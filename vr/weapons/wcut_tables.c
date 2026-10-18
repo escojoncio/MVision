@@ -57,21 +57,35 @@ NAMES(N_MINE, "body", "plate", "sight", "legl", "legr");
 #define PIST_SLIDE \
     {.name = "slide", .sel = CLIP(0, 68, -125, 30, 21.8f, 120), .cap_piece = PD, .cap_hole = PD, .pivot = PV(0, 0, 0), \
      .channel = WCH_SLIDE, .axis = AX(0, 0, 1), .note = "y >= 46,2 mm (junta de la textura); recorre +Z"}
-/* cañón generado bajo la corredera: el original no lo tiene. Radio = 0,5 del semilado menor de la sección frontal de la corredera;
- * la cara frontal de la corredera se perfora con un canal (fondo oscuro) y el cañón queda dentro con la boca a ras; eje a
- * y = 62 mm (altura del eje de w_pist PIST_BY y del supresor); boca en z = cara frontal. */
+/* Cañón generado (el original no lo tiene), todo proporcional a la corredera (ancho 22 mm = SLIDE_W; ver WCutTube):
+ *  - pared de la corredera = 12 % del ancho (2,64 mm); ancho interior 16,72 mm; techo interior 69,36 mm (cara superior 72);
+ *  - eje a y = 63 mm: el del asiento del supresor (centro de su sección trasera; w_pist PIST_BY); radio exterior = techo
+ *    interior - eje - 2 holguras (0,3 mm) = 5,76 mm (diámetro 11,5 mm: el máximo que cabe bajo el techo), canal de la
+ *    corredera de 6,06 mm;
+ *  - ánima = 13 % del ancho (radio 2,86 mm), el calibre del cartucho del cargador (MAG_BORE_FRAC);
+ *  - la boca asoma 12 % del ancho (2,64 mm) por delante de la corredera: ahí se enrosca el supresor, que cuelga del cañón;
+ *  - recámara: capuchón rectangular sobre el cartucho del cargador (culote y largo del cartucho), con su rampa; la
+ *    corredera gana una cavidad que cubre los 42 mm de recorrido y una ventana lateral derecha por la que se ve. */
+#define SLIDE_W 22.0f
+#define WALL_FRAC 0.12f
+#define BORE_FRAC 0.13f
+#define AXIS_Y 63.0f
+#define PROT_MM (WALL_FRAC * SLIDE_W)
+#define SLIDE_TRAVEL_MM 42.0f
+#define BARREL_METAL MAT(68, 0, PW, PH)   /* bloque 3x3 uniforme del atlas, luminancia 16/255: negro algo mas claro que el cargador (7) */
+#define BARREL_BORE MAT(0, 0, PW, PH)    /* luminancia 8/255 */
 #define PIST_BARREL \
-    {.name = "barrel", .pivot = PV(0, 0, 0), .cap_piece = PM, .cap_hole = PD, \
-     .tube = {.on = 1, .ref = "slide", .axis_y = WCUT_MM(62), .r_frac = 0.5f, .bore_frac = 0.55f, .length = WCUT_MM(120), \
-              .bore_depth = WCUT_MM(8), .gap = WCUT_MM(0.3f), .segs = 20}, \
-     .note = "tubo hueco generado dentro de un canal de la corredera; visible al retroceder la corredera"}
+    {.name = "barrel", .pivot = PV(0, 0, 0), .cap_piece = BARREL_METAL, .cap_hole = MAG_BODY, \
+     .tube = {.on = 1, .ref = "slide", .feed = "mag", .axis_y = WCUT_MM(AXIS_Y), .wall_frac = WALL_FRAC, .bore_frac = BORE_FRAC, \
+              .prot_frac = WALL_FRAC, .gap = WCUT_MM(0.3f), .travel = WCUT_MM(SLIDE_TRAVEL_MM), .segs = 24, .mat_bore = BARREL_BORE}, \
+     .note = "tubo con anima + capuchon de recamara generados en una cavidad de la corredera; fijo al marco (el supresor cuelga de el)"}
 /* cargador: la pieza extraida es la franja de 7 mm del fondo del mango (piel original, a ras del fondo = la base visible con el
  * cargador insertado); sobre su cara superior se genera el cargador (ver WCutMag): cuerpo con la seccion del mango inset por
  * la pared, cizallado a lo largo del eje, hasta bajo la corredera, labios y bala arriba. Queda oculto dentro del mango. */
 #define PIST_MAG \
     {.name = "mag", .sel = CLIP(0, -40.5f, -56.5f, 15, 11.5f, 30), .cap_piece = PM, .cap_hole = PD, \
      .pivot = PV(0, -29, -59), .channel = WCH_MAG, .axis = AX(0, -MAG_UY, -MAG_UZ), \
-     .mag = {.on = 1, .slide = "slide", .bore = "barrel", .dir = {0, MAG_UY, MAG_UZ}, .clear = WCUT_MM(0.8f), .wall_frac = 0.13f, \
+     .mag = {.on = 1, .slide = "slide", .bore_frac = BORE_FRAC, .dir = {0, MAG_UY, MAG_UZ}, .clear = WCUT_MM(0.8f), .wall_frac = 0.13f, \
              .lip_frac = 0.10f, .lip_keep = 0.75f, .rec_frac = 0.9f, .case_frac = 1.1f, .case_len = 1.9f, .bullet_len = 1.1f, \
              .mat_body = MAG_BODY, .mat_case = MAG_CASE, .mat_bullet = MAG_BULLET}, \
      .note = "base del fondo del mango + cargador completo generado (cuerpo, labios, ranura y cartucho)"}
@@ -87,13 +101,14 @@ NAMES(N_MINE, "body", "plate", "sight", "legl", "legr");
      .pivot = NOPIV, .note = "vaina: tramo 5x8x5 mm del prisma del cargador"}
 static const WCutRule R_PIST[] = {
     /* supresor: componente conexa independiente; se cierra su extremo trasero abierto (CAP_OPEN). Se acopla al
-     * extremo del cañón: su asiento trasero (z = -217) es la boca del cañón. */
-    {.name = "supp", .sel = COMPSEL(2), .flags = WCUT_CAP_OPEN, .cap_piece = PM, .cap_hole = PD, .pivot = PV(0, 63, -217),
-     .channel = WCH_CUSTOM0, .axis = AX(0, 100, 0), .note = "tubo original (comp. 1), pivote en el asiento trasero"},
-    PIST_SLIDE, PIST_BARREL, PIST_MAG, PIST_TRIGGER, PIST_ROUND, PIST_CASE,
+     * extremo del cañón (rule 'barrel'): su asiento trasero es la boca del cañón, que asoma PROT_MM de la corredera. */
+    {.name = "supp", .sel = COMPSEL(2), .flags = WCUT_CAP_OPEN, .cap_piece = PM, .cap_hole = PD, .pivot = PV(0, AXIS_Y, -217 - PROT_MM),
+     .shift = {0, 0, -WCUT_MM(PROT_MM)}, .parent = "barrel",
+     .channel = WCH_CUSTOM0, .axis = AX(0, 100, 0), .note = "tubo original (comp. 1) desplazado la parte de cañon que asoma; cuelga del cañon; pivote en su asiento trasero = boca"},
+    PIST_SLIDE, PIST_MAG, PIST_BARREL, PIST_TRIGGER, PIST_ROUND, PIST_CASE,
 };
 static const WCutRule R_PIST_BARE[] = {  /* 21b6: igual sin la regla del supresor */
-    PIST_SLIDE, PIST_BARREL, PIST_MAG, PIST_TRIGGER, PIST_ROUND, PIST_CASE,
+    PIST_SLIDE, PIST_MAG, PIST_BARREL, PIST_TRIGGER, PIST_ROUND, PIST_CASE,
 };
 
 /* ---------------------------------------------------------------- fusil (atlas 128x64) */

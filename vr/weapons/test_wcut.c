@@ -23,7 +23,7 @@ static int fails, verbose;
 #define CHECK(c, ...) do { if (!(c)) { printf("  FALLO: " __VA_ARGS__); printf("\n"); fails++; } } while (0)
 #define VERB(...) do { if (verbose) { printf("    " __VA_ARGS__); printf("\n"); } } while (0)
 
-extern const float w_pist_bare_muzzle_z;
+extern const float w_pist_bare_muzzle_z, w_pist_slide_travel, w_pist_supp_seat_z;
 
 /* ------------------------------------------------------------------ utilidades */
 static uint8_t *slurp(const char *path, size_t *n) {
@@ -53,6 +53,52 @@ static int ray_hits(const double *o, const double *d, const float *a, const floa
     double v = (d[0] * qv[0] + d[1] * qv[1] + d[2] * qv[2]) * inv;
     if (v < 0 || u + v > 1) return 0;
     return (e2[0] * qv[0] + e2[1] * qv[1] + e2[2] * qv[2]) * inv > 1e-9;
+}
+
+/* arista a->b que atraviesa de verdad el interior del triángulo (A,B,C) (los contactos por vértice/arista/cara no cuentan) */
+static int seg_tri_cross(const double *a, const double *b, const double *A, const double *B, const double *C) {
+    const double eps = 1e-7;
+    double d[3], e1[3], e2[3], pv[3], tv[3], qv[3];
+    for (int i = 0; i < 3; i++) { d[i] = b[i] - a[i]; e1[i] = B[i] - A[i]; e2[i] = C[i] - A[i]; tv[i] = a[i] - A[i]; }
+    pv[0] = d[1] * e2[2] - d[2] * e2[1]; pv[1] = d[2] * e2[0] - d[0] * e2[2]; pv[2] = d[0] * e2[1] - d[1] * e2[0];
+    double det = e1[0] * pv[0] + e1[1] * pv[1] + e1[2] * pv[2];
+    if (fabs(det) < 1e-20) return 0;
+    double u = (tv[0] * pv[0] + tv[1] * pv[1] + tv[2] * pv[2]) / det;
+    if (u < eps || u > 1 - eps) return 0;
+    qv[0] = tv[1] * e1[2] - tv[2] * e1[1]; qv[1] = tv[2] * e1[0] - tv[0] * e1[2]; qv[2] = tv[0] * e1[1] - tv[1] * e1[0];
+    double v = (d[0] * qv[0] + d[1] * qv[1] + d[2] * qv[2]) / det;
+    if (v < eps || u + v > 1 - eps) return 0;
+    double t = (e2[0] * qv[0] + e2[1] * qv[1] + e2[2] * qv[2]) / det;
+    return t > eps && t < 1 - eps;
+}
+/* triángulos de 'a' (desplazada oa) cuyas aristas atraviesan triángulos de 'b' (desplazada ob), o al revés; a == b con oa == ob:
+ * autointersección (los triángulos que comparten vértice no cuentan) */
+static int mesh_cross(const WCutPiece *a, const float *oa, const WCutPiece *b, const float *ob) {
+    int n = 0;
+    for (uint32_t i = 0; i < a->ni / 3; i++) {
+        double A[3][3];
+        for (int k = 0; k < 3; k++) for (int q = 0; q < 3; q++) A[k][q] = (double)a->v[a->idx[i * 3 + k]].pos[q] + oa[q];
+        for (uint32_t j = (a == b ? i + 1 : 0); j < b->ni / 3; j++) {
+            double B[3][3];
+            for (int k = 0; k < 3; k++) for (int q = 0; q < 3; q++) B[k][q] = (double)b->v[b->idx[j * 3 + k]].pos[q] + ob[q];
+            int h = 0;
+            for (int k = 0; k < 3 && !h; k++) h = seg_tri_cross(A[k], A[(k + 1) % 3], B[0], B[1], B[2]) || seg_tri_cross(B[k], B[(k + 1) % 3], A[0], A[1], A[2]);
+            n += h;
+        }
+    }
+    return n;
+}
+/* aristas dirigidas repetidas (una arista compartida por mas de dos triangulos o con orientacion incoherente): 0 = variedad orientable */
+static int nonmanifold_edges(const WCutPiece *p) {
+    uint32_t nt = p->ni / 3; int bad = 0;
+    for (uint32_t i = 0; i < nt * 3; i++) {
+        const float *a = p->v[p->idx[(i / 3) * 3 + i % 3]].pos, *b = p->v[p->idx[(i / 3) * 3 + (i % 3 + 1) % 3]].pos;
+        for (uint32_t j = i + 1; j < nt * 3; j++) {
+            const float *c = p->v[p->idx[(j / 3) * 3 + j % 3]].pos, *d = p->v[p->idx[(j / 3) * 3 + (j % 3 + 1) % 3]].pos;
+            if (!memcmp(a, c, 12) && !memcmp(b, d, 12) && memcmp(a, b, 12)) { bad++; break; }
+        }
+    }
+    return bad;
 }
 
 /* ¿hay dos triángulos coplanares de la pieza que se solapan (centroide de uno estrictamente dentro del otro)? */
@@ -326,15 +372,107 @@ static void check_pistol(const char *tag, const WCutModel *cm, const WLoaded *m,
         float zexp = cm->id == 0x36f6 ? wcut_piece(s, "supp")->bmin.z : w_pist_bare_muzzle_z;   /* con supresor, WP_MUZZLE es su punta */
         CHECK(hypotf((float)(mz.x - cx), (float)(mz.y - cy)) < rmax, "%s: WP_MUZZLE cae dentro de la boca del cañón", tag);
         CHECK(fabsf(mz.x - (float)cx) < 1e-3f && fabsf(mz.y - (float)cy) < 1e-3f, "%s: WP_MUZZLE centrado en la boca", tag);
-        CHECK(fabsf(zexp - (cm->id == 0x36f6 ? mz.z : zm)) < 1e-3f, "%s: z de la boca / punta del supresor", tag);
+        CHECK(fabsf(zexp - (cm->id == 0x36f6 ? mz.z : zm)) < 2e-5f, "%s: z de la boca / punta del supresor", tag);
+        CHECK(fabsf(mz.x - (float)cx) < 2e-5f && fabsf(mz.y - (float)cy) < 2e-5f, "%s: WP_MUZZLE exactamente en el eje del cañón", tag);
         if (cm->id == 0x36f6) {   /* el supresor se acopla al extremo del cañón */
             const WCutPiece *su = wcut_piece(s, "supp");
-            CHECK(su && fabsf(su->pivot.z - zm) < 1e-3f, "%s: el supresor arranca en la boca del cañón", tag);
+            CHECK(su && fabsf(su->pivot.z - zm) < 2e-5f, "%s: el supresor arranca en la boca del cañón", tag);
         }
         VERB("%s: boca z=%.4f radio=%.4f", tag, zm, rmax);
     }
     /* el cañón es visible al retroceder la corredera: su caja sale de la de la corredera hacia atrás y está sobre el marco */
-    CHECK(bar->bmax.z < slide->bmax.z && bar->bmin.z >= slide->bmin.z - 1e-4f, "%s: el cañón queda bajo la corredera", tag);
+    const WCutRule *tr_ = NULL; for (int q = 0; q < cm->nrules; q++) if (cm->rules[q].tube.on) tr_ = &cm->rules[q];
+    CHECK(tr_ != NULL, "%s: regla del cañón", tag);
+    if (!tr_) return;
+    const WCutTube *tb = &tr_->tube;
+    const float SW = slide->bmax.x - slide->bmin.x, wall = tb->wall_frac * SW;
+    float rin = 1e9f;   /* radio del anima = el menor de la boca */
+    for (uint32_t k = 0; k < bar->nv; k++) if (fabsf(bar->v[k].pos[2] - zm) < 1e-6f) {
+        float r = hypotf((float)(bar->v[k].pos[0] - cx), (float)(bar->v[k].pos[1] - cy)); if (r < rin) rin = r;
+    }
+    /* dimensiones derivadas de la corredera (ver WCutTube): cada una se recalcula aquí desde el modelo cortado */
+    {
+        const float ya = tb->axis_y, hw = SW / 2 - wall, yc = slide->bmax.y - wall;
+        float Ro_exp = yc - ya - 2 * tb->gap; if (hw - 2 * tb->gap < Ro_exp) Ro_exp = hw - 2 * tb->gap;
+        VERB("%s: corredera ancho %.2f alto %.2f pared %.2f; radio exterior esperado %.3f", tag, SW * 1e3, (slide->bmax.y - slide->bmin.y) * 1e3, wall * 1e3, Ro_exp * 1e3);
+        CHECK(fabsf(rmax - Ro_exp) < 2e-5f, "%s: radio exterior del cañón = el maximo bajo el techo y entre paredes (%.3f / %.3f mm)", tag, rmax * 1e3, Ro_exp * 1e3);
+        CHECK(rmax <= hw && ya + rmax <= yc - tb->gap + 1e-6f, "%s: el cañón cabe dentro de la corredera con su pared", tag);
+        CHECK(fabsf((float)cy - ya) < 1e-6f && fabsf((float)cx) < 1e-6f, "%s: eje del cañón", tag);
+        CHECK(fabsf(zm - (slide->bmin.z - tb->prot_frac * SW)) < 2e-5f, "%s: la boca asoma prot_frac del ancho de la corredera", tag);
+        CHECK(fabsf(rin - tb->bore_frac * SW) < 2e-5f, "%s: radio del anima = bore_frac del ancho", tag);
+        CHECK(bar->bmax.y <= yc && bar->bmin.y >= slide->bmin.y + wall, "%s: el cañón queda entre el techo y el suelo interiores", tag);
+        CHECK(bar->bmax.x <= hw && bar->bmin.x >= -hw, "%s: el capuchon cabe en el ancho interior", tag);
+        CHECK(fabsf(bar->bmax.x - (hw - tb->gap)) < 2e-5f, "%s: capuchon de ancho = interior - holgura", tag);
+        CHECK(fabsf(tb->travel - w_pist_slide_travel) < 1e-6f, "%s: recorrido de la tabla = el de w_pist", tag);
+    }
+    /* recamara sobre el cartucho del cargador: el culote del capuchon cae en el culote del cartucho y su largo es el cartucho
+     * completo; el capuchon queda sobre los labios (y minimo del cañón > y maximo del cargador) */
+    {
+        const WCutRule *mr = NULL; for (int q = 0; q < cm->nrules; q++) if (cm->rules[q].mag.on) mr = &cm->rules[q];
+        float zcase_back = -1e9f, zbul_front = 1e9f;
+        for (uint32_t t = 0; mr && t < mag->ni / 3; t++) {
+            const float *uv = mag->v[mag->idx[t * 3]].uv; const WCutUV *u = NULL;
+            #define INUV(R) (uv[0] >= (R).u0 - 1e-5f && uv[0] <= (R).u1 + 1e-5f && uv[1] >= (R).v0 - 1e-5f && uv[1] <= (R).v1 + 1e-5f)
+            if (INUV(mr->mag.mat_bullet)) u = &mr->mag.mat_bullet; else if (INUV(mr->mag.mat_case)) u = &mr->mag.mat_case;
+            #undef INUV
+            if (!u) continue;
+            for (int k = 0; k < 3; k++) {
+                float z = mag->v[mag->idx[t * 3 + k]].pos[2];
+                if (u == &mr->mag.mat_case && z > zcase_back) zcase_back = z;
+                if (u == &mr->mag.mat_bullet && z < zbul_front) zbul_front = z;
+            }
+        }
+        VERB("%s: cartucho z %.3f..%.3f, capuchon z %.3f..%.3f", tag, zbul_front * 1e3, zcase_back * 1e3, bar->bmax.z * 1e3, 0.0);
+        CHECK(fabsf(bar->bmax.z - zcase_back) < 2e-5f, "%s: culote del capuchon = culote del cartucho (%.3f / %.3f mm)", tag, bar->bmax.z * 1e3, zcase_back * 1e3);
+        float zhood_front = 1e9f;   /* cara delantera del capuchon: el prisma ancho (x = +-xh) */
+        for (uint32_t k = 0; k < bar->nv; k++) if (fabsf(bar->v[k].pos[0]) > rmax + 1e-4f && bar->v[k].pos[2] < zhood_front) zhood_front = bar->v[k].pos[2];
+        CHECK(fabsf(zhood_front - zbul_front) < 2e-5f, "%s: largo del capuchon = cartucho completo", tag);
+        CHECK(bar->bmin.y > mag->bmax.y, "%s: el cañón queda sobre los labios del cargador", tag);
+        /* la boca de la recamara existe en la cara trasera: vertices de radio = radio de la vaina en z = culote, de profundidad = vaina */
+        int nrc = 0; for (uint32_t k = 0; k < bar->nv; k++) if (fabsf(bar->v[k].pos[2] - bar->bmax.z) < 1e-6f && hypotf(bar->v[k].pos[0] - (float)cx, bar->v[k].pos[1] - (float)cy) < 0.0045f) nrc++;
+        CHECK(nrc >= 8, "%s: boca de la recamara en el culote", tag);
+    }
+    /* sin intersecar corredera ni marco, en reposo y en retroceso maximo (la corredera se desplaza +travel en z): vertices, centroides
+     * de triangulo y puntos medios de las aristas del cañon fuera del solido de la corredera (paridad de cruces, mayoria de 3 rayos) */
+    {
+        const WPart *sp = def_part(d, "slide"); (void)sp;
+        const WCutPiece *fr = wcut_piece(s, "frame");
+        CHECK(fr && bar->bmin.y > fr->bmax.y, "%s: el cañón queda sobre el marco", tag);
+        static const double D3[3][3] = {{0.5773, 0.3711, 0.7311}, {-0.3141, 0.8123, -0.4922}, {0.2718, -0.6180, -0.7371}};
+        for (int pos = 0; pos < 2; pos++) {
+            const float dz = pos ? tb->travel : 0.0f; int inside = 0, npts = 0;
+            for (uint32_t t = 0; t < bar->ni / 3; t++) {
+                float P[7][3];
+                for (int k = 0; k < 3; k++) memcpy(P[k], bar->v[bar->idx[t * 3 + k]].pos, 12);
+                for (int c = 0; c < 3; c++) { P[3][c] = (P[0][c] + P[1][c] + P[2][c]) / 3; P[4][c] = (P[0][c] + P[1][c]) / 2; P[5][c] = (P[1][c] + P[2][c]) / 2; P[6][c] = (P[2][c] + P[0][c]) / 2; }
+                for (int q = 0; q < 7; q++) {
+                    double o[3] = {P[q][0], P[q][1], P[q][2] - dz}; int votes = 0;   /* corredera desplazada +dz == punto desplazado -dz */
+                    for (int r = 0; r < 3; r++) {
+                        int n = 0;
+                        for (uint32_t i = 0; i < slide->ni; i += 3) n += ray_hits(o, D3[r], slide->v[slide->idx[i]].pos, slide->v[slide->idx[i + 1]].pos, slide->v[slide->idx[i + 2]].pos);
+                        votes += n & 1;
+                    }
+                    inside += votes >= 2; npts++;
+                }
+            }
+            CHECK(inside == 0, "%s: el cañón interseca la corredera %s (%d de %d puntos)", tag, pos ? "en retroceso maximo" : "en reposo", inside, npts);
+        }
+    }
+    /* aristas contra triangulos (no solo puntos de muestra): corredera cerrada y sin autointersecciones, y el cañón (todo su recorrido, en
+     * pasos de 1/8) sin cruzar la corredera ni el marco; todas las piezas son variedades orientables (ninguna arista repetida) */
+    {
+        const float z0[3] = {0, 0, 0}; const WCutPiece *fr = wcut_piece(s, "frame"), *su = wcut_piece(s, "supp");
+        CHECK(nonmanifold_edges(slide) == 0 && nonmanifold_edges(bar) == 0 && nonmanifold_edges(mag) == 0 && (!fr || nonmanifold_edges(fr) == 0)
+              && (!su || nonmanifold_edges(su) == 0), "%s: aristas repetidas (pieza no variedad)", tag);
+        CHECK(wcut_open_edges(slide) == 0, "%s: la corredera (canal, cavidad, ventana) es cerrada", tag);
+        CHECK(mesh_cross(slide, z0, slide, z0) == 0, "%s: la corredera se autointerseca", tag);
+        CHECK(fr && mesh_cross(bar, z0, fr, z0) == 0, "%s: el cañón cruza el marco", tag);
+        for (int stp = 0; stp <= 8; stp++) {
+            const float dz[3] = {0, 0, tb->travel * (float)stp / 8.0f};
+            CHECK(mesh_cross(bar, z0, slide, dz) == 0, "%s: el cañón cruza la corredera (recorrido %.1f mm)", tag, dz[2] * 1e3);
+            CHECK(!su || mesh_cross(su, z0, slide, dz) == 0, "%s: el supresor cruza la corredera (recorrido %.1f mm)", tag, dz[2] * 1e3);
+        }
+    }
     /* cargador completo: volumen cerrado; solo la base (franja del fondo) queda fuera del contorno del mango */
     CHECK(wcut_open_edges(mag) == 0, "%s: el cargador es cerrado", tag);
     float ytop = mag->bmin.y + 0.0075f; int nstub = 0, outside = 0;
@@ -356,10 +494,6 @@ static void check_pistol(const char *tag, const WCutModel *cm, const WLoaded *m,
     /* calibre: la bala tiene el diametro del anima del canon generado y la vaina 1,1 veces; la bala usa su propio material */
     {
         const WCutRule *mr = NULL; for (int q = 0; q < cm->nrules; q++) if (cm->rules[q].mag.on) mr = &cm->rules[q];
-        float rin = 1e9f;
-        for (uint32_t k = 0; k < bar->nv; k++) if (fabsf(bar->v[k].pos[2] - zm) < 1e-6f) {
-            float r = hypotf((float)(bar->v[k].pos[0] - cx), (float)(bar->v[k].pos[1] - cy)); if (r < rin) rin = r;
-        }
         float bxm = 0, cxm = 0;
         for (uint32_t t = 0; mr && t < mag->ni / 3; t++) {
             const WCutUV *u = NULL;
@@ -433,6 +567,48 @@ static void check_pistol(const char *tag, const WCutModel *cm, const WLoaded *m,
             }
             CHECK(bad == 0, "%s: el cargador, extraido %.0f mm, atraviesa el mango (%d vertices)", tag, sdist * 1e3, (int)bad);
         }
+        /* y no cruza el cañón (capuchon y rampa) ni la corredera en todo el recorrido de extraccion, ni a medio insertar */
+        for (int stp = 0; stp <= 40; stp++) {
+            const float sd = L * (float)stp / 40.0f, off[3] = {mp->axis.x * sd, mp->axis.y * sd, mp->axis.z * sd}, z0[3] = {0, 0, 0};
+            CHECK(mesh_cross(mag, off, bar, z0) == 0 && mesh_cross(mag, off, slide, z0) == 0, "%s: el cargador, extraido %.1f mm, cruza el cañón o la corredera", tag, sd * 1e3);
+        }
+    }
+    /* jerarquia y acople del supresor (solo 36f6): cuelga del cañón, nunca de la corredera ni del marco; su base coincide con la boca
+     * del cañón y sus ejes son los del cañón, en reposo y con la corredera en retroceso maximo (la corredera pasa por encima) */
+    if (cm->id == 0x36f6) {
+        int ib = -1, is = -1, il = -1;
+        for (int i = 0; i < s->nparts; i++) { if (!strcmp(s->parts[i].name, "barrel")) ib = i; if (!strcmp(s->parts[i].name, "supp")) is = i; if (!strcmp(s->parts[i].name, "slide")) il = i; }
+        CHECK(ib >= 0 && is >= 0 && il >= 0, "%s: piezas barrel/supp/slide", tag);
+        if (ib >= 0 && is >= 0 && il >= 0) {
+            CHECK(s->parts[is].parent == ib && ib < is, "%s: el supresor cuelga del cañón (padre = barrel)", tag);
+            CHECK(s->parts[ib].parent < 0 && s->parts[il].parent < 0 && s->parts[ib].channel == WCH_NONE, "%s: cañón fijo al marco, corredera independiente", tag);
+            const WPart *dp = d->parts; int dsup = -1, dbar = -1;
+            for (int i = 0; i < d->nparts; i++) { if (!strcmp(dp[i].name, "supp")) dsup = i; if (!strcmp(dp[i].name, "barrel")) dbar = i; }
+            CHECK(dsup > dbar && dbar >= 0 && dp[dsup].parent == dbar, "%s: w_pist: el supresor cuelga del cañón", tag);
+            CHECK(dsup >= 0 && fabsf(dp[dsup].rest.p.z - s->parts[is].rest.p.z) < 2e-5f && fabsf(dp[dsup].rest.p.y - s->parts[is].rest.p.y) < 2e-5f
+                  && fabsf(w_pist_supp_seat_z - s->parts[is].rest.p.z) < 2e-5f, "%s: w_pist: asiento del supresor = el del modelo", tag);
+            const WCutPiece *su = wcut_piece(s, "supp");
+            for (int pos = 0; pos < 2; pos++) {
+                WeaponState st; memset(&st, 0, sizeof st); st.def = d; weapon_bind(&st, s->meshes, s->nmeshes, s->parts, s->nparts);
+                st.channel[WCH_SLIDE] = pos ? w_pist_slide_travel : 0.0f;
+                WPose id = {{0, 0, 0}, {0, 0, 0, 1}}, po[16];
+                int np = wcore_part_poses(&st, id, po, 16);
+                CHECK(np == s->nparts, "%s: poses de piezas", tag);
+                if (np != s->nparts) continue;
+                /* base del supresor = origen de su malla (pivote en el asiento); boca del cañón = centro de su cara frontal en el marco del cañón */
+                WVec3 base = po[is].p, mouth = {po[ib].p.x + (float)cx, po[ib].p.y + (float)cy, po[ib].p.z + zm};
+                float dist = sqrtf((base.x - mouth.x) * (base.x - mouth.x) + (base.y - mouth.y) * (base.y - mouth.y) + (base.z - mouth.z) * (base.z - mouth.z));
+                float qd = po[is].q.x * po[ib].q.x + po[is].q.y * po[ib].q.y + po[is].q.z * po[ib].q.z + po[is].q.w * po[ib].q.w;
+                VERB("%s: %s: distancia base del supresor - boca %.6f mm, |q.q| %.6f, corredera z %.3f mm", tag, pos ? "retroceso" : "reposo", dist * 1e3, fabsf(qd), po[il].p.z * 1e3);
+                CHECK(dist < 2e-5f, "%s: la base del supresor coincide con la boca del cañón (%s, %.4f mm)", tag, pos ? "retroceso maximo" : "reposo", dist * 1e3);
+                CHECK(fabsf(fabsf(qd) - 1) < 1e-6f, "%s: ejes del supresor y del cañón alineados (%s)", tag, pos ? "retroceso maximo" : "reposo");
+                CHECK(fabsf(po[il].p.z - (pos ? w_pist_slide_travel : 0.0f)) < 1e-6f, "%s: la corredera retrocede por encima (%s)", tag, pos ? "retroceso maximo" : "reposo");
+                /* la malla del supresor esta centrada en el eje del cañón y su cara trasera (z maxima) esta en la base */
+                float sx = 0.5f * (su->bmin.x + su->bmax.x) - po[is].p.x + base.x, sy = 0.5f * (su->bmin.y + su->bmax.y) - su->pivot.y + base.y;
+                CHECK(fabsf(sx - mouth.x) < 2e-5f && fabsf(sy - mouth.y) < 2e-4f, "%s: el eje del supresor es el del cañón (%s)", tag, pos ? "retroceso maximo" : "reposo");
+                CHECK(fabsf(su->bmax.z - su->pivot.z) < 2e-5f, "%s: la cara trasera del supresor esta en su base", tag);
+            }
+        }
     }
 }
 
@@ -504,10 +680,10 @@ static void check_model(const uint8_t *d, size_t n, const char *stage, const WCu
             if (p->kind[t] > WCUT_TRI_FILL) badk++;
             if (p->kind[t] != WCUT_TRI_SKIN) {
                 int inany = 0;
-                for (int q = 0; q < cm->nrules && !inany; q++) for (int k = 0; k < 5 && !inany; k++) {
+                for (int q = 0; q < cm->nrules && !inany; q++) for (int k = 0; k < 6 && !inany; k++) {
                     const WCutRule *rq = &cm->rules[q];
-                    if (k > 1 && !rq->mag.on) break;
-                    const WCutUV *u = k == 0 ? &rq->cap_piece : k == 1 ? &rq->cap_hole : k == 2 ? &rq->mag.mat_body : k == 3 ? &rq->mag.mat_case : &rq->mag.mat_bullet; int all = 1;
+                    if ((k >= 2 && k <= 4 && !rq->mag.on) || (k == 5 && !rq->tube.on)) continue;
+                    const WCutUV *u = k == 0 ? &rq->cap_piece : k == 1 ? &rq->cap_hole : k == 2 ? &rq->mag.mat_body : k == 3 ? &rq->mag.mat_case : k == 4 ? &rq->mag.mat_bullet : &rq->tube.mat_bore; int all = 1;
                     for (int c = 0; c < 3; c++) { const float *uv = p->v[p->idx[t * 3 + c]].uv; if (uv[0] < u->u0 - 1e-5f || uv[0] > u->u1 + 1e-5f || uv[1] < u->v0 - 1e-5f || uv[1] > u->v1 + 1e-5f) all = 0; }
                     inany = all;
                 }
