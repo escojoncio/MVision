@@ -65,11 +65,23 @@ enum {
     WCUT_NO_CAP    = 8    /* no tapa la pieza */
 };
 
-/* Extrusión de la pieza extraída (rellena de cuerpo un volumen que el original no tiene): las tapas superiores de la
- * pieza (las que miran hacia 'dir') se sustituyen por un anillo y se levanta un prisma interior (la sección reducida
- * por 'inset' respecto a su centroide) 'len' metros en la dirección 'dir' (unitaria), cerrado con tapa de material. */
-typedef struct { WVec3 dir; float len, inset; } WCutExtrude;
-#define WCUT_EXT(dx, dy, dz, len_mm, inset) { {dx, dy, dz}, WCUT_MM(len_mm), inset }
+/* Generador de cargador (pistolas): la pieza extraída es solo la base (franja de piel original del fondo del mango).
+ * Sobre su cara superior (el plano de corte, normal +Y) se construye un cargador completo derivado del propio modelo:
+ *  - sección = contorno de la base desplazado hacia dentro 'wall_frac' del ancho de la base (grosor de pared); el cuerpo
+ *    es ese contorno cizallado a lo largo de 'dir' (la inclinación del mango: las paredes del mango no son verticales);
+ *  - altura: el cargador sube hasta la cara inferior de la pieza 'slide' menos 'clear' (holgura) menos lo que la bala
+ *    asoma por encima de los labios: el último 'lip_frac' de la altura los labios se estrechan en x ('lip_keep');
+ *  - arriba, ranura de alimentación (recorte rectangular de profundidad 'rec_frac' * radio de la vaina, con fondo) y un
+ *    cartucho en ella; su calibre sale del ánima del cañón generado ('bore': radio del ánima = radio de la bala; vaina =
+ *    'case_frac' veces el radio; longitudes en diámetros de vaina). Es volumen cerrado: la base y el cargador forman una
+ *    sola cáscara y el cartucho otra, solapada con ella. Materiales: bloques del atlas del propio modelo. */
+typedef struct {
+    int on;
+    const char *slide, *bore;
+    WVec3 dir;                              /* eje del cargador hacia arriba (unitario) */
+    float clear, wall_frac, lip_frac, lip_keep, rec_frac, case_frac, case_len, bullet_len;
+    WCutUV mat_body, mat_case, mat_bullet;
+} WCutMag;
 
 /* Generador de cañón: tubo hueco (con ánima) bajo una pieza de referencia. La cara frontal (z mínima) de 'ref' se
  * perfora con un canal cilíndrico del radio exterior (la pieza de referencia gana un orificio con fondo oscuro) y el
@@ -95,7 +107,7 @@ typedef struct {
     const char *parent;   /* pieza padre para rest (NULL = raíz) */
     WChannel channel; WVec3 axis; int rotates;   /* como WPart */
     const char *note;     /* decisión de diseño (documentación) */
-    WCutExtrude extrude;  /* len > 0: extrusión de la pieza extraída (ver arriba) */
+    WCutMag mag;          /* on: cargador generado sobre la pieza extraída (ver arriba) */
     WCutTube tube;        /* on: la regla genera un cañón en lugar de seleccionar triángulos */
 } WCutRule;
 
@@ -111,6 +123,11 @@ typedef struct { WVec3 lo, hi; } WCutBounds;
 #define WCUT_BB(x0, y0, z0, x1, y1, z1) { {WCUT_MM(x0), WCUT_MM(y0), WCUT_MM(z0)}, {WCUT_MM(x1), WCUT_MM(y1), WCUT_MM(z1)} }
 #define WCUT_BB_TOL 0.003f   /* m: margen de la comprobación de caja (las tablas la redondean al mm) */
 
+/* Sellado de una pieza resultante: sus contornos abiertos (aristas sin gemela: la boca hueca de un cañon, el hueco del
+ * original que ocupaba otra superficie) se tapan con un parche del material 'mat' (bloque del atlas). Se aplica tras todas
+ * las reglas, sobre la pieza ya cortada; no modifica ninguna otra. */
+typedef struct { const char *piece; WCutUV mat; const char *note; } WCutSeal;
+
 typedef struct {
     uint16_t id;          /* id16 del modelo */
     const char *tag;      /* rol neutro: "pist", "rifle"... */
@@ -123,6 +140,7 @@ typedef struct {
     const char *weapon;   /* id del arma del registro cuyos nombres/canales/ejes debe seguir (NULL = ninguna); lo comprueba el test */
     uint32_t src_tris;    /* nº de triángulos esperado del modelo; 0 = no comprobar. Si no coincide: wcut_run devuelve -4 */
     WCutBounds bounds;    /* caja envolvente esperada (aprox.); ignorada si src_tris == 0 */
+    const WCutSeal *seals; int nseals;
 } WCutModel;
 
 /* Origen de cada triángulo de una pieza. */
@@ -138,7 +156,7 @@ typedef struct {
     uint32_t ncap;                  /* triángulos de tapa incluidos (kind != WCUT_TRI_SKIN) */
     uint8_t *kind;                  /* por triángulo (ni/3 entradas): WCUT_TRI_* */
     int copy;                       /* 1 si es un duplicado (no cuenta para la suma de volúmenes) */
-    double gen_vol;                 /* m3 netos de geometría generada (cañón, extrusión, canal): volumen total - gen_vol = volumen original */
+    double gen_vol;                 /* m3 netos de geometría generada (cañón, cargador, canal): volumen total - gen_vol = volumen original */
 } WCutPiece;
 
 typedef struct {

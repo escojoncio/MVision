@@ -20,10 +20,10 @@
 #define PIST_MAG_HALF 0.0675f
 #define PIST_MAG_CY -0.022291f
 #define PIST_MAG_CZ 0.007675f
-#define PIST_MAG_QX -0.127909f
-#define PIST_MAG_QW 0.991786f
-#define PIST_MAG_UY 0.967278f
-#define PIST_MAG_UZ -0.253717f
+#define PIST_MAG_QX -0.173648f   /* inclinación del mango medida en el modelo: 20 grados (ver wcut_tables.c MAG_UY) */
+#define PIST_MAG_QW 0.984808f
+#define PIST_MAG_UY 0.939693f
+#define PIST_MAG_UZ -0.342020f
 #define PIST_WELL_Y -0.075f
 #define PIST_WELL_Z 0.021501f
 #define PIST_SEAT_DEPTH 0.121992f

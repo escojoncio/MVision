@@ -80,8 +80,15 @@ int wprev_cam(const WeaponState *s, WPose ww, const char *view, float radius, WC
 }
 
 /* ---- rasterizador ---- */
-typedef struct { float x, y, z, r, g, b; } RV;
-typedef struct { int w, h; float *zb; uint8_t *col; } Buf;
+typedef struct { float x, y, z, r, g, b, u, v; } RV;
+typedef struct { int w, h; float *zb; uint8_t *col; int tex; } Buf;   /* tex: 1 = la malla en curso lleva textura (r,g,b = luz) */
+/* atlas global opcional (RGBA8, v = 0 arriba); ganancia para ver modelos muy oscuros */
+static const uint8_t *g_atlas; static int g_aw, g_ah; static float g_gain = 1.0f;
+static int g_ccw;   /* 1 = triangulos antihorarios hacia fuera (salida de wcut); 0 = horarios (salida cruda de wload / OBJ extraidos) */
+static int g_two;   /* 1 = sin descarte de caras traseras (cortes en seccion) */
+void wprev_set_twosided(int on) { g_two = on ? 1 : 0; }
+void wprev_set_winding(int ccw_outward) { g_ccw = ccw_outward ? 1 : 0; }
+void wprev_set_atlas(const uint8_t *rgba, int w, int h, float gain) { g_atlas = rgba; g_aw = w; g_ah = h; g_gain = gain > 0 ? gain : 1.0f; }
 typedef struct { WVec3 pos, R, U, Fd; float f; int w, h; WVec3 L1, L2; } View;
 
 static void raster_tri(Buf *B, const View *V, RV a, RV b, RV c, int cull) {
@@ -93,7 +100,7 @@ static void raster_tri(Buf *B, const View *V, RV a, RV b, RV c, int cull) {
     float qx = cx + V->f * c.x * ic, qy = cy - V->f * c.y * ic;
     float area = (bx - ax) * (qy - ay) - (by - ay) * (qx - ax);   /* >0 = horario en pantalla (y abajo) = antihorario real */
     if (area == 0) return;
-    if (cull && area < 0) return;
+    if (cull && !g_two && (g_ccw ? area > 0 : area < 0)) return;
     int x0 = (int)floorf(fminf(ax, fminf(bx, qx))), x1 = (int)ceilf(fmaxf(ax, fmaxf(bx, qx)));
     int y0 = (int)floorf(fminf(ay, fminf(by, qy))), y1 = (int)ceilf(fmaxf(ay, fmaxf(by, qy)));
     if (x0 < 0) { x0 = 0; }
@@ -110,10 +117,19 @@ static void raster_tri(Buf *B, const View *V, RV a, RV b, RV c, int cull) {
         float iw = w0 * ia + w1 * ib + w2 * ic;
         size_t k = (size_t)y * B->w + x;
         if (iw <= B->zb[k]) continue;
-        B->zb[k] = iw;
         float r = (w0 * a.r * ia + w1 * b.r * ib + w2 * c.r * ic) / iw;
         float g = (w0 * a.g * ia + w1 * b.g * ib + w2 * c.g * ic) / iw;
         float bl = (w0 * a.b * ia + w1 * b.b * ib + w2 * c.b * ic) / iw;
+        if (B->tex) {   /* r,g,b = luz * 255: se multiplica por el texel (vecino mas proximo) */
+            float u = (w0 * a.u * ia + w1 * b.u * ib + w2 * c.u * ic) / iw, vv = (w0 * a.v * ia + w1 * b.v * ib + w2 * c.v * ic) / iw;
+            int tx = (int)(u * g_aw), ty = (int)(vv * g_ah);
+            tx = tx < 0 ? 0 : (tx >= g_aw ? g_aw - 1 : tx); ty = ty < 0 ? 0 : (ty >= g_ah ? g_ah - 1 : ty);
+            const uint8_t *tp = g_atlas + ((size_t)ty * g_aw + tx) * 4;
+            if (tp[3] < 128) continue;   /* texel transparente: no escribe */
+            float gl = r / 255.0f * g_gain;
+            r = tp[0] * gl; g = tp[1] * gl; bl = tp[2] * gl;
+        }
+        B->zb[k] = iw;
         B->col[k * 3] = (uint8_t)fminf(255, r); B->col[k * 3 + 1] = (uint8_t)fminf(255, g); B->col[k * 3 + 2] = (uint8_t)fminf(255, bl);
     }
 }
@@ -130,6 +146,7 @@ static void clip_draw(Buf *B, const View *V, RV t[3], int cull) {
             float u = (N - p.z) / (q.z - p.z); RV r;
             r.x = p.x + (q.x - p.x) * u; r.y = p.y + (q.y - p.y) * u; r.z = N;
             r.r = p.r + (q.r - p.r) * u; r.g = p.g + (q.g - p.g) * u; r.b = p.b + (q.b - p.b) * u;
+            r.u = p.u + (q.u - p.u) * u; r.v = p.v + (q.v - p.v) * u;
             if (m < 4) o[m++] = r;
         }
     }
@@ -138,6 +155,7 @@ static void clip_draw(Buf *B, const View *V, RV t[3], int cull) {
 
 static void draw_mesh(Buf *B, const View *V, const WMesh *me, WPose P) {
     if (!me || me->nv == 0 || me->ni == 0) return;
+    B->tex = (me->texture && g_atlas) ? 1 : 0;
     /* descarte rápido: pieza fuera de vista (centro lejano) */
     WVec3 c0 = wpose_apply(P, wv(me->v[0].pos[0], me->v[0].pos[1], me->v[0].pos[2]));
     if (wv_len(wv_sub(c0, V->pos)) > 20.0f) return;
@@ -152,7 +170,8 @@ static void draw_mesh(Buf *B, const View *V, const WMesh *me, WPose P) {
             float d1 = fmaxf(0, wv_dot(n, V->L1)), d2 = fmaxf(0, wv_dot(n, V->L2));
             float up = 0.5f + 0.5f * wv_dot(n, V->U);
             float l = 0.55f + 0.15f * up + 0.70f * d1 + 0.25f * d2;
-            r[k].r = v->rgba[0] * l; r[k].g = v->rgba[1] * l; r[k].b = v->rgba[2] * l;
+            if (B->tex) { r[k].r = r[k].g = r[k].b = 255.0f * l; r[k].u = v->uv[0]; r[k].v = v->uv[1]; }
+            else { r[k].r = v->rgba[0] * l; r[k].g = v->rgba[1] * l; r[k].b = v->rgba[2] * l; r[k].u = r[k].v = 0; }
         }
         if (r[0].z < 0.02f && r[1].z < 0.02f && r[2].z < 0.02f) continue;
         clip_draw(B, V, r, 1);
@@ -161,7 +180,7 @@ static void draw_mesh(Buf *B, const View *V, const WMesh *me, WPose P) {
 
 void wprev_render(const WeaponState *s, WPose ww, const WCam *cam, WImage *img, int ss) {
     if (ss < 1) ss = 1;
-    Buf B = {img->w * ss, img->h * ss, NULL, NULL};
+    Buf B = {img->w * ss, img->h * ss, NULL, NULL, 0};
     B.zb = calloc((size_t)B.w * B.h, sizeof(float));
     B.col = malloc((size_t)B.w * B.h * 3);
     for (int y = 0; y < B.h; y++) {          /* fondo degradado */

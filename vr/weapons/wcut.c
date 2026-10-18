@@ -1127,7 +1127,7 @@ static int orient(TL *l) {
     return comp_label(l);
 }
 
-/* ------------------------------------------------------------------ geometría generada (extrusión y cañón) */
+/* ------------------------------------------------------------------ geometría generada (cargador y cañón) */
 static double tl_volume(const TL *l) {
     double v = 0;
     for (size_t i = 0; i < l->n; i++) {
@@ -1164,64 +1164,238 @@ static int gen_quad(TL *l, const float *a, const float *b, const float *c, const
     return rc;
 }
 
-static int extrude_piece(TL *P, const WCutRule *ru) {
-    const WCutExtrude *x = &ru->extrude;
-    double d[3] = {x->dir.x, x->dir.y, x->dir.z}, dl = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-    if (dl < 1e-9) return -1;
-    for (int i = 0; i < 3; i++) d[i] /= dl;
+/* Bucles de contorno de una lista de triángulos (aristas sin gemela dentro de la lista). */
+static int boundary_loops(const TL *T, Loops *L) {
+    size_t ne = 0; EK *e = edges_of(T, &ne);
+    EK *sel = (EK *)malloc((T->n * 3 + 1) * sizeof(EK)); float (*pa)[3] = (float (*)[3])malloc((T->n * 3 + 1) * sizeof(float[3]));
+    int *sc = (int *)malloc((T->n * 3 + 1) * sizeof(int)); int nsel = 0, rc = 0;
+    if (!e || !sel || !pa || !sc) rc = -3;
+    for (size_t i = 0; i < T->n && !rc; i++)
+        for (int a = 0; a < 3; a++) {
+            EK k; k.a = pkey(T->t[i].v[a].p); k.b = pkey(T->t[i].v[(a + 1) % 3].p);
+            if (!memcmp(&k.a, &k.b, sizeof(PK)) || has_rev(e, ne, &k)) continue;
+            sel[nsel] = k; memcpy(pa[nsel], T->t[i].v[a].p, 12); sc[nsel] = T->t[i].comp; nsel++;
+        }
+    if (!rc) rc = build_loops(sel, (const float (*)[3])pa, sc, nsel, L);
+    free(e); free(sel); free(pa); free(sc);
+    return rc;
+}
+
+/* Polígono convexo horizontal (y constante) desplazado 'd' hacia dentro (esquinas a inglete). */
+static int poly_inset(const P3 *p, int n, double d, P3 *out) {
+    if (n < 3) return -7;
+    double cx = 0, cz = 0; for (int i = 0; i < n; i++) { cx += p[i].p[0]; cz += p[i].p[2]; }
+    cx /= n; cz /= n;
+    double (*nin)[2] = (double (*)[2])malloc(sizeof(double[2]) * (size_t)n);
+    if (!nin) return -3;
+    int rc = 0, sgn = 0;
+    for (int i = 0; i < n && !rc; i++) {
+        const float *a = p[i].p, *b = p[(i + 1) % n].p, *c = p[(i + 2) % n].p;
+        double ex = (double)b[0] - a[0], ez = (double)b[2] - a[2], l = sqrt(ex * ex + ez * ez);
+        if (l < 1e-9 * g_sc) { rc = -7; break; }
+        double px = -ez / l, pz = ex / l;
+        if (px * (cx - (a[0] + b[0]) * 0.5) + pz * (cz - (a[2] + b[2]) * 0.5) < 0) { px = -px; pz = -pz; }
+        nin[i][0] = px; nin[i][1] = pz;
+        double fx = (double)c[0] - b[0], fz = (double)c[2] - b[2], cr = ex * fz - ez * fx;   /* convexidad (colineales con ruido: sin angulo) */
+        if (fabs(cr) > 1e-4 * l * sqrt(fx * fx + fz * fz)) { int s = cr > 0 ? 1 : -1; if (sgn && s != sgn) rc = -7; sgn = s; }
+    }
+    for (int i = 0; i < n && !rc; i++) {
+        const double *n1 = nin[(i + n - 1) % n], *n2 = nin[i];
+        double k = 1 + n1[0] * n2[0] + n1[1] * n2[1];
+        if (k < 1e-6) { rc = -7; break; }
+        out[i].p[0] = (float)(p[i].p[0] + d * (n1[0] + n2[0]) / k); out[i].p[1] = p[i].p[1];
+        out[i].p[2] = (float)(p[i].p[2] + d * (n1[1] + n2[1]) / k);
+    }
+    /* un desplazamiento mayor que el radio interior (o una esquina muy aguda) invierte aristas y deja un contorno
+     * autointersecado: cada arista del resultado debe seguir en el mismo sentido que la original */
+    for (int i = 0; i < n && !rc; i++) {
+        const int j = (i + 1) % n;
+        double ex = (double)p[j].p[0] - p[i].p[0], ez = (double)p[j].p[2] - p[i].p[2];
+        double fx = (double)out[j].p[0] - out[i].p[0], fz = (double)out[j].p[2] - out[i].p[2];
+        if (!(ex * fx + ez * fz > 0)) rc = -7;
+    }
+    free(nin);
+    return rc;
+}
+
+/* Punto (x, z) dentro del polígono convexo horizontal 'p' (cualquier sentido), a más de 'm' de cada arista. */
+static int pt_in_convex_xz(const P3 *p, int n, double x, double z, double m) {
+    double area = 0;
+    for (int i = 0; i < n; i++) { const int j = (i + 1) % n; area += (double)p[i].p[0] * p[j].p[2] - (double)p[j].p[0] * p[i].p[2]; }
+    const double sg = area >= 0 ? 1 : -1;
+    for (int i = 0; i < n; i++) {
+        const int j = (i + 1) % n;
+        double ex = (double)p[j].p[0] - p[i].p[0], ez = (double)p[j].p[2] - p[i].p[2], l = sqrt(ex * ex + ez * ez);
+        if (!(l > 0)) return 0;
+        if (!(sg * (ex * (z - p[i].p[2]) - ez * (x - p[i].p[0])) / l > m)) return 0;
+    }
+    return 1;
+}
+
+/* Quita los vertices colineales del contorno (los puntos de union en T del borde no existen en el desplazado). */
+static int poly_reduce(const P3 *p, int n, P3 *out) {
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        const float *a = p[(i + n - 1) % n].p, *b = p[i].p, *c = p[(i + 1) % n].p;
+        double ex = (double)b[0] - a[0], ez = (double)b[2] - a[2], fx = (double)c[0] - b[0], fz = (double)c[2] - b[2];
+        if (fabs(ex * fz - ez * fx) > 1e-4 * sqrt(ex * ex + ez * ez) * sqrt(fx * fx + fz * fz)) out[m++] = p[i];
+    }
+    return m;
+}
+
+/* Cartucho (vaina + bala con ojiva), eje paralelo a Z con la punta hacia -Z; volumen cerrado. */
+static int gen_cartridge(TL *out, double cx, double cy, double zr, double rc, double rbl, double lcase, double lbul, WCutUV mc, WCutUV mb) {
+    enum { NS = 12 };
+    double cs[NS], sn[NS];
+    for (int i = 0; i < NS; i++) { cs[i] = cos(6.283185307179586 * i / NS); sn[i] = sin(6.283185307179586 * i / NS); }
+    #define RP(O, Z, R, I) do { (O)[0] = (float)(cx + (R) * cs[(I) % NS]); (O)[1] = (float)(cy + (R) * sn[(I) % NS]); (O)[2] = (float)(Z); } while (0)
+    const double zs = zr - lcase;   /* hombro: aquí acaba la vaina y arranca la bala */
+    /* bala: cilindro y ojiva (anillos desde el hombro hasta la punta) */
+    const double bz[4] = {zs, zs - 0.45 * lbul, zs - 0.80 * lbul, zs - lbul}, br[4] = {rbl, rbl, 0.78 * rbl, 0.38 * rbl};
+    int rcd = 0;
+    for (int i = 0; i < NS && !rcd; i++) {
+        float a[3], b[3], c[3], d[3];
+        double rad[3] = {cs[i] + cs[(i + 1) % NS], sn[i] + sn[(i + 1) % NS], 0};
+        double zp[3] = {0, 0, 1}, zm[3] = {0, 0, -1};
+        float ctr[3] = {(float)cx, (float)cy, (float)zr};
+        RP(a, zr, rc, i); RP(b, zr, rc, i + 1);
+        rcd = gen_tri(out, ctr, a, b, zp, mc, WCUT_TRI_CAP, -1, 0);                                  /* culote */
+        RP(a, zr, rc, i); RP(b, zr, rc, i + 1); RP(c, zs, rc, i + 1); RP(d, zs, rc, i);
+        if (!rcd) rcd = gen_quad(out, a, b, c, d, rad, mc, WCUT_TRI_CAP);                            /* pared de la vaina */
+        RP(a, zs, rc, i); RP(b, zs, rc, i + 1); RP(c, zs, rbl, i + 1); RP(d, zs, rbl, i);
+        if (!rcd) rcd = gen_quad(out, a, b, c, d, zm, mc, WCUT_TRI_CAP);                             /* hombro */
+        for (int k = 0; k < 3 && !rcd; k++) {
+            RP(a, bz[k], br[k], i); RP(b, bz[k], br[k], i + 1); RP(c, bz[k + 1], br[k + 1], i + 1); RP(d, bz[k + 1], br[k + 1], i);
+            rcd = gen_quad(out, a, b, c, d, rad, mb, WCUT_TRI_CAP);
+        }
+        float tc[3] = {(float)cx, (float)cy, (float)bz[3]};
+        RP(a, bz[3], br[3], i); RP(b, bz[3], br[3], i + 1);
+        if (!rcd) rcd = gen_tri(out, tc, a, b, zm, mb, WCUT_TRI_CAP, -1, 0);                          /* punta */
+    }
+    #undef RP
+    return rcd;
+}
+
+static void quad_ring_walls(TL *out, const P3 *A, const P3 *B, int n, const double *c, int inward, WCutUV uv, int *rc) {
+    for (int i = 0; i < n && !*rc; i++) {
+        int j = (i + 1) % n;
+        double mx = ((double)A[i].p[0] + A[j].p[0]) * 0.5 - c[0], mz = ((double)A[i].p[2] + A[j].p[2]) * 0.5 - c[2];
+        double want[3] = {inward ? -mx : mx, 0, inward ? -mz : mz};
+        *rc = gen_quad(out, A[i].p, A[j].p, B[j].p, B[i].p, want, uv, WCUT_TRI_CAP);
+    }
+}
+
+static int gen_mag(const WCutRule *ru, TL *P, const BPiece *slide, const BPiece *barrel) {
+    const WCutMag *g = &ru->mag;
     int rc = 0;
     TL T = {0}, Keep = {0}, New = {0};
-    for (size_t i = 0; i < P->n && !rc; i++) {   /* tapas que miran hacia 'dir' */
+    Loops L = {0};
+    P3 *Q = NULL;
+    double d[3] = {g->dir.x, g->dir.y, g->dir.z}, dl = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (!(dl >= 1e-9) || !(d[1] / dl >= 0.5)) return -1;
+    for (int i = 0; i < 3; i++) d[i] /= dl;
+    const double sx = d[0] / d[1], sz = d[2] / d[1];             /* desplazamiento horizontal por metro de altura */
+    for (size_t i = 0; i < P->n && !rc; i++) {                    /* tapas de la base que miran hacia arriba (+Y) */
         const Tri *t = &P->t[i];
         double e1[3], e2[3], n[3]; sub3(t->v[1].p, t->v[0].p, e1); sub3(t->v[2].p, t->v[0].p, e2); cross3(e1, e2, n);
         double ln = sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-        if (t->cap == WCUT_TRI_CAP && ln > 0 && (n[0] * d[0] + n[1] * d[1] + n[2] * d[2]) > 0.95 * ln) rc = tl_push(&T, t);
-        else rc = tl_push(&Keep, t);
+        rc = (t->cap == WCUT_TRI_CAP && ln > 0 && n[1] > 0.999 * ln) ? tl_push(&T, t) : tl_push(&Keep, t);
     }
     if (!rc && !T.n) rc = -7;
-    size_t nT = T.n; EK *e = NULL; size_t ne = 0; EK *sel = NULL; float (*pa)[3] = NULL; int *sc = NULL; int nsel = 0; Loops L = {0};
-    if (!rc) {
-        e = edges_of(&T, &ne);
-        sel = (EK *)malloc((nT * 3 + 1) * sizeof(EK)); pa = (float (*)[3])malloc((nT * 3 + 1) * sizeof(float[3])); sc = (int *)malloc((nT * 3 + 1) * sizeof(int));
-        if (!e || !sel || !pa || !sc) rc = -3;
-    }
-    for (size_t i = 0; i < nT && !rc; i++)
-        for (int a = 0; a < 3; a++) {
-            EK k; k.a = pkey(T.t[i].v[a].p); k.b = pkey(T.t[i].v[(a + 1) % 3].p);
-            if (!memcmp(&k.a, &k.b, sizeof(PK)) || has_rev(e, ne, &k)) continue;
-            sel[nsel] = k; memcpy(pa[nsel], T.t[i].v[a].p, 12); sc[nsel] = T.t[i].comp; nsel++;
+    if (!rc) rc = boundary_loops(&T, &L);
+    if (!rc && L.nloops != 1) rc = -7;
+    if (rc) goto done;
+    {
+        const int n = L.len[0]; const P3 *pts = L.pt;
+        const double y0 = pts[0].p[1];
+        double xlo = 1e30, xhi = -1e30, zlo = 1e30, zhi = -1e30;
+        for (int i = 0; i < n; i++) {
+            if (fabs((double)pts[i].p[1] - y0) > ON_TOL) { rc = -7; goto done; }
+            if (pts[i].p[0] < xlo) xlo = pts[i].p[0];
+            if (pts[i].p[0] > xhi) xhi = pts[i].p[0];
+            if (pts[i].p[2] < zlo) zlo = pts[i].p[2];
+            if (pts[i].p[2] > zhi) zhi = pts[i].p[2];
         }
-    if (!rc) rc = build_loops(sel, (const float (*)[3])pa, sc, nsel, &L);
-    if (!rc && !L.nloops) rc = -7;
-    int off = 0;
-    for (int l = 0; l < L.nloops && !rc; l++) {
-        int n = L.len[l]; const P3 *pts = L.pt + off; off += n;
-        if (n < 3) continue;
-        double c[3] = {0, 0, 0}; for (int i = 0; i < n; i++) for (int a = 0; a < 3; a++) c[a] += pts[i].p[a] / n;
-        P3 *q = (P3 *)malloc(sizeof(P3) * (size_t)n * 2);
-        if (!q) { rc = -3; break; }
-        P3 *up = q + n;
-        for (int i = 0; i < n; i++) for (int a = 0; a < 3; a++) {
-            double v = c[a] + x->inset * (pts[i].p[a] - c[a]);
-            q[i].p[a] = (float)v; up[i].p[a] = (float)(v + d[a] * x->len);
+        /* cotas derivadas: pared, ánima del cañón (calibre), cara inferior de la corredera */
+        const double wall = g->wall_frac * (xhi - xlo);
+        double ysl = 1e30;
+        for (size_t i = 0; i < slide->tl.n; i++) for (int k = 0; k < 3; k++) if (slide->tl.t[i].v[k].p[1] < ysl) ysl = slide->tl.t[i].v[k].p[1];
+        double bx0 = 1e30, bx1 = -1e30, by0 = 1e30, by1 = -1e30, bz0 = 1e30;
+        for (size_t i = 0; i < barrel->tl.n; i++) for (int k = 0; k < 3; k++) {
+            const float *p = barrel->tl.t[i].v[k].p;
+            if (p[0] < bx0) bx0 = p[0];
+            if (p[0] > bx1) bx1 = p[0];
+            if (p[1] < by0) by0 = p[1];
+            if (p[1] > by1) by1 = p[1];
+            if (p[2] < bz0) bz0 = p[2];
         }
-        Loop outer = { (P3 *)pts, n, L.comp[l], 1 }, hole = { q, n, L.comp[l], 1 }, top = { up, n, L.comp[l], 1 };
-        const Loop *hl[1] = { &hole };
-        rc = emit_polygon(&outer, hl, 1, ru->cap_piece, ru->cap_piece, &New, NULL);
-        if (!rc) rc = emit_polygon(&top, NULL, 0, ru->cap_piece, ru->cap_piece, &New, NULL);
-        for (int i = 0; i < n && !rc; i++) {
-            int j = (i + 1) % n; double ed[3], w[3], u[3] = {d[0] * x->len, d[1] * x->len, d[2] * x->len};
-            for (int a = 0; a < 3; a++) ed[a] = (double)q[j].p[a] - q[i].p[a];
-            cross3(ed, u, w);
-            rc = gen_quad(&New, q[i].p, q[j].p, up[j].p, up[i].p, w, ru->cap_piece, WCUT_TRI_CAP);
+        double rbore = 1e30;   /* radio del ánima = el radio menor de la corona de la boca */
+        for (size_t i = 0; i < barrel->tl.n; i++) for (int k = 0; k < 3; k++) {
+            const float *p = barrel->tl.t[i].v[k].p;
+            if (fabs((double)p[2] - bz0) > ON_TOL) continue;
+            double r = hypot(p[0] - (bx0 + bx1) * 0.5, p[1] - (by0 + by1) * 0.5);
+            if (r > 1e-9 * g_sc && r < rbore) rbore = r;
         }
-        free(q);
+        if (ysl > 1e29 || bx1 < bx0 || rbore > 1e29 || !(wall > 0) || !(g->case_frac >= 1) || !(g->case_len > 0) || !(g->bullet_len > 0)) { rc = -7; goto done; }   /* case_frac < 1: bala más ancha que la vaina (hombro invertido) */
+        const double rcase = g->case_frac * rbore, rbul = rbore, lcase = g->case_len * 2 * rcase, lbul = g->bullet_len * 2 * rcase;
+        const double drec = g->rec_frac * rcase;
+        const double ytop = ysl - g->clear - 2 * rcase + drec;     /* plano superior de los labios */
+        const double yf = ytop - drec;                              /* fondo de la ranura */
+        if (ytop - y0 < 10 * rcase || g->lip_frac <= 0 || g->lip_frac >= 0.5 || g->lip_keep <= 0 || g->lip_keep > 1) { rc = -7; goto done; }
+        const double y1 = ytop - g->lip_frac * (ytop - y0);          /* arranque de los labios */
+        Q = (P3 *)malloc(sizeof(P3) * ((size_t)n * 4 + 1));
+        if (!Q) { rc = -3; goto done; }
+        P3 *RP0 = Q + 3 * n, *Q0 = Q, *Q1 = Q + n, *Q2 = Q + 2 * n;
+        const int nq = poly_reduce(pts, n, RP0);                      /* esquinas del contorno (sin las uniones en T) */
+        rc = poly_inset(RP0, nq, wall, Q0);
+        if (rc) goto done;
+        double qx0 = 1e30, qx1 = -1e30, qz0 = 1e30, qz1 = -1e30;
+        for (int i = 0; i < nq; i++) {
+            if (Q0[i].p[0] < qx0) qx0 = Q0[i].p[0];
+            if (Q0[i].p[0] > qx1) qx1 = Q0[i].p[0];
+            if (Q0[i].p[2] < qz0) qz0 = Q0[i].p[2];
+            if (Q0[i].p[2] > qz1) qz1 = Q0[i].p[2];
+        }
+        const double qcx = (qx0 + qx1) * 0.5, h1 = y1 - y0, h2 = ytop - y1;
+        for (int i = 0; i < nq; i++) {
+            Q1[i].p[0] = (float)(Q0[i].p[0] + sx * h1); Q1[i].p[1] = (float)y1; Q1[i].p[2] = (float)(Q0[i].p[2] + sz * h1);
+            Q2[i].p[0] = (float)(qcx + sx * h1 + (Q0[i].p[0] - qcx) * g->lip_keep + sx * h2); Q2[i].p[1] = (float)ytop;
+            Q2[i].p[2] = (float)(Q0[i].p[2] + sz * (h1 + h2));
+        }
+        const double c0[3] = {qcx, 0, (qz0 + qz1) * 0.5};
+        const double c1[3] = {qcx + sx * h1, 0, c0[2] + sz * h1}, c2[3] = {qcx + sx * (h1 + h2), 0, c0[2] + sz * (h1 + h2)};
+        /* ranura de alimentación: rectángulo centrado en x en el plano de los labios; márgenes = grosor de pared */
+        const double slot_hw = 1.2 * rcase, sx0 = c2[0] - slot_hw, sx1 = c2[0] + slot_hw;
+        const double sz0 = qz0 + sz * (h1 + h2) + wall, sz1 = qz1 + sz * (h1 + h2) - wall;
+        const double lipx = (qx1 - qcx) * g->lip_keep;
+        if (!(slot_hw < lipx) || !(sz1 - sz0 >= lcase + lbul + 0.001)) { rc = -7; goto done; }
+        P3 S[4], Sf[4];
+        const double sxv[4] = {sx0, sx1, sx1, sx0}, szv[4] = {sz0, sz0, sz1, sz1};
+        for (int i = 0; i < 4; i++) if (!pt_in_convex_xz(Q2, nq, sxv[i], szv[i], 0.05 * wall)) { rc = -7; goto done; }   /* la ranura cabe en la cara superior (contorno con chaflanes) */
+        for (int i = 0; i < 4; i++) {
+            S[i].p[0] = Sf[i].p[0] = (float)sxv[i]; S[i].p[1] = (float)ytop; Sf[i].p[1] = (float)yf; S[i].p[2] = Sf[i].p[2] = (float)szv[i];
+        }
+        Loop outer = { (P3 *)pts, n, L.comp[0], 1 }, hole0 = { Q0, nq, L.comp[0], 1 }, top = { Q2, nq, L.comp[0], 1 }, slot = { S, 4, L.comp[0], 1 };
+        const Loop *hl0[1] = { &hole0 }, *hls[1] = { &slot };
+        rc = emit_polygon(&outer, hl0, 1, ru->cap_piece, ru->cap_piece, &New, NULL);      /* hombro de la base */
+        if (!rc) quad_ring_walls(&New, Q0, Q1, nq, c0, 0, g->mat_body, &rc);               /* cuerpo */
+        if (!rc) quad_ring_walls(&New, Q1, Q2, nq, c1, 0, g->mat_body, &rc);               /* labios */
+        if (!rc) rc = emit_polygon(&top, hls, 1, g->mat_body, g->mat_body, &New, NULL);    /* cara superior con la ranura */
+        const double sc[3] = {c2[0], 0, (sz0 + sz1) * 0.5};
+        if (!rc) quad_ring_walls(&New, S, Sf, 4, sc, 1, g->mat_body, &rc);                 /* paredes de la ranura */
+        if (!rc) {
+            double up[3] = {0, 1, 0};
+            rc = gen_quad(&New, Sf[0].p, Sf[1].p, Sf[2].p, Sf[3].p, up, g->mat_body, WCUT_TRI_CAP);   /* fondo */
+        }
+        if (!rc) rc = gen_cartridge(&New, c2[0], yf + rcase - 0.0002, sz1 - 0.0005, rcase, rbul, lcase, lbul, g->mat_case, g->mat_bullet);
+        if (!rc && (sz1 - 0.0005 - lcase - lbul < sz0)) rc = -7;
     }
     if (!rc) {
         for (size_t i = 0; i < New.n && !rc; i++) rc = tl_push(&Keep, &New.t[i]);
         if (!rc) { tl_free(P); *P = Keep; Keep.t = NULL; Keep.n = Keep.cap = 0; }
     }
-    loops_free(&L); free(e); free(sel); free(pa); free(sc); tl_free(&T); tl_free(&Keep); tl_free(&New);
+done:
+    free(Q); loops_free(&L); tl_free(&T); tl_free(&Keep); tl_free(&New);
     return rc;
 }
 
@@ -1335,6 +1509,72 @@ static int gen_tube(const WCutRule *ru, BPiece *ref, TL *out) {
     return rc;
 }
 
+/* Sella los contornos abiertos de una pieza (aristas sin gemela, p.ej. la boca hueca de un cañon o un hueco del original):
+ * cada bucle se tapa con un parche triangulado por orejas en el plano perpendicular a su normal de Newell (vale tambien
+ * para bucles alabeados), recorrido al reves del bucle para que sus aristas emparejen con las abiertas. Los puntos del bucle
+ * se insertan despues en las aristas vecinas (uniones en T). Material = bloque del atlas 'mat'. */
+static int seal_open(TL *l, WCutUV mat) {
+    size_t ne = 0; EK *e = edges_of(l, &ne);
+    EK *sel = (EK *)malloc((l->n * 3 + 1) * sizeof(EK)); float (*pa)[3] = (float (*)[3])malloc((l->n * 3 + 1) * sizeof(float[3]));
+    int *sc = (int *)malloc((l->n * 3 + 1) * sizeof(int)); int nsel = 0, rc = 0; Loops L = {0}; TL Pn = {0}; PtList pts = {0};
+    if (!e || !sel || !pa || !sc) rc = -3;
+    for (size_t i = 0; i < l->n && !rc; i++)
+        for (int a = 0; a < 3; a++) {
+            EK k; k.a = pkey(l->t[i].v[a].p); k.b = pkey(l->t[i].v[(a + 1) % 3].p);
+            if (!memcmp(&k.a, &k.b, sizeof(PK)) || has_rev(e, ne, &k)) continue;
+            sel[nsel] = k; memcpy(pa[nsel], l->t[i].v[a].p, 12); sc[nsel] = l->t[i].comp; nsel++;
+        }
+    if (!rc) rc = build_loops(sel, (const float (*)[3])pa, sc, nsel, &L);
+    int off = 0;
+    for (int q = 0; q < L.nloops && !rc; q++) {
+        const int n = L.len[q]; const P3 *src = L.pt + off; off += n;
+        if (n < 3) continue;
+        P3 *rp = (P3 *)malloc(sizeof(P3) * (size_t)n); V2 *X = (V2 *)malloc(sizeof(V2) * (size_t)n);
+        int *ring = (int *)malloc(sizeof(int) * (size_t)n); int (*tri)[3] = (int (*)[3])malloc(sizeof(int[3]) * (size_t)n);
+        if (!rp || !X || !ring || !tri) { free(rp); free(X); free(ring); free(tri); rc = -3; break; }
+        for (int i = 0; i < n; i++) rp[i] = src[n - 1 - i];
+        double nw[3]; newell(rp, n, nw);
+        double nl = sqrt(nw[0] * nw[0] + nw[1] * nw[1] + nw[2] * nw[2]);
+        if (nl < 1e-14 * SC2) { free(rp); free(X); free(ring); free(tri); continue; }
+        double nn[3] = {nw[0] / nl, nw[1] / nl, nw[2] / nl};
+        int ax = fabs(nn[0]) < fabs(nn[1]) ? (fabs(nn[0]) < fabs(nn[2]) ? 0 : 2) : (fabs(nn[1]) < fabs(nn[2]) ? 1 : 2);
+        double h[3] = {0, 0, 0}; h[ax] = 1;
+        double u[3]; cross3(h, nn, u); double ul = sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]); for (int i = 0; i < 3; i++) u[i] /= ul;
+        double v[3]; cross3(nn, u, v);                     /* u x v = n: antihorario visto desde n */
+        double umin = 1e30, umax = -1e30, vmin = 1e30, vmax = -1e30;
+        for (int i = 0; i < n; i++) {
+            X[i].x = u[0] * rp[i].p[0] + u[1] * rp[i].p[1] + u[2] * rp[i].p[2];
+            X[i].y = v[0] * rp[i].p[0] + v[1] * rp[i].p[1] + v[2] * rp[i].p[2];
+            ring[i] = i;
+            if (X[i].x < umin) umin = X[i].x;
+            if (X[i].x > umax) umax = X[i].x;
+            if (X[i].y < vmin) vmin = X[i].y;
+            if (X[i].y > vmax) vmax = X[i].y;
+        }
+        int nt = 0;
+        rc = ear_clip(X, ring, n, tri, &nt);
+        double du = umax - umin > 1e-12 ? umax - umin : 1, dv = vmax - vmin > 1e-12 ? vmax - vmin : 1;
+        for (int i = 0; i < n && !rc; i++) rc = pl_add(&pts, rp[i].p);
+        for (int t = 0; t < nt && !rc; t++) {
+            Tri tr; tr.comp = L.comp[q]; tr.cap = WCUT_TRI_CAP;
+            for (int k = 0; k < 3; k++) {
+                Vx *w = &tr.v[k]; const int ii = tri[t][k];
+                memcpy(w->p, rp[ii].p, 12);
+                for (int r = 0; r < 3; r++) w->n[r] = (float)nn[r];
+                w->uv[0] = mat.u0 + (float)((X[ii].x - umin) / du) * (mat.u1 - mat.u0);
+                w->uv[1] = mat.v0 + (float)((X[ii].y - vmin) / dv) * (mat.v1 - mat.v0);
+                w->c[0] = w->c[1] = w->c[2] = w->c[3] = 255;
+            }
+            rc = tl_push(&Pn, &tr);
+        }
+        free(rp); free(X); free(ring); free(tri);
+    }
+    for (size_t i = 0; i < Pn.n && !rc; i++) rc = tl_push(l, &Pn.t[i]);
+    if (!rc) rc = conform_tl(l, &pts);
+    loops_free(&L); free(e); free(sel); free(pa); free(sc); tl_free(&Pn); free(pts.p);
+    return rc;
+}
+
 static int run_impl(const WLoaded *m, const WCutModel *model, WCutSet *out, double scale);
 
 int wcut_run(const WLoaded *m, const WCutModel *model, WCutSet *out) {
@@ -1397,9 +1637,10 @@ static int run_impl(const WLoaded *m, const WCutModel *model, WCutSet *out, doub
             if (!rc) { double gv = tl_volume(&P); BPiece *dst0 = find_piece(pc, npc, ru->name); if (!dst0 && npc < 40) { dst0 = &pc[npc++]; copy_name(dst0->name, ru->name); dst0->rule = ru; } if (dst0) dst0->gen_vol += gv; }
         } else {
             rc = select_split(&src->tl, ru, &P, &R);
-            if (!rc && ru->extrude.len > 0) {
+            if (!rc && ru->mag.on) {
+                BPiece *sl = find_piece(pc, npc, ru->mag.slide ? ru->mag.slide : ""), *ba = find_piece(pc, npc, ru->mag.bore ? ru->mag.bore : "");
                 double v0 = tl_volume(&P);
-                rc = extrude_piece(&P, ru);
+                rc = (sl && ba) ? gen_mag(ru, &P, sl, ba) : -2;
                 if (!rc) { BPiece *dst0 = find_piece(pc, npc, ru->name); if (!dst0 && npc < 40) { dst0 = &pc[npc++]; copy_name(dst0->name, ru->name); dst0->rule = ru; dst0->copy = (ru->flags & WCUT_COPY) ? 1 : 0; } if (dst0) dst0->gen_vol += tl_volume(&P) - v0; }
             }
         }
@@ -1416,6 +1657,13 @@ static int run_impl(const WLoaded *m, const WCutModel *model, WCutSet *out, doub
             if (dst) for (size_t i = 0; i < P.n && !rc; i++) rc = tl_push(&dst->tl, &P.t[i]);
         }
         tl_free(&P); tl_free(&R);
+    }
+    for (int q = 0; q < model->nseals && !rc; q++) {   /* sellado de contornos abiertos (ver WCutSeal) */
+        BPiece *sp = find_piece(pc, npc, model->seals[q].piece ? model->seals[q].piece : "");
+        if (!sp) { rc = -2; break; }
+        double v0 = tl_volume(&sp->tl);
+        rc = seal_open(&sp->tl, model->seals[q].mat);
+        if (!rc) sp->gen_vol += tl_volume(&sp->tl) - v0;
     }
     for (int i = 0; i < npc && !rc; i++) rc = clean_collinear(&pc[i].tl);
     for (int i = 0; i < npc && !rc; i++) if (pc[i].tl.n * 3 > 65535) rc = -5;   /* índices de 16 bits: se comprueba antes de reservar */

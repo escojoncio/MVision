@@ -232,3 +232,12 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - Validado en local contra una implementación de referencia (fuera del repo): 12 M de casos aleatorios + 0,75 M de transferencias, todos los comandos y bits sf/lm/mx/v/cv -> 0 discrepancias.
 - Regresión en el repo: `runtime/gte_vectors.h` (cmd, semilla, FLAG, MAC0, hash FNV-1a de 64 registros; generado con nuestro gte.c ya corregido) + `t_gte_vec` y `t_gte_regs16` (casos a mano) en `test_runtime.c`. `make test` OK con clang y gcc.
 - En juego: el personaje del muelle se ve correcto. Pendiente menor: UBSan "left shift of negative value" en gte.c (código previo, mismo resultado en gcc/clang).
+
+## 17. Cargador de pistolas generado y cierre de cuerpos (`vr/weapons/`, `tools/wmodel/`) — 2026-10-18
+
+- `wcut.h`: `WCutExtrude` -> `WCutMag` (slide, bore, dir, clear, wall/lip/rec/case fracs, case/bullet len, materiales); `WCutSeal` + `WCutModel.seals/nseals`.
+- `wcut.c`: `gen_mag` (sección = contorno interior del mango en la base con `poly_inset` de mitra, altura del pozo hasta bajo la corredera, eje 20°, labios en el último 10 %, cartucho derivado de la boca del cañón, material oscuro muestreado del atlas); `seal_open` cierra bordes abiertos por modelo (`SEALS()` en `wcut_tables.c`). Endurecido en revisión: rechazo -7 si el inset invierte aristas, ranura fuera del contorno (`pt_in_convex_xz`), `case_frac<1`, NaN.
+- `w_pist.c`: eje del cargador QX=-0.173648 QW=0.984808 (UY=0.939693 UZ=-0.342020).
+- Tests: `test_wcut` (cerrado, contención, holgura, altura, anchura, calibre, barrido de extracción, `mag_bad_params`); OPEN solo 57f8 body 4, 57f8 tube 3, 9a90 round 10; rifle/sniper/guiado a 0. `test_wload` usa `wload_id16` y entra en TESTS (se omite sin datos). `make -C vr/weapons test test-san` OK.
+- Herramienta: `make -C vr/weapons cutprev` (`tools/wmodel/cutprev.c`; `wprev_set_atlas/winding/twosided`; salida de wcut CCW -> `wprev_set_winding(1)`).
+- Pendiente: marco macizo (sin pozo hueco al sacar el cargador); `PIST_MAG_HALF/CY/CZ` en w_pist.c para el cargador de ~86 mm; `game_weapon_id` real (puente RAM: pistola 0, fusil 1, granada 2, guiado 3, antiaéreo 4, mina 5, adhesivo 6, aturdidora 7, chaff 8, francotirador 9).
