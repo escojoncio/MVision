@@ -290,3 +290,11 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - Supresor: `parent="barrel"` en wcut_tables.c y w_pist.c, `WCutRule.shift` 2,64 mm; base = boca del cañón (0,000015 mm), ejes alineados en reposo y en retroceso máximo. WP_MUZZLE: boca -0,21964 sin supresor, punta -0,37364 con él. Orden de reglas slide -> mag -> barrel. `gen_mag` publica `Feed` (cartucho) para gen_barrel.
 - Tests: medidas derivadas, volumen cerrado, sin aristas repetidas, sin cruces cañón/corredera/supresor en 9 posiciones del recorrido, cargador contra cañón/corredera en 41 posiciones de extracción. `make -C vr/weapons test test-san` OK.
 - Pendiente: hueco de alimentación en el suelo de la corredera; bala recamarada (`round`) se dibuja en el mango, no en la recámara; marco/corredera se cruzan desde ~12 mm de recorrido (heredado del original); posible z-fighting boca/supresor con doble cara.
+
+## 24. Escena estéreo (`vr/scene/`) — 2026-10-18
+
+- `vr_scene_build(dl, bs, opts, out)`: captura de GPU + puente -> VrVtx en metros (mundo VR Y arriba, origen = pies del jugador), batches por época de eventos VRAM (`ev_end` monótono = índice en `src->ops`; aplicar todos los eventos < ev_end antes del batch), clases 0 opaco 3D / 1 semi 3D / 2 2D-HUD, `states[pad]` (ventana E2 + recorte). Layout = render/metal/vr_types.h (VrVtx 32 B, VrState 12 B, VrBatch 20 B).
+- Transformación: `v_vr = S·Mmap·(inv(eye_axes^T)·v_vista + eye_pos − origen)`; la rotación de la GTE es eye_axes^T con escala ~1,002 por eje y la traslación −eye_axes^T·eye_pos (inversa exacta, no columnas normalizadas). Escala 0,001 m/unidad (personaje 1,6-1,75 m, cámara cenital a 8,2 m). Mundo del juego Y arriba y derecho (espejo Z solo si det<0).
+- `world_valid` = has_player && ALL_CORE (si no, el consumidor congela el mundo). Líneas 2D por centros de píxel.
+- Herramientas: `make -C vr/scene test test-san`; `make -C vr/scene dump` -> build-scene/scene_dump (`--out DIR --at F,...`).
+- Limitaciones: geometría fuera del campo de la cámara del juego no existe (depende de vr/camera); polígonos con algún vértice sin posición de vista se descartan (~50/frame en sala, la mitad en cinemáticas) -> en curso `vvalid` para vértices saturados desde la GTE; en cinemáticas la cámara del puente no coincide con la de dibujo; 2D dibujado antes de un 3D queda encima (diseño por panel).
