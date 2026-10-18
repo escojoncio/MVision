@@ -1,0 +1,21 @@
+# E/S de sistema (runtime/pad.c, runtime/card.c). Nombre = símbolo del mapa de firmas.
+PadInitDirect
+PadStartCom
+PadStopCom
+PadGetState
+PadInfoMode
+PadInfoAct
+PadInfoComb
+PadSetActAlign
+PadSetAct
+PadSetMainMode
+PadChkMtap
+PadEnableCom
+InitPAD
+StartPAD
+StopPAD
+InitCARD
+StartCARD
+StopCARD
+firstfile
+SetConf

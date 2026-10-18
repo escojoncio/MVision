@@ -4,6 +4,8 @@
 #include <string.h>
 #include "cpu.h"
 #include "fiber.h"
+#include "hle.h"
+#include "sys.h"
 
 #define V0 c->r[2]
 #define A0 c->r[4]
@@ -16,7 +18,31 @@
 #define K_C0_TABLE 0x00000674u
 
 #define MAX_EVENTS 32
-static struct { uint32_t cls, spec, mode, func, enabled, fired; } events[MAX_EVENTS];
+/* Estado de evento como en el kernel: 0x1000 desactivado, 0x2000 activo, 0x4000 entregado. */
+#define EV_DISABLED 0x1000u
+#define EV_ENABLED 0x2000u
+#define EV_READY 0x4000u
+#define EV_MODE_CALL 0x1000u
+#define EV_MODE_FLAG 0x2000u
+static struct { uint32_t cls, spec, mode, func, status; } events[MAX_EVENTS];
+
+/* Memoria de kernel (alloc_kernel_memory): zona baja libre entre tablas ficticias y 0x10000. */
+#define K_HEAP_START 0x00001000u
+#define K_HEAP_END 0x0000F000u
+static uint32_t k_heap = K_HEAP_START;
+
+static int ev_index(uint32_t h) {
+    uint32_t i = h & 0xFFFFu;
+    return (h & 0xFF000000u) == 0xF1000000u && i < MAX_EVENTS && events[i].cls ? (int)i : -1;
+}
+
+void bios_deliver_event(Cpu *c, uint32_t cls, uint32_t spec) {
+    for (int i = 0; i < MAX_EVENTS; i++) {
+        if (events[i].cls != cls || events[i].spec != spec || events[i].status != EV_ENABLED) continue;
+        if (events[i].mode == EV_MODE_CALL) hle_invoke(c, events[i].func, 0);
+        else events[i].status = EV_READY;
+    }
+}
 
 static uint32_t strlen_psx(Cpu *c, uint32_t a) {
     uint32_t n = 0;
@@ -75,46 +101,72 @@ static void bios_a0(Cpu *c, uint32_t fn) {
     case 0x72: V0 = 0; return;                     /* CdRemove */
     case 0x9F: V0 = 0; return;                     /* SetMem */
     case 0x39: V0 = 0; return;                     /* InitHeap (el juego usa su propio gestor) */
-    default: unknown(c, 0xA0, fn);
+    default:
+        if (card_bios(c, 0xA0, fn)) return;
+        unknown(c, 0xA0, fn);
     }
 }
 
 static void bios_b0(Cpu *c, uint32_t fn) {
     switch (fn) {
-    case 0x07: V0 = 1; return;                     /* DeliverEvent */
+    case 0x00:                                     /* alloc_kernel_memory */
+        A0 = (A0 + 3) & ~3u;
+        if (k_heap + A0 > K_HEAP_END) { V0 = 0; return; }
+        V0 = k_heap; memset(&psx_ram[k_heap], 0, A0); k_heap += A0; return;
+    case 0x01: V0 = 0; return;                     /* free_kernel_memory */
+    case 0x07: bios_deliver_event(c, A0, A1); V0 = 1; return;          /* DeliverEvent */
     case 0x08: {                                   /* OpenEvent(class, spec, mode, func) */
         for (unsigned i = 0; i < MAX_EVENTS; i++) if (!events[i].cls) {
             events[i].cls = A0; events[i].spec = A1; events[i].mode = A2; events[i].func = A3;
+            events[i].status = EV_DISABLED;
             V0 = 0xF1000000u | i; return;
         }
         V0 = 0xFFFFFFFFu; return;
     }
-    case 0x09: events[A0 & (MAX_EVENTS - 1)].cls = 0; V0 = 1; return;  /* CloseEvent */
-    case 0x0A: V0 = 1; return;                                          /* WaitEvent */
-    case 0x0B: {                                                        /* TestEvent */
-        unsigned i = A0 & (MAX_EVENTS - 1);
-        V0 = events[i].fired; events[i].fired = 0; return;
+    case 0x09: { int i = ev_index(A0); if (i >= 0) events[i].cls = 0; V0 = 1; return; }  /* CloseEvent */
+    case 0x0A: {                                   /* WaitEvent: aquí no se puede bloquear */
+        int i = ev_index(A0);
+        if (i < 0 || events[i].status == EV_DISABLED) { V0 = 0; return; }
+        if (events[i].status != EV_READY) {
+            static unsigned warn;
+            if (warn++ < 4) fprintf(stderr, "[bios] WaitEvent(0x%08x) sin evento pendiente: se continúa\n", A0);
+        }
+        events[i].status = EV_ENABLED; V0 = 1; return;
     }
-    case 0x0C: events[A0 & (MAX_EVENTS - 1)].enabled = 1; V0 = 1; return; /* EnableEvent */
-    case 0x0D: events[A0 & (MAX_EVENTS - 1)].enabled = 0; V0 = 1; return; /* DisableEvent */
+    case 0x0B: {                                   /* TestEvent */
+        int i = ev_index(A0);
+        if (i >= 0 && events[i].status == EV_READY) { events[i].status = EV_ENABLED; V0 = 1; }
+        else V0 = 0;
+        return;
+    }
+    case 0x0C: { int i = ev_index(A0); if (i >= 0) events[i].status = EV_ENABLED; V0 = 1; return; }  /* EnableEvent */
+    case 0x0D: { int i = ev_index(A0); if (i >= 0) events[i].status = EV_DISABLED; V0 = 1; return; } /* DisableEvent */
     case 0x0E: V0 = fiber_open(c, A0, A1, A2); return;   /* OpenTh(pc, sp, gp) */
     case 0x0F: V0 = fiber_close(c, A0); return;          /* CloseTh */
     case 0x10: fiber_change(c, A0); V0 = 1; return;      /* ChangeTh */
-    case 0x12: case 0x13: case 0x14: V0 = 1; return; /* InitPAD/StartPAD/StopPAD (HLE de pad aparte) */
+    case 0x12: pad_bios_init(c, A0, A1, A2, A3); V0 = 1; return;   /* InitPAD */
+    case 0x13: pad_bios_start(c); V0 = 1; return;                   /* StartPAD */
+    case 0x14: pad_bios_stop(); V0 = 1; return;                     /* StopPAD */
+    case 0x15: V0 = 1; return;                                      /* OutdatedPadInitAndStart */
     case 0x17: rt_fatal(c, "ReturnFromException fuera de IRQ");
     case 0x18: case 0x19: V0 = 0; return;         /* Set*ExitFromException */
-    case 0x20: V0 = 1; return;                     /* UnDeliverEvent */
+    case 0x20: {                                   /* UnDeliverEvent */
+        for (int i = 0; i < MAX_EVENTS; i++)
+            if (events[i].cls == A0 && events[i].spec == A1 && events[i].status == EV_READY) events[i].status = EV_ENABLED;
+        V0 = 1; return;
+    }
     case 0x3D: fputc((int)(A0 & 0xFF), stderr); V0 = A0; return; /* putchar */
     case 0x3F: {                                   /* puts */
         uint32_t n = strlen_psx(c, A0);
         for (uint32_t i = 0; i < n; i++) fputc(mem_r8(c, A0 + i), stderr);
         fputc('\n', stderr); V0 = 0; return;
     }
-    case 0x4A: case 0x4B: case 0x4C: V0 = 1; return; /* InitCARD/StartCARD/StopCARD */
     case 0x56: V0 = K_C0_TABLE; return;            /* GetC0Table */
     case 0x57: V0 = K_B0_TABLE; return;            /* GetB0Table */
     case 0x5B: V0 = 0; return;                     /* ChangeClearPad */
-    default: unknown(c, 0xB0, fn);
+    default:
+        if (card_bios(c, 0xB0, fn)) return;
+        unknown(c, 0xB0, fn);
     }
 }
 
@@ -133,3 +185,7 @@ void bios_hle(Cpu *c, uint32_t vec) {
     else if (vec == 0xB0) bios_b0(c, fn);
     else bios_c0(c, fn);
 }
+
+/* SetConf(eventos, tcbs, pila): reconfigura tablas del kernel parcheando su código; con el kernel
+ * en HLE (eventos/hilos con tablas propias) no hay nada que hacer. */
+void hle_SetConf(Cpu *c) { V0 = 1; }
