@@ -37,7 +37,7 @@ static void g_init(WeaponState *s);
 static void g_update(WeaponState *s, const WInput *in, WReloadMode rm, const WGameBridge *g);
 
 const WeaponDef w_guided = {
-    .id = "guided", .game_weapon_id = 6,
+    .id = "guided", .game_weapon_id = 3,
     .meshes = NULL, .nmeshes = 0, .mesh_names = guided_mesh_names,
     .parts = g_parts, .nparts = GP_COUNT,
     .points = {

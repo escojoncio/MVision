@@ -63,7 +63,7 @@ static void aa_init(WeaponState *s);
 static void aa_update(WeaponState *s, const WInput *in, WReloadMode rm, const WGameBridge *g);
 
 const WeaponDef w_aa = {
-    .id = "aa", .game_weapon_id = 7,   /* identificador interno del arma en el juego (provisional; único en el registro) */
+    .id = "aa", .game_weapon_id = 4,   /* antiaéreo, tabla del puente */
     .meshes = NULL, .nmeshes = 0, .mesh_names = aa_mesh_names,
     .parts = aa_parts, .nparts = PT_N,
     .points = {

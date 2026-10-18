@@ -411,7 +411,7 @@ static void throw_update(WeaponState *s, const WInput *in, WReloadMode rm, const
 }
 
 /* ---------------------------------------------------------------- definiciones */
-/* Los id de arma del juego son valores de integración: 100+ hasta que la capa de juego los mapee. */
+/* Ids de la tabla del puente: 2 la granada principal; 7 y 8 las otras dos variantes (b/c; asignación por fusible, a confirmar). */
 #define ID_Q {0, 0, 0, 1}
 #define THROW_POINTS(Y) { \
     [WP_GRIP]    = {{0, 0, 0}, ID_Q}, [WP_SUPPORT] = {{0, Y, 0.0485f}, ID_Q}, [WP_MUZZLE] = {{0, 0, -0.04f}, ID_Q}, \
@@ -427,6 +427,6 @@ static void throw_update(WeaponState *s, const WInput *in, WReloadMode rm, const
         .state_size = sizeof(WThrowState), .init = throw_init_##NAME, .update = throw_update, \
         .mesh_names = THROW_MESH_NAMES }; \
     static void throw_init_##NAME(WeaponState *s) { throw_init_k(s, &w_throw_##NAME, KIND); }
-THROW_DEF(frag, "throw_frag", 100, 0.056f, 0)
-THROW_DEF(b,    "throw_b",    101, 0.098f, 1)
-THROW_DEF(c,    "throw_c",    102, 0.093f, 2)
+THROW_DEF(frag, "throw_frag", 2, 0.056f, 0)
+THROW_DEF(b,    "throw_b",    7, 0.098f, 1)
+THROW_DEF(c,    "throw_c",    8, 0.093f, 2)

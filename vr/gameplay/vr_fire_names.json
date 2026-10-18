@@ -1,0 +1,11 @@
+{
+  "vrfire_bullet":   {"target": "800779a8", "how": "exact", "doc": "crea una bala instantánea (matriz, bando, color, tipo)"},
+  "vrfire_flash_a":  {"target": "8005e6dc", "how": "exact", "doc": "resplandor del disparo de pistola (matriz, matriz, modo)"},
+  "vrfire_flash_b":  {"target": "8005e358", "how": "exact", "doc": "resplandor del disparo de fusil (matriz)"},
+  "vrfire_rmissile": {"target": "8006e128", "how": "exact", "doc": "crea el misil guiado (matriz, bando)"},
+  "vrfire_amissile": {"target": "8006eca0", "how": "exact", "doc": "crea el misil antiaéreo (matriz, bando)"},
+  "vrfire_mine":     {"target": "8006c4b4", "how": "exact", "doc": "coloca la mina direccional (matriz, suelo)"},
+  "vrfire_charge":   {"target": "8006b69c", "how": "exact", "doc": "coloca la carga adhesiva (matriz, pos, adherida, bando, seg)"},
+  "vrfire_grenade":  {"target": "8006af98", "how": "exact", "doc": "lanza la granada de mano (pos, velocidad, mecha, tipo, modelo)"},
+  "vrfire_hide":     {"target": "80018c8c", "how": "exact", "doc": "etapa de recorte por objeto de un canal (canal, índice)"}
+}
