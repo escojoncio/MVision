@@ -77,6 +77,9 @@ Coste: mapear símbolos JP→EU (por firmas) si se elige opción A.
 
 - **Requisito impactos (VR):** raycast 3D desde la boca del arma contra hitboxes por pieza del modelo jerárquico animado de cada enemigo + geometría del escenario; impacto comunicado a la función de daño propia del juego (reacciones/alertas/muerte originales). Daño por zona configurable: original (uniforme) / realista (defecto: multiplicador cabeza, menos extremidades). Proyectiles propios del juego reciben dirección 3D real. Colisión del jugador sigue la pose real de cabeza/torso (agacharse/asomarse reduce exposición). Requiere puente RAM.
 
+- **Decisión caja:** estilo por defecto `BOX_STYLE_CARDBOARD` (textura interior del disco); negro puro como opción. Máscara visible siempre que el objeto caja esté equipado y puesto.
+- **Requisito máscara de gas (VR):** el modelo equipado del disco es una cabeza completa con la máscara (ids de cabezas con equipo en el stage residente: ver /work/models/index.txt local). Separar solo la máscara de la cabeza (corte por textura/componentes con wcut, sin geometría nueva) y mostrarla anclada a la cabeza como en vr/box: marco de las lentes visible en la periferia, efecto de ver a través (viñeta del contorno de lentes, ligera distorsión/aberración de lente, tinte del cristal, empañado sutil sincronizado con la respiración, oclusión periférica fiel a las proporciones del modelo). Activación por el estado del juego (objeto equipado), nunca por la capa VR. Mismo patrón aplicable a las gafas de visión (nocturna/térmica) del otro modelo de cabeza.
+
 ## 6. Herramientas en el repo
 
 - `tools/disc/psxdisc.py` (stdlib): `info`, `ls`, `extract`, `dirtable <DISCO> <FICHERO>`, `manifest`. Sin probar con BIN real (el usuario extrajo con dumpsxiso; formato de tabla DIR confirmado sobre el fichero extraído).
@@ -131,3 +134,13 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - `w_throw.c`, `w_placed.c`: ids neutros `throw_frag/throw_b/throw_c`, `placed_a/placed_b` (símbolos `w_throw_b/c`, `w_placed_a/b`); un init por variante; dt<=0.1; palanca con subpasos 8 ms y canal en [0,1.5]; `w5_emit` rechazado no consume ni pasa a GONE (reintento cada 0,15 s); `ang_vel`<=45 rad/s; reserva>=0; detonación rechazada conserva la carga; `WVH_ACCEL_BLEND`=0,9 (mezcla parcial parábola/recta); placed: gatillo apretado al sacar no coloca.
 - Makefile: sin GENS/GENOBJS; `-MMD`; `wload.c` en la lib; `test_registry` enlaza contra el .a; `test-san`, `test-wload` (test_wload fuera de `test`: su API aún cambia).
 - Pendiente: `test_wload.c` usa `wload_hash16` y `wload.h` declara `wload_id16` (WIP del cargador); `game_weapon_id` siguen siendo provisionales; ajustar puntos/pivotes y canales a los modelos reales.
+
+---
+
+## 9. Carcasa de visión interior (`vr/box/`, `tools/box/`) — 2026-10-18
+
+- Original (EXE EU recompilado): al usar el objeto en 1ª persona se crea un actor de "sight" con el recurso tipo `s` (id16 0xE2A9, stage `init`): máscara 2D, NO geometría 3D ni textura de cartón. 36 polígonos planos negros opacos (todo fuera del hueco) + 38 Gouraud semitransparentes modo resta (degradado interior ~16-19 px). Hueco = rectángulo redondeado en lienzo 320x256: x 17..302, y 50..160, centro (159.5,105); con foco 320 px y centro óptico fila 120 -> 24° izq/dcha, +12.3°/-7.1°. Se abre en 8 pasos (desplazamiento por vértice `(t-hi)*(dx,dy)/4`, inicial = final-2*(dx,dy)). Modelo 3D de la caja (id 0xE2A9 tipo `k`) es solo la caja en 3ª persona (se oculta en 1ª).
+- Puente (RAM EU): sight activo = `u32 @0x800A07DC == 0xE2A9` (refcount @0x800A07D8); el actor vive mientras `s16 @0x800B898A == 1` (flag 1ª persona). Llamar `box_view_set_active(sight_id==0xE2A9)`.
+- `vr/box/box_data.{h,c}` (lector de stage/máscara/PCX, parser endurecido, fuzz), `box_view.{h,c}` (carcasa cerrada, panel frontal con el contorno real, canto con grosor, degradado alfa, estilos CARDBOARD(defecto)/BLACK(fiel), inercia acotada 2.5°, bajada/subida, apertura animada, `set_wide` accesibilidad), `test_box.c` (4749 comprobaciones OK, también con ASan/UBSan). `make -C vr/box test|test-san|prev`.
+- `tools/box/`: `mkpano.py` (fondo), `boxres.py` (extrae máscara/textura + render del original), `boxprev.c` (trazado de rayos de la carcasa), `render_compare.py`.
+- Pendiente: integrar draws en el renderer Metal (malla dinámica `box_view_revision`, alfa, baldosa con repetición), puente con la RAM, ajustar altura del centro óptico si el lienzo PAL difiere (±8 px), prueba en visor de distancia/confort.
