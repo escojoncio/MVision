@@ -1,0 +1,47 @@
+// Mock minimalista de metal_stdlib solo para validar sintaxis C++14 de los .metal (no ejecuta nada).
+#pragma once
+#include <cmath>
+#include <algorithm>
+#define vertex
+#define fragment
+#define kernel
+#define device
+#define constant
+#define thread
+#define threadgroup
+typedef unsigned int uint; typedef unsigned short ushort;
+namespace metal {
+struct sampler {};
+template<class T> struct vec2t { union { struct { T x, y; }; struct { T r, g; }; }; vec2t() : x(0), y(0) {} explicit vec2t(T a) : x(a), y(a) {} vec2t(T a, T b) : x(a), y(b) {}
+  template<class U> explicit vec2t(const vec2t<U>& o) : x(T(o.x)), y(T(o.y)) {} };
+template<class T> struct vec3t { union { struct { T x, y, z; }; struct { T r, g, b; }; }; vec3t() : x(0), y(0), z(0) {} explicit vec3t(T a) : x(a), y(a), z(a) {} vec3t(T a, T b, T c) : x(a), y(b), z(c) {}
+  vec3t(vec2t<T> v, T c) : x(v.x), y(v.y), z(c) {} vec3t& operator+=(const vec3t& o){x+=o.x;y+=o.y;z+=o.z;return *this;} };
+template<class T> struct vec4t { union { struct { T x, y, z, w; }; struct { T r, g, b, a; }; struct { vec2t<T> xy; vec2t<T> zw; }; struct { vec3t<T> xyz; T w_; }; struct { vec3t<T> rgb; T a_; }; };
+  vec4t() : x(0), y(0), z(0), w(0) {} explicit vec4t(T a) : x(a), y(a), z(a), w(a) {} vec4t(T a, T b, T c, T d) : x(a), y(b), z(c), w(d) {}
+  vec4t(vec3t<T> v, T d) : x(v.x), y(v.y), z(v.z), w(d) {} vec4t(vec2t<T> v, T c, T d) : x(v.x), y(v.y), z(c), w(d) {} };
+typedef vec2t<float> float2; typedef vec3t<float> float3; typedef vec4t<float> float4;
+typedef vec2t<unsigned> uint2; typedef vec4t<unsigned short> ushort4;
+template<class T> vec2t<T> operator-(vec2t<T> a, float s){return vec2t<T>(a.x-s,a.y-s);}
+inline float2 operator-(float2 a, float s){return float2(a.x-s,a.y-s);} inline float2 operator-(float2 a, float2 b){return float2(a.x-b.x,a.y-b.y);}
+inline float2 operator+(float2 a, float2 b){return float2(a.x+b.x,a.y+b.y);} inline float2 operator*(float2 a, float s){return float2(a.x*s,a.y*s);}
+inline uint2 operator+(uint2 a, uint2 b){return uint2(a.x+b.x,a.y+b.y);}
+inline float3 operator*(float3 a, float3 b){return float3(a.x*b.x,a.y*b.y,a.z*b.z);} inline float3 operator*(float3 a, float s){return float3(a.x*s,a.y*s,a.z*s);}
+inline float3 operator/(float3 a, float s){return float3(a.x/s,a.y/s,a.z/s);}
+inline float3 operator*(float s, float3 a){return a*s;}
+inline float4 operator*(float4 a, float s){return float4(a.x*s,a.y*s,a.z*s,a.w*s);}
+inline uint2 make_uint2(float2 v){return uint2((unsigned)v.x,(unsigned)v.y);}
+inline float3 clamp(float3 v, float3 a, float3 b){return float3(std::min(std::max(v.x,a.x),b.x),std::min(std::max(v.y,a.y),b.y),std::min(std::max(v.z,a.z),b.z));}
+inline float clamp(float v, float a, float b){return std::min(std::max(v,a),b);}
+inline float max(float a, float b){return a>b?a:b;} inline float min(float a, float b){return a<b?a:b;}
+inline float2 floor(float2 v){return float2(std::floor(v.x),std::floor(v.y));}
+inline float floor(float v){return std::floor(v);} inline float pow(float a, float b){return std::pow(a,b);}
+inline void discard_fragment(){}
+enum class access { read, write, read_write, sample };
+template<class T, access A = access::read> struct texture2d { vec4t<T> read(uint2) const { return vec4t<T>(); } void write(vec4t<T>, uint2) {} vec4t<T> sample(sampler, float2) const { return vec4t<T>(); } };
+inline float3 operator+(float3 a, float3 b){return float3(a.x+b.x,a.y+b.y,a.z+b.z);} inline float3 operator-(float3 a, float3 b){return float3(a.x-b.x,a.y-b.y,a.z-b.z);}
+inline float3 cross(float3 a, float3 b){return float3(a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x);}
+enum class mem_flags { mem_none, mem_device, mem_threadgroup, mem_texture };
+inline void threadgroup_barrier(mem_flags) {}
+}
+#define is_function_constant_defined(x) true
+// uint2(float2): conversión explícita en MSL; en el mock se emula con un ctor libre.

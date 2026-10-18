@@ -1,0 +1,58 @@
+// Cabeceras SIMULADAS de Metal para comprobar la sintaxis de render/metal/vr_weapon.metal como C++ (no ejecutan nada).
+// Solo cubre lo que usa ese shader; si el shader usa algo nuevo, ampliar aquí. No es una validación de Metal real.
+#pragma once
+#include <cmath>
+#include <cstdint>
+#define vertex
+#define fragment
+#define constant
+#define device
+#define thread
+#define threadgroup
+namespace metal {
+typedef unsigned int uint; typedef unsigned short ushort; typedef unsigned char uchar;
+struct float2 { union { struct { float x, y; }; }; float2() = default; float2(float a) : x(a), y(a) {} float2(float a, float b) : x(a), y(b) {} };
+struct float3 {
+    union { struct { float x, y, z; }; float2 xy; };
+    float3() = default; float3(float a) : x(a), y(a), z(a) {} float3(float a, float b, float c) : x(a), y(b), z(c) {}
+    float3(float2 a, float c) : x(a.x), y(a.y), z(c) {}
+};
+struct float4 {
+    union { struct { float x, y, z, w; }; float3 xyz; };
+    float4() = default; float4(float a) : x(a), y(a), z(a), w(a) {} float4(float a, float b, float c, float d) : x(a), y(b), z(c), w(d) {}
+    float4(float3 a, float d) : x(a.x), y(a.y), z(a.z), w(d) {}
+};
+struct packed_float2 { float v[2]; operator float2() const { return float2(v[0], v[1]); } };
+struct packed_float3 { float v[3]; operator float3() const { return float3(v[0], v[1], v[2]); } };
+struct uchar4 { uchar x, y, z, w; uchar4() = default; uchar4(uchar a, uchar b, uchar c, uchar d) : x(a), y(b), z(c), w(d) {} };
+struct packed_uchar4 { uchar v[4]; operator uchar4() const { return uchar4(v[0], v[1], v[2], v[3]); } };
+static_assert(sizeof(packed_float2) == 8 && sizeof(packed_float3) == 12 && sizeof(packed_uchar4) == 4, "tamaños packed");
+struct float4x4 {
+    float4 c[4];
+    float4 &operator[](int i) { return c[i]; } const float4 &operator[](int i) const { return c[i]; }
+};
+inline float4 operator*(const float4x4 &m, const float4 &v) {
+    return float4(m.c[0].x * v.x + m.c[1].x * v.y + m.c[2].x * v.z + m.c[3].x * v.w, m.c[0].y * v.x + m.c[1].y * v.y + m.c[2].y * v.z + m.c[3].y * v.w,
+                  m.c[0].z * v.x + m.c[1].z * v.y + m.c[2].z * v.z + m.c[3].z * v.w, m.c[0].w * v.x + m.c[1].w * v.y + m.c[2].w * v.z + m.c[3].w * v.w);
+}
+inline float2 operator*(float2 a, float s) { return float2(a.x * s, a.y * s); }
+inline float3 operator*(float3 a, float s) { return float3(a.x * s, a.y * s, a.z * s); }
+inline float3 operator*(float3 a, float3 b) { return float3(a.x * b.x, a.y * b.y, a.z * b.z); }
+inline float3 operator-(float3 a) { return float3(-a.x, -a.y, -a.z); }
+inline float3 operator-(float3 a, float3 b) { return float3(a.x - b.x, a.y - b.y, a.z - b.z); }
+inline float3 operator+(float3 a, float3 b) { return float3(a.x + b.x, a.y + b.y, a.z + b.z); }
+inline float dot(float3 a, float3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+inline float3 normalize(float3 a) { float l = std::sqrt(dot(a, a)); return a * (1.0f / l); }
+inline float3 clamp(float3 a, float3 lo, float3 hi) {
+    auto c = [](float v, float l, float h) { return v < l ? l : (v > h ? h : v); };
+    return float3(c(a.x, lo.x, hi.x), c(a.y, lo.y, hi.y), c(a.z, lo.z, hi.z));
+}
+using std::pow;
+inline bool is_function_constant_defined(bool) { return true; }
+inline void discard_fragment() {}
+enum class filter { nearest, linear };
+enum class address { clamp_to_edge, repeat };
+enum class access { sample, read, write };
+struct sampler { constexpr sampler(filter, address) {} };
+template <typename T, access A = access::sample> struct texture2d { float4 sample(sampler, float2) const { return float4(0.0f); } };
+}

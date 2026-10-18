@@ -1,0 +1,3 @@
+{
+  "vrradar_draw": {"target": "8003bd9c", "how": "exact", "doc": "dibuja el radar del HUD enlazando sus primitivas en una ranura de OT (a1 = ranura de OT)"}
+}
