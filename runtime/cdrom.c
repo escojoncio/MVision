@@ -356,6 +356,11 @@ int cd_read_sector(uint32_t lba, uint8_t *out, int raw) {
 /* ---------------- estado de la unidad ---------------- */
 
 static uint32_t ready_cb, sync_cb;
+/* Diagnóstico (volcado por cd_dump_state, p. ej. desde el vigilante del host): últimos comandos y contadores. */
+#define CMDRING 16
+static struct { uint8_t com; uint32_t pos, vbl; } cmdring[CMDRING];
+static unsigned cmd_n;
+static uint32_t n_delivered, n_read_fail;
 static uint32_t pos;         /* LBA lógico de Setloc / lectura */
 static int reading;          /* 1 = ReadN/ReadS activo */
 static int in_delivery;      /* dentro de deliver(); seguro como global: corre en la excepción, que no conmuta de hilo */
@@ -387,6 +392,10 @@ static void deliver(Cpu *c, int max) {
     in_delivery = 1;
     while (reading && max-- > 0) {
         int rr = cd_read_sector(pos, secbuf, 1);
+        n_delivered++;
+        if (rr && ndiscs && discs[cur].img && pos < disc_img_sectors(discs[cur].img)) {   /* dentro de la imagen: fallo de E/S */
+            if (n_read_fail++ < 8) fprintf(stderr, "[cd] fallo de lectura del sector %u (disco %d): se entregan ceros\n", pos, cur + 1);
+        }
         if (getenv("MV_CDLOG")) fprintf(stderr, "[cd] deliver lba=%u rr=%d d0=%02x %02x %02x %02x ndiscs=%d cur=%d\n", pos, rr, secbuf[12], secbuf[13], secbuf[14], secbuf[15], ndiscs, cur);
         secoff = (mode & 0x20) ? 0 : 12;
         if (!(mode & 0x20) && (mode & 0x10)) secoff = 12; /* tamaño 2328: no usado */
@@ -439,6 +448,7 @@ static int control(Cpu *c, uint32_t com, uint32_t param, uint32_t result) {
     if (logn < 0) logn = getenv("MV_CDLOG") ? 1 : 0;
     if (logn) fprintf(stderr, "[cd] CdControl 0x%02x param@%08x=%06x ra=%08x pos=%u reading=%d vbl=%u\n", com, param,
                       param ? mem_r32(c, param) & 0xFFFFFF : 0, c->r[31], pos, reading, hle_frame_count());
+    cmdring[cmd_n % CMDRING].com = (uint8_t)com; cmdring[cmd_n % CMDRING].pos = pos; cmdring[cmd_n % CMDRING].vbl = hle_frame_count(); cmd_n++;
     switch (com) {
     case 0x02: /* Setloc */
         if (param) { uint32_t p = mem_r32(c, param) & 0xFFFFFF; pos = msf_to_lba(p); }
@@ -499,4 +509,19 @@ void hle_CdGetSector(Cpu *c) {
     }
     rt_ov_written(dst, n);   /* las overlays de zona se cargan con CdGetSector: invalida la recompilada */
     V0 = 1;
+}
+
+/* Estado de la unidad para el registro (una línea por dato; seguro llamarlo desde otro hilo: solo lecturas sueltas). */
+void cd_dump_state(void) {
+    fprintf(stderr, "[cd] estado: discos=%d actual=%d leyendo=%d pos=%u modo=%02x cb_dato=%08x cb_fin=%08x pendientes=%d en_entrega=%d entregados=%u fallos=%u",
+            ndiscs, cur + 1, reading, pos, mode, ready_cb, sync_cb, syncq_n, in_delivery, n_delivered, n_read_fail);
+    if (ndiscs && discs[cur].img) fprintf(stderr, " errores_E/S=%u", disc_img_io_errors(discs[cur].img));
+    fputc('\n', stderr);
+    unsigned n = cmd_n < CMDRING ? cmd_n : CMDRING;
+    fprintf(stderr, "[cd] ultimos comandos (antiguo -> reciente):");
+    for (unsigned i = 0; i < n; i++) {
+        unsigned k = (cmd_n - n + i) % CMDRING;
+        fprintf(stderr, " %02x@%u(pos %u)", cmdring[k].com, cmdring[k].vbl, cmdring[k].pos);
+    }
+    fputc('\n', stderr);
 }

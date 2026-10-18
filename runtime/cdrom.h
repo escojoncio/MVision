@@ -24,3 +24,5 @@ int cd_busy(void);
 int cd_read_sector(uint32_t lba, uint8_t *out, int raw);
 /* Busca un fichero por ruta ("DIR/FICHERO"); devuelve lba y tamaño. */
 int cd_find(const char *path, uint32_t *lba, uint32_t *size);
+/* Vuelca a stderr el estado de la unidad (lectura en curso, posición, modo, callbacks, últimos comandos, contadores de fallos de E/S). */
+void cd_dump_state(void);

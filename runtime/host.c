@@ -334,6 +334,7 @@ static void dump_stall(uint32_t f, double secs) {
     for (int i = nb > 32 ? nb - 32 : 0; i < nb; i++) fprintf(stderr, " %08x", blocks[i]);
     fputc('\n', stderr);
     for (int i = nb > 8 ? nb - 8 : 0; i < nb; i++) fprintf(stderr, "[wd]   %08x %s\n", blocks[i], rt_name(blocks[i]));
+    cd_dump_state();
     fflush(stderr);
 }
 

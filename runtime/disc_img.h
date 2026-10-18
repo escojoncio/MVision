@@ -32,6 +32,9 @@ const char *disc_img_filepath(const DiscImg *h, int i);
 /* Sector bruto de 2352 B tal cual está en la imagen (sync, cabecera MSF/modo, subcabecera XA, datos, EDC/ECC).
  * 0 = bien; -1 = fuera de rango o error de E/S (out queda a cero). */
 int disc_img_read_raw(DiscImg *h, uint32_t lba, uint8_t out[DISC_RAW]);
+/* Lecturas de sectores dentro de rango que fallaron tras reintentos y reapertura del fichero (0 = sano). Cada fallo
+ * también se registra en stderr (los 8 primeros). */
+uint32_t disc_img_io_errors(const DiscImg *h);
 /* 2048 B de datos de usuario (forma 1 / modo 1); detecta el modo por el byte 15 de la cabecera. */
 int disc_img_read_user(DiscImg *h, uint32_t lba, uint8_t out[DISC_USER]);
 
