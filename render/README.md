@@ -41,13 +41,14 @@ en el VBlank del runtime (irq.c/hook de frame).
 lista tras `enable` (y la siguiente a una pérdida por cola llena, `gpu_capture_dropped()`) trae `vram_init`: volcado
 completo de VRAM al principio de ese frame. Habilitar fuera de una subida en curso.
 
-**Subpíxel (hueco).** `GpuVtx` reserva `fvalid, fx, fy, fz`. El juego escribe SXY como enteros y el SXY redondeado de
-la GTE es lo que ve la GPU, así que el enlace futuro es: `gte.c` guarda, en cada RTPS/RTPT, la posición float previa
-a redondear/saturar y SZ en una tabla pequeña con clave = par (sx,sy) entero de salida, vaciada cada frame
-(si dos vértices comparten SXY gana el último), y la expone como `GpuFloatHook` vía
-`gpu_capture_set_float_hook`. `gpu.c` lo consulta por vértice con el SXY crudo y rellena `fx,fy` (+offset) y `fz`.
-`ref_raster` ya usa `fx,fy` con `REF_FLOAT_VTX` (coordenadas en punto fijo a 1/(32*M) px). No hay nada que cambiar
-en el formato cuando exista la ruta GTE. `fz` permitirá además texturizado con corrección de perspectiva (hoy afín).
+**Geometría de alta precisión (hecha).** `gpu_capture_hiprec(1)` enciende la sombra flotante de la GTE (`gte.c`, bloque
+"Alta precisión") y la engancha a la captura. RTPS/RTPT siguen dando el resultado entero exacto; en paralelo se calcula en
+double `P = TR + R·V/4096` (espacio de VISTA), `fx = H·P.x/P.z + OFX`, `fy` análogo y `fz = P.z` (sin truncar SZ ni redondear
+SXY) y se guarda en una tabla asociativa de 16384 conjuntos x 4 vías con clave (sx,sy,SZ) saturados a 11 bits, vaciada por
+generación (el cierre de frame de la captura la incrementa; una entrada vale dos generaciones). `gpu.c` consulta por vértice
+con la coordenada cruda del juego (ANTES de sumar el offset E5: `v->x - g.ox`) y rellena `GpuVtx.fvalid, fx, fy, fz, vx, vy, vz`
+(+ offset) y `GpuOp.proj_h/proj_ox/proj_oy` (H y OFX/OFY de la GTE) y `GpuOp.dox/doy` (offset de dibujo). Rects y polígonos 2D
+salen con `fvalid=0`. Ver `runtime/test_geom.c`.
 
 ## 2. Modelo de referencia (`ref_raster`)
 
@@ -156,8 +157,22 @@ Imágenes (mirarlas): `<scratchpad>/render/` (guion pedido) y `<scratchpad>/rend
    dentro del hook de frame; el runtime es de un solo hilo).
 2. Host Metal: empaquetado `GpuOp -> PS1Vertex/PS1Prim`, lotes y pases por eventos, seguimiento de rectángulo sucio y
    `resolve_native`. Validar contra `ref_raster` volcando el mismo frame con `capture_test`.
-3. GTE: tabla (sx,sy)->(x,y,z float) y `gpu_capture_set_float_hook`; activar `REF_FLOAT_VTX`; luego sustituir la rejilla
-   entera de vértices por la posición float en Metal (quita el temblor de vértices) y evaluar corrección de perspectiva con `fz`.
+3. (hecho en C, pendiente en el host Metal) Geometría de alta precisión: ver `PS1Vertex.iz` / `PS1Frame.hiprec` y el diseño de
+   profundidad en `ps1_types.h`. Falta el empaquetado host y la matriz de proyección/vista del juego para el estéreo.
 4. Filtrado de texturas opcional (bilineal sobre texels de 15 bits tras la CLUT, respetando transparencia 0x0000), y texto/HUD
    en capa aparte (intercepción de `RECT` de fuente).
 5. Compilar los shaders y portar `ref_selftest` a una prueba de imagen en el dispositivo.
+
+## 6. Alta precisión en el modelo de referencia (`REF_FLOAT_VTX`, `REF_DEPTH`)
+
+* `REF_FLOAT_VTX`: si TODOS los vértices del polígono son `fvalid`, coherentes con el entero (|float-entero| <= 3 px; medido < 2 salvo
+  12 de 106 058) y `fz > 0`, se usa la posición subpíxel (punto fijo 1/(32·M) px) y los atributos (UV, color) se interpolan con
+  corrección de perspectiva (pesos de arista / z). Solo en el objetivo de alta resolución: el modo nativo 1x exacto no cambia
+  (`ref_selftest 3000`: 0 fallos). Un polígono con algún vértice sin float (saturado, desalojado) cae entero.
+* `REF_DEPTH` (requiere el anterior): búfer 1/z por muestra, por tile, a cero al inicio de cada lista. 3D opaco: prueba y escribe;
+  3D semitransparente: prueba sin escribir; 2D (HUD, rects, líneas, polígonos sin float): sin prueba, y lo opaco BORRA la
+  profundidad de las muestras que pinta (lo 2D pasa a ser lo más cercano, como el orden de pintor del juego: así un modelo 3D
+  pintado después de un fondo/HUD no queda tapado por una profundidad vieja). Tolerancia relativa a favor del último dibujado
+  (`RefOpts.depth_bias`, 1/128 por defecto) para calcomanías coplanares.
+* `capture_test`: `CT_HIPREC=1` (captura float + tercer modelo `rh` con `REF_FLOAT_VTX`), `CT_DEPTH=1` (+`REF_DEPTH`),
+  `CT_JITTER=1` (métrica de temblor). Vuelca `hiprec[_z]_4x_ssaa2_*.png` y `hpdiff_*` junto a `ref4x_*`.

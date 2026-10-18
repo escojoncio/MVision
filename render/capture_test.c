@@ -4,6 +4,7 @@
  * activa la captura en modo verificación, aplica CADA lista capturada a un rasterizador de referencia 1x
  * (comparado con la VRAM del oráculo al cerrar el frame) y a uno NxSSAA que solo dibuja en alta resolución
  * en las ventanas de volcado. Escribe PNG: oraculo, ref 1x, diferencia amplificada y ref NxSSAA. Disco: MV_DISC. */
+#include <math.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
@@ -23,7 +24,7 @@ extern int rt_fatal_armed;
 
 static uint32_t max_frames = 4000;
 static const char *outdir;
-static RefR *r1, *rn;
+static RefR *r1, *rn, *rh; /* rh: alta precision (CT_HIPREC=1; con CT_DEPTH=1 tambien profundidad) */
 static int scale_n = 4, ssaa_n = 2;
 static const uint32_t dump_frames[] = {300, 700, 1100, 1600, 2000, 2600, 3000, 3400, 3800, 3990};
 #define NDUMP ((int)(sizeof dump_frames / sizeof *dump_frames))
@@ -96,6 +97,34 @@ static struct {
 } S;
 static int printed_bad;
 
+/* ---- estadísticas de geometría de alta precisión (CT_HIPREC=1) ---- */
+static struct {
+    uint64_t polys, polys3d, polys_part, verts, verts_valid, poly_tex3d;
+    uint64_t hist[8];  /* max |f - entero| por polígono 3D: <.5, <1, <2, <4, <8, <16, <64, resto */
+    double sum_err; uint64_t n_err;
+} H;
+static void hp_stats(const GpuDrawList *l) {
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *o = &l->ops[i];
+        if (o->type != GPU_OP_POLY) continue;
+        H.polys++;
+        int nvalid = 0; float mx = 0;
+        for (int k = 0; k < o->nv; k++) {
+            H.verts++;
+            if (!o->v[k].fvalid) continue;
+            nvalid++; H.verts_valid++;
+            float e = fmaxf(fabsf(o->v[k].fx - o->v[k].x), fabsf(o->v[k].fy - o->v[k].y));
+            if (e > mx) mx = e;
+            H.sum_err += e; H.n_err++;
+        }
+        if (nvalid == o->nv) {
+            H.polys3d++; if (o->flags & GPU_F_TEXTURED) H.poly_tex3d++;
+            int b = mx < .5f ? 0 : mx < 1 ? 1 : mx < 2 ? 2 : mx < 4 ? 3 : mx < 8 ? 4 : mx < 16 ? 5 : mx < 64 ? 6 : 7;
+            H.hist[b]++;
+        } else if (nvalid) H.polys_part++;
+    }
+}
+
 static void compare_list(const GpuDrawList *l) {
     S.lists++;
     if (l->reason == GPU_CLOSE_FLIP) S.flips++; else S.vblank_closes++;
@@ -133,6 +162,67 @@ static void compare_list(const GpuDrawList *l) {
     free(ora);
 }
 
+/* ---- metrica de "temblor" (CT_JITTER=1, requiere CT_HIPREC=1) ----
+ * Se emparejan poligonos 3D (todos los vertices fvalid) entre listas consecutivas por una clave que NO incluye la posicion
+ * (nv, flags, color, UV, CLUT, pagina, modo) + numero de ocurrencia dentro de la lista. Para cada vertice presente en tres listas
+ * seguidas (t-1, t, t+1) y que se mueve poco (|d1| <= 6 px, descarta emparejamientos falsos) se mide la segunda diferencia
+ * d2 = p(t+1) - 2 p(t) + p(t-1) por eje: una trayectoria suave a velocidad casi constante da d2 ~ 0; el redondeo a entero de la
+ * GTE da saltos de +-1 px (d2 de 0, +-1, +-2). Se compara la posicion entera (lo que dibuja el hardware) y la float. */
+typedef struct { uint64_t key; int nv; float ix[4], iy[4], fx[4], fy[4]; } JP;
+static JP *jf[3]; static size_t jcnt[3], jcap[3];
+static struct { uint64_t n_v, n_axis; double s2_int, s2_f; uint64_t big_int, big_f, zero_int, zero_f, moving; double sdev; } J;
+static int jcmp(const void *a, const void *b) { uint64_t x = ((const JP *)a)->key, y = ((const JP *)b)->key; return x < y ? -1 : x > y; }
+static void jitter_push(const GpuDrawList *l) {
+    JP *t = jf[2]; jf[2] = jf[1]; jf[1] = jf[0]; jf[0] = t;
+    size_t tn = jcnt[2], tc = jcap[2]; jcnt[2] = jcnt[1]; jcap[2] = jcap[1]; jcnt[1] = jcnt[0]; jcap[1] = jcap[0]; jcnt[0] = 0; jcap[0] = tc; (void)tn;
+    static uint32_t *occ; static size_t occ_n;
+    if (!occ) { occ_n = 1 << 16; occ = calloc(occ_n, 4); } else memset(occ, 0, occ_n * 4);
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *o = &l->ops[i];
+        if (o->type != GPU_OP_POLY) continue;
+        int ok = 1;
+        for (int k = 0; k < o->nv; k++) if (!o->v[k].fvalid) ok = 0;
+        if (!ok) continue;
+        uint64_t h = 1469598103934665603ull;
+        #define MIX(x) h = (h ^ (uint64_t)(x)) * 1099511628211ull
+        MIX(o->nv); MIX(o->flags); MIX(o->tp); MIX(o->tx); MIX(o->ty); MIX(o->clx); MIX(o->cly); MIX(o->abr);
+        for (int k = 0; k < o->nv; k++) { MIX(o->v[k].u); MIX(o->v[k].v); MIX(o->v[k].r); MIX(o->v[k].g); MIX(o->v[k].b); }
+        uint32_t *c = &occ[(h >> 7) & (occ_n - 1)]; /* colision de bucket = ocurrencias contadas juntas: aceptable (solo desplaza la numeracion) */
+        h = h * 31 + (*c)++;
+        if (jcnt[0] == jcap[0]) { jcap[0] = jcap[0] ? jcap[0] * 2 : 4096; jf[0] = realloc(jf[0], jcap[0] * sizeof(JP)); }
+        JP *p = &jf[0][jcnt[0]++];
+        p->key = h; p->nv = o->nv;
+        for (int k = 0; k < o->nv; k++) { p->ix[k] = o->v[k].x - o->dox; p->iy[k] = o->v[k].y - o->doy; p->fx[k] = o->v[k].fx - o->dox; p->fy[k] = o->v[k].fy - o->doy; }
+    }
+    qsort(jf[0], jcnt[0], sizeof(JP), jcmp);
+    if (!jcnt[1] || !jcnt[2]) return;
+    /* triples: lista actual = t+1 (jf[0]), jf[1] = t, jf[2] = t-1 */
+    for (size_t a = 0; a < jcnt[1]; a++) {
+        const JP *m = &jf[1][a];
+        JP kx = {m->key}; 
+        if (a && jf[1][a - 1].key == m->key) continue; /* clave repetida: ambigua */
+        const JP *n = bsearch(&kx, jf[0], jcnt[0], sizeof(JP), jcmp), *pv = bsearch(&kx, jf[2], jcnt[2], sizeof(JP), jcmp);
+        if (!n || !pv) continue;
+        for (int k = 0; k < m->nv; k++) {
+            float di[2] = {m->ix[k] - pv->ix[k], m->iy[k] - pv->iy[k]}, dn[2] = {n->ix[k] - m->ix[k], n->iy[k] - m->iy[k]};
+            float df[2] = {m->fx[k] - pv->fx[k], m->fy[k] - pv->fy[k]}, dfn[2] = {n->fx[k] - m->fx[k], n->fy[k] - m->fy[k]};
+            if (fabsf(di[0]) > 6 || fabsf(di[1]) > 6 || fabsf(dn[0]) > 6 || fabsf(dn[1]) > 6) continue;
+            if (fabsf(df[0]) > 6 || fabsf(df[1]) > 6 || fabsf(dfn[0]) > 6 || fabsf(dfn[1]) > 6) continue;
+            /* solo vertices en movimiento real (la camara o el objeto avanza): el float se mueve mas de 0,05 px entre listas */
+            if (fabsf(df[0]) + fabsf(df[1]) + fabsf(dfn[0]) + fabsf(dfn[1]) < 0.05f) continue;
+            J.n_v++; J.moving++;
+            for (int e = 0; e < 2; e++) {
+                float d2i = dn[e] - di[e], d2f = dfn[e] - df[e];
+                J.n_axis++; J.s2_int += fabsf(d2i); J.s2_f += fabsf(d2f);
+                if (fabsf(d2i) >= 1.0f) J.big_int++;
+                if (fabsf(d2f) >= 1.0f) J.big_f++;
+                if (fabsf(d2i) < 0.5f) J.zero_int++;
+                if (fabsf(d2f) < 0.5f) J.zero_f++;
+            }
+        }
+    }
+}
+
 static int in_dump_window(uint32_t f) {
     for (int i = 0; i < NDUMP; i++) if (f + HIRES_WINDOW >= dump_frames[i] && f <= dump_frames[i]) return 1;
     return 0;
@@ -151,6 +241,19 @@ static void dump_images(uint32_t f) {
     snprintf(p, sizeof p, "%s/oraculo_%05u.png", outdir, f); write_png(p, ora, w1, h1);
     snprintf(p, sizeof p, "%s/ref1x_%05u.png", outdir, f); write_png(p, a, w1, h1);
     snprintf(p, sizeof p, "%s/ref%dx_ssaa%d_%05u.png", outdir, scale_n, ssaa_n, f); write_png(p, b, wn, hn);
+    if (rh) {
+        int wh, hh;
+        const uint8_t *c = ref_present(rh, &last_disp, &wh, &hh);
+        snprintf(p, sizeof p, "%s/hiprec%s_%dx_ssaa%d_%05u.png", outdir, getenv("CT_DEPTH") ? "_z" : "", scale_n, ssaa_n, f);
+        write_png(p, c, wh, hh);
+        /* diferencia normal vs alta precision (amplificada x4) */
+        uint8_t *dd = malloc((size_t)wh * hh * 3);
+        uint64_t nd = 0;
+        for (size_t i = 0; i < (size_t)wh * hh * 3; i++) { int e = abs((int)b[i] - (int)c[i]); nd += e != 0; dd[i] = (uint8_t)(e * 4 > 255 ? 255 : e * 4); }
+        snprintf(p, sizeof p, "%s/hpdiff_%dx_ssaa%d_%05u.png", outdir, scale_n, ssaa_n, f); write_png(p, dd, wh, hh);
+        fprintf(stderr, "[hp] frame %u: normal vs alta precision: %llu/%llu canales distintos\n", f, (unsigned long long)nd, (unsigned long long)wh * hh * 3);
+        free(dd);
+    }
     uint8_t *df = malloc((size_t)w1 * h1 * 3);
     int nd = 0;
     for (size_t i = 0; i < (size_t)w1 * h1; i++) {
@@ -187,7 +290,10 @@ static void on_frame(Cpu *c, uint32_t f) {
         int hi = in_dump_window(f);
         ref_apply(r1, l, 1);
         ref_apply(rn, l, hi);
+        if (rh) ref_apply(rh, l, hi);
         compare_list(l);
+        if (getenv("CT_HIPREC")) hp_stats(l);
+        if (getenv("CT_JITTER")) jitter_push(l);
         last_disp = l->disp;
         if (l->vram_after) {
             if (!last_vram_after) last_vram_after = malloc(1024 * 512 * 2);
@@ -211,6 +317,23 @@ static void on_frame(Cpu *c, uint32_t f) {
                 S.hires_bad_lists, S.lists, (unsigned long long)S.disp_diff_px, (unsigned long long)S.disp_px,
                 S.disp_px ? 100.0 * (double)S.disp_diff_px / (double)S.disp_px : 0.0, S.disp_max_abs,
                 S.disp_px ? (double)S.disp_sum_abs / (3.0 * (double)S.disp_px) : 0.0);
+        if (getenv("CT_JITTER") && J.n_axis)
+            fprintf(stderr, "[jitter] %llu vertices en movimiento (%llu ejes) en triples consecutivos: |d2| medio entero=%.4f px float=%.4f px; "
+                    "|d2|>=1px: entero %.2f%% float %.2f%%; |d2|<0.5px: entero %.2f%% float %.2f%%\n",
+                    (unsigned long long)J.n_v, (unsigned long long)J.n_axis, J.s2_int / (double)J.n_axis, J.s2_f / (double)J.n_axis,
+                    100.0 * (double)J.big_int / (double)J.n_axis, 100.0 * (double)J.big_f / (double)J.n_axis,
+                    100.0 * (double)J.zero_int / (double)J.n_axis, 100.0 * (double)J.zero_f / (double)J.n_axis);
+        if (getenv("CT_HIPREC")) {
+            GteHpStats g; gte_hp_stats(&g);
+            fprintf(stderr, "[hp] polys=%llu 3D(todos fvalid)=%llu (texturizados %llu) parciales=%llu; vertices %llu/%llu fvalid\n",
+                    (unsigned long long)H.polys, (unsigned long long)H.polys3d, (unsigned long long)H.poly_tex3d,
+                    (unsigned long long)H.polys_part, (unsigned long long)H.verts_valid, (unsigned long long)H.verts);
+            fprintf(stderr, "[hp] max|f-int| por poligono 3D: <.5:%llu <1:%llu <2:%llu <4:%llu <8:%llu <16:%llu <64:%llu mas:%llu; media %.3f px\n",
+                    (unsigned long long)H.hist[0], (unsigned long long)H.hist[1], (unsigned long long)H.hist[2], (unsigned long long)H.hist[3],
+                    (unsigned long long)H.hist[4], (unsigned long long)H.hist[5], (unsigned long long)H.hist[6], (unsigned long long)H.hist[7],
+                    H.n_err ? H.sum_err / (double)H.n_err : 0.0);
+            fprintf(stderr, "[hp] tabla GTE: almacenados=%u desalojos=%u omitidos(saturados)=%u consultas=%u aciertos=%u; omitidos: sf0=%u sat=%u div=%u z=%u; max por frame=%u\n", g.stored, g.evict, g.skipped, g.lookups, g.hits, g.skip_sf, g.skip_sat, g.skip_ovf, g.skip_z, g.max_gen_stored);
+        }
         exit(0);
     }
 }
@@ -238,11 +361,16 @@ int main(int argc, char **argv) {
     RefOpts o1 = {1, 1, getenv("CT_R1_HQ") ? REF_HQ : 0}, on = {scale_n, ssaa_n, 0}; /* CT_R1_HQ=1: 1x con muestreo al centro y 8 bits (mide la desviacion de convencion) */
     r1 = ref_create(&o1);
     rn = ref_create(&on);
+    if (getenv("CT_HIPREC")) {
+        RefOpts oh = on; oh.flags |= REF_FLOAT_VTX | (getenv("CT_DEPTH") ? REF_DEPTH : 0);
+        rh = ref_create(&oh);
+    }
     Cpu c = {0};
     c.r[28] = gp;
     c.r[29] = c.r[30] = 0x801FFFF0u;
     gte_reset();
     gpu_reset();
+    if (getenv("CT_HIPREC")) gpu_capture_hiprec(1);
     gpu_capture_enable(2);
     rt_host_frame = on_frame;
     signal(SIGALRM, on_alarm);

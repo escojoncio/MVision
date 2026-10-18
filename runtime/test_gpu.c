@@ -9,6 +9,10 @@
 /* Stubs mínimos del runtime para enlazar gpu.c aislado. */
 uint8_t psx_ram[PSX_RAM_SIZE];
 uint32_t hle_frame_count(void) { return 0; }
+/* gpu.c enlaza con la sombra flotante de la GTE (gte.c); aqui no hay GTE */
+void gte_hp_enable(int on) { (void)on; }
+void gte_hp_frame(void) {}
+int gte_hp_lookup(int sx, int sy, GpuHpInfo *o) { (void)sx; (void)sy; (void)o; return 0; }
 void hle_invoke(Cpu *c, uint32_t fn, uint32_t arg) { (void)c; (void)fn; (void)arg; }
 uint8_t mem_r8(Cpu *c, uint32_t a) { (void)c; return psx_ram[a & 0x1FFFFF]; }
 uint16_t mem_r16(Cpu *c, uint32_t a) { (void)c; uint16_t v; memcpy(&v, &psx_ram[a & 0x1FFFFE], 2); return v; }

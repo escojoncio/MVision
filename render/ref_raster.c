@@ -14,6 +14,7 @@
 #include <string.h>
 #include "ref_raster.h"
 
+#define REF_F_TOL 3.0f /* tolerancia |float - entero| (px) para aceptar la ruta subpíxel */
 #define TILE 32
 #define VW 1024
 #define VH 512
@@ -23,10 +24,12 @@ struct RefR {
     int M, hq, scale, K;
     uint16_t (*vram)[VW];
     uint32_t *tile[VH / TILE][VW / TILE];
-    int ntiles;
+    float *dtile[VH / TILE][VW / TILE];   /* búfer de profundidad (1/z de vista, 0 = lejos); solo con REF_DEPTH */
+    int ntiles, depth;
+    float dbias;
     uint8_t *img; size_t img_cap;
     /* caché del último tile */
-    int c_tx, c_ty; uint32_t *c_p;
+    int c_tx, c_ty; uint32_t *c_p; float *c_d;
 };
 
 typedef struct { int M, native, hq, centre; } Tgt; /* centre: desplazamiento de muestreo (0 esquina, 1 centro) */
@@ -35,6 +38,10 @@ typedef struct {
     RefR *R; const Tgt *T; const GpuOp *op;
     int csx1, csy1, csx2, csy2; /* recorte en muestras */
     int semi, mask_chk, mask_set, abr;
+    int dmode;      /* profundidad (solo objetivo hires con REF_DEPTH): 0 nada; 1 prueba+escribe (3D opaco);
+                     * 2 solo prueba (3D semitransparente); 3 borra (2D opaco: lo que pinta pasa a ser lo más cercano,
+                     * igual que el orden de pintor del hardware) */
+    float iz;       /* 1/z de la muestra actual (dmode 1/2) */
 } Ctx;
 
 static const int dither_m[4][4] = {{-4, 0, -3, 1}, {2, -2, 3, -1}, {-3, 1, -4, 0}, {3, -1, 2, -2}};
@@ -59,14 +66,18 @@ static uint32_t *tile_get(RefR *R, int tx, int ty, int alloc) {
             for (int i = 0; i < side; i++) dst[i] = expand555(src[i / M]);
         }
         *slot = t; R->ntiles++;
+        if (R->depth) R->dtile[ty][tx] = calloc((size_t)side * side, sizeof(float));
     }
     return *slot;
 }
 
 static void tiles_free(RefR *R) {
     for (int j = 0; j < VH / TILE; j++)
-        for (int i = 0; i < VW / TILE; i++) { free(R->tile[j][i]); R->tile[j][i] = NULL; }
-    R->ntiles = 0; R->c_p = NULL;
+        for (int i = 0; i < VW / TILE; i++) {
+            free(R->tile[j][i]); R->tile[j][i] = NULL;
+            free(R->dtile[j][i]); R->dtile[j][i] = NULL;
+        }
+    R->ntiles = 0; R->c_p = NULL; R->c_d = NULL;
 }
 
 /* puntero a la muestra (sx,sy) (en rejilla M); NULL si no hay tile y !alloc */
@@ -78,7 +89,7 @@ static inline uint32_t *hpix(RefR *R, int sx, int sy, int alloc) {
     else {
         t = tile_get(R, tx, ty, alloc);
         if (!t) return NULL;
-        R->c_tx = tx; R->c_ty = ty; R->c_p = t;
+        R->c_tx = tx; R->c_ty = ty; R->c_p = t; R->c_d = R->dtile[ty][tx];
     }
     return t + (size_t)(sy - ty * side) * side + (sx - tx * side);
 }
@@ -106,6 +117,14 @@ static inline void rplot(Ctx *c, int sx, int sy, int r, int g, int b, int dith, 
         if (!T->hq) { bd_r >>= 3; bd_g >>= 3; bd_b >>= 3; }
     }
     if (c->mask_chk && bmask) return;
+    if (c->dmode && p32 && c->R->c_d) {
+        float *d = c->R->c_d + (p32 - c->R->c_p); /* hpix acaba de dejar en caché el tile de p32 */
+        if (c->dmode == 3) *d = 0.0f;
+        else {
+            if (c->iz < *d * (1.0f - c->R->dbias)) return;   /* detrás de algo 3D opaco ya pintado */
+            if (c->dmode == 1 && c->iz > *d) *d = c->iz;
+        }
+    }
     int nm = mbit | c->mask_set;
     if (!T->hq) { /* canal de 5 bits, idéntico al oráculo */
         if (dith) {
@@ -188,7 +207,7 @@ static inline void tex_shade(Ctx *c, int sx, int sy, int u, int v, int r, int g,
 }
 
 /* ---------------- geometría ---------------- */
-typedef struct { int x, y; int64_t X, Y; int r, g, b, u, v; } V;
+typedef struct { int x, y; int64_t X, Y; int r, g, b, u, v; double iz; } V;
 
 static void make_v(const GpuOp *o, int i, const Tgt *T, unsigned flags, V *d, int use_f) {
     const GpuVtx *s = &o->v[i];
@@ -197,6 +216,7 @@ static void make_v(const GpuOp *o, int i, const Tgt *T, unsigned flags, V *d, in
     if (use_f) { d->X = llroundf(s->fx * (float)Q); d->Y = llroundf(s->fy * (float)Q); }
     else { d->X = (int64_t)s->x * Q; d->Y = (int64_t)s->y * Q; }
     d->r = s->r; d->g = s->g; d->b = s->b; d->u = s->u; d->v = s->v;
+    d->iz = use_f ? 1.0 / (double)s->fz : 0.0;
     (void)flags;
 }
 
@@ -208,7 +228,7 @@ static inline int is_tl(const V *a, const V *b) {
     return dy < 0 || (dy == 0 && dx > 0);
 }
 
-static void tri(Ctx *c, V v0, V v1, V v2, int gour, int tex, int raw, int dither) {
+static void tri(Ctx *c, V v0, V v1, V v2, int gour, int tex, int raw, int dither, int persp) {
     const Tgt *T = c->T;
     int M = T->M, soff = T->centre ? 16 : 0;
     int minx = v0.x, maxx = v0.x, miny = v0.y, maxy = v0.y;
@@ -252,6 +272,25 @@ static void tri(Ctx *c, V v0, V v1, V v2, int gour, int tex, int raw, int dither
             if (w0 + b0 < 0 || w1 + b1 < 0 || w2 + b2 < 0) continue;
             int r = v0.r, g = v0.g, b = v0.b;
             if (fb) { r <<= 8; g <<= 8; b <<= 8; }
+            if (persp) { /* vértices de la GTE con z real: atributos e 1/z corregidos por perspectiva */
+                double a0 = (double)w0 * v0.iz, a1 = (double)w1 * v1.iz, a2 = (double)w2 * v2.iz, S = a0 + a1 + a2;
+                if (!(S > 0.0)) continue;
+                c->iz = (float)(S / (double)area);
+                double k = (double)(1 << fb) / S;
+                if (gour) {
+                    r = (int)((v0.r * a0 + v1.r * a1 + v2.r * a2) * k);
+                    g = (int)((v0.g * a0 + v1.g * a1 + v2.g * a2) * k);
+                    b = (int)((v0.b * a0 + v1.b * a1 + v2.b * a2) * k);
+                }
+                if (tex) {
+                    int u = (int)floor((v0.u * a0 + v1.u * a1 + v2.u * a2) / S);
+                    int v = (int)floor((v0.v * a0 + v1.v * a1 + v2.v * a2) / S);
+                    tex_shade(c, x, y, u, v, r, g, b, fb, raw, dith);
+                } else {
+                    rplot(c, x, y, r >> fb, g >> fb, b >> fb, dith, c->semi, 0);
+                }
+                continue;
+            }
             if (gour) {
                 r = (int)(((int64_t)v0.r * w0 + (int64_t)v1.r * w1 + (int64_t)v2.r * w2) * (1 << fb) / area);
                 g = (int)(((int64_t)v0.g * w0 + (int64_t)v1.g * w1 + (int64_t)v2.g * w2) * (1 << fb) / area);
@@ -279,12 +318,17 @@ static void do_poly(Ctx *c, unsigned flags) {
      * NaN, infinito o un vértice saturado (|f - entero| > 1) desbordarían la aritmética de aristas. */
     for (int i = 0; i < nv; i++) {
         const GpuVtx *s = &o->v[i];
-        if (!s->fvalid || !(fabsf(s->fx - (float)s->x) <= 1.0f) || !(fabsf(s->fy - (float)s->y) <= 1.0f)) use_f = 0;
+        /* La GTE trunca (floor) y recorta SZ a entero: el float puede estar hasta ~2 px del entero (medido < 2).
+         * Fuera de REF_F_TOL es una coincidencia espuria (HUD) o un vértice saturado. */
+        if (!s->fvalid || !(fabsf(s->fx - (float)s->x) <= REF_F_TOL) || !(fabsf(s->fy - (float)s->y) <= REF_F_TOL) ||
+            !(s->fz > 0.0f))
+            use_f = 0;
     }
+    if (c->R->depth && !c->T->native) c->dmode = use_f ? ((o->flags & GPU_F_SEMI) ? 2 : 1) : ((o->flags & GPU_F_SEMI) ? 0 : 3);
     V v[4];
     for (int i = 0; i < nv; i++) make_v(o, i, c->T, flags, &v[i], use_f);
-    tri(c, v[0], v[1], v[2], gour, tex, raw, dither);
-    if (nv == 4) tri(c, v[1], v[2], v[3], gour, tex, raw, dither);
+    tri(c, v[0], v[1], v[2], gour, tex, raw, dither, use_f);
+    if (nv == 4) tri(c, v[1], v[2], v[3], gour, tex, raw, dither, use_f);
 }
 
 static void do_rect(Ctx *c) {
@@ -368,7 +412,11 @@ static void do_line(Ctx *c) {
 static void block_set(RefR *R, int x, int y, uint32_t val) {
     int M = R->M;
     for (int j = 0; j < M; j++)
-        for (int i = 0; i < M; i++) *hpix(R, x * M + i, y * M + j, 1) = val;
+        for (int i = 0; i < M; i++) {
+            uint32_t *p = hpix(R, x * M + i, y * M + j, 1);
+            *p = val;
+            if (R->c_d) R->c_d[p - R->c_p] = 0.0f; /* fill/subida/copia = 2D: la profundidad de esas muestras se pierde */
+        }
 }
 static int tile_any(RefR *R, int x, int y, int w, int h) {
     if (!R->ntiles) return 0;
@@ -428,7 +476,9 @@ static void op_vcopy(RefR *R, const GpuOp *o, int hires) {
                     for (int si = 0; si < M; si++) {
                         uint32_t v = hl[((size_t)sj * ww + i) * M + si];
                         if (mset) v |= 1u << 24;
-                        *hpix(R, dx * M + si, dy * M + sj, 1) = v;
+                        uint32_t *hp = hpix(R, dx * M + si, dy * M + sj, 1);
+                        *hp = v;
+                        if (R->c_d) R->c_d[hp - R->c_p] = 0.0f;
                     }
         }
     }
@@ -444,6 +494,8 @@ RefR *ref_create(const RefOpts *o) {
     R->M = R->scale * R->K;
     R->hq = R->M > 1 ? !(o->flags & REF_EXACT5) : !!(o->flags & REF_HQ);
     R->vram = calloc(VH, sizeof *R->vram);
+    R->depth = !!(o->flags & REF_DEPTH);
+    R->dbias = o->depth_bias > 0.0f ? o->depth_bias : 1.0f / 128.0f;
     return R;
 }
 
@@ -456,6 +508,10 @@ void ref_destroy(RefR *R) {
 void ref_apply(RefR *R, const GpuDrawList *l, int hires) {
     if (l->vram_init) { memcpy(R->vram, l->vram_init, (size_t)VW * VH * 2); tiles_free(R); }
     if (!hires && R->ntiles) tiles_free(R);
+    if (R->depth && hires) /* un frame = una pasada de pintor: la profundidad empieza lejos en cada lista */
+        for (int j = 0; j < VH / TILE; j++)
+            for (int i = 0; i < VW / TILE; i++)
+                if (R->dtile[j][i]) memset(R->dtile[j][i], 0, (size_t)TILE * R->M * TILE * R->M * sizeof(float));
     Tgt TN = {1, 1, 0, 0};
     Tgt TH = {R->M, 0, R->hq, (R->M > 1 || R->hq) ? 1 : 0};
     for (uint32_t k = 0; k < l->nops; k++) {
@@ -469,6 +525,7 @@ void ref_apply(RefR *R, const GpuDrawList *l, int hires) {
                 c.csx1 = o->cx1 * M; c.csy1 = o->cy1 * M; c.csx2 = (o->cx2 + 1) * M - 1; c.csy2 = (o->cy2 + 1) * M - 1;
                 c.semi = !!(o->flags & GPU_F_SEMI); c.mask_chk = !!(o->flags & GPU_F_MASK_CHK);
                 c.mask_set = !!(o->flags & GPU_F_MASK_SET); c.abr = o->abr;
+                if (R->depth && !T->native && o->type != GPU_OP_POLY) c.dmode = c.semi ? 0 : 3; /* rect/línea: 2D */
                 if (o->type == GPU_OP_POLY) do_poly(&c, R->o.flags);
                 else if (o->type == GPU_OP_RECT) do_rect(&c);
                 else do_line(&c);

@@ -79,6 +79,7 @@ typedef struct {
     uint8_t r, g, b, u, v;
     uint8_t fvalid;
     float fx, fy, fz;
+    float vx, vy, vz;        /* posición 3D en espacio de VISTA (R·V+TR de la GTE, unidades del juego; vz = fz) */
 } GpuVtx;
 
 typedef struct {
@@ -96,6 +97,9 @@ typedef struct {
     uint16_t fill15;         /* FILL: color RGB555 */
     uint32_t data_off, data_n; /* UPLOAD: píxeles (uint16) en GpuDrawList.data, por filas */
     uint32_t seq;            /* orden global desde enable */
+    int16_t dox, doy;        /* offset de dibujo E5 vigente (ya sumado en v[].x,y y fx,fy; restarlo da la coordenada cruda de la GTE) */
+    float proj_h, proj_ox, proj_oy; /* POLY/LINE con algún vértice fvalid: H de la GTE y OFX/OFY en píxeles (0 si no). Con
+                                     * ellos y vx,vy,vz se re-proyecta por ojo: x = proj_ox + proj_h*(vx -/+ e)/vz. */
 } GpuOp;
 
 enum { GPU_CLOSE_FLIP = 1, GPU_CLOSE_VBLANK = 2 };
@@ -120,9 +124,36 @@ void gpu_capture_vblank(void);
 /* Listas perdidas por cola llena (la siguiente entregada trae vram_init). */
 uint32_t gpu_capture_dropped(void);
 
-/* Enlace futuro con la GTE: dado el SXY entero que escribió el juego (sin offset, con signo), devuelve 1 y
+/* Enlace antiguo (solo float, sin vista) con la GTE; el actual es gpu_capture_hiprec / GpuHpHook (abajo). Dado el SXY entero que escribió el juego (sin offset, con signo), devuelve 1 y
  * rellena la posición float si el último RTPS/RTPT produjo exactamente ese SXY. La GTE (gte.c) mantendrá una
  * tabla pequeña (clave = par (sx,sy) saturado, valor = x,y float previos a saturar/redondear y SZ),
  * vaciada cada frame; si dos vértices comparten SXY gana el último. Este hook es el único acoplamiento. */
 typedef int (*GpuFloatHook)(int sx, int sy, float *fx, float *fy, float *fz);
 void gpu_capture_set_float_hook(GpuFloatHook h);
+
+/* ====================== Geometría de alta precisión (sombra flotante de la GTE) ======================
+ * gte.c mantiene, además del resultado entero exacto, una tabla por frame con la posición sin cuantizar de cada
+ * vértice transformado (ver el bloque "Alta precisión" de gte.c). gpu_capture_hiprec(1) la enciende y engancha a
+ * la captura: cada vértice de polígono/línea cuyo (sx,sy) entero coincida con uno de la tabla sale con
+ * fvalid/fx/fy/fz/vx/vy/vz. Los rects y los polígonos 2D (HUD, texto) nunca coinciden con coherencia y salen con
+ * fvalid=0. El cierre de frame de la captura vacía la tabla (gte_hp_frame). Con la alta precisión apagada
+ * (por defecto) no cambia nada del comportamiento observable. */
+typedef struct {
+    float fx, fy, fz;      /* pantalla sin cuantizar (sin offset de dibujo) y z de vista */
+    float vx, vy, vz;      /* espacio de vista */
+    float h, ofx, ofy;     /* proyección vigente: x = ofx + h*vx/vz */
+} GpuHpInfo;
+typedef struct {
+    uint32_t stored, evict, skipped, lookups, hits;
+    uint32_t skip_sf, skip_sat, skip_ovf, skip_z; /* motivos de 'skipped' */
+    uint32_t gen_stored, max_gen_stored;           /* almacenados en la generación en curso / máximo por generación */
+} GteHpStats;
+typedef int (*GpuHpHook)(int sx, int sy, GpuHpInfo *out);
+void gpu_capture_set_hp_hook(GpuHpHook h);
+void gpu_capture_hiprec(int on);
+/* gte.c */
+void gte_hp_enable(int on);
+int gte_hp_enabled(void);
+void gte_hp_frame(void);
+int gte_hp_lookup(int sx, int sy, GpuHpInfo *out);
+void gte_hp_stats(GteHpStats *s);
