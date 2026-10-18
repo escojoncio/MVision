@@ -3,6 +3,7 @@
  * Unidades: metros, segundos, radianes. Ejes: +Y arriba, -Z hacia delante (convención visionOS). */
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 
 typedef struct { float x, y, z; } WVec3;
 typedef struct { float x, y, z, w; } WQuat;
@@ -12,7 +13,7 @@ typedef struct { WVec3 p; WQuat q; } WPose;
 typedef struct {
     float pos[3], nrm[3];
     float uv[2];
-    uint8_t rgba[4];      /* color de vértice (estética PS1: color plano/gouraud + textura opcional) */
+    uint8_t rgba[4];      /* color de vértice (color plano/gouraud + textura opcional) */
 } WVertex;
 
 typedef struct {
@@ -66,7 +67,7 @@ typedef enum { WR_MANUAL, WR_SIMPLIFIED, WR_AUTOMATIC } WReloadMode;
 /* ---------- Puente con el juego (lo implementa la capa de integración sobre la RAM emulada) ---------- */
 typedef struct {
     int  (*ammo_reserve)(int weapon_id);             /* munición total del juego fuera del cargador */
-    void (*ammo_take)(int weapon_id, int n);          /* descuenta del contador original */
+    void (*ammo_take)(int weapon_id, int n);          /* descuenta del contador original (n<0 = devolver) */
     void (*fire)(int weapon_id, WPose muzzle_world);  /* el juego crea el proyectil/impacto */
     void (*haptic)(int hand, float strength, float seconds);
     void (*sound)(int weapon_id, int event);          /* WS_* */
@@ -75,7 +76,9 @@ typedef struct {
     void (*steer)(int weapon_id, float yaw, float pitch); /* guiado del proyectil (-1..1) */
     void *user;
 } WGameBridge;
-enum { WS_FIRE, WS_DRY, WS_MAG_OUT, WS_MAG_IN, WS_SLIDE_BACK, WS_SLIDE_FWD, WS_BOLT, WS_LOCK_TONE, WS_LOCKED };
+enum { WS_FIRE, WS_DRY, WS_MAG_OUT, WS_MAG_IN, WS_SLIDE_BACK, WS_SLIDE_FWD, WS_BOLT, WS_LOCK_TONE, WS_LOCKED,
+       /* arrojadizas y colocables (w_throw.h los alias como W5_S_*) */
+       WS_DRAW, WS_PIN, WS_LEVER, WS_THROW, WS_PLACE, WS_CAP, WS_BTN, WS_LEGS, WS_EMPTY, WS_COUNT };
 
 /* ---------- Vistas auxiliares (render-to-texture) ----------
  * Un arma puede pedir que el motor renderice la escena del juego desde una cámara y la
@@ -94,6 +97,12 @@ enum { WO_RETICLE = 1, WO_LOCK_BOX = 2, WO_TELEMETRY = 4, WO_NOISE = 8, WO_SCANL
 typedef struct WeaponDef WeaponDef;
 typedef struct WeaponState WeaponState;
 
+/* Objeto suelto/sostenido en mundo (cargador nuevo, vaina expulsada, cartucho, accesorio...).
+ * Lo coloca y simula el arma; el renderizador dibuja def->meshes[mesh] con la pose mundo.
+ * (Añadido al contrato por el núcleo: sin esto no se podría ver el cargador en la mano libre.) */
+#define W_MAX_HELD 4
+typedef struct { int active; int mesh; WPose world; } WHeld;
+
 /* Estado común (cada arma puede extenderlo con su propio struct que empiece por este). */
 struct WeaponState {
     const WeaponDef *def;
@@ -104,29 +113,44 @@ struct WeaponState {
     int phase;                  /* máquina de estados propia del arma */
     float t;                    /* tiempo en fase */
     WAuxView aux;
+    WHeld held[W_MAX_HELD];     /* objetos sueltos/sostenidos (zero-init = ninguno) */
+    /* Binding en tiempo de ejecución (modelos cargados del disco): si no son NULL sustituyen a
+     * def->meshes/def->parts. Se rellenan con weapon_bind() (wcore.c). Un mesh con nv==0 = hueco vacío.
+     * Las meshes enlazadas siguen el orden de def->mesh_names. */
+    const WMesh *meshes; int nmeshes;
+    const WPart *parts; int nparts;
 };
 
 struct WeaponDef {
-    const char *id;             /* código interno neutro: "pist", "rifle", "sniper", "guided", "aa", "throw_*" */
-    int game_weapon_id;
-    const WMesh *meshes; int nmeshes;
+    const char *id;             /* código interno neutro: "pist", "rifle", "sniper", "guided", "aa", "throw_*", "placed_*" */
+    int game_weapon_id;         /* único en todo el registro (lo comprueba test_registry) */
+    const WMesh *meshes; int nmeshes;   /* meshes compiladas: las armas no las usan (nmeshes = 0) */
     const WPart *parts; int nparts;
-    WPose points[WP_COUNT];
+    WPose points[WP_COUNT];     /* todos con cuaternión válido (identidad si no se usa el punto) */
     WRecoil recoil;
     WFireMode mode;
     float rpm;
     int mag_capacity;
     size_t state_size;          /* tamaño del struct de estado propio (>= sizeof(WeaponState)) */
+    /* Ciclo de vida: la memoria llega a cero (calloc) la primera vez. init(s) deja TODO el estado (también
+     * la extensión propia, hasta state_size) a cero salvo lo que fija él, pone s->def, recoil_offset en
+     * identidad y held[].mesh = -1, y CONSERVA el binding (meshes/parts) que hubiera. El orden normal es
+     * init -> weapon_bind; un init posterior (reinicio) no deshace el binding. init no necesita que el
+     * llamador asigne s->def. update ignora el cuadro si in->dt es NaN o <= 0 y recorta dt a 0,1 s. */
     void (*init)(WeaponState *s);
     void (*update)(WeaponState *s, const WInput *in, WReloadMode rm, const WGameBridge *g);
+    /* Nombre lógico de cada hueco de mesh, terminado en NULL. Las piezas con mesh == -1 se asocian a la
+     * mesh que tenga su mismo nombre (weapon_part_mesh); los objetos sueltos (held[].mesh) usan el
+     * índice directo en esta lista. Va al final: no rompe inicializadores. */
+    const char *const *mesh_names;
 };
 
 /* ---------- Núcleo (vr/weapons/wcore.c) ---------- */
 WPose wpose_mul(WPose a, WPose b);
 WVec3 wpose_apply(WPose a, WVec3 v);
 WQuat wquat_axis_angle(WVec3 axis, float rad);
-/* Transformaciones de mundo de todas las piezas (out: nparts poses). */
-void wcore_part_poses(const WeaponState *s, WPose weapon_world, WPose *out);
+/* Transformaciones de mundo de las piezas (hasta max); devuelve cuántas ha escrito (<= nparts). */
+int wcore_part_poses(const WeaponState *s, WPose weapon_world, WPose *out, int max);
 /* Pose del arma en mundo = mano · agarre⁻¹ · retroceso. */
 WPose wcore_weapon_world(const WeaponState *s, const WInput *in);
 /* Integra el muelle de retroceso; wcore_kick aplica un disparo. */
@@ -134,6 +158,16 @@ void wcore_recoil_step(WeaponState *s, const WInput *in, float dt);
 void wcore_kick(WeaponState *s, const WInput *in, uint32_t seed);
 /* Utilidades de interacción: distancia de una mano a un punto del arma (mundo). */
 float wcore_hand_dist(const WeaponState *s, const WInput *in, int hand, WPoint p);
+
+/* Binding de modelos en tiempo de ejecución: meshes (n) y, opcional, partes (np; NULL = las del def). */
+void weapon_bind(WeaponState *s, const WMesh *meshes, int n, const WPart *parts, int np);
+const WMesh *weapon_meshes(const WeaponState *s, int *n);
+const WPart *weapon_parts(const WeaponState *s, int *n);
+/* Nº de nombres en def->mesh_names (0 si no hay). */
+int weapon_mesh_count(const WeaponDef *d);
+/* Mesh efectiva de la pieza i: parts[i].mesh si es >= 0; si no, el índice (en mesh_names) del nombre de
+ * la pieza. -1 si no tiene. Con binding, el índice es el de las meshes enlazadas. */
+int weapon_part_mesh(const WeaponState *s, int i);
 
 /* Registro de armas. */
 extern const WeaponDef *const w_registry[];

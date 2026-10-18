@@ -11,7 +11,9 @@ extracted/
 gamedata/
 # Build
 build/
+build-san/
 out/
 *.o
 __pycache__/
+vr/weapons/gen/
 .DS_Store

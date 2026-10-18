@@ -69,6 +69,12 @@ Coste: mapear símbolos JP→EU (por firmas) si se elige opción A.
 - Gestos: radio (mano a la oreja), raciones/cigarros (boca; humo revela láseres), gafas térmicas/nocturnas, caja de cartón, golpear pared, estrangular, pegarse a pared.
 - Difícil: animaciones de tercera persona y bosses de cámara cenital.
 
+- **Requisito objetos equipados:** la capa VR nunca decide el equipo; inventario leído de la RAM del juego y equipar/usar siempre vía la función de equipar del propio juego (recompilada) o secuencia de botones del menú original, nunca escribiendo RAM directamente. Efectos pasivos de objetos equipados (consumo automático, acceso por tarjeta, etc.) los ejecuta el código original. Persistencia = estado del juego (zonas, cinemáticas, cambio de disco, partidas). Representación física en el cuerpo solo visual. Selección de armas por la misma vía.
+
+- **Requisito percepción enemiga (VR):** ampliar alcance de visión de los enemigos en las overlays con sospecha gradual por distancia (cerca: alerta inmediata original; media: sospecha/investigar; lejos: solo con exposición prolongada), periferia solo por movimiento, manteniendo línea de visión, caja, oscuridad y resto de lógica original. Ajuste configurable (original / VR recomendado por defecto / exigente). Verificar que enemigos lejanos visibles siguen activos (no desactivados por estar fuera de la cámara original). Tras arranque jugable.
+
+- **Requisito cuerpo a cuerpo (VR):** gestos → acciones propias del juego (sin combate físico paralelo). Golpe: velocidad de mano hacia delante + enemigo al alcance → botón de golpe (combo original). Agarre: grip cerca de cuello/hombro desde la espalda → agarre del juego; apretar repetido/mantenido = pulsaciones; tirón brusco = proyección en esa dirección; soltar grip = soltar. Golpear pared, pegarse a pared. Sin mover la cabeza del usuario. Modos gestual (defecto) / asistido / botón. Requiere puente RAM (pos/orientación/estado de enemigos).
+
 ## 6. Herramientas en el repo
 
 - `tools/disc/psxdisc.py` (stdlib): `info`, `ls`, `extract`, `dirtable <DISCO> <FICHERO>`, `manifest`. Sin probar con BIN real (el usuario extrajo con dumpsxiso; formato de tabla DIR confirmado sobre el fichero extraído).
@@ -93,3 +99,33 @@ Coste: mapear símbolos JP→EU (por firmas) si se elige opción A.
 - [ ] Recompilador MIPS→C: decodificador + emisor, empezando por el ejecutable principal.
 - [ ] HLE: GPU (OT/primitivas → Metal), GTE float, CD sobre imagen, hilos `mts` → fibras.
 - [ ] Esqueleto de app visionOS (ventana plana primero).
+
+---
+
+## 7. Armas en mano — núcleo + "pist" (`vr/weapons/`, `tools/wmodel/`)
+
+- `weapon.h` (añadidos mínimos): `#include <stddef.h>`; `WHeld held[W_MAX_HELD]` (objetos sueltos: cargador, vaina...); en `WeaponState` binding en ejecución `meshes/nmeshes/parts/nparts`; en `WeaponDef` `mesh_names[]`; funciones `weapon_bind`, `weapon_meshes`, `weapon_parts`. `ammo_take(n<0)` devuelve munición.
+- `wcore.c/.h`: quaternions/poses, `wcore_part_poses(s,W,out,max)` (usa binding si existe; devuelve nº escrito), retroceso muelle-amortiguador (subpasos 2 ms), `wcore_kick`, `wcore_hand_dist`, `wcore_point_world`. `registry.c`: referencias fuertes a las 10 armas (los weak no extraen miembros de un .a).
+- `w_pist.c`: sin meshes compilados (enlazar con `weapon_bind` por `pist_mesh_names`, static). Semiauto, ciclo 60 ms, slide lock, cargador extraíble (WB_B/WB_MAG_RELEASE), cadera+grip, guiado al pozo, rack con WP_CHARGE, supresor desmontable (CUSTOM0), modos manual/simplificado/automático.
+- `tools/wmodel/preview.c + wprev.c`: rasterizador (ss=2 → MSAA x4), `--obj` externo, guion `--sim`. `make -C vr/weapons test` OK.
+- `tools/wmodel/geom.py`, `m_*.py` y `vr/weapons/gen/`: ELIMINADOS (los modelos son los originales del disco, cargados en ejecución con `weapon_bind`). Las armas no llevan mallas compiladas (`meshes=NULL`, `nmeshes=0`).
+- Pendiente: probar modo simplificado en test; validar con modelo real del disco (puntos/pivotes en `w_pist.c` son del placeholder).
+
+## 8. Modelos originales en runtime (2026-10-18)
+
+Sustituye a los modelos de arma hechos a mano: se cargan los del propio disco (datos locales, nunca al repo).
+- `tools/wmodel/mdlfmt.py` (formato, documentado en su cabecera), `raster.py`, `extract.py <archivo_stages> <out> [--dict f] [--resident <stage>] [--only-resident]` -> OBJ/MTL/PNG + hojas de contacto + `index.txt`. Los nombres concretos de stage/ficheros se pasan por argumento, no están en el código.
+- `vr/weapons/wload.c/.h`: `wload_model(dir,len,stage,id,&opts,&out)`; `opts.resident` = stage de recursos compartidos. Normales suavizadas, atlas RGBA8, escalado x2/x4 tipo xBR propio, `split_parts`. `test_wload.c` (ASan/UBSan): `./test_wload <archivo_stages> <stage>`.
+- Pendiente: integrar con WeaponDef/registry (sustituir generador procedural), puntos WP_* y canales por pieza, semitransparencia/color de vértice, índice 32 bits para mallas grandes, build/CI.
+
+## 9. Revisión adversarial de armas — correcciones (2026-10-18)
+
+Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `build-san/`) limpios, sin warnings. Registro 10/10 contra `libweapons.a` (`test_registry.c`).
+- Contrato (`weapon.h`, `wcore.c/.h`): `WeaponDef.init` limpia `state_size` bytes con `wcore_state_reset(s,def)` conservando el binding (`meshes/parts`), pone `recoil_offset.q` identidad y `held[].mesh=-1`; orden init -> `weapon_bind`. `mesh_names` terminado en NULL; `weapon_mesh_count`, `weapon_part_mesh(s,i)` (pieza con `mesh=-1` -> hueco de su mismo nombre). `wcore_part_find(const WeaponState*,name)` mira `s->parts`. `wcore_dt(dt,max)`: 0 si NaN/<=0; todos los `update` salen sin tocar nada con dt inválido. Sonidos `WS_DRAW..WS_EMPTY` + `WS_COUNT` en el enum (alias `W5_S_*` en `w_throw.h`).
+- `w_gunc.c`: recarga temporizada sin cargador (`SEQ_T_NOMAG`=0,40 < `SEQ_T_MAG_IN`=0,55); automático solo con reserva (sin DRY en bucle); `cd` acotado a -min(interval,dt); `cycle_bolt` devuelve la bala viva con `ammo_take(-1)`; `equip_latch` (gatillo apretado al equipar no dispara). `w_sniper.c`: viñeta con `vig0=min(0.60,edge-0.05)`; `w_rifle.c/w_sniper.c` con `.recoil` designado y `mesh_names` con NULL.
+- `w_pist.c`: carga inicial en la 1ª actualización (descuenta min(cap+1,reserva)); `seat_mag` no pisa cargador montado; FM_ANIM no pisa; `auto_stage` se abandona al salir de WR_AUTOMATIC y se reanuda si no hay cargador; `trig_armed=0` en init; sin `part_poses` (pose del cargador = `W·k_parts[P_MAG].rest`); `nmeshes=0`; código muerto fuera.
+- `w_aa.c`: sin `gen/aa_mesh`; piezas `mesh=-1` + `aa_mesh_names`; `game_weapon_id=7` (guided=6); `trig_armed=1` en init.
+- `w_guided.c/.h`: `w_guided` const, sin globales mutables (eliminadas `guided_bind_model/part_table/set_point`); piezas renombradas (`tube,grip,trigger,sight,screen,frame,lid,round`) = `guided_mesh_names`; `prev_trig=1` en init.
+- `w_throw.c`, `w_placed.c`: ids neutros `throw_frag/throw_b/throw_c`, `placed_a/placed_b` (símbolos `w_throw_b/c`, `w_placed_a/b`); un init por variante; dt<=0.1; palanca con subpasos 8 ms y canal en [0,1.5]; `w5_emit` rechazado no consume ni pasa a GONE (reintento cada 0,15 s); `ang_vel`<=45 rad/s; reserva>=0; detonación rechazada conserva la carga; `WVH_ACCEL_BLEND`=0,9 (mezcla parcial parábola/recta); placed: gatillo apretado al sacar no coloca.
+- Makefile: sin GENS/GENOBJS; `-MMD`; `wload.c` en la lib; `test_registry` enlaza contra el .a; `test-san`, `test-wload` (test_wload fuera de `test`: su API aún cambia).
+- Pendiente: `test_wload.c` usa `wload_hash16` y `wload.h` declara `wload_id16` (WIP del cargador); `game_weapon_id` siguen siendo provisionales; ajustar puntos/pivotes y canales a los modelos reales.
