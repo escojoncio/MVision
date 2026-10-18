@@ -122,7 +122,7 @@ final class XRRenderLoop {
 
     private func finish() {
         arSession.stop()
-        layerRenderer.onSpatialEvent = nil
+        layerRenderer.onSpatialEvent = { _ in }
         mv_vr_clear_head()      // sin cabeza publicada la cámara del motor vuelve a la del juego
         Storage.log("xr: bucle terminado")
         onEnded(self)
@@ -145,7 +145,7 @@ final class XRRenderLoop {
         defer { frame.endSubmission() }
 
         let drawable: LayerRenderer.Drawable?
-        if #available(visionOS 2.0, *) { drawable = frame.queryDrawables().first } else { drawable = frame.queryDrawable() }
+        drawable = frame.queryDrawable()
         guard let drawable = drawable, drawable.views.count >= viewCount else { return }
 
         // Pose en el instante de presentación previsto.
@@ -221,11 +221,8 @@ final class XRRenderLoop {
         cb.commit()
     }
 
-    /// Proyección de Z invertida del ojo i (computeProjection en visionOS 2; tangentes en 1.x).
+    /// Proyección de Z invertida del ojo i (a partir de las tangentes de la vista).
     private func projection(_ drawable: LayerRenderer.Drawable, _ i: Int) -> simd_float4x4 {
-        if #available(visionOS 2.0, *) {
-            return drawable.computeProjection(convention: .rightUpBackward, viewIndex: i)
-        }
         let r = drawable.depthRange
         let near = min(r.x, r.y), far = max(r.x, r.y)
         return XRMath.projection(tangents: drawable.views[i].tangents, near: near, far: far)
