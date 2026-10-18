@@ -3,7 +3,7 @@
 # el runtime corre en modo sin código generado, MV_NOGEN, y el ejecutable sale del disco del usuario).
 name: MVision
 options:
-  bundleIdPrefix: app.mvision
+  bundleIdPrefix: com.kdt
   deploymentTarget:
     visionOS: "1.0"
   createIntermediateGroups: true
@@ -35,7 +35,7 @@ targets:
         optional: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: app.mvision.player
+        PRODUCT_BUNDLE_IDENTIFIER: com.kdt.livecontainer
         TARGETED_DEVICE_FAMILY: "7"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging-Header.h
         # MV_HAVE_PS1RENDERER desactiva el renderer de relleno (XRStubRenderer.swift): RenderPS1.swift es el real.
