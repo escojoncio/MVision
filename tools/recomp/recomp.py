@@ -88,7 +88,9 @@ def after_end(exe, v):
     return p == 0x03E00008 or (p >> 26) == 2 or prologue
 
 
-def find_funcs(exe, extra):
+def find_funcs(exe, extra, weak_out=None):
+    """Lista ordenada de inicios. Si weak_out es un set, se rellena con los inicios débiles
+    (heurísticos de datos y lui/addiu) que no son también fuertes."""
     starts = {exe.pc0} | set(extra)
     for a in range(exe.base, exe.end, 4):
         w = exe.word(a)
@@ -98,9 +100,12 @@ def find_funcs(exe, extra):
                 starts.add(t)
     # Punteros a función en datos: palabra alineada que apunta al código justo tras un `jr ra`+delay.
     full = struct.unpack_from(f"<{len(exe.text) // 4}I", exe.text, 0)
+    dptr = set()
     for v in full:
         if exe.code_start <= v < exe.end and v % 4 == 0 and after_end(exe, v):
-            starts.add(v)
+            dptr.add(v)
+    strong = set(starts)
+    starts |= dptr
     # Punteros construidos en código: lui rX,hi + addiu/ori rY,rX,lo (p.ej. entradas de hilos y callbacks).
     # El addiu puede ir en el delay slot de un j/jal/jr: se olvida `hi` tras el slot, no antes.
     hi, clear_after = {}, None
@@ -146,7 +151,52 @@ def find_funcs(exe, extra):
     bad = {v for v in heur - starts for s, e in jr_ranges if s < v < e and harmful(s, v, e)}
     if bad:
         print("inicios heurísticos descartados (dentro de tabla jr):", " ".join(f"{v:08x}" for v in sorted(bad)))
-    return sorted(set(base) | {v for v in heur - bad if exe.has(v)})
+    res = sorted(set(base) | {v for v in heur - bad if exe.has(v)})
+    if weak_out is not None:
+        weak_out |= {v for v in res if v not in strong and v != exe.code_start}
+    return res
+
+
+MAX_EXTEND = 64 * 1024
+
+
+def extend_ends(exe, starts, weak):
+    """Fin de cada función = siguiente inicio, ampliado a punto fijo hasta cubrir los destinos de
+    rama/j locales que caen en regiones de inicio débil (sin inicio fuerte por medio).
+    Devuelve (lista de fines, nº de funciones ampliadas)."""
+    import bisect
+    ends, n_ext = [], 0
+    for i, s in enumerate(starts):
+        e = starts[i + 1] if i + 1 < len(starts) else exe.end
+        e0, scanned, limit = e, s, s + MAX_EXTEND
+        while scanned < e:
+            a, scanned_to = scanned, e
+            scanned = e
+            grow = e
+            for x in range(a, scanned_to, 4):
+                w = exe.word(x)
+                op = w >> 26
+                if op == 2:
+                    t = (x & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
+                elif op in (4, 5, 6, 7) or (op == 1 and rt(w) in (0, 1)):
+                    t = branch_target(x, w)
+                else:
+                    continue
+                if t < grow or t >= exe.end or t % 4:
+                    continue
+                k = bisect.bisect_right(starts, t) - 1  # región que contiene t
+                j = bisect.bisect_left(starts, e)
+                if starts[k] < e or any(v not in weak for v in starts[j:k + 1]):
+                    continue
+                ne = starts[k + 1] if k + 1 < len(starts) else exe.end
+                if ne > limit:
+                    continue
+                grow = max(grow, ne)
+            e = grow
+        if e > e0:
+            n_ext += 1
+        ends.append(e)
+    return ends, n_ext
 
 
 def detect_code(exe, run=4):
@@ -418,13 +468,15 @@ def main(a):
         if x == "--hle":
             hle |= {l.split("#")[0].strip() for l in open(a[i + 1])} - {""}
     SETJMP.update(t for t, n in names.items() if n == "setjmp")
-    starts = find_funcs(exe, extra)
+    weak = set()
+    starts = find_funcs(exe, extra, weak)
+    ends, n_ext = extend_ends(exe, starts, weak)
+    print(f"funciones ampliadas por ramas a regiones débiles: {n_ext}")
     known = set(starts)
     os.makedirs(out, exist_ok=True)
     funcs = []
     for i, s in enumerate(starts):
-        e = starts[i + 1] if i + 1 < len(starts) else exe.end
-        funcs.append(Func(exe, s, e, known))
+        funcs.append(Func(exe, s, ends[i], known))
     with open(os.path.join(out, "funcs.h"), "w") as f:
         f.write('#pragma once\n#include <setjmp.h>\n#include "cpu.h"\n'
                 'jmp_buf *rt_sj_slot(Cpu *c, uint32_t buf);\nvoid rt_sj_resumed(Cpu *c);\n')
