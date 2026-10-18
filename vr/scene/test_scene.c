@@ -1,0 +1,361 @@
+/* Prueba sintética de vr_scene (sin datos del juego). make -C vr/scene test / test-san */
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "vr_scene.h"
+
+static int fails;
+#define CHECK(c, ...) do { if (!(c)) { fails++; fprintf(stderr, "FALLO %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
+static int near_f(float a, float b, float t) { return fabsf(a - b) <= t; }
+
+static GpuOp ops[64];
+static GpuDrawList dl;
+
+static void reset(void) { memset(ops, 0, sizeof ops); memset(&dl, 0, sizeof dl); dl.ops = ops; }
+static GpuOp *add(int type) { GpuOp *o = &ops[dl.nops++]; o->type = (uint8_t)type; return o; }
+static void setv3(GpuVtx *v, float x, float y, float z) { v->fvalid = 1; v->vx = x; v->vy = y; v->vz = z; v->fz = z; }
+static GpuOp *poly3(float a[3], float b[3], float c[3], int semi) {
+    GpuOp *o = add(GPU_OP_POLY);
+    o->nv = 3; o->flags = (uint16_t)(GPU_F_TEXTURED | (semi ? GPU_F_SEMI : 0)); o->abr = 1; o->tp = 1; o->tx = 320; o->ty = 256; o->clx = 48; o->cly = 500;
+    setv3(&o->v[0], a[0], a[1], a[2]); setv3(&o->v[1], b[0], b[1], b[2]); setv3(&o->v[2], c[0], c[1], c[2]);
+    for (int i = 0; i < 3; i++) { o->v[i].u = (uint8_t)(10 * i); o->v[i].v = (uint8_t)(5 * i); o->v[i].r = 128; o->v[i].g = 100; o->v[i].b = 60; }
+    return o;
+}
+
+/* cámara del motor: ejes en columnas (der, abajo, adelante) en el mundo del juego (Y arriba) */
+static void set_eye(BridgeState *bs, const float R[3][3], const int32_t e[3]) {
+    memset(bs, 0, sizeof *bs);
+    bs->valid = BRIDGE_OK_ALL_CORE;
+    bs->has_player = 1;
+    for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) bs->eye_axes[r][c] = (int16_t)lrintf(R[r][c] * 4096.0f);
+    for (int i = 0; i < 3; i++) bs->eye_pos[i] = e[i];
+    bs->eye_focal = 320;
+    bs->player_pos = (BVec3){100, 1104, -200};
+    bs->ctl_height = 1104;
+}
+/* vista de un punto del mundo con una cámara (R = ejes en columnas): v = R^T (P - e) */
+static void to_view(const float R[3][3], const int32_t e[3], const float P[3], float v[3]) {
+    for (int c = 0; c < 3; c++) { v[c] = 0; for (int r = 0; r < 3; r++) v[c] += R[r][c] * (P[r] - (float)e[r]); }
+}
+
+static void test_basic(void) {
+    /* cámara mirando a -Z, derecha +X, abajo -Y (mundo Y arriba, mano derecha) */
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    reset();
+    float a[3] = {0, 0, 2000}, b[3] = {1000, 0, 2000}, c[3] = {0, 1000, 2000}; /* en vista: 2 m delante */
+    poly3(a, b, c, 0);
+    VrSceneOpts o = vr_scene_opts_default();
+    o.origin_mode = 1; o.origin_game[0] = 0; o.origin_game[1] = 0; o.origin_game[2] = 0;
+    VrScene s;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0, "build");
+    CHECK(s.has_3d && s.nv == 3 && s.nb == 1 && s.b[0].kind == 0, "nv=%u nb=%u", s.nv, s.nb);
+    CHECK(s.world_valid, "world_valid");
+    /* vista (0,0,2000) -> mundo del juego e + fwd*2000 = (0,3000,500-2000) = (0,3000,-1500) -> VR (0,3,-1.5) */
+    int found = 0;
+    for (uint32_t i = 0; i < s.nv; i++)
+        if (near_f(s.v[i].pos[0], 0, 1e-4f) && near_f(s.v[i].pos[1], 3.0f, 1e-4f) && near_f(s.v[i].pos[2], -1.5f, 1e-4f)) found++;
+    CHECK(found == 1, "vértice esperado (0,3,-1,5) no aparece (%d)", found);
+    CHECK(near_f(s.eye_vr[0], 0, 1e-5f) && near_f(s.eye_vr[1], 3.0f, 1e-5f) && near_f(s.eye_vr[2], 0.5f, 1e-5f), "eye_vr %.3f %.3f %.3f", s.eye_vr[0], s.eye_vr[1], s.eye_vr[2]);
+    /* game_view columna-mayor: punto de vista (0,0,2000) -> VR */
+    float p[3];
+    for (int r = 0; r < 3; r++) p[r] = s.game_view[8 + r] * 2000 + s.game_view[12 + r];
+    CHECK(near_f(p[0], 0, 1e-4f) && near_f(p[1], 3.0f, 1e-4f) && near_f(p[2], -1.5f, 1e-4f), "game_view");
+    /* UV, color, clut, tpage */
+    CHECK(s.v[0].clut == (48 / 16 | (500 << 6)) && (s.v[0].tpage & 15) == 5 && ((s.v[0].tpage >> 4) & 1) == 1 && ((s.v[0].tpage >> 7) & 3) == 1 &&
+          ((s.v[0].tpage >> 5) & 3) == 1, "clut/tpage %04x %04x", s.v[0].clut, s.v[0].tpage);
+    CHECK((s.v[0].rgba & 255) == 128 && ((s.v[0].rgba >> 24) & 255) == 255, "rgba");
+    CHECK(!(s.v[0].flags & VR_F_2D), "flags 3D");
+    /* orientación: la normal mira a la cámara (producto escalar con eye-p0 > 0) */
+    {
+        const VrVtx *v = s.v;
+        float e1[3], e2[3], n[3], t[3];
+        for (int i = 0; i < 3; i++) { e1[i] = v[1].pos[i] - v[0].pos[i]; e2[i] = v[2].pos[i] - v[0].pos[i]; t[i] = s.eye_vr[i] - v[0].pos[i]; }
+        n[0] = e1[1]*e2[2]-e1[2]*e2[1]; n[1] = e1[2]*e2[0]-e1[0]*e2[2]; n[2] = e1[0]*e2[1]-e1[1]*e2[0];
+        CHECK(n[0]*t[0] + n[1]*t[1] + n[2]*t[2] > 0, "frente hacia la cámara");
+    }
+    /* mundo zurdo: espejo de Z automático; el frente sigue mirando a la cámara */
+    const float RL[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, 1}};
+    set_eye(&bs, RL, e);
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.nv == 3, "build zurdo");
+    CHECK(near_f(s.eye_vr[2], -0.5f, 1e-5f), "espejo Z eye_vr z=%.3f", s.eye_vr[2]);
+    vr_scene_release();
+}
+
+static void test_stability(void) {
+    /* un punto fijo del mundo visto desde dos cámaras distintas (giro + traslación) cae en el mismo punto VR */
+    float ca = cosf(0.7f), sa = sinf(0.7f);
+    const float R1[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    /* R2: R1 girada 0,7 rad alrededor de Y del mundo */
+    float R2[3][3];
+    for (int c = 0; c < 3; c++) { R2[0][c] = ca * R1[0][c] + sa * R1[2][c]; R2[1][c] = R1[1][c]; R2[2][c] = -sa * R1[0][c] + ca * R1[2][c]; }
+    const int32_t e1[3] = {0, 3000, 500}, e2[3] = {1500, 2500, -900};
+    const float P[3][3] = {{-500, 100, -4000}, {-300, 600, -4200}, {-700, 900, -3900}};
+    VrScene s1, s2;
+    float out1[9], out2[9];
+    for (int k = 0; k < 2; k++) {
+        const float (*R)[3] = k ? R2 : R1; const int32_t *e = k ? e2 : e1;
+        BridgeState bs; set_eye(&bs, R, e);
+        reset();
+        float v[3][3];
+        for (int i = 0; i < 3; i++) to_view(R, e, P[i], v[i]);
+        poly3(v[0], v[1], v[2], 0);
+        VrSceneOpts o = vr_scene_opts_default();
+        o.origin_mode = 1; /* origen fijo: el mundo no se mueve con la cámara */
+        VrScene *s = k ? &s2 : &s1;
+        CHECK(vr_scene_build(&dl, &bs, &o, s) == 0 && s->nv == 3, "build cam %d (nv=%u)", k, s->nv);
+        memcpy(k ? out2 : out1, s->v ? (float[9]){s->v[0].pos[0], s->v[0].pos[1], s->v[0].pos[2], s->v[1].pos[0], s->v[1].pos[1], s->v[1].pos[2],
+                                                 s->v[2].pos[0], s->v[2].pos[1], s->v[2].pos[2]} : out1, sizeof out1);
+        /* la permutación del frente puede reordenar: se compara como conjunto */
+    }
+    int ok = 1;
+    for (int i = 0; i < 3; i++) {
+        int m = 0;
+        for (int j = 0; j < 3; j++)
+            if (near_f(out1[i*3], out2[j*3], 2e-3f) && near_f(out1[i*3+1], out2[j*3+1], 2e-3f) && near_f(out1[i*3+2], out2[j*3+2], 2e-3f)) m = 1;
+        ok &= m;
+    }
+    CHECK(ok, "escenario fijo entre dos cámaras (cuantización 1.12 de la matriz: 2 mm)");
+    /* y coincide con la posición del mundo del juego (VR = mundo*0,001, sin espejo) */
+    int ok2 = 1;
+    for (int i = 0; i < 3; i++) {
+        int m = 0;
+        for (int j = 0; j < 3; j++)
+            if (near_f(P[i][0] * 0.001f, out1[j*3], 3e-3f) && near_f(P[i][1] * 0.001f, out1[j*3+1], 3e-3f) && near_f(P[i][2] * 0.001f, out1[j*3+2], 3e-3f)) m = 1;
+        ok2 &= m;
+    }
+    CHECK(ok2, "posición VR == mundo del juego * escala");
+    vr_scene_release();
+}
+
+static void test_classes_and_events(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    reset();
+    float a[3] = {0, 0, 2000}, b[3] = {1000, 0, 2000}, c[3] = {0, 1000, 2000};
+    poly3(a, b, c, 0);                                   /* op0 3D opaco */
+    { GpuOp *r = add(GPU_OP_RECT); r->v[0].x = 10; r->v[0].y = 20; r->v[0].u = 5; r->v[0].v = 6; r->rw = 16; r->rh = 8; r->flags = GPU_F_TEXTURED | GPU_F_FLIPX | GPU_F_SEMI; r->abr = 2; } /* op1 */
+    poly3(a, b, c, 1);                                   /* op2 3D semi */
+    { GpuOp *o = add(GPU_OP_POLY); o->nv = 4; o->flags = GPU_F_GOURAUD; /* op3 2D quad sin float */
+      for (int i = 0; i < 4; i++) { o->v[i].x = (int16_t)(i & 1 ? 100 : 50); o->v[i].y = (int16_t)(i & 2 ? 90 : 40); } }
+    { GpuOp *o = add(GPU_OP_UPLOAD); o->rx = 0; o->ry = 0; o->rw = 4; o->rh = 4; }   /* op4 evento */
+    poly3(a, b, c, 0);                                   /* op5 3D opaco (otra época) */
+    { GpuOp *o = add(GPU_OP_LINE); o->nv = 2; o->v[0].x = 0; o->v[0].y = 0; o->v[1].x = 30; o->v[1].y = 40; } /* op6 línea 2D */
+    { GpuOp *o = add(GPU_OP_FILL); o->rx = 0; o->ry = 0; o->rw = 16; o->rh = 16; }   /* op7 evento */
+    poly3(b, c, a, 0);                                   /* op8 */
+    { GpuOp *o = add(GPU_OP_POLY); o->nv = 3; o->flags = 0; /* op9 parcialmente 3D */
+      setv3(&o->v[0], 0, 0, 2000); setv3(&o->v[1], 100, 0, 2000); o->v[2].fvalid = 0; }
+    VrSceneOpts o = vr_scene_opts_default();
+    VrScene s;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0, "build");
+    CHECK(s.stats.n_events == 2, "eventos %u", s.stats.n_events);
+    CHECK(s.stats.drop_partial == 1, "parcial %u", s.stats.drop_partial);
+    /* tris: 3D opacos op0, op5, op8 = 3; semi op2 = 1; 2D: rect 2 + quad 2 + línea 2 = 6 */
+    CHECK(s.stats.n_tris3d == 4 && s.stats.n_tris2d == 6, "tris3d %u tris2d %u", s.stats.n_tris3d, s.stats.n_tris2d);
+    CHECK(s.nv == 30, "nv %u", s.nv);
+    /* batches por época: época A (ev_end=4): k0 [op0], k1 [op2], k2 [rect abr2 | quad opaco]; época B (ev_end=7): k0 [op5], k2 [línea]; época C (ev_end=10): k0 [op8] */
+    uint32_t prev = 0;
+    int kinds_ok = 1;
+    for (uint32_t i = 0; i < s.nb; i++) { if (s.b[i].ev_end < prev) kinds_ok = 0; prev = s.b[i].ev_end; }
+    CHECK(kinds_ok, "ev_end no decrece");
+    CHECK(s.nb == 7, "nb %u", s.nb);
+    if (s.nb == 7) {
+        const struct { uint8_t k, bl; uint32_t ev, n, src; } ex[7] = {
+            {0, 0xFF, 4, 3, 0}, {1, 1, 4, 3, 2}, {2, 2, 4, 6, 1}, {2, 0xFF, 4, 6, 3},
+            {0, 0xFF, 7, 3, 5}, {2, 0xFF, 7, 6, 6}, {0, 0xFF, 10, 3, 8}};
+        for (int i = 0; i < 7; i++)
+            CHECK(s.b[i].kind == ex[i].k && s.b[i].blend == ex[i].bl && s.b[i].ev_end == ex[i].ev && s.b[i].count == ex[i].n && s.b[i].src_op == ex[i].src,
+                  "batch %d: k%u bl%u ev%u n%u src%u", i, s.b[i].kind, s.b[i].blend, s.b[i].ev_end, s.b[i].count, s.b[i].src_op);
+    }
+    /* rect: flip X -> u decrece; flags */
+    for (uint32_t i = 0; i < s.nb; i++)
+        if (s.b[i].kind == 2 && s.b[i].src_op == 1) {
+            const VrVtx *v = &s.v[s.b[i].first];
+            CHECK((v[0].flags & VR_F_2D) && (v[0].flags & VR_F_RECT), "flags rect");
+            float umin = 1e9f, umax = -1e9f;
+            for (int k = 0; k < 6; k++) { umin = fminf(umin, v[k].uv[0]); umax = fmaxf(umax, v[k].uv[0]); }
+            CHECK(near_f(umax, 5, 1e-4f) && near_f(umin, 5 - 16, 1e-4f), "u rect flip %f %f", umin, umax);
+            CHECK(near_f(v[0].pos[0], 10, 1e-4f) && near_f(v[0].pos[2], 0, 1e-4f), "pos rect");
+        }
+    /* líneas: 2D con VR_F_LINE */
+    for (uint32_t i = 0; i < s.nb; i++)
+        if (s.b[i].src_op == 6) CHECK(s.v[s.b[i].first].flags & VR_F_LINE, "línea");
+    /* partial_to_2d */
+    o.partial_to_2d = 1;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.drop_partial == 0 && s.stats.n_poly2d == 2, "partial_to_2d (%u)", s.stats.n_poly2d);
+    vr_scene_release();
+}
+
+static void test_drops(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    reset();
+    float a[3] = {0, 0, 2000}, b[3] = {1000, 0, 2000}, c[3] = {0, 1000, 2000};
+    float bh[3] = {0, 0, -500};                          /* detrás de la cámara */
+    float a2[3] = {0, 0, 2000}, c2[3] = {2000, 0, 2000}; /* degenerado (colineal) */
+    float h0[3] = {0, 0, 2000}, h1[3] = {500000, 0, 2000}, h2[3] = {0, 500000, 2000}; /* enorme */
+    float nanp[3] = {NAN, 0, 2000};
+    poly3(a, b, c, 0);
+    poly3(a, b, bh, 0);
+    poly3(a2, b, c2, 0);
+    poly3(h0, h1, h2, 0);
+    poly3(a, b, nanp, 0);
+    VrSceneOpts o = vr_scene_opts_default();
+    VrScene s;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0, "build");
+    CHECK(s.stats.n_tris3d == 1 && s.stats.drop_near == 1 && s.stats.drop_degenerate == 1 && s.stats.drop_huge == 1 && s.stats.drop_nan == 1,
+          "3d %u near %u deg %u huge %u nan %u", s.stats.n_tris3d, s.stats.drop_near, s.stats.drop_degenerate, s.stats.drop_huge, s.stats.drop_nan);
+    /* sin puente: espacio de vista, cámara en el origen, -Z adelante */
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && !s.world_valid && s.has_3d, "sin puente");
+    for (uint32_t i = 0; i < s.nv; i++) CHECK(near_f(s.v[i].pos[2], -2.0f, 1e-4f), "sin puente z=%f", s.v[i].pos[2]);
+    /* lista vacía, argumentos nulos, escala distinta */
+    GpuDrawList empty; memset(&empty, 0, sizeof empty);
+    CHECK(vr_scene_build(&empty, &bs, &o, &s) == 0 && s.nv == 0 && s.nb == 0 && !s.has_3d, "vacía");
+    CHECK(vr_scene_build(NULL, &bs, &o, &s) < 0 && vr_scene_build(&empty, &bs, &o, NULL) < 0, "nulos");
+    VrSceneOpts o2 = o; o2.scale = 0.002f;
+    CHECK(vr_scene_build(&dl, &bs, &o2, &s) == 0 && s.stats.n_tris3d == 1 && near_f(s.scale, 0.002f, 1e-9f), "escala");
+    vr_scene_release();
+}
+
+static void test_state(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    reset();
+    float a[3] = {0, 0, 2000}, b[3] = {1000, 0, 2000}, c[3] = {0, 1000, 2000};
+    GpuOp *o1 = poly3(a, b, c, 0); o1->twmx = 3; o1->twox = 1; o1->cx2 = 319; o1->cy2 = 239;
+    GpuOp *o2 = poly3(a, b, c, 0); o2->twmx = 3; o2->twox = 1; o2->cx2 = 319; o2->cy2 = 239;
+    GpuOp *o3 = poly3(a, b, c, 0); (void)o3;
+    VrSceneOpts o = vr_scene_opts_default();
+    VrScene s;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.nstates == 2, "estados %u", s.nstates);
+    CHECK(s.v[0].pad == s.v[3].pad && s.v[0].pad != s.v[6].pad, "índices de estado");
+    const VrState *st = vr_scene_state(&s, s.v[0].pad);
+    CHECK(st && st->twmx == 3 && st->twox == 1 && st->cx2 == 319, "estado");
+    CHECK(vr_scene_state(&s, 77) == NULL, "estado fuera de rango");
+    vr_scene_release();
+}
+
+
+static void test_gte_scale_and_validity(void) {
+    /* La GTE usa N = M^T con M = eye_axes (columnas escaladas ~1,002): el mundo reconstruido debe ser exacto, sin
+     * escala 1,002 respecto al ojo. Vértice de vista v = N*(P - e) -> mundo e + inv(N) v. */
+    const float Rr[3][3] = {{1, 0, 0}, {0, -0.5f, -0.8660254f}, {0, 0.8660254f, -0.5f}};
+    const float D[3] = {1.0024f, 1.0034f, 1.0008f};
+    float M[3][3];
+    for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) M[r][c] = Rr[r][c] * D[c];
+    const int32_t e[3] = {-5800, 8188, 1807};
+    BridgeState bs; set_eye(&bs, M, e);
+    reset();
+    const float P[3][3] = {{-5000, 0, -3000}, {-6000, 100, -2500}, {-4000, 50, -3500}};
+    float v[3][3];
+    for (int i = 0; i < 3; i++) {
+        float Q[3] = {P[i][0] - e[0], P[i][1] - e[1], P[i][2] - e[2]};
+        for (int c = 0; c < 3; c++) { v[i][c] = 0; for (int r = 0; r < 3; r++) v[i][c] += (bs.eye_axes[r][c] / 4096.0f) * Q[r]; }
+    }
+    poly3(v[0], v[1], v[2], 0);
+    VrSceneOpts o = vr_scene_opts_default();
+    o.origin_mode = 1;
+    VrScene s;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.nv == 3, "build gte");
+    int ok = 1;
+    for (int i = 0; i < 3; i++) {
+        int m = 0;
+        for (uint32_t j = 0; j < 3; j++)
+            if (near_f(s.v[j].pos[0], P[i][0] * 0.001f, 1e-3f) && near_f(s.v[j].pos[1], P[i][1] * 0.001f, 1e-3f) &&
+                near_f(s.v[j].pos[2], P[i][2] * 0.001f, 1e-3f)) m = 1;
+        ok &= m;
+    }
+    CHECK(ok, "mundo exacto con la matriz escalada de la GTE");
+    /* eye_from_view_t coincide con eye_pos cuando la traslación es -N*e */
+    for (int c = 0; c < 3; c++) { float t = 0; for (int r = 0; r < 3; r++) t -= (bs.eye_axes[r][c] / 4096.0f) * (float)e[r]; bs.view_t[c] = (int32_t)lrintf(t); }
+    VrScene s2; o.eye_from_view_t = 1;
+    float eye_a[3] = {s.eye_vr[0], s.eye_vr[1], s.eye_vr[2]};
+    CHECK(vr_scene_build(&dl, &bs, &o, &s2) == 0 && near_f(s2.eye_vr[0], eye_a[0], 2e-3f) && near_f(s2.eye_vr[1], eye_a[1], 2e-3f) &&
+          near_f(s2.eye_vr[2], eye_a[2], 2e-3f), "ojo desde view_t == eye_pos");
+    o.eye_from_view_t = 0;
+    /* validez del puente: sin jugador o sin ALL_CORE => world_valid 0 (la matriz del ojo se aplica igualmente) */
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.world_valid, "world_valid con puente completo");
+    bs.has_player = 0;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && !s.world_valid && s.nv == 3, "sin jugador");
+    bs.has_player = 1; bs.valid &= ~BRIDGE_OK_ALERT;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && !s.world_valid, "sin ALL_CORE");
+    bs.valid &= ~BRIDGE_OK_EYE;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && !s.world_valid && s.nv == 3, "sin EYE");
+    vr_scene_release();
+}
+
+static void test_line_coverage(void) {
+    reset();
+    { GpuOp *o = add(GPU_OP_LINE); o->nv = 2; o->v[0].x = 10; o->v[0].y = 20; o->v[1].x = 14; o->v[1].y = 20; }
+    VrSceneOpts o = vr_scene_opts_default();
+    VrScene s;
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.nv == 6, "línea");
+    float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+    for (uint32_t i = 0; i < s.nv; i++) {
+        x0 = fminf(x0, s.v[i].pos[0]); x1 = fmaxf(x1, s.v[i].pos[0]); y0 = fminf(y0, s.v[i].pos[1]); y1 = fmaxf(y1, s.v[i].pos[1]);
+    }
+    /* píxeles 10..14 en x (5) y la fila 20 */
+    CHECK(near_f(x0, 10, 1e-4f) && near_f(x1, 15, 1e-4f) && near_f(y0, 20, 1e-4f) && near_f(y1, 21, 1e-4f), "cobertura línea %f %f %f %f", x0, x1, y0, y1);
+    vr_scene_release();
+}
+
+static void test_event_epochs(void) {
+    /* aleatorio: ev_end de cada triángulo == nº de op < src_op que son eventos... en índices: primer evento con índice > op */
+    srand(7);
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    float a[3] = {0, 0, 2000}, b[3] = {1000, 0, 2000}, c[3] = {0, 1000, 2000};
+    for (int iter = 0; iter < 200; iter++) {
+        reset();
+        int n = 1 + rand() % 60;
+        for (int i = 0; i < n; i++) {
+            int k = rand() % 6;
+            if (k == 0) { GpuOp *o = add(GPU_OP_FILL); o->rw = 1; o->rh = 1; }
+            else if (k == 1) { GpuOp *o = add(GPU_OP_UPLOAD); o->rw = 1; o->rh = 1; }
+            else if (k == 2) add(GPU_OP_DOWNLOAD);
+            else if (k == 3) { GpuOp *o = add(GPU_OP_RECT); o->rw = 4; o->rh = 4; o->flags = (uint16_t)(rand() & 1 ? GPU_F_SEMI : 0); o->abr = (uint8_t)(rand() & 3); }
+            else poly3(a, b, c, rand() & 1);
+        }
+        VrSceneOpts o = vr_scene_opts_default();
+        VrScene s;
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0, "build fuzz");
+        uint32_t prev = 0, total = 0;
+        for (uint32_t i = 0; i < s.nb; i++) {
+            const VrBatch *bt = &s.b[i];
+            CHECK(bt->ev_end >= prev, "monotónico"); prev = bt->ev_end;
+            total += bt->count;
+            for (uint32_t j = 0; j < bt->count; j += 3) {
+                /* ningún evento de índice < src (de la primitiva) puede quedar fuera, ni uno > op dentro */
+                const VrVtx *v = &s.v[bt->first + j]; (void)v;
+            }
+            /* eventos con índice < ev_end deben ser exactamente los anteriores a la primitiva del batch */
+            for (uint32_t q = 0; q < dl.nops; q++) {
+                int ev = dl.ops[q].type == GPU_OP_FILL || dl.ops[q].type == GPU_OP_UPLOAD || dl.ops[q].type == GPU_OP_VCOPY;
+                if (!ev) continue;
+                CHECK((q < bt->ev_end) == (q < bt->src_op), "evento %u vs ev_end %u src_op %u", q, bt->ev_end, bt->src_op);
+            }
+        }
+        CHECK(total == s.nv, "vértices en batches");
+    }
+    vr_scene_release();
+}
+
+int main(void) {
+    test_basic();
+    test_stability();
+    test_classes_and_events();
+    test_drops();
+    test_state();
+    test_gte_scale_and_validity();
+    test_line_coverage();
+    test_event_epochs();
+    if (fails) { fprintf(stderr, "%d fallos\n", fails); return 1; }
+    printf("test_scene: OK\n");
+    return 0;
+}
