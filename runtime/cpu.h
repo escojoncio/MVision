@@ -81,6 +81,16 @@ void rt_syscall(Cpu *c, uint32_t pc);
 void rt_break(Cpu *c, uint32_t pc);
 void rt_div(Cpu *c, uint32_t a, uint32_t b);
 void rt_divu(Cpu *c, uint32_t a, uint32_t b);
+/* ---- Overlays recompiladas (tools/recomp/recomp.py --ov-batch; índice generado ov_index.c) ----
+ * Todas las overlays se cargan en la misma base. Cada una trae su tabla de funciones y el hash FNV-1a 64
+ * de sus bytes de código [base+off, base+off+len). El runtime registra la tabla cuya firma coincide con
+ * la RAM (rt.c, rt_ov_*). Sin índice enlazado (rt_ov_count = 0) todo sigue en el intérprete. */
+typedef struct { const char *name; uint32_t base, off, len, w0; uint64_t hash; const FuncEntry *table; unsigned count; } OvDesc;
+extern const OvDesc rt_ov_index[];
+extern const unsigned rt_ov_count;
+/* Aviso de que se escribieron bytes de RAM de código potencial (cargas de disco: CdGetSector): invalida la overlay. */
+void rt_ov_written(uint32_t addr, uint32_t len);
+
 /* Registro de tablas extra (overlays cargados en RAM). */
 void rt_register_table(const FuncEntry *t, unsigned n);
 void rt_clear_tables(void);

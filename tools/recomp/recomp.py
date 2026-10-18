@@ -3,6 +3,8 @@
 
   recomp.py <exe> <salida_dir> [--funcs funcs.txt]... [--code-end HEX] [--names names.json] [--hle hle.txt]...
             [--no-extra] [--poll-entry]
+  recomp.py <ov.bin> <salida> --overlay NOMBRE --base HEX --main-gen DIR   (modo overlay, ver más abajo)
+  recomp.py --ov-batch <dir_bins> <salida> --base HEX --main-gen DIR
 
 Interrupciones: se emite RT_POLL(c) en cada arista hacia atrás (bucles), en el despacho de tablas de
 salto y, con --poll-entry, en la entrada de cada función (sondeo de IRQ pendiente, ver runtime/cpu.h).
@@ -58,6 +60,18 @@ class Exe:
         self.text = d[HDR:HDR + size]
         self.end = self.base + len(self.text)
 
+    @classmethod
+    def overlay(cls, path, base):
+        """Binario de overlay crudo cargado tal cual en `base` (sin cabecera PS-X EXE)."""
+        e = cls.__new__(cls)
+        d = open(path, "rb").read()
+        e.pc0, e.base, e.is_ov = None, base, True
+        e.text = d[:len(d) & ~3]
+        e.end = base + len(e.text)
+        return e
+
+    is_ov = False
+
     def word(self, a):
         return struct.unpack_from("<I", self.text, a - self.base)[0]
 
@@ -91,7 +105,7 @@ def after_end(exe, v):
 def find_funcs(exe, extra, weak_out=None):
     """Lista ordenada de inicios. Si weak_out es un set, se rellena con los inicios débiles
     (heurísticos de datos y lui/addiu) que no son también fuertes."""
-    starts = {exe.pc0} | set(extra)
+    starts = ({exe.pc0} if exe.pc0 is not None else set()) | set(extra)
     for a in range(exe.base, exe.end, 4):
         w = exe.word(a)
         if w >> 26 == 3:  # jal
@@ -135,6 +149,9 @@ def find_funcs(exe, extra, weak_out=None):
     # Excepción: justo tras `jr ra`+delay es un límite real (la función con tabla acaba ahí).
     # Daño = la parte [s,v) salta (rama o tabla en datos) a [v,e): se descarta; si no, el corte es inocuo.
     data_ptrs = set(struct.unpack_from(f"<{(exe.code_start - exe.base) // 4}I", exe.text, 0))
+    if exe.is_ov:  # overlay: tablas de saltos y datos tras el código
+        o = exe.end - exe.base
+        data_ptrs |= set(struct.unpack_from(f"<{(len(exe.text) - o) // 4}I", exe.text, o))
 
     def harmful(s, v, e):
         for x in range(s, v, 4):
@@ -309,8 +326,9 @@ def emit_simple(a, w):
 
 
 class Func:
-    def __init__(self, exe, start, end, known):
+    def __init__(self, exe, start, end, known, pfx="f_", ext=()):
         self.exe, self.start, self.end, self.known = exe, start, end, known
+        self.pfx, self.ext = pfx, ext   # overlay: prefijo propio y conjunto de inicios del ejecutable principal
         self.labels = set()
         self.unsupported = 0
         for a in range(start, end, 4):
@@ -332,23 +350,29 @@ class Func:
     def _is_jr_nonra(w):
         return w >> 26 == 0 and (w & 63) == 8 and rs(w) != 31
 
+    def sym(self, t):
+        """Símbolo C de la función que empieza en t (propia o del ejecutable principal) o None."""
+        if t in self.known: return f"{self.pfx}{t:08x}"
+        if t in self.ext: return f"f_{t:08x}"
+        return None
+
     def goto_or_tail(self, t, a=None):
         if self.start <= t < self.end:
             # arista hacia atrás (bucle): punto seguro de entrega de interrupciones
             if a is not None and t <= a:
                 return f"RT_POLL(c); goto L_{t:08x};"
             return f"goto L_{t:08x};"
-        if t in self.known:
-            return f"f_{t:08x}(c); return;"
+        if self.sym(t):
+            return f"{self.sym(t)}(c); return;"
         return f"rt_jump(c, 0x{t:08x}u); return;"
 
     def call(self, t, ret):
         if t in SETJMP:
             # setjmp del juego: punto de reanudación en el marco C actual (ver runtime/rt.c rt_sj_*).
             return (f"c->r[31] = 0x{ret:08x}u; if (setjmp(*rt_sj_slot(c, c->r[4]))) rt_sj_resumed(c); "
-                    f"else f_{t:08x}(c);")
-        if t in self.known:
-            return f"c->r[31] = 0x{ret:08x}u; f_{t:08x}(c);"
+                    f"else {self.sym(t) or 'f_%08x' % t}(c);")
+        if self.sym(t):
+            return f"c->r[31] = 0x{ret:08x}u; {self.sym(t)}(c);"
         return f"c->r[31] = 0x{ret:08x}u; rt_call(c, 0x{t:08x}u);"
 
     def simple(self, a):
@@ -360,7 +384,7 @@ class Func:
         return out
 
     def emit(self, name=None, hle=False):
-        fname = f"orig_f_{self.start:08x}" if hle else f"f_{self.start:08x}"
+        fname = f"orig_f_{self.start:08x}" if hle else f"{self.pfx}{self.start:08x}"
         L = []
         if hle:
             L += [f"void f_{self.start:08x}(Cpu *c) {{ RT_ENTER(0x{self.start:08x}u); hle_{name}(c); }}", ""]
@@ -411,8 +435,8 @@ class Func:
                 continue
             L.append(f"    {lab}{self.simple(a)}")
             a += 4
-        L.append(f"    f_{self.end:08x}(c); return; /* caída a la siguiente función */"
-                 if self.end in self.known else "    rt_fallthrough(c, 0x%08xu); return;" % self.end)
+        L.append(f"    {self.sym(self.end)}(c); return; /* caída a la siguiente función */"
+                 if self.sym(self.end) else "    rt_fallthrough(c, 0x%08xu); return;" % self.end)
         if self.has_jr_table:
             L.append("JR_DISPATCH:")
             L.append("    RT_POLL(c);")
@@ -425,12 +449,123 @@ class Func:
         return "\n".join(L)
 
 
+
+# ---------------------------------------------------------------------------------------------
+# Modo overlay (código de zona cargado en RAM en una base común; ver bitácora §15).
+#   recomp.py <ov.bin> <salida> --overlay NOMBRE --base HEX --main-gen DIR_GEN_PRINCIPAL
+#   recomp.py --ov-batch <dir_bins> <salida> --base HEX --main-gen DIR_GEN_PRINCIPAL
+# Genera ov_<nombre>.c (funciones ov_<nombre>_f_XXXXXXXX + tabla ov_<nombre>_table) y, en lote, el
+# índice ov_index.c. Dos overlays con el mismo código (mismo hash) comparten tabla.
+# ---------------------------------------------------------------------------------------------
+def fnv1a64(b):
+    h = 0xcbf29ce484222325
+    for x in b:
+        h = ((h ^ x) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def load_main_gen(gen):
+    """Inicios de función y dirección de setjmp del ejecutable principal ya recompilado."""
+    import re
+    starts = {int(m, 16) for m in re.findall(r"void f_([0-9a-f]{8})\(Cpu", open(os.path.join(gen, "funcs.h")).read())}
+    disp = open(os.path.join(gen, "dispatch.c")).read()
+    sj = {int(m, 16) for m in re.findall(r'\{0x([0-9a-f]{8})u, "setjmp"\}', disp)}
+    return starts, sj
+
+
+def ov_region(path, base):
+    """Región de código del overlay, afinada: el inicio sube hasta la primera función real (los datos
+    de cabecera que se decodifican como instrucciones quedan fuera del hash). Devuelve
+    (exe, inicio, fin, hash, inicios, fines)."""
+    exe = Exe.overlay(path, base)
+    cs, ce = detect_code(exe)
+    exe.end, exe.code_start = ce, cs
+    starts = find_funcs(exe, [], set())
+    firsts = [x for x in starts if x != cs]
+    if firsts and min(firsts) > cs:
+        exe.code_start = cs = min(firsts)
+    weak = set()
+    starts = find_funcs(exe, [], weak)
+    ends, _ = extend_ends(exe, starts, weak)
+    return exe, cs, ce, fnv1a64(exe.text[cs - base:ce - base]), starts, ends
+
+
+def ov_ident(name):
+    return "".join(ch if ch.isalnum() else "_" for ch in name)
+
+
+def recompile_overlay(exe, name, outdir, main_starts, starts, ends):
+    """Escribe ov_<name>.c. Devuelve (nº de funciones, nº de instrucciones no soportadas)."""
+    ident = ov_ident(name)
+    pfx = f"ov_{ident}_f_"
+    known = set(starts)
+    funcs = [Func(exe, s, ends[i], known, pfx, main_starts) for i, s in enumerate(starts)]
+    with open(os.path.join(outdir, f"ov_{ident}.c"), "w") as f:
+        f.write('#include "funcs.h"\n\n')
+        for fn in funcs:
+            f.write(f"static void {pfx}{fn.start:08x}(Cpu *c);\n")
+        f.write("\n")
+        for fn in funcs:
+            text = fn.emit()
+            f.write(text.replace(f"void {pfx}{fn.start:08x}(", f"static void {pfx}{fn.start:08x}(", 1) + "\n\n")
+        f.write(f"const FuncEntry ov_{ident}_table[] = {{\n")
+        for fn in funcs:
+            f.write(f"    {{0x{fn.start:08x}u, {pfx}{fn.start:08x}}},\n")
+        f.write("};\n")
+    return len(funcs), sum(fn.unsupported for fn in funcs)
+
+
+def overlay_main(a):
+    base = int(a[a.index("--base") + 1], 16)
+    main_starts, sj = load_main_gen(a[a.index("--main-gen") + 1])
+    SETJMP.update(sj)
+    if "--ov-batch" in a:
+        i = a.index("--ov-batch")
+        bindir, outdir = a[i + 1], a[i + 2]
+        os.makedirs(outdir, exist_ok=True)
+        bins = sorted(x for x in os.listdir(bindir) if x.endswith(".bin") and os.path.getsize(os.path.join(bindir, x)) >= 64)
+        done, rows, words = {}, [], {}   # (hash, off, len) -> nombre con tabla
+        for fn in bins:
+            name = fn[:-4]
+            exe, cs, ce, h, st, en = ov_region(os.path.join(bindir, fn), base)
+            key = (h, cs - base, ce - cs)
+            if key not in done:
+                n, un = recompile_overlay(exe, name, outdir, main_starts, st, en)
+                done[key] = (name, n)
+                print(f"{name}: código 0x{cs:08x}-0x{ce:08x} hash {h:016x} funciones {n} no soportadas {un}")
+            else:
+                print(f"{name}: igual que {done[key][0]}")
+            words[name] = exe.text
+            rows.append((name, key, done[key]))
+        with open(os.path.join(outdir, "ov_index.c"), "w") as f:
+            f.write('#include "cpu.h"\n\n')
+            for tn in sorted({d[0] for _, _, d in rows}):
+                f.write(f"extern const FuncEntry ov_{ov_ident(tn)}_table[];\n")
+            f.write("\nconst OvDesc rt_ov_index[] = {\n")
+            for name, (h, off, ln), (tn, n) in rows:
+                w0 = struct.unpack_from("<I", words[name], off)[0]
+                f.write(f'    {{"{name}", 0x{base:08x}u, 0x{off:x}u, 0x{ln:x}u, 0x{w0:08x}u, 0x{h:016x}ull, ov_{ov_ident(tn)}_table, {n}u}},\n')
+            f.write("    {0, 0, 0, 0, 0, 0, 0, 0}\n};\n")
+            f.write(f"const unsigned rt_ov_count = {len(rows)};\n")
+        print(f"overlays {len(rows)}, códigos distintos {len(done)}")
+        return 0
+    path, outdir = a[0], a[1]
+    name = a[a.index("--overlay") + 1]
+    os.makedirs(outdir, exist_ok=True)
+    exe, cs, ce, h, st, en = ov_region(path, base)
+    n, un = recompile_overlay(exe, name, outdir, main_starts, st, en)
+    print(f"{name}: código 0x{cs:08x}-0x{ce:08x} hash {h:016x} funciones {n} no soportadas {un}")
+    return 0
+
+
 POLL_ENTRY = False  # --poll-entry: sondeo también en la entrada de cada función
 
 
 def main(a):
     global POLL_ENTRY
     POLL_ENTRY = "--poll-entry" in a
+    if "--overlay" in a or "--ov-batch" in a:
+        return overlay_main(a)
     if len(a) < 2:
         print(__doc__)
         return 1

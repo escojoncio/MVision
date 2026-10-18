@@ -25,9 +25,91 @@ static FuncPtr find(const FuncEntry *t, unsigned n, uint32_t a) {
     return lo < n && t[lo].addr == a ? t[lo].fn : NULL;
 }
 
+/* ---- Overlays: detección por hash del código en RAM ----
+ * Hay a lo sumo una overlay activa (tabla ov_t). rt_ov_written (llamado al cargar datos del disco)
+ * la invalida si se tocó su código o, sin overlay activa, la ventana de overlays; entonces el siguiente
+ * fallo de búsqueda dentro de la ventana la identifica: para cada (off,len) distinto del índice se
+ * compara primero la primera palabra y solo entonces se calcula el FNV-1a 64 de la RAM.
+ * Si ninguna coincide (carga a medias, overlay desconocida) no se registra nada (intérprete) y solo se
+ * reintenta cuando cambie una muestra de 64 palabras de la ventana. */
+__attribute__((weak)) const OvDesc rt_ov_index[] = {{0, 0, 0, 0, 0, 0, 0, 0}};
+__attribute__((weak)) const unsigned rt_ov_count = 0;
+
+static const FuncEntry *ov_t;           /* tabla de la overlay activa */
+static unsigned ov_n;
+static uint32_t ov_lo, ov_hi;           /* código de la overlay activa (direcciones) */
+static uint32_t ov_wlo, ov_whi;         /* ventana: unión de todos los códigos del índice */
+static int ov_init, ov_dirty = 1, ov_have_sample;
+static uint32_t ov_sample;
+
+static void ov_setup(void) {
+    ov_init = 1;
+    ov_wlo = 0xFFFFFFFFu; ov_whi = 0;
+    for (unsigned i = 0; i < rt_ov_count; i++) {
+        uint32_t lo = rt_ov_index[i].base + rt_ov_index[i].off, hi = lo + rt_ov_index[i].len;
+        if (lo < ov_wlo) ov_wlo = lo;
+        if (hi > ov_whi) ov_whi = hi;
+    }
+}
+
+static uint64_t fnv1a64(const uint8_t *p, uint32_t n) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    while (n--) h = (h ^ *p++) * 0x100000001b3ull;
+    return h;
+}
+
+static uint32_t ov_word(uint32_t a) { uint32_t v; memcpy(&v, &psx_ram[a & (PSX_RAM_SIZE - 1)], 4); return v; }
+
+static uint32_t ov_sample_calc(void) {
+    uint32_t step = ((ov_whi - ov_wlo) / 64) & ~3u, h = 2166136261u;
+    for (unsigned i = 0; i < 64; i++) h = (h ^ ov_word(ov_wlo + i * step)) * 16777619u;
+    return h;
+}
+
+void rt_ov_written(uint32_t a, uint32_t n) {
+    if (!rt_ov_count) return;
+    if (!ov_init) ov_setup();
+    a = (a & 0x1FFFFFFFu) | 0x80000000u;
+    uint32_t lo = ov_t ? ov_lo : ov_wlo, hi = ov_t ? ov_hi : ov_whi;
+    if (a < hi && (uint64_t)a + n > lo) {
+        ov_dirty = 1;
+        if (ov_t) { ov_t = NULL; ov_n = 0; }
+    }
+}
+
+static void ov_detect(void) {
+    uint32_t s = ov_sample_calc();
+    if (!ov_dirty && ov_have_sample && s == ov_sample) return;   /* nada nuevo desde el último intento */
+    ov_dirty = 0; ov_have_sample = 1; ov_sample = s;
+    for (unsigned i = 0; i < rt_ov_count; i++) {
+        const OvDesc *d = &rt_ov_index[i];
+        uint32_t a = d->base + d->off;
+        if (a + d->len > 0x80000000u + PSX_RAM_SIZE || !d->len) continue;
+        const uint8_t *p = &psx_ram[a & (PSX_RAM_SIZE - 1)];
+        uint32_t w0;
+        memcpy(&w0, p, 4);
+        if (w0 != d->w0 || fnv1a64(p, d->len) != d->hash) continue;
+        ov_t = d->table; ov_n = d->count; ov_lo = a; ov_hi = a + d->len;
+        if (getenv("MV_OVLOG")) fprintf(stderr, "[ov] overlay '%s' en 0x%08x (%u funciones)\n", d->name, d->base, d->count);
+        return;
+    }
+    if (getenv("MV_OVLOG")) fprintf(stderr, "[ov] ninguna overlay coincide con la RAM de la ventana\n");
+}
+
+/* Fallo de búsqueda: si la dirección cae en la ventana de overlays, intenta identificar la cargada. */
+static FuncPtr ov_miss(uint32_t a) {
+    if (!rt_ov_count) return NULL;
+    if (!ov_init) ov_setup();
+    if (a < ov_wlo || a >= ov_whi || ov_t) return NULL;
+    ov_detect();
+    return ov_t ? find(ov_t, ov_n, a) : NULL;
+}
+
 FuncPtr rt_lookup(uint32_t a) {
     a = (a & 0x1FFFFFFFu) | 0x80000000u; /* KUSEG/KSEG1 -> KSEG0 */
     FuncPtr f = find(rt_func_table, rt_func_count, a);
+    if (!f && ov_t && a >= ov_lo && a < ov_hi) f = find(ov_t, ov_n, a);
+    if (!f) f = ov_miss(a);
     for (unsigned i = ntables; !f && i-- > 0;) f = find(tables[i].t, tables[i].n, a);
     return f;
 }

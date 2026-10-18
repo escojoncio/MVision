@@ -30,6 +30,9 @@ static void note_entry(uint32_t t, uint32_t c_ra) {
     for (unsigned i = 0; i < nseen; i++) if (seen[i] == t) return;
     if (nseen < SEEN_N) seen[nseen++] = t;
     fprintf(stderr, "[interp] interpretando 0x%08x %s (sin función recompilada; ra=0x%08x %s)\n", t, rt_name(t), c_ra, rt_name(c_ra));
+    /* MV_RAMDUMP=fichero: vuelca la RAM al primer aviso (diagnóstico: localizar overlays cargadas). */
+    { const char *rd = getenv("MV_RAMDUMP"); static int done;
+      if (rd && !done && t >= 0x800c0000u) { done = 1; FILE *g = fopen(rd, "wb"); if (g) { fwrite(psx_ram, 1, PSX_RAM_SIZE, g); fclose(g); } } }
     if (!interp_log_enabled) return;
     FILE *f = fopen("missing_funcs.txt", "a+");
     if (!f) return;

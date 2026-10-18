@@ -102,12 +102,14 @@ static void bios_a0(Cpu *c, uint32_t fn) {
     case 0x25: V0 = (A0 >= 'a' && A0 <= 'z') ? A0 - 32 : A0; return; /* toupper */
     case 0x2A: {                                   /* memcpy */
         void *d = mem_ptr(A0), *s = mem_ptr(A1);
+        rt_ov_written(A0, A2);
         if (d && s && A2) memmove(d, s, A2);
         else for (uint32_t i = 0; i < A2; i++) mem_w8(c, A0 + i, mem_r8(c, A1 + i));
         V0 = A0; return;
     }
     case 0x2B: {                                   /* memset */
         void *d = mem_ptr(A0);
+        rt_ov_written(A0, A2);
         if (d && A2) memset(d, (int)(A1 & 0xFF), A2);
         else for (uint32_t i = 0; i < A2; i++) mem_w8(c, A0 + i, (uint8_t)A1);
         V0 = A0; return;
