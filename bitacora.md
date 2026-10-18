@@ -75,7 +75,7 @@ Coste: mapear símbolos JP→EU (por firmas) si se elige opción A.
 
 - `tools/stage/stages.py`: `list`, `check`, `overlays <DIR> <out>`. Formato DATACNF: cabecera `u8 ver, u8 pad, i16 sectores`; tags 8 B `u16 id, u8 modo, u8 ext, i32 tamaño` hasta modo 0; datos tras sector de cabecera, alineados a sector; grupo `c` empaquetado con tamaño en tag ext `0xFF`. **Verificado disco 1: 94/94 stages cuadran; 92 overlays (`s`/`b`) extraídos** (`init`, `init_tux` sin overlay).
 - `sigs.py` tras revisión: solo símbolos dentro de secciones `text` del map psylink (tras "Names in address order"), fin acotado a la sección, enmascara también lwl/lwr/swl/swr, corregido off-by-one del índice. Nombres del map en MAYÚSCULAS.
-- Workflow tras revisión: `setup-python` 3.12 (PEP 668), `wine wine32:i386` sin caché apt, `wineboot --init`, `build.py` tolerante a fallo de `compare.py` (paso de firmas exige `obj/_mgsi.exe` + `obj/asm.map`), timeout 45 min.
+- Workflow tras revisión: `setup-python` 3.12 (PEP 668), `wine wine32:i386` sin caché apt, `wineboot --init`, `build.py` tolerante a fallo de `compare.py` (paso de firmas exige `obj/_*.exe` + `obj/asm.map`), timeout 45 min.
 
 ## 7. Pendiente siguiente sesión
 

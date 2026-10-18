@@ -45,7 +45,7 @@ jobs:
 
       - name: Function signatures (sin código)
         run: |
-          EXE=upstream/decomp/obj/_mgsi.exe; MAP=upstream/decomp/obj/asm.map
+          EXE=$(ls upstream/decomp/obj/_*.exe | head -1); MAP=upstream/decomp/obj/asm.map
           test -f "$EXE" && test -f "$MAP" || { echo "Falta exe o map de referencia"; exit 1; }
           sha256sum "$EXE"
           python tools/sig/sigs.py make "$EXE" "$MAP" sigs_ref.json
