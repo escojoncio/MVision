@@ -12,6 +12,9 @@ name: visionos
 #
 # Secrets (Settings > Secrets and variables > Actions):
 #   DECOMP_REPO, DECOMP_COMMIT, SDK_REPO   solo si hay que ejecutar `reference` (los usa build.yml).
+#   APP_FOLDER_KEY   (opcional) SHA-256 en hex minúsculas del nombre de carpeta exigido a la app. Cálculo: nombre sin
+#                     espacios al principio/fin, en minúsculas, UTF-8 (NFC) -> sha256 -> 64 caracteres hex.
+#                     Ejemplo: printf '%s' "nombre en minúsculas" | shasum -a 256. Si falta, vale cualquier carpeta.
 #   HOST_REPO, HOST_COMMIT   (opcionales, ambos) repo y commit del motor propio cuyos ficheros Swift
 #                     opcionales se añaden si compilan.
 on:
@@ -132,12 +135,15 @@ jobs:
 
       - name: Compilar (sin firmar)
         working-directory: app
+        env:
+          APP_FOLDER_KEY: ${{ secrets.APP_FOLDER_KEY }}
         run: |
           build() {
             xcodebuild -project MVision.xcodeproj -scheme MVision -configuration Release \
               -destination 'generic/platform=visionOS' -derivedDataPath build \
               -jobs "$(sysctl -n hw.ncpu)" \
               CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+              MV_FOLDER_KEY="$APP_FOLDER_KEY" \
               "$@" build > "$RUNNER_TEMP/xcb.log" 2>&1
           }
           # Errores como anotaciones de GitHub (fichero y línea cuando los hay), recortados y sin duplicados.

@@ -3,6 +3,7 @@ import SwiftUI
 enum GamePhase: Equatable {
     case loading
     case running
+    case needFolder(String?)   // hay que elegir la carpeta del juego (con aviso opcional)
     case noDisc
     case failed(String)
 }
@@ -10,6 +11,8 @@ enum GamePhase: Equatable {
 @MainActor
 final class GameModel: ObservableObject {
     @Published var phase: GamePhase = .loading
+    @Published var showPicker = false
+    @Published var aviso: String?
 
     private var hostStarted = false
     private var monitor: Timer?
@@ -25,9 +28,25 @@ final class GameModel: ObservableObject {
         MVExtras.start()
         #endif
 
+        // Carpeta del juego (fuera del contenedor): el acceso queda abierto durante toda la sesión.
+        if FolderAccess.shared.root == nil {
+            switch FolderAccess.shared.restore() {
+            case .ok: break
+            case .missing:
+                if !Storage.devDocuments { phase = .needFolder(nil); return }
+            case .lost:
+                phase = .needFolder("Se perdió el permiso de acceso a la carpeta. Vuelve a elegirla.")
+                return
+            case .wrongName:
+                phase = .needFolder(Self.nombreIncorrecto)
+                return
+            }
+        }
+        Storage.resolveCardDir()
+
         let discs = Storage.findDiscs()
         if discs.isEmpty {
-            Storage.log("sin disco en \(Storage.documents.path)")
+            Storage.log("sin disco en la carpeta elegida")
             phase = .noDisc
             return
         }
@@ -47,7 +66,7 @@ final class GameModel: ObservableObject {
         mv_host_set_sigs(sigs)
         mv_vrhost_install()   // capa VR (cámara, escenas): antes de arrancar el motor
 
-        let r = mv_host_start(exe.path, discs.joined(separator: ";"), Storage.cardDir.path)
+        let r = mv_host_start(exe.path, discs.joined(separator: ";"), Storage.cardDir.path)   // el hilo de emulación lee del disco con el acceso de seguridad aún abierto
         if r != 0 {
             let msg = String(cString: mv_host_error())
             Storage.log("mv_host_start = \(r): \(msg)")
@@ -63,6 +82,39 @@ final class GameModel: ObservableObject {
             Task { @MainActor in self?.poll() }
         }
     }
+
+    static let nombreIncorrecto = "La carpeta debe tener el nombre indicado en las instrucciones."
+
+    /// Resultado del selector de carpetas del sistema.
+    func folderPicked(_ r: Result<[URL], Error>) {
+        switch r {
+        case .failure(let e):
+            Storage.log("selector de carpeta: \(e.localizedDescription)")
+            phase = .needFolder("No se pudo abrir la carpeta elegida. Inténtalo de nuevo.")
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            switch FolderAccess.shared.adopt(url) {
+            case .ok: start()
+            case .wrongName: phase = .needFolder(Self.nombreIncorrecto)
+            default: phase = .needFolder("No se pudo acceder a la carpeta elegida. Inténtalo de nuevo.")
+            }
+        }
+    }
+
+    /// Botón "Cambiar carpeta". El motor no admite reiniciarse: con la partida en marcha solo se olvida la carpeta
+    /// (se pedirá al volver a abrir la app) y el acceso actual sigue abierto hasta salir.
+    func changeFolder() {
+        FolderAccess.shared.forget()
+        if hostStarted {
+            aviso = "La carpeta se pedirá de nuevo la próxima vez que abras la app. Cierra la app para cambiarla ahora."
+        } else {
+            FolderAccess.shared.release()
+            phase = .needFolder(nil)
+        }
+    }
+
+    /// Cierra el acceso a la carpeta (al terminar la app).
+    func shutdown() { FolderAccess.shared.release() }
 
     private func poll() {
         if mv_host_state() == MV_HOST_ERROR {

@@ -72,3 +72,5 @@ targets:
         # Seguimiento de los mandos Sense (poses de las manos) vía ARKit AccessoryTrackingProvider.
         NSAccessoryTrackingUsageDescription: "Se usa el seguimiento de los mandos para moverte y apuntar con ellos dentro del juego."
         GCSupportsControllerUserInteraction: true
+        # SHA-256 (hex minúsculas) del nombre de carpeta exigido; vacío = cualquier carpeta. Ver FolderAccess.swift.
+        MVFolderKey: "$(MV_FOLDER_KEY)"

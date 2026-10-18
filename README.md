@@ -1,14 +1,18 @@
 # MVision
 
-Experimental native runtime for a classic PlayStation title on Apple Vision Pro (immersive, 6DOF).
+Runtime y herramientas experimentales para Apple Vision Pro.
 
-This repository contains **no game data and no copyrighted code**. You must supply your own legally obtained disc image; everything game-specific is read from it at runtime or at build time on your machine/CI.
+## Estructura
 
-## Layout
+- `runtime/` — núcleo en C y pruebas.
+- `vr/` — módulos de entrada, cámara, escena y render inmersivo.
+- `render/` — shaders y código de render.
+- `app/` — aplicación para visionOS.
+- `tools/` — utilidades de análisis y conversión.
+- `.github/workflows/` — CI (disparo manual o `[build]` en el mensaje de commit).
 
-- `tools/disc/` — BIN/CUE (MODE2/2352) reader: ISO9660 listing, extraction, manifests for diffs.
-- `.github/workflows/` — CI (manual dispatch or `[build]` in the commit message only).
+## Pruebas
 
-## Credits
-
-Written by Claude, building on the great work of the projects credited here; the repository owner contributed ideas on how some things could be adapted.
+```
+cd runtime && make test test_sys
+```
