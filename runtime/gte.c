@@ -325,6 +325,11 @@ void gte_mtc2(Cpu *c, int r, uint32_t v) {
         IR(2) = (int32_t)(((v >> 5) & 0x1F) << 7);
         IR(3) = (int32_t)(((v >> 10) & 0x1F) << 7);
         break;
+    /* Registros de 16 bits: el hardware solo guarda 16 bits. Los guardamos ya extendidos (con signo
+     * VZ0..VZ2/IR0..IR3; sin signo OTZ/SZ0..SZ3) para que los cálculos internos, que leen el registro
+     * entero, no vean basura en la mitad alta cuando el juego carga una palabra de 32 bits (lwc2). */
+    case 1: case 3: case 5: case 8: case 9: case 10: case 11: D[r] = (int32_t)(int16_t)v; break;
+    case 7: case 16: case 17: case 18: case 19: D[r] = (int32_t)(v & 0xFFFF); break;
     case 29: case 31: break; /* solo lectura */
     case 30: {
         D[30] = (int32_t)v;
