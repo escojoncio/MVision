@@ -206,3 +206,10 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - `extend_ends(exe, starts, weak)`: a punto fijo, si una rama condicional sin enlace o `j` va a t >= fin y todos los inicios en [fin,t] son débiles, el fin pasa al de la región de t (tope 64 KB). Los débiles absorbidos siguen siendo funciones propias (código duplicado, intencionado). Los nombres HLE y `setjmp` nunca son débiles (no se saltan su envoltorio). 220 funciones ampliadas; 2461 funciones, 96 con tabla jr.
 - Resultado: 6000 frames sin fallo (~28 s); intro en motor en 3D con subtítulos en castellano y rótulo de personaje con actor de doblaje. Quedan 127 avisos `interpretando` (direcciones 0x80010000/100/200 con ra=0, también en test_sys).
 - Siguiente: revisar qué son esas llamadas a 0x8001xxxx (zona del cargador/rdata), ejecutar 20000+ frames hasta tomar el control (pulsar Start con `pad_set_state`), y comprobar FMV.
+
+## 14. Guion de mando en headless (`runtime/headless.c`) — 2026-10-18
+
+- `--pad FRAME:BOTONES[:DUR],...` (botones con `+`, duración 6 por defecto) y `--pad-every N:BOTON` (repetibles, máx. 256 eventos). `buttons` de `pad_set_state` es activo-alto (pad.c invierte). Se aplica en `rt_host_frame`.
+- **Confirmar = círculo** (cruz no confirma en menús). Start: salta intro y pausa en juego.
+- Guion que llega a partida: `--pad 120:start,400:start --pad-every 97:circle --pad-every 211:left --pad-every 151:start` -> aviso sin tarjeta (Sí con izquierda+círculo), dificultad, códec en castellano, **jugabilidad en el muelle (radar, créditos sobre el juego)** hacia frame 3000-4000. 24000 frames en 93 s, sin fallos.
+- Siguiente: guion sin Start periódico (lo pausa), mover al personaje (cruceta) y comprobar movimiento en los frames.
