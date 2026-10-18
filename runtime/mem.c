@@ -54,7 +54,11 @@ uint32_t mem_r32(Cpu *c, uint32_t a) { READ(uint32_t, 4) }
 
 #define WRITE(SZ)                                                       \
     void *h = mem_ptr(a);                                               \
-    if (h) { memcpy(h, &v, sizeof v); return; }                         \
+    if (h) {                                                            \
+        memcpy(h, &v, sizeof v);                                        \
+        if (phys(a) < 0x800000u) { uint32_t i_ = phys(a) & (PSX_RAM_SIZE - 1); if (rt_codemap[i_ >> 8]) rt_code_hit(i_); } \
+        return;                                                         \
+    }                                                                   \
     if (is_io(phys(a))) { io_write(a, v, SZ); return; }                 \
     if (a == 0xFFFE0130u) return; /* control de caché */                \
     bad(c, a, "escritura");

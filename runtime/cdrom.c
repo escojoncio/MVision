@@ -315,8 +315,9 @@ static void invoke2(Cpu *c, uint32_t fn, uint32_t a0, uint32_t a1) {
     if (!fn) return;
     Cpu saved = *c;
     c->r[4] = a0; c->r[5] = a1;
-    c->r[29] = (c->r[29] - 0x400) & ~7u;
+    c->r[29] = hle_cb_sp(c->r[29]);
     rt_call(c, fn);
+    hle_cb_done();
     *c = saved;
 }
 

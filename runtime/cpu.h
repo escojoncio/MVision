@@ -15,13 +15,28 @@ extern const FuncEntry rt_func_table[];
 extern const unsigned rt_func_count;
 extern const FuncName rt_func_names[];
 extern const unsigned rt_func_name_count;
+#ifdef MV_NOGEN
+extern uint32_t rt_entry;   /* modo sin código generado: lo fija el cargador con el pc de la cabecera del EXE */
+#else
 extern const uint32_t rt_entry;
+#endif
 /* Código original de las funciones sustituidas por HLE (nombre -> orig_f_XXXXXXXX), para que el HLE
  * delegue en él cuando necesita sus efectos sobre el estado interno de la librería. */
 typedef struct { const char *name; FuncPtr fn; } HleOrig;
 extern const HleOrig rt_hle_orig[];
 extern const unsigned rt_hle_orig_count;
 int rt_orig(Cpu *c, const char *name);   /* ejecuta el original; 0 si no existe */
+
+/* ---- Intérprete (interp.c) ----
+ * interp_call ejecuta desde `entry` hasta que el código salta a la ra de entrada (activación plana, ver interp.c);
+ * interp_call_raw lo hace ignorando la HLE enlazada en `entry` (código original). Las escrituras en RAM con
+ * bloques decodificados los invalidan: rt_codemap marca granos de 256 B con código. */
+void interp_call(Cpu *c, uint32_t entry);
+void interp_call_raw(Cpu *c, uint32_t entry);
+void interp_flush_all(void);
+extern uint8_t rt_codemap[0x200000u >> 8];
+void rt_code_hit(uint32_t ram_offset);                   /* escritura en un grano marcado (mem.c, interp.c) */
+void rt_code_invalidate(uint32_t addr, uint32_t len);    /* escritura masiva (cargas de disco, memcpy de BIOS) */
 
 void rt_dump_trace(void);   /* últimas funciones ejecutadas (anillo de 64; vacío sin -DRT_TRACE) */
 /* Traza opcional de entrada a funciones (compilar con -DRT_TRACE). */

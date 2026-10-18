@@ -9,6 +9,9 @@
 *.7z
 extracted/
 gamedata/
+# Firmas del SDK derivadas del ejecutable (se generan en CI/local, no se versionan)
+sigs_ref.json
+sigs_hle.json
 # Build
 build/
 build-san/

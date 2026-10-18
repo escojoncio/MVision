@@ -1,5 +1,5 @@
 /* Arranque headless: carga un PS-X EXE en RAM y ejecuta su punto de entrada recompilado.
- *   headless <exe> [frames] [--dump DIR] [--every N] [--disc RUTAS] [--card FICHERO] [--full]
+ *   headless <exe> [frames] [--dump DIR] [--every N] [--disc RUTAS] [--card FICHERO] [--full] [--sigs FIRMAS]
  *  - frames: VBlanks a ejecutar (por defecto 300).
  *  - --disc "dir1;dir2" (o variable MV_DISC): discos extraídos; --card (o MV_CARD): imagen .mcd.
  *  - --peek DIR,LEN (repetible): vuelca palabras de RAM al terminar (diagnóstico).
@@ -9,6 +9,7 @@
  *    up down left right l1 l2 r1 r2); DURACION en frames (por defecto 6). Ej.: --pad 1800:start,2400:cross+up:10
  *  - --pad-every N:BOTON: pulsa BOTON 6 frames cada N frames (útil para saltar escenas). Repetible junto a --pad.
  *    Los botones se pasan a pad_set_state() en positivo (bit a 1 = pulsado; pad.c invierte); sticks a 0x80.
+ *  - --sigs FICHERO (o MV_SIGS): firmas del SDK; obligatorio en el runtime sin código generado (headless_interp).
  * Al terminar imprime estadísticas de la GPU y del intérprete. */
 #include <setjmp.h>
 #include <signal.h>
@@ -17,22 +18,25 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include "cdrom.h"
 #include "cpu.h"
 #include "gpu.h"
 #include "hle.h"
+#include "hlebind.h"
 #include "sys.h"
 
 extern jmp_buf rt_fatal_jmp;
 extern int rt_fatal_armed;
-extern unsigned long interp_insns;
+extern unsigned long interp_insns, interp_blocks, interp_invalidations;
 extern unsigned long irq_count[11], irq_exceptions;
 static uint32_t max_frames = 300;
 static const char *dump_dir;
 static uint32_t dump_every = 50;
 static int dump_full;
 static GpuStats total;
+static struct timespec t0;
 static uint32_t peek_a[8], peek_n[8];
 static int npeek;
 
@@ -55,6 +59,12 @@ static void report(void) {
             irq_count[0], irq_count[2], irq_count[3], irq_count[4], irq_count[5], irq_count[6], irq_count[9]);
     fprintf(stderr, "[headless] %u VBlank, %llu ciclos virtuales, %lu instrucciones interpretadas\n",
             sys_vblank_count(), (unsigned long long)sys_cycles(), interp_insns);
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double wall = (double)(t1.tv_sec - t0.tv_sec) + 1e-9 * (double)(t1.tv_nsec - t0.tv_nsec);
+    if (wall > 0)
+        fprintf(stderr, "[headless] rendimiento: %.2f s | %.1f VBlank/s (%.2fx tiempo real PAL) | %.1f M instr/s | bloques %lu, invalidaciones %lu\n",
+                wall, sys_vblank_count() / wall, sys_vblank_count() / wall / 50.0, interp_insns / wall / 1e6, interp_blocks, interp_invalidations);
 }
 
 typedef struct { uint32_t start, dur, every; uint16_t mask; } PadEv;
@@ -124,6 +134,13 @@ static void on_frame(Cpu *c, uint32_t f) {
     alarm(10);
     if (npad_ev) script_pad_frame(f);
     if (f % 60 == 0) fprintf(stderr, "[headless] frame %u\n", f);
+    { /* MV_RAMDUMP_AT=N:FICHERO vuelca los 2 MB de RAM en el VBlank N (diagnóstico: comparar compilado/intérprete) */
+        const char *e = getenv("MV_RAMDUMP_AT");
+        if (e && (uint32_t)strtoul(e, 0, 0) == f && strchr(e, ':')) {
+            FILE *o = fopen(strchr(e, ':') + 1, "wb");
+            if (o) { fwrite(psx_ram, 1, PSX_RAM_SIZE, o); fclose(o); }
+        }
+    }
     if (dump_dir && f % dump_every == 0) {
         char p[1024];
         snprintf(p, sizeof p, "%s/frame_%05u.ppm", dump_dir, f);
@@ -144,13 +161,14 @@ static void on_alarm(int s) {
 static uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 
 int main(int argc, char **argv) {
-    const char *exe = NULL, *disc = getenv("MV_DISC"), *card = getenv("MV_CARD");
+    const char *exe = NULL, *disc = getenv("MV_DISC"), *card = getenv("MV_CARD"), *sigs = getenv("MV_SIGS");
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dump") && i + 1 < argc) dump_dir = argv[++i];
         else if (!strcmp(argv[i], "--every") && i + 1 < argc) dump_every = (uint32_t)strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--disc") && i + 1 < argc) disc = argv[++i];
         else if (!strcmp(argv[i], "--card") && i + 1 < argc) card = argv[++i];
         else if (!strcmp(argv[i], "--full")) dump_full = 1;
+        else if (!strcmp(argv[i], "--sigs") && i + 1 < argc) sigs = argv[++i];
         else if (!strcmp(argv[i], "--pad") && i + 1 < argc) {
             if (pad_add_script(argv[++i])) { fprintf(stderr, "guion --pad inválido: '%s'\n", argv[i]); return 1; }
         }
@@ -177,7 +195,14 @@ int main(int argc, char **argv) {
     uint32_t pc = rd32(buf + 0x10), gp = rd32(buf + 0x14), t = rd32(buf + 0x18), sz = rd32(buf + 0x1C);
     if (sz > n - 0x800 || (t & 0x1FFFFF) + sz > PSX_RAM_SIZE) { fprintf(stderr, "cabecera inválida\n"); return 1; }
     memcpy(&psx_ram[t & 0x1FFFFF], buf + 0x800, sz);
+#ifdef MV_NOGEN
+    rt_entry = pc;
+    if (!sigs) { fprintf(stderr, "falta el fichero de firmas del SDK (--sigs FICHERO o MV_SIGS)\n"); return 1; }
+    if (hle_bind_file(sigs, t, sz, pc) < 0) return 1;
+#else
+    (void)sigs;
     if (pc != rt_entry) fprintf(stderr, "[headless] aviso: pc 0x%08x != entrada recompilada 0x%08x\n", pc, rt_entry);
+#endif
 
     if (disc) {
         int nd = cd_open(disc);
@@ -197,6 +222,7 @@ int main(int argc, char **argv) {
     rt_fatal_armed = 1;
     if (setjmp(rt_fatal_jmp)) { report(); return 2; }
     alarm(10);
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     rt_call(&c, pc);
     fprintf(stderr, "[headless] la entrada retornó (v0=0x%08x) tras %u frames\n", c.r[2], hle_frame_count());
     report();
