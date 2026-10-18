@@ -75,6 +75,8 @@ Coste: mapear símbolos JP→EU (por firmas) si se elige opción A.
 
 - **Requisito cuerpo a cuerpo (VR):** gestos → acciones propias del juego (sin combate físico paralelo). Golpe: velocidad de mano hacia delante + enemigo al alcance → botón de golpe (combo original). Agarre: grip cerca de cuello/hombro desde la espalda → agarre del juego; apretar repetido/mantenido = pulsaciones; tirón brusco = proyección en esa dirección; soltar grip = soltar. Golpear pared, pegarse a pared. Sin mover la cabeza del usuario. Modos gestual (defecto) / asistido / botón. Requiere puente RAM (pos/orientación/estado de enemigos).
 
+- **Requisito impactos (VR):** raycast 3D desde la boca del arma contra hitboxes por pieza del modelo jerárquico animado de cada enemigo + geometría del escenario; impacto comunicado a la función de daño propia del juego (reacciones/alertas/muerte originales). Daño por zona configurable: original (uniforme) / realista (defecto: multiplicador cabeza, menos extremidades). Proyectiles propios del juego reciben dirección 3D real. Colisión del jugador sigue la pose real de cabeza/torso (agacharse/asomarse reduce exposición). Requiere puente RAM.
+
 ## 6. Herramientas en el repo
 
 - `tools/disc/psxdisc.py` (stdlib): `info`, `ls`, `extract`, `dirtable <DISCO> <FICHERO>`, `manifest`. Sin probar con BIN real (el usuario extrajo con dumpsxiso; formato de tabla DIR confirmado sobre el fichero extraído).
