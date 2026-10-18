@@ -28,6 +28,8 @@ Revisada en commit `9830efd98559be84da59dc1a961f8fc0e628ba36` (2026-10-18):
 - Ficheros en `D/` (dir de datos): `<fichas> 5,7M`, `<demos> 248M/184M`, `<retratos> 3,5M`, `<radio> 1,7M`, `<stages>.DIR 70M`, `<voces> 194M/181M`, `<video> 54M/162M (mixed, XA)`. Raíz: `FILLER.DAT` (relleno).
 - `<stages>.DIR` (disco 1): u32 tamaño tabla = 1128 → **94 entradas** de 12 B (nombre[8] + sector). Incluye todas las zonas de la decomp (`s00a`…`s20a`, variantes `*r`, `d*`, `brf`, `rank`, `camera`, `title`, `select*`, `ending`) **y `vr01`…`vr10`, `vrdemo`, `selectvr`**. Overlays de código viajan dentro de cada stage (tag `.bin`, ver `source/libfs/cdstage.c` `SetupNextFile`).
 
+- **Requisito: juego íntegro en castellano (textos, radio, voces, cinemáticas).** Cubierto por la opción A: se ejecuta el EXE y los datos del disco ES tal cual. Verificado: textos de radio (`<radio>`) y menús/tarjeta de memoria del EXE en castellano. Voces/FMV en `<voces>`, `<demos>`, `<video>` (doblaje ES del disco). Regla: nunca sustituir datos ES por JP; cualquier parche de la decomp JP debe respetar tablas de texto/fuente del EXE ES. Textos nuevos (opciones VR de la app) en castellano.
+
 ## 3. Inventario de la capa de plataforma (main exe + overlays parciales)
 
 Llamadas externas a la decomp (conteo aprox. por regex):
