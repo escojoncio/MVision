@@ -41,12 +41,15 @@ static int rd_active;
 
 static inline int sext11(uint32_t v) { return (int)(v << 21) >> 21; }
 
+static void cap_on_reset(void);
+
 void gpu_reset(void) {
     memset(&g, 0, sizeof g);
     g.disp_off = 1;
     g.hx1 = 0x200; g.hx2 = 0x200 + 256 * 10;
     g.vy1 = 0x10; g.vy2 = 0x10 + 240;
     fifo_n = 0; st = ST_CMD; rd_active = 0;
+    cap_on_reset();
 }
 
 /* ---------------- escritura de píxel ---------------- */
@@ -134,6 +137,207 @@ static void set_texpage(uint32_t v) {
 /* ---------------- triángulos ---------------- */
 typedef struct { int x, y, r, g, b, u, v; } Vtx;
 
+/* ---------------- captura de primitivas (ver gpu.h) ---------------- */
+static struct {
+    int on, verify;
+    GpuDrawList cur, out, q[GPU_CAP_QDEPTH];
+    int qh, qn;
+    uint32_t seq, nframes, dropped;
+    int need_snap, up_active, pending_close, disp_open, vb_noflip;
+    uint32_t up_idx;
+    int last_dx, last_dy;
+    GpuFloatHook hook;
+} cap;
+
+static void cap_list_reset(GpuDrawList *l) {
+    l->nops = l->ndata = 0;
+    free(l->vram_init); l->vram_init = NULL;
+    free(l->vram_after); l->vram_after = NULL;
+}
+
+static void cap_begin(void) {
+    cap_list_reset(&cap.cur);
+    if (cap.need_snap) {
+        cap.cur.vram_init = malloc(sizeof gpu_vram);
+        if (cap.cur.vram_init) memcpy(cap.cur.vram_init, gpu_vram, sizeof gpu_vram);
+        cap.need_snap = 0;
+    }
+}
+
+static GpuOp *cap_new(int type) {
+    GpuDrawList *l = &cap.cur;
+    if (l->nops == l->cap_ops) {
+        l->cap_ops = l->cap_ops ? l->cap_ops * 2 : 1024;
+        l->ops = realloc(l->ops, l->cap_ops * sizeof *l->ops);
+        if (!l->ops) { fprintf(stderr, "[gpu] captura: sin memoria\n"); abort(); }
+    }
+    GpuOp *o = &l->ops[l->nops++];
+    memset(o, 0, sizeof *o);
+    o->type = (uint8_t)type;
+    o->seq = cap.seq++;
+    o->abr = (uint8_t)g.abr; o->tp = (uint8_t)g.tp;
+    o->twmx = (uint8_t)g.twmx; o->twmy = (uint8_t)g.twmy; o->twox = (uint8_t)g.twox; o->twoy = (uint8_t)g.twoy;
+    o->tx = (uint16_t)g.tx; o->ty = (uint16_t)g.ty;
+    o->cx1 = (int16_t)g.cx1; o->cy1 = (int16_t)g.cy1; o->cx2 = (int16_t)g.cx2; o->cy2 = (int16_t)g.cy2;
+    o->flags = (uint16_t)((g.mask_set ? GPU_F_MASK_SET : 0) | (g.mask_chk ? GPU_F_MASK_CHK : 0));
+    cap.disp_open = 0;
+    return o;
+}
+
+static void cap_close(int reason) {
+    if (cap.cur.nops == 0) { cap.disp_open = 0; return; }
+    if (cap.up_active) { cap.pending_close = reason; return; } /* subida en curso: cerrar al terminarla */
+    GpuDrawList *c = &cap.cur;
+    if (cap.qn == GPU_CAP_QDEPTH) {
+        /* Nadie consume. Perder solo la más antigua dejaría una cola sin vram_init y con un hueco (VRAM del
+         * consumidor divergente hasta el siguiente resincronizado): se descarta TODA la cola y también esta lista
+         * (no lleva instantánea); la siguiente que se cierre trae vram_init. */
+        for (int i = 0; i < cap.qn; i++) cap_list_reset(&cap.q[(cap.qh + i) % GPU_CAP_QDEPTH]);
+        cap.dropped += (uint32_t)cap.qn + 1; cap.nframes++;
+        cap.qh = cap.qn = 0; cap.need_snap = 1;
+        cap_begin();
+        cap.disp_open = 0; cap.vb_noflip = 0; cap.pending_close = 0;
+        return;
+    }
+    c->index = cap.nframes++;
+    c->host_frame = hle_frame_count();
+    c->reason = reason;
+    gpu_get_display(&c->disp);
+    if (cap.verify) {
+        c->vram_after = malloc(sizeof gpu_vram);
+        if (c->vram_after) memcpy(c->vram_after, gpu_vram, sizeof gpu_vram);
+    }
+    GpuDrawList *slot = &cap.q[(cap.qh + cap.qn) % GPU_CAP_QDEPTH];
+    GpuDrawList tmp = *slot; *slot = *c; *c = tmp;
+    cap.qn++;
+    cap_begin();
+    cap.disp_open = 1; cap.vb_noflip = 0; cap.pending_close = 0;
+}
+
+/* Tras un cierre, las escrituras GP1 de la misma ráfaga (modo, rango vertical...) retocan el display. */
+static void cap_refresh_disp(void) {
+    if (cap.disp_open && cap.qn) gpu_get_display(&cap.q[(cap.qh + cap.qn - 1) % GPU_CAP_QDEPTH].disp);
+}
+
+static void cap_vtx(GpuVtx *o, const Vtx *v, int tex) {
+    o->x = (int16_t)v->x; o->y = (int16_t)v->y;
+    o->r = (uint8_t)v->r; o->g = (uint8_t)v->g; o->b = (uint8_t)v->b;
+    if (tex) { o->u = (uint8_t)v->u; o->v = (uint8_t)v->v; }
+    if (cap.hook) {
+        float fx, fy, fz;
+        if (cap.hook(v->x - g.ox, v->y - g.oy, &fx, &fy, &fz)) {
+            o->fvalid = 1; o->fx = fx + g.ox; o->fy = fy + g.oy; o->fz = fz;
+        }
+    }
+}
+
+static void cap_poly(const Vtx *v, int nv, int gour, int tex, int raw, int semi, const TexCtx *t) {
+    GpuOp *o = cap_new(GPU_OP_POLY);
+    o->nv = (uint8_t)nv;
+    o->flags |= (uint16_t)((gour ? GPU_F_GOURAUD : 0) | (tex ? GPU_F_TEXTURED : 0) | (raw ? GPU_F_RAW : 0) |
+                           (semi ? GPU_F_SEMI : 0) | (nv == 4 ? GPU_F_QUAD : 0) |
+                           (g.dither && (gour || (tex && !raw)) ? GPU_F_DITHER : 0));
+    o->clx = (uint16_t)t->cx; o->cly = (uint16_t)t->cy;
+    for (int i = 0; i < nv; i++) cap_vtx(&o->v[i], &v[i], tex);
+}
+
+static void cap_line(const Vtx *a, const Vtx *b, int gour, int semi) {
+    GpuOp *o = cap_new(GPU_OP_LINE);
+    o->nv = 2;
+    o->flags |= (uint16_t)((gour ? GPU_F_GOURAUD : 0) | (semi ? GPU_F_SEMI : 0) | (g.dither && gour ? GPU_F_DITHER : 0));
+    cap_vtx(&o->v[0], a, 0); cap_vtx(&o->v[1], b, 0);
+}
+
+static void cap_rect(int x, int y, int w, int h, int r, int gg, int b, int tex, int raw, int semi, int u0, int v0,
+                     const TexCtx *t) {
+    GpuOp *o = cap_new(GPU_OP_RECT);
+    o->nv = 1;
+    o->flags |= (uint16_t)((tex ? GPU_F_TEXTURED : 0) | (raw ? GPU_F_RAW : 0) | (semi ? GPU_F_SEMI : 0) |
+                           (g.flipx ? GPU_F_FLIPX : 0) | (g.flipy ? GPU_F_FLIPY : 0));
+    o->v[0].x = (int16_t)x; o->v[0].y = (int16_t)y;
+    o->v[0].r = (uint8_t)r; o->v[0].g = (uint8_t)gg; o->v[0].b = (uint8_t)b;
+    o->v[0].u = (uint8_t)u0; o->v[0].v = (uint8_t)v0;
+    o->clx = (uint16_t)t->cx; o->cly = (uint16_t)t->cy;
+    o->rw = (int16_t)w; o->rh = (int16_t)h;
+}
+
+static void cap_upload_begin(int x, int y, int w, int h) {
+    GpuOp *o = cap_new(GPU_OP_UPLOAD);
+    o->rx = (int16_t)x; o->ry = (int16_t)y; o->rw = (int16_t)w; o->rh = (int16_t)h;
+    o->data_off = cap.cur.ndata;
+    cap.up_idx = cap.cur.nops - 1;
+    cap.up_active = 1;
+}
+
+static void cap_upload_px(uint16_t v) {
+    GpuDrawList *l = &cap.cur;
+    if (l->ndata == l->cap_data) {
+        l->cap_data = l->cap_data ? l->cap_data * 2 : 1 << 16;
+        l->data = realloc(l->data, l->cap_data * sizeof *l->data);
+        if (!l->data) { fprintf(stderr, "[gpu] captura: sin memoria\n"); abort(); }
+    }
+    l->data[l->ndata++] = v;
+    l->ops[cap.up_idx].data_n++;
+}
+
+static void cap_upload_end(void) {
+    cap.up_active = 0;
+    if (cap.pending_close) cap_close(cap.pending_close);
+}
+
+/* ---------------- API de captura ---------------- */
+void gpu_capture_enable(int mode) {
+    if (mode <= 0) {
+        if (cap.on) {
+            cap_list_reset(&cap.cur); free(cap.cur.ops); free(cap.cur.data);
+            cap_list_reset(&cap.out); free(cap.out.ops); free(cap.out.data);
+            for (int i = 0; i < GPU_CAP_QDEPTH; i++) { cap_list_reset(&cap.q[i]); free(cap.q[i].ops); free(cap.q[i].data); }
+            GpuFloatHook h = cap.hook;
+            memset(&cap, 0, sizeof cap);
+            cap.hook = h;
+        }
+        return;
+    }
+    cap.verify = mode >= 2;
+    if (cap.on) return;
+    cap.on = 1;
+    cap.need_snap = 1; cap.up_active = 0;
+    cap.last_dx = g.dx; cap.last_dy = g.dy;
+    cap_begin();
+}
+
+const GpuDrawList *gpu_capture_frame(void) {
+    if (!cap.on || !cap.qn) return NULL;
+    GpuDrawList *slot = &cap.q[cap.qh];
+    cap_list_reset(&cap.out);
+    GpuDrawList tmp = cap.out; cap.out = *slot; *slot = tmp;
+    cap.qh = (cap.qh + 1) % GPU_CAP_QDEPTH; cap.qn--;
+    return &cap.out;
+}
+
+void gpu_capture_vblank(void) {
+    if (!cap.on) return;
+    if (!cap.cur.nops) { cap.vb_noflip = 0; return; } /* sin nada pendiente no se acumula: un frame no se parte tras estar ocioso */
+    if (++cap.vb_noflip >= GPU_CAP_VB_FALLBACK) cap_close(GPU_CLOSE_VBLANK);
+}
+uint32_t gpu_capture_dropped(void) { return cap.dropped; }
+void gpu_capture_set_float_hook(GpuFloatHook h) { cap.hook = h; }
+
+static void cap_display_start_changed(void) {
+    if (g.dx != cap.last_dx || g.dy != cap.last_dy) {
+        cap.last_dx = g.dx; cap.last_dy = g.dy;
+        cap_close(GPU_CLOSE_FLIP);
+    }
+}
+
+/* GP1(00h)/ResetGraph: puede llegar a mitad de una subida (el estado se anula) y devuelve la dirección de
+ * display a 0 sin pasar por GP1(05h). */
+static void cap_on_reset(void) {
+    if (!cap.on) return;
+    if (cap.up_active) cap_upload_end();
+    cap.last_dx = g.dx; cap.last_dy = g.dy;
+}
+
 static inline int64_t edge(const Vtx *a, const Vtx *b, int px, int py) {
     return (int64_t)(b->x - a->x) * (py - a->y) - (int64_t)(b->y - a->y) * (px - a->x);
 }
@@ -214,6 +418,7 @@ static void cmd_poly(const uint32_t *w) {
     if (tex && g.tex_off) tex = 0; /* texturas deshabilitadas por E1 bit 11 */
     t.tx = g.tx; t.ty = g.ty; t.tp = g.tp;
     gpu_stats.poly++;
+    if (cap.on) cap_poly(v, nv, gour, tex, raw, semi, &t);
     draw_tri(v[0], v[1], v[2], gour, tex, &t, raw, semi);
     if (quad) draw_tri(v[1], v[2], v[3], gour, tex, &t, raw, semi);
 }
@@ -236,6 +441,11 @@ static void draw_line(Vtx a, Vtx b, int gour, int semi) {
         }
         plot(x, y, r, gg, bb, dith, semi, 0);
     }
+}
+
+static void do_line(Vtx a, Vtx b, int gour, int semi) {
+    if (cap.on) cap_line(&a, &b, gour, semi);
+    draw_line(a, b, gour, semi);
 }
 
 static Vtx line_v(uint32_t col, uint32_t xy) {
@@ -272,6 +482,7 @@ static void cmd_rect(const uint32_t *w) {
     if (g.tex_off) tex = 0;
     int r = col & 255, gg = (col >> 8) & 255, b = (col >> 16) & 255;
     gpu_stats.rect++;
+    if (cap.on) cap_rect(x0, y0, ww, hh, r, gg, b, tex, raw, semi, u0, v0, &t);
     for (int j = 0; j < hh; j++) {
         int y = y0 + j;
         if (y < g.cy1 || y > g.cy2) continue;
@@ -296,6 +507,12 @@ static void cmd_fill(const uint32_t *w) {
     int ww = ((w[2] & 0x3FF) + 15) & ~15, hh = (w[2] >> 16) & 0x1FF;
     uint16_t c = (uint16_t)(((col >> 3) & 31) | (((col >> 11) & 31) << 5) | (((col >> 19) & 31) << 10));
     gpu_stats.fill++;
+    if (cap.on) {
+        GpuOp *o = cap_new(GPU_OP_FILL);
+        o->rx = (int16_t)x; o->ry = (int16_t)y; o->rw = (int16_t)ww; o->rh = (int16_t)hh;
+        o->fill15 = c;
+        o->v[0].r = (uint8_t)col; o->v[0].g = (uint8_t)(col >> 8); o->v[0].b = (uint8_t)(col >> 16);
+    }
     for (int j = 0; j < hh; j++)
         for (int i = 0; i < ww; i++) gpu_vram[(y + j) & 511][(x + i) & 1023] = c;
 }
@@ -311,6 +528,11 @@ static void cmd_copy(const uint32_t *w) {
     int dx = w[2] & 0x3FF, dy = (w[2] >> 16) & 0x1FF;
     int ww = (((w[3] & 0xFFFF) - 1) & 0x3FF) + 1, hh = ((((w[3] >> 16) & 0xFFFF) - 1) & 0x1FF) + 1;
     gpu_stats.copy++;
+    if (cap.on) {
+        GpuOp *o = cap_new(GPU_OP_VCOPY);
+        o->sx = (int16_t)sx; o->sy = (int16_t)sy; o->rx = (int16_t)dx; o->ry = (int16_t)dy;
+        o->rw = (int16_t)ww; o->rh = (int16_t)hh;
+    }
     /* copia vía buffer de línea: evita aliasing cuando se solapan */
     static uint16_t line[1024];
     for (int j = 0; j < hh; j++) {
@@ -326,15 +548,21 @@ static void xfer_setup(const uint32_t *w, int read) {
         rd.x = x; rd.y = y; rd.w = ww; rd.h = hh; rd.i = 0; rd.n = ww * hh;
         rd_active = 1;
         gpu_stats.download++;
+        if (cap.on) {
+            GpuOp *o = cap_new(GPU_OP_DOWNLOAD);
+            o->rx = (int16_t)x; o->ry = (int16_t)y; o->rw = (int16_t)ww; o->rh = (int16_t)hh;
+        }
     } else {
         xfer.x = x; xfer.y = y; xfer.w = ww; xfer.h = hh; xfer.i = 0; xfer.n = ww * hh;
         st = ST_UPLOAD;
         gpu_stats.upload++;
+        if (cap.on) cap_upload_begin(x, y, ww, hh);
     }
 }
 
 static void upload_px(uint16_t v) {
     if (xfer.i < xfer.n) {
+        if (cap.on && cap.up_active) cap_upload_px(v);
         vram_put(xfer.x + xfer.i % xfer.w, xfer.y + xfer.i / xfer.w, v);
         xfer.i++;
     }
@@ -398,7 +626,7 @@ static void exec_cmd(const uint32_t *w) {
         Vtx a = line_v(w[0], w[1]);
         Vtx b = gour ? line_v(w[2], w[3]) : line_v(w[0], w[2]);
         gpu_stats.line++;
-        draw_line(a, b, gour, semi);
+        do_line(a, b, gour, semi);
         if (op & 8) { st = ST_POLYLINE; pl_last = b; pl_col = gour ? w[2] : w[0]; pl_op = op; pl_wait_col = gour; }
     } else if (op >= 0x60 && op < 0x80) cmd_rect(w);
     else if (op >= 0x80 && op < 0xA0) cmd_copy(w);
@@ -415,7 +643,7 @@ void gpu_gp0(uint32_t w) {
     case ST_UPLOAD:
         upload_px((uint16_t)w);
         upload_px((uint16_t)(w >> 16));
-        if (xfer.i >= xfer.n) st = ST_CMD;
+        if (xfer.i >= xfer.n) { st = ST_CMD; if (cap.on && cap.up_active) cap_upload_end(); }
         return;
     case ST_POLYLINE:
         if ((w & 0xF000F000u) == 0x50005000u) { st = ST_CMD; return; }
@@ -423,7 +651,7 @@ void gpu_gp0(uint32_t w) {
         {
             Vtx b = line_v(pl_col, w);
             gpu_stats.line++;
-            draw_line(pl_last, b, (pl_op >> 4) & 1, (pl_op >> 1) & 1);
+            do_line(pl_last, b, (pl_op >> 4) & 1, (pl_op >> 1) & 1);
             pl_last = b;
             if (pl_op & 0x10) pl_wait_col = 1;
         }
@@ -441,14 +669,19 @@ void gpu_gp1(uint32_t w) {
     uint32_t v = w & 0xFFFFFF;
     switch ((w >> 24) & 0x3F) {
     case 0x00: gpu_reset(); break;
-    case 0x01: fifo_n = 0; st = ST_CMD; break;
+    case 0x01:
+        if (st == ST_UPLOAD && cap.on && cap.up_active) cap_upload_end();
+        fifo_n = 0; st = ST_CMD; break;
     case 0x02: g.irq = 0; break;
-    case 0x03: g.disp_off = v & 1; break;
+    case 0x03: g.disp_off = v & 1; if (cap.on) cap_refresh_disp(); break;
     case 0x04: g.dma_dir = v & 3; break;
-    case 0x05: g.dx = v & 0x3FE; g.dy = (v >> 10) & 0x1FF; break;
-    case 0x06: g.hx1 = v & 0xFFF; g.hx2 = (v >> 12) & 0xFFF; break;
-    case 0x07: g.vy1 = v & 0x3FF; g.vy2 = (v >> 10) & 0x3FF; break;
-    case 0x08: g.mode = v; break;
+    case 0x05:
+        g.dx = v & 0x3FE; g.dy = (v >> 10) & 0x1FF;
+        if (cap.on) { cap_display_start_changed(); cap_refresh_disp(); }
+        break;
+    case 0x06: g.hx1 = v & 0xFFF; g.hx2 = (v >> 12) & 0xFFF; if (cap.on) cap_refresh_disp(); break;
+    case 0x07: g.vy1 = v & 0x3FF; g.vy2 = (v >> 10) & 0x3FF; if (cap.on) cap_refresh_disp(); break;
+    case 0x08: g.mode = v; if (cap.on) cap_refresh_disp(); break;
     case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15: case 0x16: case 0x17:
     case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x1E: case 0x1F:
         switch (v & 7) {

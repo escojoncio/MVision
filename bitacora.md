@@ -249,3 +249,12 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - Convenciones: yaw 4096 = vuelta, 1024=+X, 2048=-Z; Y hacia arriba. Equipo por índice: armas 0 pistola, 1 fusil, 2 granada, 3 guiado, 4 antiaéreo, 5 mina, 6 adhesivo, 7 aturdidora, 8 chaff, 9 francotirador.
 - Validado en partida real (cruceta mueve pos/yaw; agachar/tumbar/1ª persona/agua). Revisión: 11 correcciones (título/cargas ya no salen válidos, KSEG1 filtrado, enlaces dobles, ortogonalidad de la vista, campo `codec` -> `comms`). `make -C vr/bridge test test-san` OK.
 - Pendiente: probar inventario/munición/alertas en partida avanzada; cablear `box_view_set_active` y `weapon_bind`; corregir `game_weapon_id` de vr/weapons a esta tabla; comprobar que `eye_*` se actualiza (cámaras fijas de sala).
+
+## 19. Captura de GPU y rasterizador de referencia (`runtime/gpu.{c,h}`, `render/`) — 2026-10-18
+
+- `gpu_capture_enable(0/1/2)` (2 = guarda además VRAM del oráculo por frame), `gpu_capture_frame()` (cola de 6). `GpuOp` de 152 B con estado efectivo completo (vértices con offset, color, UV, CLUT, tpage/modo, semitransparencia, dither, máscara, ventana, recorte); polígonos, rects, líneas por tramo, fill, copia, subida (con píxeles), descarga, intercalados en orden. Cierre de frame en GP1(05h) al cambiar la dirección de display (diferido si hay subida en curso); reserva `gpu_capture_vblank()` tras 4 VBlanks sin flip (AÚN NO enganchado al VBlank real). Cola llena -> se descarta todo y la siguiente trae `vram_init`. `cap_on_reset` en `gpu_reset`. Monohilo.
+- Hueco subpíxel: `GpuVtx.fvalid/fx/fy/fz` + `gpu_capture_set_float_hook` (sin enlazar con la GTE todavía).
+- `render/ref_raster.{h,c}`: escala N 1..8 y supermuestreo KxK (K=2 = MSAA x4); a 1x bit-exacto con gpu.c: 0 diferencias en VRAM y display (3845 listas reales, `ref_selftest 3000`). Modo HQ: muestreo al centro, 8 bits, sin dither.
+- `render/metal/ps1_gpu.metal`, `ps1_types.h`: VRAM como R16Uint, semitransparencia por lectura del framebuffer, MSAA x4 por muestra; host debe poner `PS1Frame.corner=1` en la pasada nativa y rellenar `PS1Event.data_n`. SIN COMPILAR.
+- Herramientas: `render/build.sh`; `MV_DISC=gamedata/disc build-render/capture_test gamedata/main.exe 4000 <dir> 4 2` (`CT_GAMEPLAY=1` llega a 3D); `build-render/ref_selftest 3000`.
+- Pendiente: enganchar `gpu_capture_vblank`; umbral del cierre por VBlank (<15 fps, 480i); copias VRAM solapadas en Metal (por filas); wrap y&511 en la pasada nativa; tope de memoria para M=N·K grande.
