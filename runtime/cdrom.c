@@ -439,5 +439,6 @@ void hle_CdGetSector(Cpu *c) {
         secoff++;
         mem_w8(c, dst + i, b);
     }
+    rt_ov_written(dst, n);   /* las overlays de zona se cargan con CdGetSector: invalida la recompilada */
     V0 = 1;
 }

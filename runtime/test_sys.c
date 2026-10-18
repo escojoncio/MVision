@@ -287,7 +287,7 @@ static void t_spu_clock(Cpu *c) {
         if (mem_r32(c, 0x1F801070) & (1u << IRQ_SPU)) hits++;
     }
     EQ(hits, 3);
-    int16_t o[64];
+    int16_t o[64 * 2];                           /* estéreo: 2 muestras por trama */
     EQ(spu_pull(o, 64), 64);
 }
 
