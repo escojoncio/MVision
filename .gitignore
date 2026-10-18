@@ -17,3 +17,5 @@ out/
 __pycache__/
 vr/weapons/gen/
 .DS_Store
+vr/box/build/
+vr/box/build-san/
