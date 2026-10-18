@@ -77,9 +77,13 @@ Coste: mapear símbolos JP→EU (por firmas) si se elige opción A.
 - `sigs.py` tras revisión: solo símbolos dentro de secciones `text` del map psylink (tras "Names in address order"), fin acotado a la sección, enmascara también lwl/lwr/swl/swr, corregido off-by-one del índice. Nombres del map en MAYÚSCULAS.
 - Workflow tras revisión: `setup-python` 3.12 (PEP 668), `wine wine32:i386` sin caché apt, `wineboot --init`, `build.py` tolerante a fallo de `compare.py` (paso de firmas exige `obj/_*.exe` + `obj/asm.map`), timeout 45 min.
 
+- `tools/recomp/recomp.py` + `runtime/cpu.h`: recompilador MIPS R3000 → C. Funciones = destinos `jal` + entrada + punteros en datos que apuntan tras un `jr ra`+delay + `--funcs`. Región de código autodetectada (tramo decodificable más largo). Ramas internas → `goto`, externas → tail call, `jal` → llamada directa, `jr` no-ra → `switch` sobre todas las direcciones de la función, delay slots con condición evaluada antes del slot, GTE/COP0/memoria vía helpers del runtime. **EXE EU: código `0x80014894-0x8009e4b4`, 1841 funciones, 78 con tablas de salto, 1 instrucción no soportada (`0x80014898`, probablemente datos al inicio de la región), compila sin errores con clang -O1 -Wall** (runtime aún sin implementar).
+- Build `reference` ejecutada (run 39136576826): **éxito**, 2 min 50 s. Artefacto `sigs-ref` generado; la sesión no puede descargar artefactos ni logs (almacenamiento de Actions bloqueado) → el usuario lo descarga y lo deja en su carpeta.
+
 ## 7. Pendiente siguiente sesión
 
-- [ ] Usuario crea secrets; lanzar `reference` (con permiso) → `sigs_ref.json` → `sigs.py match` contra EXE principal EU → % de cobertura.
+- [ ] Recibir `sigs_ref.json` (descarga manual) → `sigs.py match` contra EXE principal EU → % de cobertura; pasar starts como `--funcs` al recompilador.
+- [ ] Runtime C: memoria, rt_call/rt_jump por tabla, div, GTE, COP0; primer arranque headless en Linux.
 - [ ] Cargar overlays extraídos en recompilador: dirección de carga = `StageCharacterEntries` (localizar en EXE EU vía firmas).
 - [ ] Recompilador MIPS→C: decodificador + emisor, empezando por el ejecutable principal.
 - [ ] HLE: GPU (OT/primitivas → Metal), GTE float, CD sobre imagen, hilos `mts` → fibras.

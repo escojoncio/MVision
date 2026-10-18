@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+"""recomp: recompilador estático MIPS R3000 (PS1) -> C.
+
+  recomp.py <exe> <salida_dir> [--funcs funcs.txt] [--code-end HEX]
+
+Salida: funcs_XX.c (una función C por función MIPS), funcs.h, dispatch.c (tabla dirección -> función).
+Runtime esperado (runtime/cpu.h): struct Cpu { uint32_t r[32], hi, lo; } y helpers de memoria/GTE/COP0.
+
+Detección de funciones: destinos de jal + entrada + lista opcional (firmas). Cada función se
+extiende hasta antes del siguiente inicio conocido. Saltos dentro de la función -> goto; fuera -> tail call.
+jr de registro distinto de ra -> switch sobre todas las etiquetas de la función (tablas de salto).
+Delay slots: la condición se evalúa antes del slot, el slot se ejecuta, luego se salta.
+"""
+import os
+import struct
+import sys
+
+HDR = 0x800
+R = ["zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
+     "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra"]
+FUNCS_PER_FILE = 200
+
+
+def rs(w): return (w >> 21) & 31
+def rt(w): return (w >> 16) & 31
+def rd(w): return (w >> 11) & 31
+def sa(w): return (w >> 6) & 31
+def imm(w): return w & 0xFFFF
+def simm(w): return imm(w) - 0x10000 if imm(w) & 0x8000 else imm(w)
+
+
+def reg(n):
+    return "0u" if n == 0 else f"c->r[{n}]"
+
+
+def setr(n, expr):
+    return "" if n == 0 else f"c->r[{n}] = {expr};"
+
+
+class Exe:
+    def __init__(self, path):
+        d = open(path, "rb").read()
+        if d[:8] != b"PS-X EXE":
+            raise SystemExit("no es PS-X EXE")
+        self.pc0 = struct.unpack_from("<I", d, 0x10)[0]
+        self.base, size = struct.unpack_from("<II", d, 0x18)
+        self.text = d[HDR:HDR + size]
+        self.end = self.base + len(self.text)
+
+    def word(self, a):
+        return struct.unpack_from("<I", self.text, a - self.base)[0]
+
+    def has(self, a):
+        return self.base <= a < self.end
+
+
+def branch_target(a, w):
+    return (a + 4 + (simm(w) << 2)) & 0xFFFFFFFF
+
+
+def is_branch(w):
+    op = w >> 26
+    if op in (2, 3, 4, 5, 6, 7):
+        return True
+    if op == 1 and rt(w) in (0, 1, 16, 17):
+        return True
+    if op == 0 and (w & 63) in (8, 9):
+        return True
+    return False
+
+
+def find_funcs(exe, extra):
+    starts = {exe.pc0} | set(extra)
+    for a in range(exe.base, exe.end, 4):
+        w = exe.word(a)
+        if w >> 26 == 3:  # jal
+            t = (a & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
+            if exe.has(t):
+                starts.add(t)
+    # Punteros a función en datos: palabra alineada que apunta al código justo tras un `jr ra`+delay.
+    full = struct.unpack_from(f"<{len(exe.text) // 4}I", exe.text, 0)
+    for v in full:
+        if exe.code_start <= v < exe.end and v % 4 == 0 and exe.word(v - 8) == 0x03E00008:
+            starts.add(v)
+    starts.add(exe.code_start)
+    return sorted(s for s in starts if exe.has(s) and s >= exe.code_start)
+
+
+def detect_code(exe, run=4):
+    """Región de código: el tramo más largo sin rachas de `run` palabras no decodificables,
+    recortado a [primer prólogo/retorno, último `jr ra` + delay]."""
+    best, cur_start, bad, last_ret = (exe.base, exe.base), None, 0, None
+    for a in range(exe.base, exe.end + 4, 4):
+        w = exe.word(a) if a < exe.end else 0xFFFFFFFF
+        ok = a < exe.end and (is_branch(w) or emit_simple(a, w) is not None)
+        if ok:
+            if cur_start is None:
+                cur_start = a
+            bad = 0
+            if w == 0x03E00008:
+                last_ret = a + 8
+        else:
+            bad += 1
+            if bad >= run or a >= exe.end:
+                if cur_start is not None and last_ret and last_ret - cur_start > best[1] - best[0]:
+                    best = (cur_start, last_ret)
+                cur_start, last_ret = None, None
+    return best
+
+
+def cond_expr(a, w):
+    op = w >> 26
+    s, t = reg(rs(w)), reg(rt(w))
+    if op == 4: return f"{s} == {t}"
+    if op == 5: return f"{s} != {t}"
+    if op == 6: return f"(int32_t){s} <= 0"
+    if op == 7: return f"(int32_t){s} > 0"
+    if op == 1:
+        k = rt(w)
+        return f"(int32_t){s} < 0" if k in (0, 16) else f"(int32_t){s} >= 0"
+    raise ValueError
+
+
+def emit_simple(a, w):
+    """Instrucción no-salto -> C. Devuelve cadena o None si no soportada."""
+    op = w >> 26
+    s, t, d = rs(w), rt(w), rd(w)
+    S, T = reg(s), reg(t)
+    if w == 0:
+        return "/* nop */"
+    if op == 0:
+        f = w & 63
+        if f == 0: return setr(d, f"{T} << {sa(w)}")
+        if f == 2: return setr(d, f"{T} >> {sa(w)}")
+        if f == 3: return setr(d, f"(uint32_t)((int32_t){T} >> {sa(w)})")
+        if f == 4: return setr(d, f"{T} << ({S} & 31)")
+        if f == 6: return setr(d, f"{T} >> ({S} & 31)")
+        if f == 7: return setr(d, f"(uint32_t)((int32_t){T} >> ({S} & 31))")
+        if f == 12: return f"rt_syscall(c, 0x{a:08x});"
+        if f == 13: return f"rt_break(c, 0x{a:08x});"
+        if f == 16: return setr(d, "c->hi")
+        if f == 17: return f"c->hi = {S};"
+        if f == 18: return setr(d, "c->lo")
+        if f == 19: return f"c->lo = {S};"
+        if f == 24: return f"{{ int64_t m = (int64_t)(int32_t){S} * (int32_t){T}; c->lo = (uint32_t)m; c->hi = (uint32_t)(m >> 32); }}"
+        if f == 25: return f"{{ uint64_t m = (uint64_t){S} * {T}; c->lo = (uint32_t)m; c->hi = (uint32_t)(m >> 32); }}"
+        if f == 26: return f"rt_div(c, {S}, {T});"
+        if f == 27: return f"rt_divu(c, {S}, {T});"
+        if f in (32, 33): return setr(d, f"{S} + {T}")
+        if f in (34, 35): return setr(d, f"{S} - {T}")
+        if f == 36: return setr(d, f"{S} & {T}")
+        if f == 37: return setr(d, f"{S} | {T}")
+        if f == 38: return setr(d, f"{S} ^ {T}")
+        if f == 39: return setr(d, f"~({S} | {T})")
+        if f == 42: return setr(d, f"(int32_t){S} < (int32_t){T}")
+        if f == 43: return setr(d, f"{S} < {T}")
+        return None
+    I, U = simm(w), imm(w)
+    ea = f"{S} + {I}"
+    if op in (8, 9): return setr(t, f"{S} + {I}")
+    if op == 10: return setr(t, f"(int32_t){S} < {I}")
+    if op == 11: return setr(t, f"{S} < (uint32_t){I}")
+    if op == 12: return setr(t, f"{S} & 0x{U:x}u")
+    if op == 13: return setr(t, f"{S} | 0x{U:x}u")
+    if op == 14: return setr(t, f"{S} ^ 0x{U:x}u")
+    if op == 15: return setr(t, f"0x{U << 16:08x}u")
+    if op == 32: return setr(t, f"(uint32_t)(int8_t)mem_r8(c, {ea})") or f"(void)mem_r8(c, {ea});"
+    if op == 33: return setr(t, f"(uint32_t)(int16_t)mem_r16(c, {ea})") or f"(void)mem_r16(c, {ea});"
+    if op == 34: return setr(t, f"mem_lwl(c, {ea}, {T})")
+    if op == 35: return setr(t, f"mem_r32(c, {ea})") or f"(void)mem_r32(c, {ea});"
+    if op == 36: return setr(t, f"mem_r8(c, {ea})") or f"(void)mem_r8(c, {ea});"
+    if op == 37: return setr(t, f"mem_r16(c, {ea})") or f"(void)mem_r16(c, {ea});"
+    if op == 38: return setr(t, f"mem_lwr(c, {ea}, {T})")
+    if op == 40: return f"mem_w8(c, {ea}, (uint8_t){T});"
+    if op == 41: return f"mem_w16(c, {ea}, (uint16_t){T});"
+    if op == 42: return f"mem_swl(c, {ea}, {T});"
+    if op == 43: return f"mem_w32(c, {ea}, {T});"
+    if op == 46: return f"mem_swr(c, {ea}, {T});"
+    if op == 50: return f"gte_lwc2(c, {t}, mem_r32(c, {ea}));"
+    if op == 58: return f"mem_w32(c, {ea}, gte_swc2(c, {t}));"
+    if op == 16:  # COP0
+        k = s
+        if k == 0: return setr(t, f"cop0_read(c, {d})")
+        if k == 4: return f"cop0_write(c, {d}, {T});"
+        if k == 16 and (w & 63) == 16: return "cop0_rfe(c);"
+        return None
+    if op == 18:  # COP2 (GTE)
+        k = s
+        if k & 16: return f"gte_cmd(c, 0x{w & 0x1FFFFFF:07x});"
+        if k == 0: return setr(t, f"gte_mfc2(c, {d})")
+        if k == 2: return setr(t, f"gte_cfc2(c, {d})")
+        if k == 4: return f"gte_mtc2(c, {d}, {T});"
+        if k == 6: return f"gte_ctc2(c, {d}, {T});"
+        return None
+    return None
+
+
+class Func:
+    def __init__(self, exe, start, end, known):
+        self.exe, self.start, self.end, self.known = exe, start, end, known
+        self.labels = set()
+        self.unsupported = 0
+        for a in range(start, end, 4):
+            w = exe.word(a)
+            op = w >> 26
+            if op in (1, 4, 5, 6, 7) and is_branch(w):
+                t = branch_target(a, w)
+                if start <= t < end:
+                    self.labels.add(t)
+            elif op == 2:
+                t = (a & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
+                if start <= t < end:
+                    self.labels.add(t)
+        self.has_jr_table = any(self._is_jr_nonra(exe.word(a)) for a in range(start, end, 4))
+        if self.has_jr_table:
+            self.labels |= set(range(start, end, 4))
+
+    @staticmethod
+    def _is_jr_nonra(w):
+        return w >> 26 == 0 and (w & 63) == 8 and rs(w) != 31
+
+    def goto_or_tail(self, t):
+        if self.start <= t < self.end:
+            return f"goto L_{t:08x};"
+        if t in self.known:
+            return f"f_{t:08x}(c); return;"
+        return f"rt_jump(c, 0x{t:08x}u); return;"
+
+    def call(self, t, ret):
+        if t in self.known:
+            return f"c->r[31] = 0x{ret:08x}u; f_{t:08x}(c);"
+        return f"c->r[31] = 0x{ret:08x}u; rt_call(c, 0x{t:08x}u);"
+
+    def simple(self, a):
+        w = self.exe.word(a)
+        out = emit_simple(a, w)
+        if out is None:
+            self.unsupported += 1
+            return f"rt_unimpl(c, 0x{a:08x}u, 0x{w:08x}u);"
+        return out
+
+    def emit(self):
+        L = [f"void f_{self.start:08x}(Cpu *c) {{", "    uint32_t tgt; (void)tgt;"]
+        a = self.start
+        while a < self.end:
+            w = self.exe.word(a)
+            lab = f"L_{a:08x}: " if a in self.labels else ""
+            if is_branch(w) and a + 4 < self.end + 4:
+                ds = self.simple(a + 4) if self.exe.has(a + 4) else ""
+                op = w >> 26
+                f = w & 63
+                body = []
+                if op == 2:
+                    t = (a & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
+                    body = [ds, self.goto_or_tail(t)]
+                elif op == 3:
+                    t = (a & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
+                    body = [ds, self.call(t, a + 8)]
+                elif op == 0 and f == 8:  # jr
+                    if rs(w) == 31:
+                        body = [f"tgt = {reg(31)};", ds, "return;"]
+                    elif self.has_jr_table:
+                        body = [f"tgt = {reg(rs(w))};", ds, "goto JR_DISPATCH;"]
+                    else:
+                        body = [f"tgt = {reg(rs(w))};", ds, "rt_jump(c, tgt); return;"]
+                elif op == 0 and f == 9:  # jalr
+                    body = [f"tgt = {reg(rs(w))};", ds,
+                            setr(rd(w), f"0x{a + 8:08x}u"), "rt_call(c, tgt);"]
+                else:
+                    t = branch_target(a, w)
+                    link = op == 1 and rt(w) in (16, 17)
+                    pre = [f"{{ int cond = {cond_expr(a, w)};"]
+                    if link:
+                        pre.append(f"c->r[31] = 0x{a + 8:08x}u;")
+                    tk = self.call(t, a + 8) if link else self.goto_or_tail(t)
+                    body = pre + [ds, f"if (cond) {{ {tk} }} }}"]
+                L.append(f"    {lab}" + " ".join(x for x in body if x))
+                # El delay slot también puede ser destino de otro salto (raro): etiqueta propia
+                if a + 4 in self.labels:
+                    L.append(f"    goto S_{a:08x}; L_{a + 4:08x}: {ds} S_{a:08x}:;")
+                a += 8
+                continue
+            L.append(f"    {lab}{self.simple(a)}")
+            a += 4
+        L.append(f"    f_{self.end:08x}(c); return; /* caída a la siguiente función */"
+                 if self.end in self.known else "    rt_fallthrough(c, 0x%08xu); return;" % self.end)
+        if self.has_jr_table:
+            L.append("JR_DISPATCH:")
+            L.append("    switch (tgt) {")
+            for x in sorted(self.labels):
+                L.append(f"    case 0x{x:08x}u: goto L_{x:08x};")
+            L.append("    default: rt_jump(c, tgt); return;")
+            L.append("    }")
+        L.append("}")
+        return "\n".join(L)
+
+
+def main(a):
+    if len(a) < 2:
+        print(__doc__)
+        return 1
+    exe = Exe(a[0])
+    out = a[1]
+    extra = []
+    if "--funcs" in a:
+        extra = [int(x, 16) for x in open(a[a.index("--funcs") + 1]).read().split()]
+    code_start, code_end = detect_code(exe)
+    if "--code-end" in a:
+        code_end = int(a[a.index("--code-end") + 1], 16)
+    exe.end, exe.code_start = code_end, code_start
+    starts = find_funcs(exe, extra)
+    known = set(starts)
+    os.makedirs(out, exist_ok=True)
+    funcs = []
+    for i, s in enumerate(starts):
+        e = starts[i + 1] if i + 1 < len(starts) else exe.end
+        funcs.append(Func(exe, s, e, known))
+    with open(os.path.join(out, "funcs.h"), "w") as f:
+        f.write('#pragma once\n#include "cpu.h"\n')
+        for fn in funcs:
+            f.write(f"void f_{fn.start:08x}(Cpu *c);\n")
+    unsup = 0
+    for k in range(0, len(funcs), FUNCS_PER_FILE):
+        with open(os.path.join(out, f"funcs_{k // FUNCS_PER_FILE:02d}.c"), "w") as f:
+            f.write('#include "funcs.h"\n\n')
+            for fn in funcs[k:k + FUNCS_PER_FILE]:
+                f.write(fn.emit() + "\n\n")
+                unsup += fn.unsupported
+    with open(os.path.join(out, "dispatch.c"), "w") as f:
+        f.write('#include "funcs.h"\n\nconst FuncEntry rt_func_table[] = {\n')
+        for fn in funcs:
+            f.write(f"    {{0x{fn.start:08x}u, f_{fn.start:08x}}},\n")
+        f.write(f"}};\nconst unsigned rt_func_count = {len(funcs)};\n")
+        f.write(f"const uint32_t rt_entry = 0x{exe.pc0:08x}u;\n")
+    print(f"código 0x{code_start:08x}-0x{code_end:08x} | funciones {len(funcs)} | jr-tabla {sum(f.has_jr_table for f in funcs)} | no soportadas {unsup}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
