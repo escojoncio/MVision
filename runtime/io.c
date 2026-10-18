@@ -142,6 +142,26 @@ static void dma_otc(uint32_t madr, uint32_t bcr) {
     }
 }
 
+/* Los canales que escriben en RAM invalidan el código decodificado por el intérprete en lo escrito (la CPU real
+ * tampoco ve la caché de instrucciones coherente, pero el programa la vacía; aquí el bloque viejo sería un error). */
+static void dma_inval(int ch, uint32_t m, uint32_t b, uint32_t c) {
+    uint32_t n = 0, a = m & 0x1FFFFC;
+    switch (ch) {
+    case 1: case 3: n = dma_words(b, c); break;                       /* MDEC / CD -> RAM */
+    case 2: if (!(c & 1) && ((c >> 9) & 3) != 2) n = dma_words(b, c); break;   /* VRAM -> RAM */
+    case 4: if (!(c & 1)) n = dma_words(b, c); break;                 /* SPU -> RAM */
+    case 6: {                                                          /* OTC: n palabras hacia atrás desde madr */
+        n = b & 0xFFFF ? b & 0xFFFF : 0x10000;
+        uint32_t back = (n - 1) * 4;
+        if (back > a) { rt_code_invalidate(0, a + 4); rt_code_invalidate(PSX_RAM_SIZE - (back - a), back - a); }
+        else rt_code_invalidate(a - back, back + 4);
+        return;
+    }
+    default: return;
+    }
+    if (n) rt_code_invalidate(a, n * 4);
+}
+
 static void dma_start(int ch) {
     uint32_t m = dma_madr[ch] & 0xFFFFFF, b = dma_bcr[ch], c = dma_chcr[ch];
     switch (ch) {
@@ -153,6 +173,7 @@ static void dma_start(int ch) {
     case 6: dma_otc(m, b); break;
     default: break;
     }
+    dma_inval(ch, m, b, c);
     dma_chcr[ch] &= ~((1u << 24) | (1u << 28));
     if (dicr & (1u << (16 + ch))) { dicr |= 1u << (24 + ch); }
     dicr_update();

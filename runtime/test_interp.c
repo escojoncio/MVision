@@ -187,6 +187,61 @@ static void t_setjmp(Cpu *c) {
     EQ(mem_r32(c, 0x80050000), 0xCAFE0000u);
 }
 
+
+/* El enlace de jal/jalr se escribe en el propio salto: el delay slot lo ve; si el slot escribe ra, gana el slot. */
+static void t_link_slot(Cpu *c) {
+    reset(c);
+    pc_asm = 0x80021000; emit(JR_RA); emit(NOP);                 /* g */
+    pc_asm = 0x80002000; emit(ADDIU(V1, 0, 99)); emit(JR(S0)); emit(NOP);
+    pc_asm = 0x80020000;
+    emit(ADDU(S0, RA, 0));
+    emit(JAL(0x80021000));
+    emit(ADDU(T0, RA, 0));                                       /* slot lee ra = 0x8002000c */
+    emit(LUI(T2, 0x8002)); emit(ORI(T2, T2, 0x1000));
+    emit(JALR(RA, T2));
+    emit(ADDU(A1, RA, 0));                                       /* slot lee rd = 0x8002001c */
+    emit(JAL(0x80021000));
+    emit(ORI(RA, 0, 0x2000));                                    /* slot escribe ra: g vuelve a 0x2000 */
+    emit(JR(S0)); emit(NOP);
+    interp_call(c, 0x80020000);
+    EQ(c->r[T0], 0x8002000cu);
+    EQ(c->r[A1], 0x8002001cu);
+    EQ(c->r[V1], 99);
+}
+
+/* Invalidación de código decodificado: escrituras del invitado y del runtime, delay slot, bloque que cruza granos. */
+static void t_codewrite(Cpu *c) {
+    reset(c);
+    pc_asm = 0x80030000; emit(ADDIU(V0, 0, 1)); emit(JR_RA); emit(NOP);
+    interp_call(c, 0x80030000); EQ(c->r[V0], 1);
+    pc_asm = 0x80030100; emit(LUI(T0, 0x8003)); emit(LUI(T1, 0x2402)); emit(ORI(T1, T1, 2)); emit(SW(T1, T0, 0)); emit(JR_RA); emit(NOP);
+    interp_call(c, 0x80030100);                                  /* sw del invitado sobre su propio código */
+    interp_call(c, 0x80030000); EQ(c->r[V0], 2);
+    mem_w8(c, 0x80030000, 3); interp_call(c, 0x80030000); EQ(c->r[V0], 3);
+    mem_w16(c, 0xA0030000, 4); interp_call(c, 0x80030000); EQ(c->r[V0], 4);
+    uint32_t w = ADDIU(V0, 0, 5); memcpy(&psx_ram[0x30000], &w, 4);
+    rt_code_invalidate(0x80030000, 4); interp_call(c, 0x80030000); EQ(c->r[V0], 5);
+    pc_asm = 0x80030200; emit(JR_RA); emit(ADDIU(V1, 0, 1));    /* delay slot */
+    interp_call(c, 0x80030200); EQ(c->r[V1], 1);
+    mem_w32(c, 0x80030204, ADDIU(V1, 0, 2)); interp_call(c, 0x80030200); EQ(c->r[V1], 2);
+    pc_asm = 0x80040000 - 32;                                    /* bloque que cruza el límite de grano 0x80040000 */
+    for (int i = 0; i < 8; i++) emit(NOP);
+    emit(ADDIU(V1, 0, 1)); emit(JR_RA); emit(NOP);
+    interp_call(c, 0x80040000 - 32); EQ(c->r[V1], 1);
+    mem_w32(c, 0x80040000, ADDIU(V1, 0, 3)); interp_call(c, 0x80040000 - 32); EQ(c->r[V1], 3);
+}
+
+/* DMA a RAM (OTC): invalida el bloque decodificado en la zona escrita. */
+extern unsigned long interp_invalidations;
+static void t_dma_inval(Cpu *c) {
+    reset(c);
+    pc_asm = 0x80090000; emit(ADDIU(V0, 0, 1)); emit(JR_RA); emit(NOP);
+    interp_call(c, 0x80090000); EQ(c->r[V0], 1);
+    unsigned long before = interp_invalidations;
+    mem_w32(c, 0x1F8010E0, 0x00090008u); mem_w32(c, 0x1F8010E4, 4); mem_w32(c, 0x1F8010E8, 0x11000002u);
+    EQ(interp_invalidations - before, 1);
+}
+
 int main(void) {
     Cpu c;
     interp_log_enabled = 0;
@@ -196,6 +251,9 @@ int main(void) {
     t_jrtable(&c);
     t_alu(&c);
     t_setjmp(&c);
+    t_link_slot(&c);
+    t_codewrite(&c);
+    t_dma_inval(&c);
     printf(fails ? "%d fallos\n" : "intérprete: todas las pruebas OK\n", fails);
     return fails != 0;
 }

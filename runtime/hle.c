@@ -16,13 +16,34 @@ HostFrameHook rt_host_frame;
 /* Contador de VBlank en la última salida de VSync, por hilo: VSync(n) de un hilo no debe leer la base de otro. */
 static uint32_t vs_base[32];
 
+static uint32_t cb_lo, cb_hi;
+static uint32_t cb_entry[16];     /* sp inicial de cada callback en curso (pila de profundidad) */
+static unsigned cb_depth;
+uint32_t hle_cb_sp(uint32_t cur_sp) {
+    if (!cb_hi) {
+        cb_lo = bios_kalloc(0x1000);
+        if (cb_lo) cb_hi = cb_lo + 0x1000 - 16;
+    }
+    uint32_t s = cur_sp & 0x1FFFFFFFu, lo = cb_lo & 0x1FFFFFFFu, hi = cb_hi & 0x1FFFFFFFu, sp;
+    if (!cb_hi) sp = (cur_sp - 0x400) & ~7u;                               /* sin memoria de kernel: comportamiento antiguo */
+    else if (s > lo && s <= hi) sp = (cur_sp - 0x80) & ~7u;                /* callback dentro de un callback */
+    else if (cb_depth) sp = (cb_entry[(cb_depth - 1) & 15] - 0x400) & ~7u;  /* excepción que interrumpe un callback: bajo el suyo */
+    else sp = cb_hi;
+    if (cb_hi && (sp & 0x1FFFFFFFu) <= lo + 0x100) sp = (cur_sp - 0x400) & ~7u;   /* región agotada: comportamiento antiguo */
+    cb_entry[cb_depth++ & 15] = sp;
+    return sp;
+}
+/* Fin del callback abierto con hle_cb_sp (hle_invoke y el CD lo llaman tras rt_call). */
+void hle_cb_done(void) { if (cb_depth) cb_depth--; }
+
 /* Ejecuta una función MIPS como si fuera una interrupción: preserva todo el estado. */
 void hle_invoke(Cpu *c, uint32_t fn, uint32_t arg) {
     if (!fn) return;
     Cpu saved = *c;
     c->r[4] = arg;
-    c->r[29] = (c->r[29] - 0x400) & ~7u; /* margen bajo la pila actual */
+    c->r[29] = hle_cb_sp(c->r[29]);
     rt_call(c, fn);
+    hle_cb_done();
     *c = saved;
 }
 

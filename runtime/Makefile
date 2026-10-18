@@ -6,8 +6,10 @@ CC = clang
 endif
 CFLAGS ?= -O2 -g -Wall -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls
 CPPFLAGS += -I. -I$(GEN)
-RT = $(filter-out headless.c test_%.c wip_%.c,$(wildcard *.c))
+# nogen.c (tablas vacías del modo sin código generado) solo entra en headless_interp.
+RT = $(filter-out headless.c test_%.c wip_%.c nogen.c,$(wildcard *.c))
 OUT ?= ../build
+LDLIBS ?= -lm
 
 # Overlays recompiladas (make gen_ov): objetos en $(GENOV); si existen se enlazan al headless.
 GENOV ?= ../build/gen_ov
@@ -15,19 +17,44 @@ OVOBJ = $(wildcard $(GENOV)/*.o)
 
 $(OUT)/headless: $(RT) headless.c $(wildcard $(GEN)/*.c) $(wildcard *.h) $(OVOBJ)
 	@mkdir -p $(OUT)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA) -o $@ $(RT) headless.c $(GEN)/*.c $(OVOBJ)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA) -o $@ $(RT) headless.c $(GEN)/*.c $(OVOBJ) $(LDLIBS)
 
 $(OUT)/test_runtime: $(RT) test_runtime.c $(wildcard *.h)
 	@mkdir -p $(OUT)
-	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_runtime.c
+	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_runtime.c $(LDLIBS)
 
 $(OUT)/test_sys: $(RT) test_sys.c $(wildcard *.h)
 	@mkdir -p $(OUT)
-	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_sys.c
+	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_sys.c $(LDLIBS)
 
-.PHONY: test test_sys
-test: $(OUT)/test_runtime
+$(OUT)/test_interp: $(RT) test_interp.c $(wildcard *.h)
+	@mkdir -p $(OUT)
+	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_interp.c $(LDLIBS)
+
+$(OUT)/test_hlebind: $(RT) test_hlebind.c $(wildcard *.h)
+	@mkdir -p $(OUT)
+	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_hlebind.c $(LDLIBS)
+
+# Runtime sin código generado (MV_NOGEN): nada derivado del juego en el binario. Toda la CPU pasa por el
+# intérprete; las HLE se enlazan por firmas en ejecución (--sigs / MV_SIGS). No usa GEN ni overlays.
+$(OUT)/headless_interp: $(RT) headless.c nogen.c $(wildcard *.h)
+	@mkdir -p $(OUT)
+	$(CC) -I. -DMV_NOGEN $(CFLAGS) $(EXTRA) -o $@ $(RT) headless.c nogen.c $(LDLIBS)
+
+.PHONY: test test_sys headless_interp
+headless_interp: $(OUT)/headless_interp
+
+test: $(OUT)/test_runtime $(OUT)/test_interp $(OUT)/test_hlebind
 	$(OUT)/test_runtime
+	$(OUT)/test_interp
+	$(OUT)/test_hlebind
+
+# Tabla nombre -> hle_<nombre> (hle_table.c va en el repo; esta regla la regenera tras tocar hle*.txt).
+.PHONY: hle_table check_hle_table
+hle_table:
+	python3 ../tools/recomp/hletab.py $(wildcard hle*.txt) > hle_table.c
+check_hle_table:
+	python3 ../tools/recomp/hletab.py $(wildcard hle*.txt) | diff -q - hle_table.c
 
 test_sys: $(OUT)/test_sys
 	$(OUT)/test_sys

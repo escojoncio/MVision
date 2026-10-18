@@ -67,6 +67,7 @@ static uint32_t ov_sample_calc(void) {
 }
 
 void rt_ov_written(uint32_t a, uint32_t n) {
+    rt_code_invalidate(a, n);   /* bloques del intérprete sobre la zona escrita */
     if (!rt_ov_count) return;
     if (!ov_init) ov_setup();
     a = (a & 0x1FFFFFFFu) | 0x80000000u;
@@ -118,10 +119,12 @@ FuncPtr rt_lookup(uint32_t a) {
 __attribute__((weak)) const HleOrig rt_hle_orig[] = {{0, 0}};
 __attribute__((weak)) const unsigned rt_hle_orig_count = 0;
 
+#include "hlebind.h"
 int rt_orig(Cpu *c, const char *name) {
     for (unsigned i = 0; i < rt_hle_orig_count; i++)
         if (!strcmp(rt_hle_orig[i].name, name)) { rt_hle_orig[i].fn(c); return 1; }
-    return 0;
+    /* modo sin código generado: el original es el código del EXE, interpretado */
+    return hle_bind_orig(c, name);
 }
 
 const char *rt_name(uint32_t a) {
@@ -130,7 +133,9 @@ const char *rt_name(uint32_t a) {
         unsigned m = (lo + hi) / 2;
         if (rt_func_names[m].addr < a) lo = m + 1; else hi = m;
     }
-    return lo < rt_func_name_count && rt_func_names[lo].addr == a ? rt_func_names[lo].name : "?";
+    if (lo < rt_func_name_count && rt_func_names[lo].addr == a) return rt_func_names[lo].name;
+    const char *h = hle_bind_name(a);
+    return h ? h : "?";
 }
 
 #include "fiber.h"
