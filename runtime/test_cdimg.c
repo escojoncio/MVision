@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include "cdrom.h"
+#include "disc_img.h"
 #include "cpu.h"
 
 const FuncEntry rt_func_table[] = {{0, 0}};
@@ -34,6 +35,12 @@ int main(void) {
     snprintf(d, sizeof d, "%s/disc", root); mkdir(d, 0755);
     char sub[1100]; snprintf(sub, sizeof sub, "%s/DATA", d); mkdir(sub, 0755);
     wfile(d, "SYSTEM.CNF", 70, 1);
+    {   /* SYSTEM.CNF legible para la identificación por contenido */
+        char p[1100]; snprintf(p, sizeof p, "%s/SYSTEM.CNF", d);
+        FILE *sf = fopen(p, "wb");
+        fputs("BOOT = cdrom:\\SLES_017.34;1\r\nTCB = 4\r\nEVENT = 16\r\nSTACK = 801FFFF0\r\n", sf);
+        fclose(sf);
+    }
     wfile(d, "BOOT.EXE", 5000, 2);
     wfile(sub, "B.DAT", 3000, 3);
     wfile(sub, "C.STR", 4 * 2336, 4);
@@ -101,6 +108,74 @@ int main(void) {
         int st = 0;
         waitpid(pid, &st, 0);
         CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+
+    /* Rutas y .cue como los de un volcado real: espacios, corchetes y paréntesis en carpeta y nombre, CRLF, BOM, comillas
+     * o no, '\' en el nombre; escaneo de carpeta; errores de E/S (fichero truncado tras abrir) sin cuelgue ni caché envenenada. */
+    {
+        char dir[1200], bin[1400], cue[1400], cmd[3000];
+        snprintf(dir, sizeof dir, "%s/MGS Vision/[SLES-01734] (Spain)", root);
+        snprintf(cmd, sizeof cmd, "mkdir -p '%s'", dir);
+        if (system(cmd)) {}
+        snprintf(bin, sizeof bin, "%s/SLES-01734 (Spain) (Disc 1).bin", dir);
+        snprintf(cue, sizeof cue, "%s/SLES-01734 (Spain) (Disc 1).cue", dir);
+        snprintf(cmd, sizeof cmd, "cp '%s' '%s'", img, bin);
+        CHECK(system(cmd) == 0);
+        static const char *cues[] = {
+            "FILE \"SLES-01734 (Spain) (Disc 1).bin\" BINARY\r\n  TRACK 01 MODE2/2352\r\n    INDEX 01 00:00:00\r\n",
+            "\xEF\xBB\xBF" "FILE SLES-01734 (Spain) (Disc 1).bin BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n",
+            "file \"x\\sles-01734 (spain) (disc 1).BIN\" binary\n  track 01 mode2/2352\n    index 01 00:00:00\n",
+        };
+        uint8_t ref[2340], got[2340];
+        for (unsigned v = 0; v < sizeof cues / sizeof *cues; v++) {
+            FILE *cf = fopen(cue, "wb");
+            fwrite(cues[v], 1, strlen(cues[v]), cf);
+            fclose(cf);
+            DiscImg *h = disc_img_open(cue);
+            CHECK(h != NULL);
+            if (!h) continue;
+            CHECK(disc_img_sectors(h) == total && disc_img_tracks(h) == 1 && disc_img_nfiles(h) == 1);
+            DiscId id;
+            CHECK(disc_img_identify(h, &id) == 0 && id.serial == 1734 && !strcmp(id.datadir, "DATA"));
+            uint8_t a[2048], b[2048];
+            for (uint32_t l = 0; l < total; l += 7) {
+                CHECK(disc_img_read_user(h, l, a) == 0);
+                cd_select_disc(0); cd_read_sector(l, b, 0);
+                if (memcmp(a, b, 2048)) { CHECK(0 && "sector distinto"); break; }
+            }
+            CHECK(disc_img_io_errors(h) == 0);
+            disc_img_close(h);
+        }
+        DiscEntry ents[4];
+        snprintf(cmd, sizeof cmd, "%s/MGS Vision", root);
+        CHECK(disc_scan_dir(cmd, ents, 4) == 1 && !ents[0].is_dir && strstr(ents[0].path, "[SLES-01734] (Spain)/") != NULL);
+        /* montaje por cd_open con la ruta tal cual (disco 2 tras la carpeta) */
+        CHECK(cd_open(cue) == 2);
+        cd_select_disc(1);
+        CHECK(cd_read_sector(16, ref, 1) == 0);
+        cd_select_disc(0);
+        CHECK(cd_read_sector(16, got, 1) == 0 && !memcmp(ref, got, 2340));
+
+        /* E/S: se trunca el .bin con el disco abierto; los sectores perdidos fallan (sin colgarse), los demás siguen bien,
+         * y al restaurar el tamaño el siguiente intento vuelve a leer (el bloque fallido no queda en caché). */
+        FILE *cf = fopen(cue, "wb");
+        fputs(cues[0], cf);
+        fclose(cf);
+        DiscImg *h = disc_img_open(cue);
+        CHECK(h != NULL);
+        if (h) {
+            uint8_t raw[DISC_RAW], u[2048];
+            CHECK(disc_img_read_raw(h, 3, raw) == 0);
+            uint32_t cut = total / 2;
+            CHECK(truncate(bin, (off_t)cut * DISC_RAW) == 0);
+            CHECK(disc_img_read_raw(h, total - 5, raw) != 0 && raw[100] == 0);   /* bloque no leído en caché: error */
+            CHECK(disc_img_io_errors(h) > 0);
+            CHECK(disc_img_read_raw(h, 3, raw) == 0);                             /* lo anterior sigue accesible */
+            CHECK(disc_img_read_user(h, total - 5, u) != 0);
+            CHECK(truncate(bin, (off_t)total * DISC_RAW) == 0);
+            CHECK(disc_img_read_raw(h, total - 5, raw) == 0);                     /* recuperado */
+            disc_img_close(h);
+        }
     }
     printf(fails ? "%d fallos\n" : "imagen de disco en cdrom.c: todas las pruebas OK\n", fails);
     char cmd[1200];

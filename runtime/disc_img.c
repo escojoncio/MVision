@@ -34,6 +34,7 @@ struct DiscImg {
     Trk trk[MAX_TRK]; int ntrk;
     uint32_t total;
     Cache cache[NCACHE]; int rr;
+    uint32_t io_errors;     /* lecturas de sectores dentro de rango que fallaron tras reintentar (disco/ficheros no disponibles) */
 };
 
 /* ---------------- utilidades ---------------- */
@@ -227,6 +228,26 @@ int disc_img_track(const DiscImg *h, int n, uint32_t *start, int *audio) {
 int disc_img_nfiles(const DiscImg *h) { return h ? h->nseg : 0; }
 const char *disc_img_filepath(const DiscImg *h, int i) { return h && i >= 0 && i < h->nseg ? h->seg[i].path : NULL; }
 
+/* Lee n sectores desde "first" del segmento; reintenta y, si sigue fallando, reabre el fichero (un almacenamiento externo
+ * puede soltar el descriptor o tardar en materializar el fichero). Devuelve los sectores leídos (n = completo). */
+static size_t seg_read(DiscImg *h, Seg *s, uint32_t first, uint32_t n, uint8_t *dst) {
+    size_t got = 0;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt == 2) {   /* último intento con un descriptor nuevo */
+            FILE *g = fopen(s->path, "rb");
+            if (g) { if (s->f) fclose(s->f); s->f = g; }
+        }
+        if (s->f && !fseeko(s->f, (off_t)first * DISC_RAW, SEEK_SET)) {
+            got = fread(dst, DISC_RAW, n, s->f);
+            if (got == n) return got;
+            clearerr(s->f);
+        }
+    }
+    if (h->io_errors++ < 8)
+        fprintf(stderr, "[disc] error de lectura en %s: sector %u (+%u), leídos %zu de %u\n", mv_base(s->path), s->base + first, n, got, n);
+    return got;
+}
+
 static Cache *cache_get(DiscImg *h, int si, uint32_t blk) {
     for (int i = 0; i < NCACHE; i++)
         if (h->cache[i].valid && h->cache[i].seg == si && h->cache[i].blk == blk) return &h->cache[i];
@@ -235,12 +256,14 @@ static Cache *cache_get(DiscImg *h, int si, uint32_t blk) {
     c->valid = 0;
     uint32_t first = blk * BLK, n = s->nsec - first;
     if (n > BLK) n = BLK;
-    if (fseeko(s->f, (off_t)first * DISC_RAW, SEEK_SET)) return NULL;
-    size_t got = fread(c->d, DISC_RAW, n, s->f);
+    size_t got = seg_read(h, s, first, n, c->d);
     if (!got) return NULL;
-    c->seg = si; c->blk = blk; c->valid = (int)got;
+    c->seg = got == n ? si : -1;   /* bloque incompleto: se usa lo leído ahora pero no queda en caché (se reintentará) */
+    c->blk = blk; c->valid = (int)got;
     return c;
 }
+
+uint32_t disc_img_io_errors(const DiscImg *h) { return h ? h->io_errors : 0; }
 
 int disc_img_read_raw(DiscImg *h, uint32_t lba, uint8_t out[DISC_RAW]) {
     memset(out, 0, DISC_RAW);
