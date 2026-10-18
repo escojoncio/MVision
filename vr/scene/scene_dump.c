@@ -406,6 +406,24 @@ static void handle_list(uint32_t f, const GpuDrawList *l) {
             f, rc, bridge_mode_name(&bs), s.world_valid, s.stats.n_ops, s.stats.n_poly, s.stats.n_poly3d, s.stats.n_poly2d, s.stats.n_rect, s.stats.n_line,
             s.stats.n_tris3d, s.stats.n_flipped, s.stats.n_tris2d, s.stats.drop_partial, s.stats.drop_near, s.stats.drop_degenerate, s.stats.drop_huge,
             s.stats.drop_nan, s.stats.n_events, s.stats.n_batches);
+    {
+        /* descartes con la regla ANTERIOR (3D = todos fvalid; parcial = algunos fvalid; cerca = algún vz < near en polis fvalid) para comparar */
+        uint32_t o3 = 0, opart = 0, onear = 0;
+        for (uint32_t i = 0; i < l->nops; i++) {
+            const GpuOp *po = &l->ops[i];
+            if (po->type != GPU_OP_POLY) continue;
+            int nv = po->nv == 4 ? 4 : 3, nf = 0, nearf = 0;
+            for (int k = 0; k < nv; k++) { nf += po->v[k].fvalid; if (po->v[k].fvalid && po->v[k].vz < o.near_units) nearf = 1; }
+            if (nf == nv) { if (nearf) onear++; else o3++; } else if (nf) opart++;
+        }
+        fprintf(stderr, "[scene]   regla previa (fvalid): polis3D-sin-cerca %u, parciales %u, con cerca %u | nueva (vvalid): 3D %u (con BEHIND %u, tris recortados %u), "
+                "parcial %u, ambig %u, derivados-descartados %u, tris-detras %u, cerca-sin-BEHIND %u\n",
+                o3, opart, onear, s.stats.n_poly3d, s.stats.n_poly_behind, s.stats.n_clipped, s.stats.drop_partial, s.stats.drop_ambig,
+                s.stats.drop_derived, s.stats.drop_behind, s.stats.drop_near);
+    }
+    fprintf(stderr, "[scene]   filtro(clase 3): activo %d  copias: polis %u rects %u  recubrimientos %u  tris %u  clear(clase 2) %u  tint (%.2f,%.2f,%.2f) filas %d\n",
+            s.filter.active, s.stats.n_filter_polys, s.stats.n_filter_rects, s.stats.n_filter_cover, s.stats.n_filter_tris, s.stats.n_clear,
+            s.filter.tint[0], s.filter.tint[1], s.filter.tint[2], s.filter.nrows);
     fprintf(stderr, "[scene]   jugador (juego) pos=(%d,%d,%d) yaw=%d  eye_pos=(%d,%d,%d) focal=%d  eje_x=(%d,%d,%d) eje_y=(%d,%d,%d) eje_z=(%d,%d,%d)\n",
             bs.player_pos.x, bs.player_pos.y, bs.player_pos.z, bs.ctl_rot.y, bs.eye_pos[0], bs.eye_pos[1], bs.eye_pos[2], bs.eye_focal,
             bs.eye_axes[0][0], bs.eye_axes[1][0], bs.eye_axes[2][0], bs.eye_axes[0][1], bs.eye_axes[1][1], bs.eye_axes[2][1],
@@ -660,6 +678,7 @@ static void finish(void) {
     }
 }
 
+static int scan_filter;
 static void on_alarm(int s) { (void)s; rt_fatal(NULL, "sin VBlank en 60 s"); }
 
 static void on_frame(Cpu *c, uint32_t f) {
@@ -670,6 +689,13 @@ static void on_frame(Cpu *c, uint32_t f) {
     gpu_capture_vblank();
     const GpuDrawList *l;
     while ((l = gpu_capture_frame())) {
+        if (scan_filter) {
+            VrScene sc;
+            if (vr_scene_build(l, &bs, &opts, &sc) == 0 && sc.filter.active)
+                fprintf(stderr, "[scan] f%u modo=%s polis %u rects %u recub %u clear %u tint (%.2f,%.2f,%.2f) filas %d cover abr %d rgb (%.2f,%.2f,%.2f) disp(%d,%d,%d,%d) 3D %u\n", f, bridge_mode_name(&bs),
+                        sc.stats.n_filter_polys, sc.stats.n_filter_rects, sc.stats.n_filter_cover, sc.stats.n_clear, sc.filter.tint[0], sc.filter.tint[1], sc.filter.tint[2],
+                        sc.filter.nrows, sc.filter.cover_abr, sc.filter.cover_rgb[0], sc.filter.cover_rgb[1], sc.filter.cover_rgb[2], l->disp.x, l->disp.y, l->disp.w, l->disp.h, sc.stats.n_tris3d);
+        }
         if (target_frame(f)) handle_list(f, l);
         else ref_apply(rv, l, 0);
     }
@@ -693,6 +719,8 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--pad") && i + 1 < argc) { if (pad_add_script(argv[++i])) return 1; }
         else if (!strcmp(argv[i], "--pad-every") && i + 1 < argc) { if (pad_add_every(argv[++i])) return 1; }
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) opts.scale = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--filter") && i + 1 < argc) opts.screen_filter = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--scan-filter")) scan_filter = 1, opts.screen_filter = 1;   /* una línea [scan] por lista con clase 3 activa */
         else if (!strcmp(argv[i], "--raw-eye")) opts.eye_normalize = 0;
         else if (!strcmp(argv[i], "--eye-vt")) opts.eye_from_view_t = 1;
         else if (!strcmp(argv[i], "--feet") && i + 1 < argc) opts.feet_below_pos = (float)atof(argv[++i]);

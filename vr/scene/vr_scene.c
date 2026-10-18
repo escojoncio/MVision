@@ -33,6 +33,9 @@ VrSceneOpts vr_scene_opts_default(void) {
     o.eye_normalize = 1;
     o.eye_from_view_t = 0;
     o.mirror_z = -1;
+    o.screen_filter = 0;   /* el renderer actual no conoce la clase 3 (la pintaría como 3D): activar solo cuando lo implemente */
+    o.filter_min_cover = 0.9f;
+    o.drop_clear = 1;
     return o;
 }
 
@@ -93,6 +96,24 @@ static int state_id(const GpuOp *op) {
 /* ---------------- geometría ---------------- */
 static uint32_t pack_rgba(uint8_t r, uint8_t g, uint8_t b) { return (uint32_t)r | (uint32_t)g << 8 | (uint32_t)b << 16 | 0xFF000000u; }
 
+/* Vértice de trabajo 3D: posición de vista + atributos en float (permite interpolar al recortar). */
+typedef struct { float p[3], u, v, r, g, b; } CV;
+
+static void cv_from(CV *c, const GpuOp *op, const GpuVtx *v, int gour) {
+    const GpuVtx *k = gour ? v : &op->v[0];
+    c->p[0] = v->vx; c->p[1] = v->vy; c->p[2] = v->vz;
+    c->u = (float)v->u; c->v = (float)v->v;
+    c->r = k->r; c->g = k->g; c->b = k->b;
+}
+static uint8_t q8(float x) { return (uint8_t)(x <= 0 ? 0 : x >= 255 ? 255 : (int)(x + 0.5f)); }
+static void fill_cv(VrVtx *o, const GpuOp *op, const CV *c, uint16_t flags, uint16_t st) {
+    o->rgba = pack_rgba(q8(c->r), q8(c->g), q8(c->b));
+    o->uv[0] = c->u; o->uv[1] = c->v;
+    o->clut = (uint16_t)((op->clx >> 4) | (op->cly << 6));
+    o->tpage = (uint16_t)(((op->tx >> 6) & 15) | (((op->ty >> 8) & 1) << 4) | ((op->abr & 3) << 5) | ((op->tp & 3) << 7));
+    o->flags = flags;
+    o->pad = st;
+}
 static void fill_vtx(VrVtx *o, const GpuOp *op, const GpuVtx *v, int gour, uint16_t flags, uint16_t st) {
     const GpuVtx *c = gour ? v : &op->v[0];
     o->rgba = pack_rgba(c->r, c->g, c->b);
@@ -103,14 +124,34 @@ static void fill_vtx(VrVtx *o, const GpuOp *op, const GpuVtx *v, int gour, uint1
     o->pad = st;
 }
 
+/* Sutherland-Hodgman contra el plano z = zn (se conserva z >= zn) de un polígono de n<=3 vértices -> <=4. Devuelve m. */
+static int clip_near(const CV *in, int n, float zn, CV *out) {
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        const CV *a = &in[i], *b = &in[(i + 1) % n];
+        int ia = a->p[2] >= zn, ib = b->p[2] >= zn;
+        if (ia) out[m++] = *a;
+        if (ia != ib) {
+            float s = (zn - a->p[2]) / (b->p[2] - a->p[2]);
+            const float *pa = a->p, *pb = b->p;
+            CV *o = &out[m++];
+            for (int k = 0; k < 3; k++) o->p[k] = pa[k] + (pb[k] - pa[k]) * s;
+            o->p[2] = zn;
+            o->u = a->u + (b->u - a->u) * s; o->v = a->v + (b->v - a->v) * s;
+            o->r = a->r + (b->r - a->r) * s; o->g = a->g + (b->g - a->g) * s; o->b = a->b + (b->b - a->b) * s;
+        }
+    }
+    return m;
+}
+
 static int has_player_ok(const BridgeState *bs) {
     return bs && bs->has_player && (bs->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE;
 }
 
 typedef struct { float m[3][3]; float t[3]; } Aff; /* v_vr = m*v + t */
 
-static void xf(const Aff *a, const GpuVtx *v, float *out) {
-    for (int r = 0; r < 3; r++) out[r] = a->m[r][0] * v->vx + a->m[r][1] * v->vy + a->m[r][2] * v->vz + a->t[r];
+static void xf(const Aff *a, const CV *v, float *out) {
+    for (int r = 0; r < 3; r++) out[r] = a->m[r][0] * v->p[0] + a->m[r][1] * v->p[1] + a->m[r][2] * v->p[2] + a->t[r];
 }
 
 void vr_scene_player_origin(const BridgeState *bs, const VrSceneOpts *o, float org[3]) {
@@ -127,6 +168,70 @@ void vr_scene_player_origin(const BridgeState *bs, const VrSceneOpts *o, float o
     }
 }
 
+/* Área (px) de la intersección de [x0,x1)x[y0,y1) con [a0,b0)x[a1,b1) */
+static double isect_area(int x0, int y0, int x1, int y1, int ax0, int ay0, int ax1, int ay1) {
+    int ix0 = x0 > ax0 ? x0 : ax0, iy0 = y0 > ay0 ? y0 : ay0, ix1 = x1 < ax1 ? x1 : ax1, iy1 = y1 < ay1 ? y1 : ay1;
+    return (ix1 > ix0 && iy1 > iy0) ? (double)(ix1 - ix0) * (iy1 - iy0) : 0.0;
+}
+
+/* Clasificación de filtro de pantalla (ver vr_scene.h, "Clase 3"). Devuelve 0 no, 1 copia de pantalla, 2 recubrimiento semitransparente.
+ * bbox (x0,y0,x1,y1; x1,y1 exclusivos) de destino de la primitiva 2D; (u0,v0,u1,v1) caja de texels inclusiva (polígonos). Todo se mide contra el área
+ * MOSTRADA (dl->disp = búfer recién dibujado), NO contra el recorte: un panel pequeño con su propio recorte (minimapa, retrato) que se cubre a sí mismo
+ * con un rect semitransparente o textura 15 bits no es un filtro de pantalla. */
+static int filter_class(const VrSceneOpts *o, const GpuDrawList *dl, const GpuOp *op, int is_rect, int x0, int y0, int x1, int y1, int u0, int v0, int u1, int v1) {
+    if (!o->screen_filter || x1 <= x0 || y1 <= y0) return 0;
+    int dx0 = dl->disp.x, dy0 = dl->disp.y, dx1 = dl->disp.x + dl->disp.w, dy1 = dl->disp.y + dl->disp.h;
+    double da = (double)dl->disp.w * dl->disp.h;
+    if (!(da > 0)) return 0;
+    if ((op->flags & GPU_F_TEXTURED) && op->tp >= 2 && !(op->flags & GPU_F_SEMI)) {   /* copia desplazada opaca; una mezcla semitransparente (brillo, desenfoque) no se modela con dv/du */
+        int sx0, sy0, sx1, sy1;
+        if (is_rect) { /* origen en (u0,v0); con flip crece hacia atrás; tamaño = el del destino */
+            sx0 = op->tx + ((op->flags & GPU_F_FLIPX) ? u0 - (x1 - x0) + 1 : u0); sx1 = sx0 + (x1 - x0);
+            sy0 = op->ty + ((op->flags & GPU_F_FLIPY) ? v0 - (y1 - y0) + 1 : v0); sy1 = sy0 + (y1 - y0);
+        } else { sx0 = op->tx + u0; sy0 = op->ty + v0; sx1 = op->tx + u1 + 1; sy1 = op->ty + v1 + 1; }
+        double area = (double)(sx1 - sx0) * (sy1 - sy0), darea = (double)(x1 - x0) * (y1 - y0);
+        /* el destino tiene que ser de ancho de pantalla: banda fina (tira, h <= 16) de >= 45 % del ancho, o >= 50 % del área. Un parche local que copia
+         * la pantalla (p. ej. un brillo alrededor de un retrato de 140x89) NO es un filtro de pantalla. */
+        int wide = (x1 - x0) * 100 >= 45 * dl->disp.w && (y1 - y0) <= 16;
+        if (area > 0 && (wide || darea >= 0.5 * da) && isect_area(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1) >= 0.5 * area &&
+            isect_area(x0, y0, x1, y1, dx0, dy0, dx1, dy1) >= 0.5 * darea) return 1;
+    }
+    if ((op->flags & GPU_F_SEMI) && !(op->flags & GPU_F_TEXTURED)) { /* solo color plano/degradado: fundido, destello, tinte (un polígono texturizado a pantalla completa es contenido) */
+        int cx0 = x0 > op->cx1 ? x0 : op->cx1, cy0 = y0 > op->cy1 ? y0 : op->cy1;
+        int cx1 = x1 < op->cx2 + 1 ? x1 : op->cx2 + 1, cy1 = y1 < op->cy2 + 1 ? y1 : op->cy2 + 1;
+        if (isect_area(cx0, cy0, cx1, cy1, dx0, dy0, dx1, dy1) >= o->filter_min_cover * da) return 2;
+    }
+    return 0;
+}
+
+/* acumula el resumen VrFilter */
+static void filter_note(VrScene *out, const GpuOp *op, int cls, int is_rect, float *tw) {
+    VrFilter *f = &out->filter;
+    f->active = 1;
+    if (cls == 2) {
+        f->n_cover++; out->stats.n_filter_cover++;
+        const GpuVtx *c = &op->v[0];
+        f->cover_rgb[0] = c->r / 255.0f; f->cover_rgb[1] = c->g / 255.0f; f->cover_rgb[2] = c->b / 255.0f; f->cover_abr = op->abr & 3;
+        return;
+    }
+    if (!is_rect) { f->n_polys++; out->stats.n_filter_polys++; }
+    else {
+        f->n_strips++; out->stats.n_filter_rects++;
+        if (!(op->flags & GPU_F_RAW)) { /* promedio del color de modulación por área */
+            float w = (float)op->rw * op->rh;
+            for (int k = 0; k < 3; k++) f->tint[k] = (f->tint[k] * *tw + (k == 0 ? op->v[0].r : k == 1 ? op->v[0].g : op->v[0].b) / 128.0f * w) / (*tw + w);
+            *tw += w;
+        }
+        int y0 = op->v[0].y - out->filter.area[1];
+        int dv = (op->ty + op->v[0].v) - op->v[0].y, du = (op->tx + op->v[0].u) - op->v[0].x;
+        for (int r = 0; r < op->rh; r++) {
+            int i = y0 + r;
+            if (i < 0 || i >= VR_FILTER_ROWS) continue;
+            if (!f->rowcov[i]) { f->rowcov[i] = 1; f->dv[i] = (float)dv; f->du[i] = (float)du; if (i + 1 > f->nrows) f->nrows = i + 1; }
+        }
+    }
+}
+
 int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOpts *op_in, VrScene *out) {
     if (!dl || !out) return -1;
     VrSceneOpts o = op_in ? *op_in : vr_scene_opts_default();
@@ -134,6 +239,9 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     memset(out, 0, sizeof *out);
     out->src = dl;
     out->scale = o.scale;
+    out->filter.tint[0] = out->filter.tint[1] = out->filter.tint[2] = 1.0f; out->filter.cover_abr = -1;
+    out->filter.area[0] = dl->disp.x; out->filter.area[1] = dl->disp.y; out->filter.area[2] = dl->disp.w; out->filter.area[3] = dl->disp.h;
+    float tint_w = 0.0f;
 
     /* ---- transformación vista -> mundo VR ---- */
     Aff A;
@@ -221,66 +329,104 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
         if (op->type == GPU_OP_POLY) {
             out->stats.n_poly++;
             int nv = op->nv == 4 ? 4 : 3, nval = 0;
-            for (int k = 0; k < nv; k++) nval += op->v[k].fvalid;
+            unsigned uf = 0;   /* unión de vflags */
+            for (int k = 0; k < nv; k++) { nval += op->v[k].vvalid; if (op->v[k].vvalid) uf |= op->v[k].vflags; }
             static const int idx[2][3] = {{0, 1, 2}, {1, 2, 3}};
             int ntri = nv == 4 ? 2 : 1;
             if (nval == nv) {
+                /* contrato §28: polígono 3D = todos vvalid. AMBIG junto a SAT/BEHIND: posiciones poco fiables -> descartar. */
+                if ((uf & GPU_VF_AMBIG) && (uf & (GPU_VF_SAT | GPU_VF_BEHIND))) { out->stats.drop_ambig++; continue; }
+                if ((uf & GPU_VF_DERIVED) && o.drop_derived) { out->stats.drop_derived++; continue; }
                 out->stats.n_poly3d++;
+                int clipmode = (uf & GPU_VF_BEHIND) != 0 || o.clip_all_near;
+                if (uf & GPU_VF_BEHIND) out->stats.n_poly_behind++;
+                CV cv[4];
+                for (int k = 0; k < nv; k++) cv_from(&cv[k], op, &op->v[k], gour);
                 for (int q = 0; q < ntri; q++) {
-                    const GpuVtx *g[3] = {&op->v[idx[q][0]], &op->v[idx[q][1]], &op->v[idx[q][2]]};
-                    float p[3][3];
+                    const CV *g3[3] = {&cv[idx[q][0]], &cv[idx[q][1]], &cv[idx[q][2]]};
                     int nanv = 0, near = 0;
                     for (int k = 0; k < 3; k++) {
-                        if (!isfinite(g[k]->vx) || !isfinite(g[k]->vy) || !isfinite(g[k]->vz)) nanv = 1;
-                        else if (g[k]->vz < o.near_units) near = 1;
+                        if (!isfinite(g3[k]->p[0]) || !isfinite(g3[k]->p[1]) || !isfinite(g3[k]->p[2])) nanv = 1;
+                        else if (g3[k]->p[2] < o.near_units) near = 1;
                     }
                     if (nanv) { out->stats.drop_nan++; continue; }
-                    if (near) { out->stats.drop_near++; continue; }
-                    for (int k = 0; k < 3; k++) xf(&A, g[k], p[k]);
-                    float e1[3], e2[3], e3[3];
-                    for (int c = 0; c < 3; c++) { e1[c] = p[1][c] - p[0][c]; e2[c] = p[2][c] - p[0][c]; e3[c] = p[2][c] - p[1][c]; }
-                    float l1 = e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2], l2 = e2[0]*e2[0] + e2[1]*e2[1] + e2[2]*e2[2],
-                          l3 = e3[0]*e3[0] + e3[1]*e3[1] + e3[2]*e3[2];
-                    float me = o.max_edge_m * o.max_edge_m;
-                    if (!(l1 <= me && l2 <= me && l3 <= me)) { out->stats.drop_huge++; continue; }
-                    float nrm[3] = {e1[1]*e2[2] - e1[2]*e2[1], e1[2]*e2[0] - e1[0]*e2[2], e1[0]*e2[1] - e1[1]*e2[0]};
-                    float area = 0.5f * sqrtf(nrm[0]*nrm[0] + nrm[1]*nrm[1] + nrm[2]*nrm[2]);
-                    if (!(area >= o.min_area_m2)) { out->stats.drop_degenerate++; continue; }
-                    /* frente = cara que vio la cámara del juego */
-                    float tc[3] = {out->eye_vr[0] - p[0][0], out->eye_vr[1] - p[0][1], out->eye_vr[2] - p[0][2]};
-                    int flip = (nrm[0]*tc[0] + nrm[1]*tc[1] + nrm[2]*tc[2]) < 0;
-                    Tri *t = &g_tri[nt++];
-                    int ord[3] = {0, flip ? 2 : 1, flip ? 1 : 2};
-                    uint16_t ff = (uint16_t)(f | (flip ? VR_F_FLIPPED : 0));
-                    for (int k = 0; k < 3; k++) {
-                        VrVtx *vv = &t->v[k];
-                        fill_vtx(vv, op, g[ord[k]], gour, ff, sid);
-                        memcpy(vv->pos, p[ord[k]], sizeof vv->pos);
+                    CV poly[4]; int pn = 3;
+                    CV tin[3] = {*g3[0], *g3[1], *g3[2]};
+                    if (near) {
+                        if (!clipmode) { out->stats.drop_near++; continue; }
+                        pn = clip_near(tin, 3, o.near_units, poly);
+                        if (pn < 3) { out->stats.drop_behind++; continue; }
+                        out->stats.n_clipped++;
+                    } else memcpy(poly, tin, sizeof tin);
+                    for (int fan = 0; fan + 2 < pn; fan++) {
+                        const CV *g[3] = {&poly[0], &poly[fan + 1], &poly[fan + 2]};
+                        float p[3][3];
+                        for (int k = 0; k < 3; k++) xf(&A, g[k], p[k]);
+                        float e1[3], e2[3], e3[3];
+                        for (int c = 0; c < 3; c++) { e1[c] = p[1][c] - p[0][c]; e2[c] = p[2][c] - p[0][c]; e3[c] = p[2][c] - p[1][c]; }
+                        float l1 = e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2], l2 = e2[0]*e2[0] + e2[1]*e2[1] + e2[2]*e2[2],
+                              l3 = e3[0]*e3[0] + e3[1]*e3[1] + e3[2]*e3[2];
+                        float me = o.max_edge_m * o.max_edge_m;
+                        if (!(l1 <= me && l2 <= me && l3 <= me)) { out->stats.drop_huge++; continue; }
+                        float nrm[3] = {e1[1]*e2[2] - e1[2]*e2[1], e1[2]*e2[0] - e1[0]*e2[2], e1[0]*e2[1] - e1[1]*e2[0]};
+                        float area = 0.5f * sqrtf(nrm[0]*nrm[0] + nrm[1]*nrm[1] + nrm[2]*nrm[2]);
+                        if (!(area >= o.min_area_m2)) { out->stats.drop_degenerate++; continue; }
+                        /* frente = cara que vio la cámara del juego */
+                        float tc[3] = {out->eye_vr[0] - p[0][0], out->eye_vr[1] - p[0][1], out->eye_vr[2] - p[0][2]};
+                        int flip = (nrm[0]*tc[0] + nrm[1]*tc[1] + nrm[2]*tc[2]) < 0;
+                        Tri *t = &g_tri[nt++];
+                        int ord[3] = {0, flip ? 2 : 1, flip ? 1 : 2};
+                        uint16_t ff = (uint16_t)(f | (flip ? VR_F_FLIPPED : 0));
+                        for (int k = 0; k < 3; k++) {
+                            VrVtx *vv = &t->v[k];
+                            fill_cv(vv, op, g[ord[k]], ff, sid);
+                            memcpy(vv->pos, p[ord[k]], sizeof vv->pos);
+                        }
+                        t->ev_end = g_next[i]; t->src_op = i;
+                        t->kind = semi ? 1 : 0; t->blend = semi ? (op->abr & 3) : 0xFF;
+                        out->stats.n_tris3d++;
+                        if (flip) out->stats.n_flipped++;
+                        GROW(g_tri, g_tri_cap, nt + 4);
                     }
-                    t->ev_end = g_next[i]; t->src_op = i;
-                    t->kind = semi ? 1 : 0; t->blend = semi ? (op->abr & 3) : 0xFF;
-                    out->stats.n_tris3d++;
-                    if (flip) out->stats.n_flipped++;
                 }
                 continue;
             }
             if (nval && !o.partial_to_2d) { out->stats.drop_partial++; continue; }
             out->stats.n_poly2d++;
             if (o.drop_2d_all) continue;
+            int fcls = 0;
+            {
+                int bx0 = 1 << 20, by0 = 1 << 20, bx1 = -(1 << 20), by1 = -(1 << 20), bu0 = 1 << 20, bv0 = 1 << 20, bu1 = -(1 << 20), bv1 = -(1 << 20);
+                for (int k = 0; k < nv; k++) {
+                    const GpuVtx *g = &op->v[k];
+                    bx0 = g->x < bx0 ? g->x : bx0; bx1 = g->x > bx1 ? g->x : bx1; by0 = g->y < by0 ? g->y : by0; by1 = g->y > by1 ? g->y : by1;
+                    bu0 = g->u < bu0 ? g->u : bu0; bu1 = g->u > bu1 ? g->u : bu1; bv0 = g->v < bv0 ? g->v : bv0; bv1 = g->v > bv1 ? g->v : bv1;
+                }
+                fcls = filter_class(&o, dl, op, 0, bx0, by0, bx1, by1, bu0, bv0, bu1, bv1);
+            }
+            if (fcls) filter_note(out, op, fcls, 0, &tint_w);
             for (int q = 0; q < ntri; q++) {
                 Tri *t = &g_tri[nt++];
                 for (int k = 0; k < 3; k++) {
                     const GpuVtx *g = &op->v[idx[q][k]];
-                    fill_vtx(&t->v[k], op, g, gour, (uint16_t)(f | VR_F_2D), sid);
+                    fill_vtx(&t->v[k], op, g, gour, (uint16_t)(f | VR_F_2D | (fcls ? VR_F_FILTER : 0)), sid);
                     t->v[k].pos[0] = g->x; t->v[k].pos[1] = g->y; t->v[k].pos[2] = 0;
                 }
-                t->ev_end = g_next[i]; t->src_op = i; t->kind = 2; t->blend = semi ? (op->abr & 3) : 0xFF;
-                out->stats.n_tris2d++;
+                t->ev_end = g_next[i]; t->src_op = i; t->kind = fcls ? 3 : 2; t->blend = semi ? (op->abr & 3) : 0xFF;
+                out->stats.n_tris2d += fcls ? 0 : 1; out->stats.n_filter_tris += fcls ? 1 : 0;
             }
         } else if (op->type == GPU_OP_RECT) {
             out->stats.n_rect++;
             if (o.drop_2d_all) continue;
             const GpuVtx *g = &op->v[0];
+            int fcls = filter_class(&o, dl, op, 1, g->x, g->y, g->x + op->rw, g->y + op->rh, g->u, g->v, g->u, g->v);
+            if (fcls) filter_note(out, op, fcls, 1, &tint_w);
+            else if (!semi && !(op->flags & GPU_F_TEXTURED) && (double)op->rw * op->rh >= 0.9 * (double)dl->disp.w * dl->disp.h) {
+                /* borrado/máscara a pantalla completa: en el panel HUD (alfa premultiplicado, cleared a transparente) lo dejaría OPACO e
+                 * ocultaría el mundo. Se cuenta y, con opts.drop_clear (def. 1), no se emite. */
+                out->stats.n_clear++;
+                if (o.drop_clear) continue;
+            }
             float x0 = g->x, y0 = g->y, x1 = x0 + op->rw, y1 = y0 + op->rh;
             float u0 = g->u, v0 = g->v;
             float u1 = (f & GPU_F_FLIPX) ? u0 - op->rw : u0 + op->rw, v1 = (f & GPU_F_FLIPY) ? v0 - op->rh : v0 + op->rh;
@@ -290,12 +436,12 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 Tri *t = &g_tri[nt++];
                 for (int k = 0; k < 3; k++) {
                     int j = idx[q][k];
-                    fill_vtx(&t->v[k], op, g, 0, (uint16_t)(f | VR_F_2D | VR_F_RECT), sid);
+                    fill_vtx(&t->v[k], op, g, 0, (uint16_t)(f | VR_F_2D | VR_F_RECT | (fcls ? VR_F_FILTER : 0)), sid);
                     t->v[k].pos[0] = cx[j]; t->v[k].pos[1] = cy[j]; t->v[k].pos[2] = 0;
                     t->v[k].uv[0] = cu[j]; t->v[k].uv[1] = cv[j];
                 }
-                t->ev_end = g_next[i]; t->src_op = i; t->kind = 2; t->blend = semi ? (op->abr & 3) : 0xFF;
-                out->stats.n_tris2d++;
+                t->ev_end = g_next[i]; t->src_op = i; t->kind = fcls ? 3 : 2; t->blend = semi ? (op->abr & 3) : 0xFF;
+                out->stats.n_tris2d += fcls ? 0 : 1; out->stats.n_filter_tris += fcls ? 1 : 0;
             }
         } else { /* LINE: cuadrilátero de 1 px */
             out->stats.n_line++;
@@ -335,7 +481,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     for (size_t s = 0; s < nt;) {
         size_t e = s;
         while (e < nt && g_tri[e].ev_end == g_tri[s].ev_end) e++;
-        for (int kind = 0; kind < 3; kind++) {
+        for (int kind = 0; kind < 4; kind++) {
             VrBatch *cur = NULL;
             for (size_t k = s; k < e; k++) {
                 const Tri *t = &g_tri[k];

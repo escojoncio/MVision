@@ -8,14 +8,22 @@
  * Clases de salida (VrBatch.kind)
  *   0 = 3D opaco        triángulos en mundo VR (pos en METROS).
  *   1 = 3D semitransp.  igual; el renderer los pinta después de los opacos, sin escribir profundidad.
+ *   3 = filtro de pantalla (ver "Clase 3" abajo): primitivas 2D que actúan sobre la imagen ya dibujada, NO son HUD.
  *   2 = 2D / HUD        triángulos en coordenadas de pantalla PS1 (pos = {x, y, 0}, píxeles enteros con el offset
  *                       de dibujo ya sumado), para la textura del panel HUD. Rects y líneas se convierten a
  *                       triángulos (líneas: cuadrilátero de 1 px, centrado en los píxeles y alargado 0,5 px por extremo). VR_F_2D siempre activo en flags.
  *
- * Qué es 3D: polígonos cuyos vértices traen TODOS datos de vista (GpuVtx.fvalid, vx/vy/vz en espacio de vista del
- * juego, unidades del motor). Todo lo demás (rects, líneas, polígonos sin float: texto, retratos, menús) es 2D.
- * Un polígono con solo ALGUNOS vértices fvalid (recortado por el juego) se descarta (opts.partial_to_2d lo
- * manda a 2D, pero entonces aparecerá como trozo de mundo en el HUD).
+ * Qué es 3D (contrato §28): polígonos cuyos vértices son TODOS vvalid (GpuVtx.vvalid: vx/vy/vz en espacio de vista del
+ * juego, unidades del motor; incluye vértices saturados, detrás de cámara y derivados). Todo lo demás (rects, líneas,
+ * polígonos sin posición de vista: texto, retratos, menús) es 2D. Reglas:
+ *   - SAT: se usa vx,vy,vz (nunca x,y enteros, que están saturados).
+ *   - BEHIND (vz<=0) en algún vértice: el polígono se recorta (Sutherland-Hodgman, por triángulo del par (0,1,2),(1,2,3)) contra el plano
+ *     z = opts.near_units en espacio de vista, interpolando posición de vista, UV y color; cada triángulo da 0, 1 o 2 triángulos (un quad hasta 4).
+ *     Los que no traen BEHIND y tienen vz < near_units se descartan (drop_near), como antes.
+ *   - AMBIG junto a SAT/BEHIND: se descarta (drop_ambig). AMBIG solo: se acepta.
+ *   - DERIVED: se acepta (opts.drop_derived=1 los descarta).
+ * Un polígono con solo ALGUNOS vértices vvalid se descarta (opts.partial_to_2d lo manda a 2D, pero entonces aparecerá
+ * como trozo de mundo en el HUD).
  *
  * ---------------------------------------------------------------------------------------------------------
  * Espacio mundo VR y escala (ver vr_scene.c, "Escala")
@@ -32,6 +40,35 @@
  *   Los triángulos salen con el frente (la cara que vio la cámara del juego) en sentido antihorario: si hace falta se
  *   permutan dos vértices y se marca VR_F_FLIPPED (solo indica la permutación; en un quad un triángulo de cada dos la
  *   necesita por la paridad del orden Z, no implica doble cara). El renderer puede culling o dibujar a doble cara.
+ *
+ * Clase 3 = filtro de pantalla (contrato para el renderer)
+ *   Qué es: primitivas 2D del juego que no dibujan contenido sino que RETOCAN el fotograma ya compuesto: p. ej. bajo el agua el juego
+ *   vuelve a dibujar el búfer de pantalla sobre sí mismo en ~260 tiras de 2 px de alto texturizadas en 15 bits (tp=2) leyendo del propio
+ *   búfer (desplazadas en vertical con una onda = distorsión) y moduladas por un color (verde = tinte submarino), y los fundidos/destellos
+ *   son rectángulos semitransparentes que cubren la pantalla. En el panel HUD serían un recuadro enorme con una copia de la escena: MAL.
+ *   Clasificación (solo primitivas 2D, es decir sin vvalid). OPT-IN: opts.screen_filter=0 por defecto (ESTADO ACTUAL: el renderer de app/ trata todo kind != 2 como 3D
+ *   y pintaría estos triángulos, que están en píxeles, como geometría del mundo; activar solo cuando el renderer implemente la clase 3). Con 1:
+ *     a) copia de pantalla: texturizada con tp>=2 (15 bits, sin CLUT) cuyo rectángulo fuente (tx+u, ty+v, tamaño de la primitiva) solape >= 50 % de su área con el
+        área MOSTRADA (src->disp; NO el recorte vigente) y cuyo destino sea de pantalla: una banda fina (alto <= 16) de >= 45 % del ancho de pantalla (las tiras)
+        o >= 50 % del área mostrada. Un parche local que copia la pantalla (brillo alrededor de un retrato) queda en la clase 2.
+     b) recubrimiento: semitransparente (GPU_F_SEMI), SIN textura (color plano o degradado), que cubre >= opts.filter_min_cover (0,9) del área MOSTRADA
+        (fundido, destello, tinte). Un panel pequeño con su propio recorte y fondo semitransparente (minimapa) o un polígono texturizado a pantalla completa
+        (contenido) no lo son.
+   NO son filtro: el borrado de pantalla (rect opaco negro a pantalla completa, primera operación de cada lista) ni el rect de máscara
+ *   (negro, GPU_F_MASK_SET): son mantenimiento de la GPU; NO se emiten (opts.drop_clear=1 por defecto; VrStats.n_clear los cuenta) porque en el panel HUD
+ *   (transparente por defecto) dejarían un fondo negro opaco a pantalla completa. Con drop_clear=0 siguen en la clase 2 y el renderer debe ignorarlos.
+ *   Datos: los triángulos van en batches kind=3 con el MISMO formato que la clase 2 (pos = píxeles de pantalla PS1 con offset sumado, z=0;
+ *   uv = texels de la página de textura tpage; flags con VR_F_2D | VR_F_FILTER | VR_F_RECT si era rect), en orden de dibujo, dentro de cada
+ *   época después de la clase 2. Además VrScene.filter resume lo que el renderer necesita sin interpretar 260 tiras:
+ *     tint[3]   multiplicador por canal (color de la tira / 128; 1,1,1 si la textura va en crudo): rgb_ojo *= tint (aquí 0,5 / 1 / 0,5 = verde).
+ *     dv[], du[]  por fila de pantalla PS1 (índice = y - area_y; area = src->disp): desplazamiento en píxeles PS1 de la fila fuente respecto a
+ *                 la de destino (fuente = destino + d). rowcov[i]=1 si esa fila la cubre una tira. Se aplica a la imagen del ojo así: para el
+ *                 píxel del ojo, calcular la fila PS1 equivalente r (por su ángulo vertical: r = area_h/2 + tan(ang)*H_motor, H_motor = proj_h del
+ *                 motor), tomar d(r) (interpolado) y muestrear la imagen del ojo en el ángulo equivalente a la fila r + d(r).
+ *     cover_rgb[3], cover_abr  último recubrimiento semitransparente (color/255 y modo de mezcla PS1) para pintarlo como capa fija.
+ *   El renderer aplica el filtro UNA vez por ojo, como capa fija en pantalla (anclada a la cabeza, no al mundo) DESPUÉS de dibujar 3D opaco y
+ *   semitransparente y ANTES de componer el panel HUD (que no se distorsiona). Si filter.active==0 no hay nada que aplicar.
+ *   Con opts.screen_filter=0 estas primitivas vuelven a la clase 2 (comportamiento anterior).
  *
  * Orden y VRAM
  *   - Los vértices de cada clase mantienen el orden de dibujo original. Los batches se emiten por "épocas": una
@@ -58,7 +95,8 @@ enum {
     VR_F_FLIPPED = 0x0800, /* se permutaron dos vértices para dejar el frente (cara vista por la cámara del juego) antihorario */
     VR_F_2D = 0x1000,      /* primitiva 2D (pantalla PS1) */
     VR_F_LINE = 0x2000,    /* era una línea (cuadrilátero de 1 px) */
-    VR_F_RECT = 0x4000     /* era un rect/sprite */
+    VR_F_RECT = 0x4000,    /* era un rect/sprite */
+    VR_F_FILTER = 0x8000   /* primitiva de filtro de pantalla (clase 3) */
 };
 
 typedef struct {
@@ -72,7 +110,7 @@ typedef struct {
 
 typedef struct {
     uint32_t first, count; /* rango en VrScene.v (count múltiplo de 3: lista de triángulos) */
-    uint8_t kind;          /* 0 opaco 3D, 1 semitransp 3D, 2 2D/HUD */
+    uint8_t kind;          /* 0 opaco 3D, 1 semitransp 3D, 2 2D/HUD, 3 filtro de pantalla */
     uint8_t blend;         /* abr (0..3) si el batch es semitransparente; 0xFF opaco */
     uint16_t pad;
     uint32_t ev_end;       /* aplicar antes los eventos de VRAM de src->ops con índice < ev_end */
@@ -91,7 +129,29 @@ typedef struct {
     uint32_t n_tris3d, n_tris2d, n_flipped;
     uint32_t drop_partial, drop_near, drop_degenerate, drop_huge, drop_nan;
     uint32_t n_events, n_batches;
+    /* --- §28: recorte cercano y descartes por causa (al final: no rompe el layout anterior) --- */
+    uint32_t n_poly_behind;   /* polígonos 3D con algún vértice GPU_VF_BEHIND */
+    uint32_t n_clipped;       /* triángulos recortados contra el plano cercano */
+    uint32_t drop_behind;     /* triángulos enteros detrás del plano cercano (en polígonos con BEHIND) */
+    uint32_t drop_ambig;      /* polígonos con AMBIG junto a SAT/BEHIND */
+    uint32_t drop_derived;    /* polígonos con vértices DERIVED (solo con opts.drop_derived) */
+    uint32_t n_filter_polys, n_filter_rects; /* primitivas 2D de filtro de pantalla mandadas a kind 3 (copias de pantalla) */
+    uint32_t n_filter_cover;  /* recubrimientos semitransparentes a pantalla completa mandados a kind 3 */
+    uint32_t n_filter_tris;   /* triángulos kind 3 */
+    uint32_t n_clear;         /* rects opacos sin textura a pantalla completa (borrado/máscara); no se emiten con opts.drop_clear (def.) */
 } VrStats;
+
+#define VR_FILTER_ROWS 512
+typedef struct {
+    int active;                 /* 1 si hay primitivas de clase 3 */
+    int n_strips, n_polys, n_cover;
+    int area[4];                /* x, y, w, h de pantalla PS1 (src->disp) */
+    float tint[3];              /* multiplicador por canal (def. 1,1,1) */
+    int nrows;                  /* filas con tira */
+    float dv[VR_FILTER_ROWS], du[VR_FILTER_ROWS];  /* desplazamiento fuente-destino por fila (px PS1) */
+    uint8_t rowcov[VR_FILTER_ROWS];
+    float cover_rgb[3]; int cover_abr;  /* último recubrimiento semitransparente; cover_abr<0 si no hay */
+} VrFilter;
 
 typedef struct {
     const VrVtx *v; uint32_t nv;
@@ -108,6 +168,7 @@ typedef struct {
     int world_valid;          /* 1 si la transformación vino del puente Y es fiable (EYE + has_player + BRIDGE_OK_ALL_CORE); 0 = no fiarse para mover
                                * el mundo (título/carga/zona). Con EYE válido pero world_valid 0 la matriz se aplica igualmente; sin EYE, cámara en el origen. */
     VrStats stats;
+    VrFilter filter;          /* resumen de la clase 3 (ver "Clase 3") */
 } VrScene;
 
 typedef struct {
@@ -123,6 +184,14 @@ typedef struct {
     int eye_normalize;        /* 1 (def.): vista->mundo = inversa exacta de eye_axes^T (la GTE usa esa matriz con escala ~1,002 por eje); 0 = eye_axes crudo */
     int eye_from_view_t;      /* 1: ojo = -R*view_t (traslación de la GTE) en vez de eye_pos (def. 0; ver bitácora) */
     int drop_2d_all;          /* 1 no emitir 2D (def. 0) */
+    /* --- §28 (al final) --- */
+    int drop_derived;         /* 1 descarta polígonos con vértices GPU_VF_DERIVED (esquinas de cartel aproximadas); def. 0 = aceptar */
+    int screen_filter;        /* 1 clasifica copias de pantalla y recubrimientos como clase 3; 0 (def.) los deja en la 2 */
+    float filter_min_cover;   /* fracción mínima del área de dibujo para un recubrimiento semitransparente (def. 0,9) */
+    int drop_clear;           /* 1 (def.) no emite los rects opacos sin textura que cubren >= 90 % del área mostrada (borrado de pantalla / máscara): en el panel
+                               * HUD lo dejarían opaco. Se cuentan en VrStats.n_clear. 0 = emitirlos en la clase 2 (comportamiento previo) */
+    int clip_all_near;        /* 1 recorta contra el plano cercano TODO polígono con algún vz < near_units (def. 0: solo los que traen
+                               * GPU_VF_BEHIND; el resto con vz < near_units se descarta como siempre, salida idéntica a la previa) */
 } VrSceneOpts;
 
 VrSceneOpts vr_scene_opts_default(void);
