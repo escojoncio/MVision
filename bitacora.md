@@ -1,10 +1,10 @@
 # Bitácora — MVision
 
-Runtime nativo para Apple Vision Pro de un título de PS1 (juego objetivo), VR inmersiva 6DOF en primera persona, control corporal (cabeza + manos) y mandos PS VR2 Sense.
+Runtime nativo experimental para Apple Vision Pro: VR inmersiva 6DOF en primera persona, control corporal (cabeza + manos) y mandos de seguimiento.
 
-**Convención de repo (público):** no nombrar el juego, personajes ni repos externos en nada que se suba. Repos externos solo vía variables de Actions (`DECOMP_REPO`, `DECOMP_COMMIT`, `SDK_REPO`). Zonas por su código interno (`s00a`…).
+**Convención de repo (público):** mantener el repo neutro; repos externos solo vía variables de Actions (`DECOMP_REPO`, `DECOMP_COMMIT`, `SDK_REPO`). Zonas por su código interno (`s00a`…).
 
-Estado: **disco analizado, arquitectura decidida (recompilación estática del EXE EU), herramientas de análisis.** Sin build todavía.
+Estado: **análisis de datos completado, arquitectura decidida (recompilación estática del ejecutable principal), herramientas de análisis.** Sin build todavía.
 
 ## 0. SIGUIENTES PASOS (orden de prioridad)
 
@@ -43,7 +43,7 @@ Revisada en commit `9830efd98559be84da59dc1a961f8fc0e628ba36` (2026-10-18):
 
 ## 2. Disco del usuario (analizado 2026-10-18)
 
-- **Edición EU (España), 2 discos.** Extraídos por el usuario con `dumpsxiso` (+ `.xml` de layout). Solo en local/sesión, nunca en repo.
+- **2 discos.** Extraídos por el usuario con `dumpsxiso` (+ `.xml` de layout). Solo en local/sesión, nunca en repo.
 - `SYSTEM.CNF`: `BOOT` → cargador, `TCB=4`, `EVENT=16`, `STACK=0x801FFFF0`.
 - **Cargador** (fichero de arranque de la raíz) (text `0x80010000`, size `0x58800`, pc `0x80066a98`, "Europe area") que hace `LoadExec` de EXE principal del directorio de datos (nombre distinto por disco: identifica el disco).
 - **EXE principal idéntico en ambos discos.** text `0x80010000`, size `0x9D000` (643 072 B), pc `0x8009a434`, cabecera "Japan area", fecha 1999-07-15, cadenas `Nov 12 1998`. Tamaño ≈ ejecutable JP de la decomp (626 KB) → mismo motor, rama muy cercana.
@@ -73,7 +73,7 @@ Diseño anterior: compilar la decomp a nativo 64-bit + RAM virtual 32-bit con pu
 
 **Propuesta: recompilación estática total (estilo N64Recomp / Zelda64Recomp), con la decomp como mapa:**
 1. Entrada = binarios MIPS (ejecutable + overlays). Opción A: los del disco EU directamente. Opción B: los generados por la decomp (JP) + datos EU.
-2. Recompilador MIPS R3000 → C (un único traductor para todo, ya previsto para overlays). Memoria = RAM PS1 de 2 MB + scratchpad tal cual → punteros de 32 bits funcionan sin tocar nada.
+2. Recompilador MIPS R3000 → C (un único traductor para todo, ya previsto para overlays). Memoria = RAM de la plataforma original de 2 MB + scratchpad tal cual → punteros de 32 bits funcionan sin tocar nada.
 3. Funciones de SDK (GPU/GTE/CD/SPU/pad/hilos) **sustituidas por implementaciones nativas (HLE)** identificadas por símbolo (mapa de la decomp) o por firma de bytes en el binario EU.
 4. Cambios para VR: parches en C escritos sobre la decomp, compilados a MIPS con gcc moderno y recompilados (como Zelda64Recomp), o funciones nativas que operan sobre la RAM emulada.
 5. Intérprete MIPS de depuración comparte decodificador.
@@ -86,8 +86,8 @@ Coste: mapear símbolos JP→EU (por firmas) si se elige opción A.
 ## 5. Capa VR, control, armas (sin cambios respecto al diseño)
 
 - CompositorServices, estéreo con proyección real; cámara 6DOF = cabeza; agacharse real → agacharse en juego; cabeza del modelo oculta; brazos por IK a las manos; disparo desde el cañón en la mano (lógica de primera persona existente en el código); arreglar culling/LOD pensados para cámara cenital; cinemáticas en pantalla flotante; confort configurable dentro de la app (giro por pasos, viñeta).
-- Control: PS VR2 Sense (principal), mando normal (alternativo), hand tracking (opcional). Hápticos en disparo/daño/radio/latido.
-- Armas en mano: modelos low-poly propios con estética PS1 y piezas móviles; mundo y enemigos originales. Recarga sobre el contador original (modos manual/simplificada/automática en opciones). Fundas corporales + rueda.
+- Control: mandos de seguimiento (principal), mando normal (alternativo), hand tracking (opcional). Hápticos en disparo/daño/radio/latido.
+- Armas en mano: modelos low-poly propios con estética de la plataforma original y piezas móviles; mundo y enemigos originales. Recarga sobre el contador original (modos manual/simplificada/automática en opciones). Fundas corporales + rueda.
 - Arsenal: pistola con supresor, fusil de asalto, rifle de francotirador (mira render-to-texture, balanceo, tranquilizante lo reduce), lanzamisiles guiado (vista de misil en pantalla del lanzador), lanzamisiles antiaéreo, granadas (frag/chaff/aturdidora), explosivo adhesivo, minas direccionales.
 - Gestos: radio (mano a la oreja), raciones/cigarros (boca; humo revela láseres), gafas térmicas/nocturnas, caja de cartón, golpear pared, estrangular, pegarse a pared.
 - Difícil: animaciones de tercera persona y bosses de cámara cenital.
@@ -262,8 +262,8 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 
 ## 20. Control VR, locomoción y confort (`vr/input/`, `app/Sources/VRInput*.swift`) — 2026-10-18
 
-- C puro `vr_input.{h,c}`: `vr_input_update(s,&frame,&pad)` -> pad PS1 activo-alto + sticks 0..255 (centro 0x80, Y abajo). Rumbo h: (x,z)=(sin h,-cos h), h=0 -> -Z, h>0 derecha. `vr_input_body_yaw()` (rad, se suma a la cabeza), `vr_input_vignette()` 0..1, `vr_input_snap_count()`, `vr_input_set_game_up()`, recalibración de altura, postura pedida.
-- Mapeo Sense (diestro): gatillo D cuadrado, gatillo I círculo, grips R1/L1, cara D baja cruz / alta triángulo, cara I baja L2 / alta R2, sticks R3/L3, Options start, Create select; espejo para zurdos; modo mando normal directo. Locomoción stick no dominante (relativa a cabeza o mano), giro por pasos 30° o suave 120°/s. Agacharse físico 0,35 m / tumbarse 0,80 m con histéresis 0,06 m, sincronizado con la postura del puente (3 reintentos, 0,6 s).
+- C puro `vr_input.{h,c}`: `vr_input_update(s,&frame,&pad)` -> pad de la plataforma original activo-alto + sticks 0..255 (centro 0x80, Y abajo). Rumbo h: (x,z)=(sin h,-cos h), h=0 -> -Z, h>0 derecha. `vr_input_body_yaw()` (rad, se suma a la cabeza), `vr_input_vignette()` 0..1, `vr_input_snap_count()`, `vr_input_set_game_up()`, recalibración de altura, postura pedida.
+- Mapeo de mandos de seguimiento (diestro): gatillo D cuadrado, gatillo I círculo, grips R1/L1, cara D baja cruz / alta triángulo, cara I baja L2 / alta R2, sticks R3/L3, Options start, Create select; espejo para zurdos; modo mando normal directo. Locomoción stick no dominante (relativa a cabeza o mano), giro por pasos 30° o suave 120°/s. Agacharse físico 0,35 m / tumbarse 0,80 m con histéresis 0,06 m, sincronizado con la postura del puente (3 reintentos, 0,6 s).
 - Revisión: wrap_pi con fmodf, altura NaN ignorada, autocalibración limitada a 0,15 m/s, giro por pasos con cambio de signo, VRInputPose con generación (dos Sense a la vez), headHeight solo al cambiar. `make -C vr/input test test-san` OK (84).
 - Pendiente de integración en app: incluir `vr_input.h` en el bridging header, copiar vr/input en `stage.sh`/`project.yml`, `NSAccessoryTrackingUsageDescription` (+ entitlement de accesorios de visionOS 26), usar VRInput en vez de InputManager; validar en visor los nombres de elementos del Sense y el ciclo de posturas.
 
@@ -374,3 +374,11 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - Clase 3 "filtro de pantalla" (copias de pantalla en tiras finas o >=50 % del área mostrada; recubrimientos no texturizados >=90 % de `disp`) con resumen `VrScene.filter` (tint, dv/du/rowcov por fila, cover). `screen_filter=0` POR DEFECTO: RenderPS1.swift trata todo kind!=2 como 3D semi -> no activar hasta que el renderer implemente kind 3. Medido 0-12000: 0 listas en juego normal y comunicador; 911 sin jugador (agua 334, fundidos 577). Efecto submarino = redibujado del búfer en ~260 tiras con tinte (0,58,1,0,66) y onda vertical por fila.
 - `drop_clear=1` por defecto: no emite el rect negro opaco de borrado a pantalla completa (dejaba el HUD opaco).
 - `scene_dump --filter 0|1 --scan-filter`. `make -C vr/scene test test-san` OK.
+
+## 31. Carpeta del juego fuera del contenedor (`app/Sources/FolderAccess.swift`, Storage, GameModel, MVApp, XRSession, project.yml, visionos.yml) — 2026-10-18
+
+- Nuevo `FolderAccess` (singleton, hilo principal): bookmark persistente en UserDefaults (`mv.folderBookmark`, `options: []`; en visionOS no existe `.withSecurityScope`), `restore()` al arrancar (obsoleto -> regenerar), `adopt(url)` tras el selector, `release()` al terminar (`willTerminateNotification` -> `GameModel.shutdown`), `forget()`. El acceso (`startAccessingSecurityScopedResource`) queda abierto toda la sesión: el hilo de emulación lee con `fopen`.
+- Nombre exigido por hash: Info.plist `MVFolderKey` = `$(MV_FOLDER_KEY)` (secret `APP_FOLDER_KEY` en visionos.yml, pasado a xcodebuild). Formato: hex minúsculas SHA-256 de UTF-8 del nombre (trim, minúsculas, NFC). Vacío/no válido = cualquier carpeta (se registra en el log).
+- `Storage.findDiscs` escanea la carpeta elegida; `Storage.devDocuments` (ajuste oculto, pulsación larga 3 s en el título de la pantalla de elegir carpeta) añade Documents y `main.exe` manual. `Storage.resolveCardDir()`: `Saves` dentro de la carpeta (sonda de escritura) o Documents/Saves. `prepare()` ya no crea Documents/Saves.
+- `GamePhase.needFolder(String?)` + `FolderPromptView` + `.fileImporter([.folder])` en ContentView; botón "Cambiar carpeta" en el menú de XRControlsView (`GameModel.changeFolder`: con el motor en marcha solo olvida el bookmark).
+- Sin verificar (sin macOS): todo el Swift; comprobar `fileImporter` en visionOS y que `URL(resolvingBookmarkData:options:[])` abre el ámbito tras `startAccessing`.

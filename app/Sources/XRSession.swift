@@ -113,6 +113,7 @@ final class XRSession: ObservableObject {
 struct XRControlsView: View {
     let running: Bool
     @ObservedObject private var xr = XRSession.shared
+    @EnvironmentObject private var model: GameModel
     @Environment(\.openImmersiveSpace) private var openSpace
     @Environment(\.dismissImmersiveSpace) private var dismissSpace
     @AppStorage(XRSettings.autoEnterKey) private var autoEnter = true
@@ -134,6 +135,7 @@ struct XRControlsView: View {
                     Text("Dos pasadas").tag("dedicated")
                 }
                 Button("Recentrar") { XRControl.shared.requestRecenter() }
+                Button("Cambiar carpeta") { model.changeFolder() }
             }
         }
         .padding(12)
