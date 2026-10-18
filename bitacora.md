@@ -82,6 +82,8 @@ Coste: mapear símbolos JP→EU (por firmas) si se elige opción A.
 
 - **Corrección corte cargador pistolas (36f6/21b6):** la región actual del cargador invade la empuñadura. Debe ir a ras del mango: lo único visible con el cargador insertado es la franja inferior (base) de la empuñadura; el cuerpo del cargador queda oculto dentro y, extraído, se extruye desde esa base hacia arriba siguiendo la inclinación del mango (eje de extracción = inclinación del mango, alineado con w_pist.c). Test: con cargador insertado nada sobresale del contorno del mango salvo la base.
 
+- **Cañón de pistolas (36f6/21b6):** el modelo original no tiene cañón. Generar pieza `barrel` derivada del modelo: tubo bajo la corredera de la boca a la recámara, diámetro según la sección frontal de la corredera, material oscuro metálico del atlas; ánima visible en la cara frontal; cañón visible al retroceder la corredera; WP_MUZZLE en el centro de la boca; el supresor se acopla al extremo del cañón.
+
 ## 6. Herramientas en el repo
 
 - `tools/disc/psxdisc.py` (stdlib): `info`, `ls`, `extract`, `dirtable <DISCO> <FICHERO>`, `manifest`. Sin probar con BIN real (el usuario extrajo con dumpsxiso; formato de tabla DIR confirmado sobre el fichero extraído).
