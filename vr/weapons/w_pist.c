@@ -28,8 +28,9 @@
 #define PIST_WELL_Z 0.021501f
 #define PIST_SEAT_DEPTH 0.121992f
 #define PIST_SUPP_Z -0.2575f
-#define PIST_MUZZLE_Z -0.1945f
-#define PIST_SUPP_TIP_Z -0.345f
+/* boca del cañón (a ras de la cara frontal de la corredera del modelo) y punta del supresor: salen del modelo cortado (wcut) */
+#define PIST_MUZZLE_Z -0.217f
+#define PIST_SUPP_TIP_Z -0.371f
 #define PIST_TRIG_Y 0.024f
 #define PIST_TRIG_Z -0.080f
 #define PIST_HAM_Y 0.050f
@@ -40,6 +41,7 @@
 #define PIST_EJECT_Z -0.010f
 #define PIST_CHARGE_Z 0.020f
 #define PIST_EYE_Z 0.055f
+const float w_pist_bare_muzzle_z = PIST_MUZZLE_Z;   /* sin supresor (lo comprueba test_wcut contra la boca del cañón) */
 enum { PIST_MESH_FRAME, PIST_MESH_SLIDE, PIST_MESH_BARREL, PIST_MESH_SUPP, PIST_MESH_TRIGGER,
        PIST_MESH_HAMMER, PIST_MESH_MAG, PIST_MESH_ROUND, PIST_MESH_CASE };
 static const char *const pist_mesh_names[] = {"frame", "slide", "barrel", "supp", "trigger", "hammer", "mag", "round", "case", NULL};

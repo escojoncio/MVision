@@ -3,6 +3,7 @@
 #   make -C vr/weapons test                    pruebas de núcleo, armas y registro (headless)
 #   make -C vr/weapons test-san                lo mismo con -fsanitize=address,undefined (en build-san/)
 #   make -C vr/weapons test-wload              prueba del cargador de modelos (necesita datos; sin ellos se omite)
+#   (test_wcut, el cortador de modelos, va en `make test`: la parte con modelos reales se omite sin gamedata/stages.bin)
 #   make -C vr/weapons preview W=pist STATE="0.5:trig0=1;0.6:trig0=0" OBJ=ruta.obj VIEW=three OUT=/ruta/a.png
 #       W=id del arma (registrada), STATE=guion --sim (ver cabecera de tools/wmodel/preview.c),
 #       OBJ=modelo .obj extraído de los datos del usuario (se enlaza por nombre de hueco de mesh),
@@ -13,7 +14,7 @@ CC ?= gcc
 CFLAGS ?= -O2 -g -Wall -Wextra -std=gnu11
 B ?= build
 PV := ../../tools/wmodel
-SRC := wcore.c registry.c wload.c $(filter-out wcore.c registry.c wload.c,$(wildcard w_*.c))
+SRC := wcore.c registry.c wload.c wcut.c wcut_tables.c $(filter-out wcore.c registry.c wload.c,$(wildcard w_*.c))
 OBJS := $(SRC:%.c=$(B)/%.o)
 W ?= pist
 VIEW ?= side

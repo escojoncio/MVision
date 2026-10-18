@@ -6,6 +6,29 @@ Runtime nativo para Apple Vision Pro de un título de PS1 (juego objetivo), VR i
 
 Estado: **disco analizado, arquitectura decidida (recompilación estática del EXE EU), herramientas de análisis.** Sin build todavía.
 
+## 0. SIGUIENTES PASOS (orden de prioridad)
+
+Estado: runtime arranca el juego (planificador, IRQ, CD virtual, GPU software) y vuelca los primeros frames (logos). Armas (lógica + modelos originales + piezas cortadas), carcasa de visión y E/S en `main` con pruebas. Todo pasa `make test` / `test_sys` / `vr/weapons test` / `vr/box test`.
+
+**Build 1 (ventana plana, IPA por sideload):**
+1. Desatascar arranque tras logos (~frame 650, ver §11): instrumentar eventos BIOS (MV_EVLOG), callbacks CD/DMA antes/después de VBlank 70, estado que consulta la carga síncrona de stages; hipótesis: overlay o comando de script no tratado.
+2. Overlays: recompilar los de la tabla de stages (cargar en su dirección, `--funcs`), reducir instrucciones interpretadas; volcar `missing_funcs.txt` → `gamedata/extra_funcs.txt`.
+3. Lector BIN/CUE (MODE2/2352) y CHD opcional en `cdrom.c`; detección de discos por contenido (SYSTEM.CNF + EXE), carpeta de la app sin nombre fijo en código.
+4. Renderer Metal: primitivas GPU a resolución nativa + MSAA x4 (rasterizador software = oráculo), sin temblor de vértices (GTE float/subpíxel), texto vectorial SDF interceptando el dibujo de cadenas, HUD en capa aparte, descarte del motor vía su ruta de primera persona.
+5. Host visionOS: audio (`spu_render` 44,1 kHz), mando (`pad_set_state`, vibración `pad_get_rumble`), tarjeta (`card_open`), FMV por MDEC; workflow macOS en Actions → IPA.
+6. Opcional: volcado/sustitución de texturas por hash (upscale local, nunca en repo).
+
+**Build 2 (VR), en orden de dependencia:**
+1. Puente RAM: inventario/equipar vía funciones del juego, munición, disparo, cámaras de proyectil, blancos, estado/pose animada de enemigos, ids de arma reales (`game_weapon_id` provisionales).
+2. Cámara 6DOF (cabeza), control corporal, comodidad; cinemáticas en estéreo (defecto) / diorama (opción); códec envolvente a pantalla completa y subtítulos sobre escenas.
+3. Armas: enlazar `wload`+`wcut` → `weapon_bind`; afinar regiones pequeñas (selector, cerrojo, palanca, round/case de pistola); rellenar piezas vacías si hace falta.
+4. Impactos por hitbox de pieza + función de daño del juego; colisión del jugador con su pose; cuerpo a cuerpo por gestos; percepción enemiga gradual; enemigos visibles activos.
+5. Audio binaural: posición 3D de cada voz SPU (interceptar cálculo de paneo del juego) → fuentes mono con HRTF del sistema; música/radio/narración en estéreo fijo a la cabeza; fallback al paneo original.
+6. Carcasa de caja (hecha, falta cablear `box_view_set_active` al estado del juego); máscara y gafas: cortar de los modelos de cabeza + cara interior derivada; detector de vacíos (360° por zona) y cierres de geometría solo donde falte.
+
+**Datos locales (nunca al repo):** `gamedata/main.exe`, `gamedata/names_eu.json`, `gamedata/stages.bin` (→ tabla de stages), `gamedata/disc/` (ficheros extraídos), `gamedata/extra_funcs.txt`. Discos del usuario en su PC; se copian a la sesión con las herramientas del dispositivo.
+**Comandos:** `cd runtime && make gen GEN=… EXE=../gamedata/main.exe NAMES=../gamedata/names_eu.json && make GEN=… OUT=… CC=clang && make test test_sys`; headless: `MV_DISC=<dir disco> <OUT>/headless ../gamedata/main.exe 800 --dump DIR --every 50`; `make -C vr/weapons test test-san`; `make -C vr/box test`.
+
 ---
 
 ## 1. Base: decomp externa (`DECOMP_REPO`)
@@ -22,13 +45,13 @@ Revisada en commit `9830efd98559be84da59dc1a961f8fc0e628ba36` (2026-10-18):
 
 - **Edición EU (España), 2 discos.** Extraídos por el usuario con `dumpsxiso` (+ `.xml` de layout). Solo en local/sesión, nunca en repo.
 - `SYSTEM.CNF`: `BOOT` → cargador, `TCB=4`, `EVENT=16`, `STACK=0x801FFFF0`.
-- **Cargador** (`<arranque>`) (text `0x80010000`, size `0x58800`, pc `0x80066a98`, "Europe area") que hace `LoadExec` de EXE principal `<exe disco 1>` (disco 2 `<exe disco 2>`).
+- **Cargador** (fichero de arranque de la raíz) (text `0x80010000`, size `0x58800`, pc `0x80066a98`, "Europe area") que hace `LoadExec` de EXE principal del directorio de datos (nombre distinto por disco: identifica el disco).
 - **EXE principal idéntico en ambos discos.** text `0x80010000`, size `0x9D000` (643 072 B), pc `0x8009a434`, cabecera "Japan area", fecha 1999-07-15, cadenas `Nov 12 1998`. Tamaño ≈ ejecutable JP de la decomp (626 KB) → mismo motor, rama muy cercana.
 - ~1500 funciones (prólogos `addiu sp,-X`).
-- Ficheros en `D/` (dir de datos): `<fichas> 5,7M`, `<demos> 248M/184M`, `<retratos> 3,5M`, `<radio> 1,7M`, `<stages>.DIR 70M`, `<voces> 194M/181M`, `<video> 54M/162M (mixed, XA)`. Raíz: `FILLER.DAT` (relleno).
+- Directorio de datos: 7 ficheros (fichas 5,7M; demos/cinemáticas en motor 248M/184M; retratos 3,5M; textos de radio 1,7M; tabla de stages 70M; voces 194M/181M; vídeo FMV 54M/162M modo mixto XA). Raíz: fichero de relleno.
 - `<stages>.DIR` (disco 1): u32 tamaño tabla = 1128 → **94 entradas** de 12 B (nombre[8] + sector). Incluye todas las zonas de la decomp (`s00a`…`s20a`, variantes `*r`, `d*`, `brf`, `rank`, `camera`, `title`, `select*`, `ending`) **y `vr01`…`vr10`, `vrdemo`, `selectvr`**. Overlays de código viajan dentro de cada stage (tag `.bin`, ver `source/libfs/cdstage.c` `SetupNextFile`).
 
-- **Requisito: juego íntegro en castellano (textos, radio, voces, cinemáticas).** Cubierto por la opción A: se ejecuta el EXE y los datos del disco ES tal cual. Verificado: textos de radio (`<radio>`) y menús/tarjeta de memoria del EXE en castellano. Voces/FMV en `<voces>`, `<demos>`, `<video>` (doblaje ES del disco). Regla: nunca sustituir datos ES por JP; cualquier parche de la decomp JP debe respetar tablas de texto/fuente del EXE ES. Textos nuevos (opciones VR de la app) en castellano.
+- **Requisito: juego íntegro en castellano (textos, radio, voces, cinemáticas).** Cubierto por la opción A: se ejecuta el EXE y los datos del disco ES tal cual. Verificado: textos de radio y menús/tarjeta de memoria del EXE en castellano. Voces, demos y FMV del disco (doblaje ES). Regla: nunca sustituir datos ES por JP; cualquier parche de la decomp JP debe respetar tablas de texto/fuente del EXE ES. Textos nuevos (opciones VR de la app) en castellano.
 
 ## 3. Inventario de la capa de plataforma (main exe + overlays parciales)
 
@@ -100,15 +123,6 @@ Coste: mapear símbolos JP→EU (por firmas) si se elige opción A.
 - **Mapa de símbolos EU (2026-10-18):** `sigs_ref.json` (1770 firmas JP, descargado a mano; el usuario lo guarda en su carpeta de discos) → `sigs.py match`: 582 exactas. `tools/sig/align.py` añade prefijo único (337), orden entre anclas (198), delta entre anclas (48 iguales + 83 por vecino). **Total 1248/1766 funciones de código, 57 % de palabras; SDK: 232/253 identificadas.** SDK sin localizar: `CdGetSector2 CdDataCallback CdDataSync GetDrawEnv GetDispEnv VSyncCallbacks PadChkVsync _padSioRW`. `main` sin match (EU difiere). Layout JP: rdata `0x80010000`, text desde `0x800148b8`; EU text `0x80014894`. Muchas funciones EU = JP +1 instrucción.
 - Mejora futura del match: firma de opcodes (sin operandos) para similitud difusa — requiere nueva ejecución de CI + descarga manual.
 
-## 7. Pendiente siguiente sesión
-
-- [ ] Pasar `names_eu.json` al recompilador (`--funcs` + nombres en comentarios) y localizar a mano el SDK que falta.
-- [ ] Runtime C: memoria, rt_call/rt_jump por tabla, div, GTE, COP0; primer arranque headless en Linux.
-- [ ] Cargar overlays extraídos en recompilador: dirección de carga = `StageCharacterEntries` (localizar en EXE EU vía firmas).
-- [ ] Recompilador MIPS→C: decodificador + emisor, empezando por el ejecutable principal.
-- [ ] HLE: GPU (OT/primitivas → Metal), GTE float, CD sobre imagen, hilos `mts` → fibras.
-- [ ] Esqueleto de app visionOS (ventana plana primero).
-
 ---
 
 ## 7. Armas en mano — núcleo + "pist" (`vr/weapons/`, `tools/wmodel/`)
@@ -141,7 +155,7 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 
 ---
 
-## 9. Carcasa de visión interior (`vr/box/`, `tools/box/`) — 2026-10-18
+## 9b. Carcasa de visión interior (`vr/box/`, `tools/box/`) — 2026-10-18
 
 - Original (EXE EU recompilado): al usar el objeto en 1ª persona se crea un actor de "sight" con el recurso tipo `s` (id16 0xE2A9, stage `init`): máscara 2D, NO geometría 3D ni textura de cartón. 36 polígonos planos negros opacos (todo fuera del hueco) + 38 Gouraud semitransparentes modo resta (degradado interior ~16-19 px). Hueco = rectángulo redondeado en lienzo 320x256: x 17..302, y 50..160, centro (159.5,105); con foco 320 px y centro óptico fila 120 -> 24° izq/dcha, +12.3°/-7.1°. Se abre en 8 pasos (desplazamiento por vértice `(t-hi)*(dx,dy)/4`, inicial = final-2*(dx,dy)). Modelo 3D de la caja (id 0xE2A9 tipo `k`) es solo la caja en 3ª persona (se oculta en 1ª).
 - Puente (RAM EU): sight activo = `u32 @0x800A07DC == 0xE2A9` (refcount @0x800A07D8); el actor vive mientras `s16 @0x800B898A == 1` (flag 1ª persona). Llamar `box_view_set_active(sight_id==0xE2A9)`.
@@ -156,7 +170,9 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - Separa un `WLoaded` rígido en piezas articuladas sin geometría nueva. Marco: salida de wload corregida con `WCUT_FIX_UPRIGHT|WINDING` (los modelos salen boca abajo, horarios, normales hacia dentro). Selección por reglas (caja orientada CLIP/WHOLE/CENTROID, máscara de componentes, rango UV); CLIP = Sutherland-Hodgman por las 6 caras con intersecciones canónicas por arista (mismo punto en ambos lados) + tapas por cara (cadenas de aristas de contorno -> polígono -> orejas con UV planar a un bloque 3x3 del atlas).
 - Cierre: los puntos de corte se insertan en las aristas vecinas (`conform_tl`, uniones en T) y se eliminan triángulos de área nula cosiendo su vértice medio (`clean_collinear`); sin esto el volumen no cerraba. Bugs resueltos: esquinas de cara insertadas fuera de orden angular; orejas que dejaban vértices colineales fuera de la tapa (rechazar oreja si hay vértice sobre su borde); caja con cara a ras de la superficie del modelo (cambiar ±1 mm: las caras coplanares no dan contorno).
 - Tablas: solo cajas/máscaras paramétricas (mm), sin vértices. `wcut_open_edges`, `wcut_volume`, `wcut_degenerate` para comprobar. Piezas con tolerancia de aristas abiertas documentada en `test_wcut.c` (originales abiertos y copias de piezas abiertas).
-- `test_wcut.c` incluye `wcut.c`/`wcut_tables.c` (no hay que tocar el Makefile): `gcc -O1 -g -fsanitize=address,undefined -I. test_wcut.c wload.c -lm`. Se omite sin `gamedata/stage.dir`. Vistas previas: `/home/claude/work/parts/<id>_<estado>.png`.
+- `test_wcut.c` ya NO incluye los .c: wcut.c y wcut_tables.c van en libweapons.a y el test en `make test` / `test-san` (parte con modelos reales omitida sin `gamedata/stages.bin`; salida solo OK/FALLO, `WCUT_VERBOSE=1` imprime medidas). Parte sintetica: entradas corruptas, -4 por tabla ajena, >32 componentes, prisma con agujero (tapa anillo, sin solape).
+- Revision adversarial (hallazgos 1-16): `wcut_run` valida `WLoaded` y acota trabajo (tope global de triangulos 4*src+4096 -> -3, tolerancias escaladas por tamano), tapas con agujeros por ear clipping con puentes, orientacion por cascara conexa (aristas + volumen con signo), normales de salida siempre acordes al orden, `src_tris`/caja en la tabla (-4), `wcut_fix` fuera de la API. Aristas abiertas esperadas exactas en el test (heredadas del original: 4725 body 4, 2d3b body 4, 15a9 tube 6, 57f8 body 4/tube 3, 9a90 round 10).
+- Pistolas (36f6/21b6): el cargador se corta a ras del fondo del mango (solo la base visible) y se extruye 30 mm por el interior siguiendo el eje de w_pist (test: ningun vertice del cuerpo fuera del contorno del mango); pieza `barrel` generada (tubo bajo la corredera, boca en su cara frontal, anima oscura); WP_MUZZLE = centro de la boca (sin supresor `w_pist_bare_muzzle_z`, con supresor su punta). Excepcion de volumen 10 % en 36f6: el original sin cortar tiene 6 aristas abiertas.
 - Pendiente: cuerpos del fusil/francotirador/lanzador guiado con unas pocas aristas abiertas en el pozo del cargador/cuña (superficies sin aristas compartidas); varias regiones pequeñas (selector, cerrojo, mango) a afinar visualmente; huecos vacíos sin geometría original (barrel, hammer, stock, bezel, marco, misil).
 
 ---
@@ -169,4 +185,4 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - `hle.c`: `hle_VSync` espera VBlank real; `ResetCallback` idempotente (libspu lo llama tras instalar el VSyncCallback). `gpu.c`: `ResetGraph` delega en el original (`rt_orig`) para inicializar libgpu. `cdrom.c`: callbacks de CdControl diferidos como IRQ de CD.
 - `headless.c`: `--dump DIR --every N`, MV_DISC, MV_CARD, estadísticas. Makefile: objetivo `test_sys`. `make test` y `make test_sys` OK.
 - Funcional: planificador del juego corriendo, FS lee la tabla de stages, GPU recibe listas, frames de logos volcados.
-- Pendiente: tras ~frame 650 el bucle de frames sigue (t3) pero no se emiten más DrawOTag/PutDrawEnv (GPU estática); la última lectura de CD termina en pos=254778 y aparecen <script> y liberaciones de DG_* (actores terminando). Tarea ociosa gira en 8008d828. Hipótesis: comando de script GCL o carga de overlay no tratados. Medir `--poll-entry`; reducir ~626k instrucciones interpretadas; limpiar trazas MV_CDLOG.
+- Pendiente: tras ~frame 650 el bucle de frames sigue (t3) pero no se emiten más DrawOTag/PutDrawEnv (GPU estática); la última lectura de CD termina en pos=254778 y aparecen lecturas de argumentos del intérprete de scripts y liberaciones del motor gráfico (actores terminando). Tarea ociosa gira en 8008d828. Hipótesis: comando del intérprete de scripts o carga de overlay no tratados. Medir `--poll-entry`; reducir ~626k instrucciones interpretadas; limpiar trazas MV_CDLOG.
