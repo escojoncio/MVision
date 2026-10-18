@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """recomp: recompilador estático MIPS R3000 (PS1) -> C.
 
-  recomp.py <exe> <salida_dir> [--funcs funcs.txt] [--code-end HEX]
+  recomp.py <exe> <salida_dir> [--funcs funcs.txt] [--code-end HEX] [--names names.json] [--hle hle.txt]
 
-Salida: funcs_XX.c (una función C por función MIPS), funcs.h, dispatch.c (tabla dirección -> función).
+Salida: funcs_XX.c (una función C por función MIPS), funcs.h, dispatch.c (tabla dirección -> función
+y dirección -> nombre). --names: JSON nombre -> {"target": "hex"} (tools/sig/align.py); sus direcciones
+se añaden como inicios de función. --hle: lista de nombres cuyo cuerpo se sustituye por hle_<nombre>(c)
+(el código original queda como orig_f_<addr> para validación diferencial).
 Runtime esperado (runtime/cpu.h): struct Cpu { uint32_t r[32], hi, lo; } y helpers de memoria/GTE/COP0.
 
 Detección de funciones: destinos de jal + entrada + lista opcional (firmas). Cada función se
@@ -69,6 +72,14 @@ def is_branch(w):
     return False
 
 
+def after_end(exe, v):
+    """v sigue a un fin de función (jr ra / j + delay) o empieza con prólogo addiu sp,sp,-X."""
+    p = exe.word(v - 8) if exe.has(v - 8) else 0
+    w = exe.word(v)
+    prologue = (w >> 16) == 0x27BD and (w & 0x8000)
+    return p == 0x03E00008 or (p >> 26) == 2 or prologue
+
+
 def find_funcs(exe, extra):
     starts = {exe.pc0} | set(extra)
     for a in range(exe.base, exe.end, 4):
@@ -80,8 +91,22 @@ def find_funcs(exe, extra):
     # Punteros a función en datos: palabra alineada que apunta al código justo tras un `jr ra`+delay.
     full = struct.unpack_from(f"<{len(exe.text) // 4}I", exe.text, 0)
     for v in full:
-        if exe.code_start <= v < exe.end and v % 4 == 0 and exe.word(v - 8) == 0x03E00008:
+        if exe.code_start <= v < exe.end and v % 4 == 0 and after_end(exe, v):
             starts.add(v)
+    # Punteros construidos en código: lui rX,hi + addiu/ori rY,rX,lo (p.ej. entradas de hilos y callbacks).
+    hi = {}
+    for a in range(exe.code_start, exe.end, 4):
+        w = exe.word(a)
+        op = w >> 26
+        if op == 15:
+            hi[rt(w)] = (imm(w) << 16, a)
+            continue
+        if op in (9, 13) and rs(w) in hi and a - hi[rs(w)][1] <= 32:
+            v = (hi[rs(w)][0] + (simm(w) if op == 9 else imm(w))) & 0xFFFFFFFF
+            if exe.code_start <= v < exe.end and v % 4 == 0 and after_end(exe, v):
+                starts.add(v)
+        if is_branch(w) and (w >> 26) in (2, 3) or (op == 0 and (w & 63) in (8, 9)):
+            hi.clear()
     starts.add(exe.code_start)
     return sorted(s for s in starts if exe.has(s) and s >= exe.code_start)
 
@@ -239,8 +264,15 @@ class Func:
             return f"rt_unimpl(c, 0x{a:08x}u, 0x{w:08x}u);"
         return out
 
-    def emit(self):
-        L = [f"void f_{self.start:08x}(Cpu *c) {{", "    uint32_t tgt; (void)tgt;"]
+    def emit(self, name=None, hle=False):
+        fname = f"orig_f_{self.start:08x}" if hle else f"f_{self.start:08x}"
+        L = []
+        if hle:
+            L += [f"void f_{self.start:08x}(Cpu *c) {{ RT_ENTER(0x{self.start:08x}u); hle_{name}(c); }}", ""]
+        L += [f"void {fname}(Cpu *c) {{" + (f" /* {name} */" if name else ""),
+              "    uint32_t tgt; (void)tgt;"]
+        if not hle:
+            L.append(f"    RT_ENTER(0x{self.start:08x}u);")
         a = self.start
         while a < self.end:
             w = self.exe.word(a)
@@ -308,6 +340,22 @@ def main(a):
     if "--code-end" in a:
         code_end = int(a[a.index("--code-end") + 1], 16)
     exe.end, exe.code_start = code_end, code_start
+    names = {}
+    if "--names" in a:
+        import json
+        sure = []
+        for n, v in json.load(open(a[a.index("--names") + 1])).items():
+            t = int(v["target"], 16)
+            if code_start <= t < code_end:
+                names.setdefault(t, n)
+                # solo los métodos fiables crean inicios de función; el resto solo nombra inicios ya detectados
+                if v.get("how") in ("exact", "prefijo"):
+                    sure.append(t)
+        extra += sure
+    hle = set()
+    for i, x in enumerate(a):  # --hle repetible: un fichero por subsistema (runtime/hle*.txt)
+        if x == "--hle":
+            hle |= {l.split("#")[0].strip() for l in open(a[i + 1])} - {""}
     starts = find_funcs(exe, extra)
     known = set(starts)
     os.makedirs(out, exist_ok=True)
@@ -319,12 +367,16 @@ def main(a):
         f.write('#pragma once\n#include "cpu.h"\n')
         for fn in funcs:
             f.write(f"void f_{fn.start:08x}(Cpu *c);\n")
+            n = names.get(fn.start)
+            if n in hle:
+                f.write(f"void orig_f_{fn.start:08x}(Cpu *c);\nvoid hle_{n}(Cpu *c);\n")
     unsup = 0
     for k in range(0, len(funcs), FUNCS_PER_FILE):
         with open(os.path.join(out, f"funcs_{k // FUNCS_PER_FILE:02d}.c"), "w") as f:
             f.write('#include "funcs.h"\n\n')
             for fn in funcs[k:k + FUNCS_PER_FILE]:
-                f.write(fn.emit() + "\n\n")
+                n = names.get(fn.start)
+                f.write(fn.emit(n, n in hle) + "\n\n")
                 unsup += fn.unsupported
     with open(os.path.join(out, "dispatch.c"), "w") as f:
         f.write('#include "funcs.h"\n\nconst FuncEntry rt_func_table[] = {\n')
@@ -332,6 +384,15 @@ def main(a):
             f.write(f"    {{0x{fn.start:08x}u, f_{fn.start:08x}}},\n")
         f.write(f"}};\nconst unsigned rt_func_count = {len(funcs)};\n")
         f.write(f"const uint32_t rt_entry = 0x{exe.pc0:08x}u;\n")
+        nl = sorted((t, n) for t, n in names.items() if t in known)
+        f.write("const FuncName rt_func_names[] = {\n")
+        for t, n in nl:
+            f.write(f'    {{0x{t:08x}u, "{n}"}},\n')
+        f.write("    {0xFFFFFFFFu, \"\"}\n};\n")
+        f.write(f"const unsigned rt_func_name_count = {len(nl)};\n")
+    missing = hle - {names.get(fn.start) for fn in funcs}
+    if missing:
+        print("HLE sin dirección:", " ".join(sorted(missing)))
     print(f"código 0x{code_start:08x}-0x{code_end:08x} | funciones {len(funcs)} | jr-tabla {sum(f.has_jr_table for f in funcs)} | no soportadas {unsup}")
     return 0
 

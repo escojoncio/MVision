@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """align: completa el match exacto de sigs.py con prefijo único, delta entre anclas y orden.
 
-  align.py <sigs_ref.json> <match.json> <objetivo.exe>   -> names_eu.json (nombre -> dirección, método)
+  align.py <sigs_ref.json> <match.json> <objetivo.exe>   -> names_eu.json (nombre -> {target, how})
 """
 import json,sys,struct,bisect
 import os; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'recomp')); import recomp
