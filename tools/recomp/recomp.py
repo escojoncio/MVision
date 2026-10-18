@@ -2,7 +2,10 @@
 """recomp: recompilador estático MIPS R3000 (PS1) -> C.
 
   recomp.py <exe> <salida_dir> [--funcs funcs.txt]... [--code-end HEX] [--names names.json] [--hle hle.txt]...
-            [--no-extra]
+            [--no-extra] [--poll-entry]
+
+Interrupciones: se emite RT_POLL(c) en cada arista hacia atrás (bucles), en el despacho de tablas de
+salto y, con --poll-entry, en la entrada de cada función (sondeo de IRQ pendiente, ver runtime/cpu.h).
 
 --funcs: fichero de direcciones hex (una por línea, # comenta); repetible. Si existe extra_funcs.txt junto
 al EXE se lee también (salvo --no-extra): ahí se vuelca missing_funcs.txt del intérprete del runtime.
@@ -279,8 +282,11 @@ class Func:
     def _is_jr_nonra(w):
         return w >> 26 == 0 and (w & 63) == 8 and rs(w) != 31
 
-    def goto_or_tail(self, t):
+    def goto_or_tail(self, t, a=None):
         if self.start <= t < self.end:
+            # arista hacia atrás (bucle): punto seguro de entrega de interrupciones
+            if a is not None and t <= a:
+                return f"RT_POLL(c); goto L_{t:08x};"
             return f"goto L_{t:08x};"
         if t in self.known:
             return f"f_{t:08x}(c); return;"
@@ -312,6 +318,8 @@ class Func:
               "    uint32_t tgt; (void)tgt;"]
         if not hle:
             L.append(f"    RT_ENTER(0x{self.start:08x}u);")
+            if POLL_ENTRY:
+                L.append("    RT_POLL(c);")
         a = self.start
         while a < self.end:
             w = self.exe.word(a)
@@ -323,7 +331,7 @@ class Func:
                 body = []
                 if op == 2:
                     t = (a & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
-                    body = [ds, self.goto_or_tail(t)]
+                    body = [ds, self.goto_or_tail(t, a)]
                 elif op == 3:
                     t = (a & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
                     body = [ds, self.call(t, a + 8)]
@@ -343,7 +351,7 @@ class Func:
                     pre = [f"{{ int cond = {cond_expr(a, w)};"]
                     if link:
                         pre.append(f"c->r[31] = 0x{a + 8:08x}u;")
-                    tk = self.call(t, a + 8) if link else self.goto_or_tail(t)
+                    tk = self.call(t, a + 8) if link else self.goto_or_tail(t, a)
                     body = pre + [ds, f"if (cond) {{ {tk} }} }}"]
                 L.append(f"    {lab}" + " ".join(x for x in body if x))
                 # El delay slot también puede ser destino de otro salto (raro): etiqueta propia
@@ -357,6 +365,7 @@ class Func:
                  if self.end in self.known else "    rt_fallthrough(c, 0x%08xu); return;" % self.end)
         if self.has_jr_table:
             L.append("JR_DISPATCH:")
+            L.append("    RT_POLL(c);")
             L.append("    switch (tgt) {")
             for x in sorted(self.labels):
                 L.append(f"    case 0x{x:08x}u: goto L_{x:08x};")
@@ -366,7 +375,12 @@ class Func:
         return "\n".join(L)
 
 
+POLL_ENTRY = False  # --poll-entry: sondeo también en la entrada de cada función
+
+
 def main(a):
+    global POLL_ENTRY
+    POLL_ENTRY = "--poll-entry" in a
     if len(a) < 2:
         print(__doc__)
         return 1
@@ -433,6 +447,13 @@ def main(a):
             f.write(f"    {{0x{fn.start:08x}u, f_{fn.start:08x}}},\n")
         f.write(f"}};\nconst unsigned rt_func_count = {len(funcs)};\n")
         f.write(f"const uint32_t rt_entry = 0x{exe.pc0:08x}u;\n")
+        # Código original de las funciones sustituidas por HLE: el HLE puede delegar en él (rt_orig).
+        ho = sorted((names[fn.start], fn.start) for fn in funcs if names.get(fn.start) in hle)
+        f.write("const HleOrig rt_hle_orig[] = {\n")
+        for n, t in ho:
+            f.write(f'    {{"{n}", orig_f_{t:08x}}},\n')
+        f.write("    {0, 0}\n};\n")
+        f.write(f"const unsigned rt_hle_orig_count = {len(ho)};\n")
         nl = sorted((t, n) for t, n in names.items() if t in known)
         f.write("const FuncName rt_func_names[] = {\n")
         for t, n in nl:

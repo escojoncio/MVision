@@ -13,6 +13,8 @@ int cd_current_disc(void);
 int cd_disc_count(void);
 /* Entrega sectores pendientes de una lectura en curso (llamar por frame desde el host). */
 void cd_pump(Cpu *c);
+/* 1 si hay una lectura en curso (hay datos que entregar en la próxima IRQ de CD). */
+int cd_busy(void);
 
 /* Acceso directo para herramientas/pruebas. lba = sector lógico (sin los 150 de pregap).
  * raw: 0 = 2048 B de datos, 1 = 2340 B (cabecera 4 + subcabecera 8 + 2328) como en modo 0x20. */

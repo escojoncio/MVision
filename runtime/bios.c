@@ -31,9 +31,26 @@ static struct { uint32_t cls, spec, mode, func, status; } events[MAX_EVENTS];
 #define K_HEAP_END 0x0000F000u
 static uint32_t k_heap = K_HEAP_START;
 
+/* Reserva en memoria de kernel (puesta a cero); devuelve dirección KSEG0. 0 si no cabe. */
+uint32_t bios_kalloc(uint32_t n) {
+    n = (n + 7) & ~7u;
+    if (k_heap + n > K_HEAP_END) return 0;
+    uint32_t a = k_heap;
+    memset(&psx_ram[a], 0, n);
+    k_heap += n;
+    return 0x80000000u | a;
+}
+
 static int ev_index(uint32_t h) {
     uint32_t i = h & 0xFFFFu;
     return (h & 0xFF000000u) == 0xF1000000u && i < MAX_EVENTS && events[i].cls ? (int)i : -1;
+}
+
+/* ¿Hay algún evento activado para (cls, spec)? Permite descartar IRQ sin destinatario. */
+int bios_event_listening(uint32_t cls, uint32_t spec) {
+    for (int i = 0; i < MAX_EVENTS; i++)
+        if (events[i].cls == cls && events[i].spec == spec && events[i].status == EV_ENABLED) return 1;
+    return 0;
 }
 
 void bios_deliver_event(Cpu *c, uint32_t cls, uint32_t spec) {
@@ -149,7 +166,8 @@ static void bios_b0(Cpu *c, uint32_t fn) {
     case 0x14: pad_bios_stop(); V0 = 1; return;                     /* StopPAD */
     case 0x15: V0 = 1; return;                                      /* OutdatedPadInitAndStart */
     case 0x17: rt_fatal(c, "ReturnFromException fuera de IRQ");
-    case 0x18: case 0x19: V0 = 0; return;         /* Set*ExitFromException */
+    case 0x18: irq_set_exit_hook(0); V0 = 0; return;      /* SetDefaultExitFromException */
+    case 0x19: irq_set_exit_hook(A0); V0 = 0; return;     /* SetCustomExitFromException (HookEntryInt) */
     case 0x20: {                                   /* UnDeliverEvent */
         for (int i = 0; i < MAX_EVENTS; i++)
             if (events[i].cls == A0 && events[i].spec == A1 && events[i].status == EV_READY) events[i].status = EV_ENABLED;
@@ -172,7 +190,9 @@ static void bios_b0(Cpu *c, uint32_t fn) {
 
 static void bios_c0(Cpu *c, uint32_t fn) {
     switch (fn) {
-    case 0x00: case 0x01: case 0x02: case 0x03: V0 = 0; return; /* colas de IRQ: HLE propio */
+    case 0x00: case 0x01: V0 = 0; return;   /* Enqueue{TimerAndVblank,Syscall}: ya forman parte de la excepción HLE */
+    case 0x02: V0 = irq_enq(c, A0, A1); return;   /* SysEnqIntRP(prio, nodo) */
+    case 0x03: V0 = irq_deq(c, A0, A1); return;   /* SysDeqIntRP(prio, nodo) */
     case 0x08: V0 = 0; return;                                  /* SysInitMemory */
     case 0x0A: V0 = 0; return;                                  /* ChangeClearRCnt */
     default: unknown(c, 0xC0, fn);
@@ -186,6 +206,6 @@ void bios_hle(Cpu *c, uint32_t vec) {
     else bios_c0(c, fn);
 }
 
-/* SetConf(eventos, tcbs, pila): reconfigura tablas del kernel parcheando su código; con el kernel
- * en HLE (eventos/hilos con tablas propias) no hay nada que hacer. */
-void hle_SetConf(Cpu *c) { V0 = 1; }
+/* SetConf(eventos, tcbs, pila): reconfigura tablas del kernel. Eventos: tabla propia; hilos: se
+ * reserva la tabla de TCB con el tamaño pedido (el juego lee *0x110 y escribe SR en los TCB). */
+void hle_SetConf(Cpu *c) { fiber_kinit(c, A1); V0 = 1; }

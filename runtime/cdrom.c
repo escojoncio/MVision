@@ -18,6 +18,7 @@
 #include "cpu.h"
 #include "hle.h"
 #include "cdrom.h"
+#include "sys.h"
 
 #define V0 c->r[2]
 #define A0 c->r[4]
@@ -84,6 +85,9 @@ static int dirrec(uint8_t *p, const char *id, int idlen, uint32_t lba, uint32_t 
     return len;
 }
 
+#define FILL_NAME "FILLER.DAT"
+#define FILL_BYTES (3u << 20)
+
 static int add_file(Disc *d, const char *dirpath, const char *name, int in_sub, uint32_t *next) {
     if (d->nfiles == MAX_FILES) return -1;
     VFile *v = &d->files[d->nfiles];
@@ -100,8 +104,8 @@ static int add_file(Disc *d, const char *dirpath, const char *name, int in_sub, 
         v->nsec = v->xa ? sz / XA_SEC : (uint32_t)((sz + SEC - 1) / SEC);
         v->size = v->xa ? v->nsec * SEC : (uint32_t)sz;
     } else {
-        /* relleno de 3 MB al final del disco */
-        v->nsec = 1536;
+        /* relleno genérico al final del disco: FILL_BYTES redondeado a sectores */
+        v->nsec = (FILL_BYTES + SEC - 1) / SEC;
         v->size = v->nsec * SEC;
     }
     v->lba = *next;
@@ -166,7 +170,7 @@ static int build_disc(Disc *d, const char *root) {
     char sub[2048]; snprintf(sub, sizeof sub, "%s/%s", root, d->subname);
     char subf[16][16]; int ns = list_dir(sub, subf, 16);
     for (int i = 0; i < ns; i++) add_file(d, sub, subf[i], 1, &next);
-    add_file(d, root, "FILLER.DAT", 0, &next); /* no extraído: relleno */
+    add_file(d, root, FILL_NAME, 0, &next); /* fichero inexistente en el volcado: relleno */
     d->total = next + 150;
 
     /* 16: descriptor primario. */
@@ -204,7 +208,6 @@ static int build_disc(Disc *d, const char *root) {
             for (int i = 0; i < d->nfiles; i++) {
                 VFile *v = &d->files[i];
                 if (v->in_sub) continue;
-                if (!strcmp(v->name, "FILLER.DAT") && o) { /* se lista igual */ }
                 int n = snprintf(id, sizeof id, "%s;1", v->name);
                 o += dirrec(p + o, id, n, v->lba, v->size, 0, v->xa);
             }
@@ -298,7 +301,7 @@ int cd_read_sector(uint32_t lba, uint8_t *out, int raw) {
 static uint32_t ready_cb, sync_cb;
 static uint32_t pos;         /* LBA lógico de Setloc / lectura */
 static int reading;          /* 1 = ReadN/ReadS activo */
-static int in_delivery;
+static int in_delivery;      /* dentro de deliver(); seguro como global: corre en la excepción, que no conmuta de hilo */
 static uint8_t mode = 0x80;
 static uint8_t secbuf[2340];
 static uint32_t secoff;      /* bytes ya entregados por CdGetSector */
@@ -325,7 +328,8 @@ static void deliver(Cpu *c, int max) {
     if (in_delivery) return;
     in_delivery = 1;
     while (reading && max-- > 0) {
-        cd_read_sector(pos, secbuf, 1);
+        int rr = cd_read_sector(pos, secbuf, 1);
+        if (getenv("MV_CDLOG")) fprintf(stderr, "[cd] deliver lba=%u rr=%d d0=%02x %02x %02x %02x ndiscs=%d cur=%d\n", pos, rr, secbuf[12], secbuf[13], secbuf[14], secbuf[15], ndiscs, cur);
         secoff = (mode & 0x20) ? 0 : 12;
         if (!(mode & 0x20) && (mode & 0x10)) secoff = 12; /* tamaño 2328: no usado */
         pos++;
@@ -337,7 +341,32 @@ static void deliver(Cpu *c, int max) {
     in_delivery = 0;
 }
 
-void cd_pump(Cpu *c) { deliver(c, 16); }
+/* Las finalizaciones de comando (CdSyncCallback) y los sectores (CdReadyCallback) se entregan como IRQ de
+ * CD en la excepción HLE, nunca dentro de la propia llamada a CdControl: el demonio de E/S del juego
+ * actualiza su estado *después* de volver de CdControl y espera la respuesta de forma asíncrona. */
+#define SYNCQ 16
+static struct { uint8_t code, res[8]; } syncq[SYNCQ];
+static int syncq_n;
+
+static void queue_sync(int code, const uint8_t *r) {
+    static int warned;
+    if (syncq_n < SYNCQ) { syncq[syncq_n].code = (uint8_t)code; memcpy(syncq[syncq_n].res, r, 8); syncq_n++; }
+    else if (!warned) { warned = 1; fprintf(stderr, "[cd] cola de finalizaciones llena: se descarta una\n"); }
+    sys_irq_raise(IRQ_CD);
+}
+
+void cd_pump(Cpu *c) {
+    while (syncq_n) {
+        uint8_t code = syncq[0].code, r[8];
+        memcpy(r, syncq[0].res, 8);
+        memmove(&syncq[0], &syncq[1], (size_t)(--syncq_n) * sizeof syncq[0]);
+        if (!sync_cb) continue;
+        for (int i = 0; i < 8; i++) mem_w8(c, RESULT_ADDR + i, r[i]);
+        invoke2(c, sync_cb, code, RESULT_ADDR);
+    }
+    deliver(c, 16);
+}
+int cd_busy(void) { return syncq_n || (reading && !in_delivery); }
 
 static uint32_t msf_to_lba(uint32_t p) {
     uint8_t m = p, s = p >> 8, f = p >> 16;
@@ -348,6 +377,10 @@ static uint32_t msf_to_lba(uint32_t p) {
 static int control(Cpu *c, uint32_t com, uint32_t param, uint32_t result) {
     uint8_t r[8];
     com &= 0xFF;
+    static int logn = -1;
+    if (logn < 0) logn = getenv("MV_CDLOG") ? 1 : 0;
+    if (logn) fprintf(stderr, "[cd] CdControl 0x%02x param@%08x=%06x ra=%08x pos=%u reading=%d vbl=%u\n", com, param,
+                      param ? mem_r32(c, param) & 0xFFFFFF : 0, c->r[31], pos, reading, hle_frame_count());
     switch (com) {
     case 0x02: /* Setloc */
         if (param) { uint32_t p = mem_r32(c, param) & 0xFFFFFF; pos = msf_to_lba(p); }
@@ -372,11 +405,9 @@ static int control(Cpu *c, uint32_t com, uint32_t param, uint32_t result) {
     if (com == 0x14) { bcd_msf(discs[cur].total, r + 1); }/* GetTD (aprox.) */
     if (com == 0x10 || com == 0x11) bcd_msf(pos + PREGAP, r);
     if (result) for (int i = 0; i < 8; i++) mem_w8(c, result + i, r[i]);
-    /* Un comando completa al momento: CdSyncCallback(CdlComplete). */
-    if (sync_cb && !in_delivery) {
-        for (int i = 0; i < 8; i++) mem_w8(c, RESULT_ADDR + i, r[i]);
-        invoke2(c, sync_cb, 2, RESULT_ADDR);
-    }
+    /* El comando completa enseguida, pero se avisa por IRQ de CD: CdSyncCallback(CdlComplete). */
+    if (sync_cb && !in_delivery) queue_sync(2, r);
+    if (reading) sys_irq_raise(IRQ_CD);
     return 1;
 }
 
@@ -394,15 +425,15 @@ void hle_CdReady(Cpu *c) { uint32_t o = ready_cb; ready_cb = A0; V0 = o; }
 void hle_CdControl(Cpu *c) {
     uint32_t com = A0 & 0xFF;
     V0 = control(c, com, A1, A2);
-    if ((com == 0x06 || com == 0x1B) && !in_delivery) deliver(c, 4096);
 }
 void hle_CdControlB(Cpu *c) { hle_CdControl(c); }
-void hle_CdControlF(Cpu *c) { V0 = control(c, A0, A1, 0); if (((A0 & 0xFF) == 6 || (A0 & 0xFF) == 0x1B) && !in_delivery) deliver(c, 4096); }
+void hle_CdControlF(Cpu *c) { V0 = control(c, A0, A1, 0); }
 
 /* CdGetSector(buf, nwords): copia del sector actual (formato 2340 si modo 0x20). */
 void hle_CdGetSector(Cpu *c) {
     uint32_t dst = A0, n = A1 * 4;
     uint32_t lim = (mode & 0x20) ? 2340 : 2048 + 12;
+    if (getenv("MV_CDLOG")) fprintf(stderr, "[cd] CdGetSector dst=%08x words=%u secoff=%u mode=%02x first=%02x %02x %02x %02x\n", A0, A1, secoff, mode, secbuf[secoff], secbuf[secoff+1], secbuf[secoff+2], secbuf[secoff+3]);
     for (uint32_t i = 0; i < n; i++) {
         uint8_t b = secoff < lim ? secbuf[secoff] : 0;
         secoff++;

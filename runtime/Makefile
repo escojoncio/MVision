@@ -14,14 +14,22 @@ $(OUT)/test_runtime: $(RT) test_runtime.c $(wildcard *.h)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_runtime.c
 
-.PHONY: test
+$(OUT)/test_sys: $(RT) test_sys.c $(wildcard *.h)
+	@mkdir -p $(OUT)
+	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_sys.c
+
+.PHONY: test test_sys
 test: $(OUT)/test_runtime
 	$(OUT)/test_runtime
+
+test_sys: $(OUT)/test_sys
+	$(OUT)/test_sys
 
 # Regenera el C a partir del EXE del disco (local, nunca se sube): make gen EXE=... NAMES=...
 EXE ?= ../gamedata/main.exe
 NAMES ?= ../gamedata/names_eu.json
+# GENFLAGS=--poll-entry añade sondeo de IRQ también en la entrada de funciones.
 .PHONY: gen
 gen:
 	rm -rf $(GEN)
-	python3 ../tools/recomp/recomp.py $(EXE) $(GEN) --names $(NAMES) $(foreach f,$(wildcard hle*.txt),--hle $(f))
+	python3 ../tools/recomp/recomp.py $(EXE) $(GEN) --names $(NAMES) $(GENFLAGS) $(foreach f,$(wildcard hle*.txt),--hle $(f))

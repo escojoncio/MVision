@@ -589,6 +589,13 @@ void hle_ResetGraph(Cpu *c) {
         gpu_gp1(0x01000000);
     }
     if (mode != 3) drawsync_cb = 0;
+    /* El estado interno de libgpu (tipo de GPU, tamaño máximo de VRAM que usan SetDrawEnv/SetDefDrawEnv
+     * para recortar) lo inicializa el ResetGraph original: se ejecuta tras la parte de hardware. */
+    if (mode == 0 || mode == 3 || mode == 5) {
+        uint32_t keep = drawsync_cb;
+        rt_orig(c, "ResetGraph");
+        drawsync_cb = keep;
+    }
     V0 = 0;
 }
 void hle_SetGraphDebug(Cpu *c) { V0 = graph_debug; graph_debug = A0; }

@@ -26,10 +26,10 @@ static unsigned nseen;
 int interp_log_enabled = 1;
 unsigned long interp_insns; /* contador global (estadística/pruebas) */
 
-static void note_entry(uint32_t t) {
+static void note_entry(uint32_t t, uint32_t c_ra) {
     for (unsigned i = 0; i < nseen; i++) if (seen[i] == t) return;
     if (nseen < SEEN_N) seen[nseen++] = t;
-    fprintf(stderr, "[interp] interpretando 0x%08x (sin función recompilada)\n", t);
+    fprintf(stderr, "[interp] interpretando 0x%08x %s (sin función recompilada; ra=0x%08x %s)\n", t, rt_name(t), c_ra, rt_name(c_ra));
     if (!interp_log_enabled) return;
     FILE *f = fopen("missing_funcs.txt", "a+");
     if (!f) return;
@@ -137,7 +137,7 @@ static void do_call(Cpu *c, uint32_t t) {
 }
 
 void interp_call(Cpu *c, uint32_t entry) {
-    note_entry(entry);
+    note_entry(entry, c->r[31]);
     const uint32_t ret = c->r[31];
     uint32_t pc = entry;
     for (;;) {
@@ -171,11 +171,12 @@ void interp_call(Cpu *c, uint32_t entry) {
         switch (kind) {
         case 1:
             if (cond && link) { do_call(c, tgt); }
-            else if (cond) next = tgt;
+            else if (cond) { next = tgt; if (tgt <= pc) RT_POLL(c); }
             break;
         case 2:
             if (rt_lookup(tgt) || is_bios_vec(tgt)) { do_call(c, tgt); return; }
             next = tgt;
+            if (tgt <= pc) RT_POLL(c);
             break;
         case 3:
             c->r[31] = pc + 8;
@@ -185,6 +186,7 @@ void interp_call(Cpu *c, uint32_t entry) {
             if (tgt == ret) return;
             if (rt_lookup(tgt) || is_bios_vec(tgt)) { do_call(c, tgt); return; }
             next = tgt;
+            if (tgt <= pc) RT_POLL(c);
             break;
         case 5:
             wr(c, RD, pc + 8);

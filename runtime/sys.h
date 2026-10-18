@@ -3,9 +3,23 @@
 #include <stdint.h>
 #include "cpu.h"
 
-/* ---- Reloj virtual y frame ---- */
-/* Llamar una vez por VSync (desde hle_VSync, antes de los callbacks de VSync del juego). */
+/* ---- Reloj virtual y frame ----
+ * El tiempo virtual (ciclos de CPU a 33,8688 MHz) avanza por tres vías: cada sondeo RT_POLL consume
+ * SYS_POLL_CYC ciclos, cada lectura de E/S 64 y sys_idle salta al siguiente evento. El VBlank y las
+ * IRQ de temporizadores se generan aquí en tiempo virtual (PAL: 50 Hz); la entrega al juego la hace la
+ * excepción HLE (irq.c) cuando SR lo permite. */
+#define SYS_POLL_CYC 12
+/* Avanza un frame completo y ejecuta el VBlank de hardware (pruebas y herramientas). */
 void sys_frame(Cpu *c);
+/* Vuelca a reloj los sondeos consumidos, genera eventos vencidos y re-arma rt_budget (lo llama rt_poll). */
+void sys_clock_tick(Cpu *c);
+/* Salta el reloj al siguiente evento (VBlank/temporizador) y lo procesa: espera de VSync. */
+void sys_idle(Cpu *c);
+/* Fuerza que el siguiente RT_POLL llame a rt_poll (tras levantar una IRQ o habilitar interrupciones). */
+void sys_kick(void);
+/* VBlanks de hardware transcurridos y líneas (HBlank) desde el arranque. */
+uint32_t sys_vblank_count(void);
+uint32_t sys_hcount(void);
 /* 0 = NTSC (60 Hz, 263 líneas), 1 = PAL (50 Hz, 314 líneas). Por defecto PAL (disco EU). */
 void sys_set_video(int pal);
 uint64_t sys_cycles(void);             /* ciclos de CPU virtuales (33,8688 MHz) */
@@ -13,11 +27,33 @@ uint64_t sys_cycles(void);             /* ciclos de CPU virtuales (33,8688 MHz) 
 /* ---- Interrupciones (I_STAT/I_MASK) ---- */
 enum { IRQ_VBLANK = 0, IRQ_GPU, IRQ_CD, IRQ_DMA, IRQ_TMR0, IRQ_TMR1, IRQ_TMR2, IRQ_SIO0, IRQ_SIO, IRQ_SPU, IRQ_PIO };
 void sys_irq_raise(int bit);
+void sys_irq_ack(int bit);
 uint32_t sys_irq_stat(void);
+uint32_t sys_irq_mask(void);
+void sys_irq_enable(int bit, int on);  /* bit de I_MASK */
+/* DMA: banderas de fin de canal pendientes (DICR 24-30); las devuelve y las borra. */
+uint32_t sys_dma_flags_take(void);
+void sys_dma_irq_enable(int ch, int on);
+
+/* ---- Excepción HLE (irq.c) ---- */
+/* Registro de manejadores como en libapi: InterruptCallback(irq, f), DMACallback(ch, f) y VSyncCallback(f).
+ * Devuelven el manejador anterior y ajustan I_MASK/DICR como la librería. */
+uint32_t irq_set_callback(int irq, uint32_t fn);
+uint32_t irq_set_dma_callback(int ch, uint32_t fn);
+uint32_t irq_set_vsync_callback(uint32_t fn);
+void irq_reset_callbacks(void);
+/* Colas del kernel C0:02/03 (SysEnqIntRP/SysDeqIntRP) y ganchos de salida B0:18/19. */
+uint32_t irq_enq(Cpu *c, uint32_t prio, uint32_t node);
+uint32_t irq_deq(Cpu *c, uint32_t prio, uint32_t node);
+void irq_set_exit_hook(uint32_t fn);
+int irq_in_exception(void);
+/* Memoria de kernel en RAM baja (bios.c). */
+uint32_t bios_kalloc(uint32_t n);
 
 /* ---- Eventos de BIOS (bios.c) ---- */
 /* Entrega un evento: modo 0x1000 llama a la función MIPS, modo 0x2000 lo deja listo para TestEvent. */
 void bios_deliver_event(Cpu *c, uint32_t cls, uint32_t spec);
+int bios_event_listening(uint32_t cls, uint32_t spec);
 #define EV_VBLANK 0xF0000001u
 #define EV_CARD_SW 0xF0000011u
 #define EV_CARD_HW 0xF4000001u

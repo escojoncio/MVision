@@ -16,7 +16,14 @@ extern const unsigned rt_func_count;
 extern const FuncName rt_func_names[];
 extern const unsigned rt_func_name_count;
 extern const uint32_t rt_entry;
+/* Código original de las funciones sustituidas por HLE (nombre -> orig_f_XXXXXXXX), para que el HLE
+ * delegue en él cuando necesita sus efectos sobre el estado interno de la librería. */
+typedef struct { const char *name; FuncPtr fn; } HleOrig;
+extern const HleOrig rt_hle_orig[];
+extern const unsigned rt_hle_orig_count;
+int rt_orig(Cpu *c, const char *name);   /* ejecuta el original; 0 si no existe */
 
+void rt_dump_trace(void);   /* últimas funciones ejecutadas (anillo de 64; vacío sin -DRT_TRACE) */
 /* Traza opcional de entrada a funciones (compilar con -DRT_TRACE). */
 #ifdef RT_TRACE
 void rt_trace_enter(Cpu *c, uint32_t addr);
@@ -24,6 +31,21 @@ void rt_trace_enter(Cpu *c, uint32_t addr);
 #else
 #define RT_ENTER(a) ((void)0)
 #endif
+
+/* ---- Sondeo de interrupciones en puntos seguros ----
+ * El recompilador emite RT_POLL(c) en las aristas hacia atrás (bucles) y el intérprete en sus saltos
+ * hacia atrás. Cada sondeo "gasta" ciclos virtuales: rt_budget cuenta sondeos hasta el próximo evento
+ * del reloj (VBlank, temporizadores). Al agotarse se llama a rt_poll, que avanza el reloj, genera los
+ * eventos de hardware vencidos y, si SR.IEc && SR.IM2 && (I_STAT & I_MASK), entrega la excepción HLE
+ * (irq.c). Cualquier fuente que levante una IRQ pone rt_budget a 0 para que se atienda en el siguiente
+ * sondeo. Los registros MIPS viven siempre en *c, así que cualquier punto de sondeo es consistente. */
+extern int32_t rt_budget;
+void rt_poll(Cpu *c);
+#define RT_POLL(c) do { if (__builtin_expect(--rt_budget < 0, 0)) rt_poll(c); } while (0)
+extern uint32_t rt_irq_enabled;          /* (SR.IEc && SR.IM2) del hilo en ejecución */
+uint32_t rt_sr_get(void);                /* bits de interrupción de SR (IEc=1, IM2=0x400) del hilo actual */
+void rt_sr_set(uint32_t v);              /* idem, sin entregar IRQ (lo usan fibras y excepciones) */
+void rt_irq_check(Cpu *c);               /* entrega la excepción ahora si procede (tras habilitar IEc) */
 
 /* ---- Memoria PS1: RAM 2 MB (espejos KUSEG/KSEG0/KSEG1 x4), scratchpad 1 KB, E/S. ---- */
 #define PSX_RAM_SIZE   0x200000u

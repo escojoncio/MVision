@@ -37,6 +37,7 @@ static int game_read(Cpu *c, uint32_t lba, uint32_t bytes) {
     mem_w8(c, PARAM + 8, 0xA0);
     c->r[4] = 0x0E; c->r[5] = PARAM + 8; c->r[6] = 0; hle_CdControl(c);
     c->r[4] = 0x06; c->r[5] = PARAM; c->r[6] = 0; hle_CdControl(c);
+    for (int i = 0; i < 100000 && cd_busy(); i++) cd_pump(c); /* IRQ de CD: entrega los sectores */
     rt_call(c, FS_LEFT);
     return (int)c->r[2];
 }
@@ -70,11 +71,14 @@ int main(int argc, char **argv) {
     }
     CHECK(found_exe);
     /* 3. fichero grande: tabla de stages, comparación byte a byte con el original */
+    /* ruta relativa del fichero grande a comparar: variable de entorno CD_TEST_FILE (p.ej. "DIR/FICHERO") */
+    const char *rel = getenv("CD_TEST_FILE");
+    if (!rel) { printf("test_cd: sin CD_TEST_FILE, se omite la parte 3-4\n"); return fails != 0; }
     uint32_t lba, size;
-    CHECK(cd_find("DIR/FICHERO", &lba, &size) == 0);
+    CHECK(cd_find(rel, &lba, &size) == 0);
     CHECK(game_read(c, lba, 64 * 2048) == 0);
     char path[2048]; snprintf(path, sizeof path, "%.*s", (int)strcspn(argv[2], ";"), argv[2]);
-    char p2[2100]; snprintf(p2, sizeof p2, "%s/DIR/FICHERO", path);
+    char p2[2100]; snprintf(p2, sizeof p2, "%s/%s", path, rel);
     FILE *g = fopen(p2, "rb");
     if (g) {
         static uint8_t ref[64 * 2048];
@@ -88,8 +92,12 @@ int main(int argc, char **argv) {
     CHECK(*(uint8_t *)mem_ptr(BUF) == 1); /* versión de cabecera de stage */
     /* 5. sector XA del vídeo */
     uint32_t xl, xs; uint8_t raw[2340];
-    CHECK(cd_find("X/<video>", &xl, &xs) == 0);
-    CHECK(cd_read_sector(xl, raw, 1) == 0);
+    /* ruta de un fichero XA: variable de entorno CD_TEST_XA (opcional) */
+    const char *xa = getenv("CD_TEST_XA");
+    if (xa) {
+        CHECK(cd_find(xa, &xl, &xs) == 0);
+        CHECK(cd_read_sector(xl, raw, 1) == 0);
+    }
     /* 6. cambio de disco */
     if (nd > 1) {
         CHECK(cd_select_disc(1) == 0);
