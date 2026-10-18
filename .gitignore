@@ -25,3 +25,4 @@ vr/box/build-san/
 build-*/
 missing_funcs.txt
 !runtime/missing_funcs.txt
+*.ppm
