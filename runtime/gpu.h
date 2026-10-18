@@ -77,10 +77,20 @@ enum {
 typedef struct {
     int16_t x, y;
     uint8_t r, g, b, u, v;
-    uint8_t fvalid;
+    uint8_t fvalid;          /* fx,fy,fz FIABLES para el modo plano (proyección sin saturar); implica vvalid y vflags==0 */
+    uint8_t vvalid;          /* vx,vy,vz FIABLES (posición de vista), también en vértices saturados / detrás de la cámara */
+    uint8_t vflags;          /* solo con vvalid (máscara de bits):
+                              * GPU_VF_SAT    el SXY entero saturó/desbordó (fx,fy = proyección en double sin saturar, útil pero NO coherente con x,y);
+                              * GPU_VF_BEHIND vz <= 0 (fx,fy = 0, no hay proyección; recortar contra el plano cercano);
+                              * GPU_VF_AMBIG  baja confianza: había varios candidatos con el mismo SXY y la secuencia de la GTE no los
+                              *              distingue (primitiva sin ancla, p.ej. todos los vértices saturados en la misma esquina);
+                              * GPU_VF_DERIVED vértice NO transformado por la GTE: esquina de un sprite rectangular en pantalla construida
+                              *              por el juego a partir de dos esquinas diagonales proyectadas; vx,vy,vz se reconstruyen a la
+                              *              profundidad media de las dos esquinas (aproximación de cartel); fvalid=0. */
     float fx, fy, fz;
     float vx, vy, vz;        /* posición 3D en espacio de VISTA (R·V+TR de la GTE, unidades del juego; vz = fz) */
 } GpuVtx;
+enum { GPU_VF_SAT = 1, GPU_VF_BEHIND = 2, GPU_VF_AMBIG = 4, GPU_VF_DERIVED = 8 };
 
 typedef struct {
     uint8_t type, nv;
@@ -98,7 +108,7 @@ typedef struct {
     uint32_t data_off, data_n; /* UPLOAD: píxeles (uint16) en GpuDrawList.data, por filas */
     uint32_t seq;            /* orden global desde enable */
     int16_t dox, doy;        /* offset de dibujo E5 vigente (ya sumado en v[].x,y y fx,fy; restarlo da la coordenada cruda de la GTE) */
-    float proj_h, proj_ox, proj_oy; /* POLY/LINE con algún vértice fvalid: H de la GTE y OFX/OFY en píxeles (0 si no). Con
+    float proj_h, proj_ox, proj_oy; /* POLY/LINE con algún vértice vvalid: H de la GTE y OFX/OFY en píxeles (0 si no). Con
                                      * ellos y vx,vy,vz se re-proyecta por ojo: x = proj_ox + proj_h*(vx -/+ e)/vz. */
 } GpuOp;
 
@@ -134,26 +144,48 @@ void gpu_capture_set_float_hook(GpuFloatHook h);
 /* ====================== Geometría de alta precisión (sombra flotante de la GTE) ======================
  * gte.c mantiene, además del resultado entero exacto, una tabla por frame con la posición sin cuantizar de cada
  * vértice transformado (ver el bloque "Alta precisión" de gte.c). gpu_capture_hiprec(1) la enciende y engancha a
- * la captura: cada vértice de polígono/línea cuyo (sx,sy) entero coincida con uno de la tabla sale con
- * fvalid/fx/fy/fz/vx/vy/vz. Los rects y los polígonos 2D (HUD, texto) nunca coinciden con coherencia y salen con
- * fvalid=0. El cierre de frame de la captura vacía la tabla (gte_hp_frame). Con la alta precisión apagada
- * (por defecto) no cambia nada del comportamiento observable. */
+ * la captura: cada primitiva (polígono/línea) se asocia ENTERA con los vértices de la GTE por su (sx,sy) entero
+ * (gte_hp_resolve; los saturados/detrás de la cámara se desambiguan por cercanía en la secuencia de salida de la GTE) y
+ * cada vértice sale con:
+ *   vvalid=1, vx,vy,vz (vista), vflags   si se encontró (también saturados / detrás de la cámara / derivados);
+ *   fvalid=1, fx,fy,fz                   además, si la proyección del hardware es fiable (vflags sin SAT ni BEHIND).
+ * CONTRATO PARA EL CONSUMIDOR 3D (escena VR):
+ *   - polígono 3D = TODOS sus vértices vvalid (antes: todos fvalid). Los rects y los polígonos 2D (HUD, texto) salen con
+ *     vvalid=0 (una coincidencia espuria de un vértice suelto es posible; exigir todos los vértices lo evita).
+ *   - GPU_VF_BEHIND (vz <= 0): hay que recortar el polígono contra el plano cercano en la escena (vx,vy,vz sí valen).
+ *   - GPU_VF_SAT: la posición de vista vale; fx,fy no se deben usar para dibujar en plano (los enteros x,y están recortados).
+ *   - GPU_VF_AMBIG: baja confianza (ver gte.c); descartar el polígono si se prefiere no arriesgar posiciones erróneas.
+ *   - GPU_VF_DERIVED: esquina de sprite sin GTE, vista aproximada a la profundidad media de las dos esquinas reales.
+ *   - proj_h/proj_ox/proj_oy valen si algún vértice es vvalid. El cierre de frame de la captura vacía la tabla
+ *     (gte_hp_frame). Con la alta precisión apagada (por defecto) no cambia nada del comportamiento observable. */
 typedef struct {
     float fx, fy, fz;      /* pantalla sin cuantizar (sin offset de dibujo) y z de vista */
     float vx, vy, vz;      /* espacio de vista */
     float h, ofx, ofy;     /* proyección vigente: x = ofx + h*vx/vz */
+    uint32_t seq;          /* orden de salida de la GTE (creciente, un número por vértice RTPS/RTPT) */
+    uint8_t flags;         /* 0 normal; GPU_VF_SAT: fx,fy sin saturar (no coherentes con el SXY entero); GPU_VF_BEHIND: vz<=0 */
 } GpuHpInfo;
 typedef struct {
     uint32_t stored, evict, skipped, lookups, hits;
     uint32_t skip_sf, skip_sat, skip_ovf, skip_z; /* motivos de 'skipped' */
     uint32_t gen_stored, max_gen_stored;           /* almacenados en la generación en curso / máximo por generación */
+    /* Desde la asociación por secuencia: skip_sat/skip_ovf/skip_z YA NO descartan; cuentan vértices registrados con flag
+     * (SXY saturado o IR1/IR2/SZ saturados, división desbordada, detrás de la cámara). 'skipped' solo cuenta sf=0. */
+    uint32_t flagged, ring_evict;                  /* vértices con flag registrados / sobrescritos por antigüedad en el anillo */
+    uint32_t res_prims, res_amb, res_pivot;        /* gte_hp_resolve: primitivas, vértices con >1 candidato, primitivas sin ancla */
+    uint32_t ev_verts, ev_ok, ev_amb, ev_amb_ok;   /* autoevaluación (gte_hp_eval): vértices evaluados / acertados / ambiguos / ambiguos acertados */
+    uint32_t ev_hi, ev_hi_ok, ev_anc, ev_anc_ok;   /* ... de ellos: de confianza alta (sin AMBIG) / en primitivas con alguna ancla única */
 } GteHpStats;
 typedef int (*GpuHpHook)(int sx, int sy, GpuHpInfo *out);
+/* Asociación por primitiva (la que usa gpu_capture_hiprec): n SXY crudos (sin offset de dibujo) -> out[i], ok[i]=1 si se resolvió. */
+typedef int (*GpuHpResolve)(int n, const int *sx, const int *sy, GpuHpInfo *out, uint8_t *ok);
 void gpu_capture_set_hp_hook(GpuHpHook h);
 void gpu_capture_hiprec(int on);
 /* gte.c */
 void gte_hp_enable(int on);
 int gte_hp_enabled(void);
 void gte_hp_frame(void);
-int gte_hp_lookup(int sx, int sy, GpuHpInfo *out);
+int gte_hp_lookup(int sx, int sy, GpuHpInfo *out);   /* solo vértices normales (flags==0), el más reciente */
+int gte_hp_resolve(int n, const int *sx, const int *sy, GpuHpInfo *out, uint8_t *ok); /* ver gte.c; devuelve nº resueltos */
+void gte_hp_eval(int on, int ex, int ey); /* autoevaluación de la heurística (solo medición; ver gte.c) */
 void gte_hp_stats(GteHpStats *s);

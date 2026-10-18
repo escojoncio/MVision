@@ -1,6 +1,7 @@
 /* GPU PS1 por software: VRAM 1024x512x16, comandos GP0/GP1, DMA canal 2 y HLE de libgpu.
  * Escrito a partir de la documentación pública del hardware. Sirve de referencia (oráculo)
  * para el renderer Metal: prioriza exactitud y claridad sobre velocidad. */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -148,6 +149,7 @@ static struct {
     int last_dx, last_dy;
     GpuFloatHook hook;
     GpuHpHook hphook;
+    GpuHpResolve hpres;
 } cap;
 
 static void cap_list_reset(GpuDrawList *l) {
@@ -223,24 +225,77 @@ static void cap_refresh_disp(void) {
 }
 
 static GpuHpInfo cap_proj;
+static uint32_t cap_seq[4];
+/* Datos básicos del vértice (el enlace con la GTE se resuelve después, por primitiva: cap_resolve). */
 static void cap_vtx(GpuVtx *o, const Vtx *v, int tex) {
     o->x = (int16_t)v->x; o->y = (int16_t)v->y;
     o->r = (uint8_t)v->r; o->g = (uint8_t)v->g; o->b = (uint8_t)v->b;
     if (tex) { o->u = (uint8_t)v->u; o->v = (uint8_t)v->v; }
-    if (cap.hphook) {
-        GpuHpInfo h;
-        /* La GTE produce SXY con OFX/OFY; el juego lo copia a la primitiva y el GPU suma después el offset de dibujo
-         * E5. La clave es, pues, la coordenada SIN offset (v->x - g.ox): la que escribió el juego. */
-        if (cap.hphook(v->x - g.ox, v->y - g.oy, &h)) {
-            o->fvalid = 1; o->fx = h.fx + (float)g.ox; o->fy = h.fy + (float)g.oy; o->fz = h.fz;
-            o->vx = h.vx; o->vy = h.vy; o->vz = h.vz;
-            cap_proj = h;
+}
+/* Enlace con la GTE de los nv vértices de una primitiva. La GTE produce SXY con OFX/OFY; el juego lo copia a la primitiva y el
+ * GPU suma después el offset de dibujo E5: la clave es la coordenada SIN offset (v->x - g.ox). Con la alta precisión se asocia
+ * la primitiva entera (gte_hp_resolve: desambigua vértices saturados por cercanía en la secuencia de salida de la GTE); cada
+ * vértice sale con vvalid/vflags/vx,vy,vz y, si no está saturado ni detrás de la cámara, además fvalid/fx/fy/fz. */
+static void cap_resolve(GpuVtx *o, const Vtx *v, int nv) {
+    if (cap.hpres) {
+        int sx[4], sy[4]; GpuHpInfo h[4]; uint8_t ok[4];
+        for (int i = 0; i < nv; i++) { sx[i] = v[i].x - g.ox; sy[i] = v[i].y - g.oy; }
+        cap.hpres(nv, sx, sy, h, ok);
+        for (int i = 0; i < nv; i++) {
+            if (!ok[i]) continue;
+            o[i].vvalid = 1; o[i].vflags = h[i].flags;
+            o[i].vx = h[i].vx; o[i].vy = h[i].vy; o[i].vz = h[i].vz; o[i].fz = h[i].fz;
+            o[i].fx = h[i].fx + (float)g.ox; o[i].fy = h[i].fy + (float)g.oy;
+            o[i].fvalid = !(h[i].flags & (GPU_VF_SAT | GPU_VF_BEHIND));
+            cap_proj = h[i]; cap_seq[i] = h[i].seq;
+        }
+    } else if (cap.hphook) {
+        for (int i = 0; i < nv; i++) {
+            GpuHpInfo h;
+            if (cap.hphook(v[i].x - g.ox, v[i].y - g.oy, &h)) {
+                o[i].fvalid = o[i].vvalid = 1; o[i].fx = h.fx + (float)g.ox; o[i].fy = h.fy + (float)g.oy; o[i].fz = h.fz;
+                o[i].vx = h.vx; o[i].vy = h.vy; o[i].vz = h.vz;
+                cap_proj = h;
+            }
         }
     } else if (cap.hook) {
-        float fx, fy, fz;
-        if (cap.hook(v->x - g.ox, v->y - g.oy, &fx, &fy, &fz)) {
-            o->fvalid = 1; o->fx = fx + g.ox; o->fy = fy + g.oy; o->fz = fz;
+        for (int i = 0; i < nv; i++) {
+            float fx, fy, fz;
+            if (cap.hook(v[i].x - g.ox, v[i].y - g.oy, &fx, &fy, &fz)) {
+                o[i].fvalid = 1; o[i].fx = fx + g.ox; o[i].fy = fy + g.oy; o[i].fz = fz;
+            }
         }
+    }
+}
+
+/* Sprite de 4 vértices del que el juego proyectó solo dos esquinas diagonales (0,3 o 1,2) y construyó las otras dos en
+ * pantalla (rectángulo alineado, o girado: son carteles de cara a la cámara). Se exige: las dos esquinas normales con seq
+ * cercanos (misma rutina; una coincidencia espuria de dos vértices de HUD con seq a <=256 es del orden de 1e-4) y las otras dos
+ * a distancia razonable del centro. Se les da vista a la profundidad media de las dos esquinas (GPU_VF_DERIVED). */
+static void cap_derive(GpuVtx *q) {
+    for (int d = 0; d < 2; d++) {
+        int a = d ? 1 : 0, b = d ? 2 : 3, c1 = d ? 0 : 1, c2 = d ? 3 : 2;
+        GpuVtx *A = &q[a], *B = &q[b];
+        if (!A->fvalid || !B->fvalid || (A->vflags | B->vflags) & GPU_VF_AMBIG || q[c1].vvalid || q[c2].vvalid || cap_proj.h == 0.0f) continue; /* AMBIG: asociación dudosa, típica de coincidencias de HUD */
+        if (cap_seq[a] - cap_seq[b] + 256u > 512u) continue;
+        float za = A->vz, zb = B->vz;
+        if (za <= 0 || zb <= 0 || fabsf(za - zb) > 0.5f * (za > zb ? za : zb)) continue;
+        float mx = 0.5f * (A->fx + B->fx), my = 0.5f * (A->fy + B->fy);
+        float lim = 1.5f * hypotf(A->fx - B->fx, A->fy - B->fy) + 4.0f;
+        if (hypotf(q[c1].x - mx, q[c1].y - my) > lim || hypotf(q[c2].x - mx, q[c2].y - my) > lim) continue;
+        float z = 0.5f * (za + zb);
+        GpuVtx *cs[2] = {&q[c1], &q[c2]};
+        for (int k = 0; k < 2; k++) {
+            GpuVtx *C = cs[k];
+            /* subpíxel de la esquina real que comparte la coordenada entera; si no, el entero del juego (con offset de dibujo) */
+            float fx = C->x == B->x ? B->fx : C->x == A->x ? A->fx : (float)C->x;
+            float fy = C->y == B->y ? B->fy : C->y == A->y ? A->fy : (float)C->y;
+            C->vvalid = 1; C->vflags = GPU_VF_DERIVED; C->fvalid = 0;
+            C->fx = fx; C->fy = fy; C->fz = z; C->vz = z;
+            C->vx = (fx - (float)g.ox - cap_proj.ofx) * z / cap_proj.h;
+            C->vy = (fy - (float)g.oy - cap_proj.ofy) * z / cap_proj.h;
+        }
+        return;
     }
 }
 
@@ -257,6 +312,8 @@ static void cap_poly(const Vtx *v, int nv, int gour, int tex, int raw, int semi,
     o->clx = (uint16_t)t->cx; o->cly = (uint16_t)t->cy;
     cap_proj.h = 0;
     for (int i = 0; i < nv; i++) cap_vtx(&o->v[i], &v[i], tex);
+    cap_resolve(o->v, v, nv);
+    if (nv == 4 && cap.hpres) cap_derive(o->v);
     cap_set_proj(o);
 }
 
@@ -266,6 +323,7 @@ static void cap_line(const Vtx *a, const Vtx *b, int gour, int semi) {
     o->flags |= (uint16_t)((gour ? GPU_F_GOURAUD : 0) | (semi ? GPU_F_SEMI : 0) | (g.dither && gour ? GPU_F_DITHER : 0));
     cap_proj.h = 0;
     cap_vtx(&o->v[0], a, 0); cap_vtx(&o->v[1], b, 0);
+    { Vtx ab[2] = {*a, *b}; cap_resolve(o->v, ab, 2); }
     cap_set_proj(o);
 }
 
@@ -344,7 +402,7 @@ void gpu_capture_vblank(void) {
 uint32_t gpu_capture_dropped(void) { return cap.dropped; }
 void gpu_capture_set_float_hook(GpuFloatHook h) { cap.hook = h; }
 void gpu_capture_set_hp_hook(GpuHpHook h) { cap.hphook = h; }
-void gpu_capture_hiprec(int on) { gte_hp_enable(on); cap.hphook = on ? gte_hp_lookup : NULL; }
+void gpu_capture_hiprec(int on) { gte_hp_enable(on); cap.hphook = NULL; cap.hpres = on ? gte_hp_resolve : NULL; }
 
 static void cap_display_start_changed(void) {
     if (g.dx != cap.last_dx || g.dy != cap.last_dy) {

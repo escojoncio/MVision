@@ -1,6 +1,7 @@
 /* GTE (COP2) exacta en enteros, para validación diferencial contra emulador de referencia.
  * La GTE en float para VR irá aparte; esta es la fuente de verdad del comportamiento original.
  * Semántica según la documentación pública del hardware (MAC 44 bits, saturaciones, flags, UNR). */
+#include <math.h>
 #include <string.h>
 #include "cpu.h"
 #include "gpu.h"   /* GpuHpInfo (solo el tipo; la GTE no depende del rasterizador) */
@@ -125,7 +126,7 @@ static uint32_t gte_divide(uint32_t h, uint32_t sz3) {
  *     fy = H·P.y/pz + OFY/65536
  * y se guarda en una tabla indexada por el SXY entero que se empujó a la FIFO (la clave que verá el GPU cuando el
  * juego copie SXY a la primitiva). Solo se registra con sf=1 (todos los usos reales de RTPS/RTPT en juegos) y si
- * el hardware no saturó (flags 13/14 de este vértice limpias, sin desbordar la división y SZ>0): un vértice recortado/saturado no tiene float útil.
+ * el hardware no saturó (con vértices saturados/detrás de la cámara se registra solo la vista y un flag; ver más abajo).
  *
  * Tabla: asociativa por conjuntos, HP_SETS conjuntos x HP_WAYS vías, hash de (sx,sy). Clave = (sx,sy) saturados a
  * 11 bits + SZ entero (dos vértices en el mismo píxel con distinta profundidad ocupan vías distintas; el mismo
@@ -133,14 +134,48 @@ static uint32_t gte_divide(uint32_t h, uint32_t sz3) {
  * Vaciado por frame: gte_hp_frame() (lo llama el cierre de frame de la captura de gpu.c) incrementa la generación;
  * una entrada vale si se escribió en la generación actual o la anterior (tolera que el juego transforme la geometría
  * del frame N+1 antes del flip del N). Colisiones/ambigüedad documentadas:
- *   - misma (sx,sy) con distinto SZ: el lookup por (sx,sy) devuelve la más reciente (seq mayor); pasa solo con
- *     vértices que caen en el mismo píxel, normalmente del mismo objeto y con z casi igual -> error < 1 px.
+ *   - misma (sx,sy) con distinto SZ: ver "Asociación por secuencia" (más abajo).
  *   - conjunto lleno (4 vías con otras claves de la misma generación): se pierde la más antigua; el vértice
- *     afectado cae a fvalid=0 (se dibuja con el entero). Se cuenta en gte_hp_stats().
- *   - coincidencia espuria: una primitiva 2D (HUD) cuyos 3 vértices coincidan con vértices GTE del frame; el
- *     consumidor exige fvalid en TODOS los vértices y |float-entero| acotado, por lo que es muy improbable. */
+ *     afectado cae a vvalid=0 (se dibuja con el entero). Se cuenta en gte_hp_stats().
+ *   - coincidencia espuria: una primitiva 2D (HUD) cuyos vértices coincidan con vértices GTE del frame; el
+ *     consumidor exige vvalid/fvalid en TODOS los vértices y |float-entero| acotado, por lo que es muy improbable.
+ *
+ * VÉRTICES SATURADOS / DESBORDADOS / DETRÁS DE LA CÁMARA: también se registran, con la posición de vista P (que es correcta
+ * aunque la proyección sature) y un flag: GPU_VF_SAT si el SXY entero saturó (±0x400/0x3FF; un SXY justo en el borde también
+ * se trata así porque es indistinguible), la división desbordó (H >= 2·SZ), IR1/IR2 saturaron o Pz no cabe en SZ (>65535);
+ * GPU_VF_BEHIND si Pz <= 0. En SAT, fx,fy = H·Px/Pz+OFX en double sin saturar (Pz>0); en BEHIND no hay proyección (fx=fy=0).
+ * Solo los flags==0 alimentan fvalid (modo plano); todos alimentan vvalid.
+ *
+ * ASOCIACIÓN POR SECUENCIA (gte_hp_resolve). Problema: muchos vértices saturados comparten el mismo SXY de borde, y el GPU
+ * solo ve el SXY (el SZ no llega a la primitiva). Cada vértice producido lleva un `seq` creciente (orden de salida de
+ * RTPS/RTPT). Estructuras: tabla asociativa de vértices normales (clave sx,sy,SZ) y un ANILLO de HP_RING vértices con flag,
+ * encadenados por hash de (sx,sy) (sin desalojos por colisión; solo por antigüedad), ambos con caducidad por generación.
+ * Para una primitiva de n vértices se reúnen, por vértice, los candidatos con su (sx,sy) exacto (hasta HP_MAXC, los más
+ * recientes del anillo). El juego escribe los vértices de una primitiva con SXY producidos por la GTE en el mismo trabajo
+ * (RTPT de 3 + RTPS, o un RTPT por triángulo), así que sus `seq` son cercanos. Heurística:
+ *   1. vértices con UN solo candidato = anclas (el caso normal y la mayoría de los saturados: un SXY de borde con la otra
+ *      coordenada normal casi es único);
+ *   2. cada vértice ambiguo (de menos a más candidatos) toma el candidato de máxima verosimilitud conjunta con las anclas ya
+ *      resueltas (al resolverse pasa a ser ancla), sin repetir un candidato que ya tomó otro vértice de la misma primitiva.
+ *      Verosimilitud de un par (vértice i, vértice j): log del conteo del histograma APRENDIDO EN LÍNEA de s_j - s_i para ese
+ *      par de ranuras (i,j) y ese tipo (tri/quad), con bins exactos en ±32 y por octavas más lejos, más un suavizado
+ *      1/(1+|d|) (sin datos = "cuanto más cerca en la secuencia, mejor"). El histograma se alimenta de las primitivas sin
+ *      ambigüedad: cada juego escribe los vértices con un patrón estable (en este: RTPT de 3 + RTPS de 1 con ranuras
+ *      0,1,3,2 -> deltas (1,3,2), o su inverso, o vértices indexados de una malla, spans de decenas a miles) y el prior lo recoge;
+ *   3. sin ninguna ancla (todos ambiguos, p.ej. todos en la misma esquina): se elige el par (vértice, candidato) pivote de
+ *      mayor verosimilitud conjunta con el mejor candidato de cada otro vértice; después se procede como en 2.
+ *   (La distancia en el espacio de vista se probó como criterio extra y se descartó: un vértice saturado está por definición
+ *   lejos de los de pantalla; gte_hp_tune lo deja disponible solo para medir.)
+ * Tasa de acierto medida: ver bitácora (autoevaluación gte_hp_eval: recorta artificialmente la ventana de pantalla, trata
+ * como 'saturados' los vértices fuera de ella y comprueba que la asociación devuelve la misma posición de vista que la
+ * búsqueda sin recorte). */
 #define HP_SETS 16384
 #define HP_WAYS 4
+#define HP_RING 32768
+#define HP_RBUCKETS 16384
+#define HP_MAXC 48
+#define HP_PIVC 16 /* candidatos por vértice que puntúan el pivote de una primitiva sin ancla */
+#define HP_MARGIN 1.0f /* diferencia mínima de log2-verosimilitud entre el mejor y el segundo candidato para fiarse */
 typedef struct {
     int16_t sx, sy;
     uint16_t sz;
@@ -149,12 +184,24 @@ typedef struct {
     GpuHpInfo i;
 } HpE;
 static HpE hp_tab[HP_SETS][HP_WAYS];
-static int hp_on, hp_dirty;
+/* Anillo encadenado: id absoluto creciente (empieza en 1); la posición es id % HP_RING; head[] guarda el id más reciente
+ * de cada cubo hash y prev el anterior de la misma cadena. Un id es válido si id > n - HP_RING y su generación vive. */
+typedef struct { int16_t sx, sy; uint32_t gen, prev; GpuHpInfo i; } HpRE;
+typedef struct { HpRE e[HP_RING]; uint32_t head[HP_RBUCKETS]; uint32_t n; } HpRing;
+static HpRing hp_ring, hp_evr; /* hp_evr: solo autoevaluación */
+static int hp_on, hp_dirty, hp_ev_on, hp_ev_x = 100, hp_ev_y = 80;
 static uint32_t hp_gen, hp_seq;
 static GteHpStats hp_st;
 
+#define HP_NB 87
+static uint32_t hp_pair[3][4][4][HP_NB]; /* clase: 0 triángulo, 1 quad, 2 línea (no se mezclan: otro patrón de escritura) */
 static void hp_clear(void) {
-    if (hp_dirty) { memset(hp_tab, 0, sizeof hp_tab); hp_dirty = 0; }
+    memset(hp_pair, 0, sizeof hp_pair);
+    if (hp_dirty) {
+        memset(hp_tab, 0, sizeof hp_tab);
+        memset(&hp_ring, 0, sizeof hp_ring); memset(&hp_evr, 0, sizeof hp_evr);
+        hp_dirty = 0;
+    }
     hp_gen = hp_seq = 0;
     memset(&hp_st, 0, sizeof hp_st);
 }
@@ -162,10 +209,15 @@ void gte_hp_enable(int on) { hp_on = on; }
 int gte_hp_enabled(void) { return hp_on; }
 void gte_hp_frame(void) { hp_gen++; hp_st.gen_stored = 0; }
 void gte_hp_stats(GteHpStats *s) { *s = hp_st; }
+void gte_hp_eval(int on, int ex, int ey) { hp_ev_on = on; if (ex > 0) hp_ev_x = ex; if (ey > 0) hp_ev_y = ey; }
 static inline uint32_t hp_set(int sx, int sy) {
     return (((uint32_t)sx & 0x7FF) * 0x9E3779B1u ^ ((uint32_t)sy & 0x7FF) * 0x85EBCA6Bu) >> 18; /* 14 bits */
 }
+static inline uint32_t hp_bucket(int sx, int sy) {
+    return (((uint32_t)sx & 0xFFFF) * 0x9E3779B1u ^ ((uint32_t)sy & 0xFFFF) * 0x85EBCA6Bu) >> 18;
+}
 static inline int hp_live(const HpE *e) { return e->used && (uint32_t)(hp_gen - e->gen) <= 1u; }
+static inline int hp_edge(int sx, int sy) { return sx <= -0x400 || sx >= 0x3FF || sy <= -0x400 || sy >= 0x3FF; }
 
 static void hp_store(int sx, int sy, uint32_t sz, const GpuHpInfo *in) {
     HpE *set = hp_tab[hp_set(sx, sy)], *v = NULL;
@@ -183,16 +235,38 @@ static void hp_store(int sx, int sy, uint32_t sz, const GpuHpInfo *in) {
         }
     }
     v->used = 1; v->sx = (int16_t)sx; v->sy = (int16_t)sy; v->sz = (uint16_t)sz;
-    v->gen = hp_gen; v->seq = hp_seq++; v->i = *in;
+    v->gen = hp_gen; v->seq = in->seq; v->i = *in;
     hp_st.stored++;
     if (++hp_st.gen_stored > hp_st.max_gen_stored) hp_st.max_gen_stored = hp_st.gen_stored;
 }
 
+static void hp_ring_push(HpRing *r, int sx, int sy, const GpuHpInfo *in) {
+    uint32_t id = ++r->n, b = hp_bucket(sx, sy);
+    if (!id) id = ++r->n; /* id 0 = cadena vacía (la vuelta de 2^32 ids no debe producirlo) */
+    HpRE *e = &r->e[id % HP_RING];
+    if (id > HP_RING && (uint32_t)(hp_gen - e->gen) <= 1u) hp_st.ring_evict++; /* sobrescribe un vértice aún vivo */
+    e->sx = (int16_t)sx; e->sy = (int16_t)sy; e->gen = hp_gen; e->prev = r->head[b]; e->i = *in;
+    r->head[b] = id;
+    hp_dirty = 1;
+}
+/* Reúne los vértices vivos con clave (sx,sy) de la cadena, del más reciente al más antiguo. */
+static int hp_ring_gather(const HpRing *r, int sx, int sy, const GpuHpInfo **c, int max) {
+    int n = 0, steps = 0;
+    uint32_t id = r->head[hp_bucket(sx, sy)];
+    while (id && (uint32_t)(r->n - id) < HP_RING && n < max && steps++ < 512) { /* resta modular: válido tras la vuelta de ids */
+        const HpRE *e = &r->e[id % HP_RING];
+        if ((uint32_t)(hp_gen - e->gen) > 1u) break; /* la cadena va de más nuevo a más viejo: el resto ya caducó */
+        if (e->sx == sx && e->sy == sy) c[n++] = &e->i;
+        id = e->prev;
+    }
+    return n;
+}
+
 int gte_hp_lookup(int sx, int sy, GpuHpInfo *out) {
     HpE *set = hp_tab[hp_set(sx, sy)], *best = NULL;
-    /* Un SXY en el borde del rango (-0x400 / 0x3FF) es indistinguible de un vértice saturado (que no se registra): una
-     * primitiva con un vértice recortado heredaría el float de otro vértice que cayó justo en el borde. */
-    if (sx <= -0x400 || sx >= 0x3FF || sy <= -0x400 || sy >= 0x3FF) { hp_st.lookups++; return 0; }
+    /* Un SXY en el borde del rango (-0x400 / 0x3FF) es indistinguible de un vértice saturado: no se devuelve aquí
+     * (gte_hp_resolve sí los resuelve, con flag). */
+    if (hp_edge(sx, sy)) { hp_st.lookups++; return 0; }
     for (int w = 0; w < HP_WAYS; w++) {
         HpE *e = &set[w];
         if (!hp_live(e) || e->sx != sx || e->sy != sy) continue;
@@ -205,27 +279,212 @@ int gte_hp_lookup(int sx, int sy, GpuHpInfo *out) {
     return 1;
 }
 
-/* Sombra flotante de un vértice RTPS/RTPT; se llama tras empujar SXY (sx,sy ya saturados). */
+/* Candidatos de un vértice: tabla normal + anillo con flag. */
+static int hp_gather(int sx, int sy, const GpuHpInfo **c, int max) {
+    int n = 0;
+    HpE *set = hp_tab[hp_set(sx, sy)];
+    for (int w = 0; w < HP_WAYS && n < max; w++) {
+        HpE *e = &set[w];
+        if (hp_live(e) && e->sx == sx && e->sy == sy) c[n++] = &e->i;
+    }
+    return n + hp_ring_gather(&hp_ring, sx, sy, c + n, max - n);
+}
+/* Prior aprendido de la distancia en la secuencia de la GTE entre los vértices i y j de una primitiva (tri/quad por separado).
+ * Se aprende en línea de las primitivas SIN ambigüedad (todos los vértices con un único candidato): el motor de un juego
+ * escribe los vértices de la primitiva con un patrón estable (p.ej. RTPT de 3 + RTPS de 1 con orden de ranura 0,1,3,2, o un
+ * grupo de vértices indexados de una malla) y el histograma de s_j - s_i lo recoge (exacto en ±32, por octavas más lejos).
+ * Sin datos todos los bins valen lo mismo y solo manda la anchura del bin = "cuanto más cerca en seq, mejor". */
+static int hp_bin(int32_t d, float *width) {
+    if (d >= -32 && d <= 32) { *width = 1.0f; return d + 32; }
+    uint32_t a = (uint32_t)(d < 0 ? -(int64_t)d : d); int e = 0;
+    while ((a >> (e + 1)) != 0) e++;
+    if (e < 5) e = 5;
+    if (e > 15) e = 15;
+    *width = (float)(1u << e);
+    return 65 + (d > 0 ? 0 : 11) + (e - 5);
+}
+/* log2 de la verosimilitud (por unidad de seq) de que los vértices i (seq si) y j (seq sj) sean de la misma primitiva */
+static float hp_ll(int q, int i, int j, uint32_t si, uint32_t sj) {
+    float w; int32_t d = (int32_t)(sj - si); int b = hp_bin(d, &w);
+    /* suavizado: sin datos manda "cuanto más cerca en seq mejor" (1/(1+|d|)); con datos mandan los conteos */
+    (void)w; /* log2 de la anchura del bin: 0 en los exactos, el exponente en los de octava (b = 65 + (d<0?11:0) + e-5) */
+    float lw = b <= 64 ? 0.0f : (float)((b - 65) % 11 + 5);
+    return log2f((float)hp_pair[q][i][j][b] + 0.5f / (1.0f + (float)(d < 0 ? -(int64_t)d : d))) - lw;
+}
+static void hp_learn(int n, const GpuHpInfo *const *cand) {
+    int q = n == 4 ? 1 : n == 2 ? 2 : 0;
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++) {
+            if (i == j) continue;
+            float w; int b = hp_bin((int32_t)(cand[j]->seq - cand[i]->seq), &w);
+            if (++hp_pair[q][i][j][b] > 0x3FFFFFFFu) for (int k = 0; k < HP_NB; k++) hp_pair[q][i][j][k] >>= 1;
+        }
+}
+static inline float hp_pair_score(int q, int i, const GpuHpInfo *ci, int j, const GpuHpInfo *cj) {
+    return hp_ll(q, j, i, cj->seq, ci->seq) + hp_ll(q, i, j, ci->seq, cj->seq);
+}
+
+/* ¿El candidato ya lo tomó otro vértice de la primitiva? (dos vértices con el mismo SXY son vértices distintos del mismo SXY) */
+static int hp_used(int n, const GpuHpInfo *(*c)[HP_MAXC], const int *idx, int v, const GpuHpInfo *cand) {
+    for (int j = 0; j < n; j++) if (j != v && idx[j] >= 0 && c[j][idx[j]] == cand) return 1;
+    return 0;
+}
+
+/* Elige un candidato por vértice (idx[i] = -1 si no hay). cnt[i] candidatos en c[i][]. Heurística documentada arriba.
+ * Devuelve 1 si no hubo ambigüedad (todos los vértices con 0 o 1 candidato). */
+static int hp_select(int n, const GpuHpInfo *(*c)[HP_MAXC], const int *cnt, int *idx, uint8_t *low) {
+    int anch[4], na = 0, pend[4], np = 0, q = n == 4 ? 1 : n == 2 ? 2 : 0;
+    for (int i = 0; i < n; i++) {
+        idx[i] = -1; low[i] = 0;
+        if (cnt[i] == 1) { idx[i] = 0; anch[na++] = i; }
+        else if (cnt[i] > 1) pend[np++] = i;
+    }
+    if (!np) return 1;
+    hp_st.res_amb += (uint32_t)np;
+    for (int a = 1; a < np; a++) { /* menos candidatos primero (inserción) */
+        int t = pend[a], b = a;
+        while (b > 0 && cnt[pend[b - 1]] > cnt[t]) { pend[b] = pend[b - 1]; b--; }
+        pend[b] = t;
+    }
+    if (!na) { /* sin anclas: pivote (vértice, candidato) de máxima verosimilitud conjunta */
+        hp_st.res_pivot++;
+        for (int a = 0; a < np; a++) low[pend[a]] = 1; /* sin ancla: candidatos de la misma esquina indistinguibles */
+        float bests = -1e30f; int bv = -1, bk = 0;
+        /* coste acotado: solo los HP_PIVC candidatos más recientes de cada vértice puntúan el pivote (4*16*3*16 pares como mucho) */
+        for (int a = 0; a < np; a++) {
+            int va = pend[a], ka = cnt[va] < HP_PIVC ? cnt[va] : HP_PIVC;
+            for (int k = 0; k < ka; k++) {
+                const GpuHpInfo *s = c[va][k]; float tot = 0;
+                for (int b = 0; b < np; b++) {
+                    int vb = pend[b], kb = cnt[vb] < HP_PIVC ? cnt[vb] : HP_PIVC;
+                    if (vb == va) continue;
+                    float m = -1e30f;
+                    for (int j = 0; j < kb; j++) { if (c[vb][j] == s) continue; float d = hp_pair_score(q, vb, c[vb][j], va, s); if (d > m) m = d; }
+                    tot += m;
+                }
+                if (tot > bests || (tot == bests && s->seq > c[bv][bk]->seq)) { bests = tot; bv = va; bk = k; }
+            }
+        }
+        idx[bv] = bk; anch[na++] = bv;
+        for (int a = 0; a < np; a++) if (pend[a] == bv) { for (int b = a; b + 1 < np; b++) pend[b] = pend[b + 1]; np--; break; }
+    }
+    for (int a = 0; a < np; a++) {
+        int v = pend[a], bi = -1; float bc = -1e30f, b2 = -1e30f;
+        for (int k = 0; k < cnt[v]; k++) {
+            if (hp_used(n, c, idx, v, c[v][k])) continue;
+            float sc = 0;
+            for (int j = 0; j < na; j++) sc += hp_pair_score(q, v, c[v][k], anch[j], c[anch[j]][idx[anch[j]]]);
+            if (bi < 0 || sc > bc || (sc == bc && c[v][k]->seq > c[v][bi]->seq)) { b2 = bc; bc = sc; bi = k; }
+            else if (sc > b2) b2 = sc;
+        }
+        if (bi >= 0 && b2 > -1e29f && bc - b2 < HP_MARGIN) low[v] = 1; /* el segundo candidato es casi igual de verosímil */
+        if (bi < 0) low[v] = 1; /* todos sus candidatos ya los tomó otro vértice (>=3 vértices con el mismo SXY): se repite el más reciente, marcado AMBIG */
+        idx[v] = bi < 0 ? 0 : bi; anch[na++] = v;
+    }
+    return 0;
+}
+
+/* Autoevaluación (gte_hp_eval): ventana artificial |sx-OFX|<ex, |sy-OFY|<ey; fuera de ella la clave se recorta al borde
+ * (como un SXY saturado). hp_evr guarda esos vértices por clave recortada; aquí se compara con la resolución sin recorte. */
+static inline void hp_evkey(const GpuHpInfo *t, int sx, int sy, int *kx, int *ky) {
+    int ox = (int)t->ofx, oy = (int)t->ofy, dx = sx - ox, dy = sy - oy;
+    *kx = ox + (dx <= -hp_ev_x ? -hp_ev_x : dx >= hp_ev_x ? hp_ev_x : dx);
+    *ky = oy + (dy <= -hp_ev_y ? -hp_ev_y : dy >= hp_ev_y ? hp_ev_y : dy);
+}
+static void hp_eval(int n, const int *sx, const int *sy, const GpuHpInfo *truth) {
+    const GpuHpInfo *c[4][HP_MAXC]; int cnt[4], idx[4], clamped[4], any = 0, kx[4], ky[4];
+    for (int i = 0; i < n; i++) {
+        hp_evkey(&truth[i], sx[i], sy[i], &kx[i], &ky[i]);
+        clamped[i] = kx[i] != sx[i] || ky[i] != sy[i]; any |= clamped[i];
+    }
+    if (!any) return;
+    for (int i = 0; i < n; i++) {
+        if (clamped[i]) cnt[i] = hp_ring_gather(&hp_evr, kx[i], ky[i], c[i], HP_MAXC);
+        else cnt[i] = hp_gather(sx[i], sy[i], c[i], HP_MAXC);
+    }
+    GteHpStats keep = hp_st;
+    uint8_t low[4];
+    (void)hp_select(n, c, cnt, idx, low);
+    hp_st.res_amb = keep.res_amb; hp_st.res_pivot = keep.res_pivot;
+    int nanc = 0; for (int i = 0; i < n; i++) if (!clamped[i] && cnt[i] == 1) nanc++;
+    for (int i = 0; i < n; i++) {
+        if (!clamped[i]) continue;
+        int ok = idx[i] >= 0 && fabs(c[i][idx[i]]->vx - truth[i].vx) < 1.0 && fabs(c[i][idx[i]]->vy - truth[i].vy) < 1.0 &&
+                 fabs(c[i][idx[i]]->vz - truth[i].vz) < 1.0;
+        hp_st.ev_verts++; hp_st.ev_ok += ok;
+        if (!low[i]) { hp_st.ev_hi++; hp_st.ev_hi_ok += ok; }
+        if (nanc) { hp_st.ev_anc++; hp_st.ev_anc_ok += ok; }
+        if (cnt[i] > 1) { hp_st.ev_amb++; hp_st.ev_amb_ok += ok; }
+    }
+}
+
+int gte_hp_resolve(int n, const int *sx, const int *sy, GpuHpInfo *out, uint8_t *ok) {
+    const GpuHpInfo *c[4][HP_MAXC]; int cnt[4] = {0, 0, 0, 0}, idx[4], got = 0;
+    if (n > 4) n = 4;
+    if (n <= 0) return 0;
+    hp_st.res_prims++;
+    for (int i = 0; i < n; i++) cnt[i] = hp_gather(sx[i], sy[i], c[i], HP_MAXC);
+    uint8_t low[4];
+    int unamb = hp_select(n, c, cnt, idx, low);
+    if (unamb && n >= 2) {
+        int full = 1; for (int i = 0; i < n; i++) full &= idx[i] >= 0;
+        if (full) { const GpuHpInfo *pc[4]; for (int i = 0; i < n; i++) pc[i] = c[i][0]; hp_learn(n, pc); }
+    }
+    /* AMBIG solo si de verdad hay alternativas distintas: los candidatos casi idénticos (mismo vértice transformado en dos
+     * generaciones seguidas, p.ej. cámara quieta; < 0,2 % de z de diferencia) no restan confianza. */
+    for (int i = 0; i < n; i++) {
+        if (!low[i] || idx[i] < 0) continue;
+        const GpuHpInfo *s = c[i][idx[i]]; float tol = 1.0f + 0.002f * fabsf(s->vz); int same = 1;
+        for (int k = 0; k < cnt[i] && same; k++) {
+            const GpuHpInfo *o2 = c[i][k];
+            same = o2 == s || (o2->flags == s->flags && fabsf(o2->vx - s->vx) <= tol && fabsf(o2->vy - s->vy) <= tol && fabsf(o2->vz - s->vz) <= tol);
+        }
+        if (same) low[i] = 0;
+    }
+    int all_norm = 1;
+    for (int i = 0; i < n; i++) {
+        hp_st.lookups++;
+        ok[i] = idx[i] >= 0;
+        if (ok[i]) { out[i] = *c[i][idx[i]]; got++; hp_st.hits++; all_norm &= out[i].flags == 0; if (low[i]) out[i].flags |= GPU_VF_AMBIG; }
+        else all_norm = 0;
+    }
+    if (hp_ev_on && all_norm) hp_eval(n, sx, sy, out);
+    return got;
+}
+
+/* Registro de un vértice RTPS/RTPT tras empujar SXY (sx,sy ya saturados). */
 static void hp_vertex(int v, int sf, int sx, int sy, int sat) {
     if (!hp_on) return;
-    if (!sf || sat || H >= (uint32_t)SZ(3) * 2u) {
-        hp_st.skipped++; if (!sf) hp_st.skip_sf++; else if (sat) hp_st.skip_sat++; else hp_st.skip_ovf++;
-        return;
-    } /* sat/desbordamiento de ESTE vértice (flag acumula en RTPT) */
+    if (!sf) { hp_st.skipped++; hp_st.skip_sf++; return; }
     double P[3];
     for (int i = 0; i < 3; i++)
         P[i] = ((double)TR(i) * 4096.0 + (double)mat(0, i, 0) * VX(v) + (double)mat(0, i, 1) * VY(v) +
                 (double)mat(0, i, 2) * VZ(v)) / 4096.0;
     int32_t sz = SZ(3);
-    if (sz <= 0 || P[2] <= 0.0) { hp_st.skipped++; hp_st.skip_z++; return; }
     GpuHpInfo in;
+    memset(&in, 0, sizeof in);
+    int fl = 0;
+    if (sat || hp_edge(sx, sy)) { fl |= GPU_VF_SAT; hp_st.skip_sat++; }
+    if (H >= (uint32_t)sz * 2u) { fl |= GPU_VF_SAT; hp_st.skip_ovf++; }
+    if (IR(1) != MAC(1) || IR(2) != MAC(2) || P[2] > 65535.0) fl |= GPU_VF_SAT; /* IR1/IR2/SZ saturados: el SXY del hardware no es la proyección */
     double h = (double)H;
-    in.fx = (float)(h * P[0] / P[2] + (double)OFX / 65536.0);
-    in.fy = (float)(h * P[1] / P[2] + (double)OFY / 65536.0);
+    if (P[2] <= 0.0) { fl |= GPU_VF_BEHIND | GPU_VF_SAT; hp_st.skip_z++; in.fx = in.fy = 0.0f; }
+    else {
+        in.fx = (float)(h * P[0] / P[2] + (double)OFX / 65536.0);
+        in.fy = (float)(h * P[1] / P[2] + (double)OFY / 65536.0);
+    }
     in.fz = (float)P[2];
     in.vx = (float)P[0]; in.vy = (float)P[1]; in.vz = (float)P[2];
     in.h = (float)h; in.ofx = (float)((double)OFX / 65536.0); in.ofy = (float)((double)OFY / 65536.0);
-    hp_store(sx, sy, (uint32_t)sz, &in);
+    in.flags = (uint8_t)fl; in.seq = hp_seq++;
+    if (fl) { hp_ring_push(&hp_ring, sx, sy, &in); hp_st.flagged++; hp_st.stored++; }
+    else {
+        hp_store(sx, sy, (uint32_t)sz, &in);
+        if (hp_ev_on) { /* pseudo-saturación: guarda por clave recortada si cae fuera de la ventana de evaluación */
+            int kx, ky; hp_evkey(&in, sx, sy, &kx, &ky);
+            if (kx != sx || ky != sy) hp_ring_push(&hp_evr, kx, ky, &in);
+        }
+    }
 }
 
 /* --- RTPS núcleo --- */

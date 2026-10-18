@@ -3,7 +3,7 @@
  * Comprueba: (1) la alta precisión NO cambia nada del resultado entero (regs de datos/control tras cada comando, 50k comandos
  * aleatorios con y sin ella); (2) la posición float coincide con la fórmula cerrada; (3) trayectoria suave: con la cámara
  * moviéndose despacio la posición float tiene segunda diferencia ~0 mientras la entera salta +-1 px; (4) envejecimiento por frame,
- * ambigüedad por (sx,sy) y saturación; (5) enlace gpu_capture_hiprec -> GpuVtx.fvalid/fx/fy/fz/vx/vy/vz y offset de dibujo. */
+ * ambigüedad por (sx,sy); (5) enlace gpu_capture_hiprec -> GpuVtx.fvalid/fx/fy/fz/vx/vy/vz y offset de dibujo; (6) vértices saturados / detrás de la cámara: vvalid + flags y asociación por secuencia en bordes y esquinas compartidos. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -145,17 +145,18 @@ static void t_table(void) {
     /* envejecimiento: sobrevive un cierre de frame, no dos */
     gte_hp_frame(); CHECK(gte_hp_lookup(160, 120, &h) == 1, "debe sobrevivir 1 cierre");
     gte_hp_frame(); CHECK(gte_hp_lookup(160, 120, &h) == 0, "debe caducar a los 2 cierres");
-    /* saturación: SXY fuera de +-1024 no se registra */
+    /* saturación: SXY fuera de +-1024 NO entra en la tabla de normales (fvalid) pero sí en el anillo con flag (vvalid) */
     gte_hp_frame();
     GteHpStats s0, s1; gte_hp_stats(&s0);
     setup_cam(0, 0, 0, 500, 160, 120);
     load_v0(30000, 0, 600); gte_cmd(&cpu, RTPS);
     gte_hp_stats(&s1);
-    CHECK(s1.stored == s0.stored && s1.skip_sat == s0.skip_sat + 1, "vertice saturado registrado");
+    CHECK(s1.flagged == s0.flagged + 1 && s1.skip_sat == s0.skip_sat + 1, "vertice saturado no registrado con flag");
+    CHECK(gte_hp_lookup(0x3FF, 120, &h) == 0, "gte_hp_lookup no debe devolver saturados");
     /* detrás de la cámara / división desbordada */
     load_v0(10, 10, 0); gte_cmd(&cpu, RTPS);
     gte_hp_stats(&s0);
-    CHECK(s0.skip_ovf >= 1, "division desbordada no omitida");
+    CHECK(s0.skip_ovf >= 1, "division desbordada no contada");
     /* sf=0: no se registra */
     gte_hp_frame(); gte_hp_frame();
     uint32_t b4 = s0.stored;
@@ -215,12 +216,163 @@ static void t_capture(void) {
     gpu_capture_hiprec(0); gpu_capture_enable(0);
 }
 
+
+/* Resolución de primitivas con vértices saturados / detrás de la cámara (asociación por secuencia). */
+static uint32_t rtps_sxy(int x, int y, int z) {
+    load_v0(x, y, z); gte_cmd(&cpu, RTPS);
+    return gte_mfc2(&cpu, 15);
+}
+static void sxy_split(uint32_t w, int *sx, int *sy) { *sx = (int16_t)(w & 0xFFFF); *sy = (int16_t)(w >> 16); }
+/* RTPT de 3 vértices: devuelve los 3 SXY de la FIFO (regs 12,13,14 = SXY0..2) */
+static void rtpt3(const int (*v)[3], int sx[3], int sy[3]) {
+    gte_mtc2(&cpu, 0, (uint32_t)(v[0][0] & 0xFFFF) | ((uint32_t)v[0][1] << 16)); gte_mtc2(&cpu, 1, (uint32_t)(int16_t)v[0][2]);
+    gte_mtc2(&cpu, 2, (uint32_t)(v[1][0] & 0xFFFF) | ((uint32_t)v[1][1] << 16)); gte_mtc2(&cpu, 3, (uint32_t)(int16_t)v[1][2]);
+    gte_mtc2(&cpu, 4, (uint32_t)(v[2][0] & 0xFFFF) | ((uint32_t)v[2][1] << 16)); gte_mtc2(&cpu, 5, (uint32_t)(int16_t)v[2][2]);
+    gte_cmd(&cpu, RTPT);
+    for (int i = 0; i < 3; i++) sxy_split(gte_mfc2(&cpu, 12 + i), &sx[i], &sy[i]);
+}
+
+static void t_saturated(void) {
+    gte_reset(); gte_hp_enable(1);
+    setup_cam(0, 0, 0, 500, 160, 120);
+    int sx[4], sy[4]; GpuHpInfo o[4]; uint8_t ok[4];
+    /* (1) fuera de pantalla por la derecha: sx satura a 0x3FF, sy normal */
+    sxy_split(rtps_sxy(30000, 60, 600), &sx[0], &sy[0]);
+    CHECK(sx[0] == 0x3FF, "esperaba sx saturado, %d", sx[0]);
+    CHECK(gte_hp_resolve(1, sx, sy, o, ok) == 1 && ok[0], "saturado no resuelto");
+    CHECK(o[0].flags == GPU_VF_SAT && fabsf(o[0].vx - 30000) < 1e-2 && fabsf(o[0].vy - 60) < 1e-2 && o[0].vz == 600.0f, "vista del saturado %f %f %f flags %d", o[0].vx, o[0].vy, o[0].vz, o[0].flags);
+    /* fx sin saturar = 160 + 500*30000/600 = 25160 */
+    CHECK(fabsf(o[0].fx - 25160.0f) < 1.0f && fabsf(o[0].fy - 170.0f) < 1e-2, "proyeccion sin saturar %f %f", o[0].fx, o[0].fy);
+    /* (2) detrás de la cámara: z < 0 */
+    int a, b; sxy_split(rtps_sxy(10, 10, -500), &a, &b);
+    CHECK(gte_hp_resolve(1, &a, &b, o, ok) == 1 && (o[0].flags & GPU_VF_BEHIND) && o[0].vz < 0 && fabsf(o[0].vx - 10) < 1e-3 && fabsf(o[0].vz + 500) < 1e-3,
+          "detras de la camara: flags %d vz %f", o[0].flags, o[0].vz);
+    /* (3) varios saturados en el mismo borde (x=0x3FF), cada uno con su sy distinto: cada clave es única */
+    int ksx[8], ksy[8];
+    for (int k = 0; k < 8; k++) sxy_split(rtps_sxy(20000 + 1000 * k, 60 * k - 200, 600), &ksx[k], &ksy[k]);
+    for (int k = 0; k < 8; k++) {
+        GpuHpInfo r; uint8_t g;
+        CHECK(gte_hp_resolve(1, &ksx[k], &ksy[k], &r, &g) == 1 && fabsf(r.vx - (20000 + 1000 * k)) < 1e-2 && fabsf(r.vy - (60 * k - 200)) < 1e-2,
+              "borde compartido k=%d vx=%f", k, r.vx);
+    }
+    /* (4) esquina compartida (0x3FF,0x3FF): 6 triángulos con v0 normal (ancla) y v1,v2 saturados en la esquina; la ancla (seq)
+     * decide a qué triángulo pertenecen v1,v2. Posiciones de vista distintas por triángulo. */
+    gte_hp_frame(); gte_hp_frame();
+    int tsx[6][3], tsy[6][3], tv[6][3][3];
+    for (int t = 0; t < 6; t++) {
+        int bx = 12000 + 2000 * t;
+        int v[3][3] = {{-300 + 60 * t, -100 + 30 * t, 2000 + 50 * t}, {bx, bx, 600 + t}, {bx + 40, bx + 70, 600 + t}};
+        memcpy(tv[t], v, sizeof v);
+        rtpt3((const int (*)[3])v, tsx[t], tsy[t]);
+        CHECK(tsx[t][1] == 0x3FF && tsy[t][1] == 0x3FF && tsx[t][2] == 0x3FF && tsy[t][2] == 0x3FF, "no son esquina t=%d", t);
+    }
+    int good = 0;
+    for (int t = 0; t < 6; t++) {
+        GpuHpInfo r[3]; uint8_t g[3];
+        gte_hp_resolve(3, tsx[t], tsy[t], r, g);
+        int okt = g[0] && g[1] && g[2] && r[0].flags == 0 && (r[1].flags & GPU_VF_SAT) && (r[2].flags & GPU_VF_SAT);
+        for (int i = 0; okt && i < 3; i++) okt = fabsf(r[i].vx - tv[t][i][0]) < 1e-2 && fabsf(r[i].vy - tv[t][i][1]) < 1e-2 && fabsf(r[i].vz - tv[t][i][2]) < 1e-2;
+        good += okt;
+    }
+    CHECK(good == 6, "esquina compartida con ancla: %d de 6 triangulos bien asociados", good);
+    /* (5) sin ancla: los tres vértices en la misma esquina; debe devolver un triple coherente (los 3 de un mismo RTPT), no mezclar */
+    {
+        GpuHpInfo r[3]; uint8_t g[3];
+        int ex[3] = {0x3FF, 0x3FF, 0x3FF}, ey[3] = {0x3FF, 0x3FF, 0x3FF};
+        for (int t = 0; t < 4; t++) {
+            int vv[3][3] = {{12000 + 500 * t, 12000, 700 + t}, {12100 + 500 * t, 12100, 700 + t}, {12200 + 500 * t, 12000, 700 + t}};
+            int qx[3], qy[3]; rtpt3((const int (*)[3])vv, qx, qy);
+        }
+        gte_hp_resolve(3, ex, ey, r, g);
+        uint32_t lo = r[0].seq, hi = lo;
+        for (int i = 1; i < 3; i++) { if (r[i].seq < lo) lo = r[i].seq; if (r[i].seq > hi) hi = r[i].seq; }
+        CHECK(g[0] && g[1] && g[2] && hi - lo == 2 && r[0].seq != r[1].seq && r[1].seq != r[2].seq, "sin ancla: triple incoherente (span seq %u)", hi - lo);
+        CHECK((r[0].flags & GPU_VF_AMBIG) && (r[1].flags & GPU_VF_AMBIG) && (r[2].flags & GPU_VF_AMBIG), "sin ancla debe marcarse AMBIG");
+    }
+    /* (6) quad: RTPT(3) + RTPS(1); v3 saturado en un borde con la otra coordenada única */
+    {
+        int vv[3][3] = {{-200, -100, 1500}, {200, -100, 1500}, {-200, 100, 1500}};
+        int qx[4], qy[4]; rtpt3((const int (*)[3])vv, qx, qy);
+        sxy_split(rtps_sxy(-30000, 100, 900), &qx[3], &qy[3]);
+        CHECK(qx[3] == -0x400, "borde izquierdo %d", qx[3]);
+        GpuHpInfo r[4]; uint8_t g[4];
+        CHECK(gte_hp_resolve(4, qx, qy, r, g) == 4, "quad no resuelto");
+        CHECK(r[3].flags == GPU_VF_SAT && fabsf(r[3].vx + 30000) < 1e-2 && r[0].flags == 0 && fabsf(r[0].vx + 200) < 1e-3, "quad con vertice saturado");
+    }
+    /* (7) sin ancla y muchos candidatos (tope HP_MAXC): 4 vértices en la misma esquina -> candidatos distintos, todos AMBIG */
+    {
+        gte_hp_frame(); gte_hp_frame();
+        for (int t = 0; t < 100; t++) rtps_sxy(15000 + 10 * t, 15000 + 10 * t, 700);
+        int ex[4] = {0x3FF, 0x3FF, 0x3FF, 0x3FF}, ey[4] = {0x3FF, 0x3FF, 0x3FF, 0x3FF};
+        GpuHpInfo r[4]; uint8_t g[4];
+        CHECK(gte_hp_resolve(4, ex, ey, r, g) == 4, "esquina con 100 candidatos");
+        for (int i = 0; i < 4; i++) for (int j = i + 1; j < 4; j++) CHECK(r[i].seq != r[j].seq, "mismo candidato en dos vertices (%d,%d)", i, j);
+        for (int i = 0; i < 4; i++) CHECK(r[i].flags & GPU_VF_AMBIG, "esquina sin ancla debe ser AMBIG");
+        /* 3 vértices con el mismo SXY y solo 2 candidatos: el tercero repite candidato pero queda marcado AMBIG */
+        gte_hp_frame(); gte_hp_frame();
+        rtps_sxy(15000, 15000, 700); rtps_sxy(26000, 26000, 900);
+        CHECK(gte_hp_resolve(3, ex, ey, r, g) == 3 && (r[0].flags & r[1].flags & r[2].flags & GPU_VF_AMBIG), "3 vertices / 2 candidatos sin AMBIG");
+    }
+    gte_hp_enable(0);
+}
+
+/* Captura: polígono con un vértice saturado y otro detrás de la cámara -> vvalid en todos, fvalid solo en los normales. */
+static void t_capture_sat(void) {
+    gte_reset(); gpu_reset(); gte_hp_enable(0);
+    gpu_capture_enable(1); gpu_capture_hiprec(1);
+    setup_cam(0, 0, 3000, 400, 160, 120);
+    int vx[3] = {-300, 30000, 0}, vy[3] = {-100, -100, 250}, vz[3] = {0, 0, -9000};
+    uint32_t sxyv[3];
+    for (int i = 0; i < 3; i++) { load_v0(vx[i], vy[i], vz[i]); gte_cmd(&cpu, RTPS); sxyv[i] = gte_mfc2(&cpu, 15); }
+    gpu_gp0(0x20FFFFFFu);
+    for (int i = 0; i < 3; i++) gpu_gp0(sxyv[i]);
+    gpu_gp1(0x05000000u | 0); gpu_gp1(0x05000000u | 100);
+    const GpuDrawList *l = gpu_capture_frame();
+    CHECK(l != NULL && l->nops >= 1, "sin lista");
+    if (l && l->nops >= 1) {
+        const GpuOp *o = &l->ops[l->nops - 1];
+        CHECK(o->v[0].vvalid && o->v[0].fvalid && o->v[0].vflags == 0, "v0 normal");
+        CHECK(o->v[1].vvalid && !o->v[1].fvalid && o->v[1].vflags == GPU_VF_SAT && fabsf(o->v[1].vx - 30000) < 1e-2, "v1 saturado: vvalid=%d fvalid=%d flags=%d vx=%f", o->v[1].vvalid, o->v[1].fvalid, o->v[1].vflags, o->v[1].vx);
+        CHECK(o->v[2].vvalid && !o->v[2].fvalid && (o->v[2].vflags & GPU_VF_BEHIND) && o->v[2].vz < 0, "v2 detras: vvalid=%d vflags=%d vz=%f", o->v[2].vvalid, o->v[2].vflags, o->v[2].vz);
+        CHECK(o->proj_h == 400.0f, "proj_h");
+    }
+    gpu_capture_hiprec(0); gpu_capture_enable(0);
+}
+
+/* Sprite rectangular: el juego proyecta dos esquinas diagonales y construye las otras dos en pantalla. */
+static void t_sprite(void) {
+    gte_reset(); gpu_reset(); gte_hp_enable(0);
+    gpu_capture_enable(1); gpu_capture_hiprec(1);
+    setup_cam(0, 0, 0, 400, 160, 120);
+    uint32_t a = rtps_sxy(-300, -200, 2000), b = rtps_sxy(300, 200, 2000);
+    int ax, ay, bx, by; sxy_split(a, &ax, &ay); sxy_split(b, &bx, &by);
+    gpu_gp0(0x2C808080u); /* quad texturizado */
+    gpu_gp0(a); gpu_gp0(0);
+    gpu_gp0((uint32_t)(bx & 0xFFFF) | ((uint32_t)ay << 16)); gpu_gp0(0);
+    gpu_gp0((uint32_t)(ax & 0xFFFF) | ((uint32_t)by << 16)); gpu_gp0(0);
+    gpu_gp0(b); gpu_gp0(0);
+    gpu_gp1(0x05000000u | 0); gpu_gp1(0x05000000u | 100);
+    const GpuDrawList *l = gpu_capture_frame();
+    CHECK(l != NULL && l->nops >= 1, "sin lista");
+    if (l && l->nops >= 1) {
+        const GpuOp *o = &l->ops[l->nops - 1];
+        CHECK(o->nv == 4 && o->v[0].fvalid && o->v[3].fvalid && !o->v[1].fvalid && !o->v[2].fvalid, "validez del sprite");
+        CHECK(o->v[1].vvalid && o->v[2].vvalid && o->v[1].vflags == GPU_VF_DERIVED && o->v[2].vflags == GPU_VF_DERIVED, "esquinas derivadas");
+        CHECK(fabsf(o->v[1].vx - 300) < 1.0f && fabsf(o->v[1].vy + 200) < 1.0f && fabsf(o->v[1].vz - 2000) < 1e-3f, "derivada v1 (%f %f %f)", o->v[1].vx, o->v[1].vy, o->v[1].vz);
+        CHECK(fabsf(o->v[2].vx + 300) < 1.0f && fabsf(o->v[2].vy - 200) < 1.0f, "derivada v2 (%f %f)", o->v[2].vx, o->v[2].vy);
+    }
+    gpu_capture_hiprec(0); gpu_capture_enable(0);
+}
+
 int main(void) {
     t_exact_unchanged();
     t_formula();
     t_smooth();
     t_table();
     t_capture();
+    t_saturated();
+    t_capture_sat();
+    t_sprite();
     if (fails) { printf("test_geom: %d FALLOS\n", fails); return 1; }
     printf("test_geom: todas las pruebas OK\n");
     return 0;
