@@ -495,7 +495,8 @@ static int comp_label(TL *l) {
 }
 
 /* ------------------------------------------------------------------ piezas en construcción */
-typedef struct { char name[24]; TL tl; int copy; const WCutRule *rule; double gen_vol; } BPiece;
+typedef struct { double x, y, z, rc, lcase, lbul; int ok; } Feed;   /* cartucho del cargador en la ranura: eje (x,y), culote z, radio de la vaina, largo de vaina y bala */
+typedef struct { char name[24]; TL tl; int copy; const WCutRule *rule; double gen_vol; Feed feed; } BPiece;
 
 static int sel_uv_ok(const WCutSel *s, const Tri *t) {
     if (!s->has_uv) return 1;
@@ -1285,7 +1286,7 @@ static void quad_ring_walls(TL *out, const P3 *A, const P3 *B, int n, const doub
     }
 }
 
-static int gen_mag(const WCutRule *ru, TL *P, const BPiece *slide, const BPiece *barrel) {
+static int gen_mag(const WCutRule *ru, TL *P, const BPiece *slide, Feed *feed) {
     const WCutMag *g = &ru->mag;
     int rc = 0;
     TL T = {0}, Keep = {0}, New = {0};
@@ -1320,23 +1321,13 @@ static int gen_mag(const WCutRule *ru, TL *P, const BPiece *slide, const BPiece 
         const double wall = g->wall_frac * (xhi - xlo);
         double ysl = 1e30;
         for (size_t i = 0; i < slide->tl.n; i++) for (int k = 0; k < 3; k++) if (slide->tl.t[i].v[k].p[1] < ysl) ysl = slide->tl.t[i].v[k].p[1];
-        double bx0 = 1e30, bx1 = -1e30, by0 = 1e30, by1 = -1e30, bz0 = 1e30;
-        for (size_t i = 0; i < barrel->tl.n; i++) for (int k = 0; k < 3; k++) {
-            const float *p = barrel->tl.t[i].v[k].p;
-            if (p[0] < bx0) bx0 = p[0];
-            if (p[0] > bx1) bx1 = p[0];
-            if (p[1] < by0) by0 = p[1];
-            if (p[1] > by1) by1 = p[1];
-            if (p[2] < bz0) bz0 = p[2];
+        double wx0 = 1e30, wx1 = -1e30;   /* ancho de la corredera: el calibre (radio del anima) es bore_frac de el, igual que en el canon (gen_barrel) */
+        for (size_t i = 0; i < slide->tl.n; i++) for (int k = 0; k < 3; k++) {
+            if (slide->tl.t[i].v[k].p[0] < wx0) wx0 = slide->tl.t[i].v[k].p[0];
+            if (slide->tl.t[i].v[k].p[0] > wx1) wx1 = slide->tl.t[i].v[k].p[0];
         }
-        double rbore = 1e30;   /* radio del ánima = el radio menor de la corona de la boca */
-        for (size_t i = 0; i < barrel->tl.n; i++) for (int k = 0; k < 3; k++) {
-            const float *p = barrel->tl.t[i].v[k].p;
-            if (fabs((double)p[2] - bz0) > ON_TOL) continue;
-            double r = hypot(p[0] - (bx0 + bx1) * 0.5, p[1] - (by0 + by1) * 0.5);
-            if (r > 1e-9 * g_sc && r < rbore) rbore = r;
-        }
-        if (ysl > 1e29 || bx1 < bx0 || rbore > 1e29 || !(wall > 0) || !(g->case_frac >= 1) || !(g->case_len > 0) || !(g->bullet_len > 0)) { rc = -7; goto done; }   /* case_frac < 1: bala más ancha que la vaina (hombro invertido) */
+        const double rbore = g->bore_frac * (wx1 - wx0);
+        if (ysl > 1e29 || wx1 < wx0 || !(rbore > 0) || !(wall > 0) || !(g->case_frac >= 1) || !(g->case_len > 0) || !(g->bullet_len > 0)) { rc = -7; goto done; }   /* case_frac < 1: bala más ancha que la vaina (hombro invertido) */
         const double rcase = g->case_frac * rbore, rbul = rbore, lcase = g->case_len * 2 * rcase, lbul = g->bullet_len * 2 * rcase;
         const double drec = g->rec_frac * rcase;
         const double ytop = ysl - g->clear - 2 * rcase + drec;     /* plano superior de los labios */
@@ -1388,6 +1379,7 @@ static int gen_mag(const WCutRule *ru, TL *P, const BPiece *slide, const BPiece 
             rc = gen_quad(&New, Sf[0].p, Sf[1].p, Sf[2].p, Sf[3].p, up, g->mat_body, WCUT_TRI_CAP);   /* fondo */
         }
         if (!rc) rc = gen_cartridge(&New, c2[0], yf + rcase - 0.0002, sz1 - 0.0005, rcase, rbul, lcase, lbul, g->mat_case, g->mat_bullet);
+        if (!rc) { feed->x = c2[0]; feed->y = yf + rcase - 0.0002; feed->z = sz1 - 0.0005; feed->rc = rcase; feed->lcase = lcase; feed->lbul = lbul; feed->ok = 1; }
         if (!rc && (sz1 - 0.0005 - lcase - lbul < sz0)) rc = -7;
     }
     if (!rc) {
@@ -1399,113 +1391,201 @@ done:
     return rc;
 }
 
-/* Cañón bajo 'ref' (ver WCutTube). Perfora la cara frontal de 'ref' y devuelve el tubo en 'out'. */
-static int gen_tube(const WCutRule *ru, BPiece *ref, TL *out) {
-    const WCutTube *g = &ru->tube;
-    TL *R = &ref->tl; int rc = 0;
-    double zf = 1e30;
-    for (size_t i = 0; i < R->n; i++) for (int k = 0; k < 3; k++) if (R->t[i].v[k].p[2] < zf) zf = R->t[i].v[k].p[2];
-    TL Keep = {0}, F = {0}, New = {0};
-    for (size_t i = 0; i < R->n && !rc; i++) {
-        const Tri *t = &R->t[i];
-        int fr = 1; for (int k = 0; k < 3; k++) if (fabs((double)t->v[k].p[2] - zf) > ON_TOL) fr = 0;
-        double e1[3], e2[3], n[3]; sub3(t->v[1].p, t->v[0].p, e1); sub3(t->v[2].p, t->v[0].p, e2); cross3(e1, e2, n);
-        double ln = sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-        rc = (fr && ln > 0 && n[2] < -0.95 * ln) ? tl_push(&F, t) : tl_push(&Keep, t);
-    }
-    if (!rc && !F.n) rc = -7;
-    double xlo = 1e30, xhi = -1e30, ylo = 1e30, yhi = -1e30;
-    for (size_t i = 0; i < F.n && !rc; i++) for (int k = 0; k < 3; k++) {
-        double x = F.t[i].v[k].p[0], y = F.t[i].v[k].p[1];
-        if (x < xlo) xlo = x;
-        if (x > xhi) xhi = x;
-        if (y < ylo) ylo = y;
-        if (y > yhi) yhi = y;
-    }
-    double w = xhi - xlo, h = yhi - ylo, cx = (xlo + xhi) / 2, cy = g->axis_y;
-    double Ro = g->r_frac * 0.5 * (w < h ? w : h), Rb = Ro - g->gap, rb = Rb * g->bore_frac;
-    int ns = g->segs < 8 ? 8 : (g->segs > 48 ? 48 : g->segs);
-    double zr = zf + g->length, zbe = zf + g->bore_depth;
-    if (!rc && (Ro <= 0 || Rb <= 0 || rb <= 0 || rb >= Rb || cy - Ro < ylo || cy + Ro > yhi || cx - Ro < xlo || cx + Ro > xhi || zr <= zbe)) rc = -7;
-    /* contorno de la cara frontal */
-    EK *e = NULL; size_t ne = 0; EK *sel = NULL; float (*pa)[3] = NULL; int *sc = NULL; int nsel = 0; Loops L = {0};
-    if (!rc) {
-        e = edges_of(&F, &ne);
-        sel = (EK *)malloc((F.n * 3 + 1) * sizeof(EK)); pa = (float (*)[3])malloc((F.n * 3 + 1) * sizeof(float[3])); sc = (int *)malloc((F.n * 3 + 1) * sizeof(int));
-        if (!e || !sel || !pa || !sc) rc = -3;
-    }
-    for (size_t i = 0; i < F.n && !rc; i++)
+/* Sustituye las caras planas F (coplanares, un solo contorno exterior) por el mismo polígono con los agujeros 'hl'; las UV
+ * de los triángulos nuevos siguen la proyección afín de la mayor de las originales (la textura de la cara no se deforma). */
+static int face_with_holes(const TL *F, const Loop *const *hl, int nh, TL *dst) {
+    size_t ne = 0; int rc = 0, nsel = 0; Loops L = {0}; TL New = {0};
+    EK *e = edges_of(F, &ne);
+    EK *sel = (EK *)malloc((F->n * 3 + 1) * sizeof(EK)); float (*pa)[3] = (float (*)[3])malloc((F->n * 3 + 1) * sizeof(float[3]));
+    int *sc = (int *)malloc((F->n * 3 + 1) * sizeof(int));
+    if (!F->n || !e || !sel || !pa || !sc) rc = F->n ? -3 : -7;
+    for (size_t i = 0; i < F->n && !rc; i++)
         for (int a = 0; a < 3; a++) {
-            EK k; k.a = pkey(F.t[i].v[a].p); k.b = pkey(F.t[i].v[(a + 1) % 3].p);
+            EK k; k.a = pkey(F->t[i].v[a].p); k.b = pkey(F->t[i].v[(a + 1) % 3].p);
             if (!memcmp(&k.a, &k.b, sizeof(PK)) || has_rev(e, ne, &k)) continue;
-            sel[nsel] = k; memcpy(pa[nsel], F.t[i].v[a].p, 12); sc[nsel] = F.t[i].comp; nsel++;
+            sel[nsel] = k; memcpy(pa[nsel], F->t[i].v[a].p, 12); sc[nsel] = F->t[i].comp; nsel++;
         }
     if (!rc) rc = build_loops(sel, (const float (*)[3])pa, sc, nsel, &L);
     if (!rc && L.nloops != 1) rc = -7;
-    /* círculos (mismos puntos exactos en todas las superficies que los comparten) */
-    float (*cr)[2] = NULL; P3 *cO = NULL;
-    #define CPT(OUT_, R_, Z_, I_) do { (OUT_)[0] = (float)(cx + (R_) * cs[(I_) % ns]); (OUT_)[1] = (float)(cy + (R_) * sn[(I_) % ns]); (OUT_)[2] = (float)(Z_); } while (0)
+    if (!rc) {
+        Loop outer = { L.pt, L.len[0], L.comp[0], 1 };
+        rc = emit_polygon(&outer, hl, nh, (WCutUV){0, 0, 1, 1}, (WCutUV){0, 0, 1, 1}, &New, NULL);
+    }
+    if (!rc) {
+        size_t bi = 0; double ba = -1;
+        for (size_t i = 0; i < F->n; i++) { double a = tri_area2(&F->t[i]); if (a > ba) { ba = a; bi = i; } }
+        const Tri *o = &F->t[bi];
+        /* base afín en el plano de la cara: ejes (s,t) = los dos de mayor extensión de la normal */
+        double e1[3], e2[3], n[3]; sub3(o->v[1].p, o->v[0].p, e1); sub3(o->v[2].p, o->v[0].p, e2); cross3(e1, e2, n);
+        int a = 0; for (int i = 1; i < 3; i++) if (fabs(n[i]) > fabs(n[a])) a = i;
+        int s = (a + 1) % 3, t = (a + 2) % 3;
+        double m00 = e1[s], m01 = e2[s], m10 = e1[t], m11 = e2[t], det = m00 * m11 - m01 * m10;
+        if (fabs(det) < 1e-18 * SC2) rc = -7;
+        for (size_t i = 0; i < New.n && !rc; i++) for (int k = 0; k < 3; k++) {
+            Vx *v = &New.t[i].v[k];
+            double dx = (double)v->p[s] - o->v[0].p[s], dy = (double)v->p[t] - o->v[0].p[t];
+            double ss = (m11 * dx - m01 * dy) / det, tt = (-m10 * dx + m00 * dy) / det;
+            for (int q = 0; q < 2; q++) v->uv[q] = (float)(o->v[0].uv[q] + ss * (o->v[1].uv[q] - o->v[0].uv[q]) + tt * (o->v[2].uv[q] - o->v[0].uv[q]));
+            memcpy(v->n, o->v[0].n, 12); memcpy(v->c, o->v[0].c, 4);
+            New.t[i].cap = WCUT_TRI_SKIN; New.t[i].comp = o->comp;
+        }
+    }
+    for (size_t i = 0; i < New.n && !rc; i++) rc = tl_push(dst, &New.t[i]);
+    loops_free(&L); free(e); free(sel); free(pa); free(sc); tl_free(&New);
+    return rc;
+}
+
+/* polígono plano (4+ puntos) con agujeros, orientado hacia 'want', relleno con el material 'uv' y la clase 'kind' */
+static int flat_face(TL *out, const P3 *pts, int n, const double *want, const Loop *const *hl, int nh, WCutUV uv, uint8_t kind) {
+    P3 *tmp = (P3 *)malloc(sizeof(P3) * (size_t)n); TL New = {0};
+    if (!tmp) return -3;
+    double nw[3]; newell(pts, n, nw);
+    int rev = nw[0] * want[0] + nw[1] * want[1] + nw[2] * want[2] < 0;
+    for (int i = 0; i < n; i++) tmp[i] = pts[rev ? n - 1 - i : i];
+    Loop o = { tmp, n, -1, 1 };
+    int rc = emit_polygon(&o, hl, nh, uv, uv, &New, NULL);
+    for (size_t i = 0; i < New.n && !rc; i++) { New.t[i].cap = kind; rc = tl_push(out, &New.t[i]); }
+    free(tmp); tl_free(&New);
+    return rc;
+}
+
+/* Cañón bajo 'ref' (ver WCutTube): todo derivado de la corredera 'ref' y del cartucho del cargador 'feed'. Modifica 'ref'
+ * (canal frontal, cavidad interior y ventana lateral) y devuelve en 'out' el cañón: tubo con ánima + capuchón de recámara. */
+static int gen_barrel(const WCutRule *ru, BPiece *ref, const BPiece *feed, TL *out) {
+    const WCutTube *g = &ru->tube;
+    TL *R = &ref->tl; int rc = 0;
+    if (!feed || !feed->feed.ok) return -7;
+    double xlo = 1e30, xhi = -1e30, ylo = 1e30, yhi = -1e30, zf = 1e30;
+    for (size_t i = 0; i < R->n; i++) for (int k = 0; k < 3; k++) {
+        const float *p = R->t[i].v[k].p;
+        if (p[0] < xlo) xlo = p[0];
+        if (p[0] > xhi) xhi = p[0];
+        if (p[1] < ylo) ylo = p[1];
+        if (p[1] > yhi) yhi = p[1];
+        if (p[2] < zf) zf = p[2];
+    }
+    double ztop = -1e30;   /* extremo trasero de la cara superior de la corredera (el trasero baja en diagonal) */
+    for (size_t i = 0; i < R->n; i++) for (int k = 0; k < 3; k++) if (fabs((double)R->t[i].v[k].p[1] - yhi) < ON_TOL && R->t[i].v[k].p[2] > ztop) ztop = R->t[i].v[k].p[2];
+    if (!(xhi > xlo) || !(yhi > ylo) || !(g->wall_frac > 0 && g->wall_frac < 0.3) || !(g->gap > 0) || !(g->travel > 0) || !(g->prot_frac > 0)) return -7;
+    const double W = xhi - xlo, cx = 0.5 * (xlo + xhi), ya = g->axis_y, gap = g->gap, T = g->travel;
+    const double wall = g->wall_frac * W, hw = 0.5 * W - wall;        /* pared y semiancho interior */
+    const double yc = yhi - wall, yfl = ylo + wall;                   /* techo y suelo interiores */
+    double Ro = yc - ya - 2 * gap;                                    /* techo: queda un hueco de holgura bajo el techo */
+    if (hw - 2 * gap < Ro) Ro = hw - 2 * gap;                         /* ancho interior */
+    const double Rc = Ro + gap, rb = g->bore_frac * W;
+    const double prot = g->prot_frac * W, zm = zf - prot;
+    const double zl = feed->feed.z, Lh = feed->feed.lcase + feed->feed.lbul, zhf = zl - Lh;   /* capuchon: justo sobre el cartucho */
+    const double rcs = feed->feed.rc, lcs = feed->feed.lcase;
+    const double zc0 = zhf - T - gap, zc1 = zl + gap;                  /* cavidad: cubre el recorrido relativo de la corredera */
+    const double xh = hw - gap, yt = yc - gap, ylow = yfl + gap, yflat = ya - Ro;
+    const double zp0 = zhf - T, zp1 = zl, yp0 = yflat, yp1 = yt - wall;   /* ventana lateral */
+    const double zt = zhf + 2 * gap, zbe = zhf - gap;
+    const int ns = g->segs < 8 ? 8 : (g->segs > 48 ? 48 : g->segs);
+    if (!(Ro > 2 * rb) || !(rb > 0) || !(Rc + gap < hw) || !(ya - Rc > yfl + gap) || !(yflat - ylow > 0.001 * g_sc) || !(yp1 > yp0) || !(rcs > rb)
+        || !(zc0 > zf + wall) || !(zc1 + wall < ztop) || !(ya - rcs > ylow + gap) || !(ya + rcs < yt - gap) || !(xh > rcs + gap) || fabs(feed->feed.x - cx) > 0.001 * g_sc
+        || !(zl - lcs > zhf + 2 * gap) || !(zl > zm)) return -7;
     double cs[48], sn[48];
     for (int i = 0; i < ns; i++) { cs[i] = cos(6.283185307179586 * i / ns); sn[i] = sin(6.283185307179586 * i / ns); }
-    (void)cr;
-    if (!rc) {   /* cara frontal con orificio: UV afines de la mayor de las originales */
-        cO = (P3 *)malloc(sizeof(P3) * (size_t)ns);
-        if (!cO) rc = -3;
-        else {
-            for (int i = 0; i < ns; i++) CPT(cO[i].p, Ro, zf, i);
-            Loop outer = { L.pt, L.len[0], L.comp[0], 1 }, hole = { cO, ns, L.comp[0], 1 };
-            const Loop *hl[1] = { &hole };
-            rc = emit_polygon(&outer, hl, 1, ru->cap_piece, ru->cap_piece, &New, NULL);
-        }
-        if (!rc) {
-            size_t bi = 0; double ba = -1;
-            for (size_t i = 0; i < F.n; i++) { double a = tri_area2(&F.t[i]); if (a > ba) { ba = a; bi = i; } }
-            const Tri *o = &F.t[bi];
-            double m00 = (double)o->v[1].p[0] - o->v[0].p[0], m01 = (double)o->v[2].p[0] - o->v[0].p[0];
-            double m10 = (double)o->v[1].p[1] - o->v[0].p[1], m11 = (double)o->v[2].p[1] - o->v[0].p[1];
-            double det = m00 * m11 - m01 * m10;
-            if (fabs(det) < 1e-18 * SC2) rc = -7;
-            for (size_t i = 0; i < New.n && !rc; i++) for (int k = 0; k < 3; k++) {
-                Vx *v = &New.t[i].v[k];
-                double dx = (double)v->p[0] - o->v[0].p[0], dy = (double)v->p[1] - o->v[0].p[1];
-                double s = (m11 * dx - m01 * dy) / det, t = (-m10 * dx + m00 * dy) / det;
-                for (int a = 0; a < 2; a++) v->uv[a] = (float)(o->v[0].uv[a] + s * (o->v[1].uv[a] - o->v[0].uv[a]) + t * (o->v[2].uv[a] - o->v[0].uv[a]));
-                memcpy(v->n, o->v[0].n, 12); memcpy(v->c, o->v[0].c, 4);
-                New.t[i].cap = WCUT_TRI_SKIN; New.t[i].comp = o->comp;
-            }
-        }
+    #define CPT(OUT_, R_, Z_, I_) do { (OUT_)[0] = (float)(cx + (R_) * cs[(I_) % ns]); (OUT_)[1] = (float)(ya + (R_) * sn[(I_) % ns]); (OUT_)[2] = (float)(Z_); } while (0)
+    #define RAD(I_) {cs[(I_) % ns] + cs[((I_) + 1) % ns], sn[(I_) % ns] + sn[((I_) + 1) % ns], 0}
+    TL Keep = {0}, Ff = {0}, Fs = {0};
+    P3 *ring = (P3 *)malloc(sizeof(P3) * (size_t)ns * 2);
+    if (!ring) return -3;
+    P3 *c_front = ring, *c_wall = ring + ns;
+    for (int i = 0; i < ns; i++) { CPT(c_front[i].p, Rc, zf, i); CPT(c_wall[i].p, Rc, zc0, i); }
+    /* separar las dos caras que se perforan: frontal (z = zf, normal -z) y lateral derecha (x = xhi, normal +x) */
+    for (size_t i = 0; i < R->n && !rc; i++) {
+        const Tri *t = &R->t[i];
+        double e1[3], e2[3], n[3]; sub3(t->v[1].p, t->v[0].p, e1); sub3(t->v[2].p, t->v[0].p, e2); cross3(e1, e2, n);
+        double ln = sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        int fr = 1, sd = 1;
+        for (int k = 0; k < 3; k++) { if (fabs((double)t->v[k].p[2] - zf) > ON_TOL) fr = 0; if (fabs((double)t->v[k].p[0] - xhi) > ON_TOL) sd = 0; }
+        if (fr && ln > 0 && n[2] < -0.95 * ln) rc = tl_push(&Ff, t);
+        else if (sd && ln > 0 && n[0] > 0.95 * ln) rc = tl_push(&Fs, t);
+        else rc = tl_push(&Keep, t);
     }
     double v0 = tl_volume(R);
-    if (!rc) {   /* canal en la pieza de referencia (paredes hacia dentro, fondo oscuro) */
-        for (size_t i = 0; i < New.n && !rc; i++) rc = tl_push(&Keep, &New.t[i]);
-        for (int i = 0; i < ns && !rc; i++) {
-            float a[3], b[3], c[3], d[3]; double wn[3] = {-(cs[i] + cs[(i + 1) % ns]), -(sn[i] + sn[(i + 1) % ns]), 0};
-            CPT(a, Ro, zf, i); CPT(b, Ro, zf, i + 1); CPT(c, Ro, zr, i + 1); CPT(d, Ro, zr, i);
-            rc = gen_quad(&Keep, a, b, c, d, wn, ru->cap_hole, WCUT_TRI_FILL);
-            float cc[3] = {(float)cx, (float)cy, (float)zr}; double zn[3] = {0, 0, -1};
-            if (!rc) rc = gen_tri(&Keep, cc, c, d, zn, ru->cap_hole, WCUT_TRI_FILL, -1, 0);
-        }
-        if (!rc) { tl_free(R); *R = Keep; Keep.t = NULL; Keep.n = Keep.cap = 0; ref->gen_vol += tl_volume(R) - v0; }
+    /* cavidad interior y ventana (puntos compartidos por todas las caras: aristas exactas) */
+    P3 prx[4], pro[4];   /* rectangulo de la ventana en x = +hw (interior) y x = xhi (exterior) */
+    const double py[4] = {yp0, yp1, yp1, yp0}, pz[4] = {zp0, zp0, zp1, zp1};
+    for (int k = 0; k < 4; k++) { prx[k].p[0] = (float)(cx + hw); pro[k].p[0] = (float)xhi; prx[k].p[1] = pro[k].p[1] = (float)py[k]; prx[k].p[2] = pro[k].p[2] = (float)pz[k]; }
+    P3 cv[8];            /* esquinas de la cavidad: bit0 = x(+), bit1 = y(techo), bit2 = z(trasero) */
+    for (int k = 0; k < 8; k++) { cv[k].p[0] = (float)(cx + ((k & 1) ? hw : -hw)); cv[k].p[1] = (float)((k & 2) ? yc : yfl); cv[k].p[2] = (float)((k & 4) ? zc1 : zc0); }
+    const Loop hc = { c_front, ns, -1, 1 }, hw_ = { c_wall, ns, -1, 1 }, hpx = { prx, 4, -1, 1 }, hpo = { pro, 4, -1, 1 };
+    const Loop *hlc[1] = { &hc }, *hlw[1] = { &hw_ }, *hlp[1] = { &hpx }, *hlo[1] = { &hpo };
+    if (!rc) rc = face_with_holes(&Ff, hlc, 1, &Keep);                                   /* cara frontal con el orificio */
+    if (!rc) rc = face_with_holes(&Fs, hlo, 1, &Keep);                                   /* cara lateral con la ventana */
+    for (int i = 0; i < ns && !rc; i++) {                                                 /* canal cilindrico del cañon */
+        float a[3], b[3], c[3], d[3]; double wn[3] = RAD(i); wn[0] = -wn[0]; wn[1] = -wn[1];
+        CPT(a, Rc, zf, i); CPT(b, Rc, zf, i + 1); CPT(c, Rc, zc0, i + 1); CPT(d, Rc, zc0, i);
+        rc = gen_quad(&Keep, a, b, c, d, wn, ru->cap_hole, WCUT_TRI_FILL);
     }
-    if (!rc) {   /* el cañón */
-        double zrb = zr - 0.0005;
-        for (int i = 0; i < ns && !rc; i++) {
-            float a[3], b[3], c[3], d[3]; double ro_[3] = {cs[i] + cs[(i + 1) % ns], sn[i] + sn[(i + 1) % ns], 0};
-            double ri_[3] = {-ro_[0], -ro_[1], 0}, zm[3] = {0, 0, -1}, zp[3] = {0, 0, 1};
-            CPT(a, Rb, zf, i); CPT(b, Rb, zf, i + 1); CPT(c, Rb, zrb, i + 1); CPT(d, Rb, zrb, i);
-            rc = gen_quad(out, a, b, c, d, ro_, ru->cap_piece, WCUT_TRI_CAP);                    /* pared exterior */
-            float a2[3], b2[3]; CPT(a2, rb, zf, i); CPT(b2, rb, zf, i + 1);
-            if (!rc) rc = gen_quad(out, a, b, b2, a2, zm, ru->cap_piece, WCUT_TRI_CAP);          /* corona de la boca */
-            float c2[3], d2[3]; CPT(c2, rb, zbe, i + 1); CPT(d2, rb, zbe, i);
-            if (!rc) rc = gen_quad(out, a2, b2, c2, d2, ri_, ru->cap_hole, WCUT_TRI_FILL);       /* pared del ánima */
-            float cb[3] = {(float)cx, (float)cy, (float)zbe};
-            if (!rc) rc = gen_tri(out, cb, c2, d2, zm, ru->cap_hole, WCUT_TRI_FILL, -1, 0);      /* fondo del ánima */
-            float cr_[3] = {(float)cx, (float)cy, (float)zrb};
-            if (!rc) rc = gen_tri(out, cr_, c, d, zp, ru->cap_piece, WCUT_TRI_CAP, -1, 0);       /* culata */
+    {
+        const double nz[3] = {0, 0, 1}, nmz[3] = {0, 0, -1}, ny[3] = {0, 1, 0}, nmy[3] = {0, -1, 0}, nx[3] = {1, 0, 0}, nmx[3] = {-1, 0, 0};
+        P3 q[4];
+        q[0] = cv[0]; q[1] = cv[1]; q[2] = cv[3]; q[3] = cv[2];                           /* pared delantera con el orificio del canal */
+        if (!rc) rc = flat_face(&Keep, q, 4, nz, hlw, 1, ru->cap_hole, WCUT_TRI_FILL);
+        q[0] = cv[4]; q[1] = cv[5]; q[2] = cv[7]; q[3] = cv[6];                           /* pared trasera */
+        if (!rc) rc = flat_face(&Keep, q, 4, nmz, NULL, 0, ru->cap_hole, WCUT_TRI_FILL);
+        q[0] = cv[2]; q[1] = cv[3]; q[2] = cv[7]; q[3] = cv[6];                           /* techo */
+        if (!rc) rc = flat_face(&Keep, q, 4, nmy, NULL, 0, ru->cap_hole, WCUT_TRI_FILL);
+        q[0] = cv[0]; q[1] = cv[1]; q[2] = cv[5]; q[3] = cv[4];                           /* suelo */
+        if (!rc) rc = flat_face(&Keep, q, 4, ny, NULL, 0, ru->cap_hole, WCUT_TRI_FILL);
+        q[0] = cv[0]; q[1] = cv[2]; q[2] = cv[6]; q[3] = cv[4];                           /* pared izquierda */
+        if (!rc) rc = flat_face(&Keep, q, 4, nx, NULL, 0, ru->cap_hole, WCUT_TRI_FILL);
+        q[0] = cv[1]; q[1] = cv[3]; q[2] = cv[7]; q[3] = cv[5];                           /* pared derecha con la ventana */
+        if (!rc) rc = flat_face(&Keep, q, 4, nmx, hlp, 1, ru->cap_hole, WCUT_TRI_FILL);
+        for (int k = 0; k < 4 && !rc; k++) {                                              /* paredes de la ventana (hacia su interior) */
+            int k2 = (k + 1) & 3; double wn[3] = {0, 0, 0};
+            if (k == 0) wn[2] = 1; else if (k == 1) wn[1] = -1; else if (k == 2) wn[2] = -1; else wn[1] = 1;
+            rc = gen_quad(&Keep, prx[k].p, prx[k2].p, pro[k2].p, pro[k].p, wn, ru->cap_hole, WCUT_TRI_FILL);
         }
+        (void)nx; (void)nmx;
+    }
+    if (!rc) { tl_free(R); *R = Keep; Keep.t = NULL; Keep.n = Keep.cap = 0; ref->gen_vol += tl_volume(R) - v0; }
+    /* ---- el cañon: tubo ---- */
+    for (int i = 0; i < ns && !rc; i++) {
+        float a[3], b[3], c[3], d[3]; double ro_[3] = RAD(i), ri_[3] = {-ro_[0], -ro_[1], 0}, zm_[3] = {0, 0, -1}, zp_[3] = {0, 0, 1};
+        CPT(a, Ro, zm, i); CPT(b, Ro, zm, i + 1); CPT(c, Ro, zt, i + 1); CPT(d, Ro, zt, i);
+        rc = gen_quad(out, a, b, c, d, ro_, ru->cap_piece, WCUT_TRI_CAP);                          /* pared exterior */
+        float a2[3], b2[3]; CPT(a2, rb, zm, i); CPT(b2, rb, zm, i + 1);
+        if (!rc) rc = gen_quad(out, a, b, b2, a2, zm_, ru->cap_piece, WCUT_TRI_CAP);               /* corona de la boca */
+        float c2[3], d2[3]; CPT(c2, rb, zbe, i + 1); CPT(d2, rb, zbe, i);
+        if (!rc) rc = gen_quad(out, a2, b2, c2, d2, ri_, g->mat_bore, WCUT_TRI_FILL);              /* pared del anima */
+        float cb[3] = {(float)cx, (float)ya, (float)zbe};
+        if (!rc) rc = gen_tri(out, cb, c2, d2, zm_, g->mat_bore, WCUT_TRI_FILL, -1, 0);            /* fondo del anima */
+        float ce[3] = {(float)cx, (float)ya, (float)zt};
+        if (!rc) rc = gen_tri(out, ce, c, d, zp_, ru->cap_piece, WCUT_TRI_CAP, -1, 0);             /* extremo trasero (dentro del capuchon) */
+    }
+    /* ---- capuchon de recamara: prisma de perfil (z,y) trapezoidal; abajo la rampa de alimentacion hacia el cargador ---- */
+    if (!rc) {
+        const double nz[3] = {0, 0, 1}, nmz[3] = {0, 0, -1}, ny[3] = {0, 1, 0}, nx[3] = {1, 0, 0}, nmx[3] = {-1, 0, 0};
+        double nramp[3] = {0, -(zl - zhf), -(yflat - ylow)};      /* normal exterior de la rampa: hacia abajo y adelante */
+        float L[4][3], Rr[4][3];                                  /* perfil izquierdo/derecho: sup. delantero, sup. trasero, inf. trasero, inf. delantero */
+        const double pzv[4] = {zhf, zl, zl, zhf}, pyv[4] = {yt, yt, ylow, yflat};
+        for (int k = 0; k < 4; k++) { L[k][0] = (float)(cx - xh); Rr[k][0] = (float)(cx + xh); L[k][1] = Rr[k][1] = (float)pyv[k]; L[k][2] = Rr[k][2] = (float)pzv[k]; }
+        rc = gen_quad(out, Rr[0], Rr[1], Rr[2], Rr[3], nx, ru->cap_piece, WCUT_TRI_CAP);            /* costado derecho */
+        if (!rc) rc = gen_quad(out, L[0], L[1], L[2], L[3], nmx, ru->cap_piece, WCUT_TRI_CAP);       /* costado izquierdo */
+        if (!rc) rc = gen_quad(out, L[0], L[1], Rr[1], Rr[0], ny, ru->cap_piece, WCUT_TRI_CAP);      /* techo */
+        if (!rc) rc = gen_quad(out, L[0], Rr[0], Rr[3], L[3], nmz, ru->cap_piece, WCUT_TRI_CAP);     /* frente */
+        if (!rc) rc = gen_quad(out, L[3], Rr[3], Rr[2], L[2], nramp, ru->cap_piece, WCUT_TRI_CAP);   /* rampa de alimentacion */
+        /* cara trasera con la boca de la recamara (agujero del calibre de la vaina y profundidad de la vaina) */
+        P3 q[4], hr[48], hb[48]; for (int k = 0; k < 4; k++) memcpy(q[k].p, (k == 0 ? L[1] : k == 1 ? Rr[1] : k == 2 ? Rr[2] : L[2]), 12);
+        for (int i = 0; i < ns; i++) { CPT(hr[i].p, rcs, zl, i); CPT(hb[i].p, rcs, zl - lcs, i); }
+        const Loop hrl = { hr, ns, -1, 1 }, *hlr[1] = { &hrl };
+        if (!rc) rc = flat_face(out, q, 4, nz, hlr, 1, ru->cap_piece, WCUT_TRI_CAP);
+        for (int i = 0; i < ns && !rc; i++) {
+            float a[3], b[3], c[3], d[3]; double ro_[3] = RAD(i), ri_[3] = {-ro_[0], -ro_[1], 0};
+            CPT(a, rcs, zl, i); CPT(b, rcs, zl, i + 1); CPT(c, rcs, zl - lcs, i + 1); CPT(d, rcs, zl - lcs, i);
+            rc = gen_quad(out, a, b, c, d, ri_, g->mat_bore, WCUT_TRI_FILL);                         /* pared de la recamara */
+            float cb[3] = {(float)cx, (float)ya, (float)(zl - lcs)};
+            if (!rc) rc = gen_tri(out, cb, c, d, nz, g->mat_bore, WCUT_TRI_FILL, -1, 0);             /* fondo de la recamara */
+        }
+        (void)nmz; (void)hb;
     }
     #undef CPT
-    loops_free(&L); free(e); free(sel); free(pa); free(sc); free(cO); tl_free(&Keep); tl_free(&F); tl_free(&New);
+    #undef RAD
+    free(ring); tl_free(&Keep); tl_free(&Ff); tl_free(&Fs);
     return rc;
 }
 
@@ -1630,18 +1710,20 @@ static int run_impl(const WLoaded *m, const WCutModel *model, WCutSet *out, doub
         if (!src) { rc = -2; break; }
         TL P = {0}, R = {0};
         if (ru->tube.on) {   /* cañón generado: sin selección; modifica la pieza de referencia */
-            BPiece *ref = find_piece(pc, npc, ru->tube.ref ? ru->tube.ref : "");
-            if (!ref) { rc = -2; break; }
-            rc = gen_tube(ru, ref, &P);
+            BPiece *ref = find_piece(pc, npc, ru->tube.ref ? ru->tube.ref : ""), *fd = find_piece(pc, npc, ru->tube.feed ? ru->tube.feed : "");
+            if (!ref || !fd) { rc = -2; break; }
+            rc = gen_barrel(ru, ref, fd, &P);
             if (!rc) { R = src->tl; src->tl.t = NULL; src->tl.n = src->tl.cap = 0; }   /* el origen no cambia */
             if (!rc) { double gv = tl_volume(&P); BPiece *dst0 = find_piece(pc, npc, ru->name); if (!dst0 && npc < 40) { dst0 = &pc[npc++]; copy_name(dst0->name, ru->name); dst0->rule = ru; } if (dst0) dst0->gen_vol += gv; }
         } else {
             rc = select_split(&src->tl, ru, &P, &R);
+            if (!rc && (ru->shift.x != 0 || ru->shift.y != 0 || ru->shift.z != 0))   /* pieza desplazada rígidamente (p.ej. el supresor, para acoplarlo al extremo del cañón) */
+                for (size_t q = 0; q < P.n; q++) for (int k = 0; k < 3; k++) { P.t[q].v[k].p[0] += ru->shift.x; P.t[q].v[k].p[1] += ru->shift.y; P.t[q].v[k].p[2] += ru->shift.z; }
             if (!rc && ru->mag.on) {
-                BPiece *sl = find_piece(pc, npc, ru->mag.slide ? ru->mag.slide : ""), *ba = find_piece(pc, npc, ru->mag.bore ? ru->mag.bore : "");
-                double v0 = tl_volume(&P);
-                rc = (sl && ba) ? gen_mag(ru, &P, sl, ba) : -2;
-                if (!rc) { BPiece *dst0 = find_piece(pc, npc, ru->name); if (!dst0 && npc < 40) { dst0 = &pc[npc++]; copy_name(dst0->name, ru->name); dst0->rule = ru; dst0->copy = (ru->flags & WCUT_COPY) ? 1 : 0; } if (dst0) dst0->gen_vol += tl_volume(&P) - v0; }
+                BPiece *sl = find_piece(pc, npc, ru->mag.slide ? ru->mag.slide : "");
+                double v0 = tl_volume(&P); Feed fd = {0};
+                rc = sl ? gen_mag(ru, &P, sl, &fd) : -2;
+                if (!rc) { BPiece *dst0 = find_piece(pc, npc, ru->name); if (!dst0 && npc < 40) { dst0 = &pc[npc++]; copy_name(dst0->name, ru->name); dst0->rule = ru; dst0->copy = (ru->flags & WCUT_COPY) ? 1 : 0; } if (dst0) { dst0->gen_vol += tl_volume(&P) - v0; dst0->feed = fd; } }
             }
         }
         if (!rc) {

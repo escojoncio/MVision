@@ -72,28 +72,38 @@ enum {
  *  - altura: el cargador sube hasta la cara inferior de la pieza 'slide' menos 'clear' (holgura) menos lo que la bala
  *    asoma por encima de los labios: el último 'lip_frac' de la altura los labios se estrechan en x ('lip_keep');
  *  - arriba, ranura de alimentación (recorte rectangular de profundidad 'rec_frac' * radio de la vaina, con fondo) y un
- *    cartucho en ella; su calibre sale del ánima del cañón generado ('bore': radio del ánima = radio de la bala; vaina =
+ *    cartucho en ella; su calibre sale del ancho de la corredera ('bore_frac', el mismo que usa el cañón generado: radio del ánima = radio de la bala; vaina =
  *    'case_frac' veces el radio; longitudes en diámetros de vaina). Es volumen cerrado: la base y el cargador forman una
  *    sola cáscara y el cartucho otra, solapada con ella. Materiales: bloques del atlas del propio modelo. */
 typedef struct {
     int on;
-    const char *slide, *bore;
+    const char *slide;
     WVec3 dir;                              /* eje del cargador hacia arriba (unitario) */
+    float bore_frac;                        /* radio de la bala/ánima = bore_frac * ancho de la corredera (el mismo valor que WCutTube.bore_frac) */
     float clear, wall_frac, lip_frac, lip_keep, rec_frac, case_frac, case_len, bullet_len;
     WCutUV mat_body, mat_case, mat_bullet;
 } WCutMag;
 
-/* Generador de cañón: tubo hueco (con ánima) bajo una pieza de referencia. La cara frontal (z mínima) de 'ref' se
- * perfora con un canal cilíndrico del radio exterior (la pieza de referencia gana un orificio con fondo oscuro) y el
- * cañón, un poco más fino, queda dentro con la boca a ras de esa cara. El radio sale de la sección frontal de 'ref':
- * radio = r_frac * (semilado menor); ánima = bore_frac * radio del cañón. */
+/* Generador de cañón (pistolas): todo derivado de la corredera 'ref' y del cartucho del cargador 'feed' (que debe ir antes).
+ *  - corredera: ancho W, pared = wall_frac*W, interior = W - 2 pared; techo interior = cara superior - pared;
+ *  - diámetro exterior = el máximo que cabe: radio = min(semiancho interior, techo interior - eje) menos dos holguras
+ *    ('gap'), de modo que bajo el techo quede una holgura y el canal de la corredera (radio + gap) no toque el techo;
+ *  - ánima = bore_frac*W de radio (el calibre del cartucho del cargador, mismo valor en WCutMag.bore_frac);
+ *  - la boca asoma prot_frac*W por delante de la cara frontal de la corredera (rosca del supresor);
+ *  - capuchón de recámara: prisma de ancho interior - 2 gap cuyo culote (cara trasera, con la boca de la recámara del
+ *    calibre de la vaina y su profundidad) cae donde el cartucho del cargador tiene el culote y cuyo largo es el del
+ *    cartucho completo (queda justo encima de los labios); suelo con rampa hacia el cargador;
+ *  - la corredera gana el canal del cañón (radio exterior + gap) desde su cara frontal, una cavidad interior que cubre
+ *    el recorrido relativo del capuchón ('travel' = recorrido de la corredera) y una ventana en la cara lateral derecha. */
 typedef struct {
     int on;
-    const char *ref;                 /* pieza que ya existe (regla anterior) */
-    float axis_y;                    /* altura del eje (x = centro de la sección frontal) */
-    float r_frac, bore_frac;
-    float length, bore_depth, gap;   /* m: longitud desde la boca hacia +Z; profundidad del ánima; holgura radial */
+    const char *ref;                 /* corredera (pieza que ya existe) */
+    const char *feed;                /* cargador: pieza cuya generación fija el cartucho (regla anterior) */
+    float axis_y;                    /* altura del eje (x = centro de la sección frontal): el del asiento del supresor */
+    float wall_frac, bore_frac, prot_frac;   /* fracciones del ancho de la corredera */
+    float gap, travel;               /* m: holgura radial/axial; recorrido de la corredera */
     int segs;
+    WCutUV mat_bore;                 /* ánima y boca de la recámara (negro) */
 } WCutTube;
 
 typedef struct {
@@ -109,6 +119,7 @@ typedef struct {
     const char *note;     /* decisión de diseño (documentación) */
     WCutMag mag;          /* on: cargador generado sobre la pieza extraída (ver arriba) */
     WCutTube tube;        /* on: la regla genera un cañón en lugar de seleccionar triángulos */
+    WVec3 shift;          /* desplazamiento rígido de la pieza extraída (m) */
 } WCutRule;
 
 /* Correcciones sobre lo que entrega wload (medido sobre los modelos reales):

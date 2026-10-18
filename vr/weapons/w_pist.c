@@ -16,7 +16,7 @@
 #include "wcore.h"
 /* Sin meshes compilados: los modelos se enlazan en ejecución con weapon_bind() por nombre de hueco
  * (pist_mesh_names). Las cotas de abajo son el "layout" del arma (m, espacio arma). */
-#define PIST_BY 0.062f
+#define PIST_BY 0.063f   /* eje del cañón = centro del asiento del supresor (wcut_tables.c AXIS_Y) */
 #define PIST_MAG_HALF 0.0675f
 #define PIST_MAG_CY -0.022291f
 #define PIST_MAG_CZ 0.007675f
@@ -27,10 +27,10 @@
 #define PIST_WELL_Y -0.075f
 #define PIST_WELL_Z 0.021501f
 #define PIST_SEAT_DEPTH 0.121992f
-#define PIST_SUPP_Z -0.2575f
+#define PIST_SUPP_Z -0.21964f   /* asiento del supresor = boca del cañón (asoma 2,64 mm de la corredera: wcut_tables.c PROT_MM) */
 /* boca del cañón (a ras de la cara frontal de la corredera del modelo) y punta del supresor: salen del modelo cortado (wcut) */
-#define PIST_MUZZLE_Z -0.217f
-#define PIST_SUPP_TIP_Z -0.371f
+#define PIST_MUZZLE_Z -0.21964f
+#define PIST_SUPP_TIP_Z -0.37364f
 #define PIST_TRIG_Y 0.024f
 #define PIST_TRIG_Z -0.080f
 #define PIST_HAM_Y 0.050f
@@ -41,6 +41,8 @@
 #define PIST_EJECT_Z -0.010f
 #define PIST_CHARGE_Z 0.020f
 #define PIST_EYE_Z 0.055f
+const float w_pist_slide_travel = PIST_SLIDE_TRAVEL;   /* recorrido de la corredera: lo usa wcut_tables.c (SLIDE_TRAVEL_MM) y lo comprueba test_wcut */
+const float w_pist_supp_seat_z = PIST_SUPP_Z;
 const float w_pist_bare_muzzle_z = PIST_MUZZLE_Z;   /* sin supresor (lo comprueba test_wcut contra la boca del cañón) */
 enum { PIST_MESH_FRAME, PIST_MESH_SLIDE, PIST_MESH_BARREL, PIST_MESH_SUPP, PIST_MESH_TRIGGER,
        PIST_MESH_HAMMER, PIST_MESH_MAG, PIST_MESH_ROUND, PIST_MESH_CASE };
@@ -70,7 +72,7 @@ static const WPart k_parts[P_COUNT] = {
     {"mag", 0, {{0, PIST_MAG_CY, PIST_MAG_CZ}, {PIST_MAG_QX, 0, 0, PIST_MAG_QW}}, PIST_MESH_MAG, WCH_MAG,
         {0, -PIST_MAG_UY, -PIST_MAG_UZ}, 0},
     {"round", 0, {{0, PIST_BY, PIST_CHAMBER_Z}, {0, 0, 0, 1}}, PIST_MESH_ROUND, WCH_ROUND, {0, 100, 0}, 0},
-    {"supp", 0, {{0, PIST_BY, PIST_SUPP_Z}, {0, 0, 0, 1}}, PIST_MESH_SUPP, WCH_CUSTOM0, {0, 100, 0}, 0},
+    {"supp", P_BARREL, {{0, PIST_BY, PIST_SUPP_Z}, {0, 0, 0, 1}}, PIST_MESH_SUPP, WCH_CUSTOM0, {0, 100, 0}, 0},
 };
 
 typedef struct {
