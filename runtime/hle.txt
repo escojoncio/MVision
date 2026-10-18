@@ -4,16 +4,4 @@ VSyncCallback
 ResetCallback
 InterruptCallback
 DMACallback
-ResetGraph
-SetGraphDebug
-DrawSync
-DrawSyncCallback
-SetDispMask
-PutDrawEnv
-PutDispEnv
-DrawOTag
-LoadImage
-StoreImage
-MoveImage
-ClearImage
 longjmp

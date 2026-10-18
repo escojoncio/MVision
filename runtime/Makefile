@@ -3,14 +3,14 @@ GEN ?= ../build/gen
 CC ?= clang
 CFLAGS ?= -O2 -g -Wall -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls
 CPPFLAGS += -I. -I$(GEN)
-RT = mem.c rt.c gte.c bios.c hle.c fiber.c
+RT = $(filter-out headless.c test_%.c wip_%.c,$(wildcard *.c))
 OUT ?= ../build
 
-$(OUT)/headless: $(RT) headless.c $(wildcard $(GEN)/*.c) cpu.h hle.h fiber.h
+$(OUT)/headless: $(RT) headless.c $(wildcard $(GEN)/*.c) $(wildcard *.h)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA) -o $@ $(RT) headless.c $(GEN)/*.c
 
-$(OUT)/test_runtime: $(RT) test_runtime.c cpu.h
+$(OUT)/test_runtime: $(RT) test_runtime.c $(wildcard *.h)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_runtime.c
 

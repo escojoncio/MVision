@@ -8,7 +8,7 @@
 #define A0 c->r[4]
 #define A1 c->r[5]
 
-static uint32_t vsync_cb, drawsync_cb;
+static uint32_t vsync_cb;
 static uint32_t frame;
 HostFrameHook rt_host_frame;
 
@@ -39,23 +39,9 @@ void hle_VSync(Cpu *c) {
 }
 
 void hle_VSyncCallback(Cpu *c) { uint32_t old = vsync_cb; vsync_cb = A0; V0 = old; }
-void hle_ResetCallback(Cpu *c) { vsync_cb = drawsync_cb = 0; V0 = 0; }
+void hle_ResetCallback(Cpu *c) { vsync_cb = 0; V0 = 0; }
 void hle_InterruptCallback(Cpu *c) { V0 = 0; }
 void hle_DMACallback(Cpu *c) { V0 = 0; }
-
-/* --- GPU (stubs) --- */
-void hle_ResetGraph(Cpu *c) { V0 = 0; }
-void hle_SetGraphDebug(Cpu *c) { V0 = 0; }
-void hle_DrawSync(Cpu *c) { V0 = 0; }
-void hle_DrawSyncCallback(Cpu *c) { uint32_t old = drawsync_cb; drawsync_cb = A0; V0 = old; }
-void hle_SetDispMask(Cpu *c) { V0 = 0; }
-void hle_PutDrawEnv(Cpu *c) { V0 = A0; }
-void hle_PutDispEnv(Cpu *c) { V0 = A0; }
-void hle_DrawOTag(Cpu *c) { hle_invoke(c, drawsync_cb, 0); V0 = 0; }
-void hle_LoadImage(Cpu *c) { V0 = 0; }
-void hle_StoreImage(Cpu *c) { V0 = 0; }
-void hle_MoveImage(Cpu *c) { V0 = 0; }
-void hle_ClearImage(Cpu *c) { V0 = 0; }
 
 /* longjmp necesita soporte del recompilador (pila C); por ahora se detecta. */
 void hle_longjmp(Cpu *c) { rt_fatal(c, "longjmp(0x%08x, %d) aún no soportado", A0, A1); }
