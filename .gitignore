@@ -23,3 +23,5 @@ vr/weapons/gen/
 vr/box/build/
 vr/box/build-san/
 build-*/
+missing_funcs.txt
+!runtime/missing_funcs.txt
