@@ -72,5 +72,10 @@ targets:
         # Seguimiento de los mandos Sense (poses de las manos) vía ARKit AccessoryTrackingProvider.
         NSAccessoryTrackingUsageDescription: "Se usa el seguimiento de los mandos para moverte y apuntar con ellos dentro del juego."
         GCSupportsControllerUserInteraction: true
+        # Perfiles de mando admitidos. El de seguimiento espacial es necesario para que el sistema entregue los mandos
+        # rastreables como accesorios (sin él, "no es rastreable"); el extendido cubre mandos normales.
+        GCSupportedGameControllers:
+          - ProfileName: SpatialGamepad
+          - ProfileName: ExtendedGamepad
         # SHA-256 (hex minúsculas) del nombre de carpeta exigido; vacío = cualquier carpeta. Ver FolderAccess.swift.
         MVFolderKey: "$(MV_FOLDER_KEY)"
