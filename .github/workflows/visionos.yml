@@ -144,6 +144,7 @@ jobs:
               -jobs "$(sysctl -n hw.ncpu)" \
               CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
               MV_FOLDER_KEY="$APP_FOLDER_KEY" \
+              MV_BUILD_SHA="${GITHUB_SHA:0:12}" \
               "$@" build > "$RUNNER_TEMP/xcb.log" 2>&1
           }
           # Errores como anotaciones de GitHub (fichero y línea cuando los hay), recortados y sin duplicados.

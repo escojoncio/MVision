@@ -33,6 +33,8 @@ int rt_orig(Cpu *c, const char *name);   /* ejecuta el original; 0 si no existe 
  * bloques decodificados los invalidan: rt_codemap marca granos de 256 B con código. */
 void interp_call(Cpu *c, uint32_t entry);
 void interp_call_raw(Cpu *c, uint32_t entry);
+/* Últimas direcciones de bloque ejecutadas por el intérprete (orden cronológico, hasta 64; diagnóstico). Devuelve cuántas. */
+int interp_recent_blocks(uint32_t *out, int max);
 void interp_flush_all(void);
 extern uint8_t rt_codemap[0x200000u >> 8];
 void rt_code_hit(uint32_t ram_offset);                   /* escritura en un grano marcado (mem.c, interp.c) */

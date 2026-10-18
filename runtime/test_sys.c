@@ -318,6 +318,31 @@ static void t_spu_clock(Cpu *c) {
     EQ(spu_pull(o, 64), 64);
 }
 
+/* Anillo SPSC de salida de la SPU: infraejecución con fundido y silencio hasta el prefill, sin repetir; desbordamiento descarta lo nuevo. */
+static void t_spu_ring(void) {
+    int16_t o[512 * 2];
+    SpuAudioStats s0, s1;
+    int n, it = 0;
+    do { n = spu_pull(o, 512); } while (n == 512 && ++it < 100);   /* vacía hasta la infraejecución */
+    EQ(n < 512, 1);
+    spu_audio_stats(&s1, 0);
+    EQ(s1.underruns >= 1, 1);
+    for (int i = n; i < 512; i++) { /* tras la cola de fundido solo hay ceros */
+        if (i - n >= 128) { EQ(o[i * 2], 0); EQ(o[i * 2 + 1], 0); }
+    }
+    spu_clock(32 * 10);                          /* 320 < prefill (1764): sigue en silencio y NO consume */
+    EQ(spu_pull(o, 64), 0);
+    EQ(spu_ring_level(), 320);
+    for (int k = 0; k < 6; k++) spu_clock(256);  /* 1856 >= prefill */
+    EQ(spu_pull(o, 64), 64);                     /* reanuda */
+    spu_audio_stats(&s0, 0);
+    for (int k = 0; k < 40; k++) spu_clock(512); /* 20480 > 16384: desborda */
+    spu_audio_stats(&s1, 0);
+    EQ(spu_ring_level(), 16384);
+    EQ(s1.dropped > s0.dropped, 1);
+    EQ(s1.produced - s0.produced, 20480);
+}
+
 int main(void) {
     Cpu c = {0};
     c.r[29] = 0x801FFF00;
@@ -329,6 +354,7 @@ int main(void) {
     t_card(&c);
     t_timer_modes(&c);
     t_spu_clock(&c);
+    t_spu_ring();
     t_irq_sin_manejador(&c);
     t_changeth_en_excepcion(&c);
     printf(fails ? "test_sys: %d FALLOS\n" : "test_sys: OK\n", fails);

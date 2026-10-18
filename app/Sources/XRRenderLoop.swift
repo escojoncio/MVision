@@ -147,6 +147,7 @@ final class XRRenderLoop {
         let drawable: LayerRenderer.Drawable?
         drawable = frame.queryDrawable()
         guard let drawable = drawable, drawable.views.count >= viewCount else { return }
+        mv_host_note_render(1)
 
         // Pose en el instante de presentación previsto.
         let d = LayerRenderer.Clock.Instant.epoch.duration(to: drawable.frameTiming.presentationTime)

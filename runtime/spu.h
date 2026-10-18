@@ -28,6 +28,21 @@ extern void (*spu_irq_hook)(void);
 void spu_clock(int frames);
 int spu_pull(int16_t *out_stereo, int frames);
 
+/* Anillo de salida (SPSC sin candados). spu_pull se llama SOLO desde un hilo (el de audio) y nunca bloquea: siempre
+ * rellena `frames`; devuelve los frames reales. Tras una infraejecución sale con un fundido corto a silencio y no
+ * reanuda hasta tener ~2 VBlanks en el anillo (entra con fundido): no se repite ni se solapa audio. */
+uint32_t spu_ring_level(void);   /* frames pendientes en el anillo (cualquier hilo) */
+uint32_t spu_ring_reads(void);   /* contador monótono de frames consumidos (para detectar consumidor parado) */
+typedef struct {
+    uint64_t produced;   /* frames escritos al anillo (o descartados) por la SPU */
+    uint64_t consumed;   /* frames reales entregados al host */
+    uint64_t dropped;    /* descartados por anillo lleno (sobreejecución) */
+    uint64_t silence;    /* frames de silencio/fundido entregados por falta de datos */
+    uint32_t underruns;  /* eventos de infraejecución */
+    uint32_t level, level_min, level_max;   /* nivel actual y extremos desde el último reset */
+} SpuAudioStats;
+void spu_audio_stats(SpuAudioStats *s, int reset_minmax);
+
 /* Solo para pruebas: spu_render/spu_advance avanzan la SPU fuera del reloj virtual; un host
  * en ejecución real debe usar spu_pull. */
 /* Genera `frames` muestras estéreo intercaladas (L,R) a 44100 Hz y avanza la SPU. */

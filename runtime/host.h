@@ -50,12 +50,17 @@ uint32_t mv_host_frame_count(void);
 
 /* Copia el último frame publicado a dst (RGBA8, filas contiguas w*4 bytes) si es más nuevo que
  * last_seq. Devuelve su número de secuencia (>0) o 0 si no hay frame nuevo o dst_size no basta
- * (usar MV_HOST_FB_BYTES). Thread-safe (doble búfer interno + mutex). */
+ * (usar MV_HOST_FB_BYTES). Thread-safe sin retener nada del hilo de emulación (triple búfer interno por intercambio de índices). */
 uint32_t mv_host_framebuffer(uint8_t *dst, size_t dst_size, int *w, int *h, uint32_t last_seq);
 
 /* Extrae `frames` muestras estéreo intercaladas (L,R) int16 a 44100 Hz; rellena con ceros lo que
- * falte (pausa, arranque). Devuelve los frames reales de audio. Llamable desde el hilo de audio. */
+ * falte (pausa, arranque, emulación más lenta que el tiempo real: fundido corto a silencio, nunca repite). Devuelve los
+ * frames reales de audio. Llamable desde el hilo de audio de tiempo real: no toma candados ni espera. Un solo consumidor. */
 int mv_host_audio_pull(int16_t *out_stereo, int frames);
+
+/* Cuenta un frame dibujado por la app (kind 0 = ventana plana, 1 = espacio inmersivo): el latido del registro (cada 5 s)
+ * lo muestra como frames por segundo. Thread-safe y sin candados. */
+void mv_host_note_render(int kind);
 
 /* Estado del mando 1. buttons activo-alto en orden PS1 (0 SELECT, 1 L3, 2 R3, 3 START, 4 ARRIBA,
  * 5 DERECHA, 6 ABAJO, 7 IZQUIERDA, 8 L2, 9 R2, 10 L1, 11 R1, 12 TRIANGULO, 13 CIRCULO, 14 CRUZ,

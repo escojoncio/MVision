@@ -2,9 +2,10 @@
  * hardware. 24 voces ADPCM (envolvente ADSR, pitch, modulación por pitch, ruido), reverb a
  * 22050 Hz, IRQ por dirección, transferencias manuales y DMA canal 4, captura en RAM de
  * sonido y entrada CD-XA.
- * Hilos: el juego escribe registros y el host llama a spu_render desde su hilo de audio;
- * un mutex serializa ambos lados. */
+ * Hilos: el estado de la SPU solo lo toca el hilo de emulación (bajo un mutex que protege además las pruebas que
+ * llaman a spu_render); el hilo de audio del sistema solo usa spu_pull, que no toma ningún candado (anillo SPSC). */
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include "spu.h"
@@ -364,36 +365,137 @@ int spu_render(int16_t *out, int frames) {
     return frames;
 }
 
-/* ---- Reloj virtual: la SPU avanza con la CPU y deja la salida en un anillo para el host ---- */
-#define OUT_RING 16384
+/* ---- Reloj virtual: la SPU avanza con la CPU y deja la salida en un anillo SPSC para el host ----
+ * Productor: el hilo de emulación (spu_clock, bajo MX porque toca el estado de la SPU). Consumidor: el hilo de audio del
+ * sistema (spu_pull), que NO toma ningún candado ni espera a nadie: solo atómicos. Contadores monótonos de frames
+ * (módulo 2^32) y tamaño potencia de 2. Si el anillo se llena se descartan las muestras NUEVAS (el productor no puede tocar
+ * la lectura); en la práctica no ocurre porque el host acompasa la emulación al nivel del anillo (host.c, pace()). */
+#define OUT_RING 16384u
+#define OUT_MASK (OUT_RING - 1u)
+#define FADE_FRAMES 128u                 /* fundido al quedarse sin datos / al volver */
+#define PREFILL_FRAMES 1764u             /* 2 VBlanks PAL: nivel mínimo para reanudar tras una infraejecución */
 static int16_t out_ring[OUT_RING * 2];
-static int out_rd, out_cnt;   /* posición de lectura y frames disponibles; protegidos por MX */
+static _Alignas(64) _Atomic uint32_t out_wr;   /* línea de caché propia por índice: productor y consumidor no comparten línea */
+static _Alignas(64) _Atomic uint32_t out_rd;
+/* Estadísticas (escritas por un solo lado cada una, leídas con relaxed) */
+static _Atomic uint64_t st_prod, st_drop;          /* productor */
+static _Atomic uint64_t st_cons, st_sil;           /* consumidor */
+static _Atomic uint32_t st_under;
+static _Atomic uint32_t st_min = 0xFFFFFFFFu, st_max;
+#ifdef MV_SPU_SEQTAG
+static uint32_t seqtag;   /* solo pruebas: sustituye la salida por un contador para detectar saltos/repeticiones */
+#endif
 
 void spu_clock(int frames) {
     int16_t tmp[2];
     pthread_mutex_lock(&MX);
+    uint32_t wr = atomic_load_explicit(&out_wr, memory_order_relaxed);
+    uint32_t rd = atomic_load_explicit(&out_rd, memory_order_acquire);
+    uint64_t dropped = 0;
     for (int i = 0; i < frames; i++) {
         render_one(tmp);
         wav_put(tmp, 1);
-        if (out_cnt == OUT_RING) { out_rd = (out_rd + 1) % OUT_RING; out_cnt--; } /* descarta lo más antiguo */
-        int w = (out_rd + out_cnt) % OUT_RING;
-        out_ring[w * 2] = tmp[0]; out_ring[w * 2 + 1] = tmp[1];
-        out_cnt++;
+#ifdef MV_SPU_SEQTAG
+        { uint32_t t = ++seqtag; tmp[0] = (int16_t)(t & 0xFFFF); tmp[1] = (int16_t)(t >> 16); }
+#endif
+        if (wr - rd >= OUT_RING) {   /* lleno: se relee rd por si el consumidor avanzó */
+            rd = atomic_load_explicit(&out_rd, memory_order_acquire);
+            if (wr - rd >= OUT_RING) { dropped++; continue; }
+        }
+        out_ring[(wr & OUT_MASK) * 2] = tmp[0];
+        out_ring[(wr & OUT_MASK) * 2 + 1] = tmp[1];
+        wr++;
     }
+    atomic_store_explicit(&out_wr, wr, memory_order_release);
     pthread_mutex_unlock(&MX);
+    atomic_fetch_add_explicit(&st_prod, (uint64_t)frames, memory_order_relaxed);
+    if (dropped) atomic_fetch_add_explicit(&st_drop, dropped, memory_order_relaxed);
+    uint32_t lvl = wr - rd;
+    if (lvl > atomic_load_explicit(&st_max, memory_order_relaxed)) atomic_store_explicit(&st_max, lvl, memory_order_relaxed);
 }
 
+uint32_t spu_ring_level(void) {
+    /* rd ANTES que wr: rd nunca supera a wr, así que con el orden inverso un consumidor rápido daría una resta negativa (~4G)
+     * a los hilos que no son el productor (vigilante). */
+    uint32_t rd = atomic_load_explicit(&out_rd, memory_order_acquire);
+    return atomic_load_explicit(&out_wr, memory_order_acquire) - rd;
+}
+uint32_t spu_ring_reads(void) { return atomic_load_explicit(&out_rd, memory_order_relaxed); }
+
+/* Consumidor (hilo de audio de tiempo real): sin candados, sin esperas, sin memoria dinámica. Siempre rellena `frames`.
+ * Si faltan datos: las muestras reales que queden + cola de fundido (último valor -> 0 en FADE_FRAMES) + ceros, y se queda
+ * en silencio hasta que el anillo vuelva a PREFILL_FRAMES (histéresis: no repite ni tartamudea); la vuelta entra con fundido. */
+static int pl_muted = 1;            /* solo lo toca el hilo consumidor; empieza en silencio hasta el primer prefill */
+static int pl_fade_in;              /* frames de fundido de entrada restantes (0 = ninguno) */
+static int16_t pl_last[2];
 int spu_pull(int16_t *out, int frames) {
-    pthread_mutex_lock(&MX);
-    int n = frames < out_cnt ? frames : out_cnt;
-    for (int i = 0; i < n; i++) {
-        int r = (out_rd + i) % OUT_RING;
-        out[i * 2] = out_ring[r * 2]; out[i * 2 + 1] = out_ring[r * 2 + 1];
+    if (frames <= 0) return 0;
+    uint32_t rd = atomic_load_explicit(&out_rd, memory_order_relaxed);
+    uint32_t wr = atomic_load_explicit(&out_wr, memory_order_acquire);
+    uint32_t avail = wr - rd;
+    int n = 0;
+    if (pl_muted) {
+        if (avail > 4u * PREFILL_FRAMES) {   /* audio viejo acumulado sin consumidor (arranque): se salta a un nivel de ~2 VBlanks */
+            rd += avail - PREFILL_FRAMES;
+            avail = PREFILL_FRAMES;
+            atomic_store_explicit(&out_rd, rd, memory_order_release);
+        }
+        if (avail >= PREFILL_FRAMES) { pl_muted = 0; pl_fade_in = (int)FADE_FRAMES; }
     }
-    out_rd = (out_rd + n) % OUT_RING; out_cnt -= n;
-    pthread_mutex_unlock(&MX);
-    for (int i = n; i < frames; i++) out[i * 2] = out[i * 2 + 1] = 0;
+    if (!pl_muted) {
+        n = (uint32_t)frames < avail ? frames : (int)avail;
+        for (int i = 0; i < n; i++) {
+            uint32_t r = (rd + (uint32_t)i) & OUT_MASK;
+            int32_t l = out_ring[r * 2], rr = out_ring[r * 2 + 1];
+#ifndef MV_SPU_SEQTAG
+            if (pl_fade_in > 0) {
+                int32_t g = (int32_t)(FADE_FRAMES - (uint32_t)pl_fade_in);   /* 0..FADE-1 */
+                l = l * g / (int32_t)FADE_FRAMES; rr = rr * g / (int32_t)FADE_FRAMES;
+                pl_fade_in--;
+            }
+#endif
+            out[i * 2] = (int16_t)l; out[i * 2 + 1] = (int16_t)rr;
+        }
+        if (n > 0) { pl_last[0] = out[(n - 1) * 2]; pl_last[1] = out[(n - 1) * 2 + 1]; }
+        atomic_store_explicit(&out_rd, rd + (uint32_t)n, memory_order_release);
+        if (n < frames) {   /* infraejecución: cola de fundido y a silencio */
+            pl_muted = 1; pl_fade_in = 0;
+            atomic_fetch_add_explicit(&st_under, 1, memory_order_relaxed);
+            int k = n;
+#ifndef MV_SPU_SEQTAG
+            for (int j = 0; k < frames && j < (int)FADE_FRAMES; j++, k++) {
+                int32_t g = (int32_t)FADE_FRAMES - 1 - j;
+                out[k * 2] = (int16_t)(pl_last[0] * g / (int32_t)FADE_FRAMES);
+                out[k * 2 + 1] = (int16_t)(pl_last[1] * g / (int32_t)FADE_FRAMES);
+            }
+#endif
+            for (; k < frames; k++) out[k * 2] = out[k * 2 + 1] = 0;
+            pl_last[0] = pl_last[1] = 0;
+        }
+    } else {
+        for (int i = 0; i < frames; i++) out[i * 2] = out[i * 2 + 1] = 0;
+    }
+    atomic_fetch_add_explicit(&st_cons, (uint64_t)n, memory_order_relaxed);
+    if (n < frames) atomic_fetch_add_explicit(&st_sil, (uint64_t)(frames - n), memory_order_relaxed);
+    uint32_t lvl = avail - (uint32_t)n;
+    if (lvl < atomic_load_explicit(&st_min, memory_order_relaxed)) atomic_store_explicit(&st_min, lvl, memory_order_relaxed);
     return n;
+}
+
+void spu_audio_stats(SpuAudioStats *s, int reset_minmax) {
+    s->produced = atomic_load_explicit(&st_prod, memory_order_relaxed);
+    s->consumed = atomic_load_explicit(&st_cons, memory_order_relaxed);
+    s->dropped = atomic_load_explicit(&st_drop, memory_order_relaxed);
+    s->silence = atomic_load_explicit(&st_sil, memory_order_relaxed);
+    s->underruns = atomic_load_explicit(&st_under, memory_order_relaxed);
+    s->level = spu_ring_level();
+    uint32_t mn = atomic_load_explicit(&st_min, memory_order_relaxed);
+    s->level_min = mn == 0xFFFFFFFFu ? s->level : mn;
+    s->level_max = atomic_load_explicit(&st_max, memory_order_relaxed);
+    if (reset_minmax) {
+        atomic_store_explicit(&st_min, 0xFFFFFFFFu, memory_order_relaxed);
+        atomic_store_explicit(&st_max, 0, memory_order_relaxed);
+    }
 }
 
 void spu_advance(int frames) {

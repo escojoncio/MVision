@@ -35,6 +35,7 @@
 #include <string.h>
 #include "cpu.h"
 #include "hlebind.h"
+#include "disc_img.h"
 #include "sys.h"
 
 #if !defined(__BYTE_ORDER__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
@@ -499,7 +500,7 @@ int hle_bind(const char *json, size_t len, uint32_t base, uint32_t size, uint32_
 
 int hle_bind_file(const char *path, uint32_t base, uint32_t size, uint32_t entry) {
     FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "[hle] no se puede abrir el fichero de firmas '%s'\n", path); return -1; }
+    if (!f) { fprintf(stderr, "[hle] no se puede abrir el fichero de firmas '%s'\n", mv_base(path)); return -1; }
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);

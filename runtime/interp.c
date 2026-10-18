@@ -463,6 +463,16 @@ static uint32_t ring[256];
 static unsigned ringpos;
 void interp_dump_ring(void) { for (unsigned i = ringpos > 64 ? ringpos - 64 : 0; i < ringpos; i++) fprintf(stderr, "  ring %08x %s\n", ring[i & 255], rt_name(ring[i & 255])); }
 #endif
+/* Anillo siempre activo de las últimas direcciones de bloque ejecutadas (diagnóstico del vigilante del host; lectura racy aceptada). */
+#define WD_RING 64u
+static volatile uint32_t wd_ring[WD_RING];
+static volatile unsigned wd_pos;
+int interp_recent_blocks(uint32_t *out, int max) {
+    unsigned p = wd_pos;
+    int n = 0;
+    for (unsigned i = p > WD_RING ? p - WD_RING : 0; i < p && n < max; i++) out[n++] = wd_ring[i & (WD_RING - 1)];
+    return n;
+}
 static Block *lookup_slow(Cpu *c, uint32_t pc, uint32_t ret) {
     (void)c;
     if (pc == SENTINEL || pc == ret) return NULL;
@@ -518,6 +528,7 @@ dispatch:
         if (!b) goto leave;
     }
 enter:
+    wd_ring[wd_pos & (WD_RING - 1)] = b->pc; wd_pos++;
 #ifdef INTERP_RING
     ring[ringpos++ & 255] = b->pc;
 #endif
