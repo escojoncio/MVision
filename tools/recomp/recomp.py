@@ -366,14 +366,23 @@ class Func:
             return f"{self.sym(t)}(c); return;"
         return f"rt_jump(c, 0x{t:08x}u); return;"
 
-    def call(self, t, ret):
+    def call(self, t, ret=None):
+        """Llamada a t. El registro de enlace se fija aparte (ver link()): en el hardware se escribe
+        ANTES de ejecutar el delay slot, así que el slot lo ve (y si lo escribe, gana el slot).
+        Si se pasa ret (uso suelto, sin slot) se antepone la escritura de ra."""
+        pre = f"c->r[31] = 0x{ret:08x}u; " if ret is not None else ""
         if t in SETJMP:
             # setjmp del juego: punto de reanudación en el marco C actual (ver runtime/rt.c rt_sj_*).
-            return (f"c->r[31] = 0x{ret:08x}u; if (setjmp(*rt_sj_slot(c, c->r[4]))) rt_sj_resumed(c); "
+            return (f"{pre}if (setjmp(*rt_sj_slot(c, c->r[4]))) rt_sj_resumed(c); "
                     f"else {self.sym(t) or 'f_%08x' % t}(c);")
         if self.sym(t):
-            return f"c->r[31] = 0x{ret:08x}u; {self.sym(t)}(c);"
-        return f"c->r[31] = 0x{ret:08x}u; rt_call(c, 0x{t:08x}u);"
+            return f"{pre}{self.sym(t)}(c);"
+        return f"{pre}rt_call(c, 0x{t:08x}u);"
+
+    @staticmethod
+    def link(n, ret):
+        """Escritura del registro de enlace (ra o rd de jalr) previa al delay slot."""
+        return setr(n, f"0x{ret:08x}u")
 
     def simple(self, a):
         w = self.exe.word(a)
@@ -408,7 +417,7 @@ class Func:
                     body = [ds, self.goto_or_tail(t, a)]
                 elif op == 3:
                     t = (a & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
-                    body = [ds, self.call(t, a + 8)]
+                    body = [self.link(31, a + 8), ds, self.call(t)]
                 elif op == 0 and f == 8:  # jr
                     if rs(w) == 31:
                         body = [f"tgt = {reg(31)};", ds, "return;"]
@@ -417,15 +426,14 @@ class Func:
                     else:
                         body = [f"tgt = {reg(rs(w))};", ds, "rt_jump(c, tgt); return;"]
                 elif op == 0 and f == 9:  # jalr
-                    body = [f"tgt = {reg(rs(w))};", ds,
-                            setr(rd(w), f"0x{a + 8:08x}u"), "rt_call(c, tgt);"]
+                    body = [f"tgt = {reg(rs(w))};", self.link(rd(w), a + 8), ds, "rt_call(c, tgt);"]
                 else:
                     t = branch_target(a, w)
                     link = op == 1 and rt(w) in (16, 17)
                     pre = [f"{{ int cond = {cond_expr(a, w)};"]
                     if link:
                         pre.append(f"c->r[31] = 0x{a + 8:08x}u;")
-                    tk = self.call(t, a + 8) if link else self.goto_or_tail(t, a)
+                    tk = self.call(t) if link else self.goto_or_tail(t, a)
                     body = pre + [ds, f"if (cond) {{ {tk} }} }}"]
                 L.append(f"    {lab}" + " ".join(x for x in body if x))
                 # El delay slot también puede ser destino de otro salto (raro): etiqueta propia

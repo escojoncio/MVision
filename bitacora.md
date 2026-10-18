@@ -339,3 +339,8 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - Captura: `GpuVtx.vvalid` (posición de vista fiable: incluye SAT/BEHIND/DERIVED) y `vflags` (SAT 1, BEHIND 2, AMBIG 4, DERIVED 8); `fvalid` conserva su semántica (ahora SAT => fvalid=0). `cap_derive` reconstruye las 2 esquinas no proyectadas de sprites (esquinas reales no AMBIG). Sala: parciales 50 -> 3,7 por frame; polígonos con ratio de z >1,5 entre vértices 57 -> 2.
 - Contrato para vr/scene (PENDIENTE de aplicar): polígono 3D = todos vvalid; BEHIND -> recortar contra plano cercano; SAT -> reproyectar con vx,vy,vz; descartar si AMBIG junto a SAT/BEHIND.
 - `make test`, test_geom (también ASan/UBSan con gcc), `ref_selftest 3000` OK.
+
+## 29. Recompilador: enlace antes del delay slot (`tools/recomp/recomp.py`) — 2026-10-18
+
+- jal: `link(31,a+8)`, slot, llamada; jalr: tgt=rs, link(rd), slot, rt_call (rd==rs y rd==0 correctos); bltzal/bgezal: cond antes del slot, ra SIEMPRE, slot, llamada si cond. `Func.call(t, ret=None)` ya no fija ra; SETJMP intacto. Igual que interp.c (§26).
+- EXE principal: 0 funciones cambian de comportamiento (ningún slot toca el registro de enlace); frames 12/12 idénticos. Test: `python3 tools/recomp/test_recomp.py` (10 casos).
