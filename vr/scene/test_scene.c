@@ -14,7 +14,7 @@ static GpuDrawList dl;
 
 static void reset(void) { memset(ops, 0, sizeof ops); memset(&dl, 0, sizeof dl); dl.ops = ops; }
 static GpuOp *add(int type) { GpuOp *o = &ops[dl.nops++]; o->type = (uint8_t)type; return o; }
-static void setv3(GpuVtx *v, float x, float y, float z) { v->fvalid = 1; v->vx = x; v->vy = y; v->vz = z; v->fz = z; }
+static void setv3(GpuVtx *v, float x, float y, float z) { v->fvalid = 1; v->vvalid = 1; v->vx = x; v->vy = y; v->vz = z; v->fz = z; }
 static GpuOp *poly3(float a[3], float b[3], float c[3], int semi) {
     GpuOp *o = add(GPU_OP_POLY);
     o->nv = 3; o->flags = (uint16_t)(GPU_F_TEXTURED | (semi ? GPU_F_SEMI : 0)); o->abr = 1; o->tp = 1; o->tx = 320; o->ty = 256; o->clx = 48; o->cly = 500;
@@ -147,7 +147,7 @@ static void test_classes_and_events(void) {
     { GpuOp *o = add(GPU_OP_FILL); o->rx = 0; o->ry = 0; o->rw = 16; o->rh = 16; }   /* op7 evento */
     poly3(b, c, a, 0);                                   /* op8 */
     { GpuOp *o = add(GPU_OP_POLY); o->nv = 3; o->flags = 0; /* op9 parcialmente 3D */
-      setv3(&o->v[0], 0, 0, 2000); setv3(&o->v[1], 100, 0, 2000); o->v[2].fvalid = 0; }
+      setv3(&o->v[0], 0, 0, 2000); setv3(&o->v[1], 100, 0, 2000); o->v[2].fvalid = 0; o->v[2].vvalid = 0; }
     VrSceneOpts o = vr_scene_opts_default();
     VrScene s;
     CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0, "build");
@@ -218,6 +218,216 @@ static void test_drops(void) {
     CHECK(vr_scene_build(NULL, &bs, &o, &s) < 0 && vr_scene_build(&empty, &bs, &o, NULL) < 0, "nulos");
     VrSceneOpts o2 = o; o2.scale = 0.002f;
     CHECK(vr_scene_build(&dl, &bs, &o2, &s) == 0 && s.stats.n_tris3d == 1 && near_f(s.scale, 0.002f, 1e-9f), "escala");
+    vr_scene_release();
+}
+
+
+/* ---- recorte cercano (contrato §28) ---- */
+static GpuOp *polyN(int nv, const float P[4][3], const uint8_t fl[4], int gour) {
+    GpuOp *o = add(GPU_OP_POLY);
+    o->nv = (uint8_t)nv; o->flags = (uint16_t)(GPU_F_TEXTURED | (gour ? GPU_F_GOURAUD : 0)); o->tp = 1; o->tx = 320; o->ty = 256;
+    for (int i = 0; i < nv; i++) {
+        setv3(&o->v[i], P[i][0], P[i][1], P[i][2]);
+        o->v[i].vflags = fl[i];
+        if (fl[i]) o->v[i].fvalid = 0;
+        o->v[i].u = (uint8_t)(20 * i); o->v[i].v = (uint8_t)(10 * i + 3);
+        o->v[i].r = (uint8_t)(40 * i + 10); o->v[i].g = 100; o->v[i].b = (uint8_t)(200 - 30 * i);
+    }
+    return o;
+}
+
+static void test_near_clip(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    VrSceneOpts o = vr_scene_opts_default();
+    o.origin_mode = 1;
+    VrScene s;
+    const float zn = o.near_units;
+    /* a) triángulo con 1 vértice detrás -> quad (2 triángulos); con 2 detrás -> 1 triángulo; con 3 -> 0 */
+    for (int nb = 0; nb <= 3; nb++) {
+        reset();
+        float P[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, 2000}, {0, 0, 0}};
+        uint8_t fl[4] = {0, 0, 0, 0};
+        for (int i = 0; i < nb; i++) { P[2 - i][2] = -400 - 100 * i; fl[2 - i] = GPU_VF_BEHIND; }
+        polyN(3, P, fl, 1);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0, "build clip");
+        uint32_t want = nb == 0 ? 1 : nb == 1 ? 2 : nb == 2 ? 1 : 0;
+        CHECK(s.stats.n_tris3d == want && s.nv == 3 * want, "clip %d detrás: tris %u (esperado %u)", nb, s.stats.n_tris3d, want);
+        CHECK(s.stats.n_poly_behind == (nb ? 1u : 0u) && s.stats.drop_behind == (nb == 3 ? 1u : 0u) && s.stats.n_clipped == (nb && nb < 3 ? 1u : 0u),
+              "stats clip %d: behind %u dropb %u clipped %u", nb, s.stats.n_poly_behind, s.stats.drop_behind, s.stats.n_clipped);
+        /* todo vértice emitido está delante del plano cercano (en VR: z <= -zn*escala; cámara mira a -Z desde z=0,5) */
+        for (uint32_t i = 0; i < s.nv; i++) {
+            float zv = (s.eye_vr[2] - s.v[i].pos[2]) / s.scale;   /* profundidad de vista */
+            CHECK(zv >= zn - 0.05f, "vértice recortado a z=%f < near", zv);
+        }
+    }
+    /* b) interpolación: arista (0,0,2000)-(0,0,-1000) cruza z=24 en s=(2000-24)/3000; uv/color lineales; posición exacta */
+    {
+        reset();
+        float P[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, -1000}, {0, 0, 0}};
+        uint8_t fl[4] = {0, 0, GPU_VF_BEHIND, 0};
+        polyN(3, P, fl, 1);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.nv == 6, "build interp");
+        float sp = (2000.0f - zn) / 3000.0f;
+        int found = 0;
+        for (uint32_t i = 0; i < s.nv; i++) {
+            float zv = (s.eye_vr[2] - s.v[i].pos[2]) / s.scale;
+            if (!near_f(zv, zn, 0.05f)) continue;
+            /* vértice en la arista 0->2: x=0, y=1000*sp (vista, abajo=+y => VR y = 3 - ...) */
+            float yv = (3.0f - s.v[i].pos[1]) / s.scale;
+            if (near_f(s.v[i].pos[0], 0, 1e-4f) && near_f(yv, 1000 * sp, 0.05f)) {
+                found++;
+                CHECK(near_f(s.v[i].uv[0], 40 * sp, 1e-3f) && near_f(s.v[i].uv[1], 3 + (23 - 3) * sp, 1e-3f), "uv interpolado %f %f", s.v[i].uv[0], s.v[i].uv[1]);
+                CHECK((s.v[i].rgba & 255) == (uint32_t)lrintf(10 + (90 - 10) * sp) && ((s.v[i].rgba >> 16) & 255) == (uint32_t)lrintf(200 + (140 - 200) * sp), "color interpolado %08x", s.v[i].rgba);
+            }
+        }
+        CHECK(found >= 1, "vértice de la arista 0-2 no aparece (%d)", found);
+    }
+    /* c) quad con 1 vértice detrás: dos triángulos (0,1,2),(1,2,3); el vértice 3 detrás recorta solo el segundo (1 vértice atrás -> 2 tris) */
+    {
+        reset();
+        float P[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, 2000}, {1000, 1000, -300}};
+        uint8_t fl[4] = {0, 0, 0, GPU_VF_BEHIND};
+        polyN(4, P, fl, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 3 && s.stats.n_clipped == 1, "quad 1 detrás: tris %u clip %u", s.stats.n_tris3d, s.stats.n_clipped);
+        /* con 2 detrás (2 y 3): tri0 pierde 1 vértice (->2), tri1 pierde 2 (->1): total 3 */
+        reset();
+        float P2[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, -300}, {1000, 1000, -300}};
+        uint8_t fl2[4] = {0, 0, GPU_VF_BEHIND, GPU_VF_BEHIND};
+        polyN(4, P2, fl2, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 3 && s.stats.n_clipped == 2, "quad 2 detrás: tris %u clip %u", s.stats.n_tris3d, s.stats.n_clipped);
+    }
+    /* d) sin BEHIND: la misma geometría con vz<near se descarta como antes (salida previa) */
+    {
+        reset();
+        float P[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, -300}, {0, 0, 0}};
+        uint8_t fl[4] = {0, 0, 0, 0};
+        polyN(3, P, fl, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.drop_near == 1 && s.stats.n_clipped == 0, "sin BEHIND: drop_near");
+        o.clip_all_near = 1;
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 2 && s.stats.n_clipped == 1, "clip_all_near");
+        o.clip_all_near = 0;
+    }
+    /* e) AMBIG: solo -> aceptado; con SAT o BEHIND -> descartado; DERIVED aceptado salvo drop_derived */
+    {
+        const float P[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, 2000}, {0, 0, 0}};
+        uint8_t fa[4] = {GPU_VF_AMBIG, 0, 0, 0}, fb[4] = {GPU_VF_AMBIG, GPU_VF_SAT, 0, 0}, fc[4] = {GPU_VF_AMBIG, 0, GPU_VF_BEHIND, 0},
+                fd[4] = {GPU_VF_DERIVED, 0, 0, 0}, fs[4] = {GPU_VF_SAT, 0, 0, 0};
+        reset(); polyN(3, P, fa, 0); CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.drop_ambig == 0, "AMBIG solo");
+        reset(); polyN(3, P, fb, 0); CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.drop_ambig == 1, "AMBIG+SAT");
+        reset(); { float Q[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, -200}, {0, 0, 0}}; polyN(3, Q, fc, 0); }
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.drop_ambig == 1, "AMBIG+BEHIND");
+        reset(); polyN(3, P, fd, 0); CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 1, "DERIVED aceptado");
+        o.drop_derived = 1; CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.drop_derived == 1, "DERIVED descartado"); o.drop_derived = 0;
+        /* SAT usa vx,vy,vz (los x,y enteros no intervienen) */
+        reset(); { GpuOp *g = polyN(3, P, fs, 0); g->v[0].x = 511; g->v[0].y = -1024; }
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 1 && near_f(s.v[0].pos[0], 0, 1.01f), "SAT con vx,vy,vz");
+    }
+    /* f) sin BEHIND/SAT/AMBIG/DERIVED: salida idéntica bit a bit a la previa (fvalid) y vvalid sin fvalid cuenta igual */
+    {
+        reset();
+        const float P[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, 2500}, {1100, 900, 2300}};
+        uint8_t z[4] = {0, 0, 0, 0};
+        polyN(4, P, z, 1);
+        VrScene s1, s2;
+        CHECK(vr_scene_build(&dl, &bs, &o, &s1) == 0 && s1.nv == 6, "build previo");
+        size_t bytes = s1.nv * sizeof(VrVtx);
+        VrVtx *copy = malloc(bytes); memcpy(copy, s1.v, bytes);
+        VrSceneOpts o2 = o; o2.clip_all_near = 1; o2.drop_derived = 1; /* no afectan sin BEHIND/DERIVED y con vz>near */
+        CHECK(vr_scene_build(&dl, &bs, &o2, &s2) == 0 && s2.nv == s1.nv && memcmp(copy, s2.v, bytes) == 0, "salida idéntica sin BEHIND");
+        /* y coincide con la fórmula previa: uv enteros, color en rango */
+        for (uint32_t i = 0; i < s1.nv; i++) CHECK(s1.v[i].uv[0] == floorf(s1.v[i].uv[0]) && s1.v[i].uv[1] == floorf(s1.v[i].uv[1]), "uv enteros");
+        free(copy);
+    }
+    /* g) fuzz: vértices aleatorios con BEHIND; nunca vértices detrás del plano, sin NaN, nº de triángulos <= 2 por triángulo de entrada */
+    srand(11);
+    for (int it = 0; it < 3000; it++) {
+        reset();
+        int nv = 3 + (rand() & 1);
+        float P[4][3]; uint8_t fl[4];
+        for (int k = 0; k < 4; k++) {
+            P[k][0] = (float)(rand() % 4001 - 2000); P[k][1] = (float)(rand() % 4001 - 2000); P[k][2] = (float)(rand() % 4001 - 1500);
+            fl[k] = P[k][2] <= 0 ? GPU_VF_BEHIND : 0;
+        }
+        polyN(nv, P, fl, rand() & 1);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d <= (nv == 4 ? 4u : 2u), "fuzz n=%u", s.stats.n_tris3d);
+        for (uint32_t i = 0; i < s.nv; i++) {
+            float zv = (s.eye_vr[2] - s.v[i].pos[2]) / s.scale;
+            CHECK(isfinite(s.v[i].pos[0]) && isfinite(s.v[i].pos[1]) && zv >= zn - 0.5f, "fuzz vértice z=%f", zv);
+            CHECK(isfinite(s.v[i].uv[0]) && s.v[i].uv[0] >= -0.01f && s.v[i].uv[0] <= 60.01f, "fuzz uv %f", s.v[i].uv[0]);
+        }
+    }
+    vr_scene_release();
+}
+
+
+/* ---- clase 3: filtro de pantalla ---- */
+static GpuOp *rect2d(int x, int y, int w, int h, int u, int v, uint16_t flags, int tp, int tx, int ty, uint8_t r, uint8_t g, uint8_t b) {
+    GpuOp *o = add(GPU_OP_RECT);
+    o->v[0].x = (int16_t)x; o->v[0].y = (int16_t)y; o->v[0].u = (uint8_t)u; o->v[0].v = (uint8_t)v; o->v[0].r = r; o->v[0].g = g; o->v[0].b = b;
+    o->rw = (int16_t)w; o->rh = (int16_t)h; o->flags = flags; o->tp = (uint8_t)tp; o->tx = (uint16_t)tx; o->ty = (uint16_t)ty;
+    o->cx1 = 0; o->cy1 = 0; o->cx2 = 319; o->cy2 = 255;
+    return o;
+}
+static void test_filter(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    float a[3] = {0, 0, 2000}, b[3] = {1000, 0, 2000}, c[3] = {0, 1000, 2000};
+    rect2d(0, 0, 320, 256, 0, 0, 0, 0, 0, 0, 0, 0, 0);                    /* op0 borrado opaco: clase 2 (n_clear) */
+    poly3(a, b, c, 0);                                                    /* op1 3D */
+    for (int i = 0; i < 20; i++) {                                         /* ops 2..41: tiras de copia de pantalla, mitades izq/der */
+        rect2d(0, 6 + 2 * i, 160, 2, 0, 10 + 2 * i + (i & 1), GPU_F_TEXTURED | GPU_F_MASK_SET, 2, 0, 0, 0x40, 0x80, 0x40);
+        rect2d(160, 6 + 2 * i, 160, 2, 32, 10 + 2 * i + (i & 1), GPU_F_TEXTURED | GPU_F_MASK_SET, 2, 128, 0, 0x40, 0x80, 0x40);
+    }
+    rect2d(16, 16, 40, 20, 0, 0, GPU_F_TEXTURED, 0, 960, 256, 128, 128, 128);                       /* op42 HUD (CLUT 4 bits): clase 2 */
+    rect2d(16, 40, 40, 20, 0, 0, GPU_F_TEXTURED, 2, 640, 256, 128, 128, 128);                       /* op43 15 bits fuera de los búferes: clase 2 */
+    rect2d(0, 0, 320, 256, 0, 0, GPU_F_SEMI, 0, 0, 0, 20, 30, 40)->abr = 1;                          /* op44 recubrimiento semitransparente */
+    rect2d(0, 0, 100, 100, 0, 0, GPU_F_SEMI, 0, 0, 0, 20, 30, 40);                                   /* op45 semitransparente pequeño: clase 2 */
+    { GpuOp *o = add(GPU_OP_POLY); o->nv = 4; o->flags = GPU_F_TEXTURED; o->tp = 2; o->tx = 0; o->ty = 0; o->cx1 = 0; o->cy1 = 0; o->cx2 = 319; o->cy2 = 255;
+      for (int i = 0; i < 4; i++) { o->v[i].x = (int16_t)(i & 1 ? 300 : 20); o->v[i].y = (int16_t)(i & 2 ? 200 : 30); o->v[i].u = (uint8_t)(i & 1 ? 255 : 0); o->v[i].v = (uint8_t)(i & 2 ? 200 : 30); } } /* op46 copia como polígono 2D */
+    VrSceneOpts o = vr_scene_opts_default();
+    CHECK(o.screen_filter == 0 && o.drop_clear == 1, "defectos: clase 3 desactivada, clear descartado");
+    VrScene s;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_filter_tris == 0 && !s.filter.active && s.stats.n_clear == 1, "por defecto no hay clase 3");
+    for (uint32_t i = 0; i < s.nb; i++) CHECK(s.b[i].kind != 3, "por defecto sin batches kind 3");
+    o.screen_filter = 1;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0, "build filtro");
+    CHECK(s.stats.n_filter_rects == 40 && s.stats.n_filter_polys == 1 && s.stats.n_filter_cover == 1, "filtro rects %u polys %u cover %u",
+          s.stats.n_filter_rects, s.stats.n_filter_polys, s.stats.n_filter_cover);
+    CHECK(s.stats.n_clear == 1, "n_clear %u", s.stats.n_clear);
+    CHECK(s.stats.n_filter_tris == (40 + 1 + 1) * 2 && s.stats.n_tris3d == 1, "tris filtro %u 3d %u", s.stats.n_filter_tris, s.stats.n_tris3d);
+    /* 2D (clase 2): HUD, 15 bits fuera de búfer, semi pequeño = 3 rects -> 6 tris (el borrado no se emite: drop_clear) */
+    CHECK(s.stats.n_tris2d == 6, "tris 2D %u", s.stats.n_tris2d);
+    uint32_t k3 = 0, k2 = 0;
+    for (uint32_t i = 0; i < s.nb; i++) {
+        if (s.b[i].kind == 3) { k3 += s.b[i].count; for (uint32_t j = 0; j < s.b[i].count; j++) CHECK((s.v[s.b[i].first + j].flags & (VR_F_FILTER | VR_F_2D)) == (VR_F_FILTER | VR_F_2D), "flags filtro"); }
+        if (s.b[i].kind == 2) { k2 += s.b[i].count; for (uint32_t j = 0; j < s.b[i].count; j++) CHECK(!(s.v[s.b[i].first + j].flags & VR_F_FILTER), "flags 2D sin filtro"); }
+    }
+    CHECK(k3 == 84 * 3 / 2 * 1 || k3 == (uint32_t)s.stats.n_filter_tris * 3, "vértices kind 3 %u", k3);
+    CHECK(k2 == 18, "vértices kind 2 %u", k2);
+    const VrFilter *f = &s.filter;
+    CHECK(f->active && f->n_strips == 40 && f->n_polys == 1 && f->n_cover == 1, "resumen filtro");
+    CHECK(near_f(f->tint[0], 0.5f, 1e-4f) && near_f(f->tint[1], 1.0f, 1e-4f) && near_f(f->tint[2], 0.5f, 1e-4f), "tinte %f %f %f", f->tint[0], f->tint[1], f->tint[2]);
+    CHECK(f->rowcov[6] && f->rowcov[7] && !f->rowcov[5] && !f->rowcov[46] && f->nrows == 46, "filas cubiertas nrows %d", f->nrows);
+    CHECK(near_f(f->dv[6], 4, 1e-4f) && near_f(f->dv[8], 4 + 1 - 0 , 1.01f) && near_f(f->du[6], 0, 1e-4f) && near_f(f->du[6 + 0], 0, 1e-4f), "dv %f %f du %f", f->dv[6], f->dv[8], f->du[6]);
+    CHECK(f->cover_abr == 1 && near_f(f->cover_rgb[1], 30 / 255.0f, 1e-4f), "recubrimiento");
+    /* con screen_filter=0: comportamiento anterior (todo clase 2) */
+    o.screen_filter = 0; o.drop_clear = 0;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_filter_tris == 0 && !s.filter.active && s.stats.n_tris2d == 8 + 84, "screen_filter=0: tris2d %u", s.stats.n_tris2d);
+    for (uint32_t i = 0; i < s.nb; i++) CHECK(s.b[i].kind != 3, "sin batches kind 3");
+    /* falsos positivos: panel pequeño con su recorte (semi sobre su propio recorte), parche local que copia la pantalla, polígono texturizado semi a pantalla completa */
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    { GpuOp *r = rect2d(235, 16, 69, 52, 0, 0, GPU_F_SEMI, 0, 0, 0, 0, 24, 24); r->cx1 = 235; r->cy1 = 16; r->cx2 = 303; r->cy2 = 67; }   /* minimapa */
+    rect2d(90, 30, 140, 89, 0, 128, GPU_F_TEXTURED | GPU_F_SEMI, 2, 0, 0, 32, 32, 32);                                             /* parche 140x89 */
+    rect2d(0, 0, 320, 256, 0, 0, GPU_F_SEMI | GPU_F_TEXTURED, 1, 128, 256, 0, 0, 0);                                                 /* semi texturizado a pantalla completa */
+    rect2d(300, 0, 1, 1, 5, 5, GPU_F_TEXTURED, 2, 0, 0, 128, 128, 128);                                                             /* 1x1 con origen dentro del búfer */
+    o = vr_scene_opts_default(); o.screen_filter = 1;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && !s.filter.active && s.stats.n_filter_tris == 0, "falsos positivos de clase 3: tris %u", s.stats.n_filter_tris);
     vr_scene_release();
 }
 
@@ -352,6 +562,8 @@ int main(void) {
     test_classes_and_events();
     test_drops();
     test_state();
+    test_near_clip();
+    test_filter();
     test_gte_scale_and_validity();
     test_line_coverage();
     test_event_epochs();
