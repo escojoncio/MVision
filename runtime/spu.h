@@ -22,6 +22,14 @@ int spu_irq_take(void);
 /* Gancho opcional llamado en cuanto salta el IRQ (desde el hilo que renderiza). */
 extern void (*spu_irq_hook)(void);
 
+/* Reloj virtual (modo normal): io.c llama a spu_clock cada lote de ciclos de CPU; renderiza
+ * `frames` muestras al anillo interno (y al WAV). El host de audio usa spu_pull, que copia lo
+ * disponible, rellena con ceros el resto, devuelve los frames reales y NO avanza la SPU. */
+void spu_clock(int frames);
+int spu_pull(int16_t *out_stereo, int frames);
+
+/* Solo para pruebas: spu_render/spu_advance avanzan la SPU fuera del reloj virtual; un host
+ * en ejecución real debe usar spu_pull. */
 /* Genera `frames` muestras estéreo intercaladas (L,R) a 44100 Hz y avanza la SPU. */
 int spu_render(int16_t *out_stereo, int frames);
 /* Avanza la SPU descartando la salida (o grabándola en el WAV). */

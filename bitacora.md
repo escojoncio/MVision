@@ -11,7 +11,7 @@ Estado: **disco analizado, arquitectura decidida (recompilación estática del E
 Estado: runtime arranca el juego (planificador, IRQ, CD virtual, GPU software) y vuelca los primeros frames (logos). Armas (lógica + modelos originales + piezas cortadas), carcasa de visión y E/S en `main` con pruebas. Todo pasa `make test` / `test_sys` / `vr/weapons test` / `vr/box test`.
 
 **Build 1 (ventana plana, IPA por sideload):**
-1. Desatascar arranque tras logos (~frame 650, ver §11): instrumentar eventos BIOS (MV_EVLOG), callbacks CD/DMA antes/después de VBlank 70, estado que consulta la carga síncrona de stages; hipótesis: overlay o comando de script no tratado.
+1. ~~Desatascar arranque tras logos~~ HECHO (§12). Siguiente: ejecutar 5000+ frames, ver si llega a pantalla de título/partida; vigilar FMV (MDEC/XA) y demos en motor.
 2. Overlays: recompilar los de la tabla de stages (cargar en su dirección, `--funcs`), reducir instrucciones interpretadas; volcar `missing_funcs.txt` → `gamedata/extra_funcs.txt`.
 3. Lector BIN/CUE (MODE2/2352) y CHD opcional en `cdrom.c`; detección de discos por contenido (SYSTEM.CNF + EXE), carpeta de la app sin nombre fijo en código.
 4. Renderer Metal: primitivas GPU a resolución nativa + MSAA x4 (rasterizador software = oráculo), sin temblor de vértices (GTE float/subpíxel), texto vectorial SDF interceptando el dibujo de cadenas, HUD en capa aparte, descarte del motor vía su ruta de primera persona.
@@ -186,3 +186,15 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - `headless.c`: `--dump DIR --every N`, MV_DISC, MV_CARD, estadísticas. Makefile: objetivo `test_sys`. `make test` y `make test_sys` OK.
 - Funcional: planificador del juego corriendo, FS lee la tabla de stages, GPU recibe listas, frames de logos volcados.
 - Pendiente: tras ~frame 650 el bucle de frames sigue (t3) pero no se emiten más DrawOTag/PutDrawEnv (GPU estática); la última lectura de CD termina en pos=254778 y aparecen lecturas de argumentos del intérprete de scripts y liberaciones del motor gráfico (actores terminando). Tarea ociosa gira en 8008d828. Hipótesis: comando del intérprete de scripts o carga de overlay no tratados. Medir `--poll-entry`; reducir ~626k instrucciones interpretadas; limpiar trazas MV_CDLOG.
+
+---
+
+## 12. Reloj de SPU en tiempo virtual (`runtime/io.c`, `spu.c/.h`, `test_sys.c`) — 2026-10-18
+
+- Causa del atasco tras logos: la SPU solo avanzaba si el host llamaba a `spu_render`; en headless nunca -> el IRQ por dirección no saltaba. El driver de sonido usa una voz en bucle sobre un bloque vacío de 512 B con la dirección de IRQ alternando base/base+256 como reloj de su tarea de interrupción (consume el stream de voz del CD). Sin IRQ, el stream se llena, el CD se pausa y el juego espera para siempre.
+- `io.c`: evento `next_spu` cada `SPU_BATCH`=32 muestras (`SPU_BATCH_CYC`=24576 ciclos, 768/muestra exactos) en `next_event`/`run_events` con bucle de puesta al día -> `spu_clock(32)` + `spu_irq_poll()`.
+- `spu.c`: `spu_clock(frames)` renderiza bajo el mutex a un anillo de 16384 frames (descarta lo más antiguo) y al WAV; `spu_pull(out,frames)` para el host (no avanza la SPU, rellena con ceros). `spu_render/spu_advance` solo para tests: un host real NUNCA debe llamarlos (doble avance).
+- `test_sys.c`: `t_spu_clock` (3 ciclos armar/disparar/reconocer IRQ, `spu_pull`); `tm_wait` 4000 -> 400000 iteraciones (sys_idle ahora salta como mucho un lote de SPU).
+- Resultado headless 1500 frames: logos -> intro con créditos y rótulo de zona en castellano; excepciones SPU 2910; CD sigue leyendo (stream) hasta el final. `make test test_sys` OK. Revisión adversarial: sin bugs.
+- Disco sintetizado: no dejar en `gamedata/disc/` el fichero de relleno de la raíz (se duplica con `FILLER.DAT` y desplaza todos los LBA); copiar solo SYSTEM.CNF, cargador y el directorio de datos.
+- Datos regenerables: `gamedata/names_eu.json` se obtiene con `sigs.py match` + `align.py` (escribe en el directorio actual: ejecutarlo desde `gamedata/`).

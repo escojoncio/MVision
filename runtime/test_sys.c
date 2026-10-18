@@ -7,6 +7,7 @@
 #include "cpu.h"
 #include "sys.h"
 #include "fiber.h"
+#include "spu.h"
 
 const FuncEntry rt_func_table[] = {{0, 0}};
 const unsigned rt_func_count = 0;
@@ -159,7 +160,7 @@ static uint64_t tm_ticks(int n, uint32_t src, uint64_t e) {
 /* Avanza el reloj hasta que la IRQ del contador n se levante; devuelve los ciclos transcurridos desde t0. */
 static uint64_t tm_wait(Cpu *c, int n, uint64_t t0) {
     uint32_t bit = 1u << (IRQ_TMR0 + n);
-    for (int i = 0; i < 4000 && !(sys_irq_stat() & bit); i++) sys_idle(c);
+    for (int i = 0; i < 400000 && !(sys_irq_stat() & bit); i++) sys_idle(c);
     EQ((sys_irq_stat() & bit) != 0, 1);
     mem_w32(c, 0x1F801070, ~bit);
     return sys_cycles() - t0;
@@ -259,6 +260,37 @@ static void t_changeth_en_excepcion(Cpu *c) {
     EQ(mem_r32(c, tcb + 0x98) & 0x400, 0x400);
 }
 
+/* El IRQ por dirección de la SPU debe saltar con el reloj virtual (sin hilo de audio). */
+static void t_spu_clock(Cpu *c) {
+    uint8_t *ram = spu_ram();
+    memset(&ram[0x1000], 0, 512);
+    ram[0x1000 + 1] = 0x07;                      /* flags: inicio de bucle */
+    ram[0x1000 + 16 + 1] = 0x03;
+    spu_io_write(0x1F801DAA, 0xC000, 2);         /* SPU activa, sin IRQ */
+    spu_io_write(0x1F801D80, 0x3FFF, 2);
+    spu_io_write(0x1F801D82, 0x3FFF, 2);
+    spu_io_write(0x1F801C00, 0x3FFF, 2);
+    spu_io_write(0x1F801C02, 0x3FFF, 2);
+    spu_io_write(0x1F801C04, 0x1000, 2);         /* pitch = 44100 Hz */
+    spu_io_write(0x1F801C06, 0x1000 / 8, 2);     /* dirección inicial */
+    spu_io_write(0x1F801C08, 0x00FF, 2);
+    spu_io_write(0x1F801C0A, 0x0000, 2);
+    spu_io_write(0x1F801DA4, 0x1000 / 8, 2);     /* dirección de IRQ */
+    spu_io_write(0x1F801D88, 1, 2);              /* key-on voz 0 */
+    int hits = 0;
+    for (int k = 0; k < 3; k++) {
+        spu_io_write(0x1F801DAA, 0xC000, 2);     /* apaga IRQ: limpia el flag */
+        mem_w32(c, 0x1F801070, ~(1u << IRQ_SPU));
+        spu_io_write(0x1F801DAA, 0xC040, 2);     /* enciende IRQ */
+        EQ((spu_io_read(0x1F801DAE, 2) & 0x40), 0);
+        sys_frame(c);
+        if (mem_r32(c, 0x1F801070) & (1u << IRQ_SPU)) hits++;
+    }
+    EQ(hits, 3);
+    int16_t o[64];
+    EQ(spu_pull(o, 64), 64);
+}
+
 int main(void) {
     Cpu c = {0};
     c.r[29] = 0x801FFF00;
@@ -269,6 +301,7 @@ int main(void) {
     t_pad(&c);
     t_card(&c);
     t_timer_modes(&c);
+    t_spu_clock(&c);
     t_irq_sin_manejador(&c);
     t_changeth_en_excepcion(&c);
     printf(fails ? "test_sys: %d FALLOS\n" : "test_sys: OK\n", fails);
