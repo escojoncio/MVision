@@ -1,0 +1,22 @@
+--- a/runtime/gpu.c	2026-10-18 19:46:59.762615324 +0000
++++ b/runtime/gpu.c	2026-10-18 19:46:59.774580687 +0000
+@@ -342,6 +342,7 @@
+     if (++cap.vb_noflip >= GPU_CAP_VB_FALLBACK) cap_close(GPU_CLOSE_VBLANK);
+ }
+ uint32_t gpu_capture_dropped(void) { return cap.dropped; }
++uint32_t gpu_capture_seq(void) { return cap.seq; }
+ void gpu_capture_set_float_hook(GpuFloatHook h) { cap.hook = h; }
+ void gpu_capture_set_hp_hook(GpuHpHook h) { cap.hphook = h; }
+ void gpu_capture_hiprec(int on) { gte_hp_enable(on); cap.hphook = on ? gte_hp_lookup : NULL; }
+--- a/runtime/gpu.h	2026-10-18 19:46:59.766497036 +0000
++++ b/runtime/gpu.h	2026-10-18 19:46:59.778679083 +0000
+@@ -123,6 +123,9 @@
+ void gpu_capture_vblank(void);
+ /* Listas perdidas por cola llena (la siguiente entregada trae vram_init). */
+ uint32_t gpu_capture_dropped(void);
++/* Número de secuencia (GpuOp.seq) que tendrá la PRÓXIMA primitiva capturada: permite a un sustituto HLE delimitar qué
++ * primitivas emitió una llamada (p.ej. un envío de lista al GPU): las que cumplan antes <= seq < después. */
++uint32_t gpu_capture_seq(void);
+ 
+ /* Enlace antiguo (solo float, sin vista) con la GTE; el actual es gpu_capture_hiprec / GpuHpHook (abajo). Dado el SXY entero que escribió el juego (sin offset, con signo), devuelve 1 y
+  * rellena la posición float si el último RTPS/RTPT produjo exactamente ese SXY. La GTE (gte.c) mantendrá una

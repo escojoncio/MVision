@@ -1,0 +1,8 @@
+# Funciones del motor sustituidas por la capa de cámara VR (vr/camera/vr_camera_hle.c). Nombres neutros; las
+# direcciones (edición europea) están en vr_names.json. Se añaden a runtime/hle*.txt al generar el C:
+#   python3 tools/recomp/recomp.py EXE SALIDA --names NOMBRES_FUSIONADOS.json --hle runtime/hle.txt ... --hle vr/camera/hle_vrcam.txt
+vrcam_view
+vrcam_padorg
+vrcam_trans
+vrcam_draw
+vrcam_overscan
