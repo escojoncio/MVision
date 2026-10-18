@@ -1,0 +1,3 @@
+{
+  "vrbody_sort": {"target": "80018304", "how": "exact", "doc": "ejecuta las 7 etapas del dibujado (pantalla, recorte, transformación, iluminación, primitivas, subdivisión, orden) del canal 3D principal"}
+}

@@ -1,0 +1,169 @@
+/* vr_body: los brazos del personaje que se ven al mirar hacia abajo siguen las manos del usuario (IK de dos huesos por
+ * brazo) con el modelo ORIGINAL del jugador. C99; el solver es matemática pura, el pegamento lee/escribe la RAM del
+ * juego (EXE principal, edición europea) y está acotado a las matrices de 6 piezas del modelo.
+ *
+ * MODELO DEL JUGADOR EN RAM (verificado en partida; detalle y direcciones en bitacora.md y en vr_body.c):
+ *   puntero de cuerpo 0x800ACBB0 -> objeto {+0 puntero al conjunto de piezas}; conjunto: nº de piezas s16 +0x2E (16),
+ *   modo de visibilidad s16 +0x32 (0 = fuera de pantalla), piezas de 0x5C bytes desde +0x48. Pieza: world (matriz 3x3 s16 + t) +0x00 (s16 m[3][3],
+ *   4096 = 1, pad, s32 t[3] en +0x14), screen (matriz igual) +0x20 (= vista x world), model* +0x40, modo de visibilidad s16 +0x4C.
+ *   Modelo de pieza: t (origen respecto al padre, mm) +0x20, parent s32 +0x2C. Mundo: Y arriba, derecho;
+ *   el personaje mira a +Z, su izquierda es +X; unidad = 1 mm.
+ *   Piezas: 0 cadera, 1 torso, 2/3/4 = brazo/antebrazo/mano DERECHOS (los del arma), 5 cuello, 6 cabeza, 7/8/9 =
+ *   brazo/antebrazo/mano IZQUIERDOS, 10-12 pierna derecha, 13-15 pierna izquierda. La mano es UNA pieza rígida (sin dedos).
+ *   Huesos: hombro = origen de la pieza 2 (7); codo = origen de la 3 (8): (0,-260,-50); muñeca = origen de la 4 (9):
+ *   (0,-249,47) respecto al codo. Longitudes 264,8 y 253,4 mm. La pieza mano mide ~125 mm bajo la muñeca.
+ *
+ * CUÁNDO. El motor anima (ángulos -> matrices world/screen de todas las piezas) en la etapa 1 del dibujado
+ * (pantalla), calcula visibilidad (2), transforma vértices (3, 0x8001e840 = sustituto vrcam_trans), ilumina (4) y
+ * ordena (7). vrbody_apply se llama al principio de la etapa 3 (después de que el juego haya animado y antes de
+ * transformar), sustituye world+screen de las 3 piezas de cada brazo y deja la copia original; vrbody_restore (tras
+ * el dibujado, 0x80018304) las devuelve a su valor, de modo que la lógica del juego (ataques, armas, efectos,
+ * objetos enganchados a la mano, enemigos) nunca ve la pose IK: solo la ve el dibujado. Ver el diff en el informe.
+ *
+ * ENTRADA. vrpose_get_hands (vr_pose.h) en el espacio de la cabeza (m, Y arriba, -Z delante). La relación espacio de
+ * usuario <-> mundo del motor la da VrBodyView (vrbody_attach_vrcam() la toma de vr/camera: ojo del motor, p_ref y
+ * giro del registro de cámara del frame): W = ojo + u * T (P - p_ref), T = R_y(theta + 180 grados).
+ *
+ * No es reentrante ni multihilo: se llama desde el hilo del emulador (sustitutos del motor). */
+#pragma once
+#include <stddef.h>
+#include <stdint.h>
+#include "vr_pose.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ---------------------------------------------------------------- solver (matemática pura) ----------------------- */
+/* Vectores float[3]; matrices 3x3 float[9] fila-mayor m[3*fila+col]; las COLUMNAS son los ejes locales en el mundo
+ * (v_mundo = M * v_local). Unidades: mm (el solver no depende de la escala). */
+
+typedef struct VrArmRig {
+    float side;              /* +1 brazo izquierdo del personaje (hombro hacia +X del torso), -1 derecho */
+    float elbow_off[3];      /* origen del codo en el marco del brazo superior (mm) */
+    float wrist_off[3];      /* origen de la muñeca en el marco del antebrazo (mm) */
+} VrArmRig;
+
+typedef struct VrArmLimits {
+    float elbow_min_deg;     /* ángulo interior mínimo del codo (flexión máxima = 180 - esto); defecto 32 */
+    float reach_margin;      /* fracción de L1+L2 que se usa como alcance máximo; defecto 0.999 */
+    float shoulder_back;     /* componente "hacia delante" mínima del brazo superior (marco del torso, unitario); defecto -0.80 */
+    float shoulder_cross;    /* componente "hacia fuera" mínima (negativa = cruza el pecho); defecto -0.85 */
+    float wrist_swing_deg;   /* desvío máximo de la mano respecto al eje del antebrazo (flexión/extensión/desviación); defecto 70 */
+    float forearm_share;     /* parte del giro (pronación) que asume el antebrazo, 0..1; defecto 0.6 */
+    float forearm_twist_deg; /* giro máximo del antebrazo sobre su eje; defecto 85 */
+    float hand_twist_deg;    /* giro máximo de la mano sobre el eje del antebrazo (respecto al antebrazo); defecto 70 */
+} VrArmLimits;
+
+enum {
+    VRARM_STRETCHED = 1,       /* objetivo fuera de alcance: brazo extendido, mano en el punto alcanzable más cercano */
+    VRARM_TOO_CLOSE = 2,       /* objetivo más cerca que la flexión máxima del codo */
+    VRARM_SHOULDER_LIMIT = 4,  /* se aplicó el límite del hombro */
+    VRARM_WRIST_LIMIT = 8,     /* se aplicó el límite de la muñeca/antebrazo */
+    VRARM_POLE_FALLBACK = 16   /* el vector polar era paralelo al brazo: se usó una alternativa */
+};
+
+typedef struct VrArmIn {
+    float shoulder[3];       /* origen del hombro (mm, mundo) */
+    float torso[9];          /* marco del torso: columnas X izquierda, Y arriba, Z delante */
+    float wrist[3];          /* objetivo de la muñeca (mm, mundo) */
+    float hand[9];           /* orientación objetivo de la pieza mano (columnas = ejes locales de la mano, en mundo) */
+    float pole[3];           /* hacia dónde apunta el codo (mundo; se proyecta perpendicular al brazo) */
+} VrArmIn;
+
+typedef struct VrArmOut {
+    float elbow[3], wrist[3];            /* posiciones resultantes (mm, mundo) */
+    float R_upper[9], R_fore[9], R_hand[9]; /* orientación de las piezas brazo, antebrazo y mano */
+    float reach;                         /* distancia pedida hombro->muñeca / (L1 + L2) */
+    float err_mm;                        /* distancia entre el objetivo de muñeca y la muñeca resultante */
+    unsigned flags;                      /* VRARM_* */
+} VrArmOut;
+
+void vrbody_limits_default(VrArmLimits *l);
+/* 0 = bien; -1 = entrada no finita o rig inválido (out sin tocar). Longitud de huesos: |elbow_off|, |wrist_off|. */
+int vrbody_solve_arm(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn *in, VrArmOut *out);
+
+/* Utilidades de matemática (expuestas para pruebas) */
+void vrbody_quat_to_mat(const float q[4], float m[9]);                 /* q = x,y,z,w; se normaliza (no finita -> identidad) */
+void vrbody_mat_to_quat(const float m[9], float q[4]);                 /* m ortonormal (se ortonormaliza antes) */
+void vrbody_orthonormalize(const float m[9], float out[9]);
+
+/* ------------------------------------------------------------------ vista y configuración ----------------------- */
+typedef struct VrBodyView {
+    int active;              /* 1: la cámara VR manda este frame (si no, no se toca nada) */
+    float eye[3];            /* ojo del motor (mundo, unidades del motor) */
+    float p_ref[3];          /* posición de la cabeza (m, espacio del usuario) a la que corresponde `eye` */
+    float theta_deg;         /* giro espacio de usuario -> mundo del motor: T = R_y(theta + 180 grados) */
+    float units_per_m;       /* 1000 */
+} VrBodyView;
+typedef int (*VrBodyViewFn)(VrBodyView *out);    /* devuelve 1 y rellena `out` si hay vista; 0 si no */
+void vrbody_set_view_fn(VrBodyViewFn fn);
+/* Usa la cámara VR de vr/camera como fuente de la vista (vr_body_cam.c). Llamar una vez tras vrbody_init. */
+void vrbody_attach_vrcam(void);
+
+typedef struct VrBodyConfig {
+    int enabled;                 /* 1 (defecto) */
+    int dominant;                /* mano que empuña el arma: 1 derecha (defecto), 0 izquierda */
+    /* piezas del modelo [0] = izquierda, [1] = derecha: hombro, codo, muñeca */
+    int part_arm[2][3];          /* {{7,8,9},{2,3,4}} */
+    int part_torso;              /* 1 */
+    int min_parts;               /* 16: modelos con menos piezas se ignoran */
+    /* mano */
+    float grip_to_wrist_mm;      /* de la pose (centro de palma) a la muñeca del modelo, a lo largo del dedo; defecto 55 */
+    float hand_rot_offset[2][4]; /* cuaternión x,y,z,w aplicado a la pose de cada mano (marco del mando -> marco de mano de vr_pose.h); defecto identidad */
+    float curl_deg;              /* giro de la pieza mano con el agarre al máximo (pose cerrada); defecto 28 */
+    float armed_grip;            /* agarre mínimo de la mano dominante con arma (vrbody_set_armed); defecto 0.85 */
+    /* codo */
+    float pole[3];               /* dirección del codo en el marco del torso para el brazo izquierdo: x = hacia fuera, y = arriba, z = delante; el derecho se refleja en x. Defecto (0.45,-1,-0.35) */
+    VrArmLimits limits;
+    /* tiempo */
+    float smooth_tau_s;          /* constante del suavizado de las manos (0 = sin suavizado); defecto 0.02 */
+    float frame_dt_s;            /* duración de un frame del motor (0.02 = 50 Hz) */
+    float blend_s;               /* tiempo de fundido con la animación original al ganar/perder seguimiento; defecto 0.25 */
+    float max_hand_jump_m;       /* salto de pose entre frames que se considera glitch y se suaviza como mucho a esta velocidad (0 = sin límite); defecto 3 m */
+} VrBodyConfig;
+
+void vrbody_config_default(VrBodyConfig *c);
+void vrbody_init(const VrBodyConfig *c);     /* reinicia estado (fundidos, filtros) y fija la configuración (copia) */
+const VrBodyConfig *vrbody_config(void);
+
+void vrbody_set_grip(int side, float v);     /* side 0 izquierda / 1 derecha; v 0 (abierta) .. 1 (cerrada) */
+void vrbody_set_dominant(int side);          /* 0 izquierda / 1 derecha */
+void vrbody_set_armed(int on);               /* la mano dominante empuña un arma: pose cerrada como mínimo armed_grip */
+void vrbody_set_enabled(int on);
+
+/* ------------------------------------------------------------------ pegamento sobre la RAM ----------------------- */
+/* Sustituye las matrices de los brazos para el frame en curso (etapa de transformación). Devuelve el nº de brazos
+ * modificados (0 si no hay vista VR, el modelo no es el esperado, el objeto está fuera de pantalla o no hay manos).
+ * Escribe en la RAM del juego SOLO world+screen (64 B) de las piezas de los brazos, y guarda su valor original. */
+int  vrbody_apply(uint8_t *ram);
+/* Devuelve esas piezas a su valor original (idempotente; sin efecto si no hay nada pendiente). */
+void vrbody_restore(uint8_t *ram);
+/* 1 si hay matrices IK escritas sin restaurar (diagnóstico). */
+int  vrbody_pending(void);
+
+typedef struct VrBodyStats {
+    uint32_t applies, arms_driven, restores;
+    uint32_t skip_disabled, skip_noview, skip_model, skip_offscreen, skip_nohands;
+    uint32_t stretched, too_close, shoulder_limit, wrist_limit, bad_solve, stale_dropped;
+} VrBodyStats;
+void vrbody_stats(VrBodyStats *s);
+
+/* Gancho de diagnóstico: se llama al final de vrbody_apply (con las matrices IK ya escritas) si se escribió algo. Para
+ * herramientas de validación; NULL por defecto. */
+typedef void (*VrBodyHook)(uint8_t *ram);
+void vrbody_set_apply_hook(VrBodyHook fn);
+
+/* Diagnóstico de la última aplicación de cada brazo (pruebas/herramientas). */
+typedef struct VrBodyDebug {
+    int driven;                  /* este brazo se modificó en el último apply */
+    float w;                     /* peso de fundido 0..1 */
+    float target_wrist[3], target_hand[9]; /* objetivos (mundo, mm) tras suavizado y fundido */
+    float grip;                  /* agarre efectivo */
+    VrArmOut sol;
+} VrBodyDebug;
+const VrBodyDebug *vrbody_debug(int side);
+
+#ifdef __cplusplus
+}
+#endif

@@ -1,0 +1,3 @@
+# Función del motor sustituida por la capa del radar de muñeca (vr/radar/vr_radar_hle.c). Nombre neutro; la dirección (edición
+# europea) está en vr_radar_names.json. Se añade a runtime/hle*.txt al generar el C / hle_table.c.
+vrradar_draw
