@@ -80,9 +80,12 @@ Coste: mapear símbolos JP→EU (por firmas) si se elige opción A.
 - `tools/recomp/recomp.py` + `runtime/cpu.h`: recompilador MIPS R3000 → C. Funciones = destinos `jal` + entrada + punteros en datos que apuntan tras un `jr ra`+delay + `--funcs`. Región de código autodetectada (tramo decodificable más largo). Ramas internas → `goto`, externas → tail call, `jal` → llamada directa, `jr` no-ra → `switch` sobre todas las direcciones de la función, delay slots con condición evaluada antes del slot, GTE/COP0/memoria vía helpers del runtime. **EXE EU: código `0x80014894-0x8009e4b4`, 1841 funciones, 78 con tablas de salto, 1 instrucción no soportada (`0x80014898`, probablemente datos al inicio de la región), compila sin errores con clang -O1 -Wall** (runtime aún sin implementar).
 - Build `reference` ejecutada (run 39136576826): **éxito**, 2 min 50 s. Artefacto `sigs-ref` generado; la sesión no puede descargar artefactos ni logs (almacenamiento de Actions bloqueado) → el usuario lo descarga y lo deja en su carpeta.
 
+- **Mapa de símbolos EU (2026-10-18):** `sigs_ref.json` (1770 firmas JP, descargado a mano; el usuario lo guarda en su carpeta de discos) → `sigs.py match`: 582 exactas. `tools/sig/align.py` añade prefijo único (337), orden entre anclas (198), delta entre anclas (48 iguales + 83 por vecino). **Total 1248/1766 funciones de código, 57 % de palabras; SDK: 232/253 identificadas.** SDK sin localizar: `CdGetSector2 CdDataCallback CdDataSync GetDrawEnv GetDispEnv VSyncCallbacks PadChkVsync _padSioRW`. `main` sin match (EU difiere). Layout JP: rdata `0x80010000`, text desde `0x800148b8`; EU text `0x80014894`. Muchas funciones EU = JP +1 instrucción.
+- Mejora futura del match: firma de opcodes (sin operandos) para similitud difusa — requiere nueva ejecución de CI + descarga manual.
+
 ## 7. Pendiente siguiente sesión
 
-- [ ] Recibir `sigs_ref.json` (descarga manual) → `sigs.py match` contra EXE principal EU → % de cobertura; pasar starts como `--funcs` al recompilador.
+- [ ] Pasar `names_eu.json` al recompilador (`--funcs` + nombres en comentarios) y localizar a mano el SDK que falta.
 - [ ] Runtime C: memoria, rt_call/rt_jump por tabla, div, GTE, COP0; primer arranque headless en Linux.
 - [ ] Cargar overlays extraídos en recompilador: dirección de carga = `StageCharacterEntries` (localizar en EXE EU vía firmas).
 - [ ] Recompilador MIPS→C: decodificador + emisor, empezando por el ejecutable principal.
