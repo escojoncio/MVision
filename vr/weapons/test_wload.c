@@ -1,4 +1,7 @@
-/* Prueba del cargador de modelos originales: ./test_wload <archivo de stages> <stage>  (o variables STAGE_FILE/STAGE_NAME; si no hay datos, se omite). */
+/* Prueba del cargador de modelos originales sobre el archivo de stages del usuario (datos locales; sin ellos se omite limpio):
+ *   ./test_wload [archivo_de_stages] [stage]       o variables STAGE_FILE / STAGE_NAME
+ * Sin argumentos busca gamedata/stages.bin y ../../gamedata/stages.bin y usa el stage "init" (stage residente).
+ *   make -C vr/weapons test-wload   (tambien va en `make test` y `make test-san`) */
 #include "wload.h"
 #include <math.h>
 #include <stdio.h>
@@ -45,11 +48,12 @@ static int check(const uint8_t *d, size_t n, const Exp *e, const WLoadOpts *o, c
 }
 
 int main(int argc, char **argv) {
-    const char *path = argc > 1 ? argv[1] : getenv("STAGE_FILE");
+    const char *cands[4] = { argc > 1 ? argv[1] : NULL, getenv("STAGE_FILE"), "gamedata/stages.bin", "../../gamedata/stages.bin" };
     stage_name = argc > 2 ? argv[2] : getenv("STAGE_NAME");
-    if (!stage_name) { printf("test_wload: falta nombre de stage, omitido\n"); return 0; }
-    FILE *f = path ? fopen(path, "rb") : NULL;
-    if (!f) { printf("test_wload: sin archivo de stages, omitido\n"); return 0; }
+    if (!stage_name) stage_name = "init";
+    FILE *f = NULL;
+    for (int i = 0; i < 4 && !f; i++) if (cands[i]) f = fopen(cands[i], "rb");
+    if (!f) { printf("test_wload: sin archivo de stages (gamedata/stages.bin ausente): omitido\n"); return 0; }
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     uint8_t *d = (uint8_t *)malloc((size_t)n);
     if (!d || fread(d, 1, (size_t)n, f) != (size_t)n) { printf("lectura fallida\n"); return 1; }

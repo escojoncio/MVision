@@ -240,14 +240,15 @@ static void synthetic(void) {
 
 /* ------------------------------------------------------------------ modelos reales */
 /* Aristas abiertas EXACTAS por (modelo, pieza); cualquier otra pieza debe quedar en 0. Todas vienen de superficies del
- * original que no son cerradas (se miden sobre el modelo sin reglas):
- *   4725 body 4, 2d3b body 4, 15a9 tube 6, 9a90 round 10: aristas abiertas de componentes del original (cañón del fusil y
- *       del francotirador, cuña del lanzador, cuerpo del misil antiaéreo);
+ * original que no son cerradas (se miden sobre el modelo sin reglas). Los cuerpos del fusil, del francotirador y del lanzador
+ * guiado ya no figuran: la tabla los sella (WCutSeal: boca hueca del cañon, hueco del vientre del tubo) y quedan a 0.
+ * Pendientes de sellar:
+ *   9a90 round 10: cuerpo del misil antiaéreo (abierto en el original);
  *   57f8 body 4 / tube 3: el bucle de interfaz del tubo con el cuerpo es alabeado (no plano) en el original; la tapa se
  *       proyecta y quedan sus aristas sin pareja. */
 typedef struct { uint16_t id; const char *piece; uint32_t open; } Open;
 static const Open OPEN[] = {
-    {0x4725, "body", 4}, {0x2d3b, "body", 4}, {0x15a9, "tube", 6}, {0x57f8, "body", 4}, {0x57f8, "tube", 3}, {0x9a90, "round", 10},
+    {0x57f8, "body", 4}, {0x57f8, "tube", 3}, {0x9a90, "round", 10},
 };
 static uint32_t open_expected(uint16_t id, const char *piece) {
     for (size_t i = 0; i < sizeof OPEN / sizeof OPEN[0]; i++) if (OPEN[i].id == id && !strcmp(OPEN[i].piece, piece)) return OPEN[i].open;
@@ -334,7 +335,8 @@ static void check_pistol(const char *tag, const WCutModel *cm, const WLoaded *m,
     }
     /* el cañón es visible al retroceder la corredera: su caja sale de la de la corredera hacia atrás y está sobre el marco */
     CHECK(bar->bmax.z < slide->bmax.z && bar->bmin.z >= slide->bmin.z - 1e-4f, "%s: el cañón queda bajo la corredera", tag);
-    /* cargador: solo la base inferior queda por fuera del contorno del mango */
+    /* cargador completo: volumen cerrado; solo la base (franja del fondo) queda fuera del contorno del mango */
+    CHECK(wcut_open_edges(mag) == 0, "%s: el cargador es cerrado", tag);
     float ytop = mag->bmin.y + 0.0075f; int nstub = 0, outside = 0;
     for (uint32_t k = 0; k < mag->nv; k++) {
         if (mag->v[k].pos[1] <= ytop) continue;
@@ -343,11 +345,54 @@ static void check_pistol(const char *tag, const WCutModel *cm, const WLoaded *m,
     }
     CHECK(nstub > 0, "%s: el cargador tiene cuerpo interior", tag);
     CHECK(outside == 0, "%s: parte del cargador sobresale del contorno del mango", tag);
-    CHECK(mag->bmax.y - mag->bmin.y > 0.03f && mag->bmin.y <= -0.0359f, "%s: base a ras del fondo del mango", tag);
-    VERB("%s: vértices del cuerpo del cargador %d, fuera %d", tag, nstub, outside);
-    /* eje de extracción = inclinación del mango (el del arma) */
+    CHECK(mag->bmin.y <= -0.0359f, "%s: base a ras del fondo del mango", tag);
+    /* altura = la del pozo: de la base a la cara inferior de la corredera menos la holgura de la bala (0,8 mm) */
+    float gap = slide->bmin.y - mag->bmax.y;
+    CHECK(gap > 0.0006f && gap < 0.0013f, "%s: holgura del cargador bajo la corredera (%.2f mm)", tag, gap * 1e3);
+    CHECK(mag->bmax.y - mag->bmin.y > 0.075f, "%s: altura del cargador", tag);
+    /* seccion = contorno del mango menos la pared: los vertices del cuerpo quedan dentro del ancho del mango (22 mm) */
+    float xm = 0; for (uint32_t k = 0; k < mag->nv; k++) if (mag->v[k].pos[1] > ytop && fabsf(mag->v[k].pos[0]) > xm) xm = fabsf(mag->v[k].pos[0]);
+    CHECK(xm < 0.0090f && xm > 0.0075f, "%s: ancho del cuerpo del cargador (%.2f mm de semiancho)", tag, xm * 1e3);
+    /* calibre: la bala tiene el diametro del anima del canon generado y la vaina 1,1 veces; la bala usa su propio material */
+    {
+        const WCutRule *mr = NULL; for (int q = 0; q < cm->nrules; q++) if (cm->rules[q].mag.on) mr = &cm->rules[q];
+        float rin = 1e9f;
+        for (uint32_t k = 0; k < bar->nv; k++) if (fabsf(bar->v[k].pos[2] - zm) < 1e-6f) {
+            float r = hypotf((float)(bar->v[k].pos[0] - cx), (float)(bar->v[k].pos[1] - cy)); if (r < rin) rin = r;
+        }
+        float bxm = 0, cxm = 0;
+        for (uint32_t t = 0; mr && t < mag->ni / 3; t++) {
+            const WCutUV *u = NULL;
+            const float *uv = mag->v[mag->idx[t * 3]].uv;
+            #define INUV(R) (uv[0] >= (R).u0 - 1e-5f && uv[0] <= (R).u1 + 1e-5f && uv[1] >= (R).v0 - 1e-5f && uv[1] <= (R).v1 + 1e-5f)
+            if (INUV(mr->mag.mat_bullet)) u = &mr->mag.mat_bullet; else if (INUV(mr->mag.mat_case)) u = &mr->mag.mat_case;
+            #undef INUV
+            if (!u) continue;
+            float lo = 1e9f, hi = -1e9f;
+            for (int k = 0; k < 3; k++) { float x = mag->v[mag->idx[t * 3 + k]].pos[0]; if (x < lo) lo = x; if (x > hi) hi = x; }
+            if (u == &mr->mag.mat_bullet) { if (hi > bxm) bxm = hi; } else if (hi > cxm) cxm = hi;
+        }
+        VERB("%s: radio del anima %.3f mm, bala max x %.3f, vaina max x %.3f", tag, rin * 1e3, bxm * 1e3, cxm * 1e3);
+        CHECK(rin > 0.002f && rin < 0.004f, "%s: radio del anima del canon", tag);
+        /* el cartucho esta centrado en x en la ranura (centro = cx del cargador, que es 0 en este modelo): radio = max x */
+        CHECK(fabsf(bxm - rin) < 2e-5f, "%s: la bala tiene el calibre del anima", tag);
+        CHECK(fabsf(cxm - 1.1f * rin) < 2e-5f, "%s: la vaina mide 1,1 veces el calibre", tag);
+    }
+    /* extraccion por el eje del mango: el cargador barrido hacia abajo no atraviesa el mango (los puntos que aun estan sobre el
+     * suelo del pozo, y = -29 mm, siguen dentro del contorno original) */
     const WPart *mp = def_part(d, "mag");
-    CHECK(mp && fabsf(mp->axis.y + 0.967278f) < 1e-4f && fabsf(mp->axis.z - 0.253717f) < 1e-4f, "%s: eje del cargador", tag);
+    CHECK(mp && fabsf(mp->axis.y + 0.939693f) < 1e-4f && fabsf(mp->axis.z - 0.342020f) < 1e-4f, "%s: eje del cargador", tag);
+    if (mp) {
+        const float L = (mag->bmax.y - mag->bmin.y) / -mp->axis.y;   /* recorrido hasta sacarlo del todo */
+        for (int stp = 1; stp <= 3; stp++) {
+            float sdist = L * 0.25f * (float)stp, bad = 0;
+            for (uint32_t k = 0; k < mag->nv; k += 3) {   /* un vertice por triangulo */
+                float p[3] = {mag->v[k].pos[0] + mp->axis.x * sdist, mag->v[k].pos[1] + mp->axis.y * sdist, mag->v[k].pos[2] + mp->axis.z * sdist};
+                if (p[1] > -0.0289f && !inside_orig(m, p)) bad++;
+            }
+            CHECK(bad == 0, "%s: el cargador, extraido %.0f mm, atraviesa el mango (%d vertices)", tag, sdist * 1e3, (int)bad);
+        }
+    }
 }
 
 static void check_model(const uint8_t *d, size_t n, const char *stage, const WCutModel *cm) {
@@ -398,8 +443,8 @@ static void check_model(const uint8_t *d, size_t n, const char *stage, const WCu
     }
     /* material de las tapas: UV dentro de alguno de los rectángulos de material de las reglas */
     for (int q = 0; q < cm->nrules; q++) {
-        const WCutUV *uvs[2] = {&cm->rules[q].cap_piece, &cm->rules[q].cap_hole};
-        for (int k = 0; k < 2; k++) CHECK(uvs[k]->u0 >= 0 && uvs[k]->v0 >= 0 && uvs[k]->u1 <= 1 && uvs[k]->v1 <= 1, "%s: material fuera del atlas", tag);
+        const WCutUV *uvs[5] = {&cm->rules[q].cap_piece, &cm->rules[q].cap_hole, &cm->rules[q].mag.mat_body, &cm->rules[q].mag.mat_case, &cm->rules[q].mag.mat_bullet};
+        for (int k = 0; k < (cm->rules[q].mag.on ? 5 : 2); k++) CHECK(uvs[k]->u0 >= 0 && uvs[k]->v0 >= 0 && uvs[k]->u1 <= 1 && uvs[k]->v1 <= 1, "%s: material fuera del atlas", tag);
     }
     for (int i = 0; i < s.npiece; i++) {
         const WCutPiece *p = &s.piece[i];
@@ -418,8 +463,10 @@ static void check_model(const uint8_t *d, size_t n, const char *stage, const WCu
             if (p->kind[t] > WCUT_TRI_FILL) badk++;
             if (p->kind[t] != WCUT_TRI_SKIN) {
                 int inany = 0;
-                for (int q = 0; q < cm->nrules && !inany; q++) for (int k = 0; k < 2 && !inany; k++) {
-                    const WCutUV *u = k ? &cm->rules[q].cap_hole : &cm->rules[q].cap_piece; int all = 1;
+                for (int q = 0; q < cm->nrules && !inany; q++) for (int k = 0; k < 5 && !inany; k++) {
+                    const WCutRule *rq = &cm->rules[q];
+                    if (k > 1 && !rq->mag.on) break;
+                    const WCutUV *u = k == 0 ? &rq->cap_piece : k == 1 ? &rq->cap_hole : k == 2 ? &rq->mag.mat_body : k == 3 ? &rq->mag.mat_case : &rq->mag.mat_bullet; int all = 1;
                     for (int c = 0; c < 3; c++) { const float *uv = p->v[p->idx[t * 3 + c]].uv; if (uv[0] < u->u0 - 1e-5f || uv[0] > u->u1 + 1e-5f || uv[1] < u->v0 - 1e-5f || uv[1] > u->v1 + 1e-5f) all = 0; }
                     inany = all;
                 }
@@ -480,6 +527,35 @@ static void fuzz_real(const uint8_t *d, size_t n, const char *stage, const WCutM
     wload_free(&m);
 }
 
+/* parametros absurdos del generador de cargador: rechazo limpio (nunca geometria abierta ni autointersecada) y con la tabla
+ * intacta el mismo modelo sigue funcionando */
+static void mag_bad_params(const uint8_t *d, size_t n, const char *stage, const WCutModel *cm0) {
+    WLoadOpts o; wload_default_opts(&o); o.resident = stage;
+    WLoaded m; if (wload_model(d, n, stage, cm0->id, &o, &m)) return;
+    WCutRule rules[40]; WCutModel cm = *cm0; int mi = -1;
+    if (cm0->nrules > 40) { wload_free(&m); return; }
+    memcpy(rules, cm0->rules, sizeof(WCutRule) * (size_t)cm0->nrules); cm.rules = rules;
+    for (int i = 0; i < cm.nrules; i++) if (rules[i].mag.on) mi = i;
+    if (mi < 0) { wload_free(&m); return; }
+    const WCutMag base = rules[mi].mag;
+    for (int c = 0; c < 4; c++) {
+        WCutMag g = base;
+        if (c == 0) g.case_frac = 0.5f;          /* bala mas ancha que la vaina */
+        if (c == 1) g.wall_frac = 0.6f;          /* pared mayor que el semiancho: contorno invertido */
+        if (c == 2) g.dir.y = 0.1f;              /* eje casi horizontal */
+        if (c == 3) g.wall_frac = NAN;
+        rules[mi].mag = g;
+        WCutSet s; int r = wcut_run(&m, &cm, &s);
+        CHECK(r != 0, "%04x: parametros de cargador absurdos (caso %d) aceptados", cm0->id, c);
+        if (r == 0) wcut_free(&s);
+    }
+    rules[mi].mag = base;
+    WCutSet s; int r = wcut_run(&m, &cm, &s);
+    CHECK(r == 0, "%04x: la tabla original deja de funcionar", cm0->id);
+    if (r == 0) wcut_free(&s);
+    wload_free(&m);
+}
+
 int main(int argc, char **argv) {
     verbose = getenv("WCUT_VERBOSE") != NULL;
     synthetic();
@@ -492,6 +568,7 @@ int main(int argc, char **argv) {
         CHECK(wcut_model_count() == 12, "la tabla no tiene 12 modelos");
         for (int i = 0; i < wcut_model_count(); i++) check_model(d, n, stage, wcut_model_at(i));
         for (int i = 0; i < wcut_model_count(); i++) fuzz_real(d, n, stage, wcut_model_at(i));
+        mag_bad_params(d, n, stage, wcut_find(0x21b6));
         CHECK(wcut_find(0x0000) == NULL, "id inexistente");
         free(d);
     }

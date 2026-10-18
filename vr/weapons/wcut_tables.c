@@ -42,9 +42,16 @@ NAMES(N_MINE, "body", "plate", "sight", "legl", "legr");
 #define PH 32
 #define PD MAT(69, 12, PW, PH)
 #define PM MAT(69, 20, PW, PH)
-/* eje del cargador = el de w_pist (inclinación 14,7 grados hacia atrás al bajar): UY/UZ del "arriba" del cargador */
-#define MAG_UY 0.967278f
-#define MAG_UZ -0.253717f
+/* eje del cargador = el de w_pist = eje del mango medido en el modelo: la pared delantera del mango sube con pendiente
+ * 0,327 (18,1 grados) y la trasera con 0,403 (22,0), así que el eje que las reparte (cizalla del cargador) es de 20 grados:
+ * UY/UZ = (cos, -sin) de 20 grados */
+#define MAG_UY 0.939693f
+#define MAG_UZ -0.342020f
+/* materiales del cargador (bloques 3x3 del propio atlas: el más oscuro metálico para el cuerpo, gris claro para la vaina,
+ * gris medio para la bala; el atlas de la pistola no tiene latón ni cobre) */
+#define MAG_BODY MAT(38, 0, PW, PH)
+#define MAG_CASE MAT(50, 0, PW, PH)
+#define MAG_BULLET MAT(37, 16, PW, PH)
 #define PIST_SLIDE \
     {.name = "slide", .sel = CLIP(0, 68, -125, 30, 21.8f, 120), .cap_piece = PD, .cap_hole = PD, .pivot = PV(0, 0, 0), \
      .channel = WCH_SLIDE, .axis = AX(0, 0, 1), .note = "y >= 46,2 mm (junta de la textura); recorre +Z"}
@@ -56,13 +63,16 @@ NAMES(N_MINE, "body", "plate", "sight", "legl", "legr");
      .tube = {.on = 1, .ref = "slide", .axis_y = WCUT_MM(62), .r_frac = 0.5f, .bore_frac = 0.55f, .length = WCUT_MM(120), \
               .bore_depth = WCUT_MM(8), .gap = WCUT_MM(0.3f), .segs = 20}, \
      .note = "tubo hueco generado dentro de un canal de la corredera; visible al retroceder la corredera"}
-/* cargador: SOLO la base (franja de 7 mm del fondo de la empuñadura, a ras del fondo) es piel visible; el resto del
- * cargador es un prisma interior (extrusión de la base hacia arriba siguiendo la inclinación del mango, sección al 80 %)
- * que queda oculto dentro de la empuñadura y da cuerpo al cargador extraído. */
+/* cargador: la pieza extraida es la franja de 7 mm del fondo del mango (piel original, a ras del fondo = la base visible con el
+ * cargador insertado); sobre su cara superior se genera el cargador (ver WCutMag): cuerpo con la seccion del mango inset por
+ * la pared, cizallado a lo largo del eje, hasta bajo la corredera, labios y bala arriba. Queda oculto dentro del mango. */
 #define PIST_MAG \
     {.name = "mag", .sel = CLIP(0, -40.5f, -56.5f, 15, 11.5f, 30), .cap_piece = PM, .cap_hole = PD, \
      .pivot = PV(0, -29, -59), .channel = WCH_MAG, .axis = AX(0, -MAG_UY, -MAG_UZ), \
-     .extrude = WCUT_EXT(0, MAG_UY, MAG_UZ, 30, 0.8f), .note = "base del fondo del mango + prisma interior"}
+     .mag = {.on = 1, .slide = "slide", .bore = "barrel", .dir = {0, MAG_UY, MAG_UZ}, .clear = WCUT_MM(0.8f), .wall_frac = 0.13f, \
+             .lip_frac = 0.10f, .lip_keep = 0.75f, .rec_frac = 0.9f, .case_frac = 1.1f, .case_len = 1.9f, .bullet_len = 1.1f, \
+             .mat_body = MAG_BODY, .mat_case = MAG_CASE, .mat_bullet = MAG_BULLET}, \
+     .note = "base del fondo del mango + cargador completo generado (cuerpo, labios, ranura y cartucho)"}
 #define PIST_TRIGGER \
     {.name = "trigger", .sel = CLIP(0, 6, -92, 3, 6, 6), .cap_piece = PM, .cap_hole = PD, .pivot = PV(0, 13, -92), \
      .channel = WCH_TRIGGER, .axis = AX(-0.35f, 0, 0), .rotates = 1, .note = "volumen que cruza la cara frontal de la empuñadura"}
@@ -209,18 +219,30 @@ static const WCutRule R_MINE[] = {
     {.name = "sight", .sel = CLIP(-18, 100, -207, 8, 6, 30), .cap_piece = NM, .cap_hole = ND, .pivot = NOPIV, .note = "alza: losa de la cara superior"},
 };
 
+/* Sellados (ver WCutSeal): contornos abiertos heredados del original que dejan el cuerpo sin cerrar. */
+static const WCutSeal S_RIFLE[] = {
+    {.piece = "body", .mat = RD, .note = "boca hueca del cañon (4 aristas): tapa oscura = ánima"},
+};
+static const WCutSeal S_SNIPER[] = {
+    {.piece = "body", .mat = SD, .note = "boca hueca del cañon (4 aristas): tapa oscura = ánima"},
+};
+static const WCutSeal S_GUIDED[] = {
+    {.piece = "tube", .mat = GD, .note = "hueco del vientre del tubo (6 aristas) que ocupa la cuña: parche oscuro"},
+};
+
 #define FIX (WCUT_FIX_UPRIGHT | WCUT_FIX_WINDING)
 #define NR(a) ((int)(sizeof(a) / sizeof(*(a))))
 /* src_tris y bounds (mm, marco corregido) identifican el modelo: wcut_run devuelve -4 si la tabla se aplica a otro. */
-#define MODEL(ID, TAG, BODY, NAMES_, RULES, WEAPON, TRIS, BB, NOTE) \
+#define SEALS(a) .seals = a, .nseals = NR(a)
+#define MODEL(ID, TAG, BODY, NAMES_, RULES, WEAPON, TRIS, BB, NOTE, ...) \
     {.id = ID, .tag = TAG, .fix = FIX, .body = BODY, .names = NAMES_, .rules = RULES, .nrules = NR(RULES), .note = NOTE, \
-     .weapon = WEAPON, .src_tris = TRIS, .bounds = BB}
+     .weapon = WEAPON, .src_tris = TRIS, .bounds = BB, ##__VA_ARGS__}
 static const WCutModel MODELS[] = {
     MODEL(0x36f6, "pist_supp", "frame", N_PIST, R_PIST, "pist", 52, WCUT_BB(-13, -36, -371, 13, 75, -34), "pistola con supresor (el cuerpo desnudo es el mismo que 21b6)"),
     MODEL(0x21b6, "pist", "frame", N_PIST, R_PIST_BARE, "pist", 36, WCUT_BB(-11, -36, -217, 11, 72, -34), "pistola sin supresor"),
-    MODEL(0x4725, "rifle", "body", N_RIFLE, R_RIFLE, "rifle", 70, WCUT_BB(-18, -64, -486, 18, 166, 251), "fusil bullpup; el cañón (componente 0) queda con el cuerpo"),
-    MODEL(0x2d3b, "sniper", "body", N_SNIPER, R_SNIPER, "sniper", 106, WCUT_BB(-22, -46, -782, 22, 162, 271), "rifle de cerrojo; mira y culata quedan en el cuerpo"),
-    MODEL(0x15a9, "guided", "tube", N_GUIDED, R_GUIDED, "guided", 81, WCUT_BB(-120, -63, -456, 60, 229, 543), "lanzador guiado; el misil es el modelo 76ab"),
+    MODEL(0x4725, "rifle", "body", N_RIFLE, R_RIFLE, "rifle", 70, WCUT_BB(-18, -64, -486, 18, 166, 251), "fusil bullpup; el cañón (componente 0) queda con el cuerpo", SEALS(S_RIFLE)),
+    MODEL(0x2d3b, "sniper", "body", N_SNIPER, R_SNIPER, "sniper", 106, WCUT_BB(-22, -46, -782, 22, 162, 271), "rifle de cerrojo; mira y culata quedan en el cuerpo", SEALS(S_SNIPER)),
+    MODEL(0x15a9, "guided", "tube", N_GUIDED, R_GUIDED, "guided", 81, WCUT_BB(-120, -63, -456, 60, 229, 543), "lanzador guiado; el misil es el modelo 76ab", SEALS(S_GUIDED)),
     MODEL(0x76ab, "guided_missile", "round", N_MISSILE, R_MISSILE_G, NULL, 66, WCUT_BB(-62, -63, -318, 62, 63, 405), "misil del lanzador guiado (= pieza 'round' del lanzador)"),
     MODEL(0x57f8, "aa", "body", N_AA, R_AA, "aa", 88, WCUT_BB(-130, -62, -447, 134, 229, 927), "lanzador antiaéreo; el misil es 9a90"),
     MODEL(0x9a90, "aa_missile", "round", N_MISSILE, R_MISSILE_A, NULL, 70, WCUT_BB(-109, -109, -108, 109, 109, 295), "misil antiaéreo"),

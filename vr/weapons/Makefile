@@ -2,8 +2,9 @@
 #   make -C vr/weapons lib                     compila build/libweapons.a
 #   make -C vr/weapons test                    pruebas de núcleo, armas y registro (headless)
 #   make -C vr/weapons test-san                lo mismo con -fsanitize=address,undefined (en build-san/)
-#   make -C vr/weapons test-wload              prueba del cargador de modelos (necesita datos; sin ellos se omite)
+#   make -C vr/weapons test-wload              solo la prueba del cargador de modelos (va tambien en test/test-san; sin gamedata/stages.bin se omite)
 #   (test_wcut, el cortador de modelos, va en `make test`: la parte con modelos reales se omite sin gamedata/stages.bin)
+#   make -C vr/weapons cutprev                 compila build/cutprev: modelo original ya cortado (wcut) con textura y canales -> PNG (ver tools/wmodel/cutprev.c)
 #   make -C vr/weapons preview W=pist STATE="0.5:trig0=1;0.6:trig0=0" OBJ=ruta.obj VIEW=three OUT=/ruta/a.png
 #       W=id del arma (registrada), STATE=guion --sim (ver cabecera de tools/wmodel/preview.c),
 #       OBJ=modelo .obj extraído de los datos del usuario (se enlaza por nombre de hueco de mesh),
@@ -32,12 +33,15 @@ $(B)/libweapons.a: $(OBJS)
 	rm -f $@ && ar rcs $@ $^
 $(B)/preview: $(PV)/preview.c $(PV)/wprev.c $(PV)/wprev.h $(OBJS)
 	$(CC) $(CFLAGS) -I. $(PV)/preview.c $(PV)/wprev.c $(OBJS) -lm -o $@
+$(B)/cutprev: $(PV)/cutprev.c $(PV)/wprev.c $(PV)/wprev.h $(OBJS)
+	$(CC) $(CFLAGS) -I. $(PV)/cutprev.c $(PV)/wprev.c $(OBJS) -lm -o $@
+cutprev: $(B)/cutprev
 preview: $(B)/preview
 	$(B)/preview $(W) -o $(OUT) --view $(VIEW) --mode $(MODE) $(if $(OBJ),--obj $(OBJ)) $(if $(STATE),--sim "$(STATE)") $(EXTRA)
 
 # pruebas: cada test_<x>.c enlaza con los objetos; test_registry enlaza contra el .a (comprueba que el
 # registro sobrevive al enlazado estático)
-TESTS := $(filter-out $(B)/test_wload $(B)/test_registry,$(patsubst test_%.c,$(B)/test_%,$(wildcard test_*.c))) $(B)/test_registry
+TESTS := $(filter-out $(B)/test_registry,$(patsubst test_%.c,$(B)/test_%,$(wildcard test_*.c))) $(B)/test_registry
 $(B)/test_registry: test_registry.c $(B)/libweapons.a
 	$(CC) $(CFLAGS) -I. test_registry.c -L$(B) -lweapons -lm -o $@
 $(B)/test_%: test_%.c $(OBJS)
@@ -47,8 +51,8 @@ test: $(TESTS)
 test-san:
 	$(MAKE) test B=build-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 test-wload: $(B)/test_wload
-	$(B)/test_wload $(WLOAD_ARGS)
+	$(B)/test_wload $(WLOAD_ARGS)   # WLOAD_ARGS="<archivo_de_stages> <stage>" opcional
 clean:
 	rm -rf build build-san
-.PHONY: all lib preview test test-san test-wload clean
+.PHONY: all lib preview cutprev test test-san test-wload clean
 -include $(OBJS:.o=.d)
