@@ -3,6 +3,7 @@
  * la pausa. Todo el estado del runtime vive en ese hilo; el resto de hilos solo usan las funciones
  * de este fichero (mutex) y spu_pull (mutex propio de la SPU). */
 #include "host.h"
+#include "host_hooks.h"
 #include <errno.h>
 #include <pthread.h>
 #include <setjmp.h>
@@ -13,6 +14,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include "cdrom.h"
+#include "disc_img.h"
 #include "cpu.h"
 #include "gpu.h"
 #include "hle.h"
@@ -23,10 +25,8 @@
 extern jmp_buf rt_fatal_jmp;
 extern int rt_fatal_armed;
 
-/* Punto de enganche para imágenes BIN/CUE: cuando cdrom.c sepa montar una imagen (vía disc_img.h) debe
- * definir `int cd_open_image(const char *path)` (>0 = disco montado). Mientras no exista (símbolo débil
- * nulo), las entradas que no son directorios se ignoran. */
-extern int cd_open_image(const char *path) __attribute__((weak));
+static MvHostHooks hooks;
+void mv_host_set_hooks(const MvHostHooks *h) { if (h) hooks = *h; else memset(&hooks, 0, sizeof hooks); }
 
 #define FRAME_NS 20000000L   /* VBlank PAL virtual: 50 Hz */
 
@@ -152,7 +152,6 @@ static void pace(void) {
 /* ---- Gancho de VBlank (hilo de emulación) ---- */
 
 static void on_frame(Cpu *c, uint32_t f) {
-    (void)c; (void)f;
     atomic_store(&frames, f);
     pthread_mutex_lock(&MX);
     uint16_t b = pad_req.buttons;
@@ -165,6 +164,8 @@ static void on_frame(Cpu *c, uint32_t f) {
     uint8_t sm, lg;
     pad_get_rumble(0, &sm, &lg);
     atomic_store(&rumble_pack, (uint16_t)(sm << 8 | lg));
+
+    if (hooks.frame) hooks.frame(c, f);
 
     pthread_mutex_lock(&MX);
     int was_paused = 0;
@@ -187,14 +188,24 @@ static void *emu_main(void *arg) {
         memcpy(&t, buf + 0x18, 4); memcpy(&sz, buf + 0x1C, 4);
         memcpy(&psx_ram[t & 0x1FFFFF], buf + 0x800, sz);
         (void)n;
+        if (hooks.exe_loaded) hooks.exe_loaded(psx_ram, t, sz);
     }
 #ifdef MV_NOGEN
     {   /* sin código generado: el punto de entrada es el de la cabecera y las HLE se enlazan por firmas */
         uint32_t t, sz;
         memcpy(&t, buf + 0x18, 4); memcpy(&sz, buf + 0x1C, 4);
         rt_entry = pc;
-        if (hle_bind_file(sigs_path, t, sz, pc) < 0) {
+        int nb = hle_bind_file(sigs_path, t, sz, pc);
+        if (nb < 0) {
             set_error("No se pudo leer el fichero de firmas del SDK.");
+            pthread_mutex_lock(&MX); state = MV_HOST_ERROR; pthread_mutex_unlock(&MX);
+            return NULL;
+        }
+        /* Firmas ausentes o de otro ejecutable: con la mayoría de las HLE sin enlazar el juego correría el código original
+         * (accesos a hardware inexistente) y se colgaría a medias. Se tolera alguna suelta (la edición real enlaza todas menos 1). */
+        if (nb == 0 || (unsigned)nb * 4u < ((unsigned)nb + hle_bind_missing()) * 3u) {
+            fprintf(stderr, "[host] firmas: solo %d funciones HLE enlazadas, %u sin enlazar\n", nb, hle_bind_missing());
+            set_error("El ejecutable del disco no coincide con las firmas incluidas en esta compilación. Vuelve a generar la app o revisa que el disco sea el esperado.");
             pthread_mutex_lock(&MX); state = MV_HOST_ERROR; pthread_mutex_unlock(&MX);
             return NULL;
         }
@@ -203,6 +214,7 @@ static void *emu_main(void *arg) {
 #else
     if (pc != rt_entry) fprintf(stderr, "[host] aviso: pc 0x%08x != entrada recompilada 0x%08x\n", pc, rt_entry);
 #endif
+    if (hooks.bound) hooks.bound();
 
     Cpu c = {0};
     c.r[28] = gp;
@@ -210,6 +222,7 @@ static void *emu_main(void *arg) {
     c.r[31] = 0;
     gte_reset();
     gpu_reset();
+    if (hooks.start) hooks.start();
     rt_host_frame = on_frame;
     rt_fatal_armed = 1;
     if (setjmp(rt_fatal_jmp)) {
@@ -230,21 +243,18 @@ static void *emu_main(void *arg) {
 
 /* ---- API ---- */
 
-/* Monta cada entrada de la lista: directorio -> cd_open; fichero -> cd_open_image si existe. */
+/* Monta cada entrada de la lista: carpeta extraída, .cue o .bin (cd_open decide por lo que sea). */
 static int mount_discs(const char *list) {
     char *dup = strdup(list);
-    int images = 0;
     if (!dup) return 0;
     char *sv = NULL;
     for (char *e = strtok_r(dup, ";", &sv); e; e = strtok_r(NULL, ";", &sv)) {
         struct stat st;
         if (!*e || stat(e, &st)) { fprintf(stderr, "[host] disco no accesible: '%s'\n", e); continue; }
-        if (S_ISDIR(st.st_mode)) cd_open(e);
-        else if (cd_open_image) { if (cd_open_image(e) > 0) images++; }
-        else fprintf(stderr, "[host] imagen de disco no soportada todavía: '%s'\n", e);
+        cd_open(e);
     }
     free(dup);
-    return cd_disc_count() + images;
+    return cd_disc_count();
 }
 
 static int start_impl(const char *exe, const char *disc_dir, const char *card_dir);
@@ -285,7 +295,7 @@ static int start_impl(const char *exe, const char *disc_dir, const char *card_di
         FILE *sf = sp && *sp ? fopen(sp, "rb") : NULL;
         if (!sf) { set_error("Falta el fichero de firmas del SDK."); return -1; }
         fclose(sf);
-        snprintf(sigs_path, sizeof sigs_path, "%s", sp);
+        if (sp != sigs_path) snprintf(sigs_path, sizeof sigs_path, "%s", sp);   /* (src == dst sería comportamiento indefinido) */
     }
 #endif
     if (!disc_dir || !*disc_dir) { set_error("No se encontró ningún disco."); return -3; }
@@ -323,7 +333,28 @@ static int start_impl(const char *exe, const char *disc_dir, const char *card_di
     return 0;
 }
 
-int mv_host_has_disc_img(void) { return cd_open_image != NULL; }
+int mv_host_has_disc_img(void) { return 1; }
+
+int mv_host_scan_discs(const char *dir, char *out, size_t cap) {
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    if (!dir) return 0;
+    static DiscEntry ents[16];
+    int n = disc_scan_dir(dir, ents, 16), w = 0;
+    for (int i = 0; i < n; i++) {
+        size_t l = strlen(ents[i].path);
+        if ((size_t)w + l + 2 > cap) { n = i; break; }
+        w += snprintf(out + w, cap - (size_t)w, "%s%s", i ? ";" : "", ents[i].path);
+    }
+    return n;
+}
+
+int mv_host_extract_exe(const char *disc, const char *outfile) {
+    if (!disc || !outfile) return -1;
+    struct stat st;
+    if (stat(disc, &st)) return -1;
+    return disc_extract_dataexe(disc, S_ISDIR(st.st_mode), outfile);
+}
 
 MvHostState mv_host_state(void) {
     pthread_mutex_lock(&MX);

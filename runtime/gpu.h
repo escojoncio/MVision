@@ -133,6 +133,9 @@ const GpuDrawList *gpu_capture_frame(void);
 void gpu_capture_vblank(void);
 /* Listas perdidas por cola llena (la siguiente entregada trae vram_init). */
 uint32_t gpu_capture_dropped(void);
+/* Número de secuencia (GpuOp.seq) que tendrá la PRÓXIMA primitiva capturada: permite a un sustituto HLE delimitar qué
+ * primitivas emitió una llamada (p.ej. un envío de lista al GPU): las que cumplan antes <= seq < después. */
+uint32_t gpu_capture_seq(void);
 
 /* Enlace antiguo (solo float, sin vista) con la GTE; el actual es gpu_capture_hiprec / GpuHpHook (abajo). Dado el SXY entero que escribió el juego (sin offset, con signo), devuelve 1 y
  * rellena la posición float si el último RTPS/RTPT produjo exactamente ese SXY. La GTE (gte.c) mantendrá una

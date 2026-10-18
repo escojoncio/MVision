@@ -31,6 +31,10 @@ $(OUT)/test_interp: $(RT) test_interp.c $(wildcard *.h)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_interp.c $(LDLIBS)
 
+$(OUT)/test_cdimg: $(RT) test_cdimg.c $(wildcard *.h)
+	@mkdir -p $(OUT)
+	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_cdimg.c $(LDLIBS)
+
 $(OUT)/test_hlebind: $(RT) test_hlebind.c $(wildcard *.h)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_hlebind.c $(LDLIBS)
@@ -44,17 +48,20 @@ $(OUT)/headless_interp: $(RT) headless.c nogen.c $(wildcard *.h)
 .PHONY: test test_sys headless_interp
 headless_interp: $(OUT)/headless_interp
 
-test: $(OUT)/test_runtime $(OUT)/test_interp $(OUT)/test_hlebind
+test: $(OUT)/test_runtime $(OUT)/test_interp $(OUT)/test_hlebind $(OUT)/test_cdimg
 	$(OUT)/test_runtime
 	$(OUT)/test_interp
 	$(OUT)/test_hlebind
+	$(OUT)/test_cdimg
 
 # Tabla nombre -> hle_<nombre> (hle_table.c va en el repo; esta regla la regenera tras tocar hle*.txt).
+# Incluye las HLE de la capa de cámara VR (vr/camera/hle_vrcam.txt); hle_vrcam_weak.c aporta los símbolos si no se enlaza vr_camera_hle.c.
+HLETXT = $(wildcard hle*.txt) ../vr/camera/hle_vrcam.txt
 .PHONY: hle_table check_hle_table
 hle_table:
-	python3 ../tools/recomp/hletab.py $(wildcard hle*.txt) > hle_table.c
+	python3 ../tools/recomp/hletab.py $(HLETXT) > hle_table.c
 check_hle_table:
-	python3 ../tools/recomp/hletab.py $(wildcard hle*.txt) | diff -q - hle_table.c
+	python3 ../tools/recomp/hletab.py $(HLETXT) | diff -q - hle_table.c
 
 test_sys: $(OUT)/test_sys
 	$(OUT)/test_sys

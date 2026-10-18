@@ -240,6 +240,29 @@ uint32_t hle_bind_addr(const char *name) {
 }
 unsigned hle_bind_missing(void) { return nmissing; }
 
+/* HLE de dirección fija (no se buscan por firma): hle_bind las omite sin avisar y se registran aparte con hle_bind_fixed. */
+#define MAX_FIXED 16
+static const char *fixed_decl[MAX_FIXED];
+static unsigned nfixed_decl;
+void hle_bind_declare_fixed(const char *name) {
+    for (unsigned i = 0; i < nfixed_decl; i++) if (!strcmp(fixed_decl[i], name)) return;
+    if (nfixed_decl < MAX_FIXED) fixed_decl[nfixed_decl++] = name;
+}
+static int is_fixed_decl(const char *name) {
+    for (unsigned i = 0; i < nfixed_decl; i++) if (!strcmp(fixed_decl[i], name)) return 1;
+    return 0;
+}
+int hle_bind_fixed(const char *name, uint32_t addr) {
+    if ((addr & 3) || (addr & 0x1FFFFFFFu) < 0x10000u || (addr & 0x1FFFFFFFu) >= PSX_RAM_SIZE) return -1;
+    for (unsigned t = 0; t < hle_table_count; t++) {
+        if (strcmp(hle_table[t].name, name)) continue;
+        unsigned before = nbound;
+        bound_add(hle_table[t].name, (addr & 0x1FFFFFFFu) | 0x80000000u, hle_table[t].fn);
+        return nbound > before ? 0 : -1;
+    }
+    return -1;
+}
+
 void interp_call_raw(Cpu *c, uint32_t entry);
 int hle_bind_orig(Cpu *c, const char *name) {
     uint32_t a = hle_bind_addr(name);
@@ -441,9 +464,12 @@ int hle_bind(const char *json, size_t len, uint32_t base, uint32_t size, uint32_
     build_starts(base, raw, entry);
     match_all(sg, (unsigned)n, base);
     int verbose = getenv("MV_HLELOG") != NULL, bound_n = 0;
+    unsigned searched = 0;
     for (unsigned t = 0; t < hle_table_count; t++) {
         const char *nm = hle_table[t].name;
         const Sig *hit = NULL;
+        if (is_fixed_decl(nm)) continue;   /* dirección fija: la registra hle_bind_fixed */
+        searched++;
         for (int i = 0; i < n; i++) if (sg[i].hle && !strcmp(sg[i].name, nm)) { hit = &sg[i]; break; }
         if (!hit) { fprintf(stderr, "[hle] aviso: '%s' no está en el fichero de firmas; se conserva el código original\n", nm); nmissing++; continue; }
         if (!hit->found) { fprintf(stderr, "[hle] aviso: '%s' no se encuentra en el ejecutable; se conserva el código original\n", nm); nmissing++; continue; }
@@ -456,7 +482,7 @@ int hle_bind(const char *json, size_t len, uint32_t base, uint32_t size, uint32_
     }
     free(sg); free(mw); free(raw); free(hkey); free(hpos); free(starts);
     rawp = NULL; mw = NULL; hkey = NULL; hpos = NULL; starts = NULL;
-    fprintf(stderr, "[hle] %d/%u funciones HLE enlazadas por firmas\n", bound_n, hle_table_count);
+    fprintf(stderr, "[hle] %d/%u funciones HLE enlazadas por firmas\n", bound_n, searched);
     return bound_n;
 }
 

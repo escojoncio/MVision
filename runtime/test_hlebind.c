@@ -282,6 +282,33 @@ static void t_setjmp(Cpu *c) {
     EQ(c->r[RA], 0xDEAD0000u);
 }
 
+/* HLE de dirección fija (capa de cámara VR): hle_bind las omite sin contarlas como faltantes y hle_bind_fixed las registra. */
+static void t_fixed(Cpu *c) {
+    build_text();
+    build_sigs();
+    hle_bind_declare_fixed("vrcam_view");
+    hle_bind_declare_fixed("vrcam_view");      /* idempotente */
+    int n = hle_bind(json, jn, BASE, a_end - BASE, BASE);
+    EQ(n, 5);
+    EQ(hle_bind_missing(), hle_table_count - 5 - 1);   /* vrcam_view no se busca por firma */
+    EQ(hle_bind_fixed("vrcam_view", a_VSync + 4 * 3), 0);
+    EQ(hle_bind_addr("vrcam_view"), a_VSync + 4 * 3);
+    EQ(hle_bind_lookup(a_VSync + 4 * 3) != NULL, 1);
+    EQ(hle_bind_is(a_VSync + 4 * 3), 1);
+    EQ(hle_bind_fixed("vrcam_view", a_VSync + 4 * 3), -1);   /* ya ocupada */
+    EQ(hle_bind_fixed("no_existe", a_VSync + 8), -1);        /* nombre fuera de hle_table */
+    EQ(hle_bind_fixed("vrcam_trans", a_VSync + 2), -1);      /* no alineada */
+    EQ(hle_bind_fixed("vrcam_trans", 0x80000000u), -1);      /* fuera de la RAM útil */
+    EQ(hle_bind_fixed("vrcam_trans", 0x80200000u), -1);
+    /* el sustituto débil delega en el original: hle_bind_orig ejecuta el código interpretado de esa dirección */
+    reset(c);
+    c->r[31] = 0xFFFFFF00u;
+    EQ(hle_bind_orig(c, "vrcam_view"), 1);
+    /* un hle_bind nuevo borra los enlaces anteriores, también los fijos */
+    n = hle_bind(json, jn, BASE, a_end - BASE, BASE);
+    EQ(hle_bind_addr("vrcam_view"), 0);
+}
+
 int main(void) {
     Cpu c;
     t_hash();
@@ -290,6 +317,7 @@ int main(void) {
     t_bind();
     t_hle_dispatch(&c);
     t_setjmp(&c);
+    t_fixed(&c);
     printf(fails ? "%d fallos\n" : "enlace HLE por firmas: todas las pruebas OK\n", fails);
     return fails != 0;
 }

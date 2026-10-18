@@ -61,3 +61,7 @@ typedef struct {
  * Descarta duplicados del mismo disco (misma identidad; gana la imagen sobre la carpeta), ordena por
  * serial/arranque (el disco 1 lleva el código más bajo) y asigna id.number = 1..n. Devuelve cuántos. */
 int disc_scan_dir(const char *dir, DiscEntry out[], int max);
+
+/* Copia el ejecutable de datos del disco (DiscId.datadir/dataexe) a "outfile". "path" = .cue/.bin o carpeta (is_dir).
+ * 0 = bien; -1 = el disco no es legible, no tiene ejecutable de datos o falló la escritura. */
+int disc_extract_dataexe(const char *path, int is_dir, const char *outfile);

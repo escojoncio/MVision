@@ -61,6 +61,11 @@ void hle_VSyncCallback(Cpu *c);
 void hle_firstfile(Cpu *c);
 void hle_longjmp(Cpu *c);
 void hle_setjmp(Cpu *c);
+void hle_vrcam_draw(Cpu *c);
+void hle_vrcam_overscan(Cpu *c);
+void hle_vrcam_padorg(Cpu *c);
+void hle_vrcam_trans(Cpu *c);
+void hle_vrcam_view(Cpu *c);
 
 const HleEntry hle_table[] = {
     {"CdControl", hle_CdControl},
@@ -123,6 +128,11 @@ const HleEntry hle_table[] = {
     {"firstfile", hle_firstfile},
     {"longjmp", hle_longjmp},
     {"setjmp", hle_setjmp},
+    {"vrcam_draw", hle_vrcam_draw},
+    {"vrcam_overscan", hle_vrcam_overscan},
+    {"vrcam_padorg", hle_vrcam_padorg},
+    {"vrcam_trans", hle_vrcam_trans},
+    {"vrcam_view", hle_vrcam_view},
     {0, 0}
 };
-const unsigned hle_table_count = 60;
+const unsigned hle_table_count = 65;

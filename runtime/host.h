@@ -21,8 +21,8 @@ typedef enum {
 
 /* Carga el ejecutable, monta los discos y arranca el hilo de emulación.
  *  exe      ruta del ejecutable principal (formato de consola).
- *  disc_dir lista separada por ';' de discos: directorio con los ficheros extraídos o, si existe
- *           cd_open_image (ver host.c), fichero de imagen. Puede ser NULL/"" (sin disco: error).
+ *  disc_dir lista separada por ';' de discos: directorio con los ficheros extraídos o imagen (.cue / .bin,
+ *           ver disc_img.h). Puede ser NULL/"" (sin disco: error).
  *  card_dir directorio de la tarjeta de memoria (se crea "card0.mcd" si falta); NULL = sin tarjeta.
  * Devuelve 0 si arrancó; <0 si falló (texto en mv_host_error()). */
 int mv_host_start(const char *exe, const char *disc_dir, const char *card_dir);
@@ -32,8 +32,15 @@ int mv_host_start(const char *exe, const char *disc_dir, const char *card_dir);
  * Sin fichero legible, mv_host_start devuelve -1. En el runtime recompilado se ignora. */
 void mv_host_set_sigs(const char *path);
 
-/* 1 si hay lector de imagen de disco enlazado (cd_open_image), 0 si solo hay ficheros extraídos. */
+/* 1 si hay lector de imagen de disco enlazado (siempre; se conserva por compatibilidad). */
 int mv_host_has_disc_img(void);
+
+/* Busca discos en "dir" (.cue, .bin sueltos, carpetas con SYSTEM.CNF; imagen preferida sobre carpeta, orden de disco).
+ * Escribe en "out" la lista de rutas separada por ';' (formato de mv_host_start). Devuelve cuántos discos (0 = ninguno). */
+int mv_host_scan_discs(const char *dir, char *out, size_t cap);
+
+/* Extrae el ejecutable de datos del disco "disc" (.cue/.bin o carpeta) al fichero "outfile". 0 = bien, <0 = error. */
+int mv_host_extract_exe(const char *disc, const char *outfile);
 
 MvHostState mv_host_state(void);
 /* Último error (castellano, cadena estática o copia interna estable); "" si no hay. */
@@ -67,6 +74,13 @@ void mv_host_set_turbo(int on);
 void mv_vr_set_head(const float m[16], double t);
 /* Devuelve 1 si hay pose publicada (copiada en m; t puede ser NULL), 0 si aún no (m intacta). */
 int mv_vr_get_head(float m[16], double *t);
+/* Olvida la pose (al cerrar el espacio inmersivo): la cámara VR del juego se desactiva. */
+void mv_vr_clear_head(void);
+/* Giro del espacio de juego del usuario (giro por pasos / suave del mando): grados, + = a la IZQUIERDA. Se acumula y se
+ * aplica en el siguiente VBlank. Thread-safe. */
+void mv_vr_turn(float deg);
+/* Pide recentrar la cámara VR del juego (la posición y mirada actuales de la cabeza pasan a ser el origen). Thread-safe. */
+void mv_vr_recenter(void);
 
 #ifdef __cplusplus
 }

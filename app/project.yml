@@ -1,0 +1,74 @@
+# Proyecto de visionOS (XcodeGen). Se genera con: cd app && ./stage.sh && xcodegen generate
+# Los fuentes C del runtime y de vr/ se copian a .stage/ con stage.sh (no entran al repo ni llevan datos del juego:
+# el runtime corre en modo sin código generado, MV_NOGEN, y el ejecutable sale del disco del usuario).
+name: MVision
+options:
+  bundleIdPrefix: app.mvision
+  deploymentTarget:
+    visionOS: "1.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: NO
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    GCC_GENERATE_DEBUGGING_SYMBOLS: NO
+    DEBUG_INFORMATION_FORMAT: dwarf
+targets:
+  MVision:
+    type: application
+    platform: visionOS
+    sources:
+      - path: Sources
+      - path: .stage/runtime
+        compilerFlags: ["-O2", "-foptimize-sibling-calls", "-Wno-unused-label", "-Wno-unused-but-set-variable"]
+      - path: .stage/vr
+        compilerFlags: ["-O2"]
+      - path: .stage/metal
+      - path: .stage/extras
+        optional: true
+      - path: .stage/res
+        optional: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.mvision.player
+        TARGETED_DEVICE_FAMILY: "7"
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging-Header.h
+        # MV_HAVE_PS1RENDERER desactiva el renderer de relleno (XRStubRenderer.swift): RenderPS1.swift es el real.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MV_HAVE_PS1RENDERER"
+        # MV_NOGEN: intérprete, sin código derivado del juego en el binario.
+        GCC_PREPROCESSOR_DEFINITIONS: ["$(inherited)", "MV_NOGEN=1"]
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/.stage/runtime"
+          - "$(SRCROOT)/.stage/vr/scene"
+          - "$(SRCROOT)/.stage/vr/bridge"
+          - "$(SRCROOT)/.stage/vr/camera"
+          - "$(SRCROOT)/.stage/vr/input"
+          - "$(SRCROOT)/.stage/vr/host"
+          - "$(SRCROOT)/.stage/metal"
+        MTL_HEADER_SEARCH_PATHS: "$(SRCROOT)/.stage/metal"
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
+        CLANG_ENABLE_MODULES: YES
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: MVision
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true   # ventana + ImmersiveSpace (XRImmersiveScene)
+          UIApplicationPreferredDefaultSceneSessionRole: UIWindowSceneSessionRoleApplication
+        # Seguimiento de la cabeza (ARKit WorldTrackingProvider) en el espacio inmersivo.
+        NSWorldSensingUsageDescription: "Se usa el seguimiento de la posición de tu cabeza para colocar la escena en el espacio y moverla contigo."
+        # Seguimiento de los mandos Sense (poses de las manos) vía ARKit AccessoryTrackingProvider.
+        NSAccessoryTrackingUsageDescription: "Se usa el seguimiento de los mandos para moverte y apuntar con ellos dentro del juego."
+        GCSupportsControllerUserInteraction: true

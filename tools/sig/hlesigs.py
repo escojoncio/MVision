@@ -9,8 +9,14 @@ referencia (role "anchor", por defecto 4), que son las anclas con las que hlebin
 por distancia/orden. Formato y algoritmo de emparejamiento: cabecera de runtime/hlebind.c.
 El fichero resultante va dentro del IPA (no se sube al repo): se genera en CI (job `reference`).
 """
+import hashlib
 import json
 import sys
+
+
+def hname(n):
+    """Nombre opaco con el que build.yml guarda las funciones en el artefacto sigs-ref (no revela símbolos externos)."""
+    return "h:" + hashlib.sha1(n.encode()).hexdigest()[:16]
 
 
 def main(a):
@@ -37,6 +43,10 @@ def main(a):
         fcount[s["full"]] = fcount.get(s["full"], 0) + 1
         pcount[s["prefix"]] = pcount.get(s["prefix"], 0) + 1
     idx = {s["name"]: i for i, s in enumerate(sigs)}
+    # sigs_ref puede traer los nombres en claro o como "h:<sha1>" (CI): se busca por ambos.
+    for n in names:
+        if n not in idx and hname(n) in idx:
+            idx[n] = idx[hname(n)]
     missing = sorted(n for n in names if n not in idx)
     for n in names:
         i = idx.get(n)
@@ -49,6 +59,9 @@ def main(a):
     for i in sorted(keep):
         s = dict(sigs[i])
         s["role"] = keep[i]
+        # Solo las HLE conservan nombre (los de runtime/hle*.txt, ya públicos); las anclas se anonimizan para que ni el IPA ni
+        # los artefactos lleven símbolos de la referencia. hlebind.c no usa el nombre de una ancla.
+        s["name"] = next(n for n in names if idx.get(n) == i) if keep[i] == "hle" else "a%d" % i
         s["fd"], s["pd"] = fcount[s["full"]], pcount[s["prefix"]]
         out.append(s)
     with open(a[1], "w") as f:
