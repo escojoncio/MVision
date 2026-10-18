@@ -1,5 +1,6 @@
 /* HLE de funciones de librería del SDK (sustituyen al código recompilado vía --hle).
  * Nombres = símbolos del mapa de firmas. Las de GPU son stubs hasta el rasterizador Metal. */
+#include <setjmp.h>
 #include <stdio.h>
 #include "cpu.h"
 #include "hle.h"
@@ -43,5 +44,19 @@ void hle_ResetCallback(Cpu *c) { vsync_cb = 0; V0 = 0; }
 void hle_InterruptCallback(Cpu *c) { V0 = 0; }
 void hle_DMACallback(Cpu *c) { V0 = 0; }
 
-/* longjmp necesita soporte del recompilador (pila C); por ahora se detecta. */
-void hle_longjmp(Cpu *c) { rt_fatal(c, "longjmp(0x%08x, %d) aún no soportado", A0, A1); }
+/* setjmp/longjmp: buffer MIPS = ra, sp, fp, s0-s7, gp (layout del SDK). El punto de reanudación del
+ * host lo crea el código generado en la llamada directa a setjmp (rt.c, rt_sj_*). */
+jmp_buf *rt_sj_slot(Cpu *c, uint32_t buf);
+int rt_sj_take_armed(void);
+void rt_sj_forget(uint32_t buf);
+_Noreturn void rt_sj_longjmp(Cpu *c, uint32_t buf, uint32_t val);
+
+void hle_setjmp(Cpu *c) {
+    static const int regs[] = {31, 28, 29, 30, 16, 17, 18, 19, 20, 21, 22, 23};
+    static const int offs[] = {0, 44, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40};
+    for (int k = 0; k < 12; k++) mem_w32(c, A0 + offs[k], c->r[regs[k]]);
+    if (!rt_sj_take_armed()) rt_sj_forget(A0); /* llamada indirecta: sin marco host al que volver */
+    V0 = 0;
+}
+
+void hle_longjmp(Cpu *c) { rt_sj_longjmp(c, A0, A1); }

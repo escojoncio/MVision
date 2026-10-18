@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """recomp: recompilador estático MIPS R3000 (PS1) -> C.
 
-  recomp.py <exe> <salida_dir> [--funcs funcs.txt] [--code-end HEX] [--names names.json] [--hle hle.txt]
+  recomp.py <exe> <salida_dir> [--funcs funcs.txt]... [--code-end HEX] [--names names.json] [--hle hle.txt]...
+            [--no-extra]
+
+--funcs: fichero de direcciones hex (una por línea, # comenta); repetible. Si existe extra_funcs.txt junto
+al EXE se lee también (salvo --no-extra): ahí se vuelca missing_funcs.txt del intérprete del runtime.
 
 Salida: funcs_XX.c (una función C por función MIPS), funcs.h, dispatch.c (tabla dirección -> función
 y dirección -> nombre). --names: JSON nombre -> {"target": "hex"} (tools/sig/align.py); sus direcciones
@@ -22,6 +26,7 @@ HDR = 0x800
 R = ["zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
      "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra"]
 FUNCS_PER_FILE = 200
+SETJMP = set()  # direcciones de setjmp (por nombre)
 
 
 def rs(w): return (w >> 21) & 31
@@ -94,21 +99,51 @@ def find_funcs(exe, extra):
         if exe.code_start <= v < exe.end and v % 4 == 0 and after_end(exe, v):
             starts.add(v)
     # Punteros construidos en código: lui rX,hi + addiu/ori rY,rX,lo (p.ej. entradas de hilos y callbacks).
-    hi = {}
+    # El addiu puede ir en el delay slot de un j/jal/jr: se olvida `hi` tras el slot, no antes.
+    hi, clear_after = {}, None
+    heur = set()
     for a in range(exe.code_start, exe.end, 4):
         w = exe.word(a)
         op = w >> 26
         if op == 15:
             hi[rt(w)] = (imm(w) << 16, a)
-            continue
-        if op in (9, 13) and rs(w) in hi and a - hi[rs(w)][1] <= 32:
+        elif op in (9, 13) and rs(w) in hi and a - hi[rs(w)][1] <= 32:
             v = (hi[rs(w)][0] + (simm(w) if op == 9 else imm(w))) & 0xFFFFFFFF
             if exe.code_start <= v < exe.end and v % 4 == 0 and after_end(exe, v):
-                starts.add(v)
-        if is_branch(w) and (w >> 26) in (2, 3) or (op == 0 and (w & 63) in (8, 9)):
+                heur.add(v)
+        if clear_after == a:
             hi.clear()
+            clear_after = None
+        if op in (2, 3) or (op == 0 and (w & 63) in (8, 9)):
+            clear_after = a + 4
     starts.add(exe.code_start)
-    return sorted(s for s in starts if exe.has(s) and s >= exe.code_start)
+    base = sorted(s for s in starts if exe.has(s) and s >= exe.code_start)
+    # Un inicio heurístico no debe partir una función con tabla jr (sus destinos quedarían fuera del switch).
+    jr_ranges = []
+    for i, s in enumerate(base):
+        e = base[i + 1] if i + 1 < len(base) else exe.end
+        if any(Func._is_jr_nonra(exe.word(x)) for x in range(s, e, 4)):
+            jr_ranges.append((s, e))
+    # Excepción: justo tras `jr ra`+delay es un límite real (la función con tabla acaba ahí).
+    # Daño = la parte [s,v) salta (rama o tabla en datos) a [v,e): se descarta; si no, el corte es inocuo.
+    data_ptrs = set(struct.unpack_from(f"<{(exe.code_start - exe.base) // 4}I", exe.text, 0))
+
+    def harmful(s, v, e):
+        for x in range(s, v, 4):
+            w = exe.word(x)
+            if is_branch(w) and (w >> 26) in (1, 4, 5, 6, 7) and v <= branch_target(x, w) < e:
+                return True
+            if (w >> 26) == 2 and v <= ((x & 0xF0000000) | ((w & 0x3FFFFFF) << 2)) < e:
+                return True
+        # tabla de saltos: el jr queda antes del corte y algún destino en datos cae después
+        if not any(Func._is_jr_nonra(exe.word(x)) for x in range(s, v, 4)):
+            return False
+        return any(v <= p < e for p in data_ptrs)
+
+    bad = {v for v in heur - starts for s, e in jr_ranges if s < v < e and harmful(s, v, e)}
+    if bad:
+        print("inicios heurísticos descartados (dentro de tabla jr):", " ".join(f"{v:08x}" for v in sorted(bad)))
+    return sorted(set(base) | {v for v in heur - bad if exe.has(v)})
 
 
 def detect_code(exe, run=4):
@@ -252,6 +287,10 @@ class Func:
         return f"rt_jump(c, 0x{t:08x}u); return;"
 
     def call(self, t, ret):
+        if t in SETJMP:
+            # setjmp del juego: punto de reanudación en el marco C actual (ver runtime/rt.c rt_sj_*).
+            return (f"c->r[31] = 0x{ret:08x}u; if (setjmp(*rt_sj_slot(c, c->r[4]))) rt_sj_resumed(c); "
+                    f"else f_{t:08x}(c);")
         if t in self.known:
             return f"c->r[31] = 0x{ret:08x}u; f_{t:08x}(c);"
         return f"c->r[31] = 0x{ret:08x}u; rt_call(c, 0x{t:08x}u);"
@@ -334,8 +373,16 @@ def main(a):
     exe = Exe(a[0])
     out = a[1]
     extra = []
-    if "--funcs" in a:
-        extra = [int(x, 16) for x in open(a[a.index("--funcs") + 1]).read().split()]
+    files = [a[i + 1] for i, x in enumerate(a) if x == "--funcs"]  # --funcs repetible
+    # Fichero opcional junto al EXE (local): direcciones registradas por el intérprete del runtime.
+    auto = os.path.join(os.path.dirname(os.path.abspath(a[0])), "extra_funcs.txt")
+    if "--no-extra" not in a and os.path.exists(auto):
+        files.append(auto)
+    for fn in files:
+        for l in open(fn):
+            l = l.split("#")[0].strip()
+            if l:
+                extra.append(int(l, 16))
     code_start, code_end = detect_code(exe)
     if "--code-end" in a:
         code_end = int(a[a.index("--code-end") + 1], 16)
@@ -356,6 +403,7 @@ def main(a):
     for i, x in enumerate(a):  # --hle repetible: un fichero por subsistema (runtime/hle*.txt)
         if x == "--hle":
             hle |= {l.split("#")[0].strip() for l in open(a[i + 1])} - {""}
+    SETJMP.update(t for t, n in names.items() if n == "setjmp")
     starts = find_funcs(exe, extra)
     known = set(starts)
     os.makedirs(out, exist_ok=True)
@@ -364,7 +412,8 @@ def main(a):
         e = starts[i + 1] if i + 1 < len(starts) else exe.end
         funcs.append(Func(exe, s, e, known))
     with open(os.path.join(out, "funcs.h"), "w") as f:
-        f.write('#pragma once\n#include "cpu.h"\n')
+        f.write('#pragma once\n#include <setjmp.h>\n#include "cpu.h"\n'
+                'jmp_buf *rt_sj_slot(Cpu *c, uint32_t buf);\nvoid rt_sj_resumed(Cpu *c);\n')
         for fn in funcs:
             f.write(f"void f_{fn.start:08x}(Cpu *c);\n")
             n = names.get(fn.start)

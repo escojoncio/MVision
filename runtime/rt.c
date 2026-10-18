@@ -80,18 +80,64 @@ static int is_bios_vec(uint32_t t) {
     return t == 0xA0 || t == 0xB0 || t == 0xC0;
 }
 
+/* Intérprete (interp.c): ejecuta desde t hasta volver a ra de entrada. */
+void interp_call(Cpu *c, uint32_t t);
+
 void rt_call(Cpu *c, uint32_t t) {
     if (is_bios_vec(t)) { bios_hle(c, t & 0xFF); return; }
     FuncPtr f = rt_lookup(t);
-    if (!f) rt_fatal(c, "llamada a 0x%08x sin función recompilada", t);
-    f(c);
+    if (f) f(c);
+    else interp_call(c, t);
 }
 
 /* Salto en cola: misma semántica que una llamada, la función destino retorna por ra al llamante C. */
 void rt_jump(Cpu *c, uint32_t t) { rt_call(c, t); }
 
-void rt_fallthrough(Cpu *c, uint32_t t) {
-    rt_fatal(c, "caída al final de la región de código hacia 0x%08x", t);
+void rt_fallthrough(Cpu *c, uint32_t t) { rt_call(c, t); }
+
+/* ---- setjmp/longjmp del juego ----
+ * En cada llamada a setjmp el código generado hace un setjmp del host en el marco C del llamante,
+ * indexado por (hilo, dirección del jmp_buf MIPS). longjmp restaura los registros MIPS desde el
+ * buffer en RAM (como el original) y hace longjmp del host a ese marco. Cada hilo tiene su pila
+ * host (fiber.c), así que solo se permite saltar dentro del mismo hilo. */
+#include "fiber.h"
+#define SJ_MAX 32
+static struct { uint32_t fiber, buf; int valid; jmp_buf env; } sj[SJ_MAX];
+static int sj_armed; /* lo pone rt_sj_slot justo antes de la llamada directa a setjmp */
+
+static int sj_find(uint32_t fb, uint32_t buf) {
+    for (int i = 0; i < SJ_MAX; i++) if (sj[i].valid && sj[i].fiber == fb && sj[i].buf == buf) return i;
+    return -1;
+}
+
+jmp_buf *rt_sj_slot(Cpu *c, uint32_t buf) {
+    uint32_t fb = fiber_current();
+    int i = sj_find(fb, buf);
+    if (i < 0) for (i = 0; i < SJ_MAX && sj[i].valid; i++) {}
+    if (i == SJ_MAX) rt_fatal(c, "demasiados setjmp activos");
+    sj[i].fiber = fb; sj[i].buf = buf; sj[i].valid = 1;
+    sj_armed = 1;
+    return &sj[i].env;
+}
+
+/* Tras volver por longjmp: los registros ya se restauraron en rt_sj_longjmp. */
+void rt_sj_resumed(Cpu *c) { (void)c; }
+
+/* setjmp llamado sin punto de reanudación del host (vía puntero/jalr): se invalida el anterior. */
+int rt_sj_take_armed(void) { int a = sj_armed; sj_armed = 0; return a; }
+void rt_sj_forget(uint32_t buf) {
+    int i = sj_find(fiber_current(), buf);
+    if (i >= 0) sj[i].valid = 0;
+}
+
+_Noreturn void rt_sj_longjmp(Cpu *c, uint32_t buf, uint32_t val) {
+    int i = sj_find(fiber_current(), buf);
+    if (i < 0) rt_fatal(c, "longjmp(0x%08x) sin setjmp registrado en este hilo", buf);
+    static const int regs[] = {31, 28, 29, 30, 16, 17, 18, 19, 20, 21, 22, 23};
+    static const int offs[] = {0, 44, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40};
+    for (int k = 0; k < 12; k++) c->r[regs[k]] = mem_r32(c, buf + offs[k]);
+    c->r[2] = val;
+    longjmp(sj[i].env, 1);
 }
 
 void rt_unimpl(Cpu *c, uint32_t pc, uint32_t insn) {
