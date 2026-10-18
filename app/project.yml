@@ -79,3 +79,5 @@ targets:
           - ProfileName: ExtendedGamepad
         # SHA-256 (hex minúsculas) del nombre de carpeta exigido; vacío = cualquier carpeta. Ver FolderAccess.swift.
         MVFolderKey: "$(MV_FOLDER_KEY)"
+        # SHA del commit compilado (lo inyecta CI como MV_BUILD_SHA; vacío = "dev"). Se muestra en el registro.
+        MVBuildSHA: "$(MV_BUILD_SHA)"

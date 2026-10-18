@@ -89,6 +89,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
+        mv_host_note_render(0)
         // Sube el frame solo si hay uno nuevo.
         var nw: Int32 = 0, nh: Int32 = 0
         let s = buffer.withUnsafeMutableBufferPointer { p in

@@ -42,6 +42,7 @@ final class GameModel: ObservableObject {
                 return
             }
         }
+        Storage.attachExternalLog()   // copia del registro en <carpeta elegida>/Logs (hilo aparte, no bloquea)
         Storage.resolveCardDir()
 
         let discs = Storage.findDiscs()
@@ -50,7 +51,7 @@ final class GameModel: ObservableObject {
             phase = .noDisc
             return
         }
-        Storage.log("discos: \(discs.joined(separator: " | "))")
+        Storage.log("discos: \(discs.count) (\(discs.map { ($0 as NSString).pathExtension.isEmpty ? "carpeta" : ($0 as NSString).pathExtension.lowercased() }.joined(separator: ", ")))")
 
         // El ejecutable sale del propio disco (el paquete no lleva datos del juego).
         guard let exe = Storage.extractExecutable(from: discs[0]) else {

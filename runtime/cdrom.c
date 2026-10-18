@@ -161,7 +161,7 @@ static int find_subdir(const char *root, char *out) {
 static int build_disc(Disc *d, const char *root) {
     memset(d, 0, sizeof *d);
     snprintf(d->root, sizeof d->root, "%s", root);
-    if (find_subdir(root, d->subname)) { fprintf(stderr, "[cd] %s: sin directorio de datos\n", root); return -1; }
+    if (find_subdir(root, d->subname)) { fprintf(stderr, "[cd] %s: sin directorio de datos\n", mv_base(root)); return -1; }
     uint32_t next = FIRST_FILE_LBA;
     /* Raíz: SYSTEM.CNF y ejecutable de arranque primero (orden del layout), resto alfabético. */
     char rootf[16][16]; int nr = list_dir(root, rootf, 16);
@@ -261,15 +261,15 @@ static int build_img(Disc *d, const char *path) {
 static int open_one(const char *path) {
     if (ndiscs == MAX_DISCS) return -1;
     struct stat st;
-    if (stat(path, &st)) { fprintf(stderr, "[cd] no se puede abrir '%s'\n", path); return -1; }
+    if (stat(path, &st)) { fprintf(stderr, "[cd] no se puede abrir '%s'\n", mv_base(path)); return -1; }
     Disc *d = &discs[ndiscs];
     if (S_ISDIR(st.st_mode)) {
         if (build_disc(d, path)) return -1;
         d->dir_a = 22; d->dir_b = 23;   /* layout sintetizado */
-        fprintf(stderr, "[cd] disco %d: carpeta %s (%d ficheros, %u sectores)\n", ndiscs + 1, path, d->nfiles, d->total);
+        fprintf(stderr, "[cd] disco %d: carpeta (%d ficheros, %u sectores)\n", ndiscs + 1, d->nfiles, d->total);
     } else {
-        if (build_img(d, path)) { fprintf(stderr, "[cd] imagen no válida o ilegible: %s\n", path); return -1; }
-        fprintf(stderr, "[cd] disco %d: imagen %s (%u sectores)\n", ndiscs + 1, path, d->total - PREGAP);
+        if (build_img(d, path)) { fprintf(stderr, "[cd] imagen no válida o ilegible: %s\n", mv_base(path)); return -1; }
+        fprintf(stderr, "[cd] disco %d: imagen (%u sectores)\n", ndiscs + 1, d->total - PREGAP);
     }
     ndiscs++;
     return 0;

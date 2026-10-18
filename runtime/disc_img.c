@@ -101,12 +101,12 @@ static int add_seg(DiscImg *h, const char *path, int warn) {
     if (h->nseg == MAX_SEG) return -1;
     Seg *s = &h->seg[h->nseg];
     s->f = fopen(path, "rb");
-    if (!s->f) { fprintf(stderr, "[disc] no se puede abrir %s\n", path); return -1; }
+    if (!s->f) { fprintf(stderr, "[disc] no se puede abrir %s\n", mv_base(path)); return -1; }
     snprintf(s->path, sizeof s->path, "%s", path);
     if (fseeko(s->f, 0, SEEK_END)) { fclose(s->f); s->f = NULL; return -1; }
     off_t sz = ftello(s->f);
     if (sz < 0) { fclose(s->f); s->f = NULL; return -1; }
-    if (warn && sz % DISC_RAW) fprintf(stderr, "[disc] aviso: %s no es múltiplo de 2352 (se ignora la cola)\n", path);
+    if (warn && sz % DISC_RAW) fprintf(stderr, "[disc] aviso: %s no es múltiplo de 2352 (se ignora la cola)\n", mv_base(path));
     s->nsec = (uint32_t)(sz / DISC_RAW);
     s->base = h->total;
     h->total += s->nsec;
@@ -116,7 +116,7 @@ static int add_seg(DiscImg *h, const char *path, int warn) {
 
 static int parse_cue(DiscImg *h, const char *cuepath) {
     FILE *f = fopen(cuepath, "rb");
-    if (!f) { fprintf(stderr, "[disc] no se puede abrir %s\n", cuepath); return -1; }
+    if (!f) { fprintf(stderr, "[disc] no se puede abrir %s\n", mv_base(cuepath)); return -1; }
     size_t cap = 1 << 20;
     char *buf = malloc(cap + 1);
     if (!buf) { fclose(f); return -1; }
@@ -161,7 +161,7 @@ static int parse_cue(DiscImg *h, const char *cuepath) {
             }
             char path[2048];
             if (!resolve(cuedir, name, path, sizeof path)) {
-                fprintf(stderr, "[disc] %s: no encuentro %s\n", cuepath, name);
+                fprintf(stderr, "[disc] %s: no encuentro %s\n", mv_base(cuepath), mv_base(name));
                 rc = -1; break;
             }
             segbase = h->total;
@@ -184,7 +184,7 @@ static int parse_cue(DiscImg *h, const char *cuepath) {
         /* PREGAP/POSTGAP/REM/CATALOG/FLAGS/PERFORMER/TITLE...: ignorados */
     }
     free(buf);
-    if (!rc && (!h->nseg || !h->ntrk)) { fprintf(stderr, "[disc] %s: sin FILE/TRACK\n", cuepath); rc = -1; }
+    if (!rc && (!h->nseg || !h->ntrk)) { fprintf(stderr, "[disc] %s: sin FILE/TRACK\n", mv_base(cuepath)); rc = -1; }
     return rc;
 }
 
@@ -208,7 +208,7 @@ DiscImg *disc_img_open(const char *path) {
         if (!rc) {
             off_t sz = (off_t)h->seg[0].nsec * DISC_RAW;
             FILE *f = h->seg[0].f; fseeko(f, 0, SEEK_END);
-            if (ftello(f) != sz) { fprintf(stderr, "[disc] %s: tamaño no múltiplo de 2352\n", path); rc = -1; }
+            if (ftello(f) != sz) { fprintf(stderr, "[disc] %s: tamaño no múltiplo de 2352\n", mv_base(path)); rc = -1; }
             h->trk[0].start = 0; h->trk[0].audio = 0; h->ntrk = 1;
         }
     }

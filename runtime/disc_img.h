@@ -6,6 +6,7 @@
  * es el mismo LBA lógico que usa ISO9660 (el PVD está en el 16) y que usa cd_read_sector() en cdrom.c.
  * Con varios ficheros BIN, el LBA continúa: base(fichero N) = suma de sectores de los anteriores.
  * Pendiente (opcional futuro): CHD, comando PREGAP/POSTGAP del .cue, pistas WAVE/MP3, .iso de 2048 B. */
+#include <string.h>
 #include <stdint.h>
 
 #define DISC_RAW 2352
@@ -65,3 +66,6 @@ int disc_scan_dir(const char *dir, DiscEntry out[], int max);
 /* Copia el ejecutable de datos del disco (DiscId.datadir/dataexe) a "outfile". "path" = .cue/.bin o carpeta (is_dir).
  * 0 = bien; -1 = el disco no es legible, no tiene ejecutable de datos o falló la escritura. */
 int disc_extract_dataexe(const char *path, int is_dir, const char *outfile);
+
+/* Solo el nombre final de una ruta: el registro no debe llevar rutas del dispositivo ni de la carpeta elegida. */
+static inline const char *mv_base(const char *p) { const char *s = strrchr(p, '/'); return s ? s + 1 : p; }

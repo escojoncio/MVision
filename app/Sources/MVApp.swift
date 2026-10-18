@@ -57,7 +57,7 @@ struct ContentView: View {
             case .failed(let msg):
                 MessageView(
                     titulo: "No se pudo ejecutar",
-                    texto: "\(msg)\n\nRegistro: mvision.log en la carpeta de documentos de la app. Cierra y vuelve a abrir la app para reintentarlo.",
+                    texto: "\(msg)\n\nRegistro: carpeta Logs dentro de la carpeta elegida (o mvision.log en la carpeta de documentos de la app). Cierra y vuelve a abrir la app para reintentarlo.",
                     reintentar: nil)
             }
         }

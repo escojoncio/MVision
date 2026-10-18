@@ -84,6 +84,17 @@ final class ControllerHub: @unchecked Sendable {
     private var lastBeat: TimeInterval = 0
     private var lastEvent: TimeInterval = 0
     private var lastKind: Kind = .none
+    private var focusChanges = 0          // cambios de GCController.current (solo se cuentan; el sistema los alterna entre los dos Sense)
+    private var focusLogged = false
+    private var appActive: Bool?
+    private var vrWrites = 0, windowWrites = 0, samples = 0
+    private var lastMuestra: TimeInterval = 0
+    private var pollTimer: DispatchSourceTimer?
+    private let pollQueue = DispatchQueue(label: "mv.hub.poll", qos: .userInteractive)
+    /// Serializa TODA lectura/recorrido de perfiles de GCController (la documentación de GameController solo garantiza
+    /// acceso desde cualquier hilo si no es simultáneo). Orden de bloqueo: `ioLock` primero, `lock` después; nunca al revés.
+    private let ioLock = NSLock()
+    private var lastSampleT: TimeInterval = 0
 
     /// Aviso (hilo principal) tras cada cambio de mandos conectados.
     var onChange: (() -> Void)?
@@ -108,7 +119,7 @@ final class ControllerHub: @unchecked Sendable {
         let now = ProcessInfo.processInfo.systemUptime
         lock.lock()
         defer { lock.unlock() }
-        guard logCount < 1500 else { return }
+        guard logCount < 4000 else { return }
         if now - budgetWindow >= 1 { budgetWindow = now; budgetUsed = 0 }
         guard budgetUsed < 25 else { return }
         budgetUsed += 1
@@ -137,21 +148,60 @@ final class ControllerHub: @unchecked Sendable {
             self?.choose()
         })
         // Foco: si los eventos no llegan, estas líneas dicen si la app estaba activa y qué mando era el actual.
-        observers.append(nc.addObserver(forName: .GCControllerDidBecomeCurrent, object: nil, queue: .main) { [weak self] n in
-            self?.dlog("foco: mando actual = \((n.object as? GCController)?.vendorName ?? "?")")
-        })
-        observers.append(nc.addObserver(forName: .GCControllerDidStopBeingCurrent, object: nil, queue: .main) { [weak self] n in
-            self?.dlog("foco: deja de ser el actual = \((n.object as? GCController)?.vendorName ?? "?")")
+        // Con mandos espaciales el sistema alterna `current` entre los dos continuamente: no tiene ningún efecto en la
+        // lectura y NO se registra cada vez (inundaba el registro y agotaba su tope por segundo); se cuenta y se
+        // informa en el latido, y solo la primera vez deja una línea.
+        let onFocus: (Notification) -> Void = { [weak self] n in
+            guard let self else { return }
+            self.lock.lock()
+            self.focusChanges += 1
+            let first = !self.focusLogged
+            self.focusLogged = true
+            self.lock.unlock()
+            if first { self.dlog("foco: primer cambio de mando actual (\((n.object as? GCController)?.vendorName ?? "?")); el resto se cuenta en el latido") }
+        }
+        observers.append(nc.addObserver(forName: .GCControllerDidBecomeCurrent, object: nil, queue: nil, using: onFocus))
+        observers.append(nc.addObserver(forName: .GCControllerDidStopBeingCurrent, object: nil, queue: nil) { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock(); self.focusChanges += 1; self.lock.unlock()
         })
         observers.append(nc.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.dlog("app activa")
+            guard let self else { return }
+            self.lock.lock(); self.appActive = true; self.lock.unlock()
+            self.dlog("app activa")
         })
         observers.append(nc.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.dlog("app pierde actividad")
+            guard let self else { return }
+            self.lock.lock(); self.appActive = false; self.lock.unlock()
+            self.dlog("app pierde actividad")
         })
+        let active = UIApplication.shared.applicationState == .active
+        lock.lock(); appActive = active; lock.unlock()
         dlog("inicio (shouldMonitorBackgroundEvents=\(GCController.shouldMonitorBackgroundEvents))")
         GCController.startWirelessControllerDiscovery {}
         choose()
+        startPolling()
+    }
+
+    /// Sondeo propio del hub (50 Hz): mantiene vivos diagnóstico, muestras y latido aunque ni la ventana ni el bucle
+    /// inmersivo estén llamando a `sample()` en ese momento. Es de solo lectura: no toca `lastWritten` ni ningún estado
+    /// de `write()`; se salta el ciclo si otro hilo acaba de leer o está leyendo (no compite con la lectura del juego).
+    private func startPolling() {
+        let t = DispatchSource.makeTimerSource(queue: pollQueue)
+        t.schedule(deadline: .now() + .milliseconds(100), repeating: .milliseconds(20), leeway: .milliseconds(2))
+        t.setEventHandler { [weak self] in self?.pollOnce() }
+        pollTimer = t
+        t.resume()
+    }
+
+    private func pollOnce() {
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        let recent = now - lastSampleT < 0.015
+        lock.unlock()
+        guard !recent, ioLock.try() else { return }
+        defer { ioLock.unlock() }
+        _ = sampleLocked()
     }
 
     /// Categoría de producto de un Sense (valor de GCProductCategorySpatialController, escrito a mano).
@@ -185,6 +235,7 @@ final class ControllerHub: @unchecked Sendable {
             ?? pads.first
 
         // Los botones ligados a gestos del sistema (PS, Create, panel táctil) pasan a ser del juego.
+        ioLock.lock()
         for c in all {
             for (_, b) in c.physicalInputProfile.buttons where b.isBoundToSystemGesture {
                 b.preferredSystemGestureState = .disabled
@@ -192,6 +243,7 @@ final class ControllerHub: @unchecked Sendable {
         }
         var newMaps: [ObjectIdentifier: HandMap] = [:]
         for c in [left, right].compactMap({ $0 }) { newMaps[ObjectIdentifier(c)] = Self.buildMap(c) }
+        ioLock.unlock()
 
         lock.lock()
         gamepad = chosenPad
@@ -202,7 +254,9 @@ final class ControllerHub: @unchecked Sendable {
         lock.unlock()
 
         if all.isEmpty { dlog("sin mandos conectados") }
+        ioLock.lock()
         for c in all { describe(c, isLeft: c === left, isRight: c === right, chosenPad: c === chosenPad) }
+        ioLock.unlock()
         onChange?()
     }
 
@@ -303,9 +357,43 @@ final class ControllerHub: @unchecked Sendable {
                            rx: g.rightThumbstick.xAxis.value, ry: g.rightThumbstick.yAxis.value)
     }
 
+    /// Lectura por `GCController.input` (GCControllerLiveInput, visionOS 1+/iOS 17+) con los alias oficiales de los
+    /// mandos espaciales. DESACTIVADA por defecto: se activa con la clave `mv.hub.liveInput` (UserDefaults, Bool) y, aunque
+    /// esté activa, si el perfil no entrega ningún elemento se cae a la lectura clásica. Siempre se registra en `muestra`.
+    private static let useLiveInput = UserDefaults.standard.bool(forKey: "mv.hub.liveInput")
+
+    private static func readHandLive(_ c: GCController) -> HandSnapshot? {
+        let input = c.input
+        func button(_ name: String) -> (any GCButtonElement)? { input[name] as? (any GCButtonElement) }
+        let a = button(GCInputButtonA), b = button(GCInputButtonB)
+        let grip = button(GCInputGripButton), trig = button(GCInputTrigger)
+        let menu = button(GCInputButtonMenu), click = button(GCInputThumbstick)
+        let pad = input[GCInputThumbstick] as? (any GCDirectionPadElement)
+        if a == nil && b == nil && grip == nil && trig == nil && menu == nil && pad == nil { return nil }
+        func pressed(_ e: (any GCButtonElement)?) -> Bool { e?.pressedInput.isPressed ?? false }
+        func analog(_ e: (any GCButtonElement)?) -> Float {
+            guard let p = e?.pressedInput else { return 0 }
+            return p.isPressed ? max(p.value, 0.6) : p.value
+        }
+        var h = HandSnapshot()
+        h.present = true
+        h.trigger = analog(trig)
+        h.grip = analog(grip)
+        h.low = pressed(a)
+        h.up = pressed(b)
+        h.menu = pressed(menu)
+        h.stickClick = pressed(click)
+        if let pad {
+            h.stickX = (pad.xAxis as? any GCLinearInput)?.value ?? 0
+            h.stickY = (pad.yAxis as? any GCLinearInput)?.value ?? 0
+        }
+        return h
+    }
+
     private func readHand(_ c: GCController?) -> HandSnapshot {
         var h = HandSnapshot()
         guard let c else { return h }
+        if Self.useLiveInput, let live = Self.readHandLive(c) { return live }
         lock.lock()
         let m = maps[ObjectIdentifier(c)]
         lock.unlock()
@@ -324,8 +412,15 @@ final class ControllerHub: @unchecked Sendable {
         return h
     }
 
-    /// Estado actual de todo. Barato; se puede llamar cada fotograma desde cualquier hilo.
+    /// Estado actual de todo. Barato; se puede llamar cada fotograma desde cualquier hilo (las lecturas se serializan).
     func sample() -> Sample {
+        ioLock.lock()
+        defer { ioLock.unlock() }
+        return sampleLocked()
+    }
+
+    /// Cuerpo de `sample()`; exige `ioLock` tomado. No modifica nada de lo que usa `write()`.
+    private func sampleLocked() -> Sample {
         let now = ProcessInfo.processInfo.systemUptime
         lock.lock()
         let gp = gamepad, l = senseL, r = senseR
@@ -340,6 +435,8 @@ final class ControllerHub: @unchecked Sendable {
         let senseActive = s.left.active || s.right.active
 
         lock.lock()
+        samples += 1
+        lastSampleT = now
         if padActive { lastPadActive = now }
         if senseActive { lastSenseActive = now }
         if !hasPad && !hasSense { s.kind = .none }
@@ -354,6 +451,7 @@ final class ControllerHub: @unchecked Sendable {
         diagnose(gp, "mando", now)
         diagnose(l, "Sense I", now)
         diagnose(r, "Sense D", now)
+        muestra(l, r, now)
         heartbeat(now, s)
         return s
     }
@@ -397,16 +495,56 @@ final class ControllerHub: @unchecked Sendable {
         if changed { dlog("entrada \(label): [\(sig)]") }
     }
 
+    /// Valores crudos de los Sense, 1 vez por segundo, para saber si el sistema entrega datos aunque nada llegue al juego.
+    private func muestra(_ l: GCController?, _ r: GCController?, _ now: TimeInterval) {
+        lock.lock()
+        // Reserva de tope: las muestras dejan de salir al llegar a 3000 líneas para no agotar el registro de eventos.
+        let due = now - lastMuestra >= 1 && logCount < 3000
+        if due { lastMuestra = now }
+        let act = appActive
+        lock.unlock()
+        guard due else { return }
+        func f(_ v: Float) -> String { String(format: "%.2f", v) }
+        func line(_ label: String, _ c: GCController?) {
+            guard let c else { dlog("muestra \(label): sin mando"); return }
+            let p = c.physicalInputProfile
+            func btn(_ n: String) -> GCControllerButtonInput? { p.buttons[n] }
+            let st = p.dpads["Thumbstick"]
+            let cur = GCController.current === c ? 1 : 0
+            let a: String = act.map { $0 ? "1" : "0" } ?? "?"
+            let gat: Float = btn("Trigger")?.value ?? -1
+            let grip: Float = btn("Grip")?.value ?? -1
+            let bA: Float = btn("Button A")?.value ?? -1
+            let bB: Float = btn("Button B")?.value ?? -1
+            let menu: Float = btn("Button Menu")?.value ?? -1
+            let clic: Float = btn("Thumbstick Button")?.value ?? -1
+            let sx: Float = st?.xAxis.value ?? -9
+            let sy: Float = st?.yAxis.value ?? -9
+            let bg = GCController.shouldMonitorBackgroundEvents ? 1 : 0
+            var out = "muestra \(label): gat=\(f(gat)) grip=\(f(grip)) A=\(f(bA)) B=\(f(bB)) menu=\(f(menu)) clic=\(f(clic))"
+            out += " stick=(\(f(sx)),\(f(sy))) actual=\(cur) appActiva=\(a) fondo=\(bg)"
+            if let v = Self.readHandLive(c) {
+                out += " | input: gat=\(f(v.trigger)) grip=\(f(v.grip)) A=\(v.low ? 1 : 0) B=\(v.up ? 1 : 0) menu=\(v.menu ? 1 : 0) clic=\(v.stickClick ? 1 : 0) stick=(\(f(v.stickX)),\(f(v.stickY)))"
+            } else {
+                out += " | input: sin datos"
+            }
+            dlog(out)
+        }
+        line("Sense I", l)
+        line("Sense D", r)
+    }
+
     private func heartbeat(_ now: TimeInterval, _ s: Sample) {
         lock.lock()
         if lastBeat == 0 { lastBeat = now }
         let due = now - lastBeat >= 10
         let n = eventCount, since = lastEvent == 0 ? -1 : now - lastEvent
-        if due { lastBeat = now; eventCount = 0 }
+        let fc = focusChanges, vw = vrWrites, ww = windowWrites, sm = samples
+        if due { lastBeat = now; eventCount = 0; focusChanges = 0; vrWrites = 0; windowWrites = 0; samples = 0 }
         lock.unlock()
         guard due else { return }
         let ago = since < 0 ? "nunca" : String(format: "hace %.1f s", since)
-        dlog("latido: fuente=\(s.kind) cambios en 10 s=\(n) ultimo=\(ago) mandoBits=\(String(format: "0x%04X", s.pad.buttons))")
+        dlog("latido: fuente=\(s.kind) cambios en 10 s=\(n) ultimo=\(ago) cambiosFoco=\(fc) lecturas=\(sm) escriturasVR=\(vw) escriturasVentana=\(ww) mandoBits=\(String(format: "0x%04X", s.pad.buttons))")
     }
 
     // MARK: - Escritura hacia el juego
@@ -432,8 +570,10 @@ final class ControllerHub: @unchecked Sendable {
         let now = ProcessInfo.processInfo.systemUptime
         lock.lock()
         switch from {
-        case .vr: lastVRWrite = now
-        case .window: if vrActive && now - lastVRWrite <= 0.25 { lock.unlock(); return }
+        case .vr: lastVRWrite = now; vrWrites += 1
+        case .window:
+            if vrActive && now - lastVRWrite <= 0.25 { lock.unlock(); return }
+            windowWrites += 1
         }
         let changed = buttons != lastWritten
         lastWritten = buttons

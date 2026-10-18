@@ -1,6 +1,8 @@
 import AVFoundation
 
 /// Salida de audio: AVAudioSourceNode a 44100 Hz estéreo que tira de mv_host_audio_pull.
+/// El callback es de tiempo real: solo llama a mv_host_audio_pull (anillo sin candados, siempre rellena con fundido/silencio
+/// lo que falte), convierte a Float en un búfer reservado de antemano y no toma candados, no reserva memoria ni escribe registros.
 final class AudioOut {
     private let engine = AVAudioEngine()
     private var node: AVAudioSourceNode?
@@ -51,12 +53,23 @@ final class AudioOut {
             self?.resume()
         }
         do { try engine.start() } catch { Storage.log("audio: \(error)") }
+        Storage.log("audio: motor \(engine.isRunning ? "en marcha" : "PARADO"), sesión \(Int(session.sampleRate)) Hz, búfer E/S \(String(format: "%.1f", session.ioBufferDuration * 1000)) ms, latencia de salida \(String(format: "%.1f", session.outputLatency * 1000)) ms")
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
+            let t = (n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 0
+            Storage.log("audio: interrupción \(t == AVAudioSession.InterruptionType.began.rawValue ? "inicio" : "fin")")
+            if t == AVAudioSession.InterruptionType.ended.rawValue { self?.resume() }
+        }
+        nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { n in
+            Storage.log("audio: cambio de ruta (motivo \((n.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0))")
+        }
     }
 
     func pause() { engine.pause() }
 
     func resume() {
         if !engine.isRunning {
+            Storage.log("audio: reanudando el motor")
             try? AVAudioSession.sharedInstance().setActive(true)
             do { try engine.start() } catch { Storage.log("audio: \(error)") }
         }
