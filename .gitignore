@@ -1,0 +1,21 @@
+# Nunca subir datos del juego
+*.bin
+*.cue
+*.iso
+*.img
+*.chd
+*.exe
+*.zip
+*.7z
+extracted/
+gamedata/
+# Build
+build/
+build-san/
+out/
+*.o
+__pycache__/
+vr/weapons/gen/
+.DS_Store
+vr/box/build/
+vr/box/build-san/

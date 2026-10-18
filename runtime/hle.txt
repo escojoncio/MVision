@@ -1,0 +1,7 @@
+# Funciones del SDK sustituidas por HLE (runtime/hle.c). Nombre = símbolo del mapa de firmas.
+VSync
+VSyncCallback
+ResetCallback
+InterruptCallback
+DMACallback
+longjmp

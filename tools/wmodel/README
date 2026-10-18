@@ -1,0 +1,27 @@
+tools/wmodel -- extracción y vista previa de modelos de armas en mano
+
+Los modelos de las armas son los ORIGINALES del juego y se cargan en ejecución desde los datos del usuario
+(vr/weapons/wload.c) y se enlazan con weapon_bind(). No hay mallas compiladas ni generadas en el repo.
+
+Flujo
+  1. extract.py   lee el archivo de stages del usuario y vuelca los modelos a OBJ/MTL/PNG (con hojas de
+                  contacto e index.txt); usa mdlfmt.py (formato de modelo) y raster.py (hojas de contacto).
+                  Los nombres concretos de stage/fichero se pasan por argumento; ver la cabecera de extract.py.
+  2. preview      rasteriza un arma del registro a PNG/PPM (software, z-buffer, supersampling), con un guion de
+                  entrada para simular estados (disparo, recarga, corredera atrás...). Se construye con
+                  make -C vr/weapons preview; el código está en preview.c y wprev.c/h.
+
+Vista previa (desde la raíz del repo)
+  make -C vr/weapons preview W=<id> OBJ=<modelo.obj> VIEW=three OUT=/ruta/a.png \
+       STATE="0.5:trig0=1;0.6:trig0=0" MODE=manual EXTRA="--print --radius 0.2 --ch SLIDE=0.04"
+  W      id del arma registrada (ver vr/weapons/registry.c)
+  OBJ    modelo externo (--obj). Los grupos `o`/`g` se enlazan por NOMBRE con los huecos del arma
+         (def->mesh_names); si ningún nombre coincide, todo el OBJ se usa como una única pieza raíz.
+         Admite `v x y z r g b`. Sin OBJ no se dibuja nada: las armas no llevan mallas propias.
+  VIEW   side|left|top|under|front|rear|three|three2|sheet (sheet = 4 vistas en una imagen)
+  STATE  guion de entrada "T:clave=valor|clave=valor;T:..." simulado a 120 Hz; claves en la cabecera de preview.c
+  EXTRA  --size WxH, --ss N, --radius R, --reserve N, --at T, --print (estado y eventos del puente)
+
+Marco de las armas: +Y arriba, -Z hacia delante (boca), origen en el punto de agarre, metros.
+Contrato de enlace: init -> weapon_bind. Las meshes enlazadas siguen el orden de mesh_names (terminado en NULL);
+una pieza sin mesh propio usa la mesh de su mismo nombre (weapon_part_mesh).

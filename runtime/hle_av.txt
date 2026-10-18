@@ -1,0 +1,4 @@
+# Audio/vídeo: sin sustituciones por ahora.
+# La librería de sonido del juego programa la SPU por registros (puntero a 0x1F801C00 en datos)
+# y la overlay de vídeo programa el MDEC por registros (0x1F801820/24) con DMA0/DMA1:
+# ambos se emulan en spu.c / mdec.c a través de los ganchos de io.c.

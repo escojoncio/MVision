@@ -1,0 +1,57 @@
+name: build
+
+# Solo a mano o con [build] en el mensaje del commit.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  reference:
+    # Compila la referencia MIPS desde la decomp externa (repos en secrets del repo).
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch upstream sources
+        env:
+          DECOMP_REPO: ${{ secrets.DECOMP_REPO }}
+          DECOMP_COMMIT: ${{ secrets.DECOMP_COMMIT }}
+          SDK_REPO: ${{ secrets.SDK_REPO }}
+        run: |
+          test -n "$DECOMP_REPO" && test -n "$DECOMP_COMMIT" && test -n "$SDK_REPO" || { echo "Faltan secrets DECOMP_REPO/DECOMP_COMMIT/SDK_REPO"; exit 1; }
+          git clone --filter=blob:none "$DECOMP_REPO" upstream/decomp
+          git -C upstream/decomp checkout "$DECOMP_COMMIT"
+          git clone --depth 1 "$SDK_REPO" upstream/sdk
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install toolchain
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends wine wine32:i386
+          python -m pip install -r upstream/decomp/build/requirements.txt
+          WINEDEBUG=-all wineboot --init
+
+      - name: Build reference executable
+        working-directory: upstream/decomp/build
+        # compare/checkup pueden fallar si el commit no es matching; para firmas no importa.
+        run: python build.py --psyq_path "$GITHUB_WORKSPACE/upstream/sdk" || echo "::warning::build.py terminó con error (ver log)"
+
+      - name: Function signatures (sin código)
+        run: |
+          EXE=$(ls upstream/decomp/obj/_*.exe | head -1); MAP=upstream/decomp/obj/asm.map
+          test -f "$EXE" && test -f "$MAP" || { echo "Falta exe o map de referencia"; exit 1; }
+          sha256sum "$EXE"
+          python tools/sig/sigs.py make "$EXE" "$MAP" sigs_ref.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sigs-ref
+          path: sigs_ref.json
+          retention-days: 30
