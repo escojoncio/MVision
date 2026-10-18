@@ -88,6 +88,7 @@ void hle_PadInitDirect(Cpu *c) {
 }
 void hle_PadStartCom(Cpu *c) { started = 1; pad_frame(c); c->r[2] = 1; }
 void hle_PadStopCom(Cpu *c) { started = 0; c->r[2] = 1; }
+int pad_hle_required(FuncPtr f) { return f == hle_PadInitDirect || f == hle_PadStartCom; }
 
 /* Estados: 0 sin mando, 2 mando simple estable, 6 mando con actuadores estable. */
 void hle_PadGetState(Cpu *c) {

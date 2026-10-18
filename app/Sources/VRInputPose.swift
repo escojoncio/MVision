@@ -63,12 +63,45 @@ final class VRInputPose: @unchecked Sendable {
             Storage.log("seguimiento de Sense: no soportado")
             return
         }
+        // Un mando recién conectado puede tardar en ser "rastreable" para el sistema (o serlo solo tras el permiso de
+        // seguimiento): se reintenta con espera creciente mientras este conjunto siga pedido, sin bloquear el resto.
         var accessories: [Accessory] = []
-        for controller in controllers {
-            do {
-                accessories.append(try await Accessory(device: controller))
-            } catch {
-                Storage.log("seguimiento de Sense: sin accesorio (\(error.localizedDescription))")
+        var pending = controllers
+        var attempt = 0
+        while !pending.isEmpty, current() {
+            var still: [GCController] = []
+            for controller in pending {
+                do {
+                    accessories.append(try await Accessory(device: controller))
+                    Storage.log("seguimiento de Sense: accesorio listo (\(controller.vendorName ?? "?"))")
+                } catch {
+                    still.append(controller)
+                    if attempt == 0 || attempt % 10 == 9 {
+                        Storage.log("seguimiento de Sense: sin accesorio todavía (\(error.localizedDescription)); intento \(attempt + 1)")
+                    }
+                }
+            }
+            pending = still
+            // Con al menos uno listo se arranca ya; los que falten se reintentan aparte (más abajo).
+            if !accessories.isEmpty || pending.isEmpty { break }
+            attempt += 1
+            try? await Task.sleep(nanoseconds: attempt < 10 ? 2_000_000_000 : 10_000_000_000)
+        }
+        if !pending.isEmpty, !accessories.isEmpty {
+            let missing = pending
+            Task.detached(priority: .utility) { [weak self] in
+                for i in 0..<60 {
+                    try? await Task.sleep(nanoseconds: i < 10 ? 3_000_000_000 : 10_000_000_000)
+                    guard let self, self.lock.withLock({ self.generation == gen }) else { return }
+                    for c in missing {
+                        if (try? await Accessory(device: c)) != nil {
+                            Storage.log("seguimiento de Sense: el otro mando ya es rastreable; se reinicia el seguimiento")
+                            self.lock.withLock { self.requested = [] }
+                            self.track(controllers)
+                            return
+                        }
+                    }
+                }
             }
         }
         guard !accessories.isEmpty, current() else { return }

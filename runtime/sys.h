@@ -78,6 +78,8 @@ void pad_frame(Cpu *c);
 void pad_bios_init(Cpu *c, uint32_t b1, uint32_t s1, uint32_t b2, uint32_t s2);
 void pad_bios_start(Cpu *c);
 void pad_bios_stop(void);
+/* 1 si `f` es una de las HLE de entrada del mando que el juego necesita para recibir controles (hlebind las exige). */
+int pad_hle_required(FuncPtr f);
 
 /* ---- Tarjeta de memoria (card.c) ----
  * Imagen cruda de 128 KB (.mcd). Si no existe se crea formateada. Puerto 0 = "bu00:", 1 = "bu10:".

@@ -55,14 +55,8 @@ struct VRInputSettings: Equatable {
 final class VRInput: @unchecked Sendable {
     static let shared = VRInput()
 
-    /// Categoría de producto de GameController de un Sense (valor de GCProductCategorySpatialController, escrito a mano).
-    private static let spatialCategory = "Spatial Controller"
-
     private let lock = NSLock()
-    private var senseLeft: GCController?
-    private var senseRight: GCController?
-    private var pad: GCController?
-    private var observers: [NSObjectProtocol] = []
+    private let hub = ControllerHub.shared
     private var state = vr_input_t()
     private var started = false
     private var lastRumbleSmall: UInt8 = 0
@@ -143,113 +137,39 @@ final class VRInput: @unchecked Sendable {
 
     // MARK: - Conexión
 
-    /// Empieza a vigilar mandos. Hilo principal.
+    /// Empieza a vigilar mandos (la detección y la lectura viven en ControllerHub). Hilo principal.
     func start() {
         guard !started else { return }
         started = true
-        let nc = NotificationCenter.default
-        observers.append(nc.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] _ in
-            self?.choose()
-        })
-        observers.append(nc.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] _ in
-            self?.choose()
-        })
-        GCController.startWirelessControllerDiscovery {}
-        choose()
+        hub.onChange = { [weak self] in self?.controllersChanged() }
+        hub.start()
+        controllersChanged()
     }
 
-    private static func isSense(_ c: GCController) -> Bool {
-        if c.productCategory == spatialCategory { return true }
-        // Respaldo si la cadena de categoría cambia: los Sense se anuncian como "...VR2 Sense Controller...".
-        let n = (c.vendorName ?? "").lowercased()
-        return n.contains("vr2")   // ojo: "dualsense" contiene "sense"; no usar solo eso
-    }
-
-    private static func isLeftSense(_ c: GCController) -> Bool {
-        let n = (c.vendorName ?? "").lowercased()
-        return n.contains("left") || n.contains("(l)") || n.hasSuffix(" l")
-    }
-
-    private func choose() {
-        let all = GCController.controllers()
-        let senses = all.filter(Self.isSense)
-        var left: GCController?
-        var right: GCController?
-        for s in senses {
-            if Self.isLeftSense(s) { if left == nil { left = s } else if right == nil { right = s } }
-            else { if right == nil { right = s } else if left == nil { left = s } }
-        }
-        let pads = all.filter { $0.extendedGamepad != nil && !Self.isSense($0) }
-        let chosenPad = pads.first(where: { $0.extendedGamepad is GCDualSenseGamepad }) ?? pads.first
-        lock.lock()
-        senseLeft = left
-        senseRight = right
-        pad = (left == nil && right == nil) ? chosenPad : nil
-        pulsers = [:]
-        lock.unlock()
-        for s in senses {
-            for (_, b) in s.physicalInputProfile.buttons where b.isBoundToSystemGesture {
-                b.preferredSystemGestureState = .disabled
-            }
-        }
-        if let p = chosenPad {
-            for (_, b) in p.physicalInputProfile.buttons where b.isBoundToSystemGesture {
-                b.preferredSystemGestureState = .disabled
-            }
-        }
-        VRInputPose.shared.track([left, right].compactMap { $0 })
-        Storage.log("control VR: \(senses.isEmpty ? (chosenPad?.vendorName ?? "sin mando") : "Sense x\(senses.count)")")
-        if senses.isEmpty && chosenPad == nil { releaseAll() }
+    /// Conexión tardía incluida: cada alta/baja de un mando vuelve a pedir el seguimiento del conjunto actual.
+    private func controllersChanged() {
+        lock.withLock { pulsers = [:] }
+        VRInputPose.shared.track(hub.senseControllers)
+        if hub.senseControllers.isEmpty && hub.gamepadController == nil { releaseAll() }
     }
 
     func releaseAll() {
-        mv_host_pad(0, 0x80, 0x80, 0x80, 0x80)
+        hub.releaseAll(from: .vr)
     }
 
     // MARK: - Lectura
 
-    private static func button(_ c: GCController?, _ names: [String]) -> (pressed: Bool, value: Float) {
-        guard let profile = c?.physicalInputProfile else { return (false, 0) }
-        var best: Float = 0
-        var pressed = false
-        for n in names {
-            if let b = profile.buttons[n] {
-                best = max(best, b.value)
-                pressed = pressed || b.isPressed
-            }
-        }
-        return (pressed, best)
-    }
-
-    private static func stick(_ c: GCController?, _ names: [String]) -> (Float, Float) {
-        guard let profile = c?.physicalInputProfile else { return (0, 0) }
-        for n in names {
-            if let d = profile.dpads[n] { return (d.xAxis.value, d.yAxis.value) }
-        }
-        return (0, 0)
-    }
-
-    /// Un Sense -> mano. Nombres tomados del motor propio: cada mando tiene "Thumbstick", cara baja/alta, etc.
-    private static func senseHand(_ c: GCController?, left: Bool, pose: VRInputPose.Pose) -> vri_hand_t {
+    private static func hand(_ s: ControllerHub.HandSnapshot, pose: VRInputPose.Pose) -> vri_hand_t {
         var h = vri_hand_t()
-        guard let c else { return h }
-        let a = GCInputButtonA, b = GCInputButtonB, x = GCInputButtonX, y = GCInputButtonY
-        let (sx, sy) = stick(c, ["Thumbstick", left ? GCInputLeftThumbstick : GCInputRightThumbstick])
-        h.stick_x = sx
-        h.stick_y = sy
-        let trig = button(c, [left ? GCInputLeftTrigger : GCInputRightTrigger, "Trigger", left ? "Left Trigger" : "Right Trigger"])
-        let grip = button(c, ["Grip Button", left ? GCInputLeftShoulder : GCInputRightShoulder, left ? "Left Shoulder" : "Right Shoulder"])
-        h.trigger = trig.pressed ? max(trig.value, 0.6) : trig.value
-        h.grip = grip.pressed ? max(grip.value, 0.6) : grip.value
+        h.stick_x = s.stickX
+        h.stick_y = s.stickY
+        h.trigger = s.trigger
+        h.grip = s.grip
         var bits: UInt32 = 0
-        if button(c, left ? [x, a] : [a, x]).pressed { bits |= UInt32(VRI_H_LOW) }
-        if button(c, left ? [y, b] : [b, y]).pressed { bits |= UInt32(VRI_H_UP) }
-        if button(c, ["Thumbstick Button", left ? GCInputLeftThumbstickButton : GCInputRightThumbstickButton]).pressed {
-            bits |= UInt32(VRI_H_STICK)
-        }
-        let menu = left ? [GCInputButtonShare, GCInputButtonMenu, GCInputButtonOptions]
-                        : [GCInputButtonOptions, GCInputButtonMenu]
-        if button(c, menu).pressed { bits |= UInt32(VRI_H_MENU) }
+        if s.low { bits |= UInt32(VRI_H_LOW) }
+        if s.up { bits |= UInt32(VRI_H_UP) }
+        if s.stickClick { bits |= UInt32(VRI_H_STICK) }
+        if s.menu { bits |= UInt32(VRI_H_MENU) }
         h.buttons = bits
         h.tracked = pose.tracked
         h.pos = (pose.position.x, pose.position.y, pose.position.z)
@@ -257,35 +177,11 @@ final class VRInput: @unchecked Sendable {
         return h
     }
 
-    /// DualSense / extendido -> bits PS1 como en Input.swift. Sticks con Y arriba (C invierte).
-    private static func fill(pad g: GCExtendedGamepad, _ f: inout vr_input_frame_t) {
-        var b: UInt16 = 0
-        func set(_ bit: Int, _ on: Bool) { if on { b |= UInt16(1) << UInt16(bit) } }
-        set(0, g.buttonOptions?.isPressed ?? false)
-        if let ds = g as? GCDualSenseGamepad { set(0, ds.touchpadButton.isPressed) }
-        set(1, g.leftThumbstickButton?.isPressed ?? false)
-        set(2, g.rightThumbstickButton?.isPressed ?? false)
-        set(3, g.buttonMenu.isPressed)
-        set(4, g.dpad.up.isPressed); set(5, g.dpad.right.isPressed)
-        set(6, g.dpad.down.isPressed); set(7, g.dpad.left.isPressed)
-        set(8, g.leftTrigger.isPressed); set(9, g.rightTrigger.isPressed)
-        set(10, g.leftShoulder.isPressed); set(11, g.rightShoulder.isPressed)
-        set(12, g.buttonY.isPressed); set(13, g.buttonB.isPressed)
-        set(14, g.buttonA.isPressed); set(15, g.buttonX.isPressed)
-        f.pad_buttons = b
-        f.pad_lx = g.leftThumbstick.xAxis.value
-        f.pad_ly = g.leftThumbstick.yAxis.value
-        f.pad_rx = g.rightThumbstick.xAxis.value
-        f.pad_ry = g.rightThumbstick.yAxis.value
-    }
-
     /// Un fotograma: lee, procesa y envía al juego. `head` = transformación cabeza->origen (deviceAnchor) o nil.
     /// `gamePosture` del puente RAM (0 de pie, 1 agachado, 2 tumbado, -1 desconocida). Devuelve el pad enviado.
     @discardableResult
     func frame(head: simd_float4x4?, dt: Float, gamePosture: Int32 = -1, menu: Bool = false) -> vr_pad_t {
-        lock.lock()
-        let left = senseLeft, right = senseRight, gamepad = pad
-        lock.unlock()
+        let sample = hub.sample()
 
         var f = vr_input_frame_t()
         f.dt = dt
@@ -301,13 +197,33 @@ final class VRInput: @unchecked Sendable {
             f.head_quat = (q.vector.x, q.vector.y, q.vector.z, q.vector.w)
         }
         var mode = VRI_MODE_PAD
-        if left != nil || right != nil {
+        switch sample.kind {
+        case .sense:
             mode = VRI_MODE_SENSE
-            let hl = Self.senseHand(left, left: true, pose: VRInputPose.shared.pose(hand: 0))
-            let hr = Self.senseHand(right, left: false, pose: VRInputPose.shared.pose(hand: 1))
-            f.hand = (hl, hr)
-        } else if let g = gamepad?.extendedGamepad {
-            Self.fill(pad: g, &f)
+            var l = sample.left, r = sample.right
+            // Con un solo Sense: su stick pasa a ser el de mover (el de girar queda quieto; se gira con el cuerpo) y,
+            // en los menús, el botón inferior también confirma (el confirmar normal es el gatillo del otro mando).
+            if l.present != r.present {
+                let dominantRight = lock.withLock { settings.rightHanded }
+                var lone = l.present ? l : r
+                var other = ControllerHub.HandSnapshot()
+                other.present = true
+                other.stickX = lone.stickX; other.stickY = lone.stickY
+                lone.stickX = 0; lone.stickY = 0
+                if menu && lone.low { other.trigger = 1 }
+                // El mando solo hace de mano dominante; la otra mano es la sintética.
+                if dominantRight { l = other; r = lone } else { l = lone; r = other }
+            }
+            let pl = VRInputPose.shared.pose(hand: 0), pr = VRInputPose.shared.pose(hand: 1)
+            f.hand = (Self.hand(l, pose: pl), Self.hand(r, pose: pr))
+        case .gamepad:
+            f.pad_buttons = sample.pad.buttons
+            f.pad_lx = sample.pad.lx
+            f.pad_ly = sample.pad.ly
+            f.pad_rx = sample.pad.rx
+            f.pad_ry = sample.pad.ry
+        case .none:
+            break
         }
 
         lock.lock()
@@ -345,7 +261,7 @@ final class VRInput: @unchecked Sendable {
         lock.unlock()
         if saveHeight { toSave.save() }
 
-        mv_host_pad(out.buttons, out.lx, out.ly, out.rx, out.ry)
+        hub.write(buttons: out.buttons, lx: out.lx, ly: out.ly, rx: out.rx, ry: out.ry, from: .vr)
         if turnDeg != 0 { mv_vr_turn(-turnDeg) }
         forwardRumble()
         return out
@@ -376,9 +292,10 @@ final class VRInput: @unchecked Sendable {
         lock.lock()
         // Objetivos: Sense -> cada mando su lado; mando normal -> localidades de empuñadura o por defecto.
         var targets: [(GCController, GCHapticsLocality, String)] = []
-        if senseLeft != nil || senseRight != nil {
-            if let c = side == 0 ? senseLeft : senseRight { targets.append((c, .default, "\(ObjectIdentifier(c).hashValue)-d")) }
-        } else if let c = pad, let h = c.haptics {
+        let sl = hub.senseLeft, sr = hub.senseRight, gp = hub.gamepadController
+        if sl != nil || sr != nil {
+            if let c = side == 0 ? sl : sr { targets.append((c, .default, "\(ObjectIdentifier(c).hashValue)-d")) }
+        } else if let c = gp, let h = c.haptics {
             let loc: GCHapticsLocality
             if h.supportedLocalities.contains(side == 0 ? .leftHandle : .rightHandle) {
                 loc = side == 0 ? .leftHandle : .rightHandle

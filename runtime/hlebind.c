@@ -35,6 +35,7 @@
 #include <string.h>
 #include "cpu.h"
 #include "hlebind.h"
+#include "sys.h"
 
 #if !defined(__BYTE_ORDER__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
 #error "hlebind.c asume host little-endian"
@@ -463,7 +464,7 @@ int hle_bind(const char *json, size_t len, uint32_t base, uint32_t size, uint32_
     }
     build_starts(base, raw, entry);
     match_all(sg, (unsigned)n, base);
-    int verbose = getenv("MV_HLELOG") != NULL, bound_n = 0;
+    int verbose = getenv("MV_HLELOG") != NULL, bound_n = 0, essential_missing = 0;
     unsigned searched = 0;
     for (unsigned t = 0; t < hle_table_count; t++) {
         const char *nm = hle_table[t].name;
@@ -472,7 +473,17 @@ int hle_bind(const char *json, size_t len, uint32_t base, uint32_t size, uint32_
         searched++;
         for (int i = 0; i < n; i++) if (sg[i].hle && !strcmp(sg[i].name, nm)) { hit = &sg[i]; break; }
         if (!hit) { fprintf(stderr, "[hle] aviso: '%s' no está en el fichero de firmas; se conserva el código original\n", nm); nmissing++; continue; }
-        if (!hit->found) { fprintf(stderr, "[hle] aviso: '%s' no se encuentra en el ejecutable; se conserva el código original\n", nm); nmissing++; continue; }
+        if (!hit->found) {
+            fprintf(stderr, "[hle] aviso: '%s' no se encuentra en el ejecutable; se conserva el código original\n", nm);
+            nmissing++;
+            /* Entrada del mando: sin estas dos el juego correría el código original contra hardware inexistente y los
+             * controles no responderían sin ningún error visible. Se falla en voz alta (la firma está, el ejecutable no casa). */
+            if (pad_hle_required(hle_table[t].fn)) {
+                fprintf(stderr, "[hle] ERROR: HLE de entrada '%s' sin enlazar: el mando no funcionaría\n", nm);
+                essential_missing++;
+            }
+            continue;
+        }
         uint32_t addr = base + 4 * hit->pos;
         FuncPtr fn = strcmp(nm, "longjmp") ? hle_table[t].fn : flat_longjmp;
         unsigned before = nbound;
@@ -483,7 +494,7 @@ int hle_bind(const char *json, size_t len, uint32_t base, uint32_t size, uint32_
     free(sg); free(mw); free(raw); free(hkey); free(hpos); free(starts);
     rawp = NULL; mw = NULL; hkey = NULL; hpos = NULL; starts = NULL;
     fprintf(stderr, "[hle] %d/%u funciones HLE enlazadas por firmas\n", bound_n, searched);
-    return bound_n;
+    return essential_missing ? -1 : bound_n;
 }
 
 int hle_bind_file(const char *path, uint32_t base, uint32_t size, uint32_t entry) {
