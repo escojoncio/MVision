@@ -198,4 +198,11 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - Resultado headless 1500 frames: logos -> intro con créditos y rótulo de zona en castellano; excepciones SPU 2910; CD sigue leyendo (stream) hasta el final. `make test test_sys` OK. Revisión adversarial: sin bugs.
 - Disco sintetizado: no dejar en `gamedata/disc/` el fichero de relleno de la raíz (se duplica con `FILLER.DAT` y desplaza todos los LBA); copiar solo SYSTEM.CNF, cargador y el directorio de datos.
 - Datos regenerables: `gamedata/names_eu.json` se obtiene con `sigs.py match` + `align.py` (escribe en el directorio actual: ejecutarlo desde `gamedata/`).
-- **PENDIENTE (siguiente sesión):** a ~frame 3120 el headless revienta por desbordamiento de pila del host: recursión infinita en `f_80084ad4` (gen/funcs_09.c:7205, se llama a sí misma ~27000 niveles) dentro de un hilo creado vía `fiber_entry`/`f_8008cd28`. Probable cola (tail call/bucle) traducida como llamada recursiva en `recomp.py` o rama externa a sí misma; revisar el C generado de esa función y convertir autollamadas en cola en `goto`.
+
+## 13. Funciones ampliadas por ramas a inicios débiles (`tools/recomp/recomp.py`) — 2026-10-18
+
+- Causa del cuelgue a ~frame 3120: `after_end` acepta lo que sigue a `j`+delay; un epílogo (0x80084a30) se tomó como inicio heurístico y las ramas de la función real a 0x80084a3c/40 salían por `rt_jump` al intérprete, que anidaba una llamada del host por iteración del bucle de la tarea de sonido -> pila agotada.
+- `find_funcs(exe, extra, weak_out=None)`: misma lista; `weak_out` recibe los inicios débiles (punteros en datos, lui/addiu) que no son fuertes (pc0, jal, extra/--funcs/nombres fiables, code_start).
+- `extend_ends(exe, starts, weak)`: a punto fijo, si una rama condicional sin enlace o `j` va a t >= fin y todos los inicios en [fin,t] son débiles, el fin pasa al de la región de t (tope 64 KB). Los débiles absorbidos siguen siendo funciones propias (código duplicado, intencionado). 220 funciones ampliadas; 2461 funciones, 96 con tabla jr.
+- Resultado: 6000 frames sin fallo (~28 s); intro en motor en 3D con subtítulos en castellano y rótulo de personaje con actor de doblaje. Quedan 127 avisos `interpretando` (direcciones 0x80010000/100/200 con ra=0, también en test_sys).
+- Siguiente: revisar qué son esas llamadas a 0x8001xxxx (zona del cargador/rdata), ejecutar 20000+ frames hasta tomar el control (pulsar Start con `pad_set_state`), y comprobar FMV.
