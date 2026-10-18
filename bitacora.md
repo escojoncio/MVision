@@ -388,3 +388,5 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - Run de visionos.yml 39171719645: probe OK, reference omitido (artefacto sigs-ref previo), ipa OK -> artefacto `MVision-ipa` (sin firmar, sin datos del juego). Primer intento (39171549580) falló solo en XRRenderLoop.swift: `onSpatialEvent = nil` (no opcional -> `{ _ in }`), `queryDrawables()` solo visionOS 26 (-> `queryDrawable()`), `AxisDirectionConvention.rightUpBackward` inexistente (-> proyección propia por tangentes `XRMath.projection`).
 - Contenido: modo intérprete + HLE por firmas, cámara VR (vrcam), escena estéreo, renderer Metal, control VR/mando, lector BIN/CUE, carpeta externa elegida por el usuario (huella `APP_FOLDER_KEY`). Sin IA, brazos IK, arma en mano ni radar (siguiente build).
 - Pendiente: prueba en el visor (log en Documents/mvision.log de la app); verificar nombres de elementos del mando de seguimiento, near plane de la proyección propia, HUD, rendimiento del intérprete.
+
+- Identificador de bundle: `com.kdt.livecontainer` (mismo que otra app del usuario; instalar una sustituye a la otra en el dispositivo).
