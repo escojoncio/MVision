@@ -470,6 +470,8 @@ def main(a):
     SETJMP.update(t for t, n in names.items() if n == "setjmp")
     weak = set()
     starts = find_funcs(exe, extra, weak)
+    # Funciones sustituidas por HLE o setjmp deben conservar su entrada: nunca se absorben en otra.
+    weak -= {t for t, n in names.items() if n in hle or n == "setjmp"}
     ends, n_ext = extend_ends(exe, starts, weak)
     print(f"funciones ampliadas por ramas a regiones débiles: {n_ext}")
     known = set(starts)
