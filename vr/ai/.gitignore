@@ -1,0 +1,7 @@
+# Herramientas de validación local (parchean una copia del runtime)
+ai_validate.c
+ai_validate.sh
+vai_local_patch.c
+vr_activity_build_ai2.sh
+vr_activity_ai2_hooks.c
+vr_activity_run.c
