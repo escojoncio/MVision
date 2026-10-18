@@ -3,12 +3,14 @@
  * Semántica según la documentación pública del hardware (MAC 44 bits, saturaciones, flags, UNR). */
 #include <string.h>
 #include "cpu.h"
+#include "gpu.h"   /* GpuHpInfo (solo el tipo; la GTE no depende del rasterizador) */
 
 static int32_t D[32];   /* datos */
 static int32_t C[32];   /* control */
 static uint32_t flag;
 
-void gte_reset(void) { memset(D, 0, sizeof D); memset(C, 0, sizeof C); flag = 0; }
+static void hp_clear(void);
+void gte_reset(void) { memset(D, 0, sizeof D); memset(C, 0, sizeof C); flag = 0; hp_clear(); }
 
 /* --- acceso a campos --- */
 #define LO16(x) ((int16_t)((x) & 0xFFFF))
@@ -110,6 +112,122 @@ static uint32_t gte_divide(uint32_t h, uint32_t sz3) {
     return r > 0x1FFFF ? 0x1FFFF : (uint32_t)r;
 }
 
+
+/* ====================== Alta precisión (sombra en coma flotante) ======================
+ * Paralelo EXACTO al camino entero: RTPS/RTPT siguen calculando MAC/IR/SZ/SXY/flags con la misma aritmética de
+ * siempre (los vectores de regresión no cambian); si la alta precisión está encendida (gte_hp_enable(1)) se calcula
+ * además, en double y sin redondear ni saturar IR1/IR2:
+ *     P = TR + R·V / 4096          posición en espacio de VISTA (el que deje la matriz RT que cargó el juego;
+ *                                   si el juego compone modelo*cámara en RT es la cámara; el "mundo" no se puede
+ *                                   recuperar en general porque la composición de matrices la hace el juego)
+ *     pz = P.z                      profundidad de vista real (el hardware la trunca a SZ entero 0..65535)
+ *     fx = H·P.x/pz + OFX/65536     posición de pantalla sin cuantizar (el hardware: trunca IR1 y SZ y divide con UNR)
+ *     fy = H·P.y/pz + OFY/65536
+ * y se guarda en una tabla indexada por el SXY entero que se empujó a la FIFO (la clave que verá el GPU cuando el
+ * juego copie SXY a la primitiva). Solo se registra con sf=1 (todos los usos reales de RTPS/RTPT en juegos) y si
+ * el hardware no saturó (flags 13/14 de este vértice limpias, sin desbordar la división y SZ>0): un vértice recortado/saturado no tiene float útil.
+ *
+ * Tabla: asociativa por conjuntos, HP_SETS conjuntos x HP_WAYS vías, hash de (sx,sy). Clave = (sx,sy) saturados a
+ * 11 bits + SZ entero (dos vértices en el mismo píxel con distinta profundidad ocupan vías distintas; el mismo
+ * (sx,sy,SZ) se actualiza en sitio). Reemplazo: vía inválida/caducada, si no la más antigua (seq).
+ * Vaciado por frame: gte_hp_frame() (lo llama el cierre de frame de la captura de gpu.c) incrementa la generación;
+ * una entrada vale si se escribió en la generación actual o la anterior (tolera que el juego transforme la geometría
+ * del frame N+1 antes del flip del N). Colisiones/ambigüedad documentadas:
+ *   - misma (sx,sy) con distinto SZ: el lookup por (sx,sy) devuelve la más reciente (seq mayor); pasa solo con
+ *     vértices que caen en el mismo píxel, normalmente del mismo objeto y con z casi igual -> error < 1 px.
+ *   - conjunto lleno (4 vías con otras claves de la misma generación): se pierde la más antigua; el vértice
+ *     afectado cae a fvalid=0 (se dibuja con el entero). Se cuenta en gte_hp_stats().
+ *   - coincidencia espuria: una primitiva 2D (HUD) cuyos 3 vértices coincidan con vértices GTE del frame; el
+ *     consumidor exige fvalid en TODOS los vértices y |float-entero| acotado, por lo que es muy improbable. */
+#define HP_SETS 16384
+#define HP_WAYS 4
+typedef struct {
+    int16_t sx, sy;
+    uint16_t sz;
+    uint8_t used;
+    uint32_t gen, seq;
+    GpuHpInfo i;
+} HpE;
+static HpE hp_tab[HP_SETS][HP_WAYS];
+static int hp_on, hp_dirty;
+static uint32_t hp_gen, hp_seq;
+static GteHpStats hp_st;
+
+static void hp_clear(void) {
+    if (hp_dirty) { memset(hp_tab, 0, sizeof hp_tab); hp_dirty = 0; }
+    hp_gen = hp_seq = 0;
+    memset(&hp_st, 0, sizeof hp_st);
+}
+void gte_hp_enable(int on) { hp_on = on; }
+int gte_hp_enabled(void) { return hp_on; }
+void gte_hp_frame(void) { hp_gen++; hp_st.gen_stored = 0; }
+void gte_hp_stats(GteHpStats *s) { *s = hp_st; }
+static inline uint32_t hp_set(int sx, int sy) {
+    return (((uint32_t)sx & 0x7FF) * 0x9E3779B1u ^ ((uint32_t)sy & 0x7FF) * 0x85EBCA6Bu) >> 18; /* 14 bits */
+}
+static inline int hp_live(const HpE *e) { return e->used && (uint32_t)(hp_gen - e->gen) <= 1u; }
+
+static void hp_store(int sx, int sy, uint32_t sz, const GpuHpInfo *in) {
+    HpE *set = hp_tab[hp_set(sx, sy)], *v = NULL;
+    hp_dirty = 1;
+    for (int w = 0; w < HP_WAYS; w++) {
+        HpE *e = &set[w];
+        if (hp_live(e) && e->sx == sx && e->sy == sy && e->sz == sz) { v = e; break; }
+    }
+    if (!v) {
+        for (int w = 0; w < HP_WAYS; w++) if (!hp_live(&set[w])) { v = &set[w]; break; }
+        if (!v) { /* conjunto lleno: sustituye la más antigua */
+            v = &set[0];
+            for (int w = 1; w < HP_WAYS; w++) if ((int32_t)(set[w].seq - v->seq) < 0) v = &set[w];
+            hp_st.evict++;
+        }
+    }
+    v->used = 1; v->sx = (int16_t)sx; v->sy = (int16_t)sy; v->sz = (uint16_t)sz;
+    v->gen = hp_gen; v->seq = hp_seq++; v->i = *in;
+    hp_st.stored++;
+    if (++hp_st.gen_stored > hp_st.max_gen_stored) hp_st.max_gen_stored = hp_st.gen_stored;
+}
+
+int gte_hp_lookup(int sx, int sy, GpuHpInfo *out) {
+    HpE *set = hp_tab[hp_set(sx, sy)], *best = NULL;
+    /* Un SXY en el borde del rango (-0x400 / 0x3FF) es indistinguible de un vértice saturado (que no se registra): una
+     * primitiva con un vértice recortado heredaría el float de otro vértice que cayó justo en el borde. */
+    if (sx <= -0x400 || sx >= 0x3FF || sy <= -0x400 || sy >= 0x3FF) { hp_st.lookups++; return 0; }
+    for (int w = 0; w < HP_WAYS; w++) {
+        HpE *e = &set[w];
+        if (!hp_live(e) || e->sx != sx || e->sy != sy) continue;
+        if (!best || (int32_t)(e->seq - best->seq) > 0) best = e;
+    }
+    hp_st.lookups++;
+    if (!best) return 0;
+    hp_st.hits++;
+    *out = best->i;
+    return 1;
+}
+
+/* Sombra flotante de un vértice RTPS/RTPT; se llama tras empujar SXY (sx,sy ya saturados). */
+static void hp_vertex(int v, int sf, int sx, int sy, int sat) {
+    if (!hp_on) return;
+    if (!sf || sat || H >= (uint32_t)SZ(3) * 2u) {
+        hp_st.skipped++; if (!sf) hp_st.skip_sf++; else if (sat) hp_st.skip_sat++; else hp_st.skip_ovf++;
+        return;
+    } /* sat/desbordamiento de ESTE vértice (flag acumula en RTPT) */
+    double P[3];
+    for (int i = 0; i < 3; i++)
+        P[i] = ((double)TR(i) * 4096.0 + (double)mat(0, i, 0) * VX(v) + (double)mat(0, i, 1) * VY(v) +
+                (double)mat(0, i, 2) * VZ(v)) / 4096.0;
+    int32_t sz = SZ(3);
+    if (sz <= 0 || P[2] <= 0.0) { hp_st.skipped++; hp_st.skip_z++; return; }
+    GpuHpInfo in;
+    double h = (double)H;
+    in.fx = (float)(h * P[0] / P[2] + (double)OFX / 65536.0);
+    in.fy = (float)(h * P[1] / P[2] + (double)OFY / 65536.0);
+    in.fz = (float)P[2];
+    in.vx = (float)P[0]; in.vy = (float)P[1]; in.vz = (float)P[2];
+    in.h = (float)h; in.ofx = (float)((double)OFX / 65536.0); in.ofy = (float)((double)OFY / 65536.0);
+    hp_store(sx, sy, (uint32_t)sz, &in);
+}
+
 /* --- RTPS núcleo --- */
 static void rtp(int v, int sf, int lm, int last) {
     int sh = sf ? 12 : 0;
@@ -136,9 +254,11 @@ static void rtp(int v, int sf, int lm, int last) {
     int64_t x = (int64_t)n * IR(1) + OFX; F(x);
     int64_t y = (int64_t)n * IR(2) + OFY; F(y);
     int32_t sx = (int32_t)(x >> 16), sy = (int32_t)(y >> 16);
-    if (sx < -0x400) { sx = -0x400; flag |= 1u << 14; } else if (sx > 0x3FF) { sx = 0x3FF; flag |= 1u << 14; }
-    if (sy < -0x400) { sy = -0x400; flag |= 1u << 13; } else if (sy > 0x3FF) { sy = 0x3FF; flag |= 1u << 13; }
+    int sat = 0;
+    if (sx < -0x400) { sx = -0x400; flag |= 1u << 14; sat = 1; } else if (sx > 0x3FF) { sx = 0x3FF; flag |= 1u << 14; sat = 1; }
+    if (sy < -0x400) { sy = -0x400; flag |= 1u << 13; sat = 1; } else if (sy > 0x3FF) { sy = 0x3FF; flag |= 1u << 13; sat = 1; }
     push_sxy(sx, sy);
+    hp_vertex(v, sf, sx, sy, sat);
     if (last) {
         int64_t q = (int64_t)n * DQA + DQB; F(q);
         MAC0 = (int32_t)q;

@@ -65,12 +65,13 @@ inline ushort ps1_texel(texture2d<ushort, access::read> vram, constant PS1Prim &
 /* ---------------- vértice ---------------- */
 struct VOut {
     float4 pos [[position]];
-    float2 uv [[center_no_perspective]];
-    float3 col [[center_no_perspective]];
+    float2 uv;     /* interpolación con corrección de perspectiva (por defecto). Con w = 1 es afín, como la PS1 */
+    float3 col;
     uint prim [[flat]];
 };
 
-/* Objetivo = VRAM completa: x en [0,1024) -> NDC [-1,1], y hacia abajo. w = 1 => interpolación afín (como la PS1). */
+/* Objetivo = VRAM completa: x en [0,1024) -> NDC [-1,1], y hacia abajo. w = 1 => interpolación afín (como la PS1);
+ * w = z de vista (alta precisión) => con corrección de perspectiva. */
 vertex VOut ps1_vs_prim(uint vid [[vertex_id]], constant PS1Vertex *verts [[buffer(0)]],
                         constant PS1Frame &fr [[buffer(1)]]) {
     PS1Vertex v = verts[vid];
@@ -78,7 +79,15 @@ vertex VOut ps1_vs_prim(uint vid [[vertex_id]], constant PS1Vertex *verts [[buff
     /* El oráculo evalúa la cobertura en la coordenada ENTERA (esquina); Metal en el centro del píxel: con
      * fr.corner se desplaza el vértice +0,5 para que (c+0,5) - (v+0,5) = c - v. */
     float off = fr.corner ? 0.5 : 0.0;
-    o.pos = float4((v.x + off) * (2.0 / 1024.0) - 1.0, 1.0 - (v.y + off) * (2.0 / 512.0), 0.0, 1.0);
+    float px = (v.x + off) * (2.0 / 1024.0) - 1.0, py = 1.0 - (v.y + off) * (2.0 / 512.0);
+    if (fr.hiprec != 0u && v.iz > 0.0) {
+        /* Geometría de alta precisión: w = z de vista => uv/color con corrección de perspectiva; clip.z = 1 => ndc.z = 1/z
+         * (profundidad lineal en pantalla, mayor = más cerca). Ver comentario de PS1Frame en ps1_types.h. */
+        float w = 1.0 / v.iz;
+        o.pos = float4(px * w, py * w, 1.0, w);
+    } else {
+        o.pos = float4(px, py, 0.0, 1.0); /* 2D / pasada nativa: afín, z = 0 (borra la profundidad si está activa) */
+    }
     o.uv = float2(v.u, v.v);
     o.col = float3(v.r, v.g, v.b);
     o.prim = v.prim;

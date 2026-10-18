@@ -147,6 +147,7 @@ static struct {
     uint32_t up_idx;
     int last_dx, last_dy;
     GpuFloatHook hook;
+    GpuHpHook hphook;
 } cap;
 
 static void cap_list_reset(GpuDrawList *l) {
@@ -178,6 +179,7 @@ static GpuOp *cap_new(int type) {
     o->abr = (uint8_t)g.abr; o->tp = (uint8_t)g.tp;
     o->twmx = (uint8_t)g.twmx; o->twmy = (uint8_t)g.twmy; o->twox = (uint8_t)g.twox; o->twoy = (uint8_t)g.twoy;
     o->tx = (uint16_t)g.tx; o->ty = (uint16_t)g.ty;
+    o->dox = (int16_t)g.ox; o->doy = (int16_t)g.oy;
     o->cx1 = (int16_t)g.cx1; o->cy1 = (int16_t)g.cy1; o->cx2 = (int16_t)g.cx2; o->cy2 = (int16_t)g.cy2;
     o->flags = (uint16_t)((g.mask_set ? GPU_F_MASK_SET : 0) | (g.mask_chk ? GPU_F_MASK_CHK : 0));
     cap.disp_open = 0;
@@ -188,6 +190,7 @@ static void cap_close(int reason) {
     if (cap.cur.nops == 0) { cap.disp_open = 0; return; }
     if (cap.up_active) { cap.pending_close = reason; return; } /* subida en curso: cerrar al terminarla */
     GpuDrawList *c = &cap.cur;
+    gte_hp_frame(); /* envejece la tabla de posiciones float de la GTE (no hace nada si está apagada) */
     if (cap.qn == GPU_CAP_QDEPTH) {
         /* Nadie consume. Perder solo la más antigua dejaría una cola sin vram_init y con un hueco (VRAM del
          * consumidor divergente hasta el siguiente resincronizado): se descarta TODA la cola y también esta lista
@@ -219,16 +222,30 @@ static void cap_refresh_disp(void) {
     if (cap.disp_open && cap.qn) gpu_get_display(&cap.q[(cap.qh + cap.qn - 1) % GPU_CAP_QDEPTH].disp);
 }
 
+static GpuHpInfo cap_proj;
 static void cap_vtx(GpuVtx *o, const Vtx *v, int tex) {
     o->x = (int16_t)v->x; o->y = (int16_t)v->y;
     o->r = (uint8_t)v->r; o->g = (uint8_t)v->g; o->b = (uint8_t)v->b;
     if (tex) { o->u = (uint8_t)v->u; o->v = (uint8_t)v->v; }
-    if (cap.hook) {
+    if (cap.hphook) {
+        GpuHpInfo h;
+        /* La GTE produce SXY con OFX/OFY; el juego lo copia a la primitiva y el GPU suma después el offset de dibujo
+         * E5. La clave es, pues, la coordenada SIN offset (v->x - g.ox): la que escribió el juego. */
+        if (cap.hphook(v->x - g.ox, v->y - g.oy, &h)) {
+            o->fvalid = 1; o->fx = h.fx + (float)g.ox; o->fy = h.fy + (float)g.oy; o->fz = h.fz;
+            o->vx = h.vx; o->vy = h.vy; o->vz = h.vz;
+            cap_proj = h;
+        }
+    } else if (cap.hook) {
         float fx, fy, fz;
         if (cap.hook(v->x - g.ox, v->y - g.oy, &fx, &fy, &fz)) {
             o->fvalid = 1; o->fx = fx + g.ox; o->fy = fy + g.oy; o->fz = fz;
         }
     }
+}
+
+static void cap_set_proj(GpuOp *o) {
+    if (cap_proj.h != 0.0f) { o->proj_h = cap_proj.h; o->proj_ox = cap_proj.ofx; o->proj_oy = cap_proj.ofy; }
 }
 
 static void cap_poly(const Vtx *v, int nv, int gour, int tex, int raw, int semi, const TexCtx *t) {
@@ -238,14 +255,18 @@ static void cap_poly(const Vtx *v, int nv, int gour, int tex, int raw, int semi,
                            (semi ? GPU_F_SEMI : 0) | (nv == 4 ? GPU_F_QUAD : 0) |
                            (g.dither && (gour || (tex && !raw)) ? GPU_F_DITHER : 0));
     o->clx = (uint16_t)t->cx; o->cly = (uint16_t)t->cy;
+    cap_proj.h = 0;
     for (int i = 0; i < nv; i++) cap_vtx(&o->v[i], &v[i], tex);
+    cap_set_proj(o);
 }
 
 static void cap_line(const Vtx *a, const Vtx *b, int gour, int semi) {
     GpuOp *o = cap_new(GPU_OP_LINE);
     o->nv = 2;
     o->flags |= (uint16_t)((gour ? GPU_F_GOURAUD : 0) | (semi ? GPU_F_SEMI : 0) | (g.dither && gour ? GPU_F_DITHER : 0));
+    cap_proj.h = 0;
     cap_vtx(&o->v[0], a, 0); cap_vtx(&o->v[1], b, 0);
+    cap_set_proj(o);
 }
 
 static void cap_rect(int x, int y, int w, int h, int r, int gg, int b, int tex, int raw, int semi, int u0, int v0,
@@ -322,6 +343,8 @@ void gpu_capture_vblank(void) {
 }
 uint32_t gpu_capture_dropped(void) { return cap.dropped; }
 void gpu_capture_set_float_hook(GpuFloatHook h) { cap.hook = h; }
+void gpu_capture_set_hp_hook(GpuHpHook h) { cap.hphook = h; }
+void gpu_capture_hiprec(int on) { gte_hp_enable(on); cap.hphook = on ? gte_hp_lookup : NULL; }
 
 static void cap_display_start_changed(void) {
     if (g.dx != cap.last_dx || g.dy != cap.last_dy) {
