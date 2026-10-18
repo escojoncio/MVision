@@ -1,5 +1,5 @@
 /* Pruebas del rasterizador GPU con primitivas sintéticas. Vuelca test_gpu.ppm (VRAM completa).
- * Compilar: cc -I. -O1 -o test_gpu test_gpu.c gpu.c   (enlaza solo la GPU, stubs abajo) */
+ * Compilar: cc -I. -O1 -o test_gpu test_gpu.c gpu.c -lm   (enlaza solo la GPU, stubs abajo; -lm por hypotf de la captura) */
 #include <stdio.h>
 #include <string.h>
 #include "cpu.h"
@@ -13,6 +13,7 @@ uint32_t hle_frame_count(void) { return 0; }
 void gte_hp_enable(int on) { (void)on; }
 void gte_hp_frame(void) {}
 int gte_hp_lookup(int sx, int sy, GpuHpInfo *o) { (void)sx; (void)sy; (void)o; return 0; }
+int gte_hp_resolve(int n, const int *sx, const int *sy, GpuHpInfo *o, uint8_t *ok) { (void)n; (void)sx; (void)sy; (void)o; (void)ok; return 0; }
 void hle_invoke(Cpu *c, uint32_t fn, uint32_t arg) { (void)c; (void)fn; (void)arg; }
 uint8_t mem_r8(Cpu *c, uint32_t a) { (void)c; return psx_ram[a & 0x1FFFFF]; }
 uint16_t mem_r16(Cpu *c, uint32_t a) { (void)c; uint16_t v; memcpy(&v, &psx_ram[a & 0x1FFFFE], 2); return v; }
