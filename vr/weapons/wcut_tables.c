@@ -47,9 +47,11 @@ NAMES(N_MINE, "body", "plate", "sight", "legl", "legr");
  * UY/UZ = (cos, -sin) de 20 grados */
 #define MAG_UY 0.939693f
 #define MAG_UZ -0.342020f
-/* materiales del cargador (bloques 3x3 del propio atlas: el más oscuro metálico para el cuerpo, gris claro para la vaina,
- * gris medio para la bala; el atlas de la pistola no tiene latón ni cobre) */
-#define MAG_BODY MAT(38, 0, PW, PH)
+/* materiales del cargador (bloques 3x3 del propio atlas: el cuerpo es casi negro como el mango, gris claro para la vaina,
+ * gris medio para la bala; el atlas de la pistola no tiene latón ni cobre). Cuerpo: bloque del relleno oscuro del propio
+ * atlas, el mismo que pinta el mango original (luminancia 7/255 = percentil 5-10 de los texels del mango, muy por debajo
+ * del tope de 28; el atlas es neutro ahi, sin tinte); test_wcut lo comprueba contra los texels del mango. */
+#define MAG_BODY MAT(30, 10, PW, PH)
 #define MAG_CASE MAT(50, 0, PW, PH)
 #define MAG_BULLET MAT(37, 16, PW, PH)
 #define PIST_SLIDE \

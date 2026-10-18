@@ -378,6 +378,47 @@ static void check_pistol(const char *tag, const WCutModel *cm, const WLoaded *m,
         CHECK(fabsf(bxm - rin) < 2e-5f, "%s: la bala tiene el calibre del anima", tag);
         CHECK(fabsf(cxm - 1.1f * rin) < 2e-5f, "%s: la vaina mide 1,1 veces el calibre", tag);
     }
+    /* color del cuerpo del cargador: casi negro como el mango. Sale de los texels mas oscuros del propio modelo: su luminancia
+     * (media del bloque) no pasa del tope de 28/255 ni del percentil 10 de los texels del mango (triangulos del original cuyo
+     * centroide queda bajo y = -25 mm en el marco bruto de wload), y el bloque es uniforme (sin dibujo) y de color casi neutro */
+    {
+        const WCutRule *mr = NULL; for (int q = 0; q < cm->nrules; q++) if (cm->rules[q].mag.on) mr = &cm->rules[q];
+        CHECK(mr && m->atlas && m->atlas_w && m->atlas_h, "%s: atlas para el color del cuerpo", tag);
+        if (mr && m->atlas) {
+            const uint32_t W = m->atlas_w, H = m->atlas_h;
+            int hist[256] = {0}, nh = 0;
+            for (uint32_t i = 0; i + 2 < m->ni; i += 3) {
+                float cy = 0, u0 = 1e9f, v0 = 1e9f, u1 = -1e9f, v1 = -1e9f;
+                for (int k = 0; k < 3; k++) {
+                    const WVertex *vv = &m->v[m->idx[i + k]]; cy += vv->pos[1] / 3;
+                    u0 = fminf(u0, vv->uv[0]); u1 = fmaxf(u1, vv->uv[0]); v0 = fminf(v0, vv->uv[1]); v1 = fmaxf(v1, vv->uv[1]);
+                }
+                if (cy >= -0.025f) continue;
+                for (uint32_t y = (uint32_t)(v0 * H); y <= (uint32_t)(v1 * H) && y < H; y++)
+                    for (uint32_t x = (uint32_t)(u0 * W); x <= (uint32_t)(u1 * W) && x < W; x++) {
+                        const uint8_t *px = m->atlas + 4 * ((size_t)y * W + x);
+                        hist[(px[0] * 30 + px[1] * 59 + px[2] * 11) / 100]++; nh++;
+                    }
+            }
+            int p10 = 0, acc = 0; while (p10 < 255 && acc + hist[p10] < nh / 10) acc += hist[p10++];
+            const WCutUV *u = &mr->mag.mat_body;
+            uint32_t x0 = (uint32_t)(u->u0 * W + 0.5f), x1 = (uint32_t)(u->u1 * W + 0.5f), y0 = (uint32_t)(u->v0 * H + 0.5f), y1 = (uint32_t)(u->v1 * H + 0.5f);
+            if (x1 > W) x1 = W;
+            if (y1 > H) y1 = H;  /* tabla corrupta: no leer fuera del atlas */
+            int lmin = 255, lmax = 0, cmax = 0;
+            for (uint32_t y = y0; y < y1; y++) for (uint32_t x = x0; x < x1; x++) {
+                const uint8_t *px = m->atlas + 4 * ((size_t)y * W + x);
+                int l = (px[0] * 30 + px[1] * 59 + px[2] * 11) / 100; lmin = l < lmin ? l : lmin; lmax = l > lmax ? l : lmax;
+                int mx = px[0] > px[1] ? px[0] : px[1]; mx = px[2] > mx ? px[2] : mx;
+                int mn = px[0] < px[1] ? px[0] : px[1]; mn = px[2] < mn ? px[2] : mn; cmax = mx - mn > cmax ? mx - mn : cmax;
+            }
+            VERB("%s: cuerpo del cargador: luminancia %d..%d, percentil 10 del mango %d (%d texels), croma max %d", tag, lmin, lmax, p10, nh, cmax);
+            CHECK(nh > 50 && x1 > x0 && y1 > y0, "%s: texels del mango para el color del cuerpo", tag);
+            CHECK(lmax <= 28, "%s: cuerpo del cargador mas oscuro que 28/255 (%d)", tag, lmax);
+            CHECK(lmax <= p10, "%s: cuerpo del cargador no mas claro que el percentil 10 del mango (%d > %d)", tag, lmax, p10);
+            CHECK(lmax == lmin && cmax <= 8, "%s: bloque del cuerpo del cargador uniforme y casi neutro", tag);
+        }
+    }
     /* extraccion por el eje del mango: el cargador barrido hacia abajo no atraviesa el mango (los puntos que aun estan sobre el
      * suelo del pozo, y = -29 mm, siguen dentro del contorno original) */
     const WPart *mp = def_part(d, "mag");

@@ -240,6 +240,7 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - `w_pist.c`: eje del cargador QX=-0.173648 QW=0.984808 (UY=0.939693 UZ=-0.342020).
 - Tests: `test_wcut` (cerrado, contención, holgura, altura, anchura, calibre, barrido de extracción, `mag_bad_params`); OPEN solo 57f8 body 4, 57f8 tube 3, 9a90 round 10; rifle/sniper/guiado a 0. `test_wload` usa `wload_id16` y entra en TESTS (se omite sin datos). `make -C vr/weapons test test-san` OK.
 - Herramienta: `make -C vr/weapons cutprev` (`tools/wmodel/cutprev.c`; `wprev_set_atlas/winding/twosided`; salida de wcut CCW -> `wprev_set_winding(1)`).
+- Cuerpo del cargador: `MAG_BODY`=MAT(30,10) (negro del mango, RGB 7,7,7); test exige luminancia <=28 y <= percentil 10 del mango.
 - Pendiente: marco macizo (sin pozo hueco al sacar el cargador); `PIST_MAG_HALF/CY/CZ` en w_pist.c para el cargador de ~86 mm; `game_weapon_id` real (puente RAM: pistola 0, fusil 1, granada 2, guiado 3, antiaéreo 4, mina 5, adhesivo 6, aturdidora 7, chaff 8, francotirador 9).
 
 ## 18. Puente RAM de solo lectura (`vr/bridge/`) — 2026-10-18
