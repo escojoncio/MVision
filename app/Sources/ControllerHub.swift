@@ -357,43 +357,9 @@ final class ControllerHub: @unchecked Sendable {
                            rx: g.rightThumbstick.xAxis.value, ry: g.rightThumbstick.yAxis.value)
     }
 
-    /// Lectura por `GCController.input` (GCControllerLiveInput, visionOS 1+/iOS 17+) con los alias oficiales de los
-    /// mandos espaciales. DESACTIVADA por defecto: se activa con la clave `mv.hub.liveInput` (UserDefaults, Bool) y, aunque
-    /// esté activa, si el perfil no entrega ningún elemento se cae a la lectura clásica. Siempre se registra en `muestra`.
-    private static let useLiveInput = UserDefaults.standard.bool(forKey: "mv.hub.liveInput")
-
-    private static func readHandLive(_ c: GCController) -> HandSnapshot? {
-        let input = c.input
-        func button(_ name: String) -> (any GCButtonElement)? { input[name] as? (any GCButtonElement) }
-        let a = button(GCInputButtonA), b = button(GCInputButtonB)
-        let grip = button(GCInputGripButton), trig = button(GCInputTrigger)
-        let menu = button(GCInputButtonMenu), click = button(GCInputThumbstick)
-        let pad = input[GCInputThumbstick] as? (any GCDirectionPadElement)
-        if a == nil && b == nil && grip == nil && trig == nil && menu == nil && pad == nil { return nil }
-        func pressed(_ e: (any GCButtonElement)?) -> Bool { e?.pressedInput.isPressed ?? false }
-        func analog(_ e: (any GCButtonElement)?) -> Float {
-            guard let p = e?.pressedInput else { return 0 }
-            return p.isPressed ? max(p.value, 0.6) : p.value
-        }
-        var h = HandSnapshot()
-        h.present = true
-        h.trigger = analog(trig)
-        h.grip = analog(grip)
-        h.low = pressed(a)
-        h.up = pressed(b)
-        h.menu = pressed(menu)
-        h.stickClick = pressed(click)
-        if let pad {
-            h.stickX = (pad.xAxis as? any GCLinearInput)?.value ?? 0
-            h.stickY = (pad.yAxis as? any GCLinearInput)?.value ?? 0
-        }
-        return h
-    }
-
     private func readHand(_ c: GCController?) -> HandSnapshot {
         var h = HandSnapshot()
         guard let c else { return h }
-        if Self.useLiveInput, let live = Self.readHandLive(c) { return live }
         lock.lock()
         let m = maps[ObjectIdentifier(c)]
         lock.unlock()
@@ -523,11 +489,6 @@ final class ControllerHub: @unchecked Sendable {
             let bg = GCController.shouldMonitorBackgroundEvents ? 1 : 0
             var out = "muestra \(label): gat=\(f(gat)) grip=\(f(grip)) A=\(f(bA)) B=\(f(bB)) menu=\(f(menu)) clic=\(f(clic))"
             out += " stick=(\(f(sx)),\(f(sy))) actual=\(cur) appActiva=\(a) fondo=\(bg)"
-            if let v = Self.readHandLive(c) {
-                out += " | input: gat=\(f(v.trigger)) grip=\(f(v.grip)) A=\(v.low ? 1 : 0) B=\(v.up ? 1 : 0) menu=\(v.menu ? 1 : 0) clic=\(v.stickClick ? 1 : 0) stick=(\(f(v.stickX)),\(f(v.stickY)))"
-            } else {
-                out += " | input: sin datos"
-            }
             dlog(out)
         }
         line("Sense I", l)
