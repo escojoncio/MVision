@@ -22,6 +22,9 @@ static uint64_t clk;                /* ciclos virtuales */
 static int pal = 1;
 static uint32_t i_stat, i_mask = 0x27Fu; /* VBlank, GPU, CD, DMA, TMR0-2, SPU: el kernel los deja habilitados */
 static uint32_t frame_no;
+#define SPU_BATCH 32u                 /* muestras por lote de reloj de SPU */
+#define SPU_BATCH_CYC (SPU_BATCH * 768u) /* 768 ciclos por muestra a 44100 Hz */
+static uint64_t next_spu;             /* ciclo del próximo lote de SPU */
 static uint64_t next_vbl;             /* ciclo del próximo VBlank */
 static int32_t chunk;                 /* sondeos asignados al último presupuesto */
 int32_t rt_budget;
@@ -359,7 +362,9 @@ static void account(void) {
 
 static uint64_t next_event(void) {
     if (!next_vbl) next_vbl = cycles_per_frame();
+    if (!next_spu) next_spu = SPU_BATCH_CYC;
     uint64_t e = next_vbl;
+    if (next_spu < e) e = next_spu;
     for (int n = 0; n < 3; n++) if (tm[n].next_irq < e) e = tm[n].next_irq;
     return e;
 }
@@ -387,9 +392,15 @@ static void vblank_hw(Cpu *c) {
 
 static void run_events(Cpu *c) {
     if (!next_vbl) next_vbl = cycles_per_frame();
+    if (!next_spu) next_spu = SPU_BATCH_CYC;
     while (clk >= next_vbl) {
         next_vbl += cycles_per_frame();
         vblank_hw(c);
+    }
+    while (clk >= next_spu) {   /* se pone al día por lotes tras saltos de reloj */
+        next_spu += SPU_BATCH_CYC;
+        spu_clock((int)SPU_BATCH);
+        spu_irq_poll();
     }
     for (int n = 0; n < 3; n++) {
         Timer *t = &tm[n];

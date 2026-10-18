@@ -364,6 +364,38 @@ int spu_render(int16_t *out, int frames) {
     return frames;
 }
 
+/* ---- Reloj virtual: la SPU avanza con la CPU y deja la salida en un anillo para el host ---- */
+#define OUT_RING 16384
+static int16_t out_ring[OUT_RING * 2];
+static int out_rd, out_cnt;   /* posición de lectura y frames disponibles; protegidos por MX */
+
+void spu_clock(int frames) {
+    int16_t tmp[2];
+    pthread_mutex_lock(&MX);
+    for (int i = 0; i < frames; i++) {
+        render_one(tmp);
+        wav_put(tmp, 1);
+        if (out_cnt == OUT_RING) { out_rd = (out_rd + 1) % OUT_RING; out_cnt--; } /* descarta lo más antiguo */
+        int w = (out_rd + out_cnt) % OUT_RING;
+        out_ring[w * 2] = tmp[0]; out_ring[w * 2 + 1] = tmp[1];
+        out_cnt++;
+    }
+    pthread_mutex_unlock(&MX);
+}
+
+int spu_pull(int16_t *out, int frames) {
+    pthread_mutex_lock(&MX);
+    int n = frames < out_cnt ? frames : out_cnt;
+    for (int i = 0; i < n; i++) {
+        int r = (out_rd + i) % OUT_RING;
+        out[i * 2] = out_ring[r * 2]; out[i * 2 + 1] = out_ring[r * 2 + 1];
+    }
+    out_rd = (out_rd + n) % OUT_RING; out_cnt -= n;
+    pthread_mutex_unlock(&MX);
+    for (int i = n; i < frames; i++) out[i * 2] = out[i * 2 + 1] = 0;
+    return n;
+}
+
 void spu_advance(int frames) {
     int16_t tmp[512 * 2];
     while (frames > 0) {
