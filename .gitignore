@@ -1,0 +1,17 @@
+# Nunca subir datos del juego
+*.bin
+*.cue
+*.iso
+*.img
+*.chd
+*.exe
+*.zip
+*.7z
+extracted/
+gamedata/
+# Build
+build/
+out/
+*.o
+__pycache__/
+.DS_Store
