@@ -259,3 +259,10 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - `render/metal/ps1_gpu.metal`, `ps1_types.h`: VRAM como R16Uint, semitransparencia por lectura del framebuffer, MSAA x4 por muestra; host debe poner `PS1Frame.corner=1` en la pasada nativa y rellenar `PS1Event.data_n`. SIN COMPILAR.
 - Herramientas: `render/build.sh`; `MV_DISC=gamedata/disc build-render/capture_test gamedata/main.exe 4000 <dir> 4 2` (`CT_GAMEPLAY=1` llega a 3D); `build-render/ref_selftest 3000`.
 - Pendiente: enganchar `gpu_capture_vblank`; umbral del cierre por VBlank (<15 fps, 480i); copias VRAM solapadas en Metal (por filas); wrap y&511 en la pasada nativa; tope de memoria para M=N·K grande.
+
+## 20. Control VR, locomoción y confort (`vr/input/`, `app/Sources/VRInput*.swift`) — 2026-10-18
+
+- C puro `vr_input.{h,c}`: `vr_input_update(s,&frame,&pad)` -> pad PS1 activo-alto + sticks 0..255 (centro 0x80, Y abajo). Rumbo h: (x,z)=(sin h,-cos h), h=0 -> -Z, h>0 derecha. `vr_input_body_yaw()` (rad, se suma a la cabeza), `vr_input_vignette()` 0..1, `vr_input_snap_count()`, `vr_input_set_game_up()`, recalibración de altura, postura pedida.
+- Mapeo Sense (diestro): gatillo D cuadrado, gatillo I círculo, grips R1/L1, cara D baja cruz / alta triángulo, cara I baja L2 / alta R2, sticks R3/L3, Options start, Create select; espejo para zurdos; modo mando normal directo. Locomoción stick no dominante (relativa a cabeza o mano), giro por pasos 30° o suave 120°/s. Agacharse físico 0,35 m / tumbarse 0,80 m con histéresis 0,06 m, sincronizado con la postura del puente (3 reintentos, 0,6 s).
+- Revisión: wrap_pi con fmodf, altura NaN ignorada, autocalibración limitada a 0,15 m/s, giro por pasos con cambio de signo, VRInputPose con generación (dos Sense a la vez), headHeight solo al cambiar. `make -C vr/input test test-san` OK (84).
+- Pendiente de integración en app: incluir `vr_input.h` en el bridging header, copiar vr/input en `stage.sh`/`project.yml`, `NSAccessoryTrackingUsageDescription` (+ entitlement de accesorios de visionOS 26), usar VRInput en vez de InputManager; validar en visor los nombres de elementos del Sense y el ciclo de posturas.
