@@ -281,6 +281,10 @@ static int ll_sector(Cpu *c, int port, uint32_t sec, uint32_t buf, int wr) {
     Card *k = &cards[port];
     if (!k->present) { card_event(c, EVS_TIMEOUT); return 1; }
     if (sec >= CARD_SIZE / SECT) { card_event(c, EVS_ERROR); return 0; }
+    /* Sondeo de escritura de la librería del juego: sector 0x3F con búfer NULL (dirección física 0, cualquier segmento). Solo se confirma con el
+     * evento: copiar la RAM baja (RAM[0..127]) sobre el sector 63 destruiría la copia de la cabecera y la imagen dejaría de ser un formato válido.
+     * Las escrituras a ese sector con un búfer real siguen copiándose. */
+    if (wr && sec == 0x3F && (buf & 0x1FFFFFFFu) == 0) { card_event(c, EVS_IOE); return 1; }
     uint8_t *p = k->img + sec * SECT;
     for (int j = 0; j < SECT; j++) {
         if (wr) p[j] = mem_r8(c, buf + j);
@@ -295,6 +299,10 @@ static int ll_sector(Cpu *c, int port, uint32_t sec, uint32_t buf, int wr) {
 int card_bios(Cpu *c, uint32_t vec, uint32_t fn) {
     uint32_t a0 = c->r[4], a1 = c->r[5], a2 = c->r[6];
     check_env();
+    static int trace = -1, ntr;
+    if (trace < 0) trace = getenv("MV_CARD_LOG") != NULL;
+    if (trace && ntr < 4000 && ((vec == 0xA0 && (fn == 0x70 || (fn >= 0xAB && fn <= 0xAF))) || (vec == 0xB0 && ((fn >= 0x32 && fn <= 0x36) || (fn >= 0x41 && fn <= 0x50)))))   /* diagnóstico: MV_CARD_LOG=1 */
+        fprintf(stderr, "[card] %02X(%02X) a0=%08x a1=%08x a2=%08x\n", vec, fn, a0, a1, a2), ntr++;
     if (vec == 0xA0) {
         switch (fn) {
         case 0x70: c->r[2] = 1; return 1;                                /* _bu_init */
