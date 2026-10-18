@@ -4,10 +4,16 @@
  *  - --disc "dir1;dir2" (o variable MV_DISC): discos extraídos; --card (o MV_CARD): imagen .mcd.
  *  - --peek DIR,LEN (repetible): vuelca palabras de RAM al terminar (diagnóstico).
  *  - --dump DIR --every N: vuelca a PPM el área de display cada N frames (--full: VRAM completa).
+ *  - --pad GUION: pulsa botones del mando 1 en frames concretos. GUION = lista separada por comas de
+ *    FRAME:BOTONES[:DURACION]; BOTONES = nombres unidos por '+' (start select cross circle square triangle
+ *    up down left right l1 l2 r1 r2); DURACION en frames (por defecto 6). Ej.: --pad 1800:start,2400:cross+up:10
+ *  - --pad-every N:BOTON: pulsa BOTON 6 frames cada N frames (útil para saltar escenas). Repetible junto a --pad.
+ *    Los botones se pasan a pad_set_state() en positivo (bit a 1 = pulsado; pad.c invierte); sticks a 0x80.
  * Al terminar imprime estadísticas de la GPU y del intérprete. */
 #include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -51,9 +57,72 @@ static void report(void) {
             sys_vblank_count(), (unsigned long long)sys_cycles(), interp_insns);
 }
 
+typedef struct { uint32_t start, dur, every; uint16_t mask; } PadEv;
+static PadEv pad_ev[256];
+static int npad_ev;
+
+static const struct { const char *n; int bit; } pad_names[] = {
+    {"select", 0}, {"l3", 1}, {"r3", 2}, {"start", 3}, {"up", 4}, {"right", 5}, {"down", 6}, {"left", 7},
+    {"l2", 8}, {"r2", 9}, {"l1", 10}, {"r1", 11}, {"triangle", 12}, {"circle", 13}, {"cross", 14}, {"square", 15}};
+
+/* "start+cross" -> máscara; devuelve 0 si algún nombre es desconocido */
+static uint16_t pad_mask(const char *s, size_t len) {
+    uint16_t m = 0;
+    while (len) {
+        size_t k = 0;
+        while (k < len && s[k] != '+') k++;
+        int ok = 0;
+        for (size_t i = 0; i < sizeof pad_names / sizeof *pad_names; i++)
+            if (strlen(pad_names[i].n) == k && !strncasecmp(s, pad_names[i].n, k)) { m |= (uint16_t)(1u << pad_names[i].bit); ok = 1; }
+        if (!ok) return 0;
+        s += k; len -= k;
+        if (len) { s++; len--; }
+    }
+    return m;
+}
+
+static int pad_add_script(const char *g) {
+    char *dup = strdup(g), *sv = NULL;
+    for (char *tok = strtok_r(dup, ",", &sv); tok; tok = strtok_r(NULL, ",", &sv)) {
+        char *e;
+        uint32_t fr = (uint32_t)strtoul(tok, &e, 0);
+        if (*e != ':' || npad_ev >= 256) { free(dup); return -1; }
+        char *b = e + 1, *c2 = strchr(b, ':');
+        uint32_t dur = 6;
+        uint16_t m = pad_mask(b, c2 ? (size_t)(c2 - b) : strlen(b));
+        if (c2) dur = (uint32_t)strtoul(c2 + 1, 0, 0);
+        if (!m || !dur) { free(dup); return -1; }
+        pad_ev[npad_ev++] = (PadEv){fr, dur, 0, m};
+    }
+    free(dup);
+    return 0;
+}
+
+static int pad_add_every(const char *a) {
+    char *e;
+    uint32_t n = (uint32_t)strtoul(a, &e, 0);
+    if (*e != ':' || !n || npad_ev >= 256) return -1;
+    uint16_t m = pad_mask(e + 1, strlen(e + 1));
+    if (!m) return -1;
+    pad_ev[npad_ev++] = (PadEv){0, 6, n, m};
+    return 0;
+}
+
+static void script_pad_frame(uint32_t f) {
+    static uint16_t last = 0xFFFF;
+    uint16_t b = 0;
+    for (int i = 0; i < npad_ev; i++) {
+        const PadEv *p = &pad_ev[i];
+        if (p->every) { if (f >= p->every && f % p->every < p->dur) b |= p->mask; }
+        else if (f >= p->start && f < p->start + p->dur) b |= p->mask;
+    }
+    if (b != last) { pad_set_state(0, b, 0x80, 0x80, 0x80, 0x80); last = b; }
+}
+
 static void on_frame(Cpu *c, uint32_t f) {
     (void)c;
     alarm(10);
+    if (npad_ev) script_pad_frame(f);
     if (f % 60 == 0) fprintf(stderr, "[headless] frame %u\n", f);
     if (dump_dir && f % dump_every == 0) {
         char p[1024];
@@ -82,6 +151,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--disc") && i + 1 < argc) disc = argv[++i];
         else if (!strcmp(argv[i], "--card") && i + 1 < argc) card = argv[++i];
         else if (!strcmp(argv[i], "--full")) dump_full = 1;
+        else if (!strcmp(argv[i], "--pad") && i + 1 < argc) {
+            if (pad_add_script(argv[++i])) { fprintf(stderr, "guion --pad inválido: '%s'\n", argv[i]); return 1; }
+        }
+        else if (!strcmp(argv[i], "--pad-every") && i + 1 < argc) {
+            if (pad_add_every(argv[++i])) { fprintf(stderr, "--pad-every inválido: '%s' (N:BOTON)\n", argv[i]); return 1; }
+        }
         else if (!strcmp(argv[i], "--peek") && i + 1 < argc && npeek < 8) {
             char *s = argv[++i], *e;
             peek_a[npeek] = (uint32_t)strtoul(s, &e, 16);
@@ -90,7 +165,7 @@ int main(int argc, char **argv) {
         else if (!exe) exe = argv[i];
         else max_frames = (uint32_t)strtoul(argv[i], 0, 0);
     }
-    if (!exe) { fprintf(stderr, "uso: %s <exe> [frames] [--dump DIR] [--every N] [--disc RUTAS] [--card MCD] [--full]\n", argv[0]); return 1; }
+    if (!exe) { fprintf(stderr, "uso: %s <exe> [frames] [--dump DIR] [--every N] [--disc RUTAS] [--card MCD] [--full] [--pad GUION] [--pad-every N:BOTON]\n", argv[0]); return 1; }
     if (!dump_every) dump_every = 1;
     if (dump_dir) mkdir(dump_dir, 0755);
     FILE *f = fopen(exe, "rb");
