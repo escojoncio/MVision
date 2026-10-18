@@ -382,3 +382,9 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - `Storage.findDiscs` escanea la carpeta elegida; `Storage.devDocuments` (ajuste oculto, pulsación larga 3 s en el título de la pantalla de elegir carpeta) añade Documents y `main.exe` manual. `Storage.resolveCardDir()`: `Saves` dentro de la carpeta (sonda de escritura) o Documents/Saves. `prepare()` ya no crea Documents/Saves.
 - `GamePhase.needFolder(String?)` + `FolderPromptView` + `.fileImporter([.folder])` en ContentView; botón "Cambiar carpeta" en el menú de XRControlsView (`GameModel.changeFolder`: con el motor en marcha solo olvida el bookmark).
 - Sin verificar (sin macOS): todo el Swift; comprobar `fileImporter` en visionOS y que `URL(resolvingBookmarkData:options:[])` abre el ámbito tras `startAccessing`.
+
+## 32. Primera IPA VR compilada en CI — 2026-10-19
+
+- Run de visionos.yml 39171719645: probe OK, reference omitido (artefacto sigs-ref previo), ipa OK -> artefacto `MVision-ipa` (sin firmar, sin datos del juego). Primer intento (39171549580) falló solo en XRRenderLoop.swift: `onSpatialEvent = nil` (no opcional -> `{ _ in }`), `queryDrawables()` solo visionOS 26 (-> `queryDrawable()`), `AxisDirectionConvention.rightUpBackward` inexistente (-> proyección propia por tangentes `XRMath.projection`).
+- Contenido: modo intérprete + HLE por firmas, cámara VR (vrcam), escena estéreo, renderer Metal, control VR/mando, lector BIN/CUE, carpeta externa elegida por el usuario (huella `APP_FOLDER_KEY`). Sin IA, brazos IK, arma en mano ni radar (siguiente build).
+- Pendiente: prueba en el visor (log en Documents/mvision.log de la app); verificar nombres de elementos del mando de seguimiento, near plane de la proyección propia, HUD, rendimiento del intérprete.
