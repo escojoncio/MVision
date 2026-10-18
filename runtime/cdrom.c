@@ -18,7 +18,9 @@
 #include "cpu.h"
 #include "hle.h"
 #include "cdrom.h"
+#include "disc_img.h"
 #include "sys.h"
+#include <sys/stat.h>
 
 #define V0 c->r[2]
 #define A0 c->r[4]
@@ -47,6 +49,8 @@ typedef struct {
     int nfiles;
     uint32_t total;     /* sectores */
     uint8_t sys[8][SEC];/* sectores 16..23 sintetizados */
+    DiscImg *img;       /* != NULL: imagen BIN/CUE (los campos de carpeta no se usan) */
+    uint32_t dir_a, dir_b; /* LBA del directorio raíz y del de datos (heurística de cambio de disco) */
 } Disc;
 
 static Disc discs[MAX_DISCS];
@@ -225,21 +229,60 @@ static int build_disc(Disc *d, const char *root) {
     return 0;
 }
 
-static int open_one(const char *dir) {
+/* Disco desde una imagen (.cue o .bin): el ISO9660 es el real, así que las lecturas pasan tal cual. */
+static uint32_t rd_le32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+
+static int build_img(Disc *d, const char *path) {
+    memset(d, 0, sizeof *d);
+    snprintf(d->root, sizeof d->root, "%s", path);
+    d->img = disc_img_open(path);
+    if (!d->img) return -1;
+    d->total = disc_img_sectors(d->img) + PREGAP;
+    d->dir_a = d->dir_b = 0xFFFFFFFFu;
+    /* LBA del directorio raíz (registro del PVD) y del primer subdirectorio (el de datos). */
+    uint8_t *b = malloc(SEC);
+    if (b && disc_img_read_user(d->img, 16, b) == 0 && !memcmp(b + 1, "CD001", 5)) {
+        d->dir_a = rd_le32(b + 156 + 2);
+        uint32_t rsz = rd_le32(b + 156 + 10), ra = d->dir_a;
+        if (rsz > SEC) rsz = SEC;
+        if (disc_img_read_user(d->img, ra, b) == 0) {
+            for (uint32_t o = 0; o < rsz && b[o];) {
+                uint32_t l = b[o];
+                if (o + l > SEC || l < 34) break;
+                if ((b[o + 25] & 2) && b[o + 32] > 1 && d->dir_b == 0xFFFFFFFFu) d->dir_b = rd_le32(b + o + 2);
+                o += l;
+            }
+        }
+    }
+    free(b);
+    return 0;
+}
+
+static int open_one(const char *path) {
     if (ndiscs == MAX_DISCS) return -1;
-    if (build_disc(&discs[ndiscs], dir)) return -1;
+    struct stat st;
+    if (stat(path, &st)) { fprintf(stderr, "[cd] no se puede abrir '%s'\n", path); return -1; }
     Disc *d = &discs[ndiscs];
-    fprintf(stderr, "[cd] disco %d: %s (%d ficheros, %u sectores)\n", ndiscs + 1, dir, d->nfiles, d->total);
+    if (S_ISDIR(st.st_mode)) {
+        if (build_disc(d, path)) return -1;
+        d->dir_a = 22; d->dir_b = 23;   /* layout sintetizado */
+        fprintf(stderr, "[cd] disco %d: carpeta %s (%d ficheros, %u sectores)\n", ndiscs + 1, path, d->nfiles, d->total);
+    } else {
+        if (build_img(d, path)) { fprintf(stderr, "[cd] imagen no válida o ilegible: %s\n", path); return -1; }
+        fprintf(stderr, "[cd] disco %d: imagen %s (%u sectores)\n", ndiscs + 1, path, d->total - PREGAP);
+    }
     ndiscs++;
     return 0;
 }
 
+/* Carpeta extraída, .cue o .bin; también lista separada por ';'. Devuelve el nº total de discos montados. */
 int cd_open(const char *dir) {
     char tmp[4096];
     snprintf(tmp, sizeof tmp, "%s", dir);
     for (char *s = strtok(tmp, ";"); s; s = strtok(NULL, ";")) open_one(s);
     return ndiscs;
 }
+int cd_open_image(const char *path) { return cd_open(path); }
 
 int cd_select_disc(int n) {
     if (n < 0 || n >= ndiscs) return -1;
@@ -253,6 +296,7 @@ int cd_disc_count(void) { return ndiscs; }
 int cd_find(const char *path, uint32_t *lba, uint32_t *size) {
     if (!ndiscs) return -1;
     Disc *d = &discs[cur];
+    if (d->img) return disc_img_find(d->img, path, lba, size);
     const char *slash = strchr(path, '/');
     const char *name = slash ? slash + 1 : path;
     for (int i = 0; i < d->nfiles; i++)
@@ -273,6 +317,19 @@ int cd_read_sector(uint32_t lba, uint8_t *out, int raw) {
     if (raw) { bcd_msf(lba + PREGAP, out); out[3] = 2; out[6] = out[10] = 8; }
     if (!ndiscs) return -1;
     Disc *d = &discs[cur];
+    if (d->img) {
+        uint8_t r[DISC_RAW];
+        if (!raw) return disc_img_read_user(d->img, lba, out);
+        if (disc_img_read_raw(d->img, lba, r)) return -1;   /* fuera de rango: ceros (con la cabecera de tiempo ya puesta) */
+        if (r[15] == 1) {                                   /* modo 1: cabecera (4) + subcabecera vacía (8) + 2048 de datos */
+            memcpy(out, r + 12, 4);
+            memset(out + 4, 0, 8);
+            memcpy(out + 12, r + 16, SEC);
+        } else {
+            memcpy(out, r + 12, 2340);                      /* modo 2: cabecera + subcabecera + 2328 */
+        }
+        return 0;
+    }
     if (lba >= 16 && lba < 24) { memcpy(data, d->sys[lba - 16], SEC); if (raw && lba == 17) out[6] = out[10] = 0x89; return 0; }
     for (int i = 0; i < d->nfiles; i++) {
         VFile *v = &d->files[i];
@@ -388,7 +445,7 @@ static int control(Cpu *c, uint32_t com, uint32_t param, uint32_t result) {
         break;
     case 0x06: case 0x1B: /* ReadN / ReadS */
         if (param) { uint32_t p = mem_r32(c, param) & 0xFFFFFF; pos = msf_to_lba(p); }
-        if (pos == 22 || pos == 23) {
+        if (ndiscs && (pos == discs[cur].dir_a || pos == discs[cur].dir_b)) {
             if (++rescans > 3 && ndiscs > 1) { cd_select_disc(cur ^ 1); rescans = 0; }
         } else if (pos > 23) rescans = 0;
         reading = 1;

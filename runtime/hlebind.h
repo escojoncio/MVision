@@ -24,6 +24,14 @@ int hle_bind(const char *json, size_t len, uint32_t text_base, uint32_t text_siz
 int hle_bind_file(const char *path, uint32_t text_base, uint32_t text_size, uint32_t entry_pc);
 unsigned hle_bind_missing(void);          /* nº de HLE de la tabla que no se pudieron enlazar */
 
+/* HLE de dirección fija (p. ej. las de la capa de cámara VR, cuyas direcciones no salen de ninguna firma de la librería):
+ * hle_bind_declare_fixed(nombre) las excluye de la búsqueda por firmas (sin aviso ni cuenta de "faltan"); tras hle_bind
+ * (que borra los enlaces anteriores) hle_bind_fixed(nombre, dirección) registra hle_<nombre> en esa dirección. 0 = bien,
+ * -1 = nombre fuera de hle_table, dirección inválida o ya ocupada. Quien las use debe haber comprobado antes que el EXE
+ * cargado es el esperado (la dirección se toma tal cual). */
+void hle_bind_declare_fixed(const char *name);
+int hle_bind_fixed(const char *name, uint32_t addr);
+
 /* Consulta (hilo del emulador). hle_bind_bits: 1 bit por palabra de RAM con una HLE enlazada. */
 extern uint8_t hle_bind_bits[PSX_RAM_SIZE / 32];
 FuncPtr hle_bind_lookup(uint32_t addr);   /* NULL si no hay HLE en esa dirección */

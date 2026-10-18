@@ -1,15 +1,22 @@
 name: build
 
-# Solo a mano o con [build] en el mensaje del commit.
+# Solo a mano o con [build] en el mensaje del commit. También se invoca desde visionos.yml (workflow_call con
+# force=true) cuando no hay artefactos de referencia vigentes.
 on:
   workflow_dispatch:
   push:
     branches: [main]
+  workflow_call:
+    inputs:
+      force:
+        description: "Ejecutar siempre (llamada desde visionos.yml)"
+        type: boolean
+        default: false
 
 jobs:
   reference:
     # Compila la referencia MIPS desde la decomp externa (repos en secrets del repo).
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build]')
+    if: inputs.force == true || github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build]')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -41,7 +48,8 @@ jobs:
       - name: Build reference executable
         working-directory: upstream/decomp/build
         # compare/checkup pueden fallar si el commit no es matching; para firmas no importa.
-        run: python build.py --psyq_path "$GITHUB_WORKSPACE/upstream/sdk" || echo "::warning::build.py terminó con error (ver log)"
+        # Salida a fichero (no al registro público: llevaría nombres de ficheros del repo externo).
+        run: python build.py --psyq_path "$GITHUB_WORKSPACE/upstream/sdk" > "$RUNNER_TEMP/ref_build.log" 2>&1 || echo "::warning::build.py terminó con error"
 
       - name: Function signatures (sin código)
         run: |
@@ -50,8 +58,31 @@ jobs:
           sha256sum "$EXE"
           python tools/sig/sigs.py make "$EXE" "$MAP" sigs_ref.json
 
+      # El artefacto no debe llevar los nombres de símbolos de la referencia: se sustituyen por "h:<sha1>" (tools/sig/hlesigs.py
+      # los busca por ese hash a partir de los nombres de runtime/hle*.txt).
+      - name: Anonimizar nombres
+        run: |
+          python3 - <<'PY'
+          import hashlib, json
+          d = json.load(open("sigs_ref.json"))
+          for s in d:
+              s["name"] = "h:" + hashlib.sha1(s["name"].encode()).hexdigest()[:16]
+          json.dump(d, open("sigs_ref.json", "w"), separators=(",", ":"))
+          PY
+
       - uses: actions/upload-artifact@v4
         with:
           name: sigs-ref
           path: sigs_ref.json
+          retention-days: 30
+
+      - name: Firmas HLE (subconjunto para el runtime sin código generado)
+        run: |
+          python3 tools/sig/hlesigs.py sigs_ref.json sigs_hle.json runtime/hle*.txt
+          ls -l sigs_hle.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sigs-hle
+          path: sigs_hle.json
           retention-days: 30

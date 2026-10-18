@@ -534,3 +534,48 @@ int disc_scan_dir(const char *dir, DiscEntry out[], int max) {
     for (int i = 0; i < n; i++) out[i].id.number = i + 1;
     return n;
 }
+
+/* ---------------- extracción del ejecutable de datos ---------------- */
+
+int disc_extract_dataexe(const char *path, int is_dir, const char *outfile) {
+    DiscId id;
+    FILE *o = NULL;
+    int rc = -1;
+    if (is_dir) {
+        if (disc_dir_identify(path, &id) || !id.datadir[0] || !id.dataexe[0]) return -1;
+        char src[2048];
+        if (snprintf(src, sizeof src, "%s/%s/%s", path, id.datadir, id.dataexe) >= (int)sizeof src) return -1;
+        FILE *f = fopen(src, "rb");
+        if (!f) return -1;
+        o = fopen(outfile, "wb");
+        if (!o) { fclose(f); return -1; }
+        uint8_t b[16384];
+        size_t n;
+        rc = 0;
+        while ((n = fread(b, 1, sizeof b, f)) > 0)
+            if (fwrite(b, 1, n, o) != n) { rc = -1; break; }
+        fclose(f);
+    } else {
+        DiscImg *h = disc_img_open(path);
+        if (!h) return -1;
+        uint32_t lba = 0, size = 0;
+        char rel[80];
+        if (disc_img_identify(h, &id) || !id.datadir[0] || !id.dataexe[0]) { disc_img_close(h); return -1; }
+        snprintf(rel, sizeof rel, "%s/%s", id.datadir, id.dataexe);
+        if (disc_img_find(h, rel, &lba, &size) || !size) { disc_img_close(h); return -1; }
+        o = fopen(outfile, "wb");
+        if (!o) { disc_img_close(h); return -1; }
+        rc = 0;
+        for (uint32_t done = 0, s = 0; done < size; s++) {
+            uint8_t b[DISC_USER];
+            if (disc_img_read_user(h, lba + s, b)) { rc = -1; break; }
+            uint32_t n = size - done < DISC_USER ? size - done : DISC_USER;
+            if (fwrite(b, 1, n, o) != n) { rc = -1; break; }
+            done += n;
+        }
+        disc_img_close(h);
+    }
+    if (fclose(o)) rc = -1;
+    if (rc) remove(outfile);
+    return rc;
+}

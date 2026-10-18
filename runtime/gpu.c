@@ -400,6 +400,7 @@ void gpu_capture_vblank(void) {
     if (++cap.vb_noflip >= GPU_CAP_VB_FALLBACK) cap_close(GPU_CLOSE_VBLANK);
 }
 uint32_t gpu_capture_dropped(void) { return cap.dropped; }
+uint32_t gpu_capture_seq(void) { return cap.seq; }
 void gpu_capture_set_float_hook(GpuFloatHook h) { cap.hook = h; }
 void gpu_capture_set_hp_hook(GpuHpHook h) { cap.hphook = h; }
 void gpu_capture_hiprec(int on) { gte_hp_enable(on); cap.hphook = NULL; cap.hpres = on ? gte_hp_resolve : NULL; }

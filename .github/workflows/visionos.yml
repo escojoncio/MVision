@@ -1,0 +1,206 @@
+name: visionos
+
+# IPA sin firmar para sideload. Solo a mano o con [ipa] en el mensaje del commit.
+# El IPA lleva únicamente código propio y el fichero de firmas del SDK (hashes enmascarados, sin código ni datos del
+# juego): el ejecutable del juego NO se empaqueta, la app lo extrae del disco del usuario al arrancar. Por eso no hay
+# generación de C ni cifrado.
+#
+# Firmas (sigs_hle.json): se derivan del artefacto `sigs-ref` del job `reference` de build.yml.
+#   1. `probe` busca el artefacto vigente más reciente (caducan a los 30 días).
+#   2. Si no hay, se ejecuta build.yml como dependencia (workflow_call, tarda ~45 min) y se usa su artefacto.
+#   3. El job `ipa` regenera sigs_hle.json con runtime/hle*.txt del commit actual, así nunca queda desfasado.
+#
+# Secrets (Settings > Secrets and variables > Actions):
+#   DECOMP_REPO, DECOMP_COMMIT, SDK_REPO   solo si hay que ejecutar `reference` (los usa build.yml).
+#   HOST_REPO, HOST_COMMIT   (opcionales, ambos) repo y commit del motor propio cuyos ficheros Swift
+#                     opcionales se añaden si compilan.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[ipa]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run_id: ${{ steps.find.outputs.run_id }}
+    steps:
+      - name: Buscar artefacto sigs-ref vigente
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=sigs-ref&per_page=30" \
+                 --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | reverse | .[0].workflow_run.id // empty') || id=""
+          echo "run_id=$id" >> "$GITHUB_OUTPUT"
+          if [ -n "$id" ]; then echo "Artefacto vigente en la ejecución $id"; else echo "Sin artefacto vigente: se ejecutará la referencia"; fi
+
+  reference:
+    needs: probe
+    if: needs.probe.outputs.run_id == ''
+    uses: ./.github/workflows/build.yml
+    with:
+      force: true
+    secrets: inherit
+
+  ipa:
+    needs: [probe, reference]
+    # !cancelled(): `reference` se salta cuando ya hay artefactos; solo se exige que no haya fallado ni se haya cancelado.
+    if: ${{ !cancelled() && needs.probe.result == 'success' && (needs.reference.result == 'success' || needs.reference.result == 'skipped') }}
+    runs-on: macos-latest
+    timeout-minutes: 90
+    # Solo el job ipa se cancela al llegar un push nuevo; `reference` (build.yml) en curso no se toca.
+    concurrency:
+      group: visionos-ipa
+      cancel-in-progress: true
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Firmas de referencia (artefacto de una ejecución anterior)
+        if: needs.probe.outputs.run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: sigs-ref
+          run-id: ${{ needs.probe.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Firmas de referencia (artefacto de esta ejecución)
+        if: needs.probe.outputs.run_id == ''
+        uses: actions/download-artifact@v4
+        with:
+          name: sigs-ref
+
+      - name: Generar sigs_hle.json
+        run: |
+          test -f sigs_ref.json || { echo "::error::Falta sigs_ref.json"; exit 1; }
+          python3 tools/sig/hlesigs.py sigs_ref.json sigs_hle.json runtime/hle*.txt
+          ls -l sigs_hle.json
+
+      - name: Motor propio opcional
+        env:
+          HOST_REPO: ${{ secrets.HOST_REPO }}
+          HOST_COMMIT: ${{ secrets.HOST_COMMIT }}
+        run: |
+          if [ -n "$HOST_REPO" ] && [ -n "$HOST_COMMIT" ]; then
+            if git clone --quiet --filter=blob:none "$HOST_REPO" "$RUNNER_TEMP/hx" \
+               && git -C "$RUNNER_TEMP/hx" checkout --quiet "$HOST_COMMIT"; then
+              echo "EXTRAS_DIR=$RUNNER_TEMP/hx" >> "$GITHUB_ENV"
+            else
+              echo "::warning::No se pudo obtener el motor opcional; se compila sin él"
+            fi
+          else
+            echo "Sin HOST_REPO/HOST_COMMIT: compilación sin extras"
+          fi
+
+      - name: Herramientas e SDK de visionOS
+        run: |
+          brew install xcodegen
+          # Xcode más nuevo instalado en el runner.
+          best=$(for x in /Applications/Xcode*.app; do
+                   [ -d "$x" ] || continue
+                   v=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$x/Contents/Info.plist" 2>/dev/null) || continue
+                   echo "$v|$x"
+                 done | sort -t'|' -k1,1 -V | tail -1 | cut -d'|' -f2)
+          [ -n "$best" ] || { echo "::error::No hay ningún Xcode en /Applications"; exit 1; }
+          sudo xcode-select -s "$best/Contents/Developer"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i xros || sudo xcodebuild -downloadPlatform visionOS
+          xcodebuild -showsdks | grep -i xros
+
+      - name: Preparar proyecto
+        working-directory: app
+        run: |
+          SIGS_HLE="$GITHUB_WORKSPACE/sigs_hle.json" ./stage.sh
+          xcodegen generate
+
+      - name: Compilar (sin firmar)
+        working-directory: app
+        run: |
+          build() {
+            xcodebuild -project MVision.xcodeproj -scheme MVision -configuration Release \
+              -destination 'generic/platform=visionOS' -derivedDataPath build \
+              -jobs "$(sysctl -n hw.ncpu)" \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+              "$@" build > "$RUNNER_TEMP/xcb.log" 2>&1
+          }
+          # Errores como anotaciones de GitHub (fichero y línea cuando los hay), recortados y sin duplicados.
+          fail_report() {
+            python3 - "$RUNNER_TEMP/xcb.log" "$GITHUB_WORKSPACE" <<'PY'
+          import re, sys
+          log, ws = sys.argv[1], sys.argv[2].rstrip("/") + "/"
+          seen, n = set(), 0
+          pat = re.compile(r"^(?P<f>/[^:\n]+):(?P<l>\d+):(?:\d+:)?\s*(?:fatal )?error:\s*(?P<m>.*)$")
+          for raw in open(log, errors="replace"):
+              line = raw.rstrip("\n")
+              m = pat.match(line)
+              if m:
+                  f = m.group("f")
+                  f = f[len(ws):] if f.startswith(ws) else f
+                  msg = m.group("m").strip()[:200].replace("%", "%25").replace("\r", "").replace("\n", " ")
+                  key = (f, m.group("l"), msg)
+                  if key in seen: continue
+                  seen.add(key)
+                  print("::error file=%s,line=%s::%s" % (f, m.group("l"), msg))
+                  n += 1
+              elif re.match(r"^(ld|clang|error): ", line) and ("error" in line or line.startswith("ld:")):
+                  msg = line.strip()[:200].replace("%", "%25")
+                  if ("", "", msg) in seen: continue
+                  seen.add(("", "", msg))
+                  print("::error::" + msg)
+                  n += 1
+              if n >= 30: break
+          if n == 0:
+              print("::error::xcodebuild falló sin errores reconocibles; última línea del registro: " + line[:160])
+          PY
+          }
+          if ls .stage/extras/*.swift >/dev/null 2>&1; then
+            if build 'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) MV_HAVE_PS1RENDERER MV_HOST_EXTRAS'; then
+              echo "Compilado con extras"
+            else
+              fail_report
+              echo "::warning::Los ficheros opcionales no compilan; se repite sin ellos"
+              rm -f .stage/extras/*.swift
+              xcodegen generate
+              build || { fail_report; exit 1; }
+            fi
+          else
+            build || { fail_report; exit 1; }
+          fi
+
+      - name: Empaquetar IPA (sin firmar)
+        run: |
+          APP=$(find app/build/Build/Products -maxdepth 2 -name MVision.app -type d | head -1)
+          [ -n "$APP" ] || { echo "::error::No se generó MVision.app"; exit 1; }
+          # Salvaguarda: el paquete no debe llevar ejecutables del juego ni código generado.
+          if find "$APP" \( -iname '*.exe' -o -iname 'boot.dat' -o -iname 'boot.exe' \) | grep -q .; then
+            echo "::error::El paquete contiene un ejecutable que no debería estar"; exit 1
+          fi
+          rm -rf "$RUNNER_TEMP/pkg" && mkdir -p "$RUNNER_TEMP/pkg/Payload" out
+          cp -R "$APP" "$RUNNER_TEMP/pkg/Payload/"
+          (cd "$RUNNER_TEMP/pkg" && zip -qry "$GITHUB_WORKSPACE/out/MVision.ipa" Payload)
+          ls -l out
+
+      - name: Publicar IPA sin firmar (7 días)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MVision-ipa
+          path: out/MVision.ipa
+          retention-days: 7
+          if-no-files-found: error

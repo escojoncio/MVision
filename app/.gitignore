@@ -1,0 +1,6 @@
+# Generado en CI / local; nunca se sube
+.stage/
+*.xcodeproj/
+Info.plist
+build/
+DerivedData/
