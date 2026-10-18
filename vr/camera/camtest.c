@@ -4,7 +4,23 @@
  *   CAM_NOVR=1 (no activar la cámara VR: línea base), CAM_PHASE=ini fija el tiempo inicial de las fases (depuración).
  * Fases (t = frames desde que la cámara VR está activa): quieto, emparejado (guiñada alterna +-20 grados por frame),
  * giro 360 grados de guiñada y vaivén de cabeceo +-60 grados. De cada lista de dibujo capturada (geometría de alta
- * precisión) se hace una vista previa de campo ancho re-proyectando con vrcam_delta y se escribe PPM. */
+ * precisión) se hace una vista previa de campo ancho re-proyectando con vrcam_delta y se escribe PPM.
+ *
+ * MODO SERVIDOR DE INSTANTÁNEAS (CAM_SERVER=lista): evita repetir los ~6500 frames hasta la parte jugable en cada prueba.
+ *   CAM_SERVER=lista.txt camtest <exe> <frames> <dir_base>
+ *   El proceso arranca una vez y ejecuta el guion de arranque hasta el punto de partida: t=0 de la cámara VR (el puente dijo
+ *   has_player && in_control durante 8 frames + 20 de margen), o el frame CAM_SNAP_FRAME=N si se define. Desde ahí, por cada línea
+ *   de la lista hace fork(): el hijo hereda por copia en escritura el proceso ENTERO (RAM/VRAM/GPU/GTE/SPU emulados, planificador,
+ *   pilas de las fibras del juego, estado del puente y de la cámara), carga su guion CAM_SCRIPT, lo ejecuta, escribe en
+ *   <dir_base>/<nombre>/ (PPM, ops_*.txt, big2d.log y log.txt = su stderr) y termina; el padre espera (alarm desarmada) y sigue con
+ *   el siguiente, y al final sale. Lista: una escenario por línea, "nombre fichero_guion" o solo "fichero_guion" (nombre = base sin
+ *   extensión; los repetidos llevan sufijo _2...); '#' comenta. CAM_JOBS=N (def. 1) ejecuta N hijos a la vez.
+ *   Arranque: CAM_PAD="inicio:mascara_hex:duracion[:cada],..." sustituye el guion de mando de arranque; CAM_BOOT_SHOT=N vuelca el original cada N frames
+ *   antes de la instantánea (boot_fNNNNN.ppm en <dir_base>).
+ *   CAM_SERVER_WATCH=1: tras la ronda el padre se queda en la instantánea y espera a que cambie el fichero de lista; al cambiar lo vuelve a
+ *   leer y ejecuta la ronda nueva SIN repetir el arranque (iterar guiones en segundos); una línea "quit" lo termina.
+ *   Cada hijo imprime al final "[camtest] hash ... RAM/VRAM": dos hijos con el mismo guion deben dar el mismo hash y PPM idénticos.
+ *   El hijo comparte el fichero de tarjeta MV_CARD con los demás (si varios escriben, usar CAM_JOBS=1 o tarjetas distintas). */
 #include <math.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -12,7 +28,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <errno.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include "bridge.h"
 #include "cdrom.h"
@@ -22,6 +41,7 @@
 #include "sys.h"
 #include "ref_raster.h"
 #include "vr_camera.h"
+#include "vr_scene.h"
 
 extern jmp_buf rt_fatal_jmp;
 extern int rt_fatal_armed;
@@ -30,10 +50,59 @@ extern int rt_fatal_armed;
 typedef struct { uint32_t start, dur, every; uint16_t mask; } PadEv;
 static PadEv pad_ev[16];
 static int npad_ev;
-static int f_act = -1, cur_t = -1;
+static int f_act = -1, cur_t = -1, boot_shot, g_keep_ambig;
+
+/* ---- guion de inmersión (CAM_SCRIPT=fichero): tras activarse la cámara VR, mando y cabeza por tiempo relativo t ----
+ *   pad  t0 t1 mascara_hex          botones pulsados en t0 <= t < t1
+ *   head t0 t1 yaw0 yaw1 elev0 elev1   interpolación lineal (grados)
+ *   dump t0 t1 paso                 panel PPM p_tNNNN cada `paso` frames
+ *   shot t0 t1 paso                 original del juego (o_tNNNN = oráculo gpu.c) y, con la pose propia del motor, la vista previa VR a la misma
+ *                                   resolución sin filtro (e_) y con filtro de pantalla (ef_), para comparar el efecto lado a lado
+ *   poke t addr hex                 escribe bytes (cadena hexadecimal) en la RAM del juego en el frame t (dirección del juego, hex)
+ *   pokes t addr 'texto'            escribe una cadena ASCII terminada en cero
+ *   gcall t func a0 a1 a2 a3 [a4 [sp]] llama a una función del juego (EXE) en el frame t con esos argumentos (hex; a4 va en la pila, [sp+16]); se
+ *                                   guarda y restaura el estado de la CPU; el retorno v0 sale en el log ("[gcall]"). Sirve para probar la tarjeta con
+ *                                   las funciones propias del juego sin llegar a su menú
+ *   card t                          reabre la tarjeta (MV_CARD) desde el fichero: lo que guardó OTRO proceso/hijo se lee del disco, no de la copia en memoria
+ *   peek t addr n                   vuelca n bytes de la RAM en el log; cmp t a b n: compara dos zonas de RAM
+ *   keep_ambig 0|1                  (prueba) dibuja también los polígonos AMBIG junto a SAT/BEHIND que vr/scene descarta
+ *   end  t                          fin
+ * Con guion no hay fases fijas; se registra cada 15 frames posición/estado/oxígeno y las primitivas 2D a pantalla completa. */
+typedef struct { int kind, t0, t1; unsigned mask; float a[4]; uint32_t u[7]; char s[160]; } ScrEv;
+static ScrEv scr[256]; static int nscr, scr_end = 1 << 30, scr_on;
+static void scr_load(const char *path) {
+    nscr = 0; scr_end = 1 << 30; scr_on = 0;
+    FILE *f = fopen(path, "r");
+    if (!f) { perror(path); exit(1); }
+    char l[256];
+    while (fgets(l, sizeof l, f) && nscr < 256) {
+        ScrEv e; memset(&e, 0, sizeof e);
+        char k[16];
+        if (sscanf(l, "%15s", k) != 1 || k[0] == '#') continue;
+        if (!strcmp(k, "pad")) { e.kind = 0; sscanf(l, "%*s %d %d %x", &e.t0, &e.t1, &e.mask); }
+        else if (!strcmp(k, "head")) { e.kind = 1; sscanf(l, "%*s %d %d %f %f %f %f", &e.t0, &e.t1, &e.a[0], &e.a[1], &e.a[2], &e.a[3]); }
+        else if (!strcmp(k, "dump")) { e.kind = 2; sscanf(l, "%*s %d %d %f", &e.t0, &e.t1, &e.a[0]); }
+        else if (!strcmp(k, "keep_ambig")) { sscanf(l, "%*s %d", &g_keep_ambig); continue; }   /* prueba: dibujar también los AMBIG junto a SAT/BEHIND */
+        else if (!strcmp(k, "shot")) { e.kind = 3; sscanf(l, "%*s %d %d %f", &e.t0, &e.t1, &e.a[0]); }
+        else if (!strcmp(k, "pokes")) { e.kind = 5; char *q = strstr(l, "pokes"); sscanf(q + 5, "%d %x", &e.t0, &e.u[0]); q = strchr(q + 5, '\''); if (q) { snprintf(e.s, sizeof e.s, "%s", q + 1); char *z = strchr(e.s, '\''); if (z) *z = 0; } }
+        else if (!strcmp(k, "poke")) { e.kind = 4; char hx[150] = ""; sscanf(l, "%*s %d %x %149s", &e.t0, &e.u[0], hx); snprintf(e.s, sizeof e.s, "%s", hx); }
+        else if (!strcmp(k, "gcall")) { e.kind = 6; sscanf(l, "%*s %d %x %x %x %x %x %x %x", &e.t0, &e.u[0], &e.u[1], &e.u[2], &e.u[3], &e.u[4], &e.u[5], &e.u[6]); }
+        else if (!strcmp(k, "peek")) { e.kind = 7; sscanf(l, "%*s %d %x %x", &e.t0, &e.u[0], &e.u[1]); }
+        else if (!strcmp(k, "card")) { e.kind = 9; sscanf(l, "%*s %d", &e.t0); }
+        else if (!strcmp(k, "cmp")) { e.kind = 8; sscanf(l, "%*s %d %x %x %x", &e.t0, &e.u[0], &e.u[1], &e.u[2]); }
+        else if (!strcmp(k, "end")) { sscanf(l, "%*s %d", &scr_end); continue; }
+        else continue;
+        scr[nscr++] = e;
+    }
+    if (nscr >= 256 && fgets(l, sizeof l, f)) fprintf(stderr, "[guion] %s: máximo 256 órdenes, el resto se ignora\n", path);
+    fclose(f); scr_on = 1;
+}
 static void script_pad(uint32_t f) {
     static uint16_t last = 0xFFFF;
     uint16_t b = 0;
+    if (f_act >= 0 && scr_on) {
+        for (int i = 0; i < nscr; i++) if (scr[i].kind == 0 && cur_t >= scr[i].t0 && cur_t < scr[i].t1) b |= (uint16_t)scr[i].mask;
+    } else
     if (f_act >= 0) {   /* con la cámara VR activa: solo la prueba de marcha (adelante) en dos ventanas */
         int t = cur_t;
         if ((t >= 10 && t < 50) || (t >= 1340 && t < 1380)) b |= 1u << 4;
@@ -91,6 +160,7 @@ static int tex_sample(const GpuOp *o, int u, int v, uint16_t *out) {
     return t != 0;
 }
 
+static int g_dbg_semi;
 typedef struct { float x, y, z, u, v, r, g, b; } PV;
 static float g_f, g_cx, g_cy;
 static int g_w, g_h;
@@ -119,14 +189,26 @@ static void raster_tri(const GpuOp *o, const PV *a, const PV *b, const PV *c) {
         float u = k0 * a->u + k1 * b->u + k2 * c->u, v = k0 * a->v + k1 * b->v + k2 * c->v;
         float cr = k0 * a->r + k1 * b->r + k2 * c->r, cg = k0 * a->g + k1 * b->g + k2 * c->g, cb = k0 * a->b + k1 * b->b + k2 * c->b;
         float R, G, B;
+        int blend = (o->flags & GPU_F_SEMI) != 0;
         if (o->flags & GPU_F_TEXTURED) {
             uint16_t t;
             if (!tex_sample(o, (int)floorf(u + 0.001f), (int)floorf(v + 0.001f), &t)) continue;
+            if (!(t & 0x8000)) blend = 0;   /* texturizado semitransparente: solo se mezclan los texels con bit 15; el resto es opaco */
             float tr = (t & 31) * 8.0f, tg = ((t >> 5) & 31) * 8.0f, tb = ((t >> 10) & 31) * 8.0f;
             if (o->flags & GPU_F_RAW) { R = tr; G = tg; B = tb; }
             else { R = tr * cr / 128; G = tg * cg / 128; B = tb * cb / 128; }
         } else { R = cr; G = cg; B = cb; }
         uint8_t *q = g_img + ((size_t)y * g_w + x) * 3;
+        if (g_dbg_semi && x == 160 && y == 128) fprintf(stderr, "  px(160,128) seq=%u flags=0x%x abr=%d tp=%d tx=%d ty=%d clut=(%d,%d) blend=%d RGB=(%.0f,%.0f,%.0f) dest=(%d,%d,%d) uv=(%.0f,%.0f) col=(%.0f,%.0f,%.0f)\n", o->seq, o->flags, o->abr, o->tp, o->tx, o->ty, o->clx, o->cly, blend, R, G, B, q[0], q[1], q[2], u, v, cr, cg, cb);
+        if (blend) {   /* mezcla semitransparente de la GPU emulada sobre lo ya dibujado (B = fondo, F = fuente) */
+            float F[3] = {R, G, B};
+            for (int k = 0; k < 3; k++) {
+                float Bk = q[k], r;
+                switch (o->abr) { case 0: r = 0.5f * Bk + 0.5f * F[k]; break; case 1: r = Bk + F[k]; break; case 2: r = Bk - F[k]; break; default: r = Bk + 0.25f * F[k]; }
+                F[k] = r < 0 ? 0 : r;
+            }
+            R = F[0]; G = F[1]; B = F[2];
+        }
         q[0] = (uint8_t)(R > 255 ? 255 : R); q[1] = (uint8_t)(G > 255 ? 255 : G); q[2] = (uint8_t)(B > 255 ? 255 : B);
         g_painted[y * g_w + x] = 1; g_pix_drawn++;
     }
@@ -153,28 +235,71 @@ static void draw_clipped(const GpuOp *o, const PV *t0, const PV *t1, const PV *t
     for (int i = 1; i + 1 < n; i++) raster_tri(o, &out[0], &out[i], &out[i + 1]);
 }
 
-typedef struct { uint32_t polys, drawn, partial, behind; } RStat;
+
+/* Desplazamiento de la GTE por primitiva: los sprites de "resplandor"/halo ponen OFX/OFY en su centro de pantalla y proyectan solo el
+ * desplazamiento local (vx,vy = +-1000 a profundidad vz), así que (vx,vy,vz) NO es una posición de vista del mundo. La posición de vista real es
+ * X = vx + (OFX_op - OFX_cam)*vz/H (y análogo en Y), con OFX_cam = centro del mundo (la moda de proj_ox+dox sobre los polígonos 3D de la lista). */
+static float g_refx, g_refy; static int g_ref_ok;
+static void list_ref(const GpuDrawList *l) {
+    struct { int x, y, n; } h[16]; int nh = 0;
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *o = &l->ops[i];
+        if (o->type != GPU_OP_POLY || !(o->proj_h > 0) || !o->v[0].vvalid || (o->flags & GPU_F_SEMI)) continue;
+        int x = (int)lroundf((o->proj_ox + o->dox) * 2), y = (int)lroundf((o->proj_oy + o->doy) * 2), k;
+        for (k = 0; k < nh; k++) if (h[k].x == x && h[k].y == y) { h[k].n++; break; }
+        if (k == nh && nh < 16) { h[nh].x = x; h[nh].y = y; h[nh].n = 1; nh++; }
+    }
+    int best = -1;
+    for (int k = 0; k < nh; k++) if (best < 0 || h[k].n > h[best].n) best = k;
+    g_ref_ok = best >= 0;
+    if (best >= 0) { g_refx = h[best].x * 0.5f; g_refy = h[best].y * 0.5f; }
+}
+static void vtx_view(const GpuOp *o, const GpuVtx *v, float *x, float *y, float *z) {
+    *x = v->vx; *y = v->vy; *z = v->vz;
+    if (g_ref_ok && o->proj_h > 0 && getenv("CAM_NO_OFXFIX") == NULL) {
+        *x += (o->proj_ox + o->dox - g_refx) * v->vz / o->proj_h;
+        *y += (o->proj_oy + o->doy - g_refy) * v->vz / o->proj_h;
+    }
+}
+typedef struct { uint32_t polys, drawn, partial, behind, ambig, clipped, nonvr2d, sat, derived, legacy; } RStat;
+static RStat g_tot;   /* acumulado de descartes por causa (se imprime al final) */
 
 /* Re-proyecta una lista con la transformación `d` (NULL = identidad) y el modelo estenopeico (f, cx, cy, w, h). */
 static int g_dbg;
+/* VRAM por época (tramo entre eventos de VRAM de la lista): las texturas se muestrean como estaban al dibujar cada primitiva, no como
+ * quedan al final del frame (si no, un sprite cuya textura se sube después del dibujo sale con el contenido del frame siguiente). */
+#define MAXSNAP 48
+static uint16_t *snap[MAXSNAP]; static uint32_t snap_op[MAXSNAP]; static int nsnap, snap_max_ev;
 static RStat render_list(const GpuDrawList *l, const VrCamDelta *d, float f, float cx, float cy, int w, int h, uint8_t *im, uint8_t *pt) {
     g_f = f; g_cx = cx; g_cy = cy; g_w = w; g_h = h; g_img = im; g_painted = pt; g_pix_drawn = 0;
     memset(im, 0, (size_t)w * h * 3); memset(pt, 0, (size_t)w * h);
     RStat s = {0};
+    int ep = 0;
     for (uint32_t i = 0; i < l->nops; i++) {
         const GpuOp *o = &l->ops[i];
+        if (nsnap) { while (ep + 1 < nsnap && snap_op[ep + 1] <= i) ep++; vram = snap[ep]; }
         if (o->type != GPU_OP_POLY) continue;
         s.polys++;
+        if (g_dbg_semi && (o->flags & GPU_F_SEMI) && o->abr == 1 && o->tx == 640 && o->tp == 1 && o->v[0].vvalid) { fprintf(stderr, "  glow op%u seq=%u nv=%d dox=%d doy=%d pox=%.1f poy=%.1f ph=%.1f ref=(%.1f,%.1f):", i, o->seq, o->nv, o->dox, o->doy, o->proj_ox, o->proj_oy, o->proj_h, g_refx, g_refy); for (int k = 0; k < o->nv; k++) fprintf(stderr, " (%d,%d vf%d vv%d fv%d vx%.0f vy%.0f vz%.0f f(%.1f,%.1f))", o->v[k].x - o->dox, o->v[k].y - o->doy, o->v[k].vflags, o->v[k].vvalid, o->v[k].fvalid, o->v[k].vx, o->v[k].vy, o->v[k].vz, o->v[k].fx - o->dox, o->v[k].fy - o->doy); fprintf(stderr, "\n"); }
+        if (g_dbg_semi && (o->flags & GPU_F_SEMI) && o->v[0].vvalid) fprintf(stderr, "  semi3D op%u flags=0x%x abr=%d tp=%d tx=%d ty=%d clut=(%d,%d) nv=%d v0=(%d,%d,vz%.0f) col=%02x%02x%02x\n", i, o->flags, o->abr, o->tp, o->tx, o->ty, o->clx, o->cly, o->nv, o->v[0].x, o->v[0].y, o->v[0].vz, o->v[0].r, o->v[0].g, o->v[0].b);
         int nvalid = 0;
         for (int k = 0; k < o->nv; k++) nvalid += o->v[k].vvalid;
+        if (!nvalid) s.nonvr2d++;
+        { int nf = 0; for (int k = 0; k < o->nv; k++) nf += o->v[k].fvalid; if (nf == o->nv) s.legacy++; }   /* regla anterior: 3D = todos fvalid */
         if (nvalid != o->nv) {
             if (nvalid) { s.partial++;
                 if (getenv("CAM_DBG") && g_dbg && (s.partial % 40) == 1) { fprintf(stderr, "  parcial op%u nv=%d dox=%d doy=%d:", i, o->nv, o->dox, o->doy); for (int k = 0; k < o->nv; k++) fprintf(stderr, " (%d,%d vv%d f%d fl%d z%.0f)", o->v[k].x - o->dox, o->v[k].y - o->doy, o->v[k].vvalid, o->v[k].fvalid, o->v[k].vflags, o->v[k].vz); fprintf(stderr, "\n"); } }
             continue; }
+        /* mismas reglas que vr/scene (§28): AMBIG junto a SAT/BEHIND -> descartar; SAT/DERIVED se aceptan; BEHIND se recorta */
+        unsigned uf = 0;
+        for (int k = 0; k < o->nv; k++) uf |= o->v[k].vflags;
+        if ((uf & GPU_VF_AMBIG) && (uf & (GPU_VF_SAT | GPU_VF_BEHIND))) { s.ambig++; if (!g_keep_ambig) continue; }
+        if (uf & GPU_VF_SAT) s.sat++;
+        if (uf & GPU_VF_DERIVED) s.derived++;
         PV pv[4];
         for (int k = 0; k < o->nv; k++) {
             const GpuVtx *v = &o->v[k];
-            float x = v->vx, y = v->vy, z = v->vz;
+            float x, y, z; vtx_view(o, v, &x, &y, &z);
             if (d) {
                 float X = d->A[0] * x + d->A[1] * y + d->A[2] * z + d->b[0], Y = d->A[3] * x + d->A[4] * y + d->A[5] * z + d->b[1],
                       Z = d->A[6] * x + d->A[7] * y + d->A[8] * z + d->b[2];
@@ -188,9 +313,12 @@ static RStat render_list(const GpuDrawList *l, const VrCamDelta *d, float f, flo
         for (int k = 0; k < o->nv; k++) if (pv[k].z >= 24) allb = 0;
         if (allb) { s.behind++; continue; }
         s.drawn++;
+        for (int k = 0; k < o->nv; k++) if (pv[k].z < 24) { s.clipped++; break; }
         draw_clipped(o, &pv[0], &pv[1], &pv[2]);
         if (o->nv == 4) draw_clipped(o, &pv[1], &pv[2], &pv[3]);
     }
+    g_tot.polys += s.polys; g_tot.drawn += s.drawn; g_tot.partial += s.partial; g_tot.behind += s.behind; g_tot.ambig += s.ambig;
+    g_tot.clipped += s.clipped; g_tot.nonvr2d += s.nonvr2d; g_tot.sat += s.sat; g_tot.derived += s.derived; g_tot.legacy += s.legacy;
     return s;
 }
 
@@ -198,7 +326,6 @@ static RStat render_list(const GpuDrawList *l, const VrCamDelta *d, float f, flo
 static RefR *r1;
 static const char *outdir;
 static uint32_t max_frames;
-static BridgeState bs;
 static int hist_n;
 static struct { int f; int x, z; float view; int po; } hist[20000];
 static uint32_t lists_seen, pair_ok, none_rec;
@@ -209,8 +336,16 @@ static GpuDisplay last_disp;
 static void phase_pose(int t, int f) {
     (void)f;
     g_yaw = g_elev = 0;
+    if (scr_on) {
+        for (int i = 0; i < nscr; i++) if (scr[i].kind == 1 && t >= scr[i].t0 && t < scr[i].t1) {
+            float k = scr[i].t1 > scr[i].t0 ? (float)(t - scr[i].t0) / (scr[i].t1 - scr[i].t0) : 0;
+            g_yaw = scr[i].a[0] + (scr[i].a[1] - scr[i].a[0]) * k; g_elev = scr[i].a[2] + (scr[i].a[3] - scr[i].a[2]) * k;
+        }
+        return;
+    }
     if (t < 120) return;
-    if (t < 240) { int s = (t >> 1) & 1; g_yaw = s ? 20.0f : -20.0f; g_elev = s ? 30.0f : -30.0f; return; }
+    if (t < 240) { if (t >= 228) return;   /* 12 frames quietos (el registro de cámara de la lista dibujada en t va ~5 frames por detrás) antes del barrido: el panel t=240 se dibuja con la pose de cabeza que se muestra */
+        int s = (t >> 1) & 1; g_yaw = s ? 20.0f : -20.0f; g_elev = s ? 30.0f : -30.0f; return; }
     if (t < 960) { g_yaw = (float)(t - 240) * 0.5f; return; }
     if (t < 1320) { g_elev = 60.0f * sinf((float)(t - 960) * 6.2831853f / 360.0f); return; }
     g_yaw = 90.0f;
@@ -228,7 +363,16 @@ static double mad_img(const uint8_t *a, const uint8_t *b, int n, const uint8_t *
 
 static VrCamRecord prev_copy, cur_copy;
 static float pair_yaw0;
+static int shot_this(int t) {
+    if (!scr_on) return 0;
+    for (int i = 0; i < nscr; i++) if (scr[i].kind == 3 && t >= scr[i].t0 && t < scr[i].t1 && scr[i].a[0] >= 1 && (t - scr[i].t0) % (int)scr[i].a[0] == 0) return 1;
+    return 0;
+}
 static int dump_this(int t) {
+    if (scr_on) {
+        for (int i = 0; i < nscr; i++) if (scr[i].kind == 2 && t >= scr[i].t0 && t < scr[i].t1 && scr[i].a[0] >= 1 && (t - scr[i].t0) % (int)scr[i].a[0] == 0) return 1;
+        return 0;
+    }
     if (t == 60 || t == 61 || t == 130 || t == 131) return 1;
     if (t >= 240 && t < 960 && (t - 240) % 45 == 0) return 1;
     if (t >= 960 && t < 1320 && (t - 960) % 45 == 0) return 1;
@@ -293,13 +437,124 @@ static void world_report(const char *tag) {
     fprintf(stderr, "[camtest] consistencia del mundo %s: %zu vértices emparejados entre frames consecutivos; error de posición mundo (unidades ~mm): mediana %.1f, p75 %.1f, p90 %.1f; %.1f%% < 20\n", tag, nwerr,
             werr[nwerr / 2], werr[nwerr * 3 / 4], werr[nwerr * 9 / 10], 100.0 * lt20 / nwerr);
 }
+static BridgeState bs;
+/* vr_scene (mismas reglas que el renderer): estadísticas acumuladas por listas fuera/bajo el agua */
+typedef struct { uint32_t lists, polys, poly3d, poly2d, tris3d, drop_partial, drop_near, drop_ambig, drop_behind, poly_behind, clipped, n_filter_rects, n_filter_polys, n_filter_cover, filter_tris, n_clear, lists_filter; } SceneAcc;
+static SceneAcc sacc[2];
+static VrFilter last_filter; static int last_filter_ok;
+static void scene_acc(const GpuDrawList *l) {
+    VrSceneOpts so = vr_scene_opts_default();
+    so.screen_filter = 1;   // la vista previa aplica el filtro de pantalla (clase 3)
+    VrScene sc;
+    if (vr_scene_build(l, &bs, &so, &sc) != 0) return;
+    SceneAcc *a = &sacc[bs.in_water ? 1 : 0];
+    a->lists++; a->polys += sc.stats.n_poly; a->poly3d += sc.stats.n_poly3d; a->poly2d += sc.stats.n_poly2d; a->tris3d += sc.stats.n_tris3d;
+    a->drop_partial += sc.stats.drop_partial; a->drop_near += sc.stats.drop_near; a->drop_ambig += sc.stats.drop_ambig; a->drop_behind += sc.stats.drop_behind;
+    a->poly_behind += sc.stats.n_poly_behind; a->clipped += sc.stats.n_clipped; a->n_filter_rects += sc.stats.n_filter_rects; a->n_filter_polys += sc.stats.n_filter_polys;
+    a->n_filter_cover += sc.stats.n_filter_cover; a->filter_tris += sc.stats.n_filter_tris; a->n_clear += sc.stats.n_clear; a->lists_filter += sc.filter.active;
+    last_filter = sc.filter; last_filter_ok = 1;
+}
+/* Aplica el filtro de pantalla (clase 3) a una imagen w x h con proyección estenopeica: eh = distancia focal del motor en px nativos, fp = la de
+ * la imagen, cy_row = fila nativa del centro óptico, cy_img = fila de la imagen donde cae ese centro (h/2 en la vista ancha; cy_row si la imagen
+ * tiene la proyección del motor). Por fila: tomar la fila equivalente del motor r, su desplazamiento d(r) y muestrear la fila de imagen del ángulo
+ * r + d(r); luego tinte. seq=1 emula el original, que copia el búfer sobre sí mismo de arriba abajo: si d < 0 la fila fuente ya está procesada
+ * (tinte aplicado dos veces); seq=0 lee siempre la imagen sin filtrar (una sola pasada). */
+static void apply_filter_img2(uint8_t *im, int w, int h, const VrFilter *f, float eh, float cy_row, float fp, float cy_img, int seq) {
+    uint8_t *tmp = malloc((size_t)w * h * 3);
+    memcpy(tmp, im, (size_t)w * h * 3);
+    const uint8_t *src = seq ? im : tmp;
+    for (int y = 0; y < h; y++) {
+        float r = (y - cy_img) * eh / fp + cy_row;
+        int ri = (int)floorf(r);
+        float d = (ri >= 0 && ri < VR_FILTER_ROWS && f->rowcov[ri]) ? f->dv[ri] : 0;
+        int ys = (int)lroundf(cy_img + (r + d - cy_row) * fp / eh);
+        if (ys < 0) ys = 0; if (ys >= h) ys = h - 1;
+        for (int x = 0; x < w; x++) for (int k = 0; k < 3; k++) {
+            float v = src[((size_t)ys * w + x) * 3 + k] * f->tint[k];
+            im[((size_t)y * w + x) * 3 + k] = (uint8_t)(v > 255 ? 255 : v);
+        }
+    }
+    free(tmp);
+}
+static void apply_filter_img(uint8_t *im, int w, int h, const VrFilter *f, float eh, float cy_row, float fp) { apply_filter_img2(im, w, h, f, eh, cy_row, fp, h / 2.0f, 0); }
+static void apply_filter_preview(uint8_t *im, const VrFilter *f, float eh, float cy_row, float fp) { apply_filter_img(im, PW, PH, f, eh, cy_row, fp); }
+/* Primitivas 2D (sin posición de vista) que cubren >= 40 % del área mostrada: candidatas a "filtro de pantalla" (kind 3 de vr/scene). */
+static FILE *big_log; static uint32_t big_lists, big_water_lists, big_air_lists, big_water_ops, big_air_ops;
+static void big2d_scan(const GpuDrawList *l, int t, int f) {
+    if (!big_log) { char p[512]; snprintf(p, sizeof p, "%s/big2d.log", outdir); big_log = fopen(p, "w"); }
+    if (!big_log || l->disp.w <= 0 || l->disp.h <= 0) return;
+    float area_d = (float)l->disp.w * l->disp.h;
+    int nb = 0, wtr = bs.in_water;
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *o = &l->ops[i];
+        int x0 = 1 << 20, y0 = 1 << 20, x1 = -(1 << 20), y1 = -(1 << 20);
+        if (o->type == GPU_OP_RECT) { x0 = o->v[0].x; y0 = o->v[0].y; x1 = x0 + o->rw; y1 = y0 + o->rh; }
+        else if (o->type == GPU_OP_POLY) {
+            int nv = 0; for (int k = 0; k < o->nv; k++) nv += o->v[k].vvalid;
+            if (nv) continue;
+            for (int k = 0; k < o->nv; k++) { if (o->v[k].x < x0) x0 = o->v[k].x; if (o->v[k].x > x1) x1 = o->v[k].x; if (o->v[k].y < y0) y0 = o->v[k].y; if (o->v[k].y > y1) y1 = o->v[k].y; }
+        } else continue;
+        int cx0 = x0 < o->cx1 ? o->cx1 : x0, cx1 = x1 > o->cx2 + 1 ? o->cx2 + 1 : x1, cy0 = y0 < o->cy1 ? o->cy1 : y0, cy1 = y1 > o->cy2 + 1 ? o->cy2 + 1 : y1;
+        if (cx1 <= cx0 || cy1 <= cy0) continue;
+        float a = (float)(cx1 - cx0) * (cy1 - cy0);
+        if (a < 0.40f * area_d) continue;
+        nb++;
+        fprintf(big_log, "t=%d f=%d water=%d o2=%d list=%u op=%u/%u type=%d nv=%d flags=0x%x abr=%d tp=%d box=(%d,%d)-(%d,%d) clip=(%d,%d)-(%d,%d) cov=%.0f%% col0=%02x%02x%02x col1=%02x%02x%02x uv0=(%d,%d) disp=(%d,%d,%d,%d) seq=%u\n",
+                t, f, wtr, bs.o2, l->index, i, l->nops, o->type, o->nv, o->flags, o->abr, o->tp, x0, y0, x1, y1, o->cx1, o->cy1, o->cx2, o->cy2, 100.0 * a / area_d,
+                o->v[0].r, o->v[0].g, o->v[0].b, o->v[1].r, o->v[1].g, o->v[1].b, o->v[0].u, o->v[0].v, l->disp.x, l->disp.y, l->disp.w, l->disp.h, o->seq);
+    }
+    big_lists++;
+    if (wtr) { big_water_lists++; big_water_ops += nb; } else { big_air_lists++; big_air_ops += nb; }
+}
+
+static int is_vram_event(int t) { return t == GPU_OP_FILL || t == GPU_OP_VCOPY || t == GPU_OP_UPLOAD; }
+static void snap_take(uint32_t op, const uint16_t *src) {
+    if (nsnap >= MAXSNAP) return;
+    if (!snap[nsnap]) snap[nsnap] = malloc(1024 * 512 * 2);
+    memcpy(snap[nsnap], src, 1024 * 512 * 2); snap_op[nsnap++] = op;
+}
+static void apply_part(const GpuDrawList *l, uint32_t a, uint32_t b) {
+    GpuDrawList s = *l; s.ops = l->ops + a; s.nops = b - a; s.vram_init = a == 0 ? l->vram_init : NULL;
+    if (b > a || s.vram_init) ref_apply(r1, &s, 1);
+}
+/* Aplica la lista al oráculo por tramos, guardando la VRAM de cada época; si kstrip > 0 captura la imagen mostrada justo antes de esa op. */
+static void apply_epochs(const GpuDrawList *l, int kstrip, uint8_t *pre, int *pw, int *ph) {
+    nsnap = 0;
+    if (l->vram_init) snap_take(0, l->vram_init); else snap_take(0, ref_vram(r1));
+    uint32_t i = 0, nev = 0;
+    while (i < l->nops) {
+        uint32_t e = i; while (e < l->nops && !is_vram_event(l->ops[e].type)) e++;
+        uint32_t a = i;
+        if (kstrip > 0 && (uint32_t)kstrip >= a && (uint32_t)kstrip < e) {
+            apply_part(l, a, (uint32_t)kstrip); a = (uint32_t)kstrip;
+            int w, h; const uint8_t *q = ref_present(r1, &l->disp, &w, &h);
+            if (w <= 640 && h <= 512) { memcpy(pre, q, (size_t)w * h * 3); *pw = w; *ph = h; }
+        }
+        apply_part(l, a, e);
+        if (e < l->nops) { apply_part(l, e, e + 1); nev++; snap_take(e + 1, ref_vram(r1)); }
+        i = e + 1;
+    }
+    if (nev > (uint32_t)snap_max_ev) snap_max_ev = (int)nev;
+}
 static void process_list(const GpuDrawList *l, int t, int f) {
     lists_seen++;
+    list_ref(l);
+    if (scr_on) { big2d_scan(l, t, f); scene_acc(l); }   /* last_filter = resumen de la clase 3 de ESTA lista */
     last_disp = l->disp;
     static uint8_t *pt;
     if (!pt) pt = malloc(PW * PH);
-    ref_apply(r1, l, 1);
-    vram = ref_vram(r1);
+    int shot = shot_this(t), kstrip = -1;
+    int bshot = boot_shot > 0 && cur_t < 0 && (f % boot_shot) == 0;
+    static uint8_t pre_img[640 * 512 * 3]; int pre_w = 0, pre_h = 0;
+    if (shot) for (uint32_t i = 0; i < l->nops; i++) {   /* primera tira de copia de pantalla (rect texturizado 15 bits, ancho, bajo) */
+        const GpuOp *o = &l->ops[i];
+        if (o->type == GPU_OP_RECT && (o->flags & GPU_F_TEXTURED) && o->tp >= 2 && o->rw >= 64 && o->rh <= 8) { kstrip = (int)i; break; }
+    }
+    if (scr_on) apply_epochs(l, kstrip, pre_img, &pre_w, &pre_h);
+    else { nsnap = 0; ref_apply(r1, l, 1); }
+    vram = ref_vram(r1);   /* estado final del frame (render_list usa el de cada época si hay instantáneas) */
+    if (shot) { int ow, oh; const uint8_t *orc = ref_present(r1, &l->disp, &ow, &oh); char nm[64]; snprintf(nm, sizeof nm, "o_t%04d", t); write_ppm(outdir, nm, orc, ow, oh); }
+    if (bshot) { int ow, oh; const uint8_t *orc = ref_present(r1, &l->disp, &ow, &oh); char nm[64]; snprintf(nm, sizeof nm, "boot_f%05d", f); write_ppm(outdir, nm, orc, ow, oh); }
     uint32_t n = l->index + 1;
     uint32_t sq = 0; for (uint32_t i = 0; i < l->nops; i++) if (l->ops[i].type == GPU_OP_POLY && l->ops[i].v[0].vvalid) { sq = l->ops[i].seq; break; }
     const VrCamRecord *r = vrcam_seq_record(sq);
@@ -312,13 +567,45 @@ static void process_list(const GpuDrawList *l, int t, int f) {
     pair_ok++;
     /* proyección del motor (primer polígono 3D con proyección) para el centro de la imagen del juego */
     float eh = 0, eox = 0, eoy = 0;
-    for (uint32_t i = 0; i < l->nops; i++) if (l->ops[i].type == GPU_OP_POLY && l->ops[i].proj_h > 0) { eh = l->ops[i].proj_h; eox = l->ops[i].proj_ox + l->ops[i].dox; eoy = l->ops[i].proj_oy + l->ops[i].doy; break; }
+    for (uint32_t i = 0; i < l->nops; i++) if (l->ops[i].type == GPU_OP_POLY && l->ops[i].proj_h > 0) { eh = l->ops[i].proj_h; break; }
+    if (g_ref_ok) { eox = g_refx; eoy = g_refy; }
+    else for (uint32_t i = 0; i < l->nops; i++) if (l->ops[i].type == GPU_OP_POLY && l->ops[i].proj_h > 0) { eox = l->ops[i].proj_ox + l->ops[i].dox; eoy = l->ops[i].proj_oy + l->ops[i].doy; break; }
     VrCamDelta d;
     float head[16]; double tt; head_fn(head, &tt);
     if (novr) { memset(&d, 0, sizeof d); d.A[0] = d.A[4] = d.A[8] = 1; }
     else if (!vrcam_delta(r, r->head, &d)) return;
+    g_dbg_semi = shot && getenv("CAM_DBGSEMI") != NULL;
+    if (shot) {   /* misma pose que el motor: vista previa a la resolución del original, sin y con filtro de pantalla */
+        int ow, oh; const uint8_t *orc = ref_present(r1, &l->disp, &ow, &oh); (void)orc;
+        static uint8_t se[640 * 512 * 3], sp[640 * 512];
+        if (ow <= 640 && oh <= 512 && eh > 0) {
+            render_list(l, &d, eh, eox - l->disp.x, eoy - l->disp.y, ow, oh, se, sp);
+            char nm[64]; snprintf(nm, sizeof nm, "e_t%04d", t); write_ppm(outdir, nm, se, ow, oh);
+            float cyr = eoy - l->disp.y;
+            { const VrFilter *vf = &last_filter; float dmn = 0, dmx = 0; int nc = 0;
+              for (int i = 0; i < VR_FILTER_ROWS; i++) if (vf->rowcov[i]) { nc++; if (vf->dv[i] < dmn) dmn = vf->dv[i]; if (vf->dv[i] > dmx) dmx = vf->dv[i]; }
+              fprintf(stderr, "[shot] t=%d imagen %dx%d H=%.1f centro óptico fila=%.1f col=%.1f (disp %d,%d %dx%d) | filtro activo=%d tiras=%d polis=%d recub=%d tinte=(%.2f,%.2f,%.2f) filas=%d dv=[%.0f,%.0f] cover_abr=%d\n",
+                      t, ow, oh, eh, cyr, eox - l->disp.x, l->disp.x, l->disp.y, l->disp.w, l->disp.h, last_filter_ok && vf->active, vf->n_strips, vf->n_polys, vf->n_cover, vf->tint[0], vf->tint[1], vf->tint[2], nc, dmn, dmx, vf->cover_abr); }
+            if (last_filter_ok && last_filter.active) {
+                static uint8_t sf[640 * 512 * 3]; memcpy(sf, se, (size_t)ow * oh * 3);
+                apply_filter_img2(sf, ow, oh, &last_filter, eh, cyr, eh, cyr, 0);
+                snprintf(nm, sizeof nm, "ef_t%04d", t); write_ppm(outdir, nm, sf, ow, oh);
+                apply_filter_img2(se, ow, oh, &last_filter, eh, cyr, eh, cyr, 1);
+                snprintf(nm, sizeof nm, "efs_t%04d", t); write_ppm(outdir, nm, se, ow, oh);   /* emulando la copia en sitio */
+                if (pre_w == ow && pre_h == oh) {   /* validación del modelo del filtro: original sin filtrar -> mi filtro, contra el original filtrado */
+                    static uint8_t qf[640 * 512 * 3];
+                    memcpy(qf, pre_img, (size_t)ow * oh * 3); snprintf(nm, sizeof nm, "q_t%04d", t); write_ppm(outdir, nm, qf, ow, oh);
+                    apply_filter_img2(qf, ow, oh, &last_filter, eh, cyr, eh, cyr, 0);
+                    snprintf(nm, sizeof nm, "qf_t%04d", t); write_ppm(outdir, nm, qf, ow, oh);
+                    memcpy(qf, pre_img, (size_t)ow * oh * 3);
+                    apply_filter_img2(qf, ow, oh, &last_filter, eh, cyr, eh, cyr, 1);
+                    snprintf(nm, sizeof nm, "qfs_t%04d", t); write_ppm(outdir, nm, qf, ow, oh);
+                }
+            }
+        }
+    }
     /* a) comprobación de identidad: re-proyectar con la pose del registro (y la proyección del motor) vs imagen del oráculo */
-    if (t == 60 || t == 61 || t == 130 || t == 131) {
+    if (!scr_on && (t == 60 || t == 61 || t == 130 || t == 131)) {
         int w = 320, h = 256;
         static uint8_t a[320 * 256 * 3], p2[320 * 256];
         g_dbg = (t == 60 || t == 600);
@@ -344,8 +631,8 @@ static void process_list(const GpuDrawList *l, int t, int f) {
     /* a2) emparejado: con la cabeza FIJA (guiñada 0) dos frames consecutivos cuyo registro difiere ~40 grados deben dar la misma
      * escena si el registro asociado es el correcto; con el registro vecino, no. */
     static int pair_n;
-    if (t >= 130 && t < 240) world_collect(l, r);
-    if (t >= 130 && t < 240 && pair_n < 2) {
+    if (!scr_on && t >= 130 && t < 240) world_collect(l, r);
+    if (!scr_on && t >= 130 && t < 240 && pair_n < 2) {
         int pn = pair_n++;
         static uint8_t ia[2][PW * PH * 3], iw[2][PW * PH * 3], pa[PW * PH];
         float save_y = g_yaw, save_e = g_elev; g_yaw = g_elev = 0;
@@ -372,12 +659,174 @@ static void process_list(const GpuDrawList *l, int t, int f) {
         double c = 100.0 * cov / (PW * PH);
         sum_cov += c; n_cov++;
         char nm[64]; snprintf(nm, sizeof nm, "p_t%04d", t); write_ppm(outdir, nm, img, PW, PH);
-        fprintf(stderr, "[camtest] t=%4d yaw=%6.1f elev=%6.1f -> vista %.0fx%.0f cubierta %.1f%%  polis %u dibujados %u parciales(perdidos) %u detras %u  eye=(%d,%d,%d) vista motor yaw=%.1f pitch=%.1f\n",
-                t, g_yaw, g_elev, hfov_prev, hfov_prev * PH / PW, c, s.polys, s.drawn, s.partial, s.behind, r->eye[0], r->eye[1], r->eye[2], r->yaw_deg, r->pitch_deg);
+        if (scr_on && last_filter_ok && last_filter.active) {
+            static uint8_t imf[PW * PH * 3];
+            memcpy(imf, img, sizeof imf);
+            apply_filter_preview(imf, &last_filter, eh, eoy - l->disp.y, fp);
+            char nf[64]; snprintf(nf, sizeof nf, "f_t%04d", t); write_ppm(outdir, nf, imf, PW, PH);
+        }
+        if (scr_on) {   /* todas las primitivas que no son polígonos 3D de la lista (2D, rects, líneas, eventos de VRAM), en orden */
+            char p2[512]; snprintf(p2, sizeof p2, "%s/ops_t%04d.txt", outdir, t);
+            FILE *fo = fopen(p2, "w");
+            if (fo) {
+                fprintf(fo, "# lista %u nops=%u disp=(%d,%d,%d,%d) agua=%d o2=%d\n", l->index, l->nops, l->disp.x, l->disp.y, l->disp.w, l->disp.h, bs.in_water, bs.o2);
+                uint32_t n3 = 0;
+                for (uint32_t i = 0; i < l->nops; i++) {
+                    const GpuOp *o = &l->ops[i];
+                    if (o->type == GPU_OP_POLY) { int nv = 0; for (int k = 0; k < o->nv; k++) nv += o->v[k].vvalid; if (nv == o->nv) { n3++; continue; } }
+                    fprintf(fo, "op%u type=%d nv=%d flags=0x%x abr=%d tp=%d tx=%d ty=%d clut=(%d,%d) v0=(%d,%d) v1=(%d,%d) v2=(%d,%d) rect=%dx%d dst=(%d,%d,%d,%d) col=%02x%02x%02x uv=(%d,%d) clip=(%d,%d,%d,%d)\n",
+                            i, o->type, o->nv, o->flags, o->abr, o->tp, o->tx, o->ty, o->clx, o->cly, o->v[0].x, o->v[0].y, o->v[1].x, o->v[1].y, o->v[2].x, o->v[2].y, o->rw, o->rh,
+                            o->rx, o->ry, o->rw, o->rh, o->v[0].r, o->v[0].g, o->v[0].b, o->v[0].u, o->v[0].v, o->cx1, o->cy1, o->cx2, o->cy2);
+                }
+                fprintf(fo, "# polígonos 3D (omitidos arriba): %u\n", n3);
+                fclose(fo);
+            }
+        }
+        if (!novr && getenv("CAM_DIAG")) {   /* mismo frame con la pose de cabeza que usó el motor al dibujarlo: separa "hueco de geometría" de "latencia de pose" */
+            VrCamDelta dn; static uint8_t imo[PW * PH * 3], pto[PW * PH];
+            if (vrcam_delta(r, r->head, &dn)) {
+                RStat so = render_list(l, &dn, fp, PW / 2.0f, PH / 2.0f, PW, PH, imo, pto);
+                uint32_t co = 0; for (int i = 0; i < PW * PH; i++) co += pto[i];
+                char n2[64]; snprintf(n2, sizeof n2, "own_t%04d", t); write_ppm(outdir, n2, imo, PW, PH);
+                { int ow, oh; const uint8_t *orc = ref_present(r1, &l->disp, &ow, &oh); snprintf(n2, sizeof n2, "orc_t%04d", t); write_ppm(outdir, n2, orc, ow, oh); }
+                fprintf(stderr, "[camtest]   diag t=%d: con la pose propia del motor cubierta %.1f%% (polis %u dibujados %u parc %u detras %u ambig %u 2D %u)\n", t, 100.0 * co / (PW * PH), so.polys, so.drawn, so.partial, so.behind, so.ambig, so.nonvr2d);
+            }
+        }
+        fprintf(stderr, "[camtest] t=%4d yaw=%6.1f elev=%6.1f -> vista %.0fx%.0f cubierta %.1f%%  polis %u dibujados %u parciales(perdidos) %u detras %u ambig %u recortados %u 2D %u sat %u deriv %u  eye=(%d,%d,%d) vista motor yaw=%.1f pitch=%.1f\n",
+                t, g_yaw, g_elev, hfov_prev, hfov_prev * PH / PW, c, s.polys, s.drawn, s.partial, s.behind, s.ambig, s.clipped, s.nonvr2d, s.sat, s.derived, r->eye[0], r->eye[1], r->eye[2], r->yaw_deg, r->pitch_deg);
+    }
+}
+
+
+/* ---- modo servidor de instantáneas (ver cabecera) ---- */
+static const char *srv_list, *srv_base;
+static int srv_frame = -1, srv_done;
+typedef struct { char name[96], path[400]; } SrvJob;
+static void state_reset_counters(void) {
+    memset(sacc, 0, sizeof sacc); memset(&g_tot, 0, sizeof g_tot);
+    lists_seen = pair_ok = none_rec = 0; sum_cov = 0; n_cov = 0; nwerr = 0;
+    big_lists = big_water_lists = big_air_lists = big_water_ops = big_air_ops = 0; big_log = NULL;
+    last_filter_ok = 0; hist_n = 0;
+}
+static double now_s(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec + ts.tv_nsec * 1e-9; }
+static double t_start;
+/* Devuelve 1 en cada hijo (que continúa el juego con su guion); el padre no vuelve (sale tras esperar a todos). */
+static int server_snapshot(uint32_t f) {
+    srv_done = 1;
+    int watch = getenv("CAM_SERVER_WATCH") != NULL;
+    struct stat lst; time_t last_mt = 0; long last_ns = 0;
+    double t_snap = now_s();
+    SrvJob *jobs = calloc(256, sizeof *jobs);
+    for (int round = 0;; round++) {
+        int nj = 0, quit = 0;
+        if (!stat(srv_list, &lst)) { last_mt = lst.st_mtime; last_ns = lst.st_mtim.tv_nsec; }   /* antes de leer: una edición posterior se detecta */
+        FILE *fl = fopen(srv_list, "r");
+        if (!fl) { perror(srv_list); exit(1); }
+        char l[600];
+        while (fgets(l, sizeof l, fl) && nj < 256) {
+            char a[400], b[400]; int n = sscanf(l, "%399s %399s", a, b);
+            if (n < 1 || a[0] == '#') continue;
+            if (!strcmp(a, "quit")) { quit = 1; break; }
+            SrvJob *j = &jobs[nj];
+            const char *path = n >= 2 ? b : a;
+            if (n >= 2) snprintf(j->name, sizeof j->name, "%s", a);
+            else { const char *bn = strrchr(path, '/'); bn = bn ? bn + 1 : path; snprintf(j->name, sizeof j->name, "%s", bn); char *dot = strrchr(j->name, '.'); if (dot) *dot = 0; }
+            snprintf(j->path, sizeof j->path, "%s", path);
+            for (int k = 0; k < nj; k++) if (!strcmp(jobs[k].name, j->name)) { size_t L = strlen(j->name); snprintf(j->name + L, sizeof j->name - L, "_%d", nj + 1); break; }
+            nj++;
+        }
+        fclose(fl);
+        if (quit) { fprintf(stderr, "[server] quit\n"); exit(0); }
+        int maxjobs = getenv("CAM_JOBS") ? atoi(getenv("CAM_JOBS")) : 1; if (maxjobs < 1) maxjobs = 1;
+        double t_r0 = now_s();
+        if (!round) fprintf(stderr, "[server] instantánea en f=%u (t=%d) tras %.1f s de arranque\n", f, cur_t, t_snap - t_start);
+        fprintf(stderr, "[server] ronda %d: %d escenarios, %d a la vez\n", round, nj, maxjobs);
+        alarm(0);
+        fflush(NULL);
+        int running = 0; pid_t pids[256]; double t0s[256];
+        for (int i = 0; i < nj; i++) {
+            while (running >= maxjobs) {
+                int st; pid_t w = wait(&st);
+                if (w < 0 && errno == EINTR) continue;
+                if (w < 0) break;
+                for (int k = 0; k < i; k++) if (pids[k] == w) { fprintf(stderr, "[server] %-20s fin: estado %d, %.1f s\n", jobs[k].name, WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st), now_s() - t0s[k]); pids[k] = 0; }
+                running--;
+            }
+            pid_t pid = fork();
+            if (pid < 0) { perror("fork"); exit(1); }
+            if (pid == 0) {   /* hijo: continúa el juego desde el estado exacto con su guion */
+                static char od[600];
+                snprintf(od, sizeof od, "%s/%s", srv_base, jobs[i].name);
+                mkdir(od, 0755);
+                outdir = od;
+                char lp[700]; snprintf(lp, sizeof lp, "%s/log.txt", od);
+                if (!freopen(lp, "w", stderr)) _exit(3);
+                setvbuf(stderr, NULL, _IONBF, 0);
+                state_reset_counters();
+                scr_load(jobs[i].path);
+                srv_list = NULL;
+                fprintf(stderr, "[server] hijo %s: guion %s desde f=%u t=%d\n", jobs[i].name, jobs[i].path, f, cur_t);
+                free(jobs);
+                alarm(60);
+                return 1;
+            }
+            pids[i] = pid; t0s[i] = now_s(); running++;
+        }
+        int st; pid_t w;
+        while ((w = wait(&st)) > 0)
+            for (int k = 0; k < nj; k++) if (pids[k] == w) fprintf(stderr, "[server] %-20s fin: estado %d, %.1f s\n", jobs[k].name, WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st), now_s() - t0s[k]);
+        fprintf(stderr, "[server] ronda %d: %.1f s (arranque %.1f s)\n", round, now_s() - t_r0, t_snap - t_start);
+        if (!watch) exit(0);
+        fprintf(stderr, "[server] esperando que cambie %s (una línea 'quit' lo termina)\n", srv_list);
+        for (;;) {   /* el padre sigue en la instantánea: una lista nueva se ejecuta sin repetir el arranque */
+            usleep(500000);
+            if (!stat(srv_list, &lst) && (lst.st_mtime != last_mt || lst.st_mtim.tv_nsec != last_ns)) {
+                usleep(400000);   /* esperar a que el editor termine de escribir (si no, se leería una lista a medias) */
+                struct stat l2;
+                if (!stat(srv_list, &l2) && l2.st_mtime == lst.st_mtime && l2.st_mtim.tv_nsec == lst.st_mtim.tv_nsec) break;
+            }
+        }
+    }
+}
+static uint64_t fnv(const void *p, size_t n) { const uint8_t *q = p; uint64_t h = 1469598103934665603ull; for (size_t i = 0; i < n; i++) h = (h ^ q[i]) * 1099511628211ull; return h; }
+
+
+/* Órdenes de guion que tocan la RAM/CPU del juego (poke/pokes/gcall/peek/cmp), en el gancho de VBlank. */
+static int in_gcall;
+static void script_mem(Cpu *c, int t) {
+    for (int i = 0; i < nscr; i++) {
+        const ScrEv *e = &scr[i];
+        if (e->kind < 4 || e->t0 != t) continue;
+        uint32_t ma = e->u[0] & 0x1FFFFF;
+        uint8_t *m = psx_ram + ma;
+        size_t room = PSX_RAM_SIZE - ma;   /* bytes hasta el final de la RAM: poke/pokes/peek/cmp nunca se salen del búfer */
+        switch (e->kind) {
+        case 4: { size_t n = strlen(e->s) / 2; if (n > room) n = room;
+            for (size_t k = 0; k < n; k++) { unsigned v = 0; if (sscanf(e->s + 2 * k, "%2x", &v) != 1) { fprintf(stderr, "[poke] t=%d: hex inválido en el byte %zu, se detiene\n", t, k); break; } m[k] = (uint8_t)v; }
+            break; }
+        case 5: { size_t n = strlen(e->s) + 1; if (n > room) n = room; memcpy(m, e->s, n); break; }
+        case 6: {
+            Cpu save = *c;
+            uint32_t sp = e->u[6] ? e->u[6] & ~7u : (save.r[29] - 0x200) & ~7u;   /* pila propia opcional (a5 = 7.º número): evita pisar los búferes de prueba */
+            { uint32_t sa = sp & 0x1FFFFFFFu; if (sa < 0x10000 || sa > 0x1FFFF0u) { fprintf(stderr, "[gcall] t=%d: pila %08x fuera de la RAM, ignorada\n", t, sp); break; } }
+            c->r[29] = sp; c->r[4] = e->u[1]; c->r[5] = e->u[2]; c->r[6] = e->u[3]; c->r[7] = e->u[4];
+            mem_w32(c, sp + 16, e->u[5]);
+            in_gcall = 1;
+            rt_call(c, e->u[0]);
+            in_gcall = 0;
+            fprintf(stderr, "[gcall] t=%d f=%08x(%x,%x,%x,%x,%x) sp=%08x -> v0=0x%08x\n", t, e->u[0], e->u[1], e->u[2], e->u[3], e->u[4], e->u[5], sp, c->r[2]);
+            *c = save;
+            break; }
+        case 7: { fprintf(stderr, "[peek] t=%d %08x:", t, e->u[0]); for (uint32_t k = 0; k < e->u[1] && k < 256 && k < room; k++) fprintf(stderr, " %02x", m[k]); fprintf(stderr, "\n"); break; }
+        case 9: { const char *cp = getenv("MV_CARD"); if (cp) { card_close(0); int r = card_open(0, cp); fprintf(stderr, "[card] t=%d reabierta %s -> %d\n", t, cp, r); } break; }
+        case 8: { uint32_t a2 = e->u[1] & 0x1FFFFF; size_t n = e->u[2], r2 = PSX_RAM_SIZE - a2; if (n > room) n = room; if (n > r2) n = r2;
+            fprintf(stderr, "[cmp] t=%d %08x vs %08x (%zu bytes): %s\n", t, e->u[0], e->u[1], n, memcmp(m, psx_ram + a2, n) ? "DISTINTAS" : "IGUALES"); break; }
+        }
     }
 }
 
 static void on_frame(Cpu *c, uint32_t f) {
+    if (in_gcall) return;   /* VBlank durante una llamada de guion: no reentrar */
     (void)c;
     alarm(60);
     script_pad(f);
@@ -387,6 +836,8 @@ static void on_frame(Cpu *c, uint32_t f) {
     vrcam_frame(psx_ram, &bs);
     if (f_act < 0 && (vrcam_active() || (getenv("CAM_NOVR") && bs.in_control && bs.has_player && f > 6000))) f_act = (int)f + 20;
     cur_t = f_act < 0 ? -1 : (int)f - f_act;
+    if (srv_list && !srv_done && (srv_frame >= 0 ? (int)f == srv_frame : cur_t == 0)) server_snapshot(f);
+    if (scr_on && cur_t >= 0) script_mem(c, cur_t);
     if (cur_t >= 0) phase_pose(cur_t, (int)f); else g_yaw = g_elev = 0;
     if (hist_n < 20000) { hist[hist_n].f = (int)f; hist[hist_n].x = bs.player_pos.x; hist[hist_n].z = bs.player_pos.z; hist[hist_n].view = vrcam_view_yaw_deg(); hist[hist_n].po = vrcam_pad_origin(); hist_n++; }
     if (cur_t == 60 || cur_t == 62) {
@@ -397,11 +848,28 @@ static void on_frame(Cpu *c, uint32_t f) {
     gpu_capture_vblank();
     const GpuDrawList *l;
     while ((l = gpu_capture_frame())) process_list(l, cur_t, (int)f);
+    static int logevery; if (!logevery) logevery = getenv("CAM_LOGEVERY") ? atoi(getenv("CAM_LOGEVERY")) : 15;
+    if (scr_on && cur_t >= 0 && cur_t % logevery == 0) {
+        uint32_t st, o2r, ctl; memcpy(&st, psx_ram + (0x800ACBE0u & 0x1FFFFF), 4); memcpy(&o2r, psx_ram + (0x800ACBC4u & 0x1FFFFF), 4); memcpy(&ctl, psx_ram + (0x800ACB84u & 0x1FFFFF), 4);
+        fprintf(stderr, "[dive] t=%d f=%u modo=%s ctl=%d agua=%d o2=%d vida=%d pos=(%d,%d,%d) vrcam=%d agachado=%d tendido=%d estado=0x%08x o2raw=0x%08x ctlraw=0x%08x\n", cur_t, f, bridge_mode_name(&bs), bs.in_control, bs.in_water, bs.o2,
+                bs.life, bs.player_pos.x, bs.player_pos.y, bs.player_pos.z, vrcam_active(), bs.crouching, bs.prone, st, o2r, ctl);
+    }
     if (f % 500 == 0) fprintf(stderr, "[camtest] frame %u modo=%s activo=%d t=%d\n", f, bridge_mode_name(&bs), vrcam_active(), cur_t);
     (void)novr;
-    if (f >= max_frames || cur_t >= 1400) {
+    if (f >= max_frames || cur_t >= (scr_on ? scr_end : 1400)) {
         { GteHpStats g; gte_hp_stats(&g); fprintf(stderr, "[camtest] tabla GTE: almacenados=%u desalojos=%u omitidos=%u (sf0=%u sat=%u div=%u z=%u) consultas=%u aciertos=%u max/gen=%u\n", g.stored, g.evict, g.skipped, g.skip_sf, g.skip_sat, g.skip_ovf, g.skip_z, g.lookups, g.hits, g.max_gen_stored); }
+        if (scr_on) fprintf(stderr, "[camtest] 2D a pantalla completa (>=40%% del área): listas bajo el agua %u con %u ops; listas fuera %u con %u ops\n", big_water_lists, big_water_ops, big_air_lists, big_air_ops);
+        if (scr_on) for (int w = 0; w < 2; w++) {
+            const SceneAcc *a = &sacc[w];
+            fprintf(stderr, "[scene] %s: listas %u polis %u 3D %u (con BEHIND %u, tris recortados %u) 2D %u | tris3D %u | descartes: parcial %u cerca-sin-BEHIND %u ambig %u tris-detrás %u | filtro: tiras %u polis %u recubrimientos %u tris %u (listas con filtro %u) | borrados %u\n",
+                    w ? "bajo el agua" : "fuera del agua", a->lists, a->polys, a->poly3d, a->poly_behind, a->clipped, a->poly2d, a->tris3d, a->drop_partial, a->drop_near, a->drop_ambig, a->drop_behind,
+                    a->n_filter_rects, a->n_filter_polys, a->n_filter_cover, a->filter_tris, a->lists_filter, a->n_clear);
+        }
+        fprintf(stderr, "[camtest] descartes acumulados (frames volcados): polis %u dibujados %u parciales %u detrás-del-todo %u ambig %u recortados %u 2D %u (sat %u deriv %u); regla anterior (todos fvalid) habría dibujado %u\n", g_tot.polys, g_tot.drawn, g_tot.partial, g_tot.behind, g_tot.ambig, g_tot.clipped, g_tot.nonvr2d, g_tot.sat, g_tot.derived, g_tot.legacy);
+        if (srv_list && !srv_done) { fprintf(stderr, "[server] error: no se llegó al punto de instantánea (f=%u, t=%d); no se ejecutó ningún escenario\n", f, cur_t); exit(2); }
         world_report(getenv("CAM_KEEP_OVERSCAN") ? "(keep_overscan)" : "");
+        if (scr_on) fprintf(stderr, "[camtest] épocas de VRAM: máximo de eventos por lista %d (instantáneas %d)\n", snap_max_ev, MAXSNAP);
+        { const uint16_t *vr = ref_vram(r1); fprintf(stderr, "[camtest] hash f=%u RAM=%016llx VRAM=%016llx\n", f, (unsigned long long)fnv(psx_ram, PSX_RAM_SIZE), (unsigned long long)fnv(vr, 1024 * 512 * 2)); }
         VrCamStats s; vrcam_stats(&s);
         fprintf(stderr, "[camtest] FIN f=%u: listas %u, con registro VR %u, sin registro %u; envíos %u; cámaras %u (VR %u) activaciones %u desactivaciones %u recentrados %u cabeza-perdida %u; cobertura media %.1f%%\n",
                 f, lists_seen, pair_ok, none_rec, vrcam_draw_count(), s.builds, s.vr_builds, s.activations, s.deactivations, s.recenters, s.head_misses, n_cov ? sum_cov / n_cov : 0);
@@ -429,11 +897,25 @@ int main(int argc, char **argv) {
     max_frames = (uint32_t)strtoul(argv[2], 0, 0);
     outdir = argv[3];
     mkdir(outdir, 0755);
+    t_start = now_s();
+    if (getenv("CAM_SERVER")) { srv_list = getenv("CAM_SERVER"); srv_base = argv[3]; }
+    if (getenv("CAM_SNAP_FRAME")) srv_frame = atoi(getenv("CAM_SNAP_FRAME"));
+    if (getenv("CAM_SCRIPT")) scr_load(getenv("CAM_SCRIPT"));
     if (getenv("CAM_HFOV")) hfov_prev = (float)atof(getenv("CAM_HFOV"));
+    if (getenv("CAM_PAD")) {   /* guion de mando de ARRANQUE propio: "inicio:mascara_hex:duracion[:cada],..." (sustituye al de defecto) */
+        char *dup = strdup(getenv("CAM_PAD")), *sv = NULL;
+        for (char *tok = strtok_r(dup, ",", &sv); tok && npad_ev < 16; tok = strtok_r(NULL, ",", &sv)) {
+            unsigned st = 0, m = 0, du = 6, ev = 0;
+            if (sscanf(tok, "%u:%x:%u:%u", &st, &m, &du, &ev) >= 2) pad_ev[npad_ev++] = (PadEv){st, du, ev, (uint16_t)m};
+        }
+        free(dup);
+    } else {
     pad_ev[npad_ev++] = (PadEv){120, 6, 0, 1u << 3};
     pad_ev[npad_ev++] = (PadEv){400, 6, 0, 1u << 3};
     pad_ev[npad_ev++] = (PadEv){0, 6, 97, 1u << 13};
     pad_ev[npad_ev++] = (PadEv){0, 6, 211, 1u << 7};
+    }
+    if (getenv("CAM_BOOT_SHOT")) boot_shot = atoi(getenv("CAM_BOOT_SHOT"));
     FILE *f = fopen(exe, "rb");
     if (!f) { perror(exe); return 1; }
     static uint8_t buf[PSX_RAM_SIZE + 0x800];

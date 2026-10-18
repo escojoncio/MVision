@@ -134,6 +134,33 @@ static void t_card(Cpu *c) {
     EQ(mem_r32(c, 0x80007018), 8192);
     EQ(bios(c, 0xB0, 0x43, 0x80007000, 0, 0, 0), 0);
 
+    /* sondeo de escritura (sector 0x3F, búfer NULL): confirma con evento pero NO copia RAM[0..127] sobre el sector 63 */
+    {
+        uint8_t hdr[128], now[128];
+        bios(c, 0xB0, 0x4F, 0x00, 0x3F, 0x80008000, 0);               /* leer sector 63 */
+        for (int j = 0; j < 128; j++) hdr[j] = mem_r8(c, 0x80008000u + (uint32_t)j);
+        EQ(hdr[0], 'M'); EQ(hdr[1], 'C');                               /* copia de la cabecera */
+        for (int j = 0; j < 128; j++) mem_w8(c, (uint32_t)j, 0xEE);   /* RAM baja distinta de la cabecera */
+        bios(c, 0xB0, 0x0C, ev_sw, 0, 0, 0);
+        EQ(bios(c, 0xB0, 0x4E, 0x00, 0x3F, 0, 0), 1);
+        EQ(bios(c, 0xB0, 0x0B, ev_sw, 0, 0, 0), 1);                    /* el evento de fin se entrega igual */
+        bios(c, 0xB0, 0x4F, 0x00, 0x3F, 0x80008100, 0);
+        for (int j = 0; j < 128; j++) now[j] = mem_r8(c, 0x80008100u + (uint32_t)j);
+        EQ(memcmp(hdr, now, 128), 0);
+        EQ(bios(c, 0xB0, 0x4E, 0x00, 0x3F, 0x80000000, 0), 1);         /* mismo sondeo por KSEG0 */
+        bios(c, 0xB0, 0x4F, 0x00, 0x3F, 0x80008100, 0);
+        for (int j = 0; j < 128; j++) now[j] = mem_r8(c, 0x80008100u + (uint32_t)j);
+        EQ(memcmp(hdr, now, 128), 0);
+        for (int j = 0; j < 128; j++) mem_w8(c, 0x80008200u + (uint32_t)j, 0x5A);   /* escritura legítima con búfer real: sí se copia */
+        EQ(bios(c, 0xB0, 0x4E, 0x00, 0x3F, 0x80008200, 0), 1);
+        bios(c, 0xB0, 0x4F, 0x00, 0x3F, 0x80008100, 0);
+        EQ(mem_r8(c, 0x80008100), 0x5A);
+        EQ(mem_r8(c, 0x8000817F), 0x5A);
+        for (int j = 0; j < 128; j++) mem_w8(c, 0x80008200u + (uint32_t)j, hdr[j]);   /* restaurar la cabecera */
+        bios(c, 0xB0, 0x4E, 0x00, 0x3F, 0x80008200, 0);
+        for (int j = 0; j < 128; j++) mem_w8(c, (uint32_t)j, 0);
+    }
+
     /* persistencia: reabrir la imagen */
     card_close(0);
     card_open(0, path);

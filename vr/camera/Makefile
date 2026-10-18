@@ -3,6 +3,8 @@
 #   make -C vr/camera gen             parchea el EXE (recorte), fusiona nombres y recompila el C con los 5 sustitutos
 #   make -C vr/camera camtest         compila la herramienta de validación (necesita `gen` y overlays en build/gen_ov)
 #   make -C vr/camera run             ejecuta la validación con datos locales y escribe vistas previas PPM en OUT/img
+#   make -C vr/camera snap LIST=l.txt servidor de instantáneas: arranca una vez, hace fork() por escenario de la lista (guiones CAM_SCRIPT) desde
+#                                     la parte jugable y escribe en OUT/snap/<nombre>/ (con CAM_SERVER_WATCH=1 se queda esperando listas nuevas)
 # Nada de lo generado se sube: todo va a OUT (por defecto ../../build/camvr).
 CC ?= gcc
 CLANG ?= clang
@@ -72,16 +74,21 @@ $(RTP)/stamp: $(RTDEPS) runtime_seq.patch
 	touch $@
 $(RTSRC): $(RTP)/stamp
 OVOBJ := $(wildcard $(GENOV)/*.o)
-$(OUT)/camtest: camtest.c vr_camera.c vr_camera_hle.c vr_camera.h $(BR)/bridge.c $(BR)/bridge_addrs.c $(RD)/ref_raster.c $(RTSRC) $(GENO) $(OVOBJ)
+SC := ../scene
+$(OUT)/camtest: camtest.c vr_camera.c vr_camera_hle.c vr_camera.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(BR)/bridge.c $(BR)/bridge_addrs.c $(RD)/ref_raster.c $(RTSRC) $(GENO) $(OVOBJ)
 	@mkdir -p $(OUT)
-	$(CLANG) -I. -I$(BR) -I$(RTP) -I$(RD) -I$(OUT)/gen -O2 -g -Wall -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
-	  -o $@ camtest.c vr_camera.c vr_camera_hle.c $(BR)/bridge.c $(BR)/bridge_addrs.c $(RD)/ref_raster.c $(RTSRC) $(GENO) $(OVOBJ) -lm
+	$(CLANG) -I. -I$(BR) -I$(SC) -I$(RTP) -I$(RD) -I$(OUT)/gen -O2 -g -Wall -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
+	  -o $@ camtest.c vr_camera.c vr_camera_hle.c $(SC)/vr_scene.c $(BR)/bridge.c $(BR)/bridge_addrs.c $(RD)/ref_raster.c $(RTSRC) $(GENO) $(OVOBJ) -lm
 # GENC se evalúa al leer el Makefile: primero se genera el C y luego se vuelve a invocar make.
 camtest: gen
 	$(MAKE) $(OUT)/camtest
 run: camtest
 	MV_DISC=$(DISC) $(OUT)/camtest $(OUT)/exe/main.exe $(FRAMES) $(OUT)/img
 FRAMES ?= 8200
+LIST ?=
+snap: camtest
+	@test -n "$(LIST)" || { echo "uso: make snap LIST=lista.txt (ver cabecera de camtest.c)"; exit 1; }
+	CAM_SERVER=$(abspath $(LIST)) MV_DISC=$(DISC) $(OUT)/camtest $(OUT)/exe/main.exe $(FRAMES) $(OUT)/snap
 clean:
 	rm -rf $(OUT)
-.PHONY: all test test-san gen camtest run clean
+.PHONY: all test test-san gen camtest run snap clean
