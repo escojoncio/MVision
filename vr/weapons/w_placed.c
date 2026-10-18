@@ -33,8 +33,8 @@ static const char *const MINE_MESH_NAMES[] = { "body", "plate", "sight", "legl",
 #define CAP_AUTOCLOSE  4.0f      /* la tapa se cierra sola si no se pulsa */
 #define LEGS_TIME      0.40f
 #define RESPAWN_T      0.40f
-#define PLACE_ID_A     103
-#define PLACE_ID_B     104
+#define PLACE_ID_A     6       /* adhesivo con mando */
+#define PLACE_ID_B     5       /* mina */
 
 static void snd(const WGameBridge *g, int id, int ev) { if (g && g->sound) g->sound(id, ev); }
 static void hap(const WGameBridge *g, int hand, float a, float sec) { if (g && g->haptic) g->haptic(hand, a, sec); }

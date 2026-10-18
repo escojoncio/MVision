@@ -49,7 +49,7 @@ static void rifle_update(WeaponState *s, const WInput *in, WReloadMode rm, const
 static const char *const rifle_mesh_names[] = { "body", "trigger", "selector", "mag", "charge", "bolt", "casing", NULL };
 
 const WeaponDef w_rifle = {
-    .id = "rifle", .game_weapon_id = 2,    /* identificador interno del arma en el juego: ajustar en la integración */
+    .id = "rifle", .game_weapon_id = 1,    /* fusil, tabla del puente */
     .mesh_names = rifle_mesh_names,
     .meshes = 0, .nmeshes = 0,   /* sin mallas propias: el cargador de modelos las asocia por nombre de pieza */
     .parts = rifle_parts, .nparts = RIFLE_PT_N,

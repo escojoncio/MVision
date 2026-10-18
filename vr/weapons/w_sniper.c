@@ -133,7 +133,7 @@ static void sniper_update(WeaponState *s, const WInput *in, WReloadMode rm, cons
 static const char *const sniper_mesh_names[] = { "body", "stock", "trigger", "selector", "mag", "charge", "bolt", "lens", "casing", NULL };
 
 const WeaponDef w_sniper = {
-    .id = "sniper", .game_weapon_id = 3,   /* identificador interno del arma en el juego: ajustar en la integración */
+    .id = "sniper", .game_weapon_id = 9,   /* francotirador, tabla del puente */
     .mesh_names = sniper_mesh_names,
     .meshes = 0, .nmeshes = 0,   /* sin mallas propias: el cargador de modelos las asocia por nombre de pieza */
     .parts = sniper_parts, .nparts = SNIPER_PT_N,

@@ -1,0 +1,107 @@
+diff -ruN a/runtime/Makefile b/runtime/Makefile
+--- a/runtime/Makefile	2026-10-18 22:46:20.830083841 +0000
++++ b/runtime/Makefile	2026-10-18 22:46:20.883831459 +0000
+@@ -56,7 +56,7 @@
+ 
+ # Tabla nombre -> hle_<nombre> (hle_table.c va en el repo; esta regla la regenera tras tocar hle*.txt).
+ # Incluye las HLE de la capa de cámara VR (vr/camera/hle_vrcam.txt); hle_vrcam_weak.c aporta los símbolos si no se enlaza vr_camera_hle.c.
+-HLETXT = $(wildcard hle*.txt) ../vr/camera/hle_vrcam.txt
++HLETXT = $(wildcard hle*.txt) ../vr/camera/hle_vrcam.txt ../vr/gameplay/hle_vrfire.txt
+ .PHONY: hle_table check_hle_table
+ hle_table:
+ 	python3 ../tools/recomp/hletab.py $(HLETXT) > hle_table.c
+diff -ruN a/runtime/hle_table.c b/runtime/hle_table.c
+--- a/runtime/hle_table.c	2026-10-18 22:46:20.833488935 +0000
++++ b/runtime/hle_table.c	2026-10-18 22:46:20.931330245 +0000
+@@ -66,6 +66,15 @@
+ void hle_vrcam_padorg(Cpu *c);
+ void hle_vrcam_trans(Cpu *c);
+ void hle_vrcam_view(Cpu *c);
++void hle_vrfire_amissile(Cpu *c);
++void hle_vrfire_bullet(Cpu *c);
++void hle_vrfire_charge(Cpu *c);
++void hle_vrfire_flash_a(Cpu *c);
++void hle_vrfire_flash_b(Cpu *c);
++void hle_vrfire_grenade(Cpu *c);
++void hle_vrfire_hide(Cpu *c);
++void hle_vrfire_mine(Cpu *c);
++void hle_vrfire_rmissile(Cpu *c);
+ 
+ const HleEntry hle_table[] = {
+     {"CdControl", hle_CdControl},
+@@ -133,6 +142,15 @@
+     {"vrcam_padorg", hle_vrcam_padorg},
+     {"vrcam_trans", hle_vrcam_trans},
+     {"vrcam_view", hle_vrcam_view},
++    {"vrfire_amissile", hle_vrfire_amissile},
++    {"vrfire_bullet", hle_vrfire_bullet},
++    {"vrfire_charge", hle_vrfire_charge},
++    {"vrfire_flash_a", hle_vrfire_flash_a},
++    {"vrfire_flash_b", hle_vrfire_flash_b},
++    {"vrfire_grenade", hle_vrfire_grenade},
++    {"vrfire_hide", hle_vrfire_hide},
++    {"vrfire_mine", hle_vrfire_mine},
++    {"vrfire_rmissile", hle_vrfire_rmissile},
+     {0, 0}
+ };
+-const unsigned hle_table_count = 65;
++const unsigned hle_table_count = 74;
+diff -ruN a/runtime/hle_vrfire_weak.c b/runtime/hle_vrfire_weak.c
+--- a/runtime/hle_vrfire_weak.c	1970-01-01 00:00:00.000000000 +0000
++++ b/runtime/hle_vrfire_weak.c	2026-10-18 22:46:20.899028275 +0000
+@@ -0,0 +1,16 @@
++/* Sustitutos débiles de las HLE de la capa de disparo VR (vr/gameplay/vr_fire_hle.c define las reales).
++ * hle_table.c (generada también de vr/gameplay/hle_vrfire.txt) los referencia; las herramientas y pruebas que enlazan
++ * los .c de runtime/ sin la capa de disparo siguen enlazando, y si alguien los enlazara por dirección se comportarían
++ * como el código original. */
++#include "cpu.h"
++
++#define WEAK_ORIG(sym, name) __attribute__((weak)) void sym(Cpu *c) { rt_orig(c, name); }
++WEAK_ORIG(hle_vrfire_bullet, "vrfire_bullet")
++WEAK_ORIG(hle_vrfire_flash_a, "vrfire_flash_a")
++WEAK_ORIG(hle_vrfire_flash_b, "vrfire_flash_b")
++WEAK_ORIG(hle_vrfire_rmissile, "vrfire_rmissile")
++WEAK_ORIG(hle_vrfire_amissile, "vrfire_amissile")
++WEAK_ORIG(hle_vrfire_mine, "vrfire_mine")
++WEAK_ORIG(hle_vrfire_charge, "vrfire_charge")
++WEAK_ORIG(hle_vrfire_grenade, "vrfire_grenade")
++WEAK_ORIG(hle_vrfire_hide, "vrfire_hide")
+diff -ruN a/runtime/hlebind.c b/runtime/hlebind.c
+--- a/runtime/hlebind.c	2026-10-18 22:46:20.833849868 +0000
++++ b/runtime/hlebind.c	2026-10-18 22:46:20.885746208 +0000
+@@ -242,7 +242,7 @@
+ unsigned hle_bind_missing(void) { return nmissing; }
+ 
+ /* HLE de dirección fija (no se buscan por firma): hle_bind las omite sin avisar y se registran aparte con hle_bind_fixed. */
+-#define MAX_FIXED 16
++#define MAX_FIXED 32
+ static const char *fixed_decl[MAX_FIXED];
+ static unsigned nfixed_decl;
+ void hle_bind_declare_fixed(const char *name) {
+diff -ruN a/runtime/host.c b/runtime/host.c
+--- a/runtime/host.c	2026-10-18 22:46:20.833825000 +0000
++++ b/runtime/host.c	2026-10-18 22:46:20.885502764 +0000
+@@ -213,7 +213,9 @@
+     uint64_t t_in = mono_ns();
+     atomic_store(&frames, f);
+     uint64_t pr = atomic_load_explicit(&pad_req, memory_order_relaxed);
+-    pad_set_state(0, (uint16_t)pr, (uint8_t)(pr >> 16), (uint8_t)(pr >> 24), (uint8_t)(pr >> 32), (uint8_t)(pr >> 40));
++    uint16_t pb = (uint16_t)pr;
++    if (hooks.pad) pb = hooks.pad(pb);
++    pad_set_state(0, pb, (uint8_t)(pr >> 16), (uint8_t)(pr >> 24), (uint8_t)(pr >> 32), (uint8_t)(pr >> 40));
+ 
+     {   /* Solo se convierte el vídeo si alguien lo mira (lectura en el último segundo); si no, 1 de cada 10 VBlanks. */
+         uint64_t lr = atomic_load_explicit(&fb_read_ns, memory_order_relaxed);
+diff -ruN a/runtime/host_hooks.h b/runtime/host_hooks.h
+--- a/runtime/host_hooks.h	2026-10-18 22:46:20.833652298 +0000
++++ b/runtime/host_hooks.h	2026-10-18 22:46:20.883984372 +0000
+@@ -15,6 +15,9 @@
+     void (*start)(void);
+     /* En cada VBlank (CPU parada), tras aplicar el mando y publicar el vídeo y antes del ritmo/pausa. */
+     void (*frame)(Cpu *c, uint32_t frame);
++    /* En cada VBlank, justo ANTES de aplicar el mando al juego: filtra los botones del mando (activo alto) que pidió la app. La capa de
++     * disparo/recarga VR (vr/gameplay) suelta/pulsa el botón de ataque y R1/R2 aquí. NULL = sin filtro. */
++    uint16_t (*pad)(uint16_t buttons);
+ } MvHostHooks;
+ void mv_host_set_hooks(const MvHostHooks *h);   /* copia; NULL los quita */
+ 

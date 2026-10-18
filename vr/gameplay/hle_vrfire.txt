@@ -1,0 +1,12 @@
+# Funciones del motor sustituidas por la capa de disparo VR (vr/gameplay/vr_fire_hle.c). Nombres neutros; las
+# direcciones (edición europea) están en vr_fire_names.json. Se añaden a runtime/hle*.txt al generar la tabla/el C:
+#   python3 tools/recomp/hletab.py runtime/hle*.txt vr/camera/hle_vrcam.txt vr/gameplay/hle_vrfire.txt > runtime/hle_table.c
+vrfire_bullet
+vrfire_flash_a
+vrfire_flash_b
+vrfire_rmissile
+vrfire_amissile
+vrfire_mine
+vrfire_charge
+vrfire_grenade
+vrfire_hide
