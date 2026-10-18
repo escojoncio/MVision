@@ -4,7 +4,7 @@ Runtime nativo para Apple Vision Pro de un título de PS1 (juego objetivo), VR i
 
 **Convención de repo (público):** no nombrar el juego, personajes ni repos externos en nada que se suba. Repos externos solo vía variables de Actions (`DECOMP_REPO`, `DECOMP_COMMIT`, `SDK_REPO`). Zonas por su código interno (`s00a`…).
 
-Estado: **fase de diseño + herramientas.** Sin build todavía.
+Estado: **disco analizado, arquitectura decidida (recompilación estática del EXE EU), herramientas de análisis.** Sin build todavía.
 
 ---
 
@@ -12,17 +12,21 @@ Estado: **fase de diseño + herramientas.** Sin build todavía.
 
 Revisada en commit `9830efd98559be84da59dc1a961f8fc0e628ba36` (2026-10-18):
 
-- Objetivo upstream: edición JP (`SLPM_862.47/48`, `862.49` = disco de misiones VR). Matching byte a byte con SDK PsyQ 4.3/4.4 (GCC 2.x).
+- Objetivo upstream: edición JP (`JP-1/2`, `JP-VR` = disco de misiones VR). Matching byte a byte con SDK PsyQ 4.3/4.4 (GCC 2.x).
 - **Ejecutable principal 100 % decompilado; 0 `INCLUDE_ASM` fuera de `source/overlays/`.**
 - Overlays con asm pendiente (747 `INCLUDE_ASM`, 37 ficheros): `brf camera d18a d18ar rank s03d s05a s07a s07b s08b s08br s11d s11e s11g s11i s14e s15c s19b s19br`. Sin empezar: `s10a/ar s11b s11h s15a s17a/ar s18a/ar s19a/ar`.
 - Se compila sin el ejecutable original: solo `source/` + `asm/` (4,9 MB, ya en upstream) + `SDK_REPO`. Toolchain Windows → wine/wibo en Linux.
 - Sin LICENSE → dependencia externa, nunca copiar su código aquí.
 
-## 2. Disco del usuario
+## 2. Disco del usuario (analizado 2026-10-18)
 
-- **SLES-01734 (España), 2 discos, BIN/CUE.** Edición europea original (no la JP de la decomp).
-- No transferible tal cual (>400 MB/fichero por el puente del PC). Solicitado partir en zip de 300 MB.
-- Pendiente: `psxdisc.py info/ls/manifest` de ambos discos → ejecutable de arranque (`SLES_017.34` esperado), lista de ficheros, comparar contra estructura que espera `source/libfs`.
+- **Edición EU (España), 2 discos.** Extraídos por el usuario con `dumpsxiso` (+ `.xml` de layout). Solo en local/sesión, nunca en repo.
+- `SYSTEM.CNF`: `BOOT` → cargador, `TCB=4`, `EVENT=16`, `STACK=0x801FFFF0`.
+- **Cargador** (`<arranque>`) (text `0x80010000`, size `0x58800`, pc `0x80066a98`, "Europe area") que hace `LoadExec` de EXE principal `<exe disco 1>` (disco 2 `<exe disco 2>`).
+- **EXE principal idéntico en ambos discos.** text `0x80010000`, size `0x9D000` (643 072 B), pc `0x8009a434`, cabecera "Japan area", fecha 1999-07-15, cadenas `Nov 12 1998`. Tamaño ≈ ejecutable JP de la decomp (626 KB) → mismo motor, rama muy cercana.
+- ~1500 funciones (prólogos `addiu sp,-X`).
+- Ficheros en `D/` (dir de datos): `<fichas> 5,7M`, `<demos> 248M/184M`, `<retratos> 3,5M`, `<radio> 1,7M`, `<stages>.DIR 70M`, `<voces> 194M/181M`, `<video> 54M/162M (mixed, XA)`. Raíz: `FILLER.DAT` (relleno).
+- `<stages>.DIR` (disco 1): u32 tamaño tabla = 1128 → **94 entradas** de 12 B (nombre[8] + sector). Incluye todas las zonas de la decomp (`s00a`…`s20a`, variantes `*r`, `d*`, `brf`, `rank`, `camera`, `title`, `select*`, `ending`) **y `vr01`…`vr10`, `vrdemo`, `selectvr`**. Overlays de código viajan dentro de cada stage (tag `.bin`, ver `source/libfs/cdstage.c` `SetupNextFile`).
 
 ## 3. Inventario de la capa de plataforma (main exe + overlays parciales)
 
@@ -36,7 +40,7 @@ Llamadas externas a la decomp (conteo aprox. por regex):
 - **libpad / libcard / kernel:** `Pad*`, `_card_*`/`InitCARD`, eventos (`OpenEvent`…), **hilos `OpenTh/ChangeTh/CloseTh` en `source/mts`** (multitarea cooperativa) → corrutinas/fibras.
 - **Accesos directos a hardware:** scratchpad `0x1F800000+` (65 `getScratchAddr` + literales), registros `0x1F801070` (I_STAT), `0x1F801040` (SIO pad). 11 ficheros con asm inline fuera de overlays.
 
-## 4. Arquitectura — revisión propuesta (pendiente de cerrar con el disco)
+## 4. Arquitectura — recompilación estática
 
 Diseño anterior: compilar la decomp a nativo 64-bit + RAM virtual 32-bit con punteros como offsets + AOT solo para overlays sin decompilar.
 
@@ -52,7 +56,7 @@ Diseño anterior: compilar la decomp a nativo 64-bit + RAM virtual 32-bit con pu
 Ventajas: sin refactor de punteros, juego completo desde el día 1 (overlays sin decompilar incluidas), validación diferencial trivial (mismo binario que el emulador de referencia).
 Coste: mapear símbolos JP→EU (por firmas) si se elige opción A.
 
-Decisión A/B tras analizar el ejecutable del disco EU.
+**Decisión: opción A** (recompilar los binarios del disco EU: EXE principal + overlays de `<stages>.DIR`). Código y datos coinciden por construcción; la decomp JP se usa como mapa de símbolos vía `tools/sig/sigs.py` (firmas enmascaradas JP → direcciones EU). Pendiente medir % de match.
 
 ## 5. Capa VR, control, armas (sin cambios respecto al diseño)
 
@@ -65,14 +69,18 @@ Decisión A/B tras analizar el ejecutable del disco EU.
 
 ## 6. Herramientas en el repo
 
-- `tools/disc/psxdisc.py` (stdlib): `info`, `ls`, `extract` (Form 2 en crudo 2336 B/sector), `dirtable <DISCO> <FICHERO>` (tabla de archivo DIR: entradas de 12 B = nombre[8] + sector, cabecera u32 tamaño), `manifest` (LBA/tamaño/sha256). **Sin probar aún con disco real.**
-- `.github/workflows/build.yml`: job `reference` (solo dispatch o `[build]`): clona decomp/SDK desde variables, instala wine con caché apt, compila referencia. **Nunca ejecutado.** Requiere crear variables `DECOMP_REPO`, `DECOMP_COMMIT`, `SDK_REPO` en el repo.
+- `tools/disc/psxdisc.py` (stdlib): `info`, `ls`, `extract`, `dirtable <DISCO> <FICHERO>`, `manifest`. Sin probar con BIN real (el usuario extrajo con dumpsxiso; formato de tabla DIR confirmado sobre el fichero extraído).
+- `tools/sig/sigs.py`: `make <exe> <map> <json>` / `match <json> <exe> <json>`. Enmascara inmediatos de lui/addiu/ori/loads/stores y destinos j/jal; guarda solo sha1 (prefijo 8 palabras + completo) y tamaño, nunca código. Autoprueba EU contra sí mismo (mapa falso por prólogos): 1518 firmas, 1392 exactas, 126 ambiguas (funciones duplicadas), 0 fallos.
+- `.github/workflows/build.yml`, job `reference` (solo dispatch o `[build]`): clona decomp/SDK desde **secrets** `DECOMP_REPO`, `DECOMP_COMMIT`, `SDK_REPO` (la API de variables no es accesible desde la sesión; los crea el usuario), instala wine con caché apt, compila referencia JP, genera `sigs_ref.json` y lo sube como artefacto `sigs-ref`. **Nunca ejecutado.**
+
+- `tools/stage/stages.py`: `list`, `check`, `overlays <DIR> <out>`. Formato DATACNF: cabecera `u8 ver, u8 pad, i16 sectores`; tags 8 B `u16 id, u8 modo, u8 ext, i32 tamaño` hasta modo 0; datos tras sector de cabecera, alineados a sector; grupo `c` empaquetado con tamaño en tag ext `0xFF`. **Verificado disco 1: 94/94 stages cuadran; 92 overlays (`s`/`b`) extraídos** (`init`, `init_tux` sin overlay).
+- `sigs.py` tras revisión: solo símbolos dentro de secciones `text` del map psylink (tras "Names in address order"), fin acotado a la sección, enmascara también lwl/lwr/swl/swr, corregido off-by-one del índice. Nombres del map en MAYÚSCULAS.
+- Workflow tras revisión: `setup-python` 3.12 (PEP 668), `wine wine32:i386` sin caché apt, `wineboot --init`, `build.py` tolerante a fallo de `compare.py` (paso de firmas exige `obj/_mgsi.exe` + `obj/asm.map`), timeout 45 min.
 
 ## 7. Pendiente siguiente sesión
 
-- [ ] Recibir discos partidos → `info`/`ls`/`manifest` de ambos; validar `psxdisc.py`.
-- [ ] Extraer ejecutable EU; comparar con build de referencia JP (tamaño, secciones, firmas de funciones) → decidir opción A/B.
-- [ ] Crear variables de Actions y lanzar `reference` (con permiso del usuario).
+- [ ] Usuario crea secrets; lanzar `reference` (con permiso) → `sigs_ref.json` → `sigs.py match` contra EXE principal EU → % de cobertura.
+- [ ] Cargar overlays extraídos en recompilador: dirección de carga = `StageCharacterEntries` (localizar en EXE EU vía firmas).
 - [ ] Recompilador MIPS→C: decodificador + emisor, empezando por el ejecutable principal.
 - [ ] HLE: GPU (OT/primitivas → Metal), GTE float, CD sobre imagen, hilos `mts` → fibras.
 - [ ] Esqueleto de app visionOS (ventana plana primero).
