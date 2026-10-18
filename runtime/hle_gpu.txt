@@ -1,0 +1,24 @@
+# libgpu sustituida por el rasterizador de referencia (runtime/gpu.c).
+ResetGraph
+SetGraphDebug
+SetGraphQueue
+GetODE
+DrawSync
+DrawSyncCallback
+SetDispMask
+ClearImage
+ClearImage2
+LoadImage
+LoadImage2
+StoreImage
+StoreImage2
+MoveImage
+MoveImage2
+ClearOTag
+ClearOTagR
+DrawPrim
+DrawOTag
+DrawOTag2
+DrawOTagEnv
+PutDrawEnv
+PutDispEnv
