@@ -80,6 +80,8 @@ Coste: mapear símbolos JP→EU (por firmas) si se elige opción A.
 - **Decisión caja:** estilo por defecto `BOX_STYLE_CARDBOARD` (textura interior del disco); negro puro como opción. Máscara visible siempre que el objeto caja esté equipado y puesto.
 - **Requisito máscara de gas (VR):** el modelo equipado del disco es una cabeza completa con la máscara (ids de cabezas con equipo en el stage residente: ver /work/models/index.txt local). Separar solo la máscara de la cabeza (corte por textura/componentes con wcut, sin geometría nueva) y mostrarla anclada a la cabeza como en vr/box: marco de las lentes visible en la periferia, efecto de ver a través (viñeta del contorno de lentes, ligera distorsión/aberración de lente, tinte del cristal, empañado sutil sincronizado con la respiración, oclusión periférica fiel a las proporciones del modelo). Activación por el estado del juego (objeto equipado), nunca por la capa VR. Mismo patrón aplicable a las gafas de visión (nocturna/térmica) del otro modelo de cabeza. Al quitar la cabeza el modelo queda hueco por dentro: generar la cara interior (lo que ve el usuario) derivándola de la exterior original: duplicar caras con normales invertidas, desplazadas hacia dentro un grosor coherente, cerrar bordes entre capa exterior e interior, material interior (goma/plástico oscuro, reverso de lentes y oculares) muestreado de las texturas del propio modelo. Aplica a máscara y a ambas gafas.
 
+- **Corrección corte cargador pistolas (36f6/21b6):** la región actual del cargador invade la empuñadura. Debe ir a ras del mango: lo único visible con el cargador insertado es la franja inferior (base) de la empuñadura; el cuerpo del cargador queda oculto dentro y, extraído, se extruye desde esa base hacia arriba siguiendo la inclinación del mango (eje de extracción = inclinación del mango, alineado con w_pist.c). Test: con cargador insertado nada sobresale del contorno del mango salvo la base.
+
 ## 6. Herramientas en el repo
 
 - `tools/disc/psxdisc.py` (stdlib): `info`, `ls`, `extract`, `dirtable <DISCO> <FICHERO>`, `manifest`. Sin probar con BIN real (el usuario extrajo con dumpsxiso; formato de tabla DIR confirmado sobre el fichero extraído).
@@ -144,3 +146,25 @@ Estado: `make -C vr/weapons test` y `make -C vr/weapons test-san` (ASan+UBSan, `
 - `vr/box/box_data.{h,c}` (lector de stage/máscara/PCX, parser endurecido, fuzz), `box_view.{h,c}` (carcasa cerrada, panel frontal con el contorno real, canto con grosor, degradado alfa, estilos CARDBOARD(defecto)/BLACK(fiel), inercia acotada 2.5°, bajada/subida, apertura animada, `set_wide` accesibilidad), `test_box.c` (4749 comprobaciones OK, también con ASan/UBSan). `make -C vr/box test|test-san|prev`.
 - `tools/box/`: `mkpano.py` (fondo), `boxres.py` (extrae máscara/textura + render del original), `boxprev.c` (trazado de rayos de la carcasa), `render_compare.py`.
 - Pendiente: integrar draws en el renderer Metal (malla dinámica `box_view_revision`, alfa, baldosa con repetición), puente con la RAM, ajustar altura del centro óptico si el lienzo PAL difiere (±8 px), prueba en visor de distancia/confort.
+
+---
+
+## 10. Cortador de modelos (`vr/weapons/wcut.{h,c}`, `wcut_tables.c`, `test_wcut.c`) — 2026-10-18
+
+- Separa un `WLoaded` rígido en piezas articuladas sin geometría nueva. Marco: salida de wload corregida con `WCUT_FIX_UPRIGHT|WINDING` (los modelos salen boca abajo, horarios, normales hacia dentro). Selección por reglas (caja orientada CLIP/WHOLE/CENTROID, máscara de componentes, rango UV); CLIP = Sutherland-Hodgman por las 6 caras con intersecciones canónicas por arista (mismo punto en ambos lados) + tapas por cara (cadenas de aristas de contorno -> polígono -> orejas con UV planar a un bloque 3x3 del atlas).
+- Cierre: los puntos de corte se insertan en las aristas vecinas (`conform_tl`, uniones en T) y se eliminan triángulos de área nula cosiendo su vértice medio (`clean_collinear`); sin esto el volumen no cerraba. Bugs resueltos: esquinas de cara insertadas fuera de orden angular; orejas que dejaban vértices colineales fuera de la tapa (rechazar oreja si hay vértice sobre su borde); caja con cara a ras de la superficie del modelo (cambiar ±1 mm: las caras coplanares no dan contorno).
+- Tablas: solo cajas/máscaras paramétricas (mm), sin vértices. `wcut_open_edges`, `wcut_volume`, `wcut_degenerate` para comprobar. Piezas con tolerancia de aristas abiertas documentada en `test_wcut.c` (originales abiertos y copias de piezas abiertas).
+- `test_wcut.c` incluye `wcut.c`/`wcut_tables.c` (no hay que tocar el Makefile): `gcc -O1 -g -fsanitize=address,undefined -I. test_wcut.c wload.c -lm`. Se omite sin `gamedata/stage.dir`. Vistas previas: `/home/claude/work/parts/<id>_<estado>.png`.
+- Pendiente: cuerpos del fusil/francotirador/lanzador guiado con unas pocas aristas abiertas en el pozo del cargador/cuña (superficies sin aristas compartidas); varias regiones pequeñas (selector, cerrojo, mango) a afinar visualmente; huecos vacíos sin geometría original (barrel, hammer, stock, bezel, marco, misil).
+
+---
+
+## 11. Interrupciones asíncronas en el runtime (`runtime/irq.c`, `io.c`, `fiber.c`) — 2026-10-18
+
+- Recompilador: `RT_POLL(c)` en aristas hacia atrás y `JR_DISPATCH` (`recomp.py`; `--poll-entry` opcional, sin medir); también en `interp.c`. `--rt_budget<0` llama a `rt_poll` (reloj virtual 33,8688 MHz, 12 ciclos/sondeo, 64/lectura de E/S, `sys_idle` salta al siguiente evento).
+- `io.c`: reloj de eventos con VBlank PAL 50 Hz; `vblank_hw` integra `sys_frame`, `cd_pump`, `rt_host_frame`. `irq.c` (nuevo): excepción HLE (guarda Cpu, colas SysEnqIntRP C0:02/03, HookEntryInt B0:18/19, callbacks Interrupt/VSync/DMA reales, retorno tipo ReturnFromException).
+- `fiber.c`: PCB/TCB en memoria de kernel (0x108/0x110), SR por hilo (IEc e IM2), `fiber_return_from_exception` conmuta de hilo si el PCB cambió. `rt.c`: `cop0_write` -> `rt_irq_check`.
+- `hle.c`: `hle_VSync` espera VBlank real; `ResetCallback` idempotente (libspu lo llama tras instalar el VSyncCallback). `gpu.c`: `ResetGraph` delega en el original (`rt_orig`) para inicializar libgpu. `cdrom.c`: callbacks de CdControl diferidos como IRQ de CD.
+- `headless.c`: `--dump DIR --every N`, MV_DISC, MV_CARD, estadísticas. Makefile: objetivo `test_sys`. `make test` y `make test_sys` OK.
+- Funcional: planificador del juego corriendo, FS lee la tabla de stages, GPU recibe listas, frames de logos volcados.
+- Pendiente: tras ~frame 650 el bucle de frames sigue (t3) pero no se emiten más DrawOTag/PutDrawEnv (GPU estática); la última lectura de CD termina en pos=254778 y aparecen <script> y liberaciones de DG_* (actores terminando). Tarea ociosa gira en 8008d828. Hipótesis: comando de script GCL o carga de overlay no tratados. Medir `--poll-entry`; reducir ~626k instrucciones interpretadas; limpiar trazas MV_CDLOG.
