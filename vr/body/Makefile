@@ -26,7 +26,7 @@ clean:
 # ---------------------------------------------------------------------------------------------------------------
 # Validación en el headless con datos locales (EXE, disco). Reutiliza la generación de vr/camera (EXE parcheado,
 # nombres fusionados) añadiendo el sustituto vrbody_sort (hle_vrbody.txt, vr_names_body.json) y el sustituto
-# de la transformación con vrbody_apply (body_hle.c = vr_camera_hle.c + integration_vr_camera_hle.patch).
+# de la transformación con vrbody_apply (vr/camera/vr_camera_hle.c ya lo llama).
 # ---------------------------------------------------------------------------------------------------------------
 CLANG ?= clang
 RT := ../../runtime
@@ -69,7 +69,7 @@ $(RTP)/stamp: $(RTDEPS) $(CAM)/runtime_seq.patch
 	touch $@
 $(RTSRC): $(RTP)/stamp
 OVOBJ := $(wildcard $(GENOV)/*.o)
-BODYSRC := bodytest.c vr_body.c vr_pose.c vr_body_cam.c body_hle.c $(CAM)/vr_camera.c $(BR)/bridge.c $(BR)/bridge_addrs.c $(RD)/ref_raster.c
+BODYSRC := bodytest.c vr_body.c vr_pose.c vr_body_cam.c $(CAM)/vr_camera_hle.c $(CAM)/vr_camera.c $(BR)/bridge.c $(BR)/bridge_addrs.c $(RD)/ref_raster.c
 $(OUT)/bodytest: $(BODYSRC) vr_body.h vr_pose.h $(RTSRC) $(GENO) $(OVOBJ)
 	@mkdir -p $(OUT)
 	$(CLANG) -I. -I$(CAM) -I$(BR) -I$(RTP) -I$(RD) -I$(OUT)/gen -O2 -g -Wall -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \

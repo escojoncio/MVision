@@ -14,6 +14,7 @@
  * (hle_bind_fixed; no hay firmas de la librería para ellas). Si el EXE no coincide con la edición esperada no hay cámara VR.
  * La IA de vr/ai NO está integrada (requiere un mecanismo rt_patch que aún no existe en el runtime). */
 #include <stdint.h>
+#include "vr_radar.h"
 #include "vr_scene.h"
 
 #ifdef __cplusplus
@@ -42,6 +43,11 @@ void mv_vrhost_game_state(MvVrGameState *out);
 
 /* Copia el BridgeState del último VBlank (bridge.h). Devuelve 1 si hay uno publicado. Thread-safe. */
 struct BridgeState;
+/* Radar de muñeca: escena del radar (vr/radar/vr_radar.h) asociada a la ÚLTIMA escena entregada por mv_host_scene (mismos punteros
+ * válidos, hasta la siguiente llamada). Devuelve 0 si esa escena no traía radar (el juego lo oculta/apaga/interfiere sin dibujarlo, o
+ * cinemática): entonces no se dibuja el quad en el brazo. La escena del HUD ya NO lleva las primitivas del radar. */
+int mv_host_radar(VrRadarScene *out);
+
 int mv_host_bridge(struct BridgeState *out);
 
 typedef struct {

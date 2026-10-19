@@ -149,6 +149,12 @@ typedef struct VrBodyStats {
 } VrBodyStats;
 void vrbody_stats(VrBodyStats *s);
 
+/* Antebrazo tras la IK en el espacio del usuario (metros): codo, muñeca y dirección unitaria hacia el dorso. Lo usa el radar de
+ * muñeca (vr/radar). side 0 izquierda / 1 derecha. 1 = válida (brazo movido por la IK en el último apply y fundido > 0,3);
+ * 0 = no (el llamador cae al mando). Mismo layout que VrRadarArm (vr_radar.h). */
+typedef struct { float elbow[3], wrist[3], dorsal[3]; } VrBodyForearm;
+int vrbody_forearm_pose(int side, VrBodyForearm *out);
+
 /* Gancho de diagnóstico: se llama al final de vrbody_apply (con las matrices IK ya escritas) si se escribió algo. Para
  * herramientas de validación; NULL por defecto. */
 typedef void (*VrBodyHook)(uint8_t *ram);

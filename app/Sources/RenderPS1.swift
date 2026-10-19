@@ -41,6 +41,11 @@ final class PS1Renderer {
     private let library: MTLLibrary?
 
     private var vram: MTLTexture
+    /// Radar de muñeca y arma en mano (integración VR: RadarPanel.swift, RenderWeapon.swift). Se crean al final de `init`.
+    var radar: RadarPanel?
+    var weapon: WeaponRenderer?
+    /// La VRAM de la consola en GPU (el radar de muñeca la muestrea al dibujar su textura).
+    var vramTexture: MTLTexture { vram }
     private var hudPre: MTLTexture?
     private let hudW = 1280, hudH = 960   // 4x 320x240
 
@@ -62,6 +67,11 @@ final class PS1Renderer {
     // escena persistente (se repite hasta que llegue otra)
     private struct DrawBatch { var first: Int, count: Int, kind: Int, mode: Int, semi: Bool, hasTex: Bool, evEnd: Int }
     private final class VtxSlot { var buf: MTLBuffer?; var cap = 0; var stOff = 0 }   // stOff: offset de VrGpuState[] tras los vértices
+    // Invariante del anillo (revisado): `inflight` (3) cuenta comandos en vuelo INCLUIDO el que se codifica, así que al volver de
+    // `inflight.wait()` hay como mucho 2 anteriores sin terminar (la cola Metal los completa en orden). `storeScene` avanza `curSlot`
+    // como mucho UNA vez por encode, de modo que el slot que se escribe (curSlot+1) nunca es el de los dos fotogramas previos
+    // (curSlot y curSlot-1 como mucho). Hace falta slots >= valor del semáforo: si se sube uno, subir el otro (memoria compartida
+    // escrita por CPU: Metal no hace seguimiento de peligros ahí).
     private var vtxSlots = [VtxSlot(), VtxSlot(), VtxSlot()]
     private var curSlot = 2
     private var batches: [DrawBatch] = []
@@ -133,6 +143,10 @@ final class PS1Renderer {
         let d2 = MTLDepthStencilDescriptor()
         d2.depthCompareFunction = .greaterEqual; d2.isDepthWriteEnabled = false
         dsSemi = device.makeDepthStencilState(descriptor: d2)
+        radar = RadarPanel(device: device, library: library, colorFormat: colorFormat, depthFormat: depthFormat,
+                           sampleCount: sampleCount, viewCount: self.viewCount, linearOutput: linearOutput)
+        weapon = WeaponRenderer(device: device, colorFormat: colorFormat, depthFormat: depthFormat,
+                                sampleCount: sampleCount, viewCount: self.viewCount)
     }
 
     // MARK: pipelines
@@ -339,6 +353,7 @@ final class PS1Renderer {
                 hudRect = hudInVRAMCoords ? simd_float4(Float(d.x), Float(d.y), w, h) : simd_float4(0, 0, w, h)
             }
             storeScene(sc, &newSlot)
+            radar?.ingest(device: device)       // escena del radar asociada a esta escena (mv_host_radar)
             gotNew = true
         }
         encodeVram(commandBuffer, preCmds.map { $0.cmd }, fs)
@@ -368,6 +383,7 @@ final class PS1Renderer {
         }
         // eventos restantes de la lista (tras el último batch) para dejar la VRAM en sincronía con el oráculo
         if nextCmd < listCmds.count { encodeVram(commandBuffer, listCmds[nextCmd...].map { $0.cmd }, fs) }
+        radar?.renderTexture(commandBuffer, vram: vram)      // VRAM ya en su estado final de la lista
         if doHud { finishHud(commandBuffer); hudDone = true }
     }
 
@@ -382,7 +398,7 @@ final class PS1Renderer {
             u.view_proj = (projections[0] * views[0], projections[min(1, cnt - 1)] * views[min(1, cnt - 1)])
             u.head = head.columns.3
             encodeScene(cb, range: range, first: first, last: last, color: c, depth: d, resolve: resolveTargets.first,
-                        uniforms: u, amplify: cnt)
+                        uniforms: u, amplify: cnt, views: views, projections: projections)
         } else {
             for i in 0..<min(colorTargets.count, depthTargets.count) where i < n {
                 var u = VrSceneUniforms()
@@ -390,7 +406,8 @@ final class PS1Renderer {
                 u.view_proj = (m, m)
                 u.head = head.columns.3
                 encodeScene(cb, range: range, first: first, last: last, color: colorTargets[i], depth: depthTargets[i],
-                            resolve: i < resolveTargets.count ? resolveTargets[i] : nil, uniforms: u, amplify: 0, viewIndex: i)
+                            resolve: i < resolveTargets.count ? resolveTargets[i] : nil, uniforms: u, amplify: 0, viewIndex: i,
+                            views: views, projections: projections)
             }
         }
     }
@@ -508,7 +525,8 @@ final class PS1Renderer {
     /// amplify > 0: un solo pase con amplificación de vértices a `amplify` capas del array; 0: un pase de un ojo.
     /// first: limpia color/profundidad; si no, carga. last: resuelve el color (MSAA); si no, lo guarda sin resolver.
     private func encodeScene(_ cb: MTLCommandBuffer, range: Range<Int>, first: Bool, last: Bool, color: MTLTexture,
-                             depth: MTLTexture, resolve: MTLTexture?, uniforms: VrSceneUniforms, amplify: Int, viewIndex: Int = 0) {
+                             depth: MTLTexture, resolve: MTLTexture?, uniforms: VrSceneUniforms, amplify: Int, viewIndex: Int = 0,
+                             views: [simd_float4x4] = [], projections: [simd_float4x4] = []) {
         let seg = range.filter { batches.indices.contains($0) && batches[$0].kind != 2 }
         if !first && seg.isEmpty && !last { return }
         let samples = color.sampleCount
@@ -538,6 +556,14 @@ final class PS1Renderer {
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pd) else { return }
         enc.label = amplify > 0 ? "PS1 escena (estéreo, amplificación)" : "PS1 escena (ojo \(viewIndex))"
         defer { enc.endEncoding() }
+        // Los defer corren al revés: este va ANTES de cerrar el codificador, tras dibujar el 3D (también si el guard de más abajo
+        // retorna). Solo en el último segmento (el que resuelve el MSAA): el quad del radar y el arma se prueban contra la profundidad del 3D.
+        defer {
+            if last {
+                radar?.encodeQuad(enc, uniforms: uniforms, layered: amplify > 0, color: color.pixelFormat, depth: depth.pixelFormat, samples: samples)
+                weapon?.encode(encoder: enc, views: views, projections: projections, layered: amplify > 0, viewIndex: viewIndex)
+            }
+        }
         enc.setCullMode(.none)
         let vp0 = MTLViewport(originX: 0, originY: 0, width: Double(color.width), height: Double(color.height), znear: 0, zfar: 1)
         if amplify > 0 {

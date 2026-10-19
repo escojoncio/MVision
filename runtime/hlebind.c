@@ -243,7 +243,7 @@ uint32_t hle_bind_addr(const char *name) {
 unsigned hle_bind_missing(void) { return nmissing; }
 
 /* HLE de dirección fija (no se buscan por firma): hle_bind las omite sin avisar y se registran aparte con hle_bind_fixed. */
-#define MAX_FIXED 16
+#define MAX_FIXED 32
 static const char *fixed_decl[MAX_FIXED];
 static unsigned nfixed_decl;
 void hle_bind_declare_fixed(const char *name) {

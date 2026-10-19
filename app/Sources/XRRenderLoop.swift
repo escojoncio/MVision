@@ -148,6 +148,12 @@ final class XRRenderLoop {
         drawable = frame.queryDrawable()
         guard let drawable = drawable, drawable.views.count >= viewCount else { return }
         mv_host_note_render(1)
+        // Plano cercano de 5 cm: el arma y el radar de muñeca se ven a 20-50 cm (Z invertida).
+        // No se asume el orden de los componentes: se conserva el que trae el sistema y solo se acerca el plano cercano.
+        let dr = drawable.depthRange
+        if min(dr.x, dr.y) > 0.05 {
+            drawable.depthRange = dr.x <= dr.y ? SIMD2<Float>(0.05, dr.y) : SIMD2<Float>(dr.x, 0.05)
+        }
 
         // Pose en el instante de presentación previsto.
         let d = LayerRenderer.Clock.Instant.epoch.duration(to: drawable.frameTiming.presentationTime)
@@ -182,7 +188,12 @@ final class XRRenderLoop {
         var gs = MvVrGameState()
         mv_vrhost_game_state(&gs)
         VRInput.shared.frame(head: tracked || !everTracked ? recentered : nil, dt: dt,
-                             gamePosture: gs.posture, menu: gs.menu != 0)
+                             gamePosture: gs.posture, menu: gs.menu != 0, recenter: recenterInverse)
+        // Hápticos del arma VR (disparo, recarga) y pose del radar de muñeca (antebrazo izquierdo tras la IK de vr/body).
+        var hapticL: Float = 0, hapticR: Float = 0
+        mv_vrgame_take_haptics(&hapticL, &hapticR)
+        if hapticL > 0 || hapticR > 0 { VRInput.shared.rumble(hapticR, hapticL) }
+        updateRadarPose(head: recentered)
 
         // Vistas y proyecciones por ojo.
         var views: [simd_float4x4] = []
@@ -220,6 +231,27 @@ final class XRRenderLoop {
 
         drawable.encodePresent(commandBuffer: cb)
         cb.commit()
+    }
+
+    /// Coloca el radar de muñeca en el antebrazo izquierdo: pose tras la IK del cuerpo; sin ella, el agarre del mando izquierdo.
+    private func updateRadarPose(head: simd_float4x4) {
+        guard let radar = renderer.radar else { return }
+        var fa = MvVrForearm()
+        var forearm: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>)?
+        if mv_vrgame_forearm(0, &fa) != 0 {
+            forearm = (SIMD3<Float>(fa.elbow.0, fa.elbow.1, fa.elbow.2),
+                       SIMD3<Float>(fa.wrist.0, fa.wrist.1, fa.wrist.2),
+                       SIMD3<Float>(fa.dorsal.0, fa.dorsal.1, fa.dorsal.2))
+        }
+        var grip: simd_float4x4?
+        var g = [Float](repeating: 0, count: 16)
+        if mv_vrgame_hand_matrix(0, &g) != 0 {
+            grip = simd_float4x4(columns: (SIMD4<Float>(g[0], g[1], g[2], g[3]), SIMD4<Float>(g[4], g[5], g[6], g[7]),
+                                           SIMD4<Float>(g[8], g[9], g[10], g[11]), SIMD4<Float>(g[12], g[13], g[14], g[15])))
+        }
+        let fwd = simd_normalize(-SIMD3<Float>(head.columns.2.x, head.columns.2.y, head.columns.2.z))
+        radar.updatePose(forearm: forearm, leftGrip: grip,
+                         headPosition: SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z), headForward: fwd)
     }
 
     /// Proyección de Z invertida del ojo i (a partir de las tangentes de la vista).

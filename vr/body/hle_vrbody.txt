@@ -1,4 +1,4 @@
-# Función del motor sustituida por la capa del cuerpo (vr/body/body_hle.c, ver integration_vr_camera_hle.patch). El nombre
+# Función del motor sustituida por la capa del cuerpo (vr/camera/vr_camera_hle.c: hle_vrbody_sort). El nombre
 # neutro y la dirección (edición europea) están en vr_names_body.json. Se añade a los --hle al generar el C:
 #   ... --hle vr/camera/hle_vrcam.txt --hle vr/body/hle_vrbody.txt   (y vr_names_body.json junto a vr/camera/vr_names.json)
 vrbody_sort

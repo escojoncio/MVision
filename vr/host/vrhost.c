@@ -14,10 +14,18 @@
 #include "hlebind.h"
 #include "host.h"
 #include "host_hooks.h"
+#include "vr_body.h"
 #include "vr_camera.h"
+#include "vr_fire.h"
+#include "vr_radar.h"
 #include "vr_scene.h"
+#include "vrgame.h"
 
 void hle_vrcam_reset(void);   /* vr_camera_hle.c */
+void hle_vrradar_reset(void); /* vr/radar/vr_radar_hle.c */
+void hle_vrfire_reset(void);  /* vr/gameplay/vr_fire_hle.c */
+#define RADAR_DRAW_ADDR 0x8003bd9cu   /* vr/radar/vr_radar_names.json (edición europea) */
+#define BODY_SORT_ADDR 0x80018304u    /* vr/body/vr_names_body.json (fin del dibujado del canal 3D: vrbody_restore) */
 
 /* Funciones del motor sustituidas por la capa de cámara y sus direcciones (edición europea del EXE). Deben coincidir con
  * vr/camera/vr_names.json (make -C vr/host check). Se enlazan por dirección porque no hay firma de librería para ellas. */
@@ -29,6 +37,21 @@ static const struct { const char *name; uint32_t addr; } SITES[] = {
     {"vrcam_overscan", 0x80017780u},
 };
 #define NSITES (sizeof SITES / sizeof SITES[0])
+
+/* Funciones del motor que crean el proyectil del jugador (vr/gameplay/vr_fire_names.json; make -C vr/host check). */
+static const struct { const char *name; uint32_t addr; } FIRE_SITES[] = {
+    {"vrfire_bullet", 0x800779a8u},
+    {"vrfire_flash_a", 0x8005e6dcu},
+    {"vrfire_flash_b", 0x8005e358u},
+    {"vrfire_rmissile", 0x8006e128u},
+    {"vrfire_amissile", 0x8006eca0u},
+    {"vrfire_mine", 0x8006c4b4u},
+    {"vrfire_charge", 0x8006b69cu},
+    {"vrfire_grenade", 0x8006af98u},
+    {"vrfire_hide", 0x80018c8cu},
+};
+#define NFIRE (sizeof FIRE_SITES / sizeof FIRE_SITES[0])
+static int body_ok, fire_ok;
 
 /* ------------------------------------------------------------------------------------------------ estado compartido */
 #define NSLOT 6        /* 1 en manos del consumidor + 1 en construcción + hasta NQ en cola */
@@ -43,6 +66,10 @@ typedef struct {
     VrBatch *b;      size_t b_cap;
     VrState *st;     size_t st_cap;
     VrScene sc;
+    VrVtx *rv;       size_t rv_cap;          /* escena del radar de muñeca (copia propia; ev_end en índices de `list`) */
+    VrBatch *rb;     size_t rb_cap;
+    VrState *rst;    size_t rst_cap;
+    VrRadarScene rs;
 } Slot;
 
 enum { S_FREE = 0, S_BUILD, S_QUEUED, S_HELD };
@@ -177,6 +204,27 @@ static int fill_slot(Slot *s, const GpuDrawList *l, const VrScene *sc) {
     return 0;
 }
 
+/* Copia la escena del radar (memoria interna de vr_radar, reutilizada en la siguiente llamada) al slot. Sus ev_end/src_op ya vienen en
+ * índices de la lista HUD (split.hud) y por eso se reescriben igual que los del HUD con el prefijo de eventos `pre` (fill_slot). */
+static int fill_radar(Slot *s, const VrRadarScene *r, size_t nops_hud) {
+    memset(&s->rs, 0, sizeof s->rs);
+    if (!r || !r->present || !r->v || !r->b) return 0;
+    if (!grow((void **)&s->rv, &s->rv_cap, r->nv, sizeof *s->rv) || !grow((void **)&s->rb, &s->rb_cap, r->nb, sizeof *s->rb) ||
+        !grow((void **)&s->rst, &s->rst_cap, r->nstates, sizeof *s->rst))
+        return -1;
+    memcpy(s->rv, r->v, r->nv * sizeof *s->rv);
+    memcpy(s->rb, r->b, r->nb * sizeof *s->rb);
+    if (r->nstates) memcpy(s->rst, r->states, r->nstates * sizeof *s->rst);
+    for (size_t i = 0; i < r->nb; i++) {
+        VrBatch *b = &s->rb[i];
+        b->ev_end = pre[b->ev_end < nops_hud ? b->ev_end : nops_hud];
+        b->src_op = pre[b->src_op < nops_hud ? b->src_op : nops_hud];
+    }
+    s->rs = *r;
+    s->rs.v = s->rv; s->rs.b = s->rb; s->rs.states = r->nstates ? s->rst : NULL;
+    return 0;
+}
+
 /* Registro de cámara con el que se emitió la lista (por número de secuencia del primer polígono con posición de vista).
  * *has3d = 1 si la lista tiene algún polígono con posición de vista (si no, no hay registro que esperar). */
 static const VrCamRecord *list_record(const GpuDrawList *l, int *has3d) {
@@ -214,14 +262,24 @@ static void build_one(const GpuDrawList *l, int si) {
             o.origin_game[0] = (float)r->eye[0]; o.origin_game[1] = org[1]; o.origin_game[2] = (float)r->eye[2];
         }
     }
+    /* Radar de muñeca: se separa del HUD (la escena del HUD se ensambla con la lista SIN sus primitivas) y su propia escena se
+     * ensambla y copia ANTES de vr_scene_build (que reutiliza sus búferes). Sin marcas del radar (el juego lo oculta/apaga) no hay nada. */
+    VrRadarSplit rsplit;
+    VrRadarScene rscene;
+    memset(&rscene, 0, sizeof rscene);
+    const GpuDrawList *hl = l;
+    if (vrradar_split(l, &rsplit) == 0 && rsplit.present) {
+        hl = rsplit.hud;
+        if (vrradar_build(&rsplit, &rscene) < 0) memset(&rscene, 0, sizeof rscene);
+    }
     uint64_t t0 = mono_ns();
     VrScene sc;
-    int rc = vr_scene_build(l, &bs, &o, &sc);
+    int rc = vr_scene_build(hl, &bs, &o, &sc);
     double ms = (double)(mono_ns() - t0) * 1e-6;
     memcpy(bs.eye_pos, save_pos, sizeof save_pos);
     memcpy(bs.eye_axes, save_axes, sizeof save_axes);
 
-    int ok = rc == 0 && fill_slot(&slot[si], l, &sc) == 0;
+    int ok = rc == 0 && fill_slot(&slot[si], hl, &sc) == 0 && fill_radar(&slot[si], &rscene, hl->nops) == 0;
     pthread_mutex_lock(&MX);
     if (ok) {
         sstate[si] = S_QUEUED;
@@ -243,6 +301,7 @@ static void build_one(const GpuDrawList *l, int si) {
         fprintf(stderr, "[vrhost] sin memoria o error al ensamblar la escena (rc=%d): se resincroniza la VRAM\n", rc);
         drop_queue();
         gpu_capture_enable(0);
+        vrradar_reset();                /* la numeración de seq de la captura vuelve a 0: los rangos de marcas viejos ya no valen */
         cap_on = 0;
     }
 }
@@ -253,9 +312,11 @@ static void capture_set(int on) {
     if (on) {
         gpu_capture_hiprec(1);
         gpu_capture_enable(1);          /* la primera lista trae vram_init */
+        vrradar_reset();                /* idem: seq vuelve a 0 */
         pthread_mutex_lock(&MX); stats.cap_resyncs++; pthread_mutex_unlock(&MX);
     } else {
         gpu_capture_enable(0);          /* libera y vacía la cola de captura */
+        vrradar_reset();
         gpu_capture_hiprec(0);
         drop_queue();
     }
@@ -289,6 +350,7 @@ static void frame_hook(Cpu *c, uint32_t f) {
     bridge_read(psx_ram, &bs);
     publish_state();
     vrcam_frame(psx_ram, &bs);
+    vrgame_frame_end();
 
     uint64_t lp = atomic_load(&last_poll_ns), now = mono_ns();
     int want = lp && now - lp < 1500000000ull;
@@ -322,7 +384,23 @@ static int head_fn(float m[16], double *t) {
 static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     vr_ok = 0;
     hle_vrcam_reset();
+    hle_vrradar_reset();
+    vrradar_reset();
+    hle_vrfire_reset();
+    vrgame_reset();
+    body_ok = fire_ok = 0;
+    {   /* cuerpo: arranca DESACTIVADO; solo se activa si la HLE que restaura las matrices (vrbody_sort) se enlaza (on_bound) */
+        VrBodyConfig bc;
+        vrbody_config_default(&bc);
+        bc.enabled = 0;
+        vrbody_init(&bc);
+        vrbody_attach_vrcam();
+    }
+    vrgame_set_enabled(0, 0);
 #ifdef MV_NOGEN
+    hle_bind_declare_fixed("vrradar_draw");
+    hle_bind_declare_fixed("vrbody_sort");
+    for (unsigned i = 0; i < NFIRE; i++) hle_bind_declare_fixed(FIRE_SITES[i].name);
     for (unsigned i = 0; i < NSITES; i++) hle_bind_declare_fixed(SITES[i].name);
     VrCamPatch p;
     vrcam_patch_default(&p);
@@ -345,7 +423,8 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
 }
 
 static void on_bound(void) {
-    if (!vr_ok) return;
+    if (!vr_ok) return;     /* las direcciones fijas son de la edición esperada del ejecutable: sin esa comprobación no se engancha nada */
+    /* Cámara primero: si falla, no se engancha nada más (las demás HLE dependen de la vista de la cámara VR). */
     for (unsigned i = 0; i < NSITES; i++) {
         if (hle_bind_fixed(SITES[i].name, SITES[i].addr) < 0) {
             fprintf(stderr, "[vrhost] no se pudo enlazar %s: sin cámara VR\n", SITES[i].name);
@@ -354,12 +433,36 @@ static void on_bound(void) {
             return;
         }
     }
+    if (hle_bind_fixed("vrradar_draw", RADAR_DRAW_ADDR) < 0) fprintf(stderr, "[vrhost] no se pudo enlazar vrradar_draw: el radar seguirá en el HUD\n");
+    /* Cuerpo: vrbody_apply (en vrcam_trans) y vrbody_restore (en vrbody_sort) van en pareja; sin la segunda no se activa la primera. */
+    if (hle_bind_fixed("vrbody_sort", BODY_SORT_ADDR) < 0) {
+        fprintf(stderr, "[vrhost] no se pudo enlazar vrbody_sort: sin IK de los brazos\n");
+    } else {
+        vrbody_set_enabled(1);
+        body_ok = 1;
+    }
+    /* Disparo: las 9 o ninguna (con unas sí y otras no, el arma VR dispararía a medias). */
+    fire_ok = 1;
+    for (unsigned i = 0; i < NFIRE; i++) {
+        if (hle_bind_fixed(FIRE_SITES[i].name, FIRE_SITES[i].addr) < 0) {
+            fprintf(stderr, "[vrhost] no se pudo enlazar %s: sin arma VR\n", FIRE_SITES[i].name);
+            fire_ok = 0;
+        }
+    }
+    vrgame_set_enabled(body_ok, fire_ok);
 }
 
 static void on_start(void) {
     /* La captura se enciende cuando aparece un consumidor de escenas (frame_hook). */
     cap_on = 0;
+    gpu_capture_set_mark_hook(vrradar_on_mark);   /* runtime_mark.patch */
     sopts = vr_scene_opts_default();
+}
+
+/* Mando que ve el juego (hilo de emulación, cada VBlank, antes de aplicarlo): arma VR, disparo y recarga (vrgame.c). `bs` es el puente
+ * del VBlank anterior. */
+static uint16_t pad_hook(uint16_t buttons) {
+    return vrgame_pad(buttons, &bs, psx_ram);
 }
 
 void mv_vrhost_install(void) {
@@ -369,6 +472,7 @@ void mv_vrhost_install(void) {
     h.bound = on_bound;
     h.start = on_start;
     h.frame = frame_hook;
+    h.pad = pad_hook;
     mv_host_set_hooks(&h);
 }
 
@@ -383,6 +487,17 @@ void mv_vrhost_game_state(MvVrGameState *out) {
         out->posture = -1; out->menu = 1; out->weapon = -1;
     }
     pthread_mutex_unlock(&MX);
+}
+
+/* Escena del radar de la última escena entregada por mv_host_scene (misma validez: hasta la siguiente llamada). 0 si esa escena no
+ * traía radar (el juego lo oculta, lo apaga o hay cinemática): entonces no hay quad en el brazo. */
+int mv_host_radar(VrRadarScene *out) {
+    int ok;
+    pthread_mutex_lock(&MX);
+    ok = held >= 0 && slot[held].rs.present;
+    if (ok && out) *out = slot[held].rs;
+    pthread_mutex_unlock(&MX);
+    return ok;
 }
 
 int mv_host_bridge(struct BridgeState *out) {

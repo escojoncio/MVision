@@ -556,6 +556,54 @@ static void test_event_epochs(void) {
     vr_scene_release();
 }
 
+/* ---- realimentación (GpuOp.fbk/fbt): sin textura, color = vértice * texel / 128, semi solo con bit 15, texel 0 descartado ---- */
+static void test_feedback(void) {
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    /* op0: quad texturizado semi, texel 0xC3E0 (bit15, g=31, b=16, r=0), color (0x80,0x80,0x40) */
+    GpuOp *q = add(GPU_OP_POLY);
+    q->nv = 4; q->flags = GPU_F_TEXTURED | GPU_F_SEMI | GPU_F_QUAD; q->abr = 2; q->tp = 2; q->cx2 = 319; q->cy2 = 255; q->fbk = 1; q->fbt = 0xC3E0;
+    for (int i = 0; i < 4; i++) { q->v[i].x = (int16_t)(i & 1 ? 120 : 80); q->v[i].y = (int16_t)(i & 2 ? 108 : 100); q->v[i].u = (uint8_t)(i & 1); q->v[i].v = (uint8_t)((i >> 1) & 1);
+                                  q->v[i].r = 0x80; q->v[i].g = 0x80; q->v[i].b = 0x40; }
+    /* op1: igual pero texel sin bit 15 (opaco aunque el polígono sea semi) y crudo */
+    GpuOp *r = add(GPU_OP_POLY);
+    *r = *q; r->flags |= GPU_F_RAW; r->fbt = 0x4210; r->seq = 1;
+    /* op2: texel 0 -> transparente, no se emite */
+    GpuOp *z = add(GPU_OP_POLY);
+    *z = *q; z->fbt = 0; z->seq = 2;
+    /* op3: rect 1x1 con fbk, color 0xFF: texel 0x001F modulado a 0xF8*0xFF/128 -> satura */
+    GpuOp *rc = rect2d(10, 10, 1, 1, 0, 0, GPU_F_TEXTURED, 2, 0, 0, 0xFF, 0x40, 0x80); rc->fbk = 1; rc->fbt = 0x001F;
+    /* op4: sin fbk: sigue texturizado */
+    rect2d(20, 20, 8, 8, 0, 0, GPU_F_TEXTURED, 2, 0, 0, 128, 128, 128);
+    VrScene s; VrSceneOpts o = vr_scene_opts_default();
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0, "build realimentacion");
+    CHECK(s.stats.n_fb_baked == 2 + 2 + 2 && s.stats.n_fb_clear == 1, "stats fb baked %u clear %u", s.stats.n_fb_baked, s.stats.n_fb_clear);
+    CHECK(s.nv / 3 == 2 + 2 + 2 + 2, "triangulos %u", s.nv / 3);   /* 2+2 (quads) + 2 (rect fb) + 2 (rect normal); el texel 0 no emite */
+    int n_semi = 0, n_opq = 0, n_tex = 0;
+    for (uint32_t i = 0; i < s.nb; i++) {
+        const VrBatch *b = &s.b[i];
+        for (uint32_t j = 0; j < b->count; j++) {
+            const VrVtx *v = &s.v[b->first + j];
+            if (v->flags & GPU_F_TEXTURED) { n_tex++; continue; }
+            if (b->src_op == 0 && j == 0) { /* primer triangulo del quad 0: modulado y semi (modo abr 2) */
+                CHECK(b->blend == 2, "blend op0 %u", b->blend);
+                /* e(t5)=expand 5->8 bits; r: 0 -> 0, g: 31 -> 255 *0x80/128 = 255, b: 16 -> 132 * 0x40/128 = 66 */
+                CHECK((v->rgba & 255) == 0 && ((v->rgba >> 8) & 255) == 255 && ((v->rgba >> 16) & 255) == 66, "color op0 %08x", v->rgba);
+            }
+            if (b->blend == 0xFF) n_opq++; else n_semi++;
+        }
+    }
+    CHECK(n_tex == 6, "vertices texturizados %d (el rect sin fbk)", n_tex);
+    CHECK(n_semi == 6 && n_opq == 6 + 6, "semi %d opacos %d", n_semi, n_opq);
+    /* op1 (crudo): el color es el texel expandido, opaco */
+    for (uint32_t i = 0; i < s.nb; i++) {
+        const VrBatch *b = &s.b[i];
+        if (b->src_op == 1) { const VrVtx *v = &s.v[b->first]; CHECK(b->blend == 0xFF && (v->rgba & 255) == 0x84 && !(v->flags & (GPU_F_TEXTURED | GPU_F_RAW)), "op1 crudo %08x blend %u", v->rgba, b->blend); }
+        if (b->src_op == 3) { const VrVtx *v = &s.v[b->first]; CHECK((v->rgba & 255) == 255 && ((v->rgba >> 8) & 255) == 0 && ((v->rgba >> 16) & 255) == 0, "op3 satura %08x", v->rgba); }
+    }
+    vr_scene_release();
+}
+
 int main(void) {
     test_basic();
     test_stability();
@@ -567,6 +615,7 @@ int main(void) {
     test_gte_scale_and_validity();
     test_line_coverage();
     test_event_epochs();
+    test_feedback();
     if (fails) { fprintf(stderr, "%d fallos\n", fails); return 1; }
     printf("test_scene: OK\n");
     return 0;

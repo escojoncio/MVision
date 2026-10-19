@@ -115,8 +115,17 @@ static inline uint16_t texel(const TexCtx *t, int u, int v) {
 }
 
 /* Fragmento texturizado: devuelve 0 si el texel es transparente (0x0000). */
+/* Sonda de realimentación (solo captura; ver cap_fb_probe): con fbp.on, tex_plot NO dibuja, anota el texel que muestrearía. */
+static struct {
+    int on, n, uniform, infb, lu, lv;
+    int bb[4];   /* caja de píxeles que la primitiva escribe (recortada al área de dibujo): x0,y0,x1,y1 inclusivos */
+    uint16_t c;
+} fbp;
+static void fb_note(const TexCtx *t, int u, int v);
+
 static inline void tex_plot(const TexCtx *t, int x, int y, int u, int v, int r, int gg, int b,
                             int raw, int semi, int dith) {
+    if (fbp.on) { fb_note(t, u, v); return; }
     uint16_t c = texel(t, u, v);
     if (!c) return;
     int tr = c & 31, tg = (c >> 5) & 31, tb = (c >> 10) & 31;
@@ -303,6 +312,130 @@ static void cap_set_proj(GpuOp *o) {
     if (cap_proj.h != 0.0f) { o->proj_h = cap_proj.h; o->proj_ox = cap_proj.ofx; o->proj_oy = cap_proj.ofy; }
 }
 
+/* ---- Realimentación (primitivas que leen el frame buffer que están dibujando) ----
+ * Un polígono/sprite texturizado cuya textura (o CLUT) está dentro del área de dibujo o de visualización lee lo que se dibuja en ese
+ * mismo fotograma; el consumidor que solo recibe eventos de VRAM (fill/subida/copia) no ve lo pintado por primitivas, así que el
+ * texel muestreado sería obsoleto. Si todos los píxeles de la primitiva dan el mismo texel (tras CLUT), la captura lo resuelve aquí,
+ * con la VRAM del oráculo justo ANTES de dibujarla, y lo guarda en GpuOp.fbk/fbt. La sonda reutiliza draw_tri/tex_plot con fbp.on
+ * (no dibuja): misma cobertura y mismas u,v que el rasterizador. Nunca altera la VRAM ni el estado del oráculo. */
+GpuFbStats gpu_fb_stats;
+
+static void draw_tri(Vtx v0, Vtx v1, Vtx v2, int gouraud, int textured, const TexCtx *t, int raw, int semi);
+
+static int fb_rect_hit(int x0, int y0, int x1, int y1) {   /* [x0,x1]x[y0,y1] inclusivo contra área de dibujo o de visualización */
+    if (x0 <= g.cx2 && x1 >= g.cx1 && y0 <= g.cy2 && y1 >= g.cy1) return 1;
+    GpuDisplay d; gpu_get_display(&d);
+    int dw = d.depth24 ? d.w * 3 / 2 : d.w;
+    return x0 < d.x + dw && x1 >= d.x && y0 < d.y + d.h && y1 >= d.y;
+}
+
+/* Bits: 1 = el texel (u,v) (tras ventana de textura) o su CLUT cae en el área de dibujo o de visualización; 2 = además toca la caja `bb`
+ * (x0,y0,x1,y1 inclusivos) que la propia primitiva va a escribir. Misma dirección que texel(). */
+static int fb_texel_hit(const TexCtx *t, int u, int v, const int *bb) {
+    int r = 0;
+    u &= 255; v &= 255;
+    u = (u & ~(g.twmx * 8)) | ((g.twox & g.twmx) * 8);
+    v = (v & ~(g.twmy * 8)) | ((g.twoy & g.twmy) * 8);
+    int y = (t->ty + v) & 511;
+    int xw = t->tp == 0 ? (u >> 2) : t->tp == 1 ? (u >> 1) : u;
+    int x = (t->tx + xw) & 1023;
+    if (fb_rect_hit(x, y, x, y)) r |= 1;
+    if (bb && x >= bb[0] && x <= bb[2] && y >= bb[1] && y <= bb[3]) r |= 2;
+    if (t->tp < 2) {   /* CLUT: fila cy, columnas cx..cx+15 (4 bits) / +255 (8 bits), con vuelta a la columna 0 */
+        int cx = t->cx & 1023, cy = t->cy & 511, n = t->tp == 0 ? 15 : 255;
+        int ex = cx + n < 1024 ? cx + n : 1023;
+        if (fb_rect_hit(cx, cy, ex, cy)) r |= 1;
+        if (bb && cy >= bb[1] && cy <= bb[3] && cx <= bb[2] && ex >= bb[0]) r |= 2;
+        if (cx + n > 1023) {
+            if (fb_rect_hit(0, cy, cx + n - 1024, cy)) r |= 1;
+            if (bb && cy >= bb[1] && cy <= bb[3] && 0 <= bb[2] && cx + n - 1024 >= bb[0]) r |= 2;
+        }
+    }
+    return r;
+}
+
+static void fb_note(const TexCtx *t, int u, int v) {
+    if (fbp.n && u == fbp.lu && v == fbp.lv) return;   /* mismo texel que el anterior (la mayoría de los píxeles) */
+    fbp.lu = u; fbp.lv = v;
+    uint16_t c = texel(t, u, v);
+    if (fbp.n == 0) fbp.c = c; else if (c != fbp.c) fbp.uniform = 0;
+    fbp.n++;
+    int h = fb_texel_hit(t, u, v, fbp.bb);
+    if (h & 1) fbp.infb = 1;
+    if (h & 2) fbp.uniform = 0;   /* la primitiva se pisa su propia textura: los píxeles posteriores leerían lo ya dibujado -> no se resuelve */
+}
+
+static int vtx_ext(const Vtx *v, int nv, int w) {   /* 0 minx, 1 miny, 2 maxx, 3 maxy de los vértices */
+    int m = (w & 1) ? v[0].y : v[0].x;
+    for (int i = 1; i < nv; i++) {
+        int c = (w & 1) ? v[i].y : v[i].x;
+        if (w < 2 ? c < m : c > m) m = c;
+    }
+    return m;
+}
+
+/* Si todo el polígono/rect muestrea un único valor de texel (tras CLUT) y ese texel (o su CLUT) vive en el frame buffer, lo anota en
+ * o->fbk/fbt. rect: v[0] = esquina y u,v de origen, rw x rh píxeles. */
+static void cap_fb_probe(GpuOp *o, const Vtx *v, int nv, int gour, int raw, int semi, const TexCtx *t, int is_rect, int rw, int rh) {
+    if (is_rect) {
+        if (rw < 1 || rh < 1 || rw * rh > 4) return;   /* un sprite de pocos píxeles; si no, no es de 1-2 texels */
+    } else {
+        int u0 = 255, u1 = 0, v0 = 255, v1 = 0, bx0 = 1 << 20, bx1 = -(1 << 20), by0 = 1 << 20, by1 = -(1 << 20);
+        for (int i = 0; i < nv; i++) {
+            if (v[i].u < u0) u0 = v[i].u;
+            if (v[i].u > u1) u1 = v[i].u;
+            if (v[i].v < v0) v0 = v[i].v;
+            if (v[i].v > v1) v1 = v[i].v;
+            if (v[i].x < bx0) bx0 = v[i].x;
+            if (v[i].x > bx1) bx1 = v[i].x;
+            if (v[i].y < by0) by0 = v[i].y;
+            if (v[i].y > by1) by1 = v[i].y;
+        }
+        if (u1 - u0 > 1 || v1 - v0 > 1) return;   /* cubre más de 2 texels por eje */
+        if ((long)(bx1 - bx0 + 1) * (by1 - by0 + 1) > (1 << 17)) return;   /* acota el coste de la sonda */
+        /* Filtro barato antes de rasterizar: los u,v interpolados solo toman los valores de los vértices (u0..u1, v0..v1: <= 2 por eje);
+         * si ninguno de esos texels (ni su CLUT) está en el frame buffer, la sonda no puede dar candidata. Sin esto toda primitiva de
+         * 1 texel (sombras, fundidos...) se rasterizaría dos veces con la captura encendida. */
+        int hit = 0;
+        for (int uu = u0; uu <= u1 && !hit; uu++)
+            for (int vv = v0; vv <= v1 && !hit; vv++) hit = fb_texel_hit(t, uu, vv, NULL);
+        if (!hit) return;
+    }
+    memset(&fbp, 0, sizeof fbp);
+    fbp.on = 1; fbp.uniform = 1;
+    {   /* caja que la primitiva escribirá (recortada); un sprite de 1 píxel lee antes de escribir y no se pisa a sí mismo */
+        int x0, y0, x1, y1;
+        if (is_rect) { x0 = v[0].x; y0 = v[0].y; x1 = x0 + rw - 1; y1 = y0 + rh - 1; }
+        else { x0 = vtx_ext(v, nv, 0); y0 = vtx_ext(v, nv, 1); x1 = vtx_ext(v, nv, 2); y1 = vtx_ext(v, nv, 3); }
+        if (x0 < g.cx1) x0 = g.cx1;
+        if (y0 < g.cy1) y0 = g.cy1;
+        if (x1 > g.cx2) x1 = g.cx2;
+        if (y1 > g.cy2) y1 = g.cy2;
+        if (is_rect && rw * rh == 1) { x0 = 1; x1 = 0; }
+        fbp.bb[0] = x0; fbp.bb[1] = y0; fbp.bb[2] = x1; fbp.bb[3] = y1;
+    }
+    if (is_rect) {
+        for (int j = 0; j < rh; j++) {
+            int y = v[0].y + j;
+            if (y < g.cy1 || y > g.cy2) continue;
+            for (int i = 0; i < rw; i++) {
+                int x = v[0].x + i;
+                if (x < g.cx1 || x > g.cx2) continue;
+                fb_note(t, g.flipx ? v[0].u - i : v[0].u + i, g.flipy ? v[0].v - j : v[0].v + j);
+            }
+        }
+    } else {
+        draw_tri(v[0], v[1], v[2], gour, 1, t, raw, semi);
+        if (nv == 4) draw_tri(v[1], v[2], v[3], gour, 1, t, raw, semi);
+    }
+    fbp.on = 0;
+    if (!fbp.n || !fbp.infb) return;
+    gpu_fb_stats.cand++;
+    if (!fbp.uniform) { gpu_fb_stats.nonuniform++; return; }
+    o->fbk = 1; o->fbt = fbp.c;
+    if (fbp.c) gpu_fb_stats.baked++; else gpu_fb_stats.cleared++;
+}
+
 static void cap_poly(const Vtx *v, int nv, int gour, int tex, int raw, int semi, const TexCtx *t) {
     GpuOp *o = cap_new(GPU_OP_POLY);
     o->nv = (uint8_t)nv;
@@ -315,6 +448,7 @@ static void cap_poly(const Vtx *v, int nv, int gour, int tex, int raw, int semi,
     cap_resolve(o->v, v, nv);
     if (nv == 4 && cap.hpres) cap_derive(o->v);
     cap_set_proj(o);
+    if (tex) cap_fb_probe(o, v, nv, gour, raw, semi, t, 0, 0, 0);
 }
 
 static void cap_line(const Vtx *a, const Vtx *b, int gour, int semi) {
@@ -327,7 +461,7 @@ static void cap_line(const Vtx *a, const Vtx *b, int gour, int semi) {
     cap_set_proj(o);
 }
 
-static void cap_rect(int x, int y, int w, int h, int r, int gg, int b, int tex, int raw, int semi, int u0, int v0,
+static void cap_rect(int x, int y, int w, int h, int r, int gg, int b, int tex, int raw, int semi, int u0, int v0_,
                      const TexCtx *t) {
     GpuOp *o = cap_new(GPU_OP_RECT);
     o->nv = 1;
@@ -335,9 +469,13 @@ static void cap_rect(int x, int y, int w, int h, int r, int gg, int b, int tex, 
                            (g.flipx ? GPU_F_FLIPX : 0) | (g.flipy ? GPU_F_FLIPY : 0));
     o->v[0].x = (int16_t)x; o->v[0].y = (int16_t)y;
     o->v[0].r = (uint8_t)r; o->v[0].g = (uint8_t)gg; o->v[0].b = (uint8_t)b;
-    o->v[0].u = (uint8_t)u0; o->v[0].v = (uint8_t)v0;
+    o->v[0].u = (uint8_t)u0; o->v[0].v = (uint8_t)v0_;
     o->clx = (uint16_t)t->cx; o->cly = (uint16_t)t->cy;
     o->rw = (int16_t)w; o->rh = (int16_t)h;
+    if (tex) {
+        Vtx q = {x, y, r, gg, b, u0, v0_};
+        cap_fb_probe(o, &q, 1, 0, raw, semi, t, 1, w, h);
+    }
 }
 
 static void cap_upload_begin(int x, int y, int w, int h) {
@@ -401,6 +539,8 @@ void gpu_capture_vblank(void) {
 }
 uint32_t gpu_capture_dropped(void) { return cap.dropped; }
 uint32_t gpu_capture_seq(void) { return cap.seq; }
+static GpuMarkHook mark_hook;
+void gpu_capture_set_mark_hook(GpuMarkHook h) { mark_hook = h; }
 void gpu_capture_set_float_hook(GpuFloatHook h) { cap.hook = h; }
 void gpu_capture_set_hp_hook(GpuHpHook h) { cap.hphook = h; }
 void gpu_capture_hiprec(int on) { gte_hp_enable(on); cap.hphook = NULL; cap.hpres = on ? gte_hp_resolve : NULL; }
@@ -717,6 +857,7 @@ static void exec_cmd(const uint32_t *w) {
     else if (op == 0x02) cmd_fill(w);
     else if (op >= 0xE1 && op <= 0xE6) cmd_env(w[0]);
     else if (op == 0x1F) g.irq = 1;
+    else if (op == 0x04) { if (cap.on && mark_hook) mark_hook(w[0] & 0xFFFFFF, cap.seq); }
     /* 0x00, 0x01 (caché), 0x03 y 0xE0/0xE7+ = nop */
 }
 

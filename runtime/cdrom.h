@@ -1,5 +1,6 @@
 #pragma once
 /* Lector de CD virtual a partir de ficheros extraídos + HLE de la librería de CD. */
+#include <stddef.h>
 #include <stdint.h>
 #include "cpu.h"
 
@@ -14,8 +15,14 @@ int cd_current_disc(void);
 /* Igual que cd_open para una imagen; devuelve el nº de discos montados (>0 = bien). */
 int cd_open_image(const char *path);
 int cd_disc_count(void);
+/* Origen del disco seleccionado (la ruta con la que se montó: .cue, .bin o carpeta). 0 = bien. Sirve para abrir lectores propios
+ * en otro hilo (disc_load_stage_archive). */
+int cd_current_source(char *path, size_t n, int *is_dir);
 /* Entrega sectores pendientes de una lectura en curso (llamar por frame desde el host). */
 void cd_pump(Cpu *c);
+/* Ritmo de lectura: sectores a entregar tras dt ciclos virtuales (75/s x1, 150/s x2); crédito en *credit. MV_CDFAST=1 lo desactiva. */
+uint32_t cd_rate_take(uint64_t *credit, uint64_t dt, int dbl);
+void cd_rate_reset(void);
 /* 1 si hay una lectura en curso (hay datos que entregar en la próxima IRQ de CD). */
 int cd_busy(void);
 
