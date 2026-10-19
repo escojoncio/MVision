@@ -1,4 +1,4 @@
-/* Puente C -> Swift del renderer VR de la escena (RenderPS1.swift). Añadir con #include "RenderPS1Bridge.h" al
+/* Puente C -> Swift del renderer VR de la escena (RenderRG.swift). Añadir con #include "RenderRGBridge.h" al
  * Bridging-Header.h. Necesita en HEADER_SEARCH_PATHS: runtime (gpu.h), vr/scene (vr_scene.h) y render/metal (vr_types.h). */
 #pragma once
 #include "gpu.h"

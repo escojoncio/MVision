@@ -26,7 +26,7 @@
 +/* Marcas en la lista de dibujo: un paquete GP0 con comando 0x04 (NOP en el hardware real y en el oráculo) y carga útil de
 + * 24 bits `id` llama al gancho (si la captura está encendida) con el id y el número de secuencia que tendrá la PRÓXIMA primitiva
 + * capturada. Permite a un sustituto HLE, que inserta paquetes de marca en la OT antes/después de lo que dibuja una función, delimitar
-+ * qué primitivas capturadas son suyas (rango de seq): el dibujo real ocurre más tarde, en DrawOTag. Se llama en el hilo de emulación. */
++ * qué primitivas capturadas son suyas (rango de seq): el dibujo real ocurre más tarde, en gfx_list. Se llama en el hilo de emulación. */
 +typedef void (*GpuMarkHook)(uint32_t id, uint32_t seq);
 +void gpu_capture_set_mark_hook(GpuMarkHook h);
  

@@ -15,7 +15,7 @@
 #define A2 c->r[6]
 #define A3 c->r[7]
 
-static void w16(uint32_t a, int16_t v) { *(int16_t *)(psx_ram + (a & RAM_MASK & ~1u)) = v; }
+static void w16(uint32_t a, int16_t v) { *(int16_t *)(emu_ram + (a & RAM_MASK & ~1u)) = v; }
 
 /* Zona propia para los dos vectores de 4 s16 (ojo, objetivo) que se pasan al constructor: 16 bytes de memoria de kernel del
  * runtime (RAM baja libre, bios_kalloc; el juego no la usa), reservada la primera vez. Antes se escribían en la pila
@@ -34,7 +34,7 @@ void hle_vrcam_view(Cpu *c) {
     int is_main = (A0 & RAM_MASK) == (0x800B2B7Cu & RAM_MASK);
     if (is_main && !vbuf && !in_view) vbuf = bios_kalloc(16);
     int vr = 0;
-    if (is_main) vr = vrcam_plan(psx_ram, (int16_t)A3, vbuf && !in_view ? &p : NULL);   /* p == NULL: cámara del juego (y limpia "activo") */
+    if (is_main) vr = vrcam_plan(emu_ram, (int16_t)A3, vbuf && !in_view ? &p : NULL);   /* p == NULL: cámara del juego (y limpia "activo") */
     uint32_t a1 = A1, a2 = A2, a3 = A3;
     if (vr) {
         for (int i = 0; i < 3; i++) { w16(vbuf + 2 * i, p.from[i]); w16(vbuf + 8 + 2 * i, p.to[i]); }
@@ -45,7 +45,7 @@ void hle_vrcam_view(Cpu *c) {
     rt_orig(c, "vrcam_view");
     in_view--;
     if (vr) { A1 = a1; A2 = a2; A3 = a3; }
-    if (is_main) vrcam_commit(psx_ram, vr ? &p : NULL);
+    if (is_main) vrcam_commit(emu_ram, vr ? &p : NULL);
 }
 
 /* Origen angular del mando (el juego lo fija cada frame a la guiñada de su cámara + 2048). */
@@ -58,8 +58,8 @@ void hle_vrcam_padorg(Cpu *c) {
  * brazos del modelo en la pose IK de las manos (vr/body; solo modifica las matrices de 6 piezas, se restauran en
  * hle_vrbody_sort al terminar el dibujado). */
 void hle_vrcam_trans(Cpu *c) {
-    if (vrcam_active() && vrcam_config()->hide_head) vrcam_hide_head(psx_ram);
-    vrbody_apply(psx_ram);
+    if (vrcam_active() && vrcam_config()->hide_head) vrcam_hide_head(emu_ram);
+    vrbody_apply(emu_ram);
     rt_orig(c, "vrcam_trans");
 }
 
@@ -68,7 +68,7 @@ void hle_vrcam_trans(Cpu *c) {
  * (efectos del arma, objetos en la mano, enemigos) no vea nunca la pose IK. */
 void hle_vrbody_sort(Cpu *c) {
     rt_orig(c, "vrbody_sort");
-    vrbody_restore(psx_ram);
+    vrbody_restore(emu_ram);
 }
 
 /* Envío del frame al GPU: solo cuenta (para asociar la lista capturada con su registro de cámara). */

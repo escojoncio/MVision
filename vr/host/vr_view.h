@@ -1,7 +1,7 @@
 #pragma once
 /* vr_view: decide, una vez por VBlank, QUÉ se le enseña al usuario en el visor: el mundo en primera persona (cámara VR del juego,
  * escena 3D en estéreo + HUD en paneles) o la PANTALLA DE CINE (el fotograma completo que dibuja el juego, en una pantalla virtual
- * grande, para todo lo que no es control en primera persona: título, menús, códec, cargas, vídeos, cinemáticas del motor, fin de
+ * grande, para todo lo que no es control en primera persona: título, menús, radio, cargas, vídeos, cinemáticas del motor, fin de
  * partida, pausa). C99 puro, sin dependencias de plataforma; lo prueba test_view.c.
  *
  * Política (ver bitácora, "Presentación en VR"):
@@ -24,7 +24,7 @@ enum {
     VRV_R_WORLD = 0,       /* mundo: partida, con control y cámara VR */
     VRV_R_NO_GAME,         /* sin partida: título, selección, cargas, vídeos de arranque, cambio de zona */
     VRV_R_CINEMATIC,       /* escena del motor (demo / control retirado) */
-    VRV_R_COMMS,           /* comunicador (códec) abierto */
+    VRV_R_COMMS,           /* comunicador (radio) abierto */
     VRV_R_STOPPED,         /* juego detenido: película, pantalla de resultado, ... */
     VRV_R_PAUSED,          /* pausa */
     VRV_R_MENU,            /* ventana de armas / objetos del juego (el motor dibuja con su cámara mientras está abierta) */

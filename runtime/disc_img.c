@@ -427,7 +427,7 @@ static int identify_ents(DiscImg *h, uint32_t rlba, uint32_t rsize, IsoEnt *ents
             for (int j = 0; j < m; j++) {
                 uint8_t b[DISC_USER];
                 if (sub[j].dir || sub[j].size < 2048) continue;
-                if (!disc_img_read_user(h, sub[j].lba, b) && !memcmp(b, "PS-X EXE", 8)) {
+                if (!disc_img_read_user(h, sub[j].lba, b) && !memcmp(b, EXE_MAGIC, 8)) {
                     snprintf(id->dataexe, sizeof id->dataexe, "%s", sub[j].name);
                     break;
                 }
@@ -469,7 +469,7 @@ int disc_dir_identify(const char *dir, DiscId *id) {
         FILE *g = fopen(p, "rb");
         if (!g) continue;
         char m[8];
-        int ok = fread(m, 1, 8, g) == 8 && !memcmp(m, "PS-X EXE", 8);
+        int ok = fread(m, 1, 8, g) == 8 && !memcmp(m, EXE_MAGIC, 8);
         fclose(g);
         if (ok && (!exe[0] || strcmp(e->d_name, exe) < 0)) snprintf(exe, sizeof exe, "%s", e->d_name);
     }

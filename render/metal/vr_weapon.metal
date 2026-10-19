@@ -1,9 +1,9 @@
 /* Shaders del arma en mano (geometría 3D propia, fuera de la captura de GPU del juego). SIN COMPILAR en Metal (no hay
  * toolchain Apple en Linux): se valida la sintaxis como C++ con cabeceras simuladas (make -C vr/hands msl). Lo usa
- * app/Sources/RenderWeapon.swift dentro del MISMO pase de escena que PS1Renderer (mismas dimensiones de color/profundidad,
+ * app/Sources/RenderWeapon.swift dentro del MISMO pase de escena que RGRenderer (mismas dimensiones de color/profundidad,
  * Z invertida con compare greaterEqual, MSAA, amplificación de vértices si layered).
  *
- * Vértice (36 B, == VrHandsVertex de vr/hands/vr_hands_frame.h): pos(3) nrm(3) uv(2) rgba(4, 128 = neutro como en la PS1:
+ * Vértice (36 B, == VrHandsVertex de vr/hands/vr_hands_frame.h): pos(3) nrm(3) uv(2) rgba(4, 128 = neutro como en el original:
  * el modulado es textura * rgba/128, así que 255 da ~2x, el rango normal de la consola). Los modelos originales traen
  * texturas oscuras y rgba = 255.
  * Iluminación: luz direccional fija en el mundo, lambert suave (media-lambert al cuadrado: sin zonas negras) + ambiente.

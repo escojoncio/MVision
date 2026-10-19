@@ -5,15 +5,15 @@
  *     presupuesto se agota, rt_poll avanza el reloj virtual (io.c) y, si SR.IEc && SR.IM2 y
  *     (I_STAT & I_MASK) != 0, llama a exception().
  *  2. exception() guarda el banco de registros, cambia a la pila de excepción del kernel, recorre las
- *     colas SysEnqIntRP (prioridades 0..3) y después atiende cada fuente pendiente en orden de bit:
+ *     colas encolar manejador de IRQ (prioridades 0..3) y después atiende cada fuente pendiente en orden de bit:
  *     reconoce el bit de I_STAT, entrega los eventos de kernel (contadores de raíz 0-3) y llama a los
- *     manejadores que registró la librería (InterruptCallback / DMACallback / VSyncCallback).
- *  3. Retorno (ReturnFromException): restaura los registros y consulta el PCB del kernel (*0x108).
+ *     manejadores que registró la librería (cb_irq / cb_dma / frame_cb).
+ *  3. Retorno (retorno de excepción): restaura los registros y consulta el PCB del kernel (*0x108).
  *     Si algún manejador cambió el TCB actual (como hace el planificador del juego, que escribe el TCB
  *     de la tarea elegida en el PCB), se conmuta de hilo: el hilo interrumpido queda suspendido dentro
  *     de este mismo marco C y reanudará en el punto exacto del sondeo cuando alguien vuelva a él
- *     (ChangeTh u otra excepción).
- *  Sin anidamiento: dentro de la excepción IEc está a 0. ChangeTh dentro de la excepción es diferido
+ *     (cambiar de hilo u otra excepción).
+ *  Sin anidamiento: dentro de la excepción IEc está a 0. cambiar de hilo dentro de la excepción es diferido
  *  (fiber.c solo escribe el PCB), de modo que toda excepción se ejecuta y termina sobre una única pila
  *  de fibra y el estado de este módulo (in_exc, exc_stack) y el de cdrom.c no necesita ser por hilo. */
 #include <stdio.h>
@@ -24,11 +24,11 @@
 #include "sys.h"
 #include "cdrom.h"
 
-static uint32_t intr_cb[11];     /* InterruptCallback(irq) */
-static uint32_t dma_cb[7];       /* DMACallback(canal) */
-static uint32_t vsync_cb;        /* VSyncCallback */
-static uint32_t exit_hook;       /* B0:19 SetCustomExitFromException */
-static uint32_t qhead[4];        /* colas SysEnqIntRP por prioridad (nodos en RAM del juego) */
+static uint32_t intr_cb[11];     /* cb_irq(irq) */
+static uint32_t dma_cb[7];       /* cb_dma(canal) */
+static uint32_t vsync_cb;        /* frame_cb */
+static uint32_t exit_hook;       /* B0:19 gancho de salida de excepción */
+static uint32_t qhead[4];        /* colas encolar manejador de IRQ por prioridad (nodos en RAM del juego) */
 static int in_exc;
 static uint32_t exc_stack;
 unsigned long irq_count[11], irq_exceptions;   /* estadísticas (headless) */
@@ -42,7 +42,7 @@ static void warn_once(int *flag, const char *msg) {
     fprintf(stderr, "[irq] %s\n", msg);
 }
 
-/* ---- registro de manejadores (libapi) ---- */
+/* ---- registro de manejadores (la librería base) ---- */
 uint32_t irq_set_callback(int irq, uint32_t fn) {
     if (irq < 0 || irq > 10) return 0;
     uint32_t old = intr_cb[irq];
@@ -177,7 +177,7 @@ static void exception(Cpu *c) {
     }
     *c = saved;
     in_exc = 0;
-    /* ReturnFromException: el PCB decide qué hilo continúa. */
+    /* retorno de excepción: el PCB decide qué hilo continúa. */
     fiber_return_from_exception(c, saved_sr);
 }
 

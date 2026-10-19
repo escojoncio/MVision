@@ -1,7 +1,7 @@
 /* Enlace de funciones HLE por firmas, en ejecución (ver hlebind.h).
  *
  * FICHERO DE FIRMAS (formato "sigs", JSON; subconjunto del que produce tools/sig/sigs.py make):
- *   [ {"name": "VSync", "addr": "800996d0", "words": 132,
+ *   [ {"name": "frame_wait", "addr": "800996d0", "words": 132,
  *      "prefix": "<sha1 hex, 40>", "full": "<sha1 hex, 40>", "role": "hle"|"anchor"}, ... ]
  *   - addr: dirección de la función en el ejecutable de REFERENCIA (hexadecimal, sin 0x). Solo se usa para
  *     ordenar y para medir distancias entre funciones vecinas; no es una dirección del juego del usuario.
@@ -198,7 +198,7 @@ static int parse_sigs(const char *json, size_t len, Sig **out) {
 #define MAX_BOUND 128
 static struct { uint32_t addr; FuncPtr fn; const char *name; } bound[MAX_BOUND];
 static unsigned nbound, nmissing;
-uint8_t hle_bind_bits[PSX_RAM_SIZE / 32];
+uint8_t hle_bind_bits[EMU_RAM_SIZE / 32];
 
 /* longjmp plano: en el intérprete no hay marcos C que reanudar; basta restaurar los registros del buffer y
  * devolver a la ra restaurada (el intérprete continúa en ra tras el HLE). */
@@ -222,7 +222,7 @@ static void bound_add(const char *name, uint32_t addr, FuncPtr fn) {
     unsigned k = nbound++;
     while (k > 0 && bound[k - 1].addr > addr) { bound[k] = bound[k - 1]; k--; }
     bound[k].addr = addr; bound[k].fn = fn; bound[k].name = name;
-    uint32_t w = (addr & (PSX_RAM_SIZE - 1)) >> 2;
+    uint32_t w = (addr & (EMU_RAM_SIZE - 1)) >> 2;
     hle_bind_bits[w >> 3] |= (uint8_t)(1u << (w & 7));
 }
 
@@ -256,7 +256,7 @@ static int is_fixed_decl(const char *name) {
     return 0;
 }
 int hle_bind_fixed(const char *name, uint32_t addr) {
-    if ((addr & 3) || (addr & 0x1FFFFFFFu) < 0x10000u || (addr & 0x1FFFFFFFu) >= PSX_RAM_SIZE) return -1;
+    if ((addr & 3) || (addr & 0x1FFFFFFFu) < 0x10000u || (addr & 0x1FFFFFFFu) >= EMU_RAM_SIZE) return -1;
     if (rt_patch_is(addr)) return -1;     /* ya hay una sustitución en ejecución (rtpatch.c): el intérprete la preferiría y la HLE quedaría muda */
     for (unsigned t = 0; t < hle_table_count; t++) {
         if (strcmp(hle_table[t].name, name)) continue;
@@ -444,7 +444,7 @@ int hle_bind(const char *json, size_t len, uint32_t base, uint32_t size, uint32_
     Sig *sg = NULL;
     int n = parse_sigs(json, len, &sg);
     if (n < 0) { fprintf(stderr, "[hle] fichero de firmas ilegible\n"); return -1; }
-    if (((base & 0x1FFFFF) + size) > PSX_RAM_SIZE) { free(sg); return -1; }
+    if (((base & 0x1FFFFF) + size) > EMU_RAM_SIZE) { free(sg); return -1; }
     nw = size / 4;
     unsigned tsz = 1024;
     while (tsz < 2u * nw) tsz <<= 1;
@@ -454,7 +454,7 @@ int hle_bind(const char *json, size_t len, uint32_t base, uint32_t size, uint32_
     hpos = calloc(tsz, sizeof *hpos);
     hmask = tsz - 1;
     if (!mw || !raw || !hkey || !hpos) { free(sg); free(mw); free(raw); free(hkey); free(hpos); return -1; }
-    memcpy(raw, &psx_ram[base & (PSX_RAM_SIZE - 1)], (size_t)nw * 4);
+    memcpy(raw, &emu_ram[base & (EMU_RAM_SIZE - 1)], (size_t)nw * 4);
     rawp = raw;
     for (unsigned i = 0; i < nw; i++) mw[i] = hle_sig_mask(raw[i]);
     for (unsigned i = 0; i + 8 <= nw; i++) {
@@ -488,7 +488,7 @@ int hle_bind(const char *json, size_t len, uint32_t base, uint32_t size, uint32_
             continue;
         }
         uint32_t addr = base + 4 * hit->pos;
-        FuncPtr fn = strcmp(nm, "longjmp") ? hle_table[t].fn : flat_longjmp;
+        FuncPtr fn = strcmp(nm, "jmp_restore") ? hle_table[t].fn : flat_longjmp;
         unsigned before = nbound;
         bound_add(nm, addr, fn);
         if (nbound > before) bound_n++;

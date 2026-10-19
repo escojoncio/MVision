@@ -178,7 +178,7 @@ jobs:
           PY
           }
           if ls .stage/extras/*.swift >/dev/null 2>&1; then
-            if build 'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) MV_HAVE_PS1RENDERER MV_HOST_EXTRAS'; then
+            if build 'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) MV_HAVE_RGRENDERER MV_HOST_EXTRAS'; then
               echo "Compilado con extras"
             else
               fail_report

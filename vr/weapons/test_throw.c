@@ -302,7 +302,7 @@ static void arm_it(Rig *r) {      /* saca, tira de la anilla y deja la arrojadiz
 
 static void test_robust(void) {
     printf("-- robustez --\n");
-    /* palanca con dt grande: el muelle no diverge y el canal queda acotado */
+    /* palanca con dt grande: el resorte no diverge y el canal queda acotado */
     mock_reset(3);
     Rig r = rig_new(&w_throw_frag, WR_MANUAL);
     arm_it(&r);

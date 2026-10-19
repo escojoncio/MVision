@@ -8,8 +8,8 @@
 #include "hle.h"
 #include "cdrom.h"
 
-void hle_CdReady(Cpu *c);
-void hle_CdControl(Cpu *c);
+void hle_disc_ready(Cpu *c);
+void hle_disc_ctl(Cpu *c);
 
 #define FS_REQ   0x80022ea8u  /* (dst, sector_abs, bytes, cb) */
 #define FS_LEFT  0x80022f08u  /* bytes pendientes */
@@ -30,13 +30,13 @@ static int game_read(Cpu *c, uint32_t lba, uint32_t bytes) {
     c->r[4] = BUF; c->r[5] = lba + 150; c->r[6] = bytes; c->r[7] = 0;
     rt_call(c, FS_REQ);
     mem_w32(c, 0x800b5fe8u, 1); /* estado del demonio: leyendo */
-    c->r[4] = FS_READY; hle_CdReady(c);
+    c->r[4] = FS_READY; hle_disc_ready(c);
     uint8_t m[3]; tobcd(lba + 150, m);
     for (int i = 0; i < 3; i++) mem_w8(c, PARAM + i, m[i]);
     mem_w8(c, PARAM + 3, 0);
     mem_w8(c, PARAM + 8, 0xA0);
-    c->r[4] = 0x0E; c->r[5] = PARAM + 8; c->r[6] = 0; hle_CdControl(c);
-    c->r[4] = 0x06; c->r[5] = PARAM; c->r[6] = 0; hle_CdControl(c);
+    c->r[4] = 0x0E; c->r[5] = PARAM + 8; c->r[6] = 0; hle_disc_ctl(c);
+    c->r[4] = 0x06; c->r[5] = PARAM; c->r[6] = 0; hle_disc_ctl(c);
     for (int i = 0; i < 100000 && cd_busy(); i++) cd_pump(c); /* IRQ de CD: entrega los sectores */
     rt_call(c, FS_LEFT);
     return (int)c->r[2];
@@ -46,11 +46,11 @@ int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "uso: %s <exe> <dir_disco>[;dir2]\n", argv[0]); return 1; }
     FILE *f = fopen(argv[1], "rb");
     if (!f) { perror(argv[1]); return 1; }
-    static uint8_t b[PSX_RAM_SIZE + 0x800];
+    static uint8_t b[EMU_RAM_SIZE + 0x800];
     size_t n = fread(b, 1, sizeof b, f); fclose(f);
     uint32_t t, sz; memcpy(&t, b + 0x18, 4); memcpy(&sz, b + 0x1C, 4);
     if (n < 0x800 + sz) return 1;
-    memcpy(&psx_ram[t & 0x1FFFFF], b + 0x800, sz);
+    memcpy(&emu_ram[t & 0x1FFFFF], b + 0x800, sz);
     int nd = cd_open(argv[2]);
     CHECK(nd >= 1);
 

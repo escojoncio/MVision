@@ -2,7 +2,7 @@
 /* Rasterizador de REFERENCIA del renderer de alta resolución.
  * Consume GpuDrawList (runtime/gpu.h) y dibuja a escala N (1..8) con supermuestreo KxK, muestreando
  * texturas de una copia de la VRAM nativa que se actualiza con los eventos en orden. Es el modelo exacto
- * que se porta a render/metal/ps1_gpu.metal. Ver render/README.md. */
+ * que se porta a render/metal/rg_gpu.metal. Ver render/README.md. */
 #include <stdint.h>
 #include "gpu.h"
 

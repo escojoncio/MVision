@@ -5,7 +5,7 @@ import CoreGraphics
 import UIKit
 
 // Presentación en VR de todo lo que NO es el juego en primera persona (ver bitácora, "Presentación en VR").
-//  - Pantalla de cine: el fotograma completo que dibuja el juego (título, menús, códec, cargas, vídeos, cinemáticas del motor, ventanas de
+//  - Pantalla de cine: el fotograma completo que dibuja el juego (título, menús, radio, cargas, vídeos, cinemáticas del motor, ventanas de
 //    armas/objetos, pausa, fin de partida) en una pantalla virtual grande, anclada delante del usuario, en un entorno negro.
 //  - Diorama (opcional, solo cinemáticas del motor): la escena 3D vista desde la cámara del juego, en miniatura delante del usuario.
 //  - HUD del juego en primera persona: recortes del panel 2D como paneles pequeños que siguen a la cabeza con retardo.

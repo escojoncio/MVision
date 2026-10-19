@@ -1,6 +1,6 @@
 /* Mando: estado inyectado por el host y escrito cada frame en los búferes de recepción del juego.
- * Sustituye a la librería de mando de acceso directo (PadInitDirect/PadGetState/PadInfoAct/
- * PadSetAct...) y al InitPAD/StartPAD de la BIOS. Formato de búfer PS1:
+ * Sustituye a la librería de mando de acceso directo (ctl_init_direct/ctl_state/ctl_info_act/
+ * ctl_act_set...) y al ctl_bios_init/ctl_bios_start de la BIOS. Formato de búfer original:
  *   [0] 0x00 = datos válidos, 0xFF = sin mando
  *   [1] tipo<<4 | medias palabras (0x41 digital, 0x73 analógico)
  *   [2..3] botones activos a nivel bajo, [4..7] RX RY LX LY. */
@@ -12,7 +12,7 @@ typedef struct {
     int type;
     uint16_t buttons;
     uint8_t ax[4];          /* rx, ry, lx, ly */
-    uint32_t act_buf;       /* búfer de actuadores del juego (PadSetAct) */
+    uint32_t act_buf;       /* búfer de actuadores del juego (ctl_act_set) */
     uint8_t align[6];
     uint8_t small, large;
 } Pad;
@@ -21,7 +21,7 @@ static Pad pads[2] = {
     {.type = PAD_ANALOG, .ax = {0x80, 0x80, 0x80, 0x80}, .align = {0, 1, 0xFF, 0xFF, 0xFF, 0xFF}},
     {.type = PAD_NONE, .ax = {0x80, 0x80, 0x80, 0x80}, .align = {0, 1, 0xFF, 0xFF, 0xFF, 0xFF}},
 };
-/* Búferes de recepción: modo directo (PadInitDirect) o BIOS (InitPAD). */
+/* Búferes de recepción: modo directo (ctl_init_direct) o BIOS (ctl_bios_init). */
 static uint32_t rx_buf[2], rx_len[2];
 static int started;
 
@@ -82,22 +82,22 @@ void pad_bios_start(Cpu *c) { started = 1; pad_frame(c); }
 void pad_bios_stop(void) { started = 0; }
 
 /* ---------- librería de acceso directo ---------- */
-void hle_PadInitDirect(Cpu *c) {
+void hle_ctl_init_direct(Cpu *c) {
     pad_bios_init(c, c->r[4], 0, c->r[5], 0);
     c->r[2] = 1;
 }
-void hle_PadStartCom(Cpu *c) { started = 1; pad_frame(c); c->r[2] = 1; }
-void hle_PadStopCom(Cpu *c) { started = 0; c->r[2] = 1; }
-int pad_hle_required(FuncPtr f) { return f == hle_PadInitDirect || f == hle_PadStartCom; }
+void hle_ctl_start(Cpu *c) { started = 1; pad_frame(c); c->r[2] = 1; }
+void hle_ctl_stop(Cpu *c) { started = 0; c->r[2] = 1; }
+int pad_hle_required(FuncPtr f) { return f == hle_ctl_init_direct || f == hle_ctl_start; }
 
 /* Estados: 0 sin mando, 2 mando simple estable, 6 mando con actuadores estable. */
-void hle_PadGetState(Cpu *c) {
+void hle_ctl_state(Cpu *c) {
     Pad *p = &pads[port_of(c->r[4])];
     c->r[2] = p->type == PAD_NONE ? 0 : p->type == PAD_DIGITAL ? 2 : 6;
 }
 
-/* PadInfoMode(port, term, offs): term 1 = id actual, 2 = número de modos, 3/4 = lista. */
-void hle_PadInfoMode(Cpu *c) {
+/* ctl_info_mode(port, term, offs): term 1 = id actual, 2 = número de modos, 3/4 = lista. */
+void hle_ctl_info_mode(Cpu *c) {
     Pad *p = &pads[port_of(c->r[4])];
     int32_t term = (int32_t)c->r[5], offs = (int32_t)c->r[6];
     uint32_t v = 0;
@@ -111,9 +111,9 @@ void hle_PadInfoMode(Cpu *c) {
     c->r[2] = v;
 }
 
-/* PadInfoAct(port, act, term): act -1 = número de actuadores.
+/* ctl_info_act(port, act, term): act -1 = número de actuadores.
  * Actuador 0: motor pequeño (todo/nada); 1: motor grande (0-255). */
-void hle_PadInfoAct(Cpu *c) {
+void hle_ctl_info_act(Cpu *c) {
     Pad *p = &pads[port_of(c->r[4])];
     int32_t act = (int32_t)c->r[5], term = (int32_t)c->r[6];
     if (p->type != PAD_ANALOG) { c->r[2] = 0; return; }
@@ -123,28 +123,28 @@ void hle_PadInfoAct(Cpu *c) {
     c->r[2] = info[act][term - 1];
 }
 
-void hle_PadInfoComb(Cpu *c) { c->r[2] = 0; }
+void hle_ctl_info_comb(Cpu *c) { c->r[2] = 0; }
 
-void hle_PadSetActAlign(Cpu *c) {
+void hle_ctl_act_align(Cpu *c) {
     Pad *p = &pads[port_of(c->r[4])];
     for (int i = 0; i < 6; i++) p->align[i] = mem_r8(c, c->r[5] + (uint32_t)i);
     c->r[2] = p->type == PAD_ANALOG ? 1 : 0;
 }
 
-void hle_PadSetAct(Cpu *c) {
+void hle_ctl_act_set(Cpu *c) {
     pads[port_of(c->r[4])].act_buf = c->r[5];
     c->r[2] = 1;
 }
 
-void hle_PadSetMainMode(Cpu *c) {
+void hle_ctl_main_mode(Cpu *c) {
     Pad *p = &pads[port_of(c->r[4])];
     if (p->type != PAD_NONE) p->type = c->r[5] ? PAD_ANALOG : PAD_DIGITAL;
     c->r[2] = 1;
 }
 
-void hle_PadChkMtap(Cpu *c) { c->r[2] = 0; }
-void hle_PadEnableCom(Cpu *c) { c->r[2] = 1; }
-/* Envoltorios de librería sobre la BIOS (InitPAD/StartPAD/StopPAD). */
-void hle_InitPAD(Cpu *c) { pad_bios_init(c, c->r[4], c->r[5], c->r[6], c->r[7]); c->r[2] = 1; }
-void hle_StartPAD(Cpu *c) { pad_bios_start(c); c->r[2] = 1; }
-void hle_StopPAD(Cpu *c) { pad_bios_stop(); c->r[2] = 1; }
+void hle_ctl_chk_multi(Cpu *c) { c->r[2] = 0; }
+void hle_ctl_enable(Cpu *c) { c->r[2] = 1; }
+/* Envoltorios de librería sobre la BIOS (ctl_bios_init/ctl_bios_start/ctl_bios_stop). */
+void hle_ctl_bios_init(Cpu *c) { pad_bios_init(c, c->r[4], c->r[5], c->r[6], c->r[7]); c->r[2] = 1; }
+void hle_ctl_bios_start(Cpu *c) { pad_bios_start(c); c->r[2] = 1; }
+void hle_ctl_bios_stop(Cpu *c) { pad_bios_stop(); c->r[2] = 1; }

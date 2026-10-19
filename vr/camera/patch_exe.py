@@ -35,6 +35,9 @@ import math
 import struct
 import sys
 
+# Firma de 8 bytes de la cabecera del formato de ejecutable (hex).
+EXE_MAGIC = bytes.fromhex("50532d5820455845")
+
 OP_ADDIU, OP_SLTI, OP_SLTIU = 0x09, 0x0A, 0x0B
 
 # rol: HX+1 ("<161": borde derecho), -HX (borde izquierdo), HY+1, -HY (vertical), P* = caja de "punto visible"
@@ -107,8 +110,8 @@ def output_ok(src, dst):
 
 def load(path):
     d = bytearray(open(path, "rb").read())
-    if d[:8] != b"PS-X EXE":
-        sys.exit("no es un PS-X EXE")
+    if d[:8] != EXE_MAGIC:
+        sys.exit("ejecutable no válido")
     base, size = struct.unpack_from("<II", d, 0x18)[0], struct.unpack_from("<I", d, 0x1C)[0]
     return d, base, size
 

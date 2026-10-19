@@ -1,6 +1,6 @@
 /* Tarjeta de memoria sobre imagen cruda de 128 KB (.mcd: 1024 sectores de 128 B, 16 bloques de 8 KB).
- * Cubre las llamadas de BIOS de bajo nivel (_card_info/_card_load/_card_read/_card_write/_new_card)
- * y el sistema de ficheros "buXY:" (open/read/write/lseek/close/firstfile/nextfile/erase/format),
+ * Cubre las llamadas de BIOS de bajo nivel (info de tarjeta/carga de tarjeta/lectura de sector de tarjeta/escritura de sector de tarjeta/marcar tarjeta no nueva)
+ * y el sistema de ficheros "buXY:" (open/read/write/lseek/close/mc_first/siguiente fichero/erase/format),
  * entregando los eventos de tarjeta (software 0xF0000011 y hardware 0xF4000001) que espera el juego. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,8 +89,8 @@ static void check_env(void) {
 /* ---------------- eventos ---------------- */
 
 static void card_event(Cpu *c, uint32_t spec) {
-    bios_deliver_event(c, EV_CARD_SW, spec);
-    bios_deliver_event(c, EV_CARD_HW, spec);
+    bios_deliver_event(c, EV_MC_SW, spec);
+    bios_deliver_event(c, EV_MC_HW, spec);
 }
 
 /* ---------------- directorio ---------------- */
@@ -230,7 +230,7 @@ static uint32_t dir_scan(Cpu *c, uint32_t de) {
     return 0;
 }
 
-static uint32_t f_firstfile(Cpu *c, uint32_t pname, uint32_t de) {
+static uint32_t f_dev_first(Cpu *c, uint32_t pname, uint32_t de) {
     char name[64];
     int port = parse_dev(c, pname, name, sizeof name);
     if (port < 0) return 0;
@@ -300,14 +300,14 @@ int card_bios(Cpu *c, uint32_t vec, uint32_t fn) {
     uint32_t a0 = c->r[4], a1 = c->r[5], a2 = c->r[6];
     check_env();
     static int trace = -1, ntr;
-    if (trace < 0) trace = getenv("MV_CARD_LOG") != NULL;
-    if (trace && ntr < 4000 && ((vec == 0xA0 && (fn == 0x70 || (fn >= 0xAB && fn <= 0xAF))) || (vec == 0xB0 && ((fn >= 0x32 && fn <= 0x36) || (fn >= 0x41 && fn <= 0x50)))))   /* diagnóstico: MV_CARD_LOG=1 */
+    if (trace < 0) trace = getenv("MV_MC_LOG") != NULL;
+    if (trace && ntr < 4000 && ((vec == 0xA0 && (fn == 0x70 || (fn >= 0xAB && fn <= 0xAF))) || (vec == 0xB0 && ((fn >= 0x32 && fn <= 0x36) || (fn >= 0x41 && fn <= 0x50)))))   /* diagnóstico: MV_MC_LOG=1 */
         fprintf(stderr, "[card] %02X(%02X) a0=%08x a1=%08x a2=%08x\n", vec, fn, a0, a1, a2), ntr++;
     if (vec == 0xA0) {
         switch (fn) {
-        case 0x70: c->r[2] = 1; return 1;                                /* _bu_init */
-        case 0xAB: ll_info(c, lport(a0), 0); c->r[2] = 1; return 1;      /* _card_info */
-        case 0xAC: ll_info(c, lport(a0), 1); c->r[2] = 1; return 1;      /* _card_load */
+        case 0x70: c->r[2] = 1; return 1;                                /* inicio de tarjeta */
+        case 0xAB: ll_info(c, lport(a0), 0); c->r[2] = 1; return 1;      /* info de tarjeta */
+        case 0xAC: ll_info(c, lport(a0), 1); c->r[2] = 1; return 1;      /* carga de tarjeta */
         case 0xAF: c->r[2] = 1; return 1;                                /* card_write_test */
         }
         return 0;
@@ -330,20 +330,20 @@ int card_bios(Cpu *c, uint32_t vec, uint32_t fn) {
         if (fd_ok(a0)) { fds[a0 - 2].used = 0; c->r[2] = a0; } else c->r[2] = (uint32_t)-1;
         return 1;
     case 0x41: c->r[2] = (uint32_t)f_format(c, a0); return 1;            /* format */
-    case 0x42: c->r[2] = f_firstfile(c, a0, a1); return 1;               /* firstfile */
-    case 0x43: c->r[2] = dir_scan(c, a0); return 1;                      /* nextfile */
+    case 0x42: c->r[2] = f_dev_first(c, a0, a1); return 1;               /* mc_first */
+    case 0x43: c->r[2] = dir_scan(c, a0); return 1;                      /* siguiente fichero */
     case 0x45: c->r[2] = (uint32_t)f_erase(c, a0); return 1;             /* erase */
-    case 0x4A: case 0x4B: case 0x4C: c->r[2] = 1; return 1;              /* Init/Start/StopCARD */
-    case 0x4E: c->r[2] = (uint32_t)ll_sector(c, lport(a0), a1, a2, 1); return 1; /* _card_write */
-    case 0x4F: c->r[2] = (uint32_t)ll_sector(c, lport(a0), a1, a2, 0); return 1; /* _card_read */
-    case 0x50: cards[lport(a0)].isnew = 0; c->r[2] = 1; return 1;       /* _new_card */
+    case 0x4A: case 0x4B: case 0x4C: c->r[2] = 1; return 1;              /* Init/Start/mc_stop */
+    case 0x4E: c->r[2] = (uint32_t)ll_sector(c, lport(a0), a1, a2, 1); return 1; /* escritura de sector de tarjeta */
+    case 0x4F: c->r[2] = (uint32_t)ll_sector(c, lport(a0), a1, a2, 0); return 1; /* lectura de sector de tarjeta */
+    case 0x50: cards[lport(a0)].isnew = 0; c->r[2] = 1; return 1;       /* marcar tarjeta no nueva */
     }
     return 0;
 }
 
-/* HLE de librería: InitCARD/StartCARD/StopCARD tocan vectores del kernel; aquí no hacen falta. */
-void hle_InitCARD(Cpu *c) { check_env(); c->r[2] = 1; }
-void hle_StartCARD(Cpu *c) { c->r[2] = 1; }
-void hle_StopCARD(Cpu *c) { c->r[2] = 1; }
-/* Envoltorio de librería de firstfile (busca el dispositivo en la tabla del kernel). */
-void hle_firstfile(Cpu *c) { check_env(); c->r[2] = f_firstfile(c, c->r[4], c->r[5]); }
+/* HLE de librería: mc_init/mc_start/mc_stop tocan vectores del kernel; aquí no hacen falta. */
+void hle_mc_init(Cpu *c) { check_env(); c->r[2] = 1; }
+void hle_mc_start(Cpu *c) { c->r[2] = 1; }
+void hle_mc_stop(Cpu *c) { c->r[2] = 1; }
+/* Envoltorio de librería de mc_first (busca el dispositivo en la tabla del kernel). */
+void hle_mc_first(Cpu *c) { check_env(); c->r[2] = f_dev_first(c, c->r[4], c->r[5]); }

@@ -90,7 +90,7 @@ int vrcam_pad_origin(void);
 
 /* ---- Registro por frame de cámara ------------------------------------------------------------------------------
  * Cada vez que el motor construye la cámara principal se guarda aquí lo necesario para re-proyectar lo que dibuje
- * con ella. Los polígonos de un frame se dibujan (DrawOTag) un frame del motor después de su construcción: el
+ * con ella. Los polígonos de un frame se dibujan (gfx_list) un frame del motor después de su construcción: el
  * registro de una lista capturada es vrcam_draw_record(n-ésimo envío). Los envíos se numeran desde 1. */
 typedef struct VrCamRecord {
     uint32_t serial;         /* nº de construcción de cámara (>=1) */

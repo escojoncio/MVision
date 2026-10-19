@@ -1,11 +1,11 @@
-# HLE de la librería de CD (runtime/cdrom.c). CdSync/CdReady de este mapa = registradores de callback.
-CdInit
-CdReset
-CdFlush
-CdMix
-CdSync
-CdReady
-CdControl
-CdControlB
-CdControlF
-CdGetSector
+# HLE de la librería de CD (runtime/cdrom.c). disc_sync/disc_ready de este mapa = registradores de callback.
+disc_init 7a533fb3103c6107
+disc_reset 1436404e27a98266
+disc_flush 1b63de86b991a7b8
+disc_mix c8340647e58f1d05
+disc_sync fde6d95faa268f02
+disc_ready 9a8ff43c26a8eb5a
+disc_ctl 3ea3dddb9b664180
+disc_ctl_b dad8302d2a4cd4f0
+disc_ctl_f 9acf5aaa6e26b795
+disc_sector 5da04c0d63f52804

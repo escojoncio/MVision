@@ -13,7 +13,7 @@
 void sys_frame(Cpu *c);
 /* Vuelca a reloj los sondeos consumidos, genera eventos vencidos y re-arma rt_budget (lo llama rt_poll). */
 void sys_clock_tick(Cpu *c);
-/* Salta el reloj al siguiente evento (VBlank/temporizador) y lo procesa: espera de VSync. */
+/* Salta el reloj al siguiente evento (VBlank/temporizador) y lo procesa: espera de frame_wait. */
 void sys_idle(Cpu *c);
 /* Fuerza que el siguiente RT_POLL llame a rt_poll (tras levantar una IRQ o habilitar interrupciones). */
 void sys_kick(void);
@@ -36,13 +36,13 @@ uint32_t sys_dma_flags_take(void);
 void sys_dma_irq_enable(int ch, int on);
 
 /* ---- Excepción HLE (irq.c) ---- */
-/* Registro de manejadores como en libapi: InterruptCallback(irq, f), DMACallback(ch, f) y VSyncCallback(f).
+/* Registro de manejadores como en la librería base: cb_irq(irq, f), cb_dma(ch, f) y frame_cb(f).
  * Devuelven el manejador anterior y ajustan I_MASK/DICR como la librería. */
 uint32_t irq_set_callback(int irq, uint32_t fn);
 uint32_t irq_set_dma_callback(int ch, uint32_t fn);
 uint32_t irq_set_vsync_callback(uint32_t fn);
 void irq_reset_callbacks(void);
-/* Colas del kernel C0:02/03 (SysEnqIntRP/SysDeqIntRP) y ganchos de salida B0:18/19. */
+/* Colas del kernel C0:02/03 (encolar/desencolar manejador de IRQ) y ganchos de salida B0:18/19. */
 uint32_t irq_enq(Cpu *c, uint32_t prio, uint32_t node);
 uint32_t irq_deq(Cpu *c, uint32_t prio, uint32_t node);
 void irq_set_exit_hook(uint32_t fn);
@@ -51,12 +51,12 @@ int irq_in_exception(void);
 uint32_t bios_kalloc(uint32_t n);
 
 /* ---- Eventos de BIOS (bios.c) ---- */
-/* Entrega un evento: modo 0x1000 llama a la función MIPS, modo 0x2000 lo deja listo para TestEvent. */
+/* Entrega un evento: modo 0x1000 llama a la función MIPS, modo 0x2000 lo deja listo para consultar evento. */
 void bios_deliver_event(Cpu *c, uint32_t cls, uint32_t spec);
 int bios_event_listening(uint32_t cls, uint32_t spec);
 #define EV_VBLANK 0xF0000001u
-#define EV_CARD_SW 0xF0000011u
-#define EV_CARD_HW 0xF4000001u
+#define EV_MC_SW 0xF0000011u
+#define EV_MC_HW 0xF4000001u
 #define EV_RCNT(n) (0xF2000000u + (n))
 #define EVS_IOE 0x0004u
 #define EVS_ERROR 0x8000u
@@ -65,7 +65,7 @@ int bios_event_listening(uint32_t cls, uint32_t spec);
 #define EVS_INTR 0x0002u
 
 /* ---- Mando (pad.c) ----
- * buttons: bit a 1 = pulsado, orden PS1: 0 Select, 1 L3, 2 R3, 3 Start, 4 Arriba, 5 Derecha, 6 Abajo,
+ * buttons: bit a 1 = pulsado, orden original: 0 Select, 1 L3, 2 R3, 3 Start, 4 Arriba, 5 Derecha, 6 Abajo,
  * 7 Izquierda, 8 L2, 9 R2, 10 L1, 11 R1, 12 Triángulo, 13 Círculo, 14 Cruz, 15 Cuadrado.
  * Ejes analógicos 0..255, centro 0x80. */
 enum { PAD_NONE = 0, PAD_DIGITAL = 1, PAD_ANALOG = 2 };

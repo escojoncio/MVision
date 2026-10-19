@@ -26,7 +26,7 @@
 
 #define BOX_MAX_DRAWS 3
 
-typedef enum { BOX_STYLE_CARDBOARD = 0, BOX_STYLE_BLACK = 1 } BoxStyle;
+typedef enum { BOX_STYLE_TEX = 0, BOX_STYLE_BLACK = 1 } BoxStyle;
 typedef enum { BOX_BLEND_OPAQUE = 0, BOX_BLEND_ALPHA = 1 } BoxBlend;
 typedef enum { BOX_OFF = 0, BOX_ENTERING, BOX_ACTIVE, BOX_LEAVING } BoxState;
 
@@ -43,7 +43,7 @@ typedef struct {
     float rim;                  /* grosor del canto de la abertura (0.012) */
     float half_w, top, bottom, back;   /* interior: lados, techo, suelo (bajo los ojos) y fondo (detrás de los ojos) */
     float ipd;                  /* separación entre ojos, solo para utilidades de medida (0.064) */
-    BoxStyle style;             /* BOX_STYLE_CARDBOARD (defecto) o BOX_STYLE_BLACK (máscara negra del original) */
+    BoxStyle style;             /* BOX_STYLE_TEX (defecto) o BOX_STYLE_BLACK (máscara negra del original) */
     /* inercia de la carcasa respecto a la cabeza (solo giro) */
     float lag_rate;             /* 1/s; 0 = sin retardo (la carcasa va pegada a la cabeza) */
     float lag_max_deg;          /* desfase angular máximo permitido (la abertura nunca sale de delante) */

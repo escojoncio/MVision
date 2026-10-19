@@ -72,7 +72,7 @@ static void sync_patches(void) {
 
 void vrp_rt_init(VrpPreset p) {
     VrpHost h = {NULL, co, guard};
-    vrp_init(&G, psx_ram, &h, p);
+    vrp_init(&G, emu_ram, &h, p);
     inited = 1;
 }
 void vrp_rt_set_preset(VrpPreset p) { if (inited) { vrp_set_preset(&G, p); sync_patches(); } }
@@ -90,16 +90,16 @@ int vrp_rt_overlay(uint32_t lo, uint32_t hi) {
     if (!inited) return 0;
     vrp_rt_overlay_gone();
     VrpSites s;
-    if (!vrp_locate(psx_ram, lo, hi, &s)) return 0;
+    if (!vrp_locate(emu_ram, lo, hi, &s)) return 0;
     /* Defensa: nunca parchear una función de cámara/sensor (tienen su propio módulo) */
     VrcSite cs[8];
-    int nc = vrc_locate(psx_ram, lo, hi, cs, 8);
+    int nc = vrc_locate(emu_ram, lo, hi, cs, 8);
     if (vrc_is_sensor_func(cs, nc, s.vision) || (s.gather && vrc_is_sensor_func(cs, nc, s.gather))) return 0;
     G.sites = s;
     memset(hguard, 0, sizeof hguard);
     for (int i = 0; i < 2; i++) {
         uint32_t a = i ? s.gather : s.vision, fs, fe;
-        if (a && vai_func_bounds(psx_ram, a, lo, hi, &fs, &fe) && fs == a && fe - fs <= 4u * 4096u) {
+        if (a && vai_func_bounds(emu_ram, a, lo, hi, &fs, &fe) && fs == a && fe - fs <= 4u * 4096u) {
             hguard[i].nwords = (fe - fs) / 4;
             hguard[i].hash = rt_code_hash(fs, hguard[i].nwords);
         }

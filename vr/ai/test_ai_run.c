@@ -102,9 +102,9 @@ static void load_script(const char *path) {
     fclose(fp);
 }
 
-static int16_t r16(uint32_t a) { return *(int16_t *)(psx_ram + (a & RAMM)); }
-static uint32_t r32(uint32_t a) { return *(uint32_t *)(psx_ram + (a & RAMM)); }
-static void w16(uint32_t a, int16_t v) { *(int16_t *)(psx_ram + (a & RAMM)) = v; }
+static int16_t r16(uint32_t a) { return *(int16_t *)(emu_ram + (a & RAMM)); }
+static uint32_t r32(uint32_t a) { return *(uint32_t *)(emu_ram + (a & RAMM)); }
+static void w16(uint32_t a, int16_t v) { *(int16_t *)(emu_ram + (a & RAMM)) = v; }
 
 static void place_player(double x, double y, double z) {
     int16_t p[3] = {(int16_t)lrint(x), (int16_t)lrint(y), (int16_t)lrint(z)};
@@ -116,7 +116,7 @@ static void place_player(double x, double y, double z) {
 static void probe(Cpu *c, uint32_t f) {
     fprintf(stderr, "[ait]   cpu ra=%08x sp=%08x a0=%08x v0=%08x gp+EC=%08x gp+F0=%08x gp+E8=%08x\n", c->r[31], c->r[29], c->r[4], c->r[2], r32(0x800AC574u), r32(0x800AC578u), r32(0x800AC56Cu));
     char st[8] = {0};
-    memcpy(st, psx_ram + (0x800AC568u & RAMM), 5);
+    memcpy(st, emu_ram + (0x800AC568u & RAMM), 5);
     fprintf(stderr, "[ait] f=%u zona=%s jugador=(%d,%d,%d) ctl=%08x mapa=%08x\n", f, st, r16(BA_PLAYER_POS), r16(BA_PLAYER_POS + 2), r16(BA_PLAYER_POS + 4), r32(BA_PLAYER_CTRL), r32(BA_PLAYER_MAP));
     fprintf(stderr, "[ait]   ataques(llamadas a la función de ataque)=%u\n", atk_calls);
     fprintf(stderr, "[ait]   arma=%d municion=[%d..] cargador=%d/%d estado_jugador=%08x global=%08x pausa=%d\n", r16(BA_VARS + 2 * BRIDGE_V_WEAPON), r16(BA_VARS + 2 * BRIDGE_V_WEAPON_AMMO), r16(BA_MAGAZINE), r16(BA_MAGAZINE_MAX), r32(BA_PLAYER_STATUS), r32(BA_GAME_STATUS), (int)r32(BA_PAUSE_LEVEL));
@@ -149,8 +149,8 @@ static void probe(Cpu *c, uint32_t f) {
 
 static int stage_req(Cpu *c, const char *name, int do_req) {
     const uint32_t buf = 0x800B5F18u;   /* nombre de zona de las variables de partida (cabe sobrado) */
-    memset(psx_ram + (buf & RAMM), 0, 8);
-    memcpy(psx_ram + (buf & RAMM), name, strlen(name));
+    memset(emu_ram + (buf & RAMM), 0, 8);
+    memcpy(emu_ram + (buf & RAMM), name, strlen(name));
     Cpu save = *c;
     uint32_t sp = 0x801FFF00u;
     c->r[29] = sp; c->r[4] = buf;
@@ -163,7 +163,7 @@ static int stage_req(Cpu *c, const char *name, int do_req) {
     in_call = 1; rt_call(c, 0x8002B124u); in_call = 0;   /* registra la zona actual (hash, nombre) */
     *c = save;
     }
-    if (do_req) *(uint32_t *)(psx_ram + (0x800AC574u & RAMM)) = (h << 16) | 0xE0u;   /* petición de carga: (hash << 16) | 0xE0 */
+    if (do_req) *(uint32_t *)(emu_ram + (0x800AC574u & RAMM)) = (h << 16) | 0xE0u;   /* petición de carga: (hash << 16) | 0xE0 */
     fprintf(stderr, "[ait] zona pedida: %s hash=%04x\n", name, h);
     return 0;
 }
@@ -305,7 +305,7 @@ static void tdump_step(uint32_t f) {   /* blancos vivos del juego (64 x 72 B), u
     static uint8_t prev[64][72];
     int n = (int)r32(0x800AC000u + 0x770u + 0u) ; (void)n;
     for (int i = 0; i < 64; i++) {
-        const uint8_t *t = psx_ram + ((0x800B7660u + 72u * (uint32_t)i) & RAMM);
+        const uint8_t *t = emu_ram + ((0x800B7660u + 72u * (uint32_t)i) & RAMM);
         uint16_t cls = *(const uint16_t *)t;
         if (cls == 0) { memset(prev[i], 0, 72); continue; }
         if (!memcmp(prev[i], t, 72)) continue;
@@ -349,7 +349,7 @@ static void front_step(uint32_t f) {
 static void hook(void *cpu, uint32_t f) {
     if (in_call) return;
     Cpu *c = cpu;
-    vrc_scan(psx_ram, &MT);
+    vrc_scan(emu_ram, &MT);
     if (front_left > 0) { front_step(f); front_left--; }
     if (hold_left > 0) { place_player(hold_p[0], hold_p[1], hold_p[2]); hold_left--; }
     if (cf_left > 0) { const VrcCamera *cc = cam_at(cf_idx); if (cc) cam_place(cc, cf_d, cf_ang, cf_h); cf_left--; }
@@ -374,8 +374,8 @@ static void hook(void *cpu, uint32_t f) {
         if (e->kind == K_PROBE) { if (f >= e->f && e->n > 0 && (f - e->f) % (uint32_t)e->every == 0) { probe(c, f); e->n--; e->u[7] = 1; } continue; }
         if (e->f != f) continue;
         switch (e->kind) {
-        case K_POKE: { size_t n = strlen(e->s) / 2; for (size_t k = 0; k < n; k++) { unsigned v = 0; sscanf(e->s + 2 * k, "%2x", &v); psx_ram[((e->u[0] & RAMM) + k) & RAMM] = (uint8_t)v; } break; }
-        case K_POKES: memcpy(psx_ram + (e->u[0] & RAMM), e->s, strlen(e->s) + 1); break;
+        case K_POKE: { size_t n = strlen(e->s) / 2; for (size_t k = 0; k < n; k++) { unsigned v = 0; sscanf(e->s + 2 * k, "%2x", &v); emu_ram[((e->u[0] & RAMM) + k) & RAMM] = (uint8_t)v; } break; }
+        case K_POKES: memcpy(emu_ram + (e->u[0] & RAMM), e->s, strlen(e->s) + 1); break;
         case K_GCALL: {
             Cpu save = *c;
             c->r[29] = 0x801FFF00u; c->r[4] = e->u[1]; c->r[5] = e->u[2]; c->r[6] = e->u[3]; c->r[7] = e->u[4];
@@ -386,7 +386,7 @@ static void hook(void *cpu, uint32_t f) {
         case K_STAGE: stage_req(c, e->s, e->n == 0 ? 1 : e->n == 2 ? 2 : e->n == 3 ? 3 : 0); break;
         case K_AI: mv_vrhost_set_ai((int)e->u[0], (int)e->u[1], (int)e->u[2]); fprintf(stderr, "[ait] f=%u IA: percepción=%u cámaras=%u actividad=%u\n", f, e->u[0], e->u[1], e->u[2]); break;
         case K_FRONT: front_left = e->n; front_d = e->d[0]; front_idx = (int)e->u[0]; break;
-        case K_DUMP: { FILE *o = fopen(e->s, "wb"); if (o) { fwrite(psx_ram, 1, 0x200000, o); fclose(o); fprintf(stderr, "[ait] dump f=%u -> %s\n", f, e->s); } break; }
+        case K_DUMP: { FILE *o = fopen(e->s, "wb"); if (o) { fwrite(emu_ram, 1, 0x200000, o); fclose(o); fprintf(stderr, "[ait] dump f=%u -> %s\n", f, e->s); } break; }
         case K_CFACE: ground_y = r16(BA_PLAYER_POS + 2); cf_left = e->n; cf_d = e->d[0]; cf_idx = (int)e->u[0]; cf_ang = e->d[1]; cf_h = e->d[2]; break;
         case K_CSWEEP: ground_y = r16(BA_PLAYER_POS + 2); sw_on = 1; sw_idx = (int)e->u[0]; sw_d = e->d[0]; sw_d1 = e->d[1]; sw_step = e->d[2]; sw_dwell = e->n; sw_t = 0; sw_hit = 0; cf_ang = 0; cf_h = 0; sw_f0 = f; break;
         case K_CHIT: chit_apply(cam_at((int)e->u[0]), e->n ? e->n : 1); break;

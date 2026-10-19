@@ -1,4 +1,4 @@
-/* SPU de PS1 emulada a nivel de registros, escrita a partir de la documentación pública del
+/* SPU de original emulada a nivel de registros, escrita a partir de la documentación pública del
  * hardware. 24 voces ADPCM (envolvente ADSR, pitch, modulación por pitch, ruido), reverb a
  * 22050 Hz, IRQ por dirección, transferencias manuales y DMA canal 4, captura en RAM de
  * sonido y entrada CD-XA.

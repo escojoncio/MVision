@@ -36,7 +36,7 @@ static double ang(const double a[3], const double b[3]) {
 }
 
 static void t_matrix(void) {
-    /* identidad: delante de usuario -Z con theta 0 = +Z del mundo -> RotMatrixYXZ(-1024, 0, 0) = [[1,0,0],[0,0,1],[0,-1,0]] */
+    /* identidad: delante de usuario -Z con theta 0 = +Z del mundo -> rotación YXZ(-1024, 0, 0) = [[1,0,0],[0,0,1],[0,-1,0]] */
     VrFireMap map = mkmap(1000, 2000, -3000, 0);
     WPose p = {{0.1f, 1.6f, -0.2f}, {0, 0, 0, 1}};
     VrFireMat m;

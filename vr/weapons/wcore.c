@@ -165,7 +165,7 @@ float wcore_hand_dist(const WeaponState *s, const WInput *in, int hand, WPoint p
 }
 
 /* ---------------- retroceso ----------------
- * Modelo: sistema masa unidad con muelle k y amortiguador c, lineal y angular, en el marco de la mano.
+ * Modelo: sistema masa unidad con resorte k y amortiguador c, lineal y angular, en el marco de la mano.
  *   a = -k x - c v     (x = desplazamiento / vector de rotación del arma respecto al agarre)
  * Integración semi-implícita con subpasos de <= 2 ms (estable con k de varios cientos).
  * Con damping = 2*sqrt(k)*zeta, zeta ~0,85 el retorno apenas rebasa (sin oscilar). */

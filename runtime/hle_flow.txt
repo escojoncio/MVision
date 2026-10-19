@@ -1,2 +1,2 @@
 # Control de flujo no local (runtime/hle.c + rt.c rt_sj_*).
-setjmp
+jmp_save 8b229c90fb82ed32

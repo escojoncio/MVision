@@ -340,17 +340,17 @@ static void t_seq_restart(void) {
 }
 
 /* ------------------------------------------------------------------------------------------------ marcas en la OT (HLE) */
-uint8_t psx_ram[PSX_RAM_SIZE];
+uint8_t emu_ram[EMU_RAM_SIZE];
 void hle_vrradar_reset(void);
 void vrradar_hle_enable(int on);
 void vrradar_hle_stats(unsigned *calls, unsigned *marked, unsigned *fail);
 void hle_vrradar_draw(Cpu *c);
 static uint32_t kheap = 0x1000;
-uint32_t bios_kalloc(uint32_t n) { n = (n + 7) & ~7u; uint32_t a = kheap; kheap += n; memset(&psx_ram[a], 0, n); return 0x80000000u | a; }
-static uint32_t rd32(uint32_t a) { uint32_t v; memcpy(&v, psx_ram + (a & 0x1FFFFC), 4); return v; }
-static void wr32(uint32_t a, uint32_t v) { memcpy(psx_ram + (a & 0x1FFFFC), &v, 4); }
+uint32_t bios_kalloc(uint32_t n) { n = (n + 7) & ~7u; uint32_t a = kheap; kheap += n; memset(&emu_ram[a], 0, n); return 0x80000000u | a; }
+static uint32_t rd32(uint32_t a) { uint32_t v; memcpy(&v, emu_ram + (a & 0x1FFFFC), 4); return v; }
+static void wr32(uint32_t a, uint32_t v) { memcpy(emu_ram + (a & 0x1FFFFC), &v, 4); }
 static int orig_nprim, orig_calls;
-/* "función original": enlaza orig_nprim primitivas de 4 palabras de carga en la ranura a1 (como AddPrim: al principio de la ranura) y
+/* "función original": enlaza orig_nprim primitivas de 4 palabras de carga en la ranura a1 (como el encadenado de primitivas: al principio de la ranura) y
  * destruye a1 (la HLE debe haberlo guardado). */
 int rt_orig(Cpu *c, const char *name) {
     (void)name;
@@ -384,7 +384,7 @@ static void t_ot_marks(void) {
     hle_vrradar_reset(); vrradar_hle_enable(1); vrradar_reset();
     const uint32_t ot = 0x1000A0;
     for (int round = 0; round < 11; round++) {            /* > 4: se reutilizan los pares de marcas */
-        memset(psx_ram + 0x100000, 0, 0x2000);
+        memset(emu_ram + 0x100000, 0, 0x2000);
         for (int i = 0; i < 4; i++) wr32(ot + 4 * i, i < 3 ? (ot + 4 * (i + 1)) & 0xFFFFFF : 0xFFFFFF);
         wr32(0x101000, (rd32(ot + 4) & 0xFFFFFF) | (1u << 24)); wr32(0x101004, 0x21000000u); wr32(ot + 4, 0x101000);   /* primitiva previa del HUD */
         wr32(0x102000, (rd32(ot + 8) & 0xFFFFFF) | (1u << 24)); wr32(0x102004, 0x22000000u); wr32(ot + 8, 0x102000);   /* y otra en la ranura siguiente */

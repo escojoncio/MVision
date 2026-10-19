@@ -1,23 +1,23 @@
-/* Memoria PS1 para código recompilado. Host little-endian (arm64/x86-64). */
+/* Memoria original para código recompilado. Host little-endian (arm64/x86-64). */
 #include <stdio.h>
 #include <string.h>
 #include "cpu.h"
 
-uint8_t psx_ram[PSX_RAM_SIZE];
-uint8_t psx_scratch[0x400];
+uint8_t emu_ram[EMU_RAM_SIZE];
+uint8_t emu_scratch[0x400];
 static uint32_t io_regs[0x2000 / 4];
 
 static inline uint32_t phys(uint32_t a) { return a & 0x1FFFFFFFu; }
 
 void *mem_ptr(uint32_t a) {
     uint32_t p = phys(a);
-    if (p < 0x800000u) return &psx_ram[p & (PSX_RAM_SIZE - 1)];
-    if (p - PSX_SCRATCH < 0x400u) return &psx_scratch[p - PSX_SCRATCH];
+    if (p < 0x800000u) return &emu_ram[p & (EMU_RAM_SIZE - 1)];
+    if (p - EMU_SCRATCH < 0x400u) return &emu_scratch[p - EMU_SCRATCH];
     return NULL;
 }
 
 __attribute__((weak)) uint32_t io_read(uint32_t a, int size) {
-    uint32_t off = (phys(a) - PSX_IO) & ~3u;
+    uint32_t off = (phys(a) - EMU_IO) & ~3u;
     uint32_t v = io_regs[off / 4] >> ((phys(a) & 3) * 8);
     static uint8_t seen[0x2000 / 4];
     if (!seen[off / 4]++) fprintf(stderr, "[io] lectura %d B en 0x%08x (sin HLE)\n", size, a);
@@ -25,7 +25,7 @@ __attribute__((weak)) uint32_t io_read(uint32_t a, int size) {
 }
 
 __attribute__((weak)) void io_write(uint32_t a, uint32_t v, int size) {
-    uint32_t off = (phys(a) - PSX_IO) & ~3u;
+    uint32_t off = (phys(a) - EMU_IO) & ~3u;
     if (size == 4) io_regs[off / 4] = v;
     else {
         int sh = (phys(a) & 3) * 8;
@@ -39,7 +39,7 @@ static void bad(Cpu *c, uint32_t a, const char *op) {
     if (n++ < 32) fprintf(stderr, "[mem] %s fuera de mapa 0x%08x (ra=0x%08x)\n", op, a, c->r[31]);
 }
 
-static inline int is_io(uint32_t p) { return p - PSX_IO < 0x2000u; }
+static inline int is_io(uint32_t p) { return p - EMU_IO < 0x2000u; }
 
 #define READ(T, SZ)                                                     \
     void *h = mem_ptr(a);                                               \
@@ -56,7 +56,7 @@ uint32_t mem_r32(Cpu *c, uint32_t a) { READ(uint32_t, 4) }
     void *h = mem_ptr(a);                                               \
     if (h) {                                                            \
         memcpy(h, &v, sizeof v);                                        \
-        if (phys(a) < 0x800000u) { uint32_t i_ = phys(a) & (PSX_RAM_SIZE - 1); if (rt_codemap[i_ >> 8]) rt_code_hit(i_); } \
+        if (phys(a) < 0x800000u) { uint32_t i_ = phys(a) & (EMU_RAM_SIZE - 1); if (rt_codemap[i_ >> 8]) rt_code_hit(i_); } \
         return;                                                         \
     }                                                                   \
     if (is_io(phys(a))) { io_write(a, v, SZ); return; }                 \

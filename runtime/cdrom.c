@@ -1,6 +1,6 @@
 /* Disco virtual + HLE de la librería de CD.
  *
- * El juego no usa CdSearchFile: su propio sistema de ficheros lee el descriptor primario ISO9660
+ * El juego no usa la búsqueda de ficheros de la librería: su propio sistema de ficheros lee el descriptor primario ISO9660
  * (sector 16), la tabla de rutas y el directorio de datos, compara los nombres con su tabla interna
  * y guarda el LBA (+150) de cada fichero; el número de disco se deduce de qué ejecutable aparece en
  * ese directorio. Por eso aquí se sintetiza un ISO9660 mínimo pero coherente a partir de los ficheros
@@ -8,7 +8,7 @@
  *
  * Lecturas: el demonio de E/S del juego hace Setmode(0xA0: doble velocidad, sector 2340), Setloc,
  * ReadN y en el callback de "dato listo" saca 3 palabras de cabecera + hasta 512 palabras con
- * CdGetSector. Aquí ReadN entrega sectores de forma síncrona invocando ese callback hasta que el
+ * disc_sector. Aquí ReadN entrega sectores de forma síncrona invocando ese callback hasta que el
  * juego pausa (fin de fichero) o se agota el cupo por llamada; el resto lo entrega cd_pump(). */
 #include <stdio.h>
 #include <stdlib.h>
@@ -180,7 +180,7 @@ static int build_disc(Disc *d, const char *root) {
     /* 16: descriptor primario. */
     uint8_t *pvd = d->sys[0];
     pvd[0] = 1; memcpy(pvd + 1, "CD001", 5); pvd[6] = 1;
-    memset(pvd + 8, ' ', 32); memcpy(pvd + 8, "PLAYSTATION", 11);
+    memset(pvd + 8, ' ', 32); memcpy(pvd + 8, "\x50\x4c\x41\x59\x53\x54\x41\x54\x49\x4f\x4e", 11);   /* identificador de sistema del volumen */
     memset(pvd + 40, ' ', 32); memcpy(pvd + 40, "VDISC", 5);
     put32b(pvd + 80, d->total);
     put16b(pvd + 120, 1); put16b(pvd + 124, 1); put16b(pvd + 128, SEC);
@@ -373,7 +373,7 @@ static int reading;          /* 1 = ReadN/ReadS activo */
 static int in_delivery;      /* dentro de deliver(); seguro como global: corre en la excepción, que no conmuta de hilo */
 static uint8_t mode = 0x80;
 static uint8_t secbuf[2340];
-static uint32_t secoff;      /* bytes ya entregados por CdGetSector */
+static uint32_t secoff;      /* bytes ya entregados por disc_sector */
 static uint8_t last_result[8];
 
 /* Heurística de cambio automático: si el juego vuelve a escanear el directorio raíz/de datos
@@ -445,9 +445,9 @@ static void deliver(Cpu *c, int max) {
     in_delivery = 0;
 }
 
-/* Las finalizaciones de comando (CdSyncCallback) y los sectores (CdReadyCallback) se entregan como IRQ de
- * CD en la excepción HLE, nunca dentro de la propia llamada a CdControl: el demonio de E/S del juego
- * actualiza su estado *después* de volver de CdControl y espera la respuesta de forma asíncrona. */
+/* Las finalizaciones de comando (callback de sincronía) y los sectores (callback de dato listo) se entregan como IRQ de
+ * CD en la excepción HLE, nunca dentro de la propia llamada a disc_ctl: el demonio de E/S del juego
+ * actualiza su estado *después* de volver de disc_ctl y espera la respuesta de forma asíncrona. */
 #define SYNCQ 16
 static struct { uint8_t code, res[8]; } syncq[SYNCQ];
 static int syncq_n;
@@ -484,7 +484,7 @@ static int control(Cpu *c, uint32_t com, uint32_t param, uint32_t result) {
     com &= 0xFF;
     static int logn = -1;
     if (logn < 0) logn = getenv("MV_CDLOG") ? 1 : 0;
-    if (logn) fprintf(stderr, "[cd] CdControl 0x%02x param@%08x=%06x ra=%08x pos=%u reading=%d vbl=%u\n", com, param,
+    if (logn) fprintf(stderr, "[cd] disc_ctl 0x%02x param@%08x=%06x ra=%08x pos=%u reading=%d vbl=%u\n", com, param,
                       param ? mem_r32(c, param) & 0xFFFFFF : 0, c->r[31], pos, reading, hle_frame_count());
     cmdring[cmd_n % CMDRING].com = (uint8_t)com; cmdring[cmd_n % CMDRING].pos = pos; cmdring[cmd_n % CMDRING].vbl = hle_frame_count(); cmd_n++;
     switch (com) {
@@ -512,7 +512,7 @@ static int control(Cpu *c, uint32_t com, uint32_t param, uint32_t result) {
     if (com == 0x14) { bcd_msf(discs[cur].total, r + 1); }/* GetTD (aprox.) */
     if (com == 0x10 || com == 0x11) bcd_msf(pos + PREGAP, r);
     if (result) for (int i = 0; i < 8; i++) mem_w8(c, result + i, r[i]);
-    /* El comando completa enseguida, pero se avisa por IRQ de CD: CdSyncCallback(CdlComplete). */
+    /* El comando completa enseguida, pero se avisa por IRQ de CD: callback de sincronía (completado). */
     if (sync_cb && !in_delivery) queue_sync(2, r);
     if (reading) sys_irq_raise(IRQ_CD);
     return 1;
@@ -520,33 +520,33 @@ static int control(Cpu *c, uint32_t com, uint32_t param, uint32_t result) {
 
 /* ---------------- HLE ---------------- */
 
-void hle_CdInit(Cpu *c) { reading = 0; mode = 0x80; V0 = 1; }
-void hle_CdReset(Cpu *c) { reading = 0; V0 = 1; }
-void hle_CdFlush(Cpu *c) { (void)c; }
-void hle_CdMix(Cpu *c) { V0 = 1; }
-/* En este EXE los símbolos identificados como CdSync/CdReady son los registradores de callback
+void hle_disc_init(Cpu *c) { reading = 0; mode = 0x80; V0 = 1; }
+void hle_disc_reset(Cpu *c) { reading = 0; V0 = 1; }
+void hle_disc_flush(Cpu *c) { (void)c; }
+void hle_disc_mix(Cpu *c) { V0 = 1; }
+/* En este EXE los símbolos identificados como disc_sync/disc_ready son los registradores de callback
  * (guardan a0 y devuelven el anterior). */
-void hle_CdSync(Cpu *c) { uint32_t o = sync_cb; sync_cb = A0; V0 = o; }
-void hle_CdReady(Cpu *c) { uint32_t o = ready_cb; ready_cb = A0; V0 = o; }
+void hle_disc_sync(Cpu *c) { uint32_t o = sync_cb; sync_cb = A0; V0 = o; }
+void hle_disc_ready(Cpu *c) { uint32_t o = ready_cb; ready_cb = A0; V0 = o; }
 
-void hle_CdControl(Cpu *c) {
+void hle_disc_ctl(Cpu *c) {
     uint32_t com = A0 & 0xFF;
     V0 = control(c, com, A1, A2);
 }
-void hle_CdControlB(Cpu *c) { hle_CdControl(c); }
-void hle_CdControlF(Cpu *c) { V0 = control(c, A0, A1, 0); }
+void hle_disc_ctl_b(Cpu *c) { hle_disc_ctl(c); }
+void hle_disc_ctl_f(Cpu *c) { V0 = control(c, A0, A1, 0); }
 
-/* CdGetSector(buf, nwords): copia del sector actual (formato 2340 si modo 0x20). */
-void hle_CdGetSector(Cpu *c) {
+/* disc_sector(buf, nwords): copia del sector actual (formato 2340 si modo 0x20). */
+void hle_disc_sector(Cpu *c) {
     uint32_t dst = A0, n = A1 * 4;
     uint32_t lim = (mode & 0x20) ? 2340 : 2048 + 12;
-    if (getenv("MV_CDLOG")) fprintf(stderr, "[cd] CdGetSector dst=%08x words=%u secoff=%u mode=%02x first=%02x %02x %02x %02x\n", A0, A1, secoff, mode, secbuf[secoff], secbuf[secoff+1], secbuf[secoff+2], secbuf[secoff+3]);
+    if (getenv("MV_CDLOG")) fprintf(stderr, "[cd] disc_sector dst=%08x words=%u secoff=%u mode=%02x first=%02x %02x %02x %02x\n", A0, A1, secoff, mode, secbuf[secoff], secbuf[secoff+1], secbuf[secoff+2], secbuf[secoff+3]);
     for (uint32_t i = 0; i < n; i++) {
         uint8_t b = secoff < lim ? secbuf[secoff] : 0;
         secoff++;
         mem_w8(c, dst + i, b);
     }
-    rt_ov_written(dst, n);   /* las overlays de zona se cargan con CdGetSector: invalida la recompilada */
+    rt_ov_written(dst, n);   /* las overlays de zona se cargan con disc_sector: invalida la recompilada */
     V0 = 1;
 }
 

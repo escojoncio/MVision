@@ -291,7 +291,7 @@ void vr_input_update(vr_input_t *s, const vr_input_frame_t *f, vr_pad_t *out) {
             float mag = mmag * c->walk_scale;
             lin = mag;
             lx = vr_input_axis_u8(mag * sinf(rel));
-            ly = vr_input_axis_u8(-mag * cosf(rel));     /* PS1: abajo positivo */
+            ly = vr_input_axis_u8(-mag * cosf(rel));     /* original: abajo positivo */
         }
         buttons |= crouch_step(s, f, dt);
     }

@@ -58,7 +58,7 @@ static uint64_t fnv1a64(const uint8_t *p, uint32_t n) {
     return h;
 }
 
-static uint32_t ov_word(uint32_t a) { uint32_t v; memcpy(&v, &psx_ram[a & (PSX_RAM_SIZE - 1)], 4); return v; }
+static uint32_t ov_word(uint32_t a) { uint32_t v; memcpy(&v, &emu_ram[a & (EMU_RAM_SIZE - 1)], 4); return v; }
 
 static uint32_t ov_sample_calc(void) {
     uint32_t step = ((ov_whi - ov_wlo) / 64) & ~3u, h = 2166136261u;
@@ -85,8 +85,8 @@ static void ov_detect(void) {
     for (unsigned i = 0; i < rt_ov_count; i++) {
         const OvDesc *d = &rt_ov_index[i];
         uint32_t a = d->base + d->off;
-        if (a + d->len > 0x80000000u + PSX_RAM_SIZE || !d->len) continue;
-        const uint8_t *p = &psx_ram[a & (PSX_RAM_SIZE - 1)];
+        if (a + d->len > 0x80000000u + EMU_RAM_SIZE || !d->len) continue;
+        const uint8_t *p = &emu_ram[a & (EMU_RAM_SIZE - 1)];
         uint32_t w0;
         memcpy(&w0, p, 4);
         if (w0 != d->w0 || fnv1a64(p, d->len) != d->hash) continue;
@@ -276,7 +276,7 @@ void rt_divu(Cpu *c, uint32_t a, uint32_t b) {
 /* --- COP0 mínimo: SR (12), CAUSE (13), EPC (14). La entrega de interrupciones es la excepción HLE (irq.c):
  * se toma si SR.IEc (bit 0) y SR.IM2 (bit 10) y hay IRQ pendiente. Esos dos bits son propios de cada hilo
  * (el kernel restaura SR desde el TCB al cambiar de contexto; fiber.c los guarda y repone). El juego los
- * manipula con mtc0 (SwEnter/ExitCriticalSection: &~0x401 / |0x401) y con syscall (IEc solamente). --- */
+ * manipula con mtc0 (entrar/salir de sección crítica: &~0x401 / |0x401) y con syscall (IEc solamente). --- */
 static uint32_t cop0[32] = {[12] = 0x401};
 uint32_t rt_irq_enabled = 1;
 
@@ -299,7 +299,7 @@ void cop0_rfe(Cpu *c) {
     sr_changed();
 }
 
-/* syscall: a0 = 1 EnterCriticalSection, 2 ExitCriticalSection. */
+/* syscall: a0 = 1 entrar en sección crítica, 2 salir de sección crítica. */
 void rt_syscall(Cpu *c, uint32_t pc) {
     switch (c->r[4]) {
     case 1: c->r[2] = cop0[12] & 1u; cop0[12] &= ~1u; sr_changed(); break;
