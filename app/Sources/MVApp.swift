@@ -18,7 +18,7 @@ struct MVApp: App {
                     XRControl.shared.setPausedHook { paused in
                         Task { @MainActor in
                             guard model.phase == .running else { return }
-                            if paused { mv_host_pause(); model.audio.pause() }
+                            if paused { model.audio.pause(); mv_host_pause() }
                             else { mv_host_resume(); model.audio.resume() }
                         }
                     }

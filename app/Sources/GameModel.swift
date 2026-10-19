@@ -66,6 +66,7 @@ final class GameModel: ObservableObject {
         }
         mv_host_set_sigs(sigs)
         mv_vrhost_install()   // capa VR (cámara, escenas): antes de arrancar el motor
+        mv_vrhost_set_render_mode(UserDefaults.standard.bool(forKey: "xr.view.render") ? 1 : 0)   // motor de dibujo elegido en el menú VR (MV_RENDER del entorno manda)
 
         let r = mv_host_start(exe.path, discs.joined(separator: ";"), Storage.cardDir.path)   // el hilo de emulación lee del disco con el acceso de seguridad aún abierto
         if r != 0 {
@@ -133,8 +134,8 @@ final class GameModel: ObservableObject {
             mv_host_resume()
             audio.resume()
         } else {
-            mv_host_pause()
             audio.pause()
+            mv_host_pause()
             input.releaseAll()
         }
     }

@@ -35,6 +35,7 @@ struct XRViewConfig {
     var wristHandSide = false       // false: los paneles se apilan hacia el codo (encima del radar); true: hacia la mano
     var hideRealHands = true        // pide al sistema ocultar tus manos y brazos reales mientras dura el espacio inmersivo (se ven los del personaje)
     var debugAxes = false           // dibuja los ejes de los mandos (dispositivo, agarre, apuntado) y de las manos del personaje
+    var nativeRender = false        // motor de dibujo: false = lista de la GPU, true = escena nativa leída de la RAM (solo si está disponible; vr/native)
     var smoothMotion = true         // fluidez de la locomoción: el mundo se corrige por fotograma de render (giro del stick y avance extrapolados entre escenas del juego)
 
     enum Cutscene: String, CaseIterable { case stereo, cinema, diorama, scene }
@@ -72,6 +73,7 @@ struct XRViewConfig {
         c.hideRealHands = b("xr.view.hideHands", true)
         c.debugAxes = b("xr.view.debugAxes", false)
         c.smoothMotion = b("xr.view.smoothMotion", true)
+        c.nativeRender = b("xr.view.render", false)
         return c
     }
 
@@ -92,6 +94,7 @@ struct XRViewConfig {
         d.set(hideRealHands, forKey: "xr.view.hideHands")
         d.set(debugAxes, forKey: "xr.view.debugAxes")
         d.set(smoothMotion, forKey: "xr.view.smoothMotion")
+        d.set(nativeRender, forKey: "xr.view.render")
     }
 }
 
@@ -146,7 +149,7 @@ struct XRNav: Equatable {
 }
 
 enum XRMenuItem: Int, CaseIterable {
-    case resume, recenter, width, distance, curve, sharp, integerScale, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, debugAxes, exit
+    case resume, recenter, calibrateHands, width, distance, curve, sharp, integerScale, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, renderMode, turnMode, vignette, hideHands, debugAxes, exit
 }
 
 final class XRPresenter {
@@ -199,7 +202,7 @@ final class XRPresenter {
     var onRecenter: (() -> Void)?
     var onExit: (() -> Void)?
 
-    private static let menuW = 1024, menuH = 920
+    private static let menuW = 1024, menuH = 980
 
     init(device: MTLDevice) {
         cinema = XRCinema(device: device)
@@ -310,6 +313,9 @@ final class XRPresenter {
         switch it {
         case .resume: closeMenu()
         case .recenter: onRecenter?(); closeMenu()
+        case .calibrateHands:
+            // Izquierda borra la calibración; seleccionar/derecha empieza una cuenta atrás de 3 s (un pulso háptico por segundo) para poner los brazos rectos al frente.
+            if dir < 0 { mv_vrgame_clear_hand_calibration() } else { mv_vrgame_calibrate_hands(3.0); closeMenu() }
         case .width: cfg.width = cycle(cfg.width, XRViewConfig.widths, dir)
         case .distance: cfg.distance = cycle(cfg.distance, XRViewConfig.distances, dir)
         case .curve: cfg.curve = cycle(cfg.curve, XRViewConfig.curves, dir)
@@ -325,6 +331,7 @@ final class XRPresenter {
         case .wristScale: cfg.wristScale = cycle(cfg.wristScale, XRViewConfig.wristScales, dir)
         case .wristSide: cfg.wristHandSide.toggle()
         case .smoothMotion: cfg.smoothMotion.toggle(); cfg.save()
+        case .renderMode: cfg.nativeRender.toggle(); cfg.save(); Self.applyRender(cfg.nativeRender)
         case .turnMode: Self.cycleTurnMode(dir)
         case .vignette: Self.cycleVignette(dir)
         case .hideHands: cfg.hideRealHands.toggle(); cfg.save()      // la escena lo lee de UserDefaults (@AppStorage): se guarda al momento
@@ -346,6 +353,11 @@ final class XRPresenter {
             switch it {
             case .resume: return ("Volver al juego", "")
             case .recenter: return ("Recentrar la vista", "")
+            case .calibrateHands:
+                let cd = mv_vrgame_calibration_countdown()
+                var q: [Float] = [0, 0, 0, 0]
+                let have = mv_vrgame_hand_calibration(0, &q) != 0 || mv_vrgame_hand_calibration(1, &q) != 0
+                return ("Calibrar manos", cd > 0 ? "brazos rectos: \(Int(cd.rounded(.up))) s" : (have ? "Hecha (izq. borra)" : "Sin calibrar"))
             case .width: return ("Tamaño de la pantalla", m(cfg.width))
             case .distance: return ("Distancia de la pantalla", m(cfg.distance))
             case .curve: return ("Curvatura de la pantalla", curveName[ci])
@@ -360,6 +372,7 @@ final class XRPresenter {
             case .wristScale: return ("Tamaño en la muñeca", "\(Int((cfg.wristScale * 100).rounded())) cm")
             case .wristSide: return ("Lado en la muñeca", cfg.wristHandSide ? "Hacia la mano" : "Hacia el codo")
             case .smoothMotion: return ("Suavizado del movimiento", yn(cfg.smoothMotion))
+            case .renderMode: return ("Motor de dibujo", Self.renderName(cfg.nativeRender))
             case .turnMode: return ("Giro con la palanca derecha", Self.turnModeName())
             case .vignette: return ("Viñeta de confort", Self.vignetteName())
             case .hideHands: return ("Ocultar mis manos reales", yn(cfg.hideRealHands))
@@ -367,6 +380,22 @@ final class XRPresenter {
             case .exit: return ("Salir de VR", "")
             }
         }
+    }
+
+    // Motor de dibujo (vr/host/vrhost.h): GPU = reconstrucción desde la lista de dibujo; Nativo = escena leída de la RAM del motor. Con MV_RENDER en el entorno el modo está fijado.
+    private static func applyRender(_ native: Bool) {
+#if !MV_BENCH
+        mv_vrhost_set_render_mode(native ? 1 : 0)
+#endif
+    }
+    private static func renderName(_ native: Bool) -> String {
+#if MV_BENCH
+        return native ? "Nativo" : "GPU"
+#else
+        if mv_vrhost_render_env_locked() != 0 { return mv_vrhost_render_mode() != 0 ? "Nativo (fijado)" : "GPU (fijado)" }
+        if !native { return "GPU" }
+        return mv_vrhost_native_available() != 0 ? "Nativo" : "Nativo (aún no disponible: GPU)"
+#endif
     }
 
     // Giro del stick y viñeta de confort: viven en los ajustes de vr_input (VRInputSettings, "vri.*"). El banco de render no enlaza VRInput.

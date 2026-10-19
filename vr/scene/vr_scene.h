@@ -264,6 +264,8 @@ typedef struct {
     int32_t cine_cut;         /* 1 si esta escena es el primer fotograma de un plano nuevo */
     int32_t cine_cover;       /* nº de recubrimientos semitransparentes a pantalla completa (fundidos) detectados en la lista */
     const uint8_t *tri_cause; /* VR_TC_* de cada triángulo de v (nv/3 bytes; misma vida que v) */
+    /* --- render nativo (lo rellena el host; vr_scene_build lo deja a cero) --- */
+    int32_t native_3d;        /* 1: el 3D de esta escena sale de la escena nativa (vr/native/ns_bridge.h): los batches 3D (kind 0/1) se han quitado de b; quedan solo 2D (kind 2) y filtro (kind 3) */
 } VrScene;
 
 typedef struct {
