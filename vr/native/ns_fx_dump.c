@@ -12,7 +12,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--items")) items = 1;
         else if (!strcmp(argv[i], "--buf") && i + 1 < argc) o.buffer = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--ysc") && i + 1 < argc) o.y_scale = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--ysc") && i + 1 < argc) o.tune.y_scale = (float)atof(argv[++i]);
         else path = argv[i];
     }
     if (!path) { fprintf(stderr, "uso: %s ram.bin [--items] [--buf 0|1] [--ysc F]\n", argv[0]); return 2; }
@@ -24,8 +24,8 @@ int main(int argc, char **argv) {
     int r = ns_fx_extract(ram, &o, s);
     printf("extract=%d cam.valid=%d H=%.0f det_neg=%d buffer=%d map=0x%X\n", r, s->cam.valid, s->cam.proj_h, s->cam.det_neg, s->buffer, s->cur_map);
     const NsFxScreen *sc = &s->screen;
-    printf("pantalla: status=0x%X nvg=%d term=%d agua(present=%d active=%d tinte=%.2f,%.2f,%.2f) gas(present=%d active=%d inten=%.2f) fundido(active=%d blanco=%d cantidad=%.2f)\n",
-           sc->game_status, sc->nvg, sc->thermal, sc->water.present, sc->water.active, sc->water.tint[0], sc->water.tint[1], sc->water.tint[2], sc->gas.present, sc->gas.active, sc->gas.intensity,
+    printf("pantalla: estado=0x%X modo_a=%d modo_b=%d destello=%d agua(present=%d active=%d tinte=%.2f,%.2f,%.2f) gas(present=%d active=%d inten=%.2f) fundido(active=%d blanco=%d cantidad=%.2f)\n",
+           sc->status, sc->mode_a, sc->mode_b, sc->flash, sc->water.present, sc->water.active, sc->water.tint[0], sc->water.tint[1], sc->water.tint[2], sc->gas.present, sc->gas.active, sc->gas.intensity,
            sc->fade.active, sc->fade.white, sc->fade.amount);
     if (sc->water.present) printf("  agua caja (%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f) fase=%u\n", sc->water.box_min[0], sc->water.box_min[1], sc->water.box_min[2], sc->water.box_max[0], sc->water.box_max[1], sc->water.box_max[2], sc->water.phase);
     printf("prims=%u sortonly=%u invisibles=%u otro_mapa=%u malas=%u libres=%u desbordadas=%u elementos=%u (cull motor=%u) sombras_obj=%u\n", s->stats.n_prims, s->stats.n_sortonly, s->stats.n_invisible,
