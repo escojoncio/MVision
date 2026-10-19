@@ -128,6 +128,7 @@ final class RGRenderer {
     private var hudRect = simd_float4(0, 0, 320, 240)
     private var lastIndex: UInt32?
     private var hudDone = false
+    private var statDraws = 0, statPasses = 0, statGroups = 0
 
     // por frame (anillo de 3 con semáforo)
     private final class FrameSlot { var buf: MTLBuffer?; var cap = 0; var used = 0 }
@@ -153,7 +154,7 @@ final class RGRenderer {
         case .bgra8Unorm_srgb, .rgba8Unorm_srgb, .rgba16Float: linearOutput = true
         default: linearOutput = false
         }
-        let lib0 = device.makeDefaultLibrary()
+        let lib0 = MVLib.library(device)
         library = lib0
         if lib0 == nil { print("[RGRenderer] sin biblioteca Metal por defecto: faltan vr_*.metal en el target") }
         if MemoryLayout<VrVtx>.stride != MemoryLayout<VrGpuVtx>.stride {
@@ -195,6 +196,11 @@ final class RGRenderer {
                            sampleCount: sampleCount, viewCount: self.viewCount, linearOutput: linearOutput)
         weapon = WeaponRenderer(device: device, colorFormat: colorFormat, depthFormat: depthFormat,
                                 sampleCount: sampleCount, viewCount: self.viewCount)
+    }
+
+    /// Resumen para el registro (1 vez por segundo): estado de la escena y trabajo del último `encode`.
+    func diagnostics() -> String {
+        "tiene3D=\(has3D) hayEscena=\(haveScene) lotes=\(batches.count) (3D=\(batches.filter { $0.kind != 2 }.count) 2D=\(batches.filter { $0.kind == 2 }.count)) pases=\(statPasses) dibujos3D=\(statDraws) drawWorld=\(drawWorld) drawBody=\(drawBody) msaa=\(sampleCount) lineal=\(linearOutput) radar=\(radar != nil)"
     }
 
     // MARK: pipelines
@@ -481,6 +487,7 @@ final class RGRenderer {
         let fs = frames[frameNo % 3]
         frameNo += 1
         fs.used = 0
+        statDraws = 0; statPasses = 0
 
         // 1) escenas nuevas: eventos de VRAM + geometría. Si llegan varias listas, los eventos de las anteriores se
         //    aplican enteros al principio y solo se dibuja la última.
@@ -879,6 +886,7 @@ final class RGRenderer {
         let seg = range.filter { batches.indices.contains($0) && batches[$0].kind != 2 }
         if !first && seg.isEmpty && !last { return }
         let samples = color.sampleCount
+        statPasses += 1
         let pd = MTLRenderPassDescriptor()
         let ca = pd.colorAttachments[0]!
         ca.texture = color
@@ -947,6 +955,7 @@ final class RGRenderer {
             enc.setRenderPipelineState(p)
             enc.setVertexBufferOffset(bt.first * stride, index: Int(VR_BUF_VERTS))
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: bt.count)
+            statDraws += 1
         }
         // Orden del ensamblador: por época, opacos y luego semitransparentes (se respeta tal cual).
         var curKind = -1
