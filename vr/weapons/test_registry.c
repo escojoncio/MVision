@@ -49,13 +49,23 @@ static void test_registry_shape(void) {
     int present = 0;
     for (int i = 0; i < w_registry_count; i++) present += w_registry[i] != NULL;
     CHECK(present == N_EXPECTED, "armas presentes tras enlazar el .a: %d/%d", present, N_EXPECTED);
+    static const uint32_t forbidden_h[] = { 0x8b29e492u, 0x3ac74425u, 0xdd6cdf21u, 0x7e89edb6u, 0x1a782dbfu, 0x61789d84u };
     for (int i = 0; i < w_registry_count; i++) {
         const WeaponDef *d = w_registry[i];
         if (!d) continue;
         CHECK(d->id && d->id[0], "arma %d sin id", i);
         int id_ok = 1;
         for (const char *q = d->id; *q; q++) id_ok &= (*q >= 'a' && *q <= 'z') || (*q >= '0' && *q <= '9') || *q == '_';
-        CHECK(id_ok, "id no neutro: %s", d->id);
+        CHECK(id_ok, "id no neutro (caracteres): %s", d->id);
+        /* Vigilancia de nombres prohibidos sin nombres en claro: FNV-1a de 32 bits de cada subcadena del id. */
+        for (unsigned k = 0; k < sizeof forbidden_h / sizeof *forbidden_h; k++) {
+            int hit = 0;
+            for (const char *a = d->id; *a; a++) {
+                uint32_t h = 0x811c9dc5u;
+                for (const char *b = a; *b; b++) { h = (h ^ (uint8_t)*b) * 0x01000193u; if (h == forbidden_h[k]) hit = 1; }
+            }
+            CHECK(!hit, "id no neutro (subcadena prohibida %u): %s", k, d->id);
+        }
         for (int j = i + 1; j < w_registry_count; j++) {
             if (!w_registry[j]) continue;
             CHECK(strcmp(d->id, w_registry[j]->id), "id repetido: %s", d->id);
