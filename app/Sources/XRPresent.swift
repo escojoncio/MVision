@@ -196,6 +196,7 @@ final class XRPresenter {
     private var shotView = matrix_identity_float4x4
     private var shotSeen: UInt32 = 0
     private var cutVeil: Float = 0
+    private var pendVeil: Float = 0       // velo mientras la vista espera a la cámara VR (VRV_R_PENDING)
 
     // Menú
     private(set) var menuOpen = false
@@ -599,7 +600,10 @@ final class XRPresenter {
             case .cinema: break
             }
         }
-        if target != .world || shown != .world { cinema?.update() }
+        // Transición con control pero sin cámara VR todavía (fin de radio / de escena, VRV_R_PENDING = 12): la vista queda congelada y se oscurece; nunca se enseña el fotograma
+        // plano del motor (cenital, baja resolución) como paso intermedio. El destino es el mundo.
+        let pending = gs.view_reason == 12
+        if (target != .world || shown != .world) && !pending { cinema?.update() }
         // Dentro de la escena: la cámara del plano se fija al empezar el plano; en cada corte nuevo anclaje y fundido rápido (0,15 s).
         if shown != .scene { shotView = gameView; shotSeen = shot }
         if shot != shotSeen {
@@ -768,7 +772,8 @@ final class XRPresenter {
         }
 
         // 7) velo de transición y menú
-        let veilNow = max(veil, cutVeil, collisionFade)
+        if pending { pendVeil = min(1, pendVeil + d / 0.15) } else { pendVeil = max(0, pendVeil - d / 0.28) }
+        let veilNow = max(veil, cutVeil, collisionFade, pendVeil)
         if veilNow > 0.001 {
             var v = XRDrawItem(kind: .veil, texture: nil)
             v.opacity = veilNow

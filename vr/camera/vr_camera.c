@@ -100,6 +100,7 @@ static inline int ptr_ok(uint32_t p, uint32_t len) {
 
 typedef struct {
     VrCamConfig cfg;
+    int comms_hold;                       /* fotogramas de gracia consumidos con la radio recién abierta */
     int ok_count, want, latched;          /* decisión por frame (gancho) / por cámara (construcción) */
     int have_ref, need_recenter;
     int zoom_capped;                      /* VBlanks que faltan para dar por terminado el recorte de zoom (el juego pidió más que el tope) */
@@ -256,6 +257,10 @@ void vrcam_frame(const uint8_t *ram, const BridgeState *st) {
     S.vb++;
     if (!st) { bridge_read(ram, &S.bs); st = &S.bs; }
     int ok = (st->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && st->has_player && st->cam_ctl && S.cfg.head;   /* cam_ctl = in_control o ventana de armas/objetos / pausa en partida: la cámara VR no se apaga con un menú 2D encima */
+    /* Radio recién abierta: la cámara VR aguanta VRCAM_COMMS_GRACE fotogramas más para que el mundo siga en pantalla hasta que el códec esté dibujado
+     * (la vista pasa al cine cuando se agota; ver vr_view.c, to_comms). */
+    if (!ok && S.want && st->comms && st->has_player && (st->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && !st->cinematic && S.cfg.head && S.comms_hold < VRCAM_COMMS_GRACE) { S.comms_hold++; ok = 1; }
+    else if (!st->comms) S.comms_hold = 0;
     if (ok) { if (S.ok_count < 1 << 20) S.ok_count++; } else S.ok_count = 0;
     int want = S.ok_count >= S.cfg.on_frames;
     if (want && !S.want) { S.have_ref = 0; S.st.activations++; }

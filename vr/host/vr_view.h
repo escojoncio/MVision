@@ -35,7 +35,8 @@ enum {
     VRV_R_NO_CAM,          /* con control pero la cámara VR no está (aún) activa o no existe */
     VRV_R_DEAD,            /* el jugador ha muerto (vida a cero / fin de partida): el motor enseña su escena de muerte con su propia cámara */
     VRV_R_SELECTOR,        /* ventana de armas/objetos con la cámara VR activa: MUNDO en primera persona + ventana como panel flotante */
-    VRV_R_PAUSE_WORLD      /* pausa con la cámara VR activa: igual que el selector */
+    VRV_R_PAUSE_WORLD,     /* pausa con la cámara VR activa: igual que el selector */
+    VRV_R_PENDING          /* transición: el jugador ya tiene el control (fin de radio / de escena) pero la cámara VR aún no está: vista congelada, la app muestra negro, NUNCA cine plano */
 };
 
 typedef struct {
@@ -72,6 +73,10 @@ typedef struct {
     uint32_t kind_switches;
     /* --- registro --- */
     int prev_reason;       /* motivo del fotograma anterior */
+    int to_comms;          /* fotogramas de radio seguidos antes de pasar de mundo a la pantalla de cine (el códec debe estar ya dibujado) */
+    int pend_max;          /* fotogramas máximos de VRV_R_PENDING seguidos; pasados, sin cámara VR = cine (cámara no disponible) */
+    int pend_run;
+    int cam_seen;          /* la cámara VR ha estado activa alguna vez (si no, no hay transición que esperar: edición no reconocida) */
     unsigned changed;      /* tras vrview_step: VRV_CH_* de lo que cambió en ese fotograma (0 = nada) */
 } VrView;
 
