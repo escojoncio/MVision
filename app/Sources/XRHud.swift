@@ -41,10 +41,13 @@ final class XRFinalPass {
     private let dsHud: MTLDepthStencilState
     private let dsOverlay: MTLDepthStencilState
     private let sampler: MTLSamplerState
+    /// Diagnóstico: elementos dibujados por el último `encode` (por tipo) y resolución de profundidad.
+    private(set) var lastCounts = ""
+    private var nDrawn = [XRDrawItem.Kind: Int]()
 
     init?(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat, layered: Bool) {
         self.layered = layered
-        guard let lib = device.makeDefaultLibrary() else { return nil }
+        guard let lib = MVLib.library(device) else { return nil }
         let sfx = layered ? "_layered" : ""
         guard let fsV = lib.makeFunction(name: "xr_fs_vertex" + sfx),
               let drF = lib.makeFunction(name: "xr_depth_resolve" + sfx),
@@ -108,6 +111,10 @@ final class XRFinalPass {
                 msaaDepth: [MTLTexture]?, viewports: [MTLViewport], views: [simd_float4x4],
                 projections: [simd_float4x4], items: [XRDrawItem], viewCount: Int) {
         let resolve = msaaDepth != nil
+        nDrawn.removeAll()
+        defer {
+            lastCounts = "resolve=\(resolve) pantalla=\(nDrawn[.screen] ?? 0) panel=\(nDrawn[.panel] ?? 0) menu=\(nDrawn[.menu] ?? 0) velo=\(nDrawn[.veil] ?? 0) de \(items.count)"
+        }
         if !resolve && items.isEmpty { return }       // nada que hacer
         guard views.count >= 2, projections.count >= 2, viewports.count >= 1 else { return }
 
@@ -162,6 +169,7 @@ final class XRFinalPass {
                 enc.setDepthStencilState(dsOverlay)
                 enc.setFragmentBytes(&c, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3, instanceCount: instances)
+                nDrawn[.veil, default: 0] += 1
                 continue
             }
             guard let tex = it.texture else { continue }
@@ -179,6 +187,7 @@ final class XRFinalPass {
             enc.setFragmentTexture(tex, index: 0)
             enc.setFragmentSamplerState(sampler, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: Int(2 * (max(it.cols, 1) + 1)), instanceCount: instances)
+            nDrawn[it.kind, default: 0] += 1
         }
     }
 }
