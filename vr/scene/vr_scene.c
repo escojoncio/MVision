@@ -59,6 +59,8 @@ static VrState *g_st; static size_t g_st_cap, g_st_n;
 static uint32_t *g_hash; static size_t g_hash_cap; /* tabla abierta: índice+1 en g_st */
 static uint32_t *g_next; static size_t g_next_cap;
 static uint8_t *g_fate; static uint32_t g_fate_cap;
+static uint32_t *g_tsrc; static uint32_t g_tsrc_cap;   /* (pruebas) op de origen de cada triángulo de VrScene.v, en el orden de salida */
+void vr_scene_set_tri_src(uint32_t *buf, uint32_t cap) { g_tsrc = buf; g_tsrc_cap = buf ? cap : 0; }
 void vr_scene_set_fate(uint8_t *buf, uint32_t cap) { g_fate = buf; g_fate_cap = buf ? cap : 0; }
 /* El destino de un polígono con varios triángulos es el mejor de ellos (emitido > descartado); `f` solo sustituye a VR_FATE_NONE o a un descarte. */
 static void fate_set(uint32_t i, uint8_t f) {
@@ -189,7 +191,12 @@ static int quad_coherent(const GpuOp *op) {
     float lm = fmaxf(l1, fmaxf(l2, l3));
     if (!(nn > 1e-3f * lm * lm) || !isfinite(nn)) return 0;
     float d = fabsf(n[0]*e3[0] + n[1]*e3[1] + n[2]*e3[2]) / nn;
-    return d < 0.02f * lm;
+    if (!(d < 0.02f * lm)) return 0;
+    /* 2.º triángulo (v1,v2,v3): un vértice duplicado o colineal lo deja degenerado y el cuadrilátero rellenaría basura bajo recon_ambig. */
+    float f1[3] = {v[2].vx - v[1].vx, v[2].vy - v[1].vy, v[2].vz - v[1].vz}, f2[3] = {v[3].vx - v[1].vx, v[3].vy - v[1].vy, v[3].vz - v[1].vz};
+    float m[3] = {f1[1]*f2[2] - f1[2]*f2[1], f1[2]*f2[0] - f1[0]*f2[2], f1[0]*f2[1] - f1[1]*f2[0]};
+    float mn = sqrtf(m[0]*m[0] + m[1]*m[1] + m[2]*m[2]);
+    return mn > 1e-3f * lm * lm && isfinite(mn);
 }
 
 /* Modelo de la GTE (RTPS/RTPT con sf=1): SXY entero que produce el vértice de vista (vx,vy,vz) con la proyección (H, OFX, OFY) de la primitiva. Devuelve 1 si reproduce
@@ -888,6 +895,8 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 }
                 memcpy(&g_vtx[nv], t->v, sizeof t->v);
                 g_tcause[nv / 3] = t->cause;
+
+                if (nv / 3 < g_tsrc_cap) g_tsrc[nv / 3] = t->src_op;
                 nv += 3; cur->count += 3;
             }
         }

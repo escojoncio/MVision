@@ -23,10 +23,10 @@ SRC_VR := $(VR)/bridge/bridge.c $(VR)/bridge/bridge_addrs.c $(VR)/camera/vr_came
 SRC_RT := $(filter-out $(RT)/headless.c $(RT)/test_%.c $(RT)/wip_%.c,$(wildcard $(RT)/*.c))
 INC := -I. -I$(RT) -I$(VR)/bridge -I$(VR)/camera -I$(VR)/input -I$(VR)/scene -I$(VR)/body -I$(VR)/radar -I$(VR)/hands -I$(VR)/weapons -I$(VR)/gameplay -I$(VR)/ai -I$(VR)/host
 
-$(BUILD)/vrprobe: vrprobe.c probe_raster.c probe_raster.h $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) $(wildcard $(VR)/*/*.h)
+$(BUILD)/vrprobe: vrprobe.c probe_raster.c probe_raster.h probe_view.c probe_view.h $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) $(wildcard $(VR)/*/*.h)
 	@mkdir -p $(BUILD)
 	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
-	  -o $@ vrprobe.c probe_raster.c $(SRC_VR) $(SRC_RT) -lm -lpthread
+	  -o $@ vrprobe.c probe_raster.c probe_view.c $(SRC_VR) $(SRC_RT) -lm -lpthread
 
 $(SIGS): $(SIGS_REF)
 	@mkdir -p $(BUILD)
