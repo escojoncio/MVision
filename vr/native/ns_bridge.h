@@ -128,6 +128,32 @@ int ns_native_decide(const NsView *v, const NsDecideIn *in, NsDecision *out);
 /* El render nativo falló a mitad de fotograma: vuelve a GPU en ese mismo fotograma (native = 0, skip = 0, why = NS_WHY_FAILED). */
 void ns_native_fail(NsDecision *d);
 
+/* ---- coherencia nativo / lista de la GPU (consumidor) ----
+ * Compara, en el MISMO espacio (mundo VR, metros), lo que la escena nativa y la lista de la GPU dicen de la cámara y del mundo, con datos independientes:
+ *   ruta GPU:    mapa mundo del motor -> VR que declara VrScene (user_R, k = user_k*scale, origen de la lista origin_game, eye_h, p_ref) y su game_view (vista -> VR);
+ *   ruta nativa: NsScene.to_vr (3x4 fila-mayor) y la cámara del motor de esa escena (cam.eye, cam.rot = vista -> mundo, columnas der/abajo/adelante).
+ * Con la misma cámara de partida salen 0; si la escena nativa es de otro fotograma/zona (origen o giro distintos) salen distancias reales. El ojo del motor es el origen de la
+ * lista por construcción, así que comparar «ojo nativo en VR» con VrScene.eye_vr (= p_ref) NO es una prueba: aquí se lleva el ojo NATIVO por el mapa de la GPU. */
+typedef struct {
+    float user_R[9], k, user_eye_h, user_p_ref[3];   /* mapa de la GPU (VrScene.user_R, user_k*scale, user_eye_h, user_p_ref) */
+    float origin[3];                                 /* VrScene.origin_game (mundo del motor) */
+    float game_view[16];                             /* VrScene.game_view (columna-mayor): vista del juego -> VR */
+    float to_vr[12];                                 /* NsScene.to_vr */
+    float cam_eye[3], cam_rot[9];                    /* NsScene.cam.eye / cam.rot (fila-mayor) */
+    float units_per_m;
+} NsCohIn;
+typedef struct {
+    int ok;                  /* 1: entradas finitas y evaluable */
+    float d_eye;             /* m: ojo nativo (to_vr * cam.eye) frente al mismo punto del motor llevado por el mapa de la GPU */
+    float d_probe;           /* m: máximo de d_eye y de dos puntos a 2 m delante y 1 m a la derecha del ojo nativo */
+    float d_rot;             /* grados: giro entre la cámara nativa y game_view (adelante y derecha) */
+    float nat_eye[3], gpu_eye[3];   /* ojo nativo en VR (to_vr * cam.eye) y VrScene.eye_vr (game_view traslación) */
+} NsCohOut;
+int ns_coherence(const NsCohIn *in, NsCohOut *out);
+/* Misma comprobación con punteros planos (para Swift, donde los arrays de las estructuras de C son tuplas). */
+int ns_coherence_flat(const float user_R[9], float k, float eye_h, const float p_ref[3], const float origin[3], const float game_view[16], const float to_vr[12],
+                      const float cam_eye[3], const float cam_rot[9], float units_per_m, NsCohOut *out);
+
 /* ---- interpolación (consumidor) ---- */
 typedef struct {
     const NsScene *prev, *cur;

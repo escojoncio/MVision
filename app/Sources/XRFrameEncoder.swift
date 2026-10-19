@@ -229,7 +229,7 @@ final class XRFrameEncoder {
 
         // Diagnóstico (1 vez por segundo): qué se decidió y qué se dibujó.
         let now = CACurrentMediaTime()
-        if now - diagT >= (now - firstEncodeT < 30 ? 1 : 10) {
+        if now - diagT >= 1 {      // 1/s siempre mientras dure la depuración (antes pasaba a 1 cada 10 s tras 30 s)
             diagT = now
             var d = "xr-diag: modo=\(gs.view_mode) motivo=\(gs.view_reason) clase=\(gs.view_kind) plano=\(gs.cine_shot) cortes=\(gs.cine_cuts) cubiertas=\(gs.cine_cover) cinem=\(gs.cinematic) estereo=\(renderer.stereoRendered) | " + presenter.diagnostics(items: pres.items)
             d += " | escena: " + renderer.diagnostics()
@@ -258,6 +258,7 @@ final class XRFrameEncoder {
                         simd_length(SIMD3<Float>(corr.shift_m.0, corr.shift_m.1, corr.shift_m.2)) * 1000, ss.max_err_m * 1000, comfortVignette)
             lastDiag = d
             log(d)
+            if let nd = renderer.nativeDiagLine() { log(nd) }
         }
         return true
     }

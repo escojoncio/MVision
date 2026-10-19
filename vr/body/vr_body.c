@@ -379,6 +379,7 @@ static struct {
     int pend_n;
     Saved sv[6];
     FistSave fs[2];
+    struct { int ok; uint32_t model; float side, grip; } pf[2];     /* mano y agarre del último apply, para vrbody_prefist */
 } G;
 
 /* Giro de agarre -> mano alrededor del eje de los dedos (z local de la mano): izquierda +deg, derecha -deg (ver VrBodyConfig.hand_roll_deg). */
@@ -570,7 +571,7 @@ static int read_part(const uint8_t *ram, uint32_t pset, int idx, PartInfo *p) {
 }
 
 void vrbody_restore(uint8_t *ram) {
-    if (!G.pending) return;
+    if (!G.pending && !G.fs[0].used && !G.fs[1].used) return;
     G.pending = 0;
     if (!ram) return;
     /* No depende del puntero actual del jugador: si el objeto cambió (otra zona, muerte) pero la pieza guardada sigue
@@ -634,6 +635,19 @@ static void fist_apply(uint8_t *ram, int s, uint32_t model, float side_sign, flo
     G.st.fist_applies++;
 }
 
+/* Puño previo a la captura de la escena nativa: la captura ocurre antes de vrbody_apply, así que la malla de la mano saldría abierta.
+ * Se aplica con el agarre y la mano del último vrbody_apply (un fotograma de retraso en el agarre); vrbody_restore lo devuelve. */
+void vrbody_prefist(uint8_t *ram) {
+    if (!ram || !G.cfg.enabled || !G.cfg.fist_enabled) return;
+    for (int s = 0; s < 2; s++) {
+        if (!G.pf[s].ok) continue;
+        float g = G.pf[s].grip;
+        if (g < G.cfg.fist_min_grip) continue;
+        fist_apply(ram, s, G.pf[s].model, G.pf[s].side, g);
+        G.st.fist_pre++;
+    }
+}
+
 int vrbody_apply(uint8_t *ram) {
     G.st.applies++;
     if (G.pending) { G.st.stale_dropped++; vrbody_restore(ram); }      /* un apply anterior sin restore: primero devolver sus originales */
@@ -644,7 +658,7 @@ int vrbody_apply(uint8_t *ram) {
     if (!G.view_fn || !G.view_fn(&view) || !view.active || !all_finite(view.eye, 3) || !all_finite(view.p_ref, 3) || !isfinite(view.theta_deg) ||
         !(view.units_per_m > 1.0f && view.units_per_m < 1e6f)) {
         G.st.skip_noview++;
-        for (int s = 0; s < 2; s++) { G.hand[s].w = 0; G.hand[s].was_valid = 0; G.dbg[s].driven = 0; }
+        for (int s = 0; s < 2; s++) { G.hand[s].w = 0; G.hand[s].was_valid = 0; G.dbg[s].driven = 0; G.pf[s].ok = 0; }
         return 0;
     }
 
@@ -715,7 +729,7 @@ int vrbody_apply(uint8_t *ram) {
         h->was_valid = v;
         any |= v || h->w > 0;
     }
-    if (!any) { G.st.skip_nohands++; for (int s = 0; s < 2; s++) G.dbg[s].driven = 0; return 0; }
+    if (!any) { G.st.skip_nohands++; for (int s = 0; s < 2; s++) G.dbg[s].driven = 0, G.pf[s].ok = 0; return 0; }
 
     /* relación usuario -> mundo del motor */
     float th = (view.theta_deg + 180.0f) * DEG, cs = cosf(th), sn = sinf(th);
@@ -724,7 +738,7 @@ int vrbody_apply(uint8_t *ram) {
 
     typeof(G.cal) cal_snap; cal_lock(); memcpy(cal_snap, G.cal, sizeof cal_snap); cal_unlock();
     int driven = 0, ns = 0;
-    for (int s = 0; s < 2; s++) {
+    for (int s = 0; s < 2; s++) { G.pf[s].ok = 0;
         VrBodyDebug *dbg = &G.dbg[s];
         dbg->driven = 0;
         G.dbg_frame_ok[s] = 0;
@@ -910,6 +924,7 @@ int vrbody_apply(uint8_t *ram) {
             f[15] = 1;
             G.dbg_frame_ok[s] = all_finite(f, 16);
         }
+        G.pf[s].ok = 1; G.pf[s].model = pw.model; G.pf[s].side = -rig.side; G.pf[s].grip = h->grip_cur * we_w;
         if (cfg->fist_enabled && h->grip_cur * we_w >= cfg->fist_min_grip) fist_apply(ram, s, pw.model, -rig.side, h->grip_cur * we_w);
         dbg->driven = 1; dbg->w = h->w; dbg->grip = h->grip_cur; v_cp(dbg->target_wrist, wt); memcpy(dbg->target_hand, Rtb, sizeof Rtb); dbg->sol = sol;
         driven++;

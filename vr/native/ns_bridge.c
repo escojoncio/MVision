@@ -175,6 +175,69 @@ int ns_scene_continuous(const NsScene *prev, const NsScene *cur) {
     return 1;
 }
 
+/* ------------------------------------------------------------------------------------------------ coherencia */
+static void coh_nat(const float t[12], const float w[3], float o[3]) {
+    for (int i = 0; i < 3; i++) o[i] = t[4 * i] * w[0] + t[4 * i + 1] * w[1] + t[4 * i + 2] * w[2] + t[4 * i + 3];
+}
+static void coh_gpu(const NsCohIn *in, const float w[3], float o[3]) {
+    float d[3] = {in->k * (w[0] - in->origin[0]), in->k * (w[1] - in->origin[1]), in->k * (w[2] - in->origin[2])};
+    for (int i = 0; i < 3; i++)
+        o[i] = in->user_R[3 * i] * d[0] + in->user_R[3 * i + 1] * d[1] + in->user_R[3 * i + 2] * d[2] + in->user_p_ref[i] - in->user_R[3 * i + 1] * in->user_eye_h;
+}
+static float coh_len(const float a[3], const float b[3]) {
+    float x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2];
+    return sqrtf(x * x + y * y + z * z);
+}
+static float coh_angle(const float a[3], const float b[3]) {
+    float la = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]), lb = sqrtf(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
+    if (!(la > 1e-9f) || !(lb > 1e-9f)) return 180.0f;
+    float c = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb);
+    if (c > 1.0f) c = 1.0f;
+    if (c < -1.0f) c = -1.0f;
+    return acosf(c) * (180.0f / 3.14159265f);
+}
+int ns_coherence(const NsCohIn *in, NsCohOut *out) {
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    if (!in) return 0;
+    const float *fl = (const float *)in;
+    for (size_t i = 0; i < sizeof *in / sizeof(float); i++) if (!isfinite(fl[i])) return 0;
+    if (!(in->units_per_m > 1.0f) || !(in->k > 0.0f)) return 0;
+    const float *e = in->cam_eye, *R = in->cam_rot;
+    float right[3] = {R[0], R[3], R[6]}, fwd[3] = {R[2], R[5], R[8]};
+    float p1[3] = {e[0] + fwd[0] * 2.0f * in->units_per_m, e[1] + fwd[1] * 2.0f * in->units_per_m, e[2] + fwd[2] * 2.0f * in->units_per_m};
+    float p2[3] = {e[0] + right[0] * in->units_per_m, e[1] + right[1] * in->units_per_m, e[2] + right[2] * in->units_per_m};
+    float n0[3], g0[3], n1[3], g1[3], n2[3], g2[3];
+    coh_nat(in->to_vr, e, n0); coh_gpu(in, e, g0);
+    coh_nat(in->to_vr, p1, n1); coh_gpu(in, p1, g1);
+    coh_nat(in->to_vr, p2, n2); coh_gpu(in, p2, g2);
+    out->d_eye = coh_len(n0, g0);
+    out->d_probe = fmaxf(out->d_eye, fmaxf(coh_len(n1, g1), coh_len(n2, g2)));
+    /* giro: adelante (z de vista) y derecha (x de vista) de game_view (columnas 2 y 0) frente a to_vr * eje de la cámara nativa */
+    const float *gv = in->game_view;
+    float gf[3] = {gv[8], gv[9], gv[10]}, gr[3] = {gv[0], gv[1], gv[2]};
+    float nf[3], nr[3];
+    for (int i = 0; i < 3; i++) {
+        nf[i] = in->to_vr[4 * i] * fwd[0] + in->to_vr[4 * i + 1] * fwd[1] + in->to_vr[4 * i + 2] * fwd[2];
+        nr[i] = in->to_vr[4 * i] * right[0] + in->to_vr[4 * i + 1] * right[1] + in->to_vr[4 * i + 2] * right[2];
+    }
+    out->d_rot = fmaxf(coh_angle(nf, gf), coh_angle(nr, gr));
+    for (int i = 0; i < 3; i++) { out->nat_eye[i] = n0[i]; out->gpu_eye[i] = gv[12 + i]; }
+    out->ok = 1;
+    return 1;
+}
+int ns_coherence_flat(const float user_R[9], float k, float eye_h, const float p_ref[3], const float origin[3], const float game_view[16], const float to_vr[12],
+                      const float cam_eye[3], const float cam_rot[9], float units_per_m, NsCohOut *out) {
+    NsCohIn in;
+    memset(&in, 0, sizeof in);
+    if (!user_R || !p_ref || !origin || !game_view || !to_vr || !cam_eye || !cam_rot) return ns_coherence(NULL, out);
+    memcpy(in.user_R, user_R, sizeof in.user_R); in.k = k; in.user_eye_h = eye_h; memcpy(in.user_p_ref, p_ref, sizeof in.user_p_ref);
+    memcpy(in.origin, origin, sizeof in.origin); memcpy(in.game_view, game_view, sizeof in.game_view); memcpy(in.to_vr, to_vr, sizeof in.to_vr);
+    memcpy(in.cam_eye, cam_eye, sizeof in.cam_eye); memcpy(in.cam_rot, cam_rot, sizeof in.cam_rot);
+    in.units_per_m = units_per_m;
+    return ns_coherence(&in, out);
+}
+
 /* ------------------------------------------------------------------------------------------------ decisión nativo/GPU */
 int ns_scene_native_ok(uint32_t valid) { return (valid & NS_NATIVE_NEED) == NS_NATIVE_NEED && !(valid & NS_NATIVE_BAD); }
 

@@ -188,6 +188,7 @@ int vrbody_calib_offset(const float grip_q[4], float roll_signed_deg, float out_
 int  vrbody_apply(uint8_t *ram);
 /* Devuelve esas piezas a su valor original (idempotente; sin efecto si no hay nada pendiente). */
 void vrbody_restore(uint8_t *ram);
+void vrbody_prefist(uint8_t *ram);   /* puño antes de la captura nativa (usa el agarre del último apply) */
 /* 1 si hay matrices IK escritas sin restaurar (diagnóstico). */
 int  vrbody_pending(void);
 
@@ -196,7 +197,7 @@ typedef struct VrBodyStats {
     uint32_t skip_disabled, skip_noview, skip_model, skip_offscreen, skip_nohands;
     uint32_t grab_applies;       /* brazos movidos con una mano pegada al enemigo (att > 0) */
     uint32_t jab_applies;        /* brazos movidos con un golpe sintético en curso */
-    uint32_t fist_applies, fist_skipped;   /* mallas de mano deformadas en puño / mallas no reconocidas (se dejan rígidas) */
+    uint32_t fist_applies, fist_skipped, fist_pre;   /* mallas de mano deformadas en puño / mallas no reconocidas (se dejan rígidas) */
     uint32_t stretched, too_close, shoulder_limit, wrist_limit, bad_solve, stale_dropped, vis_forced;
 } VrBodyStats;
 void vrbody_stats(VrBodyStats *s);

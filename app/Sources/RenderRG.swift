@@ -142,8 +142,14 @@ final class RGRenderer {
     private var nativeSkip: UInt32 = 0     // batches marcados que NO se dibujan (NS_SKIP_*); 0 tras un fallo de este fotograma
     private var decidedSkip: UInt32 = 0    // la máscara decidida al principio del fotograma (para recuperar los grupos ya saltados si el dibujo nativo falla)
     private var nativeFailed = false       // el dibujo nativo falló en este fotograma: todo lo marcado vuelve a GPU
-    private var nativeEyeVR: SIMD3<Float>?
-    private var nativeWorldValid = false
+#if !MV_BENCH
+    private var nativeMap: NativeRenderer.GpuMap?       // mapa mundo -> VR y cámara que declara la lista de la GPU (nil en cinemáticas / mundo no fiable): para la red de coherencia
+#endif
+    private var gpuEyeVR: SIMD3<Float>?                 // VrScene.eye_vr de la lista actual
+    // Diagnóstico nativo frente a GPU (ver nativeDiagLine): triángulos 3D de la lista (marcados = los que el nativo sustituye) y batches 3D saltados / dibujados en el último encode.
+    private var gpuMarkedTris = 0, gpuOtherTris = 0
+    private var gpuMarkedMin = SIMD3<Float>(repeating: .greatestFiniteMagnitude), gpuMarkedMax = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+    private var statSkipB = 0, statDrawB = 0, statSkipTris = 0, statDrawTris = 0
     private var has3D = false
     private var haveScene = false
     private var hudRect = simd_float4(0, 0, 320, 240)
@@ -238,6 +244,21 @@ final class RGRenderer {
     /// Resumen para el registro (1 vez por segundo): estado de la escena y trabajo del último `encode`.
     func diagnostics() -> String {
         "tiene3D=\(has3D) hayEscena=\(haveScene) lotes=\(batches.count) (3D=\(batches.filter { $0.kind != 2 }.count) 2D=\(batches.filter { $0.kind == 2 }.count)) pases=\(statPasses) dibujos3D=\(statDraws) drawWorld=\(drawWorld) drawBody=\(drawBody) msaa=\(sampleCount) lineal=\(linearOutput) radar=\(radar != nil)" + nativeLog()
+    }
+
+    /// Línea de diagnóstico del render nativo frente a la lista de la GPU (1 vez por segundo, justo tras xr-diag): decisión, batches de la GPU saltados / dibujados, triángulos y caja VR de
+    /// cada ruta, cámaras y coherencia. nil si no hay renderer nativo.
+    func nativeDiagLine() -> String? {
+#if MV_BENCH
+        return nil
+#else
+        guard let n = native else { return nil }
+        let box = gpuMarkedTris > 0
+            ? String(format: "[%.1f %.1f %.1f]..[%.1f %.1f %.1f]", gpuMarkedMin.x, gpuMarkedMin.y, gpuMarkedMin.z, gpuMarkedMax.x, gpuMarkedMax.y, gpuMarkedMax.z) : "vacia"
+        return "nat-diag: modo=\(mv_vrhost_render_mode() != 0 ? "nativo" : "gpu") marcada=\(nativeSceneMarked) usa=\(nativeUse) saltar=\(nativeSkip) recuperado_por_fallo=\(nativeFailed) | " +
+            "lista GPU: tris_marcados=\(gpuMarkedTris) tris_no_marcados=\(gpuOtherTris) caja_VR_marcados=\(box) batches_3D_saltados=\(statSkipB) (tris \(statSkipTris)) batches_3D_dibujados=\(statDrawB) (tris \(statDrawTris)) | " +
+            "nativo: " + n.drawnSummary(gpuEye: gpuEyeVR)
+#endif
     }
 
     private func nativeLog() -> String {
@@ -493,8 +514,18 @@ final class RGRenderer {
         batches.removeAll(keepingCapacity: true)
         has3D = sc.has_3d != 0
         nativeSceneMarked = sc.native_3d != 0
-        nativeEyeVR = SIMD3<Float>(sc.eye_vr.0, sc.eye_vr.1, sc.eye_vr.2)
-        nativeWorldValid = sc.world_valid != 0
+        gpuEyeVR = SIMD3<Float>(sc.eye_vr.0, sc.eye_vr.1, sc.eye_vr.2)
+#if !MV_BENCH
+        nativeMap = nil
+        if sc.user_space != 0 && sc.world_valid != 0 && sc.has_3d != 0 && sc.scale > 0 && sc.user_k > 0 {
+            func flat<T>(_ t: T) -> [Float] { withUnsafeBytes(of: t) { Array($0.bindMemory(to: Float.self)) } }
+            let k = sc.user_k * sc.scale
+            nativeMap = NativeRenderer.GpuMap(userR: flat(sc.user_R), k: k, eyeH: sc.user_eye_h, pRef: flat(sc.user_p_ref), origin: flat(sc.origin_game),
+                                              gameView: flat(sc.game_view), eyeVR: flat(sc.eye_vr), upm: 1 / k)
+        }
+#endif
+        gpuMarkedTris = 0; gpuOtherTris = 0
+        gpuMarkedMin = SIMD3<Float>(repeating: .greatestFiniteMagnitude); gpuMarkedMax = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
         haveScene = true
         sceneCine = sc.cine_active != 0
         sceneShot = sc.cine_shot
@@ -528,6 +559,15 @@ final class RGRenderer {
             let semi = kind == 1 || (kind == 2 && bt.blend <= 3)   // blend 0xFF = opaco
             batches.append(DrawBatch(first: first, count: cnt, kind: kind, mode: Int(bt.blend) & 3, semi: semi,
                                      hasTex: hasTex, evEnd: Int(bt.ev_end), skip: UInt32(bt.skip_if_native)))
+            if kind != 2 {   // diagnóstico: triángulos 3D de la lista y caja (mundo VR) de los marcados, que son los que el nativo debe sustituir
+                if bt.skip_if_native != 0 {
+                    gpuMarkedTris += cnt / 3
+                    for j in first..<(first + cnt) {
+                        let q = SIMD3<Float>(v[j].pos.0, v[j].pos.1, v[j].pos.2)
+                        if q.x.isFinite && q.y.isFinite && q.z.isFinite { gpuMarkedMin = pointwiseMin(gpuMarkedMin, q); gpuMarkedMax = pointwiseMax(gpuMarkedMax, q) }
+                    }
+                } else { gpuOtherTris += cnt / 3 }
+            }
         }
     }
 
@@ -545,6 +585,7 @@ final class RGRenderer {
         frameNo += 1
         fs.used = 0
         statDraws = 0; statPasses = 0
+        statSkipB = 0; statDrawB = 0; statSkipTris = 0; statDrawTris = 0
 
         // 1) escenas nuevas: eventos de VRAM + geometría. Si llegan varias listas, los eventos de las anteriores se
         //    aplican enteros al principio y solo se dibuja la última.
@@ -604,6 +645,7 @@ final class RGRenderer {
             let viewsOK = nTargets >= 1 && sceneV.count >= nTargets && projections.count >= nTargets
                 && sceneV.prefix(nTargets).allSatisfy { m in (0..<4).allSatisfy { c in (0..<4).allSatisfy { m[c][$0].isFinite } } }
             let canTry = want && drawWorld && drawEyes && nativeSceneMarked && c0 != nil && d0 != nil && !sceneV.isEmpty && viewsOK
+            n.headVR = SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z)
             n.beginFrame(commandBuffer: commandBuffer, sortView: sceneV.first ?? matrix_identity_float4x4, draw: canTry)
             var ready = false
             if canTry, let c = c0, let d = d0 {
@@ -619,7 +661,7 @@ final class RGRenderer {
                     }
                 }
             }
-            let dec = n.decide(wantNative: want, sceneMarked: nativeSceneMarked, pipelinesReady: ready, eyeVR: nativeEyeVR, worldValid: nativeWorldValid)
+            let dec = n.decide(wantNative: want, sceneMarked: nativeSceneMarked, pipelinesReady: ready, gpuMap: nativeMap)
             if dec.native != 0 && canTry { nativeUse = true; nativeSkip = dec.skip; decidedSkip = dec.skip }
         }
 #endif
@@ -1176,7 +1218,8 @@ final class RGRenderer {
         var curKind = -1
         for i in segDraw {
             let bt = batches[i]
-            if (bt.skip & skipMask) != 0 { continue }   // 3D que se pinta desde la escena nativa (VrBatch.skip_if_native & NsDecision.skip)
+            if (bt.skip & skipMask) != 0 { statSkipB += 1; statSkipTris += bt.count / 3; continue }   // 3D que se pinta desde la escena nativa (VrBatch.skip_if_native & NsDecision.skip)
+            statDrawB += 1; statDrawTris += bt.count / 3
             if bt.kind != curKind {
                 curKind = bt.kind
                 if curKind == 0 {

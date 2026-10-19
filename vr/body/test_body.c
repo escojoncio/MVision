@@ -855,6 +855,14 @@ static void test_fist_glue(void) {
         for (int i = 8; i < 16; i++) { dfull += fabsf((float)(full[4 * i + 1] - r[4 * i + 1])); dhalf += fabsf((float)(half[4 * i + 1] - r[4 * i + 1])); }
         CHECK(dhalf > 0 && dhalf < dfull, "cierre progresivo: medio %.0f, completo %.0f", dhalf, dfull);
     }
+    /* puño previo a la captura nativa: tras un apply con agarre, prefist deja la malla cerrada ANTES del siguiente apply y restore la devuelve aunque no haya apply */
+    { vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+      run_fist_frames(1.0f, 60, &driven); vrbody_restore(RAM);
+      CHECK(memcmp(RAM, RAM0, RAMSZ) == 0, "prefist: RAM original antes");
+      vrbody_prefist(RAM);
+      CHECK(mesh_diff(0, nv) >= 6 && mesh_diff(1, nv) >= 6, "prefist: la malla debe llegar cerrada a la captura");
+      vrbody_restore(RAM);
+      CHECK(memcmp(RAM, RAM0, RAMSZ) == 0, "prefist: restore sin apply devuelve la malla"); }
     /* desactivado por configuración */
     { VrBodyConfig c2 = cfg; c2.fist_enabled = 0; vrbody_init(&c2); vrbody_set_view_fn(view_fn);
       run_fist_frames(1.0f, 40, &driven); CHECK(mesh_diff(0, nv) == 0 && mesh_diff(1, nv) == 0, "fist_enabled = 0: malla rígida"); vrbody_restore(RAM); }

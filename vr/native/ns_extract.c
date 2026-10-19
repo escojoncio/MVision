@@ -335,6 +335,17 @@ static uint64_t sample(Ram *r, uint64_t h, uint32_t ptr, uint32_t len) {
     }
     return h;
 }
+/* Tabla pequeña (<= SIG_FULL_BYTES): se firma ENTERA. Las mallas que el juego (o la capa VR) deforma en la RAM sin cambiar de dirección ni de tamaño (la mano del personaje
+ * cuando se cierra en puño: 100-128 vértices) conservan idénticos el principio y el final de la tabla; con solo esa muestra la firma no cambiaba, la memoria devolvía la malla
+ * abierta y el render nativo no veía nunca el puño. Las tablas grandes (escenario) siguen con la muestra. */
+#define SIG_FULL_BYTES 2048u
+static uint64_t sample_full(Ram *r, uint64_t h, uint32_t ptr, uint32_t len) {
+    if (len && len <= SIG_FULL_BYTES && ok_rng(r, ptr, len)) {
+        h = ns_hash64_u32(h, ptr);
+        return ns_hash64(h, r->b + (ptr & ADDR_MASK), len);
+    }
+    return sample(r, h, ptr, len);
+}
 /* Firma barata del modelo: cabecera, muestra (principio y final) de cada tabla, entradas de textura de la primera y la última cara y, si tiene vértices
  * soldados, la cabecera y los índices del padre. 0 si el modelo no es legible. */
 static uint64_t model_sig(Ctx *c, uint32_t m, uint32_t def) {
@@ -344,9 +355,9 @@ static uint64_t model_sig(Ctx *c, uint32_t m, uint32_t def) {
     uint64_t h = ns_hash64(NS_HASH64_INIT, hd, 0x58);
     int32_t nf = rs32(r, m + 4), nv = rs32(r, m + 0x34), nn = rs32(r, m + 0x40);
     if (nf < 0 || nf > MAX_FACES || nv < 0 || nv > MAX_VERTS || nn < 0 || nn > MAX_NORMS) return h;
-    h = sample(r, h, rd32(r, m + 0x38), (uint32_t)nv * 8u);
+    h = sample_full(r, h, rd32(r, m + 0x38), (uint32_t)nv * 8u);
     h = sample(r, h, rd32(r, m + 0x3C), (uint32_t)nf * 4u);
-    h = sample(r, h, rd32(r, m + 0x44), (uint32_t)nn * 8u);
+    h = sample_full(r, h, rd32(r, m + 0x44), (uint32_t)nn * 8u);
     h = sample(r, h, rd32(r, m + 0x48), (uint32_t)nf * 4u);
     h = sample(r, h, rd32(r, m + 0x4C), (uint32_t)nf * 8u);
     uint32_t tx = rd32(r, m + 0x50);

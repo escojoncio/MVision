@@ -393,6 +393,15 @@ int main(void) {
     w16(MODEL7_V, 7777);
     rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
     CHECK(es.memo_stale == 1 && sc.piece[0].mesh_id != idA && es.zone_changes == 0 && sc.zone_gen == 1);
+    {   /* regresión (puño de la mano): un vértice INTERIOR de una tabla pequeña (ni los primeros ni los últimos bytes) también invalida la memoria */
+        uint64_t idC = sc.piece[0].mesh_id;
+        rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
+        CHECK(es.memo_stale == 0 && sc.piece[0].mesh_id == idC);                    /* sin cambios: se reutiliza */
+        w16(MODEL7_V + 8u * 100u + 2u, 1234);
+        rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
+        CHECK(es.memo_stale == 1 && sc.piece[0].mesh_id != idC && es.zone_changes == 0);
+        (void)rc;
+    }
     fresh();
     q1(O0);
     rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);

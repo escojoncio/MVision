@@ -52,6 +52,7 @@ int32_t mv_vrgame_hand_matrix(int32_t side, float m[16]);
 int32_t mv_vrgame_debug_frame(int32_t kind, int32_t side, float m[16]);
 /* Hápticos pendientes del arma (0..1 por mando físico); se consumen (una lectura = un pulso). */
 void mv_vrgame_take_haptics(float *left, float *right);
+void mv_vrgame_grip_diag(float raw[2], int32_t valid[2]);   /* diagnóstico: agarre crudo de cada mano (0 izq, 1 der) y si su pose era válida */
 
 typedef struct {
     int32_t loader;          /* 0 sin pedir, 1 cargando, 2 listo, 3 fallo */
