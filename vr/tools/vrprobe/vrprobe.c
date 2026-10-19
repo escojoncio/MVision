@@ -36,6 +36,7 @@
 #include "bridge.h"
 #include "bridge_addrs.h"
 #include "cpu.h"
+#include "gpu.h"
 #include "host.h"
 #include "probe_raster.h"
 #include "sys.h"
@@ -75,9 +76,11 @@ typedef struct {
     double vblank_min, build_avg_ms, build_max_ms;
 } Thr;
 static Thr TH = {25.0, 2.0, 6.0, 15.0, 6.0, 3.0, 6.0, 0.15, 8.0, 0.8, 35.0, 2.0, 100.0};
+static double XP_EDGE_M = 60.0, XP_FAR_M = 150.0, XP_VOL_M = 20.0, XP_MAXFRAC = 0.0;   /* detector de polígonos explotados (ver más abajo) */
 static const struct { const char *n; double *p; } THN[] = {
     {"hueco_max", &TH.hole_max}, {"hueco_medio", &TH.hole_mean}, {"hueco_p95", &TH.hole_p95}, {"desajuste_grados", &TH.lag_deg}, {"reg_pos_cm", &TH.reg_pos_cm}, {"reg_mirada_grados", &TH.reg_gaze_deg},
     {"retardo_camara", &TH.conv_frames}, {"descartes", &TH.disc_share}, {"mano_err_cm", &TH.hand_err_cm}, {"mano_ok", &TH.hand_ok_frac},
+    {"explot_arista_m", &XP_EDGE_M}, {"explot_lejos_m", &XP_FAR_M}, {"explot_volumen_m", &XP_VOL_M}, {"explot_max", &XP_MAXFRAC},
     {"vblank_min", &TH.vblank_min}, {"escena_ms_medio", &TH.build_avg_ms}, {"escena_ms_max", &TH.build_max_ms},
 };
 
@@ -452,6 +455,7 @@ static void zs_detect(void) {
     free(b);
 }
 
+static void xp_scan(const VrScene *s, int zone, const Cap *c);
 static void on_scene(const VrScene *s) {
     if (!s->src) return;
     uint32_t hf = s->src->host_frame;
@@ -459,6 +463,15 @@ static void on_scene(const VrScene *s) {
     if (in->f != hf) { atomic_store(&g_cons, hf); return; }
     Intent snap = *in;
     atomic_store(&g_cons, hf);
+    if (snap.kind != CK_NONE && snap.zone >= 0 && snap.zone < MAXZ && s->has_3d && s->world_valid) {   /* detector de polígonos explotados: TODAS las escenas de las pruebas */
+        Cap xc;
+        memset(&xc, 0, sizeof xc);
+        xc.in = snap;
+        memcpy(xc.eye_vr, s->eye_vr, sizeof xc.eye_vr); memcpy(xc.org, s->origin_game, sizeof xc.org); xc.scale = s->scale;
+        if (s->user_space) { xc.um_on = 1; memcpy(xc.um_R, s->user_R, sizeof xc.um_R); xc.um_k = s->user_k; xc.um_eye_h = s->user_eye_h; memcpy(xc.um_pref, s->user_p_ref, sizeof xc.um_pref); }
+        zs_detect();
+        xp_scan(s, snap.zone, &xc);
+    }
     if (!snap.store || snap.zone < 0 || snap.zone >= MAXZ) return;
     Zone *z = &Z[snap.zone];
     z->seen_scenes++;
@@ -554,6 +567,203 @@ static void to_fixed(const Cap *c, const float *v0, float *P) {
 static void from_fixed(const Cap *c, const float *P, float *v) {
     float s_[3] = {(P[0] - c->org[0]) * c->scale, (P[1] - c->org[1]) * c->scale, (float)g_zs * (P[2] - c->org[2]) * c->scale};
     um_forward(c, s_, v);
+}
+
+/* ------------------------------------------------------------------------------------------------ polígonos explotados
+ * Detector independiente del camino de ensamblado: mira la geometría FINAL de la escena VR (la que recibe el renderer), triángulo a triángulo, en metros del mundo
+ * del juego (se deshace la corrección al espacio del usuario). Un triángulo está "explotado" si estirado hacia lejos: alguna arista > xp_edge_m, algún vértice a más de
+ * xp_far_m del ojo del motor, o algún vértice fuera del volumen de la zona (cajas de los vértices fiables de TODAS las escenas de esa zona, ampliadas xp_vol_m).
+ * La causa sale de VrScene.tri_cause (VR_TC_*): se atribuye a la primera de AMBIG, DERIVED, RECON, BEHIND, SAT, OFS y, si no hay ninguna, "limpio". */
+enum { XC_CLEAN = 0, XC_SAT, XC_BEHIND, XC_AMBIG, XC_RECON, XC_DERIVED, XC_OFS, XC_N };
+static const char *XC_NAME[XC_N] = {"limpio", "saturado", "detrás", "ambiguo", "reconstruido", "derivado", "desplaz.proy"};
+#define XP_NB 14
+#define XP_WORST 12
+typedef struct { float v[9]; float edge, far; int cat, scene, why; uint8_t cause; } XpSamp;
+typedef struct {
+    uint64_t scenes, scenes_bad, tris, expl, e_edge, e_far, e_vol;
+    uint64_t cat_tris[XC_N], cat_expl[XC_N];
+    uint64_t h_edge[XC_N][XP_NB], h_far[XC_N][XP_NB];
+    uint32_t vh[3][600];                      /* histograma por eje (bins de 1 m, -300..300) de vértices de triángulos fiables (coordenadas fijas del juego) */
+    uint64_t vh_n;
+    float lo[3], hi[3]; int have_vol;         /* volumen de la zona (percentiles 0,05 / 99,95 de vh) */
+    XpSamp worst[XP_WORST]; int nworst;
+    uint64_t net_drop, net_cause[8];          /* descartes de la red de seguridad de vr_scene (VrStats) */
+    uint64_t chk_vtx, chk_bad[4];             /* vértices comprobados contra el modelo de la GTE / que no lo reproducen (normal, saturado, detrás, ambiguo) */
+    int nimg; uint64_t last_img;              /* imágenes de escenas con explotados escritas */
+} Xp;
+static char g_xp_tag[32] = "";                /* prefijo de los PNG de explotados ("antes", "despues") */
+static Xp XPZ[MAXZ];
+
+static int xp_cat(unsigned c) {
+    if (c & VR_TC_AMBIG) return XC_AMBIG;
+    if (c & VR_TC_DERIVED) return XC_DERIVED;
+    if (c & VR_TC_RECON) return XC_RECON;
+    if (c & VR_TC_BEHIND) return XC_BEHIND;
+    if (c & VR_TC_SAT) return XC_SAT;
+    if (c & VR_TC_OFS) return XC_OFS;
+    return XC_CLEAN;
+}
+static int xp_bin(double m) { int b = m < 0.25 ? 0 : (int)floor(log2(m / 0.25)) + 1; return b < 0 ? 0 : b >= XP_NB ? XP_NB - 1 : b; }
+static void xp_inv(const Cap *c, const float *P, float *g) { um_inverse(c, P, g); if (!c->um_on) g[2] *= (float)g_zs; }
+
+static void verdict(const char *what, double val, double thr, int le, const char *unit, const char *extra);
+static void xp_volume(Xp *x) {
+    x->have_vol = 0;
+    if (x->vh_n < 30000) return;
+    for (int a = 0; a < 3; a++) {
+        uint64_t lo_t = x->vh_n / 2000, hi_t = x->vh_n - x->vh_n / 2000, acc = 0;
+        int lo = -1, hi = -1;
+        for (int i = 0; i < 600; i++) { acc += x->vh[a][i]; if (lo < 0 && acc > lo_t) lo = i; if (hi < 0 && acc >= hi_t) { hi = i; break; } }
+        if (lo < 0 || hi < 0) return;
+        x->lo[a] = (float)(lo - 300); x->hi[a] = (float)(hi - 300 + 1);
+    }
+    x->have_vol = 1;
+}
+
+static void xp_render(Xp *x, int zone, const VrScene *s, const uint8_t *bad, const float *head) {
+    enum { W = 256 };
+    uint8_t *img = calloc((size_t)W * 2 * W * 3, 1);
+    if (!img) return;
+    for (int panel = 0; panel < 2; panel++) {
+        float hm[16];
+        memcpy(hm, head, sizeof hm);
+        float fov = panel ? 100.0f : 110.0f;
+        if (panel) {   /* vista cenital: 40 m sobre la cabeza mirando abajo; arriba de la imagen = hacia donde mira la cabeza */
+            float yaw = atan2f(-head[8], -head[10]);
+            float cy = cosf(yaw), sy = sinf(yaw);
+            float m2[16] = {-cy, 0, sy, 0,   sy, 0, cy, 0,   0, 1, 0, 0,   head[12], head[13] + 40.0f, head[14], 1};
+            memcpy(hm, m2, sizeof hm);
+        }
+        PrCam cam = {W, W, tanf(fov * 0.5f * 0.01745329252f), tanf(fov * 0.5f * 0.01745329252f), 0.05f};
+        PrEye e;
+        pr_eye_from_head(hm, 0, 0.0f, &e);
+        PrBuf V, X;
+        pr_buf_init(&V, W, W); pr_buf_init(&X, W, W);
+        for (uint32_t bi = 0; bi < s->nb; bi++) {
+            const VrBatch *b = &s->b[bi];
+            if (b->kind > 1) continue;
+            for (uint32_t j = 0; j + 2 < b->count; j += 3) {
+                uint32_t vi = b->first + j;
+                if ((uint64_t)vi + 2 >= s->nv) break;
+                float t9[9];
+                for (int k = 0; k < 3; k++) memcpy(t9 + 3 * k, s->v[vi + k].pos, 3 * sizeof(float));
+                pr_tri(bad[vi / 3] ? &X : &V, &cam, &e, t9);
+            }
+        }
+        for (int py = 0; py < W; py++) for (int px = 0; px < W; px++) {
+            uint8_t *o = img + ((size_t)py * 2 * W + panel * W + px) * 3;
+            float zv = V.z[py * W + px], zx = X.z[py * W + px];
+            if (zx < 1e29f) { o[0] = 235; o[1] = 40; o[2] = 40; }
+            else if (zv < 1e29f) { float g = 60.0f + 170.0f * expf(-zv / 6.0f); o[0] = o[1] = o[2] = (uint8_t)g; }
+            else { o[0] = 14; o[1] = 22; o[2] = 52; }
+        }
+        pr_buf_free(&V); pr_buf_free(&X);
+    }
+    char path[640];
+    snprintf(path, sizeof path, "%s/%szona%d_explotados_%d.png", g_out, g_xp_tag, zone, x->nimg);
+    pr_write_png(path, 2 * W, W, img);
+    free(img);
+}
+
+static void xp_scan(const VrScene *s, int zone, const Cap *c) {
+    Xp *x = &XPZ[zone];
+    x->scenes++;
+    x->chk_vtx += s->stats.chk_vtx; x->net_drop += s->stats.drop_incoh;
+    for (int k = 0; k < 4; k++) x->chk_bad[k] += s->stats.chk_bad[k];
+    for (int k = 0; k < VR_INC_N; k++) x->net_cause[k] += s->stats.incoh[k];
+    if (!s->tri_cause || !s->v || !s->b) return;
+    float eg[3];
+    xp_inv(c, s->eye_vr, eg);
+    xp_volume(x);
+    int bad_scene = 0;
+    int want_img = x->nimg < 8 && x->scenes - x->last_img >= 90;
+    uint8_t *badv = want_img ? calloc(s->nv / 3 + 1, 1) : NULL;
+    for (uint32_t bi = 0; bi < s->nb; bi++) {
+        const VrBatch *b = &s->b[bi];
+        if (b->kind > 1) continue;
+        for (uint32_t j = 0; j + 2 < b->count; j += 3) {
+            uint32_t vi = b->first + j;
+            if ((uint64_t)vi + 2 >= s->nv) break;
+            float g[3][3], ab[3][3];
+            for (int k = 0; k < 3; k++) {
+                xp_inv(c, s->v[vi + k].pos, g[k]);
+                for (int a = 0; a < 3; a++) ab[k][a] = (float)(g[k][a] + (double)c->org[a] * c->scale);
+            }
+            double e = 0, f = 0;
+            for (int k = 0; k < 3; k++) {
+                double d1 = hypot(hypot(g[k][0] - g[(k + 1) % 3][0], g[k][1] - g[(k + 1) % 3][1]), g[k][2] - g[(k + 1) % 3][2]);
+                if (d1 > e) e = d1;
+                double d2 = hypot(hypot(g[k][0] - eg[0], g[k][1] - eg[1]), g[k][2] - eg[2]);
+                if (d2 > f) f = d2;
+            }
+            uint8_t cause = s->tri_cause[vi / 3];
+            int cat = xp_cat(cause);
+            x->tris++; x->cat_tris[cat]++;
+            x->h_edge[cat][xp_bin(e)]++; x->h_far[cat][xp_bin(f)]++;
+            int ex = e > XP_EDGE_M, fx = f > XP_FAR_M, vx = 0;
+            if (x->have_vol)
+                for (int k = 0; k < 3 && !vx; k++) for (int a = 0; a < 3; a++) if (ab[k][a] < x->lo[a] - XP_VOL_M || ab[k][a] > x->hi[a] + XP_VOL_M) { vx = 1; break; }
+            if (cat == XC_CLEAN && !(ex || fx || vx)) {   /* vértices fiables: alimentan el volumen de la zona */
+                for (int k = 0; k < 3; k++) {
+                    for (int a = 0; a < 3; a++) { int bin = (int)floor(ab[k][a]) + 300; if (bin >= 0 && bin < 600) x->vh[a][bin]++; }
+                    x->vh_n++;
+                }
+            }
+            if (ex || fx || vx) {
+                if (badv) badv[vi / 3] = 1;
+                x->expl++; x->cat_expl[cat]++; x->e_edge += ex; x->e_far += fx; x->e_vol += vx; bad_scene = 1;
+                double m = e > f ? e : f;
+                if (x->nworst < XP_WORST || m > fmax(x->worst[XP_WORST - 1].edge, x->worst[XP_WORST - 1].far)) {
+                    XpSamp w;
+                    memcpy(w.v, ab, sizeof w.v);
+                    w.edge = (float)e; w.far = (float)f; w.cat = cat; w.scene = (int)x->scenes; w.cause = cause; w.why = ex | fx << 1 | vx << 2;
+                    int p = x->nworst < XP_WORST ? x->nworst++ : XP_WORST - 1;
+                    x->worst[p] = w;
+                    for (; p > 0 && fmax(x->worst[p].edge, x->worst[p].far) > fmax(x->worst[p - 1].edge, x->worst[p - 1].far); p--) { XpSamp t = x->worst[p]; x->worst[p] = x->worst[p - 1]; x->worst[p - 1] = t; }
+                }
+            }
+        }
+    }
+    x->scenes_bad += bad_scene;
+    if (badv) {
+        if (bad_scene && c->in.head[15] != 0) { xp_render(x, zone, s, badv, c->in.head); x->nimg++; x->last_img = x->scenes; }
+        free(badv);
+    }
+}
+
+static void xp_report(int zi) {
+    Xp *x = &XPZ[zi];
+    REP("  -- polígonos explotados (detector sobre la geometría final de la escena; %llu escenas, %llu triángulos 3D) --\n", (unsigned long long)x->scenes, (unsigned long long)x->tris);
+    if (!x->tris) { REP("  [FALLA] sin triángulos 3D que evaluar\n"); fails++; return; }
+    REP("      criterios: arista > %.0f m · vértice a > %.0f m del ojo del motor · fuera del volumen de la zona ±%.0f m", XP_EDGE_M, XP_FAR_M, XP_VOL_M);
+    if (x->have_vol) REP(" (volumen x %.0f..%.0f, y %.0f..%.0f, z %.0f..%.0f m)", x->lo[0], x->hi[0], x->lo[1], x->hi[1], x->lo[2], x->hi[2]);
+    REP("\n");
+    REP("      %-13s %10s %9s\n", "causa", "triángulos", "explotados");
+    for (int cI = 0; cI < XC_N; cI++) REP("      %-13s %10llu %9llu\n", XC_NAME[cI], (unsigned long long)x->cat_tris[cI], (unsigned long long)x->cat_expl[cI]);
+    REP("      por criterio: arista %llu · lejos %llu · fuera de volumen %llu · escenas con alguno: %llu de %llu\n", (unsigned long long)x->e_edge, (unsigned long long)x->e_far, (unsigned long long)x->e_vol,
+        (unsigned long long)x->scenes_bad, (unsigned long long)x->scenes);
+    REP("      histograma de la arista mayor (triángulos por causa; contenedores <0.25, <0.5, <1, <2, ... m):\n");
+    for (int cI = 0; cI < XC_N; cI++) { REP("        %-13s", XC_NAME[cI]); for (int bI = 0; bI < XP_NB; bI++) REP(" %7llu", (unsigned long long)x->h_edge[cI][bI]); REP("\n"); }
+    REP("      histograma de la distancia máx. al ojo del motor:\n");
+    for (int cI = 0; cI < XC_N; cI++) { REP("        %-13s", XC_NAME[cI]); for (int bI = 0; bI < XP_NB; bI++) REP(" %7llu", (unsigned long long)x->h_far[cI][bI]); REP("\n"); }
+    for (int w = 0; w < x->nworst; w++) {
+        const XpSamp *p = &x->worst[w];
+        REP("      peor %2d: %-12s causa 0x%02x arista %.1f m lejos %.1f m (%s%s%s) v0 (%.1f %.1f %.1f) v1 (%.1f %.1f %.1f) v2 (%.1f %.1f %.1f)\n", w + 1, XC_NAME[p->cat], p->cause, p->edge, p->far,
+            p->why & 1 ? "arista " : "", p->why & 2 ? "lejos " : "", p->why & 4 ? "volumen" : "", p->v[0], p->v[1], p->v[2], p->v[3], p->v[4], p->v[5], p->v[6], p->v[7], p->v[8]);
+    }
+    REP("      modelo de la GTE: %llu vértices comprobados, no reproducen su pantalla: normales %llu · saturados %llu · detrás %llu · ambiguos %llu\n", (unsigned long long)x->chk_vtx,
+        (unsigned long long)x->chk_bad[0], (unsigned long long)x->chk_bad[1], (unsigned long long)x->chk_bad[2], (unsigned long long)x->chk_bad[3]);
+    REP("      red de seguridad de vr_scene: %llu triángulos descartados (modelo %llu · arista %llu · lejos %llu)%s\n", (unsigned long long)x->net_drop, (unsigned long long)x->net_cause[VR_INC_MODEL],
+        (unsigned long long)x->net_cause[VR_INC_EDGE], (unsigned long long)x->net_cause[VR_INC_FAR], x->net_drop ? "" : " (desactivada o sin casos)");
+    {
+        GteHpStats g;
+        gte_hp_stats(&g);
+        REP("      asociación de vértices (acumulado hasta ahora): almacenados %u · desalojos %u · anillo sobrescrito %u · primitivas %u · vértices ambiguos %u · primitivas sin ancla %u\n", g.stored, g.evict, g.ring_evict, g.res_prims, g.res_amb, g.res_pivot);
+        if (g.ev_verts) REP("      autoevaluación de la asociación: %u vértices, %.2f %% correctos; confianza alta %u (%.2f %%); ambiguos %u (%.2f %%)\n", g.ev_verts, 100.0 * g.ev_ok / g.ev_verts, g.ev_hi, g.ev_hi ? 100.0 * g.ev_hi_ok / g.ev_hi : 0.0, g.ev_amb, g.ev_amb ? 100.0 * g.ev_amb_ok / g.ev_amb : 0.0);
+    }
+    double frac = x->tris ? (double)x->expl / (double)x->tris : 0;
+    char ex[96]; snprintf(ex, sizeof ex, "%llu de %llu triángulos, %llu escenas afectadas", (unsigned long long)x->expl, (unsigned long long)x->tris, (unsigned long long)x->scenes_bad);
+    verdict("polígonos explotados (fracción)", frac * 100.0, XP_MAXFRAC, 1, "%", ex);
 }
 
 /* ------------------------------------------------------------------------------------------------ evaluación de una captura */
@@ -796,6 +1006,7 @@ static void eval_zone(int zi) {
     Zone *z = &Z[zi];
     REP("\n=== zona %d (código '%s') ===\n", zi, z->name);
     if (zi > 0 && !z->reached) { REP("  [AVISO] zona no alcanzada: no se mide (la receta de cambio de zona no llegó al control)\n"); return; }
+    xp_report(zi);
     if (!z->n) { REP("  [FALLA] sin capturas\n"); fails++; return; }
     double t0 = now_s();
     z->ev = calloc(z->n, sizeof *z->ev);
@@ -1143,6 +1354,8 @@ int main(int argc, char **argv) {
 
     if (getenv("MV_SIGS")) mv_host_set_sigs(getenv("MV_SIGS"));
     char card[640]; snprintf(card, sizeof card, "%s/card", g_out); mkdir(card, 0755);
+    if (getenv("VRPROBE_HPEVAL")) gte_hp_eval(1, 100, 80);
+    if (getenv("VRPROBE_TAG")) snprintf(g_xp_tag, sizeof g_xp_tag, "%s_", getenv("VRPROBE_TAG"));
     mv_vrhost_install();
     mv_vrhost_set_test_hook(hook);
     mv_host_set_turbo(1);

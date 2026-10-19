@@ -1052,3 +1052,28 @@ Conclusión: el 10,6 VBlank/s NO es real del motor ni de los parches en sí: sin
 **(4) Sin entorno visible de arranque.** Eliminado `XRFallbackEnv` (rejilla + panel "Cargando...") y sus opciones (`fallbackEnabled`, `fallbackDefault`, `bootSeconds`) de `XRFrameEncoder.swift`; solo queda el motivo en el registro (`sin-contenido=arranque|nada que dibujar`). Banco de render: los casos `negro-layered-sin-nada` y `negro-dedicated-sin-nada` exigen ahora ojo en negro limpio (< 0,5 % de píxeles no negros) en vez de >= 1,5 %; ya no se desactiva el entorno en el banco. Sin compilar (lo comprueba CI).
 
 **Pruebas**: `make -C vr/scene test`, `vr/bridge test` (44.975 comprobaciones), `vr/camera test`, `make -C vr/host test` (test_view con muerte, test_cine). Pendiente en visor: comodidad del seguimiento de la pantalla (zona muerta), que las puertas/ascensores/cámaras de evento reales entren en las clases de escena, y la animación de muerte real.
+
+## 56. Vértices explotados: detector en el probador, asociación con coherencia espacial y red de seguridad en `vr_scene` (rama `vertices`) — 2026-10-19
+
+**Síntoma.** Triángulos estirados hacia lejos ("explosiones de vértices") en el visor.
+
+**Cambios exactos.**
+- `vr/tools/vrprobe/vrprobe.c`: detector de polígonos explotados sobre la geometría FINAL de cada escena 3D (todas las pruebas, todas las zonas), en metros del mundo del juego deshaciendo `user_map`. Un triángulo está explotado si arista > `explot_arista_m` (60), algún vértice a > `explot_lejos_m` (150) del ojo del motor o fuera del volumen de la zona (percentiles 0,05/99,95 de los vértices fiables, ±`explot_volumen_m` = 20). Informe por zona: tabla por causa (`VrScene.tri_cause`), histogramas, 12 peores, métricas del modelo de la GTE y de la red, asociación de vértices. Veredicto `polígonos explotados (fracción)` con umbral `explot_max` = 0: PASA = 0 explotados. PNG `<etiqueta>_zonaN_explotados_K.png` (vista de cabeza + cenital, rojo = explotados; etiqueta con `VRPROBE_TAG`). `VRPROBE_HPEVAL=1` activa la autoevaluación de la asociación.
+- `vr/scene/vr_scene.{c,h}`: `VrScene.tri_cause` (`VR_TC_*` por triángulo), `vtx_model_ok` (modelo exacto RTPS: reproduce el SXY del vértice con H/OFX/OFY de la primitiva, incluidos saturados y detrás), `VrStats.chk_vtx/chk_bad[]/drop_incoh/incoh[]`, `VR_FATE_INCOH`. Red de seguridad (`opts.coherence`, def. 1; `MV_COH=0` en el host la apaga): descarta y cuenta por causa los triángulos con (a) algún vértice que no reproduce su SXY (`coh_px` 2,5), (b) arista > `coh_edge_m` (60 m), (c) vértice a > `coh_far_m` (150 m) del ojo del motor, (d) arista > `coh_flag_edge_m` (32 m) si algún vértice es ambiguo/saturado/detrás/derivado/desplazado, (e) arista > `coh_synth_edge_m` (20 m) si hay vértices reconstruidos/derivados. Los límites se miden en espacio de vista (antes de `user_map`).
+- `runtime/gte.c`: la puntuación de asociación por secuencia (`hp_pair_score`) suma una penalización espacial `-w·log2(1 + d/4096)` entre candidatos (d = distancia en espacio de vista; `MV_HPSPATIAL`, w def. 1, 0 = desactivada). Antes se descartó por "un saturado está lejos en pantalla", pero en 3D los vértices de una primitiva sí están juntos.
+- `vr/host/vrhost.c`: copia `tri_cause` al slot; `MV_COH`. `vr/scene/test_scene.c`: `test_coherence` (intacto, arista 70 m, 40 m fiable vs ambiguo, lejos, modelo, saturado) y `coherence=0` en los tests sintéticos que no rellenan x,y.
+
+**Fuentes encontradas (zona inicial, antes de arreglar; 929 escenas, 1,1 M triángulos 3D).** 269 explotados: 138 con vértice detrás de la cámara (SAT|BEHIND, asociación con un vértice lejano que comparte el SXY de borde), 126 ambiguos, 4 reconstruidos. Zona 1: detrás + ambiguos (aristas ~59 m) y 12 esquinas reconstruidas de resplandor (aristas ~24 m, a 50 m del ojo). Zona 3: ambiguos (aristas hasta 117 m). Zona 2: ninguno. Revisados sin hallazgos: `user_map` (se aplica una sola vez, `A' = Mu·A` en `vr_scene_build`; el reconstruido `o2` es otra llamada), sprites con desplazamiento de proyección (86 triángulos, 0 explotados), predicción de mirada (solo mueve el centro del recorte, no geometría). Piezas del cuerpo con IK: pasan por la GTE como el resto; prueba `--solo manos` (zona inicial, 8 poses de brazos): 0 explotados de 1055627 triángulos, manos 8/8 correctas.
+
+**Medidas (`--solo giro_c --sin-control`, zonas inicial/1/2/3; explotados de N triángulos).**
+
+| zona | antes (sin red, sin coherencia espacial) | después |
+|---|---|---|
+| 0 | 253 de 927956 (98 escenas) | 0 de 924921 |
+| 1 | 100 de 977016 (40 escenas) | 0 de 977251 |
+| 2 | 0 | 0 |
+| 3 | 35 de 347399 (9 escenas) | 0 de 346360 |
+
+Descartes de la red tras el arreglo: zona 0 = 1408 (modelo 947, arista 459, lejos 2) de 925 k (0,15 %); zona 1 = 400; zona 2 = 0; zona 3 = 1067. Vértices que no reproducen su pantalla (zona 0): 1007 de 1,9 M. Autoevaluación de la asociación (ventana artificial 100x80, zona inicial): 46,36 % -> 47,16 % correctos con la penalización espacial (+0,8 puntos; confianza alta 89,46 % -> 89,77 %): mejora pequeña, la mayoría de las explosiones se evitan con la red. Imágenes: `scratchpad/vertices/antes/antes_zona*_explotados_*.png` (después: ninguna, 0 explotados).
+
+**Pendiente.** (1) La asociación sigue acertando poco con recorte artificial fuerte (47 %): idea, guardar en cada vértice el índice de objeto/malla (puntero de la RAM de la GTE) para no mezclar objetos. (2) Los ~1000 descartes por modelo por zona son geometría real perdida (huecos pequeños): ver si se pueden reparar con el candidato correcto en vez de descartar. (3) Zonas no cubiertas por el probador (agua, resto): añadir códigos a `probador_zonas.txt`.
