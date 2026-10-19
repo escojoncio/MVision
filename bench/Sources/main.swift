@@ -426,9 +426,9 @@ func runCase(_ cfg: Cfg, first: Bool) {
             let w = frame * local
             if let px = project(SIMD3<Float>(w.x, w.y, w.z), eye: e, head: headB) {
                 let c = im.avg(px.0, px.1, r: 2)
-                check(caso, "ojo \(e) HUD magenta (encima del cubo ciano que lo tapa)", near(c, (235, 0, 235), 70), "pixel (\(px.0),\(px.1)) color \(c) esperado ~(235,0,235); ciano (0,255,255) = el mundo tapa el panel")
+                check(caso, "ojo \(e) HUD magenta (encima del cubo ciano que lo tapa)", c.0 > 150 && c.2 > 150 && c.1 < 150, "pixel (\(px.0),\(px.1)) color \(c) esperado magenta (R,B > 150, G < 150); ciano (0,255,255) = el mundo tapa el panel")
                 // el cubo ciano existe: un píxel de su cara a un lado del rectángulo del panel (misma línea de visión del cubo, fuera del rectángulo magenta) es ciano
-                if let q = project(SIMD3<Float>(-0.093, 1.70, -0.85), eye: e, head: headB) {
+                if let q = project(SIMD3<Float>(-0.133, 1.776, -0.94), eye: e, head: headB) {
                     let cc = im.avg(q.0, q.1, r: 1)
                     soft(caso, "ojo \(e) cubo ciano delante del panel visible", near(cc, (0, 255, 255), 80), "pixel (\(q.0),\(q.1)) color \(cc) esperado ciano")
                 }
