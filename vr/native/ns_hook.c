@@ -9,6 +9,7 @@ static struct {
     NsCtxFn ctx; void *ctx_user;
     NsGateFn gate; void *gate_user;
     NsStoreResetFn sreset; void *sreset_user;
+    NsSceneTapFn tap; void *tap_user;
     uint32_t vbl;
     int pending;
     NsPlayerMap map;
@@ -44,6 +45,7 @@ int ns_hook_has_extractor(void) { return atomic_load(&H.ex) != NULL; }
 void ns_hook_set_context(NsCtxFn fn, void *user) { H.ctx = fn; H.ctx_user = user; }
 void ns_hook_set_gate(NsGateFn fn, void *user) { H.gate_user = user; H.gate = fn; }
 void ns_hook_set_store_reset(NsStoreResetFn fn, void *user) { H.sreset_user = user; H.sreset = fn; }
+void ns_hook_set_scene_tap(NsSceneTapFn fn, void *user) { H.tap_user = user; H.tap = fn; }
 void ns_hook_set_frame(uint32_t v) { H.vbl = v; }
 void ns_hook_stats(NsHookStats *s) {
     if (!s) return;
@@ -116,6 +118,7 @@ void ns_hook_tick(const uint8_t *ram) {
     if (!s) { H.pending = 0; return; }
     if (H.refresh_parts && !H.ik_done) inc(&H.st.ik_missed);   /* se esperaba la pose IK y no llegó: la escena sale sin PLAYER_OK */
     atomic_store(&H.st.last_valid, s->valid);
+    if (H.tap) H.tap(s, H.store, H.tap_user);   /* antes de publicar: el observador ve la escena que verá el consumidor */
     ns_bridge_publish(H.br, H.store);
     atomic_store(&H.st.last_pub_ns, ns_now_ns());
     inc(&H.st.published);

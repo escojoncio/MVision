@@ -32,7 +32,8 @@ static void test_basics(void) {
     float p3[3] = {1, 1, 0};
     CHECK(NEAR(vrhc_tri_dist(a, b, c, p3, q), sqrtf(0.5f), 1e-5f), "arista");
     VrHcCfg c0; vrhc_config_default(&c0);
-    CHECK(c0.enabled && c0.radius_m >= 0.12f && c0.radius_m <= 0.15f, "radio por defecto 12-15 cm");
+    CHECK(c0.enabled && c0.radius_m >= 0.18f && c0.radius_m <= 0.22f, "radio por defecto 18-22 cm (%.3f)", c0.radius_m);
+    CHECK(c0.safe_m > 0.1f && c0.face_m >= c0.safe_m && c0.face_m <= c0.radius_m, "safe %.3f <= face %.3f <= radio %.3f; safe > plano cercano 0,1 m", c0.safe_m, c0.face_m, c0.radius_m);
 }
 
 static void test_wall(void) {
@@ -45,19 +46,24 @@ static void test_wall(void) {
     float head[3] = {0.1f, 1.6f, -0.2f};
     vrhc_query(&m, head, 0.02f, &o);
     CHECK(!o.hit && o.corr_len < 1e-4f && o.fade == 0, "en reposo no hay corrección (corr=%.4f fade=%.2f)", o.corr_len, o.fade);
-    /* se asoma 0,2 m hacia la pared: aún libre (0,13 de radio -> límite en x = 0,47) */
+    /* se asoma 0,2 m hacia la pared: aún libre (0,2 de radio -> límite en x = 0,4) */
     head[0] = 0.1f + 0.2f; vrhc_query(&m, head, 0.02f, &o);
     CHECK(!o.hit && o.corr_len < 1e-4f, "0,2 m sin contacto (hit=%d corr=%.4f)", o.hit, o.corr_len);
-    /* 0,6 m: atraviesa; se recorta en x = 0,6 - 0,13 */
+    /* 0,6 m: atraviesa; se recorta en x = 0,6 - radio */
     head[0] = 0.1f + 0.6f; vrhc_query(&m, head, 0.02f, &o);
     CHECK(o.hit, "choca");
-    CHECK(NEAR(head[0] + o.corr[0], 0.6f - 0.13f, 0.005f), "posición recortada x=%.4f esperado 0.47", head[0] + o.corr[0]);
+    CHECK(NEAR(head[0] + o.corr[0], 0.6f - vrhc_config()->radius_m, 0.005f), "posición recortada x=%.4f esperado 0.40", head[0] + o.corr[0]);
     CHECK(NEAR(o.corr[1], 0, 0.003f) && NEAR(o.corr[2], 0, 0.003f), "recorte solo en x (%.4f %.4f)", o.corr[1], o.corr[2]);
-    CHECK(o.fade > 0.0f && o.fade < 1.0f, "fundido parcial %.3f", o.fade);
+    CHECK(o.fade > 0.99f && o.through > 0.99f, "la cabeza física atraviesa la pared: negro INMEDIATO en la misma consulta (fade=%.3f through=%.3f)", o.fade, o.through);
+    /* sin atravesar, pero empujando 8 cm más allá del límite: recorta sin negro */
+    vrhc_reset(); feed_wall(&m, 0.6f, 1);
+    head[0] = 0.4f + 0.08f; vrhc_query(&m, head, 0.02f, &o);
+    CHECK(o.hit && o.fade < 0.5f && NEAR(head[0] + o.corr[0], 0.4f, 0.005f), "empuje corto: recorte sin negro (fade=%.3f x=%.3f)", o.fade, head[0] + o.corr[0]);
+    head[0] = 0.1f + 1.0f; vrhc_query(&m, head, 0.02f, &o);
     /* mucho más allá: fundido total */
     head[0] = 0.1f + 1.5f; vrhc_query(&m, head, 0.02f, &o);
     CHECK(o.fade > 0.99f, "fundido total %.3f", o.fade);
-    CHECK(head[0] + o.corr[0] < 0.6f - 0.12f, "no atraviesa nunca (x=%.3f)", head[0] + o.corr[0]);
+    CHECK(head[0] + o.corr[0] < 0.6f - 0.18f, "no atraviesa nunca (x=%.3f)", head[0] + o.corr[0]);
     /* liberación progresiva */
     head[0] = 0.1f;
     float f0 = o.fade; vrhc_query(&m, head, 0.1f, &o);
@@ -66,7 +72,7 @@ static void test_wall(void) {
     CHECK(o.fade == 0 && o.corr_len < 1e-4f, "tras soltar vuelve a 0");
     /* deslizamiento: oblicuo (+x hacia la pared, +z libre): z avanza, x se queda en el límite */
     head[0] = 0.1f + 0.8f; head[2] = -0.2f + 0.5f; vrhc_query(&m, head, 0.02f, &o);
-    CHECK(o.hit && NEAR(head[0] + o.corr[0], 0.47f, 0.01f) && NEAR(head[2] + o.corr[2], head[2], 0.02f), "desliza por la pared (x=%.3f z=%.3f)", head[0] + o.corr[0], head[2] + o.corr[2]);
+    CHECK(o.hit && NEAR(head[0] + o.corr[0], 0.40f, 0.01f) && NEAR(head[2] + o.corr[2], head[2], 0.02f), "desliza por la pared (x=%.3f z=%.3f)", head[0] + o.corr[0], head[2] + o.corr[2]);
     /* de un lado a otro de una pared fina de un salto: no se atraviesa */
     head[0] = 0.1f + 3.0f; head[2] = -0.2f; vrhc_query(&m, head, 0.02f, &o);
     CHECK(head[0] + o.corr[0] < 0.6f, "no hay túnel con un salto de 3 m");
@@ -76,16 +82,19 @@ static void test_overlap_start(void) {
     vrhc_init(NULL);
     float eye[3] = {0, 1500, 0}, pref[3] = {0, 1.6f, 0};
     VrHcMap m = mk_map(-180.0f, eye, pref);
-    feed_wall(&m, 0.08f, 1);                    /* pared a 8 cm del ancla (< radio 13 cm): solapado desde el principio */
+    const VrHcCfg *cf = vrhc_config();
+    feed_wall(&m, 0.08f, 1);                    /* pared a 8 cm del ancla (< safe): el ojo del juego está pegado */
     VrHcOut o; float head[3] = {0, 1.6f, 0};
     vrhc_query(&m, head, 0.02f, &o);
-    CHECK(!o.hit && o.corr_len < 1e-4f, "no empuja al estar solapado al empezar (corr=%.4f)", o.corr_len);
+    CHECK(o.pushed_m > 0.05f && o.clear_m >= cf->face_m - 0.005f, "se expulsa hasta face_m (clear=%.3f pushed=%.3f)", o.clear_m, o.pushed_m);
+    CHECK(head[0] + o.corr[0] < 0.08f - cf->face_m + 0.006f, "la cámara se aparta de la pared (x=%.3f)", head[0] + o.corr[0]);
+    CHECK(o.fade < 0.01f, "expulsión resuelta: sin negro (fade=%.3f)", o.fade);
     head[0] = -0.3f; vrhc_query(&m, head, 0.02f, &o);
-    CHECK(!o.hit && o.corr_len < 1e-4f, "alejarse es libre");
+    CHECK(o.clear_m >= cf->face_m - 0.005f && o.fade < 0.01f, "alejarse es libre");
     head[0] = 0.04f; vrhc_query(&m, head, 0.02f, &o);
-    CHECK(o.hit && head[0] + o.corr[0] <= 0.005f, "no se acerca más (x=%.4f)", head[0] + o.corr[0]);
+    CHECK(o.clear_m >= cf->face_m - 0.005f && head[0] + o.corr[0] < 0.08f - cf->face_m + 0.006f, "no se acerca más (x=%.4f clear=%.3f)", head[0] + o.corr[0], o.clear_m);
     head[1] = 2.0f; head[2] = 0.5f; head[0] = 0; vrhc_query(&m, head, 0.02f, &o);
-    CHECK(!o.hit, "moverse en paralelo a la pared solapada es libre");
+    CHECK(o.clear_m >= cf->face_m - 0.005f, "moverse en paralelo a la pared pegada: la cara nunca baja de face_m (clear=%.3f)", o.clear_m);
 }
 
 static void test_rotated_map(void) {
@@ -101,7 +110,7 @@ static void test_rotated_map(void) {
         vrhc_feed_tris(&m, t, 2, NULL, 0);
         VrHcOut o; float head[3] = {pref[0] + 0.9f, pref[1], pref[2]};
         vrhc_query(&m, head, 0.02f, &o);
-        CHECK(o.hit && NEAR(head[0] + o.corr[0], xw - 0.13f, 0.006f), "mapa girado %d: x=%.4f esperado %.4f", k, head[0] + o.corr[0], xw - 0.13f);
+        CHECK(o.hit && NEAR(head[0] + o.corr[0], xw - vrhc_config()->radius_m, 0.006f), "mapa girado %d: x=%.4f esperado %.4f", k, head[0] + o.corr[0], xw - vrhc_config()->radius_m);
     }
 }
 
@@ -172,8 +181,177 @@ static void test_penetration_fade(void) {
     float save = vrhc_config()->radius_m;
     (void)save;
     vrhc_query(&m2, h2, 0.02f, &o);
-    CHECK(o.hit && h2[0] + o.corr[0] <= 0.2f - 0.12f, "recortado antes de la pared (x=%.3f)", h2[0] + o.corr[0]);
-    CHECK(o.pen_m < 0.005f, "tras recortar no queda penetración (pen=%.4f)", o.pen_m);
+    CHECK(o.hit && h2[0] + o.corr[0] <= 0.2f - vrhc_config()->face_m + 0.006f, "recortado antes de la pared (x=%.3f)", h2[0] + o.corr[0]);
+    CHECK(o.pen_m < 0.005f && o.clear_m >= vrhc_config()->face_m - 0.006f, "tras recortar no queda penetración (pen=%.4f clear=%.3f)", o.pen_m, o.clear_m);
+}
+
+
+/* ---- sólidos de prueba en el espacio del usuario (mapa identidad: R = I, ojo (5000,1500,-2000), p_ref (0.1,1.6,-0.2); 1 m = 1000 unidades) ---- */
+static void quad_user(const VrHcMap *m, int axis, float sign, float dist, float half, const float c0[3], float *t18) {
+    /* plano perpendicular a `axis` a `dist` (con signo) de c0, cuadrado de lado 2*half */
+    (void)m;
+    int a1 = (axis + 1) % 3, a2 = (axis + 2) % 3;
+    float p[4][3];
+    for (int k = 0; k < 4; k++) {
+        memcpy(p[k], c0, 12);
+        p[k][axis] = c0[axis] + sign * dist;
+        p[k][a1] = c0[a1] + ((k == 0 || k == 3) ? -half : half);
+        p[k][a2] = c0[a2] + ((k == 0 || k == 1) ? -half : half);
+    }
+    int idx[6] = {0, 1, 2, 0, 2, 3};
+    for (int i = 0; i < 6; i++) memcpy(t18 + 3 * i, p[idx[i]], 12);
+}
+static void to_world_id(const VrHcMap *m, const float p[3], float w[3]) {
+    for (int i = 0; i < 3; i++) w[i] = m->eye[i] + m->upm * (p[i] - m->p_ref[i]);
+}
+
+static void test_six_directions(void) {
+    float eye[3] = {5000, 1500, -2000}, pref[3] = {0.1f, 1.6f, -0.2f};
+    VrHcMap m = mk_map(-180.0f, eye, pref);
+    const char *nm[6] = {"+x", "-x", "+y (techo)", "-y (suelo)", "+z", "-z"};
+    for (int d = 0; d < 6; d++) {
+        for (int src = 0; src < 2; src++) {      /* 0 = lista de la GPU (espacio del usuario), 1 = escena nativa (mundo) */
+            vrhc_init(NULL);
+            const VrHcCfg *cf = vrhc_config();
+            int axis = d / 2; float sign = (d & 1) ? -1.0f : 1.0f;
+            float t[18], tw[18];
+            quad_user(&m, axis, sign, 0.6f, 3.0f, pref, t);
+            if (src == 0) vrhc_feed_tris(&m, t, 2, NULL, 0);
+            else { for (int v = 0; v < 6; v++) to_world_id(&m, t + 3 * v, tw + 3 * v); vrhc_feed_world(tw, 2, 0); }
+            VrHcOut o;
+            float head[3] = {pref[0], pref[1], pref[2]};
+            vrhc_query(&m, head, 0.011f, &o);
+            CHECK(o.corr_len < 1e-3f && o.fade == 0, "%s src%d: en reposo libre", nm[d], src);
+            /* 3 empujes: hasta tocar, más allá y a través (1,5 m) */
+            float reach[3] = {0.55f, 0.75f, 1.5f};
+            for (int s = 0; s < 3; s++) {
+                vrhc_reset();
+                if (src == 0) vrhc_feed_tris(&m, t, 2, NULL, 0);
+                else vrhc_feed_world(tw, 2, 0);
+                memcpy(head, pref, 12); head[axis] += sign * reach[s];
+                vrhc_query(&m, head, 0.011f, &o);
+                float fin = head[axis] + o.corr[axis];
+                float dist_wall = 0.6f - sign * (fin - pref[axis]);   /* distancia del centro de la cabeza al plano */
+                CHECK(dist_wall >= cf->radius_m - 0.006f, "%s src%d empuje %.2f: la cabeza queda a %.3f m del plano (>= radio %.2f)", nm[d], src, reach[s], dist_wall, cf->radius_m);
+                CHECK(o.clear_m >= cf->face_m - 0.006f, "%s src%d empuje %.2f: cara a %.3f m de un sólido (>= %.2f)", nm[d], src, reach[s], o.clear_m, cf->face_m);
+                if (s == 2) CHECK(o.fade > 0.99f, "%s src%d: atravesar la pared funde a negro de inmediato (%.3f)", nm[d], src, o.fade);
+            }
+        }
+    }
+}
+
+static void test_native_360(void) {
+    /* La lista de la GPU solo ve DELANTE; la escena nativa trae además lo de ATRÁS: sin la nativa la cabeza atravesaría la pared trasera. */
+    float eye[3] = {5000, 1500, -2000}, pref[3] = {0.1f, 1.6f, -0.2f};
+    VrHcMap m = mk_map(-180.0f, eye, pref);
+    vrhc_init(NULL);
+    float front[18], back[18], bw[18];
+    quad_user(&m, 0, 1.0f, 0.6f, 3.0f, pref, front);
+    quad_user(&m, 0, -1.0f, 0.6f, 3.0f, pref, back);
+    vrhc_feed_tris(&m, front, 2, NULL, 0);
+    VrHcOut o; float head[3] = {pref[0] - 0.9f, pref[1], pref[2]};
+    vrhc_query(&m, head, 0.011f, &o);
+    CHECK(!o.native_live && head[0] + o.corr[0] < pref[0] - 0.7f, "solo GPU: la pared de atrás no existe (atraviesa x=%.3f) -- el hueco que cubre la escena nativa", head[0] + o.corr[0]);
+    for (int v = 0; v < 6; v++) to_world_id(&m, back + 3 * v, bw + 3 * v);
+    CHECK(vrhc_feed_world(bw, 2, 0) == 2 && vrhc_native_count() == 2, "alimenta la lista nativa");
+    vrhc_query(&m, head, 0.011f, &o);
+    CHECK(o.native_live && head[0] + o.corr[0] >= pref[0] - 0.6f + vrhc_config()->radius_m - 0.006f, "con la nativa la pared de atrás frena (x=%.3f)", head[0] + o.corr[0]);
+    CHECK(o.fade > 0.99f, "y funde a negro (%.3f)", o.fade);
+    /* la lista nativa se REEMPLAZA (sin fantasmas) */
+    vrhc_reset(); vrhc_feed_tris(&m, front, 2, NULL, 0);
+    vrhc_feed_world(bw, 2, 0);
+    float far_[9] = {9000, 0, 9000, 9000, 10, 9000, 9100, 0, 9000};
+    vrhc_feed_world(far_, 1, 0);
+    head[0] = pref[0] - 0.9f; vrhc_query(&m, head, 0.011f, &o);
+    CHECK(o.clear_m > 1.0f && head[0] + o.corr[0] < pref[0] - 0.7f, "la lista nativa nueva sustituye a la anterior");
+    /* caduca sin refrescar (la nativa deja de llegar: modo gpu, escena no apta): vuelve a la lista de la GPU */
+    vrhc_feed_world(bw, 2, 0);
+    for (int i = 0; i < 120; i++) vrhc_query(&m, (float[3]){pref[0], pref[1], pref[2]}, 0.011f, &o);
+    CHECK(!o.native_live, "la lista nativa caduca a ~1 s sin refresco");
+}
+
+static void test_fade_and_release(void) {
+    float eye[3] = {5000, 1500, -2000}, pref[3] = {0.1f, 1.6f, -0.2f};
+    VrHcMap m = mk_map(-180.0f, eye, pref);
+    vrhc_init(NULL);
+    float t[18]; quad_user(&m, 2, 1.0f, 0.5f, 3.0f, pref, t);
+    vrhc_feed_tris(&m, t, 2, NULL, 0);
+    VrHcOut o; float head[3] = {pref[0], pref[1], pref[2]};
+    vrhc_query(&m, head, 0.011f, &o);
+    CHECK(o.fade == 0, "libre");
+    head[2] = pref[2] + 0.65f; vrhc_query(&m, head, 0.011f, &o);   /* un solo fotograma de entrada en el sólido */
+    CHECK(o.fade > 0.99f, "negro inmediato al entrar en el sólido (%.3f)", o.fade);
+    head[2] = pref[2]; vrhc_query(&m, head, 0.011f, &o);
+    CHECK(o.fade > 0.9f, "al salir se mantiene un instante (liberación, no parpadeo): %.3f", o.fade);
+    for (int i = 0; i < 40; i++) vrhc_query(&m, head, 0.011f, &o);
+    CHECK(o.fade == 0, "y se libera del todo (%.3f)", o.fade);
+    /* hueco de seguridad: más candidatos de los que caben -> negro, nunca ver a través */
+    vrhc_init(NULL);
+    int n = HC_NAT_MAX;
+    float *w = malloc(sizeof(float) * 9 * (size_t)(n + 10));
+    for (int i = 0; i < n + 10; i++) { float x = 5000 + (float)(i % 100), y = 1500 + (float)(i / 100 % 100) * 0.5f; float tt[9] = {x, y, -2000, x + 1, y, -2000, x, y + 1, -2000}; memcpy(w + 9 * i, tt, 36); }
+    vrhc_feed_world(w, n + 10, 0);
+    free(w);
+    memcpy(head, pref, 12); vrhc_query(&m, head, 0.011f, &o);
+    CHECK(o.overflow && o.fade > 0.99f, "desbordamiento de la lista nativa: negro (ov=%d fade=%.2f)", o.overflow, o.fade);
+    /* lista truncada por el recolector (el búfer se llenó): ante la duda, negro */
+    vrhc_init(NULL);
+    float one[9] = {5000, 1500, -1000, 5001, 1500, -1000, 5000, 1501, -1000};
+    vrhc_feed_world(one, 1, 1);
+    memcpy(head, pref, 12); vrhc_query(&m, head, 0.011f, &o);
+    CHECK(o.overflow && o.fade > 0.99f, "lista truncada: negro (ov=%d fade=%.2f)", o.overflow, o.fade);
+    vrhc_feed_world(one, 1, 0);
+    for (int i = 0; i < 40; i++) vrhc_query(&m, head, 0.011f, &o);
+    CHECK(!o.overflow && o.fade == 0, "lista completa: sin negro");
+}
+
+static void test_min_face_distance(void) {
+    /* habitación cerrada de 2 x 2.6 x 2 m (6 paredes); la cabeza se mueve al azar 3000 pasos con saltos grandes: la cara nunca baja de la distancia mínima ni sale */
+    float eye[3] = {5000, 1500, -2000}, pref[3] = {0.1f, 1.6f, -0.2f};
+    VrHcMap m = mk_map(-180.0f, eye, pref);
+    for (int pass = 0; pass < 2; pass++) {
+        vrhc_init(NULL);
+        const VrHcCfg *cf = vrhc_config();
+        float c0[3] = {pref[0], pref[1], pref[2]};
+        float room[6][18]; float tw[18];
+        float half[6] = {1.0f, 1.0f, 1.3f, 1.3f, 1.0f, 1.0f};
+        for (int d = 0; d < 6; d++) {
+            quad_user(&m, d / 2, (d & 1) ? -1.0f : 1.0f, half[d], 2.0f, c0, room[d]);
+            if (pass == 0) vrhc_feed_tris(&m, room[d], 2, NULL, 0);
+        }
+        if (pass == 1) {   /* misma habitación pero pegada a una pared: el ancla a 5 cm de la pared +x */
+            for (int d = 0; d < 6; d++) { quad_user(&m, d / 2, (d & 1) ? -1.0f : 1.0f, d == 0 ? 0.05f : half[d], 2.0f, c0, room[d]); }
+        }
+        float *all = malloc(sizeof(float) * 18 * 6);
+        for (int d = 0; d < 6; d++) for (int v = 0; v < 6; v++) to_world_id(&m, room[d] + 3 * v, all + 18 * d + 3 * v);
+        vrhc_reset();
+        vrhc_feed_world(all, 12, 0);
+        (void)tw;
+        srand(123 + pass);
+        VrHcOut o;
+        float worst = 9.0f; int outside = 0, fade_bad = 0;
+        for (int i = 0; i < 3000; i++) {
+            float head[3] = {c0[0] + ((rand() % 4000) - 2000) / 1000.0f, c0[1] + ((rand() % 4000) - 2000) / 1000.0f, c0[2] + ((rand() % 4000) - 2000) / 1000.0f};
+            if (i % 4 == 0) vrhc_feed_world(all, 12, 0);   /* la escena nativa llega cada pocos fotogramas */
+            vrhc_query(&m, head, 0.011f, &o);
+            float f[3] = {head[0] + o.corr[0] - c0[0], head[1] + o.corr[1] - c0[1], head[2] + o.corr[2] - c0[2]};
+            if (o.clear_m < worst) worst = o.clear_m;
+            if (f[0] > (pass ? 0.05f : 1.0f) || f[0] < -1.0f || f[1] > 1.3f || f[1] < -1.3f || fabsf(f[2]) > 1.0f) outside++;
+            if (o.clear_m < cf->safe_m && o.fade < 0.5f) fade_bad++;
+        }
+        free(all);
+        CHECK(worst >= cf->face_m - 0.01f, "pase %d: distancia mínima de la cara en 3000 pasos = %.3f m (>= %.2f)", pass, worst, cf->face_m);
+        CHECK(outside == 0, "pase %d: la cabeza dibujada nunca sale de la habitación (%d fuera)", pass, outside);
+        CHECK(fade_bad == 0, "pase %d: nunca a menos de safe sin negro", pass);
+    }
+    /* pasillo estrecho (2 x 13 cm): la cara no puede quedar a salvo -> negro, nunca ver a través */
+    vrhc_init(NULL);
+    float t1[18], t2[18];
+    quad_user(&m, 0, 1.0f, 0.10f, 3.0f, pref, t1); quad_user(&m, 0, -1.0f, 0.10f, 3.0f, pref, t2);
+    vrhc_feed_tris(&m, t1, 2, NULL, 0); vrhc_feed_tris(&m, t2, 2, NULL, 0);
+    VrHcOut o; float head[3] = {pref[0], pref[1], pref[2]};
+    vrhc_query(&m, head, 0.011f, &o);
+    CHECK(o.clear_m < vrhc_config()->safe_m && o.fade > 0.5f, "pasillo de 20 cm: imposible mantener la distancia -> negro (clear=%.3f fade=%.2f)", o.clear_m, o.fade);
 }
 
 static void test_perf(void) {
@@ -196,7 +374,7 @@ static void test_perf(void) {
 }
 
 int main(void) {
-    test_basics(); test_wall(); test_overlap_start(); test_rotated_map(); test_body_and_ttl(); test_scene_feed(); test_penetration_fade(); test_perf();
+    test_basics(); test_wall(); test_overlap_start(); test_rotated_map(); test_body_and_ttl(); test_scene_feed(); test_penetration_fade(); test_six_directions(); test_native_360(); test_fade_and_release(); test_min_face_distance(); test_perf();
     printf("test_headcol: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }
