@@ -353,6 +353,18 @@ struct XRImmersiveScene: Scene {
     @AppStorage("xr.view.hideHands") private var hideRealHands = true
 
     var body: some Scene {
+        /* Indicador de inicio del sistema oculto (`Scene.persistentSystemOverlays`, visionOS 2+): al girar la palma no aparece sin intención
+         * expresa. Es una petición: el gesto de la palma es del sistema y no existe API pública para anularlo. SceneBuilder no admite
+         * `if #available` (no tiene buildEither/buildOptional), por eso el destino mínimo del proyecto es visionOS 2.0 (project.yml). */
+        XRImmersiveSpaceBase(hideRealHands: hideRealHands)
+            .persistentSystemOverlays(.hidden)
+    }
+}
+
+/// Espacio inmersivo completo con el compositor; las manos reales se ocultan si se pide.
+struct XRImmersiveSpaceBase: Scene {
+    let hideRealHands: Bool
+    var body: some Scene {
         ImmersiveSpace(id: XRSession.spaceID) {
             CompositorLayer(configuration: XRLayerConfiguration()) { layerRenderer in
                 Task { @MainActor in XRSession.shared.attach(layerRenderer) }

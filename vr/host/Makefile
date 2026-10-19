@@ -104,3 +104,11 @@ $(OUT)/test_special_run: test_special_run.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)
 	  -o $@ test_special_run.c $(SRC_VR) $(SRC_RT) -lm -lpthread
 .PHONY: test_special_run
 test_special_run: $(OUT)/test_special_run
+
+# Entradas hostiles (NaN, umbrales, armas al azar) sobre el host completo (fuzzrun.c). Para sanitizadores: make fuzzrun CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer".
+$(OUT)/fuzzrun: fuzzrun.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
+	@mkdir -p $(OUT)
+	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
+	  -o $@ fuzzrun.c $(SRC_VR) $(SRC_RT) -lm -lpthread
+.PHONY: fuzzrun
+fuzzrun: $(OUT)/fuzzrun
