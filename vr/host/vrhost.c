@@ -230,21 +230,44 @@ static int grow(void **p, size_t *cap, size_t need, size_t esz) {
 #ifndef MV_RENDER_DEFAULT_NATIVE
 #define MV_RENDER_DEFAULT_NATIVE 0
 #endif
-#define NS_FRESH_NS 250000000ull         /* antigüedad máxima de la última escena nativa para quitar el 3D de la lista */
-static NsBridge *ns_br;
-static _Atomic int render_req = MV_RENDER_DEFAULT_NATIVE, render_locked, renderer_ready, render_eff;
+static NsBridge *_Atomic ns_br;          /* se crea una sola vez (ns_bridge_get); nunca se destruye */
+static pthread_mutex_t NSMX = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int render_req = MV_RENDER_DEFAULT_NATIVE, render_locked, renderer_ready;
 static int dump_point;                   /* 1 = el volcado en curso se tomó en el punto de enganche */
 /* Definición DÉBIL vacía (una referencia débil sin definir no enlaza en Mach-O): ns_extract la sustituye con una fuerte que registra el extractor en el enganche. */
 __attribute__((weak)) void ns_extract_register(void) {}
 _Static_assert(NS_PLAYER_BODY_PTR == BA_PLAYER_BODY, "ns_player y el puente deben coincidir en el puntero del jugador");
 static void dump_at_stage(Cpu *c);
+static int ns_gate(void *u);
+static void ns_frame_check(void);
+static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u);
+_Static_assert(VR_SKIP_WORLD == NS_SKIP_WORLD && VR_SKIP_FX == NS_SKIP_FX, "las marcas de batch y la decisión del consumidor deben coincidir");
 
 void mv_vrhost_set_render_mode(int native) { if (!atomic_load(&render_locked)) atomic_store(&render_req, native != 0); }
 int mv_vrhost_render_mode(void) { return atomic_load(&render_req); }
 int mv_vrhost_render_env_locked(void) { return atomic_load(&render_locked); }
 void mv_vrhost_native_renderer_ready(int ready) { atomic_store(&renderer_ready, ready != 0); }
 int mv_vrhost_native_available(void) { return ns_hook_has_extractor() && ns_hook_installed() && atomic_load(&renderer_ready); }
-struct NsBridge *mv_vrhost_native_bridge(void) { return ns_br; }
+/* Puente de la escena nativa: se crea la primera vez que alguien lo pide (instalación del anfitrión o interfaz) y a partir de ahí nunca es NULL (salvo sin memoria). */
+static NsBridge *ns_bridge_get(void) {
+    NsBridge *b = atomic_load(&ns_br);
+    if (b) return b;
+    pthread_mutex_lock(&NSMX);
+    b = atomic_load(&ns_br);
+    if (!b) {
+        NsBridgeCaps bc = {512, 8192, 256, 2048};
+        b = ns_bridge_create(&bc);
+        if (b) {
+            ns_hook_init(b);
+            ns_hook_set_context(ns_ctx, NULL);
+            ns_hook_set_gate(ns_gate, NULL);
+            atomic_store(&ns_br, b);
+        }
+    }
+    pthread_mutex_unlock(&NSMX);
+    return b;
+}
+struct NsBridge *mv_vrhost_native_bridge(void) { return ns_bridge_get(); }
 
 /* Mundo del motor -> espacio recentrado del usuario (3x4 fila-mayor, metros): la MISMA regla que vr_scene con user_map_on (la reflexión de Z se cancela):
  *   P = R * (k * S * (W - origen)) - R * (0, eye_h, 0) + p_ref.
@@ -282,18 +305,55 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
 }
 static void ns_post_ik(uint8_t *ram) { ns_hook_post_ik(ram); }
 
-/* ¿Esta escena de la lista lleva el 3D nativo? Solo con cámara VR en primera persona (no cinemáticas), modo pedido, medios disponibles y escena reciente. */
-static int native_for_scene(const VrCamRecord *r, const VrScene *sc, int cine_cand) {
-    if (!atomic_load(&render_req) || !mv_vrhost_native_available()) return 0;
-    if (!r || !r->active || cine_cand || !sc->has_3d || !sc->world_valid || view.kind == VRV_K_ENGINE) return 0;
-    return ns_hook_native_ready(mono_ns(), NS_FRESH_NS);
+/* Vigilancia por fotograma (hilo de emulación, tras el sincronismo): (M4) con la capa de cuerpo activa cada captura debe llevar la pose IK de los brazos
+ * (ik_refresh crece a la par que captures); (B4) reintento de la instalación y reinstalación si otra overlay pisó la etapa. Se registra como mucho una vez por segundo. */
+static void ns_frame_check(void) {
+    static uint32_t cap0, ik0, miss0, nfr;
+    static uint64_t last_log_ns;
+    NsHookStats st;
+    ns_hook_stats(&st);
+#ifdef MV_NOGEN
+    if (vr_ok && (++nfr & 31u) == 0) {
+        unsigned stale0 = ns_hook_stale_count();
+        int was = ns_hook_installed(), rc0 = ns_hook_last_rc();
+        ns_hook_poll();
+        if (ns_hook_stale_count() != stale0) fprintf(stderr, "[vrhost] etapa de pantalla cambiada (otra overlay): enganche del render nativo %s\n", ns_hook_installed() ? "reinstalado" : "retirado");
+        else if (!was && ns_hook_installed()) fprintf(stderr, "[vrhost] enganche del render nativo instalado en un reintento\n");
+        else if (!was && ns_hook_last_rc() != rc0) fprintf(stderr, "[vrhost] enganche del render nativo sin instalar (%d)\n", ns_hook_last_rc());
+    }
+#endif
+    uint64_t t = mono_ns();
+    if (t - last_log_ns < 1000000000ull) return;
+    last_log_ns = t;
+    uint32_t dcap = st.captures - cap0, dik = st.ik_refresh - ik0, dmiss = st.ik_missed - miss0;
+    cap0 = st.captures; ik0 = st.ik_refresh; miss0 = st.ik_missed;
+    if (body_ok && dcap > 0 && (dik < dcap || dmiss))
+        fprintf(stderr, "[vrhost] render nativo: %u capturas, %u con pose IK, %u sin IK (esas escenas se pintan por GPU); jugador enlazado %u\n", dcap, dik, dmiss, st.player_bound);
 }
-/* Quita los batches 3D (kind 0/1): los eventos de VRAM se aplican de forma incremental por ev_end, así que quitar batches no rompe la sincronía. */
-static void strip_3d(Slot *s) {
-    uint32_t n = 0;
-    for (uint32_t i = 0; i < s->sc.nb; i++) if (s->b[i].kind >= 2) s->b[n++] = s->b[i];
-    s->sc.nb = n;
+
+/* ¿Esta escena de la lista ADMITE el 3D nativo? Solo cámara VR en primera persona (no cinemáticas) y 3D de mundo válido. No depende del modo ni del estado del puente:
+ * el productor no decide nada, solo marca (mark_3d); quien dibuja decide con ns_native_decide y su estado real de ese fotograma (A1). */
+static int native_for_scene(const VrCamRecord *r, const VrScene *sc, int cine_cand) {
+    return r && r->active && !cine_cand && sc->has_3d && sc->world_valid && view.kind != VRV_K_ENGINE;
+}
+/* Marca los batches 3D (NO quita ninguno): kind 0 -> VR_SKIP_WORLD, kind 1 -> VR_SKIP_FX. Con sc.native_3d = 0 no hay marcas y se dibuja todo. */
+static void mark_3d(Slot *s) {
+    for (uint32_t i = 0; i < s->sc.nb; i++) s->b[i].skip_if_native = s->b[i].kind == 0 ? VR_SKIP_WORLD : s->b[i].kind == 1 ? VR_SKIP_FX : 0;
     s->sc.native_3d = 1;
+}
+
+/* Compuerta de la captura (M1): con el modo gpu (o sin renderer nativo listo) no se captura ni se extrae nada, salvo para un volcado pendiente en el punto de enganche. */
+enum { DS_IDLE = 0, DS_REQ, DS_CAP, DS_WRITE };
+static _Atomic int dump_state;   /* escrito bajo DMX; la compuerta de la captura lo lee sin bloquear */
+static int dump_stage_mode(void) {
+    static int env = -1;
+    if (env < 0) { const char *e = getenv("MV_DUMP_AT"); env = e && !strcmp(e, "stage"); }
+    return env;
+}
+static int ns_gate(void *u) {
+    (void)u;
+    if (atomic_load(&render_req) && atomic_load(&renderer_ready)) return 1;
+    return dump_stage_mode() && atomic_load(&dump_state) == DS_REQ;
 }
 
 /* ------------------------------------------------------------------------------------------------ cola de escenas */
@@ -532,8 +592,7 @@ static void build_one(const GpuDrawList *l, int si) {
     sm_sample(&slot[si].smp, &sc, r);   /* (r = registro de cámara de la lista; antes de fill_slot: sc.v/b son memoria interna de vr_scene) */
     int native_now = rc == 0 && native_for_scene(r, &sc, cine_cand);
     int ok = rc == 0 && fill_slot(&slot[si], hl, &sc) == 0 && fill_radar(&slot[si], &rscene, hl->nops) == 0;
-    if (ok && native_now) strip_3d(&slot[si]);   /* el casco de colisión de la cabeza (abajo) sigue alimentándose de la geometría de la lista, que no se toca */
-    atomic_store(&render_eff, ok && native_now);
+    if (ok && native_now) mark_3d(&slot[si]);   /* solo marca: la lista de la GPU queda entera (casco de colisión de la cabeza, modo gpu, caída del render nativo) */
     memset(&slot[si].hcmap, 0, sizeof slot[si].hcmap);
     if (ok && hc_on && r && r->active && sc.user_space && sc.world_valid) {
         VrHcMap hm;
@@ -621,7 +680,7 @@ static void publish_state(void) {
         g.cinematic = vin.cinematic; g.comms = vin.comms; g.paused = vin.paused; g.menu_open = vin.menu_open; g.stopped = vin.stopped;
         g.item = core ? bs.item : -1;
         g.alert_mode = core ? bs.alert_mode : 0;
-        g.render_req = atomic_load(&render_req); g.render_native = atomic_load(&render_eff); g.native_avail = mv_vrhost_native_available();
+        g.render_req = atomic_load(&render_req); g.native_avail = mv_vrhost_native_available();
         g.ammo = -1; g.ammo_max = -1;
         if (core && bs.weapon >= 0 && bs.weapon < BRIDGE_N_WEAPONS) { g.ammo = bs.weapon_ammo[bs.weapon]; g.ammo_max = bs.weapon_max[bs.weapon]; }
     }
@@ -701,14 +760,13 @@ static void ovp_frame(void) {
 /* ------------------------------------------------------------------------------------------------ volcado (ns_dump.h)
  * Hilo de emulación: SOLO copia (memcpy) RAM/VRAM/scratch/GTE/lista a búferes reservados una vez y arma el texto de meta. La conversión a PNG y toda la
  * escritura a disco las hace un hilo trabajador propio. Estados: IDLE -> REQ (pedido) -> CAP (copiado) -> WRITE -> IDLE (resultado en dump_res). */
-enum { DS_IDLE = 0, DS_REQ, DS_CAP, DS_WRITE };
 #define DUMP_OPS_CAP  16384u
 #define DUMP_DATA_CAP (1u << 20)
 #define DUMP_META_CAP 6144
 static pthread_mutex_t DMX = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t DCV = PTHREAD_COND_INITIALIZER;
 static pthread_t dump_thr;
-static int dump_thr_on, dump_state, dump_res;
+static int dump_thr_on, dump_res;
 static char dump_dir[512];
 static uint32_t dump_count;
 static struct {
@@ -744,26 +802,32 @@ static void *dump_worker(void *arg) {
     return NULL;
 }
 
+/* Reserva única de los búferes del volcado. SIN el cerrojo DMX (malloc bajo él bloquearía al hilo de emulación y al trabajador): se reserva fuera y se instala dentro si nadie lo hizo. */
+static int dump_buffers_ready(void) {
+    pthread_mutex_lock(&DMX);
+    int have = DB.ram != NULL;
+    pthread_mutex_unlock(&DMX);
+    if (have) return 1;
+    uint8_t *ram = (uint8_t *)malloc(NS_DUMP_RAM_SIZE), *scratch = (uint8_t *)malloc(1024), *rgba = (uint8_t *)malloc((size_t)1024 * 512 * 4);
+    uint16_t *vram = (uint16_t *)malloc(NS_DUMP_VRAM_BYTES), *ldata = (uint16_t *)malloc((size_t)DUMP_DATA_CAP * 2);
+    GpuOp *lops = (GpuOp *)malloc((size_t)DUMP_OPS_CAP * sizeof(GpuOp));
+    char *meta = (char *)malloc(DUMP_META_CAP);
+    int ok = ram && scratch && rgba && vram && ldata && lops && meta;
+    int used = 0;
+    pthread_mutex_lock(&DMX);
+    if (ok && !DB.ram) { DB.ram = ram; DB.scratch = scratch; DB.rgba = rgba; DB.vram = vram; DB.ldata = ldata; DB.lops = lops; DB.meta = meta; used = 1; }
+    int have2 = DB.ram != NULL;
+    pthread_mutex_unlock(&DMX);
+    if (!used) { free(ram); free(scratch); free(rgba); free(vram); free(ldata); free(lops); free(meta); }
+    return have2;
+}
+
 int mv_vrhost_request_dump(const char *dir) {
     if (!dir || !*dir || strlen(dir) >= sizeof dump_dir) return -1;
+    if (!dump_buffers_ready()) return -1;
     int rc = -1;
     pthread_mutex_lock(&DMX);
     if (dump_state == DS_IDLE) {
-        if (!DB.ram) {   /* reserva única (fuera del hilo de emulación) */
-            DB.ram = (uint8_t *)malloc(NS_DUMP_RAM_SIZE);
-            DB.scratch = (uint8_t *)malloc(1024);
-            DB.vram = (uint16_t *)malloc(NS_DUMP_VRAM_BYTES);
-            DB.rgba = (uint8_t *)malloc((size_t)1024 * 512 * 4);
-            DB.lops = (GpuOp *)malloc((size_t)DUMP_OPS_CAP * sizeof(GpuOp));
-            DB.ldata = (uint16_t *)malloc((size_t)DUMP_DATA_CAP * 2);
-            DB.meta = (char *)malloc(DUMP_META_CAP);
-            if (!DB.ram || !DB.scratch || !DB.vram || !DB.rgba || !DB.lops || !DB.ldata || !DB.meta) {
-                free(DB.ram); free(DB.scratch); free(DB.vram); free(DB.rgba); free(DB.lops); free(DB.ldata); free(DB.meta);
-                memset(&DB, 0, sizeof DB);
-                pthread_mutex_unlock(&DMX);
-                return -1;
-            }
-        }
         if (!dump_thr_on) {
             if (pthread_create(&dump_thr, NULL, dump_worker, NULL) != 0) { pthread_mutex_unlock(&DMX); return -1; }
             pthread_detach(dump_thr);
@@ -848,9 +912,7 @@ static void dump_capture(Cpu *c, uint32_t f, const GpuDrawList *l) {
 /* Volcado en el punto de enganche (etapa «pantalla», justo tras la captura nativa): la RAM es la misma que lee el extractor. Sin lista de la GPU (la última
  * cerrada no corresponde a este instante). Se usa con el modo nativo pedido o con MV_DUMP_AT=stage; si no, el volcado se toma en el gancho de frame como siempre. */
 static void dump_at_stage(Cpu *c) {
-    static int env = -1;
-    if (env < 0) { const char *e = getenv("MV_DUMP_AT"); env = e && !strcmp(e, "stage"); }
-    if (!env && !atomic_load(&render_req)) return;
+    if (!dump_stage_mode() && !atomic_load(&render_req)) return;
     dump_point = 1;
     dump_capture(c, (uint32_t)hle_frame_count(), NULL);   /* no hace nada si no hay un pedido sin atender */
     dump_point = 0;
@@ -859,6 +921,7 @@ static void dump_at_stage(Cpu *c) {
 static void frame_hook_body(Cpu *c, uint32_t f) {
     ns_hook_set_frame((uint32_t)hle_frame_count());
     ns_hook_tick(emu_ram);                        /* publica la escena nativa capturada en este fotograma de juego */
+    ns_frame_check();
 #ifdef MV_NOGEN
     if (vr_ok) ovp_frame();
 #endif
@@ -1045,11 +1108,8 @@ void mv_vrhost_set_ai(int perception, int cameras, int activity) {
 }
 
 void mv_vrhost_install(void) {
-    if (!ns_br) {
-        NsBridgeCaps bc = {512, 8192, 256, 2048};
-        ns_br = ns_bridge_create(&bc);
-        ns_hook_init(ns_br);
-        ns_hook_set_context(ns_ctx, NULL);
+    if (!atomic_load(&ns_br)) {
+        ns_bridge_get();
         const char *e = getenv("MV_RENDER");
         if (e && *e) {
             if (!strcmp(e, "nativo") || !strcmp(e, "native")) { atomic_store(&render_req, 1); atomic_store(&render_locked, 1); }

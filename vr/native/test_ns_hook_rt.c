@@ -94,8 +94,18 @@ int main(void) {
     int before = ex_calls;
     run(&c, NS_MAIN_CHANNEL);
     CHECK(ex_calls == before && rt_patch_stale(NS_STAGE_ADDR), "guarda por hash");
+    /* B4: la overlay nueva tiene otra forma valida -> poll retira el parche caducado y reinstala con el hash nuevo */
+    CHECK(ns_hook_poll() && ns_hook_installed() && !rt_patch_stale(NS_STAGE_ADDR) && ns_hook_stale_count() == 1, "reinstalado tras caducar");
+    before = ex_calls;
+    run(&c, NS_MAIN_CHANNEL);
+    CHECK(ex_calls == before + 1, "captura con la overlay nueva");
+    /* overlay sin la forma esperada: queda sin instalar y se reintenta */
+    put_stage(0);
+    rt_code_invalidate(NS_STAGE_ADDR, 28);
+    CHECK(!ns_hook_poll() && !ns_hook_installed() && ns_hook_last_rc() == NS_HOOK_BAD_CODE, "forma incorrecta: sin parche");
     put_stage(0x27BDFFF8u);
     rt_code_invalidate(NS_STAGE_ADDR, 28);
+    CHECK(ns_hook_poll() && ns_hook_installed(), "reintento correcto");
     ns_hook_uninstall();
     CHECK(!ns_hook_installed() && !rt_patched(NS_STAGE_ADDR), "desinstalado");
     before = ex_calls;

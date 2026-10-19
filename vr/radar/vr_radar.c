@@ -323,7 +323,7 @@ int vrradar_build(const VrRadarSplit *s, VrRadarScene *out) {
         memcpy(ov + vins, ext.v, add * sizeof *ov);
         if (nv > vins) memcpy(ov + vins + add, sc.v + vins, (nv - vins) * sizeof *ov);
         for (size_t i = 0; i < ins; i++) ob[i] = sc.b[i];
-        ob[ins] = (VrBatch){(uint32_t)vins, (uint32_t)add, 2, 1, 0, sc.b ? sc.b[ins].ev_end : 0, sc.b ? sc.b[ins].src_op : 0};
+        ob[ins] = (VrBatch){.first = (uint32_t)vins, .count = (uint32_t)add, .kind = 2, .blend = 1, .ev_end = sc.b ? sc.b[ins].ev_end : 0, .src_op = sc.b ? sc.b[ins].src_op : 0};
         for (size_t i = ins; i < nb; i++) { ob[i + 1] = sc.b[i]; ob[i + 1].first += (uint32_t)add; }
         nb++;
     }

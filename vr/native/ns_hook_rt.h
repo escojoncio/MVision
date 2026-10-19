@@ -17,3 +17,9 @@ void ns_hook_set_stage_cb(NsStageCb cb);
 int ns_hook_install(void);
 void ns_hook_uninstall(void);
 int ns_hook_installed(void);
+
+/* Para llamar cada cierto tiempo (p. ej. cada medio segundo) desde el hilo de emulación: reintenta una instalación fallida y reinstala si el parche quedó caducado
+ * (otra overlay sobre la etapa). Devuelve 1 si queda instalado. */
+int ns_hook_poll(void);
+unsigned ns_hook_stale_count(void);   /* veces que se retiró un parche caducado */
+int ns_hook_last_rc(void);            /* último NS_HOOK_* de ns_hook_install (para registrar solo los cambios) */

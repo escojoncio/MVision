@@ -39,11 +39,9 @@ static int read_part(const uint8_t *ram, uint32_t objs, int part, NsXf *x) {
     return 1;
 }
 
-static int xf_close(const NsXf *a, const NsXf *b) {
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) if (fabsf(a->m[4 * i + j] - b->m[4 * i + j]) > 3e-4f) return 0;
-        if (fabsf(a->m[4 * i + 3] - b->m[4 * i + 3]) > 1.5f) return 0;
-    }
+/* Igualdad EXACTA: ambas matrices salen de los mismos s16 (rotación, múltiplos de 1/4096) y s32 (traslación) con ns_xf_from_engine. */
+static int xf_same(const NsXf *a, const NsXf *b) {
+    for (int i = 0; i < 12; i++) if (!(a->m[i] == b->m[i])) return 0;
     return 1;
 }
 
@@ -58,22 +56,29 @@ int ns_player_bind(NsPlayerMap *m, const NsScene *sc, const uint8_t *ram, uint32
     int nm = rd16(ram, key + OBJS_NMODELS);
     if (nm <= NS_PART_HEAD || nm > 64) return 0;
     if (nm > NS_PLAYER_PARTS) nm = NS_PLAYER_PARTS;
-    uint8_t used[1024];
-    uint32_t np = in->n_pieces < sizeof used ? in->n_pieces : (uint32_t)sizeof used;
-    memset(used, 0, np);
-    int bound = 0;
+    enum { MAXP = 1024 };
+    uint32_t np = in->n_pieces < MAXP ? in->n_pieces : (uint32_t)MAXP;
+    uint8_t owner[MAXP];        /* parte que reclama la pieza: 0xFF ninguna, 0xFE disputada por varias partes (no se enlaza a ninguna) */
+    memset(owner, 0xFF, np);
+    NsXf xs[NS_PLAYER_PARTS];
+    uint32_t have = 0;
     for (int k = 0; k < nm; k++) {
-        NsXf x;
-        if (!read_part(ram, key, k, &x)) continue;
-        for (uint32_t p = 0; p < np && m->part[k].n < NS_PLAYER_MAXPC; p++) {
-            if (used[p]) continue;
-            if (xf_close(&sc->piece[in->first_piece + p].world, &x)) {
-                m->part[k].idx[m->part[k].n++] = in->first_piece + p;
-                used[p] = 1;
-            }
-        }
-        if (m->part[k].n) bound++;
+        if (!read_part(ram, key, k, &xs[k])) continue;
+        have |= 1u << k;
     }
+    for (uint32_t p = 0; p < np; p++) {
+        for (int k = 0; k < nm; k++) {
+            if (!(have & (1u << k)) || !xf_same(&sc->piece[in->first_piece + p].world, &xs[k])) continue;
+            owner[p] = owner[p] == 0xFF ? (uint8_t)k : 0xFE;   /* dos partes con la misma matriz: la pieza es ambigua y no se reutiliza */
+        }
+    }
+    int bound = 0;
+    for (uint32_t p = 0; p < np; p++) {
+        int k = owner[p];
+        if (k >= NS_PLAYER_PARTS || m->part[k].n >= NS_PLAYER_MAXPC) continue;
+        m->part[k].idx[m->part[k].n++] = in->first_piece + p;
+    }
+    for (int k = 0; k < nm; k++) if (m->part[k].n) bound++;
     m->key = key; m->inst = ii; m->bound = bound > 0;
     return bound;
 }

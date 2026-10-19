@@ -1,14 +1,20 @@
 /* ns_hook_rt: ver ns_hook_rt.h. */
 #include "ns_hook_rt.h"
+#include <stdatomic.h>
 #include <string.h>
 #include "ns_hook.h"
 #include "rtpatch.h"
 
-static int installed;
+static _Atomic int installed;   /* lo lee la interfaz (mv_vrhost_native_available) desde otro hilo */
+static _Atomic unsigned stale_n;
+static uint64_t patch_hash;
+static int last_rc = NS_HOOK_PATCH_FAIL - 1;
 static NsStageCb stage_cb;
 
 void ns_hook_set_stage_cb(NsStageCb cb) { stage_cb = cb; }
-int ns_hook_installed(void) { return installed; }
+int ns_hook_installed(void) { return atomic_load(&installed); }
+unsigned ns_hook_stale_count(void) { return atomic_load(&stale_n); }
+int ns_hook_last_rc(void) { return last_rc; }
 
 static uint32_t rd(uint32_t a) { uint32_t v; memcpy(&v, emu_ram + (a & 0x1FFFFFu), 4); return v; }
 
@@ -23,19 +29,32 @@ static void stage_wrap(Cpu *c) {
 }
 
 int ns_hook_install(void) {
-    if (installed) return NS_HOOK_OK;
+    if (atomic_load(&installed)) return NS_HOOK_OK;
     uint32_t w = rd(NS_STAGE_ADDR);
-    if ((w >> 16) != 0x27BDu || !(w & 0x8000u)) return NS_HOOK_BAD_CODE;      /* addiu sp, sp, -N */
+    if ((w >> 16) != 0x27BDu || !(w & 0x8000u)) return last_rc = NS_HOOK_BAD_CODE;      /* addiu sp, sp, -N */
     uint32_t e = rd(NS_STAGE_TABLE);
-    if (e != 0 && e != NS_STAGE_ADDR) return NS_HOOK_BAD_TABLE;               /* otra rutina ya ocupa la entrada */
+    if (e != 0 && e != NS_STAGE_ADDR) return last_rc = NS_HOOK_BAD_TABLE;               /* otra rutina ya ocupa la entrada */
     RtPatchGuard g = {12, rt_code_hash(NS_STAGE_ADDR, 12)};
-    if (rt_patch_fn(NS_STAGE_ADDR, stage_wrap, &g) != RT_PATCH_OK) return NS_HOOK_PATCH_FAIL;
-    installed = 1;
-    return NS_HOOK_OK;
+    if (rt_patch_fn(NS_STAGE_ADDR, stage_wrap, &g) != RT_PATCH_OK) return last_rc = NS_HOOK_PATCH_FAIL;
+    patch_hash = g.hash;
+    atomic_store(&installed, 1);
+    return last_rc = NS_HOOK_OK;
 }
 
 void ns_hook_uninstall(void) {
-    if (!installed) return;
+    if (!atomic_load(&installed)) return;
     rt_unpatch(NS_STAGE_ADDR);
-    installed = 0;
+    atomic_store(&installed, 0);
+}
+
+/* Reintento y detección de parche caducado: otra overlay encima de la etapa deja el parche inerte (rt_patch_stale); se retira y, si el código nuevo
+ * tiene la forma esperada, se vuelve a instalar con su hash. Si la instalación falló (p. ej. la etapa aún no estaba cargada), se reintenta. */
+int ns_hook_poll(void) {
+    if (atomic_load(&installed) && (rt_patch_stale(NS_STAGE_ADDR) || rt_code_hash(NS_STAGE_ADDR, 12) != patch_hash)) {   /* la marca de caducidad solo se actualiza al entrar: se comprueba también el hash */
+        rt_unpatch(NS_STAGE_ADDR);
+        atomic_store(&installed, 0);
+        atomic_fetch_add(&stale_n, 1);
+    }
+    if (!atomic_load(&installed)) ns_hook_install();
+    return atomic_load(&installed);
 }
