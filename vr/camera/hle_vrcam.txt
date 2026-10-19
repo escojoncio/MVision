@@ -6,3 +6,4 @@ vrcam_padorg
 vrcam_trans
 vrcam_draw
 vrcam_overscan
+vrcam_pack

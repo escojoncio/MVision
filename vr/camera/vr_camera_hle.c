@@ -3,6 +3,7 @@
  * cambia, y solo cambia algo si vrcam_active() (decidido por el gancho de frame con el puente). Se ejecutan en el hilo
  * del juego, así que son seguros respecto a la fase del frame. */
 #include <stdint.h>
+#include <string.h>
 #include "cpu.h"
 #include "gpu.h"
 #include "sys.h"
@@ -82,4 +83,47 @@ void hle_vrcam_draw(Cpu *c) {
 void hle_vrcam_overscan(Cpu *c) {
     if (vrcam_active() && !vrcam_config()->keep_overscan) return;
     rt_orig(c, "vrcam_overscan");
+}
+
+/* Etapa de polígono de la transformación (0x8001e1fc): (lista de índices de vértice, paquetes, nº). Para cada paquete decide si se emite
+ * (cabecera de 16 bits baja = z de ordenación != 0) con la prueba de orientación de la GTE (NCLIP) sobre las coordenadas de pantalla.
+ * Si algún vértice está detrás de la cámara, demasiado cerca (división desbordada) o con coordenadas saturadas, esas coordenadas son
+ * basura y la orientación aleatoria: el motor descartaba esos polígonos (la mitad de lo que hay alrededor del jugador, según hacia donde mire).
+ * Con VR activa el original corre tal cual y después se recuperan SOLO los descartados con algún vértice poco fiable (la orientación de los
+ * fiables sigue decidiendo, igual que antes); el renderer recorta contra el plano cercano y decide la cara con las posiciones 3D de vista.
+ * Paquetes indirectos (bits altos de los índices) y todo lo demás: intactos. Contadores en vrcam_pack_stats(). */
+static uint32_t pk_seen, pk_fixed;
+void vrcam_pack_stats(uint32_t *seen, uint32_t *fixed) { *seen = pk_seen; *fixed = pk_fixed; }
+static int pk_enable = 1;
+void vrcam_pack_enable(int on) { pk_enable = on; }   /* 0: la HLE solo ejecuta el original (pruebas A/B sin recorte) */
+extern uint8_t emu_scratch[0x400];
+void hle_vrcam_pack(Cpu *c) {
+    uint32_t list = A0, pk = A1; int32_t n = (int32_t)A2;
+    rt_orig(c, "vrcam_pack");
+    if (!pk_enable || !vrcam_active() || n <= 0 || n > 4096 || (list & RAM_MASK) + 4u * (uint32_t)n > 0x200000u || (pk & RAM_MASK) + 52u * (uint32_t)n > 0x200000u) return;
+    const int32_t hh = (int32_t)gte_cfc2(c, 26);          /* H: la división de la GTE desborda con 2*SZ <= H */
+    const uint32_t zmin = (uint32_t)(hh > 0 ? hh / 2 + 4 : 80);
+    for (int32_t i = 0; i < n; i++) {
+        uint32_t w, hdr;
+        memcpy(&w, emu_ram + ((list + 4u * (uint32_t)i) & RAM_MASK), 4);
+        uint8_t *ph = emu_ram + ((pk + 52u * (uint32_t)i) & RAM_MASK);
+        memcpy(&hdr, ph, 4);
+        pk_seen++;
+        if ((w & 0x80808080u) || (hdr & 0xFFFFu)) continue;
+        const uint32_t o[4] = {(w << 2) & 0x1FCu, (w >> 6) & 0x1FCu, (w >> 14) & 0x1FCu, (w >> 22) & 0x1FCu};
+        int bad = 0;
+        uint32_t sz[4];
+        for (int k = 0; k < 4; k++) {
+            uint32_t sxy, z;
+            memcpy(&sxy, emu_scratch + o[k], 4); memcpy(&z, emu_scratch + 0x200 + o[k], 4);
+            int x = (int16_t)(sxy & 0xFFFF), y = (int16_t)(sxy >> 16);
+            sz[k] = z & 0xFFFFu;
+            if (sz[k] < zmin || x >= 1000 || x <= -1000 || y >= 1000 || y <= -1000) bad = 1;
+        }
+        if (!bad) continue;
+        uint32_t otz = (sz[0] + sz[2]) >> 1;
+        if (otz < 1) otz = 1;
+        memcpy(ph, &otz, 4);
+        pk_fixed++;
+    }
 }
