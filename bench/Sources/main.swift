@@ -313,8 +313,8 @@ func runCase(_ cfg: Cfg, first: Bool) {
                 ("cubo rojo", SIMD3<Float>(-1.2, 0.5, -3), (255, 0, 0)),
                 ("cubo azul", SIMD3<Float>(1.5, 0.5, -3), (0, 0, 255)),
                 ("cubo amarillo cercano (oclusion)", SIMD3<Float>(0, 1.6, -2), (255, 255, 0)),
-                ("suelo oscuro", SIMD3<Float>(-0.5, 0, -2.2), (70, 70, 70)),
-                ("suelo claro", SIMD3<Float>(0.5, 0, -2.5), (150, 150, 150)),
+                ("suelo oscuro", SIMD3<Float>(-0.5, 0, -8.5), (70, 70, 70)),
+                ("suelo claro", SIMD3<Float>(0.5, 0, -8.5), (150, 150, 150)),
             ]
             for p in pts {
                 // punto del mundo -> posición en la imagen de la cámara del ojo e -> punto de la pantalla en el mundo -> pixel del ojo del usuario (con la cabeza movida)
