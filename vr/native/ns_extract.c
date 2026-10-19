@@ -560,7 +560,7 @@ static int light_index(Ctx *c, const NsLight *L) {
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- piezas */
-enum { RES_OK = 0, RES_HIDDEN = 1, RES_FULL = 2 };
+enum { RES_OK = 0, RES_HIDDEN = 1, RES_FULL = 2, RES_BAD = 3 /* modelo ilegible/roto: la geometría FALTA (no es una pieza oculta por el juego) */ };
 
 /* Relee el color precalculado de la pieza y devuelve su versión (0 si no hay). */
 static uint32_t baked_version(Ctx *c, Memo *me, uint64_t id, uint32_t rgbs) {
@@ -590,7 +590,7 @@ static int resolve_piece(Ctx *c, uint32_t model, uint32_t def, uint32_t rgbs, ui
     p->mesh_id = 0; p->parent = -1; p->baked_ver = 0;
     if (!model) { S->null_model++; return RES_HIDDEN; }
     uint32_t mn = norm_addr(model), dn = norm_addr(def);
-    if (!ok_rng(&c->r, model, 0x58) || !mn) { c->r.oob++; S->drop_bad_model++; return RES_HIDDEN; }
+    if (!ok_rng(&c->r, model, 0x58) || !mn) { c->r.oob++; S->drop_bad_model++; return RES_BAD; }
     const int want_baked = (oflag & OF_PRECOLORED) && rgbs && ok_rng(&c->r, rgbs, 16);
     uint64_t sig = model_sig(c, model, def);
     Memo *me = memo_find(st, mn, dn);
@@ -607,7 +607,7 @@ static int resolve_piece(Ctx *c, uint32_t model, uint32_t def, uint32_t rgbs, ui
         use->baked_ver = 0; use->baked_hash = 0;
         int rc = decode_model(c, model, def, want_baked, use, &id);
         if (rc == 0) { if (slot) { slot->sig = sig; slot->zsig = model_zsig(c, model); slot->empty = 1; slot->id = 0; } else S->memo_full++; if (slot) { /* queda memorizado como vacío */ } return RES_HIDDEN; }
-        if (rc < 0) { if (slot) { memset(slot, 0, sizeof *slot); } if (rc == -1) S->drop_bad_model++; return rc == -2 ? RES_FULL : RES_HIDDEN; }
+        if (rc < 0) { if (slot) { memset(slot, 0, sizeof *slot); } if (rc == -1) S->drop_bad_model++; return rc == -2 ? RES_FULL : rc == -1 ? RES_BAD : RES_HIDDEN; }
         use->sig = sig; use->zsig = model_zsig(c, model); use->id = id; use->empty = 0;
         if (!slot) S->memo_full++;
         me = use;
@@ -667,6 +667,7 @@ static int emit_object(Ctx *c, const Cand *cd, uint32_t piece_cap) {
         int rr = resolve_piece(c, rd32(r, p + 0x40), cd->def, rd32(r, p + 0x44), flag, nm, rs16(r, p + 0x50), 1, cd->is_static, pc);
         if (rr == RES_FULL) full = 1;
         if (rr != RES_OK) { pc->flags |= NS_PF_HIDDEN; S->n_hidden_pieces++; }
+        if (rr == RES_BAD && cd->is_static) sc->valid |= NS_SV_MAP_INCOMPLETE;   /* geometría del escenario ausente: la escena no es apta (se pinta por GPU) */
         sc->n_piece++; S->n_pieces++;
     }
     /* extensiones: otra malla que comparte la matriz de la pieza que la enlaza; viven en la parte «extra» del array (índice >= nm) */
@@ -693,6 +694,7 @@ static int emit_object(Ctx *c, const Cand *cd, uint32_t piece_cap) {
             int rr = resolve_piece(c, rd32(r, e + 0x40), cd->def, rd32(r, e + 0x44), flag, nm, rs16(r, e + 0x50), 1, cd->is_static, pc);
             if (rr == RES_FULL) full = 1;
             if (rr != RES_OK) { pc->flags |= NS_PF_HIDDEN; S->n_hidden_pieces++; }
+            if (rr == RES_BAD && cd->is_static) sc->valid |= NS_SV_MAP_INCOMPLETE;   /* geometría del escenario ausente: la escena no es apta (se pinta por GPU) */
             sc->n_piece++; S->n_pieces++; S->n_ext_pieces++;
             e = rd32(r, e + 0x48);
             if (e && depth == MAX_EXT_DEPTH - 1) S->ext_bad++;   /* cadena demasiado profunda */

@@ -61,6 +61,10 @@ void ns_hook_set_store_reset(NsStoreResetFn fn, void *user);
  * animación del juego (lo que también dibuja la lista de la GPU) y la escena sale apta. Se llama en ns_hook_tick. NULL = toda ausencia de IK esperada es un fallo. */
 typedef int (*NsIkIdleFn)(void *user);
 void ns_hook_set_ik_idle(NsIkIdleFn fn, void *user);
+/* Observador de la escena (hilo de emulación): se llama con la escena pendiente COMPLETA (tras el contexto y la IK) y su almacén de mallas justo antes de publicarla en
+ * ns_hook_tick. Solo lectura, no debe tardar (colisión de la cabeza: vr_headcol alimentada con la geometría 360 grados). NULL = nada. */
+typedef void (*NsSceneTapFn)(const NsScene *sc, const NsMeshStore *store, void *user);
+void ns_hook_set_scene_tap(NsSceneTapFn fn, void *user);
 void ns_hook_set_frame(uint32_t vblank_count);          /* para NsScene.vblank (si el extractor lo dejó a 0) */
 
 void ns_capture(const uint8_t *ram, const uint8_t *scratch);
