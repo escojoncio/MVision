@@ -205,7 +205,7 @@ typedef struct NsScene {
     uint32_t mesh_epoch; /* sube cuando el almacén de mallas se vacía */
     uint32_t valid;      /* NS_SV_* */
     uint32_t truncated;  /* bits: 1 instancias, 2 piezas, 4 luces, 8 efectos (se alcanzó la capacidad) */
-    uint32_t clock;      /* GV_Clock: búfer doble del motor (0/1) */
+    uint32_t clock;      /* reloj de búfer: búfer doble del motor (0/1) */
     uint32_t group_mask; /* grupos de mapa activos */
     uint16_t area_id; uint16_t pad0;
     float units_per_m;   /* 1000 */
