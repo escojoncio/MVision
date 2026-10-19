@@ -220,6 +220,7 @@ final class XRRenderLoop {
         if #available(visionOS 2.0, *) {
             sysProj = (0..<viewCount).map { drawable.computeProjection(viewIndex: $0) }
         }
+        encoder.comfortVignette = blocked ? 0 : VRInput.shared.vignette      // viñeta de confort (vr_input: crece al girar con el stick / moverse)
         let ok = encoder.encode(commandBuffer: cb, gs: gs, originFromDevice: originFromDevice, recenterInverse: recenterInverse, dt: dt,
                                 eyes: eyes, depthRange: drawable.depthRange, colorTextures: drawable.colorTextures,
                                 depthTextures: drawable.depthTextures, systemProjections: sysProj,

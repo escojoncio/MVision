@@ -14,6 +14,7 @@ static double VR_T = 0.0;
 static int VR_VALID = 0;
 static struct timespec VR_STAMP;
 static float VR_TURN;
+static double VR_TURN_SUM;   /* suma de todos los giros pedidos (no se borra al tomarlos): lo lee el renderer para la corrección por fotograma (vr_smooth) */
 static int VR_RECENTER;
 static float VR_EYE_H;      /* altura de ojos de pie pedida (m); 0 = estimar al recentrar */
 static int VR_EYE_H_SET;
@@ -52,6 +53,7 @@ void mv_vr_turn(float deg)
     if (!isfinite(deg)) return;
     pthread_mutex_lock(&VR_MX);
     VR_TURN += deg;
+    VR_TURN_SUM += (double)deg;
     pthread_mutex_unlock(&VR_MX);
 }
 
@@ -110,4 +112,12 @@ int mv_vr_get_head(float m[16], double *t)
     }
     pthread_mutex_unlock(&VR_MX);
     return ok;
+}
+
+double mv_vr_turn_total(void)
+{
+    pthread_mutex_lock(&VR_MX);
+    double t = VR_TURN_SUM;
+    pthread_mutex_unlock(&VR_MX);
+    return t;
 }

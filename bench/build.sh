@@ -14,7 +14,7 @@ xcrun -sdk macosx metallib "$OUT"/*.air -o "$OUT/default.metallib"
 
 echo "== C sintetico =="
 OBJ=()
-for f in bench/c/bench_host.c vr/scene/vr_scene.c vr/radar/vr_radar.c vr/gameplay/vr_scope.c; do
+for f in bench/c/bench_host.c vr/scene/vr_scene.c vr/radar/vr_radar.c vr/gameplay/vr_scope.c vr/host/vr_smooth.c; do
   xcrun clang -c -O1 "${INC[@]}" "$f" -o "$OUT/c_$(basename "$f" .c).o"
   OBJ+=("$OUT/c_$(basename "$f" .c).o")
 done

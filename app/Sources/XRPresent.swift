@@ -35,6 +35,7 @@ struct XRViewConfig {
     var wristHandSide = false       // false: los paneles se apilan hacia el codo (encima del radar); true: hacia la mano
     var hideRealHands = true        // pide al sistema ocultar tus manos y brazos reales mientras dura el espacio inmersivo (se ven los del personaje)
     var debugAxes = false           // dibuja los ejes de los mandos (dispositivo, agarre, apuntado) y de las manos del personaje
+    var smoothMotion = true         // fluidez de la locomoción: el mundo se corrige por fotograma de render (giro del stick y avance extrapolados entre escenas del juego)
 
     enum Cutscene: String, CaseIterable { case stereo, cinema, diorama, scene }
     static let widths: [Float] = [2.4, 3.0, 3.6, 4.5]
@@ -70,6 +71,7 @@ struct XRViewConfig {
         c.wristHandSide = b("xr.view.wristHand", false)
         c.hideRealHands = b("xr.view.hideHands", true)
         c.debugAxes = b("xr.view.debugAxes", false)
+        c.smoothMotion = b("xr.view.smoothMotion", true)
         return c
     }
 
@@ -89,6 +91,7 @@ struct XRViewConfig {
         d.set(wristHandSide, forKey: "xr.view.wristHand")
         d.set(hideRealHands, forKey: "xr.view.hideHands")
         d.set(debugAxes, forKey: "xr.view.debugAxes")
+        d.set(smoothMotion, forKey: "xr.view.smoothMotion")
     }
 }
 
@@ -143,7 +146,7 @@ struct XRNav: Equatable {
 }
 
 enum XRMenuItem: Int, CaseIterable {
-    case resume, recenter, width, distance, curve, sharp, integerScale, cutscene, hud, hudScale, wristHud, wristScale, wristSide, hideHands, debugAxes, exit
+    case resume, recenter, width, distance, curve, sharp, integerScale, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, debugAxes, exit
 }
 
 final class XRPresenter {
@@ -194,7 +197,7 @@ final class XRPresenter {
     var onRecenter: (() -> Void)?
     var onExit: (() -> Void)?
 
-    private static let menuW = 1024, menuH = 768
+    private static let menuW = 1024, menuH = 920
 
     init(device: MTLDevice) {
         cinema = XRCinema(device: device)
@@ -319,6 +322,9 @@ final class XRPresenter {
         case .wristHud: cfg.wristHud.toggle()
         case .wristScale: cfg.wristScale = cycle(cfg.wristScale, XRViewConfig.wristScales, dir)
         case .wristSide: cfg.wristHandSide.toggle()
+        case .smoothMotion: cfg.smoothMotion.toggle(); cfg.save()
+        case .turnMode: Self.cycleTurnMode(dir)
+        case .vignette: Self.cycleVignette(dir)
         case .hideHands: cfg.hideRealHands.toggle(); cfg.save()      // la escena lo lee de UserDefaults (@AppStorage): se guarda al momento
         case .debugAxes: cfg.debugAxes.toggle()
         case .exit: cfg.save(); onExit?()
@@ -351,11 +357,52 @@ final class XRPresenter {
             case .wristHud: return ("Vida y arma en la muñeca", yn(cfg.wristHud))
             case .wristScale: return ("Tamaño en la muñeca", "\(Int((cfg.wristScale * 100).rounded())) cm")
             case .wristSide: return ("Lado en la muñeca", cfg.wristHandSide ? "Hacia la mano" : "Hacia el codo")
+            case .smoothMotion: return ("Suavizado del movimiento", yn(cfg.smoothMotion))
+            case .turnMode: return ("Giro con la palanca derecha", Self.turnModeName())
+            case .vignette: return ("Viñeta de confort", Self.vignetteName())
             case .hideHands: return ("Ocultar mis manos reales", yn(cfg.hideRealHands))
             case .debugAxes: return ("Ejes de mandos y manos", yn(cfg.debugAxes))
             case .exit: return ("Salir de VR", "")
             }
         }
+    }
+
+    // Giro del stick y viñeta de confort: viven en los ajustes de vr_input (VRInputSettings, "vri.*"). El banco de render no enlaza VRInput.
+    private static let turnModes: [(String, Bool, Float)] = [("Por pasos de 30°", false, 30), ("Por pasos de 45°", false, 45), ("Suave", true, 30)]
+    private static let vignetteLevels: [(String, Float)] = [("No", 0), ("Suave", 0.35), ("Media", 0.6), ("Fuerte", 0.9)]
+    private static func turnModeName() -> String {
+#if MV_BENCH
+        return turnModes[0].0
+#else
+        let s = VRInput.shared.settings
+        if s.smoothTurn { return turnModes[2].0 }
+        return s.snapDegrees >= 37.5 ? turnModes[1].0 : turnModes[0].0
+#endif
+    }
+    private static func cycleTurnMode(_ dir: Int) {
+#if !MV_BENCH
+        let s = VRInput.shared.settings
+        var i = s.smoothTurn ? 2 : (s.snapDegrees >= 37.5 ? 1 : 0)
+        i = (i + dir + turnModes.count) % turnModes.count
+        VRInput.shared.update { $0.smoothTurn = turnModes[i].1; if !turnModes[i].1 { $0.snapDegrees = turnModes[i].2 } }
+#endif
+    }
+    private static func vignetteIndex() -> Int {
+#if MV_BENCH
+        return 0
+#else
+        let v = VRInput.shared.settings.vignette
+        var best = 0
+        for (i, l) in vignetteLevels.enumerated() where abs(l.1 - v) < abs(vignetteLevels[best].1 - v) { best = i }
+        return best
+#endif
+    }
+    private static func vignetteName() -> String { vignetteLevels[vignetteIndex()].0 }
+    private static func cycleVignette(_ dir: Int) {
+#if !MV_BENCH
+        let i = (vignetteIndex() + dir + vignetteLevels.count) % vignetteLevels.count
+        VRInput.shared.update { $0.vignette = vignetteLevels[i].1 }
+#endif
     }
 
     private func drawMenu() {
@@ -394,7 +441,7 @@ final class XRPresenter {
             }
         }
         let help: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 24), .foregroundColor: UIColor(white: 0.6, alpha: 1)]
-        ("Palanca: mover y cambiar · Gatillo: elegir · B: cerrar · Menú: cerrar" as NSString).draw(at: CGPoint(x: 60, y: 730), withAttributes: help)
+        ("Palanca: mover y cambiar · Gatillo: elegir · B: cerrar · Menú: cerrar" as NSString).draw(at: CGPoint(x: 60, y: CGFloat(h) - 56), withAttributes: help)
         UIGraphicsPopContext()
         guard let data = ctx.data else { return }
         menuIdx = (menuIdx + 1) % menuTex.count
@@ -597,7 +644,7 @@ final class XRPresenter {
             if !menuTex.isEmpty {
                 var it = XRDrawItem(kind: .menu, texture: linear ? menuTexSRGB[menuIdx] : menuTex[menuIdx])
                 it.model = menuModel
-                it.size = SIMD2<Float>(0.9, 0.675)
+                it.size = SIMD2<Float>(0.9, 0.9 * Float(Self.menuH) / Float(Self.menuW))
                 it.opacity = 1
                 r.items.append(it)
             }

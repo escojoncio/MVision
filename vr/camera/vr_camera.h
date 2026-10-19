@@ -84,6 +84,8 @@ void vrcam_frame(const uint8_t *ram, const BridgeState *st);
 void vrcam_recenter(void);
 /* Giro del espacio de juego del usuario (giro por pasos / suave del mando): grados, + = a la izquierda. */
 void vrcam_turn(float deg);
+/* Giro total acumulado por vrcam_turn desde vrcam_init (grados, + = izquierda; no se envuelve). */
+double vrcam_turn_total(void);
 /* Tope de la distancia de pantalla (zoom) que el juego pide a la cámara del usuario; 0 = sin tope. Con la mira óptica del francotirador
  * (el juego sube de 320 a 3000) la app pone 320: el aumento va en una vista aparte en el visor del arma y la cabeza no se acerca. */
 void vrcam_set_zoom_cap(int cap);
@@ -115,6 +117,10 @@ typedef struct VrCamRecord {
     float p_ref[3];          /* posición de la cabeza (m, espacio del usuario) a la que corresponde `eye` */
     float units_per_m;
     float head[16];          /* pose de la cabeza muestreada al construir la cámara (la que el motor usó) */
+    /* --- fluidez (vr/host/vr_smooth.h; al final: no rompe el layout) --- */
+    double turn_total_deg;   /* giro del stick acumulado (suma de vrcam_turn, + izquierda) en el momento de construir la cámara */
+    uint32_t epoch;          /* recentrados hechos hasta esta cámara (cambia el sistema de referencia del espacio del usuario) */
+    uint32_t vbl;            /* VBlanks vistos por vrcam_frame hasta construir esta cámara (reloj de juego sin fluctuación: 1 VBlank = 20 ms) */
 } VrCamRecord;
 const VrCamRecord *vrcam_last_record(void);
 uint32_t vrcam_draw_count(void);                         /* envíos de frame al GPU vistos */

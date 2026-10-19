@@ -40,6 +40,12 @@ final class XRFrameEncoder {
     private var firstEncodeT: CFTimeInterval = 0
     private(set) var projSource = "propia"
     private var projNote = ""
+    /// Fluidez de la locomoción (vr/host/vr_smooth.h, bitácora): corrección rígida del mundo por fotograma de render (giro del stick pedido y aún no visto en la escena
+    /// + traslación del personaje extrapolada). Solo mueve la geometría del mundo; el arma, las manos, el radar y los paneles van en el espacio del usuario.
+    var smoothMotion = true
+    /// Viñeta de confort 0..1 (la calcula vr_input: crece al girar con el stick / moverse); 0 = sin viñeta. La app la fija cada fotograma.
+    var comfortVignette: Float = 0
+    private(set) var lastSmooth = VrSmCorr()
 
     init?(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat, layered: Bool, sampleCount: Int) {
         guard let fp = XRFinalPass(device: device, colorFormat: colorFormat, depthFormat: depthFormat, layered: layered) else { return nil }
@@ -52,6 +58,14 @@ final class XRFrameEncoder {
         targets = XRTargets(device: device)
         self.layered = layered
         self.sampleCount = sampleCount
+    }
+
+    /// Corrección de fluidez (matriz 4x4 columna-mayor de C) como simd_float4x4.
+    static func matrix(_ c: VrSmCorr) -> simd_float4x4 {
+        let v: [Float] = withUnsafeBytes(of: c.m) { Array($0.bindMemory(to: Float.self)) }
+        guard v.count >= 16 else { return matrix_identity_float4x4 }
+        return simd_float4x4(columns: (SIMD4<Float>(v[0], v[1], v[2], v[3]), SIMD4<Float>(v[4], v[5], v[6], v[7]),
+                                       SIMD4<Float>(v[8], v[9], v[10], v[11]), SIMD4<Float>(v[12], v[13], v[14], v[15])))
     }
 
     /// Planos cercano y lejano (m) a partir de `drawable.depthRange` (el sistema da lejos/cerca en metros; el orden no importa). Un rango degenerado
@@ -153,6 +167,16 @@ final class XRFrameEncoder {
         if let sr = pres.stereo { renderer.prepareStereo(width: sr.width, height: sr.height) }
         var sceneViews = views
         if let dm = pres.dioramaModel { sceneViews = views.map { $0 * dm } }
+        // Fluidez: P' = m P en el espacio del usuario -> vista' = vista * m (solo el pase de la escena; el pase final conserva `views`).
+        var corr = VrSmCorr()
+        if smoothMotion && presenter.cfg.smoothMotion && pres.drawWorld && pres.dioramaModel == nil && pres.stereo == nil {
+            mv_vrhost_smooth(&corr)
+            if corr.active != 0 {
+                let m = Self.matrix(corr)
+                if XRMath.isFinite(m) { sceneViews = sceneViews.map { $0 * m } } else { corr.active = 0 }
+            }
+        }
+        lastSmooth = corr
         if pres.dioramaModel != nil || !pres.drawWorld || pres.stereo != nil { special = false }
         renderer.special = special ? sv : nil
         renderer.suppressFrame = special && sv.kind == Int32(MV_VIEW_SCOPE) && sv.suppress_frame != 0
@@ -175,6 +199,20 @@ final class XRFrameEncoder {
         // Ejes de depuración (opción del menú VR): marcos de los mandos y de las manos del personaje, solo en el mundo.
         if !debugAxes.isEmpty, pres.drawWorld, let ax = axes {
             pres.items.insert(contentsOf: ax.items(frames: debugAxes, linear: renderer.linearOutput), at: 0)
+        }
+        // Viñeta de confort: oscurece la periferia al girar / moverse (solo en el mundo en primera persona). Va debajo del velo y del menú.
+        if comfortVignette > 0.01 && pres.drawWorld && pres.dioramaModel == nil && pres.stereo == nil {
+            var vg = XRDrawItem(kind: .vignette, texture: nil)
+            vg.opacity = min(max(comfortVignette, 0), 1)
+            vg.vig = (0..<2).map { i -> SIMD4<Float> in
+                let e = eyes[min(i, eyes.count - 1)], t = e.tangents, vp = e.viewport
+                let tw = max(t.x + t.y, 1e-3), th = max(t.z + t.w, 1e-3)
+                // centro óptico en píxeles del destino (x der, y abajo) y tangentes por píxel
+                return SIMD4<Float>(Float(vp.originX) + Float(vp.width) * t.x / tw, Float(vp.originY) + Float(vp.height) * t.z / th,
+                                    tw / max(Float(vp.width), 1), th / max(Float(vp.height), 1))
+            }
+            let at = pres.items.firstIndex(where: { $0.kind == .veil || $0.kind == .menu }) ?? pres.items.count
+            pres.items.insert(vg, at: at)
         }
         renderer.encode(commandBuffer: cb, colorTargets: tgt.color, depthTargets: tgt.depth,
                         resolveTargets: tgt.resolve, views: sceneViews, projections: projs,
@@ -218,6 +256,11 @@ final class XRFrameEncoder {
             d += " P propia=" + ownProjs.map(pm).joined(separator: " ")
             if let sp = systemProjections { d += " P sistema=" + sp.map(pm).joined(separator: " ") }
             d += " entorno-minimo=" + (fbReason.isEmpty ? "no" : fbReason)
+            var ss = VrSmoothStats()
+            mv_vrhost_smooth_stats(&ss)
+            d += String(format: " | fluidez: " + (smoothMotion ? "si" : "no") + " escenas/s=%.1f rho=%.3f reinicios=%u activa=%d giro=%.2fgr traslacion=%.0fmm err-pred-max=%.0fmm vineta=%.2f",
+                        ss.period_s > 0 ? 1 / ss.period_s : 0, ss.rho, ss.resets, Int32(corr.active), corr.delta_deg,
+                        simd_length(SIMD3<Float>(corr.shift_m.0, corr.shift_m.1, corr.shift_m.2)) * 1000, ss.max_err_m * 1000, comfortVignette)
             lastDiag = d
             log(d)
         }
