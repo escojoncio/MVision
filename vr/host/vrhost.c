@@ -37,6 +37,7 @@
 #include "ns_hook.h"
 #include "ns_hook_rt.h"
 #include "ns_player.h"
+#include "ns_solid.h"
 #include "bridge_addrs.h"
 
 void hle_vrcam_reset(void);   /* vr_camera_hle.c */
@@ -245,6 +246,7 @@ __attribute__((weak)) size_t ns_cover_glue_poll(char *buf, size_t cap) { (void)b
 _Static_assert(NS_PLAYER_BODY_PTR == BA_PLAYER_BODY, "ns_player y el puente deben coincidir en el puntero del jugador");
 static void dump_at_stage(Cpu *c);
 static int ns_gate(void *u);
+static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u);
 static void ns_frame_check(void);
 static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u);
 _Static_assert(VR_SKIP_WORLD == NS_SKIP_WORLD && VR_SKIP_FX == NS_SKIP_FX, "las marcas de batch y la decisión del consumidor deben coincidir");
@@ -268,6 +270,7 @@ static NsBridge *ns_bridge_get(void) {
             ns_hook_init(b);
             ns_hook_set_context(ns_ctx, NULL);
             ns_hook_set_gate(ns_gate, NULL);
+            ns_hook_set_scene_tap(ns_solid_tap, NULL);
             atomic_store(&ns_br, b);
         }
     }
@@ -303,6 +306,46 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
     o->hide_head = 1;                                       /* primera persona: la cabeza propia no se dibuja (misma regla que vrcam_hide_head) */
     o->refresh_parts = body_ok ? NS_PARTS_ARMS : 0;
 }
+/* Colisión de la cabeza con la escena NATIVA (vr_headcol): la escena trae el escenario y los objetos sólidos en 360 grados, también lo que está detrás o a los lados de la
+ * cámara del juego (la lista de la GPU solo trae lo que ésta ve). Se recoge en el hilo de emulación justo antes de publicar la escena (ns_hook_set_scene_tap) y REEMPLAZA la
+ * lista nativa del almacén (sin fantasmas). ns_solid.c solo está en la app; en el host de escritorio esta definición débil vacía hace que valga solo la lista de la GPU. */
+__attribute__((weak)) size_t ns_solid_collect(const NsScene *sc, const NsMeshStore *st, const NsSolidOpts *opt, float *tris, NsSolidSrc *src, size_t cap, NsSolidStats *stats) {
+    (void)sc; (void)st; (void)opt; (void)tris; (void)src; (void)cap;
+    if (stats) memset(stats, 0, sizeof *stats);
+    return 0;
+}
+static float hc_nat_buf[HC_NAT_MAX * 9];
+static struct { _Atomic uint32_t scenes, no_mesh, overflow, retried; _Atomic uint32_t last_tris; } hcn;
+static VrHcOut hc_last;                  /* última consulta (bajo HCMX), solo para el registro */
+static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u) {
+    (void)u;
+    if (!hc_on || !s || !st || !(s->valid & NS_SV_TOVR_OK) || !(s->valid & NS_SV_GAME)) return;   /* cinemática / sin cámara VR: no hay ancla */
+    NsSolidOpts o; memset(&o, 0, sizeof o);
+    float jt[16][3];
+    int nj = vrcam_model_joints(emu_ram, jt, 16);
+    float upm = s->units_per_m > 1.0f ? s->units_per_m : 1000.0f;
+    memcpy(o.center, s->cam.eye, sizeof o.center);
+    o.skip_key = ns_player_key(emu_ram);
+    o.joints = (const float (*)[3])jt; o.n_joints = nj > 0 ? nj : 0; o.body_units = vrhc_config()->body_m * upm;
+    float radius = (vrhc_config()->keep_m + 1.0f) * upm;   /* margen sobre el almacén de la GPU: la cabeza física puede estar lejos del ancla */
+    NsSolidStats S;
+    size_t n = 0;
+    for (int tryn = 0; tryn < 3; tryn++) {   /* si no cabe, se reduce el radio (el barrido solo necesita lo cercano); aun así la consulta funde a negro si se desborda */
+        o.radius = radius;
+        n = ns_solid_collect(s, st, &o, hc_nat_buf, NULL, HC_NAT_MAX, &S);
+        if (!S.overflow) break;
+        radius *= 0.5f;
+        atomic_fetch_add_explicit(&hcn.retried, 1, memory_order_relaxed);
+    }
+    pthread_mutex_lock(&HCMX);
+    vrhc_feed_world(hc_nat_buf, (int)n, S.overflow != 0);   /* truncada: la consulta funde a negro por seguridad */
+    pthread_mutex_unlock(&HCMX);
+    atomic_fetch_add_explicit(&hcn.scenes, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&hcn.no_mesh, S.pieces_no_mesh, memory_order_relaxed);
+    atomic_fetch_add_explicit(&hcn.overflow, S.overflow ? 1u : 0u, memory_order_relaxed);
+    atomic_store_explicit(&hcn.last_tris, (uint32_t)n, memory_order_relaxed);
+}
+
 static void ns_post_ik(uint8_t *ram) { ns_hook_post_ik(ram); ns_cover_glue_post_ik(ram); }
 
 /* Vigilancia por fotograma (hilo de emulación, tras el sincronismo): (M4) con la capa de cuerpo activa cada captura debe llevar la pose IK de los brazos
@@ -328,6 +371,16 @@ static void ns_frame_check(void) {
     {   /* cobertura de la lista de la GPU por la escena nativa (resultado del hilo trabajador, ~1 por segundo) */
         static char cbuf[8192];
         if (ns_cover_glue_poll(cbuf, sizeof cbuf)) fputs(cbuf, stderr);
+    }
+    {   /* colisión de la cabeza (una línea por segundo): de dónde sale la geometría y qué hizo la última consulta */
+        static uint32_t hs0, hn0, ho0, hr0;
+        VrHcOut q; int nat, gpu;
+        pthread_mutex_lock(&HCMX); q = hc_last; nat = vrhc_native_count(); gpu = vrhc_count(); pthread_mutex_unlock(&HCMX);
+        uint32_t hs = atomic_load(&hcn.scenes), hn = atomic_load(&hcn.no_mesh), ho = atomic_load(&hcn.overflow), hr = atomic_load(&hcn.retried);
+        if (hc_on && (hs || gpu))
+            fprintf(stderr, "[cabeza] geometria: nativa=%d tris (vigente=%d, escenas/s=%u, mallas_ausentes=+%u, desbordes=+%u, radio_reducido=+%u) gpu=%d tris | ultima consulta: candidatos=%d expulsion=%.3fm holgura=%.3fm atraviesa=%.2f negro=%.2f recorte=%.3fm%s\n",
+                    nat, q.native_live, hs - hs0, hn - hn0, ho - ho0, hr - hr0, gpu, q.n_cand, q.pushed_m, q.clear_m, q.through, q.fade, q.corr_len, q.overflow ? " DESBORDE" : "");
+        hs0 = hs; hn0 = hn; ho0 = ho; hr0 = hr;
     }
     uint32_t dcap = st.captures - cap0, dik = st.ik_refresh - ik0, dmiss = st.ik_missed - miss0;
     cap0 = st.captures; ik0 = st.ik_refresh; miss0 = st.ik_missed;
@@ -746,6 +799,7 @@ int mv_vrhost_head_limit(const float head[16], float dt, float corr[3], float *f
     VrHcOut o;
     pthread_mutex_lock(&HCMX);
     int r = vrhc_query(&m, (const float[3]){head[12], head[13], head[14]}, dt, &o);
+    hc_last = o;
     pthread_mutex_unlock(&HCMX);
     memcpy(corr, o.corr, sizeof o.corr);
     if (fade) *fade = o.fade;

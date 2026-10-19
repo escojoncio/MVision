@@ -5,7 +5,7 @@
 
 #define HC_SLOTS 16384
 #define HC_PROBE 8
-#define HC_MAX_CAND 1024
+#define HC_MAX_CAND 16384
 
 typedef struct { float v[3][3]; uint64_t key; uint32_t stamp; uint8_t used; } HcTri;
 
@@ -15,13 +15,15 @@ static struct {
     uint32_t now;                   /* escenas alimentadas */
     int live_hint;
     float fade;                     /* fundido suavizado */
+    int n_nat; int nat_over; float nat_age;   /* lista nativa (mundo del motor): triángulos, desbordada, segundos de consultas desde la última alimentación */
 } H;
 static HcTri g_tris[HC_SLOTS];
+static float g_nat[HC_NAT_MAX][3][3];
 
 void vrhc_config_default(VrHcCfg *c) {
     memset(c, 0, sizeof *c);
-    c->enabled = 1; c->radius_m = 0.13f; c->keep_m = 2.0f; c->body_m = 0.30f; c->safe_m = 0.05f;
-    c->fade_start_m = 0.08f; c->fade_full_m = 0.35f; c->fade_release_s = 0.30f; c->ttl = 100; c->step_frac = 0.25f;
+    c->enabled = 1; c->radius_m = 0.20f; c->keep_m = 2.0f; c->body_m = 0.30f; c->safe_m = 0.12f; c->face_m = 0.18f; c->push_max_m = 0.60f; c->through_m = 0.03f;
+    c->fade_start_m = 0.10f; c->fade_full_m = 0.30f; c->fade_release_s = 0.30f; c->ttl = 100; c->step_frac = 0.25f;
 }
 void vrhc_init(const VrHcCfg *c) {
     memset(&H, 0, sizeof H);
@@ -33,6 +35,9 @@ void vrhc_init(const VrHcCfg *c) {
     if (!(H.cfg.keep_m >= 0.5f && H.cfg.keep_m <= 10.0f)) H.cfg.keep_m = d.keep_m;
     if (!(H.cfg.body_m >= 0.0f && H.cfg.body_m <= 1.0f)) H.cfg.body_m = d.body_m;
     if (!(H.cfg.safe_m >= 0.0f && H.cfg.safe_m < H.cfg.radius_m)) H.cfg.safe_m = d.safe_m < H.cfg.radius_m ? d.safe_m : 0.0f;
+    if (!(H.cfg.face_m >= H.cfg.safe_m && H.cfg.face_m <= H.cfg.radius_m)) H.cfg.face_m = H.cfg.safe_m + 0.5f * (H.cfg.radius_m - H.cfg.safe_m);
+    if (!(H.cfg.push_max_m >= 0.0f && H.cfg.push_max_m <= 2.0f)) H.cfg.push_max_m = d.push_max_m;
+    if (!(H.cfg.through_m >= 0.0f && H.cfg.through_m < H.cfg.radius_m)) H.cfg.through_m = d.through_m < H.cfg.radius_m ? d.through_m : 0.0f;
     if (!(H.cfg.fade_start_m >= 0.0f && H.cfg.fade_start_m < 2.0f)) H.cfg.fade_start_m = d.fade_start_m;
     if (!(H.cfg.fade_full_m > H.cfg.fade_start_m && H.cfg.fade_full_m < 3.0f)) H.cfg.fade_full_m = H.cfg.fade_start_m + 0.27f;
     if (!(H.cfg.fade_release_s > 0.0f && H.cfg.fade_release_s < 10.0f)) H.cfg.fade_release_s = d.fade_release_s;
@@ -43,7 +48,7 @@ const VrHcCfg *vrhc_config(void) { return &H.cfg; }
 void vrhc_reset(void) {
     if (!H.tris) { vrhc_init(NULL); return; }
     memset(g_tris, 0, sizeof g_tris);
-    H.fade = 0.0f; H.now = 0;
+    H.fade = 0.0f; H.now = 0; H.n_nat = 0; H.nat_over = 0; H.nat_age = 0.0f;
 }
 
 int vrhc_map_from_record(VrHcMap *m, const VrCamRecord *r) {
@@ -205,8 +210,31 @@ int vrhc_feed_scene(const VrHcMap *m, const VrScene *sc, const float (*joints)[3
     return k;
 }
 
+int vrhc_feed_world(const float *tris, int n, int truncated) {
+    if (!H.tris) vrhc_init(NULL);
+    H.nat_over = truncated != 0;
+    if (!H.cfg.enabled || !tris || n <= 0) { H.n_nat = 0; return 0; }
+    if (n > HC_NAT_MAX) { n = HC_NAT_MAX; H.nat_over = 1; }
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        const float *p = tris + 9 * i;
+        int ok = 1;
+        for (int j = 0; j < 9; j++) if (!isfinite(p[j])) ok = 0;
+        if (!ok) continue;
+        memcpy(g_nat[k++], p, 36);
+    }
+    H.n_nat = k; H.nat_age = 0.0f;
+    return k;
+}
+int vrhc_native_count(void) { return H.n_nat; }
+
 /* ---------------------------------------------------------------- consulta */
-typedef struct { const HcTri *t; float thr; } Cand;
+typedef struct { const float (*v)[3]; float thr; float lo[3], hi[3]; } Cand;
+static inline float cand_dist(const Cand *c, const float p[3], float q[3]) { return vrhc_tri_dist(c->v[0], c->v[1], c->v[2], p, q); }
+static inline int cand_far(const Cand *c, const float p[3]) {   /* rechazo rápido: p fuera de la caja del triángulo ensanchada por thr */
+    for (int a = 0; a < 3; a++) if (p[a] < c->lo[a] - c->thr || p[a] > c->hi[a] + c->thr) return 1;
+    return 0;
+}
 
 /* Primer punto del segmento a->b (a lo largo de t en 0..1) donde la esfera viola algún candidato; devuelve 1 si lo hay. t_ok = último t sin violación. */
 static int sweep_first(Cand *cs, int nc, const float a[3], const float b[3], float step, float *t_ok, int *which) {
@@ -218,8 +246,8 @@ static int sweep_first(Cand *cs, int nc, const float a[3], const float b[3], flo
         float t = (float)s / (float)ns, p[3] = {a[0] + d[0] * t, a[1] + d[1] * t, a[2] + d[2] * t};
         int hit = -1;
         for (int i = 0; i < nc; i++) {
-            float dd = vrhc_tri_dist(cs[i].t->v[0], cs[i].t->v[1], cs[i].t->v[2], p, NULL);
-            if (dd < cs[i].thr) { hit = i; break; }
+            if (cand_far(&cs[i], p)) continue;
+            if (cand_dist(&cs[i], p, NULL) < cs[i].thr) { hit = i; break; }
         }
         if (hit >= 0) {
             float lo = prev, hi = t;
@@ -227,7 +255,7 @@ static int sweep_first(Cand *cs, int nc, const float a[3], const float b[3], flo
                 float mid = 0.5f * (lo + hi), q[3] = {a[0] + d[0] * mid, a[1] + d[1] * mid, a[2] + d[2] * mid};
                 int h2 = 0;
                 for (int i = 0; i < nc; i++)
-                    if (vrhc_tri_dist(cs[i].t->v[0], cs[i].t->v[1], cs[i].t->v[2], q, NULL) < cs[i].thr) { h2 = 1; break; }
+                    if (!cand_far(&cs[i], q) && cand_dist(&cs[i], q, NULL) < cs[i].thr) { h2 = 1; break; }
                 if (h2) hi = mid; else lo = mid;
             }
             *t_ok = lo; *which = hit;
@@ -254,39 +282,54 @@ int vrhc_query(const VrHcMap *m, const float head[3], float dt, VrHcOut *out) {
     float A[3], B[3];                                        /* mundo: ancla = ojo del personaje; B = cabeza física */
     memcpy(A, m->eye, 12);
     to_world(m, head, B);
-    float r = H.cfg.radius_m * m->upm, rsafe = H.cfg.safe_m * m->upm, step = r * H.cfg.step_frac;
-    /* candidatos: AABB del segmento + radio */
-    float lo[3], hi[3];
-    for (int i = 0; i < 3; i++) { lo[i] = (A[i] < B[i] ? A[i] : B[i]) - r - 1.0f; hi[i] = (A[i] > B[i] ? A[i] : B[i]) + r + 1.0f; }
+    if (dt > 0.0f) H.nat_age += dt < 1.0f ? dt : 1.0f;
+    int nat_live = H.n_nat > 0 && H.nat_age < 1.0f;
+    out->native_live = nat_live;
+    float r = H.cfg.radius_m * m->upm, hard = H.cfg.safe_m * m->upm, face = H.cfg.face_m * m->upm, pushmax = H.cfg.push_max_m * m->upm;
+    float step = r * H.cfg.step_frac;
+    /* candidatos: AABB del segmento + radio + margen de expulsión (si desborda, solo radio + 1 unidad; si aun así desborda, negro por seguridad) */
     static Cand cs[HC_MAX_CAND];
-    int nc = 0;
-    for (int i = 0; i < HC_SLOTS && nc < HC_MAX_CAND; i++) {
-        const HcTri *t = &H.tris[i];
-        if (!alive(t)) continue;
-        int out_ = 0;
-        for (int ax = 0; ax < 3 && !out_; ax++) {
-            float mn = t->v[0][ax], mx = mn;
-            for (int v = 1; v < 3; v++) { if (t->v[v][ax] < mn) mn = t->v[v][ax]; if (t->v[v][ax] > mx) mx = t->v[v][ax]; }
-            if (mx < lo[ax] || mn > hi[ax]) out_ = 1;
+    int nc = 0, over = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        float mg = pass == 0 ? r + pushmax : r + 1.0f, lo[3], hi[3];
+        for (int i = 0; i < 3; i++) { lo[i] = (A[i] < B[i] ? A[i] : B[i]) - mg; hi[i] = (A[i] > B[i] ? A[i] : B[i]) + mg; }
+        nc = 0; over = 0;
+        for (int s = 0; s < 2 && !over; s++) {
+            int cnt = s == 0 ? (nat_live ? H.n_nat : 0) : HC_SLOTS;
+            for (int i = 0; i < cnt; i++) {
+                const float (*v)[3];
+                if (s == 0) v = g_nat[i];
+                else { const HcTri *t = &H.tris[i]; if (!alive(t)) continue; v = (const float (*)[3])t->v; }
+                float mn[3], mx[3];
+                int out_ = 0;
+                for (int ax = 0; ax < 3; ax++) {
+                    mn[ax] = mx[ax] = v[0][ax];
+                    for (int k = 1; k < 3; k++) { if (v[k][ax] < mn[ax]) mn[ax] = v[k][ax]; if (v[k][ax] > mx[ax]) mx[ax] = v[k][ax]; }
+                    if (mx[ax] < lo[ax] || mn[ax] > hi[ax]) { out_ = 1; break; }
+                }
+                if (out_) continue;
+                if (nc >= HC_MAX_CAND) { over = 1; break; }
+                cs[nc].v = v; cs[nc].thr = 0; memcpy(cs[nc].lo, mn, 12); memcpy(cs[nc].hi, mx, 12); nc++;
+            }
         }
-        if (out_) continue;
-        cs[nc].t = t; cs[nc].thr = 0; nc++;
+        if (!over) break;
     }
     out->n_cand = nc;
+    out->overflow = over || (nat_live && H.nat_over);
     float pos[3]; memcpy(pos, A, 12);
     float rem[3]; sub3(B, A, rem);
+    /* distancia del ancla al sólido más cercano (holgura inicial) */
+    float dA = 1e30f;
+    for (int i = 0; i < nc; i++) { float d0 = cand_dist(&cs[i], A, NULL); if (d0 < dA) dA = d0; }
     int hit = 0;
     for (int iter = 0; iter < 3; iter++) {
         float rl = sqrtf(dot3(rem, rem));
         if (rl < 1e-4f * r) break;
         float tgt[3] = {pos[0] + rem[0], pos[1] + rem[1], pos[2] + rem[2]};
         /* radio efectivo desde la posición actual: r, o la holgura inicial mínima si ya estaba más cerca de algo (no se acerca más a nada; los vecinos
-         * coplanares de una pared a la que ya se estaba pegado no atrapan) */
+         * coplanares de una pared a la que ya se estaba pegado no atrapan). La expulsión de después corrige la holgura insuficiente. */
         float dmin = 1e30f;
-        for (int i = 0; i < nc; i++) {
-            float d0 = vrhc_tri_dist(cs[i].t->v[0], cs[i].t->v[1], cs[i].t->v[2], pos, NULL);
-            if (d0 < dmin) dmin = d0;
-        }
+        for (int i = 0; i < nc; i++) { float d0 = cand_dist(&cs[i], pos, NULL); if (d0 < dmin) dmin = d0; }
         float reff = dmin >= r ? r : (dmin - 0.02f * r > 0 ? dmin - 0.02f * r : 0.0f);
         for (int i = 0; i < nc; i++) cs[i].thr = reff;
         float t_ok = 1.0f; int which = -1;
@@ -295,37 +338,80 @@ int vrhc_query(const VrHcMap *m, const float head[3], float dt, VrHcOut *out) {
         for (int i = 0; i < 3; i++) pos[i] += rem[i] * t_ok;
         /* normal de contacto: del punto más cercano hacia el centro; desliza el resto del movimiento por ese plano */
         float q[3], n[3];
-        float dd = vrhc_tri_dist(cs[which].t->v[0], cs[which].t->v[1], cs[which].t->v[2], pos, q);
+        cand_dist(&cs[which], pos, q);
         sub3(pos, q, n);
         float nl = sqrtf(dot3(n, n));
         if (nl < 1e-6f) break;
         for (int i = 0; i < 3; i++) n[i] /= nl;
-        (void)dd;
         float left[3] = {rem[0] * (1 - t_ok), rem[1] * (1 - t_ok), rem[2] * (1 - t_ok)};
         float into = dot3(left, n);
         if (into < 0) for (int i = 0; i < 3; i++) left[i] -= n[i] * into;
         memcpy(rem, left, 12);
     }
     out->hit = hit;
+    /* EXPULSIÓN: la cara no puede quedar a menos de face del sólido más cercano (el plano cercano no corta paredes). Normal de contacto; hasta 6 pasadas (esquinas). */
+    float pos0[3]; memcpy(pos0, pos, 12);
+    float pushed = 0.0f;
+    for (int it = 0; it < 6; it++) {
+        float dn = 1e30f, qn[3] = {0, 0, 0}; int wn = -1;
+        for (int i = 0; i < nc; i++) { float q[3]; float d0 = cand_dist(&cs[i], pos, q); if (d0 < dn) { dn = d0; memcpy(qn, q, 12); wn = i; } }
+        if (wn < 0 || dn >= face) break;
+        float n[3]; sub3(pos, qn, n);
+        float nl = sqrtf(dot3(n, n));
+        if (nl > 1e-3f) { for (int i = 0; i < 3; i++) n[i] /= nl; }
+        else {   /* sobre la superficie: normal del triángulo del lado del ancla (o hacia arriba si no hay lado) */
+            const float (*v)[3] = cs[wn].v;
+            float e1[3], e2[3];
+            sub3(v[1], v[0], e1); sub3(v[2], v[0], e2);
+            n[0] = e1[1] * e2[2] - e1[2] * e2[1]; n[1] = e1[2] * e2[0] - e1[0] * e2[2]; n[2] = e1[0] * e2[1] - e1[1] * e2[0];
+            nl = sqrtf(dot3(n, n));
+            if (nl < 1e-9f) { n[0] = 0; n[1] = -1; n[2] = 0; } else for (int i = 0; i < 3; i++) n[i] /= nl;
+            float toA[3]; sub3(A, qn, toA);
+            if (dot3(toA, n) < 0) for (int i = 0; i < 3; i++) n[i] = -n[i];
+        }
+        float need = face - dn + 0.01f * face;
+        float room = pushmax - pushed;
+        if (room <= 0) break;
+        if (need > room) need = room;
+        for (int i = 0; i < 3; i++) pos[i] += n[i] * need;
+        { float d[3]; sub3(pos, pos0, d); pushed = sqrtf(dot3(d, d)); }
+    }
+    /* holgura final */
+    float clear = 1e30f;
+    for (int i = 0; i < nc; i++) { float d0 = cand_dist(&cs[i], pos, NULL); if (d0 < clear) clear = d0; }
+    out->pushed_m = pushed / m->upm;
+    out->clear_m = clear > 1e29f ? 9.0f : clear / m->upm;
     /* resultado: pos (mundo) -> usuario */
     float pu[3];
     to_user(m, pos, pu);
     for (int i = 0; i < 3; i++) out->corr[i] = pu[i] - head[i];
     out->corr_len = sqrtf(dot3(out->corr, out->corr));
-    /* penetración residual de la cabeza dibujada contra triángulos que el ancla no solapaba a menos de rsafe */
-    float pen = 0.0f;
-    for (int i = 0; i < nc; i++) {
-        const HcTri *t = cs[i].t;
-        if (vrhc_tri_dist(t->v[0], t->v[1], t->v[2], A, NULL) < rsafe) continue;
-        float d = vrhc_tri_dist(t->v[0], t->v[1], t->v[2], pos, NULL);
-        if (d < rsafe && rsafe - d > pen) pen = rsafe - d;
+    /* ¿la cabeza FÍSICA atraviesa una superficie? Segmento ancla -> cabeza con un radio fino (through_m); si ya parte pegado, el radio se reduce a su holgura. */
+    float through = 0.0f;
+    {
+        float thr_c = H.cfg.through_m * m->upm;
+        if (dA * 0.98f < thr_c) thr_c = dA * 0.98f;
+        float d[3]; sub3(B, A, d);
+        float len = sqrtf(dot3(d, d));
+        if (thr_c > 0.5f && len > 0.5f && nc > 0) {
+            for (int i = 0; i < nc; i++) cs[i].thr = thr_c;
+            float st = thr_c * 1.5f < step ? thr_c * 1.5f : step, t_ok = 1.0f; int which = -1;
+            if (sweep_first(cs, nc, A, B, st, &t_ok, &which)) through = smooth01(len * (1.0f - t_ok) / m->upm / 0.04f);
+        }
     }
+    out->through = through;
+    float pen = clear < hard ? hard - clear : 0.0f;
     out->pen_m = pen / m->upm;
     float f1 = smooth01((out->corr_len - H.cfg.fade_start_m) / (H.cfg.fade_full_m - H.cfg.fade_start_m));
-    float f2 = rsafe > 0 ? smooth01(pen / rsafe) : 0.0f;
-    float target = f1 > f2 ? f1 : f2;
+    float f2 = hard > 0 ? smooth01(pen / (0.5f * hard)) : 0.0f;
+    float f4 = smooth01((out->pushed_m - 0.25f) / 0.25f);
+    float target = f1;
+    if (f2 > target) target = f2;
+    if (through > target) target = through;
+    if (f4 > target) target = f4;
+    if (out->overflow) target = 1.0f;                        /* faltan candidatos: ante la duda, negro; nunca ver a través */
     if (target >= H.fade) H.fade = target;
     else H.fade = (H.fade - rel > target) ? H.fade - rel : target;
     out->fade = H.fade;
-    return out->hit || H.fade > 0.0f;
+    return out->hit || pushed > 0.0f || H.fade > 0.0f;
 }
