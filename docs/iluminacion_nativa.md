@@ -11,13 +11,13 @@ con volcados de RAM de partidas reales (sección 9). Sin datos del juego: solo f
   255 = x1,99.
 - Hay **dos rutas**, según una marca del objeto:
   1. **Objetos dinámicos** (personajes, enemigos, armas, vehículos, objetos sueltos con marca de sombreado): luz **en tiempo
-     real cada fotograma** con la GTE, **por normal de modelo** (no por vértice): un comando de color-normal (NCS/NCT, sf=1,
-     lm=1) por normal; luego cada esquina de cada polígono toma el color de su normal por índice. Una matriz de luz y una
+     real cada fotograma** con la unidad de geometría, **por normal de modelo** (no por vértice): un cálculo de color por normal
+     (desplazamiento 12, intensidades sin negativos) por normal; luego cada esquina de cada polígono toma el color de su normal por índice. Una matriz de luz y una
      de color **por objeto** (hasta 3 luces: 1 principal direccional + 2 puntuales), más el ambiente.
   2. **Mapa y decorado fijo** (marca de "color precalculado"): el color de cada esquina se calcula **una vez al cargar** (y
      al colocar el objeto), por **vértice**, con la luz principal + las 2 luces puntuales más cercanas de ESE vértice, y se
      guarda en un array (4 colores por cara). No se recalcula por fotograma. Es la ruta del 100 % del mapa.
-- **Ambiente**: color de fondo de la GTE (BK), global por nivel (orden de script), o propio del objeto si lleva la marca de
+- **Ambiente**: color de fondo, global por nivel (orden de script), o propio del objeto si lleva la marca de
   ambiente propio.
 - **Niebla**: no hay niebla ni atenuación por distancia por defecto. Existe un **actor opcional de niebla** (cargado por
   algunas zonas) que sustituye cuatro etapas del motor: mezcla de profundidad hacia **negro** y descarte de primitivas
@@ -27,29 +27,28 @@ con volcados de RAM de partidas reales (sección 9). Sin datos del juego: solo f
   temporal** (sección 4.4) que sí alumbra modelos dinámicos y mapa dinámico.
 - Visión térmica: sustituye las matrices de color por cero y el ambiente por un tinte fijo (sección 7).
 
-## 2. Núcleo exacto: comando de color por normal (NCS, sf=1, lm=1)
+## 2. Núcleo exacto: color por normal
 
-Entradas: normal `n` (4096 = 1,0, en el espacio de la matriz de luz), matriz de luz `LLM` (3x3, **fila i = dirección de la
-luz i**), matriz de color `LCM` (3x3, **columna j = color de la luz j**), color de fondo `BK` (por canal).
+Entradas: normal `n` (4096 = 1,0, en el espacio de la matriz de luz), matriz de luz `L` (3x3, **fila i = dirección de la
+luz i**), matriz de color `C` (3x3, **columna j = color de la luz j**), color de fondo `G` (por canal).
 
 ```
-IR_i   = clamp( (LLM[i][0]*n0 + LLM[i][1]*n1 + LLM[i][2]*n2) >> 12 , 0 , 0x7FFF )          i = 0..2   (intensidad de la luz i)
-MAC_c  = ( (BK_c << 12) + LCM[c][0]*IR_0 + LCM[c][1]*IR_1 + LCM[c][2]*IR_2 ) >> 12            c = R,G,B
-byte_c = clamp( MAC_c >> 4 , 0 , 255 )
+I_i    = clamp( (L[i][0]*n0 + L[i][1]*n1 + L[i][2]*n2) >> 12 , 0 , 0x7FFF )          i = 0..2   (intensidad de la luz i)
+A_c    = ( G_c*4096 + C[c][0]*I_0 + C[c][1]*I_1 + C[c][2]*I_2 ) >> 12                 c = R,G,B
+byte_c = clamp( A_c >> 4 , 0 , 255 )
 ```
 
-Los desplazamientos son aritméticos sobre la suma completa (44 bits). Implementado como `ns_light_ncs` y verificado contra
-`runtime/gte.c` con 200 000 casos aleatorios (incluyendo saturaciones), con igualdad exacta de color y de los acumuladores.
+Los desplazamientos son aritméticos sobre la suma completa (44 bits). Implementado como `ns_light_color` y verificado contra
+la unidad de geometría de referencia del runtime con 200 000 casos aleatorios (incluyendo saturaciones), con igualdad exacta de color y de acumuladores.
 Unidades: color de luz principal y de luces puntuales y ambiente se guardan **x16** respecto al valor del script (0..255).
-Intensidad 1,0 de una luz = 4096 en `IR`; con color 4080 (255x16) y `BK`=0 el resultado satura en 255.
+Intensidad 1,0 de una luz = 4096 en `I`; con color 4080 (255x16) y `G`=0 el resultado satura en 255.
 
-El mismo comando existe en variante con modulación (NCCS, `byte = MAC*RGB>>...`) pero solo se usa en un panel concreto,
-no en la escena 3D.
+Existe una variante que además modula por un color base, pero solo se usa en un panel concreto, no en la escena 3D.
 
 ### Fórmula para shader (flotante)
 
-Precalcular en CPU por objeto (en espacio de la normal del modelo; ver 3): `L0..L2 = filas de LLM / 4096`,
-`K0..K2 = filas de LCM / 4096`, `B = BK / 4096`.
+Precalcular en CPU por objeto (en espacio de la normal del modelo; ver 3): `L0..L2 = filas de L / 4096`,
+`K0..K2 = filas de C / 4096`, `B = G / 4096`.
 
 ```
 ir   = clamp( float3(dot(L0,n), dot(L1,n), dot(L2,n)), 0, 7.999756 )
@@ -79,11 +78,11 @@ Las bytes de color precalculado (mapa) se usan directamente: `tint = byte / 128`
 ## 3. Espacios y matrices (objetos dinámicos)
 
 La normal está en el espacio del modelo. El motor no rota la normal: rota las luces al espacio del modelo con
-`LLM_local = LLM_mundo x R_pieza` (R_pieza = rotación 3x3 de la pieza en mundo, 4096 = 1,0) usando la multiplicación de
-matrices de la GTE (cada elemento `(suma>>12)` saturado a 16 bits con signo): `ns_light_to_local`. Hay una `LLM_local`
-distinta **por pieza** de cada objeto (los modelos articulados tienen hasta 24 piezas). `LCM` y `BK` son del objeto.
+`L_local = L_mundo x R_pieza` (R_pieza = rotación 3x3 de la pieza en mundo, 4096 = 1,0) usando la multiplicación de
+matrices de la unidad de geometría (cada elemento `(suma>>12)` saturado a 16 bits con signo): `ns_light_to_local`. Hay una `L_local`
+distinta **por pieza** de cada objeto (los modelos articulados tienen hasta 24 piezas). `C` y `G` son del objeto.
 
-- Las matrices de luz de cada objeto (`LLM_mundo`, `LCM`, ambiente propio) **ya están en RAM** y las rellena el juego cada
+- Las matrices de luz de cada objeto (`L_mundo`, `C`, ambiente propio) **ya están en RAM** y las rellena el juego cada
   fotograma (llamada de "luz en la posición"). El renderer nativo debe **leerlas de RAM** en vez de recalcularlas; así
   coincide siempre (matices por escena incluidos). `ns_light_object` las reconstruye si hiciera falta (objetos creados por
   nosotros, p. ej. manos/armas VR).
@@ -98,7 +97,7 @@ distinta **por pieza** de cada objeto (los modelos articulados tienen hasta 24 p
 - Orden de esquinas en el paquete: `r0 <- nidx[0]`, `r1 <- nidx[1]`, `r2 <- nidx[3]`, `r3 <- nidx[2]`.
 - **Atención a cobertura:** el motor solo sombrea los polígonos que pasan su prueba de visibilidad ese fotograma (los
   paquetes con 16 bits bajos de etiqueta a 0 conservan el color antiguo). Un renderer 360° que dibuje polígonos fuera del campo del
-  juego **no puede leer los colores de los paquetes** de objetos dinámicos: debe calcular con `ns_light_ncs` a partir de las
+  juego **no puede leer los colores de los paquetes** de objetos dinámicos: debe calcular con `ns_light_color` a partir de las
   normales del modelo. Para el mapa (`rgbs`) sí vale leer el array: se calcula para toda la geometría.
 
 ## 4. Luces
@@ -106,8 +105,8 @@ distinta **por pieza** de cada objeto (los modelos articulados tienen hasta 24 p
 ### 4.1 Luz principal y ambiente (globales del nivel; órdenes de script)
 - Dirección: vector normalizado a 4096, **apunta hacia la luz** (cara iluminada si `n . dir > 0`). Estado típico de exteriores
   del volcado: `(0,-4096,0)` (el eje Y del juego va hacia abajo, luz cenital).
-- Color: `valor * 16` en la columna 0 de `LCM` (los tres canales).
-- Ambiente: `valor` 0..255; `BK = valor * 16`.
+- Color: `valor * 16` en la columna 0 de `C` (los tres canales).
+- Ambiente: `valor` 0..255; `G = valor * 16`.
 
 ### 4.2 Luces puntuales (mapa y temporales)
 Formato: posición s16x3, `r_range` u16, `e_range` u16, color RGB u8. Una luz alumbra un punto si **cada** `|dx|,|dy|,|dz| <= e_range`
@@ -119,18 +118,17 @@ Formato: posición s16x3, `r_range` u16, `e_range` u16, color RGB u8. Una luz al
 - Mapa precalculado: solo la lista de luces del propio bloque de mapa, evaluadas en la **posición mundo de cada vértice**.
 
 Vector de luz (réplica exacta, `ns_light_point_vector`): `d = pos_punto - pos_luz` (¡del punto a la luz restada: apunta de la luz
-al punto!), `dist = raiz_motor(dx²+dy²+dz²)` (con cada componente truncada a 16 bits como al cargarla en la GTE), `dist=1` si 0,
+al punto!), `dist = raiz_motor(dx²+dy²+dz²)` (con cada componente truncada a 16 bits como al cargarla en la unidad de geometría; se trunca una sola vez, para la distancia y para el numerador, y la suma de cuadrados se satura en vez de desbordar), `dist=1` si 0,
 `s = max(0, 2*r_range - dist)`, `v = ((d*3072)/dist * s) / r_range` (divisiones enteras truncadas). Módulo = 3072 a distancia
 `r_range`, 6144 en el centro, 0 a `2*r_range`. **Convención verificada con datos:** con esa orientación (signo contrario a la luz
 principal) el mapa del volcado coincide el 100 %; con el signo invertido solo el 66 %. Es una peculiaridad del original que se
 replica tal cual.
 
 La raíz del motor **no es floor(sqrt)**: normaliza a una mantisa de 8 bits (ceros iniciales pares) y usa una tabla
-`floor(512*sqrt(m))`, `m=64..255`, con desplazamiento (`ns_light_isqrt`; error relativo < 0,8 %). La tabla se verificó entrada a entrada
-contra los 192 valores del ejecutable.
+`floor(512*sqrt(m))`, `m=64..255`, con desplazamiento (`ns_light_isqrt`; error relativo < 0,9 %). El error relativo máximo medido es 0,85 %.
 
 ### 4.3 Montaje de la matriz de luz
-`LLM_mundo`: fila 0 = dirección principal, fila 1 = vector de la luz puntual 1, fila 2 = vector de la 2. `LCM`: columna 0 =
+`L_mundo`: fila 0 = dirección principal, fila 1 = vector de la luz puntual 1, fila 2 = vector de la 2. `C`: columna 0 =
 color principal x16, columna 1/2 = color de la luz puntual x16. Las filas sin luz son 0. `ns_light_assemble`.
 
 ### 4.4 Luces temporales
@@ -142,7 +140,7 @@ en el primer paso (efecto sutil sobre dinámicos cercanos; **no** afectan al map
 
 Para cada cara-vértice `k` (4 por cara, orden de la cara): vértice `v = vindices[k]` (índice < 126), normal `n = norms[nindices[k]]`;
 posición mundo `p = T + (R*v >> 12)` (`ns_light_world_pos`, con la traslación y rotación del objeto en el momento de precalcular);
-2 luces puntuales de la lista del bloque más cercanas a `p` en orden de lista; matriz de luz `LLM = [dir; vec0; vec1] x R`; NCS.
+2 luces puntuales de la lista del bloque más cercanas a `p` en orden de lista; matriz de luz `L = [dir; vec0; vec1] x R`; color por normal.
 `ns_light_preshade_vertex`. Modelos con marca "sin luz": 0x808080. El array resultante se copia a los paquetes (`r0..r3`).
 **Excepción:** objetos con vértices animados (líquidos) se deforman después de precalcular; sus colores siguen siendo los del
 instante de precalcular (probable causa del 4,4 % de vértices de objetos pequeños que no coinciden en el volcado: sus alturas de vértice varían unas unidades; no confirmado).
@@ -161,7 +159,7 @@ f  = clamp((zi - start) * 4096 / len0, 0, 4096)      // len0 = len original; zi 
 color_lejano = negro
 ```
 
-- **Mapa/decorado precalculado:** por vértice, `byte' = mezcla(byte, 0, f)`: DPCS exacto con `FC=0` (`ns_fog_apply`): `byte*(4096-f)/4096`.
+- **Mapa/decorado precalculado:** por vértice, `byte' = mezcla(byte, 0, f)`: mezcla de profundidad exacta con color lejano 0 (`ns_fog_apply`; `f` se recorta a 0..4096): `byte*(4096-f)/4096`.
 - **Objetos dinámicos:** a la profundidad de la pieza raíz (`screen.t[2]/256`) el motor escala **la matriz de color y el ambiente** por
   `s = 4096 - f` (`ns_fog_light_object`; el ambiente se recorta con división entera antes de x16).
 - **Primitivas** (efectos, líneas, sprites): mezcla por vértice con la profundidad de la primitiva; **las que tienen `zi >= start+len` no se
@@ -183,10 +181,14 @@ color_lejano = negro
 - Semitransparencia: bit 1 del código.
 
 ## 9. Validación (`vr/native/ns_lightcheck.c`, `make -f vr/native/luz.mk test`)
-- Pruebas sintéticas contra `runtime/gte.c`: NCS 200 000 casos (color y acumuladores exactos), matriz local y posición mundo
-  100 000 casos, DPCS 100 000, raíz 400 000 valores, selección de luces, caída, niebla y cadena completa del mapa.
-- Volcado de RAM de una partida (dos fotogramas, escena exterior): **dinámicos 100 %** (80 y 104 vértices sombreados, error 0,0000
-  bytes/canal; matrices de luz leídas de la propia RAM); **mapa 100 %** (724/724 vértices del bloque principal, recalculado con luz global,
-  ambiente y la lista de luces fijas); objetos pequeños colocados 95,5 % global (error medio 0,3-0,46 byte; diferencias de 1-5 niveles en vértices cuya altura varía; ver sección 5). Los colores comparados son los que el motor deja en los paquetes de la GPU.
-- Pendiente de los volcados con fotograma real: comparar con la lista GPU capturada (equivalente a lo anterior) y fotograma de escena
-  con niebla (el volcado usado no tenía el actor activo).
+- Pruebas sintéticas contra la unidad de geometría de referencia: color por normal 200 000 casos (color y acumuladores exactos), matriz local y
+  posición mundo 100 000, mezcla de profundidad 100 000, raíz 500 000 valores, selección de luces, caída, casos límite (componentes de
+  ±32768 y 30000x3, truncado a 16 bits, r=0/1), niebla (incl. `start+len>255`) y cadena completa del mapa. Float vs entero: error medio
+  0,008 byte y máximo 1 byte con valores reales; con color de luz negativo o saturando la intensidad hasta 7.999756 el máximo medido sigue en 1 byte (cota ≤ 3).
+- `ns_lightcheck` lee un volcado de RAM de 2 MiB, localiza los objetos 3D por su estructura y compara los colores por vértice de los paquetes
+  de dibujo (lo que recibe la GPU) con el cálculo de `ns_light`. Las tres direcciones de los globales (luz global, ambiente, luces fijas) son
+  obligatorias, por entorno `NS_DIR_LUZ`, `NS_AMBIENTE`, `NS_LUCES_FIJAS`. La prueba usa RAM sintética (incluye punteros en el último byte) y corre
+  también con sanitizers (`test-san`, cualquier UB falla).
+- Con volcados de partidas reales: objetos dinámicos y bloque principal del mapa 100 % exactos (error 0); objetos pequeños precalculados
+  ~95 % exactos (diferencias de 1-5 niveles en vértices cuya altura varía; ver sección 5).
+- Pendiente: comparar con la lista GPU capturada de un fotograma real y con niebla activa.
