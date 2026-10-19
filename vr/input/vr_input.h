@@ -1,11 +1,11 @@
-/* Entrada VR -> mando PS1 + locomoción + confort. C puro, sin dependencias (testeable en Linux).
+/* Entrada VR -> mando original + locomoción + confort. C puro, sin dependencias (testeable en Linux).
  *
  * Convenciones:
  *  - Espacio VR: Y arriba, mano derecha, "adelante" por defecto = -Z. Cuaterniones como float[4] = x,y,z,w
  *    (mismo orden que simd_quatf.vector). Unidades en metros / radianes.
  *  - Rumbo (heading) h: dirección (x,z) = (sin h, -cos h). h=0 mira a -Z, h>0 gira hacia +X (a la derecha).
- *  - Sticks de entrada: -1..1, Y positivo = arriba/adelante. Salida PS1: 0..255, centro 0x80, Y positivo = abajo.
- *  - Botones PS1 activo-alto (bits de bitacora §14).
+ *  - Sticks de entrada: -1..1, Y positivo = arriba/adelante. Salida original: 0..255, centro 0x80, Y positivo = abajo.
+ *  - Botones original activo-alto (bits de bitacora §14).
  *
  * Uso por fotograma: rellenar vr_input_frame_t, llamar vr_input_update() y enviar vr_pad_t a mv_host_pad().
  * La capa de cámara usa vr_input_body_yaw() (se SUMA al rumbo de la cabeza) y vr_input_vignette() el renderer. */
@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-/* Bits del mando PS1 (activo-alto). */
+/* Bits del mando original (activo-alto). */
 enum {
     VRI_PAD_SELECT = 1u << 0, VRI_PAD_L3 = 1u << 1, VRI_PAD_R3 = 1u << 2, VRI_PAD_START = 1u << 3,
     VRI_PAD_UP = 1u << 4, VRI_PAD_RIGHT = 1u << 5, VRI_PAD_DOWN = 1u << 6, VRI_PAD_LEFT = 1u << 7,
@@ -58,7 +58,7 @@ typedef struct {
     float head_pos[3];
     float head_quat[4];
     vri_hand_t hand[2];             /* 0 = izquierdo, 1 = derecho (físicos) */
-    /* Modo PAD (DualSense / extendido): ya mapeado a bits PS1 como hoy, sticks -1..1 con Y arriba. */
+    /* Modo PAD (DualSense / extendido): ya mapeado a bits original como hoy, sticks -1..1 con Y arriba. */
     uint16_t pad_buttons;
     float pad_lx, pad_ly, pad_rx, pad_ry;
     /* Retroalimentación del juego (puente RAM); -1 = desconocida. */
@@ -71,7 +71,7 @@ typedef struct {
     uint8_t lx, ly, rx, ry;         /* 0..255, centro 0x80 */
 } vr_pad_t;
 
-/* Mapa de botones del modo Sense (máscara de bits PS1; 0 = sin acción). "dom" = mano dominante. */
+/* Mapa de botones del modo Sense (máscara de bits original; 0 = sin acción). "dom" = mano dominante. */
 typedef struct {
     uint16_t trig_dom, trig_off, grip_dom, grip_off;
     uint16_t low_dom, up_dom, low_off, up_off;

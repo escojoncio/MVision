@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""psxdisc: lector de imágenes BIN/CUE de PlayStation (MODE2/2352).
+"""discread: lector de imágenes BIN/CUE de la plataforma original (MODE2/2352).
 
 Solo biblioteca estándar. Nunca escribe datos del juego dentro del repo.
 
 Uso:
-  psxdisc.py info    <disco.cue>                 # pista, PVD, ejecutable de arranque
-  psxdisc.py ls      <disco.cue>                 # ficheros ISO9660: LBA, tamaño, modo
-  psxdisc.py extract <disco.cue> <dir_salida>    # extrae todo (Form 2 en crudo 2336 B/sector)
-  psxdisc.py dirtable <disco.cue> <NOMBRE.EXT>    # tabla de archivo DIR (nombre[8], sector)
-  psxdisc.py manifest <disco.cue> <salida.json>  # LBA/tamaño/sha256 por fichero (para diffs)
+  discread.py info    <disco.cue>                 # pista, PVD, ejecutable de arranque
+  discread.py ls      <disco.cue>                 # ficheros ISO9660: LBA, tamaño, modo
+  discread.py extract <disco.cue> <dir_salida>    # extrae todo (Form 2 en crudo 2336 B/sector)
+  discread.py dirtable <disco.cue> <NOMBRE.EXT>    # tabla de archivo DIR (nombre[8], sector)
+  discread.py manifest <disco.cue> <salida.json>  # LBA/tamaño/sha256 por fichero (para diffs)
 """
 import hashlib
 import json

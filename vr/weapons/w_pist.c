@@ -322,7 +322,7 @@ static void pist_update(WeaponState *ws, const WInput *in, WReloadMode rm, const
                 s->slide = ns;
             }
         } else if (!s->cyc && !s->locked) {
-            /* retorno por muelle */
+            /* retorno por resorte */
             if (s->slide > 0) {
                 float prev = s->slide;
                 s->slide = wcore_approach(s->slide, 0, RET_SPEED * dt);

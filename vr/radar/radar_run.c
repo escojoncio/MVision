@@ -89,7 +89,7 @@ static void blend(float *d, const float f[3], int mode) {
     }
 }
 
-/* Triángulo con regla de relleno única (sin doble dibujo en la diagonal), color Gouraud, textura nearest, mezcla PS1. */
+/* Triángulo con regla de relleno única (sin doble dibujo en la diagonal), color Gouraud, textura nearest, mezcla original. */
 static void tri(Img *im, float ox, float oy, const VrVtx *a, const VrVtx *b, const VrVtx *c, int bl, const VrState *states, uint32_t ns) {
     const VrVtx *V[3] = {a, b, c};
     float X[3], Y[3];
@@ -282,10 +282,10 @@ static void frame_hook(Cpu *c, uint32_t f) {
     (void)c;
     if (force_mode >= 0 && f >= force_from && f < force_to) {   /* prueba: fuerza el modo de alerta global (0 normal, 1 interferencia, 2 evasión, 3 alerta) */
         uint32_t m = (uint32_t)force_mode, lv = 120;
-        memcpy(psx_ram + (BA_ALERT_MODE & 0x1FFFFF), &m, 4);
-        memcpy(psx_ram + (BA_ALERT_LEVEL & 0x1FFFFF), &lv, 4);
+        memcpy(emu_ram + (BA_ALERT_MODE & 0x1FFFFF), &m, 4);
+        memcpy(emu_ram + (BA_ALERT_LEVEL & 0x1FFFFF), &lv, 4);
     }
-    bridge_read(psx_ram, &bs);
+    bridge_read(emu_ram, &bs);
     if (!cap_on) {
         gpu_capture_hiprec(1);
         gpu_capture_enable(1);

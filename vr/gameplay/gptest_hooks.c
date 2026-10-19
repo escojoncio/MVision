@@ -64,7 +64,7 @@ static void probe(int kind, int decision, uint32_t res, const VrFireMat *m) {
     }
     if (kind == 3) { fprintf(stderr, " lanzamiento %s pos=(%d,%d,%d) vel/tick=(%d,%d,%d)\n", decision ? "SUSTITUIDO" : "original", m->t[0], m->t[1], m->t[2], m->m[0], m->m[1], m->m[2]); return; }
     if (kind == 0 && res >= 0x80010000u && res < 0x80200000u) {
-        /* busca la copia de la matriz en el actor y los SVECTOR pos/paso */
+        /* busca la copia de la matriz en el actor y los VEC16 pos/paso */
         int off_w = -1;
         for (uint32_t o = 0; o < 0x80 && decision == 1; o += 4) {
             if (!memcmp(g_ram + ((res + o) & 0x1FFFFF), m->m, 18)) { off_w = (int)o; break; }

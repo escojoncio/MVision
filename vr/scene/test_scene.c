@@ -657,7 +657,7 @@ static void test_ofs_fix(void) {
 
 static void test_post_emu(void) {
     /* Modelo del post-proceso (hud_emu_post == vr_fs_post): imagen del ojo 200x480 cuyo valor R codifica la fila (y/h); ojo con cy_img=240, f_eye=400; motor con
-     * proj_h=160, centro (160,128). Tiras en las filas PS1 50..59 con dv=+3, y 60..69 con dv=-2; tinte (0,5; 1; 0,5). */
+     * proj_h=160, centro (160,128). Tiras en las filas original 50..59 con dv=+3, y 60..69 con dv=-2; tinte (0,5; 1; 0,5). */
     enum { W = 200, H = 480 };
     static float src[W * H * 3], dst[W * H * 3];
     for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { float *p = &src[((size_t)y * W + x) * 3]; p[0] = (y + 0.5f) / H; p[1] = 0.8f; p[2] = 0.4f; }
@@ -905,7 +905,7 @@ static void test_goggles_emu(void) {
     hud_emu_post2(src, dst, 320, 256, 160.0f, 128.0f, 80.0f, 80.0f, &s.filter);   /* focal 80: el ojo ve el doble de campo (tangente ±2): fuera de la imagen del motor = negro */
     CHECK(near_f(dst[((size_t)5 * 320 + 5) * 3], 0.12f, 1e-4f) && near_f(dst[((size_t)128 * 320 + 160) * 3], 0.5f, 1e-4f) && near_f(dst[((size_t)128 * 320 + 60) * 3], 0.12f, 1e-4f),
           "campo mayor que el del motor: negro fuera (centro %.3f)", dst[((size_t)128 * 320 + 160) * 3]);
-    /* fidelidad con la resta de la PS1 sobre una escena cualquiera: out = max(c - resta, 0) en cada canal */
+    /* fidelidad con la resta del original sobre una escena cualquiera: out = max(c - resta, 0) en cada canal */
     {
         for (int i = 0; i < W * H * 3; i++) src[i] = 0.9f;
         hud_emu_post2(src, dst, W, H, 320.0f, 256.0f, 320.0f, 320.0f, &s.filter);

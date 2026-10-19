@@ -11,9 +11,9 @@ import Foundation
 // de VRAM, semitransparencia y paletas que el HUD) para la textura; vr_vs_radar(_amp) / vr_fs_radar (vr_radar.metal) para el quad.
 //
 // ---------------------------------------------------------------------------------------------------------------------------
-// INTEGRACIÓN (diff pedido para RenderPS1.swift y el bucle; no aplicado aquí)
+// INTEGRACIÓN (diff pedido para RenderRG.swift y el bucle; no aplicado aquí)
 //
-//   PS1Renderer (RenderPS1.swift):
+//   RGRenderer (RenderRG.swift):
 //   1) exponer la VRAM:            `var vramTexture: MTLTexture { vram }`
 //   2) propiedad:                  `var radar: RadarPanel?`
 //   3) en `init`, tras crear los pipelines:
@@ -32,7 +32,7 @@ import Foundation
 //      `encode` anterior (un fotograma de retraso, imperceptible en un radar); por eso `encodeQuad` no dibuja hasta que la textura
 //      se ha renderizado al menos una vez (`textureReady`: una textura privada recién creada tiene contenido indefinido).
 //   7) cada fotograma, antes de `encode`, el bucle inmersivo pasa la pose:
-//         ps1.radar?.updatePose(forearm: body.leftForearm /* (elbow, wrist, dorsal) o nil */, leftGrip: pose.leftGrip,
+//         rg.radar?.updatePose(forearm: body.leftForearm /* (elbow, wrist, dorsal) o nil */, leftGrip: pose.leftGrip,
 //                               headPosition: headPos, headForward: headFwd)
 //      con `leftForearm` = vrbody_forearm_pose(0, ...) de vr/body (ver vr_radar.h, "4.").
 //   Host C (vrhost.c / vrhost.h): ver vr/radar/vr_radar.h, "Integración en el host".
@@ -54,7 +54,7 @@ struct RadarQuadU {
 
 final class RadarPanel {
     // MARK: configuración
-    /// Muestreo de la textura en el quad: false = nearest (píxeles de la PS1 nítidos), true = bilineal + mips + anisotropía 4.
+    /// Muestreo de la textura en el quad: false = nearest (píxeles del original nítidos), true = bilineal + mips + anisotropía 4.
     var smooth = false { didSet { sampler = nil } }
     /// Si false no se dibuja el quad (y tampoco se renderiza la textura).
     var enabled = true
@@ -65,7 +65,7 @@ final class RadarPanel {
     var bezelColor = SIMD3<Float>(0.02, 0.025, 0.03)
     /// Geometría del dispositivo (tamaño, posición en el antebrazo, brillo al mirarlo...): ver VrRadarWristCfg.
     var wrist: VrRadarWristCfg = vrradar_wrist_cfg_default()
-    /// Resolución de la textura respecto al radar de la PS1 (71x54 px): 4 = 284x216.
+    /// Resolución de la textura respecto al radar del original (71x54 px): 4 = 284x216.
     let scale = 4
 
     // MARK: estado público
@@ -95,7 +95,7 @@ final class RadarPanel {
     private var rect = simd_float4(234, 15, 71, 54)
     private var dirty = false
     private var textureReady = false
-    /// El anillo de búferes avanza como mucho UNA vez por `encode` (como `storeScene` en PS1Renderer): con 3 comandos en vuelo, un `encode` que
+    /// El anillo de búferes avanza como mucho UNA vez por `encode` (como `storeScene` en RGRenderer): con 3 comandos en vuelo, un `encode` que
     /// ingiriera 2-4 escenas pisaría el búfer que la GPU aún lee de un fotograma anterior. Lo rearma `renderTexture` (una vez por `encode`).
     private var advanced = false
 
@@ -196,7 +196,7 @@ final class RadarPanel {
             ca.pixelFormat = .rgba8Unorm
             if k.mode >= 0 {
                 ca.isBlendingEnabled = true
-                switch k.mode {                       // los 4 modos de la PS1 (B = destino, F = fragmento); ver RenderPS1.pipeline
+                switch k.mode {                       // los 4 modos del original (B = destino, F = fragmento); ver RenderRG.pipeline
                 case 0:
                     ca.rgbBlendOperation = .add
                     ca.sourceRGBBlendFactor = .blendColor; ca.destinationRGBBlendFactor = .oneMinusBlendColor
@@ -223,7 +223,7 @@ final class RadarPanel {
         }
     }
 
-    /// Dibuja el radar en su textura (si llegó una escena nueva). `vram`: la VRAM de PS1Renderer en su estado final de la lista.
+    /// Dibuja el radar en su textura (si llegó una escena nueva). `vram`: la VRAM de RGRenderer en su estado final de la lista.
     func renderTexture(_ cb: MTLCommandBuffer, vram: MTLTexture) {
         defer { advanced = false }
         guard enabled, present, dirty, let tex = texture, let buf = slots[cur].buf else { return }

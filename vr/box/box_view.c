@@ -287,7 +287,7 @@ void box_view_default_config(BoxViewConfig *c) {
     c->distance = 0.26f; c->rim = 0.012f;
     c->half_w = 0.21f; c->top = 0.17f; c->bottom = 0.40f; c->back = 0.20f;
     c->ipd = 0.064f;
-    c->style = BOX_STYLE_CARDBOARD;
+    c->style = BOX_STYLE_TEX;
     c->lag_rate = 16.f; c->lag_max_deg = 2.5f;
     c->drop_time = 0.55f; c->open_time = 0.32f; c->lift = 0.85f;
     c->wide_x = 1.5f; c->wide_y = 2.0f;

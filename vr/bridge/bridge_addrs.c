@@ -42,7 +42,7 @@ const BridgeAddr bridge_addr_table[] = {
      "Bloque sbss de ~30 variables del módulo principal (orden: ... magazine, id, ctrl, ruido, modo alerta, ...). "
      "El puntero apunta a un bloque cuyo campo +0x30 vale siempre 0x21CA (hash del actor del jugador) y cuyos "
      "+0/+8 coinciden con la posición/rotación del jugador y con la entrada 0 de la lista de controles."},
-    {"pos_jugador", BA_PLAYER_POS, 8, T3, "SVECTOR",
+    {"pos_jugador", BA_PLAYER_POS, 8, T3, "VEC16",
      "Función de inicialización del sistema de juego: copia 3 halfwords de las variables de partida [8..10] a "
      "gp+1816/1818/1820. En ejecución sigue a la posición del bloque de control (diferencia <= 1 unidad)."},
     {"estado_jugador", BA_PLAYER_STATUS, 4, T3, "u32 (gp+1880)",
@@ -57,7 +57,7 @@ const BridgeAddr bridge_addr_table[] = {
      "No se vio alerta en la ejecución de prueba (siempre 0); lectura validada solo por rango."},
     {"nivel_alerta", BA_ALERT_LEVEL, 4, T2, "s32 (gp+1824)", "Inicialización + función de ruido que lo copia del máximo del fotograma. Sin ejercitar."},
     {"alerta_max", BA_ALERT_MAX, 4, T2, "s32 (gp+1768)", "Inicialización (se pone a cero). Sin ejercitar."},
-    {"ruido", BA_NOISE_POS, 8, T2, "SVECTOR + s32 potencia/duración",
+    {"ruido", BA_NOISE_POS, 8, T2, "VEC16 + s32 potencia/duración",
      "Bloque de ruido (posición +0x00 desde gp+1792, potencia gp+1836, duración gp+1848): inicializados por la "
      "función que decrementa la duración. Sin ejercitar."},
     {"mapa_jugador", BA_PLAYER_MAP, 4, T3, "s32 (gp+1812)", "Vecina de la posición del jugador; vale 1 en la zona de prueba y coincide con el mapa de los blancos del jugador."},

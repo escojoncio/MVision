@@ -17,7 +17,7 @@ struct XRDrawItem {
     var opacity: Float = 1                      // veil: opacidad del negro
 }
 
-/// Pase final de cada frame, tras PS1Renderer.encode:
+/// Pase final de cada frame, tras RGRenderer.encode:
 ///  1) resolución de la profundidad MSAA a la textura de profundidad del drawable (si hay MSAA);
 ///  2) lista de `XRDrawItem` en orden: pantalla de cine, paneles del HUD, velo de transición, menú VR.
 /// Layered: una pasada con `renderTargetArrayLength = vistas` y dibujo instanciado (instance = vista);

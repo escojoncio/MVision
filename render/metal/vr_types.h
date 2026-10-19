@@ -1,5 +1,5 @@
 /* Estructuras compartidas host (C / Swift vía puente) <-> shaders Metal del renderer de la escena VR
- * (vr_scene.metal, vr_vram.metal). Independiente de ps1_types.h. Mismo layout en C y en MSL. */
+ * (vr_scene.metal, vr_vram.metal). Independiente de rg_types.h. Mismo layout en C y en MSL. */
 #pragma once
 #ifdef __METAL_VERSION__
 #include <metal_stdlib>
@@ -25,8 +25,8 @@
 #define VR_BUF_STATES 2     /* VrGpuState[] (== VrScene.states), indexado por VrGpuVtx.pad; 0xFFFF = sin estado */
 
 /* Espejo de VrVtx (vr/scene/vr_scene.h), 32 bytes.
- * clut: bits 0-5 x/16, 6-14 y (palabra de CLUT de la PS1). tpage: bits 0-3 x/64, 4 y/256, 5-6 abr, 7-8 modo de color
- * (0=4b, 1=8b, 2/3=15b) (palabra de texpage de la PS1). rgba = r | g<<8 | b<<16 | a<<24 (128 = modulación neutra). */
+ * clut: bits 0-5 x/16, 6-14 y (palabra de CLUT del original). tpage: bits 0-3 x/64, 4 y/256, 5-6 abr, 7-8 modo de color
+ * (0=4b, 1=8b, 2/3=15b) (palabra de texpage del original). rgba = r | g<<8 | b<<16 | a<<24 (128 = modulación neutra). */
 typedef struct {
     float pos[3];
     float uv[2];

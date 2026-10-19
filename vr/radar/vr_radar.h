@@ -5,7 +5,7 @@
  * ---------------------------------------------------------------------------------------------------------
  * 1. Cómo se distinguen las primitivas del radar (marcas en la lista de dibujo)
  *   La función del juego que dibuja el radar (vr_radar_hle.c, `vrradar_draw`) NO envía nada a la GPU: solo enlaza primitivas
- *   en una OT, que se dibuja después (DrawOTag). Por eso no vale anotar el rango de seq de captura a la entrada/salida de la
+ *   en una OT, que se dibuja después (gfx_list). Por eso no vale anotar el rango de seq de captura a la entrada/salida de la
  *   función (como hace vr/camera con el envío de la lista). El sustituto HLE hace lo equivalente EN LA OT: ejecuta la función
  *   original y, al volver, inserta un paquete de marca (comando GP0 0x04, NOP real) justo antes de la primera primitiva que
  *   añadió y otro justo después de la última. La GPU (con runtime_mark.patch) llama a `vrradar_on_mark(id, seq)` cuando

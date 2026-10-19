@@ -69,7 +69,7 @@ static int aa_code_ok(void) {
     };
     for (unsigned i = 0; i < sizeof W / sizeof *W; i++) {
         uint32_t w;
-        memcpy(&w, psx_ram + (W[i].addr & (PSX_RAM_SIZE - 1u)), 4);
+        memcpy(&w, emu_ram + (W[i].addr & (EMU_RAM_SIZE - 1u)), 4);
         if (w != W[i].word) return 0;
     }
     return 1;
@@ -405,9 +405,9 @@ static void frame_hook(Cpu *c, uint32_t f) {
     float turn = mv_vr_take_turn();
     if (turn != 0.0f) vrcam_turn(turn);
     if (mv_vr_take_recenter()) vrcam_recenter();
-    bridge_read(psx_ram, &bs);
+    bridge_read(emu_ram, &bs);
     publish_state();
-    vrcam_frame(psx_ram, &bs);
+    vrcam_frame(emu_ram, &bs);
     vrai_frame(&bs, f);
     if (test_cb) test_cb(c, f);
     vrgame_frame_end();
@@ -525,13 +525,13 @@ static void on_start(void) {
     cap_on = 0;
     gpu_capture_set_mark_hook(vrradar_on_mark);   /* runtime_mark.patch */
     sopts = vr_scene_opts_default();
-    sopts.screen_filter = 1;   /* el renderer de la app aplica la clase 3 (post-proceso por ojo: onda, tinte y recubrimiento; RenderPS1.swift) */
+    sopts.screen_filter = 1;   /* el renderer de la app aplica la clase 3 (post-proceso por ojo: onda, tinte y recubrimiento; RenderRG.swift) */
 }
 
 /* Mando que ve el juego (hilo de emulación, cada VBlank, antes de aplicarlo): arma VR, disparo y recarga (vrgame.c). `bs` es el puente
  * del VBlank anterior. */
 static uint16_t pad_hook(uint16_t buttons) {
-    return vrgame_pad(buttons, &bs, psx_ram);
+    return vrgame_pad(buttons, &bs, emu_ram);
 }
 
 /* Radar de muñeca: copia de la percepción activa (cono original + cono ampliado más tenue; nada con el ajuste original). */

@@ -38,8 +38,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.kdt.livecontainer
         TARGETED_DEVICE_FAMILY: "7"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging-Header.h
-        # MV_HAVE_PS1RENDERER desactiva el renderer de relleno (XRStubRenderer.swift): RenderPS1.swift es el real.
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MV_HAVE_PS1RENDERER"
+        # MV_HAVE_RGRENDERER desactiva el renderer de relleno (XRStubRenderer.swift): RenderRG.swift es el real.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MV_HAVE_RGRENDERER"
         # MV_NOGEN: intérprete, sin código derivado del juego en el binario.
         GCC_PREPROCESSOR_DEFINITIONS: ["$(inherited)", "MV_NOGEN=1"]
         HEADER_SEARCH_PATHS:

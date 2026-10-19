@@ -47,9 +47,9 @@ void rt_unpatch_code_all(void);
 unsigned rt_patch_code_count(void);
 
 /* Consulta rápida del intérprete (1 bit por palabra de RAM con parche de función). */
-extern uint8_t rt_patch_bits[PSX_RAM_SIZE / 32];
+extern uint8_t rt_patch_bits[EMU_RAM_SIZE / 32];
 static inline int rt_patch_is(uint32_t a) {
-    uint32_t w = (a & (PSX_RAM_SIZE - 1)) >> 2;
+    uint32_t w = (a & (EMU_RAM_SIZE - 1)) >> 2;
     return (rt_patch_bits[w >> 3] >> (w & 7)) & 1;
 }
 FuncPtr rt_patch_lookup(uint32_t addr);           /* hilo del emulador; NULL si no hay (devuelve la entrada que comprueba la guarda) */

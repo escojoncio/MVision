@@ -47,7 +47,7 @@ static void make_image(const char *path, const char *boot, const char *dexe, int
     o += dirrec(u[22] + o, "ABC.DAT;1", 24, 2048, 0);
     char nm[32]; snprintf(nm, sizeof nm, "%s;1", dexe);
     o += dirrec(u[22] + o, nm, 23, 2048, 0);
-    memcpy(u[23], "PS-X EXE", 8);
+    memcpy(u[23], EXE_MAGIC, 8);
     for (int i = 0; i < 2048; i++) u[24][i] = i * 7 + 1;
 
     FILE *f = fopen(path, "wb");
@@ -97,8 +97,8 @@ int main(void) {
 
     /* 1. bin suelto */
     snprintf(p, sizeof p, "%s/solo.bin", d);
-    make_image(p, "SLES_000.01", "MAIN.EXE", NSEC + 10);
-    check_image(p, "SLES_000.01", "MAIN.EXE", NSEC + 10);
+    make_image(p, "BOOT_000.01", "MAIN.EXE", NSEC + 10);
+    check_image(p, "BOOT_000.01", "MAIN.EXE", NSEC + 10);
     /* tamaño no múltiplo -> rechazo */
     snprintf(q, sizeof q, "%s/malo.bin", d);
     W(q, "hola");
@@ -108,15 +108,15 @@ int main(void) {
     /* 2. .cue: variantes */
     snprintf(q, sizeof q, "%s/a.cue", d);
     W(q, "\xEF\xBB\xBF" "FILE \"solo.bin\" BINARY\r\n  TRACK 01 MODE2/2352\r\n    INDEX 01 00:00:00\r\n");
-    check_image(q, "SLES_000.01", "MAIN.EXE", NSEC + 10);
+    check_image(q, "BOOT_000.01", "MAIN.EXE", NSEC + 10);
     snprintf(p, sizeof p, "%s/Mi Juego (Disc 1).BIN", d);
-    make_image(p, "SLES_000.01", "MAIN.EXE", NSEC);
+    make_image(p, "BOOT_000.01", "MAIN.EXE", NSEC);
     W(q, "REM x\nfile \"MI JUEGO (disc 1).bin\" binary\n\ttrack 01 mode2/2352\n\t\tindex 01 00:00:00\n");
-    check_image(q, "SLES_000.01", "MAIN.EXE", NSEC);                         /* mayúsculas distintas */
+    check_image(q, "BOOT_000.01", "MAIN.EXE", NSEC);                         /* mayúsculas distintas */
     W(q, "FILE Mi Juego (Disc 1).BIN BINARY\r\nTRACK 01 MODE2/2352\r\nINDEX 01 00:00:00\r\n");
-    check_image(q, "SLES_000.01", "MAIN.EXE", NSEC);                         /* sin comillas, con espacios */
+    check_image(q, "BOOT_000.01", "MAIN.EXE", NSEC);                         /* sin comillas, con espacios */
     W(q, "FILE \"C:\\Juegos\\roms\\Mi Juego (Disc 1).BIN\" BINARY\r\nTRACK 01 MODE2/2352\r\nINDEX 01 00:00:00\r\n");
-    check_image(q, "SLES_000.01", "MAIN.EXE", NSEC);                         /* ruta Windows */
+    check_image(q, "BOOT_000.01", "MAIN.EXE", NSEC);                         /* ruta Windows */
     W(q, "FILE \"no_existe.bin\" BINARY\nTRACK 01 MODE2/2352\nINDEX 01 00:00:00\n");
     CHECK(disc_img_open(q) == NULL);
     W(q, "FILE \"x.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n");
@@ -143,7 +143,7 @@ int main(void) {
 
     /* 4. caché: lecturas aleatorias idénticas a lectura directa */
     snprintf(p, sizeof p, "%s/big.bin", d);
-    make_image(p, "SLES_000.09", "BIG.EXE", NSEC + 200);
+    make_image(p, "BOOT_000.09", "BIG.EXE", NSEC + 200);
     h = disc_img_open(p);
     CHECK(h != NULL);
     if (h) {
@@ -164,29 +164,29 @@ int main(void) {
     char sd[600]; snprintf(sd, sizeof sd, "%s/scan", d); mkdir(sd, 0755);
     char b1[900], c1[900], b2[900], dd[900];
     snprintf(b1, sizeof b1, "%s/zzz primero.bin", sd);   /* disco con serial MAYOR, nombre que ordena primero */
-    make_image(b1, "SLES_000.12", "EXE_B.EXE", NSEC);
+    make_image(b1, "BOOT_000.12", "EXE_B.EXE", NSEC);
     snprintf(c1, sizeof c1, "%s/aaa.cue", sd);
     W(c1, "FILE \"zzz primero.bin\" BINARY\nTRACK 01 MODE2/2352\nINDEX 01 00:00:00\n");
     char sub[800]; snprintf(sub, sizeof sub, "%s/otro", sd); mkdir(sub, 0755);
     snprintf(b2, sizeof b2, "%s/suelto.bin", sub);
-    make_image(b2, "SLES_000.11", "EXE_A.EXE", NSEC);
+    make_image(b2, "BOOT_000.11", "EXE_A.EXE", NSEC);
     snprintf(dd, sizeof dd, "%s/extraido", sd); mkdir(dd, 0755);
-    snprintf(p, sizeof p, "%s/SYSTEM.CNF", dd); W(p, "BOOT = cdrom:\\SLES_000.10;1\r\n");
+    snprintf(p, sizeof p, "%s/SYSTEM.CNF", dd); W(p, "BOOT = cdrom:\\BOOT_000.10;1\r\n");
     snprintf(p, sizeof p, "%s/DATA", dd); mkdir(p, 0755);
-    snprintf(p, sizeof p, "%s/DATA/Z.EXE", dd); W(p, "PS-X EXE\0\0\0\0");
+    snprintf(p, sizeof p, "%s/DATA/Z.EXE", dd); W(p, EXE_MAGIC "\0\0\0\0");
     snprintf(p, sizeof p, "%s/DATA/A.DAT", dd); W(p, "nada");
     char dup[900]; snprintf(dup, sizeof dup, "%s/dup", sd); mkdir(dup, 0755);   /* misma identidad que el .bin suelto */
-    snprintf(p, sizeof p, "%s/SYSTEM.CNF", dup); W(p, "BOOT = cdrom:\\SLES_000.11;1\r\n");
+    snprintf(p, sizeof p, "%s/SYSTEM.CNF", dup); W(p, "BOOT = cdrom:\\BOOT_000.11;1\r\n");
     snprintf(p, sizeof p, "%s/DATA", dup); mkdir(p, 0755);
-    snprintf(p, sizeof p, "%s/DATA/EXE_A.EXE", dup); W(p, "PS-X EXE\0\0\0\0");
+    snprintf(p, sizeof p, "%s/DATA/EXE_A.EXE", dup); W(p, EXE_MAGIC "\0\0\0\0");
     static DiscEntry ents[8];
     int n = disc_scan_dir(sd, ents, 8);
     for (int i = 0; i < n; i++) printf("  scan[%d] #%d dir=%d boot=%s dexe=%s %s\n", i, ents[i].id.number, ents[i].is_dir, ents[i].id.boot, ents[i].id.dataexe, ents[i].path);
     CHECK(n == 3);
     if (n == 3) {
-        CHECK(!strcmp(ents[0].id.boot, "SLES_000.10") && ents[0].is_dir && ents[0].id.number == 1);
-        CHECK(!strcmp(ents[1].id.boot, "SLES_000.11") && !ents[1].is_dir && ents[1].id.number == 2);   /* imagen gana a carpeta */
-        CHECK(!strcmp(ents[2].id.boot, "SLES_000.12") && ents[2].id.number == 3);
+        CHECK(!strcmp(ents[0].id.boot, "BOOT_000.10") && ents[0].is_dir && ents[0].id.number == 1);
+        CHECK(!strcmp(ents[1].id.boot, "BOOT_000.11") && !ents[1].is_dir && ents[1].id.number == 2);   /* imagen gana a carpeta */
+        CHECK(!strcmp(ents[2].id.boot, "BOOT_000.12") && ents[2].id.number == 3);
         CHECK(strstr(ents[2].path, "aaa.cue") != NULL);   /* .bin cubierto por su .cue: no duplica */
     }
 

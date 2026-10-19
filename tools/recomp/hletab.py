@@ -3,14 +3,16 @@
 
   hletab.py runtime/hle*.txt > runtime/hle_table.c      (make -C runtime hle_table)
 
-Solo contiene nombres de funciones de librería del SDK y símbolos de nuestro runtime: nada del juego.
+Cada línea de hle*.txt es "<nombre_neutro> [hash16]": el nombre neutro es el identificador del runtime (hle_<nombre>);
+el hash opcional (sha1 del símbolo del mapa de firmas, 16 hex) lo usa tools/sig/hlesigs.py. Nada del juego ni del SDK en claro.
 """
 import sys
 
 names = []
 for f in sys.argv[1:]:
     for line in open(f):
-        n = line.split("#")[0].strip()
+        t = line.split("#")[0].split()
+        n = t[0] if t else ""
         if n and n not in names:
             names.append(n)
 names.sort()

@@ -26,9 +26,9 @@ static int aim_t0 = 40, aim_t1 = 400, fire_t = 200, no_target;
 static float tgt_dist = 7.0f, off_deg;
 static int tgt_slot = -1;
 
-static int16_t r16(uint32_t a) { int16_t v; memcpy(&v, psx_ram + (a & 0x1FFFFF), 2); return v; }
-static uint32_t r32(uint32_t a) { uint32_t v; memcpy(&v, psx_ram + (a & 0x1FFFFF), 4); return v; }
-static void w16(uint32_t a, int v) { int16_t x = (int16_t)v; memcpy(psx_ram + (a & 0x1FFFFF), &x, 2); }
+static int16_t r16(uint32_t a) { int16_t v; memcpy(&v, emu_ram + (a & 0x1FFFFF), 2); return v; }
+static uint32_t r32(uint32_t a) { uint32_t v; memcpy(&v, emu_ram + (a & 0x1FFFFF), 4); return v; }
+static void w16(uint32_t a, int v) { int16_t x = (int16_t)v; memcpy(emu_ram + (a & 0x1FFFFF), &x, 2); }
 
 static uint16_t std_pad(uint32_t v) {
     uint16_t b = 0;
@@ -66,7 +66,7 @@ static void put_target(const BridgeState *bs) {
     w16(a + 0, 0x1F); w16(a + 2, 2); w16(a + 4, (int)(pmap ? pmap : 1)); w16(a + 6, 0);
     for (int i = 0; i < 3; i++) w16(a + 8 + 2u * (uint32_t)i, (int)lrintf(w[i]));
     w16(a + 0x10, 300); w16(a + 0x12, 400); w16(a + 0x14, 300); w16(a + 0x26, 100);
-    if (n < tgt_slot + 1) { uint32_t v = (uint32_t)(tgt_slot + 1); memcpy(psx_ram + (BA_N_TARGETS & 0x1FFFFF), &v, 4); }
+    if (n < tgt_slot + 1) { uint32_t v = (uint32_t)(tgt_slot + 1); memcpy(emu_ram + (BA_N_TARGETS & 0x1FFFFF), &v, 4); }
 }
 
 static uint32_t g_missile; static int g_moff = -1;
@@ -74,7 +74,7 @@ static void probe(int kind, int decision, uint32_t res, const VrFireMat *m) {
     if (kind != 1) return;
     fprintf(stderr, "[misil] creado actor=%08x decision=%s t=(%d,%d,%d)\n", res, decision == 1 ? "SUSTITUIDA" : decision == -1 ? "suprimida" : "pasa", m->t[0], m->t[1], m->t[2]);
     g_missile = res; g_moff = -1;
-    for (uint32_t o = 0; o < 0x200; o += 2) if (!memcmp(psx_ram + ((res + o) & 0x1FFFFF), m->m, 18)) { g_moff = (int)o; break; }
+    for (uint32_t o = 0; o < 0x200; o += 2) if (!memcmp(emu_ram + ((res + o) & 0x1FFFFF), m->m, 18)) { g_moff = (int)o; break; }
 }
 
 static uint16_t driver(uint32_t vbl, uint16_t pad, const BridgeState *bs) {

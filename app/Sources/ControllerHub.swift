@@ -4,7 +4,7 @@ import UIKit
 
 /// Única fuente de verdad de los mandos y único punto que escribe en `mv_host_pad`.
 ///
-/// - Detecta mando normal (DualSense, DualShock, extendido) y mandos de seguimiento (Sense) a la vez.
+/// - Detecta mando normal (DualSense, clásico, extendido) y mandos de seguimiento (Sense) a la vez.
 /// - Lee SIEMPRE por sondeo del estado completo (sin handlers): cada llamada a `sample()` devuelve el estado actual.
 /// - Si hay los dos tipos, manda el que se haya usado más recientemente (por defecto, los Sense).
 /// - `write(_:from:)` es el único camino hacia `mv_host_pad`: el espacio inmersivo (`.vr`) tiene prioridad y la

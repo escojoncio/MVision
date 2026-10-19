@@ -44,6 +44,6 @@ import collections
 print(collections.Counter(how.values()), len(out),'/',len(ref))
 tot=sum(r[2] for r in ref); print('cobertura palabras %.1f%%'%(100*sum(r[2] for r in ref if r[1] in out)/tot))
 json.dump({n:{'target':f'{t:08x}','how':how[n]} for n,t in out.items()},open('names_eu.json','w'),indent=0)
-for k in ['main','GV_Main','StageCharacterEntries']:
+for k in ['main']:
   for n in out:
     if n.lower()==k.lower(): print(n,hex(out[n]))

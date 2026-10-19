@@ -5,4 +5,4 @@
 #include "vrgame.h"
 #include "vr_hands_frame.h"
 #include "vr_scope.h"
-#include "RenderPS1Bridge.h"
+#include "RenderRGBridge.h"

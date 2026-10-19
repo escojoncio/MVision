@@ -48,7 +48,7 @@ const char *vrview_reason_name(int r) {
     case VRV_R_WORLD: return "mundo";
     case VRV_R_NO_GAME: return "sin partida";
     case VRV_R_CINEMATIC: return "cinemática";
-    case VRV_R_COMMS: return "códec";
+    case VRV_R_COMMS: return "radio";
     case VRV_R_STOPPED: return "detenido";
     case VRV_R_PAUSED: return "pausa";
     case VRV_R_MENU: return "ventana de armas/objetos";

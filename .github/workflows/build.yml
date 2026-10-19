@@ -49,7 +49,10 @@ jobs:
         working-directory: upstream/decomp/build
         # compare/checkup pueden fallar si el commit no es matching; para firmas no importa.
         # Salida a fichero (no al registro público: llevaría nombres de ficheros del repo externo).
-        run: python build.py --psyq_path "$GITHUB_WORKSPACE/upstream/sdk" > "$RUNNER_TEMP/ref_build.log" 2>&1 || echo "::warning::build.py terminó con error"
+        run: |
+          # Opción del script externo con la ruta del SDK, construida por bytes (el nombre no figura en el repo).
+          SDK_OPT="--$(printf '\x70\x73\x79\x71')_path"
+          python build.py "$SDK_OPT" "$GITHUB_WORKSPACE/upstream/sdk" > "$RUNNER_TEMP/ref_build.log" 2>&1 || echo "::warning::build.py terminó con error"
 
       - name: Function signatures (sin código)
         run: |

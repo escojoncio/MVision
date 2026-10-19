@@ -13,7 +13,7 @@
 
 HostFrameHook rt_host_frame;
 #include "fiber.h"
-/* Contador de VBlank en la última salida de VSync, por hilo: VSync(n) de un hilo no debe leer la base de otro. */
+/* Contador de VBlank en la última salida de frame_wait, por hilo: frame_wait(n) de un hilo no debe leer la base de otro. */
 static uint32_t vs_base[32];
 
 static uint32_t cb_lo, cb_hi;
@@ -49,11 +49,11 @@ void hle_invoke(Cpu *c, uint32_t fn, uint32_t arg) {
 
 uint32_t hle_frame_count(void) { return sys_vblank_count(); }
 
-/* VSync(mode): <0 = contador de VBlank; 1 = contador horizontal; 0 = esperar al siguiente VBlank;
+/* frame_wait(mode): <0 = contador de VBlank; 1 = contador horizontal; 0 = esperar al siguiente VBlank;
  * n>1 = esperar hasta n VBlank desde la salida de la llamada anterior. El VBlank lo genera el reloj
  * virtual (io.c); aquí solo se deja avanzar el tiempo y entregar excepciones mientras se espera, de
- * modo que otras tareas pueden ejecutarse (el planificador del juego conmuta desde su VSyncCallback). */
-void hle_VSync(Cpu *c) {
+ * modo que otras tareas pueden ejecutarse (el planificador del juego conmuta desde su frame_cb). */
+void hle_frame_wait(Cpu *c) {
     int32_t mode = (int32_t)A0;
     if (mode < 0) { V0 = sys_vblank_count(); return; }
     if (mode == 1) { V0 = sys_hcount(); return; }
@@ -66,16 +66,16 @@ void hle_VSync(Cpu *c) {
     V0 = 0;
 }
 
-void hle_VSyncCallback(Cpu *c) { V0 = irq_set_vsync_callback(A0); }
-/* ResetCallback es idempotente como en libapi: libspu la llama desde SpuInit, que el juego ejecuta
- * después de instalar su VSyncCallback, y no debe borrarlo. Solo la primera llamada reinicia. */
-void hle_ResetCallback(Cpu *c) {
+void hle_frame_cb(Cpu *c) { V0 = irq_set_vsync_callback(A0); }
+/* cb_reset es idempotente como en la librería base: la librería de sonido la llama desde su inicio, que el juego ejecuta
+ * después de instalar su frame_cb, y no debe borrarlo. Solo la primera llamada reinicia. */
+void hle_cb_reset(Cpu *c) {
     static int done;
     if (!done) { done = 1; irq_reset_callbacks(); }
     V0 = 0;
 }
-void hle_InterruptCallback(Cpu *c) { V0 = irq_set_callback((int)A0, A1); }
-void hle_DMACallback(Cpu *c) { V0 = irq_set_dma_callback((int)A0, A1); }
+void hle_cb_irq(Cpu *c) { V0 = irq_set_callback((int)A0, A1); }
+void hle_cb_dma(Cpu *c) { V0 = irq_set_dma_callback((int)A0, A1); }
 
 /* setjmp/longjmp: buffer MIPS = ra, sp, fp, s0-s7, gp (layout del SDK). El punto de reanudación del
  * host lo crea el código generado en la llamada directa a setjmp (rt.c, rt_sj_*). */
@@ -84,7 +84,7 @@ int rt_sj_take_armed(void);
 void rt_sj_forget(uint32_t buf);
 _Noreturn void rt_sj_longjmp(Cpu *c, uint32_t buf, uint32_t val);
 
-void hle_setjmp(Cpu *c) {
+void hle_jmp_save(Cpu *c) {
     static const int regs[] = {31, 28, 29, 30, 16, 17, 18, 19, 20, 21, 22, 23};
     static const int offs[] = {0, 44, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40};
     for (int k = 0; k < 12; k++) mem_w32(c, A0 + offs[k], c->r[regs[k]]);
@@ -92,4 +92,4 @@ void hle_setjmp(Cpu *c) {
     V0 = 0;
 }
 
-void hle_longjmp(Cpu *c) { rt_sj_longjmp(c, A0, A1); }
+void hle_jmp_restore(Cpu *c) { rt_sj_longjmp(c, A0, A1); }

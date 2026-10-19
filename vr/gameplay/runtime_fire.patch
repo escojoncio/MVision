@@ -28,7 +28,7 @@ diff -ruN a/runtime/hle_table.c b/runtime/hle_table.c
 +void hle_vrfire_rmissile(Cpu *c);
  
  const HleEntry hle_table[] = {
-     {"CdControl", hle_CdControl},
+     {"disc_ctl", hle_disc_ctl},
 @@ -133,6 +142,15 @@
      {"vrcam_padorg", hle_vrcam_padorg},
      {"vrcam_trans", hle_vrcam_trans},

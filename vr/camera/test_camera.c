@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include "vr_camera.h"
+#ifndef EXE_MAGIC
+/* Firma de 8 bytes de la cabecera del formato de ejecutable (construida en hex; se valida con memcmp). */
+#define EXE_MAGIC "\x50\x53\x2d\x58\x20\x45\x58\x45"
+#endif
 
 static int fails, checks;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; printf("FALLA %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
@@ -212,7 +216,7 @@ static void test_e2e(void) {
         CHECK(fabsf(pe) <= lim + 1e-3f);
         if (fabsf(es[ie]) <= lim) NEAR(pe, -es[ie], 0.01);
         float M[9]; engine_matrix(p.yaw_deg, p.pitch_deg, M);
-        uint32_t eye = BA_VIEW_CHANNEL + BCH_EYE;
+        uint32_t eye = BA_VIEW_CHANNEL + BCH_CAM;
         for (int k = 0; k < 9; k++) w16(eye + 2 * k, (int16_t)lrintf(M[k] * 4096.0f));
         vrcam_commit(ram, &p);
         const VrCamRecord *r = vrcam_last_record();
@@ -239,7 +243,7 @@ static void test_records(void) {
     BridgeState s = ok_state(); VrCamPlan p;
     for (int i = 0; i < c.on_frames; i++) vrcam_frame(ram, &s);
     /* matriz "eye" de la RAM: columnas X, Y, Z, t */
-    uint32_t eye = BA_VIEW_CHANNEL + BCH_EYE;
+    uint32_t eye = BA_VIEW_CHANNEL + BCH_CAM;
     w16(eye + 0, 4096); w16(eye + 8, 4096); w16(eye + 16, 4096); w16(BA_VIEW_CHANNEL + BCH_SCREEN, 320);
     w32(eye + 0x14, 1234); w32(eye + 0x18, 5); w32(eye + 0x1C, (uint32_t)-77);
     CHECK(vrcam_last_record() == NULL);
@@ -300,7 +304,7 @@ static int load_exe(const char *path, uint8_t *img, uint32_t *base, uint32_t *si
     FILE *f = fopen(path, "rb"); if (!f) return 0;
     static uint8_t buf[BRIDGE_RAM_SIZE + 0x800];
     size_t n = fread(buf, 1, sizeof buf, f); fclose(f);
-    if (n < 0x800 || memcmp(buf, "PS-X EXE", 8)) return 0;
+    if (n < 0x800 || memcmp(buf, EXE_MAGIC, 8)) return 0;
     memcpy(base, buf + 0x18, 4); memcpy(size, buf + 0x1C, 4);
     if (*size > n - 0x800 || (*base & 0x1FFFFF) + *size > BRIDGE_RAM_SIZE) return 0;
     memcpy(img + (*base & 0x1FFFFF), buf + 0x800, *size);

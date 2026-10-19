@@ -283,17 +283,17 @@ int main(int argc, char **argv) {
                 usleep(300000);
                 static const int ammo[10] = {60, 120, 6, 6, 4, 4, 4, 3, 3, 20}, mx[10] = {200, 400, 10, 10, 10, 10, 10, 10, 10, 100};
                 for (int i = 0; i < 10; i++) {
-                    *(int16_t *)(psx_ram + ((BA_VARS + 2u * (BRIDGE_V_WEAPON_AMMO + i)) & 0x1FFFFF)) = (int16_t)ammo[i];
-                    *(int16_t *)(psx_ram + ((BA_VARS + 2u * (BRIDGE_V_WEAPON_MAX + i)) & 0x1FFFFF)) = (int16_t)mx[i];
+                    *(int16_t *)(emu_ram + ((BA_VARS + 2u * (BRIDGE_V_WEAPON_AMMO + i)) & 0x1FFFFF)) = (int16_t)ammo[i];
+                    *(int16_t *)(emu_ram + ((BA_VARS + 2u * (BRIDGE_V_WEAPON_MAX + i)) & 0x1FFFFF)) = (int16_t)mx[i];
                 }
-                *(int16_t *)(psx_ram + ((BA_VARS + 2u * BRIDGE_V_WEAPON) & 0x1FFFFF)) = (int16_t)weapon_sel;
+                *(int16_t *)(emu_ram + ((BA_VARS + 2u * BRIDGE_V_WEAPON) & 0x1FFFFF)) = (int16_t)weapon_sel;
                 mv_host_resume();
                 if (weapon_sel) r1_at = f + 10;
             }
             if (dumpmis && g_mis && f % dumpmis == 0) {
                 uint32_t a = g_mis & 0x1FFFFF;
                 fprintf(stderr, "[mis] f=%u kind=%u actor=%08x:", f, g_mis_kind, g_mis);
-                for (int k = 0; k < 48; k++) fprintf(stderr, " %08x", *(uint32_t *)(psx_ram + a + 4u * (uint32_t)k));
+                for (int k = 0; k < 48; k++) fprintf(stderr, " %08x", *(uint32_t *)(emu_ram + a + 4u * (uint32_t)k));
                 fputc('\n', stderr);
                 static BridgeState *lb3; if (!lb3) lb3 = malloc(sizeof *lb3);
                 if (lb3 && mv_host_bridge(lb3)) fprintf(stderr, "[mis]   cam pos=(%d,%d,%d) tgt=(%d,%d,%d) rot=(%d,%d,%d) zoom=%d 1p=%d tipo=%d eye=(%d,%d,%d) ctl=%d player=(%d,%d,%d) ctlpos=(%d,%d,%d) accion=%d estado=%x\n",
@@ -327,7 +327,7 @@ int main(int argc, char **argv) {
             { VrRadarScene rs; if (mv_host_radar(&rs)) n_radar++; }
             CHECK(sc.src != NULL, "escena sin lista");
             if (!sc.src) continue;
-            if (hud_dir) {   /* igual que PS1Renderer: instantánea completa si la trae y eventos en orden */
+            if (hud_dir) {   /* igual que RGRenderer: instantánea completa si la trae y eventos en orden */
                 if (sc.src->vram_init) memcpy(evram, sc.src->vram_init, sizeof evram);
                 int want = 0;
                 for (int q = 0; q < n_hud; q++) if (hud_at[q] && sc.src->host_frame >= hud_at[q]) { hud_at[q] = 0; want = 1; }

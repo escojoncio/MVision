@@ -76,10 +76,10 @@ static void load_script(const char *path) {
     fclose(f);
 }
 
-static int16_t r16(uint32_t a) { return *(int16_t *)(psx_ram + (a & 0x1FFFFF)); }
-static int32_t r32(uint32_t a) { return *(int32_t *)(psx_ram + (a & 0x1FFFFF)); }
-static void w16(uint32_t a, int v) { *(int16_t *)(psx_ram + (a & 0x1FFFFF)) = (int16_t)v; }
-static void w32(uint32_t a, uint32_t v) { *(uint32_t *)(psx_ram + (a & 0x1FFFFF)) = v; }
+static int16_t r16(uint32_t a) { return *(int16_t *)(emu_ram + (a & 0x1FFFFF)); }
+static int32_t r32(uint32_t a) { return *(int32_t *)(emu_ram + (a & 0x1FFFFF)); }
+static void w16(uint32_t a, int v) { *(int16_t *)(emu_ram + (a & 0x1FFFFF)) = (int16_t)v; }
+static void w32(uint32_t a, uint32_t v) { *(uint32_t *)(emu_ram + (a & 0x1FFFFF)) = v; }
 
 /* variables de partida (puente): [14] arma equipada, [17+i] munición, [27+i] máximo */
 static void set_inventory(void) {
@@ -104,7 +104,7 @@ static uint16_t pad_now;
 static void on_frame(Cpu *c, uint32_t f) {
     (void)c;
     alarm(60);
-    bridge_read(psx_ram, &bs);
+    bridge_read(emu_ram, &bs);
     int ok = (bs.valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs.has_player && bs.in_control;
     if (ok) ok_count++; else ok_count = 0;
     if (t_ready < 0 && ok_count >= 30) t_ready = (int)f;
@@ -120,7 +120,7 @@ static void on_frame(Cpu *c, uint32_t f) {
         case E_POKE32: if (t == e->t0) w32(e->addr, e->val); break;
         case E_INV: if (t == e->t0) set_inventory(); break;
         case E_TRACE: if (t >= e->t0 && t < e->t1) want_trace = 1; break;
-        case E_DUMP: if (t == e->t0) { FILE *o = fopen(e->path, "wb"); if (o) { fwrite(psx_ram, 1, PSX_RAM_SIZE, o); fclose(o); } } break;
+        case E_DUMP: if (t == e->t0) { FILE *o = fopen(e->path, "wb"); if (o) { fwrite(emu_ram, 1, EMU_RAM_SIZE, o); fclose(o); } } break;
         case E_PPM: if (t == e->t0) gpu_dump_ppm(e->path, 0); break;
         case E_PROBE:
             if (t == e->t0)
@@ -150,15 +150,15 @@ int main(int argc, char **argv) {
     if (!exe || !sigs) { fprintf(stderr, "uso: %s <exe> <frames> --sigs FIRMAS [--script G]\n", argv[0]); return 1; }
     if (script) load_script(script);
     FILE *f = fopen(exe, "rb"); if (!f) { perror(exe); return 1; }
-    static uint8_t buf[PSX_RAM_SIZE + 0x800];
+    static uint8_t buf[EMU_RAM_SIZE + 0x800];
     size_t n = fread(buf, 1, sizeof buf, f); fclose(f);
-    if (n < 0x800 || memcmp(buf, "PS-X EXE", 8)) { fprintf(stderr, "ejecutable no válido\n"); return 1; }
+    if (n < 0x800 || memcmp(buf, EXE_MAGIC, 8)) { fprintf(stderr, "ejecutable no válido\n"); return 1; }
     uint32_t pc = rd32(buf + 0x10), gp = rd32(buf + 0x14), t = rd32(buf + 0x18), sz = rd32(buf + 0x1C);
-    memcpy(&psx_ram[t & 0x1FFFFF], buf + 0x800, sz);
+    memcpy(&emu_ram[t & 0x1FFFFF], buf + 0x800, sz);
     rt_entry = pc;
     gptest_pre_bind();
     if (hle_bind_file(sigs, t, sz, pc) < 0) return 1;
-    if (gptest_init(psx_ram) < 0) return 1;
+    if (gptest_init(emu_ram) < 0) return 1;
     if (disc && !cd_open(disc)) return 1;
     Cpu c = {0};
     c.r[28] = gp; c.r[29] = c.r[30] = 0x801FFFF0u; c.r[31] = 0;

@@ -2,7 +2,7 @@
  *
  * Parámetros físicos:
  *  - cadencia 950 rpm (intervalo 63,2 ms); cerrojo ida y vuelta en 45 ms;
- *  - retroceso: muelle k=220, amortiguación ζ≈0,85 (c=25); por disparo 0,30 m/s hacia atrás y
+ *  - retroceso: resorte k=220, amortiguación ζ≈0,85 (c=25); por disparo 0,30 m/s hacia atrás y
  *    0,9 rad/s de cabeceo; a 15,8 disp/s eso da ~2 cm de retroceso y ~3,7 grados de subida
  *    sostenida a una mano, más hasta 0,55 rad/s extra de cabeceo según crece la ráfaga (30 disparos);
  *    con la mano de apoyo en el guardamanos se multiplica por 0,45. */

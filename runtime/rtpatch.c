@@ -5,7 +5,7 @@
 #include <string.h>
 #include "hlebind.h"
 
-uint8_t rt_patch_bits[PSX_RAM_SIZE / 32];
+uint8_t rt_patch_bits[EMU_RAM_SIZE / 32];
 
 typedef struct {
     uint32_t addr;          /* 0 = libre */
@@ -23,11 +23,11 @@ static CodePatch CP[CODE_MAX];
 static uint32_t norm(uint32_t a) { return (a & 0x1FFFFFFFu) | 0x80000000u; }
 static int addr_ok(uint32_t a, unsigned nwords) {
     uint32_t o = a & 0x1FFFFFFFu;
-    return !(a & 3) && o >= 0x10000u && (uint64_t)o + 4ull * nwords <= PSX_RAM_SIZE;
+    return !(a & 3) && o >= 0x10000u && (uint64_t)o + 4ull * nwords <= EMU_RAM_SIZE;
 }
 static uint32_t rd(uint32_t a) {
     uint32_t v;
-    memcpy(&v, psx_ram + (a & 0x1FFFFFFFu), 4);
+    memcpy(&v, emu_ram + (a & 0x1FFFFFFFu), 4);
     return v;
 }
 
@@ -42,7 +42,7 @@ uint64_t rt_code_hash(uint32_t addr, unsigned nwords) {
 }
 
 static void bit_set(uint32_t a, int on) {
-    uint32_t w = (a & (PSX_RAM_SIZE - 1)) >> 2;
+    uint32_t w = (a & (EMU_RAM_SIZE - 1)) >> 2;
     if (on) rt_patch_bits[w >> 3] |= (uint8_t)(1u << (w & 7));
     else rt_patch_bits[w >> 3] &= (uint8_t)~(1u << (w & 7));
 }
@@ -132,7 +132,7 @@ int rt_patch_code(uint32_t addr, unsigned n, const uint32_t *expect, const uint3
     if (!buf) return RT_PATCH_FULL;
     memcpy(buf, expect, 4 * n); memcpy(buf + n, neu, 4 * n);
     CP[k].addr = norm(addr); CP[k].n = n; CP[k].orig = buf; CP[k].neu = buf + n;
-    memcpy(psx_ram + (addr & 0x1FFFFFFFu), neu, 4 * n);
+    memcpy(emu_ram + (addr & 0x1FFFFFFFu), neu, 4 * n);
     rt_code_invalidate(addr, 4 * n);
     if (id) *id = k;
     return RT_PATCH_OK;
@@ -143,7 +143,7 @@ int rt_unpatch_code(int id) {
     int same = 1;
     for (unsigned i = 0; i < p->n; i++) if (rd(p->addr + 4 * i) != p->neu[i]) { same = 0; break; }
     if (same) {
-        memcpy(psx_ram + (p->addr & 0x1FFFFFFFu), p->orig, 4 * p->n);
+        memcpy(emu_ram + (p->addr & 0x1FFFFFFFu), p->orig, 4 * p->n);
         rt_code_invalidate(p->addr, 4 * p->n);
     }
     free(p->orig);

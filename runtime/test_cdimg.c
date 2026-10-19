@@ -59,7 +59,7 @@ int main(void) {
     {   /* SYSTEM.CNF legible para la identificación por contenido */
         char p[1100]; snprintf(p, sizeof p, "%s/SYSTEM.CNF", d);
         FILE *sf = fopen(p, "wb");
-        fputs("BOOT = cdrom:\\SLES_000.42;1\r\nTCB = 4\r\nEVENT = 16\r\nSTACK = 801FFFF0\r\n", sf);
+        fputs("BOOT = cdrom:\\BOOT_000.42;1\r\nTCB = 4\r\nEVENT = 16\r\nSTACK = 801FFFF0\r\n", sf);
         fclose(sf);
     }
     wfile(d, "BOOT.EXE", 5000, 2);
@@ -173,17 +173,17 @@ int main(void) {
      * o no, '\' en el nombre; escaneo de carpeta; errores de E/S (fichero truncado tras abrir) sin cuelgue ni caché envenenada. */
     {
         char dir[1200], bin[1400], cue[1400], cmd[3000];
-        snprintf(dir, sizeof dir, "%s/Carpeta Juego/[SLES-00042] (Region)", root);
+        snprintf(dir, sizeof dir, "%s/Carpeta Juego/[BOOT-00042] (Region)", root);
         snprintf(cmd, sizeof cmd, "mkdir -p '%s'", dir);
         if (system(cmd)) {}
-        snprintf(bin, sizeof bin, "%s/SLES-00042 (Region) (Disc 1).bin", dir);
-        snprintf(cue, sizeof cue, "%s/SLES-00042 (Region) (Disc 1).cue", dir);
+        snprintf(bin, sizeof bin, "%s/BOOT-00042 (Region) (Disc 1).bin", dir);
+        snprintf(cue, sizeof cue, "%s/BOOT-00042 (Region) (Disc 1).cue", dir);
         snprintf(cmd, sizeof cmd, "cp '%s' '%s'", img, bin);
         CHECK(system(cmd) == 0);
         static const char *cues[] = {
-            "FILE \"SLES-00042 (Region) (Disc 1).bin\" BINARY\r\n  TRACK 01 MODE2/2352\r\n    INDEX 01 00:00:00\r\n",
-            "\xEF\xBB\xBF" "FILE SLES-00042 (Region) (Disc 1).bin BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n",
-            "file \"x\\sles-00042 (region) (disc 1).BIN\" binary\n  track 01 mode2/2352\n    index 01 00:00:00\n",
+            "FILE \"BOOT-00042 (Region) (Disc 1).bin\" BINARY\r\n  TRACK 01 MODE2/2352\r\n    INDEX 01 00:00:00\r\n",
+            "\xEF\xBB\xBF" "FILE BOOT-00042 (Region) (Disc 1).bin BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n",
+            "file \"x\\boot-00042 (region) (disc 1).BIN\" binary\n  track 01 mode2/2352\n    index 01 00:00:00\n",
         };
         uint8_t ref[2340], got[2340];
         for (unsigned v = 0; v < sizeof cues / sizeof *cues; v++) {
@@ -207,7 +207,7 @@ int main(void) {
         }
         DiscEntry ents[4];
         snprintf(cmd, sizeof cmd, "%s/Carpeta Juego", root);
-        CHECK(disc_scan_dir(cmd, ents, 4) == 1 && !ents[0].is_dir && strstr(ents[0].path, "[SLES-00042] (Region)/") != NULL);
+        CHECK(disc_scan_dir(cmd, ents, 4) == 1 && !ents[0].is_dir && strstr(ents[0].path, "[BOOT-00042] (Region)/") != NULL);
         /* montaje por cd_open con la ruta tal cual (disco 2 tras la carpeta) */
         CHECK(cd_open(cue) == 2);
         cd_select_disc(1);

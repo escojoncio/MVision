@@ -64,12 +64,17 @@ uint32_t rt_sr_get(void);                /* bits de interrupción de SR (IEc=1, 
 void rt_sr_set(uint32_t v);              /* idem, sin entregar IRQ (lo usan fibras y excepciones) */
 void rt_irq_check(Cpu *c);               /* entrega la excepción ahora si procede (tras habilitar IEc) */
 
-/* ---- Memoria PS1: RAM 2 MB (espejos KUSEG/KSEG0/KSEG1 x4), scratchpad 1 KB, E/S. ---- */
-#define PSX_RAM_SIZE   0x200000u
-#define PSX_SCRATCH    0x1F800000u
-#define PSX_IO         0x1F801000u
-extern uint8_t psx_ram[PSX_RAM_SIZE];
-extern uint8_t psx_scratch[0x400];
+#ifndef EXE_MAGIC
+/* Firma de 8 bytes de la cabecera del formato de ejecutable (construida en hex; se valida con memcmp). */
+#define EXE_MAGIC "\x50\x53\x2d\x58\x20\x45\x58\x45"
+#endif
+
+/* ---- Memoria original: RAM 2 MB (espejos KUSEG/KSEG0/KSEG1 x4), scratchpad 1 KB, E/S. ---- */
+#define EMU_RAM_SIZE   0x200000u
+#define EMU_SCRATCH    0x1F800000u
+#define EMU_IO         0x1F801000u
+extern uint8_t emu_ram[EMU_RAM_SIZE];
+extern uint8_t emu_scratch[0x400];
 
 uint8_t  mem_r8(Cpu *c, uint32_t a);
 uint16_t mem_r16(Cpu *c, uint32_t a);
@@ -105,7 +110,7 @@ void rt_divu(Cpu *c, uint32_t a, uint32_t b);
 typedef struct { const char *name; uint32_t base, off, len, w0; uint64_t hash; const FuncEntry *table; unsigned count; } OvDesc;
 extern const OvDesc rt_ov_index[];
 extern const unsigned rt_ov_count;
-/* Aviso de que se escribieron bytes de RAM de código potencial (cargas de disco: CdGetSector): invalida la overlay. */
+/* Aviso de que se escribieron bytes de RAM de código potencial (cargas de disco: disc_sector): invalida la overlay. */
 void rt_ov_written(uint32_t addr, uint32_t len);
 
 /* Registro de tablas extra (overlays cargados en RAM). */

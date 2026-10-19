@@ -7,10 +7,10 @@
  * Cámara del juego
  *  - Una tarea del motor (la de cámara, función en 0x800311e8) corre cada frame: elige posición/objetivo según el
  *    modo (cenital seguida, cámaras fijas de sala, primera persona) y siempre termina llamando al constructor de
- *    matriz de cámara (0x80017564, args: a0 = canal 3D principal 0x800B2B7C, a1 = *SVECTOR ojo, a2 = *SVECTOR objetivo,
+ *    matriz de cámara (0x80017564, args: a0 = canal 3D principal 0x800B2B7C, a1 = *VEC16 ojo, a2 = *VEC16 objetivo,
  *    a3 = distancia de pantalla/zoom (s16)). El constructor fija la distancia de pantalla del canal (+0x50, es la H de la GTE para
  *    todas las etapas), la matriz vista->mundo "eye" (+0x30: s16 m[3][3] 1.12 con columnas X derecha, Y abajo, Z
- *    delante, t = ojo) y su inversa (+0x10, BCH_EYE_INV), que es la que usan las etapas de pantalla. La orientación sale
+ *    delante, t = ojo) y su inversa (+0x10, BCH_CAM_INV), que es la que usan las etapas de pantalla. La orientación sale
  *    de (objetivo - ojo) y de un vector "arriba" fijo (0x8009E524 = (0,-4096,0)): no hay alabeo posible.
  *    Entrada previa (zoom, posición, objetivo) viva en 0x800B89E8 (ojo), +8 objetivo, +0x10 rotación, +0x18 distancia,
  *    +0x1C zoom: NO se escribe (el motor la reconstruye cada frame con interpolaciones que dependen de su valor
@@ -288,7 +288,7 @@ void vrcam_commit(const uint8_t *ram, const VrCamPlan *p) {
     memset(r, 0, sizeof *r);
     r->serial = ++S.serial;
     r->active = p && S.latched;
-    uint32_t eye = VC_CHANNEL_MAIN + BCH_EYE;
+    uint32_t eye = VC_CHANNEL_MAIN + BCH_CAM;
     for (int i = 0; i < 3; i++) {
         r->eye[i] = rd_i32(ram, eye + 0x14 + 4 * i);
         for (int j = 0; j < 3; j++) r->M[3 * i + j] = (float)rd_s16(ram, eye + (uint32_t)(3 * i + j) * 2) / 4096.0f;

@@ -2,7 +2,7 @@
  * descartes, partición por épocas de VRAM.
  *
  * ================================ Escala (metros por unidad del juego) ================================
- * Hipótesis de partida: 1 unidad del motor = 1 mm (defecto 0,001). Evidencia de datos (partida real, zona s00a):
+ * Hipótesis de partida: 1 unidad del motor = 1 mm (defecto 0,001). Evidencia de datos (partida real, zona inicial):
  *  - el jugador de pie tiene player_pos.y ~ 1100 y los enemigos de pie ~ 1080; el "centro" del cuerpo de un adulto
  *    está a ~1,0-1,1 m del suelo => 1 unidad ~ 1 mm. Agachado, player_pos.y ~ 500 (0,5 m).
  *  - los objetos del suelo (items) están en y = 500 y los blancos de suelo en y = 0; la cámara cenital del juego está a
@@ -290,7 +290,7 @@ static uint8_t g_frame_out[VR_FRAME_W * VR_FRAME_H];
 static float g_scan_prev_y, g_scan_y0;
 static int g_scan_cover_seq;   /* recubrimientos vistos (todos, no solo los conservados) antes de la primera línea */
 
-/* Suma a g_frame_acc la resta que produce un triángulo (coordenadas de la imagen mostrada, px PS1). val[k] = resta/255 en cada vértice. */
+/* Suma a g_frame_acc la resta que produce un triángulo (coordenadas de la imagen mostrada, px original). val[k] = resta/255 en cada vértice. */
 static void frame_tri(const VrFilter *f, const float px[3], const float py[3], const float val[3]) {
     float aw = (float)f->area[2], ah = (float)f->area[3];
     if (!(aw > 0 && ah > 0)) return;
