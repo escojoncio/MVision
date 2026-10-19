@@ -148,12 +148,8 @@ final class XRRenderLoop {
         drawable = frame.queryDrawable()
         guard let drawable = drawable, drawable.views.count >= viewCount else { return }
         mv_host_note_render(1)
-        // Plano cercano de 5 cm: el arma y el radar de muñeca se ven a 20-50 cm (Z invertida).
-        // No se asume el orden de los componentes: se conserva el que trae el sistema y solo se acerca el plano cercano.
-        let dr = drawable.depthRange
-        if min(dr.x, dr.y) > 0.05 {
-            drawable.depthRange = dr.x <= dr.y ? SIMD2<Float>(0.05, dr.y) : SIMD2<Float>(dr.x, 0.05)
-        }
+        // NO se toca drawable.depthRange: cp_drawable_set_depth_range aborta (__BUG_IN_CLIENT__) en visionOS 27 al llamarlo
+        // sobre el drawable ya consultado. La proyección (projection(_:_:)) lee el rango del sistema, así que es coherente.
 
         // Pose en el instante de presentación previsto.
         let d = LayerRenderer.Clock.Instant.epoch.duration(to: drawable.frameTiming.presentationTime)

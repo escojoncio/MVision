@@ -526,3 +526,11 @@ Correcciones (sin commit):
 - `runtime/gpu.h`: comentario sin nombre de función del SDK.
 Verificación: todos los `make test`, `make -C vr/host check`, `vrhost_run --vr --inv --auto` (14000 f: recarga 5/5 OK) y ASan/UBSan (gcc) limpios; staging simulado: sin basenames duplicados, sin `main`, enlace sin símbolos sin resolver.
 Pendiente: compilar Swift/Metal en CI (no verificable en Linux); R1 (agarre de la mano del arma) no abre la ventana de objetos mientras el arma VR manda.
+
+## 40. Cierre al arrancar de la IPA 9c82558 — 2026-10-19
+
+- Causa exacta (informe de cierre del visor): hilo `mv.xr.render` → `XRRenderLoop.renderFrame()` → `cp_drawable_set_depth_range` → `__BUG_IN_CLIENT__` → abort. La llamada `drawable.depthRange = ...` añadida en §39 es rechazada por CompositorServices (visionOS 27).
+- Arreglo: `app/Sources/XRRenderLoop.swift` ya NO escribe `drawable.depthRange`; `projection(_:_:)` sigue leyendo el rango del sistema (coherente con el drawable). Plano cercano = el del sistema (el arma/radar a 0,2-0,5 m deben comprobarse en el visor; si hace falta más cerca, fijar el rango SOLO en `LayerRenderer.Configuration` o antes de `queryDrawable`, nunca sobre el drawable consultado).
+- Revisión de la ruta de arranque (LogTee, Storage, ControllerHub, Info.plist, project.yml): sin force-unwrap ni `try!` en el arranque; Info.plist solo añade `MVBuildSHA`. Sin hallazgos que aborten.
+- CI (`.github/workflows/visionos.yml`): nuevo paso "Inspeccionar paquete" imprime `plutil -p Info.plist`, `ls -la` del .app, `otool -L` del binario y falla si falta `default.metallib` o `sigs_hle.json` o el plist no es válido.
+- Pendiente: compilar en CI y probar en el visor; la revisión de §39 introdujo este fallo: no tocar APIs de CompositorServices sin documentación.
