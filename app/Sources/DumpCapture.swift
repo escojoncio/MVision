@@ -1,58 +1,76 @@
 import Foundation
 
 /// Captura de volcados para desarrollo (vr/native/ns_dump.h): el usuario mantiene los DOS clics de stick durante ~1 s mientras juega y la app guarda en
-/// `<carpeta del usuario>/Dumps/d<NNNN>_<fecha>/` la RAM, la VRAM, los registros de la GTE, la última lista de la GPU, el fotograma real (PNG) y la pose
-/// de cámara/cabeza. Aviso háptico: una vibración corta al aceptar el gesto y otra larga cuando termina de escribirse (o dos cortas si falló).
-/// Se alimenta una vez por fotograma de render desde `VRInput.frame`. Sin carpeta de usuario escribe en Documents/Dumps.
+/// `<carpeta del usuario>/Dumps/d<NNNN>_<fecha>/` la RAM, la VRAM, los registros del coprocesador de geometría, la última lista de la GPU, el fotograma real (PNG)
+/// y la pose de cámara/cabeza. Aviso háptico: una vibración corta al aceptar el gesto y otra larga cuando termina de escribirse (dos cortas si falló o
+/// si pasan 5 s sin resultado).
+/// `frame(both:)` se llama una vez por fotograma de render desde `VRInput.frame` y NO toca disco ni `FolderAccess`: la carpeta raíz se refresca desde el
+/// hilo principal y la creación de directorios y el pedido al anfitrión van a una cola de fondo. Mientras los dos clics están pulsados `VRInput`
+/// los oculta al juego (el gesto no debe cambiar el seguro/selector del arma).
 final class DumpCapture: @unchecked Sendable {
     static let shared = DumpCapture()
 
     private let holdSeconds = 1.0
+    private let timeoutSeconds = 5.0
+    private let gapReset = 0.2             // sin llamadas durante más de esto: el contador de pulsación vuelve a cero
+    private let io = DispatchQueue(label: "dump.io", qos: .utility)
+    private let lock = NSLock()            // protege todo lo de abajo salvo `heldSince`, `armed`, `lastCall` (sólo hilo de render)
+
     private var heldSince: Double?
-    private var armed = true          // se rearma al soltar
-    private var waiting = false       // hay un volcado pedido sin resultado
+    private var lastCall: Double?
+    private var armed = true               // se rearma al soltar
+    private var latched = false            // los dos clics se ocultan hasta soltar ambos
     private var buzz: (until: Double, amp: Float)?
+
+    // Estado compartido con la cola de fondo.
+    private var rootURL: URL?
+    private var rootRefreshAt = 0.0
+    private var busy = false               // hay un pedido en marcha (preparando o esperando resultado)
+    private var requestedAt = 0.0
+    private var pendingBuzz: (amp: Float, dur: Double)?
     private var counter = 0
+    private var counterReady = false
 
-    private init() {
-        counter = Self.nextIndex()
-    }
+    private init() {}
 
-    private static var root: URL {
-        let base = FolderAccess.shared.root ?? Storage.documents
-        return base.appendingPathComponent("Dumps", isDirectory: true)
-    }
-
-    private static func nextIndex() -> Int {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
-        let used = names.compactMap { n -> Int? in
-            guard n.hasPrefix("d") else { return nil }
-            return Int(n.dropFirst().prefix(4))
-        }
-        return (used.max() ?? 0) + 1
-    }
+    /// Los dos clics están (o estaban hasta soltar ambos) pulsados: `VRInput` debe ocultarlos al juego.
+    var suppressesStickClicks: Bool { latched }
 
     /// `both` = los dos clics de stick pulsados (o L3+R3 en mando normal). Devuelve la amplitud háptica a aplicar ahora (0 = ninguna).
-    func frame(both: Bool) -> Float {
+    func frame(both: Bool, any: Bool = false) -> Float {
         let now = CFAbsoluteTimeGetCurrent()
+        if let l = lastCall, now - l > gapReset { heldSince = nil }   // M9: huecos largos entre llamadas no cuentan como pulsación continua
+        lastCall = now
+        refreshRoot(now)
         if both {
+            latched = true
             if heldSince == nil { heldSince = now }
-            if armed && !waiting, let t = heldSince, now - t >= holdSeconds { request(now) }
+            if armed, let t = heldSince, now - t >= holdSeconds { startRequest(now) }
         } else {
             heldSince = nil
-            armed = true
+            if !any { latched = false; armed = true }   // `any` = alguno de los dos sigue pulsado
         }
-        if waiting {
+        lock.lock()
+        if busy && requestedAt > 0 && now - requestedAt > timeoutSeconds {
+            busy = false
+            requestedAt = 0
+            lock.unlock()
+            mv_vrhost_cancel_dump()
+            Storage.log("volcado: sin resultado en 5 s")
+            buzz = (now + 0.25, 0.8)
+            lock.lock()
+        }
+        if busy && requestedAt > 0 {
             let r = mv_vrhost_dump_result()
             if r != 0 {
-                waiting = false
+                busy = false; requestedAt = 0
                 if r > 0 { buzz = (now + 0.7, 1.0) }
-                else {
-                    Storage.log("volcado: ERROR al escribir")
-                    buzz = (now + 0.25, 0.8)
-                }
+                else { buzz = (now + 0.25, 0.8) }
+                if r < 0 { Storage.log("volcado: ERROR al escribir") }
             }
         }
+        if let p = pendingBuzz { buzz = (now + p.dur, p.amp); pendingBuzz = nil }
+        lock.unlock()
         if let b = buzz {
             if now < b.until { return b.amp }
             buzz = nil
@@ -60,20 +78,50 @@ final class DumpCapture: @unchecked Sendable {
         return 0
     }
 
-    private func request(_ now: Double) {
-        armed = false
-        let fm = FileManager.default
-        let root = Self.root
-        do { try fm.createDirectory(at: root, withIntermediateDirectories: true) }
-        catch { Storage.log("volcado: no se puede crear Dumps (\(error.localizedDescription))"); buzz = (now + 0.25, 0.8); return }
-        let f = DateFormatter()
-        f.dateFormat = "yyyyMMdd-HHmmss"
-        let dir = root.appendingPathComponent(String(format: "d%04d_%@", counter, f.string(from: Date())), isDirectory: true)
-        counter += 1
-        if mv_vrhost_request_dump(dir.path) == 0 {
-            waiting = true
-            buzz = (now + 0.12, 0.6)
-            Storage.log("volcado pedido: \(dir.lastPathComponent)")
+    /// Refresca la carpeta raíz desde el hilo principal (como mucho cada 2 s); el hilo de render nunca lee `FolderAccess`.
+    private func refreshRoot(_ now: Double) {
+        if now - rootRefreshAt < 2.0 && rootURL != nil { return }
+        rootRefreshAt = now
+        DispatchQueue.main.async { [self] in
+            let base = FolderAccess.shared.root ?? Storage.documents
+            let dumps = base.appendingPathComponent("Dumps", isDirectory: true)
+            lock.lock(); rootURL = dumps; lock.unlock()
         }
+    }
+
+    private func startRequest(_ now: Double) {
+        lock.lock()
+        let root = rootURL
+        if busy || root == nil { lock.unlock(); if root == nil { armed = false; buzz = (now + 0.25, 0.8) }; return }
+        busy = true
+        requestedAt = 0                       // aún preparando: el plazo de 5 s cuenta desde que el anfitrión acepta
+        lock.unlock()
+        armed = false
+        buzz = (now + 0.12, 0.6)
+        io.async { [self] in
+            let fm = FileManager.default
+            do { try fm.createDirectory(at: root!, withIntermediateDirectories: true) }
+            catch {
+                Storage.log("volcado: no se puede crear Dumps (\(error.localizedDescription))")
+                fail(); return
+            }
+            if !counterReady {
+                let names = (try? fm.contentsOfDirectory(atPath: root!.path)) ?? []
+                let used = names.compactMap { n -> Int? in n.hasPrefix("d") ? Int(n.dropFirst().prefix(4)) : nil }
+                lock.lock(); counter = (used.max() ?? 0) + 1; counterReady = true; lock.unlock()
+            }
+            let f = DateFormatter()
+            f.dateFormat = "yyyyMMdd-HHmmss"
+            lock.lock(); let idx = counter; counter += 1; lock.unlock()
+            let dir = root!.appendingPathComponent(String(format: "d%04d_%@", idx, f.string(from: Date())), isDirectory: true)
+            if mv_vrhost_request_dump(dir.path) == 0 {
+                lock.lock(); requestedAt = CFAbsoluteTimeGetCurrent(); lock.unlock()
+                Storage.log("volcado pedido: \(dir.lastPathComponent)")
+            } else { fail() }
+        }
+    }
+
+    private func fail() {
+        lock.lock(); busy = false; requestedAt = 0; pendingBuzz = (0.8, 0.25); lock.unlock()
     }
 }
