@@ -25,6 +25,7 @@ struct XRViewConfig {
     var distance: Float = 2.5       // distancia de la pantalla (m)
     var curve: Float = 0.35         // 0 plana .. 1 cilindro con el usuario en el eje
     var sharp = 1                   // 0 suave, 1 nítida (bilineal de píxel fijo), 2 píxel (vecino más próximo)
+    var smooth2D = 1                // suavizado de la capa 2D (HUD, menús, créditos, pantalla de cine): 0 original, 1 nítido (píxel art), 2 suave
     var integerScale = false        // ajusta el ancho para que cada texel ocupe un número entero de píxeles del visor
     var cutscene: Cutscene = .stereo // cinemáticas del motor: pantalla 3D (defecto), pantalla de cine, diorama o dentro de la escena
     var dioramaScale: Float = 0.15  // metros por metro del motor (0,15: una sala de 8 m cabe en ~1,2 m)
@@ -70,6 +71,8 @@ struct XRViewConfig {
         let s = UserDefaults.standard.integer(forKey: "xr.view.sharp")
         c.sharp = UserDefaults.standard.object(forKey: "xr.view.sharp") == nil ? 1 : min(max(s, 0), 2)
         c.integerScale = b("xr.view.integer", false)
+        let s2 = UserDefaults.standard.integer(forKey: "xr.view.smooth2d")
+        c.smooth2D = UserDefaults.standard.object(forKey: "xr.view.smooth2d") == nil ? 1 : min(max(s2, 0), 2)
         c.cutscene = Cutscene(rawValue: UserDefaults.standard.string(forKey: "xr.view.cutscene2") ?? "") ?? .stereo
         c.dioramaScale = f("xr.view.dioramaScale", 0.15, 0.03, 0.5)
         c.hudPanels = b("xr.view.hud", true)
@@ -91,6 +94,7 @@ struct XRViewConfig {
         d.set(Double(curve), forKey: "xr.view.curve")
         d.set(sharp, forKey: "xr.view.sharp")
         d.set(integerScale, forKey: "xr.view.integer")
+        d.set(smooth2D, forKey: "xr.view.smooth2d")
         d.set(cutscene.rawValue, forKey: "xr.view.cutscene2")
         d.set(Double(dioramaScale), forKey: "xr.view.dioramaScale")
         d.set(hudPanels, forKey: "xr.view.hud")
@@ -117,6 +121,7 @@ final class XRCinema {
     private(set) var haveFrame = false
 
     init?(device: MTLDevice) {
+        self.device = device
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: Int(MV_HOST_MAX_W), height: Int(MV_HOST_MAX_H), mipmapped: false)
         td.usage = [.shaderRead, .pixelFormatView]
         td.storageMode = .shared
@@ -147,7 +152,41 @@ final class XRCinema {
         haveFrame = true
     }
 
-    func texture(srgb: Bool) -> MTLTexture? { haveFrame ? (srgb ? ringSRGB[idx] : ring[idx]) : nil }
+    private var hqSeq: UInt32 = 0
+    private var hqRing: [MTLTexture] = [], hqRingSRGB: [MTLTexture] = []
+    private var hqIdx = 0, hqW = 0, hqH = 0
+    private(set) var hqActive = false
+    private var device: MTLDevice?
+
+    /// Fotograma completo de la capa 2D fiel (vr_layer2d, a alta resolución): sustituye al fotograma de la VRAM a 1x mientras llegue. nil = vuelve al fotograma normal.
+    func setHighRes(_ f: (bytes: [UInt8], w: Int, h: Int, seq: UInt32)?) {
+        guard let f = f, f.w > 0, f.h > 0, f.bytes.count >= f.w * f.h * 4, let dev = device else { hqActive = false; return }
+        if f.seq == hqSeq && hqActive && hqW == f.w && hqH == f.h { return }
+        if hqW != f.w || hqH != f.h || hqRing.isEmpty {
+            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: f.w, height: f.h, mipmapped: false)
+            td.usage = [.shaderRead, .pixelFormatView]
+            td.storageMode = .shared
+            var a: [MTLTexture] = [], b: [MTLTexture] = []
+            for i in 0..<3 {
+                guard let t = dev.makeTexture(descriptor: td), let v = t.makeTextureView(pixelFormat: .rgba8Unorm_srgb) else { hqActive = false; return }
+                t.label = "mv.cine.hq.\(i)"; a.append(t); b.append(v)
+            }
+            hqRing = a; hqRingSRGB = b; hqW = f.w; hqH = f.h
+        }
+        hqIdx = (hqIdx + 1) % hqRing.count
+        f.bytes.withUnsafeBytes { p in
+            if let base = p.baseAddress { hqRing[hqIdx].replace(region: MTLRegionMake2D(0, 0, f.w, f.h), mipmapLevel: 0, withBytes: base, bytesPerRow: f.w * 4) }
+        }
+        hqSeq = f.seq; hqActive = true
+    }
+
+    var width: Int { hqActive ? hqW : w }
+    var height: Int { hqActive ? hqH : h }
+
+    func texture(srgb: Bool) -> MTLTexture? {
+        if hqActive, !hqRing.isEmpty { return srgb ? hqRingSRGB[hqIdx] : hqRing[hqIdx] }
+        return haveFrame ? (srgb ? ringSRGB[idx] : ring[idx]) : nil
+    }
 }
 
 /// Entrada del menú (flancos ya detectados).
@@ -156,7 +195,7 @@ struct XRNav: Equatable {
 }
 
 enum XRMenuItem: Int, CaseIterable {
-    case resume, recenter, calibrateHands, width, distance, curve, sharp, integerScale, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, renderMode, turnMode, vignette, hideHands, debugAxes, diagnostics, exit
+    case resume, recenter, calibrateHands, width, distance, curve, sharp, integerScale, smooth2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, renderMode, turnMode, vignette, hideHands, debugAxes, diagnostics, exit
 }
 
 /// Submenú «Diagnóstico» (interruptores en vivo de XRDiag).
@@ -181,6 +220,8 @@ final class XRPresenter {
 
     private(set) var cfg = XRViewConfig.load()
     private let cinema: XRCinema?
+    /// Fotograma completo de la capa 2D fiel a alta resolución (lo fija el bucle de render desde RGRenderer.hqFull antes de componer); nil = fotograma normal.
+    var hqFull: (bytes: [UInt8], w: Int, h: Int, seq: UInt32)?
     private(set) var shown: Display = .cinema
     private(set) var veil: Float = 1
     /// Fundido a negro por la cabeza empujando contra el escenario (0..1; lo fija el bucle de render con mv_vrhost_head_limit; ya viene suavizado).
@@ -219,6 +260,9 @@ final class XRPresenter {
 
     init(device: MTLDevice) {
         cinema = XRCinema(device: device)
+#if !MV_BENCH
+        mv_vrhost_set_hud2d_smooth(Int32(XRViewConfig.load().smooth2D))
+#endif
         if cinema == nil { Storage.log("xr: no se pudo crear la textura de la pantalla de cine") }
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: Self.menuW, height: Self.menuH, mipmapped: false)
         td.usage = [.shaderRead, .pixelFormatView]
@@ -370,6 +414,11 @@ final class XRPresenter {
         case .curve: cfg.curve = cycle(cfg.curve, XRViewConfig.curves, dir)
         case .sharp: cfg.sharp = (cfg.sharp + dir + 3) % 3
         case .integerScale: cfg.integerScale.toggle()
+        case .smooth2D:
+            cfg.smooth2D = (cfg.smooth2D + dir + 3) % 3
+#if !MV_BENCH
+            mv_vrhost_set_hud2d_smooth(Int32(cfg.smooth2D))
+#endif
         case .cutscene:
             let all = XRViewConfig.Cutscene.allCases
             let i = all.firstIndex(of: cfg.cutscene) ?? 0
@@ -435,6 +484,7 @@ final class XRPresenter {
             case .curve: return ("Curvatura de la pantalla", curveName[ci])
             case .sharp: return ("Nitidez de la imagen", ["Suave", "Nítida", "Píxel"][min(max(cfg.sharp, 0), 2)])
             case .integerScale: return ("Escalado entero", yn(cfg.integerScale))
+            case .smooth2D: return ("Suavizado 2D", ["Original", "Nítido", "Suave"][min(max(cfg.smooth2D, 0), 2)])
             case .cutscene:
                 let n: [XRViewConfig.Cutscene: String] = [.stereo: "Pantalla 3D", .cinema: "Pantalla de cine", .diorama: "Diorama", .scene: "Dentro de la escena"]
                 return ("Cinemáticas del motor", n[cfg.cutscene] ?? "")
@@ -599,7 +649,7 @@ final class XRPresenter {
             case .cinema: break
             }
         }
-        if target != .world || shown != .world { cinema?.update() }
+        if target != .world || shown != .world { cinema?.update(); cinema?.setHighRes(hqFull) }
         // Dentro de la escena: la cámara del plano se fija al empezar el plano; en cada corte nuevo anclaje y fundido rápido (0,15 s).
         if shown != .scene { shotView = gameView; shotSeen = shot }
         if shot != shotSeen {
@@ -653,10 +703,10 @@ final class XRPresenter {
             let leg = XRCinemaLayout.legible(reason: Int32(gs.view_reason))
             var W = XRCinemaLayout.width(base: cfg.width, legible: leg)
             let D = cfg.distance
-            if XRCinemaLayout.integerScale(base: cfg.integerScale, legible: leg), p00 > 0, eyePx > 0, c.w > 0 {
+            if XRCinemaLayout.integerScale(base: cfg.integerScale, legible: leg), p00 > 0, eyePx > 0, c.width > 0 {
                 let ppm = p00 * eyePx / (2 * D)                       // píxeles del visor por metro, en el centro de la pantalla
-                let texPx = W / Float(c.w) * ppm
-                if texPx.isFinite, texPx > 1 { W = max(1, texPx.rounded()) * Float(c.w) / ppm }
+                let texPx = W / Float(c.width) * ppm
+                if texPx.isFinite, texPx > 1 { W = max(1, texPx.rounded()) * Float(c.width) / ppm }
             }
             var it = XRDrawItem(kind: .screen, texture: tex)
             it.model = anchor * XRMath.translation(SIMD3<Float>(0, anchorY, -D))
@@ -665,7 +715,7 @@ final class XRPresenter {
             let cv = XRCinemaLayout.curve(base: cfg.curve, legible: leg)
             it.curve = cv
             it.cols = cv > 0.01 ? 48 : 1
-            it.imgSize = SIMD2<Float>(Float(c.w), Float(c.h))
+            it.imgSize = SIMD2<Float>(Float(c.width), Float(c.height))
             it.sharp = Float(XRCinemaLayout.sharp(base: cfg.sharp, legible: leg))
             r.items.append(it)
         }

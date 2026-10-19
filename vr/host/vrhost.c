@@ -27,6 +27,7 @@
 #include "vr_radar.h"
 #include "vr_radar_vrp.h"
 #include "vr_scene.h"
+#include "vr_layer2d.h"
 #include "vr_smooth.h"
 #include "vr_view.h"
 #include "vrai.h"
@@ -112,6 +113,7 @@ typedef struct {
     VrState *rst;    size_t rst_cap;
     VrRadarScene rs;
     VrSmSample smp;                      /* muestra de la fluidez de la escena (vr_smooth.h): se alimenta al entregarla */
+    uint8_t *hud;    size_t hud_cap;     /* capa 2D fiel (vr_layer2d.h): RGBA8 de la zona mostrada ampliada; sc.hud2d apunta aquí */
 } Slot;
 
 enum { S_FREE = 0, S_BUILD, S_QUEUED, S_HELD };
@@ -133,6 +135,18 @@ static float hc_last_eye[3]; static int hc_have_eye;
 
 /* ------------------------------------------------------------------------------------------------ estado del hilo de emulación */
 static BridgeState bs;                   /* último puente leído */
+/* Capa 2D fiel y en alta resolución (vr_layer2d.h). Se calcula en el hilo de emulación, una vez por lista, con una VRAM espejo propia (solo eventos). MV_HUD2D=0 la apaga
+ * (el renderer vuelve a dibujar los batches kind 2 con el shader). MV_HUD2D_SCALE=1..6 fija la escala (defecto 4). Presupuesto: si una lista tarda más de L2_SLOW_MS la escala
+ * baja un escalón (mínimo 1 = rasterizado exacto de 5 bits); tras L2_RECOVER listas rápidas seguidas sube otro. */
+#define L2_SLOW_MS 12.0
+#define L2_FAST_MS 3.0
+#define L2_RECOVER 240
+static VrLayer2D *l2d;
+static _Atomic int l2d_enabled = 1;
+static _Atomic int l2d_smooth = VL_SMOOTH_SHARP;
+static int l2d_target = 4, l2d_cur = 4, l2d_fast;
+static uint32_t l2d_seq;
+static double l2d_ms_last;
 static VrView view;                      /* vista vigente: mundo / cine (vr_view.h) */
 static VrCine cine;                      /* planos de la cinemática del motor en curso (vr_cine.h) */
 static int last_scene3d, last_video;     /* de la última lista ensamblada: geometría 3D sustancial con cámara válida / fotograma de vídeo */
@@ -629,9 +643,38 @@ static void build_one(const GpuDrawList *l, int si) {
     memcpy(bs.eye_pos, save_pos, sizeof save_pos);
     memcpy(bs.eye_axes, save_axes, sizeof save_axes);
 
+    /* Capa 2D fiel y en alta resolución (vr_layer2d.h). Con escena fallida solo se aplican los eventos de VRAM (la VRAM espejo debe verlos todos). En vista de cine (UI / vídeo) la capa es el
+     * fotograma ENTERO (todas las primitivas sobre la zona mostrada); en las demás, solo las primitivas que vr_scene mandó al panel. */
+    int l2_have = 0, l2_full = 0, l2_w = 0, l2_h = 0;
+    const uint8_t *l2_px = NULL;
+    {
+        if (!l2d) l2d = vl2d_new();
+        if (l2d) {
+            if (!atomic_load(&l2d_enabled)) { vl2d_reset(l2d); }
+            else {
+                l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO;
+                vl2d_set_options(l2d, l2d_cur, atomic_load(&l2d_smooth));
+                uint64_t t1 = mono_ns();
+                l2_have = vl2d_run(l2d, hl, rc == 0 ? &sc : NULL, l2_full);
+                l2d_ms_last = (double)(mono_ns() - t1) * 1e-6;
+                if (l2d_ms_last > L2_SLOW_MS && l2d_cur > 1) { l2d_cur--; l2d_fast = 0; }
+                else if (l2d_ms_last < L2_FAST_MS && l2d_cur < l2d_target) { if (++l2d_fast >= L2_RECOVER) { l2d_cur++; l2d_fast = 0; } }
+                else l2d_fast = 0;
+                if (l2_have) l2_px = vl2d_rgba(l2d, &l2_w, &l2_h);
+            }
+        }
+    }
     sm_sample(&slot[si].smp, &sc, r);   /* (r = registro de cámara de la lista; antes de fill_slot: sc.v/b son memoria interna de vr_scene) */
     int native_now = rc == 0 && native_for_scene(r, &sc, cine_cand);
     int ok = rc == 0 && fill_slot(&slot[si], hl, &sc) == 0 && fill_radar(&slot[si], &rscene, hl->nops) == 0;
+    if (ok) {   /* la capa 2D viaja con la escena: copia propia (la memoria de vl2d se reutiliza en la siguiente lista) */
+        Slot *S = &slot[si];
+        S->sc.hud2d = NULL; S->sc.hud2d_w = S->sc.hud2d_h = S->sc.hud2d_full = 0; S->sc.hud2d_seq = 0;
+        if (l2_have && l2_px && l2_w > 0 && l2_h > 0 && grow((void **)&S->hud, &S->hud_cap, (size_t)l2_w * l2_h * 4, 1)) {
+            memcpy(S->hud, l2_px, (size_t)l2_w * l2_h * 4);
+            S->sc.hud2d = S->hud; S->sc.hud2d_w = l2_w; S->sc.hud2d_h = l2_h; S->sc.hud2d_full = l2_full; S->sc.hud2d_seq = ++l2d_seq;
+        }
+    }
     if (ok && native_now) mark_3d(&slot[si]);   /* solo marca: la lista de la GPU queda entera (casco de colisión de la cabeza, modo gpu, caída del render nativo) */
     memset(&slot[si].hcmap, 0, sizeof slot[si].hcmap);
     if (ok && hc_on && r && r->active && sc.user_space && sc.world_valid) {
@@ -751,6 +794,10 @@ int mv_vrhost_head_limit(const float head[16], float dt, float corr[3], float *f
     if (fade) *fade = o.fade;
     return r;
 }
+/* Capa 2D fiel (vr_layer2d.h): suavizado de las texturas 2D (0 original, 1 nítido, 2 suave). Cualquier hilo. */
+void mv_vrhost_set_hud2d_smooth(int mode) { atomic_store(&l2d_smooth, mode < 0 ? 0 : mode > 2 ? 2 : mode); }
+int mv_vrhost_hud2d_smooth(void) { return atomic_load(&l2d_smooth); }
+void mv_vrhost_hud2d_stats(int *scale, double *ms) { if (scale) *scale = l2d_cur; if (ms) *ms = l2d_ms_last; }
 void mv_vrhost_set_headcol(int enable, float radius_m) {
     pthread_mutex_lock(&HCMX);
     VrHcCfg c = *vrhc_config();
@@ -1198,6 +1245,8 @@ void mv_vrhost_set_ai(int perception, int cameras, int activity) {
 }
 
 void mv_vrhost_install(void) {
+    { const char *e = getenv("MV_HUD2D"); if (e && e[0] == '0') atomic_store(&l2d_enabled, 0); }
+    { const char *e = getenv("MV_HUD2D_SCALE"); if (e) { int v = atoi(e); if (v >= 1 && v <= 6) l2d_target = l2d_cur = v; } }
     if (!atomic_load(&ns_br)) {
         ns_bridge_get();
         const char *e = getenv("MV_RENDER");

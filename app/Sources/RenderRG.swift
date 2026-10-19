@@ -172,6 +172,13 @@ final class RGRenderer {
     private var hudRect = simd_float4(0, 0, 320, 240)
     private var lastIndex: UInt32?
     private var hudDone = false
+    // Capa 2D fiel (vr/scene/vr_layer2d): la rasteriza la CPU con la aritmética de la GPU original y llega ya como RGBA8; sustituye al pase HUD del shader mientras exista.
+    /// Fotograma completo (pantalla de cine / vídeo ampliado) a alta resolución; nil si la última escena no lo trae. Lo consume XRPresenter.hqFull.
+    private(set) var hqFull: (bytes: [UInt8], w: Int, h: Int, seq: UInt32)?
+    private var hudLegacy: MTLTexture?, hudLegacySRGB: MTLTexture?
+    private var hudHQRing: [MTLTexture] = [], hudHQRingSRGB: [MTLTexture] = []
+    private var hudHQIdx = 0, hudHQW = 0, hudHQH = 0, hudHQSeq: UInt32 = 0
+    private var hudHQ = false
     private var statDraws = 0, statPasses = 0, statGroups = 0
 
     // por frame (anillo de 3 con semáforo)
@@ -217,6 +224,7 @@ final class RGRenderer {
         hudTexture = device.makeTexture(descriptor: hd)
         hudTexture?.label = "HUD"
         hudTextureSRGB = hudTexture?.makeTextureView(pixelFormat: .rgba8Unorm_srgb)
+        hudLegacy = hudTexture; hudLegacySRGB = hudTextureSRGB
         let pd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Unorm, width: hudW, height: hudH, mipmapped: false)
         pd.usage = [.renderTarget, .shaderRead]
         pd.storageMode = .private
@@ -543,6 +551,40 @@ final class RGRenderer {
         return true
     }
 
+    /// Recoge la capa 2D fiel de la escena: el panel (RGBA8 no premultiplicado, anillo de 3 texturas del tamaño de la capa) o el fotograma completo del cine.
+    private func takeLayer2D(_ sc: VrScene) {
+        guard let px = sc.hud2d, sc.hud2d_w > 0, sc.hud2d_h > 0 else {
+            if hudHQ { hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB }
+            hqFull = nil
+            return
+        }
+        let w = Int(sc.hud2d_w), h = Int(sc.hud2d_h)
+        if sc.hud2d_full != 0 {
+            hqFull = (Array(UnsafeBufferPointer(start: px, count: w * h * 4)), w, h, sc.hud2d_seq)
+            if hudHQ { hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB }
+            return
+        }
+        hqFull = nil
+        if hudHQRing.isEmpty || hudHQW != w || hudHQH != h {
+            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
+            td.usage = [.shaderRead, .pixelFormatView]
+            td.storageMode = .shared
+            var a: [MTLTexture] = [], b: [MTLTexture] = []
+            for i in 0..<3 {
+                guard let t = device.makeTexture(descriptor: td), let v = t.makeTextureView(pixelFormat: .rgba8Unorm_srgb) else { return }
+                t.label = "HUD 2D fiel \(i)"; a.append(t); b.append(v)
+            }
+            hudHQRing = a; hudHQRingSRGB = b; hudHQW = w; hudHQH = h; hudHQSeq = 0
+        }
+        if sc.hud2d_seq != hudHQSeq || !hudHQ {
+            hudHQIdx = (hudHQIdx + 1) % hudHQRing.count
+            hudHQRing[hudHQIdx].replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: px, bytesPerRow: w * 4)
+            hudHQSeq = sc.hud2d_seq
+        }
+        hudTexture = hudHQRing[hudHQIdx]; hudTextureSRGB = hudHQRingSRGB[hudHQIdx]
+        hudHQ = true
+    }
+
     private func storeScene(_ sc: VrScene, _ newSlot: inout Bool) {
         storeFilter(sc.filter)
         let nv = Int(sc.nv)
@@ -698,6 +740,7 @@ final class RGRenderer {
                 hudRect = hudInVRAMCoords ? simd_float4(Float(d.x), Float(d.y), w, h) : simd_float4(0, 0, w, h)
             }
             storeScene(sc, &newSlot)
+            takeLayer2D(sc)
             radar?.ingest(device: device)       // escena del radar asociada a esta escena (mv_host_radar)
             gotNew = true
         }
@@ -716,7 +759,7 @@ final class RGRenderer {
         } else {
             groups.append((0, batches.count, Int.max))
         }
-        let doHud = (gotNew || !hudDone) && drawWorld
+        let doHud = (gotNew || !hudDone) && drawWorld && !hudHQ
         // Filtro de pantalla: la escena se resuelve en texturas intermedias y un pase por ojo escribe el drawable (ver planPost).
         let plan = planPost(colorTargets: colorTargets, resolveTargets: resolveTargets, layered: layered)
         let sceneColor = plan?.sceneColor ?? colorTargets
