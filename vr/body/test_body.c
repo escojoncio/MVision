@@ -486,10 +486,10 @@ static void test_glue(void) {
 /* El marco de la mano del modelo sigue el marco de vr_pose.h: dedos (-Y local) = -Z de la mano, palma (derecha +X local /
  * izquierda -X local) = -Y de la mano, pulgar (+Z local) = -X (derecha) / +X (izquierda). Comprobado sobre las matrices escritas
  * en la RAM, con orientaciones de mano distintas, sin usar hand_map. */
-/* mode 0: pose = marco de vr_pose.h (sin cabeceo); 1: mando Sense con apuntado (agarre inclinado 35 grados, cabeceo automático); 2: Sense sin apuntado (cabeceo fijo -35);
- * 3: Sense calibrado con vrbody_calibrate_hands. En 1..3 el marco esperado de la mano es el del apuntado horizontal (guiñada de la pose) girado el alabeo. */
+/* mode 0: pose = marco de vr_pose.h (sin cabeceo); 1: mando de seguimiento con apuntado (agarre inclinado 35 grados, cabeceo automático); 2: sin apuntado (cabeceo fijo -35);
+ * 3: calibrado con vrbody_calibrate_hands; 4: como 1 con el apuntado ausente 3 fotogramas antes de medir (se mantiene el último cabeceo); 5: apuntado ausente desde el fotograma 20 con cabeceo fijo 0 (tras 10 fotogramas vuelve al fijo: dedos 35 grados arriba). En 1..3 el marco esperado de la mano es el del apuntado horizontal (guiñada de la pose) girado el alabeo. */
 static void hand_axes_run(float roll_deg, int mode) {
-    VrBodyConfig cfg; vrbody_config_default(&cfg); if (mode == 0) cfg.hand_pitch_deg = 0;
+    VrBodyConfig cfg; vrbody_config_default(&cfg); if (mode == 0 || mode == 5) cfg.hand_pitch_deg = 0;
     int tested = 0;
     for (int seed = 0; seed < 30; seed++) {
         build_body(200 + seed);
@@ -504,13 +504,13 @@ static void hand_axes_run(float roll_deg, int mode) {
                 float dw[3] = {want[0] - g_view.eye[0], want[1] - g_view.eye[1], want[2] - g_view.eye[2]};
                 float Tt[9] = {T[0], T[3], T[6], T[1], T[4], T[7], T[2], T[5], T[8]}, pu[3]; mv(pu, Tt, dw);
                 set_hand(s, pu[0] / 1000 + g_view.p_ref[0], pu[1] / 1000 + g_view.p_ref[1], pu[2] / 1000 + g_view.p_ref[2], yaw);
-                if (mode) {     /* agarre = guiñada * Rx(35 grados) (medido en el Sense); apuntado = guiñada */
+                if (mode) {     /* agarre = guiñada * Rx(35 grados) (medido en el mando de seguimiento); apuntado = guiñada */
                     float h2 = yaw * 0.5f, a2 = 35.0f * 3.14159265f / 180 * 0.5f;
                     float qy[4] = {0, sinf(h2), 0, cosf(h2)}, qx[4] = {sinf(a2), 0, 0, cosf(a2)}, qg[4];
                     qg[0] = qy[3] * qx[0] + qy[0] * qx[3] + qy[1] * qx[2] - qy[2] * qx[1]; qg[1] = qy[3] * qx[1] - qy[0] * qx[2] + qy[1] * qx[3] + qy[2] * qx[0];
                     qg[2] = qy[3] * qx[2] + qy[0] * qx[1] - qy[1] * qx[0] + qy[2] * qx[3]; qg[3] = qy[3] * qx[3] - qy[0] * qx[0] - qy[1] * qx[1] - qy[2] * qx[2];
                     memcpy(g_hands[s].rot, qg, sizeof qg);
-                    if (mode == 1 || mode == 3) { g_hands[s].aim_valid = 1; memcpy(g_hands[s].aim_rot, qy, sizeof qy); }
+                    { int av = mode == 1 || mode == 3 || (mode == 4 && !(f >= 36 && f <= 38)) || (mode == 5 && f < 20); g_hands[s].aim_valid = av; if (av) memcpy(g_hands[s].aim_rot, qy, sizeof qy); }
                     if (mode == 3 && f > 20 && 0) {}
                 }
                 /* la posición de la pose es el centro de la palma: la muñeca queda 55 mm atrás; el objetivo sigue alcanzable */
@@ -533,6 +533,7 @@ static void hand_axes_run(float roll_deg, int mode) {
                     for (int k = 0; k < 3; k++) { palm[k] = (s ? lx[k] : -lx[k]); thumb[k] = lz[k]; }
                     float fl[3] = {-ly[0], -ly[1], -ly[2]};
                     float pw[3] = {-up[0], -up[1], -up[2]}, tm[3] = {s ? -xm[0] : xm[0], s ? -xm[1] : xm[1], s ? -xm[2] : xm[2]};
+                    if (mode == 5) { CHECK(fabsf(fl[1] - 0.5736f) < 0.04f, "vuelta al cabeceo fijo: %g", fl[1]); tested++; continue; }
                     CHECK(dotv(fl, fing) > 0.995f, "dedos de la mano %d: %g", s, dotv(fl, fing));
                     CHECK(dotv(palm, pw) > 0.995f, "palma de la mano %d: %g", s, dotv(palm, pw));
                     CHECK(dotv(thumb, tm) > 0.995f, "pulgar de la mano %d: %g", s, dotv(thumb, tm));
@@ -559,7 +560,7 @@ static void test_hand_axes(void) {
     hand_axes_run(0.0f, 0);      /* sin giro: marco de vr_pose.h tal cual */
     hand_axes_run(90.0f, 0);
     hand_axes_run(45.0f, 0);     /* defecto */
-    for (int mode = 1; mode <= 3; mode++) { hand_axes_run(45.0f, mode); hand_axes_run(0.0f, mode); }
+    for (int mode = 1; mode <= 5; mode++) { hand_axes_run(45.0f, mode); hand_axes_run(0.0f, mode); }
 }
 
 /* Valor por defecto (45 grados): con el marco de agarre alineado con el mundo la mano del personaje queda girada 45 grados sobre el eje de los dedos
@@ -578,7 +579,7 @@ static void test_default_roll(void) {
 }
 
 
-/* API de cabeceo/calibración (pura): relación agarre/apuntado del Sense, calibración, persistencia y entradas inválidas */
+/* API de cabeceo/calibración (pura): relación agarre/apuntado del mando de seguimiento, calibración, persistencia y entradas inválidas */
 static void qmul_(float *o, const float *a, const float *b) {
     float x = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], y = a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
           z = a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], w = a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2];
@@ -594,7 +595,7 @@ static void test_hand_pitch_api(void) {
         float a[4], x35[4], g[4];
         qeul_(a, (float)(i * 37 % 360), (float)(i * 11 % 120 - 60), (float)(i * 7 % 40 - 20));
         qeul_(x35, 0, 35.0f, 0); qmul_(g, a, x35);
-        CHECK(vrbody_pitch_from_aim(g, a, &deg) && fabsf(deg + 35.0f) < 0.05f, "cabeceo del Sense: %g", deg);
+        CHECK(vrbody_pitch_from_aim(g, a, &deg) && fabsf(deg + 35.0f) < 0.05f, "cabeceo del mando: %g", deg);
         qeul_(x35, 0, -20.0f, 0); qmul_(g, a, x35);
         CHECK(vrbody_pitch_from_aim(g, a, &deg) && fabsf(deg - 20.0f) < 0.05f, "cabeceo de otro mando: %g", deg);
     }
@@ -627,6 +628,8 @@ static void test_hand_pitch_api(void) {
       float c[4]; qeul_(c, 0, -35.0f, 20.0f); vrbody_set_calibration(1, c);
       float bad[4] = {NAN, 0, 0, 1}, zero[4] = {0, 0, 0, 0}; vrbody_set_calibration(0, bad); vrbody_set_calibration(0, zero); vrbody_set_calibration(5, c);
       CHECK(!vrbody_get_calibration(0, q) && vrbody_get_calibration(1, q) && fabsf(q[0] - c[0]) < 1e-5f, "set/get");
+      float big[4] = {3, 0, 0, 1}, small[4] = {0.1f, 0, 0, 0.1f}, edge[4] = {0, 0, 0, 1.9f}; vrbody_set_calibration(0, big); CHECK(!vrbody_get_calibration(0, q), "norma > 2 rechazada");
+      vrbody_set_calibration(0, small); CHECK(!vrbody_get_calibration(0, q), "norma < 0,5 rechazada"); vrbody_set_calibration(0, edge); CHECK(vrbody_get_calibration(0, q) && fabsf(q[3] - 1.0f) < 1e-5f, "norma 1,9 aceptada y normalizada");
       vrbody_init(&cfg); CHECK(vrbody_get_calibration(1, q), "la calibración sobrevive a vrbody_init");
       CHECK(vrbody_calibrate_hands() == 0, "sin manos seguidas no se calibra nada");
       vrbody_clear_calibration(); CHECK(!vrbody_get_calibration(1, q), "borrada"); }
