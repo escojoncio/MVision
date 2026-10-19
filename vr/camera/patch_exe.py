@@ -14,7 +14,7 @@ inmediato. El resultado es un ejecutable con el mismo tamaño que se recompila c
 (`make gen EXE=...`); el original no se modifica.
 
 Uso:
-  patch_exe.py ORIGINAL SALIDA [--hfov 140] [--vfov 120] [--h 160] [--margin 1.0] [--no-divide] [--wide-points]
+  patch_exe.py ORIGINAL SALIDA [--hfov 140] [--vfov 120] [--h 160] [--margin 1.0] [--no-divide] [--no-cull] [--wide-points]
   patch_exe.py ORIGINAL --check            comprueba los puntos sin escribir
   patch_exe.py --table                     imprime la tabla de puntos
 
@@ -72,6 +72,29 @@ SITES += [(0x8001c440, ROLE_PX), (0x8001c444, ROLE_PX2), (0x8001c458, ROLE_PY), 
 # 0x8001a11c: `addiu v0,zero,0x800` -> `lui v0,0x7FFF`: umbral de área a partir del cual se subdivide (guardado en el
 # bloque de trabajo de la etapa "divide"); con 0x7FFF0000 no se subdivide nunca.
 WORD_PATCHES = {"no-divide": [(0x8001A11C, 0x24020800, 0x3C027FFF)]}
+
+# ---- Sin recorte del motor (--no-cull): la visibilidad para DIBUJAR siempre devuelve "visible". Cada punto es una sola instrucción
+# (rama condicional `beq v0,zero,destino`) que se anula (nop) o se vuelve incondicional (`beq zero,zero,destino`); nada de ello es
+# lógica del juego (la IA y los guiones usan la prueba de punto visible/campo +0x32, que se quedan como estaban salvo lo descrito en la bitácora).
+#   obj-map : la visibilidad de objetos (0x80018c8c). Objeto cuya máscara de mapa (+0x2C) no corta con el mapa actual -> oculto. Se anula.
+#   obj-box : la visibilidad de objetos. Objeto con caja envolvente (flag 0x20): proyecta 8 esquinas y compara con la caja de pantalla; fuera -> oculto (modo 0),
+#             parcial -> modo 1 (recorte por vértice). Se fuerza el modo 2 (dentro) sin proyectar nada.
+#   part-box: la visibilidad por pieza (0x800188a4). Lo mismo por pieza (flag 0x10): se fuerza visible.
+#   prim-map: el dibujo de primitivas (0x8001ba44), primitivas del motor (láseres, sombras, humo...) con máscara de mapa. Se anula.
+#   sort-map: la ordenación (0x8001da18), idem al ordenar. Se anula.
+#   outcode : etapa de polígono de la transformación (0x8001e1fc): descarta el polígono si todos sus vértices caen del mismo lado de la caja de
+#             pantalla (códigos 515(x)). Se salta siempre.
+NOCULL = [  # (nombre, dirección, palabra original, palabra nueva)
+    ("obj-map", 0x80018D00, 0x104000B0, 0x00000000),
+    ("obj-box", 0x80018D0C, 0x104000AD, 0x100000AD),
+    ("part-box", 0x800188F8, 0x104000B3, 0x100000B3),
+    ("prim-map", 0x8001BAE0, 0x104000D5, 0x00000000),
+    ("sort-map", 0x8001DB10, 0x10400026, 0x00000000),
+    ("outcode", 0x8001E29C, 0x1040000E, 0x1000000E),
+]
+for _n, _a, _o, _w in NOCULL:
+    WORD_PATCHES["nc-" + _n] = [(_a, _o, _w)]
+WORD_PATCHES["no-cull"] = [(a, o, w) for _n, a, o, w in NOCULL]
 
 LIMIT = 1020  # la GTE satura SX/SY en [-1024, 1023]
 

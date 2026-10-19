@@ -101,6 +101,7 @@ static void scr_load(const char *path) {
         else if (!strcmp(k, "poke")) { e.kind = 4; char hx[150] = ""; sscanf(l, "%*s %d %x %149s", &e.t0, &e.u[0], hx); snprintf(e.s, sizeof e.s, "%s", hx); }
         else if (!strcmp(k, "gcall")) { e.kind = 6; sscanf(l, "%*s %d %x %x %x %x %x %x %x", &e.t0, &e.u[0], &e.u[1], &e.u[2], &e.u[3], &e.u[4], &e.u[5], &e.u[6]); }
         else if (!strcmp(k, "peek")) { e.kind = 7; sscanf(l, "%*s %d %x %x", &e.t0, &e.u[0], &e.u[1]); }
+        else if (!strcmp(k, "cov")) { e.kind = 10; sscanf(l, "%*s %d %d", &e.t0, &e.t1); }   /* cobertura: vuelca los centroides mundo de los polígonos 3D de cada lista a <salida>/cov.bin */
         else if (!strcmp(k, "card")) { e.kind = 9; sscanf(l, "%*s %d", &e.t0); }
         else if (!strcmp(k, "cmp")) { e.kind = 8; sscanf(l, "%*s %d %x %x %x", &e.t0, &e.u[0], &e.u[1], &e.u[2]); }
         else if (!strcmp(k, "escena")) { e.kind = 10; e.a[1] = 110; e.a[2] = 100; e.a[3] = 3; sscanf(l, "%*s %d %d %f %f %f %f", &e.t0, &e.t1, &e.a[0], &e.a[1], &e.a[2], &e.a[3]); }
@@ -585,8 +586,7 @@ static void apply_epochs(const GpuDrawList *l, int kstrip, uint8_t *pre, int *pw
     }
     if (nev > (uint32_t)snap_max_ev) snap_max_ev = (int)nev;
 }
-/* ===================================== §49: medición de la ruta propia (pérdidas y huecos) =====================================
- * Una lista dibujada llega al visor por vr_scene (montada como hace vr/host: con el registro de cámara de la lista). Aquí se cuenta,
+/* ===================================== §49: medición de la ruta propia (pérdidas y huecos) ============================== * Una lista dibujada llega al visor por vr_scene (montada como hace vr/host: con el registro de cámara de la lista). Aquí se cuenta,
  * por lista, qué ha emitido el juego (primitivas con posición de vista) y qué ha llegado a la escena, y se mide la cobertura de un visor
  * de fovh x fovv grados con la cabeza donde esté en el instante de presentación (t + lat) para tres casos:
  *   E  oráculo      todo lo que el juego emitió con posición de vista completa, re-proyectado con vrcam_delta exacto a la pose de presentación;
@@ -774,6 +774,80 @@ static void esc_report(void) {
             e->cov_e / e->n_cov, e->cov_a / e->n_cov, e->cov_n / e->n_cov, e->hole_a / e->n_cov, e->hole_n / e->n_cov, e->off_h_abs / e->n_off, e->off_h_max, e->off_v_abs / e->n_off);
 }
 
+/* ---- cobertura (orden `cov t0 t1`): por lista, los polígonos 3D (todos los vértices con posición de vista) con su centroide en
+ * coordenadas de MUNDO del motor (mundo = M v + ojo), para medir cuánta geometría llega al renderer según la dirección de la cabeza.
+ * Registro binario en <salida>/cov.bin: por lista {int32 t, float yaw, float pitch, int32 ojo[3], uint32 n, uint32 total, parciales, sin3d} y n x {float w[3], uint8 nv, flags, vflags, pad}. */
+static int cov_active(int t) {
+    if (!scr_on) return 0;
+    for (int i = 0; i < nscr; i++) if (scr[i].kind == 10 && t >= scr[i].t0 && t < scr[i].t1) return 1;
+    return 0;
+}
+static void cov_record(const GpuDrawList *l, const VrCamRecord *r, int t) {
+    static FILE *fp; static char opened;
+    if (!opened) { char p[512]; snprintf(p, sizeof p, "%s/cov.bin", outdir); fp = fopen(p, "wb"); opened = 1; }
+    if (!fp) return;
+    uint32_t n = 0, nall = 0, npart = 0, n2d = 0;
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *o = &l->ops[i]; int nvv = o->nv == 4 ? 4 : 3, ok = 1, any = 0;
+        if (o->type != GPU_OP_POLY) continue;
+        nall++;
+        if (!(o->proj_h > 0)) { n2d++; continue; }
+        for (int k = 0; k < nvv; k++) { ok &= o->v[k].vvalid; any |= o->v[k].vvalid; }
+        if (ok) n++; else if (any) npart++; else n2d++;
+    }
+    int32_t th[3] = {t, 0, 0}; float yp[2] = {r->yaw_deg, r->pitch_deg};
+    fwrite(&th[0], 4, 1, fp); fwrite(yp, 4, 2, fp); fwrite(r->eye, 4, 3, fp); fwrite(&n, 4, 1, fp);
+    fwrite(&nall, 4, 1, fp); fwrite(&npart, 4, 1, fp); fwrite(&n2d, 4, 1, fp);
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *o = &l->ops[i]; int nvv = o->nv == 4 ? 4 : 3, ok = 1;
+        if (o->type != GPU_OP_POLY || !(o->proj_h > 0)) continue;
+        for (int k = 0; k < nvv; k++) ok &= o->v[k].vvalid;
+        if (!ok) continue;
+        float c[3] = {0, 0, 0}; unsigned vf = 0;
+        for (int k = 0; k < nvv; k++) {
+            float x, y, z; vtx_view(o, &o->v[k], &x, &y, &z); vf |= o->v[k].vflags;
+            c[0] += r->M[0] * x + r->M[1] * y + r->M[2] * z; c[1] += r->M[3] * x + r->M[4] * y + r->M[5] * z; c[2] += r->M[6] * x + r->M[7] * y + r->M[8] * z;
+        }
+        float w[3] = {c[0] / nvv + r->eye[0], c[1] / nvv + r->eye[1], c[2] / nvv + r->eye[2]};
+        uint8_t m[4] = {(uint8_t)nvv, (uint8_t)((o->flags & GPU_F_SEMI) ? 1 : 0), (uint8_t)vf, 0};
+        fwrite(w, 4, 3, fp); fwrite(m, 1, 4, fp);
+    }
+    fflush(fp);
+}
+/* ---- inventario del motor (orden `cov`): objetos/piezas/paquetes del canal principal en la RAM del juego, por modo de recorte ----
+ * Canal principal 0x800B2B7C: +0x56 nº de objetos, +0x58 cola de punteros; objeto: +0x28 flags, +0x2C máscara de mapa, +0x2E nº de piezas,
+ * +0x32 modo de recorte (0 oculto, 1 parcial, 2 dentro), piezas de 0x5C bytes desde +0x48 (+0x4C contador de visibilidad); cada pieza:
+ * +0x50 desplazamiento z, +0x52 nº de paquetes, +0x54+4*buf puntero al búfer de paquetes (52 bytes; cabecera 16 bits baja != 0 = emitido),
+ * +0x48 siguiente tramo. Salida: línea "[eng]" en el log. */
+static uint32_t eng_rd32(uint32_t a) { uint32_t v; memcpy(&v, emu_ram + (a & 0x1FFFFF), 4); return v; }
+static int eng_rd16(uint32_t a) { int16_t v; memcpy(&v, emu_ram + (a & 0x1FFFFF), 2); return v; }
+static void eng_inventory(int t) {
+    const uint32_t chn = 0x800B2B7Cu;
+    int nobj = eng_rd16(chn + 0x56); uint32_t q = eng_rd32(chn + 0x58); uint32_t buf = eng_rd32(0x800BCAB0u) & 1;
+    uint32_t cur = eng_rd32(0x800BCAF8u);
+    int bym[4] = {0}, hid = 0, mapoff = 0; long packs = 0, emit = 0, packs_m0 = 0, emit_vis = 0;
+    if (nobj < 0 || nobj > 2000 || q < 0x80000000u) return;
+    for (int i = 0; i < nobj; i++) {
+        uint32_t o = eng_rd32(q + 4u * i); if (o < 0x80000000u || o >= 0x80200000u) continue;
+        int m = eng_rd16(o + 0x32); if (m < 0 || m > 3) m = 3;
+        uint32_t fl = eng_rd32(o + 0x28), mp = (uint32_t)eng_rd16(o + 0x2C) & 0xFFFF;
+        bym[m]++; if (fl & 0x80) hid++; if (mp && !(mp & cur)) mapoff++;
+        int np = eng_rd16(o + 0x2E); if (np < 0 || np > 64) continue;
+        for (int k = 0; k < np; k++) {
+            uint32_t seg = o + 0x48u + 0x5Cu * k;
+            for (int g = 0; g < 8 && seg >= 0x80000000u && seg < 0x80200000u; g++) {
+                int n = eng_rd16(seg + 0x52); uint32_t pb = eng_rd32(seg + 0x54 + 4 * buf);
+                if (n > 0 && n < 4000 && pb >= 0x80000000u && pb < 0x80200000u) {
+                    int e = 0; for (int j = 0; j < n; j++) e += (eng_rd16(pb + 52u * j) & 0xFFFF) != 0;
+                    packs += n; emit += e; if (m == 0) packs_m0 += n; else emit_vis += e;
+                }
+                seg = eng_rd32(seg + 0x48);
+            }
+        }
+    }
+    fprintf(stderr, "[eng] t=%d objs=%d modo0=%d modo1=%d modo2=%d ocultos(0x80)=%d fuera_de_mapa=%d paquetes=%ld emitidos=%ld (en objetos modo0: %ld; emitidos en modo>0: %ld)\n",
+            t, nobj, bym[0], bym[1], bym[2], hid, mapoff, packs, emit, packs_m0, emit_vis);
+}
 static void process_list(const GpuDrawList *l, int t, int f) {
     lists_seen++;
     list_ref(l);
@@ -804,6 +878,7 @@ static void process_list(const GpuDrawList *l, int t, int f) {
     if (t < 0) return;
     pair_ok++;
     { float ea[4]; if (esc_this(t, ea)) esc_list(l, r, t, ea); }
+    if (cov_active(t)) { cov_record(l, r, t); eng_inventory(t); }
     /* proyección del motor (primer polígono 3D con proyección) para el centro de la imagen del juego */
     float eh = 0, eox = 0, eoy = 0;
     for (uint32_t i = 0; i < l->nops; i++) if (l->ops[i].type == GPU_OP_POLY && l->ops[i].proj_h > 0) { eh = l->ops[i].proj_h; break; }

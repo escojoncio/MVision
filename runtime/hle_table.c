@@ -64,6 +64,7 @@ void hle_sys_conf(Cpu *c);
 void hle_vrbody_sort(Cpu *c);
 void hle_vrcam_draw(Cpu *c);
 void hle_vrcam_overscan(Cpu *c);
+void hle_vrcam_pack(Cpu *c);
 void hle_vrcam_padorg(Cpu *c);
 void hle_vrcam_trans(Cpu *c);
 void hle_vrcam_view(Cpu *c);
@@ -144,6 +145,7 @@ const HleEntry hle_table[] = {
     {"vrbody_sort", hle_vrbody_sort},
     {"vrcam_draw", hle_vrcam_draw},
     {"vrcam_overscan", hle_vrcam_overscan},
+    {"vrcam_pack", hle_vrcam_pack},
     {"vrcam_padorg", hle_vrcam_padorg},
     {"vrcam_trans", hle_vrcam_trans},
     {"vrcam_view", hle_vrcam_view},
@@ -161,4 +163,4 @@ const HleEntry hle_table[] = {
     {"vrradar_draw", hle_vrradar_draw},
     {0, 0}
 };
-const unsigned hle_table_count = 78;
+const unsigned hle_table_count = 79;
