@@ -2,8 +2,8 @@
 /* ns_adapt: adaptador NativeScene (ns_types.h + almacén de mallas) -> triángulos NsRTri del rasterizador de referencia (ns_cpuref.h).
  * Herramienta/validador de escritorio; no forma parte de la app. Hace en CPU lo que hará el renderer nativo en GPU:
  *   - posición de mundo de cada vértice = world_pieza * v_local; los vértices soldados (NsVert.weld) usan la posición transformada del vértice
- *     del padre con la matriz del padre (costura entre articulaciones, docs §3.5);
- *   - color de esquina: array precalculado (mapa, NsMesh.paint) tal cual; objetos dinámicos con la luz de la instancia (matrices de RAM) y las normales del
+ *     del padre con la matriz del padre; las soldaduras encadenadas usan la posición ya soldada del padre (costura entre articulaciones, docs §3.5);
+ *   - color de esquina: array precalculado (NsBaked de la pieza) tal cual; objetos dinámicos con la luz de la instancia (matrices de RAM) y las normales del
  *     modelo mediante ns_light (exacto al motor, rotando las luces al espacio de la pieza con ns_light_to_local); UNLIT o sin luz: 128 (neutro);
  *   - cuadriláteros con la división del hardware: (A,B,D) y (B,D,C) (A,B,C,D en perímetro); triángulos (C==D): (A,B,C);
  *   - SIN culling por defecto: el rasterizador dibuja ambos anversos (el z-buffer resuelve); `cull_eye` activa el descarte de reversos solo para la vista del juego.
@@ -33,7 +33,7 @@ typedef struct {
     size_t drop_backface;            /* caras descartadas por reverso (sólo con cull_eye) */
     size_t drop_degenerate;          /* triángulos con vértices repetidos o área nula/no finita */
     size_t welded_verts;             /* vértices soldados resueltos con el padre */
-    size_t faces_paint, faces_dyn, faces_flat;
+    size_t faces_baked, faces_dyn, faces_flat;
     size_t faces_textured;
 } NsAdaptStats;
 

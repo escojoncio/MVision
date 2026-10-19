@@ -1,5 +1,5 @@
 /* nshito1: herramienta de escritorio del extractor nativo (HITO 1). Carga un volcado de RAM (fichero .bin de 2 MiB o directorio NSD1 con ram.bin,
- * vram.bin, gte.bin...), extrae la escena (ns_extract), la convierte a triángulos (ns_adapt) y la dibuja con el rasterizador de referencia (ns_cpuref):
+ * vram.bin, registros de cálculo...), extrae la escena (ns_extract), la convierte a triángulos (ns_adapt) y la dibuja con el rasterizador de referencia (ns_cpuref):
  *   <nombre>_pano.png     panorama equirectangular 360x180 (def. 4096x2048) desde la cabeza del jugador o la cámara; huecos en magenta
  *   <nombre>_pano_raw.png el mismo sin marcar huecos
  *   <nombre>_cube.png     cubemap en cruz 4x3
@@ -17,6 +17,8 @@
  *   --exposure f              sin VRAM: multiplicador del color (def. 1.8)   --no-tint   sin tinte por tpage/clut
  *   --skip-objs a,b,..        direcciones de objetos que no se extraen (sombras que pinta ns_fx)
  *   --no-cull                 la vista del juego NO descarta reversos (por defecto sí, como el motor)
+ *   --player-key k            clave de la instancia que hace de jugador (def. heurística: articulada, con luz y ambiente propios, más cercana al rayo de la cámara)
+ *   --detect-shadows          omitir además lo que parece sombra (una cara plana translúcida iluminada)
  *   --keep-self               no ocultar el cuerpo propio en el panorama desde la cabeza   --znear n (def. 20)
  *   --only pano,cube,game     seleccionar salidas */
 #include "../ns_adapt.h"
@@ -63,11 +65,28 @@ static void level_pose(NsRCam *c, const float pos[3], const float fwd_h[3]) {
     ns_cam_basis(c, pos, right, down, f, 90, 64, 64);
 }
 
+/* Caja vertical de mundo de una instancia (8 esquinas de la caja de cada malla visible). Devuelve 0 si no tiene mallas. */
+static int inst_y_range(const NsScene *sc, const NsMeshStore *st, const NsInstance *in, float *lo, float *top) {
+    *lo = 1e30f; *top = -1e30f;
+    for (uint32_t k = 0; k < in->n_pieces; k++) {
+        const NsPiece *q = &sc->piece[in->first_piece + k];
+        const NsMesh *mm = (q->flags & NS_PF_HIDDEN) ? NULL : ns_store_get(st, q->mesh_id);
+        if (!mm) continue;
+        for (int c = 0; c < 8; c++) {
+            float l[3] = {mm->bbox[(c & 1) ? 3 : 0], mm->bbox[(c & 2) ? 4 : 1], mm->bbox[(c & 4) ? 5 : 2]}, w[3];
+            ns_xf_apply(&q->world, l, w);
+            if (w[1] > *top) *top = w[1];
+            if (w[1] < *lo) *lo = w[1];
+        }
+    }
+    return *top >= *lo;
+}
+
 int main(int argc, char **argv) {
     const char *ramf = NULL, *dumpd = NULL, *vramf = NULL, *framef = NULL, *dir = ".", *name = "hito", *from = NULL, *only = NULL;
     int pw = 4096, ph = 2048, gw = 0, gh = 0, rw = 320, rh = 256;
     float ofx = -1, ofy = -1, exposure = 1.8f, znear = 20.0f, yaw_deg = NAN;
-    uint32_t skip_list[64]; uint32_t nskip = 0;
+    uint32_t skip_list[64]; uint32_t nskip = 0, player_key = 0; int detect_shadows = 0;
     int overscan = 1, no_tint = 0, keep_self = 0, nocull = 0;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -92,6 +111,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--no-tint")) no_tint = 1;
         else if (!strcmp(a, "--keep-self")) keep_self = 1;
         else if (!strcmp(a, "--no-cull")) nocull = 1;
+        else if (!strcmp(a, "--player-key")) player_key = (uint32_t)strtoul(NEXT(), NULL, 0);
+        else if (!strcmp(a, "--detect-shadows")) detect_shadows = 1;
         else if (!strcmp(a, "--skip-objs")) { for (char *q = (char *)NEXT(); *q && nskip < 64;) { char *e; skip_list[nskip++] = (uint32_t)strtoul(q, &e, 0); if (e == q) return 2; q = *e == ',' ? e + 1 : e; } }
         else { fprintf(stderr, "opción desconocida: %s (véase la cabecera de nshito1.c)\n", a); return 2; }
     }
@@ -99,14 +120,14 @@ int main(int argc, char **argv) {
 
     /* ---- carga ---- */
     uint8_t *ram = NULL, *scratch = NULL; uint16_t *vram = NULL; NsDump *nd = NULL;
-    float ofx_gte = -1, ofy_gte = -1;
+    float ofx_reg = -1, ofy_reg = -1;
     if (dumpd) {
         nd = ns_dump_open(dumpd);
         if (!nd) { fprintf(stderr, "no se pudo abrir el volcado %s\n", dumpd); return 1; }
         ram = nd->ram; scratch = nd->scratch; vram = nd->vram;
-        if (nd->has_gte) {   /* control 24/25 = OFX/OFY (16.16) */
+        if (nd->has_gte) {   /* control 24/25 = centro de proyección (16.16) */
             float x = (float)((int32_t)nd->gte[32 + 24]) / 65536.0f, y = (float)((int32_t)nd->gte[32 + 25]) / 65536.0f;
-            if (x > 0 && x < 1024 && y > 0 && y < 1024) { ofx_gte = x; ofy_gte = y; }
+            if (x > 0 && x < 1024 && y > 0 && y < 1024) { ofx_reg = x; ofy_reg = y; }
         }
     } else {
         size_t n = 0;
@@ -126,17 +147,17 @@ int main(int argc, char **argv) {
 
     /* ---- extracción ---- */
     NsScene sc; NsMeshStore *st = ns_store_create();
-    if (ns_scene_alloc(&sc, NS_DEF_CAP_INST, NS_DEF_CAP_PIECE, NS_DEF_CAP_LIGHT, 0) || !st) { fprintf(stderr, "sin memoria\n"); return 1; }
+    if (ns_scene_alloc(&sc, NS_MIN_INST, 8192, NS_MIN_LIGHT, 0) || !st) { fprintf(stderr, "sin memoria\n"); return 1; }
     NsExtractStats es;
-    NsExtractOpts xo = {skip_list, nskip};
+    NsExtractOpts xo; memset(&xo, 0, sizeof xo); xo.shadow_objs = skip_list; xo.n_shadow = nskip; xo.detect_shadows = detect_shadows;
     int rc = ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, scratch, scratch ? 1024 : 0, &xo, &es);
     OUT("== %s ==\n", name);
     OUT("extracción: rc=%d valid=0x%x truncated=0x%x cola=%u instancias=%u piezas=%u (ocultas/sin caras=%u, extensiones=%u) luces=%u grupo=0x%x\n", rc, sc.valid, sc.truncated, es.queue_n, es.n_inst, es.n_pieces,
         es.n_hidden_pieces, es.n_ext_pieces, es.n_lights, sc.group_mask);
     OUT("descartes de cola: nulo=%u fuera_de_RAM=%u repetido=%u invisible=%u grupo_inactivo=%u objeto_inconsistente=%u | modelo_inconsistente=%u extension_rota=%u lecturas_fuera_de_rango=%u\n",
-        es.drop_null, es.drop_badptr, es.drop_dup, es.drop_invisible, es.drop_group, es.drop_badobj, es.drop_bad_model, es.ext_bad, es.oob_reads);
-    OUT("mallas: nuevas=%u (en almacén %u) reutilizadas=%u | caras leídas=%u guardadas=%u (cuadriláteros %u, triángulos %u) degeneradas=%u sin_textura=%u con_color_precalculado=%u\n", es.mesh_new,
-        ns_store_count(st), es.mesh_ref, es.faces_seen, es.faces_kept, es.faces_quad, es.faces_tri, es.faces_degenerate, es.faces_no_tex, es.faces_paint);
+        es.drop_null, es.drop_badptr, es.drop_dup, es.drop_hidden_flag, es.drop_group, es.drop_badobj, es.drop_bad_model, es.ext_bad, es.oob_reads);
+    OUT("mallas: nuevas=%u (en almacén %u) reutilizadas=%u | caras leídas=%u (cuadriláteros %u, triángulos %u) degeneradas=%u sin_textura=%u versiones_de_color(nuevas/reutilizadas)=%u/%u\n", es.mesh_new,
+        ns_store_count(st), es.mesh_ref, es.faces_seen, es.faces_quad, es.faces_tri, es.faces_degenerate, es.faces_no_tex, es.baked_new, es.baked_ref);
     OUT("caras descartadas por motivo: indice_de_vertice_malo=%u | indice_de_normal_malo(sustituido)=%u | soldaduras resueltas=%u sin_resolver=%u\n", es.faces_bad_vindex, es.faces_bad_nindex, es.welded_verts, es.weld_bad);
     for (uint32_t i = 0; i < sc.n_inst && getenv("NS_LIST"); i++) {
         const NsInstance *in = &sc.inst[i];
@@ -162,27 +183,34 @@ int main(int argc, char **argv) {
     }
     if (!isnan(yaw_deg)) { fwd_h[0] = sinf(yaw_deg * 3.14159265f / 180.0f); fwd_h[2] = cosf(yaw_deg * 3.14159265f / 180.0f); }
 
-    /* ---- jugador: instancia articulada con luz propia (flags SHADE|AMBIENT) más cercana al punto que mira la cámara en el plano de la cadera ---- */
+    /* ---- jugador: instancia articulada con luz propia (LIT + OWN_AMBIENT) más cercana al rayo de la cámara, o la indicada con --player-key ---- */
     int player = -1; float head[3] = {0, 0, 0};
     {
         float fw[3] = {(float)ramS16(0x800B2B7Cu + 0x10u + 12u) / 4096.0f, (float)ramS16(0x800B2B7Cu + 0x10u + 14u) / 4096.0f, (float)ramS16(0x800B2B7Cu + 0x10u + 16u) / 4096.0f};
-        float tgt[3] = {eye[0], eye[1], eye[2]};
-        if (fw[1] < -0.2f) { float s = (eye[1] - 1100.0f) / -fw[1]; for (int k = 0; k < 3; k++) tgt[k] = eye[k] + fw[k] * s; }
         float best = 1e30f;
         for (uint32_t i = 0; i < sc.n_inst; i++) {
             const NsInstance *in = &sc.inst[i];
-            if (!(in->flags & NS_IF_SHADE) || !(in->flags & NS_IF_AMBIENT) || in->n_pieces < 8) continue;
+            if (player_key) { if (in->key == player_key) { player = (int)i; break; } continue; }
+            if (!(in->flags & NS_IF_LIT) || !(in->flags & NS_IF_OWN_AMBIENT) || in->n_pieces < 8) continue;
             const NsPiece *p0 = &sc.piece[in->first_piece];
-            float dx = p0->world.m[3] - tgt[0], dz = p0->world.m[11] - tgt[2];
-            float d = dx * dx + dz * dz;
-            if (d < best) { best = d; player = (int)i; }
+            float d[3] = {p0->world.m[3] - eye[0], p0->world.m[7] - eye[1], p0->world.m[11] - eye[2]};
+            float tpar = d[0] * fw[0] + d[1] * fw[1] + d[2] * fw[2];
+            float dn2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2], ylo, ytop;
+            int near_eye = inst_y_range(&sc, st, in, &ylo, &ytop) && dn2 <= (ytop - ylo) * (ytop - ylo);   /* la cámara está dentro o pegada a la instancia */
+            if (near_eye) { if (dn2 < best) { best = dn2; player = (int)i; } continue; }
+            if (tpar <= 0) continue;
+            float q[3] = {d[0] - fw[0] * tpar, d[1] - fw[1] * tpar, d[2] - fw[2] * tpar};
+            float dist = q[0] * q[0] + q[1] * q[1] + q[2] * q[2];
+            if (dist > 0.09f * tpar * tpar) continue;   /* debe quedar cerca del rayo (ángulo < ~17 grados) */
+            if (dist < best) { best = dist; player = (int)i; }
         }
         if (player >= 0) {
             const NsInstance *in = &sc.inst[player];
-            float top = -1e30f; const NsPiece *pr = &sc.piece[in->first_piece];
-            for (uint32_t k = 0; k < in->n_pieces; k++) { const NsPiece *q = &sc.piece[in->first_piece + k]; if (!(q->flags & NS_PF_HIDDEN) && q->world.m[7] > top) top = q->world.m[7]; }
-            head[0] = pr->world.m[3]; head[1] = top + 120.0f; head[2] = pr->world.m[11];
-            OUT("jugador (heurística): instancia %d key=%08x piezas=%u raíz=(%.0f,%.0f,%.0f) cabeza≈(%.0f,%.0f,%.0f)\n", player, in->key, in->n_pieces, pr->world.m[3], pr->world.m[7], pr->world.m[11], head[0], head[1], head[2]);
+            float lo, top; const NsPiece *pr = &sc.piece[in->first_piece];
+            inst_y_range(&sc, st, in, &lo, &top);
+            if (top < lo) { top = pr->world.m[7]; lo = top; }
+            head[0] = pr->world.m[3]; head[1] = top - 0.08f * (top - lo); head[2] = pr->world.m[11];
+            OUT("jugador (heurística): instancia %d key=%08x piezas=%u raíz=(%.0f,%.0f,%.0f) altura=[%.0f,%.0f] origen=(%.0f,%.0f,%.0f)\n", player, in->key, in->n_pieces, pr->world.m[3], pr->world.m[7], pr->world.m[11], lo, top, head[0], head[1], head[2]);
         } else OUT("jugador: no encontrado\n");
     }
     float pos[3]; const char *src = "cam";
@@ -196,7 +224,7 @@ int main(int argc, char **argv) {
     NsRTri *tris = NULL; NsAdaptStats as;
     size_t nt = ns_adapt_scene(&sc, st, &ao, &tris, &as);
     OUT("adaptador: piezas dibujadas=%zu/%zu (ocultas=%zu sin_malla=%zu omitidas_cuerpo_propio=%zu) caras=%zu -> triángulos=%zu | caras: mapa(precalculado)=%zu dinámicas(luz)=%zu neutras=%zu texturizadas=%zu\n",
-        as.pieces_drawn, as.pieces_in, as.drop_hidden_piece, as.drop_no_mesh, as.drop_skip_inst, as.faces_in, nt, as.faces_paint, as.faces_dyn, as.faces_flat, as.faces_textured);
+        as.pieces_drawn, as.pieces_in, as.drop_hidden_piece, as.drop_no_mesh, as.drop_skip_inst, as.faces_in, nt, as.faces_baked, as.faces_dyn, as.faces_flat, as.faces_textured);
     OUT("  cuadriláteros=%zu triángulos=%zu | triángulos descartados por degenerados=%zu | vértices soldados con el padre=%zu\n", as.quads, as.tris, as.drop_degenerate, as.welded_verts);
     OUT("  render: %s\n", vram ? "CON VRAM (texturizado)" : "SIN VRAM: color de vértice x exposición x tinte por tpage/clut (las caras sin textura, grises)");
     /* bbox de la geometría */
@@ -229,7 +257,7 @@ int main(int argc, char **argv) {
             ns_cube_to_equirect(faces, &pose, &pano);
             uint8_t *rgb = (uint8_t *)malloc((size_t)pw * ph * 3);
             ns_buf_to_rgb8(&pano, rgb, 1, 0xFF00FF); snprintf(p, sizeof p, "%s/%s_pano.png", dir, name); ns_write_png(p, pw, ph, rgb);
-            ns_buf_to_rgb8(&pano, rgb, 0, 0); snprintf(p, sizeof p, "%s/%s_pano_raw.png", dir, name); ns_write_png(p, pw, ph, rgb);
+            ns_buf_to_rgb8(&pano, rgb, 1, ((uint32_t)sc.bg_rgb[0] << 16) | ((uint32_t)sc.bg_rgb[1] << 8) | (uint32_t)sc.bg_rgb[2]); snprintf(p, sizeof p, "%s/%s_pano_raw.png", dir, name); ns_write_png(p, pw, ph, rgb);
             size_t holes = 0, hup = 0, hdn = 0, nup = 0, ndn = 0;
             for (int j = 0; j < ph; j++) for (int i = 0; i < pw; i++) {
                 int h = pano.iz[(size_t)j * pw + i] == 0;
@@ -257,7 +285,7 @@ int main(int argc, char **argv) {
         /* referencia: la pantalla de juego (rw x rh); un fotograma más ancho (p. ej. 368) tiene el mismo alto y se centra: se escala por el alto */
         float sx = (float)gw / (float)(frame ? fw : rw), sy = (float)gh / (float)(frame ? fh : rh);
         (void)sx; (void)sy;
-        float cx = ofx >= 0 ? ofx : (ofx_gte >= 0 ? ofx_gte : (float)(frame ? fw : rw) * 0.5f), cy = ofy >= 0 ? ofy : (ofy_gte >= 0 ? ofy_gte : (float)(frame ? fh : rh) * 0.5f);
+        float cx = ofx >= 0 ? ofx : (ofx_reg >= 0 ? ofx_reg : (float)(frame ? fw : rw) * 0.5f), cy = ofy >= 0 ? ofy : (ofy_reg >= 0 ? ofy_reg : (float)(frame ? fh : rh) * 0.5f);
         NsRCam c; ns_cam_game(&c, A, t, H, cx, cy, frame ? fw : rw, frame ? fh : rh, gw, gh); c.znear = 1.0f;
         NsRBuf b; ns_buf_alloc(&b, gw, gh); ns_buf_clear(&b, 0, 0, 0);
         NsAdaptOpts go = ao; go.skip_key = 0; if (!nocull) go.cull_eye = eye;
