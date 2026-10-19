@@ -37,7 +37,18 @@ typedef struct {
     uint8_t in_control;
     uint8_t cam_active;    /* la cámara del motor es la de la cabeza del usuario */
     uint8_t cinematic, comms, paused, menu_open, stopped;
+    /* --- clasificación de lo que NO es mundo (al final: no rompe inicializaciones posicionales) --- */
+    uint8_t scene3d;       /* la última lista capturada trae geometría 3D sustancial con cámara del motor válida */
+    uint8_t video;         /* la última lista es un fotograma de vídeo pregrabado (subida grande a la zona mostrada, sin 3D) */
 } VrViewIn;
+
+/* Qué es lo que se ve (con histéresis propia, ver VrView.kind):
+ *   WORLD   primera persona (= VRV_WORLD)
+ *   ENGINE  cinemática o conversación hecha con el motor en tiempo real: hay 3D en la escena y la cámara la lleva el guion (sin partida
+ *           controlable). Se presenta en 3D estereoscópico (pantalla 3D) en vez de en la pantalla de cine plana.
+ *   VIDEO   vídeo pregrabado (fotogramas descomprimidos subidos a VRAM): siempre pantalla de cine
+ *   UI      menús, títulos, cargas, códec/radio, pausa, ventanas de armas/objetos, resultados: 2D, pantalla de cine */
+enum { VRV_K_UI = 0, VRV_K_WORLD, VRV_K_ENGINE, VRV_K_VIDEO };
 
 typedef struct {
     int mode;              /* VrViewMode vigente (con histéresis) */
@@ -46,6 +57,12 @@ typedef struct {
     int run;               /* fotogramas seguidos pidiendo `want` distinto de `mode` */
     int to_cine, to_world; /* umbrales de histéresis, en fotogramas */
     uint32_t switches;
+    /* --- clasificación (VRV_K_*) --- */
+    int kind;              /* vigente */
+    int want_kind;         /* pedido por el último fotograma */
+    int kind_run;          /* fotogramas seguidos pidiendo `want_kind` distinto de `kind` */
+    int to_engine, from_engine, to_other;   /* umbrales de histéresis (fotogramas): entrar en ENGINE, salir de ENGINE, resto de cambios */
+    uint32_t kind_switches;
 } VrView;
 
 void vrview_reset(VrView *v);
@@ -53,6 +70,9 @@ void vrview_reset(VrView *v);
 int vrview_reason(const VrViewIn *in);
 /* Un fotograma. Devuelve el modo vigente. */
 int vrview_step(VrView *v, const VrViewIn *in);
+/* Clase de lo que se ve para unas entradas dadas (función pura, sin histéresis). */
+int vrview_kind_of(const VrViewIn *in);
+const char *vrview_kind_name(int kind);
 const char *vrview_reason_name(int reason);
 
 #ifdef __cplusplus

@@ -74,7 +74,9 @@ struct XRQuadU {
     float4   uvrect;     /* u0, v0 (arriba), u1, v1 (abajo) */
     float4   geom;       /* x ancho (m), y alto (m), z distancia D (m, radio de la curvatura), w curvatura 0..1 */
     float4   tex;        /* x, y = tamaño de la imagen en texels (pantalla); z = nitidez 0 suave / 1 nítida / 2 píxel; w = opacidad */
-    uint4    cfg;        /* x = índice de vista de la 1ª instancia, y = columnas */
+    uint4    cfg;        /* x = índice de vista de la 1ª instancia, y = columnas, z = bit0 destino lineal / bit1 valores guardados lineales (pantalla 3D) */
+    float4   fxTint;     /* pantalla 3D: tinte por canal (xyz) en espacio gamma */
+    float4   fxCov[4];   /* pantalla 3D: recubrimientos (xyz = color, w = modo de mezcla original 0..3 o -1 = sin usar), en orden */
 };
 
 struct XRQVOut {
@@ -161,6 +163,45 @@ fragment float4 xr_screen_fragment_layered(XRQVOutL in [[stage_in]], constant XR
                                            texture2d<float> tex [[texture(0)]], sampler smp [[sampler(0)]])
 {
     float4 c = xr_screen_color(in.uv, u, tex, smp);
+    return float4(c.rgb * u.tex.w, u.tex.w);
+}
+
+/* Pantalla 3D: el array de 2 capas (ojo izquierdo/derecho) lo dibuja RGRenderer con las cámaras del juego; cada ojo del usuario ve SU capa. Tinte y recubrimientos de pantalla
+ * de la escena (fundidos, destellos, filtro de color del juego) en espacio gamma como el post-proceso de los ojos (vr_post_blend de vr_scene.metal). */
+static float xr_s2l(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
+static float xr_l2s(float c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
+
+static float4 xr_screen3d_color(float2 uv, constant XRQuadU &u, texture2d_array<float> tex, uint layer, sampler smp)
+{
+    float3 c = tex.sample(smp, uv, min(layer, 1u)).rgb;
+    if ((u.cfg.z & 2u) != 0u) c = float3(xr_l2s(c.x), xr_l2s(c.y), xr_l2s(c.z));
+    c = clamp(c * u.fxTint.xyz, 0.0, 1.0);
+    for (int i = 0; i < 4; i++) {
+        float m = u.fxCov[i].w;
+        if (m < 0.0) break;
+        float3 f = u.fxCov[i].xyz;
+        int mi = int(m + 0.5);
+        if (mi == 0) c = 0.5 * c + 0.5 * f;
+        else if (mi == 1) c = c + f;
+        else if (mi == 2) c = c - f;
+        else c = c + 0.25 * f;
+        c = clamp(c, 0.0, 1.0);
+    }
+    if ((u.cfg.z & 1u) != 0u) c = float3(xr_s2l(c.x), xr_s2l(c.y), xr_s2l(c.z));
+    return float4(c, 1.0);
+}
+
+fragment float4 xr_screen3d_fragment(XRQVOut in [[stage_in]], constant XRQuadU &u [[buffer(0)]],
+                                     texture2d_array<float> tex [[texture(0)]], sampler smp [[sampler(0)]])
+{
+    float4 c = xr_screen3d_color(in.uv, u, tex, u.cfg.x, smp);
+    return float4(c.rgb * u.tex.w, u.tex.w);
+}
+
+fragment float4 xr_screen3d_fragment_layered(XRQVOutL in [[stage_in]], constant XRQuadU &u [[buffer(0)]],
+                                             texture2d_array<float> tex [[texture(0)]], sampler smp [[sampler(0)]])
+{
+    float4 c = xr_screen3d_color(in.uv, u, tex, in.layer, smp);
     return float4(c.rgb * u.tex.w, u.tex.w);
 }
 

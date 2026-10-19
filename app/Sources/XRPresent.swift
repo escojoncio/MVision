@@ -9,7 +9,12 @@ import UIKit
 // Presentación en VR de todo lo que NO es el juego en primera persona (ver bitácora, "Presentación en VR").
 //  - Pantalla de cine: el fotograma completo que dibuja el juego (título, menús, radio, cargas, vídeos, cinemáticas del motor, ventanas de
 //    armas/objetos, pausa, fin de partida) en una pantalla virtual grande, anclada delante del usuario, en un entorno negro.
-//  - Diorama (opcional, solo cinemáticas del motor): la escena 3D vista desde la cámara del juego, en miniatura delante del usuario.
+//  - Cinemáticas del motor (con 3D en la escena y la cámara del guion; vídeos pregrabados, menús y radio siguen en la pantalla de cine):
+//      * Pantalla 3D (defecto): la escena se dibuja en estéreo con la cámara del juego (cámaras paralelas separadas un IPD, frustos desplazados, campo de visión
+//        igual al que la pantalla ocupa desde el usuario: escala real) en una pantalla grande y curva fija en el mundo. Mover la cabeza NO cambia el encuadre ni la
+//        perspectiva, solo hacia dónde de la pantalla se mira. Los cortes de plano los hace el juego (sin fundido). Subtítulos/créditos/bandas van en el panel 2D encima.
+//      * Dentro de la escena (opción): la cabeza en la cámara del plano, anclada al empezar el plano (fundido de 0,15 s en cada corte).
+//      * Diorama (opción): la escena 3D en miniatura delante del usuario.
 //  - HUD del juego en primera persona: recortes del panel 2D como paneles pequeños que siguen a la cabeza con retardo.
 //  - Menú de opciones VR: se abre manteniendo el botón de menú izquierdo (o Select del mando) y se maneja con el mando.
 // Todo en el hilo de render. Sin llamadas al compositor: solo compone `XRDrawItem` para XRFinalPass.
@@ -21,7 +26,7 @@ struct XRViewConfig {
     var curve: Float = 0.35         // 0 plana .. 1 cilindro con el usuario en el eje
     var sharp = 1                   // 0 suave, 1 nítida (bilineal de píxel fijo), 2 píxel (vecino más próximo)
     var integerScale = false        // ajusta el ancho para que cada texel ocupe un número entero de píxeles del visor
-    var diorama = false             // cinemáticas del motor: false = pantalla de cine, true = diorama
+    var cutscene: Cutscene = .stereo // cinemáticas del motor: pantalla 3D (defecto), pantalla de cine, diorama o dentro de la escena
     var dioramaScale: Float = 0.15  // metros por metro del motor (0,15: una sala de 8 m cabe en ~1,2 m)
     var hudPanels = true
     var hudScale: Float = 0.8
@@ -29,6 +34,7 @@ struct XRViewConfig {
     var wristScale: Float = 0.2     // ancho (m) que ocuparía el panel 2D completo en la muñeca (el recorte de la vida mide ~35 % de él)
     var wristHandSide = false       // false: los paneles se apilan hacia el codo (encima del radar); true: hacia la mano
 
+    enum Cutscene: String, CaseIterable { case stereo, cinema, diorama, scene }
     static let widths: [Float] = [2.4, 3.0, 3.6, 4.5]
     static let distances: [Float] = [2.0, 2.5, 3.0, 4.0]
     static let curves: [Float] = [0, 0.35, 0.7, 1.0]
@@ -53,7 +59,7 @@ struct XRViewConfig {
         let s = UserDefaults.standard.integer(forKey: "xr.view.sharp")
         c.sharp = UserDefaults.standard.object(forKey: "xr.view.sharp") == nil ? 1 : min(max(s, 0), 2)
         c.integerScale = b("xr.view.integer", false)
-        c.diorama = (UserDefaults.standard.string(forKey: "xr.view.cutscene") ?? "cine") == "diorama"
+        c.cutscene = Cutscene(rawValue: UserDefaults.standard.string(forKey: "xr.view.cutscene2") ?? "") ?? .stereo
         c.dioramaScale = f("xr.view.dioramaScale", 0.15, 0.03, 0.5)
         c.hudPanels = b("xr.view.hud", true)
         c.hudScale = f("xr.view.hudScale", 0.8, 0.3, 2.0)
@@ -70,7 +76,7 @@ struct XRViewConfig {
         d.set(Double(curve), forKey: "xr.view.curve")
         d.set(sharp, forKey: "xr.view.sharp")
         d.set(integerScale, forKey: "xr.view.integer")
-        d.set(diorama ? "diorama" : "cine", forKey: "xr.view.cutscene")
+        d.set(cutscene.rawValue, forKey: "xr.view.cutscene2")
         d.set(Double(dioramaScale), forKey: "xr.view.dioramaScale")
         d.set(hudPanels, forKey: "xr.view.hud")
         d.set(Double(hudScale), forKey: "xr.view.hudScale")
@@ -135,12 +141,16 @@ enum XRMenuItem: Int, CaseIterable {
 }
 
 final class XRPresenter {
-    enum Display { case world, cinema, diorama }
+    enum Display { case world, cinema, diorama, stereo, scene }
 
     struct Result {
         var items: [XRDrawItem] = []
         var drawWorld = true
         var drawBody = true
+        /// false = la geometría 3D no va a los ojos (pantalla 3D: va a las texturas estéreo de `stereo`).
+        var drawEyes = true
+        /// Pantalla 3D: parámetros de las cámaras estéreo y tamaño de las texturas (RGRenderer calcula las vistas con la cámara de la escena que dibuja).
+        var stereo: RGRenderer.StereoRequest?
         /// Diorama: se multiplica a la vista de cada ojo (mundo VR del juego en metros -> espacio recentrado del usuario).
         var dioramaModel: simd_float4x4?
     }
@@ -156,6 +166,10 @@ final class XRPresenter {
     private var anchorY: Float = 1.5
     private var hudYaw: Float = 0
     private var hudInit = false
+    // Dentro de la escena: cámara del plano (vista del motor -> mundo VR al empezar el plano) y plano visto
+    private var shotView = matrix_identity_float4x4
+    private var shotSeen: UInt32 = 0
+    private var cutVeil: Float = 0
 
     // Menú
     private(set) var menuOpen = false
@@ -290,7 +304,10 @@ final class XRPresenter {
         case .curve: cfg.curve = cycle(cfg.curve, XRViewConfig.curves, dir)
         case .sharp: cfg.sharp = (cfg.sharp + dir + 3) % 3
         case .integerScale: cfg.integerScale.toggle()
-        case .cutscene: cfg.diorama.toggle()
+        case .cutscene:
+            let all = XRViewConfig.Cutscene.allCases
+            let i = all.firstIndex(of: cfg.cutscene) ?? 0
+            cfg.cutscene = all[(i + dir + all.count) % all.count]
         case .hud: cfg.hudPanels.toggle()
         case .hudScale: cfg.hudScale = cycle(cfg.hudScale, XRViewConfig.hudScales, dir)
         case .wristHud: cfg.wristHud.toggle()
@@ -318,7 +335,9 @@ final class XRPresenter {
             case .curve: return ("Curvatura de la pantalla", curveName[ci])
             case .sharp: return ("Nitidez de la imagen", ["Suave", "Nítida", "Píxel"][min(max(cfg.sharp, 0), 2)])
             case .integerScale: return ("Escalado entero", yn(cfg.integerScale))
-            case .cutscene: return ("Cinemáticas del motor", cfg.diorama ? "Diorama" : "Pantalla de cine")
+            case .cutscene:
+                let n: [XRViewConfig.Cutscene: String] = [.stereo: "Pantalla 3D", .cinema: "Pantalla de cine", .diorama: "Diorama", .scene: "Dentro de la escena"]
+                return ("Cinemáticas del motor", n[cfg.cutscene] ?? "")
             case .hud: return ("Paneles del HUD", yn(cfg.hudPanels))
             case .hudScale: return ("Tamaño de los paneles", "\(Int((cfg.hudScale * 100).rounded())) %")
             case .wristHud: return ("Vida y arma en la muñeca", yn(cfg.wristHud))
@@ -405,11 +424,25 @@ final class XRPresenter {
 
     /// `hud`: panel 2D (textura del renderer, ya la vista sRGB si el destino es lineal). `eyePx`/`p00`: ancho en píxeles de un ojo y P[0][0].
     func compose(gs: MvVrGameState, head: simd_float4x4, dt: Float, hud: MTLTexture?, eyePx: Float, p00: Float,
-                 gameView: simd_float4x4, linear: Bool, wrist: Wrist? = nil) -> Result {
-        // 1) qué toca mostrar
+                 gameView: simd_float4x4, linear: Bool, wrist: Wrist? = nil, ipd: Float = 0.063, shot: UInt32 = 0) -> Result {
+        // 1) qué toca mostrar. view_kind 2 (vr_view.h, VRV_K_ENGINE) = cinemática del motor con 3D y cámara del guion; los vídeos pregrabados (3), los menús, el códec/radio,
+        //    las cargas, la pausa y las ventanas de armas/objetos (0) siguen en la pantalla de cine.
         var target: Display = gs.view_mode == 1 ? .world : .cinema
-        if target == .cinema && cfg.diorama && gs.cinematic != 0 && Self.dioramaOK(gameView) { target = .diorama }
+        if target == .cinema && gs.view_kind == 2 && Self.gameViewOK(gameView) {
+            switch cfg.cutscene {
+            case .stereo: target = .stereo
+            case .diorama: target = .diorama
+            case .scene: target = .scene
+            case .cinema: break
+            }
+        }
         if target != .world || shown != .world { cinema?.update() }
+        // Dentro de la escena: la cámara del plano se fija al empezar el plano; en cada corte nuevo anclaje y fundido rápido (0,15 s).
+        if shown != .scene { shotView = gameView; shotSeen = shot }
+        if shot != shotSeen {
+            shotSeen = shot
+            if shown == .scene { shotView = gameView; needAnchor = true; cutVeil = 1 }
+        }
 
         // 2) transición: negro -> cambio -> negro (0,22 s + 0,28 s)
         let d = min(max(dt, 0.001), 0.1)
@@ -424,7 +457,7 @@ final class XRPresenter {
         let hp = XRMath.position(head)
         let hy = XRMath.yaw(of: head)
         if needAnchor && shown != .world {
-            anchorY = max(0.8, hp.y - 0.05)
+            anchorY = max(0.8, hp.y - (shown == .scene ? 0 : 0.05))
             anchor = XRMath.translation(SIMD3<Float>(hp.x, 0, hp.z)) * XRMath.rotationY(hy)
             needAnchor = false
         }
@@ -438,6 +471,8 @@ final class XRPresenter {
         var r = Result()
         r.drawWorld = shown != .cinema
         r.drawBody = shown == .world
+        r.drawEyes = shown != .stereo
+        cutVeil = max(0, cutVeil - d / 0.15)
 
         // 4) pantalla de cine (también como respaldo del diorama sin geometría)
         if shown == .cinema, let c = cinema, let tex = c.texture(srgb: linear) {
@@ -459,6 +494,44 @@ final class XRPresenter {
             r.items.append(it)
         }
 
+        // 4b) pantalla 3D: dos cámaras del juego (separadas un IPD, frustos desplazados) dibujadas por RGRenderer en texturas; cada ojo ve la suya en la pantalla anclada al mundo.
+        //     La cabeza no interviene en las cámaras: solo cambia hacia dónde de la pantalla se mira.
+        if shown == .stereo, Self.gameViewOK(gameView) {
+            let W = cfg.width, D = cfg.distance
+            let tanX = max(0.2, W / (2 * D)), tanY = tanX * 0.75      // campo de visión = ángulo que la pantalla ocupa desde el usuario (escala real)
+            do {
+                r.stereo = RGRenderer.StereoRequest(ipd: ipd, convergence: XRStereo.convergence, tanX: tanX, tanY: tanY, width: Self.stereoW, height: Self.stereoH)
+                let model = anchor * XRMath.translation(SIMD3<Float>(0, anchorY, -D))
+                var it = XRDrawItem(kind: .screen3d, texture: nil)
+                it.model = model
+                it.size = SIMD2<Float>(W, W * 0.75)
+                it.distance = D
+                it.curve = cfg.curve
+                it.cols = cfg.curve > 0.01 ? 48 : 1
+                it.opacity = 1
+                r.items.append(it)
+                // subtítulos, créditos y bandas del juego (panel 2D completo) sobre la misma pantalla, 4 mm por delante
+                if let h = hud {
+                    var hp2 = XRDrawItem(kind: .panel, texture: h)
+                    hp2.model = model * XRMath.translation(SIMD3<Float>(0, 0, 0.004))
+                    hp2.uvrect = SIMD4<Float>(0, 0, 1, 1)
+                    hp2.size = SIMD2<Float>(W, W * 0.75)
+                    hp2.distance = D
+                    hp2.curve = cfg.curve
+                    hp2.cols = it.cols
+                    hp2.opacity = 1
+                    r.items.append(hp2)
+                }
+            }
+        }
+
+        // 4c) dentro de la escena: la cabeza en la cámara del plano (vista del motor en unidades -> metros a escala 1)
+        if shown == .scene, Self.gameViewOK(shotView) {
+            let s: Float = 0.001
+            let f = simd_float4x4(diagonal: SIMD4<Float>(s, -s, -s, 1))
+            r.dioramaModel = anchor * XRMath.translation(SIMD3<Float>(0, anchorY, 0)) * f * shotView.inverse
+        }
+
         // 5) diorama
         if shown == .diorama, Self.dioramaOK(gameView) {
             let s = cfg.dioramaScale * 0.001
@@ -467,7 +540,7 @@ final class XRPresenter {
         }
 
         // 6) paneles del HUD (mundo y diorama; en el cine el HUD ya va dentro de la imagen)
-        if shown != .cinema && cfg.hudPanels, let h = hud {
+        if shown != .cinema && shown != .stereo && cfg.hudPanels, let h = hud {
             let frame = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw)
             let sc = cfg.hudScale
             var wm: (n: SIMD3<Float>, ok: Bool)?
@@ -503,9 +576,10 @@ final class XRPresenter {
         }
 
         // 7) velo de transición y menú
-        if veil > 0.001 {
+        let veilNow = max(veil, cutVeil)
+        if veilNow > 0.001 {
             var v = XRDrawItem(kind: .veil, texture: nil)
-            v.opacity = veil
+            v.opacity = veilNow
             r.items.append(v)
         }
         if menuOpen {
@@ -528,7 +602,7 @@ final class XRPresenter {
         let a = anchor.columns.3
         var d = "mostrando=\(shown) " + String(format: "velo=%.2f ancla=(%.2f %.2f %.2f) rumbo=%.0fgrados alturaAncla=%.2f", veil, a.x, a.y, a.z,
                                                XRMath.yaw(of: anchor) * 180 / .pi, anchorY)
-        d += " items: pantalla=\(n[.screen] ?? 0) panel=\(n[.panel] ?? 0) menu=\(n[.menu] ?? 0) velo=\(n[.veil] ?? 0)"
+        d += " items: pantalla=\(n[.screen] ?? 0) pantalla3d=\(n[.screen3d] ?? 0) panel=\(n[.panel] ?? 0) menu=\(n[.menu] ?? 0) velo=\(n[.veil] ?? 0)"
         if let c = cinema {
             d += " cine: fotograma=\(c.haveFrame) \(c.w)x\(c.h) tex=\(c.texture(srgb: true).map { "\($0.width)x\($0.height)/fmt\($0.pixelFormat.rawValue)" } ?? "nil")"
         } else {
@@ -541,9 +615,14 @@ final class XRPresenter {
         return d
     }
 
-    private static func dioramaOK(_ m: simd_float4x4) -> Bool {
+    /// Resolución de las texturas de la pantalla 3D (por ojo).
+    static let stereoW = 1280, stereoH = 960
+
+    /// `game_view` es una transformación vista del motor (unidades) -> metros: su determinante es ~1e-9 (0,001 al cubo), así que el umbral va muy por debajo.
+    private static func gameViewOK(_ m: simd_float4x4) -> Bool {
         guard XRMath.isFinite(m) else { return false }
         let det = simd_determinant(m)
-        return det.isFinite && abs(det) > 1e-9
+        return det.isFinite && abs(det) > 1e-13
     }
+    private static func dioramaOK(_ m: simd_float4x4) -> Bool { gameViewOK(m) }
 }
