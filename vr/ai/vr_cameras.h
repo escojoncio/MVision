@@ -164,7 +164,7 @@ typedef struct VrcSoundCfg {
     float max_dist;     /* a partir de aquí, silencio */
     float fade_frac;    /* fracción final de max_dist en la que se funde a 0 (evita el corte seco) */
     float gain;         /* multiplicador global */
-    int   min_vol;      /* mínimo (1..63) que se envía mientras haya algo audible: la cuantización de 6 bits no lo borra */
+    int   min_vol;      /* mínimo (1..63) enviado mientras haya algo audible; medido en el juego: con volumen <= 8 dos de los tres sonidos salen con volumen SPU 0 */
     int   n_se;         /* sonidos de cámara afectados */
     uint8_t se[8];
 } VrcSoundCfg;

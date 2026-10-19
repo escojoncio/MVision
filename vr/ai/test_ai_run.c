@@ -32,15 +32,19 @@
 #include "vr_cameras.h"
 #include "vr_perception_rt.h"
 #include "vrai.h"
+#include "rtpatch.h"
 #include "vrhost.h"
 
 #define RAMM 0x1FFFFFu
-enum { K_POKE, K_POKES, K_GCALL, K_STAGE, K_AI, K_PLACE, K_HOLD, K_PAD, K_PROBE, K_FB, K_LOG, K_FRONT, K_DUMP, K_CFACE, K_CSWEEP, K_CHIT, K_SPUPROBE, K_FACE, K_WATCH };
+enum { K_POKE, K_POKES, K_GCALL, K_STAGE, K_AI, K_PLACE, K_HOLD, K_PAD, K_PROBE, K_FB, K_LOG, K_FRONT, K_DUMP, K_CFACE, K_CSWEEP, K_CHIT, K_SPUPROBE, K_FACE, K_WATCH, K_SCENE, K_TDUMP, K_ALIST, K_CFWD, K_ATK, K_HEAD };
 typedef struct { int kind; uint32_t f; uint32_t u[8]; int n, every; char s[160]; double d[3]; } Ev;
 static Ev EV[512];
 static int nev;
 static const char *outdir = ".";
 static int in_call;
+static uint32_t atk_calls;
+static volatile double head_yaw_deg;
+static VrcTable MT;   /* tabla propia de cámaras (la de vrc_frame solo existe con las cámaras VR encendidas; con la IA original se escanea aquí igualmente) */
 
 typedef struct { uint32_t start, dur, every; uint16_t mask; } PadEv;
 static PadEv PADX[32];
@@ -80,6 +84,12 @@ static void load_script(const char *path) {
         else if (!strcmp(k, "csweep")) { e->kind = K_CSWEEP; sscanf(a, "%u %d %lf %lf %lf %d", &e->f, &e->u[0], &e->d[0], &e->d[1], &e->d[2], &e->n); }
         else if (!strcmp(k, "chit")) { e->kind = K_CHIT; sscanf(a, "%u %d %d", &e->f, &e->u[0], &e->n); }
         else if (!strcmp(k, "face")) { e->kind = K_FACE; sscanf(a, "%u %d %d", &e->f, &e->n, &e->u[0]); }
+        else if (!strcmp(k, "head")) { e->kind = K_HEAD; sscanf(a, "%u %lf", &e->f, &e->d[0]); }
+        else if (!strcmp(k, "atk")) { e->kind = K_ATK; sscanf(a, "%u %d", &e->f, &e->n); }
+        else if (!strcmp(k, "cfwd")) { e->kind = K_CFWD; sscanf(a, "%u %d %lf %lf", &e->f, &e->u[0], &e->d[0], &e->d[1]); }
+        else if (!strcmp(k, "alist")) { e->kind = K_ALIST; sscanf(a, "%u %d", &e->f, &e->n); }
+        else if (!strcmp(k, "tdump")) { e->kind = K_TDUMP; sscanf(a, "%u %d", &e->f, &e->n); }
+        else if (!strcmp(k, "scene")) { e->kind = K_SCENE; sscanf(a, "%u %d %d %lf", &e->f, &e->n, &e->u[0], &e->d[0]); }
         else if (!strcmp(k, "watch")) { e->kind = K_WATCH; sscanf(a, "%u %d %d", &e->f, &e->n, &e->u[0]); }
         else if (!strcmp(k, "spu")) { e->kind = K_SPUPROBE; sscanf(a, "%u %d", &e->f, &e->n); }
         else if (!strcmp(k, "pad")) { e->kind = K_PAD; unsigned m = 0, d = 0; sscanf(a, "%u %x %u", &e->f, &m, &d); if (npadx < 32) { PADX[npadx].start = e->f; PADX[npadx].mask = (uint16_t)m; PADX[npadx].dur = d; npadx++; } continue; }
@@ -108,6 +118,7 @@ static void probe(Cpu *c, uint32_t f) {
     char st[8] = {0};
     memcpy(st, psx_ram + (0x800AC568u & RAMM), 5);
     fprintf(stderr, "[ait] f=%u zona=%s jugador=(%d,%d,%d) ctl=%08x mapa=%08x\n", f, st, r16(BA_PLAYER_POS), r16(BA_PLAYER_POS + 2), r16(BA_PLAYER_POS + 4), r32(BA_PLAYER_CTRL), r32(BA_PLAYER_MAP));
+    fprintf(stderr, "[ait]   ataques(llamadas a la función de ataque)=%u\n", atk_calls);
     fprintf(stderr, "[ait]   arma=%d municion=[%d..] cargador=%d/%d estado_jugador=%08x global=%08x pausa=%d\n", r16(BA_VARS + 2 * BRIDGE_V_WEAPON), r16(BA_VARS + 2 * BRIDGE_V_WEAPON_AMMO), r16(BA_MAGAZINE), r16(BA_MAGAZINE_MAX), r32(BA_PLAYER_STATUS), r32(BA_GAME_STATUS), (int)r32(BA_PAUSE_LEVEL));
     VraiStats s; vrai_stats(&s);
     fprintf(stderr, "[ait]   vrai: instalado=%d overlay=%d reubic=%u visión=%u ampliada=%u sospechas=%u alertas_lejos=%u | sonido llam=%u reprod=%u silenc=%u | cámaras=%d parches=%d\n", s.installed, s.overlay_found,
@@ -122,7 +133,7 @@ static void probe(Cpu *c, uint32_t f) {
             fprintf(stderr, "[ait]   soldado %08x pos=(%d,%d,%d) dist_xz=%.0f | modelo: acc=%.2f dist=%u salida=%d lejos=%d\n", e->actor, sp[0], sp[1], sp[2], sqrt(dx * dx + dz * dz), e->acc, e->last_dist_q, e->last_out, e->seen_far);
         }
     }
-    const VrcTable *t = vrc_table();
+    const VrcTable *t = &MT;
     if (t) for (int i = 0; i < t->n; i++) {
         const VrcCamera *k = &t->cam[i];
         double dx = k->pos[0] - r16(BA_PLAYER_POS), dz = k->pos[2] - r16(BA_PLAYER_POS + 4);
@@ -161,8 +172,7 @@ static int stage_req(Cpu *c, const char *name, int do_req) {
 /* ---- cámaras reales: colocar, barrer alcance, golpear, sonido ---- */
 #include "spu.h"
 static const VrcCamera *cam_at(int idx) {
-    const VrcTable *t = vrc_table();
-    return (t && idx >= 0 && idx < t->n) ? &t->cam[idx] : NULL;
+    return (idx >= 0 && idx < MT.n) ? &MT.cam[idx] : NULL;
 }
 static void set_player_yaw(int yaw) {
     uint32_t ctl = r32(BA_PLAYER_CTRL);
@@ -171,7 +181,7 @@ static void set_player_yaw(int yaw) {
 /* jugador a D unidades (horizontal) de la cámara, a `ang` grados del eje de la cámara (0 = justo delante), a altura base + h, mirando a la cámara */
 static int ground_y;
 static void cam_place(const VrcCamera *c, double D, double ang, double h) {
-    double yaw = c->rot[1] * 2.0 * M_PI / 4096.0 + ang * M_PI / 180.0;
+    double yaw = ang >= 1000.0 ? (ang - 1000.0) * M_PI / 180.0 : c->rot[1] * 2.0 * M_PI / 4096.0 + ang * M_PI / 180.0;   /* ang >= 1000: rumbo absoluto (grados) = ang - 1000 */
     double x = c->pos[0] + D * sin(yaw), z = c->pos[2] + D * cos(yaw);
     place_player(x, ground_y + h, z);
     int face = (int)lrint(atan2(c->pos[0] - x, c->pos[2] - z) * 4096.0 / (2.0 * M_PI));
@@ -188,26 +198,39 @@ static void sweep_step(uint32_t f) {
     else cam_place(c, sw_d, cf_ang, cf_h);
     if (sw_t >= 3 && cam_detected(c)) sw_hit = 1;
     if (++sw_t >= sw_dwell) {
-        fprintf(stderr, "[ait] csweep cam=%d D=%.0f ang=%.0f: %s (detectado=%d modo=%d)\n", sw_idx, sw_d, cf_ang, sw_hit ? "DETECTADO" : "no", (int)r32(c->actor + 476), (int)r32(c->actor + 0x1E0));
+        { double ddx = r16(BA_PLAYER_POS) - c->pos[0], ddy = r16(BA_PLAYER_POS + 2) - c->pos[1], ddz = r16(BA_PLAYER_POS + 4) - c->pos[2];
+          fprintf(stderr, "[ait] csweep cam=%d D=%.0f ang=%.0f: %s (detectado=%d modo=%d) jugador=(%d,%d,%d) dist3d=%.0f mapa=%08x\n", sw_idx, sw_d, cf_ang, sw_hit ? "DETECTADO" : "no", (int)r32(c->actor + 476), (int)r32(c->actor + 0x1E0), r16(BA_PLAYER_POS), r16(BA_PLAYER_POS + 2), r16(BA_PLAYER_POS + 4), sqrt(ddx * ddx + ddy * ddy + ddz * ddz), r32(BA_PLAYER_MAP)); }
         if (sw_hit) { fprintf(stderr, "[ait] csweep RESULTADO cam=%d primera detección a D=%.0f (rango del script %d, mitad %d)\n", sw_idx, sw_d, c->range, c->half); sw_on = 0; return; }
         sw_t = 0; sw_d -= sw_step;
         if (sw_d < sw_d1 - 1e-9) { fprintf(stderr, "[ait] csweep RESULTADO cam=%d sin detección hasta D=%.0f\n", sw_idx, sw_d1); sw_on = 0; }
     }
     (void)f;
 }
-static void spu_dump(uint32_t f) {
-    int nv = 0;
+static int spu_prev[24]; static uint32_t spu_t0[24];
+static void spu_dump(uint32_t f) {   /* solo las voces que acaban de arrancar (envolvente 0 -> >0) */
     for (int v = 0; v < 24; v++) {
         uint32_t b = 0x1F801C00u + 16u * (uint32_t)v;
         int adsr = (int)spu_io_read(b + 0xC, 2) & 0xFFFF;
-        if (!adsr) continue;
-        int l = (int16_t)spu_io_read(b, 2), r = (int16_t)spu_io_read(b + 2, 2);
-        fprintf(stderr, "[ait]   spu f=%u voz %d: volL=%d volR=%d adsr=%d pitch=%04x\n", f, v, l, r, adsr, (unsigned)spu_io_read(b + 4, 2));
-        nv++;
+        if (adsr && !spu_prev[v]) {
+            int l = (int16_t)spu_io_read(b, 2), r = (int16_t)spu_io_read(b + 2, 2);
+            fprintf(stderr, "[ait]   spu f=%u voz NUEVA %d: volL=%d volR=%d adsr=%d pitch=%04x\n", f, v, l, r, adsr, (unsigned)spu_io_read(b + 4, 2));
+            spu_t0[v] = f;
+        }
+        if (adsr && spu_t0[v] && f == spu_t0[v] + 3) {
+            int l = (int16_t)spu_io_read(b, 2), r = (int16_t)spu_io_read(b + 2, 2);
+            fprintf(stderr, "[ait]   spu f=%u voz %d (+3 fotogramas): volL=%d volR=%d adsr=%d pitch=%04x\n", f, v, l, r, adsr, (unsigned)spu_io_read(b + 4, 2));
+        }
+        spu_prev[v] = adsr;
     }
-    if (!nv) fprintf(stderr, "[ait]   spu f=%u sin voces con envolvente\n", f);
 }
 static int spu_left;
+static void spu_step(uint32_t f) {
+    VrcSoundEvent se[8];
+    int n = vrc_sound_events(se, 8);
+    for (int i = 0; i < n; i++)
+        fprintf(stderr, "[ait]   sonido cam f=%u se=%u cam=%d dist=%.0f vol_orig=%u vol=%u pan=%u gain=%.3f reproducido=%u\n", f, se[i].se, se[i].cam_index, se[i].dist, se[i].vol_orig, se[i].vol, se[i].pan, se[i].gain, se[i].played);
+    spu_dump(f);
+}
 static int wa_left, wa_idx;
 static uint32_t wa_prev[8];
 static void watch_step(uint32_t f) {
@@ -219,12 +242,79 @@ static void watch_step(uint32_t f) {
         memcpy(wa_prev, v, sizeof v);
     }
 }
-static void spu_step(uint32_t f) {
-    VrcSoundEvent se[8];
-    int n = vrc_sound_events(se, 8);
-    for (int i = 0; i < n; i++)
-        fprintf(stderr, "[ait]   sonido cam f=%u se=%u cam=%d pos=(%d,%d,%d) dist=%.0f vol_orig=%u vol=%u pan=%u gain=%.3f reproducido=%u\n", f, se[i].se, se[i].cam_index, se[i].pos[0], se[i].pos[1], se[i].pos[2], se[i].dist, se[i].vol_orig, se[i].vol, se[i].pan, se[i].gain, se[i].played);
-    if (n) spu_dump(f);
+/* consumo de escenas VR para contar los triángulos 3D que caen sobre una cámara (visibilidad a distancia) */
+static volatile int scn_left, scn_idx; static double scn_R = 0.9;
+static struct { uint32_t scenes, with3d; double sum0, sum1, tri_all; uint32_t max0, max1; } SCN;
+static int scn_report;
+static int td_left, al_left;
+static volatile int atk_left; static uint32_t atk_f;
+#define ATK_FN 0x8002E208u   /* aplica el ataque de un blanco (bala, golpe, explosión) a los blancos dañables que toca */
+static void atk_wrap(Cpu *c) {
+    uint32_t a = c->r[4];
+    int16_t pre6[64];
+    for (int i = 0; i < 64; i++) pre6[i] = r16(0x800B7660u + 72u * (uint32_t)i + 6);
+    int16_t pre_cls[64];
+    for (int i = 0; i < 64; i++) pre_cls[i] = r16(0x800B7660u + 72u * (uint32_t)i);
+    rt_call_orig(c, ATK_FN);
+    atk_calls++;
+    if (atk_left <= 0) return;
+    if (getenv("ATK_ALL")) fprintf(stderr, "[ait] atk call f=%u a=%08x cls=%04x ra=%08x\n", atk_f, a, (uint16_t)r16(a), c->r[31]);
+    int ai = (a >= 0x800B7660u && a < 0x800B7660u + 72u * 64u) ? (int)((a - 0x800B7660u) / 72u) : -1;
+    int stamped = 0;
+    for (int i = 0; i < 64; i++) {
+        uint32_t t = 0x800B7660u + 72u * (uint32_t)i;
+        if (i != ai && pre_cls[i] && !(pre6[i] & 4) && (r16(t + 6) & 4)) {
+            fprintf(stderr, "[ait] ataque f=%u atacante#%d (cls=%04x +24=%04x +26=%d +3e=%d centro=(%d,%d,%d) mitad=(%d,%d,%d)) -> sella blanco #%d cls=%04x +3e=%d +26=%d +28=%d\n", atk_f, ai, (uint16_t)r16(a), (uint16_t)r16(a + 0x24), r16(a + 0x26), r16(a + 0x3e),
+                    r16(a + 8), r16(a + 10), r16(a + 12), r16(a + 0x10), r16(a + 0x12), r16(a + 0x14), i, (uint16_t)r16(t), r16(t + 0x3e), r16(t + 0x26), r16(t + 0x28));
+            stamped++;
+        }
+    }
+    if (!stamped) fprintf(stderr, "[ait] ataque f=%u atacante#%d cls=%04x +24=%04x +26=%d +3e=%d centro=(%d,%d,%d) mitad=(%d,%d,%d): sin blanco sellado\n", atk_f, ai, (uint16_t)r16(a), (uint16_t)r16(a + 0x24), r16(a + 0x26), r16(a + 0x3e),
+            r16(a + 8), r16(a + 10), r16(a + 12), r16(a + 0x10), r16(a + 0x12), r16(a + 0x14));
+}
+static void alist_step(uint32_t f) {   /* altas y bajas de actores en las 9 listas (nivel, dirección, función de actualización) */
+    static uint32_t seen[9][256]; static uint32_t seen_act[9][256]; static int nseen[9], first = 1;
+    uint32_t cur[9][256]; int ncur[9];
+    memset(ncur, 0, sizeof ncur);
+    for (int lv = 0; lv < 9; lv++) {
+        uint32_t base = 0x800ADDA8u + 68u * (uint32_t)lv, endn = base + 32u, node = r32(base + 4);
+        for (int st = 0; node != endn && st < 255 && node >= 0x80010000u && node < 0x80200000u; st++, node = r32(node + 4)) cur[lv][ncur[lv]++] = node;
+    }
+    for (int lv = 0; lv < 9; lv++) {
+        for (int i = 0; i < ncur[lv]; i++) {
+            int found = 0;
+            for (int k = 0; k < nseen[lv]; k++) if (seen[lv][k] == cur[lv][i]) found = 1;
+            if (!found && !first) fprintf(stderr, "[ait] actor ALTA f=%u nivel=%d nodo=%08x act=%08x\n", f, lv, cur[lv][i], r32(cur[lv][i] + 8));
+        }
+        for (int k = 0; k < nseen[lv]; k++) {
+            int found = 0;
+            for (int i = 0; i < ncur[lv]; i++) if (cur[lv][i] == seen[lv][k]) found = 1;
+            if (!found) fprintf(stderr, "[ait] actor BAJA f=%u nivel=%d nodo=%08x act=%08x\n", f, lv, seen[lv][k], seen_act[lv][k]);
+        }
+        nseen[lv] = ncur[lv];
+        for (int i = 0; i < ncur[lv]; i++) { seen[lv][i] = cur[lv][i]; seen_act[lv][i] = r32(cur[lv][i] + 8); }
+    }
+    first = 0;
+    for (int lv = 0; lv < 9; lv++) for (int i = 0; i < ncur[lv]; i++) if (r32(cur[lv][i] + 8) == 0x800771acu) {   /* bala del arma: segmento (inicio +0x110, fin +0x118 / +0x120) */
+        uint32_t n = cur[lv][i];
+        fprintf(stderr, "[ait] bala f=%u nodo=%08x +110=(%d,%d,%d) +118=(%d,%d,%d) +120=(%d,%d,%d) +128=(%d,%d,%d) jugador=(%d,%d,%d)\n", f, n, r16(n + 0x110), r16(n + 0x112), r16(n + 0x114), r16(n + 0x118), r16(n + 0x11a), r16(n + 0x11c),
+                r16(n + 0x120), r16(n + 0x122), r16(n + 0x124), r16(n + 0x128), r16(n + 0x12a), r16(n + 0x12c), r16(BA_PLAYER_POS), r16(BA_PLAYER_POS + 2), r16(BA_PLAYER_POS + 4));
+    }
+}
+static void tdump_step(uint32_t f) {   /* blancos vivos del juego (64 x 72 B), una línea por blanco que cambió o es nuevo */
+    static uint8_t prev[64][72];
+    int n = (int)r32(0x800AC000u + 0x770u + 0u) ; (void)n;
+    for (int i = 0; i < 64; i++) {
+        const uint8_t *t = psx_ram + ((0x800B7660u + 72u * (uint32_t)i) & RAMM);
+        uint16_t cls = *(const uint16_t *)t;
+        if (cls == 0) { memset(prev[i], 0, 72); continue; }
+        if (!memcmp(prev[i], t, 72)) continue;
+        { const int16_t *hh = (const int16_t *)t; if ((hh[0] == 0xdf || hh[0] == 0x9f || hh[0] == 0x14) && hh[3] == 0 && hh[0x1F] == 0 && (hh[0x1F] == 0)) { memcpy(prev[i], t, 72); continue; } }
+        memcpy(prev[i], t, 72);
+        const int16_t *h = (const int16_t *)t;
+        fprintf(stderr, "[ait] blanco f=%u #%d cls=%04x +2=%04x +4=%04x +6=%04x centro=(%d,%d,%d) mitad=(%d,%d,%d) +24=%04x +26=%d +28=%d +2a=%d +3c=%d +3e=%d +40=%d +42=%d +44=%08x\n", f, i, h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[8], h[9], h[10],
+                h[0x12], h[0x13], h[0x14], h[0x15], h[0x1E], h[0x1F], h[0x20], h[0x21], *(const uint32_t *)(t + 0x44));
+    }
 }
 static void chit_apply(const VrcCamera *c, int mode) {
     if (!c || !c->target) return;
@@ -259,12 +349,26 @@ static void front_step(uint32_t f) {
 static void hook(void *cpu, uint32_t f) {
     if (in_call) return;
     Cpu *c = cpu;
+    vrc_scan(psx_ram, &MT);
     if (front_left > 0) { front_step(f); front_left--; }
     if (hold_left > 0) { place_player(hold_p[0], hold_p[1], hold_p[2]); hold_left--; }
     if (cf_left > 0) { const VrcCamera *cc = cam_at(cf_idx); if (cc) cam_place(cc, cf_d, cf_ang, cf_h); cf_left--; }
     if (sw_on) sweep_step(f);
     if (wa_left > 0) { watch_step(f); wa_left--; }
+    if (scn_report && scn_left <= 0 && SCN.scenes) {
+        const VrcCamera *cc = cam_at(scn_idx);
+        double dd = 0;
+        if (cc) { double dx = cc->pos[0] - r16(BA_PLAYER_POS), dy = cc->pos[1] - r16(BA_PLAYER_POS + 2), dz = cc->pos[2] - r16(BA_PLAYER_POS + 4); dd = sqrt(dx * dx + dy * dy + dz * dz); }
+        fprintf(stderr, "[ait] scene cam=%d dist3d=%.0f R=%.2fm: escenas=%u con3D=%u triángulos3D(medio)=%.0f | triángulos sobre la cámara (z normal / z espejo): medio %.1f / %.1f, máx %u / %u\n", scn_idx, dd, scn_R, SCN.scenes, SCN.with3d,
+                SCN.with3d ? SCN.tri_all / SCN.with3d : 0.0, SCN.with3d ? SCN.sum0 / SCN.with3d : 0.0, SCN.with3d ? SCN.sum1 / SCN.with3d : 0.0, SCN.max0, SCN.max1);
+        scn_report = 0;
+    }
     if (spu_left > 0) { spu_step(f); spu_left--; }
+    if (scn_left > 0) scn_left--;
+    atk_f = f;
+    if (atk_left > 0) atk_left--;
+    if (td_left > 0) { tdump_step(f); td_left--; }
+    if (al_left > 0) { alist_step(f); al_left--; }
     for (int i = 0; i < nev; i++) {
         Ev *e = &EV[i];
         if (e->kind == K_PROBE) { if (f >= e->f && e->n > 0 && (f - e->f) % (uint32_t)e->every == 0) { probe(c, f); e->n--; e->u[7] = 1; } continue; }
@@ -287,6 +391,19 @@ static void hook(void *cpu, uint32_t f) {
         case K_CSWEEP: ground_y = r16(BA_PLAYER_POS + 2); sw_on = 1; sw_idx = (int)e->u[0]; sw_d = e->d[0]; sw_d1 = e->d[1]; sw_step = e->d[2]; sw_dwell = e->n; sw_t = 0; sw_hit = 0; cf_ang = 0; cf_h = 0; sw_f0 = f; break;
         case K_CHIT: chit_apply(cam_at((int)e->u[0]), e->n ? e->n : 1); break;
         case K_FACE: { const VrcCamera *cc = cam_at((int)e->u[0]); if (cc) { double dx = cc->pos[0] - r16(BA_PLAYER_POS), dz = cc->pos[2] - r16(BA_PLAYER_POS + 4); set_player_yaw((int)lrint(atan2(dx, dz) * 4096.0 / (2.0 * M_PI))); } break; }
+        case K_SCENE: memset(&SCN, 0, sizeof SCN); scn_idx = (int)e->u[0]; scn_R = e->d[0] > 0 ? e->d[0] : 0.9; scn_left = e->n; scn_report = 1; break;
+        case K_TDUMP: td_left = e->n; break;
+        case K_CFWD: { const VrcCamera *cc = cam_at((int)e->u[0]);
+            uint32_t ctl = r32(BA_PLAYER_CTRL);
+            if (cc && ctl >= 0x80000000u && ctl < 0x80200000u) {
+                double yaw = (r16(ctl + BC_ROT + 2) & 4095) * 2.0 * M_PI / 4096.0;
+                int16_t np[3] = {(int16_t)lrint(r16(BA_PLAYER_POS) + e->d[0] * sin(yaw)), (int16_t)lrint(r16(BA_PLAYER_POS + 2) + e->d[1]), (int16_t)lrint(r16(BA_PLAYER_POS + 4) + e->d[0] * cos(yaw))};
+                for (int q = 0; q < 3; q++) w16(cc->actor + 0x20u + 2u * q, np[q]);
+                fprintf(stderr, "[ait] cfwd f=%u cam=%d -> (%d,%d,%d) (jugador yaw=%d)\n", f, (int)e->u[0], np[0], np[1], np[2], r16(ctl + BC_ROT + 2));
+            } break; }
+        case K_HEAD: head_yaw_deg = e->d[0]; break;
+        case K_ATK: if (!rt_patched(ATK_FN)) { int rr = rt_patch(ATK_FN, atk_wrap); fprintf(stderr, "[ait] parche de traza del ataque: %d\n", rr); } atk_left = e->n; break;
+        case K_ALIST: al_left = e->n; break;
         case K_WATCH: wa_left = e->n; wa_idx = (int)e->u[0]; memset(wa_prev, 0xff, sizeof wa_prev); break;
         case K_SPUPROBE: spu_left = e->n; break;
         case K_PLACE: place_player(e->d[0], e->d[1], e->d[2]); break;
@@ -320,8 +437,46 @@ int main(int argc, char **argv) {
         if (f == last) { usleep(200); continue; }
         last = f;
         mv_host_pad(pad_at(f), 128, 128, 128, 128);
-        float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1.65f, 0, 1};
+        double hy = head_yaw_deg * M_PI / 180.0; float hc = (float)cos(hy), hs = (float)sin(hy);
+        float m[16] = {hc, 0, -hs, 0, 0, 1, 0, 0, hs, 0, hc, 0, 0, 1.65f, 0, 1};
         mv_vr_set_head(m, 0.0);
+        if (scn_left > 0) for (int k = 0; k < 4; k++) {
+            VrScene sc;
+            if (!mv_host_scene(&sc)) break;
+            const VrcCamera *cc = cam_at(scn_idx);
+            SCN.scenes++;
+            if (!sc.has_3d || !sc.world_valid || !cc) continue;
+            SCN.with3d++;
+            float ex = (cc->pos[0] - sc.origin_game[0]) * sc.scale, ey = (cc->pos[1] - sc.origin_game[1]) * sc.scale, ez = (cc->pos[2] - sc.origin_game[2]) * sc.scale;
+            uint32_t h0 = 0, h1 = 0, tall = 0;
+            for (uint32_t bi = 0; bi < sc.nb; bi++) {
+                const VrBatch *b = &sc.b[bi];
+                if (b->kind > 1) continue;
+                for (uint32_t j = 0; j + 2 < b->count; j += 3) {
+                    const VrVtx *v = &sc.v[b->first + j];
+                    tall++;
+                    int in0 = 1, in1 = 1;
+                    for (int q = 0; q < 3; q++) {
+                        double dx = v[q].pos[0] - ex, dy = v[q].pos[1] - ey, dz0 = v[q].pos[2] - ez, dz1 = v[q].pos[2] + ez;
+                        if (sqrt(dx * dx + dy * dy + dz0 * dz0) > scn_R) in0 = 0;
+                        if (sqrt(dx * dx + dy * dy + dz1 * dz1) > scn_R) in1 = 0;
+                    }
+                    h0 += in0; h1 += in1;
+                }
+            }
+            if (getenv("SCN_DBG") && (SCN.with3d % 10) == 1) {
+                double m0 = 1e9, m1 = 1e9; float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
+                for (uint32_t bi = 0; bi < sc.nb; bi++) { const VrBatch *b = &sc.b[bi]; if (b->kind > 1) continue;
+                    for (uint32_t j = 0; j < b->count; j++) { const VrVtx *v = &sc.v[b->first + j];
+                        double dx = v->pos[0] - ex, dy = v->pos[1] - ey, d0 = sqrt(dx * dx + dy * dy + (v->pos[2] - ez) * (v->pos[2] - ez)), d1 = sqrt(dx * dx + dy * dy + (v->pos[2] + ez) * (v->pos[2] + ez));
+                        if (d0 < m0) m0 = d0; if (d1 < m1) m1 = d1;
+                        for (int q = 0; q < 3; q++) { if (v->pos[q] < lo[q]) lo[q] = v->pos[q]; if (v->pos[q] > hi[q]) hi[q] = v->pos[q]; } } }
+                fprintf(stderr, "[ait] scene-dbg esperado=(%.2f,%.2f,%.2f) origen=(%.0f,%.0f,%.0f) ojo=(%.2f,%.2f,%.2f) escala=%.4f vértice más cercano z/-z: %.2f / %.2f m; caja 3D=(%.1f..%.1f, %.1f..%.1f, %.1f..%.1f)\n", ex, ey, ez, sc.origin_game[0], sc.origin_game[1], sc.origin_game[2], sc.eye_vr[0], sc.eye_vr[1], sc.eye_vr[2], sc.scale, m0, m1, lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
+            }
+            SCN.tri_all += tall; SCN.sum0 += h0; SCN.sum1 += h1;
+            if (h0 > SCN.max0) SCN.max0 = h0;
+            if (h1 > SCN.max1) SCN.max1 = h1;
+        }
         for (int i = 0; i < nev; i++) if (EV[i].kind == K_FB && EV[i].f == f) {
             int w = 0, h = 0;
             if (mv_host_framebuffer(fbuf, sizeof fbuf, &w, &h, 0)) {
