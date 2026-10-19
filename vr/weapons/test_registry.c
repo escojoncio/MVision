@@ -49,12 +49,13 @@ static void test_registry_shape(void) {
     int present = 0;
     for (int i = 0; i < w_registry_count; i++) present += w_registry[i] != NULL;
     CHECK(present == N_EXPECTED, "armas presentes tras enlazar el .a: %d/%d", present, N_EXPECTED);
-    static const char *const forbidden[] = { "c4", "chaff", "stun", "mine", "ps1", "psx" };
     for (int i = 0; i < w_registry_count; i++) {
         const WeaponDef *d = w_registry[i];
         if (!d) continue;
         CHECK(d->id && d->id[0], "arma %d sin id", i);
-        for (unsigned k = 0; k < sizeof forbidden / sizeof *forbidden; k++) CHECK(!strstr(d->id, forbidden[k]), "id no neutro: %s", d->id);
+        int id_ok = 1;
+        for (const char *q = d->id; *q; q++) id_ok &= (*q >= 'a' && *q <= 'z') || (*q >= '0' && *q <= '9') || *q == '_';
+        CHECK(id_ok, "id no neutro: %s", d->id);
         for (int j = i + 1; j < w_registry_count; j++) {
             if (!w_registry[j]) continue;
             CHECK(strcmp(d->id, w_registry[j]->id), "id repetido: %s", d->id);

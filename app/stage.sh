@@ -2,7 +2,7 @@
 # Prepara app/.stage/ con los fuentes que compila el target (todo local, fuera del repo; .stage/ está ignorado):
 #   .stage/runtime  runtime/*.c y *.h (sin headless ni pruebas; nogen.c entra: el runtime corre sin código generado)
 #   .stage/vr/<x>   vr/{bridge,camera,input,scene,host,body,radar,hands,weapons,gameplay,ai}: solo el código de biblioteca (sin pruebas ni herramientas con main)
-#   .stage/metal    render/metal/vr_*.metal y vr_types.h (ps1_gpu.metal es del renderer de referencia: no entra)
+#   .stage/metal    render/metal/vr_*.metal y vr_types.h (rg_gpu.metal es del renderer de referencia: no entra)
 #   .stage/res      sigs_hle.json (firmas del SDK enmascaradas, sin código del juego)
 #   .stage/extras   ficheros Swift opcionales (EXTRAS_DIR)
 # No se copia código generado ni el ejecutable del juego: el EXE sale del disco del usuario en tiempo de ejecución.
@@ -37,9 +37,10 @@ cp ../render/metal/vr_*.metal ../render/metal/vr_types.h .stage/metal/
 cp "$SIGS_HLE" .stage/res/sigs_hle.json
 
 if [ -n "${EXTRAS_DIR:-}" ]; then
-  for n in PlayStationController LogFiles Language; do
-    p="$EXTRAS_DIR/platform/visionos/Sources/$n.swift"
-    [ -f "$p" ] && cp "$p" ".stage/extras/$n.swift" && echo "extra: $n.swift"
+  # Ficheros opcionales del repo de extras: los controladores de mando (patrón *Controller.swift) y los auxiliares fijos.
+  for p in "$EXTRAS_DIR"/platform/visionos/Sources/*Controller.swift \
+           "$EXTRAS_DIR/platform/visionos/Sources/LogFiles.swift" "$EXTRAS_DIR/platform/visionos/Sources/Language.swift"; do
+    [ -f "$p" ] && cp "$p" ".stage/extras/$(basename "$p")" && echo "extra: $(basename "$p")"
   done
 fi
 echo "stage: $(ls .stage/runtime/*.c | wc -l) .c de runtime, $(ls .stage/vr/*/*.c | wc -l) .c de vr, $(ls .stage/metal/*.metal | wc -l) .metal"

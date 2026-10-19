@@ -181,12 +181,12 @@ static int mat_col_norm_ok(const int16_t m[3][3]) {
 
 static uint32_t read_camera(Ram m, BridgeState *s) {
     uint32_t ok = 0;
-    uint32_t e = BA_VIEW_CHANNEL + BCH_EYE;
+    uint32_t e = BA_VIEW_CHANNEL + BCH_CAM;
     for (int r = 0; r < 3; r++)
         for (int c = 0; c < 3; c++) s->eye_axes[r][c] = rds16(m, e + 2u * (uint32_t)(r * 3 + c));
     for (int i = 0; i < 3; i++) {
         s->eye_pos[i] = (int32_t)rd32(m, e + 20u + 4u * (uint32_t)i);
-        s->view_t[i] = (int32_t)rd32(m, BA_VIEW_CHANNEL + BCH_EYE_INV + 20u + 4u * (uint32_t)i);
+        s->view_t[i] = (int32_t)rd32(m, BA_VIEW_CHANNEL + BCH_CAM_INV + 20u + 4u * (uint32_t)i);
     }
     s->eye_focal = rds16(m, BA_VIEW_CHANNEL + BCH_SCREEN);
     int pos_ok = 1;

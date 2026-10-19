@@ -517,7 +517,7 @@ int vrbody_apply(uint8_t *ram) {
     /* matriz de vista del motor: la del canal (mundo->vista); si el screen del torso no coincide (ajuste vertical activo, etc.)
      * se deduce del propio torso: screen = EYE o world */
     {
-        Xf ch; xf_read(ram, BA_VIEW_CHANNEL + BCH_EYE_INV, &ch);
+        Xf ch; xf_read(ram, BA_VIEW_CHANNEL + BCH_CAM_INV, &ch);
         Xf pr; Xf tw = torso_w; xf_quant(&tw);
         xf_comp(&pr, &ch, &tw);
         float e = 0;

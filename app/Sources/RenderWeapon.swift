@@ -4,19 +4,19 @@ import Foundation
 import QuartzCore
 
 // Renderer del arma en mano: dibuja la geometría 3D propia (piezas del modelo original cortado + objetos sueltos) que entrega
-// vr/hands (mv_host_hands -> VrHandsFrame), DENTRO del mismo pase de escena de PS1Renderer. SIN COMPILAR (escrito sin
+// vr/hands (mv_host_hands -> VrHandsFrame), DENTRO del mismo pase de escena de RGRenderer. SIN COMPILAR (escrito sin
 // toolchain Apple): revisar en la primera compilación. Shaders: render/metal/vr_weapon.metal.
 //
-// Estado que replica de PS1Renderer.encodeScene: Z invertida (profundidad limpiada a 0, compare greaterEqual, escritura
+// Estado que replica de RGRenderer.encodeScene: Z invertida (profundidad limpiada a 0, compare greaterEqual, escritura
 // activa), cullMode .none (doble cara; el shader invierte la normal de las caras vistas desde dentro), MSAA con el mismo
 // sampleCount, amplificación de vértices si `layered` (el encoder ya trae setVertexAmplificationCount y viewports; el
 // pipeline declara maxVertexAmplificationCount = viewCount), formatos de color/profundidad (con stencil si hace falta).
 // Matrices: views = mundo->ojo, projections = ojo->clip (clip = P * V * mundo), mundo VR en metros, Y arriba, -Z delante.
 //
-// USO (ver el informe de integración): crear una vez junto a PS1Renderer con los mismos formatos/sampleCount/viewCount y,
+// USO (ver el informe de integración): crear una vez junto a RGRenderer con los mismos formatos/sampleCount/viewCount y,
 // dentro del pase de escena del ÚLTIMO segmento (el que se resuelve), llamar a encode(...) tras los opacos del juego.
 // encode PISA los enlaces del encoder (búfer de vértices 0-2, textura 0, estado de profundidad, sesgo de profundidad):
-// si después se siguen dibujando lotes de la escena hay que volver a enlazarlos (ver PS1Renderer.bindSceneState).
+// si después se siguen dibujando lotes de la escena hay que volver a enlazarlos (ver RGRenderer.bindSceneState).
 
 // Mismo layout que VrWpnFrame / VrWpnDraw de vr_weapon.metal (192 y 64 bytes).
 struct WpnFrameU {
@@ -109,7 +109,7 @@ final class WeaponRenderer {
         }
         if MemoryLayout<VrHandsVertex>.stride != 36 { print("[WeaponRenderer] VrHandsVertex no mide 36 bytes") }
         let dd = MTLDepthStencilDescriptor()
-        dd.depthCompareFunction = .greaterEqual    // Z invertida, igual que dsOpaque de PS1Renderer
+        dd.depthCompareFunction = .greaterEqual    // Z invertida, igual que dsOpaque de RGRenderer
         dd.isDepthWriteEnabled = true
         depthState = device.makeDepthStencilState(descriptor: dd)
         let sd = MTLDepthStencilDescriptor()
@@ -147,7 +147,7 @@ final class WeaponRenderer {
             if k.layered { d.maxVertexAmplificationCount = viewCount }
             d.colorAttachments[0].pixelFormat = k.color
             d.depthAttachmentPixelFormat = k.depth
-            if k.depth == .depth32Float_stencil8 { d.stencilAttachmentPixelFormat = k.depth }   // igual que PS1Renderer (depth24Unorm_stencil8 no existe en visionOS)
+            if k.depth == .depth32Float_stencil8 { d.stencilAttachmentPixelFormat = k.depth }   // igual que RGRenderer (depth24Unorm_stencil8 no existe en visionOS)
             let p = try device.makeRenderPipelineState(descriptor: d)
             pipes[k] = p
             return p

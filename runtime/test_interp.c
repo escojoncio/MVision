@@ -7,8 +7,8 @@
 
 void interp_call(Cpu *c, uint32_t entry);
 extern int interp_log_enabled;
-void hle_setjmp(Cpu *c);
-void hle_longjmp(Cpu *c);
+void hle_jmp_save(Cpu *c);
+void hle_jmp_restore(Cpu *c);
 jmp_buf *rt_sj_slot(Cpu *c, uint32_t buf);
 void rt_sj_resumed(Cpu *c);
 
@@ -18,9 +18,9 @@ static void nat_triple(Cpu *c) { c->r[2] = c->r[4] * 3; }
 static int sj_hits;
 static void nat_sj(Cpu *c) {
     uint32_t buf = c->r[4];
-    if (setjmp(*rt_sj_slot(c, buf))) rt_sj_resumed(c); else hle_setjmp(c);
+    if (setjmp(*rt_sj_slot(c, buf))) rt_sj_resumed(c); else hle_jmp_save(c);
     sj_hits++;
-    if (c->r[2] == 0) { c->r[4] = buf; c->r[5] = 7; hle_longjmp(c); }
+    if (c->r[2] == 0) { c->r[4] = buf; c->r[5] = 7; hle_jmp_restore(c); }
 }
 const FuncEntry rt_func_table[] = {{0x80030000u, nat_triple}, {0x80030100u, nat_sj}};
 const unsigned rt_func_count = 2;
@@ -219,7 +219,7 @@ static void t_codewrite(Cpu *c) {
     interp_call(c, 0x80030000); EQ(c->r[V0], 2);
     mem_w8(c, 0x80030000, 3); interp_call(c, 0x80030000); EQ(c->r[V0], 3);
     mem_w16(c, 0xA0030000, 4); interp_call(c, 0x80030000); EQ(c->r[V0], 4);
-    uint32_t w = ADDIU(V0, 0, 5); memcpy(&psx_ram[0x30000], &w, 4);
+    uint32_t w = ADDIU(V0, 0, 5); memcpy(&emu_ram[0x30000], &w, 4);
     rt_code_invalidate(0x80030000, 4); interp_call(c, 0x80030000); EQ(c->r[V0], 5);
     pc_asm = 0x80030200; emit(JR_RA); emit(ADDIU(V1, 0, 1));    /* delay slot */
     interp_call(c, 0x80030200); EQ(c->r[V1], 1);

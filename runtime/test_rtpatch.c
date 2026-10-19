@@ -137,7 +137,7 @@ static void t_busy_limits(Cpu *c) {
 static void t_code(Cpu *c) {
     put_g(); put_f();
     uint32_t exp[3], neu[3];
-    for (int i = 0; i < 3; i++) memcpy(&exp[i], psx_ram + 0x21000 + 4 * i, 4);
+    for (int i = 0; i < 3; i++) memcpy(&exp[i], emu_ram + 0x21000 + 4 * i, 4);
     memcpy(neu, exp, sizeof neu);
     neu[2] = ADDIU(V0, A0, 7);                  /* g(a0) = a0 + 7 */
     EQ(run_f(c, 4), 105);                        /* bloques en caché */

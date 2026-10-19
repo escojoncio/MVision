@@ -1,7 +1,7 @@
 #pragma once
 /* vr_scene: ensamblador de escena estéreo. Convierte una lista de dibujo capturada (GpuDrawList, runtime/gpu.h)
  * más el estado del puente (BridgeState) en geometría 3D en un espacio "mundo VR" (metros, Y arriba, mano
- * derecha) y en primitivas 2D de pantalla PS1 (HUD, texto, menús), listas para que el renderer las pinte por ojo.
+ * derecha) y en primitivas 2D de pantalla original (HUD, texto, menús), listas para que el renderer las pinte por ojo.
  * C99, sin dependencias de plataforma; no llama al runtime (solo lee las estructuras).
  *
  * ---------------------------------------------------------------------------------------------------------
@@ -9,7 +9,7 @@
  *   0 = 3D opaco        triángulos en mundo VR (pos en METROS).
  *   1 = 3D semitransp.  igual; el renderer los pinta después de los opacos, sin escribir profundidad.
  *   3 = filtro de pantalla (ver "Clase 3" abajo): primitivas 2D que actúan sobre la imagen ya dibujada, NO son HUD.
- *   2 = 2D / HUD        triángulos en coordenadas de pantalla PS1 (pos = {x, y, 0}, píxeles enteros con el offset
+ *   2 = 2D / HUD        triángulos en coordenadas de pantalla original (pos = {x, y, 0}, píxeles enteros con el offset
  *                       de dibujo ya sumado), para la textura del panel HUD. Rects y líneas se convierten a
  *                       triángulos (líneas: cuadrilátero de 1 px, centrado en los píxeles y alargado 0,5 px por extremo). VR_F_2D siempre activo en flags.
  *
@@ -57,15 +57,15 @@
    NO son filtro: el borrado de pantalla (rect opaco negro a pantalla completa, primera operación de cada lista) ni el rect de máscara
  *   (negro, GPU_F_MASK_SET): son mantenimiento de la GPU; NO se emiten (opts.drop_clear=1 por defecto; VrStats.n_clear los cuenta) porque en el panel HUD
  *   (transparente por defecto) dejarían un fondo negro opaco a pantalla completa. Con drop_clear=0 siguen en la clase 2 y el renderer debe ignorarlos.
- *   Datos: los triángulos van en batches kind=3 con el MISMO formato que la clase 2 (pos = píxeles de pantalla PS1 con offset sumado, z=0;
+ *   Datos: los triángulos van en batches kind=3 con el MISMO formato que la clase 2 (pos = píxeles de pantalla original con offset sumado, z=0;
  *   uv = texels de la página de textura tpage; flags con VR_F_2D | VR_F_FILTER | VR_F_RECT si era rect), en orden de dibujo, dentro de cada
  *   época después de la clase 2. Además VrScene.filter resume lo que el renderer necesita sin interpretar 260 tiras:
  *     tint[3]   multiplicador por canal (color de la tira / 128; 1,1,1 si la textura va en crudo): rgb_ojo *= tint (aquí 0,5 / 1 / 0,5 = verde).
- *     dv[], du[]  por fila de pantalla PS1 (índice = y - area_y; area = src->disp): desplazamiento en píxeles PS1 de la fila fuente respecto a
+ *     dv[], du[]  por fila de pantalla original (índice = y - area_y; area = src->disp): desplazamiento en píxeles original de la fila fuente respecto a
  *                 la de destino (fuente = destino + d). rowcov[i]=1 si esa fila la cubre una tira. Se aplica a la imagen del ojo así: para el
- *                 píxel del ojo, calcular la fila PS1 equivalente r (por su ángulo vertical: r = area_h/2 + tan(ang)*H_motor, H_motor = proj_h del
+ *                 píxel del ojo, calcular la fila original equivalente r (por su ángulo vertical: r = area_h/2 + tan(ang)*H_motor, H_motor = proj_h del
  *                 motor), tomar d(r) (interpolado) y muestrear la imagen del ojo en el ángulo equivalente a la fila r + d(r).
- *     cover_rgb[3], cover_abr  último recubrimiento semitransparente (color/255 y modo de mezcla PS1) para pintarlo como capa fija.
+ *     cover_rgb[3], cover_abr  último recubrimiento semitransparente (color/255 y modo de mezcla original) para pintarlo como capa fija.
      proj_h, cx_col, cy_row  proyección del motor para convertir ángulos <-> filas de la imagen original: H (px por unidad de tangente) y centro óptico (columna, fila) RELATIVOS a area
                  (cx_col = rx - area_x, cy_row = ry - area_y con (rx,ry) el centro del mundo de arriba; por defecto 160, centro de area). Se rellenan siempre
                  (con o sin filtro). Modelo validado en camtest (error medio 0,9 sobre 255): para la fila y del ojo, con cy_img/f_eye = fila del punto principal y focal
@@ -80,10 +80,10 @@
  *   a) varios recubrimientos: covers_*[] (los 4 últimos, en orden; p. ej. el tinte aditivo de las gafas y un destello/fundido a la vez). El 1.º tinte NV es verde aditivo
  *      (56,120,40), el térmico rojo aditivo (80,0,0); la paleta ya viene convertida por el propio juego (se reescribe la CLUT en VRAM), no hay que hacer nada en 3D.
  *   b) líneas de exploración: rects semitransparentes SIN textura, de >= 90 % del ancho de la imagen mostrada y alto <= 2, repetidos cada `scan_pitch` filas (gafas: 1 fila cada 2, resta 64/255).
- *      No salen en el panel: n_scan/scan_* las describen para repintarlas en la vista (fila PS1 equivalente r = cy_row + proj_h*tan; cobertura = (r - scan_phase) mod pitch < scan_h).
+ *      No salen en el panel: n_scan/scan_* las describen para repintarlas en la vista (fila original equivalente r = cy_row + proj_h*tan; cobertura = (r - scan_phase) mod pitch < scan_h).
  *   c) máscara de visión (frame): con >= 8 polígonos planos de restar-blanco u opacos negros Y >= 8 polígonos degradados semitransparentes de resta, SIN textura, 2D (la mira
  *      de la máscara de gas, de la caja y de otros visores): todos se emiten a kind 3 y se vuelcan sumados en filter.frame (resta por celda, 160x128). El renderer la aplica en
- *      el espacio angular de la cabeza (celda = fila/columna PS1 equivalentes), con resta total (255) fuera de la imagen original; así el marco rodea TODO el campo del visor en vez
+ *      el espacio angular de la cabeza (celda = fila/columna original equivalentes), con resta total (255) fuera de la imagen original; así el marco rodea TODO el campo del visor en vez
  *      de quedar en el panel flotante.
  *
  * Desplazamiento de proyección por primitiva (OFX/OFY) y centro del mundo
@@ -112,7 +112,7 @@
  *   uv: texels 0..255 de la página (floats, sin ventana de textura; si la primitiva tiene ventana E2 está en
  *       VrScene.states[v.pad]). Para rects con flip, u decrece (u1 = u - w).
  *   rgba: r | g<<8 | b<<16 | a<<24 (a = 255). Color de vértice (planos: el de la primitiva).
- *   clut = (clx/16) | (cly << 6); tpage = (tx/64) | ((ty/256)<<4) | (abr<<5) | (tp<<7)  (formato PS1 GP0(E1h)).
+ *   clut = (clx/16) | (cly << 6); tpage = (tx/64) | ((ty/256)<<4) | (abr<<5) | (tp<<7)  (formato original GP0(E1h)).
  *   flags = GPU_F_* (gpu.h, bits 0..9) | VR_F_*.
  *   pad = índice en VrScene.states (ventana de textura + recorte de la primitiva).
  */
@@ -122,7 +122,7 @@
 
 enum {
     VR_F_FLIPPED = 0x0800, /* se permutaron dos vértices para dejar el frente (cara vista por la cámara del juego) antihorario */
-    VR_F_2D = 0x1000,      /* primitiva 2D (pantalla PS1) */
+    VR_F_2D = 0x1000,      /* primitiva 2D (pantalla original) */
     VR_F_LINE = 0x2000,    /* era una línea (cuadrilátero de 1 px) */
     VR_F_RECT = 0x4000,    /* era un rect/sprite */
     VR_F_FILTER = 0x8000   /* primitiva de filtro de pantalla (clase 3) */
@@ -183,10 +183,10 @@ typedef struct {
 typedef struct {
     int active;                 /* 1 si hay primitivas de clase 3 */
     int n_strips, n_polys, n_cover;
-    int area[4];                /* x, y, w, h de pantalla PS1 (src->disp) */
+    int area[4];                /* x, y, w, h de pantalla original (src->disp) */
     float tint[3];              /* multiplicador por canal (def. 1,1,1) */
     int nrows;                  /* filas con tira */
-    float dv[VR_FILTER_ROWS], du[VR_FILTER_ROWS];  /* desplazamiento fuente-destino por fila (px PS1) */
+    float dv[VR_FILTER_ROWS], du[VR_FILTER_ROWS];  /* desplazamiento fuente-destino por fila (px original) */
     uint8_t rowcov[VR_FILTER_ROWS];
     float cover_rgb[3]; int cover_abr;  /* último recubrimiento semitransparente; cover_abr<0 si no hay */
     /* proyección del motor (ver "Clase 3"): se rellenan siempre. Defecto 160 / centro de area (160,128 con 320x256). */
@@ -196,8 +196,8 @@ typedef struct {
     int n_covers;               /* recubrimientos semitransparentes en orden de dibujo (los VR_FILTER_COVERS últimos); cover_rgb/cover_abr = el último */
     float covers_rgb[VR_FILTER_COVERS][3]; int covers_abr[VR_FILTER_COVERS];
     int n_scan;                 /* líneas de exploración detectadas (0 = no hay) */
-    float scan_rgb[3]; int scan_abr;   /* color/255 y modo de mezcla PS1 de cada línea (gafas: 64/255 y resta) */
-    float scan_pitch, scan_phase, scan_h;   /* periodo (filas PS1), fila de la primera línea mod periodo (relativa a area[1]) y alto de cada línea */
+    float scan_rgb[3]; int scan_abr;   /* color/255 y modo de mezcla original de cada línea (gafas: 64/255 y resta) */
+    float scan_pitch, scan_phase, scan_h;   /* periodo (filas original), fila de la primera línea mod periodo (relativa a area[1]) y alto de cada línea */
     int scan_after;             /* nº de covers_*[] (de los conservados) dibujados ANTES de las líneas: el orden importa (p. ej. tinte, líneas, y luego el velo gris de la mira) */
     int frame_on;               /* 1 si hay máscara de visión: frame[] válido */
     const uint8_t *frame;       /* frame_w*frame_h bytes: resta (0..255 = 0..1, por canal, en espacio gamma original) que la máscara aplica a cada celda de la imagen mostrada

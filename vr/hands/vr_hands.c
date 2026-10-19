@@ -36,7 +36,7 @@ void vrhands_default_config(VrHandsConfig *c) {
     c->grip_manual = wpose_identity();
     c->grip_pitch_deg = 0.0f;
     c->cull_dist = 4.0f;
-    /* luz fija de arriba, algo hacia delante y a la izquierda (sombra suave hacia abajo-derecha): estilo de juego de PS1 */
+    /* luz fija de arriba, algo hacia delante y a la izquierda (sombra suave hacia abajo-derecha): estilo de juego de original */
     c->light_dir[0] = -0.30f; c->light_dir[1] = 0.85f; c->light_dir[2] = -0.43f;
     c->ambient = 0.78f; c->diffuse = 0.62f;
 }

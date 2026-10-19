@@ -8,7 +8,7 @@ import QuartzCore
 /// Bucle de render inmersivo en hilo propio (nunca MainActor).
 ///
 /// Por frame: queryNextFrame -> startUpdate/endUpdate -> predictTiming -> espera a optimalInputTime ->
-/// startSubmission -> queryDrawable -> pose prevista (ARKit) en presentationTime -> PS1Renderer.encode
+/// startSubmission -> queryDrawable -> pose prevista (ARKit) en presentationTime -> RGRenderer.encode
 /// (a texturas MSAA propias con resolve a la textura del drawable) -> pase final (resolución de profundidad
 /// MSAA + panel 2D) -> encodePresent -> commit -> endSubmission.
 ///
@@ -25,7 +25,7 @@ final class XRRenderLoop {
     private let stopLock = NSLock()
     private var stopFlag = false
 
-    private var renderer: PS1Renderer!
+    private var renderer: RGRenderer!
     private var finalPass: XRFinalPass!
     private var presenter: XRPresenter!                        // pantalla de cine, paneles del HUD, menú VR (XRPresent.swift)
     private var wasBlocked = false
@@ -84,7 +84,7 @@ final class XRRenderLoop {
     // MARK: hilo
 
     private func run() {
-        renderer = PS1Renderer(device: device, colorFormat: colorFormat, depthFormat: depthFormat,
+        renderer = RGRenderer(device: device, colorFormat: colorFormat, depthFormat: depthFormat,
                                sampleCount: sampleCount, viewCount: viewCount)
         guard let fp = XRFinalPass(device: device, colorFormat: colorFormat, depthFormat: depthFormat, layered: layered) else {
             Storage.log("xr: no se pudieron crear los pipelines del pase final")
@@ -287,7 +287,7 @@ final class XRRenderLoop {
     }
 
     /// Segunda vista de la escena pedida por el arma (cámara del visor / del misil): matrices en el espacio recentrado. nil si no hace falta renderizarla.
-    private func auxView(_ sv: MvVrSpecialView, _ drawable: LayerRenderer.Drawable) -> PS1Renderer.AuxView? {
+    private func auxView(_ sv: MvVrSpecialView, _ drawable: LayerRenderer.Drawable) -> RGRenderer.AuxView? {
         let wantsAux = sv.kind == Int32(MV_VIEW_SCOPE) || (sv.kind == Int32(MV_VIEW_MISSILE) && sv.ended == 0)
         guard wantsAux, sv.cam_valid != 0, sv.tex_w >= 16, sv.tex_h >= 16, sv.tex_w <= 2048, sv.tex_h <= 2048 else { return nil }
         let vals = [sv.cam_pos.0, sv.cam_pos.1, sv.cam_pos.2, sv.cam_rot.0, sv.cam_rot.1, sv.cam_rot.2, sv.cam_rot.3, sv.cam_fov_y]
@@ -299,7 +299,7 @@ final class XRRenderLoop {
         let aspect = Float(sv.tex_w) / Float(sv.tex_h)
         let r = drawable.depthRange
         let proj = XRMath.projection(tangents: SIMD4<Float>(t * aspect, t * aspect, t, t), near: min(r.x, r.y), far: max(r.x, r.y))
-        return PS1Renderer.AuxView(view: cam.inverse, proj: proj, width: Int(sv.tex_w), height: Int(sv.tex_h),
+        return RGRenderer.AuxView(view: cam.inverse, proj: proj, width: Int(sv.tex_w), height: Int(sv.tex_h),
                                    pos: simd_float4(sv.cam_pos.0, sv.cam_pos.1, sv.cam_pos.2, 1))
     }
 

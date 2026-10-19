@@ -3,7 +3,7 @@
  * (EXE u overlay) ejecuta ambos con estados aleatorios (registros, hi/lo, RAM) y compara registros, hi/lo, RAM de
  * trabajo y destino del salto. Se compila con -DINTERP_TEST (interp_step).
  *   test_interp_diff <fichero> <base_hex> [offset_ini_hex fin_hex] [rondas]
- * El fichero se carga tal cual en RAM en <base>. Las cabeceras PS-X EXE se saltan solas (0x800). Sin datos
+ * El fichero se carga tal cual en RAM en <base>. Las cabeceras ejecutable se saltan solas (0x800). Sin datos
  * del juego en el repo: se invoca a mano con los binarios locales. Bloques con cop0/cop2/syscall/break se omiten. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -174,14 +174,14 @@ static void on_hit(uint32_t idx) {
         if (i == ndirty && ndirty < MAXD) dirty[ndirty++] = g;
     }
 }
-static uint8_t snap[PSX_RAM_SIZE];
+static uint8_t snap[EMU_RAM_SIZE];
 static uint8_t win0[WSZ];
 static const uint8_t *base_of(uint32_t g) {
     uint32_t a = g << 8, w = WIN & 0x1FFFFF;
     return a >= w && a < w + WSZ ? &win0[a - w] : &snap[a];
 }
 static void restore_dirty(void) {
-    for (unsigned i = 0; i < ndirty; i++) memcpy(&psx_ram[dirty[i] << 8], base_of(dirty[i]), 256);
+    for (unsigned i = 0; i < ndirty; i++) memcpy(&emu_ram[dirty[i] << 8], base_of(dirty[i]), 256);
     ndirty = 0;
 }
 
@@ -189,13 +189,13 @@ int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "uso: %s <fichero> <base_hex> [ini fin] [rondas]\n", argv[0]); return 2; }
     FILE *f = fopen(argv[1], "rb");
     if (!f) { perror(argv[1]); return 2; }
-    static uint8_t buf[PSX_RAM_SIZE + 0x800];
+    static uint8_t buf[EMU_RAM_SIZE + 0x800];
     size_t n = fread(buf, 1, sizeof buf, f);
     fclose(f);
     uint32_t base = (uint32_t)strtoul(argv[2], 0, 16);
-    size_t skip = (n > 8 && !memcmp(buf, "PS-X EXE", 8)) ? 0x800 : 0;
+    size_t skip = (n > 8 && !memcmp(buf, EXE_MAGIC, 8)) ? 0x800 : 0;
     n -= skip;
-    memcpy(&psx_ram[base & 0x1FFFFF], buf + skip, n);
+    memcpy(&emu_ram[base & 0x1FFFFF], buf + skip, n);
     uint32_t lo = 0, hi = (uint32_t)n;
     if (argc >= 5) { lo = (uint32_t)strtoul(argv[3], 0, 16); hi = (uint32_t)strtoul(argv[4], 0, 16); }
     int rounds = argc >= 6 ? atoi(argv[5]) : 3;
@@ -205,35 +205,35 @@ int main(int argc, char **argv) {
     unsigned tested = 0, skipped = 0, bad = 0;
     static uint8_t copyA[MAXD][256];
     static uint32_t dirtyA[MAXD];
-    memcpy(snap, psx_ram, sizeof snap);
+    memcpy(snap, emu_ram, sizeof snap);
     for (uint32_t off = lo & ~3u; off < hi; off += 4) {
         uint32_t pc = base + off;
         for (int r = 0; r < rounds; r++) {
             Cpu a, b;
             rand_state(&a, win0);
             b = a;
-            memcpy(&psx_ram[WIN & 0x1FFFFF], win0, WSZ);
+            memcpy(&emu_ram[WIN & 0x1FFFFF], win0, WSZ);
             ndirty = 0;
             static uint8_t scr0[0x400], scrA[0x400];
-            memcpy(scr0, psx_scratch, sizeof scr0);
+            memcpy(scr0, emu_scratch, sizeof scr0);
             rt_budget = 1 << 30;
             uint32_t nx_ref;
             int ok = ref_block(&a, pc, &nx_ref);
             unsigned nA = ndirty;
-            for (unsigned i = 0; i < nA; i++) { dirtyA[i] = dirty[i]; memcpy(copyA[i], &psx_ram[dirty[i] << 8], 256); }
-            memcpy(scrA, psx_scratch, sizeof scrA);
-            memcpy(psx_scratch, scr0, sizeof scr0);
+            for (unsigned i = 0; i < nA; i++) { dirtyA[i] = dirty[i]; memcpy(copyA[i], &emu_ram[dirty[i] << 8], 256); }
+            memcpy(scrA, emu_scratch, sizeof scrA);
+            memcpy(emu_scratch, scr0, sizeof scr0);
             restore_dirty();
             if (!ok) { skipped++; break; }
             uint32_t nx_new = interp_step(&b, pc);
             tested++;
             int diff = nx_ref != nx_new || memcmp(&a, &b, sizeof a);
-            int ramdiff = memcmp(psx_scratch, scrA, sizeof scrA) != 0;
-            memcpy(psx_scratch, scr0, sizeof scr0);
+            int ramdiff = memcmp(emu_scratch, scrA, sizeof scrA) != 0;
+            memcpy(emu_scratch, scr0, sizeof scr0);
             for (unsigned i = 0; i < ndirty && !ramdiff; i++) {      /* granos escritos por la nueva */
                 const uint8_t *exp = base_of(dirty[i]);
                 for (unsigned k = 0; k < nA; k++) if (dirtyA[k] == dirty[i]) exp = copyA[k];
-                if (memcmp(&psx_ram[dirty[i] << 8], exp, 256)) ramdiff = 1;
+                if (memcmp(&emu_ram[dirty[i] << 8], exp, 256)) ramdiff = 1;
             }
             for (unsigned k = 0; k < nA && !ramdiff; k++) {          /* granos escritos solo por la referencia */
                 int seen = 0;

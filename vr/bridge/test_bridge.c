@@ -86,7 +86,7 @@ static void build_game(void) {
     p32(BA_N_TARGETS, 4);
     /* cámara */
     int16_t m[9] = {4096, 0, 0, 0, -1736, -3716, 0, 3725, -1731};
-    uint32_t e = BA_VIEW_CHANNEL + BCH_EYE;
+    uint32_t e = BA_VIEW_CHANNEL + BCH_CAM;
     for (int i = 0; i < 9; i++) p16(e + 2u * (uint32_t)i, m[i]);
     p32(e + 20, (uint32_t)-5800); p32(e + 24, 8188); p32(e + 28, 1807);
     p16(BA_VIEW_CHANNEL + BCH_SCREEN, 320);
@@ -243,14 +243,14 @@ static void test_invalid(void) {
     bridge_read(ram, &s);
     CHECK(!(s.valid & BRIDGE_OK_TARGETS) && s.n_targets == 0);
     /* matriz de cámara degenerada */
-    build_game(); p16(BA_VIEW_CHANNEL + BCH_EYE, 0);
+    build_game(); p16(BA_VIEW_CHANNEL + BCH_CAM, 0);
     bridge_read(ram, &s);
     CHECK(!(s.valid & BRIDGE_OK_EYE) && (s.valid & BRIDGE_OK_CAMERA) && s.eye_focal == 0 && s.eye_pos[1] == 0);
     /* columnas no ortogonales / posición de ojo absurda */
-    build_game(); p16(BA_VIEW_CHANNEL + BCH_EYE + 2, 3000);
+    build_game(); p16(BA_VIEW_CHANNEL + BCH_CAM + 2, 3000);
     bridge_read(ram, &s);
     CHECK(!(s.valid & BRIDGE_OK_EYE));
-    build_game(); p32(BA_VIEW_CHANNEL + BCH_EYE + 20, 0x7FFFFFFFu);
+    build_game(); p32(BA_VIEW_CHANNEL + BCH_CAM + 20, 0x7FFFFFFFu);
     bridge_read(ram, &s);
     CHECK(!(s.valid & BRIDGE_OK_EYE));
     build_game(); p16(BA_CAMERA + BCAM_FIRST, 7);

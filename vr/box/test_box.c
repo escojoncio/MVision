@@ -427,9 +427,9 @@ int main(void) {
     printf("== init y datos\n");      t_init_and_data();
     printf("== transición\n");        t_transition();
     printf("== geometría cerrada y abertura\n");
-    t_closed_and_aperture(0, BOX_STYLE_CARDBOARD);
+    t_closed_and_aperture(0, BOX_STYLE_TEX);
     t_closed_and_aperture(0, BOX_STYLE_BLACK);
-    t_closed_and_aperture(1, BOX_STYLE_CARDBOARD);
+    t_closed_and_aperture(1, BOX_STYLE_TEX);
     printf("== dirección de la vista\n"); t_world_direction();
     printf("== proporciones\n");      t_proportions();
     printf("== accesibilidad y apertura\n"); t_wide_and_open();

@@ -351,12 +351,12 @@ int main(int argc, char **argv) {
     mkdir(outdir, 0755);
     FILE *f = fopen(exe, "rb");
     if (!f) { perror(exe); return 1; }
-    static uint8_t buf[PSX_RAM_SIZE + 0x800];
+    static uint8_t buf[EMU_RAM_SIZE + 0x800];
     size_t n = fread(buf, 1, sizeof buf, f);
     fclose(f);
-    if (n < 0x800 || memcmp(buf, "PS-X EXE", 8)) { fprintf(stderr, "no es PS-X EXE\n"); return 1; }
+    if (n < 0x800 || memcmp(buf, EXE_MAGIC, 8)) { fprintf(stderr, "ejecutable no válido\n"); return 1; }
     uint32_t pc = rd32(buf + 0x10), gp = rd32(buf + 0x14), t = rd32(buf + 0x18), sz = rd32(buf + 0x1C);
-    memcpy(&psx_ram[t & 0x1FFFFF], buf + 0x800, sz);
+    memcpy(&emu_ram[t & 0x1FFFFF], buf + 0x800, sz);
     if (disc && !cd_open(disc)) { fprintf(stderr, "sin discos\n"); return 1; }
     RefOpts o1 = {1, 1, getenv("CT_R1_HQ") ? REF_HQ : 0}, on = {scale_n, ssaa_n, 0}; /* CT_R1_HQ=1: 1x con muestreo al centro y 8 bits (mide la desviacion de convencion) */
     r1 = ref_create(&o1);

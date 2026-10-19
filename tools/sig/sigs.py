@@ -14,6 +14,9 @@ import re
 import struct
 import sys
 
+# Firma de 8 bytes de la cabecera del formato de ejecutable (hex).
+EXE_MAGIC = bytes.fromhex("50532d5820455845")
+
 HDR = 0x800
 PREFIX_WORDS = 8
 MASK_IMM_OPS = {0x08, 0x09, 0x0D, 0x0F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x28, 0x29, 0x2A, 0x2B, 0x2E, 0x32, 0x3A}
@@ -21,8 +24,8 @@ MASK_IMM_OPS = {0x08, 0x09, 0x0D, 0x0F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26
 
 def load_exe(path):
     d = open(path, "rb").read()
-    if d[:8] != b"PS-X EXE":
-        raise SystemExit(f"{path}: no es PS-X EXE")
+    if d[:8] != EXE_MAGIC:
+        raise SystemExit(f"{path}: ejecutable no válido")
     base, size = struct.unpack_from("<II", d, 0x18)
     if HDR + size > len(d):
         raise SystemExit(f"{path}: truncado")

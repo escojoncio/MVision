@@ -219,7 +219,7 @@ static void render_list(const GpuDrawList *l, const VrCamDelta *d, float f, floa
 }
 
 /* ------------------------------------------------------------------ vistas externas del cuerpo ---- */
-#define R_(a) (psx_ram + ((a) & 0x1FFFFF))
+#define R_(a) (emu_ram + ((a) & 0x1FFFFF))
 static uint32_t U32(uint32_t a) { uint32_t v; memcpy(&v, R_(a), 4); return v; }
 static int32_t I32(uint32_t a) { int32_t v; memcpy(&v, R_(a), 4); return v; }
 static int16_t S16(uint32_t a) { int16_t v; memcpy(&v, R_(a), 2); return v; }
@@ -414,8 +414,8 @@ static void on_frame(Cpu *c, uint32_t f) {
     (void)c;
     alarm(90);
     script_pad(f);
-    bridge_read(psx_ram, &bs);
-    vrcam_frame(psx_ram, &bs);
+    bridge_read(emu_ram, &bs);
+    vrcam_frame(emu_ram, &bs);
     if (f_act < 0 && vrcam_active()) f_act = (int)f + 20;
     cur_t = f_act < 0 ? -1 : (int)f - f_act;
     /* comprobación: al principio del frame (CPU parada en el VBlank) las piezas de los brazos no pueden tener la pose IK;
@@ -467,12 +467,12 @@ int main(int argc, char **argv) {
     pad_ev[npad_ev++] = (PadEv){0, 6, 211, 1u << 7};
     FILE *f = fopen(exe, "rb");
     if (!f) { perror(exe); return 1; }
-    static uint8_t buf[PSX_RAM_SIZE + 0x800];
+    static uint8_t buf[EMU_RAM_SIZE + 0x800];
     size_t n = fread(buf, 1, sizeof buf, f);
     fclose(f);
-    if (n < 0x800 || memcmp(buf, "PS-X EXE", 8)) { fprintf(stderr, "no es PS-X EXE\n"); return 1; }
+    if (n < 0x800 || memcmp(buf, EXE_MAGIC, 8)) { fprintf(stderr, "ejecutable no válido\n"); return 1; }
     uint32_t pc = rd32(buf + 0x10), gp = rd32(buf + 0x14), t = rd32(buf + 0x18), sz = rd32(buf + 0x1C);
-    memcpy(&psx_ram[t & 0x1FFFFF], buf + 0x800, sz);
+    memcpy(&emu_ram[t & 0x1FFFFF], buf + 0x800, sz);
     if (disc && !cd_open(disc)) { fprintf(stderr, "sin discos\n"); return 1; }
     VrCamConfig cfg; vrcam_config_default(&cfg);
     cfg.head = head_fn;

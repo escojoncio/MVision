@@ -1,7 +1,7 @@
-/* bridge: puente de lectura de la RAM emulada (2 MB, PS1) -> estado del juego para la capa VR.
+/* bridge: puente de lectura de la RAM emulada (2 MB, original) -> estado del juego para la capa VR.
  * SOLO LECTURA: nunca escribe en la RAM. C99, sin dependencias de plataforma ni del runtime.
  *
- * Uso: `bridge_read(psx_ram, &st)` UNA vez por fotograma, SOLO desde el gancho de fotograma/VBlank del host
+ * Uso: `bridge_read(emu_ram, &st)` UNA vez por fotograma, SOLO desde el gancho de fotograma/VBlank del host
  * (el que el runtime llama entre dos fotogramas del juego, con la CPU emulada detenida), y nunca desde otro hilo
  * mientras la CPU corre: la lectura NO es atómica y a mitad de actualización del juego se verían listas, posiciones
  * y matrices de fotogramas distintos. Desde ese gancho todos los campos son del mismo fotograma.

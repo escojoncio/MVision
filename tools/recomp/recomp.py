@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""recomp: recompilador estático MIPS R3000 (PS1) -> C.
+"""recomp: recompilador estático MIPS R3000 (original) -> C.
 
   recomp.py <exe> <salida_dir> [--funcs funcs.txt]... [--code-end HEX] [--names names.json] [--hle hle.txt]...
             [--no-extra] [--poll-entry]
@@ -15,7 +15,8 @@ al EXE se lee también (salvo --no-extra): ahí se vuelca missing_funcs.txt del 
 Salida: funcs_XX.c (una función C por función MIPS), funcs.h, dispatch.c (tabla dirección -> función
 y dirección -> nombre). --names: JSON nombre -> {"target": "hex"} (tools/sig/align.py); sus direcciones
 se añaden como inicios de función. --hle: lista de nombres cuyo cuerpo se sustituye por hle_<nombre>(c)
-(el código original queda como orig_f_<addr> para validación diferencial).
+(el código original queda como orig_f_<addr> para validación diferencial). Formato de cada línea: "<nombre_neutro> [hash16]";
+si hay hash, el nombre del mapa --names cuyo sha1[:16] coincida se traduce al nombre neutro.
 Runtime esperado (runtime/cpu.h): struct Cpu { uint32_t r[32], hi, lo; } y helpers de memoria/GTE/COP0.
 
 Detección de funciones: destinos de jal + entrada + lista opcional (firmas). Cada función se
@@ -27,11 +28,14 @@ import os
 import struct
 import sys
 
+# Firma de 8 bytes de la cabecera del formato de ejecutable (hex).
+EXE_MAGIC = bytes.fromhex("50532d5820455845")
+
 HDR = 0x800
 R = ["zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
      "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra"]
 FUNCS_PER_FILE = 200
-SETJMP = set()  # direcciones de setjmp (por nombre)
+SETJMP = set()  # direcciones de la rutina de guardado de contexto (por nombre neutro)
 
 
 def rs(w): return (w >> 21) & 31
@@ -53,8 +57,8 @@ def setr(n, expr):
 class Exe:
     def __init__(self, path):
         d = open(path, "rb").read()
-        if d[:8] != b"PS-X EXE":
-            raise SystemExit("no es PS-X EXE")
+        if d[:8] != EXE_MAGIC:
+            raise SystemExit("ejecutable no válido")
         self.pc0 = struct.unpack_from("<I", d, 0x10)[0]
         self.base, size = struct.unpack_from("<II", d, 0x18)
         self.text = d[HDR:HDR + size]
@@ -62,7 +66,7 @@ class Exe:
 
     @classmethod
     def overlay(cls, path, base):
-        """Binario de overlay crudo cargado tal cual en `base` (sin cabecera PS-X EXE)."""
+        """Binario de overlay crudo cargado tal cual en `base` (sin cabecera ejecutable)."""
         e = cls.__new__(cls)
         d = open(path, "rb").read()
         e.pc0, e.base, e.is_ov = None, base, True
@@ -473,11 +477,11 @@ def fnv1a64(b):
 
 
 def load_main_gen(gen):
-    """Inicios de función y dirección de setjmp del ejecutable principal ya recompilado."""
+    """Inicios de función y dirección de la rutina de salto no local del ejecutable principal ya recompilado."""
     import re
     starts = {int(m, 16) for m in re.findall(r"void f_([0-9a-f]{8})\(Cpu", open(os.path.join(gen, "funcs.h")).read())}
     disp = open(os.path.join(gen, "dispatch.c")).read()
-    sj = {int(m, 16) for m in re.findall(r'\{0x([0-9a-f]{8})u, "setjmp"\}', disp)}
+    sj = {int(m, 16) for m in re.findall(r'\{0x([0-9a-f]{8})u, "jmp_save"\}', disp)}
     return starts, sj
 
 
@@ -607,14 +611,23 @@ def main(a):
                     sure.append(t)
         extra += sure
     hle = set()
+    alias = {}   # sha1[:16] del símbolo del mapa -> nombre neutro
     for i, x in enumerate(a):  # --hle repetible: un fichero por subsistema (runtime/hle*.txt)
         if x == "--hle":
-            hle |= {l.split("#")[0].strip() for l in open(a[i + 1])} - {""}
-    SETJMP.update(t for t, n in names.items() if n == "setjmp")
+            for l in open(a[i + 1]):
+                t = l.split("#")[0].split()
+                if t:
+                    hle.add(t[0])
+                    if len(t) > 1:
+                        alias[t[1]] = t[0]
+    if alias:
+        import hashlib
+        names = {t: alias.get(hashlib.sha1(n.encode()).hexdigest()[:16], n) for t, n in names.items()}
+    SETJMP.update(t for t, n in names.items() if n == "jmp_save")
     weak = set()
     starts = find_funcs(exe, extra, weak)
     # Funciones sustituidas por HLE o setjmp deben conservar su entrada: nunca se absorben en otra.
-    weak -= {t for t, n in names.items() if n in hle or n == "setjmp"}
+    weak -= {t for t, n in names.items() if n in hle or n == "jmp_save"}
     ends, n_ext = extend_ends(exe, starts, weak)
     print(f"funciones ampliadas por ramas a regiones débiles: {n_ext}")
     known = set(starts)

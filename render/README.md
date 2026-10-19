@@ -7,8 +7,8 @@ Estado: capa de captura en `runtime/gpu.c`, rasterizador de **referencia** en C 
 ```
 runtime/gpu.h,gpu.c        captura de primitivas/eventos -> GpuDrawList
 render/ref_raster.{h,c}    modelo exacto: consume GpuDrawList, dibuja a escala N con supermuestreo KxK
-render/metal/ps1_types.h   estructuras compartidas host <-> shaders
-render/metal/ps1_gpu.metal vertex/fragment/compute que portan ref_raster.c
+render/metal/rg_types.h   estructuras compartidas host <-> shaders
+render/metal/rg_gpu.metal vertex/fragment/compute que portan ref_raster.c
 render/capture_test.c      arranca el juego, captura, compara con el oráculo, vuelca PNG
 render/ref_selftest.c      prueba aleatoria (GP0 al azar) del modelo contra el oráculo
 render/build.sh            compila ambos a build-render/ (enlaza el runtime como el objetivo headless)
@@ -29,11 +29,11 @@ regla de aristas y la interpolación), `RECT`, `LINE` (cada tramo de polilínea 
 `UPLOAD` (con los píxeles en `GpuDrawList.data`), `DOWNLOAD` (marcador, sin efecto en el consumidor).
 Los eventos de VRAM van **intercalados en orden** con las primitivas (las texturas y CLUT cambian dentro del frame).
 
-**Cierre de frame.** El punto elegido es el cambio de dirección de display `GP1(05h)` (lo que hace `PutDispEnv`
-tras `VSync`): lo dibujado desde el cierre anterior es exactamente el frame que acaba de pasar a mostrarse.
+**Cierre de frame.** El punto elegido es el cambio de dirección de display `GP1(05h)` (lo que hace `gfx_put_disp`
+tras `frame_wait`): lo dibujado desde el cierre anterior es exactamente el frame que acaba de pasar a mostrarse.
 Reserva: `gpu_capture_vblank()` (a llamar desde el VBlank del host) cierra tras 4 VBlanks sin cambio de display
 (juegos de un solo búfer). El cierre se difiere si cae en mitad de una subida CPU->VRAM; `disp` se refresca en la
-ráfaga de GP1 (en `PutDispEnv` modo y rango vertical se escriben después de `GP1(05h)`).
+ráfaga de GP1 (en `gfx_put_disp` modo y rango vertical se escriben después de `GP1(05h)`).
 **Pendiente (otros ficheros):** hoy nadie llama a `gpu_capture_vblank()` salvo `capture_test`; hay que engancharlo
 en el VBlank del runtime (irq.c/hook de frame).
 
@@ -110,37 +110,37 @@ Imágenes (mirarlas): `<scratchpad>/render/` (guion pedido) y `<scratchpad>/rend
   empaquetados** (4 por halfword / 2 por halfword) y las CLUT están en la misma memoria; con una textura de color se
   perdería el bit 15 (máscara/semitransparencia) y los índices. `texture.read()` exacto, sin filtrado ni espacio de color.
   El fragment hace lo mismo que `texel()` del modelo (ventana de textura incluida).
-* **Dos objetivos**: VRAM nativa `R16Uint` (fuente de texturas, exacta; shader `ps1_fs_prim_native`) y VRAM de alta
-  resolución `RGBA8` de (1024·M)x(512·M), A = bit de máscara (`ps1_fs_prim_hires`). Una textura no puede ser a la vez
+* **Dos objetivos**: VRAM nativa `R16Uint` (fuente de texturas, exacta; shader `rg_fs_prim_native`) y VRAM de alta
+  resolución `RGBA8` de (1024·M)x(512·M), A = bit de máscara (`rg_fs_prim_hires`). Una textura no puede ser a la vez
   adjunto y fuente en el mismo pase, así que **la nativa no se dibuja "en vivo" y se muestrea a la vez**: o bien se dibuja
   cada primitiva en dos pases/adjuntos distintos (un segundo `MTLRenderPassDescriptor` sobre la nativa, solo lee de una
   copia), o (recomendado) se sigue el rectángulo sucio del destino de cada primitiva y, cuando una primitiva posterior
-  muestrea (textura o CLUT) una región sucia, se termina el pase, se ejecuta `ps1_k_resolve_native` sobre esa región
+  muestrea (textura o CLUT) una región sucia, se termina el pase, se ejecuta `rg_k_resolve_native` sobre esa región
   y se continúa. Es lo que hacen los renderers de alta resolución habituales y cuesta cero en escenas sin render a textura.
 * **Semitransparencia y máscara**: mezcla programable (`[[color(0)]]`, lectura del framebuffer; GPU Apple) en el fragment:
   los 4 modos `(B+F)/2, B+F, B-F, B+F/4` y la comprobación del bit de máscara por muestra, imposibles con mezcla fija
-  (el bit 15 del texel decide por fragmento si hay mezcla y qué máscara se escribe). `PS1_FC_EXACT5` reproduce el canal de 5
+  (el bit 15 del texel decide por fragmento si hay mezcla y qué máscara se escribe). `RG_FC_EXACT5` reproduce el canal de 5
   bits y tramado (modo oráculo); sin él, 8 bits (HQ). Orden: Metal respeta el orden de envío de primitivas que se solapan
   sobre el mismo adjunto, por lo que basta emitirlas en el orden de la lista.
-* **MSAA x4**: objetivo multimuestra con `PS1_FC_PERSAMPLE` (el parámetro `[[sample_id]]` fuerza sombreado por muestra y
+* **MSAA x4**: objetivo multimuestra con `RG_FC_PERSAMPLE` (el parámetro `[[sample_id]]` fuerza sombreado por muestra y
   `[[color(0)]]` pasa a ser por muestra): equivale al supermuestreo del modelo (K=2). Con MSAA los kernels de cómputo no
   pueden escribir el objetivo (las texturas multimuestra no se escriben desde compute): los eventos de VRAM sobre él
-  (fill/subida/copia) se hacen con rectángulos (`ps1_vs_rect` + `ps1_fs_fill_hires/sync_hires/copy_hires`).
-  Alternativa sin MSAA: M = N·K de una muestra y `ps1_k_display` promedia KxK (igual que `ref_present`).
+  (fill/subida/copia) se hacen con rectángulos (`rg_vs_rect` + `rg_fs_fill_hires/sync_hires/copy_hires`).
+  Alternativa sin MSAA: M = N·K de una muestra y `rg_k_display` promedia KxK (igual que `ref_present`).
   Memoria: (1024·M)x(512·M)x4 B (M=4: 32 MB; M=8: 128 MB; x4 muestras: multiplicar). Reducible limitando el objetivo a
   las dos áreas de dibujo.
 * **Orden de eventos y copias a mitad de frame**: la lista se recorre en orden. Una operación de VRAM termina el pase de
   render en curso (para que todo lo anterior esté escrito), se ejecuta (nativa por compute; alta resolución por
   rectángulo) y se reabre el pase con `loadAction = load`. Subidas CPU->VRAM sin máscara: `replaceRegion`
-  directo en la nativa + `ps1_fs_sync_hires`. Copia VRAM->VRAM: blit del rectángulo origen a una textura auxiliar
-  (instantánea; no se lee y escribe la misma textura), luego `ps1_k_copy_native` (nativa) y `ps1_fs_copy_hires` (alta
+  directo en la nativa + `rg_fs_sync_hires`. Copia VRAM->VRAM: blit del rectángulo origen a una textura auxiliar
+  (instantánea; no se lee y escribe la misma textura), luego `rg_k_copy_native` (nativa) y `rg_fs_copy_hires` (alta
   resolución, conserva detalle). Semántica de solape: el hardware copia fila a fila, la instantánea copia "a la vez";
   difiere solo en copias que se solapan hacia abajo (el modelo C replica la fila a fila).
-* **Expansión en el host** (siguiente paso): cada `GpuOp` -> `PS1Vertex`/`PS1Prim` (`ps1_types.h`); quads = 2 triángulos
+* **Expansión en el host** (siguiente paso): cada `GpuOp` -> `RGVertex`/`RGPrim` (`rg_types.h`); quads = 2 triángulos
   (0,1,2),(1,2,3); sprites = 2 triángulos con u,v = u0 / u0+w (con volteo: u0+1 / u0+1-w, para que el suelo en el centro
   del píxel dé u0-i); líneas = cinta de 1 px nativo; color plano repetido en los vértices. Recorte E3/E4 en el shader
-  (`ps1_clipped`), así los lotes no se parten por cambios de recorte. `w=1` y `[[center_no_perspective]]`: interpolación
-  afín como la PS1. Lote = primitivas consecutivas sin eventos intermedios.
+  (`rg_clipped`), así los lotes no se parten por cambios de recorte. `w=1` y `[[center_no_perspective]]`: interpolación
+  afín como el original. Lote = primitivas consecutivas sin eventos intermedios.
 
 ### Límites conocidos de la versión Metal frente al modelo
 
@@ -155,10 +155,10 @@ Imágenes (mirarlas): `<scratchpad>/render/` (guion pedido) y `<scratchpad>/rend
 
 1. Enganchar `gpu_capture_vblank()` al VBlank real del runtime y `gpu_capture_frame()` al hilo de render (copiar o consumir
    dentro del hook de frame; el runtime es de un solo hilo).
-2. Host Metal: empaquetado `GpuOp -> PS1Vertex/PS1Prim`, lotes y pases por eventos, seguimiento de rectángulo sucio y
+2. Host Metal: empaquetado `GpuOp -> RGVertex/RGPrim`, lotes y pases por eventos, seguimiento de rectángulo sucio y
    `resolve_native`. Validar contra `ref_raster` volcando el mismo frame con `capture_test`.
-3. (hecho en C, pendiente en el host Metal) Geometría de alta precisión: ver `PS1Vertex.iz` / `PS1Frame.hiprec` y el diseño de
-   profundidad en `ps1_types.h`. Falta el empaquetado host y la matriz de proyección/vista del juego para el estéreo.
+3. (hecho en C, pendiente en el host Metal) Geometría de alta precisión: ver `RGVertex.iz` / `RGFrame.hiprec` y el diseño de
+   profundidad en `rg_types.h`. Falta el empaquetado host y la matriz de proyección/vista del juego para el estéreo.
 4. Filtrado de texturas opcional (bilineal sobre texels de 15 bits tras la CLUT, respetando transparencia 0x0000), y texto/HUD
    en capa aparte (intercepción de `RECT` de fuente).
 5. Compilar los shaders y portar `ref_selftest` a una prueba de imagen en el dispositivo.

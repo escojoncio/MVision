@@ -310,7 +310,7 @@ static void test_respect_original(void) {
     st.pause_level = 0;
     vra_frame(&A, ram, &st);
     CHECK(vra_pointcheck_fixup(&A, ram, 0x80180000u, 1) == 1 && r16(0x80180006u) == 1);
-    CHECK(vra_pointcheck_fixup(&A, ram, 0x80180001u, 1) == 0);          /* SVECTOR desalineado: no se toca */
+    CHECK(vra_pointcheck_fixup(&A, ram, 0x80180001u, 1) == 0);          /* VEC16 desalineado: no se toca */
     /* histéresis: entra a r, sale a r*1.0625; el soldado está a 5000 */
     vra_set_radius(&A, VRA_CLASS_SOLDIER, 1000);
     vra_frame(&A, ram, &st);

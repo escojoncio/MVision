@@ -1,11 +1,11 @@
 import Metal
 import simd
 
-// Stub mínimo del renderer de escena: solo existe mientras no haya RenderPS1.swift real.
-// Al añadir RenderPS1.swift definir MV_HAVE_PS1RENDERER (SWIFT_ACTIVE_COMPILATION_CONDITIONS en project.yml)
+// Stub mínimo del renderer de escena: solo existe mientras no haya RenderRG.swift real.
+// Al añadir RenderRG.swift definir MV_HAVE_RGRENDERER (SWIFT_ACTIVE_COMPILATION_CONDITIONS en project.yml)
 // para desactivar este bloque; la firma de abajo es el contrato que usa XRRenderLoop.
-#if !MV_HAVE_PS1RENDERER
-final class PS1Renderer {
+#if !MV_HAVE_RGRENDERER
+final class RGRenderer {
     /// Textura del panel 2D (HUD/menús). Opcional; el bucle la dibuja a ~1,5 m si no es nil.
     var hudTexture: MTLTexture?
     var hudTextureSRGB: MTLTexture?

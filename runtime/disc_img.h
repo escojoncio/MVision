@@ -8,9 +8,18 @@
  * Pendiente (opcional futuro): CHD, comando PREGAP/POSTGAP del .cue, pistas WAVE/MP3, .iso de 2048 B. */
 #include <string.h>
 #include <stdint.h>
+#ifndef EXE_MAGIC
+/* Firma de 8 bytes de la cabecera del formato de ejecutable (construida en hex; se valida con memcmp). */
+#define EXE_MAGIC "\x50\x53\x2d\x58\x20\x45\x58\x45"
+#endif
 
 #define DISC_RAW 2352
 #define DISC_USER 2048
+
+#ifndef EXE_MAGIC
+/* Firma de 8 bytes de la cabecera del formato de ejecutable (construida en hex; se valida con memcmp). */
+#define EXE_MAGIC "\x50\x53\x2d\x58\x20\x45\x58\x45"
+#endif
 
 typedef struct DiscImg DiscImg;
 
@@ -45,8 +54,8 @@ int disc_img_find(DiscImg *h, const char *path, uint32_t *lba, uint32_t *size);
 typedef struct {
     char boot[32];      /* ejecutable de arranque de SYSTEM.CNF (BOOT=cdrom:\X;1 -> "X", tal cual está escrito) */
     char datadir[32];   /* primer directorio de la raíz ("" si no hay) */
-    char dataexe[32];   /* primer fichero PS-X EXE del directorio de datos ("" si no hay) */
-    int serial;         /* dígitos del nombre de arranque (SLES_000.42 -> 42), 0 si no hay */
+    char dataexe[32];   /* primer fichero ejecutable del directorio de datos ("" si no hay) */
+    int serial;         /* dígitos del nombre de arranque (BOOT_000.42 -> 42), 0 si no hay */
     int number;         /* nº de disco 1..n asignado por disc_scan_dir (0 = sin asignar) */
 } DiscId;
 

@@ -33,12 +33,12 @@ void hle_bind_declare_fixed(const char *name);
 int hle_bind_fixed(const char *name, uint32_t addr);
 
 /* Consulta (hilo del emulador). hle_bind_bits: 1 bit por palabra de RAM con una HLE enlazada. */
-extern uint8_t hle_bind_bits[PSX_RAM_SIZE / 32];
+extern uint8_t hle_bind_bits[EMU_RAM_SIZE / 32];
 FuncPtr hle_bind_lookup(uint32_t addr);   /* NULL si no hay HLE en esa dirección */
 const char *hle_bind_name(uint32_t addr); /* nombre de la HLE enlazada o NULL */
 uint32_t hle_bind_addr(const char *name); /* dirección enlazada de la HLE o 0 */
 static inline int hle_bind_is(uint32_t a) {
-    uint32_t w = (a & (PSX_RAM_SIZE - 1)) >> 2;
+    uint32_t w = (a & (EMU_RAM_SIZE - 1)) >> 2;
     return (hle_bind_bits[w >> 3] >> (w & 7)) & 1;
 }
 

@@ -2,7 +2,7 @@
  * Llega a la partida con el guion de mando estándar, y a partir de ahí (T0 = primer VBlank con 30 fotogramas seguidos de control del
  * jugador) ejecuta un guion de mando/cabeza/manos sintéticos, determinista por VBlank (vrgame_set_driver), y registra el puente.
  *   bodyrun <exe> <disco> [--frames N] [--pad "T:botones:dur,..."] [--log CADA] [--scn nombre] [--setup "dir:valor,.."]
- * Botones: nombres PS1 separados por '+' (square, circle, cross, triangle, l1, r1, l2, r2, up, down, left, right, start, select).
+ * Botones: nombres original separados por '+' (square, circle, cross, triangle, l1, r1, l2, r2, up, down, left, right, start, select).
  * T y dur en VBlanks relativos a T0. MV_SIGS = firmas. No lleva datos del juego. */
 #include <math.h>
 #include <stdio.h>
@@ -54,9 +54,9 @@ static void teleport(const BridgeState *bs) {
     float k = tp_side ? tp_dist : -tp_dist;
     int16_t x = (int16_t)(e->pos.x + sx * k), z = (int16_t)(e->pos.z + cz * k), y = e->pos.y;
     int16_t yaw = tp_side ? (int16_t)(e->rot.y + 2048) : e->rot.y;
-    uint8_t *c = psx_ram + (bs->ctl_addr & 0x1FFFFF);
+    uint8_t *c = emu_ram + (bs->ctl_addr & 0x1FFFFF);
     memcpy(c + 0, &x, 2); memcpy(c + 2, &y, 2); memcpy(c + 4, &z, 2); memcpy(c + 8 + 2, &yaw, 2);
-    uint8_t *p = psx_ram + (BA_PLAYER_POS & 0x1FFFFF);
+    uint8_t *p = emu_ram + (BA_PLAYER_POS & 0x1FFFFF);
     memcpy(p + 0, &x, 2); memcpy(p + 2, &y, 2); memcpy(p + 4, &z, 2);
 }
 static float hyaw_deg;   /* guiñada de la cabeza sintética (+ = izquierda) */

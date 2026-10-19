@@ -47,7 +47,7 @@ typedef struct VrFireMap {
     float units_per_m;       /* unidades del motor por metro (1000) */
 } VrFireMap;
 
-/* Matriz del motor (MATRIX de 32 B): m[3][3] fila-mayor en 1.12 (4096 = 1,0), relleno, t[3] en unidades. */
+/* Matriz del motor (MAT16 de 32 B): m[3][3] fila-mayor en 1.12 (4096 = 1,0), relleno, t[3] en unidades. */
 typedef struct VrFireMat {
     int16_t m[9];
     int32_t t[3];

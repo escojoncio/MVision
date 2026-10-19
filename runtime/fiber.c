@@ -1,4 +1,4 @@
-/* Hilos del kernel PS1 (OpenTh/ChangeTh/CloseTh) sobre fibras del host.
+/* Hilos del kernel original (abrir hilo/cambiar de hilo/cerrar hilo) sobre fibras del host.
  * Cada hilo MIPS tiene su banco de registros y su propia pila C, porque el código recompilado
  * anida llamadas C: cambiar de hilo = guardar registros MIPS + cambiar de pila host. */
 #include <stdio.h>
@@ -75,7 +75,7 @@ static void tcb_store(Cpu *c, int i, const Cpu *r) {
 }
 
 /* Reserva PCB y tabla de TCB en memoria de kernel y publica los punteros en 0x108/0x110. La tabla se
- * reserva entera (MAX_TH) la primera vez: SetConf solo cambia cuántos TCB se anuncian, sin mover ni
+ * reserva entera (MAX_TH) la primera vez: sys_conf solo cambia cuántos TCB se anuncian, sin mover ni
  * perder los hilos ya abiertos. */
 void fiber_kinit(Cpu *c, uint32_t n) {
     if (n < 4) n = 4;
@@ -149,13 +149,13 @@ uint32_t fiber_close(Cpu *c, uint32_t h) {
     unsigned i = h & 0xFF;
     ensure_init(c);
     if (i == 0 || i >= MAX_TH || !th[i].used) return 0;
-    if ((int)i == cur) rt_fatal(c, "CloseTh del hilo en ejecución");
+    if ((int)i == cur) rt_fatal(c, "cerrar hilo del hilo en ejecución");
     th[i].used = 0;
     mem_w32(c, tcb_addr((int)i), TCB_FREE);
-    return 1;     /* la pila host se conserva para reutilizarla en el próximo OpenTh */
+    return 1;     /* la pila host se conserva para reutilizarla en el próximo abrir hilo */
 }
 
-/* Cambia al hilo i guardando el actual. set_ret: v0 = 1 al reanudar (retorno de ChangeTh). */
+/* Cambia al hilo i guardando el actual. set_ret: v0 = 1 al reanudar (retorno de cambiar de hilo). */
 static void switch_to(Cpu *c, int i, int set_ret) {
     int from = cur;
     if (set_ret) c->r[2] = 1;
@@ -176,7 +176,7 @@ static void switch_to(Cpu *c, int i, int set_ret) {
 uint32_t fiber_change(Cpu *c, uint32_t h) {
     unsigned i = h & 0xFF;
     ensure_init(c);
-    if (i >= MAX_TH || !th[i].used) rt_fatal(c, "ChangeTh a hilo inválido 0x%08x", h);
+    if (i >= MAX_TH || !th[i].used) rt_fatal(c, "cambiar de hilo a hilo inválido 0x%08x", h);
     if ((int)i == cur) { mem_w32(c, pcb, tcb_addr(cur)); return 1; }
     /* Dentro de la excepción (manejador del planificador) solo se escribe el PCB: la conmutación real se
      * hace al retornar (fiber_return_from_exception), con la pila de excepción y el estado de IRQ

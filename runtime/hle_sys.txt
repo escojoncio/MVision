@@ -1,21 +1,21 @@
-# E/S de sistema (runtime/pad.c, runtime/card.c). Nombre = símbolo del mapa de firmas.
-PadInitDirect
-PadStartCom
-PadStopCom
-PadGetState
-PadInfoMode
-PadInfoAct
-PadInfoComb
-PadSetActAlign
-PadSetAct
-PadSetMainMode
-PadChkMtap
-PadEnableCom
-InitPAD
-StartPAD
-StopPAD
-InitCARD
-StartCARD
-StopCARD
-firstfile
-SetConf
+# E/S de sistema (runtime/pad.c, runtime/card.c). Formato: <nombre neutro> <hash16 del símbolo del mapa de firmas>.
+ctl_init_direct d48d8a7569cb8439
+ctl_start 18ba2173bc51b73c
+ctl_stop 2ae9656f0658a2ac
+ctl_state 0407528d639920c5
+ctl_info_mode ba542a7d2a447413
+ctl_info_act 1981a9f7be5cf9e3
+ctl_info_comb b11ee572e3b23e3c
+ctl_act_align 3ad0563171fa5ac9
+ctl_act_set 9f55944b73ec763b
+ctl_main_mode 3018dce0c5de9b15
+ctl_chk_multi 122a3ed042ded3ed
+ctl_enable 17c7e1c6f55a94d1
+ctl_bios_init 9db01db4cbe9e400
+ctl_bios_start 7ca31f8f7f12d612
+ctl_bios_stop f53f035b04fe3882
+mc_init afd6a6d863ff7539
+mc_start c8cbadb97703ee10
+mc_stop 244eb5f511de20ef
+mc_first 418d8fd1d352d40e
+sys_conf d65a8ba20c126a84

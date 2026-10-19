@@ -1,5 +1,5 @@
 /* Shaders de la escena VR (3D estéreo + panel HUD 2D). SIN COMPILAR (escrito sin toolchain Metal): revisar en la
- * primera compilación. Reimplementa el muestreo paletizado de ps1_gpu.metal (sin tocar ps1_*). Diseño: ver RenderPS1.swift.
+ * primera compilación. Reimplementa el muestreo paletizado de rg_gpu.metal (sin tocar rg_*). Diseño: ver RenderRG.swift.
  *
  * Semitransparencia: la mezcla es de función fija (estado de pipeline, 4 modos). El bit 15 del texel decide por
  * fragmento si un polígono texturizado semitransparente mezcla: se hace en dos pasadas del mismo lote con VR_FC_PASS
@@ -18,7 +18,7 @@ constant uint kPass = is_function_constant_defined(fcPass) ? fcPass : 0u;
 struct VrVOut {
     float4 pos [[position]];
     float2 uv;             /* texels 0..255, perspectiva correcta */
-    float3 col;            /* multiplicador (1.0 = 128 de la PS1) */
+    float3 col;            /* multiplicador (1.0 = 128 del original) */
     uint tpage [[flat]];
     uint clut_flags [[flat]]; /* clut | flags << 16 */
     uint tw [[flat]];         /* ventana de textura E2: twmx | twmy<<8 | twox<<16 | twoy<<24 (0 = sin ventana) */
@@ -57,7 +57,7 @@ vertex VrVOut vr_vs_scene_amp(uint vid [[vertex_id]], ushort amp [[amplification
     return vr_pack(v, states, u.view_proj[amp] * float4(v.pos[0], v.pos[1], v.pos[2], 1.0));
 }
 
-/* HUD 2D: pos.xy en las coordenadas de dibujo de la PS1 -> NDC del panel (rect = origen y tamaño visibles). Sin profundidad. */
+/* HUD 2D: pos.xy en las coordenadas de dibujo del original -> NDC del panel (rect = origen y tamaño visibles). Sin profundidad. */
 vertex VrVOut vr_vs_hud(uint vid [[vertex_id]], const device VrGpuVtx *verts [[buffer(VR_BUF_VERTS)]],
                         constant VrHudUniforms &h [[buffer(VR_BUF_UNI)]],
                         const device VrGpuState *states [[buffer(VR_BUF_STATES)]]) {
@@ -265,7 +265,7 @@ inline float4 vr_post_finish(float4 px, constant VrPostUniforms &u, float scanw,
         float m = u.covers[i].w;
         if (m < 0.0) break;
         c = vr_post_blend(c, u.covers[i].xyz, int(m + 0.5), 1.0);
-        c = clamp(c, float3(0.0), float3(1.0));      /* la PS1 satura tras cada primitiva */
+        c = clamp(c, float3(0.0), float3(1.0));      /* el original satura tras cada primitiva */
     }
     if (scanPending) c = clamp(vr_post_blend(c, u.scan_rgb.xyz, int(u.scan.w + 0.5), scanw * u.scan_rgb.w), float3(0.0), float3(1.0));
     if (framesub > 0.0) {

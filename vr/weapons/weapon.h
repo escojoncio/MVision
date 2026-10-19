@@ -41,11 +41,11 @@ typedef struct {
 /* ---------- Puntos de interacción (en espacio del arma) ---------- */
 typedef enum { WP_GRIP, WP_SUPPORT, WP_MUZZLE, WP_EYE, WP_MAGWELL, WP_CHARGE, WP_SCREEN, WP_COUNT } WPoint;
 
-/* ---------- Física de retroceso (muelle-amortiguador sobre la pose relativa a la mano) ---------- */
+/* ---------- Física de retroceso (resorte-amortiguador sobre la pose relativa a la mano) ---------- */
 typedef struct {
     float kick_back, kick_up;   /* impulso lineal (m/s) y angular de cabeceo (rad/s) por disparo */
     float kick_yaw_rand;        /* ruido de guiñada (rad/s) */
-    float stiffness, damping;   /* muelle hacia la pose de agarre */
+    float stiffness, damping;   /* resorte hacia la pose de agarre */
     float two_hand_factor;      /* reducción con la segunda mano en WP_SUPPORT */
 } WRecoil;
 
@@ -153,7 +153,7 @@ WQuat wquat_axis_angle(WVec3 axis, float rad);
 int wcore_part_poses(const WeaponState *s, WPose weapon_world, WPose *out, int max);
 /* Pose del arma en mundo = mano · agarre⁻¹ · retroceso. */
 WPose wcore_weapon_world(const WeaponState *s, const WInput *in);
-/* Integra el muelle de retroceso; wcore_kick aplica un disparo. */
+/* Integra el resorte de retroceso; wcore_kick aplica un disparo. */
 void wcore_recoil_step(WeaponState *s, const WInput *in, float dt);
 void wcore_kick(WeaponState *s, const WInput *in, uint32_t seed);
 /* Utilidades de interacción: distancia de una mano a un punto del arma (mundo). */

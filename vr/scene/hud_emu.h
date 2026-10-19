@@ -1,6 +1,6 @@
 #pragma once
 /* Emulador por CPU del camino HUD (kind 2) del renderer Metal: replica vr_vs_hud + vr_fs_scene (render/metal/vr_scene.metal)
- * y la mezcla/pases de PS1Renderer.encodeHud, a resolución 1x del área mostrada. Sirve para comprobar en Linux, sin Metal, que
+ * y la mezcla/pases de RGRenderer.encodeHud, a resolución 1x del área mostrada. Sirve para comprobar en Linux, sin Metal, que
  * lo que genera vr_scene_build se vería igual que el oráculo. Mantener sincronizado con vr_scene.metal. */
 #include <stdint.h>
 #include "vr_scene.h"

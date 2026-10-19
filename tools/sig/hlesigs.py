@@ -29,12 +29,12 @@ def main(a):
         print(__doc__)
         return 1
     sigs = sorted(json.load(open(a[0])), key=lambda s: int(s["addr"], 16))
-    names = set()
+    names = {}   # nombre neutro -> hash16 del símbolo de la referencia ("" si la línea no lo trae: nombre ya neutro)
     for f in a[2:]:
         for line in open(f):
-            n = line.split("#")[0].strip()
-            if n:
-                names.add(n)
+            t = line.split("#")[0].split()
+            if t:
+                names[t[0]] = t[1] if len(t) > 1 else ""
     keep = {}
     # Gemelas en la referencia COMPLETA: cuántas funciones comparten el hash completo / de prefijo. El runtime
     # no empareja por hash único funciones con gemelas (un único candidato en el EXE no las distingue).
@@ -42,11 +42,17 @@ def main(a):
     for s in sigs:
         fcount[s["full"]] = fcount.get(s["full"], 0) + 1
         pcount[s["prefix"]] = pcount.get(s["prefix"], 0) + 1
-    idx = {s["name"]: i for i, s in enumerate(sigs)}
-    # sigs_ref puede traer los nombres en claro o como "h:<sha1>" (CI): se busca por ambos.
-    for n in names:
-        if n not in idx and hname(n) in idx:
-            idx[n] = idx[hname(n)]
+    # sigs_ref puede traer los nombres en claro o como "h:<sha1>" (CI): se indexa siempre por el hash opaco.
+    byhash = {}
+    for i, s in enumerate(sigs):
+        byhash[s["name"] if s["name"].startswith("h:") else hname(s["name"])] = i
+    idx = {}
+    for n, hx in names.items():
+        i = byhash.get("h:" + hx) if hx else None
+        if i is None:
+            i = byhash.get(hname(n))   # nombre ya neutro (capas VR): por si la referencia lo trae igual
+        if i is not None:
+            idx[n] = i
     missing = sorted(n for n in names if n not in idx)
     for n in names:
         i = idx.get(n)
