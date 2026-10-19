@@ -62,26 +62,28 @@ void vr_input_cfg_defaults(vri_cfg_t *c) {
     c->prone_drop_m = 0.80f;
     c->hysteresis_m = 0.06f;
     c->crouch_btn = VRI_PAD_CROSS;
-    c->grip_delay_s = 0.12f;
+    c->grip_delay_s = 0.0f;       /* los agarres son los botones del puño (R1/L1): sin acorde ni retardo */
     c->grip_tap_s = 0.10f;
     c->hold_advance_s = 0.5f; c->adv_on_s = 0.06f; c->adv_off_s = 0.10f;
     c->analog_on = 0.55f; c->analog_off = 0.45f;
     c->menu_debounce_s = 0.12f;
-    /* Mapa por defecto (Sense, estándar de los juegos de VR):
-     *   mano dominante: A (cara baja) = cruz, B (cara alta) = círculo, gatillo = cuadrado (disparo/golpe: el botón de ataque del
-     *     juego; con arma VR en mano lo gobierna el módulo de armas), agarre = R1 (arma), clic = R3, Menú = Start.
-     *   mano no dominante: A = cuadrado, B = triángulo, gatillo = L2, agarre = L1 (objeto), clic = L3, Menú = Select;
-     *     agarre + gatillo a la vez = R2.
+    /* Mapa por defecto (Sense) - TABLA FINAL DE CONTROLES (ver bitacora):
+     *   mano dominante: gatillo = R2 = DISPARAR (vrbodyg lo convierte en el botón de ataque del juego SOLO con arma; sin arma no hace
+     *     nada), agarre = R1 = puño derecho / agarrar a un enemigo (NO llega al juego: lo consume vr_gesture), A = cruz, B = círculo,
+     *     clic = R3, Menú = Start.
+     *   mano no dominante: agarre = L1 = puño izquierdo / agarrar (tampoco llega al juego), A = cuadrado (respaldo
+     *     de golpe como en el original), B = LIBRE (el triángulo del juego es la vista en primera persona, permanente en VR),
+     *     gatillo = LIBRE (L2), clic = L3, Menú = Select. Ya no hay acorde agarre+gatillo.
      *   En menús: gatillo y A = confirmar (círculo + cruz: círculo confirma en los menús y cruz avanza texto y salta escenas;
      *     con ambos pulsados el confirmar gana), B = cancelar (cruz). */
     vri_map_t *m = &c->map;
-    m->trig_dom = VRI_PAD_SQUARE; m->trig_off = VRI_PAD_L2;
+    m->trig_dom = VRI_PAD_R2;     m->trig_off = 0;
     m->grip_dom = VRI_PAD_R1;     m->grip_off = VRI_PAD_L1;
     m->low_dom = VRI_PAD_CROSS;   m->up_dom = VRI_PAD_CIRCLE;
-    m->low_off = VRI_PAD_SQUARE;  m->up_off = VRI_PAD_TRIANGLE;
+    m->low_off = VRI_PAD_SQUARE;  m->up_off = 0;
     m->stick_dom = VRI_PAD_R3;    m->stick_off = VRI_PAD_L3;
     m->menu_dom = VRI_PAD_START;  m->menu_off = VRI_PAD_SELECT;
-    m->chord_off = VRI_PAD_R2;
+    m->chord_off = 0;
     m->menu_trig = VRI_PAD_CIRCLE | VRI_PAD_CROSS;
     m->menu_low = VRI_PAD_CIRCLE | VRI_PAD_CROSS;
     m->menu_up = VRI_PAD_CROSS;

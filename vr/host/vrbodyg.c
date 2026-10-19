@@ -13,6 +13,8 @@
 #include "vr_fire.h"
 #include "vr_gesture.h"
 #include "vrgame.h"
+#include "vrhost.h"
+#include "vr_melee_rt.h"
 
 static vrg_t G;
 static int inited, en_all = 1, en_mask = 0xF;      /* bits: 1 golpe, 2 agarre, 4 pared, 8 asomarse */
@@ -30,18 +32,25 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
     if (!inited) { vrg_init(&G); inited = 1; }
     G.cfg.enable = en_all; G.cfg.punch = !!(en_mask & 1); G.cfg.grab = !!(en_mask & 2); G.cfg.knock = !!(en_mask & 4); G.cfg.peek = !!(en_mask & 8);
     G.cfg.right_handed = right_handed;
+    int core = bs && (bs->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs->has_player;
+    /* R2 = DISPARAR: con arma equipada es el botón de ataque del juego; sin arma no hace nada. El cuadrado físico sigue como en el original. */
+    if (pad & VRG_R2) {
+        pad = (uint16_t)(pad & ~VRG_R2);
+        if (core && bs->weapon >= 0) pad |= VRG_SQUARE;
+    }
     vrg_in_t in;
     memset(&in, 0, sizeof in);
     VrFireMap map;
     vrfire_map_from_cam(&map, vrcam_last_record());
-    int core = bs && (bs->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs->has_player;
     float hm[16];
     in.active = core && bs->in_control && vrcam_active() && map.valid && mv_vr_get_head(hm, NULL);
     in.weapon = -1;
     in.weapon_busy = vrgame_weapon_engaged();
-    in.sq_user = (pad & VRG_SQUARE) != 0;
     in.stick_dom = (pad & VRG_R3) != 0; in.stick_off = (pad & VRG_L3) != 0;
     in.dt = 0.02f;                                   /* el gancho corre una vez por VBlank (50 Hz virtuales) */
+    int domside = right_handed ? 1 : 0;
+    in.fist_btn[domside] = (pad & VRG_R1) != 0; in.fist_btn[1 - domside] = (pad & VRG_L1) != 0;   /* R1/L1 = botones del puño */
+    VrmFrame mf; memset(&mf, 0, sizeof mf); mf.punch_side = mf.knock_side = -1;
     vrg_out_t out;
     if (in.active) {
         float w[3];
@@ -54,7 +63,14 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
             float p[3], gr, tg;
             in.tracked[s] = vrgame_hand_raw(s, p, &gr, &tg, &in.hand_time[s]);
             if (in.tracked[s]) for (int i = 0; i < 3; i++) { in.hrel[s][i] = p[i] - hm[12 + i]; in.hand_u[s][i] = p[i]; }
-            if (in.tracked[s]) { vrfire_pos_to_world(&map, p, w); for (int i = 0; i < 3; i++) in.hand[s][i] = w[i] * 0.001f; in.grip[s] = gr; in.trig[s] = tg; }
+            if (in.tracked[s]) {
+                vrfire_pos_to_world(&map, p, w);
+                for (int i = 0; i < 3; i++) { in.hand[s][i] = w[i] * 0.001f; mf.fist[s][i] = w[i]; }
+                in.grip[s] = gr; in.trig[s] = tg;
+                mf.fist_ok[s] = 1; mf.fist_closed[s] = in.fist_btn[s];
+                float dmm = mv_vrhost_wall_distance(w, 400.0f);     /* geometría estática de la escena (la de la colisión de la cabeza) */
+                in.wall_valid[s] = dmm >= 0.0f; in.wall_dist[s] = dmm >= 0.0f ? dmm * 0.001f : 1.0f;
+            }
         }
         in.weapon = bs->weapon; in.stance = bs->stance; in.on_wall = bs->on_wall; in.in_box = bs->in_box; in.in_water = bs->in_water;
         in.holding = act_holds(bs->player_action); in.life = bs->life;
@@ -70,29 +86,32 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
         }
     }
     vrg_update(&G, &in, &out);
-    {   /* registro [gest] (va al log del visor): cada intento de golpe con su velocidad, dirección y motivo de descarte, y cada evento */
-        static const char *evn[] = {"", "golpe", "agarre", "apreton", "soltar", "pared", "asomar", "pared2", "dano", "impacto", "golpe_boton"};
+    {   /* registro [gest] (va al log del visor): cada intento con su motivo, y cada evento */
+        static const char *evn[] = {"", "golpe", "agarre", "apreton", "soltar", "pared", "asomar", "pared2", "dano", "impacto", "ventana"};
         static unsigned vb;
         vb++;
         if (out.gest.valid) {
             const vrg_gest_t *q = &out.gest;
             fprintf(stderr, "[gest] vb=%u mano=%d %s v=%.2f m/s adelante=%.2f radial=%.2f alcance=%.2f enemigo=%.2f m grip=%.2f puno=%d\n", vb, q->side, q->reason, q->speed, q->fcos, q->rcos, q->reach, q->dist, q->grip, q->fist);
         }
+        if (out.grab_why) fprintf(stderr, "[gest] vb=%u agarre %s mano=%d distancia=%.2f m (cuello/espalda, limite 0,30)\n", vb, out.grab_why, out.grab_side_try, out.grab_dist);
+        if (out.knock_why) fprintf(stderr, "[gest] vb=%u toque en la pared %s mano=%d v=%.2f m/s distancia=%.3f m\n", vb, out.knock_why, out.knock_try_side, out.knock_speed, out.knock_dist);
         if (out.event > 0 && out.event < 11) fprintf(stderr, "[gest] vb=%u evento=%s armas_libres=%d\n", vb, evn[out.event], in.weapon < 0);
     }
-    {   /* el cuerpo del personaje: golpe sintético del botón y manos pegadas al cuello del enemigo sujeto (en el mundo del motor, mm) */
+    /* decisiones del cuerpo -> motor (ganchos de vr/input/vr_melee): ninguna pasa por botones */
+    mf.punch_side = out.punch_side; mf.knock_side = out.knock_side;
+    mf.grab_start = out.grab_start; mf.grab_side = out.grab_side_try >= 0 && out.grab_start ? out.grab_side_try : out.grab_side;
+    mf.hold = out.grab_hold; mf.squeeze = out.squeeze;
+    {
+        static int warned;
+        if (!vrmelee_rt_installed()) {
+            if ((mf.punch_side >= 0 || mf.grab_start || mf.knock_side >= 0) && !warned) { warned = 1; fprintf(stderr, "[gest] las acciones del motor no están enganchadas (ejecutable no reconocido): los gestos no actúan\n"); }
+        } else vrmelee_rt_frame(&mf);
+    }
+    {   /* el cuerpo del personaje: manos pegadas al cuello del enemigo sujeto (en el mundo del motor, mm) */
         VrBodyGrab gb; memset(&gb, 0, sizeof gb);
         if (in.active && bs) {
             float px = (float)bs->ctl_pos.x, pz = (float)bs->ctl_pos.z;
-            if (out.jab_side >= 0) {
-                float d[3] = {sinf(in.yaw), 0, cosf(in.yaw)}, best = 3000.0f;
-                for (int i = 0; i < bs->n_enemies; i++) {
-                    const BridgeEnemy *e = &bs->enemies[i];
-                    float dx = e->pos.x - px, dz = e->pos.z - pz, dd = sqrtf(dx * dx + dz * dz);
-                    if (!e->down && dd < best && dd > 1.0f) { best = dd; d[0] = dx / dd; d[2] = dz / dd; }
-                }
-                vrbody_set_jab(out.jab_side, d);
-            }
             if (out.grab_side >= 0 && out.grab_en >= 0 && out.grab_en < bs->n_enemies) {
                 const BridgeEnemy *e = &bs->enemies[out.grab_en];
                 float dx = e->pos.x - px, dz = e->pos.z - pz, dd = sqrtf(dx * dx + dz * dz);
@@ -105,11 +124,6 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
         }
         vrbody_set_grab(&gb);
     }
-    static int dbg = -1, dn;
-    if (dbg < 0) dbg = getenv("VRG_DEBUG") != NULL;
-    if (dbg && (++dn % 10) == 0)
-        fprintf(stderr, "[vrg] act=%d core=%d ctl=%d cam=%d map=%d n_en=%d w=%d tr=%d%d hand1=(%.2f,%.2f,%.2f) head=(%.2f,%.2f,%.2f) body=(%.2f,%.2f,%.2f) en0=(%.2f,%.2f,%.2f) press=%04x ev=%d\n", in.active, core, bs ? bs->in_control : -1, vrcam_active(), map.valid, in.n_en, in.weapon, in.tracked[0], in.tracked[1],
-                in.hand[1][0], in.hand[1][1], in.hand[1][2], in.head[0], in.head[1], in.head[2], in.body[0], in.body[1], in.body[2], in.en[0].p[0], in.en[0].p[1], in.en[0].p[2], out.press, out.event);
     if (out.event > 0 && out.event < 16) n_events[out.event]++;
     if (out.haptic[0] > 0 || out.haptic[1] > 0) { vrgame_haptic(0, out.haptic[0]); vrgame_haptic(1, out.haptic[1]); }
     return (uint16_t)((pad & ~out.mask) | out.press);

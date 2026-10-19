@@ -68,6 +68,9 @@ int vrhc_feed_tris(const VrHcMap *m, const float *tris, int n, const float (*joi
  * consulta anterior (liberación del fundido). Devuelve 1 si hay corrección o fundido. */
 int vrhc_query(const VrHcMap *m, const float head[3], float dt, VrHcOut *out);
 
+/* Distancia (unidades del motor) de un punto del mundo fijo del motor a la superficie estática más cercana a menos de max_units; -1 si no hay. */
+float vrhc_nearest_world(const float p[3], float max_units);
+
 /* Triángulos vivos (diagnóstico / pruebas). */
 int vrhc_count(void);
 
