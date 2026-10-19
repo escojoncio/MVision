@@ -21,3 +21,18 @@ test-san:
 clean:
 	rm -rf vr/native/build-extract vr/native/build-extract-san
 .PHONY: test test-san clean nshito1
+
+# Cobertura de la lista de la GPU por la escena nativa (ns_cover): prueba sintética y herramienta de volcados.
+#   make -f vr/native/extract.mk test-cover    pruebas sintéticas de ns_cover
+#   make -f vr/native/extract.mk nscover       compila vr/native/build-extract/nscover (ver tools/nscover.c)
+COVSRC := vr/native/ns_cover.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c
+$(B)/test_ns_cover: vr/native/test_ns_cover.c vr/native/ns_cover_glue.c $(COVSRC) vr/native/ns_cover.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/test_ns_cover.c vr/native/ns_cover_glue.c $(COVSRC) -lm -lpthread -o $@
+$(B)/nscover: vr/native/tools/nscover.c vr/native/ns_dump.c $(COVSRC) vr/native/ns_cover.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/tools/nscover.c vr/native/ns_dump.c $(COVSRC) -lm -lpthread -o $@
+nscover: $(B)/nscover
+test-cover: $(B)/test_ns_cover
+	$(B)/test_ns_cover
+test-cover-san:
+	$(MAKE) -f vr/native/extract.mk test-cover B=vr/native/build-extract-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+.PHONY: nscover test-cover test-cover-san

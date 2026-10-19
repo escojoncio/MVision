@@ -24,7 +24,11 @@ typedef struct {
     int no_shade;            /* no calcular luz dinámica (neutro 128) */
     const float *cull_eye;   /* NULL = sin descarte de reversos (panoramas). Si no, posición del ojo del juego en el mundo: se descartan las caras no doble cara que el motor
                               * no dibujaría (regla del anverso del contrato: dot(A - ojo, (B-A)x(D-A)) > 0). Sólo para comparar con el fotograma real. */
+    struct NsAdaptSrc **src_out;   /* herramientas: si no es NULL recibe (malloc) un NsAdaptSrc por triángulo de salida, en el mismo orden */
 } NsAdaptOpts;
+
+/* Origen de un triángulo de salida (solo diagnóstico): instancia, pieza (índice absoluto en NsScene.piece), cara y mitad del cuadrilátero. */
+typedef struct NsAdaptSrc { uint32_t inst, piece, face, half, mesh_id, key, piece_rel, mflags; int32_t vis; } NsAdaptSrc;   /* key = NsInstance.key, piece_rel = índice dentro de la instancia, mflags = NsMesh.flags, vis = NsInstance.vis_state */
 
 typedef struct {
     size_t pieces_in, pieces_drawn;

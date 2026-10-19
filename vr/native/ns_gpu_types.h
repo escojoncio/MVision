@@ -53,7 +53,7 @@ typedef uint8_t ns_u8;
 /* Vértice local (unidades del motor). weld: NSG_NO_WELD o índice de vértice del modelo PADRE (NsPiece.parent) cuya posición transformada lo sustituye. */
 typedef struct { float p[3]; ns_u32 weld; } NsGpuVert;                                              /* 16 B */
 
-/* Esquina de triángulo (3 por triángulo; un cuadrilátero = 2 triángulos (A,B,C) y (A,C,D)). */
+/* Esquina de triángulo (3 por triángulo; un cuadrilátero = 2 triángulos (A,B,D) y (B,C,D): diagonal B-D como el hardware). */
 typedef struct {
     float n[3];          /* normal local unitaria */
     ns_u32 v;            /* índice ABSOLUTO del vértice en el pool de vértices */
