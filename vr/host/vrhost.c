@@ -30,6 +30,7 @@
 #include "vr_smooth.h"
 #include "vr_view.h"
 #include "vrai.h"
+#include "vr_melee_rt.h"
 #include "vrgame.h"
 #include "hle.h"
 #include "ns_dump.h"
@@ -737,6 +738,15 @@ void mv_vrhost_set_scene_tap(void (*cb)(const GpuDrawList *, const BridgeState *
 
 void mv_vrhost_set_list_tap(MvVrListTap cb) { list_tap = cb; }
 
+/* Distancia (mm del motor) de un punto del mundo a la superficie estática más cercana (golpe en la pared); -1 si no hay geometría a menos de max_mm. */
+float mv_vrhost_wall_distance(const float p_mm[3], float max_mm) {
+    if (!hc_on) return -1.0f;
+    pthread_mutex_lock(&HCMX);
+    float d = vrhc_nearest_world(p_mm, max_mm);
+    pthread_mutex_unlock(&HCMX);
+    return d;
+}
+
 /* Límite de la cabeza (hilo de render). head = pose física recentrada (16 floats, columnas); corr = desplazamiento a sumar a la cabeza para dibujar. */
 int mv_vrhost_head_limit(const float head[16], float dt, float corr[3], float *fade) {
     VrHcMap m;
@@ -1171,6 +1181,7 @@ static void on_bound(void) {
     }
     vrgame_set_enabled(body_ok, fire_ok);
     if (vrai_on_bound() < 0) fprintf(stderr, "[vrhost] IA de enemigos no instalada\n");
+    if (vrmelee_rt_install() < 0) fprintf(stderr, "[vrhost] acciones de cuerpo (golpe/agarre/toque) no instaladas\n");
 }
 
 static void on_start(void) {
