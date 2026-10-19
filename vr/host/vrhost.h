@@ -79,7 +79,6 @@ typedef struct {
     int32_t cine_cover;      /* fundidos/destellos (recubrimientos a pantalla completa) en la última lista */
     /* --- render nativo --- */
     int32_t render_req;      /* modo pedido: 0 = GPU (reconstrucción desde la lista de dibujo), 1 = nativo */
-    int32_t render_native;   /* 1 si la última escena entregada lleva el 3D nativo (native_3d): hay que dibujarlo desde el puente */
     int32_t native_avail;    /* 1 si el modo nativo se puede usar (extractor registrado, enganche instalado y renderer Metal listo) */
 } MvVrGameState;
 void mv_vrhost_game_state(MvVrGameState *out);
@@ -90,7 +89,12 @@ void mv_vrhost_game_state(MvVrGameState *out);
  * del motor y todo lo que no tenga cámara VR se dibujan SIEMPRE como pantalla estereoscópica con la cámara del juego (desde la lista).
  * Elección: variable de entorno MV_RENDER=nativo|gpu (gana y fija el modo) o mv_vrhost_set_render_mode (menú VR). Defecto: gpu (MV_RENDER_DEFAULT_NATIVE en vrhost.c
  * pasará a 1 cuando extractor y renderer estén integrados). El modo nativo solo se activa de verdad si mv_vrhost_native_available() y llega una escena válida;
- * si no, se sigue con la lista de la GPU (nunca pantalla vacía). Cualquier hilo. */
+ * si no, se sigue con la lista de la GPU (nunca pantalla vacía). Cualquier hilo.
+ * QUIÉN DECIDE: el que DIBUJA, en cada fotograma, con su estado real. La lista de la GPU llega entera; si la escena admite el 3D nativo trae VrScene.native_3d = 1 y los
+ * batches 3D marcados (VrBatch.skip_if_native). El render hace  ns_bridge_acquire(mv_vrhost_native_bridge(), ns_now_ns(), &view)  y
+ * ns_native_decide(&view, &(NsDecideIn){mv_vrhost_render_mode(), renderer_ok, mallas_subidas, scene.native_3d, ahora, 250 ms}, &d)  (vr/native/ns_bridge.h); si d.native pinta la
+ * escena nativa y salta los batches con (b.skip_if_native & d.skip); si el dibujo nativo falla a mitad llama a ns_native_fail(&d) y pinta TODOS los batches en ese mismo fotograma.
+ * No hay estado global "esta escena es nativa": solo el de cada escena (native_3d) y el de la decisión. */
 void mv_vrhost_set_render_mode(int native);
 int mv_vrhost_render_mode(void);                 /* modo pedido (0/1) */
 int mv_vrhost_render_env_locked(void);           /* 1 si MV_RENDER fija el modo (el menú no puede cambiarlo) */

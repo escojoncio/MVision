@@ -619,6 +619,7 @@ static void test_feedback(void) {
             if (b->blend == 0xFF) n_opq++; else n_semi++;
         }
     }
+    for (uint32_t i = 0; i < s.nb; i++) CHECK(s.b[i].skip_if_native == 0 && !vr_batch_skipped(&s.b[i], VR_SKIP_WORLD | VR_SKIP_FX), "batch %u sin marca de nativo por defecto", i);
     CHECK(n_tex == 6, "vertices texturizados %d (el rect sin fbk)", n_tex);
     CHECK(n_semi == 6 && n_opq == 6 + 6, "semi %d opacos %d", n_semi, n_opq);
     /* op1 (crudo): el color es el texel expandido, opaco */
