@@ -618,17 +618,80 @@ static void ovp_frame(void) {
 }
 #endif
 
-/* ------------------------------------------------------------------------------------------------ volcado (ns_dump.h) */
+/* ------------------------------------------------------------------------------------------------ volcado (ns_dump.h)
+ * Hilo de emulación: SOLO copia (memcpy) RAM/VRAM/scratch/GTE/lista a búferes reservados una vez y arma el texto de meta. La conversión a PNG y toda la
+ * escritura a disco las hace un hilo trabajador propio. Estados: IDLE -> REQ (pedido) -> CAP (copiado) -> WRITE -> IDLE (resultado en dump_res). */
+enum { DS_IDLE = 0, DS_REQ, DS_CAP, DS_WRITE };
+#define DUMP_OPS_CAP  16384u
+#define DUMP_DATA_CAP (1u << 20)
+#define DUMP_META_CAP 6144
 static pthread_mutex_t DMX = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t DCV = PTHREAD_COND_INITIALIZER;
+static pthread_t dump_thr;
+static int dump_thr_on, dump_state, dump_res;
 static char dump_dir[512];
-static int dump_pending, dump_res;
 static uint32_t dump_count;
+static struct {
+    uint8_t *ram, *scratch, *rgba;
+    uint16_t *vram, *ldata;
+    GpuOp *lops;
+    char *meta;
+    uint32_t gte[64];
+    GpuDisplay disp;
+    GpuDrawList list;
+    int has_list;
+} DB;
+
+static void *dump_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&DMX);
+        while (dump_state != DS_CAP) pthread_cond_wait(&DCV, &DMX);
+        dump_state = DS_WRITE;
+        char dir[512]; snprintf(dir, sizeof dir, "%s", dump_dir);
+        pthread_mutex_unlock(&DMX);
+        int fw = DB.disp.fw > 0 ? DB.disp.fw : DB.disp.w, fh = DB.disp.h, haveimg = 0;
+        if (fw > 0 && fh > 0 && fw <= 1024 && fh <= 512)
+            haveimg = gpu_present_rgba(&DB.disp, DB.vram, DB.rgba, (size_t)1024 * 512) != 0;
+        NsDumpSrc s = { DB.ram, DB.scratch, DB.vram, DB.gte, DB.has_list ? &DB.list : NULL, haveimg ? DB.rgba : NULL, haveimg ? fw : 0, haveimg ? fh : 0, DB.meta };
+        int rc = ns_dump_write(dir, &s);
+        fprintf(stderr, "[vrhost] volcado %s: %s\n", dir, rc == 0 ? "ok" : rc > 0 ? "parcial" : "ERROR");
+        pthread_mutex_lock(&DMX);
+        dump_res = rc == 0 ? 1 : rc > 0 ? 2 : -1;
+        dump_state = DS_IDLE;
+        pthread_mutex_unlock(&DMX);
+    }
+    return NULL;
+}
 
 int mv_vrhost_request_dump(const char *dir) {
     if (!dir || !*dir || strlen(dir) >= sizeof dump_dir) return -1;
     int rc = -1;
     pthread_mutex_lock(&DMX);
-    if (!dump_pending) { strcpy(dump_dir, dir); dump_pending = 1; dump_res = 0; rc = 0; }
+    if (dump_state == DS_IDLE) {
+        if (!DB.ram) {   /* reserva única (fuera del hilo de emulación) */
+            DB.ram = (uint8_t *)malloc(NS_DUMP_RAM_SIZE);
+            DB.scratch = (uint8_t *)malloc(1024);
+            DB.vram = (uint16_t *)malloc(NS_DUMP_VRAM_BYTES);
+            DB.rgba = (uint8_t *)malloc((size_t)1024 * 512 * 4);
+            DB.lops = (GpuOp *)malloc((size_t)DUMP_OPS_CAP * sizeof(GpuOp));
+            DB.ldata = (uint16_t *)malloc((size_t)DUMP_DATA_CAP * 2);
+            DB.meta = (char *)malloc(DUMP_META_CAP);
+            if (!DB.ram || !DB.scratch || !DB.vram || !DB.rgba || !DB.lops || !DB.ldata || !DB.meta) {
+                free(DB.ram); free(DB.scratch); free(DB.vram); free(DB.rgba); free(DB.lops); free(DB.ldata); free(DB.meta);
+                memset(&DB, 0, sizeof DB);
+                pthread_mutex_unlock(&DMX);
+                return -1;
+            }
+        }
+        if (!dump_thr_on) {
+            if (pthread_create(&dump_thr, NULL, dump_worker, NULL) != 0) { pthread_mutex_unlock(&DMX); return -1; }
+            pthread_detach(dump_thr);
+            dump_thr_on = 1;
+        }
+        strcpy(dump_dir, dir);
+        dump_state = DS_REQ; dump_res = 0; rc = 0;
+    }
     pthread_mutex_unlock(&DMX);
     return rc;
 }
@@ -638,49 +701,71 @@ int mv_vrhost_dump_result(void) {
     pthread_mutex_unlock(&DMX);
     return r;
 }
+void mv_vrhost_cancel_dump(void) {   /* sólo anula un pedido que aún no se copió */
+    pthread_mutex_lock(&DMX);
+    if (dump_state == DS_REQ) dump_state = DS_IDLE;
+    pthread_mutex_unlock(&DMX);
+}
 
-static void dump_now(Cpu *c, uint32_t f, const GpuDrawList *l) {
-    char dir[512];
-    pthread_mutex_lock(&DMX); snprintf(dir, sizeof dir, "%s", dump_dir); pthread_mutex_unlock(&DMX);
-    uint32_t gte[64];
-    for (int i = 0; i < 32; i++) { gte[i] = gte_mfc2(c, i); gte[32 + i] = gte_cfc2(c, i); }
-    GpuDisplay d; gpu_get_display(&d);
-    uint8_t *rgba = NULL; int fw = d.fw > 0 ? d.fw : d.w, fh = d.h;
-    if (fw > 0 && fh > 0 && fw <= 1024 && fh <= 512) {
-        rgba = (uint8_t *)malloc((size_t)fw * (size_t)fh * 4);
-        if (rgba && !gpu_present_rgba(&d, &gpu_vram[0][0], rgba, (size_t)fw * (size_t)fh)) { free(rgba); rgba = NULL; }
+#define MP(...) do { if (n < DUMP_META_CAP - 160) n += snprintf(DB.meta + n, (size_t)(DUMP_META_CAP - n), __VA_ARGS__); } while (0)
+static int meta_rec(int n, const char *pfx, const VrCamRecord *r) {
+    if (!r) return n;
+    MP("%sactive=%d\n%seye=%d,%d,%d\n%sM=", pfx, r->active, pfx, r->eye[0], r->eye[1], r->eye[2], pfx);
+    for (int i = 0; i < 9; i++) MP("%.6f%s", r->M[i], i < 8 ? "," : "\n");
+    MP("%sscreen=%d\n%syaw=%.4f\n%spitch=%.4f\n%stheta=%.4f\n%sunits_per_m=%.3f\n", pfx, r->screen, pfx, r->yaw_deg, pfx, r->pitch_deg, pfx, r->theta_play_deg, pfx, r->units_per_m);
+    MP("%sp_ref=%.5f,%.5f,%.5f\n%shead=", pfx, r->p_ref[0], r->p_ref[1], r->p_ref[2], pfx);
+    for (int i = 0; i < 16; i++) MP("%.6f%s", r->head[i], i < 15 ? "," : "\n");
+    return n;
+}
+
+/* Hilo de emulación. Copia a los búferes reservados y despierta al trabajador. `l` = última lista construida (o NULL). */
+static void dump_capture(Cpu *c, uint32_t f, const GpuDrawList *l) {
+    pthread_mutex_lock(&DMX);
+    if (dump_state != DS_REQ) { pthread_mutex_unlock(&DMX); return; }
+    memcpy(DB.ram, emu_ram, NS_DUMP_RAM_SIZE);
+    memcpy(DB.scratch, emu_scratch, 1024);
+    memcpy(DB.vram, &gpu_vram[0][0], NS_DUMP_VRAM_BYTES);
+    for (int i = 0; i < 32; i++) { DB.gte[i] = gte_mfc2(c, i); DB.gte[32 + i] = gte_cfc2(c, i); }
+    gpu_get_display(&DB.disp);
+    DB.has_list = 0;
+    int list_trunc = 0;
+    if (l) {
+        if (l->nops <= DUMP_OPS_CAP && l->ndata <= DUMP_DATA_CAP) {
+            memcpy(DB.lops, l->ops, (size_t)l->nops * sizeof(GpuOp));
+            memcpy(DB.ldata, l->data, (size_t)l->ndata * 2);
+            DB.list = *l; DB.list.ops = DB.lops; DB.list.data = DB.ldata; DB.list.cap_ops = l->nops; DB.list.cap_data = l->ndata;
+            DB.has_list = 1;
+        } else list_trunc = 1;
     }
-    char meta[2048]; int n = 0;
-#define MP(...) do { if (n < (int)sizeof meta - 128) n += snprintf(meta + n, sizeof meta - (size_t)n, __VA_ARGS__); } while (0)
+    int n = 0;
     MP("dump_index=%u\ngame_frame=%u\nvblank=%u\n", ++dump_count, f, (unsigned)hle_frame_count());
-    if (l) MP("list_index=%u\n", l->index);
-    MP("area_id=%d\nstage_code=%s\ngame=%d\nin_control=%d\nposture=%d\nview_mode=%d\n", bs.area_id, bs.stage_code, bs.has_player, bs.in_control, bs.stance, view.kind);
+    if (DB.has_list) MP("list_index=%u\n", l->index);
+    if (list_trunc) MP("list_omitted=1\n");
+    MP("area_id=%d\ngame=%d\nin_control=%d\nposture=%d\nview_mode=%d\n", bs.area_id, bs.has_player, bs.in_control, bs.stance, view.kind);
     MP("player_x=%d\nplayer_y=%d\nplayer_z=%d\n", bs.player_pos.x, bs.player_pos.y, bs.player_pos.z);
     MP("eye_x=%d\neye_y=%d\neye_z=%d\ncam_h=%d\n", bs.eye_pos[0], bs.eye_pos[1], bs.eye_pos[2], bs.eye_focal);
     MP("cam_rot=");
     for (int i = 0; i < 9; i++) MP("%d%s", bs.eye_axes[i / 3][i % 3], i < 8 ? "," : "\n");
-    const VrCamRecord *r = vrcam_last_record();
-    if (r) {
-        MP("rec_active=%d\nrec_eye=%d,%d,%d\nrec_M=", r->active, r->eye[0], r->eye[1], r->eye[2]);
-        for (int i = 0; i < 9; i++) MP("%.6f%s", r->M[i], i < 8 ? "," : "\n");
-        MP("rec_screen=%d\nrec_yaw=%.4f\nrec_pitch=%.4f\nrec_theta=%.4f\nrec_units_per_m=%.3f\n", r->screen, r->yaw_deg, r->pitch_deg, r->theta_play_deg, r->units_per_m);
-        MP("rec_p_ref=%.5f,%.5f,%.5f\nrec_head=", r->p_ref[0], r->p_ref[1], r->p_ref[2]);
-        for (int i = 0; i < 16; i++) MP("%.6f%s", r->head[i], i < 15 ? "," : "\n");
-    }
+    /* Registro de cámara: el de la lista volcada (la que fijó la vista de sus polígonos) y, aparte, el último del hilo de emulación. */
+    const VrCamRecord *last = vrcam_last_record(), *lr = NULL;
+    if (DB.has_list) { int has3d = 0; lr = list_record(l, &has3d); }
+    MP("rec_source=%s\n", lr ? "list" : "last");
+    n = meta_rec(n, "rec_", lr ? lr : last);
+    if (lr && last) n = meta_rec(n, "last_rec_", last);
     float hm[16]; double ht = 0;
     if (mv_vr_get_head(hm, &ht)) {
         MP("head=");
         for (int i = 0; i < 16; i++) MP("%.6f%s", hm[i], i < 15 ? "," : "\n");
         MP("head_age=%.3f\n", mv_vr_head_age());
     }
-    NsDumpSrc s = { emu_ram, emu_scratch, &gpu_vram[0][0], gte, l, rgba, fw, fh, meta };
-    int rc = ns_dump_write(dir, &s);
-    free(rgba);
-    fprintf(stderr, "[vrhost] volcado %s: %s\n", dir, rc == 0 ? "ok" : "ERROR");
-    pthread_mutex_lock(&DMX); dump_pending = 0; dump_res = rc == 0 ? 1 : -1; pthread_mutex_unlock(&DMX);
+    DB.meta[n < DUMP_META_CAP ? n : DUMP_META_CAP - 1] = 0;
+    dump_state = DS_CAP;
+    pthread_cond_signal(&DCV);
+    pthread_mutex_unlock(&DMX);
 }
+#undef MP
 
-static void frame_hook(Cpu *c, uint32_t f) {
+static void frame_hook_body(Cpu *c, uint32_t f) {
 #ifdef MV_NOGEN
     if (vr_ok) ovp_frame();
 #endif
@@ -705,11 +790,7 @@ static void frame_hook(Cpu *c, uint32_t f) {
     uint64_t lp = atomic_load(&last_poll_ns), now = mono_ns();
     int want = lp && now - lp < 1500000000ull;
     capture_set(want);
-    if (!cap_on) {   /* sin consumidor de escenas no hay lista: el volcado se hace sin ella */
-        pthread_mutex_lock(&DMX); int dp = dump_pending; pthread_mutex_unlock(&DMX);
-        if (dp) dump_now(c, f, NULL);
-        return;
-    }
+    if (!cap_on) return;   /* sin consumidor de escenas no hay lista: frame_hook vuelca sin ella */
     gpu_capture_vblank();
     for (;;) {
         int si = take_free_slot();
@@ -723,9 +804,14 @@ static void frame_hook(Cpu *c, uint32_t f) {
             break;
         }
         build_one(l, si);
-        { pthread_mutex_lock(&DMX); int dp = dump_pending; pthread_mutex_unlock(&DMX); if (dp) { dump_now(c, f, l); } }
+        dump_capture(c, f, l);
         if (!cap_on) break;
     }
+}
+
+static void frame_hook(Cpu *c, uint32_t f) {
+    frame_hook_body(c, f);
+    dump_capture(c, f, NULL);   /* si el pedido no se atendió con una lista (sin consumidor, cola llena, sin lista nueva), se vuelca sin ella */
 }
 
 /* ------------------------------------------------------------------------------------------------ enganches de arranque */

@@ -1,119 +1,166 @@
 #pragma once
-/* ns_types: CONTRATO de la escena nativa (renderer nativo). Qué se extrae en cada fotograma de juego de la RAM del motor y cómo se
- * entrega al renderer. C99 puro, sin dependencias de plataforma ni del runtime; el mismo fichero lo ven el extractor (hilo de emulación),
- * el puente a Swift y las herramientas de escritorio. Contexto y origen de cada campo: docs/escena_nativa.md (léelo primero).
+/* ns_types: CONTRATO de la escena nativa (renderer nativo). Qué se extrae en cada fotograma de juego de la RAM del motor y cómo se entrega al renderer.
+ * C99 puro, sin dependencias de plataforma ni del runtime; el mismo fichero lo ven el extractor (hilo de emulación), el puente a Swift y las herramientas
+ * de escritorio. Contexto y origen de cada campo: docs/escena_nativa.md (léelo primero). Versión 2 (ver NS_VERSION y la sección «Cambios» de la bitácora).
  *
  * Idea
- *   El motor del juego mantiene en RAM una LISTA DE OBJETOS por canal (modelos con matriz de mundo, el escenario es una lista de objetos del
- *   mismo tipo) y una lista de PRIMITIVAS de efectos con coordenadas de mundo. Una vez por fotograma de juego, justo después de que el motor
- *   calcule todas las matrices de mundo, el extractor lee esa lista y produce una NsScene: instancias (qué mallas, dónde, con qué luz) +
- *   mallas (cacheables, se envían una vez) + luces + efectos + cámara del juego. El renderer la dibuja con la cámara VR a la frecuencia del visor.
- *   La lógica, la IA y el sonido siguen siendo del juego; el HUD y los menús 2D siguen saliendo de la lista de la GPU (vr_scene, clase 2/3).
+ *   El motor mantiene en RAM una LISTA DE OBJETOS por canal (modelos con matriz de mundo; el escenario es una lista de objetos del mismo tipo) y una lista
+ *   de PRIMITIVAS de efectos con coordenadas de mundo. Una vez por fotograma de juego, justo después de que el motor calcule todas las matrices de mundo,
+ *   el extractor lee esa lista y produce una NsScene: instancias (qué mallas, dónde, con qué luz) + mallas (cacheables, se envían una vez) + luces +
+ *   efectos + cámara del juego. El renderer la dibuja con la cámara VR a la frecuencia del visor. La lógica, la IA y el sonido siguen siendo del juego; el
+ *   HUD y los menús 2D siguen saliendo de la lista de la GPU (vr_scene, clase 2/3).
  *
  * Unidades y ejes (iguales a los del puente y vr_scene)
- *   Todo va en UNIDADES DEL MOTOR (enteros del juego pasados a float donde se indica) y en el MUNDO DEL MOTOR: Y arriba, 1 unidad = 1 mm
- *   nominal (NsScene.units_per_m = 1000; el personaje mide ~1650-1750). NO se convierte a metros ni a espacio del usuario en el extractor:
- *   NsScene.to_vr (3x4) lleva del mundo del motor al mundo VR con la MISMA regla que vr_scene (escala, espejo Z si hace falta, origen) y se
- *   rellena con vr_scene_opts/vrcam; el renderer aplica to_vr * (world_pieza * v_local) y después la pose de la cabeza (vrcam_delta / usermap).
- *   Ángulos del motor: 4096 = vuelta. Matrices del motor: rotación 3x3 s16 con 4096 = 1,0 (la rotación de mundo de una pieza puede llevar escala:
- *   p. ej. una sombra aplanada pone la escala en la diagonal; se pasa tal cual, como float).
+ *   Todo va en UNIDADES DEL MOTOR (enteros del juego pasados a float donde se indica) y en el MUNDO DEL MOTOR: **Y ARRIBA, mano derecha** (verificado: el suelo
+ *   está en y ~ 0, la cabeza de un personaje por encima de sus pies, la cámara por encima mirando hacia -Y, y la rotación vista->mundo tiene determinante +1),
+ *   1 unidad = 1 mm nominal (NsScene.units_per_m = 1000). NO se convierte a metros ni a espacio del usuario en el extractor: NsScene.to_vr (3x4) lleva del
+ *   mundo del motor al mundo VR con la MISMA regla que vr_scene:  v_vr = S * Mmap * (v - origen_juego),  S = 1/units_per_m,  Mmap = identidad (el mundo del
+ *   motor ya es Y arriba y derecho; sólo sería un espejo en Z si det(R_ojo) < 0, opts.mirror_z), origen_juego = el origen que use vr_scene (suelo bajo el
+ *   jugador o fijo). El renderer aplica to_vr * (world_pieza * v_local) y después la pose de la cabeza (vrcam_delta / usermap). NO hay inversión de Y.
+ *   Ángulos del motor: 4096 = vuelta. Matrices del motor: rotación 3x3 s16 con 4096 = 1,0 (puede llevar escala, p. ej. una sombra aplanada; se pasa tal cual).
  *
- * Entrega (triple búfer + caché de mallas en GPU)
- *   - Las MALLAS son inmutables y viven en un NsMeshStore propio del productor (arena con punteros estables, solo se añade). Una NsScene sólo
- *     referencia mallas por id (u64) y por tanto es pequeña (unos cientos de instancias): puede perderse o saltarse sin perder datos.
- *     id = ((uint64)dirección_de_la_definición_en_RAM << 32) | hash32 del CONTENIDO resuelto (vértices, normales, caras con UV/tpage/clut,
- *     colores precalculados). Si el motor reescribe una definición (cambio de zona) cambia el hash y por tanto el id: nunca hay que invalidar.
- *   - El consumidor mantiene su caché id -> búferes de GPU; para cada id nuevo llama a ns_store_get(). `mesh_epoch` sube cuando el productor vacía el
- *     almacén (cambio de zona/ejecutable): entonces el consumidor puede soltar toda su caché.
- *   - NsScene es memoria plana (arrays con capacidad) pensada para 3 slots rotativos: productor escribe el libre, el consumidor toma el más reciente
- *     completo; `seq` crece de 1 en 1, `game_frame` es el fotograma del motor. Nada de punteros a la RAM del juego dentro de la escena.
+ * Convenio de normales y luces (importante para sombrear)
+ *   Las normales almacenadas de un modelo apuntan HACIA EL LADO NO VISIBLE de la cara (son «interiores»: coinciden con cross(B-A, D-A) en el orden de
+ *   vértices del motor y el anverso es el de la prueba de orientación de §3.4 del documento). Las filas de luz son la dirección en que VIAJA la luz (una luz cenital
+ * viaja hacia -Y). Por eso la intensidad es dot(dir_luz, normal_almacenada) sin cambio de signo: un suelo (normal almacenada hacia
+ *   -Y) recibe la luz que cae. ns_shade_normal() implementa exactamente esa fórmula; NO invertir ningún signo.
+ *
+ * Entrega (triple búfer + almacén de mallas con liberación diferida) — PROTOCOLO OBLIGATORIO
+ *   1. Las MALLAS son inmutables y viven en un NsMeshStore del productor organizado en ARENAS por época (mesh_epoch). Una NsScene sólo referencia mallas
+ *      por id (u64) y por tanto es pequeña. id = hash de 64 bits del CONTENIDO GEOMÉTRICO (ns_mesh_content_hash: vértices, normales y caras con UV/tpage/clut,
+ *      campo a campo, sin padding ni punteros). El color precalculado NO entra en el id: va aparte como juego de colores versionado (NsBaked, ns_store_get_baked).
+ *   2. El hash se calcula UNA vez por (dirección de la definición, zone_gen) y se guarda en una tabla dirección -> id; los fotogramas siguientes sólo
+ *      comprueban que la definición no cambió (zone_gen) y reutilizan el id. zone_gen sube cuando el motor libera/recarga definiciones (cambio de zona).
+ *   3. LIBERACIÓN DIFERIDA CON DOS GENERACIONES: como mucho hay dos arenas vivas (época e y e-1). El productor abre la época e+1 (al vaciar por cambio de
+ *      zona) sólo cuando ya se liberó la e-1, y la e-1 se libera SÓLO cuando el consumidor llamó a ns_store_ack(st, e): «no volveré a tocar mallas de época < e».
+ *      Mientras el consumidor no reconozca, el productor sigue añadiendo a la época actual (no hay corte). Un puntero de ns_store_get() es válido hasta
+ *      que el consumidor reconoce una época mayor que NsMesh.epoch.
+ *   4. ORDEN DE PUBLICACIÓN: el productor (a) añade al almacén TODAS las mallas y juegos de colores que la escena referencia, (b) rellena el slot libre,
+ *      (c) lo publica con ns_pub_publish() (ns_pub.h), que hace el intercambio con semántica release; el consumidor toma con ns_pub_acquire() (acquire).
+ *      Así todo lo que el productor escribió antes (mallas incluidas) es visible para el consumidor al ver la escena.
+ *   5. Cada slot lleva un CONTADOR DE GENERACIÓN (NsScene.slot_gen, creciente por slot): el consumidor puede comprobar antes y después de copiar que no cambió.
+ *      La entrega es de TRIPLE búfer sin bloqueos: ni el productor espera al consumidor ni al revés; se pueden saltar escenas sin perder datos.
+ *   - `seq` crece de 1 en 1 por escena publicada; `game_frame` es el fotograma del motor. Nada de punteros a la RAM del juego dentro de la escena.
+ *
+ * Capacidades mínimas y truncado
+ *   Las capacidades de NsScene deben ser >= NS_MIN_INST / NS_MIN_PIECE / NS_MIN_LIGHT / NS_MIN_EFFECT (valen para una escena sin ningún recorte de visibilidad).
+ *   Si algo no cabe: el escenario (NS_IF_STATIC) NUNCA se descarta —se emite primero—; después se emiten las instancias dinámicas por orden de la cola y se
+ *   descarta por el final. `truncated` marca qué lista se llenó, `n_dropped_*` cuántos elementos se perdieron y NS_SV_MAP_INCOMPLETE avisa si ni el escenario cupo.
  *
  * Qué NO contiene (y por qué)
- *   - Texturas: salen de la VRAM, que el consumidor ya reconstruye por eventos con la lista de la GPU (vr_scene, VrBatch.ev_end). Aquí sólo
- *     tpage/clut/UV por cara. La paleta térmica/nocturna es un cambio de CLUT en VRAM: no afecta a este contrato.
- *   - Colores finales: se entrega la ENTRADA del sombreado (normales + luces + color precalculado) y el renderer evalúa ns_shade_*, así la luz
- *     responde a la posición real de cada pieza y no a la del último fotograma del motor. La fórmula está fijada y validada (docs §6).
+ *   - Texturas: salen de la VRAM, que el consumidor ya reconstruye por eventos con la lista de la GPU (vr_scene, VrBatch.ev_end). Aquí sólo tpage/clut/UV por cara.
+ *   - Colores finales: se entrega la ENTRADA del sombreado (normales + luces + color precalculado) y el renderer evalúa ns_shade_*, así la luz responde a la
+ *     posición real de cada pieza y no a la del último fotograma del motor. La fórmula está fijada y validada (docs §6).
+ *   - Sombras: las dibuja el módulo de efectos (NsFxScene.shadow_objs). El extractor de mallas las OMITE (instancias marcadas NS_IF_SHADOW no se emiten, sólo
+ *     se cuentan en n_shadow_omitted) para que no se dibujen dos veces.
+ *   - Efectos de pantalla completa (agua, gas, fundido, gafas): los entrega el módulo de efectos en NsFxScene.screen. NsScene sólo lleva `fx_seq`, la secuencia de
+ *     la NsFxScene que corresponde a esta escena (mismo game_frame), y NS_SV_FX si existe.
  */
 #include <stdint.h>
 #include <stddef.h>
 
-#define NS_VERSION 1u
+#define NS_VERSION 2u
+
+/* Comprobación de tamaños en compilación (C99 y C11). */
+#define NS_STATIC_ASSERT(name, cond) typedef char ns_sa_##name[(cond) ? 1 : -1]
+
+/* Capacidades mínimas que debe tener una NsScene (ver «Capacidades mínimas y truncado»). */
+enum { NS_MIN_INST = 256, NS_MIN_PIECE = 2048, NS_MIN_LIGHT = 256, NS_MIN_EFFECT = 4096 };
+
+/* Tope de la intensidad de luz de una normal: el registro de 16 bits con signo satura en 0x7FFF sobre 4096 = 1,0. */
+#define NS_INTENSITY_MAX (32767.0f / 4096.0f)
 
 /* ---------------------------------------------------------------------------------------------------------------- transformaciones */
 /* 3x4 fila-mayor: v' = R*v + t.  m[0..2] = fila 0 (r00 r01 r02), m[3] = tx, m[4..6] fila 1, m[7] = ty, m[8..10] fila 2, m[11] = tz.
  * Para matrices del motor (s16 con 4096 = 1) el productor ya divide por 4096; la traslación va en unidades del motor. */
 typedef struct { float m[12]; } NsXf;
+NS_STATIC_ASSERT(xf, sizeof(NsXf) == 48);
 
 /* ---------------------------------------------------------------------------------------------------------------- malla */
 typedef struct {
     int16_t x, y, z;     /* espacio local de la pieza, unidades del motor */
     uint8_t weld;        /* 0xFF = ninguno; si no: índice de vértice del modelo PADRE (NsPiece.parent) cuya posición TRANSFORMADA sustituye a ésta
                           * (costura entre piezas articuladas: el motor copia el vértice ya transformado del padre). El renderer calcula primero los
-                          * vértices del padre y luego los welded. Posición y, a falta de más datos, también la normal de color (docs §3.5). */
-    uint8_t pad;
+                          * vértices del padre y luego los soldados. Su color/normal: los de la propia cara (docs §3.5). */
+    uint8_t pad;         /* 0 */
 } NsVert;
+NS_STATIC_ASSERT(vert, sizeof(NsVert) == 8);
 
-typedef struct { int16_t x, y, z, pad; } NsNorm;   /* normal unitaria con 4096 = 1,0, espacio local */
+typedef struct { int16_t x, y, z, pad; } NsNorm;   /* normal unitaria con 4096 = 1,0, espacio local; pad = 0 */
+NS_STATIC_ASSERT(norm, sizeof(NsNorm) == 8);
 
 enum {
     NS_FF_TRI = 1u,      /* triángulo: el motor repite el 3.er vértice (v[2] == v[3]); dibujar (A,B,C) */
-    NS_FF_PAINT_OK = 2u  /* la cara tiene color precalculado válido en NsMesh.paint */
+    NS_FF_BAKED_OK = 2u  /* la cara tiene color precalculado válido en el NsBaked de la pieza */
 };
 
-/* Cara = cuadrilátero A,B,C,D en orden PERÍMETRO (el motor lo guarda así; el hardware lo dibuja en orden Z: triángulos (A,B,D) y (A,D,C) del
- * vértice 0,1,2,3 = A,B,D,C). Triángulos para el renderer: (A,B,C) y (A,C,D). Anverso: nclip(A,B,D) > 0 en la proyección del motor, equivale a
- * dot(A_vista, cross(B-A, D-A)) > 0 con vista X derecha, Y abajo, Z delante (docs §3.4). Si el modelo es BOTHFACE se dibuja a doble cara. */
+/* Cara = cuadrilátero A,B,C,D en orden PERÍMETRO (el motor lo guarda así; el hardware lo dibuja en orden Z: triángulos (A,B,D) y (A,D,C) del vértice
+ * 0,1,2,3 = A,B,D,C). Triángulos para el renderer: (A,B,C) y (A,C,D). Anverso: la prueba de orientación de (A,B,D) en la proyección del motor es > 0, equivale a
+ * dot(A_vista, cross(B-A, D-A)) > 0 con vista X derecha, Y abajo, Z delante (docs §3.4). Si el modelo es NS_MF_TWOSIDED se dibuja a doble cara. */
 typedef struct {
-    uint8_t v[4];        /* índices de vértice A,B,C,D (7 bits) */
-    uint8_t n[4];        /* índices de normal A,B,C,D (7 bits) */
+    uint8_t v[4];        /* índices de vértice A,B,C,D (0..255). En modelos con vértices soldados el motor sólo usa 7 bits: el extractor ya los enmascaró */
+    uint8_t n[4];        /* índices de normal A,B,C,D (0..255; igual: 7 bits si hay soldados) */
     uint8_t u[4], t[4];  /* texels (0..255) de A,B,C,D DENTRO de la página de textura del tpage (u = columna, t = fila), ya resueltos con el rectángulo de textura */
-    uint16_t tpage;      /* formato GP0(E1h): bits 0-3 x/64, 4 y/256, 5-6 modo de mezcla, 7-8 profundidad (0=4b,1=8b,2/3=15b) */
+    uint16_t tpage;      /* palabra de página de textura: bits 0-3 x/64, 4 y/256, 5-6 modo de mezcla, 7-8 profundidad (0=4b,1=8b,2/3=15b) */
     uint16_t clut;       /* (clx/16) | (cly << 6) */
     uint16_t texid;      /* id de textura del motor (depuración; 0 = sin textura -> cara plana) */
     uint8_t flags;       /* NS_FF_* */
-    uint8_t pad;
+    uint8_t pad;         /* 0 */
 } NsFace;
+NS_STATIC_ASSERT(face, sizeof(NsFace) == 24);
 
 enum {
-    NS_MF_TRANS = 1u,    /* semitransparente (modo de mezcla en tpage de cada cara) */
-    NS_MF_UNLIT = 2u,    /* sin sombreado: color neutro 128 (o paint) */
-    NS_MF_BOTHFACE = 4u, /* doble cara */
-    NS_MF_INDIRECT = 8u, /* tiene vértices welded */
-    NS_MF_PAINT = 16u,   /* usa NsMesh.paint (color precalculado por esquina, p. ej. el escenario) en vez de luz dinámica */
-    NS_MF_RAISE_UP = 32u /* raise > 0: se dibuja por delante de otros de su misma profundidad (decals) */
+    NS_MF_BLEND = 1u,    /* semitransparente (modo de mezcla en tpage de cada cara) */
+    NS_MF_UNLIT = 2u,    /* sin sombreado: color neutro 128 (o color precalculado) */
+    NS_MF_TWOSIDED = 4u, /* doble cara */
+    NS_MF_WELDED = 8u,   /* tiene vértices soldados al padre */
+    NS_MF_BAKED = 16u,   /* usa el NsBaked de la pieza (color precalculado por esquina, p. ej. el escenario) en vez de luz dinámica */
+    NS_MF_BIAS_UP = 32u  /* depth_bias > 0: se dibuja por delante de otros de su misma profundidad (decals) */
 };
 
 typedef struct NsMesh {
-    uint64_t id;
-    uint32_t hash;       /* hash32 del contenido (parte baja de id) */
+    uint64_t id;         /* ns_mesh_content_hash() del contenido geométrico */
+    uint32_t epoch;      /* época del almacén en que se creó (ver protocolo) */
     uint32_t flags;      /* NS_MF_* */
     uint32_t model_flags;/* palabra cruda del motor (depuración) */
     uint16_t n_verts, n_faces, n_norms, pad;
-    int16_t raise;       /* sesgo de orden de dibujo del motor (unidades de profundidad); 0 normal. Signo + = acercar */
+    int16_t depth_bias;  /* sesgo de orden de dibujo del motor (unidades de profundidad); 0 normal. Signo + = acercar */
     int16_t bbox[6];     /* min xyz, max xyz locales */
+    int16_t pad2;
     const NsVert *verts;
     const NsNorm *norms;
     const NsFace *faces;
-    const uint32_t *paint; /* NULL o n_faces*4 colores RGBA8 (r | g<<8 | b<<16 | a<<24; 128 = neutro) en orden A,B,C,D; ya incluyen luces fijas del mapa */
 } NsMesh;
+
+/* Color precalculado de una pieza (el escenario trae los de las luces fijas). Es del OBJETO, no del modelo, y puede recalcularse sin que cambie la geometría:
+ * por eso va aparte del id de malla y versionado. ver >= 1; una versión nueva sustituye a la anterior (la vieja caduca con su época). */
+typedef struct NsBaked {
+    uint64_t mesh_id;
+    uint32_t ver;
+    uint32_t n_colors;   /* = 4 * n_faces */
+    const uint32_t *rgba;/* RGBA8 (r | g<<8 | b<<16 | a<<24; 128 = neutro) en orden A,B,C,D de cada cara */
+} NsBaked;
 
 /* ---------------------------------------------------------------------------------------------------------------- instancias */
 typedef struct {
     uint64_t mesh_id;    /* NsMesh.id */
     NsXf world;          /* local -> mundo del motor */
-    int16_t parent;      /* índice de pieza (dentro de la misma instancia) cuyos vértices usan los welded de esta malla; -1 */
+    uint32_t baked_ver;  /* versión del NsBaked de (mesh_id) que usa esta pieza; 0 = ninguno */
+    int16_t parent;      /* índice de pieza (dentro de la misma instancia) cuyos vértices usan los soldados de esta malla; -1 */
     uint16_t flags;      /* NS_PF_* */
 } NsPiece;
+NS_STATIC_ASSERT(piece, sizeof(NsPiece) == 64);
 enum { NS_PF_HIDDEN = 1u /* pieza oculta por el juego o por la capa VR (cabeza propia); no dibujar */ };
 
 enum {
-    NS_IF_SHADE = 1u,    /* se sombrea con NsLight (si no: neutro/paint) */
-    NS_IF_AMBIENT = 2u,  /* ambiente propio (NsLight.amb) en vez del global */
-    NS_IF_TRANS = 4u,    /* el objeto entero puede tener piezas semitransparentes (dibujar en el pase de transparentes) */
-    NS_IF_STATIC = 8u,   /* escenario (objeto de mapa): no cambia entre fotogramas salvo cambio de grupo */
-    NS_IF_THERMAL = 16u, /* admite textura térmica (CLUT alterno en VRAM; informativo) */
-    NS_IF_ONEPIECE = 32u,/* todas las piezas comparten la misma matriz */
-    NS_IF_ENVMAP = 64u   /* mapa de reflexión (raro; la normal se proyecta sobre la vista) */
+    NS_IF_LIT = 1u,      /* se sombrea con NsLight (si no: neutro/precalculado) */
+    NS_IF_OWN_AMBIENT = 2u, /* ambiente propio (NsLight.amb) en vez del global */
+    NS_IF_BLEND = 4u,    /* el objeto entero puede tener piezas semitransparentes (dibujar en el pase de transparentes) */
+    NS_IF_STATIC = 8u,   /* escenario (objeto de mapa): no cambia entre fotogramas salvo cambio de zona; NUNCA se trunca */
+    NS_IF_THERMAL_OK = 16u, /* admite textura térmica (CLUT alterno en VRAM; informativo) */
+    NS_IF_RIGID = 32u,   /* todas las piezas comparten la misma matriz */
+    NS_IF_ENVREFL = 64u, /* mapa de reflexión (raro; la normal se proyecta sobre la vista) */
+    NS_IF_SHADOW = 128u  /* sombra proyectada: la dibuja el módulo de efectos; el extractor NO la emite (sólo aparece en pruebas/depuración) */
 };
 
 typedef struct {
@@ -121,39 +168,41 @@ typedef struct {
     uint32_t first_piece;
     uint16_t n_pieces;
     uint16_t flags;      /* NS_IF_* */
-    uint16_t group;      /* grupo de mapa (máscara de bits); 0 = siempre */
-    int16_t chanl;       /* canal del motor (0 = principal) */
+    uint16_t zone_mask;  /* máscara de grupo de mapa (bits); 0 = siempre */
+    int16_t layer;       /* canal del motor (0 = principal) */
     int16_t light;       /* índice en NsScene.lights, -1 si no */
-    int16_t bound_mode;  /* modo de visibilidad del último fotograma completo del motor (0 = lo descartó; informativo: el renderer decide por su cámara) */
-    uint32_t pad;
+    int16_t vis_state;   /* estado de visibilidad del último fotograma completo del motor (0 = lo descartó; informativo: el renderer decide por su cámara) */
+    uint32_t pad;        /* 0 */
 } NsInstance;
+NS_STATIC_ASSERT(inst, sizeof(NsInstance) == 24);
 
 /* ---------------------------------------------------------------------------------------------------------------- luces */
 /* Conjunto de luces tal como las consume el sombreado del motor (docs §6), en MUNDO del motor:
- *   dir[l][0..2] (l=0..2): dirección de la luz l, s16 con 4096 = 1,0; la fila trae ya el factor de atenuación de las puntuales (módulo <= 3072).
+ *   dir[l][0..2] (l=0..2): dirección en que VIAJA la luz l, s16 con 4096 = 1,0; la fila trae ya el factor de atenuación de las puntuales (módulo <= 3072).
  *   col[c][l]: color de la luz l en el canal c (s16; col/16 = aportación 0..255 con intensidad 1,0).
- *   amb[c]: color ambiente 0..255 (el motor lo multiplica por 16 al cargarlo en la GTE).
- * Fórmula (docs §6): I_l = clamp(dot(dir[l]/4096, R*n) , 0, 7.99) ; c = clamp(amb[c] + sum_l col[c][l]/16 * I_l, 0, 255) ; la textura se modula con c/128.
- * `has_dyn` = alguna luz distinta de la principal está activa. */
+ *   amb[c]: color ambiente 0..255 (el motor lo multiplica por 16 al cargarlo).
+ * Fórmula (docs §6): I_l = clamp(dot(dir[l]/4096, R*n), 0, NS_INTENSITY_MAX) ; c = clamp(amb[c] + sum_l col[c][l]/16 * I_l, 0, 255) ; la textura se modula con c/128. */
 typedef struct {
     int16_t dir[3][3];
     int16_t col[3][3];
     int16_t amb[3];
-    uint16_t flags;      /* bit 0: has_dyn; bit 1: ambiente propio de la instancia */
+    uint16_t flags;      /* bit 0: hay alguna luz distinta de la principal; bit 1: ambiente propio de la instancia */
 } NsLight;
+NS_STATIC_ASSERT(light, sizeof(NsLight) == 44);
 
-/* Niebla / atenuación por profundidad. El motor NO usa el depth-cue de la GTE: sólo hay niebla en las zonas con el actor de niebla, que sustituye
+/* Niebla / atenuación por profundidad. El motor NO usa atenuación por hardware: sólo hay niebla en las zonas con el actor de niebla, que sustituye
  * las etapas de canal y atenúa hacia NEGRO por profundidad de OBJETO (z de la pieza 0) y de primitiva. Rampa lineal en z de vista (unidades del motor):
  * f = clamp((z - start)/len, 0, 1); color = color*(1-f). `active` = 0 -> sin niebla. */
 typedef struct {
     int32_t active;
     float start, len;    /* unidades del motor en profundidad de vista de la cámara del juego */
-    float rgb[3];        /* color lejano 0..255 (siempre 0 en la edición analizada) */
+    float rgb[3];        /* color lejano 0..255 (siempre 0 en lo observado) */
 } NsFog;
+NS_STATIC_ASSERT(fog, sizeof(NsFog) == 24);
 
 /* ---------------------------------------------------------------------------------------------------------------- efectos */
 enum {
-    NS_EK_QUAD = 0,      /* polígono/línea con vértices de mundo (pos[]) */
+    NS_EK_QUAD = 0,      /* polígono/línea con vértices de mundo (p[]) */
     NS_EK_BILLBOARD = 1  /* sprite cuadrilátero de tamaño en PÍXELES de la proyección del motor alrededor de un punto de mundo */
 };
 enum {
@@ -161,17 +210,18 @@ enum {
     NS_EF_TEXTURED = 2u,
     NS_EF_GOURAUD = 4u,
     NS_EF_ONESIDE = 8u,  /* sólo anverso */
-    NS_EF_LINE = 16u,    /* línea (dibujar como cinta de ancho `px`) */
+    NS_EF_LINE = 16u,    /* línea (dibujar como cinta de ancho `width_px`) */
     NS_EF_ON_CAMERA = 32u/* posiciones en espacio de VISTA del motor (pegado a la cámara): el renderer las pega a la cabeza */
 };
 typedef struct {
     uint8_t kind;        /* NS_EK_* */
     uint8_t nv;          /* 2 (línea), 3 o 4 vértices (orden de paquete: 0,1,2,3 = Z; cuadrilátero = triángulos (0,1,2) y (1,2,3)) */
     uint16_t flags;      /* NS_EF_* */
-    int16_t raise;       /* sesgo de orden */
+    int16_t depth_bias;  /* sesgo de orden */
     uint8_t abr;         /* modo de semitransparencia 0..3 */
     uint8_t pad;
     uint16_t tpage, clut;
+    uint16_t pad2;
     float p[4][3];       /* QUAD: vértices en mundo del motor (ya con la matriz del grupo aplicada); BILLBOARD: p[0] = centro */
     uint8_t rgb[4][3];   /* color por vértice 0..255 (128 = neutro con textura) */
     uint8_t uv[4][2];    /* texels en la página */
@@ -180,36 +230,50 @@ typedef struct {
     float width_px;      /* LINE: grosor aproximado en píxeles del motor */
     uint32_t src_key;    /* dirección de la primitiva del motor (identidad entre fotogramas) */
 } NsEffect;
+NS_STATIC_ASSERT(effect, sizeof(NsEffect) == 112);
 
 /* ---------------------------------------------------------------------------------------------------------------- cámara y escena */
 typedef struct {
     float eye[3];        /* posición del ojo, mundo del motor */
-    float rot[9];        /* vista -> mundo, fila-mayor; columnas = X derecha, Y abajo, Z delante (como VrCamRecord.M) */
+    float rot[9];        /* vista -> mundo, fila-mayor; columnas = X derecha, Y abajo, Z delante (como VrCamRecord.M). SIN escalar (tal como está en RAM) */
     float h;             /* distancia de pantalla H del motor (320 normal) */
-    float overscan_y;    /* 58/64: la proyección vertical del motor escala Y por este factor (ya aplicado a eye_inv en el motor) */
+    float overscan_y;    /* factor vertical de la proyección del motor con SU cámara: 66/64 (medido; error de reproyección 0,85-1,3 px frente a 14-24 px con 58/64).
+                          * Las matrices de RAM NO lo llevan aplicado: el motor multiplica por él la Y proyectada. Con vr_active = 1 el motor no lo aplica y vale 1,0 */
     int32_t vr_active;   /* 1 si esta cámara es la que la capa VR le dio al motor (cabeza); 0 la propia del juego */
 } NsCamera;
+NS_STATIC_ASSERT(camera, sizeof(NsCamera) == 60);
+#define NS_OVERSCAN_Y (66.0f / 64.0f)
 
 enum {
     NS_SV_GAME = 1u,     /* hay partida/escena 3D con jugador (puente válido) */
     NS_SV_LISTS_OK = 2u, /* las listas de instancias/primitivas se leyeron enteras (si no: truncadas; ver `truncated`) */
-    NS_SV_MAP_OK = 4u    /* hay objetos de escenario en la lista */
+    NS_SV_MAP_OK = 4u,   /* hay objetos de escenario en la lista */
+    NS_SV_MAP_INCOMPLETE = 8u, /* el escenario no cupo en las capacidades (no debería ocurrir con las mínimas) */
+    NS_SV_FX = 16u,      /* existe la NsFxScene con secuencia fx_seq */
+    NS_SV_STORE_FULL = 32u/* el almacén de mallas llegó a su tope sin reconocimiento del consumidor: faltan instancias nuevas */
 };
+enum { NS_TR_INST = 1u, NS_TR_PIECE = 2u, NS_TR_LIGHT = 4u, NS_TR_EFFECT = 8u };
 
 typedef struct NsScene {
+    uint32_t size;       /* sizeof(NsScene) de quien la rellenó: el consumidor rechaza la escena si no coincide con el suyo */
     uint32_t version;    /* NS_VERSION */
     uint32_t seq;        /* contador de escenas publicadas (sube 1 en 1) */
+    uint32_t slot_gen;   /* generación del slot (sube cada vez que el productor reescribe este slot) */
     uint32_t game_frame; /* nº de fotograma del motor (hle_frame_count) */
-    uint32_t vblank;     /* VBlanks desde el arranque en el momento de la extracción */
+    uint32_t vblank;     /* pulsos de refresco desde el arranque en el momento de la extracción */
     uint64_t t_ns;       /* reloj monótono (ns) al extraer */
-    uint32_t mesh_epoch; /* sube cuando el almacén de mallas se vacía */
+    uint32_t mesh_epoch; /* época del almacén de mallas con la que se hizo la escena (el consumidor reconoce con ns_store_ack) */
+    uint32_t zone_gen;   /* generación de definiciones del motor (sube al cambiar de zona/recargar); invalida la tabla dirección -> id del extractor */
     uint32_t valid;      /* NS_SV_* */
-    uint32_t truncated;  /* bits: 1 instancias, 2 piezas, 4 luces, 8 efectos (se alcanzó la capacidad) */
+    uint32_t truncated;  /* NS_TR_*: listas que alcanzaron su capacidad */
+    uint32_t n_dropped_inst, n_dropped_piece, n_dropped_effect;
+    uint32_t n_shadow_omitted; /* sombras reconocidas y no emitidas (las dibuja el módulo de efectos) */
+    uint32_t fx_seq;     /* secuencia de la NsFxScene de esta escena (mismo game_frame); sólo vale si NS_SV_FX */
     uint32_t clock;      /* reloj de búfer: búfer doble del motor (0/1) */
     uint32_t group_mask; /* grupos de mapa activos */
     uint16_t area_id; uint16_t pad0;
     float units_per_m;   /* 1000 */
-    float to_vr[12];     /* mundo del motor -> mundo VR (3x4 fila-mayor, metros); misma regla que vr_scene (docs §2) */
+    float to_vr[12];     /* mundo del motor -> mundo VR (3x4 fila-mayor, metros); misma regla que vr_scene (ver arriba) */
     NsCamera cam;
     NsFog fog;
     float bg_rgb[3];     /* color de fondo del canal de fondo 0..255 */
@@ -222,19 +286,47 @@ typedef struct NsScene {
 } NsScene;
 
 /* ---------------------------------------------------------------------------------------------------------------- almacén de mallas */
-typedef struct NsMeshStore NsMeshStore;   /* opaco: lo implementa el extractor. Lectura thread-safe; sólo el productor añade. */
-/* Devuelve la malla o NULL si el id no está (caducó con mesh_epoch). El puntero y sus arrays valen hasta el siguiente vaciado del almacén. */
+typedef struct NsMeshStore NsMeshStore;   /* opaco: lo implementa el extractor (productor). Ver «Entrega» arriba. */
+/* Consumidor (cualquier hilo, sólo lectura): NULL si el id no está. Válido hasta que el propio consumidor reconozca una época > NsMesh.epoch. */
 const NsMesh *ns_store_get(const NsMeshStore *st, uint64_t id);
-uint32_t ns_store_epoch(const NsMeshStore *st);
+/* Color precalculado (mesh_id, ver) o NULL si esa versión ya no existe. Misma validez que la malla. */
+const NsBaked *ns_store_get_baked(const NsMeshStore *st, uint64_t mesh_id, uint32_t ver);
+uint32_t ns_store_epoch(const NsMeshStore *st);        /* época actual del productor */
+/* Consumidor: «no volveré a tocar mallas ni colores de época < epoch». Release; el productor libera la época anterior sólo tras verlo (acquire). */
+void ns_store_ack(NsMeshStore *st, uint32_t epoch);
 
 /* ---------------------------------------------------------------------------------------------------------------- utilidades (cabecera, sin dependencias) */
-static inline uint32_t ns_hash32(uint32_t h, const void *data, size_t n) {   /* FNV-1a 32 encadenable; h inicial = 2166136261u */
+/* FNV-1a de 64 bits encadenable, SIEMPRE campo a campo (nunca sobre un struct entero: el padding no está definido). */
+#define NS_HASH64_INIT 14695981039346656037ull
+static inline uint64_t ns_hash64(uint64_t h, const void *data, size_t n) {
     const uint8_t *p = (const uint8_t *)data;
-    for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 16777619u; }
+    for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ull; }
     return h;
 }
-#define NS_HASH_INIT 2166136261u
-#define NS_MESH_ID(addr, hash) ((((uint64_t)(uint32_t)(addr)) << 32) | (uint64_t)(uint32_t)(hash))
+static inline uint64_t ns_hash64_u8(uint64_t h, uint8_t v) { h ^= v; return h * 1099511628211ull; }
+static inline uint64_t ns_hash64_u16(uint64_t h, uint16_t v) { return ns_hash64_u8(ns_hash64_u8(h, (uint8_t)v), (uint8_t)(v >> 8)); }
+static inline uint64_t ns_hash64_u32(uint64_t h, uint32_t v) { return ns_hash64_u16(ns_hash64_u16(h, (uint16_t)v), (uint16_t)(v >> 16)); }
+
+/* Hash del CONTENIDO GEOMÉTRICO de una malla (id). Campo a campo, sin padding, sin punteros, sin color precalculado, sin época. Excluye `id`. */
+static inline uint64_t ns_mesh_content_hash(const NsMesh *m) {
+    uint64_t h = NS_HASH64_INIT;
+    h = ns_hash64_u32(h, m->flags);
+    h = ns_hash64_u16(h, (uint16_t)m->depth_bias);
+    h = ns_hash64_u16(h, m->n_verts); h = ns_hash64_u16(h, m->n_faces); h = ns_hash64_u16(h, m->n_norms);
+    for (unsigned i = 0; i < m->n_verts; i++) {
+        h = ns_hash64_u16(h, (uint16_t)m->verts[i].x); h = ns_hash64_u16(h, (uint16_t)m->verts[i].y); h = ns_hash64_u16(h, (uint16_t)m->verts[i].z);
+        h = ns_hash64_u8(h, m->verts[i].weld);
+    }
+    for (unsigned i = 0; i < m->n_norms; i++) {
+        h = ns_hash64_u16(h, (uint16_t)m->norms[i].x); h = ns_hash64_u16(h, (uint16_t)m->norms[i].y); h = ns_hash64_u16(h, (uint16_t)m->norms[i].z);
+    }
+    for (unsigned i = 0; i < m->n_faces; i++) {
+        const NsFace *f = &m->faces[i];
+        for (int k = 0; k < 4; k++) { h = ns_hash64_u8(h, f->v[k]); h = ns_hash64_u8(h, f->n[k]); h = ns_hash64_u8(h, f->u[k]); h = ns_hash64_u8(h, f->t[k]); }
+        h = ns_hash64_u16(h, f->tpage); h = ns_hash64_u16(h, f->clut); h = ns_hash64_u16(h, f->texid); h = ns_hash64_u8(h, f->flags);
+    }
+    return h;
+}
 
 static inline float ns_clampf(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
@@ -260,16 +352,16 @@ static inline void ns_xf_rot(const NsXf *x, const float v[3], float o[3]) {
 }
 
 /* Sombreado por vértice-normal de una cara, EXACTO al del motor (docs §6, validado contra los paquetes de la GPU del motor):
- *   n_local -> normal de mundo = R_pieza * n (sin normalizar: la matriz del motor ya es ~ortonormal; con escala ver docs),
- *   I_l = clamp0( dot(dir_l, nw) / 4096 ) con tope 8,0 (saturación del registro de 16 bits de la GTE: 0x7FFF/4096),
- *   c   = clamp(amb + sum col_l/16 * I_l, 0, 255).   Salida 0..255 por canal; el hardware modula la textura con c/128.
- * `rw` = rotación 3x3 de mundo de la pieza (fila-mayor, 4096 = 1 ya dividido -> floats), n = normal s16/4096 en espacio local. */
+ *   normal de mundo = R_pieza * n (sin normalizar: la matriz del motor ya es ~ortonormal; con escala ver docs),
+ *   I_l = clamp(dot(dir_l, nw) / 4096, 0, NS_INTENSITY_MAX),   c = clamp(amb + sum col_l/16 * I_l, 0, 255).   Salida 0..255 por canal.
+ * Convenio: n = normal ALMACENADA (interior) y dir_l = dirección en que viaja la luz; NO se invierte ningún signo. El hardware modula la textura con c/128.
+ * `rw` = rotación 3x3 de mundo de la pieza (fila-mayor, ya dividida por 4096), n = normal s16/4096 en espacio local. */
 static inline void ns_shade_normal(const NsLight *L, const float rw[9], const float n[3], float out_rgb[3]) {
     float nw[3] = { rw[0]*n[0] + rw[1]*n[1] + rw[2]*n[2], rw[3]*n[0] + rw[4]*n[1] + rw[5]*n[2], rw[6]*n[0] + rw[7]*n[1] + rw[8]*n[2] };
     float I[3];
     for (int l = 0; l < 3; l++) {
         float d = (L->dir[l][0] * nw[0] + L->dir[l][1] * nw[1] + L->dir[l][2] * nw[2]) * (1.0f / 4096.0f);
-        I[l] = ns_clampf(d, 0.0f, 8.0f);
+        I[l] = ns_clampf(d, 0.0f, NS_INTENSITY_MAX);
     }
     for (int c = 0; c < 3; c++) {
         float v = (float)L->amb[c] + (L->col[c][0] * I[0] + L->col[c][1] * I[1] + L->col[c][2] * I[2]) * (1.0f / 16.0f);
