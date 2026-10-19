@@ -87,23 +87,28 @@ static int write_list(const char *dir, const GpuDrawList *l) {
 }
 
 int ns_dump_write(const char *dir, const NsDumpSrc *s) {
-    if (!dir || !s || !s->ram) return -1;
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST) return -1;
-    if (put_file(dir, "ram.bin", s->ram, NS_DUMP_RAM_SIZE) != 0) return -1;
-    if (s->scratch) put_file(dir, "scratch.bin", s->scratch, 1024);
-    if (s->vram) put_file(dir, "vram.bin", s->vram, NS_DUMP_VRAM_BYTES);
-    if (s->gte) put_file(dir, "gte.bin", s->gte, 64 * 4);
-    if (s->list) write_list(dir, s->list);
+    if (!dir || !s || !s->ram || strlen(dir) > 480) return -1;
+    char tmp[512];
+    snprintf(tmp, sizeof tmp, "%s.tmp", dir);
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+    int failed = 0;
+    if (put_file(tmp, "ram.bin", s->ram, NS_DUMP_RAM_SIZE) != 0) return -1;   /* sin RAM no hay volcado: queda el .tmp incompleto, nunca el directorio final */
+    if (s->scratch && put_file(tmp, "scratch.bin", s->scratch, 1024) != 0) failed++;
+    if (s->vram && put_file(tmp, "vram.bin", s->vram, NS_DUMP_VRAM_BYTES) != 0) failed++;
+    if (s->gte && put_file(tmp, "gte.bin", s->gte, 64 * 4) != 0) failed++;
+    if (s->list && write_list(tmp, s->list) != 0) failed++;
     if (s->rgba && s->fw > 0 && s->fh > 0) {
-        char p[640]; snprintf(p, sizeof p, "%s/frame.png", dir);
-        ns_png_write_rgba(p, s->rgba, s->fw, s->fh);
+        char p[640]; snprintf(p, sizeof p, "%s/frame.png", tmp);
+        if (ns_png_write_rgba(p, s->rgba, s->fw, s->fh) != 0) failed++;
     }
     size_t ml = s->meta ? strlen(s->meta) : 0;
     char *m = (char *)malloc(ml + 64);
-    if (m) {
-        int n = snprintf(m, ml + 64, "format=NSD1\n%s", s->meta ? s->meta : "");
-        put_file(dir, "meta.txt", m, (size_t)n);
+    if (!m) failed++;
+    else {
+        int n = snprintf(m, ml + 64, "format=NSD1\nparts_failed=%d\n%s", failed, s->meta ? s->meta : "");
+        if (put_file(tmp, "meta.txt", m, (size_t)n) != 0) failed++;
         free(m);
     }
-    return 0;
+    if (rename(tmp, dir) != 0) return -1;   /* publicación atómica: el directorio final aparece completo o no aparece */
+    return failed;
 }
