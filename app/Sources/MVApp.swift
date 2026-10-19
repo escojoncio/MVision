@@ -11,7 +11,7 @@ struct MVApp: App {
         WindowGroup(id: XRSession.windowID) {
             ContentView()
                 .environmentObject(model)
-                .xrCompactWhenImmersive()   // en VR la ventana se reduce a una barra pequeña, sin destruirla (ver XRSession.swift)
+                .xrCompactWhenImmersive()   // en VR la ventana queda viva pero invisible (ver XRSession.swift)
                 .onAppear {
                     model.start()
                     // VR: el compositor pausa/reanuda el espacio inmersivo (quitarse el visor, menús del sistema).
@@ -32,6 +32,7 @@ struct MVApp: App {
                     model.scenePhaseChanged(p)
                 }
         }
+        .windowStyle(.plain)            // sin cristal: en VR la ventana (invisible) no deja ningún fondo
         .defaultSize(width: 1024, height: 768)
         .windowResizability(.contentSize)
         XRImmersiveScene()
@@ -45,6 +46,30 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
+        Group {
+            // En VR no se ve nada de la ventana: ni la imagen del juego (ya sale en el espacio inmersivo) ni botones.
+            if xr.state == .open { XRGhostView() } else { windowContent }
+        }
+        // visionOS entrega los botones del mando por GameController solo a la app que lo declara en una vista con foco.
+        .modifier(GameControllerEventsModifier())
+        .focusable()
+        .focusEffectDisabled()
+        .focused($controllerFocus)
+        .onAppear { controllerFocus = true }
+        // Al abrir/cerrar el espacio inmersivo o reactivarse la ventana el foco puede perderse: se reasigna.
+        .onChange(of: xr.state) { _, _ in refocus() }
+        .onChange(of: scenePhase) { _, _ in refocus() }
+        .fileImporter(isPresented: $model.showPicker, allowedContentTypes: [.folder], allowsMultipleSelection: false) { model.folderPicked($0) }
+        .alert("Carpeta", isPresented: Binding(get: { model.aviso != nil }, set: { if !$0 { model.aviso = nil } })) {
+            Button("Aceptar", role: .cancel) {}
+        } message: { Text(model.aviso ?? "") }
+        .overlay(alignment: .bottom) {
+            XRControlsView(running: model.phase == .running)
+                .padding(.bottom, xr.state == .open ? 0 : 24)
+        }
+    }
+
+    private var windowContent: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             switch model.phase {
@@ -66,23 +91,6 @@ struct ContentView: View {
                     texto: "\(msg)\n\nRegistro: carpeta Logs dentro de la carpeta elegida (o mvision.log en la carpeta de documentos de la app). Cierra y vuelve a abrir la app para reintentarlo.",
                     reintentar: nil)
             }
-        }
-        // visionOS entrega los botones del mando por GameController solo a la app que lo declara en una vista con foco.
-        .modifier(GameControllerEventsModifier())
-        .focusable()
-        .focusEffectDisabled()
-        .focused($controllerFocus)
-        .onAppear { controllerFocus = true }
-        // Al abrir/cerrar el espacio inmersivo o reactivarse la ventana el foco puede perderse: se reasigna.
-        .onChange(of: xr.state) { _, _ in refocus() }
-        .onChange(of: scenePhase) { _, _ in refocus() }
-        .fileImporter(isPresented: $model.showPicker, allowedContentTypes: [.folder], allowsMultipleSelection: false) { model.folderPicked($0) }
-        .alert("Carpeta", isPresented: Binding(get: { model.aviso != nil }, set: { if !$0 { model.aviso = nil } })) {
-            Button("Aceptar", role: .cancel) {}
-        } message: { Text(model.aviso ?? "") }
-        .overlay(alignment: .bottom) {
-            XRControlsView(running: model.phase == .running)
-                .padding(.bottom, 24)
         }
     }
 }
