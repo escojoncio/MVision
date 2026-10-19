@@ -24,13 +24,19 @@ typedef struct {
     float rot[4];            /* cuaternión x, y, z, w */
     float trigger, grip;     /* 0..1 */
     int32_t low, up, stick;  /* cara inferior (A/X), superior (B/Y), clic del stick */
+    /* Apuntado del mando (ubicación "aim" del accesorio: -Z = hacia donde apunta), mismo espacio. aim_valid = 0: sin apuntado (el arma usa el agarre). */
+    int32_t aim_valid;
+    float aim_pos[3], aim_rot[4];
 } MvVrHand;
 /* side: 0 = mando izquierdo, 1 = derecho (físicos). Llamar cada fotograma. */
 void mv_vrgame_set_hand(int32_t side, const MvVrHand *h);
 void mv_vrgame_clear_hands(void);   /* sin mandos rastreados (mando normal, sin Sense, fuera del espacio inmersivo) */
 /* right_handed: mano del arma (1 derecha); reload_mode: 0 manual, 1 simplificada, 2 automática (WReloadMode). */
 void mv_vrgame_set_options(int32_t right_handed, int32_t reload_mode);
-/* Marco del agarre respecto al del mando: p (m, en el marco del mando) y cuaternión x,y,z,w. Defecto identidad. */
+/* Si 1 (defecto) y el mando entrega apuntado, el arma toma la orientación del apuntado y la posición del agarre. 0: todo del agarre. */
+void mv_vrgame_set_weapon_aim(int32_t on);
+/* Marco del agarre respecto al de la pose publicada en MvVrHand.pos/rot: p (m, en ese marco) y cuaternión x,y,z,w. Defecto identidad: la app publica ya
+ * la ubicación "agarre" del accesorio (centro de la palma, -Z hacia los dedos, +Y al dorso); si el visor solo da la pose del dispositivo, aquí va el desplazamiento medido. */
 void mv_vrgame_set_grip_offset(const float p[3], const float q[4]);
 
 /* ---- salida (hilo de render) ---- */
@@ -39,6 +45,11 @@ typedef struct { float elbow[3], wrist[3], dorsal[3]; } MvVrForearm;   /* mismo 
 int32_t mv_vrgame_forearm(int32_t side, MvVrForearm *out);
 /* Pose del agarre (marco de vr/body) como matriz 4x4 columna-mayor; 1 si el mando está rastreado. */
 int32_t mv_vrgame_hand_matrix(int32_t side, float m[16]);
+/* Marcos de depuración (m, espacio recentrado; 4x4 columna-mayor: columnas = ejes x, y, z y origen). kind: 0 = lo que pide el mando (agarre con el
+ * desplazamiento aplicado: centro de la palma, -Z dedos, +Y dorso), 1 = marco EFECTIVO de la mano del personaje tras la IK (misma convención; si el objetivo
+ * era alcanzable coincide con el 0, si no la diferencia muestra dónde actuaron los límites), 2 = pose del arma en la mano (posición del agarre, orientación
+ * del apuntado). side: mano física (0 izquierda, 1 derecha); en kind 2 se ignora (la mano del arma). 1 = válido; 0 = sin dato en el último fotograma. */
+int32_t mv_vrgame_debug_frame(int32_t kind, int32_t side, float m[16]);
 /* Hápticos pendientes del arma (0..1 por mando físico); se consumen (una lectura = un pulso). */
 void mv_vrgame_take_haptics(float *left, float *right);
 

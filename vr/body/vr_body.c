@@ -336,6 +336,8 @@ typedef struct {
     uint32_t addr;         /* dirección de la pieza */
     uint32_t model;        /* model* (identidad de la pieza al guardar) */
     uint8_t raw[0x40];     /* world + screen originales */
+    int16_t vis_old;       /* contador de visibilidad (+0x4C) que dejó el motor */
+    int vis_forced;        /* 1 si se forzó (estaba a 0: el motor daba la pieza por fuera de pantalla según la pose ANIMADA) */
 } Saved;
 
 static struct {
@@ -350,6 +352,8 @@ static struct {
     int view_ok;
     float view_eye[3], view_pref[3], view_T[9], view_upm;
     float fore_q[2][4];                /* orientación de la mano (espacio del usuario, con hand_rot_offset) del último apply */
+    float dbg_frame[2][16];            /* marco efectivo de la mano tras la IK (espacio del usuario, m; ver vrbody_debug_hand_frame) */
+    int dbg_frame_ok[2];
     /* copia de lo escrito en el último apply, hasta vrbody_restore */
     int pending;
     int pend_n;
@@ -361,7 +365,7 @@ void vrbody_config_default(VrBodyConfig *c) {
     c->enabled = 1; c->dominant = 1;
     c->part_arm[0][0] = 7; c->part_arm[0][1] = 8; c->part_arm[0][2] = 9;
     c->part_arm[1][0] = 2; c->part_arm[1][1] = 3; c->part_arm[1][2] = 4;
-    c->part_torso = 1; c->min_parts = 16;
+    c->part_torso = 1; c->min_parts = 16; c->force_arm_visible = 1;
     c->grip_to_wrist_mm = 55.0f;
     for (int s = 0; s < 2; s++) c->hand_rot_offset[s][3] = 1;
     c->curl_deg = 28.0f; c->armed_grip = 0.85f;
@@ -459,8 +463,10 @@ void vrbody_restore(uint8_t *ram) {
         Saved *s = &G.sv[i];
         if (!s->used) continue;
         /* la pieza debe seguir siendo la misma (mismo model*): si el objeto se destruyó/rehízo no se escribe */
-        if (ptr_ok(s->addr, OBJ_SIZE) && rd_u32(ram, s->addr + OBJ_MODEL) == s->model) memcpy(ram + (s->addr & RAM_MASK), s->raw, sizeof s->raw);
-        else G.st.stale_dropped++;
+        if (ptr_ok(s->addr, OBJ_SIZE) && rd_u32(ram, s->addr + OBJ_MODEL) == s->model) {
+            memcpy(ram + (s->addr & RAM_MASK), s->raw, sizeof s->raw);
+            if (s->vis_forced) wr_s16(ram, s->addr + OBJ_VIS, s->vis_old);
+        } else G.st.stale_dropped++;
         s->used = 0;
     }
     G.pend_n = 0;
@@ -568,6 +574,7 @@ int vrbody_apply(uint8_t *ram) {
     for (int s = 0; s < 2; s++) {
         VrBodyDebug *dbg = &G.dbg[s];
         dbg->driven = 0;
+        G.dbg_frame_ok[s] = 0;
         Hand *h = &G.hand[s];
         if (h->w <= 0.0005f) continue;
         int ia = cfg->part_arm[s][0], ie = cfg->part_arm[s][1], iw = cfg->part_arm[s][2];
@@ -651,17 +658,46 @@ int vrbody_apply(uint8_t *ram) {
             Saved *sv = &G.sv[ns++];
             sv->used = 1; sv->addr = pi[k]->addr; sv->model = pi[k]->model;
             memcpy(sv->raw, ram + (pi[k]->addr & RAM_MASK), sizeof sv->raw);
+            /* Brazos siempre dibujados: el motor decide la visibilidad de cada pieza (contador +0x4C = 0: ni se transforma ni genera
+             * paquetes) con la pose ANIMADA, no con la de la IK. Si dejó a 0 una pieza que la IK sí lleva a la vista, se le da el valor
+             * de la pieza del torso durante esta transformación y se devuelve en vrbody_restore. La cabeza (parte 6) no se toca. */
+            sv->vis_old = rd_s16(ram, pi[k]->addr + OBJ_VIS); sv->vis_forced = 0;
+            if (cfg->force_arm_visible && sv->vis_old == 0) {
+                int16_t tv = rd_s16(ram, ptor.addr + OBJ_VIS);
+                if (tv > 0) { wr_s16(ram, pi[k]->addr + OBJ_VIS, tv); sv->vis_forced = 1; G.st.vis_forced++; }
+            }
             Xf scr; xf_comp(&scr, &eye, &nw[k]);
             xf_write(ram, pi[k]->addr + OBJ_WORLD, &nw[k]);
             xf_write(ram, pi[k]->addr + OBJ_SCREEN, &scr);
         }
         G.pending = 1; G.pend_n = ns;
+        {   /* marco efectivo de la mano en el espacio del usuario (depuración): pieza tras la IK -> convención del agarre, sin el giro de cierre */
+            float tr[9]; m_transpose(tr, T);
+            float wu[3]; v_sub(wu, sol.wrist, view.eye); m_mulv(wu, tr, wu); v_scale(wu, wu, 1.0f / view.units_per_m); v_add(wu, wu, view.p_ref);
+            float Rpu[9]; m_mulm(Rpu, tr, sol.R_hand);
+            float Mc[9], Mct[9], Re[9]; m_mulm(Mc, M, curl); m_transpose(Mct, Mc); m_mulm(Re, Rpu, Mct);
+            float ez[3]; m_col(ez, Re, 2);
+            float *f = G.dbg_frame[s];
+            for (int j = 0; j < 3; j++) {
+                float c[3]; m_col(c, Re, j);
+                f[4 * j] = c[0]; f[4 * j + 1] = c[1]; f[4 * j + 2] = c[2]; f[4 * j + 3] = 0;
+            }
+            for (int j = 0; j < 3; j++) f[12 + j] = wu[j] - ez[j] * (cfg->grip_to_wrist_mm / view.units_per_m);
+            f[15] = 1;
+            G.dbg_frame_ok[s] = all_finite(f, 16);
+        }
         dbg->driven = 1; dbg->w = h->w; dbg->grip = h->grip_cur; v_cp(dbg->target_wrist, wt); memcpy(dbg->target_hand, Rtb, sizeof Rtb); dbg->sol = sol;
         driven++;
     }
     G.st.arms_driven += (uint32_t)driven;
     if (driven && G.hook) G.hook(ram);
     return driven;
+}
+
+int vrbody_debug_hand_frame(int side, float m[16]) {
+    if (!m || (side != 0 && side != 1) || !G.dbg_frame_ok[side] || !G.dbg[side].driven) return 0;
+    memcpy(m, G.dbg_frame[side], 16 * sizeof(float));
+    return 1;
 }
 
 /* Antebrazo tras la IK, en el espacio del usuario (metros): codo y muñeca resueltos (con los límites aplicados) y la dirección

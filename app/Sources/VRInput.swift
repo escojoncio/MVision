@@ -185,28 +185,33 @@ final class VRInput: @unchecked Sendable {
         return h
     }
 
-    /// Pose del mando en el espacio recentrado (el mismo en que llega la cabeza): `recenter` = inversa del origen de recentrado.
-    private static func recentered(_ p: VRInputPose.Pose, _ recenter: simd_float4x4) -> VRInputPose.Pose {
+    /// Convierte (posición, cuaternión) del espacio de ARKit al recentrado: `recenter` = inversa del origen de recentrado.
+    private static func toRecentered(_ pos: SIMD3<Float>, _ rot: SIMD4<Float>, _ recenter: simd_float4x4) -> (SIMD3<Float>, SIMD4<Float>) {
+        var m = simd_matrix4x4(simd_quatf(vector: rot))
+        m.columns.3 = SIMD4<Float>(pos.x, pos.y, pos.z, 1)
+        return VRInputPose.split(recenter * m)
+    }
+
+    /// Pose del mando en el espacio recentrado (el mismo en que llega la cabeza): dispositivo, agarre y apuntado.
+    static func recentered(_ p: VRInputPose.Pose, _ recenter: simd_float4x4) -> VRInputPose.Pose {
         guard p.tracked else { return p }
-        var m = simd_matrix4x4(simd_quatf(vector: p.rotation))
-        m.columns.3 = SIMD4<Float>(p.position.x, p.position.y, p.position.z, 1)
-        let r = recenter * m
-        let q = simd_quatf(simd_float3x3(
-            SIMD3<Float>(r.columns.0.x, r.columns.0.y, r.columns.0.z),
-            SIMD3<Float>(r.columns.1.x, r.columns.1.y, r.columns.1.z),
-            SIMD3<Float>(r.columns.2.x, r.columns.2.y, r.columns.2.z)))
         var out = p
-        out.position = SIMD3<Float>(r.columns.3.x, r.columns.3.y, r.columns.3.z)
-        out.rotation = q.vector
+        (out.position, out.rotation) = Self.toRecentered(p.position, p.rotation, recenter)
+        (out.gripPosition, out.gripRotation) = Self.toRecentered(p.gripPosition, p.gripRotation, recenter)
+        if p.hasLocations { (out.aimPosition, out.aimRotation) = Self.toRecentered(p.aimPosition, p.aimRotation, recenter) }
         return out
     }
 
-    /// Entrega el mando (pose recentrada y botones) a la capa de jugabilidad en C (brazos, radar de muñeca, arma VR).
+    /// Entrega el mando (pose recentrada y botones) a la capa de jugabilidad en C (brazos, radar de muñeca, arma VR). La pose que se entrega es la
+    /// del AGARRE (centro de la palma; con ella se mueve la mano del personaje) y el apuntado va aparte (orientación del arma).
     private static func publish(_ s: ControllerHub.HandSnapshot, _ pose: VRInputPose.Pose, side: Int32) {
         var h = MvVrHand()
         h.valid = (s.present && pose.tracked) ? 1 : 0
-        h.pos = (pose.position.x, pose.position.y, pose.position.z)
-        h.rot = (pose.rotation.x, pose.rotation.y, pose.rotation.z, pose.rotation.w)
+        h.pos = (pose.gripPosition.x, pose.gripPosition.y, pose.gripPosition.z)
+        h.rot = (pose.gripRotation.x, pose.gripRotation.y, pose.gripRotation.z, pose.gripRotation.w)
+        h.aim_valid = pose.hasLocations ? 1 : 0
+        h.aim_pos = (pose.aimPosition.x, pose.aimPosition.y, pose.aimPosition.z)
+        h.aim_rot = (pose.aimRotation.x, pose.aimRotation.y, pose.aimRotation.z, pose.aimRotation.w)
         h.trigger = s.trigger
         h.grip = s.grip
         h.low = s.low ? 1 : 0

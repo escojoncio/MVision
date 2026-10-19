@@ -7,11 +7,22 @@ import simd
 /// AccessoryTrackingProvider (visionOS 26). Sin permiso, sin soporte o antes de visionOS 26 las manos quedan
 /// como "no seguidas" y la locomoción cae a la cabeza. Hilo: las actualizaciones llegan en una Task propia;
 /// `pose(hand:)` se puede llamar desde cualquier hilo.
+///
+/// MARCOS. La pose del anclaje (`position/rotation`) es la del DISPOSITIVO (su origen no es la mano). El sistema da además ubicaciones con
+/// nombre del accesorio (`Accessory.LocationName`: `.grip` = centro de la palma, `.aim` = punto de apuntado; convención OpenXR: -Z hacia
+/// delante, +Y arriba): `grip*` es lo que debe mover la mano del personaje y `aim*` el arma. Si el sistema no las entrega, `grip*` cae a la
+/// pose del dispositivo y `aim*` queda sin validar (`hasLocations` = false).
 final class VRInputPose: @unchecked Sendable {
     struct Pose {
         var tracked = false
         var position = SIMD3<Float>(0, 0, 0)
         var rotation = SIMD4<Float>(0, 0, 0, 1)   // x, y, z, w
+        /// Ubicaciones del accesorio (mismo espacio que `position`).
+        var hasLocations = false
+        var gripPosition = SIMD3<Float>(0, 0, 0)
+        var gripRotation = SIMD4<Float>(0, 0, 0, 1)
+        var aimPosition = SIMD3<Float>(0, 0, 0)
+        var aimRotation = SIMD4<Float>(0, 0, 0, 1)
     }
 
     static let shared = VRInputPose()
@@ -22,6 +33,8 @@ final class VRInputPose: @unchecked Sendable {
     private var task: Task<Void, Never>?
     private var requested: Set<ObjectIdentifier> = []   // último conjunto pedido a track()
     private var generation = 0                            // invalida arranques en curso cuando cambia el conjunto
+    private var locationsLogged = [false, false]
+    private var locationFail = [0, 0]
 
     private init() {}
 
@@ -146,6 +159,7 @@ final class VRInputPose: @unchecked Sendable {
         self.session = nil
         self.task = nil
         poses = [Pose(), Pose()]
+        locationsLogged = [false, false]
         lock.unlock()
         task?.cancel()
         session?.stop()
@@ -161,12 +175,47 @@ final class VRInputPose: @unchecked Sendable {
         var p = Pose()
         if anchor.isTracked {
             let m = anchor.originFromAnchorTransform
-            let r = simd_quatf(simd_float3x3(
-                SIMD3<Float>(m.columns.0.x, m.columns.0.y, m.columns.0.z),
-                SIMD3<Float>(m.columns.1.x, m.columns.1.y, m.columns.1.z),
-                SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z)))
-            p = Pose(tracked: true, position: SIMD3(m.columns.3.x, m.columns.3.y, m.columns.3.z), rotation: r.vector)
+            let (pos, rot) = Self.split(m)
+            p = Pose(tracked: true, position: pos, rotation: rot)
+            // Agarre y apuntado: ubicaciones del propio accesorio (sin corrección: posiciones reales, sin el ajuste de pantalla de paso).
+            if let g = Self.location(anchor, .grip), let a = Self.location(anchor, .aim) {
+                let (gp, gr) = Self.split(g), (ap, ar) = Self.split(a)
+                p.hasLocations = true
+                p.gripPosition = gp; p.gripRotation = gr
+                p.aimPosition = ap; p.aimRotation = ar
+                if !lock.withLock({ locationsLogged[hand] }) {
+                    lock.withLock { locationsLogged[hand] = true; locationFail[hand] = 0 }
+                    // Desplazamientos medidos (marco del dispositivo): sirven para documentar el mando.
+                    let inv = m.inverse
+                    let dg = inv * g, da = inv * a
+                    Storage.log("seguimiento de Sense: ubicaciones de \(hand == 0 ? "izq" : "der"): agarre desde el dispositivo (m) \(String(format: "%.3f %.3f %.3f", dg.columns.3.x, dg.columns.3.y, dg.columns.3.z)), apuntado \(String(format: "%.3f %.3f %.3f", da.columns.3.x, da.columns.3.y, da.columns.3.z)); ejes del agarre en el dispositivo X=(\(String(format: "%.2f %.2f %.2f", dg.columns.0.x, dg.columns.0.y, dg.columns.0.z))) Y=(\(String(format: "%.2f %.2f %.2f", dg.columns.1.x, dg.columns.1.y, dg.columns.1.z))) Z=(\(String(format: "%.2f %.2f %.2f", dg.columns.2.x, dg.columns.2.y, dg.columns.2.z))); ejes del apuntado Z=(\(String(format: "%.2f %.2f %.2f", da.columns.2.x, da.columns.2.y, da.columns.2.z)))")
+                }
+            } else {
+                // Sin ubicaciones: se usa la pose del dispositivo como agarre. Se avisa una vez y luego cada ~10 s.
+                let n: Int = lock.withLock { locationFail[hand] += 1; return locationFail[hand] }
+                if n == 1 || n % 1000 == 0 {
+                    Storage.log("seguimiento de Sense: el sistema no entrega las ubicaciones agarre/apuntado de la mano \(hand == 0 ? "izquierda" : "derecha") (\(n)); se usa la pose del dispositivo")
+                }
+                p.gripPosition = pos; p.gripRotation = rot
+            }
         }
         lock.withLock { poses[hand] = p }
+    }
+
+    /// (posición, cuaternión x,y,z,w) de una matriz rígida.
+    static func split(_ m: simd_float4x4) -> (SIMD3<Float>, SIMD4<Float>) {
+        let r = simd_quatf(simd_float3x3(
+            SIMD3<Float>(m.columns.0.x, m.columns.0.y, m.columns.0.z),
+            SIMD3<Float>(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+            SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z)))
+        return (SIMD3(m.columns.3.x, m.columns.3.y, m.columns.3.z), r.vector)
+    }
+
+    /// Transformación origen <- ubicación del accesorio (`Accessory.LocationName`), o nil si el accesorio no la tiene o no se puede convertir.
+    @available(visionOS 26.0, *)
+    private static func location(_ anchor: AccessoryAnchor, _ name: Accessory.LocationName) -> simd_float4x4? {
+        let space = anchor.coordinateSpace(for: name, correction: .none)
+        guard let t = try? space.ancestorFromSpaceTransformFloat().matrix, XRMath.isFinite(t) else { return nil }
+        return t
     }
 }

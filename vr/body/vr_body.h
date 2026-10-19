@@ -112,6 +112,7 @@ typedef struct VrBodyConfig {
     float grip_to_wrist_mm;      /* de la pose (centro de palma) a la muñeca del modelo, a lo largo del dedo; defecto 55 */
     float hand_rot_offset[2][4]; /* cuaternión x,y,z,w aplicado a la pose de cada mano (marco del mando -> marco de mano de vr_pose.h); defecto identidad */
     float curl_deg;              /* giro de la pieza mano con el agarre al máximo (pose cerrada); defecto 28 */
+    int force_arm_visible;       /* 1 (defecto): si el motor dejó a 0 la visibilidad de una pieza del brazo movida por la IK, se fuerza durante la transformación (brazos siempre dibujados) */
     float armed_grip;            /* agarre mínimo de la mano dominante con arma (vrbody_set_armed); defecto 0.85 */
     /* codo */
     float pole[3];               /* dirección del codo en el marco del torso para el brazo izquierdo: x = hacia fuera, y = arriba, z = delante; el derecho se refleja en x. Defecto (0.45,-1,-0.35) */
@@ -145,7 +146,7 @@ int  vrbody_pending(void);
 typedef struct VrBodyStats {
     uint32_t applies, arms_driven, restores;
     uint32_t skip_disabled, skip_noview, skip_model, skip_offscreen, skip_nohands;
-    uint32_t stretched, too_close, shoulder_limit, wrist_limit, bad_solve, stale_dropped;
+    uint32_t stretched, too_close, shoulder_limit, wrist_limit, bad_solve, stale_dropped, vis_forced;
 } VrBodyStats;
 void vrbody_stats(VrBodyStats *s);
 
@@ -154,6 +155,12 @@ void vrbody_stats(VrBodyStats *s);
  * 0 = no (el llamador cae al mando). Mismo layout que VrRadarArm (vr_radar.h). */
 typedef struct { float elbow[3], wrist[3], dorsal[3]; } VrBodyForearm;
 int vrbody_forearm_pose(int side, VrBodyForearm *out);
+
+/* Marco EFECTIVO de la mano del personaje tras la IK, en el espacio del usuario (m): 4x4 columna-mayor (columnas = ejes x, y, z y origen) con la convención de
+ * vr_pose.h (-Z hacia los dedos, +Y al dorso; sin el giro de cierre de los dedos) y el origen en el centro de la palma que resulta de la muñeca resuelta. Si el
+ * objetivo era alcanzable y está dentro de los límites coincide con la pose pedida; si no, la diferencia muestra dónde actuaron los límites (depuración visual).
+ * 1 = válido (brazo movido por la IK en el último apply); 0 = no. */
+int vrbody_debug_hand_frame(int side, float m[16]);
 
 /* Gancho de diagnóstico: se llama al final de vrbody_apply (con las matrices IK ya escritas) si se escribió algo. Para
  * herramientas de validación; NULL por defecto. */
