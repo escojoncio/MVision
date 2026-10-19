@@ -165,6 +165,8 @@ final class XRPresenter {
     private let cinema: XRCinema?
     private(set) var shown: Display = .cinema
     private(set) var veil: Float = 1
+    /// Fundido a negro por la cabeza empujando contra el escenario (0..1; lo fija el bucle de render con mv_vrhost_head_limit; ya viene suavizado).
+    var collisionFade: Float = 0
 
     // Anclas (espacio recentrado)
     private var needAnchor = true
@@ -600,7 +602,7 @@ final class XRPresenter {
         }
 
         // 7) velo de transición y menú
-        let veilNow = max(veil, cutVeil)
+        let veilNow = max(veil, cutVeil, collisionFade)
         if veilNow > 0.001 {
             var v = XRDrawItem(kind: .veil, texture: nil)
             v.opacity = veilNow

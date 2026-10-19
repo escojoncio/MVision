@@ -40,7 +40,7 @@ typedef int (*VrCamHeadFn)(float m[16], double *t);
 
 enum { VRCAM_LOCO_HEAD = 0,   /* mando relativo a la mirada (por defecto): delante = hacia donde se mira */
        VRCAM_LOCO_BODY = 1 }; /* mirada = giro del cuerpo + giro relativo de la cabeza; mando relativo al cuerpo */
-enum { VRCAM_EYE_AUTO = 0,    /* x,z del centro del cuerpo salvo tumbado (entonces la articulación de la cabeza) */
+enum { VRCAM_EYE_AUTO = 0,    /* x,y,z de la articulación de la cabeza del modelo en todas las posturas (sin modelo: centro del cuerpo) */
        VRCAM_EYE_BODY = 1,    /* x,z siempre del centro del cuerpo */
        VRCAM_EYE_JOINT = 2 }; /* x,y,z de la articulación de la cabeza (sigue balanceo y animaciones) */
 
@@ -59,6 +59,7 @@ typedef struct VrCamConfig {
                               * Debe coincidir con --h de patch_exe.py (la caja de recorte se calcula con ella). */
     int keep_overscan;       /* 1: no anular el ajuste vertical de matrices de pantalla (solo para pruebas A/B; defecto 0) */
     int draw_lag;            /* construcciones de cámara entre la que dibuja un envío y la última hecha (0 = la última) */
+    float joint_lead;        /* fotogramas que se adelanta el ojo con la velocidad de la articulación de la cabeza (def. 1: la cámara se construye antes de animar el modelo; 0 = sin adelanto) */
     float pitch_limit_deg;   /* tope de la elevación que se le da al motor (el resto lo absorbe vrcam_delta); defecto 80 */
     /* --- §49: predicción de la mirada (al final: no rompe el layout) --- */
     float predict_s;         /* segundos de adelanto con que se extrapola la mirada (guiñada y cabeceo) al construir la cámara del motor: lo que se dibuja llega al visor
@@ -96,6 +97,10 @@ const struct VrCalib *vrcam_calib(void);
 void vrcam_set_user_eye_height(float m);
 /* 1 si el frame de cámara en curso es VR (decidido al construir la cámara). */
 int vrcam_active(void);
+/* Ojos del modelo del personaje (unidades del motor) leídos ahora de la RAM para la mirada `view_deg`; 0 si no hay modelo. */
+int vrcam_model_eye(const uint8_t *ram, float view_deg, float out[3]);
+/* Articulaciones del personaje (unidades del motor, hasta `max`); devuelve cuántas (0 si no hay modelo). */
+int vrcam_model_joints(const uint8_t *ram, float (*out)[3], int max);
 /* Yaw de mirada (grados) del último frame VR; origen angular del mando (unidades del motor) con la configuración. */
 float vrcam_view_yaw_deg(void);
 int vrcam_pad_origin(void);

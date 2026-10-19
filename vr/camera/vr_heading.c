@@ -34,7 +34,7 @@ static float wrap360(float a) { a = fmodf(a, 360.0f); if (a < 0) a += 360.0f; re
 void vrhead_config_default(VrHeadingConfig *c) {
     memset(c, 0, sizeof *c);
     c->enabled = 1; c->margin_deg = 45.0f; c->follow_dps = 300.0f;
-    c->relax_deg = 12.0f; c->relax_s = 1.2f; c->relax_dps = 45.0f; c->frame_dt_s = 0.02f;
+    c->relax_deg = 12.0f; c->relax_s = 1.2f; c->relax_dps = 45.0f; c->frame_dt_s = 0.02f; c->walk_dps = 540.0f;
 }
 void vrhead_init(const VrHeadingConfig *c) {
     memset(&H, 0, sizeof H);
@@ -44,6 +44,7 @@ void vrhead_init(const VrHeadingConfig *c) {
     if (!(H.cfg.relax_dps > 0)) H.cfg.relax_dps = 45.0f;
     if (!(H.cfg.frame_dt_s > 0 && H.cfg.frame_dt_s < 0.2f)) H.cfg.frame_dt_s = 0.02f;
     if (!(H.cfg.relax_deg >= 0 && H.cfg.relax_deg < H.cfg.margin_deg)) H.cfg.relax_deg = 0.0f;
+    if (!(H.cfg.walk_dps >= 0 && H.cfg.walk_dps <= 3600.0f)) H.cfg.walk_dps = 0.0f;
 }
 const VrHeadingConfig *vrhead_config(void) { return &H.cfg; }
 
@@ -65,6 +66,14 @@ float vrhead_follow_step(const VrHeadingConfig *c, float off, float still_s, flo
         if (step > mx) step = mx;
     }
     return sg * step;
+}
+
+float vrhead_walk_step(const VrHeadingConfig *c, float err, float dt) {
+    if (!(c->walk_dps > 0.0f) || !isfinite(err)) return 0.0f;
+    float a = fabsf(err);
+    if (a < 1.0f) return 0.0f;
+    float mx = c->walk_dps * dt, st = a < mx ? a : mx;
+    return err < 0 ? -st : st;
 }
 
 float vrhead_body_yaw(void) { return H.body; }
@@ -89,9 +98,20 @@ int vrhead_frame(uint8_t *ram, const BridgeState *st, int walking) {
     H.last_view = view; H.have_last = 1;
 
     float delta = H.pending;                         /* giro del stick: inmediato (por pasos) o continuo (suave) */
+    int had_turn = delta != 0.0f;
     H.pending = 0.0f;
     float off = wrap180(view - (body + delta));      /* la mirada ya incluye el giro del stick (vrcam_turn) */
+    int walk_write = 0;
     if (!walking) delta += vrhead_follow_step(&H.cfg, off, H.still_s, dt);
+    else if (H.cfg.walk_dps > 0.0f && !st->on_wall && !st->first_person && !st->knocking && st->in_control) {
+        /* andando: el juego orienta al personaje hacia el rumbo deseado (campo +0x4E, el del mando relativo a la mirada) a su propio ritmo; aquí se adelanta ese giro
+         * sin tocar el deseado (el juego sigue mandando: si lo escribiéramos pisaríamos su decisión) */
+        int16_t graw; memcpy(&graw, ram + cb + HD_GOAL, 2);
+        float goal = (float)((uint16_t)graw & 4095u) * (360.0f / 4096.0f);
+        float werr = wrap180(goal - wrap360(body + delta));
+        float step = vrhead_walk_step(&H.cfg, werr, dt);
+        if (step != 0.0f) { delta += step; walk_write = 1; }
+    }
 
     H.body = body; H.off = off;
     if (delta == 0.0f && H.carry == 0.0f) return 0;
@@ -102,7 +122,7 @@ int vrhead_frame(uint8_t *ram, const BridgeState *st, int walking) {
     uint16_t nv = (uint16_t)(((long)(raw & 4095) + iu) & 4095);
     memcpy(ram + a, &nv, 2);
     memcpy(ram + cb + HD_PREV, &nv, 2);
-    memcpy(ram + cb + HD_GOAL, &nv, 2);
+    if (!walk_write || had_turn) memcpy(ram + cb + HD_GOAL, &nv, 2);
     H.body = wrap360((float)nv * (360.0f / 4096.0f));
     H.off = wrap180(view - H.body);
     return 1;

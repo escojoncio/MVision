@@ -78,6 +78,14 @@ int mv_host_radar(VrRadarScene *out);
 
 int mv_host_bridge(struct BridgeState *out);
 
+/* Límite de la cabeza contra el escenario (vr/camera/vr_headcol.h). Hilo de render, una vez por fotograma: `head` = pose física de la cabeza en el espacio recentrado
+ * (16 floats en columnas, como mv_vr_set_head), dt = segundos desde la llamada anterior. Devuelve 1 si hay recorte o fundido; corr = desplazamiento (m, mismo espacio)
+ * que hay que SUMAR a la posición de la cabeza para dibujar el mundo (la esfera de la cabeza no atraviesa paredes; nunca se mueve al personaje del juego);
+ * fade = 0..1 de negro progresivo si la cabeza empuja más allá del límite. Sin escena VR activa devuelve 0 y corr = 0. */
+int mv_vrhost_head_limit(const float head[16], float dt, float corr[3], float *fade);
+/* Activa/desactiva el límite (defecto: activo; MV_HEADCOL=0 en el entorno lo apaga al arrancar) y fija el radio de la esfera en metros (0 = no cambiar). */
+void mv_vrhost_set_headcol(int enable, float radius_m);
+
 typedef struct {
     uint32_t built;          /* escenas ensambladas */
     uint32_t delivered;      /* entregadas por mv_host_scene */

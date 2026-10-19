@@ -20,6 +20,7 @@
 #include "vr_body.h"
 #include "vr_camera.h"
 #include "vr_heading.h"
+#include "vr_headcol.h"
 #include "vr_usermap.h"
 #include "vr_cine.h"
 #include "vr_fire.h"
@@ -96,6 +97,7 @@ typedef struct {
     VrState *st;     size_t st_cap;
     uint8_t *tc;     size_t tc_cap;          /* VrScene.tri_cause (un byte por triángulo) */
     VrScene sc;
+    VrHcMap hcmap;                       /* correspondencia usuario <-> mundo de la cámara con que se emitió esta escena (límite de la cabeza) */
     uint8_t frm[VR_FRAME_W * VR_FRAME_H];    /* copia de VrFilter.frame (máscara de visión: la memoria de vr_scene se reutiliza en la siguiente lista) */
     VrVtx *rv;       size_t rv_cap;          /* escena del radar de muñeca (copia propia; ev_end en índices de `list`) */
     VrBatch *rb;     size_t rb_cap;
@@ -114,6 +116,11 @@ static int pub_valid;
 static MvVrGameState pub_gs;
 static MvVrHostStats stats;
 static _Atomic uint64_t last_poll_ns;
+/* Límite de la cabeza contra el escenario (vr_headcol): el almacén lo alimenta el hilo de emulación y lo consulta el de render. */
+static pthread_mutex_t HCMX = PTHREAD_MUTEX_INITIALIZER;
+static VrHcMap hc_disp;                  /* correspondencia de la escena entregada al consumidor (protegida por MX) */
+static int hc_on = 1;
+static float hc_last_eye[3]; static int hc_have_eye;
 
 /* ------------------------------------------------------------------------------------------------ estado del hilo de emulación */
 static BridgeState bs;                   /* último puente leído */
@@ -160,6 +167,7 @@ int mv_host_scene(VrScene *out) {
     sstate[i] = S_HELD;
     held = i;
     *out = slot[i].sc;
+    hc_disp = slot[i].hcmap;
     stats.delivered++;
     pthread_mutex_unlock(&MX);
     return 1;
@@ -374,6 +382,21 @@ static void build_one(const GpuDrawList *l, int si) {
     memcpy(bs.eye_axes, save_axes, sizeof save_axes);
 
     int ok = rc == 0 && fill_slot(&slot[si], hl, &sc) == 0 && fill_radar(&slot[si], &rscene, hl->nops) == 0;
+    memset(&slot[si].hcmap, 0, sizeof slot[si].hcmap);
+    if (ok && hc_on && r && r->active && sc.user_space && sc.world_valid) {
+        VrHcMap hm;
+        if (vrhc_map_from_record(&hm, r)) {
+            float jt[16][3];
+            int nj = vrcam_model_joints(emu_ram, jt, 16);
+            pthread_mutex_lock(&HCMX);
+            float dx = hc_last_eye[0] - hm.eye[0], dz = hc_last_eye[2] - hm.eye[2];
+            if (hc_have_eye && dx * dx + dz * dz > (4.0f * hm.upm) * (4.0f * hm.upm)) vrhc_reset();   /* salto (otra zona): sin fantasmas del mundo anterior */
+            memcpy(hc_last_eye, hm.eye, sizeof hc_last_eye); hc_have_eye = 1;
+            vrhc_feed_scene(&hm, &sc, (const float (*)[3])jt, nj);
+            pthread_mutex_unlock(&HCMX);
+            slot[si].hcmap = hm;
+        }
+    }
     pthread_mutex_lock(&MX);
     if (ok) {
         sstate[si] = S_QUEUED;
@@ -462,6 +485,31 @@ void mv_vrhost_set_scene_tap(void (*cb)(const GpuDrawList *, const BridgeState *
 
 void mv_vrhost_set_list_tap(MvVrListTap cb) { list_tap = cb; }
 
+/* Límite de la cabeza (hilo de render). head = pose física recentrada (16 floats, columnas); corr = desplazamiento a sumar a la cabeza para dibujar. */
+int mv_vrhost_head_limit(const float head[16], float dt, float corr[3], float *fade) {
+    VrHcMap m;
+    corr[0] = corr[1] = corr[2] = 0.0f; if (fade) *fade = 0.0f;
+    if (!hc_on || !head) return 0;
+    pthread_mutex_lock(&MX); m = hc_disp; pthread_mutex_unlock(&MX);
+    VrHcOut o;
+    pthread_mutex_lock(&HCMX);
+    int r = vrhc_query(&m, (const float[3]){head[12], head[13], head[14]}, dt, &o);
+    pthread_mutex_unlock(&HCMX);
+    memcpy(corr, o.corr, sizeof o.corr);
+    if (fade) *fade = o.fade;
+    return r;
+}
+void mv_vrhost_set_headcol(int enable, float radius_m) {
+    pthread_mutex_lock(&HCMX);
+    VrHcCfg c = *vrhc_config();
+    if (!c.radius_m) vrhc_config_default(&c);
+    c.enabled = enable != 0;
+    if (radius_m >= 0.03f && radius_m <= 0.5f) c.radius_m = radius_m;
+    vrhc_init(&c);
+    pthread_mutex_unlock(&HCMX);
+    hc_on = enable != 0;
+}
+
 #ifdef MV_NOGEN
 /* Sin recorte en las overlays de zona (vr/camera, bitácora): algunas llevan su propia copia de la visibilidad de objetos y por pieza.
  * Se muestrea la ventana de código de overlays (160 palabras); con la muestra estable 12 fotogramas se escanea y se parchean los sitios con
@@ -509,6 +557,12 @@ static void frame_hook(Cpu *c, uint32_t f) {
     publish_state();
     vrcam_frame(emu_ram, &bs);
     vrhead_frame(emu_ram, &bs, bs.moving);
+    if (hc_on) {   /* sin cámara VR (cinemática, menú, otra zona) el almacén de colisión no vale */
+        static int was_active;
+        int act = vrcam_active();
+        if (was_active && !act) { pthread_mutex_lock(&HCMX); vrhc_reset(); hc_have_eye = 0; pthread_mutex_unlock(&HCMX); }
+        was_active = act;
+    }
     vrai_frame(&bs, f);
     if (test_cb) test_cb(c, f);
     vrgame_frame_end();
@@ -589,6 +643,8 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     VrCamConfig cfg;
     vrcam_config_default(&cfg);
     cfg.head = vr_ok ? head_fn : NULL;
+    { const char *e = getenv("MV_EYE"); if (e && !strcmp(e, "body")) cfg.eye_xz = VRCAM_EYE_BODY; }
+    { const char *e = getenv("MV_HEADCOL"); if (e && !strcmp(e, "0")) hc_on = 0; }   /* pruebas A/B: sin límite de la cabeza contra el escenario */   /* pruebas A/B: ojo en el centro del cuerpo (comportamiento anterior) */
     cfg.calibrate = 1;                            /* altura/escala del usuario al recentrar (vr_calib.h) */
     vrcam_init(&cfg);
     vrhead_init(NULL);

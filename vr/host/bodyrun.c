@@ -18,6 +18,7 @@
 #include <pthread.h>
 #include "eyeshot.h"
 #include "vr_calib.h"
+#include "vr_input.h"
 #include "vr_camera.h"
 #include "vr_heading.h"
 #include "vr_fire.h"
@@ -59,6 +60,20 @@ static uint32_t headlog_every;
 typedef struct { uint32_t t; int units, both; } PokeEv;
 static PokeEv pokes[16]; static int npokes;
 static int no_heading;
+static int use_hc; static float hc_corr[3];   /* ver --hc */
+/* --stick T:dur:x:y : stick izquierdo (x derecha, y adelante, -1..1) por la cadena REAL de la app (vr_input_update con la cabeza sintetica; la salida analogica va a mv_host_pad);
+ * --stickr T:dur:x : stick derecho (giro de cuerpo); --hyaw-ramp T0:T1:g0:g1 : guinada de cabeza lineal; --loco log: linea [loco] por construccion de camara con
+ * la distancia ojo-camara vs ojos del modelo; --stick-hand deg : (loco por mando) guinada fija del mando izquierdo */
+typedef struct { uint32_t t, dur; float x, y; } StEv;
+static StEv sticks[32]; static int nsticks;
+static StEv sticksr[32]; static int nsticksr;
+typedef struct { uint32_t t0, t1; float g0, g1; } RampEv;
+static RampEv ramps[16]; static int nramps;
+static int loco_log, loco_hand; static float hand_yaw_deg;
+static vr_input_t vin; static int vin_init;
+static float last_serial_eye[3]; static uint32_t last_serial;
+static float prev_model[3]; static int have_prev_model;
+static double sum_cam, max_cam, sum_prev, n_cam;
 /* --tp T:dist:lado: teletransporta al jugador (SOLO PRUEBAS, escribe la RAM) detrás (lado=0) o delante (1) del enemigo 0, a dist unidades, con su mismo rumbo */
 static int tp_t = -1, tp_side;
 static float tp_dist;
@@ -102,6 +117,7 @@ static void *poller(void *arg) {
         int k = shot_pending;
         if (k >= 0 && sc.has_3d && sc.world_valid) {
             float h[16]; pthread_mutex_lock(&head_mx); memcpy(h, cur_head, sizeof h); pthread_mutex_unlock(&head_mx);
+            if (use_hc && strncmp(shots[k].name, "raw", 3)) { h[12] += hc_corr[0]; h[13] += hc_corr[1]; h[14] += hc_corr[2]; }
             char pth[512]; snprintf(pth, sizeof pth, "%s/%s.ppm", dir ? dir : ".", shots[k].name);
             int rc = eyeshot_render(&sc, h, 640, 480, 100.0f, pth);
             fprintf(stderr, "[shot] %s rc=%d tris3d=%u cabeza=(%.2f,%.2f,%.2f)\n", shots[k].name, rc, sc.stats.n_tris3d, h[12], h[13], h[14]);
@@ -140,7 +156,15 @@ static uint16_t std_pad(uint32_t v) {
 
 /* ---- manos sintéticas (espacio del usuario) ---- */
 static const char *scn;
-static float head_x;     /* desplazamiento lateral de la cabeza (asomarse) */
+static float head_x, head_z;     /* desplazamiento de la cabeza en el plano (asomarse; espacio del usuario, + x derecha, - z delante) */
+/* --head-ramp T0:T1:x:y:z : la posicion fisica de la cabeza (espacio del usuario recentrado; y = altura absoluta) pasa linealmente a (x,y,z) entre T0 y T1.
+ * --hc : activa el limite de la cabeza contra el escenario (mv_vrhost_head_limit) por VBlank y lo registra ([hc]); las imagenes de --shot se rasterizan desde la
+ * cabeza corregida. */
+typedef struct { uint32_t t0, t1; float x, y, z; float sx, sy, sz; int started; } HrEv;
+static HrEv hramps[16]; static int nhramps;
+static float hc_fade;
+static double hc_max_corr, hc_max_fade; static uint32_t hc_n_hit, hc_n_fade;
+static float prev_ctl[2]; static int have_prev_ctl;
 static void hand_set(int side, float x, float y, float z, float grip) {
     MvVrHand h; memset(&h, 0, sizeof h);
     h.valid = 1; h.rot[3] = 1; h.pos[0] = x; h.pos[1] = y; h.pos[2] = z; h.grip = grip;
@@ -204,6 +228,45 @@ static uint16_t driver(uint32_t vbl, uint16_t pad, const BridgeState *bs) {
     for (int i = 0; i < nturns; i++)
         if (t >= turns[i].t && t < turns[i].t + turns[i].dur) mv_vr_turn(turns[i].deg / (float)turns[i].dur);
     for (int i = 0; i < nhy; i++) if (t >= hyev[i].t) hyaw_deg = hyev[i].deg;
+    for (int i = 0; i < nramps; i++) if (t >= ramps[i].t0 && t <= ramps[i].t1) hyaw_deg = ramps[i].g0 + (ramps[i].g1 - ramps[i].g0) * (float)(t - ramps[i].t0) / (float)(ramps[i].t1 > ramps[i].t0 ? ramps[i].t1 - ramps[i].t0 : 1);
+    if (nsticks || nsticksr) {
+        if (!vin_init) { vr_input_init(&vin); vri_cfg_t c = vin.cfg; c.mode = VRI_MODE_SENSE; c.turn_mode = VRI_TURN_SMOOTH; if (loco_hand) c.loco_ref = VRI_LOCO_HAND; vr_input_set_cfg(&vin, &c); vin_init = 1; }
+        float sx = 0, sy = 0, rx2 = 0;
+        for (int i = 0; i < nsticks; i++) if (t >= sticks[i].t && t < sticks[i].t + sticks[i].dur) { sx = sticks[i].x; sy = sticks[i].y; }
+        for (int i = 0; i < nsticksr; i++) if (t >= sticksr[i].t && t < sticksr[i].t + sticksr[i].dur) rx2 = sticksr[i].x;
+        vr_input_frame_t f; memset(&f, 0, sizeof f);
+        float a = hyaw_deg * 3.14159265f / 180.0f;
+        f.dt = 0.02f; f.head_valid = true; f.game_posture = bs ? bs->stance : -1;
+        f.head_quat[1] = sinf(a * 0.5f); f.head_quat[3] = cosf(a * 0.5f); f.head_pos[1] = head_y;
+        f.hand[0].tracked = true; f.hand[0].stick_x = sx; f.hand[0].stick_y = sy;
+        { float h = hand_yaw_deg * 3.14159265f / 180.0f; f.hand[0].quat[1] = sinf(h * 0.5f); f.hand[0].quat[3] = cosf(h * 0.5f); f.hand[0].pos[1] = head_y - 0.4f; }
+        f.hand[1].tracked = true; f.hand[1].stick_x = rx2; f.hand[1].quat[3] = 1; f.hand[1].pos[1] = head_y - 0.4f;
+        f.menu = !(bs && bs->in_control);
+        vr_input_set_game_up(&vin, vr_input_quat_heading(f.head_quat) + vr_input_body_yaw(&vin));
+        float by0 = vr_input_body_yaw(&vin);
+        vr_pad_t out; vr_input_update(&vin, &f, &out);
+        float dy = vr_input_body_yaw(&vin) - by0;
+        while (dy > 3.14159265f) dy -= 6.2831853f; while (dy <= -3.14159265f) dy += 6.2831853f;
+        if (dy != 0) mv_vr_turn(-dy * 180.0f / 3.14159265f);
+        mv_host_pad(out.buttons, out.lx, out.ly, out.rx, out.ry);
+    }
+    if (loco_log && bs && vrcam_active()) {
+        const VrCamRecord *rr = vrcam_last_record();
+        float me[3];
+        if (rr && rr->active && rr->serial != last_serial && vrcam_model_eye(emu_ram, rr->yaw_deg, me)) {
+            float dxz = hypotf((float)rr->eye[0] - me[0], (float)rr->eye[2] - me[2]);
+            float dp = have_prev_model ? hypotf((float)rr->eye[0] - prev_model[0], (float)rr->eye[2] - prev_model[2]) : -1;
+            float dy3 = (float)rr->eye[1] - me[1];
+            float mvx = have_prev_ctl ? (float)bs->ctl_pos.x - prev_ctl[0] : 0, mvz = have_prev_ctl ? (float)bs->ctl_pos.z - prev_ctl[1] : 0;
+            float spd = hypotf(mvx, mvz), mdir = spd > 0.5f ? atan2f(mvx, mvz) * 57.29578f : 0; if (mdir < 0) mdir += 360.0f;
+            prev_ctl[0] = (float)bs->ctl_pos.x; prev_ctl[1] = (float)bs->ctl_pos.z; have_prev_ctl = 1;
+            fprintf(stderr, "[loco] t=%u ser=%u stance=%d act=%d mov=%d wall=%d ojo-modelo(xz)=%.1f (vs modelo del fotograma anterior %.1f) dy=%.1f ctl=(%d,%d) vel=%.1f rumbo-marcha=%.1f cuerpo=%.1f vista=%.1f cabeza=%.1f\n", t, rr->serial, bs->stance, bs->player_action, bs->moving, bs->on_wall,
+                    dxz, dp, dy3, bs->ctl_pos.x, bs->ctl_pos.z, spd, mdir, (float)((uint16_t)bs->ctl_rot.y & 4095u) * (360.0f / 4096.0f), vrcam_view_yaw_deg(), hyaw_deg);
+            sum_cam += dxz; if (dxz > max_cam) max_cam = dxz; if (dp >= 0) sum_prev += dp; n_cam++;
+            last_serial = rr->serial;
+        }
+        if (vrcam_model_eye(emu_ram, vrcam_view_yaw_deg(), me)) { memcpy(prev_model, me, sizeof me); have_prev_model = 1; }
+    }
     for (int i = 0; i < npi; i++) if (t >= piev[i].t) hpitch_deg = piev[i].deg;
     for (int i = 0; i < npokes; i++)
         if (t == pokes[i].t && bs && bs->ctl_addr) {
@@ -227,7 +290,26 @@ static uint16_t driver(uint32_t vbl, uint16_t pad, const BridgeState *bs) {
         fputc('\n', stderr);
     }
     if (scn && !strcmp(scn, "peek")) head_x = t >= 80 && t < 140 ? 0.2f : 0.0f;
-    set_head(head_x, head_y, 0);
+    for (int i = 0; i < nhramps; i++) {
+        HrEv *e = &hramps[i];
+        if (t < e->t0) continue;
+        if (!e->started) { e->started = 1; e->sx = head_x; e->sy = head_y; e->sz = head_z; }
+        float k = t >= e->t1 || e->t1 <= e->t0 ? 1.0f : (float)(t - e->t0) / (float)(e->t1 - e->t0);
+        head_x = e->sx + (e->x - e->sx) * k; head_y = e->sy + (e->y - e->sy) * k; head_z = e->sz + (e->z - e->sz) * k;
+    }
+    set_head(head_x, head_y, head_z);
+    if (use_hc) {
+        float h[16], c[3] = {0, 0, 0}, fd = 0;
+        pthread_mutex_lock(&head_mx); memcpy(h, cur_head, sizeof h); pthread_mutex_unlock(&head_mx);
+        int r = mv_vrhost_head_limit(h, 0.02f, c, &fd);
+        memcpy(hc_corr, c, sizeof c); hc_fade = fd;
+        float cl = sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+        if (cl > hc_max_corr) hc_max_corr = cl;
+        if (fd > hc_max_fade) hc_max_fade = fd;
+        if (cl > 1e-4f) hc_n_hit++;
+        if (fd > 0.01f) hc_n_fade++;
+        if (r && (t % 4 == 0)) fprintf(stderr, "[hc] t=%u cabeza=(%.3f,%.3f,%.3f) corr=(%.3f,%.3f,%.3f) |corr|=%.3f fade=%.2f\n", t, h[12], h[13], h[14], c[0], c[1], c[2], cl, fd);
+    }
     hands_for(t, bs);
     if (tp_t >= 0 && t >= (uint32_t)tp_t && t < (uint32_t)tp_t + 4) teleport(bs);
     uint16_t b = 0;
@@ -251,6 +333,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--shot") && i + 1 < argc && nshots < 16) { unsigned tt = 0; char nm[64] = "shot"; sscanf(argv[++i], "%u:%63s", &tt, nm); shots[nshots].t = tt; snprintf(shots[nshots].name, sizeof shots[nshots].name, "%s", nm); nshots++; }
         else if (!strcmp(argv[i], "--poke") && i + 1 < argc && npokes < 16) { unsigned tt = 0; int u = 0, b = 0; sscanf(argv[++i], "%u:%d:%d", &tt, &u, &b); pokes[npokes++] = (PokeEv){tt, u, b}; }
         else if (!strcmp(argv[i], "--nohead")) no_heading = 1;
+        else if (!strcmp(argv[i], "--stick") && i + 1 < argc && nsticks < 32) { unsigned tt = 0, dd = 1; float x = 0, y = 0; sscanf(argv[++i], "%u:%u:%f:%f", &tt, &dd, &x, &y); sticks[nsticks++] = (StEv){tt, dd, x, y}; }
+        else if (!strcmp(argv[i], "--stickr") && i + 1 < argc && nsticksr < 32) { unsigned tt = 0, dd = 1; float x = 0; sscanf(argv[++i], "%u:%u:%f", &tt, &dd, &x); sticksr[nsticksr++] = (StEv){tt, dd, x, 0}; }
+        else if (!strcmp(argv[i], "--hyaw-ramp") && i + 1 < argc && nramps < 16) { unsigned a = 0, b = 0; float g0 = 0, g1 = 0; sscanf(argv[++i], "%u:%u:%f:%f", &a, &b, &g0, &g1); ramps[nramps++] = (RampEv){a, b, g0, g1}; }
+        else if (!strcmp(argv[i], "--loco-log")) loco_log = 1;
+        else if (!strcmp(argv[i], "--hc")) use_hc = 1;
+        else if (!strcmp(argv[i], "--head-ramp") && i + 1 < argc && nhramps < 16) { unsigned a = 0, b = 0; float x = 0, y = head_y, z = 0; sscanf(argv[++i], "%u:%u:%f:%f:%f", &a, &b, &x, &y, &z); hramps[nhramps++] = (HrEv){a, b, x, y, z, 0, 0, 0, 0}; }
+        else if (!strcmp(argv[i], "--loco-hand") && i + 1 < argc) { loco_hand = 1; hand_yaw_deg = (float)atof(argv[++i]); }
         else if (!strcmp(argv[i], "--hyaw") && i + 1 < argc) hyaw_deg = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--tp") && i + 1 < argc) { int tt, sd = 0; float d = 0; sscanf(argv[++i], "%d:%f:%d", &tt, &d, &sd); tp_t = tt; tp_dist = d; tp_side = sd; }
         else if (!strcmp(argv[i], "--pad") && i + 1 < argc) {
@@ -275,7 +364,7 @@ int main(int argc, char **argv) {
     vrgame_set_driver(driver);
     mv_host_set_turbo(1);
     pthread_t pt; int have_pt = 0;
-    if (nshots) have_pt = pthread_create(&pt, NULL, poller, NULL) == 0;
+    if (nshots || use_hc) have_pt = pthread_create(&pt, NULL, poller, NULL) == 0;
     int r = mv_host_start(argv[1], argv[2], "build-host/card");
     if (r) { fprintf(stderr, "mv_host_start = %d: %s\n", r, mv_host_error()); return 1; }
     for (;;) {
@@ -288,5 +377,7 @@ int main(int argc, char **argv) {
     poll_run = 0; if (have_pt) pthread_join(pt, NULL);
     fprintf(stderr, "[bodyrun] eventos de gestos: golpe %u agarre %u apretón %u soltar %u pared(golpe) %u asomar %u contacto-pared %u daño %u\n", vrbodyg_event_count(VRG_EV_PUNCH), vrbodyg_event_count(VRG_EV_GRAB),
             vrbodyg_event_count(VRG_EV_SQUEEZE), vrbodyg_event_count(VRG_EV_RELEASE), vrbodyg_event_count(VRG_EV_KNOCK), vrbodyg_event_count(VRG_EV_PEEK), vrbodyg_event_count(VRG_EV_WALL), vrbodyg_event_count(VRG_EV_HURT));
+    if (use_hc) fprintf(stderr, "[hc-resumen] VBlanks con recorte=%u con fundido=%u corr max=%.3f m fade max=%.2f\n", hc_n_hit, hc_n_fade, hc_max_corr, hc_max_fade);
+    if (n_cam > 0) fprintf(stderr, "[loco-resumen] construcciones=%.0f distancia ojo-modelo(xz) media=%.1f max=%.1f unidades (vs modelo del fotograma anterior: media=%.1f)\n", n_cam, sum_cam / n_cam, max_cam, sum_prev / n_cam);
     return 0;
 }
