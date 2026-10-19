@@ -36,9 +36,9 @@ static void test_basic(void) {
         for (int i = 8; i < 16; i++) { float xs = sg * v[4 * i]; if (xs < lo) lo = xs; }
         CHECK(lo > -30, "dedos por detrás del dorso: %.1f", lo);
         for (int i = 8; i < 16; i++) CHECK(v[4 * i + 2] == h.v[4 * i + 2], "z de los dedos se conserva");
-        /* pulgar: cruza hacia -Z (el meñique), su base casi no se mueve */
+        /* pulgar: se acerca a la hilera de dedos (hacia -Z) sin pasar del centro de la hilera (nunca cruza hacia el meñique) */
         float t0[3], t1[3]; centroid(h.v, 16, 24, t0); centroid(v, 16, 24, t1);
-        CHECK(t1[2] < t0[2] - 6, "el pulgar debe cruzar hacia -Z: %.1f -> %.1f", t0[2], t1[2]);
+        CHECK(t1[2] < t0[2] - 1.5f && t1[2] > -5, "el pulgar debe acercarse a los dedos sin cruzarlos: %.1f -> %.1f", t0[2], t1[2]);
         /* normales: módulo conservado y giran donde se mueve el vértice */
         for (int j = 0; j < h.nn; j++) {
             float a = sqrtf((float)h.n[4 * j] * h.n[4 * j] + (float)h.n[4 * j + 1] * h.n[4 * j + 1] + (float)h.n[4 * j + 2] * h.n[4 * j + 2]);
@@ -69,6 +69,63 @@ static void test_basic(void) {
         worst = 0;
         for (int j = 0; j < a.nn; j++) { int dx = abs(na[4 * j] + nb[4 * j]), dy = abs(na[4 * j + 1] - nb[4 * j + 1]), dz = abs(na[4 * j + 2] - nb[4 * j + 2]); if (dx > worst) worst = dx; if (dy > worst) worst = dy; if (dz > worst) worst = dz; }
         CHECK(worst <= 2, "espejo de normales: desviación %d", worst);
+    }
+}
+
+
+/* Pulgar anatómico: cadena de 2 articulaciones, termina por FUERA de los dedos doblados sobre las falanges medias del índice y el corazón */
+static float dist3(const float *a, const float *b) { return sqrtf((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2])); }
+static void test_thumb(void) {
+    VrFistParams p; vrfist_params_default(&p);
+    CHECK(fabsf(p.thumb_tilt_deg - 45.0f) < 1e-4f, "eje de la base inclinado 45 grados");
+    for (int mirror = 0; mirror < 2; mirror++) {
+        SynthHand h; synth_hand(&h, mirror); VrFistMesh m = as_mesh(&h);
+        float sg = mirror ? -1.0f : 1.0f;
+        int16_t v[128 * 4], n[128 * 4], v1[128 * 4], n1[128 * 4];
+        CHECK(vrfist_deform(&m, sg, 1.0f, &p, v1, n1) == 0, "puño");
+        /* finger row extents (z) y alcance en x/y de las falanges medias: anillo 2 y 3 */
+        float zmax = -1e9f, zmin = 1e9f;
+        for (int i = 8; i < 16; i++) { if (v1[4 * i + 2] > zmax) zmax = v1[4 * i + 2]; if (v1[4 * i + 2] < zmin) zmin = v1[4 * i + 2]; }
+        float W = zmax - zmin, tipc[3], t0[3];
+        centroid(v1, 20, 24, tipc); centroid(h.v, 20, 24, t0);
+        float base1[3], base0[3]; centroid(v1, 16, 18, base1); centroid(h.v, 16, 18, base0);
+        CHECK(tipc[2] <= zmax - 0.05f * W && tipc[2] >= zmax - 0.65f * W, "la punta queda sobre el índice y el corazón, no sobre el meñique: z=%.1f (dedos %.1f..%.1f)", tipc[2], zmin, zmax);
+        CHECK(dist3(base1, base0) < 14.0f, "la base del pulgar casi no se mueve: %.1f", dist3(base1, base0));
+        /* por fuera de la palma: ningún vértice del pulgar dentro del bloque de la palma (x*signo > xlo de la palma) salvo la base */
+        for (int i = 16; i < 24; i++) CHECK(sg * v1[4 * i] >= 18, "pulgar dentro de la palma: x=%g", sg * v1[4 * i]);
+        /* continuidad con el agarre: la punta avanza sin saltos (< 35 % del recorrido total por 0,1 de agarre) y el recorrido total es el de 0 a 1 */
+        float prev[3] = {t0[0], t0[1], t0[2]}, path = 0, maxstep = 0;
+        for (int k = 1; k <= 10; k++) {
+            int16_t vk[128 * 4], nk[128 * 4]; vrfist_deform(&m, sg, k / 10.0f, &p, vk, nk);
+            float c[3]; centroid(vk, 20, 24, c);
+            float st = dist3(c, prev); path += st; if (st > maxstep) maxstep = st; prev[0] = c[0]; prev[1] = c[1]; prev[2] = c[2];
+        }
+        CHECK(maxstep <= 0.35f * path + 1.0f, "pulgar con saltos: paso máx %.1f de %.1f", maxstep, path);
+        /* agarre parcial: el pulgar no se deforma de forma rara (aristas casi intactas) y se mueve proporcionalmente */
+        for (int k = 1; k <= 9; k += 2) {
+            vrfist_deform(&m, sg, k / 10.0f, &p, v, n);
+            float worst = 0;
+            for (int i = 16; i < 24; i++) for (int j = i + 1; j < 24; j++) {
+                float a0[3] = {(float)h.v[4 * i], (float)h.v[4 * i + 1], (float)h.v[4 * i + 2]}, b0[3] = {(float)h.v[4 * j], (float)h.v[4 * j + 1], (float)h.v[4 * j + 2]};
+                float a1[3] = {(float)v[4 * i], (float)v[4 * i + 1], (float)v[4 * i + 2]}, b1[3] = {(float)v[4 * j], (float)v[4 * j + 1], (float)v[4 * j + 2]};
+                float e = fabsf(dist3(a1, b1) - dist3(a0, b0)) / (dist3(a0, b0) + 1e-3f);
+                if (e > worst) worst = e;
+            }
+            CHECK(worst < 0.35f, "pulgar estirado/encogido %.2f con agarre %.1f", worst, k / 10.0f);
+            float c[3]; centroid(v, 20, 24, c);
+            CHECK(dist3(c, t0) <= dist3(tipc, t0) * (k / 10.0f) * 1.6f + 3.0f, "desplazamiento no proporcional con agarre %.1f", k / 10.0f);
+        }
+        /* a medias de camino el pulgar sigue entero y las normales conservan el módulo */
+        for (int j = 0; j < h.nn; j++) {
+            float a = sqrtf((float)h.n[4 * j] * h.n[4 * j] + (float)h.n[4 * j + 1] * h.n[4 * j + 1] + (float)h.n[4 * j + 2] * h.n[4 * j + 2]);
+            float b = sqrtf((float)n1[4 * j] * n1[4 * j] + (float)n1[4 * j + 1] * n1[4 * j + 1] + (float)n1[4 * j + 2] * n1[4 * j + 2]);
+            CHECK(fabsf(a - b) <= 0.01f * a + 3, "módulo de la normal %d en el puño", j);
+        }
+        /* ejes anatómicos: con el eje de la base a 0 grados (igual que los dedos) o a 90 la pose cambia: el ángulo cuenta */
+        VrFistParams q = p; q.thumb_tilt_deg = 0.0f;
+        int16_t vq[128 * 4], nq[128 * 4]; vrfist_deform(&m, sg, 1.0f, &q, vq, nq);
+        int diff = 0; for (int i = 16; i < 24; i++) diff += abs(vq[4 * i] - v1[4 * i]) + abs(vq[4 * i + 1] - v1[4 * i + 1]) + abs(vq[4 * i + 2] - v1[4 * i + 2]);
+        CHECK(diff > 0, "la inclinación del eje de la base debe influir");
     }
 }
 
@@ -127,7 +184,7 @@ static void test_fuzz(void) {
 }
 
 int main(void) {
-    test_basic(); test_invalid(); test_fuzz();
+    test_basic(); test_thumb(); test_invalid(); test_fuzz();
     if (fails) { printf("FALLO: %d de %d\n", fails, checks); return 1; }
     printf("OK vr_fist: %d comprobaciones\n", checks);
     return 0;

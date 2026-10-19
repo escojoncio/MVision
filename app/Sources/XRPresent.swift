@@ -146,7 +146,7 @@ struct XRNav: Equatable {
 }
 
 enum XRMenuItem: Int, CaseIterable {
-    case resume, recenter, width, distance, curve, sharp, integerScale, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, debugAxes, exit
+    case resume, recenter, calibrateHands, width, distance, curve, sharp, integerScale, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, debugAxes, exit
 }
 
 final class XRPresenter {
@@ -199,7 +199,7 @@ final class XRPresenter {
     var onRecenter: (() -> Void)?
     var onExit: (() -> Void)?
 
-    private static let menuW = 1024, menuH = 920
+    private static let menuW = 1024, menuH = 980
 
     init(device: MTLDevice) {
         cinema = XRCinema(device: device)
@@ -310,6 +310,9 @@ final class XRPresenter {
         switch it {
         case .resume: closeMenu()
         case .recenter: onRecenter?(); closeMenu()
+        case .calibrateHands:
+            // Izquierda borra la calibración; seleccionar/derecha empieza una cuenta atrás de 3 s (un pulso háptico por segundo) para poner los brazos rectos al frente.
+            if dir < 0 { mv_vrgame_clear_hand_calibration() } else { mv_vrgame_calibrate_hands(3.0); closeMenu() }
         case .width: cfg.width = cycle(cfg.width, XRViewConfig.widths, dir)
         case .distance: cfg.distance = cycle(cfg.distance, XRViewConfig.distances, dir)
         case .curve: cfg.curve = cycle(cfg.curve, XRViewConfig.curves, dir)
@@ -346,6 +349,11 @@ final class XRPresenter {
             switch it {
             case .resume: return ("Volver al juego", "")
             case .recenter: return ("Recentrar la vista", "")
+            case .calibrateHands:
+                let cd = mv_vrgame_calibration_countdown()
+                var q: [Float] = [0, 0, 0, 0]
+                let have = mv_vrgame_hand_calibration(0, &q) != 0 || mv_vrgame_hand_calibration(1, &q) != 0
+                return ("Calibrar manos", cd > 0 ? "brazos rectos: \(Int(cd.rounded(.up))) s" : (have ? "Hecha (izq. borra)" : "Sin calibrar"))
             case .width: return ("Tamaño de la pantalla", m(cfg.width))
             case .distance: return ("Distancia de la pantalla", m(cfg.distance))
             case .curve: return ("Curvatura de la pantalla", curveName[ci])

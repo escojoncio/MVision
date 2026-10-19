@@ -311,7 +311,7 @@ static void set_hand(int s, float x, float y, float z, float yaw) {
 static int is_arm_part(int i) { return i == 2 || i == 3 || i == 4 || i == 7 || i == 8 || i == 9; }
 
 static void test_glue(void) {
-    VrBodyConfig cfg; vrbody_config_default(&cfg);
+    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0;
     vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
     /* a) sin manos: no toca nada */
     build_body(1);
@@ -486,8 +486,10 @@ static void test_glue(void) {
 /* El marco de la mano del modelo sigue el marco de vr_pose.h: dedos (-Y local) = -Z de la mano, palma (derecha +X local /
  * izquierda -X local) = -Y de la mano, pulgar (+Z local) = -X (derecha) / +X (izquierda). Comprobado sobre las matrices escritas
  * en la RAM, con orientaciones de mano distintas, sin usar hand_map. */
-static void hand_axes_run(float roll_deg) {
-    VrBodyConfig cfg; vrbody_config_default(&cfg);
+/* mode 0: pose = marco de vr_pose.h (sin cabeceo); 1: mando de seguimiento con apuntado (agarre inclinado 35 grados, cabeceo automático); 2: sin apuntado (cabeceo fijo -35);
+ * 3: calibrado con vrbody_calibrate_hands; 4: como 1 con el apuntado ausente 3 fotogramas antes de medir (se mantiene el último cabeceo); 5: apuntado ausente desde el fotograma 20 con cabeceo fijo 0 (tras 10 fotogramas vuelve al fijo: dedos 35 grados arriba). En 1..3 el marco esperado de la mano es el del apuntado horizontal (guiñada de la pose) girado el alabeo. */
+static void hand_axes_run(float roll_deg, int mode) {
+    VrBodyConfig cfg; vrbody_config_default(&cfg); if (mode == 0 || mode == 5) cfg.hand_pitch_deg = 0;
     int tested = 0;
     for (int seed = 0; seed < 30; seed++) {
         build_body(200 + seed);
@@ -502,9 +504,19 @@ static void hand_axes_run(float roll_deg) {
                 float dw[3] = {want[0] - g_view.eye[0], want[1] - g_view.eye[1], want[2] - g_view.eye[2]};
                 float Tt[9] = {T[0], T[3], T[6], T[1], T[4], T[7], T[2], T[5], T[8]}, pu[3]; mv(pu, Tt, dw);
                 set_hand(s, pu[0] / 1000 + g_view.p_ref[0], pu[1] / 1000 + g_view.p_ref[1], pu[2] / 1000 + g_view.p_ref[2], yaw);
+                if (mode) {     /* agarre = guiñada * Rx(35 grados) (medido en el mando de seguimiento); apuntado = guiñada */
+                    float h2 = yaw * 0.5f, a2 = 35.0f * 3.14159265f / 180 * 0.5f;
+                    float qy[4] = {0, sinf(h2), 0, cosf(h2)}, qx[4] = {sinf(a2), 0, 0, cosf(a2)}, qg[4];
+                    qg[0] = qy[3] * qx[0] + qy[0] * qx[3] + qy[1] * qx[2] - qy[2] * qx[1]; qg[1] = qy[3] * qx[1] - qy[0] * qx[2] + qy[1] * qx[3] + qy[2] * qx[0];
+                    qg[2] = qy[3] * qx[2] + qy[0] * qx[1] - qy[1] * qx[0] + qy[2] * qx[3]; qg[3] = qy[3] * qx[3] - qy[0] * qx[0] - qy[1] * qx[1] - qy[2] * qx[2];
+                    memcpy(g_hands[s].rot, qg, sizeof qg);
+                    { int av = mode == 1 || mode == 3 || (mode == 4 && !(f >= 36 && f <= 38)) || (mode == 5 && f < 20); g_hands[s].aim_valid = av; if (av) memcpy(g_hands[s].aim_rot, qy, sizeof qy); }
+                    if (mode == 3 && f > 20 && 0) {}
+                }
                 /* la posición de la pose es el centro de la palma: la muñeca queda 55 mm atrás; el objetivo sigue alcanzable */
             }
             memcpy(RAM, RAM0, sizeof RAM);
+            if (mode == 3 && f == 10) { vrbody_set_hand_pitch(0); CHECK(vrbody_calibrate_hands() == 2, "calibrar manos"); for (int s = 0; s < 2; s++) g_hands[s].aim_valid = 0; }
             int n = vrbody_apply(RAM);
             if (f == 39 && n == 2) {
                 float Ru[9]; { float q[4] = {0, sinf(yaw / 2), 0, cosf(yaw / 2)}; vrbody_quat_to_mat(q, Ru); }
@@ -521,10 +533,11 @@ static void hand_axes_run(float roll_deg) {
                     for (int k = 0; k < 3; k++) { palm[k] = (s ? lx[k] : -lx[k]); thumb[k] = lz[k]; }
                     float fl[3] = {-ly[0], -ly[1], -ly[2]};
                     float pw[3] = {-up[0], -up[1], -up[2]}, tm[3] = {s ? -xm[0] : xm[0], s ? -xm[1] : xm[1], s ? -xm[2] : xm[2]};
+                    if (mode == 5) { CHECK(fabsf(fl[1] - 0.5736f) < 0.04f, "vuelta al cabeceo fijo: %g", fl[1]); tested++; continue; }
                     CHECK(dotv(fl, fing) > 0.995f, "dedos de la mano %d: %g", s, dotv(fl, fing));
                     CHECK(dotv(palm, pw) > 0.995f, "palma de la mano %d: %g", s, dotv(palm, pw));
                     CHECK(dotv(thumb, tm) > 0.995f, "pulgar de la mano %d: %g", s, dotv(thumb, tm));
-                    {   /* marco de depuración: mismos ejes que la pose pedida (alcanzable, sin límites) */
+                    if (mode == 0) {   /* marco de depuración: mismos ejes que la pose pedida (alcanzable, sin límites) */
                         float df[16]; int ok = vrbody_debug_hand_frame(s, df);
                         CHECK(ok, "marco de depuración de la mano %d no disponible", s);
                         if (ok) {
@@ -541,17 +554,19 @@ static void hand_axes_run(float roll_deg) {
         }
     }
     CHECK(tested >= 20, "pocas manos comprobadas: %d", tested);
+    vrbody_clear_calibration();
 }
 static void test_hand_axes(void) {
-    hand_axes_run(0.0f);      /* sin giro: marco de vr_pose.h tal cual */
-    hand_axes_run(90.0f);
-    hand_axes_run(45.0f);     /* defecto */
+    hand_axes_run(0.0f, 0);      /* sin giro: marco de vr_pose.h tal cual */
+    hand_axes_run(90.0f, 0);
+    hand_axes_run(45.0f, 0);     /* defecto */
+    for (int mode = 1; mode <= 5; mode++) { hand_axes_run(45.0f, mode); hand_axes_run(0.0f, mode); }
 }
 
 /* Valor por defecto (45 grados): con el marco de agarre alineado con el mundo la mano del personaje queda girada 45 grados sobre el eje de los dedos
  * (palma hacia dentro y abajo, dorso hacia fuera y arriba), no plana "sobre las piernas" ni en apretón de manos. */
 static void test_default_roll(void) {
-    VrBodyConfig cfg; vrbody_config_default(&cfg);
+    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0;
     CHECK(fabsf(cfg.hand_roll_deg - 45.0f) < 1e-4f, "roll por defecto");
     float sn = sinf(45.0f * 3.14159265f / 180), cs = cosf(45.0f * 3.14159265f / 180);
     for (int s = 0; s < 2; s++) {
@@ -561,6 +576,67 @@ static void test_default_roll(void) {
         CHECK(fabsf(dors[0] - (s ? 1.0f : -1.0f) * sn) < 1e-4f && fabsf(dors[1] - cs) < 1e-4f, "dorso mano %d: %g %g", s, dors[0], dors[1]);
         CHECK(fabsf((s ? -xh[1] : xh[1]) - sn) < 1e-4f, "pulgar mano %d: %g", s, xh[1]);
     }
+}
+
+
+/* API de cabeceo/calibración (pura): relación agarre/apuntado del mando de seguimiento, calibración, persistencia y entradas inválidas */
+static void qmul_(float *o, const float *a, const float *b) {
+    float x = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], y = a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+          z = a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], w = a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2];
+    o[0] = x; o[1] = y; o[2] = z; o[3] = w;
+}
+static void qeul_(float *q, float yaw, float pitch, float roll) {   /* guiñada (Y) * cabeceo (X) * alabeo (Z), grados */
+    float d = 3.14159265f / 360.0f, qy[4] = {0, sinf(yaw * d), 0, cosf(yaw * d)}, qx[4] = {sinf(pitch * d), 0, 0, cosf(pitch * d)}, qz[4] = {0, 0, sinf(roll * d), cosf(roll * d)}, t[4];
+    qmul_(t, qy, qx); qmul_(q, t, qz);
+}
+static void test_hand_pitch_api(void) {
+    float deg;
+    for (int i = 0; i < 200; i++) {                      /* apuntado cualquiera; agarre = apuntado * Rx(35): el cabeceo calculado es -35 */
+        float a[4], x35[4], g[4];
+        qeul_(a, (float)(i * 37 % 360), (float)(i * 11 % 120 - 60), (float)(i * 7 % 40 - 20));
+        qeul_(x35, 0, 35.0f, 0); qmul_(g, a, x35);
+        CHECK(vrbody_pitch_from_aim(g, a, &deg) && fabsf(deg + 35.0f) < 0.05f, "cabeceo del mando: %g", deg);
+        qeul_(x35, 0, -20.0f, 0); qmul_(g, a, x35);
+        CHECK(vrbody_pitch_from_aim(g, a, &deg) && fabsf(deg - 20.0f) < 0.05f, "cabeceo de otro mando: %g", deg);
+    }
+    float id[4] = {0, 0, 0, 1}, nan4[4] = {NAN, 0, 0, 1}, back[4];
+    qeul_(back, 0, 100.0f, 0);
+    CHECK(!vrbody_pitch_from_aim(NULL, id, &deg) && !vrbody_pitch_from_aim(id, nan4, &deg) && !vrbody_pitch_from_aim(id, id, NULL), "entradas inválidas");
+    CHECK(!vrbody_pitch_from_aim(id, back, &deg), "apuntado casi perpendicular a los dedos");
+    /* calibración pura: los dedos del resultado son horizontales (±1 grado) con cualquier agarre y el dorso queda a `roll` del cenit */
+    for (int i = 0; i < 300; i++) {
+        float g[4], o[4], h[4], M[9];
+        qeul_(g, (float)(i * 53 % 360), (float)(i * 13 % 100 - 50), (float)(i * 29 % 120 - 60));
+        float roll = (i & 1) ? 45.0f : -45.0f;
+        int ok = vrbody_calib_offset(g, roll, o);
+        float gm[9]; vrbody_quat_to_mat(g, gm);
+        float fh = sqrtf(gm[2] * gm[2] + gm[8] * gm[8]);
+        CHECK(ok == (fh > 0.3f), "calibrable según el rumbo de los dedos");
+        if (!ok) continue;
+        qmul_(h, g, o); vrbody_quat_to_mat(h, M);
+        CHECK(fabsf(M[5]) < 0.02f, "dedos horizontales: %g", M[5]);                          /* y de -Z */
+        float dors = M[4];                                                                     /* componente vertical del dorso (+Y) = cos(roll) */
+        CHECK(fabsf(dors - cosf(roll * 3.14159265f / 180)) < 0.02f, "dorso: %g", dors);
+        float yaw_g = atan2f(-gm[2], -gm[8]), yaw_h = atan2f(-M[2], -M[8]);                   /* mismo rumbo */
+        CHECK(fabsf(yaw_g - yaw_h) < 0.02f, "rumbo conservado");
+    }
+    { float o[4], v[4] = {0, 0, 0, 1}; float up[4]; qeul_(up, 0, -88.0f, 0);   /* dedos casi verticales hacia arriba */
+      CHECK(!vrbody_calib_offset(up, 45.0f, o) && !vrbody_calib_offset(v, NAN, o) && !vrbody_calib_offset(NULL, 0, o), "calibración inválida"); }
+    /* persistencia: set/get/clear, y sobrevive a vrbody_init */
+    { VrBodyConfig cfg; vrbody_config_default(&cfg); vrbody_init(&cfg); float q[4]; vrbody_clear_calibration();
+      CHECK(!vrbody_get_calibration(0, q) && !vrbody_get_calibration(2, q) && !vrbody_get_calibration(1, NULL), "sin calibración");
+      float c[4]; qeul_(c, 0, -35.0f, 20.0f); vrbody_set_calibration(1, c);
+      float bad[4] = {NAN, 0, 0, 1}, zero[4] = {0, 0, 0, 0}; vrbody_set_calibration(0, bad); vrbody_set_calibration(0, zero); vrbody_set_calibration(5, c);
+      CHECK(!vrbody_get_calibration(0, q) && vrbody_get_calibration(1, q) && fabsf(q[0] - c[0]) < 1e-5f, "set/get");
+      float big[4] = {3, 0, 0, 1}, small[4] = {0.1f, 0, 0, 0.1f}, edge[4] = {0, 0, 0, 1.9f}; vrbody_set_calibration(0, big); CHECK(!vrbody_get_calibration(0, q), "norma > 2 rechazada");
+      vrbody_set_calibration(0, small); CHECK(!vrbody_get_calibration(0, q), "norma < 0,5 rechazada"); vrbody_set_calibration(0, edge); CHECK(vrbody_get_calibration(0, q) && fabsf(q[3] - 1.0f) < 1e-5f, "norma 1,9 aceptada y normalizada");
+      vrbody_init(&cfg); CHECK(vrbody_get_calibration(1, q), "la calibración sobrevive a vrbody_init");
+      CHECK(vrbody_calibrate_hands() == 0, "sin manos seguidas no se calibra nada");
+      vrbody_clear_calibration(); CHECK(!vrbody_get_calibration(1, q), "borrada"); }
+    { VrBodyConfig cfg; vrbody_config_default(&cfg);
+      CHECK(fabsf(cfg.hand_pitch_deg + 35.0f) < 1e-4f && cfg.hand_pitch_auto == 1, "cabeceo por defecto -35 y automático");
+      vrbody_init(&cfg); vrbody_set_hand_pitch(1000.0f); CHECK(vrbody_config()->hand_pitch_deg <= 89.0f, "cabeceo acotado"); vrbody_set_hand_pitch(NAN);
+      vrbody_set_hand_pitch_auto(0); CHECK(vrbody_config()->hand_pitch_auto == 0, "auto apagado"); }
 }
 
 /* Golpe sintético (botón sin gesto) y agarre de enemigo: la MANO del personaje se mueve (no solo el codo) y vuelve al mando. */
@@ -575,7 +651,7 @@ static void hands_at_rest(const float T[9]) {
 }
 static void wrist_pos(int s, float w[3]) { float R[9]; load_xf(part_addr(s ? 4 : 9), R, w); }
 static void test_jab_and_grab(void) {
-    VrBodyConfig cfg; vrbody_config_default(&cfg);
+    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0;
     for (int seed = 0; seed < 12; seed++) {
         build_body(300 + seed);
         vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
@@ -632,7 +708,7 @@ static void test_jab_and_grab(void) {
  * transformación y restore lo devuelve; la cabeza (parte 6, oculta a propósito) y el resto no se tocan. */
 static void test_visibility(void) {
     for (int force = 0; force < 2; force++) {
-        VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.force_arm_visible = force;
+        VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0; cfg.force_arm_visible = force;
         vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
         build_body(77);
         static const int ARMS[6] = {2, 3, 4, 7, 8, 9};
@@ -684,7 +760,7 @@ static void test_mirror(void) {
 
 /* RAM corrupta: no debe caerse ni escribir fuera */
 static void test_fuzz(void) {
-    VrBodyConfig cfg; vrbody_config_default(&cfg);
+    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0;
     build_body(90); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
     set_hand(0, -0.2f, 1.3f, -0.4f, 0); set_hand(1, 0.2f, 1.3f, -0.4f, 0);
     for (int it = 0; it < 3000; it++) {
@@ -746,7 +822,7 @@ static void run_fist_frames(float grip, int frames, int *driven_last) {
 static void test_fist_glue(void) {
     VrBodyStats st0, st1;
     int driven = 0;
-    VrBodyConfig cfg; vrbody_config_default(&cfg);
+    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0;
     vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
     build_body(31); install_hand_mesh(0, 1); install_hand_mesh(1, 0); memcpy(RAM0, RAM, RAMSZ);
     /* mano abierta: la malla no se toca */
@@ -804,7 +880,7 @@ int main(void) {
     test_natural_elbow();
     test_continuity();
     test_glue();
-    test_hand_axes(); test_default_roll(); test_jab_and_grab();
+    test_hand_axes(); test_hand_pitch_api(); test_default_roll(); test_jab_and_grab();
     test_visibility();
     test_fist_glue();
     test_mirror();
