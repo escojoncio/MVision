@@ -127,6 +127,8 @@ void bench_make_scene(void) {
     box(1.5f, 0.5f, -3.0f, 1.0f, 1.0f, 1.0f, rgba(0, 0, 255));
     box(0.0f, 1.6f, -2.0f, 0.5f, 0.5f, 0.5f, rgba(255, 255, 0));
     box(0.0f, 1.6f, -8.0f, 3.0f, 3.0f, 1.0f, rgba(0, 255, 0));
+    /* CIANO delante del panel del HUD: entre la cabeza de la pose B (0.2, 1.6, -0.3) y el rectángulo magenta del panel (-0.386, 1.953, -1.7); el texto/HUD siempre va encima */
+    box(-0.093f, 1.776f, -1.0f, 0.3f, 0.3f, 0.3f, rgba(0, 255, 255));
     batch(first, 0, 0);
     first = g_nv;
     /* cuadro texturizado 2x2 m en x -4..-2, y 1..3, z -5: lee la VRAM tras aplicar los eventos (relleno azul en texels 0..15 x 0..15 y subida verde en 16..31 x 0..15) */

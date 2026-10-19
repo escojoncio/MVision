@@ -1026,6 +1026,84 @@ static void test_user_map(void) {
     vr_scene_release();
 }
 
+
+/* ---- composición 3D + 2D con la cámara del juego (la usa el probador por fotograma): la vista GL sale de game_view y el pase 3D cae donde el motor proyectó ---- */
+static void test_compose_view(void) {
+    for (int lefty = 0; lefty < 2; lefty++) {
+        const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, lefty ? 1 : -1}};
+        const int32_t e[3] = {200, 3000, 500};
+        BridgeState bs; set_eye(&bs, R, e);
+        reset();
+        /* triángulo de color plano en espacio de vista (z = 2000, H = 320, centro (160,120)): vértices en pantalla (96,56) (224,56) (160,184) */
+        float a[3] = {-400, -400, 2000}, b[3] = {400, -400, 2000}, c[3] = {0, 400, 2000};
+        GpuOp *o = poly3(a, b, c, 0);
+        o->flags = 0; o->proj_h = 320.0f; o->proj_ox = 160.0f; o->proj_oy = 120.0f;
+        for (int k = 0; k < 3; k++) { o->v[k].r = 200; o->v[k].g = 40; o->v[k].b = 40; o->v[k].x = (int16_t)(160 + (k == 0 ? -64 : k == 1 ? 64 : 0)); o->v[k].y = (int16_t)(120 + (k == 2 ? 64 : -64)); }
+        /* rect 2D opaco azul encima del centro del triángulo */
+        GpuOp *r2 = add(GPU_OP_RECT);
+        r2->v[0].x = 150; r2->v[0].y = 110; r2->rw = 20; r2->rh = 20; r2->cx2 = 319; r2->cy2 = 239; r2->v[0].r = 0; r2->v[0].g = 0; r2->v[0].b = 250;
+        dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 240;
+        VrSceneOpts so = vr_scene_opts_default();
+        so.origin_mode = 1;
+        VrScene s;
+        CHECK(vr_scene_build(&dl, &bs, &so, &s) == 0 && s.has_3d, "build compose %d", lefty);
+        enum { W = 320, H = 240 };
+        HudImg i3 = hud_img_new(W, H), i2 = hud_img_new(W, H);
+        static float zb[W * H];
+        static uint16_t vram[1024 * 512];
+        float view[16];
+        CHECK(hud_emu_game_view_gl(&s, view), "vista invertible");
+        const float tn[4] = {s.filter.cx_col / s.filter.proj_h, (W - s.filter.cx_col) / s.filter.proj_h, s.filter.cy_row / s.filter.proj_h, (H - s.filter.cy_row) / s.filter.proj_h};
+        for (int i = 0; i < W * H; i++) i3.rgba[i * 4 + 3] = 1;
+        hud_emu_run3d(&s, vram, &i3, zb, 1, view, tn);
+        hud_emu_run(&s, vram, &i2, 0, 0);
+        const float *p = &i3.rgba[((size_t)(100) * W + 160) * 4];      /* dentro del triángulo, fuera del rect */
+        CHECK(near_f(p[0], 200.0f / 255.0f, 0.03f) && p[1] < 0.2f, "3D en (160,100) = (%.2f %.2f %.2f) lefty=%d", p[0], p[1], p[2], lefty);
+        const float *q = &i3.rgba[((size_t)(60) * W + 100) * 4];       /* esquina sup. izq. del triángulo: dentro (96,56) .. */
+        const float *out = &i3.rgba[((size_t)(200) * W + 30) * 4];     /* fuera */
+        CHECK(near_f(out[0], 0.0f, 0.01f) && out[2] < 0.01f, "fuera del triángulo negro");
+        CHECK(near_f(q[0], 200.0f / 255.0f, 0.03f), "vértice del triángulo en la posición proyectada por el motor: (100,60) = %.2f", q[0]);
+        const float *z = &i3.rgba[((size_t)(190) * W + 160) * 4];      /* debajo de (160,184): fuera */
+        CHECK(z[0] < 0.01f, "bajo el vértice inferior (160,190) vacío: %.2f", z[0]);
+        const float *u = &i2.rgba[((size_t)(120) * W + 160) * 4];
+        CHECK(near_f(u[2], 250.0f / 255.0f, 0.02f) && near_f(u[3], 1.0f, 1e-4f), "panel 2D opaco en el centro: %.2f a=%.2f", u[2], u[3]);
+        CHECK(near_f(i2.rgba[((size_t)(100) * W + 160) * 4 + 3], 0.0f, 1e-4f), "panel 2D transparente fuera del rect");
+        hud_img_free(&i3); hud_img_free(&i2);
+        vr_scene_release();
+    }
+}
+
+/* ---- recorte vigente (E3/E4) en el panel 2D: lo que el juego dibuja fuera de su caja no se ve (ventanas, cuadros de texto, letras con recorte) ---- */
+static void test_clip_2d(void) {
+    BridgeState bs; const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}}; const int32_t e[3] = {0, 0, 0};
+    set_eye(&bs, R, e);
+    reset();
+    /* rect rojo de 100x100 en (10,10) con recorte (30..69, 40..79) inclusivo, y otro igual SIN recorte más abajo a la derecha */
+    GpuOp *a = add(GPU_OP_RECT);
+    a->v[0].x = 10; a->v[0].y = 10; a->rw = 100; a->rh = 100; a->v[0].r = 250; a->v[0].g = 0; a->v[0].b = 0;
+    a->cx1 = 30; a->cy1 = 40; a->cx2 = 69; a->cy2 = 79;
+    GpuOp *b = add(GPU_OP_RECT);
+    b->v[0].x = 150; b->v[0].y = 10; b->rw = 40; b->rh = 40; b->v[0].r = 0; b->v[0].g = 250; b->v[0].b = 0;
+    b->cx1 = 0; b->cy1 = 0; b->cx2 = 319; b->cy2 = 239;
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 240;
+    VrSceneOpts so = vr_scene_opts_default();
+    VrScene s;
+    CHECK(vr_scene_build(&dl, &bs, &so, &s) == 0, "build clip");
+    enum { W = 320, H = 240 };
+    HudImg i2 = hud_img_new(W, H);
+    static uint16_t vram[1024 * 512];
+    hud_emu_run(&s, vram, &i2, 0, 0);
+#define PX(x, y) (&i2.rgba[((size_t)(y) * W + (x)) * 4])
+    CHECK(PX(50, 60)[0] > 0.9f && PX(50, 60)[3] > 0.99f, "dentro del recorte se dibuja");
+    CHECK(PX(30, 40)[3] > 0.99f && PX(69, 79)[3] > 0.99f, "bordes inclusivos del recorte");
+    CHECK(PX(29, 60)[3] < 0.01f && PX(70, 60)[3] < 0.01f && PX(50, 39)[3] < 0.01f && PX(50, 80)[3] < 0.01f, "fuera del recorte no se dibuja");
+    CHECK(PX(20, 20)[3] < 0.01f && PX(100, 100)[3] < 0.01f, "el resto del rect recortado (esquinas) no se dibuja");
+    CHECK(PX(160, 20)[1] > 0.9f && PX(189, 49)[3] > 0.99f, "sin recorte (pantalla completa) se dibuja entero");
+    hud_img_free(&i2);
+    vr_scene_release();
+#undef PX
+}
+
 int main(void) {
     test_basic();
     test_stability();
@@ -1045,6 +1123,8 @@ int main(void) {
     test_recon_fate();
     test_recon_diag_ambig();
     test_user_map();
+    test_compose_view();
+    test_clip_2d();
     if (fails) { fprintf(stderr, "%d fallos\n", fails); return 1; }
     printf("test_scene: OK\n");
     return 0;
