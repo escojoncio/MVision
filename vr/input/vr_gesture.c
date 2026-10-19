@@ -7,7 +7,7 @@ static int fin3(const float *v) { return fin(v[0]) && fin(v[1]) && fin(v[2]); }
 
 void vrg_cfg_defaults(vrg_cfg_t *c) {
     memset(c, 0, sizeof *c);
-    c->enable = 1; c->button_jab = 1; c->trig_on = 0.6f; c->trig_off = 0.3f; c->punch = c->grab = c->knock = c->peek = 1;
+    c->enable = 1; c->fist_required = 1; c->fist_haptic = 0.12f; c->button_jab = 1; c->trig_on = 0.6f; c->trig_off = 0.3f; c->punch = c->grab = c->knock = c->peek = 1;
     c->right_handed = 1;
     c->punch_speed = 1.8f; c->knock_speed = 1.2f; c->reach_min = 0.22f; c->melee_range = 2.5f;
     c->grab_range = 1.3f; c->neck_radius = 0.45f; c->neck_height = 0.45f;
@@ -178,11 +178,23 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
     }
     if (g->fist_mask > 0) g->fist_mask -= dt;
 
-    /* ---------------- golpe: gesto físico; el puño (agarre cerrado) no influye y nunca agarra ---------------- */
+    /* ---------------- puño: agarre (grip) cerrado con histéresis; el cierre da un háptico suave ---------------- */
+    int fst[2] = {0, 0};
+    for (int s = 0; s < 2; s++) {
+        if (!tr[s] || !fin(in->grip[s])) continue;
+        int was = (g->fist >> s) & 1;
+        fst[s] = was ? in->grip[s] > c->grip_off : in->grip[s] > c->grip_on;
+        if (fst[s] && !was && free_hands && g->warm == 0 && c->fist_haptic > 0 && out->haptic[s] < c->fist_haptic) out->haptic[s] = c->fist_haptic;
+    }
+    g->fist = (fst[0] ? 1 : 0) | (fst[1] ? 2 : 0);
+    /* con un enemigo a tiro, el grip es el puño y no el botón del juego (R1/L1 abriría el menú de objetos o (des)equiparía el arma) */
+    int fist_guard = c->punch && free_hands && !in->on_wall && g->fist && ne >= 0 && nd <= c->melee_range + 0.5f;
+
+    /* ---------------- golpe: gesto físico CON EL PUÑO cerrado; nunca agarra ---------------- */
     if (c->punch && free_hands && !in->on_wall && in->stance < 2 && g->grab_side < 0 && !in->holding && g->settle <= 0) {
         if (g->punch_left <= 0 && g->cool <= 0) {
             for (int s = 0; s < 2; s++) {
-                if (!tr[s]) continue;
+                if (!tr[s] || (c->fist_required && !fst[s])) continue;
                 if (spd[s] >= c->punch_speed && rad[s] >= 0.7f * spd[s] && fv[s] >= 0.6f * spd[s] && reach[s] >= c->reach_min && (c->melee_range <= 0 || (ne >= 0 && nd <= c->melee_range))) {
                     g->punch_left = 4; g->cool = c->cooldown_s; out->haptic[s] = 0.25f; out->event = VRG_EV_PUNCH;
                     g->impact_t = 0.6f; g->impact_side = s; g->fist_mask = 0.6f; break;
@@ -260,7 +272,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
         }
         if (g->latch) out->mask |= (uint16_t)(VRG_R1 | VRG_L1);
     }
-    if (g->fist_mask > 0) out->mask |= (uint16_t)(VRG_R1 | VRG_L1);
+    if (g->fist_mask > 0 || fist_guard) out->mask |= (uint16_t)(VRG_R1 | VRG_L1);
 
     if (sq_pulse) out->press |= VRG_SQUARE;
     if (circle) out->press |= VRG_CIRCLE;
