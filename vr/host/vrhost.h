@@ -3,7 +3,7 @@
  * Vive fuera de runtime/ para que los .c de runtime/ no dependan de vr/ (varias herramientas enlazan todo runtime/ tal cual).
  *
  * Uso (app): mv_vrhost_install() una vez, ANTES de mv_host_start. Después:
- *  - el hilo de render llama a mv_host_scene() (RenderPS1Bridge.h) por frame para recibir las listas de dibujo ya ensambladas;
+ *  - el hilo de render llama a mv_host_scene() (RenderRGBridge.h) por frame para recibir las listas de dibujo ya ensambladas;
  *  - el hilo de entrada lee mv_vrhost_game_state() (postura, menú) para alimentar vr_input, publica la pose de la cabeza
  *    con mv_vr_set_head() y los giros con mv_vr_turn() / mv_vr_recenter() (host.h).
  *
@@ -32,7 +32,7 @@ void mv_vrhost_set_ai(int perception, int cameras, int activity);
 /* Solo para herramientas de prueba (vr/ai/test_ai_run): función llamada en el gancho de VBlank del hilo de emulación tras la capa VR (cpu = Cpu*). */
 void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame));
 
-/* Escena VR del siguiente frame (contrato en app/Sources/RenderPS1Bridge.h). Una por llamada y sin saltarse ninguna;
+/* Escena VR del siguiente frame (contrato en app/Sources/RenderRGBridge.h). Una por llamada y sin saltarse ninguna;
  * los punteros de `out` valen hasta la siguiente llamada. Llamarla es lo que activa la captura de la GPU: sin llamadas durante
  * ~1,5 s se apaga (ventana plana) y al volver la primera lista trae la VRAM completa (vram_init). Thread-safe. */
 extern int mv_host_scene(VrScene *out);
@@ -50,7 +50,7 @@ typedef struct {
     /* --- presentación (vr_view.h; al final: no rompe a quien solo lea lo anterior) --- */
     int32_t view_mode;   /* VrViewMode con histéresis: 1 = mundo en primera persona, 0 = pantalla de cine */
     int32_t view_reason; /* VRV_R_* del último VBlank (motivo del cine / del mundo) */
-    int32_t cinematic, comms, paused, menu_open, stopped;   /* banderas del puente (escena del motor, códec, pausa, ventana de armas/objetos, detenido) */
+    int32_t cinematic, comms, paused, menu_open, stopped;   /* banderas del puente (escena del motor, radio, pausa, ventana de armas/objetos, detenido) */
     int32_t ammo, ammo_max;  /* munición del arma equipada (cargador del juego) y su máximo; -1 si no hay */
     int32_t item;            /* objeto equipado, -1 ninguno */
     int32_t alert_mode;      /* 0 normal, 1 interferencia, 2 evasión, 3 alerta */

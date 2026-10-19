@@ -3,7 +3,7 @@
  *
  * Parámetros físicos:
  *  - 300 rpm máx. (semiautomático: un disparo por pulsación, intervalo mínimo 200 ms), 20 balas;
- *  - retroceso: muelle k=190, ζ≈0,9 (c=24.8); por disparo 0,55 m/s hacia atrás y 1,1 rad/s de
+ *  - retroceso: resorte k=190, ζ≈0,9 (c=24.8); por disparo 0,55 m/s hacia atrás y 1,1 rad/s de
  *    cabeceo (~4 grados de pico a una mano); con la mano de apoyo ×0,5;
  *  - mira: 4x / 6x / 10x sobre 60 grados de vista base; balanceo de respiración 0,0055 rad en cabeceo
  *    y 0,0040 en guiñada (0,21 y 0,16 Hz) + temblor filtrado de 0,0012 rad; segunda mano ×0,55;

@@ -63,7 +63,7 @@ static uint32_t se_calls, se_played, se_dropped;
  * y el modo original pasan al código real. */
 static void se_patch(Cpu *c) {
     uint32_t pos = c->r[4], se = c->r[5], cmd = 0;
-    int r = vrc_se_intercept(psx_ram, pos, se, &cmd);
+    int r = vrc_se_intercept(emu_ram, pos, se, &cmd);
     se_calls++;
     if (r == VRC_SE_PASS) { rt_call_orig(c, SE_PLAY_POS); return; }
     if (r == VRC_SE_DROP) { se_dropped++; c->r[2] = 0xFFFFFFFFu; return; }
@@ -147,9 +147,9 @@ static uint32_t ov_hash(void) {
     uint32_t h = 2166136261u;
     for (unsigned i = 0; i < 160; i++) {
         uint32_t a = OV_LO + (((OV_HI - OV_LO) / 160u) & ~3u) * i;
-        h = (h ^ vai_r32(psx_ram, a)) * 16777619u;
+        h = (h ^ vai_r32(emu_ram, a)) * 16777619u;
     }
-    for (int i = 0; i < 8; i++) h = (h ^ vai_r8(psx_ram, STAGE_CODE + (uint32_t)i)) * 16777619u;
+    for (int i = 0; i < 8; i++) h = (h ^ vai_r8(emu_ram, STAGE_CODE + (uint32_t)i)) * 16777619u;
     return h;
 }
 
@@ -168,8 +168,8 @@ void vrai_frame(const BridgeState *bs, uint32_t frame) {
         S.overlay_found = vrp_rt_overlay(OV_LO, OV_HI);
         vrc_reset();
     }
-    if (cur_act && bs) vra_frame(&act, psx_ram, bs);
-    if (cur_cam) S.cameras_seen = vrc_frame(psx_ram, NULL);
+    if (cur_act && bs) vra_frame(&act, emu_ram, bs);
+    if (cur_cam) S.cameras_seen = vrc_frame(emu_ram, NULL);
 }
 
 void vrai_stats(VraiStats *s) {

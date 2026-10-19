@@ -36,7 +36,7 @@ void rt_trace_enter(Cpu *c, uint32_t addr);
 #define MAXI 60                   /* instrucciones de un bloque antes de cortarlo (+ salto + slot <= 64 palabras) */
 #define GRAN 8                    /* grano de rt_codemap: 256 B */
 
-uint8_t rt_codemap[PSX_RAM_SIZE >> GRAN];
+uint8_t rt_codemap[EMU_RAM_SIZE >> GRAN];
 int interp_log_enabled = 1;
 unsigned long interp_insns;       /* instrucciones ejecutadas (por bloques completos; estadística/pruebas) */
 unsigned long interp_blocks, interp_invalidations;   /* bloques decodificados / invalidaciones (estadística) */
@@ -51,7 +51,7 @@ typedef struct Block {
     Op ops[];
 } Block;
 
-static Block **tab;               /* PSX_RAM_SIZE/4 punteros, creado en el primer uso */
+static Block **tab;               /* EMU_RAM_SIZE/4 punteros, creado en el primer uso */
 
 enum {
     O_NOP, O_SLL, O_SRL, O_SRA, O_SLLV, O_SRLV, O_SRAV, O_ADDU, O_SUBU, O_AND, O_OR, O_XOR, O_NOR, O_SLT, O_SLTU,
@@ -82,7 +82,7 @@ static void note_entry(uint32_t t, uint32_t c_ra) {
     fprintf(stderr, "[interp] interpretando 0x%08x %s (sin función recompilada; ra=0x%08x %s)\n", t, rt_name(t), c_ra, rt_name(c_ra));
     /* MV_RAMDUMP=fichero: vuelca la RAM al primer aviso (diagnóstico: localizar overlays cargadas). */
     { const char *rd = getenv("MV_RAMDUMP"); static int done;
-      if (rd && !done && t >= 0x800c0000u) { done = 1; FILE *g = fopen(rd, "wb"); if (g) { fwrite(psx_ram, 1, PSX_RAM_SIZE, g); fclose(g); } } }
+      if (rd && !done && t >= 0x800c0000u) { done = 1; FILE *g = fopen(rd, "wb"); if (g) { fwrite(emu_ram, 1, EMU_RAM_SIZE, g); fclose(g); } } }
     if (!interp_log_enabled) return;
     FILE *f = fopen("missing_funcs.txt", "a+");
     if (!f) return;
@@ -152,7 +152,7 @@ void rt_code_invalidate(uint32_t addr, uint32_t len) {
     if (a >= 0x800000u) return;
     a &= 0x1FFFFF;
     uint32_t e = a + len;
-    if (e > PSX_RAM_SIZE) e = PSX_RAM_SIZE;
+    if (e > EMU_RAM_SIZE) e = EMU_RAM_SIZE;
     for (uint32_t g = a >> GRAN; g <= (e - 1) >> GRAN; g++) if (rt_codemap[g]) rt_code_hit(g << GRAN);
 }
 
@@ -166,7 +166,7 @@ void interp_forget(uint32_t addr) {
 
 void interp_flush_all(void) {
     if (!tab) return;
-    for (unsigned w = 0; w < PSX_RAM_SIZE / 4; w++) if (tab[w]) kill_block(w);
+    for (unsigned w = 0; w < EMU_RAM_SIZE / 4; w++) if (tab[w]) kill_block(w);
     memset(rt_codemap, 0, sizeof rt_codemap);
 }
 
@@ -274,7 +274,7 @@ static int decode_simple(uint32_t w, uint32_t pc, Op *o, unsigned *dst, int *end
 
 static inline uint32_t fetch(uint32_t a) {
     uint32_t w;
-    memcpy(&w, &psx_ram[a & 0x1FFFFC], 4);
+    memcpy(&w, &emu_ram[a & 0x1FFFFC], 4);
     return w;
 }
 
@@ -306,7 +306,7 @@ static Block *finish(const Op *tmp, unsigned n, uint32_t pc, uint32_t end, int m
     interp_blocks++;
     if (mark) {
         uint32_t s = pc & 0x1FFFFF, e = s + (end - pc);
-        if (e > PSX_RAM_SIZE) e = PSX_RAM_SIZE;      /* bloque al final de la RAM: no salirse de rt_codemap */
+        if (e > EMU_RAM_SIZE) e = EMU_RAM_SIZE;      /* bloque al final de la RAM: no salirse de rt_codemap */
         for (uint32_t g = s >> GRAN; g <= (e - 1) >> GRAN; g++) rt_codemap[g] = 1;
     }
     return b;
@@ -430,40 +430,40 @@ static Block *decode(uint32_t pc, int plain) {
 /* ------------------------------------------------------------------ memoria rápida */
 static inline uint32_t rd32(Cpu *c, uint32_t a) {
     uint32_t p = a & 0x1FFFFFFFu, v;
-    if (__builtin_expect(p < 0x800000u, 1)) { memcpy(&v, &psx_ram[p & 0x1FFFFF], 4); return v; }
-    if (p - PSX_SCRATCH < 0x400u) { memcpy(&v, &psx_scratch[p - PSX_SCRATCH], 4); return v; }
+    if (__builtin_expect(p < 0x800000u, 1)) { memcpy(&v, &emu_ram[p & 0x1FFFFF], 4); return v; }
+    if (p - EMU_SCRATCH < 0x400u) { memcpy(&v, &emu_scratch[p - EMU_SCRATCH], 4); return v; }
     return mem_r32(c, a);
 }
 static inline uint32_t rd16(Cpu *c, uint32_t a) {
     uint32_t p = a & 0x1FFFFFFFu;
     uint16_t v;
-    if (__builtin_expect(p < 0x800000u, 1)) { memcpy(&v, &psx_ram[p & 0x1FFFFF], 2); return v; }
-    if (p - PSX_SCRATCH < 0x400u) { memcpy(&v, &psx_scratch[p - PSX_SCRATCH], 2); return v; }
+    if (__builtin_expect(p < 0x800000u, 1)) { memcpy(&v, &emu_ram[p & 0x1FFFFF], 2); return v; }
+    if (p - EMU_SCRATCH < 0x400u) { memcpy(&v, &emu_scratch[p - EMU_SCRATCH], 2); return v; }
     return mem_r16(c, a);
 }
 static inline uint32_t rd8(Cpu *c, uint32_t a) {
     uint32_t p = a & 0x1FFFFFFFu;
-    if (__builtin_expect(p < 0x800000u, 1)) return psx_ram[p & 0x1FFFFF];
-    if (p - PSX_SCRATCH < 0x400u) return psx_scratch[p - PSX_SCRATCH];
+    if (__builtin_expect(p < 0x800000u, 1)) return emu_ram[p & 0x1FFFFF];
+    if (p - EMU_SCRATCH < 0x400u) return emu_scratch[p - EMU_SCRATCH];
     return mem_r8(c, a);
 }
 static inline void ram_hit(uint32_t idx) { if (__builtin_expect(rt_codemap[idx >> GRAN], 0)) rt_code_hit(idx); }
 static inline void wr32(Cpu *c, uint32_t a, uint32_t v) {
     uint32_t p = a & 0x1FFFFFFFu;
-    if (__builtin_expect(p < 0x800000u, 1)) { uint32_t i = p & 0x1FFFFF; memcpy(&psx_ram[i], &v, 4); ram_hit(i); return; }
-    if (p - PSX_SCRATCH < 0x400u) { memcpy(&psx_scratch[p - PSX_SCRATCH], &v, 4); return; }
+    if (__builtin_expect(p < 0x800000u, 1)) { uint32_t i = p & 0x1FFFFF; memcpy(&emu_ram[i], &v, 4); ram_hit(i); return; }
+    if (p - EMU_SCRATCH < 0x400u) { memcpy(&emu_scratch[p - EMU_SCRATCH], &v, 4); return; }
     mem_w32(c, a, v);
 }
 static inline void wr16(Cpu *c, uint32_t a, uint16_t v) {
     uint32_t p = a & 0x1FFFFFFFu;
-    if (__builtin_expect(p < 0x800000u, 1)) { uint32_t i = p & 0x1FFFFF; memcpy(&psx_ram[i], &v, 2); ram_hit(i); return; }
-    if (p - PSX_SCRATCH < 0x400u) { memcpy(&psx_scratch[p - PSX_SCRATCH], &v, 2); return; }
+    if (__builtin_expect(p < 0x800000u, 1)) { uint32_t i = p & 0x1FFFFF; memcpy(&emu_ram[i], &v, 2); ram_hit(i); return; }
+    if (p - EMU_SCRATCH < 0x400u) { memcpy(&emu_scratch[p - EMU_SCRATCH], &v, 2); return; }
     mem_w16(c, a, v);
 }
 static inline void wr8(Cpu *c, uint32_t a, uint8_t v) {
     uint32_t p = a & 0x1FFFFFFFu;
-    if (__builtin_expect(p < 0x800000u, 1)) { uint32_t i = p & 0x1FFFFF; psx_ram[i] = v; ram_hit(i); return; }
-    if (p - PSX_SCRATCH < 0x400u) { psx_scratch[p - PSX_SCRATCH] = v; return; }
+    if (__builtin_expect(p < 0x800000u, 1)) { uint32_t i = p & 0x1FFFFF; emu_ram[i] = v; ram_hit(i); return; }
+    if (p - EMU_SCRATCH < 0x400u) { emu_scratch[p - EMU_SCRATCH] = v; return; }
     mem_w8(c, a, v);
 }
 
@@ -710,7 +710,7 @@ static void interp_init(void) {
     if (inited) return;
     inited = 1;
     run(NULL, 0, NULL);
-    tab = calloc(PSX_RAM_SIZE / 4, sizeof *tab);
+    tab = calloc(EMU_RAM_SIZE / 4, sizeof *tab);
     if (!tab) abort();
 }
 

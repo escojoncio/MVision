@@ -144,10 +144,10 @@ static void on_frame(Cpu *c, uint32_t f) {
     for (int i = 0; i < n_ram; i++)
         if (ram_f[i] == f) {
             FILE *o = fopen(ram_n[i], "wb");
-            if (o) { fwrite(psx_ram, 1, PSX_RAM_SIZE, o); fclose(o); }
+            if (o) { fwrite(emu_ram, 1, EMU_RAM_SIZE, o); fclose(o); }
         }
     if (f >= from_frame && (f - from_frame) % every == 0) {
-        bridge_read(psx_ram, &st);
+        bridge_read(emu_ram, &st);
         print_state(f, &st);
         if (full) print_lists(&st);
     }
@@ -201,13 +201,13 @@ int main(int argc, char **argv) {
     }
     FILE *f = fopen(exe, "rb");
     if (!f) { perror(exe); return 1; }
-    static uint8_t buf[PSX_RAM_SIZE + 0x800];
+    static uint8_t buf[EMU_RAM_SIZE + 0x800];
     size_t n = fread(buf, 1, sizeof buf, f);
     fclose(f);
-    if (n < 0x800 || memcmp(buf, "PS-X EXE", 8)) { fprintf(stderr, "no es PS-X EXE\n"); return 1; }
+    if (n < 0x800 || memcmp(buf, EXE_MAGIC, 8)) { fprintf(stderr, "ejecutable no válido\n"); return 1; }
     uint32_t pc = rd32f(buf + 0x10), gp = rd32f(buf + 0x14), t = rd32f(buf + 0x18), sz = rd32f(buf + 0x1C);
-    if (sz > n - 0x800 || (t & 0x1FFFFF) + sz > PSX_RAM_SIZE) { fprintf(stderr, "cabecera inválida\n"); return 1; }
-    memcpy(&psx_ram[t & 0x1FFFFF], buf + 0x800, sz);
+    if (sz > n - 0x800 || (t & 0x1FFFFF) + sz > EMU_RAM_SIZE) { fprintf(stderr, "cabecera inválida\n"); return 1; }
+    memcpy(&emu_ram[t & 0x1FFFFF], buf + 0x800, sz);
     if (disc) {
         int nd = cd_open(disc);
         fprintf(stderr, "[bridge_dump] disco(s) montado(s): %d\n", nd);

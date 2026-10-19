@@ -7,7 +7,7 @@
  *
  * Las marcas son paquetes de 1 palabra con el comando GP0 0x04 (NOP en el hardware real y en el oráculo; con
  * runtime_mark.patch la GPU avisa a vrradar_on_mark con el seq de captura). Nada del juego depende de ellas.
- * Se ejecuta en el hilo del juego, entre la construcción de la OT y su envío (DrawOTag): seguro respecto a la fase del frame.
+ * Se ejecuta en el hilo del juego, entre la construcción de la OT y su envío (gfx_list): seguro respecto a la fase del frame.
  * Se rotan 4 pares de marcas porque la OT del frame anterior puede no haberse enviado aún cuando se prepara la siguiente. */
 #include <stdint.h>
 #include <string.h>
@@ -31,8 +31,8 @@ void vrradar_hle_stats(unsigned *calls, unsigned *marked, unsigned *fail) {
     if (fail) *fail = n_fail;
 }
 
-static uint32_t rd(uint32_t a) { uint32_t v; memcpy(&v, psx_ram + (a & RAM_MASK & ~3u), 4); return v; }
-static void wr(uint32_t a, uint32_t v) { memcpy(psx_ram + (a & RAM_MASK & ~3u), &v, 4); }
+static uint32_t rd(uint32_t a) { uint32_t v; memcpy(&v, emu_ram + (a & RAM_MASK & ~3u), 4); return v; }
+static void wr(uint32_t a, uint32_t v) { memcpy(emu_ram + (a & RAM_MASK & ~3u), &v, 4); }
 
 void hle_vrradar_draw(Cpu *c) {
     uint32_t ot = A1;                      /* a1 = ranura de OT (u_long *): se guarda, la original puede tocar a1 */

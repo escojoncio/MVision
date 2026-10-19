@@ -23,7 +23,7 @@
 #define V_MAX             22.0f   /* tope de velocidad de lanzamiento (m/s) */
 #define W_MAX             45.0f   /* tope de velocidad angular entregada (rad/s) */
 #define DT_MAX            0.1f    /* un cuadro largo no cuenta más que esto */
-#define LEVER_H           0.008f  /* paso máximo de integración del muelle de la palanca (s) */
+#define LEVER_H           0.008f  /* paso máximo de integración del resorte de la palanca (s) */
 #define RETRY_T           0.15f   /* espera antes de reintentar un evento rechazado */
 #define V_WIN             0.070f  /* ventana de estimación (s) */
 #define V_LAG             0.025f  /* latencia del agarre: se ignoran los últimos ms antes de detectar la suelta */
@@ -248,7 +248,7 @@ static void sync_held(WThrowState *t, const WInput *in) {
 static void lever_step(WThrowState *t, float dt) {
     float *c = &t->base.channel[WCH_CUSTOM1];
     if (!t->lever_off) { *c = 0; t->lever_v = 0; return; }
-    /* muelle amortiguado hacia 1 con impulso inicial: la palanca "salta" y rebasa un poco.
+    /* resorte amortiguado hacia 1 con impulso inicial: la palanca "salta" y rebasa un poco.
      * Euler semi-implícito con subpasos <= LEVER_H (con k=900 es estable hasta ~60 ms) */
     int n = (int)ceilf(dt / LEVER_H); if (n < 1) n = 1;
     float h = dt / (float)n;

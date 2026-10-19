@@ -62,7 +62,7 @@ int mv_host_audio_pull(int16_t *out_stereo, int frames);
  * lo muestra como frames por segundo. Thread-safe y sin candados. */
 void mv_host_note_render(int kind);
 
-/* Estado del mando 1. buttons activo-alto en orden PS1 (0 SELECT, 1 L3, 2 R3, 3 START, 4 ARRIBA,
+/* Estado del mando 1. buttons activo-alto en orden original (0 SELECT, 1 L3, 2 R3, 3 START, 4 ARRIBA,
  * 5 DERECHA, 6 ABAJO, 7 IZQUIERDA, 8 L2, 9 R2, 10 L1, 11 R1, 12 TRIANGULO, 13 CIRCULO, 14 CRUZ,
  * 15 CUADRADO); ejes 0..255 con centro 128. Se aplica en el siguiente VBlank. */
 void mv_host_pad(uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);

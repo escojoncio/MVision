@@ -93,47 +93,47 @@ static void t_hash(void) {
     EQ(hle_sig_mask(ADDU(1, 2, 3)), ADDU(1, 2, 3));
 }
 
-/* Disposición del texto (palabras): A 12 | DrawSync 14 | B 12 | VSync 20 | C 12 | VSyncCallback 10 (original) |
+/* Disposición del texto (palabras): A 12 | gfx_sync 14 | B 12 | frame_wait 20 | C 12 | frame_cb 10 (original) |
  * setjmp 10 | longjmp 10 | D 12. */
-static uint32_t a_VSync, a_DrawSync, a_VSyncCb, a_setjmp, a_longjmp, a_end;
+static uint32_t a_fw, a_gs, a_fcb, a_jsave, a_jrest, a_end;
 
 static void build_text(void) {
     at = BASE;
-    func(12, 1, 0, BASE + 48);           /* A (llama a DrawSync: la hace inicio de función) */
-    a_DrawSync = at; func(14, 2, 0, 0);
+    func(12, 1, 0, BASE + 48);           /* A (llama a gfx_sync: la hace inicio de función) */
+    a_gs = at; func(14, 2, 0, 0);
     func(12, 3, 0, 0);                   /* B */
-    a_VSync = at; func(20, 4, 0, 0);
+    a_fw = at; func(20, 4, 0, 0);
     func(12, 5, 0, 0);                   /* C */
-    a_VSyncCb = at;                      /* original: v0 = 77 */
+    a_fcb = at;                      /* original: v0 = 77 */
     emit(ADDIU(V0, 0, 77)); emit(JR_RA); emit(NOP);
     for (int i = 0; i < 7; i++) emit(ADDU(1, 1 + i, 2));
-    a_setjmp = at; emit(BREAK); for (int i = 0; i < 9; i++) emit(ADDU(2, 3 + i, 4));
-    a_longjmp = at; emit(BREAK); for (int i = 0; i < 9; i++) emit(ADDU(3, 4 + i, 5));
+    a_jsave = at; emit(BREAK); for (int i = 0; i < 9; i++) emit(ADDU(2, 3 + i, 4));
+    a_jrest = at; emit(BREAK); for (int i = 0; i < 9; i++) emit(ADDU(3, 4 + i, 5));
     func(12, 6, 0, 0);                   /* D */
     a_end = at;
 }
 
 static void build_sigs(void) {
-    /* La referencia tiene los mismos tamaños; DrawSync difiere en una palabra no enmascarada (sin match exacto
+    /* La referencia tiene los mismos tamaños; gfx_sync difiere en una palabra no enmascarada (sin match exacto
      * ni por prefijo: la palabra cambiada está dentro de las 8 primeras) y se hallará por distancia a las anclas. */
     const uint32_t d = 0x40000;
     jn = 0; first_sig = 1;
     jn += (size_t)sprintf(json + jn, "[\n");
     sig("anchor_a", BASE + d, BASE, 12);
-    /* firma de referencia de DrawSync: copia con la palabra 3 distinta */
-    uint32_t keep[14], p = a_DrawSync;
+    /* firma de referencia de gfx_sync: copia con la palabra 3 distinta */
+    uint32_t keep[14], p = a_gs;
     for (unsigned i = 0; i < 14; i++) keep[i] = mem_r32(NULL, p + 4 * i);
     mem_w32(NULL, p + 12, ADDU(9, 9, 9));
-    sig("DrawSync", a_DrawSync + d, a_DrawSync, 14);
+    sig("gfx_sync", a_gs + d, a_gs, 14);
     for (unsigned i = 0; i < 14; i++) mem_w32(NULL, p + 4 * i, keep[i]);
     sig("anchor_b", BASE + 26 * 4 + d, BASE + 26 * 4, 12);
-    sig("VSync", a_VSync + d, a_VSync, 20);
-    sig("anchor_c", a_VSync + 80 + d, a_VSync + 80, 12);
-    sig("VSyncCallback", a_VSyncCb + d, a_VSyncCb, 10);
-    sig("setjmp", a_setjmp + d, a_setjmp, 10);
-    sig("longjmp", a_longjmp + d, a_longjmp, 10);
-    /* CdInit: firma que no existe en el texto */
-    jn += (size_t)sprintf(json + jn, ",\n{\"name\":\"CdInit\",\"addr\":\"%08x\",\"words\":9,\"prefix\":\"%040x\",\"full\":\"%040x\"}", BASE + 0x70000, 1, 2);
+    sig("frame_wait", a_fw + d, a_fw, 20);
+    sig("anchor_c", a_fw + 80 + d, a_fw + 80, 12);
+    sig("frame_cb", a_fcb + d, a_fcb, 10);
+    sig("jmp_save", a_jsave + d, a_jsave, 10);
+    sig("jmp_restore", a_jrest + d, a_jrest, 10);
+    /* disc_init: firma que no existe en el texto */
+    jn += (size_t)sprintf(json + jn, ",\n{\"name\":\"disc_init\",\"addr\":\"%08x\",\"words\":9,\"prefix\":\"%040x\",\"full\":\"%040x\"}", BASE + 0x70000, 1, 2);
     jn += (size_t)sprintf(json + jn, "\n]\n");
 }
 
@@ -146,14 +146,14 @@ static void t_bind(void) {
     build_text();
     build_sigs();
     int n = hle_bind(json, jn, BASE, a_end - BASE, BASE);
-    EQ(n, 5);                                  /* VSync, DrawSync (por distancia), VSyncCallback, setjmp, longjmp */
+    EQ(n, 5);                                  /* frame_wait, gfx_sync (por distancia), frame_cb, setjmp, longjmp */
     EQ(hle_bind_missing(), hle_table_count - 5);
-    EQ(hle_bind_addr("VSync"), a_VSync);
-    EQ(hle_bind_addr("DrawSync"), a_DrawSync);
-    EQ(hle_bind_addr("setjmp"), a_setjmp);
-    EQ(hle_bind_addr("CdInit"), 0);            /* firma ausente */
+    EQ(hle_bind_addr("frame_wait"), a_fw);
+    EQ(hle_bind_addr("gfx_sync"), a_gs);
+    EQ(hle_bind_addr("jmp_save"), a_jsave);
+    EQ(hle_bind_addr("disc_init"), 0);            /* firma ausente */
     EQ(hle_bind_addr("anchor_a"), 0);          /* las anclas no se enlazan */
-    EQ(strcmp(hle_bind_name(a_VSync), "VSync"), 0);
+    EQ(strcmp(hle_bind_name(a_fw), "frame_wait"), 0);
 }
 
 
@@ -162,7 +162,7 @@ static void t_bind(void) {
 static void t_decoy(void) {
     const uint32_t b2 = 0x80100000u;
     int n;
-    /* texto: ancla (12) | decoy VSync (20 palabras, sin jr ra) */
+    /* texto: ancla (12) | decoy frame_wait (20 palabras, sin jr ra) */
     at = b2;
     func(12, 1, 0, 0);
     uint32_t dec = at;
@@ -174,34 +174,34 @@ static void t_decoy(void) {
     mem_w32(NULL, dec + 48, ADDU(9, 9, 9));
     jn = 0; first_sig = 1;
     jn += (size_t)sprintf(json + jn, "[\n");
-    sig("VSync", dec + 0x40000, dec, 20);
+    sig("frame_wait", dec + 0x40000, dec, 20);
     jn += (size_t)sprintf(json + jn, "\n]\n");
     mem_w32(NULL, dec + 48, tmp);
     n = hle_bind(json, jn, b2, end - b2, b2);
     EQ(n, 0);                                          /* prefijo único pero sin cola de función: descartado */
-    EQ(hle_bind_addr("VSync"), 0);
+    EQ(hle_bind_addr("frame_wait"), 0);
     /* mismo texto con cola correcta (jr ra + nop): el prefijo único sí enlaza */
     mem_w32(NULL, dec + 4 * 18, JR_RA); mem_w32(NULL, dec + 4 * 19, NOP);
     tmp = mem_r32(NULL, dec + 48);
     mem_w32(NULL, dec + 48, ADDU(9, 9, 9));
     jn = 0; first_sig = 1;
     jn += (size_t)sprintf(json + jn, "[\n");
-    sig("VSync", dec + 0x40000, dec, 20);
+    sig("frame_wait", dec + 0x40000, dec, 20);
     jn += (size_t)sprintf(json + jn, "\n]\n");
     mem_w32(NULL, dec + 48, tmp);
     n = hle_bind(json, jn, b2, end - b2, b2);
     EQ(n, 1);
-    EQ(hle_bind_addr("VSync"), dec);
+    EQ(hle_bind_addr("frame_wait"), dec);
     /* con gemelas en la referencia completa (fd=2) el hash único tampoco basta; sin ancla no hay otra vía: no se enlaza */
     sig_fd = 2;
     jn = 0; first_sig = 1;
     jn += (size_t)sprintf(json + jn, "[\n");
-    sig("VSync", dec + 0x40000, dec, 20);
+    sig("frame_wait", dec + 0x40000, dec, 20);
     jn += (size_t)sprintf(json + jn, "\n]\n");
     sig_fd = 0;
     n = hle_bind(json, jn, b2, end - b2, b2);
     EQ(n, 0);
-    EQ(hle_bind_addr("VSync"), 0);
+    EQ(hle_bind_addr("frame_wait"), 0);
 }
 
 /* Código de invitado fuera del texto. */
@@ -209,17 +209,17 @@ static uint32_t gat;
 static void gemit(uint32_t w) { mem_w32(NULL, gat, w); gat += 4; }
 
 static void t_hle_dispatch(Cpu *c) {
-    /* VSyncCallback (HLE) devuelve el valor anterior del callback y guarda a0; el cuerpo original (v0=77) no corre. */
-    EQ(hle_bind_lookup(a_VSyncCb) != NULL, 1);
-    EQ(hle_bind_addr("VSyncCallback"), a_VSyncCb);
-    EQ(hle_bind_is(a_VSyncCb), 1);
-    EQ(hle_bind_is(a_VSync + 4), 0);
+    /* frame_cb (HLE) devuelve el valor anterior del callback y guarda a0; el cuerpo original (v0=77) no corre. */
+    EQ(hle_bind_lookup(a_fcb) != NULL, 1);
+    EQ(hle_bind_addr("frame_cb"), a_fcb);
+    EQ(hle_bind_is(a_fcb), 1);
+    EQ(hle_bind_is(a_fw + 4), 0);
     /* llamada: jal HLE, dos veces */
     gat = 0x80020000;
     gemit(ADDIU(SP, SP, -16)); gemit(SW(RA, SP, 0));
-    gemit(ADDIU(A0, 0, 0x1234)); gemit(JAL(a_VSyncCb)); gemit(NOP);
+    gemit(ADDIU(A0, 0, 0x1234)); gemit(JAL(a_fcb)); gemit(NOP);
     gemit(ADDU(S0, V0, 0));                     /* s0 = valor anterior (0) */
-    gemit(ADDIU(A0, 0, 0)); gemit(JAL(a_VSyncCb)); gemit(NOP);
+    gemit(ADDIU(A0, 0, 0)); gemit(JAL(a_fcb)); gemit(NOP);
     gemit(ADDU(T1, V0, 0));                     /* t1 = 0x1234 */
     gemit(0x8FBF0000u); gemit(ADDIU(SP, SP, 16)); gemit(JR_RA); gemit(NOP);
     reset(c);
@@ -230,18 +230,18 @@ static void t_hle_dispatch(Cpu *c) {
     EQ(c->r[RA], 0xDEAD0000u);
     /* salto en cola (j) a la HLE: vuelve a ra del llamador */
     gat = 0x80020100;
-    gemit(ADDIU(A0, 0, 0x4321)); gemit(J(a_VSyncCb)); gemit(NOP);
+    gemit(ADDIU(A0, 0, 0x4321)); gemit(J(a_fcb)); gemit(NOP);
     reset(c);
     c->r[RA] = 0xDEAD0000u;
     rt_call(c, 0x80020100);
     EQ(c->r[V0], 0);                            /* anterior era 0 (se puso a 0) */
     c->r[RA] = 0xDEAD0000u; c->r[A0] = 0;
-    rt_call(c, a_VSyncCb);                      /* desde el host: también HLE */
+    rt_call(c, a_fcb);                      /* desde el host: también HLE */
     EQ(c->r[V0], 0x4321);
     /* puntero a función (jalr) */
     gat = 0x80020200;
     gemit(ADDIU(SP, SP, -16)); gemit(SW(RA, SP, 0));
-    gemit(LUI(T0, a_VSyncCb >> 16)); gemit(ORI(T0, T0, a_VSyncCb & 0xFFFF));
+    gemit(LUI(T0, a_fcb >> 16)); gemit(ORI(T0, T0, a_fcb & 0xFFFF));
     gemit(JALR(RA, T0)); gemit(ADDIU(A0, 0, 7));
     gemit(0x8FBF0000u); gemit(ADDIU(SP, SP, 16)); gemit(JR_RA); gemit(NOP);
     reset(c);
@@ -251,10 +251,10 @@ static void t_hle_dispatch(Cpu *c) {
     /* el original, interpretado */
     reset(c);
     c->r[RA] = 0xDEAD0000u;
-    EQ(hle_bind_orig(c, "VSyncCallback"), 1);
+    EQ(hle_bind_orig(c, "frame_cb"), 1);
     EQ(c->r[V0], 77);
     EQ(c->r[RA], 0xDEAD0000u);
-    EQ(rt_orig(c, "VSyncCallback"), 1);
+    EQ(rt_orig(c, "frame_cb"), 1);
     EQ(rt_orig(c, "NoExiste"), 0);
     EQ(hle_bind_orig(c, "NoExiste"), 0);
     irq_set_vsync_callback(0);
@@ -265,11 +265,11 @@ static void t_setjmp(Cpu *c) {
     gat = 0x80020300;
     gemit(ADDIU(SP, SP, -16)); gemit(SW(RA, SP, 0));
     gemit(LUI(A0, 0x8004));                      /* buf = 0x80040000 */
-    gemit(JAL(a_setjmp)); gemit(ADDIU(S0, 0, 0x1234));   /* slot: s0 = 0x1234 antes de guardar */
+    gemit(JAL(a_jsave)); gemit(ADDIU(S0, 0, 0x1234));   /* slot: s0 = 0x1234 antes de guardar */
     gemit(BNE(V0, 0, 7)); gemit(NOP);            /* v0 != 0 -> después */
     gemit(ADDIU(T0, T0, 1));                     /* primera pasada */
     gemit(ADDIU(S0, 0, 0x9999));
-    gemit(LUI(A0, 0x8004)); gemit(JAL(a_longjmp)); gemit(ADDIU(A1, 0, 5));
+    gemit(LUI(A0, 0x8004)); gemit(JAL(a_jrest)); gemit(ADDIU(A1, 0, 5));
     gemit(NOP);                                  /* no se ejecuta */
     gemit(0x8FBF0000u); gemit(ADDIU(SP, SP, 16)); gemit(JR_RA); gemit(NOP);
     reset(c);
@@ -291,13 +291,13 @@ static void t_fixed(Cpu *c) {
     int n = hle_bind(json, jn, BASE, a_end - BASE, BASE);
     EQ(n, 5);
     EQ(hle_bind_missing(), hle_table_count - 5 - 1);   /* vrcam_view no se busca por firma */
-    EQ(hle_bind_fixed("vrcam_view", a_VSync + 4 * 3), 0);
-    EQ(hle_bind_addr("vrcam_view"), a_VSync + 4 * 3);
-    EQ(hle_bind_lookup(a_VSync + 4 * 3) != NULL, 1);
-    EQ(hle_bind_is(a_VSync + 4 * 3), 1);
-    EQ(hle_bind_fixed("vrcam_view", a_VSync + 4 * 3), -1);   /* ya ocupada */
-    EQ(hle_bind_fixed("no_existe", a_VSync + 8), -1);        /* nombre fuera de hle_table */
-    EQ(hle_bind_fixed("vrcam_trans", a_VSync + 2), -1);      /* no alineada */
+    EQ(hle_bind_fixed("vrcam_view", a_fw + 4 * 3), 0);
+    EQ(hle_bind_addr("vrcam_view"), a_fw + 4 * 3);
+    EQ(hle_bind_lookup(a_fw + 4 * 3) != NULL, 1);
+    EQ(hle_bind_is(a_fw + 4 * 3), 1);
+    EQ(hle_bind_fixed("vrcam_view", a_fw + 4 * 3), -1);   /* ya ocupada */
+    EQ(hle_bind_fixed("no_existe", a_fw + 8), -1);        /* nombre fuera de hle_table */
+    EQ(hle_bind_fixed("vrcam_trans", a_fw + 2), -1);      /* no alineada */
     EQ(hle_bind_fixed("vrcam_trans", 0x80000000u), -1);      /* fuera de la RAM útil */
     EQ(hle_bind_fixed("vrcam_trans", 0x80200000u), -1);
     /* el sustituto débil delega en el original: hle_bind_orig ejecuta el código interpretado de esa dirección */

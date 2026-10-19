@@ -1,4 +1,4 @@
-/* Kernels de VRAM PS1 (R16Uint 1024x512) del renderer VR: relleno, subida y copia. SIN COMPILAR (ver vr_scene.metal).
+/* Kernels de VRAM original (R16Uint 1024x512) del renderer VR: relleno, subida y copia. SIN COMPILAR (ver vr_scene.metal).
  * Se ejecutan en orden de la lista de captura, en la misma cola que los pases de render. */
 #include <metal_stdlib>
 #include "vr_types.h"

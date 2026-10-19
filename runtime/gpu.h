@@ -1,5 +1,5 @@
 #pragma once
-/* GPU PS1: rasterizador software de referencia (oráculo del renderer Metal/VR). */
+/* GPU original: rasterizador software de referencia (oráculo del renderer Metal/VR). */
 #include <stdint.h>
 
 #define GPU_VRAM_W 1024
@@ -15,7 +15,7 @@ uint32_t gpu_read(void);
 uint32_t gpu_stat(void);
 /* DMA canal 2 (0x1F8010A0 MADR, A4 BCR, A8 CHCR): ejecutar al escribir CHCR con bit 24. */
 void gpu_dma2(uint32_t madr, uint32_t bcr, uint32_t chcr);
-/* Recorre una lista enlazada de paquetes (modo lista del DMA / DrawOTag). */
+/* Recorre una lista enlazada de paquetes (modo lista del DMA / gfx_list). */
 void gpu_draw_list(uint32_t addr);
 
 typedef struct {
@@ -38,12 +38,12 @@ void gpu_dump_ppm(const char *path, int full_vram);
  * modifica: la captura es un espectador. Apagada (gpu_capture_enable(0)) el coste es un `if` por comando.
  *
  * Cierre de frame (punto elegido): el juego dibuja en un búfer y lo muestra con un cambio de dirección
- * de display (GP1(05h), p.ej. PutDispEnv tras VSync). Lo dibujado desde el cierre anterior hasta ese GP1(05h)
+ * de display (GP1(05h), p.ej. gfx_put_disp tras frame_wait). Lo dibujado desde el cierre anterior hasta ese GP1(05h)
  * es exactamente el frame que acaba de pasar a mostrarse, así que la lista se cierra ahí. Si un juego no
  * alterna búferes, gpu_capture_vblank() (a llamar desde el manejador de VBlank del host) cierra la lista tras
  * GPU_CAP_VB_FALLBACK VBlanks seguidos sin alternancia. El cierre se difiere si ocurre en mitad de una subida
  * CPU->VRAM. GpuDrawList.disp se refresca durante la ráfaga de GP1 (modo/rango vertical se escriben
- * después de GP1(05h) en PutDispEnv).
+ * después de GP1(05h) en gfx_put_disp).
  *
  * Los eventos de VRAM van intercalados en el mismo orden que las primitivas: las texturas (y CLUTs) cambian
  * dentro del frame, el consumidor debe aplicarlos en secuencia. Las listas son consecutivas: aplicar TODAS

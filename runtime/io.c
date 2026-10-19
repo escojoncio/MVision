@@ -1,4 +1,4 @@
-/* Registros de E/S PS1 (0x1F801000-0x1F802FFF): interrupciones, DMA, temporizadores, SIO y
+/* Registros de E/S original (0x1F801000-0x1F802FFF): interrupciones, DMA, temporizadores, SIO y
  * reparto hacia GPU/CD/SPU/MDEC mediante ganchos débiles que implementan otros módulos.
  * El reloj es virtual y dirigido por eventos: cada sondeo RT_POLL del código recompilado consume
  * SYS_POLL_CYC ciclos, cada lectura de E/S 64, y el VBlank (50 Hz PAL) y las IRQ de temporizadores se
@@ -46,7 +46,7 @@ void sys_irq_enable(int bit, int on) {
 uint32_t sys_vblank_count(void) { return frame_no; }
 uint32_t sys_hcount(void) { return (uint32_t)(clk * lines_per_frame() / cycles_per_frame()) & 0xFFFF; }
 
-static inline uint32_t off_of(uint32_t a) { return (a & 0x1FFFFFFFu) - PSX_IO; }
+static inline uint32_t off_of(uint32_t a) { return (a & 0x1FFFFFFFu) - EMU_IO; }
 
 static uint32_t plain_read(uint32_t a, int size) {
     uint32_t o = off_of(a);
@@ -83,9 +83,9 @@ static uint32_t dma_words(uint32_t bcr, uint32_t chcr) {
 
 /* Puntero host a RAM con recorte al final de los 2 MB. */
 static uint32_t *ram_words(uint32_t madr, uint32_t *n) {
-    uint32_t a = madr & 0x1FFFFC, max = (PSX_RAM_SIZE - a) / 4;
+    uint32_t a = madr & 0x1FFFFC, max = (EMU_RAM_SIZE - a) / 4;
     if (*n > max) *n = max;
-    return (uint32_t *)&psx_ram[a];
+    return (uint32_t *)&emu_ram[a];
 }
 
 static void spu_dma_ch(uint32_t m, uint32_t b, uint32_t ch) {
@@ -138,7 +138,7 @@ static void dma_otc(uint32_t madr, uint32_t bcr) {
     uint32_t a = madr & 0x1FFFFC;
     for (uint32_t i = 0; i < n; i++, a = (a - 4) & 0x1FFFFC) {
         uint32_t v = i == n - 1 ? 0x00FFFFFFu : ((a - 4) & 0x1FFFFC);
-        memcpy(&psx_ram[a], &v, 4);
+        memcpy(&emu_ram[a], &v, 4);
     }
 }
 
@@ -153,7 +153,7 @@ static void dma_inval(int ch, uint32_t m, uint32_t b, uint32_t c) {
     case 6: {                                                          /* OTC: n palabras hacia atrás desde madr */
         n = b & 0xFFFF ? b & 0xFFFF : 0x10000;
         uint32_t back = (n - 1) * 4;
-        if (back > a) { rt_code_invalidate(0, a + 4); rt_code_invalidate(PSX_RAM_SIZE - (back - a), back - a); }
+        if (back > a) { rt_code_invalidate(0, a + 4); rt_code_invalidate(EMU_RAM_SIZE - (back - a), back - a); }
         else rt_code_invalidate(a - back, back + 4);
         return;
     }

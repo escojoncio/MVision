@@ -1,4 +1,4 @@
-/* GPU PS1 por software: VRAM 1024x512x16, comandos GP0/GP1, DMA canal 2 y HLE de libgpu.
+/* GPU original por software: VRAM 1024x512x16, comandos GP0/GP1, DMA canal 2 y HLE de la librería de gráficos.
  * Escrito a partir de la documentación pública del hardware. Sirve de referencia (oráculo)
  * para el renderer Metal: prioriza exactitud y claridad sobre velocidad. */
 #include <math.h>
@@ -552,7 +552,7 @@ static void cap_display_start_changed(void) {
     }
 }
 
-/* GP1(00h)/ResetGraph: puede llegar a mitad de una subida (el estado se anula) y devuelve la dirección de
+/* GP1(00h)/gfx_reset: puede llegar a mitad de una subida (el estado se anula) y devuelve la dirección de
  * display a 0 sin pasar por GP1(05h). */
 static void cap_on_reset(void) {
     if (!cap.on) return;
@@ -952,7 +952,7 @@ void gpu_get_display(GpuDisplay *d) {
 /* ---------------- DMA canal 2 y listas enlazadas ---------------- */
 static inline uint32_t ram32(uint32_t a) {
     uint32_t v;
-    memcpy(&v, &psx_ram[a & 0x1FFFFC], 4);
+    memcpy(&v, &emu_ram[a & 0x1FFFFC], 4);
     return v;
 }
 
@@ -976,7 +976,7 @@ void gpu_dma2(uint32_t madr, uint32_t bcr, uint32_t chcr) {
         uint32_t words = (chcr >> 9) & 3 ? (bcr & 0xFFFF) * (bcr >> 16) : (bcr & 0xFFFF ? bcr & 0xFFFF : 0x10000);
         for (uint32_t i = 0; i < words; i++, a += 4) {
             if (chcr & 1) gpu_gp0(ram32(a));
-            else { uint32_t v = gpu_read(); memcpy(&psx_ram[a & 0x1FFFFC], &v, 4); }
+            else { uint32_t v = gpu_read(); memcpy(&emu_ram[a & 0x1FFFFC], &v, 4); }
         }
         break;
     }
@@ -1014,14 +1014,14 @@ void gpu_dump_ppm(const char *path, int full) {
     fclose(f);
 }
 
-/* =================== HLE de libgpu =================== */
+/* =================== HLE de la librería de gráficos =================== */
 #define V0 c->r[2]
 #define A0 c->r[4]
 #define A1 c->r[5]
 #define A2 c->r[6]
 #define A3 c->r[7]
 
-static uint32_t drawsync_cb;
+static uint32_t gfxsync_cb;
 static int in_cb;
 static int graph_debug;
 
@@ -1029,14 +1029,14 @@ static int16_t rd16(Cpu *c, uint32_t a) { return (int16_t)mem_r16(c, a); }
 
 /* Callback de fin de dibujo: con GPU síncrona se invoca al terminar cada operación encolable. */
 static void done(Cpu *c) {
-    if (drawsync_cb && !in_cb) {
+    if (gfxsync_cb && !in_cb) {
         in_cb = 1;
-        hle_invoke(c, drawsync_cb, 0);
+        hle_invoke(c, gfxsync_cb, 0);
         in_cb = 0;
     }
 }
 
-void hle_ResetGraph(Cpu *c) {
+void hle_gfx_reset(Cpu *c) {
     int mode = A0 & 7;
     if (mode == 0 || mode == 3 || mode == 5) {
         gpu_reset();
@@ -1044,29 +1044,29 @@ void hle_ResetGraph(Cpu *c) {
     } else {
         gpu_gp1(0x01000000);
     }
-    if (mode != 3) drawsync_cb = 0;
-    /* El estado interno de libgpu (tipo de GPU, tamaño máximo de VRAM que usan SetDrawEnv/SetDefDrawEnv
-     * para recortar) lo inicializa el ResetGraph original: se ejecuta tras la parte de hardware. */
+    if (mode != 3) gfxsync_cb = 0;
+    /* El estado interno de la librería de gráficos (tipo de GPU, tamaño máximo de VRAM que usan ajustes de entorno de dibujo
+     * para recortar) lo inicializa el gfx_reset original: se ejecuta tras la parte de hardware. */
     if (mode == 0 || mode == 3 || mode == 5) {
-        uint32_t keep = drawsync_cb;
-        rt_orig(c, "ResetGraph");
-        drawsync_cb = keep;
+        uint32_t keep = gfxsync_cb;
+        rt_orig(c, "gfx_reset");
+        gfxsync_cb = keep;
     }
     V0 = 0;
 }
-void hle_SetGraphDebug(Cpu *c) { V0 = graph_debug; graph_debug = A0; }
-void hle_SetGraphQueue(Cpu *c) { V0 = 0; }
-void hle_GetODE(Cpu *c) { V0 = gpu_stat() >> 31; }
-void hle_DrawSync(Cpu *c) { V0 = 0; } /* cola siempre vacía */
-void hle_DrawSyncCallback(Cpu *c) { V0 = drawsync_cb; drawsync_cb = A0; }
-void hle_SetDispMask(Cpu *c) { gpu_gp1(0x03000000 | (A0 ? 0 : 1)); V0 = 0; }
+void hle_gfx_debug(Cpu *c) { V0 = graph_debug; graph_debug = A0; }
+void hle_gfx_queue(Cpu *c) { V0 = 0; }
+void hle_gfx_field(Cpu *c) { V0 = gpu_stat() >> 31; }
+void hle_gfx_sync(Cpu *c) { V0 = 0; } /* cola siempre vacía */
+void hle_gfx_sync_cb(Cpu *c) { V0 = gfxsync_cb; gfxsync_cb = A0; }
+void hle_gfx_dispmask(Cpu *c) { gpu_gp1(0x03000000 | (A0 ? 0 : 1)); V0 = 0; }
 
 /* RECT {short x, y, w, h} */
 static void get_rect(Cpu *c, uint32_t p, int *x, int *y, int *w, int *h) {
     *x = rd16(c, p); *y = rd16(c, p + 2); *w = rd16(c, p + 4); *h = rd16(c, p + 6);
 }
 
-void hle_LoadImage(Cpu *c) {
+void hle_gfx_upload(Cpu *c) {
     int x, y, w, h;
     get_rect(c, A0, &x, &y, &w, &h);
     uint32_t src = A1;
@@ -1081,9 +1081,9 @@ void hle_LoadImage(Cpu *c) {
     V0 = 0;
     done(c);
 }
-void hle_LoadImage2(Cpu *c) { hle_LoadImage(c); }
+void hle_gfx_upload2(Cpu *c) { hle_gfx_upload(c); }
 
-void hle_StoreImage(Cpu *c) {
+void hle_gfx_download(Cpu *c) {
     int x, y, w, h;
     get_rect(c, A0, &x, &y, &w, &h);
     uint32_t dst = A1;
@@ -1098,9 +1098,9 @@ void hle_StoreImage(Cpu *c) {
     V0 = 0;
     done(c);
 }
-void hle_StoreImage2(Cpu *c) { hle_StoreImage(c); }
+void hle_gfx_download2(Cpu *c) { hle_gfx_download(c); }
 
-void hle_MoveImage(Cpu *c) {
+void hle_gfx_copy(Cpu *c) {
     int x, y, w, h;
     get_rect(c, A0, &x, &y, &w, &h);
     if (w > 0 && h > 0) {
@@ -1112,10 +1112,10 @@ void hle_MoveImage(Cpu *c) {
     V0 = 0;
     done(c);
 }
-void hle_MoveImage2(Cpu *c) { hle_MoveImage(c); }
+void hle_gfx_copy2(Cpu *c) { hle_gfx_copy(c); }
 
-/* ClearImage(RECT*, r, g, b): fill respetando solo el rectángulo (sin clip ni offset). */
-void hle_ClearImage(Cpu *c) {
+/* gfx_clear(RECT*, r, g, b): fill respetando solo el rectángulo (sin clip ni offset). */
+void hle_gfx_clear(Cpu *c) {
     int x, y, w, h;
     get_rect(c, A0, &x, &y, &w, &h);
     uint32_t col = (A1 & 255) | (A2 & 255) << 8 | (A3 & 255) << 16;
@@ -1125,34 +1125,34 @@ void hle_ClearImage(Cpu *c) {
     V0 = 0;
     done(c);
 }
-void hle_ClearImage2(Cpu *c) { hle_ClearImage(c); }
+void hle_gfx_clear2(Cpu *c) { hle_gfx_clear(c); }
 
 /* OT: entradas = puntero de 24 bits a la siguiente (longitud 0); terminador 0x00FFFFFF. */
-void hle_ClearOTag(Cpu *c) {
+void hle_gfx_list_clear(Cpu *c) {
     uint32_t ot = A0, n = A1;
     for (uint32_t i = 0; i + 1 < n; i++) mem_w32(c, ot + 4 * i, (ot + 4 * (i + 1)) & 0xFFFFFF);
     if (n) mem_w32(c, ot + 4 * (n - 1), 0x00FFFFFF);
     V0 = ot;
 }
-void hle_ClearOTagR(Cpu *c) {
+void hle_gfx_list_clear_r(Cpu *c) {
     uint32_t ot = A0, n = A1;
     for (uint32_t i = 1; i < n; i++) mem_w32(c, ot + 4 * i, (ot + 4 * (i - 1)) & 0xFFFFFF);
     if (n) mem_w32(c, ot, 0x00FFFFFF);
     V0 = ot;
 }
 
-void hle_DrawOTag(Cpu *c) { gpu_draw_list(A0); V0 = 0; done(c); }
-void hle_DrawOTag2(Cpu *c) { hle_DrawOTag(c); }
+void hle_gfx_list(Cpu *c) { gpu_draw_list(A0); V0 = 0; done(c); }
+void hle_gfx_list2(Cpu *c) { hle_gfx_list(c); }
 
-/* DrawPrim(p): un único paquete (cabecera con longitud). */
-void hle_DrawPrim(Cpu *c) {
+/* gfx_prim(p): un único paquete (cabecera con longitud). */
+void hle_gfx_prim(Cpu *c) {
     uint32_t h = mem_r32(c, A0);
     unsigned n = h >> 24;
     for (unsigned i = 0; i < n; i++) gpu_gp0(mem_r32(c, A0 + 4 + 4 * i));
     V0 = 0;
 }
 
-/* DRAWENV: clip RECT @0, ofs[2] @8, tw RECT @12, tpage @20, dtd @22, dfe @23, isbg @24,
+/* entorno de dibujo: clip RECT @0, ofs[2] @8, tw RECT @12, tpage @20, dtd @22, dfe @23, isbg @24,
  * r0 g0 b0 @25..27, dr_env @28 (64 B). Total 92 B. */
 static void put_drawenv(Cpu *c, uint32_t e) {
     int x, y, w, h;
@@ -1181,11 +1181,11 @@ static void put_drawenv(Cpu *c, uint32_t e) {
     }
 }
 
-void hle_PutDrawEnv(Cpu *c) { put_drawenv(c, A0); V0 = A0; done(c); }
-void hle_DrawOTagEnv(Cpu *c) { uint32_t p = A0; put_drawenv(c, A1); gpu_draw_list(p); V0 = 0; done(c); }
+void hle_gfx_put_draw(Cpu *c) { put_drawenv(c, A0); V0 = A0; done(c); }
+void hle_gfx_list_env(Cpu *c) { uint32_t p = A0; put_drawenv(c, A1); gpu_draw_list(p); V0 = 0; done(c); }
 
-/* DISPENV: disp RECT @0, screen RECT @8, isinter @16, isrgb24 @17. */
-void hle_PutDispEnv(Cpu *c) {
+/* entorno de display: disp RECT @0, screen RECT @8, isinter @16, isrgb24 @17. */
+void hle_gfx_put_disp(Cpu *c) {
     uint32_t e = A0;
     int x, y, w, h, sx, sy, sw, sh;
     get_rect(c, e, &x, &y, &w, &h);

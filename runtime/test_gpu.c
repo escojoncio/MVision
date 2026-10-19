@@ -7,7 +7,7 @@
 #include "hle.h"
 
 /* Stubs mínimos del runtime para enlazar gpu.c aislado. */
-uint8_t psx_ram[PSX_RAM_SIZE];
+uint8_t emu_ram[EMU_RAM_SIZE];
 uint32_t hle_frame_count(void) { return 0; }
 /* gpu.c enlaza con la sombra flotante de la GTE (gte.c); aqui no hay GTE */
 void gte_hp_enable(int on) { (void)on; }
@@ -15,13 +15,13 @@ void gte_hp_frame(void) {}
 int gte_hp_lookup(int sx, int sy, GpuHpInfo *o) { (void)sx; (void)sy; (void)o; return 0; }
 int gte_hp_resolve(int n, const int *sx, const int *sy, GpuHpInfo *o, uint8_t *ok) { (void)n; (void)sx; (void)sy; (void)o; (void)ok; return 0; }
 void hle_invoke(Cpu *c, uint32_t fn, uint32_t arg) { (void)c; (void)fn; (void)arg; }
-uint8_t mem_r8(Cpu *c, uint32_t a) { (void)c; return psx_ram[a & 0x1FFFFF]; }
-uint16_t mem_r16(Cpu *c, uint32_t a) { (void)c; uint16_t v; memcpy(&v, &psx_ram[a & 0x1FFFFE], 2); return v; }
-uint32_t mem_r32(Cpu *c, uint32_t a) { (void)c; uint32_t v; memcpy(&v, &psx_ram[a & 0x1FFFFC], 4); return v; }
-void mem_w32(Cpu *c, uint32_t a, uint32_t v) { (void)c; memcpy(&psx_ram[a & 0x1FFFFC], &v, 4); }
+uint8_t mem_r8(Cpu *c, uint32_t a) { (void)c; return emu_ram[a & 0x1FFFFF]; }
+uint16_t mem_r16(Cpu *c, uint32_t a) { (void)c; uint16_t v; memcpy(&v, &emu_ram[a & 0x1FFFFE], 2); return v; }
+uint32_t mem_r32(Cpu *c, uint32_t a) { (void)c; uint32_t v; memcpy(&v, &emu_ram[a & 0x1FFFFC], 4); return v; }
+void mem_w32(Cpu *c, uint32_t a, uint32_t v) { (void)c; memcpy(&emu_ram[a & 0x1FFFFC], &v, 4); }
 
-void hle_ClearOTagR(Cpu *c);
-void hle_DrawOTag(Cpu *c);
+void hle_gfx_list_clear_r(Cpu *c);
+void hle_gfx_list(Cpu *c);
 static int fails;
 #define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("FALLO: " __VA_ARGS__); printf("\n"); } } while (0)
 static uint16_t px(int x, int y) { return gpu_vram[y][x]; }
@@ -96,14 +96,14 @@ int main(void) {
     uint32_t r = gpu_read();
     CHECK((r & 0xFFFF) == 0x001F, "lectura %08x", r);
 
-    /* OT enlazada en RAM: ClearOTagR + paquete tile */
+    /* OT enlazada en RAM: gfx_list_clear_r + paquete tile */
     Cpu c = {0};
-    c.r[4] = 0x1000; c.r[5] = 4; hle_ClearOTagR(&c);
+    c.r[4] = 0x1000; c.r[5] = 4; hle_gfx_list_clear_r(&c);
     uint32_t pk = 0x2000;
     mem_w32(&c, pk, 3u << 24 | (mem_r32(&c, 0x1000 + 4 * 2) & 0xFFFFFF));
     mem_w32(&c, 0x1000 + 8, pk);
     mem_w32(&c, pk + 4, 0x6000FFFF); mem_w32(&c, pk + 8, xy(400, 10)); mem_w32(&c, pk + 12, xy(8, 8));
-    c.r[4] = 0x1000 + 12; hle_DrawOTag(&c);
+    c.r[4] = 0x1000 + 12; hle_gfx_list(&c);
     CHECK(px(401, 11) == 0x03FF, "OT tile %04x", px(401, 11));
 
     /* dithering gouraud: debe variar en una zona de color constante intermedio */

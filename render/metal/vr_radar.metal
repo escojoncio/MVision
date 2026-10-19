@@ -1,6 +1,6 @@
 /* Quad del radar de muñeca (dispositivo en el antebrazo izquierdo). SIN COMPILAR (escrito sin toolchain Metal): revisar en la
  * primera compilación. Lo dibuja app/Sources/RadarPanel.swift dentro del pase de escena (MSAA, Z invertida con greaterEqual,
- * amplificación de vértices si layered). La textura del radar (rgba8, valores de la PS1, no premultiplicada) la rellena el propio
+ * amplificación de vértices si layered). La textura del radar (rgba8, valores del original, no premultiplicada) la rellena el propio
  * RadarPanel con las funciones de vr_scene.metal (vr_vs_hud / vr_fs_scene); aquí solo se muestrea.
  *
  * Geometría: un quad de 4 vértices (triangle strip) por llamada, generado en el shader a partir de RadarQuadU; sin búfer de vértices.
@@ -59,7 +59,7 @@ vertex RadarVOut vr_vs_radar_amp(uint vid [[vertex_id]], ushort amp [[amplificat
 inline float radar_lin1(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
 
 /* Pantalla: textura del radar x brillo; marco: color liso. La textura la muestrea el sampler pasado (nearest = fiel a los píxeles de la
- * PS1, linear con mips = más suave de lejos; lo elige RadarPanel.smooth). */
+ * original, linear con mips = más suave de lejos; lo elige RadarPanel.smooth). */
 fragment float4 vr_fs_radar(RadarVOut in [[stage_in]], constant RadarQuadU &q [[buffer(3)]],
                             texture2d<float, access::sample> tex [[texture(0)]], sampler smp [[sampler(0)]]) {
     float3 rgb;

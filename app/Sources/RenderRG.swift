@@ -14,10 +14,10 @@ import Foundation
 // intermedia propia (`fxTex`, mismo formato/forma que el drawable) y un pase de post-proceso por ojo (`vr_fs_post*`) la lee y escribe el drawable con la onda
 // vertical por fila (dv) y el tinte; el panel 2D (XRFinalPass) se dibuja después, sin distorsionar. El radar y el arma, que van dentro del pase de escena, sí se distorsionan/tintan.
 
-final class PS1Renderer {
+final class RGRenderer {
     // MARK: API pública
     let device: MTLDevice
-    /// Panel 2D: RGBA8 NO premultiplicado (gamma, valores de la PS1). Se redibuja solo cuando llega una escena nueva.
+    /// Panel 2D: RGBA8 NO premultiplicado (gamma, valores del original). Se redibuja solo cuando llega una escena nueva.
     private(set) var hudTexture: MTLTexture?
     /// Vista sRGB de hudTexture por si el pase que la muestrea escribe en un destino lineal (decodifica al muestrear).
     private(set) var hudTextureSRGB: MTLTexture?
@@ -155,32 +155,32 @@ final class PS1Renderer {
         }
         let lib0 = device.makeDefaultLibrary()
         library = lib0
-        if lib0 == nil { print("[PS1Renderer] sin biblioteca Metal por defecto: faltan vr_*.metal en el target") }
+        if lib0 == nil { print("[RGRenderer] sin biblioteca Metal por defecto: faltan vr_*.metal en el target") }
         if MemoryLayout<VrVtx>.stride != MemoryLayout<VrGpuVtx>.stride {
-            print("[PS1Renderer] VrVtx (\(MemoryLayout<VrVtx>.stride) B) != VrGpuVtx: layout incompatible")
+            print("[RGRenderer] VrVtx (\(MemoryLayout<VrVtx>.stride) B) != VrGpuVtx: layout incompatible")
         }
 
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Uint, width: 1024, height: 512, mipmapped: false)
         td.usage = [.shaderRead, .shaderWrite]
         td.storageMode = .private
         vram = device.makeTexture(descriptor: td)!
-        vram.label = "PS1 VRAM"
+        vram.label = "VRAM"
 
         let hd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: hudW, height: hudH, mipmapped: false)
         hd.usage = [.renderTarget, .shaderRead, .pixelFormatView]
         hd.storageMode = .private
         hudTexture = device.makeTexture(descriptor: hd)
-        hudTexture?.label = "PS1 HUD"
+        hudTexture?.label = "HUD"
         hudTextureSRGB = hudTexture?.makeTextureView(pixelFormat: .rgba8Unorm_srgb)
         let pd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Unorm, width: hudW, height: hudH, mipmapped: false)
         pd.usage = [.renderTarget, .shaderRead]
         pd.storageMode = .private
         hudPre = device.makeTexture(descriptor: pd)
-        hudPre?.label = "PS1 HUD premultiplicado (unorm: satura a 0..1 como la PS1)"
+        hudPre?.label = "HUD premultiplicado (unorm: satura a 0..1 como el original)"
 
         if let lib = lib0 {
             func cp(_ n: String) -> MTLComputePipelineState? {
-                guard let f = lib.makeFunction(name: n) else { print("[PS1Renderer] falta \(n)"); return nil }
+                guard let f = lib.makeFunction(name: n) else { print("[RGRenderer] falta \(n)"); return nil }
                 return try? device.makeComputePipelineState(function: f)
             }
             csFill = cp("vr_k_fill"); csUpload = cp("vr_k_upload"); csCopy = cp("vr_k_copy")
@@ -211,7 +211,7 @@ final class PS1Renderer {
             let vsName = k.hud ? "vr_vs_hud" : (k.layered ? "vr_vs_scene_amp" : "vr_vs_scene")
             guard let vs = lib.makeFunction(name: vsName) else { return nil }
             let d = MTLRenderPipelineDescriptor()
-            d.label = "PS1 \(vsName) pass\(k.pass) blend\(k.mode)"
+            d.label = "\(vsName) pass\(k.pass) blend\(k.mode)"
             d.vertexFunction = vs
             d.fragmentFunction = fs
             d.rasterSampleCount = k.samples
@@ -225,7 +225,7 @@ final class PS1Renderer {
             }
             if k.mode >= 0 {
                 ca.isBlendingEnabled = true
-                // Los 4 modos de la PS1 (B = destino, F = fragmento). blendColor = 0,5 (modo 0) o 0,25 (modo 3).
+                // Los 4 modos del original (B = destino, F = fragmento). blendColor = 0,5 (modo 0) o 0,25 (modo 3).
                 switch k.mode {
                 case 0: // 0,5B + 0,5F  (alfa: 0,5·1 + 0,5·Ad -> cobertura de panel premultiplicado)
                     ca.rgbBlendOperation = .add
@@ -254,7 +254,7 @@ final class PS1Renderer {
             return p
         } catch {
             let key = "\(k)"
-            if !failed.contains(key) { failed.insert(key); print("[PS1Renderer] pipeline: \(error)") }
+            if !failed.contains(key) { failed.insert(key); print("[RGRenderer] pipeline: \(error)") }
             return nil
         }
     }
@@ -264,7 +264,7 @@ final class PS1Renderer {
         guard let lib = library, let vs = lib.makeFunction(name: "vr_vs_full"),
               let fs = lib.makeFunction(name: "vr_fs_unpremul") else { return nil }
         let d = MTLRenderPipelineDescriptor()
-        d.label = "PS1 HUD sin premultiplicar"
+        d.label = "HUD sin premultiplicar"
         d.vertexFunction = vs; d.fragmentFunction = fs
         d.colorAttachments[0].pixelFormat = .rgba8Unorm
         pipeFull = try? device.makeRenderPipelineState(descriptor: d)
@@ -277,7 +277,7 @@ final class PS1Renderer {
         if need > fs.cap {
             let cap = max(need, fs.cap * 2, 1 << 20)
             guard let nb = device.makeBuffer(length: cap, options: [.storageModeShared, .cpuCacheModeWriteCombined]) else { return false }
-            nb.label = "PS1 subidas VRAM"
+            nb.label = "subidas VRAM"
             if let ob = fs.buf, fs.used > 0 { memcpy(nb.contents(), ob.contents(), fs.used) }
             fs.buf = nb; fs.cap = cap
         }
@@ -434,7 +434,7 @@ final class PS1Renderer {
         if bytes > slot.cap {
             let cap = max(bytes, slot.cap * 2, 1 << 20)
             slot.buf = device.makeBuffer(length: cap, options: [.storageModeShared, .cpuCacheModeWriteCombined])
-            slot.buf?.label = "PS1 vértices VR"
+            slot.buf?.label = "vértices VR"
             slot.cap = slot.buf == nil ? 0 : cap
         }
         batches.removeAll(keepingCapacity: true)
@@ -822,7 +822,7 @@ final class PS1Renderer {
         pd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         pd.colorAttachments[0].storeAction = .store
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pd) else { return }
-        enc.label = "PS1 HUD"
+        enc.label = "HUD"
         defer { enc.endEncoding() }
         enc.setCullMode(.none)
         enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(hudW), height: Double(hudH), znear: 0, zfar: 1))
@@ -861,7 +861,7 @@ final class PS1Renderer {
         p2.colorAttachments[0].loadAction = .dontCare
         p2.colorAttachments[0].storeAction = .store
         guard let enc = cb.makeRenderCommandEncoder(descriptor: p2) else { return }
-        enc.label = "PS1 HUD sin premultiplicar"
+        enc.label = "HUD sin premultiplicar"
         if let fp = fullPipeline() {
             enc.setRenderPipelineState(fp)
             enc.setFragmentTexture(pre, index: 0)
@@ -903,7 +903,7 @@ final class PS1Renderer {
         if amplify > 0 { pd.renderTargetArrayLength = amplify }
         if let m = rasterizationRateMap, !isAux { pd.rasterizationRateMap = m }
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pd) else { return }
-        enc.label = isAux ? "PS1 escena (segunda vista)" : amplify > 0 ? "PS1 escena (estéreo, amplificación)" : "PS1 escena (ojo \(viewIndex))"
+        enc.label = isAux ? "escena (segunda vista)" : amplify > 0 ? "escena (estéreo, amplificación)" : "escena (ojo \(viewIndex))"
         defer { enc.endEncoding() }
         // Los defer corren al revés: este va ANTES de cerrar el codificador, tras dibujar el 3D (también si el guard de más abajo
         // retorna). Solo en el último segmento (el que resuelve el MSAA): el quad del radar y el arma se prueban contra la profundidad del 3D.

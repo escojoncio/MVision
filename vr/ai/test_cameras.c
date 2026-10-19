@@ -475,16 +475,25 @@ static uint8_t *slurp(const char *path, long *n) {
     if (!b || fread(b, 1, (size_t)*n, f) != (size_t)*n) { fclose(f); free(b); return NULL; }
     fclose(f); return b;
 }
-static const struct { const char *ov; uint32_t act; VrcFamily fam; } REAL[] = {
-    {"s01a", 0x800d77a0u, VRC_FAM_CAMERA}, {"s02a", 0x800d6becu, VRC_FAM_CAMERA}, {"s02b", 0x800d6e28u, VRC_FAM_CAMERA},
-    {"s02c", 0x800d6be0u, VRC_FAM_CAMERA}, {"s02d", 0x800d6de4u, VRC_FAM_CAMERA}, {"s02e", 0x800d6be0u, VRC_FAM_CAMERA},
-    {"s06a", 0x800d6ac0u, VRC_FAM_CAMERA}, {"s16c", 0x800d4558u, VRC_FAM_CAMERA}, {"s16d", 0x800d4974u, VRC_FAM_CAMERA},
-    {"d16e", 0x800c5a98u, VRC_FAM_CAMERA}, {"vr09", 0x800d5368u, VRC_FAM_CAMERA}, {"vr10", 0x800d5490u, VRC_FAM_CAMERA},
-    {"s11a", 0x800c66d0u, VRC_FAM_SIMPLE}, {"s19a", 0x800c6fc0u, VRC_FAM_SIMPLE},
-    {"s04c", 0x800c9464u, VRC_FAM_GUN}, {"s04br", 0x800cb690u, VRC_FAM_GUN}, {"s10ar", 0x800d34e4u, VRC_FAM_GUN}, {"s12b", 0x800c8eacu, VRC_FAM_GUN}, {"s12c", 0x800c8ea0u, VRC_FAM_GUN},
-    {"s03a", 0x800cd2f4u, VRC_FAM_GUN}, {"s03c", 0x800d24f4u, VRC_FAM_GUN}, {"s03e", 0x800c93a4u, VRC_FAM_GUN}, {"s04b", 0x800cb690u, VRC_FAM_GUN},
-    {"s05a", 0x800cac74u, VRC_FAM_GUN}, {"s08a", 0x800cbd78u, VRC_FAM_GUN}, {"s10a", 0x800d34e4u, VRC_FAM_GUN}, {"s11c", 0x800c8664u, VRC_FAM_GUN},
-    {"s12a", 0x800cb960u, VRC_FAM_GUN}, {"s13a", 0x800db804u, VRC_FAM_GUN}, {"s14e", 0x800d1c24u, VRC_FAM_GUN}, {"s15b", 0x800c6d10u, VRC_FAM_GUN}, {"s16a", 0x800c7b60u, VRC_FAM_GUN},
+/* Zonas conocidas: la clave es el hash FNV-1a de 32 bits del nombre del fichero local de la overlay (sin ".bin"), de modo que
+ * el repo no lleva nombres de zonas. act = actor esperado; fam = familia con la que debe clasificarse. */
+static uint32_t name_hash(const char *s) {
+    uint32_t h = 0x811c9dc5u;
+    for (; *s; s++) h = (h ^ (uint8_t)*s) * 0x01000193u;
+    return h;
+}
+static const struct { uint32_t key; uint32_t act; VrcFamily fam; } REAL[] = {
+    {0xc8cbfd6cu, 0x800d77a0u, VRC_FAM_CAMERA}, {0xd8c3c7d7u, 0x800d6becu, VRC_FAM_CAMERA}, {0xd9c3c96au, 0x800d6e28u, VRC_FAM_CAMERA},
+    {0xdac3cafdu, 0x800d6be0u, VRC_FAM_CAMERA}, {0xd3c3bff8u, 0x800d6de4u, VRC_FAM_CAMERA}, {0xd4c3c18bu, 0x800d6be0u, VRC_FAM_CAMERA},
+    {0xc0baa7b3u, 0x800d6ac0u, VRC_FAM_CAMERA}, {0x48abd10au, 0x800d4558u, VRC_FAM_CAMERA}, {0x43abc92bu, 0x800d4974u, VRC_FAM_CAMERA},
+    {0x5bfdb10fu, 0x800c5a98u, VRC_FAM_CAMERA}, {0x0eb467ceu, 0x800d5368u, VRC_FAM_CAMERA}, {0x81b14b40u, 0x800d5490u, VRC_FAM_CAMERA},
+    {0x3e9a782bu, 0x800c66d0u, VRC_FAM_SIMPLE}, {0x4e8709a3u, 0x800c6fc0u, VRC_FAM_SIMPLE}, {0xcabf349fu, 0x800c9464u, VRC_FAM_GUN},
+    {0x15fe0f5au, 0x800cb690u, VRC_FAM_GUN}, {0x590c6914u, 0x800d34e4u, VRC_FAM_GUN}, {0x31a2b279u, 0x800c8eacu, VRC_FAM_GUN},
+    {0x30a2b0e6u, 0x800c8ea0u, VRC_FAM_GUN}, {0xfcc63f1au, 0x800cd2f4u, VRC_FAM_GUN}, {0xfac63bf4u, 0x800d24f4u, VRC_FAM_GUN},
+    {0xf8c638ceu, 0x800c93a4u, VRC_FAM_GUN}, {0xc9bf330cu, 0x800cb690u, VRC_FAM_GUN}, {0xf0c1af08u, 0x800cac74u, VRC_FAM_GUN},
+    {0xd4dd5971u, 0x800cbd78u, VRC_FAM_GUN}, {0x629cef6eu, 0x800d34e4u, VRC_FAM_GUN}, {0x409a7b51u, 0x800c8664u, VRC_FAM_GUN},
+    {0x2ea2adc0u, 0x800cb960u, VRC_FAM_GUN}, {0x4aa09b3du, 0x800db804u, VRC_FAM_GUN}, {0x36a73786u, 0x800d1c24u, VRC_FAM_GUN},
+    {0x57a52ce2u, 0x800c6d10u, VRC_FAM_GUN}, {0x46abcde4u, 0x800c7b60u, VRC_FAM_GUN},
 };
 static void t_real(const char *dir) {
     int fp = 0, found = 0, ovs = 0;
@@ -503,7 +512,7 @@ static void t_real(const char *dir) {
         memcpy(RAM + (0x800C4380u & 0x1FFFFF), b, (size_t)n);
         free(b); ovs++;
         int expect_fam = -1; uint32_t expect_act = 0;
-        for (unsigned i = 0; i < sizeof REAL / sizeof *REAL; i++) if (!strcmp(REAL[i].ov, name)) { expect_fam = REAL[i].fam; expect_act = REAL[i].act; }
+        for (unsigned i = 0; i < sizeof REAL / sizeof *REAL; i++) if (REAL[i].key == name_hash(name)) { expect_fam = REAL[i].fam; expect_act = REAL[i].act; }
         /* cada prólogo de función de la overlay: solo el actor conocido puede clasificarse como cámara */
         for (uint32_t a = 0x800C4380u; a < 0x800C4380u + (uint32_t)n; a += 4) {
             if (!vai_is_prologue(vai_r32(RAM, a))) continue;
@@ -516,7 +525,7 @@ static void t_real(const char *dir) {
                 int f = vrc_classify_actor(RAM, actor);
                 if (f >= 0) {
                     if (act == expect_act && f == expect_fam) found++;
-                    else { fp++; printf("  falso positivo en %s: %08x (fam %d)\n", name, act, f); }
+                    else { fp++; printf("  falso positivo en zona %08x: %08x (fam %d)\n", name_hash(name), act, f); }
                 }
             }
         }

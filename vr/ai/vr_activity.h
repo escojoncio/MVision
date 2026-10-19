@@ -46,7 +46,7 @@
  *      soldados a 10000-20000 unidades con clip_state 0).
  *  M5  Proyección de puntos a pantalla (0x8001c30c, llamadores EU: 0x8005dde8 la función de M4a, 0x80078124 un
  *      efecto, y la rama M4a de cada overlay, p. ej. overlay inicial 0x800cd32c): proyecta con la matriz del canal 1
- *      (@0x800B2B8C) y marca `pad`=1 en cada SVECTOR si cae en la pantalla original. La variante de un punto
+ *      (@0x800B2B8C) y marca `pad`=1 en cada VEC16 si cae en la pantalla original. La variante de un punto
  *      (0x8001c564; llamadores 0x8002d814 = orden de guion "¿en pantalla?" y 0x800659b4 = cámara de fotos) debe
  *      seguir siendo ORIGINAL: son reglas del juego ligadas a la cámara que sí se usa (foto) o a guiones.
  *  M6  Mapas/zonas: cada actor tiene un bit de mapa; el conjunto de mapas del jugador (0x800ACB9C) es el OR de
@@ -179,7 +179,7 @@ int vra_point_active(const VrActivity *a, VraClass cls, const int32_t p[3]);   /
  * conmutador de su clase está en ORIGINAL, el objeto es invisible o está fuera del grupo, o ya era != 0. */
 int vra_clip_state(const VrActivity *a, uint32_t objs, uint32_t flag, uint32_t group, int mode_in);
 VraClass vra_class_of_objs(const VrActivity *a, uint32_t objs);
-/* Marca `pad`=1 en cada punto (SVECTOR de 8 B: x,y,z,pad) que debe contar como "en pantalla" aunque la
+/* Marca `pad`=1 en cada punto (VEC16 de 8 B: x,y,z,pad) que debe contar como "en pantalla" aunque la
  * cámara original no lo vea. `pts` apunta a RAM del juego. Solo clase SOLDADO (único llamador de la proyección M5
  * en lógica). Devuelve cuántos puntos cambió de 0 a 1. */
 int vra_pointcheck_fixup(const VrActivity *a, uint8_t *ram, uint32_t pts, int n);

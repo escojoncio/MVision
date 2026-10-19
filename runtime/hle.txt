@@ -1,7 +1,7 @@
-# Funciones del SDK sustituidas por HLE (runtime/hle.c). Nombre = símbolo del mapa de firmas.
-VSync
-VSyncCallback
-ResetCallback
-InterruptCallback
-DMACallback
-longjmp
+# Funciones del SDK sustituidas por HLE (runtime/hle.c). Formato: <nombre neutro> <hash16 del símbolo del mapa de firmas>.
+frame_wait 04688b460ce0c613
+frame_cb 458b506fa61081c6
+cb_reset 6618e3e35c0c0a54
+cb_irq 9e6a5e86e878460b
+cb_dma 76efc90750b523c5
+jmp_restore db80fe1858b7298b

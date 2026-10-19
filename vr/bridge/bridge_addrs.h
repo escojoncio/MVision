@@ -1,9 +1,9 @@
-/* bridge_addrs: direcciones (RAM de PS1, KSEG0) del estado del juego en el EXE principal de la edición europea.
+/* bridge_addrs: direcciones (RAM de original, KSEG0) del estado del juego en el EXE principal de la edición europea.
  * Solo lectura. Todas son direcciones del EXE principal (no de overlays), válidas mientras el juego corre.
  * Cómo se halló cada una y su confianza: bridge_addrs.c (tabla `bridge_addr_table`).
  *
- * Convenciones: SVECTOR = {s16 x, s16 y, s16 z, s16 pad}; ángulos 4096 = vuelta completa; MATRIX = {s16 m[3][3],
- * s16 pad, s32 t[3]} (32 B, m en coma fija 1.12: 4096 = 1,0). Eje Y: el de la PS1 (el valor crece hacia abajo en
+ * Convenciones: VEC16 = {s16 x, s16 y, s16 z, s16 pad}; ángulos 4096 = vuelta completa; MAT16 = {s16 m[3][3],
+ * s16 pad, s32 t[3]} (32 B, m en coma fija 1.12: 4096 = 1,0). Eje Y: el del original (el valor crece hacia abajo en
  * el motor; la capa VR convierte). Las estructuras por actor se leen con los offsets de abajo.
  */
 #pragma once
@@ -17,10 +17,10 @@
 #define BA_GAME_STATUS      0x800AC570u /* u32  banderas globales del juego (BRIDGE_GS_*) */
 #define BA_STAGE_CODE       0x800AC568u /* char[8] código de zona actual, NUL-terminado (p. ej. "q00a") */
 #define BA_PLAYER_CTRL      0x800ACB84u /* u32  puntero al bloque de control (posición/rotación) del jugador */
-#define BA_NOISE_POS        0x800ACB88u /* SVECTOR posición del último ruido */
+#define BA_NOISE_POS        0x800ACB88u /* VEC16 posición del último ruido */
 #define BA_ALERT_MODE       0x800ACB90u /* s32  0 normal, 1 interferencia, 2 evasión, 3 alerta */
 #define BA_PLAYER_MAP       0x800ACB9Cu /* s32  máscara de mapa(s) donde está el jugador */
-#define BA_PLAYER_POS       0x800ACBA0u /* SVECTOR posición del jugador (la que usa el resto del juego) */
+#define BA_PLAYER_POS       0x800ACBA0u /* VEC16 posición del jugador (la que usa el resto del juego) */
 #define BA_ALERT_LEVEL      0x800ACBA8u /* s32  cuenta atrás de la evasión/alerta (fotogramas) */
 #define BA_PLAYER_BODY      0x800ACBB0u /* u32  puntero al objeto animado (modelo) del jugador */
 #define BA_NOISE_POWER      0x800ACBB4u /* s32  potencia del ruido */
@@ -65,33 +65,33 @@ enum {
 #define BRIDGE_N_ITEMS   24
 
 /* Bloque de control (CONTROL): offsets */
-#define BC_MOV      0x00 /* SVECTOR posición */
-#define BC_ROT      0x08 /* SVECTOR rotación (4096 = vuelta) */
+#define BC_MOV      0x00 /* VEC16 posición */
+#define BC_ROT      0x08 /* VEC16 rotación (4096 = vuelta) */
 #define BC_MAP      0x2C /* u32 puntero al mapa (su primer s32 es el índice/bit de mapa) */
 #define BC_NAME     0x30 /* u16 identificador (hash) del actor */
 #define BC_HEIGHT   0x32 /* s16 altura sobre la posición */
 #define BC_RADAR    0x3A /* u16 atributos de radar: bit0 visible, bit2 cono, bit3 todo el mapa, bits 12-15 estado */
 #define BC_CONE     0x3C /* {u16 dir, u16 dis, u16 range, u16 r} cono de visión mostrado en el radar */
-#define BC_STEP     0x44 /* SVECTOR desplazamiento del fotograma */
+#define BC_STEP     0x44 /* VEC16 desplazamiento del fotograma */
 #define BC_SIZE     0x80 /* tamaño mínimo que se exige leer */
 
 /* Blanco (TARGET) de 72 B: offsets */
 #define BT_SIZE     72
-#define BT_CLASS    0x00 /* u16 bits: 1 disponible, 2 captura, 4 daño, 8 empuje, 16 búsqueda, 32 caído, 64 C4 */
+#define BT_CLASS    0x00 /* u16 bits: 1 disponible, 2 captura, 4 daño, 8 empuje, 16 búsqueda, 32 caído, 64 explosivo adhesivo */
 #define BT_SIDE     0x02 /* u16 0 ninguno, 1 jugador, 2 enemigo, 3 ambos */
 #define BT_MAP      0x04 /* u16 máscara de mapa */
 #define BT_DAMAGED  0x06 /* u16 */
-#define BT_CENTER   0x08 /* SVECTOR centro */
-#define BT_BOX      0x10 /* SVECTOR semitamaño de la caja */
+#define BT_CENTER   0x08 /* VEC16 centro */
+#define BT_BOX      0x10 /* VEC16 semitamaño de la caja */
 #define BT_VITAL    0x26 /* s16 vida restante del blanco */
 #define BT_DAMAGE   0x28 /* s16 daño acumulado en el fotograma */
 #define BT_FAINT    0x2A /* s16 contador de aturdimiento/desmayo */
 #define BT_WEAPON   0x44 /* s32 arma que lo golpeó por última vez (-1 ninguna) */
 
 /* Cámara del juego: offsets */
-#define BCAM_POS    0x00 /* SVECTOR posición */
-#define BCAM_TARGET 0x08 /* SVECTOR objetivo */
-#define BCAM_ROT    0x10 /* SVECTOR rotación */
+#define BCAM_POS    0x00 /* VEC16 posición */
+#define BCAM_TARGET 0x08 /* VEC16 objetivo */
+#define BCAM_ROT    0x10 /* VEC16 rotación */
 #define BCAM_FLAG   0x18 /* u32 */
 #define BCAM_TRACK  0x1C /* s32 distancia de seguimiento */
 #define BCAM_ZOOM   0x20 /* s16 zoom (320 = normal) */
@@ -99,13 +99,13 @@ enum {
 #define BCAM_TYPE   0x28 /* s16 modo */
 
 /* Canal 3D del motor: offsets desde BA_VIEW_CHANNEL */
-#define BCH_EYE_INV 0x10 /* MATRIX mundo->vista (la que usa la GTE) */
-#define BCH_EYE     0x30 /* MATRIX vista->mundo: columnas = ejes de la cámara, t = posición del ojo */
+#define BCH_CAM_INV 0x10 /* MAT16 mundo->vista (la que usa la GTE) */
+#define BCH_CAM     0x30 /* MAT16 vista->mundo: columnas = ejes de la cámara, t = posición del ojo */
 #define BCH_SCREEN  0x50 /* s16 distancia de pantalla (focal en píxeles) */
 
 /* Banderas de estado global (BA_GAME_STATUS) */
 enum {
-    BRIDGE_GS_CHAFF = 0x1, BRIDGE_GS_STUN = 0x2, BRIDGE_GS_NVG = 0x4, BRIDGE_GS_THERMAL = 0x8,
+    BRIDGE_GS_DECOY = 0x1, BRIDGE_GS_SHOCK = 0x2, BRIDGE_GS_NVG = 0x4, BRIDGE_GS_THERMAL = 0x8,
     BRIDGE_GS_BEHIND_CAMERA = 0x10, BRIDGE_GS_VOX_STREAM = 0x20, BRIDGE_GS_CUT_IN = 0x40,
     BRIDGE_GS_ENEMY_OFF = 0x200, BRIDGE_GS_TAKING_PHOTO = 0x400, BRIDGE_GS_CAMERA_ACTIVE = 0x800,
     BRIDGE_GS_RADIO_OFF = 0x2000, BRIDGE_GS_PAUSE_OFF = 0x4000,

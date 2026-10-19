@@ -7,7 +7,7 @@
  *    del juego persigue el blanco que dejó su buscador (no hay nada que guiar desde aquí).
  *  - La munición se descuenta (ammo_take) al ACOPLAR cada tubo, no al sacarlo de la espalda; el primer tubo se carga en la
  *    primera actualización. Sin reserva no hay tubo nuevo.
- *  - update() calcula la pose y avanza el muelle de retroceso (wcore_recoil_step). Sin vista auxiliar: la mira y el marco de
+ *  - update() calcula la pose y avanza el resorte de retroceso (wcore_recoil_step). Sin vista auxiliar: la mira y el marco de
  *    fijación son los del HUD del juego.
  *  - Sin mallas compiladas: los modelos se enlazan en ejecución con weapon_bind() por nombre de pieza (aa_mesh_names).
  *    Equipar con el gatillo apretado no dispara: hay que soltarlo una vez. */

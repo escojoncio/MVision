@@ -284,14 +284,14 @@ static void build_body(int seed) {
         store_xf(part_addr(i) + 0x20, Rs, ts);
     }
     /* matriz de vista del canal (mundo->vista del canal) con la misma redondeada que la usada */
-    float Rc[9]; for (int i = 0; i < 9; i++) { w16(BA_VIEW_CHANNEL + BCH_EYE_INV + 2 * i, (int16_t)lrintf(EYE_R[i] * 4096)); Rc[i] = r16(BA_VIEW_CHANNEL + BCH_EYE_INV + 2 * i) / 4096.0f; }
+    float Rc[9]; for (int i = 0; i < 9; i++) { w16(BA_VIEW_CHANNEL + BCH_CAM_INV + 2 * i, (int16_t)lrintf(EYE_R[i] * 4096)); Rc[i] = r16(BA_VIEW_CHANNEL + BCH_CAM_INV + 2 * i) / 4096.0f; }
     (void)Rc;
-    for (int k = 0; k < 3; k++) w32(BA_VIEW_CHANNEL + BCH_EYE_INV + 0x14 + 4 * k, (int32_t)lrintf(EYE_t[k]));
+    for (int k = 0; k < 3; k++) w32(BA_VIEW_CHANNEL + BCH_CAM_INV + 0x14 + 4 * k, (int32_t)lrintf(EYE_t[k]));
     /* recalcula screen con los R de la matriz de vista redondeados, para que coincida exactamente */
-    float Re[9]; for (int i = 0; i < 9; i++) Re[i] = r16(BA_VIEW_CHANNEL + BCH_EYE_INV + 2 * i) / 4096.0f;
+    float Re[9]; for (int i = 0; i < 9; i++) Re[i] = r16(BA_VIEW_CHANNEL + BCH_CAM_INV + 2 * i) / 4096.0f;
     for (int i = 0; i < 16; i++) {
         float Rq[9], tq[3]; load_xf(part_addr(i), Rq, tq);
-        float Rs[9], ts[3]; mm(Rs, Re, Rq); mv(ts, Re, tq); for (int k = 0; k < 3; k++) ts[k] += (float)r32(BA_VIEW_CHANNEL + BCH_EYE_INV + 0x14 + 4 * k);
+        float Rs[9], ts[3]; mm(Rs, Re, Rq); mv(ts, Re, tq); for (int k = 0; k < 3; k++) ts[k] += (float)r32(BA_VIEW_CHANNEL + BCH_CAM_INV + 0x14 + 4 * k);
         store_xf(part_addr(i) + 0x20, Rs, ts);
     }
     memset(g_hands, 0, sizeof g_hands);
@@ -356,7 +356,7 @@ static void test_glue(void) {
                     /* screen = EYE o world, con redondeo */
                     for (int k = 0; k < 3; k++) {
                         float Rs[9], ts[3]; load_xf(part_addr(pi[k]) + 0x20, Rs, ts);
-                        float Re[9], te[3]; load_xf(BA_VIEW_CHANNEL + BCH_EYE_INV, Re, te);
+                        float Re[9], te[3]; load_xf(BA_VIEW_CHANNEL + BCH_CAM_INV, Re, te);
                         float Rx[9], tx[3]; mm(Rx, Re, R[k]); mv(tx, Re, t[k]); for (int c = 0; c < 3; c++) tx[c] += te[c];
                         float e = 0; for (int c = 0; c < 9; c++) e = fmaxf(e, fabsf(Rx[c] - Rs[c]));
                         float et = fmaxf(fabsf(tx[0] - ts[0]), fmaxf(fabsf(tx[1] - ts[1]), fabsf(tx[2] - ts[2])));

@@ -251,7 +251,7 @@ static void on_frame(Cpu *c, uint32_t f) {
 static void *emu_main(void *arg) {
     (void)arg;
     FILE *f = fopen(exe_path, "rb");
-    static uint8_t buf[PSX_RAM_SIZE + 0x800];
+    static uint8_t buf[EMU_RAM_SIZE + 0x800];
     size_t n = f ? fread(buf, 1, sizeof buf, f) : 0;
     if (f) fclose(f);
     uint32_t pc = 0, gp = 0;
@@ -259,9 +259,9 @@ static void *emu_main(void *arg) {
         uint32_t t, sz;
         memcpy(&pc, buf + 0x10, 4); memcpy(&gp, buf + 0x14, 4);
         memcpy(&t, buf + 0x18, 4); memcpy(&sz, buf + 0x1C, 4);
-        memcpy(&psx_ram[t & 0x1FFFFF], buf + 0x800, sz);
+        memcpy(&emu_ram[t & 0x1FFFFF], buf + 0x800, sz);
         (void)n;
-        if (hooks.exe_loaded) hooks.exe_loaded(psx_ram, t, sz);
+        if (hooks.exe_loaded) hooks.exe_loaded(emu_ram, t, sz);
     }
 #ifdef MV_NOGEN
     {   /* sin código generado: el punto de entrada es el de la cabecera y las HLE se enlazan por firmas */
@@ -439,11 +439,11 @@ static int start_impl(const char *exe, const char *disc_dir, const char *card_di
     fseek(f, 0, SEEK_END);
     long total = ftell(f);
     fclose(f);
-    if (n < 0x800 || memcmp(hdr, "PS-X EXE", 8)) { set_error("El ejecutable del juego no es válido."); return -1; }
+    if (n < 0x800 || memcmp(hdr, EXE_MAGIC, 8)) { set_error("El ejecutable del juego no es válido."); return -1; }
     uint32_t t, sz;
     memcpy(&t, hdr + 0x18, 4); memcpy(&sz, hdr + 0x1C, 4);
-    if (total < 0 || sz > (uint32_t)total - 0x800 || (t & 0x1FFFFF) + sz > PSX_RAM_SIZE ||
-        sz > PSX_RAM_SIZE) { set_error("La cabecera del ejecutable del juego es inválida."); return -1; }
+    if (total < 0 || sz > (uint32_t)total - 0x800 || (t & 0x1FFFFF) + sz > EMU_RAM_SIZE ||
+        sz > EMU_RAM_SIZE) { set_error("La cabecera del ejecutable del juego es inválida."); return -1; }
 
 #ifdef MV_NOGEN
     {

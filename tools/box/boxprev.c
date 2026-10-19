@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
     uint8_t *dir = NULL; size_t dl = 0;
     if (stages) { FILE *f = fopen(stages, "rb"); if (f) { fseek(f, 0, SEEK_END); dl = ftell(f); fseek(f, 0, SEEK_SET); dir = malloc(dl); if (fread(dir, 1, dl, f) != dl) { free(dir); dir = NULL; } fclose(f); } }
     BoxViewConfig c; box_view_default_config(&c);
-    c.stage = stage; c.sight_id = sid; c.tex_id = tid; c.style = strcmp(style, "black") ? BOX_STYLE_CARDBOARD : BOX_STYLE_BLACK;
+    c.stage = stage; c.sight_id = sid; c.tex_id = tid; c.style = strcmp(style, "black") ? BOX_STYLE_TEX : BOX_STYLE_BLACK;
     if (nolag) c.lag_rate = 0;
     int rc = box_view_init(&c, dir, dl);
     fprintf(stderr, "datos: %s\n", rc == 0 ? "disco" : "generico");

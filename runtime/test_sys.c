@@ -15,9 +15,9 @@ const FuncName rt_func_names[] = {{0xFFFFFFFFu, ""}};
 const unsigned rt_func_name_count = 0;
 const uint32_t rt_entry = 0;
 
-void hle_PadInitDirect(Cpu *c);
-void hle_PadStartCom(Cpu *c);
-void hle_PadGetState(Cpu *c);
+void hle_ctl_init_direct(Cpu *c);
+void hle_ctl_start(Cpu *c);
+void hle_ctl_state(Cpu *c);
 
 static int fails;
 #define EQ(a, b) do { unsigned long long _a = (a), _b = (b); \
@@ -70,9 +70,9 @@ static void t_events(Cpu *c) {
     bios_deliver_event(c, EV_RCNT(3), 2);
     EQ(bios(c, 0xB0, 0x0B, ev, 0, 0, 0), 0);     /* desactivado: no se registra */
     bios(c, 0xB0, 0x0C, ev, 0, 0, 0);
-    bios(c, 0xB0, 0x07, EV_RCNT(3), 2, 0, 0);    /* DeliverEvent */
+    bios(c, 0xB0, 0x07, EV_RCNT(3), 2, 0, 0);    /* entregar evento */
     EQ(bios(c, 0xB0, 0x0B, ev, 0, 0, 0), 1);
-    EQ(bios(c, 0xB0, 0x0B, ev, 0, 0, 0), 0);     /* TestEvent consume */
+    EQ(bios(c, 0xB0, 0x0B, ev, 0, 0, 0), 0);     /* consultar evento consume */
     bios(c, 0xB0, 0x09, ev, 0, 0, 0);
     uint32_t k = bios(c, 0xB0, 0x00, 64, 0, 0, 0);
     EQ(k != 0, 1);
@@ -80,8 +80,8 @@ static void t_events(Cpu *c) {
 
 static void t_pad(Cpu *c) {
     c->r[4] = 0x80003000; c->r[5] = 0x80003100;
-    hle_PadInitDirect(c);
-    hle_PadStartCom(c);
+    hle_ctl_init_direct(c);
+    hle_ctl_start(c);
     pad_set_state(0, 0x4008, 0x10, 0x20, 0x30, 0x40); /* Cruz + Start */
     pad_frame(c);
     EQ(mem_r8(c, 0x80003000), 0x00);
@@ -90,8 +90,8 @@ static void t_pad(Cpu *c) {
     EQ(mem_r8(c, 0x80003004), 0x30);
     EQ(mem_r8(c, 0x80003007), 0x20);
     EQ(mem_r8(c, 0x80003100), 0xFF);              /* puerto 2 vacío */
-    c->r[4] = 0; hle_PadGetState(c); EQ(c->r[2], 6);
-    c->r[4] = 0x10; hle_PadGetState(c); EQ(c->r[2], 0);
+    c->r[4] = 0; hle_ctl_state(c); EQ(c->r[2], 6);
+    c->r[4] = 0x10; hle_ctl_state(c); EQ(c->r[2], 0);
     pad_set_type(0, PAD_DIGITAL); pad_frame(c);
     EQ(mem_r8(c, 0x80003001), 0x41);
     pad_set_type(0, PAD_ANALOG);
@@ -102,14 +102,14 @@ static void t_pad(Cpu *c) {
 }
 
 static void t_card(Cpu *c) {
-    char path[] = "/tmp/mv_test_card_XXXXXX";
+    char path[] = "/tmp/mv_test_mc_XXXXXX";
     int fd = mkstemp(path); close(fd); unlink(path);
     EQ(card_open(0, path), 0);
-    uint32_t ev_sw = bios(c, 0xB0, 0x08, EV_CARD_SW, EVS_IOE, 0x2000, 0);
+    uint32_t ev_sw = bios(c, 0xB0, 0x08, EV_MC_SW, EVS_IOE, 0x2000, 0);
     bios(c, 0xB0, 0x0C, ev_sw, 0, 0, 0);
-    bios(c, 0xA0, 0xAB, 0x00, 0, 0, 0);          /* _card_info: tarjeta nueva -> NEWCARD, no IOE */
+    bios(c, 0xA0, 0xAB, 0x00, 0, 0, 0);          /* info de tarjeta: tarjeta nueva -> NEWCARD, no IOE */
     EQ(bios(c, 0xB0, 0x0B, ev_sw, 0, 0, 0), 0);
-    bios(c, 0xB0, 0x50, 0x00, 0, 0, 0);          /* _new_card */
+    bios(c, 0xB0, 0x50, 0x00, 0, 0, 0);          /* marcar tarjeta no nueva */
     bios(c, 0xA0, 0xAB, 0x00, 0, 0, 0);
     EQ(bios(c, 0xB0, 0x0B, ev_sw, 0, 0, 0), 1);
 
@@ -254,16 +254,16 @@ static void t_irq_sin_manejador(Cpu *c) {
 #define JR(rs)         ((rs) << 21 | 8u)
 #define JALR(rs)       ((rs) << 21 | 31u << 11 | 9u)
 
-/* ChangeTh desde un manejador de VSync (dentro de la excepción): es diferido y no deja el estado de
+/* cambiar de hilo desde un manejador de frame_wait (dentro de la excepción): es diferido y no deja el estado de
  * excepción bloqueado. El hilo 0 gira hasta que el contador (que incrementa el hilo 1) llega a N; el
  * manejador manda al hilo 1 mientras no, y de vuelta al 0 después. */
-static void t_changeth_en_excepcion(Cpu *c) {
+static void t_cambio_hilo_en_excepcion(Cpu *c) {
     enum { N = 1000, CNT = 0x80020000, H = 0x80010000, A = 0x80010200, B = 0x80010100 };
     uint32_t h[] = {
         ADDIU(29, 29, -8), SW(31, 29, 0),
         LUI(8, 0x8002), LW(11, 8, 0), SLTIU(11, 11, N),     /* t3 = contador < N */
         LUI(4, 0xFF00), OR(4, 4, 11),                       /* a0 = hilo 1 si t3, hilo 0 si no */
-        ORI(10, 0, 0xB0), JALR(10), ORI(9, 0, 0x10),        /* ChangeTh */
+        ORI(10, 0, 0xB0), JALR(10), ORI(9, 0, 0x10),        /* cambiar de hilo */
         LW(31, 29, 0), ADDIU(29, 29, 8), JR(31), 0};
     uint32_t b[] = {LUI(8, 0x8002), LW(9, 8, 0), ADDIU(9, 9, 1), SW(9, 8, 0), BNE(0, 9, -4 & 0xFFFF), 0};
     uint32_t a[] = {LUI(8, 0x8002), LW(9, 8, 0), SLTIU(10, 9, N), BNE(10, 0, -3), 0, JR(31), 0};
@@ -356,7 +356,7 @@ int main(void) {
     t_spu_clock(&c);
     t_spu_ring();
     t_irq_sin_manejador(&c);
-    t_changeth_en_excepcion(&c);
+    t_cambio_hilo_en_excepcion(&c);
     printf(fails ? "test_sys: %d FALLOS\n" : "test_sys: OK\n", fails);
     return fails != 0;
 }

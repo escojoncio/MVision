@@ -449,7 +449,7 @@ int vrc_sound_curve(const VrcSoundCfg *c, float dist, float *gain_out) {
 }
 
 static int rcos_i(int a) { return (int)lrintf(4096.f * cosf((float)(a & 4095) * (2.f * PI_F / 4096.f))); }
-/* Paneo del juego (primera persona): rcos(ángulo)*escala/4096, con los negativos mapeados a 255-|p|. */
+/* Paneo del juego (primera persona): coseno_tabla(ángulo)*escala/4096, con los negativos mapeados a 255-|p|. */
 static int pan_orig(float dist, int angle) {
     if (!(dist < 1e6f)) dist = 1e6f;
     int d = (int)dist; if (d < 0) d = 0;

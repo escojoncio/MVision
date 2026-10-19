@@ -144,7 +144,7 @@ static void write_ppm(const char *dir, const char *name, const uint8_t *rgb, int
     fprintf(f, "P6\n%d %d\n255\n", w, h); fwrite(rgb, 1, (size_t)w * h * 3, f); fclose(f);
 }
 
-/* ---- muestreo de textura PS1 desde la VRAM ---- */
+/* ---- muestreo de textura original desde la VRAM ---- */
 static const uint16_t *vram;
 static int tex_sample(const GpuOp *o, int u, int v, uint16_t *out) {
     u &= 255; v &= 255;
@@ -890,8 +890,8 @@ static void script_mem(Cpu *c, int t) {
         const ScrEv *e = &scr[i];
         if (e->kind < 4 || e->t0 != t) continue;
         uint32_t ma = e->u[0] & 0x1FFFFF;
-        uint8_t *m = psx_ram + ma;
-        size_t room = PSX_RAM_SIZE - ma;   /* bytes hasta el final de la RAM: poke/pokes/peek/cmp nunca se salen del búfer */
+        uint8_t *m = emu_ram + ma;
+        size_t room = EMU_RAM_SIZE - ma;   /* bytes hasta el final de la RAM: poke/pokes/peek/cmp nunca se salen del búfer */
         switch (e->kind) {
         case 4: { size_t n = strlen(e->s) / 2; if (n > room) n = room;
             for (size_t k = 0; k < n; k++) { unsigned v = 0; if (sscanf(e->s + 2 * k, "%2x", &v) != 1) { fprintf(stderr, "[poke] t=%d: hex inválido en el byte %zu, se detiene\n", t, k); break; } m[k] = (uint8_t)v; }
@@ -911,8 +911,8 @@ static void script_mem(Cpu *c, int t) {
             break; }
         case 7: { fprintf(stderr, "[peek] t=%d %08x:", t, e->u[0]); for (uint32_t k = 0; k < e->u[1] && k < 256 && k < room; k++) fprintf(stderr, " %02x", m[k]); fprintf(stderr, "\n"); break; }
         case 9: { const char *cp = getenv("MV_CARD"); if (cp) { card_close(0); int r = card_open(0, cp); fprintf(stderr, "[card] t=%d reabierta %s -> %d\n", t, cp, r); } break; }
-        case 8: { uint32_t a2 = e->u[1] & 0x1FFFFF; size_t n = e->u[2], r2 = PSX_RAM_SIZE - a2; if (n > room) n = room; if (n > r2) n = r2;
-            fprintf(stderr, "[cmp] t=%d %08x vs %08x (%zu bytes): %s\n", t, e->u[0], e->u[1], n, memcmp(m, psx_ram + a2, n) ? "DISTINTAS" : "IGUALES"); break; }
+        case 8: { uint32_t a2 = e->u[1] & 0x1FFFFF; size_t n = e->u[2], r2 = EMU_RAM_SIZE - a2; if (n > room) n = room; if (n > r2) n = r2;
+            fprintf(stderr, "[cmp] t=%d %08x vs %08x (%zu bytes): %s\n", t, e->u[0], e->u[1], n, memcmp(m, emu_ram + a2, n) ? "DISTINTAS" : "IGUALES"); break; }
         }
     }
 }
@@ -924,8 +924,8 @@ static void on_frame(Cpu *c, uint32_t f) {
     script_pad(f);
     static int novr;
     if (getenv("CAM_NOVR")) novr = 1;
-    bridge_read(psx_ram, &bs);
-    vrcam_frame(psx_ram, &bs);
+    bridge_read(emu_ram, &bs);
+    vrcam_frame(emu_ram, &bs);
     if (f_act < 0 && (vrcam_active() || (getenv("CAM_NOVR") && bs.in_control && bs.has_player && f > 6000))) f_act = (int)f + 20;
     cur_t = f_act < 0 ? -1 : (int)f - f_act;
     if (srv_list && !srv_done && (srv_frame >= 0 ? (int)f == srv_frame : cur_t == 0)) server_snapshot(f);
@@ -933,7 +933,7 @@ static void on_frame(Cpu *c, uint32_t f) {
     if (cur_t >= 0) phase_pose(cur_t, (int)f); else g_yaw = g_elev = 0;
     if (hist_n < 20000) { hist[hist_n].f = (int)f; hist[hist_n].x = bs.player_pos.x; hist[hist_n].z = bs.player_pos.z; hist[hist_n].view = vrcam_view_yaw_deg(); hist[hist_n].po = vrcam_pad_origin(); hist_n++; }
     if (cur_t == 60 || cur_t == 62) {
-        const int16_t *m = (const int16_t *)(psx_ram + (0x800B2B7Cu & 0x1FFFFF) + 0x10);   /* canal principal: matriz mundo->vista */
+        const int16_t *m = (const int16_t *)(emu_ram + (0x800B2B7Cu & 0x1FFFFF) + 0x10);   /* canal principal: matriz mundo->vista */
         double n[3]; for (int r = 0; r < 3; r++) n[r] = sqrt((double)m[3 * r] * m[3 * r] + (double)m[3 * r + 1] * m[3 * r + 1] + (double)m[3 * r + 2] * m[3 * r + 2]) / 4096.0;
         fprintf(stderr, "[camtest] t=%d norma de las filas de la matriz mundo->vista (x,y,z): %.4f %.4f %.4f (activo=%d)\n", cur_t, n[0], n[1], n[2], vrcam_active());
     }
@@ -942,7 +942,7 @@ static void on_frame(Cpu *c, uint32_t f) {
     while ((l = gpu_capture_frame())) process_list(l, cur_t, (int)f);
     static int logevery; if (!logevery) logevery = getenv("CAM_LOGEVERY") ? atoi(getenv("CAM_LOGEVERY")) : 15;
     if (scr_on && cur_t >= 0 && cur_t % logevery == 0) {
-        uint32_t st, o2r, ctl; memcpy(&st, psx_ram + (0x800ACBE0u & 0x1FFFFF), 4); memcpy(&o2r, psx_ram + (0x800ACBC4u & 0x1FFFFF), 4); memcpy(&ctl, psx_ram + (0x800ACB84u & 0x1FFFFF), 4);
+        uint32_t st, o2r, ctl; memcpy(&st, emu_ram + (0x800ACBE0u & 0x1FFFFF), 4); memcpy(&o2r, emu_ram + (0x800ACBC4u & 0x1FFFFF), 4); memcpy(&ctl, emu_ram + (0x800ACB84u & 0x1FFFFF), 4);
         fprintf(stderr, "[dive] t=%d f=%u modo=%s ctl=%d agua=%d o2=%d vida=%d pos=(%d,%d,%d) vrcam=%d agachado=%d tendido=%d estado=0x%08x o2raw=0x%08x ctlraw=0x%08x\n", cur_t, f, bridge_mode_name(&bs), bs.in_control, bs.in_water, bs.o2,
                 bs.life, bs.player_pos.x, bs.player_pos.y, bs.player_pos.z, vrcam_active(), bs.crouching, bs.prone, st, o2r, ctl);
     }
@@ -962,7 +962,7 @@ static void on_frame(Cpu *c, uint32_t f) {
         world_report(getenv("CAM_KEEP_OVERSCAN") ? "(keep_overscan)" : "");
         if (scr_on) fprintf(stderr, "[camtest] vr_scene vs propio: centro/H del filtro %u comprobadas, %u discrepancias; polígonos con desplazamiento OFX corregido %u comprobadas, %u discrepancias\n", ref_chk, ref_bad, ofs_chk, ofs_bad);
         if (scr_on) fprintf(stderr, "[camtest] épocas de VRAM: máximo de eventos por lista %d (instantáneas %d)\n", snap_max_ev, MAXSNAP);
-        { const uint16_t *vr = ref_vram(r1); fprintf(stderr, "[camtest] hash f=%u RAM=%016llx VRAM=%016llx\n", f, (unsigned long long)fnv(psx_ram, PSX_RAM_SIZE), (unsigned long long)fnv(vr, 1024 * 512 * 2)); }
+        { const uint16_t *vr = ref_vram(r1); fprintf(stderr, "[camtest] hash f=%u RAM=%016llx VRAM=%016llx\n", f, (unsigned long long)fnv(emu_ram, EMU_RAM_SIZE), (unsigned long long)fnv(vr, 1024 * 512 * 2)); }
         VrCamStats s; vrcam_stats(&s);
         fprintf(stderr, "[camtest] FIN f=%u: listas %u, con registro VR %u, sin registro %u; envíos %u; cámaras %u (VR %u) activaciones %u desactivaciones %u recentrados %u cabeza-perdida %u; cobertura media %.1f%%\n",
                 f, lists_seen, pair_ok, none_rec, vrcam_draw_count(), s.builds, s.vr_builds, s.activations, s.deactivations, s.recenters, s.head_misses, n_cov ? sum_cov / n_cov : 0);
@@ -1011,12 +1011,12 @@ int main(int argc, char **argv) {
     if (getenv("CAM_BOOT_SHOT")) boot_shot = atoi(getenv("CAM_BOOT_SHOT"));
     FILE *f = fopen(exe, "rb");
     if (!f) { perror(exe); return 1; }
-    static uint8_t buf[PSX_RAM_SIZE + 0x800];
+    static uint8_t buf[EMU_RAM_SIZE + 0x800];
     size_t n = fread(buf, 1, sizeof buf, f);
     fclose(f);
-    if (n < 0x800 || memcmp(buf, "PS-X EXE", 8)) { fprintf(stderr, "no es PS-X EXE\n"); return 1; }
+    if (n < 0x800 || memcmp(buf, EXE_MAGIC, 8)) { fprintf(stderr, "ejecutable no válido\n"); return 1; }
     uint32_t pc = rd32(buf + 0x10), gp = rd32(buf + 0x14), t = rd32(buf + 0x18), sz = rd32(buf + 0x1C);
-    memcpy(&psx_ram[t & 0x1FFFFF], buf + 0x800, sz);
+    memcpy(&emu_ram[t & 0x1FFFFF], buf + 0x800, sz);
     if (disc && !cd_open(disc)) { fprintf(stderr, "sin discos\n"); return 1; }
     RefOpts o1 = {1, 1, 0};
     r1 = ref_create(&o1);

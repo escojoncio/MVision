@@ -138,7 +138,7 @@ static void write_png(const char *path, const uint8_t *rgb, int w, int h) {
 
 
 /* ---- sonda del camino HUD: compara el panel (emulado en CPU, como lo dibujaría Metal) con el rasterizador de referencia ---- */
-/* VRAM del renderer: SOLO eventos (fill/copia/subida), como la textura de PS1Renderer; lo dibujado por primitivas no llega a ella */
+/* VRAM del renderer: SOLO eventos (fill/copia/subida), como la textura de RGRenderer; lo dibujado por primitivas no llega a ella */
 static uint16_t evram[512 * 1024];
 static int late_from = -1, late_started;   /* --late F: el renderer "arranca" en la primera lista con frame >= F (VRAM inicial = la completa del oráculo) */
 static void track_events(const GpuDrawList *l) {
@@ -271,7 +271,7 @@ static void on_frame(Cpu *c, uint32_t f) {
         if (ph == 0) { gpu_capture_hiprec(1); gpu_capture_enable(1); }
         else if (ph == toggle_n) { gpu_capture_enable(0); gpu_capture_hiprec(0); }
     }
-    bridge_read(psx_ram, &bs);
+    bridge_read(emu_ram, &bs);
     gpu_capture_vblank();
     const GpuDrawList *l;
     while ((l = gpu_capture_frame())) {
@@ -317,12 +317,12 @@ int main(int argc, char **argv) {
     mkdir(outdir, 0755);
     FILE *f = fopen(exe, "rb");
     if (!f) { perror(exe); return 1; }
-    static uint8_t buf[PSX_RAM_SIZE + 0x800];
+    static uint8_t buf[EMU_RAM_SIZE + 0x800];
     size_t n = fread(buf, 1, sizeof buf, f);
     fclose(f);
-    if (n < 0x800 || memcmp(buf, "PS-X EXE", 8)) { fprintf(stderr, "no es PS-X EXE\n"); return 1; }
+    if (n < 0x800 || memcmp(buf, EXE_MAGIC, 8)) { fprintf(stderr, "ejecutable no válido\n"); return 1; }
     uint32_t pc = rd32f(buf + 0x10), gp = rd32f(buf + 0x14), t = rd32f(buf + 0x18), sz = rd32f(buf + 0x1C);
-    memcpy(&psx_ram[t & 0x1FFFFF], buf + 0x800, sz);
+    memcpy(&emu_ram[t & 0x1FFFFF], buf + 0x800, sz);
 #ifdef MV_NOGEN   /* runtime sin código generado (como la app): intérprete + HLE por firmas (MV_SIGS) */
     rt_entry = pc;
     if (!getenv("MV_SIGS")) { fprintf(stderr, "falta MV_SIGS\n"); return 1; }

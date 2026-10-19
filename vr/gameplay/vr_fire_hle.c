@@ -48,7 +48,7 @@ static void with_matrix(Cpu *c, const char *orig, int kind) {
     int r = zone() ? vrfire_take_projectile(kind, &m) : VRFIRE_PASS;
     if (r == VRFIRE_SKIP) { V0 = 0; return; }
     uint32_t a0 = A0;
-    if (r == VRFIRE_SUBST) { vrfire_store_mat(psx_ram, zbuf + Z_BULLET, &m); A0 = zbuf + Z_BULLET; }
+    if (r == VRFIRE_SUBST) { vrfire_store_mat(emu_ram, zbuf + Z_BULLET, &m); A0 = zbuf + Z_BULLET; }
     rt_orig(c, orig);
     vrfire_probe(kind, r, V0, &m);
     A0 = a0;     /* a0 es de quien llama (convenio o32: el llamado puede cambiarlo; se restaura por si el llamador lo reutiliza) */
@@ -77,7 +77,7 @@ static void flash(Cpu *c, const char *orig, int style) {
     VrFireMat m;
     uint32_t a0 = A0, a1 = A1;
     if (zone() && vrfire_take_flash(style, &m)) {
-        vrfire_store_mat(psx_ram, zbuf + Z_FLASH, &m);
+        vrfire_store_mat(emu_ram, zbuf + Z_FLASH, &m);
         A0 = zbuf + Z_FLASH;
         if (style == 0) A1 = zbuf + Z_FLASH;
     }
@@ -94,8 +94,8 @@ void hle_vrfire_grenade(Cpu *c) {
     uint32_t a0 = A0, a1 = A1;
     if (zone() && vrfire_take_throw(p, v)) {
         for (int i = 0; i < 3; i++) {
-            *(int16_t *)(psx_ram + ((zbuf + Z_POS + 2u * (uint32_t)i) & RAM_MASK)) = p[i];
-            *(int16_t *)(psx_ram + ((zbuf + Z_VEL + 2u * (uint32_t)i) & RAM_MASK)) = v[i];
+            *(int16_t *)(emu_ram + ((zbuf + Z_POS + 2u * (uint32_t)i) & RAM_MASK)) = p[i];
+            *(int16_t *)(emu_ram + ((zbuf + Z_VEL + 2u * (uint32_t)i) & RAM_MASK)) = v[i];
         }
         A0 = zbuf + Z_POS; A1 = zbuf + Z_VEL;
         thrown = 1;
@@ -109,7 +109,7 @@ void hle_vrfire_grenade(Cpu *c) {
 /* Etapa de recorte por objeto: tras ella el arma del juego ya tiene su límite de pantalla; se pone a 0. */
 void hle_vrfire_hide(Cpu *c) {
     rt_orig(c, "vrfire_hide");
-    if (vrfire_hide_enabled()) vrfire_hide_weapon(psx_ram);
+    if (vrfire_hide_enabled()) vrfire_hide_weapon(emu_ram);
 }
 
 /* ---- buscador de blancos del lanzador antiaéreo (vr_aa.h) ----
@@ -121,7 +121,7 @@ void hle_vrfire_hide(Cpu *c) {
  * con el visor, se recarga la GTE con la vista del juego (el estado que dejaría el original: rotación, traslación y H); si el
  * original no llegó a llamar a aaview (se destruye a sí mismo), la GTE no se toca. */
 #define CH_MAIN   0x800B2B7Cu
-#define CH_VIEW   (CH_MAIN + 0x10u)     /* MATRIX mundo->vista (32 B) */
+#define CH_VIEW   (CH_MAIN + 0x10u)     /* MAT16 mundo->vista (32 B) */
 #define CH_SCREEN (CH_MAIN + 0x50u)     /* s16 distancia de pantalla */
 
 /* aa_pending: dentro de un paso con visor, el siguiente aaview usa aa_view. aa_swapped: aaview corrió con el visor en este paso. */
@@ -132,15 +132,15 @@ void hle_vrfire_aaview(Cpu *c) {
     aa_pending = 0;                      /* una sola vez por paso */
     uint8_t save[32];
     int16_t focal = 0;
-    memcpy(save, psx_ram + (CH_VIEW & RAM_MASK), sizeof save);
-    memcpy(&focal, psx_ram + (CH_SCREEN & RAM_MASK), 2);
+    memcpy(save, emu_ram + (CH_VIEW & RAM_MASK), sizeof save);
+    memcpy(&focal, emu_ram + (CH_SCREEN & RAM_MASK), 2);
     int16_t h16 = (int16_t)vraa_view_focal(focal);
-    vrfire_store_mat(psx_ram, CH_VIEW, &aa_view);
-    memcpy(psx_ram + (CH_SCREEN & RAM_MASK), &h16, 2);
+    vrfire_store_mat(emu_ram, CH_VIEW, &aa_view);
+    memcpy(emu_ram + (CH_SCREEN & RAM_MASK), &h16, 2);
     vraa_note_h((float)h16);
     rt_orig(c, "vrfire_aaview");
-    memcpy(psx_ram + (CH_VIEW & RAM_MASK), save, sizeof save);
-    memcpy(psx_ram + (CH_SCREEN & RAM_MASK), &focal, 2);
+    memcpy(emu_ram + (CH_VIEW & RAM_MASK), save, sizeof save);
+    memcpy(emu_ram + (CH_SCREEN & RAM_MASK), &focal, 2);
     aa_swapped = 1;
 }
 
@@ -159,5 +159,5 @@ void hle_vrfire_aalock(Cpu *c) {
         for (int i = 0; i < 6; i++) c->r[2 + i] = keep[i];
         c->r[31] = ra;
     }
-    vraa_after_step(psx_ram, actor, sw);
+    vraa_after_step(emu_ram, actor, sw);
 }

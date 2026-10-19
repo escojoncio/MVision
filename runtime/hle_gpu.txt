@@ -1,24 +1,24 @@
-# libgpu sustituida por el rasterizador de referencia (runtime/gpu.c).
-ResetGraph
-SetGraphDebug
-SetGraphQueue
-GetODE
-DrawSync
-DrawSyncCallback
-SetDispMask
-ClearImage
-ClearImage2
-LoadImage
-LoadImage2
-StoreImage
-StoreImage2
-MoveImage
-MoveImage2
-ClearOTag
-ClearOTagR
-DrawPrim
-DrawOTag
-DrawOTag2
-DrawOTagEnv
-PutDrawEnv
-PutDispEnv
+# Librería de gráficos sustituida por el rasterizador de referencia (runtime/gpu.c).
+gfx_reset aec503e77d54f9c3
+gfx_debug 1fa7cc82966dfdc7
+gfx_queue 5e3231d0d5da2469
+gfx_field 79067076ad48b236
+gfx_sync e3d3bc1e97f87fa5
+gfx_sync_cb 73e4080f8b757a4a
+gfx_dispmask db6c44e7389d07ae
+gfx_clear 1a5cf574d727a246
+gfx_clear2 930705ed3c5abeda
+gfx_upload 170064944b680a2d
+gfx_upload2 09e131359fee3b88
+gfx_download 516dd36dd1dc0f4c
+gfx_download2 d7af8df5e3b2cdc3
+gfx_copy 171f77121652303c
+gfx_copy2 d1571c4a41b9b334
+gfx_list_clear f3832ed84fdd93bc
+gfx_list_clear_r e7ef19c545f475dc
+gfx_prim 91861857851cf947
+gfx_list 997bce56093ac7a5
+gfx_list2 6ecc3a88f8cc3a4e
+gfx_list_env 451420e8e41e34c7
+gfx_put_draw bd7815f05455209e
+gfx_put_disp cecff8640a617e8b
