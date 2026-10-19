@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include "gpu.h"
 #include "ns_adapt.h"
+#include "ns_fx.h"
 #include "ns_types.h"
 
 #ifdef __cplusplus
@@ -37,6 +38,7 @@ typedef struct {
     float surf_tol;            /* margen extra para «sobre la superficie» (def. 80) */
     int screen_w, screen_h;    /* pantalla de referencia (def. 320x256) */
     void *dbg;                 /* FILE* opcional (herramientas): una línea por triángulo sin pareja y por nativo de más */
+    const float *list_eye, *list_M;   /* cámara con la que se emitió la lista (ojo en el mundo y vista->mundo fila-mayor); NULL = la de la RAM */
     uint32_t max_detail;       /* máximo de triángulos sin pareja que se clasifican a fondo (def. 512); el resto cuenta como ABSENT sin dueño */
 } NsCoverCfg;
 void ns_cover_cfg_default(NsCoverCfg *c);
@@ -55,6 +57,7 @@ typedef struct {
 typedef struct {
     uint32_t list_ops, list_polys3d, list_no_view;     /* operaciones de la lista / polígonos con vista válida / polígonos sin posición de vista (no se comparan) */
     uint32_t list_tris, list_degenerate;               /* triángulos 3D comparados / degenerados omitidos */
+    uint32_t fx_tris, fx_water, fx_sprite, fx_other;    /* triángulos de la lista cubiertos por ELEMENTOS DE EFECTOS (ns_fx): ondas de agua / carteles y sprites / resto; ya incluidos en list_tris y en cover_pct */
     uint32_t cause[NC_N][2];                           /* por causa: [0] opacos, [1] semitransparentes */
     uint32_t tex_page, tex_clut, tex_uv;               /* entre los MATCH: página/CLUT/UV distintos */
     uint32_t col_n, col_bad;                           /* entre los MATCH con color por vértice comparable: cuántos / con error medio de color > 24 (128 = neutro) */

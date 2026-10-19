@@ -425,7 +425,7 @@ int ns_cover_core(const NsRTri *tris, const NsAdaptSrc *src, size_t n, const NsC
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- completo */
-struct NsCover { NsScene sc; NsMeshStore *st; int ok; };
+struct NsCover { NsScene sc; NsMeshStore *st; NsFxScene *fx; int ok; };
 
 NsCover *ns_cover_create(void) {
     NsCover *c = (NsCover *)calloc(1, sizeof *c);
@@ -440,6 +440,7 @@ void ns_cover_destroy(NsCover *c) {
     if (!c) return;
     if (c->ok) ns_scene_free(&c->sc);
     if (c->st) ns_store_destroy(c->st);
+    if (c->fx) ns_fx_scene_destroy(c->fx);
     free(c);
 }
 
@@ -460,7 +461,51 @@ int ns_cover_run(NsCover *c, const uint8_t *ram, const uint8_t *scratch, const G
     for (int r = 0; r < 3; r++) for (int k = 0; k < 3; k++) cam.A[3 * r + k] = R[3 * k + r];
     for (int r = 0; r < 3; r++) cam.t[r] = -(cam.A[3 * r] * E[0] + cam.A[3 * r + 1] * E[1] + cam.A[3 * r + 2] * E[2]);
     cam.fog_far = c->sc.fog.active ? c->sc.fog.start + c->sc.fog.len : 0.0f;
-    int rc = ns_cover_core(tr, src, n, &cam, ops, nops, cfg, out);
+    /* Efectos: lo que el motor genera aparte de las mallas (ondas de agua, carteles, destellos...) se extrae de la misma RAM; las operaciones de la lista que
+     * casan con un elemento (exacto o tolerante, ver ns_fx_classify_near) se cuentan como cubiertas por él y no entran en la comparación con las mallas. */
+    uint8_t *fxcls = NULL; int32_t *fxit = NULL; GpuOp *rest = NULL;
+    uint32_t nrest = 0, f_tris = 0, f_water = 0, f_sprite = 0, f_other = 0;
+    if (nops) {
+        if (!c->fx) c->fx = ns_fx_scene_create(0);
+        fxcls = (uint8_t *)calloc(nops, 1); fxit = (int32_t *)malloc(sizeof(int32_t) * nops); rest = (GpuOp *)malloc(sizeof(GpuOp) * nops);
+    }
+    GpuDrawList dl;
+    memset(&dl, 0, sizeof dl);
+    if (c->fx && fxcls && fxit && rest) {
+        NsFxOpts fo = ns_fx_opts_default();
+        if (ns_fx_extract(ram, &fo, c->fx) == 0) {
+            dl.ops = (GpuOp *)ops; dl.nops = nops;
+            for (uint32_t i = 0; i < nops; i++) fxit[i] = -1;
+            if (ns_fx_classify(ram, c->fx, &dl, fxcls, NULL, fxit, NULL) == 0) {
+                NsFxListCam lc; const NsFxListCam *plc = NULL;
+                if (cfg && cfg->list_eye && cfg->list_M) { memcpy(lc.eye, cfg->list_eye, sizeof lc.eye); memcpy(lc.M, cfg->list_M, sizeof lc.M); plc = &lc; }
+                ns_fx_classify_near(c->fx, plc, &dl, fxcls, fxit);
+            } else memset(fxcls, 0, nops);
+        }
+    }
+    for (uint32_t i = 0; i < nops; i++) {
+        const GpuOp *o = &ops[i];
+        int isfx = fxcls && (fxcls[i] == NSFX_OP_FX || fxcls[i] == NSFX_OP_FX_PACK) && o->type == GPU_OP_POLY && o->nv >= 3;
+        if (isfx) { for (int k = 0; k < o->nv; k++) if (!o->v[k].vvalid) isfx = 0; }
+        if (!isfx) { if (rest) rest[nrest++] = *o; continue; }
+        uint32_t t = o->nv == 4 ? 2u : 1u;
+        const NsFxItem *it = (fxit && fxit[i] >= 0 && (uint32_t)fxit[i] < c->fx->n_items) ? &c->fx->items[fxit[i]] : NULL;
+        f_tris += t;
+        if (it && it->role == NSFX_ROLE_RIPPLE) f_water += t;
+        else if (it && (it->shape == NSFX_SH_BILLBOARD || it->role == NSFX_ROLE_BUBBLE || it->role == NSFX_ROLE_LIGHT || it->role == NSFX_ROLE_SPRITE_ANIM)) f_sprite += t;
+        else f_other += t;
+    }
+    int rc = ns_cover_core(tr, src, n, &cam, rest ? rest : ops, rest ? nrest : nops, cfg, out);
+    if (rc == 0 && f_tris) {
+        out->list_ops = nops;
+        out->list_tris += f_tris;
+        out->fx_tris = f_tris; out->fx_water = f_water; out->fx_sprite = f_sprite; out->fx_other = f_other;
+        uint32_t cov = 0;
+        for (int k = 0; k < NC_N; k++) if (k == NC_MATCH || k == NC_SPLIT || k == NC_SUBDIV) cov += out->cause[k][0] + out->cause[k][1];
+        out->cover_pct = 100.0f * (float)(cov + f_tris) / (float)out->list_tris;
+        out->exact_pct = 100.0f * (float)(out->cause[NC_MATCH][0] + out->cause[NC_MATCH][1]) / (float)out->list_tris;
+    }
+    free(fxcls); free(fxit); free(rest);
     free(tr); free(src);
     return rc;
 }
@@ -472,9 +517,9 @@ size_t ns_cover_format(const NsCoverResult *r, uint32_t frame, char *buf, size_t
 #define APP(...) do { if (o < cap) { int w_ = snprintf(buf + o, cap - o, __VA_ARGS__); if (w_ > 0) o += (size_t)w_ < cap - o ? (size_t)w_ : cap - o - 1; } } while (0)
     uint32_t no_cov[NC_N];
     for (int c = 0; c < NC_N; c++) no_cov[c] = r->cause[c][0] + r->cause[c][1];
-    APP("[cobertura] fr=%u lista: tris3D=%u (poligonos=%u sin_vista=%u degenerados=%u) cubierto=%.1f%% (opacos %.1f%%, exacto %.1f%%) | cubierto_por: exacto=%u otra_diagonal=%u subdividido=%u | SIN_CUBRIR: pose=%u otra_textura=%u parcial=%u ausente=%u sprite=%u (semi: pose=%u otra_tex=%u parcial=%u ausente=%u sprite=%u) | textura_distinta(pagina/clut/uv)=%u/%u/%u | nativo: tris=%u sin_pareja=%u (detras=%u plano_cercano=%u fuera=%u reverso=%u lejos=%u objeto_no_visible=%u hardware_descarta_grande=%u de_mas=%u) | posicion(match): error_medio=%.2fpx desplazados_>2px=%u | color(match): comparados=%u distintos=%u error_medio=%.1f | %.1f ms\n",
+    APP("[cobertura] fr=%u lista: tris3D=%u (poligonos=%u sin_vista=%u degenerados=%u) cubierto=%.1f%% (opacos %.1f%%, exacto %.1f%%) | cubierto_por: exacto=%u otra_diagonal=%u subdividido=%u efectos=%u (agua=%u sprites=%u otros=%u) | SIN_CUBRIR: pose=%u otra_textura=%u parcial=%u ausente=%u sprite=%u (semi: pose=%u otra_tex=%u parcial=%u ausente=%u sprite=%u) | textura_distinta(pagina/clut/uv)=%u/%u/%u | nativo: tris=%u sin_pareja=%u (detras=%u plano_cercano=%u fuera=%u reverso=%u lejos=%u objeto_no_visible=%u hardware_descarta_grande=%u de_mas=%u) | posicion(match): error_medio=%.2fpx desplazados_>2px=%u | color(match): comparados=%u distintos=%u error_medio=%.1f | %.1f ms\n",
         frame, r->list_tris, r->list_polys3d, r->list_no_view, r->list_degenerate, r->cover_pct, r->cover_opaque_pct, r->exact_pct,
-        no_cov[NC_MATCH], no_cov[NC_SPLIT], no_cov[NC_SUBDIV],
+        no_cov[NC_MATCH], no_cov[NC_SPLIT], no_cov[NC_SUBDIV], r->fx_tris, r->fx_water, r->fx_sprite, r->fx_other,
         no_cov[NC_POSE], no_cov[NC_OTHERTEX], no_cov[NC_PARTIAL], no_cov[NC_ABSENT], no_cov[NC_BILLBOARD],
         r->cause[NC_POSE][1], r->cause[NC_OTHERTEX][1], r->cause[NC_PARTIAL][1], r->cause[NC_ABSENT][1], r->cause[NC_BILLBOARD][1],
         r->tex_page, r->tex_clut, r->tex_uv, r->nat_tris, r->nat_tris - r->nat_used,
