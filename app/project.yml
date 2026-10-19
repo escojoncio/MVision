@@ -5,7 +5,7 @@ name: MVision
 options:
   bundleIdPrefix: com.kdt
   deploymentTarget:
-    visionOS: "1.0"
+    visionOS: "2.0"
   createIntermediateGroups: true
   generateEmptyDirectories: true
 settings:
