@@ -42,6 +42,7 @@ typedef struct {
     uint32_t skipped_gate;   /* capturas omitidas por la compuerta (modo gpu / renderer no listo) */
     uint32_t last_valid;     /* NsScene.valid de la última publicada */
     uint64_t last_pub_ns;
+    uint32_t ik_idle;        /* de las esperadas sin pose IK, las que la capa VR dejó INACTIVA (sin pose de mano válida: ningún brazo manejado): aptas, con los brazos de la animación del juego */
 } NsHookStats;
 
 void ns_hook_init(NsBridge *b);                         /* NULL desengancha */
@@ -56,6 +57,10 @@ void ns_hook_set_gate(NsGateFn fn, void *user);
 /* Cambio de ejecutable: el extractor debe vaciar su almacén y reiniciar la época (los ids y punteros anteriores dejan de valer). NULL = nada. */
 typedef void (*NsStoreResetFn)(NsMeshStore *store, void *user);
 void ns_hook_set_store_reset(NsStoreResetFn fn, void *user);
+/* ¿La capa de brazos corrió en este fotograma sin manejar ningún brazo (mandos sin seguimiento)? Si sí, la ausencia de pose IK no es un fallo: los brazos de la escena son los de la
+ * animación del juego (lo que también dibuja la lista de la GPU) y la escena sale apta. Se llama en ns_hook_tick. NULL = toda ausencia de IK esperada es un fallo. */
+typedef int (*NsIkIdleFn)(void *user);
+void ns_hook_set_ik_idle(NsIkIdleFn fn, void *user);
 void ns_hook_set_frame(uint32_t vblank_count);          /* para NsScene.vblank (si el extractor lo dejó a 0) */
 
 void ns_capture(const uint8_t *ram, const uint8_t *scratch);

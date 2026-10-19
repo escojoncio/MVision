@@ -76,6 +76,10 @@ typedef struct VrSmCorr {
     float shift_m[3];        /* desplazamiento del cuerpo respecto a la escena (m, espacio del usuario) */
 } VrSmCorr;
 
+/* Muestra de una escena a partir de su mapa mundo -> usuario (UNICA definición: la usan la lista de la GPU y la escena nativa, cada una con SU registro de cámara; el suavizador
+ * debe recibir la muestra de la escena que realmente se dibuja, o la corrige con el movimiento de otro fotograma del motor). origin = origen del mundo VR (unidades del juego),
+ * R = user_R, K = metros por unidad, p_ref y eye_h = centro del giro (p_ref - (0, eye_h, 0) rotado por R, como vr_scene). */
+void vrsm_make_sample(VrSmSample *out, const float origin[3], const float R[9], float K, const float p_ref[3], float eye_h, double game_s, double turn_deg, uint32_t epoch, double t_wall);
 void vrsm_cfg_default(VrSmoothCfg *c);
 void vrsm_init(VrSmooth *s, const VrSmoothCfg *c);   /* NULL = valores por defecto */
 void vrsm_reset(VrSmooth *s);                         /* olvida la escena vigente (cambio de modo: menú, cine...) */
