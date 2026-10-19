@@ -752,6 +752,14 @@ Corrige la nota de arriba ("no se halló retícula 2D ni balanceo"): sí existen
 - Swift/Metal: `PS1Renderer` (`auxRequest`, `encodeAux`, `suppressFrame`, parámetro `isAux` de `encodeScene`: sin mapa de tasas ni viewport propio), `WeaponRenderer.encodeSpecial` + `vr_vs_spc(_amp)`/`vr_fs_spc` en `vr_weapon.metal`, `XRRenderLoop.auxView` (reverse-Z con tangentes simétricas desde `cam_fov_y`). Textura auxiliar del mismo formato de color y profundidad que el ojo, vista sin sRGB para linealizar una sola vez en el shader.
 - Arnés `vr/host/test_special_run.c` (juego real, MV_NOGEN): `--wpn sniper|aa|guided --aim --fire --steer T0:T1:GRADOS --tgt --tranq --fullscreen --log`. Mira: iris abierto (blend 1), cámara 0,30 m por delante del ojo, `fov` 4,89 grados, `suppress_frame` y `hide_hud` activos, balanceo +-4 mrad. Misil: rumbo 1024 -> 512 -> 0 -> 3072 -> 2048 -> 1536 al girar 60 grados por tick de cruceta; cámara = actor; fin del misil: `fin=1`. AA: `lock`/`cerrado` y rectángulo a 3 m.
 
+### Revisión adversarial de las vistas especiales (cambios)
+- `vr/camera`: `vrcam_zoom_capped()` (nuevo; 8 VBlanks tras recortar el zoom con `vrcam_set_zoom_cap`). `vrgame.c: special_view` pone `suppress_frame` solo mientras el juego tiene su mira activa (antes: siempre con el francotirador equipado, lo que ocultaba también gafas/careta).
+- `vrgame.c`: durante el guiado (`gid` 3, misil vivo) se borran los bits de cruceta (0xF0) del mando antes de añadir `vrmis_pad` (una sola fuente).
+- `vr_missile.c`: la edad que retrocede = puntero reciclado (`ended`=2 al instante); `test_missile` 38 comprobaciones.
+- `RenderWeapon.swift`: un pipeline de vistas especiales que falla no se recompila cada fotograma (`failed`); sin `baseAddress!` al subir la textura de la mira.
+- Revisado sin hallazgos: pase auxiliar (textura/profundidad propias, 1 muestra, mismos formatos, sin amplificación, sin mapa de tasas, solo lectura de los buffers de vértices del anillo, no escribe en ningún búfer por fotograma, sin API del compositor salvo leer `depthRange`).
+- Pendiente: el visor antiaéreo muestrea `hudTexture` en el pase del ojo, que `finishHud` reescribe al final del mismo búfer de comandos: se ve el HUD del fotograma anterior (una latencia); el aux de la mira usa `vram` sin los eventos posteriores al último lote.
+
 ### No verificado
 - Todo el Swift/Metal solo se comprueba en CI (compilación); no se ha visto en el visor. La posición real de la mano para "ojo en el visor" (valores del arnés) es una estimación; la geometría de la lente sale de `SNIPER_PT_LENS`.
 - Cuánto reduce el tranquilizante el balanceo del original; diagonales inferiores del guiado; el contenido de la pantalla del misil cuando el motor no dibuja (MSAA/HUD en el pase auxiliar sí se omiten a propósito).
