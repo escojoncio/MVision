@@ -470,6 +470,17 @@ final class XRPresenter {
             anchorY = max(0.8, hp.y - (shown == .scene ? 0 : 0.05))
             anchor = XRMath.translation(SIMD3<Float>(hp.x, 0, hp.z)) * XRMath.rotationY(hy)
             needAnchor = false
+        } else if shown == .cinema || shown == .stereo {
+            // Seguimiento perezoso de la pantalla (cine y pantalla 3D): al mirar a otro lado más de ~35 grados o alejarse más de 0,5 m, la pantalla se
+            // recoloca suavemente delante de la vista (antes se quedaba donde se creó: muerte, cámaras de evento y escenas cortas se perdían a la espalda).
+            // La cabeza dentro de la zona muerta no la mueve, así que no hay arrastre al mirar alrededor de la imagen.
+            var ay = XRMath.yaw(of: anchor)
+            let da = atan2f(sinf(hy - ay), cosf(hy - ay))
+            if abs(da) > Self.followDead { ay += (da - (da > 0 ? Self.followDead : -Self.followDead)) * (1 - expf(-d / 0.6)) }
+            var ax = anchor.columns.3.x, az = anchor.columns.3.z
+            let ddx = hp.x - ax, ddz = hp.z - az
+            if (ddx * ddx + ddz * ddz).squareRoot() > 0.5 { let k = 1 - expf(-d / 0.8); ax += ddx * k; az += ddz * k }
+            anchor = XRMath.translation(SIMD3<Float>(ax, 0, az)) * XRMath.rotationY(ay)
         }
         if !hudInit { hudYaw = hy; hudInit = true }
         var dy = hy - hudYaw
@@ -627,6 +638,8 @@ final class XRPresenter {
 
     /// Resolución de las texturas de la pantalla 3D (por ojo).
     static let stereoW = 1280, stereoH = 960
+    /// Zona muerta (rad, ~35 grados) del seguimiento de la pantalla de cine / pantalla 3D.
+    static let followDead: Float = 0.61
 
     /// `game_view` es una transformación vista del motor (unidades) -> metros: su determinante es ~1e-9 (0,001 al cubo), así que el umbral va muy por debajo.
     private static func gameViewOK(_ m: simd_float4x4) -> Bool {

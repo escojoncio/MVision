@@ -11,7 +11,7 @@ enum XRSettings {
     static let recenterGestureKey = "xr.recenterGesture"   // Bool, defecto true: pinza mantenida 1,2 s
     static let windowModeKey = "xr.windowMode"      // "hidden" (defecto) | "closed" (prueba: cierra la ventana al entrar en VR)
 
-    static var autoEnter: Bool { bool(autoEnterKey, true) }
+    static var autoEnter: Bool { true }   // siempre: el juego entra en VR por sí solo (la clave solo se conserva por compatibilidad)
     static var layered: Bool { (UserDefaults.standard.string(forKey: layoutKey) ?? "layered") != "dedicated" }
     static var hdr: Bool { bool(hdrKey, false) }
     static var recenterGesture: Bool { bool(recenterGestureKey, true) }
@@ -276,7 +276,6 @@ struct XRControlsView: View {
     @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.openWindow) private var openWindow
     @AppStorage(XRSettings.windowModeKey) private var windowMode = "hidden"
-    @AppStorage(XRSettings.autoEnterKey) private var autoEnter = true
     @AppStorage(XRSettings.layoutKey) private var layout = "layered"
 
     var body: some View {
@@ -294,7 +293,6 @@ struct XRControlsView: View {
                     }
                     .disabled(!running || xr.state == .opening)
                     Menu("Opciones VR") {
-                        Toggle("Entrar en VR al arrancar", isOn: $autoEnter)
                         Picker("Estéreo", selection: $layout) {
                             Text("Una pasada (capas)").tag("layered")
                             Text("Dos pasadas").tag("dedicated")
@@ -324,7 +322,7 @@ struct XRControlsView: View {
     }
 
     private func autoEnterIfNeeded(_ isRunning: Bool) {
-        guard isRunning, autoEnter, !xr.autoEntered, xr.state == .closed else { return }
+        guard isRunning, !xr.autoEntered, xr.state == .closed else { return }
         xr.autoEntered = true
         Task { await xr.open(openSpace) }
     }

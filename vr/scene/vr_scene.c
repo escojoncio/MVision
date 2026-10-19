@@ -35,6 +35,7 @@ VrSceneOpts vr_scene_opts_default(void) {
     o.mirror_z = -1;
     o.screen_filter = 0;   /* opt-in: lo activa el anfitrión (vr/host) porque su renderer implementa la clase 3 (post-proceso por ojo) */
     o.filter_min_cover = 0.9f;
+    o.drop_ghost = 1;
     o.drop_clear = 1;
     o.engine_near_clip = 0;   /* §49: todo lo que el juego emite llega al renderer; el plano cercano es el de la cabeza */
     o.recon_partial = 1; o.recon_ambig = 1;
@@ -280,8 +281,43 @@ static int frame_scan(const GpuDrawList *dl) {
     return nflat >= 8 && ngour >= 8;
 }
 
+/* Búfer de dibujo alterno (doble búfer). Un sprite que lee del búfer que NO se muestra ahora (el fotograma anterior: estela, fundido encadenado) lee de la VRAM
+ * del renderer, que solo recibe eventos y no lo dibujado por primitivas: contendría restos de lo último subido (pantalla de título, etc.). El alterno es el último
+ * área mostrada distinta de la actual, más los vecinos del área mostrada del tamaño de la pantalla (disposición lado a lado o apilada). */
+static struct { int x, y, w, h; } g_disp_other, g_disp_cur;
+static void disp_track(const GpuDrawList *dl) {
+    if (dl->disp.w <= 0 || dl->disp.h <= 0) return;
+    if (g_disp_cur.w > 0 && (g_disp_cur.x != dl->disp.x || g_disp_cur.y != dl->disp.y || g_disp_cur.w != dl->disp.w || g_disp_cur.h != dl->disp.h)) g_disp_other = g_disp_cur;
+    g_disp_cur.x = dl->disp.x; g_disp_cur.y = dl->disp.y; g_disp_cur.w = dl->disp.w; g_disp_cur.h = dl->disp.h;
+}
+/* >= 50 % del origen (sx0,sy0)-(sx1,sy1) cae en el búfer alterno */
+static int src_in_other_buffer(const GpuDrawList *dl, int sx0, int sy0, int sx1, int sy1) {
+    double area = (double)(sx1 - sx0) * (sy1 - sy0);
+    if (!(area > 0)) return 0;
+    int w = dl->disp.w, h = dl->disp.h, x = dl->disp.x, y = dl->disp.y;
+    int cand[5][4] = {{x + w, y, w, h}, {x - w, y, w, h}, {x, y + h, w, h}, {x, y - h, w, h}, {g_disp_other.x, g_disp_other.y, g_disp_other.w, g_disp_other.h}};
+    for (int i = 0; i < 5; i++) {
+        int cx = cand[i][0], cy = cand[i][1], cw = cand[i][2], ch = cand[i][3];
+        if (cw <= 0 || ch <= 0 || cx < 0 || cy < 0 || cx + cw > 1024 || cy + ch > 512) continue;
+        if (cx == x && cy == y) continue;
+        if (isect_area(sx0, sy0, sx1, sy1, cx, cy, cx + cw, cy + ch) >= 0.5 * area) return 1;
+    }
+    return 0;
+}
+
 static int filter_class(const VrSceneOpts *o, const GpuDrawList *dl, const GpuOp *op, int is_rect, int x0, int y0, int x1, int y1, int u0, int v0, int u1, int v1) {
-    if (!o->screen_filter || x1 <= x0 || y1 <= y0) return 0;
+    if (x1 <= x0 || y1 <= y0) return 0;
+    if (o->drop_ghost && (op->flags & GPU_F_TEXTURED) && op->tp >= 2 && dl->disp.w > 0 && dl->disp.h > 0) {   /* mezcla con el fotograma anterior (con o sin screen_filter) */
+        int sx0, sy0, sx1, sy1;
+        if (is_rect) {
+            sx0 = op->tx + ((op->flags & GPU_F_FLIPX) ? u0 - (x1 - x0) + 1 : u0); sx1 = sx0 + (x1 - x0);
+            sy0 = op->ty + ((op->flags & GPU_F_FLIPY) ? v0 - (y1 - y0) + 1 : v0); sy1 = sy0 + (y1 - y0);
+        } else { sx0 = op->tx + u0; sy0 = op->ty + v0; sx1 = op->tx + u1 + 1; sy1 = op->ty + v1 + 1; }
+        double darea = (double)(x1 - x0) * (y1 - y0), dga = (double)dl->disp.w * dl->disp.h;
+        if (darea >= 0.2 * dga && isect_area(x0, y0, x1, y1, dl->disp.x, dl->disp.y, dl->disp.x + dl->disp.w, dl->disp.y + dl->disp.h) >= 0.8 * darea &&
+            src_in_other_buffer(dl, sx0, sy0, sx1, sy1)) return 5;
+    }
+    if (!o->screen_filter) return 0;
     if (g_frame_on && !is_rect && frame_cand(op)) return 4;
     int dx0 = dl->disp.x, dy0 = dl->disp.y, dx1 = dl->disp.x + dl->disp.w, dy1 = dl->disp.y + dl->disp.h;
     double da = (double)dl->disp.w * dl->disp.h;
@@ -346,6 +382,7 @@ static void frame_tri(const VrFilter *f, const float px[3], const float py[3], c
 /* acumula el resumen VrFilter */
 static void filter_note(VrScene *out, const GpuOp *op, int cls, int is_rect, float *tw) {
     VrFilter *f = &out->filter;
+    if (cls == 5) { out->stats.n_filter_ghost++; return; }   /* mezcla con el fotograma anterior: se descarta del panel, no hay nada que aplicar */
     f->active = 1;
     if (cls == 4) {   /* marco de la máscara de visión: resta del polígono (opaco negro = resta total) */
         int nv = op->nv == 4 ? 4 : 3;
@@ -417,6 +454,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     out->filter.tint[0] = out->filter.tint[1] = out->filter.tint[2] = 1.0f; out->filter.cover_abr = -1;
     out->filter.area[0] = dl->disp.x; out->filter.area[1] = dl->disp.y; out->filter.area[2] = dl->disp.w; out->filter.area[3] = dl->disp.h;
     float tint_w = 0.0f;
+    disp_track(dl);
     g_frame_on = o.screen_filter && frame_scan(dl);
     if (g_frame_on) memset(g_frame_acc, 0, sizeof g_frame_acc);
     g_scan_prev_y = g_scan_y0 = 0; g_scan_cover_seq = 0;
