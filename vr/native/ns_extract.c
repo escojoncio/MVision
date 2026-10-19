@@ -292,6 +292,17 @@ static Memo *memo_put(NsMeshStore *s, uint32_t addr, uint32_t def) {   /* entrad
 }
 static void memo_clear(NsMeshStore *s) { memset(s->memo, 0, MEMO_N * sizeof(Memo)); }
 
+/* Cambio de ejecutable (ns_hook_set_store_reset; hilo del productor): las direcciones memorizadas dejan de valer. Se vacía la memoria, sube zone_gen y se intenta abrir
+ * una época nueva; las mallas ya publicadas NO se liberan aquí (el consumidor puede estar leyéndolas: las libera el protocolo de dos épocas). */
+void ns_store_reset(NsMeshStore *s) {
+    if (!s) return;
+    memo_clear(s);
+    s->zone_gen++;
+    (void)ns_store_new_epoch(s);
+}
+/* 0: este es el almacén real del extractor (en la app no hay otra definición de ns_store_*; ver la prueba de enlace del banco). */
+int ns_store_is_stub(void) { return 0; }
+
 /* ---------------------------------------------------------------------------------------------------------------- contexto */
 typedef struct {
     Ram r;

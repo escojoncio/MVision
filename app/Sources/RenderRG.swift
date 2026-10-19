@@ -122,7 +122,7 @@ final class RGRenderer {
     private var failed = Set<String>()
 
     // escena persistente (se repite hasta que llegue otra)
-    private struct DrawBatch { var first: Int, count: Int, kind: Int, mode: Int, semi: Bool, hasTex: Bool, evEnd: Int }
+    private struct DrawBatch { var first: Int, count: Int, kind: Int, mode: Int, semi: Bool, hasTex: Bool, evEnd: Int, skip: UInt32 }   // skip: VrBatch.skip_if_native
     private final class VtxSlot { var buf: MTLBuffer?; var cap = 0; var stOff = 0 }   // stOff: offset de VrGpuState[] tras los vértices
     // Invariante del anillo (revisado): `inflight` (3) cuenta comandos en vuelo INCLUIDO el que se codifica, así que al volver de
     // `inflight.wait()` hay como mucho 2 anteriores sin terminar (la cola Metal los completa en orden). `storeScene` avanza `curSlot`
@@ -132,6 +132,14 @@ final class RGRenderer {
     private var vtxSlots = [VtxSlot(), VtxSlot(), VtxSlot()]
     private var curSlot = 2
     private var batches: [DrawBatch] = []
+    /// VrScene.native_3d de la última lista: la escena admite el 3D nativo y sus batches 3D vienen marcados (skip_if_native).
+    private var nativeSceneMarked = false
+#if !MV_BENCH
+    /// Renderer nativo (vr/native): lee la escena de la RAM del motor del puente. nil si no hay biblioteca Metal. La decisión nativo/GPU se toma en cada fotograma.
+    private(set) var native: NativeRenderer?
+#endif
+    private var nativeUse = false          // decisión de este fotograma: se dibuja la escena nativa
+    private var nativeSkip: UInt32 = 0     // batches marcados que NO se dibujan (NS_SKIP_*)
     private var has3D = false
     private var haveScene = false
     private var hudRect = simd_float4(0, 0, 320, 240)
@@ -205,11 +213,34 @@ final class RGRenderer {
                            sampleCount: sampleCount, viewCount: self.viewCount, linearOutput: linearOutput)
         weapon = WeaponRenderer(device: device, colorFormat: colorFormat, depthFormat: depthFormat,
                                 sampleCount: sampleCount, viewCount: self.viewCount)
+#if !MV_BENCH
+        if let lib = lib0, let n = NativeRenderer(device: device, library: lib, ringSize: 3) {
+            n.bridge = mv_vrhost_native_bridge()
+            // pipelines de los formatos conocidos (con y sin amplificación): nada se compila en el primer fotograma nativo
+            for layered in [false, true] { n.prewarm(layered: layered, colorFormat: colorFormat, depthFormat: depthFormat, samples: sampleCount, linear: linearOutput) }
+            native = n
+            mv_vrhost_native_renderer_ready(1)
+        } else { print("[RGRenderer] renderer nativo no disponible: se dibuja por la lista de la GPU") }
+#endif
     }
+
+#if !MV_BENCH
+    deinit { mv_vrhost_native_renderer_ready(0) }
+#endif
 
     /// Resumen para el registro (1 vez por segundo): estado de la escena y trabajo del último `encode`.
     func diagnostics() -> String {
-        "tiene3D=\(has3D) hayEscena=\(haveScene) lotes=\(batches.count) (3D=\(batches.filter { $0.kind != 2 }.count) 2D=\(batches.filter { $0.kind == 2 }.count)) pases=\(statPasses) dibujos3D=\(statDraws) drawWorld=\(drawWorld) drawBody=\(drawBody) msaa=\(sampleCount) lineal=\(linearOutput) radar=\(radar != nil)"
+        "tiene3D=\(has3D) hayEscena=\(haveScene) lotes=\(batches.count) (3D=\(batches.filter { $0.kind != 2 }.count) 2D=\(batches.filter { $0.kind == 2 }.count)) pases=\(statPasses) dibujos3D=\(statDraws) drawWorld=\(drawWorld) drawBody=\(drawBody) msaa=\(sampleCount) lineal=\(linearOutput) radar=\(radar != nil)" + nativeLog()
+    }
+
+    private func nativeLog() -> String {
+#if MV_BENCH
+        return ""
+#else
+        let mode = mv_vrhost_render_mode() != 0 ? "nativo" : "gpu"
+        guard let n = native else { return " | nativo: modo=\(mode) renderer=no" }
+        return " | modo=\(mode) listo=\(mv_vrhost_native_available() != 0) marcada=\(nativeSceneMarked) usa=\(nativeUse) " + n.logLine()
+#endif
     }
 
     // MARK: pipelines
@@ -454,6 +485,7 @@ final class RGRenderer {
         }
         batches.removeAll(keepingCapacity: true)
         has3D = sc.has_3d != 0
+        nativeSceneMarked = sc.native_3d != 0
         haveScene = true
         sceneCine = sc.cine_active != 0
         sceneShot = sc.cine_shot
@@ -486,7 +518,7 @@ final class RGRenderer {
             }
             let semi = kind == 1 || (kind == 2 && bt.blend <= 3)   // blend 0xFF = opaco
             batches.append(DrawBatch(first: first, count: cnt, kind: kind, mode: Int(bt.blend) & 3, semi: semi,
-                                     hasTex: hasTex, evEnd: Int(bt.ev_end)))
+                                     hasTex: hasTex, evEnd: Int(bt.ev_end), skip: UInt32(bt.skip_if_native)))
         }
     }
 
@@ -551,6 +583,23 @@ final class RGRenderer {
         let plan = planPost(colorTargets: colorTargets, resolveTargets: resolveTargets, layered: layered)
         let sceneColor = plan?.sceneColor ?? colorTargets
         let sceneResolve = plan?.sceneResolve ?? resolveTargets
+        // Render nativo: se prepara SIEMPRE (reconoce épocas del almacén aunque no se dibuje: cinemáticas, menús) y se decide AHORA, con el estado real de este fotograma.
+        // Si falta cualquier condición, nativeUse = false y no se salta ningún batch: nunca un fotograma sin 3D.
+        nativeUse = false; nativeSkip = 0
+#if !MV_BENCH
+        if let n = native {
+            let want = mv_vrhost_render_mode() != 0
+            let c0 = sceneColor.first, d0 = depthTargets.first
+            let canTry = want && drawWorld && drawEyes && nativeSceneMarked && c0 != nil && d0 != nil && !sceneV.isEmpty
+            n.beginFrame(commandBuffer: commandBuffer, sortView: sceneV.first ?? matrix_identity_float4x4, draw: canTry)
+            var ready = false
+            if canTry, let c = c0, let d = d0 {
+                ready = n.prewarm(layered: layered, colorFormat: c.pixelFormat, depthFormat: d.pixelFormat, samples: c.sampleCount, linear: linearOutput)
+            }
+            let dec = n.decide(wantNative: want, sceneMarked: nativeSceneMarked, pipelinesReady: ready)
+            if dec.native != 0 && canTry { nativeUse = true; nativeSkip = dec.skip }
+        }
+#endif
         var nextCmd = 0
         for (gi, g) in groups.enumerated() {
             let firstG = gi == 0, lastG = gi == groups.count - 1
@@ -1057,6 +1106,25 @@ final class RGRenderer {
         } else {
             enc.setViewport(isAux ? vp0 : (viewportOverride.flatMap { viewIndex < $0.count ? $0[viewIndex] : nil } ?? vp0))
         }
+#if !MV_BENCH
+        // Escena nativa: en el último segmento del fotograma (la VRAM ya tiene todos los eventos de la lista), con las mismas vistas y proyecciones por ojo que la ruta
+        // de la GPU y la profundidad inversa del sistema (no se escribe depthRange). Si falla, ns_native_fail y los batches de este segmento se dibujan por GPU.
+        var skipMask = nativeSkip
+        if last, !isAux, nativeUse, drawWorld, drawEyes, let n = native {
+            var vps: [simd_float4x4] = [], eyes: [SIMD3<Float>] = []
+            func eyePos(_ v: simd_float4x4) -> SIMD3<Float> { let t = v.inverse.columns.3; return SIMD3<Float>(t.x, t.y, t.z) }
+            if amplify > 0 {
+                for i in 0..<min(amplify, min(views.count, 2)) { vps.append(i == 0 ? uniforms.view_proj.0 : uniforms.view_proj.1); eyes.append(eyePos(views[i])) }
+            } else if viewIndex < views.count {
+                vps.append(uniforms.view_proj.0); eyes.append(eyePos(views[viewIndex]))
+            }
+            let ok = !vps.isEmpty && n.encode(encoder: enc, vram: vram, viewProj: vps, eyes: eyes, layered: amplify > 0, colorFormat: color.pixelFormat,
+                                              depthFormat: depth.pixelFormat, samples: samples, linear: linearOutput)
+            if !ok { n.fail(); skipMask = 0; nativeSkip = 0; nativeUse = false }
+        }
+#else
+        let skipMask: UInt32 = 0
+#endif
         guard haveScene, has3D, drawWorld, drawEyes || isAux, !seg.isEmpty, let buf = vtxSlots[curSlot].buf else { return }
         var u = uniforms
         enc.setVertexBuffer(buf, offset: 0, index: Int(VR_BUF_VERTS))
@@ -1079,6 +1147,7 @@ final class RGRenderer {
         var curKind = -1
         for i in seg {
             let bt = batches[i]
+            if (bt.skip & skipMask) != 0 { continue }   // 3D que se pinta desde la escena nativa (VrBatch.skip_if_native & NsDecision.skip)
             if bt.kind != curKind {
                 curKind = bt.kind
                 if curKind == 0 {

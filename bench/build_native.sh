@@ -22,6 +22,20 @@ done
 echo "== pruebas C (empaquetado, orden, puente) =="
 xcrun clang -O2 -Wall -Wextra -std=gnu11 "${INC[@]}" bench/c/test_native_gpu.c "${OBJ[@]}" -lpthread -o "$OUT/test_native_gpu"
 
+echo "== prueba de enlace del almacén de mallas (extractor real, sin sustitutos débiles) =="
+LOBJ=()
+for f in vr/native/ns_extract.c vr/native/ns_extract_glue.c vr/native/ns_hook.c vr/native/ns_bridge.c vr/native/ns_player.c; do
+  xcrun clang -c -O2 -Wall -Wextra -std=gnu11 "${INC[@]}" "$f" -o "$OUT/l_$(basename "$f" .c).o"
+  LOBJ+=("$OUT/l_$(basename "$f" .c).o")
+done
+xcrun clang -O2 -Wall -Wextra -std=gnu11 "${INC[@]}" bench/c/test_native_link.c "${LOBJ[@]}" -lpthread -o "$OUT/test_native_link"
+if xcrun nm -m "$OUT/test_native_link" | grep -i "weak" | grep "ns_store_"; then
+  echo "error: queda algún símbolo ns_store_* débil en el enlace del extractor"; exit 1
+fi
+for sym in ns_store_get ns_store_get_baked ns_store_epoch ns_store_ack ns_store_is_stub; do
+  xcrun nm -g "$OUT/l_ns_extract.o" | grep -q " T _$sym\$" || { echo "error: el extractor no define $sym"; exit 1; }
+done
+
 echo "== Swift (NativeRenderer de la app + banco) =="
 XCC=()
 for i in "${INC[@]}"; do XCC+=(-Xcc "$i"); done

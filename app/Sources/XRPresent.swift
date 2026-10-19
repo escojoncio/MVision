@@ -35,7 +35,7 @@ struct XRViewConfig {
     var wristHandSide = false       // false: los paneles se apilan hacia el codo (encima del radar); true: hacia la mano
     var hideRealHands = true        // pide al sistema ocultar tus manos y brazos reales mientras dura el espacio inmersivo (se ven los del personaje)
     var debugAxes = false           // dibuja los ejes de los mandos (dispositivo, agarre, apuntado) y de las manos del personaje
-    var nativeRender = false        // motor de dibujo: false = lista de la GPU, true = escena nativa leída de la RAM (solo si está disponible; vr/native)
+    var nativeRender = true         // motor de dibujo: false = lista de la GPU, true = escena nativa leída de la RAM (solo si está disponible; vr/native)
     var smoothMotion = true         // fluidez de la locomoción: el mundo se corrige por fotograma de render (giro del stick y avance extrapolados entre escenas del juego)
 
     enum Cutscene: String, CaseIterable { case stereo, cinema, diorama, scene }
@@ -73,7 +73,7 @@ struct XRViewConfig {
         c.hideRealHands = b("xr.view.hideHands", true)
         c.debugAxes = b("xr.view.debugAxes", false)
         c.smoothMotion = b("xr.view.smoothMotion", true)
-        c.nativeRender = b("xr.view.render", false)
+        c.nativeRender = b("xr.view.render", true)
         return c
     }
 

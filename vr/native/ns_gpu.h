@@ -40,9 +40,14 @@ typedef struct {
     float zrow[4];
 } NsGpuSemiSrc;
 
+/* Memoria de trabajo de la ordenación (crece y se reutiliza: sin malloc por fotograma). Inicializar a cero; liberar con ns_gpu_sort_free. */
+typedef struct { void *a, *b; size_t cap; } NsGpuSortScratch;
+void ns_gpu_sort_free(NsGpuSortScratch *sc);
+
 /* Ordena todos los triángulos semitransparentes de atrás adelante (clave = profundidad del centroide; empate = orden de entrada: el mismo criterio del
- * rasterizador de referencia). Escribe como mucho cap entradas en out/abr_out y devuelve cuántas. */
-size_t ns_gpu_sort_semi(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out, uint8_t *abr_out, size_t cap);
+ * rasterizador de referencia), con radix sort estable sobre la clave de 32 bits. Escribe como mucho cap entradas en out/abr_out y devuelve cuántas; si hay más
+ * de cap se descartan los MÁS LEJANOS. scratch puede ser NULL (reserva y libera dentro: solo pruebas). */
+size_t ns_gpu_sort_semi(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out, uint8_t *abr_out, size_t cap, NsGpuSortScratch *scratch);
 
 /* Accesores para Swift (los arrays fijos de C llegan como tuplas) */
 static inline const float *ns_scene_to_vr(const NsScene *s) { return s->to_vr; }

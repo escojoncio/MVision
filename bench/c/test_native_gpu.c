@@ -164,13 +164,19 @@ static void test_sort(void) {
     for (int p = 0; p < NP; p++) for (int t = 0; t < NT; t++, seq++) { bf[n].d = cen[p][3 * t + 2] + (float)(p * 3); bf[n].seq = seq; bf[n].piece = (uint32_t)p; bf[n].tri = (uint32_t)(p * NT + t); n++; }
     qsort(bf, n, sizeof *bf, bf_cmp);
     NsGpuOrder *out = (NsGpuOrder *)malloc(NP * NT * sizeof *out); uint8_t *ab = (uint8_t *)malloc(NP * NT);
-    size_t m = ns_gpu_sort_semi(src, NP, out, ab, NP * NT);
+    NsGpuSortScratch scr; memset(&scr, 0, sizeof scr);
+    size_t m = ns_gpu_sort_semi(src, NP, out, ab, NP * NT, &scr);
     CHECK(m == n);
     int ok = 1;
     for (size_t i = 0; i < n && i < m; i++) if (out[i].piece != bf[i].piece || out[i].tri != bf[i].tri) ok = 0;
     CHECK(ok);
-    CHECK(ns_gpu_sort_semi(src, NP, out, ab, 17) == 17);   /* capacidad */
-    CHECK(ns_gpu_sort_semi(src, 0, out, ab, 10) == 0);
+    CHECK(ns_gpu_sort_semi(src, NP, out, ab, 17, &scr) == 17);   /* capacidad: quedan los 17 MÁS CERCANOS (el final de la lista) */
+    int okc = 1;
+    for (size_t i = 0; i < 17; i++) if (out[i].piece != bf[n - 17 + i].piece || out[i].tri != bf[n - 17 + i].tri) okc = 0;
+    CHECK(okc);
+    CHECK(ns_gpu_sort_semi(src, 0, out, ab, 10, &scr) == 0);
+    CHECK(ns_gpu_sort_semi(src, NP, out, ab, NP * NT, NULL) == n);   /* sin scratch propio */
+    ns_gpu_sort_free(&scr);
     free(bf); free(out); free(ab);
 }
 

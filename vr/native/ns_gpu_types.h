@@ -30,10 +30,11 @@ typedef uint8_t ns_u8;
 #define NSG_BUF_CORNERS 1
 #define NSG_BUF_PIECES  2
 #define NSG_BUF_UNI     3
-#define NSG_BUF_PIECEIX 4    /* pase de opacos: constant uint = índice de pieza de la llamada */
+#define NSG_BUF_PIECEIX 4    /* (en desuso: el índice de pieza de los opacos por pieza es el instance_id = baseInstance de la llamada) */
 #define NSG_BUF_ORDER   4    /* pase de semitransparentes: NsGpuOrder[] ya ordenado de atrás adelante */
 #define NSG_FC_PASS     10   /* uint: 0 opaco, 1 semitransparente */
 #define NSG_FC_LINEAR   11   /* bool: destino lineal/sRGB (convertir gamma -> lineal al escribir) */
+#define NSG_FC_FLAT     12   /* bool: malla sin caras texturizadas ni semitransparentes: el fragmento no lee la VRAM ni descarta (early-z completo) */
 
 /* Marcas de esquina */
 #define NSG_CF_TEX    1u     /* cara texturizada */

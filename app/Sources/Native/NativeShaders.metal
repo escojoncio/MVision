@@ -10,6 +10,8 @@
 using namespace metal;
 
 constant uint fcNsPass [[function_constant(NSG_FC_PASS)]];
+constant bool fcNsFlat [[function_constant(NSG_FC_FLAT)]];
+constant bool kNsFlat = is_function_constant_defined(fcNsFlat) ? fcNsFlat : false;
 constant bool fcNsLinear [[function_constant(NSG_FC_LINEAR)]];
 constant uint kNsPass = is_function_constant_defined(fcNsPass) ? fcNsPass : 0u;
 constant bool kNsLinear = is_function_constant_defined(fcNsLinear) ? fcNsLinear : false;
@@ -92,28 +94,26 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
     return o;
 }
 
-/* ---- opacos: una pieza por llamada ---- */
-vertex NsVOut ns_vs_piece(uint vid [[vertex_id]],
+/* ---- opacos dinámicos: una pieza por llamada; el índice de pieza es el instance_id (baseInstance de drawPrimitives, instanceCount 1) ---- */
+vertex NsVOut ns_vs_piece(uint vid [[vertex_id]], uint iid [[instance_id]],
                           const device NsGpuVert *verts [[buffer(NSG_BUF_VERTS)]],
                           const device NsGpuCorner *corners [[buffer(NSG_BUF_CORNERS)]],
                           const device NsGpuPiece *pieces [[buffer(NSG_BUF_PIECES)]],
-                          constant NsGpuUniforms &U [[buffer(NSG_BUF_UNI)]],
-                          constant uint &pieceIx [[buffer(NSG_BUF_PIECEIX)]])
+                          constant NsGpuUniforms &U [[buffer(NSG_BUF_UNI)]])
 {
-    return ns_vertex(vid, pieceIx, 0u, verts, corners, pieces, U);
+    return ns_vertex(vid, iid, 0u, verts, corners, pieces, U);
 }
 
-vertex NsVOut ns_vs_piece_amp(uint vid [[vertex_id]], ushort amp [[amplification_id]],
+vertex NsVOut ns_vs_piece_amp(uint vid [[vertex_id]], uint iid [[instance_id]], ushort amp [[amplification_id]],
                               const device NsGpuVert *verts [[buffer(NSG_BUF_VERTS)]],
                               const device NsGpuCorner *corners [[buffer(NSG_BUF_CORNERS)]],
                               const device NsGpuPiece *pieces [[buffer(NSG_BUF_PIECES)]],
-                              constant NsGpuUniforms &U [[buffer(NSG_BUF_UNI)]],
-                              constant uint &pieceIx [[buffer(NSG_BUF_PIECEIX)]])
+                              constant NsGpuUniforms &U [[buffer(NSG_BUF_UNI)]])
 {
-    return ns_vertex(vid, pieceIx, uint(amp), verts, corners, pieces, U);
+    return ns_vertex(vid, iid, uint(amp), verts, corners, pieces, U);
 }
 
-/* ---- semitransparentes: lista de triángulos ya ordenada ---- */
+/* ---- lista de triángulos (semitransparentes ya ordenados, o el escenario opaco en una sola llamada) ---- */
 vertex NsVOut ns_vs_order(uint vid [[vertex_id]],
                           const device NsGpuVert *verts [[buffer(NSG_BUF_VERTS)]],
                           const device NsGpuCorner *corners [[buffer(NSG_BUF_CORNERS)]],
@@ -167,7 +167,10 @@ fragment float4 ns_fs(NsVOut in [[stage_in]], texture2d<ushort, access::read> vr
     bool semi = (flags & NSG_CF_SEMI) != 0u;
     float3 col = clamp(in.col, 0.0, 255.0);
     float3 rgb;
-    if ((flags & NSG_CF_TEX) != 0u) {
+    if (kNsFlat) {
+        /* malla opaca sin textura: ni lectura de VRAM ni descarte */
+        rgb = col / 255.0;
+    } else if ((flags & NSG_CF_TEX) != 0u) {
         uint tn = ns_texel(vram, in.tpage, clut, int(floor(in.uv.x + 1.0e-4)), int(floor(in.uv.y + 1.0e-4)));
         if (tn == 0u) discard_fragment();
         bool b15 = (tn & 0x8000u) != 0u;

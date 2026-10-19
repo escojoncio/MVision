@@ -106,6 +106,7 @@ func makeTexture(_ fmt: MTLPixelFormat, _ n: Int, layers: Int, samples: Int, lab
 }
 
 struct RenderResult { var rgba: [[Float]]; var cpuMs: Double }
+var lastDec = NsDecision()
 
 /// Dibuja `views` (cámaras de Metal) con NativeRenderer. layered: un solo pase con amplificación a las 2 primeras vistas; si no, un pase por vista.
 /// Devuelve RGBA (float, 0..1) por vista, la alfa = cobertura.
@@ -125,7 +126,8 @@ func renderViews(n: Int, views: [simd_float4x4], projs: [simd_float4x4], eyes: [
     for p in 0..<passes {
         guard let cb = queue.makeCommandBuffer() else { return nil }
         let t0 = CFAbsoluteTimeGetCurrent()
-        nr.prepareFrame(sortView: views[p])
+        nr.beginFrame(commandBuffer: cb, sortView: views[p], draw: true)
+        lastDec = nr.decide(wantNative: true, sceneMarked: true, pipelinesReady: nr.prewarm(layered: layered, colorFormat: format, depthFormat: .depth32Float, samples: samples, linear: false))
         let pd = MTLRenderPassDescriptor()
         pd.colorAttachments[0].texture = colorMS
         pd.colorAttachments[0].loadAction = .clear
@@ -152,7 +154,7 @@ func renderViews(n: Int, views: [simd_float4x4], projs: [simd_float4x4], eyes: [
         }
         let vps = layered ? [projs[0] * views[0], projs[1] * views[1]] : [projs[p] * views[p]]
         let eyeList = layered ? [eyes[0], eyes[1]] : [eyes[p]]
-        nr.encode(encoder: enc, vram: vram, viewProj: vps, eyes: eyeList, layered: layered, colorFormat: format, depthFormat: .depth32Float, samples: samples, linear: false)
+        if !nr.encode(encoder: enc, vram: vram, viewProj: vps, eyes: eyeList, layered: layered, colorFormat: format, depthFormat: .depth32Float, samples: samples, linear: false) { print("AVISO: encode devolvió false") }
         enc.endEncoding()
         cpu += CFAbsoluteTimeGetCurrent() - t0
         var bufs: [MTLBuffer] = []
@@ -329,6 +331,11 @@ if let r = renderViews(n: 64, views: [down], projs: [proj], eyes: [SIMD3<Float>(
     check("decal (base visible fuera)", near(e, (200, 40, 40)), "borde \(e), esperado (200,40,40)")
     writePNG("decal.png", 64, 64, rgb)
 }
+check("decisión nativo", lastDec.native == 1 && lastDec.skip == UInt32(NS_SKIP_WORLD), "native=\(lastDec.native) skip=\(lastDec.skip) motivo=\(lastDec.why) (escena de decals apta y reciente)")
+let dOff = nr.decide(wantNative: false, sceneMarked: true, pipelinesReady: true)
+check("decisión modo gpu", dOff.native == 0 && dOff.skip == 0 && Int(dOff.why) == Int(NS_WHY_MODE), "native=\(dOff.native) skip=\(dOff.skip) motivo=\(dOff.why)")
+let dUn = nr.decide(wantNative: true, sceneMarked: false, pipelinesReady: true)
+check("decisión sin marca", dUn.native == 0 && dUn.skip == 0, "native=\(dUn.native) skip=\(dUn.skip) motivo=\(dUn.why)")
 check("ack de época", ns_synth_acked() == 2, "época reconocida \(ns_synth_acked()), esperada 2")
 print(nr.diagnostics())
 

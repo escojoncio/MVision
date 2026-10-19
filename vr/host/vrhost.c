@@ -226,9 +226,9 @@ static int grow(void **p, size_t *cap, size_t need, size_t esz) {
 
 
 /* ------------------------------------------------------------------------------------------------ render nativo (vr/native) */
-/* Defecto del modo de render: 0 = gpu. Pasará a 1 cuando extractor (ns_extract) y renderer Metal estén integrados. */
+/* Defecto del modo de render: 1 = nativo (extractor y renderer Metal integrados). El menú VR «Motor de dibujo» o MV_RENDER=gpu vuelven a la lista de la GPU. */
 #ifndef MV_RENDER_DEFAULT_NATIVE
-#define MV_RENDER_DEFAULT_NATIVE 0
+#define MV_RENDER_DEFAULT_NATIVE 1
 #endif
 static NsBridge *_Atomic ns_br;          /* se crea una sola vez (ns_bridge_get); nunca se destruye */
 static pthread_mutex_t NSMX = PTHREAD_MUTEX_INITIALIZER;
