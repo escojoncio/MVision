@@ -397,3 +397,180 @@ size_t ns_gpu_sort_semi(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out, u
     if (!scratch) ns_gpu_sort_free(&local);
     return m;
 }
+
+/* ------------------------------------------------------------------------------------------------------------ efectos nativos */
+typedef struct { float depth; uint32_t first, count; uint8_t abr; uint32_t order; } FxSemi;
+static int fx_semi_cmp(const void *a, const void *b) {
+    const FxSemi *x = (const FxSemi *)a, *y = (const FxSemi *)b;
+    if (x->depth != y->depth) return x->depth > y->depth ? -1 : 1;   /* más lejos primero */
+    return x->order < y->order ? -1 : x->order > y->order;
+}
+static int fx_finite3(const float *p) { return isfinite(p[0]) && isfinite(p[1]) && isfinite(p[2]); }
+static void fx_vr(const float *m, const float *w, float *o) {
+    for (int r = 0; r < 3; r++) o[r] = m[4 * r] * w[0] + m[4 * r + 1] * w[1] + m[4 * r + 2] * w[2] + m[4 * r + 3];
+}
+/* inversa de la parte afín 3x4; 0 si es singular */
+static int fx_inv34(const float *m, float *o) {
+    double a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f = m[6], g = m[8], h = m[9], i = m[10];
+    double det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (!(fabs(det) > 1e-30)) return 0;
+    double iv = 1.0 / det;
+    double r[9] = {(e * i - f * h) * iv, (c * h - b * i) * iv, (b * f - c * e) * iv,
+                   (f * g - d * i) * iv, (a * i - c * g) * iv, (c * d - a * f) * iv,
+                   (d * h - e * g) * iv, (b * g - a * h) * iv, (a * e - b * d) * iv};
+    for (int k = 0; k < 9; k++) o[4 * (k / 3) + (k % 3)] = (float)r[k];
+    for (int k = 0; k < 3; k++) o[4 * k + 3] = (float)-(r[3 * k] * m[3] + r[3 * k + 1] * m[7] + r[3 * k + 2] * m[11]);
+    return 1;
+}
+static float fx_len_scale(const float *m) {   /* metros por unidad del motor: longitud de la imagen de un eje */
+    double s = 0;
+    for (int c = 0; c < 3; c++) s += sqrt((double)m[c] * m[c] + (double)m[4 + c] * m[4 + c] + (double)m[8 + c] * m[8 + c]);
+    return (float)(s / 3.0);
+}
+
+int ns_gpu_fx_build(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm, NsGpuFxVert *verts, uint32_t cap_verts, NsGpuFxRun *runs, uint32_t cap_runs,
+                    uint64_t *keys, uint32_t cap_keys, NsGpuFxOut *out) {
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    if (!prm || !prm->to_vr || !prm->cam || prm->n_eyes < 1 || prm->n_eyes > 2 || (n_fx && (!fx || !verts || !keys)) || (n_fx && !runs)) return -1;
+    if (!n_fx) return 0;
+    const float *M = prm->to_vr;
+    float inv[12];
+    const int have_inv = fx_inv34(M, inv);
+    const float L = fx_len_scale(M);
+    float eye_w[2][3] = {{0, 0, 0}, {0, 0, 0}};
+    for (int e = 0; e < prm->n_eyes; e++) if (have_inv) fx_vr(inv, prm->eyes[e], eye_w[e]);
+    const float *R = prm->cam->rot;
+    const float det = R[0] * (R[4] * R[8] - R[5] * R[7]) - R[1] * (R[3] * R[8] - R[5] * R[6]) + R[2] * (R[3] * R[7] - R[4] * R[6]);
+    const float face_sign = det < 0 ? -1.0f : 1.0f;
+    const float zmin = prm->px_z_min > 0 ? prm->px_z_min : 32.0f, zref = prm->px_z_ref > 0 ? prm->px_z_ref : 1000.0f;
+    const float ys = NS_OVERSCAN_Y;
+    const uint32_t all_eyes = prm->n_eyes == 2 ? 3u : 1u;
+
+    FxSemi *semi = (FxSemi *)malloc(sizeof(FxSemi) * n_fx);
+    if (!semi) return -1;
+    uint32_t nv = 0, nsemi = 0;
+    /* los semitransparentes se escriben primero en la zona alta del búfer (de la cola hacia delante) y luego se reordenan: se genera todo en un solo recorrido
+     * a una zona de trabajo = el propio búfer; los opacos se compactan al principio y los semitransparentes ordenados detrás (copia por trozos) */
+    NsGpuFxVert *tmp = (NsGpuFxVert *)malloc(sizeof(NsGpuFxVert) * (size_t)cap_verts);
+    if (!tmp) { free(semi); return -1; }
+    uint32_t tn = 0;   /* vértices de los semitransparentes en tmp */
+    for (uint32_t i = 0; i < n_fx; i++) {
+        const NsEffect *e = &fx[i];
+        out->n_items++;
+        int ok = 1;
+        float q[4][3];       /* esquinas en el mundo VR */
+        float uvs[4][2];
+        float cols[4][3];
+        uint32_t mask = all_eyes;
+        int nq = 0, tri_only = 0;
+        for (int v = 0; v < 4; v++) { uvs[v][0] = e->uv[v][0]; uvs[v][1] = e->uv[v][1]; for (int c = 0; c < 3; c++) cols[v][c] = e->rgb[v][c]; }
+        if (e->kind == NS_EK_BILLBOARD) {
+            if (!fx_finite3(e->p[0]) || !(e->ref_h > 0)) ok = 0;
+            else {
+                float c[3];
+                fx_vr(M, e->p[0], c);
+                /* profundidad del motor del centro respecto a la cámara del juego; con poca profundidad (el tamaño en px explota) se usa la de referencia */
+                const float *E = prm->cam->eye;
+                float z = 0;
+                for (int r = 0; r < 3; r++) z += (e->p[0][r] - E[r]) * R[3 * r + 2];
+                if (z < zmin) z = zref;
+                float k = z / e->ref_h;
+                float x0 = e->box[0] * k, y0 = e->box[1] * k / ys, x1 = e->box[2] * k, y1 = e->box[3] * k / ys;
+                const float ox[4] = {x0, x1, x0, x1}, oy[4] = {y0, y0, y1, y1};
+                for (int v = 0; v < 4; v++) for (int r = 0; r < 3; r++) q[v][r] = c[r] + prm->head_right[r] * ox[v] * L - prm->head_up[r] * oy[v] * L;
+                nq = 4; out->n_billboard++;
+            }
+        } else if ((e->flags & NS_EF_LINE) || e->nv == 2) {
+            if (!fx_finite3(e->p[0]) || !fx_finite3(e->p[1])) ok = 0;
+            else {
+                float a[3], b[3];
+                fx_vr(M, e->p[0], a); fx_vr(M, e->p[1], b);
+                float d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, vv[3] = {prm->head[0] - 0.5f * (a[0] + b[0]), prm->head[1] - 0.5f * (a[1] + b[1]), prm->head[2] - 0.5f * (a[2] + b[2])};
+                float s[3] = {d[1] * vv[2] - d[2] * vv[1], d[2] * vv[0] - d[0] * vv[2], d[0] * vv[1] - d[1] * vv[0]};
+                float l = sqrtf(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
+                const float *E = prm->cam->eye;
+                float z = 0;
+                for (int r = 0; r < 3; r++) z += (e->p[0][r] - E[r]) * R[3 * r + 2];
+                if (z < zmin) z = zref;
+                float wpx = e->width_px > 0 ? e->width_px : 1.0f;
+                float half = 0.5f * wpx * z / (prm->cam->h > 0 ? prm->cam->h : 320.0f) * L;   /* anchura en el mundo VR */
+                float dl = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                if (!(dl > 1e-9f) || !(l > 1e-4f * dl)) ok = 0;   /* línea nula o vista de punta (la cabeza sobre ella, a menos de 0,1 mm) */
+                else {
+                    for (int r = 0; r < 3; r++) {
+                        float sr = s[r] / l * half;
+                        q[0][r] = a[r] - sr; q[1][r] = a[r] + sr; q[2][r] = b[r] - sr; q[3][r] = b[r] + sr;
+                    }
+                    /* uv/color: extremo 0 para las esquinas 0,1 y extremo 1 para 2,3 */
+                    for (int c = 0; c < 3; c++) { cols[2][c] = cols[1][c]; cols[3][c] = cols[1][c]; cols[1][c] = cols[0][c]; }
+                    uvs[2][0] = uvs[1][0]; uvs[2][1] = uvs[1][1]; uvs[3][0] = uvs[1][0]; uvs[3][1] = uvs[1][1]; uvs[1][0] = uvs[0][0]; uvs[1][1] = uvs[0][1];
+                    nq = 4; out->n_ribbon++;
+                }
+            }
+        } else {
+            nq = e->nv == 3 ? 3 : 4;
+            tri_only = nq == 3;
+            for (int v = 0; v < nq; v++) { if (!fx_finite3(e->p[v])) ok = 0; else fx_vr(M, e->p[v], q[v]); }
+            if (ok) out->n_poly++;
+            if (ok && (e->flags & NS_EF_ONESIDE)) {
+                float a[3], b[3], n[3];
+                for (int r = 0; r < 3; r++) { a[r] = e->p[1][r] - e->p[0][r]; b[r] = e->p[2][r] - e->p[0][r]; }
+                n[0] = a[1] * b[2] - a[2] * b[1]; n[1] = a[2] * b[0] - a[0] * b[2]; n[2] = a[0] * b[1] - a[1] * b[0];
+                mask = 0;
+                for (int ey = 0; ey < prm->n_eyes; ey++) {
+                    float dd = face_sign * (n[0] * (e->p[0][0] - eye_w[ey][0]) + n[1] * (e->p[0][1] - eye_w[ey][1]) + n[2] * (e->p[0][2] - eye_w[ey][2]));
+                    if (have_inv ? dd > 0 : 1) mask |= 1u << ey;
+                }
+            }
+        }
+        if (ok) for (int v = 0; v < nq; v++) if (!fx_finite3(q[v])) ok = 0;
+        if (!ok) { out->n_skipped++; continue; }
+        if (out->n_keys < cap_keys) keys[out->n_keys++] = ns_gpu_fx_key(e);
+        if (mask == 0) continue;   /* confirmado (el motor tampoco lo dibujaría desde aquí) pero sin triángulos */
+        const int semi_f = (e->flags & NS_EF_SEMI) != 0, tex = (e->flags & NS_EF_TEXTURED) != 0;
+        const uint32_t cf = (uint32_t)((tex ? NSG_CF_TEX : 0u) | (semi_f ? NSG_CF_SEMI : 0u) | ((uint32_t)(e->abr & 3u) << 2));
+        const uint32_t clutf = (uint32_t)e->clut | (cf << 16);
+        static const int T4[6] = {0, 1, 2, 1, 2, 3}, T3[3] = {0, 1, 2};
+        const int *T = tri_only ? T3 : T4;
+        const int nt = tri_only ? 3 : 6;
+        /* copias: pase 0 si es opaco o semitransparente texturizado; pase 1 si es semitransparente */
+        for (int pass = 0; pass < 2; pass++) {
+            if (pass == 0 && semi_f && !tex) continue;
+            if (pass == 1 && !semi_f) continue;
+            if (pass == 0) {
+                if (nv + (uint32_t)nt > cap_verts) { out->n_skipped++; break; }
+            } else if (tn + (uint32_t)nt > cap_verts) { out->n_skipped++; break; }
+            NsGpuFxVert *o = pass == 0 ? &verts[nv] : &tmp[tn];
+            for (int k = 0; k < nt; k++) {
+                const int v = T[k];
+                o[k].p[0] = q[v][0]; o[k].p[1] = q[v][1]; o[k].p[2] = q[v][2];
+                o[k].u = uvs[v][0]; o[k].v = uvs[v][1];
+                o[k].col[0] = cols[v][0]; o[k].col[1] = cols[v][1]; o[k].col[2] = cols[v][2];
+                o[k].tpage = e->tpage; o[k].clutf = clutf; o[k].eyes = mask;
+            }
+            if (pass == 0) nv += (uint32_t)nt;
+            else {
+                float cx[3] = {0, 0, 0};
+                for (int v = 0; v < nq; v++) for (int r = 0; r < 3; r++) cx[r] += q[v][r] / (float)nq;
+                float dx = cx[0] - prm->head[0], dy = cx[1] - prm->head[1], dz = cx[2] - prm->head[2];
+                semi[nsemi].depth = dx * dx + dy * dy + dz * dz; semi[nsemi].first = tn; semi[nsemi].count = (uint32_t)nt; semi[nsemi].abr = (uint8_t)(e->abr & 3u); semi[nsemi].order = nsemi;
+                nsemi++; tn += (uint32_t)nt;
+            }
+        }
+    }
+    out->n_opaque = nv;
+    qsort(semi, nsemi, sizeof *semi, fx_semi_cmp);
+    uint32_t w = nv;
+    for (uint32_t s = 0; s < nsemi; s++) {
+        if (w + semi[s].count > cap_verts) { out->n_skipped++; continue; }
+        memcpy(&verts[w], &tmp[semi[s].first], sizeof(NsGpuFxVert) * semi[s].count);
+        if (out->n_runs && runs[out->n_runs - 1].abr == semi[s].abr && runs[out->n_runs - 1].start + runs[out->n_runs - 1].count == w) runs[out->n_runs - 1].count += semi[s].count;
+        else if (out->n_runs < cap_runs) { runs[out->n_runs].start = w; runs[out->n_runs].count = semi[s].count; runs[out->n_runs].abr = semi[s].abr; out->n_runs++; }
+        else { /* sin sitio para otro run: se mezcla en el último (el orden relativo se conserva) */ runs[out->n_runs - 1].count += semi[s].count; }
+        w += semi[s].count;
+    }
+    out->n_semi = w - nv;
+    free(semi); free(tmp);
+    return 0;
+}

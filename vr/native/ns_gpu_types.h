@@ -32,6 +32,7 @@ typedef uint8_t ns_u8;
 #define NSG_BUF_UNI     3
 #define NSG_BUF_PIECEIX 4    /* (en desuso: el índice de pieza de los opacos por pieza es el instance_id = baseInstance de la llamada) */
 #define NSG_BUF_ORDER   4    /* pase de semitransparentes: NsGpuOrder[] ya ordenado de atrás adelante */
+#define NSG_BUF_FX      0    /* efectos (ns_vs_fx*): NsGpuFxVert[] (usa el índice 0; no se mezcla con las mallas en una misma llamada) */
 #define NSG_FC_PASS     10   /* uint: 0 opaco, 1 semitransparente */
 #define NSG_FC_LINEAR   11   /* bool: destino lineal/sRGB (convertir gamma -> lineal al escribir) */
 #define NSG_FC_FLAT     12   /* bool: malla sin caras texturizadas ni semitransparentes: el fragmento no lee la VRAM ni descarta (early-z completo) */
@@ -81,6 +82,18 @@ typedef struct {
 /* Entrada de la lista ordenada de semitransparentes: una por triángulo. */
 typedef struct { ns_u32 piece; ns_u32 tri; } NsGpuOrder;                                            /* tri = índice ABSOLUTO de triángulo (esquina = 3*tri + k) */
 
+/* Vértice de un efecto (billboards, cintas, cuadriláteros y triángulos de mundo), ya en el MUNDO VR (m): el empaquetador en C (ns_gpu_fx_build) orienta los
+ * carteles y cintas a la cabeza una vez por fotograma. Color/texel como NsGpuCorner (la misma ns_fs). `eyes`: bit i = se dibuja para el ojo i (polígonos de una
+ * cara: el test se hace por ojo en CPU). */
+typedef struct {
+    float p[3];
+    float u, v;          /* texels 0..255 */
+    float col[3];        /* 0..255, 128 = neutro */
+    ns_u32 tpage;
+    ns_u32 clutf;        /* clut | NSG_CF_* << 16 */
+    ns_u32 eyes;
+} NsGpuFxVert;                                                                                      /* 44 B */
+
 #ifdef NS_GPU_HAVE_SIMD
 typedef struct {
     matrix_float4x4 view_proj[2];   /* clip = P * V por ojo (índice = amplification_id; sin amplificación se usa [0]) */
@@ -97,6 +110,7 @@ typedef char ns_gpu_chk_vert[(sizeof(NsGpuVert) == 16) ? 1 : -1];
 typedef char ns_gpu_chk_corner[(sizeof(NsGpuCorner) == 28) ? 1 : -1];
 typedef char ns_gpu_chk_piece[(sizeof(NsGpuPiece) == 164) ? 1 : -1];
 typedef char ns_gpu_chk_order[(sizeof(NsGpuOrder) == 8) ? 1 : -1];
+typedef char ns_gpu_chk_fxvert[(sizeof(NsGpuFxVert) == 44) ? 1 : -1];
 #endif
 
 #endif

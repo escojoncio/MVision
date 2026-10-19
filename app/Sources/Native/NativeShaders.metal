@@ -137,6 +137,33 @@ vertex NsVOut ns_vs_order_amp(uint vid [[vertex_id]], ushort amp [[amplification
     return ns_vertex(o.tri * 3u + (vid % 3u), o.piece, uint(amp), verts, corners, pieces, U);
 }
 
+
+/* ---- efectos (carteles, cintas, cuadriláteros y triángulos de mundo): vértices ya en el mundo VR, orientados a la cabeza en CPU (ns_gpu_fx_build). Misma ns_fs. ---- */
+static NsVOut ns_fx_vertex(uint vid, uint amp, const device NsGpuFxVert *fv, constant NsGpuUniforms &U)
+{
+    const device NsGpuFxVert &V = fv[vid];
+    NsVOut o;
+    /* polígono de una cara que este ojo no ve: triángulo degenerado (los tres vértices llevan la misma máscara) */
+    o.pos = ((V.eyes >> amp) & 1u) != 0u ? U.view_proj[amp] * float4(V.p[0], V.p[1], V.p[2], 1.0) : float4(0.0);
+    o.uv = float2(V.u, V.v);
+    o.col = clamp(floor(clamp(float3(V.col[0], V.col[1], V.col[2]), 0.0, 255.0) * U.tint.xyz), 0.0, 255.0);
+    o.tpage = V.tpage;
+    o.clutf = V.clutf;
+    return o;
+}
+vertex NsVOut ns_vs_fx(uint vid [[vertex_id]],
+                       const device NsGpuFxVert *fv [[buffer(NSG_BUF_FX)]],
+                       constant NsGpuUniforms &U [[buffer(NSG_BUF_UNI)]])
+{
+    return ns_fx_vertex(vid, 0u, fv, U);
+}
+vertex NsVOut ns_vs_fx_amp(uint vid [[vertex_id]], ushort amp [[amplification_id]],
+                           const device NsGpuFxVert *fv [[buffer(NSG_BUF_FX)]],
+                           constant NsGpuUniforms &U [[buffer(NSG_BUF_UNI)]])
+{
+    return ns_fx_vertex(vid, uint(amp), fv, U);
+}
+
 /* ---------------- muestreo de VRAM (igual que ns_sample_texel de la referencia, sin ventana de textura) ---------------- */
 static uint ns_texel(texture2d<ushort, access::read> vram, uint tpage, uint clut, int u, int v)
 {
