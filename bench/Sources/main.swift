@@ -105,6 +105,8 @@ func near(_ c: (Int, Int, Int), _ e: (Int, Int, Int), _ tol: Int = 60) -> Bool {
 
 // MARK: dispositivo
 
+XRFrameEncoder.fallbackDefault = false      // el entorno mínimo solo se prueba en su propio caso (los demás miden la imagen real)
+
 guard let device = MTLCreateSystemDefaultDevice() else {
     annot("error", "banco de render", "No hay dispositivo Metal en este runner")
     print("FALLO: sin dispositivo Metal"); exit(2)
@@ -341,6 +343,30 @@ func runCase(_ cfg: Cfg, first: Bool) {
                 check(caso, "ojo \(e) HUD magenta", near(c, (235, 0, 235), 70), "pixel (\(px.0),\(px.1)) color \(c) esperado ~(235,0,235)")
             } else { check(caso, "ojo \(e) HUD magenta", false, "detras de la camara") }
         }
+    }
+}
+
+// ---------- Arranque a prueba de negro: sin cine ni escena el ojo NO puede salir negro (entorno mínimo) ----------
+do {
+    for (nm, layered, boot) in [("layered", true, 3.0), ("layered", true, 0.0), ("dedicated", false, 3.0)] {
+        let caso = "negro-\(nm)-" + (boot > 0 ? "arranque" : "sin-nada")
+        if layered && !device.supportsVertexAmplificationCount(2) { continue }
+        setDefaults(curve: 0.35, sharp: 1)
+        guard let tg = makeTargets(layered: layered) else { check(caso, "texturas", false, "no se pudieron crear"); continue }
+        guard let enc = XRFrameEncoder(device: device, colorFormat: colorFormat, depthFormat: depthFormat, layered: layered, sampleCount: 4) else {
+            check(caso, "codificador", false, "XRFrameEncoder no se pudo crear"); continue
+        }
+        enc.fallbackEnabled = true
+        enc.bootSeconds = boot
+        enc.log = { print("[diag] " + $0) }
+        var gs = MvVrGameState(); gs.view_mode = 1
+        let head = headPose(SIMD3<Float>(0, 1.6, 0), yaw: 0)
+        guard let imgs = render(enc, layered: layered, color: tg.color, depth: tg.depth, gs: gs, frames: 6, head: { _ in head }) else {
+            check(caso, "render", false, "fallo al renderizar"); continue
+        }
+        report(caso, imgs, notice: boot > 0 && layered)
+        print("[diag] última: \(enc.lastDiag)")
+        for e in 0..<2 { check(caso, "ojo \(e) no negro", imgs[e].nonBlack > 0.015, String(format: "%.2f %% de pixeles no negros (minimo 1,5 %%)", imgs[e].nonBlack * 100)) }
     }
 }
 

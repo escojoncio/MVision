@@ -29,6 +29,8 @@ final class XRRenderLoop {
     private var presenter: XRPresenter { encoder.presenter }   // pantalla de cine, paneles del HUD, menú VR (XRPresent.swift)
     private var wasBlocked = false
     private var diagT: CFTimeInterval = 0
+    private var lastEncFailLog: CFTimeInterval = 0
+    private let startT = CACurrentMediaTime()
     private static let errLock = NSLock()
     private static var lastErrLog: CFTimeInterval = 0
     private var trackedFrames = 0, untrackedFrames = 0
@@ -212,17 +214,25 @@ final class XRRenderLoop {
         }
         guard let cb = queue.makeCommandBuffer() else { return }
         cb.label = "mv.xr.frame"
-        // Una vez por segundo se compara nuestra proyección con la del sistema (solo para el registro).
+        // Proyección del sistema (referencia de Apple, con el rango de profundidad del compositor): el codificador la usa si es válida
+        // (Z invertida y concordante con las tangentes) y, si no, la propia. Solo lectura: no modifica el drawable (§40).
         var sysProj: [simd_float4x4]?
-        if nowT - diagT >= 1, #available(visionOS 2.0, *) {
+        if #available(visionOS 2.0, *) {
             sysProj = (0..<viewCount).map { drawable.computeProjection(viewIndex: $0) }
         }
         let ok = encoder.encode(commandBuffer: cb, gs: gs, originFromDevice: originFromDevice, recenterInverse: recenterInverse, dt: dt,
                                 eyes: eyes, depthRange: drawable.depthRange, colorTextures: drawable.colorTextures,
                                 depthTextures: drawable.depthTextures, systemProjections: sysProj)
-        if !ok { Storage.log("xr: el codificador no pudo preparar el fotograma (texturas del drawable vacías o destinos MSAA)") }
+        if !ok {
+            // Como antes del refactor: sin codificar no se presenta el fotograma. El aviso sale como mucho 1 vez por segundo.
+            if nowT - lastEncFailLog >= 1 {
+                lastEncFailLog = nowT
+                Storage.log("xr: el codificador no pudo preparar el fotograma (texturas del drawable vacías o destinos MSAA)")
+            }
+            return
+        }
 
-        if nowT - diagT >= 1 {
+        if nowT - diagT >= (nowT - startT < 30 ? 1 : 10) {      // 1/s los primeros 30 s, luego cada 10 s: sin inundar el registro
             diagT = nowT
             Storage.log("xr-diag: seguimiento ok=\(trackedFrames) sin=\(untrackedFrames) ancla=\(anchor == nil ? "nil" : (anchor!.isTracked ? "rastreada" : "no rastreada")) recentrado=\(needsRecenter ? "pendiente" : "hecho") frame=\(encoder.frameNo) origenDispositivo=(\(String(format: "%.2f %.2f %.2f", originFromDevice.columns.3.x, originFromDevice.columns.3.y, originFromDevice.columns.3.z))) rumboDispositivo=\(String(format: "%.0f", XRMath.yaw(of: originFromDevice) * 180 / .pi))grados mapasTasa=\(drawable.rasterizationRateMaps.count) objetivo=\(Self.targetName(drawable)) vistas=\(drawable.views.count) uso(color0)=\(drawable.colorTextures.first?.usage.rawValue ?? 0) almacenamiento=\(drawable.colorTextures.first?.storageMode.rawValue ?? 99) pasoDeFotograma=\(Int(1000 * dt)) ms")
             trackedFrames = 0; untrackedFrames = 0
