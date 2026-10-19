@@ -358,13 +358,13 @@ static inline void ns_xf_rot(const NsXf *x, const float v[3], float o[3]) {
  * `rw` = rotación 3x3 de mundo de la pieza (fila-mayor, ya dividida por 4096), n = normal s16/4096 en espacio local. */
 static inline void ns_shade_normal(const NsLight *L, const float rw[9], const float n[3], float out_rgb[3]) {
     float nw[3] = { rw[0]*n[0] + rw[1]*n[1] + rw[2]*n[2], rw[3]*n[0] + rw[4]*n[1] + rw[5]*n[2], rw[6]*n[0] + rw[7]*n[1] + rw[8]*n[2] };
-    float I[3];
+    float inten[3];
     for (int l = 0; l < 3; l++) {
         float d = (L->dir[l][0] * nw[0] + L->dir[l][1] * nw[1] + L->dir[l][2] * nw[2]) * (1.0f / 4096.0f);
-        I[l] = ns_clampf(d, 0.0f, NS_INTENSITY_MAX);
+        inten[l] = ns_clampf(d, 0.0f, NS_INTENSITY_MAX);
     }
     for (int c = 0; c < 3; c++) {
-        float v = (float)L->amb[c] + (L->col[c][0] * I[0] + L->col[c][1] * I[1] + L->col[c][2] * I[2]) * (1.0f / 16.0f);
+        float v = (float)L->amb[c] + (L->col[c][0] * inten[0] + L->col[c][1] * inten[1] + L->col[c][2] * inten[2]) * (1.0f / 16.0f);
         out_rgb[c] = ns_clampf(v, 0.0f, 255.0f);
     }
 }
