@@ -59,6 +59,7 @@ static VrState *g_st; static size_t g_st_cap, g_st_n;
 static uint32_t *g_hash; static size_t g_hash_cap; /* tabla abierta: índice+1 en g_st */
 static uint32_t *g_next; static size_t g_next_cap;
 static uint8_t *g_fate; static uint32_t g_fate_cap;
+static uint8_t *g_opd; static size_t g_opd_cap;   /* destino por op (VrScene.op_dest) */
 static uint32_t *g_tsrc; static uint32_t g_tsrc_cap;   /* (pruebas) op de origen de cada triángulo de VrScene.v, en el orden de salida */
 void vr_scene_set_tri_src(uint32_t *buf, uint32_t cap) { g_tsrc = buf; g_tsrc_cap = buf ? cap : 0; }
 void vr_scene_set_fate(uint8_t *buf, uint32_t cap) { g_fate = buf; g_fate_cap = buf ? cap : 0; }
@@ -71,6 +72,7 @@ static void fate_set(uint32_t i, uint8_t f) {
 }
 
 void vr_scene_release(void) {
+    free(g_opd); g_opd = NULL; g_opd_cap = 0;
     free(g_tri); free(g_vtx); free(g_tcause); free(g_bat); free(g_st); free(g_hash); free(g_next);
     g_tri = NULL; g_vtx = NULL; g_tcause = NULL; g_tcause_cap = 0; g_bat = NULL; g_st = NULL; g_hash = NULL; g_next = NULL;
     g_tri_cap = g_vtx_cap = g_bat_cap = g_st_cap = g_st_n = g_hash_cap = g_next_cap = 0;
@@ -577,6 +579,8 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     g_st_n = 0;
     if (g_hash) memset(g_hash, 0, g_hash_cap * sizeof *g_hash);
     GROW(g_tri, g_tri_cap, (size_t)n * 2 + 2);
+    GROW(g_opd, g_opd_cap, (size_t)n + 1);
+    memset(g_opd, 0, (size_t)n + 1);
 
     size_t nt = 0;
     out->stats.n_ops = n;
@@ -897,11 +901,13 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 g_tcause[nv / 3] = t->cause;
 
                 if (nv / 3 < g_tsrc_cap) g_tsrc[nv / 3] = t->src_op;
+                if ((kind == 2 || kind == 3) && t->src_op < g_opd_cap) g_opd[t->src_op] = (uint8_t)kind;
                 nv += 3; cur->count += 3;
             }
         }
         s = e;
     }
+    out->op_dest = g_opd; out->n_op_dest = n;
     out->v = g_vtx; out->nv = (uint32_t)nv; out->tri_cause = g_tcause;
     out->b = g_bat; out->nb = (uint32_t)nb;
     out->states = g_st; out->nstates = (uint32_t)g_st_n;
