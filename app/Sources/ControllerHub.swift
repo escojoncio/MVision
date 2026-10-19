@@ -492,6 +492,9 @@ final class ControllerHub: @unchecked Sendable {
 
     // MARK: - Diagnóstico
 
+    /// Gancho opcional de diagnóstico: recibe la firma de elementos pulsados cada vez que cambia.
+    static var onInputSignature: ((String) -> Void)?
+
     private func diagnose(_ c: GCController?, _ label: String, _ now: TimeInterval) {
         guard let c else { return }
         let id = ObjectIdentifier(c)
@@ -535,6 +538,7 @@ final class ControllerHub: @unchecked Sendable {
         }
         lock.unlock()
         if changed { dlog("entrada \(label): [\(sig)]") }
+        if changed { ControllerHub.onInputSignature?(sig) }
     }
 
     /// Valores crudos de los Sense, 1 vez por segundo, para saber si el sistema entrega datos aunque nada llegue al juego.
@@ -631,9 +635,8 @@ final class ControllerHub: @unchecked Sendable {
         return UInt8(max(0, min(255, Int((x + 1) * 127.5 + 0.5))))
     }
 
-    /// Estado -> bytes de `mv_host_pad` sin locomoción VR (mando normal tal cual; Sense con el mapa por defecto).
+    /// Estado -> bytes de `mv_host_pad` sin locomoción VR (mando normal tal cual; Sense con el mapa de menús de vr_input).
     func plainPad(_ s: Sample) -> (UInt16, UInt8, UInt8, UInt8, UInt8) {
-        let k = Self.bit
         var b: UInt16 = 0
         var lx: Float = 0, ly: Float = 0, rx: Float = 0, ry: Float = 0
         switch s.kind {
@@ -643,15 +646,9 @@ final class ControllerHub: @unchecked Sendable {
             b = s.pad.buttons
             lx = s.pad.lx; ly = s.pad.ly; rx = s.pad.rx; ry = s.pad.ry
         case .sense:
-            func set(_ bit: UInt16, _ v: Bool) { if v { b |= bit } }
-            set(k.squ, s.right.trigger > 0.55); set(k.cir, s.left.trigger > 0.55)
-            set(k.r1, s.right.grip > 0.55); set(k.l1, s.left.grip > 0.55)
-            set(k.cro, s.right.low); set(k.tri, s.right.up)
-            set(k.l2, s.left.low); set(k.r2, s.left.up)
-            set(k.r3, s.right.stickClick); set(k.l3, s.left.stickClick)
-            set(k.start, s.right.menu); set(k.select, s.left.menu)
+            // Sin juego conocido (ventana): tabla de menús de vr_input (confirmar/cancelar/cruceta); una sola fuente de verdad.
+            b = VRInput.shared.plainSenseButtons(left: s.left, right: s.right)
             lx = s.left.stickX; ly = s.left.stickY; rx = s.right.stickX; ry = s.right.stickY
-            set(k.up, ly > 0.55); set(k.down, ly < -0.55); set(k.right, lx > 0.55); set(k.left, lx < -0.55)
         }
         return (b, Self.axis(lx, invert: false), Self.axis(ly, invert: true),
                 Self.axis(rx, invert: false), Self.axis(ry, invert: true))

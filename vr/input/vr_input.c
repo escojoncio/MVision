@@ -62,16 +62,26 @@ void vr_input_cfg_defaults(vri_cfg_t *c) {
     c->prone_drop_m = 0.80f;
     c->hysteresis_m = 0.06f;
     c->crouch_btn = VRI_PAD_CROSS;
-    /* Mapa por defecto (Sense): gatillo dominante = usar arma; gatillo no dominante = acción/confirmar;
-     * grips = L1/R1 (ventanas de objeto/arma); cara baja/alta dominante = cruz/triángulo;
-     * cara baja/alta no dominante = L2/R2; clic de stick = L3/R3; Options = Start; Create = Select. */
+    c->grip_delay_s = 0.12f;
+    c->grip_tap_s = 0.10f;
+    /* Mapa por defecto (Sense, estándar de los juegos de VR):
+     *   mano dominante: A (cara baja) = cruz, B (cara alta) = círculo, gatillo = cuadrado (disparo/golpe: el botón de ataque del
+     *     juego; con arma VR en mano lo gobierna el módulo de armas), agarre = R1 (arma), clic = R3, Menú = Start.
+     *   mano no dominante: A = cuadrado, B = triángulo, gatillo = L2, agarre = L1 (objeto), clic = L3, Menú = Select;
+     *     agarre + gatillo a la vez = R2.
+     *   En menús: gatillo y A = confirmar (círculo + cruz: círculo confirma en los menús y cruz avanza texto y salta escenas;
+     *     con ambos pulsados el confirmar gana), B = cancelar (cruz). */
     vri_map_t *m = &c->map;
-    m->trig_dom = VRI_PAD_SQUARE; m->trig_off = VRI_PAD_CIRCLE;
+    m->trig_dom = VRI_PAD_SQUARE; m->trig_off = VRI_PAD_L2;
     m->grip_dom = VRI_PAD_R1;     m->grip_off = VRI_PAD_L1;
-    m->low_dom = VRI_PAD_CROSS;   m->up_dom = VRI_PAD_TRIANGLE;
-    m->low_off = VRI_PAD_L2;      m->up_off = VRI_PAD_R2;
+    m->low_dom = VRI_PAD_CROSS;   m->up_dom = VRI_PAD_CIRCLE;
+    m->low_off = VRI_PAD_SQUARE;  m->up_off = VRI_PAD_TRIANGLE;
     m->stick_dom = VRI_PAD_R3;    m->stick_off = VRI_PAD_L3;
     m->menu_dom = VRI_PAD_START;  m->menu_off = VRI_PAD_SELECT;
+    m->chord_off = VRI_PAD_R2;
+    m->menu_trig = VRI_PAD_CIRCLE | VRI_PAD_CROSS;
+    m->menu_low = VRI_PAD_CIRCLE | VRI_PAD_CROSS;
+    m->menu_up = VRI_PAD_CROSS;
 }
 
 static void sanitize(vri_cfg_t *c) {
@@ -89,6 +99,8 @@ static void sanitize(vri_cfg_t *c) {
     c->crouch_drop_m = clampf(fin0(c->crouch_drop_m), 0.15f, 0.7f);
     c->prone_drop_m = clampf(fin0(c->prone_drop_m), c->crouch_drop_m + 0.2f, 1.4f);
     c->hysteresis_m = clampf(fin0(c->hysteresis_m), 0.01f, 0.15f);
+    c->grip_delay_s = clampf(fin0(c->grip_delay_s), 0.0f, 0.5f);
+    c->grip_tap_s = clampf(fin0(c->grip_tap_s), 0.04f, 0.3f);
 }
 
 void vr_input_set_cfg(vr_input_t *s, const vri_cfg_t *cfg) {
@@ -132,21 +144,69 @@ static bool hys(bool *st, float v, float on, float off) {
     return *st;
 }
 
-static uint16_t map_sense(vr_input_t *s, const vr_input_frame_t *f, int dom) {
-    const vri_map_t *m = &s->cfg.map;
+/* Botones digitales y gatillos/agarres de las dos manos -> máscara original. Sin estado salvo el de los agarres (acorde y retardo). */
+static uint16_t map_sense(vr_input_t *s, const vr_input_frame_t *f, int dom, float dt) {
+    const vri_cfg_t *c = &s->cfg;
+    const vri_map_t *m = &c->map;
+    bool menu = f->menu;
     uint16_t b = 0;
     for (int role = 0; role < 2; role++) {            /* role 0 = dominante, 1 = no dominante */
         int hi = role == 0 ? dom : 1 - dom;           /* índice físico */
         const vri_hand_t *h = &f->hand[hi];
         bool trig = hys(&s->hold_trig[role], h->trigger, 0.55f, 0.35f);
         bool grip = hys(&s->hold_grip[role], h->grip, 0.55f, 0.35f);
-        if (trig) b |= role == 0 ? m->trig_dom : m->trig_off;
-        if (grip) b |= role == 0 ? m->grip_dom : m->grip_off;
-        if (h->buttons & VRI_H_LOW) b |= role == 0 ? m->low_dom : m->low_off;
-        if (h->buttons & VRI_H_UP) b |= role == 0 ? m->up_dom : m->up_off;
+        bool use_chord = role == 1 && !menu && m->chord_off != 0 && c->grip_delay_s > 0.0f;
+        /* acorde: agarre + gatillo con el agarre aún sin emitir; dura mientras se mantenga el agarre */
+        bool was_chord = s->grip_chord[role];
+        if (!grip) s->grip_chord[role] = false;
+        else if (use_chord && trig && !s->grip_out[role]) s->grip_chord[role] = true;
+        if (!use_chord) s->grip_chord[role] = false;
+        bool chord = s->grip_chord[role];
+        /* agarre: L1/R1 con retardo solo en la mano del acorde (un toque corto emite un pulso al soltar) */
+        bool g_out = false;
+        if (grip) {
+            if (!s->grip_prev[role]) { s->grip_t[role] = 0.0f; s->grip_out[role] = false; }
+            s->grip_t[role] += dt;
+            float delay = use_chord ? c->grip_delay_s : 0.0f;
+            if (!chord && s->grip_t[role] >= delay) { g_out = true; s->grip_out[role] = true; }
+        } else if (s->grip_prev[role] && !s->grip_out[role] && !was_chord && !menu) {
+            s->grip_tap[role] = c->grip_tap_s;         /* agarre más corto que el retardo: toque de L1 */
+        }
+        s->grip_prev[role] = grip;
+        if (s->grip_tap[role] > 0.0f) { g_out = true; s->grip_tap[role] -= dt; }
+        if (menu) s->grip_tap[role] = 0.0f;
+        if (g_out) b |= role == 0 ? m->grip_dom : m->grip_off;
+        if (chord) { if (trig) b |= m->chord_off; }
+        else if (trig) b |= menu ? m->menu_trig : (role == 0 ? m->trig_dom : m->trig_off);
+        if (h->buttons & VRI_H_LOW) b |= menu ? m->menu_low : (role == 0 ? m->low_dom : m->low_off);
+        if (h->buttons & VRI_H_UP) b |= menu ? m->menu_up : (role == 0 ? m->up_dom : m->up_off);
         if (h->buttons & VRI_H_STICK) b |= role == 0 ? m->stick_dom : m->stick_off;
         if (h->buttons & VRI_H_MENU) b |= role == 0 ? m->menu_dom : m->menu_off;
     }
+    return b;
+}
+
+uint16_t vr_input_sense_plain(const vri_cfg_t *cfg, const vri_hand_t hand[2]) {
+    if (!cfg || !hand) return 0;
+    const vri_map_t *m = &cfg->map;
+    int dom = cfg->dominant_hand ? 1 : 0;
+    uint16_t b = 0;
+    float sx = 0, sy = 0;
+    for (int role = 0; role < 2; role++) {
+        const vri_hand_t *h = &hand[role == 0 ? dom : 1 - dom];
+        if (fin0(h->trigger) > 0.55f) b |= m->menu_trig;
+        if (fin0(h->grip) > 0.55f) b |= role == 0 ? m->grip_dom : m->grip_off;
+        if (h->buttons & VRI_H_LOW) b |= m->menu_low;
+        if (h->buttons & VRI_H_UP) b |= m->menu_up;
+        if (h->buttons & VRI_H_STICK) b |= role == 0 ? m->stick_dom : m->stick_off;
+        if (h->buttons & VRI_H_MENU) b |= role == 0 ? m->menu_dom : m->menu_off;
+        float x = fin0(h->stick_x), y = fin0(h->stick_y);
+        if (x * x + y * y > sx * sx + sy * sy) { sx = x; sy = y; }
+    }
+    if (sy > 0.55f) b |= VRI_PAD_UP;
+    if (sy < -0.55f) b |= VRI_PAD_DOWN;
+    if (sx > 0.55f) b |= VRI_PAD_RIGHT;
+    if (sx < -0.55f) b |= VRI_PAD_LEFT;
     return b;
 }
 
@@ -232,7 +292,7 @@ void vr_input_update(vr_input_t *s, const vr_input_frame_t *f, vr_pad_t *out) {
         buttons = f->pad_buttons;
         mx = f->pad_lx; my = f->pad_ly; tx = f->pad_rx; ty = f->pad_ry;
     } else {
-        buttons = map_sense(s, f, dom);
+        buttons = map_sense(s, f, dom, dt);
         mx = move_hand->stick_x; my = move_hand->stick_y;
         tx = f->hand[dom].stick_x; ty = f->hand[dom].stick_y;
     }
@@ -246,6 +306,7 @@ void vr_input_update(vr_input_t *s, const vr_input_frame_t *f, vr_pad_t *out) {
     if (f->menu) {
         /* Menús del juego: el stick de mover hace de cruceta (el digital del mando se conserva en modo PAD). */
         const float on = 0.55f, off = 0.35f;
+        if (c->mode == VRI_MODE_SENSE && tx * tx + ty * ty > mx * mx + my * my) { mx = tx; my = ty; }   /* en menús vale cualquiera de los dos sticks (el de mayor desvío) */
         bool *dp = s->menu_dpad;                 /* arriba, derecha, abajo, izquierda */
         hys(&dp[0], my, on, off); hys(&dp[2], -my, on, off);
         hys(&dp[1], mx, on, off); hys(&dp[3], -mx, on, off);

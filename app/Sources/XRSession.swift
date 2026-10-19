@@ -85,7 +85,7 @@ struct XRGhostView: View {
 /// Comprobación de que, con la ventana CERRADA (modo de prueba), los botones del mando siguen llegando. El botón de Menú
 /// llega siempre; si tras él pasan 3 s sin ningún otro elemento, se vuelve al modo "ventana invisible" y se reabre.
 /// Un falso positivo es barato (la ventana de respaldo es invisible). `note(signature:)` es seguro desde cualquier hilo;
-/// lo llama `ControllerHub.diagnose` con la firma de elementos pulsados (la misma que escribe en el registro `entrada ...`).
+/// lo llama el gancho `ControllerHub.onInputSignature` (conectado en `arm()`) con la firma de elementos pulsados (la misma que escribe en el registro `entrada ...`).
 final class XRInputProbe {
     static let shared = XRInputProbe()
     private let lock = NSLock()
@@ -93,8 +93,15 @@ final class XRInputProbe {
     private var menuAt: TimeInterval?
     private var sawOther = false
 
-    func arm() { lock.lock(); armed = true; menuAt = nil; sawOther = false; lock.unlock() }
-    func disarm() { lock.lock(); armed = false; lock.unlock() }
+    func arm() {
+        lock.lock(); armed = true; menuAt = nil; sawOther = false; lock.unlock()
+        // ControllerHub.diagnose avisa de cada cambio de la firma de botones pulsados (el mismo texto del registro `entrada ...`).
+        ControllerHub.onInputSignature = { XRInputProbe.shared.note(signature: $0) }
+    }
+    func disarm() {
+        lock.lock(); armed = false; lock.unlock()
+        ControllerHub.onInputSignature = nil
+    }
 
     func note(signature: String) {
         let names = signature.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }

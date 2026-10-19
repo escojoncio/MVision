@@ -76,6 +76,12 @@ typedef struct {
     uint16_t trig_dom, trig_off, grip_dom, grip_off;
     uint16_t low_dom, up_dom, low_off, up_off;
     uint16_t stick_dom, stick_off, menu_dom, menu_off;
+    /* Acorde de la mano no dominante: agarre + gatillo apretados a la vez (con el agarre aún no emitido) = esta máscara
+     * (R2 por defecto); no emite ni L1 ni L2. 0 = sin acorde. Solo en juego (no en menús). */
+    uint16_t chord_off;
+    /* En menús (jugador fuera de control: título, menús, comunicador, escenas, pausa) los botones de las dos manos pasan por
+     * estas máscaras en vez de las del juego: gatillo y cara baja = confirmar (+ avanzar texto/saltar escena), cara alta = cancelar. */
+    uint16_t menu_trig, menu_low, menu_up;
 } vri_map_t;
 
 typedef struct {
@@ -95,6 +101,8 @@ typedef struct {
     float prone_drop_m;      /* caída para tumbarse (~0.80) */
     float hysteresis_m;      /* 0.06 */
     uint16_t crouch_btn;     /* botón del juego que agacha/tumba (toques) */
+    float grip_delay_s;      /* mano no dominante con acorde: el agarre solo emite L1 tras este tiempo (0 = inmediato) */
+    float grip_tap_s;        /* un agarre más corto que grip_delay_s emite un toque de esta duración al soltar */
     vri_map_t map;
 } vri_cfg_t;
 
@@ -112,6 +120,8 @@ typedef struct {
     bool need_calib, crouch_pending, hold_trig[2], hold_grip[2];
     float game_up;
     bool menu_dpad[4];
+    float grip_t[2], grip_tap[2];
+    bool grip_prev[2], grip_out[2], grip_chord[2];
     vr_pad_t last;
 } vr_input_t;
 
@@ -119,6 +129,9 @@ void vr_input_cfg_defaults(vri_cfg_t *cfg);
 void vr_input_init(vr_input_t *s);                       /* configuración por defecto */
 void vr_input_set_cfg(vr_input_t *s, const vri_cfg_t *cfg); /* sanea valores fuera de rango */
 void vr_input_update(vr_input_t *s, const vr_input_frame_t *f, vr_pad_t *out);
+/* Sin estado, para la ventana (sin juego conocido): botones de los dos Sense con el mapa de MENÚS y los agarres sin retardo;
+ * el stick de cada mano (el de mayor desvío) pasa a cruceta. Misma tabla que vr_input_update en modo Sense con menu=true. */
+uint16_t vr_input_sense_plain(const vri_cfg_t *cfg, const vri_hand_t hand[2]);
 
 /* Cámara: yaw del "cuerpo" en radianes (-pi..pi], se suma al rumbo de la cabeza. Gira alrededor de la cabeza
  * (la capa de cámara debe compensar el desplazamiento XZ para que la cabeza no se mueva al girar). */
