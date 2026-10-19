@@ -4,7 +4,7 @@
 
 static struct {
     NsBridge *br;
-    NsExtractFn ex; void *ex_user; const NsMeshStore *store;
+    NsExtractFn ex; void *ex_user; NsMeshStore *store;
     NsCtxFn ctx; void *ctx_user;
     uint32_t vbl;
     int pending;
@@ -15,7 +15,7 @@ static struct {
 
 void ns_hook_init(NsBridge *b) { H.br = b; H.pending = 0; memset(&H.map, 0, sizeof H.map); }
 void ns_hook_reset(void) { H.pending = 0; memset(&H.map, 0, sizeof H.map); memset(&H.st, 0, sizeof H.st); }
-void ns_hook_set_extractor(NsExtractFn fn, void *user, const NsMeshStore *store) { H.ex = fn; H.ex_user = user; H.store = store; }
+void ns_hook_set_extractor(NsExtractFn fn, void *user, NsMeshStore *store) { H.ex = fn; H.ex_user = user; H.store = store; }
 int ns_hook_has_extractor(void) { return H.ex != NULL; }
 void ns_hook_set_context(NsCtxFn fn, void *user) { H.ctx = fn; H.ctx_user = user; }
 void ns_hook_set_frame(uint32_t v) { H.vbl = v; }

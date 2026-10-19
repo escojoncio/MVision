@@ -45,12 +45,15 @@ void mv_vrhost_set_list_tap(MvVrListTap cb);
  * ~1,5 s se apaga (ventana plana) y al volver la primera lista trae la VRAM completa (vram_init). Thread-safe. */
 extern int mv_host_scene(VrScene *out);
 
-/* Volcado de un fotograma para desarrollo (vr/native/ns_dump.h). Cualquier hilo. `dir` = directorio a crear (el padre debe existir; se copia la ruta).
- * Se atiende en el siguiente VBlank con lista de dibujo (como mucho unos pocos VBlanks) en el hilo de emulación: RAM, scratchpad, VRAM, registros de la GTE,
- * la última lista de la GPU, el fotograma real en PNG y la pose de cámara/cabeza. Devuelve 0 si se aceptó, -1 si ya hay uno pendiente o la ruta es inválida. */
+/* Volcado de un fotograma para desarrollo (vr/native/ns_dump.h). Cualquier hilo (no bloquea). `dir` = directorio a crear (el padre debe existir; se copia la
+ * ruta). El hilo de emulación sólo COPIA (RAM, memoria rápida, VRAM, coprocesador de geometría, lista, meta) en el siguiente fin de fotograma, con la última lista construida si la hay y sin ella si no
+ * (sin consumidor, cola llena o sin lista nueva); la PNG y el disco los hace un hilo trabajador propio. Devuelve 0 si se aceptó, -1 si ya hay uno en curso,
+ * la ruta es inválida o falta memoria. */
 int mv_vrhost_request_dump(const char *dir);
-/* Resultado del último volcado pedido: 0 = pendiente o ninguno, 1 = escrito, -1 = falló. Se consume al leerlo (devuelve 0 después). */
+/* Resultado del último volcado: 0 = en curso o ninguno, 1 = escrito, 2 = escrito con partes accesorias fallidas, -1 = falló. Se consume al leerlo. */
 int mv_vrhost_dump_result(void);
+/* Anula un pedido que aún no llegó a copiarse (timeout del llamador). Si ya se copió, termina de escribirse. */
+void mv_vrhost_cancel_dump(void);
 
 /* Resumen del último frame del puente para Swift (sin importar el BridgeState entero). */
 typedef struct {

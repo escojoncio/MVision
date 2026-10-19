@@ -42,7 +42,7 @@ typedef struct {
 
 void ns_hook_init(NsBridge *b);                         /* NULL desengancha */
 void ns_hook_reset(void);                               /* cambio de ejecutable: descarta lo pendiente y los contadores */
-void ns_hook_set_extractor(NsExtractFn fn, void *user, const NsMeshStore *store);   /* fn NULL = sustituto */
+void ns_hook_set_extractor(NsExtractFn fn, void *user, NsMeshStore *store);   /* fn NULL = sustituto */
 int ns_hook_has_extractor(void);
 void ns_hook_set_context(NsCtxFn fn, void *user);
 void ns_hook_set_frame(uint32_t vblank_count);          /* para NsScene.vblank (si el extractor lo dejó a 0) */

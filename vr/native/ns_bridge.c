@@ -12,10 +12,7 @@ struct NsBridge {
     _Atomic uint32_t state;              /* buzón | actual << 4 | anterior << 8 (4 bits cada uno, 0xF = ninguna) */
     NsBridgeCaps caps;
     NsScene slot[NS_BRIDGE_SLOTS];
-    const NsMeshStore *store[NS_BRIDGE_SLOTS];
-    uint32_t gen[NS_BRIDGE_SLOTS];       /* generación de publicación de cada ranura */
-    uint32_t gen_counter;
-    _Atomic uint32_t acked_epoch;
+    NsMeshStore *store[NS_BRIDGE_SLOTS];
     /* solo productor */
     int wr;                              /* ranura en escritura o -1 */
     uint32_t seq;
@@ -113,7 +110,10 @@ NsScene *ns_bridge_begin(NsBridge *b) {
     }
     NsScene *s = &b->slot[b->wr];
     NsInstance *ai = s->inst; NsPiece *ap = s->piece; NsLight *al = s->lights; NsEffect *ae = s->effects;
+    uint32_t gen = s->slot_gen + 1;   /* contrato v2: generación del slot, sube en cada reescritura */
     memset(s, 0, sizeof *s);
+    s->size = (uint32_t)sizeof *s;
+    s->slot_gen = gen;
     s->version = NS_VERSION;
     s->units_per_m = 1000.0f;
     s->inst = ai; s->cap_inst = b->caps.cap_inst;
@@ -126,7 +126,7 @@ NsScene *ns_bridge_begin(NsBridge *b) {
 NsScene *ns_bridge_current(NsBridge *b) { return b && b->wr >= 0 ? &b->slot[b->wr] : NULL; }
 int ns_bridge_pending(const NsBridge *b) { return b && b->wr >= 0; }
 
-void ns_bridge_publish(NsBridge *b, const NsMeshStore *store) {
+void ns_bridge_publish(NsBridge *b, NsMeshStore *store) {
     if (!b || b->wr < 0) return;
     uint32_t w = (uint32_t)b->wr;
     NsScene *s = &b->slot[w];
@@ -138,7 +138,6 @@ void ns_bridge_publish(NsBridge *b, const NsMeshStore *store) {
     s->seq = ++b->seq;
     if (!s->t_ns) s->t_ns = ns_now_ns();
     b->store[w] = store;
-    b->gen[w] = ++b->gen_counter;
     uint32_t old = atomic_load_explicit(&b->state, memory_order_relaxed), nw;
     int replaced;
     do {
@@ -178,7 +177,7 @@ int ns_bridge_acquire(NsBridge *b, uint64_t now_ns, NsView *out) {
     const NsScene *cur = &b->slot[ci];
     const NsScene *prev = pi == NONE ? NULL : &b->slot[pi];
     out->cur = cur; out->prev = prev; out->store = b->store[ci];
-    out->cur_gen = b->gen[ci]; out->prev_gen = prev ? b->gen[pi] : 0;
+    out->cur_gen = cur->slot_gen; out->prev_gen = prev ? prev->slot_gen : 0;
     if (out->fresh) atomic_fetch_add_explicit(&b->acquired, 1, memory_order_relaxed);
     if (out->fresh && prev && cur->t_ns > prev->t_ns) {
         uint64_t dt = cur->t_ns - prev->t_ns;
@@ -205,14 +204,6 @@ int ns_bridge_acquire(NsBridge *b, uint64_t now_ns, NsView *out) {
     }
     return 1;
 }
-
-void ns_bridge_ack_epoch(NsBridge *b, uint32_t epoch) {
-    if (!b) return;
-    uint32_t cur = atomic_load_explicit(&b->acked_epoch, memory_order_relaxed);
-    while ((int32_t)(epoch - cur) > 0 &&
-           !atomic_compare_exchange_weak_explicit(&b->acked_epoch, &cur, epoch, memory_order_release, memory_order_relaxed)) {}
-}
-uint32_t ns_bridge_acked_epoch(const NsBridge *b) { return b ? atomic_load_explicit(&b->acked_epoch, memory_order_acquire) : 0; }
 
 /* ------------------------------------------------------------------------------------------------ interpolación */
 static void lerp12(const NsXf *a, const NsXf *b, float t, NsXf *o) {

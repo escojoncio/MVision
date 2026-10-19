@@ -36,15 +36,15 @@ static void t_basic(void) {
     NsView v;
     CHECK(ns_bridge_acquire(b, 0, &v) == 0, "vacío");
     NsScene *s = ns_bridge_begin(b);
-    CHECK(s && s->cap_inst == 8 && s->cap_piece == 64 && s->version == NS_VERSION && s->n_inst == 0, "begin");
+    CHECK(s && s->size == sizeof(NsScene) && s->cap_inst == 8 && s->cap_piece == 64 && s->version == NS_VERSION && s->n_inst == 0, "begin");
     CHECK(ns_bridge_pending(b) && ns_bridge_current(b) == s, "pendiente");
     CHECK(ns_bridge_begin(b) == s, "begin idempotente");
     s->t_ns = 1000;
     fill(s, 1, 2, 2);
-    ns_bridge_publish(b, (const NsMeshStore *)0x1);
+    ns_bridge_publish(b, (NsMeshStore *)0x1);
     CHECK(!ns_bridge_pending(b), "ya no pendiente");
     CHECK(ns_bridge_acquire(b, 5000, &v) == 1 && v.fresh && v.cur && v.cur->seq == 1 && !v.prev && !v.interp && v.alpha == 1.0f, "primera");
-    CHECK(v.store == (const NsMeshStore *)0x1 && v.cur_gen == 1 && v.prev_gen == 0, "store/gen");
+    CHECK(v.store == (NsMeshStore *)0x1 && v.cur_gen == 1 && v.prev_gen == 0, "store/gen");
     CHECK(ns_bridge_acquire(b, 6000, &v) == 1 && !v.fresh && v.cur->seq == 1, "repite");
     /* sustituir el buzón: dos publicaciones sin tomar */
     s = ns_bridge_begin(b); s->t_ns = 2000; fill(s, 2, 2, 2); ns_bridge_publish(b, NULL);
@@ -55,15 +55,6 @@ static void t_basic(void) {
     CHECK(check(v.cur) && check(v.prev), "contenido");
     /* la escena actual y la anterior no se pisan aunque el productor siga */
     for (uint32_t i = 0; i < 20; i++) { s = ns_bridge_begin(b); s->t_ns = 10000 + i; fill(s, 4 + i, 2, 2); CHECK(s != v.cur && s != v.prev, "ranura en uso"); ns_bridge_publish(b, NULL); CHECK(check(v.cur) && check(v.prev), "pisada"); }
-    ns_bridge_destroy(b);
-}
-
-static void t_epoch(void) {
-    NsBridge *b = ns_bridge_create(NULL);
-    CHECK(ns_bridge_acked_epoch(b) == 0, "ack inicial");
-    ns_bridge_ack_epoch(b, 3);
-    ns_bridge_ack_epoch(b, 2);   /* no retrocede */
-    CHECK(ns_bridge_acked_epoch(b) == 3, "ack monótono");
     ns_bridge_destroy(b);
 }
 
@@ -191,7 +182,7 @@ static void t_threads(void) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
-    t_basic(); t_epoch(); t_interp(); t_lerp(); t_threads();
+    t_basic(); t_interp(); t_lerp(); t_threads();
     printf(fails ? "ns_bridge: %d fallos\n" : "ns_bridge: todas las pruebas OK\n", fails);
     return fails != 0;
 }
