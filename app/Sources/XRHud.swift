@@ -15,7 +15,7 @@ struct XRDrawItem {
     var imgSize = SIMD2<Float>(1, 1)            // pantalla: tamaño de la imagen en texels
     var sharp: Float = 1                        // pantalla: 0 suave, 1 nítido, 2 píxel
     var opacity: Float = 1                      // veil: opacidad del negro; vignette: intensidad 0..1
-    /// Texto/HUD (subtítulos, mensajes, créditos, alertas, panel 2D flotante, HUD de muñeca): se dibuja SIEMPRE encima del mundo, el cuerpo y el arma
+    /// Solo TEXTOS (subtítulos, mensajes, créditos, alertas, panel 2D flotante; NO el HUD de muñeca ni el radar, que van pegados al brazo con profundidad): se dibuja SIEMPRE encima del mundo, el cuerpo y el arma
     /// (sin prueba de profundidad ni escritura) y después de ellos; la posición 3D del panel se conserva (estereoscopía), solo cambia la oclusión.
     var onTop = false
     var vig: [SIMD4<Float>] = []                // vignette: por ojo (centro óptico x, y en píxeles del destino; tangentes por píxel x, y)

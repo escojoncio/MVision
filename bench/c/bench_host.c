@@ -117,6 +117,9 @@ static void texvtx(float x, float y, float z, float u, float v) {
 /* Mundo (metros, Y arriba, -Z delante): suelo ajedrezado 20x20 m en y=0 (gris claro/oscuro), cubo ROJO (-1.2, .5, -3), AZUL (1.5, .5, -3),
  * AMARILLO pequeño y cercano en (0, 1.6, -2) justo delante de un cubo VERDE grande y lejano (0, 1.6, -8) (oclusión: el verde se emite DESPUÉS
  * del amarillo, así que si la profundidad falla se vería verde en el centro). HUD 2D: rectángulo magenta 10..60 x 10..40 px en la esquina sup. izq. */
+/* Cubo CIANO opcional delante del radar de muñeca (lo coloca el banco tras conocer el marco del radar): el radar lleva profundidad normal y debe quedar tapado. */
+static int g_occ_on; static float g_occ[4];
+void bench_set_radar_occluder(int on, float x, float y, float z, float size) { g_occ_on = on; g_occ[0] = x; g_occ[1] = y; g_occ[2] = z; g_occ[3] = size; }
 void bench_make_scene(void) {
     g_nv = 0; g_nb = 0;
     uint32_t first = 0;
@@ -132,6 +135,7 @@ void bench_make_scene(void) {
     box(0.0f, 1.6f, -8.0f, 3.0f, 3.0f, 1.0f, rgba(0, 255, 0));
     /* CIANO delante del panel del HUD: entre la cabeza de la pose B (0.2, 1.6, -0.3) y el rectángulo magenta del panel (-0.386, 1.953, -1.7); el texto/HUD siempre va encima */
     box(-0.093f, 1.776f, -1.0f, 0.12f, 0.12f, 0.12f, rgba(0, 255, 255));
+    if (g_occ_on) box(g_occ[0], g_occ[1], g_occ[2], g_occ[3], g_occ[3], g_occ[3], rgba(0, 255, 255));
     batch(first, 0, 0);
     first = g_nv;
     /* cuadro texturizado 2x2 m en x -4..-2, y 1..3, z -5: lee la VRAM tras aplicar los eventos (relleno azul en texels 0..15 x 0..15 y subida verde en 16..31 x 0..15) */

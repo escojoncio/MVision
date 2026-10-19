@@ -350,13 +350,26 @@ func runCase(_ cfg: Cfg, first: Bool) {
             check(caso, "codificador", false, "XRFrameEncoder no se pudo crear"); return
         }
         enc.log = { print("[diag] " + $0) }
+        let headA = headPose(SIMD3<Float>(0, 1.6, 0), yaw: 0)
+        let headB = headPose(SIMD3<Float>(0.2, 1.6, -0.3), yaw: 0.1745)
+        // cubo ciano a ~45 % del camino cabeza -> centro del radar (mismo antebrazo sintético que más abajo): el radar lleva profundidad y debe quedar TAPADO
+        var radarCover = false
+        do {
+            let fa: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>) = (SIMD3<Float>(-0.30, 1.20, -0.40), SIMD3<Float>(-0.25, 1.25, -0.80), SIMD3<Float>(0, 1, 0))
+            enc.renderer.radar?.updatePose(forearm: fa, leftGrip: nil, headPosition: XRMath.position(headB), headForward: SIMD3<Float>(0, 0, -1))
+            if let wf = enc.renderer.radar?.wristFrame {
+                let hp0 = XRMath.position(headB)
+                let m = hp0 + (wf.center - hp0) * 0.45
+                bench_set_radar_occluder(1, m.x, m.y, m.z, 0.06)
+                radarCover = true
+            }
+        }
         bench_make_pattern()
         bench_make_scene()
+        bench_set_radar_occluder(0, 0, 0, 0, 0)
         bench_scene_post()
         bench_enable_radar(1)
         bench_enable_weapon(1)
-        let headA = headPose(SIMD3<Float>(0, 1.6, 0), yaw: 0)
-        let headB = headPose(SIMD3<Float>(0.2, 1.6, -0.3), yaw: 0.1745)
         var gs = MvVrGameState(); gs.view_mode = 1; gs.game = 1; gs.in_control = 1; gs.cam_active = 1; gs.first_person = 1
         // radar de muñeca: antebrazo izquierdo sintético (codo, muñeca, dorso hacia arriba)
         let forearm: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>) = (SIMD3<Float>(-0.30, 1.20, -0.40), SIMD3<Float>(-0.25, 1.25, -0.80), SIMD3<Float>(0, 1, 0))
@@ -410,7 +423,16 @@ func runCase(_ cfg: Cfg, first: Bool) {
             // radar de muñeca y arma en mano (informativos: no hacen fallar el banco, ver "soft")
             if let wf = enc.renderer.radar?.wristFrame, let px = project(wf.center, eye: e, head: headB) {
                 let c = im.avg(px.0, px.1, r: 3)
-                soft(caso, "ojo \(e) radar de muneca", c.1 > 80 || c.0 > 120, "centro del radar \(wf.center) pixel (\(px.0),\(px.1)) color \(c) esperado verde o punto rojo")
+                if radarCover {
+                    check(caso, "ojo \(e) radar tapado por el cubo ciano (profundidad normal)", near(c, (0, 255, 255), 80), "centro del radar \(wf.center) pixel (\(px.0),\(px.1)) color \(c) esperado ciano; verde/rojo = el radar se pinta por encima del mundo")
+                    let ex = wf.center + wf.right * (wf.halfW * 0.85)
+                    if let pe = project(ex, eye: e, head: headB) {
+                        let ce = im.avg(pe.0, pe.1, r: 1)
+                        soft(caso, "ojo \(e) radar visible fuera del cubo", ce.1 > 80 && ce.2 < 200, "borde del radar pixel (\(pe.0),\(pe.1)) color \(ce) esperado verde")
+                    }
+                } else {
+                    soft(caso, "ojo \(e) radar de muneca", c.1 > 80 || c.0 > 120, "centro del radar \(wf.center) pixel (\(px.0),\(px.1)) color \(c) esperado verde o punto rojo")
+                }
             } else { soft(caso, "ojo \(e) radar de muneca", false, "sin marco de muneca (radar sin pose o sin escena)") }
             if let px = project(SIMD3<Float>(0.25, 1.2, -0.6), eye: e, head: headB) {
                 let c = im.avg(px.0, px.1, r: 3)

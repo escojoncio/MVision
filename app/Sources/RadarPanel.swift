@@ -124,8 +124,8 @@ final class RadarPanel {
         texture = device.makeTexture(descriptor: td)
         texture?.label = "Radar de muñeca"
         let d = MTLDepthStencilDescriptor()
-        d.depthCompareFunction = .always            // el radar va SIEMPRE encima del mundo, el cuerpo y el arma (se codifica el último): sin prueba ni escritura de profundidad
-        d.isDepthWriteEnabled = false
+        d.depthCompareFunction = .greaterEqual      // Z invertida (cerca = 1), igual que el pase de escena: pegado al brazo, lo tapan el mundo, el cuerpo y el arma
+        d.isDepthWriteEnabled = true
         depthState = device.makeDepthStencilState(descriptor: d)
     }
 
