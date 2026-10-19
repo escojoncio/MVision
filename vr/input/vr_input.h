@@ -64,6 +64,7 @@ typedef struct {
     /* Retroalimentación del juego (puente RAM); -1 = desconocida. */
     int game_posture;               /* 0 de pie, 1 agachado, 2 tumbado */
     bool menu;                      /* pausa / menú / comunicador: sin locomoción ni agacharse, stick -> cruceta */
+    bool comms;                     /* comunicador (radio) abierto: habilita el avance sostenido de textos (cfg.hold_advance_s) */
 } vr_input_frame_t;
 
 typedef struct {
@@ -103,6 +104,16 @@ typedef struct {
     uint16_t crouch_btn;     /* botón del juego que agacha/tumba (toques) */
     float grip_delay_s;      /* mano no dominante con acorde: el agarre solo emite L1 tras este tiempo (0 = inmediato) */
     float grip_tap_s;        /* un agarre más corto que grip_delay_s emite un toque de esta duración al soltar */
+    /* Avance sostenido de la radio: con el comunicador abierto, mantener una cara (A o B de cualquier mano) más de hold_advance_s
+     * segundos emite toques repetidos de CRUZ (adv_on_s pulsado / adv_off_s suelto) y retira CÍRCULO/CRUZ del resto: avanza todos
+     * los textos hasta el final de la conversación SIN confirmar nada (nunca emite CÍRCULO, así que una pregunta de sí/no no se
+     * contesta). 0 = desactivado. Soltar, o tocar cruceta/stick, lo detiene. */
+    float hold_advance_s, adv_on_s, adv_off_s;
+    /* Histéresis de los umbrales analógicos (gatillo, agarre): se activa por encima de analog_on y se suelta por debajo de analog_off. */
+    float analog_on, analog_off;
+    /* Antirrebote del estado de menú: un cambio de f->menu solo se acepta si dura menu_debounce_s (evita el bucle control<->menú
+     * de un fotograma). 0 = sin antirrebote. */
+    float menu_debounce_s;
     vri_map_t map;
 } vri_cfg_t;
 
@@ -122,6 +133,10 @@ typedef struct {
     bool menu_dpad[4];
     float grip_t[2], grip_tap[2];
     bool grip_prev[2], grip_out[2], grip_chord[2];
+    bool menu_eff, menu_init;          /* estado de menú con antirrebote */
+    float menu_t;                      /* tiempo que f->menu discrepa de menu_eff */
+    float adv_hold, adv_phase;         /* avance sostenido: tiempo mantenido y fase del tren de toques */
+    bool adv_active;
     vr_pad_t last;
 } vr_input_t;
 

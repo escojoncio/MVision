@@ -64,6 +64,9 @@ void vr_input_cfg_defaults(vri_cfg_t *c) {
     c->crouch_btn = VRI_PAD_CROSS;
     c->grip_delay_s = 0.12f;
     c->grip_tap_s = 0.10f;
+    c->hold_advance_s = 0.5f; c->adv_on_s = 0.06f; c->adv_off_s = 0.10f;
+    c->analog_on = 0.55f; c->analog_off = 0.45f;
+    c->menu_debounce_s = 0.12f;
     /* Mapa por defecto (Sense, estándar de los juegos de VR):
      *   mano dominante: A (cara baja) = cruz, B (cara alta) = círculo, gatillo = cuadrado (disparo/golpe: el botón de ataque del
      *     juego; con arma VR en mano lo gobierna el módulo de armas), agarre = R1 (arma), clic = R3, Menú = Start.
@@ -101,6 +104,12 @@ static void sanitize(vri_cfg_t *c) {
     c->hysteresis_m = clampf(fin0(c->hysteresis_m), 0.01f, 0.15f);
     c->grip_delay_s = clampf(fin0(c->grip_delay_s), 0.0f, 0.5f);
     c->grip_tap_s = clampf(fin0(c->grip_tap_s), 0.04f, 0.3f);
+    c->hold_advance_s = clampf(fin0(c->hold_advance_s), 0.0f, 5.0f);
+    c->adv_on_s = clampf(fin0(c->adv_on_s), 0.03f, 0.5f);
+    c->adv_off_s = clampf(fin0(c->adv_off_s), 0.03f, 1.0f);
+    c->analog_on = clampf(fin0(c->analog_on), 0.2f, 0.95f);
+    c->analog_off = clampf(fin0(c->analog_off), 0.05f, c->analog_on - 0.02f);
+    c->menu_debounce_s = clampf(fin0(c->menu_debounce_s), 0.0f, 0.5f);
 }
 
 void vr_input_set_cfg(vr_input_t *s, const vri_cfg_t *cfg) {
@@ -145,16 +154,15 @@ static bool hys(bool *st, float v, float on, float off) {
 }
 
 /* Botones digitales y gatillos/agarres de las dos manos -> máscara original. Sin estado salvo el de los agarres (acorde y retardo). */
-static uint16_t map_sense(vr_input_t *s, const vr_input_frame_t *f, int dom, float dt) {
+static uint16_t map_sense(vr_input_t *s, const vr_input_frame_t *f, bool menu, int dom, float dt) {
     const vri_cfg_t *c = &s->cfg;
     const vri_map_t *m = &c->map;
-    bool menu = f->menu;
     uint16_t b = 0;
     for (int role = 0; role < 2; role++) {            /* role 0 = dominante, 1 = no dominante */
         int hi = role == 0 ? dom : 1 - dom;           /* índice físico */
         const vri_hand_t *h = &f->hand[hi];
-        bool trig = hys(&s->hold_trig[role], h->trigger, 0.55f, 0.35f);
-        bool grip = hys(&s->hold_grip[role], h->grip, 0.55f, 0.35f);
+        bool trig = hys(&s->hold_trig[role], h->trigger, c->analog_on, c->analog_off);
+        bool grip = hys(&s->hold_grip[role], h->grip, c->analog_on, c->analog_off);
         bool use_chord = role == 1 && !menu && m->chord_off != 0 && c->grip_delay_s > 0.0f;
         /* acorde: agarre + gatillo con el agarre aún sin emitir; dura mientras se mantenga el agarre */
         bool was_chord = s->grip_chord[role];
@@ -280,9 +288,39 @@ no_change:
     return out;
 }
 
-void vr_input_update(vr_input_t *s, const vr_input_frame_t *f, vr_pad_t *out) {
+/* Avance sostenido de la radio (ver vri_cfg_t.hold_advance_s). Solo en modo Sense con el comunicador abierto. Se parte de los botones ya
+ * calculados: tras hold_advance_s con una cara A/B apretada se quitan CÍRCULO/CRUZ y se emite CRUZ a toques (nunca CÍRCULO). Cualquier
+ * cruceta/stick desvía la intención (elegir respuesta) y detiene el avance hasta soltar. */
+static uint16_t hold_advance(vr_input_t *s, const vr_input_frame_t *f, uint16_t b, float dt) {
+    const vri_cfg_t *c = &s->cfg;
+    bool face = false;
+    for (int i = 0; i < 2; i++) if (f->hand[i].buttons & (VRI_H_LOW | VRI_H_UP)) face = true;
+    bool dpad = (b & (VRI_PAD_UP | VRI_PAD_DOWN | VRI_PAD_LEFT | VRI_PAD_RIGHT)) != 0;
+    if (c->mode != VRI_MODE_SENSE || c->hold_advance_s <= 0.0f || !f->comms || !face || dpad) {
+        s->adv_hold = 0.0f; s->adv_active = false; s->adv_phase = 0.0f;
+        return b;
+    }
+    s->adv_hold += dt;
+    if (s->adv_hold < c->hold_advance_s) return b;
+    if (!s->adv_active) { s->adv_active = true; s->adv_phase = 0.0f; }
+    float period = c->adv_on_s + c->adv_off_s;
+    s->adv_phase = fmodf(s->adv_phase + dt, period);
+    b = (uint16_t)(b & ~(VRI_PAD_CIRCLE | VRI_PAD_CROSS));
+    if (s->adv_phase < c->adv_on_s) b |= VRI_PAD_CROSS;
+    return b;
+}
+
+void vr_input_update(vr_input_t *s, const vr_input_frame_t *f_in, vr_pad_t *out) {
     vri_cfg_t *c = &s->cfg;
-    float dt = clampf(fin0(f->dt), 0.001f, 0.1f);
+    float dt = clampf(fin0(f_in->dt), 0.001f, 0.1f);
+    /* Antirrebote del estado de menú: el juego puede alternar control/menú cada fotograma (p. ej. una acción que retira el control un
+     * instante y lo devuelve); sin esto el mapa saltaba entre juego y menú en cada fotograma. El primer valor se acepta tal cual. */
+    if (!s->menu_init || c->menu_debounce_s <= 0.0f) { s->menu_eff = f_in->menu; s->menu_init = true; s->menu_t = 0.0f; }
+    else if (f_in->menu == s->menu_eff) s->menu_t = 0.0f;
+    else if ((s->menu_t += dt) >= c->menu_debounce_s) { s->menu_eff = f_in->menu; s->menu_t = 0.0f; }
+    vr_input_frame_t fr = *f_in;
+    fr.menu = s->menu_eff;
+    const vr_input_frame_t *f = &fr;
     int dom = c->dominant_hand ? 1 : 0;
     uint16_t buttons;
     float mx, my, tx, ty;                   /* stick de mover / de girar */
@@ -292,7 +330,7 @@ void vr_input_update(vr_input_t *s, const vr_input_frame_t *f, vr_pad_t *out) {
         buttons = f->pad_buttons;
         mx = f->pad_lx; my = f->pad_ly; tx = f->pad_rx; ty = f->pad_ry;
     } else {
-        buttons = map_sense(s, f, dom, dt);
+        buttons = map_sense(s, f, f->menu, dom, dt);
         mx = move_hand->stick_x; my = move_hand->stick_y;
         tx = f->hand[dom].stick_x; ty = f->hand[dom].stick_y;
     }
@@ -305,7 +343,7 @@ void vr_input_update(vr_input_t *s, const vr_input_frame_t *f, vr_pad_t *out) {
 
     if (f->menu) {
         /* Menús del juego: el stick de mover hace de cruceta (el digital del mando se conserva en modo PAD). */
-        const float on = 0.55f, off = 0.35f;
+        const float on = c->analog_on, off = c->analog_off;
         if (c->mode == VRI_MODE_SENSE && tx * tx + ty * ty > mx * mx + my * my) { mx = tx; my = ty; }   /* en menús vale cualquiera de los dos sticks (el de mayor desvío) */
         bool *dp = s->menu_dpad;                 /* arriba, derecha, abajo, izquierda */
         hys(&dp[0], my, on, off); hys(&dp[2], -my, on, off);
@@ -315,7 +353,9 @@ void vr_input_update(vr_input_t *s, const vr_input_frame_t *f, vr_pad_t *out) {
         if (dp[2]) buttons |= VRI_PAD_DOWN;
         if (dp[3]) buttons |= VRI_PAD_LEFT;
         s->turn_armed = 1;
+        buttons = hold_advance(s, f, buttons, dt);
     } else {
+        s->adv_hold = 0.0f; s->adv_active = false; s->adv_phase = 0.0f;
         memset(s->menu_dpad, 0, sizeof s->menu_dpad);
         /* giro */
         bool turn_on = c->turn_mode != VRI_TURN_OFF && !(c->mode == VRI_MODE_PAD && c->pass_right_stick);

@@ -17,6 +17,7 @@ struct VRInputSettings: Equatable {
     var headHeight: Float = 0         // altura de pie calibrada en metros; 0 = autocalibrar
     var crouchDrop: Float = 0.35
     var proneDrop: Float = 0.80
+    var holdAdvance: Float = 0.5      // segundos con A/B mantenido para avanzar toda la radio (0 = desactivado)
 
     private static let prefix = "vri."
 
@@ -35,6 +36,7 @@ struct VRInputSettings: Equatable {
         if has("height") { s.headHeight = d.float(forKey: prefix + "height") }
         if has("crouch") { s.crouchDrop = d.float(forKey: prefix + "crouch") }
         if has("proneDrop") { s.proneDrop = d.float(forKey: prefix + "proneDrop") }
+        if has("holdAdvance") { s.holdAdvance = min(max(d.float(forKey: prefix + "holdAdvance"), 0), 5) }
         return s
     }
 
@@ -51,6 +53,7 @@ struct VRInputSettings: Equatable {
         d.set(headHeight, forKey: Self.prefix + "height")
         d.set(crouchDrop, forKey: Self.prefix + "crouch")
         d.set(proneDrop, forKey: Self.prefix + "proneDrop")
+        d.set(holdAdvance, forKey: Self.prefix + "holdAdvance")
     }
 }
 
@@ -138,6 +141,7 @@ final class VRInput: @unchecked Sendable {
         c.posture_mode = Int32(settings.physicalPosture)
         c.crouch_drop_m = settings.crouchDrop
         c.prone_drop_m = settings.proneDrop
+        c.hold_advance_s = settings.holdAdvance
         vr_input_set_cfg(&state, &c)
         mv_vrgame_set_options(settings.rightHanded ? 1 : 0, Int32(settings.weaponReload))   // mano y recarga del arma VR
         if applyHeight, settings.headHeight > 0 {
@@ -232,7 +236,7 @@ final class VRInput: @unchecked Sendable {
     /// Un fotograma: lee, procesa y envía al juego. `head` = transformación cabeza->origen (deviceAnchor) o nil.
     /// `gamePosture` del puente RAM (0 de pie, 1 agachado, 2 tumbado, -1 desconocida). Devuelve el pad enviado.
     @discardableResult
-    func frame(head: simd_float4x4?, dt: Float, gamePosture: Int32 = -1, menu: Bool = false,
+    func frame(head: simd_float4x4?, dt: Float, gamePosture: Int32 = -1, menu: Bool = false, comms: Bool = false,
                recenter: simd_float4x4 = matrix_identity_float4x4) -> vr_pad_t {
         let sample = hub.sample()
 
@@ -240,6 +244,7 @@ final class VRInput: @unchecked Sendable {
         f.dt = dt
         f.game_posture = gamePosture
         f.menu = menu
+        f.comms = comms
         if let m = head {
             f.head_valid = true
             f.head_pos = (m.columns.3.x, m.columns.3.y, m.columns.3.z)
