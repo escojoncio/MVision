@@ -492,6 +492,8 @@ uint32_t bridge_read(const uint8_t *ram, BridgeState *out) {
     out->has_player = (ok & need) == need;
     if ((ok & BRIDGE_OK_MODE) && (!out->has_player || (out->player_status & (BRIDGE_PS_NOT_PLAYABLE | BRIDGE_PS_GAME_OVER))))
         out->in_control = 0;
+    /* vida a cero: muerte en curso (el juego retira el control y pone su cámara de muerte; las banderas de fin de partida llegan más tarde) */
+    if ((ok & BRIDGE_OK_LIFE) && out->life_max > 0 && out->life <= 0) out->in_control = 0;
     clear_invalid(out, ok);
     out->valid = ok;
     return ok;

@@ -29,7 +29,8 @@ enum {
     VRV_R_PAUSED,          /* pausa */
     VRV_R_MENU,            /* ventana de armas / objetos del juego (el motor dibuja con su cámara mientras está abierta) */
     VRV_R_LOST_CONTROL,    /* sin control sin otra causa conocida (fin de partida, transiciones) */
-    VRV_R_NO_CAM           /* con control pero la cámara VR no está (aún) activa o no existe */
+    VRV_R_NO_CAM,          /* con control pero la cámara VR no está (aún) activa o no existe */
+    VRV_R_DEAD             /* el jugador ha muerto (vida a cero / fin de partida): el motor enseña su escena de muerte con su propia cámara */
 };
 
 typedef struct {
@@ -39,6 +40,7 @@ typedef struct {
     uint8_t cinematic, comms, paused, menu_open, stopped;
     /* --- clasificación de lo que NO es mundo (al final: no rompe inicializaciones posicionales) --- */
     uint8_t scene3d;       /* la última lista capturada trae geometría 3D sustancial con cámara del motor válida */
+    uint8_t dead;          /* vida a cero (o fin de partida) con partida en curso: la cámara del motor muestra la muerte en tercera persona */
     uint8_t video;         /* la última lista es un fotograma de vídeo pregrabado (subida grande a la zona mostrada, sin 3D) */
 } VrViewIn;
 

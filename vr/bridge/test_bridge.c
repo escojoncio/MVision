@@ -164,6 +164,10 @@ static void test_modes(void) {
     bridge_read(ram, &s);
     CHECK(s.cinematic);
     build_game();
+    p16(BA_VARS + 2u * BRIDGE_V_LIFE, 0);   /* vida a cero: muerte en curso, sin control */
+    bridge_read(ram, &s);
+    CHECK(s.life == 0 && s.has_player && !s.in_control);
+    build_game();
     p32(BA_GAME_STATUS, BRIDGE_GS_VOX_STREAM);
     bridge_read(ram, &s);
     CHECK(s.on_screen_text && s.in_control);

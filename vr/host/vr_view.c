@@ -22,7 +22,7 @@ int vrview_kind_of(const VrViewIn *in) {
     if (r == VRV_R_WORLD) return VRV_K_WORLD;
     /* Cinemática del motor: sin control del jugador y con 3D; con o sin jugador en escena (las introducciones no lo tienen). Radio, pausa,
      * detenido y ventana de armas/objetos son 2D del juego aunque el motor dibuje 3D detrás. */
-    if (in->scene3d && (r == VRV_R_NO_GAME || r == VRV_R_CINEMATIC || r == VRV_R_LOST_CONTROL)) return VRV_K_ENGINE;
+    if (in->scene3d && (r == VRV_R_NO_GAME || r == VRV_R_CINEMATIC || r == VRV_R_LOST_CONTROL || r == VRV_R_DEAD)) return VRV_K_ENGINE;
     if (in->video && r != VRV_R_PAUSED) return VRV_K_VIDEO;
     return VRV_K_UI;
 }
@@ -45,6 +45,7 @@ int vrview_reason(const VrViewIn *in) {
     if (in->stopped) return VRV_R_STOPPED;
     if (in->paused) return VRV_R_PAUSED;
     if (in->menu_open) return VRV_R_MENU;
+    if (in->dead) return VRV_R_DEAD;
     if (!in->in_control) return VRV_R_LOST_CONTROL;
     if (!in->cam_active) return VRV_R_NO_CAM;
     return VRV_R_WORLD;
@@ -91,6 +92,7 @@ const char *vrview_reason_name(int r) {
     case VRV_R_MENU: return "ventana de armas/objetos";
     case VRV_R_LOST_CONTROL: return "sin control";
     case VRV_R_NO_CAM: return "sin cámara VR";
+    case VRV_R_DEAD: return "muerte";
     default: return "?";
     }
 }
