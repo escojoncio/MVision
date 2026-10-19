@@ -1,4 +1,5 @@
 import SwiftUI
+import GameController
 import UniformTypeIdentifiers
 
 @main
@@ -37,6 +38,7 @@ struct MVApp: App {
 
 struct ContentView: View {
     @EnvironmentObject var model: GameModel
+    @FocusState private var controllerFocus: Bool
 
     var body: some View {
         ZStack {
@@ -61,6 +63,12 @@ struct ContentView: View {
                     reintentar: nil)
             }
         }
+        // visionOS entrega los botones del mando por GameController solo a la app que lo declara en una vista con foco.
+        .handlesGameControllerEvents(matching: .gamepad)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($controllerFocus)
+        .onAppear { controllerFocus = true }
         .fileImporter(isPresented: $model.showPicker, allowedContentTypes: [.folder], allowsMultipleSelection: false) { model.folderPicked($0) }
         .alert("Carpeta", isPresented: Binding(get: { model.aviso != nil }, set: { if !$0 { model.aviso = nil } })) {
             Button("Aceptar", role: .cancel) {}

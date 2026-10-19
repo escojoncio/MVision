@@ -84,8 +84,6 @@ final class ControllerHub: @unchecked Sendable {
     private var lastBeat: TimeInterval = 0
     private var lastEvent: TimeInterval = 0
     private var lastKind: Kind = .none
-    private var focusChanges = 0          // cambios de GCController.current (solo se cuentan; el sistema los alterna entre los dos Sense)
-    private var focusLogged = false
     private var appActive: Bool?
     private var vrWrites = 0, windowWrites = 0, samples = 0
     private var lastMuestra: TimeInterval = 0
@@ -138,6 +136,7 @@ final class ControllerHub: @unchecked Sendable {
         // En visionOS los mandos solo envían eventos a la app con foco; con el espacio inmersivo abierto la ventana
         // pasa a segundo plano, así que se piden también los eventos de fondo (como hace el motor propio).
         GCController.shouldMonitorBackgroundEvents = true
+        attachEventInteractions()
         let nc = NotificationCenter.default
         observers.append(nc.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] n in
             self?.dlog("conectado: \((n.object as? GCController)?.vendorName ?? "?")")
@@ -147,27 +146,10 @@ final class ControllerHub: @unchecked Sendable {
             self?.dlog("desconectado: \((n.object as? GCController)?.vendorName ?? "?")")
             self?.choose()
         })
-        // Foco: si los eventos no llegan, estas líneas dicen si la app estaba activa y qué mando era el actual.
-        // Con mandos espaciales el sistema alterna `current` entre los dos continuamente: no tiene ningún efecto en la
-        // lectura y NO se registra cada vez (inundaba el registro y agotaba su tope por segundo); se cuenta y se
-        // informa en el latido, y solo la primera vez deja una línea.
-        let onFocus: (Notification) -> Void = { [weak self] n in
-            guard let self else { return }
-            self.lock.lock()
-            self.focusChanges += 1
-            let first = !self.focusLogged
-            self.focusLogged = true
-            self.lock.unlock()
-            if first { self.dlog("foco: primer cambio de mando actual (\((n.object as? GCController)?.vendorName ?? "?")); el resto se cuenta en el latido") }
-        }
-        observers.append(nc.addObserver(forName: .GCControllerDidBecomeCurrent, object: nil, queue: nil, using: onFocus))
-        observers.append(nc.addObserver(forName: .GCControllerDidStopBeingCurrent, object: nil, queue: nil) { [weak self] _ in
-            guard let self else { return }
-            self.lock.lock(); self.focusChanges += 1; self.lock.unlock()
-        })
         observers.append(nc.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             self.lock.lock(); self.appActive = true; self.lock.unlock()
+            self.attachEventInteractions()
             self.dlog("app activa")
         })
         observers.append(nc.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -181,6 +163,32 @@ final class ControllerHub: @unchecked Sendable {
         GCController.startWirelessControllerDiscovery {}
         choose()
         startPolling()
+    }
+
+    // MARK: - Eventos de mando para la app (visionOS)
+
+    private var interactionViews = Set<ObjectIdentifier>()
+
+    /// En visionOS el sistema solo entrega los botones/gatillos/stick de un mando a la app si alguna vista declara que
+    /// atiende eventos de mando por GameController; si no, los convierte en gestos de pellizco y el perfil físico se
+    /// queda a cero (solo el botón de menú llega). Se añade `GCEventInteraction` (tipo gamepad) a la vista raíz de cada
+    /// ventana de la app. Idempotente. Hilo principal.
+    func attachEventInteractions() {
+        var added = 0
+        for scene in UIApplication.shared.connectedScenes {
+            guard let ws = scene as? UIWindowScene else { continue }
+            for w in ws.windows {
+                let v: UIView = w.rootViewController?.view ?? w
+                let id = ObjectIdentifier(v)
+                if interactionViews.contains(id) { continue }
+                let gi = GCEventInteraction()
+                gi.handledEventTypes = .gamepad
+                v.addInteraction(gi)
+                interactionViews.insert(id)
+                added += 1
+            }
+        }
+        if added > 0 { dlog("GCEventInteraction(.gamepad) anadida a \(added) vista(s) raiz") }
     }
 
     /// Sondeo propio del hub (50 Hz): mantiene vivos diagnóstico, muestras y latido aunque ni la ventana ni el bucle
@@ -357,6 +365,39 @@ final class ControllerHub: @unchecked Sendable {
                            rx: g.rightThumbstick.xAxis.value, ry: g.rightThumbstick.yAxis.value)
     }
 
+    /// Lectura por el perfil de entrada en vivo (`GCController.input`): valores 0..1 de gatillo/grip/A/B/menu/clic y
+    /// stick. Se usan los subscripts `String` de `GCPhysicalInputElementCollection` (firma documentada por Apple:
+    /// `subscript(String) -> T?`); cada valor ausente da -1.
+    struct LiveRead {
+        var trigger: Float = -1, grip: Float = -1, a: Float = -1, b: Float = -1, menu: Float = -1, click: Float = -1
+        var sx: Float = 0, sy: Float = 0
+        var stickOK = false
+    }
+
+    private func readLive(_ c: GCController) -> LiveRead {
+        let st = c.input.capture()
+        var r = LiveRead()
+        func bv(_ name: String) -> Float {
+            let key: String = name
+            guard let e = st.buttons[key] else { return -1 }
+            let p = e.pressedInput
+            return p.isPressed ? max(p.value, 0.6) : p.value
+        }
+        r.trigger = bv("Trigger")
+        r.grip = bv("Grip")
+        r.a = bv("Button A")
+        r.b = bv("Button B")
+        r.menu = bv("Button Menu")
+        r.click = bv("Thumbstick Button")
+        let sk: String = "Thumbstick"
+        if let d = st.dpads[sk] {
+            r.sx = d.right.value - d.left.value
+            r.sy = d.up.value - d.down.value
+            r.stickOK = true
+        }
+        return r
+    }
+
     private func readHand(_ c: GCController?) -> HandSnapshot {
         var h = HandSnapshot()
         guard let c else { return h }
@@ -364,6 +405,7 @@ final class ControllerHub: @unchecked Sendable {
         let m = maps[ObjectIdentifier(c)]
         lock.unlock()
         guard let m else { return h }
+        let live = readLive(c)
         func strongest(_ a: [GCControllerButtonInput]) -> Float {
             a.reduce(Float(0)) { max($0, $1.isPressed ? max($1.value, 0.6) : $1.value) }
         }
@@ -375,6 +417,16 @@ final class ControllerHub: @unchecked Sendable {
         h.stickClick = m.stickClick.contains { $0.isPressed }
         h.menu = m.menu.contains { $0.isPressed }
         if let s = m.stick { h.stickX = s.xAxis.value; h.stickY = s.yAxis.value }
+        // Lectura nueva: se combina con la antigua (gana la más fuerte; si una se queda a cero, la otra llega igual).
+        h.trigger = max(h.trigger, live.trigger)
+        h.grip = max(h.grip, live.grip)
+        h.low = h.low || live.a > 0.5
+        h.up = h.up || live.b > 0.5
+        h.stickClick = h.stickClick || live.click > 0.5
+        h.menu = h.menu || live.menu > 0.5
+        if live.stickOK && (live.sx * live.sx + live.sy * live.sy) > (h.stickX * h.stickX + h.stickY * h.stickY) {
+            h.stickX = live.sx; h.stickY = live.sy
+        }
         return h
     }
 
@@ -445,6 +497,14 @@ final class ControllerHub: @unchecked Sendable {
             let x = q(d.xAxis.value), y = q(d.yAxis.value)
             if x != 0 || y != 0 { parts.append("\(d.aliases.union([key]).min() ?? key)(\(x),\(y))") }
         }
+        if label.hasPrefix("Sense") {
+            let lv = readLive(c)
+            for (n, v) in [("Trigger", lv.trigger), ("Grip", lv.grip), ("Button A", lv.a), ("Button B", lv.b),
+                           ("Button Menu", lv.menu), ("Thumbstick Button", lv.click)] where v > 0.5 {
+                parts.append("nuevo:\(n)")
+            }
+            if abs(lv.sx) > 0.5 || abs(lv.sy) > 0.5 { parts.append("nuevo:Thumbstick(\(q(lv.sx)),\(q(lv.sy)))") }
+        }
         parts.sort()
         let sig = parts.joined(separator: ", ")
         lock.lock()
@@ -478,17 +538,13 @@ final class ControllerHub: @unchecked Sendable {
             let st = p.dpads["Thumbstick"]
             let cur = GCController.current === c ? 1 : 0
             let a: String = act.map { $0 ? "1" : "0" } ?? "?"
-            let gat: Float = btn("Trigger")?.value ?? -1
-            let grip: Float = btn("Grip")?.value ?? -1
-            let bA: Float = btn("Button A")?.value ?? -1
-            let bB: Float = btn("Button B")?.value ?? -1
-            let menu: Float = btn("Button Menu")?.value ?? -1
-            let clic: Float = btn("Thumbstick Button")?.value ?? -1
-            let sx: Float = st?.xAxis.value ?? -9
-            let sy: Float = st?.yAxis.value ?? -9
+            let lv = readLive(c)
             let bg = GCController.shouldMonitorBackgroundEvents ? 1 : 0
-            var out = "muestra \(label): gat=\(f(gat)) grip=\(f(grip)) A=\(f(bA)) B=\(f(bB)) menu=\(f(menu)) clic=\(f(clic))"
-            out += " stick=(\(f(sx)),\(f(sy))) actual=\(cur) appActiva=\(a) fondo=\(bg)"
+            func pair(_ old: Float?, _ new: Float) -> String { "\(f(old ?? -1))|\(f(new))" }
+            var out = "muestra \(label) (antigua|nueva): gat=\(pair(btn("Trigger")?.value, lv.trigger)) grip=\(pair(btn("Grip")?.value, lv.grip))"
+            out += " A=\(pair(btn("Button A")?.value, lv.a)) B=\(pair(btn("Button B")?.value, lv.b)) menu=\(pair(btn("Button Menu")?.value, lv.menu))"
+            out += " clic=\(pair(btn("Thumbstick Button")?.value, lv.click))"
+            out += " stick=(\(f(st?.xAxis.value ?? -9))|\(f(lv.sx)),\(f(st?.yAxis.value ?? -9))|\(f(lv.sy))) actual=\(cur) appActiva=\(a) fondo=\(bg)"
             dlog(out)
         }
         line("Sense I", l)
@@ -500,12 +556,12 @@ final class ControllerHub: @unchecked Sendable {
         if lastBeat == 0 { lastBeat = now }
         let due = now - lastBeat >= 10
         let n = eventCount, since = lastEvent == 0 ? -1 : now - lastEvent
-        let fc = focusChanges, vw = vrWrites, ww = windowWrites, sm = samples
-        if due { lastBeat = now; eventCount = 0; focusChanges = 0; vrWrites = 0; windowWrites = 0; samples = 0 }
+        let vw = vrWrites, ww = windowWrites, sm = samples
+        if due { lastBeat = now; eventCount = 0; vrWrites = 0; windowWrites = 0; samples = 0 }
         lock.unlock()
         guard due else { return }
         let ago = since < 0 ? "nunca" : String(format: "hace %.1f s", since)
-        dlog("latido: fuente=\(s.kind) cambios en 10 s=\(n) ultimo=\(ago) cambiosFoco=\(fc) lecturas=\(sm) escriturasVR=\(vw) escriturasVentana=\(ww) mandoBits=\(String(format: "0x%04X", s.pad.buttons))")
+        dlog("latido: fuente=\(s.kind) cambios en 10 s=\(n) ultimo=\(ago) lecturas=\(sm) escriturasVR=\(vw) escriturasVentana=\(ww) mandoBits=\(String(format: "0x%04X", s.pad.buttons))")
     }
 
     // MARK: - Escritura hacia el juego
