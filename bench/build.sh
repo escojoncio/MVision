@@ -23,7 +23,7 @@ echo "== Swift (mismos ficheros del renderer que la app) =="
 XCC=()
 for i in "${INC[@]}"; do XCC+=(-Xcc "$i"); done
 SRC=()
-for f in RenderRG RenderWeapon RadarPanel XRHud XRPresent XRMath XRFrameEncoder; do SRC+=("app/Sources/$f.swift"); done
+for f in RenderRG RenderWeapon RadarPanel XRHud XRPresent XRMath XRFrameEncoder XRDebugAxes; do SRC+=("app/Sources/$f.swift"); done
 xcrun swiftc -O -swift-version 5 -DMV_BENCH -import-objc-header bench/BenchBridge.h "${XCC[@]}" \
   "${SRC[@]}" bench/Sources/*.swift "${OBJ[@]}" -o "$OUT/bench"
 echo "OK: $OUT/bench"
