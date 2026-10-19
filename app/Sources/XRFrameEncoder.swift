@@ -168,15 +168,20 @@ final class XRFrameEncoder {
         var sceneViews = views
         if let dm = pres.dioramaModel { sceneViews = views.map { $0 * dm } }
         // Fluidez: P' = m P en el espacio del usuario -> vista' = vista * m (solo el pase de la escena; el pase final conserva `views`).
+        // La corrección se evalúa DENTRO de renderer.encode, justo después de tomar las escenas nuevas (mv_host_scene empuja su muestra al
+        // suavizador): así corresponde a la geometría que se dibuja en este mismo fotograma.
         var corr = VrSmCorr()
         if smoothMotion && presenter.cfg.smoothMotion && pres.drawWorld && pres.dioramaModel == nil && pres.stereo == nil {
-            mv_vrhost_smooth(&corr)
-            if corr.active != 0 {
+            let base = sceneViews
+            renderer.viewsHook = {
+                mv_vrhost_smooth(&corr)
+                guard corr.active != 0 else { return base }
                 let m = Self.matrix(corr)
-                if XRMath.isFinite(m) { sceneViews = sceneViews.map { $0 * m } } else { corr.active = 0 }
+                if XRMath.isFinite(m) { return base.map { $0 * m } }
+                corr.active = 0
+                return base
             }
-        }
-        lastSmooth = corr
+        } else { renderer.viewsHook = nil }
         if pres.dioramaModel != nil || !pres.drawWorld || pres.stereo != nil { special = false }
         renderer.special = special ? sv : nil
         renderer.suppressFrame = special && sv.kind == Int32(MV_VIEW_SCOPE) && sv.suppress_frame != 0
@@ -217,6 +222,8 @@ final class XRFrameEncoder {
         renderer.encode(commandBuffer: cb, colorTargets: tgt.color, depthTargets: tgt.depth,
                         resolveTargets: tgt.resolve, views: sceneViews, projections: projs,
                         head: recentered, layered: layered)
+        renderer.viewsHook = nil
+        lastSmooth = corr
 
         if pres.stereo != nil {   // la imagen estéreo y el tinte/recubrimientos de la escena se conocen tras renderer.encode
             let fxs = renderer.screenFx
