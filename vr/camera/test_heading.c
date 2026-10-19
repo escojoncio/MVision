@@ -177,8 +177,83 @@ static void test_step(void) {
     NEAR(vrhead_follow_step(&c, -170, 0, 0.02f), -6, 1e-6);             /* tope 6 grados por VBlank */
 }
 
+static void test_walk(void) {
+    /* andando: el rumbo del personaje se adelanta al deseado por el juego (+0x4E), con tope, sin pasarse y sin pisar el deseado */
+    setup(2048, 0); tick(0);
+    float b0 = body_deg();
+    int16_t goal = (int16_t)(2048 + 1024);                    /* 90 grados a la izquierda del rumbo actual */
+    w16(CTL + 0x4E, goal);
+    st.moving = 1; st.on_wall = 0; st.first_person = 0; st.knocking = 0;
+    float prev = b0, maxstep = 0;
+    for (int i = 0; i < 4; i++) { tick(1); float b = body_deg(); float d = wrap180(b - prev); if (fabsf(d) > maxstep) maxstep = fabsf(d); prev = b; }
+    NEAR(wrap180(body_deg() - b0), 4 * 10.8f, 0.5);           /* 540 grados/s a 0,02 s = 10,8 por VBlank */
+    NEAR(maxstep, 10.8f, 0.2);
+    CHECK(r16(CTL + 0x4E) == goal);                           /* el deseado del juego no se toca */
+    for (int i = 0; i < 20; i++) tick(1);
+    NEAR(wrap180(body_deg() - b0), 90, 0.2);                  /* llega y no se pasa */
+    CHECK(tick(1) == 0);                                       /* ya alineado: no escribe */
+    /* pegado a pared / primera persona / golpeando / sin control: no actúa */
+    int flags[3] = {0, 1, 2};
+    for (int k = 0; k < 4; k++) {
+        setup(2048, 0); tick(0);
+        w16(CTL + 0x4E, goal);
+        st.moving = 1; st.on_wall = k == 0; st.first_person = k == 1; st.knocking = k == 2; st.in_control = k == 3 ? 0 : 1;
+        (void)flags;
+        float b = body_deg();
+        int r = vrhead_frame(ram, &st, 1);
+        CHECK(r == 0 && fabsf(wrap180(body_deg() - b)) < 0.1f);
+    }
+    st.in_control = 1;
+    /* sin andar: el seguimiento normal (margen) manda, el deseado se ignora */
+    setup(2048, 0); tick(0);
+    w16(CTL + 0x4E, goal);
+    st.moving = 0;
+    CHECK(tick(0) == 0);
+    /* desactivado (walk_dps = 0) */
+    VrHeadingConfig hc; vrhead_config_default(&hc); hc.walk_dps = 0; vrhead_init(&hc);
+    setup(2048, 0); vrhead_init(&hc); tick(0);
+    w16(CTL + 0x4E, goal); st.moving = 1;
+    CHECK(tick(1) == 0);
+    /* un giro del stick mientras anda sigue escribiendo los tres campos */
+    vrhead_init(NULL); setup(2048, 0); tick(0);
+    st.moving = 1; w16(CTL + 0x4E, 2048);
+    vrhead_turn(30.0f);
+    CHECK(tick(1) == 1 && r16(CTL + 0x4E) == r16(CTL + BC_ROT + 2) && r16(CTL + 0x2A) == r16(CTL + BC_ROT + 2));
+    /* paso puro */
+    VrHeadingConfig c; vrhead_config_default(&c);
+    NEAR(vrhead_walk_step(&c, 0.5f, 0.02f), 0, 1e-9);
+    NEAR(vrhead_walk_step(&c, 5.0f, 0.02f), 5.0f, 1e-6);
+    NEAR(vrhead_walk_step(&c, -170.0f, 0.02f), -10.8f, 1e-5);
+    NEAR(vrhead_walk_step(&c, NAN, 0.02f), 0, 1e-9);
+}
+
+static void test_eye(void) {
+    /* AUTO: ojo en la articulación de la cabeza del modelo (no en el centro del cuerpo) y adelantado un fotograma con su velocidad */
+    setup(2048, 0);
+    VrCamPlan p;
+    G_yaw = 0;
+    vrcam_plan(ram, 320, &p);                                 /* 1.ª construcción: sin velocidad conocida */
+    float y = 2048 * 360.0f / 4096.0f * 3.14159265f / 180.0f, fx = sinf(y) * vrcam_config()->eye_fwd, fz = cosf(y) * vrcam_config()->eye_fwd;
+    (void)fx; (void)fz;
+    CHECK(abs(p.from[0] - 1010) <= 71 && abs(p.from[0] - 1000) > 3);   /* x de la articulación (1010 +- eye_fwd), no del centro (1000) */
+    NEAR(p.from[1], 1497 + vrcam_config()->eye_up, 1.0);
+    int x0 = p.from[0];
+    w32(PART6 + 0x14, 1060);                                  /* el modelo avanzó 50 unidades */
+    vrcam_plan(ram, 320, &p);
+    NEAR(p.from[0] - x0, 100, 1.0);                           /* 50 reales + 50 de adelanto */
+    w32(PART6 + 0x14, 5000);                                  /* salto grande: no se extrapola */
+    vrcam_plan(ram, 320, &p);
+    NEAR(p.from[0] - x0, 5000 - 1010, 1.0);
+    /* sin adelanto */
+    VrCamConfig c = *vrcam_config(); c.joint_lead = 0; vrcam_init(&c);
+    for (int i = 0; i < 10; i++) vrcam_frame(ram, &st);
+    w32(PART6 + 0x14, 1010); vrcam_plan(ram, 320, &p); int a = p.from[0];
+    w32(PART6 + 0x14, 1060); vrcam_plan(ram, 320, &p);
+    NEAR(p.from[0] - a, 50, 1.0);
+}
+
 int main(void) {
-    test_turn(); test_torso(); test_guards(); test_calib(); test_step();
+    test_turn(); test_torso(); test_guards(); test_calib(); test_step(); test_walk(); test_eye();
     printf("test_heading: %d comprobaciones, %d fallos\n", checks, fails);
     return fails != 0;
 }

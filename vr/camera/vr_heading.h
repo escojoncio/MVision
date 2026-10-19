@@ -28,6 +28,8 @@ typedef struct VrHeadingConfig {
     float relax_s;        /* tiempo con la cabeza quieta y girada antes de relajar (defecto 1,2 s) */
     float relax_dps;      /* velocidad de la relajación (defecto 45 grados/s) */
     float frame_dt_s;     /* duración de un VBlank del motor (0,02) */
+    float walk_dps;       /* andando: velocidad máxima con la que el rumbo del personaje alcanza el rumbo DESEADO por el juego (el del mando relativo a la mirada),
+                           * en vez de esperar al giro propio del juego (defecto 540 grados/s; 0 = no tocar). No actúa pegado a pared, ni en primera persona, ni con el mando en reposo */
 } VrHeadingConfig;
 
 void vrhead_config_default(VrHeadingConfig *c);
@@ -49,6 +51,8 @@ float vrhead_offset_deg(void);
 /* Matemática pura (para pruebas): paso del seguimiento. off = vista - rumbo (grados, envuelto); devuelve el giro del
  * rumbo (grados) para este paso. `still_s` = tiempo que lleva la cabeza quieta. */
 float vrhead_follow_step(const VrHeadingConfig *c, float off, float still_s, float dt);
+/* Andando: paso del rumbo (grados) hacia el deseado; err = deseado - rumbo (grados, envuelto). Tope walk_dps*dt; no pasa del objetivo; ignora errores < 1 grado. */
+float vrhead_walk_step(const VrHeadingConfig *c, float err, float dt);
 
 #ifdef __cplusplus
 }

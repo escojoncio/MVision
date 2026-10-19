@@ -72,6 +72,7 @@
 #include "vr_camera.h"
 #include "vr_calib.h"
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define RAM_MASK 0x1FFFFFu
@@ -117,6 +118,7 @@ typedef struct {
     uint32_t vb;                          /* VBlanks vistos (vrcam_frame) */
     int hp_ok; float hp_yaw, hp_el; uint32_t hp_vb;
     float w_yaw, w_el;
+    int32_t pj[3]; int pj_ok;             /* articulación de la cabeza en la construcción anterior (adelanto del ojo) */
 } Vc;
 static Vc S;
 
@@ -127,7 +129,7 @@ void vrcam_config_default(VrCamConfig *c) {
     c->loco = VRCAM_LOCO_HEAD; c->eye_xz = VRCAM_EYE_AUTO;
     c->hide_head = 1; c->override_pad = 1;
     c->on_frames = 8; c->engine_h = 160; c->draw_lag = 0; c->pitch_limit_deg = 80.0f;
-    c->predict_s = 0.10f; c->predict_max_deg = 35.0f; c->vblank_hz = 50.0f;
+    c->joint_lead = 1.0f; c->predict_s = 0.10f; c->predict_max_deg = 35.0f; c->vblank_hz = 50.0f;
 }
 void vrcam_init(const VrCamConfig *c) {
     memset(&S, 0, sizeof S);
@@ -181,7 +183,7 @@ static int head_finite(const float m[16]) {
 static int16_t sat16(float v) { return (int16_t)(v > 32767.0f ? 32767 : (v < -32768.0f ? -32768 : lrintf(v))); }
 
 /* ============================================ lectura del estado del juego ============================================ */
-typedef struct { int ok; int32_t eye_x, eye_y, eye_z; float body_yaw; int prone; } Body;
+typedef struct { int ok; int32_t eye_x, eye_y, eye_z; float body_yaw; int prone; int joint; int32_t jx, jy, jz; } Body;
 
 static Body read_body(const uint8_t *ram) {
     Body b = {0};
@@ -203,14 +205,48 @@ static Body read_body(const uint8_t *ram) {
             int n = rd_s16(ram, objs + VC_OBJS_NMODELS);
             if (n > VC_HEAD_PART && n <= VC_MAX_MODELS) {
                 uint32_t o = objs + VC_OBJS_FIRST + VC_OBJ_SIZE * VC_HEAD_PART;
+                b.joint = 1;
                 jx = rd_i32(ram, o + VC_OBJ_WORLD_T); jy = rd_i32(ram, o + VC_OBJ_WORLD_T + 4); jz = rd_i32(ram, o + VC_OBJ_WORLD_T + 8);
             }
         }
     }
-    int use_joint_xz = S.cfg.eye_xz == VRCAM_EYE_JOINT || (S.cfg.eye_xz == VRCAM_EYE_AUTO && b.prone);
+    /* AUTO: los ojos siguen SIEMPRE la articulación de la cabeza del modelo (andando, agachado, tumbado y en las transiciones el modelo se inclina/adelanta
+     * y el centro del cuerpo queda detrás: la cabeza del usuario se veía por detrás del cuerpo). BODY: solo el centro. */
+    b.jx = jx; b.jy = jy; b.jz = jz;
+    int use_joint_xz = b.joint && (S.cfg.eye_xz == VRCAM_EYE_JOINT || S.cfg.eye_xz == VRCAM_EYE_AUTO);
     b.eye_x = use_joint_xz ? jx : mx; b.eye_y = jy; b.eye_z = use_joint_xz ? jz : mz;
     b.ok = have_ctl;
     return b;
+}
+
+/* Ojos del modelo del personaje ahora mismo (articulación de la cabeza + eye_up/eye_fwd según la mirada dada `view_deg`), unidades del motor.
+ * Devuelve 0 si no hay modelo. Solo lee la RAM (pruebas y medidas). */
+int vrcam_model_eye(const uint8_t *ram, float view_deg, float out[3]) {
+    Body b = read_body(ram);
+    if (!b.joint) return 0;
+    uint32_t ob = rd_u32(ram, VC_PLAYER_BODY), objs = rd_u32(ram, ob);
+    uint32_t o = objs + VC_OBJS_FIRST + VC_OBJ_SIZE * VC_HEAD_PART;
+    float yr = view_deg * (PI_F / 180.0f);
+    out[0] = (float)rd_i32(ram, o + VC_OBJ_WORLD_T) + sinf(yr) * S.cfg.eye_fwd;
+    out[1] = (float)rd_i32(ram, o + VC_OBJ_WORLD_T + 4) + S.cfg.eye_up;
+    out[2] = (float)rd_i32(ram, o + VC_OBJ_WORLD_T + 8) + cosf(yr) * S.cfg.eye_fwd;
+    return 1;
+}
+
+/* Articulaciones del personaje (traslación mundo de cada parte del modelo, unidades del motor). Devuelve cuántas escribió (0 si no hay modelo). */
+int vrcam_model_joints(const uint8_t *ram, float (*out)[3], int max) {
+    uint32_t ob = rd_u32(ram, VC_PLAYER_BODY);
+    if (!ptr_ok(ob, 8)) return 0;
+    uint32_t objs = rd_u32(ram, ob);
+    if (!ptr_ok(objs, VC_OBJS_FIRST + VC_OBJ_SIZE * (VC_HEAD_PART + 1))) return 0;
+    int n = rd_s16(ram, objs + VC_OBJS_NMODELS);
+    if (n <= VC_HEAD_PART || n > VC_MAX_MODELS) return 0;
+    if (n > max) n = max;
+    for (int i = 0; i < n; i++) {
+        uint32_t o = objs + VC_OBJS_FIRST + VC_OBJ_SIZE * (uint32_t)i + VC_OBJ_WORLD_T;
+        out[i][0] = (float)rd_i32(ram, o); out[i][1] = (float)rd_i32(ram, o + 4); out[i][2] = (float)rd_i32(ram, o + 8);
+    }
+    return n;
 }
 
 /* ================================================== gancho de frame ================================================== */
@@ -223,6 +259,7 @@ void vrcam_frame(const uint8_t *ram, const BridgeState *st) {
     int want = S.ok_count >= S.cfg.on_frames;
     if (want && !S.want) { S.have_ref = 0; S.st.activations++; }
     if (!want && S.want) { S.st.deactivations++; S.have_ref = 0; }
+    if (!want) S.pj_ok = 0;
     S.want = want;
     if (S.zoom_capped > 0) S.zoom_capped--;
 }
@@ -249,6 +286,22 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
     if (!S.cfg.head(h, &t) || !head_finite(h)) { S.st.head_misses++; return 0; }
     Body b = read_body(ram);
     if (!b.ok) return 0;
+
+    /* La cámara se construye ANTES de que el juego anime el modelo en ese mismo fotograma: la articulación leída es la del fotograma anterior y el ojo iba un
+     * fotograma por detrás del personaje (medido: = la velocidad de marcha, ~10 cm/fotograma andando). Se adelanta un fotograma con la velocidad medida entre las
+     * dos últimas construcciones (sin extrapolar saltos: cambios de zona, teletransportes). */
+    if (b.joint) {
+        if (S.pj_ok && S.cfg.joint_lead > 0.0f) {
+            int32_t d[3] = {b.jx - S.pj[0], b.jy - S.pj[1], b.jz - S.pj[2]};
+            int small = abs(d[0]) <= 400 && abs(d[1]) <= 400 && abs(d[2]) <= 400;
+            if (small) {
+                if (b.eye_x == b.jx) b.eye_x += (int32_t)lrintf((float)d[0] * S.cfg.joint_lead);
+                if (b.eye_z == b.jz) b.eye_z += (int32_t)lrintf((float)d[2] * S.cfg.joint_lead);
+                b.eye_y += (int32_t)lrintf((float)d[1] * S.cfg.joint_lead);
+            }
+        }
+        S.pj[0] = b.jx; S.pj[1] = b.jy; S.pj[2] = b.jz; S.pj_ok = 1;
+    } else S.pj_ok = 0;
 
     float a_yaw, elev;
     vrcam_head_angles(h, &a_yaw, &elev);
