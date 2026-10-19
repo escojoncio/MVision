@@ -130,6 +130,120 @@ static void rot_y(const float R[9], float rad, float out[9]) {
     }
 }
 
+/* ---- andando: la escena nativa y la lista de la GPU salen de registros de cámara distintos del motor (la nativa, del último; la lista, del anterior) ----
+ * Reproduce «al andar se va la imagen»: con la regla antigua (0,2 m / 8 grados, caída inmediata) el jugador andando/girando la dispara en una fracción grande de los
+ * fotogramas y en «solo nativo» cada una deja el mundo sin dibujar; con el veredicto de ns_coh_step no cae nunca, y un mundo realmente distinto (otra zona) sí cae. */
+static void fill_pair(const VrCamRecord *rg, const VrCamRecord *rn, NsCohIn *in) {
+    BridgeState bs;
+    memset(&bs, 0, sizeof bs);
+    bs.valid = BRIDGE_OK_ALL_CORE; bs.has_player = 1; bs.eye_focal = 320;
+    for (int i = 0; i < 3; i++) { bs.eye_pos[i] = rg->eye[i]; for (int j = 0; j < 3; j++) bs.eye_axes[i][j] = (int16_t)lrintf(rg->M[3 * i + j] * 4096.0f); }
+    bs.player_pos = (BVec3){rg->eye[0] + 30, rg->eye[1] - 150, rg->eye[2] - 20};
+    bs.ctl_height = 1104;
+    VrSceneOpts o = vr_scene_opts_default();
+    float org[3];
+    vr_scene_player_origin(&bs, &o, org);
+    o.origin_mode = 1; o.origin_game[0] = (float)rg->eye[0]; o.origin_game[1] = org[1]; o.origin_game[2] = (float)rg->eye[2];
+    vrcam_scene_user_map(&o, rg, org[1]);
+    const float P[3][3] = {{0, 0, 2500}, {800, -300, 4000}, {-1200, 500, 3000}};
+    memset(ops, 0, sizeof ops); memset(&dl, 0, sizeof dl); dl.ops = ops;
+    tri(P[0], P[1], P[2]);
+    VrScene sc;
+    CHECK(vr_scene_build(&dl, &bs, &o, &sc) == 0, "andando: build");
+    VrSceneOpts on = vr_scene_opts_default();
+    float orgn[3] = {(float)rn->eye[0], org[1], (float)rn->eye[2]};
+    on.origin_mode = 1; memcpy(on.origin_game, orgn, sizeof orgn);
+    vrcam_scene_user_map(&on, rn, org[1]);
+    float to_vr[12];
+    CHECK(vrcam_native_to_vr(&on, orgn, to_vr) == 1, "andando: to_vr");
+    memset(in, 0, sizeof *in);
+    memcpy(in->user_R, sc.user_R, sizeof in->user_R); in->k = sc.user_k * sc.scale; in->user_eye_h = sc.user_eye_h; memcpy(in->user_p_ref, sc.user_p_ref, sizeof in->user_p_ref);
+    memcpy(in->origin, sc.origin_game, sizeof in->origin); memcpy(in->game_view, sc.game_view, sizeof in->game_view);
+    memcpy(in->to_vr, to_vr, sizeof in->to_vr);
+    for (int i = 0; i < 3; i++) in->cam_eye[i] = (float)rn->eye[i];
+    memcpy(in->cam_rot, rn->M, sizeof in->cam_rot);
+    in->units_per_m = 1000.0f;
+}
+/* Registro k del jugador andando a v m/s hacia delante mientras gira con el stick a w grados/s; un registro cada 40 ms (25 escenas/s). La cabeza no se mueve: el giro del stick
+ * gira el mundo (theta) y la cámara del motor lo compensa, así que la cámara en VR es la misma. */
+static void walk_record(VrCamRecord *r, int k, float v, float w) {
+    const float base[9] = {1, 0, 0, 0, -1, 0, 0, 0, -1};
+    float t = 0.040f * (float)k, psi = w * t * 3.14159265f / 180.0f;
+    memset(r, 0, sizeof *r);
+    r->active = 1; r->serial = (uint32_t)k + 1; r->screen = 320; r->units_per_m = 1000.0f;
+    r->theta_play_deg = 20.0f + w * t;
+    float M[9];
+    rot_y(base, psi, M);
+    memcpy(r->M, M, sizeof r->M);
+    float x = 1200.0f, z = -800.0f;   /* integra el avance por registros (rumbo = el del giro acumulado) */
+    for (int i = 0; i < k; i++) {
+        float pi_ = w * (0.040f * (float)i) * 3.14159265f / 180.0f;
+        x += -sinf(pi_) * v * 0.040f * 1000.0f; z += -cosf(pi_) * v * 0.040f * 1000.0f;
+    }
+    r->eye[0] = (int32_t)lrintf(x); r->eye[1] = 1700; r->eye[2] = (int32_t)lrintf(z);
+    r->p_ref[0] = 0.02f; r->p_ref[1] = 1.62f; r->p_ref[2] = -0.03f;
+}
+static void walking_case(const char *name, float v, float w, int rec_lag, int legacy_must_trip) {
+    NsCohCfg legacy, cur;
+    ns_coh_cfg_default(&cur);
+    legacy = cur;
+    legacy.pos_m = 0.2f; legacy.rot_deg = 8.0f; legacy.gross_pos_m = 1e9f; legacy.gross_rot_deg = 1e9f; legacy.persist_ns = 0; legacy.return_frames = 3;
+    NsCohState sl, sn;
+    memset(&sl, 0, sizeof sl); memset(&sn, 0, sizeof sn);
+    unsigned fr = 0, leg_gpu = 0, new_gpu = 0;
+    float worst_p = 0, worst_r = 0;
+    /* 4 s de render a 100 fps; la lista de la GPU llega con su escena en t=k*40 ms y la nativa 6 ms después (cada una usa la última disponible) */
+    for (int f = 0; f < 400; f++) {
+        double t = 0.010 * f;
+        int kg = (int)floor(t / 0.040), kn = (int)floor((t - 0.006) / 0.040);
+        if (kg < 1 || kn < 1) continue;
+        VrCamRecord rg, rn;
+        walk_record(&rg, kg - 1, v, w);                 /* la lista se dibuja con el registro anterior... */
+        walk_record(&rn, kn - 1 + rec_lag, v, w);       /* ...y la nativa con el último (rec_lag = 1 registro por delante) */
+        NsCohIn in; NsCohOut out;
+        fill_pair(&rg, &rn, &in);
+        CHECK(ns_coherence(&in, &out) == 1 && out.ok, "%s: coherencia", name);
+        uint64_t now = (uint64_t)f * 10000000ull + 1000000000ull;
+        if (!ns_coh_step(&sl, &legacy, &out, now)) leg_gpu++;
+        if (!ns_coh_step(&sn, &cur, &out, now)) new_gpu++;
+        if (out.d_probe > worst_p) worst_p = out.d_probe;
+        if (out.d_rot > worst_r) worst_r = out.d_rot;
+        fr++;
+    }
+    printf("  %-10s andando v=%.1f m/s giro=%.0f gr/s desfase=%d registro(s): peor sondas=%.3f m giro=%.2f gr | fotogramas a GPU de %u: regla antigua=%u, nueva=%u (tolerados %u)\n",
+           name, v, w, rec_lag, worst_p, worst_r, fr, leg_gpu, new_gpu, sn.tolerated);
+    CHECK(!legacy_must_trip || leg_gpu > 0, "%s: la regla antigua debería dispararse andando (la prueba no reproduce el fallo)", name);
+    CHECK(new_gpu == 0 && sn.trips == 0, "%s: el veredicto nuevo cae a GPU %u fotogramas andando (peor sondas %.3f m, giro %.2f gr)", name, new_gpu, worst_p, worst_r);
+    CHECK(!legacy_must_trip || sn.tolerated > 0, "%s: debería contar discrepancias toleradas", name);
+}
+/* Un mundo realmente distinto (otra zona: el mapa nativo salta decenas de metros) y uno que se queda desfasado 40 grados de forma continuada SÍ caen a GPU y vuelven. */
+static void real_incoherence_case(void) {
+    VrCamRecord a, b;
+    walk_record(&a, 10, 0.0f, 0.0f);
+    b = a; b.eye[0] += 30000;                          /* salto de 30 m: otra zona */
+    NsCohIn in; NsCohOut out;
+    NsCohCfg cfg; ns_coh_cfg_default(&cfg);
+    NsCohState st; memset(&st, 0, sizeof st);
+    fill_pair(&a, &a, &in);
+    CHECK(ns_coherence(&in, &out) == 1 && ns_coh_step(&st, &cfg, &out, 1000000000ull) == 1, "misma cámara: coherente");
+    fill_pair(&a, &b, &in);
+    CHECK(ns_coherence(&in, &out) == 1 && out.d_probe > 6.0f, "salto de zona: sondas %.2f m", out.d_probe);
+    CHECK(ns_coh_step(&st, &cfg, &out, 1010000000ull) == 0 && st.incoherent && st.why == NS_COH_WHY_POS && st.trips == 1, "salto grueso: cae a GPU al instante");
+    fill_pair(&a, &a, &in);
+    ns_coherence(&in, &out);
+    int back = 0;
+    for (int i = 0; i < 3; i++) back = ns_coh_step(&st, &cfg, &out, 1020000000ull + (uint64_t)i * 10000000ull);
+    CHECK(back == 1 && !st.incoherent, "vuelve al nativo tras 3 fotogramas coherentes");
+    /* giro continuado de 40 grados del mapa: tolerado 100 ms, cae a los 150 ms */
+    VrCamRecord c = a; c.theta_play_deg += 40.0f;
+    fill_pair(&a, &c, &in);
+    ns_coherence(&in, &out);
+    int r1 = ns_coh_step(&st, &cfg, &out, 2000000000ull), r2 = ns_coh_step(&st, &cfg, &out, 2100000000ull), r3 = ns_coh_step(&st, &cfg, &out, 2160000000ull);
+    CHECK(out.d_probe > cfg.pos_m, "mapa girado 40 gr: sondas %.2f m (> %.1f)", out.d_probe, cfg.pos_m);
+    CHECK(r1 == 1 && r2 == 1 && r3 == 0 && st.why == NS_COH_WHY_POS, "discrepancia continuada: tolera 100 ms y cae a los 150 ms (%d %d %d)", r1, r2, r3);
+    printf("  salto de zona y discrepancia continuada: caen a GPU y vuelven\n");
+}
+
 int main(void) {
     /* columnas = der, abajo, adelante en el mundo del motor (Y arriba): mirando a -Z; luego girada */
     const float base[9] = {1, 0, 0, 0, -1, 0, 0, 0, -1};
@@ -145,6 +259,12 @@ int main(void) {
     const float left[9] = {1, 0, 0, 0, -1, 0, 0, 0, 1};
     rot_y(left, 0.4f, M);
     run_case("zurdo", M, e2, 80.0f, pref);
+    walking_case("paso", 2.0f, 0.0f, 1, 0);          /* andar lento: la regla antigua aún aguantaba */
+    walking_case("carrera", 5.0f, 0.0f, 1, 1);
+    walking_case("giro", 0.0f, 150.0f, 1, 1);
+    walking_case("carr+giro", 4.0f, 150.0f, 1, 1);
+    walking_case("sin-lag", 5.0f, 150.0f, 0, 1);     /* solo el desfase de 6 ms entre la llegada de ambas escenas */
+    real_incoherence_case();
     if (fails) { fprintf(stderr, "test_native_coh: %d fallos\n", fails); return 1; }
     printf("test_native_coh: todo correcto\n");
     return 0;

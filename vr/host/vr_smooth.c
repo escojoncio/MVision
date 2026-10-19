@@ -170,3 +170,17 @@ void vrsm_eval(VrSmooth *s, double t_now, double turn_req_deg, VrSmCorr *out) {
 }
 
 void vrsm_stats(const VrSmooth *s, VrSmoothStats *out) { *out = s->st; }
+
+void vrsm_make_sample(VrSmSample *out, const float origin[3], const float R[9], float K, const float p_ref[3], float eye_h, double game_s, double turn_deg, uint32_t epoch, double t_wall) {
+    memset(out, 0, sizeof *out);
+    out->t_wall = t_wall;
+    if (!(K > 0.0f) || !isfinite(K)) return;
+    out->valid = 1;
+    out->game_s = game_s;
+    for (int i = 0; i < 3; i++) out->B[i] = origin[i];
+    memcpy(out->R, R, sizeof out->R);
+    out->K = K;
+    for (int i = 0; i < 3; i++) out->c[i] = p_ref[i] - R[3 * i + 1] * eye_h;
+    out->turn_deg = turn_deg;
+    out->epoch = epoch;
+}

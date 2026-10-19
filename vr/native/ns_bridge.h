@@ -154,6 +154,34 @@ int ns_coherence(const NsCohIn *in, NsCohOut *out);
 int ns_coherence_flat(const float user_R[9], float k, float eye_h, const float p_ref[3], const float origin[3], const float game_view[16], const float to_vr[12],
                       const float cam_eye[3], const float cam_rot[9], float units_per_m, NsCohOut *out);
 
+/* ---- veredicto de coherencia con tolerancia al desfase de fotogramas (consumidor) ----
+ * La escena nativa y la lista de la GPU salen de registros de cámara distintos del motor (la lista se dibuja con el registro de su secuencia; la captura nativa con el último):
+ * andando, el mapa de una y otra difiere en lo que el jugador se movió/giró entre ambos (medido en registros reales: hasta 0,53 m y 16 grados, y 0,001 m parado). Eso NO es un
+ * mundo distinto, así que no justifica caer a la GPU (en «solo nativo» eso dejaba el mundo sin dibujar mientras se andaba). Se cae a GPU solo si (a) el salto es grueso (otra zona /
+ * otro mapa: metros o decenas de grados) o (b) la discrepancia supera la tolerancia de forma CONTINUADA (persist_ns); se vuelve tras return_frames fotogramas dentro de tolerancia. */
+typedef struct {
+    float pos_m, rot_deg;              /* tolerancia (sondas / giro) por desfase de fotogramas del motor */
+    float gross_pos_m, gross_rot_deg;  /* por encima: incoherente al instante */
+    float legacy_pos_m, legacy_rot_deg;/* umbrales de la primera versión (0,2 m / 8 grados): solo sirven para contar lo tolerado */
+    uint64_t persist_ns;               /* tiempo continuado por encima de la tolerancia antes de caer a GPU */
+    uint32_t return_frames;            /* fotogramas seguidos dentro de tolerancia para volver al nativo */
+} NsCohCfg;
+enum { NS_COH_WHY_NONE = 0, NS_COH_WHY_POS = 1, NS_COH_WHY_ROT = 2 };
+typedef struct {
+    int incoherent;                    /* estado vigente */
+    int why;                           /* NS_COH_WHY_* del último fallo */
+    uint64_t over_since_ns;            /* 0 = no hay racha por encima de la tolerancia */
+    uint32_t good_run;
+    /* acumulados desde el último ns_coh_take_stats */
+    uint32_t frames, tolerated, over, trips;   /* evaluaciones; por encima del umbral antiguo pero tolerado; por encima de la tolerancia; veces que se cayó a GPU */
+    float worst_pos_m, worst_rot_deg;
+} NsCohState;
+typedef struct { uint32_t frames, tolerated, over, trips; float worst_pos_m, worst_rot_deg; } NsCohStats;
+void ns_coh_cfg_default(NsCohCfg *c);
+/* Un fotograma: out = ns_coherence(...) válido (out->ok). Devuelve 1 si se puede dibujar nativo. */
+int ns_coh_step(NsCohState *st, const NsCohCfg *cfg, const NsCohOut *out, uint64_t now_ns);
+void ns_coh_take_stats(NsCohState *st, NsCohStats *out);   /* devuelve y pone a cero los acumulados */
+
 /* ---- interpolación (consumidor) ---- */
 typedef struct {
     const NsScene *prev, *cur;
