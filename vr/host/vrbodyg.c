@@ -9,6 +9,7 @@
 #include "bridge.h"
 #include "host.h"
 #include "vr_camera.h"
+#include "vr_body.h"
 #include "vr_fire.h"
 #include "vr_gesture.h"
 #include "vrgame.h"
@@ -38,6 +39,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
     in.active = core && bs->in_control && vrcam_active() && map.valid && mv_vr_get_head(hm, NULL);
     in.weapon = -1;
     in.weapon_busy = vrgame_weapon_engaged();
+    in.sq_user = (pad & VRG_SQUARE) != 0;
     in.dt = 0.02f;                                   /* el gancho corre una vez por VBlank (50 Hz virtuales) */
     vrg_out_t out;
     if (in.active) {
@@ -48,10 +50,10 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
         memcpy(in.head_u, &hm[12], sizeof in.head_u);
         in.head_fwd[0] = -hm[8]; in.head_fwd[1] = -hm[10];
         for (int s = 0; s < 2; s++) {
-            float p[3], gr;
-            in.tracked[s] = vrgame_hand_raw(s, p, &gr, &in.hand_time[s]);
+            float p[3], gr, tg;
+            in.tracked[s] = vrgame_hand_raw(s, p, &gr, &tg, &in.hand_time[s]);
             if (in.tracked[s]) for (int i = 0; i < 3; i++) { in.hrel[s][i] = p[i] - hm[12 + i]; in.hand_u[s][i] = p[i]; }
-            if (in.tracked[s]) { vrfire_pos_to_world(&map, p, w); for (int i = 0; i < 3; i++) in.hand[s][i] = w[i] * 0.001f; in.grip[s] = gr; }
+            if (in.tracked[s]) { vrfire_pos_to_world(&map, p, w); for (int i = 0; i < 3; i++) in.hand[s][i] = w[i] * 0.001f; in.grip[s] = gr; in.trig[s] = tg; }
         }
         in.weapon = bs->weapon; in.stance = bs->stance; in.on_wall = bs->on_wall; in.in_box = bs->in_box; in.in_water = bs->in_water;
         in.holding = act_holds(bs->player_action); in.life = bs->life;
@@ -62,11 +64,36 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
             const BridgeEnemy *e = &bs->enemies[i];
             in.en[in.n_en].p[0] = e->pos.x * 0.001f; in.en[in.n_en].p[1] = e->pos.y * 0.001f; in.en[in.n_en].p[2] = e->pos.z * 0.001f;
             in.en[in.n_en].yaw = (float)e->rot.y * (6.2831853f / 4096.0f);
-            in.en[in.n_en].down = e->down;
+            in.en[in.n_en].down = e->down; in.en[in.n_en].vital = e->vital;
             in.n_en++;
         }
     }
     vrg_update(&G, &in, &out);
+    {   /* el cuerpo del personaje: golpe sintético del botón y manos pegadas al cuello del enemigo sujeto (en el mundo del motor, mm) */
+        VrBodyGrab gb; memset(&gb, 0, sizeof gb);
+        if (in.active && bs) {
+            float px = (float)bs->ctl_pos.x, pz = (float)bs->ctl_pos.z;
+            if (out.jab_side >= 0) {
+                float d[3] = {sinf(in.yaw), 0, cosf(in.yaw)}, best = 3000.0f;
+                for (int i = 0; i < bs->n_enemies; i++) {
+                    const BridgeEnemy *e = &bs->enemies[i];
+                    float dx = e->pos.x - px, dz = e->pos.z - pz, dd = sqrtf(dx * dx + dz * dz);
+                    if (!e->down && dd < best && dd > 1.0f) { best = dd; d[0] = dx / dd; d[2] = dz / dd; }
+                }
+                vrbody_set_jab(out.jab_side, d);
+            }
+            if (out.grab_side >= 0 && out.grab_en >= 0 && out.grab_en < bs->n_enemies) {
+                const BridgeEnemy *e = &bs->enemies[out.grab_en];
+                float dx = e->pos.x - px, dz = e->pos.z - pz, dd = sqrtf(dx * dx + dz * dz);
+                if (dd > 1.0f) {
+                    float fx = dx / dd, fz = dz / dd;
+                    gb.active = 1; gb.neck[0] = e->pos.x; gb.neck[1] = (float)e->pos.y + 450.0f; gb.neck[2] = e->pos.z;
+                    gb.left[0] = fz; gb.left[1] = 0; gb.left[2] = -fx;      /* izquierda del personaje mirando al enemigo */
+                }
+            }
+        }
+        vrbody_set_grab(&gb);
+    }
     static int dbg = -1, dn;
     if (dbg < 0) dbg = getenv("VRG_DEBUG") != NULL;
     if (dbg && (++dn % 10) == 0)

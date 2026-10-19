@@ -2,11 +2,13 @@
  *
  * La capa VR no combate ni decide nada: traduce gestos del usuario a los botones que el juego ya espera (medido en el juego real, ver
  * bitacora):
- *  - Golpe: cuadrado (toque) sin arma equipada; el juego encadena su combo (puñetazos y patada) con toques repetidos.
- *  - Agarre / estrangulamiento: cuadrado MANTENIDO cerca de un enemigo (agarra, tira de él y lo estrangula); cada nuevo toque de cuadrado
- *    mientras sujeta aprieta el cuello (baja el contador de desmayo del enemigo); soltar = el enemigo cae. Moverse con el stick mientras
- *    sujeta arrastra al enemigo. En el gesto el agarre de la mano (grip) cerrado == cuadrado pulsado, así que mantener = mantener y
- *    apretar/aflojar repetido = toques.
+ *  - GOLPEAR y AGARRAR son dos cosas separadas (con las manos libres):
+ *    GOLPEAR = gesto físico de golpe (mano rápida hacia delante, ~2-4 m/s durante 0,2-0,4 s) con la mano en PUÑO (agarre/grip cerrado con histéresis; el
+ *    movimiento rápido con la mano abierta no golpea): cuadrado (toque) -> el juego da su golpe del combo; la mano del personaje sigue tu puño (IK) y el háptico llega al impactar. NUNCA agarra.
+ *    AGARRAR = llevar la mano al cuello del enemigo + apretar el GATILLO: cuadrado MANTENIDO (agarra, tira de él y lo estrangula); cada nuevo
+ *    apretón del gatillo mientras sujeta aprieta el cuello (baja el contador de desmayo); soltar = el enemigo cae. Moverse con el stick sujetando
+ *    arrastra al enemigo. Con gestos activos y manos libres el cuadrado físico del mando (gatillo dominante / A) NO llega al juego tal cual:
+ *    cerca del cuello es agarre, lejos es un golpe de botón (toque de 4 VBlanks + golpe sintético de la mano del personaje, para accesibilidad).
  *  - Pegarse a la pared: lo hace el juego al empujar el stick contra ella (nada que traducir, funciona sentado); asomarse = triángulo
  *    (primera persona asomándose) cuando la cabeza se inclina hacia un lado estando pegado (opcional).
  *  - Golpear la pared: círculo estando pegado, al hacer un golpe rápido de la mano.
@@ -23,10 +25,15 @@ extern "C" {
 
 #define VRG_MAX_EN 8
 enum { VRG_SQUARE = 1u << 15, VRG_CIRCLE = 1u << 13, VRG_TRIANGLE = 1u << 12, VRG_R1 = 1u << 11, VRG_L1 = 1u << 10 };
-enum { VRG_EV_NONE = 0, VRG_EV_PUNCH = 1, VRG_EV_GRAB = 2, VRG_EV_SQUEEZE = 3, VRG_EV_RELEASE = 4, VRG_EV_KNOCK = 5, VRG_EV_PEEK = 6, VRG_EV_WALL = 7, VRG_EV_HURT = 8 };
+enum { VRG_EV_NONE = 0, VRG_EV_PUNCH = 1, VRG_EV_GRAB = 2, VRG_EV_SQUEEZE = 3, VRG_EV_RELEASE = 4, VRG_EV_KNOCK = 5, VRG_EV_PEEK = 6, VRG_EV_WALL = 7, VRG_EV_HURT = 8,
+       VRG_EV_IMPACT = 9, VRG_EV_JAB = 10 };
 
 typedef struct {
     int enable;              /* 0: el módulo no hace nada (modo botón) */
+    int fist_required;       /* 1 (defecto): el golpe solo cuenta con la mano en PUÑO (agarre cerrado con histéresis grip_on/off); 0 = como antes (el puño es indiferente) */
+    float fist_haptic;       /* háptico suave al cerrar el puño con las manos libres (0,12); 0 = ninguno */
+    int button_jab;          /* 1 (defecto): con manos libres, el cuadrado físico lejos del cuello = golpe de botón (toque + golpe sintético de la mano); 0 = se descarta */
+    float trig_on, trig_off; /* histéresis del gatillo (0,6 / 0,3) */
     int punch, grab, knock, peek;   /* conmutadores por gesto (1 activo) */
     int right_handed;        /* el agarre de la mano dominante es R1 (derecho) o L1 */
     float punch_speed;       /* m/s de la mano para contar como golpe (1,8) */
@@ -61,9 +68,11 @@ typedef struct {
     int tracked[2];          /* 0 = izquierda física, 1 = derecha física */
     double hand_time[2];     /* instante (s, reloj monótono) de la pose de cada mano; <= 0: sin marca (se usa dt por llamada). Repetir la marca = misma muestra */
     int weapon_busy;         /* arma VR mostrada o maniobra de recarga en curso (el juego desequipa el arma un instante al recargar) */
-    float hand[2][3], grip[2];   /* mano en el mundo (cercanía a enemigos) */
+    float hand[2][3], grip[2];   /* mano en el mundo (cercanía a enemigos); grip = agarre (puño), NO decide el agarre del enemigo */
+    float trig[2];           /* gatillo analógico por mano física */
+    int sq_user;             /* el cuadrado físico del mando está pulsado (gatillo dominante o botón A de la otra mano) */
     int n_en;
-    struct { float p[3]; float yaw; int down; } en[VRG_MAX_EN];
+    struct { float p[3]; float yaw; int down; int vital; } en[VRG_MAX_EN];
 } vrg_in_t;
 
 typedef struct {
@@ -71,6 +80,9 @@ typedef struct {
     uint16_t mask;           /* botones del usuario a retirar (el grip mientras agarra: no debe abrir menús) */
     float haptic[2];         /* 0..1 por mano física (este VBlank) */
     int event;               /* VRG_EV_* de este VBlank */
+    int jab_side;            /* -1 nada; 0/1: iniciar un golpe sintético de esa mano del personaje (botón sin gesto) */
+    int grab_side;           /* mano física que sujeta (-1 ninguna) mientras el agarre dura (para pegar las manos al cuello) */
+    int grab_en;             /* índice del enemigo sujetado (en `en`) o -1 */
 } vrg_out_t;
 
 typedef struct {
@@ -82,7 +94,12 @@ typedef struct {
     int knock_left, peek_on;
     int grab_side;           /* -1 ninguno; mano que sujeta */
     int sq_hold, sq_age;     /* cuadrado por agarre y VBlanks en su estado actual */
-    int prev_grip_closed;
+    int fist;                /* bits: mano física con el puño cerrado (histéresis del agarre) */
+    int prev_grip_closed;    /* ahora: gatillo cerrado (con histéresis) */
+    int grab_en;
+    float fist_mask;         /* s con R1/L1 retirados tras un golpe (el puño cerrado no debe abrir el menú de objetos) */
+    float impact_t; int impact_side;      /* s restantes para el háptico de impacto del último golpe y mano que lo dio */
+    int vit_prev[VRG_MAX_EN], vit_n;      /* vida de los enemigos en el VBlank anterior (un descenso = impacto) */
     int prev_life, have_life;
     float peek_ref, peek_ax[2]; int peek_ref_ok, prev_wall;
     double tim[2][4]; double clock_s;   /* marcas de las últimas muestras y reloj interno de reserva */
