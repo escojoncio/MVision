@@ -45,6 +45,13 @@ void mv_vrhost_set_list_tap(MvVrListTap cb);
  * ~1,5 s se apaga (ventana plana) y al volver la primera lista trae la VRAM completa (vram_init). Thread-safe. */
 extern int mv_host_scene(VrScene *out);
 
+/* Volcado de un fotograma para desarrollo (vr/native/ns_dump.h). Cualquier hilo. `dir` = directorio a crear (el padre debe existir; se copia la ruta).
+ * Se atiende en el siguiente VBlank con lista de dibujo (como mucho unos pocos VBlanks) en el hilo de emulación: RAM, scratchpad, VRAM, registros de la GTE,
+ * la última lista de la GPU, el fotograma real en PNG y la pose de cámara/cabeza. Devuelve 0 si se aceptó, -1 si ya hay uno pendiente o la ruta es inválida. */
+int mv_vrhost_request_dump(const char *dir);
+/* Resultado del último volcado pedido: 0 = pendiente o ninguno, 1 = escrito, -1 = falló. Se consume al leerlo (devuelve 0 después). */
+int mv_vrhost_dump_result(void);
+
 /* Resumen del último frame del puente para Swift (sin importar el BridgeState entero). */
 typedef struct {
     int32_t game;        /* 1 si hay jugador en escena con el puente completo (partida) */

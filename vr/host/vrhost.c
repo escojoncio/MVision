@@ -31,6 +31,8 @@
 #include "vr_view.h"
 #include "vrai.h"
 #include "vrgame.h"
+#include "hle.h"
+#include "ns_dump.h"
 
 void hle_vrcam_reset(void);   /* vr_camera_hle.c */
 void hle_vrradar_reset(void); /* vr/radar/vr_radar_hle.c */
@@ -616,6 +618,68 @@ static void ovp_frame(void) {
 }
 #endif
 
+/* ------------------------------------------------------------------------------------------------ volcado (ns_dump.h) */
+static pthread_mutex_t DMX = PTHREAD_MUTEX_INITIALIZER;
+static char dump_dir[512];
+static int dump_pending, dump_res;
+static uint32_t dump_count;
+
+int mv_vrhost_request_dump(const char *dir) {
+    if (!dir || !*dir || strlen(dir) >= sizeof dump_dir) return -1;
+    int rc = -1;
+    pthread_mutex_lock(&DMX);
+    if (!dump_pending) { strcpy(dump_dir, dir); dump_pending = 1; dump_res = 0; rc = 0; }
+    pthread_mutex_unlock(&DMX);
+    return rc;
+}
+int mv_vrhost_dump_result(void) {
+    pthread_mutex_lock(&DMX);
+    int r = dump_res; dump_res = 0;
+    pthread_mutex_unlock(&DMX);
+    return r;
+}
+
+static void dump_now(Cpu *c, uint32_t f, const GpuDrawList *l) {
+    char dir[512];
+    pthread_mutex_lock(&DMX); snprintf(dir, sizeof dir, "%s", dump_dir); pthread_mutex_unlock(&DMX);
+    uint32_t gte[64];
+    for (int i = 0; i < 32; i++) { gte[i] = gte_mfc2(c, i); gte[32 + i] = gte_cfc2(c, i); }
+    GpuDisplay d; gpu_get_display(&d);
+    uint8_t *rgba = NULL; int fw = d.fw > 0 ? d.fw : d.w, fh = d.h;
+    if (fw > 0 && fh > 0 && fw <= 1024 && fh <= 512) {
+        rgba = (uint8_t *)malloc((size_t)fw * (size_t)fh * 4);
+        if (rgba && !gpu_present_rgba(&d, &gpu_vram[0][0], rgba, (size_t)fw * (size_t)fh)) { free(rgba); rgba = NULL; }
+    }
+    char meta[2048]; int n = 0;
+#define MP(...) do { if (n < (int)sizeof meta - 128) n += snprintf(meta + n, sizeof meta - (size_t)n, __VA_ARGS__); } while (0)
+    MP("dump_index=%u\ngame_frame=%u\nvblank=%u\n", ++dump_count, f, (unsigned)hle_frame_count());
+    if (l) MP("list_index=%u\n", l->index);
+    MP("area_id=%d\nstage_code=%s\ngame=%d\nin_control=%d\nposture=%d\nview_mode=%d\n", bs.area_id, bs.stage_code, bs.has_player, bs.in_control, bs.stance, view.kind);
+    MP("player_x=%d\nplayer_y=%d\nplayer_z=%d\n", bs.player_pos.x, bs.player_pos.y, bs.player_pos.z);
+    MP("eye_x=%d\neye_y=%d\neye_z=%d\ncam_h=%d\n", bs.eye_pos[0], bs.eye_pos[1], bs.eye_pos[2], bs.eye_focal);
+    MP("cam_rot=");
+    for (int i = 0; i < 9; i++) MP("%d%s", bs.eye_axes[i / 3][i % 3], i < 8 ? "," : "\n");
+    const VrCamRecord *r = vrcam_last_record();
+    if (r) {
+        MP("rec_active=%d\nrec_eye=%d,%d,%d\nrec_M=", r->active, r->eye[0], r->eye[1], r->eye[2]);
+        for (int i = 0; i < 9; i++) MP("%.6f%s", r->M[i], i < 8 ? "," : "\n");
+        MP("rec_screen=%d\nrec_yaw=%.4f\nrec_pitch=%.4f\nrec_theta=%.4f\nrec_units_per_m=%.3f\n", r->screen, r->yaw_deg, r->pitch_deg, r->theta_play_deg, r->units_per_m);
+        MP("rec_p_ref=%.5f,%.5f,%.5f\nrec_head=", r->p_ref[0], r->p_ref[1], r->p_ref[2]);
+        for (int i = 0; i < 16; i++) MP("%.6f%s", r->head[i], i < 15 ? "," : "\n");
+    }
+    float hm[16]; double ht = 0;
+    if (mv_vr_get_head(hm, &ht)) {
+        MP("head=");
+        for (int i = 0; i < 16; i++) MP("%.6f%s", hm[i], i < 15 ? "," : "\n");
+        MP("head_age=%.3f\n", mv_vr_head_age());
+    }
+    NsDumpSrc s = { emu_ram, emu_scratch, &gpu_vram[0][0], gte, l, rgba, fw, fh, meta };
+    int rc = ns_dump_write(dir, &s);
+    free(rgba);
+    fprintf(stderr, "[vrhost] volcado %s: %s\n", dir, rc == 0 ? "ok" : "ERROR");
+    pthread_mutex_lock(&DMX); dump_pending = 0; dump_res = rc == 0 ? 1 : -1; pthread_mutex_unlock(&DMX);
+}
+
 static void frame_hook(Cpu *c, uint32_t f) {
 #ifdef MV_NOGEN
     if (vr_ok) ovp_frame();
@@ -641,7 +705,11 @@ static void frame_hook(Cpu *c, uint32_t f) {
     uint64_t lp = atomic_load(&last_poll_ns), now = mono_ns();
     int want = lp && now - lp < 1500000000ull;
     capture_set(want);
-    if (!cap_on) return;
+    if (!cap_on) {   /* sin consumidor de escenas no hay lista: el volcado se hace sin ella */
+        pthread_mutex_lock(&DMX); int dp = dump_pending; pthread_mutex_unlock(&DMX);
+        if (dp) dump_now(c, f, NULL);
+        return;
+    }
     gpu_capture_vblank();
     for (;;) {
         int si = take_free_slot();
@@ -655,6 +723,7 @@ static void frame_hook(Cpu *c, uint32_t f) {
             break;
         }
         build_one(l, si);
+        { pthread_mutex_lock(&DMX); int dp = dump_pending; pthread_mutex_unlock(&DMX); if (dp) { dump_now(c, f, l); } }
         if (!cap_on) break;
     }
 }

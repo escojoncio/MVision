@@ -239,6 +239,15 @@ final class VRInput: @unchecked Sendable {
     func frame(head: simd_float4x4?, dt: Float, gamePosture: Int32 = -1, menu: Bool = false, comms: Bool = false,
                recenter: simd_float4x4 = matrix_identity_float4x4) -> vr_pad_t {
         let sample = hub.sample()
+        // Volcado de desarrollo: los dos clics de stick mantenidos ~1 s (ver DumpCapture).
+        let dumpBoth: Bool
+        switch sample.kind {
+        case .sense: dumpBoth = sample.left.stickClick && sample.right.stickClick
+        case .gamepad: dumpBoth = (sample.pad.buttons & 0x6) == 0x6   // L3 (bit 1) + R3 (bit 2)
+        case .none: dumpBoth = false
+        }
+        let dumpBuzz = DumpCapture.shared.frame(both: dumpBoth)
+        if dumpBuzz > 0 { rumble(dumpBuzz, dumpBuzz) }
 
         var f = vr_input_frame_t()
         f.dt = dt
