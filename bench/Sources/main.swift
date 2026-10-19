@@ -763,6 +763,15 @@ func runMenuLayout() {
             check(case_, "esquinas entre 0,35 y 1,0 m de la cabeza", minD > 0.35 && maxD < 1.0, String(format: "%.2f..%.2f m", minD, maxD))
         }
     }
+    // Profundidad de relleno (XRMath.depthValue) y ajustes de diagnóstico por defecto
+    var pInf = XRMath.projection(tangents: SIMD4<Float>(1, 1, 1, 1), near: 0.1, far: 1000); pInf.columns.2.z = 0; pInf.columns.3.z = 0.1
+    let vInf = XRMath.depthValue(projection: pInf, meters: 50)
+    check("prof-relleno", "plano lejano infinito: near/dist = 0,002", vInf != nil && abs(vInf! - 0.002) < 1e-6, String(describing: vInf))
+    let pFin = XRMath.projection(tangents: SIMD4<Float>(1, 1, 1, 1), near: 0.1, far: 1000)
+    let vFin = XRMath.depthValue(projection: pFin, meters: 50)
+    check("prof-relleno", "plano lejano finito: entre 0 y 1 y mayor que a 900 m", vFin != nil && vFin! > 0 && vFin! < 1 && vFin! > XRMath.depthValue(projection: pFin, meters: 900)!, String(describing: vFin))
+    check("prof-relleno", "proyección no invertida o distancia nula: nil", XRMath.depthValue(projection: pInf, meters: 0) == nil && XRMath.depthValue(projection: matrix_identity_float4x4, meters: 50) == nil, "")
+    check("prof-relleno", "ajustes normales: relleno activado, profundidad constante apagada", XRDiag.Settings().fillDepth && !XRDiag.Settings().flatDepth && XRDiag.Settings().isNormal, "")
     // Legibilidad del cine
     check("cine-legible", "sin partida (1) y detenido (4) son escenas de texto", XRCinemaLayout.legible(reason: 1) && XRCinemaLayout.legible(reason: 4), "")
     check("cine-legible", "mundo, radio, cinemática y pausa no cambian", !XRCinemaLayout.legible(reason: 0) && !XRCinemaLayout.legible(reason: 2) && !XRCinemaLayout.legible(reason: 3) && !XRCinemaLayout.legible(reason: 5), "")

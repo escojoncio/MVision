@@ -66,6 +66,22 @@ fragment XRDepthOut xr_depth_resolve_layered(XRVOutL in [[stage_in]],
     return o;
 }
 
+/* Profundidad de relleno: escribe una profundidad constante (c = profundidad ya en el espacio del buffer, Z invertida). Con la prueba "mayor" solo sobrescribe los píxeles
+ * que conservan la profundidad de borrado (0) o están más lejos que ella; con "siempre" (diagnóstico) aplana todo el buffer. Sin color. */
+fragment XRDepthOut xr_depth_fill(XRVOut in [[stage_in]], constant float &c [[buffer(0)]])
+{
+    XRDepthOut o;
+    o.depth = c;
+    return o;
+}
+
+fragment XRDepthOut xr_depth_fill_layered(XRVOutL in [[stage_in]], constant float &c [[buffer(0)]])
+{
+    XRDepthOut o;
+    o.depth = c;
+    return o;
+}
+
 /* ---- Quads en el mundo: pantalla de cine, paneles del HUD, menú ----
  * Un solo vertex shader: tira de 2*(cols+1) vértices (cols = 1 para un panel plano). El modelo (rígido, en metros) lo pone la matriz mvp;
  * el tamaño y la curvatura van en `geom`. Curvatura: cilindro de radio D (el usuario en su eje) mezclado con el plano (cv 0..1). */

@@ -69,6 +69,15 @@ enum XRMath {
                 c.2.x, c.2.y, c.2.z, c.2.w, c.3.x, c.3.y, c.3.z, c.3.w]
     }
 
+    /// Profundidad del buffer (0..1, Z invertida: cerca = 1) de un punto a `meters` m delante del ojo con la proyección `p`: z_clip = P22*z + P32 con z = -meters, w = meters.
+    /// Con plano lejano infinito (P22 = 0) es near/meters. Nil si la proyección no es de Z invertida o el resultado sale de (0, 1).
+    static func depthValue(projection p: simd_float4x4, meters: Float) -> Float? {
+        guard meters > 0 else { return nil }
+        let a = p.columns.2.z, b = p.columns.3.z
+        let v = (b - a * meters) / meters
+        return (v.isFinite && v > 0 && v < 1) ? v : nil
+    }
+
     static func isFinite(_ m: simd_float4x4) -> Bool {
         for c in [m.columns.0, m.columns.1, m.columns.2, m.columns.3] {
             if !(c.x.isFinite && c.y.isFinite && c.z.isFinite && c.w.isFinite) { return false }
