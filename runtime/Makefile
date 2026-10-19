@@ -35,6 +35,13 @@ $(OUT)/test_rtpatch: $(RT) test_rtpatch.c $(wildcard *.h)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_rtpatch.c $(LDLIBS)
 
+# test_audio con límites de índices y UB comprobados (arranque sin datos, extensión): make test_audio-san
+test_audio-san:
+	@mkdir -p $(OUT)
+	$(CC) -I. -O1 -g -fsanitize=bounds,undefined -fno-sanitize-recover=all -o $(OUT)/test_audio_san spu.c test_audio.c -lm -lpthread
+	$(OUT)/test_audio_san
+.PHONY: test_audio-san
+
 # test_rtpatch con ASan/UBSan (requiere gcc o clang con los runtimes de sanitizers): make test_rtpatch-san CC=gcc
 test_rtpatch-san:
 	@mkdir -p $(OUT)

@@ -69,9 +69,9 @@ uint8_t *spu_ram(void) { return S.ram; }
 #define RG(off) S.regs[((off) - 0x1C00) / 2]
 #define CNT RG(0x1DAA)
 
-/* Saturación suave de la mezcla: lineal hasta SOFT_KNEE y después curva racional con pendiente continua que tiende a +-32767
+/* Saturación suave de la mezcla: lineal hasta SOFT_KNEE (28000: las mezclas normales no se tocan) y después curva racional con pendiente continua que tiende a +-32767
  * (sin recorte duro al sumar 24 voces + reverb). */
-#define SOFT_KNEE 22000
+#define SOFT_KNEE 28000
 static inline int32_t soft16(int32_t x) {
     int32_t a = x < 0 ? -x : x;
     if (a > 1 << 20) a = 1 << 20;
@@ -496,7 +496,7 @@ uint32_t spu_ring_reads(void) { return atomic_load_explicit(&out_rd, memory_orde
 #define RS_FC 0.4887                  /* corte relativo a la frecuencia de muestreo de la fuente */
 #define RS_BETA 7.0
 #define RESUME_FRAMES 1100u           /* margen para volver de la extensión */
-#define TARGET_LEVEL 2800.0           /* nivel objetivo del anillo (frames) para el control de la relación de reloj */
+#define TARGET_LEVEL ((double)SPU_TARGET_LEVEL)   /* nivel objetivo del anillo (frames); definido en spu.h junto al umbral de pace() */
 #define RS_MAX_ADJ 0.005
 #define CC_P 512                      /* periodo de la extensión (muestras de salida) */
 #define XF_FRAMES 256
@@ -523,9 +523,9 @@ static struct {   /* solo lo toca el hilo consumidor */
     float hist[2][CC_P + 1];      /* últimas salidas (anillo de CC_P+1) */
     int hw;                       /* índice de escritura en hist */
     float cs[2][CC_P + 1];        /* instantánea para la extensión: cs[P] = última salida real */
-    int ci, cl; float corr[2], cg;    /* posición en la extensión, corrección de continuidad, ganancia */
+    int ci, cl; float corr[2], cg; int cn;   /* cn: muestras seguidas en extensión */    /* posición en la extensión, corrección de continuidad, ganancia */
     int xf;                       /* muestras de fundido cruzado hechas */
-} pl = { .state = PL_CONCEAL, .lvl_f = TARGET_LEVEL, .ci = 1, .cg = 1.0f };
+} pl = { .state = PL_CONCEAL, .lvl_f = TARGET_LEVEL, .ci = 1, .cl = CC_P, .cg = 1.0f };
 
 static inline void pl_hist_push(float l, float r) {
     pl.hist[0][pl.hw] = l; pl.hist[1][pl.hw] = r;
@@ -552,12 +552,14 @@ static void pl_enter_conceal(void) {
     /* cs[0..P] = las últimas P+1 salidas en orden cronológico */
     for (int i = 0; i <= CC_P; i++) { int j = (pl.hw + i) % (CC_P + 1); pl.cs[0][i] = pl.hist[0][j]; pl.cs[1][i] = pl.hist[1][j]; }
     pl.cl = pl_pick_period();
-    pl.ci = CC_P - pl.cl + 1; pl.cg = 1.0f;
+    pl.ci = CC_P - pl.cl + 1; pl.cg = 1.0f; pl.cn = 0;
     /* continuidad: la primera muestra de la extensión es cs[ci] + corr, que debe seguir a cs[P] con la pendiente cs[ci]-cs[ci-1] */
     for (int c = 0; c < 2; c++) pl.corr[c] = pl.cs[c][CC_P] - pl.cs[c][pl.ci - 1];
     pl.state = PL_CONCEAL; pl.xf = 0;
 }
 static inline void pl_conceal_sample(float *l, float *r) {
+    if (pl.cl < CC_MINL || pl.cl > CC_P) { pl.cl = CC_P; pl.ci = 1; }
+    if (pl.ci < 1 || pl.ci > CC_P) pl.ci = CC_P - pl.cl + 1;
     *l = (pl.cs[0][pl.ci] + pl.corr[0]) * pl.cg;
     *r = (pl.cs[1][pl.ci] + pl.corr[1]) * pl.cg;
     if (++pl.ci > CC_P) {   /* vuelta al principio del tramo: su predecesor es cs[P-L] */
@@ -565,7 +567,9 @@ static inline void pl_conceal_sample(float *l, float *r) {
         for (int c = 0; c < 2; c++) pl.corr[c] += pl.cs[c][CC_P] - pl.cs[c][pl.ci - 1];
     }
     pl.corr[0] *= 1.0f - 1.0f / 384; pl.corr[1] *= 1.0f - 1.0f / 384;
-    pl.cg *= 1.0f - 1.0f / 3000;
+    /* caída lenta (tau ~3000 muestras) en huecos cortos; si el productor sigue parado (>~100 ms: pausa, interrupción) cae rápido (tau ~20 ms) */
+    pl.cg *= pl.cn < 4800 ? 1.0f - 1.0f / 3000 : 1.0f - 1.0f / 960;
+    if (pl.cn < 1000000) pl.cn++;
 }
 
 static inline int16_t f2s(float x) { return x > 32767.f ? 32767 : x < -32768.f ? -32768 : (int16_t)lrintf(x); }
@@ -579,6 +583,11 @@ int spu_pull_rate(int16_t *out, int frames, int rate) {
     if (pl.state == PL_CONCEAL && avail > 4u * PREFILL_FRAMES) {   /* audio viejo acumulado sin consumidor (arranque): salta al nivel objetivo */
         rd += avail - (uint32_t)TARGET_LEVEL; avail = (uint32_t)TARGET_LEVEL;
         atomic_store_explicit(&out_rd, rd, memory_order_release);
+    }
+    if (pl.state != PL_CONCEAL && avail > OUT_RING / 2) {   /* consumidor parado (interrupción, pausa): todo el anillo es audio viejo */
+        rd += avail; avail = 0; pl.pos = 0;   /* se descarta TODO lo viejo; se vuelve con audio nuevo por la extensión + fundido cruzado */
+        atomic_store_explicit(&out_rd, rd, memory_order_release);
+        pl_enter_conceal();
     }
     uint32_t lvl0 = avail, lvl_min = avail;
     /* relación de reloj: fuente por salida; el filtro lento del nivel mueve +-0,5 % como mucho */
@@ -649,7 +658,7 @@ void spu_pull_reset(void) {   /* solo pruebas: estado inicial del consumidor y d
     atomic_store(&out_wr, 0); atomic_store(&out_rd, 0);
     memset(out_ring, 0, sizeof out_ring);
     memset(&pl, 0, sizeof pl);
-    pl.state = PL_CONCEAL; pl.lvl_f = TARGET_LEVEL; pl.ci = 1; pl.cg = 1.0f;
+    pl.state = PL_CONCEAL; pl.lvl_f = TARGET_LEVEL; pl.ci = 1; pl.cl = CC_P; pl.cg = 1.0f;
     atomic_store(&st_prod, 0); atomic_store(&st_drop, 0); atomic_store(&st_cons, 0); atomic_store(&st_sil, 0); atomic_store(&st_under, 0);
     atomic_store(&st_min, 0xFFFFFFFFu); atomic_store(&st_max, 0);
 }
