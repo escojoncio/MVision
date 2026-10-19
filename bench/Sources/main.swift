@@ -467,6 +467,110 @@ for (nm, r) in [("rango-1-0", SIMD2<Float>(1, 0)), ("rango-0.1-1000", SIMD2<Floa
 // Proyección del sistema con plano lejano infinito (P22 = 0) y rango degenerado (inf, 0.1) como en el visor: debe usarse y dar la misma imagen
 runCase(Cfg(name: "layered-msaa4-sistema-inf", layered: true, msaa: 4, range: SIMD2<Float>(Float.infinity, 0.1), sysInf: true), first: false)
 sysInf = false
+
+// ---------- Fluidez de la locomoción (vr_smooth): escenas sintéticas a 25 Hz, movimiento constante, render a 100 Hz ----------
+// El "juego" publica una escena nueva cada 40 ms (bench_publish_motion: el mundo ya re-expresado respecto al personaje y al giro que traía su cámara) y el visor dibuja a 100 Hz.
+// Se sigue el centroide del cubo rojo en el ojo izquierdo, fotograma a fotograma, con la corrección de fluidez apagada (comportamiento anterior) y encendida, y se compara con la posición
+// ideal del movimiento continuo. Caminar: el personaje avanza 1 m/s de lado (el mundo va a la izquierda). Girar: el stick gira 30 grados/s y la cámara de cada escena trae el giro de 100 ms antes.
+struct FluidezRes { var cv = 0.0, mean = 0.0, maxStep = 0.0, sdev = 0.0, maxErr = 0.0, rmsErr = 0.0, frames = 0 }
+
+func fluidezScenario(_ caso: String, layered: Bool, color: [MTLTexture], depth: [MTLTexture], enc: XRFrameEncoder, walkV: Double, turnDps: Double, smooth: Bool,
+                     frames: Int, sceneHz: Double = 25, pipelineLag: Double = 0.1) -> FluidezRes? {
+    let K = 0.001
+    let lead = 0.012
+    bench_smooth_config(1, Float(lead))
+    enc.smoothMotion = smooth
+    bench_make_pattern(); bench_make_scene(); bench_enable_radar(0); bench_enable_weapon(0)
+    let head = headPose(SIMD3<Float>(0, 1.6, 0), yaw: 0)
+    var gs = MvVrGameState(); gs.view_mode = 1; gs.game = 1; gs.in_control = 1; gs.cam_active = 1; gs.first_person = 1
+    func turnReq(_ t: Double) -> Double { turnDps * max(t, 0) }
+    func rotY(_ a: Double, _ v: SIMD3<Double>) -> SIMD3<Double> {
+        let r = a * Double.pi / 180, c = cos(r), s = sin(r)
+        return SIMD3<Double>(c * v.x - s * v.z, v.y, s * v.x + c * v.z)
+    }
+    let marker = SIMD3<Double>(-1.2, 0.5, -3.0)
+    func projF(_ w: SIMD3<Double>) -> (Double, Double)? {
+        let v = (head * eyes[0].transform).inverse
+        let p = XRFrameEncoder.projection(eyes[0], depthRange: SIMD2<Float>(1000, 0.1))
+        let c = p * v * SIMD4<Float>(Float(w.x), Float(w.y), Float(w.z), 1)
+        guard c.w > 0.01 else { return nil }
+        return (Double((c.x / c.w * 0.5 + 0.5) * Float(EW)), Double((1 - (c.y / c.w * 0.5 + 0.5)) * Float(EH)))
+    }
+    var k = 0
+    var meas: [Double] = [], ideal: [Double] = []
+    for i in 0..<frames {
+        let t = Double(i) / 100.0
+        while t >= Double(k) / sceneHz + 0.002 {
+            let tg = Double(k) / sceneHz
+            bench_publish_motion(tg, tg, walkV * tg / K, 0, turnReq(tg - pipelineLag))
+            k += 1
+        }
+        bench_smooth_set_time(t, turnReq(t))
+        guard let cb = queue.makeCommandBuffer() else { return nil }
+        let ok = enc.encode(commandBuffer: cb, gs: gs, originFromDevice: head, recenterInverse: matrix_identity_float4x4, dt: 0.01,
+                            eyes: eyes, depthRange: depthRange, colorTextures: color, depthTextures: depth, systemProjections: nil, debugAxes: [])
+        if !ok { check(caso, "encode", false, "devolvió false"); return nil }
+        let buf = blitEye(cb, color, layered: layered, eye: 0)
+        cb.commit(); cb.waitUntilCompleted()
+        guard cb.status == .completed, let b = buf else { check(caso, "render", false, "estado \(cb.status.rawValue)"); return nil }
+        guard i >= 40 else { continue }
+        let px = b.contents().assumingMemoryBound(to: UInt8.self)
+        var sw = 0.0, sx = 0.0
+        for y in 0..<EH { for x in 0..<EW {
+            let o = (y * EW + x) * 4
+            let w = max(0.0, Double(px[o + 2]) - (Double(px[o + 1]) + Double(px[o])) * 0.5)
+            if w > 8 { sw += w; sx += w * Double(x) }
+        } }
+        guard sw > 2000 else { check(caso, "marcador visible", false, "fotograma \(i): el cubo rojo no se ve (peso \(sw))"); return nil }
+        meas.append(sx / sw)
+        let te = t + lead
+        let pw = rotY(turnReq(t), marker - SIMD3<Double>(walkV * te, 0, 0))
+        guard let pp = projF(pw) else { return nil }
+        ideal.append(pp.0)
+    }
+    var steps: [Double] = []
+    for i in 1..<meas.count { steps.append(abs(meas[i] - meas[i - 1])) }
+    var r = FluidezRes()
+    r.frames = meas.count
+    r.mean = steps.reduce(0, +) / Double(steps.count)
+    r.sdev = sqrt(steps.map { ($0 - r.mean) * ($0 - r.mean) }.reduce(0, +) / Double(steps.count))
+    r.cv = r.mean > 1e-9 ? r.sdev / r.mean : 0
+    r.maxStep = steps.max() ?? 0
+    let bias = zip(meas, ideal).map { $0 - $1 }.reduce(0, +) / Double(meas.count)
+    let errs = zip(meas, ideal).map { abs($0 - $1 - bias) }
+    r.maxErr = errs.max() ?? 0
+    r.rmsErr = sqrt(errs.map { $0 * $0 }.reduce(0, +) / Double(errs.count))
+    return r
+}
+
+func runFluidez(layered: Bool) {
+    let name = layered ? "layered" : "dedicated"
+    if layered && !device.supportsVertexAmplificationCount(2) { return }
+    depthRange = SIMD2<Float>(1000, 0.1); sysInf = false
+    setDefaults(curve: 0.35, sharp: 1)
+    guard let tg = makeTargets(layered: layered) else { check("fluidez-\(name)", "texturas", false, "no se pudieron crear"); return }
+    guard let enc = XRFrameEncoder(device: device, colorFormat: colorFormat, depthFormat: depthFormat, layered: layered, sampleCount: 4) else {
+        check("fluidez-\(name)", "codificador", false, "XRFrameEncoder no se pudo crear"); return
+    }
+    enc.log = { print("[diag] " + $0) }
+    print("\n######## fluidez \(name) ########")
+    for (label, walkV, turnDps, nf) in [("caminar 1 m/s", 1.0, 0.0, 160), ("girar 30 gr/s", 0.0, 30.0, 110), ("caminar 0,5 m/s y girar 30 gr/s", 0.5, 30.0, 110)] {
+        let caso = "fluidez-\(name)/\(label)"
+        guard let off = fluidezScenario(caso, layered: layered, color: tg.color, depth: tg.depth, enc: enc, walkV: walkV, turnDps: turnDps, smooth: false, frames: nf),
+              let on = fluidezScenario(caso, layered: layered, color: tg.color, depth: tg.depth, enc: enc, walkV: walkV, turnDps: turnDps, smooth: true, frames: nf) else { continue }
+        print(String(format: "[fluidez] %@ | sin: paso medio %.2f px, desviacion %.2f, CV %.3f, paso max %.2f px, error vs ideal rms %.2f max %.2f px | con: paso medio %.2f, desviacion %.2f, CV %.3f, paso max %.2f, error rms %.2f max %.2f px",
+                     caso, off.mean, off.sdev, off.cv, off.maxStep, off.rmsErr, off.maxErr, on.mean, on.sdev, on.cv, on.maxStep, on.rmsErr, on.maxErr))
+        print("[diag] fluidez última corrección: activa=\(enc.lastSmooth.active) giro=\(enc.lastSmooth.delta_deg) gr")
+        check(caso, "sensibilidad: sin corregir hay judder o retraso", off.cv > 0.3 || off.maxErr > 6, String(format: "CV %.3f error max %.2f px", off.cv, off.maxErr))
+        check(caso, "CV del paso por fotograma", on.cv < 0.25 && on.cv < off.cv * 0.5 + 1e-9, String(format: "con %.3f, sin %.3f (limite 0,25 y menos de la mitad)", on.cv, off.cv))
+        check(caso, "error frente al movimiento continuo", on.maxErr < 3.0, String(format: "max %.2f px rms %.2f px (sin corregir: max %.2f)", on.maxErr, on.rmsErr, off.maxErr))
+        check(caso, "paso maximo sin saltos", on.maxStep < max(on.mean * 2.0, 1.5), String(format: "paso max %.2f px, medio %.2f px (sin corregir: max %.2f)", on.maxStep, on.mean, off.maxStep))
+    }
+    enc.smoothMotion = true
+}
+
+runFluidez(layered: true)
+runFluidez(layered: false)
 print("\nresumen: \(failures) comprobaciones falladas")
 if !warnList.isEmpty { annot("warning", "banco de render (informativo)", warnList.prefix(30).joined(separator: "\n")) }
 if failures > 0 {

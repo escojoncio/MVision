@@ -1026,6 +1026,42 @@ static void test_user_map(void) {
     vr_scene_release();
 }
 
+
+/* El contrato que usa vr/host/vr_smooth: con user_map, un punto del mundo del juego W cae en P = c + R * (k * scale) * (W - O), c = p_ref - R col1 * eye_h, tanto con la
+ * cámara del motor directa (det > 0) como reflejada (det < 0: la reflexión de z de vr_scene se cancela). */
+static void test_user_map_linear(void) {
+    for (int mirrored = 0; mirrored < 2; mirrored++) {
+        float R[3][3] = {{-1, 0, 0}, {0, -1, 0}, {0, 0, 1}};
+        if (mirrored) { R[0][0] = 1; R[1][1] = 1; R[2][2] = -1; }
+        const int32_t e[3] = {1000, 1600, 2000};
+        BridgeState bs; set_eye(&bs, R, e);
+        float pts[3][3] = {{0, 0, 2000}, {0, 0, 3000}, {500, 300, 1000}};
+        reset();
+        poly3(pts[0], pts[1], pts[2], 0);
+        VrSceneOpts o = vr_scene_opts_default();
+        o.origin_mode = 1; o.origin_game[0] = 1000; o.origin_game[1] = 0; o.origin_game[2] = 2000;
+        float th = 125.0f * 3.14159265f / 180.0f, cs = cosf(th), sn = sinf(th);
+        const float Rm[9] = {cs, 0, -sn, 0, 1, 0, sn, 0, cs};
+        o.user_map_on = 1; memcpy(o.user_R, Rm, sizeof Rm);
+        o.user_k = 1.1f; o.user_eye_h_m = 1.76f; o.user_p_ref[0] = 0.1f; o.user_p_ref[1] = 1.04f; o.user_p_ref[2] = 0.2f;
+        VrScene s;
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.nv == 3 && s.user_space, "linear: build");
+        float K = s.user_k * s.scale, c[3];
+        for (int i = 0; i < 3; i++) c[i] = s.user_p_ref[i] - s.user_R[3 * i + 1] * s.user_eye_h;
+        int found = 0;
+        for (int i = 0; i < 3; i++) {
+            float W[3], d[3], P[3];
+            for (int r = 0; r < 3; r++) W[r] = (float)e[r] + R[r][0] * pts[i][0] + R[r][1] * pts[i][1] + R[r][2] * pts[i][2];
+            for (int r = 0; r < 3; r++) d[r] = W[r] - s.origin_game[r];
+            for (int r = 0; r < 3; r++) P[r] = c[r] + K * (s.user_R[3 * r] * d[0] + s.user_R[3 * r + 1] * d[1] + s.user_R[3 * r + 2] * d[2]);
+            for (uint32_t j = 0; j < s.nv; j++)
+                if (near_f(s.v[j].pos[0], P[0], 2e-3f) && near_f(s.v[j].pos[1], P[1], 2e-3f) && near_f(s.v[j].pos[2], P[2], 2e-3f)) { found++; break; }
+        }
+        CHECK(found == 3, "linear: P = c + R k scale (W - O) (espejado %d): %d de 3", mirrored, found);
+    }
+    vr_scene_release();
+}
+
 int main(void) {
     test_basic();
     test_stability();
@@ -1045,6 +1081,7 @@ int main(void) {
     test_recon_fate();
     test_recon_diag_ambig();
     test_user_map();
+    test_user_map_linear();
     if (fails) { fprintf(stderr, "%d fallos\n", fails); return 1; }
     printf("test_scene: OK\n");
     return 0;

@@ -3,7 +3,7 @@ import simd
 
 /// Un elemento que dibuja el pase final dentro del espacio de la escena (todo en metros, espacio recentrado).
 struct XRDrawItem {
-    enum Kind { case screen, screen3d, panel, menu, veil }
+    enum Kind { case screen, screen3d, panel, menu, veil, vignette }
     var kind: Kind
     var texture: MTLTexture?
     var model = matrix_identity_float4x4        // rígido: el origen es el centro del quad, +Z mira al usuario
@@ -14,7 +14,8 @@ struct XRDrawItem {
     var cols: UInt32 = 1                        // segmentos horizontales (más de 1 solo si hay curvatura)
     var imgSize = SIMD2<Float>(1, 1)            // pantalla: tamaño de la imagen en texels
     var sharp: Float = 1                        // pantalla: 0 suave, 1 nítido, 2 píxel
-    var opacity: Float = 1                      // veil: opacidad del negro
+    var opacity: Float = 1                      // veil: opacidad del negro; vignette: intensidad 0..1
+    var vig: [SIMD4<Float>] = []                // vignette: por ojo (centro óptico x, y en píxeles del destino; tangentes por píxel x, y)
     // screen3d: `texture` es un array de 2 capas (ojo izquierdo, derecho). Tinte y recubrimientos de pantalla del juego (espacio gamma, como VrFilter:
     // w de cada recubrimiento = modo de mezcla original 0..3 o -1 = sin usar), y cómo leer/escribir los valores.
     var tint = SIMD3<Float>(1, 1, 1)
@@ -49,6 +50,7 @@ final class XRFinalPass {
     private let screen3dPSO: MTLRenderPipelineState
     private let panelPSO: MTLRenderPipelineState
     private let veilPSO: MTLRenderPipelineState
+    private let vignettePSO: MTLRenderPipelineState
     private let dsAlways: MTLDepthStencilState
     private let dsHud: MTLDepthStencilState
     private let dsOverlay: MTLDepthStencilState
@@ -67,7 +69,8 @@ final class XRFinalPass {
               let scF = lib.makeFunction(name: "xr_screen_fragment" + sfx),
               let s3F = lib.makeFunction(name: "xr_screen3d_fragment" + sfx),
               let pnF = lib.makeFunction(name: "xr_panel_fragment" + sfx),
-              let vlF = lib.makeFunction(name: "xr_veil_fragment" + sfx) else { return nil }
+              let vlF = lib.makeFunction(name: "xr_veil_fragment" + sfx),
+              let vgF = lib.makeFunction(name: "xr_vignette_fragment" + sfx) else { return nil }
 
         let d1 = MTLRenderPipelineDescriptor()
         d1.label = "mv.xr.depthResolve"
@@ -96,13 +99,15 @@ final class XRFinalPass {
         let d2b = blended("mv.xr.screen3d", qV, s3F, topology: true)
         let d3 = blended("mv.xr.panel", qV, pnF, topology: true)
         let d4 = blended("mv.xr.veil", fsV, vlF, topology: true)
+        let d5 = blended("mv.xr.vignette", fsV, vgF, topology: true)
 
         guard let p1 = try? device.makeRenderPipelineState(descriptor: d1),
               let p2 = try? device.makeRenderPipelineState(descriptor: d2),
               let p2b = try? device.makeRenderPipelineState(descriptor: d2b),
               let p3 = try? device.makeRenderPipelineState(descriptor: d3),
-              let p4 = try? device.makeRenderPipelineState(descriptor: d4) else { return nil }
-        resolvePSO = p1; screenPSO = p2; screen3dPSO = p2b; panelPSO = p3; veilPSO = p4
+              let p4 = try? device.makeRenderPipelineState(descriptor: d4),
+              let p5 = try? device.makeRenderPipelineState(descriptor: d5) else { return nil }
+        resolvePSO = p1; screenPSO = p2; screen3dPSO = p2b; panelPSO = p3; veilPSO = p4; vignettePSO = p5
 
         let a = MTLDepthStencilDescriptor()
         a.depthCompareFunction = .always; a.isDepthWriteEnabled = true
@@ -128,7 +133,7 @@ final class XRFinalPass {
         let resolve = msaaDepth != nil
         nDrawn.removeAll()
         defer {
-            lastCounts = "resolve=\(resolve) pantalla=\(nDrawn[.screen] ?? 0) pantalla3d=\(nDrawn[.screen3d] ?? 0) panel=\(nDrawn[.panel] ?? 0) menu=\(nDrawn[.menu] ?? 0) velo=\(nDrawn[.veil] ?? 0) de \(items.count)"
+            lastCounts = "resolve=\(resolve) pantalla=\(nDrawn[.screen] ?? 0) pantalla3d=\(nDrawn[.screen3d] ?? 0) panel=\(nDrawn[.panel] ?? 0) menu=\(nDrawn[.menu] ?? 0) velo=\(nDrawn[.veil] ?? 0) vineta=\(nDrawn[.vignette] ?? 0) de \(items.count)"
         }
         if !resolve && items.isEmpty { return }       // nada que hacer
         guard views.count >= 2, projections.count >= 2, viewports.count >= 1 else { return }
@@ -177,6 +182,16 @@ final class XRFinalPass {
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3, instanceCount: instances)
         }
         for it in items {
+            if it.kind == .vignette {
+                if it.opacity <= 0.005 || it.vig.count < 2 { continue }
+                var u = (SIMD4<Float>(min(max(it.opacity, 0), 1), Float(base), 0, 0), it.vig[0], it.vig[1])   // debe coincidir con XRVigU
+                enc.setRenderPipelineState(vignettePSO)
+                enc.setDepthStencilState(dsOverlay)
+                enc.setFragmentBytes(&u, length: MemoryLayout.size(ofValue: u), index: 0)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3, instanceCount: instances)
+                nDrawn[.vignette, default: 0] += 1
+                continue
+            }
             if it.kind == .veil {
                 if it.opacity <= 0.001 { continue }
                 var c = SIMD4<Float>(min(max(it.opacity, 0), 1), 0, 0, 0)

@@ -9,6 +9,8 @@
 #include "vrgame.h"
 #include "vr_hands_frame.h"
 #include "vr_scene.h"
+#include "vr_smooth.h"
+#include <math.h>
 
 /* ---------- fotograma 2D (pantalla de cine): patrón de prueba 320x240 ---------- */
 static uint8_t g_fb[320 * 240 * 4];
@@ -58,6 +60,7 @@ void bench_touch_frame(void) { if (g_fb_seq) g_fb_seq++; }
 /* ---------- escena VR sintética ---------- */
 #define MAXV 20000
 static VrVtx g_v[MAXV];
+static VrVtx g_vbase[MAXV];   /* geometría base (mundo en metros del usuario con el origen del personaje en O = 0, R = I): ver bench_publish_motion */
 static uint32_t g_nv;
 static VrBatch g_b[4];
 static uint32_t g_nb;
@@ -146,6 +149,7 @@ void bench_make_scene(void) {
     g_list.index = 0; g_list.disp.w = 320; g_list.disp.h = 240; g_list.disp.enabled = 1;
     g_list.ops = g_ops; g_list.nops = 2; g_list.cap_ops = 2; g_list.data = g_data; g_list.ndata = 256; g_list.cap_data = 256;
     g_list.vram_init = g_vram_init;
+    memcpy(g_vbase, g_v, g_nv * sizeof g_v[0]);
     g_scene_loaded = 1;
 }
 void bench_scene_post(void) { g_scene_pending = g_scene_loaded; }
@@ -153,9 +157,16 @@ void bench_scene_post(void) { g_scene_pending = g_scene_loaded; }
 static int g_cine_cam;
 void bench_set_cine_camera(int on) { g_cine_cam = on; }
 
+static VrSmooth g_sm;
+static VrSmSample g_sample;
+static int g_sample_pending, g_sm_ready;
+static double g_clock, g_turn_req;
+static void sm_ready(void) { if (!g_sm_ready) { vrsm_init(&g_sm, NULL); g_sm_ready = 1; } }
+
 int mv_host_scene(VrScene *out) {
     if (!g_scene_pending) return 0;
     g_scene_pending = 0;
+    if (g_sample_pending) { sm_ready(); vrsm_push(&g_sm, &g_sample, g_clock); g_sample_pending = 0; }
     memset(out, 0, sizeof *out);
     out->v = g_v; out->nv = g_nv; out->b = g_b; out->nb = g_nb;
     out->has_3d = 1;
@@ -240,3 +251,42 @@ int32_t mv_vrgame_special_view(MvVrSpecialView *out) { (void)out; return 0; }
 int32_t mv_vrgame_forearm(int32_t side, MvVrForearm *out) { (void)side; (void)out; return 0; }
 int32_t mv_vrgame_hand_matrix(int32_t side, float m[16]) { (void)side; (void)m; return 0; }
 void mv_host_note_render(int kind) { (void)kind; }
+
+/* ---------- fluidez sintética (vr_smooth): el mundo avanza/gira con el personaje y el juego publica escenas a su ritmo ----------
+ * Escena i: P_i(W) = R_i * (b - K * O_i)  (c = 0), con b = geometría base, O_i = origen del personaje (unidades del juego, K = 0,001 m/unidad) y R_i = giro del stick que traía
+ * la cámara de esa escena. El reloj y el giro pedido los fija el banco por fotograma; mv_vrhost_smooth evalúa la corrección como el host real. */
+void bench_smooth_config(int enabled, float lead_s) {
+    VrSmoothCfg c;
+    vrsm_cfg_default(&c);
+    c.enabled = enabled != 0;
+    if (lead_s >= 0) c.lead_s = lead_s;
+    vrsm_init(&g_sm, &c);
+    g_sm_ready = 1; g_sample_pending = 0; g_clock = 0; g_turn_req = 0;
+}
+void bench_smooth_set_time(double t, double turn_req_deg) { g_clock = t; g_turn_req = turn_req_deg; }
+static void rot_y(double a_deg, float R[9]) {
+    double a = a_deg * 0.017453292519943295, cs = cos(a), sn = sin(a);
+    float r[9] = {(float)cs, 0, (float)-sn, 0, 1, 0, (float)sn, 0, (float)cs};
+    memcpy(R, r, sizeof r);
+}
+void bench_publish_motion(double t_wall, double game_s, double ox_units, double oz_units, double turn_deg) {
+    float R[9];
+    rot_y(turn_deg, R);
+    const float K = 0.001f;
+    for (uint32_t i = 0; i < g_nv; i++) {
+        if (g_vbase[i].flags & 0x1000) { g_v[i] = g_vbase[i]; continue; }   /* 2D (HUD): no se mueve */
+        double b[3] = {g_vbase[i].pos[0] - K * ox_units, g_vbase[i].pos[1], g_vbase[i].pos[2] - K * oz_units};
+        g_v[i] = g_vbase[i];
+        for (int r = 0; r < 3; r++) g_v[i].pos[r] = (float)(R[3 * r] * b[0] + R[3 * r + 1] * b[1] + R[3 * r + 2] * b[2]);
+    }
+    memset(&g_sample, 0, sizeof g_sample);
+    g_sample.valid = 1; g_sample.t_wall = t_wall; g_sample.game_s = game_s;
+    g_sample.B[0] = (float)ox_units; g_sample.B[2] = (float)oz_units;
+    memcpy(g_sample.R, R, sizeof R);
+    g_sample.K = K; g_sample.turn_deg = turn_deg; g_sample.epoch = 1;
+    g_sample_pending = 1;
+    g_scene_pending = g_scene_loaded;
+}
+void mv_vrhost_smooth(VrSmCorr *out) { sm_ready(); vrsm_eval(&g_sm, g_clock, g_turn_req, out); }
+void mv_vrhost_smooth_stats(VrSmoothStats *s) { sm_ready(); vrsm_stats(&g_sm, s); }
+void mv_vrhost_set_smooth(int on) { sm_ready(); g_sm.cfg.enabled = on != 0; }
