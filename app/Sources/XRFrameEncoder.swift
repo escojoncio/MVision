@@ -39,16 +39,26 @@ final class XRFrameEncoder {
         self.sampleCount = sampleCount
     }
 
+    /// Planos cercano y lejano (m) a partir de `drawable.depthRange` (el sistema da lejos/cerca en metros; el orden no importa). Un rango degenerado
+    /// (no finito, cercano < 1 cm o lejano < 4x el cercano, p. ej. (0,0) o (1,0) = valores de profundidad en vez de distancias) haría la proyección
+    /// NaN o la dejaría sin plano lejano útil y todo saldría negro: en ese caso se usa 0,1-1000 m (el banco de CI lo prueba con rangos degenerados).
+    static func planes(_ r: SIMD2<Float>) -> (near: Float, far: Float, valid: Bool) {
+        let n = min(r.x, r.y), f = max(r.x, r.y)
+        if r.x.isFinite && r.y.isFinite && n >= 0.01 && f >= n * 4 { return (n, f, true) }
+        return (0.1, 1000, false)
+    }
+
     /// Proyección de Z invertida del ojo (a partir de las tangentes y el rango de profundidad del sistema, en metros).
     static func projection(_ e: XREyeView, depthRange r: SIMD2<Float>) -> simd_float4x4 {
-        XRMath.projection(tangents: e.tangents, near: min(r.x, r.y), far: max(r.x, r.y))
+        let p = planes(r)
+        return XRMath.projection(tangents: e.tangents, near: p.near, far: p.far)
     }
 
     /// Codifica el fotograma completo en `cb`. `recenterInverse * originFromDevice` = cabeza en el espacio de la escena (recentrado).
     /// Devuelve false si no se pudo (texturas vacías, destinos MSAA).
     func encode(commandBuffer cb: MTLCommandBuffer, gs: MvVrGameState, originFromDevice: simd_float4x4, recenterInverse: simd_float4x4,
                 dt: Float, eyes: [XREyeView], depthRange: SIMD2<Float>, colorTextures colorTex: [MTLTexture],
-                depthTextures depthTex: [MTLTexture]) -> Bool {
+                depthTextures depthTex: [MTLTexture], systemProjections: [simd_float4x4]? = nil) -> Bool {
         guard eyes.count >= viewCount, !colorTex.isEmpty, !depthTex.isEmpty else { return false }
         frameNo += 1
         let recentered = recenterInverse * originFromDevice
@@ -101,12 +111,19 @@ final class XRFrameEncoder {
             d += " | escena: " + renderer.diagnostics()
             let c = colorTex[0], z = depthTex[0]
             d += " | color: tipo=\(c.textureType.rawValue) fmt=\(c.pixelFormat.rawValue) \(c.width)x\(c.height)x\(c.arrayLength) n=\(colorTex.count) | prof: fmt=\(z.pixelFormat.rawValue) n=\(depthTex.count)"
-            d += String(format: " | rango=(%.3f, %.3f) tan0=(%.2f %.2f %.2f %.2f) tan1=(%.2f %.2f %.2f %.2f)", depthRange.x, depthRange.y,
+            let pl = Self.planes(depthRange)
+            d += String(format: " | rango=(%.3f, %.3f) valido=%d usado=(%.3f, %.3f) tan0=(%.2f %.2f %.2f %.2f) tan1=(%.2f %.2f %.2f %.2f)", depthRange.x, depthRange.y, Int32(pl.valid ? 1 : 0), pl.near, pl.far,
                         eyes[0].tangents.x, eyes[0].tangents.y, eyes[0].tangents.z, eyes[0].tangents.w,
                         eyes[1].tangents.x, eyes[1].tangents.y, eyes[1].tangents.z, eyes[1].tangents.w)
             d += String(format: " vp0=(%.0f %.0f %.0fx%.0f) cabeza=(%.2f %.2f %.2f)", eyes[0].viewport.originX, eyes[0].viewport.originY,
                         eyes[0].viewport.width, eyes[0].viewport.height, recentered.columns.3.x, recentered.columns.3.y, recentered.columns.3.z)
             d += " pase final: " + finalPass.lastCounts
+            // Proyección propia vs la del sistema (computeProjection): P00 P11 P20 P21 P22 P32 por ojo.
+            func pm(_ m: simd_float4x4) -> String {
+                String(format: "[%.3f %.3f %.3f %.3f %.3f %.3f]", m.columns.0.x, m.columns.1.y, m.columns.2.x, m.columns.2.y, m.columns.2.z, m.columns.3.z)
+            }
+            d += " | P propia=" + projs.map(pm).joined(separator: " ")
+            if let sp = systemProjections { d += " P sistema=" + sp.map(pm).joined(separator: " ") }
             lastDiag = d
             log(d)
         }
@@ -130,8 +147,8 @@ final class XRFrameEncoder {
         cam.columns.3 = simd_float4(sv.cam_pos.0, sv.cam_pos.1, sv.cam_pos.2, 1)
         let t = tan(sv.cam_fov_y * 0.5)
         let aspect = Float(sv.tex_w) / Float(sv.tex_h)
-        let proj = XRMath.projection(tangents: SIMD4<Float>(t * aspect, t * aspect, t, t), near: min(depthRange.x, depthRange.y),
-                                     far: max(depthRange.x, depthRange.y))
+        let pl = Self.planes(depthRange)
+        let proj = XRMath.projection(tangents: SIMD4<Float>(t * aspect, t * aspect, t, t), near: pl.near, far: pl.far)
         return RGRenderer.AuxView(view: cam.inverse, proj: proj, width: Int(sv.tex_w), height: Int(sv.tex_h),
                                    pos: simd_float4(sv.cam_pos.0, sv.cam_pos.1, sv.cam_pos.2, 1))
     }

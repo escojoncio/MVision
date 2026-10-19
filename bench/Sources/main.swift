@@ -289,7 +289,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
                 ("cubo azul", SIMD3<Float>(1.5, 0.5, -3), (0, 0, 255)),
                 ("cubo amarillo cercano (oclusion)", SIMD3<Float>(0, 1.6, -8), (255, 255, 0)),
                 ("cubo verde lejano visible", SIMD3<Float>(1.3, 1.6, -7.5), (0, 255, 0)),
-                ("suelo oscuro", SIMD3<Float>(1.5, 0, -2.5), (70, 70, 70)),
+                ("suelo oscuro", SIMD3<Float>(-0.5, 0, -2.2), (70, 70, 70)),
                 ("suelo claro", SIMD3<Float>(0.5, 0, -2.5), (150, 150, 150)),
             ]
             for p in pts {
