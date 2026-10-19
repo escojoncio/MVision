@@ -3,9 +3,15 @@
  * llama a ns_extract_ex en el hilo de emulación (único productor). */
 #include "ns_extract.h"
 #include "ns_hook.h"
+#include "ns_fx.h"
+#include "ns_fx_export.h"
 #include <stdatomic.h>
+#include <string.h>
 
 static NsMeshStore *g_store;
+/* Escena de efectos (ns_fx): solo la toca el hilo de emulación (único productor). Los efectos de cada captura se exportan a NsScene.effects. */
+static NsFxScene *g_fx;
+static uint32_t g_fx_seq;
 
 /* Contadores acumulados de ns_extract_ex (para el registro de diagnóstico, 1 vez por segundo). Los escribe el hilo de emulación y los lee el de render o el mismo
  * hilo: atómicos relajados. last_* = la última escena. */
@@ -18,7 +24,24 @@ static void bump(_Atomic uint32_t *c, uint32_t v) { atomic_fetch_add_explicit(c,
 
 static int glue_extract(const uint8_t *ram, const uint8_t *scratch, NsScene *out, void *user) {
     NsExtractStats st;
-    int rc = ns_extract_ex(out, (NsMeshStore *)user, ram, NS_RAM_SIZE, scratch, scratch ? 1024u : 0u, NULL, &st);
+    /* Efectos: se extraen ANTES de las mallas porque las sombras de objeto salen aquí como cuadriláteros y el extractor de mallas debe omitir esos objetos. */
+    int have_fx = 0;
+    NsExtractOpts eo;
+    memset(&eo, 0, sizeof eo);
+    if (!g_fx) g_fx = ns_fx_scene_create(0);
+    if (g_fx) {
+        NsFxOpts fo = ns_fx_opts_default();
+        have_fx = ns_fx_extract(ram, &fo, g_fx) == 0;
+        if (have_fx) { eo.shadow_objs = g_fx->shadow_objs; eo.n_shadow = g_fx->n_shadow_objs; }
+    }
+    int rc = ns_extract_ex(out, (NsMeshStore *)user, ram, NS_RAM_SIZE, scratch, scratch ? 1024u : 0u, have_fx ? &eo : NULL, &st);
+    if (rc == 0 && have_fx && out->effects) {
+        int trunc = 0;
+        out->n_effect = ns_fx_export(g_fx, 1, out->effects, out->cap_effect, &trunc);
+        if (trunc) { out->truncated |= NS_TR_EFFECT; out->n_dropped_effect = g_fx->n_items > out->n_effect ? g_fx->n_items - out->n_effect : 0; }
+        out->fx_seq = ++g_fx_seq;
+        out->valid |= NS_SV_FX;
+    }
     uint32_t other = st.drop_null + st.drop_badptr + st.drop_dup + st.drop_badobj + st.drop_bad_model;
     bump(&G.calls, 1); bump(&G.mesh_new, st.mesh_new); bump(&G.memo_stale, st.memo_stale); bump(&G.zone_changes, st.zone_changes);
     bump(&G.epoch_opened, st.epoch_opened); bump(&G.store_full, st.store_full); bump(&G.drop_group, st.drop_group);

@@ -1,0 +1,169 @@
+/* Pruebas sintéticas de ns_gpu_fx_build (geometría de efectos del renderer nativo). Sin datos del juego. */
+#include "ns_gpu.h"
+#include "ns_fx_export.h"
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int g_checks, g_fail;
+#define CHECK(c, ...) do { g_checks++; if (!(c)) { g_fail++; printf("FALLO %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
+
+static float to_vr[12] = {0.001f, 0, 0, 0, 0, -0.001f, 0, 0, 0, 0, 0.001f, 0};   /* Y arriba del motor = -Y... (cualquier mapa afín sirve) */
+static NsCamera cam;
+static NsGpuFxParams P;
+
+static void setup(void) {
+    memset(&cam, 0, sizeof cam);
+    cam.rot[0] = 1; cam.rot[4] = 1; cam.rot[8] = 1;   /* vista = mundo; adelante = +Z */
+    cam.h = 320.0f; cam.overscan_y = NS_OVERSCAN_Y;
+    memset(&P, 0, sizeof P);
+    P.to_vr = to_vr; P.cam = &cam;
+    P.head_right[0] = 1; P.head_up[1] = 1;
+    P.eyes[0][0] = -0.03f; P.eyes[1][0] = 0.03f; P.n_eyes = 2;
+}
+static NsEffect quad(float x, float y, float z, float s) {
+    NsEffect e; memset(&e, 0, sizeof e);
+    e.kind = NS_EK_QUAD; e.nv = 4; e.src_key = 0x80100000u; e.tpage = 0x15; e.clut = 0x3d7e;
+    const float d[4][2] = {{-s, -s}, {s, -s}, {-s, s}, {s, s}};
+    for (int v = 0; v < 4; v++) { e.p[v][0] = x + d[v][0]; e.p[v][1] = y + d[v][1]; e.p[v][2] = z; for (int c = 0; c < 3; c++) e.rgb[v][c] = 128; e.uv[v][0] = (uint8_t)(v & 1 ? 31 : 0); e.uv[v][1] = (uint8_t)(v >> 1 ? 31 : 0); }
+    return e;
+}
+static int build(NsEffect *fx, uint32_t n, NsGpuFxVert *vb, NsGpuFxRun *runs, uint64_t *keys, NsGpuFxOut *o) {
+    return ns_gpu_fx_build(fx, n, &P, vb, 12 * n + 12, runs, n + 1, keys, n + 1, o);
+}
+
+static void t_poly(void) {
+    NsEffect fx[3];
+    fx[0] = quad(0, 0, 4000, 100); fx[0].idx = 1; fx[0].flags = NS_EF_TEXTURED;                       /* opaco texturizado */
+    fx[1] = quad(0, 0, 3000, 100); fx[1].idx = 2; fx[1].flags = NS_EF_SEMI; fx[1].abr = 1;             /* semi sin textura */
+    fx[2] = quad(0, 0, 2000, 100); fx[2].idx = 3; fx[2].flags = NS_EF_SEMI | NS_EF_TEXTURED; fx[2].abr = 2; fx[2].nv = 3;
+    NsGpuFxVert vb[64]; NsGpuFxRun runs[8]; uint64_t keys[8]; NsGpuFxOut o;
+    CHECK(build(fx, 3, vb, runs, keys, &o) == 0, "build");
+    /* opaco: fx0 (6) + copia del semi texturizado fx2 (3) */
+    CHECK(o.n_opaque == 9, "n_opaque=%u", o.n_opaque);
+    CHECK(o.n_semi == 6 + 3, "n_semi=%u", o.n_semi);
+    CHECK(o.n_keys == 3 && keys[0] == ns_gpu_fx_key(&fx[0]) && keys[1] != keys[0] && keys[2] != keys[1], "claves");
+    /* mundo VR: x = 0.001*x */
+    CHECK(fabsf(vb[0].p[0] - (-0.1f)) < 1e-5f && fabsf(vb[0].p[2] - 4.0f) < 1e-5f, "posicion VR %f %f", vb[0].p[0], vb[0].p[2]);
+    CHECK(vb[0].eyes == 3u, "ambos ojos");
+    CHECK((vb[0].clutf >> 16) & NSG_CF_TEX, "bandera de textura");
+    /* semi: de atrás adelante respecto a la cabeza (origen): fx1 a 3 m antes que fx2 a 2 m */
+    const NsGpuFxVert *s0 = &vb[o.n_opaque];
+    CHECK(fabsf(s0[0].p[2] - 3.0f) < 1e-5f, "primero el mas lejano z=%f", s0[0].p[2]);
+    CHECK(fabsf(s0[6].p[2] - 2.0f) < 1e-5f, "despues el cercano z=%f", s0[6].p[2]);
+    CHECK(o.n_runs == 2 && runs[0].abr == 1 && runs[1].abr == 2 && runs[0].start == o.n_opaque && runs[0].count == 6 && runs[1].start == o.n_opaque + 6 && runs[1].count == 3, "runs por modo de mezcla");
+    CHECK(((vb[0].clutf >> 16) >> 2 & 3) == 0 && ((s0[6].clutf >> 16) >> 2 & 3) == 2, "abr en las banderas");
+}
+
+static void t_billboard(void) {
+    NsEffect e; memset(&e, 0, sizeof e);
+    e.kind = NS_EK_BILLBOARD; e.nv = 4; e.flags = NS_EF_TEXTURED | NS_EF_SEMI; e.abr = 1; e.src_key = 0x80200000u; e.tpage = 0x1a; e.clut = 0x3db1;
+    e.p[0][0] = 500; e.p[0][1] = -200; e.p[0][2] = 3200;     /* centro */
+    e.ref_h = 320.0f; e.box[0] = -16; e.box[1] = -16; e.box[2] = 16; e.box[3] = 16;   /* 32x32 px a z = 3200 -> 320x320 unidades (con y/ys) */
+    for (int v = 0; v < 4; v++) { e.uv[v][0] = (uint8_t)(v & 1 ? 63 : 0); e.uv[v][1] = (uint8_t)(v >> 1 ? 63 : 0); for (int c = 0; c < 3; c++) e.rgb[v][c] = 128; }
+    NsGpuFxVert vb[64]; NsGpuFxRun runs[4]; uint64_t keys[4]; NsGpuFxOut o;
+    CHECK(build(&e, 1, vb, runs, keys, &o) == 0 && o.n_billboard == 1, "billboard");
+    const NsGpuFxVert *s = &vb[o.n_opaque];
+    /* esquinas 0 (sup-izq),1,2 (inf-izq) = vb[0],[1],[2]; 3 = [5] */
+    float w = s[1].p[0] - s[0].p[0], h = s[0].p[1] - s[2].p[1];
+    CHECK(fabsf(w - 0.32f) < 1e-4f, "ancho %f", w);
+    CHECK(fabsf(fabsf(h) - 0.32f / NS_OVERSCAN_Y) < 1e-4f, "alto %f", h);
+    CHECK(fabsf(s[0].p[2] - 3.2f) < 1e-5f && fabsf(s[1].p[2] - 3.2f) < 1e-5f, "plano perpendicular a la vista");
+    CHECK(s[0].u == 0 && s[1].u == 63 && s[2].v == 63, "uv de las esquinas");
+    /* orientado a la cabeza: con otra cabeza (ejes girados) el cartel gira con ella */
+    P.head_right[0] = 0; P.head_right[2] = 1;   /* la cabeza mira hacia -X o +X: su derecha pasa a Z */
+    CHECK(build(&e, 1, vb, runs, keys, &o) == 0, "rebuild");
+    s = &vb[o.n_opaque];
+    CHECK(fabsf(s[1].p[0] - s[0].p[0]) < 1e-5f && fabsf(s[1].p[2] - s[0].p[2]) > 0.3f, "cartel girado con la cabeza");
+    P.head_right[0] = 1; P.head_right[2] = 0;
+    /* profundidad pequeña: se usa la de referencia en vez de explotar */
+    e.p[0][2] = 5.0f;
+    CHECK(build(&e, 1, vb, runs, keys, &o) == 0, "z pequena");
+    s = &vb[o.n_opaque];
+    CHECK(fabsf(s[1].p[0] - s[0].p[0]) < 0.12f, "tamano acotado %f", s[1].p[0] - s[0].p[0]);
+}
+
+static void t_ribbon(void) {
+    NsEffect e; memset(&e, 0, sizeof e);
+    e.kind = NS_EK_QUAD; e.nv = 2; e.flags = NS_EF_LINE | NS_EF_SEMI; e.abr = 1; e.src_key = 0x80300000u;
+    e.p[0][2] = 3000; e.p[1][0] = 2000; e.p[1][2] = 3000; e.width_px = 4.0f; e.ref_h = 0;
+    for (int v = 0; v < 2; v++) for (int c = 0; c < 3; c++) e.rgb[v][c] = 200;
+    NsGpuFxVert vb[64]; NsGpuFxRun runs[4]; uint64_t keys[4]; NsGpuFxOut o;
+    CHECK(build(&e, 1, vb, runs, keys, &o) == 0 && o.n_ribbon == 1 && o.n_semi == 6, "cinta");
+    const NsGpuFxVert *s = &vb[o.n_opaque];
+    float wid = sqrtf((s[1].p[0] - s[0].p[0]) * (s[1].p[0] - s[0].p[0]) + (s[1].p[1] - s[0].p[1]) * (s[1].p[1] - s[0].p[1]) + (s[1].p[2] - s[0].p[2]) * (s[1].p[2] - s[0].p[2]));
+    CHECK(fabsf(wid - 4.0f * 3000.0f / 320.0f * 0.001f) < 1e-4f, "anchura de la cinta %f", wid);
+    CHECK(fabsf(s[0].p[0] - s[1].p[0]) < 1e-5f, "perpendicular a la linea");
+    CHECK(s[0].col[0] == 200.0f, "color");
+    /* degenerada: la cabeza sobre la línea */
+    P.head[0] = 1.0f; P.head[1] = 0; P.head[2] = 3.0f;
+    CHECK(build(&e, 1, vb, runs, keys, &o) == 0 && o.n_skipped == 1 && o.n_keys == 0 && o.n_semi == 0, "cinta degenerada descartada y no confirmada sk=%u k=%u s=%u", o.n_skipped, o.n_keys, o.n_semi);
+    memset(P.head, 0, sizeof P.head);
+}
+
+static void t_oneside(void) {
+    NsEffect e = quad(0, 0, 4000, 100);
+    e.flags = NS_EF_ONESIDE | NS_EF_SEMI; e.abr = 1;
+    NsGpuFxVert vb[64]; NsGpuFxRun runs[4]; uint64_t keys[4]; NsGpuFxOut o;
+    /* el sentido del paquete (0,1,2) da una normal; la cara se ve desde un lado solo */
+    P.eyes[0][2] = 0; P.eyes[1][2] = 0;
+    CHECK(build(&e, 1, vb, runs, keys, &o) == 0 && o.n_keys == 1, "una cara");
+    uint32_t m1 = o.n_semi ? vb[o.n_opaque].eyes : 0;
+    /* ojos al otro lado del plano: la máscara se invierte */
+    P.eyes[0][2] = 8.0f; P.eyes[1][2] = 8.0f;
+    CHECK(build(&e, 1, vb, runs, keys, &o) == 0 && o.n_keys == 1, "una cara, otro lado");
+    uint32_t m2 = o.n_semi ? vb[o.n_opaque].eyes : 0;
+    CHECK(m1 != m2 && (m1 == 0 || m1 == 3) && (m2 == 0 || m2 == 3), "caras opuestas m1=%u m2=%u", m1, m2);
+    /* un ojo a cada lado: máscara de un solo bit */
+    P.eyes[0][2] = 0; P.eyes[1][2] = 8.0f;
+    CHECK(build(&e, 1, vb, runs, keys, &o) == 0, "ojos a ambos lados");
+    uint32_t m3 = o.n_semi ? vb[o.n_opaque].eyes : 0;
+    CHECK(m3 == 1u || m3 == 2u, "un ojo ve la cara m3=%u", m3);
+    P.eyes[0][2] = 0; P.eyes[1][2] = 0;
+    /* dos caras: siempre ambos ojos */
+    e.flags = NS_EF_SEMI;
+    CHECK(build(&e, 1, vb, runs, keys, &o) == 0 && vb[o.n_opaque].eyes == 3u, "dos caras");
+}
+
+static void t_limits(void) {
+    NsGpuFxVert vb[16]; NsGpuFxRun runs[4]; uint64_t keys[4]; NsGpuFxOut o;
+    CHECK(ns_gpu_fx_build(NULL, 0, &P, vb, 16, runs, 4, keys, 4, &o) == 0 && o.n_opaque == 0 && o.n_semi == 0, "vacio");
+    NsEffect e = quad(0, 0, 3000, 100);
+    e.p[2][1] = NAN;
+    CHECK(build(&e, 1, vb, runs, keys, &o) == 0 && o.n_skipped == 1 && o.n_keys == 0, "no finito descartado");
+    CHECK(ns_gpu_fx_build(&e, 1, NULL, vb, 16, runs, 4, keys, 4, &o) < 0, "sin parametros");
+    NsGpuFxParams bad = P; bad.n_eyes = 0;
+    CHECK(ns_gpu_fx_build(&e, 1, &bad, vb, 16, runs, 4, keys, 4, &o) < 0, "sin ojos");
+    /* capacidad: nunca escribe fuera */
+    NsEffect many[10];
+    for (int i = 0; i < 10; i++) { many[i] = quad(0, 0, 3000, 50); many[i].idx = (uint16_t)i; many[i].flags = NS_EF_SEMI; }
+    NsGpuFxVert small[12]; NsGpuFxRun r2[10]; uint64_t k2[10];
+    CHECK(ns_gpu_fx_build(many, 10, &P, small, 12, r2, 10, k2, 10, &o) == 0 && o.n_opaque + o.n_semi <= 12 && o.n_skipped >= 8, "capacidad acotada semi=%u skip=%u", o.n_semi, o.n_skipped);
+}
+
+/* Del extractor al empaquetador: ns_fx_export -> ns_gpu_fx_build conserva la identidad (prim, paquete, segmento) */
+static void t_export_roundtrip(void) {
+    NsFxScene *sc = ns_fx_scene_create(4);
+    sc->n_items = 1;
+    NsFxItem *it = &sc->items[0];
+    memset(it, 0, sizeof *it);
+    it->shape = NSFX_SH_QUAD; it->nv = 4; it->prim = 0x8012A000u; it->idx = 7; it->sub = 3; it->flags = NSFX_F_SEMI; it->abr = 1;
+    for (int v = 0; v < 4; v++) { it->pos[v][0] = (float)(v & 1) * 100; it->pos[v][1] = 0; it->pos[v][2] = 2000.0f + (float)(v >> 1) * 100; }
+    NsEffect fx[2]; int tr;
+    CHECK(ns_fx_export(sc, 1, fx, 2, &tr) == 1 && fx[0].idx == 7 && fx[0].sub == 3 && fx[0].src_key == 0x8012A000u, "export con idx y sub");
+    CHECK(ns_gpu_fx_key(&fx[0]) == ns_fx_item_key(it), "misma clave que ns_fx_item_key");
+    ns_fx_scene_destroy(sc);
+}
+
+int main(void) {
+    setup();
+    t_poly();
+    setup(); t_billboard();
+    setup(); t_ribbon();
+    setup(); t_oneside();
+    setup(); t_limits();
+    t_export_roundtrip();
+    printf("%s: %d comprobaciones, %d fallos\n", g_fail ? "FALLA" : "OK", g_checks, g_fail);
+    return g_fail != 0;
+}
