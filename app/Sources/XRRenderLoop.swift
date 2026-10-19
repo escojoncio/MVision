@@ -29,6 +29,8 @@ final class XRRenderLoop {
     private var presenter: XRPresenter { encoder.presenter }   // pantalla de cine, paneles del HUD, menú VR (XRPresent.swift)
     private var wasBlocked = false
     private var diagT: CFTimeInterval = 0
+    private static let errLock = NSLock()
+    private static var lastErrLog: CFTimeInterval = 0
     private var trackedFrames = 0, untrackedFrames = 0
     private let colorFormat: MTLPixelFormat
     private let depthFormat: MTLPixelFormat
@@ -227,6 +229,17 @@ final class XRRenderLoop {
         }
 
         drawable.encodePresent(commandBuffer: cb)
+        // Errores de GPU (un command buffer con error no presenta el fotograma = negro): se registran, como mucho uno por segundo.
+        cb.addCompletedHandler { buf in
+            if let e = buf.error {
+                let t = CACurrentMediaTime()
+                XRRenderLoop.errLock.lock()
+                let go = t - XRRenderLoop.lastErrLog >= 1
+                if go { XRRenderLoop.lastErrLog = t }
+                XRRenderLoop.errLock.unlock()
+                if go { Storage.log("xr: ERROR DE GPU en el command buffer (estado \(buf.status.rawValue)): \(e)") }
+            }
+        }
         cb.commit()
     }
 

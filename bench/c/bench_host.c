@@ -90,11 +90,25 @@ static void rect2d(float x0, float y0, float x1, float y1, uint32_t col) {
     vtx(x0, y0, 0, col, f); vtx(x1, y0, 0, col, f); vtx(x1, y1, 0, col, f);
     vtx(x0, y0, 0, col, f); vtx(x1, y1, 0, col, f); vtx(x0, y1, 0, col, f);
 }
-static void batch(uint32_t first, uint8_t kind) {
+static void batch(uint32_t first, uint8_t kind, uint32_t ev_end) {
     if (g_nv == first || g_nb >= 4) return;
     VrBatch *b = &g_b[g_nb++];
     memset(b, 0, sizeof *b);
-    b->first = first; b->count = g_nv - first; b->kind = kind; b->blend = 0xFF;
+    b->first = first; b->count = g_nv - first; b->kind = kind; b->blend = 0xFF; b->ev_end = ev_end;
+}
+
+/* ---- VRAM sintética: textura RGB555 de 64x64 en (640,0) con degradado (r = x/2, g = y/2, b = 16) ---- */
+static uint16_t g_vram_init[512 * 1024];
+static GpuOp g_ops[2];
+static uint16_t g_data[256];
+static GpuDrawList g_list;
+
+static void texvtx(float x, float y, float z, float u, float v) {
+    vtx(x, y, z, rgba(128, 128, 128), 2 /* GPU_F_TEXTURED */);
+    VrVtx *t = &g_v[g_nv - 1];
+    t->uv[0] = u; t->uv[1] = v;
+    t->tpage = (uint16_t)(10 | (0 << 4) | (0 << 5) | (2 << 7));   /* x = 640/64, y = 0, abr 0, 15 bits */
+    t->clut = 0;
 }
 
 /* Mundo (metros, Y arriba, -Z delante): suelo ajedrezado 20x20 m en y=0 (gris claro/oscuro), cubo ROJO (-1.2, .5, -3), AZUL (1.5, .5, -3),
@@ -113,10 +127,25 @@ void bench_make_scene(void) {
     box(1.5f, 0.5f, -3.0f, 1.0f, 1.0f, 1.0f, rgba(0, 0, 255));
     box(0.0f, 1.6f, -2.0f, 0.5f, 0.5f, 0.5f, rgba(255, 255, 0));
     box(0.0f, 1.6f, -8.0f, 3.0f, 3.0f, 1.0f, rgba(0, 255, 0));
-    batch(first, 0);
+    batch(first, 0, 0);
+    first = g_nv;
+    /* cuadro texturizado 2x2 m en x -4..-2, y 1..3, z -5: lee la VRAM tras aplicar los eventos (relleno azul en texels 0..15 x 0..15 y subida verde en 16..31 x 0..15) */
+    texvtx(-4, 3, -5, 0, 0);  texvtx(-2, 3, -5, 64, 0);  texvtx(-2, 1, -5, 64, 64);
+    texvtx(-4, 3, -5, 0, 0);  texvtx(-2, 1, -5, 64, 64); texvtx(-4, 1, -5, 0, 64);
+    batch(first, 0, 2);
     first = g_nv;
     rect2d(10, 10, 60, 40, rgba(255, 0, 255));
-    batch(first, 2);
+    batch(first, 2, 2);
+    for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++) g_vram_init[(size_t)y * 1024 + 640 + x] = (uint16_t)((x / 2) | ((y / 2) << 5) | (16 << 10));
+    memset(g_ops, 0, sizeof g_ops);
+    g_ops[0].type = GPU_OP_FILL; g_ops[0].rx = 640; g_ops[0].ry = 0; g_ops[0].rw = 16; g_ops[0].rh = 16; g_ops[0].fill15 = 0x7C00;   /* azul */
+    g_ops[1].type = GPU_OP_UPLOAD; g_ops[1].rx = 656; g_ops[1].ry = 0; g_ops[1].rw = 16; g_ops[1].rh = 16; g_ops[1].data_off = 0; g_ops[1].data_n = 256;
+    for (int i = 0; i < 256; i++) g_data[i] = 0x03E0;                                                                                 /* verde */
+    memset(&g_list, 0, sizeof g_list);
+    g_list.index = 0; g_list.disp.w = 320; g_list.disp.h = 240; g_list.disp.enabled = 1;
+    g_list.ops = g_ops; g_list.nops = 2; g_list.cap_ops = 2; g_list.data = g_data; g_list.ndata = 256; g_list.cap_data = 256;
+    g_list.vram_init = g_vram_init;
     g_scene_loaded = 1;
 }
 void bench_scene_post(void) { g_scene_pending = g_scene_loaded; }
@@ -127,6 +156,7 @@ int mv_host_scene(VrScene *out) {
     memset(out, 0, sizeof *out);
     out->v = g_v; out->nv = g_nv; out->b = g_b; out->nb = g_nb;
     out->has_3d = 1;
+    out->src = &g_list;
     out->game_view[0] = out->game_view[5] = out->game_view[10] = out->game_view[15] = 1.0f;
     out->scale = 0.001f;
     out->world_valid = 1;
