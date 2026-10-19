@@ -285,7 +285,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
         let headB = headPose(SIMD3<Float>(0.2, 1.6, -0.3), yaw: 0.1745)
         var gs = MvVrGameState(); gs.view_mode = 1; gs.game = 1; gs.in_control = 1; gs.cam_active = 1; gs.first_person = 1
         // radar de muñeca: antebrazo izquierdo sintético (codo, muñeca, dorso hacia arriba)
-        let forearm: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>) = (SIMD3<Float>(-0.25, 1.05, -0.15), SIMD3<Float>(-0.20, 1.12, -0.45), SIMD3<Float>(0, 1, 0))
+        let forearm: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>) = (SIMD3<Float>(-0.30, 1.20, -0.40), SIMD3<Float>(-0.25, 1.25, -0.80), SIMD3<Float>(0, 1, 0))
         let hpB = XRMath.position(headB)
         guard let imgs = render(enc, layered: cfg.layered, color: tg.color, depth: tg.depth, gs: gs, frames: 70, head: { $0 == 69 ? headB : headA },
                                 before: { _ in enc.renderer.radar?.updatePose(forearm: forearm, leftGrip: nil, headPosition: hpB, headForward: SIMD3<Float>(0, 0, -1)) }) else {
@@ -310,6 +310,15 @@ func runCase(_ cfg: Cfg, first: Bool) {
                 guard let px = project(p.1, eye: e, head: headB) else { check(caso, "ojo \(e) \(p.0)", false, "detras de la camara"); continue }
                 let c = im.avg(px.0, px.1, r: 2)
                 check(caso, "ojo \(e) \(p.0)", near(c, p.2, 45), "pixel (\(px.0),\(px.1)) color \(c) esperado \(p.2)")
+            }
+            // cuadro texturizado desde la VRAM (eventos de relleno y subida aplicados antes del lote)
+            let texPts: [(String, Float, Float, (Int, Int, Int))] = [
+                ("VRAM: relleno azul", -3.75, 2.75, (0, 0, 255)), ("VRAM: subida verde", -3.25, 2.75, (0, 255, 0)), ("VRAM: degradado", -2.25, 1.25, (231, 231, 132)),
+            ]
+            for t in texPts {
+                guard let px = project(SIMD3<Float>(t.1, t.2, -5), eye: e, head: headB) else { check(caso, "ojo \(e) \(t.0)", false, "detras de la camara"); continue }
+                let c = im.avg(px.0, px.1, r: 2)
+                check(caso, "ojo \(e) \(t.0)", near(c, t.3, 45), "pixel (\(px.0),\(px.1)) color \(c) esperado \(t.3)")
             }
             // radar de muñeca y arma en mano (informativos: no hacen fallar el banco, ver "soft")
             if let wf = enc.renderer.radar?.wristFrame, let px = project(wf.center, eye: e, head: headB) {
