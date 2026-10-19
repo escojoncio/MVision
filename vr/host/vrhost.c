@@ -456,7 +456,7 @@ void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame)) { test_cb = 
 #define OVP_LO 0x800C4380u
 #define OVP_HI 0x80100000u
 #define OVP_MAX 24
-static int ovp_on = 1, ovp_map = 1;   /* ovp_map: parchear también la máscara de mapa de las overlays (bit 0 de MV_NOCULL) */
+static int ovp_on = 0, ovp_map = 0;   /* ovp_map: parchear también la máscara de mapa de las overlays (bit 0 de MV_NOCULL) */
 static uint32_t ovp_sample, ovp_done = 1; static unsigned ovp_stable;
 static int ovp_ids[OVP_MAX], ovp_n;
 static void ovp_release(void) { for (int i = 0; i < ovp_n; i++) rt_unpatch_code(ovp_ids[i]); ovp_n = 0; }
@@ -558,8 +558,8 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     for (unsigned i = 0; i < NSITES; i++) hle_bind_declare_fixed(SITES[i].name);
     VrCamPatch p;
     vrcam_patch_default(&p);
-    {   /* MV_NOCULL=máscara hex (pruebas A/B): bits 0-5 sitios de NOCULL, bit 6 HLE de paquetes, bit 7 overlays; defecto 0xFF */
-        const char *e = getenv("MV_NOCULL"); unsigned m = e ? (unsigned)strtoul(e, NULL, 16) : 0xFEu;
+    {   /* MV_NOCULL=máscara hex (pruebas A/B): bits 0-5 sitios de NOCULL, bit 6 HLE de paquetes, bit 7 overlays; defecto 0x00 (todo apagado: versión segura; ver bitácora §55) */
+        const char *e = getenv("MV_NOCULL"); unsigned m = e ? (unsigned)strtoul(e, NULL, 16) : 0x00u;
         p.no_cull = (int)(m & VRCAM_NOCULL_ALL); vrcam_pack_enable((m >> 6) & 1); ovp_on = (int)((m >> 7) & 1); ovp_map = (int)(m & 1);
     }
     int n = vrcam_patch_ram(ram, &p);
