@@ -245,6 +245,20 @@ typedef struct {
                                * HUD lo dejarían opaco. Se cuentan en VrStats.n_clear. 0 = emitirlos en la clase 2 (comportamiento previo) */
     int clip_all_near;        /* 1 recorta contra el plano cercano TODO polígono con algún vz < near_units (def. 0: solo los que traen
                                * GPU_VF_BEHIND; el resto con vz < near_units se descarta como siempre, salida idéntica a la previa) */
+    /* --- correspondencia mundo -> espacio del usuario (cámara VR; al final: ceros = sin cambio) ---
+     * Con la cámara VR el mundo del juego no está alineado con el espacio recentrado del usuario: hay un giro (rumbo del personaje
+     * menos giro de la cabeza al recentrar + giro del stick), la cabeza del usuario ya no está sobre el suelo del juego (sentado o de pie,
+     * el ojo del personaje se ancla a la cabeza) y la escala usuario->mundo puede no ser 1. Si user_map_on, cada vértice (ya en el mundo VR
+     * descrito arriba, metros, tras la reflexión de Z si la hubo) se lleva a:  P = R * (k * (F * s) - (0, eye_h_m, 0)) + p_ref
+     * con s el vértice, F = diag(1,1,reflexión) (se deshace la reflexión de Z, que el usuario no necesita), R = user_R (fila-mayor, giro
+     * mundo -> usuario), k = metros de usuario por metro de mundo (1 / escala usuario->mundo), eye_h_m = altura del ojo del motor sobre el
+     * origen YA EN METROS DE USUARIO (= k * altura en m de mundo; el ojo del motor, s = (0,h,0), cae en p_ref) y p_ref = cabeza del usuario
+     * al recentrar. Ver vrhost.c (user_map_from_record) y bitácora. */
+    int user_map_on;
+    float user_R[9];
+    float user_k;
+    float user_eye_h_m;
+    float user_p_ref[3];
 } VrSceneOpts;
 
 VrSceneOpts vr_scene_opts_default(void);

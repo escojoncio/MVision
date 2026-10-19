@@ -75,7 +75,8 @@ final class XRFrameEncoder {
         let c = m.columns
         if abs(c.2.w + 1) > 1e-3 || abs(c.3.w) > 1e-3 || abs(c.0.y) > 1e-3 || abs(c.0.z) > 1e-3 || abs(c.0.w) > 1e-3
             || abs(c.1.x) > 1e-3 || abs(c.1.z) > 1e-3 || abs(c.1.w) > 1e-3 || abs(c.3.x) > 1e-3 || abs(c.3.y) > 1e-3 { return "forma inesperada" }
-        if !(c.2.z > 0 && c.3.z > 0) { return "no es Z invertida (P22=\(c.2.z) P32=\(c.3.z))" }
+        // Z invertida: P32 > 0 y P22 >= 0. P22 = 0 es el caso del plano lejano INFINITO (el que da el compositor: P22=0, P32=cercano).
+        if !(c.2.z >= -1e-6 && c.3.z > 0) { return "no es Z invertida (P22=\(c.2.z) P32=\(c.3.z))" }
         let own = XRMath.projection(tangents: t, near: 0.1, far: 1000)
         func close(_ a: Float, _ b: Float) -> Bool { abs(a - b) <= 0.02 * max(abs(b), 0.5) }
         if !(close(c.0.x, own.columns.0.x) && close(c.1.y, own.columns.1.y) && close(c.2.x, own.columns.2.x) && close(c.2.y, own.columns.2.y)) {
@@ -85,9 +86,11 @@ final class XRFrameEncoder {
     }
 
     /// Planos (cercano, lejano) en metros que implica una proyección de Z invertida: a = n/(f-n), b = n f/(f-n).
+    /// Con a ~ 0 (P22 = 0) el plano lejano es INFINITO (f = +inf, n = b): es lo que devuelve `computeProjection` en el visor.
     static func planes(of m: simd_float4x4) -> (near: Float, far: Float)? {
         let a = m.columns.2.z, b = m.columns.3.z
-        guard a > 0, b > 0 else { return nil }
+        guard a >= -1e-6, b > 0 else { return nil }
+        if a < 1e-6 { return b >= 0.001 ? (b, Float.infinity) : nil }
         let n = b / (a + 1), f = n * (a + 1) / a
         return (n.isFinite && f.isFinite && n > 0 && f > n) ? (n, f) : nil
     }
@@ -216,7 +219,7 @@ final class XRFrameEncoder {
         cam.columns.3 = simd_float4(sv.cam_pos.0, sv.cam_pos.1, sv.cam_pos.2, 1)
         let t = tan(sv.cam_fov_y * 0.5)
         let aspect = Float(sv.tex_w) / Float(sv.tex_h)
-        let proj = XRMath.projection(tangents: SIMD4<Float>(t * aspect, t * aspect, t, t), near: pl.near, far: pl.far)
+        let proj = XRMath.projection(tangents: SIMD4<Float>(t * aspect, t * aspect, t, t), near: pl.near, far: pl.far.isFinite ? pl.far : 1000)
         return RGRenderer.AuxView(view: cam.inverse, proj: proj, width: Int(sv.tex_w), height: Int(sv.tex_h),
                                    pos: simd_float4(sv.cam_pos.0, sv.cam_pos.1, sv.cam_pos.2, 1))
     }
