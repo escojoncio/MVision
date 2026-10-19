@@ -42,6 +42,11 @@ typedef struct VrpConfig {
     float prone_mult;       /* tumbado */
     float q_cooldown;       /* s mínimos entre dos sospechas del mismo soldado */
     float dt_max;           /* tope del paso de tiempo por evaluación (pausas, cargas) */
+    float range_scale;      /* factor del menú «IA: alcance de visión» (1,0 / 1,5 / 2,0): escala el alcance de visión del soldado (el que usa la rutina del
+                             * motor para su alerta inmediata) y, con él, la zona de sospecha (range_mult sobre el alcance ya escalado). 0 se trata como 1 */
+    int   head_see;         /* 1: la cabeza VR también cuenta como punto visible (se evalúa con la rutina del motor y manda lo más desfavorable) */
+    float head_dz;          /* zona muerta del desplazamiento de la cabeza respecto del ancla (unidades del motor): por debajo, la cabeza no se evalúa */
+    float head_max;         /* tope del desplazamiento considerado (unidades del motor) */
 } VrpConfig;
 
 void vrp_config_preset(VrpConfig *c, VrpPreset p);
@@ -57,6 +62,8 @@ typedef struct VrpEntry {
     uint8_t last_out;       /* último resultado emitido (0/1/2) */
     uint8_t seen_far;       /* última evaluación: visto en la zona ampliada */
     uint16_t last_dist_q;   /* última distancia (unidades del motor, saturada) */
+    uint8_t via;            /* última evaluación que lo vio (resultado 2): 1 cuerpo, 2 cabeza VR, 0 no */
+    float seen_t;           /* instante (host) de la última evaluación con resultado 2 */
 } VrpEntry;
 
 typedef struct VrpInput {
@@ -106,6 +113,7 @@ int vrp_locate(const uint8_t *ram, uint32_t lo, uint32_t hi, VrpSites *out);
 #define VRP_PS_MOVE   0x10u
 #define VRP_PS_SQUAT  0x20u
 #define VRP_PS_GROUND 0x40u
+#define VRP_A_PLAYER_POS 0x800ACBA0u   /* posición del personaje que usa la visión (3 x s16: x, y, z; y arriba) */
 
 /* ---- Contexto (tabla de acumuladores + enlace con la RAM) ---- */
 typedef struct VrpHost {
@@ -120,6 +128,8 @@ typedef struct VrpHost {
 #define VRP_MAX_ENTRIES 128
 typedef struct VrpStats {
     uint32_t calls, turns, extended_hits, suspects, alerts_far;
+    uint32_t head_evals;     /* evaluaciones extra con la cabeza VR */
+    uint32_t seen_body, seen_head;   /* evaluaciones con resultado 2: por el cuerpo / solo por la cabeza VR */
 } VrpStats;
 
 typedef struct VrpCtx {
@@ -129,6 +139,12 @@ typedef struct VrpCtx {
     VrpSites sites;
     float now;
     int external_motion;     /* el host marca movimiento extra del jugador (cabeza/manos en VR) */
+    int head_user;           /* interruptor del usuario para la cabeza VR (defecto 1; se combina con cfg.head_see) */
+    int head_valid;          /* hay un desplazamiento de cabeza vigente */
+    float head_off[3];       /* desplazamiento mundo (unidades del motor) de la cabeza VR respecto del ojo del personaje */
+    float head_t;            /* instante (host) en que se fijó */
+    float log_t;             /* instante del último registro [ia] */
+    int log_active;          /* el último registro tenía soldados que veían */
     VrpEntry tab[VRP_MAX_ENTRIES];
     VrpStats st;
 } VrpCtx;
@@ -137,7 +153,19 @@ void vrp_init(VrpCtx *x, uint8_t *ram, const VrpHost *host, VrpPreset p);
 void vrp_set_preset(VrpCtx *x, VrpPreset p);
 void vrp_set_time(VrpCtx *x, float seconds);          /* una vez por fotograma, desde el gancho de VBlank */
 void vrp_set_external_motion(VrpCtx *x, int moving);
-void vrp_reset(VrpCtx *x);                            /* al cambiar de overlay/zona */
+void vrp_reset(VrpCtx *x);
+/* Cabeza VR: desplazamiento mundo (unidades del motor) de la cabeza respecto del ancla (el ojo del personaje); NULL = sin cabeza válida.
+ * Lo calcula el host con vrp_head_offset(). Caduca a los 0,25 s sin renovarse. */
+void vrp_set_head(VrpCtx *x, const float off[3]);
+void vrp_set_head_enabled(VrpCtx *x, int on);
+/* W - ojo = upm * R^T (P + corr - p_ref), con R el giro de la correspondencia usuario<->mundo (vr_headcol/vr_usermap). P = cabeza física (m,
+ * espacio del usuario), corr = recorte contra el escenario (m) o NULL. */
+void vrp_head_offset(float theta_play_deg, float upm, const float p_ref[3], const float head[3], const float corr[3], float out[3]);
+/* Punto que evalúa la rutina de visión con la cabeza: posición del personaje + desplazamiento (con zona muerta y tope); 0 si por debajo de la zona muerta. */
+int vrp_head_point(const VrpConfig *c, const int16_t body[3], const float off[3], int16_t out[3]);
+/* Registro [ia] como máximo una vez por segundo de host: escribe la línea en buf y devuelve 1 si toca emitirla (algún soldado lo ve ahora o
+ * lo veía en el último registro). Cuenta soldados con visión (resultado 2) en el último segundo, por cuerpo y por cabeza VR. */
+int vrp_log_tick(VrpCtx *x, char *buf, size_t n);                            /* al cambiar de overlay/zona */
 VrpEntry *vrp_entry(VrpCtx *x, uint32_t actor, int create);
 
 /* Cuerpos de los parches (a0 = actor). `vrp_vision` sustituye a la prueba de visión; `vrp_gather` a la recogida

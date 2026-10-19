@@ -30,6 +30,9 @@ void mv_vrhost_install(void);
  *   activity:   1 (defecto) soldados y sensores activos aunque la cámara original no los vea; 0 original
  * El radar de muñeca dibuja el cono original y el ampliado según `perception`. */
 void mv_vrhost_set_ai(int perception, int cameras, int activity);
+/* Menú VR «IA: alcance de visión» (1,0 / 1,5 / 2,0; defecto 1,5) y «los enemigos ven la cabeza VR» (defecto 1). Cualquier hilo; no afectan a las cámaras de vigilancia. */
+void mv_vrhost_set_ai_range(float scale);
+void mv_vrhost_set_ai_head(int on);
 /* Solo para herramientas de prueba (vr/ai/test_ai_run): función llamada en el gancho de VBlank del hilo de emulación tras la capa VR (cpu = Cpu*). */
 void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame));
 /* Toma de pruebas: se llama en el hilo de emulación justo tras ensamblar cada escena (antes de copiarla al slot), con la lista, el puente y la escena. NULL = sin toma. */

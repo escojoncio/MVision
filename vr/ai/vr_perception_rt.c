@@ -2,6 +2,7 @@
 #include "vr_cameras.h"
 #include "cpu.h"
 #include <string.h>
+#include <stdio.h>
 #include "sys.h"
 
 #include "rtpatch.h"
@@ -13,6 +14,7 @@ static uint32_t patched[2];
 static RtPatchGuard hguard[2];     /* hash del bloque de cada función al localizarla: si otra carga lo pisa el parche queda inerte */
 static int inited;
 static int use_gather = 1;
+static float range_scale_user = 1.5f;
 
 static void co(void *u, uint32_t addr, uint32_t a0) {
     (void)u;
@@ -59,7 +61,7 @@ static void unpatch_all(void) {
     for (int i = 0; i < 2; i++) if (patched[i]) { rt_unpatch(patched[i]); patched[i] = 0; }
 }
 static void sync_patches(void) {
-    if (!inited || !G.sites.found || !G.cfg.enabled) { unpatch_all(); return; }
+    if (!inited || !G.sites.found || !(G.cfg.enabled || (G.cfg.head_see && G.head_user))) { unpatch_all(); return; }
     if (!patched[0]) {
         /* Sin guarda de hash no se parchea (un parche sin validar podría quedar vivo sobre otra overlay). */
         if (!hguard[0].nwords || rt_patch_fn(G.sites.vision, hook_vision, &hguard[0])) { G.sites.found = 0; return; }
@@ -73,12 +75,24 @@ static void sync_patches(void) {
 void vrp_rt_init(VrpPreset p) {
     VrpHost h = {NULL, co, guard};
     vrp_init(&G, emu_ram, &h, p);
+    if (p != VRP_ORIGINAL) G.cfg.range_scale = range_scale_user;
     inited = 1;
 }
-void vrp_rt_set_preset(VrpPreset p) { if (inited) { vrp_set_preset(&G, p); sync_patches(); } }
+void vrp_rt_set_preset(VrpPreset p) { if (inited) { vrp_set_preset(&G, p); if (p != VRP_ORIGINAL) G.cfg.range_scale = range_scale_user; sync_patches(); } }
+void vrp_rt_set_head(const float off[3]) { if (inited) vrp_set_head(&G, off); }
+void vrp_rt_set_head_enabled(int on) { if (inited) { vrp_set_head_enabled(&G, on); sync_patches(); } }
+void vrp_rt_set_range_scale(float s) {
+    if (!(s >= 1.0f)) s = 1.0f; if (s > 3.0f) s = 3.0f;
+    range_scale_user = s;
+    if (inited && G.cfg.enabled) G.cfg.range_scale = s;
+}
+void vrp_rt_log(void) {
+    char b[160];
+    if (inited && vrp_log_tick(&G, b, sizeof b)) fprintf(stderr, "%s\n", b);
+}
 void vrp_rt_set_external_motion(int m) { if (inited) vrp_set_external_motion(&G, m); }
 void vrp_rt_set_gather(int on) { use_gather = on != 0; sync_patches(); }
-void vrp_rt_frame(float s) { if (inited) vrp_set_time(&G, s); }
+void vrp_rt_frame(float s) { if (inited) { vrp_set_time(&G, s); vrp_rt_log(); } }
 const VrpCtx *vrp_rt_ctx(void) { return &G; }
 
 void vrp_rt_overlay_gone(void) {

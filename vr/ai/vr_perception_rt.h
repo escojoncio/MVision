@@ -16,3 +16,10 @@ int  vrp_rt_overlay(uint32_t code_lo, uint32_t code_hi);
 void vrp_rt_overlay_gone(void);                      /* overlay invalidada/descargada */
 void vrp_rt_frame(float seconds);                    /* una vez por fotograma (VBlank): reloj del modelo */
 const VrpCtx *vrp_rt_ctx(void);
+/* Cabeza VR (hilo de emulación): desplazamiento mundo de la cabeza respecto del ojo del personaje (vrp_head_offset); NULL = sin cabeza válida. */
+void vrp_rt_set_head(const float off[3]);
+void vrp_rt_set_head_enabled(int on);                /* interruptor del usuario (defecto 1) */
+/* Factor «IA: alcance de visión» (1,0 / 1,5 / 2,0; defecto 1,5): escala el alcance de visión de los soldados y su zona de sospecha. Las cámaras NO. */
+void vrp_rt_set_range_scale(float scale);
+/* Registro [ia] (stderr) como máximo una vez por segundo de host. */
+void vrp_rt_log(void);
