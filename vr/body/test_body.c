@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "vr_body.h"
+#include "test_fist_mesh.h"
 #include "../bridge/bridge_addrs.h"
 
 static int g_fail, g_checks;
@@ -713,6 +714,89 @@ static void test_fuzz(void) {
     CHECK(!vrbody_pending(), "fuzz: nada pendiente al final");
 }
 
+/* Puño en la RAM: la malla de la mano (vértices + normales) se deforma al cerrar el agarre y vuelve byte a byte tras el dibujado. */
+static const uint32_t FM_BASE[2] = {0x80190000u, 0x801A0000u};     /* malla de la mano izquierda (pieza 9) y derecha (pieza 4) */
+static void install_hand_mesh(int s, int mirror) {
+    SynthHand h; synth_hand(&h, mirror);
+    uint32_t b = FM_BASE[s], mdl = PMODELS + 0x3C * (uint32_t)(s ? 4 : 9);
+    memcpy(RAM + (b & 0x1FFFFF), h.v, (size_t)h.nv * 8);
+    memcpy(RAM + ((b + 0x400) & 0x1FFFFF), h.vidx, (size_t)h.nf * 4);
+    memcpy(RAM + ((b + 0x500) & 0x1FFFFF), h.n, (size_t)h.nn * 8);
+    memcpy(RAM + ((b + 0x900) & 0x1FFFFF), h.nidx, (size_t)h.nf * 4);
+    w32(mdl + 0x04, h.nf); w32(mdl + 0x34, h.nv); w32(mdl + 0x38, (int32_t)b); w32(mdl + 0x3C, (int32_t)(b + 0x400));
+    w32(mdl + 0x40, h.nn); w32(mdl + 0x44, (int32_t)(b + 0x500)); w32(mdl + 0x48, (int32_t)(b + 0x900));
+}
+static int mesh_diff(int s, int nv) {      /* nº de vértices distintos entre RAM y RAM0 */
+    int d = 0; const int16_t *a = (const int16_t *)(RAM + (FM_BASE[s] & 0x1FFFFF)), *b = (const int16_t *)(RAM0 + (FM_BASE[s] & 0x1FFFFF));
+    for (int i = 0; i < nv; i++) d += a[4 * i] != b[4 * i] || a[4 * i + 1] != b[4 * i + 1] || a[4 * i + 2] != b[4 * i + 2];
+    return d;
+}
+static void run_fist_frames(float grip, int frames, int *driven_last) {
+    static uint8_t before[RAMSZ];
+    for (int f = 0; f < frames; f++) {
+        set_hand(0, -0.25f, 1.3f, -0.4f, 0.3f); set_hand(1, 0.30f, 1.25f, -0.45f, -0.2f);
+        vrbody_set_grip(0, grip); vrbody_set_grip(1, grip);
+        memcpy(RAM, RAM0, RAMSZ); memcpy(before, RAM, RAMSZ);
+        *driven_last = vrbody_apply(RAM);
+        if (f == frames - 1) return;                      /* el último apply se deja sin restaurar para inspeccionarlo */
+        vrbody_restore(RAM);
+        CHECK(memcmp(RAM, before, RAMSZ) == 0, "restore no devuelve la RAM (incluida la malla) byte a byte (f=%d)", f);
+    }
+}
+static void test_fist_glue(void) {
+    VrBodyStats st0, st1;
+    int driven = 0;
+    VrBodyConfig cfg; vrbody_config_default(&cfg);
+    vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+    build_body(31); install_hand_mesh(0, 1); install_hand_mesh(1, 0); memcpy(RAM0, RAM, RAMSZ);
+    /* mano abierta: la malla no se toca */
+    vrbody_stats(&st0);
+    run_fist_frames(0.0f, 40, &driven);
+    CHECK(driven == 2 && mesh_diff(0, 28) == 0 && mesh_diff(1, 28) == 0, "con el agarre abierto la malla no debe tocarse");
+    vrbody_restore(RAM);
+    vrbody_stats(&st1); CHECK(st1.fist_applies == st0.fist_applies, "sin agarre no hay puño");
+    /* agarre cerrado: las dos mallas se deforman y vuelven exactas */
+    run_fist_frames(1.0f, 60, &driven);
+    const int nv = 8 + 8 + 8;   /* 24 vértices de la malla sintética */
+    CHECK(driven == 2, "dos brazos");
+    CHECK(mesh_diff(0, nv) >= 6 && mesh_diff(1, nv) >= 6, "la malla de ambas manos debe deformarse: %d y %d vértices", mesh_diff(0, nv), mesh_diff(1, nv));
+    for (int i = 0; i < 8; i++) {          /* la palma (muñeca y nudillos) no se mueve */
+        const int16_t *a = (const int16_t *)(RAM + (FM_BASE[1] & 0x1FFFFF)), *b = (const int16_t *)(RAM0 + (FM_BASE[1] & 0x1FFFFF));
+        CHECK(a[4 * i] == b[4 * i] && a[4 * i + 1] == b[4 * i + 1], "palma movida (%d)", i);
+    }
+    CHECK(vrbody_pending(), "pendiente");
+    vrbody_restore(RAM);
+    CHECK(memcmp(RAM, RAM0, RAMSZ) == 0, "tras restaurar, la RAM (malla incluida) es la original");
+    vrbody_stats(&st1); CHECK(st1.fist_applies >= st0.fist_applies + 2, "puños aplicados: %u", st1.fist_applies - st0.fist_applies);
+    /* cierre progresivo: con medio agarre la deformación es menor que con el agarre completo */
+    {
+        int16_t full[24 * 4], half[24 * 4];
+        run_fist_frames(1.0f, 60, &driven); memcpy(full, RAM + (FM_BASE[1] & 0x1FFFFF), sizeof full); vrbody_restore(RAM);
+        vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+        run_fist_frames(0.5f, 60, &driven); memcpy(half, RAM + (FM_BASE[1] & 0x1FFFFF), sizeof half); vrbody_restore(RAM);
+        const int16_t *r = (const int16_t *)(RAM0 + (FM_BASE[1] & 0x1FFFFF));
+        float dfull = 0, dhalf = 0;
+        for (int i = 8; i < 16; i++) { dfull += fabsf((float)(full[4 * i + 1] - r[4 * i + 1])); dhalf += fabsf((float)(half[4 * i + 1] - r[4 * i + 1])); }
+        CHECK(dhalf > 0 && dhalf < dfull, "cierre progresivo: medio %.0f, completo %.0f", dhalf, dfull);
+    }
+    /* desactivado por configuración */
+    { VrBodyConfig c2 = cfg; c2.fist_enabled = 0; vrbody_init(&c2); vrbody_set_view_fn(view_fn);
+      run_fist_frames(1.0f, 40, &driven); CHECK(mesh_diff(0, nv) == 0 && mesh_diff(1, nv) == 0, "fist_enabled = 0: malla rígida"); vrbody_restore(RAM); }
+    /* malla no reconocida (recuentos absurdos): se deja rígida y se cuenta */
+    { vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+      w32(PMODELS + 0x3C * 4 + 0x34, 500); memcpy(RAM0, RAM, RAMSZ);
+      vrbody_stats(&st0); run_fist_frames(1.0f, 40, &driven); vrbody_stats(&st1);
+      CHECK(mesh_diff(1, nv) == 0 && st1.fist_skipped > st0.fist_skipped, "malla no válida: rígida y contada"); vrbody_restore(RAM);
+      w32(PMODELS + 0x3C * 4 + 0x34, 24); memcpy(RAM0, RAM, RAMSZ); }
+    /* si el modelo cambió entre el apply y el restore, no se escribe sobre la malla nueva */
+    { vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+      run_fist_frames(1.0f, 60, &driven);
+      w32(PMODELS + 0x3C * 4 + 0x38, (int32_t)(FM_BASE[1] + 0x40));      /* otro array de vértices */
+      vrbody_stats(&st0); vrbody_restore(RAM); vrbody_stats(&st1);
+      CHECK(st1.stale_dropped > st0.stale_dropped, "restore con la malla cambiada no escribe");
+      w32(PMODELS + 0x3C * 4 + 0x38, (int32_t)FM_BASE[1]); }
+}
+
 int main(void) {
     test_math();
     test_solver();
@@ -722,6 +806,7 @@ int main(void) {
     test_glue();
     test_hand_axes(); test_default_roll(); test_jab_and_grab();
     test_visibility();
+    test_fist_glue();
     test_mirror();
     test_fuzz();
     VrBodyStats st; vrbody_stats(&st);

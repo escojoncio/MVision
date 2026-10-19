@@ -26,6 +26,7 @@ static vrg_in_t base(void) {
 /* golpe: la mano derecha avanza `dist` m en `n` pasos desde el pecho; delante = +Z con yaw 0. Devuelve nº de VBlanks con cuadrado. */
 static int run_punch(vrg_t *g, vrg_in_t in, float dist, int n, int *ev) {
     int sq = 0; vrg_out_t o;
+    in.grip[1] = 1.0f;                                   /* el golpe cuenta con la mano en puño */
     for (int i = 0; i < 10; i++) upd(g, &in, &o);
     for (int i = 1; i <= n + 12; i++) {
         float t = i > n ? 1.0f : (float)i / n;
@@ -57,7 +58,7 @@ static void t_punch(void) {
     for (int i = 1; i <= 10; i++) { in.hand[1][2] = 0.1f - 0.1f * i; upd(&g, &in, &o); cnt += (o.press & VRG_SQUARE) != 0; }
     CHECK(cnt == 0);
     /* dos golpes seguidos respetan el enfriamiento: 2 golpes separados 0,6 s dan 2 eventos */
-    vrg_init(&g); in = base(); in.n_en = 1; in.en[0].p[2] = 1.5f; ev = 0; cnt = 0;
+    vrg_init(&g); in = base(); in.n_en = 1; in.en[0].p[2] = 1.5f; in.grip[1] = 1.0f; ev = 0; cnt = 0;
     for (int i = 0; i < 10; i++) upd(&g, &in, &o);
     for (int k = 0; k < 2; k++) {
         for (int i = 1; i <= 6; i++) { in.hand[1][2] = 0.1f + 0.1f * i; upd(&g, &in, &o); ev += o.event == VRG_EV_PUNCH; cnt += (o.press & VRG_SQUARE) != 0; }
@@ -207,7 +208,7 @@ static void t_timestamps(void) {
     for (int pass = 0; pass < 3; pass++) {
         /* pass 0: 5 m/s con marcas cada 20 ms: golpe. pass 1: las mismas posiciones con marcas cada 100 ms (1 m/s): nada.
          * pass 2: el render repite la muestra (misma marca y pose) en llamadas alternas: golpe igualmente */
-        vrg_init(&g); in = base(); in.n_en = 1; in.en[0].p[2] = 1.5f; double t = 100.0; int sq = 0, ev = 0;
+        vrg_init(&g); in = base(); in.n_en = 1; in.en[0].p[2] = 1.5f; in.grip[1] = 1.0f; double t = 100.0; int sq = 0, ev = 0;
         for (int i = 0; i < 10; i++) { in.hand_time[0] = in.hand_time[1] = t; upd(&g, &in, &o); t += 0.02; }
         for (int i = 1; i <= 24; i++) {
             int fresh = pass != 2 || (i & 1);
@@ -308,7 +309,7 @@ static void t_fist_vs_grab(void) {
     }
     CHECK(sq == 4 && grab == 0 && pun == 1 && imp == 1 && hmax >= 0.9f && rmask > 10);
     /* el impacto también llega si baja la vida del enemigo sin que la mano llegue a tocarlo */
-    vrg_init(&g); in = base(); in.n_en = 1; in.en[0].p[2] = 2.4f; in.en[0].vital = 100;
+    vrg_init(&g); in = base(); in.n_en = 1; in.en[0].p[2] = 2.4f; in.en[0].vital = 100; in.grip[1] = 1.0f;
     for (int i = 0; i < 10; i++) upd(&g, &in, &o);
     imp = 0; for (int i = 1; i <= 20; i++) { in.hand[1][2] = 0.1f + 0.6f * (i > 6 ? 1.0f : i / 6.0f); if (i == 12) in.en[0].vital = 80; upd(&g, &in, &o); imp += o.event == VRG_EV_IMPACT; }
     CHECK(imp == 1);
@@ -345,9 +346,46 @@ static void t_button_jab(void) {
     CHECK(jabs == 0 && masked == 0);
 }
 
+/* puño: el golpe solo cuenta con la mano en puño (grip cerrado con histéresis); háptico suave al cerrar; el grip no abre el menú junto a un enemigo */
+static int punch_with(vrg_cfg_t *cfg, float grip, float grip_then, int *haptic_closes) {
+    vrg_t g; vrg_init(&g); if (cfg) g.cfg = *cfg;
+    vrg_in_t in = base(); vrg_out_t o; in.n_en = 1; in.en[0].p[2] = 1.5f; in.en[0].p[1] = 1.0f;
+    for (int i = 0; i < 10; i++) upd(&g, &in, &o);        /* mano abierta primero: cerrar es un flanco */
+    in.grip[1] = grip; for (int i = 0; i < 10; i++) { upd(&g, &in, &o); if (haptic_closes && o.haptic[1] > 0.05f && o.haptic[1] < 0.3f) (*haptic_closes)++; }
+    in.grip[1] = grip_then; int sq = 0;
+    for (int i = 1; i <= 18; i++) { in.hand[1][2] = 0.1f + 0.6f * (i > 6 ? 1.0f : i / 6.0f); upd(&g, &in, &o); sq += (o.press & VRG_SQUARE) != 0; }
+    return sq;
+}
+static void t_fist(void) {
+    int hc = 0;
+    CHECK(punch_with(NULL, 0.0f, 0.0f, NULL) == 0);                /* mano abierta: el movimiento rápido NO golpea */
+    CHECK(punch_with(NULL, 0.5f, 0.5f, NULL) == 0);                /* a medio cerrar (bajo el umbral de cierre 0,65): tampoco */
+    CHECK(punch_with(NULL, 1.0f, 1.0f, &hc) == 4);                 /* puño: golpe */
+    CHECK(hc == 1);                                                /* háptico suave una sola vez al cerrar (0,12) */
+    CHECK(punch_with(NULL, 1.0f, 0.5f, NULL) == 4);                /* histéresis: cerrado a 1,0 y relajado a 0,5 (> 0,35) sigue siendo puño */
+    CHECK(punch_with(NULL, 1.0f, 0.3f, NULL) == 0);                /* abrir la mano (< 0,35) en pleno movimiento: ya no golpea */
+    vrg_cfg_t legacy; vrg_cfg_defaults(&legacy); legacy.fist_required = 0;
+    CHECK(punch_with(&legacy, 0.0f, 0.0f, NULL) == 4);             /* fist_required = 0: comportamiento anterior */
+    vrg_cfg_t nohap; vrg_cfg_defaults(&nohap); nohap.fist_haptic = 0; hc = 0;
+    punch_with(&nohap, 1.0f, 1.0f, &hc); CHECK(hc == 0);
+    /* sin manos libres (arma) no hay háptico de puño ni golpe */
+    { vrg_t g; vrg_init(&g); vrg_in_t in = base(); vrg_out_t o; in.weapon = 1; in.n_en = 1; in.en[0].p[2] = 1.5f; int h = 0;
+      for (int i = 0; i < 6; i++) upd(&g, &in, &o);
+      in.grip[1] = 1.0f; for (int i = 0; i < 10; i++) { upd(&g, &in, &o); h += o.haptic[1] > 0.05f; } CHECK(h == 0); }
+    /* el grip cerrado junto a un enemigo no llega al juego como R1/L1; lejos o sin grip, sí (equipar/objetos) */
+    { vrg_t g; vrg_init(&g); vrg_in_t in = base(); vrg_out_t o; in.n_en = 1; in.en[0].p[2] = 1.5f;
+      for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+      CHECK(!(o.mask & (VRG_R1 | VRG_L1)));
+      in.grip[1] = 1.0f; for (int i = 0; i < 5; i++) upd(&g, &in, &o); CHECK((o.mask & VRG_R1) && (o.mask & VRG_L1));
+      in.grip[1] = 0.0f; for (int i = 0; i < 5; i++) upd(&g, &in, &o); CHECK(!(o.mask & (VRG_R1 | VRG_L1)));
+      in.en[0].p[2] = 9.0f; in.grip[1] = 1.0f; for (int i = 0; i < 5; i++) upd(&g, &in, &o); CHECK(!(o.mask & (VRG_R1 | VRG_L1))); }
+    /* grip ya cerrado al volver el control (reinicio): sin háptico de cierre */
+    { vrg_t g; vrg_init(&g); vrg_in_t in = base(); vrg_out_t o; in.grip[1] = 1.0f; int h = 0; for (int i = 0; i < 6; i++) { upd(&g, &in, &o); h += o.haptic[1] > 0.05f; } CHECK(h == 0); }
+}
+
 int main(void) {
     t_pose_jumps(); t_timestamps(); t_weapon_lock(); t_grip_latch(); t_peek_axis_haptics();
-    t_punch(); t_walk(); t_grab(); t_fist_vs_grab(); t_button_jab(); t_wall(); t_haptics_robust();
+    t_punch(); t_fist(); t_walk(); t_grab(); t_fist_vs_grab(); t_button_jab(); t_wall(); t_haptics_robust();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

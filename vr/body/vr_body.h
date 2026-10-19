@@ -9,7 +9,7 @@
  *   Modelo de pieza: t (origen respecto al padre, mm) +0x20, parent s32 +0x2C. Mundo: Y arriba, derecho;
  *   el personaje mira a +Z, su izquierda es +X; unidad = 1 mm.
  *   Piezas: 0 cadera, 1 torso, 2/3/4 = brazo/antebrazo/mano DERECHOS (los del arma), 5 cuello, 6 cabeza, 7/8/9 =
- *   brazo/antebrazo/mano IZQUIERDOS, 10-12 pierna derecha, 13-15 pierna izquierda. La mano es UNA pieza rígida (sin dedos).
+ *   brazo/antebrazo/mano IZQUIERDOS, 10-12 pierna derecha, 13-15 pierna izquierda. La mano es UNA pieza (manopla abierta, sin variante de puño en el juego): con el agarre cerrado su malla se deforma en un puño (vr_fist.h).
  *   Huesos: hombro = origen de la pieza 2 (7); codo = origen de la 3 (8): (0,-260,-50); muñeca = origen de la 4 (9):
  *   (0,-249,47) respecto al codo. Longitudes 264,8 y 253,4 mm. La pieza mano mide ~125 mm bajo la muñeca.
  *
@@ -29,6 +29,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "vr_pose.h"
+#include "vr_fist.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -114,7 +115,10 @@ typedef struct VrBodyConfig {
                                   * (izquierda +, derecha -): el marco de AGARRE de los mandos del visor es el del dispositivo (Y arriba, -Z delante, X lateral; medido: inclinado 35 grados y NO está
                                   * reflejado entre mandos), mientras que el de vr_pose.h es el de la mano plana con la palma abajo (+Y = dorso). Con identidad la mano sale plana "sobre las piernas". */
     float hand_roll_deg;         /* giro de agarre -> mano (defecto 45): al sujetar los mandos la mano queda girada ~45 grados vista desde arriba (palma hacia dentro y abajo); 90 = apretón de manos, 0 = plana */
-    float curl_deg;              /* giro de la pieza mano con el agarre al máximo (pose cerrada); defecto 28 */
+    float curl_deg;              /* giro RÍGIDO de la pieza mano con el agarre al máximo; defecto 0 (el cierre lo hace el puño deformado: fist_enabled) */
+    int fist_enabled;            /* 1 (defecto): con el agarre cerrado la malla de la mano del personaje se deforma en un puño (vr_fist); 0 = mano rígida */
+    float fist_min_grip;         /* agarre (ya suavizado y fundido) a partir del cual se deforma la malla; defecto 0,03 */
+    VrFistParams fist;           /* forma del puño (ángulos de las falanges, pulgar...) */
     int force_arm_visible;       /* 1 (defecto): si el motor dejó a 0 la visibilidad de una pieza del brazo movida por la IK, se fuerza durante la transformación (brazos siempre dibujados) */
     float armed_grip;            /* agarre mínimo de la mano dominante con arma (vrbody_set_armed); defecto 0.85 */
     /* codo */
@@ -172,6 +176,7 @@ typedef struct VrBodyStats {
     uint32_t skip_disabled, skip_noview, skip_model, skip_offscreen, skip_nohands;
     uint32_t grab_applies;       /* brazos movidos con una mano pegada al enemigo (att > 0) */
     uint32_t jab_applies;        /* brazos movidos con un golpe sintético en curso */
+    uint32_t fist_applies, fist_skipped;   /* mallas de mano deformadas en puño / mallas no reconocidas (se dejan rígidas) */
     uint32_t stretched, too_close, shoulder_limit, wrist_limit, bad_solve, stale_dropped, vis_forced;
 } VrBodyStats;
 void vrbody_stats(VrBodyStats *s);

@@ -3,8 +3,8 @@
  * La capa VR no combate ni decide nada: traduce gestos del usuario a los botones que el juego ya espera (medido en el juego real, ver
  * bitacora):
  *  - GOLPEAR y AGARRAR son dos cosas separadas (con las manos libres):
- *    GOLPEAR = gesto físico de golpe (mano rápida hacia delante, ~2-4 m/s durante 0,2-0,4 s) con el puño (el agarre cerrado no importa): cuadrado
- *    (toque) -> el juego da su golpe del combo; la mano del personaje sigue tu puño (IK) y el háptico llega al impactar. NUNCA agarra.
+ *    GOLPEAR = gesto físico de golpe (mano rápida hacia delante, ~2-4 m/s durante 0,2-0,4 s) con la mano en PUÑO (agarre/grip cerrado con histéresis; el
+ *    movimiento rápido con la mano abierta no golpea): cuadrado (toque) -> el juego da su golpe del combo; la mano del personaje sigue tu puño (IK) y el háptico llega al impactar. NUNCA agarra.
  *    AGARRAR = llevar la mano al cuello del enemigo + apretar el GATILLO: cuadrado MANTENIDO (agarra, tira de él y lo estrangula); cada nuevo
  *    apretón del gatillo mientras sujeta aprieta el cuello (baja el contador de desmayo); soltar = el enemigo cae. Moverse con el stick sujetando
  *    arrastra al enemigo. Con gestos activos y manos libres el cuadrado físico del mando (gatillo dominante / A) NO llega al juego tal cual:
@@ -30,6 +30,8 @@ enum { VRG_EV_NONE = 0, VRG_EV_PUNCH = 1, VRG_EV_GRAB = 2, VRG_EV_SQUEEZE = 3, V
 
 typedef struct {
     int enable;              /* 0: el módulo no hace nada (modo botón) */
+    int fist_required;       /* 1 (defecto): el golpe solo cuenta con la mano en PUÑO (agarre cerrado con histéresis grip_on/off); 0 = como antes (el puño es indiferente) */
+    float fist_haptic;       /* háptico suave al cerrar el puño con las manos libres (0,12); 0 = ninguno */
     int button_jab;          /* 1 (defecto): con manos libres, el cuadrado físico lejos del cuello = golpe de botón (toque + golpe sintético de la mano); 0 = se descarta */
     float trig_on, trig_off; /* histéresis del gatillo (0,6 / 0,3) */
     int punch, grab, knock, peek;   /* conmutadores por gesto (1 activo) */
@@ -92,6 +94,7 @@ typedef struct {
     int knock_left, peek_on;
     int grab_side;           /* -1 ninguno; mano que sujeta */
     int sq_hold, sq_age;     /* cuadrado por agarre y VBlanks en su estado actual */
+    int fist;                /* bits: mano física con el puño cerrado (histéresis del agarre) */
     int prev_grip_closed;    /* ahora: gatillo cerrado (con histéresis) */
     int grab_en;
     float fist_mask;         /* s con R1/L1 retirados tras un golpe (el puño cerrado no debe abrir el menú de objetos) */

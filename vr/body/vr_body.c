@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "vr_body.h"
+#include "vr_fist.h"
 #include "../bridge/bridge_addrs.h"
 
 #define PI_F 3.14159265358979f
@@ -342,6 +343,14 @@ typedef struct {
     int vis_forced;        /* 1 si se forzó (estaba a 0: el motor daba la pieza por fuera de pantalla según la pose ANIMADA) */
 } Saved;
 
+/* copia de la malla de mano (vértices + normales) que sustituyó el puño, hasta vrbody_restore */
+typedef struct {
+    uint8_t used;
+    uint32_t model, vaddr, naddr;      /* model* (identidad de la pieza) y direcciones de los arrays */
+    int nv, nn;
+    int16_t v[VRFIST_MAX_V * 4], n[VRFIST_MAX_V * 4];
+} FistSave;
+
 static struct {
     VrBodyConfig cfg;
     VrBodyViewFn view_fn;
@@ -361,6 +370,7 @@ static struct {
     int pending;
     int pend_n;
     Saved sv[6];
+    FistSave fs[2];
 } G;
 
 /* Giro de agarre -> mano alrededor del eje de los dedos (z local de la mano): izquierda +deg, derecha -deg (ver VrBodyConfig.hand_roll_deg). */
@@ -383,7 +393,8 @@ void vrbody_config_default(VrBodyConfig *c) {
     c->grip_to_wrist_mm = 55.0f;
     c->hand_roll_deg = 45.0f;
     for (int s = 0; s < 2; s++) roll_offset(c->hand_roll_deg, s, c->hand_rot_offset[s]);
-    c->curl_deg = 28.0f; c->armed_grip = 0.85f;
+    c->curl_deg = 0.0f; c->armed_grip = 0.85f;
+    c->fist_enabled = 1; c->fist_min_grip = 0.03f; vrfist_params_default(&c->fist);
     c->pole[0] = 0.45f; c->pole[1] = -1.0f; c->pole[2] = -0.35f;
     vrbody_limits_default(&c->limits);
     c->jab_s = 0.28f; c->jab_reach_mm = 450.0f; c->grab_blend_s = 0.2f; c->grab_spread_mm = 75.0f; c->grab_roll_deg = 60.0f; c->grab_max_dist_mm = 1100.0f;
@@ -435,6 +446,13 @@ const VrBodyDebug *vrbody_debug(int side) { return &G.dbg[side ? 1 : 0]; }
 #define OBJ_VIS    0x4C
 #define MDL_T        0x20
 #define MDL_PARENT   0x2C
+#define MDL_NF       0x04
+#define MDL_NV_OFF   0x34
+#define MDL_VOFF     0x38
+#define MDL_VIDX     0x3C
+#define MDL_NN_OFF   0x40
+#define MDL_NOFF     0x44
+#define MDL_NIDX     0x48
 #define MAX_PARTS    64
 
 static inline int ptr_ok(uint32_t p, uint32_t len) { return (p & 3u) == 0 && (p >> 29) == 4u && (p & RAM_MASK) + len <= RAM_SIZE && (p & RAM_MASK) >= 0x10000u; }
@@ -497,6 +515,15 @@ void vrbody_restore(uint8_t *ram) {
         s->used = 0;
     }
     G.pend_n = 0;
+    for (int i = 0; i < 2; i++) {
+        FistSave *f = &G.fs[i];
+        if (!f->used) continue;
+        f->used = 0;
+        if (ptr_ok(f->model, 0x58) && rd_u32(ram, f->model + MDL_NV_OFF) == (uint32_t)f->nv && rd_u32(ram, f->model + MDL_VOFF) == f->vaddr && rd_u32(ram, f->model + MDL_NOFF) == f->naddr) {
+            memcpy(ram + (f->vaddr & RAM_MASK), f->v, (size_t)f->nv * 8);
+            memcpy(ram + (f->naddr & RAM_MASK), f->n, (size_t)f->nn * 8);
+        } else G.st.stale_dropped++;
+    }
     G.st.restores++;
 }
 
@@ -514,6 +541,26 @@ static int hand_valid(const VrHandPose *h) {
 static void hand_map(float side, float *M) {
     if (side < 0) { const float r[9] = {0, 0, -1, -1, 0, 0, 0, 1, 0}; memcpy(M, r, sizeof r); }
     else          { const float r[9] = {0, 0, 1, 1, 0, 0, 0, 1, 0};  memcpy(M, r, sizeof r); }
+}
+
+/* Puño: deforma la malla de la pieza mano (vértices y normales en la RAM del juego) con vr_fist. Guarda los originales para vrbody_restore. */
+static int ram_ok(uint32_t p, uint32_t len) { return (p >> 29) == 4u && (p & RAM_MASK) >= 0x10000u && (uint64_t)(p & RAM_MASK) + len <= RAM_SIZE; }
+static void fist_apply(uint8_t *ram, int s, uint32_t model, float side_sign, float grip) {
+    FistSave *f = &G.fs[s];
+    if (f->used || !ptr_ok(model, 0x58)) return;
+    uint32_t nf = rd_u32(ram, model + MDL_NF), nv = rd_u32(ram, model + MDL_NV_OFF), nn = rd_u32(ram, model + MDL_NN_OFF);
+    uint32_t vo = rd_u32(ram, model + MDL_VOFF), no = rd_u32(ram, model + MDL_NOFF), vi = rd_u32(ram, model + MDL_VIDX), ni = rd_u32(ram, model + MDL_NIDX);
+    if (nv < 8 || nv > VRFIST_MAX_V || nn < 1 || nn > VRFIST_MAX_V || nf < 4 || nf > VRFIST_MAX_F || (vo & 1u) || (no & 1u) ||
+        !ram_ok(vo, nv * 8) || !ram_ok(no, nn * 8) || !ram_ok(vi, nf * 4) || !ram_ok(ni, nf * 4)) { G.st.fist_skipped++; return; }
+    for (int o = 0; o < 2; o++) if (o != s && G.fs[o].used && G.fs[o].vaddr == vo) return;     /* la misma malla ya deformada para la otra mano */
+    int16_t v[VRFIST_MAX_V * 4], n[VRFIST_MAX_V * 4], ov[VRFIST_MAX_V * 4], on[VRFIST_MAX_V * 4];
+    memcpy(v, ram + (vo & RAM_MASK), nv * 8); memcpy(n, ram + (no & RAM_MASK), nn * 8);
+    VrFistMesh m = {(int)nv, (int)nn, (int)nf, v, n, ram + (vi & RAM_MASK), ram + (ni & RAM_MASK)};
+    if (vrfist_deform(&m, side_sign, grip, &G.cfg.fist, ov, on) != 0) { G.st.fist_skipped++; return; }
+    f->used = 1; f->model = model; f->vaddr = vo; f->naddr = no; f->nv = (int)nv; f->nn = (int)nn;
+    memcpy(f->v, v, nv * 8); memcpy(f->n, n, nn * 8);
+    memcpy(ram + (vo & RAM_MASK), ov, nv * 8); memcpy(ram + (no & RAM_MASK), on, nn * 8);
+    G.st.fist_applies++;
 }
 
 int vrbody_apply(uint8_t *ram) {
@@ -766,6 +813,7 @@ int vrbody_apply(uint8_t *ram) {
             f[15] = 1;
             G.dbg_frame_ok[s] = all_finite(f, 16);
         }
+        if (cfg->fist_enabled && h->grip_cur * we_w >= cfg->fist_min_grip) fist_apply(ram, s, pw.model, -rig.side, h->grip_cur * we_w);
         dbg->driven = 1; dbg->w = h->w; dbg->grip = h->grip_cur; v_cp(dbg->target_wrist, wt); memcpy(dbg->target_hand, Rtb, sizeof Rtb); dbg->sol = sol;
         driven++;
     }
