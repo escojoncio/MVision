@@ -238,6 +238,10 @@ static int dump_point;                   /* 1 = el volcado en curso se tomó en 
 /* Definición DÉBIL vacía (una referencia débil sin definir no enlaza en Mach-O): ns_extract la sustituye con una fuerte que registra el extractor en el enganche. */
 __attribute__((weak)) void ns_extract_register(void) {}
 __attribute__((weak)) void ns_extract_glue_stats(NsExtractGlueStats *o) { if (o) memset(o, 0, sizeof *o); }   /* idem: la fuerte está en ns_extract_glue.c */
+/* Comprobación de cobertura de la lista de la GPU por la escena nativa (ns_cover_glue.c, solo en la app): definiciones débiles vacías para las pruebas de escritorio. */
+__attribute__((weak)) void ns_cover_glue_post_ik(const uint8_t *ram) { (void)ram; }
+__attribute__((weak)) void ns_cover_glue_submit(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; }
+__attribute__((weak)) size_t ns_cover_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
 _Static_assert(NS_PLAYER_BODY_PTR == BA_PLAYER_BODY, "ns_player y el puente deben coincidir en el puntero del jugador");
 static void dump_at_stage(Cpu *c);
 static int ns_gate(void *u);
@@ -299,7 +303,7 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
     o->hide_head = 1;                                       /* primera persona: la cabeza propia no se dibuja (misma regla que vrcam_hide_head) */
     o->refresh_parts = body_ok ? NS_PARTS_ARMS : 0;
 }
-static void ns_post_ik(uint8_t *ram) { ns_hook_post_ik(ram); }
+static void ns_post_ik(uint8_t *ram) { ns_hook_post_ik(ram); ns_cover_glue_post_ik(ram); }
 
 /* Vigilancia por fotograma (hilo de emulación, tras el sincronismo): (M4) con la capa de cuerpo activa cada captura debe llevar la pose IK de los brazos
  * (ik_refresh crece a la par que captures); (B4) reintento de la instalación y reinstalación si otra overlay pisó la etapa. Se registra como mucho una vez por segundo. */
@@ -321,6 +325,10 @@ static void ns_frame_check(void) {
     uint64_t t = mono_ns();
     if (t - last_log_ns < 1000000000ull) return;
     last_log_ns = t;
+    {   /* cobertura de la lista de la GPU por la escena nativa (resultado del hilo trabajador, ~1 por segundo) */
+        static char cbuf[8192];
+        if (ns_cover_glue_poll(cbuf, sizeof cbuf)) fputs(cbuf, stderr);
+    }
     uint32_t dcap = st.captures - cap0, dik = st.ik_refresh - ik0, dmiss = st.ik_missed - miss0;
     cap0 = st.captures; ik0 = st.ik_refresh; miss0 = st.ik_missed;
     {   /* Diagnóstico por segundo (una línea cada una), siempre: qué extrajo el enganche del motor y cómo van las manos. Se mide todo junto para no ir a ciegas. */
@@ -1040,6 +1048,7 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
             break;
         }
         build_one(l, si);
+        ns_cover_glue_submit(emu_ram, emu_scratch, l->ops, l->nops, f);   /* 1 de cada N: instantánea y comprobación de cobertura en otro hilo */
         dump_capture(c, f, l);
         if (!cap_on) break;
     }

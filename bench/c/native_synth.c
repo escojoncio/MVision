@@ -634,7 +634,9 @@ static void adapt(const NsScene *sc, TriList *out) {
                     for (int a = 0; a < 3; a++) { float c = floorf(raw[a] * s); c3[a] = c < 0 ? 0 : c > 255 ? 255 : c; }
                     rv[k].r = (uint8_t)c3[0]; rv[k].g = (uint8_t)c3[1]; rv[k].b = (uint8_t)c3[2];
                 }
-                static const int idx[2][3] = {{0, 1, 2}, {0, 2, 3}};
+                static const int idxq[2][3] = {{0, 1, 3}, {1, 2, 3}};   /* diagonal B-D: la del hardware (igual que ns_gpu_pack) */
+                static const int idxt[1][3] = {{0, 1, 2}};
+                const int (*idx)[3] = (fc->flags & NS_FF_TRI) ? idxt : idxq;
                 const int ntri = (fc->flags & NS_FF_TRI) ? 1 : 2;
                 for (int t = 0; t < ntri; t++) {
                     NsRTri tr;

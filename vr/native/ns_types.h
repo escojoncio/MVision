@@ -95,7 +95,7 @@ enum {
 };
 
 /* Cara = cuadrilátero A,B,C,D en orden PERÍMETRO (el motor lo guarda así; el hardware lo dibuja en orden Z: triángulos (A,B,D) y (A,D,C) del vértice
- * 0,1,2,3 = A,B,D,C). Triángulos para el renderer: (A,B,C) y (A,C,D). Anverso: la prueba de orientación de (A,B,D) en la proyección del motor es > 0, equivale a
+ * 0,1,2,3 = A,B,D,C). Triángulos para el renderer: (A,B,D) y (B,C,D) (diagonal B-D, la del hardware; antes (A,B,C),(A,C,D) torcía los cuadriláteros alabeados). Anverso: la prueba de orientación de (A,B,D) en la proyección del motor es > 0, equivale a
  * dot(A_vista, cross(B-A, D-A)) > 0 con vista X derecha, Y abajo, Z delante (docs §3.4). Si el modelo es NS_MF_TWOSIDED se dibuja a doble cara. */
 typedef struct {
     uint8_t v[4];        /* índices de vértice A,B,C,D (0..255). En modelos con vértices soldados el motor sólo usa 7 bits: el extractor ya los enmascaró */

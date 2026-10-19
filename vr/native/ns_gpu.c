@@ -41,7 +41,10 @@ void ns_gpu_pack(const NsMesh *m, const NsBaked *baked, NsGpuVert *verts, NsGpuC
             c->flags = (uint16_t)fl;
         }
         const int tris = (fc->flags & NS_FF_TRI) ? 1 : 2;
-        static const int idx[2][3] = {{0, 1, 2}, {0, 2, 3}};
+        /* diagonal B-D como el hardware (v0,v1,v2,v3 = A,B,D,C -> (A,B,D) y (B,D,C)); (B,C,D) conserva el sentido del perímetro */
+        static const int idxq[2][3] = {{0, 1, 3}, {1, 2, 3}};
+        static const int idxt[1][3] = {{0, 1, 2}};   /* triángulo (C == D): (A,B,C), como ns_adapt */
+        const int (*idx)[3] = (fc->flags & NS_FF_TRI) ? idxt : idxq;
         for (int t = 0; t < tris; t++, tri++) {
             for (int k = 0; k < 3; k++) corners[3u * tri + (uint32_t)k] = c4[idx[t][k]];
             if (centroid) {

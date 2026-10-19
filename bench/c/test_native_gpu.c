@@ -145,6 +145,26 @@ static int bf_cmp(const void *a, const void *b) {
     if (x->d != y->d) return x->d > y->d ? -1 : 1;
     return x->seq < y->seq ? -1 : x->seq > y->seq;
 }
+/* Un cuadrilátero se parte por la diagonal B-D (la del hardware), no por A-C; un triángulo (C == D) es (A,B,C). */
+static void test_quad_diagonal(void) {
+    NsVert v[4] = {{0, 0, 0, 0xFF, 0}, {100, 0, 0, 0xFF, 0}, {100, 0, 100, 0xFF, 0}, {0, 50, 100, 0xFF, 0}};   /* perímetro A,B,C,D alabeado */
+    NsFace f[2]; memset(f, 0, sizeof f);
+    for (int k = 0; k < 4; k++) { f[0].v[k] = (uint8_t)k; f[0].u[k] = (uint8_t)(10 * k); }
+    f[1] = f[0]; f[1].flags = NS_FF_TRI; f[1].v[3] = f[1].v[2];
+    NsMesh m; memset(&m, 0, sizeof m);
+    m.n_verts = 4; m.n_faces = 2; m.verts = v; m.faces = f;
+    CHECK(ns_gpu_tri_count(&m) == 3);
+    NsGpuVert gv[4]; NsGpuCorner c[9];
+    ns_gpu_pack(&m, NULL, gv, c, 0, NULL, NULL);
+    /* cuadrilátero: (A,B,D) y (B,C,D) -> comparten B-D */
+    CHECK(c[0].v == 0 && c[1].v == 1 && c[2].v == 3);
+    CHECK(c[3].v == 1 && c[4].v == 2 && c[5].v == 3);
+    /* cada esquina conserva su propio UV (el de su vértice de la cara, no el de otra) */
+    CHECK(c[2].u == 30 && c[3].u == 10 && c[4].u == 20 && c[5].u == 30);
+    /* triángulo: (A,B,C) */
+    CHECK(c[6].v == 0 && c[7].v == 1 && c[8].v == 2);
+}
+
 static void test_sort(void) {
     srand(7);
     enum { NP = 5, NT = 200 };
@@ -271,6 +291,7 @@ int main(int argc, char **argv) {
     CHECK(ns_synth_write(p) == 0);
     CHECK(ns_synth_load(p) == 0);
     test_emulation();
+    test_quad_diagonal();
     test_sort();
     test_split();
     printf(fails ? "FALLOS: %d\n" : "OK: todas las pruebas pasan\n", fails);

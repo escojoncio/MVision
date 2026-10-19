@@ -11,13 +11,16 @@
 #undef NsLight
 #undef NsFog
 
-typedef struct { NsRTri *t; size_t n, cap; } Vec;
+typedef struct { NsRTri *t; size_t n, cap; NsAdaptSrc *s; } Vec;
 static int vec_push(Vec *v, const NsRTri *t) {
     if (v->n == v->cap) {
         size_t nc = v->cap ? v->cap * 2 : 4096;
         NsRTri *p = (NsRTri *)realloc(v->t, nc * sizeof *p);
         if (!p) return -1;
         v->t = p; v->cap = nc;
+        NsAdaptSrc *q = (NsAdaptSrc *)realloc(v->s, nc * sizeof *q);
+        if (!q) return -1;
+        v->s = q;
     }
     v->t[v->n++] = *t;
     return 0;
@@ -66,7 +69,7 @@ size_t ns_adapt_scene(const NsScene *sc, const NsMeshStore *st, const NsAdaptOpt
     NsAdaptStats *S = stats ? stats : &dummy;
     memset(S, 0, sizeof *S);
     *out = NULL;
-    Vec V = {0, 0, 0};
+    Vec V = {0, 0, 0, 0};
     const float expo = (opt && opt->exposure > 0) ? opt->exposure : 1.0f;
     const uint16_t *vram = opt ? opt->vram : NULL;
     float wp[256][3];
@@ -161,12 +164,14 @@ size_t ns_adapt_scene(const NsScene *sc, const NsMeshStore *st, const NsAdaptOpt
                     T.abr = (uint8_t)((f->tpage >> 5) & 3);
                     if (textured) T.flags |= NS_TF_TEXTURED;
                     if (m->flags & NS_MF_BLEND) T.flags |= NS_TF_SEMI;
-                    if (vec_push(&V, &T)) { free(V.t); return 0; }
+                    if (vec_push(&V, &T)) { free(V.t); free(V.s); return 0; }
+                    V.s[V.n - 1].inst = ii; V.s[V.n - 1].piece = pi; V.s[V.n - 1].face = fi; V.s[V.n - 1].half = (uint32_t)tt; V.s[V.n - 1].mesh_id = (uint32_t)p->mesh_id; V.s[V.n - 1].key = in->key; V.s[V.n - 1].piece_rel = k; V.s[V.n - 1].mflags = m->flags; V.s[V.n - 1].vis = in->vis_state;
                     S->faces_out_tris++;
                 }
             }
         }
     }
     *out = V.t;
+    if (opt && opt->src_out) *opt->src_out = V.s; else free(V.s);
     return V.n;
 }
