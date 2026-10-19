@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "bridge.h"
+#include "cpu.h"
 #include "gpu.h"
 #include "host.h"
 #include "hud_emu.h"
@@ -79,12 +80,21 @@ int main(int argc, char **argv) {
     const char *exe = argv[1], *disc = argv[2], *out = NULL, *logp = NULL;
     uint32_t nframes = (uint32_t)strtoul(argv[3], 0, 0), every = 100, from = 0;
     int sweep = 0;
+    struct { uint32_t f, addr, val; int n, done; } pk[16]; int n_pk = 0;   /* --poke F:DIR_HEX:VALOR_HEX:BYTES: escribe en la RAM del juego (solo pruebas) */
+    uint32_t dump_at[16]; int n_dump = 0;   /* --dump F1,F2,..: lista las primitivas 2D de la escena de esos fotogramas (diagnóstico de la capa 2D) */
     for (int i = 4; i < argc; i++) {
         if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "--every") && i + 1 < argc) every = (uint32_t)strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--from") && i + 1 < argc) from = (uint32_t)strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--head") && i + 1 < argc) sweep = !strcmp(argv[++i], "barrido");
         else if (!strcmp(argv[i], "--log") && i + 1 < argc) logp = argv[++i];
+        else if (!strcmp(argv[i], "--poke") && i + 1 < argc && n_pk < 16) {
+            unsigned pf = 0, pa = 0, pv = 0; int pn = 0;
+            if (sscanf(argv[++i], "%u:%x:%x:%d", &pf, &pa, &pv, &pn) == 4 && (pn == 1 || pn == 2 || pn == 4)) { pk[n_pk].f = pf; pk[n_pk].addr = pa; pk[n_pk].val = pv; pk[n_pk].n = pn; pk[n_pk].done = 0; n_pk++; }
+        }
+        else if (!strcmp(argv[i], "--dump") && i + 1 < argc) {
+            for (char *t = strtok(argv[++i], ","); t && n_dump < 16; t = strtok(NULL, ",")) dump_at[n_dump++] = (uint32_t)strtoul(t, 0, 0);
+        }
     }
     if (out) mkdir(out, 0755);
     FILE *lg = logp ? fopen(logp, "w") : stdout;
@@ -116,6 +126,13 @@ int main(int argc, char **argv) {
         if (f >= nframes) break;
         if (f != last_f) {
             last_f = f;
+            for (int q = 0; q < n_pk; q++) if (!pk[q].done && f >= pk[q].f) {
+                pk[q].done = 1;
+                mv_host_pause(); usleep(300000);
+                memcpy(emu_ram + (pk[q].addr & 0x1FFFFF), &pk[q].val, (size_t)pk[q].n);
+                mv_host_resume();
+                fprintf(lg, "[poke] f=%u %08x <- %x (%d B)\n", f, pk[q].addr, pk[q].val, pk[q].n);
+            }
             mv_host_pad(pad_at(f), 128, 128, 128, 128);
             float m[16];
             if (sweep) head_pose(70.0f * sinf((float)f * 0.05f), 0.3f * sinf((float)f * 0.031f), 1.65f + 0.2f * sinf((float)f * 0.043f), m);
@@ -160,6 +177,22 @@ int main(int argc, char **argv) {
                         sc.cine_shot, sc.cine_cut, sc.cine_cover, sc.stats.n_tris3d, sc.eye_vr[0], sc.eye_vr[1], sc.eye_vr[2]);
                 last_kind = gs.view_kind; last_shot = eng ? sc.cine_shot : last_shot;
             }
+            for (int q = 0; q < n_dump; q++) if (dump_at[q] && hf >= dump_at[q] && sc.nb > 3) {
+                dump_at[q] = 0;
+                fprintf(lg, "[dump] f=%u lista=%u lotes=%u verts=%u disp=(%d,%d %dx%d)\n", hf, sc.src->index, sc.nb, sc.nv, sc.src->disp.x, sc.src->disp.y, sc.src->disp.w, sc.src->disp.h);
+                for (uint32_t bi = 0; bi < sc.nb; bi++) {
+                    const VrBatch *bt = &sc.b[bi];
+                    if (bt->kind < 2) continue;
+                    for (uint32_t t = 0; t + 2 < bt->count; t += 3) {
+                        const VrVtx *v0 = &sc.v[bt->first + t];
+                        float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+                        for (int k = 0; k < 3; k++) { const VrVtx *w = &sc.v[bt->first + t + k]; if (w->pos[0] < x0) x0 = w->pos[0]; if (w->pos[0] > x1) x1 = w->pos[0]; if (w->pos[1] < y0) y0 = w->pos[1]; if (w->pos[1] > y1) y1 = w->pos[1]; }
+                        fprintf(lg, "  lote%u k=%u blend=%u ev<%u tri%u fl=%04x tpage=%04x(x%u,y%u,tp%u) clut=%04x uv0=(%.0f,%.0f) dst=(%.0f,%.0f)-(%.0f,%.0f) rgba=%08x clip=(%d,%d)-(%d,%d)\n", bi, bt->kind, bt->blend, bt->ev_end, t / 3, v0->flags, v0->tpage,
+                                (v0->tpage & 15) * 64, ((v0->tpage >> 4) & 1) * 256, (v0->tpage >> 7) & 3, v0->clut, v0->uv[0], v0->uv[1], x0, y0, x1, y1, v0->rgba,
+                                v0->pad < sc.nstates ? sc.states[v0->pad].cx1 : -1, v0->pad < sc.nstates ? sc.states[v0->pad].cy1 : -1, v0->pad < sc.nstates ? sc.states[v0->pad].cx2 : -1, v0->pad < sc.nstates ? sc.states[v0->pad].cy2 : -1);
+                    }
+                }
+            }
             int want = hf >= next_sample && out && eng && sc.has_3d;
             if (eng && sc.has_3d) {   /* la cámara del juego debe ser finita y la vista estéreo invertible */
                 VrCineEye e;
@@ -198,8 +231,12 @@ int main(int argc, char **argv) {
                     }
                 }
             }
-            if (hudim.rgba) hud_img_free(&hudim);
             char p[512];
+            if (hudim.rgba) {   /* capa 2D (panel) sola sobre negro, a la resolución de la pantalla del juego */
+                uint8_t *hr = malloc((size_t)hudim.w * hudim.h * 3);
+                if (hr) { hud_emu_to_rgb(&hudim, hr); snprintf(p, sizeof p, "%s/s_%05u_hud.ppm", out, hf); write_ppm(p, hudim.w, hudim.h, hr); free(hr); }
+                hud_img_free(&hudim);
+            }
             snprintf(p, sizeof p, "%s/s_%05u_L.ppm", out, hf); write_ppm(p, EW, EH, rgbL);
             snprintf(p, sizeof p, "%s/s_%05u_R.ppm", out, hf); write_ppm(p, EW, EH, rgbR);
             int fw = 0, fh = 0;

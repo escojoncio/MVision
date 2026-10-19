@@ -157,6 +157,8 @@ int main(int argc, char **argv) {
     static uint16_t evram[1024 * 512];   /* VRAM del renderer: solo eventos */
     const char *fb_dir = NULL;   /* --fb DIR F1,F2,..: vuelca (PPM) el fotograma que muestra el host (lo que verá la pantalla de cine) en esos frames */
     uint32_t fb_at[64]; int n_fb = 0;
+    /* --poke F:DIR_HEX:VALOR_HEX:BYTES (1, 2 o 4; repetible): escribe en la RAM del juego al llegar al fotograma F (con el motor en pausa), solo para pruebas */
+    struct { uint32_t f, addr, val; int n, done; } pk[16]; int n_pk = 0;
     int log_modes = 0;           /* --modes: imprime cada cambio del estado de vista (ver vr_view.h) y de las banderas del puente */
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--padx") && i + 1 < argc && n_xpad < 32) {
@@ -165,6 +167,11 @@ int main(int argc, char **argv) {
             continue;
         }
         if (!strcmp(argv[i], "--nobase") && i + 1 < argc) { no_base_pad = (int)strtoul(argv[++i], 0, 0); continue; }
+        if (!strcmp(argv[i], "--poke") && i + 1 < argc && n_pk < 16) {
+            unsigned pf = 0, pa = 0, pv = 0; int pn = 0;
+            if (sscanf(argv[++i], "%u:%x:%x:%d", &pf, &pa, &pv, &pn) == 4 && (pn == 1 || pn == 2 || pn == 4)) { pk[n_pk].f = pf; pk[n_pk].addr = pa; pk[n_pk].val = pv; pk[n_pk].n = pn; pk[n_pk].done = 0; n_pk++; }
+            continue;
+        }
         if (!strcmp(argv[i], "--modes")) { log_modes = 1; continue; }
         if (!strcmp(argv[i], "--fb") && i + 2 < argc) {
             fb_dir = argv[++i];
@@ -233,9 +240,18 @@ int main(int argc, char **argv) {
                 if (!lb) lb = malloc(sizeof *lb);
                 char cur[256] = "";
                 if (lb && mv_host_bridge(lb))
-                    snprintf(cur, sizeof cur, "game=%d ctl=%d cam=%d | cine=%d comms=%d pausa=%d menu=%d(%d) stop=%d | vista=%d motivo=%d", gs.game, gs.in_control, gs.cam_active,
-                             lb->cinematic, lb->comms, lb->paused, lb->menu_open, lb->menu_state, lb->stopped, gs.view_mode, gs.view_reason);
+                    snprintf(cur, sizeof cur, "game=%d ctl=%d cam=%d | cine=%d comms=%d pausa=%d menu=%d(%d) stop=%d | gs=%08x ps=%x camtipo=%d cam1p=%d vida=%d acc=%d | vista=%d motivo=%d clase=%d", gs.game, gs.in_control, gs.cam_active,
+                             lb->cinematic, lb->comms, lb->paused, lb->menu_open, lb->menu_state, lb->stopped, lb->game_status, lb->player_status, lb->cam_type, lb->cam_first_person, lb->life, lb->player_action, gs.view_mode, gs.view_reason, gs.view_kind);
                 if (strcmp(cur, lastm)) { fprintf(stderr, "[modo] f=%u %s\n", f, cur); strcpy(lastm, cur); }
+            }
+            for (int q = 0; q < n_pk; q++) if (!pk[q].done && f >= pk[q].f) {
+                pk[q].done = 1;
+                mv_host_pause();
+                usleep(300000);
+                uint8_t *pp = emu_ram + (pk[q].addr & 0x1FFFFF);
+                memcpy(pp, &pk[q].val, (size_t)pk[q].n);
+                mv_host_resume();
+                fprintf(stderr, "[poke] f=%u %08x <- %x (%d B)\n", f, pk[q].addr, pk[q].val, pk[q].n);
             }
             if (fb_dir) for (int q = 0; q < n_fb; q++) if (fb_at[q] && f >= fb_at[q]) {
                 fb_at[q] = 0;
