@@ -286,7 +286,7 @@ static void build_one(const GpuDrawList *l, int si) {
     int cine_cut = 0;
     {   /* Cinemática del motor (ni mundo ni vídeo/2D puros): la cámara es la del guion, nunca la de la cabeza. Planos y origen fijo por plano. */
         int rs = view.reason;
-        int cine_reason = rs == VRV_R_NO_GAME || rs == VRV_R_CINEMATIC || rs == VRV_R_LOST_CONTROL;
+        int cine_reason = rs == VRV_R_NO_GAME || rs == VRV_R_CINEMATIC || rs == VRV_R_LOST_CONTROL || rs == VRV_R_DEAD;
         if (!cine_reason || (r && r->active)) vrcine_camera(&cine, 0, bs.eye_pos, (const float[9]){0});
         else if (r) cine_cut = vrcine_camera(&cine, 1, r->eye, r->M);
     }
@@ -413,7 +413,7 @@ static void publish_state(void) {
     memset(&g, 0, sizeof g);
     int core = (bs.valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs.has_player;
     g.game = core;
-    g.in_control = core && bs.in_control;
+    g.in_control = core && bs.in_control && !(((bs.valid & BRIDGE_OK_LIFE) && bs.life_max > 0 && bs.life <= 0));
     g.menu = !(core && bs.in_control);
     g.posture = core && bs.stance >= 0 && bs.stance <= 2 ? bs.stance : -1;
     g.cam_active = vrcam_active();
@@ -428,6 +428,7 @@ static void publish_state(void) {
         vin.cam_active = (uint8_t)(g.cam_active != 0);
         vin.cinematic = core && bs.cinematic; vin.comms = core && bs.comms; vin.paused = core && bs.paused;
         vin.menu_open = core && bs.menu_open; vin.stopped = core && bs.stopped;
+        vin.dead = (uint8_t)(core && (((bs.valid & BRIDGE_OK_LIFE) && bs.life_max > 0 && bs.life <= 0) || (bs.player_status & BRIDGE_PS_GAME_OVER) || (bs.game_status & BRIDGE_GS_GAME_OVER)));
         vin.scene3d = (uint8_t)last_scene3d; vin.video = (uint8_t)last_video;
         g.view_mode = vrview_step(&view, &vin);
         g.view_kind = view.kind;

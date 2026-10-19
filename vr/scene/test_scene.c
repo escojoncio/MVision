@@ -432,6 +432,30 @@ static void test_filter(void) {
     vr_scene_release();
 }
 
+/* Mezcla con el fotograma anterior (sprite semitransparente de 15 bits que lee del búfer alterno): no va al panel, con o sin screen_filter */
+static void test_ghost(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    rect2d(0, 0, 160, 184, 0, 27, GPU_F_TEXTURED | GPU_F_SEMI, 2, 320, 0, 120, 120, 120);       /* mitad izquierda leyendo del búfer vecino (x 320): estela */
+    rect2d(160, 0, 160, 184, 32, 27, GPU_F_TEXTURED | GPU_F_SEMI, 2, 448, 0, 120, 120, 120);    /* mitad derecha */
+    rect2d(16, 40, 40, 20, 0, 0, GPU_F_TEXTURED, 2, 640, 256, 128, 128, 128);                   /* contenido 2D normal */
+    rect2d(0, 0, 100, 60, 0, 0, GPU_F_TEXTURED | GPU_F_SEMI, 2, 320, 0, 128, 128, 128);        /* parche pequeño que lee del vecino: se conserva */
+    VrSceneOpts o = vr_scene_opts_default();
+    VrScene s;
+    CHECK(o.drop_ghost == 1, "drop_ghost por defecto");
+    for (int sf = 0; sf < 2; sf++) {
+        o.screen_filter = sf;
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_filter_ghost == 2, "estela descartada (screen_filter=%d): %u", sf, s.stats.n_filter_ghost);
+        CHECK(s.stats.n_tris2d == 4 && !s.filter.active, "queda el 2D normal: tris2d %u activo %d", s.stats.n_tris2d, s.filter.active);
+    }
+    o.drop_ghost = 0;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_filter_ghost == 0 && s.stats.n_tris2d == 8, "drop_ghost=0: comportamiento anterior");
+    vr_scene_release();
+}
+
 static void test_state(void) {
     const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
     const int32_t e[3] = {0, 3000, 500};
@@ -1034,6 +1058,7 @@ int main(void) {
     test_state();
     test_near_clip();
     test_filter();
+    test_ghost();
     test_gte_scale_and_validity();
     test_line_coverage();
     test_event_epochs();

@@ -187,6 +187,7 @@ typedef struct {
     uint32_t n_filter_frame;  /* polígonos de la máscara de visión (marco de máscara/caja/mira) mandados a kind 3 y volcados en filter.frame */
     uint32_t n_recon;         /* §49: polígonos de 4 vértices con un vértice sin posición de vista reconstruido (opts.recon_partial) */
     uint32_t n_unclipped;     /* §49: triángulos emitidos con algún vértice por detrás/pegado al ojo del motor (z < near_units) sin recortar (engine_near_clip=0) */
+    uint32_t n_filter_ghost;  /* primitivas 2D que mezclan el fotograma anterior (sprite que lee del búfer mostrado durante el dibujo): kind 3, sin efecto en el panel */
 } VrStats;
 
 #define VR_FILTER_ROWS 512
@@ -286,6 +287,9 @@ typedef struct {
     float user_k;
     float user_eye_h_m;
     float user_p_ref[3];
+    /* --- fotograma anterior (al final) --- */
+    int drop_ghost;           /* 1 (def.): un sprite 2D texturizado de 15 bits que lee del búfer alterno (fotograma anterior: estela o fundido encadenado) y cubre >= 20 % de la pantalla
+                               * no se emite al panel (kind 3, VrStats.n_filter_ghost): la VRAM del renderer no tiene ese fotograma y mostraría restos de lo último subido. Independiente de screen_filter */
 } VrSceneOpts;
 
 VrSceneOpts vr_scene_opts_default(void);

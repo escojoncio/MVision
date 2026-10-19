@@ -19,6 +19,10 @@ int main(void) {
     i = world(); i.in_control = 0; i.cinematic = 1; i.comms = 1; CHECK(vrview_reason(&i) == VRV_R_CINEMATIC, "cinemática gana a todo");
     i = world(); i.game = 0; i.cinematic = 1; CHECK(vrview_reason(&i) == VRV_R_NO_GAME, "sin partida gana a todo");
     CHECK(vrview_reason(NULL) == VRV_R_NO_GAME, "NULL");
+    i = world(); i.in_control = 0; i.dead = 1; CHECK(vrview_reason(&i) == VRV_R_DEAD, "muerte");
+    i = world(); i.in_control = 0; i.dead = 1; i.scene3d = 1; CHECK(vrview_kind_of(&i) == VRV_K_ENGINE, "muerte con 3D = pantalla 3D");
+    i.scene3d = 0; CHECK(vrview_kind_of(&i) == VRV_K_UI, "muerte sin 3D = cine plano");
+    i = world(); i.dead = 1; i.cinematic = 1; CHECK(vrview_reason(&i) == VRV_R_CINEMATIC, "cinemática gana a muerte");
 
     VrView v;
     vrview_reset(&v);
@@ -36,7 +40,7 @@ int main(void) {
     v.to_cine = 0; v.to_world = 0;
     CHECK(vrview_step(&v, &i) == VRV_WORLD, "umbral 0 se trata como 1");
     CHECK(vrview_step(NULL, &i) == VRV_CINEMA, "NULL");
-    for (int r = 0; r <= VRV_R_NO_CAM; r++) CHECK(vrview_reason_name(r)[0] != '?', "nombre %d", r);
+    for (int r = 0; r <= VRV_R_DEAD; r++) CHECK(vrview_reason_name(r)[0] != '?', "nombre %d", r);
     /* clasificación: mundo / cinemática del motor / vídeo / 2D */
     {
         VrViewIn k;
