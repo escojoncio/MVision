@@ -234,7 +234,8 @@ static int grow(void **p, size_t *cap, size_t need, size_t esz) {
 static NsBridge *ns_br;
 static _Atomic int render_req = MV_RENDER_DEFAULT_NATIVE, render_locked, renderer_ready, render_eff;
 static int dump_point;                   /* 1 = el volcado en curso se tomó en el punto de enganche */
-extern void ns_extract_register(void) __attribute__((weak));   /* lo define ns_extract al integrarse: registra el extractor en el enganche */
+/* Definición DÉBIL vacía (una referencia débil sin definir no enlaza en Mach-O): ns_extract la sustituye con una fuerte que registra el extractor en el enganche. */
+__attribute__((weak)) void ns_extract_register(void) {}
 _Static_assert(NS_PLAYER_BODY_PTR == BA_PLAYER_BODY, "ns_player y el puente deben coincidir en el puntero del jugador");
 static void dump_at_stage(Cpu *c);
 
@@ -970,7 +971,7 @@ void mv_vrhost_install(void) {
             if (!strcmp(e, "nativo") || !strcmp(e, "native")) { atomic_store(&render_req, 1); atomic_store(&render_locked, 1); }
             else if (!strcmp(e, "gpu")) { atomic_store(&render_req, 0); atomic_store(&render_locked, 1); }
         }
-        if (ns_extract_register) ns_extract_register();
+        ns_extract_register();
     }
     vrai_set_perception_listener(radar_perception);
     MvHostHooks h;
