@@ -171,6 +171,7 @@ final class XRFrameEncoder {
         // Presentación: mundo en primera persona, pantalla de cine o diorama, paneles del HUD, velo de transición y menú.
         var ipd = simd_length(XRMath.position(eyes[0].transform) - XRMath.position(eyes[1].transform))
         if !(ipd > 0.05 && ipd < 0.08) { ipd = 0.063 }
+        presenter.hqFull = renderer.hqFull
         var pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, eyePx: Float(w), p00: projs[0].columns.0.x,
                                      gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame(), ipd: ipd, shot: renderer.sceneShot)
         if dg.noLayers {

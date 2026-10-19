@@ -334,3 +334,10 @@ void bench_publish_motion(double t_wall, double game_s, double ox_units, double 
 void mv_vrhost_smooth(VrSmCorr *out) { sm_ready(); vrsm_eval(&g_sm, g_clock, g_turn_req, out); }
 void mv_vrhost_smooth_stats(VrSmoothStats *s) { sm_ready(); vrsm_stats(&g_sm, s); }
 void mv_vrhost_set_smooth(int on) { sm_ready(); g_sm.cfg.enabled = on != 0; }
+
+/* Capa 2D fiel (vr_layer2d): el banco no la usa; el menú del visor solo necesita los símbolos. */
+void mv_vrhost_set_hud2d_smooth(int mode) { (void)mode; }
+int mv_vrhost_hud2d_smooth(void) { return 1; }
+void mv_vrhost_hud2d_stats(int *scale, double *ms) { if (scale) *scale = 0; if (ms) *ms = 0; }
+int mv_vrhost_hud2d_acquire(const uint8_t **px, int *w, int *h, int *full, uint32_t *seq) { (void)px; (void)w; (void)h; (void)full; (void)seq; return -1; }
+void mv_vrhost_hud2d_release(void) {}

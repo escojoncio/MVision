@@ -274,6 +274,14 @@ typedef struct {
     int32_t native_3d;        /* 1: la escena admite el 3D nativo (cámara VR en primera persona, no cinemática, con 3D de mundo): sus batches 3D (kind 0/1) están MARCADOS con skip_if_native pero siguen todos presentes; el que dibuja decide con ns_native_decide (vr/native/ns_bridge.h) cuáles saltar. 0: no marcar nada, dibujar todo */
     const uint32_t *tri_src;  /* índice de la primitiva de la lista (la de `src` de vr_scene_build) de origen de cada triángulo de v (nv/3 entradas; misma vida que v). El host lo usa para ocultar por triángulo lo que el render nativo confirma */
     const uint64_t *tri_fx;   /* (lo rellena el host; vr_scene_build lo deja a NULL) identidad de efecto de cada triángulo: ns_fx_item_key, NSFX_KEY_MESH (1) para mallas, 0 = nada que ocultar. Lo oculta el render nativo solo si lo confirma */
+    /* --- destino de cada primitiva y capa 2D fiel (vr_layer2d.h) --- */
+    const uint8_t *op_dest;   /* por op de src->ops (n_op_dest = src->nops): 2 = salió al panel 2D (batches kind 2), 3 = filtro de pantalla (kind 3), 0 = no emitida (3D, descartada, evento). Memoria de vr_scene (reutilizada en la siguiente llamada) */
+    uint32_t n_op_dest;
+    /* Lo rellena el host (vrhost.c) con vl2d_run: RGBA8 NO premultiplicado de la zona mostrada ampliada (hud2d_w x hud2d_h, filas de arriba abajo). NULL = no hay: el renderer
+     * dibuja los batches kind 2 como antes. hud2d_full = 1: es el fotograma ENTERO (todas las primitivas sobre el área mostrada, opaco: pantalla de cine), no solo la capa 2D. */
+    const uint8_t *hud2d;
+    int32_t hud2d_w, hud2d_h, hud2d_full;
+    uint32_t hud2d_seq;
 } VrScene;
 
 typedef struct {
