@@ -84,37 +84,40 @@ static void t_grab(void) {
     in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 0.85f;            /* mano derecha en su cuello */
     for (int i = 0; i < 10; i++) upd(&g, &in, &o);
     CHECK(!(o.press & VRG_SQUARE));
-    in.grip[1] = 1.0f;
+    in.grip[1] = in.trig[1] = 1.0f;
     int sq = 0, first = -1, ev_grab = 0, masked = 0;
     for (int i = 0; i < 20; i++) { upd(&g, &in, &o); if (o.press & VRG_SQUARE) { sq++; if (first < 0) first = i; } ev_grab += o.event == VRG_EV_GRAB; masked += (o.mask & (VRG_R1 | VRG_L1)) != 0; }
     CHECK(sq >= 18 && first <= 1 && ev_grab == 1 && masked >= 18);   /* cuadrado mantenido mientras el grip está cerrado */
     /* apretar de nuevo (abrir y cerrar) con el juego sujetando = toques de cuadrado */
     in.holding = 1; int taps = 0, prev = 1;
     for (int k = 0; k < 3; k++) {
-        in.grip[1] = 0.2f; for (int i = 0; i < 6; i++) { upd(&g, &in, &o); prev = (o.press & VRG_SQUARE) != 0; }
-        in.grip[1] = 1.0f; for (int i = 0; i < 6; i++) { upd(&g, &in, &o); int p = (o.press & VRG_SQUARE) != 0; if (p && !prev) taps++; prev = p; }
+        in.grip[1] = in.trig[1] = 0.2f; for (int i = 0; i < 6; i++) { upd(&g, &in, &o); prev = (o.press & VRG_SQUARE) != 0; }
+        in.grip[1] = in.trig[1] = 1.0f; for (int i = 0; i < 6; i++) { upd(&g, &in, &o); int p = (o.press & VRG_SQUARE) != 0; if (p && !prev) taps++; prev = p; }
     }
     CHECK(taps >= 2);
     /* soltar: el cuadrado se suelta y el grip libre vuelve a manos del usuario */
-    in.grip[1] = 0.0f; for (int i = 0; i < 8; i++) upd(&g, &in, &o);
+    in.grip[1] = in.trig[1] = 0.0f; for (int i = 0; i < 8; i++) upd(&g, &in, &o);
     CHECK(!(o.press & VRG_SQUARE) && !(o.mask & (VRG_R1 | VRG_L1)));
     /* mano lejos del cuello: cerrar el grip no agarra (R1/L1 siguen siendo del usuario) */
-    vrg_init(&g); in.holding = 0; in.hand[1][0] = 0.6f; in.hand[1][1] = 1.0f; in.hand[1][2] = 0.1f; in.grip[1] = 0;
+    vrg_init(&g); in.holding = 0; in.hand[1][0] = 0.6f; in.hand[1][1] = 1.0f; in.hand[1][2] = 0.1f; in.grip[1] = in.trig[1] = 0;
     for (int i = 0; i < 10; i++) upd(&g, &in, &o);
-    in.grip[1] = 1.0f; sq = 0; masked = 0;
-    for (int i = 0; i < 20; i++) { upd(&g, &in, &o); sq += (o.press & VRG_SQUARE) != 0; masked += o.mask != 0; }
-    CHECK(sq == 0 && masked == 0);
+    in.grip[1] = in.trig[1] = 1.0f; sq = 0; masked = 0;
+    for (int i = 0; i < 20; i++) { upd(&g, &in, &o); sq += (o.press & VRG_SQUARE) != 0; masked += (o.mask & (VRG_R1 | VRG_L1)) != 0; }
+    CHECK(sq == 4);    /* gatillo lejos del cuello = golpe de botón (toque de 4 VBlanks, nunca agarre mantenido) */
+    vrg_init(&g); g.cfg.button_jab = 0; in.grip[1] = in.trig[1] = 0; for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+    in.grip[1] = in.trig[1] = 1.0f; sq = 0; for (int i = 0; i < 20; i++) { upd(&g, &in, &o); sq += (o.press & VRG_SQUARE) != 0; }
+    CHECK(sq == 0);                   /* sin golpe de botón: el cuadrado físico se descarta */
     /* grip ya cerrado al llegar: no agarra (hay que cerrar la mano cerca) */
-    vrg_init(&g); in.grip[1] = 1.0f; in.hand[1][0] = 0.6f; for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+    vrg_init(&g); in.grip[1] = in.trig[1] = 1.0f; in.hand[1][0] = 0.6f; for (int i = 0; i < 10; i++) upd(&g, &in, &o);
     in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 0.85f; sq = 0;
     for (int i = 0; i < 10; i++) { upd(&g, &in, &o); sq += (o.press & VRG_SQUARE) != 0; }
     CHECK(sq == 0);
     /* con arma equipada: nada */
-    vrg_init(&g); in.weapon = 1; in.grip[1] = 0; for (int i = 0; i < 10; i++) upd(&g, &in, &o);
-    in.grip[1] = 1; sq = 0; for (int i = 0; i < 10; i++) { upd(&g, &in, &o); sq += (o.press & VRG_SQUARE) != 0; } CHECK(sq == 0);
+    vrg_init(&g); in.weapon = 1; in.grip[1] = in.trig[1] = 0; for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+    in.grip[1] = in.trig[1] = 1; sq = 0; for (int i = 0; i < 10; i++) { upd(&g, &in, &o); sq += (o.press & VRG_SQUARE) != 0; } CHECK(sq == 0);
     /* enemigo caído: no se agarra */
-    vrg_init(&g); in.weapon = -1; in.en[0].down = 1; in.grip[1] = 0; for (int i = 0; i < 10; i++) upd(&g, &in, &o);
-    in.grip[1] = 1; sq = 0; for (int i = 0; i < 10; i++) { upd(&g, &in, &o); sq += (o.press & VRG_SQUARE) != 0; } CHECK(sq == 0);
+    vrg_init(&g); in.weapon = -1; in.en[0].down = 1; in.grip[1] = in.trig[1] = 0; for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+    in.grip[1] = in.trig[1] = 1; sq = 0; for (int i = 0; i < 10; i++) { upd(&g, &in, &o); sq += (o.press & VRG_SQUARE) != 0; } CHECK(sq == 4);   /* caído: golpe de botón, no agarre */
 }
 
 static void t_wall(void) {
@@ -241,27 +244,27 @@ static void t_weapon_lock(void) {
 static void t_grip_latch(void) {
     vrg_t g; vrg_out_t o; vrg_in_t in = base();
     in.n_en = 1; in.en[0].p[1] = 1.0f; in.en[0].p[2] = 0.9f; in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 0.85f;
-    vrg_init(&g); count_sq(&g, &in, 10); in.grip[1] = 1.0f; count_sq(&g, &in, 10);
+    vrg_init(&g); count_sq(&g, &in, 10); in.grip[1] = in.trig[1] = 1.0f; count_sq(&g, &in, 10);
     /* aparece un arma con el grip cerrado: se suelta el cuadrado pero R1/L1 siguen retirados hasta abrir el grip */
     in.weapon = 1; int masked = 0, sq = 0;
     for (int i = 0; i < 20; i++) { upd(&g, &in, &o); masked += o.mask != 0; sq += (o.press & VRG_SQUARE) != 0; }
     CHECK(sq == 0 && masked == 20);
-    in.grip[1] = 0; for (int i = 0; i < 3; i++) upd(&g, &in, &o); CHECK(o.mask == 0);
+    in.grip[1] = in.trig[1] = 0; for (int i = 0; i < 3; i++) upd(&g, &in, &o); CHECK(o.mask == 0);
     /* seguimiento perdido con el grip cerrado: R1/L1 retirados como máximo 0,5 s */
-    vrg_init(&g); in.weapon = -1; count_sq(&g, &in, 10); in.grip[1] = 1.0f; count_sq(&g, &in, 10);
+    vrg_init(&g); in.weapon = -1; count_sq(&g, &in, 10); in.grip[1] = in.trig[1] = 1.0f; count_sq(&g, &in, 10);
     in.tracked[1] = 0; int m = 0; for (int i = 0; i < 40; i++) { upd(&g, &in, &o); m += o.mask != 0; }
     CHECK(m > 5 && m <= 27 && o.mask == 0 && !(o.press & VRG_SQUARE));
     /* perder el control (menú, escena) con el grip cerrado: tampoco queda nada bloqueado más de 0,5 s */
-    vrg_init(&g); in.tracked[1] = 1; in.grip[1] = 0; count_sq(&g, &in, 10); in.grip[1] = 1.0f; count_sq(&g, &in, 10);
+    vrg_init(&g); in.tracked[1] = 1; in.grip[1] = in.trig[1] = 0; count_sq(&g, &in, 10); in.grip[1] = in.trig[1] = 1.0f; count_sq(&g, &in, 10);
     in.active = 0; m = 0; for (int i = 0; i < 40; i++) { upd(&g, &in, &o); m += o.mask != 0; }
     CHECK(m <= 27 && o.mask == 0 && o.press == 0);
     /* grip ya cerrado al volver el control (tras un reinicio): no agarra */
-    vrg_init(&g); in.active = 1; in.grip[1] = 1.0f; sq = count_sq(&g, &in, 12); CHECK(sq == 0);
+    vrg_init(&g); in.active = 1; in.grip[1] = in.trig[1] = 1.0f; sq = count_sq(&g, &in, 12); CHECK(sq == 0);
     /* grip cerrado mientras había arma y se queda sin ella cerca de un enemigo: tampoco es un flanco */
     vrg_init(&g); in.weapon = 1; count_sq(&g, &in, 20); in.weapon = -1; sq = count_sq(&g, &in, 80); CHECK(sq == 0);
     /* sujetando ya al enemigo, apretar de nuevo con la mano algo apartada del cuello sigue siendo un toque */
-    vrg_init(&g); in.grip[1] = 0; in.holding = 1; in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 0.85f; count_sq(&g, &in, 10);
-    in.hand[1][0] = 0.5f; in.hand[1][1] = 1.1f; in.grip[1] = 1.0f; sq = count_sq(&g, &in, 10); CHECK(sq > 0);
+    vrg_init(&g); in.grip[1] = in.trig[1] = 0; in.holding = 1; in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 0.85f; count_sq(&g, &in, 10);
+    in.hand[1][0] = 0.5f; in.hand[1][1] = 1.1f; in.grip[1] = in.trig[1] = 1.0f; sq = count_sq(&g, &in, 10); CHECK(sq > 0);
 }
 
 static void t_peek_axis_haptics(void) {
@@ -281,9 +284,70 @@ static void t_peek_axis_haptics(void) {
     CHECK(w <= 4);
 }
 
+/* GOLPEAR != AGARRAR: el puño (agarre cerrado) con la mano en el cuello del enemigo NO agarra; solo el gatillo agarra */
+static void t_fist_vs_grab(void) {
+    vrg_t g; vrg_init(&g); vrg_in_t in = base(); vrg_out_t o;
+    in.n_en = 1; in.en[0].p[1] = 1.0f; in.en[0].p[2] = 0.9f;
+    in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 0.85f;
+    for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+    in.grip[1] = 1.0f;                                /* puño cerrado junto al cuello */
+    int sq = 0, grab = 0, jab = 0;
+    for (int i = 0; i < 30; i++) { upd(&g, &in, &o); sq += (o.press & VRG_SQUARE) != 0; grab += o.event == VRG_EV_GRAB; jab += o.event == VRG_EV_JAB; }
+    CHECK(sq == 0 && grab == 0 && jab == 0);
+    /* golpe con el puño cerrado hacia el enemigo: toque de 4 VBlanks y nunca agarre */
+    vrg_init(&g); in = base(); in.n_en = 1; in.en[0].p[2] = 1.5f; in.en[0].p[1] = 1.0f; in.grip[1] = 1.0f; in.grip[0] = 1.0f;
+    for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+    sq = 0; grab = 0; int pun = 0, rmask = 0, imp = 0, maxh = 0; float hmax = 0;
+    for (int i = 1; i <= 60; i++) {
+        in.hand[1][2] = 0.1f + 0.6f * (i > 6 ? 1.0f : i / 6.0f);
+        in.hand[1][1] = 1.2f; in.en[0].p[2] = 1.1f;
+        upd(&g, &in, &o);
+        sq += (o.press & VRG_SQUARE) != 0; grab += o.event == VRG_EV_GRAB; pun += o.event == VRG_EV_PUNCH; imp += o.event == VRG_EV_IMPACT; rmask += (o.mask & (VRG_R1 | VRG_L1)) != 0;
+        if (o.haptic[1] > hmax) hmax = o.haptic[1];
+        (void)maxh;
+    }
+    CHECK(sq == 4 && grab == 0 && pun == 1 && imp == 1 && hmax >= 0.9f && rmask > 10);
+    /* el impacto también llega si baja la vida del enemigo sin que la mano llegue a tocarlo */
+    vrg_init(&g); in = base(); in.n_en = 1; in.en[0].p[2] = 2.4f; in.en[0].vital = 100;
+    for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+    imp = 0; for (int i = 1; i <= 20; i++) { in.hand[1][2] = 0.1f + 0.6f * (i > 6 ? 1.0f : i / 6.0f); if (i == 12) in.en[0].vital = 80; upd(&g, &in, &o); imp += o.event == VRG_EV_IMPACT; }
+    CHECK(imp == 1);
+    /* gatillo con la mano en el cuello = agarre mantenido; las manos del personaje reciben lado y enemigo */
+    vrg_init(&g); in = base(); in.n_en = 1; in.en[0].p[1] = 1.0f; in.en[0].p[2] = 0.9f;
+    in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 0.85f;
+    for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+    in.trig[1] = 1.0f; sq = 0; int gs = -2, ge = -2, ms = 0;
+    for (int i = 0; i < 20; i++) { upd(&g, &in, &o); sq += (o.press & VRG_SQUARE) != 0; ms += (o.mask & VRG_SQUARE) != 0; gs = o.grab_side; ge = o.grab_en; }
+    CHECK(sq >= 18 && gs == 1 && ge == 0 && ms == 20);
+    /* gatillo cerrado por el botón A de la otra mano (cuadrado físico): cuenta como gatillo dominante */
+    vrg_init(&g); in.trig[1] = 0; in.sq_user = 0; for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+    in.sq_user = 1; sq = 0; for (int i = 0; i < 20; i++) { upd(&g, &in, &o); sq += (o.press & VRG_SQUARE) != 0; } CHECK(sq >= 18 && o.grab_side == 1);
+    /* sin seguimiento de manos el cuadrado físico pasa intacto (modo botón) */
+    vrg_init(&g); in = base(); in.tracked[0] = in.tracked[1] = 0; in.sq_user = 1; for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+    CHECK(!(o.mask & VRG_SQUARE) && o.jab_side == -1);
+}
+
+/* golpe de botón (accesibilidad): sin enemigo cerca de la mano, el cuadrado físico da UN toque corto y pide el golpe sintético de la mano; mantenerlo no repite */
+static void t_button_jab(void) {
+    vrg_t g; vrg_init(&g); vrg_in_t in = base(); vrg_out_t o;
+    in.n_en = 1; in.en[0].p[2] = 1.5f;
+    for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+    in.sq_user = 1; in.trig[1] = 1.0f;
+    int sq = 0, jabs = 0, js = -2, masked = 0;
+    for (int i = 0; i < 40; i++) { upd(&g, &in, &o); sq += (o.press & VRG_SQUARE) != 0; masked += (o.mask & VRG_SQUARE) != 0; if (o.jab_side >= 0) { jabs++; js = o.jab_side; } }
+    CHECK(sq == 4 && jabs == 1 && js == 1 && masked == 40);
+    in.sq_user = 0; in.trig[1] = 0; for (int i = 0; i < 20; i++) upd(&g, &in, &o);
+    in.sq_user = 1; in.trig[1] = 1.0f; jabs = 0; for (int i = 0; i < 40; i++) { upd(&g, &in, &o); jabs += o.jab_side >= 0; }
+    CHECK(jabs == 1);                         /* otra pulsación = otro golpe */
+    /* con arma: el cuadrado pasa tal cual (lo gobierna el arma) */
+    vrg_init(&g); in.weapon = 1; in.sq_user = 0; in.trig[1] = 0; for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+    in.sq_user = 1; in.trig[1] = 1.0f; jabs = 0; masked = 0; for (int i = 0; i < 20; i++) { upd(&g, &in, &o); jabs += o.jab_side >= 0; masked += (o.mask & VRG_SQUARE) != 0; }
+    CHECK(jabs == 0 && masked == 0);
+}
+
 int main(void) {
     t_pose_jumps(); t_timestamps(); t_weapon_lock(); t_grip_latch(); t_peek_axis_haptics();
-    t_punch(); t_walk(); t_grab(); t_wall(); t_haptics_robust();
+    t_punch(); t_walk(); t_grab(); t_fist_vs_grab(); t_button_jab(); t_wall(); t_haptics_robust();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

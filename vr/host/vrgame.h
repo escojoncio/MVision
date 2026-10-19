@@ -116,7 +116,7 @@ void mv_vrgame_set_gestures(int32_t enable, int32_t mask);
 void vrbodyg_reset(void);
 unsigned vrbodyg_event_count(int ev);                                  /* VRG_EV_* acumulados (pruebas) */
 uint16_t vrbodyg_pad(uint16_t pad, const struct BridgeState *bs, int right_handed);
-int vrgame_hand_raw(int side, float p[3], float *grip, double *t_s);   /* pose del agarre (espacio usuario, m), grip y marca de tiempo (s, monótono; 0 con guion de pruebas); 1 si hay seguimiento */
+int vrgame_hand_raw(int side, float p[3], float *grip, float *trig, double *t_s);   /* pose del agarre (espacio usuario, m), grip (puño), gatillo y marca de tiempo (s, monótono; 0 con guion de pruebas); 1 si hay seguimiento */
 int vrgame_weapon_engaged(void);                                       /* arma VR mostrada o recarga en curso */
 void vrgame_haptic(int side, float strength);                          /* pulso háptico (0..1) a la mano física */
 void vrgame_frame_end(void);                   /* una vez por VBlank, tras el puente: publica el antebrazo y el estado */

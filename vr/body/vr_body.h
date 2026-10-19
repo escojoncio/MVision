@@ -110,7 +110,10 @@ typedef struct VrBodyConfig {
     int min_parts;               /* 16: modelos con menos piezas se ignoran */
     /* mano */
     float grip_to_wrist_mm;      /* de la pose (centro de palma) a la muñeca del modelo, a lo largo del dedo; defecto 55 */
-    float hand_rot_offset[2][4]; /* cuaternión x,y,z,w aplicado a la pose de cada mano (marco del mando -> marco de mano de vr_pose.h); defecto identidad */
+    float hand_rot_offset[2][4]; /* cuaternión x,y,z,w aplicado a la pose de cada mano (marco del mando -> marco de mano de vr_pose.h). Defecto: giro de hand_roll_deg sobre el eje de los dedos
+                                  * (izquierda +, derecha -): el marco de AGARRE de los mandos del visor es el del dispositivo (Y arriba, -Z delante, X lateral; medido: inclinado 35 grados y NO está
+                                  * reflejado entre mandos), mientras que el de vr_pose.h es el de la mano plana con la palma abajo (+Y = dorso). Con identidad la mano sale plana "sobre las piernas". */
+    float hand_roll_deg;         /* giro de agarre -> mano (defecto 45): al sujetar los mandos la mano queda girada ~45 grados vista desde arriba (palma hacia dentro y abajo); 90 = apretón de manos, 0 = plana */
     float curl_deg;              /* giro de la pieza mano con el agarre al máximo (pose cerrada); defecto 28 */
     int force_arm_visible;       /* 1 (defecto): si el motor dejó a 0 la visibilidad de una pieza del brazo movida por la IK, se fuerza durante la transformación (brazos siempre dibujados) */
     float armed_grip;            /* agarre mínimo de la mano dominante con arma (vrbody_set_armed); defecto 0.85 */
@@ -121,6 +124,14 @@ typedef struct VrBodyConfig {
     float smooth_tau_s;          /* constante del suavizado de las manos (0 = sin suavizado); defecto 0.02 */
     float frame_dt_s;            /* duración de un frame del motor (0.02 = 50 Hz) */
     float blend_s;               /* tiempo de fundido con la animación original al ganar/perder seguimiento; defecto 0.25 */
+    /* agarre de un enemigo (vrbody_set_grab) */
+    float grab_blend_s;          /* tiempo de ida (y vuelta, algo más lenta) de las manos al cuello del enemigo; defecto 0.2 */
+    float grab_spread_mm;        /* separación lateral de cada mano respecto al centro del cuello; defecto 75 */
+    float grab_roll_deg;         /* giro de la palma al rodear el cuello (izquierda +, derecha -); defecto 60 */
+    float grab_max_dist_mm;      /* si el cuello está más lejos que esto del hombro, esa mano no se pega; defecto 1100 */
+    /* golpe sintético (vrbody_set_jab: golpe con el botón sin gesto) */
+    float jab_s;                 /* duración total del golpe; defecto 0.28 */
+    float jab_reach_mm;          /* cuánto avanza la mano respecto a donde está el mando; defecto 450 */
     float max_hand_jump_m;       /* salto de pose entre frames que se considera glitch y se suaviza como mucho a esta velocidad (0 = sin límite); defecto 3 m */
 } VrBodyConfig;
 
@@ -132,6 +143,19 @@ void vrbody_set_grip(int side, float v);     /* side 0 izquierda / 1 derecha; v 
 void vrbody_set_dominant(int side);          /* 0 izquierda / 1 derecha */
 void vrbody_set_armed(int on);               /* la mano dominante empuña un arma: pose cerrada como mínimo armed_grip */
 void vrbody_set_enabled(int on);
+
+/* Agarre de un enemigo (gestos de vr/input): mientras `active`, las DOS manos del personaje se pegan con una transición suave a los lados del cuello del enemigo
+ * (la izquierda a su lado `left` del cuello, la derecha al otro; dedos hacia el cuello, palma girada grab_roll_deg) y vuelven al mando al soltar. `neck` y `left` en el
+ * MUNDO del motor (neck en unidades del motor = mm; left unitario horizontal, hacia la izquierda del personaje mirando al enemigo). Llamar cada VBlank mientras se
+ * sujeta; si dejan de llegar (3 apply sin refrescar) se suelta. NULL o active = 0: soltar. Sin vista VR no hace nada. */
+typedef struct VrBodyGrab { int active; float neck[3]; float left[3]; } VrBodyGrab;
+void vrbody_set_grab(const VrBodyGrab *g);
+/* Golpe sintético de una mano del personaje (side 0 izquierda del personaje / 1 derecha; dir = dirección horizontal del golpe en el MUNDO del motor, unitaria): la mano
+ * sale hacia dir jab_reach_mm y vuelve en jab_s con el puño cerrado, para que el golpe con el BOTÓN (sin gesto físico) también mueva la mano y no solo el codo. Sin vista VR o sin
+ * seguimiento de esa mano no hace nada. Un golpe nuevo reinicia el anterior. */
+void vrbody_set_jab(int side, const float dir[3]);
+/* Cambia el giro de agarre -> mano (grados, -180..180; ver VrBodyConfig.hand_roll_deg) sin reiniciar el estado. Para calibrar en el visor. */
+void vrbody_set_hand_roll(float deg);
 
 /* ------------------------------------------------------------------ pegamento sobre la RAM ----------------------- */
 /* Sustituye las matrices de los brazos para el frame en curso (etapa de transformación). Devuelve el nº de brazos
@@ -146,18 +170,20 @@ int  vrbody_pending(void);
 typedef struct VrBodyStats {
     uint32_t applies, arms_driven, restores;
     uint32_t skip_disabled, skip_noview, skip_model, skip_offscreen, skip_nohands;
+    uint32_t grab_applies;       /* brazos movidos con una mano pegada al enemigo (att > 0) */
+    uint32_t jab_applies;        /* brazos movidos con un golpe sintético en curso */
     uint32_t stretched, too_close, shoulder_limit, wrist_limit, bad_solve, stale_dropped, vis_forced;
 } VrBodyStats;
 void vrbody_stats(VrBodyStats *s);
 
-/* Antebrazo tras la IK en el espacio del usuario (metros): codo, muñeca y dirección unitaria hacia el dorso. Lo usa el radar de
+/* Antebrazo tras la IK en el espacio del usuario (metros): codo, muñeca y dirección unitaria hacia el lado +Y del marco de AGARRE (arriba con el pulgar arriba; no es el dorso anatómico: ver hand_roll_deg). Lo usa el radar de
  * muñeca (vr/radar). side 0 izquierda / 1 derecha. 1 = válida (brazo movido por la IK en el último apply y fundido > 0,3);
  * 0 = no (el llamador cae al mando). Mismo layout que VrRadarArm (vr_radar.h). */
 typedef struct { float elbow[3], wrist[3], dorsal[3]; } VrBodyForearm;
 int vrbody_forearm_pose(int side, VrBodyForearm *out);
 
-/* Marco EFECTIVO de la mano del personaje tras la IK, en el espacio del usuario (m): 4x4 columna-mayor (columnas = ejes x, y, z y origen) con la convención de
- * vr_pose.h (-Z hacia los dedos, +Y al dorso; sin el giro de cierre de los dedos) y el origen en el centro de la palma que resulta de la muñeca resuelta. Si el
+/* Marco EFECTIVO de la mano del personaje tras la IK, en el espacio del usuario (m): 4x4 columna-mayor (columnas = ejes x, y, z y origen) en el MISMO marco que el
+ * agarre entregado por vrpose_get_hands (sin hand_rot_offset ni el giro de cierre de los dedos: -Z hacia los dedos) y el origen en el centro de la palma que resulta de la muñeca resuelta. Si el
  * objetivo era alcanzable y está dentro de los límites coincide con la pose pedida; si no, la diferencia muestra dónde actuaron los límites (depuración visual).
  * 1 = válido (brazo movido por la IK en el último apply); 0 = no. */
 int vrbody_debug_hand_frame(int side, float m[16]);
