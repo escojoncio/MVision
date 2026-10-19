@@ -846,3 +846,24 @@ Queja: "el códec se ve mal, todo el rato con artefactos" (imagen 2D en la venta
 **Revisión adversarial e integración (sobre `abe26ce`).** (a) Consumidores del tamaño publicado: `GameView` y `XRCinema` crean las texturas a `MV_HOST_MAX_W x MV_HOST_MAX_H` (1024x512) una sola vez y suben solo la región `w x h` (uniformes/`imgSize` por fotograma), así que 320 <-> 384 en caliente no recrea nada; `RenderRG` usa `disp.w/h` solo para `hudRect` (cambia únicamente en el modo de 384). (b) `w` nominal solo cambia para el bit 6 (368 -> 384); en 0x00/0x09 (256/320) y 512/640 es idéntico: `camtest` 8200 fotogramas con el disco real en `abe26ce` y en la integración: todas las PPM (21), el log (sin `[ref] DISCREPANCIA`) y el hash RAM/VRAM idénticos. (c) Observación: el marco de 384 se estira a 4:3 (2688 ciclos para 4:3 frente a ~2560 del hardware), así que la imagen de la radio (318 de 384 columnas) sale ~5 % más estrecha que el hardware (antes 368). (d) `t_display` mutado: fallan `sx>=w`, `aw` por exceso, gamma de 5 a 8 bits, bit 6 y `screen.x*div`; NO detectan (sin cobertura) los límites de x2/y1/y2 de `put_disp` ni `screen.h = 0` cuando disp.h = 240. (e) `fb_rect_hit` (gpu.c) sigue usando `d.w` nominal (conservador: 384 en vez de 368, solo en el modo de la radio).
 
 **Pendiente.** (1) Con el visor: confirmar el aspecto de la radio en la pantalla de cine (el marco 384 se estira a 4:3 como cualquier ancho; la imagen queda ligeramente descentrada a la izquierda igual que en el hardware, 26 columnas de margen izquierdo y 40 derecho). (2) La escena VR no usa `GpuDisplay.aw/fw` (en radio es CINE). (3) NTSC: la tabla de rangos es la PAL (edición única); `hle_gfx_put_disp` sigue marcando PAL.
+
+## 49. Sin recorte del motor: todo el entorno cercano se envía a dibujar en 360 grados (`vr/camera/patch_exe.py`, `vr_camera.{c,h}`, `vr_camera_hle.c`) — 2026-10-19 (rama `sin-recorte`)
+
+**Problema.** Al girar (cabeza o cuerpo) desaparecían trozos enteros de geometría. Solo debe recortar nuestro renderer en GPU.
+
+**Medición (camtest, `cov`, guiñada 0..360 paso 15, cabeceo 0, zona inicial, ojo fijo).** Polígonos 3D que llegan a nuestra escena por pose: base (solo caja ampliada) 151..1271 (factor 8 entre poses); con los 6 parches de visibilidad (`nc`) 213..1364 (casi no cambia); si además se quitan los descartes de la etapa de polígono (`nc2`, experimento) 2535..2663 y casi constante. Conclusión: la pérdida dominante dependiente de la guiñada NO es el recorte de mapa/caja/outcode sino el descarte de la etapa de polígono para vértices detrás del plano cercano o saturados (la GTE da SXY basura, así que el signo de NCLIP y el OTZ no valen). `nc3` (definitivo) = parches + HLE `vrcam_pack`: 1840..2450 (factor 1,3) conservando el descarte de caras traseras fiable.
+
+**Parches de palabra (`--no-cull`, activo por defecto; validados por palabra original, todo o nada; `NOCULL` en `patch_exe.py`, `NOCULL_SITES` en `vr_camera.c`; 6 sitios, total 50 / 62 con `--wide-points`).**
+- `0x80018D00` obj-map: DG_BoundChanl, objeto cuya máscara de mapa no corta con el mapa actual -> oculto. `beq` -> `nop` (siempre visible).
+- `0x80018D0C` obj-box: DG_BoundChanl, objeto con caja envolvente fuera/parcial de pantalla -> modo 0/1. `beq` condicional -> incondicional (modo 2, dentro).
+- `0x800188F8` part-box: DG_BoundObjs, lo mismo por pieza. Incondicional.
+- `0x8001BAE0` prim-map: DG_PrimChanl, primitivas con máscara de mapa. `nop`.
+- `0x8001DB10` sort-map: DG_SortChanl, idem. `nop`.
+- `0x8001E29C` outcode: etapa de polígono de DG_TransChanl, descarte si todos los vértices caen del mismo lado de la caja. Incondicional.
+Lógica de juego (IA/guiones por DG_PointCheck y campo +0x32) no tocada.
+
+**HLE `vrcam_pack` (0x8001e1fc, `hle_vrcam_pack` en `vr_camera_hle.c`, `hle_vrcam.txt`, `vr_names.json`, SITES de `vrhost.c`).** Ejecuta el original y, con la cámara VR activa, re-emite los paquetes no indirectos descartados que tengan un vértice poco fiable (SZ < H/2+4 o |x|,|y| >= 1000): cabecera de orden = max(1,(sz0+sz2)>>1). Los fiables siguen con su descarte de caras traseras. Estadísticas: `vrcam_pack_stats`.
+
+**Camtest.** `cov t0 t1` (registra polígonos del mundo por pose en `cov.bin`) y `[eng]` (inventario objetos/paquetes del motor desde RAM; supuestos de estructura sin verificar).
+
+**Pendiente.** (1) Copias de DG_BoundChanl/BoundObjs en los overlays s11c, s12a/b/c, s14e, s19b: no parcheadas. (2) Residuo 1,3x entre poses sin explicar (candidato: paquetes fiables fuera de pantalla con SZ>0 que el pack aún descarta, o el recorte parcial de DG_TransChanl). (3) Otras zonas, simulación del giro con stick, coste de CPU por frame e imágenes antes/después sin medir. (4) Comprobar con el visor que la lógica (IA/visión) no cambia. (5) Los 12 sitios de punto visible siguen sin parchear (`--wide-points` opcional).

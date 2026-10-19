@@ -38,6 +38,7 @@ static const struct { const char *name; uint32_t addr; } SITES[] = {
     {"vrcam_trans", 0x8001e840u},
     {"vrcam_draw", 0x80018110u},
     {"vrcam_overscan", 0x80017780u},
+    {"vrcam_pack", 0x8001e1fcu},
 };
 #define NSITES (sizeof SITES / sizeof SITES[0])
 
