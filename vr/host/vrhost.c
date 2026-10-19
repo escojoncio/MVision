@@ -27,6 +27,8 @@
 #include "vr_radar.h"
 #include "vr_radar_vrp.h"
 #include "vr_scene.h"
+#include "vr_layer2d.h"
+#include "vr_layer2d_async.h"
 #include "vr_smooth.h"
 #include "vr_view.h"
 #include "vrai.h"
@@ -137,6 +139,13 @@ static float hc_last_eye[3]; static int hc_have_eye;
 
 /* ------------------------------------------------------------------------------------------------ estado del hilo de emulación */
 static BridgeState bs;                   /* último puente leído */
+/* Capa 2D fiel y en alta resolución (vr_layer2d.h) en un HILO TRABAJADOR (vr_layer2d_async.h): el hilo de emulación solo copia la lista a una cola (memcpy) y el render recoge
+ * la última capa publicada con mv_vrhost_hud2d_acquire; nadie espera. MV_HUD2D=0 la apaga (el renderer vuelve al shader). MV_HUD2D_SCALE=1..6 fija la escala objetivo (defecto 4);
+ * la escala baja sola si el trabajador tarda (mide su propio coste) y sube al recuperarse. */
+static VrL2Async *l2a;
+static _Atomic int l2d_enabled = 1;
+static _Atomic int l2d_smooth = VL_SMOOTH_SHARP;
+static int l2d_target = 4;
 static VrView view;                      /* vista vigente: mundo / cine (vr_view.h) */
 static VrCine cine;                      /* planos de la cinemática del motor en curso (vr_cine.h) */
 static int last_scene3d, last_video;     /* de la última lista ensamblada: geometría 3D sustancial con cámara válida / fotograma de vídeo */
@@ -678,6 +687,16 @@ static void build_one(const GpuDrawList *l, int si) {
     memcpy(bs.eye_pos, save_pos, sizeof save_pos);
     memcpy(bs.eye_axes, save_axes, sizeof save_axes);
 
+    /* Capa 2D fiel: se encola (copia) para el hilo trabajador. Con escena fallida solo se aplican los eventos de VRAM (la VRAM espejo debe verlos todos). En vista de cine (UI / vídeo)
+     * la capa es el fotograma ENTERO; en las demás, solo las primitivas que vr_scene mandó al panel. */
+    if (atomic_load(&l2d_enabled)) {
+        if (!l2a) l2a = vl2a_new();
+        if (l2a) {
+            vl2a_options(l2a, l2d_target, atomic_load(&l2d_smooth));
+            int l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO;
+            vl2a_submit(l2a, hl, rc == 0 && sc.op_dest && sc.n_op_dest >= hl->nops ? sc.op_dest : NULL, l2_full, 0);
+        }
+    }
     sm_sample(&slot[si].smp, &sc, r);   /* (r = registro de cámara de la lista; antes de fill_slot: sc.v/b son memoria interna de vr_scene) */
     int native_now = rc == 0 && native_for_scene(r, &sc, cine_cand);
     g_opkey = native_now ? fx_classify_list(hl, r) : NULL;
@@ -811,6 +830,12 @@ int mv_vrhost_head_limit(const float head[16], float dt, float corr[3], float *f
     if (fade) *fade = o.fade;
     return r;
 }
+/* Capa 2D fiel (vr_layer2d.h): suavizado de las texturas 2D (0 original, 1 nítido, 2 suave). Cualquier hilo. */
+void mv_vrhost_set_hud2d_smooth(int mode) { atomic_store(&l2d_smooth, mode < 0 ? 0 : mode > 2 ? 2 : mode); }
+int mv_vrhost_hud2d_smooth(void) { return atomic_load(&l2d_smooth); }
+void mv_vrhost_hud2d_stats(int *scale, double *ms) { double sm; uint32_t lag; if (l2a) vl2a_stats(l2a, scale, ms, &sm, &lag); else { if (scale) *scale = 0; if (ms) *ms = 0; } }
+int mv_vrhost_hud2d_acquire(const uint8_t **px, int *w, int *h, int *full, uint32_t *seq) { return l2a ? vl2a_acquire(l2a, px, w, h, full, seq) : -1; }
+void mv_vrhost_hud2d_release(void) { if (l2a) vl2a_release(l2a); }
 void mv_vrhost_set_headcol(int enable, float radius_m) {
     pthread_mutex_lock(&HCMX);
     VrHcCfg c = *vrhc_config();
@@ -1259,6 +1284,8 @@ void mv_vrhost_set_ai(int perception, int cameras, int activity) {
 }
 
 void mv_vrhost_install(void) {
+    { const char *e = getenv("MV_HUD2D"); if (e && e[0] == '0') atomic_store(&l2d_enabled, 0); }
+    { const char *e = getenv("MV_HUD2D_SCALE"); if (e) { int v = atoi(e); if (v >= 1 && v <= 6) l2d_target = v; } }
     if (!atomic_load(&ns_br)) {
         ns_bridge_get();
         const char *e = getenv("MV_RENDER");

@@ -125,6 +125,13 @@ float mv_vrhost_wall_distance(const float p_mm[3], float max_mm);   /* mm hasta 
 int mv_vrhost_head_limit(const float head[16], float dt, float corr[3], float *fade);
 /* Activa/desactiva el límite (defecto: activo; MV_HEADCOL=0 en el entorno lo apaga al arrancar) y fija el radio de la esfera en metros (0 = no cambiar). */
 void mv_vrhost_set_headcol(int enable, float radius_m);
+/* Capa 2D fiel y en alta resolución (vr/scene/vr_layer2d.h): suavizado de las texturas 2D, 0 original / 1 nítido / 2 suave (defecto 1). MV_HUD2D=0 la apaga (el renderer vuelve al shader); MV_HUD2D_SCALE=1..6 fija la escala interna (defecto 4, baja sola si la lista tarda > 12 ms). Cualquier hilo. */
+void mv_vrhost_set_hud2d_smooth(int mode);
+int mv_vrhost_hud2d_smooth(void);
+void mv_vrhost_hud2d_stats(int *scale, double *ms);
+/* Capa 2D fiel (hilo trabajador): -1 sin capa utilizable (usar el shader), 0 la misma de antes, 1 nueva (px RGBA8 w x h válidos hasta mv_vrhost_hud2d_release; full = fotograma entero). Hilo de render. */
+int mv_vrhost_hud2d_acquire(const uint8_t **px, int *w, int *h, int *full, uint32_t *seq);
+void mv_vrhost_hud2d_release(void);
 
 typedef struct {
     uint32_t built;          /* escenas ensambladas */

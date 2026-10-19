@@ -64,6 +64,7 @@ jobs:
           make -C vr/camera test-native-coh
           make -C vr/body test
           make -C vr/scene test-split
+          make -C vr/scene test-layer2d
 
       - name: Compilar el banco de render
         run: |
