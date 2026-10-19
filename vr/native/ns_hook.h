@@ -29,6 +29,7 @@ typedef struct {
 } NsCtxOut;
 typedef void (*NsCtxFn)(NsScene *sc, NsCtxOut *out, void *user);
 
+/* Estadísticas (instantánea; cada campo se lee atómicamente, entre campos puede haber un fotograma de diferencia). */
 typedef struct {
     uint32_t captures;       /* llamadas a ns_capture aceptadas (fotogramas de juego) */
     uint32_t published;
@@ -36,22 +37,33 @@ typedef struct {
     uint32_t extract_fail;
     uint32_t ik_refresh;     /* escenas a las que se copió la pose IK de los brazos */
     uint32_t player_bound;   /* escenas con el jugador enlazado */
+    uint32_t ik_expected;    /* escenas en las que se esperaba la pose IK (jugador enlazado y capa VR con brazos) */
+    uint32_t ik_missed;      /* de ellas, las que se publicaron SIN la pose IK (no aptas: se pintan por GPU) */
+    uint32_t skipped_gate;   /* capturas omitidas por la compuerta (modo gpu / renderer no listo) */
     uint32_t last_valid;     /* NsScene.valid de la última publicada */
     uint64_t last_pub_ns;
 } NsHookStats;
 
 void ns_hook_init(NsBridge *b);                         /* NULL desengancha */
-void ns_hook_reset(void);                               /* cambio de ejecutable: descarta lo pendiente y los contadores */
+void ns_hook_reset(void);                               /* cambio de ejecutable: descarta lo pendiente y los contadores, reinicia el almacén del extractor (ns_hook_set_store_reset) y publica una escena vacía (valid = 0) para que el consumidor no use la anterior */
 void ns_hook_set_extractor(NsExtractFn fn, void *user, NsMeshStore *store);   /* fn NULL = sustituto */
 int ns_hook_has_extractor(void);
 void ns_hook_set_context(NsCtxFn fn, void *user);
+/* Compuerta (M1): ns_capture solo extrae si la función devuelve distinto de 0 (modo nativo pedido y renderer listo, o un volcado pendiente en el punto de enganche).
+ * NULL = siempre. Se llama en el hilo de emulación en cada etapa: debe ser barata. */
+typedef int (*NsGateFn)(void *user);
+void ns_hook_set_gate(NsGateFn fn, void *user);
+/* Cambio de ejecutable: el extractor debe vaciar su almacén y reiniciar la época (los ids y punteros anteriores dejan de valer). NULL = nada. */
+typedef void (*NsStoreResetFn)(NsMeshStore *store, void *user);
+void ns_hook_set_store_reset(NsStoreResetFn fn, void *user);
 void ns_hook_set_frame(uint32_t vblank_count);          /* para NsScene.vblank (si el extractor lo dejó a 0) */
 
 void ns_capture(const uint8_t *ram, const uint8_t *scratch);
 void ns_hook_post_ik(const uint8_t *ram);
 void ns_hook_tick(const uint8_t *ram);
 
-/* 1 si la última escena publicada es de partida con listas completas y mapa VR (to_vr) y tiene menos de max_age_ns. */
+/* 1 si la última escena publicada es apta (ns_scene_native_ok: partida, listas completas, mapa, to_vr, jugador/IK; sin MAP_INCOMPLETE ni STORE_FULL) y tiene menos de max_age_ns.
+ * Solo informativo (estadísticas, registro): la decisión de dibujar nativo la toma el consumidor con ns_native_decide. Se puede llamar desde cualquier hilo. */
 int ns_hook_native_ready(uint64_t now_ns, uint64_t max_age_ns);
 void ns_hook_stats(NsHookStats *s);
 

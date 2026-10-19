@@ -41,6 +41,11 @@ extern "C" {
 #ifndef NS_SV_TOVR_OK
 #define NS_SV_TOVR_OK 64u   /* (8 = NS_SV_MAP_INCOMPLETE, 16 = FX, 32 = STORE_FULL en el contrato v2; pasar a ns_types.h) */
 #endif
+/* bit añadido: el jugador está enlazado a su instancia, su cabeza propia quedó oculta y, si la capa VR mueve los brazos, la pose IK se copió a esta escena.
+ * Sin él la escena NO es apta (se vería la cabeza propia o los brazos del motor): se pinta por GPU. */
+#ifndef NS_SV_PLAYER_OK
+#define NS_SV_PLAYER_OK 128u
+#endif
 
 #define NS_BRIDGE_SLOTS 4
 #define NS_TELEPORT_UNITS 4000.0f   /* salto de traslación de una pieza entre escenas consecutivas que no se interpola (4 m del motor) */
@@ -97,6 +102,41 @@ int ns_bridge_acquire(NsBridge *b, uint64_t now_ns, NsView *out);
 /* RECONOCIMIENTO DE ÉPOCA (contrato v2): el consumidor llama a ns_store_ack(view.store, escena->mesh_epoch) cuando ya no usa mallas de épocas anteriores
  * (p. ej. tras subir a la GPU las de la escena). El puente no lo hace por él: el almacén es del extractor (ns_types.h, «Entrega»). */
 
+/* ---- decisión nativo/GPU (consumidor) ----
+ * La decisión se toma AL DIBUJAR, con el estado real de ese fotograma; el productor de la lista de la GPU no quita nada: marca los batches 3D
+ * (VrBatch.skip_if_native: VR_SKIP_WORLD en kind 0, VR_SKIP_FX en kind 1) y pone VrScene.native_3d = 1 si la escena admite el 3D nativo.
+ * Uso en el renderer:
+ *     NsView v; NsDecision d;
+ *     if (ns_bridge_acquire(b, now, &v)) {
+ *         NsDecideIn in = { want_native, renderer_ok, meshes_uploaded, scene->native_3d, now, 250000000ull };
+ *         ns_native_decide(&v, &in, &d);
+ *     } else d = (NsDecision){0};
+ *     if (d.native && !draw_native(&v)) ns_native_fail(&d);          // el render nativo cayó a mitad: este mismo fotograma se pinta todo por GPU
+ *     for each batch: if (!(batch.skip_if_native & d.skip)) draw(batch);   // d.skip == 0 => se dibujan TODOS los batches
+ * Nunca queda un fotograma sin 3D: si algo falta, d.native = 0 y d.skip = 0. */
+enum { NS_SKIP_WORLD = 1, NS_SKIP_FX = 2 };   /* = VR_SKIP_WORLD / VR_SKIP_FX (vr_scene.h) */
+enum { NS_WHY_OK = 0, NS_WHY_MODE, NS_WHY_RENDERER, NS_WHY_MESHES, NS_WHY_UNMARKED, NS_WHY_NOSCENE, NS_WHY_STALE, NS_WHY_INVALID, NS_WHY_FAILED };
+typedef struct {
+    int want_native;        /* modo de render pedido (menú / MV_RENDER) */
+    int renderer_ok;        /* el renderer nativo está operativo en este fotograma */
+    int meshes_ok;          /* las mallas de la escena actual están subidas a la GPU */
+    int scene_marked;       /* VrScene.native_3d de la escena de la lista que se va a dibujar */
+    uint64_t now_ns;        /* base de ns_now_ns */
+    uint64_t max_age_ns;    /* antigüedad máxima de la escena nativa (defecto recomendado 250 ms) */
+} NsDecideIn;
+typedef struct {
+    int native;             /* 1: dibujar la escena nativa */
+    uint32_t skip;          /* NS_SKIP_*: batches marcados que NO se dibujan (0 si !native) */
+    int why;                /* NS_WHY_*: motivo de native == 0 */
+} NsDecision;
+/* Bits mínimos de NsScene.valid para dibujar nativo, y los que lo impiden. */
+#define NS_NATIVE_NEED (NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK | NS_SV_TOVR_OK | NS_SV_PLAYER_OK)
+#define NS_NATIVE_BAD  (NS_SV_MAP_INCOMPLETE | NS_SV_STORE_FULL)
+int ns_scene_native_ok(uint32_t valid);
+int ns_native_decide(const NsView *v, const NsDecideIn *in, NsDecision *out);
+/* El render nativo falló a mitad de fotograma: vuelve a GPU en ese mismo fotograma (native = 0, skip = 0, why = NS_WHY_FAILED). */
+void ns_native_fail(NsDecision *d);
+
 /* ---- interpolación (consumidor) ---- */
 typedef struct {
     const NsScene *prev, *cur;
@@ -112,7 +152,7 @@ void ns_interp_to_vr(const NsInterp *ip, float out[12]);
 /* Interpolación de transformaciones: traslación lineal, rotación por cuaterniones (slerp) con escala por columna lineal; si la matriz no es una rotación
  * con escala razonable (sombras aplanadas, reflejos) cae a interpolación lineal elemento a elemento. t fuera de [0,1] extrapola. */
 void ns_xf_lerp(const NsXf *a, const NsXf *b, float t, NsXf *out);
-/* 1 si dos escenas consecutivas se pueden interpolar (misma época de mallas, misma zona, hueco < NS_DISCONT_NS, cámara sin salto). */
+/* 1 si dos escenas consecutivas se pueden interpolar (misma época de mallas, misma zona, hueco < NS_DISCONT_NS, cámara sin salto, to_vr sin salto). */
 int ns_scene_continuous(const NsScene *prev, const NsScene *cur);
 
 #ifdef __cplusplus

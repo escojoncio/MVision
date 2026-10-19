@@ -890,7 +890,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 if (t->kind != kind) continue;
                 if (!cur || cur->blend != t->blend) {
                     cur = &g_bat[nb++];
-                    cur->first = (uint32_t)nv; cur->count = 0; cur->kind = (uint8_t)kind; cur->blend = t->blend; cur->pad = 0;
+                    cur->first = (uint32_t)nv; cur->count = 0; cur->kind = (uint8_t)kind; cur->blend = t->blend; cur->skip_if_native = 0; cur->pad = 0;
                     cur->ev_end = t->ev_end; cur->src_op = t->src_op;
                 }
                 memcpy(&g_vtx[nv], t->v, sizeof t->v);

@@ -159,14 +159,20 @@ typedef struct {
     uint16_t pad;          /* índice en VrScene.states */
 } VrVtx;
 
-typedef struct {
+/* VrBatch.skip_if_native. Los mismos valores que NS_SKIP_* (vr/native/ns_bridge.h): d.skip & batch.skip_if_native != 0 => no dibujar. */
+enum { VR_SKIP_WORLD = 1, VR_SKIP_FX = 2 };
+
+typedef struct VrBatchTag {
     uint32_t first, count; /* rango en VrScene.v (count múltiplo de 3: lista de triángulos) */
     uint8_t kind;          /* 0 opaco 3D, 1 semitransp 3D, 2 2D/HUD, 3 filtro de pantalla */
     uint8_t blend;         /* abr (0..3) si el batch es semitransparente; 0xFF opaco */
-    uint16_t pad;
+    uint8_t skip_if_native;/* VR_SKIP_*: 0 = siempre se dibuja; VR_SKIP_WORLD (kind 0) / VR_SKIP_FX (kind 1) = el batch NO se dibuja cuando el consumidor pinta ese 3D desde la escena nativa (ns_native_decide) */
+    uint8_t pad;
     uint32_t ev_end;       /* aplicar antes los eventos de VRAM de src->ops con índice < ev_end */
     uint32_t src_op;       /* índice en src->ops de la primera primitiva */
 } VrBatch;
+/* 1 si el batch no se dibuja con la decisión `skip` del consumidor (NsDecision.skip; 0 = dibujarlo todo). */
+static inline int vr_batch_skipped(const struct VrBatchTag *b, uint32_t skip) { return (b->skip_if_native & skip) != 0; }
 
 /* Estado por primitiva que no cabe en el vértice (deduplicado). */
 typedef struct {
@@ -265,7 +271,7 @@ typedef struct {
     int32_t cine_cover;       /* nº de recubrimientos semitransparentes a pantalla completa (fundidos) detectados en la lista */
     const uint8_t *tri_cause; /* VR_TC_* de cada triángulo de v (nv/3 bytes; misma vida que v) */
     /* --- render nativo (lo rellena el host; vr_scene_build lo deja a cero) --- */
-    int32_t native_3d;        /* 1: el 3D de esta escena sale de la escena nativa (vr/native/ns_bridge.h): los batches 3D (kind 0/1) se han quitado de b; quedan solo 2D (kind 2) y filtro (kind 3) */
+    int32_t native_3d;        /* 1: la escena admite el 3D nativo (cámara VR en primera persona, no cinemática, con 3D de mundo): sus batches 3D (kind 0/1) están MARCADOS con skip_if_native pero siguen todos presentes; el que dibuja decide con ns_native_decide (vr/native/ns_bridge.h) cuáles saltar. 0: no marcar nada, dibujar todo */
 } VrScene;
 
 typedef struct {
