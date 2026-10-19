@@ -37,6 +37,7 @@ int main(void) {
     i = world();
     CHECK(vrview_step(&v, &i) == VRV_CINEMA && vrview_step(&v, &i) == VRV_CINEMA, "histéresis a mundo (2 de 3)");
     CHECK(vrview_step(&v, &i) == VRV_WORLD, "mundo tras 3 fotogramas");
+    v.to_comms = 3;                  /* umbral de radio igualado al resto para esta prueba de histéresis */
     VrViewIn c = world(); c.in_control = 0; c.comms = 1;
     CHECK(vrview_step(&v, &c) == VRV_WORLD && vrview_step(&v, &c) == VRV_WORLD, "histéresis a cine");
     CHECK(vrview_step(&v, &i) == VRV_WORLD, "un parpadeo no cambia la vista");
@@ -47,7 +48,7 @@ int main(void) {
     v.to_cine = 0; v.to_world = 0;
     CHECK(vrview_step(&v, &i) == VRV_WORLD, "umbral 0 se trata como 1");
     CHECK(vrview_step(NULL, &i) == VRV_CINEMA, "NULL");
-    for (int r = 0; r <= VRV_R_PAUSE_WORLD; r++) CHECK(vrview_reason_name(r)[0] != '?', "nombre %d", r);
+    for (int r = 0; r <= VRV_R_PENDING; r++) CHECK(vrview_reason_name(r)[0] != '?', "nombre %d", r);
     /* clasificación: mundo / cinemática del motor / vídeo / 2D */
     {
         VrViewIn k;
@@ -146,6 +147,54 @@ int main(void) {
         CHECK(len > 20 && strstr(buf, "selector") && strstr(buf, "modo=mundo") && strstr(buf, "menu=1") && strstr(buf, "camVR=1"), "describe: %s", buf);
         CHECK(vrview_describe(&m, &sel, buf, 8) == 7 && buf[7] == 0, "describe trunca sin desbordar");
         CHECK(vrview_describe(NULL, &sel, buf, sizeof buf) == 0 && vrview_describe(&m, NULL, buf, sizeof buf) > 0, "describe NULL");
+    }
+    /* --- secuencias reales del registro: transiciones hacia/desde la radio y al acabar una escena --- */
+    {
+        /* Ninguna transición enseña la pantalla de cine plana salvo destino cine: "plana" = modo CINE con clase UI. Se registra por fotograma. */
+        VrView m; vrview_reset(&m);
+        VrViewIn w2 = world(); w2.scene3d = 1;
+        for (int n = 0; n < 10; n++) vrview_step(&m, &w2);
+        CHECK(m.mode == VRV_WORLD, "arranca en mundo");
+        /* mundo -> radio: el mundo se mantiene to_comms-1 fotogramas y la cámara VR aguanta la gracia; luego cine */
+        VrViewIn cm = world(); cm.in_control = 0; cm.comms = 1; cm.stopped = 1; cm.scene3d = 1; cm.cam_active = 0;
+        for (int n = 0; n < m.to_comms - 1; n++) { vrview_step(&m, &cm); CHECK(m.mode == VRV_WORLD, "radio: el mundo se mantiene hasta que el códec esté en pantalla (n=%d)", n); }
+        vrview_step(&m, &cm); CHECK(m.mode == VRV_CINEMA && m.kind == VRV_K_UI && m.reason == VRV_R_COMMS, "radio: cine tras %d fotogramas", m.to_comms);
+        /* un parpadeo de la bandera de radio de 1 fotograma no mueve la vista */
+        vrview_reset(&m); for (int n = 0; n < 10; n++) vrview_step(&m, &w2);
+        vrview_step(&m, &cm); vrview_step(&m, &w2); CHECK(m.mode == VRV_WORLD && m.switches == 1, "parpadeo de radio");
+        /* radio -> mundo: sin control no hay salto; con control y sin cámara VR (8 fotogramas + latencia, ~1-2 s medidos) la vista queda congelada en cine y marcada PENDIENTE (negro en la app) */
+        vrview_reset(&m); for (int n = 0; n < 10; n++) vrview_step(&m, &w2);
+        for (int n = 0; n < 40; n++) vrview_step(&m, &cm);
+        CHECK(m.mode == VRV_CINEMA && m.kind == VRV_K_UI, "dentro de la radio");
+        VrViewIn nc = world(); nc.cam_active = 0; nc.scene3d = 1;
+        unsigned flat = 0, pend = 0, sw0 = m.switches, ksw0 = m.kind_switches;
+        for (int n = 0; n < 70; n++) {      /* ~1,4 s sin cámara VR */
+            vrview_step(&m, &nc);
+            if (m.reason == VRV_R_PENDING) pend++;
+            if (m.reason != VRV_R_PENDING) flat++;      /* cualquier fotograma que no sea pendiente aquí llevaría al cine plano */
+            CHECK(m.mode == VRV_CINEMA && m.kind == VRV_K_UI && m.switches == sw0 && m.kind_switches == ksw0, "pendiente: vista congelada (n=%d)", n);
+        }
+        CHECK(pend == 70 && flat == 0, "todo el hueco sin cámara es PENDIENTE (%u de 70)", pend);
+        for (int n = 0; n < 3; n++) vrview_step(&m, &w2);
+        CHECK(m.mode == VRV_WORLD && m.kind == VRV_K_WORLD && m.reason == VRV_R_WORLD, "cámara VR de vuelta: mundo directo");
+        /* fin de una escena del motor: ENGINE -> (control, sin cámara VR) -> mundo, sin pasar nunca por clase 2D */
+        vrview_reset(&m); for (int n = 0; n < 10; n++) vrview_step(&m, &w2);
+        VrViewIn ci = world(); ci.in_control = 0; ci.cinematic = 1; ci.scene3d = 1; ci.cam_active = 0;
+        for (int n = 0; n < 60; n++) vrview_step(&m, &ci);
+        CHECK(m.mode == VRV_CINEMA && m.kind == VRV_K_ENGINE, "escena: clase motor");
+        VrViewIn after = world(); after.cam_active = 0; after.scene3d = 0;     /* escena terminada, control devuelto, 3D ya no es de escena */
+        for (int n = 0; n < 60; n++) { vrview_step(&m, &after); CHECK(m.kind == VRV_K_ENGINE && m.reason == VRV_R_PENDING, "fin de escena: clase motor congelada, nunca 2D (n=%d kind=%d r=%d)", n, m.kind, m.reason); }
+        for (int n = 0; n < 3; n++) vrview_step(&m, &w2);
+        CHECK(m.mode == VRV_WORLD, "fin de escena: mundo");
+        /* sin cámara VR disponible nunca (edición no reconocida): cine sin espera */
+        vrview_reset(&m);
+        VrViewIn none = world(); none.cam_active = 0;
+        for (int n = 0; n < 5; n++) vrview_step(&m, &none);
+        CHECK(m.reason == VRV_R_NO_CAM && m.mode == VRV_CINEMA, "sin cámara VR jamás: cine (motivo %d)", m.reason);
+        /* la espera está acotada */
+        vrview_reset(&m); for (int n = 0; n < 5; n++) vrview_step(&m, &w2);
+        for (int n = 0; n < m.pend_max + 5; n++) vrview_step(&m, &none);
+        CHECK(m.reason == VRV_R_NO_CAM && m.mode == VRV_CINEMA, "espera acotada: pasados %d fotogramas, cine", m.pend_max);
     }
     fprintf(stderr, fails ? "test_view: %d FALLOS\n" : "test_view: OK\n", fails);
     return fails ? 1 : 0;

@@ -126,6 +126,12 @@ static void test_activation(void) {
     /* ventana de armas/objetos o pausa abiertas (in_control=0, cam_ctl=1): la cabeza sigue llevando la cámara */
     s.in_control = 0; s.cam_ctl = 1; vrcam_frame(ram, &s);
     CHECK(vrcam_plan(ram, 320, &p) != 0 && vrcam_active());
+    /* radio recién abierta: la cámara aguanta VRCAM_COMMS_GRACE fotogramas y luego se apaga; sin radio no hay gracia */
+    { BridgeState cs = s; cs.in_control = 0; cs.cam_ctl = 0; cs.comms = 1; cs.stopped = 1;
+      for (int i = 0; i < VRCAM_COMMS_GRACE; i++) { vrcam_frame(ram, &cs); CHECK(vrcam_plan(ram, 320, &p) != 0 && vrcam_active()); }
+      vrcam_frame(ram, &cs); CHECK(vrcam_plan(ram, 320, &p) == 0 && !vrcam_active());
+      cs.comms = 0; cs.in_control = 1; cs.cam_ctl = 1; for (int i = 0; i < c.on_frames + 1; i++) vrcam_frame(ram, &cs);
+      CHECK(vrcam_plan(ram, 320, &p) != 0); }
     /* salida inmediata al perder el control */
     s.in_control = 0; s.cam_ctl = 0; vrcam_frame(ram, &s);
     CHECK(vrcam_plan(ram, 320, &p) == 0 && !vrcam_active());
@@ -136,7 +142,7 @@ static void test_activation(void) {
     for (int i = 0; i < 20; i++) vrcam_frame(ram, &s);
     CHECK(vrcam_plan(ram, 320, &p) == 0);
     VrCamStats st; vrcam_stats(&st);
-    CHECK(st.activations == 1 && st.deactivations >= 1);
+    CHECK(st.activations == 2 && st.deactivations >= 1);
     /* hasta que no pasan on_frames cuadros buenos otra vez, no vuelve */
     s.valid = BRIDGE_OK_ALL_CORE;
     for (int i = 0; i < c.on_frames - 1; i++) vrcam_frame(ram, &s);

@@ -16,6 +16,8 @@ void vrview_reset(VrView *v) {
     v->from_engine = 10;           /* salir: 200 ms sin 3D (un fundido o un corte no deben parpadear) */
     v->to_other = 3;
     v->prev_reason = VRV_R_NO_GAME;
+    v->to_comms = 12;              /* 240 ms de radio antes de dejar el mundo (= VRCAM_COMMS_GRACE) */
+    v->pend_max = 150;             /* 3 s esperando la cámara VR tras una radio o una escena */
 }
 
 int vrview_kind_of(const VrViewIn *in) {
@@ -57,14 +59,23 @@ int vrview_reason(const VrViewIn *in) {
 int vrview_step(VrView *v, const VrViewIn *in) {
     if (!v) return VRV_CINEMA;
     int r = vrview_reason(in);
+    if (in && in->cam_active) v->cam_seen = 1;
+    /* Regla de destino: sin cámara VR pero con control (fin de radio / de escena / pérdida de seguimiento) el destino es el MUNDO, no el cine: se congela la vista
+     * (modo y clase) y la app oscurece, hasta que la cámara vuelve. Solo si la cámara ha existido alguna vez y por un tiempo acotado. */
+    if (r == VRV_R_NO_CAM && v->cam_seen && v->pend_run < v->pend_max) { v->pend_run++; r = VRV_R_PENDING; }
+    else if (r != VRV_R_NO_CAM) v->pend_run = 0;
     int old_mode = v->mode, old_kind = v->kind, old_reason = v->reason;
     v->prev_reason = old_reason;
     v->reason = r;
+    if (r == VRV_R_PENDING) {
+        v->want = v->mode; v->run = 0; v->want_kind = v->kind; v->kind_run = 0; v->changed = r != old_reason ? VRV_CH_REASON : 0;
+        return v->mode;
+    }
     v->want = (r == VRV_R_WORLD || r == VRV_R_SELECTOR || r == VRV_R_PAUSE_WORLD) ? VRV_WORLD : VRV_CINEMA;
     if (v->want == v->mode) {
         v->run = 0;
     } else {
-        int need = v->want == VRV_CINEMA ? v->to_cine : v->to_world;
+        int need = v->want == VRV_CINEMA ? (r == VRV_R_COMMS ? v->to_comms : v->to_cine) : v->to_world;
         if (need < 1) need = 1;
         if (++v->run >= need) {
             v->mode = v->want;
@@ -79,7 +90,7 @@ int vrview_step(VrView *v, const VrViewIn *in) {
     } else {
         int need = k == VRV_K_ENGINE ? v->to_engine : v->kind == VRV_K_ENGINE ? v->from_engine : v->to_other;
         if (k == VRV_K_WORLD) need = v->to_world;      /* el mundo y el modo de vista usan el mismo umbral */
-        if (v->kind == VRV_K_WORLD) need = v->to_cine;
+        if (v->kind == VRV_K_WORLD) need = r == VRV_R_COMMS ? v->to_comms : v->to_cine;
         if (need < 1) need = 1;
         if (++v->kind_run >= need) { v->kind = k; v->kind_run = 0; v->kind_switches++; }
     }
@@ -101,6 +112,7 @@ const char *vrview_reason_name(int r) {
     case VRV_R_DEAD: return "muerte";
     case VRV_R_SELECTOR: return "selector de armas/objetos sobre el mundo";
     case VRV_R_PAUSE_WORLD: return "pausa sobre el mundo";
+    case VRV_R_PENDING: return "transición: esperando cámara VR";
     default: return "?";
     }
 }
