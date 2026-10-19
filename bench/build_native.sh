@@ -24,7 +24,7 @@ xcrun clang -O2 -Wall -Wextra -std=gnu11 "${INC[@]}" bench/c/test_native_gpu.c "
 
 echo "== prueba de enlace del almacén de mallas (extractor real, sin sustitutos débiles) =="
 LOBJ=()
-for f in vr/native/ns_extract.c vr/native/ns_extract_glue.c vr/native/ns_hook.c vr/native/ns_bridge.c vr/native/ns_player.c; do
+for f in vr/native/ns_extract.c vr/native/ns_extract_glue.c vr/native/ns_fx.c vr/native/ns_fx_export.c vr/native/ns_hook.c vr/native/ns_bridge.c vr/native/ns_player.c; do
   xcrun clang -c -O2 -Wall -Wextra -std=gnu11 "${INC[@]}" "$f" -o "$OUT/l_$(basename "$f" .c).o"
   LOBJ+=("$OUT/l_$(basename "$f" .c).o")
 done

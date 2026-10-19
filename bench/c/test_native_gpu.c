@@ -284,6 +284,27 @@ static void test_split(void) {
     CHECK(sc.tris == 1 && sc.big == 1 && sc.cross == 1 && sc.big_cross == 1);
 }
 
+/* Efectos (ns_gpu_fx_build): un cuadrilátero opaco, un cartel y una cinta semitransparentes -> geometría del mundo VR orientada a la cabeza (la misma que dibuja ns_vs_fx). */
+static void test_fx(void) {
+    NsCamera cam; memset(&cam, 0, sizeof cam);
+    cam.rot[0] = cam.rot[4] = cam.rot[8] = 1; cam.h = 320; cam.overscan_y = NS_OVERSCAN_Y;
+    float to_vr[12] = {0.001f, 0, 0, 0, 0, 0.001f, 0, 0, 0, 0, 0.001f, 0};
+    NsEffect fx[3]; memset(fx, 0, sizeof fx);
+    fx[0].kind = NS_EK_QUAD; fx[0].nv = 4; fx[0].src_key = 0x80100000u; fx[0].idx = 1;
+    for (int v = 0; v < 4; v++) { fx[0].p[v][0] = (float)(v & 1) * 100; fx[0].p[v][1] = (float)(v >> 1) * 100; fx[0].p[v][2] = 3000; }
+    fx[1].kind = NS_EK_BILLBOARD; fx[1].nv = 4; fx[1].flags = NS_EF_SEMI | NS_EF_TEXTURED; fx[1].abr = 1; fx[1].src_key = 0x80100000u; fx[1].idx = 2;
+    fx[1].p[0][2] = 3200; fx[1].ref_h = 320; fx[1].box[0] = fx[1].box[1] = -16; fx[1].box[2] = fx[1].box[3] = 16;
+    fx[2].kind = NS_EK_QUAD; fx[2].nv = 2; fx[2].flags = NS_EF_LINE | NS_EF_SEMI; fx[2].abr = 2; fx[2].src_key = 0x80100000u; fx[2].idx = 3; fx[2].width_px = 3;
+    fx[2].p[0][0] = -500; fx[2].p[0][2] = 2500; fx[2].p[1][0] = 500; fx[2].p[1][2] = 2500;
+    NsGpuFxParams P; memset(&P, 0, sizeof P);
+    P.to_vr = to_vr; P.cam = &cam; P.head_right[0] = 1; P.head_up[1] = 1; P.n_eyes = 2; P.eyes[0][0] = -0.03f; P.eyes[1][0] = 0.03f;
+    NsGpuFxVert vb[64]; NsGpuFxRun runs[4]; uint64_t keys[4]; NsGpuFxOut o;
+    CHECK(ns_gpu_fx_build(fx, 3, &P, vb, 64, runs, 4, keys, 4, &o) == 0);
+    CHECK(o.n_keys == 3 && o.n_billboard == 1 && o.n_ribbon == 1 && o.n_poly == 1);
+    CHECK(o.n_opaque == 6 + 6 && o.n_semi == 6 + 6);   /* cuadrilátero + copia opaca del cartel texturizado; cartel + cinta */
+    CHECK(o.n_runs == 2 && runs[0].abr == 1 && runs[1].abr == 2);   /* de atrás adelante: el cartel (3,2 m) y después la cinta (2,5 m) */
+}
+
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : ".";
     char p[1024];
@@ -294,6 +315,7 @@ int main(int argc, char **argv) {
     test_quad_diagonal();
     test_sort();
     test_split();
+    test_fx();
     printf(fails ? "FALLOS: %d\n" : "OK: todas las pruebas pasan\n", fails);
     return fails ? 1 : 0;
 }

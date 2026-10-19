@@ -59,6 +59,7 @@ static VrState *g_st; static size_t g_st_cap, g_st_n;
 static uint32_t *g_hash; static size_t g_hash_cap; /* tabla abierta: índice+1 en g_st */
 static uint32_t *g_next; static size_t g_next_cap;
 static uint8_t *g_fate; static uint32_t g_fate_cap;
+static uint32_t *g_tsrc_int; static size_t g_tsrc_int_cap;   /* op de origen de cada triángulo de salida (VrScene.tri_src) */
 static uint32_t *g_tsrc; static uint32_t g_tsrc_cap;   /* (pruebas) op de origen de cada triángulo de VrScene.v, en el orden de salida */
 void vr_scene_set_tri_src(uint32_t *buf, uint32_t cap) { g_tsrc = buf; g_tsrc_cap = buf ? cap : 0; }
 void vr_scene_set_fate(uint8_t *buf, uint32_t cap) { g_fate = buf; g_fate_cap = buf ? cap : 0; }
@@ -71,6 +72,7 @@ static void fate_set(uint32_t i, uint8_t f) {
 }
 
 void vr_scene_release(void) {
+    free(g_tsrc_int); g_tsrc_int = NULL; g_tsrc_int_cap = 0;
     free(g_tri); free(g_vtx); free(g_tcause); free(g_bat); free(g_st); free(g_hash); free(g_next);
     g_tri = NULL; g_vtx = NULL; g_tcause = NULL; g_tcause_cap = 0; g_bat = NULL; g_st = NULL; g_hash = NULL; g_next = NULL;
     g_tri_cap = g_vtx_cap = g_bat_cap = g_st_cap = g_st_n = g_hash_cap = g_next_cap = 0;
@@ -878,6 +880,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     /* ---- ensamblado: épocas (mismo ev_end), dentro clase 0,1,2; batch nuevo al cambiar blend ---- */
     GROW(g_vtx, g_vtx_cap, nt * 3 + 3);
     GROW(g_tcause, g_tcause_cap, nt + 1);
+    GROW(g_tsrc_int, g_tsrc_int_cap, nt + 1);
     GROW(g_bat, g_bat_cap, nt + 4);
     size_t nv = 0, nb = 0;
     for (size_t s = 0; s < nt;) {
@@ -895,6 +898,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 }
                 memcpy(&g_vtx[nv], t->v, sizeof t->v);
                 g_tcause[nv / 3] = t->cause;
+                g_tsrc_int[nv / 3] = t->src_op;
 
                 if (nv / 3 < g_tsrc_cap) g_tsrc[nv / 3] = t->src_op;
                 nv += 3; cur->count += 3;
@@ -902,7 +906,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
         }
         s = e;
     }
-    out->v = g_vtx; out->nv = (uint32_t)nv; out->tri_cause = g_tcause;
+    out->v = g_vtx; out->nv = (uint32_t)nv; out->tri_cause = g_tcause; out->tri_src = g_tsrc_int;
     out->b = g_bat; out->nb = (uint32_t)nb;
     out->states = g_st; out->nstates = (uint32_t)g_st_n;
     out->has_3d = out->stats.n_tris3d > 0;

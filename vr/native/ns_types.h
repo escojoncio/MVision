@@ -211,7 +211,7 @@ enum {
     NS_EF_GOURAUD = 4u,
     NS_EF_ONESIDE = 8u,  /* sólo anverso */
     NS_EF_LINE = 16u,    /* línea (dibujar como cinta de ancho `width_px`) */
-    NS_EF_ON_CAMERA = 32u/* posiciones en espacio de VISTA del motor (pegado a la cámara): el renderer las pega a la cabeza */
+    NS_EF_ON_CAMERA = 32u/* informativo: pegado a la cámara del motor; las posiciones ya vienen en el MUNDO del motor con la cámara de la escena (que en VR es la de la cabeza) */
 };
 typedef struct {
     uint8_t kind;        /* NS_EK_* */
@@ -219,9 +219,9 @@ typedef struct {
     uint16_t flags;      /* NS_EF_* */
     int16_t depth_bias;  /* sesgo de orden */
     uint8_t abr;         /* modo de semitransparencia 0..3 */
-    uint8_t pad;
+    uint8_t sub;         /* segmento dentro del paquete (polilíneas): con src_key e idx identifica el elemento entre fotogramas (ver ns_fx_item_key) */
     uint16_t tpage, clut;
-    uint16_t pad2;
+    uint16_t idx;        /* índice del paquete dentro de la primitiva */
     float p[4][3];       /* QUAD: vértices en mundo del motor (ya con la matriz del grupo aplicada); BILLBOARD: p[0] = centro */
     uint8_t rgb[4][3];   /* color por vértice 0..255 (128 = neutro con textura) */
     uint8_t uv[4][2];    /* texels en la página */
