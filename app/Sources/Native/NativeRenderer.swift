@@ -181,6 +181,9 @@ final class NativeRenderer {
     private(set) var statMeshes = 0
     private(set) var statScenes = 0
     var enabled = true
+    /// El fotograma preparado se puede dibujar entero: hay escena válida en el mundo del usuario, con piezas y sin mallas que no cupieron en la caché.
+    /// El llamador decide con esto, en cada fotograma, entre `encode` y los batches 3D de la lista de la GPU (nunca un fotograma sin 3D).
+    var canDrawNative: Bool { isActive && current != nil && meshFailures == 0 }
 
     init?(device: MTLDevice, library: MTLLibrary, ringSize: Int = 3) {
         guard MemoryLayout<NsGpuVert>.stride == 16, MemoryLayout<NsGpuCorner>.stride == 28, MemoryLayout<NsGpuPiece>.stride == 164,
