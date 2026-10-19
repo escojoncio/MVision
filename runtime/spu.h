@@ -26,7 +26,13 @@ extern void (*spu_irq_hook)(void);
  * `frames` muestras al anillo interno (y al WAV). El host de audio usa spu_pull, que copia lo
  * disponible, rellena con ceros el resto, devuelve los frames reales y NO avanza la SPU. */
 void spu_clock(int frames);
-int spu_pull(int16_t *out_stereo, int frames);
+int spu_pull(int16_t *out_stereo, int frames);   /* = spu_pull_rate a 44100 */
+/* Consumidor para la frecuencia de la sesión de audio `rate`: remuestreo polifásico con relación de reloj ajustada por el nivel del
+ * anillo y relleno continuo (sin silencio brusco) si faltan datos. Devuelve los frames reales (no de relleno). */
+int spu_pull_rate(int16_t *out_stereo, int frames, int rate);
+/* Solo pruebas: productor sin SPU y reinicio del anillo/consumidor (un solo hilo). */
+void spu_ring_feed(const int16_t *stereo, int frames);
+void spu_pull_reset(void);
 
 /* Anillo de salida (SPSC sin candados). spu_pull se llama SOLO desde un hilo (el de audio) y nunca bloquea: siempre
  * rellena `frames`; devuelve los frames reales. Tras una infraejecución sale con un fundido corto a silencio y no

@@ -318,7 +318,8 @@ static void t_spu_clock(Cpu *c) {
     EQ(spu_pull(o, 64), 64);
 }
 
-/* Anillo SPSC de salida de la SPU: infraejecución con fundido y silencio hasta el prefill, sin repetir; desbordamiento descarta lo nuevo. */
+/* Anillo SPSC de salida de la SPU: sin datos el consumidor rellena de forma continua (cero exacto si nunca hubo audio) y no consume;
+ * reanuda con margen; desbordamiento descarta lo nuevo. (Calidad de remuestreo y relleno: test_audio.) */
 static void t_spu_ring(void) {
     int16_t o[512 * 2];
     SpuAudioStats s0, s1;
@@ -327,14 +328,12 @@ static void t_spu_ring(void) {
     EQ(n < 512, 1);
     spu_audio_stats(&s1, 0);
     EQ(s1.underruns >= 1, 1);
-    for (int i = n; i < 512; i++) { /* tras la cola de fundido solo hay ceros */
-        if (i - n >= 128) { EQ(o[i * 2], 0); EQ(o[i * 2 + 1], 0); }
-    }
-    spu_clock(32 * 10);                          /* 320 < prefill (1764): sigue en silencio y NO consume */
+    uint32_t rest = spu_ring_level();            /* resto < 25 frames que el filtro no puede consumir */
+    spu_clock(32 * 10);                          /* 320 < margen de reanudación: sigue rellenando y NO consume */
     EQ(spu_pull(o, 64), 0);
-    EQ(spu_ring_level(), 320);
-    for (int k = 0; k < 6; k++) spu_clock(256);  /* 1856 >= prefill */
-    EQ(spu_pull(o, 64), 64);                     /* reanuda */
+    EQ(spu_ring_level(), rest + 320);
+    for (int k = 0; k < 6; k++) spu_clock(256);  /* 1856 >= margen */
+    EQ(spu_pull(o, 64) > 0, 1);                  /* reanuda */
     spu_audio_stats(&s0, 0);
     for (int k = 0; k < 40; k++) spu_clock(512); /* 20480 > 16384: desborda */
     spu_audio_stats(&s1, 0);

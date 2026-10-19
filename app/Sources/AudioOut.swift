@@ -1,7 +1,8 @@
 import AVFoundation
 
-/// Salida de audio: AVAudioSourceNode a 44100 Hz estéreo que tira de mv_host_audio_pull.
-/// El callback es de tiempo real: solo llama a mv_host_audio_pull (anillo sin candados, siempre rellena con fundido/silencio
+/// Salida de audio: AVAudioSourceNode estéreo a la frecuencia de la sesión (48000 Hz normalmente) que tira de mv_host_audio_pull_rate:
+/// el remuestreo 44,1 -> sesión lo hace el propio emulador (polifásico de calidad, reloj ajustado al nivel del anillo), no el mezclador del sistema.
+/// El callback es de tiempo real: solo llama a mv_host_audio_pull (anillo sin candados, siempre rellena de forma continua
 /// lo que falte), convierte a Float en un búfer reservado de antemano y no toma candados, no reserva memoria ni escribe registros.
 final class AudioOut {
     private let engine = AVAudioEngine()
@@ -24,7 +25,10 @@ final class AudioOut {
         try? session.setCategory(.playback, mode: .default)
         try? session.setActive(true)
 
-        guard let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 44100, channels: 2, interleaved: false) else { return }
+        let sr = session.sampleRate
+        let rate = (sr >= 8000 && sr <= 192000) ? sr : 44100
+        let rateI = Int32(rate.rounded())
+        guard let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 2, interleaved: false) else { return }
         let buf = scratch
         let cap = scratchFrames
         let n = AVAudioSourceNode(format: fmt) { _, _, frameCount, abl -> OSStatus in
@@ -36,7 +40,7 @@ final class AudioOut {
             let total = Int(frameCount)
             while done < total {
                 let chunk = min(cap, total - done)
-                _ = mv_host_audio_pull(buf, Int32(chunk))   // rellena con ceros lo que falte
+                _ = mv_host_audio_pull_rate(buf, Int32(chunk), rateI)   // siempre rellena (extensión continua si faltan datos)
                 for i in 0..<chunk {
                     l[done + i] = Float(buf[2 * i]) * (1.0 / 32768.0)
                     r[done + i] = Float(buf[2 * i + 1]) * (1.0 / 32768.0)

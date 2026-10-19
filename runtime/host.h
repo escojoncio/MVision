@@ -56,7 +56,9 @@ uint32_t mv_host_framebuffer(uint8_t *dst, size_t dst_size, int *w, int *h, uint
 /* Extrae `frames` muestras estéreo intercaladas (L,R) int16 a 44100 Hz; rellena con ceros lo que
  * falte (pausa, arranque, emulación más lenta que el tiempo real: fundido corto a silencio, nunca repite). Devuelve los
  * frames reales de audio. Llamable desde el hilo de audio de tiempo real: no toma candados ni espera. Un solo consumidor. */
-int mv_host_audio_pull(int16_t *out_stereo, int frames);
+int mv_host_audio_pull(int16_t *out_stereo, int frames);   /* a 44100 Hz */
+/* A la frecuencia de la sesión `rate` (remuestreo de calidad + control de nivel del anillo). */
+int mv_host_audio_pull_rate(int16_t *out_stereo, int frames, int rate);
 
 /* Cuenta un frame dibujado por la app (kind 0 = ventana plana, 1 = espacio inmersivo): el latido del registro (cada 5 s)
  * lo muestra como frames por segundo. Thread-safe y sin candados. */
