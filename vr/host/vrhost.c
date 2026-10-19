@@ -509,7 +509,7 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     VrCamPatch p;
     vrcam_patch_default(&p);
     {   /* MV_NOCULL=máscara hex (pruebas A/B): bits 0-5 sitios de NOCULL, bit 6 HLE de paquetes, bit 7 overlays; defecto 0xFF */
-        const char *e = getenv("MV_NOCULL"); unsigned m = e ? (unsigned)strtoul(e, NULL, 16) : 0xFFu;
+        const char *e = getenv("MV_NOCULL"); unsigned m = e ? (unsigned)strtoul(e, NULL, 16) : 0xFEu;
         p.no_cull = (int)(m & VRCAM_NOCULL_ALL); vrcam_pack_enable((m >> 6) & 1); ovp_on = (int)((m >> 7) & 1); ovp_map = (int)(m & 1);
     }
     int n = vrcam_patch_ram(ram, &p);
