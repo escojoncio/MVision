@@ -224,7 +224,7 @@ final class XRRenderLoop {
 
         if nowT - diagT >= 1 {
             diagT = nowT
-            Storage.log("xr-diag: seguimiento ok=\(trackedFrames) sin=\(untrackedFrames) ancla=\(anchor == nil ? "nil" : (anchor!.isTracked ? "rastreada" : "no rastreada")) recentrado=\(needsRecenter ? "pendiente" : "hecho") frame=\(encoder.frameNo)")
+            Storage.log("xr-diag: seguimiento ok=\(trackedFrames) sin=\(untrackedFrames) ancla=\(anchor == nil ? "nil" : (anchor!.isTracked ? "rastreada" : "no rastreada")) recentrado=\(needsRecenter ? "pendiente" : "hecho") frame=\(encoder.frameNo) origenDispositivo=(\(String(format: "%.2f %.2f %.2f", originFromDevice.columns.3.x, originFromDevice.columns.3.y, originFromDevice.columns.3.z))) rumboDispositivo=\(String(format: "%.0f", XRMath.yaw(of: originFromDevice) * 180 / .pi))grados mapasTasa=\(drawable.rasterizationRateMaps.count) objetivo=\(drawable.target) vistas=\(drawable.views.count) uso(color0)=\(drawable.colorTextures.first?.usage.rawValue ?? 0) almacenamiento=\(drawable.colorTextures.first?.storageMode.rawValue ?? 99) pasoDeFotograma=\(Int(1000 * dt)) ms")
             trackedFrames = 0; untrackedFrames = 0
         }
 
