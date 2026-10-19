@@ -1021,7 +1021,7 @@ void gpu_dump_ppm(const char *path, int full) {
 #define A2 c->r[6]
 #define A3 c->r[7]
 
-static uint32_t drawsync_cb;
+static uint32_t gfxsync_cb;
 static int in_cb;
 static int graph_debug;
 
@@ -1029,9 +1029,9 @@ static int16_t rd16(Cpu *c, uint32_t a) { return (int16_t)mem_r16(c, a); }
 
 /* Callback de fin de dibujo: con GPU síncrona se invoca al terminar cada operación encolable. */
 static void done(Cpu *c) {
-    if (drawsync_cb && !in_cb) {
+    if (gfxsync_cb && !in_cb) {
         in_cb = 1;
-        hle_invoke(c, drawsync_cb, 0);
+        hle_invoke(c, gfxsync_cb, 0);
         in_cb = 0;
     }
 }
@@ -1044,13 +1044,13 @@ void hle_gfx_reset(Cpu *c) {
     } else {
         gpu_gp1(0x01000000);
     }
-    if (mode != 3) drawsync_cb = 0;
+    if (mode != 3) gfxsync_cb = 0;
     /* El estado interno de la librería de gráficos (tipo de GPU, tamaño máximo de VRAM que usan ajustes de entorno de dibujo
      * para recortar) lo inicializa el gfx_reset original: se ejecuta tras la parte de hardware. */
     if (mode == 0 || mode == 3 || mode == 5) {
-        uint32_t keep = drawsync_cb;
+        uint32_t keep = gfxsync_cb;
         rt_orig(c, "gfx_reset");
-        drawsync_cb = keep;
+        gfxsync_cb = keep;
     }
     V0 = 0;
 }
@@ -1058,7 +1058,7 @@ void hle_gfx_debug(Cpu *c) { V0 = graph_debug; graph_debug = A0; }
 void hle_gfx_queue(Cpu *c) { V0 = 0; }
 void hle_gfx_field(Cpu *c) { V0 = gpu_stat() >> 31; }
 void hle_gfx_sync(Cpu *c) { V0 = 0; } /* cola siempre vacía */
-void hle_gfx_sync_cb(Cpu *c) { V0 = drawsync_cb; drawsync_cb = A0; }
+void hle_gfx_sync_cb(Cpu *c) { V0 = gfxsync_cb; gfxsync_cb = A0; }
 void hle_gfx_dispmask(Cpu *c) { gpu_gp1(0x03000000 | (A0 ? 0 : 1)); V0 = 0; }
 
 /* RECT {short x, y, w, h} */

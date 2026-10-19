@@ -257,7 +257,7 @@ static void t_irq_sin_manejador(Cpu *c) {
 /* cambiar de hilo desde un manejador de frame_wait (dentro de la excepción): es diferido y no deja el estado de
  * excepción bloqueado. El hilo 0 gira hasta que el contador (que incrementa el hilo 1) llega a N; el
  * manejador manda al hilo 1 mientras no, y de vuelta al 0 después. */
-static void t_changeth_en_excepcion(Cpu *c) {
+static void t_cambio_hilo_en_excepcion(Cpu *c) {
     enum { N = 1000, CNT = 0x80020000, H = 0x80010000, A = 0x80010200, B = 0x80010100 };
     uint32_t h[] = {
         ADDIU(29, 29, -8), SW(31, 29, 0),
@@ -356,7 +356,7 @@ int main(void) {
     t_spu_clock(&c);
     t_spu_ring();
     t_irq_sin_manejador(&c);
-    t_changeth_en_excepcion(&c);
+    t_cambio_hilo_en_excepcion(&c);
     printf(fails ? "test_sys: %d FALLOS\n" : "test_sys: OK\n", fails);
     return fails != 0;
 }
