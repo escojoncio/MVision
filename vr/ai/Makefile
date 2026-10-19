@@ -42,3 +42,22 @@ test-cameras: $(B)/test_cameras
 test-cameras-san:
 	$(MAKE) test-cameras B=build-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 .PHONY: test-cameras test-cameras-san
+
+# --- visión por la cabeza VR y factor de alcance (vr_perception) ---
+$(B)/test_head: test_head.c vr_perception.c vr_ai_scan.c vr_perception.h
+	@mkdir -p $(B)
+	$(CC) $(CFLAGS) -I. -o $@ test_head.c vr_perception.c vr_ai_scan.c -lm
+test-head: $(B)/test_head
+	$(B)/test_head
+test-head-san:
+	$(MAKE) test-head B=build-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+.PHONY: test-head test-head-san
+
+# Validación con la rutina REAL del motor sobre volcados de RAM (intérprete del runtime; no se ejecuta el juego): make -C vr/ai test-head-dump DUMP=ruta/volcado.bin [ACTOR=hex]
+RTSRC := $(filter-out ../../runtime/headless.c ../../runtime/test_%.c ../../runtime/wip_%.c ../../runtime/nogen.c,$(wildcard ../../runtime/*.c))
+$(B)/test_head_dump: test_head_dump.c vr_perception.c vr_perception_rt.c vr_ai_scan.c vr_cameras.c ../bridge/bridge.c ../bridge/bridge_addrs.c $(RTSRC)
+	@mkdir -p $(B)
+	$(CC) -O1 -w -I. -I../../runtime -I../bridge -o $@ $^ -lm
+test-head-dump: $(B)/test_head_dump
+	$(B)/test_head_dump $(DUMP) $(ACTOR) 2>&1 | grep -v '^\[interp\]\|^\[ia\]'
+.PHONY: test-head-dump

@@ -23,7 +23,7 @@
 #define SE_SEND 0x80089e40u            /* envío de la orden de sonido (a0 = orden, a1 = 0) */
 #define STAGE_CODE 0x800AC568u
 
-static _Atomic int opt_perc = VRP_VR, opt_cam = 1, opt_act = 1, opt_motion;
+static _Atomic int opt_perc = VRP_VR, opt_cam = 1, opt_act = 1, opt_motion, opt_range100 = 150, opt_head = 1;
 static _Atomic int dirty = 1;
 static void (*listener)(const VrpConfig *);
 static int inited, installed;
@@ -49,11 +49,16 @@ void vrai_set_perception(int p) {
     o.perception = p;
     vrai_set_options(&o);
 }
+void vrai_set_range_scale(float s) { if (!(s >= 1.0f)) s = 1.0f; if (s > 3.0f) s = 3.0f; atomic_store(&opt_range100, (int)(s * 100.0f + 0.5f)); atomic_store(&dirty, 1); }
+float vrai_get_range_scale(void) { return (float)atomic_load(&opt_range100) / 100.0f; }
+void vrai_set_head_perception(int on) { atomic_store(&opt_head, on != 0); atomic_store(&dirty, 1); }
+void vrai_feed_head(const float off[3]) { vrp_rt_set_head(off); }
 void vrai_set_perception_listener(void (*fn)(const VrpConfig *cfg)) { listener = fn; }
 void vrai_set_motion(int moving) { atomic_store(&opt_motion, moving != 0); }
 VrpConfig vrai_perception_config(void) {
     VrpConfig c;
     vrp_config_preset(&c, (VrpPreset)atomic_load(&opt_perc));
+    if (c.enabled) c.range_scale = vrai_get_range_scale();
     return c;
 }
 
@@ -77,6 +82,7 @@ static void notify_listener(void) {
     if (!listener) return;
     VrpConfig c;
     vrp_config_preset(&c, (VrpPreset)cur_perc);
+    if (c.enabled) c.range_scale = vrai_get_range_scale();
     listener(&c);
 }
 
@@ -84,7 +90,10 @@ static void apply_options(void) {
     int p = atomic_load(&opt_perc), cm = atomic_load(&opt_cam), ac = atomic_load(&opt_act);
     atomic_store(&dirty, 0);
     if (!installed) return;
+    vrp_rt_set_range_scale(vrai_get_range_scale());
+    vrp_rt_set_head_enabled(atomic_load(&opt_head));
     if (p != cur_perc) { cur_perc = p; vrp_rt_set_preset((VrpPreset)p); notify_listener(); }
+    else notify_listener();
     if (cm != cur_cam) {
         int first = cur_cam < 0;
         cur_cam = cm;

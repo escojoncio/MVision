@@ -844,6 +844,20 @@ float mv_vrhost_wall_distance(const float p_mm[3], float max_mm) {
     return d;
 }
 
+static float ai_corr[3];      /* último recorte de la cabeza contra el escenario (m, espacio del usuario; protegido por MX) */
+static uint64_t ai_corr_t;
+/* Desplazamiento de la cabeza VR respecto del ojo del personaje, para la IA (vr/ai): la cabeza dibujada (física + recorte) en el mundo del motor. */
+static void ai_feed_head(void) {
+    const VrCamRecord *r = vrcam_last_record();
+    float hm[16], corr[3] = {0, 0, 0}, off[3];
+    if (!vrcam_active() || !r || !r->active || !mv_vr_get_head(hm, NULL)) { vrai_feed_head(NULL); return; }
+    for (int i = 12; i < 15; i++) if (!isfinite(hm[i])) { vrai_feed_head(NULL); return; }
+    uint64_t now = mono_ns();
+    pthread_mutex_lock(&MX); if (hc_on && ai_corr_t && now - ai_corr_t < 300000000ull) memcpy(corr, ai_corr, sizeof corr); pthread_mutex_unlock(&MX);
+    vrp_head_offset(r->theta_play_deg, r->units_per_m, r->p_ref, &hm[12], corr, off);
+    vrai_feed_head(off);
+}
+
 /* Límite de la cabeza (hilo de render). head = pose física recentrada (16 floats, columnas); corr = desplazamiento a sumar a la cabeza para dibujar. */
 int mv_vrhost_head_limit(const float head[16], float dt, float corr[3], float *fade) {
     VrHcMap m;
@@ -854,6 +868,7 @@ int mv_vrhost_head_limit(const float head[16], float dt, float corr[3], float *f
     pthread_mutex_lock(&HCMX);
     int r = vrhc_query(&m, (const float[3]){head[12], head[13], head[14]}, dt, &o);
     pthread_mutex_unlock(&HCMX);
+    pthread_mutex_lock(&MX); memcpy(ai_corr, o.corr, sizeof ai_corr); ai_corr_t = mono_ns(); pthread_mutex_unlock(&MX);   /* la IA ve la cabeza ya recortada contra el escenario */
     memcpy(corr, o.corr, sizeof o.corr);
     if (fade) *fade = o.fade;
     return r;
@@ -1140,6 +1155,7 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
         if (was_active && !act) { pthread_mutex_lock(&HCMX); vrhc_reset(); hc_have_eye = 0; pthread_mutex_unlock(&HCMX); }
         was_active = act;
     }
+    ai_feed_head();
     vrai_frame(&bs, f);
     if (test_cb) test_cb(c, f);
     vrgame_frame_end();
@@ -1306,6 +1322,8 @@ static uint16_t pad_hook(uint16_t buttons) {
 /* Radar de muñeca: copia de la percepción activa (cono original + cono ampliado más tenue; nada con el ajuste original). */
 static void radar_perception(const VrpConfig *c) { vrradar_set_vrp(c); }
 
+void mv_vrhost_set_ai_range(float scale) { vrai_set_range_scale(scale); }
+void mv_vrhost_set_ai_head(int on) { vrai_set_head_perception(on); }
 void mv_vrhost_set_ai(int perception, int cameras, int activity) {
     VraiOptions o;
     o.perception = perception; o.cameras = cameras; o.activity = activity;
