@@ -166,7 +166,7 @@ static void t_menu_map(void) {
     int n = 0; for (int i = 0; i < 40; i++) { vr_input_update(&s, &f, &o); n += o.buttons != 0; }
     CHECK(n == 0);
     /* al volver al juego el gatillo derecho es el ataque, no confirmar */
-    f.menu = false; f.hand[1].trigger = 1; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_SQUARE);
+    f.menu = false; f.hand[1].trigger = 1; run(&s, &f, 15, &o); CHECK(o.buttons == VRI_PAD_SQUARE);   /* tras el antirrebote (0,12 s) */
     /* tabla sin estado (ventana): mismo mapa de menús */
     vri_hand_t h[2]; memset(h, 0, sizeof h);
     h[1].trigger = 1; CHECK(vr_input_sense_plain(&s.cfg, h) == CONF);
@@ -315,7 +315,7 @@ static void t_crouch(void) {
     for (int i = 0; i < 1500; i++) { vr_input_update(&s, &f, &o); bool p = o.buttons & VRI_PAD_CROSS; if (p && !prev) taps++; prev = p; }
     CHECK(taps >= 1 && taps <= 6);
     /* menú: sin toques */
-    f.head_pos[1] = 1.65f; run(&s, &f, 60, &o); f.menu = true; f.head_pos[1] = 1.2f; taps = 0;
+    f.head_pos[1] = 1.65f; run(&s, &f, 60, &o); f.menu = true; f.head_pos[1] = 1.2f; taps = 0; run(&s, &f, 15, &o);   /* antirrebote del menú */
     for (int i = 0; i < 300; i++) { vr_input_update(&s, &f, &o); if (o.buttons & VRI_PAD_CROSS) taps++; }
     CHECK(taps == 0);
     /* prone desactivado */
@@ -382,9 +382,114 @@ static void t_review(void) {
     CHECK(vr_input_snap_count(&s3) == 2);
 }
 
+/* Avance sostenido de la radio, histéresis analógica y antirrebote de menú. */
+static void t_hold_advance(void) {
+    vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); vr_pad_t o;
+    f.menu = true; f.comms = true; f.dt = 0.01f;
+    /* toque normal: A derecho = CÍRCULO+CRUZ al instante (se confirma), sin avance sostenido */
+    f.hand[1].buttons = VRI_H_LOW; vr_input_update(&s, &f, &o);
+    CHECK(o.buttons == (VRI_PAD_CIRCLE | VRI_PAD_CROSS));
+    run(&s, &f, 40, &o); CHECK(o.buttons == (VRI_PAD_CIRCLE | VRI_PAD_CROSS));   /* 0,41 s: aún no */
+    run(&s, &f, 15, &o);                                       /* 0,56 s: ya en avance */
+    /* pasado 0,5 s: CRUZ a toques (nunca CÍRCULO) */
+    int on = 0, off = 0, circle = 0, edges = 0; bool prev = false;
+    for (int i = 0; i < 300; i++) {
+        vr_input_update(&s, &f, &o);
+        if (o.buttons & VRI_PAD_CIRCLE) circle++;
+        bool c = o.buttons & VRI_PAD_CROSS; if (c) on++; else off++; if (c && !prev) edges++; prev = c;
+    }
+    CHECK(circle == 0 && on > 0 && off > 0);
+    CHECK(edges >= 15 && edges <= 20);                       /* 3 s / 0,16 s */
+    NEAR((double)on / (on + off), 0.06 / 0.16, 0.08);
+    /* B de la otra mano también cuenta; soltar detiene y reinicia el temporizador */
+    f.hand[1].buttons = 0; vr_input_update(&s, &f, &o); CHECK(o.buttons == 0);
+    f.hand[0].buttons = VRI_H_UP; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_CROSS);
+    run(&s, &f, 20, &o); CHECK(o.buttons == VRI_PAD_CROSS);   /* otra vez desde cero */
+    /* cruceta/stick (elegir respuesta) detiene el avance mientras dure; el gatillo no cuenta */
+    f.hand[0].buttons = VRI_H_UP; run(&s, &f, 80, &o);
+    f.hand[1].stick_x = 1; edges = 0; circle = 0;
+    for (int i = 0; i < 100; i++) { vr_input_update(&s, &f, &o); if (o.buttons & VRI_PAD_CIRCLE) circle++; CHECK(o.buttons & VRI_PAD_RIGHT); }
+    CHECK(circle == 0);
+    f.hand[1].stick_x = 0; f.hand[0].buttons = 0; f.hand[1].trigger = 1.0f; run(&s, &f, 200, &o);
+    CHECK(o.buttons == (VRI_PAD_CIRCLE | VRI_PAD_CROSS));
+    /* sin comunicador, o desactivado, no hay avance sostenido */
+    vr_input_init(&s); f.hand[1].trigger = 0; f.hand[1].buttons = VRI_H_LOW; f.comms = false;
+    run(&s, &f, 200, &o); CHECK(o.buttons == (VRI_PAD_CIRCLE | VRI_PAD_CROSS));
+    f.comms = true; s.cfg.hold_advance_s = 0; run(&s, &f, 200, &o); CHECK(o.buttons == (VRI_PAD_CIRCLE | VRI_PAD_CROSS));
+    /* mantener antes de abrirse el comunicador: el tiempo cuenta desde que se abre */
+    vr_input_init(&s); f.comms = false; run(&s, &f, 100, &o); f.comms = true; run(&s, &f, 10, &o);
+    CHECK(o.buttons == (VRI_PAD_CIRCLE | VRI_PAD_CROSS));
+    /* modo PAD: sin efecto */
+    vr_input_init(&s); s.cfg.mode = VRI_MODE_PAD; f.pad_buttons = VRI_PAD_CIRCLE | VRI_PAD_CROSS; run(&s, &f, 200, &o);
+    CHECK(o.buttons == (VRI_PAD_CIRCLE | VRI_PAD_CROSS));
+}
+
+static void t_hysteresis(void) {
+    vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); vr_pad_t o;
+    /* gatillo derecho oscilando alrededor de 0,5-0,6 (log real): una sola pulsación, sin parpadeo */
+    int edges = 0; bool prev = false;
+    for (int i = 0; i < 300; i++) {
+        f.hand[1].trigger = (i & 1) ? 0.60f : 0.52f;
+        if (i == 0) f.hand[1].trigger = 0.60f;
+        vr_input_update(&s, &f, &o); bool c = o.buttons & VRI_PAD_SQUARE; if (c != prev) edges++; prev = c;
+    }
+    CHECK(edges == 1 && prev);
+    f.hand[1].trigger = 0.46f; vr_input_update(&s, &f, &o); CHECK(o.buttons & VRI_PAD_SQUARE);   /* por encima de 0,45 sigue */
+    f.hand[1].trigger = 0.44f; vr_input_update(&s, &f, &o); CHECK(!(o.buttons & VRI_PAD_SQUARE)); /* por debajo se suelta */
+    f.hand[1].trigger = 0.54f; vr_input_update(&s, &f, &o); CHECK(!(o.buttons & VRI_PAD_SQUARE)); /* hay que superar 0,55 para volver */
+    f.hand[1].trigger = 0.56f; vr_input_update(&s, &f, &o); CHECK(o.buttons & VRI_PAD_SQUARE);
+    /* config absurda saneada: off < on */
+    vri_cfg_t c = s.cfg; c.analog_on = 0.3f; c.analog_off = 0.9f; vr_input_set_cfg(&s, &c); CHECK(s.cfg.analog_off < s.cfg.analog_on);
+}
+
+static void t_menu_debounce(void) {
+    /* control <-> menú alternando en cada fotograma con ambos gatillos (bucle del log real): el mapa no cambia de golpe */
+    vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); vr_pad_t o;
+    f.hand[0].trigger = 1; f.hand[1].trigger = 1; f.menu = false; vr_input_update(&s, &f, &o);
+    CHECK(o.buttons == (VRI_PAD_L2 | VRI_PAD_SQUARE));
+    int switches = 0; uint16_t last = o.buttons;
+    for (int i = 0; i < 400; i++) {
+        f.menu = (i & 1);
+        vr_input_update(&s, &f, &o); if (o.buttons != last) switches++; last = o.buttons;
+    }
+    CHECK(switches == 0);
+    /* un menú real (estable) sí se acepta, con retardo < 0,2 s, y vuelve al soltarse */
+    f.menu = true; int n = 0; while (!(o.buttons & VRI_PAD_CROSS) && n < 100) { vr_input_update(&s, &f, &o); n++; }
+    CHECK(n >= 1 && n <= 18);
+    f.menu = false; n = 0; while ((o.buttons & VRI_PAD_CROSS) && n < 100) { vr_input_update(&s, &f, &o); n++; }
+    CHECK(n >= 1 && n <= 18);
+    /* sin antirrebote: inmediato */
+    s.cfg.menu_debounce_s = 0; f.menu = true; vr_input_update(&s, &f, &o); CHECK(o.buttons & VRI_PAD_CROSS);
+}
+
+/* Robustez: entradas aleatorias con NaN/Inf/enormes en todos los campos no abortan ni producen valores fuera de rango. */
+static void t_fuzz(void) {
+    vr_input_t s; vr_input_init(&s); vr_pad_t o; unsigned r = 12345;
+    #define RND() (r = r * 1664525u + 1013904223u, (r >> 8) & 0xFFFF)
+    for (int it = 0; it < 20000; it++) {
+        vr_input_frame_t f = frame();
+        float sp[] = {0, 1, -1, 0.5f, 0.55f, 0.45f, 1e30f, -1e30f, NAN, INFINITY, -INFINITY, 1e-30f};
+        #define SP() (sp[RND() % 12])
+        f.dt = (RND() & 7) ? (RND() % 200) / 1000.0f : SP();
+        f.menu = RND() & 1; f.comms = RND() & 1; f.head_valid = RND() & 1; f.game_posture = (int)(RND() % 5) - 2;
+        for (int i = 0; i < 3; i++) { f.head_pos[i] = SP(); }
+        for (int i = 0; i < 4; i++) f.head_quat[i] = (RND() & 3) ? 0.0f : SP();
+        for (int h = 0; h < 2; h++) {
+            f.hand[h].tracked = RND() & 1; f.hand[h].trigger = SP(); f.hand[h].grip = SP();
+            f.hand[h].stick_x = SP(); f.hand[h].stick_y = SP(); f.hand[h].buttons = RND() & 15;
+            for (int i = 0; i < 4; i++) f.hand[h].quat[i] = (RND() & 3) ? 0.0f : SP();
+        }
+        s.cfg.mode = (RND() & 7) ? VRI_MODE_SENSE : VRI_MODE_PAD; f.pad_buttons = (uint16_t)RND();
+        f.pad_lx = SP(); f.pad_ly = SP(); f.pad_rx = SP(); f.pad_ry = SP();
+        vr_input_update(&s, &f, &o);
+        if (!isfinite(vr_input_body_yaw(&s)) || vr_input_vignette(&s) < 0 || vr_input_vignette(&s) > 1 || !isfinite(s.adv_phase)) { CHECK(0); return; }
+    }
+    CHECK(1);
+}
+
 int main(void) {
     t_axis(); t_heading(); t_sense_buttons(); t_menu_map(); t_pad_mode(); t_loco(); t_snap(); t_smooth();
-    t_vignette(); t_crouch(); t_posture_modes(); t_calib(); t_menu(); t_robust(); t_review();
+    t_vignette(); t_crouch(); t_posture_modes(); t_calib(); t_menu(); t_robust(); t_review(); t_hold_advance(); t_hysteresis(); t_menu_debounce(); t_fuzz();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

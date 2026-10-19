@@ -1,7 +1,7 @@
 /* padrun: recorre el juego real (host completo en MV_NOGEN, sin escenas ni render) con acciones de mandos Sense sintéticas, traducidas con la
  * MISMA tabla en C que usa la app (vr_input_update en modo Sense), y comprueba que se llega del título a la partida.
  *   padrun <exe> <disco> [--frames N] [--seq "T:acc+acc[:dur],..."] [--log]
- * T y dur en VBlanks absolutos (dur por defecto 6). Acciones: rtrig ltrig rgrip lgrip rA rB lA lB rmenu lmenu rclick lclick
+ * T y dur en VBlanks absolutos (dur por defecto 6). Acciones (y xHHHH = máscara cruda del juego): rtrig ltrig rgrip lgrip rA rB lA lB rmenu lmenu rclick lclick
  * y sticks rup rdown rleft rright lup ldown lleft lright. El indicador de menú de vr_input es "jugador fuera de control" del puente,
  * igual que en el host. Sin guion usa el estándar del ejemplo de la bitácora. MV_SIGS = firmas. No lleva datos del juego. */
 #include <stdio.h>
@@ -22,18 +22,21 @@ enum { A_RTRIG, A_LTRIG, A_RGRIP, A_LGRIP, A_RA, A_RB, A_LA, A_LB, A_RMENU, A_LM
        A_RUP, A_RDOWN, A_RLEFT, A_RRIGHT, A_LUP, A_LDOWN, A_LLEFT, A_LRIGHT, A_N };
 static const char *AN[A_N] = {"rtrig", "ltrig", "rgrip", "lgrip", "rA", "rB", "lA", "lB", "rmenu", "lmenu", "rclick", "lclick",
                               "rup", "rdown", "rleft", "rright", "lup", "ldown", "lleft", "lright"};
-typedef struct { uint32_t t, dur, m; } Ev;
+typedef struct { uint32_t t, dur, m; uint16_t raw; } Ev;
 static Ev ev[512];
 static int nev;
 static uint32_t nframes = 9000, t_ctl;
 static int verbose = 1;
 
+static uint16_t g_raw;      /* botones crudos del juego pedidos con xHHHH (solo para medir el juego, sin pasar por vr_input) */
 static uint32_t amask(const char *s, size_t len) {
     uint32_t m = 0;
+    g_raw = 0;
     while (len) {
         size_t k = 0;
         while (k < len && s[k] != '+') k++;
         int ok = 0;
+        if (k > 1 && s[0] == 'x') { g_raw |= (uint16_t)strtoul(s + 1, 0, 16); ok = 1; }
         for (int i = 0; i < A_N; i++) if (strlen(AN[i]) == k && !strncmp(s, AN[i], k)) { m |= 1u << i; ok = 1; }
         if (!ok) { fprintf(stderr, "[padrun] acción desconocida '%.*s'\n", (int)k, s); exit(1); }
         s += k; len -= k;
@@ -49,7 +52,7 @@ static int add_seq(const char *g) {
         if (*e != ':' || nev >= 512) { free(dup); return -1; }
         char *b = e + 1, *c2 = strchr(b, ':');
         uint32_t d = c2 ? (uint32_t)strtoul(c2 + 1, 0, 0) : 6;
-        ev[nev++] = (Ev){t, d, amask(b, c2 ? (size_t)(c2 - b) : strlen(b))};
+        { uint32_t mm = amask(b, c2 ? (size_t)(c2 - b) : strlen(b)); ev[nev++] = (Ev){t, d, mm, g_raw}; }
     }
     free(dup);
     return 0;
@@ -59,7 +62,7 @@ static const char *PNAME[16] = {"SELECT", "L3", "R3", "START", "ARRIBA", "DERECH
                                 "L2", "R2", "L1", "R1", "TRIANGULO", "CIRCULO", "CRUZ", "CUADRADO"};
 static vr_input_t st;
 static uint16_t last_b = 0xFFFF;
-static int last_menu = -1;
+static int last_menu = -1, last_comms = -1;
 
 static uint16_t driver(uint32_t vbl, uint16_t pad, const BridgeState *bs) {
     (void)pad;
@@ -70,10 +73,12 @@ static uint16_t driver(uint32_t vbl, uint16_t pad, const BridgeState *bs) {
     if (run >= 150 && !t_ctl) { t_ctl = vbl; fprintf(stderr, "[padrun] jugador al mando (150 VBlanks seguidos) en el VBlank %u (zona %.8s)\n", vbl, bs->stage_code); }
     if (verbose && vbl % 250 == 0) fprintf(stderr, "[padrun] vbl=%u valid=%x jugador=%d mando=%d camara=%d estado=%08x zona=%.8s\n", vbl, bs ? bs->valid : 0, bs ? bs->has_player : 0, bs ? bs->in_control : 0, vrcam_active(), bs ? (unsigned)bs->game_status : 0, bs ? bs->stage_code : "");
     uint32_t m = 0;
-    for (int i = 0; i < nev; i++) if (vbl >= ev[i].t && vbl < ev[i].t + ev[i].dur) m |= ev[i].m;
+    uint16_t raw = 0;
+    for (int i = 0; i < nev; i++) if (vbl >= ev[i].t && vbl < ev[i].t + ev[i].dur) { m |= ev[i].m; raw |= ev[i].raw; }
+    if (bs && (bs->comms != last_comms)) { last_comms = bs->comms; fprintf(stderr, "[padrun] vbl=%u comunicador=%d\n", vbl, bs->comms); }
     vr_input_frame_t f;
     memset(&f, 0, sizeof f);
-    f.dt = 0.02f; f.game_posture = -1; f.menu = !(core && bs->in_control);
+    f.dt = 0.02f; f.game_posture = -1; f.menu = !(core && bs->in_control); f.comms = core && bs->comms;
     f.head_valid = 1; f.head_pos[1] = 1.65f; f.head_quat[3] = 1;
     f.hand[0].quat[3] = f.hand[1].quat[3] = 1;
     /* derecha */
@@ -106,7 +111,7 @@ static uint16_t driver(uint32_t vbl, uint16_t pad, const BridgeState *bs) {
         fprintf(stderr, "[padrun] vbl=%u menu=%d botones=0x%04X [%s]\n", vbl, f.menu, o.buttons, nm);
         last_b = o.buttons; last_menu = f.menu;
     }
-    return o.buttons;
+    return o.buttons | raw;
 }
 
 int main(int argc, char **argv) {
