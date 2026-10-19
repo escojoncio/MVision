@@ -229,8 +229,34 @@ static double isect_area(int x0, int y0, int x1, int y1, int ax0, int ay0, int a
  * bbox (x0,y0,x1,y1; x1,y1 exclusivos) de destino de la primitiva 2D; (u0,v0,u1,v1) caja de texels inclusiva (polígonos). Todo se mide contra el área
  * MOSTRADA (dl->disp = búfer recién dibujado), NO contra el recorte: un panel pequeño con su propio recorte (minimapa, retrato) que se cubre a sí mismo
  * con un rect semitransparente o textura 15 bits no es un filtro de pantalla. */
+static int g_frame_on;   /* esta lista trae máscara de visión (frame_scan) */
+/* Polígono 2D sin textura que puede formar parte de la máscara de visión: plano "resta blanco" (semitransparente, modo 2, color >= 0xE0), plano opaco negro,
+ * o degradado semitransparente de resta. */
+static int frame_cand(const GpuOp *op) {
+    if (op->type != GPU_OP_POLY || (op->flags & GPU_F_TEXTURED)) return 0;
+    int semi = (op->flags & GPU_F_SEMI) != 0, gour = (op->flags & GPU_F_GOURAUD) != 0;
+    const GpuVtx *g = &op->v[0];
+    if (gour) return semi && (op->abr & 3) == 2;
+    if (semi) return (op->abr & 3) == 2 && g->r >= 0xE0 && g->g >= 0xE0 && g->b >= 0xE0;
+    return g->r <= 0x10 && g->g <= 0x10 && g->b <= 0x10;
+}
+/* Firma de la máscara: >= 8 polígonos planos candidatos y >= 8 degradados de resta, todos 2D (sin posición de vista). */
+static int frame_scan(const GpuDrawList *dl) {
+    int nflat = 0, ngour = 0;
+    for (uint32_t i = 0; i < dl->nops; i++) {
+        const GpuOp *op = &dl->ops[i];
+        if (!frame_cand(op)) continue;
+        int nv = op->nv == 4 ? 4 : 3, any = 0;
+        for (int k = 0; k < nv; k++) any |= op->v[k].vvalid;
+        if (any) continue;
+        if (op->flags & GPU_F_GOURAUD) ngour++; else nflat++;
+    }
+    return nflat >= 8 && ngour >= 8;
+}
+
 static int filter_class(const VrSceneOpts *o, const GpuDrawList *dl, const GpuOp *op, int is_rect, int x0, int y0, int x1, int y1, int u0, int v0, int u1, int v1) {
     if (!o->screen_filter || x1 <= x0 || y1 <= y0) return 0;
+    if (g_frame_on && !is_rect && frame_cand(op)) return 4;
     int dx0 = dl->disp.x, dy0 = dl->disp.y, dx1 = dl->disp.x + dl->disp.w, dy1 = dl->disp.y + dl->disp.h;
     double da = (double)dl->disp.w * dl->disp.h;
     if (!(da > 0)) return 0;
@@ -251,18 +277,90 @@ static int filter_class(const VrSceneOpts *o, const GpuDrawList *dl, const GpuOp
         int cx0 = x0 > op->cx1 ? x0 : op->cx1, cy0 = y0 > op->cy1 ? y0 : op->cy1;
         int cx1 = x1 < op->cx2 + 1 ? x1 : op->cx2 + 1, cy1 = y1 < op->cy2 + 1 ? y1 : op->cy2 + 1;
         if (isect_area(cx0, cy0, cx1, cy1, dx0, dy0, dx1, dy1) >= o->filter_min_cover * da) return 2;
+        /* línea de exploración: tira fina de ancho de pantalla (alto <= 2, >= 90 % del ancho mostrado) */
+        if (is_rect && (y1 - y0) <= 2 && (x1 - x0) * 10 >= 9 * dl->disp.w &&
+            isect_area(x0, y0, x1, y1, dx0, dy0, dx1, dy1) >= 0.9 * (double)(x1 - x0) * (y1 - y0)) return 3;
     }
     return 0;
+}
+
+/* máscara de visión: acumulación (resta por celda, 0..n) y estado de las líneas de exploración */
+static float g_frame_acc[VR_FRAME_W * VR_FRAME_H];
+static uint8_t g_frame_out[VR_FRAME_W * VR_FRAME_H];
+static float g_scan_prev_y, g_scan_y0;
+static int g_scan_cover_seq;   /* recubrimientos vistos (todos, no solo los conservados) antes de la primera línea */
+
+/* Suma a g_frame_acc la resta que produce un triángulo (coordenadas de la imagen mostrada, px PS1). val[k] = resta/255 en cada vértice. */
+static void frame_tri(const VrFilter *f, const float px[3], const float py[3], const float val[3]) {
+    float aw = (float)f->area[2], ah = (float)f->area[3];
+    if (!(aw > 0 && ah > 0)) return;
+    float cw = aw / VR_FRAME_W, ch = ah / VR_FRAME_H;
+    float minx = fminf(px[0], fminf(px[1], px[2])), maxx = fmaxf(px[0], fmaxf(px[1], px[2]));
+    float miny = fminf(py[0], fminf(py[1], py[2])), maxy = fmaxf(py[0], fmaxf(py[1], py[2]));
+    float area = (px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0]);
+    if (fabsf(area) < 1e-6f) return;
+    int i0 = (int)floorf(minx / cw - 0.5f), i1 = (int)ceilf(maxx / cw - 0.5f), j0 = (int)floorf(miny / ch - 0.5f), j1 = (int)ceilf(maxy / ch - 0.5f);
+    if (i0 < 0) i0 = 0;
+    if (j0 < 0) j0 = 0;
+    if (i1 > VR_FRAME_W - 1) i1 = VR_FRAME_W - 1;
+    if (j1 > VR_FRAME_H - 1) j1 = VR_FRAME_H - 1;
+    for (int j = j0; j <= j1; j++) {
+        float y = ((float)j + 0.5f) * ch;
+        for (int i = i0; i <= i1; i++) {
+            float x = ((float)i + 0.5f) * cw;
+            float w0 = ((px[1] - x) * (py[2] - y) - (px[2] - x) * (py[1] - y)) / area;
+            float w1 = ((px[2] - x) * (py[0] - y) - (px[0] - x) * (py[2] - y)) / area;
+            float w2 = 1.0f - w0 - w1;
+            if (w0 < -1e-4f || w1 < -1e-4f || w2 < -1e-4f) continue;
+            g_frame_acc[j * VR_FRAME_W + i] += w0 * val[0] + w1 * val[1] + w2 * val[2];
+        }
+    }
 }
 
 /* acumula el resumen VrFilter */
 static void filter_note(VrScene *out, const GpuOp *op, int cls, int is_rect, float *tw) {
     VrFilter *f = &out->filter;
     f->active = 1;
+    if (cls == 4) {   /* marco de la máscara de visión: resta del polígono (opaco negro = resta total) */
+        int nv = op->nv == 4 ? 4 : 3;
+        int semi = (op->flags & GPU_F_SEMI) != 0, gour = (op->flags & GPU_F_GOURAUD) != 0;
+        float px[4], py[4], vl[4];
+        for (int k = 0; k < nv; k++) {
+            const GpuVtx *g = gour ? &op->v[k] : &op->v[0];
+            px[k] = (float)(op->v[k].x - f->area[0]); py[k] = (float)(op->v[k].y - f->area[1]);
+            vl[k] = semi ? (float)(g->r + g->g + g->b) / (3.0f * 255.0f) : 1.0f;
+        }
+        static const int idx[2][3] = {{0, 1, 2}, {1, 2, 3}};
+        for (int q = 0; q < (nv == 4 ? 2 : 1); q++) {
+            float tx[3] = {px[idx[q][0]], px[idx[q][1]], px[idx[q][2]]}, ty[3] = {py[idx[q][0]], py[idx[q][1]], py[idx[q][2]]}, tv[3] = {vl[idx[q][0]], vl[idx[q][1]], vl[idx[q][2]]};
+            frame_tri(f, tx, ty, tv);
+        }
+        out->stats.n_filter_frame++;
+        return;
+    }
+    if (cls == 3) {   /* línea de exploración */
+        const GpuVtx *c = &op->v[0];
+        float y = (float)(c->y - f->area[1]);
+        if (f->n_scan == 0) { g_scan_cover_seq = f->n_cover; g_scan_y0 = y; f->scan_h = (float)op->rh; f->scan_pitch = 0; f->scan_rgb[0] = c->r / 255.0f; f->scan_rgb[1] = c->g / 255.0f; f->scan_rgb[2] = c->b / 255.0f; f->scan_abr = op->abr & 3; }
+        else {
+            float d = fabsf(y - g_scan_prev_y);
+            if (d > 0.5f && (f->scan_pitch == 0 || d < f->scan_pitch)) f->scan_pitch = d;
+        }
+        g_scan_prev_y = y;
+        f->n_scan++; out->stats.n_filter_scan++;
+        return;
+    }
     if (cls == 2) {
         f->n_cover++; out->stats.n_filter_cover++;
         const GpuVtx *c = &op->v[0];
         f->cover_rgb[0] = c->r / 255.0f; f->cover_rgb[1] = c->g / 255.0f; f->cover_rgb[2] = c->b / 255.0f; f->cover_abr = op->abr & 3;
+        if (f->n_covers == VR_FILTER_COVERS) {   /* se conservan los últimos */
+            memmove(f->covers_rgb[0], f->covers_rgb[1], sizeof f->covers_rgb[0] * (VR_FILTER_COVERS - 1));
+            memmove(&f->covers_abr[0], &f->covers_abr[1], sizeof f->covers_abr[0] * (VR_FILTER_COVERS - 1));
+            f->n_covers--;
+        }
+        for (int k = 0; k < 3; k++) f->covers_rgb[f->n_covers][k] = f->cover_rgb[k];
+        f->covers_abr[f->n_covers++] = f->cover_abr;
         return;
     }
     if (!is_rect) { f->n_polys++; out->stats.n_filter_polys++; }
@@ -293,6 +391,9 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     out->filter.tint[0] = out->filter.tint[1] = out->filter.tint[2] = 1.0f; out->filter.cover_abr = -1;
     out->filter.area[0] = dl->disp.x; out->filter.area[1] = dl->disp.y; out->filter.area[2] = dl->disp.w; out->filter.area[3] = dl->disp.h;
     float tint_w = 0.0f;
+    g_frame_on = o.screen_filter && frame_scan(dl);
+    if (g_frame_on) memset(g_frame_acc, 0, sizeof g_frame_acc);
+    g_scan_prev_y = g_scan_y0 = 0; g_scan_cover_seq = 0;
     /* centro del mundo y proyección del motor (una vez por lista); VrFilter.proj_h/cx_col/cy_row se rellenan siempre */
     WorldRef wref;
     list_ref(dl, &wref);
@@ -547,6 +648,22 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 t->ev_end = g_next[i]; t->src_op = i; t->kind = 2; t->blend = semi ? (op->abr & 3) : 0xFF;
                 out->stats.n_tris2d++;
             }
+        }
+    }
+
+    /* ---- cierre del resumen de clase 3b: líneas de exploración y máscara de visión ---- */
+    {
+        VrFilter *f = &out->filter;
+        if (f->n_scan > 0) {
+            if (!(f->scan_pitch >= 1.0f)) f->scan_pitch = f->n_scan > 1 ? 2.0f : 0.0f;   /* sin pareja: no se puede saber el periodo */
+            if (f->scan_pitch >= 1.0f) { float ph = fmodf(g_scan_y0, f->scan_pitch); f->scan_phase = ph < 0 ? ph + f->scan_pitch : ph; }
+            if (f->n_scan < 8 || !(f->scan_pitch >= 1.0f)) f->n_scan = 0;   /* un par de tiras sueltas no son un efecto de pantalla */
+            { int dropped = f->n_cover - f->n_covers, sa = g_scan_cover_seq - dropped; f->scan_after = sa < 0 ? 0 : sa > f->n_covers ? f->n_covers : sa; }
+        }
+        if (g_frame_on && out->stats.n_filter_frame > 0) {
+            for (int i = 0; i < VR_FRAME_W * VR_FRAME_H; i++) { float v = g_frame_acc[i]; g_frame_out[i] = (uint8_t)(v <= 0 ? 0 : v >= 1 ? 255 : (int)(v * 255.0f + 0.5f)); }
+            f->frame_on = 1; f->frame = g_frame_out; f->frame_w = VR_FRAME_W; f->frame_h = VR_FRAME_H;
+            if (bs && (bs->valid & BRIDGE_OK_EQUIP) && bs->item >= 2 && bs->item <= 4) { f->frame_rgb[0] = 0.12f; f->frame_rgb[1] = 0.085f; f->frame_rgb[2] = 0.055f; }   /* caja de cartón: el interior no es negro puro */
         }
     }
 

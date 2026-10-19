@@ -22,6 +22,47 @@ static vr_input_frame_t frame(void) {
 
 static void run(vr_input_t *s, vr_input_frame_t *f, int n, vr_pad_t *o) { for (int i = 0; i < n; i++) vr_input_update(s, f, o); }
 
+
+/* Postura física opcional: nunca fuerza la postura del botón del juego. */
+static void t_posture_modes(void) {
+    vr_pad_t o; int taps;
+    /* OFF (defecto): de pie físico y el juego tumbado (por el botón): no se pulsa nada ni se levanta */
+    vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame();
+    run(&s, &f, 3, &o);
+    f.game_posture = 2; taps = 0;
+    for (int i = 0; i < 300; i++) { vr_input_update(&s, &f, &o); if (o.buttons & VRI_PAD_CROSS) taps++; }
+    CHECK(taps == 0); CHECK(vr_input_posture(&s) == VRI_PRONE);
+    f.head_pos[1] = 0.7f; taps = 0;                      /* agacharse físicamente tampoco hace nada */
+    f.game_posture = 0;
+    for (int i = 0; i < 300; i++) { vr_input_update(&s, &f, &o); if (o.buttons & VRI_PAD_CROSS) taps++; }
+    CHECK(taps == 0); CHECK(vr_input_posture(&s) == VRI_STAND);
+    /* el botón de cruz del usuario llega intacto */
+    f.pad_buttons = 0; f.hand[1].buttons = VRI_H_LOW; vr_input_update(&s, &f, &o); CHECK(o.buttons & VRI_PAD_CROSS);
+    /* DOWN: bajar físicamente baja el juego una vez; levantarse no lo sube; con el juego ya tumbado no baja */
+    vr_input_t d; vr_input_init(&d); d.cfg.posture_mode = VRI_POSTURE_DOWN; f = frame(); f.game_posture = 0;
+    run(&d, &f, 3, &o);
+    f.head_pos[1] = 1.65f - 0.45f; taps = 0; int game = 0; bool prev = false;
+    for (int i = 0; i < 300; i++) {
+        vr_input_update(&d, &f, &o);
+        bool c = o.buttons & VRI_PAD_CROSS; if (c && !prev) { taps++; game = game == 0 ? 1 : game; } prev = c; f.game_posture = game;
+    }
+    CHECK(taps == 1 && game == 1);
+    f.head_pos[1] = 1.65f; taps = 0;                     /* se levanta: el juego sigue agachado, sin toques */
+    for (int i = 0; i < 300; i++) { vr_input_update(&d, &f, &o); if (o.buttons & VRI_PAD_CROSS) taps++; }
+    CHECK(taps == 0);
+    f.game_posture = 2; f.head_pos[1] = 1.65f - 0.45f; taps = 0;   /* juego tumbado por botón, el usuario se agacha: no se toca */
+    for (int i = 0; i < 300; i++) { vr_input_update(&d, &f, &o); if (o.buttons & VRI_PAD_CROSS) taps++; }
+    CHECK(taps == 0);
+    /* DOWN: me agacho, el juego recibe mi toque pero el usuario además pulsa la cruz a mano hasta tumbarse: ningún reintento más */
+    vr_input_init(&d); d.cfg.posture_mode = VRI_POSTURE_DOWN; f = frame(); f.game_posture = 0; run(&d, &f, 3, &o);
+    f.head_pos[1] = 1.65f - 0.45f; taps = 0;
+    for (int i = 0; i < 3; i++) { vr_input_update(&d, &f, &o); if (o.buttons & VRI_PAD_CROSS) taps++; }
+    CHECK(taps >= 1);                                    /* el primer toque sí sale */
+    f.game_posture = 2; taps = 0; bool pv = (o.buttons & VRI_PAD_CROSS) != 0;
+    for (int i = 0; i < 600; i++) { vr_input_update(&d, &f, &o); bool c = (o.buttons & VRI_PAD_CROSS) != 0; if (c && !pv) taps++; pv = c; }
+    CHECK(taps == 0);
+}
+
 static void t_axis(void) {
     CHECK(vr_input_axis_u8(0) == 0x80);
     CHECK(vr_input_axis_u8(1) == 255);
@@ -160,7 +201,7 @@ static void t_vignette(void) {
 
 /* Juego simulado: cada toque de la cruz cambia la postura 0->1->2 y 2->0 (si es el ciclo supuesto) */
 static void t_crouch(void) {
-    vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); vr_pad_t o;
+    vr_input_t s; vr_input_init(&s); s.cfg.posture_mode = VRI_POSTURE_FULL; s.cfg.allow_prone = true; vr_input_frame_t f = frame(); vr_pad_t o;
     run(&s, &f, 3, &o); NEAR(vr_input_height(&s), 1.65f, 1e-5f);
     CHECK(vr_input_posture(&s) == VRI_STAND);
     int taps = 0; bool prev = false; int game = 0; f.game_posture = 0;
@@ -270,7 +311,7 @@ static void t_review(void) {
 
 int main(void) {
     t_axis(); t_heading(); t_sense_buttons(); t_pad_mode(); t_loco(); t_snap(); t_smooth();
-    t_vignette(); t_crouch(); t_calib(); t_menu(); t_robust(); t_review();
+    t_vignette(); t_crouch(); t_posture_modes(); t_calib(); t_menu(); t_robust(); t_review();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

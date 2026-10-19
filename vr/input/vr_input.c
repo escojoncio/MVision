@@ -56,7 +56,8 @@ void vr_input_cfg_defaults(vri_cfg_t *c) {
     c->stick_deadzone = 0.15f;
     c->walk_scale = 1.0f;
     c->pass_right_stick = false;
-    c->allow_prone = true;
+    c->allow_prone = false;   /* nunca se detecta "tumbado" por la cabeza por defecto: se juega sentado o de pie; tumbarse es solo del botón del juego */
+    c->posture_mode = VRI_POSTURE_OFF;
     c->crouch_drop_m = 0.35f;
     c->prone_drop_m = 0.80f;
     c->hysteresis_m = 0.06f;
@@ -76,6 +77,7 @@ void vr_input_cfg_defaults(vri_cfg_t *c) {
 static void sanitize(vri_cfg_t *c) {
     c->mode = c->mode == VRI_MODE_PAD ? VRI_MODE_PAD : VRI_MODE_SENSE;
     c->dominant_hand = c->dominant_hand ? 1 : 0;
+    if ((unsigned)c->posture_mode > VRI_POSTURE_FULL) c->posture_mode = VRI_POSTURE_OFF;
     c->loco_ref = c->loco_ref == VRI_LOCO_HAND ? VRI_LOCO_HAND : VRI_LOCO_HEAD;
     if ((unsigned)c->turn_mode > VRI_TURN_OFF) c->turn_mode = VRI_TURN_SNAP;
     c->snap_deg = clampf(fin0(c->snap_deg), 5.0f, 180.0f);
@@ -161,10 +163,15 @@ static uint16_t crouch_step(vr_input_t *s, const vr_input_frame_t *f, float dt) 
         if (y > 0.5f) { s->calib_h = y; s->need_calib = false; s->desired = s->prev_desired = VRI_STAND; s->crouch_pending = false; }
         return 0;
     }
-    if (s->desired == VRI_STAND && y > s->calib_h)
+    if ((s->desired == VRI_STAND || c->posture_mode == VRI_POSTURE_OFF) && y > s->calib_h)
     {   /* la altura "de pie" solo sube, con velocidad limitada (0.15 m/s): un pico de tracking no la infla */
         float step = fminf((y - s->calib_h) * 2.0f, 0.15f) * dt;
         s->calib_h += step;
+    }
+    if (c->posture_mode == VRI_POSTURE_OFF) {          /* la postura es solo del botón del juego: se sigue, no se fuerza */
+        if (f->game_posture >= 0 && f->game_posture <= 2) s->desired = s->prev_desired = f->game_posture;
+        s->crouch_pending = false; s->crouch_phase = PH_IDLE;
+        return 0;
     }
     float drop = s->calib_h - y;
     int d = s->desired;
@@ -180,12 +187,16 @@ static uint16_t crouch_step(vr_input_t *s, const vr_input_frame_t *f, float dt) 
     if (d != s->desired) {
         s->prev_desired = s->desired;
         s->desired = d;
+        /* DOWN: solo se actúa al bajar y solo si el juego está más alto que lo pedido; subir o igualar no pulsa nada */
+        bool act = c->posture_mode == VRI_POSTURE_FULL || (d > s->prev_desired && (f->game_posture < 0 || f->game_posture < d));
+        if (!act) { s->crouch_pending = false; goto no_change; }
         s->crouch_pending = true;
         s->retries = 0;
         int n = d > s->prev_desired ? d - s->prev_desired : s->prev_desired - d;
         s->taps_left = n < 1 ? 1 : n;
         if (s->crouch_phase == PH_ON) { s->crouch_phase = PH_SETTLE; s->crouch_timer = 0.15f; }
     }
+no_change:
     if (f->menu) { s->crouch_pending = false; s->crouch_phase = PH_IDLE; return 0; }
 
     uint16_t out = 0;
@@ -198,7 +209,7 @@ static uint16_t crouch_step(vr_input_t *s, const vr_input_frame_t *f, float dt) 
     }
     if (s->crouch_phase == PH_IDLE && s->crouch_pending) {
         bool ok;
-        if (f->game_posture >= 0) ok = f->game_posture == s->desired;
+        if (f->game_posture >= 0) ok = c->posture_mode == VRI_POSTURE_DOWN ? f->game_posture >= s->desired : f->game_posture == s->desired;   /* DOWN: el juego ya igual o más bajo (botón manual) = nada que corregir, sin reintentos */
         else ok = s->taps_left <= 0;
         if (ok || s->retries >= 3) s->crouch_pending = false;
         else {

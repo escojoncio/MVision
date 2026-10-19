@@ -24,28 +24,28 @@
  *  M2  Animación: cada actor llama a la función de "actualizar objeto" (EU 0x80035968, que llama a la de
  *      reproducir movimiento 0x800356c8) cada fotograma, sin condición de dibujo. Las matrices de articulaciones
  *      las calcula el paso de pantalla del canal 3D para TODA la cola del canal, sin mirar la bandera de
- *      invisible ni bound_mode. No hay LOD de animación. => la animación NO depende de que el objeto se dibuje.
- *  M3  Paso de límites del canal 3D (0x80018c8c): por bloque de objeto 3D: si flag&0x80 (invisible) -> bound_mode=0;
+ *      invisible ni clip_state. No hay LOD de animación. => la animación NO depende de que el objeto se dibuje.
+ *  M3  Paso de límites del canal 3D (0x80018c8c): por bloque de objeto 3D: si flag&0x80 (invisible) -> clip_state=0;
  *      si id de grupo!=0 y (id de grupo & grupo_actual @0x800ACAF8)==0 -> 0; si flag&0x20 (caja global) -> prueba de caja
- *      contra la pantalla ORIGINAL (320x224 del canal 1) -> 0/1/2; si no 2. Se guarda en bound_mode (s16
+ *      contra la pantalla ORIGINAL (320x224 del canal 1) -> 0/1/2; si no 2. Se guarda en clip_state (s16
  *      @+0x32 del bloque) en la instrucción 0x80018fc4 (sh $7,0x32($4)) y decide si se construyen paquetes de
  *      polígonos (los libera tras 8 fotogramas). Bloque: +0x14 world.t (posición mundo), +0x24 def, +0x28 flag,
- *      +0x2c id de grupo, +0x2e nº de modelos, +0x30 canal, +0x32 bound_mode, +0x48 objs[] (0x58 B cada uno).
- *  M4  El juego LEE bound_mode en lógica, no solo en dibujo. Lectores en overlays de enemigos (cada zona tiene su
- *      propia copia en direcciones distintas, p. ej. 's00a' 0x800c72a4 / 0x800cd2a0 / 0x800d18bc / 0x800d5760;
+ *      +0x2c id de grupo, +0x2e nº de modelos, +0x30 canal, +0x32 clip_state, +0x48 objs[] (0x5C B cada uno).
+ *  M4  El juego LEE clip_state en lógica, no solo en dibujo. Lectores en overlays de enemigos (cada zona tiene su
+ *      propia copia en direcciones distintas, p. ej. overlay inicial 0x800c72a4 / 0x800cd2a0 / 0x800d18bc / 0x800d5760;
  *      la tabla por overlay sale de buscar `lh/lhu rt,0x32(rs)`):
- *       a) soldado "ir a una zona" (ov 0x800cd2a0, rama bound_mode==0 && bit 0x100 del estado de acción): si la
+ *       a) soldado "ir a una zona" (ov 0x800cd2a0, rama clip_state==0 && bit 0x100 del estado de acción): si la
  *          cámara no lo ve, en vez de andar se TELETRANSPORTA por las zonas de ruta (función de "salir de
  *          pantalla por zonas", EU 0x8005dce0, que usa la proyección a pantalla 0x8001c30c para decidir qué
  *          zona queda fuera de pantalla).
- *       b) soldado en marcha (ov 0x800c72a4): bound_mode==0 -> gira de golpe a la dirección de marcha;
+ *       b) soldado en marcha (ov 0x800c72a4): clip_state==0 -> gira de golpe a la dirección de marcha;
  *          !=0 -> giro suave. Solo estética del giro.
- *       c) cámara de vigilancia (ov): bound_mode!=0 -> actualiza la matriz de luz del modelo (solo iluminación).
- *       d) objetos sueltos: si bound_mode==0 y se agotó su tiempo -> desaparecen; roedores; cuerpo del jugador.
- *      Con la cámara original lo habitual es bound_mode==0 para todo lo lejano (comprobado en el muelle:
- *      soldados a 10000-20000 unidades con bound_mode 0).
+ *       c) cámara de vigilancia (ov): clip_state!=0 -> actualiza la matriz de luz del modelo (solo iluminación).
+ *       d) objetos sueltos: si clip_state==0 y se agotó su tiempo -> desaparecen; roedores; cuerpo del jugador.
+ *      Con la cámara original lo habitual es clip_state==0 para todo lo lejano (comprobado en la zona inicial:
+ *      soldados a 10000-20000 unidades con clip_state 0).
  *  M5  Proyección de puntos a pantalla (0x8001c30c, llamadores EU: 0x8005dde8 la función de M4a, 0x80078124 un
- *      efecto, y la rama M4a de cada overlay, p. ej. 's00a' 0x800cd32c): proyecta con la matriz del canal 1
+ *      efecto, y la rama M4a de cada overlay, p. ej. overlay inicial 0x800cd32c): proyecta con la matriz del canal 1
  *      (@0x800B2B8C) y marca `pad`=1 en cada SVECTOR si cae en la pantalla original. La variante de un punto
  *      (0x8001c564; llamadores 0x8002d814 = orden de guion "¿en pantalla?" y 0x800659b4 = cámara de fotos) debe
  *      seguir siendo ORIGINAL: son reglas del juego ligadas a la cámara que sí se usa (foto) o a guiones.
@@ -55,7 +55,7 @@
  *      se dibuja y no ejecuta efectos. Es lógica de guion (puertas, plantas), no de cámara: este módulo NO la
  *      modifica (ver pendientes).
  *  M7  Reparto en el tiempo: la visión de cada soldado solo se evalúa cuando (contador % intervalo) == su
- *      índice (ov, 's00a' 0x800c9e68 y similares): escalonamiento por soldado, no por cámara; es dominio de
+ *      índice (ov inicial, 0x800c9e68 y similares): escalonamiento por soldado, no por cámara; es dominio de
  *      vr_perception.
  *  M8  Banderas globales: la bandera 0x200 del estado global (0x800AC570) apaga a todos los soldados
  *      (guiones); fundido de salida individual. Independientes de la cámara.
@@ -64,7 +64,7 @@
  *      al dibujo es la matriz de luz (M4c). No se congelan fuera de la cámara original.
  *
  * Conclusión de diseño: para que la simulación no dependa de la cámara original basta con
- *   (1) que bound_mode NO sea 0 para soldados/sensores activos dentro del radio (gancho a mitad de función en
+ *   (1) que clip_state NO sea 0 para soldados/sensores activos dentro del radio (gancho a mitad de función en
  *       0x80018fc4), y
  *   (2) que la proyección a pantalla M5 considere "visible" todo punto activo (parche de 0x8001c30c),
  * con conmutadores separados soldados / sensores. Todo lo demás ya corre a frecuencia completa.
@@ -94,7 +94,7 @@ enum {
     VRA_WHY_NO_LOS        = 1u << 2,  /* la función de línea de visión lo descarta */
     VRA_WHY_NOT_IN_GROUP  = 1u << 3,  /* su modelo no está en el grupo de mapas del jugador (M6) */
     VRA_WHY_INVISIBLE     = 1u << 4,  /* bandera de invisible (lo decide el juego: fundido, muerte...) */
-    VRA_WHY_BOUND_ZERO    = 1u << 5,  /* en rango y en grupo pero bound_mode==0: el hook no actuó (BUG) */
+    VRA_WHY_CLIP_ZERO    = 1u << 5,  /* en rango y en grupo pero clip_state==0: el hook no actuó (BUG) */
     VRA_WHY_PAUSED        = 1u << 6,  /* el juego está pausado/detenido (M1) */
     VRA_WHY_ENEMY_OFF     = 1u << 7,  /* soldados apagados por el estado global (M8) */
     VRA_WHY_NO_OBJS       = 1u << 8   /* no se localizó su objeto 3D */
@@ -130,7 +130,7 @@ typedef struct VraAudit {
     uint32_t actor;
     uint8_t cls, level;
     int32_t dist;
-    int16_t bound_mode;                /* bound_mode del primer objeto 3D (o -1) */
+    int16_t clip_state;                /* clip_state del primer objeto 3D (o -1) */
     uint32_t why;                      /* VRA_WHY_* (0 = activo) */
 } VraAudit;
 
@@ -174,10 +174,10 @@ int vra_frame(VrActivity *a, const uint8_t *ram, const BridgeState *st);
 /* ---- decisiones puras (usables desde parches y pruebas) ---- */
 int32_t vra_radius(const VrActivity *a, VraClass cls);              /* radio efectivo */
 int vra_point_active(const VrActivity *a, VraClass cls, const int32_t p[3]);   /* modo VR + activo + rango + LOS */
-/* Valor de bound_mode que debe quedar guardado para el objeto 3D `objs` dado lo que calculó el motor
+/* Valor de clip_state que debe quedar guardado para el objeto 3D `objs` dado lo que calculó el motor
  * (`mode_in`), su flag, grupo y el grupo actual. Devuelve mode_in sin cambios si no es un actor seguido, el
  * conmutador de su clase está en ORIGINAL, el objeto es invisible o está fuera del grupo, o ya era != 0. */
-int vra_bound_mode(const VrActivity *a, uint32_t objs, uint32_t flag, uint32_t group, int mode_in);
+int vra_clip_state(const VrActivity *a, uint32_t objs, uint32_t flag, uint32_t group, int mode_in);
 VraClass vra_class_of_objs(const VrActivity *a, uint32_t objs);
 /* Marca `pad`=1 en cada punto (SVECTOR de 8 B: x,y,z,pad) que debe contar como "en pantalla" aunque la
  * cámara original no lo vea. `pts` apunta a RAM del juego. Solo clase SOLDADO (único llamador de la proyección M5
@@ -194,7 +194,7 @@ int vra_register_name(const char *name, VraClass cls, int lmin, int lmax);
 /* Caja de zonas de los mapas usados (EU): devuelve la diagonal 3D en unidades del motor o 0 si no se pudo. */
 int32_t vra_zone_diag(const uint8_t *ram, int32_t *box /* NULL o int32[6]: minx,miny,minz,maxx,maxy,maxz */);
 
-/* ---- direcciones EU (RAM de PS1, KSEG0) ---- */
+/* ---- direcciones EU (RAM de la plataforma original, KSEG0) ---- */
 #define VRA_A_CUR_GROUP   0x800ACAF8u  /* grupo de dibujo actual (lw -0x3508 sobre 0x800B0000 en el paso M3) */
 #define VRA_A_MAPS        0x800B8A90u  /* MAP[16] de 20 B: index,name u16,used u16,haz,lit,zone (hallado por escaneo) */
 #define VRA_MAP_STRIDE    20u

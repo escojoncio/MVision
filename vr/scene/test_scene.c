@@ -10,7 +10,7 @@ static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; fprintf(stderr, "FALLO %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
 static int near_f(float a, float b, float t) { return fabsf(a - b) <= t; }
 
-static GpuOp ops[64];
+static GpuOp ops[512];
 static GpuDrawList dl;
 
 static void reset(void) { memset(ops, 0, sizeof ops); memset(&dl, 0, sizeof dl); dl.ops = ops; }
@@ -709,6 +709,212 @@ static void test_post_emu(void) {
     CHECK(near_f(dst[(100 * W) * 3 + 1], 1.0f, 1e-6f) && near_f(dst[(100 * W) * 3 + 2], 0.4f, 1e-6f), "recubrimiento aditivo");
 }
 
+
+/* ---- objetos equipados (clase 3b): gafas (recubrimiento + líneas de exploración), máscara de visión, varios recubrimientos ---- */
+static GpuOp *poly2d_quad(int x0, int y0, int x1, int y1, uint16_t flags, int abr, const uint8_t col[4][3]) {
+    GpuOp *o = add(GPU_OP_POLY);
+    o->nv = 4; o->flags = flags; o->abr = (uint8_t)abr;
+    int xs[4] = {x0, x1, x0, x1}, ys[4] = {y0, y0, y1, y1};
+    for (int k = 0; k < 4; k++) { o->v[k].x = (int16_t)xs[k]; o->v[k].y = (int16_t)ys[k]; o->v[k].r = col[k][0]; o->v[k].g = col[k][1]; o->v[k].b = col[k][2]; }
+    o->cx1 = 0; o->cy1 = 0; o->cx2 = 319; o->cy2 = 255;
+    return o;
+}
+static void test_goggles(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    VrSceneOpts o = vr_scene_opts_default(); o.screen_filter = 1;
+    VrScene s;
+    float a[3] = {0, 0, 2000}, b[3] = {1000, 0, 2000}, c[3] = {0, 1000, 2000};
+
+    /* A) gafas de visión nocturna: tinte aditivo verde (56,120,40) + 128 líneas de 320x1 cada 2 filas, resta 64 */
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    rect2d(0, 0, 320, 256, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    poly3(a, b, c, 0);
+    rect2d(0, 0, 320, 256, 0, 0, GPU_F_SEMI, 0, 0, 0, 56, 120, 40)->abr = 1;
+    for (int i = 0; i < 128; i++) { GpuOp *r = rect2d(0, 254 - 2 * i, 320, 1, 0, 0, GPU_F_SEMI, 0, 0, 0, 64, 64, 64); r->abr = 2; }
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0, "build gafas");
+    const VrFilter *f = &s.filter;
+    CHECK(f->active && f->n_cover == 1 && f->n_covers == 1 && f->covers_abr[0] == 1 && near_f(f->covers_rgb[0][1], 120 / 255.0f, 1e-4f), "cover NV");
+    CHECK(s.stats.n_filter_scan == 128 && f->n_scan == 128 && near_f(f->scan_pitch, 2.0f, 1e-4f) && near_f(f->scan_phase, 0.0f, 1e-4f) && near_f(f->scan_h, 1.0f, 1e-4f) &&
+          f->scan_abr == 2 && near_f(f->scan_rgb[0], 64 / 255.0f, 1e-4f), "líneas: n %d pitch %.2f phase %.2f h %.2f abr %d", f->n_scan, f->scan_pitch, f->scan_phase, f->scan_h, f->scan_abr);
+    CHECK(!f->frame_on && f->frame == NULL, "sin máscara");
+    CHECK(f->scan_after == 1, "las líneas van tras el 1.er recubrimiento: %d", f->scan_after);
+    CHECK(s.stats.n_tris2d == 0 && s.stats.n_tris3d == 1, "las líneas no van al panel: tris2d %u", s.stats.n_tris2d);
+    for (uint32_t i = 0; i < s.nb; i++) CHECK(s.b[i].kind != 2, "sin batches 2D");
+    /* sin screen_filter las líneas y el tinte vuelven a la clase 2 (comportamiento anterior) */
+    { VrSceneOpts o0 = vr_scene_opts_default();
+      CHECK(vr_scene_build(&dl, &bs, &o0, &s) == 0 && s.stats.n_filter_scan == 0 && !s.filter.active && s.filter.n_scan == 0 && s.stats.n_tris2d == 2 * 129, "screen_filter=0: tris2d %u", s.stats.n_tris2d); }
+
+    /* A0) objetos que solo se ven con las gafas/el tabaco (haz de un sensor: polígono 3D semitransparente cuyo color modula el juego, 0 = invisible, 128 = neutro): se emiten en los dos casos */
+    for (int pass = 0; pass < 2; pass++) {
+        reset();
+        dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+        GpuOp *beam = poly3(a, b, c, 1);
+        for (int i = 0; i < 3; i++) beam->v[i].r = beam->v[i].g = beam->v[i].b = (uint8_t)(pass ? 128 : 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 1 && s.nb == 1 && s.b[0].kind == 1, "haz semitransparente emitido (color %d)", pass ? 128 : 0);
+        CHECK(s.nv == 3 && (s.v[0].rgba & 255) == (uint32_t)(pass ? 128 : 0), "color del haz %u", s.v[0].rgba & 255);
+    }
+
+    /* A2) mira de las gafas en primera persona: tinte, líneas y DESPUÉS un velo gris (B/2+F/2, poligono plano a pantalla completa) -> orden tinte < líneas < velo */
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    poly3(a, b, c, 0);
+    rect2d(0, 0, 320, 256, 0, 0, GPU_F_SEMI, 0, 0, 0, 56, 120, 40)->abr = 1;
+    for (int i = 0; i < 128; i++) { GpuOp *r = rect2d(0, 254 - 2 * i, 320, 1, 0, 0, GPU_F_SEMI, 0, 0, 0, 64, 64, 64); r->abr = 2; }
+    { static const uint8_t G[4][3] = {{85, 85, 85}, {85, 85, 85}, {85, 85, 85}, {85, 85, 85}}; poly2d_quad(0, 0, 320, 256, GPU_F_QUAD | GPU_F_SEMI, 0, G); }
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.filter.n_covers == 2 && s.filter.scan_after == 1 && s.filter.n_scan == 128 && s.filter.covers_abr[1] == 0, "orden tinte/líneas/velo: covers %d after %d", s.filter.n_covers, s.filter.scan_after);
+    { static float src2[64 * 64 * 3], dst2[64 * 64 * 3];
+      for (int i = 0; i < 64 * 64 * 3; i++) src2[i] = 0.5f;
+      VrFilter ff = s.filter; ff.proj_h = 160.0f; ff.cx_col = 160.0f; ff.cy_row = 128.0f;
+      hud_emu_post2(src2, dst2, 64, 64, 32.0f, 32.0f, 320.0f, 320.0f, &ff);   /* cada fila del ojo = 0,5 fila original: periodo 4 px, centro en la fila 128 original */
+      /* fila 32 del ojo (+0,5): r = 128 + 0,5/2 = 128,25 -> t = fract(64,125) = 0,125: sobre línea; fila 34: r = 129,25 -> entre líneas */
+      float g_on = 0.5f + 120 / 255.0f; g_on = g_on - 64 / 255.0f; g_on = 0.5f * g_on + 0.5f * (85 / 255.0f);
+      float g_off = 0.5f + 120 / 255.0f; g_off = 0.5f * g_off + 0.5f * (85 / 255.0f);
+      CHECK(near_f(dst2[(32 * 64 + 10) * 3 + 1], g_on, 2e-3f) && near_f(dst2[(34 * 64 + 10) * 3 + 1], g_off, 2e-3f), "velo gris tras las líneas: %.4f (%.4f) / %.4f (%.4f)", dst2[(32 * 64 + 10) * 3 + 1], g_on, dst2[(34 * 64 + 10) * 3 + 1], g_off); }
+
+    /* B) tiras sueltas (< 8) no son un efecto de pantalla; periodo irregular: se toma el menor; fase con origen de la imagen desplazado */
+    reset();
+    dl.disp.x = 320; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    for (int i = 0; i < 5; i++) { GpuOp *r = rect2d(320, 100 + 3 * i, 320, 1, 0, 0, GPU_F_SEMI, 0, 0, 0, 64, 64, 64); r->abr = 2; r->cx1 = 320; r->cx2 = 639; }
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.filter.n_scan == 0, "5 tiras: n_scan %d", s.filter.n_scan);
+    reset();
+    dl.disp.x = 320; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    for (int i = 0; i < 20; i++) { GpuOp *r = rect2d(320, 101 + 3 * i, 320, 1, 0, 0, GPU_F_SEMI, 0, 0, 0, 40, 40, 40); r->abr = 2; r->cx1 = 320; r->cx2 = 639; }
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.filter.n_scan == 20 && near_f(s.filter.scan_pitch, 3.0f, 1e-4f) && near_f(s.filter.scan_phase, 2.0f, 1e-4f), "periodo 3 fase 2: n %d pitch %.2f phase %.2f", s.filter.n_scan, s.filter.scan_pitch, s.filter.scan_phase);
+
+    /* C) varios recubrimientos en orden: el tinte de las gafas y un destello rojo (el último gana en cover_*; los dos van en covers_*) */
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    poly3(a, b, c, 0);
+    rect2d(0, 0, 320, 256, 0, 0, GPU_F_SEMI, 0, 0, 0, 56, 120, 40)->abr = 1;
+    rect2d(0, 0, 320, 256, 0, 0, GPU_F_SEMI, 0, 0, 0, 90, 0, 0)->abr = 1;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.filter.n_covers == 2 && s.filter.n_cover == 2 && near_f(s.filter.covers_rgb[0][1], 120 / 255.0f, 1e-4f) &&
+          near_f(s.filter.covers_rgb[1][0], 90 / 255.0f, 1e-4f) && near_f(s.filter.cover_rgb[0], 90 / 255.0f, 1e-4f), "dos recubrimientos");
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    for (int i = 0; i < 6; i++) rect2d(0, 0, 320, 256, 0, 0, GPU_F_SEMI, 0, 0, 0, (uint8_t)(10 * (i + 1)), 0, 0)->abr = (uint8_t)(i & 3);
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.filter.n_covers == VR_FILTER_COVERS && near_f(s.filter.covers_rgb[0][0], 30 / 255.0f, 1e-4f) && near_f(s.filter.covers_rgb[3][0], 60 / 255.0f, 1e-4f) &&
+          s.filter.covers_abr[0] == 2 && s.filter.covers_abr[3] == 1, "6 recubrimientos: se conservan los 4 últimos (n %d, [0]=%.0f abr %d)", s.filter.n_covers, s.filter.covers_rgb[0][0] * 255, s.filter.covers_abr[0]);
+
+    /* D) máscara de visión: agujero rectangular x 100..220, y 80..180 (centro 160,130), 10 planos de restar blanco / negro opaco alrededor y 10 degradados de resta en el borde interior */
+    static const uint8_t WHITE[4][3] = {{255, 255, 255}, {255, 255, 255}, {255, 255, 255}, {255, 255, 255}};
+    static const uint8_t BLACK[4][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+    for (int variant = 0; variant < 2; variant++) {   /* 0: planos de restar blanco (semitransparente, modo 2); 1: planos opacos negros */
+        reset();
+        dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+        poly3(a, b, c, 0);
+        uint16_t ff = (uint16_t)(variant == 0 ? GPU_F_QUAD | GPU_F_SEMI : GPU_F_QUAD);
+        const uint8_t (*col)[3] = variant == 0 ? WHITE : BLACK;
+        for (int i = 0; i < 4; i++) { poly2d_quad(80 * i, 0, 80 * (i + 1), 80, ff, 2, col); poly2d_quad(80 * i, 180, 80 * (i + 1), 256, ff, 2, col); }
+        poly2d_quad(0, 80, 100, 180, ff, 2, col); poly2d_quad(220, 80, 320, 180, ff, 2, col);
+        /* degradado interior de 10 px: 255 pegado al agujero... al borde del plano (resta total) -> 0 en el interior (arriba y abajo en 3 trozos, izq/der: 2) */
+        static const uint8_t GT[4][3] = {{255, 255, 255}, {255, 255, 255}, {0, 0, 0}, {0, 0, 0}};   /* arriba: vértices 0,1 en y0 (borde), 2,3 en y1 */
+        static const uint8_t GB[4][3] = {{0, 0, 0}, {0, 0, 0}, {255, 255, 255}, {255, 255, 255}};
+        for (int i = 0; i < 3; i++) { poly2d_quad(100 + 40 * i, 80, 140 + 40 * i, 90, GPU_F_QUAD | GPU_F_GOURAUD | GPU_F_SEMI, 2, GT); poly2d_quad(100 + 40 * i, 170, 140 + 40 * i, 180, GPU_F_QUAD | GPU_F_GOURAUD | GPU_F_SEMI, 2, GB); }
+        static const uint8_t GL[4][3] = {{255, 255, 255}, {0, 0, 0}, {255, 255, 255}, {0, 0, 0}}, GR[4][3] = {{0, 0, 0}, {255, 255, 255}, {0, 0, 0}, {255, 255, 255}};
+        for (int i = 0; i < 2; i++) { poly2d_quad(100, 90 + 40 * i, 110, 130 + 40 * i, GPU_F_QUAD | GPU_F_GOURAUD | GPU_F_SEMI, 2, GL); poly2d_quad(210, 90 + 40 * i, 220, 130 + 40 * i, GPU_F_QUAD | GPU_F_GOURAUD | GPU_F_SEMI, 2, GR); }
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0, "build máscara");
+        f = &s.filter;
+        CHECK(f->active && f->frame_on && f->frame && f->frame_w == VR_FRAME_W && f->frame_h == VR_FRAME_H, "máscara activa (variante %d)", variant);
+        CHECK(s.stats.n_filter_frame == 10 + 10 && s.stats.n_tris2d == 0 && s.stats.n_tris3d == 1, "polígonos de la máscara %u (tris2d %u)", s.stats.n_filter_frame, s.stats.n_tris2d);
+        for (uint32_t i = 0; i < s.nb; i++) CHECK(s.b[i].kind != 2, "la máscara no va al panel");
+        if (f->frame) {
+            #define FR(px, py) f->frame[(int)((py) / 2) * VR_FRAME_W + (int)((px) / 2)]
+            CHECK(FR(160, 130) == 0, "centro del agujero abierto: %d", FR(160, 130));
+            CHECK(FR(10, 10) == 255 && FR(300, 250) == 255 && FR(40, 130) == 255 && FR(280, 130) == 255 && FR(160, 40) == 255 && FR(160, 220) == 255, "fuera del agujero cerrado");
+            CHECK(FR(160, 81) >= 200 && FR(160, 89) <= 60 && FR(160, 85) > 60 && FR(160, 85) < 200, "degradado superior %d %d %d", FR(160, 81), FR(160, 85), FR(160, 89));
+            CHECK(FR(101, 130) >= 200 && FR(109, 130) <= 60 && FR(219, 130) >= 200 && FR(211, 130) <= 60, "degradados laterales %d %d", FR(101, 130), FR(109, 130));
+        }
+    }
+    /* sin screen_filter no se detecta; y con pocos polígonos de resta (< 8 de cada) no es una máscara (HUD normal con degradados) */
+    { VrSceneOpts o0 = vr_scene_opts_default(); CHECK(vr_scene_build(&dl, &bs, &o0, &s) == 0 && !s.filter.frame_on && s.stats.n_filter_frame == 0, "screen_filter=0: sin máscara"); }
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    for (int i = 0; i < 6; i++) { poly2d_quad(10 + 40 * i, 10, 40 + 40 * i, 30, GPU_F_QUAD | GPU_F_SEMI, 2, WHITE); poly2d_quad(10 + 40 * i, 40, 40 + 40 * i, 60, GPU_F_QUAD | GPU_F_GOURAUD | GPU_F_SEMI, 2, WHITE); }
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && !s.filter.frame_on && s.stats.n_filter_frame == 0 && s.stats.n_tris2d == 24, "6+6 polígonos: HUD normal (tris2d %u)", s.stats.n_tris2d);
+    /* la máscara con origen de imagen desplazado (disp.x=320) cae en las mismas celdas */
+    reset();
+    dl.disp.x = 320; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    for (int i = 0; i < 8; i++) poly2d_quad(320 + 40 * i, 0, 320 + 40 * (i + 1), 100, GPU_F_QUAD | GPU_F_SEMI, 2, WHITE);
+    for (int i = 0; i < 8; i++) poly2d_quad(320 + 40 * i, 100, 320 + 40 * (i + 1), 110, GPU_F_QUAD | GPU_F_GOURAUD | GPU_F_SEMI, 2, WHITE);
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.filter.frame_on && s.filter.frame[(50 / 2) * VR_FRAME_W + 100 / 2] == 255 && s.filter.frame[(200 / 2) * VR_FRAME_W + 100 / 2] == 0, "máscara con disp.x=320");
+    vr_scene_release();
+}
+
+
+/* emulación del post-proceso con la clase 3b (hud_emu_post2 == vr_fs_post): gafas (tinte + líneas) y máscara de visión */
+static void test_goggles_emu(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    VrSceneOpts o = vr_scene_opts_default(); o.screen_filter = 1;
+    VrScene s;
+    float a[3] = {0, 0, 2000}, b[3] = {1000, 0, 2000}, c[3] = {0, 1000, 2000};
+    enum { W = 640, H = 512 };    /* ojo con el doble de resolución que la imagen del motor y su mismo campo: x_ojo = 2*x_motor, f = 320 */
+    static float src[W * H * 3], dst[W * H * 3];
+    for (int i = 0; i < W * H * 3; i++) src[i] = 0.5f;
+    /* gafas nocturnas */
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    poly3(a, b, c, 0);
+    rect2d(0, 0, 320, 256, 0, 0, GPU_F_SEMI, 0, 0, 0, 56, 120, 40)->abr = 1;
+    for (int i = 0; i < 128; i++) { GpuOp *r = rect2d(0, 254 - 2 * i, 320, 1, 0, 0, GPU_F_SEMI, 0, 0, 0, 64, 64, 64); r->abr = 2; }
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.filter.n_scan == 128, "build gafas (emu)");
+    s.filter.proj_h = 160.0f; s.filter.cx_col = 160.0f; s.filter.cy_row = 128.0f;
+    hud_emu_post2(src, dst, W, H, 320.0f, 256.0f, 320.0f, 320.0f, &s.filter);
+    {   /* fila 200 del ojo -> fila original r = 128 + (200,5-256)/2 = 100,25: dentro de una línea (filas pares); fila 202 -> r = 101,25: entre líneas */
+        const float *on = &dst[((size_t)200 * W + 300) * 3], *off = &dst[((size_t)202 * W + 300) * 3];
+        float r0 = 0.5f + 56 / 255.0f, g0 = 0.5f + 120 / 255.0f, b0 = 0.5f + 40 / 255.0f;
+        CHECK(near_f(off[0], r0, 1e-4f) && near_f(off[1], g0, 1e-4f) && near_f(off[2], b0, 1e-4f), "entre líneas: tinte aditivo %.3f %.3f %.3f", off[0], off[1], off[2]);
+        CHECK(near_f(on[0], r0 - 64 / 255.0f, 1e-3f) && near_f(on[1], g0 - 64 / 255.0f, 1e-3f) && near_f(on[2], b0 - 64 / 255.0f, 1e-3f), "sobre línea: resta 64 %.3f %.3f %.3f", on[0], on[1], on[2]);
+    }
+    /* con las líneas más finas que ~1 px del ojo (periodo = 1 px) se usa la media (alto/periodo = 0,5): resta media 32 */
+    hud_emu_post2(src, dst, 320, 256, 160.0f, 128.0f, 80.0f, 80.0f, &s.filter);
+    {
+        const float *p0 = &dst[((size_t)100 * 320 + 50) * 3], *p1 = &dst[((size_t)101 * 320 + 50) * 3];
+        CHECK(near_f(p0[0], p1[0], 1e-4f) && near_f(p0[0], 0.5f + 56 / 255.0f - 32 / 255.0f, 2e-3f), "periodo de 2 px: media %.4f %.4f", p0[0], p1[0]);
+    }
+    /* sin líneas (n_scan = 0) y sin recubrimientos: identidad */
+    { VrFilter f; memset(&f, 0, sizeof f); f.proj_h = 160.0f; f.cy_row = 128.0f; f.cx_col = 160.0f; f.tint[0] = f.tint[1] = f.tint[2] = 1.0f; f.cover_abr = -1;
+      hud_emu_post2(src, dst, W, H, 320.0f, 256.0f, 320.0f, 320.0f, &f);
+      int same = 1; for (int i = 0; i < W * H * 3; i++) if (!near_f(src[i], dst[i], 1e-6f)) same = 0;
+      CHECK(same, "post2 identidad"); }
+    /* máscara de visión: agujero x 100..240 (asimétrico), y 80..180 con el mismo campo; ojo 640x512 a doble resolución */
+    static const uint8_t WHITE[4][3] = {{255, 255, 255}, {255, 255, 255}, {255, 255, 255}, {255, 255, 255}};
+    static const uint8_t GT[4][3] = {{255, 255, 255}, {255, 255, 255}, {0, 0, 0}, {0, 0, 0}};
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    poly3(a, b, c, 0);
+    for (int i = 0; i < 4; i++) { poly2d_quad(80 * i, 0, 80 * (i + 1), 80, GPU_F_QUAD | GPU_F_SEMI, 2, WHITE); poly2d_quad(80 * i, 180, 80 * (i + 1), 256, GPU_F_QUAD | GPU_F_SEMI, 2, WHITE); }
+    poly2d_quad(0, 80, 100, 180, GPU_F_QUAD | GPU_F_SEMI, 2, WHITE); poly2d_quad(240, 80, 320, 180, GPU_F_QUAD | GPU_F_SEMI, 2, WHITE);
+    for (int i = 0; i < 3; i++) { poly2d_quad(100 + 46 * i, 80, 146 + 46 * i, 90, GPU_F_QUAD | GPU_F_GOURAUD | GPU_F_SEMI, 2, GT); poly2d_quad(100 + 46 * i, 170, 146 + 46 * i, 180, GPU_F_QUAD | GPU_F_GOURAUD | GPU_F_SEMI, 2, GT); }
+    for (int i = 0; i < 2; i++) { poly2d_quad(100, 90 + 40 * i, 110, 130 + 40 * i, GPU_F_QUAD | GPU_F_GOURAUD | GPU_F_SEMI, 2, GT); poly2d_quad(230, 90 + 40 * i, 240, 130 + 40 * i, GPU_F_QUAD | GPU_F_GOURAUD | GPU_F_SEMI, 2, GT); }
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.filter.frame_on && s.filter.frame_rgb[0] == 0.0f, "build máscara (emu): interior negro sin caja");
+    bs.item = 3; bs.valid |= BRIDGE_OK_EQUIP;   /* caja equipada: el interior cerrado es cartón oscuro */
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.filter.frame_on && near_f(s.filter.frame_rgb[0], 0.12f, 1e-6f) && s.filter.frame_rgb[2] > 0.0f, "build máscara (emu): interior de cartón con la caja");
+    s.filter.proj_h = 160.0f; s.filter.cx_col = 160.0f; s.filter.cy_row = 128.0f;
+    hud_emu_post2(src, dst, W, H, 320.0f, 256.0f, 320.0f, 320.0f, &s.filter);
+    #define PX(x, y) (&dst[((size_t)(y) * W + (x)) * 3])
+    CHECK(near_f(PX(320, 260)[1], 0.5f, 1e-4f), "centro abierto: %.3f", PX(320, 260)[1]);          /* canvas (160,130) */
+    CHECK(near_f(PX(20, 20)[0], 0.12f, 1e-4f) && near_f(PX(600, 500)[2], 0.055f, 1e-4f) && near_f(PX(100, 260)[0], 0.12f, 1e-4f), "fuera del agujero: interior de la caja");
+    CHECK(near_f(PX(2 * 225, 260)[0], 0.5f, 1e-4f) && near_f(PX(2 * 95, 260)[0], 0.12f, 1e-4f) && near_f(PX(2 * 255, 260)[0], 0.12f, 1e-4f), "agujero asimétrico: abierto en x=225, cerrado en 95 y 255");
+    CHECK(near_f(PX(320, 176)[0], 0.3f, 0.03f), "degradado superior (canvas y=88: resta 0,2): %.3f", PX(320, 176)[0]);
+    /* fuera de la imagen del motor (campo del ojo mayor que el del motor): resta total. Ojo 2x: la imagen del motor ocupa todo; con la misma cámara pero focal menor (160) cubre 1280x1024 virtuales */
+    hud_emu_post2(src, dst, 320, 256, 160.0f, 128.0f, 80.0f, 80.0f, &s.filter);   /* focal 80: el ojo ve el doble de campo (tangente ±2): fuera de la imagen del motor = negro */
+    CHECK(near_f(dst[((size_t)5 * 320 + 5) * 3], 0.12f, 1e-4f) && near_f(dst[((size_t)128 * 320 + 160) * 3], 0.5f, 1e-4f) && near_f(dst[((size_t)128 * 320 + 60) * 3], 0.12f, 1e-4f),
+          "campo mayor que el del motor: negro fuera (centro %.3f)", dst[((size_t)128 * 320 + 160) * 3]);
+    /* fidelidad con la resta de la PS1 sobre una escena cualquiera: out = max(c - resta, 0) en cada canal */
+    {
+        for (int i = 0; i < W * H * 3; i++) src[i] = 0.9f;
+        hud_emu_post2(src, dst, W, H, 320.0f, 256.0f, 320.0f, 320.0f, &s.filter);
+        float want = 0.9f - s.filter.frame[(int)(84 / 2) * VR_FRAME_W + (int)(160 / 2)] / 255.0f;   /* canvas (160,84): 0,9 - resta */
+        CHECK(near_f(PX(320, 168)[0], want < 0 ? 0 : want, 0.12f), "resta en el degradado: %.3f vs %.3f", PX(320, 168)[0], want);
+    }
+    vr_scene_release();
+}
+
 int main(void) {
     test_basic();
     test_stability();
@@ -723,6 +929,8 @@ int main(void) {
     test_feedback();
     test_ofs_fix();
     test_post_emu();
+    test_goggles();
+    test_goggles_emu();
     if (fails) { fprintf(stderr, "%d fallos\n", fails); return 1; }
     printf("test_scene: OK\n");
     return 0;

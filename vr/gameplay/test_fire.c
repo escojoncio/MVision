@@ -322,11 +322,18 @@ static void t_throw(void) {
     vstep(&g, &in, NULL);
     float p[3] = {0.1f + 0.3f, 1.6f + 0.2f, -0.2f - 0.4f}, v[3] = {1.0f, 2.0f, -5.0f};
     CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "lanzamiento admitido");
-    in.fire = 1; vstep(&g, &in, NULL); in.fire = 0; settle(&g, in, 10, NULL);
+    in.fire = 1; vstep(&g, &in, NULL); in.fire = 0;
     int16_t pos[3], vel[3];
     CHECK(vrfire_take_throw(pos, vel) == 1, "datos de lanzamiento");
-    CHECK(pos[0] == -300 && pos[1] == 200 && pos[2] == 400, "posición del motor (%d %d %d)", pos[0], pos[1], pos[2]);
-    CHECK(vel[0] == -40 && vel[1] == 80 && vel[2] == 200, "velocidad por tick (%d %d %d)", vel[0], vel[1], vel[2]);
+    /* 1 VBlank de retardo (0,02 s): la posición avanza v*dt y la gravedad (9,81 m/s2 sobre Y del motor) la curva; la velocidad pierde g*dt */
+    CHECK(pos[0] == -320 && pos[1] >= 237 && pos[1] <= 239 && pos[2] == 500, "posición del motor con 1 VBlank de retardo (%d %d %d)", pos[0], pos[1], pos[2]);
+    CHECK(vel[0] == -40 && vel[1] >= 71 && vel[1] <= 73 && vel[2] == 200, "velocidad por tick (%d %d %d)", vel[0], vel[1], vel[2]);
+    /* 16 VBlanks de retardo (la granada sale tras la animación): 0,32 s de trayectoria */
+    CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "segundo lanzamiento");
+    settle(&g, in, 16, NULL);
+    CHECK(vrfire_take_throw(pos, vel) == 1, "datos con 16 VBlanks");
+    CHECK(pos[0] == -620 && pos[2] == 2000 && pos[1] >= 200 + 640 - 502 - 3 && pos[1] <= 200 + 640 - 502 + 3, "posición adelantada 0,32 s con gravedad (%d %d %d)", pos[0], pos[1], pos[2]);
+    CHECK(vel[1] >= 80 - 126 - 2 && vel[1] <= 80 - 126 + 2, "velocidad vertical menos g*dt (%d)", vel[1]);
     CHECK(vrfire_take_throw(pos, vel) == 0, "se consume una vez");
     CHECK(!vrfire_set_throw(NULL, v, 0.04f) && !vrfire_set_throw(p, NULL, 0.04f) && !vrfire_set_throw(p, v, 0) && !vrfire_set_throw(p, v, NAN), "argumentos inválidos");
     CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "de nuevo");
@@ -338,6 +345,26 @@ static void t_throw(void) {
     in.fire = 1; vstep(&g, &in, NULL); in.fire = 0;
     CHECK(vrfire_take_throw(pos, vel) == 0, "sin datos: el juego lanza con los suyos"); 
     VrFireStats st; vrfire_stats(&st); CHECK(st.passed >= 1, "contado como pasado");
+}
+/* Petición de vida larga (mina: el juego la crea ~70 VBlanks después, al terminar de agacharse): sustituye en vez de caducar, y la liberación en curso
+ * no provoca una segunda pulsación mientras espera. Con la vida por defecto (60) la petición caduca y el proyectil pasa. */
+static void t_long_life(void) {
+    for (int life = 0; life <= 150; life += 150) {
+        init_trigger();
+        VrFireMap map = mkmap(100, 200, 300, 40); VrFireIn in = mkin(&map);
+        VrFireGame gs; memset(&gs, 0, sizeof gs); gs.ok = 1; gs.armed = 1; gs.mag = 1; gs.mag_max = 13; gs.total = 4;
+        in.fire = 1; in.fire_life = life;
+        VrFireOut o; vrfire_frame(&gs, &in, &o); in.fire = 0;
+        for (int i = 0; i < 100; i++) vrfire_frame(&gs, &in, &o);
+        VrFireStats st; vrfire_stats(&st);
+        VrFireMat m; int r = vrfire_take_projectile(2, &m);
+        if (life) CHECK(r == VRFIRE_SUBST && st.expired == 0 && st.presses == 1, "vida larga: sustituye tras 100 VBlanks (r=%d exp=%u pulsaciones=%u)", r, st.expired, st.presses);
+        else CHECK(r == VRFIRE_PASS && st.expired == 1, "vida por defecto: caduca (r=%d exp=%u)", r, st.expired);
+        in.fire = 1; in.fire_life = -5; vrfire_frame(&gs, &in, &o); in.fire = 0;       /* vida negativa = la de la configuración */
+        for (int i = 0; i < 70; i++) vrfire_frame(&gs, &in, &o);
+        vrfire_stats(&st);
+        CHECK(vrfire_take_projectile(2, &m) == VRFIRE_PASS && st.expired >= 1, "vida negativa = por defecto");
+    }
 }
 static void t_invalid_input(void) {
     init_trigger();
@@ -449,7 +476,7 @@ static void t_cfg(void) {
 }
 
 int main(void) {
-    t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
+    t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_long_life(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
     printf("test_fire: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

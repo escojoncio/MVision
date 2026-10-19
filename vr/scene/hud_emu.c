@@ -206,24 +206,77 @@ static float post_ysrc(const VrFilter *f, float yc, float cy_img, float f_eye) {
     }
     return yc + f_eye * d / f->proj_h;
 }
-void hud_emu_post(const float *src, float *dst, int w, int h, float cy_img, float f_eye, const VrFilter *f) {
+/* mezcla del modo original m con peso w (vr_post_blend de vr_scene.metal) */
+static float post_blend(float c, float f, int m, float w) {
+    switch (m & 3) {
+    case 0: return c + (0.5f * c + 0.5f * f - c) * w;
+    case 1: return c + f * w;
+    case 2: return c - f * w;
+    default: return c + 0.25f * f * w;
+    }
+}
+static float sat1(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+static float frac1(float v) { return v - floorf(v); }
+/* vr_post_scan */
+static float post_scan(const VrFilter *f, float yc, float cy_img, float f_eye) {
+    if (f->n_scan <= 0 || f->scan_pitch < 1.0f || f_eye <= 1.0f || f->proj_h <= 0.0f) return 0.0f;
+    float pitch = f->scan_pitch, duty = sat1(f->scan_h / pitch);
+    float r = f->cy_row + f->proj_h * ((yc - cy_img) / f_eye);
+    float t = frac1((r - f->scan_phase) / pitch);
+    float pe = pitch * f_eye / f->proj_h, e = pitch / (pe > 1e-3f ? pe : 1e-3f), edge = e > 1e-4f ? e : 1e-4f;
+    float w = sat1((duty - t) * pitch / edge + 0.5f) * sat1(t * pitch / edge + 0.5f);
+    float k = sat1((3.0f - pe) * 0.5f);
+    return w + (duty - w) * k;
+}
+/* vr_post_frame: bilineal con clamp (centro de celda i + 0,5), 1 fuera de la imagen original */
+static float post_frame(const VrFilter *f, float px, float py, float cx_img, float cy_img, float fx_eye, float f_eye) {
+    if (!f->frame_on || !f->frame || f->frame_w <= 0 || f->frame_h <= 0 || f_eye <= 1.0f || fx_eye <= 1.0f || f->proj_h <= 0.0f || f->area[2] <= 0 || f->area[3] <= 0) return 0.0f;
+    float k = f->proj_h;
+    float cx = f->cx_col + k * ((px - cx_img) / fx_eye), cy = f->cy_row + k * ((py - cy_img) / f_eye);
+    float u = cx / (float)f->area[2], v = cy / (float)f->area[3];
+    if (u < 0 || u > 1 || v < 0 || v > 1) return 1.0f;
+    float fx = u * f->frame_w - 0.5f, fy = v * f->frame_h - 0.5f, x0f = floorf(fx), y0f = floorf(fy);
+    int x0 = (int)x0f, y0 = (int)y0f, x1 = x0 + 1, y1 = y0 + 1;
+    float wx = fx - x0f, wy = fy - y0f;
+    x0 = x0 < 0 ? 0 : x0 > f->frame_w - 1 ? f->frame_w - 1 : x0; x1 = x1 < 0 ? 0 : x1 > f->frame_w - 1 ? f->frame_w - 1 : x1;
+    y0 = y0 < 0 ? 0 : y0 > f->frame_h - 1 ? f->frame_h - 1 : y0; y1 = y1 < 0 ? 0 : y1 > f->frame_h - 1 ? f->frame_h - 1 : y1;
+    float a = f->frame[y0 * f->frame_w + x0], b = f->frame[y0 * f->frame_w + x1], c = f->frame[y1 * f->frame_w + x0], d = f->frame[y1 * f->frame_w + x1];
+    float top = a + (b - a) * wx, bot = c + (d - c) * wx;
+    return (top + (bot - top) * wy) / 255.0f;
+}
+void hud_emu_post2(const float *src, float *dst, int w, int h, float cx_img, float cy_img, float fx_eye, float f_eye, const VrFilter *f) {
     for (int y = 0; y < h; y++) {
         float ys = post_ysrc(f, (float)y + 0.5f, cy_img, f_eye);
         float ty = ys - 0.5f, fy = floorf(ty), wy = ty - fy;      /* bilineal: texel i tiene su centro en i + 0,5 */
         int y0 = (int)fy, y1 = y0 + 1;
         y0 = y0 < 0 ? 0 : y0 > h - 1 ? h - 1 : y0; y1 = y1 < 0 ? 0 : y1 > h - 1 ? h - 1 : y1;
+        float sw = post_scan(f, (float)y + 0.5f, cy_img, f_eye);
         for (int x = 0; x < w; x++) {
+            float fs = post_frame(f, (float)x + 0.5f, (float)y + 0.5f, cx_img, cy_img, fx_eye, f_eye);
             for (int k = 0; k < 3; k++) {
                 float a = src[((size_t)y0 * w + x) * 3 + k], b = src[((size_t)y1 * w + x) * 3 + k];
-                float c = a + (b - a) * wy;
-                c = c < 0 ? 0 : c > 1 ? 1 : c;
+                float c = sat1(a + (b - a) * wy);
                 c *= f->tint[k];
-                if (f->cover_abr >= 0) {
-                    float cv = f->cover_rgb[k];
-                    switch (f->cover_abr & 3) { case 0: c = 0.5f * c + 0.5f * cv; break; case 1: c += cv; break; case 2: c -= cv; break; default: c += 0.25f * cv; break; }
+                int scan_pending = sw > 0.0f, nc = f->n_covers > VR_FILTER_COVERS ? VR_FILTER_COVERS : f->n_covers;
+                if (nc > 0) {
+                    for (int i = 0; i < nc; i++) {
+                        if (scan_pending && i >= f->scan_after) { c = sat1(post_blend(c, f->scan_rgb[k], f->scan_abr, sw)); scan_pending = 0; }
+                        c = sat1(post_blend(c, f->covers_rgb[i][k], f->covers_abr[i], 1.0f));
+                    }
+                } else if (f->cover_abr >= 0) {
+                    c = post_blend(c, f->cover_rgb[k], f->cover_abr, 1.0f);   /* filtros construidos a mano sin covers[] (pruebas antiguas) */
                 }
-                dst[((size_t)y * w + x) * 3 + k] = c < 0 ? 0 : c > 1 ? 1 : c;
+                if (scan_pending) c = sat1(post_blend(c, f->scan_rgb[k], f->scan_abr, sw));
+                if (fs > 0.0f) {
+                    c = c - fs < 0 ? 0 : c - fs;
+                    float sm = sat1((fs - 0.85f) / 0.15f); sm = sm * sm * (3.0f - 2.0f * sm);   /* smoothstep(0,85; 1) */
+                    c += f->frame_rgb[k] * sm;
+                }
+                dst[((size_t)y * w + x) * 3 + k] = sat1(c);
             }
         }
     }
+}
+void hud_emu_post(const float *src, float *dst, int w, int h, float cy_img, float f_eye, const VrFilter *f) {
+    hud_emu_post2(src, dst, w, h, 0.5f * (float)w, cy_img, f_eye, f_eye, f);
 }
