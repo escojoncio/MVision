@@ -27,6 +27,13 @@ func check(_ caso: String, _ name: String, _ ok: Bool, _ detail: String) {
     if !ok { failures += 1; failList.append("\(caso) \(name): \(detail)") }
 }
 
+/// Comprobación informativa: se imprime como aviso, no cuenta como fallo.
+func soft(_ caso: String, _ name: String, _ ok: Bool, _ detail: String) {
+    print("[\(ok ? "OK  " : "AVISO")] \(caso): \(name) \(detail)")
+    if !ok { warnList.append("\(caso) \(name): \(detail)") }
+}
+var warnList: [String] = []
+
 // MARK: imágenes
 
 struct Img {
@@ -161,9 +168,10 @@ func blitEye(_ cb: MTLCommandBuffer, _ color: [MTLTexture], layered: Bool, eye: 
 
 /// Codifica `frames` fotogramas; en el último lee los dos ojos. `head(i)` = pose de la cabeza (espacio recentrado) del fotograma i.
 func render(_ enc: XRFrameEncoder, layered: Bool, color: [MTLTexture], depth: [MTLTexture], gs: MvVrGameState, frames: Int,
-            head: (Int) -> simd_float4x4) -> [Img]? {
+            head: (Int) -> simd_float4x4, before: ((Int) -> Void)? = nil) -> [Img]? {
     var result: [Img]?
     for i in 0..<frames {
+        before?(i)
         guard let cb = queue.makeCommandBuffer() else { return nil }
         let ok = enc.encode(commandBuffer: cb, gs: gs, originFromDevice: head(i), recenterInverse: matrix_identity_float4x4, dt: 1.0 / 90.0,
                             eyes: eyes, depthRange: depthRange, colorTextures: color, depthTextures: depth)
@@ -213,9 +221,9 @@ func runCase(_ cfg: Cfg, first: Bool) {
     if cfg.msaa > 1 && !device.supportsTextureSampleCount(cfg.msaa) { annot("warning", cfg.name, "sin msaa \(cfg.msaa): caso omitido"); return }
 
     // ---------- A: pantalla de cine (curva 0 para comprobar la geometría exacta, luego la curva por defecto) ----------
-    for (variant, curve) in [("cine-plano", 0.0), ("cine-curvo", 0.35)] {
+    for (variant, curve, sharp) in [("cine-plano", 0.0, 0), ("cine-curvo", 0.35, 0), ("cine-defecto", 0.35, 1), ("cine-pixel", 0.35, 2)] {
         let caso = "\(cfg.name)/\(variant)"
-        setDefaults(curve: curve, sharp: 0)
+        setDefaults(curve: curve, sharp: sharp)
         guard let tg = makeTargets(layered: cfg.layered) else { check(caso, "texturas", false, "no se pudieron crear"); continue }
         guard let enc = XRFrameEncoder(device: device, colorFormat: colorFormat, depthFormat: depthFormat, layered: cfg.layered, sampleCount: cfg.msaa) else {
             check(caso, "codificador", false, "XRFrameEncoder no se pudo crear (pipelines?)"); continue
@@ -271,10 +279,16 @@ func runCase(_ cfg: Cfg, first: Bool) {
         bench_make_pattern()
         bench_make_scene()
         bench_scene_post()
+        bench_enable_radar(1)
+        bench_enable_weapon(1)
         let headA = headPose(SIMD3<Float>(0, 1.6, 0), yaw: 0)
         let headB = headPose(SIMD3<Float>(0.2, 1.6, -0.3), yaw: 0.1745)
         var gs = MvVrGameState(); gs.view_mode = 1; gs.game = 1; gs.in_control = 1; gs.cam_active = 1; gs.first_person = 1
-        guard let imgs = render(enc, layered: cfg.layered, color: tg.color, depth: tg.depth, gs: gs, frames: 70, head: { $0 == 69 ? headB : headA }) else {
+        // radar de muñeca: antebrazo izquierdo sintético (codo, muñeca, dorso hacia arriba)
+        let forearm: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>) = (SIMD3<Float>(-0.25, 1.05, -0.15), SIMD3<Float>(-0.20, 1.12, -0.45), SIMD3<Float>(0, 1, 0))
+        let hpB = XRMath.position(headB)
+        guard let imgs = render(enc, layered: cfg.layered, color: tg.color, depth: tg.depth, gs: gs, frames: 70, head: { $0 == 69 ? headB : headA },
+                                before: { _ in enc.renderer.radar?.updatePose(forearm: forearm, leftGrip: nil, headPosition: hpB, headForward: SIMD3<Float>(0, 0, -1)) }) else {
             check(caso, "render", false, "fallo al renderizar"); return
         }
         report(caso, imgs, notice: true)
@@ -296,6 +310,15 @@ func runCase(_ cfg: Cfg, first: Bool) {
                 guard let px = project(p.1, eye: e, head: headB) else { check(caso, "ojo \(e) \(p.0)", false, "detras de la camara"); continue }
                 let c = im.avg(px.0, px.1, r: 2)
                 check(caso, "ojo \(e) \(p.0)", near(c, p.2, 45), "pixel (\(px.0),\(px.1)) color \(c) esperado \(p.2)")
+            }
+            // radar de muñeca y arma en mano (informativos: no hacen fallar el banco, ver "soft")
+            if let wf = enc.renderer.radar?.wristFrame, let px = project(wf.center, eye: e, head: headB) {
+                let c = im.avg(px.0, px.1, r: 3)
+                soft(caso, "ojo \(e) radar de muneca", c.1 > 80 && c.0 < 120, "centro del radar \(wf.center) pixel (\(px.0),\(px.1)) color \(c) esperado verde")
+            } else { soft(caso, "ojo \(e) radar de muneca", false, "sin marco de muneca (radar sin pose o sin escena)") }
+            if let px = project(SIMD3<Float>(0.25, 1.2, -0.6), eye: e, head: headB) {
+                let c = im.avg(px.0, px.1, r: 3)
+                soft(caso, "ojo \(e) arma en mano", c.0 > 100 && c.0 > c.2 + 40, "pixel (\(px.0),\(px.1)) color \(c) esperado naranja")
             }
             // panel del HUD: rectángulo magenta de la esquina sup. izq. del panel 2D, en el recorte 0 (arriba izquierda)
             let hp = XRMath.position(headB)
@@ -321,6 +344,7 @@ for (nm, r) in [("rango-1-0", SIMD2<Float>(1, 0)), ("rango-0.1-1000", SIMD2<Floa
     runCase(Cfg(name: "layered-msaa4-" + nm, layered: true, msaa: 4, range: r), first: false)
 }
 print("\nresumen: \(failures) comprobaciones falladas")
+if !warnList.isEmpty { annot("warning", "banco de render (informativo)", warnList.prefix(30).joined(separator: "\n")) }
 if failures > 0 {
     annot("error", "banco de render", "\(failures) comprobaciones falladas\n" + failList.prefix(60).joined(separator: "\n"))
     exit(1)

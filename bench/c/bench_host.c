@@ -136,8 +136,68 @@ int mv_host_scene(VrScene *out) {
 }
 
 /* ---------- ganchos sin contenido (radar, manos/arma, vistas especiales, estado) ---------- */
-int mv_host_radar(VrRadarScene *out) { (void)out; return 0; }
-int mv_host_hands(VrHandsFrame *out) { (void)out; return 0; }
+/* Radar sintético: ventana de 71x54 con fondo verde y un punto rojo central (coordenadas de VRAM). */
+static VrVtx g_rv[12];
+static VrBatch g_rb[1];
+static int g_radar_on, g_weapon_on;
+void bench_enable_radar(int on) { g_radar_on = on; }
+void bench_enable_weapon(int on) { g_weapon_on = on; }
+int mv_host_radar(VrRadarScene *out) {
+    if (!g_radar_on) return 0;
+    memset(out, 0, sizeof *out);
+    uint32_t n = 0;
+    uint16_t f = 0x1000;
+    float r[2][4] = {{0, 0, 71, 54}, {31, 22, 40, 32}};
+    uint32_t col[2] = {rgba(0, 160, 0), rgba(255, 0, 0)};
+    for (int i = 0; i < 2; i++) {
+        float x0 = r[i][0], y0 = r[i][1], x1 = r[i][2], y1 = r[i][3];
+        float q[6][2] = {{x0,y0},{x1,y0},{x1,y1},{x0,y0},{x1,y1},{x0,y1}};
+        for (int k = 0; k < 6; k++) {
+            VrVtx *v = &g_rv[n++];
+            memset(v, 0, sizeof *v);
+            v->pos[0] = q[k][0]; v->pos[1] = q[k][1]; v->rgba = col[i]; v->flags = f; v->pad = 0xFFFF;
+        }
+    }
+    memset(&g_rb[0], 0, sizeof g_rb[0]);
+    g_rb[0].first = 0; g_rb[0].count = n; g_rb[0].kind = 2; g_rb[0].blend = 0xFF;
+    out->present = 1; out->rect[2] = 71; out->rect[3] = 54;
+    out->v = g_rv; out->nv = n; out->b = g_rb; out->nb = 1;
+    return 1;
+}
+
+/* Arma sintética: caja naranja 0,08 x 0,10 x 0,30 m en (0.25, 1.2, -0.6) del espacio recentrado. */
+static VrHandsVertex g_wv[24];
+static uint16_t g_wi[36];
+static VrHandsMesh g_wm;
+int mv_host_hands(VrHandsFrame *out) {
+    if (!g_weapon_on) return 0;
+    static const float N[6][3] = {{0,0,-1},{0,0,1},{-1,0,0},{1,0,0},{0,1,0},{0,-1,0}};
+    float hx = 0.04f, hy = 0.05f, hz = 0.15f;
+    for (int f = 0; f < 6; f++) {
+        for (int k = 0; k < 4; k++) {
+            VrHandsVertex *v = &g_wv[f * 4 + k];
+            float a = (k == 0 || k == 3) ? -1.f : 1.f, b = (k < 2) ? -1.f : 1.f;
+            float p[3];
+            if (f < 2) { p[0] = a * hx; p[1] = b * hy; p[2] = (f ? 1 : -1) * hz; }
+            else if (f < 4) { p[0] = (f == 3 ? 1 : -1) * hx; p[1] = a * hy; p[2] = b * hz; }
+            else { p[0] = a * hx; p[1] = (f == 4 ? 1 : -1) * hy; p[2] = b * hz; }
+            memcpy(v->pos, p, sizeof p); memcpy(v->nrm, N[f], sizeof v->nrm);
+            v->uv[0] = v->uv[1] = 0;
+            v->rgba[0] = 255; v->rgba[1] = 128; v->rgba[2] = 0; v->rgba[3] = 255;
+        }
+        uint16_t *ix = &g_wi[f * 6];
+        ix[0] = f * 4; ix[1] = f * 4 + 1; ix[2] = f * 4 + 2; ix[3] = f * 4; ix[4] = f * 4 + 2; ix[5] = f * 4 + 3;
+    }
+    memset(&g_wm, 0, sizeof g_wm);
+    g_wm.mesh_id = 1; g_wm.tex_id = 0;
+    for (int i = 0; i < 16; i++) g_wm.model[i] = (i % 5 == 0) ? 1.f : 0.f;
+    g_wm.model[12] = 0.25f; g_wm.model[13] = 1.2f; g_wm.model[14] = -0.6f;
+    g_wm.verts = g_wv; g_wm.nverts = 24; g_wm.idx = g_wi; g_wm.nidx = 36;
+    memset(out, 0, sizeof *out);
+    out->seq = 1; out->nmeshes = 1; out->meshes = &g_wm;
+    out->light_dir[1] = 1.f; out->ambient = 0.6f; out->diffuse = 0.4f;
+    return 1;
+}
 void mv_host_hands_done(void) {}
 int32_t mv_vrgame_special_view(MvVrSpecialView *out) { (void)out; return 0; }
 int32_t mv_vrgame_forearm(int32_t side, MvVrForearm *out) { (void)side; (void)out; return 0; }
