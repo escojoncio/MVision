@@ -74,8 +74,27 @@ typedef struct {
     uint32_t cine_shot;      /* plano en curso de la cinemática (sube en cada corte de cámara) */
     uint32_t cine_cuts;      /* cortes de cámara detectados desde que se cargó el ejecutable */
     int32_t cine_cover;      /* fundidos/destellos (recubrimientos a pantalla completa) en la última lista */
+    /* --- render nativo --- */
+    int32_t render_req;      /* modo pedido: 0 = GPU (reconstrucción desde la lista de dibujo), 1 = nativo */
+    int32_t render_native;   /* 1 si la última escena entregada lleva el 3D nativo (native_3d): hay que dibujarlo desde el puente */
+    int32_t native_avail;    /* 1 si el modo nativo se puede usar (extractor registrado, enganche instalado y renderer Metal listo) */
 } MvVrGameState;
 void mv_vrhost_game_state(MvVrGameState *out);
+
+/* ---- Modo de render (nativo | gpu) ----
+ * gpu: el 3D se reconstruye de la lista de dibujo de la GPU (comportamiento histórico). nativo: el 3D sale de la escena que el extractor lee de la RAM
+ * (vr/native, puente ns_bridge) y la capa 2D (HUD, menús, radio, textos, radar y HUD de muñeca) sigue saliendo de la lista de la GPU. Las cinemáticas
+ * del motor y todo lo que no tenga cámara VR se dibujan SIEMPRE como pantalla estereoscópica con la cámara del juego (desde la lista).
+ * Elección: variable de entorno MV_RENDER=nativo|gpu (gana y fija el modo) o mv_vrhost_set_render_mode (menú VR). Defecto: gpu (MV_RENDER_DEFAULT_NATIVE en vrhost.c
+ * pasará a 1 cuando extractor y renderer estén integrados). El modo nativo solo se activa de verdad si mv_vrhost_native_available() y llega una escena válida;
+ * si no, se sigue con la lista de la GPU (nunca pantalla vacía). Cualquier hilo. */
+void mv_vrhost_set_render_mode(int native);
+int mv_vrhost_render_mode(void);                 /* modo pedido (0/1) */
+int mv_vrhost_render_env_locked(void);           /* 1 si MV_RENDER fija el modo (el menú no puede cambiarlo) */
+int mv_vrhost_native_available(void);
+void mv_vrhost_native_renderer_ready(int ready); /* el renderer Metal nativo avisa de que puede dibujar el puente */
+struct NsBridge;
+struct NsBridge *mv_vrhost_native_bridge(void);  /* puente de escenas nativas (consumidor: render a 100 Hz). Nunca NULL tras mv_vrhost_install */
 
 /* Copia el BridgeState del último VBlank (bridge.h). Devuelve 1 si hay uno publicado. Thread-safe. */
 struct BridgeState;
