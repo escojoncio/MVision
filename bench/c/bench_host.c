@@ -339,3 +339,5 @@ void mv_vrhost_set_smooth(int on) { sm_ready(); g_sm.cfg.enabled = on != 0; }
 void mv_vrhost_set_hud2d_smooth(int mode) { (void)mode; }
 int mv_vrhost_hud2d_smooth(void) { return 1; }
 void mv_vrhost_hud2d_stats(int *scale, double *ms) { if (scale) *scale = 0; if (ms) *ms = 0; }
+int mv_vrhost_hud2d_acquire(const uint8_t **px, int *w, int *h, int *full, uint32_t *seq) { (void)px; (void)w; (void)h; (void)full; (void)seq; return -1; }
+void mv_vrhost_hud2d_release(void) {}

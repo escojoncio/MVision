@@ -9,6 +9,8 @@
 #include <time.h>
 #include "cpu.h"
 #include "gpu.h"
+#include "vr_layer2d_async.h"
+#include <unistd.h>
 #include "hle.h"
 #include "vr_scene.h"
 #include "vr_layer2d.h"
@@ -379,6 +381,52 @@ int main(void) {
         for (int i = 0; rf && i < w * h; i++) if (rf[i * 4 + 3] == 255) opq++;
         CHECK(rf && w == 1280 && h == 960 && opq == w * h, "cine x4 opaco (%d de %d)", opq, w * h);
         vl2d_free(LF);
+    }
+
+    /* Hilo trabajador (vr_layer2d_async): mismo resultado que la ejecución síncrona, el hilo que encola no espera y la capa lleva como mucho una lista de retraso. */
+    {
+        VrL2Async *A = vl2a_new();
+        CHECK(A != NULL, "vl2a_new");
+        vl2a_options(A, 4, VL_SMOOTH_SHARP);
+        CHECK(vl2a_submit(A, g_list, g_sc.op_dest, 0, 1) == 1, "vl2a_submit");
+        vl2a_flush(A);
+        const uint8_t *ap = NULL; int aw = 0, ah = 0, afull = 0; uint32_t aseq = 0;
+        CHECK(vl2a_acquire(A, &ap, &aw, &ah, &afull, &aseq) == 1, "vl2a_acquire nueva");
+        VrLayer2D *LS = vl2d_new();
+        vl2d_set_options(LS, 4, VL_SMOOTH_SHARP);
+        vl2d_run(LS, g_list, &g_sc, 0);
+        int sw = 0, sh = 0;
+        const uint8_t *sp = vl2d_rgba(LS, &sw, &sh);
+        CHECK(ap && sp && aw == sw && ah == sh && memcmp(ap, sp, (size_t)sw * sh * 4) == 0, "capa asincrona identica a la sincrona");
+        CHECK(vl2a_acquire(A, &ap, &aw, &ah, &afull, &aseq) == 0, "vl2a_acquire repetida = misma");
+        vl2a_release(A);
+        vl2d_free(LS);
+        /* ráfaga ritmada a 50 listas/s (sin vram_init: solo ops): coste de encolar y retraso */
+        uint16_t *vi = g_list->vram_init; g_list->vram_init = NULL;
+        double smax = 0; uint32_t lagmax = 0; int got = 0;
+        for (int i = 0; i < 100; i++) {
+            double t = now_ms();
+            vl2a_submit(A, g_list, g_sc.op_dest, 0, 0);
+            double d = now_ms() - t;
+            if (d > smax) smax = d;
+            usleep(20000);
+            if (vl2a_acquire(A, &ap, &aw, &ah, &afull, &aseq) >= 0) { got++; vl2a_release(A); }
+            int sc_; double wm, sm; uint32_t lag;
+            vl2a_stats(A, &sc_, &wm, &sm, &lag);
+            if (i >= 20 && lag > lagmax) lagmax = lag;
+        }
+        int scl; double wms, sms; uint32_t lg;
+        vl2a_stats(A, &scl, &wms, &sms, &lg);
+        printf("  asincrono: encolar max %.3f ms, retraso max %u listas (tras calentar), escala final %d, trabajador %.1f ms, capas recogidas %d/100\n", smax, lagmax, scl, wms, got);
+        CHECK(smax < 1.0, "encolar tarda %.3f ms (>1 ms)", smax);
+        CHECK(lagmax <= 1, "retraso de la capa %u listas (>1)", lagmax);
+        g_list->vram_init = vi;
+        /* ráfaga sin ritmo: la cola nunca bloquea al productor de forma apreciable y la VRAM espejo no se corrompe (solo eventos de las intermedias) */
+        double sm2 = 0;
+        for (int i = 0; i < 60; i++) { double t = now_ms(); vl2a_submit(A, g_list, g_sc.op_dest, 0, 0); double d = now_ms() - t; if (d > sm2) sm2 = d; }
+        vl2a_flush(A);
+        printf("  asincrono: rafaga sin ritmo, encolar max %.3f ms\n", sm2);
+        vl2a_free(A);
     }
 
     vl2d_free(L);

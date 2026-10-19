@@ -39,8 +39,8 @@ $(B)/test_split: test_split.c vr_split.c vr_split.h vr_scene.h | $(B)
 test-split: $(B)/test_split
 	$(B)/test_split
 
-$(B)/test_layer2d: test_layer2d.c vr_layer2d.c vr_layer2d.h vr_scene.c vr_scene.h $(RT)/gpu.c | $(B)
-	$(CC) $(CFLAGS) $(INC) test_layer2d.c vr_layer2d.c vr_scene.c $(RT)/gpu.c -lm -o $@
+$(B)/test_layer2d: test_layer2d.c vr_layer2d.c vr_layer2d.h vr_layer2d_async.c vr_layer2d_async.h vr_scene.c vr_scene.h $(RT)/gpu.c | $(B)
+	$(CC) $(CFLAGS) $(INC) test_layer2d.c vr_layer2d.c vr_layer2d_async.c vr_scene.c $(RT)/gpu.c -lm -lpthread -o $@
 test-layer2d: $(B)/test_layer2d
 	$(B)/test_layer2d
 
