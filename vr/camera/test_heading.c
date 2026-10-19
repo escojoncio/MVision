@@ -43,7 +43,7 @@ static void setup(int yaw_units, int calibrate) {
     VrCamConfig c; vrcam_config_default(&c); c.head = head; c.calibrate = calibrate; vrcam_init(&c);
     vrhead_init(NULL);
     memset(&st, 0, sizeof st);
-    st.valid = BRIDGE_OK_ALL_CORE; st.has_player = 1; st.in_control = 1; st.ctl_addr = CTL;
+    st.valid = BRIDGE_OK_ALL_CORE; st.has_player = 1; st.in_control = 1; st.cam_ctl = 1; st.ctl_addr = CTL;
     for (int i = 0; i < 10; i++) vrcam_frame(ram, &st);
 }
 static float body_deg(void) { return (float)((uint16_t)r16(CTL + BC_ROT + 2) & 4095u) * (360.0f / 4096.0f); }
@@ -203,7 +203,7 @@ static void test_walk(void) {
         int r = vrhead_frame(ram, &st, 1);
         CHECK(r == 0 && fabsf(wrap180(body_deg() - b)) < 0.1f);
     }
-    st.in_control = 1;
+    st.in_control = 1; st.cam_ctl = 1;
     /* sin andar: el seguimiento normal (margen) manda, el deseado se ignora */
     setup(2048, 0); tick(0);
     w16(CTL + 0x4E, goal);
