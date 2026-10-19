@@ -165,7 +165,7 @@ void vrc_config_default(VrcConfig *c) {
 void vrc_sound_default(VrcSoundCfg *c) {
     memset(c, 0, sizeof *c);
     c->mode = VRC_SND_NATURAL; c->ref_dist = 1500.f; c->rolloff = 1.f; c->max_dist = 30000.f; c->fade_frac = 0.25f;
-    c->gain = 1.f; c->min_vol = 1; c->n_se = 3; c->se[0] = 94; c->se[1] = 95; c->se[2] = 109;
+    c->gain = 1.f; c->min_vol = 16; c->n_se = 3; c->se[0] = 94; c->se[1] = 95; c->se[2] = 109;
 }
 static void ensure_init(void) {
     if (!g_cfg_init) { vrc_config_default(&g_cfg); g_cfg_init = 1; }
@@ -437,6 +437,8 @@ int vrc_sound_curve(const VrcSoundCfg *c, float dist, float *gain_out) {
         if (c->fade_frac > 0.f && dist > f0) g *= (c->max_dist - dist) / (c->max_dist - f0);
         g *= c->gain;
     }
+    /* Nunca más bajo que el original: la curva natural cae por debajo de la del juego a media distancia. */
+    { float go = (float)orig_vol(dist) / 63.f; if (go > g) g = go; }
     if (g > 1.f) g = 1.f;
     if (!(g >= 0.f)) g = 0.f;
     if (gain_out) *gain_out = g;

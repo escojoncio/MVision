@@ -100,10 +100,11 @@ static void t_curve(void) {
     CHECK(vrc_sound_curve(&c, 0, &g) == 63 && g == 1.f, "pleno en 0");
     CHECK(vrc_sound_curve(&c, c.ref_dist, &g) == 63, "pleno en ref");
     /* natural llega más lejos que el original, con la misma cercanía */
-    CHECK(vrc_sound_curve(&c, 9400, NULL) > vrc_sound_curve(&o, 9400, NULL), "natural más lejos que original");
+    CHECK(vrc_sound_curve(&c, 9400, NULL) >= vrc_sound_curve(&o, 9400, NULL), "nunca más bajo que el original");
+    for (float d = 0; d < 9500; d += 41) CHECK(vrc_sound_curve(&c, d, NULL) >= vrc_sound_curve(&o, d, NULL), "natural >= original d=%.0f", d);
     CHECK(vrc_sound_curve(&c, 20000, NULL) > 0 && vrc_sound_curve(&o, 20000, NULL) == 0, "a 20000 solo natural");
     /* ley inversa: al doblar la distancia (fuera del fundido) la ganancia se divide por ~2 */
-    float g1, g2; vrc_sound_curve(&c, 3000, &g1); vrc_sound_curve(&c, 6000, &g2);
+    float g1, g2; vrc_sound_curve(&c, 10000, &g1); vrc_sound_curve(&c, 20000, &g2);
     CHECK(fabsf(g1 / g2 - 2.f) < 0.01f, "inversa: %f %f", g1, g2);
     CHECK(vrc_sound_curve(&c, NAN, &g) == 63, "NaN -> 0");
     CHECK(vrc_sound_curve(&c, -5.f, &g) == 63, "negativa");
@@ -369,8 +370,8 @@ static void t_sound(void) {
     VrcSoundEvent ev[8]; int n = vrc_sound_events(ev, 8);
     CHECK(n == 1 && ev[0].se == 94 && ev[0].pos[0] == 4000 && ev[0].pos[1] == 500 && ev[0].pos[2] == 0, "evento con posición 3D del emisor");
     CHECK(ev[0].cam_index == 0 && ev[0].actor == A && fabsf(ev[0].dist - 4000.f) < 1e-3f && ev[0].played, "asociado a la cámara, distancia");
-    CHECK(ev[0].vol_orig == 63 - 4000 / 150 && ev[0].vol == 24, "vol natural ~63*1500/4000 (%d)", ev[0].vol);
-    CHECK(fabsf(ev[0].gain - 1500.f / 4000.f) < 1e-3f, "ganancia continua");
+    CHECK(ev[0].vol_orig == 63 - 4000 / 150 && ev[0].vol == ev[0].vol_orig, "vol = max(natural, original) = original a 4000 (%d)", ev[0].vol);
+    CHECK(fabsf(ev[0].gain - (float)ev[0].vol_orig / 63.f) < 1e-3f, "ganancia continua");
     CHECK(vrc_sound_events(ev, 8) == 0, "vaciado");
     /* lejos: el original ya no suena, el natural sí; muy lejos silencio */
     vai_w16(RAM, A + 0x20, 12000);
