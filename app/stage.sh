@@ -37,6 +37,8 @@ done
 # vr/native: sólo el escritor de volcados y los tipos del contrato (el cargador ns_dump.c, el rasterizador de referencia y las herramientas son de escritorio)
 mkdir -p .stage/vr/native
 cp ../vr/native/ns_types.h ../vr/native/ns_dump.h ../vr/native/ns_dumpw.c .stage/vr/native/
+# puente productor/consumidor, jugador y enganche de la captura (integración del renderer nativo)
+cp ../vr/native/ns_bridge.[ch] ../vr/native/ns_player.[ch] ../vr/native/ns_hook.[ch] ../vr/native/ns_hook_rt.[ch] .stage/vr/native/
 
 cp ../render/metal/vr_*.metal ../render/metal/vr_types.h .stage/metal/
 cp "$SIGS_HLE" .stage/res/sigs_hle.json
