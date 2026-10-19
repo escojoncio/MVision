@@ -1,6 +1,7 @@
 import Metal
 import simd
 import Foundation
+import QuartzCore
 
 // Renderer del arma en mano: dibuja la geometría 3D propia (piezas del modelo original cortado + objetos sueltos) que entrega
 // vr/hands (mv_host_hands -> VrHandsFrame), DENTRO del mismo pase de escena de PS1Renderer. SIN COMPILAR (escrito sin
