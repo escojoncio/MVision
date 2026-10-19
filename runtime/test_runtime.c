@@ -5,6 +5,7 @@
 #include <string.h>
 #include "gte_vectors.h"
 #include "gpu.h"
+#include "hle.h"
 
 const FuncEntry rt_func_table[] = {{0, 0}};
 const unsigned rt_func_count = 0;
@@ -248,6 +249,73 @@ static void t_gpu_feedback(void) {
     EQ(ops[10].fbk, 0);                          /* se pisa su propia textura */
 }
 
+/* Presentación del vídeo: la réplica de PutDispEnv fija el rango horizontal y la lectura del marco respeta lo que muestra el
+ * hardware (regresión del códec: modo de 384 con rango de 318 columnas; antes se publicaban 368 con 48 de basura de la VRAM). */
+void hle_gfx_put_disp(Cpu *c);
+static void put_disp(Cpu *c, int dw, int dh, int sx, int sy, int sw, int sh, int rgb24) {
+    uint32_t e = 0x3000;
+    int16_t v[8] = {0, 0, (int16_t)dw, (int16_t)dh, (int16_t)sx, (int16_t)sy, (int16_t)sw, (int16_t)sh};
+    for (int i = 0; i < 8; i++) mem_w16(c, e + 2u * (unsigned)i, (uint16_t)v[i]);
+    mem_w8(c, e + 16, 0); mem_w8(c, e + 17, (uint8_t)rgb24);
+    c->r[4] = e;
+    hle_gfx_put_disp(c);
+}
+static uint8_t disp_img[1024 * 512 * 4];
+static void t_display(void) {
+    Cpu c = {0};
+    GpuDisplay d;
+    gpu_reset();
+    memset(gpu_vram, 0, sizeof gpu_vram);
+    gpu_gp1(0x03000000);   /* display encendido */
+    /* juego normal: 320x256, rango completo -> marco = área, sin márgenes; rango 0x270..0xC70 y 35..291 */
+    put_disp(&c, 320, 256, 0, 16, 256, 256, 0);
+    gpu_get_display(&d);
+    EQ(d.w, 320); EQ(d.aw, 320); EQ(d.fw, 320); EQ(d.pad_l, 0); EQ(d.h, 256); EQ(d.mode & 0x4F, 0x09);
+    EQ(d.hx1, 0x270); EQ(d.hx2, 0xC70); EQ(d.vy1, 35); EQ(d.vy2, 291);
+    /* modo de 256 y de 512/640: anchos nominales con screen.w=256 */
+    put_disp(&c, 256, 240, 0, 0, 0, 0, 0);
+    gpu_get_display(&d); EQ(d.w, 256); EQ(d.aw, 256); EQ(d.fw, 256); EQ(d.pad_l, 0); EQ(d.h, 240);    /* screen.h = 0 -> 240 */
+    put_disp(&c, 512, 256, 0, 16, 256, 256, 0);
+    gpu_get_display(&d); EQ(d.w, 512); EQ(d.aw, 512); EQ(d.fw, 512);
+    put_disp(&c, 640, 256, 0, 16, 256, 256, 0);
+    gpu_get_display(&d); EQ(d.w, 640); EQ(d.aw, 640); EQ(d.fw, 640);
+    /* radio/códec: disp 384 con screen (26,16,212,256): visibles 318 columnas desplazadas 26 en un marco de 384 */
+    put_disp(&c, 384, 256, 26, 16, 212, 256, 0);
+    gpu_get_display(&d);
+    EQ(d.mode & 0x40, 0x40); EQ(d.w, 384); EQ(d.aw, 318); EQ(d.fw, 384); EQ(d.pad_l, 26); EQ(d.h, 256);
+    EQ(d.hx1, 0x230 + 26 * 7); EQ(d.hx2, 0x230 + 26 * 7 + (2688 * 212 >> 8));
+    for (int y = 0; y < 256; y++) for (int x = 0; x < 400; x++) gpu_vram[y][x] = (uint16_t)(0x1F);   /* rojo */
+    gpu_vram[0][0] = 0x03E0; gpu_vram[0][317] = 0x7C00; gpu_vram[0][318] = 0x7FFF; gpu_vram[0][367] = 0x7FFF; gpu_vram[1][320] = 0x7FFF;
+    EQ(gpu_present_rgba(&d, NULL, disp_img, 1024 * 512), 384 * 256);
+    const uint8_t *r0 = disp_img;
+    #define PIX(x, y) (r0 + 4 * ((y) * 384 + (x)))
+    EQ(PIX(0, 0)[0], 0); EQ(PIX(25, 0)[0], 0); EQ(PIX(25, 0)[3], 255);          /* margen izquierdo negro */
+    EQ(PIX(26, 0)[1], 255); EQ(PIX(26, 0)[0], 0);                               /* VRAM x=0 (verde) en la columna 26 */
+    EQ(PIX(27, 0)[0], 255);                                                     /* VRAM x=1 (rojo) */
+    EQ(PIX(26 + 317, 0)[2], 255); EQ(PIX(26 + 317, 0)[0], 0);                   /* última columna visible: VRAM x=317 (azul) */
+    EQ(PIX(26 + 318, 0)[0], 0); EQ(PIX(26 + 318, 0)[1], 0); EQ(PIX(26 + 318, 0)[2], 0);   /* x=318 (blanco en VRAM) NO se ve */
+    EQ(PIX(383, 0)[0], 0); EQ(PIX(26 + 320, 1)[0], 0);                          /* nada de basura a la derecha */
+    #undef PIX
+    /* pantalla apagada: marco negro */
+    gpu_gp1(0x03000001); gpu_get_display(&d);
+    EQ(gpu_present_rgba(&d, NULL, disp_img, 1024 * 512), 384 * 256);
+    EQ(disp_img[4 * 27], 0); EQ(disp_img[4 * 27 + 3], 255);
+    /* 24 bits: 3 bytes por píxel empaquetados desde disp.x*2 */
+    gpu_gp1(0x03000000);
+    put_disp(&c, 256, 240, 0, 0, 0, 0, 1);
+    gpu_get_display(&d);
+    EQ(d.depth24, 1); EQ(d.aw, 256);
+    uint8_t *ln = (uint8_t *)gpu_vram[0];
+    for (int i = 0; i < 9; i++) ln[i] = (uint8_t)(10 + i);
+    gpu_present_rgba(&d, NULL, disp_img, 1024 * 512);
+    EQ(disp_img[0], 10); EQ(disp_img[1], 11); EQ(disp_img[2], 12); EQ(disp_img[4], 13); EQ(disp_img[8 + 2], 18);
+    /* tras gpu_reset el rango por defecto da 256 columnas */
+    gpu_reset(); gpu_get_display(&d); EQ(d.w, 256); EQ(d.aw, 256);
+    /* screen.w = 255 (vídeos del juego): 2550 ciclos / 8 = 318,75 -> 319 columnas visibles de 320, la última a medias recortada */
+    put_disp(&c, 320, 256, 0, 16, 255, 256, 0);
+    gpu_get_display(&d); EQ(d.w, 320); EQ(d.aw, 319); EQ(d.fw, 320); EQ(d.pad_l, 0);
+}
+
 int main(void) {
     Cpu c = {0};
     t_mem(&c);
@@ -256,6 +324,7 @@ int main(void) {
     t_gte_regs16(&c);
     t_gte_vec(&c);
     t_gpu_feedback();
+    t_display();
     printf(fails ? "%d fallos\n" : "runtime: todas las pruebas OK\n", fails);
     return fails != 0;
 }

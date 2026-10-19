@@ -1,5 +1,6 @@
 #pragma once
 /* GPU original: rasterizador software de referencia (oráculo del renderer Metal/VR). */
+#include <stddef.h>
 #include <stdint.h>
 
 #define GPU_VRAM_W 1024
@@ -18,11 +19,26 @@ void gpu_dma2(uint32_t madr, uint32_t bcr, uint32_t chcr);
 /* Recorre una lista enlazada de paquetes (modo lista del DMA / gfx_list). */
 void gpu_draw_list(uint32_t addr);
 
+/* Área de VRAM mostrada (rango horizontal GP1(06h), vertical GP1(07h), modo GP1(08h)):
+ *  x,y,w,h  rectángulo NOMINAL de la pantalla del modo (w = ancho del modo: 256/320/384/512/640; h = alto del rango vertical,
+ *           x2 si entrelazado de alta resolución). Es el que usan la captura de listas, la escena VR y los renderers.
+ *  aw       píxeles de ese rectángulo que el hardware muestra de verdad: ceil((x2-x1)/ciclos de reloj de punto por píxel). Puede
+ *           ser menor que w (p. ej. el códec usa un modo de 384 con rango de 318): lo que cae fuera del rango NO se ve, es basura
+ *           de la VRAM (el búfer vecino, texturas) y no debe presentarse.
+ *  fw,pad_l marco completo en píxeles (ancho nominal del modo, ampliado si el rango se sale de él) y columna del marco donde
+ *           empieza x: el hardware pinta x..x+aw en la columna pad_l y negro en el resto. Rango por defecto: pad_l = 0, fw = aw = w.
+ *  mode,hx1,hx2,vy1,vy2  registros crudos (informativos). */
 typedef struct {
-    int x, y, w, h;      /* área de VRAM mostrada */
+    int x, y, w, h;
     int depth24, interlace, pal, enabled;
+    int aw, fw, pad_l;
+    int mode, hx1, hx2, vy1, vy2;
 } GpuDisplay;
 void gpu_get_display(GpuDisplay *d);
+/* Imagen RGBA8 del marco completo (fw x h; usa aw, fw y pad_l) a partir de una VRAM de 1024x512x16 (NULL = la del oráculo): la lectura exacta del
+ * hardware (15 bits con replicación de los bits altos, o 24 bits empaquetados), con el negro de los márgenes y con la pantalla
+ * apagada en negro. dst necesita fw*h*4 bytes; devuelve el número de píxeles escritos (fw*h), 0 si no cabe (cap en píxeles). */
+size_t gpu_present_rgba(const GpuDisplay *d, const uint16_t *vram, uint8_t *dst, size_t cap_px);
 
 /* Contadores por frame (para depurar): primitivas recibidas por clase. */
 typedef struct { uint32_t poly, line, rect, fill, copy, upload, download, env, lists; } GpuStats;
