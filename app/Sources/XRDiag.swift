@@ -23,6 +23,12 @@ final class XRDiag {
         var projMode = 0
         /// Sin prueba de profundidad en el mundo (solo diagnóstico).
         var noZTest = false
+        /// Profundidad de relleno (por defecto ACTIVADA): tras el mundo, todo píxel que conserve la profundidad de borrado (0 en Z invertida = infinito) recibe una profundidad
+        /// finita (50 m). El compositor reproyecta con NUESTRA profundidad: sin ella, los píxeles sin geometría opaca (agua y efectos semitransparentes no escriben profundidad) se
+        /// tratan como vacíos y se pintan en negro por bloques. Apagarlo vuelve al comportamiento anterior.
+        var fillDepth = true
+        /// No entregar profundidad útil al sistema: el compositor recibe una profundidad CONSTANTE (50 m) en todos los píxeles (la API no permite quitar la textura de profundidad).
+        var flatDepth = false
 
         var isNormal: Bool { self == Settings() }
     }
@@ -68,6 +74,8 @@ final class XRDiag {
         let pm = d.integer(forKey: "xr.diag.proj")
         s.projMode = (pm >= 0 && pm <= 2) ? pm : 0
         s.noZTest = b("noZ")
+        s.fillDepth = d.object(forKey: "xr.diag.fillDepth") == nil ? true : b("fillDepth")
+        s.flatDepth = b("flatDepth")
         return s
     }
 
@@ -81,6 +89,8 @@ final class XRDiag {
         d.set(Double(s.nearPlane), forKey: "xr.diag.near")
         d.set(s.projMode, forKey: "xr.diag.proj")
         d.set(s.noZTest, forKey: "xr.diag.noZ")
+        d.set(s.fillDepth, forKey: "xr.diag.fillDepth")
+        d.set(s.flatDepth, forKey: "xr.diag.flatDepth")
     }
 
     // MARK: texto (menú y registro)
@@ -93,7 +103,7 @@ final class XRDiag {
     static func summary(_ s: Settings) -> String {
         func yn(_ b: Bool) -> String { b ? "si" : "no" }
         return "magenta=\(yn(s.magentaClear)) partir=\(s.splitMeters > 0 ? metersText(s.splitMeters) : "no") sin-mapa-tasa=\(yn(s.ignoreRateMap)) msaa1x=\(yn(s.msaa1)) " +
-            "sin-capas=\(yn(s.noLayers)) cercano=\(s.nearPlane > 0 ? metersText(s.nearPlane) : "sistema") proyeccion=\(["auto", "propia", "sistema"][min(max(s.projMode, 0), 2)]) sin-ztest=\(yn(s.noZTest))" +
+            "sin-capas=\(yn(s.noLayers)) cercano=\(s.nearPlane > 0 ? metersText(s.nearPlane) : "sistema") proyeccion=\(["auto", "propia", "sistema"][min(max(s.projMode, 0), 2)]) sin-ztest=\(yn(s.noZTest)) prof-relleno=\(yn(s.fillDepth)) prof-constante=\(yn(s.flatDepth))" +
             (s.isNormal ? " (todo normal)" : "")
     }
 }

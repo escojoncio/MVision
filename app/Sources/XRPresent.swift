@@ -161,7 +161,7 @@ enum XRMenuItem: Int, CaseIterable {
 
 /// Submenú «Diagnóstico» (interruptores en vivo de XRDiag).
 enum XRDiagItem: Int, CaseIterable {
-    case back, reset, magenta, split, rateMap, msaa1, noLayers, nearPlane, projection, noZTest
+    case back, reset, magenta, split, rateMap, msaa1, noLayers, nearPlane, projection, noZTest, fillDepth, flatDepth
 }
 
 final class XRPresenter {
@@ -350,6 +350,8 @@ final class XRPresenter {
         case .nearPlane: d.update { $0.nearPlane = stepList($0.nearPlane, XRDiag.nearChoices, dir) }
         case .projection: d.update { $0.projMode = ($0.projMode + (dir < 0 ? 2 : 1)) % 3 }
         case .noZTest: d.update { $0.noZTest.toggle() }
+        case .fillDepth: d.update { $0.fillDepth.toggle() }
+        case .flatDepth: d.update { $0.flatDepth.toggle() }
         }
         menuDirty = true
     }
@@ -406,6 +408,8 @@ final class XRPresenter {
             case .nearPlane: return ("Plano cercano", s.nearPlane > 0 ? XRDiag.metersText(s.nearPlane) : "Normal (sistema)")
             case .projection: return ("Proyección", ["Automática", "Propia", "Del sistema"][min(max(s.projMode, 0), 2)])
             case .noZTest: return ("Sin prueba de profundidad", yn(s.noZTest))
+            case .fillDepth: return ("Profundidad de relleno", yn(s.fillDepth))
+            case .flatDepth: return ("No entregar profundidad al sistema", yn(s.flatDepth))
             }
         }
     }

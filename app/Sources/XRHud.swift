@@ -49,6 +49,8 @@ final class XRFinalPass {
 
     private let layered: Bool
     private let resolvePSO: MTLRenderPipelineState
+    private let fillPSO: MTLRenderPipelineState
+    private let dsFill: MTLDepthStencilState
     private let screenPSO: MTLRenderPipelineState
     private let screen3dPSO: MTLRenderPipelineState
     private let panelPSO: MTLRenderPipelineState
@@ -68,6 +70,7 @@ final class XRFinalPass {
         let sfx = layered ? "_layered" : ""
         guard let fsV = lib.makeFunction(name: "xr_fs_vertex" + sfx),
               let drF = lib.makeFunction(name: "xr_depth_resolve" + sfx),
+              let dfF = lib.makeFunction(name: "xr_depth_fill" + sfx),
               let qV = lib.makeFunction(name: "xr_q_vertex" + sfx),
               let scF = lib.makeFunction(name: "xr_screen_fragment" + sfx),
               let s3F = lib.makeFunction(name: "xr_screen3d_fragment" + sfx),
@@ -82,6 +85,14 @@ final class XRFinalPass {
         d1.colorAttachments[0].writeMask = []
         d1.depthAttachmentPixelFormat = depthFormat
         if layered { d1.inputPrimitiveTopology = .triangle }   // requerido al escribir render_target_array_index
+
+        let d1f = MTLRenderPipelineDescriptor()
+        d1f.label = "mv.xr.depthFill"
+        d1f.vertexFunction = fsV; d1f.fragmentFunction = dfF
+        d1f.colorAttachments[0].pixelFormat = colorFormat
+        d1f.colorAttachments[0].writeMask = []
+        d1f.depthAttachmentPixelFormat = depthFormat
+        if layered { d1f.inputPrimitiveTopology = .triangle }
 
         func blended(_ label: String, _ v: MTLFunction, _ f: MTLFunction, topology: Bool) -> MTLRenderPipelineDescriptor {
             let d = MTLRenderPipelineDescriptor()
@@ -105,12 +116,13 @@ final class XRFinalPass {
         let d5 = blended("mv.xr.vignette", fsV, vgF, topology: true)
 
         guard let p1 = try? device.makeRenderPipelineState(descriptor: d1),
+              let p1f = try? device.makeRenderPipelineState(descriptor: d1f),
               let p2 = try? device.makeRenderPipelineState(descriptor: d2),
               let p2b = try? device.makeRenderPipelineState(descriptor: d2b),
               let p3 = try? device.makeRenderPipelineState(descriptor: d3),
               let p4 = try? device.makeRenderPipelineState(descriptor: d4),
               let p5 = try? device.makeRenderPipelineState(descriptor: d5) else { return nil }
-        resolvePSO = p1; screenPSO = p2; screen3dPSO = p2b; panelPSO = p3; veilPSO = p4; vignettePSO = p5
+        resolvePSO = p1; fillPSO = p1f; screenPSO = p2; screen3dPSO = p2b; panelPSO = p3; veilPSO = p4; vignettePSO = p5
 
         let a = MTLDepthStencilDescriptor()
         a.depthCompareFunction = .always; a.isDepthWriteEnabled = true
@@ -118,10 +130,12 @@ final class XRFinalPass {
         b.depthCompareFunction = .greaterEqual; b.isDepthWriteEnabled = true      // Z invertida
         let ov = MTLDepthStencilDescriptor()
         ov.depthCompareFunction = .always; ov.isDepthWriteEnabled = false         // velo y menú: siempre encima, sin tocar la profundidad
-        guard let s1 = device.makeDepthStencilState(descriptor: a),
+        let fl = MTLDepthStencilDescriptor()
+        fl.depthCompareFunction = .greater; fl.isDepthWriteEnabled = true         // Z invertida: solo donde el buffer tiene menos que el relleno (0 = borrado)
+        guard let s1 = device.makeDepthStencilState(descriptor: a), let sf = device.makeDepthStencilState(descriptor: fl),
               let s2 = device.makeDepthStencilState(descriptor: b),
               let s3 = device.makeDepthStencilState(descriptor: ov) else { return nil }
-        dsAlways = s1; dsHud = s2; dsOverlay = s3
+        dsAlways = s1; dsFill = sf; dsHud = s2; dsOverlay = s3
 
         let sd = MTLSamplerDescriptor()
         sd.minFilter = .linear; sd.magFilter = .linear
@@ -132,13 +146,13 @@ final class XRFinalPass {
 
     func encode(commandBuffer cb: MTLCommandBuffer, colorTextures: [MTLTexture], depthTextures: [MTLTexture],
                 msaaDepth: [MTLTexture]?, viewports: [MTLViewport], views: [simd_float4x4],
-                projections: [simd_float4x4], items: [XRDrawItem], viewCount: Int) {
+                projections: [simd_float4x4], items: [XRDrawItem], viewCount: Int, fillDepth: Float? = nil, flatDepth: Bool = false) {
         let resolve = msaaDepth != nil
         nDrawn.removeAll()
         defer {
             lastCounts = "resolve=\(resolve) pantalla=\(nDrawn[.screen] ?? 0) pantalla3d=\(nDrawn[.screen3d] ?? 0) panel=\(nDrawn[.panel] ?? 0) menu=\(nDrawn[.menu] ?? 0) velo=\(nDrawn[.veil] ?? 0) vineta=\(nDrawn[.vignette] ?? 0) de \(items.count)"
         }
-        if !resolve && items.isEmpty { return }       // nada que hacer
+        if !resolve && items.isEmpty && fillDepth == nil { return }       // nada que hacer
         guard views.count >= 2, projections.count >= 2, viewports.count >= 1 else { return }
 
         if layered {
@@ -154,7 +168,7 @@ final class XRFinalPass {
             guard let enc = cb.makeRenderCommandEncoder(descriptor: pd) else { return }
             enc.label = "mv.xr.final"
             enc.setViewport(viewports[0])
-            draw(enc, msaaDepth: msaaDepth?.first, items: items, views: views, projections: projections, base: 0, instances: viewCount)
+            draw(enc, msaaDepth: msaaDepth?.first, items: items, views: views, projections: projections, base: 0, instances: viewCount, fillDepth: fillDepth, flatDepth: flatDepth)
             enc.endEncoding()
         } else {
             for i in 0..<viewCount {
@@ -170,19 +184,37 @@ final class XRFinalPass {
                 enc.label = "mv.xr.final.\(i)"
                 enc.setViewport(viewports[i])
                 draw(enc, msaaDepth: msaaDepth.map { $0[min(i, $0.count - 1)] }, items: items, views: views,
-                     projections: projections, base: UInt32(i), instances: 1)
+                     projections: projections, base: UInt32(i), instances: 1, fillDepth: fillDepth, flatDepth: flatDepth)
                 enc.endEncoding()
             }
         }
     }
 
     private func draw(_ enc: MTLRenderCommandEncoder, msaaDepth: MTLTexture?, items: [XRDrawItem], views: [simd_float4x4],
-                      projections: [simd_float4x4], base: UInt32, instances: Int) {
+                      projections: [simd_float4x4], base: UInt32, instances: Int, fillDepth: Float?, flatDepth: Bool) {
         if let md = msaaDepth {
             enc.setRenderPipelineState(resolvePSO)
             enc.setDepthStencilState(dsAlways)
             enc.setFragmentTexture(md, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3, instanceCount: instances)
+        }
+        // Profundidad de relleno (ver XRDiag.fillDepth): ningún píxel conserva la profundidad de borrado al llegar al compositor.
+        if let fd = fillDepth {
+            var c = fd
+            enc.setRenderPipelineState(fillPSO)
+            enc.setDepthStencilState(dsFill)
+            enc.setFragmentBytes(&c, length: MemoryLayout<Float>.stride, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3, instanceCount: instances)
+        }
+        defer {
+            // Diagnóstico «No entregar profundidad al sistema»: profundidad constante en todo el buffer, tras todo lo demás.
+            if flatDepth, let fd = fillDepth {
+                var c = fd
+                enc.setRenderPipelineState(fillPSO)
+                enc.setDepthStencilState(dsAlways)
+                enc.setFragmentBytes(&c, length: MemoryLayout<Float>.stride, index: 0)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3, instanceCount: instances)
+            }
         }
         for it in items {
             if it.kind == .vignette {

@@ -40,6 +40,8 @@ final class XRFrameEncoder {
     var comfortVignette: Float = 0
     private(set) var lastSmooth = VrSmCorr()
     /// Lectura sin bloqueo de unos píxeles del drawable final (diagnóstico, 1 vez por segundo).
+    /// Distancia (m) a la que se rellena la profundidad de los píxeles sin geometría opaca (ver XRDiag.fillDepth).
+    static let fillDepthMeters: Float = 50
     private var probe: XRPixelProbe?
     private var probeT: CFTimeInterval = 0
 
@@ -248,13 +250,14 @@ final class XRFrameEncoder {
         }
         finalPass.encode(commandBuffer: cb, colorTextures: colorTex, depthTextures: depthTex,
                          msaaDepth: effSamples > 1 ? tgt.depth : nil, viewports: eyes.map { $0.viewport },
-                         views: views, projections: projs, items: pres.items, viewCount: viewCount)
+                         views: views, projections: projs, items: pres.items, viewCount: viewCount,
+                         fillDepth: (dg.fillDepth || dg.flatDepth) ? XRMath.depthValue(projection: projs[0], meters: Self.fillDepthMeters) : nil, flatDepth: dg.flatDepth)
 
         // Muestra de píxeles del color FINAL (tras el pase final, antes de presentar): 1 vez por segundo, un blit a un búfer pequeño; el resultado llega en el manejador de finalización.
         let nowP = CACurrentMediaTime()
         if let pr = probe, nowP - probeT >= 1 {
             probeT = nowP
-            pr.encode(commandBuffer: cb, colorTextures: colorTex, layered: layered, eyes: eyes, viewCount: viewCount)
+            pr.encode(commandBuffer: cb, colorTextures: colorTex, depthTextures: depthTex, layered: layered, eyes: eyes, viewCount: viewCount)
         }
 
         // Diagnóstico (1 vez por segundo): qué se decidió y qué se dibujó.
@@ -412,7 +415,7 @@ final class XRPixelProbe {
     private var busy = false
 
     init?(device: MTLDevice) {
-        guard let b = device.makeBuffer(length: 2 * XRPixelProbe.perEye * XRPixelProbe.slot, options: .storageModeShared) else { return nil }
+        guard let b = device.makeBuffer(length: 4 * XRPixelProbe.perEye * XRPixelProbe.slot, options: .storageModeShared) else { return nil }
         b.label = "mv.xr.probe"
         buf = b
     }
@@ -430,7 +433,7 @@ final class XRPixelProbe {
         return sign * (1 + m / 1024) * powf(2, Float(e - 15))
     }
 
-    func encode(commandBuffer cb: MTLCommandBuffer, colorTextures: [MTLTexture], layered: Bool, eyes: [XREyeView], viewCount: Int) {
+    func encode(commandBuffer cb: MTLCommandBuffer, colorTextures: [MTLTexture], depthTextures: [MTLTexture] = [], layered: Bool, eyes: [XREyeView], viewCount: Int) {
         lock.lock()
         if busy { lock.unlock(); return }
         lock.unlock()
@@ -451,6 +454,13 @@ final class XRPixelProbe {
             if layered { targets.append((t0, e)) }
             else if e < colorTextures.count { targets.append((colorTextures[e], 0)) }
         }
+        // Profundidad en los mismos puntos (solo depth32Float y legible): segunda mitad del búfer. Sin ella el registro dice d=n/d.
+        var depthTargets: [(tex: MTLTexture, slice: Int)] = []
+        for e in 0..<n {
+            if layered, let d0 = depthTextures.first { depthTargets.append((d0, e)) }
+            else if e < depthTextures.count { depthTargets.append((depthTextures[e], 0)) }
+        }
+        let depthOK = depthTargets.count == targets.count && depthTargets.allSatisfy { $0.tex.pixelFormat == .depth32Float && !$0.tex.isFramebufferOnly }
         for (e, tg) in targets.enumerated() {
             let vp = eyes[e].viewport
             var k = 0
@@ -460,6 +470,12 @@ final class XRPixelProbe {
                     let y = min(max(Int(vp.originY + Double(r) * vp.height), 0), tg.tex.height - 1)
                     blit.copy(from: tg.tex, sourceSlice: tg.slice, sourceLevel: 0, sourceOrigin: MTLOrigin(x: x, y: y, z: 0), sourceSize: MTLSize(width: 1, height: 1, depth: 1),
                               to: buf, destinationOffset: (e * Self.perEye + k) * Self.slot, destinationBytesPerRow: bpp, destinationBytesPerImage: bpp)
+                    if depthOK {
+                        let dt = depthTargets[e]
+                        let dx = min(max(x, 0), dt.tex.width - 1), dy = min(max(y, 0), dt.tex.height - 1)
+                        blit.copy(from: dt.tex, sourceSlice: dt.slice, sourceLevel: 0, sourceOrigin: MTLOrigin(x: dx, y: dy, z: 0), sourceSize: MTLSize(width: 1, height: 1, depth: 1),
+                                  to: buf, destinationOffset: (2 * Self.perEye + e * Self.perEye + k) * Self.slot, destinationBytesPerRow: 4, destinationBytesPerImage: 4, options: [])
+                    }
                     k += 1
                 }
             }
@@ -468,6 +484,7 @@ final class XRPixelProbe {
         lock.lock(); busy = true; lock.unlock()
         let count = targets.count
         let fmtCopy = fmt
+        let depthOK2 = depthOK
         cb.addCompletedHandler { [weak self] _ in
             guard let self = self else { return }
             let base = self.buf.contents()
@@ -492,6 +509,14 @@ final class XRPixelProbe {
                     parts.append(String(format: "%.0f,%.0f,%.0f/a%.0f", r, g, b, al))   // /a = alfa del drawable (255 = opaco)
                 }
                 out.append("ojo\(e): " + parts.joined(separator: " "))
+                if depthOK2 {
+                    var dparts: [String] = []
+                    for k in 0..<Self.perEye {
+                        let p = base + (2 * Self.perEye + e * Self.perEye + k) * Self.slot
+                        dparts.append(String(format: "%.5f", p.assumingMemoryBound(to: Float.self).pointee))
+                    }
+                    out.append("prof-ojo\(e) (0 = borrado/infinito, near/dist): " + dparts.joined(separator: " "))
+                } else if e == 0 { out.append("prof=n/d") }
             }
             self.set(out.joined(separator: " | ") + " | negro-puro(0,0,0)=\(black)/\(total)")
         }
