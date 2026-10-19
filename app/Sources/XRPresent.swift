@@ -530,6 +530,7 @@ final class XRPresenter {
                     hp2.curve = cfg.curve
                     hp2.cols = it.cols
                     hp2.opacity = 1
+                    hp2.onTop = true
                     r.items.append(hp2)
                 }
             }
@@ -574,6 +575,7 @@ final class XRPresenter {
                     it.uvrect = SIMD4<Float>(rg.u0, rg.v0, rg.u1, rg.v1)
                     it.size = SIMD2<Float>((rg.u1 - rg.u0) * cfg.wristScale, (rg.v1 - rg.v0) * cfg.wristScale * 0.75)
                     it.opacity = 1
+                    it.onTop = true
                     r.items.append(it)
                     continue
                 }
@@ -581,6 +583,7 @@ final class XRPresenter {
                 it.uvrect = SIMD4<Float>(rg.u0, rg.v0, rg.u1, rg.v1)
                 it.size = SIMD2<Float>((rg.u1 - rg.u0) * sc, (rg.v1 - rg.v0) * sc * 0.75)
                 it.opacity = 0.92
+                it.onTop = true
                 r.items.append(it)
             }
         }

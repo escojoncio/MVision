@@ -1028,16 +1028,17 @@ final class RGRenderer {
         enc.label = isAux ? "escena (segunda vista)" : amplify > 0 ? "escena (estéreo, amplificación)" : "escena (ojo \(viewIndex))"
         defer { enc.endEncoding() }
         // Los defer corren al revés: este va ANTES de cerrar el codificador, tras dibujar el 3D (también si el guard de más abajo
-        // retorna). Solo en el último segmento (el que resuelve el MSAA): el quad del radar y el arma se prueban contra la profundidad del 3D.
+        // retorna). Solo en el último segmento (el que resuelve el MSAA): el arma se prueba contra la profundidad del 3D y el quad del radar va el último, sin prueba de profundidad.
         defer {
             if last && drawBody {
-                radar?.encodeQuad(enc, uniforms: uniforms, layered: amplify > 0, color: color.pixelFormat, depth: depth.pixelFormat, samples: samples)
                 weapon?.encode(encoder: enc, views: views, projections: projections, layered: amplify > 0, viewIndex: viewIndex)
                 if let sv = special {
                     // Con el filtro de pantalla el HUD se muestrea por la vista que corresponda al destino: aquí el panel del HUD en bruto (gamma)
                     weapon?.encodeSpecial(encoder: enc, view: sv, aux: auxImage, auxLinear: auxStoredLinear, hud: hudTexture, views: views,
                                           projections: projections, layered: amplify > 0, viewIndex: viewIndex)
                 }
+                // El radar de muñeca el ÚLTIMO y sin prueba de profundidad: siempre visible, ni el mundo ni el cuerpo ni el arma lo tapan.
+                radar?.encodeQuad(enc, uniforms: uniforms, layered: amplify > 0, color: color.pixelFormat, depth: depth.pixelFormat, samples: samples)
             }
         }
         enc.setCullMode(.none)
