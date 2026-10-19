@@ -12,6 +12,9 @@
 #include "cpu.h"
 #include "gpu.h"
 #include "hlebind.h"
+#ifdef MV_NOGEN
+#include "rtpatch.h"
+#endif
 #include "host.h"
 #include "host_hooks.h"
 #include "vr_body.h"
@@ -402,7 +405,45 @@ static void publish_state(void) {
 static void (*test_cb)(void *cpu, uint32_t frame);
 void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame)) { test_cb = cb; }
 
+#ifdef MV_NOGEN
+/* Sin recorte en las overlays de zona (vr/camera, bitácora): algunas llevan su propia copia de la visibilidad de objetos y por pieza.
+ * Se muestrea la ventana de código de overlays (160 palabras); con la muestra estable 12 fotogramas se escanea y se parchean los sitios con
+ * rt_patch_code (palabra original validada; se deshace al cambiar de overlay). Coste: 160 lecturas por fotograma y un escaneo por zona. */
+#define OVP_LO 0x800C4380u
+#define OVP_HI 0x80100000u
+#define OVP_MAX 24
+static int ovp_on = 1, ovp_map = 1;   /* ovp_map: parchear también la máscara de mapa de las overlays (bit 0 de MV_NOCULL) */
+static uint32_t ovp_sample, ovp_done = 1; static unsigned ovp_stable;
+static int ovp_ids[OVP_MAX], ovp_n;
+static void ovp_release(void) { for (int i = 0; i < ovp_n; i++) rt_unpatch_code(ovp_ids[i]); ovp_n = 0; }
+static void ovp_frame(void) {
+    uint32_t h = 2166136261u;
+    for (unsigned i = 0; i < 160; i++) {
+        uint32_t a = OVP_LO + (((OVP_HI - OVP_LO) / 160u) & ~3u) * i, v;
+        memcpy(&v, emu_ram + (a & 0x1FFFFFu), 4);
+        h = (h ^ v) * 16777619u;
+    }
+    if (h != ovp_sample) { ovp_sample = h; ovp_stable = 0; return; }
+    if (ovp_stable < 1000) ovp_stable++;
+    if (ovp_stable != 12 || h == ovp_done) return;
+    if (!ovp_on) { ovp_done = h; return; }
+    ovp_done = h;
+    ovp_release();
+    VrCamOvSite st[OVP_MAX];
+    int n = vrcam_scan_overlay(emu_ram, OVP_LO, OVP_HI, st, OVP_MAX);
+    for (int i = 0; i < n; i++) {
+        int id = -1;
+        if (st[i].kind == 0 && !ovp_map) continue;
+        if (rt_patch_code(st[i].addr, 1, &st[i].old, &st[i].neu, &id) == RT_PATCH_OK) ovp_ids[ovp_n++] = id;
+    }
+    if (n) fprintf(stderr, "[vrhost] overlay: %d de %d sitios de visibilidad sin recorte\n", ovp_n, n);
+}
+#endif
+
 static void frame_hook(Cpu *c, uint32_t f) {
+#ifdef MV_NOGEN
+    if (vr_ok) ovp_frame();
+#endif
     float turn = mv_vr_take_turn();
     if (turn != 0.0f) vrcam_turn(turn);
     if (mv_vr_take_recenter()) vrcam_recenter();
@@ -460,12 +501,17 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     }
     vrgame_set_enabled(0, 0);
 #ifdef MV_NOGEN
+    ovp_release(); ovp_done = 1; ovp_stable = 0;
     hle_bind_declare_fixed("vrradar_draw");
     hle_bind_declare_fixed("vrbody_sort");
     for (unsigned i = 0; i < NFIRE; i++) hle_bind_declare_fixed(FIRE_SITES[i].name);
     for (unsigned i = 0; i < NSITES; i++) hle_bind_declare_fixed(SITES[i].name);
     VrCamPatch p;
     vrcam_patch_default(&p);
+    {   /* MV_NOCULL=máscara hex (pruebas A/B): bits 0-5 sitios de NOCULL, bit 6 HLE de paquetes, bit 7 overlays; defecto 0xFF */
+        const char *e = getenv("MV_NOCULL"); unsigned m = e ? (unsigned)strtoul(e, NULL, 16) : 0xFFu;
+        p.no_cull = (int)(m & VRCAM_NOCULL_ALL); vrcam_pack_enable((m >> 6) & 1); ovp_on = (int)((m >> 7) & 1); ovp_map = (int)(m & 1);
+    }
     int n = vrcam_patch_ram(ram, &p);
     if (n < 0) {
         fprintf(stderr, "[vrhost] el ejecutable no coincide con la edición esperada: sin cámara VR (se usa la del juego)\n");

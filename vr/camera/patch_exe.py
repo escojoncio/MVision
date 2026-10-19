@@ -75,14 +75,14 @@ WORD_PATCHES = {"no-divide": [(0x8001A11C, 0x24020800, 0x3C027FFF)]}
 
 # ---- Sin recorte del motor (--no-cull): la visibilidad para DIBUJAR siempre devuelve "visible". Cada punto es una sola instrucción
 # (rama condicional `beq v0,zero,destino`) que se anula (nop) o se vuelve incondicional (`beq zero,zero,destino`); nada de ello es
-# lógica del juego (la IA y los guiones usan DG_PointCheck/campo +0x32, que se quedan como estaban salvo lo descrito en la bitácora).
-#   obj-map : DG_BoundChanl (0x80018c8c). Objeto cuya máscara de mapa (+0x2C) no corta con el mapa actual -> oculto. Se anula.
-#   obj-box : DG_BoundChanl. Objeto con caja envolvente (flag 0x20): proyecta 8 esquinas y compara con la caja de pantalla; fuera -> oculto (modo 0),
+# lógica del juego (la IA y los guiones usan la prueba de punto visible/campo +0x32, que se quedan como estaban salvo lo descrito en la bitácora).
+#   obj-map : la visibilidad de objetos (0x80018c8c). Objeto cuya máscara de mapa (+0x2C) no corta con el mapa actual -> oculto. Se anula.
+#   obj-box : la visibilidad de objetos. Objeto con caja envolvente (flag 0x20): proyecta 8 esquinas y compara con la caja de pantalla; fuera -> oculto (modo 0),
 #             parcial -> modo 1 (recorte por vértice). Se fuerza el modo 2 (dentro) sin proyectar nada.
-#   part-box: DG_BoundObjs (0x800188a4). Lo mismo por pieza (flag 0x10): se fuerza visible.
-#   prim-map: DG_PrimChanl (0x8001ba44), primitivas del motor (láseres, sombras, humo...) con máscara de mapa. Se anula.
-#   sort-map: DG_SortChanl (0x8001da18), idem al ordenar. Se anula.
-#   outcode : etapa de polígono de DG_TransChanl (0x8001e1fc): descarta el polígono si todos sus vértices caen del mismo lado de la caja de
+#   part-box: la visibilidad por pieza (0x800188a4). Lo mismo por pieza (flag 0x10): se fuerza visible.
+#   prim-map: el dibujo de primitivas (0x8001ba44), primitivas del motor (láseres, sombras, humo...) con máscara de mapa. Se anula.
+#   sort-map: la ordenación (0x8001da18), idem al ordenar. Se anula.
+#   outcode : etapa de polígono de la transformación (0x8001e1fc): descarta el polígono si todos sus vértices caen del mismo lado de la caja de
 #             pantalla (códigos 515(x)). Se salta siempre.
 NOCULL = [  # (nombre, dirección, palabra original, palabra nueva)
     ("obj-map", 0x80018D00, 0x104000B0, 0x00000000),

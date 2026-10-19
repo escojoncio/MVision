@@ -404,16 +404,41 @@ static const struct { uint32_t addr; uint8_t role; } PATCH_SITES[] = {
 /* Sin recorte del motor (equivalente a NOCULL de patch_exe.py): cada sitio es UNA instrucción de rama; se comprueba la palabra original
  * (todo o nada) y se escribe la nueva. Efecto de cada uno: ver patch_exe.py y la bitácora. */
 static const struct { uint32_t addr, old, neu; } NOCULL_SITES[] = {
-    {0x80018D00u, 0x104000B0u, 0x00000000u},   /* DG_BoundChanl: objeto con máscara de mapa fuera del mapa actual -> oculto */
-    {0x80018D0Cu, 0x104000ADu, 0x100000ADu},   /* DG_BoundChanl: caja envolvente del objeto (8 esquinas proyectadas) -> siempre dentro */
-    {0x800188F8u, 0x104000B3u, 0x100000B3u},   /* DG_BoundObjs: caja envolvente por pieza -> siempre dentro */
-    {0x8001BAE0u, 0x104000D5u, 0x00000000u},   /* DG_PrimChanl: primitivas del motor con máscara de mapa */
-    {0x8001DB10u, 0x10400026u, 0x00000000u},   /* DG_SortChanl: idem al ordenar */
+    {0x80018D00u, 0x104000B0u, 0x00000000u},   /* la visibilidad de objetos: objeto con máscara de mapa fuera del mapa actual -> oculto */
+    {0x80018D0Cu, 0x104000ADu, 0x100000ADu},   /* la visibilidad de objetos: caja envolvente del objeto (8 esquinas proyectadas) -> siempre dentro */
+    {0x800188F8u, 0x104000B3u, 0x100000B3u},   /* la visibilidad por pieza: caja envolvente por pieza -> siempre dentro */
+    {0x8001BAE0u, 0x104000D5u, 0x00000000u},   /* el dibujo de primitivas: primitivas del motor con máscara de mapa */
+    {0x8001DB10u, 0x10400026u, 0x00000000u},   /* la ordenación: idem al ordenar */
     {0x8001E29Cu, 0x1040000Eu, 0x1000000Eu},   /* etapa de polígono: descarte por códigos de pantalla de los vértices */
 };
 #define NOCULL_N ((int)(sizeof NOCULL_SITES / sizeof *NOCULL_SITES))
 
-void vrcam_patch_default(VrCamPatch *p) { p->engine_h = 160; p->hfov_deg = 140; p->vfov_deg = 120; p->no_divide = 1; p->wide_points = 0; p->no_cull = 1; }
+/* Copias de las funciones de visibilidad de objetos y por pieza dentro de las overlays de zona (las demás overlays usan las del ejecutable).
+ * Se localizan por firma de 3-4 instrucciones (rama condicional sobre una máscara) y el parche conserva el desplazamiento de la rama:
+ *   map : `lhu v0,44(x); nop; beq v0,zero,+3; and v0,v0,rY; beq v0,zero,D; nop`  -> la 2.ª rama pasa a `nop` (equivale a obj-map)
+ *   box : `andi v0,x,0x20; beq v0,zero,D; addiu a3,zero,2`                        -> rama incondicional (equivale a obj-box)
+ *   part: `andi v0,x,0x10; beq v0,zero,D; addiu v1,zero,2`                         -> rama incondicional (equivale a part-box)
+ * La firma `part` exige además `beq s6,zero,..; addu v1,zero,zero` justo antes (`box` y `part` del ejecutable también encajan, pero el
+ * llamador solo escanea la ventana de overlays). */
+int vrcam_scan_overlay(const uint8_t *ram, uint32_t lo, uint32_t hi, VrCamOvSite *out, int max) {
+    int n = 0;
+    if (!ram || !out || max <= 0 || lo >= hi || (lo & 3) || (hi & 3) || lo < 0x80000000u || hi > 0x80200000u) return 0;
+    for (uint32_t a = lo + 8; a + 16 <= hi && n < max; a += 4) {
+        uint32_t w0 = (uint32_t)rd_i32(ram, a), w1 = (uint32_t)rd_i32(ram, a + 4), w2 = (uint32_t)rd_i32(ram, a + 8);
+        if (w0 == 0x10400003u && (w1 & 0xFFE0FFFFu) == 0x00401024u && (w2 >> 16) == 0x1040u && (uint32_t)rd_i32(ram, a + 12) == 0 &&
+            (((uint32_t)rd_i32(ram, a - 8)) & 0xFC1FFFFFu) == 0x9402002Cu && (uint32_t)rd_i32(ram, a - 4) == 0) {
+            out[n].addr = a + 8; out[n].old = w2; out[n].neu = 0; out[n].kind = 0; n++;
+        } else if ((w0 & 0xFC1FFFFFu) == 0x30020020u && (w1 >> 16) == 0x1040u && w2 == 0x24070002u) {
+            out[n].addr = a + 4; out[n].old = w1; out[n].neu = 0x10000000u | (w1 & 0xFFFFu); out[n].kind = 1; n++;
+        } else if ((w0 & 0xFC1FFFFFu) == 0x30020010u && (w1 >> 16) == 0x1040u && w2 == 0x24030002u &&
+                   ((uint32_t)rd_i32(ram, a - 4) == 0x00001821u) && (((uint32_t)rd_i32(ram, a - 8)) >> 16) == 0x12C0u) {
+            out[n].addr = a + 4; out[n].old = w1; out[n].neu = 0x10000000u | (w1 & 0xFFFFu); out[n].kind = 2; n++;
+        }
+    }
+    return n;
+}
+
+void vrcam_patch_default(VrCamPatch *p) { p->engine_h = 160; p->hfov_deg = 140; p->vfov_deg = 120; p->no_divide = 1; p->wide_points = 0; p->no_cull = VRCAM_NOCULL_ALL; }
 
 int vrcam_patch_ram(uint8_t *ram, const VrCamPatch *pp) {
     VrCamPatch d; if (!pp) { vrcam_patch_default(&d); pp = &d; }
@@ -443,6 +468,6 @@ int vrcam_patch_ram(uint8_t *ram, const VrCamPatch *pp) {
         n++;
     }
     if (pp->no_divide) { uint32_t w = DIVIDE_NEW; memcpy(ram + (DIVIDE_SITE & RAM_MASK), &w, 4); n++; }
-    if (pp->no_cull) for (int i = 0; i < NOCULL_N; i++) { uint32_t w = NOCULL_SITES[i].neu; memcpy(ram + (NOCULL_SITES[i].addr & RAM_MASK), &w, 4); n++; }
+    for (int i = 0; i < NOCULL_N; i++) if ((pp->no_cull >> i) & 1) { uint32_t w = NOCULL_SITES[i].neu; memcpy(ram + (NOCULL_SITES[i].addr & RAM_MASK), &w, 4); n++; }
     return n;
 }
