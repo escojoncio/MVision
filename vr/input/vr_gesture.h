@@ -24,6 +24,7 @@ extern "C" {
 #endif
 
 #define VRG_MAX_EN 8
+enum { VRG_R3 = 1u << 2, VRG_L3 = 1u << 1 };   /* clic del stick (bits del mando del juego, mismos que vr_input) */
 enum { VRG_SQUARE = 1u << 15, VRG_CIRCLE = 1u << 13, VRG_TRIANGLE = 1u << 12, VRG_R1 = 1u << 11, VRG_L1 = 1u << 10 };
 enum { VRG_EV_NONE = 0, VRG_EV_PUNCH = 1, VRG_EV_GRAB = 2, VRG_EV_SQUEEZE = 3, VRG_EV_RELEASE = 4, VRG_EV_KNOCK = 5, VRG_EV_PEEK = 6, VRG_EV_WALL = 7, VRG_EV_HURT = 8,
        VRG_EV_IMPACT = 9, VRG_EV_JAB = 10 };
@@ -32,14 +33,17 @@ typedef struct {
     int enable;              /* 0: el módulo no hace nada (modo botón) */
     int fist_required;       /* 1 (defecto): el golpe solo cuenta con la mano en PUÑO (agarre cerrado con histéresis grip_on/off); 0 = como antes (el puño es indiferente) */
     float fist_haptic;       /* háptico suave al cerrar el puño con las manos libres (0,12); 0 = ninguno */
-    int button_jab;          /* 1 (defecto): con manos libres, el cuadrado físico lejos del cuello = golpe de botón (toque + golpe sintético de la mano); 0 = se descarta */
+    int button_jab;          /* 0 (defecto): con manos libres el cuadrado físico (gatillo) fuera de un agarre se DESCARTA (el gatillo solo agarra); 1 = golpe de botón de accesibilidad (toque + golpe sintético de la mano) */
+    float item_hold_s;       /* con manos libres los grips NO llegan al juego (solo cierran el puño): mantener el clic del stick de cada mano este tiempo (0,35 s) emite R1 (dominante) / L1 (la otra) = ventana de objetos / armas */
+    float punch_dir_cos;     /* el golpe exige que la velocidad RELATIVA A LA CABEZA vaya al menos este coseno hacia delante Y radialmente hacia fuera de la cabeza (0,5 = dentro de 60 grados): un gesto lateral o girar el cuerpo no valen */
     float trig_on, trig_off; /* histéresis del gatillo (0,6 / 0,3) */
     int punch, grab, knock, peek;   /* conmutadores por gesto (1 activo) */
     int right_handed;        /* el agarre de la mano dominante es R1 (derecho) o L1 */
-    float punch_speed;       /* m/s de la mano para contar como golpe (1,8) */
+    float punch_speed;       /* m/s de la mano para contar como golpe (1,3: la media de 4 muestras recorta el pico real de 2-4 m/s) */
     float knock_speed;       /* m/s para golpear la pared (1,2) */
-    float reach_min;         /* alcance horizontal mínimo de la mano respecto a la cabeza en el golpe (0,22 m) */
-    float melee_range;       /* distancia máxima al enemigo para golpear (2,5 m); 0 = sin condición */
+    float reach_min;         /* alcance horizontal mínimo de la mano respecto a la cabeza en el golpe (0,30 m) */
+    float front_cos;         /* el golpe exige un enemigo a tiro DELANTE: coseno mínimo entre el rumbo del jugador y la dirección al enemigo (0,5 = 60 grados) */
+    float melee_range;       /* distancia máxima al enemigo para golpear (3,0 m); 0 = sin condición */
     float grab_range;        /* distancia máxima cuerpo-enemigo para agarrar (1,3 m) */
     float neck_radius;       /* radio de la mano al cuello/hombro del enemigo (0,45 m) */
     float neck_height;       /* altura del cuello sobre la posición del enemigo (0,45 m, posición del motor = cintura) */
@@ -70,10 +74,19 @@ typedef struct {
     int weapon_busy;         /* arma VR mostrada o maniobra de recarga en curso (el juego desequipa el arma un instante al recargar) */
     float hand[2][3], grip[2];   /* mano en el mundo (cercanía a enemigos); grip = agarre (puño), NO decide el agarre del enemigo */
     float trig[2];           /* gatillo analógico por mano física */
+    int stick_dom, stick_off; /* clic del stick de la mano dominante / de la otra (R3 / L3 del mando del juego) */
     int sq_user;             /* el cuadrado físico del mando está pulsado (gatillo dominante o botón A de la otra mano) */
     int n_en;
     struct { float p[3]; float yaw; int down; int vital; } en[VRG_MAX_EN];
 } vrg_in_t;
+
+/* Intento de golpe (una mano con el puño o un movimiento casi rápido): para el registro [gest] del visor. reason es una cadena estática. */
+typedef struct {
+    int valid, side;
+    float speed, fcos, rcos, reach, dist, grip;   /* m/s, coseno hacia delante, coseno radial, alcance (m), distancia al enemigo más cercano (-1 ninguno), agarre */
+    int fist;
+    const char *reason;      /* "detras" (enemigo a tiro pero no delante), "ok", "lento", "dir", "alcance", "sin_enemigo", "lejos", "sin_puno", "enfriamiento", "calma", "ocupado", "manos_ocupadas" */
+} vrg_gest_t;
 
 typedef struct {
     uint16_t press;          /* botones a añadir al mando del juego */
@@ -83,6 +96,7 @@ typedef struct {
     int jab_side;            /* -1 nada; 0/1: iniciar un golpe sintético de esa mano del personaje (botón sin gesto) */
     int grab_side;           /* mano física que sujeta (-1 ninguna) mientras el agarre dura (para pegar las manos al cuello) */
     int grab_en;             /* índice del enemigo sujetado (en `en`) o -1 */
+    vrg_gest_t gest;         /* intento de golpe de este VBlank (valid = 0: ninguno) */
 } vrg_out_t;
 
 typedef struct {
@@ -108,6 +122,11 @@ typedef struct {
     int warm;                /* llamadas tras un reinicio sin iniciar agarres (el grip ya cerrado no es un flanco) */
     int latch; float latch_t;/* R1/L1 retirados hasta soltar el grip tras un agarre */
     float hurt_cool, wall_cool;
+    float gest_tokens;       /* cupo de registros [gest] (10 por segundo) */
+    int swing[2];            /* movimiento casi rápido en curso por mano (histéresis del registro) */
+    float fist_hap_cool[2];  /* s hasta el próximo háptico de cierre de puño por mano (evita el temblor con el grip en el umbral) */
+    float item_t[2];         /* s con el clic de stick mantenido (dominante, otra) */
+    vrg_gest_t gpk[2];       /* mejor registro del movimiento en curso por mano (se emite al terminar) */
     float prev_head[3], prev_fwd[2]; int have_head;
 } vrg_t;
 

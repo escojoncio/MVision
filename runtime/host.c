@@ -137,10 +137,10 @@ static int have_deadline;
  * 1) Con consumidor de audio vivo (el anillo de la SPU se está leyendo) la emulación se acompasa AL AUDIO: espera mientras
  *    haya más de AUDIO_TARGET frames de audio por delante. El reloj de audio manda, así que no hay deriva entre el reloj de
  *    50 Hz virtual y el real, el anillo nunca desborda y no se descarta ni repite nada. Si la emulación va más lenta que
- *    el audio simplemente no espera (y el consumidor hace fundido a silencio, ver spu_pull).
+ *    el audio simplemente no espera (y el consumidor rellena de forma continua, ver spu_pull_rate).
  * 2) Sin consumidor (arranque, audio parado/interrumpido, pausa del motor de audio): reloj de pared a 50 Hz. Un consumidor
  *    se da por muerto si el contador de lectura no avanza en 150 ms (así un audio atascado no congela el juego). */
-#define AUDIO_TARGET 2646u   /* 3 VBlanks PAL de audio por delante (~60 ms): absorbe picos de trabajo de ~1 VBlank */
+#define AUDIO_TARGET SPU_AUDIO_TARGET   /* 3 VBlanks PAL de audio por delante (~60 ms): absorbe picos de trabajo de ~1 VBlank */
 static uint32_t pace_last_rd;
 static uint64_t pace_last_change_ns;
 static int audio_live(uint64_t now) {
@@ -504,17 +504,19 @@ const char *mv_host_error(void) {
 uint32_t mv_host_frame_count(void) { return atomic_load(&frames); }
 
 /* Hilo de audio de tiempo real: solo atómicos (anillo SPSC), sin candados ni esperas. En pausa o error el anillo se vacía
- * con fundido y luego sale silencio; al reanudar no se reproduce audio viejo (la SPU no avanza durante la pausa). */
-int mv_host_audio_pull(int16_t *out, int n) {
+ * y el consumidor rellena de forma continua hasta decaer a silencio; al reanudar no se reproduce audio viejo (la SPU no avanza durante la pausa). */
+int mv_host_audio_pull_rate(int16_t *out, int n, int rate) {
     if (!out || n <= 0) return 0;
     uint64_t t0 = mono_ns();
-    int r = spu_pull(out, n);
+    int r = spu_pull_rate(out, n, rate);
     uint64_t dt = mono_ns() - t0;
     atomic_fetch_add_explicit(&st_audio_calls, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&st_audio_frames, (uint64_t)n, memory_order_relaxed);
     if (dt > atomic_load_explicit(&st_audio_max_ns, memory_order_relaxed)) atomic_store_explicit(&st_audio_max_ns, dt, memory_order_relaxed);
     return r;
 }
+
+int mv_host_audio_pull(int16_t *out, int n) { return mv_host_audio_pull_rate(out, n, 44100); }
 
 void mv_host_note_render(int kind) { atomic_fetch_add_explicit(&st_render[kind ? 1 : 0], 1, memory_order_relaxed); }
 

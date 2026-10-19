@@ -134,8 +134,8 @@ final class GameModel: ObservableObject {
             mv_host_resume()
             audio.resume()
         } else {
-            mv_host_pause()
             audio.pause()
+            mv_host_pause()
             input.releaseAll()
         }
     }

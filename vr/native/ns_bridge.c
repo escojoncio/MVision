@@ -15,6 +15,7 @@ struct NsBridge {
     NsMeshStore *store[NS_BRIDGE_SLOTS];
     /* solo productor */
     int wr;                              /* ranura en escritura o -1 */
+    int fresh_wr;                        /* la ranura de escritura se acaba de elegir (primer begin) */
     uint32_t seq;
     /* contadores (cualquier hilo) */
     _Atomic uint32_t published, dropped, acquired, polls;
@@ -107,10 +108,12 @@ NsScene *ns_bridge_begin(NsBridge *b) {
             if ((uint32_t)i != used[0] && (uint32_t)i != used[1] && (uint32_t)i != used[2]) { b->wr = i; break; }
         }
         if (b->wr < 0) return NULL;   /* imposible por construcción */
+        b->fresh_wr = 1;
     }
     NsScene *s = &b->slot[b->wr];
     NsInstance *ai = s->inst; NsPiece *ap = s->piece; NsLight *al = s->lights; NsEffect *ae = s->effects;
-    uint32_t gen = s->slot_gen + 1;   /* contrato v2: generación del slot, sube en cada reescritura */
+    uint32_t gen = s->slot_gen + (b->fresh_wr ? 1u : 0u);   /* contrato v2: generación del slot, sube en cada reescritura (begin repetido no cuenta) */
+    b->fresh_wr = 0;
     memset(s, 0, sizeof *s);
     s->size = (uint32_t)sizeof *s;
     s->slot_gen = gen;

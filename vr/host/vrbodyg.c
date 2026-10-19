@@ -40,6 +40,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
     in.weapon = -1;
     in.weapon_busy = vrgame_weapon_engaged();
     in.sq_user = (pad & VRG_SQUARE) != 0;
+    in.stick_dom = (pad & VRG_R3) != 0; in.stick_off = (pad & VRG_L3) != 0;
     in.dt = 0.02f;                                   /* el gancho corre una vez por VBlank (50 Hz virtuales) */
     vrg_out_t out;
     if (in.active) {
@@ -69,6 +70,16 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
         }
     }
     vrg_update(&G, &in, &out);
+    {   /* registro [gest] (va al log del visor): cada intento de golpe con su velocidad, dirección y motivo de descarte, y cada evento */
+        static const char *evn[] = {"", "golpe", "agarre", "apreton", "soltar", "pared", "asomar", "pared2", "dano", "impacto", "golpe_boton"};
+        static unsigned vb;
+        vb++;
+        if (out.gest.valid) {
+            const vrg_gest_t *q = &out.gest;
+            fprintf(stderr, "[gest] vb=%u mano=%d %s v=%.2f m/s adelante=%.2f radial=%.2f alcance=%.2f enemigo=%.2f m grip=%.2f puno=%d\n", vb, q->side, q->reason, q->speed, q->fcos, q->rcos, q->reach, q->dist, q->grip, q->fist);
+        }
+        if (out.event > 0 && out.event < 11) fprintf(stderr, "[gest] vb=%u evento=%s armas_libres=%d\n", vb, evn[out.event], in.weapon < 0);
+    }
     {   /* el cuerpo del personaje: golpe sintético del botón y manos pegadas al cuello del enemigo sujeto (en el mundo del motor, mm) */
         VrBodyGrab gb; memset(&gb, 0, sizeof gb);
         if (in.active && bs) {
