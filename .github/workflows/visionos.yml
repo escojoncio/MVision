@@ -193,7 +193,9 @@ jobs:
 
       - name: Empaquetar IPA (sin firmar)
         run: |
-          APP=$(find app/build/Build/Products -maxdepth 2 -name MVision.app -type d | head -1)
+          APP=$(find app/build/Build/Products -maxdepth 2 -name "*.app" -type d | head -1)
+          if [ -z "$APP" ]; then echo "::warning::No se encontró el .app para inspeccionar"; exit 0; fi
+          BIN=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
           [ -n "$APP" ] || { echo "::error::No se generó MVision.app"; exit 1; }
           # Salvaguarda: el paquete no debe llevar ejecutables del juego ni código generado.
           if find "$APP" \( -iname '*.exe' -o -iname 'boot.dat' -o -iname 'boot.exe' \) | grep -q .; then
@@ -203,6 +205,22 @@ jobs:
           cp -R "$APP" "$RUNNER_TEMP/pkg/Payload/"
           (cd "$RUNNER_TEMP/pkg" && zip -qry "$GITHUB_WORKSPACE/out/MVision.ipa" Payload)
           ls -l out
+
+      - name: Inspeccionar paquete (Info.plist, recursos, enlaces)
+        run: |
+          APP=$(find app/build/Build/Products -maxdepth 2 -name "*.app" -type d | head -1)
+          if [ -z "$APP" ]; then echo "::warning::No se encontró el .app para inspeccionar"; exit 0; fi
+          BIN=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
+          echo "== Info.plist =="; plutil -p "$APP/Info.plist"
+          echo "== Contenido de MVision.app =="; ls -la "$APP"
+          echo "== otool -L =="; otool -L "$APP/$BIN"
+          echo "== Frameworks =="; ls -la "$APP/Frameworks" 2>/dev/null || echo "(sin Frameworks)"
+          miss=0
+          for f in default.metallib sigs_hle.json; do
+            if [ ! -f "$APP/$f" ]; then echo "::error::Falta $f en el paquete"; miss=1; fi
+          done
+          plutil -lint "$APP/Info.plist" || miss=1
+          [ "$miss" = 0 ] || exit 1
 
       - name: Publicar IPA sin firmar (7 días)
         uses: actions/upload-artifact@v4
