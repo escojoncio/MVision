@@ -44,8 +44,17 @@ final class RGRenderer {
     var drawWorld = true
     /// false = no se dibujan el radar de muñeca ni el arma en la mano (diorama: las vistas llevan otra transformación y el cuerpo no tiene sentido).
     var drawBody = true
+    /// false = el pase de los ojos limpia color y profundidad pero no dibuja la geometría 3D de la escena (pantalla 3D: la escena se dibuja en las texturas
+    /// estéreo de `stereoRequest`, no en los ojos). El panel 2D del HUD sí se sigue dibujando (`drawWorld`).
+    var drawEyes = true
     /// Cámara del juego de la última escena -> mundo VR (VrScene.game_view, columnas; vista del juego en unidades del motor -> metros).
     private(set) var gameView = matrix_identity_float4x4
+    /// Cinemática del motor (VrScene.cine_*): la escena es de una cinemática con 3D, nº de plano (sube en cada corte), si es el primer fotograma de un plano
+    /// y cuántos fundidos/destellos a pantalla completa trae.
+    private(set) var sceneCine = false
+    private(set) var sceneShot: UInt32 = 0
+    private(set) var sceneCut = false
+    private(set) var sceneCover = 0
     /// La última escena traía geometría 3D.
     var sceneHas3D: Bool { has3D }
 
@@ -446,6 +455,10 @@ final class RGRenderer {
         batches.removeAll(keepingCapacity: true)
         has3D = sc.has_3d != 0
         haveScene = true
+        sceneCine = sc.cine_active != 0
+        sceneShot = sc.cine_shot
+        sceneCut = sc.cine_cut != 0
+        sceneCover = Int(sc.cine_cover)
         let gv: [Float] = withUnsafeBytes(of: sc.game_view) { Array($0.bindMemory(to: Float.self)) }
         if gv.count >= 16 && gv.allSatisfy({ $0.isFinite }) {
             gameView = simd_float4x4(columns: (SIMD4<Float>(gv[0], gv[1], gv[2], gv[3]), SIMD4<Float>(gv[4], gv[5], gv[6], gv[7]),
@@ -542,6 +555,8 @@ final class RGRenderer {
             encodeVram(commandBuffer, pend, fs)
             // Segunda vista (mira / misil): una sola vez, con la VRAM tal como queda tras los eventos del último grupo, ANTES del pase del ojo que la muestrea.
             if lastG, let a = auxRequest, drawWorld, drawBody { encodeAux(commandBuffer, a) }
+            // Pantalla 3D: la escena a las dos texturas estéreo, solo cuando llega una escena nueva (la cabeza no interviene: la imagen es la misma hasta entonces).
+            if lastG, let sr = stereoRequest, drawWorld, gotNew || stereoDirty || stereoRendered == false { encodeStereo(commandBuffer, sr) }
             if doHud { encodeHud(commandBuffer, range: g.0..<g.1, first: firstG) }
             encodeScenePasses(commandBuffer, range: g.0..<g.1, first: firstG, last: lastG, colorTargets: sceneColor,
                               depthTargets: depthTargets, resolveTargets: sceneResolve, views: views,
@@ -597,6 +612,105 @@ final class RGRenderer {
         }
         auxColor = c; auxDepth = d; auxRaw = raw ?? c; auxKey = key
         return true
+    }
+
+    // MARK: pantalla 3D estereoscópica (cinemáticas del motor)
+    /// Petición de la pantalla 3D de este fotograma: parámetros de las cámaras estéreo (XRStereo) y tamaño de las texturas. Las vistas se calculan en `encodeStereo` con la
+    /// cámara del juego de la escena que se va a dibujar (la recién llegada; si se calcularan antes, cada escena se dibujaría con la cámara de la anterior: un fotograma de
+    /// desfase y un fotograma erróneo en cada corte de plano). No dependen de la cabeza.
+    struct StereoRequest: Equatable {
+        var ipd: Float
+        var convergence: Float
+        var tanX: Float
+        var tanY: Float
+        var width: Int
+        var height: Int
+    }
+    var stereoRequest: StereoRequest? {
+        didSet { if stereoRequest != oldValue { stereoDirty = true } }
+    }
+    private var stereoDirty = true
+    private(set) var stereoRendered = false
+    private var stereoTex: MTLTexture?          // array de 2 capas (ojo izquierdo, derecho) en el formato de color del renderer
+    private var stereoRaw: MTLTexture?          // la misma sin decodificación sRGB (el shader aplica tinte y recubrimientos en gamma)
+    private var stereoSlices: [MTLTexture] = []
+    private var stereoMSAAColor: MTLTexture?
+    private var stereoDepth: MTLTexture?
+    private var stereoKey = ""
+    /// Imagen estéreo (array de 2 capas, valores tal como se guardaron: gamma en los formatos sRGB) o nil si aún no se dibujó.
+    var stereoImage: MTLTexture? { stereoRendered ? stereoRaw : nil }
+    /// Los valores de `stereoImage` ya son lineales (destino de coma flotante).
+    var stereoStoredLinear: Bool { colorFormat == .rgba16Float }
+    /// Tinte y recubrimientos de pantalla de la última escena (espacio gamma) para aplicarlos a la pantalla 3D: la escena de una cinemática no pasa por el post-proceso de los ojos.
+    var screenFx: (tint: SIMD3<Float>, covers: [SIMD4<Float>]) { (fx.tint, fx.covers) }
+
+    func prepareStereo(width: Int, height: Int) { _ = ensureStereo(width, height) }
+
+    private func ensureStereo(_ w: Int, _ h: Int) -> Bool {
+        let key = "\(w)x\(h)/\(colorFormat.rawValue)/\(depthFormat.rawValue)/\(sampleCount)"
+        if key == stereoKey, stereoTex != nil, stereoDepth != nil { return true }
+        guard w >= 64, h >= 64, w <= 4096, h <= 4096 else { return false }
+        stereoRendered = false
+        let cd = MTLTextureDescriptor()
+        cd.textureType = .type2DArray
+        cd.pixelFormat = colorFormat
+        cd.width = w; cd.height = h; cd.arrayLength = 2
+        cd.usage = [.renderTarget, .shaderRead, .pixelFormatView]
+        cd.storageMode = .private
+        guard let t = device.makeTexture(descriptor: cd) else { return false }
+        t.label = "VR pantalla 3D (ojos)"
+        var slices: [MTLTexture] = []
+        for e in 0..<2 {
+            guard let v = t.makeTextureView(pixelFormat: colorFormat, textureType: .type2D, levels: 0..<1, slices: e..<(e + 1)) else { return false }
+            v.label = "VR pantalla 3D (ojo \(e))"
+            slices.append(v)
+        }
+        var raw: MTLTexture? = t
+        switch colorFormat {
+        case .bgra8Unorm_srgb: raw = t.makeTextureView(pixelFormat: .bgra8Unorm)
+        case .rgba8Unorm_srgb: raw = t.makeTextureView(pixelFormat: .rgba8Unorm)
+        default: break
+        }
+        let dd = MTLTextureDescriptor()
+        dd.pixelFormat = depthFormat
+        dd.width = w; dd.height = h
+        dd.usage = .renderTarget
+        dd.storageMode = .private
+        var msaa: MTLTexture?
+        if sampleCount > 1 {
+            cd.textureType = .type2DMultisample
+            cd.arrayLength = 1
+            cd.sampleCount = sampleCount
+            cd.usage = .renderTarget
+            msaa = device.makeTexture(descriptor: cd)
+            msaa?.label = "VR pantalla 3D (color MSAA)"
+            dd.textureType = .type2DMultisample
+            dd.sampleCount = sampleCount
+            guard msaa != nil else { return false }
+        } else {
+            dd.textureType = .type2D
+        }
+        guard let d = device.makeTexture(descriptor: dd) else { return false }
+        d.label = "VR pantalla 3D (profundidad)"
+        stereoTex = t; stereoRaw = raw ?? t; stereoSlices = slices; stereoMSAAColor = msaa; stereoDepth = d; stereoKey = key
+        stereoDirty = true
+        return true
+    }
+
+    private func encodeStereo(_ cb: MTLCommandBuffer, _ r: StereoRequest) {
+        guard ensureStereo(r.width, r.height), let d = stereoDepth, stereoSlices.count == 2 else { return }
+        for e in 0..<2 {
+            guard let cam = XRStereo.eye(gameView: gameView, eye: e, ipd: r.ipd, conv: r.convergence, tanX: r.tanX, tanY: r.tanY) else { return }
+            var u = VrSceneUniforms()
+            let m = XRMath.projection(tangents: cam.tangents, near: 0.05, far: 800) * cam.view
+            u.view_proj = (m, m)
+            u.head = SIMD4<Float>(0, 0, 0, 1)
+            let color = stereoMSAAColor ?? stereoSlices[e]
+            encodeScene(cb, range: 0..<batches.count, first: true, last: true, color: color, depth: d,
+                        resolve: stereoMSAAColor != nil ? stereoSlices[e] : nil, uniforms: u, amplify: 0, viewIndex: 0, views: [], projections: [], isAux: true)
+        }
+        stereoRendered = true
+        stereoDirty = false
     }
 
     private func encodeAux(_ cb: MTLCommandBuffer, _ a: AuxView) {
@@ -939,7 +1053,7 @@ final class RGRenderer {
         } else {
             enc.setViewport(isAux ? vp0 : (viewportOverride.flatMap { viewIndex < $0.count ? $0[viewIndex] : nil } ?? vp0))
         }
-        guard haveScene, has3D, drawWorld, !seg.isEmpty, let buf = vtxSlots[curSlot].buf else { return }
+        guard haveScene, has3D, drawWorld, drawEyes || isAux, !seg.isEmpty, let buf = vtxSlots[curSlot].buf else { return }
         var u = uniforms
         enc.setVertexBuffer(buf, offset: 0, index: Int(VR_BUF_VERTS))
         enc.setVertexBuffer(buf, offset: vtxSlots[curSlot].stOff, index: Int(VR_BUF_STATES))

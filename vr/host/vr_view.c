@@ -9,6 +9,32 @@ void vrview_reset(VrView *v) {
     v->reason = VRV_R_NO_GAME;
     v->to_cine = 3;                /* 60 ms */
     v->to_world = 3;
+    v->kind = VRV_K_UI;
+    v->want_kind = VRV_K_UI;
+    v->to_engine = 3;              /* entrar en cinemática de motor: 60 ms de 3D seguido */
+    v->from_engine = 10;           /* salir: 200 ms sin 3D (un fundido o un corte no deben parpadear) */
+    v->to_other = 3;
+}
+
+int vrview_kind_of(const VrViewIn *in) {
+    if (!in) return VRV_K_UI;
+    int r = vrview_reason(in);
+    if (r == VRV_R_WORLD) return VRV_K_WORLD;
+    /* Cinemática del motor: sin control del jugador y con 3D; con o sin jugador en escena (las introducciones no lo tienen). Radio, pausa,
+     * detenido y ventana de armas/objetos son 2D del juego aunque el motor dibuje 3D detrás. */
+    if (in->scene3d && (r == VRV_R_NO_GAME || r == VRV_R_CINEMATIC || r == VRV_R_LOST_CONTROL)) return VRV_K_ENGINE;
+    if (in->video && r != VRV_R_PAUSED) return VRV_K_VIDEO;
+    return VRV_K_UI;
+}
+
+const char *vrview_kind_name(int k) {
+    switch (k) {
+    case VRV_K_UI: return "2D";
+    case VRV_K_WORLD: return "mundo";
+    case VRV_K_ENGINE: return "cinemática del motor";
+    case VRV_K_VIDEO: return "vídeo";
+    default: return "?";
+    }
 }
 
 int vrview_reason(const VrViewIn *in) {
@@ -39,6 +65,17 @@ int vrview_step(VrView *v, const VrViewIn *in) {
             v->run = 0;
             v->switches++;
         }
+    }
+    int k = vrview_kind_of(in);
+    v->want_kind = k;
+    if (k == v->kind) {
+        v->kind_run = 0;
+    } else {
+        int need = k == VRV_K_ENGINE ? v->to_engine : v->kind == VRV_K_ENGINE ? v->from_engine : v->to_other;
+        if (k == VRV_K_WORLD) need = v->to_world;      /* el mundo y el modo de vista usan el mismo umbral */
+        if (v->kind == VRV_K_WORLD) need = v->to_cine;
+        if (need < 1) need = 1;
+        if (++v->kind_run >= need) { v->kind = k; v->kind_run = 0; v->kind_switches++; }
     }
     return v->mode;
 }

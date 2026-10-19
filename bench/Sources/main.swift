@@ -197,7 +197,7 @@ func render(_ enc: XRFrameEncoder, layered: Bool, color: [MTLTexture], depth: [M
 func setDefaults(width: Double = 3.0, distance: Double = 2.5, curve: Double, sharp: Int) {
     let d = UserDefaults.standard
     d.set(width, forKey: "xr.view.width"); d.set(distance, forKey: "xr.view.distance"); d.set(curve, forKey: "xr.view.curve")
-    d.set(sharp, forKey: "xr.view.sharp"); d.set(false, forKey: "xr.view.integer"); d.set("cine", forKey: "xr.view.cutscene")
+    d.set(sharp, forKey: "xr.view.sharp"); d.set(false, forKey: "xr.view.integer"); d.set("cinema", forKey: "xr.view.cutscene2")
     d.set(true, forKey: "xr.view.hud"); d.set(0.8, forKey: "xr.view.hudScale"); d.set(false, forKey: "xr.view.wristHud")
 }
 
@@ -272,6 +272,74 @@ func runCase(_ cfg: Cfg, first: Bool) {
                 check(caso, "ojo \(e) \(m.0)", near(c, m.3), "pixel esperado (\(p.0),\(p.1)) color \(c) esperado \(m.3)")
             }
         }
+    }
+
+    // ---------- C: pantalla 3D estereoscópica (cinemática del motor): dos cámaras del juego separadas un IPD en una pantalla fija en el mundo ----------
+    stereoBlock: do {
+        let caso = "\(cfg.name)/pantalla3d"
+        setDefaults(curve: 0.0, sharp: 1)
+        UserDefaults.standard.set("stereo", forKey: "xr.view.cutscene2")
+        guard let tg = makeTargets(layered: cfg.layered) else { check(caso, "texturas", false, "no se pudieron crear"); break stereoBlock }
+        guard let enc = XRFrameEncoder(device: device, colorFormat: colorFormat, depthFormat: depthFormat, layered: cfg.layered, sampleCount: cfg.msaa) else {
+            check(caso, "codificador", false, "XRFrameEncoder no se pudo crear"); break stereoBlock
+        }
+        enc.log = { print("[diag] " + $0) }
+        bench_make_pattern()
+        bench_make_scene()
+        bench_set_cine_camera(1)
+        bench_scene_post()
+        bench_enable_radar(0)
+        bench_enable_weapon(0)
+        let headA = headPose(SIMD3<Float>(0.10, 1.60, 0.20), yaw: 0.45)
+        let headB = headPose(SIMD3<Float>(0.35, 1.45, -0.10), yaw: 0.20)      // la cabeza se mueve tras anclar: el encuadre de la escena NO debe cambiar
+        var gs = MvVrGameState(); gs.view_mode = 0; gs.view_kind = 2
+        guard let imgs = render(enc, layered: cfg.layered, color: tg.color, depth: tg.depth, gs: gs, frames: 80, head: { $0 == 79 ? headB : headA }) else {
+            check(caso, "render", false, "fallo al renderizar"); bench_set_cine_camera(0); break stereoBlock
+        }
+        bench_set_cine_camera(0)
+        report(caso, imgs, notice: true)
+        print("[diag] última: \(enc.lastDiag)")
+        check(caso, "presentacion = pantalla 3D", "\(enc.presenter.shown)" == "stereo", "mostrando=\(enc.presenter.shown)")
+        check(caso, "imagen estereo dibujada", enc.renderer.stereoRendered, "stereoRendered=\(enc.renderer.stereoRendered)")
+        check(caso, "velo disipado", enc.presenter.veil < 0.01, "velo=\(enc.presenter.veil)")
+        let W: Float = 3.0, D: Float = 2.5
+        let tanX = W / (2 * D), tanY = tanX * 0.75
+        let hp = XRMath.position(headA)
+        let anchor = XRMath.translation(SIMD3<Float>(hp.x, 0, hp.z)) * XRMath.rotationY(XRMath.yaw(of: headA))
+        let anchorY = max(0.8, hp.y - 0.05)
+        var gv = matrix_identity_float4x4
+        gv.columns.0.x = 0.001; gv.columns.1.y = -0.001; gv.columns.2.z = -0.001; gv.columns.3 = SIMD4<Float>(0, 1.6, 0, 1)
+        var disparity: [String: Int] = [:]
+        for e in 0..<2 {
+            let im = imgs[e]
+            check(caso, "ojo \(e) no negro", im.nonBlack > 0.10, String(format: "%.1f %% de pixeles no negros (minimo 10 %%)", im.nonBlack * 100))
+            guard let cam = XRStereo.eye(gameView: gv, eye: e, ipd: IPD, conv: XRStereo.convergence, tanX: tanX, tanY: tanY) else { check(caso, "camara estereo", false, "XRStereo.eye devolvio nil"); continue }
+            let pts: [(String, SIMD3<Float>, (Int, Int, Int))] = [
+                ("cubo rojo", SIMD3<Float>(-1.2, 0.5, -3), (255, 0, 0)),
+                ("cubo azul", SIMD3<Float>(1.5, 0.5, -3), (0, 0, 255)),
+                ("cubo amarillo cercano (oclusion)", SIMD3<Float>(0, 1.6, -2), (255, 255, 0)),
+                ("suelo oscuro", SIMD3<Float>(-0.5, 0, -4.5), (70, 70, 70)),
+                ("suelo claro", SIMD3<Float>(0.5, 0, -4.5), (150, 150, 150)),
+            ]
+            for p in pts {
+                // punto del mundo -> posición en la imagen de la cámara del ojo e -> punto de la pantalla en el mundo -> pixel del ojo del usuario (con la cabeza movida)
+                let c = cam.view * SIMD4<Float>(p.1, 1)
+                guard c.z < -0.01 else { check(caso, "ojo \(e) \(p.0)", false, "detras de la camara estereo"); continue }
+                let u = (c.x / -c.z + cam.tangents.x) / (cam.tangents.x + cam.tangents.y)
+                let v = (cam.tangents.z - c.y / -c.z) / (cam.tangents.z + cam.tangents.w)
+                let local = SIMD4<Float>((u - 0.5) * W, (0.5 - v) * W * 0.75, 0, 1)
+                let w = anchor * XRMath.translation(SIMD3<Float>(0, anchorY, -D)) * local
+                guard let px = project(SIMD3<Float>(w.x, w.y, w.z), eye: e, head: headB) else { check(caso, "ojo \(e) \(p.0)", false, "detras de la camara"); continue }
+                let col = im.avg(px.0, px.1, r: 2)
+                check(caso, "ojo \(e) \(p.0)", near(col, p.2, 50), "pixel (\(px.0),\(px.1)) color \(col) esperado \(p.2)")
+                if p.0 == "cubo rojo" { disparity["rojo\(e)"] = px.0 }
+            }
+        }
+        // paralaje: el cubo rojo (a 3 m = plano de convergencia) cae en el mismo punto de la pantalla en los dos ojos de la cámara, y la pantalla está a 2,5 m,
+        // así que sus posiciones en los ojos del usuario difieren como las de un objeto de la pantalla (no como las de uno lejano)
+        if let a = disparity["rojo0"], let b = disparity["rojo1"] { print("[diag] cubo rojo: x ojo izq \(a) der \(b)") }
+        // la cabeza no cambia el encuadre: segunda imagen con otra pose y misma escena -> la imagen del juego en la pantalla es la misma textura
+        check(caso, "texturas estereo con tamano", enc.renderer.stereoImage?.arrayLength == 2, "arrayLength=\(String(describing: enc.renderer.stereoImage?.arrayLength))")
     }
 
     // ---------- B: mundo ----------

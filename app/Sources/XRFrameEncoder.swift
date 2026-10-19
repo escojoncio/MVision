@@ -142,13 +142,18 @@ final class XRFrameEncoder {
         var special = mv_vrgame_special_view(&sv) != 0
         if special && sv.hide_hud != 0 { hud = nil }          // el panel plano del HUD sobra mientras se mira por la mira / el visor
         // Presentación: mundo en primera persona, pantalla de cine o diorama, paneles del HUD, velo de transición y menú.
+        var ipd = simd_length(XRMath.position(eyes[0].transform) - XRMath.position(eyes[1].transform))
+        if !(ipd > 0.05 && ipd < 0.08) { ipd = 0.063 }
         var pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, eyePx: Float(w), p00: projs[0].columns.0.x,
-                                     gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame())
+                                     gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame(), ipd: ipd, shot: renderer.sceneShot)
         renderer.drawWorld = pres.drawWorld
         renderer.drawBody = pres.drawBody
+        renderer.drawEyes = pres.drawEyes
+        renderer.stereoRequest = pres.stereo
+        if let sr = pres.stereo { renderer.prepareStereo(width: sr.width, height: sr.height) }
         var sceneViews = views
         if let dm = pres.dioramaModel { sceneViews = views.map { $0 * dm } }
-        if pres.dioramaModel != nil || !pres.drawWorld { special = false }
+        if pres.dioramaModel != nil || !pres.drawWorld || pres.stereo != nil { special = false }
         renderer.special = special ? sv : nil
         renderer.suppressFrame = special && sv.kind == Int32(MV_VIEW_SCOPE) && sv.suppress_frame != 0
         renderer.auxRequest = special ? auxView(sv, planesUsed) : nil
@@ -159,7 +164,7 @@ final class XRFrameEncoder {
         var fbReason = ""
         if fallbackEnabled, let fb = fallback {
             let hayPantalla = pres.items.contains(where: { $0.kind == .screen })
-            let sinMundo = pres.drawWorld ? !renderer.sceneHas3D : !hayPantalla
+            let sinMundo = pres.stereo != nil ? false : (pres.drawWorld ? !renderer.sceneHas3D : !hayPantalla)
             let arranque = nowT0 - firstEncodeT < bootSeconds
             if arranque || sinMundo {
                 fbReason = arranque ? "arranque" : "nada que dibujar"
@@ -175,6 +180,16 @@ final class XRFrameEncoder {
                         resolveTargets: tgt.resolve, views: sceneViews, projections: projs,
                         head: recentered, layered: layered)
 
+        if pres.stereo != nil {   // la imagen estéreo y el tinte/recubrimientos de la escena se conocen tras renderer.encode
+            let fxs = renderer.screenFx
+            for i in pres.items.indices where pres.items[i].kind == .screen3d {
+                pres.items[i].texture = renderer.stereoImage
+                pres.items[i].tint = fxs.tint
+                pres.items[i].covers = fxs.covers
+                pres.items[i].storedLinear = renderer.stereoStoredLinear
+                pres.items[i].outLinear = renderer.linearOutput
+            }
+        }
         finalPass.encode(commandBuffer: cb, colorTextures: colorTex, depthTextures: depthTex,
                          msaaDepth: sampleCount > 1 ? tgt.depth : nil, viewports: eyes.map { $0.viewport },
                          views: views, projections: projs, items: pres.items, viewCount: viewCount)
@@ -183,7 +198,7 @@ final class XRFrameEncoder {
         let now = CACurrentMediaTime()
         if now - diagT >= (now - firstEncodeT < 30 ? 1 : 10) {
             diagT = now
-            var d = "xr-diag: modo=\(gs.view_mode) motivo=\(gs.view_reason) cinem=\(gs.cinematic) | " + presenter.diagnostics(items: pres.items)
+            var d = "xr-diag: modo=\(gs.view_mode) motivo=\(gs.view_reason) clase=\(gs.view_kind) plano=\(gs.cine_shot) cortes=\(gs.cine_cuts) cubiertas=\(gs.cine_cover) cinem=\(gs.cinematic) estereo=\(renderer.stereoRendered) | " + presenter.diagnostics(items: pres.items)
             d += " | escena: " + renderer.diagnostics()
             let c = colorTex[0], z = depthTex[0]
             d += " | color: tipo=\(c.textureType.rawValue) fmt=\(c.pixelFormat.rawValue) \(c.width)x\(c.height)x\(c.arrayLength) n=\(colorTex.count) | prof: fmt=\(z.pixelFormat.rawValue) n=\(depthTex.count)"
