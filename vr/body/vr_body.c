@@ -328,6 +328,7 @@ typedef struct {
     int was_valid;
     float pos[3], q[4];    /* pose filtrada (espacio del usuario) */
     float aq[4]; int aim_ok; /* apuntado filtrado (si el mando lo entrega) */
+    float pitch_s; int pitch_init, pitch_miss;   /* cabeceo automático suavizado, y fotogramas seguidos sin valor válido */
     float w;               /* peso de fundido 0..1 */
     float grip_set;        /* agarre pedido por la aplicación */
     float grip_cur;        /* agarre aplicado (suavizado) */
@@ -351,6 +352,11 @@ typedef struct {
     int nv, nn;
     int16_t v[VRFIST_MAX_V * 4], n[VRFIST_MAX_V * 4];
 } FistSave;
+
+/* Calibración compartida entre el hilo de la app (set/get/clear) y el de emulación (apply/calibrate): bloqueo de giro muy corto + instantánea por fotograma. */
+static volatile int g_cal_lock;
+static void cal_lock(void) { while (__atomic_exchange_n(&g_cal_lock, 1, __ATOMIC_ACQUIRE)) { } }
+static void cal_unlock(void) { __atomic_store_n(&g_cal_lock, 0, __ATOMIC_RELEASE); }
 
 static struct {
     VrBodyConfig cfg;
@@ -429,20 +435,22 @@ int vrbody_calibrate_hands(void) {
         Hand *h = &G.hand[s];
         if (!h->init || !h->was_valid) continue;
         float q[4];
-        if (vrbody_calib_offset(h->q, (s == 0 ? 1.0f : -1.0f) * G.cfg.hand_roll_deg, q)) { memcpy(G.cal[s].q, q, sizeof q); G.cal[s].ok = 1; n++; }
+        if (vrbody_calib_offset(h->q, (s == 0 ? 1.0f : -1.0f) * G.cfg.hand_roll_deg, q)) { cal_lock(); memcpy(G.cal[s].q, q, sizeof q); G.cal[s].ok = 1; cal_unlock(); n++; }
     }
     return n;
 }
-void vrbody_clear_calibration(void) { G.cal[0].ok = G.cal[1].ok = 0; }
+void vrbody_clear_calibration(void) { cal_lock(); G.cal[0].ok = G.cal[1].ok = 0; cal_unlock(); }
 int vrbody_get_calibration(int side, float q[4]) {
-    if ((side != 0 && side != 1) || !q || !G.cal[side].ok) return 0;
-    memcpy(q, G.cal[side].q, sizeof G.cal[side].q); return 1;
+    if ((side != 0 && side != 1) || !q) return 0;
+    cal_lock(); int ok = G.cal[side].ok; if (ok) memcpy(q, G.cal[side].q, sizeof G.cal[side].q); cal_unlock();
+    return ok;
 }
 void vrbody_set_calibration(int side, const float q[4]) {
     if ((side != 0 && side != 1) || !q || !all_finite(q, 4)) return;
     float t[4] = {q[0], q[1], q[2], q[3]};
-    if ((t[0] * t[0] + t[1] * t[1] + t[2] * t[2] + t[3] * t[3]) < 1e-6f) return;
-    q_normalize(t); memcpy(G.cal[side].q, t, sizeof t); G.cal[side].ok = 1;
+    float n2 = t[0] * t[0] + t[1] * t[1] + t[2] * t[2] + t[3] * t[3];
+    if (!(n2 >= 0.25f && n2 <= 4.0f)) return;               /* norma fuera de 0,5..2: dato corrupto, no es un cuaternión de rotación */
+    q_normalize(t); cal_lock(); memcpy(G.cal[side].q, t, sizeof t); G.cal[side].ok = 1; cal_unlock();
 }
 
 void vrbody_config_default(VrBodyConfig *c) {
@@ -464,9 +472,9 @@ void vrbody_config_default(VrBodyConfig *c) {
 }
 void vrbody_init(const VrBodyConfig *c) {
     VrBodyViewFn fn = G.view_fn; VrBodyHook hk = G.hook;
-    typeof(G.cal) cal; memcpy(cal, G.cal, sizeof cal);
+    typeof(G.cal) cal; cal_lock(); memcpy(cal, G.cal, sizeof cal); cal_unlock();
     memset(&G, 0, sizeof G);
-    G.view_fn = fn; G.hook = hk; memcpy(G.cal, cal, sizeof cal);
+    G.view_fn = fn; G.hook = hk; cal_lock(); memcpy(G.cal, cal, sizeof cal); cal_unlock();
     if (c) G.cfg = *c; else vrbody_config_default(&G.cfg);
     if (!(G.cfg.frame_dt_s > 1e-4f && G.cfg.frame_dt_s < 1.0f)) G.cfg.frame_dt_s = 0.02f;
     if (!(G.cfg.blend_s >= 0)) G.cfg.blend_s = 0.25f;
@@ -714,6 +722,7 @@ int vrbody_apply(uint8_t *ram) {
     const float T[9] = {cs, 0, sn, 0, 1, 0, -sn, 0, cs};
     G.view_ok = 1; v_cp(G.view_eye, view.eye); v_cp(G.view_pref, view.p_ref); memcpy(G.view_T, T, sizeof T); G.view_upm = view.units_per_m;
 
+    typeof(G.cal) cal_snap; cal_lock(); memcpy(cal_snap, G.cal, sizeof cal_snap); cal_unlock();
     int driven = 0, ns = 0;
     for (int s = 0; s < 2; s++) {
         VrBodyDebug *dbg = &G.dbg[s];
@@ -759,10 +768,19 @@ int vrbody_apply(uint8_t *ram) {
         }
         float Ru[9], Rq[4], qo[4];
         {   /* corrección fija agarre -> mano: calibrada (cuaternión completo) o cabeceo (X del agarre) seguido del alabeo (eje de los dedos) */
-            if (G.cal[s].ok) { memcpy(qo, G.cal[s].q, sizeof qo); q_normalize(qo); }
+            if (cal_snap[s].ok) { memcpy(qo, cal_snap[s].q, sizeof qo); q_normalize(qo); }
             else {
                 float pd = cfg->hand_pitch_deg;
-                if (cfg->hand_pitch_auto && h->aim_ok) { float pa_; if (vrbody_pitch_from_aim(h->q, h->aq, &pa_)) pd = pa_; }
+                if (cfg->hand_pitch_auto) {
+                    /* cabeceo automático: suavizado (constante 0,15 s) y, si el apuntado falta un instante, se mantiene el último valor válido hasta 10 fotogramas */
+                    float pa_ = 0;
+                    if (h->aim_ok && vrbody_pitch_from_aim(h->q, h->aq, &pa_)) {
+                        if (!h->pitch_init) { h->pitch_s = pa_; h->pitch_init = 1; }
+                        else h->pitch_s += (1 - expf(-dt / 0.15f)) * (pa_ - h->pitch_s);
+                        h->pitch_miss = 0; pd = h->pitch_s;
+                    } else if (h->pitch_init && ++h->pitch_miss <= 10) pd = h->pitch_s;
+                    else h->pitch_init = 0;
+                }
                 float qp[4], qr[4]; pitch_quat(pd, qp);
                 qr[0] = cfg->hand_rot_offset[s][0]; qr[1] = cfg->hand_rot_offset[s][1]; qr[2] = cfg->hand_rot_offset[s][2]; qr[3] = cfg->hand_rot_offset[s][3]; q_normalize(qr);
                 q_mul(qo, qp, qr);

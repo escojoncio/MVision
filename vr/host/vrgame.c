@@ -210,7 +210,7 @@ void mv_vrgame_clear_hand_calibration(void) { vrbody_clear_calibration(); cal_se
 int32_t mv_vrgame_hand_calibration(int32_t side, float q[4]) { return vrbody_get_calibration(side, q); }
 void mv_vrgame_set_hand_calibration(int32_t side, const float q[4]) { vrbody_set_calibration(side, q); }
 uint32_t mv_vrgame_calibration_serial(void) { return cal_serial; }
-/* Una vez por VBlank (hilo de emulación): cuenta atrás de la calibración con háptico. */
+/* Una vez por VBlank (hilo de emulación): cuenta atrás de la calibración con háptico. La calibración tiene prioridad sobre el cabeceo/alabeo configurados de esa mano. */
 static void calib_tick(float dt) {
     float t = cal_countdown;
     if (t <= 0) return;
@@ -222,9 +222,8 @@ static void calib_tick(float dt) {
     }
     cal_countdown = 0;
     int n = vrbody_calibrate_hands();
-    cal_serial++;
-    if (n > 0) { vrgame_haptic(0, 1.0f); vrgame_haptic(1, 1.0f); }
-    fprintf(stderr, "[manos] calibradas %d manos (corrección agarre->mano fija)\n", n);
+    if (n > 0) { cal_serial++; vrgame_haptic(0, 1.0f); vrgame_haptic(1, 1.0f); }     /* una calibración fallida (n = 0) no cambia nada ni se persiste */
+    fprintf(stderr, "[manos] calibradas %d manos (corrección agarre->mano fija)%s\n", n, n ? "" : ": ninguna (¿mandos sin seguimiento o dedos casi verticales?)");
 }
 
 int32_t mv_vrgame_hand_matrix(int32_t side, float m[16]) {

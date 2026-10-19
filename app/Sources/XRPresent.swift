@@ -199,7 +199,7 @@ final class XRPresenter {
     var onRecenter: (() -> Void)?
     var onExit: (() -> Void)?
 
-    private static let menuW = 1024, menuH = 920
+    private static let menuW = 1024, menuH = 980
 
     init(device: MTLDevice) {
         cinema = XRCinema(device: device)
@@ -353,7 +353,7 @@ final class XRPresenter {
                 let cd = mv_vrgame_calibration_countdown()
                 var q: [Float] = [0, 0, 0, 0]
                 let have = mv_vrgame_hand_calibration(0, &q) != 0 || mv_vrgame_hand_calibration(1, &q) != 0
-                return ("Calibrar manos (brazos rectos, 3 s)", cd > 0 ? "en \(Int(cd.rounded(.up))) s" : (have ? "Hecha" : "Sin calibrar"))
+                return ("Calibrar manos", cd > 0 ? "brazos rectos: \(Int(cd.rounded(.up))) s" : (have ? "Hecha (izq. borra)" : "Sin calibrar"))
             case .width: return ("Tamaño de la pantalla", m(cfg.width))
             case .distance: return ("Distancia de la pantalla", m(cfg.distance))
             case .curve: return ("Curvatura de la pantalla", curveName[ci])
