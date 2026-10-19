@@ -87,7 +87,7 @@ void mv_vrhost_game_state(MvVrGameState *out);
  * gpu: el 3D se reconstruye de la lista de dibujo de la GPU (comportamiento histórico). nativo: el 3D sale de la escena que el extractor lee de la RAM
  * (vr/native, puente ns_bridge) y la capa 2D (HUD, menús, radio, textos, radar y HUD de muñeca) sigue saliendo de la lista de la GPU. Las cinemáticas
  * del motor y todo lo que no tenga cámara VR se dibujan SIEMPRE como pantalla estereoscópica con la cámara del juego (desde la lista).
- * Elección: variable de entorno MV_RENDER=nativo|gpu (gana y fija el modo) o mv_vrhost_set_render_mode (menú VR). Defecto: gpu (MV_RENDER_DEFAULT_NATIVE en vrhost.c
+ * Elección: variable de entorno MV_RENDER=nativo|gpu (gana y fija el modo) o mv_vrhost_set_render_mode (menú VR). Defecto: nativo (MV_RENDER_DEFAULT_NATIVE en vrhost.c
  * pasará a 1 cuando extractor y renderer estén integrados). El modo nativo solo se activa de verdad si mv_vrhost_native_available() y llega una escena válida;
  * si no, se sigue con la lista de la GPU (nunca pantalla vacía). Cualquier hilo.
  * QUIÉN DECIDE: el que DIBUJA, en cada fotograma, con su estado real. La lista de la GPU llega entera; si la escena admite el 3D nativo trae VrScene.native_3d = 1 y los

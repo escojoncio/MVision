@@ -250,7 +250,9 @@ enum {
     NS_SV_MAP_OK = 4u,   /* hay objetos de escenario en la lista */
     NS_SV_MAP_INCOMPLETE = 8u, /* el escenario no cupo en las capacidades (no debería ocurrir con las mínimas) */
     NS_SV_FX = 16u,      /* existe la NsFxScene con secuencia fx_seq */
-    NS_SV_STORE_FULL = 32u/* el almacén de mallas llegó a su tope sin reconocimiento del consumidor: faltan instancias nuevas */
+    NS_SV_STORE_FULL = 32u,/* el almacén de mallas llegó a su tope sin reconocimiento del consumidor: faltan instancias nuevas */
+    NS_SV_TOVR_OK = 64u,   /* to_vr es válido (cámara VR activa, primera persona); lo fija el enganche (ns_hook), nunca el extractor. Sin él no se dibuja en el mundo del usuario */
+    NS_SV_PLAYER_OK = 128u /* jugador enlazado, cabeza propia oculta e IK de los brazos copiada; lo fija el enganche. Sin él la escena no es apta (se pinta por GPU) */
 };
 enum { NS_TR_INST = 1u, NS_TR_PIECE = 2u, NS_TR_LIGHT = 4u, NS_TR_EFFECT = 8u };
 

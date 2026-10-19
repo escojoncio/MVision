@@ -39,8 +39,9 @@ mkdir -p .stage/vr/native
 cp ../vr/native/ns_types.h ../vr/native/ns_dump.h ../vr/native/ns_dumpw.c .stage/vr/native/
 # puente productor/consumidor, jugador y enganche de la captura (integración del renderer nativo)
 cp ../vr/native/ns_bridge.[ch] ../vr/native/ns_player.[ch] ../vr/native/ns_hook.[ch] ../vr/native/ns_hook_rt.[ch] .stage/vr/native/
-# renderer Metal nativo: empaquetado para la GPU y almacén débil (sin test_*, sin tools/, sin ns_cpuref: validador de escritorio)
-cp ../vr/native/ns_gpu.[ch] ../vr/native/ns_gpu_types.h ../vr/native/ns_store_weak.c .stage/vr/native/
+# renderer Metal nativo: empaquetado para la GPU y extractor real con su almacén de mallas (ns_store_*: sin definiciones débiles) y su registro en el enganche
+# (sin test_*, sin tools/, sin ns_cpuref ni ns_adapt: validadores de escritorio)
+cp ../vr/native/ns_gpu.[ch] ../vr/native/ns_gpu_types.h ../vr/native/ns_extract.[ch] ../vr/native/ns_extract_glue.c .stage/vr/native/
 
 cp ../render/metal/vr_*.metal ../render/metal/vr_types.h .stage/metal/
 cp ../vr/native/ns_gpu_types.h .stage/metal/   # lo incluye app/Sources/Native/NativeShaders.metal

@@ -515,7 +515,7 @@ int ns_synth_load(const char *path) {
     if (!g_br) return -5;
     NsScene *sc = ns_bridge_begin(g_br);
     if (!sc) return -6;
-    g_epoch = 1; sc->game_frame = 1; sc->mesh_epoch = 1; sc->valid = NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK | NS_SV_TOVR_OK; sc->units_per_m = 1000;
+    g_epoch = 1; sc->game_frame = 1; sc->mesh_epoch = 1; sc->valid = NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK | NS_SV_TOVR_OK | NS_SV_PLAYER_OK; sc->units_per_m = 1000;
     memcpy(sc->to_vr, h.to_vr, sizeof h.to_vr);
     sc->cam = h.cam; sc->fog = h.fog; sc->global_light = h.global_light; sc->group_mask = h.group_mask;
     memcpy(sc->bg_rgb, h.bg, sizeof h.bg);
@@ -659,7 +659,7 @@ int ns_synth_publish_decal(uint32_t epoch) {
     if (!idBase || !idDecal) return -2;
     NsScene *sc = ns_bridge_begin(g_br);
     if (!sc) return -3;
-    g_epoch = epoch; sc->game_frame = 2; sc->mesh_epoch = epoch; sc->valid = NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_TOVR_OK; sc->units_per_m = 1000;
+    g_epoch = epoch; sc->game_frame = 2; sc->mesh_epoch = epoch; sc->valid = NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK | NS_SV_TOVR_OK | NS_SV_PLAYER_OK; sc->units_per_m = 1000;
     float tv[12] = {0.001f, 0, 0, 0, 0, 0.001f, 0, 0, 0, 0, -0.001f, 0};
     memcpy(sc->to_vr, tv, sizeof tv);
     sc->cam.rot[0] = 1; sc->cam.rot[4] = -1; sc->cam.rot[8] = 1; sc->cam.h = 320;

@@ -79,6 +79,8 @@ int ns_store_new_epoch(NsMeshStore *st);
 uint32_t ns_store_count(const NsMeshStore *st);           /* mallas vivas (ambas épocas) */
 size_t ns_store_bytes(const NsMeshStore *st);
 uint32_t ns_store_zone_gen(const NsMeshStore *st);
+void ns_store_reset(NsMeshStore *st);   /* cambio de ejecutable: vacía la memoria de direcciones, sube zone_gen y abre época si se puede (productor) */
+int ns_store_is_stub(void);             /* siempre 0: sirve a la prueba de enlace (si el almacén fuese un sustituto débil devolvería 1) */
 
 /* ---- escena ---- */
 /* Reserva las tablas con al menos NS_MIN_* de capacidad (se sube al mínimo). 0 = bien. */

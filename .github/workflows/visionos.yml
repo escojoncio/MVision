@@ -119,6 +119,7 @@ jobs:
           set -o pipefail
           mkdir -p bench-out/native
           bench/build_native/test_native_gpu bench-out/native 2>&1 | tee bench-out/native/test-gpu-log.txt
+          bench/build_native/test_native_link 2>&1 | tee -a bench-out/native/test-gpu-log.txt
 
       - name: Ejecutar el banco del renderer nativo (Metal)
         if: always()

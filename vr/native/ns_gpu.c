@@ -106,39 +106,68 @@ void ns_gpu_make_piece(const NsScene *sc, const NsInstance *inst, const NsPiece 
     }
 }
 
-typedef struct { uint64_t key; uint32_t piece, tri; uint8_t abr; } SortItem;
-static int sort_cmp(const void *a, const void *b) {
-    const SortItem *x = (const SortItem *)a, *y = (const SortItem *)b;
-    return x->key < y->key ? -1 : x->key > y->key;
-}
+typedef struct { uint32_t key, piece, tri, abr; } SortItem;   /* 16 B */
 /* float -> entero sin signo con el mismo orden (los negativos antes que los positivos) */
 static uint32_t ordered_bits(float f) {
     uint32_t b; memcpy(&b, &f, 4);
     return (b & 0x80000000u) ? ~b : (b | 0x80000000u);
 }
 
-size_t ns_gpu_sort_semi(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out, uint8_t *abr_out, size_t cap) {
+void ns_gpu_sort_free(NsGpuSortScratch *sc) {
+    if (!sc) return;
+    free(sc->a); free(sc->b);
+    sc->a = sc->b = NULL; sc->cap = 0;
+}
+
+/* Ordenación por radix LSD (3 pasadas de 11 bits) sobre la clave de 32 bits = ~bits_ordenados(profundidad): estable, así que el empate de profundidad conserva el
+ * orden de entrada (el criterio de la referencia). Sin malloc por fotograma: el scratch crece y se reutiliza. */
+size_t ns_gpu_sort_semi(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out, uint8_t *abr_out, size_t cap, NsGpuSortScratch *scratch) {
     size_t total = 0;
     for (size_t s = 0; s < nsrc; s++) total += src[s].ntri;
-    if (total > cap) total = cap;
-    if (!total) return 0;
-    SortItem *it = (SortItem *)malloc(total * sizeof *it);
-    if (!it) return 0;
+    if (!total || !cap) return 0;
+    NsGpuSortScratch local = {0, 0, 0};
+    NsGpuSortScratch *sc = scratch ? scratch : &local;
+    if (sc->cap < total) {
+        size_t nc = total + total / 4 + 1024;
+        SortItem *na = (SortItem *)realloc(sc->a, nc * sizeof(SortItem));
+        if (na) sc->a = na;
+        SortItem *nb = (SortItem *)realloc(sc->b, nc * sizeof(SortItem));
+        if (nb) sc->b = nb;
+        if (!na || !nb) { if (!scratch) ns_gpu_sort_free(&local); return 0; }
+        sc->cap = nc;
+    }
+    SortItem *a = (SortItem *)sc->a, *b = (SortItem *)sc->b;
     size_t n = 0;
-    uint32_t seq = 0;
-    for (size_t s = 0; s < nsrc && n < total; s++) {
+    for (size_t s = 0; s < nsrc; s++) {
         const NsGpuSemiSrc *g = &src[s];
-        for (uint32_t t = 0; t < g->ntri && n < total; t++, seq++) {
+        for (uint32_t t = 0; t < g->ntri; t++) {
             const float *c = &g->centroid[3u * t];
             float depth = g->zrow[0] * c[0] + g->zrow[1] * c[1] + g->zrow[2] * c[2] + g->zrow[3];
             if (!(depth == depth)) depth = 0.0f;                     /* NaN */
-            it[n].key = ((uint64_t)(~ordered_bits(depth)) << 32) | seq;   /* mayor profundidad primero; empate: orden de entrada */
-            it[n].piece = g->piece; it[n].tri = g->tri_base + t; it[n].abr = g->abr[t];
+            a[n].key = ~ordered_bits(depth);                          /* mayor profundidad primero */
+            a[n].piece = g->piece; a[n].tri = g->tri_base + t; a[n].abr = g->abr[t];
             n++;
         }
     }
-    qsort(it, n, sizeof *it, sort_cmp);
-    for (size_t i = 0; i < n; i++) { out[i].piece = it[i].piece; out[i].tri = it[i].tri; abr_out[i] = it[i].abr; }
-    free(it);
-    return n;
+    enum { RB = 11, RN = 1 << RB };
+    uint32_t hist[3][RN];
+    memset(hist, 0, sizeof hist);
+    for (size_t i = 0; i < n; i++) {
+        uint32_t k = a[i].key;
+        hist[0][k & (RN - 1)]++; hist[1][(k >> RB) & (RN - 1)]++; hist[2][k >> (2 * RB)]++;
+    }
+    for (int p = 0; p < 3; p++) {
+        uint32_t sum = 0;
+        for (int i = 0; i < RN; i++) { uint32_t c = hist[p][i]; hist[p][i] = sum; sum += c; }
+        for (size_t i = 0; i < n; i++) {
+            uint32_t k = a[i].key, d = p == 0 ? (k & (RN - 1)) : p == 1 ? ((k >> RB) & (RN - 1)) : (k >> (2 * RB));
+            b[hist[p][d]++] = a[i];
+        }
+        SortItem *t = a; a = b; b = t;
+    }
+    /* a = ordenado de atrás adelante. Con tope se descartan los MÁS LEJANOS (el principio de la lista). */
+    size_t first = n > cap ? n - cap : 0, m = n - first;
+    for (size_t i = 0; i < m; i++) { out[i].piece = a[first + i].piece; out[i].tri = a[first + i].tri; abr_out[i] = (uint8_t)a[first + i].abr; }
+    if (!scratch) ns_gpu_sort_free(&local);
+    return m;
 }

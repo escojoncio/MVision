@@ -36,16 +36,7 @@
 extern "C" {
 #endif
 
-/* bit añadido al contrato (NsScene.valid): to_vr es válido (cámara VR activa, primera persona). Sin él el consumidor NO debe dibujar la escena nativa
- * en el mundo del usuario (cinemáticas: pantalla estereoscópica con la cámara del juego). */
-#ifndef NS_SV_TOVR_OK
-#define NS_SV_TOVR_OK 64u   /* (8 = NS_SV_MAP_INCOMPLETE, 16 = FX, 32 = STORE_FULL en el contrato v2; pasar a ns_types.h) */
-#endif
-/* bit añadido: el jugador está enlazado a su instancia, su cabeza propia quedó oculta y, si la capa VR mueve los brazos, la pose IK se copió a esta escena.
- * Sin él la escena NO es apta (se vería la cabeza propia o los brazos del motor): se pinta por GPU. */
-#ifndef NS_SV_PLAYER_OK
-#define NS_SV_PLAYER_OK 128u
-#endif
+/* NS_SV_TOVR_OK y NS_SV_PLAYER_OK (NsScene.valid) están en ns_types.h. */
 
 #define NS_BRIDGE_SLOTS 4
 #define NS_TELEPORT_UNITS 4000.0f   /* salto de traslación de una pieza entre escenas consecutivas que no se interpola (4 m del motor) */
