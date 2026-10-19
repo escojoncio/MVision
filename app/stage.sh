@@ -34,6 +34,10 @@ for d in bridge camera input scene host body radar hands weapons gameplay ai; do
   done
 done
 
+# vr/native: sólo el escritor de volcados y los tipos del contrato (el cargador ns_dump.c, el rasterizador de referencia y las herramientas son de escritorio)
+mkdir -p .stage/vr/native
+cp ../vr/native/ns_types.h ../vr/native/ns_dump.h ../vr/native/ns_dumpw.c .stage/vr/native/
+
 cp ../render/metal/vr_*.metal ../render/metal/vr_types.h .stage/metal/
 cp "$SIGS_HLE" .stage/res/sigs_hle.json
 

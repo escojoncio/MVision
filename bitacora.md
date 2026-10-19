@@ -1227,3 +1227,12 @@ Corrige §59 ("siempre por delante"): solo los TEXTOS (subtítulos, mensajes, cr
 - `XRPresent.swift`: el ítem de muñeca ya no pone `onTop` (los paneles flotantes de la rama no-muñeca y la pantalla 3D sí lo conservan). `XRHud.swift`: solo el comentario de `onTop`.
 - Banco (`bench/c/bench_host.c`, `BenchBridge.h`, `Sources/main.swift`): `bench_set_radar_occluder` añade un cubo ciano al 65 % del camino cabeza -> centro del radar; comprobación dura "radar tapado por el cubo ciano" (el centro del radar debe ser ciano) más borde visible (blanda). Se mantiene la comprobación dura del texto magenta con cubo ciano delante.
 Pendiente: verificar en visor que el HUD de muñeca no se ve a través del brazo con la muñeca girada (depende de que el cuerpo escriba profundidad en el pase de escena).
+
+## 67. Renderer nativo: documentación de la escena, contrato y captura de volcados (rama `render-nativo`; `docs/escena_nativa.md`, `vr/native/`, `app/Sources/DumpCapture.swift`)
+
+Cambio de arquitectura: leer la escena del motor desde la RAM (objetos por canal, modelos, matrices de mundo, luces) y dibujarla con la cámara VR; la lista de la GPU queda para HUD/menús.
+- `docs/escena_nativa.md`: estructuras (canales, cola, objeto, pieza, modelo, texturas, primitivas), fórmula de sombreado validada contra paquetes en RAM, niebla, punto de enganche (tras la etapa de pantalla, 0x8001D324) y algoritmo de extracción.
+- `vr/native/ns_types.h`: contrato (instancias, mallas con id+hash, luces, niebla, efectos), apto para triple búfer y caché de mallas en GPU.
+- `vr/native/ns_dump.{h,c}` + `ns_dumpw.c`: formato de volcado NSD1; escritor en la app y cargador solo de escritorio. Prueba: `make -f vr/native/dump.mk test`.
+- App: mantener los dos clics de stick ~1 s guarda RAM, VRAM, GTE, lista GPU, fotograma PNG y pose en `Dumps/`, con aviso háptico (`mv_vrhost_request_dump`).
+Pendiente: el Swift no está compilado ni probado en visor; extractor y enganche sin implementar; niebla y primitivas con retrollamada por medir.
