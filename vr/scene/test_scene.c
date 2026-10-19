@@ -962,12 +962,16 @@ static void test_recon_diag_ambig(void) {
     for (int k = 0; k < 4; k++) r1->v[k].vflags = GPU_VF_AMBIG | GPU_VF_SAT;
     GpuOp *r2 = add(GPU_OP_POLY);
     *r2 = *r1; r2->v[1].vy = -2649; r2->v[1].vz = -502; r2->v[2].vx = -1000;
+    /* cuadrilátero con v3 == v1: el primer triángulo es válido pero el segundo es degenerado -> no es coherente, se descarta */
+    GpuOp *r3 = add(GPU_OP_POLY);
+    *r3 = *r1; r3->v[3] = r3->v[1];
     uint8_t fate[4];
     VrScene s; VrSceneOpts o = vr_scene_opts_default();
     vr_scene_set_fate(fate, sizeof fate);
     CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0, "build diag");
     CHECK(s.stats.n_recon == 1 && s.stats.n_tris3d >= 4, "diag: recon %u tris %u", s.stats.n_recon, s.stats.n_tris3d);
     CHECK(fate[0] == VR_FATE_3D && fate[1] == VR_FATE_3D && fate[2] == VR_FATE_AMBIG, "destinos %u %u %u", fate[0], fate[1], fate[2]);
+    CHECK(fate[3] == VR_FATE_AMBIG, "quad con 2.º triángulo degenerado: destino %u", fate[3]);
     o.recon_ambig = 0;
     CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && fate[1] == VR_FATE_AMBIG, "sin recon_ambig: %u", fate[1]);
     vr_scene_set_fate(NULL, 0);

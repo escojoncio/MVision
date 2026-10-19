@@ -31,6 +31,8 @@ void mv_vrhost_install(void);
 void mv_vrhost_set_ai(int perception, int cameras, int activity);
 /* Solo para herramientas de prueba (vr/ai/test_ai_run): función llamada en el gancho de VBlank del hilo de emulación tras la capa VR (cpu = Cpu*). */
 void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame));
+/* Toma de pruebas: se llama en el hilo de emulación justo tras ensamblar cada escena (antes de copiarla al slot), con la lista, el puente y la escena. NULL = sin toma. */
+void mv_vrhost_set_scene_tap(void (*cb)(const GpuDrawList *dl, const BridgeState *bs, const VrScene *sc, uint32_t frame));
 
 /* Escena VR del siguiente frame (contrato en app/Sources/RenderRGBridge.h). Una por llamada y sin saltarse ninguna;
  * los punteros de `out` valen hasta la siguiente llamada. Llamarla es lo que activa la captura de la GPU: sin llamadas durante

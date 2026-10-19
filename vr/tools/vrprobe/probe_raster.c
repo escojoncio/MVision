@@ -15,9 +15,9 @@ void pr_eye_from_head(const float h[16], int side, float ipd, PrEye *e) {
     }
 }
 
-void pr_buf_init(PrBuf *b, int w, int h) { b->w = w; b->h = h; b->z = malloc((size_t)w * (size_t)h * sizeof(float)); pr_buf_clear(b); }
-void pr_buf_free(PrBuf *b) { free(b->z); b->z = NULL; }
-void pr_buf_clear(PrBuf *b) { for (int i = 0; i < b->w * b->h; i++) b->z[i] = 1e30f; }
+void pr_buf_init(PrBuf *b, int w, int h) { b->w = w; b->h = h; b->z = malloc((size_t)w * (size_t)h * sizeof(float)); b->id = NULL; b->cur = 0; pr_buf_clear(b); }
+void pr_buf_free(PrBuf *b) { free(b->z); b->z = NULL; free(b->id); b->id = NULL; }
+void pr_buf_clear(PrBuf *b) { for (int i = 0; i < b->w * b->h; i++) { b->z[i] = 1e30f; if (b->id) b->id[i] = -1; } }
 
 static void to_cam(const PrEye *e, const float *v, float *o) {
     float d[3] = {v[0] - e->p[0], v[1] - e->p[1], v[2] - e->p[2]};
@@ -56,7 +56,7 @@ static int raster_sv(PrBuf *b, const SV *a, const SV *bb, const SV *cc) {
         if (px < 0 || py < 0 || px >= b->w || py >= b->h) return 0;
         float z = 1.0f / fmaxf((a->iz + bb->iz + cc->iz) * (1.0f / 3.0f), 1e-9f);
         float *p = &b->z[py * b->w + px];
-        if (z < *p) *p = z;
+        if (z < *p) { *p = z; if (b->id) b->id[py * b->w + px] = b->cur; }
         return 1;
     }
     float ia = 1.0f / area;
@@ -71,7 +71,7 @@ static int raster_sv(PrBuf *b, const SV *a, const SV *bb, const SV *cc) {
             float iz = w0 * a->iz + w1 * bb->iz + w2 * cc->iz;
             float z = 1.0f / fmaxf(iz, 1e-9f);
             float *p = &b->z[y * b->w + x];
-            if (z < *p) *p = z;
+            if (z < *p) { *p = z; if (b->id) b->id[y * b->w + x] = b->cur; }
             n++;
         }
     }
