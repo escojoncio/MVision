@@ -140,7 +140,7 @@ static int have_deadline;
  *    el audio simplemente no espera (y el consumidor rellena de forma continua, ver spu_pull_rate).
  * 2) Sin consumidor (arranque, audio parado/interrumpido, pausa del motor de audio): reloj de pared a 50 Hz. Un consumidor
  *    se da por muerto si el contador de lectura no avanza en 150 ms (así un audio atascado no congela el juego). */
-#define AUDIO_TARGET 2646u   /* 3 VBlanks PAL de audio por delante (~60 ms): absorbe picos de trabajo de ~1 VBlank */
+#define AUDIO_TARGET SPU_AUDIO_TARGET   /* 3 VBlanks PAL de audio por delante (~60 ms): absorbe picos de trabajo de ~1 VBlank */
 static uint32_t pace_last_rd;
 static uint64_t pace_last_change_ns;
 static int audio_live(uint64_t now) {

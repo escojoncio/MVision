@@ -5,6 +5,10 @@
 
 #define SPU_RAM_SIZE 0x80000u
 #define SPU_RATE     44100
+/* Nivel del anillo de salida (frames): host.c acompasa la emulación a SPU_AUDIO_TARGET (espera por encima) y el nivel visto por el
+ * consumidor queda ~medio VBlank por encima; el control de reloj del remuestreo apunta a SPU_TARGET_LEVEL. Un solo sitio. */
+#define SPU_AUDIO_TARGET 2646u
+#define SPU_TARGET_LEVEL (SPU_AUDIO_TARGET + 441u + 13u)   /* ~3100 */
 
 void spu_reset(void);
 

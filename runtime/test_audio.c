@@ -182,11 +182,11 @@ static void fill_sine(int16_t *buf, int n, long start, double f, double amp) {
 /* 44,1 -> 48 kHz: ganancia plana y residuo (distorsión + alias + imágenes) bajo en toda la banda. */
 static void test_resample(void) {
     static const double fs_[] = { 100, 1000, 5000, 10000, 15000, 18000 };
-    static int16_t src[441 * 2], o[480 * 2], cap[48000 * 2];
+    static int16_t src[450 * 2], o[480 * 2], cap[48000 * 2];
     for (unsigned t = 0; t < sizeof fs_ / sizeof *fs_; t++) {
         spu_pull_reset();
         long pos = 0; int fill = 0;
-        for (int k = 0; k < 7; k++) { fill_sine(src, 400, pos, fs_[t], 10000); spu_ring_feed(src, 400); pos += 400; }   /* 2800 = nivel objetivo */
+        for (int k = 0; k < 31; k++) { fill_sine(src, 100, pos, fs_[t], 10000); spu_ring_feed(src, 100); pos += 100; }   /* 3100 = SPU_TARGET_LEVEL exacto (si no, el control de nivel desplaza el tono) */
         int n = 0;
         for (int it = 0; it < 150; it++) {
             spu_pull_rate(o, 480, 48000);
@@ -241,7 +241,7 @@ static void test_jitter(void) {
     /* tras la recuperación la señal vuelve a ser un seno limpio */
     static int16_t cap[480 * 2 * 100];
     int n = 0;
-    { int need = 2800 - (int)spu_ring_level(); if (need > 0) { static int16_t big[3000 * 2]; fill_sine(big, need, spos, f, A); spu_ring_feed(big, need); spos += need; } }
+    { int need = (int)SPU_TARGET_LEVEL - (int)spu_ring_level(); if (need > 0) { static int16_t big[3000 * 2]; fill_sine(big, need, spos, f, A); spu_ring_feed(big, need); spos += need; } }
     for (int tick = 0; tick < 100; tick++) {
         fill_sine(src, 441, spos, f, A); spu_ring_feed(src, 441); spos += 441;
         spu_pull_rate(o, 480, 48000); memcpy(cap + 2 * n, o, 480 * 4); n += 480;
@@ -266,10 +266,11 @@ static void test_starve(void) {
     for (int i = 0; i < 40; i++) { spu_pull_rate(o, 480, 48000); fill_sine(src, 441, pos, 440, 10000); spu_ring_feed(src, 441); pos += 441; }
     double live = rms_i16(o, 480);
     Track tr = { 0, 0 }; int16_t prev = o[958];
-    double r0 = 0, r1 = 0;
-    for (int i = 0; i < 200; i++) { spu_pull_rate(o, 480, 48000); track(&tr, o, 480, &prev); if (i == 1) r0 = rms_i16(o, 480); if (i == 199) r1 = rms_i16(o, 480); }
+    double r0 = 0, r1 = 0, r05 = 0;
+    for (int i = 0; i < 200; i++) { spu_pull_rate(o, 480, 48000); track(&tr, o, 480, &prev); if (i == 1) r0 = rms_i16(o, 480); if (i == 49) r05 = rms_i16(o, 480); if (i == 199) r1 = rms_i16(o, 480); }
     INFO("rms vivo %.0f, 20 ms %.0f, 2 s %.1f, salto max %.0f", live, r0, r1, tr.maxd);
     CHECK(r0 > 0.5 * live, "la extension se queda sin nivel de inmediato (%.0f vs %.0f)", r0, live);
+    CHECK(r05 < 0.01 * live, "la extension no cae rapido con el productor parado (%.1f a 0,5 s)", r05);
     CHECK(r1 < 0.02 * live, "la extension no decae (%.1f)", r1);
     CHECK(tr.maxd < 10000 * 2 * M_PI * 440 / 48000 * 1.6 + 60, "salto %.0f en la extension", tr.maxd);
 }
@@ -298,6 +299,23 @@ static void test_drift(void) {
     }
 }
 
+/* Consumidor parado (interrupción/pausa): vuelve con el anillo casi lleno en LIVE; debe saltar al nivel objetivo sin salto de señal. */
+static void test_stale_ring(void) {
+    static int16_t src[441 * 2], o[480 * 2], big[12000 * 2];
+    spu_pull_reset();
+    long pos = 0;
+    for (int k = 0; k < 8; k++) { fill_sine(src, 441, pos, 440, 10000); spu_ring_feed(src, 441); pos += 441; }
+    int16_t prev = 0; Track tr = { 0, 0 };
+    for (int i = 0; i < 40; i++) { spu_pull_rate(o, 480, 48000); fill_sine(src, 441, pos, 440, 10000); spu_ring_feed(src, 441); pos += 441; if (i == 20) prev = o[958]; if (i > 20) track(&tr, o, 480, &prev); }
+    fill_sine(big, 12000, pos, 440, 10000); spu_ring_feed(big, 12000); pos += 12000;   /* el productor siguió, el consumidor no */
+    CHECK(spu_ring_level() > 8192, "preparacion: nivel %u", spu_ring_level());
+    prev = o[958]; tr.maxd = 0;
+    for (int i = 0; i < 10; i++) { spu_pull_rate(o, 480, 48000); track(&tr, o, 480, &prev); fill_sine(src, 441, pos, 440, 10000); spu_ring_feed(src, 441); pos += 441; }
+    INFO("tras la parada: nivel %u, salto max %.0f", spu_ring_level(), tr.maxd);
+    CHECK(spu_ring_level() < SPU_TARGET_LEVEL + 2000, "no descarto el audio viejo (nivel %u)", spu_ring_level());
+    CHECK(tr.maxd < 10000 * 2 * M_PI * 440 / 48000 * 1.7 + 60, "salto %.0f al reanudar", tr.maxd);
+}
+
 int main(int argc, char **argv) {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
     test_voice_model();
@@ -308,6 +326,7 @@ int main(int argc, char **argv) {
     test_jitter();
     test_starve();
     test_drift();
+    test_stale_ring();
     printf(fails ? "test_audio: %d fallos\n" : "test_audio: OK\n", fails);
     return fails != 0;
 }
