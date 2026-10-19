@@ -68,6 +68,14 @@ $(OUT)/bodyrun: bodyrun.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrg
 .PHONY: bodyrun
 bodyrun: $(OUT)/bodyrun
 
+# Recorrido título -> partida con acciones de Sense sintéticas y la tabla de mandos de vr_input (padrun.c).
+$(OUT)/padrun: padrun.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
+	@mkdir -p $(OUT)
+	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
+	  -o $@ padrun.c $(SRC_VR) $(SRC_RT) -lm -lpthread
+.PHONY: padrun
+padrun: $(OUT)/padrun
+
 # Prueba de integración del apuntado del lanzador antiaéreo (test_aa_run.c): host completo, manos y blanco sintéticos, juego real en MV_NOGEN.
 $(OUT)/test_aa_run: test_aa_run.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
 	@mkdir -p $(OUT)
