@@ -477,19 +477,19 @@ final class XRPixelProbe {
                 var parts: [String] = []
                 for k in 0..<Self.perEye {
                     let p = base + (e * Self.perEye + k) * Self.slot
-                    let r: Float, g: Float, b: Float
+                    let r: Float, g: Float, b: Float, al: Float
                     switch fmtCopy {
                     case .bgra8Unorm, .bgra8Unorm_srgb:
-                        let q = p.assumingMemoryBound(to: UInt8.self); r = Float(q[2]); g = Float(q[1]); b = Float(q[0])
+                        let q = p.assumingMemoryBound(to: UInt8.self); r = Float(q[2]); g = Float(q[1]); b = Float(q[0]); al = Float(q[3])
                     case .rgba8Unorm, .rgba8Unorm_srgb:
-                        let q = p.assumingMemoryBound(to: UInt8.self); r = Float(q[0]); g = Float(q[1]); b = Float(q[2])
+                        let q = p.assumingMemoryBound(to: UInt8.self); r = Float(q[0]); g = Float(q[1]); b = Float(q[2]); al = Float(q[3])
                     default:
                         let q = p.assumingMemoryBound(to: UInt16.self)
-                        r = Self.half(q[0]) * 255; g = Self.half(q[1]) * 255; b = Self.half(q[2]) * 255
+                        r = Self.half(q[0]) * 255; g = Self.half(q[1]) * 255; b = Self.half(q[2]) * 255; al = Self.half(q[3]) * 255
                     }
                     total += 1
                     if r == 0 && g == 0 && b == 0 { black += 1 }
-                    parts.append(String(format: "%.0f,%.0f,%.0f", r, g, b))
+                    parts.append(String(format: "%.0f,%.0f,%.0f/a%.0f", r, g, b, al))   // /a = alfa del drawable (255 = opaco)
                 }
                 out.append("ojo\(e): " + parts.joined(separator: " "))
             }
