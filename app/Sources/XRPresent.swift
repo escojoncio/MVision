@@ -156,7 +156,12 @@ struct XRNav: Equatable {
 }
 
 enum XRMenuItem: Int, CaseIterable {
-    case resume, recenter, calibrateHands, width, distance, curve, sharp, integerScale, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, renderMode, turnMode, vignette, hideHands, debugAxes, exit
+    case resume, recenter, calibrateHands, width, distance, curve, sharp, integerScale, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, renderMode, turnMode, vignette, hideHands, debugAxes, diagnostics, exit
+}
+
+/// Submenú «Diagnóstico» (interruptores en vivo de XRDiag).
+enum XRDiagItem: Int, CaseIterable {
+    case back, reset, magenta, split, rateMap, msaa1, noLayers, nearPlane, projection, noZTest
 }
 
 final class XRPresenter {
@@ -195,6 +200,7 @@ final class XRPresenter {
     // Menú
     private(set) var menuOpen = false
     private var sel = 0
+    private var page = 0                  // 0 = menú principal, 1 = submenú «Diagnóstico»
     private var menuDirty = true
     private var menuModel = matrix_identity_float4x4
     private var menuTex: [MTLTexture] = []
@@ -209,7 +215,7 @@ final class XRPresenter {
     var onRecenter: (() -> Void)?
     var onExit: (() -> Void)?
 
-    private static let menuW = 1024, menuH = 980
+    private static let menuW = 1024, menuH = 1060
 
     init(device: MTLDevice) {
         cinema = XRCinema(device: device)
@@ -250,12 +256,13 @@ final class XRPresenter {
             let nav = Self.nav(from: s)
             let p = prevNav
             prevNav = nav
-            if nav.up && !p.up { sel = (sel + XRMenuItem.allCases.count - 1) % XRMenuItem.allCases.count; menuDirty = true }
-            if nav.down && !p.down { sel = (sel + 1) % XRMenuItem.allCases.count; menuDirty = true }
+            let rc = rowCount
+            if nav.up && !p.up { sel = (sel + rc - 1) % rc; menuDirty = true }
+            if nav.down && !p.down { sel = (sel + 1) % rc; menuDirty = true }
             if nav.left && !p.left { activate(dir: -1) }
             if nav.right && !p.right { activate(dir: 1) }
             if nav.select && !p.select { activate(dir: 1) }
-            if nav.back && !p.back { closeMenu() }
+            if nav.back && !p.back { if page != 0 { leaveDiag() } else { closeMenu() } }
         } else {
             prevNav = XRNav()
         }
@@ -294,6 +301,7 @@ final class XRPresenter {
     private func openMenu(head: simd_float4x4) {
         menuOpen = true
         sel = 0
+        page = 0
         menuDirty = true
         prevNav = XRNav()
         let p = XRMath.position(head)
@@ -315,7 +323,41 @@ final class XRPresenter {
         return list[(best + dir + list.count) % list.count]
     }
 
+    private var rowCount: Int { page == 0 ? XRMenuItem.allCases.count : XRDiagItem.allCases.count }
+
+    private func leaveDiag() {
+        page = 0
+        sel = XRMenuItem.diagnostics.rawValue
+        menuDirty = true
+    }
+
+    /// Un paso de la lista `list` desde el valor actual `v` (el más próximo), en el sentido `dir`.
+    private func stepList(_ v: Float, _ list: [Float], _ dir: Int) -> Float {
+        var best = 0
+        for (i, x) in list.enumerated() where abs(x - v) < abs(list[best] - v) { best = i }
+        return list[(best + (dir < 0 ? list.count - 1 : 1)) % list.count]
+    }
+
+    private func activateDiag(dir: Int) {
+        guard let it = XRDiagItem(rawValue: sel) else { return }
+        let d = XRDiag.shared
+        switch it {
+        case .back: leaveDiag()
+        case .reset: if dir >= 0 { d.reset() }
+        case .magenta: d.update { $0.magentaClear.toggle() }
+        case .split: d.update { $0.splitMeters = stepList($0.splitMeters, XRDiag.splitChoices, dir) }
+        case .rateMap: d.update { $0.ignoreRateMap.toggle() }
+        case .msaa1: d.update { $0.msaa1.toggle() }
+        case .noLayers: d.update { $0.noLayers.toggle() }
+        case .nearPlane: d.update { $0.nearPlane = stepList($0.nearPlane, XRDiag.nearChoices, dir) }
+        case .projection: d.update { $0.projMode = ($0.projMode + (dir < 0 ? 2 : 1)) % 3 }
+        case .noZTest: d.update { $0.noZTest.toggle() }
+        }
+        menuDirty = true
+    }
+
     private func activate(dir: Int) {
+        if page == 1 { activateDiag(dir: dir); return }
         guard let it = XRMenuItem(rawValue: sel) else { return }
         switch it {
         case .resume: closeMenu()
@@ -343,6 +385,7 @@ final class XRPresenter {
         case .vignette: Self.cycleVignette(dir)
         case .hideHands: cfg.hideRealHands.toggle(); cfg.save()      // la escena lo lee de UserDefaults (@AppStorage): se guarda al momento
         case .debugAxes: cfg.debugAxes.toggle()
+        case .diagnostics: if dir >= 0 { page = 1; sel = 0 }
         case .exit: cfg.save(); onExit?()
         }
         menuDirty = true
@@ -350,7 +393,27 @@ final class XRPresenter {
 
     // MARK: menú: dibujo
 
+    private func diagRows() -> [(String, String)] {
+        func yn(_ b: Bool) -> String { b ? "Sí" : "No" }
+        let s = XRDiag.shared.settings
+        return XRDiagItem.allCases.map { it -> (String, String) in
+            switch it {
+            case .back: return ("Volver", "")
+            case .reset: return ("Restablecer todo", s.isNormal ? "ya normal" : "")
+            case .magenta: return ("Fondo de borrado magenta", yn(s.magentaClear))
+            case .split: return ("Partir triángulos grandes", s.splitMeters > 0 ? "arista > " + XRDiag.metersText(s.splitMeters) : "No")
+            case .rateMap: return ("Sin mapa de tasa de rasterización", yn(s.ignoreRateMap))
+            case .msaa1: return ("MSAA 1x (sin resolve)", yn(s.msaa1))
+            case .noLayers: return ("Sin capas finales", yn(s.noLayers))
+            case .nearPlane: return ("Plano cercano", s.nearPlane > 0 ? XRDiag.metersText(s.nearPlane) : "Normal (sistema)")
+            case .projection: return ("Proyección", ["Automática", "Propia", "Del sistema"][min(max(s.projMode, 0), 2)])
+            case .noZTest: return ("Sin prueba de profundidad", yn(s.noZTest))
+            }
+        }
+    }
+
     private func rows() -> [(String, String)] {
+        if page == 1 { return diagRows() }
         func m(_ v: Float) -> String { String(format: "%.1f m", v).replacingOccurrences(of: ".", with: ",") }
         func yn(_ b: Bool) -> String { b ? "Sí" : "No" }
         let curveName = ["Plana", "Suave", "Media", "Fuerte"]
@@ -384,6 +447,7 @@ final class XRPresenter {
             case .vignette: return ("Viñeta de confort", Self.vignetteName())
             case .hideHands: return ("Ocultar mis manos reales", yn(cfg.hideRealHands))
             case .debugAxes: return ("Ejes de mandos y manos", yn(cfg.debugAxes))
+            case .diagnostics: return ("Diagnóstico", XRDiag.shared.settings.isNormal ? "▸" : "activo ▸")
             case .exit: return ("Salir de VR", "")
             }
         }
@@ -459,7 +523,7 @@ final class XRPresenter {
         UIColor(white: 0.07, alpha: 1).setFill()
         UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: w, height: h), cornerRadius: 56).fill()
         let title: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 44, weight: .semibold), .foregroundColor: UIColor.white]
-        ("Opciones VR" as NSString).draw(at: CGPoint(x: 60, y: 36), withAttributes: title)
+        ((page == 1 ? "Diagnóstico" : "Opciones VR") as NSString).draw(at: CGPoint(x: 60, y: 36), withAttributes: title)
         let right = NSMutableParagraphStyle()
         right.alignment = .right
         let rowH: CGFloat = 40
@@ -481,7 +545,7 @@ final class XRPresenter {
             }
         }
         let help: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 24), .foregroundColor: UIColor(white: 0.6, alpha: 1)]
-        ("Palanca: mover y cambiar · Gatillo: elegir · B: cerrar · Menú: cerrar" as NSString).draw(at: CGPoint(x: 60, y: CGFloat(h) - 56), withAttributes: help)
+        ((page == 1 ? "Palanca: mover y cambiar · Gatillo: elegir · B: volver · Menú: cerrar" : "Palanca: mover y cambiar · Gatillo: elegir · B: cerrar · Menú: cerrar") as NSString).draw(at: CGPoint(x: 60, y: CGFloat(h) - 56), withAttributes: help)
         UIGraphicsPopContext()
         guard let data = ctx.data else { return }
         menuIdx = (menuIdx + 1) % menuTex.count

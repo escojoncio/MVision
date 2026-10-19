@@ -14,7 +14,7 @@ xcrun -sdk macosx metallib "$OUT"/*.air -o "$OUT/default.metallib"
 
 echo "== C sintetico =="
 OBJ=()
-for f in bench/c/bench_host.c bench/c/native_synth.c vr/native/ns_bridge.c vr/native/ns_gpu.c vr/native/ns_cpuref.c vr/scene/vr_scene.c vr/radar/vr_radar.c vr/gameplay/vr_scope.c vr/host/vr_smooth.c; do
+for f in bench/c/bench_host.c bench/c/native_synth.c vr/native/ns_bridge.c vr/native/ns_gpu.c vr/native/ns_cpuref.c vr/scene/vr_scene.c vr/scene/vr_split.c vr/radar/vr_radar.c vr/gameplay/vr_scope.c vr/host/vr_smooth.c; do
   xcrun clang -c -O1 "${INC[@]}" "$f" -o "$OUT/c_$(basename "$f" .c).o"
   OBJ+=("$OUT/c_$(basename "$f" .c).o")
 done
@@ -23,7 +23,7 @@ echo "== Swift (mismos ficheros del renderer que la app) =="
 XCC=()
 for i in "${INC[@]}"; do XCC+=(-Xcc "$i"); done
 SRC=()
-for f in RenderRG RenderWeapon RadarPanel XRHud XRPresent XRMath XRFrameEncoder XRDebugAxes Native/NativeRenderer; do SRC+=("app/Sources/$f.swift"); done
+for f in RenderRG RenderWeapon RadarPanel XRHud XRPresent XRMath XRFrameEncoder XRDiag XRDebugAxes Native/NativeRenderer; do SRC+=("app/Sources/$f.swift"); done
 xcrun swiftc -O -swift-version 5 -DMV_BENCH -DMV_BENCH_NATIVE -import-objc-header bench/BenchBridge.h "${XCC[@]}" \
   "${SRC[@]}" bench/Sources/*.swift "${OBJ[@]}" -o "$OUT/bench"
 echo "OK: $OUT/bench"

@@ -373,6 +373,10 @@ static void mark_3d(Slot *s) {
 /* Compuerta de la captura (M1): con el modo gpu (o sin renderer nativo listo) no se captura ni se extrae nada, salvo para un volcado pendiente en el punto de enganche. */
 enum { DS_IDLE = 0, DS_REQ, DS_CAP, DS_WRITE };
 static _Atomic int dump_state;   /* escrito bajo DMX; la compuerta de la captura lo lee sin bloquear */
+/* Capturas pendientes del pedido en curso (bajo DMX): DN_ANY = la primera que llegue (pedido simple); DN_STAGE + DN_FRAME = pareja del mismo fotograma de juego
+ * (primero el punto de enganche, justo tras la captura nativa; luego el final del fotograma). */
+enum { DN_STAGE = 1, DN_FRAME = 2, DN_ANY = 4 };
+static int dump_need;
 static int dump_stage_mode(void) {
     static int env = -1;
     if (env < 0) { const char *e = getenv("MV_DUMP_AT"); env = e && !strcmp(e, "stage"); }
@@ -795,9 +799,9 @@ static pthread_mutex_t DMX = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t DCV = PTHREAD_COND_INITIALIZER;
 static pthread_t dump_thr;
 static int dump_thr_on, dump_res;
-static char dump_dir[512];
+static char dump_dir[512], dump_dir2[512];   /* destino de la 1ª captura (punto de enganche en la pareja) y de la 2ª (final de fotograma) */
 static uint32_t dump_count;
-static struct {
+typedef struct {
     uint8_t *ram, *scratch, *rgba;
     uint16_t *vram, *ldata;
     GpuOp *lops;
@@ -806,34 +810,47 @@ static struct {
     GpuDisplay disp;
     GpuDrawList list;
     int has_list;
-} DB;
+} DumpBuf;
+static DumpBuf DBS[2];                        /* dos juegos de búferes: la pareja se copia entera en el mismo fotograma mientras el trabajador escribe */
+static DumpBuf *dbc = &DBS[0];                /* el juego en el que copia el hilo de emulación ahora */
+#define DB (*dbc)
+static int slot_busy[2];                      /* bajo DMX: el juego de búferes tiene una copia sin escribir aún */
+static struct { int slot; char dir[512]; } jobq[2];
+static int job_n, job_writing, dump_acc;      /* bajo DMX: copias pendientes de escribir, escritura en curso, resultado acumulado del pedido (1 ok, 2 parcial, -1 error) */
 
 static void *dump_worker(void *arg) {
     (void)arg;
     for (;;) {
         pthread_mutex_lock(&DMX);
-        while (dump_state != DS_CAP) pthread_cond_wait(&DCV, &DMX);
-        dump_state = DS_WRITE;
-        char dir[512]; snprintf(dir, sizeof dir, "%s", dump_dir);
+        while (job_n == 0) pthread_cond_wait(&DCV, &DMX);
+        int slot = jobq[0].slot;
+        char dir[512]; snprintf(dir, sizeof dir, "%s", jobq[0].dir);
+        jobq[0] = jobq[1]; job_n--;
+        job_writing = 1;
+        if (dump_state == DS_CAP) dump_state = DS_WRITE;
         pthread_mutex_unlock(&DMX);
-        int fw = DB.disp.fw > 0 ? DB.disp.fw : DB.disp.w, fh = DB.disp.h, haveimg = 0;
+        DumpBuf *d = &DBS[slot];
+        int fw = d->disp.fw > 0 ? d->disp.fw : d->disp.w, fh = d->disp.h, haveimg = 0;
         if (fw > 0 && fh > 0 && fw <= 1024 && fh <= 512)
-            haveimg = gpu_present_rgba(&DB.disp, DB.vram, DB.rgba, (size_t)1024 * 512) != 0;
-        NsDumpSrc s = { DB.ram, DB.scratch, DB.vram, DB.gte, DB.has_list ? &DB.list : NULL, haveimg ? DB.rgba : NULL, haveimg ? fw : 0, haveimg ? fh : 0, DB.meta };
+            haveimg = gpu_present_rgba(&d->disp, d->vram, d->rgba, (size_t)1024 * 512) != 0;
+        NsDumpSrc s = { d->ram, d->scratch, d->vram, d->gte, d->has_list ? &d->list : NULL, haveimg ? d->rgba : NULL, haveimg ? fw : 0, haveimg ? fh : 0, d->meta };
         int rc = ns_dump_write(dir, &s);
         fprintf(stderr, "[vrhost] volcado %s: %s\n", dir, rc == 0 ? "ok" : rc > 0 ? "parcial" : "ERROR");
         pthread_mutex_lock(&DMX);
-        dump_res = rc == 0 ? 1 : rc > 0 ? 2 : -1;
-        dump_state = DS_IDLE;
+        int r = rc == 0 ? 1 : rc > 0 ? 2 : -1;
+        if (dump_acc == 0 || r == -1 || (r == 2 && dump_acc == 1)) dump_acc = r;
+        slot_busy[slot] = 0;
+        job_writing = 0;
+        if (dump_need == 0 && job_n == 0) { dump_res = dump_acc; dump_acc = 0; dump_state = DS_IDLE; }
         pthread_mutex_unlock(&DMX);
     }
     return NULL;
 }
 
-/* Reserva única de los búferes del volcado. SIN el cerrojo DMX (malloc bajo él bloquearía al hilo de emulación y al trabajador): se reserva fuera y se instala dentro si nadie lo hizo. */
-static int dump_buffers_ready(void) {
+/* Reserva única de los búferes de un juego. SIN el cerrojo DMX (malloc bajo él bloquearía al hilo de emulación y al trabajador): se reserva fuera y se instala dentro si nadie lo hizo. */
+static int dump_buffers_ready_slot(int i) {
     pthread_mutex_lock(&DMX);
-    int have = DB.ram != NULL;
+    int have = DBS[i].ram != NULL;
     pthread_mutex_unlock(&DMX);
     if (have) return 1;
     uint8_t *ram = (uint8_t *)malloc(NS_DUMP_RAM_SIZE), *scratch = (uint8_t *)malloc(1024), *rgba = (uint8_t *)malloc((size_t)1024 * 512 * 4);
@@ -843,16 +860,22 @@ static int dump_buffers_ready(void) {
     int ok = ram && scratch && rgba && vram && ldata && lops && meta;
     int used = 0;
     pthread_mutex_lock(&DMX);
-    if (ok && !DB.ram) { DB.ram = ram; DB.scratch = scratch; DB.rgba = rgba; DB.vram = vram; DB.ldata = ldata; DB.lops = lops; DB.meta = meta; used = 1; }
-    int have2 = DB.ram != NULL;
+    if (ok && !DBS[i].ram) { DBS[i].ram = ram; DBS[i].scratch = scratch; DBS[i].rgba = rgba; DBS[i].vram = vram; DBS[i].ldata = ldata; DBS[i].lops = lops; DBS[i].meta = meta; used = 1; }
+    int have2 = DBS[i].ram != NULL;
     pthread_mutex_unlock(&DMX);
     if (!used) { free(ram); free(scratch); free(rgba); free(vram); free(ldata); free(lops); free(meta); }
     return have2;
 }
+static int dump_buffers_ready(void) { return dump_buffers_ready_slot(0); }
 
-int mv_vrhost_request_dump(const char *dir) {
+/* Pedido simple (la primera captura que llegue) o pareja (dir2 != NULL: `dir` = punto de enganche, `dir2` = final del fotograma, ambos del mismo fotograma de juego).
+ * La pareja necesita el enganche de la captura nativa: sin él se degrada a un solo volcado en dir2. */
+static int dump_request(const char *dir, const char *dir2) {
     if (!dir || !*dir || strlen(dir) >= sizeof dump_dir) return -1;
+    if (dir2 && (!*dir2 || strlen(dir2) >= sizeof dump_dir2)) return -1;
+    int pair = dir2 != NULL && ns_hook_installed();
     if (!dump_buffers_ready()) return -1;
+    if (pair && !dump_buffers_ready_slot(1)) pair = 0;
     int rc = -1;
     pthread_mutex_lock(&DMX);
     if (dump_state == DS_IDLE) {
@@ -861,21 +884,31 @@ int mv_vrhost_request_dump(const char *dir) {
             pthread_detach(dump_thr);
             dump_thr_on = 1;
         }
-        strcpy(dump_dir, dir);
+        if (dir2 && !pair) snprintf(dump_dir, sizeof dump_dir, "%s", dir2);
+        else snprintf(dump_dir, sizeof dump_dir, "%s", dir);
+        if (pair) snprintf(dump_dir2, sizeof dump_dir2, "%s", dir2);
+        dump_need = pair ? (DN_STAGE | DN_FRAME) : DN_ANY;
+        dump_acc = 0;
         dump_state = DS_REQ; dump_res = 0; rc = 0;
     }
     pthread_mutex_unlock(&DMX);
     return rc;
 }
+int mv_vrhost_request_dump(const char *dir) { return dump_request(dir, NULL); }
+int mv_vrhost_request_dump_pair(const char *dir_stage, const char *dir_frame) { return dir_stage && dir_frame ? dump_request(dir_stage, dir_frame) : -1; }
 int mv_vrhost_dump_result(void) {
     pthread_mutex_lock(&DMX);
     int r = dump_res; dump_res = 0;
     pthread_mutex_unlock(&DMX);
     return r;
 }
-void mv_vrhost_cancel_dump(void) {   /* sólo anula un pedido que aún no se copió */
+void mv_vrhost_cancel_dump(void) {   /* sólo anula lo que aún no se copió; lo ya copiado termina de escribirse */
     pthread_mutex_lock(&DMX);
-    if (dump_state == DS_REQ) dump_state = DS_IDLE;
+    if (dump_state == DS_REQ) {
+        dump_need = 0;
+        if (job_n == 0 && !job_writing) dump_state = DS_IDLE;
+        else dump_state = DS_CAP;
+    }
     pthread_mutex_unlock(&DMX);
 }
 
@@ -894,6 +927,15 @@ static int meta_rec(int n, const char *pfx, const VrCamRecord *r) {
 static void dump_capture(Cpu *c, uint32_t f, const GpuDrawList *l) {
     pthread_mutex_lock(&DMX);
     if (dump_state != DS_REQ) { pthread_mutex_unlock(&DMX); return; }
+    /* qué captura toca en este punto: en la pareja, primero el enganche y, ya hecho, el final de fotograma (del mismo fotograma de juego) */
+    int bit = 0;
+    if (dump_point) bit = (dump_need & DN_STAGE) ? DN_STAGE : (dump_need & DN_ANY);
+    else if (dump_need & DN_ANY) bit = DN_ANY;
+    else if ((dump_need & DN_FRAME) && !(dump_need & DN_STAGE)) bit = DN_FRAME;
+    int slot = (bit == DN_FRAME) ? 1 : 0;
+    if (!bit || slot_busy[slot] || (slot == 1 && !DBS[1].ram)) { pthread_mutex_unlock(&DMX); return; }
+    dbc = &DBS[slot];
+    slot_busy[slot] = 1;
     memcpy(DB.ram, emu_ram, NS_DUMP_RAM_SIZE);
     memcpy(DB.scratch, emu_scratch, 1024);
     memcpy(DB.vram, &gpu_vram[0][0], NS_DUMP_VRAM_BYTES);
@@ -931,7 +973,11 @@ static void dump_capture(Cpu *c, uint32_t f, const GpuDrawList *l) {
         MP("head_age=%.3f\n", mv_vr_head_age());
     }
     DB.meta[n < DUMP_META_CAP ? n : DUMP_META_CAP - 1] = 0;
-    dump_state = DS_CAP;
+    snprintf(jobq[job_n].dir, sizeof jobq[job_n].dir, "%s", bit == DN_FRAME ? dump_dir2 : dump_dir);
+    jobq[job_n].slot = slot;
+    job_n++;
+    dump_need &= ~bit;
+    if (dump_need == 0) dump_state = DS_CAP;
     pthread_cond_signal(&DCV);
     pthread_mutex_unlock(&DMX);
 }
@@ -939,8 +985,14 @@ static void dump_capture(Cpu *c, uint32_t f, const GpuDrawList *l) {
 
 /* Volcado en el punto de enganche (etapa «pantalla», justo tras la captura nativa): la RAM es la misma que lee el extractor. Sin lista de la GPU (la última
  * cerrada no corresponde a este instante). Se usa con el modo nativo pedido o con MV_DUMP_AT=stage; si no, el volcado se toma en el gancho de frame como siempre. */
+static int dump_wants_stage(void) {   /* hay una pareja pendiente que aún necesita su captura del punto de enganche */
+    pthread_mutex_lock(&DMX);
+    int r = (dump_need & DN_STAGE) != 0;
+    pthread_mutex_unlock(&DMX);
+    return r;
+}
 static void dump_at_stage(Cpu *c) {
-    if (!dump_stage_mode() && !atomic_load(&render_req)) return;
+    if (!dump_stage_mode() && !atomic_load(&render_req) && !dump_wants_stage()) return;
     dump_point = 1;
     dump_capture(c, (uint32_t)hle_frame_count(), NULL);   /* no hace nada si no hay un pedido sin atender */
     dump_point = 0;

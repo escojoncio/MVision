@@ -39,6 +39,18 @@ final class RGRenderer {
     /// false: no se aplica el filtro de pantalla (la escena va directa al drawable, sin onda ni tinte).
     var screenFilterEnabled = true
 
+    // MARK: diagnóstico del hueco (submenú «Diagnóstico»; XRDiag). Lo fija XRFrameEncoder cada fotograma.
+    /// Sin prueba de profundidad en el mundo (opacos: siempre pasan y escriben; semitransparentes: siempre pasan, sin escribir).
+    var diagNoZ = false
+    /// Umbral (m) para partir en CPU los triángulos con una arista más larga, en las dos rutas. 0 = no partir.
+    var diagSplitMeters: Float = 0
+    /// Tope de triángulos de salida de los batches reescritos por el partido de la lista de la GPU (tope de seguridad).
+    private static let splitTriCap: UInt32 = 600_000
+    private var diagView0 = matrix_identity_float4x4          // vista (mundo VR -> ojo) del primer ojo de la escena del último fotograma
+    private var scanWanted = false, scanNear: Float = 0.1, scanBig: Float = 12
+    private var gpuScanText = "sin medir aun"
+    private var gpuSplitText = "partido=no"
+
     /// Presentación (XRPresent.swift). false = pantalla de cine: se siguen aplicando los eventos de VRAM (la VRAM debe quedar al día) pero no se dibuja
     /// el mundo 3D ni el panel 2D; el color y la profundidad se limpian igual.
     var drawWorld = true
@@ -61,7 +73,8 @@ final class RGRenderer {
     // MARK: estado
     private let colorFormat: MTLPixelFormat
     private let depthFormat: MTLPixelFormat
-    private let sampleCount: Int
+    /// Muestras del pase de escena. Lo fija XRFrameEncoder cada fotograma (el interruptor de diagnóstico «MSAA 1x» lo baja a 1 sin reiniciar).
+    var sampleCount: Int
     private let viewCount: Int
     private let library: MTLLibrary?
 
@@ -79,6 +92,8 @@ final class RGRenderer {
     private var csCopy: MTLComputePipelineState?
     private var dsOpaque: MTLDepthStencilState?
     private var dsSemi: MTLDepthStencilState?
+    private var dsOpaqueNoZ: MTLDepthStencilState?
+    private var dsSemiNoZ: MTLDepthStencilState?
 
     private struct PKey: Hashable {
         var hud: Bool, layered: Bool, filter: Bool, linear: Bool
@@ -221,6 +236,12 @@ final class RGRenderer {
         let d2 = MTLDepthStencilDescriptor()
         d2.depthCompareFunction = .greaterEqual; d2.isDepthWriteEnabled = false
         dsSemi = device.makeDepthStencilState(descriptor: d2)
+        let d3 = MTLDepthStencilDescriptor()
+        d3.depthCompareFunction = .always; d3.isDepthWriteEnabled = true
+        dsOpaqueNoZ = device.makeDepthStencilState(descriptor: d3)
+        let d4 = MTLDepthStencilDescriptor()
+        d4.depthCompareFunction = .always; d4.isDepthWriteEnabled = false
+        dsSemiNoZ = device.makeDepthStencilState(descriptor: d4)
         radar = RadarPanel(device: device, library: library, colorFormat: colorFormat, depthFormat: depthFormat,
                            sampleCount: sampleCount, viewCount: self.viewCount, linearOutput: linearOutput)
         weapon = WeaponRenderer(device: device, colorFormat: colorFormat, depthFormat: depthFormat,
@@ -261,6 +282,21 @@ final class RGRenderer {
             "lista GPU: tris_marcados=\(gpuMarkedTris) tris_no_marcados=\(gpuOtherTris) caja_VR_marcados=\(box) batches_3D_saltados=\(statSkipB) (tris \(statSkipTris)) batches_3D_dibujados=\(statDrawB) (tris \(statDrawTris)) | " +
             "nativo: " + n.drawnSummary(gpuEye: gpuEyeVR)
 #endif
+    }
+
+    /// Línea de diagnóstico del hueco (1 vez por segundo): triángulos con arista > bigEdge m y que cruzan el plano cercano en cada ruta. La lista de la GPU se mide al
+    /// llegar la siguiente escena (con la vista del último fotograma; no se lee el búfer de la GPU, que es de escritura combinada); la nativa, ahora, recorriendo las mallas
+    /// subidas (memoria compartida normal).
+    func diagLine(near: Float, bigEdge: Float) -> String {
+        scanWanted = true; scanNear = near; scanBig = bigEdge
+        var t = String(format: "arista>%.0fm y cruce del plano cercano (%.3f m) por ruta: ", bigEdge, near)
+        t += gpuScanText + " [" + gpuSplitText + "]"
+#if MV_BENCH && !MV_BENCH_NATIVE
+        t += " | nativa: no compilada"
+#else
+        if let n = native { t += " | nativa: " + n.diagScan(view: diagView0, near: near, big: bigEdge) } else { t += " | nativa: no disponible" }
+#endif
+        return t
     }
 
     private static func modeName() -> String {
@@ -512,7 +548,25 @@ final class RGRenderer {
         let nv = Int(sc.nv)
         if !newSlot { curSlot = (curSlot + 1) % 3; newSlot = true }
         let slot = vtxSlots[curSlot]
-        let stOff = (nv * MemoryLayout<VrGpuVtx>.stride + 15) & ~15
+        // Diagnóstico «partir triángulos grandes»: los batches 3D con triángulos de arista > umbral se reescriben (todos sus triángulos, en orden) tras los vértices originales;
+        // los demás batches (y el 2D) conservan su rango. Con tope de seguridad (splitTriCap).
+        var split = VrSplit()
+        var splitOK = false
+        gpuSplitText = "partido=no"
+        if diagSplitMeters > 0, nv > 0, sc.nb > 0, sc.has_3d != 0, let v0 = sc.v, let b0 = sc.b {
+            let rc = vr_split_run(v0, sc.nv, b0, sc.nb, diagSplitMeters, Self.splitTriCap, &split)
+            if rc == 0 {
+                splitOK = true
+                gpuSplitText = "partido=\(Int(split.split_tris)) tris (arista>\(XRDiag.metersText(diagSplitMeters))) salida=\(Int(split.out_tris)) tris sin_partir_por_tope=\(Int(split.cap_skipped))"
+            } else if rc == 1 {
+                gpuSplitText = "partido=nada que partir (examinados \(Int(split.src_tris)) tris)"
+            } else {
+                gpuSplitText = "partido=ERROR (memoria o parametros)"
+            }
+        }
+        defer { if splitOK { vr_split_free(&split) } }
+        let nvTotal = nv + (splitOK ? Int(split.n) : 0)
+        let stOff = (nvTotal * MemoryLayout<VrGpuVtx>.stride + 15) & ~15
         let ns = Int(sc.nstates)
         let bytes = max(stOff + max(ns, 1) * MemoryLayout<VrGpuState>.stride, 32)
         if bytes > slot.cap {
@@ -548,11 +602,20 @@ final class RGRenderer {
         }
         guard let buf = slot.buf, let v = sc.v, nv > 0 else { return }
         memcpy(buf.contents(), v, nv * MemoryLayout<VrGpuVtx>.stride)
+        if splitOK, split.n > 0, let sv = split.v { memcpy(buf.contents() + nv * MemoryLayout<VrGpuVtx>.stride, sv, Int(split.n) * MemoryLayout<VrGpuVtx>.stride) }
         slot.stOff = stOff
         if ns > 0, let st = sc.states { memcpy(buf.contents() + stOff, st, ns * MemoryLayout<VrGpuState>.stride) }
         else { memset(buf.contents() + stOff, 0, MemoryLayout<VrGpuState>.stride) }
         guard let b = sc.b else { return }
         let texBit = UInt16(VR_VF_TEXTURED)
+        var scan = VrScan(), scanMarked = VrScan()
+        let doScan = scanWanted
+        scanWanted = false
+        var scanView = [Float](repeating: 0, count: 16)
+        if doScan {
+            let c = diagView0.columns
+            scanView = [c.0.x, c.0.y, c.0.z, c.0.w, c.1.x, c.1.y, c.1.z, c.1.w, c.2.x, c.2.y, c.2.z, c.2.w, c.3.x, c.3.y, c.3.z, c.3.w]
+        }
         for i in 0..<Int(sc.nb) {
             let bt = b[i]
             let first = Int(bt.first)
@@ -567,7 +630,17 @@ final class RGRenderer {
                 for j in first..<(first + cnt) where (v[j].flags & texBit) != 0 { hasTex = true; break }
             }
             let semi = kind == 1 || (kind == 2 && bt.blend <= 3)   // blend 0xFF = opaco
-            batches.append(DrawBatch(first: first, count: cnt, kind: kind, mode: Int(bt.blend) & 3, semi: semi,
+            var drawFirst = first, drawCnt = cnt
+            var scanPtr: UnsafePointer<VrVtx> = v + first
+            if splitOK, i < Int(split.nb), split.first[i] != 0xFFFF_FFFF, let sv = split.v {
+                let nf = Int(split.first[i]), nc = Int(split.count[i]) - Int(split.count[i]) % 3
+                if nc > 0 && nf >= nv && nf + nc <= nvTotal { drawFirst = nf; drawCnt = nc; scanPtr = UnsafePointer(sv) + (nf - nv) }
+            }
+            if doScan && kind != 2 {
+                vr_scan_tris(scanPtr, UInt32(drawCnt), scanView, scanNear, scanBig, &scan)
+                if bt.skip_if_native != 0 { vr_scan_tris(scanPtr, UInt32(drawCnt), scanView, scanNear, scanBig, &scanMarked) }
+            }
+            batches.append(DrawBatch(first: drawFirst, count: drawCnt, kind: kind, mode: Int(bt.blend) & 3, semi: semi,
                                      hasTex: hasTex, evEnd: Int(bt.ev_end), skip: UInt32(bt.skip_if_native)))
             if kind != 2 {   // diagnóstico: triángulos 3D de la lista y caja (mundo VR) de los marcados, que son los que el nativo debe sustituir
                 if bt.skip_if_native != 0 {
@@ -578,6 +651,10 @@ final class RGRenderer {
                     }
                 } else { gpuOtherTris += cnt / 3 }
             }
+        }
+        if doScan {
+            gpuScanText = String(format: "lista GPU (tras partir): tris=%u largos=%u (marcados %u) cruzan_cercano=%u (marcados %u) largos_y_cruzan=%u (marcados %u) arista_max=%.1fm",
+                                 scan.tris, scan.big, scanMarked.big, scan.cross, scanMarked.cross, scan.big_cross, scanMarked.big_cross, scan.max_edge)
         }
     }
 
@@ -626,6 +703,7 @@ final class RGRenderer {
         }
         encodeVram(commandBuffer, preCmds.map { $0.cmd }, fs)
         let sceneV = viewsHook?() ?? views
+        if let v0 = sceneV.first { diagView0 = v0 }
 
         // 2) grupos de batches con el mismo ev_end: antes de cada grupo se aplican los eventos pendientes de VRAM.
         //    Repetición de una escena ya vista (reproyección): un solo grupo, sin eventos (la VRAM ya está en su estado final).
@@ -651,6 +729,8 @@ final class RGRenderer {
             let want = mv_vrhost_render_mode() != 0
             nativeOnly = mv_vrhost_render_only_native() != 0
             n.tint = nativeOnly ? Self.nativeOnlyTint : SIMD3<Float>(1, 1, 1)
+            n.splitMeters = diagSplitMeters      // diagnóstico: partir triángulos grandes (cambiarlo vuelve a subir las mallas)
+            n.noZTest = diagNoZ
             let c0 = sceneColor.first, d0 = depthTargets.first
             // Validación previa: todo lo que haría fallar a n.encode se comprueba aquí, antes de saltar ningún batch.
             let nTargets = layered ? viewCount : min(sceneColor.count, depthTargets.count)
@@ -1163,6 +1243,7 @@ final class RGRenderer {
         defer {
             if last && drawBody {
                 radar?.encodeQuad(enc, uniforms: uniforms, layered: amplify > 0, color: color.pixelFormat, depth: depth.pixelFormat, samples: samples)
+                weapon?.sampleCount = samples      // las muestras del pase pueden cambiar en vivo (diagnóstico MSAA 1x)
                 weapon?.encode(encoder: enc, views: views, projections: projections, layered: amplify > 0, viewIndex: viewIndex)
                 if let sv = special {
                     // Con el filtro de pantalla el HUD se muestrea por la vista que corresponda al destino: aquí el panel del HUD en bruto (gamma)
@@ -1236,10 +1317,10 @@ final class RGRenderer {
             if bt.kind != curKind {
                 curKind = bt.kind
                 if curKind == 0 {
-                    enc.setDepthStencilState(dsOpaque)
+                    enc.setDepthStencilState(diagNoZ ? dsOpaqueNoZ : dsOpaque)
                     enc.setDepthBias(0, slopeScale: 0, clamp: 0)
                 } else {
-                    enc.setDepthStencilState(dsSemi)
+                    enc.setDepthStencilState(diagNoZ ? dsSemiNoZ : dsSemi)
                     enc.setDepthBias(semiDepthBias, slopeScale: semiSlopeBias, clamp: 0)   // Z invertida: + = hacia la cámara
                 }
             }

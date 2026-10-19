@@ -1436,3 +1436,21 @@ Causas y cambios (todo verificado solo con pruebas sintéticas locales; falta pr
 - Renderer: las mallas se cachean por id de contenido (no por época), así que una época nueva no resube lo ya subido; `gcMeshes` solo libera lo que ya no está en el almacén.
 - CI: `render-test` ejecuta antes las pruebas C sintéticas (extractor, mapa nativo, cuerpo).
 - **Pendiente**: ver el resultado de la prueba de extremo a extremo en CI (el Swift/Metal no se compila en local); comprobar en el visor con «Solo nativo» y la línea `nat-diag`.
+
+## Build de diagnóstico del hueco negro (rama `diag-huecos`, sobre fix-nativo1 bd492a5) — 2026-10-19 (solo código y pruebas sintéticas; NO se ejecutó el juego)
+Objetivo: localizar por qué aparece una cuña escalonada de negro puro (0,0,0) en el suelo al mirar a lo largo de un canal de agua, en las dos rutas (lista de la GPU y nativa) aunque los datos son correctos fuera de línea. La causa tiene que estar en algo común del visor: rasterización de triángulos gigantes que cruzan el plano cercano, mapa de tasa de rasterización, MSAA/resolve o una capa final que pinta negro.
+
+**Submenú «Diagnóstico»** (menú VR, interruptores en vivo, sin reiniciar, guardados en UserDefaults `xr.diag.*`; «Restablecer todo» los devuelve a normal):
+1. «Fondo de borrado magenta»: el color de borrado del pase de escena pasa a magenta (lo que se ve magenta es fondo sin pintar; el negro es pintado).
+2. «Partir triángulos grandes» (Desactivado / 4 m / 2 m / 1 m en metros VR): bisección de la arista más larga en CPU, con tope de seguridad. Ruta GPU: `vr/scene/vr_split.{h,c}` sobre los batches 3D en `RGRenderer.storeScene`. Ruta nativa: `ns_gpu_split` (`vr/native/ns_gpu.c`) al subir cada malla en `NativeRenderer.upload` (umbral en unidades del motor; los triángulos con vértices soldados no se parten y se cuentan). Cambiar el valor vuelve a subir las mallas nativas.
+3. «Sin mapa de tasa de rasterización»: informativo y a prueba de fallos. La app no asigna mapa en ninguna ruta; el registro dice si el drawable trae mapas, el viewport frente al tamaño de la textura y «usado por la app=no».
+4. «MSAA 1x (sin resolve)»: pase de escena a 1 muestra, sin resolve (pipelines del radar, del arma y nativos se eligen por las muestras reales del pase).
+5. «Sin capas finales»: sin velo, viñeta, oscurecimiento por colisión de la cabeza, pantalla de cine ni pases sobre el mundo; se conservan mundo, HUD 2D y textos.
+6. «Plano cercano» (Automático / 0,05 / 0,1 / 0,3) y «Proyección» (Automática / Propia / Del sistema).
+7. «Sin prueba de profundidad»: opacos siempre pasan y escriben; semitransparentes siempre pasan sin escribir (también en el nativo).
+
+**Volcados**: con los dos clics de palanca se guardan DOS volcados en el mismo gesto: `<base>_stage` (point=stage) y `<base>_frame` (point=frame) (`mv_vrhost_request_dump_pair`, `vr/host/vrhost.c`, dos juegos de buffers, cola de trabajos).
+
+**Registro 1 Hz** (`diag-huecos:`): estado de los interruptores; triángulos con arista > 12 m y cuántos cruzan el plano cercano en cada ruta (`vr_scan_tris` / `ns_gpu_scan`); si el drawable trae mapa de tasa y cómo se trata; muestra no bloqueante del color final abajo al centro (blit de 1 texel a un buffer compartido leído en el manejador de finalización).
+
+**Pruebas**: `make -C vr/scene test-split` (nuevo paso de CI), `test_split()` en `bench/c/test_native_gpu.c`. Swift/Metal sin compilar en local: la verificación es el CI.

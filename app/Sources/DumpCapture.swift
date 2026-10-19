@@ -1,9 +1,9 @@
 import Foundation
 
 /// Captura de volcados para desarrollo (vr/native/ns_dump.h): el usuario mantiene los DOS clics de stick durante ~1 s mientras juega y la app guarda en
-/// `<carpeta del usuario>/Dumps/d<NNNN>_<fecha>/` la RAM, la VRAM, los registros del coprocesador de geometría, la última lista de la GPU, el fotograma real (PNG)
+/// `<carpeta del usuario>/Dumps/d<NNNN>_<fecha>_stage/` y `..._frame/` (dos volcados del mismo fotograma: punto de la captura nativa y final de fotograma) la RAM, la VRAM, los registros del coprocesador de geometría, la última lista de la GPU, el fotograma real (PNG)
 /// y la pose de cámara/cabeza. Aviso háptico: una vibración corta al aceptar el gesto y otra larga cuando termina de escribirse (dos cortas si falló o
-/// si pasan 5 s sin resultado).
+/// si pasan 10 s sin resultado).
 /// `frame(both:)` se llama una vez por fotograma de render desde `VRInput.frame` y NO toca disco ni `FolderAccess`: la carpeta raíz se refresca desde el
 /// hilo principal y la creación de directorios y el pedido al anfitrión van a una cola de fondo. Mientras los dos clics están pulsados `VRInput`
 /// los oculta al juego (el gesto no debe cambiar el seguro/selector del arma).
@@ -11,7 +11,7 @@ final class DumpCapture: @unchecked Sendable {
     static let shared = DumpCapture()
 
     private let holdSeconds = 1.0
-    private let timeoutSeconds = 5.0
+    private let timeoutSeconds = 10.0     // dos volcados seguidos (pareja)
     private let gapReset = 0.2             // sin llamadas durante más de esto: el contador de pulsación vuelve a cero
     private let io = DispatchQueue(label: "dump.io", qos: .utility)
     private let lock = NSLock()            // protege todo lo de abajo salvo `heldSince`, `armed`, `lastCall` (sólo hilo de render)
@@ -56,7 +56,7 @@ final class DumpCapture: @unchecked Sendable {
             requestedAt = 0
             lock.unlock()
             mv_vrhost_cancel_dump()
-            Storage.log("volcado: sin resultado en 5 s")
+            Storage.log("volcado: sin resultado en 10 s")
             buzz = (now + 0.25, 0.8)
             lock.lock()
         }
@@ -113,10 +113,14 @@ final class DumpCapture: @unchecked Sendable {
             let f = DateFormatter()
             f.dateFormat = "yyyyMMdd-HHmmss"
             lock.lock(); let idx = counter; counter += 1; lock.unlock()
-            let dir = root!.appendingPathComponent(String(format: "d%04d_%@", idx, f.string(from: Date())), isDirectory: true)
-            if mv_vrhost_request_dump(dir.path) == 0 {
+            // Un gesto = DOS volcados del mismo fotograma de juego: el del punto de enganche (instante de la captura nativa, point=stage) y el del final del fotograma
+            // (point=frame). Sin el enganche nativo el anfitrión hace uno solo (el segundo).
+            let base = String(format: "d%04d_%@", idx, f.string(from: Date()))
+            let dirStage = root!.appendingPathComponent(base + "_stage", isDirectory: true)
+            let dirFrame = root!.appendingPathComponent(base + "_frame", isDirectory: true)
+            if mv_vrhost_request_dump_pair(dirStage.path, dirFrame.path) == 0 {
                 lock.lock(); requestedAt = CFAbsoluteTimeGetCurrent(); lock.unlock()
-                Storage.log("volcado pedido: \(dir.lastPathComponent)")
+                Storage.log("volcado pedido (pareja stage+frame): \(base)")
             } else { fail() }
         }
     }

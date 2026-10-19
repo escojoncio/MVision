@@ -54,7 +54,8 @@ final class WeaponRenderer {
     // MARK: estado
     private let colorFormat: MTLPixelFormat
     private let depthFormat: MTLPixelFormat
-    private let sampleCount: Int
+    /// Muestras del pase donde se dibuja (la fija RGRenderer en cada fotograma: pueden cambiar en vivo con el interruptor de diagnóstico «MSAA 1x»).
+    var sampleCount: Int
     private let viewCount: Int
     private let library: MTLLibrary?
     private var depthState: MTLDepthStencilState?

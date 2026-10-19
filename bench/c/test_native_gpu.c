@@ -180,6 +180,90 @@ static void test_sort(void) {
     free(bf); free(out); free(ab);
 }
 
+/* Diagnóstico: partir triángulos largos de la malla empaquetada y recuento de triángulos largos / que cruzan el plano cercano. */
+static void test_split(void) {
+    NsGpuVert v[5];
+    memset(v, 0, sizeof v);
+    float P[5][3] = {{0, 0, 0}, {63000, 0, 0}, {0, 0, 3000}, {0, 100, 0}, {100, 0, 0}};   /* unidades locales (1 = 1 mm) */
+    for (int i = 0; i < 5; i++) { v[i].p[0] = P[i][0]; v[i].p[1] = P[i][1]; v[i].p[2] = P[i][2]; v[i].weld = NSG_NO_WELD; }
+    NsGpuCorner c[9];
+    memset(c, 0, sizeof c);
+    uint32_t idx[9] = {0, 1, 2, 0, 3, 4, 0, 1, 2};
+    for (int i = 0; i < 9; i++) { c[i].v = idx[i]; c[i].n[1] = 1.0f; c[i].u = (uint8_t)(i * 10); c[i].t = (uint8_t)(i * 20); c[i].tpage = 5; c[i].clut = 6; c[i].flags = NSG_CF_TEX | NSG_CF_PAINT; c[i].paint = 0x808080u; }
+    float cen[9] = {21000, 0, 1000, 33, 33, 0, 21000, 0, 1000};
+    uint8_t abr[3] = {0, 1, 2};
+    NsGpuSplit sp;
+    /* triángulos 0 y 2 largos (63 m), el 1 pequeño; umbral 2 m = 2000 unidades */
+    int rc = ns_gpu_split(v, 5, c, 3, cen, abr, 2000.0f, 100000, &sp);
+    CHECK(rc == 0);
+    if (rc == 0) {
+        CHECK(sp.n_split == 2 && sp.ntris > 3 && sp.nverts > 5 && sp.n_skip_cap == 0);
+        float mx = 0;
+        int order = 1;
+        for (uint32_t t = 0; t < sp.ntris; t++) {
+            for (int k = 0; k < 3; k++) {
+                const NsGpuCorner *a = &sp.corners[3 * t + k], *b = &sp.corners[3 * t + (k + 1) % 3];
+                CHECK(a->v < sp.nverts && a->tpage == 5 && a->clut == 6);
+                float dx = sp.verts[a->v].p[0] - sp.verts[b->v].p[0], dy = sp.verts[a->v].p[1] - sp.verts[b->v].p[1], dz = sp.verts[a->v].p[2] - sp.verts[b->v].p[2];
+                float e = sqrtf(dx * dx + dy * dy + dz * dz);
+                if (e > mx) mx = e;
+                float nl = sqrtf(a->n[0] * a->n[0] + a->n[1] * a->n[1] + a->n[2] * a->n[2]);
+                CHECK(fabsf(nl - 1.0f) < 1e-3f);
+                CHECK((a->paint & 255u) == 0x80u);
+            }
+            if (sp.abr[t] < abr[0] || sp.abr[t] > abr[2]) order = 0;
+        }
+        CHECK(mx <= 2000.0f + 1.0f);
+        CHECK(order);
+        /* el triángulo pequeño sigue ahí, en el mismo orden relativo: abr 0.. luego 1 (un solo triángulo) luego 2.. */
+        uint32_t n1 = 0, first1 = 0;
+        for (uint32_t t = 0; t < sp.ntris; t++) if (sp.abr[t] == 1) { n1++; first1 = t; }
+        CHECK(n1 == 1);
+        uint32_t before = 0; for (uint32_t t = 0; t < first1; t++) if (sp.abr[t] == 0) before++;
+        CHECK(before == first1 && before > 1);
+        /* los originales conservan sus índices */
+        CHECK(memcmp(sp.verts, v, sizeof v) == 0);
+        /* los centroides son la media de los vértices */
+        int okc = 1;
+        for (uint32_t t = 0; t < sp.ntris; t++) {
+            float ex = 0; for (int k = 0; k < 3; k++) ex += sp.verts[sp.corners[3 * t + k].v].p[0];
+            if (fabsf(sp.centroid[3 * t] - ex / 3.0f) > 1.0f) okc = 0;
+        }
+        CHECK(okc);
+        NsGpuCorner *cc = (NsGpuCorner *)malloc(3u * sp.ntris * sizeof *cc);
+        memcpy(cc, sp.corners, 3u * sp.ntris * sizeof *cc);
+        ns_gpu_rebase_corners(cc, 3u * sp.ntris, 1000);
+        CHECK(cc[0].v == sp.corners[0].v + 1000);
+        free(cc);
+        ns_gpu_split_free(&sp);
+    }
+    /* tope: salida <= 10 triángulos */
+    rc = ns_gpu_split(v, 5, c, 3, cen, abr, 2000.0f, 10, &sp);
+    CHECK(rc == 0 && sp.ntris <= 10 && sp.n_skip_cap >= 1);
+    if (rc == 0) ns_gpu_split_free(&sp);
+    /* sin centroides ni abr */
+    rc = ns_gpu_split(v, 5, c, 3, NULL, NULL, 2000.0f, 100000, &sp);
+    CHECK(rc == 0 && sp.centroid == NULL && sp.abr == NULL);
+    if (rc == 0) ns_gpu_split_free(&sp);
+    /* soldados: no se tocan */
+    v[1].weld = 3;
+    rc = ns_gpu_split(v, 5, c, 3, cen, abr, 2000.0f, 100000, &sp);
+    CHECK(rc == 1 && sp.n_skip_weld == 2);
+    v[1].weld = NSG_NO_WELD;
+    CHECK(ns_gpu_split(v, 5, c, 3, cen, abr, 1e9f, 1000, &sp) == 1);
+    CHECK(ns_gpu_split(v, 5, c, 3, cen, abr, 0.0f, 1000, &sp) == -1);
+    /* recuento: matriz identidad (local = ojo, en metros), plano cercano 0,1 m */
+    float id[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    NsGpuVert w[3]; memset(w, 0, sizeof w);
+    float W[3][3] = {{0, 0, -1}, {30, 0, -80}, {0, 5, 2}};
+    for (int i = 0; i < 3; i++) { w[i].p[0] = W[i][0]; w[i].p[1] = W[i][1]; w[i].p[2] = W[i][2]; w[i].weld = NSG_NO_WELD; }
+    NsGpuCorner wc[3]; memset(wc, 0, sizeof wc);
+    for (int i = 0; i < 3; i++) wc[i].v = (uint32_t)i;
+    NsGpuScan sc; memset(&sc, 0, sizeof sc);
+    ns_gpu_scan(w, wc, 1, id, 0.1f, 12.0f, &sc);
+    CHECK(sc.tris == 1 && sc.big == 1 && sc.cross == 1 && sc.big_cross == 1);
+}
+
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : ".";
     char p[1024];
@@ -188,6 +272,7 @@ int main(int argc, char **argv) {
     CHECK(ns_synth_load(p) == 0);
     test_emulation();
     test_sort();
+    test_split();
     printf(fails ? "FALLOS: %d\n" : "OK: todas las pruebas pasan\n", fails);
     return fails ? 1 : 0;
 }

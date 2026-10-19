@@ -50,6 +50,10 @@ extern int mv_host_scene(VrScene *out);
  * (sin consumidor, cola llena o sin lista nueva); la PNG y el disco los hace un hilo trabajador propio. Devuelve 0 si se aceptó, -1 si ya hay uno en curso,
  * la ruta es inválida o falta memoria. */
 int mv_vrhost_request_dump(const char *dir);
+/* Pareja de volcados del MISMO fotograma de juego en un solo gesto: el del punto de enganche (justo tras la captura nativa, point=stage en el meta; sin lista de la GPU)
+ * a dir_stage y, a continuación, el del final de fotograma (point=frame, con la última lista) a dir_frame. Mismas reglas y mismo resultado que mv_vrhost_request_dump
+ * (el resultado es el peor de los dos). Sin el enganche nativo instalado se hace un único volcado, a dir_frame. */
+int mv_vrhost_request_dump_pair(const char *dir_stage, const char *dir_frame);
 /* Resultado del último volcado: 0 = en curso o ninguno, 1 = escrito, 2 = escrito con partes accesorias fallidas, -1 = falló. Se consume al leerlo. */
 int mv_vrhost_dump_result(void);
 /* Anula un pedido que aún no llegó a copiarse (timeout del llamador). Si ya se copió, termina de escribirse. */

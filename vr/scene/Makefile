@@ -1,6 +1,7 @@
 # vr_scene: ensamblador de escena estéreo. Uso (desde la raíz del repo):
 #   make -C vr/scene test        prueba sintética (no necesita datos del juego)
 #   make -C vr/scene test-san    lo mismo con ASan/UBSan (gcc)
+#   make -C vr/scene test-split  prueba de vr_split (partir triángulos largos, recuento de cruces del plano cercano)
 #   make -C vr/scene dump        compila scene_dump enlazando el runtime (necesita `make gen` y, opcional, `gen_ov`)
 #   make -C vr/scene run ARGS="--at 7800,7860 --out DIR"   ejecuta scene_dump con datos locales
 #   make -C vr/scene probe       (opcional, NO forma parte de `test`) compila hud_probe: panel HUD emulado en CPU (hud_emu.c) vs rasterizador de referencia
@@ -32,6 +33,11 @@ test: $(B)/test_scene
 test-san:
 	$(MAKE) test B=build-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 
+$(B)/test_split: test_split.c vr_split.c vr_split.h vr_scene.h | $(B)
+	$(CC) $(CFLAGS) $(INC) test_split.c vr_split.c -lm -o $@
+test-split: $(B)/test_split
+	$(B)/test_split
+
 # Herramienta con el runtime: mismas fuentes que runtime/Makefile (headless.c se sustituye por scene_dump.c).
 RTSRC := $(filter-out $(RT)/headless.c $(RT)/test_%.c $(RT)/wip_%.c $(RT)/nogen.c,$(wildcard $(RT)/*.c))
 OVOBJ := $(wildcard $(GENOV)/*.o)
@@ -54,4 +60,4 @@ run: dump
 	MV_DISC=$(DISC) $(OUT)/scene_dump $(EXE) $(SCRIPT) $(ARGS)
 clean:
 	rm -rf build build-san
-.PHONY: all test test-san dump run probe probe-run clean
+.PHONY: all test test-san test-split dump run probe probe-run clean
