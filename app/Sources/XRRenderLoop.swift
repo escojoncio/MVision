@@ -224,7 +224,7 @@ final class XRRenderLoop {
 
         if nowT - diagT >= 1 {
             diagT = nowT
-            Storage.log("xr-diag: seguimiento ok=\(trackedFrames) sin=\(untrackedFrames) ancla=\(anchor == nil ? "nil" : (anchor!.isTracked ? "rastreada" : "no rastreada")) recentrado=\(needsRecenter ? "pendiente" : "hecho") frame=\(encoder.frameNo) origenDispositivo=(\(String(format: "%.2f %.2f %.2f", originFromDevice.columns.3.x, originFromDevice.columns.3.y, originFromDevice.columns.3.z))) rumboDispositivo=\(String(format: "%.0f", XRMath.yaw(of: originFromDevice) * 180 / .pi))grados mapasTasa=\(drawable.rasterizationRateMaps.count) objetivo=\(drawable.target) vistas=\(drawable.views.count) uso(color0)=\(drawable.colorTextures.first?.usage.rawValue ?? 0) almacenamiento=\(drawable.colorTextures.first?.storageMode.rawValue ?? 99) pasoDeFotograma=\(Int(1000 * dt)) ms")
+            Storage.log("xr-diag: seguimiento ok=\(trackedFrames) sin=\(untrackedFrames) ancla=\(anchor == nil ? "nil" : (anchor!.isTracked ? "rastreada" : "no rastreada")) recentrado=\(needsRecenter ? "pendiente" : "hecho") frame=\(encoder.frameNo) origenDispositivo=(\(String(format: "%.2f %.2f %.2f", originFromDevice.columns.3.x, originFromDevice.columns.3.y, originFromDevice.columns.3.z))) rumboDispositivo=\(String(format: "%.0f", XRMath.yaw(of: originFromDevice) * 180 / .pi))grados mapasTasa=\(drawable.rasterizationRateMaps.count) objetivo=\(Self.targetName(drawable)) vistas=\(drawable.views.count) uso(color0)=\(drawable.colorTextures.first?.usage.rawValue ?? 0) almacenamiento=\(drawable.colorTextures.first?.storageMode.rawValue ?? 99) pasoDeFotograma=\(Int(1000 * dt)) ms")
             trackedFrames = 0; untrackedFrames = 0
         }
 
@@ -262,6 +262,12 @@ final class XRRenderLoop {
         let fwd = simd_normalize(-SIMD3<Float>(head.columns.2.x, head.columns.2.y, head.columns.2.z))
         radar.updatePose(forearm: forearm, leftGrip: grip,
                          headPosition: SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z), headForward: fwd)
+    }
+
+    /// Objetivo del drawable (visionOS 26+); solo para el registro.
+    private static func targetName(_ d: LayerRenderer.Drawable) -> String {
+        if #available(visionOS 26.0, *) { return "\(d.target)" }
+        return "n/d"
     }
 
     private func applyRecenter(_ originFromDevice: simd_float4x4) {
