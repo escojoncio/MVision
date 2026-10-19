@@ -210,9 +210,14 @@ final class XRRenderLoop {
         }
         guard let cb = queue.makeCommandBuffer() else { return }
         cb.label = "mv.xr.frame"
+        // Una vez por segundo se compara nuestra proyección con la del sistema (solo para el registro).
+        var sysProj: [simd_float4x4]?
+        if nowT - diagT >= 1, #available(visionOS 2.0, *) {
+            sysProj = (0..<viewCount).map { drawable.computeProjection(viewIndex: $0) }
+        }
         let ok = encoder.encode(commandBuffer: cb, gs: gs, originFromDevice: originFromDevice, recenterInverse: recenterInverse, dt: dt,
                                 eyes: eyes, depthRange: drawable.depthRange, colorTextures: drawable.colorTextures,
-                                depthTextures: drawable.depthTextures)
+                                depthTextures: drawable.depthTextures, systemProjections: sysProj)
         if !ok { Storage.log("xr: el codificador no pudo preparar el fotograma (texturas del drawable vacías o destinos MSAA)") }
 
         if nowT - diagT >= 1 {
