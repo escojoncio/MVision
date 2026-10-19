@@ -716,8 +716,22 @@ final class XRPresenter {
             r.dioramaModel = anchor * XRMath.translation(SIMD3<Float>(0, anchorY - 0.1, -1.3)) * f * gameView.inverse
         }
 
+        // 5b) ventana 2D del juego sobre el mundo (selector de armas/objetos, pausa): el mundo sigue en primera persona y la capa 2D completa va en un panel flotante delante,
+        //     por delante de la geometría. Sustituye a los paneles sueltos del HUD mientras dura (la capa 2D ya los trae).
+        let overlay2D = shown == .world && gs.view_mode == 1 && XRMenuPanelLayout.isOverlay(reason: gs.view_reason)
+        if overlay2D, let h = hud {
+            var it = XRDrawItem(kind: .panel, texture: h)
+            it.model = XRMenuPanelLayout.model(position: hp, yaw: hudYaw)
+            it.uvrect = SIMD4<Float>(0, 0, 1, 1)
+            it.size = SIMD2<Float>(XRMenuPanelLayout.width, XRMenuPanelLayout.width * 0.75)
+            it.distance = XRMenuPanelLayout.distance
+            it.opacity = 1
+            it.onTop = true
+            r.items.append(it)
+        }
+
         // 6) paneles del HUD (mundo y diorama; en el cine el HUD ya va dentro de la imagen)
-        if shown != .cinema && shown != .stereo && cfg.hudPanels, let h = hud {
+        if shown != .cinema && shown != .stereo && cfg.hudPanels && !overlay2D, let h = hud {
             let frame = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw)
             let sc = cfg.hudScale
             var wm: (n: SIMD3<Float>, ok: Bool)?

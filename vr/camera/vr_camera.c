@@ -255,7 +255,7 @@ void vrcam_frame(const uint8_t *ram, const BridgeState *st) {
     if (!ram) return;
     S.vb++;
     if (!st) { bridge_read(ram, &S.bs); st = &S.bs; }
-    int ok = (st->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && st->has_player && st->in_control && S.cfg.head;
+    int ok = (st->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && st->has_player && st->cam_ctl && S.cfg.head;   /* cam_ctl = in_control o ventana de armas/objetos / pausa en partida: la cámara VR no se apaga con un menú 2D encima */
     if (ok) { if (S.ok_count < 1 << 20) S.ok_count++; } else S.ok_count = 0;
     int want = S.ok_count >= S.cfg.on_frames;
     if (want && !S.want) { S.have_ref = 0; S.st.activations++; }

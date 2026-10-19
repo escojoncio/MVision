@@ -50,7 +50,7 @@ static void build_world(int yaw_body) {
 }
 static BridgeState ok_state(void) {
     BridgeState s; memset(&s, 0, sizeof s);
-    s.valid = BRIDGE_OK_ALL_CORE; s.has_player = 1; s.in_control = 1;
+    s.valid = BRIDGE_OK_ALL_CORE; s.has_player = 1; s.in_control = 1; s.cam_ctl = 1;
     return s;
 }
 
@@ -123,10 +123,13 @@ static void test_activation(void) {
     G_yaw = 80; vrcam_plan(ram, 320, &p); NEAR(p.yaw_deg, 100, 0.05);
     /* giro por pasos del espacio del usuario */
     vrcam_turn(30); vrcam_plan(ram, 320, &p); NEAR(p.yaw_deg, 130, 0.05);
+    /* ventana de armas/objetos o pausa abiertas (in_control=0, cam_ctl=1): la cabeza sigue llevando la cámara */
+    s.in_control = 0; s.cam_ctl = 1; vrcam_frame(ram, &s);
+    CHECK(vrcam_plan(ram, 320, &p) != 0 && vrcam_active());
     /* salida inmediata al perder el control */
-    s.in_control = 0; vrcam_frame(ram, &s);
+    s.in_control = 0; s.cam_ctl = 0; vrcam_frame(ram, &s);
     CHECK(vrcam_plan(ram, 320, &p) == 0 && !vrcam_active());
-    s.in_control = 1; s.has_player = 0;
+    s.in_control = 1; s.cam_ctl = 1; s.has_player = 0;
     for (int i = 0; i < 20; i++) vrcam_frame(ram, &s);
     CHECK(vrcam_plan(ram, 320, &p) == 0);
     s.has_player = 1; s.valid &= ~1u;           /* un grupo del puente sin validar */

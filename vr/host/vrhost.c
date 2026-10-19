@@ -714,6 +714,11 @@ static void publish_state(void) {
         vin.dead = (uint8_t)(core && (((bs.valid & BRIDGE_OK_LIFE) && bs.life_max > 0 && bs.life <= 0) || (bs.player_status & BRIDGE_PS_GAME_OVER) || (bs.game_status & BRIDGE_GS_GAME_OVER)));
         vin.scene3d = (uint8_t)last_scene3d; vin.video = (uint8_t)last_video;
         g.view_mode = vrview_step(&view, &vin);
+        if (view.changed) {     /* cada cambio de modo / clase / motivo de la vista queda en el registro con su causa (banderas del puente incluidas) */
+            char vb[512];
+            vrview_describe(&view, &vin, vb, sizeof vb);
+            fprintf(stderr, "%s | vb=%u modoBruto=%d\n", vb, (unsigned)hle_frame_count(), view.want);
+        }
         g.view_kind = view.kind;
         g.cine_shot = cine.shot; g.cine_cuts = cine.cuts; g.cine_cover = last_cover;
         g.view_reason = view.reason;

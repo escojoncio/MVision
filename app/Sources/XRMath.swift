@@ -129,9 +129,24 @@ enum XRMenuLayout {
     static func height(w: Int, h: Int) -> Float { width * Float(h) / Float(max(w, 1)) }
 }
 
+/// Ventana 2D del juego (selector de armas/objetos, pausa) sobre el mundo en primera persona (VRV_R_SELECTOR = 10, VRV_R_PAUSE_WORLD = 11): la vista sigue en MUNDO y la capa 2D
+/// completa del juego se dibuja como un panel flotante delante de la cabeza, por delante de la geometría (sin prueba de profundidad), en lugar de los paneles sueltos del HUD.
+enum XRMenuPanelLayout {
+    static let distance: Float = 0.95       // m delante de la cabeza (en horizontal)
+    static let width: Float = 1.40          // m; alto = 3/4 del ancho (la capa 2D es 4:3)
+    static let drop: Float = 0.02           // m por debajo de los ojos
+
+    static func isOverlay(reason: Int32) -> Bool { reason == 10 || reason == 11 }
+
+    /// Modelo del panel (centro del quad, +Z hacia el usuario) para una posición de cabeza `p` y un rumbo `yaw` (el del HUD, con zona muerta).
+    static func model(position p: SIMD3<Float>, yaw: Float) -> simd_float4x4 {
+        XRMath.translation(p) * XRMath.rotationY(yaw) * XRMath.translation(SIMD3<Float>(0, -drop, -distance))
+    }
+}
+
 enum XRCinemaLayout {
-    /// Motivos de vista (VRV_R_*) cuya pantalla lleva texto pequeño de 1 px (títulos, créditos, nombres de la intro, pantallas de resultado): sin partida y juego detenido.
-    static func legible(reason: Int32) -> Bool { reason == 1 || reason == 4 }
+    /// Motivos de vista (VRV_R_*) cuya pantalla lleva texto pequeño de 1 px (títulos, créditos, nombres de la intro, pantallas de resultado, códec): sin partida, radio y juego detenido.
+    static func legible(reason: Int32) -> Bool { reason == 1 || reason == 3 || reason == 4 }
     /// Ancho de la pantalla (m): un 25 % mayor para esas escenas (hasta 4,5 m).
     static func width(base: Float, legible: Bool) -> Float { legible ? min(base * 1.25, 4.5) : base }
     /// Curvatura: el cilindro deforma la rejilla de píxeles (trazos de 1 px de grosor desigual); en escenas de texto se limita a 0,12.

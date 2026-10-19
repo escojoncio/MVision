@@ -146,15 +146,38 @@ static void test_modes(void) {
     build_game();
     p32(BA_PAUSE_LEVEL, 1); p8(BA_MENU_WORK + 0x2A, 4);
     bridge_read(ram, &s);
-    CHECK(s.comms && s.stopped && !s.in_control && strcmp(bridge_mode_name(&s), "comms") == 0);
+    CHECK(s.comms && s.stopped && !s.in_control && !s.cam_ctl && strcmp(bridge_mode_name(&s), "comms") == 0);
     build_game();
     p32(BA_PAUSE_LEVEL, 2);
     bridge_read(ram, &s);
-    CHECK(s.paused && !s.in_control && strcmp(bridge_mode_name(&s), "pausa") == 0);
+    CHECK(s.paused && !s.in_control && s.cam_ctl && strcmp(bridge_mode_name(&s), "pausa") == 0);
     build_game();
     p8(BA_MENU_WORK + 0x2A, 2);
     bridge_read(ram, &s);
-    CHECK(s.menu_open && !s.comms && !s.in_control);
+    CHECK(s.menu_open && !s.comms && !s.in_control && s.cam_ctl);     /* ventana de armas: la cabeza sigue llevando la cámara */
+    build_game();
+    p8(BA_MENU_WORK + 0x2A, 1);
+    bridge_read(ram, &s);
+    CHECK(s.menu_open && !s.comms && !s.in_control && s.cam_ctl);     /* ventana de objetos */
+    build_game();
+    p8(BA_MENU_WORK + 0x2A, 4 | 1);
+    bridge_read(ram, &s);
+    CHECK(s.comms && !s.cam_ctl);                                     /* con radio no hay cámara de jugador */
+    build_game();
+    p8(BA_MENU_WORK + 0x2A, 2); p32(BA_GAME_STATUS, 0x104A0000u);
+    bridge_read(ram, &s);
+    CHECK(s.cinematic && !s.cam_ctl);                                 /* escena con menú: sin cámara de jugador */
+    build_game();
+    p8(BA_MENU_WORK + 0x2A, 2); p16(BA_VARS + 2u * BRIDGE_V_LIFE, 0);
+    bridge_read(ram, &s);
+    CHECK(!s.cam_ctl);                                                /* muerte con menú: tampoco */
+    build_game();
+    p8(BA_MENU_WORK + 0x2A, 2); p32(BA_PAUSE_LEVEL, 1);
+    bridge_read(ram, &s);
+    CHECK(s.stopped && !s.cam_ctl);                                   /* juego detenido: tampoco */
+    build_game();
+    bridge_read(ram, &s);
+    CHECK(s.in_control && s.cam_ctl);
     build_game();
     p32(BA_GAME_STATUS, 0x104A0000u);   /* escena con mando retirado */
     bridge_read(ram, &s);
