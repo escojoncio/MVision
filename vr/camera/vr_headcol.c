@@ -238,6 +238,28 @@ static int sweep_first(Cand *cs, int nc, const float a[3], const float b[3], flo
     return 0;
 }
 
+/* Distancia (unidades del motor) de un punto del MUNDO FIJO a la superficie estática más cercana dentro de `max_units`; -1 si no hay ninguna.
+ * Solo lectura del almacén (el que llama sostiene el candado del host). Sirve al golpe en la pared. */
+float vrhc_nearest_world(const float p[3], float max_units) {
+    if (!H.tris || !p || !isfinite(p[0]) || !isfinite(p[1]) || !isfinite(p[2]) || !(max_units > 0)) return -1.0f;
+    float best = max_units;
+    int found = 0;
+    for (int i = 0; i < HC_SLOTS; i++) {
+        const HcTri *t = &H.tris[i];
+        if (!alive(t)) continue;
+        int out_ = 0;
+        for (int ax = 0; ax < 3 && !out_; ax++) {
+            float mn = t->v[0][ax], mx = mn;
+            for (int v = 1; v < 3; v++) { if (t->v[v][ax] < mn) mn = t->v[v][ax]; if (t->v[v][ax] > mx) mx = t->v[v][ax]; }
+            if (mx < p[ax] - best || mn > p[ax] + best) out_ = 1;
+        }
+        if (out_) continue;
+        float d = vrhc_tri_dist(t->v[0], t->v[1], t->v[2], p, NULL);
+        if (d < best) { best = d; found = 1; }
+    }
+    return found ? best : -1.0f;
+}
+
 static float smooth01(float x) { x = x < 0 ? 0 : (x > 1 ? 1 : x); return x * x * (3 - 2 * x); }
 
 int vrhc_query(const VrHcMap *m, const float head[3], float dt, VrHcOut *out) {
