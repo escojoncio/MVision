@@ -290,6 +290,10 @@ static void build_one(const GpuDrawList *l, int si) {
             vr_scene_player_origin(&bs, &o, org);
             o.origin_mode = 1;
             o.origin_game[0] = (float)r->eye[0]; o.origin_game[1] = org[1]; o.origin_game[2] = (float)r->eye[2];
+            /* la escena se entrega en el espacio del USUARIO (la cámara del juego va girada theta_play respecto de él, y la cabeza
+             * de esa lista estaba en p_ref): así el giro con el stick y la cabeza coinciden con lo que ve el visor */
+            o.user_on = 1; o.user_theta_deg = r->theta_play_deg;
+            o.user_pos[0] = r->p_ref[0]; o.user_pos[1] = r->p_ref[1]; o.user_pos[2] = r->p_ref[2];
         }
     }
     /* Radar de muñeca: se separa del HUD (la escena del HUD se ensambla con la lista SIN sus primitivas) y su propia escena se
