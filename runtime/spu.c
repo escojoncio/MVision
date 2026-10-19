@@ -7,6 +7,8 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include "spu.h"
 
@@ -58,6 +60,9 @@ static struct {
 } S;
 
 void (*spu_irq_hook)(void);
+/* Estado de arranque: las 24 voces apagadas (el hardware no reproduce nada hasta el primer key-on). Sin esto, si nadie llama a
+ * spu_reset, todas las voces empiezan en fase de ataque sobre la dirección 0. */
+__attribute__((constructor)) static void spu_boot_voices(void) { for (int i = 0; i < NV; i++) S.v[i].env.phase = 4; }
 uint8_t *spu_ram(void) { return S.ram; }
 
 #define RG(off) S.regs[((off) - 0x1C00) / 2]
@@ -126,10 +131,10 @@ void spu_adsr_tick(SpuAdsr *e) {
         e->level = env_step(e->level, &e->counter, (lo >> 10) & 0x1F, 7 - ((lo >> 8) & 3), lo >> 15, 0);
         if (e->level >= 0x7FFF) { e->phase = 1; e->counter = 0; }
         break;
-    case 1: { /* decaimiento exponencial hasta el nivel de sostenido */
+    case 1: { /* decaimiento exponencial hasta el nivel de sostenido (shift = campo de 4 bits tal cual, paso -8) */
         int32_t sus = ((lo & 0xF) + 1) * 0x800;
         if (sus > 0x7FFF) sus = 0x7FFF;
-        e->level = env_step(e->level, &e->counter, ((lo >> 4) & 0xF) << 2, -8, 1, 1);
+        e->level = env_step(e->level, &e->counter, (lo >> 4) & 0xF, -8, 1, 1);
         if (e->level <= sus) { e->phase = 2; e->counter = 0; }
         break;
     }
@@ -138,8 +143,8 @@ void spu_adsr_tick(SpuAdsr *e) {
         e->level = env_step(e->level, &e->counter, (hi >> 8) & 0x1F, dec ? -8 + st : 7 - st, hi >> 15, dec);
         break;
     }
-    case 3: /* relajación */
-        e->level = env_step(e->level, &e->counter, (hi & 0x1F) << 2, -8, (hi >> 5) & 1, 1);
+    case 3: /* relajación: shift = campo de 5 bits tal cual (NO multiplicado por 4), paso -8; bit 5 = exponencial */
+        e->level = env_step(e->level, &e->counter, hi & 0x1F, -8, (hi >> 5) & 1, 1);
         if (e->level < 8) { e->level = 0; e->phase = 4; }
         break;
     default:
@@ -386,15 +391,51 @@ static _Atomic uint32_t st_min = 0xFFFFFFFFu, st_max;
 static uint32_t seqtag;   /* solo pruebas: sustituye la salida por un contador para detectar saltos/repeticiones */
 #endif
 
+/* Depuración (solo por variable de entorno): MV_SPU_WAV=fichero graba la mezcla; MV_SPU_TRACE=1 imprime por VBlank las
+ * voces activas, KON/KOFF recientes, ENDX, volúmenes y estado del reverb. */
+static void wav_header(FILE *f, uint32_t frames);
+static int dbg_init, dbg_trace;
+static uint32_t dbg_frames, dbg_kon, dbg_koff;
+static pid_t dbg_pid;
+static void dbg_atexit(void) { if (getpid() == dbg_pid) spu_dump_close(); }   /* los hijos fork de camtest no tocan el WAV del padre */
+static void dbg_setup(void) {
+    dbg_init = 1;
+    const char *w = getenv("MV_SPU_WAV");
+    if (w && *w && !S.wav) { S.wav = fopen(w, "wb"); S.wav_frames = 0; if (S.wav) wav_header(S.wav, 0); }
+    dbg_trace = getenv("MV_SPU_TRACE") != NULL;
+    dbg_pid = getpid();
+    if (S.wav) atexit(dbg_atexit);
+}
+static void dbg_vblank(void) {
+    static uint32_t n;
+    int act = 0;
+    char buf[1400] = ""; int o = 0;
+    for (int i = 0; i < NV; i++) {
+        Voice *v = &S.v[i];
+        if (v->env.phase == 4) continue;
+        act++;
+        uint16_t *r = &S.regs[i * 8];
+        o += snprintf(buf + o, sizeof buf - (size_t)o, " v%d[a=%05x ph%d e=%04x adsr=%04x%04x vol=%04x/%04x p=%04x fl=%x%s]", i, v->addr, v->env.phase,
+                      (unsigned)v->env.level, r[5], r[4], (unsigned)(uint16_t)v->cur_vol[0], (unsigned)(uint16_t)v->cur_vol[1], r[2], v->blk_flags, (RG(0x1D98) >> i) & 1 ? " rv" : "");
+        if (o > 1200) break;
+    }
+    fprintf(stderr, "[spu] vb=%u act=%d kon=%06x koff=%06x endx=%06x cnt=%04x main=%04x/%04x cur=%04x/%04x rvon=%x rvbase=%04x rvvol=%04x/%04x xa=%u%s\n",
+            n++, act, dbg_kon, dbg_koff, S.endx, CNT, RG(0x1D80), RG(0x1D82), (uint16_t)S.main_cur[0], (uint16_t)S.main_cur[1],
+            RG(0x1D98) | (RG(0x1D9A) << 16), RG(0x1DA2), RG(0x1D84), RG(0x1D86), S.xa_wr - S.xa_rd, buf);
+    dbg_kon = dbg_koff = 0;
+}
+
 void spu_clock(int frames) {
     int16_t tmp[2];
     pthread_mutex_lock(&MX);
+    if (!dbg_init) dbg_setup();
     uint32_t wr = atomic_load_explicit(&out_wr, memory_order_relaxed);
     uint32_t rd = atomic_load_explicit(&out_rd, memory_order_acquire);
     uint64_t dropped = 0;
     for (int i = 0; i < frames; i++) {
         render_one(tmp);
         wav_put(tmp, 1);
+        if (dbg_trace && ++dbg_frames >= 882) { dbg_frames = 0; dbg_vblank(); }
 #ifdef MV_SPU_SEQTAG
         { uint32_t t = ++seqtag; tmp[0] = (int16_t)(t & 0xFFFF); tmp[1] = (int16_t)(t >> 16); }
 #endif
@@ -543,10 +584,10 @@ static void reg_write16(uint32_t off, uint16_t v) {
         return;
     }
     switch (off + 0x1C00) {
-    case 0x1D88: for (int i = 0; i < 16; i++) if (v & (1u << i)) key_on(i); break;
-    case 0x1D8A: for (int i = 0; i < 8; i++) if (v & (1u << i)) key_on(16 + i); break;
-    case 0x1D8C: for (int i = 0; i < 16; i++) if (v & (1u << i)) spu_adsr_keyoff(&S.v[i].env); break;
-    case 0x1D8E: for (int i = 0; i < 8; i++) if (v & (1u << i)) spu_adsr_keyoff(&S.v[16 + i].env); break;
+    case 0x1D88: dbg_kon |= v; for (int i = 0; i < 16; i++) if (v & (1u << i)) key_on(i); break;
+    case 0x1D8A: dbg_kon |= (uint32_t)v << 16; for (int i = 0; i < 8; i++) if (v & (1u << i)) key_on(16 + i); break;
+    case 0x1D8C: dbg_koff |= v; for (int i = 0; i < 16; i++) if (v & (1u << i)) spu_adsr_keyoff(&S.v[i].env); break;
+    case 0x1D8E: dbg_koff |= (uint32_t)v << 16; for (int i = 0; i < 8; i++) if (v & (1u << i)) spu_adsr_keyoff(&S.v[16 + i].env); break;
     case 0x1D9C: case 0x1D9E: break; /* ENDX de solo lectura */
     case 0x1DA2: S.rv_cur = (uint32_t)v * 8; break;
     case 0x1DA6: S.xfer_addr = (uint32_t)v * 8; break;

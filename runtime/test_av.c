@@ -94,6 +94,127 @@ static void test_voice(void) {
     CHECK(out[98] == 0 && out[99] == 0, "key-off no silencia %d", out[98]);
 }
 
+/* Energía RMS de un tramo estéreo intercalado. */
+static double rms(const int16_t *o, int frames) {
+    double a = 0;
+    for (int i = 0; i < frames * 2; i++) a += (double)o[i] * o[i];
+    return frames ? sqrt(a / (frames * 2)) : 0;
+}
+/* Voz de bucle con onda cuadrada en 0x1000 (bandera 7 = inicio+repetición+fin) por registros; hi = ADSR alto. */
+static void setup_loop_voice(int v, uint16_t lo, uint16_t hi, uint8_t flags, uint32_t addr) {
+    uint8_t blk[16] = { 0x00, flags };
+    for (int i = 0; i < 14; i++) blk[2 + i] = i < 7 ? 0x33 : 0xCC;
+    wr(0x1F801DA6, (uint16_t)(addr / 8));
+    for (int i = 0; i < 8; i++) wr(0x1F801DA8, (uint16_t)(blk[i * 2] | blk[i * 2 + 1] << 8));
+    uint32_t b = 0x1F801C00 + (uint32_t)v * 16;
+    wr(b, 0x3FFF); wr(b + 2, 0x3FFF); wr(b + 4, 0x1000); wr(b + 6, (uint16_t)(addr / 8)); wr(b + 8, lo); wr(b + 10, hi);
+}
+
+/* Los campos de decaimiento (4 bits) y relajación (5 bits) son el desplazamiento del hardware tal cual, no x4. */
+static void test_release_rates(void) {
+    SpuAdsr e = { 0 };
+    e.lo = 0x00FF; e.hi = 0x000E;      /* ataque instantáneo, decaimiento 15 -> sostenido en 0x8000 (máx), relajación lineal 14 */
+    spu_adsr_keyon(&e);
+    for (int i = 0; i < 8; i++) spu_adsr_tick(&e);
+    CHECK(e.phase == 2 && e.level >= 0x7000, "sostenido previo fase %d nivel %d", e.phase, e.level);
+    spu_adsr_keyoff(&e);
+    int t = 0;
+    while (e.phase != 4 && t < 60000) { spu_adsr_tick(&e); t++; }
+    /* shift 14 lineal: 1<<3 = 8 ticks por paso de -8 -> 4096 pasos = 32768 ticks */
+    CHECK(e.phase == 4 && t > 30000 && t < 35000, "relajación lineal shift 14: %d ticks (fase %d)", t, e.phase);
+    /* exponencial shift 8: termina siempre (la aritmética de piso da al menos -1 por paso) */
+    e.lo = 0x00FF; e.hi = 0x0020 | 8;
+    spu_adsr_keyon(&e);
+    for (int i = 0; i < 8; i++) spu_adsr_tick(&e);
+    spu_adsr_keyoff(&e);
+    t = 0;
+    while (e.phase != 4 && t < 400000) { spu_adsr_tick(&e); t++; }
+    CHECK(e.phase == 4 && t > 1000 && t < 100000, "relajación exponencial shift 8: %d ticks", t);
+    /* decaimiento 4 (exponencial, paso -8 << 7): tau ~32 ticks, de 0x7FFF a 0x800 en ~90 ticks (antes del arreglo: >100 mil) */
+    e.lo = 0x0040; e.hi = 0x0000;      /* ataque 0, decaimiento 4, sostenido nivel 0 (0x800) */
+    spu_adsr_keyon(&e);
+    t = 0;
+    while (e.phase < 2 && t < 100000) { spu_adsr_tick(&e); t++; }
+    CHECK(e.phase == 2 && t > 60 && t < 150, "decaimiento shift 4: %d ticks", t);
+}
+
+/* KOFF por registros: una voz en bucle (como un búfer de transmisión que el juego deja de rellenar) debe ir a silencio. */
+static void test_koff_silence(void) {
+    spu_reset();
+    wr(0x1F801DAA, 0xC000); wr(0x1F801D80, 0x3FFF); wr(0x1F801D82, 0x3FFF);
+    setup_loop_voice(5, 0x000F, 0x000C, 7, 0x1000);   /* sostenido, relajación lineal shift 12 (~8 mil ticks) */
+    wr(0x1F801D88, 1u << 5);
+    static int16_t out[2048 * 2];
+    spu_render(out, 2048);
+    CHECK(rms(out, 2048) > 1000, "voz en bucle sin sonido antes de KOFF");
+    wr(0x1F801D8C, 1u << 5);
+    int ok = 0;
+    for (int k = 0; k < 40 && !ok; k++) { spu_render(out, 2048); ok = rms(out, 2048) == 0; }
+    CHECK(ok, "la voz sigue sonando mucho después de KOFF (rms %.0f)", rms(out, 2048));
+    CHECK(spu_io_read(0x1F801C0C, 2) == 0, "ADSR actual no llegó a 0 tras la relajación");
+    /* KOFF de las voces 16-23 (segundo registro) */
+    setup_loop_voice(20, 0x000F, 0x000C, 7, 0x1100);
+    wr(0x1F801D8A, 1u << 4);
+    spu_render(out, 2048);
+    CHECK(rms(out, 2048) > 1000, "voz 20 sin sonido");
+    wr(0x1F801D8E, 1u << 4);
+    ok = 0;
+    for (int k = 0; k < 40 && !ok; k++) { spu_render(out, 2048); ok = rms(out, 2048) == 0; }
+    CHECK(ok, "voz 20 sigue sonando tras KOFF alto");
+    /* SPUCNT con bit 15 a 0 corta todo */
+    wr(0x1F801D88, 1u << 5);
+    spu_render(out, 512);
+    CHECK(rms(out, 512) > 1000, "voz renovada sin sonido");
+    wr(0x1F801DAA, 0x4000);
+    spu_render(out, 512);
+    CHECK(rms(out, 512) == 0, "SPU apagada sigue sonando");
+    wr(0x1F801DAA, 0xC000);
+    spu_render(out, 512);
+    CHECK(rms(out, 512) == 0, "las voces no deben revivir al reactivar la SPU");
+}
+
+/* Bandera de fin sin repetición (bit 0 sin bit 1): ENDX y silencio, sin repetir el bloque. */
+static void test_end_no_repeat(void) {
+    spu_reset();
+    wr(0x1F801DAA, 0xC000); wr(0x1F801D80, 0x3FFF); wr(0x1F801D82, 0x3FFF);
+    setup_loop_voice(2, 0x000F, 0x0000, 1, 0x1200);   /* fin sin repetición, relajación irrelevante */
+    wr(0x1F801D88, 1u << 2);
+    static int16_t out[512 * 2];
+    spu_render(out, 10);
+    CHECK(rms(out, 10) > 1000 && !(spu_io_read(0x1F801D9C, 2) & 4), "voz de un solo disparo: sonido antes del fin / ENDX prematuro");
+    spu_render(out, 512);                              /* 28 muestras a 44100 Hz: el bloque ya terminó */
+    CHECK(spu_io_read(0x1F801D9C, 2) & 4, "ENDX no se marcó al terminar el bloque de fin");
+    spu_render(out, 512);
+    CHECK(rms(out, 512) == 0, "el bloque de fin sin repetición se repite (rms %.0f)", rms(out, 512));
+    wr(0x1F801D88, 1u << 2);                           /* nuevo key-on limpia ENDX */
+    CHECK(!(spu_io_read(0x1F801D9C, 2) & 4), "key-on no limpia ENDX");
+}
+
+/* Reverb: sin entrada nueva la cola decae a casi cero; sin voces con reverb el búfer no se realimenta. */
+static void test_reverb_tail(void) {
+    spu_reset();
+    wr(0x1F801DAA, 0xC080);                            /* SPU activa + escritura del reverb */
+    wr(0x1F801D80, 0x3FFF); wr(0x1F801D82, 0x3FFF);
+    wr(0x1F801D84, 0x3000); wr(0x1F801D86, 0x3000);    /* volumen de salida del reverb */
+    wr(0x1F801DA2, 0xE000 / 8);                        /* búfer de 8 KB..., tamaño hasta el final de la RAM */
+    /* Configuración propia, estable (todas las ganancias < 1): retardos de apf, iir, 4 combs, pared, apf, 20 direcciones, entradas. */
+    static const uint16_t rv[32] = { 0x0020, 0x0030, 0x4000, 0x3000, 0x2000, 0x1000, 0x0000, 0x2000, 0x2000, 0x2000,
+        0x0400, 0x0500, 0x0300, 0x0380, 0x0600, 0x0680, 0x0410, 0x0510, 0x0420, 0x0520, 0x0700, 0x0780, 0x0800, 0x0880,
+        0x0430, 0x0530, 0x0440, 0x0540, 0x0450, 0x0550, 0x7FFF, 0x7FFF };
+    for (int i = 0; i < 32; i++) wr(0x1F801DC0 + (uint32_t)i * 2, rv[i]);
+    setup_loop_voice(3, 0x000F, 0x000C, 7, 0x1000);
+    wr(0x1F801D98, 1u << 3);                           /* voz 3 con reverb */
+    wr(0x1F801D88, 1u << 3);
+    static int16_t out[44100 * 2];
+    spu_render(out, 8192);
+    wr(0x1F801D8C, 1u << 3);
+    double w[40];
+    for (int k = 0; k < 40; k++) { spu_render(out, 4096); w[k] = rms(out, 4096); }
+    double early = 0, late = w[39];
+    for (int k = 0; k < 40; k++) if (w[k] > early) early = w[k];
+    CHECK(early > 1000 && late < 3.0, "cola de reverb no decae: temprano %.1f, tardío %.1f", early, late);
+}
+
 static void test_xa(void) {
     spu_reset();
     spu_io_write(0x1F801DAA, 0xC001, 2);
@@ -155,6 +276,10 @@ int main(void) {
     test_adpcm();
     test_adsr();
     test_voice();
+    test_release_rates();
+    test_koff_silence();
+    test_end_no_repeat();
+    test_reverb_tail();
     test_xa();
     test_mdec();
     printf(fails ? "test_av: %d fallos\n" : "test_av: OK\n", fails);
