@@ -4,23 +4,34 @@
  * motor en los paquetes de dibujo (lo que recibe la GPU) con el que calcula ns_light:
  *   - objetos dinámicos (marca de sombreado): matrices de luz del propio objeto leídas de RAM;
  *   - mapa (color precalculado): se recalcula con la luz global, el ambiente y las luces fijas de la RAM.
- * Direcciones de los globales (propias de la versión del ejecutable; se pueden cambiar con variables de entorno
- * NS_DIR_LUZ, NS_AMBIENTE, NS_LUCES_FIJAS). Salida: coincidencias exactas y error medio por canal (en bytes). */
+ * Direcciones de los globales: obligatorias, por variables de entorno NS_DIR_LUZ, NS_AMBIENTE, NS_LUCES_FIJAS
+ * (propias de cada versión; no hay valores por defecto). Salida: coincidencias exactas y error medio por canal (en bytes). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <errno.h>
 #include "ns_light.h"
 
 static uint8_t *ram;
 #define RAM_SIZE 0x200000u
 static int okp(uint32_t p) { return p >= 0x80010000u && p < 0x80200000u; }
-static uint32_t U32(uint32_t a) { uint32_t v; memcpy(&v, ram + (a & 0x1FFFFF), 4); return v; }
+/* Accesores acotados: un acceso que no cabe entero dentro de la RAM devuelve 0 (nunca lee fuera). */
+static uint32_t U32(uint32_t a) { uint32_t v = 0; uint32_t o = a & 0x1FFFFF; if (o <= RAM_SIZE - 4) memcpy(&v, ram + o, 4); return v; }
 static int32_t S32(uint32_t a) { return (int32_t)U32(a); }
-static uint16_t U16(uint32_t a) { uint16_t v; memcpy(&v, ram + (a & 0x1FFFFF), 2); return v; }
+static uint16_t U16(uint32_t a) { uint16_t v = 0; uint32_t o = a & 0x1FFFFF; if (o <= RAM_SIZE - 2) memcpy(&v, ram + o, 2); return v; }
 static int16_t S16(uint32_t a) { return (int16_t)U16(a); }
 static uint8_t U8(uint32_t a) { return ram[a & 0x1FFFFF]; }
-static uint32_t envu(const char *n, uint32_t d) { const char *s = getenv(n); return s ? (uint32_t)strtoul(s, 0, 0) : d; }
+/* Dirección obligatoria por entorno; 0 si falta o es inválida. */
+static int envu(const char *n, uint32_t *out) {
+    const char *s = getenv(n);
+    if (!s || !*s) { fprintf(stderr, "falta la variable %s\n", n); return 0; }
+    char *end; errno = 0;
+    unsigned long v = strtoul(s, &end, 0);
+    if (errno || *end || v > 0xFFFFFFFFul) { fprintf(stderr, "valor inválido en %s\n", n); return 0; }
+    *out = (uint32_t)v;
+    return 1;
+}
 
 static void rd_mat(uint32_t a, int16_t m[3][3]) { for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) m[i][j] = S16(a + (i * 3 + j) * 2); }
 
@@ -35,10 +46,11 @@ int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "uso: %s ram.bin\n", argv[0]); return 2; }
     FILE *f = fopen(argv[1], "rb");
     if (!f) { perror(argv[1]); return 2; }
-    ram = calloc(1, RAM_SIZE);
+    ram = calloc(1, RAM_SIZE + 8);
     size_t got = fread(ram, 1, RAM_SIZE, f); fclose(f);
     if (got < RAM_SIZE) { fprintf(stderr, "volcado corto (%zu)\n", got); return 2; }
-    uint32_t a_dir = envu("NS_DIR_LUZ", 0x8009E55C), a_amb = envu("NS_AMBIENTE", 0x800AC530), a_fix = envu("NS_LUCES_FIJAS", 0x800B2F98);
+    uint32_t a_dir, a_amb, a_fix;
+    if (!envu("NS_DIR_LUZ", &a_dir) || !envu("NS_AMBIENTE", &a_amb) || !envu("NS_LUCES_FIJAS", &a_fix)) return 2;
 
     NsLightEnv env; int16_t LM[3][3], CM[3][3];
     rd_mat(a_dir, LM); rd_mat(a_dir + 32, CM);
@@ -71,13 +83,13 @@ int main(int argc, char **argv) {
         if (flag & 8) {                                   /* dinámico, sombreado en tiempo real */
             uint32_t lp = U32(a + 0x34);
             if (!okp(lp)) continue;
-            NsLight L; int16_t Lw[3][3]; rd_mat(lp, Lw); rd_mat(lp + 32, L.lcm);
-            for (int i = 0; i < 3; i++) L.bk[i] = ((flag & 0x100) ? S32(lp + 20 + 4 * i) : env.ambient[i]) * 16;
+            NsLight L; int16_t Lw[3][3]; rd_mat(lp, Lw); rd_mat(lp + 32, L.cmat);
+            for (int i = 0; i < 3; i++) L.bg[i] = ((flag & 0x100) ? S32(lp + 20 + 4 * i) : env.ambient[i]) * 16;
             int used = 0;
             for (int i = 0; i < n; i++) {
                 uint32_t o = a + 0x48 + i * 0x5c, chain[8]; int nc = 0;
                 for (uint32_t p = o; okp(p) && nc < 8; p = U32(p + 0x48)) chain[nc++] = p;
-                int16_t R[3][3]; rd_mat(o, R); ns_light_to_local(Lw, R, L.llm);
+                int16_t R[3][3]; rd_mat(o, R); ns_light_to_local(Lw, R, L.lmat);
                 for (int pi = 0; pi < 2; pi++) {          /* dos búferes de dibujo: el bueno es el último escrito */
                     uint32_t q = U32(o + 0x54 + 4 * pi); if (!okp(q)) continue;
                     Stat s = {0};
@@ -92,7 +104,7 @@ int main(int argc, char **argv) {
                             for (int sl = 0; sl < 4; sl++) {
                                 int ni = U8(nidx + k * 4 + src[sl]); if (ni >= nn) continue;
                                 int16_t nv[3] = {S16(norms + ni * 8), S16(norms + ni * 8 + 2), S16(norms + ni * 8 + 4)};
-                                uint8_t e[3], g[3]; ns_light_ncs(&L, nv, e);
+                                uint8_t e[3], g[3]; ns_light_color(&L, nv, e);
                                 for (int a2 = 0; a2 < 3; a2++) g[a2] = U8(q + 4 + sl * 12 + a2);
                                 cmp(&s, g, e);
                             }
@@ -142,5 +154,5 @@ int main(int argc, char **argv) {
            (prebest.ok + prebest.bad) ? 100.0 * prebest.ok / (prebest.ok + prebest.bad) : 0.0,
            (prebest.ok + prebest.bad) ? prebest.sad / (3.0 * (prebest.ok + prebest.bad)) : 0.0);
     free(ram);
-    return 0;
+    return (dt + pt) ? 0 : 1;   /* 1 si no se encontró nada que comparar */
 }

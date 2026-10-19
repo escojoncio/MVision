@@ -5,34 +5,34 @@
 static int32_t clampi(int32_t v, int32_t lo, int32_t hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 /* ---------------------------------------------------------------- color de una normal */
-void ns_light_ncs_mac(const NsLight *L, const int16_t n[3], int32_t mac[3]) {
+void ns_light_color_acc(const NsLight *L, const int16_t n[3], int32_t mac[3]) {
     int32_t ir[3];
     for (int i = 0; i < 3; i++) {
-        int64_t t = (int64_t)L->llm[i][0] * n[0] + (int64_t)L->llm[i][1] * n[1] + (int64_t)L->llm[i][2] * n[2];
-        ir[i] = clampi((int32_t)(t >> 12), 0, 0x7FFF);       /* sf=1, lm=1 */
+        int64_t t = (int64_t)L->lmat[i][0] * n[0] + (int64_t)L->lmat[i][1] * n[1] + (int64_t)L->lmat[i][2] * n[2];
+        ir[i] = clampi((int32_t)(t >> 12), 0, 0x7FFF);       /* desplazamiento 12, mínimo 0 */
     }
     for (int i = 0; i < 3; i++) {
-        int64_t t = ((int64_t)L->bk[i] << 12) + (int64_t)L->lcm[i][0] * ir[0] + (int64_t)L->lcm[i][1] * ir[1] +
-                    (int64_t)L->lcm[i][2] * ir[2];
+        int64_t t = (int64_t)L->bg[i] * 4096 + (int64_t)L->cmat[i][0] * ir[0] + (int64_t)L->cmat[i][1] * ir[1] +
+                    (int64_t)L->cmat[i][2] * ir[2];
         mac[i] = (int32_t)(t >> 12);
     }
 }
 
-void ns_light_ncs(const NsLight *L, const int16_t n[3], uint8_t rgb[3]) {
+void ns_light_color(const NsLight *L, const int16_t n[3], uint8_t rgb[3]) {
     int32_t m[3];
-    ns_light_ncs_mac(L, n, m);
+    ns_light_color_acc(L, n, m);
     for (int i = 0; i < 3; i++) rgb[i] = (uint8_t)clampi(m[i] >> 4, 0, 255);
 }
 
 void ns_light_tint_f(const NsLight *L, const float n[3], float tint[3]) {
     float ir[3];
     for (int i = 0; i < 3; i++) {
-        float d = (L->llm[i][0] * n[0] + L->llm[i][1] * n[1] + L->llm[i][2] * n[2]) * (1.0f / 4096.0f);
+        float d = (L->lmat[i][0] * n[0] + L->lmat[i][1] * n[1] + L->lmat[i][2] * n[2]) * (1.0f / 4096.0f);
         ir[i] = d < 0.f ? 0.f : d > 7.999756f ? 7.999756f : d;
     }
     for (int i = 0; i < 3; i++) {
-        float c = L->bk[i] * (1.0f / 4096.0f) +
-                  (L->lcm[i][0] * ir[0] + L->lcm[i][1] * ir[1] + L->lcm[i][2] * ir[2]) * (1.0f / 4096.0f);
+        float c = L->bg[i] * (1.0f / 4096.0f) +
+                  (L->cmat[i][0] * ir[0] + L->cmat[i][1] * ir[1] + L->cmat[i][2] * ir[2]) * (1.0f / 4096.0f);
         float t = floorf(c * 256.0f) * (1.0f / 128.0f);       /* byte = floor(c*256); factor = byte/128 */
         tint[i] = t < 0.f ? 0.f : t > 255.0f / 128.0f ? 255.0f / 128.0f : t;
     }
@@ -49,7 +49,7 @@ void ns_light_to_local(const int16_t Lw[3][3], const int16_t R[3][3], int16_t ou
 
 void ns_light_world_pos(const int16_t R[3][3], const int32_t T[3], const int16_t v[3], int32_t out[3]) {
     for (int i = 0; i < 3; i++) {
-        int64_t t = ((int64_t)T[i] << 12) + (int64_t)R[i][0] * v[0] + (int64_t)R[i][1] * v[1] + (int64_t)R[i][2] * v[2];
+        int64_t t = (int64_t)T[i] * 4096 + (int64_t)R[i][0] * v[0] + (int64_t)R[i][1] * v[1] + (int64_t)R[i][2] * v[2];
         out[i] = (int32_t)(t >> 12);
     }
 }
@@ -73,15 +73,17 @@ uint32_t ns_light_isqrt(int32_t a) {
 
 void ns_light_point_vector(const int32_t d[3], int r_range, int16_t out[3]) {
     if (r_range == 0) { out[0] = out[1] = out[2] = 0; return; }
-    uint32_t s = 0;
-    for (int i = 0; i < 3; i++) { int32_t q = (int16_t)d[i]; s += (uint32_t)(q * q); }   /* lwc2 de 16 bits */
+    int32_t q[3];
+    uint64_t s = 0;
+    for (int i = 0; i < 3; i++) { q[i] = (int16_t)d[i]; s += (uint64_t)((int64_t)q[i] * q[i]); }   /* truncado a 16 bits una vez */
+    if (s > 0x7FFFFFFFu) s = 0x7FFFFFFFu;                    /* saturación (el original desbordaría con signo) */
     int32_t sq = (int32_t)ns_light_isqrt((int32_t)s);
     if (sq == 0) sq = 1;
     int32_t sq2 = r_range * 2 - sq;
     if (sq2 < 0) sq2 = 0;
     for (int i = 0; i < 3; i++) {
-        int32_t v = (int32_t)((uint32_t)d[i] * 3072u) / sq;
-        v = (int32_t)((uint32_t)v * (uint32_t)sq2) / r_range;
+        int32_t v = (q[i] * 3072) / sq;                      /* |q*3072| <= 1e8 */
+        v = (v * sq2) / r_range;                             /* |v| <= ~3100, sq2 <= 131070 */
         out[i] = (int16_t)v;
     }
 }
@@ -109,15 +111,15 @@ void ns_light_assemble(const NsLightEnv *env, int nl, const int16_t vec[2][3], c
                        const int16_t *amb, NsLight *o) {
     const int16_t *a = amb ? amb : env->ambient;
     for (int j = 0; j < 3; j++) {
-        o->llm[0][j] = env->main_dir[j];
-        o->llm[1][j] = nl > 0 ? vec[0][j] : 0;
-        o->llm[2][j] = nl > 1 ? vec[1][j] : 0;
+        o->lmat[0][j] = env->main_dir[j];
+        o->lmat[1][j] = nl > 0 ? vec[0][j] : 0;
+        o->lmat[2][j] = nl > 1 ? vec[1][j] : 0;
     }
     for (int i = 0; i < 3; i++) {
-        o->lcm[i][0] = env->main_col[i];
-        o->lcm[i][1] = nl > 0 ? (int16_t)(col[0][i] << 4) : 0;
-        o->lcm[i][2] = nl > 1 ? (int16_t)(col[1][i] << 4) : 0;
-        o->bk[i] = (int32_t)a[i] * 16;
+        o->cmat[i][0] = env->main_col[i];
+        o->cmat[i][1] = nl > 0 ? (int16_t)(col[0][i] << 4) : 0;
+        o->cmat[i][2] = nl > 1 ? (int16_t)(col[1][i] << 4) : 0;
+        o->bg[i] = (int32_t)a[i] * 16;
     }
 }
 
@@ -127,22 +129,21 @@ void ns_light_object(const NsLightEnv *env, const NsLightList *lists, int nlists
     int nl = ns_light_pick(lists, nlists, pos, vec, col);
     NsLight w;
     ns_light_assemble(env, nl, vec, col, 0, &w);
-    ns_light_to_local(w.llm, R, out->llm);
-    for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) out->lcm[i][j] = w.lcm[i][j]; out->bk[i] = w.bk[i]; }
+    ns_light_to_local(w.lmat, R, out->lmat);
+    for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) out->cmat[i][j] = w.cmat[i][j]; out->bg[i] = w.bg[i]; }
 }
 
 void ns_light_preshade_vertex(const NsLightEnv *env, const NsLightList *lists, int nlists, const int32_t vw[3],
                               const int16_t R[3][3], const int16_t n[3], uint8_t rgb[3]) {
     NsLight l;
     ns_light_object(env, lists, nlists, vw, R, &l);
-    ns_light_ncs(&l, n, rgb);
+    ns_light_color(&l, n, rgb);
 }
 
 /* ---------------------------------------------------------------- niebla */
 void ns_fog_init(NsFog *f, int start, int len) {
-    f->start = start < 0 ? 0 : start > 255 ? 255 : start;
     f->len0 = len < 1 ? 1 : len;
-    f->len = f->len0;
+    ns_fog_set_start(f, start);                  /* recorta len a 255-start */
 }
 void ns_fog_set_start(NsFog *f, int start) {
     if (start > 255) start = 255;
@@ -159,10 +160,11 @@ int ns_fog_factor(const NsFog *f, int zi) {
 }
 int ns_fog_culled(const NsFog *f, int zi) { return zi >= f->start + f->len; }
 
-/* DPCS con color lejano 0, sf=1, lm=0: MAC = (c<<16) + clamp16(((0 - c<<16)>>12)) * f ; color = MAC>>12 >> 4 */
+/* Mezcla de profundidad con color lejano 0: ir = clamp16(-(c*65536)>>12); mac = (ir*f + c*65536)>>12; byte = mac>>4. */
 void ns_fog_apply(int f, const uint8_t in[3], uint8_t out[3]) {
+    f = (int)clampi(f, 0, 4096);
     for (int i = 0; i < 3; i++) {
-        int64_t m = (int64_t)in[i] << 16;
+        int64_t m = (int64_t)in[i] * 65536;
         int32_t ir = clampi((int32_t)((0 - m) >> 12), -0x8000, 0x7FFF);
         int32_t mac = (int32_t)((((int64_t)ir * f) + m) >> 12);
         out[i] = (uint8_t)clampi(mac >> 4, 0, 255);
@@ -170,10 +172,10 @@ void ns_fog_apply(int f, const uint8_t in[3], uint8_t out[3]) {
 }
 
 void ns_fog_light_object(const NsLight *in, const int16_t amb[3], int f, NsLight *out) {
-    int s = 4096 - f;
+    int s = 4096 - (int)clampi(f, 0, 4096);
     for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) out->lcm[i][j] = (int16_t)((in->lcm[i][j] * s) >> 12);
-        out->bk[i] = ((amb[i] * s) / 4096) * 16;
-        for (int j = 0; j < 3; j++) out->llm[i][j] = in->llm[i][j];
+        for (int j = 0; j < 3; j++) out->cmat[i][j] = (int16_t)((in->cmat[i][j] * s) >> 12);
+        out->bg[i] = ((amb[i] * s) / 4096) * 16;
+        for (int j = 0; j < 3; j++) out->lmat[i][j] = in->lmat[i][j];
     }
 }

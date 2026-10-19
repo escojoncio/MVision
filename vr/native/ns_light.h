@@ -1,6 +1,6 @@
 /* Modelo de color/iluminación fiel al motor original para el renderer nativo.
  *
- * Referencia en C (enteros, bit a bit con la GTE de runtime/gte.c) + equivalente en coma flotante para shader.
+ * Referencia en C (enteros, bit a bit con la unidad de geometría de referencia del runtime) + equivalente en coma flotante para shader.
  * Sin dependencias: tipos propios, C99. Descripción completa y fórmulas MSL en docs/iluminacion_nativa.md.
  *
  * Convenciones: 4096 = 1,0 en matrices y normales (4.12). Los colores de luz y el ambiente de las órdenes del
@@ -16,13 +16,13 @@ extern "C" {
 #endif
 
 /* ---- Conjunto de luz de un objeto (lo que ve la UG al calcular una normal) ----
- * llm: fila i = dirección de la luz i en el espacio de la normal (x4096; las puntuales llegan con módulo variable).
- * lcm: columna j = color de la luz j (unidades UG: valor0..255 x16 = 4096 es el máximo "natural").
- * bk : ambiente en unidades UG (valor0..255 x16). */
+ * lmat: fila i = dirección de la luz i en el espacio de la normal (x4096; las puntuales llegan con módulo variable).
+ * cmat: columna j = color de la luz j (unidades UG: valor0..255 x16 = 4096 es el máximo "natural").
+ * bg : ambiente en unidades UG (valor0..255 x16). */
 typedef struct {
-    int16_t llm[3][3];
-    int16_t lcm[3][3];
-    int32_t bk[3];
+    int16_t lmat[3][3];
+    int16_t cmat[3][3];
+    int32_t bg[3];
 } NsLight;
 
 /* Luz global del nivel (órdenes del script) */
@@ -42,26 +42,27 @@ typedef struct {
 
 typedef struct { const NsPointLight *l; int n; } NsLightList;
 
-/* ---- Color de una normal (NCS/NCT con sf=1, lm=1): exacto ----
- * n: normal en el MISMO espacio que las filas de llm (4096 = 1,0). rgb: bytes 0..255. */
-void ns_light_ncs(const NsLight *L, const int16_t n[3], uint8_t rgb[3]);
-/* Igual, devolviendo el acumulador antes de >>4 y la saturación (MAC1..3 de la UG). */
-void ns_light_ncs_mac(const NsLight *L, const int16_t n[3], int32_t mac[3]);
+/* ---- Color de una normal (aritmética de la unidad de geometría, desplazamiento 12, sin negativos): exacto ----
+ * n: normal en el MISMO espacio que las filas de lmat (4096 = 1,0). rgb: bytes 0..255. */
+void ns_light_color(const NsLight *L, const int16_t n[3], uint8_t rgb[3]);
+/* Igual, devolviendo el acumulador antes de >>4 y la saturación (acumuladores por canal). */
+void ns_light_color_acc(const NsLight *L, const int16_t n[3], int32_t mac[3]);
 /* Equivalente para shader (sin cuantizar). n unitaria float. Devuelve el FACTOR de modulación de textura
- * (1,0 = neutro, máx 255/128): tint = clamp(floor(256*(bk/4096 + lcm/4096 * clamp(llm/4096 . n, 0, 8)))/128, 0, 255/128).
+ * (1,0 = neutro, máx 255/128): tint = clamp(floor(256*(bg/4096 + cmat/4096 * clamp(lmat/4096 . n, 0, 7.999756)))/128, 0, 255/128).
  * El floor reproduce el byte del motor (error medio 0,008 byte, máximo 1 byte por redondeos de la cadena entera); sin él el error medio es 0,28 y el máximo ~1,1 byte. */
 void ns_light_tint_f(const NsLight *L, const float n[3], float tint[3]);
 
-/* ---- Cambio de espacio: llm_local = llm_mundo x R  (R = rotación del objeto/modelo 3x3 en 4.12). Replica
+/* ---- Cambio de espacio: lmat_local = lmat_mundo x R  (R = rotación del objeto/modelo 3x3 en 4.12). Replica
  * la multiplicación de matrices de la UG (cada elemento (suma>>12) saturado a 16 bits con signo). */
-void ns_light_to_local(const int16_t llm_world[3][3], const int16_t R[3][3], int16_t llm_local[3][3]);
+void ns_light_to_local(const int16_t lmat_world[3][3], const int16_t R[3][3], int16_t lmat_local[3][3]);
 /* Posición mundo de un vértice local: p = T + (R.v >> 12) con acumulación exacta (como RT + lectura de MAC). */
 void ns_light_world_pos(const int16_t R[3][3], const int32_t T[3], const int16_t v[3], int32_t out[3]);
 
 /* ---- Luces puntuales ---- */
-/* Raíz entera aproximada con tabla de 8 bits (réplica exacta de la raíz del motor; NO es floor(sqrt)). a<=0 -> 0 */
+/* Raíz entera aproximada con tabla de 8 bits (réplica de la raíz del motor; NO es floor(sqrt); error relativo < 0,9 %). a<=0 -> 0 */
 uint32_t ns_light_isqrt(int32_t a);
-/* Vector de luz: d = pos_objeto - pos_luz (se trunca a 16 bits como el motor), módulo 3072*(2r-dist)/r, dirección
+/* Vector de luz: d = pos_objeto - pos_luz (cada componente se trunca a 16 bits UNA vez, para distancia y numerador;
+ * el motor solo trunca en la distancia, pero con la caja e_range <= 32767 es idéntico; la suma de cuadrados se satura), módulo 3072*(2r-dist)/r, dirección
  * luz->objeto. r_range==0 -> (0,0,0). */
 void ns_light_point_vector(const int32_t d[3], int r_range, int16_t out[3]);
 /* Elige hasta 2 luces: se recorren las listas en orden (temporales de la pasada anterior primero, luego las fijas
@@ -89,7 +90,7 @@ void ns_fog_init(NsFog *f, int start, int len);
 void ns_fog_set_start(NsFog *f, int start);
 int  ns_fog_factor(const NsFog *f, int zi);     /* zi = SZ>>8, 0..255 */
 int  ns_fog_culled(const NsFog *f, int zi);     /* el motor no ordena primitivas con zi >= start+len */
-/* Mezcla de profundidad con color lejano 0 (DPCS exacto): c*(1-f) */
+/* Mezcla de profundidad con color lejano 0 (mezcla de profundidad exacta): c*(1-f) */
 void ns_fog_apply(int f, const uint8_t in[3], uint8_t out[3]);
 /* Objeto dinámico con niebla: el motor escala la matriz de color y el ambiente por s=4096-f (a la profundidad de
  * la pieza raíz, screen.t[2]/256). ambient en unidades 0..255. */
