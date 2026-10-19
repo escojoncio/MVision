@@ -974,6 +974,58 @@ static void test_recon_diag_ambig(void) {
     vr_scene_release();
 }
 
+/* Correspondencia mundo -> espacio del usuario (user_map_on): el ojo del motor cae en p_ref, lo que está delante del ojo del motor queda delante
+ * del usuario (-Z) con el giro theta, el suelo queda bajo la cabeza a la altura del ojo y la escala k cambia las distancias. */
+static void test_user_map(void) {
+    const float R[3][3] = {{-1, 0, 0}, {0, -1, 0}, {0, 0, 1}};       /* motor mirando a +Z (rumbo 0), derecha -X, abajo -Y */
+    const int32_t e[3] = {1000, 1600, 2000};
+    BridgeState bs; set_eye(&bs, R, e);
+    float pts[3][3] = {{0, 0, 2000}, {0, 0, 3000}, {500, 300, 1000}};  /* vistas: 2 m delante a la altura del ojo; 3 m; (500 der, 300 abajo, 1000) */
+    for (int th_case = 0; th_case < 3; th_case++) {
+        float theta = th_case == 0 ? 0.0f : (th_case == 1 ? 90.0f : -37.0f);
+        for (int sc_case = 0; sc_case < 2; sc_case++) {
+            float k = sc_case ? 1.0f / 0.9f : 1.0f;
+            reset();
+            poly3(pts[0], pts[1], pts[2], 0);
+            VrSceneOpts o = vr_scene_opts_default();
+            o.origin_mode = 1; o.origin_game[0] = 1000; o.origin_game[1] = 0; o.origin_game[2] = 2000;
+            VrScene base;
+            CHECK(vr_scene_build(&dl, &bs, &o, &base) == 0 && base.nv == 3, "build base");
+            float bp[3][3];
+            for (int i = 0; i < 3; i++) memcpy(bp[i], base.v[i].pos, 12);
+            float th = (theta + 180.0f) * 3.14159265f / 180.0f, cs = cosf(th), sn = sinf(th);
+            o.user_map_on = 1;
+            const float Rm[9] = {cs, 0, -sn, 0, 1, 0, sn, 0, cs};
+            memcpy(o.user_R, Rm, sizeof Rm);
+            o.user_k = k; o.user_eye_h_m = k * 1.6f;
+            o.user_p_ref[0] = 0.1f; o.user_p_ref[1] = 1.04f; o.user_p_ref[2] = 0.2f;
+            VrScene s;
+            CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.nv == 3, "build user_map");
+            int ok = 1;
+            for (int i = 0; i < 3; i++) {
+                float w[3] = {bp[i][0], bp[i][1] * k - k * 1.6f, bp[i][2] * k};          /* el mundo no se refleja aquí (det > 0) */
+                w[0] = bp[i][0] * k;
+                float P[3] = {Rm[0] * w[0] + Rm[1] * w[1] + Rm[2] * w[2] + 0.1f, Rm[3] * w[0] + Rm[4] * w[1] + Rm[5] * w[2] + 1.04f,
+                              Rm[6] * w[0] + Rm[7] * w[1] + Rm[8] * w[2] + 0.2f};
+                int m = 0;   /* el orden de los vértices puede cambiar (el ensamblador ordena por sentido de giro) */
+                for (uint32_t j = 0; j < s.nv; j++)
+                    if (near_f(s.v[j].pos[0], P[0], 2e-3f) && near_f(s.v[j].pos[1], P[1], 2e-3f) && near_f(s.v[j].pos[2], P[2], 2e-3f)) m = 1;
+                ok &= m;
+            }
+            CHECK(ok, "user_map: fórmula (theta %.0f, k %.3f)", theta, k);
+            if (!ok) for (int i = 0; i < 3; i++) fprintf(stderr, "  base %.3f %.3f %.3f -> %.3f %.3f %.3f\n", bp[i][0], bp[i][1], bp[i][2], s.v[i].pos[0], s.v[i].pos[1], s.v[i].pos[2]);
+            if (th_case == 0 && sc_case == 0) {
+                /* theta 0: 2 m delante del ojo y a su altura -> 2 m delante (-Z) de la cabeza, a su altura */
+                int m = 0;
+                for (uint32_t j = 0; j < s.nv; j++)
+                    if (near_f(s.v[j].pos[0], 0.1f, 2e-3f) && near_f(s.v[j].pos[1], 1.04f, 2e-3f) && near_f(s.v[j].pos[2], -1.8f, 2e-3f)) m = 1;
+                CHECK(m, "user_map: 2 m delante del ojo = 2 m delante (-Z) de la cabeza, a su altura");
+            }
+        }
+    }
+    vr_scene_release();
+}
+
 int main(void) {
     test_basic();
     test_stability();
@@ -992,6 +1044,7 @@ int main(void) {
     test_goggles_emu();
     test_recon_fate();
     test_recon_diag_ambig();
+    test_user_map();
     if (fails) { fprintf(stderr, "%d fallos\n", fails); return 1; }
     printf("test_scene: OK\n");
     return 0;

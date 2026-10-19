@@ -474,18 +474,16 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
         /* world_valid: criterio conservador del puente (jugador en escena y grupos básicos válidos): en título, cargas y
          * cambios de zona los ejes conservan valores que "parecen" válidos pero no son de la cámara real. */
         out->world_valid = has_player_ok(bs);
-        if (o.user_on && isfinite(o.user_theta_deg) && isfinite(o.user_pos[0]) && isfinite(o.user_pos[1]) && isfinite(o.user_pos[2])) {
-            /* Espacio del usuario (ver vr_scene.h): sin el espejo opcional (A.m ya lo lleva en la fila 2), girar el mundo con Tt = R_y(theta + 180 grados)^T
-             * (el inverso de lo que usa vrcam_delta para llevar el mundo del motor al espacio del usuario) y colocar el ojo del motor en p_ref (x,z); la altura
-             * no cambia (el suelo sigue en y=0 del espacio del usuario). */
-            float th = (o.user_theta_deg + 180.0f) * (3.14159265358979f / 180.0f), cs = cosf(th), sn = sinf(th);
-            const float Tt[3][3] = {{cs, 0, -sn}, {0, 1, 0}, {sn, 0, cs}};
-            Aff B;
-            for (int c = 0; c < 3; c++) A.m[2][c] *= zs;   /* deshacer el espejo */
-            A.t[2] *= zs;
-            for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) B.m[r][c] = Tt[r][0] * A.m[0][c] + Tt[r][1] * A.m[1][c] + Tt[r][2] * A.m[2][c];
-            B.t[0] = o.user_pos[0]; B.t[1] = A.t[1]; B.t[2] = o.user_pos[2];
-            A = B;
+        if (o.user_map_on) {   /* mundo VR -> espacio del usuario (ver VrSceneOpts.user_map_on): A' = Mu * A, t' = Mu * t + c */
+            float Mu[3][3], cc[3];
+            for (int r = 0; r < 3; r++) for (int cI = 0; cI < 3; cI++) Mu[r][cI] = o.user_R[3 * r + cI] * o.user_k * (cI == 2 ? zs : 1.0f);
+            for (int r = 0; r < 3; r++) cc[r] = o.user_p_ref[r] - o.user_R[3 * r + 1] * o.user_eye_h_m;
+            float m2[3][3], t2[3];
+            for (int r = 0; r < 3; r++) {
+                for (int cI = 0; cI < 3; cI++) m2[r][cI] = Mu[r][0] * A.m[0][cI] + Mu[r][1] * A.m[1][cI] + Mu[r][2] * A.m[2][cI];
+                t2[r] = Mu[r][0] * A.t[0] + Mu[r][1] * A.t[1] + Mu[r][2] * A.t[2] + cc[r];
+            }
+            memcpy(A.m, m2, sizeof A.m); memcpy(A.t, t2, sizeof A.t);
             out->user_space = 1;
         }
     } else {

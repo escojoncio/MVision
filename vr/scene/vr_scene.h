@@ -29,9 +29,10 @@
  * pero con coordenadas de pantalla sin saturar (|x-dox-proj_ox| < 1000 px), recupera ese vértice: rayo (px/H, py/H, 1) cortado con el plano de
  * los otros tres. Se exige t>0, plano no paralelo al rayo y z del vértice entre 0,2x y 5x del rango de los otros. VrStats.n_recon los cuenta.
  *
- * Espacio del usuario (opts.user_on): el mundo VR sale en los ejes del juego con el ojo del motor bajo el origen. La cabeza del visor vive en el
- * espacio del usuario; la cámara del juego va girada theta_play (VrCamRecord) respecto de él. user_on aplica R_y(theta+180 grados)^T a todo el mundo
- * y coloca el ojo del motor en p_ref (x,z), con lo que la escena queda donde la ve la cabeza al girar con el stick (comprobado contra vrcam_delta).
+ * Espacio del usuario (opts.user_map_*, ver el campo): el mundo VR sale en los ejes del juego con el ojo del motor bajo el origen; la cabeza del visor
+ * vive en el espacio del usuario y la cámara del juego va girada theta_play (VrCamRecord) respecto de él. user_map_on aplica el giro R_y(theta+180)^T,
+ * la escala de la calibración y el ancla vertical (el ojo del motor cae en p_ref), con lo que la escena queda donde la ve la cabeza (comprobado contra
+ * vrcam_delta); `vr_usermap.h` (vr/camera) rellena los campos desde el registro de cámara.
  * Con engine_near_clip=0 (def.) no se recorta ni descarta contra el plano z=near_units de la cámara del motor: eso solo sirve para la vista del motor,
  * no para una cabeza que mira a otro lado. VrStats.n_unclipped cuenta los polígonos que traían vértices así.
  *
@@ -234,7 +235,7 @@ typedef struct {
                                * el mundo (título/carga/zona). Con EYE válido pero world_valid 0 la matriz se aplica igualmente; sin EYE, cámara en el origen. */
     VrStats stats;
     VrFilter filter;          /* resumen de la clase 3 (ver "Clase 3") */
-    int user_space;           /* 1 si el mundo de salida está en el espacio del usuario (opts.user_on aplicado) */
+    int user_space;           /* 1 si el mundo de salida está en el espacio del usuario (opts.user_map_on aplicado) */
 } VrScene;
 
 typedef struct {
@@ -258,18 +259,27 @@ typedef struct {
                                * HUD lo dejarían opaco. Se cuentan en VrStats.n_clear. 0 = emitirlos en la clase 2 (comportamiento previo) */
     int clip_all_near;        /* 1 recorta contra el plano cercano TODO polígono con algún vz < near_units (def. 0: solo los que traen
                                * GPU_VF_BEHIND; el resto con vz < near_units se descarta como siempre, salida idéntica a la previa) */
-    /* --- §49: espacio del usuario (al final: no rompe el layout) --- */
-    int user_on;              /* 1: el "mundo VR" de salida es el ESPACIO DEL USUARIO recentrado (el de la pose de la cabeza): se gira el mundo del juego
-                               * R_y(user_theta_deg + 180 grados)^T alrededor de la vertical y el ojo del motor cae en user_pos (x,z). Sin esto el mundo sale en los
-                               * ejes del juego y solo coincide con la cabeza cuando el rumbo del cuerpo es justo 180 grados (ver "Espacio del usuario" abajo). 0 = como antes */
-    float user_theta_deg;     /* VrCamRecord.theta_play_deg de la cámara con la que se dibujó la lista */
-    float user_pos[3];        /* VrCamRecord.p_ref: cabeza (m, espacio del usuario) a la que corresponde el ojo del motor; solo se usan x y z */
+    /* --- §49: recorte del motor y reconstrucción (al final: no rompe el layout) --- */
     int engine_near_clip;     /* 1 = comportamiento anterior: recorta/descarta contra el plano z = near_units de la CÁMARA DEL MOTOR (una cabeza VR que mira a otro lado ve esa
                                * geometría). 0 (def.): se emite todo polígono con posiciones de vista válidas, también con vértices detrás o pegados al ojo del motor; el plano cercano
                                * lo recorta el renderer con el de la cabeza. Siguen los límites de arista (max_edge_m) y de área */
     int recon_partial;        /* 1 (def.): polígonos de 4 vértices con exactamente 3 de vista limpios y el 4.º sin posición: el 4.º se reconstruye cortando su rayo de
                                * pantalla con el plano de los otros tres (ver "Reconstrucción de parciales") en vez de descartar el polígono entero */
     int recon_ambig;          /* 1 (def.): un polígono AMBIG junto a SAT/BEHIND ya no se descarta si sus vértices están en un orden de magnitud coherente (ver .c) */
+    /* --- correspondencia mundo -> espacio del usuario (cámara VR; al final: ceros = sin cambio) ---
+     * Con la cámara VR el mundo del juego no está alineado con el espacio recentrado del usuario: hay un giro (rumbo del personaje
+     * menos giro de la cabeza al recentrar + giro del stick), la cabeza del usuario ya no está sobre el suelo del juego (sentado o de pie,
+     * el ojo del personaje se ancla a la cabeza) y la escala usuario->mundo puede no ser 1. Si user_map_on, cada vértice (ya en el mundo VR
+     * descrito arriba, metros, tras la reflexión de Z si la hubo) se lleva a:  P = R * (k * (F * s) - (0, eye_h_m, 0)) + p_ref
+     * con s el vértice, F = diag(1,1,reflexión) (se deshace la reflexión de Z, que el usuario no necesita), R = user_R (fila-mayor, giro
+     * mundo -> usuario), k = metros de usuario por metro de mundo (1 / escala usuario->mundo), eye_h_m = altura del ojo del motor sobre el
+     * origen YA EN METROS DE USUARIO (= k * altura en m de mundo; el ojo del motor, s = (0,h,0), cae en p_ref) y p_ref = cabeza del usuario
+     * al recentrar. Ver vrhost.c (user_map_from_record) y bitácora. */
+    int user_map_on;
+    float user_R[9];
+    float user_k;
+    float user_eye_h_m;
+    float user_p_ref[3];
 } VrSceneOpts;
 
 VrSceneOpts vr_scene_opts_default(void);

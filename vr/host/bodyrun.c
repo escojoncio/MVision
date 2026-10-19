@@ -15,7 +15,11 @@
 #include "bridge_addrs.h"
 #include "host.h"
 #include "sys.h"
+#include <pthread.h>
+#include "eyeshot.h"
+#include "vr_calib.h"
 #include "vr_camera.h"
+#include "vr_heading.h"
 #include "vr_fire.h"
 #include "vr_gesture.h"
 #include "vrgame.h"
@@ -44,6 +48,17 @@ static uint32_t nframes = 9000, log_every = 0, t0_vbl;
 static int have_t0, inctl_run;
 
 static float head_y = 1.65f;
+/* --turn T:grados[:dur]: giro del stick (+ = izquierda) repartido en `dur` VBlanks (1 = por pasos); --hyaw-at T:grados: guiñada de la cabeza (+ = izquierda) desde T;
+ * --walk T:dur: stick de mover hacia delante (pad analógico) ; --headlog N: línea [head] cada N VBlanks */
+typedef struct { uint32_t t, dur; float deg; } TurnEv;
+static TurnEv turns[32]; static int nturns;
+typedef struct { uint32_t t; float deg; } HyEv;
+static HyEv hyev[32]; static int nhy;
+static uint32_t headlog_every;
+/* --poke T:unidades[:modo]: escribe el rumbo del jugador (4096 = vuelta) en el bloque de control; modo 0 = solo +0x0A, 1 = +0x0A y +0x2A (SOLO PRUEBAS) ; --nohead: sin vr_heading */
+typedef struct { uint32_t t; int units, both; } PokeEv;
+static PokeEv pokes[16]; static int npokes;
+static int no_heading;
 /* --tp T:dist:lado: teletransporta al jugador (SOLO PRUEBAS, escribe la RAM) detrás (lado=0) o delante (1) del enemigo 0, a dist unidades, con su mismo rumbo */
 static int tp_t = -1, tp_side;
 static float tp_dist;
@@ -60,10 +75,41 @@ static void teleport(const BridgeState *bs) {
     memcpy(p + 0, &x, 2); memcpy(p + 2, &y, 2); memcpy(p + 4, &z, 2);
 }
 static float hyaw_deg;   /* guiñada de la cabeza sintética (+ = izquierda) */
+static float hpitch_deg; /* cabeceo (+ = mirando ABAJO) */
+static float cur_head[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1.6f, 0, 1};
+static pthread_mutex_t head_mx = PTHREAD_MUTEX_INITIALIZER;
 static void set_head(float x, float y, float z) {
-    float a = hyaw_deg * 3.14159265f / 180.0f, c = cosf(a), sn = sinf(a);
-    float m[16] = {c, 0, -sn, 0, 0, 1, 0, 0, sn, 0, c, 0, x, y, z, 1};
+    float a = hyaw_deg * 3.14159265f / 180.0f, c = cosf(a), sn = sinf(a), e = -hpitch_deg * 3.14159265f / 180.0f, ce = cosf(e), se = sinf(e);
+    float m[16] = {c, 0, -sn, 0, sn * se, ce, c * se, 0, sn * ce, -se, c * ce, 0, x, y, z, 1};
+    pthread_mutex_lock(&head_mx); memcpy(cur_head, m, sizeof m); pthread_mutex_unlock(&head_mx);
     mv_vr_set_head(m, 0.0);
+}
+/* --shot T:nombre : en T (VBlanks tras T0) se pide una imagen de lo que ve el usuario (escena VR rasterizada por software desde la cabeza sintética) ->
+ * <BR_SHOTDIR>/<nombre>.ppm. --hpitch-at T:grados : cabeceo desde T (+ = mirando abajo). */
+typedef struct { uint32_t t; char name[64]; int done; } ShotEv;
+static ShotEv shots[16]; static int nshots;
+static volatile int shot_pending = -1;
+typedef struct { uint32_t t; float deg; } PiEv;
+static PiEv piev[32]; static int npi;
+static volatile int poll_run = 1;
+static void *poller(void *arg) {
+    (void)arg;
+    static VrScene sc;
+    const char *dir = getenv("BR_SHOTDIR");
+    while (poll_run) {
+        if (!mv_host_scene(&sc)) { usleep(1500); continue; }
+        eyeshot_begin(&sc);
+        int k = shot_pending;
+        if (k >= 0 && sc.has_3d && sc.world_valid) {
+            float h[16]; pthread_mutex_lock(&head_mx); memcpy(h, cur_head, sizeof h); pthread_mutex_unlock(&head_mx);
+            char pth[512]; snprintf(pth, sizeof pth, "%s/%s.ppm", dir ? dir : ".", shots[k].name);
+            int rc = eyeshot_render(&sc, h, 640, 480, 100.0f, pth);
+            fprintf(stderr, "[shot] %s rc=%d tris3d=%u cabeza=(%.2f,%.2f,%.2f)\n", shots[k].name, rc, sc.stats.n_tris3d, h[12], h[13], h[14]);
+            shots[k].done = 1; shot_pending = -1;
+        }
+        eyeshot_end(&sc);
+    }
+    return NULL;
 }
 
 static void print_bs(uint32_t t, const BridgeState *b) {
@@ -123,7 +169,7 @@ static int world_to_user(const float W[3], float u[3]) {
 }
 static void hands_for(uint32_t t, const BridgeState *bs) {
     float gR = 0;
-    float rx = 0.2f, ry = 1.25f, rz = -0.15f;          /* reposo, mano derecha */
+    float rx = 0.2f, ry = head_y - 0.40f, rz = -0.15f;  /* reposo, mano derecha (a 0,40 m bajo la cabeza) */
     if (scn && (!strcmp(scn, "punch") || !strcmp(scn, "punch_noenemy") || !strcmp(scn, "punch_slow"))) {
         uint32_t k = t < 230 ? 999 : (t - 230) % 40;
         int n = !strcmp(scn, "punch_slow") ? 60 : 6;
@@ -141,7 +187,7 @@ static void hands_for(uint32_t t, const BridgeState *bs) {
         else if (k < 16) rz = lerpf(0.4f, -0.15f, (float)(k - 5) / 10);
     }
     hand_set(1, rx, ry, rz, gR);
-    hand_set(0, -0.2f, 1.25f, -0.15f, 0);
+    hand_set(0, -0.2f, head_y - 0.40f, -0.15f, 0);
 }
 
 static uint32_t last_st = 0xFFFFFFFFu; static int last_act = -1;
@@ -155,6 +201,31 @@ static uint16_t driver(uint32_t vbl, uint16_t pad, const BridgeState *bs) {
         else { set_head(0, head_y, 0); return std_pad(vbl); }
     }
     uint32_t t = vbl - t0_vbl;
+    for (int i = 0; i < nturns; i++)
+        if (t >= turns[i].t && t < turns[i].t + turns[i].dur) mv_vr_turn(turns[i].deg / (float)turns[i].dur);
+    for (int i = 0; i < nhy; i++) if (t >= hyev[i].t) hyaw_deg = hyev[i].deg;
+    for (int i = 0; i < npi; i++) if (t >= piev[i].t) hpitch_deg = piev[i].deg;
+    for (int i = 0; i < npokes; i++)
+        if (t == pokes[i].t && bs && bs->ctl_addr) {
+            int16_t v = (int16_t)pokes[i].units;
+            memcpy(emu_ram + ((bs->ctl_addr + 0x0A) & 0x1FFFFF), &v, 2);
+            if (pokes[i].both) memcpy(emu_ram + ((bs->ctl_addr + 0x2A) & 0x1FFFFF), &v, 2);
+            if (pokes[i].both >= 2) memcpy(emu_ram + ((bs->ctl_addr + 0x4E) & 0x1FFFFF), &v, 2);
+        }
+    for (int i = 0; i < nshots; i++) if (!shots[i].done && t >= shots[i].t && shot_pending < 0) shot_pending = i;
+    if (headlog_every && t % headlog_every == 0 && bs) {
+        const VrCalib *cal = vrcam_calib();
+        const VrCamRecord *rr = vrcam_last_record();
+        float bw = (float)((uint16_t)bs->ctl_rot.y & 4095u) * (360.0f / 4096.0f), vw = vrcam_view_yaw_deg();
+        float off = vw - bw; while (off > 180) off -= 360; while (off < -180) off += 360;
+        fprintf(stderr, "[head] t=%u cuerpo=%.1f vista=%.1f desvio=%.1f cabeza=%.1f theta=%.1f sentado=%d escala=%.3f upm=%.1f pref_y=%.2f pos=(%d,%d,%d) mov=%d\n", t, bw, vw, off, hyaw_deg,
+                rr ? rr->theta_play_deg : 0.0f, cal->seated, cal->scale, rr ? rr->units_per_m : 0.0f, rr ? rr->p_ref[1] : 0.0f, bs->ctl_pos.x, bs->ctl_pos.y, bs->ctl_pos.z, bs->moving);
+    }
+    if (getenv("BR_DUMPCTL") && headlog_every && t % headlog_every == 0 && bs && bs->ctl_addr) {
+        fprintf(stderr, "[ctl] t=%u:", t);
+        for (int k = 0; k < 0x80; k += 2) { int16_t w; memcpy(&w, emu_ram + ((bs->ctl_addr + (uint32_t)k) & 0x1FFFFF), 2); fprintf(stderr, " %d", w); }
+        fputc('\n', stderr);
+    }
     if (scn && !strcmp(scn, "peek")) head_x = t >= 80 && t < 140 ? 0.2f : 0.0f;
     set_head(head_x, head_y, 0);
     hands_for(t, bs);
@@ -172,6 +243,14 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--log") && i + 1 < argc) log_every = (uint32_t)strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--nogest")) mv_vrgame_set_gestures(0, 0);
         else if (!strcmp(argv[i], "--scn") && i + 1 < argc) scn = argv[++i];
+        else if (!strcmp(argv[i], "--head-y") && i + 1 < argc) head_y = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--headlog") && i + 1 < argc) headlog_every = (uint32_t)strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "--turn") && i + 1 < argc && nturns < 32) { unsigned tt = 0, dd = 1; float dg = 0; sscanf(argv[++i], "%u:%f:%u", &tt, &dg, &dd); turns[nturns++] = (TurnEv){tt, dd ? dd : 1, dg}; }
+        else if (!strcmp(argv[i], "--hyaw-at") && i + 1 < argc && nhy < 32) { unsigned tt = 0; float dg = 0; sscanf(argv[++i], "%u:%f", &tt, &dg); hyev[nhy++] = (HyEv){tt, dg}; }
+        else if (!strcmp(argv[i], "--hpitch-at") && i + 1 < argc && npi < 32) { unsigned tt = 0; float dg = 0; sscanf(argv[++i], "%u:%f", &tt, &dg); piev[npi++] = (PiEv){tt, dg}; }
+        else if (!strcmp(argv[i], "--shot") && i + 1 < argc && nshots < 16) { unsigned tt = 0; char nm[64] = "shot"; sscanf(argv[++i], "%u:%63s", &tt, nm); shots[nshots].t = tt; snprintf(shots[nshots].name, sizeof shots[nshots].name, "%s", nm); nshots++; }
+        else if (!strcmp(argv[i], "--poke") && i + 1 < argc && npokes < 16) { unsigned tt = 0; int u = 0, b = 0; sscanf(argv[++i], "%u:%d:%d", &tt, &u, &b); pokes[npokes++] = (PokeEv){tt, u, b}; }
+        else if (!strcmp(argv[i], "--nohead")) no_heading = 1;
         else if (!strcmp(argv[i], "--hyaw") && i + 1 < argc) hyaw_deg = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--tp") && i + 1 < argc) { int tt, sd = 0; float d = 0; sscanf(argv[++i], "%d:%f:%d", &tt, &d, &sd); tp_t = tt; tp_dist = d; tp_side = sd; }
         else if (!strcmp(argv[i], "--pad") && i + 1 < argc) {
@@ -192,8 +271,11 @@ int main(int argc, char **argv) {
     mkdir("build-host", 0755);
     mkdir("build-host/card", 0755);
     mv_vrhost_install();
+    if (no_heading) { VrHeadingConfig hc; vrhead_config_default(&hc); hc.enabled = 0; vrhead_set_default(&hc); }
     vrgame_set_driver(driver);
     mv_host_set_turbo(1);
+    pthread_t pt; int have_pt = 0;
+    if (nshots) have_pt = pthread_create(&pt, NULL, poller, NULL) == 0;
     int r = mv_host_start(argv[1], argv[2], "build-host/card");
     if (r) { fprintf(stderr, "mv_host_start = %d: %s\n", r, mv_host_error()); return 1; }
     for (;;) {
@@ -203,6 +285,7 @@ int main(int argc, char **argv) {
     }
     mv_host_pause();
     usleep(100000);
+    poll_run = 0; if (have_pt) pthread_join(pt, NULL);
     fprintf(stderr, "[bodyrun] eventos de gestos: golpe %u agarre %u apretón %u soltar %u pared(golpe) %u asomar %u contacto-pared %u daño %u\n", vrbodyg_event_count(VRG_EV_PUNCH), vrbodyg_event_count(VRG_EV_GRAB),
             vrbodyg_event_count(VRG_EV_SQUEEZE), vrbodyg_event_count(VRG_EV_RELEASE), vrbodyg_event_count(VRG_EV_KNOCK), vrbodyg_event_count(VRG_EV_PEEK), vrbodyg_event_count(VRG_EV_WALL), vrbodyg_event_count(VRG_EV_HURT));
     return 0;

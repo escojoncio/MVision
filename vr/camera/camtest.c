@@ -41,6 +41,7 @@
 #include "sys.h"
 #include "ref_raster.h"
 #include "vr_camera.h"
+#include "vr_usermap.h"
 #include "vr_scene.h"
 #include "hud_emu.h"
 
@@ -590,7 +591,7 @@ static void apply_epochs(const GpuDrawList *l, int kstrip, uint8_t *pre, int *pw
  * de fovh x fovv grados con la cabeza donde esté en el instante de presentación (t + lat) para tres casos:
  *   E  oráculo      todo lo que el juego emitió con posición de vista completa, re-proyectado con vrcam_delta exacto a la pose de presentación;
  *   Sa escena "vieja"  VrScene en ejes del juego (sin espacio de usuario), tal como la dibuja la IPA anterior (mundo sin girar);
- *   Sn escena nueva    VrScene en el espacio del usuario (opts.user_on).
+ *   Sn escena nueva    VrScene en el espacio del usuario (opts.user_map_on).
  * Huecos = píxeles que E pinta y la escena no (pérdida de nuestra ruta) o, comparando varias ejecuciones, lo que el motor no emitió. */
 #define ESC_MAXW 440
 static float esc_f; static int esc_w, esc_h;
@@ -662,7 +663,7 @@ static const VrScene *esc_build(const GpuDrawList *l, const VrCamRecord *r, int 
         o.origin_mode = 1; o.origin_game[0] = (float)r->eye[0]; o.origin_game[1] = org[1]; o.origin_game[2] = (float)r->eye[2];
     }
     if (getenv("CAM_ESC_LEGACY")) { o.engine_near_clip = 1; o.recon_partial = 0; o.recon_ambig = 0; }   /* opciones previas a §49 */
-    if (user_on) { o.user_on = 1; o.user_theta_deg = r->theta_play_deg; memcpy(o.user_pos, r->p_ref, sizeof o.user_pos); }
+    if (user_on && r->active) vrcam_scene_user_map(&o, r, o.origin_game[1]);
     vr_scene_set_fate(esc_fate, sizeof esc_fate);
     int rc = vr_scene_build(l, &b2, &o, &sc);
     vr_scene_set_fate(NULL, 0);

@@ -864,3 +864,19 @@ Queja: "el códec se ve mal, todo el rato con artefactos" (imagen 2D en la venta
 **Pruebas.** `vr/scene/test_scene.c`: destino por primitiva (`vr_scene_set_fate`), `engine_near_clip` 0/1, reconstrucción de 3 vértices y de diagonal, AMBIG coherente/no coherente, saturados sin reconstruir. `vr/camera/test_camera.c`: `test_userspace` (espacio del usuario frente a `vrcam_delta`) y `test_predict` (adelanto = velocidad x predict_s, tope, desactivada y fuera de rango).
 
 **Pendiente / avisos.** (1) El cono de recorte sigue en 140 x 120 (Makefile `HFOV`/`VFOV`, `vrcam_patch_default`): ensancharlo (160 x 140 cabe en `PATCH_LIMIT`) lo hace la rama del recorte del motor. (2) Con `user_on`, `VrScene.game_view` y `eye_vr` ya están en el espacio del usuario: los consumidores que mezclen coordenadas de la escena con las del mundo del juego (cuerpo, manos) deben pasar por `game_view`. (3) Sin verificar en visor.
+
+## 50. Cuerpo VR: giro del personaje, mundo en espacio de usuario, calibración y proyección del sistema — 2026-10-19 (rama `cuerpo-vr`)
+
+**Síntomas** (visor, usuario sentado, cabeza ≈1,04 m): cuerpo y altura sin sincronizar, el cuerpo no seguía la cámara con el stick, proyección del sistema descartada (`depthRange=(inf,0.1)`, P22=0, P32=0,098: Z invertido con lejano infinito).
+
+**Causas y arreglos**
+1. *Falta la correspondencia mundo → usuario.* `vr_scene` emitía vértices en ejes de juego con origen bajo el ojo del motor, y Swift los pintaba con la pose de la cabeza sin θ, `p_ref` ni ancla vertical. Ahora `VrSceneOpts.user_map_*` (`vr_scene_build`) aplica `P = p_ref + R_y(−θ−180°)·[k·F·s − (0, eye_h/upm, 0)]`, con k = 1/(escala·upm) y F deshace la reflexión de z. Es coherente con `vrcam_delta`, `vr_body` y `vr_fire`. `vrhost.c` la activa en `build_one` si el registro de cámara está activo (`-DMV_NO_USER_MAP` solo para A/B).
+2. *Giro con stick sobre el personaje* (`vr/camera/vr_heading.{h,c}`): el rumbo vive en el bloque de control como s16 (4096 = vuelta) en tres campos (actual +0x0A, previo +0x2A, objetivo +0x4E); escribir solo uno lo deshace el juego (aproxima al objetivo cada frame de juego). Se escriben los tres. Vista = rumbo del personaje + giro físico de la cabeza. El torso sigue a la cabeza con margen 45°, 300°/s, relaja a 12° tras 1,2 s quieto, sin escribir al andar; la vista efectiva incluye los giros del stick aún no vistos por una cámara construida.
+3. *Calibración* (`vr/camera/vr_calib.h`, cabecera): al recentrar, `p_ref` ancla el ojo del personaje a la cabeza física; escala s = s0·ojo_ref/ojo_usuario sobre `units_per_m` del registro (traslación de cabeza, manos, aim; el IPD no). Sentado si cabeza < 1,30 m; ojo estimado = cabeza/0,63. `vrcam_set_user_eye_height()` queda sin cablear desde Swift (`settings.headHeight`).
+4. *Proyección del sistema* (`XRFrameEncoder.swift`): el validador acepta `c.2.z ≥ −1e-6 && c.3.z > 0`; `planes(of:)` devuelve far = ∞ si a<1e-6 (near = b, b ≥ 0,001); la vista auxiliar usa far 1000. El banco (`bench`) pasa proyecciones del sistema y comprueba `projSource == "sistema"`; caso `layered-msaa4-sistema-inf`.
+
+**Pruebas**: `vr/camera/test_heading.c` (55), `test_user_map` en `test_scene.c`, `make -C vr/camera test` y `test-san`. Herramientas headless: `bodyrun` (`--head-y --turn --hyaw-at --hpitch-at --shot --poke --nohead`) con `eyeshot.{c,h}` (rasterizador de sonda). A/B sentado mirando abajo: antes el torso tapaba la vista y las manos no se veían; ahora se ven suelo y ambas manos; sentado y de pie dan lo mismo relativo a la cabeza.
+
+**Interfaz para `manos-vr`**: `units_per_m` del registro ya viene escalado; la escena está en espacio de usuario; objetivo de manos W = ojo + upm·T(P − p_ref). No se tocó agarre, orientación de mano ni `upperLimbVisibility`.
+
+**Pendiente/límites**: Swift sin verificar en visor; cablear altura de usuario desde ajustes.

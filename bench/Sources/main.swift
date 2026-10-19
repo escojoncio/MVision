@@ -117,6 +117,7 @@ guard let queue = device.makeCommandQueue() else { print("FALLO: sin cola Metal"
 let EW = 1024, EH = 1024                 // tamaño por ojo
 let colorFormat = MTLPixelFormat.bgra8Unorm_srgb
 let depthFormat = MTLPixelFormat.depth32Float
+var sysInf = false                        // simula `computeProjection` del compositor: Z invertida con plano lejano INFINITO (P22 = 0, P32 = cercano)
 var depthRange = SIMD2<Float>(1000, 0.1)  // (lejos, cerca) en metros: el renderer toma min/max, como con el sistema
 let IPD: Float = 0.063
 let eyes: [XREyeView] = [
@@ -176,7 +177,9 @@ func render(_ enc: XRFrameEncoder, layered: Bool, color: [MTLTexture], depth: [M
         before?(i)
         guard let cb = queue.makeCommandBuffer() else { return nil }
         let ok = enc.encode(commandBuffer: cb, gs: gs, originFromDevice: head(i), recenterInverse: matrix_identity_float4x4, dt: 1.0 / 90.0,
-                            eyes: eyes, depthRange: depthRange, colorTextures: color, depthTextures: depth)
+                            eyes: eyes, depthRange: depthRange, colorTextures: color, depthTextures: depth,
+                            systemProjections: sysInf ? eyes.map { e -> simd_float4x4 in
+                                var p = XRMath.projection(tangents: e.tangents, near: 0.098, far: 1000); p.columns.2.z = 0; p.columns.3.z = 0.098; return p } : nil)
         if !ok { print("FALLO: encode devolvió false"); return nil }
         var bufs: [MTLBuffer] = []
         if i == frames - 1 { for e in 0..<2 { if let b = blitEye(cb, color, layered: layered, eye: e) { bufs.append(b) } } }
@@ -213,11 +216,12 @@ func report(_ caso: String, _ imgs: [Img], notice: Bool = false) {
 
 // MARK: casos
 
-struct Cfg { var name: String; var layered: Bool; var msaa: Int; var range = SIMD2<Float>(1000, 0.1) }
+struct Cfg { var name: String; var layered: Bool; var msaa: Int; var range = SIMD2<Float>(1000, 0.1); var sysInf = false }
 
 func runCase(_ cfg: Cfg, first: Bool) {
     firstConfig = first
     depthRange = cfg.range
+    sysInf = cfg.sysInf
     print("\n######## \(cfg.name) ########")
     if cfg.layered && !device.supportsVertexAmplificationCount(2) { annot("warning", cfg.name, "sin amplificacion de vertices x2: caso omitido"); return }
     if cfg.msaa > 1 && !device.supportsTextureSampleCount(cfg.msaa) { annot("warning", cfg.name, "sin msaa \(cfg.msaa): caso omitido"); return }
@@ -296,6 +300,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
         report(caso, imgs, notice: true)
         print("[diag] última: \(enc.lastDiag)")
         check(caso, "presentacion = mundo", "\(enc.presenter.shown)" == "world", "mostrando=\(enc.presenter.shown)")
+        if cfg.sysInf { check(caso, "proyeccion del sistema (lejano infinito) usada", enc.projSource == "sistema", "proyeccion usada=\(enc.projSource)") }
         check(caso, "velo disipado", enc.presenter.veil < 0.01, "velo=\(enc.presenter.veil)")
         for e in 0..<2 {
             let im = imgs[e]
@@ -378,6 +383,9 @@ for (nm, r) in [("rango-1-0", SIMD2<Float>(1, 0)), ("rango-0.1-1000", SIMD2<Floa
                 ("rango-0-0", SIMD2<Float>(0, 0)), ("rango-1e-3-1e5", SIMD2<Float>(1e5, 1e-3))] {
     runCase(Cfg(name: "layered-msaa4-" + nm, layered: true, msaa: 4, range: r), first: false)
 }
+// Proyección del sistema con plano lejano infinito (P22 = 0) y rango degenerado (inf, 0.1) como en el visor: debe usarse y dar la misma imagen
+runCase(Cfg(name: "layered-msaa4-sistema-inf", layered: true, msaa: 4, range: SIMD2<Float>(Float.infinity, 0.1), sysInf: true), first: false)
+sysInf = false
 print("\nresumen: \(failures) comprobaciones falladas")
 if !warnList.isEmpty { annot("warning", "banco de render (informativo)", warnList.prefix(30).joined(separator: "\n")) }
 if failures > 0 {

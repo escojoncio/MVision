@@ -28,7 +28,7 @@ for d in bridge camera input scene host body radar hands weapons gameplay ai; do
   mkdir -p ".stage/vr/$d"
   for f in ../vr/$d/*.c ../vr/$d/*.h; do
     [ -f "$f" ] || continue
-    case "$(basename "$f")" in test_*|*_dump.c|camtest.c|vrhost_run.c|bodyrun.c|padrun.c|bodytest.c|radar_run.c|gptest*|hands_preview.c|hud_probe.c|hud_emu.c|hud_emu.h|hle_vrfire_weak.c|ai_validate.c|vai_local_patch.c|vr_activity_run.c|vr_activity_ai2_hooks.c) continue ;; esac
+    case "$(basename "$f")" in test_*|*_dump.c|camtest.c|vrhost_run.c|bodyrun.c|eyeshot.c|eyeshot.h|padrun.c|bodytest.c|radar_run.c|gptest*|hands_preview.c|hud_probe.c|hud_emu.c|hud_emu.h|hle_vrfire_weak.c|ai_validate.c|vai_local_patch.c|vr_activity_run.c|vr_activity_ai2_hooks.c) continue ;; esac
     cp "$f" ".stage/vr/$d/"
   done
 done
