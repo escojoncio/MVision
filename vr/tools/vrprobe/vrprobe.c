@@ -106,6 +106,8 @@ typedef struct {
     uint32_t hf;
     float eye_vr[3], org[3], scale, fwd[3];
     int world_valid, has3d;
+    int um_on;                   /* la escena viene en el espacio del usuario (VrScene.user_space): corrección mundo -> usuario de vr_scene, ver um_forward */
+    float um_R[9], um_k, um_eye_h, um_pref[3];
     VrStats st;
     uint32_t ntri, nsemi;
     float *tri;                  /* ntri * 9, mundo VR de ESA escena */
@@ -472,6 +474,9 @@ static void on_scene(const VrScene *s) {
     memcpy(c->eye_vr, s->eye_vr, sizeof c->eye_vr);
     memcpy(c->org, s->origin_game, sizeof c->org);
     c->scale = s->scale;
+    if (s->user_space) {   /* la corrección mundo -> usuario que aplicó vr_scene (la escena la publica: VrScene.user_*) */
+        c->um_on = 1; memcpy(c->um_R, s->user_R, sizeof c->um_R); c->um_k = s->user_k; c->um_eye_h = s->user_eye_h; memcpy(c->um_pref, s->user_p_ref, sizeof c->um_pref);
+    }
     c->st = s->stats; c->world_valid = s->world_valid; c->has3d = s->has_3d;
     c->fwd[0] = s->game_view[8]; c->fwd[1] = s->game_view[9]; c->fwd[2] = s->game_view[10];
     if (s->world_valid) zs_detect();
@@ -526,16 +531,29 @@ static void ref_add(Ref *R, const float *P) {
     memcpy(R->t + R->n * 9, P, 9 * sizeof(float));
     R->n++;
 }
-static void to_fixed(const Cap *c, const float *v, float *P) {
+/* Corrección mundo VR (ejes del juego, escalado) <-> espacio del usuario que aplica vr_scene (user_map_*): P = R (k diag(1,1,zs) s) + p_ref - (0, eye_h, 0). */
+static void um_forward(const Cap *c, const float *s_, float *P) {
+    if (!c->um_on) { memcpy(P, s_, 3 * sizeof *P); return; }
+    float w[3] = {s_[0] * c->um_k, s_[1] * c->um_k, (float)g_zs * s_[2] * c->um_k};
+    for (int r = 0; r < 3; r++) P[r] = c->um_R[3 * r] * w[0] + c->um_R[3 * r + 1] * w[1] + c->um_R[3 * r + 2] * w[2] + c->um_pref[r] - (r == 1 ? c->um_eye_h : 0.0f);
+}
+static void um_inverse(const Cap *c, const float *P, float *s_) {
+    if (!c->um_on) { memcpy(s_, P, 3 * sizeof *s_); return; }
+    float u[3] = {P[0] - c->um_pref[0], P[1] - c->um_pref[1] + c->um_eye_h, P[2] - c->um_pref[2]};
+    float ik = 1.0f / c->um_k;
+    for (int r = 0; r < 3; r++) s_[r] = (c->um_R[r] * u[0] + c->um_R[3 + r] * u[1] + c->um_R[6 + r] * u[2]) * ik;   /* R^T u / k */
+    s_[2] *= (float)g_zs;
+}
+static void to_fixed(const Cap *c, const float *v0, float *P) {
+    float v[3]; um_inverse(c, v0, v);
     float is = 1.0f / c->scale;
     P[0] = v[0] * is + c->org[0];
     P[1] = v[1] * is + c->org[1];
     P[2] = (float)g_zs * v[2] * is + c->org[2];
 }
 static void from_fixed(const Cap *c, const float *P, float *v) {
-    v[0] = (P[0] - c->org[0]) * c->scale;
-    v[1] = (P[1] - c->org[1]) * c->scale;
-    v[2] = (float)g_zs * (P[2] - c->org[2]) * c->scale;
+    float s_[3] = {(P[0] - c->org[0]) * c->scale, (P[1] - c->org[1]) * c->scale, (float)g_zs * (P[2] - c->org[2]) * c->scale};
+    um_forward(c, s_, v);
 }
 
 /* ------------------------------------------------------------------------------------------------ evaluación de una captura */
@@ -639,9 +657,7 @@ static void eval_hands(const Cap *c, HandEv *h, uint8_t *thumb) {
         float back[3] = {0, 0, 0.055f}, rb[3], E[3], D[3], Dc[3];
         quat_rot(c->in.hq[s], back, rb);
         for (int k = 0; k < 3; k++) E[k] = c->in.hp[s][k] + rb[k];
-        D[0] = c->scale * (c->in.wrist[s][0] - c->org[0]);
-        D[1] = c->scale * (c->in.wrist[s][1] - c->org[1]);
-        D[2] = (float)g_zs * c->scale * (c->in.wrist[s][2] - c->org[2]);
+        from_fixed(c, c->in.wrist[s], D);   /* muñeca del personaje (mundo del motor) en el espacio de la escena */
         memcpy(Dc, D, sizeof Dc);
         xf_apply(&xf, Dc);
         h->drv[s] = c->in.drv[s] && c->in.fade[s] > 0.9f;
