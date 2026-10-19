@@ -146,6 +146,12 @@ final class ControllerHub: @unchecked Sendable {
             self?.dlog("desconectado: \((n.object as? GCController)?.vendorName ?? "?")")
             self?.choose()
         })
+        // Ventanas nuevas o reactivadas (p. ej. al cerrar el espacio inmersivo): se reasegura la interacción.
+        for name in [UIScene.willConnectNotification, UIScene.didActivateNotification] {
+            observers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.attachEventInteractions()
+            })
+        }
         observers.append(nc.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             self.lock.lock(); self.appActive = true; self.lock.unlock()
@@ -167,8 +173,6 @@ final class ControllerHub: @unchecked Sendable {
 
     // MARK: - Eventos de mando para la app (visionOS)
 
-    private var interactionViews = Set<ObjectIdentifier>()
-
     /// En visionOS el sistema solo entrega los botones/gatillos/stick de un mando a la app si alguna vista declara que
     /// atiende eventos de mando por GameController; si no, los convierte en gestos de pellizco y el perfil físico se
     /// queda a cero (solo el botón de menú llega). Se añade `GCEventInteraction` (tipo gamepad) a la vista raíz de cada
@@ -180,12 +184,10 @@ final class ControllerHub: @unchecked Sendable {
             guard let ws = scene as? UIWindowScene else { continue }
             for w in ws.windows {
                 let v: UIView = w.rootViewController?.view ?? w
-                let id = ObjectIdentifier(v)
-                if interactionViews.contains(id) { continue }
+                if v.interactions.contains(where: { $0 is GCEventInteraction }) { continue }
                 let gi = GCEventInteraction()
                 gi.handledEventTypes = .gamepad
                 v.addInteraction(gi)
-                interactionViews.insert(id)
                 added += 1
             }
         }
@@ -375,7 +377,20 @@ final class ControllerHub: @unchecked Sendable {
         var stickOK = false
     }
 
+    /// `capture()` reserva una instantánea nueva en cada llamada: se reutiliza durante 3 ms por mando (siempre bajo
+    /// `ioLock`, que serializa a todos los lectores).
+    private var liveCache: [ObjectIdentifier: (t: TimeInterval, r: LiveRead)] = [:]
+
     private func readLive(_ c: GCController) -> LiveRead {
+        let now = ProcessInfo.processInfo.systemUptime
+        let key = ObjectIdentifier(c)
+        if let hit = liveCache[key], now - hit.t < 0.003 { return hit.r }
+        let r = readLiveUncached(c)
+        liveCache[key] = (now, r)
+        return r
+    }
+
+    private func readLiveUncached(_ c: GCController) -> LiveRead {
         let st = c.input.capture()
         var r = LiveRead()
         func bv(_ name: String) -> Float {

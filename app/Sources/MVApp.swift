@@ -32,13 +32,17 @@ struct MVApp: App {
                 }
         }
         .defaultSize(width: 1024, height: 768)
+        .handlesGameControllerEvents(matching: .gamepad)
         XRImmersiveScene()
+            .handlesGameControllerEvents(matching: .gamepad)
     }
 }
 
 struct ContentView: View {
     @EnvironmentObject var model: GameModel
     @FocusState private var controllerFocus: Bool
+    @ObservedObject private var xr = XRSession.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
@@ -69,6 +73,9 @@ struct ContentView: View {
         .focusEffectDisabled()
         .focused($controllerFocus)
         .onAppear { controllerFocus = true }
+        // Al abrir/cerrar el espacio inmersivo o reactivarse la ventana el foco puede perderse: se reasigna.
+        .onChange(of: xr.state) { _, _ in refocus() }
+        .onChange(of: scenePhase) { _, _ in refocus() }
         .fileImporter(isPresented: $model.showPicker, allowedContentTypes: [.folder], allowsMultipleSelection: false) { model.folderPicked($0) }
         .alert("Carpeta", isPresented: Binding(get: { model.aviso != nil }, set: { if !$0 { model.aviso = nil } })) {
             Button("Aceptar", role: .cancel) {}
@@ -100,6 +107,13 @@ struct MessageView: View {
 }
 
 /// Pantalla de elegir la carpeta del juego (primera vez, permiso perdido o nombre incorrecto).
+extension ContentView {
+    func refocus() {
+        controllerFocus = false
+        DispatchQueue.main.async { controllerFocus = true }
+    }
+}
+
 struct FolderPromptView: View {
     @EnvironmentObject var model: GameModel
     let aviso: String?

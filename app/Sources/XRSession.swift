@@ -76,6 +76,7 @@ final class XRSession: ObservableObject {
         // Mientras el espacio está abierto manda VRInput (Sense o mando normal); el mando de la ventana se calla.
         InputManager.shared.setSuspended(true)
         VRInput.shared.start()
+        ControllerHub.shared.attachEventInteractions()
         l.start()
     }
 
