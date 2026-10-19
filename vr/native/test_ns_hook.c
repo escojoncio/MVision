@@ -10,6 +10,7 @@ static int sreset_calls; static NsMeshStore *sreset_arg;
 static int gate_closed(void *u) { (void)u; return 0; }
 static void store_reset(NsMeshStore *st, void *u) { (void)u; sreset_calls++; sreset_arg = st; }
 #define CHECK(c, ...) do { if (!(c)) { printf("FALLO %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); fails++; } } while (0)
+static int idle_yes(void *u) { (void)u; return 1; }
 
 static uint8_t *RAM;
 static void w32(uint32_t a, uint32_t v) { memcpy(RAM + (a & 0x1FFFFF), &v, 4); }
@@ -207,6 +208,14 @@ static void t_decide(void) {
     now = ns_now_ns(); ns_bridge_acquire(b, now, &v); in = din(now);
     ns_hook_stats(&st);
     CHECK(st.ik_missed == miss0 + 1 && !(v.cur->valid & NS_SV_PLAYER_OK) && !ns_native_decide(&v, &in, &d) && d.skip == 0, "sin IK: no apta");
+    /* capa de brazos inactiva (mandos sin seguimiento: vrbody_apply corre y no maneja ningún brazo): la ausencia de IK no es un fallo, la escena es apta con los brazos del juego */
+    ns_hook_set_ik_idle(idle_yes, NULL);
+    ns_hook_stats(&st); uint32_t miss1 = st.ik_missed, idle1 = st.ik_idle;
+    ns_capture(RAM, NULL); ns_hook_tick(RAM);
+    now = ns_now_ns(); ns_bridge_acquire(b, now, &v); in = din(now);
+    ns_hook_stats(&st);
+    CHECK(st.ik_idle == idle1 + 1 && st.ik_missed == miss1 && (v.cur->valid & NS_SV_PLAYER_OK) && ns_native_decide(&v, &in, &d), "IK inactiva (sin mandos): apta, no cuenta como fallo");
+    ns_hook_set_ik_idle(NULL, NULL);
     /* sin IK esperada (capa VR sin brazos): apta con solo ocultar la cabeza */
     ctx_refresh = 0;
     ns_capture(RAM, NULL); ns_hook_tick(RAM);

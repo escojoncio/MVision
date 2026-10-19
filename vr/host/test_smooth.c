@@ -36,6 +36,8 @@ typedef struct {
     int smooth;
     double teleport_t;     /* >0: salto de 4000 unidades del cuerpo en x */
     double settle_t0, settle_t1;   /* intervalo que se excluye de las métricas (el propio corte) */
+    double geom_ahead_s;   /* la geometría dibujada es de un registro del motor POSTERIOR al de la muestra que se empuja (escena nativa frente a la lista de la GPU) */
+    int own_sample;        /* 1: la muestra empujada es la de la geometría dibujada (vrsm_make_sample de su propio registro) */
 } Sim;
 
 typedef struct { double rms_err_mm, max_err_mm, jitter_mm, max_step_dev_mm, rms_ang_deg, max_ang_deg; int active; } Res;
@@ -72,20 +74,23 @@ static Res run(const Sim *m, VrSmooth *sm) {
         /* la emulación publica escenas a su ritmo con fluctuación de reloj; el renderer las toma en el primer fotograma posterior a su ensamblado */
         for (;;) {
             double tg = k * dt_scene;                               /* tiempo de juego de la escena k */
-            double tb = tg + jt_k;                                  /* reloj de pared en que se ensambló (con fluctuación) */
+            double tb = tg + jt_k + (m->own_sample ? m->geom_ahead_s : 0.0);   /* reloj de pared en que se ensambló (con fluctuación); la escena nativa, de un registro posterior, se captura después */
             if (t < tb) break;
             memset(&cur, 0, sizeof cur);
             cur.valid = 1;
             cur.t_wall = tb; cur.game_s = tg;
-            double bx = body_x(m, tg);
-            cur.B[0] = (float)bx; cur.B[1] = 0; cur.B[2] = 0;
-            double taken = req_turn(m, tg - m->turn_lag_s);          /* giro que la emulación ya había tomado al construir la cámara */
-            rot_form((float)(180.0 + 90.0 + taken), cur.R);
-            cur.K = (float)K; memcpy(cur.c, c, sizeof c);
-            cur.turn_deg = taken;
-            cur.epoch = (m->teleport_t > 0 && tg >= m->teleport_t) ? 2 : 1;
-            float O[3] = {cur.B[0], cur.B[1], cur.B[2]};
-            project(cur.R, cur.K, cur.c, O, W, P_i);
+            double tgeo = tg + m->geom_ahead_s;                        /* instante del registro de la geometría que se dibuja */
+            double tsm = m->own_sample ? tgeo : tg;                    /* instante que declara la muestra */
+            double bx = body_x(m, tgeo);
+            double taken = req_turn(m, tgeo - m->turn_lag_s);          /* giro que la emulación ya había tomado al construir la cámara */
+            float Og[3] = {(float)bx, 0, 0}, Rg[9];
+            rot_form((float)(180.0 + 90.0 + taken), Rg);
+            const float pref[3] = {0.0f, 0.0f, 0.0f};
+            double bxs = body_x(m, tsm), takens = req_turn(m, tsm - m->turn_lag_s);
+            float Os[3] = {(float)bxs, 0, 0}, Rs[9];
+            rot_form((float)(180.0 + 90.0 + takens), Rs);
+            vrsm_make_sample(&cur, Os, Rs, (float)K, pref, 1.65f, tsm, takens, (m->teleport_t > 0 && tg >= m->teleport_t) ? 2 : 1, tb);
+            project(Rg, (float)K, c, Og, W, P_i);
             have_scene = 1;
             vrsm_push(sm, &cur, t);
             k++;
@@ -190,6 +195,18 @@ int main(void) {
     Sim tp = base; tp.teleport_t = 2.0; tp.settle_t0 = 1.98; tp.settle_t1 = 2.25; tp.jitter_ms = 3.0; tp.v_x = 400;
     on = runboth("teletransporte", tp, &off);
     CHECK(on.max_err_mm < 20.0, "teletransporte: error máximo %.2f mm", on.max_err_mm);
+
+    /* 8b) la escena que se dibuja (nativa) es de un registro del motor posterior (40 ms) al de la muestra que recibe el suavizador (la de la lista de la GPU): la corrección
+     * la mueve de más. Con la muestra de la propia escena (vrsm_make_sample), andando y girando, el desfase con la cabeza (posición ideal en el instante de presentación) es 0. */
+    {
+        Sim w = wt; w.jitter_ms = 0.0; w.geom_ahead_s = 0.040; w.own_sample = 0;
+        Res offx, bad = runboth("nativa +1 registro, muestra de la lista", w, &offx);
+        w.own_sample = 1;
+        Res good = runboth("nativa +1 registro, muestra propia", w, &offx);
+        CHECK(bad.max_ang_deg > 2.0 || bad.rms_err_mm > 20.0, "la muestra de otro registro debería desfasar la escena (err rms %.2f mm, ang max %.3f)", bad.rms_err_mm, bad.max_ang_deg);
+        CHECK(good.rms_err_mm < 3.0 && good.max_ang_deg < 0.5, "muestra propia: desfase con la cabeza err rms %.3f mm, ang max %.3f gr (esperado ~0)", good.rms_err_mm, good.max_ang_deg);
+        printf("  desfase de la escena nativa con la cabeza: muestra de la lista %.1f mm / %.2f gr -> muestra propia %.2f mm / %.3f gr\n", bad.rms_err_mm, bad.max_ang_deg, good.rms_err_mm, good.max_ang_deg);
+    }
 
     /* 9) desactivado: identidad exacta */
     {

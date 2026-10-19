@@ -14,8 +14,9 @@ static struct {
     NsPlayerMap map;
     uint32_t refresh_parts;
     int ik_done, hide_head;
+    NsIkIdleFn idle; void *idle_user;
     struct {
-        _Atomic uint32_t captures, published, replaced, extract_fail, ik_refresh, player_bound, ik_expected, ik_missed, skipped_gate, last_valid;
+        _Atomic uint32_t captures, published, replaced, extract_fail, ik_refresh, player_bound, ik_expected, ik_missed, skipped_gate, last_valid, ik_idle;
         _Atomic uint64_t last_pub_ns;
     } st;
 } H;
@@ -23,7 +24,7 @@ static struct {
 static void clear_stats(void) {
     atomic_store(&H.st.captures, 0); atomic_store(&H.st.published, 0); atomic_store(&H.st.replaced, 0); atomic_store(&H.st.extract_fail, 0);
     atomic_store(&H.st.ik_refresh, 0); atomic_store(&H.st.player_bound, 0); atomic_store(&H.st.ik_expected, 0); atomic_store(&H.st.ik_missed, 0);
-    atomic_store(&H.st.skipped_gate, 0); atomic_store(&H.st.last_valid, 0); atomic_store(&H.st.last_pub_ns, 0);
+    atomic_store(&H.st.ik_idle, 0); atomic_store(&H.st.skipped_gate, 0); atomic_store(&H.st.last_valid, 0); atomic_store(&H.st.last_pub_ns, 0);
 }
 static void inc(_Atomic uint32_t *c) { atomic_fetch_add_explicit(c, 1, memory_order_relaxed); }
 
@@ -45,12 +46,14 @@ void ns_hook_set_context(NsCtxFn fn, void *user) { H.ctx = fn; H.ctx_user = user
 void ns_hook_set_gate(NsGateFn fn, void *user) { H.gate_user = user; H.gate = fn; }
 void ns_hook_set_store_reset(NsStoreResetFn fn, void *user) { H.sreset_user = user; H.sreset = fn; }
 void ns_hook_set_frame(uint32_t v) { H.vbl = v; }
+void ns_hook_set_ik_idle(NsIkIdleFn fn, void *user) { H.idle_user = user; H.idle = fn; }
 void ns_hook_stats(NsHookStats *s) {
     if (!s) return;
     s->captures = atomic_load(&H.st.captures); s->published = atomic_load(&H.st.published); s->replaced = atomic_load(&H.st.replaced);
     s->extract_fail = atomic_load(&H.st.extract_fail); s->ik_refresh = atomic_load(&H.st.ik_refresh); s->player_bound = atomic_load(&H.st.player_bound);
     s->ik_expected = atomic_load(&H.st.ik_expected); s->ik_missed = atomic_load(&H.st.ik_missed); s->skipped_gate = atomic_load(&H.st.skipped_gate);
     s->last_valid = atomic_load(&H.st.last_valid); s->last_pub_ns = atomic_load(&H.st.last_pub_ns);
+    s->ik_idle = atomic_load(&H.st.ik_idle);
 }
 
 void ns_capture(const uint8_t *ram, const uint8_t *scratch) {
@@ -114,7 +117,10 @@ void ns_hook_tick(const uint8_t *ram) {
     if (!H.pending || !H.br) return;
     NsScene *s = ns_bridge_current(H.br);
     if (!s) { H.pending = 0; return; }
-    if (H.refresh_parts && !H.ik_done) inc(&H.st.ik_missed);   /* se esperaba la pose IK y no llegó: la escena sale sin PLAYER_OK */
+    if (H.refresh_parts && !H.ik_done) {
+        if (H.idle && H.idle(H.idle_user)) { inc(&H.st.ik_idle); s->valid |= NS_SV_PLAYER_OK; }   /* capa VR sin mandos con seguimiento: brazos de la animación del juego, escena apta */
+        else inc(&H.st.ik_missed);                                                                  /* se esperaba la pose IK y no llegó: la escena sale sin PLAYER_OK */
+    }
     atomic_store(&H.st.last_valid, s->valid);
     ns_bridge_publish(H.br, H.store);
     atomic_store(&H.st.last_pub_ns, ns_now_ns());
