@@ -101,7 +101,7 @@ final class WeaponRenderer {
         case .bgra8Unorm_srgb, .rgba8Unorm_srgb, .rgba16Float: linearOutput = true
         default: linearOutput = false
         }
-        let lib = device.makeDefaultLibrary()
+        let lib = MVLib.library(device)
         library = lib
         if lib == nil { print("[WeaponRenderer] sin biblioteca Metal por defecto: falta vr_weapon.metal en el target") }
         if MemoryLayout<WpnFrameU>.stride != 192 || MemoryLayout<WpnDrawU>.stride != 64 || MemoryLayout<SpcDrawU>.stride != 128 {
