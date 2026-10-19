@@ -846,3 +846,45 @@ Queja: "el códec se ve mal, todo el rato con artefactos" (imagen 2D en la venta
 **Revisión adversarial e integración (sobre `abe26ce`).** (a) Consumidores del tamaño publicado: `GameView` y `XRCinema` crean las texturas a `MV_HOST_MAX_W x MV_HOST_MAX_H` (1024x512) una sola vez y suben solo la región `w x h` (uniformes/`imgSize` por fotograma), así que 320 <-> 384 en caliente no recrea nada; `RenderRG` usa `disp.w/h` solo para `hudRect` (cambia únicamente en el modo de 384). (b) `w` nominal solo cambia para el bit 6 (368 -> 384); en 0x00/0x09 (256/320) y 512/640 es idéntico: `camtest` 8200 fotogramas con el disco real en `abe26ce` y en la integración: todas las PPM (21), el log (sin `[ref] DISCREPANCIA`) y el hash RAM/VRAM idénticos. (c) Observación: el marco de 384 se estira a 4:3 (2688 ciclos para 4:3 frente a ~2560 del hardware), así que la imagen de la radio (318 de 384 columnas) sale ~5 % más estrecha que el hardware (antes 368). (d) `t_display` mutado: fallan `sx>=w`, `aw` por exceso, gamma de 5 a 8 bits, bit 6 y `screen.x*div`; NO detectan (sin cobertura) los límites de x2/y1/y2 de `put_disp` ni `screen.h = 0` cuando disp.h = 240. (e) `fb_rect_hit` (gpu.c) sigue usando `d.w` nominal (conservador: 384 en vez de 368, solo en el modo de la radio).
 
 **Pendiente.** (1) Con el visor: confirmar el aspecto de la radio en la pantalla de cine (el marco 384 se estira a 4:3 como cualquier ancho; la imagen queda ligeramente descentrada a la izquierda igual que en el hardware, 26 columnas de margen izquierdo y 40 derecho). (2) La escena VR no usa `GpuDisplay.aw/fw` (en radio es CINE). (3) NTSC: la tabla de rangos es la PAL (edición única); `hle_gfx_put_disp` sigue marcando PAL.
+
+## 49. Probador VR local (`vr/tools/vrprobe/`; rama `probador-vr`, sin fusionar) — 2026-10-19
+
+Validador objetivo de lo que sale de la capa VR, para dejar de depender de "se ve mal en el visor". Usa el disco real del usuario (`gamedata/`), por eso es LOCAL: `vr/tools/` no lo copia `app/stage.sh` (lista cerrada de directorios) ni lo compila la CI. No contiene datos del juego; las zonas se dan por código en un fichero local ignorado.
+
+**Qué ejecuta.** El mismo camino que la app: vrhost + vr_scene + vrcam + body + gameplay con el intérprete (`MV_NOGEN`), arrancando título -> partida (guion de mando del vrhost) -> zona inicial + las zonas pedidas (se piden con el registro de zona del motor y se espera control estable; si una no llega al control en 8000 VBlanks se marca "no alcanzada" y se sigue). Todo gobernado por una máquina de estados en el hook de VBlank (determinista: dos ejecuciones dan las mismas cifras). Cabeza sintética: `mv_vr_set_head`, manos: `mv_vrgame_set_hand`.
+
+**Cómo correrlo** (desde la raíz del repo; Linux, clang/gcc, 2 núcleos bastan, ~1 min por zona):
+- `make -C vr/tools/vrprobe run OUT=<carpeta> SIGS_REF=<sigs_ref.json> ARGS="--zonas a,b --solo giro_c,stick,manos,rend"`.
+- `SIGS_REF` (por defecto `gamedata/sigs_ref.json`) se convierte con `tools/sig/hlesigs.py` en `build-probe/sigs_hle.json`. Un `sigs_hle.json` viejo no enlaza (0/60): hay que generarlo del `sigs_ref.json` de ESE ejecutable (59/60 enlazadas es lo normal).
+- Zonas: `gamedata/probador_zonas.txt` (un código por línea, ignorado por git) o `--zonas`/`--zonas-fichero`. En el informe y aquí se llaman "zona N" (0 = inicial).
+- Umbrales: `--th nombre=valor` (ver `THN` en `vrprobe.c`). `make -C vr/tools/vrprobe selftest` valida rasterizador y escritor PNG (gcc + ASan/UBSan; clang-18 no trae runtime ASan).
+- Salida: `OUT/informe.txt` (PASA/FALLA por prueba y resumen por zona), `OUT/vistas.csv` (una fila por vista), PNG: `zonaN_barrido.png` (24 guiñadas x 5 cabeceos {0,-30,+30,-60,+60}, rojo = hueco), `zonaN_giro.png`, `zonaN_manos.png`, `resumen_huecos.png`. Código de salida != 0 si algún umbral falla. Los mensajes `[wd]` al terminar son inocuos (el hilo de emulación se detiene al volcar).
+
+**Medidas.**
+- (a) Barrido de cabeza 360° cada 15° en guiñada y cabeceos hasta ±60°; giro continuo (2.5°/fotograma); giro con stick suave (2.4°/fotograma, 360°) y por pasos (12 x 30°).
+- (b) Referencia omnidireccional = unión (dedupe a 25 mm) de los triángulos de todas las escenas asentadas del barrido, en coordenadas de juego fijas. Cada escena evaluada se proyecta en CPU (128x128 por ojo, FOV 100°, IPD 63 mm) con la cabeza de presentación; hueco = % de píxeles donde la referencia tiene geometría y la escena no. Además: error de mirada (grados) y de posición (cm) entre la cámara del motor y la cabeza, retardo (VBlanks), polígonos emitidos por el juego vs en escena vs dibujados en la vista, y descartes de `vr_scene` por motivo.
+- (c) Manos: mandos sintéticos con cabeza a 1.60 m (de pie) y 1.04 m (sentado), cinco vistas; error en cm entre la muñeca del mando y la muñeca del personaje dibujada (instantánea de `vrbody_debug`), absoluto y con el registro corregido idealmente.
+- (d) Rendimiento: VBlank/s en avance libre (turbo, con un consumidor de escenas: es margen, no tiempo real) y ms de `vr_scene` (medio y máximo acumulado).
+- Control positivo: el mismo barrido con la escena corregida idealmente (giro Ry(phi) en torno al ojo + traslación del ojo a la cabeza). Debe dar huecos ~1-5 %; así la medida se valida a sí misma (si el control falla, la medida no es fiable).
+
+**Umbrales** (valores por defecto): hueco máx 25 %, medio 2 %, p95 6 %; desajuste angular 15°; registro posición 6 cm, mirada 3°; convergencia 6 VBlanks; descartes/emitidos 0.15; mano correcta <= 8 cm en >= 80 % de las visibles; >= 35 VBlank/s; vr_scene <= 2 ms medio, <= 100 ms máx.
+
+**Resultado sobre main (ab001c0): FALLA** (63 umbrales sin cumplir). 4 zonas (0 y tres más; las que no llegaron a control o se cuelgan en la radio/escena de apertura no se incluyen):
+
+| zona | barrido hueco medio/p95/máx % | giro cabeza | stick suave | stick pasos | control positivo | mirada err. | pos. de pie / sentado (cm) | VBlank/s |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 39.2 / 63.5 / 68.2 | 67.0 | 56.5 | 55.7 | 0.87 | 75.5° | 0.7 / 56.7 | 103 |
+| 1 | 36.5 / 61.6 / 68.3 | 63.9 | 51.7 | 51.6 | 2.57 | 75.5° | 0.8 / (623, artefacto: personaje en movimiento) | 265 |
+| 2 | 39.5 / 61.2 / 70.1 | 65.7 | 50.5 | 52.2 | 5.29 | 75.5° | 0.8 / 56.8 | 107 |
+| 3 | 5.7 / 22.4 / 24.2 | 6.3 | 15.3 | 15.5 | 2.76 | 75.5° | 61.8 / 5.8 | 278 |
+
+Huecos por cabeceo en la zona 0: 0° 57 %, -30° 49 %, +30° 53 %, -60° 17 %, +60° 20 %. La zona 3 es casi todo fondo (95 % de la vista), por eso sus huecos son bajos aun con el mismo defecto de registro.
+
+**Lectura.**
+1. Causa dominante: la cámara del motor, en la escena, no apunta donde la cabeza (75-90° de desajuste; con el stick el error llega a 177°: la escena no gira con theta_play y la guiñada del motor = theta_play + guiñada de cabeza). Con la guiñada corregida los huecos bajan a 1-5 % (control positivo): el defecto es de registro, no de geometría perdida.
+2. Altura/posición: el ojo del motor sigue al cuerpo, no a la cabeza: sentado el ojo queda 56.7 cm por encima de la cabeza (1.60 - 1.04 + 0.007).
+3. Manos: 0 de 8 visibles correctas; error constante 44.5 cm (de pie) / 72.1 cm (sentado) = el mismo desplazamiento de registro; con el registro corregido el error es 0.0 cm (la IK/pose de las manos es correcta). En la zona 1 la cifra "corregida" (601 cm) es un artefacto de la medida (el personaje se mueve entre captura y evaluación): ignorar.
+4. Descartes de `vr_scene`: ~0.10 de lo emitido (671 emitidos, 604 polígonos en escena, 237 triángulos dibujados por vista en la zona 0); por motivo (media por vista): parciales 4.5, cercanos 5.3, detrás 4.6, ambiguos 7.8, degenerados 44.9, recortados 12.6; derivados/enormes/NaN 0. No son la causa de los huecos.
+5. Rendimiento: `vr_scene` 0.1-0.4 ms medio; retardo de cámara 4.9 VBlanks (p95 5).
+
+**Limitaciones.** Sólo ve lo que emite el juego por la zona (la referencia sale del propio barrido: no detecta geometría que el juego nunca emite). Las zonas con comunicación/escena de apertura sin control no se miden. El rendimiento es de la máquina de pruebas, no del visor. No hay sustituto de la prueba en visor para comodidad.
