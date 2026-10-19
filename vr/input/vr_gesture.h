@@ -1,17 +1,15 @@
-/* Gestos de cuerpo -> entrada del juego (C puro, sin dependencias; testeable en Linux).
+/* Gestos de cuerpo (C puro, sin dependencias; testeable en Linux).
  *
- * La capa VR no combate ni decide nada: traduce gestos del usuario a los botones que el juego ya espera (medido en el juego real, ver
- * bitacora):
- *  - GOLPEAR y AGARRAR son dos cosas separadas (con las manos libres):
- *    GOLPEAR = gesto físico de golpe (mano rápida hacia delante, ~2-4 m/s durante 0,2-0,4 s) con la mano en PUÑO (agarre/grip cerrado con histéresis; el
- *    movimiento rápido con la mano abierta no golpea): cuadrado (toque) -> el juego da su golpe del combo; la mano del personaje sigue tu puño (IK) y el háptico llega al impactar. NUNCA agarra.
- *    AGARRAR = llevar la mano al cuello del enemigo + apretar el GATILLO: cuadrado MANTENIDO (agarra, tira de él y lo estrangula); cada nuevo
- *    apretón del gatillo mientras sujeta aprieta el cuello (baja el contador de desmayo); soltar = el enemigo cae. Moverse con el stick sujetando
- *    arrastra al enemigo. Con gestos activos y manos libres el cuadrado físico del mando (gatillo dominante / A) NO llega al juego tal cual:
- *    cerca del cuello es agarre, lejos es un golpe de botón (toque de 4 VBlanks + golpe sintético de la mano del personaje, para accesibilidad).
- *  - Pegarse a la pared: lo hace el juego al empujar el stick contra ella (nada que traducir, funciona sentado); asomarse = triángulo
- *    (primera persona asomándose) cuando la cabeza se inclina hacia un lado estando pegado (opcional).
- *  - Golpear la pared: círculo estando pegado, al hacer un golpe rápido de la mano.
+ * La capa VR decide con el cuerpo y NO simula botones de ataque: sus decisiones (golpe, agarre, apretar) las ejecuta el motor
+ * directamente (vr/input/vr_melee). Controles (tabla final en la bitacora):
+ *  - R1 (mano dominante) / L1 (la otra) son los botones del PUÑO: puño cerrado mientras se mantienen. No llegan al juego.
+ *    El grip analógico solo da la pose de los dedos.
+ *  - GOLPE = puño cerrado (botón mantenido) + golpe físico rápido hacia delante (velocidad relativa a la cabeza) -> punch_side.
+ *  - AGARRE = PULSAR R1/L1 (flanco) con la mano abierta a <= 0,30 m del cuello o la espalda de un enemigo -> grab_start.
+ *    Con el puño ya cerrado (botón mantenido de antes) NUNCA se agarra. Mantener el botón mantiene el agarre (grab_hold);
+ *    cada pulsación nueva o un golpe con el puño estando agarrado = squeeze (apretar y rematar).
+ *  - El cuadrado físico y los demás botones pasan al juego como en el original (respaldo de golpe).
+ *  - Pared: golpear la pared = círculo (golpe rápido de la mano estando pegado); asomarse = triángulo (opcional).
  *  - Hápticos: golpe, agarre, apretón, pared, daño recibido.
  * Espacio de entrada: MUNDO del motor en metros (x, y arriba, z), rumbo del jugador yaw en radianes con delante = (sin yaw, cos yaw).
  * Una llamada por VBlank (dt ~ 0,02). */
@@ -25,27 +23,32 @@ extern "C" {
 
 #define VRG_MAX_EN 8
 enum { VRG_R3 = 1u << 2, VRG_L3 = 1u << 1 };   /* clic del stick (bits del mando del juego, mismos que vr_input) */
-enum { VRG_SQUARE = 1u << 15, VRG_CIRCLE = 1u << 13, VRG_TRIANGLE = 1u << 12, VRG_R1 = 1u << 11, VRG_L1 = 1u << 10 };
+enum { VRG_R2 = 1u << 9, VRG_SQUARE = 1u << 15, VRG_CIRCLE = 1u << 13, VRG_TRIANGLE = 1u << 12, VRG_R1 = 1u << 11, VRG_L1 = 1u << 10 };
 enum { VRG_EV_NONE = 0, VRG_EV_PUNCH = 1, VRG_EV_GRAB = 2, VRG_EV_SQUEEZE = 3, VRG_EV_RELEASE = 4, VRG_EV_KNOCK = 5, VRG_EV_PEEK = 6, VRG_EV_WALL = 7, VRG_EV_HURT = 8,
-       VRG_EV_IMPACT = 9, VRG_EV_JAB = 10 };
+       VRG_EV_IMPACT = 9, VRG_EV_MENU = 10 };
 
 typedef struct {
     int enable;              /* 0: el módulo no hace nada (modo botón) */
     int fist_required;       /* 1 (defecto): el golpe solo cuenta con la mano en PUÑO (agarre cerrado con histéresis grip_on/off); 0 = como antes (el puño es indiferente) */
     float fist_haptic;       /* háptico suave al cerrar el puño con las manos libres (0,12); 0 = ninguno */
-    int button_jab;          /* 0 (defecto): con manos libres el cuadrado físico (gatillo) fuera de un agarre se DESCARTA (el gatillo solo agarra); 1 = golpe de botón de accesibilidad (toque + golpe sintético de la mano) */
     float item_hold_s;       /* con manos libres los grips NO llegan al juego (solo cierran el puño): mantener el clic del stick de cada mano este tiempo (0,35 s) emite R1 (dominante) / L1 (la otra) = ventana de objetos / armas */
     float punch_dir_cos;     /* el golpe exige que la velocidad RELATIVA A LA CABEZA vaya al menos este coseno hacia delante Y radialmente hacia fuera de la cabeza (0,5 = dentro de 60 grados): un gesto lateral o girar el cuerpo no valen */
     float trig_on, trig_off; /* histéresis del gatillo (0,6 / 0,3) */
     int punch, grab, knock, peek;   /* conmutadores por gesto (1 activo) */
     int right_handed;        /* el agarre de la mano dominante es R1 (derecho) o L1 */
     float punch_speed;       /* m/s de la mano para contar como golpe (1,3: la media de 4 muestras recorta el pico real de 2-4 m/s) */
-    float knock_speed;       /* m/s para golpear la pared (1,2) */
+    float knock_speed;       /* velocidad de acercamiento mínima de la mano a la pared al tocarla (0,4 m/s) */
+    float knock_touch;       /* distancia mano-superficie que cuenta como tocar (0,08 m) */
+    float knock_cooldown_s;  /* entre toques (0,25 s) */
+    float knock_enemy_m;     /* con un enemigo a menos de esto de la mano no es pared sino golpe (1,0 m) */
     float reach_min;         /* alcance horizontal mínimo de la mano respecto a la cabeza en el golpe (0,30 m) */
     float front_cos;         /* el golpe exige un enemigo a tiro DELANTE: coseno mínimo entre el rumbo del jugador y la dirección al enemigo (0,5 = 60 grados) */
     float melee_range;       /* distancia máxima al enemigo para golpear (3,0 m); 0 = sin condición */
     float grab_range;        /* distancia máxima cuerpo-enemigo para agarrar (1,3 m) */
-    float neck_radius;       /* radio de la mano al cuello/hombro del enemigo (0,45 m) */
+    float neck_radius;       /* radio de la mano al cuello o a la espalda del enemigo para agarrar (0,30 m) */
+    float back_dist;         /* la espalda: punto a esta distancia (0,25 m) detrás del enemigo, a 0,2 m de altura */
+    float chest_down, chest_side, chest_fwd, chest_radius;   /* zona del pecho (m): bajo la cabeza 0,37, a cada lado 0,15, delante 0,12, radio 0,22 */
+    float grab_after_punch_s;/* sin agarres tras un golpe durante este tiempo (0,3 s) */
     float neck_height;       /* altura del cuello sobre la posición del enemigo (0,45 m, posición del motor = cintura) */
     float grip_on, grip_off; /* histéresis del agarre (0,65 / 0,35) */
     float peek_on, peek_off; /* inclinación lateral de la cabeza para asomarse (0,12 / 0,06 m) */
@@ -69,13 +72,15 @@ typedef struct {
     float head_fwd[2];
     float head_u[3];         /* cabeza (para asomarse: inclinación lateral respecto a la entrada en la pared) */
     float head[3];           /* cabeza del usuario en el mundo */
+    int wall_valid[2];       /* hay consulta de pared para la mano (geometría estática de la escena) */
+    float wall_dist[2];      /* distancia de la mano a la superficie más cercana de la geometría estática (m) */
     int tracked[2];          /* 0 = izquierda física, 1 = derecha física */
     double hand_time[2];     /* instante (s, reloj monótono) de la pose de cada mano; <= 0: sin marca (se usa dt por llamada). Repetir la marca = misma muestra */
     int weapon_busy;         /* arma VR mostrada o maniobra de recarga en curso (el juego desequipa el arma un instante al recargar) */
     float hand[2][3], grip[2];   /* mano en el mundo (cercanía a enemigos); grip = agarre (puño), NO decide el agarre del enemigo */
     float trig[2];           /* gatillo analógico por mano física */
     int stick_dom, stick_off; /* clic del stick de la mano dominante / de la otra (R3 / L3 del mando del juego) */
-    int sq_user;             /* el cuadrado físico del mando está pulsado (gatillo dominante o botón A de la otra mano) */
+    int fist_btn[2];         /* botón del puño pulsado por mano física (R1 de la dominante / L1 de la otra, ya mapeados): ESTO decide puño y agarre; el grip analógico solo es la pose */
     int n_en;
     struct { float p[3]; float yaw; int down; int vital; } en[VRG_MAX_EN];
 } vrg_in_t;
@@ -93,7 +98,17 @@ typedef struct {
     uint16_t mask;           /* botones del usuario a retirar (el grip mientras agarra: no debe abrir menús) */
     float haptic[2];         /* 0..1 por mano física (este VBlank) */
     int event;               /* VRG_EV_* de este VBlank */
-    int jab_side;            /* -1 nada; 0/1: iniciar un golpe sintético de esa mano del personaje (botón sin gesto) */
+    int punch_side;          /* -1 nada; 0/1: lanzar el golpe del motor (mano física que lo dio) */
+    int grab_start;          /* 1: lanzar el agarre del motor este VBlank (mano grab_side, enemigo grab_en) */
+    int grab_hold;           /* 1: el botón del puño sigue pulsado durante el agarre (mantiene el agarre del motor) */
+    int menu_open[2];        /* ventana abierta por la mano física (0 objetos/L1, 1 armas/R1) mientras se mantiene el botón; vr vrg_out.press ya lleva L1/R1 */
+    int knock_side;          /* -1 nada; 0/1: llamar con los nudillos (acción del motor) con esa mano */
+    const char *knock_why;   /* motivo del último intento de toque de este VBlank ("ok", "lento", "enfriamiento", "enemigo", "no_pegado", "lejos_de_la_pared"...) */
+    float knock_speed, knock_dist; int knock_try_side;
+    int squeeze;             /* 1: apretar/rematar (nueva pulsación o golpe estando agarrado) */
+    const char *grab_why;    /* motivo del último intento de agarre de este VBlank (NULL: ninguno): "ok", "mano_lejos", "cuerpo_lejos", "puno_cerrado", "tras_golpe"... */
+    float grab_dist;         /* distancia de la mano al cuello/espalda en ese intento (m) */
+    int grab_side_try;
     int grab_side;           /* mano física que sujeta (-1 ninguna) mientras el agarre dura (para pegar las manos al cuello) */
     int grab_en;             /* índice del enemigo sujetado (en `en`) o -1 */
     vrg_gest_t gest;         /* intento de golpe de este VBlank (valid = 0: ninguno) */
@@ -104,14 +119,15 @@ typedef struct {
     /* interno */
     float pos[2][4][3]; int npos[2];
     float cool;
-    int punch_left;          /* VBlanks restantes de cuadrado por golpe */
-    int knock_left, peek_on;
+    float since_punch;       /* s desde el último golpe */
+    int near_prev[2];
+    int menu_hold, chest_prev[2];
+    float chest_cool[2];
+    int peek_on;
+    float knock_cool[2], cool_knock; double kn_t[2][3]; float kn_d[2][3]; int kn_n[2], kn_toward[2];
     int grab_side;           /* -1 ninguno; mano que sujeta */
-    int sq_hold, sq_age;     /* cuadrado por agarre y VBlanks en su estado actual */
     int fist;                /* bits: mano física con el puño cerrado (histéresis del agarre) */
-    int prev_grip_closed;    /* ahora: gatillo cerrado (con histéresis) */
     int grab_en;
-    float fist_mask;         /* s con R1/L1 retirados tras un golpe (el puño cerrado no debe abrir el menú de objetos) */
     float impact_t; int impact_side;      /* s restantes para el háptico de impacto del último golpe y mano que lo dio */
     int vit_prev[VRG_MAX_EN], vit_n;      /* vida de los enemigos en el VBlank anterior (un descenso = impacto) */
     int prev_life, have_life;
@@ -120,7 +136,6 @@ typedef struct {
     float settle;            /* s sin golpes tras un salto de pose (recentrado, pérdida de seguimiento) */
     float weapon_hold;       /* s sin manos libres tras haber tenido arma (recarga, cambio de arma) */
     int warm;                /* llamadas tras un reinicio sin iniciar agarres (el grip ya cerrado no es un flanco) */
-    int latch; float latch_t;/* R1/L1 retirados hasta soltar el grip tras un agarre */
     float hurt_cool, wall_cool;
     float gest_tokens;       /* cupo de registros [gest] (10 por segundo) */
     int swing[2];            /* movimiento casi rápido en curso por mano (histéresis del registro) */

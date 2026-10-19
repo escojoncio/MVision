@@ -393,7 +393,7 @@ int main(int argc, char **argv) {
     usleep(100000);
     poll_run = 0; if (have_pt) pthread_join(pt, NULL);
     fprintf(stderr, "[bodyrun] eventos de gestos: golpe %u agarre %u apretón %u soltar %u pared(golpe) %u asomar %u contacto-pared %u daño %u impacto %u golpe-botón %u\n", vrbodyg_event_count(VRG_EV_PUNCH), vrbodyg_event_count(VRG_EV_GRAB),
-            vrbodyg_event_count(VRG_EV_SQUEEZE), vrbodyg_event_count(VRG_EV_RELEASE), vrbodyg_event_count(VRG_EV_KNOCK), vrbodyg_event_count(VRG_EV_PEEK), vrbodyg_event_count(VRG_EV_WALL), vrbodyg_event_count(VRG_EV_HURT), vrbodyg_event_count(VRG_EV_IMPACT), vrbodyg_event_count(VRG_EV_JAB));
+            vrbodyg_event_count(VRG_EV_SQUEEZE), vrbodyg_event_count(VRG_EV_RELEASE), vrbodyg_event_count(VRG_EV_KNOCK), vrbodyg_event_count(VRG_EV_PEEK), vrbodyg_event_count(VRG_EV_WALL), vrbodyg_event_count(VRG_EV_HURT), vrbodyg_event_count(VRG_EV_IMPACT), 0u);
     { VrBodyStats bst; vrbody_stats(&bst); fprintf(stderr, "[bodyrun] cuerpo: apply %u brazos %u puños %u malla-no-reconocida %u\n", bst.applies, bst.arms_driven, bst.fist_applies, bst.fist_skipped); }
     if (use_hc) fprintf(stderr, "[hc-resumen] VBlanks con recorte=%u con fundido=%u corr max=%.3f m fade max=%.2f\n", hc_n_hit, hc_n_fade, hc_max_corr, hc_max_fade);
     if (n_cam > 0) fprintf(stderr, "[loco-resumen] construcciones=%.0f distancia ojo-modelo(xz) media=%.1f max=%.1f unidades (vs modelo del fotograma anterior: media=%.1f)\n", n_cam, sum_cam / n_cam, max_cam, sum_prev / n_cam);
