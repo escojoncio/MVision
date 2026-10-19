@@ -352,15 +352,15 @@ func runCase(_ cfg: Cfg, first: Bool) {
         enc.log = { print("[diag] " + $0) }
         let headA = headPose(SIMD3<Float>(0, 1.6, 0), yaw: 0)
         let headB = headPose(SIMD3<Float>(0.2, 1.6, -0.3), yaw: 0.1745)
-        // cubo ciano a ~45 % del camino cabeza -> centro del radar (mismo antebrazo sintético que más abajo): el radar lleva profundidad y debe quedar TAPADO
+        // cubo ciano a ~65 % del camino cabeza -> centro del radar (mismo antebrazo sintético que más abajo): el radar lleva profundidad y debe quedar TAPADO
         var radarCover = false
         do {
             let fa: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>) = (SIMD3<Float>(-0.30, 1.20, -0.40), SIMD3<Float>(-0.25, 1.25, -0.80), SIMD3<Float>(0, 1, 0))
             enc.renderer.radar?.updatePose(forearm: fa, leftGrip: nil, headPosition: XRMath.position(headB), headForward: SIMD3<Float>(0, 0, -1))
             if let wf = enc.renderer.radar?.wristFrame {
                 let hp0 = XRMath.position(headB)
-                let m = hp0 + (wf.center - hp0) * 0.45
-                bench_set_radar_occluder(1, m.x, m.y, m.z, 0.06)
+                let m = hp0 + (wf.center - hp0) * 0.65
+                bench_set_radar_occluder(1, m.x, m.y, m.z, 0.03)
                 radarCover = true
             }
         }
@@ -425,7 +425,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
                 let c = im.avg(px.0, px.1, r: 3)
                 if radarCover {
                     check(caso, "ojo \(e) radar tapado por el cubo ciano (profundidad normal)", near(c, (0, 255, 255), 80), "centro del radar \(wf.center) pixel (\(px.0),\(px.1)) color \(c) esperado ciano; verde/rojo = el radar se pinta por encima del mundo")
-                    let ex = wf.center + wf.right * (wf.halfW * 0.85)
+                    let ex = wf.center + wf.right * (wf.halfW * 0.9)
                     if let pe = project(ex, eye: e, head: headB) {
                         let ce = im.avg(pe.0, pe.1, r: 1)
                         soft(caso, "ojo \(e) radar visible fuera del cubo", ce.1 > 80 && ce.2 < 200, "borde del radar pixel (\(pe.0),\(pe.1)) color \(ce) esperado verde")
