@@ -45,9 +45,9 @@ static void emu_vertex(const NsGpuVert *verts, const NsGpuCorner *c, const NsGpu
     if (c->flags & NSG_CF_PAINT) {
         raw[0] = (float)(c->paint & 255u); raw[1] = (float)((c->paint >> 8) & 255u); raw[2] = (float)((c->paint >> 16) & 255u);
     } else if (P->flags & NSG_PF_SHADE) {
-        float I[3];
-        for (int l = 0; l < 3; l++) I[l] = clampf(P->l[3 * l] * c->n[0] + P->l[3 * l + 1] * c->n[1] + P->l[3 * l + 2] * c->n[2], 0.0f, NSG_INTENSITY_MAX);
-        for (int ch = 0; ch < 3; ch++) raw[ch] = P->k[4 * ch + 3] + P->k[4 * ch] * I[0] + P->k[4 * ch + 1] * I[1] + P->k[4 * ch + 2] * I[2];
+        float inten[3];
+        for (int l = 0; l < 3; l++) inten[l] = clampf(P->l[3 * l] * c->n[0] + P->l[3 * l + 1] * c->n[1] + P->l[3 * l + 2] * c->n[2], 0.0f, NSG_INTENSITY_MAX);
+        for (int ch = 0; ch < 3; ch++) raw[ch] = P->k[4 * ch + 3] + P->k[4 * ch] * inten[0] + P->k[4 * ch + 1] * inten[1] + P->k[4 * ch + 2] * inten[2];
     } else raw[0] = raw[1] = raw[2] = 128.0f;
     float s = P->fog;
     if (P->flags & NSG_PF_VFOG) {
