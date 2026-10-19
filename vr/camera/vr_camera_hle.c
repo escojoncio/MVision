@@ -94,11 +94,13 @@ void hle_vrcam_overscan(Cpu *c) {
  * Paquetes indirectos (bits altos de los índices) y todo lo demás: intactos. Contadores en vrcam_pack_stats(). */
 static uint32_t pk_seen, pk_fixed;
 void vrcam_pack_stats(uint32_t *seen, uint32_t *fixed) { *seen = pk_seen; *fixed = pk_fixed; }
+static int pk_enable = 1;
+void vrcam_pack_enable(int on) { pk_enable = on; }   /* 0: la HLE solo ejecuta el original (pruebas A/B sin recorte) */
 extern uint8_t emu_scratch[0x400];
 void hle_vrcam_pack(Cpu *c) {
     uint32_t list = A0, pk = A1; int32_t n = (int32_t)A2;
     rt_orig(c, "vrcam_pack");
-    if (!vrcam_active() || n <= 0 || n > 4096 || (list & RAM_MASK) + 4u * (uint32_t)n > 0x200000u || (pk & RAM_MASK) + 52u * (uint32_t)n > 0x200000u) return;
+    if (!pk_enable || !vrcam_active() || n <= 0 || n > 4096 || (list & RAM_MASK) + 4u * (uint32_t)n > 0x200000u || (pk & RAM_MASK) + 52u * (uint32_t)n > 0x200000u) return;
     const int32_t hh = (int32_t)gte_cfc2(c, 26);          /* H: la división de la GTE desborda con 2*SZ <= H */
     const uint32_t zmin = (uint32_t)(hh > 0 ? hh / 2 + 4 : 80);
     for (int32_t i = 0; i < n; i++) {

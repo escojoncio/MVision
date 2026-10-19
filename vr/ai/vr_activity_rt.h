@@ -20,6 +20,7 @@
 #define VRA_EU_CLIP_DRAW_NW    249u
 #define VRA_EU_CLIP_DRAW_HASH  0x538a9302bf5e594bull   /* código del ejecutable sin tocar */
 #define VRA_EU_CLIP_DRAW_HASH_VRCAM 0xf6fd9952c641334bull /* idem con el parche de recorte de vr/camera ya aplicado (el host siempre lo aplica) */
+#define VRA_EU_CLIP_DRAW_HASH_VRCAM_NC 0xa543389b52276e0bull /* idem con ademas el parche sin recorte de vr/camera (0x800188F8) */
 
 /* Instancia global que usan los parches (una por proceso). NULL = parches inertes (comportamiento original). */
 void vra_rt_attach(VrActivity *a);

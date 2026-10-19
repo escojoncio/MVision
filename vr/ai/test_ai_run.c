@@ -32,11 +32,12 @@
 #include "vr_cameras.h"
 #include "vr_perception_rt.h"
 #include "vrai.h"
+#include "vr_camera.h"
 #include "rtpatch.h"
 #include "vrhost.h"
 
 #define RAMM 0x1FFFFFu
-enum { K_POKE, K_POKES, K_GCALL, K_STAGE, K_AI, K_PLACE, K_HOLD, K_PAD, K_PROBE, K_FB, K_LOG, K_FRONT, K_DUMP, K_CFACE, K_CSWEEP, K_CHIT, K_SPUPROBE, K_FACE, K_WATCH, K_SCENE, K_TDUMP, K_ALIST, K_CFWD, K_ATK, K_HEAD };
+enum { K_POKE, K_POKES, K_GCALL, K_STAGE, K_AI, K_PLACE, K_HOLD, K_PAD, K_PROBE, K_FB, K_LOG, K_FRONT, K_DUMP, K_CFACE, K_CSWEEP, K_CHIT, K_SPUPROBE, K_FACE, K_WATCH, K_SCENE, K_TDUMP, K_ALIST, K_CFWD, K_ATK, K_HEAD, K_TRI };
 typedef struct { int kind; uint32_t f; uint32_t u[8]; int n, every; char s[160]; double d[3]; } Ev;
 static Ev EV[512];
 static int nev;
@@ -84,6 +85,7 @@ static void load_script(const char *path) {
         else if (!strcmp(k, "csweep")) { e->kind = K_CSWEEP; sscanf(a, "%u %d %lf %lf %lf %d", &e->f, &e->u[0], &e->d[0], &e->d[1], &e->d[2], &e->n); }
         else if (!strcmp(k, "chit")) { e->kind = K_CHIT; sscanf(a, "%u %d %d", &e->f, &e->u[0], &e->n); }
         else if (!strcmp(k, "face")) { e->kind = K_FACE; sscanf(a, "%u %d %d", &e->f, &e->n, &e->u[0]); }
+        else if (!strcmp(k, "tri")) { e->kind = K_TRI; sscanf(a, "%u %d", &e->f, &e->n); }
         else if (!strcmp(k, "head")) { e->kind = K_HEAD; sscanf(a, "%u %lf", &e->f, &e->d[0]); }
         else if (!strcmp(k, "atk")) { e->kind = K_ATK; sscanf(a, "%u %d", &e->f, &e->n); }
         else if (!strcmp(k, "cfwd")) { e->kind = K_CFWD; sscanf(a, "%u %d %lf %lf", &e->f, &e->u[0], &e->d[0], &e->d[1]); }
@@ -120,6 +122,7 @@ static void probe(Cpu *c, uint32_t f) {
     fprintf(stderr, "[ait] f=%u zona=%s jugador=(%d,%d,%d) ctl=%08x mapa=%08x\n", f, st, r16(BA_PLAYER_POS), r16(BA_PLAYER_POS + 2), r16(BA_PLAYER_POS + 4), r32(BA_PLAYER_CTRL), r32(BA_PLAYER_MAP));
     fprintf(stderr, "[ait]   ataques(llamadas a la función de ataque)=%u\n", atk_calls);
     fprintf(stderr, "[ait]   arma=%d municion=[%d..] cargador=%d/%d estado_jugador=%08x global=%08x pausa=%d\n", r16(BA_VARS + 2 * BRIDGE_V_WEAPON), r16(BA_VARS + 2 * BRIDGE_V_WEAPON_AMMO), r16(BA_MAGAZINE), r16(BA_MAGAZINE_MAX), r32(BA_PLAYER_STATUS), r32(BA_GAME_STATUS), (int)r32(BA_PAUSE_LEVEL));
+    { uint32_t ps, pf; vrcam_pack_stats(&ps, &pf); fprintf(stderr, "[ait] paquetes (HLE de la etapa de polígono): vistos=%u re-emitidos=%u\n", ps, pf); }
     VraiStats s; vrai_stats(&s);
     fprintf(stderr, "[ait]   vrai: instalado=%d overlay=%d reubic=%u visión=%u ampliada=%u sospechas=%u alertas_lejos=%u | sonido llam=%u reprod=%u silenc=%u | cámaras=%d parches=%d\n", s.installed, s.overlay_found,
             s.relocates, s.vision_calls, s.extended_hits, s.suspects, s.alerts_far, s.se_calls, s.se_played, s.se_dropped, s.cameras_seen, s.patches);
@@ -246,6 +249,8 @@ static void watch_step(uint32_t f) {
 static volatile int scn_left, scn_idx; static double scn_R = 0.9;
 static struct { uint32_t scenes, with3d; double sum0, sum1, tri_all; uint32_t max0, max1; } SCN;
 static int scn_report;
+/* cobertura 3D: `tri F n` mide n fotogramas los triángulos 3D (lotes kind<=1) de la escena que publica el host con la guiñada de cabeza actual */
+static int tri_left, tri_n; static double tri_sum, tri_min, tri_max, tri_yaw;
 static int td_left, al_left;
 static volatile int atk_left; static uint32_t atk_f;
 #define ATK_FN 0x8002E208u   /* aplica el ataque de un blanco (bala, golpe, explosión) a los blancos dañables que toca */
@@ -402,6 +407,7 @@ static void hook(void *cpu, uint32_t f) {
                 fprintf(stderr, "[ait] cfwd f=%u cam=%d -> (%d,%d,%d) (jugador yaw=%d)\n", f, (int)e->u[0], np[0], np[1], np[2], r16(ctl + BC_ROT + 2));
             } break; }
         case K_HEAD: head_yaw_deg = e->d[0]; break;
+        case K_TRI: tri_left = e->n; tri_n = 0; tri_sum = 0; tri_min = 1e18; tri_max = 0; tri_yaw = head_yaw_deg; break;
         case K_ATK: if (!rt_patched(ATK_FN)) { int rr = rt_patch(ATK_FN, atk_wrap); fprintf(stderr, "[ait] parche de traza del ataque: %d\n", rr); } atk_left = e->n; break;
         case K_ALIST: al_left = e->n; break;
         case K_WATCH: wa_left = e->n; wa_idx = (int)e->u[0]; memset(wa_prev, 0xff, sizeof wa_prev); break;
@@ -477,6 +483,15 @@ int main(int argc, char **argv) {
             if (h0 > SCN.max0) SCN.max0 = h0;
             if (h1 > SCN.max1) SCN.max1 = h1;
         }
+        if (tri_left > 0) {
+            VrScene sc;
+            if (mv_host_scene(&sc) && sc.has_3d) {
+                double t = 0;
+                for (uint32_t bi = 0; bi < sc.nb; bi++) if (sc.b[bi].kind <= 1) t += sc.b[bi].count / 3;
+                tri_sum += t; tri_n++; if (t < tri_min) tri_min = t; if (t > tri_max) tri_max = t;
+            }
+            if (--tri_left == 0) fprintf(stderr, "[ait] tri f=%u yaw=%.0f escenas=%d triangulos3D medio=%.0f min=%.0f max=%.0f\n", f, tri_yaw, tri_n, tri_n ? tri_sum / tri_n : 0.0, tri_n ? tri_min : 0.0, tri_max);
+        }
         for (int i = 0; i < nev; i++) if (EV[i].kind == K_FB && EV[i].f == f) {
             int w = 0, h = 0;
             if (mv_host_framebuffer(fbuf, sizeof fbuf, &w, &h, 0)) {
@@ -488,6 +503,7 @@ int main(int argc, char **argv) {
             }
         }
     }
+    { uint32_t ps, pf; vrcam_pack_stats(&ps, &pf); fprintf(stderr, "[ait] paquetes (HLE de la etapa de polígono): vistos=%u re-emitidos=%u\n", ps, pf); }
     fprintf(stderr, "[ait] fin f=%u\n", mv_host_frame_count());
     return 0;
 }

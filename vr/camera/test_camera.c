@@ -365,15 +365,47 @@ static void test_patch(void) {
     p.no_divide = 0; p.engine_h = 320; p.hfov_deg = 110; p.vfov_deg = 90;
     CHECK(vrcam_patch_ram(a, &p) == 50);   /* 44 inmediatos + 6 sitios sin recorte */
     memset(a, 0, sizeof a); load_exe(eo, a, &base, &size);
-    p.no_cull = 0; CHECK(vrcam_patch_ram(a, &p) == 44); p.no_cull = 1;
+    p.no_cull = 0; CHECK(vrcam_patch_ram(a, &p) == 44); p.no_cull = VRCAM_NOCULL_ALL;
     memset(a, 0, sizeof a); load_exe(eo, a, &base, &size); CHECK(vrcam_patch_ram(a, &p) == 50);
     CHECK(vrcam_patch_ram(a, &p) == -1);
     p.hfov_deg = 10; memset(a, 0, sizeof a); load_exe(eo, a, &base, &size); CHECK(vrcam_patch_ram(a, &p) == -1);   /* parámetros fuera de rango */
 }
 
+
+/* Copias de la visibilidad dentro de overlays: firma sintética (misma codificación que el ejecutable, otros registros y desplazamientos). */
+static void test_scan_overlay(void) {
+    static uint8_t ram[0x200000];
+    memset(ram, 0, sizeof ram);
+    #define W32(a, v) do { uint32_t w_ = (v); memcpy(ram + ((a) & 0x1FFFFFu), &w_, 4); } while (0)
+    /* map en 0x800D0000: lhu v0,44(a0); nop; beq v0,zero,+3; and v0,v0,s4; beq v0,zero,D; nop */
+    W32(0x800D0000u, 0x9482002Cu); W32(0x800D0004u, 0); W32(0x800D0008u, 0x10400003u); W32(0x800D000Cu, 0x00541024u); W32(0x800D0010u, 0x104000F1u); W32(0x800D0014u, 0);
+    /* box en 0x800D0100: andi v0,a2,0x20; beq v0,zero,D; addiu a3,zero,2 */
+    W32(0x800D0100u, 0x30C20020u); W32(0x800D0104u, 0x104000EEu); W32(0x800D0108u, 0x24070002u);
+    /* part en 0x800D0200: beq s6,zero,X; addu v1,zero,zero; andi v0,s4,0x10; beq v0,zero,D; addiu v1,zero,2 */
+    W32(0x800D01F4u, 0x12C000F3u); W32(0x800D01F8u, 0x00001821u); W32(0x800D01FCu, 0x32820010u); W32(0x800D0200u, 0x104000F0u); W32(0x800D0204u, 0x24030002u);
+    VrCamOvSite st[8];
+    int n = vrcam_scan_overlay(ram, 0x800C4380u, 0x80100000u, st, 8);
+    CHECK(n == 3);
+    if (n == 3) {
+        CHECK(st[0].kind == 0 && st[0].addr == 0x800D0010u && st[0].old == 0x104000F1u && st[0].neu == 0);
+        CHECK(st[1].kind == 1 && st[1].addr == 0x800D0104u && st[1].old == 0x104000EEu && st[1].neu == 0x100000EEu);
+        CHECK(st[2].kind == 2 && st[2].addr == 0x800D0200u && st[2].old == 0x104000F0u && st[2].neu == 0x100000F0u);
+    }
+    CHECK(vrcam_scan_overlay(ram, 0x800C4380u, 0x80100000u, st, 2) == 2);          /* respeta el máximo */
+    CHECK(vrcam_scan_overlay(ram, 0x800C4380u, 0x80100000u, st, 0) == 0);
+    CHECK(vrcam_scan_overlay(NULL, 0x800C4380u, 0x80100000u, st, 8) == 0);
+    CHECK(vrcam_scan_overlay(ram, 0x80100000u, 0x800C4380u, st, 8) == 0);          /* rango invertido */
+    CHECK(vrcam_scan_overlay(ram, 0x800C4381u, 0x80100000u, st, 8) == 0);          /* sin alinear */
+    CHECK(vrcam_scan_overlay(ram, 0x800C4380u, 0x80300000u, st, 8) == 0);          /* fuera de la RAM */
+    W32(0x800D0208u, 0); W32(0x800D0108u, 0x24070003u);                             /* box con otra constante: ya no encaja */
+    CHECK(vrcam_scan_overlay(ram, 0x800C4380u, 0x80100000u, st, 8) == 2);
+    #undef W32
+}
+
 int main(void) {
     test_angles();
     test_patch();
+    test_scan_overlay();
     test_hide_head();
     test_activation();
     test_engine_h();

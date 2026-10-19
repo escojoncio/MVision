@@ -58,6 +58,10 @@ int vra_rt_install_fnpatch(void) {
     if (r == RT_PATCH_HASH) {   /* con el parche de recorte de la cámara VR aplicado el código es otro */
         const RtPatchGuard g3 = {VRA_EU_CLIP_DRAW_NW, VRA_EU_CLIP_DRAW_HASH_VRCAM};
         r = rt_patch_fn(VRA_EU_CLIP_DRAW, vra_rt_clip_draw, &g3);
+        if (r == RT_PATCH_HASH) {   /* ... y con ademas el parche sin recorte (caja por pieza siempre visible) */
+            const RtPatchGuard g4 = {VRA_EU_CLIP_DRAW_NW, VRA_EU_CLIP_DRAW_HASH_VRCAM_NC};
+            r = rt_patch_fn(VRA_EU_CLIP_DRAW, vra_rt_clip_draw, &g4);
+        }
     }
     if (r) { rt_unpatch(VRA_EU_POINTCHECK); return r; }
     return 0;

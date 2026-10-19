@@ -149,11 +149,22 @@ typedef struct VrCamPatch {
     float hfov_deg, vfov_deg;/* campo TOTAL que debe cubrir el recorte alrededor de la dirección del motor */
     int no_divide;           /* 1: desactiva la subdivisión de polígonos cercanos (recomendado) */
     int wide_points;         /* 1: ensancha también las 3 comprobaciones de "punto visible" (12 sitios; solo pruebas: ver vr_camera.c) */
-    int no_cull;             /* 1 (defecto): el motor dibuja SIEMPRE todo lo cargado, sin recorte por mapa/sala, caja de pantalla ni códigos de vértice
-                              * (los sitios de la visibilidad para DIBUJAR; la de lógica -DG_PointCheck, campo +0x32 leído por la IA- no cambia) */
+    int no_cull;             /* máscara de bits de los 6 sitios de NOCULL (VRCAM_NOCULL_ALL = todos, defecto; 0 = ninguno): el motor dibuja SIEMPRE todo lo cargado, sin recorte por mapa/sala, caja de pantalla ni códigos de vértice
+                              * (los sitios de la visibilidad para DIBUJAR; la de lógica -la prueba de punto visible, campo +0x32 leído por la IA- no cambia) */
 } VrCamPatch;
+#define VRCAM_NOCULL_ALL 0x3F
 void vrcam_patch_default(VrCamPatch *p);                   /* 160, 140, 120, no_divide = 1, wide_points = 0, no_cull = 1 */
 int vrcam_patch_ram(uint8_t *ram, const VrCamPatch *p);
+
+/* HLE de la etapa de polígono (re-emisión de paquetes poco fiables, ver bitácora): contadores y interruptor (0 = solo el original). */
+void vrcam_pack_stats(uint32_t *seen, uint32_t *fixed);
+void vrcam_pack_enable(int on);
+
+/* Sin recorte en las overlays de zona: algunas llevan su propia copia de la visibilidad de objetos y por pieza. vrcam_scan_overlay busca en
+ * [lo, hi) de la RAM los sitios (máscara de mapa, caja del objeto, caja por pieza) y devuelve cuántos; cada uno trae la palabra original esperada
+ * y la nueva (kind 0 = map, 1 = box, 2 = part). No escribe: aplicarlos con un parche validado (rt_patch_code) para poder deshacerlos. */
+typedef struct VrCamOvSite { uint32_t addr, old, neu; int kind; } VrCamOvSite;
+int vrcam_scan_overlay(const uint8_t *ram, uint32_t lo, uint32_t hi, VrCamOvSite *out, int max);
 
 /* Matemática pura (sin estado) */
 /* Yaw (grados, antihorario visto desde arriba, + = izquierda) y elevación (grados, + = arriba) de una pose de cabeza. */
