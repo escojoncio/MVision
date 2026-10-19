@@ -87,22 +87,95 @@ static void t_sense_buttons(void) {
     vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); vr_pad_t o;
     vr_input_update(&s, &f, &o);
     CHECK(o.buttons == 0 && o.lx == 0x80 && o.ly == 0x80 && o.rx == 0x80 && o.ry == 0x80);
+    /* gatillo derecho = cuadrado (ataque del juego), con histéresis */
     f.hand[1].trigger = 1; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_SQUARE);
-    f.hand[1].trigger = 0.45f; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_SQUARE); /* histéresis */
+    f.hand[1].trigger = 0.45f; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_SQUARE);
     f.hand[1].trigger = 0.2f; vr_input_update(&s, &f, &o); CHECK(o.buttons == 0);
-    f.hand[0].trigger = 1; f.hand[0].grip = 1; f.hand[1].grip = 1;
-    f.hand[1].buttons = VRI_H_LOW | VRI_H_UP | VRI_H_STICK | VRI_H_MENU;
-    f.hand[0].buttons = VRI_H_LOW | VRI_H_UP | VRI_H_STICK | VRI_H_MENU;
-    vr_input_update(&s, &f, &o);
-    uint16_t all = VRI_PAD_CIRCLE | VRI_PAD_L1 | VRI_PAD_R1 | VRI_PAD_CROSS | VRI_PAD_TRIANGLE | VRI_PAD_L2 | VRI_PAD_R2 |
-                   VRI_PAD_L3 | VRI_PAD_R3 | VRI_PAD_START | VRI_PAD_SELECT;
-    CHECK(o.buttons == all);
-    /* zurdo: se espejan los roles */
+    /* caras: derecha A = cruz, B = círculo; izquierda A = cuadrado, B = triángulo */
+    f.hand[1].buttons = VRI_H_LOW; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_CROSS);
+    f.hand[1].buttons = VRI_H_UP; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_CIRCLE);
+    f.hand[1].buttons = 0; f.hand[0].buttons = VRI_H_LOW; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_SQUARE);
+    f.hand[0].buttons = VRI_H_UP; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_TRIANGLE);
+    /* clics y menús */
+    f.hand[0].buttons = VRI_H_STICK; f.hand[1].buttons = VRI_H_STICK; vr_input_update(&s, &f, &o);
+    CHECK(o.buttons == (VRI_PAD_L3 | VRI_PAD_R3));
+    f.hand[0].buttons = VRI_H_MENU; f.hand[1].buttons = VRI_H_MENU; vr_input_update(&s, &f, &o);
+    CHECK(o.buttons == (VRI_PAD_SELECT | VRI_PAD_START));
+    f.hand[0].buttons = f.hand[1].buttons = 0; vr_input_update(&s, &f, &o);
+    /* gatillo izquierdo = L2 */
+    f.hand[0].trigger = 1; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_L2);
+    f.hand[0].trigger = 0; vr_input_update(&s, &f, &o); CHECK(o.buttons == 0);
+    /* agarre derecho = R1 inmediato */
+    f.hand[1].grip = 1; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_R1);
+    f.hand[1].grip = 0; vr_input_update(&s, &f, &o);
+    /* agarre izquierdo = L1 tras el retardo (0,12 s); un toque corto emite un pulso al soltar */
+    f.hand[0].grip = 1; vr_input_update(&s, &f, &o); CHECK(o.buttons == 0);
+    run(&s, &f, 12, &o); CHECK(o.buttons == VRI_PAD_L1);
+    f.hand[0].grip = 0; vr_input_update(&s, &f, &o);
+    vr_input_t t; vr_input_init(&t);
+    f.hand[0].grip = 1; run(&t, &f, 4, &o); f.hand[0].grip = 0;
+    int l1 = 0; for (int i = 0; i < 40; i++) { vr_input_update(&t, &f, &o); if (o.buttons & VRI_PAD_L1) l1++; }
+    CHECK(l1 >= 6 && l1 <= 11);                          /* ~0,10 s a 90 Hz, sin otros botones */
+    CHECK((o.buttons & ~VRI_PAD_L1) == 0);
+    /* acorde: agarre + gatillo izquierdos juntos = R2, sin L1 ni L2 ni toque posterior */
+    vr_input_t u; vr_input_init(&u); f = frame();
+    f.hand[0].grip = 1; f.hand[0].trigger = 1; l1 = 0; int r2 = 0, l2 = 0;
+    for (int i = 0; i < 30; i++) { vr_input_update(&u, &f, &o); if (o.buttons & VRI_PAD_L1) l1++; if (o.buttons & VRI_PAD_R2) r2++; if (o.buttons & VRI_PAD_L2) l2++; }
+    CHECK(l1 == 0 && l2 == 0 && r2 == 30);
+    f.hand[0].trigger = 0; vr_input_update(&u, &f, &o); CHECK(o.buttons == 0);   /* soltar el gatillo con el agarre: sin L1 ni L2 */
+    f.hand[0].grip = 0; l1 = 0; for (int i = 0; i < 30; i++) { vr_input_update(&u, &f, &o); if (o.buttons & VRI_PAD_L1) l1++; }
+    CHECK(l1 == 0);
+    /* con el agarre ya emitido (L1 sostenido), el gatillo da L2 (L1+L2), no R2 */
+    vr_input_t w; vr_input_init(&w); f = frame(); f.hand[0].grip = 1; run(&w, &f, 20, &o);
+    f.hand[0].trigger = 1; vr_input_update(&w, &f, &o); CHECK(o.buttons == (VRI_PAD_L1 | VRI_PAD_L2));
+    /* sin acorde configurado: inmediato y sin R2 */
+    vr_input_t x; vr_input_init(&x); vri_cfg_t cx = x.cfg; cx.map.chord_off = 0; vr_input_set_cfg(&x, &cx); f = frame();
+    f.hand[0].grip = 1; f.hand[0].trigger = 1; vr_input_update(&x, &f, &o); CHECK(o.buttons == (VRI_PAD_L1 | VRI_PAD_L2));
+    /* zurdo: se espejan los roles (gatillo izquierdo = cuadrado, derecho = L2, agarre derecho = L1 con retardo) */
     vri_cfg_t c = s.cfg; c.dominant_hand = 0; vr_input_set_cfg(&s, &c);
-    memset(&f.hand[0], 0, sizeof f.hand[0]); memset(&f.hand[1], 0, sizeof f.hand[1]);
-    f.hand[0].quat[3] = f.hand[1].quat[3] = 1;
-    s.hold_trig[0] = s.hold_trig[1] = false;
-    f.hand[0].trigger = 1; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_SQUARE);
+    vr_input_t z; vr_input_init(&z); vr_input_set_cfg(&z, &c); f = frame();
+    f.hand[0].trigger = 1; vr_input_update(&z, &f, &o); CHECK(o.buttons == VRI_PAD_SQUARE);
+    f.hand[0].trigger = 0; f.hand[1].trigger = 1; vr_input_update(&z, &f, &o); CHECK(o.buttons == VRI_PAD_L2);
+    f.hand[1].trigger = 0; f.hand[0].buttons = VRI_H_LOW; f.hand[1].buttons = VRI_H_LOW; vr_input_update(&z, &f, &o);
+    CHECK(o.buttons == (VRI_PAD_CROSS | VRI_PAD_SQUARE));
+}
+
+/* Menús (jugador fuera de control): gatillo y A confirman (círculo + cruz: confirma en los menús y avanza texto/salta escenas),
+ * B cancela (cruz); los sticks hacen de cruceta; los menús Start/Select y los agarres siguen. */
+static void t_menu_map(void) {
+    const uint16_t CONF = VRI_PAD_CIRCLE | VRI_PAD_CROSS;
+    vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); vr_pad_t o; f.menu = true;
+    f.hand[1].trigger = 1; vr_input_update(&s, &f, &o); CHECK(o.buttons == CONF);
+    f.hand[1].trigger = 0; f.hand[1].buttons = VRI_H_LOW; vr_input_update(&s, &f, &o); CHECK(o.buttons == CONF);
+    f.hand[1].buttons = VRI_H_UP; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_CROSS);
+    f.hand[1].buttons = VRI_H_MENU; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_START);
+    f.hand[1].buttons = 0; f.hand[0].buttons = VRI_H_MENU; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_SELECT);
+    f.hand[0].buttons = VRI_H_LOW; vr_input_update(&s, &f, &o); CHECK(o.buttons == CONF);
+    f.hand[0].buttons = VRI_H_UP; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_CROSS);
+    f.hand[0].buttons = 0; f.hand[0].trigger = 1; vr_input_update(&s, &f, &o); CHECK(o.buttons == CONF);   /* L2 no existe en menús */
+    f.hand[0].trigger = 0;
+    /* el stick derecho (el de girar) también navega: sin giro ni locomoción */
+    f.hand[1].stick_y = -1; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_DOWN && o.lx == 0x80 && o.ly == 0x80);
+    NEAR(vr_input_body_yaw(&s), 0, 1e-9f);
+    f.hand[1].stick_y = 0; vr_input_update(&s, &f, &o); CHECK(o.buttons == 0);
+    f.hand[1].stick_x = 1; f.hand[0].stick_y = 0.6f; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_RIGHT);  /* gana el mayor desvío */
+    f.hand[1].stick_x = 0; f.hand[0].stick_y = 0;
+    /* agarre derecho pasa (R1); el agarre izquierdo en menús no emite toques tardíos */
+    f.hand[1].grip = 1; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_R1); f.hand[1].grip = 0;
+    f.hand[0].grip = 1; run(&s, &f, 3, &o); f.hand[0].grip = 0;
+    int n = 0; for (int i = 0; i < 40; i++) { vr_input_update(&s, &f, &o); n += o.buttons != 0; }
+    CHECK(n == 0);
+    /* al volver al juego el gatillo derecho es el ataque, no confirmar */
+    f.menu = false; f.hand[1].trigger = 1; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_SQUARE);
+    /* tabla sin estado (ventana): mismo mapa de menús */
+    vri_hand_t h[2]; memset(h, 0, sizeof h);
+    h[1].trigger = 1; CHECK(vr_input_sense_plain(&s.cfg, h) == CONF);
+    h[1].trigger = 0; h[1].buttons = VRI_H_UP; CHECK(vr_input_sense_plain(&s.cfg, h) == VRI_PAD_CROSS);
+    h[1].buttons = VRI_H_MENU; h[0].buttons = VRI_H_MENU; h[0].grip = 1; h[1].grip = 1;
+    CHECK(vr_input_sense_plain(&s.cfg, h) == (VRI_PAD_START | VRI_PAD_SELECT | VRI_PAD_L1 | VRI_PAD_R1));
+    memset(h, 0, sizeof h); h[0].stick_x = -1; CHECK(vr_input_sense_plain(&s.cfg, h) == VRI_PAD_LEFT);
+    CHECK(vr_input_sense_plain(NULL, h) == 0 && vr_input_sense_plain(&s.cfg, NULL) == 0);
+    h[0].trigger = NAN; h[0].stick_x = NAN; h[1].grip = INFINITY; (void)vr_input_sense_plain(&s.cfg, h);
 }
 
 static void t_pad_mode(void) {
@@ -268,7 +341,7 @@ static void t_menu(void) {
     CHECK(o.buttons == VRI_PAD_UP && o.lx == 0x80 && o.ly == 0x80);
     f.hand[0].stick_y = 0; f.hand[0].stick_x = -1; vr_input_update(&s, &f, &o); CHECK(o.buttons == VRI_PAD_LEFT);
     f.hand[1].stick_x = 1; vr_input_update(&s, &f, &o); NEAR(vr_input_body_yaw(&s), 0, 1e-9f);
-    f.hand[0].stick_x = 0; vr_input_update(&s, &f, &o); CHECK(o.buttons == 0);
+    f.hand[1].stick_x = 0; f.hand[0].stick_x = 0; vr_input_update(&s, &f, &o); CHECK(o.buttons == 0);
 }
 
 static void t_robust(void) {
@@ -310,7 +383,7 @@ static void t_review(void) {
 }
 
 int main(void) {
-    t_axis(); t_heading(); t_sense_buttons(); t_pad_mode(); t_loco(); t_snap(); t_smooth();
+    t_axis(); t_heading(); t_sense_buttons(); t_menu_map(); t_pad_mode(); t_loco(); t_snap(); t_smooth();
     t_vignette(); t_crouch(); t_posture_modes(); t_calib(); t_menu(); t_robust(); t_review();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

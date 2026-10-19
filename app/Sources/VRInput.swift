@@ -245,8 +245,8 @@ final class VRInput: @unchecked Sendable {
             Self.publish(sample.left, pl, side: 0)
             Self.publish(sample.right, pr, side: 1)
             var l = sample.left, r = sample.right
-            // Con un solo Sense: su stick pasa a ser el de mover (el de girar queda quieto; se gira con el cuerpo) y,
-            // en los menús, el botón inferior también confirma (el confirmar normal es el gatillo del otro mando).
+            // Con un solo Sense: su stick pasa a ser el de mover (el de girar queda quieto; se gira con el cuerpo).
+            // En los menús ya confirman tanto su gatillo como su botón inferior (mapa de menús de vr_input).
             if l.present != r.present {
                 let dominantRight = lock.withLock { settings.rightHanded }
                 var lone = l.present ? l : r
@@ -254,7 +254,6 @@ final class VRInput: @unchecked Sendable {
                 other.present = true
                 other.stickX = lone.stickX; other.stickY = lone.stickY
                 lone.stickX = 0; lone.stickY = 0
-                if menu && lone.low { other.trigger = 1 }
                 // El mando solo hace de mano dominante; la otra mano es la sintética.
                 if dominantRight { l = other; r = lone } else { l = lone; r = other }
             }
@@ -309,6 +308,13 @@ final class VRInput: @unchecked Sendable {
         if turnDeg != 0 { mv_vr_turn(-turnDeg) }
         forwardRumble()
         return out
+    }
+
+    /// Botones de los dos Sense con la tabla de MENÚS de vr_input (sin estado): la usa la ventana, que no conoce el juego.
+    func plainSenseButtons(left: ControllerHub.HandSnapshot, right: ControllerHub.HandSnapshot) -> UInt16 {
+        let hands: [vri_hand_t] = [Self.hand(left, pose: VRInputPose.Pose()), Self.hand(right, pose: VRInputPose.Pose())]
+        var cfg = lock.withLock { state.cfg }
+        return hands.withUnsafeBufferPointer { vr_input_sense_plain(&cfg, $0.baseAddress) }
     }
 
     // MARK: - Hápticos
