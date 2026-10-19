@@ -634,8 +634,7 @@ final class XRPresenter {
                     it.model = simd_float4x4(columns: (SIMD4<Float>(w.right, 0), SIMD4<Float>(w.up, 0), SIMD4<Float>(m.n, 0), SIMD4<Float>(pos, 1)))
                     it.uvrect = SIMD4<Float>(rg.u0, rg.v0, rg.u1, rg.v1)
                     it.size = SIMD2<Float>((rg.u1 - rg.u0) * cfg.wristScale, (rg.v1 - rg.v0) * cfg.wristScale * 0.75)
-                    it.opacity = 1
-                    it.onTop = true
+                    it.opacity = 1      // pegado al antebrazo: con prueba de profundidad normal (no onTop)
                     r.items.append(it)
                     continue
                 }

@@ -1218,3 +1218,12 @@ Descartes de la red tras el arreglo: zona 0 = 1408 (modelo 947, arista 459, lejo
 Con referencia propia de cada una: main 3,25 / 11,93 / 25,37; integra-vr3 2,44 / 9,25 / 25,40. Sin regresión de huecos; los umbrales de hueco (2 %) siguen sin cumplirse en ambos (`MV_NOCULL=00` por defecto; lo ataca `cero-huecos`).
 
 **Pendiente.** Unir `cero-huecos` (conflictos previstos con `agua` en `vrprobe.c`/`vrhost.c` y con `vertices` en `vr_scene.c`/`gte.c`) y repetir la huella de IA por VBlank (`VRPROBE_IAHASH`, `MV_NOCULL=00` frente a `FF`); verificar en visor todo lo marcado como sin verificar en §56-§64.
+
+## 66. Radar y HUD de muñeca con profundidad; solo los textos van por delante (rama `radar-profundidad`; `app/Sources/RadarPanel.swift`, `RenderRG.swift`, `XRPresent.swift`, `XRHud.swift`, `bench/`) — 2026-10-19 (Swift/Metal sin compilar aquí; verifica el CI)
+
+Corrige §59 ("siempre por delante"): solo los TEXTOS (subtítulos, mensajes, créditos, alertas, panel 2D flotante) usan `onTop` (`dsOverlay`, sin prueba de profundidad). El radar del antebrazo y las ranuras del HUD de muñeca (vida, objeto, arma/munición) vuelven a ser objetos pegados al brazo con prueba de profundidad normal.
+- `RadarPanel.swift`: `depthState` = `.greaterEqual` + escritura (Z invertida), como antes de §59.
+- `RenderRG.swift`: `radar?.encodeQuad` vuelve a codificarse ANTES del arma (se prueba contra la profundidad del 3D y del cuerpo).
+- `XRPresent.swift`: el ítem de muñeca ya no pone `onTop` (los paneles flotantes de la rama no-muñeca y la pantalla 3D sí lo conservan). `XRHud.swift`: solo el comentario de `onTop`.
+- Banco (`bench/c/bench_host.c`, `BenchBridge.h`, `Sources/main.swift`): `bench_set_radar_occluder` añade un cubo ciano al 45 % del camino cabeza -> centro del radar; comprobación dura "radar tapado por el cubo ciano" (el centro del radar debe ser ciano) más borde visible (blanda). Se mantiene la comprobación dura del texto magenta con cubo ciano delante.
+Pendiente: verificar en visor que el HUD de muñeca no se ve a través del brazo con la muñeca girada (depende de que el cuerpo escriba profundidad en el pase de escena).
