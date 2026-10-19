@@ -89,7 +89,7 @@ static void t_hook(void) {
     ns_hook_tick(RAM);
     CHECK(ns_bridge_acquire(b, ns_now_ns(), &v) && v.cur->seq == 1 && v.cur->valid == 0 && v.cur->vblank == 77 && v.cur->game_frame == 1 && v.cur->t_ns, "sustituto");
     CHECK(!ns_hook_native_ready(ns_now_ns(), 1000000000ull), "no lista con valid=0");
-    ns_hook_set_extractor(extract, NULL, (const NsMeshStore *)0x42);
+    ns_hook_set_extractor(extract, NULL, (NsMeshStore *)0x42);
     ns_hook_set_context(ctx, NULL);
     CHECK(ns_hook_has_extractor(), "extractor");
     ctx_key = OBJ; ctx_hide = 1;
@@ -98,7 +98,7 @@ static void t_hook(void) {
     put_part(4, 1024, 4242);               /* la IK ocurre después de la captura */
     ns_hook_post_ik(RAM);
     ns_hook_tick(RAM);
-    CHECK(ns_bridge_acquire(b, ns_now_ns(), &v) && v.fresh && v.cur->seq == 2 && v.store == (const NsMeshStore *)0x42, "publicada");
+    CHECK(ns_bridge_acquire(b, ns_now_ns(), &v) && v.fresh && v.cur->seq == 2 && v.store == (NsMeshStore *)0x42, "publicada");
     CHECK(v.cur->area_id == 3 && (v.cur->valid & NS_SV_TOVR_OK) && v.cur->game_frame == 2, "contexto y contador de fotogramas");
     CHECK(v.cur->piece[1 + 6 + 1].flags & NS_PF_HIDDEN, "cabeza oculta por id de instancia");
     CHECK(v.cur->piece[1 + 4].world.m[3] == 4242.0f && fabsf(v.cur->piece[1 + 4].world.m[0] - 0.25f) < 1e-6f, "brazo con pose IK");

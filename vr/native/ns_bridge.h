@@ -3,6 +3,8 @@
  * C11 puro (atómicos), sin dependencias del runtime. Contrato de datos: ns_types.h.
  *
  * DISEÑO (SPSC, sin bloqueos, sin asignaciones en caliente)
+ *   (El contrato v2 trae un triple búfer mínimo, ns_pub.h; este puente es de 4 ranuras porque el consumidor necesita DOS escenas retenidas a la vez para
+ *   interpolar y el productor otra para escribir. Mismo protocolo release/acquire y mismo slot_gen.)
  *   4 ranuras NsScene preasignadas en ns_bridge_create (con las capacidades pedidas). Un único atómico de 12 bits reparte las ranuras:
  *     buzón (la última publicada que el consumidor aún no tomó) | actual | anterior.
  *   El consumidor necesita DOS escenas a la vez (anterior y actual, para interpolar entre escenas del juego) y el productor otra para
@@ -37,7 +39,7 @@ extern "C" {
 /* bit añadido al contrato (NsScene.valid): to_vr es válido (cámara VR activa, primera persona). Sin él el consumidor NO debe dibujar la escena nativa
  * en el mundo del usuario (cinemáticas: pantalla estereoscópica con la cámara del juego). */
 #ifndef NS_SV_TOVR_OK
-#define NS_SV_TOVR_OK 8u
+#define NS_SV_TOVR_OK 64u   /* (8 = NS_SV_MAP_INCOMPLETE, 16 = FX, 32 = STORE_FULL en el contrato v2; pasar a ns_types.h) */
 #endif
 
 #define NS_BRIDGE_SLOTS 4
@@ -73,7 +75,7 @@ void ns_bridge_stats(const NsBridge *b, NsBridgeStats *s);
 NsScene *ns_bridge_begin(NsBridge *b);
 /* ORDEN: las mallas que la escena referencia deben estar ya completas en el almacén ANTES de llamar a publish (publish es la barrera release; el consumidor
  * adquiere con acquire en ns_bridge_acquire). Publica la escena de begin: seq = anterior + 1, t_ns = ahora si era 0. `store` = almacén de mallas del productor (puntero estable; puede ser NULL). */
-void ns_bridge_publish(NsBridge *b, const NsMeshStore *store);
+void ns_bridge_publish(NsBridge *b, NsMeshStore *store);
 /* 1 si hay una escena empezada con begin y aún sin publicar. */
 int ns_bridge_pending(const NsBridge *b);
 /* La escena empezada (o NULL). */
@@ -83,20 +85,17 @@ NsScene *ns_bridge_current(NsBridge *b);
 typedef struct {
     const NsScene *cur;     /* la más reciente publicada */
     const NsScene *prev;    /* la anterior (NULL si solo ha llegado una) */
-    const NsMeshStore *store;   /* almacén de cur */
+    NsMeshStore *store;   /* almacén de cur (no const: ns_store_ack) */
     float alpha;            /* 0..1+extrap entre prev (0) y cur (1); 1 si no hay prev o hay discontinuidad */
     int interp;             /* 1 si hay prev y es continua con cur (se puede interpolar) */
     int fresh;              /* 1 si esta llamada tomó una escena nueva */
-    uint32_t cur_gen, prev_gen;   /* generación de publicación de cada ranura (sube en cada publish; 0 = sin escena): permite detectar que una ranura se reutilizó */
+    uint32_t cur_gen, prev_gen;   /* NsScene.slot_gen de cada una al tomarla (contrato v2): comprobar que no cambió tras copiar */
 } NsView;
 /* Devuelve 0 si todavía no hay ninguna escena; 1 en otro caso. `now_ns` en la base de ns_now_ns (se pasa para poder simular el tiempo en pruebas). */
 int ns_bridge_acquire(NsBridge *b, uint64_t now_ns, NsView *out);
 
-/* Reconocimiento de época de mallas (consumidor -> productor). El productor solo puede liberar la arena de mallas de una época cuando el consumidor ha
- * confirmado que ya no usa mallas anteriores a ella (p. ej. terminó de subir a la GPU todas las de la época vista). Llamar tras procesar una escena
- * con `ns_bridge_ack_epoch(b, escena->mesh_epoch)`; el productor consulta `ns_bridge_acked_epoch` antes de vaciar/reutilizar la arena. Monótono. */
-void ns_bridge_ack_epoch(NsBridge *b, uint32_t epoch);
-uint32_t ns_bridge_acked_epoch(const NsBridge *b);
+/* RECONOCIMIENTO DE ÉPOCA (contrato v2): el consumidor llama a ns_store_ack(view.store, escena->mesh_epoch) cuando ya no usa mallas de épocas anteriores
+ * (p. ej. tras subir a la GPU las de la escena). El puente no lo hace por él: el almacén es del extractor (ns_types.h, «Entrega»). */
 
 /* ---- interpolación (consumidor) ---- */
 typedef struct {
