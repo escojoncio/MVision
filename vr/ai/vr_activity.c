@@ -184,7 +184,7 @@ VraClass vra_class_of_objs(const VrActivity *a, uint32_t objs) {
 
 /* Posición mundo de un objeto 3D (world.t en +0x14). Los parches la leen de RAM; aquí la copia de este
  * fotograma (la posición cambia dentro del fotograma, pero el radio es de miles de unidades). */
-int vra_bound_mode(const VrActivity *a, uint32_t objs, uint32_t flag, uint32_t group, int mode_in) {
+int vra_clip_state(const VrActivity *a, uint32_t objs, uint32_t flag, uint32_t group, int mode_in) {
     if (!a->active || mode_in != 0) return mode_in;
     VraClass cls = vra_class_of_objs(a, objs);
     if (cls == VRA_CLASS_OTHER || a->cfg.mode[cls] != VRA_VR || suspended(a, cls)) return mode_in;
@@ -308,22 +308,22 @@ int vra_audit(const VrActivity *a, const uint8_t *ram, VraAudit *out, int max) {
         const VraTracked *t = &a->tracked[i];
         VraAudit *o = &out[n++];
         memset(o, 0, sizeof *o);
-        o->actor = t->actor; o->cls = t->cls; o->level = t->level; o->dist = t->dist; o->bound_mode = -1;
+        o->actor = t->actor; o->cls = t->cls; o->level = t->level; o->dist = t->dist; o->clip_state = -1;
         if (a->cfg.mode[t->cls] != VRA_VR) o->why |= VRA_WHY_NOT_VR;
         if (a->pause_level & 3) o->why |= VRA_WHY_PAUSED;   /* igual que suspended() */
         if (t->cls == VRA_CLASS_SOLDIER && (a->game_status & 0x200u)) o->why |= VRA_WHY_ENEMY_OFF;
         if (!t->n_objs) { o->why |= VRA_WHY_NO_OBJS; continue; }
         uint32_t ob = t->objs[0], flag = r32(ram, ob + 0x28);
         uint32_t group = (uint16_t)r16(ram, ob + 0x2c);
-        o->bound_mode = r16(ram, ob + 0x32);
+        o->clip_state = r16(ram, ob + 0x32);
         int32_t r = vra_radius(a, (VraClass)t->cls);
         int32_t d = t->dist;
         if (r <= 0 || d > r) o->why |= VRA_WHY_OUT_OF_RANGE;
         else if (!t->in_range && a->cfg.mode[t->cls] == VRA_VR) o->why |= VRA_WHY_NO_LOS;
         if (flag & 0x80u) o->why |= VRA_WHY_INVISIBLE;
         if (group != 0 && !(group & a->cur_group)) o->why |= VRA_WHY_NOT_IN_GROUP;
-        if (!(o->why & (VRA_WHY_INVISIBLE | VRA_WHY_NOT_IN_GROUP | VRA_WHY_OUT_OF_RANGE | VRA_WHY_NO_LOS | VRA_WHY_NOT_VR)) && o->bound_mode == 0)
-            o->why |= VRA_WHY_BOUND_ZERO;
+        if (!(o->why & (VRA_WHY_INVISIBLE | VRA_WHY_NOT_IN_GROUP | VRA_WHY_OUT_OF_RANGE | VRA_WHY_NO_LOS | VRA_WHY_NOT_VR)) && o->clip_state == 0)
+            o->why |= VRA_WHY_CLIP_ZERO;
     }
     return n;
 }

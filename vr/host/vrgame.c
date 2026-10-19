@@ -13,10 +13,14 @@
 #include "host.h"
 #include "vr_body.h"
 #include "vr_camera.h"
+#include "vr_aa.h"
 #include "vr_fire.h"
 #include "vr_hands.h"
 #include "vr_pose.h"
 #include "vr_reload.h"
+#include "w_aa.h"
+#include "w_rifle.h"
+#include "w_throw.h"
 #include "wcut.h"
 #include "wload.h"
 
@@ -24,10 +28,15 @@
 #define PAD_R1 (1u << 11)
 #define PAD_SQUARE (1u << 15)
 
-/* Modelo del arma en el archivo de stages del usuario: stage residente y id del modelo de la pistola con supresor (vr/weapons/wcut_tables.c). */
+/* Modelos de las armas VR en el archivo de stages del usuario (stage residente y id16 del modelo; tablas de corte en vr/weapons/wcut_tables.c).
+ * game_id = índice de arma del puente (0 pistola, 1 fusil, 2 granada a, 3 misil guiado, 5 mina, 6 adhesivo, 8 granada c, 9 francotirador).
+ * Sin entrada: granada b (7, sin modelo identificado): siguen con el arma del propio juego. */
 #define WPN_STAGE "init"
-#define WPN_MODEL 0x36f6u
-#define WPN_GAME_ID 0            /* índice de arma del puente que corresponde a esa arma VR (game_weapon_id de la pistola) */
+typedef struct { int game_id; uint16_t model; } WpnModel;
+static const WpnModel WPN_TAB[] = {
+    {0, 0x36f6}, {1, 0x4725}, {9, 0x2d3b}, {3, 0x15a9}, {4, 0x57f8}, {2, 0x3b88}, {8, 0x761a}, {6, 0xf83d}, {5, 0x17a1},
+};
+#define NSLOT ((int)(sizeof WPN_TAB / sizeof WPN_TAB[0]))
 
 static uint64_t mono_ns(void) {
     struct timespec t;
@@ -199,21 +208,28 @@ void mv_vrgame_status(MvVrGameStatus *out) {
 /* ============================================================================================================== carga del arma */
 enum { LD_IDLE = 0, LD_LOADING = 1, LD_READY = 2, LD_FAILED = 3 };
 
-static struct {
+/* Una ranura por arma con modelo. Se carga bajo demanda la primera vez que el jugador la equipa (un hilo cada vez). */
+typedef struct {
     _Atomic int state;
-    char path[1024];
-    int is_dir, disc;
-    pthread_t th;
-    int th_started;
-    /* resultado (los escribe el hilo de carga antes de publicar state = READY) */
+    int disc;                    /* disco con el que falló (otro disco: se reintenta) */
     WCutSet cs;
     WeaponDef *def;
     WeaponState *st;
     VrHandsRig *rig;
-} LD;
+} Slot;
+static Slot SL[NSLOT];
+static struct {
+    char path[1024];
+    int is_dir;
+    pthread_t th;
+    int th_started;
+    int loading;                 /* ranura en carga (-1 ninguna) */
+} LD = {.loading = -1};
 
 static void *load_thread(void *arg) {
-    (void)arg;
+    int si = (int)(intptr_t)arg;
+    Slot *sl = &SL[si];
+    const uint16_t model = WPN_TAB[si].model;
     int rc = -1;
     size_t len = 0;
     WLoaded m;
@@ -221,31 +237,32 @@ static void *load_thread(void *arg) {
     WCutSet cs;
     memset(&cs, 0, sizeof cs);
     uint8_t *arch = disc_load_stage_archive(LD.path, LD.is_dir, &len);
-    if (!arch) { fprintf(stderr, "[vrgame] arma VR: el disco no tiene el archivo de modelos legible\n"); goto fail; }
+    if (!arch) { fprintf(stderr, "[vrgame] arma VR %d: el disco no tiene el archivo de modelos legible\n", WPN_TAB[si].game_id); goto fail; }
     WLoadOpts o;
     wload_default_opts(&o);
     o.resident = WPN_STAGE;
     o.upscale = 2;
-    rc = wload_model(arch, len, WPN_STAGE, (uint16_t)WPN_MODEL, &o, &m);
+    rc = wload_model(arch, len, WPN_STAGE, model, &o, &m);
     free(arch);
-    if (rc) { fprintf(stderr, "[vrgame] arma VR: wload_model=%d\n", rc); goto fail; }
-    const WCutModel *cm = wcut_find((uint16_t)WPN_MODEL);
-    if (!cm || !cm->weapon) { wload_free(&m); fprintf(stderr, "[vrgame] arma VR: sin tabla de corte\n"); goto fail; }
+    if (rc) { fprintf(stderr, "[vrgame] arma VR %d: wload_model=%d\n", WPN_TAB[si].game_id, rc); goto fail; }
+    const WCutModel *cm = wcut_find(model);
+    if (!cm || !cm->weapon) { wload_free(&m); fprintf(stderr, "[vrgame] arma VR %d: sin tabla de corte\n", WPN_TAB[si].game_id); goto fail; }
     rc = wcut_run(&m, cm, &cs);
     wload_free(&m);
-    if (rc) { fprintf(stderr, "[vrgame] arma VR: wcut_run=%d\n", rc); goto fail; }
+    if (rc) { fprintf(stderr, "[vrgame] arma VR %d: wcut_run=%d\n", WPN_TAB[si].game_id, rc); goto fail; }
     const WeaponDef *base = NULL;
     for (int i = 0; i < w_registry_count; i++) if (w_registry[i] && !strcmp(w_registry[i]->id, cm->weapon)) base = w_registry[i];
-    if (!base) { fprintf(stderr, "[vrgame] arma VR: arma no registrada\n"); goto fail2; }
+    if (!base || base->game_weapon_id != WPN_TAB[si].game_id) { fprintf(stderr, "[vrgame] arma VR %d: arma no registrada\n", WPN_TAB[si].game_id); goto fail2; }
     WeaponDef *def = (WeaponDef *)malloc(sizeof *def);
     WeaponState *st = (WeaponState *)calloc(1, base->state_size);
     if (!def || !st) { free(def); free(st); goto fail2; }
     *def = *base;
     st->def = def;
-    def->init(st);                                        /* init pone s->def = &w_pist: se corrige abajo */
+    def->init(st);                                        /* init pone s->def = &<arma base>: se corrige abajo */
     st->def = def;
     weapon_bind(st, cs.meshes, cs.nmeshes, cs.parts, cs.nparts);
-    /* El agarre derivado del modelo pasa a ser el del arma: dibujo (vr_hands) y lógica (puntos de interacción, boca) coinciden. */
+    /* El agarre derivado del modelo pasa a ser el del arma: dibujo (vr_hands) y lógica (puntos de interacción, boca) coinciden.
+     * Sin pieza de referencia (granadas, minas...) se conserva el punto de la definición. */
     WPose g;
     if (vrhands_derive_grip(st, &g) == 0) def->points[WP_GRIP] = g;
     VrHandsConfig hc;
@@ -257,42 +274,75 @@ static void *load_thread(void *arg) {
         free(def); free(st);
         goto fail2;
     }
-    LD.cs = cs; LD.def = def; LD.st = st; LD.rig = rig;
-    atomic_store_explicit(&LD.state, LD_READY, memory_order_release);
-    fprintf(stderr, "[vrgame] arma VR lista (%d piezas)\n", cs.nmeshes);
+    sl->cs = cs; sl->def = def; sl->st = st; sl->rig = rig;
+    atomic_store_explicit(&sl->state, LD_READY, memory_order_release);
+    fprintf(stderr, "[vrgame] arma VR %d lista (%d piezas)\n", WPN_TAB[si].game_id, cs.nmeshes);
     return NULL;
 fail2:
     wcut_free(&cs);
 fail:
-    atomic_store_explicit(&LD.state, LD_FAILED, memory_order_release);
+    atomic_store_explicit(&sl->state, LD_FAILED, memory_order_release);
     return NULL;
 }
 
-/* Hilo de emulación. */
-static void load_start(void) {
-    if (atomic_load(&LD.state) != LD_IDLE) return;
-    if (LD.th_started) { pthread_join(LD.th, NULL); LD.th_started = 0; }
-    if (cd_current_source(LD.path, sizeof LD.path, &LD.is_dir) != 0) { atomic_store(&LD.state, LD_FAILED); return; }
-    LD.disc = cd_current_disc();
-    atomic_store(&LD.state, LD_LOADING);
-    if (pthread_create(&LD.th, NULL, load_thread, NULL) != 0) { atomic_store(&LD.state, LD_FAILED); return; }
+static int slot_of(int game_id) {
+    for (int i = 0; i < NSLOT; i++) if (WPN_TAB[i].game_id == game_id) return i;
+    return -1;
+}
+
+/* Hilo de emulación. Recoge el hilo anterior si ya terminó y pide el siguiente modelo. */
+static void load_poll(void) {
+    if (LD.loading >= 0) {
+        int s = atomic_load_explicit(&SL[LD.loading].state, memory_order_acquire);
+        if (s == LD_READY || s == LD_FAILED) {
+            if (LD.th_started) { pthread_join(LD.th, NULL); LD.th_started = 0; }
+            if (s == LD_FAILED) SL[LD.loading].disc = cd_current_disc();
+            LD.loading = -1;
+        }
+    }
+}
+static void load_start(int si) {
+    if (si < 0 || LD.loading >= 0) return;
+    int st = atomic_load(&SL[si].state);
+    if (st == LD_FAILED && SL[si].disc != cd_current_disc()) { atomic_store(&SL[si].state, LD_IDLE); st = LD_IDLE; }   /* otro disco: se reintenta */
+    if (st != LD_IDLE) return;
+    if (cd_current_source(LD.path, sizeof LD.path, &LD.is_dir) != 0) { atomic_store(&SL[si].state, LD_FAILED); SL[si].disc = cd_current_disc(); return; }
+    atomic_store(&SL[si].state, LD_LOADING);
+    LD.loading = si;
+    if (pthread_create(&LD.th, NULL, load_thread, (void *)(intptr_t)si) != 0) { atomic_store(&SL[si].state, LD_FAILED); SL[si].disc = cd_current_disc(); LD.loading = -1; return; }
     LD.th_started = 1;
 }
 
 /* ============================================================================================================== simulación del arma */
+/* Botón con el que el juego detona las cargas adhesivas colocadas (se fija por la prueba de vrhost_run: ver bitacora). */
+#define PAD_DETONATE PAD_SQUARE
+#define DET_PRESS_VBL 4
+
+#define PLACE_REACH_M 1.6f      /* radio (m, desde la cabeza) dentro del cual se coloca una mina o carga */
+#define PLACE_LIFT_M 0.02f      /* separación del suelo (la mina se apoya, no se hunde) */
+#define THROW_TICK_S 0.04f      /* un tick del motor (2 VBlanks de 50 Hz) */
+
 static struct {
     int body_ok, fire_ok;
     int inited;
     uint64_t last_ns;
+    int cur;                    /* ranura del arma VR mostrada en el VBlank anterior (-1 ninguna) */
     int active;                 /* modo arma VR del VBlank anterior */
     int prev_mag_in;            /* mag_inserted del paso anterior (flanco "cargador insertado") */
     int prev_state;
-    int fire_edge;              /* lo pone el callback fire() dentro de update */
+    int fire_edge;              /* lo pone el callback fire() (o el gancho de lanzamiento) dentro de update */
     WPose fire_pose;
     int boot_done;              /* la primera toma de munición del arma (arranque) no cuenta como cargador de la cintura */
+    int mag_weapon;             /* el arma activa lleva cargador en el juego (contabilidad virtual de cargadores) */
+    int ammo_game;              /* munición total del arma activa en el juego (para los lanzamientos) */
+    VrFireMap map;              /* correspondencia usuario -> motor del VBlank (para el gancho de colocación) */
+    WPose head;                 /* cabeza del VBlank (usuario) */
+    float floor_u;              /* altura del suelo del juego en espacio de usuario (m) */
+    int floor_ok;
+    int det_t;                  /* VBlanks restantes pulsando el botón de detonación */
     WGameBridge br;
     VrReloadOut ro;             /* última salida de la recarga */
-    uint32_t shots, arms;
+    uint32_t shots, arms, throws, places, dets, rejects;
     int last_disc;
     int logged;
 } G;
@@ -305,8 +355,9 @@ static void publish_off(void) {
 }
 
 void vrgame_reset(void) {
-    G.inited = 0; G.active = 0; G.prev_mag_in = 0; G.prev_state = VRR_OFF; G.fire_edge = 0;
-    G.boot_done = 0; G.last_ns = 0;
+    vrbodyg_reset();
+    G.inited = 0; G.active = 0; G.cur = -1; G.prev_mag_in = 0; G.prev_state = VRR_OFF; G.fire_edge = 0;
+    G.boot_done = 0; G.last_ns = 0; G.det_t = 0;
     memset(&G.ro, 0, sizeof G.ro);
     G.ro.sync_rounds = G.ro.sync_chambered = -1;
     publish_off();      /* un arma publicada antes de reiniciar el motor no debe quedarse dibujada */
@@ -315,7 +366,9 @@ void vrgame_set_enabled(int body_ok, int fire_ok) { G.body_ok = body_ok; G.fire_
 
 static int cb_ammo_reserve(int id) { return vrreload_ammo_reserve(id); }
 static void cb_ammo_take(int id, int n) {
-    if (!G.boot_done) return;     /* el cargador con el que arranca el arma es el del juego (se sincroniza): no sale de la cintura */
+    /* Solo las armas de cargador llevan libro virtual (cargadores cogidos de la cintura). Las demás (misil, granadas, minas)
+     * gastan la munición el propio juego al crear el proyectil: descontarla aquí la contaría dos veces. */
+    if (!G.boot_done || !G.mag_weapon) return;
     vrreload_ammo_take(id, n);
 }
 static void cb_fire(int id, WPose mz) { (void)id; G.fire_edge = 1; G.fire_pose = mz; G.shots++; }
@@ -329,12 +382,76 @@ static void cb_haptic(int hand, float strength, float seconds) {
     pthread_mutex_unlock(&HM);
 }
 
+/* ---- colocación (mina, carga adhesiva) ----
+ * El juego decide la superficie y si se puede; aquí solo se da la pose. El jugador puede estar SENTADO: no se exige acercar
+ * la mano al suelo físico. Desde la pose del objeto en la mano se traza el rayo de su "delante" (-Z) y se proyecta sobre el
+ * suelo del juego (plano a la altura de los pies del personaje); sin inclinación hacia abajo se coloca a la altura de la mano
+ * a la distancia máxima alcanzable (pared: no hay geometría del escenario en esta capa, es aproximado). Dentro de PLACE_REACH_M
+ * de la cabeza; fuera se rechaza (el arma no gasta nada). Devuelve 0 si se rechaza. */
+static int place_project(const WPose *obj, WPose *out) {
+    float fx = -2 * (obj->q.x * obj->q.z + obj->q.w * obj->q.y);
+    float fy = -2 * (obj->q.y * obj->q.z - obj->q.w * obj->q.x);
+    float fz = -(1 - 2 * (obj->q.x * obj->q.x + obj->q.y * obj->q.y));
+    float hx = obj->p.x - G.head.p.x, hz = obj->p.z - G.head.p.z;
+    float p[3] = {obj->p.x, obj->p.y, obj->p.z};
+    if (G.floor_ok && fy < -0.2f && obj->p.y > G.floor_u) {          /* apunta hacia abajo: suelo */
+        float t = (G.floor_u + PLACE_LIFT_M - obj->p.y) / fy;
+        p[0] = obj->p.x + fx * t; p[1] = G.floor_u + PLACE_LIFT_M; p[2] = obj->p.z + fz * t;
+    } else {                                                          /* horizontal: a la distancia máxima */
+        float hl = sqrtf(fx * fx + fz * fz);
+        if (hl < 1e-3f) return 0;
+        float t = PLACE_REACH_M * 0.8f - sqrtf(hx * hx + hz * hz);
+        if (t < 0.1f) t = 0.1f;
+        p[0] = obj->p.x + fx / hl * t; p[2] = obj->p.z + fz / hl * t;
+    }
+    float dx = p[0] - G.head.p.x, dz = p[2] - G.head.p.z;
+    if (sqrtf(dx * dx + dz * dz) > PLACE_REACH_M) return 0;
+    out->p.x = p[0]; out->p.y = p[1]; out->p.z = p[2];
+    /* orientación: solo la guiñada de la mano (el "delante" del objeto horizontal), así la mina mira hacia donde apunta el jugador */
+    float hl = sqrtf(fx * fx + fz * fz);
+    float yaw = hl > 1e-3f ? atan2f(-fx, -fz) : 0.0f;
+    out->q.x = 0; out->q.y = sinf(yaw * 0.5f); out->q.z = 0; out->q.w = cosf(yaw * 0.5f);
+    return 1;
+}
+
+static int launch_hook(void *user, const WLaunch *ev) {
+    (void)user;
+    if (!ev) return 0;
+    switch (ev->kind) {
+    case WL_THROW:
+    case WL_INHAND: {
+        if (G.ammo_game <= 0 || !G.map.valid) { G.rejects++; return 0; }
+        float v[3] = {ev->lin_vel.x, ev->lin_vel.y, ev->lin_vel.z};
+        if (ev->kind == WL_INHAND) v[0] = v[1] = v[2] = 0;     /* cocinada hasta el final en la mano: cae a los pies (mecha del juego) */
+        float p[3] = {ev->pose.p.x, ev->pose.p.y, ev->pose.p.z};
+        if (!vrfire_set_throw(p, v, THROW_TICK_S)) { G.rejects++; return 0; }
+        G.fire_edge = 1; G.fire_pose = ev->pose; G.shots++; G.throws++;
+        return 1; }
+    case WL_PLACE_C:
+    case WL_PLACE_MINE: {
+        if (G.ammo_game <= 0 || !G.map.valid) { G.rejects++; return 0; }
+        WPose pp;
+        if (!place_project(&ev->pose, &pp)) { G.rejects++; return 0; }
+        G.fire_edge = 1; G.fire_pose = pp; G.shots++; G.places++;
+        return 1; }
+    case WL_DETONATE:
+        G.det_t = DET_PRESS_VBL; G.dets++;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static void init_once(void) {
     if (G.inited) return;
     G.inited = 1;
     VrFireCfg fc;
     vrfire_cfg_default(&fc);
     vrfire_init(&fc);
+    VrAaCfg ac;       /* apuntado del lanzador antiaéreo con el buscador del juego (vr_aa.h) */
+    vraa_cfg_default(&ac);
+    if (vrcam_config()->engine_h > 0) ac.h_scale = 320.0f / (float)vrcam_config()->engine_h;   /* el visor usa la H original del juego */
+    vraa_init(&ac);
     VrReloadCfg rc;
     vrreload_cfg_default(&rc);
     vrreload_init(&rc);
@@ -344,6 +461,8 @@ static void init_once(void) {
     G.br.fire = cb_fire;
     G.br.haptic = cb_haptic;
     G.ro.sync_rounds = G.ro.sync_chambered = -1;
+    G.cur = -1;
+    w_throw_set_hook(launch_hook, NULL);
 }
 
 static void head_pose(WPose *h) {
@@ -363,8 +482,33 @@ static WPose wpose_of(const GripPose *g) {
     return w;
 }
 
+int vrgame_hand_raw(int side, float p[3], float *grip) {
+    if (side < 0 || side > 1) return 0;
+    pthread_mutex_lock(&HM);
+    GripPose g = grip_locked(&hand_in[side], mono_ns());
+    float gr = hand_in[side].grip;
+    pthread_mutex_unlock(&HM);
+    if (!g.valid) return 0;
+    memcpy(p, g.p, sizeof g.p);
+    if (grip) *grip = gr;
+    return 1;
+}
+void vrgame_haptic(int side, float s) {
+    if (side < 0 || side > 1 || !isfinite(s) || s <= 0) return;
+    pthread_mutex_lock(&HM);
+    if (s > hap_out[side]) hap_out[side] = s > 1 ? 1 : s;
+    pthread_mutex_unlock(&HM);
+}
+
+static VrGameDriver drv_fn;
+static uint32_t drv_vbl;
+void vrgame_set_driver(VrGameDriver f) { drv_fn = f; drv_vbl = 0; }
+
 uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     init_once();
+    vraa_tick();
+    if (drv_fn) pad = drv_fn(drv_vbl++, pad, bs);
+    pad = vrbodyg_pad(pad, bs, opt_right);     /* gestos de cuerpo (golpe, agarre, pared): añaden/retiran botones del mando del usuario */
     uint64_t now = mono_ns();
     float dt = G.last_ns ? (float)((double)(now - G.last_ns) * 1e-9) : 0.02f;
     G.last_ns = now;
@@ -387,45 +531,58 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     vrbody_set_dominant(right ? 1 : 0);
     for (int i = 0; i < 2; i++) vrbody_set_grip(i, gp[i].valid ? hs[i].grip : 0.0f);
 
-    if (atomic_load(&LD.state) == LD_FAILED && cd_current_disc() != LD.disc) {   /* otro disco: se vuelve a intentar */
-        if (LD.th_started) { pthread_join(LD.th, NULL); LD.th_started = 0; }
-        atomic_store(&LD.state, LD_IDLE);
-    }
-    if (core && bs->weapon == WPN_GAME_ID && G.fire_ok && cam) load_start();   /* pide el modelo la primera vez que hace falta */
-    int ready = atomic_load_explicit(&LD.state, memory_order_acquire) == LD_READY;
-    if (ready && LD.th_started) { pthread_join(LD.th, NULL); LD.th_started = 0; }   /* el hilo ya terminó (solo falta recogerlo) */
+    /* carga bajo demanda: el arma equipada que tiene modelo y aún no se ha pedido */
+    load_poll();
+    int eq_slot = core ? slot_of(bs->weapon) : -1;
+    if (eq_slot >= 0 && G.fire_ok && cam) load_start(eq_slot);
+    int eq_ready = eq_slot >= 0 && atomic_load_explicit(&SL[eq_slot].state, memory_order_acquire) == LD_READY;
 
     int w = right ? 1 : 0, o = 1 - w;   /* w: mando que empuña el arma; o: el otro */
-    int equipped = core && bs->weapon == WPN_GAME_ID;
-    int mode = ready && G.fire_ok && cam && gp[w].valid && core && (equipped || G.ro.busy);
+    /* Arma mostrada: la equipada; durante la maniobra de recarga el juego la desequipa un instante y se conserva la anterior. */
+    int slot = eq_ready ? eq_slot : (G.ro.busy && G.cur >= 0 ? G.cur : -1);
+    int mode = slot >= 0 && G.fire_ok && cam && gp[w].valid && core;
+    if (mode && slot != G.cur && G.cur >= 0 && G.active) {    /* cambio de arma: la anterior se reinicia al volver a mostrarla */
+        Slot *old = &SL[G.cur];
+        if (atomic_load(&old->state) == LD_READY) { old->def->init(old->st); old->st->def = old->def; }
+        G.boot_done = 0; G.prev_mag_in = 0;
+    }
+    Slot *sl = slot >= 0 ? &SL[slot] : NULL;
+    const int gid = slot >= 0 ? WPN_TAB[slot].game_id : -1;
+    G.mag_weapon = core && bs->magazine_max > 0 && (gid == 0 || gid == 1 || gid == 9);
+    G.ammo_game = core && bs->weapon >= 0 && bs->weapon < BRIDGE_N_WEAPONS ? bs->weapon_ammo[bs->weapon] : 0;
 
-    /* la recarga corre siempre (si no hay arma VR vuelve a reposo y suelta su contabilidad) */
+    /* la recarga corre siempre (si no hay arma VR de cargador vuelve a reposo y suelta su contabilidad) */
     VrReloadGame rg;
     vrreload_read_game(bs, &rg);
     VrReloadIn ri;
     memset(&ri, 0, sizeof ri);
-    ri.weapon_id = mode ? WPN_GAME_ID : -1;
+    ri.weapon_id = mode && G.mag_weapon ? gid : -1;
     ri.mag_in_edge = 0;
     ri.ready = 0;
-    if (ready && mode) {
-        int mi = LD.st->mag_inserted;
+    if (mode && G.mag_weapon) {
+        int mi = sl->st->mag_inserted;
+        if (!G.active || slot != G.cur) G.prev_mag_in = mi;      /* arma recién mostrada: su cargador inicial no es un gesto de recarga */
         ri.mag_in_edge = mi && !G.prev_mag_in;
-        ri.ready = mi && LD.st->chambered;
+        ri.ready = mi && sl->st->chambered;
         G.prev_mag_in = mi;
     } else {
         G.prev_mag_in = 0;
     }
     VrReloadOut ro;
     vrreload_frame(&rg, &ri, &ro);
+    /* Armas sin cargador en el juego (misil, granadas, minas): puede disparar mientras quede munición. */
+    if (mode && !G.mag_weapon) { ro.fire_allowed = G.ammo_game > 0; ro.state = VRR_READY; ro.busy = 0; }
 
     if (!mode) {
+        vraa_set_scope(0, NULL, NULL);
         if (G.active) {
             publish_off();
-            /* al volver a mostrarla se reinicia el estado de la pistola (cargador del juego otra vez) */
-            if (ready) { LD.def->init(LD.st); LD.st->def = LD.def; }
+            /* al volver a mostrarla se reinicia el estado del arma (cargador del juego otra vez) */
+            if (G.cur >= 0 && atomic_load(&SL[G.cur].state) == LD_READY) { SL[G.cur].def->init(SL[G.cur].st); SL[G.cur].st->def = SL[G.cur].def; }
             G.boot_done = 0;
         }
         G.active = 0;
+        G.cur = -1;
         vrbody_set_armed(0);
         vrfire_set_hide(0);
         VrFireGame fg;
@@ -439,8 +596,8 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         if (ro.busy) out = (uint16_t)(out & ~ro.pad_mask);
         out |= ro.pad_force;     /* una maniobra a medias termina aunque el arma ya no esté equipada */
         pthread_mutex_lock(&HM);
-        pub_status.loader = atomic_load(&LD.state);
-        pub_status.active = 0; pub_status.mag_rounds = pub_status.chambered = pub_status.mag_inserted = 0;
+        pub_status.loader = eq_slot >= 0 ? atomic_load(&SL[eq_slot].state) : 0;
+        pub_status.active = 0; pub_status.weapon = -1; pub_status.mag_rounds = pub_status.chambered = pub_status.mag_inserted = 0;
         pub_status.game_mag = pub_status.game_reserve = 0;
         pub_status.reload_state = ro.state;
         pub_status.shots = G.shots;
@@ -449,23 +606,38 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     }
 
     /* ---- arma VR mostrada y mandando ---- */
-    WeaponState *st = LD.st;
-    const WeaponDef *def = LD.def;
+    WeaponState *st = sl->st;
+    const WeaponDef *def = sl->def;
     G.active = 1;
+    G.cur = slot;
     vrbody_set_armed(1);
     vrfire_set_hide(1);
 
     /* tope/sincronía del cargador VR con el del juego (vr_reload.h): solo con cargador dentro y fuera de la espera de recarga */
-    if (ro.state == VRR_EMPTY && G.prev_state != VRR_EMPTY) { st->chambered = 0; st->mag_rounds = 0; }   /* el juego vació: el VR también */
-    if (ro.state == VRR_READY && st->mag_inserted) {
-        if (ro.sync_rounds >= 0) { if (ro.sync_force || st->mag_rounds > ro.sync_rounds) st->mag_rounds = ro.sync_rounds; }
-        if (ro.sync_chambered >= 0) { if (ro.sync_force || st->chambered > ro.sync_chambered) st->chambered = ro.sync_chambered; }
+    if (G.mag_weapon) {
+        if (ro.state == VRR_EMPTY && G.prev_state != VRR_EMPTY) { st->chambered = 0; st->mag_rounds = 0; }   /* el juego vació: el VR también */
+        if (ro.state == VRR_READY && st->mag_inserted) {
+            if (ro.sync_rounds >= 0) { if (ro.sync_force || st->mag_rounds > ro.sync_rounds) st->mag_rounds = ro.sync_rounds; }
+            if (ro.sync_chambered >= 0) { if (ro.sync_force || st->chambered > ro.sync_chambered) st->chambered = ro.sync_chambered; }
+        }
     }
     G.prev_state = ro.state;
 
+    /* correspondencia usuario -> motor y suelo del juego (para colocar minas y cargas) */
+    VrFireMap map;
+    vrfire_map_from_cam(&map, vrcam_last_record());
+    G.map = map;
+    head_pose(&G.head);
+    G.floor_ok = 0;
+    if (map.valid && core) {
+        /* los pies del personaje: ctl_pos.y es la base del bloque de control; ojo del motor <-> cabeza del usuario */
+        float feet_below_eye_m = (float)(map.eye[1] - bs->ctl_pos.y) / map.units_per_m;
+        if (feet_below_eye_m > 0.3f && feet_below_eye_m < 2.5f) { G.floor_u = G.head.p.y - feet_below_eye_m; G.floor_ok = 1; }
+    }
+
     WInput in;
     memset(&in, 0, sizeof in);
-    head_pose(&in.head);
+    in.head = G.head;
     in.hand[0] = wpose_of(&gp[w]);
     if (gp[o].valid) in.hand[1] = wpose_of(&gp[o]);
     else { in.hand[1].p.x = 0; in.hand[1].p.y = -10; in.hand[1].p.z = 0; in.hand[1].q.w = 1; }   /* sin mano libre: lejos de todo punto de interacción */
@@ -476,10 +648,18 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     if (gp[o].valid) in.buttons[1] = (hs[o].low ? WB_A : 0u) | (hs[o].up ? WB_B : 0u) | (hs[o].stick ? WB_STICK : 0u);
     in.dt = dt;
     /* el gatillo solo actúa cuando el disparo puede salir (recarga del juego en curso, cargador del juego vacío...: sin disparos sin proyectil) */
-    if (!(ro.state == VRR_READY && ro.fire_allowed)) in.trigger[0] = 0;
+    if (G.mag_weapon && !(ro.state == VRR_READY && ro.fire_allowed)) in.trigger[0] = 0;
     in.support_held = gp[o].valid && in.grip[1] > 0.5f && wcore_hand_dist(st, &in, 1, WP_SUPPORT) < 0.07f;
 
     G.fire_edge = 0;
+    if (gid == 4) {      /* lanzador antiaéreo: el arma refleja el buscador del propio juego (para háptico y estado visible) */
+        VrAaLock al;
+        vraa_lock_info(&al);
+        AAGameLock gl = {al.alive, al.target != 0, al.frames};
+        aa_feed_game_lock(st, &gl);
+    } else {
+        vraa_set_scope(0, NULL, NULL);
+    }
     def->update(st, &in, (WReloadMode)rmode, &G.br);
     G.boot_done = 1;      /* la primera actualización es la del arranque del arma */
 
@@ -489,7 +669,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     hp.valid = 1;
     memcpy(hp.pos, gp[w].p, sizeof hp.pos); memcpy(hp.rot, gp[w].q, sizeof hp.rot);
     VrHandsFrame vf;
-    int nb = vrhands_build(LD.rig, st, &hp, &vf);   /* fuera del cerrojo: el hilo de render no espera a la construcción de las mallas */
+    int nb = vrhands_build(sl->rig, st, &hp, &vf);   /* fuera del cerrojo: el hilo de render no espera a la construcción de las mallas */
     pthread_mutex_lock(&HM);
     if (nb > 0) {
         vrhands_post(&vf);
@@ -504,17 +684,26 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     /* disparo */
     VrFireGame fg;
     vrfire_read_game(ram, bs, &fg);
-    VrFireMap map;
-    vrfire_map_from_cam(&map, vrcam_last_record());
     VrFireIn fi;
     memset(&fi, 0, sizeof fi);
     fi.active = bs->in_control && !ro.busy && map.valid && (ro.fire_allowed || ro.state == VRR_READY || ro.state == VRR_OFF);
     {
-        WPose W = vrhands_weapon_world(LD.rig, st, &hp);
+        WPose W = vrhands_weapon_world(sl->rig, st, &hp);
         fi.muzzle = wpose_mul(W, def->points[WP_MUZZLE]);
+        if (gid == 4) {
+            /* Visor del lanzador: con el arma al ojo el juego tiene su mira y su buscador (vr_fire mantiene el botón) y el buscador
+             * del juego corre con la vista de este visor (vr_aa). Sin gesto (a la cadera) se dispara como antes, sin fijar. */
+            WPose sight = wpose_mul(W, def->points[WP_EYE]);
+            int aim = vraa_gesture(&G.head, &sight, st->phase == AA_P_READY && st->mag_rounds > 0);
+            vraa_set_scope(aim, &map, &sight);
+            fi.ready = aim;
+            fi.raise = 1;
+        }
     }
     fi.fire = G.fire_edge && ro.fire_allowed;
     fi.fire_pose = G.fire_pose;
+    /* Fusil en automático: el juego dispara mientras el botón está mantenido; la pose de cada bala es la boca en vivo. */
+    fi.trigger_held = gid == 1 && !rifle_is_semi(st) && in.trigger[0] > 0.5f && ro.fire_allowed && st->chambered > 0;
     fi.map = &map;
     VrFireOut fo;
     vrfire_frame(&fg, &fi, &fo);
@@ -530,15 +719,18 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     if (ro.busy) out = (uint16_t)(out & ~ro.pad_mask);
     out |= ro.pad_force;
     if (fo.engaged && fo.square) out |= PAD_SQUARE;
+    if (G.det_t > 0) { G.det_t--; if (bs->in_control) out |= PAD_DETONATE; }
     G.ro = ro;
 
     pthread_mutex_lock(&HM);
     pub_status.loader = LD_READY;
     pub_status.active = 1;
+    pub_status.weapon = gid;
     pub_status.mag_rounds = st->mag_rounds; pub_status.chambered = st->chambered; pub_status.mag_inserted = st->mag_inserted;
     pub_status.game_mag = ro.show_mag; pub_status.game_reserve = ro.show_reserve;
     pub_status.reload_state = ro.state;
     pub_status.shots = G.shots;
+    pub_status.throws = G.throws; pub_status.places = G.places; pub_status.dets = G.dets; pub_status.rejects = G.rejects;
     pthread_mutex_unlock(&HM);
     return out;
 }
@@ -556,7 +748,7 @@ void vrgame_frame_end(void) {
     pthread_mutex_lock(&HM);
     for (int i = 0; i < 2; i++) { pub_fore_ok[i] = ok[i]; if (ok[i]) pub_fore[i] = f[i]; }
     pub_status.arms_driven = bst.arms_driven;
-    pub_status.loader = atomic_load(&LD.state);
+    pub_status.loader = G.cur >= 0 ? atomic_load(&SL[G.cur].state) : pub_status.loader;
     pthread_mutex_unlock(&HM);
 }
 

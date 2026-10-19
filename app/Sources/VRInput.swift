@@ -12,7 +12,8 @@ struct VRInputSettings: Equatable {
     var locomotionFromHand = false    // false: relativa a la cabeza
     var rightHanded = true            // mano dominante
     var weaponReload = 0              // recarga del arma VR: 0 manual, 1 simplificada, 2 automática
-    var allowProne = true
+    var allowProne = false
+    var physicalPosture = 0           // postura por altura de la cabeza: 0 desactivada (defecto; el botón del juego manda), 1 solo para bajar, 2 completa
     var headHeight: Float = 0         // altura de pie calibrada en metros; 0 = autocalibrar
     var crouchDrop: Float = 0.35
     var proneDrop: Float = 0.80
@@ -30,6 +31,7 @@ struct VRInputSettings: Equatable {
         if has("rightHanded") { s.rightHanded = d.bool(forKey: prefix + "rightHanded") }
         if has("wreload") { s.weaponReload = min(max(d.integer(forKey: prefix + "wreload"), 0), 2) }
         if has("prone") { s.allowProne = d.bool(forKey: prefix + "prone") }
+        if has("posture") { s.physicalPosture = min(max(d.integer(forKey: prefix + "posture"), 0), 2) }
         if has("height") { s.headHeight = d.float(forKey: prefix + "height") }
         if has("crouch") { s.crouchDrop = d.float(forKey: prefix + "crouch") }
         if has("proneDrop") { s.proneDrop = d.float(forKey: prefix + "proneDrop") }
@@ -45,6 +47,7 @@ struct VRInputSettings: Equatable {
         d.set(rightHanded, forKey: Self.prefix + "rightHanded")
         d.set(weaponReload, forKey: Self.prefix + "wreload")
         d.set(allowProne, forKey: Self.prefix + "prone")
+        d.set(physicalPosture, forKey: Self.prefix + "posture")
         d.set(headHeight, forKey: Self.prefix + "height")
         d.set(crouchDrop, forKey: Self.prefix + "crouch")
         d.set(proneDrop, forKey: Self.prefix + "proneDrop")
@@ -132,6 +135,7 @@ final class VRInput: @unchecked Sendable {
         c.loco_ref = settings.locomotionFromHand ? VRI_LOCO_HAND : VRI_LOCO_HEAD
         c.dominant_hand = settings.rightHanded ? 1 : 0
         c.allow_prone = settings.allowProne
+        c.posture_mode = Int32(settings.physicalPosture)
         c.crouch_drop_m = settings.crouchDrop
         c.prone_drop_m = settings.proneDrop
         vr_input_set_cfg(&state, &c)

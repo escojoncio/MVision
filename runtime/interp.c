@@ -26,6 +26,7 @@
 #include <string.h>
 #include "cpu.h"
 #include "hlebind.h"
+#include "rtpatch.h"
 #include "sys.h"
 
 #ifdef INTERP_TRACE
@@ -153,6 +154,14 @@ void rt_code_invalidate(uint32_t addr, uint32_t len) {
     uint32_t e = a + len;
     if (e > PSX_RAM_SIZE) e = PSX_RAM_SIZE;
     for (uint32_t g = a >> GRAN; g <= (e - 1) >> GRAN; g++) if (rt_codemap[g]) rt_code_hit(g << GRAN);
+}
+
+/* Registro/retirada de una sustitución (rtpatch.c): el bloque especial de `addr` y los bloques que lo cubren se decodifican de nuevo. */
+void interp_forget(uint32_t addr) {
+    if (!tab) return;
+    unsigned w = (addr & 0x1FFFFC) >> 2;
+    if (tab[w] && tab[w]->special) kill_block(w);
+    rt_code_invalidate(addr, 4);
 }
 
 void interp_flush_all(void) {
@@ -308,7 +317,8 @@ static Block *decode(uint32_t pc, int plain) {
     Op tmp[MAXI + 16];
     unsigned n = 0;
     if (!plain) {
-        FuncPtr f = hle_bind_lookup(pc);
+        FuncPtr f = rt_patch_is(pc) ? rt_patch_lookup(pc) : NULL;   /* sustitución en ejecución (rtpatch.c) */
+        if (!f) f = hle_bind_lookup(pc);
         if (f) { tmp[0] = mk(O_HLE, 0, 0, 0, 0, 0); tmp[0].ptr = (void *)f; tmp[0].h = lbl[O_HLE]; return finish(tmp, 1, pc, pc + 4, 0); }
         if (is_bios_vec(pc)) { tmp[0] = mk(O_BIOS, 0, 0, 0, 0, pc & 0xFF); return finish(tmp, 1, pc, pc + 4, 0); }
     }
@@ -316,7 +326,7 @@ static Block *decode(uint32_t pc, int plain) {
     int last_lui = -1;                    /* índice en tmp de un lui recién emitido (fusión) */
     for (unsigned count = 0;; count++) {
         uint32_t w = fetch(a);
-        if (count >= MAXI || (count > 0 && hle_bind_is(a))) { tmp[n++] = mk(O_FALL, 0, 0, 0, 0, 0); return finish(tmp, n, pc, a, 1); }
+        if (count >= MAXI || (count > 0 && (hle_bind_is(a) || rt_patch_is(a)))) { tmp[n++] = mk(O_FALL, 0, 0, 0, 0, 0); return finish(tmp, n, pc, a, 1); }
         Br br = classify(w, a);
         if (br.kind == K_NONE) {
             Op o;

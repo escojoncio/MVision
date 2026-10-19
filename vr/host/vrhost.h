@@ -12,7 +12,7 @@
  *    ensambla una VrScene por lista cerrada (vr_scene_build con el BridgeState del mismo frame) y la copia a memoria propia.
  * Al cargar el EXE (solo MV_NOGEN): parchea el recorte (vrcam_patch_ram) y registra las HLE de la cámara por DIRECCIÓN FIJA
  * (hle_bind_fixed; no hay firmas de la librería para ellas). Si el EXE no coincide con la edición esperada no hay cámara VR.
- * La IA de vr/ai NO está integrada (requiere un mecanismo rt_patch que aún no existe en el runtime). */
+ * IA de enemigos y cámaras (vr/ai): se instala con las HLE si el EXE es la edición esperada (ver mv_vrhost_set_ai). */
 #include <stdint.h>
 #include "vr_radar.h"
 #include "vr_scene.h"
@@ -22,6 +22,15 @@ extern "C" {
 #endif
 
 void mv_vrhost_install(void);
+
+/* IA de enemigos y cámaras (vr/ai/vrai.h); cualquier hilo, antes o después de arrancar (se aplica en el siguiente VBlank).
+ *   perception: 0 original (el juego tal cual), 1 VR (defecto: visión ampliada con sospecha gradual), 2 exigente
+ *   cameras:    1 (defecto) cámaras de vigilancia audibles/visibles de lejos y rompibles con 2 balas (alcance de detección original); 0 original
+ *   activity:   1 (defecto) soldados y sensores activos aunque la cámara original no los vea; 0 original
+ * El radar de muñeca dibuja el cono original y el ampliado según `perception`. */
+void mv_vrhost_set_ai(int perception, int cameras, int activity);
+/* Solo para herramientas de prueba (vr/ai/aitest): función llamada en el gancho de VBlank del hilo de emulación tras la capa VR (cpu = Cpu*). */
+void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame));
 
 /* Escena VR del siguiente frame (contrato en app/Sources/RenderPS1Bridge.h). Una por llamada y sin saltarse ninguna;
  * los punteros de `out` valen hasta la siguiente llamada. Llamarla es lo que activa la captura de la GPU: sin llamadas durante
@@ -38,6 +47,13 @@ typedef struct {
     int32_t first_person;
     int32_t weapon;      /* -1 ninguna, 0..9 */
     int32_t life, life_max;
+    /* --- presentación (vr_view.h; al final: no rompe a quien solo lea lo anterior) --- */
+    int32_t view_mode;   /* VrViewMode con histéresis: 1 = mundo en primera persona, 0 = pantalla de cine */
+    int32_t view_reason; /* VRV_R_* del último VBlank (motivo del cine / del mundo) */
+    int32_t cinematic, comms, paused, menu_open, stopped;   /* banderas del puente (escena del motor, códec, pausa, ventana de armas/objetos, detenido) */
+    int32_t ammo, ammo_max;  /* munición del arma equipada (cargador del juego) y su máximo; -1 si no hay */
+    int32_t item;            /* objeto equipado, -1 ninguno */
+    int32_t alert_mode;      /* 0 normal, 1 interferencia, 2 evasión, 3 alerta */
 } MvVrGameState;
 void mv_vrhost_game_state(MvVrGameState *out);
 

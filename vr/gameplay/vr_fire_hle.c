@@ -13,11 +13,15 @@
  *   vrfire_charge     (matriz*, pos*, adherida, bando, seg)  carga adhesiva
  *   vrfire_grenade    (pos*, velocidad*, mecha, tipo, modelo) granada de mano
  *   vrfire_hide       (canal, índice)                        etapa de recorte por objeto; después oculta el arma del juego
+ *   vrfire_aalock     (actor)                                paso del buscador de blancos del lanzador antiaéreo (vr_aa.h)
+ *   vrfire_aaview     ()                                     carga la matriz del canal 3D principal en la GTE (lo llama el buscador)
  */
 #include <stdint.h>
+#include <string.h>
 #include "cpu.h"
 #include "sys.h"
 #include "vr_fire.h"
+#include "vr_aa.h"
 
 #define RAM_MASK 0x1FFFFFu
 #define A0 c->r[4]
@@ -105,4 +109,42 @@ void hle_vrfire_grenade(Cpu *c) {
 void hle_vrfire_hide(Cpu *c) {
     rt_orig(c, "vrfire_hide");
     if (vrfire_hide_enabled()) vrfire_hide_weapon(psx_ram);
+}
+
+/* ---- buscador de blancos del lanzador antiaéreo (vr_aa.h) ----
+ * El actor del buscador carga la GTE con la matriz mundo->vista del canal 3D principal (aaview) y con ella proyecta los
+ * blancos. Mientras dura su paso se escribe en ese canal la matriz del visor del lanzador VR (y la H del juego) y al
+ * terminar se restaura la del juego y se recarga la GTE, de modo que el resto del frame no ve nada distinto. */
+#define CH_MAIN   0x800B2B7Cu
+#define CH_VIEW   (CH_MAIN + 0x10u)     /* MATRIX mundo->vista (32 B) */
+#define CH_SCREEN (CH_MAIN + 0x50u)     /* s16 distancia de pantalla */
+
+void hle_vrfire_aaview(Cpu *c) { rt_orig(c, "vrfire_aaview"); }
+
+void hle_vrfire_aalock(Cpu *c) {
+    uint32_t actor = A0;
+    VrFireMat v;
+    uint8_t save[32];
+    int16_t focal = 0;
+    int sw = vraa_take_view(&v);
+    if (sw) {
+        memcpy(save, psx_ram + (CH_VIEW & RAM_MASK), sizeof save);
+        memcpy(&focal, psx_ram + (CH_SCREEN & RAM_MASK), 2);
+        int h = vraa_view_focal(focal);
+        int16_t h16 = (int16_t)h;
+        vrfire_store_mat(psx_ram, CH_VIEW, &v);
+        memcpy(psx_ram + (CH_SCREEN & RAM_MASK), &h16, 2);
+        vraa_note_h((float)h);
+    }
+    rt_orig(c, "vrfire_aalock");
+    if (sw) {
+        uint32_t keep[6] = {c->r[2], c->r[3], c->r[4], c->r[5], c->r[6], c->r[7]};
+        uint32_t ra = c->r[31];
+        memcpy(psx_ram + (CH_VIEW & RAM_MASK), save, sizeof save);
+        memcpy(psx_ram + (CH_SCREEN & RAM_MASK), &focal, 2);
+        rt_orig(c, "vrfire_aaview");     /* GTE otra vez con la vista del juego */
+        for (int i = 0; i < 6; i++) c->r[2 + i] = keep[i];
+        c->r[31] = ra;
+    }
+    vraa_after_step(psx_ram, actor, sw);
 }

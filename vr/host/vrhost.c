@@ -18,7 +18,10 @@
 #include "vr_camera.h"
 #include "vr_fire.h"
 #include "vr_radar.h"
+#include "vr_radar_vrp.h"
 #include "vr_scene.h"
+#include "vr_view.h"
+#include "vrai.h"
 #include "vrgame.h"
 
 void hle_vrcam_reset(void);   /* vr_camera_hle.c */
@@ -49,6 +52,8 @@ static const struct { const char *name; uint32_t addr; } FIRE_SITES[] = {
     {"vrfire_charge", 0x8006b69cu},
     {"vrfire_grenade", 0x8006af98u},
     {"vrfire_hide", 0x80018c8cu},
+    {"vrfire_aalock", 0x80071fc8u},
+    {"vrfire_aaview", 0x800711acu},
 };
 #define NFIRE (sizeof FIRE_SITES / sizeof FIRE_SITES[0])
 static int body_ok, fire_ok;
@@ -66,6 +71,7 @@ typedef struct {
     VrBatch *b;      size_t b_cap;
     VrState *st;     size_t st_cap;
     VrScene sc;
+    uint8_t frm[VR_FRAME_W * VR_FRAME_H];    /* copia de VrFilter.frame (máscara de visión: la memoria de vr_scene se reutiliza en la siguiente lista) */
     VrVtx *rv;       size_t rv_cap;          /* escena del radar de muñeca (copia propia; ev_end en índices de `list`) */
     VrBatch *rb;     size_t rb_cap;
     VrState *rst;    size_t rst_cap;
@@ -86,6 +92,7 @@ static _Atomic uint64_t last_poll_ns;
 
 /* ------------------------------------------------------------------------------------------------ estado del hilo de emulación */
 static BridgeState bs;                   /* último puente leído */
+static VrView view;                      /* vista vigente: mundo / cine (vr_view.h) */
 static int vr_ok;                        /* EXE de la edición esperada: parche aplicado y HLE de cámara enlazadas */
 static int cap_on;
 static VrSceneOpts sopts;
@@ -201,6 +208,12 @@ static int fill_slot(Slot *s, const GpuDrawList *l, const VrScene *sc) {
     s->sc.b = nb ? s->b : NULL;
     s->sc.states = ns ? s->st : NULL;
     s->sc.src = &s->list;
+    if (sc->filter.frame_on && sc->filter.frame && sc->filter.frame_w == VR_FRAME_W && sc->filter.frame_h == VR_FRAME_H) {
+        memcpy(s->frm, sc->filter.frame, sizeof s->frm);
+        s->sc.filter.frame = s->frm;
+    } else {
+        s->sc.filter.frame_on = 0; s->sc.filter.frame = NULL; s->sc.filter.frame_w = s->sc.filter.frame_h = 0;
+    }
     return 0;
 }
 
@@ -277,7 +290,10 @@ static void build_one(const GpuDrawList *l, int si) {
     int rc = vr_scene_build(hl, &bs, &o, &sc);
     /* Solo recubrimientos (fundidos/destellos) sin tiras ni copias de pantalla (menús, vídeos, transiciones): el post-proceso solo cubre la vista 3D y no el
      * panel 2D, así que se reconstruye sin filtro y el fundido va al panel como antes. Con tiras (efecto submarino) se conserva el filtro. */
-    if (rc == 0 && o.screen_filter && sc.filter.active && sc.filter.n_strips == 0 && sc.filter.n_polys == 0) {
+    /* Las gafas (líneas de exploración) y la máscara de visión (máscara de gas, caja) no son fundidos: se conserva el filtro (clase 3b) para que su tinte, sus líneas y su marco
+     * cubran toda la vista; también un destello/fundido durante la partida (hay 3D y el jugador está en escena) se aplica sobre la vista en vez de en el panel. */
+    int keep3b = sc.filter.n_scan > 0 || sc.filter.frame_on || (sc.has_3d && sc.world_valid);
+    if (rc == 0 && o.screen_filter && sc.filter.active && sc.filter.n_strips == 0 && sc.filter.n_polys == 0 && !keep3b) {
         VrSceneOpts o2 = o;
         o2.screen_filter = 0;
         rc = vr_scene_build(hl, &bs, &o2, &sc);
@@ -342,6 +358,22 @@ static void publish_state(void) {
     g.first_person = bs.first_person;
     g.weapon = bs.weapon;
     g.life = bs.life; g.life_max = bs.life_max;
+    {
+        VrViewIn vin;
+        memset(&vin, 0, sizeof vin);
+        vin.game = (uint8_t)core;
+        vin.in_control = (uint8_t)g.in_control;
+        vin.cam_active = (uint8_t)(g.cam_active != 0);
+        vin.cinematic = core && bs.cinematic; vin.comms = core && bs.comms; vin.paused = core && bs.paused;
+        vin.menu_open = core && bs.menu_open; vin.stopped = core && bs.stopped;
+        g.view_mode = vrview_step(&view, &vin);
+        g.view_reason = view.reason;
+        g.cinematic = vin.cinematic; g.comms = vin.comms; g.paused = vin.paused; g.menu_open = vin.menu_open; g.stopped = vin.stopped;
+        g.item = core ? bs.item : -1;
+        g.alert_mode = core ? bs.alert_mode : 0;
+        g.ammo = -1; g.ammo_max = -1;
+        if (core && bs.weapon >= 0 && bs.weapon < BRIDGE_N_WEAPONS) { g.ammo = bs.weapon_ammo[bs.weapon]; g.ammo_max = bs.weapon_max[bs.weapon]; }
+    }
     pthread_mutex_lock(&MX);
     memcpy(&pub_bs, &bs, sizeof bs);
     pub_valid = 1;
@@ -349,14 +381,18 @@ static void publish_state(void) {
     pthread_mutex_unlock(&MX);
 }
 
+static void (*test_cb)(void *cpu, uint32_t frame);
+void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame)) { test_cb = cb; }
+
 static void frame_hook(Cpu *c, uint32_t f) {
-    (void)c; (void)f;
     float turn = mv_vr_take_turn();
     if (turn != 0.0f) vrcam_turn(turn);
     if (mv_vr_take_recenter()) vrcam_recenter();
     bridge_read(psx_ram, &bs);
     publish_state();
     vrcam_frame(psx_ram, &bs);
+    vrai_frame(&bs, f);
+    if (test_cb) test_cb(c, f);
     vrgame_frame_end();
 
     uint64_t lp = atomic_load(&last_poll_ns), now = mono_ns();
@@ -390,6 +426,7 @@ static int head_fn(float m[16], double *t) {
 
 static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     vr_ok = 0;
+    vrview_reset(&view);
     hle_vrcam_reset();
     hle_vrradar_reset();
     vrradar_reset();
@@ -427,6 +464,7 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     cfg.head = vr_ok ? head_fn : NULL;
     vrcam_init(&cfg);
     pthread_mutex_lock(&MX); stats.cam_ok = vr_ok; pthread_mutex_unlock(&MX);
+    if (vr_ok) vrai_on_exe_loaded();   /* IA de enemigos y cámaras: solo con la edición esperada; los parches se instalan en on_bound */
 }
 
 static void on_bound(void) {
@@ -448,7 +486,7 @@ static void on_bound(void) {
         vrbody_set_enabled(1);
         body_ok = 1;
     }
-    /* Disparo: las 9 o ninguna (con unas sí y otras no, el arma VR dispararía a medias). */
+    /* Disparo: todas o ninguna (con unas sí y otras no, el arma VR dispararía a medias). */
     fire_ok = 1;
     for (unsigned i = 0; i < NFIRE; i++) {
         if (hle_bind_fixed(FIRE_SITES[i].name, FIRE_SITES[i].addr) < 0) {
@@ -457,6 +495,7 @@ static void on_bound(void) {
         }
     }
     vrgame_set_enabled(body_ok, fire_ok);
+    if (vrai_on_bound() < 0) fprintf(stderr, "[vrhost] IA de enemigos no instalada\n");
 }
 
 static void on_start(void) {
@@ -473,7 +512,17 @@ static uint16_t pad_hook(uint16_t buttons) {
     return vrgame_pad(buttons, &bs, psx_ram);
 }
 
+/* Radar de muñeca: copia de la percepción activa (cono original + cono ampliado más tenue; nada con el ajuste original). */
+static void radar_perception(const VrpConfig *c) { vrradar_set_vrp(c); }
+
+void mv_vrhost_set_ai(int perception, int cameras, int activity) {
+    VraiOptions o;
+    o.perception = perception; o.cameras = cameras; o.activity = activity;
+    vrai_set_options(&o);
+}
+
 void mv_vrhost_install(void) {
+    vrai_set_perception_listener(radar_perception);
     MvHostHooks h;
     memset(&h, 0, sizeof h);
     h.exe_loaded = on_exe_loaded;
@@ -493,6 +542,7 @@ void mv_vrhost_game_state(MvVrGameState *out) {
     } else {
         memset(out, 0, sizeof *out);
         out->posture = -1; out->menu = 1; out->weapon = -1;
+        out->view_mode = VRV_CINEMA; out->view_reason = VRV_R_NO_GAME; out->ammo = out->ammo_max = out->item = -1;
     }
     pthread_mutex_unlock(&MX);
 }

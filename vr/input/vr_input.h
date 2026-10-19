@@ -36,6 +36,12 @@ typedef enum { VRI_MODE_SENSE = 0, VRI_MODE_PAD = 1 } vri_mode_t;
 typedef enum { VRI_LOCO_HEAD = 0, VRI_LOCO_HAND = 1 } vri_loco_t;
 typedef enum { VRI_TURN_SNAP = 0, VRI_TURN_SMOOTH = 1, VRI_TURN_OFF = 2 } vri_turn_t;
 typedef enum { VRI_STAND = 0, VRI_CROUCH = 1, VRI_PRONE = 2 } vri_posture_t;
+/* Postura física (altura de la cabeza). El botón del juego (cruz) SIEMPRE funciona, con cualquier modo: esto es un añadido.
+ *  OFF  (defecto): la capa nunca pulsa el botón de postura; la postura deseada sigue a la del juego.
+ *  DOWN: agacharse/tumbarse físicamente baja la postura del juego (un toque por escalón) pero levantarse nunca la sube, y
+ *        nunca se actúa si el juego ya está igual de bajo o más (el botón manual manda).
+ *  FULL: como antes, sigue también las subidas (de pie físico = de pie en el juego). */
+typedef enum { VRI_POSTURE_OFF = 0, VRI_POSTURE_DOWN = 1, VRI_POSTURE_FULL = 2 } vri_posture_mode_t;
 
 typedef struct {
     bool tracked;          /* pose válida */
@@ -84,6 +90,7 @@ typedef struct {
     float walk_scale;        /* 0.1..1: tope del módulo del stick de mover */
     bool pass_right_stick;   /* modo PAD: no usar el stick derecho para girar, pasarlo al juego */
     bool allow_prone;
+    int posture_mode;        /* vri_posture_mode_t */
     float crouch_drop_m;     /* caída de cabeza para agacharse (~0.35) */
     float prone_drop_m;      /* caída para tumbarse (~0.80) */
     float hysteresis_m;      /* 0.06 */
