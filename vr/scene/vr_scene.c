@@ -36,6 +36,8 @@ VrSceneOpts vr_scene_opts_default(void) {
     o.screen_filter = 0;   /* opt-in: lo activa el anfitrión (vr/host) porque su renderer implementa la clase 3 (post-proceso por ojo) */
     o.filter_min_cover = 0.9f;
     o.drop_clear = 1;
+    o.engine_near_clip = 0;   /* §49: todo lo que el juego emite llega al renderer; el plano cercano es el de la cabeza */
+    o.recon_partial = 1; o.recon_ambig = 1;
     return o;
 }
 
@@ -52,6 +54,15 @@ static VrBatch *g_bat; static size_t g_bat_cap;
 static VrState *g_st; static size_t g_st_cap, g_st_n;
 static uint32_t *g_hash; static size_t g_hash_cap; /* tabla abierta: índice+1 en g_st */
 static uint32_t *g_next; static size_t g_next_cap;
+static uint8_t *g_fate; static uint32_t g_fate_cap;
+void vr_scene_set_fate(uint8_t *buf, uint32_t cap) { g_fate = buf; g_fate_cap = buf ? cap : 0; }
+/* El destino de un polígono con varios triángulos es el mejor de ellos (emitido > descartado); `f` solo sustituye a VR_FATE_NONE o a un descarte. */
+static void fate_set(uint32_t i, uint8_t f) {
+    if (i >= g_fate_cap) return;
+    uint8_t c = g_fate[i];
+    if (c == VR_FATE_3D || c == VR_FATE_RECON) return;
+    g_fate[i] = f;
+}
 
 void vr_scene_release(void) {
     free(g_tri); free(g_vtx); free(g_bat); free(g_st); free(g_hash); free(g_next);
@@ -160,6 +171,21 @@ static void fill_vtx(VrVtx *o, const GpuOp *op, const GpuVtx *v, int gour, uint1
     o->tpage = (uint16_t)(((op->tx >> 6) & 15) | (((op->ty >> 8) & 1) << 4) | ((op->abr & 3) << 5) | ((op->tp & 3) << 7));
     o->flags = flags;
     o->pad = st;
+}
+
+/* Cuadrilátero con posiciones de vista coherentes: los 4 vértices coplanares (distancia del 4.º al plano de los otros tres < 2 % de la mayor arista)
+ * y triángulos no degenerados. Es la señal de que un AMBIG junto a SAT/BEHIND no es una coincidencia espuria. */
+static int quad_coherent(const GpuOp *op) {
+    const GpuVtx *v = op->v;
+    float e1[3] = {v[1].vx - v[0].vx, v[1].vy - v[0].vy, v[1].vz - v[0].vz}, e2[3] = {v[2].vx - v[0].vx, v[2].vy - v[0].vy, v[2].vz - v[0].vz};
+    float e3[3] = {v[3].vx - v[0].vx, v[3].vy - v[0].vy, v[3].vz - v[0].vz};
+    float n[3] = {e1[1]*e2[2] - e1[2]*e2[1], e1[2]*e2[0] - e1[0]*e2[2], e1[0]*e2[1] - e1[1]*e2[0]};
+    float nn = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+    float l1 = sqrtf(e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2]), l2 = sqrtf(e2[0]*e2[0] + e2[1]*e2[1] + e2[2]*e2[2]), l3 = sqrtf(e3[0]*e3[0] + e3[1]*e3[1] + e3[2]*e3[2]);
+    float lm = fmaxf(l1, fmaxf(l2, l3));
+    if (!(nn > 1e-3f * lm * lm) || !isfinite(nn)) return 0;
+    float d = fabsf(n[0]*e3[0] + n[1]*e3[1] + n[2]*e3[2]) / nn;
+    return d < 0.02f * lm;
 }
 
 /* Sutherland-Hodgman contra el plano z = zn (se conserva z >= zn) de un polígono de n<=3 vértices -> <=4. Devuelve m. */
@@ -448,6 +474,20 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
         /* world_valid: criterio conservador del puente (jugador en escena y grupos básicos válidos): en título, cargas y
          * cambios de zona los ejes conservan valores que "parecen" válidos pero no son de la cámara real. */
         out->world_valid = has_player_ok(bs);
+        if (o.user_on && isfinite(o.user_theta_deg) && isfinite(o.user_pos[0]) && isfinite(o.user_pos[1]) && isfinite(o.user_pos[2])) {
+            /* Espacio del usuario (ver vr_scene.h): sin el espejo opcional (A.m ya lo lleva en la fila 2), girar el mundo con Tt = R_y(theta + 180 grados)^T
+             * (el inverso de lo que usa vrcam_delta para llevar el mundo del motor al espacio del usuario) y colocar el ojo del motor en p_ref (x,z); la altura
+             * no cambia (el suelo sigue en y=0 del espacio del usuario). */
+            float th = (o.user_theta_deg + 180.0f) * (3.14159265358979f / 180.0f), cs = cosf(th), sn = sinf(th);
+            const float Tt[3][3] = {{cs, 0, -sn}, {0, 1, 0}, {sn, 0, cs}};
+            Aff B;
+            for (int c = 0; c < 3; c++) A.m[2][c] *= zs;   /* deshacer el espejo */
+            A.t[2] *= zs;
+            for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) B.m[r][c] = Tt[r][0] * A.m[0][c] + Tt[r][1] * A.m[1][c] + Tt[r][2] * A.m[2][c];
+            B.t[0] = o.user_pos[0]; B.t[1] = A.t[1]; B.t[2] = o.user_pos[2];
+            A = B;
+            out->user_space = 1;
+        }
     } else {
         /* sin cámara del motor: espacio de vista (x der, y abajo, z adelante) -> VR (x der, y arriba, -z adelante) */
         A.m[0][0] = o.scale; A.m[1][1] = -o.scale; A.m[2][2] = -o.scale;
@@ -474,6 +514,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
 
     size_t nt = 0;
     out->stats.n_ops = n;
+    if (g_fate) memset(g_fate, 0, n < g_fate_cap ? n : g_fate_cap);
     for (uint32_t i = 0; i < n; i++) {
         const GpuOp *op = &dl->ops[i];
         if (op->type != GPU_OP_POLY && op->type != GPU_OP_RECT && op->type != GPU_OP_LINE) continue;
@@ -485,6 +526,61 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
         int semi = (op->flags & GPU_F_SEMI) != 0;
         GROW(g_tri, g_tri_cap, nt + 4);
 
+        GpuOp rc;   /* copia de trabajo si se reconstruye un vértice */
+        if (op->type == GPU_OP_POLY && o.recon_partial && op->nv == 4 && op->proj_h > 0 && isfinite(op->proj_h)) {
+            int bad = -1, nbad = 0, clean = 1;
+            for (int k = 0; k < 4; k++) {
+                if (!op->v[k].vvalid) { bad = k; nbad++; }
+                else if (op->v[k].vflags != 0 || !isfinite(op->v[k].vx + op->v[k].vy + op->v[k].vz)) clean = 0;
+            }
+            if (nbad == 1 && clean) {
+                const GpuVtx *a = &op->v[(bad + 1) & 3], *b = &op->v[(bad + 2) & 3], *c = &op->v[(bad + 3) & 3];
+                float dxs = (float)op->v[bad].x - (float)op->dox - op->proj_ox, dys = (float)op->v[bad].y - (float)op->doy - op->proj_oy;
+                if (fabsf(dxs) < 1000.0f && fabsf(dys) < 1000.0f) {
+                    /* plano de los tres vértices fiables (espacio de vista) ∩ rayo del cuarto (px de pantalla / H) */
+                    float e1[3] = {b->vx - a->vx, b->vy - a->vy, b->vz - a->vz}, e2[3] = {c->vx - a->vx, c->vy - a->vy, c->vz - a->vz};
+                    float n[3] = {e1[1]*e2[2] - e1[2]*e2[1], e1[2]*e2[0] - e1[0]*e2[2], e1[0]*e2[1] - e1[1]*e2[0]};
+                    float d[3] = {dxs / op->proj_h, dys / op->proj_h, 1.0f};
+                    float den = n[0]*d[0] + n[1]*d[1] + n[2]*d[2];
+                    float nn = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]), dn = sqrtf(d[0]*d[0] + d[1]*d[1] + 1.0f);
+                    if (nn > 0 && fabsf(den) > 0.05f * nn * dn) {
+                        float t = (n[0]*a->vx + n[1]*a->vy + n[2]*a->vz) / den;
+                        float zmin = fminf(a->vz, fminf(b->vz, c->vz)), zmax = fmaxf(a->vz, fmaxf(b->vz, c->vz));
+                        if (isfinite(t) && t > 0 && zmin > 0 && t > 0.2f * zmin && t < 5.0f * zmax) {
+                            rc = *op;
+                            rc.v[bad].vvalid = 1; rc.v[bad].vflags = 0;
+                            rc.v[bad].vx = d[0] * t; rc.v[bad].vy = d[1] * t; rc.v[bad].vz = t;
+                            op = &rc;
+                            out->stats.n_recon++;
+                            fate_set(i, VR_FATE_RECON);
+                        }
+                    }
+                }
+            }
+        }
+        if (op->type == GPU_OP_POLY && o.recon_partial && op->nv == 4 && op->proj_h > 0 && isfinite(op->proj_h)) {
+            /* esquinas diagonales (resplandores/destellos: cartel de cara a la cámara a z constante): las otras dos esquinas salen de las dos dadas.
+             * Orden del cuadrilátero de la GPU: v0 arriba-izq, v1 arriba-der, v2 abajo-izq, v3 abajo-der. */
+            int m = (op->v[0].vvalid ? 1 : 0) | (op->v[1].vvalid ? 2 : 0) | (op->v[2].vvalid ? 4 : 0) | (op->v[3].vvalid ? 8 : 0);
+            if (m == 9 || m == 6) {
+                int p0 = m == 9 ? 0 : 1, p1 = m == 9 ? 3 : 2;
+                const GpuVtx *a = &op->v[p0], *b = &op->v[p1];
+                float zz = a->vz;
+                if (isfinite(a->vx + a->vy + a->vz + b->vx + b->vy + b->vz) && zz > 0 && fabsf(b->vz - zz) <= 0.02f * zz + 1.0f &&
+                    a->vx != b->vx && a->vy != b->vy) {
+                    rc = *op;
+                    int k1 = m == 9 ? 1 : 0, k2 = m == 9 ? 2 : 3;   /* vértices a rellenar */
+                    GpuVtx *g1 = &rc.v[k1], *g2 = &rc.v[k2];
+                    g1->vvalid = g2->vvalid = 1; g1->vflags = g2->vflags = 0;
+                    g1->vz = g2->vz = zz;
+                    if (m == 9) { g1->vx = b->vx; g1->vy = a->vy; g2->vx = a->vx; g2->vy = b->vy; }   /* v1 = (x3,y0), v2 = (x0,y3) */
+                    else        { g1->vx = a->vx; g1->vy = b->vy; g2->vx = b->vx; g2->vy = a->vy; }   /* v0 = (x2,y1), v3 = (x1,y2) */
+                    op = &rc;
+                    out->stats.n_recon++;
+                    fate_set(i, VR_FATE_RECON);
+                }
+            }
+        }
         if (op->type == GPU_OP_POLY) {
             out->stats.n_poly++;
             int nv = op->nv == 4 ? 4 : 3, nval = 0;
@@ -494,8 +590,8 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             int ntri = nv == 4 ? 2 : 1;
             if (nval == nv) {
                 /* contrato §28: polígono 3D = todos vvalid. AMBIG junto a SAT/BEHIND: posiciones poco fiables -> descartar. */
-                if ((uf & GPU_VF_AMBIG) && (uf & (GPU_VF_SAT | GPU_VF_BEHIND))) { out->stats.drop_ambig++; continue; }
-                if ((uf & GPU_VF_DERIVED) && o.drop_derived) { out->stats.drop_derived++; continue; }
+                if ((uf & GPU_VF_AMBIG) && (uf & (GPU_VF_SAT | GPU_VF_BEHIND)) && !(o.recon_ambig && nv == 4 && quad_coherent(op))) { out->stats.drop_ambig++; fate_set(i, VR_FATE_AMBIG); continue; }
+                if ((uf & GPU_VF_DERIVED) && o.drop_derived) { out->stats.drop_derived++; fate_set(i, VR_FATE_DERIVED); continue; }
                 out->stats.n_poly3d++;
                 int clipmode = (uf & GPU_VF_BEHIND) != 0 || o.clip_all_near;
                 if (uf & GPU_VF_BEHIND) out->stats.n_poly_behind++;
@@ -505,18 +601,19 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 if (ofs_fixed) out->stats.n_ofs_fix++;
                 for (int q = 0; q < ntri; q++) {
                     const CV *g3[3] = {&cv[idx[q][0]], &cv[idx[q][1]], &cv[idx[q][2]]};
-                    int nanv = 0, near = 0;
+                    int nanv = 0, near = 0, behind = 0;
                     for (int k = 0; k < 3; k++) {
                         if (!isfinite(g3[k]->p[0]) || !isfinite(g3[k]->p[1]) || !isfinite(g3[k]->p[2])) nanv = 1;
-                        else if (g3[k]->p[2] < o.near_units) near = 1;
+                        else if (g3[k]->p[2] < o.near_units) { if (o.engine_near_clip) near = 1; else behind = 1; }
                     }
-                    if (nanv) { out->stats.drop_nan++; continue; }
+                    if (nanv) { out->stats.drop_nan++; fate_set(i, VR_FATE_NAN); continue; }
                     CV poly[4]; int pn = 3;
+                    if (behind) out->stats.n_unclipped++;
                     CV tin[3] = {*g3[0], *g3[1], *g3[2]};
                     if (near) {
-                        if (!clipmode) { out->stats.drop_near++; continue; }
+                        if (!clipmode) { out->stats.drop_near++; fate_set(i, VR_FATE_NEAR); continue; }
                         pn = clip_near(tin, 3, o.near_units, poly);
-                        if (pn < 3) { out->stats.drop_behind++; continue; }
+                        if (pn < 3) { out->stats.drop_behind++; fate_set(i, VR_FATE_BEHIND); continue; }
                         out->stats.n_clipped++;
                     } else memcpy(poly, tin, sizeof tin);
                     for (int fan = 0; fan + 2 < pn; fan++) {
@@ -528,10 +625,10 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                         float l1 = e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2], l2 = e2[0]*e2[0] + e2[1]*e2[1] + e2[2]*e2[2],
                               l3 = e3[0]*e3[0] + e3[1]*e3[1] + e3[2]*e3[2];
                         float me = o.max_edge_m * o.max_edge_m;
-                        if (!(l1 <= me && l2 <= me && l3 <= me)) { out->stats.drop_huge++; continue; }
+                        if (!(l1 <= me && l2 <= me && l3 <= me)) { out->stats.drop_huge++; fate_set(i, VR_FATE_HUGE); continue; }
                         float nrm[3] = {e1[1]*e2[2] - e1[2]*e2[1], e1[2]*e2[0] - e1[0]*e2[2], e1[0]*e2[1] - e1[1]*e2[0]};
                         float area = 0.5f * sqrtf(nrm[0]*nrm[0] + nrm[1]*nrm[1] + nrm[2]*nrm[2]);
-                        if (!(area >= o.min_area_m2)) { out->stats.drop_degenerate++; continue; }
+                        if (!(area >= o.min_area_m2)) { out->stats.drop_degenerate++; fate_set(i, VR_FATE_DEGEN); continue; }
                         /* frente = cara que vio la cámara del juego */
                         float tc[3] = {out->eye_vr[0] - p[0][0], out->eye_vr[1] - p[0][1], out->eye_vr[2] - p[0][2]};
                         int flip = (nrm[0]*tc[0] + nrm[1]*tc[1] + nrm[2]*tc[2]) < 0;
@@ -546,14 +643,16 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                         t->ev_end = g_next[i]; t->src_op = i;
                         t->kind = semi ? 1 : 0; t->blend = semi ? (op->abr & 3) : 0xFF;
                         out->stats.n_tris3d++;
+                        if (i < g_fate_cap) g_fate[i] = VR_FATE_3D;
                         if (flip) out->stats.n_flipped++;
                         GROW(g_tri, g_tri_cap, nt + 4);
                     }
                 }
                 continue;
             }
-            if (nval && !o.partial_to_2d) { out->stats.drop_partial++; continue; }
+            if (nval && !o.partial_to_2d) { out->stats.drop_partial++; fate_set(i, VR_FATE_PARTIAL); continue; }
             out->stats.n_poly2d++;
+            fate_set(i, VR_FATE_2D);
             if (o.drop_2d_all) continue;
             int fb = op->fbk != 0;
             if (fb && !op->fbt) { out->stats.n_fb_clear++; continue; }   /* texel 0 = transparente: no pinta nada */
@@ -586,6 +685,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             }
         } else if (op->type == GPU_OP_RECT) {
             out->stats.n_rect++;
+            fate_set(i, VR_FATE_2D);
             if (o.drop_2d_all) continue;
             const GpuVtx *g = &op->v[0];
             int fb = op->fbk != 0;
@@ -622,6 +722,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             }
         } else { /* LINE: cuadrilátero de 1 px */
             out->stats.n_line++;
+            fate_set(i, VR_FATE_2D);
             if (o.drop_2d_all) continue;
             const GpuVtx *a = &op->v[0], *b = &op->v[1];
             float dx = (float)(b->x - a->x), dy = (float)(b->y - a->y), l = sqrtf(dx*dx + dy*dy);

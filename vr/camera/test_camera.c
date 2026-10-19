@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "vr_camera.h"
+#include "vr_scene.h"
 #ifndef EXE_MAGIC
 /* Firma de 8 bytes de la cabecera del formato de ejecutable (construida en hex; se valida con memcmp). */
 #define EXE_MAGIC "\x50\x53\x2d\x58\x20\x45\x58\x45"
@@ -368,6 +369,96 @@ static void test_patch(void) {
     p.hfov_deg = 10; memset(a, 0, sizeof a); load_exe(eo, a, &base, &size); CHECK(vrcam_patch_ram(a, &p) == -1);   /* parámetros fuera de rango */
 }
 
+/* ===== §49: el mundo de vr_scene en el espacio del usuario coincide con vrcam_delta =====
+ * Un punto del mundo del motor visto con la cámara del motor (V = M^T (W - E)) se lleva a la vista de la cabeza de presentación de dos maneras:
+ *   (a) vrcam_delta (A V + b, mm, X der, Y abajo, Z delante);
+ *   (b) vr_scene con opts.user_on: posición en el espacio del usuario (m) y luego la cabeza (derecha, arriba, atrás).
+ * Deben coincidir para cualquier rumbo del cuerpo (theta), mirada del motor, giro de la cabeza y traslación física. Sin user_on (comportamiento
+ * anterior) solo coinciden cuando theta + 180 grados es múltiplo de 360. */
+static void test_predict(void) {
+    /* predicción de mirada: el motor mira predict_s por delante de la cabeza (acotada) y el registro conserva la mirada real para el espacio del usuario */
+    for (int mode = 0; mode < 3; mode++) {
+        VrCamConfig c; vrcam_config_default(&c); c.head = head;
+        if (mode == 0) c.predict_s = 0.0f;
+        vrcam_init(&c); build_world(1024);
+        BridgeState s = ok_state();
+        VrCamPlan p;
+        G_ok = 1; G_yaw = 0; G_elev = 0;
+        for (int i = 0; i < c.on_frames; i++) vrcam_frame(ram, &s);
+        CHECK(vrcam_plan(ram, 320, &p) == 1);
+        float rate = mode == 2 ? 40.0f : 1.0f;   /* grados por VBlank (a 50 Hz) */
+        for (int i = 0; i < 24; i++) { G_yaw += rate; vrcam_frame(ram, &s); vrcam_plan(ram, 320, &p); }
+        float real = 90.0f + G_yaw;               /* 1024 = 90 grados de cuerpo */
+        float dy = p.yaw_deg - real; while (dy > 180) dy -= 360; while (dy < -180) dy += 360;
+        if (mode == 0) NEAR(dy, 0, 0.05);
+        else if (mode == 1) NEAR(dy, 5.0, 0.3);          /* 1 grado/VBlank = 50 grados/s x 0,1 s */
+        else NEAR(dy, 35.0, 0.05);                       /* acotada a predict_max_deg */
+    }
+    VrCamConfig c; vrcam_config_default(&c); c.head = head; c.predict_s = 9.0f;   /* fuera de rango: sin predicción */
+    vrcam_init(&c);
+    CHECK(vrcam_config()->predict_s == 0.0f);
+}
+
+static GpuOp t_ops[8];
+static GpuDrawList t_dl;
+static void us_scene_point(const VrCamRecord *r, const float V[3], int user_on, float out[3]) {
+    memset(t_ops, 0, sizeof t_ops); memset(&t_dl, 0, sizeof t_dl); t_dl.ops = t_ops; t_dl.nops = 1;
+    GpuOp *o = &t_ops[0]; o->type = GPU_OP_POLY; o->nv = 3; o->flags = GPU_F_TEXTURED; o->tp = 1;
+    /* triángulo con el punto en el vértice 0 y dos auxiliares delante del ojo */
+    const float P[3][3] = {{V[0], V[1], V[2]}, {V[0] + 300, V[1], V[2]}, {V[0], V[1] + 300, V[2]}};
+    for (int k = 0; k < 3; k++) { o->v[k].vvalid = 1; o->v[k].fvalid = 1; o->v[k].vx = P[k][0]; o->v[k].vy = P[k][1]; o->v[k].vz = P[k][2]; o->v[k].fz = P[k][2]; o->v[k].r = o->v[k].g = o->v[k].b = 100; }
+    BridgeState bs; memset(&bs, 0, sizeof bs);
+    bs.valid = BRIDGE_OK_ALL_CORE; bs.has_player = 1;
+    for (int i = 0; i < 3; i++) { bs.eye_pos[i] = r->eye[i]; for (int j = 0; j < 3; j++) bs.eye_axes[i][j] = (int16_t)lrintf(r->M[3 * i + j] * 4096.0f); }
+    bs.player_pos = (BVec3){r->eye[0], r->eye[1], r->eye[2]}; bs.ctl_height = 1104;
+    VrSceneOpts so = vr_scene_opts_default();
+    so.origin_mode = 1; so.origin_game[0] = (float)r->eye[0]; so.origin_game[1] = (float)r->eye[1] - 1600.0f; so.origin_game[2] = (float)r->eye[2];
+    so.near_units = 1.0f; so.max_edge_m = 1000.0f;
+    if (user_on) { so.user_on = 1; so.user_theta_deg = r->theta_play_deg; memcpy(so.user_pos, r->p_ref, sizeof so.user_pos); }
+    VrScene sc;
+    CHECK(vr_scene_build(&t_dl, &bs, &so, &sc) == 0 && sc.nv == 3);
+    /* el triángulo emitido puede tener los vértices permutados por el frente: game_view (exacta) lleva el punto de vista al espacio de salida */
+    for (int r2 = 0; r2 < 3; r2++) out[r2] = sc.game_view[r2] * V[0] + sc.game_view[4 + r2] * V[1] + sc.game_view[8 + r2] * V[2] + sc.game_view[12 + r2];
+    vr_scene_release();
+}
+static void test_userspace(void) {
+    VrCamConfig c; vrcam_config_default(&c); c.head = head; c.predict_s = 0; vrcam_init(&c);
+    const float thetas[] = {0, 90, 180, 237, 359}, bodyyaw[] = {0, 77, 180};
+    const float ys[] = {0, 33, -120}, es[] = {0, 25, -40};
+    for (unsigned it = 0; it < 5; it++) for (unsigned iy = 0; iy < 3; iy++) for (unsigned ie = 0; ie < 3; ie++) for (unsigned ib = 0; ib < 3; ib++) {
+        /* registro sintético: motor mirando (yaw = theta + yaw cabeza al construir) */
+        VrCamRecord r; memset(&r, 0, sizeof r);
+        float a_plan = ys[iy];
+        r.active = 1; r.units_per_m = 1000; r.theta_play_deg = thetas[it];
+        r.yaw_deg = fmodf(thetas[it] + a_plan + 720.0f, 360.0f); r.pitch_deg = -es[ie];
+        engine_matrix(r.yaw_deg, r.pitch_deg, r.M);
+        r.eye[0] = 12345 + (int)(bodyyaw[ib] * 10); r.eye[1] = 1500; r.eye[2] = -4321;
+        G_yaw = a_plan; G_elev = es[ie]; double tt; head(r.head, &tt);
+        memcpy(r.p_ref, (float[3]){r.head[12], r.head[13], r.head[14]}, sizeof r.p_ref);
+        /* cabeza de presentación: otra orientación y otra posición física */
+        G_yaw = a_plan + 25.0f; G_elev = es[ie] - 10.0f; float h[16]; head(h, &tt); h[12] += 0.07f; h[13] -= 0.05f; h[14] += 0.11f;
+        VrCamDelta d; CHECK(vrcam_delta(&r, h, &d));
+        const float V[3] = {420, -180, 2600};
+        float want[3];   /* vista de la cabeza (x der, y arriba, d delante) en metros por vrcam_delta */
+        want[0] = (d.A[0] * V[0] + d.A[1] * V[1] + d.A[2] * V[2] + d.b[0]) * 0.001f;
+        want[1] = -(d.A[3] * V[0] + d.A[4] * V[1] + d.A[5] * V[2] + d.b[1]) * 0.001f;
+        want[2] = (d.A[6] * V[0] + d.A[7] * V[1] + d.A[8] * V[2] + d.b[2]) * 0.001f;
+        float U[3]; us_scene_point(&r, V, 1, U);
+        float dd[3] = {U[0] - h[12], U[1] - h[13], U[2] - h[14]}, got[3];   /* a la vista de la cabeza: derecha, arriba, atrás */
+        got[0] = h[0] * dd[0] + h[1] * dd[1] + h[2] * dd[2];
+        got[1] = h[4] * dd[0] + h[5] * dd[1] + h[6] * dd[2];
+        got[2] = -(h[8] * dd[0] + h[9] * dd[1] + h[10] * dd[2]);
+        /* la altura del ojo del motor (1,6 m sobre el suelo del usuario) coincide con p_ref.y (1,6 m): sin desplazamiento vertical */
+        NEAR(got[0], want[0], 0.004); NEAR(got[1], want[1], 0.004); NEAR(got[2], want[2], 0.004);
+        /* sin user_on: solo coincide si theta + 180 es múltiplo de 360 */
+        float U0[3]; us_scene_point(&r, V, 0, U0);
+        float d0[3] = {U0[0] - h[12], U0[1] - h[13], U0[2] - h[14]};
+        float g0x = h[0] * d0[0] + h[1] * d0[1] + h[2] * d0[2], g0z = -(h[8] * d0[0] + h[9] * d0[1] + h[10] * d0[2]);
+        int aligned = fabsf(fmodf(thetas[it] + 180.0f, 360.0f)) < 0.01f;
+        if (!aligned) CHECK(fabsf(g0x - want[0]) > 0.05f || fabsf(g0z - want[2]) > 0.05f);
+    }
+}
+
 int main(void) {
     test_angles();
     test_patch();
@@ -377,6 +468,8 @@ int main(void) {
     test_delta();
     test_e2e();
     test_records();
+    test_userspace();
+    test_predict();
     test_robust();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

@@ -60,6 +60,11 @@ typedef struct VrCamConfig {
     int keep_overscan;       /* 1: no anular el ajuste vertical de matrices de pantalla (solo para pruebas A/B; defecto 0) */
     int draw_lag;            /* construcciones de cámara entre la que dibuja un envío y la última hecha (0 = la última) */
     float pitch_limit_deg;   /* tope de la elevación que se le da al motor (el resto lo absorbe vrcam_delta); defecto 80 */
+    /* --- §49: predicción de la mirada (al final: no rompe el layout) --- */
+    float predict_s;         /* segundos de adelanto con que se extrapola la mirada (guiñada y cabeceo) al construir la cámara del motor: lo que se dibuja llega al visor
+                              * ~ predict_s después de construirse la cámara, y el recorte del motor está centrado en SU dirección; 0 = sin predicción. Defecto 0,10 */
+    float predict_max_deg;   /* tope del adelanto angular aplicado (grados); defecto 35 */
+    float vblank_hz;         /* VBlanks por segundo de la emulación (50 PAL); da la escala de tiempo de la velocidad angular */
 } VrCamConfig;
 
 void vrcam_config_default(VrCamConfig *c);
