@@ -110,9 +110,23 @@ uint16_t vrgame_pad(uint16_t pad, const struct BridgeState *bs, uint8_t *ram);  
  * mv_vr_set_head, etc.: así las manos sintéticas van sincronizadas con el VBlank y la prueba es determinista. NULL la quita. */
 typedef uint16_t (*VrGameDriver)(uint32_t vbl, uint16_t pad, const struct BridgeState *bs);
 void vrgame_set_driver(VrGameDriver f);
-/* Gestos de cuerpo (vr/input/vr_gesture): golpe, agarre/estrangulamiento, golpear la pared, asomarse. mask: bit 1 golpe, 2 agarre,
- * 4 pared, 8 asomarse (defecto todos). Sin arma equipada y con el jugador al mando; el botón del juego sigue funcionando siempre. */
+/* Gestos de cuerpo (vr/input/vr_gesture): golpe (puño + movimiento rápido de la mano relativo a la cabeza, hacia delante y hacia fuera, con el enemigo delante), agarre/estrangulamiento
+ * (gatillo con la mano abierta junto al cuello; con el enemigo ya sujeto basta el gatillo), golpear la pared, asomarse. mask: bit 1 golpe, 2 agarre, 4 pared, 8 asomarse (defecto todos).
+ * Solo con el jugador al mando, cámara VR activa y SIN arma equipada ni caja/agua. Con las manos libres y rastreadas el módulo gobierna esos botones: los GRIPS solo cierran el puño (nunca
+ * llegan al juego como R1/L1: la ventana de objetos/armas se abre manteniendo el clic de stick 0,35 s) y el cuadrado físico (gatillo / A de la otra mano) se retira y lo sustituye lo que decide
+ * el módulo. Con arma, sin seguimiento de manos (mando normal) o fuera de control, los botones pasan tal cual. */
 void mv_vrgame_set_gestures(int32_t enable, int32_t mask);
+/* Orientación de las manos del personaje respecto al agarre del mando (vr/body/vr_body.h): cabeceo fijo (grados; defecto -35: el agarre del Sense está inclinado 35 grados respecto al
+ * apuntado), `auto_pitch` = deducirlo del apuntado cuando el mando lo entrega, y alabeo (giro sobre el eje de los dedos; defecto 45). */
+void mv_vrgame_set_hand_pose(float pitch_deg, int32_t auto_pitch, float roll_deg);
+/* "Calibrar manos": cuenta atrás de `delay_s` s (pulsos hápticos cada segundo), y al terminar toma la orientación de ambos agarres (brazos rectos al frente, mandos sujetos de forma natural)
+ * y guarda la corrección fija. Háptico largo en las manos calibradas. delay_s <= 0: ahora. */
+void mv_vrgame_calibrate_hands(float delay_s);
+float mv_vrgame_calibration_countdown(void);                           /* s que faltan (0 = no hay cuenta atrás) */
+void mv_vrgame_clear_hand_calibration(void);
+int32_t mv_vrgame_hand_calibration(int32_t side, float q[4]);          /* 1 si hay calibración de ese lado (0 izq, 1 der) */
+void mv_vrgame_set_hand_calibration(int32_t side, const float q[4]);   /* restaurar una calibración guardada */
+uint32_t mv_vrgame_calibration_serial(void);                           /* cambia cada vez que se calibra o se borra (para persistir) */
 void vrbodyg_reset(void);
 unsigned vrbodyg_event_count(int ev);                                  /* VRG_EV_* acumulados (pruebas) */
 uint16_t vrbodyg_pad(uint16_t pad, const struct BridgeState *bs, int right_handed);
