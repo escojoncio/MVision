@@ -206,6 +206,7 @@ static void test_drops(void) {
     poly3(h0, h1, h2, 0);
     poly3(a, b, nanp, 0);
     VrSceneOpts o = vr_scene_opts_default(); o.engine_near_clip = 1;   /* comportamiento previo: recorte contra el plano del motor */
+    o.coherence = 0;   /* aquí se prueban los límites propios (max_edge_m); la red de §56 va en test_coherence */
     VrScene s;
     CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0, "build");
     CHECK(s.stats.n_tris3d == 1 && s.stats.drop_near == 1 && s.stats.drop_degenerate == 1 && s.stats.drop_huge == 1 && s.stats.drop_nan == 1,
@@ -622,6 +623,7 @@ static void test_ofs_fix(void) {
     GpuOp *g = poly3(ga, gb, gc, 1);
     g->proj_h = 150.0f; g->proj_ox = 210.0f; g->proj_oy = 100.0f; g->dox = 330; g->doy = 8;
     VrScene s; VrSceneOpts o = vr_scene_opts_default();
+    o.coherence = 0;   /* x,y de pantalla sin rellenar en este caso sintético: la comprobación del modelo (§56) se prueba en test_coherence */
     CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0, "build ofs");
     CHECK(near_f(s.filter.proj_h, 150.0f, 1e-3f) && near_f(s.filter.cx_col, 160.0f, 1e-3f) && near_f(s.filter.cy_row, 128.0f, 1e-3f),
           "filter proj %.2f %.2f %.2f", s.filter.proj_h, s.filter.cx_col, s.filter.cy_row);
@@ -1026,6 +1028,59 @@ static void test_user_map(void) {
     vr_scene_release();
 }
 
+
+/* §56: red de seguridad de coherencia de vértices. 1 unidad de vista = 1 mm (escala por defecto 0,001). */
+static void test_coherence(void) {
+    VrScene s; VrSceneOpts o = vr_scene_opts_default();
+    CHECK(o.coherence == 1 && o.coh_edge_m == 60.0f && o.coh_flag_edge_m == 32.0f, "coherencia: valores por defecto");
+    /* limpio y razonable: se conserva */
+    float a[3] = {0, 0, 5000}, b[3] = {1000, 0, 5000}, c[3] = {0, 1000, 5000};
+    reset(); poly3(a, b, c, 0);
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.drop_incoh == 0, "coherencia: triángulo normal intacto");
+    /* un vértice a 70 m del resto (asociación equivocada): fuera y contado; con la red apagada se emite pero se cuenta */
+    float far3[3] = {70000, 3000, 5000};
+    reset(); poly3(a, b, far3, 0);
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.drop_incoh == 1 && s.stats.incoh[VR_INC_EDGE] == 1, "coherencia: arista de 70 m descartada (%u)", s.stats.drop_incoh);
+    o.coherence = 0;
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.drop_incoh == 0 && s.stats.incoh[VR_INC_EDGE] == 1, "coherencia apagada: se emite y se cuenta (tris %u drop %u edge %u)", s.stats.n_tris3d, s.stats.drop_incoh, s.stats.incoh[VR_INC_EDGE]);
+    o.coherence = 1;
+    /* 40 m: legítimo si todos sus vértices son fiables, sospechoso si alguno es ambiguo */
+    float m40[3] = {40000, 3000, 5000};
+    reset(); poly3(a, b, m40, 0);
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 1, "coherencia: 40 m fiable se conserva (tris %u inc %u/%u/%u/%u)", s.stats.n_tris3d, s.stats.incoh[0], s.stats.incoh[1], s.stats.incoh[2], s.stats.drop_degenerate);
+    reset(); { GpuOp *p = poly3(a, b, m40, 0); p->v[2].vflags = GPU_VF_AMBIG; }
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.incoh[VR_INC_EDGE] == 1, "coherencia: 40 m ambiguo descartado");
+    /* vértice a más de 150 m del ojo del motor */
+    float f1[3] = {160000, 0, 100}, f2[3] = {160500, 0, 100}, f3[3] = {160000, 500, 100};
+    reset(); poly3(f1, f2, f3, 0);
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.incoh[VR_INC_FAR] == 1, "coherencia: vértice a 160 m descartado");
+    /* modelo de la GTE: proyección coherente con (x,y) -> intacto; un vértice con otra pantalla -> descartado */
+    reset();
+    {
+        GpuOp *q = poly3(a, b, c, 0);
+        q->proj_h = 150.0f; q->proj_ox = 160.0f; q->proj_oy = 128.0f;
+        for (int k = 0; k < 3; k++) {
+            q->v[k].x = (int16_t)lrintf(150.0f * q->v[k].vx / q->v[k].vz + 160.0f);
+            q->v[k].y = (int16_t)lrintf(150.0f * q->v[k].vy / q->v[k].vz + 128.0f);
+        }
+    }
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.chk_vtx == 3 && s.stats.drop_incoh == 0, "coherencia: modelo reproduce la pantalla (%u de %u)", s.stats.chk_bad[0], s.stats.chk_vtx);
+    dl.ops[0].v[1].x += 40;
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.incoh[VR_INC_MODEL] == 1 && s.stats.chk_bad[0] == 1, "coherencia: vértice que no reproduce su pantalla descartado");
+    /* saturado: SXY recortado a +-0x3FF con la posición muy fuera de pantalla -> el modelo lo reproduce */
+    reset();
+    {
+        float s1[3] = {300000, 0, 100}, s2[3] = {300500, 0, 100}, s3[3] = {300000, 500, 100};
+        GpuOp *q = poly3(s1, s2, s3, 0);
+        q->proj_h = 150.0f; q->proj_ox = 160.0f; q->proj_oy = 128.0f;
+        for (int k = 0; k < 3; k++) { q->v[k].vflags = GPU_VF_SAT; q->v[k].x = 0x3FF; q->v[k].y = (int16_t)lrintf(150.0f * q->v[k].vy / q->v[k].vz + 128.0f); }
+    }
+    o.coh_far_m = 0.0f;
+    (void)vr_scene_build(&dl, NULL, &o, &s);
+    CHECK(s.stats.chk_bad[1] == 0, "coherencia: vértice saturado coherente (malos %u)", s.stats.chk_bad[1]);
+    vr_scene_release();
+}
+
 int main(void) {
     test_basic();
     test_stability();
@@ -1045,6 +1100,7 @@ int main(void) {
     test_recon_fate();
     test_recon_diag_ambig();
     test_user_map();
+    test_coherence();
     if (fails) { fprintf(stderr, "%d fallos\n", fails); return 1; }
     printf("test_scene: OK\n");
     return 0;

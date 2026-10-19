@@ -139,6 +139,17 @@ enum {
     VR_F_FILTER = 0x8000   /* primitiva de filtro de pantalla (clase 3) */
 };
 
+/* Causa/origen de cada triángulo de la salida (VrScene.tri_cause, un byte por triángulo en el orden de VrScene.v): diagnóstico y probador. 0 = ninguna (normal o 2D). */
+enum {
+    VR_TC_AMBIG = 1,     /* algún vértice con asociación dudosa (GPU_VF_AMBIG) */
+    VR_TC_SAT = 2,       /* algún vértice saturado en pantalla (GPU_VF_SAT) */
+    VR_TC_BEHIND = 4,    /* algún vértice detrás de la cámara del motor */
+    VR_TC_RECON = 8,     /* algún vértice reconstruido (parcial / esquinas de diagonal) */
+    VR_TC_DERIVED = 16,  /* algún vértice derivado (esquina de cartel sin GTE) */
+    VR_TC_OFS = 32,      /* polígono con desplazamiento de proyección distinto del centro del mundo (sprites, destellos) */
+    VR_TC_CLIPPED = 64   /* recortado contra el plano cercano */
+};
+
 typedef struct {
     float pos[3];
     float uv[2];
@@ -162,6 +173,9 @@ typedef struct {
     uint8_t twmx, twmy, twox, twoy; /* ventana de textura E2 (unidades de 8 px); 0 = sin ventana */
     int16_t cx1, cy1, cx2, cy2;     /* recorte vigente (inclusivo) */
 } VrState;
+
+/* Causas de descarte de la red de seguridad (VrStats.incoh[]). */
+enum { VR_INC_MODEL = 0, VR_INC_EDGE, VR_INC_FAR, VR_INC_STRETCH, VR_INC_N };
 
 typedef struct {
     uint32_t n_ops, n_poly, n_rect, n_line;
@@ -187,6 +201,11 @@ typedef struct {
     uint32_t n_filter_frame;  /* polígonos de la máscara de visión (marco de máscara/caja/mira) mandados a kind 3 y volcados en filter.frame */
     uint32_t n_recon;         /* §49: polígonos de 4 vértices con un vértice sin posición de vista reconstruido (opts.recon_partial) */
     uint32_t n_unclipped;     /* §49: triángulos emitidos con algún vértice por detrás/pegado al ojo del motor (z < near_units) sin recortar (engine_near_clip=0) */
+    /* --- §56: coherencia de vértices (modelo de la GTE) y red de seguridad --- */
+    uint32_t chk_vtx;         /* vértices de polígonos 3D comprobados contra el modelo de la GTE (los derivados/reconstruidos no se comprueban) */
+    uint32_t chk_bad[4];      /* ... los que NO reproducen su SXY (más de coh_px): [0] normales, [1] saturados, [2] detrás de la cámara, [3] ambiguos */
+    uint32_t drop_incoh;      /* triángulos descartados por la red de seguridad (opts.coherence) */
+    uint32_t incoh[VR_INC_N]; /* ... por causa (VR_INC_*) */
 } VrStats;
 
 #define VR_FILTER_ROWS 512
@@ -242,6 +261,7 @@ typedef struct {
     uint32_t cine_shot;       /* nº de plano (sube en cada corte de cámara y al empezar la cinemática) */
     int32_t cine_cut;         /* 1 si esta escena es el primer fotograma de un plano nuevo */
     int32_t cine_cover;       /* nº de recubrimientos semitransparentes a pantalla completa (fundidos) detectados en la lista */
+    const uint8_t *tri_cause; /* VR_TC_* de cada triángulo de v (nv/3 bytes; misma vida que v) */
 } VrScene;
 
 typedef struct {
@@ -286,6 +306,15 @@ typedef struct {
     float user_k;
     float user_eye_h_m;
     float user_p_ref[3];
+    /* --- §56: coherencia de vértices y red de seguridad (al final: ceros = sin red) --- */
+    int coherence;            /* 1 (def.): red de seguridad: se descartan (y se cuentan en VrStats.incoh[]) los triángulos con vértices incoherentes: SXY que no reproduce el modelo de la GTE
+                               * (coh_px), arista mayor que coh_edge_m, vértice a más de coh_far_m del ojo del motor o estiramiento extremo (coh_stretch). 0 = solo se cuenta (chk_*) */
+    float coh_px;             /* tolerancia (px) del modelo de la GTE; def. 2,5 */
+    float coh_edge_m;         /* arista máxima (m del mundo del juego); def. 60 */
+    float coh_far_m;          /* distancia máxima de un vértice al ojo del motor (m); def. 150 */
+    float coh_stretch;        /* reservado (0 = desactivado) */
+    float coh_synth_edge_m;   /* arista máxima (m) de los triángulos con vértices reconstruidos o derivados (no salen de la GTE); def. 20 */
+    float coh_flag_edge_m;    /* arista máxima (m) de los triángulos con algún vértice dudoso (ambiguo / saturado / detrás / reconstruido / derivado / desplazamiento de proyección); def. 32 */
 } VrSceneOpts;
 
 VrSceneOpts vr_scene_opts_default(void);
@@ -304,6 +333,7 @@ enum {
     VR_FATE_NAN = 9,       /* descartado: coordenadas no finitas */
     VR_FATE_DERIVED = 10,  /* descartado: DERIVED con opts.drop_derived */
     VR_FATE_RECON = 11,    /* emitido tras reconstruir un vértice sin posición o un AMBIG (recon_partial / recon_ambig) */
+    VR_FATE_INCOH = 12,    /* descartado por la red de seguridad de coherencia de vértices (opts.coherence) */
     VR_FATE_COUNT
 };
 void vr_scene_set_fate(uint8_t *buf, uint32_t cap);   /* NULL para desactivar */

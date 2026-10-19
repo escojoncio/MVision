@@ -38,6 +38,8 @@ VrSceneOpts vr_scene_opts_default(void) {
     o.drop_clear = 1;
     o.engine_near_clip = 0;   /* §49: todo lo que el juego emite llega al renderer; el plano cercano es el de la cabeza */
     o.recon_partial = 1; o.recon_ambig = 1;
+    o.coherence = 1;   /* §56: red de seguridad contra vértices incoherentes */
+    o.coh_px = 2.5f; o.coh_edge_m = 60.0f; o.coh_far_m = 150.0f; o.coh_stretch = 0.0f; o.coh_flag_edge_m = 32.0f; o.coh_synth_edge_m = 20.0f;
     return o;
 }
 
@@ -45,11 +47,12 @@ VrSceneOpts vr_scene_opts_default(void) {
 typedef struct {
     VrVtx v[3];
     uint32_t ev_end, src_op;
-    uint8_t kind, blend;
+    uint8_t kind, blend, cause;
 } Tri;
 
 static Tri *g_tri; static size_t g_tri_cap;
 static VrVtx *g_vtx; static size_t g_vtx_cap;
+static uint8_t *g_tcause; static size_t g_tcause_cap;
 static VrBatch *g_bat; static size_t g_bat_cap;
 static VrState *g_st; static size_t g_st_cap, g_st_n;
 static uint32_t *g_hash; static size_t g_hash_cap; /* tabla abierta: índice+1 en g_st */
@@ -65,8 +68,8 @@ static void fate_set(uint32_t i, uint8_t f) {
 }
 
 void vr_scene_release(void) {
-    free(g_tri); free(g_vtx); free(g_bat); free(g_st); free(g_hash); free(g_next);
-    g_tri = NULL; g_vtx = NULL; g_bat = NULL; g_st = NULL; g_hash = NULL; g_next = NULL;
+    free(g_tri); free(g_vtx); free(g_tcause); free(g_bat); free(g_st); free(g_hash); free(g_next);
+    g_tri = NULL; g_vtx = NULL; g_tcause = NULL; g_tcause_cap = 0; g_bat = NULL; g_st = NULL; g_hash = NULL; g_next = NULL;
     g_tri_cap = g_vtx_cap = g_bat_cap = g_st_cap = g_st_n = g_hash_cap = g_next_cap = 0;
 }
 
@@ -186,6 +189,24 @@ static int quad_coherent(const GpuOp *op) {
     if (!(nn > 1e-3f * lm * lm) || !isfinite(nn)) return 0;
     float d = fabsf(n[0]*e3[0] + n[1]*e3[1] + n[2]*e3[2]) / nn;
     return d < 0.02f * lm;
+}
+
+/* Modelo de la GTE (RTPS/RTPT con sf=1): SXY entero que produce el vértice de vista (vx,vy,vz) con la proyección (H, OFX, OFY) de la primitiva. Devuelve 1 si reproduce
+ * las coordenadas (x,y) del GPU (menos el offset de dibujo) con tolerancia `tol` px. Es la comprobación exacta de que un vértice asociado es coherente con su pantalla:
+ * incluye los vértices saturados (SXY recortado a +-0x400/0x3FF; SZ y división saturadas) y detrás de la cámara (SZ=0 => n=0x1FFFF). No distingue entre candidatos que
+ * comparten SXY, pero sí delata proyecciones/offsets distintos por vértice, entradas de otro fotograma y asociaciones con otro vértice de la misma clave aproximada. */
+static int vtx_model_ok(const GpuOp *op, const GpuVtx *v, float tol) {
+    double H = op->proj_h;
+    double sz = floor((double)v->vz);
+    sz = sz < 0 ? 0 : sz > 65535 ? 65535 : sz;
+    double nf = H >= sz * 2.0 ? 131071.0 / 65536.0 : H / sz;
+    double i1 = floor((double)v->vx), i2 = floor((double)v->vy);
+    i1 = i1 < -32768 ? -32768 : i1 > 32767 ? 32767 : i1;
+    i2 = i2 < -32768 ? -32768 : i2 > 32767 ? 32767 : i2;
+    double ex = nf * i1 + op->proj_ox, ey = nf * i2 + op->proj_oy;
+    ex = ex < -1024 ? -1024 : ex > 1023 ? 1023 : ex;
+    ey = ey < -1024 ? -1024 : ey > 1023 ? 1023 : ey;
+    return fabs(ex - (double)(v->x - op->dox)) <= tol && fabs(ey - (double)(v->y - op->doy)) <= tol;
 }
 
 /* Sutherland-Hodgman contra el plano z = zn (se conserva z >= zn) de un polígono de n<=3 vértices -> <=4. Devuelve m. */
@@ -527,6 +548,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
         GROW(g_tri, g_tri_cap, nt + 4);
 
         GpuOp rc;   /* copia de trabajo si se reconstruye un vértice */
+        int recon_flag = 0;
         if (op->type == GPU_OP_POLY && o.recon_partial && op->nv == 4 && op->proj_h > 0 && isfinite(op->proj_h)) {
             int bad = -1, nbad = 0, clean = 1;
             for (int k = 0; k < 4; k++) {
@@ -551,7 +573,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                             rc.v[bad].vvalid = 1; rc.v[bad].vflags = 0;
                             rc.v[bad].vx = d[0] * t; rc.v[bad].vy = d[1] * t; rc.v[bad].vz = t;
                             op = &rc;
-                            out->stats.n_recon++;
+                            out->stats.n_recon++; recon_flag = 1;
                             fate_set(i, VR_FATE_RECON);
                         }
                     }
@@ -576,7 +598,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                     if (m == 9) { g1->vx = b->vx; g1->vy = a->vy; g2->vx = a->vx; g2->vy = b->vy; }   /* v1 = (x3,y0), v2 = (x0,y3) */
                     else        { g1->vx = a->vx; g1->vy = b->vy; g2->vx = b->vx; g2->vy = a->vy; }   /* v0 = (x2,y1), v3 = (x1,y2) */
                     op = &rc;
-                    out->stats.n_recon++;
+                    out->stats.n_recon++; recon_flag = 1;
                     fate_set(i, VR_FATE_RECON);
                 }
             }
@@ -599,6 +621,19 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 int ofs_fixed = 0;
                 for (int k = 0; k < nv; k++) cv_from(&cv[k], op, &op->v[k], gour, &wref, &ofs_fixed);
                 if (ofs_fixed) out->stats.n_ofs_fix++;
+                unsigned bad_v = 0;   /* vértices que no reproducen su SXY con el modelo de la GTE */
+                if (!recon_flag && op->proj_h > 0 && isfinite(op->proj_h))
+                    for (int k = 0; k < nv; k++) {
+                        const GpuVtx *g = &op->v[k];
+                        if (g->vflags & GPU_VF_DERIVED) continue;
+                        out->stats.chk_vtx++;
+                        if (!vtx_model_ok(op, g, o.coh_px)) {
+                            out->stats.chk_bad[(g->vflags & GPU_VF_AMBIG) ? 3 : (g->vflags & GPU_VF_BEHIND) ? 2 : (g->vflags & GPU_VF_SAT) ? 1 : 0]++;
+                            bad_v |= 1u << k;
+                        }
+                    }
+                uint8_t pcause = (uint8_t)(((uf & GPU_VF_AMBIG) ? VR_TC_AMBIG : 0) | ((uf & GPU_VF_SAT) ? VR_TC_SAT : 0) | ((uf & GPU_VF_BEHIND) ? VR_TC_BEHIND : 0) |
+                                           (recon_flag ? VR_TC_RECON : 0) | ((uf & GPU_VF_DERIVED) ? VR_TC_DERIVED : 0) | (ofs_fixed ? VR_TC_OFS : 0));
                 for (int q = 0; q < ntri; q++) {
                     const CV *g3[3] = {&cv[idx[q][0]], &cv[idx[q][1]], &cv[idx[q][2]]};
                     int nanv = 0, near = 0, behind = 0;
@@ -607,6 +642,29 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                         else if (g3[k]->p[2] < o.near_units) { if (o.engine_near_clip) near = 1; else behind = 1; }
                     }
                     if (nanv) { out->stats.drop_nan++; fate_set(i, VR_FATE_NAN); continue; }
+                    {   /* red de seguridad (§56): triángulo con vértices incoherentes -> fuera (y contado por causa) */
+                        int why = -1;
+                        unsigned bm = (1u << idx[q][0]) | (1u << idx[q][1]) | (1u << idx[q][2]);
+                        if (bad_v & bm) why = VR_INC_MODEL;
+                        else {
+                            double sc = o.scale > 0 ? (double)o.scale : 1.0, emax = 0, fmax_ = 0;
+                            for (int k = 0; k < 3; k++) {
+                                const float *a = g3[k]->p, *b = g3[(k + 1) % 3]->p;
+                                double e = sqrt((double)(a[0]-b[0])*(a[0]-b[0]) + (double)(a[1]-b[1])*(a[1]-b[1]) + (double)(a[2]-b[2])*(a[2]-b[2])) * sc;
+                                double d = sqrt((double)a[0]*a[0] + (double)a[1]*a[1] + (double)a[2]*a[2]) * sc;
+                                if (e > emax) emax = e;
+                                if (d > fmax_) fmax_ = d;
+                            }
+                            if (o.coh_far_m > 0 && fmax_ > o.coh_far_m) why = VR_INC_FAR;
+                            else if (o.coh_edge_m > 0 && emax > o.coh_edge_m) why = VR_INC_EDGE;
+                            else if ((pcause & (VR_TC_RECON | VR_TC_DERIVED)) && o.coh_synth_edge_m > 0 && emax > o.coh_synth_edge_m) why = VR_INC_EDGE;
+                            else if (pcause && o.coh_flag_edge_m > 0 && emax > o.coh_flag_edge_m) why = VR_INC_EDGE;
+                        }
+                        if (why >= 0) {
+                            out->stats.incoh[why]++;
+                            if (o.coherence) { out->stats.drop_incoh++; fate_set(i, VR_FATE_INCOH); continue; }
+                        }
+                    }
                     CV poly[4]; int pn = 3;
                     if (behind) out->stats.n_unclipped++;
                     CV tin[3] = {*g3[0], *g3[1], *g3[2]};
@@ -641,6 +699,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                             memcpy(vv->pos, p[ord[k]], sizeof vv->pos);
                         }
                         t->ev_end = g_next[i]; t->src_op = i;
+                        t->cause = (uint8_t)(pcause | (pn != 3 || near ? VR_TC_CLIPPED : 0));
                         t->kind = semi ? 1 : 0; t->blend = semi ? (op->abr & 3) : 0xFF;
                         out->stats.n_tris3d++;
                         if (i < g_fate_cap) g_fate[i] = VR_FATE_3D;
@@ -669,6 +728,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             if (fcls) filter_note(out, op, fcls, 0, &tint_w);
             for (int q = 0; q < ntri; q++) {
                 Tri *t = &g_tri[nt++];
+                t->cause = 0;
                 for (int k = 0; k < 3; k++) {
                     const GpuVtx *g = &op->v[idx[q][k]];
                     fill_vtx(&t->v[k], op, g, gour, (uint16_t)(f | VR_F_2D | (fcls ? VR_F_FILTER : 0)), sid);
@@ -705,6 +765,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             static const int idx[2][3] = {{0, 1, 2}, {1, 2, 3}};
             for (int q = 0; q < 2; q++) {
                 Tri *t = &g_tri[nt++];
+                t->cause = 0;
                 for (int k = 0; k < 3; k++) {
                     int j = idx[q][k];
                     fill_vtx(&t->v[k], op, g, 0, (uint16_t)(f | VR_F_2D | VR_F_RECT | (fcls ? VR_F_FILTER : 0)), sid);
@@ -741,6 +802,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             static const int idx[2][3] = {{0, 1, 2}, {1, 2, 3}};
             for (int q = 0; q < 2; q++) {
                 Tri *t = &g_tri[nt++];
+                t->cause = 0;
                 for (int k = 0; k < 3; k++) {
                     int j = idx[q][k];
                     fill_vtx(&t->v[k], op, cs[j], gour, (uint16_t)((f & ~GPU_F_TEXTURED) | VR_F_2D | VR_F_LINE), sid);
@@ -770,6 +832,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
 
     /* ---- ensamblado: épocas (mismo ev_end), dentro clase 0,1,2; batch nuevo al cambiar blend ---- */
     GROW(g_vtx, g_vtx_cap, nt * 3 + 3);
+    GROW(g_tcause, g_tcause_cap, nt + 1);
     GROW(g_bat, g_bat_cap, nt + 4);
     size_t nv = 0, nb = 0;
     for (size_t s = 0; s < nt;) {
@@ -786,12 +849,13 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                     cur->ev_end = t->ev_end; cur->src_op = t->src_op;
                 }
                 memcpy(&g_vtx[nv], t->v, sizeof t->v);
+                g_tcause[nv / 3] = t->cause;
                 nv += 3; cur->count += 3;
             }
         }
         s = e;
     }
-    out->v = g_vtx; out->nv = (uint32_t)nv;
+    out->v = g_vtx; out->nv = (uint32_t)nv; out->tri_cause = g_tcause;
     out->b = g_bat; out->nb = (uint32_t)nb;
     out->states = g_st; out->nstates = (uint32_t)g_st_n;
     out->has_3d = out->stats.n_tris3d > 0;
