@@ -304,9 +304,7 @@ final class XRPresenter {
         page = 0
         menuDirty = true
         prevNav = XRNav()
-        let p = XRMath.position(head)
-        menuModel = XRMath.translation(SIMD3<Float>(p.x, p.y - 0.05, p.z)) * XRMath.rotationY(XRMath.yaw(of: head))
-            * XRMath.translation(SIMD3<Float>(0, 0, -1.1))
+        menuModel = XRMenuLayout.model(head: head)      // cerca, abajo e inclinado hacia la cara: nunca sobre la pantalla de cine / códec
     }
 
     private func closeMenu() {
@@ -648,9 +646,10 @@ final class XRPresenter {
 
         // 4) pantalla de cine (también como respaldo del diorama sin geometría)
         if shown == .cinema, let c = cinema, let tex = c.texture(srgb: linear) {
-            var W = cfg.width
+            let leg = XRCinemaLayout.legible(reason: Int32(gs.view_reason))
+            var W = XRCinemaLayout.width(base: cfg.width, legible: leg)
             let D = cfg.distance
-            if cfg.integerScale, p00 > 0, eyePx > 0, c.w > 0 {
+            if XRCinemaLayout.integerScale(base: cfg.integerScale, legible: leg), p00 > 0, eyePx > 0, c.w > 0 {
                 let ppm = p00 * eyePx / (2 * D)                       // píxeles del visor por metro, en el centro de la pantalla
                 let texPx = W / Float(c.w) * ppm
                 if texPx.isFinite, texPx > 1 { W = max(1, texPx.rounded()) * Float(c.w) / ppm }
@@ -659,10 +658,11 @@ final class XRPresenter {
             it.model = anchor * XRMath.translation(SIMD3<Float>(0, anchorY, -D))
             it.size = SIMD2<Float>(W, W * 0.75)
             it.distance = D
-            it.curve = cfg.curve
-            it.cols = cfg.curve > 0.01 ? 48 : 1
+            let cv = XRCinemaLayout.curve(base: cfg.curve, legible: leg)
+            it.curve = cv
+            it.cols = cv > 0.01 ? 48 : 1
             it.imgSize = SIMD2<Float>(Float(c.w), Float(c.h))
-            it.sharp = Float(cfg.sharp)
+            it.sharp = Float(XRCinemaLayout.sharp(base: cfg.sharp, legible: leg))
             r.items.append(it)
         }
 
@@ -761,7 +761,7 @@ final class XRPresenter {
             if !menuTex.isEmpty {
                 var it = XRDrawItem(kind: .menu, texture: linear ? menuTexSRGB[menuIdx] : menuTex[menuIdx])
                 it.model = menuModel
-                it.size = SIMD2<Float>(0.9, 0.9 * Float(Self.menuH) / Float(Self.menuW))
+                it.size = SIMD2<Float>(XRMenuLayout.width, XRMenuLayout.height(w: Self.menuW, h: Self.menuH))
                 it.opacity = 1
                 r.items.append(it)
             }

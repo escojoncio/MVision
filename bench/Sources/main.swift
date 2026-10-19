@@ -727,6 +727,53 @@ if !CommandLine.arguments.contains("--sin-nativo") {
     runNativeE2E(layered: true, msaa: 4, infinite: true)
 }
 
+/// Colocación del menú VR (XRMenuLayout) y legibilidad de la pantalla de cine (XRCinemaLayout): pruebas puras, sin Metal.
+func runMenuLayout() {
+    let tag = "menu-vr"
+    let menuW = 1024, menuH = 1060
+    for (i, yaw) in [Float(0), 0.7, -1.9, 3.0].enumerated() {
+        for hy in [Float(1.2), 1.65] {
+            let head = XRMath.translation(SIMD3<Float>(0.3, hy, -0.2)) * XRMath.rotationY(yaw)
+            let m = XRMenuLayout.model(head: head)
+            let hp = XRMath.position(head)
+            let c = XRMath.position(m)
+            let n = simd_normalize(SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z))
+            let toHead = simd_normalize(hp - c)
+            let fwd = SIMD3<Float>(-sinf(yaw), 0, -cosf(yaw))
+            let d = c - hp
+            let horiz = simd_dot(SIMD3<Float>(d.x, 0, d.z), fwd)
+            let case_ = "\(tag)/\(i)-\(hy)"
+            check(case_, "centro delante de la cabeza a 0,7 m", abs(horiz - XRMenuLayout.distance) < 1e-3, String(format: "%.3f m", horiz))
+            check(case_, "centro por debajo de los ojos", abs((hp.y - c.y) - XRMenuLayout.drop) < 1e-3, String(format: "%.3f m", hp.y - c.y))
+            check(case_, "el panel mira a la cara (normal . hacia la cabeza > 0,99)", simd_dot(n, toHead) > 0.99, String(format: "%.4f", simd_dot(n, toHead)))
+            // Pantalla de cine: centro a D m delante, a la altura de la cabeza - 0,05; ancho/alto máximos de los ajustes.
+            let elev = atan2f(c.y - hp.y, hypotf(d.x, d.z)) * 180 / .pi
+            check(case_, "elevación del centro por debajo de -25 grados (borde inferior de la pantalla de cine a 2,5 m)", elev < -25, String(format: "%.1f grados", elev))
+            for D in XRViewConfig.distances {
+                check(case_, "separación en profundidad con la pantalla a \(D) m >= 1,1 m", D - simd_length(d) >= 1.1, String(format: "%.2f m", D - simd_length(d)))
+            }
+            // esquinas: ni pegadas a los ojos ni más lejos de 1 m
+            let h = XRMenuLayout.height(w: menuW, h: menuH)
+            var minD: Float = 9, maxD: Float = 0
+            for (sx, sy) in [(Float(-1), Float(-1)), (1, -1), (-1, 1), (1, 1)] {
+                let q = m * SIMD4<Float>(sx * XRMenuLayout.width / 2, sy * h / 2, 0, 1)
+                let dd = simd_length(SIMD3<Float>(q.x, q.y, q.z) - hp)
+                minD = min(minD, dd); maxD = max(maxD, dd)
+            }
+            check(case_, "esquinas entre 0,35 y 1,0 m de la cabeza", minD > 0.35 && maxD < 1.0, String(format: "%.2f..%.2f m", minD, maxD))
+        }
+    }
+    // Legibilidad del cine
+    check("cine-legible", "sin partida (1) y detenido (4) son escenas de texto", XRCinemaLayout.legible(reason: 1) && XRCinemaLayout.legible(reason: 4), "")
+    check("cine-legible", "mundo, radio, cinemática y pausa no cambian", !XRCinemaLayout.legible(reason: 0) && !XRCinemaLayout.legible(reason: 2) && !XRCinemaLayout.legible(reason: 3) && !XRCinemaLayout.legible(reason: 5), "")
+    check("cine-legible", "ancho +25 % con tope de 4,5 m", abs(XRCinemaLayout.width(base: 3.0, legible: true) - 3.75) < 1e-4 && XRCinemaLayout.width(base: 4.5, legible: true) == 4.5 && XRCinemaLayout.width(base: 3.0, legible: false) == 3.0, "")
+    check("cine-legible", "curvatura limitada a 0,12 solo en texto", XRCinemaLayout.curve(base: 0.7, legible: true) == 0.12 && XRCinemaLayout.curve(base: 0.0, legible: true) == 0 && XRCinemaLayout.curve(base: 0.7, legible: false) == 0.7, "")
+    check("cine-legible", "nitidez nunca suave en texto; píxel se respeta", XRCinemaLayout.sharp(base: 0, legible: true) == 1 && XRCinemaLayout.sharp(base: 2, legible: true) == 2 && XRCinemaLayout.sharp(base: 0, legible: false) == 0, "")
+    check("cine-legible", "escalado entero forzado en texto", XRCinemaLayout.integerScale(base: false, legible: true) && !XRCinemaLayout.integerScale(base: false, legible: false), "")
+}
+
+runMenuLayout()
+
 print("\nresumen: \(failures) comprobaciones falladas")
 if !warnList.isEmpty { annot("warning", "banco de render (informativo)", warnList.prefix(30).joined(separator: "\n")) }
 if failures > 0 {

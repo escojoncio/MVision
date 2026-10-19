@@ -20,6 +20,15 @@ enum XRMath {
             SIMD4<Float>(0, 0, 0, 1)))
     }
 
+    static func rotationX(_ a: Float) -> simd_float4x4 {
+        let c = cosf(a), s = sinf(a)
+        return simd_float4x4(columns: (
+            SIMD4<Float>(1, 0, 0, 0),
+            SIMD4<Float>(0, c, s, 0),
+            SIMD4<Float>(0, -s, c, 0),
+            SIMD4<Float>(0, 0, 0, 1)))
+    }
+
     static func scale(_ s: SIMD3<Float>) -> simd_float4x4 {
         simd_float4x4(diagonal: SIMD4<Float>(s.x, s.y, s.z, 1))
     }
@@ -90,4 +99,36 @@ enum XRStereo {
         let t = eye == 0 ? SIMD4<Float>(tanX - sh, tanX + sh, tanY, tanY) : SIMD4<Float>(tanX + sh, tanX - sh, tanY, tanY)
         return (view, t)
     }
+}
+
+/// Colocación del menú VR y ajustes de legibilidad de la pantalla de cine (funciones puras: las prueba el banco de render).
+/// El menú ya no sale a 1,1 m a la altura de los ojos, justo delante de la pantalla de cine / códec (a 2-4 m): se coloca más cerca, más abajo, inclinado hacia la cara
+/// y más pequeño, de modo que nunca coincide con la pantalla (ni en ángulo ni en profundidad) y se lee entero sin girar la cabeza.
+enum XRMenuLayout {
+    static let distance: Float = 0.70       // m delante de la cabeza (en horizontal)
+    static let drop: Float = 0.45           // m por debajo de los ojos
+    static let width: Float = 0.66          // ancho del panel (m); alto = ancho * h / w de la textura
+
+    /// Modelo del panel (centro del quad, +Z hacia el usuario) para una cabeza `head` (espacio recentrado).
+    static func model(head: simd_float4x4) -> simd_float4x4 {
+        let p = XRMath.position(head)
+        let pitch = atan2f(drop, distance)      // inclina el panel hacia la cara: -pitch gira +Z hacia arriba
+        return XRMath.translation(p) * XRMath.rotationY(XRMath.yaw(of: head)) * XRMath.translation(SIMD3<Float>(0, -drop, -distance)) * XRMath.rotationX(-pitch)
+    }
+
+    /// Altura del panel (m) para una textura de `w` x `h` px.
+    static func height(w: Int, h: Int) -> Float { width * Float(h) / Float(max(w, 1)) }
+}
+
+enum XRCinemaLayout {
+    /// Motivos de vista (VRV_R_*) cuya pantalla lleva texto pequeño de 1 px (títulos, créditos, nombres de la intro, pantallas de resultado): sin partida y juego detenido.
+    static func legible(reason: Int32) -> Bool { reason == 1 || reason == 4 }
+    /// Ancho de la pantalla (m): un 25 % mayor para esas escenas (hasta 4,5 m).
+    static func width(base: Float, legible: Bool) -> Float { legible ? min(base * 1.25, 4.5) : base }
+    /// Curvatura: el cilindro deforma la rejilla de píxeles (trazos de 1 px de grosor desigual); en escenas de texto se limita a 0,12.
+    static func curve(base: Float, legible: Bool) -> Float { legible ? min(base, 0.12) : base }
+    /// Nitidez: nunca «Suave» (el bilineal borra los trazos finos).
+    static func sharp(base: Int, legible: Bool) -> Int { legible ? max(base, 1) : base }
+    /// Escalado entero (cada texel = nº entero de píxeles del visor): siempre en esas escenas.
+    static func integerScale(base: Bool, legible: Bool) -> Bool { base || legible }
 }
