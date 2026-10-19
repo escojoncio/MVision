@@ -128,6 +128,9 @@ void mv_vrhost_set_headcol(int enable, float radius_m);
 void mv_vrhost_set_hud2d_smooth(int mode);
 int mv_vrhost_hud2d_smooth(void);
 void mv_vrhost_hud2d_stats(int *scale, double *ms);
+/* Capa 2D fiel (hilo trabajador): -1 sin capa utilizable (usar el shader), 0 la misma de antes, 1 nueva (px RGBA8 w x h válidos hasta mv_vrhost_hud2d_release; full = fotograma entero). Hilo de render. */
+int mv_vrhost_hud2d_acquire(const uint8_t **px, int *w, int *h, int *full, uint32_t *seq);
+void mv_vrhost_hud2d_release(void);
 
 typedef struct {
     uint32_t built;          /* escenas ensambladas */

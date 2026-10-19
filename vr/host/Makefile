@@ -16,7 +16,7 @@ SIGS ?= $(OUT)/sigs_hle.json
 SIGS_REF ?= ../../gamedata/sigs_ref.json
 FRAMES ?= 7000
 # Capas de vr/ que enlaza el host: puente, cámara, entrada, escena, cuerpo (IK), radar, manos/armas, disparo y recarga.
-SRC_VR := ../bridge/bridge.c ../bridge/bridge_addrs.c ../camera/vr_camera.c ../camera/vr_heading.c ../camera/vr_headcol.c ../camera/vr_camera_hle.c ../input/vr_input.c ../input/vr_gesture.c ../scene/vr_scene.c ../scene/vr_layer2d.c \
+SRC_VR := ../bridge/bridge.c ../bridge/bridge_addrs.c ../camera/vr_camera.c ../camera/vr_heading.c ../camera/vr_headcol.c ../camera/vr_camera_hle.c ../input/vr_input.c ../input/vr_gesture.c ../scene/vr_scene.c ../scene/vr_layer2d.c ../scene/vr_layer2d_async.c \
   ../body/vr_body.c ../body/vr_fist.c ../body/vr_body_cam.c ../body/vr_pose.c ../radar/vr_radar.c ../radar/vr_radar_hle.c \
   ../hands/vr_hands.c $(filter-out ../weapons/test_%.c,$(wildcard ../weapons/*.c)) \
   ../gameplay/vr_fire.c ../gameplay/vr_fire_hle.c ../gameplay/vr_aa.c ../gameplay/vr_missile.c ../gameplay/vr_scope.c ../gameplay/vr_reload.c \

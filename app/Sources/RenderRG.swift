@@ -551,22 +551,30 @@ final class RGRenderer {
         return true
     }
 
-    /// Recoge la capa 2D fiel de la escena: el panel (RGBA8 no premultiplicado, anillo de 3 texturas del tamaño de la capa) o el fotograma completo del cine.
-    private func takeLayer2D(_ sc: VrScene) {
-        guard let px = sc.hud2d, sc.hud2d_w > 0, sc.hud2d_h > 0 else {
+    /// Recoge la última capa 2D fiel publicada por el hilo trabajador de vr/host (no espera nunca): el panel (RGBA8 no premultiplicado, anillo de 3 texturas del tamaño de la capa)
+    /// o el fotograma completo del cine. Sin capa utilizable (apagada, sin resultado o con retraso excesivo) vuelve al pase HUD del shader.
+    private func takeLayer2D() {
+#if MV_BENCH
+        return
+#else
+        var px: UnsafePointer<UInt8>?
+        var w: Int32 = 0, h: Int32 = 0, full: Int32 = 0, seq: UInt32 = 0
+        let r = mv_vrhost_hud2d_acquire(&px, &w, &h, &full, &seq)
+        defer { if r >= 0 { mv_vrhost_hud2d_release() } }
+        if r < 0 || px == nil || w <= 0 || h <= 0 {
             if hudHQ { hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB }
             hqFull = nil
             return
         }
-        let w = Int(sc.hud2d_w), h = Int(sc.hud2d_h)
-        if sc.hud2d_full != 0 {
-            hqFull = (Array(UnsafeBufferPointer(start: px, count: w * h * 4)), w, h, sc.hud2d_seq)
+        let W = Int(w), H = Int(h)
+        if full != 0 {
+            if r == 1 || hqFull == nil { hqFull = (Array(UnsafeBufferPointer(start: px!, count: W * H * 4)), W, H, seq) }
             if hudHQ { hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB }
             return
         }
         hqFull = nil
-        if hudHQRing.isEmpty || hudHQW != w || hudHQH != h {
-            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
+        if hudHQRing.isEmpty || hudHQW != W || hudHQH != H {
+            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: W, height: H, mipmapped: false)
             td.usage = [.shaderRead, .pixelFormatView]
             td.storageMode = .shared
             var a: [MTLTexture] = [], b: [MTLTexture] = []
@@ -574,15 +582,16 @@ final class RGRenderer {
                 guard let t = device.makeTexture(descriptor: td), let v = t.makeTextureView(pixelFormat: .rgba8Unorm_srgb) else { return }
                 t.label = "HUD 2D fiel \(i)"; a.append(t); b.append(v)
             }
-            hudHQRing = a; hudHQRingSRGB = b; hudHQW = w; hudHQH = h; hudHQSeq = 0
+            hudHQRing = a; hudHQRingSRGB = b; hudHQW = W; hudHQH = H; hudHQSeq = 0
         }
-        if sc.hud2d_seq != hudHQSeq || !hudHQ {
+        if r == 1 || !hudHQ || hudHQSeq != seq {
             hudHQIdx = (hudHQIdx + 1) % hudHQRing.count
-            hudHQRing[hudHQIdx].replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: px, bytesPerRow: w * 4)
-            hudHQSeq = sc.hud2d_seq
+            hudHQRing[hudHQIdx].replace(region: MTLRegionMake2D(0, 0, W, H), mipmapLevel: 0, withBytes: px!, bytesPerRow: W * 4)
+            hudHQSeq = seq
         }
         hudTexture = hudHQRing[hudHQIdx]; hudTextureSRGB = hudHQRingSRGB[hudHQIdx]
         hudHQ = true
+#endif
     }
 
     private func storeScene(_ sc: VrScene, _ newSlot: inout Bool) {
@@ -740,7 +749,6 @@ final class RGRenderer {
                 hudRect = hudInVRAMCoords ? simd_float4(Float(d.x), Float(d.y), w, h) : simd_float4(0, 0, w, h)
             }
             storeScene(sc, &newSlot)
-            takeLayer2D(sc)
             radar?.ingest(device: device)       // escena del radar asociada a esta escena (mv_host_radar)
             gotNew = true
         }
@@ -759,6 +767,7 @@ final class RGRenderer {
         } else {
             groups.append((0, batches.count, Int.max))
         }
+        takeLayer2D()
         let doHud = (gotNew || !hudDone) && drawWorld && !hudHQ
         // Filtro de pantalla: la escena se resuelve en texturas intermedias y un pase por ojo escribe el drawable (ver planPost).
         let plan = planPost(colorTargets: colorTargets, resolveTargets: resolveTargets, layered: layered)
