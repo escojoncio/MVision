@@ -272,6 +272,8 @@ typedef struct {
     const uint8_t *tri_cause; /* VR_TC_* de cada triángulo de v (nv/3 bytes; misma vida que v) */
     /* --- render nativo (lo rellena el host; vr_scene_build lo deja a cero) --- */
     int32_t native_3d;        /* 1: la escena admite el 3D nativo (cámara VR en primera persona, no cinemática, con 3D de mundo): sus batches 3D (kind 0/1) están MARCADOS con skip_if_native pero siguen todos presentes; el que dibuja decide con ns_native_decide (vr/native/ns_bridge.h) cuáles saltar. 0: no marcar nada, dibujar todo */
+    const uint32_t *tri_src;  /* índice de la primitiva de la lista (la de `src` de vr_scene_build) de origen de cada triángulo de v (nv/3 entradas; misma vida que v). El host lo usa para ocultar por triángulo lo que el render nativo confirma */
+    const uint64_t *tri_fx;   /* (lo rellena el host; vr_scene_build lo deja a NULL) identidad de efecto de cada triángulo: ns_fx_item_key, NSFX_KEY_MESH (1) para mallas, 0 = nada que ocultar. Lo oculta el render nativo solo si lo confirma */
 } VrScene;
 
 typedef struct {

@@ -137,7 +137,8 @@ final class RGRenderer {
     private var failed = Set<String>()
 
     // escena persistente (se repite hasta que llegue otra)
-    private struct DrawBatch { var first: Int, count: Int, kind: Int, mode: Int, semi: Bool, hasTex: Bool, evEnd: Int, skip: UInt32 }   // skip: VrBatch.skip_if_native
+    private struct DrawBatch { var first: Int, count: Int, kind: Int, mode: Int, semi: Bool, hasTex: Bool, evEnd: Int, skip: UInt32
+        var keys: [UInt64]? = nil }   // skip: VrBatch.skip_if_native; keys: identidad de efecto de cada triángulo (VrScene.tri_fx; solo batches con VR_SKIP_FX) para ocultar por triángulo lo que el render nativo confirma
     private final class VtxSlot { var buf: MTLBuffer?; var cap = 0; var stOff = 0 }   // stOff: offset de VrGpuState[] tras los vértices
     // Invariante del anillo (revisado): `inflight` (3) cuenta comandos en vuelo INCLUIDO el que se codifica, así que al volver de
     // `inflight.wait()` hay como mucho 2 anteriores sin terminar (la cola Metal los completa en orden). `storeScene` avanza `curSlot`
@@ -640,8 +641,14 @@ final class RGRenderer {
                 vr_scan_tris(scanPtr, UInt32(drawCnt), scanView, scanNear, scanBig, &scan)
                 if bt.skip_if_native != 0 { vr_scan_tris(scanPtr, UInt32(drawCnt), scanView, scanNear, scanBig, &scanMarked) }
             }
+            // Efectos: identidad de cada triángulo (solo si el batch no se partió: los índices de v siguen siendo válidos) para ocultar por triángulo, no el batch entero
+            var fxKeys: [UInt64]? = nil
+            if (UInt32(bt.skip_if_native) & UInt32(VR_SKIP_FX)) != 0, drawFirst == first, let tf = sc.tri_fx {
+                let kb = UnsafeBufferPointer(start: tf + first / 3, count: cnt / 3)
+                if kb.contains(where: { $0 != 0 }) { fxKeys = Array(kb) }
+            }
             batches.append(DrawBatch(first: drawFirst, count: drawCnt, kind: kind, mode: Int(bt.blend) & 3, semi: semi,
-                                     hasTex: hasTex, evEnd: Int(bt.ev_end), skip: UInt32(bt.skip_if_native)))
+                                     hasTex: hasTex, evEnd: Int(bt.ev_end), skip: UInt32(bt.skip_if_native), keys: fxKeys))
             if kind != 2 {   // diagnóstico: triángulos 3D de la lista y caja (mundo VR) de los marcados, que son los que el nativo debe sustituir
                 if bt.skip_if_native != 0 {
                     gpuMarkedTris += cnt / 3
@@ -738,7 +745,9 @@ final class RGRenderer {
                 && sceneV.prefix(nTargets).allSatisfy { m in (0..<4).allSatisfy { c in (0..<4).allSatisfy { m[c][$0].isFinite } } }
             let canTry = want && drawWorld && drawEyes && nativeSceneMarked && c0 != nil && d0 != nil && !sceneV.isEmpty && viewsOK
             n.headVR = SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z)
-            n.beginFrame(commandBuffer: commandBuffer, sortView: sceneV.first ?? matrix_identity_float4x4, draw: canTry)
+            func eyeOf(_ v: simd_float4x4) -> SIMD3<Float> { let t = v.inverse.columns.3; return SIMD3<Float>(t.x, t.y, t.z) }
+            n.beginFrame(commandBuffer: commandBuffer, sortView: sceneV.first ?? matrix_identity_float4x4, draw: canTry,
+                         eyes: canTry ? sceneV.prefix(min(2, nTargets)).map(eyeOf) : [])
             var ready = false
             if canTry, let c = c0, let d = d0 {
                 ready = n.prewarm(layered: layered, colorFormat: c.pixelFormat, depthFormat: d.pixelFormat, samples: c.sampleCount, linear: linearOutput)
@@ -1287,7 +1296,8 @@ final class RGRenderer {
         // Recuperación: si el dibujo nativo falló, los batches marcados de los grupos anteriores (ya saltados en sus pases) se dibujan ahora, en este mismo pase.
         var segDraw = seg
         if last, !isAux, nativeFailed, !nativeOnly, decidedSkip != 0, range.lowerBound > 0 {
-            let lost = (0..<range.lowerBound).filter { batches.indices.contains($0) && batches[$0].kind != 2 && (batches[$0].skip & decidedSkip) != 0 }
+            // (los batches de efectos se ocultan por triángulo, no enteros: no se recuperan aquí; ver más abajo)
+            let lost = (0..<range.lowerBound).filter { batches.indices.contains($0) && batches[$0].kind != 2 && (batches[$0].skip & decidedSkip & ~UInt32(VR_SKIP_FX)) != 0 }
             segDraw = lost + seg
         }
         guard haveScene, has3D, drawWorld, drawEyes || isAux, !segDraw.isEmpty, let buf = vtxSlots[curSlot].buf else { return }
@@ -1312,7 +1322,27 @@ final class RGRenderer {
         var curKind = -1
         for i in segDraw {
             let bt = batches[i]
-            if (bt.skip & skipMask) != 0 { statSkipB += 1; statSkipTris += bt.count / 3; continue }   // 3D que se pinta desde la escena nativa (VrBatch.skip_if_native & NsDecision.skip)
+            // 3D que se pinta desde la escena nativa (VrBatch.skip_if_native & NsDecision.skip). Los batches de efectos (VR_SKIP_FX) no se saltan enteros: solo se omiten los
+            // triángulos cuyo elemento CONFIRMA el render nativo (clave de efecto en VrScene.tri_fx; lo no confirmado sigue por GPU). Modo «solo nativo»: se salta entero.
+            var runs: [(first: Int, count: Int)] = [(bt.first, bt.count)]
+            if (bt.skip & skipMask) != 0 {
+                if (bt.skip & UInt32(VR_SKIP_FX)) != 0 && skipMask != UInt32.max {
+                    // batch de efectos: sin identidades o sin renderer = se dibuja entero; si no, se quitan los triángulos confirmados
+                    if let keys = bt.keys, let n = native {
+                        runs.removeAll(keepingCapacity: true)
+                        var start = -1
+                        for t in 0..<keys.count {
+                            let hide = keys[t] != 0 && n.fxConfirmed(keys[t])
+                            if hide { if start >= 0 { runs.append((bt.first + start * 3, (t - start) * 3)); start = -1 } }
+                            else if start < 0 { start = t }
+                        }
+                        if start >= 0 { runs.append((bt.first + start * 3, (keys.count - start) * 3)) }
+                        let kept = runs.reduce(0) { $0 + $1.count }
+                        statSkipTris += (bt.count - kept) / 3
+                        if kept == 0 { statSkipB += 1; continue }
+                    }
+                } else { statSkipB += 1; statSkipTris += bt.count / 3; continue }
+            }
             statDrawB += 1; statDrawTris += bt.count / 3
             if bt.kind != curKind {
                 curKind = bt.kind
@@ -1324,13 +1354,17 @@ final class RGRenderer {
                     enc.setDepthBias(semiDepthBias, slopeScale: semiSlopeBias, clamp: 0)   // Z invertida: + = hacia la cámara
                 }
             }
-            if bt.kind == 0 {
-                draw(bt, key(0, -1))
-            } else {
-                let a: Float = bt.mode == 3 ? 0.25 : 0.5
-                enc.setBlendColor(red: a, green: a, blue: a, alpha: a)
-                draw(bt, key(bt.hasTex ? 1 : 0, bt.mode))
-                if bt.hasTex { draw(bt, key(2, -1)) }
+            for r in runs {
+                var part = bt
+                part.first = r.first; part.count = r.count
+                if bt.kind == 0 {
+                    draw(part, key(0, -1))
+                } else {
+                    let a: Float = bt.mode == 3 ? 0.25 : 0.5
+                    enc.setBlendColor(red: a, green: a, blue: a, alpha: a)
+                    draw(part, key(bt.hasTex ? 1 : 0, bt.mode))
+                    if bt.hasTex { draw(part, key(2, -1)) }
+                }
             }
         }
     }

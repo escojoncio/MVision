@@ -75,6 +75,35 @@ void ns_gpu_sort_free(NsGpuSortScratch *sc);
  * de cap se descartan los MÁS LEJANOS. scratch puede ser NULL (reserva y libera dentro: solo pruebas). */
 size_t ns_gpu_sort_semi(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out, uint8_t *abr_out, size_t cap, NsGpuSortScratch *scratch);
 
+
+/* ---- Efectos nativos (NsScene.effects): geometría por fotograma ----
+ * Convierte los NsEffect (mundo del motor) en triángulos del mundo VR para el renderer: carteles (tamaño en píxeles del motor -> mundo con la profundidad de la
+ * cámara del juego) y cintas orientados UNA vez por fotograma a la cabeza; cuadriláteros y triángulos de mundo (diagonal 0,1,2 / 1,2,3); polígonos de una cara con
+ * test de cara por ojo (en el mundo del motor, como el motor). Salida en dos tramos del mismo búfer:
+ *   [0, n_opaque)                 pase 0 (opaco): todos los no semitransparentes y, de los semitransparentes texturizados, una copia (solo se pintan sus texels con
+ *                                 el bit 15 a 0)
+ *   [n_opaque, n_opaque + n_semi) pase 1 (semitransparente), de atrás adelante respecto a la cabeza, en runs de igual modo de mezcla (`runs`)
+ * `keys` recibe la identidad (ns_fx_item_key) de cada efecto que ha entrado en el dibujo: el renderer solo lo da por CONFIRMADO si dibuja de verdad. */
+typedef struct {
+    const float *to_vr;                 /* 12: mundo del motor -> mundo VR (m), 3x4 fila-mayor */
+    const NsCamera *cam;                /* cámara del juego de la escena (profundidad de los carteles, sentido del mundo) */
+    float head[3];                      /* cabeza (mundo VR, m) */
+    float head_right[3], head_up[3];    /* ejes de la cabeza en el mundo VR (unitarios, ortogonales) */
+    float eyes[2][3]; int n_eyes;       /* ojos (mundo VR, m): 1 o 2 */
+    float px_z_min, px_z_ref;           /* profundidad mínima fiable de un tamaño en píxeles y la de referencia si no (0 = 32 y 1000) */
+} NsGpuFxParams;
+typedef struct { uint32_t start, count; uint8_t abr; } NsGpuFxRun;   /* start/count en vértices del búfer completo */
+typedef struct {
+    uint32_t n_opaque, n_semi, n_runs, n_keys;
+    uint32_t n_items, n_skipped;        /* efectos entrados / descartados (no finitos, degenerados) */
+    uint32_t n_billboard, n_ribbon, n_poly;
+} NsGpuFxOut;
+/* Capacidades: verts >= 12 * n_fx (peor caso: cartel semitransparente texturizado = 6 + 6), runs >= n_fx, keys >= n_fx. 0 = bien; <0 parámetros inválidos. */
+int ns_gpu_fx_build(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm, NsGpuFxVert *verts, uint32_t cap_verts, NsGpuFxRun *runs, uint32_t cap_runs,
+                    uint64_t *keys, uint32_t cap_keys, NsGpuFxOut *out);
+/* Clave de 64 bits (no nula) de un efecto: la misma que ns_fx_item_key de ns_fx.h. */
+static inline uint64_t ns_gpu_fx_key(const NsEffect *e) { return ((uint64_t)e->src_key << 32) | ((uint64_t)e->idx << 8) | (uint64_t)e->sub; }
+
 /* Accesores para Swift (los arrays fijos de C llegan como tuplas) */
 static inline const float *ns_scene_to_vr(const NsScene *s) { return s->to_vr; }
 static inline const float *ns_scene_cam_rot(const NsScene *s) { return s->cam.rot; }

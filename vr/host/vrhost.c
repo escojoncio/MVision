@@ -34,6 +34,7 @@
 #include "hle.h"
 #include "ns_dump.h"
 #include "ns_extract.h"
+#include "ns_fx.h"
 #include "ns_hook.h"
 #include "ns_hook_rt.h"
 #include "ns_player.h"
@@ -104,6 +105,8 @@ typedef struct {
     VrBatch *b;      size_t b_cap;
     VrState *st;     size_t st_cap;
     uint8_t *tc;     size_t tc_cap;          /* VrScene.tri_cause (un byte por triángulo) */
+    uint64_t *tk;    size_t tk_cap;          /* VrScene.tri_fx (identidad de efecto por triángulo) */
+    uint32_t *tsrc;  size_t tsrc_cap;        /* VrScene.tri_src (primitiva de origen por triángulo) */
     VrScene sc;
     VrHcMap hcmap;                       /* correspondencia usuario <-> mundo de la cámara con que se emitió esta escena (límite de la cabeza) */
     uint8_t frm[VR_FRAME_W * VR_FRAME_H];    /* copia de VrFilter.frame (máscara de visión: la memoria de vr_scene se reutiliza en la siguiente lista) */
@@ -439,11 +442,19 @@ static void drop_queue(void) {
 /* Copia la escena recién ensamblada (memoria interna de vr_scene, reutilizada en la siguiente llamada) y los eventos de VRAM
  * de la lista a memoria del slot. De la lista solo se conservan los eventos (subida / copia / relleno) compactados; ev_end y
  * src_op de los batches se reescriben a índices de esa lista compacta. Devuelve 0 o <0 sin memoria. */
+static const uint64_t *g_opkey;   /* identidad de efecto por primitiva de la lista que se ensambla (build_one; NULL = ninguna) */
 static int fill_slot(Slot *s, const GpuDrawList *l, const VrScene *sc) {
     size_t nv = sc->v ? sc->nv : 0, nb = sc->b ? sc->nb : 0, ns = sc->states ? sc->nstates : 0;
     if (!grow((void **)&s->v, &s->v_cap, nv, sizeof *s->v) || !grow((void **)&s->b, &s->b_cap, nb, sizeof *s->b) ||
-        !grow((void **)&s->st, &s->st_cap, ns, sizeof *s->st) || !grow((void **)&s->tc, &s->tc_cap, nv / 3 + 1, sizeof *s->tc))
+        !grow((void **)&s->st, &s->st_cap, ns, sizeof *s->st) || !grow((void **)&s->tc, &s->tc_cap, nv / 3 + 1, sizeof *s->tc) ||
+        !grow((void **)&s->tk, &s->tk_cap, nv / 3 + 1, sizeof *s->tk) || !grow((void **)&s->tsrc, &s->tsrc_cap, nv / 3 + 1, sizeof *s->tsrc))
         return -1;
+    int any_fx = 0;
+    if (nv && sc->tri_src) memcpy(s->tsrc, sc->tri_src, (nv / 3) * sizeof *s->tsrc);
+    for (size_t t = 0; t < nv / 3; t++) {
+        uint64_t k = (g_opkey && sc->tri_src && sc->tri_src[t] < l->nops) ? g_opkey[sc->tri_src[t]] : 0;
+        s->tk[t] = k; any_fx |= k != 0;
+    }
     if (nv) memcpy(s->v, sc->v, nv * sizeof *s->v);
     if (nv && sc->tri_cause) memcpy(s->tc, sc->tri_cause, nv / 3); else memset(s->tc, 0, nv / 3 + 1);
     if (nb) memcpy(s->b, sc->b, nb * sizeof *s->b);
@@ -496,6 +507,8 @@ static int fill_slot(Slot *s, const GpuDrawList *l, const VrScene *sc) {
     s->sc.b = nb ? s->b : NULL;
     s->sc.states = ns ? s->st : NULL;
     s->sc.tri_cause = nv ? s->tc : NULL;
+    s->sc.tri_src = nv ? s->tsrc : NULL;
+    s->sc.tri_fx = any_fx ? s->tk : NULL;
     s->sc.src = &s->list;
     if (sc->filter.frame_on && sc->filter.frame && sc->filter.frame_w == VR_FRAME_W && sc->filter.frame_h == VR_FRAME_H) {
         memcpy(s->frm, sc->filter.frame, sizeof s->frm);
@@ -534,6 +547,41 @@ static const VrCamRecord *list_record(const GpuDrawList *l, int *has3d) {
     for (uint32_t i = 0; i < l->nops; i++)
         if (l->ops[i].type == GPU_OP_POLY && l->ops[i].v[0].vvalid) { *has3d = 1; return vrcam_seq_record(l->ops[i].seq); }
     return NULL;
+}
+
+/* Efectos nativos: a cada primitiva de la lista se le asigna la identidad del elemento de efectos (ns_fx_item_key) o de malla (NSFX_KEY_MESH) que la sustituye en
+ * el render nativo. El render solo oculta (por triángulo) lo que confirma haber dibujado; el resto sigue por GPU. Se usa la RAM del final del fotograma: puede traer los
+ * paquetes del fotograma siguiente, de ahí la casación tolerante (ns_fx_classify_near) con la cámara de la lista. NULL si no hay nada que asignar. */
+static NsFxScene *hx_fx;
+static uint8_t *hx_cls; static int32_t *hx_item; static uint64_t *hx_key; static size_t hx_cap;
+static const uint64_t *fx_classify_list(const GpuDrawList *hl, const VrCamRecord *r) {
+    size_t n = hl ? hl->nops : 0;
+    if (!n) return NULL;
+    if (n > hx_cap) {
+        size_t nc = hx_cap ? hx_cap : 1024;
+        while (nc < n) nc *= 2;
+        uint8_t *a = (uint8_t *)realloc(hx_cls, nc); if (!a) return NULL; hx_cls = a;
+        int32_t *b = (int32_t *)realloc(hx_item, nc * sizeof *b); if (!b) return NULL; hx_item = b;
+        uint64_t *c = (uint64_t *)realloc(hx_key, nc * sizeof *c); if (!c) return NULL; hx_key = c;
+        hx_cap = nc;
+    }
+    if (!hx_fx) hx_fx = ns_fx_scene_create(0);
+    if (!hx_fx) return NULL;
+    NsFxOpts fo = ns_fx_opts_default();
+    if (ns_fx_extract(emu_ram, &fo, hx_fx) != 0) return NULL;
+    memset(hx_cls, 0, n);
+    for (size_t i = 0; i < n; i++) hx_item[i] = -1;
+    if (ns_fx_classify(emu_ram, hx_fx, hl, hx_cls, NULL, hx_item, NULL) != 0) return NULL;
+    NsFxListCam lc;
+    if (r) { for (int i = 0; i < 3; i++) lc.eye[i] = (float)r->eye[i]; memcpy(lc.M, r->M, sizeof lc.M); }
+    ns_fx_classify_near(hx_fx, r ? &lc : NULL, hl, hx_cls, hx_item);
+    for (size_t i = 0; i < n; i++) {
+        uint64_t k = 0;
+        if ((hx_cls[i] == NSFX_OP_FX || hx_cls[i] == NSFX_OP_FX_PACK) && hx_item[i] >= 0 && (uint32_t)hx_item[i] < hx_fx->n_items) k = ns_fx_item_key(&hx_fx->items[hx_item[i]]);
+        else if (hx_cls[i] == NSFX_OP_MESH) k = NSFX_KEY_MESH;
+        hx_key[i] = k;
+    }
+    return hx_key;
 }
 
 static void build_one(const GpuDrawList *l, int si) {
@@ -631,7 +679,9 @@ static void build_one(const GpuDrawList *l, int si) {
 
     sm_sample(&slot[si].smp, &sc, r);   /* (r = registro de cámara de la lista; antes de fill_slot: sc.v/b son memoria interna de vr_scene) */
     int native_now = rc == 0 && native_for_scene(r, &sc, cine_cand);
+    g_opkey = native_now ? fx_classify_list(hl, r) : NULL;
     int ok = rc == 0 && fill_slot(&slot[si], hl, &sc) == 0 && fill_radar(&slot[si], &rscene, hl->nops) == 0;
+    g_opkey = NULL;
     if (ok && native_now) mark_3d(&slot[si]);   /* solo marca: la lista de la GPU queda entera (casco de colisión de la cabeza, modo gpu, caída del render nativo) */
     memset(&slot[si].hcmap, 0, sizeof slot[si].hcmap);
     if (ok && hc_on && r && r->active && sc.user_space && sc.world_valid) {
