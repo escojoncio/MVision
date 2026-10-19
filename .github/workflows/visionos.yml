@@ -87,10 +87,52 @@ jobs:
           set -o pipefail
           bench/build/bench bench/build/default.metallib bench-out 2>&1 | tee bench-out/log.txt
 
+      # Renderer nativo (app/Sources/Native): escena sintética generada por código -> Metal (cubemap) frente a la referencia de CPU (vr/native/ns_cpuref.c).
+      - name: Compilar el banco del renderer nativo
+        if: always()
+        run: |
+          set -o pipefail
+          mkdir -p bench-out/native
+          bench/build_native.sh 2>&1 | tee "$RUNNER_TEMP/native-build.log" || {
+            python3 - "$RUNNER_TEMP/native-build.log" <<'PY'
+          import re, sys
+          seen, n = set(), 0
+          pat = re.compile(r"^(?P<f>[^:\n]+):(?P<l>\d+):(?:\d+:)?\s*(?:fatal )?error:\s*(?P<m>.*)$")
+          for line in open(sys.argv[1], errors="replace"):
+              m = pat.match(line.rstrip("\n"))
+              if m:
+                  msg = m.group("m").strip()[:200].replace("%", "%25")
+                  key = (m.group("f"), m.group("l"), msg)
+                  if key in seen: continue
+                  seen.add(key); n += 1
+                  print("::error file=%s,line=%s::%s" % (m.group("f"), m.group("l"), msg))
+                  if n >= 30: break
+              elif re.match(r"^(ld|clang|error|Undefined symbols)", line):
+                  print("::error::" + line.strip()[:200].replace("%", "%25"))
+          PY
+            exit 1
+          }
+
+      - name: Pruebas C del renderer nativo (empaquetado, orden, puente)
+        if: always()
+        run: |
+          set -o pipefail
+          mkdir -p bench-out/native
+          bench/build_native/test_native_gpu bench-out/native 2>&1 | tee bench-out/native/test-gpu-log.txt
+
+      - name: Ejecutar el banco del renderer nativo (Metal)
+        if: always()
+        env:
+          MTL_DEBUG_LAYER: "1"
+        run: |
+          set -o pipefail
+          mkdir -p bench-out/native
+          bench/build_native/nbench bench/build_native/native.metallib bench-out/native 2>&1 | tee bench-out/native/native-log.txt
+
       - name: Volcar los registros como anotaciones (la descarga de registros y artefactos puede estar bloqueada)
         if: always()
         run: |
-          python3 - "$RUNNER_TEMP/bench-build.log" bench-out/log.txt <<'PY'
+          python3 - "$RUNNER_TEMP/bench-build.log" bench-out/log.txt "$RUNNER_TEMP/native-build.log" bench-out/native/test-gpu-log.txt bench-out/native/native-log.txt <<'PY'
           import sys
           for path in sys.argv[1:]:
               try:
