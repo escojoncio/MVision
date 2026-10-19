@@ -1053,7 +1053,7 @@ Conclusión: el 10,6 VBlank/s NO es real del motor ni de los parches en sí: sin
 
 **Pruebas**: `make -C vr/scene test`, `vr/bridge test` (44.975 comprobaciones), `vr/camera test`, `make -C vr/host test` (test_view con muerte, test_cine). Pendiente en visor: comodidad del seguimiento de la pantalla (zona muerta), que las puertas/ascensores/cámaras de evento reales entren en las clases de escena, y la animación de muerte real.
 
-## 56. Vértices explotados: detector en el probador, asociación con coherencia espacial y red de seguridad en `vr_scene` (rama `vertices`) — 2026-10-19
+## 57. Vértices explotados: detector en el probador, asociación con coherencia espacial y red de seguridad en `vr_scene` (rama `vertices`) — 2026-10-19
 
 **Síntoma.** Triángulos estirados hacia lejos ("explosiones de vértices") en el visor.
 
@@ -1078,7 +1078,7 @@ Descartes de la red tras el arreglo: zona 0 = 1408 (modelo 947, arista 459, lejo
 
 **Pendiente.** (1) La asociación sigue acertando poco con recorte artificial fuerte (47 %): idea, guardar en cada vértice el índice de objeto/malla (puntero de la RAM de la GTE) para no mezclar objetos. (2) Los ~1000 descartes por modelo por zona son geometría real perdida (huecos pequeños): ver si se pueden reparar con el candidato correcto en vez de descartar. (3) Zonas no cubiertas por el probador (agua, resto): añadir códigos a `probador_zonas.txt`.
 
-## 56. Agua de la zona inicial: huecos hacia abajo y «agujero negro cuadriculado» (rama `agua`) — 2026-10-19
+## 58. Agua de la zona inicial: huecos hacia abajo y «agujero negro cuadriculado» (rama `agua`) — 2026-10-19
 
 **Síntoma.** (a) Al mirar hacia abajo desde el muelle hay vacíos en el agua; (b) mirando al agua desde fuera se ve un agujero enorme, negro y cuadriculado.
 
@@ -1093,7 +1093,7 @@ Descartes de la red tras el arreglo: zona 0 = 1408 (modelo 947, arista 459, lejo
 
 **Pendiente.** Clasificar con el búfer de id los triángulos de referencia que cubren los huecos del peor giro (270 grados, cabeza -60, 31 %); decidir con cero-huecos si el relleno debe venir de un caché de mundo (reconstruir polígonos enormes >120 m y mantenerlos) en vez de depender del recorte del motor; filtro submarino §41 no está en la simulación de CPU; verificar en visor desde muelle, borde, nadando y buceando.
 
-## 56. Capa 2D: recorte por estado, paneles siempre por delante y probador de parpadeos (`vr/tools/vrprobe/probe2d.c`) — 2026-10-19 (rama `capa-2d`)
+## 59. Capa 2D: recorte por estado, paneles siempre por delante y probador de parpadeos (`vr/tools/vrprobe/probe2d.c`) — 2026-10-19 (rama `capa-2d`)
 
 **Causa común hallada.** El camino del HUD (shader `vr_scene.metal` y réplica `hud_emu.c`) ignoraba el rectángulo de recorte de `VrState` (`cx1..cy2`, inclusivo): toda primitiva 2D con recorte (ventanas de objetos, textos en cajas, restos de la pantalla 3D, efectos recortados a un marco) se pintaba fuera de su marco y se acumulaba en el panel 2D. Ahora `VrVOut` lleva el recorte y `vr_fs_scene` descarta fuera de él; `hud_emu.c` intersecta la caja con el recorte del estado. Tests: `test_clip_2d`, `test_compose_view` (`make -C vr/scene test test-san`). El Metal no se compiló aquí (sin toolchain): comprobar en CI y que los estados del radar lleven un recorte válido.
 
@@ -1105,7 +1105,7 @@ Descartes de la red tras el arreglo: zona 0 = 1408 (modelo 947, arista 459, lejo
 
 **Pendiente.** (a) Semis aditivos/sustractivos 2D sobre panel transparente (se pierde el sustractivo). (b) Parpadeo 3D <-> descartado: la causa es la decisión por polígono de AMBIG/parcial sin memoria entre listas; hace falta persistencia temporal o reconstrucción para triángulos. (c) Letreros 3D alternos de 7 px de alto en la parte baja. (d) Fundido de pantalla estéreo de la cinemática del motor (lista 1964; dominio de la pantalla 3D). (e) Verificar en CI el Metal y el banco de render.
 
-## 56. Avance sostenido de la radio, histéresis analógica, antirrebote de menú y fuzz de entradas (rama `codec-saltar`; `vr/input/vr_input.{h,c}`, `test_vr_input.c`, `vr/host/padrun.c`, `fuzzrun.c`, `Makefile`, `app/Sources/VRInput.swift`, `XRRenderLoop.swift`, `XRSession.swift`) — 2026-10-19
+## 60. Avance sostenido de la radio, histéresis analógica, antirrebote de menú y fuzz de entradas (rama `codec-saltar`; `vr/input/vr_input.{h,c}`, `test_vr_input.c`, `vr/host/padrun.c`, `fuzzrun.c`, `Makefile`, `app/Sources/VRInput.swift`, `XRRenderLoop.swift`, `XRSession.swift`) — 2026-10-19
 
 **(1) Mantener A o B avanza toda la conversación.** Medido en headless (padrun, disco real, llamada del arranque, abre en el VBlank 1698): sin pulsar nada cierra en el 3962; CRUZ **mantenido** 2500 VBlanks no hace nada (el motor solo ve el flanco: cierra igual en el 3962); CRUZ a toques (3 VBlanks pulsado cada 10) cierra en el 2052. Implementación en `vr_input` (modo Sense, solo con `f->comms` y `f->menu`): una cara A/B de cualquier mano mantenida `cfg.hold_advance_s` (0,5 s; 0 = desactivado; ajuste `vri.holdAdvance` en `VRInputSettings`, sin UI aún) pasa a emitir CRUZ a toques (`adv_on_s` 0,06 s pulsado / `adv_off_s` 0,10 s suelto) y retira CÍRCULO/CRUZ del resto de botones (el gatillo no cuenta ni emite). **Nunca emite CÍRCULO durante el avance**, y cualquier cruceta/stick (elegir respuesta) o soltar lo detiene y reinicia el contador (el tiempo cuenta desde que se abre el comunicador, no antes). Verificación: `padrun ... --seq "...,1720:rA:2500"` y `...:rB:2500` (nuevo en padrun: `f.comms` y registro `comunicador=N` en cada cambio; acciones `xHHHH` = máscara cruda del juego para medir): ambas cierran la llamada en el VBlank 2016 (2264 -> 318 VBlanks) y la partida llega al control en el 2356. **Limitación**: no se pudo probar con una pregunta de sí/no real (el bridge no expone "esperando respuesta" y no se alcanzó en headless una llamada con pregunta); la garantía es por construcción (solo CRUZ, nunca CÍRCULO, y se detiene al tocar la cruceta). Si en el visor CRUZ responde "no" en una pregunta, hay que dar al bridge una bandera de pregunta y bloquear el avance con ella (`vr_input_frame_t` ya tiene el sitio: añadir `blocked`).
 
@@ -1116,7 +1116,7 @@ Descartes de la red tras el arreglo: zona 0 = 1408 (modelo 947, arista 459, lejo
 **Verificación**: `make -C vr/input test test-san` 259 + 57 comprobaciones (nuevas: avance sostenido, histéresis, antirrebote, fuzz). `padrun` como arriba. Swift sin compilar en este entorno (CI en la rama).
 **Pendiente**: UI para `holdAdvance`; bandera de pregunta en el bridge; confirmar en visor que el cierre no reaparece (adjuntar informe del sistema si ocurre) y el efecto del overlay oculto.
 
-## 56. Locomoción y cabeza: ojo en la cabeza del modelo, marcha hacia la mirada y límite de la cabeza contra el escenario (rama `locomocion`; `vr/camera/vr_camera.{c,h}`, `vr_heading.{c,h}`, `vr_headcol.{c,h}` nuevo, `vr/host/vrhost.{c,h}`, `bodyrun.c`, `app/Sources/XRRenderLoop.swift`, `XRPresent.swift`) — 2026-10-19 (Swift sin compilar/verificar en visor)
+## 61. Locomoción y cabeza: ojo en la cabeza del modelo, marcha hacia la mirada y límite de la cabeza contra el escenario (rama `locomocion`; `vr/camera/vr_camera.{c,h}`, `vr_heading.{c,h}`, `vr_headcol.{c,h}` nuevo, `vr/host/vrhost.{c,h}`, `bodyrun.c`, `app/Sources/XRRenderLoop.swift`, `XRPresent.swift`) — 2026-10-19 (Swift sin compilar/verificar en visor)
 
 **Quejas.** (1) Andando y agachado la cabeza queda por detrás del cuerpo. (2) Girar a un lado solo sirve si antes se gira el cuerpo con el stick derecho. (3) Nuevo: la cabeza puede atravesar paredes y se ve a través.
 
@@ -1133,7 +1133,7 @@ Descartes de la red tras el arreglo: zona 0 = 1408 (modelo 947, arista 459, lejo
 
 **Pendiente.** Verificar en visor: los tres síntomas, la sensación del recorte/fundido y la mano desplazada; cablear `mv_vrhost_set_headcol` a ajustes (radio, activar); medir sentado y de pie contra una pared alta; aceleración al arrancar (picos 4-12 cm); analógico 0,4.
 
-## 56. Brazos y gestos: postura natural de las manos, GOLPEAR separado de AGARRAR y qué hace el botón (rama `brazos-gestos`; `vr/body/vr_body.{h,c}`, `vr/input/vr_gesture.{h,c}`, `vr/host/vrbodyg.c`, `vrgame.{c,h}`, `bodyrun.c`) — 2026-10-19
+## 62. Brazos y gestos: postura natural de las manos, GOLPEAR separado de AGARRAR y qué hace el botón (rama `brazos-gestos`; `vr/body/vr_body.{h,c}`, `vr/input/vr_gesture.{h,c}`, `vr/host/vrbodyg.c`, `vrgame.{c,h}`, `bodyrun.c`) — 2026-10-19
 
 **1) Postura natural de las manos.** Causa: la mano del personaje recibía tal cual el marco de AGARRE del mando (marco del dispositivo: Y arriba, -Z delante, medido inclinado 35 grados y sin reflejar entre mandos) como si fuese el marco de mano de `vr_pose.h` (mano plana, palma abajo, +Y = dorso), así que con los mandos en la postura natural la mano salía plana "sobre las piernas". Solución: `VrBodyConfig.hand_roll_deg` (defecto **45**, `hand_rot_offset` derivado: giro sobre el eje de los dedos, izquierda +, derecha -); vista desde arriba la mano queda girada ~45 grados (palma hacia dentro y abajo, dorso hacia fuera y arriba), 90 = apretón de manos, 0 = plana. `vrbody_set_hand_roll(deg)` lo cambia en caliente (calibrar en el visor). La orientación del radar de muñeca (`vrbody_forearm_pose`) y el marco de depuración (`vrbody_debug_hand_frame`) siguen en el marco del AGARRE (sin el giro) para que no cambien. El reparto de giro muñeca/antebrazo (`forearm_share` 0,6, `forearm_twist_deg` 85, `hand_twist_deg` 70) y el polo del codo (`pole` = (0,45·lado, -1, -0,35) en el marco del torso: codo hacia fuera, abajo y atrás) se comprobaron con el giro nuevo (`test_hand_axes` a 0, 45 y 90 grados: dedos, palma y pulgar del modelo coinciden con la pose pedida a 0,995 en las 3 configuraciones) y no hizo falta tocarlos.
 
@@ -1155,7 +1155,7 @@ Descartes de la red tras el arreglo: zona 0 = 1408 (modelo 947, arista 459, lejo
 - Nota del banco: el guion de llegada de `bodyrun` (`std_pad`) estaba obsoleto con el mapa de menús del visor (faltaba confirmar+cruz para avanzar el comunicador y saltar la escena inicial): ahora desde el VBlank 2000 pulsa círculo+cruz cada 83 VBlanks y T0 sale en ~4040. `bodyrun` imprime también impactos y golpes de botón. Tras `--tp` el juego dispara por sí solo secuencias (acción 6/7/124) con el enemigo, como ya estaba anotado; por eso los recuentos se comparan con los eventos del módulo y no con la acción aislada.
 **Pendiente / sin verificar en visor:** calibrar `hand_roll_deg` (45) con las manos reales (`vrbody_set_hand_roll`); la mano que golpea llega al enemigo en espacio de usuario escalado (la altura/escala del usuario afecta al alcance del golpe); la hora del daño del juego es la de su animación (el cuadrado se envía al detectar el golpe, ~0,1 s antes de que el puño llegue); ajustes de la app para `button_jab` y `hand_roll_deg` sin cablear en Swift; el agarre con la mano dominante sin seguimiento cae al comportamiento de botón (cuadrado tal cual, sin manos al cuello).
 
-## 57. Puños cerrados: la mano del personaje se deforma en un puño con el grip y solo el puño golpea (rama `punos`; `vr/body/vr_fist.{h,c}`, `vr_body.{h,c}`, `vr/input/vr_gesture.{h,c}`, `vr/host/bodyrun.c`) — 2026-10-19
+## 63. Puños cerrados: la mano del personaje se deforma en un puño con el grip y solo el puño golpea (rama `punos`; `vr/body/vr_fist.{h,c}`, `vr_body.{h,c}`, `vr/input/vr_gesture.{h,c}`, `vr/host/bodyrun.c`) — 2026-10-19
 
 **Requisito.** "Crear unos puños cerrados con el modelo del personaje: al golpear con los agarres (grip) del mando, los puños se cierran como en los juegos VR, y eso activa que los puñetazos peguen."
 
@@ -1171,7 +1171,7 @@ Descartes de la red tras el arreglo: zona 0 = 1408 (modelo 947, arista 459, lejo
 - Resultados `--tp 150:1100:1` (jugador junto al primer enemigo, 4500 VBlanks): trayectoria del golpe con la mano ABIERTA (`punch_open`): 0 golpes, 0 puños aplicados; la MISMA con el puño cerrado (`punch`): 6 golpes, 0 agarres, 434 puños en 436 brazos. Imágenes del golpe con los puños cerrados (`q0..q3`, `--scn punch_noenemy --hpitch-at 0:30`): los dos puños cerrados al final de los antebrazos.
 - Pendiente / sin verificar en visor: ángulos y compresión del puño (`VrFistParams`) a gusto con las manos reales; la forma depende de la malla de 28 vértices (los dedos son un bloque, no hay dedos sueltos); cablear en Swift el ajuste de `fist_required` y `fist_haptic` (hoy defectos de C); la malla de la mano también sale deformada en cualquier otro dibujado de esa pieza durante el apply (reflejos/sombras no medidos). Revisión adversarial con subagente aparte: no hecha en esta sesión (no hay herramienta de subagentes).
 
-## 56. Fluidez de la locomoción: suavizado de pose entre escenas en el renderer (`vr/host/vr_smooth.{c,h}`, `vrhost.c`, `vr_camera.{c,h}`, `XRFrameEncoder`, `XRHud`, `XRShaders.metal`, `XRPresent`) — 2026-10-19 (rama `fluidez`; Swift/Metal sin verificar en visor)
+## 64. Fluidez de la locomoción: suavizado de pose entre escenas en el renderer (`vr/host/vr_smooth.{c,h}`, `vrhost.c`, `vr_camera.{c,h}`, `XRFrameEncoder`, `XRHud`, `XRShaders.metal`, `XRPresent`) — 2026-10-19 (rama `fluidez`; Swift/Metal sin verificar en visor)
 
 **Problema.** El visor dibuja a 100 Hz pero el juego publica escenas a su ritmo: medido con `smoothrun` (disco real, sin visor) **25,0 escenas/s** (una cada 2 VBlank). Al andar el mundo avanza a saltos de 2 fotogramas y al girar con el stick la vista va con el retardo de la tubería (~6-7 grados a 90 grados/s).
 
