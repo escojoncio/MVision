@@ -58,6 +58,7 @@ jobs:
 
       - name: Compilar el banco de render
         run: |
+          set -o pipefail
           bench/build.sh 2>&1 | tee "$RUNNER_TEMP/bench-build.log" || {
             python3 - "$RUNNER_TEMP/bench-build.log" <<'PY'
           import re, sys
@@ -83,6 +84,7 @@ jobs:
           MTL_DEBUG_LAYER: "1"
         run: |
           mkdir -p bench-out
+          set -o pipefail
           bench/build/bench bench/build/default.metallib bench-out 2>&1 | tee bench-out/log.txt
 
       - name: Volcar los registros como anotaciones (la descarga de registros y artefactos puede estar bloqueada)
