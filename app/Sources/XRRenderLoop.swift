@@ -191,6 +191,21 @@ final class XRRenderLoop {
         lastFrameTime = nowT
         var gs = MvVrGameState()
         mv_vrhost_game_state(&gs)
+        // Límite de la cabeza contra el escenario (vr/camera/vr_headcol): si la cabeza física atraviesa una pared, el mundo se dibuja desde la posición recortada
+        // (la corrección se suma a la cabeza en el espacio recentrado; el personaje del juego no se mueve) y, si empuja más allá, el velo negro sube.
+        var headCorr: [Float] = [0, 0, 0]
+        var headFade: Float = 0
+        if gs.cam_active != 0 && gs.game != 0 && tracked {
+            let hf = XRMath.floats(recentered)
+            _ = hf.withUnsafeBufferPointer { h in headCorr.withUnsafeMutableBufferPointer { c in mv_vrhost_head_limit(h.baseAddress, dt, c.baseAddress, &headFade) } }
+            if !(headFade.isFinite && headCorr.allSatisfy({ $0.isFinite })) { headCorr = [0, 0, 0]; headFade = 0 }
+        } else {
+            _ = headCorr.withUnsafeMutableBufferPointer { c in mv_vrhost_head_limit(nil, dt, c.baseAddress, &headFade) }   // libera el fundido
+            headCorr = [0, 0, 0]
+        }
+        presenter.collisionFade = max(0, min(1, headFade))
+        let renderRecenterInverse = (headCorr[0] != 0 || headCorr[1] != 0 || headCorr[2] != 0)
+            ? XRMath.translation(SIMD3<Float>(headCorr[0], headCorr[1], headCorr[2])) * recenterInverse : recenterInverse
         // Menú VR (mantener el botón de menú izquierdo): mientras está abierto el juego no recibe entrada.
         let blocked = presenter.updateInput(ControllerHub.shared.sample(), dt: dt, head: recentered)
         if blocked {
@@ -220,7 +235,7 @@ final class XRRenderLoop {
         if #available(visionOS 2.0, *) {
             sysProj = (0..<viewCount).map { drawable.computeProjection(viewIndex: $0) }
         }
-        let ok = encoder.encode(commandBuffer: cb, gs: gs, originFromDevice: originFromDevice, recenterInverse: recenterInverse, dt: dt,
+        let ok = encoder.encode(commandBuffer: cb, gs: gs, originFromDevice: originFromDevice, recenterInverse: renderRecenterInverse, dt: dt,
                                 eyes: eyes, depthRange: drawable.depthRange, colorTextures: drawable.colorTextures,
                                 depthTextures: drawable.depthTextures, systemProjections: sysProj,
                                 debugAxes: debugAxisFrames(recenterInverse: recenterInverse))

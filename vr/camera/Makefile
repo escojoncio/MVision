@@ -104,3 +104,15 @@ test-heading-san: test_heading.c vr_heading.c vr_heading.h vr_calib.h vr_camera.
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -I. -I$(BR) test_heading.c vr_heading.c vr_camera.c $(BR)/bridge.c $(BR)/bridge_addrs.c -o $(OUT)/test_heading_san -lm
 	$(OUT)/test_heading_san
 .PHONY: test-heading test-heading-san
+
+# ---- límite de la cabeza contra el escenario (vr_headcol): pruebas sin datos del juego ----
+$(OUT)/test_headcol: test_headcol.c vr_headcol.c vr_headcol.h vr_camera.h $(SC)/vr_scene.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -I. -I$(BR) -I$(SC) -I$(RT) test_headcol.c vr_headcol.c -o $@ -lm
+test-headcol: $(OUT)/test_headcol
+	$(OUT)/test_headcol
+test-headcol-san: test_headcol.c vr_headcol.c vr_headcol.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -I. -I$(BR) -I$(SC) -I$(RT) test_headcol.c vr_headcol.c -o $(OUT)/test_headcol_san -lm
+	$(OUT)/test_headcol_san
+.PHONY: test-headcol test-headcol-san
