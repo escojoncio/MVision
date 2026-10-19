@@ -40,10 +40,10 @@ cp ../vr/native/ns_types.h ../vr/native/ns_dump.h ../vr/native/ns_dumpw.c .stage
 # puente productor/consumidor, jugador y enganche de la captura (integración del renderer nativo)
 cp ../vr/native/ns_bridge.[ch] ../vr/native/ns_player.[ch] ../vr/native/ns_hook.[ch] ../vr/native/ns_hook_rt.[ch] .stage/vr/native/
 # renderer Metal nativo: empaquetado para la GPU y extractor real con su almacén de mallas (ns_store_*: sin definiciones débiles) y su registro en el enganche
-# (sin test_*, sin tools/, sin ns_cpuref.c: validador de escritorio; ns_adapt/ns_light/ns_cover/ns_cover_glue = comprobación de cobertura en tiempo real, ver ns_cover.h)
+# (sin test_*, sin tools/, sin ns_cpuref.c: validador de escritorio; ns_adapt/ns_light/ns_cover/ns_cover_glue = comprobación de cobertura en tiempo real, ver ns_cover.h; ns_solid = geometría sólida 360 grados para la colisión de la cabeza)
 cp ../vr/native/ns_gpu.[ch] ../vr/native/ns_gpu_types.h ../vr/native/ns_extract.[ch] ../vr/native/ns_extract_glue.c .stage/vr/native/
 cp ../vr/native/ns_fx.[ch] ../vr/native/ns_fx_export.[ch] .stage/vr/native/   # efectos del renderer nativo (extractor, clasificación de la lista, exportación al contrato)
-cp ../vr/native/ns_adapt.[ch] ../vr/native/ns_light.[ch] ../vr/native/ns_cpuref.h ../vr/native/ns_cover.[ch] ../vr/native/ns_cover_glue.c .stage/vr/native/
+cp ../vr/native/ns_adapt.[ch] ../vr/native/ns_light.[ch] ../vr/native/ns_cpuref.h ../vr/native/ns_cover.[ch] ../vr/native/ns_cover_glue.c ../vr/native/ns_solid.[ch] .stage/vr/native/
 
 cp ../render/metal/vr_*.metal ../render/metal/vr_types.h .stage/metal/
 cp ../vr/native/ns_gpu_types.h .stage/metal/   # lo incluye app/Sources/Native/NativeShaders.metal

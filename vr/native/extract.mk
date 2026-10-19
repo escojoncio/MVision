@@ -36,3 +36,18 @@ test-cover: $(B)/test_ns_cover
 test-cover-san:
 	$(MAKE) -f vr/native/extract.mk test-cover B=vr/native/build-extract-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 .PHONY: nscover test-cover test-cover-san
+
+# Geometría sólida de la escena nativa (ns_solid: colisión de la cabeza) y análisis de huecos del escenario sobre volcados.
+#   make -f vr/native/extract.mk test-solid   pruebas sintéticas de ns_solid
+#   make -f vr/native/extract.mk nssolid      compila vr/native/build-extract/nssolid (ver tools/nssolid.c)
+SOLSRC := vr/native/ns_solid.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c
+$(B)/test_ns_solid: vr/native/test_ns_solid.c $(SOLSRC) vr/native/ns_solid.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native -Ivr/camera -Ivr/scene -Ivr/bridge vr/native/test_ns_solid.c $(SOLSRC) vr/camera/vr_headcol.c -lm -lpthread -o $@
+$(B)/nssolid: vr/native/tools/nssolid.c vr/native/ns_dump.c $(SOLSRC) vr/native/ns_solid.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/tools/nssolid.c vr/native/ns_dump.c $(SOLSRC) -lm -lpthread -o $@
+nssolid: $(B)/nssolid
+test-solid: $(B)/test_ns_solid
+	$(B)/test_ns_solid
+test-solid-san:
+	$(MAKE) -f vr/native/extract.mk test-solid B=vr/native/build-extract-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+.PHONY: nssolid test-solid test-solid-san
