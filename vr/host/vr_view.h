@@ -5,8 +5,11 @@
  * partida, pausa). C99 puro, sin dependencias de plataforma; lo prueba test_view.c.
  *
  * Política (ver bitácora, "Presentación en VR"):
- *   - MUNDO solo si hay partida (puente completo + jugador), el jugador controla a su personaje, y la cámara VR del juego está
- *     activa (si no, el motor dibuja con SU cámara, cenital, y mezclarla con el mundo del usuario sería un salto de 8 m de altura).
+ *   - MUNDO si hay partida (puente completo + jugador), la cámara VR del juego está activa y, o bien el jugador controla a su personaje, o bien
+ *     hay una ventana 2D del juego encima (armas/objetos = VRV_R_SELECTOR, pausa = VRV_R_PAUSE_WORLD) sin otra causa (escena, radio, detenido, muerte):
+ *     el mundo sigue en primera persona y la ventana se ve como panel flotante (la cámara VR no se apaga: vr/camera usa BridgeState.cam_ctl).
+ *     Sin cámara VR activa, el motor dibuja con SU cámara, cenital, y mezclarla con el mundo del usuario sería un salto de 8 m de altura.
+ *   - La radio (códec) gana a la cinemática: es 2D del juego aunque el motor la abra durante una escena -> pantalla de cine plana, nunca la pantalla 3D.
  *   - Todo lo demás es CINE. Si la cámara VR no está disponible (edición del ejecutable no reconocida), siempre CINE: el juego se
  *     ve igualmente, en pantalla grande.
  *   - Histéresis en fotogramas de VBlank (50 Hz) para que un parpadeo de una bandera del juego no haga saltar la vista:
@@ -30,7 +33,10 @@ enum {
     VRV_R_MENU,            /* ventana de armas / objetos del juego (el motor dibuja con su cámara mientras está abierta) */
     VRV_R_LOST_CONTROL,    /* sin control sin otra causa conocida (fin de partida, transiciones) */
     VRV_R_NO_CAM,          /* con control pero la cámara VR no está (aún) activa o no existe */
-    VRV_R_DEAD             /* el jugador ha muerto (vida a cero / fin de partida): el motor enseña su escena de muerte con su propia cámara */
+    VRV_R_DEAD,            /* el jugador ha muerto (vida a cero / fin de partida): el motor enseña su escena de muerte con su propia cámara */
+    VRV_R_SELECTOR,        /* ventana de armas/objetos con la cámara VR activa: MUNDO en primera persona + ventana como panel flotante */
+    VRV_R_PAUSE_WORLD,     /* pausa con la cámara VR activa: igual que el selector */
+    VRV_R_PENDING          /* transición: el jugador ya tiene el control (fin de radio / de escena) pero la cámara VR aún no está: vista congelada, la app muestra negro, NUNCA cine plano */
 };
 
 typedef struct {
@@ -65,7 +71,19 @@ typedef struct {
     int kind_run;          /* fotogramas seguidos pidiendo `want_kind` distinto de `kind` */
     int to_engine, from_engine, to_other;   /* umbrales de histéresis (fotogramas): entrar en ENGINE, salir de ENGINE, resto de cambios */
     uint32_t kind_switches;
+    /* --- registro --- */
+    int prev_reason;       /* motivo del fotograma anterior */
+    int to_comms;          /* fotogramas de radio seguidos antes de pasar de mundo a la pantalla de cine (el códec debe estar ya dibujado) */
+    int pend_max;          /* fotogramas máximos de VRV_R_PENDING seguidos; pasados, sin cámara VR = cine (cámara no disponible) */
+    int pend_run;
+    int cam_seen;          /* la cámara VR ha estado activa alguna vez (si no, no hay transición que esperar: edición no reconocida) */
+    unsigned changed;      /* tras vrview_step: VRV_CH_* de lo que cambió en ese fotograma (0 = nada) */
 } VrView;
+
+enum { VRV_CH_MODE = 1, VRV_CH_KIND = 2, VRV_CH_REASON = 4 };
+
+/* Línea de registro para un fotograma con cambios (view.changed != 0): "modo=a->b clase=... motivo=... | banderas". Devuelve la longitud escrita. */
+int vrview_describe(const VrView *v, const VrViewIn *in, char *buf, int n);
 
 void vrview_reset(VrView *v);
 /* Motivo para unas entradas dadas (función pura, sin histéresis). */

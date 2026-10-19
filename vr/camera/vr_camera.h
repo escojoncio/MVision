@@ -44,6 +44,9 @@ enum { VRCAM_EYE_AUTO = 0,    /* x,y,z de la articulación de la cabeza del mode
        VRCAM_EYE_BODY = 1,    /* x,z siempre del centro del cuerpo */
        VRCAM_EYE_JOINT = 2 }; /* x,y,z de la articulación de la cabeza (sigue balanceo y animaciones) */
 
+/* Fotogramas (VBlank) que la cámara VR sigue activa tras abrirse la radio (= to_comms de vr_view). */
+#define VRCAM_COMMS_GRACE 12
+
 typedef struct VrCamConfig {
     VrCamHeadFn head;        /* NULL: sin cabeza -> la cámara VR nunca se activa */
     float units_per_m;       /* unidades del motor por metro (1000) */
