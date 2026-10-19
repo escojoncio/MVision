@@ -27,7 +27,7 @@ struct NsBridge {
     int32_t *map;
     int32_t *tab_idx;
     uint32_t *tab_key;
-    uint32_t tab_n;
+    uint32_t tab_n, tab_shift;           /* tab_n = 1 << (32 - tab_shift) */
     uint32_t map_cur_seq, map_prev_seq;
     int map_valid;
 };
@@ -59,6 +59,8 @@ NsBridge *ns_bridge_create(const NsBridgeCaps *caps) {
     uint32_t tn = 16;
     while (tn < 2u * b->caps.cap_inst) tn <<= 1;
     b->tab_n = tn;
+    b->tab_shift = 32;
+    for (uint32_t t = tn; t > 1; t >>= 1) b->tab_shift--;
     b->map = (int32_t *)calloc(b->caps.cap_inst, sizeof *b->map);
     b->tab_idx = (int32_t *)calloc(tn, sizeof *b->tab_idx);
     b->tab_key = (uint32_t *)calloc(tn, sizeof *b->tab_key);
@@ -156,11 +158,43 @@ void ns_bridge_publish(NsBridge *b, NsMeshStore *store) {
 int ns_scene_continuous(const NsScene *prev, const NsScene *cur) {
     if (!prev || !cur) return 0;
     if (prev->mesh_epoch != cur->mesh_epoch || prev->area_id != cur->area_id) return 0;
+    if (!prev->valid || !cur->valid) return 0;               /* escena vacía (cambio de ejecutable / captura fallida): sin interpolación */
+    if (cur->game_frame < prev->game_frame) return 0;        /* el contador de fotogramas de juego retrocede: otro ejecutable o reinicio */
     if (cur->t_ns <= prev->t_ns || cur->t_ns - prev->t_ns >= NS_DISCONT_NS) return 0;
     float dx = cur->cam.eye[0] - prev->cam.eye[0], dy = cur->cam.eye[1] - prev->cam.eye[1], dz = cur->cam.eye[2] - prev->cam.eye[2];
     if (dx * dx + dy * dy + dz * dz > 8000.0f * 8000.0f) return 0;
+    if ((prev->valid & NS_SV_TOVR_OK) != (cur->valid & NS_SV_TOVR_OK)) return 0;
+    if (cur->valid & NS_SV_TOVR_OK) {   /* el mapa mundo -> usuario también debe ser continuo (recentrado, cambio de escala): traslación en metros */
+        float sc = 0.0f;
+        for (int i = 0; i < 12; i++) if ((i & 3) != 3) sc = fmaxf(sc, fabsf(prev->to_vr[i]));
+        for (int i = 0; i < 12; i++) {
+            float d = fabsf(cur->to_vr[i] - prev->to_vr[i]);
+            if (!(d <= ((i & 3) == 3 ? 2.0f : 0.25f * sc))) return 0;   /* giro de más de ~14 grados o escala distinta; NaN también descarta */
+        }
+    }
     return 1;
 }
+
+/* ------------------------------------------------------------------------------------------------ decisión nativo/GPU */
+int ns_scene_native_ok(uint32_t valid) { return (valid & NS_NATIVE_NEED) == NS_NATIVE_NEED && !(valid & NS_NATIVE_BAD); }
+
+int ns_native_decide(const NsView *v, const NsDecideIn *in, NsDecision *out) {
+    NsDecision d = {0, 0, NS_WHY_OK};
+    if (!in || !in->want_native) d.why = NS_WHY_MODE;
+    else if (!in->renderer_ok) d.why = NS_WHY_RENDERER;
+    else if (!v || !v->cur) d.why = NS_WHY_NOSCENE;
+    else if (!in->scene_marked) d.why = NS_WHY_UNMARKED;
+    else if (!in->meshes_ok) d.why = NS_WHY_MESHES;
+    else if (!ns_scene_native_ok(v->cur->valid)) d.why = NS_WHY_INVALID;
+    else if (in->now_ns > v->cur->t_ns && in->now_ns - v->cur->t_ns > in->max_age_ns) d.why = NS_WHY_STALE;   /* now < t_ns: la escena llegó tras muestrear el reloj, edad 0 */
+    else {
+        d.native = 1;
+        d.skip = NS_SKIP_WORLD | ((v->cur->valid & NS_SV_FX) ? NS_SKIP_FX : 0u);   /* sin efectos nativos los batches kind 1 siguen por GPU */
+    }
+    if (out) *out = d;
+    return d.native;
+}
+void ns_native_fail(NsDecision *d) { if (d) { d->native = 0; d->skip = 0; d->why = NS_WHY_FAILED; } }
 
 int ns_bridge_acquire(NsBridge *b, uint64_t now_ns, NsView *out) {
     if (!b || !out) return 0;
@@ -285,7 +319,8 @@ void ns_xf_lerp(const NsXf *a, const NsXf *b, float t, NsXf *out) {
     }
 }
 
-static uint32_t hslot(uint32_t key, uint32_t n) { return (key * 2654435761u) & (n - 1u); }
+/* Bits ALTOS del producto de Fibonacci (los bajos de una dirección alineada casi no varían). */
+static uint32_t hslot(uint32_t key, uint32_t shift) { return (key * 2654435761u) >> shift; }
 
 void ns_interp_begin(NsBridge *b, const NsView *v, NsInterp *out) {
     memset(out, 0, sizeof *out);
@@ -299,7 +334,7 @@ void ns_interp_begin(NsBridge *b, const NsView *v, NsInterp *out) {
     if (!(b->map_valid && b->map_cur_seq == cur->seq && b->map_prev_seq == prev->seq)) {
         memset(b->tab_idx, 0xFF, b->tab_n * sizeof *b->tab_idx);   /* -1 = vacío */
         for (uint32_t i = 0; i < np; i++) {
-            uint32_t h = hslot(prev->inst[i].key, b->tab_n);
+            uint32_t h = hslot(prev->inst[i].key, b->tab_shift);
             while (b->tab_idx[h] >= 0) {
                 if (b->tab_key[h] == prev->inst[i].key) break;   /* clave repetida: gana la primera */
                 h = (h + 1) & (b->tab_n - 1u);
@@ -308,7 +343,7 @@ void ns_interp_begin(NsBridge *b, const NsView *v, NsInterp *out) {
         }
         for (uint32_t i = 0; i < n; i++) {
             int32_t r = -1;
-            uint32_t h = hslot(cur->inst[i].key, b->tab_n);
+            uint32_t h = hslot(cur->inst[i].key, b->tab_shift);
             while (b->tab_idx[h] >= 0) {
                 if (b->tab_key[h] == cur->inst[i].key) { r = b->tab_idx[h]; break; }
                 h = (h + 1) & (b->tab_n - 1u);

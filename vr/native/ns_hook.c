@@ -1,57 +1,112 @@
-/* ns_hook: ver ns_hook.h. Todo en el hilo de emulación (las estadísticas se leen desde otros hilos sin garantías de coherencia entre campos). */
+/* ns_hook: ver ns_hook.h. Se ejecuta en el hilo de emulación; los contadores y el estado que lee la interfaz (otro hilo) son atómicos. */
 #include "ns_hook.h"
+#include <stdatomic.h>
 #include <string.h>
 
 static struct {
     NsBridge *br;
-    NsExtractFn ex; void *ex_user; NsMeshStore *store;
+    _Atomic(NsExtractFn) ex; void *ex_user; NsMeshStore *store;
     NsCtxFn ctx; void *ctx_user;
+    NsGateFn gate; void *gate_user;
+    NsStoreResetFn sreset; void *sreset_user;
     uint32_t vbl;
     int pending;
     NsPlayerMap map;
     uint32_t refresh_parts;
-    NsHookStats st;
+    int ik_done, hide_head;
+    struct {
+        _Atomic uint32_t captures, published, replaced, extract_fail, ik_refresh, player_bound, ik_expected, ik_missed, skipped_gate, last_valid;
+        _Atomic uint64_t last_pub_ns;
+    } st;
 } H;
 
-void ns_hook_init(NsBridge *b) { H.br = b; H.pending = 0; memset(&H.map, 0, sizeof H.map); }
-void ns_hook_reset(void) { H.pending = 0; memset(&H.map, 0, sizeof H.map); memset(&H.st, 0, sizeof H.st); }
-void ns_hook_set_extractor(NsExtractFn fn, void *user, NsMeshStore *store) { H.ex = fn; H.ex_user = user; H.store = store; }
-int ns_hook_has_extractor(void) { return H.ex != NULL; }
+static void clear_stats(void) {
+    atomic_store(&H.st.captures, 0); atomic_store(&H.st.published, 0); atomic_store(&H.st.replaced, 0); atomic_store(&H.st.extract_fail, 0);
+    atomic_store(&H.st.ik_refresh, 0); atomic_store(&H.st.player_bound, 0); atomic_store(&H.st.ik_expected, 0); atomic_store(&H.st.ik_missed, 0);
+    atomic_store(&H.st.skipped_gate, 0); atomic_store(&H.st.last_valid, 0); atomic_store(&H.st.last_pub_ns, 0);
+}
+static void inc(_Atomic uint32_t *c) { atomic_fetch_add_explicit(c, 1, memory_order_relaxed); }
+
+void ns_hook_init(NsBridge *b) { H.br = b; H.pending = 0; memset(&H.map, 0, sizeof H.map); clear_stats(); }
+
+void ns_hook_reset(void) {
+    H.pending = 0;
+    memset(&H.map, 0, sizeof H.map);
+    clear_stats();
+    if (H.sreset && H.store) H.sreset(H.store, H.sreset_user);
+    if (H.br) {   /* escena vacía: el consumidor deja de usar la del ejecutable anterior (valid = 0 => GPU) y la interpolación se corta (game_frame retrocede) */
+        NsScene *s = ns_bridge_begin(H.br);
+        if (s) { s->t_ns = ns_now_ns(); ns_bridge_publish(H.br, H.store); }
+    }
+}
+void ns_hook_set_extractor(NsExtractFn fn, void *user, NsMeshStore *store) { H.ex_user = user; H.store = store; atomic_store(&H.ex, fn); }
+int ns_hook_has_extractor(void) { return atomic_load(&H.ex) != NULL; }
 void ns_hook_set_context(NsCtxFn fn, void *user) { H.ctx = fn; H.ctx_user = user; }
+void ns_hook_set_gate(NsGateFn fn, void *user) { H.gate_user = user; H.gate = fn; }
+void ns_hook_set_store_reset(NsStoreResetFn fn, void *user) { H.sreset_user = user; H.sreset = fn; }
 void ns_hook_set_frame(uint32_t v) { H.vbl = v; }
-void ns_hook_stats(NsHookStats *s) { if (s) *s = H.st; }
+void ns_hook_stats(NsHookStats *s) {
+    if (!s) return;
+    s->captures = atomic_load(&H.st.captures); s->published = atomic_load(&H.st.published); s->replaced = atomic_load(&H.st.replaced);
+    s->extract_fail = atomic_load(&H.st.extract_fail); s->ik_refresh = atomic_load(&H.st.ik_refresh); s->player_bound = atomic_load(&H.st.player_bound);
+    s->ik_expected = atomic_load(&H.st.ik_expected); s->ik_missed = atomic_load(&H.st.ik_missed); s->skipped_gate = atomic_load(&H.st.skipped_gate);
+    s->last_valid = atomic_load(&H.st.last_valid); s->last_pub_ns = atomic_load(&H.st.last_pub_ns);
+}
 
 void ns_capture(const uint8_t *ram, const uint8_t *scratch) {
     if (!H.br || !ram) return;
+    if (H.gate && !H.gate(H.gate_user)) {      /* modo gpu / renderer no listo: ni se captura ni se extrae */
+        inc(&H.st.skipped_gate);
+        H.pending = 0;
+        atomic_store(&H.st.last_valid, 0);
+        return;
+    }
     uint64_t t = ns_now_ns();
-    if (H.pending) H.st.replaced++;
+    if (H.pending) inc(&H.st.replaced);
     NsScene *s = ns_bridge_begin(H.br);   /* idempotente: si había una pendiente se reutiliza la misma ranura limpia */
     if (!s) return;
     H.pending = 0;
-    H.st.captures++;
-    if (H.ex) {
-        if (H.ex(ram, scratch, s, H.ex_user) < 0) { H.st.extract_fail++; return; }
+    inc(&H.st.captures);
+    NsExtractFn ex = atomic_load(&H.ex);
+    if (ex) {
+        if (ex(ram, scratch, s, H.ex_user) < 0) { inc(&H.st.extract_fail); return; }
     }
     s->t_ns = t;
-    if (!s->game_frame) s->game_frame = H.st.captures;
+    if (!s->game_frame) s->game_frame = atomic_load(&H.st.captures);
     if (!s->vblank) s->vblank = H.vbl;
     NsCtxOut o;
     memset(&o, 0, sizeof o);
     if (H.ctx) H.ctx(s, &o, H.ctx_user);
     memset(&H.map, 0, sizeof H.map);
-    H.refresh_parts = 0;
-    if (o.player_key && ns_player_bind(&H.map, s, ram, o.player_key) > 0) {
-        H.st.player_bound++;
-        if (o.hide_head) ns_player_hide_part(&H.map, s, NS_PART_HEAD);
+    H.refresh_parts = 0; H.ik_done = 0; H.hide_head = o.hide_head;
+    s->valid &= ~NS_SV_PLAYER_OK;              /* lo decide este enganche, nunca el extractor */
+    int pb = o.player_key ? ns_player_bind(&H.map, s, ram, o.player_key) : 0;
+    if (pb > 0) {
+        inc(&H.st.player_bound);
+        int head_ok = 1;
+        if (o.hide_head) head_ok = ns_player_hide_part(&H.map, s, NS_PART_HEAD) > 0;
         H.refresh_parts = o.refresh_parts;
+        int arms_ok = 1;
+        if (o.refresh_parts) {   /* debe haber al menos una pieza de brazo enlazada para que la IK tenga efecto */
+            arms_ok = 0;
+            for (int k = 0; k < NS_PLAYER_PARTS; k++) if ((o.refresh_parts & (1u << k)) && H.map.part[k].n) arms_ok = 1;
+            inc(&H.st.ik_expected);
+        }
+        /* Apto: cabeza oculta; si no hay IK que esperar, ya; si la hay, se marca en ns_hook_post_ik cuando llegue. */
+        if (head_ok && arms_ok && !o.refresh_parts) s->valid |= NS_SV_PLAYER_OK;
+        else if (!(head_ok && arms_ok)) { H.refresh_parts = 0; if (o.refresh_parts) inc(&H.st.ik_missed); }
     }
     H.pending = 1;
 }
 
 void ns_hook_post_ik(const uint8_t *ram) {
-    if (!H.pending || !H.br || !H.map.bound || !H.refresh_parts) return;
+    if (!H.pending || !H.br || !H.map.bound || !H.refresh_parts || H.ik_done) return;
     NsScene *s = ns_bridge_current(H.br);
-    if (s && ns_player_refresh(&H.map, s, ram, H.refresh_parts) > 0) H.st.ik_refresh++;
+    if (s && ns_player_refresh(&H.map, s, ram, H.refresh_parts) > 0) {
+        H.ik_done = 1;
+        inc(&H.st.ik_refresh);
+        s->valid |= NS_SV_PLAYER_OK;
+    }
 }
 
 void ns_hook_tick(const uint8_t *ram) {
@@ -59,15 +114,16 @@ void ns_hook_tick(const uint8_t *ram) {
     if (!H.pending || !H.br) return;
     NsScene *s = ns_bridge_current(H.br);
     if (!s) { H.pending = 0; return; }
-    H.st.last_valid = s->valid;
-    H.st.last_pub_ns = ns_now_ns();
+    if (H.refresh_parts && !H.ik_done) inc(&H.st.ik_missed);   /* se esperaba la pose IK y no llegó: la escena sale sin PLAYER_OK */
+    atomic_store(&H.st.last_valid, s->valid);
     ns_bridge_publish(H.br, H.store);
-    H.st.published++;
+    atomic_store(&H.st.last_pub_ns, ns_now_ns());
+    inc(&H.st.published);
     H.pending = 0;
     memset(&H.map, 0, sizeof H.map);
 }
 
 int ns_hook_native_ready(uint64_t now_ns, uint64_t max_age_ns) {
-    const uint32_t need = NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_TOVR_OK;
-    return H.st.published && (H.st.last_valid & need) == need && now_ns >= H.st.last_pub_ns && now_ns - H.st.last_pub_ns <= max_age_ns;
+    uint64_t t = atomic_load(&H.st.last_pub_ns);
+    return atomic_load(&H.st.published) && ns_scene_native_ok(atomic_load(&H.st.last_valid)) && now_ns >= t && now_ns - t <= max_age_ns;
 }

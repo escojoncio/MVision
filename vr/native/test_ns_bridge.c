@@ -73,7 +73,7 @@ static void t_interp(void) {
     s->inst[0].key = 0xCCC0; s->inst[1].key = 0xDDD0; s->inst[2].key = 0xAAA0;
     for (uint32_t i = 0; i < 6; i++) s->piece[i].world.m[3] = 1000.0f;   /* trasladadas 1000 respecto a la anterior (m[3]=7) -> ver abajo */
     s->piece[0].world.m[3] = 107.0f; s->piece[1].world.m[3] = 107.0f; s->piece[4].world.m[3] = 9000.0f; s->piece[5].world.m[3] = 9000.0f;
-    memcpy(s->to_vr, (float[12]){1,0,0,40, 0,1,0,0, 0,0,1,0}, 48); s->valid = NS_SV_TOVR_OK;
+    memcpy(s->to_vr, (float[12]){1,0,0,0.4f, 0,1,0,0, 0,0,1,0}, 48); s->valid = NS_SV_TOVR_OK;
     ns_bridge_publish(b, NULL);
     CHECK(ns_bridge_acquire(b, 140 * MS, &v) && v.interp, "continua");
     CHECK(fabsf(v.alpha - 0.0f) < 0.02f, "alpha al llegar la escena nueva = %f", v.alpha);   /* T = 140 - 40 (periodo) = 100 -> alpha 0 */
@@ -91,7 +91,7 @@ static void t_interp(void) {
     /* teletransporte: inst 2 (AAA0) pasa de 7 a 1000 */
     CHECK(ns_interp_piece(&ip, 2, 0, &x) == 0 && x.m[3] == 9000.0f, "teletransporte no se interpola");
     float tv[12]; ns_interp_to_vr(&ip, tv);
-    CHECK(fabsf(tv[3] - 20.0f) < 0.6f, "to_vr interpolado %f", tv[3]);
+    CHECK(fabsf(tv[3] - 0.2f) < 0.01f, "to_vr interpolado %f", tv[3]);
     /* discontinuidad: época distinta */
     ns_bridge_acquire(b, 160 * MS, &v);
     s = ns_bridge_begin(b); s->t_ns = 180 * MS; s->mesh_epoch = 9; fill(s, 7, 3, 2); ns_bridge_publish(b, NULL);
@@ -104,6 +104,20 @@ static void t_interp(void) {
     s = ns_bridge_begin(b); s->t_ns = 900 * MS; s->mesh_epoch = 9; fill(s, 7, 3, 2); ns_bridge_publish(b, NULL);
     ns_bridge_acquire(b, 900 * MS, &v);
     CHECK(!v.interp, "hueco > 400 ms");
+    /* M5: to_vr con salto (recentrado de 5 m, o escala distinta) corta la interpolación aunque la cámara y las mallas sean continuas */
+    {
+        NsScene a, c; memset(&a, 0, sizeof a); memset(&c, 0, sizeof c);
+        a.valid = c.valid = NS_SV_TOVR_OK | NS_SV_GAME; a.t_ns = 100 * MS; c.t_ns = 140 * MS; a.game_frame = 5; c.game_frame = 6;
+        float id[12] = {0.001f,0,0,1, 0,0.001f,0,0, 0,0,0.001f,0};
+        memcpy(a.to_vr, id, 48); memcpy(c.to_vr, id, 48);
+        CHECK(ns_scene_continuous(&a, &c), "to_vr igual: continua");
+        c.to_vr[3] = 6.5f; CHECK(!ns_scene_continuous(&a, &c), "to_vr con salto de 5 m");
+        memcpy(c.to_vr, id, 48); c.to_vr[0] = 0.002f; CHECK(!ns_scene_continuous(&a, &c), "to_vr con otra escala");
+        memcpy(c.to_vr, id, 48); c.to_vr[0] = 0.00099f; CHECK(ns_scene_continuous(&a, &c), "to_vr con giro pequeño");
+        c.valid = NS_SV_GAME; CHECK(!ns_scene_continuous(&a, &c), "TOVR_OK distinto");
+        c.valid = 0; CHECK(!ns_scene_continuous(&a, &c), "escena vacia");
+        c.valid = a.valid; c.game_frame = 2; CHECK(!ns_scene_continuous(&a, &c), "game_frame retrocede");
+    }
     ns_bridge_destroy(b);
 }
 

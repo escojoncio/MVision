@@ -7,7 +7,7 @@
  * al terminar el dibujado), y (2) la cabeza del jugador se oculta con el modo de visibilidad de su pieza (vrcam_hide_head). Ninguna de las dos
  * cosas está en la escena extraída. Aquí:
  *   - ns_player_bind (en la captura, tras extraer): localiza la instancia del jugador y, por cada pieza del modelo del motor (partes 0..15), qué NsPiece
- *     de la escena la representa (las que tienen la MISMA matriz de mundo que la RAM; una parte puede dar varias NsPiece: mallas encadenadas).
+ *     de la escena la representa (las que tienen la MISMA matriz de mundo EXACTA que la RAM; una parte puede dar varias NsPiece: mallas encadenadas).
  *   - ns_player_hide_part: marca esas piezas NS_PF_HIDDEN (cabeza propia en primera persona).
  *   - ns_player_refresh (después de vrbody_apply): vuelve a leer de la RAM la matriz de mundo de las partes pedidas (brazos) y la copia a sus NsPiece,
  *     de modo que cuerpo, manos y brazos quedan en el mismo espacio del mundo del motor que el resto de la escena (y por tanto bajo la misma to_vr).
@@ -37,7 +37,8 @@ typedef struct {
 uint32_t ns_player_key(const uint8_t *ram);
 /* Índice de la instancia con esa clave o -1. */
 int ns_player_find(const NsScene *sc, uint32_t key);
-/* Empareja partes con piezas. Devuelve cuántas partes quedaron enlazadas (0 = nada: jugador no está en la escena o su modelo no coincide con la RAM). */
+/* Empareja partes con piezas por matriz de mundo IDÉNTICA (mismos s16/s32 del motor, sin tolerancia); una pieza que coincide con más de una parte es ambigua y no se enlaza a ninguna.
+ * Empareja partes con piezas. Devuelve cuántas partes quedaron enlazadas (0 = nada: jugador no está en la escena o su modelo no coincide con la RAM). */
 int ns_player_bind(NsPlayerMap *m, const NsScene *sc, const uint8_t *ram, uint32_t key);
 /* Marca ocultas las piezas de la parte. Devuelve cuántas. */
 int ns_player_hide_part(const NsPlayerMap *m, NsScene *sc, int part);
