@@ -935,10 +935,34 @@ uint32_t gpu_stat(void) {
     return s;
 }
 
+/* Ciclos de reloj de punto por píxel y ventana nominal (inicio, fin) del rango horizontal de cada modo de la edición PAL: los de la
+ * librería gráfica del juego (tabla de PutDispEnv). Índice: 0 = 256, 1 = 320, 2 = 384 (bit 6), 3 = 512, 4 = 640. */
+static const struct { uint8_t div; uint16_t lo, hi; } HMODE[5] = {{10, 0x262, 0xC62}, {8, 0x270, 0xC70}, {7, 0x230, 0xCB0}, {5, 0x27B, 0xC7B}, {4, 0x280, 0xC80}};
+static int hmode_idx(uint32_t mode) {
+    if (mode & 0x40) return 2;
+    switch (mode & 3) { case 0: return 0; case 1: return 1; case 2: return 3; default: return 4; }
+}
+
 void gpu_get_display(GpuDisplay *d) {
-    static const int hres[4] = {256, 320, 512, 640};
+    int hi = hmode_idx((uint32_t)g.mode), div = HMODE[hi].div;
+    int x1 = g.hx1, x2 = g.hx2;
+    if (x2 < x1) x2 = x1;
     d->x = g.dx; d->y = g.dy;
-    d->w = (g.mode & 0x40) ? 368 : hres[g.mode & 3];
+    int nom = (HMODE[hi].hi - HMODE[hi].lo + div - 1) / div;
+    d->w = nom;
+    /* anchura visible = ciclos del rango / ciclos por píxel (el hardware no muestra más allá de x2 ni antes de x1); un píxel
+     * a medias dentro del rango también se ve */
+    int aw = (x2 - x1 + div - 1) / div;
+    if (aw < 1) aw = 1;
+    if (aw > 1024) aw = 1024;
+    d->aw = aw;
+    int lo = x1 < HMODE[hi].lo ? x1 : HMODE[hi].lo, hi_c = x2 > HMODE[hi].hi ? x2 : HMODE[hi].hi;
+    int fw = (hi_c - lo + div - 1) / div;
+    if (fw < aw) fw = aw;
+    if (fw > 1024) fw = 1024;
+    d->fw = fw;
+    d->pad_l = (x1 - lo + div - 1) / div;
+    if (d->pad_l + aw > fw) d->pad_l = fw - aw;
     int h = g.vy2 - g.vy1;
     if (h <= 0 || h > 288) h = (g.mode & 8) ? 256 : 240;
     d->interlace = (g.mode >> 5) & 1;
@@ -947,6 +971,41 @@ void gpu_get_display(GpuDisplay *d) {
     d->depth24 = (g.mode >> 4) & 1;
     d->pal = (g.mode >> 3) & 1;
     d->enabled = !g.disp_off;
+    d->mode = g.mode; d->hx1 = g.hx1; d->hx2 = g.hx2; d->vy1 = g.vy1; d->vy2 = g.vy2;
+}
+
+size_t gpu_present_rgba(const GpuDisplay *d, const uint16_t *vram, uint8_t *dst, size_t cap_px) {
+    int fw = d->fw > 0 ? d->fw : d->w, h = d->h, w = d->aw > 0 ? d->aw : d->w;
+    if (fw <= 0 || h <= 0 || (size_t)fw * (size_t)h > cap_px) return 0;
+    if (!vram) vram = &gpu_vram[0][0];
+    int pad = d->pad_l;
+    if (pad < 0) pad = 0;
+    for (int y = 0; y < h; y++) {
+        uint8_t *p = dst + (size_t)y * fw * 4;
+        if (!d->enabled) {
+            for (int x = 0; x < fw; x++, p += 4) { p[0] = p[1] = p[2] = 0; p[3] = 255; }
+            continue;
+        }
+        const uint16_t *row = vram + (size_t)((d->y + y) & 511) * 1024;
+        for (int x = 0; x < fw; x++, p += 4) {
+            int sx = x - pad;
+            if (sx < 0 || sx >= w) { p[0] = p[1] = p[2] = 0; p[3] = 255; continue; }
+            if (d->depth24) {
+                const uint8_t *ln = (const uint8_t *)row;
+                p[0] = ln[((d->x * 2) + sx * 3 + 0) & 2047];
+                p[1] = ln[((d->x * 2) + sx * 3 + 1) & 2047];
+                p[2] = ln[((d->x * 2) + sx * 3 + 2) & 2047];
+            } else {
+                uint16_t c = row[(d->x + sx) & 1023];
+                unsigned r = c & 31, gg = (c >> 5) & 31, b = (c >> 10) & 31;
+                p[0] = (uint8_t)(r << 3 | r >> 2);
+                p[1] = (uint8_t)(gg << 3 | gg >> 2);
+                p[2] = (uint8_t)(b << 3 | b >> 2);
+            }
+            p[3] = 255;
+        }
+    }
+    return (size_t)fw * (size_t)h;
 }
 
 /* ---------------- DMA canal 2 y listas enlazadas ---------------- */
@@ -1184,7 +1243,11 @@ static void put_drawenv(Cpu *c, uint32_t e) {
 void hle_gfx_put_draw(Cpu *c) { put_drawenv(c, A0); V0 = A0; done(c); }
 void hle_gfx_list_env(Cpu *c) { uint32_t p = A0; put_drawenv(c, A1); gpu_draw_list(p); V0 = 0; done(c); }
 
-/* entorno de display: disp RECT @0, screen RECT @8, isinter @16, isrgb24 @17. */
+/* entorno de display: disp RECT @0, screen RECT @8, isinter @16, isrgb24 @17. Réplica de la función original de la librería
+ * gráfica (edición PAL): modo (GP1 08h) por el ancho/alto de disp; inicio de display (05h) = disp.x/y; rango horizontal (06h) =
+ * inicio nominal del modo + screen.x*divisor, de ancho (fin-inicio nominal)*screen.w/256 (0 = todo); rango vertical (07h) =
+ * 0x13 + screen.y, de alto screen.h (0 = 240); con los mismos límites que la original. Antes el rango horizontal era siempre
+ * 0x260..0x260+2560: los modos de 384 con screen.w < 256 (radio/códec) mostraban 368 columnas, 48 de ellas basura de la VRAM. */
 void hle_gfx_put_disp(Cpu *c) {
     uint32_t e = A0;
     int x, y, w, h, sx, sy, sw, sh;
@@ -1197,12 +1260,18 @@ void hle_gfx_put_disp(Cpu *c) {
     if (inter) mode |= 0x20;
     if (rgb24) mode |= 0x10;
     mode |= 8; /* edición PAL */
+    int hi = hmode_idx(mode), div = HMODE[hi].div;
+    int x1 = HMODE[hi].lo + sx * div;
+    int span = HMODE[hi].hi - HMODE[hi].lo;
+    int x2 = x1 + (sw ? (span * sw) >> 8 : span);
+    int y1 = 0x13 + sy, y2 = y1 + (sh ? sh : 0xF0);
+    if (x1 < 0x21C) x1 = 0x21C; else if (x1 >= 0xC95) x1 = 0xC94;
+    if (x2 < x1 + div * 4) x2 = x1 + div * 4; else if (x2 >= 0xCBD) x2 = 0xCBC;
+    if (y1 < 0x13) y1 = 0x13; else if (y1 >= 0x130) y1 = 0x12F;
+    if (y2 < y1 + 2) y2 = y1 + 2; else if (y2 >= 0x132) y2 = 0x131;
     gpu_gp1(0x08000000 | mode);
     gpu_gp1(0x05000000 | (x & 0x3FF) | (uint32_t)(y & 0x1FF) << 10);
-    /* rango vertical: alto visible (screen.h si se dio, si no disp.h) */
-    int vh = sh ? sh : (h > 256 ? h / 2 : h);
-    int vy = 0x13 + sy; /* PAL: primera línea visible aproximada */
-    gpu_gp1(0x07000000 | (vy & 0x3FF) | (uint32_t)((vy + vh) & 0x3FF) << 10);
-    gpu_gp1(0x06000000 | 0x260 | (uint32_t)(0x260 + 2560) << 12);
+    gpu_gp1(0x07000000 | (uint32_t)(y1 & 0x3FF) | (uint32_t)(y2 & 0x3FF) << 10);
+    gpu_gp1(0x06000000 | (uint32_t)(x1 & 0xFFF) | (uint32_t)(x2 & 0xFFF) << 12);
     V0 = A0;
 }
