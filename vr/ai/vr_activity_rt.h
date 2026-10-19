@@ -29,6 +29,10 @@ VrActivity *vra_rt_instance(void);
 int vra_rt_install_fnpatch(void);
 void vra_rt_clip_draw(Cpu *c);
 void vra_rt_uninstall(void);
+/* Gancho previo del constructor (r4 = bloque, r7 = modo; puede cambiar r7): lo usa vr/camera para separar el estado de recorte de dibujo del de lógica.
+ * La sustitución del constructor puede instalarse sola (vra_rt_install_builder, idempotente, 0 = ok); vra_rt_uninstall no la quita. */
+void vra_rt_set_pre_builder(void (*fn)(Cpu *));
+int vra_rt_install_builder(void);
 /* Los dos parches, expuestos para pruebas y para que el dueño del paso de límites pueda llamarlos él mismo si
  * sustituye esa función entera: */
 void vra_rt_pointcheck(Cpu *c);

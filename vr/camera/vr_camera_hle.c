@@ -1,3 +1,5 @@
+#include <stdio.h>
+#include <stdlib.h>
 /* Sustitutos (HLE) de cinco funciones del motor para la cámara VR. Se enlazan con --hle hle_vrcam.txt y los
  * nombres de vr_names.json (ver Makefile). Cada sustituto delega en el código original con rt_orig() salvo en lo que
  * cambia, y solo cambia algo si vrcam_active() (decidido por el gancho de frame con el puente). Se ejecutan en el hilo
@@ -70,6 +72,15 @@ void hle_vrcam_trans(Cpu *c) {
 void hle_vrbody_sort(Cpu *c) {
     rt_orig(c, "vrbody_sort");
     vrbody_restore(emu_ram);
+    vrcam_drawclip_restore(emu_ram);   /* el estado de recorte de lógica (+0x32) vuelve a su valor original antes de que corra la lógica */
+}
+
+/* Gancho de entrada del constructor de paquetes de un bloque de objeto 3D (r4 = bloque, r7 = modo): estado de recorte de DIBUJO separado del de
+ * lógica (vr_camera.h). Lo llama la sustitución de esa función (vr_activity_rt.c, que es la dueña de la dirección). */
+void vrcam_dc_builder_pre(Cpu *c) {
+    if (!vrcam_active()) return;
+    uint32_t m = c->r[7], nm = vrcam_drawclip_pre(emu_ram, c->r[4], m);
+    if (nm != m) c->r[7] = nm;
 }
 
 /* Envío del frame al GPU: solo cuenta (para asociar la lista capturada con su registro de cámara). */
@@ -93,37 +104,127 @@ void hle_vrcam_overscan(Cpu *c) {
  * fiables sigue decidiendo, igual que antes); el renderer recorta contra el plano cercano y decide la cara con las posiciones 3D de vista.
  * Paquetes indirectos (bits altos de los índices) y todo lo demás: intactos. Contadores en vrcam_pack_stats(). */
 static uint32_t pk_seen, pk_fixed;
+static uint32_t pk_ind, pk_ind_drop, pk_dir_drop, pk_reg;   /* indirectos vistos / descartados por el original, directos descartados (tras la re-emisión), registrados */
 void vrcam_pack_stats(uint32_t *seen, uint32_t *fixed) { *seen = pk_seen; *fixed = pk_fixed; }
+void vrcam_pack_stats2(uint32_t *indirect, uint32_t *indirect_dropped, uint32_t *direct_dropped, uint32_t *registered) { *indirect = pk_ind; *indirect_dropped = pk_ind_drop; *direct_dropped = pk_dir_drop; *registered = pk_reg; }
 static int pk_enable = 1;
+static uint32_t pk_front_rescue;   /* frontales exactos que el motor había descartado y se emiten */
+static uint32_t pk_bad_cull;      /* poco fiables descartados por cara trasera exacta */
+static uint32_t pk_val_agree, pk_val_dis;   /* validación: orientación exacta vs la del motor en paquetes fiables con los tres vértices delante */
+static int pk_val_on = 1;
+static uint32_t pk_tab[2][2][2];
+void vrcam_pack_tab(uint32_t out[8]) { memcpy(out, pk_tab, sizeof pk_tab); }
+static int pk_exact_cull = -1;    /* MV_BADCULL=0 apaga el descarte exacto (pruebas A/B) */
+void vrcam_pack_stats3(uint32_t *bad_cull, uint32_t *rescued, uint32_t *agree, uint32_t *disagree) { *bad_cull = pk_bad_cull; *rescued = pk_front_rescue; *agree = pk_val_agree; *disagree = pk_val_dis; }
+static int pk_ind_reemit = -1;   /* MV_INDFIX=0 apaga la re-emisión de indirectos (pruebas A/B) */
 void vrcam_pack_enable(int on) { pk_enable = on; }   /* 0: la HLE solo ejecuta el original (pruebas A/B sin recorte) */
 extern uint8_t emu_scratch[0x400];
 void hle_vrcam_pack(Cpu *c) {
     uint32_t list = A0, pk = A1; int32_t n = (int32_t)A2;
     rt_orig(c, "vrcam_pack");
-    if (!pk_enable || !vrcam_active() || n <= 0 || n > 4096 || (list & RAM_MASK) + 4u * (uint32_t)n > 0x200000u || (pk & RAM_MASK) + 52u * (uint32_t)n > 0x200000u) return;
+    if (n <= 0 || n > 4096 || (list & RAM_MASK) + 4u * (uint32_t)n > 0x200000u || (pk & RAM_MASK) + 52u * (uint32_t)n > 0x200000u) return;
+    if (pk_exact_cull < 0) { const char *e = getenv("MV_BADCULL"); pk_exact_cull = !(e && e[0] == '0'); }
+    if (pk_ind_reemit < 0) { const char *e = getenv("MV_INDFIX"); pk_ind_reemit = !(e && e[0] == '0'); }
+    const int do_fix = pk_enable && vrcam_active();
+    const int do_reg = gte_hp_enabled() && vrcam_active();
+    if (!do_fix && !do_reg) return;
     const int32_t hh = (int32_t)gte_cfc2(c, 26);          /* H: la división de la GTE desborda con 2*SZ <= H */
     const uint32_t zmin = (uint32_t)(hh > 0 ? hh / 2 + 4 : 80);
+    uint32_t base = 0;
+    if (do_reg) {   /* ranuras del scratchpad usadas por esta lista -> vértices exactos del log de la GTE */
+        uint32_t mx = 0;
+        for (int32_t i = 0; i < n; i++) {
+            uint32_t w; memcpy(&w, emu_ram + ((list + 4u * (uint32_t)i) & RAM_MASK), 4);
+            if (w & 0x80808080u) continue;
+            uint32_t o[4] = {(w << 2) & 0x1FCu, (w >> 6) & 0x1FCu, (w >> 14) & 0x1FCu, (w >> 22) & 0x1FCu};
+            for (int k = 0; k < 4; k++) if (o[k] > mx) mx = o[k];
+        }
+        base = gte_hp_align(emu_scratch, (int)(mx >> 2) + 1);
+    }
     for (int32_t i = 0; i < n; i++) {
         uint32_t w, hdr;
         memcpy(&w, emu_ram + ((list + 4u * (uint32_t)i) & RAM_MASK), 4);
         uint8_t *ph = emu_ram + ((pk + 52u * (uint32_t)i) & RAM_MASK);
         memcpy(&hdr, ph, 4);
+        const uint32_t hdr0 = hdr;   /* decisión original del motor (para los diagnósticos) */
         pk_seen++;
-        if ((w & 0x80808080u) || (hdr & 0xFFFFu)) continue;
-        const uint32_t o[4] = {(w << 2) & 0x1FCu, (w >> 6) & 0x1FCu, (w >> 14) & 0x1FCu, (w >> 22) & 0x1FCu};
-        int bad = 0;
-        uint32_t sz[4];
-        for (int k = 0; k < 4; k++) {
-            uint32_t sxy, z;
-            memcpy(&sxy, emu_scratch + o[k], 4); memcpy(&z, emu_scratch + 0x200 + o[k], 4);
-            int x = (int16_t)(sxy & 0xFFFF), y = (int16_t)(sxy >> 16);
-            sz[k] = z & 0xFFFFu;
-            if (sz[k] < zmin || x >= 1000 || x <= -1000 || y >= 1000 || y <= -1000) bad = 1;
+        if (w & 0x80808080u) {
+            pk_ind++;
+            if (!(hdr & 0xFFFFu)) {
+                pk_ind_drop++;
+                if (do_fix && pk_ind_reemit) { uint32_t one = (hdr & ~0xFFFFu) | 1u; memcpy(ph, &one, 4); }
+            }
+            continue;
         }
-        if (!bad) continue;
-        uint32_t otz = (sz[0] + sz[2]) >> 1;
-        if (otz < 1) otz = 1;
-        memcpy(ph, &otz, 4);
-        pk_fixed++;
+        const uint32_t o[4] = {(w << 2) & 0x1FCu, (w >> 6) & 0x1FCu, (w >> 14) & 0x1FCu, (w >> 22) & 0x1FCu};
+        if (!(hdr & 0xFFFFu) && do_fix) {
+            /* El motor descartó el paquete (NCLIP <= 0 sobre las coordenadas de pantalla). Con las posiciones de vista EXACTAS (log de la GTE) se decide por la
+             * orientación real (signo del triple producto de los tres vértices que usa el motor: índices 0, 1 y 3), no por el NCLIP:
+             *   - frontal -> se emite aunque el NCLIP fuera 0 o aleatorio: los polígonos lejanos o rasantes (área de pantalla < 1 píxel tras redondear a enteros, ~7 % de
+             *     los frontales) o con vértices detrás/saturados se perdían, y con la cabeza inclinada y la vista ampliada SÍ se ven;
+             *   - trasero de una cara -> se descarta igual que el motor (si no, aparecería al girar lo que el juego nunca dibuja); de dos caras -> se emite.
+             * Sin posiciones exactas (sin registro): solo se recuperan los de vértices poco fiables (SZ < H/2+4 o coordenadas saturadas), como antes. */
+            int emit = 0, decided = 0;
+            uint32_t sz[4];
+            for (int k = 0; k < 4; k++) { uint32_t z; memcpy(&z, emu_scratch + 0x200 + o[k], 4); sz[k] = z & 0xFFFFu; }
+            if (base && pk_exact_cull) {
+                GpuHpInfo q[3];
+                if (gte_hp_log_get(base + (o[0] >> 2), &q[0]) && gte_hp_log_get(base + (o[1] >> 2), &q[1]) && gte_hp_log_get(base + (o[3] >> 2), &q[2])) {
+                    double det = (double)q[0].vx * ((double)q[1].vy * q[2].vz - (double)q[1].vz * q[2].vy)
+                               - (double)q[0].vy * ((double)q[1].vx * q[2].vz - (double)q[1].vz * q[2].vx)
+                               + (double)q[0].vz * ((double)q[1].vx * q[2].vy - (double)q[1].vy * q[2].vx);
+                    uint16_t two; memcpy(&two, emu_scratch + 0x1FC, 2);
+                    decided = 1;
+                    emit = det > 0.0 || (two && det < 0.0);
+                    if (!emit) pk_bad_cull++;
+                    else if (det > 0.0) pk_front_rescue++;
+                }
+            }
+            if (!decided) {
+                for (int k = 0; k < 4; k++) {
+                    uint32_t sxy; memcpy(&sxy, emu_scratch + o[k], 4);
+                    int x = (int16_t)(sxy & 0xFFFF), y = (int16_t)(sxy >> 16);
+                    if (sz[k] < zmin || x >= 1000 || x <= -1000 || y >= 1000 || y <= -1000) emit = 1;
+                }
+            }
+            if (emit) {
+                uint32_t otz = (sz[0] + sz[2]) >> 1;
+                if (otz < 1) otz = 1;
+                memcpy(ph, &otz, 4);
+                hdr = otz;
+                pk_fixed++;
+            }
+        }
+        if (base && pk_val_on && !(w & 0x80808080u)) {   /* tabla de diagnóstico: orientación exacta x emitido x una/dos caras, solo vértices normales y delante */
+            GpuHpInfo q[3];
+            if (gte_hp_log_get(base + (o[0] >> 2), &q[0]) && gte_hp_log_get(base + (o[1] >> 2), &q[1]) && gte_hp_log_get(base + (o[3] >> 2), &q[2]) &&
+                !q[0].flags && !q[1].flags && !q[2].flags && q[0].vz > 0 && q[1].vz > 0 && q[2].vz > 0) {
+                double det = (double)q[0].vx * ((double)q[1].vy * q[2].vz - (double)q[1].vz * q[2].vy)
+                           - (double)q[0].vy * ((double)q[1].vx * q[2].vz - (double)q[1].vz * q[2].vx)
+                           + (double)q[0].vz * ((double)q[1].vx * q[2].vy - (double)q[1].vy * q[2].vx);
+                uint16_t two; memcpy(&two, emu_scratch + 0x1FC, 2);
+                pk_tab[det > 0.0][(hdr0 & 0xFFFFu) != 0][two != 0]++;
+            }
+        }
+        if (base && (hdr0 & 0xFFFFu) && pk_val_on) {   /* validación del signo exacto: paquete fiable que sí se emite, con los tres vértices delante */
+            GpuHpInfo q[3];
+            if (gte_hp_log_get(base + (o[0] >> 2), &q[0]) && gte_hp_log_get(base + (o[1] >> 2), &q[1]) && gte_hp_log_get(base + (o[3] >> 2), &q[2]) &&
+                !q[0].flags && !q[1].flags && !q[2].flags && q[0].vz > 0 && q[1].vz > 0 && q[2].vz > 0) {
+                double det = (double)q[0].vx * ((double)q[1].vy * q[2].vz - (double)q[1].vz * q[2].vy)
+                           - (double)q[0].vy * ((double)q[1].vx * q[2].vz - (double)q[1].vz * q[2].vx)
+                           + (double)q[0].vz * ((double)q[1].vx * q[2].vy - (double)q[1].vy * q[2].vx);
+                int front_hw = !(hdr0 & 0x10000u);
+                if ((det > 0.0) == front_hw) pk_val_agree++; else pk_val_dis++;
+            }
+        }
+        if (!(hdr & 0xFFFFu)) pk_dir_drop++;
+        if (base && (hdr & 0xFFFFu)) {   /* paquete que se enviará al GPU: registrar sus vértices exactos */
+            int sx[4], sy[4]; uint32_t id[4];
+            for (int k = 0; k < 4; k++) {
+                uint32_t sxy; memcpy(&sxy, emu_scratch + o[k], 4);
+                sx[k] = (int16_t)(sxy & 0xFFFF); sy[k] = (int16_t)(sxy >> 16); id[k] = base + (o[k] >> 2);
+            }
+            if (gte_hp_poly_reg(4, sx, sy, id) || gte_hp_poly_reg(3, sx, sy, id)) pk_reg++;
+        }
     }
 }

@@ -331,6 +331,33 @@ static void t_eye_height(void) {
     EQ(mv_vr_take_user_eye_height(&m), 0);
 }
 
+/* Registro exacto de vértices de la GTE (alta precisión): align + log_get devuelven la posición de vista de cada ranura del scratchpad. */
+static void t_hp_log(Cpu *c) {
+    gte_reset(); gte_hp_enable(1);
+    gte_ctc2(c, 0, 0x1000); gte_ctc2(c, 1, 0); gte_ctc2(c, 2, 0x1000); gte_ctc2(c, 3, 0); gte_ctc2(c, 4, 0x1000);
+    gte_ctc2(c, 5, 0); gte_ctc2(c, 6, 0); gte_ctc2(c, 7, 1000);
+    gte_ctc2(c, 24, 0); gte_ctc2(c, 25, 0); gte_ctc2(c, 26, 1000);
+    static const int vx[3] = {100, 300, 100}, vy[3] = {50, 50, 250};
+    uint8_t scr[1024]; memset(scr, 0, sizeof scr);
+    for (int s = 0; s < 3; s++) {
+        gte_mtc2(c, 0, ((uint32_t)vy[s] << 16) | (uint32_t)vx[s]); gte_mtc2(c, 1, 0);
+        gte_cmd(c, 0x00180001);   /* RTPS sf=1 */
+        uint32_t sxy = gte_mfc2(c, 14), sz = gte_mfc2(c, 19);
+        memcpy(scr + 4 * s, &sxy, 4); memcpy(scr + 0x200 + 4 * s, &sz, 4);
+    }
+    uint32_t base = gte_hp_align(scr, 3);
+    EQ(base != 0, 1);
+    for (int s = 0; s < 3; s++) {
+        GpuHpInfo g;
+        EQ(gte_hp_log_get(base + (uint32_t)s, &g), 1);
+        EQ((int)g.vx, vx[s]); EQ((int)g.vy, vy[s]); EQ((int)g.vz, 1000);
+    }
+    GpuHpInfo g;
+    EQ(gte_hp_log_get(0, &g), 0);                 /* id nulo */
+    EQ(gte_hp_log_get(base + 100000u, &g), 0);    /* id futuro */
+    gte_hp_enable(0); gte_reset();
+}
+
 int main(void) {
     Cpu c = {0};
     t_mem(&c);
@@ -338,6 +365,7 @@ int main(void) {
     t_gte(&c);
     t_gte_regs16(&c);
     t_gte_vec(&c);
+    t_hp_log(&c);
     t_gpu_feedback();
     t_display();
     t_eye_height();

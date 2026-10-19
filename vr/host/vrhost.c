@@ -28,6 +28,9 @@
 #include "vr_scene.h"
 #include "vr_view.h"
 #include "vrai.h"
+#include "vr_activity_rt.h"
+
+void vrcam_dc_builder_pre(Cpu *c);   /* vr/camera/vr_camera_hle.c */
 #include "vrgame.h"
 
 void hle_vrcam_reset(void);   /* vr_camera_hle.c */
@@ -457,9 +460,17 @@ void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame)) { test_cb = 
 #define OVP_HI 0x80100000u
 #define OVP_MAX 24
 static int ovp_on = 0, ovp_map = 0;   /* ovp_map: parchear también la máscara de mapa de las overlays (bit 0 de MV_NOCULL) */
+static int dc_want = 0;   /* máscara pedida del estado de recorte de dibujo separado (0 = ninguno) */
 static uint32_t ovp_sample, ovp_done = 1; static unsigned ovp_stable;
 static int ovp_ids[OVP_MAX], ovp_n;
-static void ovp_release(void) { for (int i = 0; i < ovp_n; i++) rt_unpatch_code(ovp_ids[i]); ovp_n = 0; }
+static int dc_active;                    /* el estado de recorte de dibujo separado del de lógica está operativo (ver on_bound) */
+static uint32_t ovp_bld;                 /* constructor de paquetes de la copia de la overlay con el gancho de dibujo puesto (0 = ninguno) */
+static void ovp_bld_hook(Cpu *c) { vrcam_dc_builder_pre(c); rt_call_orig(c, ovp_bld); }
+static void ovp_release(void) {
+    for (int i = 0; i < ovp_n; i++) rt_unpatch_code(ovp_ids[i]);
+    ovp_n = 0;
+    if (ovp_bld) { rt_unpatch(ovp_bld); ovp_bld = 0; }
+}
 static void ovp_frame(void) {
     uint32_t h = 2166136261u;
     for (unsigned i = 0; i < 160; i++) {
@@ -477,10 +488,24 @@ static void ovp_frame(void) {
     int n = vrcam_scan_overlay(emu_ram, OVP_LO, OVP_HI, st, OVP_MAX);
     for (int i = 0; i < n; i++) {
         int id = -1;
+        if (dc_active && st[i].kind != 2) continue;   /* mapa y caja de objeto: los resuelve el gancho del constructor sin tocar el estado de la lógica */
         if (st[i].kind == 0 && !ovp_map) continue;
         if (rt_patch_code(st[i].addr, 1, &st[i].old, &st[i].neu, &id) == RT_PATCH_OK) ovp_ids[ovp_n++] = id;
     }
-    if (n) fprintf(stderr, "[vrhost] overlay: %d de %d sitios de visibilidad sin recorte\n", ovp_n, n);
+    if (dc_active) {   /* constructor de la copia: prólogo `addiu sp,sp,-48; sw s5,36(sp)` por delante de la caja por pieza */
+        for (int i = 0; i < n && !ovp_bld; i++) {
+            if (st[i].kind != 2) continue;
+            for (uint32_t a = st[i].addr; a > st[i].addr - 0x100u; a -= 4) {
+                uint32_t w0, w1; memcpy(&w0, emu_ram + (a & 0x1FFFFFu), 4); memcpy(&w1, emu_ram + ((a + 4) & 0x1FFFFFu), 4);
+                if (w0 == 0x27BDFFD0u && w1 == 0xAFB50024u) {
+                    const RtPatchGuard g = {40u, rt_code_hash(a, 40u)};
+                    if (rt_patch_fn(a, ovp_bld_hook, &g) == RT_PATCH_OK) ovp_bld = a;
+                    break;
+                }
+            }
+        }
+    }
+    if (n) fprintf(stderr, "[vrhost] overlay: %d de %d sitios de visibilidad sin recorte%s\n", ovp_n, n, ovp_bld ? " + gancho de dibujo del constructor" : "");
 }
 #endif
 
@@ -551,16 +576,17 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     }
     vrgame_set_enabled(0, 0);
 #ifdef MV_NOGEN
-    ovp_release(); ovp_done = 1; ovp_stable = 0;
+    ovp_release(); ovp_done = 1; ovp_stable = 0; dc_active = 0;
     hle_bind_declare_fixed("vrradar_draw");
     hle_bind_declare_fixed("vrbody_sort");
     for (unsigned i = 0; i < NFIRE; i++) hle_bind_declare_fixed(FIRE_SITES[i].name);
     for (unsigned i = 0; i < NSITES; i++) hle_bind_declare_fixed(SITES[i].name);
     VrCamPatch p;
     vrcam_patch_default(&p);
-    {   /* MV_NOCULL=máscara hex (pruebas A/B): bits 0-5 sitios de NOCULL, bit 6 HLE de paquetes, bit 7 overlays; defecto 0x00 (todo apagado: versión segura; ver bitácora §55) */
-        const char *e = getenv("MV_NOCULL"); unsigned m = e ? (unsigned)strtoul(e, NULL, 16) : 0x00u;
+    {   /* MV_NOCULL=máscara hex (pruebas A/B): bits 0-5 sitios de NOCULL, bit 6 HLE de paquetes, bit 7 overlays; defecto 0xFF (todo activo; bits 0-1 con el estado de dibujo separado del de lógica, ver bitácora «Cero huecos») */
+        const char *e = getenv("MV_NOCULL"); unsigned m = e ? (unsigned)strtoul(e, NULL, 16) : 0xFFu;
         p.no_cull = (int)(m & VRCAM_NOCULL_ALL); vrcam_pack_enable((m >> 6) & 1); ovp_on = (int)((m >> 7) & 1); ovp_map = (int)(m & 1);
+        dc_want = (int)(m & 3);   /* bits 0-1: estado de dibujo separado del de lógica (obj-map / obj-box), ver vr_camera.h */
     }
     int n = vrcam_patch_ram(ram, &p);
     if (n < 0) {
@@ -616,6 +642,14 @@ static void on_bound(void) {
         }
     }
     vrgame_set_enabled(body_ok, fire_ok);
+    {   /* estado de recorte de dibujo separado del de lógica: necesita el gancho del constructor Y la restauración al final del dibujado (body_ok) */
+        vra_rt_set_pre_builder(vrcam_dc_builder_pre);
+        vrcam_drawclip_reset();
+        int ok = dc_want && body_ok && vra_rt_install_builder() == 0;
+        vrcam_drawclip_enable(ok ? dc_want : 0);
+        dc_active = ok;
+        if (dc_want && !ok) fprintf(stderr, "[vrhost] sin estado de dibujo separado: los objetos fuera de mapa/caja se recortan como en el original\n");
+    }
     if (vrai_on_bound() < 0) fprintf(stderr, "[vrhost] IA de enemigos no instalada\n");
 }
 

@@ -326,7 +326,12 @@ static void test_patch(void) {
     uint32_t base, size, base2, size2;
     memset(a, 0, sizeof a); memset(b, 0, sizeof b);
     CHECK(load_exe(eo, a, &base, &size) && load_exe(ep, b, &base2, &size2) && base == base2 && size == size2);
-    CHECK(vrcam_patch_ram(a, &p) == 51);       /* 44 inmediatos de recorte + subdivisión + 6 de sin-recorte; "punto visible" intacto */
+    CHECK(vrcam_patch_ram(a, &p) == 49);       /* 44 inmediatos de recorte + subdivisión + 4 de sin-recorte de solo dibujo (obj-map y obj-box van por vrcam_drawclip_*); "punto visible" intacto */
+    /* patch_exe.py (estático) también parchea obj-map y obj-box; el runtime los deja intactos (van por vrcam_drawclip_*): se igualan esas dos palabras y se exige lo demás idéntico */
+    for (uint32_t site = 0x80018D00u; site <= 0x80018D0Cu; site += 12) {
+        CHECK(memcmp(a + (site & 0x1FFFFF), b + (site & 0x1FFFFF), 4) != 0);
+        memcpy(a + (site & 0x1FFFFF), b + (site & 0x1FFFFF), 4);
+    }
     CHECK(memcmp(a + (base & 0x1FFFFF), b + (base & 0x1FFFFF), size) == 0);   /* coincide byte a byte con patch_exe.py */
     /* "punto visible" y subdivisión realmente intactos sin sus opciones */
     { uint32_t w; memcpy(&w, a + (0x8001c440u & 0x1FFFFF), 4); CHECK((int16_t)(w & 0xFFFF) == 192);
@@ -335,7 +340,8 @@ static void test_patch(void) {
     if (ew) {
         static uint8_t cw[BRIDGE_RAM_SIZE]; uint32_t b3, s3; VrCamPatch pw = p; pw.wide_points = 1;
         memset(cw, 0, sizeof cw); memset(b, 0, sizeof b);
-        CHECK(load_exe(eo, cw, &b3, &s3) && load_exe(ew, b, &base2, &size2) && vrcam_patch_ram(cw, &pw) == 63);
+        CHECK(load_exe(eo, cw, &b3, &s3) && load_exe(ew, b, &base2, &size2) && vrcam_patch_ram(cw, &pw) == 61);
+        for (uint32_t site = 0x80018D00u; site <= 0x80018D0Cu; site += 12) memcpy(cw + (site & 0x1FFFFF), b + (site & 0x1FFFFF), 4);
         CHECK(memcmp(cw + (b3 & 0x1FFFFF), b + (base2 & 0x1FFFFF), s3) == 0);
     }
     /* doble aplicación: ya no coincide con lo esperado */
@@ -358,17 +364,17 @@ static void test_patch(void) {
         /* parámetros no finitos o enormes: rechazados / sin desbordar */
         memset(a, 0, sizeof a); load_exe(eo, a, &base, &size);
         VrCamPatch pn = p; pn.hfov_deg = NAN; CHECK(vrcam_patch_ram(a, &pn) == -1);
-        pn = p; pn.vfov_deg = 180; pn.engine_h = 2000000000; CHECK(vrcam_patch_ram(a, &pn) == 51);   /* caja limitada a 1020 */
+        pn = p; pn.vfov_deg = 180; pn.engine_h = 2000000000; CHECK(vrcam_patch_ram(a, &pn) == 49);   /* caja limitada a 1020 */
         { uint32_t w2; memcpy(&w2, a + (0x80018b54u & 0x1FFFFF), 4); CHECK((int16_t)(w2 & 0xFFFF) == 1021); }
     }
     memset(a, 0, sizeof a); load_exe(eo, a, &base, &size);
     /* sin subdivisión y con otra caja */
     memset(a, 0, sizeof a); load_exe(eo, a, &base, &size);
     p.no_divide = 0; p.engine_h = 320; p.hfov_deg = 110; p.vfov_deg = 90;
-    CHECK(vrcam_patch_ram(a, &p) == 50);   /* 44 inmediatos + 6 sitios sin recorte */
+    CHECK(vrcam_patch_ram(a, &p) == 48);   /* 44 inmediatos + 4 sitios sin recorte de solo dibujo */
     memset(a, 0, sizeof a); load_exe(eo, a, &base, &size);
     p.no_cull = 0; CHECK(vrcam_patch_ram(a, &p) == 44); p.no_cull = VRCAM_NOCULL_ALL;
-    memset(a, 0, sizeof a); load_exe(eo, a, &base, &size); CHECK(vrcam_patch_ram(a, &p) == 50);
+    memset(a, 0, sizeof a); load_exe(eo, a, &base, &size); CHECK(vrcam_patch_ram(a, &p) == 48);
     CHECK(vrcam_patch_ram(a, &p) == -1);
     p.hfov_deg = 10; memset(a, 0, sizeof a); load_exe(eo, a, &base, &size); CHECK(vrcam_patch_ram(a, &p) == -1);   /* parámetros fuera de rango */
 }
@@ -493,8 +499,52 @@ static void test_scan_overlay(void) {
     #undef W32
 }
 
+
+/* Estado de recorte de dibujo separado del de lógica: el constructor ve «dentro» (2) y el campo +0x32 que lee la IA vuelve a su valor al restaurar. */
+static void test_drawclip(void) {
+    static uint8_t m[BRIDGE_RAM_SIZE];
+    memset(m, 0, sizeof m);
+    #define MW32(a, v) do { uint32_t w_ = (v); memcpy(m + ((a) & 0x1FFFFFu), &w_, 4); } while (0)
+    #define MW16(a, v) do { uint16_t w_ = (uint16_t)(v); memcpy(m + ((a) & 0x1FFFFFu), &w_, 2); } while (0)
+    #define MR16(a) ({ int16_t w_; memcpy(&w_, m + ((a) & 0x1FFFFFu), 2); w_; })
+    const uint32_t O1 = 0x80130000u, O2 = 0x80130100u, O3 = 0x80130200u, O4 = 0x80130300u, CUR = 0x800ACAF8u;
+    MW32(CUR, 0x0004u);                                   /* mapa actual: bit 2 */
+    MW32(O1 + 0x28, 0x20); MW16(O1 + 0x2C, 0x0001); MW16(O1 + 0x32, 0);   /* fuera de mapa, con caja: oculto por mapa */
+    MW32(O2 + 0x28, 0x20); MW16(O2 + 0x2C, 0x0004); MW16(O2 + 0x32, 1);   /* en mapa, caja parcial: por caja */
+    MW32(O3 + 0x28, 0x80); MW16(O3 + 0x2C, 0x0001); MW16(O3 + 0x32, 0);   /* invisible por decisión del juego: se queda oculto */
+    MW32(O4 + 0x28, 0x20); MW16(O4 + 0x2C, 0x0004); MW16(O4 + 0x32, 2);   /* ya dentro: no se toca */
+    vrcam_drawclip_reset(); vrcam_drawclip_enable(0);
+    CHECK(vrcam_drawclip_pre(m, O1, 0) == 0 && MR16(O1 + 0x32) == 0);   /* apagado: nada cambia */
+    vrcam_drawclip_enable(3);
+    CHECK(vrcam_drawclip_pre(m, O1, 0) == 2 && MR16(O1 + 0x32) == 2);
+    CHECK(vrcam_drawclip_pre(m, O2, 1) == 2 && MR16(O2 + 0x32) == 2);
+    CHECK(vrcam_drawclip_pre(m, O3, 0) == 0 && MR16(O3 + 0x32) == 0);
+    CHECK(vrcam_drawclip_pre(m, O4, 2) == 2 && MR16(O4 + 0x32) == 2);
+    CHECK(vrcam_drawclip_pre(m, 0x00130000u, 0) == 0);                  /* puntero no KSEG0: se ignora */
+    vrcam_drawclip_restore(m);
+    CHECK(MR16(O1 + 0x32) == 0 && MR16(O2 + 0x32) == 1 && MR16(O3 + 0x32) == 0 && MR16(O4 + 0x32) == 2);   /* lógica intacta */
+    VrCamDcStats st = vrcam_drawclip_stats();
+    CHECK(st.by_map == 1 && st.by_box == 1 && st.restored == 2 && st.changed == 0);
+    /* por causa: solo mapa (bit 0) o solo caja (bit 1) */
+    MW16(O1 + 0x32, 0); MW16(O2 + 0x32, 1);
+    vrcam_drawclip_reset(); vrcam_drawclip_enable(1);
+    CHECK(vrcam_drawclip_pre(m, O1, 0) == 2 && vrcam_drawclip_pre(m, O2, 1) == 1);
+    vrcam_drawclip_restore(m);
+    vrcam_drawclip_reset(); vrcam_drawclip_enable(2);
+    CHECK(vrcam_drawclip_pre(m, O1, 0) == 0 && vrcam_drawclip_pre(m, O2, 1) == 2);
+    /* si el campo cambió entre el gancho y la restauración (otro escritor) no se pisa */
+    MW16(O2 + 0x32, 0);
+    vrcam_drawclip_restore(m);
+    CHECK(MR16(O2 + 0x32) == 0 && vrcam_drawclip_stats().changed == 1);
+    vrcam_drawclip_enable(0); vrcam_drawclip_reset();
+    #undef MW32
+    #undef MW16
+    #undef MR16
+}
+
 int main(void) {
     test_angles();
+    test_drawclip();
     test_patch();
     test_scan_overlay();
     test_hide_head();

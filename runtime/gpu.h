@@ -225,3 +225,8 @@ int gte_hp_lookup(int sx, int sy, GpuHpInfo *out);   /* solo vértices normales 
 int gte_hp_resolve(int n, const int *sx, const int *sy, GpuHpInfo *out, uint8_t *ok); /* ver gte.c; devuelve nº resueltos */
 void gte_hp_eval(int on, int ex, int ey); /* autoevaluación de la heurística (solo medición; ver gte.c) */
 void gte_hp_stats(GteHpStats *s);
+/* Asociación exacta por polígono (ver gte.c): la etapa de polígono del motor registra los vértices de cada polígono. */
+uint32_t gte_hp_align(const uint8_t *scr, int nslots);
+int gte_hp_poly_reg(int n, const int *sx, const int *sy, const uint32_t *logid);
+int gte_hp_log_get(uint32_t id, GpuHpInfo *out);   /* vértice exacto del log por id (0 si caducó) */
+void gte_hp_exact_stats(uint32_t *reg, uint32_t *found, uint32_t *miss, uint32_t *afail);

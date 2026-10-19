@@ -2,6 +2,7 @@
  * La GTE en float para VR irá aparte; esta es la fuente de verdad del comportamiento original.
  * Semántica según la documentación pública del hardware (MAC 44 bits, saturaciones, flags, UNR). */
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include "cpu.h"
 #include "gpu.h"   /* GpuHpInfo (solo el tipo; la GTE no depende del rasterizador) */
@@ -193,6 +194,151 @@ static int hp_on, hp_dirty, hp_ev_on, hp_ev_x = 100, hp_ev_y = 80;
 static uint32_t hp_gen, hp_seq;
 static GteHpStats hp_st;
 
+/* ====== Asociación EXACTA por polígono (registro de la etapa de polígono del motor) ======
+ * La asociación por secuencia (arriba) es una heurística: los vértices saturados comparten SXY y los polígonos grandes que cruzan el borde de la GTE quedan
+ * AMBIG. El motor, en cambio, SÍ sabe qué vértice usa cada polígono: la etapa de polígono (vr/camera, hle_vrcam_pack) recibe, por polígono, las ranuras
+ * del scratchpad donde la transformación dejó el SXY/SZ de sus vértices. Aquí:
+ *   - un LOG cronológico de TODOS los vértices que produjo RTPS/RTPT (normales y con flag), con SXY y SZ de 16 bits (id creciente);
+ *   - gte_hp_align: localiza en el log los vértices de la malla recién transformada (la ranura s del scratchpad es el vértice base+s: RTPT escribe sus
+ *     tres SXY/SZ en ranuras consecutivas) comparando SXY y SZ del scratchpad con el log;
+ *   - gte_hp_poly_reg: registra el polígono (los vértices EXACTOS, en cualquier orden) con una clave conmutativa de sus SXY;
+ *   - gte_hp_resolve consulta primero ese registro: si el polígono (tri/quad por sus SXY) está, devuelve las posiciones de vista exactas sin AMBIG.
+ * Caducidad por generación igual que el resto (la generación actual y la anterior). Con el registro vacío o sin coincidencia, nada cambia. */
+#define HPL_N 65536u
+typedef struct { int16_t sx, sy; uint16_t sz; GpuHpInfo i; } HpLog;
+static HpLog *hp_log;
+static uint32_t hp_log_n;
+#define HPP_N 16384u               /* polígonos registrados vivos (anillo) */
+#define HPK_N (1u << 17)           /* claves (un cuádruple y hasta cuatro triples por polígono) */
+typedef struct { int16_t sx[4], sy[4]; GpuHpInfo v[4]; uint8_t nv, used; uint32_t gen, ver; } HpPoly;
+typedef struct { uint64_t key; uint32_t poly, ver; } HpKey;
+static HpPoly *hp_poly;
+static HpKey *hp_keys;
+static uint32_t hp_poly_n;
+typedef struct { uint32_t reg, found, miss, align_fail, align_ok; } HpExactStats;
+static HpExactStats hp_ex;
+void gte_hp_exact_stats(uint32_t *reg, uint32_t *found, uint32_t *miss, uint32_t *afail) { *reg = hp_ex.reg; *found = hp_ex.found; *miss = hp_ex.miss; *afail = hp_ex.align_fail; }
+static inline uint32_t hpx_mix(int sx, int sy) {
+    uint32_t x = ((uint32_t)sx & 0xFFFF) * 0x9E3779B1u ^ ((uint32_t)sy & 0xFFFF) * 0x85EBCA6Bu;
+    x ^= x >> 15; x *= 0x2C1B3C6Du; x ^= x >> 12; x *= 0x297A2D39u; x ^= x >> 15;
+    return x;
+}
+static uint64_t hpx_key(int n, const int *sx, const int *sy) {
+    uint64_t k = 0x9E3779B97F4A7C15ull * (uint64_t)n;
+    for (int i = 0; i < n; i++) { uint64_t m = hpx_mix(sx[i], sy[i]); k += m * 0xD6E8FEB86659FD93ull + (m << 17); }
+    return k | 1;
+}
+static void hpx_alloc(void) {
+    if (!hp_log) hp_log = calloc(HPL_N, sizeof *hp_log);
+    if (!hp_poly) hp_poly = calloc(HPP_N, sizeof *hp_poly);
+    if (!hp_keys) hp_keys = calloc(HPK_N, sizeof *hp_keys);
+}
+static inline void hpx_log(int sx, int sy, uint32_t sz, const GpuHpInfo *in) {
+    if (!hp_log) { hpx_alloc(); if (!hp_log) return; }
+    HpLog *e = &hp_log[(++hp_log_n) % HPL_N];
+    e->sx = (int16_t)sx; e->sy = (int16_t)sy; e->sz = (uint16_t)sz; e->i = *in;
+}
+/* Base (id del log de la ranura 0) de la malla recién transformada; 0 si no se encuentra. scr = scratchpad de 1 KB (SXY en [4s], SZ en [0x200+4s]). */
+uint32_t gte_hp_align(const uint8_t *scr, int nslots) {
+    if (!hp_log || hp_log_n < 3) return 0;
+    if (nslots > 128) nslots = 128;
+    uint32_t best = 0; int bs = 0;
+    uint32_t lo = hp_log_n > 4096 ? hp_log_n - 4096 : 1;
+    for (uint32_t b = hp_log_n; b >= lo && b >= 1; b--) {
+        int sc = 0, first3 = 1;
+        for (int s = 0; s < nslots; s++) {
+            uint32_t id = b + (uint32_t)s;
+            if (id > hp_log_n) break;
+            const HpLog *e = &hp_log[id % HPL_N];
+            int16_t sx = (int16_t)(scr[4 * s] | scr[4 * s + 1] << 8), sy = (int16_t)(scr[4 * s + 2] | scr[4 * s + 3] << 8);
+            uint16_t sz = (uint16_t)(scr[0x200 + 4 * s] | scr[0x200 + 4 * s + 1] << 8);
+            if (e->sx == sx && e->sy == sy && e->sz == sz) sc++;
+            else if (s < 3) { first3 = 0; break; }
+        }
+        if (first3 && sc > bs) { bs = sc; best = b; if (sc >= nslots) break; }
+        if (b == 1) break;
+    }
+    if (bs < 3) { hp_ex.align_fail++; return 0; }
+    hp_ex.align_ok++;
+    return best;
+}
+/* Vértice del log por id (el que devolvió gte_hp_align + ranura); 0 si el id ya caducó. Solo lectura. */
+int gte_hp_log_get(uint32_t id, GpuHpInfo *out) {
+    if (!hp_log || !id || id > hp_log_n || hp_log_n - id >= HPL_N) return 0;
+    *out = hp_log[id % HPL_N].i;
+    return 1;
+}
+static void hpx_put(uint64_t key, uint32_t poly) {
+    uint32_t h = (uint32_t)(key >> 20) & (HPK_N - 1);
+    for (int step = 0; step < 16; step++, h = (h + 1) & (HPK_N - 1)) {
+        HpKey *k = &hp_keys[h];
+        int live = k->key && k->poly < HPP_N && hp_poly[k->poly].ver == k->ver && (uint32_t)(hp_gen - hp_poly[k->poly].gen) <= 1u;
+        if (!live) { k->key = key; k->poly = poly; k->ver = hp_poly[poly].ver; return; }
+    }
+    /* cadena llena: sobrescribe la primera (se pierde un polígono viejo) */
+    HpKey *k = &hp_keys[(uint32_t)(key >> 20) & (HPK_N - 1)];
+    k->key = key; k->poly = poly; k->ver = hp_poly[poly].ver;
+}
+/* Registra un polígono de n (3 o 4) vértices con sus SXY y los ids del log de sus vértices exactos. */
+int gte_hp_poly_reg(int n, const int *sx, const int *sy, const uint32_t *logid) {
+    if (!hp_on || !hp_log || !hp_poly || !hp_keys || n < 3 || n > 4) return 0;
+    HpPoly *p = &hp_poly[hp_poly_n % HPP_N];
+    uint32_t pi = hp_poly_n % HPP_N;
+    hp_poly_n++;
+    for (int i = 0; i < n; i++) {
+        uint32_t id = logid[i];
+        if (!id || id > hp_log_n || hp_log_n - id >= HPL_N) return 0;
+        const HpLog *e = &hp_log[id % HPL_N];
+        if (e->sx != sx[i] || e->sy != sy[i]) return 0;
+        p->sx[i] = (int16_t)sx[i]; p->sy[i] = (int16_t)sy[i]; p->v[i] = e->i;
+    }
+    p->nv = (uint8_t)n; p->used = 0; p->gen = hp_gen; p->ver++;
+    if (!p->ver) p->ver = 1;
+    hp_ex.reg++;
+    hpx_put(hpx_key(n, sx, sy), pi);
+    if (n == 4) {
+        static const int T[4][3] = {{0, 1, 2}, {0, 1, 3}, {0, 2, 3}, {1, 2, 3}};
+        for (int t = 0; t < 4; t++) {
+            int tx[3], ty[3];
+            for (int j = 0; j < 3; j++) { tx[j] = sx[T[t][j]]; ty[j] = sy[T[t][j]]; }
+            hpx_put(hpx_key(3, tx, ty), pi);
+        }
+    }
+    return 1;
+}
+/* Consulta: n vértices (3 o 4) con SXY crudos; rellena out/ok. Devuelve 1 si el polígono está registrado. Un cuádruple se busca como tal; un triple, como triple
+ * (de un cuadrilátero registrado se toman tres de sus vértices). */
+static int hpx_find(int n, const int *sx, const int *sy, GpuHpInfo *out, uint8_t *ok) {
+    if (!hp_keys || !hp_poly || n < 3 || n > 4) return 0;
+    uint64_t key = hpx_key(n, sx, sy);
+    uint32_t h = (uint32_t)(key >> 20) & (HPK_N - 1);
+    HpPoly *best = NULL;
+    for (int step = 0; step < 16; step++, h = (h + 1) & (HPK_N - 1)) {
+        const HpKey *k = &hp_keys[h];
+        if (!k->key) break;
+        if (k->key != key || k->poly >= HPP_N) continue;
+        HpPoly *p = &hp_poly[k->poly];
+        if (p->ver != k->ver || (uint32_t)(hp_gen - p->gen) > 1u) continue;
+        /* verificación del multiconjunto de SXY (la clave es un hash) */
+        int ok_set = 1, u[4] = {0, 0, 0, 0};
+        for (int i = 0; i < n && ok_set; i++) {
+            int f = 0;
+            for (int j = 0; j < p->nv && !f; j++) if (!u[j] && p->sx[j] == sx[i] && p->sy[j] == sy[i]) { u[j] = 1; f = 1; }
+            if (!f) ok_set = 0;
+        }
+        if (!ok_set) continue;
+        if (!best || (!p->used && best->used)) best = p;
+        if (!p->used) break;
+    }
+    if (!best) return 0;
+    best->used = 1;
+    int u[4] = {0, 0, 0, 0};
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < best->nv; j++) if (!u[j] && best->sx[j] == sx[i] && best->sy[j] == sy[i]) { u[j] = 1; out[i] = best->v[j]; ok[i] = 1; break; }
+    }
+    return 1;
+}
+
 #define HP_NB 87
 static uint32_t hp_pair[3][4][4][HP_NB]; /* clase: 0 triángulo, 1 quad, 2 línea (no se mezclan: otro patrón de escritura) */
 static void hp_clear(void) {
@@ -200,6 +346,9 @@ static void hp_clear(void) {
     if (hp_dirty) {
         memset(hp_tab, 0, sizeof hp_tab);
         memset(&hp_ring, 0, sizeof hp_ring); memset(&hp_evr, 0, sizeof hp_evr);
+        if (hp_poly) memset(hp_poly, 0, HPP_N * sizeof *hp_poly);
+        if (hp_keys) memset(hp_keys, 0, HPK_N * sizeof *hp_keys);
+        hp_log_n = 0; hp_poly_n = 0;
         hp_dirty = 0;
     }
     hp_gen = hp_seq = 0;
@@ -423,6 +572,11 @@ int gte_hp_resolve(int n, const int *sx, const int *sy, GpuHpInfo *out, uint8_t 
     if (n > 4) n = 4;
     if (n <= 0) return 0;
     hp_st.res_prims++;
+    if (n >= 3) {
+        for (int i = 0; i < n; i++) ok[i] = 0;
+        if (hpx_find(n, sx, sy, out, ok)) { int all = 1; for (int i = 0; i < n; i++) all &= ok[i]; if (all) { hp_ex.found++; hp_st.lookups += (uint32_t)n; hp_st.hits += (uint32_t)n; return n; } }
+        hp_ex.miss++;
+    }
     for (int i = 0; i < n; i++) cnt[i] = hp_gather(sx[i], sy[i], c[i], HP_MAXC);
     uint8_t low[4];
     int unamb = hp_select(n, c, cnt, idx, low);
@@ -477,6 +631,7 @@ static void hp_vertex(int v, int sf, int sx, int sy, int sat) {
     in.vx = (float)P[0]; in.vy = (float)P[1]; in.vz = (float)P[2];
     in.h = (float)h; in.ofx = (float)((double)OFX / 65536.0); in.ofy = (float)((double)OFY / 65536.0);
     in.flags = (uint8_t)fl; in.seq = hp_seq++;
+    hpx_log(sx, sy, (uint32_t)sz, &in);
     if (fl) { hp_ring_push(&hp_ring, sx, sy, &in); hp_st.flagged++; hp_st.stored++; }
     else {
         hp_store(sx, sy, (uint32_t)sz, &in);

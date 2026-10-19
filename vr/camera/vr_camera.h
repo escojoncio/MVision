@@ -165,11 +165,17 @@ typedef struct VrCamPatch {
                               * (los sitios de la visibilidad para DIBUJAR; la de lógica -la prueba de punto visible, campo +0x32 leído por la IA- no cambia) */
 } VrCamPatch;
 #define VRCAM_NOCULL_ALL 0x3F
+/* Los bits 0 (obj-map) y 1 (obj-box) NO se escriben en palabras de código: cambiarían el estado de recorte +0x32 que lee la IA. Los resuelve la
+ * separación estado-de-dibujo / estado-de-lógica (vrcam_drawclip_*, abajo). Máscara de los sitios que SÍ son palabras (solo dibujo). */
+#define VRCAM_NOCULL_WORDS 0x3Cu
 void vrcam_patch_default(VrCamPatch *p);                   /* 160, 140, 120, no_divide = 1, wide_points = 0, no_cull = 1 */
 int vrcam_patch_ram(uint8_t *ram, const VrCamPatch *p);
 
 /* HLE de la etapa de polígono (re-emisión de paquetes poco fiables, ver bitácora): contadores y interruptor (0 = solo el original). */
 void vrcam_pack_stats(uint32_t *seen, uint32_t *fixed);
+void vrcam_pack_stats3(uint32_t *bad_cull, uint32_t *rescued, uint32_t *agree, uint32_t *disagree);   /* descartados por cara trasera exacta; frontales exactos recuperados; validación del signo exacto frente al del motor */
+void vrcam_pack_tab(uint32_t out[8]);   /* diagnóstico: [orientación exacta frontal][emitido][dos caras], paquetes fiables con los tres vértices delante */
+void vrcam_pack_stats2(uint32_t *indirect, uint32_t *indirect_dropped, uint32_t *direct_dropped, uint32_t *registered);
 void vrcam_pack_enable(int on);
 
 /* Sin recorte en las overlays de zona: algunas llevan su propia copia de la visibilidad de objetos y por pieza. vrcam_scan_overlay busca en
@@ -177,6 +183,22 @@ void vrcam_pack_enable(int on);
  * y la nueva (kind 0 = map, 1 = box, 2 = part). No escribe: aplicarlos con un parche validado (rt_patch_code) para poder deshacerlos. */
 typedef struct VrCamOvSite { uint32_t addr, old, neu; int kind; } VrCamOvSite;
 int vrcam_scan_overlay(const uint8_t *ram, uint32_t lo, uint32_t hi, VrCamOvSite *out, int max);
+
+/* ---- Estado de recorte de DIBUJO separado del de LÓGICA (bitácora, sección «Cero huecos») -------------------------------------------------------
+ * La visibilidad de objetos del motor guarda su resultado (0 oculto, 1 parcial, 2 dentro) en el campo s16 +0x32 del bloque de objeto y lo usa para
+ * construir los paquetes de dibujo (función «constructor», r4 = bloque, r7 = modo) y en las etapas siguientes del dibujado; pero ese mismo campo
+ * lo lee también la lógica (IA de soldados y sensores, objetos sueltos, etc.). Forzarlo a «dentro» con parches de código cambiaba la IA.
+ * Aquí el original corre intacto (el campo conserva su valor de lógica L); justo antes del constructor se sustituye por el valor de dibujo D = 2
+ * (salvo objetos marcados invisibles por el juego) y se apunta (bloque, L) en una lista; al terminar las etapas del dibujado del canal
+ * (vrcam_drawclip_restore, desde la HLE del final del dibujado) se devuelve cada campo a L. Entre la primera escritura y la restauración solo
+ * corren las etapas de dibujo, nunca la lógica, así que la IA ve exactamente lo que vería sin esto.
+ * Interruptores por causa: bit 0 = objetos fuera del mapa actual, bit 1 = objetos con caja fuera de pantalla (parcial u oculto). */
+typedef struct VrCamDcStats { uint32_t calls, by_map, by_box, overflow, restored, changed; } VrCamDcStats;
+void vrcam_drawclip_enable(int mask);
+uint32_t vrcam_drawclip_pre(uint8_t *ram, uint32_t obj, uint32_t mode);   /* devuelve el modo con el que debe correr el constructor */
+void vrcam_drawclip_restore(uint8_t *ram);
+VrCamDcStats vrcam_drawclip_stats(void);
+void vrcam_drawclip_reset(void);
 
 /* Matemática pura (sin estado) */
 /* Yaw (grados, antihorario visto desde arriba, + = izquierda) y elevación (grados, + = arriba) de una pose de cabeza. */

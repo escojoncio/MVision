@@ -503,6 +503,37 @@ int vrcam_patch_ram(uint8_t *ram, const VrCamPatch *pp) {
         n++;
     }
     if (pp->no_divide) { uint32_t w = DIVIDE_NEW; memcpy(ram + (DIVIDE_SITE & RAM_MASK), &w, 4); n++; }
-    for (int i = 0; i < NOCULL_N; i++) if ((pp->no_cull >> i) & 1) { uint32_t w = NOCULL_SITES[i].neu; memcpy(ram + (NOCULL_SITES[i].addr & RAM_MASK), &w, 4); n++; }
+    for (int i = 0; i < NOCULL_N; i++) if (((pp->no_cull & VRCAM_NOCULL_WORDS) >> i) & 1) { uint32_t w = NOCULL_SITES[i].neu; memcpy(ram + (NOCULL_SITES[i].addr & RAM_MASK), &w, 4); n++; }
     return n;
+}
+
+/* ---- Estado de recorte de dibujo separado del de lógica (ver vr_camera.h) ---- */
+#define DC_MAX 8192
+#define DC_CURMAP 0x800ACAF8u   /* mapa(s) actual(es): el motor compara con la máscara +0x2C del bloque de objeto */
+static struct { uint32_t obj; int16_t logic; } dc_list[DC_MAX];
+static int dc_n, dc_mask;
+static VrCamDcStats dc_st;
+void vrcam_drawclip_enable(int mask) { dc_mask = mask & 3; }
+void vrcam_drawclip_reset(void) { dc_n = 0; memset(&dc_st, 0, sizeof dc_st); }
+VrCamDcStats vrcam_drawclip_stats(void) { return dc_st; }
+uint32_t vrcam_drawclip_pre(uint8_t *ram, uint32_t obj, uint32_t mode) {
+    dc_st.calls++;
+    if (!dc_mask || mode > 1 || !ram || !ptr_ok(obj, 0x34)) return mode;
+    uint32_t flag = rd_u32(ram, obj + 0x28);
+    if (flag & 0x80u) return mode;                                   /* invisible por decisión del juego: se queda oculto */
+    uint32_t gm = (uint16_t)rd_s16(ram, obj + 0x2C), cur = rd_u32(ram, DC_CURMAP);
+    int by_map = gm != 0 && (gm & cur) == 0;
+    if (by_map ? !(dc_mask & 1) : !(dc_mask & 2)) return mode;
+    if (dc_n >= DC_MAX) { dc_st.overflow++; return mode; }
+    dc_list[dc_n].obj = obj; dc_list[dc_n].logic = rd_s16(ram, obj + 0x32); dc_n++;
+    wr_s16(ram, obj + 0x32, 2);
+    if (by_map) dc_st.by_map++; else dc_st.by_box++;
+    return 2;
+}
+void vrcam_drawclip_restore(uint8_t *ram) {
+    for (int i = 0; i < dc_n; i++) {
+        if (rd_s16(ram, dc_list[i].obj + 0x32) == 2) { wr_s16(ram, dc_list[i].obj + 0x32, dc_list[i].logic); dc_st.restored++; }
+        else dc_st.changed++;
+    }
+    dc_n = 0;
 }

@@ -6,8 +6,9 @@
 
 static VrActivity *G;
 static VraRtStats S;
+static int keep_builder;
 
-void vra_rt_attach(VrActivity *a) { G = a; }
+void vra_rt_attach(VrActivity *a) { G = a; keep_builder = 0; }
 VrActivity *vra_rt_instance(void) { return G; }
 VraRtStats vra_rt_stats(void) { return S; }
 
@@ -38,6 +39,8 @@ uint32_t vra_rt_clip_store(Cpu *c, uint32_t objs, uint32_t mode) {
 
 /* Parche de entrada de la función que consume el estado de recorte justo después de calcularlo (a0 = bloque, a3 = clip_state;
  * la guarda en un registro salvado y NO la relee de RAM, por eso hay que cambiar r7 además del campo). */
+static void (*pre_builder)(Cpu *);
+void vra_rt_set_pre_builder(void (*fn)(Cpu *)) { pre_builder = fn; }
 void vra_rt_clip_draw(Cpu *c) {
     uint32_t objs = c->r[4];
     if (G && G->active && c->r[7] == 0) {
@@ -48,13 +51,13 @@ void vra_rt_clip_draw(Cpu *c) {
             c->r[7] = m;
         }
     }
+    if (pre_builder) pre_builder(c);   /* tras la corrección de la IA y antes del original */
     rt_call_orig(c, VRA_EU_CLIP_DRAW);
 }
-int vra_rt_install_fnpatch(void) {
-    const RtPatchGuard g1 = {VRA_EU_POINTCHECK_NW, VRA_EU_POINTCHECK_HASH}, g2 = {VRA_EU_CLIP_DRAW_NW, VRA_EU_CLIP_DRAW_HASH};
-    int r = rt_patch_fn(VRA_EU_POINTCHECK, vra_rt_pointcheck, &g1);
-    if (r) return r;
-    r = rt_patch_fn(VRA_EU_CLIP_DRAW, vra_rt_clip_draw, &g2);
+static int install_builder_only(void) {
+    if (rt_patched(VRA_EU_CLIP_DRAW)) return 0;
+    const RtPatchGuard g2 = {VRA_EU_CLIP_DRAW_NW, VRA_EU_CLIP_DRAW_HASH};
+    int r = rt_patch_fn(VRA_EU_CLIP_DRAW, vra_rt_clip_draw, &g2);
     if (r == RT_PATCH_HASH) {   /* con el parche de recorte de la cámara VR aplicado el código es otro */
         const RtPatchGuard g3 = {VRA_EU_CLIP_DRAW_NW, VRA_EU_CLIP_DRAW_HASH_VRCAM};
         r = rt_patch_fn(VRA_EU_CLIP_DRAW, vra_rt_clip_draw, &g3);
@@ -63,10 +66,18 @@ int vra_rt_install_fnpatch(void) {
             r = rt_patch_fn(VRA_EU_CLIP_DRAW, vra_rt_clip_draw, &g4);
         }
     }
+    return r;
+}
+int vra_rt_install_builder(void) { int r = install_builder_only(); if (!r) keep_builder = 1; return r; }
+int vra_rt_install_fnpatch(void) {
+    const RtPatchGuard g1 = {VRA_EU_POINTCHECK_NW, VRA_EU_POINTCHECK_HASH};
+    int r = rt_patched(VRA_EU_POINTCHECK) ? 0 : rt_patch_fn(VRA_EU_POINTCHECK, vra_rt_pointcheck, &g1);
+    if (r) return r;
+    r = install_builder_only();
     if (r) { rt_unpatch(VRA_EU_POINTCHECK); return r; }
     return 0;
 }
 void vra_rt_uninstall(void) {
     rt_unpatch(VRA_EU_POINTCHECK);
-    rt_unpatch(VRA_EU_CLIP_DRAW);
+    if (!keep_builder) rt_unpatch(VRA_EU_CLIP_DRAW);
 }
