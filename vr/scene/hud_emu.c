@@ -189,3 +189,41 @@ void hud_emu_to_rgb(const HudImg *im, uint8_t *rgb) {
         for (int k = 0; k < 3; k++) rgb[i * 3 + k] = (uint8_t)(o[k] * 255.0f + 0.5f);
     }
 }
+
+/* --- vr_fs_post de vr_scene.metal (mantener sincronizado) --- */
+static float post_ysrc(const VrFilter *f, float yc, float cy_img, float f_eye) {
+    if (f->nrows <= 0 || !(f_eye > 1.0f) || !(f->proj_h > 0.0f)) return yc;
+    float t = (yc - cy_img) / f_eye;
+    float r = f->cy_row + f->proj_h * t;
+    float d = 0.0f;
+    if (r >= 0.0f && r < (float)VR_FILTER_ROWS) {
+        float rr = r - 0.5f, fl = floorf(rr);
+        int i0 = (int)fl, i1 = i0 + 1 < VR_FILTER_ROWS - 1 ? i0 + 1 : VR_FILTER_ROWS - 1;
+        float fr = rr - fl;
+        if (i0 < 0) i0 = 0;
+        float d0 = f->rowcov[i0] ? f->dv[i0] : 0.0f, d1 = f->rowcov[i1] ? f->dv[i1] : 0.0f;
+        d = d0 + (d1 - d0) * fr;
+    }
+    return yc + f_eye * d / f->proj_h;
+}
+void hud_emu_post(const float *src, float *dst, int w, int h, float cy_img, float f_eye, const VrFilter *f) {
+    for (int y = 0; y < h; y++) {
+        float ys = post_ysrc(f, (float)y + 0.5f, cy_img, f_eye);
+        float ty = ys - 0.5f, fy = floorf(ty), wy = ty - fy;      /* bilineal: texel i tiene su centro en i + 0,5 */
+        int y0 = (int)fy, y1 = y0 + 1;
+        y0 = y0 < 0 ? 0 : y0 > h - 1 ? h - 1 : y0; y1 = y1 < 0 ? 0 : y1 > h - 1 ? h - 1 : y1;
+        for (int x = 0; x < w; x++) {
+            for (int k = 0; k < 3; k++) {
+                float a = src[((size_t)y0 * w + x) * 3 + k], b = src[((size_t)y1 * w + x) * 3 + k];
+                float c = a + (b - a) * wy;
+                c = c < 0 ? 0 : c > 1 ? 1 : c;
+                c *= f->tint[k];
+                if (f->cover_abr >= 0) {
+                    float cv = f->cover_rgb[k];
+                    switch (f->cover_abr & 3) { case 0: c = 0.5f * c + 0.5f * cv; break; case 1: c += cv; break; case 2: c -= cv; break; default: c += 0.25f * cv; break; }
+                }
+                dst[((size_t)y * w + x) * 3 + k] = c < 0 ? 0 : c > 1 ? 1 : c;
+            }
+        }
+    }
+}

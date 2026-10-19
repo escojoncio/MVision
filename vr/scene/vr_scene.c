@@ -33,7 +33,7 @@ VrSceneOpts vr_scene_opts_default(void) {
     o.eye_normalize = 1;
     o.eye_from_view_t = 0;
     o.mirror_z = -1;
-    o.screen_filter = 0;   /* el renderer actual no conoce la clase 3 (la pintaría como 3D): activar solo cuando lo implemente */
+    o.screen_filter = 0;   /* opt-in: lo activa el anfitrión (vr/host) porque su renderer implementa la clase 3 (post-proceso por ojo) */
     o.filter_min_cover = 0.9f;
     o.drop_clear = 1;
     return o;
@@ -99,9 +99,47 @@ static uint32_t pack_rgba(uint8_t r, uint8_t g, uint8_t b) { return (uint32_t)r 
 /* Vértice de trabajo 3D: posición de vista + atributos en float (permite interpolar al recortar). */
 typedef struct { float p[3], u, v, r, g, b; } CV;
 
-static void cv_from(CV *c, const GpuOp *op, const GpuVtx *v, int gour) {
+/* Centro del mundo de la lista (ver vr_scene.h, "Desplazamiento de proyección"): moda de (proj_ox+dox, proj_oy+doy) cuantizada a 0,5 px. */
+typedef struct { int ok; float rx, ry, h; uint32_t n; } WorldRef;
+static int poly_all_valid(const GpuOp *op) {
+    int nv = op->nv == 4 ? 4 : 3;
+    for (int k = 0; k < nv; k++) if (!op->v[k].vvalid) return 0;
+    return 1;
+}
+static void list_ref(const GpuDrawList *dl, WorldRef *w) {
+    memset(w, 0, sizeof *w);
+    for (int pass = 0; pass < 3 && !w->ok; pass++) {   /* 0: 3D opacos; 1: cualquier 3D; 2: cualquier polígono con proj_h */
+        struct { int x, y; uint32_t n; float h; } hb[16]; int nh = 0;
+        for (uint32_t i = 0; i < dl->nops; i++) {
+            const GpuOp *o = &dl->ops[i];
+            if (o->type != GPU_OP_POLY || !(o->proj_h > 0) || !isfinite(o->proj_h)) continue;
+            if (pass < 2 && !poly_all_valid(o)) continue;
+            if (pass == 0 && (o->flags & GPU_F_SEMI)) continue;
+            float fx = (o->proj_ox + o->dox) * 2.0f, fy = (o->proj_oy + o->doy) * 2.0f;
+            if (!isfinite(fx) || !isfinite(fy) || fabsf(fx) > 1e6f || fabsf(fy) > 1e6f) continue;
+            int x = (int)lroundf(fx), y = (int)lroundf(fy), k;
+            for (k = 0; k < nh; k++) if (hb[k].x == x && hb[k].y == y) { hb[k].n++; break; }
+            if (k == nh && nh < 16) { hb[nh].x = x; hb[nh].y = y; hb[nh].n = 1; hb[nh].h = o->proj_h; nh++; }
+        }
+        int best = -1;
+        for (int k = 0; k < nh; k++) if (best < 0 || hb[k].n > hb[best].n) best = k;
+        if (best >= 0) { w->ok = 1; w->rx = hb[best].x * 0.5f; w->ry = hb[best].y * 0.5f; w->h = hb[best].h; w->n = hb[best].n; }
+    }
+}
+
+/* Vértice de vista del polígono 3D: (vx,vy,vz) corregido por el desplazamiento de proyección de la primitiva respecto del centro del mundo.
+ * *fixed se pone a 1 si hubo corrección. */
+static void cv_from(CV *c, const GpuOp *op, const GpuVtx *v, int gour, const WorldRef *w, int *fixed) {
     const GpuVtx *k = gour ? v : &op->v[0];
     c->p[0] = v->vx; c->p[1] = v->vy; c->p[2] = v->vz;
+    if (w && w->ok && op->proj_h > 0 && isfinite(op->proj_h)) {
+        float ex = op->proj_ox + (float)op->dox - w->rx, ey = op->proj_oy + (float)op->doy - w->ry;
+        if (ex != 0.0f || ey != 0.0f) {
+            c->p[0] += ex * v->vz / op->proj_h;
+            c->p[1] += ey * v->vz / op->proj_h;
+            if (fixed) *fixed = 1;
+        }
+    }
     c->u = (float)v->u; c->v = (float)v->v;
     c->r = k->r; c->g = k->g; c->b = k->b;
 }
@@ -255,6 +293,13 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     out->filter.tint[0] = out->filter.tint[1] = out->filter.tint[2] = 1.0f; out->filter.cover_abr = -1;
     out->filter.area[0] = dl->disp.x; out->filter.area[1] = dl->disp.y; out->filter.area[2] = dl->disp.w; out->filter.area[3] = dl->disp.h;
     float tint_w = 0.0f;
+    /* centro del mundo y proyección del motor (una vez por lista); VrFilter.proj_h/cx_col/cy_row se rellenan siempre */
+    WorldRef wref;
+    list_ref(dl, &wref);
+    out->stats.n_ref_group = wref.n;
+    out->filter.proj_h = wref.ok ? wref.h : 160.0f;
+    out->filter.cx_col = wref.ok ? wref.rx - (float)dl->disp.x : (dl->disp.w > 0 ? 0.5f * (float)dl->disp.w : 160.0f);
+    out->filter.cy_row = wref.ok ? wref.ry - (float)dl->disp.y : (dl->disp.h > 0 ? 0.5f * (float)dl->disp.h : 128.0f);
 
     /* ---- transformación vista -> mundo VR ---- */
     Aff A;
@@ -354,7 +399,9 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 int clipmode = (uf & GPU_VF_BEHIND) != 0 || o.clip_all_near;
                 if (uf & GPU_VF_BEHIND) out->stats.n_poly_behind++;
                 CV cv[4];
-                for (int k = 0; k < nv; k++) cv_from(&cv[k], op, &op->v[k], gour);
+                int ofs_fixed = 0;
+                for (int k = 0; k < nv; k++) cv_from(&cv[k], op, &op->v[k], gour, &wref, &ofs_fixed);
+                if (ofs_fixed) out->stats.n_ofs_fix++;
                 for (int q = 0; q < ntri; q++) {
                     const CV *g3[3] = {&cv[idx[q][0]], &cv[idx[q][1]], &cv[idx[q][2]]};
                     int nanv = 0, near = 0;

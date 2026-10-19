@@ -25,8 +25,8 @@ $(B):
 	mkdir -p $(B)
 $(B)/libvrscene.a: $(B)/vr_scene.o
 	rm -f $@ && ar rcs $@ $^
-$(B)/test_scene: test_scene.c $(B)/libvrscene.a
-	$(CC) $(CFLAGS) $(INC) $< $(B)/libvrscene.a -lm -o $@
+$(B)/test_scene: test_scene.c hud_emu.c hud_emu.h $(B)/libvrscene.a
+	$(CC) $(CFLAGS) $(INC) test_scene.c hud_emu.c $(B)/libvrscene.a -lm -o $@
 test: $(B)/test_scene
 	$(B)/test_scene
 test-san:

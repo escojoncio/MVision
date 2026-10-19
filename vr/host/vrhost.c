@@ -275,6 +275,13 @@ static void build_one(const GpuDrawList *l, int si) {
     uint64_t t0 = mono_ns();
     VrScene sc;
     int rc = vr_scene_build(hl, &bs, &o, &sc);
+    /* Solo recubrimientos (fundidos/destellos) sin tiras ni copias de pantalla (menús, vídeos, transiciones): el post-proceso solo cubre la vista 3D y no el
+     * panel 2D, así que se reconstruye sin filtro y el fundido va al panel como antes. Con tiras (efecto submarino) se conserva el filtro. */
+    if (rc == 0 && o.screen_filter && sc.filter.active && sc.filter.n_strips == 0 && sc.filter.n_polys == 0) {
+        VrSceneOpts o2 = o;
+        o2.screen_filter = 0;
+        rc = vr_scene_build(hl, &bs, &o2, &sc);
+    }
     double ms = (double)(mono_ns() - t0) * 1e-6;
     memcpy(bs.eye_pos, save_pos, sizeof save_pos);
     memcpy(bs.eye_axes, save_axes, sizeof save_axes);
@@ -457,6 +464,7 @@ static void on_start(void) {
     cap_on = 0;
     gpu_capture_set_mark_hook(vrradar_on_mark);   /* runtime_mark.patch */
     sopts = vr_scene_opts_default();
+    sopts.screen_filter = 1;   /* el renderer de la app aplica la clase 3 (post-proceso por ojo: onda, tinte y recubrimiento; RenderPS1.swift) */
 }
 
 /* Mando que ve el juego (hilo de emulación, cada VBlank, antes de aplicarlo): arma VR, disparo y recarga (vrgame.c). `bs` es el puente

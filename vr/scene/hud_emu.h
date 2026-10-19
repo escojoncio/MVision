@@ -17,3 +17,8 @@ void hud_emu_event(const GpuDrawList *l, const GpuOp *o, uint16_t *vram);
 void hud_emu_run(const VrScene *s, uint16_t *vram, HudImg *im, int rx, int ry);
 /* Convierte a RGB8 sobre negro (rgb no premultiplicado * alfa, como se vería el panel sobre fondo negro). */
 void hud_emu_to_rgb(const HudImg *im, uint8_t *rgb);
+
+/* Emula el post-proceso del filtro de pantalla (vr_vs_post/vr_fs_post de vr_scene.metal, destino NO lineal): src/dst = RGB float 0..1 (w*h*3, filas de arriba abajo,
+ * espacio gamma); cy_img/f_eye = fila del punto principal y focal vertical del ojo en píxeles (de la proyección: h/2*(1+P[2][1]) y h/2*P[1][1]); f = VrFilter de la escena.
+ * Muestreo bilineal con clamp, igual que el sampler del shader. Las filas sin tira (rowcov=0) no se desplazan; el tinte y el recubrimiento se aplican a toda la vista. */
+void hud_emu_post(const float *src, float *dst, int w, int h, float cy_img, float f_eye, const VrFilter *f);

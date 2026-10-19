@@ -62,3 +62,16 @@ typedef struct {
 } VrVramEvent;
 #define VR_MASK_SET 32u
 #define VR_MASK_CHK 64u
+
+/* Pase de post-proceso del filtro de pantalla (efecto submarino: onda vertical por fila + tinte + recubrimiento). Un pase por ojo con la escena
+ * ya resuelta (una sola muestra) como entrada. Modelo (ver "Clase 3" en vr/scene/vr_scene.h): para la fila y del ojo (coordenada continua, centro de
+ * píxel = y+0,5) con tangente t = (y - eye.x)/eye.y:  r = cfg.y + cfg.x*t;  d = dv[r] (interpolado entre centros de fila, 0 fuera de las filas con tira);
+ * fila fuente y_src = y + eye.y*d/cfg.x  (== cy_img + f_eye*(r + d - cy_row)/proj_h);  salida = tinte * muestra(x, y_src), luego el recubrimiento. */
+#define VR_POST_ROWS 512
+#define VR_BUF_POST_DV 1    /* constant float dv[VR_POST_ROWS]: desplazamiento fuente-destino por fila de la imagen original, 0 en las filas sin tira */
+typedef struct {
+    vector_float4 eye[2];   /* por ojo (amplification/array layer): x = fila del punto principal en píxeles, y = focal vertical en píxeles */
+    vector_float4 tint;     /* xyz = multiplicador por canal (espacio gamma original); w sin uso */
+    vector_float4 cover;    /* xyz = color/255 del recubrimiento semitransparente; w = modo de mezcla original (0..3) o -1 si no hay */
+    vector_float4 cfg;      /* x = proj_h del motor, y = cy_row (fila del centro óptico en filas de la imagen original), z = filas con datos (0 = sin onda) */
+} VrPostUniforms;

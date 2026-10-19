@@ -42,6 +42,7 @@
 #include "ref_raster.h"
 #include "vr_camera.h"
 #include "vr_scene.h"
+#include "hud_emu.h"
 
 extern jmp_buf rt_fatal_jmp;
 extern int rt_fatal_armed;
@@ -50,7 +51,7 @@ extern int rt_fatal_armed;
 typedef struct { uint32_t start, dur, every; uint16_t mask; } PadEv;
 static PadEv pad_ev[16];
 static int npad_ev;
-static int f_act = -1, cur_t = -1, boot_shot, g_keep_ambig;
+static int f_act = -1, cur_t = -1, boot_shot, g_keep_ambig, g_fill_partial, g_filled;
 
 /* ---- guion de inmersión (CAM_SCRIPT=fichero): tras activarse la cámara VR, mando y cabeza por tiempo relativo t ----
  *   pad  t0 t1 mascara_hex          botones pulsados en t0 <= t < t1
@@ -66,6 +67,7 @@ static int f_act = -1, cur_t = -1, boot_shot, g_keep_ambig;
  *   card t                          reabre la tarjeta (MV_CARD) desde el fichero: lo que guardó OTRO proceso/hijo se lee del disco, no de la copia en memoria
  *   peek t addr n                   vuelca n bytes de la RAM en el log; cmp t a b n: compara dos zonas de RAM
  *   keep_ambig 0|1                  (prueba) dibuja también los polígonos AMBIG junto a SAT/BEHIND que vr/scene descarta
+ *   fill_partial 0|1                (prueba) quads con 3 vértices de vista limpios (sin SAT/BEHIND/AMBIG/DERIVED) y el 4.º sin posición: lo reconstruye como paralelogramo (v_k = v_a + v_b - v_opuesto, también uv y color)
  *   end  t                          fin
  * Con guion no hay fases fijas; se registra cada 15 frames posición/estado/oxígeno y las primitivas 2D a pantalla completa. */
 typedef struct { int kind, t0, t1; unsigned mask; float a[4]; uint32_t u[7]; char s[160]; } ScrEv;
@@ -82,6 +84,7 @@ static void scr_load(const char *path) {
         if (!strcmp(k, "pad")) { e.kind = 0; sscanf(l, "%*s %d %d %x", &e.t0, &e.t1, &e.mask); }
         else if (!strcmp(k, "head")) { e.kind = 1; sscanf(l, "%*s %d %d %f %f %f %f", &e.t0, &e.t1, &e.a[0], &e.a[1], &e.a[2], &e.a[3]); }
         else if (!strcmp(k, "dump")) { e.kind = 2; sscanf(l, "%*s %d %d %f", &e.t0, &e.t1, &e.a[0]); }
+        else if (!strcmp(k, "fill_partial")) { sscanf(l, "%*s %d", &g_fill_partial); continue; }
         else if (!strcmp(k, "keep_ambig")) { sscanf(l, "%*s %d", &g_keep_ambig); continue; }   /* prueba: dibujar también los AMBIG junto a SAT/BEHIND */
         else if (!strcmp(k, "shot")) { e.kind = 3; sscanf(l, "%*s %d %d %f", &e.t0, &e.t1, &e.a[0]); }
         else if (!strcmp(k, "pokes")) { e.kind = 5; char *q = strstr(l, "pokes"); sscanf(q + 5, "%d %x", &e.t0, &e.u[0]); q = strchr(q + 5, '\''); if (q) { snprintf(e.s, sizeof e.s, "%s", q + 1); char *z = strchr(e.s, '\''); if (z) *z = 0; } }
@@ -266,12 +269,14 @@ static RStat g_tot;   /* acumulado de descartes por causa (se imprime al final) 
 
 /* Re-proyecta una lista con la transformación `d` (NULL = identidad) y el modelo estenopeico (f, cx, cy, w, h). */
 static int g_dbg;
+static int g_dbg_partial;   /* CAM_PARTIAL=1 */
 /* VRAM por época (tramo entre eventos de VRAM de la lista): las texturas se muestrean como estaban al dibujar cada primitiva, no como
  * quedan al final del frame (si no, un sprite cuya textura se sube después del dibujo sale con el contenido del frame siguiente). */
 #define MAXSNAP 48
 static uint16_t *snap[MAXSNAP]; static uint32_t snap_op[MAXSNAP]; static int nsnap, snap_max_ev;
 static RStat render_list(const GpuDrawList *l, const VrCamDelta *d, float f, float cx, float cy, int w, int h, uint8_t *im, uint8_t *pt) {
     g_f = f; g_cx = cx; g_cy = cy; g_w = w; g_h = h; g_img = im; g_painted = pt; g_pix_drawn = 0;
+    g_dbg_partial = getenv("CAM_PARTIAL") != NULL;
     memset(im, 0, (size_t)w * h * 3); memset(pt, 0, (size_t)w * h);
     RStat s = {0};
     int ep = 0;
@@ -284,12 +289,43 @@ static RStat render_list(const GpuDrawList *l, const VrCamDelta *d, float f, flo
         if (g_dbg_semi && (o->flags & GPU_F_SEMI) && o->v[0].vvalid) fprintf(stderr, "  semi3D op%u flags=0x%x abr=%d tp=%d tx=%d ty=%d clut=(%d,%d) nv=%d v0=(%d,%d,vz%.0f) col=%02x%02x%02x\n", i, o->flags, o->abr, o->tp, o->tx, o->ty, o->clx, o->cly, o->nv, o->v[0].x, o->v[0].y, o->v[0].vz, o->v[0].r, o->v[0].g, o->v[0].b);
         int nvalid = 0;
         for (int k = 0; k < o->nv; k++) nvalid += o->v[k].vvalid;
+        GpuOp fillop;
+        if (g_fill_partial && o->nv == 4 && nvalid == 3) {   /* paralelogramo: el vértice sin posición = suma de sus vecinos - el opuesto */
+            int bad = -1, clean = 1;
+            for (int k = 0; k < 4; k++) { if (!o->v[k].vvalid) bad = k; else if (o->v[k].vflags) clean = 0; }
+            if (bad >= 0 && clean) {
+                int c = 3 - bad, a = bad == 0 || bad == 3 ? 1 : 0, b = bad == 0 || bad == 3 ? 2 : 3;
+                fillop = *o;
+                GpuVtx *fv = &fillop.v[bad];
+                const GpuVtx *va = &o->v[a], *vb = &o->v[b], *vc = &o->v[c];
+                fv->vx = va->vx + vb->vx - vc->vx; fv->vy = va->vy + vb->vy - vc->vy; fv->vz = va->vz + vb->vz - vc->vz;
+                int uu = va->u + vb->u - vc->u, vv = va->v + vb->v - vc->v, rr = va->r + vb->r - vc->r, gg = va->g + vb->g - vc->g, bb = va->b + vb->b - vc->b;
+                fv->u = (uint8_t)(uu < 0 ? 0 : uu > 255 ? 255 : uu); fv->v = (uint8_t)(vv < 0 ? 0 : vv > 255 ? 255 : vv);
+                fv->r = (uint8_t)(rr < 0 ? 0 : rr > 255 ? 255 : rr); fv->g = (uint8_t)(gg < 0 ? 0 : gg > 255 ? 255 : gg); fv->b = (uint8_t)(bb < 0 ? 0 : bb > 255 ? 255 : bb);
+                fv->vvalid = 1; fv->vflags = 0;
+                o = &fillop; nvalid = 4; g_filled++;
+            }
+        }
         if (!nvalid) s.nonvr2d++;
         { int nf = 0; for (int k = 0; k < o->nv; k++) nf += o->v[k].fvalid; if (nf == o->nv) s.legacy++; }   /* regla anterior: 3D = todos fvalid */
         if (nvalid != o->nv) {
+            if (nvalid && g_dbg_partial) {   /* CAM_PARTIAL=1: todos los polígonos parcialmente 3D (parte de los vértices con posición de vista) */
+                fprintf(stderr, "  [parcial] op%u seq=%u nv=%d flags=0x%x abr=%d tp=%d tex=(%d,%d) col=%02x%02x%02x ph=%.1f pox=%.1f poy=%.1f dox=%d doy=%d:", i, o->seq, o->nv, o->flags, o->abr, o->tp, o->tx, o->ty, o->v[0].r, o->v[0].g, o->v[0].b, o->proj_h, o->proj_ox, o->proj_oy, o->dox, o->doy);
+                for (int k = 0; k < o->nv; k++) fprintf(stderr, " [xy=(%d,%d) vv%d fv%d vf%d v=(%.0f,%.0f,%.0f)]", o->v[k].x, o->v[k].y, o->v[k].vvalid, o->v[k].fvalid, o->v[k].vflags, o->v[k].vx, o->v[k].vy, o->v[k].vz);
+                fprintf(stderr, "\n");
+            }
             if (nvalid) { s.partial++;
                 if (getenv("CAM_DBG") && g_dbg && (s.partial % 40) == 1) { fprintf(stderr, "  parcial op%u nv=%d dox=%d doy=%d:", i, o->nv, o->dox, o->doy); for (int k = 0; k < o->nv; k++) fprintf(stderr, " (%d,%d vv%d f%d fl%d z%.0f)", o->v[k].x - o->dox, o->v[k].y - o->doy, o->v[k].vvalid, o->v[k].fvalid, o->v[k].vflags, o->v[k].vz); fprintf(stderr, "\n"); } }
             continue; }
+        if (g_dbg_partial) {   /* CAM_PARTIAL=1: polígonos 3D grandes en pantalla (> 5000 px2) con su color y su textura */
+            int x0 = 1 << 20, x1 = -(1 << 20), y0 = 1 << 20, y1 = -(1 << 20);
+            for (int k = 0; k < o->nv; k++) { if (o->v[k].x < x0) x0 = o->v[k].x; if (o->v[k].x > x1) x1 = o->v[k].x; if (o->v[k].y < y0) y0 = o->v[k].y; if (o->v[k].y > y1) y1 = o->v[k].y; }
+            if ((long)(x1 - x0) * (y1 - y0) > 5000) {
+                fprintf(stderr, "  [grande3D] op%u seq=%u nv=%d flags=0x%x abr=%d tp=%d tex=(%d,%d) col=%02x%02x%02x bbox=(%d,%d)-(%d,%d) clip=(%d,%d,%d,%d):", i, o->seq, o->nv, o->flags, o->abr, o->tp, o->tx, o->ty, o->v[0].r, o->v[0].g, o->v[0].b, x0, y0, x1, y1, o->cx1, o->cy1, o->cx2, o->cy2);
+                for (int k = 0; k < o->nv; k++) fprintf(stderr, " [vf%d v=(%.0f,%.0f,%.0f)]", o->v[k].vflags, o->v[k].vx, o->v[k].vy, o->v[k].vz);
+                fprintf(stderr, "\n");
+            }
+        }
         /* mismas reglas que vr/scene (§28): AMBIG junto a SAT/BEHIND -> descartar; SAT/DERIVED se aceptan; BEHIND se recorta */
         unsigned uf = 0;
         for (int k = 0; k < o->nv; k++) uf |= o->v[k].vflags;
@@ -441,7 +477,8 @@ static BridgeState bs;
 /* vr_scene (mismas reglas que el renderer): estadísticas acumuladas por listas fuera/bajo el agua */
 typedef struct { uint32_t lists, polys, poly3d, poly2d, tris3d, drop_partial, drop_near, drop_ambig, drop_behind, poly_behind, clipped, n_filter_rects, n_filter_polys, n_filter_cover, filter_tris, n_clear, lists_filter; } SceneAcc;
 static SceneAcc sacc[2];
-static VrFilter last_filter; static int last_filter_ok;
+static VrFilter last_filter; static int last_filter_ok; static uint32_t last_ofs_fix;
+static uint32_t ref_chk, ref_bad, ofs_chk, ofs_bad;   /* vr_scene (centro del mundo, polígonos corregidos) vs la implementación propia de este programa */
 static void scene_acc(const GpuDrawList *l) {
     VrSceneOpts so = vr_scene_opts_default();
     so.screen_filter = 1;   // la vista previa aplica el filtro de pantalla (clase 3)
@@ -452,7 +489,7 @@ static void scene_acc(const GpuDrawList *l) {
     a->drop_partial += sc.stats.drop_partial; a->drop_near += sc.stats.drop_near; a->drop_ambig += sc.stats.drop_ambig; a->drop_behind += sc.stats.drop_behind;
     a->poly_behind += sc.stats.n_poly_behind; a->clipped += sc.stats.n_clipped; a->n_filter_rects += sc.stats.n_filter_rects; a->n_filter_polys += sc.stats.n_filter_polys;
     a->n_filter_cover += sc.stats.n_filter_cover; a->filter_tris += sc.stats.n_filter_tris; a->n_clear += sc.stats.n_clear; a->lists_filter += sc.filter.active;
-    last_filter = sc.filter; last_filter_ok = 1;
+    last_filter = sc.filter; last_filter_ok = 1; last_ofs_fix = sc.stats.n_ofs_fix;
 }
 /* Aplica el filtro de pantalla (clase 3) a una imagen w x h con proyección estenopeica: eh = distancia focal del motor en px nativos, fp = la de
  * la imagen, cy_row = fila nativa del centro óptico, cy_img = fila de la imagen donde cae ese centro (h/2 en la vista ancha; cy_row si la imagen
@@ -570,6 +607,25 @@ static void process_list(const GpuDrawList *l, int t, int f) {
     for (uint32_t i = 0; i < l->nops; i++) if (l->ops[i].type == GPU_OP_POLY && l->ops[i].proj_h > 0) { eh = l->ops[i].proj_h; break; }
     if (g_ref_ok) { eox = g_refx; eoy = g_refy; }
     else for (uint32_t i = 0; i < l->nops; i++) if (l->ops[i].type == GPU_OP_POLY && l->ops[i].proj_h > 0) { eox = l->ops[i].proj_ox + l->ops[i].dox; eoy = l->ops[i].proj_oy + l->ops[i].doy; break; }
+    if (scr_on && last_filter_ok && eh > 0) {   /* comprobación cruzada con vr_scene: proj_h/centro del filtro y nº de polígonos 3D corregidos */
+        ref_chk++;
+        if (fabsf(last_filter.proj_h - eh) > 0.01f || fabsf(last_filter.cx_col - (eox - l->disp.x)) > 0.01f || fabsf(last_filter.cy_row - (eoy - l->disp.y)) > 0.01f) {
+            ref_bad++;
+            if (ref_bad <= 5) fprintf(stderr, "[ref] DISCREPANCIA t=%d: vr_scene H=%.2f c=(%.2f,%.2f) vs propio H=%.2f c=(%.2f,%.2f)\n", t, last_filter.proj_h, last_filter.cx_col, last_filter.cy_row, eh, eox - l->disp.x, eoy - l->disp.y);
+        }
+        uint32_t nfix = 0;
+        for (uint32_t i = 0; i < l->nops; i++) {
+            const GpuOp *o = &l->ops[i];
+            int nvv = o->nv == 4 ? 4 : 3, okv = 1;
+            if (o->type != GPU_OP_POLY || !(o->proj_h > 0)) continue;
+            for (int k = 0; k < nvv; k++) okv &= o->v[k].vvalid;
+            if (!okv) continue;
+            { unsigned uf = 0; for (int k = 0; k < nvv; k++) uf |= o->v[k].vflags; if ((uf & GPU_VF_AMBIG) && (uf & (GPU_VF_SAT | GPU_VF_BEHIND))) continue; }   /* vr_scene los descarta antes */
+            if (o->proj_ox + o->dox - g_refx != 0.0f || o->proj_oy + o->doy - g_refy != 0.0f) nfix++;
+        }
+        ofs_chk++;
+        if (nfix != last_ofs_fix) { ofs_bad++; if (ofs_bad <= 5) fprintf(stderr, "[ref] polígonos corregidos t=%d: vr_scene %u vs propio %u\n", t, last_ofs_fix, nfix); }
+    }
     VrCamDelta d;
     float head[16]; double tt; head_fn(head, &tt);
     if (novr) { memset(&d, 0, sizeof d); d.A[0] = d.A[4] = d.A[8] = 1; }
@@ -581,6 +637,11 @@ static void process_list(const GpuDrawList *l, int t, int f) {
         if (ow <= 640 && oh <= 512 && eh > 0) {
             render_list(l, &d, eh, eox - l->disp.x, eoy - l->disp.y, ow, oh, se, sp);
             char nm[64]; snprintf(nm, sizeof nm, "e_t%04d", t); write_ppm(outdir, nm, se, ow, oh);
+            { /* diferencia con el original a la misma pose (e_ vs o_): global (lo no pintado cuenta como negro) y solo lo pintado */
+                int npaint = 0; for (int i = 0; i < ow * oh; i++) npaint += sp[i] != 0;
+                const uint8_t *cmpi = (kstrip >= 0 && pre_w == ow && pre_h == oh) ? pre_img : orc;   /* bajo el agua: el original justo ANTES del filtro */
+                fprintf(stderr, "[shot] t=%d e_ vs o_: MAD global %.3f, pintado %.3f, cobertura %.1f%%, polígonos parciales rellenados (acum) %d\n", t, mad_img(se, cmpi, ow * oh, NULL), mad_img(se, cmpi, ow * oh, sp), 100.0 * npaint / (ow * oh), g_filled);
+            }
             float cyr = eoy - l->disp.y;
             { const VrFilter *vf = &last_filter; float dmn = 0, dmx = 0; int nc = 0;
               for (int i = 0; i < VR_FILTER_ROWS; i++) if (vf->rowcov[i]) { nc++; if (vf->dv[i] < dmn) dmn = vf->dv[i]; if (vf->dv[i] > dmx) dmx = vf->dv[i]; }
@@ -597,6 +658,15 @@ static void process_list(const GpuDrawList *l, int t, int f) {
                     memcpy(qf, pre_img, (size_t)ow * oh * 3); snprintf(nm, sizeof nm, "q_t%04d", t); write_ppm(outdir, nm, qf, ow, oh);
                     apply_filter_img2(qf, ow, oh, &last_filter, eh, cyr, eh, cyr, 0);
                     snprintf(nm, sizeof nm, "qf_t%04d", t); write_ppm(outdir, nm, qf, ow, oh);
+                    { /* el mismo efecto con el emulador del post-proceso del visor (vr/scene/hud_emu.c == vr_fs_post), ojo = pose del motor: cy_img = fila del centro, f_eye = H */
+                        static float fsrc[640 * 512 * 3], fdst[640 * 512 * 3]; static uint8_t emu[640 * 512 * 3];
+                        for (int i = 0; i < ow * oh * 3; i++) fsrc[i] = pre_img[i] / 255.0f;
+                        hud_emu_post(fsrc, fdst, ow, oh, last_filter.cy_row, last_filter.proj_h, &last_filter);
+                        for (int i = 0; i < ow * oh * 3; i++) { float v = fdst[i] * 255.0f + 0.5f; emu[i] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+                        snprintf(nm, sizeof nm, "qp_t%04d", t); write_ppm(outdir, nm, emu, ow, oh);
+                        fprintf(stderr, "[shot] t=%d filtro: emulación del post-proceso del visor vs original filtrado MAD %.3f (modelo de camtest qf_ %.3f; sin filtro %.3f)\n", t,
+                                mad_img(emu, orc, ow * oh, NULL), mad_img(qf, orc, ow * oh, NULL), mad_img(pre_img, orc, ow * oh, NULL));
+                    }
                     memcpy(qf, pre_img, (size_t)ow * oh * 3);
                     apply_filter_img2(qf, ow, oh, &last_filter, eh, cyr, eh, cyr, 1);
                     snprintf(nm, sizeof nm, "qfs_t%04d", t); write_ppm(outdir, nm, qf, ow, oh);
@@ -868,6 +938,7 @@ static void on_frame(Cpu *c, uint32_t f) {
         fprintf(stderr, "[camtest] descartes acumulados (frames volcados): polis %u dibujados %u parciales %u detrás-del-todo %u ambig %u recortados %u 2D %u (sat %u deriv %u); regla anterior (todos fvalid) habría dibujado %u\n", g_tot.polys, g_tot.drawn, g_tot.partial, g_tot.behind, g_tot.ambig, g_tot.clipped, g_tot.nonvr2d, g_tot.sat, g_tot.derived, g_tot.legacy);
         if (srv_list && !srv_done) { fprintf(stderr, "[server] error: no se llegó al punto de instantánea (f=%u, t=%d); no se ejecutó ningún escenario\n", f, cur_t); exit(2); }
         world_report(getenv("CAM_KEEP_OVERSCAN") ? "(keep_overscan)" : "");
+        if (scr_on) fprintf(stderr, "[camtest] vr_scene vs propio: centro/H del filtro %u comprobadas, %u discrepancias; polígonos con desplazamiento OFX corregido %u comprobadas, %u discrepancias\n", ref_chk, ref_bad, ofs_chk, ofs_bad);
         if (scr_on) fprintf(stderr, "[camtest] épocas de VRAM: máximo de eventos por lista %d (instantáneas %d)\n", snap_max_ev, MAXSNAP);
         { const uint16_t *vr = ref_vram(r1); fprintf(stderr, "[camtest] hash f=%u RAM=%016llx VRAM=%016llx\n", f, (unsigned long long)fnv(psx_ram, PSX_RAM_SIZE), (unsigned long long)fnv(vr, 1024 * 512 * 2)); }
         VrCamStats s; vrcam_stats(&s);
