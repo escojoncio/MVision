@@ -62,7 +62,7 @@ static int head_fn(float m[16], double *t) {
 }
 
 typedef struct { int valid; float p[3]; float yaw, pitch, roll; } HandSpec;   /* grados; marco de mano: rot = Ry(yaw) Rx(pitch) Rz(roll) */
-typedef struct { const char *name; HandSpec h[2]; float grip[2]; int armed; float head_pitch; } Scenario;   /* h[0] izquierda, h[1] derecha (del usuario) */
+typedef struct { const char *name; HandSpec h[2]; float grip[2]; int armed; float head_pitch; float head_yaw; } Scenario;   /* h[0] izquierda, h[1] derecha (del usuario) */
 #define NS (sizeof SC / sizeof *SC)
 /* Posiciones en m en el espacio de la cabeza: x derecha, y arriba (cabeza a 1,6), z atrás. Dedos = -Z de la mano. */
 static const Scenario SC[] = {
@@ -77,7 +77,20 @@ static const Scenario SC[] = {
     {"onehand",    {{1, {-0.22f, 1.22f, -0.45f}, 0, 0, 0},      {0}},                                        {0, 0}, 0, 55},
     {"handshake",  {{1, {-0.18f, 1.22f, -0.45f}, 0, 0, 90},     {1, {0.18f, 1.22f, -0.45f}, 0, 0, -90}},      {0, 0}, 0, 55},
     {"armed",      {{1, {-0.12f, 1.28f, -0.40f}, 0, 0, 0},      {1, {0.14f, 1.30f, -0.50f}, 0, 12, 0}},       {0, 0}, 1, 50},
-    {"rest_down",  {{1, {-0.22f, 0.95f, 0.02f}, 0, -90, 0},     {1, {0.22f, 0.95f, 0.02f}, 0, -90, 0}},       {0, 0}, 0, 70},
+    {"rest_down",  {{1, {-0.22f, 0.95f, 0.02f}, 0, -90, 0},     {1, {0.22f, 0.95f, 0.02f}, 0, -90, 0}},       {0, 0}, 0, 70, 0},
+    /* ---- manos por el marco de agarre de un mando real (pulgar arriba, palma hacia dentro: roll -90 derecha / +90 izquierda) ---- */
+    {"hold_stand", {{1, {-0.22f, 1.28f, -0.38f}, 0, 12, 90},    {1, {0.22f, 1.28f, -0.38f}, 0, 12, -90}},     {0, 0}, 0, 25, 0},
+    {"hold_fwd0",  {{1, {-0.22f, 1.28f, -0.38f}, 0, 12, 90},    {1, {0.22f, 1.28f, -0.38f}, 0, 12, -90}},     {0, 0}, 0, 0, 0},
+    {"hold_up",    {{1, {-0.22f, 1.28f, -0.38f}, 0, 12, 90},    {1, {0.22f, 1.28f, -0.38f}, 0, 12, -90}},     {0, 0}, 0, -20, 0},
+    {"sit_lap",    {{1, {-0.20f, 1.10f, -0.22f}, 0, -20, 80},   {1, {0.20f, 1.10f, -0.22f}, 0, -20, -80}},    {0, 0}, 0, 50, 0},
+    {"sit_fwd",    {{1, {-0.20f, 1.10f, -0.22f}, 0, -20, 80},   {1, {0.20f, 1.10f, -0.22f}, 0, -20, -80}},    {0, 0}, 0, 10, 0},
+    {"look_left",  {{1, {-0.22f, 1.28f, -0.38f}, 0, 12, 90},    {1, {0.22f, 1.28f, -0.38f}, 0, 12, -90}},     {0, 0}, 0, 20, 60},
+    {"look_right", {{1, {-0.22f, 1.28f, -0.38f}, 0, 12, 90},    {1, {0.22f, 1.28f, -0.38f}, 0, 12, -90}},     {0, 0}, 0, 20, -60},
+    {"look_back_l",{{1, {-0.22f, 1.28f, -0.38f}, 0, 12, 90},    {1, {0.22f, 1.28f, -0.38f}, 0, 12, -90}},     {0, 0}, 0, 0, 110},
+    {"tight",      {{1, {-0.07f, 1.30f, -0.22f}, 0, 20, 90},    {1, {0.07f, 1.30f, -0.22f}, 0, 20, -90}},     {0, 0}, 0, 40, 0},
+    {"chest_cross",{{1, {0.10f, 1.32f, -0.16f}, -40, 0, 80},    {1, {-0.10f, 1.30f, -0.16f}, 40, 0, -80}},    {0, 0}, 0, 45, 0},
+    {"hip_rest",   {{1, {-0.27f, 0.88f, 0.00f}, 0, -60, 90},    {1, {0.27f, 0.88f, 0.00f}, 0, -60, -90}},     {0, 0}, 0, 65, 0},
+    {"aim_pistol", {{1, {-0.10f, 1.30f, -0.40f}, 15, 20, 70},   {1, {0.12f, 1.38f, -0.52f}, -8, 15, -75}},    {0, 1}, 1, 15, 0},
 };
 static const Scenario *g_sc;
 static float g_grip_override = -1;
@@ -346,6 +359,12 @@ static void on_apply(uint8_t *ram) {
     if (want_ext) {
         want_ext = 0;
         collect_body();
+        {   /* estado de visibilidad que dejó el motor (etapas de pantalla y recorte) antes de transformar: bloque +0x32 y contador +0x4C de cada pieza */
+            uint32_t ps = pa_of(0) - 0x48;
+            fprintf(stderr, "[vis] %-12s clip_state=%d piezas:", ext_name, S16(ps + 0x32));
+            for (int i = 0; i < 16; i++) fprintf(stderr, " %d", S16(pa_of(i) + 0x4C));
+            fputc('\n', stderr);
+        }
         if (getenv("BT_DBG")) {
             VrBodyView vw; memset(&vw, 0, sizeof vw); const VrCamRecord *rr = vrcam_last_record();
             float tz[3] = {S16(pa_of(1) + 4) / 4096.0f, S16(pa_of(1) + 10) / 4096.0f, S16(pa_of(1) + 16) / 4096.0f};
@@ -428,7 +447,7 @@ static void on_frame(Cpu *c, uint32_t f) {
         if (si != sc_idx) { sc_idx = si; sc_t0 = cur_t; g_sc = si >= 0 ? &SC[si] : NULL; }
         if (si >= 0) {
             const Scenario *s = &SC[si];
-            g_yaw = getenv("BT_YAW") ? (float)atof(getenv("BT_YAW")) : 0; g_elev = -(getenv("BT_PITCH") ? (float)atof(getenv("BT_PITCH")) : s->head_pitch);
+            g_yaw = getenv("BT_YAW") ? (float)atof(getenv("BT_YAW")) : s->head_yaw; g_elev = -(getenv("BT_PITCH") ? (float)atof(getenv("BT_PITCH")) : s->head_pitch);
             vrbody_set_grip(0, s->grip[0]); vrbody_set_grip(1, s->grip[1]); vrbody_set_armed(s->armed);
             int skip = only && strcmp(only, s->name);
             if (!skip && cur_t - sc_t0 == SC_SETTLE) { pending_eye = si; want_ext = 1; snprintf(ext_name, sizeof ext_name, "%s", s->name); }

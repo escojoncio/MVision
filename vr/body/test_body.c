@@ -521,6 +521,16 @@ static void test_hand_axes(void) {
                     CHECK(dotv(fl, fing) > 0.995f, "dedos de la mano %d: %g", s, dotv(fl, fing));
                     CHECK(dotv(palm, pw) > 0.995f, "palma de la mano %d: %g", s, dotv(palm, pw));
                     CHECK(dotv(thumb, tm) > 0.995f, "pulgar de la mano %d: %g", s, dotv(thumb, tm));
+                    {   /* marco de depuración: mismos ejes que la pose pedida (alcanzable, sin límites) */
+                        float df[16]; int ok = vrbody_debug_hand_frame(s, df);
+                        CHECK(ok, "marco de depuración de la mano %d no disponible", s);
+                        if (ok) {
+                            /* el marco se da en el espacio del usuario: se compara con Ru (la pose pedida), no con su versión en el mundo */
+                            float dz[3] = {df[8], df[9], df[10]}, dy[3] = {df[4], df[5], df[6]}, uz[3] = {Ru[2], Ru[5], Ru[8]}, uy[3] = {Ru[1], Ru[4], Ru[7]};
+                            CHECK(dotv(dz, uz) > 0.995f, "marco depuración: -Z a los dedos (mano %d): %g", s, dotv(dz, uz));
+                            CHECK(dotv(dy, uy) > 0.995f, "marco depuración: +Y al dorso (mano %d): %g", s, dotv(dy, uy));
+                        }
+                    }
                     tested++;
                 }
             }
@@ -528,6 +538,31 @@ static void test_hand_axes(void) {
         }
     }
     CHECK(tested >= 20, "pocas manos comprobadas: %d", tested);
+}
+
+/* Brazos siempre dibujados: si el motor dejó a 0 el contador de visibilidad (+0x4C) de piezas del brazo, la IK lo fuerza durante la
+ * transformación y restore lo devuelve; la cabeza (parte 6, oculta a propósito) y el resto no se tocan. */
+static void test_visibility(void) {
+    for (int force = 0; force < 2; force++) {
+        VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.force_arm_visible = force;
+        vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+        build_body(77);
+        static const int ARMS[6] = {2, 3, 4, 7, 8, 9};
+        for (int f = 0; f < 30; f++) {
+            set_hand(0, -0.25f, 1.3f, -0.4f, 0.3f); set_hand(1, 0.30f, 1.25f, -0.45f, -0.2f);
+            memcpy(RAM, RAM0, sizeof RAM);
+            for (int k = 0; k < 6; k++) w16(part_addr(ARMS[k]) + 0x4C, 0);
+            w16(part_addr(6) + 0x4C, 0);
+            int n = vrbody_apply(RAM);
+            if (n == 2 && f > 20) {
+                for (int k = 0; k < 6; k++) CHECK((r16(part_addr(ARMS[k]) + 0x4C) != 0) == (force != 0), "visibilidad forzada de la pieza %d con force=%d: %d", ARMS[k], force, r16(part_addr(ARMS[k]) + 0x4C));
+                CHECK(r16(part_addr(6) + 0x4C) == 0, "la cabeza no debe tocarse");
+                CHECK(r16(part_addr(10) + 0x4C) == 2, "las piernas no deben tocarse");
+            }
+            vrbody_restore(RAM);
+            for (int k = 0; k < 6; k++) CHECK(r16(part_addr(ARMS[k]) + 0x4C) == 0, "restore devuelve la visibilidad (pieza %d)", ARMS[k]);
+        }
+    }
 }
 
 /* Espejo: el brazo derecho resuelto con la escena reflejada en X del torso da el espejo del izquierdo. */
@@ -599,6 +634,7 @@ int main(void) {
     test_continuity();
     test_glue();
     test_hand_axes();
+    test_visibility();
     test_mirror();
     test_fuzz();
     VrBodyStats st; vrbody_stats(&st);

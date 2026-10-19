@@ -97,12 +97,13 @@ static void m16_from_pq(const float p[3], const float q[4], float m[16]) {
 static int finite_n(const float *v, int n) { for (int i = 0; i < n; i++) if (!isfinite(v[i])) return 0; return 1; }
 
 /* ============================================================================================================== buzón de manos */
-typedef struct { int valid; float pos[3], rot[4]; float trigger, grip; int low, up, stick; uint64_t t_ns; } HandSlot;
+typedef struct { int valid; float pos[3], rot[4]; float trigger, grip; int low, up, stick; int aim_valid; float aim_pos[3], aim_rot[4]; uint64_t t_ns; } HandSlot;
 typedef struct { int valid; float p[3], q[4]; } GripPose;
 
 static pthread_mutex_t HM = PTHREAD_MUTEX_INITIALIZER;   /* manos, opciones, hápticos, estado, publicación del arma */
 static HandSlot hand_in[2];
 static int opt_right = 1, opt_reload = WR_MANUAL;
+static int opt_aim = 1;            /* 1: el arma toma la ORIENTACIÓN del apuntado del mando (donde apuntas es donde dispara) y la POSICIÓN del agarre */
 static float goff_p[3] = {0, 0, 0}, goff_q[4] = {0, 0, 0, 1};
 static float hap_out[2];
 static MvVrGameStatus pub_status;
@@ -124,6 +125,8 @@ void mv_vrgame_set_hand(int32_t side, const MvVrHand *h) {
         memcpy(s.pos, h->pos, sizeof s.pos); memcpy(s.rot, h->rot, sizeof s.rot); q_norm(s.rot);
         s.trigger = isfinite(h->trigger) ? h->trigger : 0; s.grip = isfinite(h->grip) ? h->grip : 0;
         s.low = h->low != 0; s.up = h->up != 0; s.stick = h->stick != 0;
+        s.aim_valid = h->aim_valid && finite_n(h->aim_pos, 3) && finite_n(h->aim_rot, 4);
+        if (s.aim_valid) { memcpy(s.aim_pos, h->aim_pos, sizeof s.aim_pos); memcpy(s.aim_rot, h->aim_rot, sizeof s.aim_rot); q_norm(s.aim_rot); }
     }
     s.t_ns = mono_ns();
     pthread_mutex_lock(&HM);
@@ -139,6 +142,11 @@ void mv_vrgame_set_options(int32_t right_handed, int32_t reload_mode) {
     pthread_mutex_lock(&HM);
     opt_right = right_handed != 0;
     opt_reload = reload_mode == 1 ? WR_SIMPLIFIED : reload_mode == 2 ? WR_AUTOMATIC : WR_MANUAL;
+    pthread_mutex_unlock(&HM);
+}
+void mv_vrgame_set_weapon_aim(int32_t on) {
+    pthread_mutex_lock(&HM);
+    opt_aim = on != 0;
     pthread_mutex_unlock(&HM);
 }
 void mv_vrgame_set_grip_offset(const float p[3], const float q[4]) {
@@ -163,6 +171,14 @@ static GripPose grip_locked(const HandSlot *s, uint64_t now) {
     return g;
 }
 
+/* Pose del arma en la mano: posición del agarre (el mango va en la palma) y orientación del apuntado del mando si lo hay (el cañón sale por donde
+ * apunta el mando; el marco del agarre queda para la mano del personaje). Con HM tomado. */
+static GripPose weapon_locked(const HandSlot *s, uint64_t now) {
+    GripPose g = grip_locked(s, now);
+    if (g.valid && opt_aim && s->aim_valid) memcpy(g.q, s->aim_rot, sizeof g.q);
+    return g;
+}
+
 /* Manos para la IK de los brazos (hilo de emulación, etapa de dibujado). */
 int vrpose_get_hands(VrHandPose out[2]) {
     uint64_t now = mono_ns();
@@ -184,6 +200,19 @@ int32_t mv_vrgame_hand_matrix(int32_t side, float m[16]) {
     if (!m || side < 0 || side > 1) return 0;
     pthread_mutex_lock(&HM);
     GripPose g = grip_locked(&hand_in[side], mono_ns());
+    pthread_mutex_unlock(&HM);
+    if (!g.valid) return 0;
+    m16_from_pq(g.p, g.q, m);
+    return 1;
+}
+int32_t mv_vrgame_debug_frame(int32_t kind, int32_t side, float m[16]) {
+    if (!m || side < 0 || side > 1 || kind < 0 || kind > 2) return 0;
+    if (kind == 1) return vrbody_debug_hand_frame(side, m);
+    uint64_t now = mono_ns();
+    pthread_mutex_lock(&HM);
+    GripPose g;
+    if (kind == 0) g = grip_locked(&hand_in[side], now);
+    else { g = weapon_locked(&hand_in[opt_right ? 1 : 0], now); if (!pub_status.active) g.valid = 0; }
     pthread_mutex_unlock(&HM);
     if (!g.valid) return 0;
     m16_from_pq(g.p, g.q, m);
@@ -659,11 +688,11 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
 
     /* manos (una sola toma coherente) */
     HandSlot hs[2];
-    GripPose gp[2];
+    GripPose gp[2], wp[2];       /* gp: agarre (mano del personaje, gestos); wp: pose del arma si esa mano la empuña */
     int right, rmode;
     pthread_mutex_lock(&HM);
     right = opt_right; rmode = opt_reload;
-    for (int i = 0; i < 2; i++) { hs[i] = hand_in[i]; gp[i] = grip_locked(&hand_in[i], now); }
+    for (int i = 0; i < 2; i++) { hs[i] = hand_in[i]; gp[i] = grip_locked(&hand_in[i], now); wp[i] = weapon_locked(&hand_in[i], now); }
     pthread_mutex_unlock(&HM);
 
     /* cuerpo: agarre de cada mano y mano dominante (la IK de los brazos lee las poses por vrpose_get_hands) */
@@ -782,7 +811,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     WInput in;
     memset(&in, 0, sizeof in);
     in.head = G.head;
-    in.hand[0] = wpose_of(&gp[w]);
+    in.hand[0] = wpose_of(&wp[w]);
     if (gp[o].valid) in.hand[1] = wpose_of(&gp[o]);
     else { in.hand[1].p.x = 0; in.hand[1].p.y = -10; in.hand[1].p.z = 0; in.hand[1].q.w = 1; }   /* sin mano libre: lejos de todo punto de interacción */
     in.trigger[0] = hs[w].trigger;
@@ -824,13 +853,13 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     VrHandsPose hp;
     memset(&hp, 0, sizeof hp);
     hp.valid = 1;
-    memcpy(hp.pos, gp[w].p, sizeof hp.pos); memcpy(hp.rot, gp[w].q, sizeof hp.rot);
+    memcpy(hp.pos, wp[w].p, sizeof hp.pos); memcpy(hp.rot, wp[w].q, sizeof hp.rot);
     VrHandsFrame vf;
     int nb = vrhands_build(sl->rig, st, &hp, &vf);   /* fuera del cerrojo: el hilo de render no espera a la construcción de las mallas */
     pthread_mutex_lock(&HM);
     if (nb > 0) {
         vrhands_post(&vf);
-        pub_sim_hand = gp[w];
+        pub_sim_hand = wp[w];
         pub_sim_valid = 1;
     } else {
         vrhands_post_clear();
@@ -931,7 +960,7 @@ int mv_host_hands(VrHandsFrame *out) {
     rc = vrhands_fetch(out);
     if (rc && pub_sim_valid && out->meshes && out->nmeshes > 0 && out->nmeshes <= VRH_MAX_MESHES) {
         int w = opt_right ? 1 : 0;
-        GripPose hn = grip_locked(&hand_in[w], now), hs = pub_sim_hand;
+        GripPose hn = weapon_locked(&hand_in[w], now), hs = pub_sim_hand;
         if (hn.valid && hs.valid) {
             float qc[4], qd[4], pd[3], rp[3];
             q_conj(hs.q, qc);

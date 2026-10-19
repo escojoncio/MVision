@@ -28,6 +28,8 @@ struct XRViewConfig {
     var wristHud = true             // vida, objeto y arma/munición del HUD sobre el antebrazo izquierdo, junto al radar
     var wristScale: Float = 0.2     // ancho (m) que ocuparía el panel 2D completo en la muñeca (el recorte de la vida mide ~35 % de él)
     var wristHandSide = false       // false: los paneles se apilan hacia el codo (encima del radar); true: hacia la mano
+    var hideRealHands = true        // pide al sistema ocultar tus manos y brazos reales mientras dura el espacio inmersivo (se ven los del personaje)
+    var debugAxes = false           // dibuja los ejes de los mandos (dispositivo, agarre, apuntado) y de las manos del personaje
 
     static let widths: [Float] = [2.4, 3.0, 3.6, 4.5]
     static let distances: [Float] = [2.0, 2.5, 3.0, 4.0]
@@ -60,6 +62,8 @@ struct XRViewConfig {
         c.wristHud = b("xr.view.wristHud", true)
         c.wristScale = f("xr.view.wristScale", 0.2, 0.1, 0.5)
         c.wristHandSide = b("xr.view.wristHand", false)
+        c.hideRealHands = b("xr.view.hideHands", true)
+        c.debugAxes = b("xr.view.debugAxes", false)
         return c
     }
 
@@ -77,6 +81,8 @@ struct XRViewConfig {
         d.set(wristHud, forKey: "xr.view.wristHud")
         d.set(Double(wristScale), forKey: "xr.view.wristScale")
         d.set(wristHandSide, forKey: "xr.view.wristHand")
+        d.set(hideRealHands, forKey: "xr.view.hideHands")
+        d.set(debugAxes, forKey: "xr.view.debugAxes")
     }
 }
 
@@ -131,7 +137,7 @@ struct XRNav: Equatable {
 }
 
 enum XRMenuItem: Int, CaseIterable {
-    case resume, recenter, width, distance, curve, sharp, integerScale, cutscene, hud, hudScale, wristHud, wristScale, wristSide, exit
+    case resume, recenter, width, distance, curve, sharp, integerScale, cutscene, hud, hudScale, wristHud, wristScale, wristSide, hideHands, debugAxes, exit
 }
 
 final class XRPresenter {
@@ -296,6 +302,8 @@ final class XRPresenter {
         case .wristHud: cfg.wristHud.toggle()
         case .wristScale: cfg.wristScale = cycle(cfg.wristScale, XRViewConfig.wristScales, dir)
         case .wristSide: cfg.wristHandSide.toggle()
+        case .hideHands: cfg.hideRealHands.toggle(); cfg.save()      // la escena lo lee de UserDefaults (@AppStorage): se guarda al momento
+        case .debugAxes: cfg.debugAxes.toggle()
         case .exit: cfg.save(); onExit?()
         }
         menuDirty = true
@@ -324,6 +332,8 @@ final class XRPresenter {
             case .wristHud: return ("Vida y arma en la muñeca", yn(cfg.wristHud))
             case .wristScale: return ("Tamaño en la muñeca", "\(Int((cfg.wristScale * 100).rounded())) cm")
             case .wristSide: return ("Lado en la muñeca", cfg.wristHandSide ? "Hacia la mano" : "Hacia el codo")
+            case .hideHands: return ("Ocultar mis manos reales", yn(cfg.hideRealHands))
+            case .debugAxes: return ("Ejes de mandos y manos", yn(cfg.debugAxes))
             case .exit: return ("Salir de VR", "")
             }
         }
@@ -346,19 +356,19 @@ final class XRPresenter {
         ("Opciones VR" as NSString).draw(at: CGPoint(x: 60, y: 36), withAttributes: title)
         let right = NSMutableParagraphStyle()
         right.alignment = .right
-        let rowH: CGFloat = 44
+        let rowH: CGFloat = 40
         for (i, r) in rows().enumerated() {
-            let y = 112 + CGFloat(i) * rowH
+            let y = 106 + CGFloat(i) * rowH
             let on = i == sel
             if on {
                 UIColor(red: 0.12, green: 0.45, blue: 0.40, alpha: 1).setFill()
                 UIBezierPath(roundedRect: CGRect(x: 36, y: y - 4, width: CGFloat(w) - 72, height: rowH - 4), cornerRadius: 14).fill()
             }
-            let a: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 30, weight: on ? .semibold : .regular),
+            let a: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 28, weight: on ? .semibold : .regular),
                                                     .foregroundColor: UIColor.white]
             (r.0 as NSString).draw(at: CGPoint(x: 60, y: y), withAttributes: a)
             if !r.1.isEmpty {
-                let v: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 30, weight: .regular),
+                let v: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 28, weight: .regular),
                                                         .foregroundColor: UIColor(white: on ? 1 : 0.75, alpha: 1), .paragraphStyle: right]
                 let txt = on ? "◀  \(r.1)  ▶" : r.1
                 (txt as NSString).draw(in: CGRect(x: 380, y: y, width: CGFloat(w) - 380 - 60, height: rowH), withAttributes: v)

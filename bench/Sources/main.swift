@@ -170,13 +170,13 @@ func blitEye(_ cb: MTLCommandBuffer, _ color: [MTLTexture], layered: Bool, eye: 
 
 /// Codifica `frames` fotogramas; en el último lee los dos ojos. `head(i)` = pose de la cabeza (espacio recentrado) del fotograma i.
 func render(_ enc: XRFrameEncoder, layered: Bool, color: [MTLTexture], depth: [MTLTexture], gs: MvVrGameState, frames: Int,
-            head: (Int) -> simd_float4x4, before: ((Int) -> Void)? = nil) -> [Img]? {
+            head: (Int) -> simd_float4x4, before: ((Int) -> Void)? = nil, axes: [XRAxisFrame] = []) -> [Img]? {
     var result: [Img]?
     for i in 0..<frames {
         before?(i)
         guard let cb = queue.makeCommandBuffer() else { return nil }
         let ok = enc.encode(commandBuffer: cb, gs: gs, originFromDevice: head(i), recenterInverse: matrix_identity_float4x4, dt: 1.0 / 90.0,
-                            eyes: eyes, depthRange: depthRange, colorTextures: color, depthTextures: depth)
+                            eyes: eyes, depthRange: depthRange, colorTextures: color, depthTextures: depth, debugAxes: axes)
         if !ok { print("FALLO: encode devolvió false"); return nil }
         var bufs: [MTLBuffer] = []
         if i == frames - 1 { for e in 0..<2 { if let b = blitEye(cb, color, layered: layered, eye: e) { bufs.append(b) } } }
@@ -289,8 +289,13 @@ func runCase(_ cfg: Cfg, first: Bool) {
         // radar de muñeca: antebrazo izquierdo sintético (codo, muñeca, dorso hacia arriba)
         let forearm: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>) = (SIMD3<Float>(-0.30, 1.20, -0.40), SIMD3<Float>(-0.25, 1.25, -0.80), SIMD3<Float>(0, 1, 0))
         let hpB = XRMath.position(headB)
+        // ejes de depuración (opción del menú VR): un marco sin rotación a la derecha y 1,3 m delante, visto de lado; X rojo, Y verde, Z azul (hacia la cabeza)
+        let axOrigin = SIMD3<Float>(0.7, 1.3, -1.6)
+        var axModel = matrix_identity_float4x4; axModel.columns.3 = SIMD4<Float>(axOrigin.x, axOrigin.y, axOrigin.z, 1)
+        let axes = [XRAxisFrame(model: axModel, length: 0.3, thickness: 0.02)]
         guard let imgs = render(enc, layered: cfg.layered, color: tg.color, depth: tg.depth, gs: gs, frames: 70, head: { $0 == 69 ? headB : headA },
-                                before: { _ in enc.renderer.radar?.updatePose(forearm: forearm, leftGrip: nil, headPosition: hpB, headForward: SIMD3<Float>(0, 0, -1)) }) else {
+                                before: { _ in enc.renderer.radar?.updatePose(forearm: forearm, leftGrip: nil, headPosition: hpB, headForward: SIMD3<Float>(0, 0, -1)) },
+                                axes: axes) else {
             check(caso, "render", false, "fallo al renderizar"); return
         }
         report(caso, imgs, notice: true)
@@ -321,6 +326,13 @@ func runCase(_ cfg: Cfg, first: Bool) {
                 guard let px = project(SIMD3<Float>(t.1, t.2, -5), eye: e, head: headB) else { check(caso, "ojo \(e) \(t.0)", false, "detras de la camara"); continue }
                 let c = im.avg(px.0, px.1, r: 2)
                 check(caso, "ojo \(e) \(t.0)", near(c, t.3, 45), "pixel (\(px.0),\(px.1)) color \(c) esperado \(t.3)")
+            }
+            // ejes de depuración: un píxel de cada color puro cerca del punto medio de cada eje
+            for (nm, d, col) in [("X rojo", SIMD3<Float>(1, 0, 0), (255, 0, 0)), ("Y verde", SIMD3<Float>(0, 1, 0), (0, 255, 0)), ("Z azul", SIMD3<Float>(0, 0, 1), (0, 0, 255))] {
+                guard let px = project(axOrigin + d * 0.15, eye: e, head: headB) else { check(caso, "ojo \(e) eje \(nm)", false, "detras de la camara"); continue }
+                var found = false
+                for dy in -5...5 { for dx in -5...5 where !found { found = near(im.rgb(px.0 + dx, px.1 + dy), col, 60) } }
+                check(caso, "ojo \(e) eje \(nm)", found, "ningun pixel \(col) cerca de (\(px.0),\(px.1))")
             }
             // radar de muñeca y arma en mano (informativos: no hacen fallar el banco, ver "soft")
             if let wf = enc.renderer.radar?.wristFrame, let px = project(wf.center, eye: e, head: headB) {
