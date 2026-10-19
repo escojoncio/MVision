@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT=bench/build
 rm -rf "$OUT" && mkdir -p "$OUT"
-INC=(-Iruntime -Ivr/scene -Ivr/bridge -Ivr/camera -Ivr/input -Ivr/host -Ivr/body -Ivr/radar -Ivr/hands -Ivr/weapons -Ivr/gameplay -Ivr/ai -Irender/metal -Iapp/Sources -Ibench)
+INC=(-Iruntime -Ivr/scene -Ivr/bridge -Ivr/camera -Ivr/input -Ivr/host -Ivr/body -Ivr/radar -Ivr/hands -Ivr/weapons -Ivr/gameplay -Ivr/ai -Ivr/native -Irender/metal -Iapp/Sources -Ibench)
 
 echo "== shaders Metal =="
 for f in render/metal/vr_scene.metal render/metal/vr_vram.metal render/metal/vr_radar.metal render/metal/vr_weapon.metal app/Sources/XRShaders.metal; do
