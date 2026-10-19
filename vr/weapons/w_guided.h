@@ -27,6 +27,7 @@ enum { GR_NONE = 0, GR_WAIT, GR_OPEN, GR_INSERT, GR_CLOSE };
 #define GD_STEER_TAU       0.10f   /* constante de suavizado (s) */
 #define GD_FUEL_TIME       14.0f   /* s de combustible */
 #define GD_STATIC_TIME     0.80f   /* s de estática al terminar el vuelo */
+#define GD_CREATE_GRACE    1.50f   /* s que se espera a que el juego cree el misil antes de darlo por no creado */
 #define GD_VIEW_W          320
 #define GD_VIEW_H          240
 

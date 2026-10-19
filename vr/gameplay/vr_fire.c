@@ -46,6 +46,17 @@ void vrfire_pos_to_world(const VrFireMap *m, const float p[3], float out[3]) {
     rot_t(m, d, r);
     for (int i = 0; i < 3; i++) out[i] = (float)m->eye[i] + r[i] * m->units_per_m;
 }
+/* Inversa: mundo del motor -> espacio de usuario (rotación inversa, escala 1/upm). */
+static void rot_inv(const VrFireMap *m, const float v[3], float o[3]) {
+    float th = (m->theta_play_deg + 180.0f) * (PI_F / 180.0f), cs = cosf(th), sn = sinf(th);
+    o[0] = cs * v[0] - sn * v[2]; o[1] = v[1]; o[2] = sn * v[0] + cs * v[2];
+}
+void vrfire_dir_from_world(const VrFireMap *m, const float d[3], float out[3]) { rot_inv(m, d, out); }
+void vrfire_pos_from_world(const VrFireMap *m, const float w[3], float out[3]) {
+    float d[3] = {(w[0] - (float)m->eye[0]) / m->units_per_m, (w[1] - (float)m->eye[1]) / m->units_per_m, (w[2] - (float)m->eye[2]) / m->units_per_m}, r[3];
+    rot_inv(m, d, r);
+    for (int i = 0; i < 3; i++) out[i] = m->p_ref[i] + r[i];
+}
 static int finite3(const float v[3]) { return isfinite(v[0]) && isfinite(v[1]) && isfinite(v[2]); }
 static int32_t round_clamp(float v) { if (!(v == v)) return 0; if (v > 1.0e9f) v = 1.0e9f; if (v < -1.0e9f) v = -1.0e9f; return (int32_t)lrintf(v); }
 static int16_t q12(float v) { float r = v * 4096.0f; if (r > 32767.0f) r = 32767.0f; if (r < -32768.0f) r = -32768.0f; return (int16_t)lrintf(r); }
@@ -153,7 +164,13 @@ const VrFireCfg *vrfire_config(void) { return &S.cfg; }
 void vrfire_stats(VrFireStats *s) { *s = S.st; }
 static VrFireProbe g_probe;
 void vrfire_set_probe(VrFireProbe f) { g_probe = f; }
-void vrfire_probe(int kind, int decision, uint32_t result, const VrFireMat *m) { if (g_probe) g_probe(kind, decision, result, m); }
+/* Último actor de misil creado (kind 1) y cuántos van: lo usa vrgame para seguir el misil guiado (el puntero se recicla: ver vr_missile.h). */
+static uint32_t g_last_missile, g_missile_serial;
+uint32_t vrfire_last_missile(uint32_t *serial) { if (serial) *serial = g_missile_serial; return g_last_missile; }
+void vrfire_probe(int kind, int decision, uint32_t result, const VrFireMat *m) {
+    if (kind == 1 && result) { g_last_missile = result; g_missile_serial++; }
+    if (g_probe) g_probe(kind, decision, result, m);
+}
 const VrFireMat *vrfire_last_subst(void) { return &S.last; }
 
 static void pop_req(void) { if (S.nq > 0) { memmove(&S.q[0], &S.q[1], sizeof(Req) * (size_t)(S.nq - 1)); S.nq--; } }

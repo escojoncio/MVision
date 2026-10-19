@@ -77,6 +77,11 @@ void vrcam_frame(const uint8_t *ram, const BridgeState *st);
 void vrcam_recenter(void);
 /* Giro del espacio de juego del usuario (giro por pasos / suave del mando): grados, + = a la izquierda. */
 void vrcam_turn(float deg);
+/* Tope de la distancia de pantalla (zoom) que el juego pide a la cámara del usuario; 0 = sin tope. Con la mira óptica del francotirador
+ * (el juego sube de 320 a 3000) la app pone 320: el aumento va en una vista aparte en el visor del arma y la cabeza no se acerca. */
+void vrcam_set_zoom_cap(int cap);
+/* 1 si en los últimos VBlanks el juego pidió más aumento que el tope (la mira del juego está activa): solo entonces la máscara de visión es la de la mira. */
+int vrcam_zoom_capped(void);
 /* 1 si el frame de cámara en curso es VR (decidido al construir la cámara). */
 int vrcam_active(void);
 /* Yaw de mirada (grados) del último frame VR; origen angular del mando (unidades del motor) con la configuración. */

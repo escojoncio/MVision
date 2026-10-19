@@ -55,6 +55,9 @@ typedef struct VrFireMat {
 
 /* Posición/dirección de usuario -> mundo del motor (float). dir no se escala. */
 void vrfire_pos_to_world(const VrFireMap *map, const float p[3], float out[3]);
+/* Inversas: mundo del motor (unidades) -> espacio de usuario (m). */
+void vrfire_pos_from_world(const VrFireMap *map, const float w[3], float out[3]);
+void vrfire_dir_from_world(const VrFireMap *map, const float d[3], float out[3]);
 void vrfire_dir_to_world(const VrFireMap *map, const float d[3], float out[3]);
 /* Matriz del motor para una pose de arma (boca): eje -Y local = delante de la pose (-Z local de WPose), col. 0 =
  * izquierda (arriba x delante), col. 2 = delante x izquierda. t = boca + shift*delante (shift en unidades; 400 para
@@ -143,6 +146,8 @@ void vrfire_stats(VrFireStats *s);
 typedef void (*VrFireProbe)(int kind, int decision, uint32_t result, const VrFireMat *m);
 void vrfire_set_probe(VrFireProbe f);
 void vrfire_probe(int kind, int decision, uint32_t result, const VrFireMat *m);
+/* Dirección del último actor de misil creado (0 = ninguno) y nº de misiles creados desde el arranque. */
+uint32_t vrfire_last_missile(uint32_t *serial);
 /* Último proyectil sustituido (para pruebas). */
 const VrFireMat *vrfire_last_subst(void);
 

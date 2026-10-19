@@ -152,6 +152,8 @@ static void t_flight(void) {
     /* el juego no crea el misil */
     reset(3); in = base_input(); step(&in, WR_MANUAL, 3); sim.alive = 0;
     G.fire = NULL; pull(&in, WR_MANUAL); step(&in, WR_MANUAL, 90);
+    CHECK(S->base.phase == G_FLIGHT);        /* aún dentro del plazo de creación */
+    step(&in, WR_MANUAL, 60);
     CHECK(S->base.phase == G_STATIC && S->ended_by == 3);
     G.fire = b_fire;
 }

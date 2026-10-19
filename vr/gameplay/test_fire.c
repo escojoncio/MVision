@@ -475,8 +475,26 @@ static void t_cfg(void) {
     vrfire_init(NULL); CHECK(vrfire_config()->press_vbl == 2 && vrfire_config()->bullet_shift == 400.0f && vrfire_config()->arm_mode == VRFIRE_ARM_ON_TRIGGER, "defecto");
 }
 
+/* inversas mundo -> usuario: ida y vuelta con cualquier giro y ojo; el misil guiado las usa para colocar la cámara de la pantalla */
+static void t_inverse(void) {
+    for (int th = -180; th <= 180; th += 15) {
+        VrFireMap map = mkmap(1234, -567, 8910, (float)th);
+        for (int i = 0; i < 40; i++) {
+            float p[3] = {(float)(i % 7) * 0.9f - 2.0f, 0.3f + (float)(i % 5) * 0.5f, (float)(i % 9) * 1.1f - 4.0f}, w[3], b[3], d[3] = {0.3f, -0.5f, 0.8f}, dw[3], db[3];
+            vrfire_pos_to_world(&map, p, w); vrfire_pos_from_world(&map, w, b);
+            vrfire_dir_to_world(&map, d, dw); vrfire_dir_from_world(&map, dw, db);
+            for (int k = 0; k < 3; k++) { CHECK(fabsf(b[k] - p[k]) < 2e-3f, "pos inversa"); CHECK(fabsf(db[k] - d[k]) < 1e-5f, "dir inversa"); }
+        }
+    }
+    uint32_t ser = 0, a0 = vrfire_last_missile(&ser), ser0 = ser; (void)a0;
+    VrFireMat m; memset(&m, 0, sizeof m);
+    vrfire_probe(0, 0, 0x801701B8u, &m); vrfire_last_missile(&ser); CHECK(ser == ser0, "inv");          /* una bala no cuenta */
+    vrfire_probe(1, 1, 0x801701B8u, &m); CHECK(vrfire_last_missile(&ser) == 0x801701B8u && ser == ser0 + 1, "inv");
+    vrfire_probe(1, 0, 0, &m); vrfire_last_missile(&ser); CHECK(ser == ser0 + 1, "inv");                 /* creación fallida (0) no cuenta */
+}
+
 int main(void) {
-    t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_long_life(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
+    t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
     printf("test_fire: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

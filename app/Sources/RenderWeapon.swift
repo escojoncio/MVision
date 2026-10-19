@@ -1,6 +1,7 @@
 import Metal
 import simd
 import Foundation
+import QuartzCore
 
 // Renderer del arma en mano: dibuja la geometría 3D propia (piezas del modelo original cortado + objetos sueltos) que entrega
 // vr/hands (mv_host_hands -> VrHandsFrame), DENTRO del mismo pase de escena de PS1Renderer. SIN COMPILAR (escrito sin
@@ -29,6 +30,14 @@ struct WpnFrameU {
 struct WpnDrawU {
     var model = matrix_identity_float4x4
 }
+// Mismo layout que VrSpcDraw de vr_weapon.metal (128 bytes): vistas especiales del arma.
+struct SpcDrawU {
+    var model = matrix_identity_float4x4
+    var uv = simd_float4(0, 0, 1, 1)
+    var p0 = simd_float4(0, 1, 0, 0)      // x = modo (0 mira, 1 HUD, 2 misil), y = opacidad, z = ruido, w = tiempo
+    var p1 = simd_float4(0, 0, 0, 1)      // x = disco, y = fijado, z = terminado, w = proporción ancho/alto
+    var p2 = simd_float4(0, 0, 0, 0)      // x = la imagen ya es lineal
+}
 
 final class WeaponRenderer {
     // MARK: API pública
@@ -56,6 +65,14 @@ final class WeaponRenderer {
         var color: MTLPixelFormat, depth: MTLPixelFormat, samples: Int
     }
     private var pipes: [PKey: MTLRenderPipelineState] = [:]
+    private struct SKey: Hashable {
+        var layered: Bool, linear: Bool
+        var color: MTLPixelFormat, depth: MTLPixelFormat, samples: Int
+    }
+    private var spcPipes: [SKey: MTLRenderPipelineState] = [:]
+    private var spcDepth: MTLDepthStencilState?
+    private var overlayTex: MTLTexture?
+    private let t0 = CACurrentMediaTime()
     private var failed = Set<String>()
 
     private final class MeshGPU {
@@ -87,7 +104,7 @@ final class WeaponRenderer {
         let lib = device.makeDefaultLibrary()
         library = lib
         if lib == nil { print("[WeaponRenderer] sin biblioteca Metal por defecto: falta vr_weapon.metal en el target") }
-        if MemoryLayout<WpnFrameU>.stride != 192 || MemoryLayout<WpnDrawU>.stride != 64 {
+        if MemoryLayout<WpnFrameU>.stride != 192 || MemoryLayout<WpnDrawU>.stride != 64 || MemoryLayout<SpcDrawU>.stride != 128 {
             print("[WeaponRenderer] layout de uniformes incompatible con vr_weapon.metal (\(MemoryLayout<WpnFrameU>.stride)/\(MemoryLayout<WpnDrawU>.stride))")
         }
         if MemoryLayout<VrHandsVertex>.stride != 36 { print("[WeaponRenderer] VrHandsVertex no mide 36 bytes") }
@@ -95,6 +112,10 @@ final class WeaponRenderer {
         dd.depthCompareFunction = .greaterEqual    // Z invertida, igual que dsOpaque de PS1Renderer
         dd.isDepthWriteEnabled = true
         depthState = device.makeDepthStencilState(descriptor: dd)
+        let sd = MTLDepthStencilDescriptor()
+        sd.depthCompareFunction = .always          // la lente / el panel van por encima del arma y del mundo
+        sd.isDepthWriteEnabled = false
+        spcDepth = device.makeDepthStencilState(descriptor: sd)
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: 1, height: 1, mipmapped: false)
         td.usage = .shaderRead
         whiteTexture = device.makeTexture(descriptor: td)
@@ -254,6 +275,136 @@ final class WeaponRenderer {
             encoder.setFragmentTexture(m.tex_id != 0 ? (texById[m.tex_id] ?? white) : white, index: 0)
             encoder.drawIndexedPrimitives(type: .triangle, indexCount: g.nidx, indexType: .uint16, indexBuffer: g.ibuf, indexBufferOffset: 0)
         }
+        encoder.popDebugGroup()
+    }
+
+    // MARK: vistas especiales (mira óptica, visor antiaéreo, pantalla del misil)
+    private func specialPipeline(_ k: SKey) -> MTLRenderPipelineState? {
+        if let p = spcPipes[k] { return p }
+        if failed.contains("S\(k)") || failed.contains("svs") { return nil }      // ya falló: no recompilar un pipeline por fotograma
+        guard let lib = library else { return nil }
+        do {
+            let fc = MTLFunctionConstantValues()
+            var f = false, l = k.linear
+            fc.setConstantValue(&f, type: .bool, index: 0)   // VR_WPN_FC_FILTER (no se usa aquí, pero la función lo declara)
+            fc.setConstantValue(&l, type: .bool, index: 1)   // VR_WPN_FC_LINEAR_OUT
+            let fs = try lib.makeFunction(name: "vr_fs_spc", constantValues: fc)
+            guard let vs = lib.makeFunction(name: k.layered ? "vr_vs_spc_amp" : "vr_vs_spc") else {
+                if !failed.contains("svs") { failed.insert("svs"); print("[WeaponRenderer] faltan las funciones de las vistas especiales") }
+                return nil
+            }
+            let d = MTLRenderPipelineDescriptor()
+            d.label = "WPN vista especial \(k.layered ? "amp" : "ojo")"
+            d.vertexFunction = vs
+            d.fragmentFunction = fs
+            d.rasterSampleCount = k.samples
+            d.inputPrimitiveTopology = .triangle
+            if k.layered { d.maxVertexAmplificationCount = viewCount }
+            let ca = d.colorAttachments[0]!
+            ca.pixelFormat = k.color
+            ca.isBlendingEnabled = true
+            ca.rgbBlendOperation = .add
+            ca.alphaBlendOperation = .add
+            ca.sourceRGBBlendFactor = .sourceAlpha
+            ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
+            ca.sourceAlphaBlendFactor = .zero
+            ca.destinationAlphaBlendFactor = .one
+            d.depthAttachmentPixelFormat = k.depth
+            if k.depth == .depth32Float_stencil8 { d.stencilAttachmentPixelFormat = k.depth }
+            let p = try device.makeRenderPipelineState(descriptor: d)
+            spcPipes[k] = p
+            return p
+        } catch {
+            let key = "S\(k)"
+            if !failed.contains(key) { failed.insert(key); print("[WeaponRenderer] pipeline de vistas especiales: \(error)") }
+            return nil
+        }
+    }
+
+    /// Textura de la abertura y la retícula de la mira (vr_scope), generada una vez: 256 x 256 RGBA, alfa recto.
+    private func scopeOverlay() -> MTLTexture? {
+        if let t = overlayTex { return t }
+        let n = 256
+        var px = [UInt32](repeating: 0, count: n * n)
+        vrscope_draw_overlay(&px, Int32(n))
+        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: n, height: n, mipmapped: false)
+        td.usage = .shaderRead
+        guard let t = device.makeTexture(descriptor: td) else { return nil }
+        t.label = "WPN mira (abertura y retícula)"
+        px.withUnsafeBytes { raw in
+            if let base = raw.baseAddress { t.replace(region: MTLRegionMake2D(0, 0, n, n), mipmapLevel: 0, withBytes: base, bytesPerRow: n * 4) }
+        }
+        overlayTex = t
+        return t
+    }
+
+    /// Dibuja la vista especial vigente en el pase de escena en curso (después del arma). `aux` = segunda vista renderizada (mira, misil; valores
+    /// en gamma, sin decodificar sRGB), `hud` = panel del HUD del juego en bruto (visor antiaéreo). `auxLinear`: los valores de `aux` ya son lineales.
+    func encodeSpecial(encoder: MTLRenderCommandEncoder, view sv: MvVrSpecialView, aux: MTLTexture?, auxLinear: Bool, hud: MTLTexture?,
+                       views: [simd_float4x4], projections: [simd_float4x4], layered: Bool, viewIndex: Int = 0) {
+        guard enabled, sv.kind != 0 else { return }
+        let n = min(views.count, projections.count)
+        guard n >= 1 else { return }
+        let finite = [sv.surf_pos.0, sv.surf_pos.1, sv.surf_pos.2, sv.surf_rot.0, sv.surf_rot.1, sv.surf_rot.2, sv.surf_rot.3, sv.surf_w, sv.surf_h, sv.blend]
+        guard finite.allSatisfy({ $0.isFinite }), sv.surf_w > 0.001, sv.surf_h > 0.001 else { return }
+        var d = SpcDrawU()
+        var image: MTLTexture?
+        var overlay: MTLTexture?
+        switch sv.kind {
+        case Int32(MV_VIEW_SCOPE):
+            guard sv.blend > 0.02, sv.cam_valid != 0, let a = aux, let o = scopeOverlay() else { return }
+            image = a; overlay = o
+            d.p0 = simd_float4(0, min(max(sv.blend, 0), 1), 0, 0)
+        case Int32(MV_VIEW_AA_SIGHT):
+            guard let h = hud else { return }
+            image = h
+            d.uv = simd_float4(sv.uv.0, sv.uv.1, sv.uv.2, sv.uv.3)
+            d.p0 = simd_float4(1, 1, 0, 0)
+        case Int32(MV_VIEW_MISSILE):
+            guard let a = aux else { return }
+            image = a
+            let live = sv.cam_valid != 0 && sv.ended == 0
+            let t = Float((CACurrentMediaTime() - t0).truncatingRemainder(dividingBy: 64))
+            d.p0 = simd_float4(2, 1, min(max(sv.noise, 0), 1), t)
+            d.p1.y = sv.locked != 0 ? 1 : 0
+            d.p1.z = live ? 0 : 1
+        default:
+            return
+        }
+        d.p1.x = sv.round != 0 ? 1 : 0
+        d.p1.w = sv.surf_w / sv.surf_h
+        d.p2.x = auxLinear && sv.kind != Int32(MV_VIEW_AA_SIGHT) ? 1 : 0
+        let q = simd_quatf(ix: sv.surf_rot.0, iy: sv.surf_rot.1, iz: sv.surf_rot.2, r: sv.surf_rot.3).normalized
+        var m = simd_float4x4(q)
+        m.columns.0 *= sv.surf_w
+        m.columns.1 *= sv.surf_h
+        m.columns.3 = simd_float4(sv.surf_pos.0, sv.surf_pos.1, sv.surf_pos.2, 1)
+        d.model = m
+
+        let key = SKey(layered: layered, linear: linearOutput, color: colorFormat, depth: depthFormat, samples: sampleCount)
+        guard let pso = specialPipeline(key), let ds = spcDepth else { return }
+        var u = WpnFrameU()
+        if layered {
+            let cnt = min(n, viewCount)
+            let i1 = min(1, cnt - 1)
+            u.viewProj0 = projections[0] * views[0]
+            u.viewProj1 = projections[i1] * views[i1]
+        } else {
+            let i = min(max(viewIndex, 0), n - 1)
+            let vp = projections[i] * views[i]
+            u.viewProj0 = vp; u.viewProj1 = vp
+        }
+        encoder.pushDebugGroup("WPN vista especial")
+        encoder.setRenderPipelineState(pso)
+        encoder.setDepthStencilState(ds)
+        encoder.setDepthBias(0, slopeScale: 0, clamp: 0)
+        encoder.setCullMode(.none)
+        encoder.setVertexBytes(&u, length: MemoryLayout<WpnFrameU>.stride, index: 1)
+        encoder.setVertexBytes(&d, length: MemoryLayout<SpcDrawU>.stride, index: 2)
+        encoder.setFragmentBytes(&d, length: MemoryLayout<SpcDrawU>.stride, index: 2)
+        encoder.setFragmentTexture(image, index: 0)
+        encoder.setFragmentTexture(overlay ?? whiteTexture, index: 1)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         encoder.popDebugGroup()
     }
 }
