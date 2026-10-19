@@ -115,6 +115,10 @@ typedef struct VrBodyConfig {
                                   * (izquierda +, derecha -): el marco de AGARRE de los mandos del visor es el del dispositivo (Y arriba, -Z delante, X lateral; medido: inclinado 35 grados y NO está
                                   * reflejado entre mandos), mientras que el de vr_pose.h es el de la mano plana con la palma abajo (+Y = dorso). Con identidad la mano sale plana "sobre las piernas". */
     float hand_roll_deg;         /* giro de agarre -> mano (defecto 45): al sujetar los mandos la mano queda girada ~45 grados vista desde arriba (palma hacia dentro y abajo); 90 = apretón de manos, 0 = plana */
+    float hand_pitch_deg;        /* CABECEO fijo agarre -> mano (grados, giro sobre el eje lateral X del agarre; positivo = los dedos suben). Defecto -35: el marco de agarre del Sense está inclinado 35 grados
+                                  * respecto al apuntado (medido: Y=(0,0.82,0.57), Z=(0,-0.57,0.82) en el marco del dispositivo, apuntado = Z del dispositivo), así que con el mando apuntando horizontal los
+                                  * dedos del agarre miran 35 grados arriba y se bajan 35. Independiente del alabeo (hand_roll_deg, que gira DESPUÉS sobre el eje de los dedos). */
+    int hand_pitch_auto;         /* 1 (defecto): si el mando entrega el apuntado (VrHandPose.aim_valid) el cabeceo se calcula de la propia relación agarre/apuntado (deja la mano alineada con el apuntado); 0 = siempre hand_pitch_deg */
     float curl_deg;              /* giro RÍGIDO de la pieza mano con el agarre al máximo; defecto 0 (el cierre lo hace el puño deformado: fist_enabled) */
     int fist_enabled;            /* 1 (defecto): con el agarre cerrado la malla de la mano del personaje se deforma en un puño (vr_fist); 0 = mano rígida */
     float fist_min_grip;         /* agarre (ya suavizado y fundido) a partir del cual se deforma la malla; defecto 0,03 */
@@ -160,6 +164,22 @@ void vrbody_set_grab(const VrBodyGrab *g);
 void vrbody_set_jab(int side, const float dir[3]);
 /* Cambia el giro de agarre -> mano (grados, -180..180; ver VrBodyConfig.hand_roll_deg) sin reiniciar el estado. Para calibrar en el visor. */
 void vrbody_set_hand_roll(float deg);
+/* Cabeceo fijo (hand_pitch_deg) y modo automático por el apuntado (hand_pitch_auto); no reinician el estado. */
+void vrbody_set_hand_pitch(float deg);
+void vrbody_set_hand_pitch_auto(int on);
+/* Cabeceo (grados, giro sobre el eje X del agarre) que alinea los dedos del agarre con el apuntado: atan2(ay, -az) con a = apuntado(-Z) en el marco del agarre. 1 = bien; 0 = apuntado
+ * inservible (cuaterniones no finitos o apuntado casi perpendicular a los dedos): se usa el cabeceo fijo. */
+int vrbody_pitch_from_aim(const float grip_q[4], const float aim_q[4], float *deg);
+/* Calibración "Calibrar manos": con los brazos rectos al frente y los mandos sujetos de forma natural, toma la orientación ACTUAL de cada agarre y guarda la corrección fija
+ * (cuaternión agarre -> mano) que deja la mano del personaje con los dedos horizontales al frente y el dorso girado hand_roll_deg hacia fuera. Reemplaza (cabeceo+alabeo) de esa mano
+ * hasta vrbody_clear_calibration. Devuelve cuántas manos se calibraron (0..2; una mano sin seguimiento o con los dedos apuntando casi vertical no se calibra). */
+int vrbody_calibrate_hands(void);
+void vrbody_clear_calibration(void);
+/* Persistencia: obtener (devuelve 1 si hay calibración) / restaurar la corrección de un lado (0 izq, 1 der). */
+int vrbody_get_calibration(int side, float q[4]);
+void vrbody_set_calibration(int side, const float q[4]);
+/* Pura (sin estado): corrección agarre -> mano que deja los dedos horizontales y el dorso a roll_signed_deg (izq +, der -) del cenit. 1 = bien; 0 = dedos casi verticales. */
+int vrbody_calib_offset(const float grip_q[4], float roll_signed_deg, float out_q[4]);
 
 /* ------------------------------------------------------------------ pegamento sobre la RAM ----------------------- */
 /* Sustituye las matrices de los brazos para el frame en curso (etapa de transformación). Devuelve el nº de brazos

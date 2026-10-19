@@ -190,10 +190,41 @@ int vrpose_get_hands(VrHandPose out[2]) {
         if (!g.valid) continue;
         out[i].valid = 1;
         memcpy(out[i].pos, g.p, sizeof g.p); memcpy(out[i].rot, g.q, sizeof g.q);
+        if (hand_in[i].aim_valid) { out[i].aim_valid = 1; memcpy(out[i].aim_rot, hand_in[i].aim_rot, sizeof out[i].aim_rot); }   /* el apuntado endereza la mano del personaje (vr/body) */
         n++;
     }
     pthread_mutex_unlock(&HM);
     return n;
+}
+
+
+/* ---- orientación de las manos del personaje y calibración ---- */
+static volatile float cal_countdown = 0;       /* s restantes; 0 = nada pendiente */
+static volatile uint32_t cal_serial;
+void mv_vrgame_set_hand_pose(float pitch_deg, int32_t auto_pitch, float roll_deg) {
+    vrbody_set_hand_pitch(pitch_deg); vrbody_set_hand_pitch_auto(auto_pitch != 0); vrbody_set_hand_roll(roll_deg);
+}
+void mv_vrgame_calibrate_hands(float delay_s) { cal_countdown = (isfinite(delay_s) && delay_s > 0.02f) ? (delay_s > 30.0f ? 30.0f : delay_s) : 0.02f; }
+float mv_vrgame_calibration_countdown(void) { return cal_countdown; }
+void mv_vrgame_clear_hand_calibration(void) { vrbody_clear_calibration(); cal_serial++; }
+int32_t mv_vrgame_hand_calibration(int32_t side, float q[4]) { return vrbody_get_calibration(side, q); }
+void mv_vrgame_set_hand_calibration(int32_t side, const float q[4]) { vrbody_set_calibration(side, q); }
+uint32_t mv_vrgame_calibration_serial(void) { return cal_serial; }
+/* Una vez por VBlank (hilo de emulación): cuenta atrás de la calibración con háptico. */
+static void calib_tick(float dt) {
+    float t = cal_countdown;
+    if (t <= 0) return;
+    float t2 = t - dt;
+    if (t2 > 0) {
+        if ((int)ceilf(t2) != (int)ceilf(t)) { vrgame_haptic(0, 0.3f); vrgame_haptic(1, 0.3f); }     /* un pulso por segundo */
+        cal_countdown = t2;
+        return;
+    }
+    cal_countdown = 0;
+    int n = vrbody_calibrate_hands();
+    cal_serial++;
+    if (n > 0) { vrgame_haptic(0, 1.0f); vrgame_haptic(1, 1.0f); }
+    fprintf(stderr, "[manos] calibradas %d manos (corrección agarre->mano fija)\n", n);
 }
 
 int32_t mv_vrgame_hand_matrix(int32_t side, float m[16]) {
@@ -686,6 +717,8 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
 
     int cam = vrcam_active();
     int core = bs && (bs->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs->has_player;
+
+    calib_tick(dt);
 
     /* manos (una sola toma coherente) */
     HandSlot hs[2];

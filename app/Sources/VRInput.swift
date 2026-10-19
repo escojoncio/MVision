@@ -163,8 +163,37 @@ final class VRInput: @unchecked Sendable {
         guard !started else { return }
         started = true
         hub.onChange = { [weak self] in self?.controllersChanged() }
+        Self.restoreHandCalibration()
         hub.start()
         controllersChanged()
+    }
+
+    // MARK: - Calibración de manos ("Calibrar manos" del menú VR): corrección fija agarre -> mano del personaje (cuaternión por mano), persistida
+
+    private static let handCalKey = "vri.handCal"
+    private static var handCalSerial: UInt32 = 0
+
+    /// Restaura la calibración guardada (8 números: izquierda x,y,z,w y derecha x,y,z,w; un cuaternión nulo = sin calibrar).
+    static func restoreHandCalibration(_ d: UserDefaults = .standard) {
+        guard let a = d.array(forKey: handCalKey) as? [Double], a.count == 8 else { handCalSerial = mv_vrgame_calibration_serial(); return }
+        for s in 0..<2 {
+            let q: [Float] = (0..<4).map { Float(a[4 * s + $0]) }
+            mv_vrgame_set_hand_calibration(Int32(s), q)
+        }
+        handCalSerial = mv_vrgame_calibration_serial()
+    }
+
+    /// Guarda la calibración cuando cambia (la hace o la borra el hilo del juego).
+    static func persistHandCalibrationIfChanged(_ d: UserDefaults = .standard) {
+        let sr = mv_vrgame_calibration_serial()
+        guard sr != handCalSerial else { return }
+        handCalSerial = sr
+        var out = [Double](repeating: 0, count: 8)
+        for s in 0..<2 {
+            var q: [Float] = [0, 0, 0, 0]
+            if mv_vrgame_hand_calibration(Int32(s), &q) != 0 { for i in 0..<4 { out[4 * s + i] = Double(q[i]) } }
+        }
+        d.set(out, forKey: handCalKey)
     }
 
     /// Conexión tardía incluida: cada alta/baja de un mando vuelve a pedir el seguimiento del conjunto actual.
@@ -239,6 +268,7 @@ final class VRInput: @unchecked Sendable {
     func frame(head: simd_float4x4?, dt: Float, gamePosture: Int32 = -1, menu: Bool = false, comms: Bool = false,
                recenter: simd_float4x4 = matrix_identity_float4x4) -> vr_pad_t {
         let sample = hub.sample()
+        Self.persistHandCalibrationIfChanged()
 
         var f = vr_input_frame_t()
         f.dt = dt

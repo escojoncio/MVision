@@ -327,6 +327,7 @@ typedef struct {
     int init;              /* filtro inicializado (con una pose válida) */
     int was_valid;
     float pos[3], q[4];    /* pose filtrada (espacio del usuario) */
+    float aq[4]; int aim_ok; /* apuntado filtrado (si el mando lo entrega) */
     float w;               /* peso de fundido 0..1 */
     float grip_set;        /* agarre pedido por la aplicación */
     float grip_cur;        /* agarre aplicado (suavizado) */
@@ -363,6 +364,7 @@ static struct {
     /* vista del último apply (para volver del mundo del motor al espacio del usuario en vrbody_forearm_pose) */
     int view_ok;
     float view_eye[3], view_pref[3], view_T[9], view_upm;
+    struct { int ok; float q[4]; } cal[2];   /* calibración de manos (sobrevive a vrbody_init) */
     float fore_q[2][4];                /* orientación del marco de agarre (espacio del usuario, sin hand_rot_offset) del último apply */
     float dbg_frame[2][16];            /* marco efectivo de la mano tras la IK (espacio del usuario, m; ver vrbody_debug_hand_frame) */
     int dbg_frame_ok[2];
@@ -384,6 +386,65 @@ void vrbody_set_hand_roll(float deg) {
     for (int s = 0; s < 2; s++) roll_offset(G.cfg.hand_roll_deg, s, G.cfg.hand_rot_offset[s]);
 }
 
+
+/* Cabeceo: giro de `deg` grados sobre el eje X (lateral) del agarre; positivo = el eje de los dedos (-Z) sube hacia +Y. */
+static void pitch_quat(float deg, float q[4]) {
+    float a = clampf(isfinite(deg) ? deg : 0.0f, -89.0f, 89.0f) * DEG * 0.5f;
+    q[0] = sinf(a); q[1] = 0; q[2] = 0; q[3] = cosf(a);
+}
+static void q_rotv(float *o, const float *q, const float *v) { float m[9]; vrbody_quat_to_mat(q, m); m_mulv(o, m, v); }
+void vrbody_set_hand_pitch(float deg) { if (isfinite(deg)) G.cfg.hand_pitch_deg = clampf(deg, -89.0f, 89.0f); }
+void vrbody_set_hand_pitch_auto(int on) { G.cfg.hand_pitch_auto = on != 0; }
+int vrbody_pitch_from_aim(const float grip_q[4], const float aim_q[4], float *deg) {
+    if (!grip_q || !aim_q || !deg || !all_finite(grip_q, 4) || !all_finite(aim_q, 4)) return 0;
+    float g[4] = {grip_q[0], grip_q[1], grip_q[2], grip_q[3]}, a[4] = {aim_q[0], aim_q[1], aim_q[2], aim_q[3]}, gc[4], rel[4];
+    q_normalize(g); q_normalize(a); q_conj(gc, g); q_mul(rel, gc, a);
+    float fwd[3] = {0, 0, -1}, v[3]; q_rotv(v, rel, fwd);              /* el apuntado en el marco del agarre */
+    if (!(-v[2] > 0.2f)) return 0;                                    /* apuntado casi perpendicular o contrario a los dedos: inservible */
+    float p = atan2f(v[1], -v[2]) / DEG;
+    if (!(fabsf(p) <= 80.0f)) return 0;
+    *deg = p; return 1;
+}
+int vrbody_calib_offset(const float grip_q[4], float roll_signed_deg, float out_q[4]) {
+    if (!grip_q || !out_q || !all_finite(grip_q, 4) || !isfinite(roll_signed_deg)) return 0;
+    float g[4] = {grip_q[0], grip_q[1], grip_q[2], grip_q[3]}; q_normalize(g);
+    float G3[9]; vrbody_quat_to_mat(g, G3);
+    float f[3] = {-G3[2], -G3[5], -G3[8]};                            /* hacia donde apuntan los dedos del agarre */
+    float fh[3] = {f[0], 0, f[2]}; float n = v_len(fh);
+    if (!(n > 0.3f)) return 0;                                        /* dedos casi verticales: no hay "delante" */
+    v_scale(fh, fh, 1.0f / n);
+    float zh[3] = {-fh[0], 0, -fh[2]}, xh[3] = {zh[2], 0, -zh[0]}, yh[3] = {0, 1, 0};
+    float H0[9], Rz[9], H[9], Gt[9], O[9];
+    m_setcol(H0, 0, xh); m_setcol(H0, 1, yh); m_setcol(H0, 2, zh);
+    float a = clampf(roll_signed_deg, -180.0f, 180.0f) * DEG, c_ = cosf(a), s_ = sinf(a);
+    float rz[9] = {c_, -s_, 0, s_, c_, 0, 0, 0, 1}; memcpy(Rz, rz, sizeof Rz);
+    m_mulm(H, H0, Rz);
+    m_transpose(Gt, G3); m_mulm(O, Gt, H);
+    vrbody_mat_to_quat(O, out_q);
+    return 1;
+}
+int vrbody_calibrate_hands(void) {
+    int n = 0;
+    for (int s = 0; s < 2; s++) {
+        Hand *h = &G.hand[s];
+        if (!h->init || !h->was_valid) continue;
+        float q[4];
+        if (vrbody_calib_offset(h->q, (s == 0 ? 1.0f : -1.0f) * G.cfg.hand_roll_deg, q)) { memcpy(G.cal[s].q, q, sizeof q); G.cal[s].ok = 1; n++; }
+    }
+    return n;
+}
+void vrbody_clear_calibration(void) { G.cal[0].ok = G.cal[1].ok = 0; }
+int vrbody_get_calibration(int side, float q[4]) {
+    if ((side != 0 && side != 1) || !q || !G.cal[side].ok) return 0;
+    memcpy(q, G.cal[side].q, sizeof G.cal[side].q); return 1;
+}
+void vrbody_set_calibration(int side, const float q[4]) {
+    if ((side != 0 && side != 1) || !q || !all_finite(q, 4)) return;
+    float t[4] = {q[0], q[1], q[2], q[3]};
+    if ((t[0] * t[0] + t[1] * t[1] + t[2] * t[2] + t[3] * t[3]) < 1e-6f) return;
+    q_normalize(t); memcpy(G.cal[side].q, t, sizeof t); G.cal[side].ok = 1;
+}
+
 void vrbody_config_default(VrBodyConfig *c) {
     memset(c, 0, sizeof *c);
     c->enabled = 1; c->dominant = 1;
@@ -393,6 +454,7 @@ void vrbody_config_default(VrBodyConfig *c) {
     c->grip_to_wrist_mm = 55.0f;
     c->hand_roll_deg = 45.0f;
     for (int s = 0; s < 2; s++) roll_offset(c->hand_roll_deg, s, c->hand_rot_offset[s]);
+    c->hand_pitch_deg = -35.0f; c->hand_pitch_auto = 1;
     c->curl_deg = 0.0f; c->armed_grip = 0.85f;
     c->fist_enabled = 1; c->fist_min_grip = 0.03f; vrfist_params_default(&c->fist);
     c->pole[0] = 0.45f; c->pole[1] = -1.0f; c->pole[2] = -0.35f;
@@ -402,8 +464,9 @@ void vrbody_config_default(VrBodyConfig *c) {
 }
 void vrbody_init(const VrBodyConfig *c) {
     VrBodyViewFn fn = G.view_fn; VrBodyHook hk = G.hook;
+    typeof(G.cal) cal; memcpy(cal, G.cal, sizeof cal);
     memset(&G, 0, sizeof G);
-    G.view_fn = fn; G.hook = hk;
+    G.view_fn = fn; G.hook = hk; memcpy(G.cal, cal, sizeof cal);
     if (c) G.cfg = *c; else vrbody_config_default(&G.cfg);
     if (!(G.cfg.frame_dt_s > 1e-4f && G.cfg.frame_dt_s < 1.0f)) G.cfg.frame_dt_s = 0.02f;
     if (!(G.cfg.blend_s >= 0)) G.cfg.blend_s = 0.25f;
@@ -627,13 +690,19 @@ int vrbody_apply(uint8_t *ram) {
             float q[4] = {hp[s].rot[0], hp[s].rot[1], hp[s].rot[2], hp[s].rot[3]}; q_normalize(q);
             float jump = 0;
             if (h->init) { float d3[3]; v_sub(d3, hp[s].pos, h->pos); jump = v_len(d3); }
+            float aqn[4] = {hp[s].aim_rot[0], hp[s].aim_rot[1], hp[s].aim_rot[2], hp[s].aim_rot[3]};
+            int aok = hp[s].aim_valid && all_finite(aqn, 4) && (aqn[0] * aqn[0] + aqn[1] * aqn[1] + aqn[2] * aqn[2] + aqn[3] * aqn[3]) > 1e-6f;
+            if (aok) q_normalize(aqn);
             if (!h->init || !h->was_valid || (cfg->max_hand_jump_m > 0 && jump > cfg->max_hand_jump_m)) {
                 v_cp(h->pos, hp[s].pos); memcpy(h->q, q, sizeof q); h->init = 1;
+                if (aok) memcpy(h->aq, aqn, sizeof aqn);
             } else {
                 float a = cfg->smooth_tau_s > 0 ? 1 - expf(-dt / cfg->smooth_tau_s) : 1.0f;
                 for (int i = 0; i < 3; i++) h->pos[i] += a * (hp[s].pos[i] - h->pos[i]);
                 q_slerp(h->q, h->q, q, a);
+                if (aok) { if (h->aim_ok) q_slerp(h->aq, h->aq, aqn, a); else memcpy(h->aq, aqn, sizeof aqn); }
             }
+            h->aim_ok = aok;
         }
         h->was_valid = v;
         any |= v || h->w > 0;
@@ -689,7 +758,17 @@ int vrbody_apply(uint8_t *ram) {
             }
         }
         float Ru[9], Rq[4], qo[4];
-        { qo[0] = cfg->hand_rot_offset[s][0]; qo[1] = cfg->hand_rot_offset[s][1]; qo[2] = cfg->hand_rot_offset[s][2]; qo[3] = cfg->hand_rot_offset[s][3]; q_normalize(qo); q_mul(Rq, h->q, qo); }
+        {   /* corrección fija agarre -> mano: calibrada (cuaternión completo) o cabeceo (X del agarre) seguido del alabeo (eje de los dedos) */
+            if (G.cal[s].ok) { memcpy(qo, G.cal[s].q, sizeof qo); q_normalize(qo); }
+            else {
+                float pd = cfg->hand_pitch_deg;
+                if (cfg->hand_pitch_auto && h->aim_ok) { float pa_; if (vrbody_pitch_from_aim(h->q, h->aq, &pa_)) pd = pa_; }
+                float qp[4], qr[4]; pitch_quat(pd, qp);
+                qr[0] = cfg->hand_rot_offset[s][0]; qr[1] = cfg->hand_rot_offset[s][1]; qr[2] = cfg->hand_rot_offset[s][2]; qr[3] = cfg->hand_rot_offset[s][3]; q_normalize(qr);
+                q_mul(qo, qp, qr);
+            }
+            q_mul(Rq, h->q, qo);
+        }
         memcpy(G.fore_q[s], h->q, sizeof h->q);     /* marco del AGARRE (sin hand_rot_offset): el radar de muñeca va en el lado +Y del agarre (arriba con el pulgar arriba), como antes */
         vrbody_quat_to_mat(Rq, Ru);
         float Rw[9]; m_mulm(Rw, T, Ru);                                    /* ejes del marco de mano en el mundo */

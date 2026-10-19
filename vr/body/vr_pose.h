@@ -29,6 +29,10 @@ typedef struct {
     int   valid;       /* 1: pose válida */
     float pos[3];      /* m */
     float rot[4];      /* cuaternión x, y, z, w (no hace falta que esté normalizado) */
+    int   aim_valid;   /* 1: `aim_rot` es la orientación del APUNTADO del mando (ubicación "aim", -Z hacia donde apunta), en el mismo espacio. Con ella vr/body deduce el
+                        * cabeceo fijo entre el agarre y el apuntado (el mango del Sense está inclinado ~35 grados) y endereza la mano del personaje: con el mando apuntando
+                        * horizontal, los dedos del personaje quedan horizontales. 0 = sin apuntado (se usa VrBodyConfig.hand_pitch_deg). */
+    float aim_rot[4];
 } VrHandPose;
 
 /* Rellena out[0] (izquierda) y out[1] (derecha). Devuelve cuántas son válidas. Débil: por defecto 0 manos. */

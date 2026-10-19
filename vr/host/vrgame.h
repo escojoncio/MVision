@@ -113,6 +113,17 @@ void vrgame_set_driver(VrGameDriver f);
 /* Gestos de cuerpo (vr/input/vr_gesture): golpe, agarre/estrangulamiento, golpear la pared, asomarse. mask: bit 1 golpe, 2 agarre,
  * 4 pared, 8 asomarse (defecto todos). Sin arma equipada y con el jugador al mando; el botón del juego sigue funcionando siempre. */
 void mv_vrgame_set_gestures(int32_t enable, int32_t mask);
+/* Orientación de las manos del personaje respecto al agarre del mando (vr/body/vr_body.h): cabeceo fijo (grados; defecto -35: el agarre del Sense está inclinado 35 grados respecto al
+ * apuntado), `auto_pitch` = deducirlo del apuntado cuando el mando lo entrega, y alabeo (giro sobre el eje de los dedos; defecto 45). */
+void mv_vrgame_set_hand_pose(float pitch_deg, int32_t auto_pitch, float roll_deg);
+/* "Calibrar manos": cuenta atrás de `delay_s` s (pulsos hápticos cada segundo), y al terminar toma la orientación de ambos agarres (brazos rectos al frente, mandos sujetos de forma natural)
+ * y guarda la corrección fija. Háptico largo en las manos calibradas. delay_s <= 0: ahora. */
+void mv_vrgame_calibrate_hands(float delay_s);
+float mv_vrgame_calibration_countdown(void);                           /* s que faltan (0 = no hay cuenta atrás) */
+void mv_vrgame_clear_hand_calibration(void);
+int32_t mv_vrgame_hand_calibration(int32_t side, float q[4]);          /* 1 si hay calibración de ese lado (0 izq, 1 der) */
+void mv_vrgame_set_hand_calibration(int32_t side, const float q[4]);   /* restaurar una calibración guardada */
+uint32_t mv_vrgame_calibration_serial(void);                           /* cambia cada vez que se calibra o se borra (para persistir) */
 void vrbodyg_reset(void);
 unsigned vrbodyg_event_count(int ev);                                  /* VRG_EV_* acumulados (pruebas) */
 uint16_t vrbodyg_pad(uint16_t pad, const struct BridgeState *bs, int right_handed);
