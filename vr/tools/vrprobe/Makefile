@@ -14,12 +14,12 @@ EXE ?= ../../../gamedata/main.exe
 DISC ?= ../../../gamedata/disc
 SIGS_REF ?= ../../../gamedata/sigs_ref.json
 SIGS ?= $(BUILD)/sigs_hle.json
-SRC_VR := $(VR)/bridge/bridge.c $(VR)/bridge/bridge_addrs.c $(VR)/camera/vr_camera.c $(VR)/camera/vr_camera_hle.c $(VR)/input/vr_input.c $(VR)/input/vr_gesture.c $(VR)/scene/vr_scene.c \
+SRC_VR := $(VR)/bridge/bridge.c $(VR)/bridge/bridge_addrs.c $(VR)/camera/vr_camera.c $(VR)/camera/vr_heading.c $(VR)/camera/vr_camera_hle.c $(VR)/input/vr_input.c $(VR)/input/vr_gesture.c $(VR)/scene/vr_scene.c \
   $(VR)/body/vr_body.c $(VR)/body/vr_body_cam.c $(VR)/body/vr_pose.c $(VR)/radar/vr_radar.c $(VR)/radar/vr_radar_hle.c \
   $(VR)/hands/vr_hands.c $(filter-out $(VR)/weapons/test_%.c,$(wildcard $(VR)/weapons/*.c)) \
   $(VR)/gameplay/vr_fire.c $(VR)/gameplay/vr_fire_hle.c $(VR)/gameplay/vr_aa.c $(VR)/gameplay/vr_missile.c $(VR)/gameplay/vr_scope.c $(VR)/gameplay/vr_reload.c \
   $(VR)/ai/vrai.c $(VR)/ai/vr_ai_scan.c $(VR)/ai/vr_perception.c $(VR)/ai/vr_perception_rt.c $(VR)/ai/vr_cameras.c $(VR)/ai/vr_activity.c $(VR)/ai/vr_activity_rt.c \
-  $(VR)/host/vrgame.c $(VR)/host/vrbodyg.c $(VR)/host/vr_view.c $(VR)/host/vrhost.c
+  $(VR)/host/vrgame.c $(VR)/host/vrbodyg.c $(VR)/host/vr_view.c $(VR)/host/vr_cine.c $(VR)/host/vrhost.c
 SRC_RT := $(filter-out $(RT)/headless.c $(RT)/test_%.c $(RT)/wip_%.c,$(wildcard $(RT)/*.c))
 INC := -I. -I$(RT) -I$(VR)/bridge -I$(VR)/camera -I$(VR)/input -I$(VR)/scene -I$(VR)/body -I$(VR)/radar -I$(VR)/hands -I$(VR)/weapons -I$(VR)/gameplay -I$(VR)/ai -I$(VR)/host
 

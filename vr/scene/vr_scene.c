@@ -485,6 +485,8 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             }
             memcpy(A.m, m2, sizeof A.m); memcpy(A.t, t2, sizeof A.t);
             out->user_space = 1;
+            memcpy(out->user_R, o.user_R, sizeof out->user_R); out->user_k = o.user_k; out->user_eye_h = o.user_eye_h_m;
+            memcpy(out->user_p_ref, o.user_p_ref, sizeof out->user_p_ref);
         }
     } else {
         /* sin cámara del motor: espacio de vista (x der, y abajo, z adelante) -> VR (x der, y arriba, -z adelante) */
