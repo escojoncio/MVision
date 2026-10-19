@@ -70,6 +70,7 @@
  *  I8 H del motor 160 (en vez de 320): argumento de I1               validar: menos vértices saturados/desbordados
  */
 #include "vr_camera.h"
+#include "vr_calib.h"
 #include <math.h>
 #include <string.h>
 
@@ -104,6 +105,7 @@ typedef struct {
     int zoom_cap;                         /* >0: tope de la distancia de pantalla que pide el juego (vista de la cabeza sin aumento) */
     float theta_play0, yaw_ref, extra;    /* grados */
     float p_ref[3];
+    VrCalib calib;                        /* altura/escala del último recentrado */
     float view_yaw, theta_body;           /* último frame VR */
     BridgeState bs;                       /* grande: no en la pila */
     VrCamRecord rec[32];                  /* anillo por construcción */
@@ -226,6 +228,8 @@ void vrcam_frame(const uint8_t *ram, const BridgeState *st) {
 }
 
 void vrcam_recenter(void) { S.need_recenter = 1; }
+const VrCalib *vrcam_calib(void) { return &S.calib; }
+void vrcam_set_user_eye_height(float m) { S.cfg.user_eye_m = isfinite(m) && m > 0 ? m : 0.0f; S.need_recenter = 1; }
 int vrcam_zoom_capped(void) { return S.zoom_capped > 0; }
 void vrcam_set_zoom_cap(int cap) { S.zoom_cap = cap > 0 ? (cap > 32767 ? 32767 : cap) : 0; }
 void vrcam_turn(float deg) { S.extra = wrap180(S.extra + deg); }
@@ -252,6 +256,8 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
         S.theta_play0 = wrap360(b.body_yaw - a_yaw);
         S.yaw_ref = a_yaw; S.extra = 0;
         S.p_ref[0] = h[12]; S.p_ref[1] = h[13]; S.p_ref[2] = h[14];
+        if (S.cfg.calibrate) { VrCalibCfg cc; vrcalib_cfg_default(&cc); cc.user_eye_m = S.cfg.user_eye_m; vrcalib_compute(&cc, h[13], &S.calib); }
+        else { S.calib.seated = 0; S.calib.head_y_m = h[13]; S.calib.user_eye_m = 0; S.calib.scale = 1.0f; }
         S.have_ref = 1; S.need_recenter = 0; S.st.recenters++;
         S.hp_ok = 0; S.w_yaw = S.w_el = 0.0f;   /* el salto del recentrado no es una velocidad */
     }
@@ -323,7 +329,7 @@ void vrcam_commit(const uint8_t *ram, const VrCamPlan *p) {
         for (int j = 0; j < 3; j++) r->M[3 * i + j] = (float)rd_s16(ram, eye + (uint32_t)(3 * i + j) * 2) / 4096.0f;
     }
     r->screen = rd_s16(ram, VC_CHANNEL_MAIN + BCH_SCREEN);
-    r->units_per_m = S.cfg.units_per_m;
+    r->units_per_m = S.cfg.units_per_m * (S.cfg.calibrate && S.calib.scale > 0 ? S.calib.scale : 1.0f);
     if (r->active) {
         r->yaw_deg = p->yaw_deg; r->pitch_deg = p->pitch_deg; r->theta_play_deg = p->theta_play_deg;
         memcpy(r->p_ref, p->p_ref, sizeof r->p_ref);

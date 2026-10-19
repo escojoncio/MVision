@@ -65,6 +65,8 @@ typedef struct VrCamConfig {
                               * ~ predict_s después de construirse la cámara, y el recorte del motor está centrado en SU dirección; 0 = sin predicción. Defecto 0,10 */
     float predict_max_deg;   /* tope del adelanto angular aplicado (grados); defecto 35 */
     float vblank_hz;         /* VBlanks por segundo de la emulación (50 PAL); da la escala de tiempo de la velocidad angular */
+    int calibrate;           /* 1: al recentrar se calcula la escala usuario->mundo (vr_calib.h) y se aplica a units_per_m del registro; defecto 0 */
+    float user_eye_m;        /* altura de ojos de pie del usuario si se conoce (m); 0 = estimar al recentrar */
 } VrCamConfig;
 
 void vrcam_config_default(VrCamConfig *c);
@@ -87,6 +89,11 @@ void vrcam_turn(float deg);
 void vrcam_set_zoom_cap(int cap);
 /* 1 si en los últimos VBlanks el juego pidió más aumento que el tope (la mira del juego está activa): solo entonces la máscara de visión es la de la mira. */
 int vrcam_zoom_capped(void);
+/* Calibración de altura/escala hecha en el último recentrado (ver vr_calib.h); escala 1 y de pie si `calibrate` = 0. */
+struct VrCalib;
+const struct VrCalib *vrcam_calib(void);
+/* Altura de ojos de pie del usuario (m, 0 = estimar) y recalibración en el próximo recentrado. */
+void vrcam_set_user_eye_height(float m);
 /* 1 si el frame de cámara en curso es VR (decidido al construir la cámara). */
 int vrcam_active(void);
 /* Yaw de mirada (grados) del último frame VR; origen angular del mando (unidades del motor) con la configuración. */

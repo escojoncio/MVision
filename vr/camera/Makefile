@@ -25,7 +25,7 @@ RECOMP := ../../tools/recomp/recomp.py
 
 all: $(OUT)/test_camera
 SC := ../scene
-$(OUT)/test_camera: test_camera.c vr_camera.c vr_camera.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(BR)/bridge.c $(BR)/bridge_addrs.c
+$(OUT)/test_camera: test_camera.c vr_camera.c vr_camera.h vr_usermap.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(BR)/bridge.c $(BR)/bridge_addrs.c
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -I. -I$(BR) -I$(SC) -I$(RT) test_camera.c vr_camera.c $(SC)/vr_scene.c $(BR)/bridge.c $(BR)/bridge_addrs.c -o $@ -lm
 # EXE sintético (solo las instrucciones esperadas en los puntos de parche; sin datos del juego) para comparar vrcam_patch_ram con
@@ -92,3 +92,15 @@ snap: camtest
 clean:
 	rm -rf $(OUT)
 .PHONY: all test test-san gen camtest run snap clean
+
+# ---- rumbo del personaje (vr_heading) y calibración de altura/escala (vr_calib): pruebas sin datos del juego ----
+$(OUT)/test_heading: test_heading.c vr_heading.c vr_heading.h vr_calib.h vr_camera.c vr_camera.h $(BR)/bridge.c $(BR)/bridge_addrs.c
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -I. -I$(BR) test_heading.c vr_heading.c vr_camera.c $(BR)/bridge.c $(BR)/bridge_addrs.c -o $@ -lm
+test-heading: $(OUT)/test_heading
+	$(OUT)/test_heading
+test-heading-san: test_heading.c vr_heading.c vr_heading.h vr_calib.h vr_camera.c vr_camera.h $(BR)/bridge.c $(BR)/bridge_addrs.c
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -I. -I$(BR) test_heading.c vr_heading.c vr_camera.c $(BR)/bridge.c $(BR)/bridge_addrs.c -o $(OUT)/test_heading_san -lm
+	$(OUT)/test_heading_san
+.PHONY: test-heading test-heading-san

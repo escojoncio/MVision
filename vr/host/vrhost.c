@@ -16,6 +16,8 @@
 #include "host_hooks.h"
 #include "vr_body.h"
 #include "vr_camera.h"
+#include "vr_heading.h"
+#include "vr_usermap.h"
 #include "vr_fire.h"
 #include "vr_radar.h"
 #include "vr_radar_vrp.h"
@@ -290,10 +292,9 @@ static void build_one(const GpuDrawList *l, int si) {
             vr_scene_player_origin(&bs, &o, org);
             o.origin_mode = 1;
             o.origin_game[0] = (float)r->eye[0]; o.origin_game[1] = org[1]; o.origin_game[2] = (float)r->eye[2];
-            /* la escena se entrega en el espacio del USUARIO (la cámara del juego va girada theta_play respecto de él, y la cabeza
-             * de esa lista estaba en p_ref): así el giro con el stick y la cabeza coinciden con lo que ve el visor */
-            o.user_on = 1; o.user_theta_deg = r->theta_play_deg;
-            o.user_pos[0] = r->p_ref[0]; o.user_pos[1] = r->p_ref[1]; o.user_pos[2] = r->p_ref[2];
+#ifndef MV_NO_USER_MAP     /* (solo pruebas A/B: sin la correspondencia mundo -> usuario, como antes de §49) */
+            vrcam_scene_user_map(&o, r, org[1]);
+#endif
         }
     }
     /* Radar de muñeca: se separa del HUD (la escena del HUD se ensambla con la lista SIN sus primitivas) y su propia escena se
@@ -407,11 +408,12 @@ void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame)) { test_cb = 
 
 static void frame_hook(Cpu *c, uint32_t f) {
     float turn = mv_vr_take_turn();
-    if (turn != 0.0f) vrcam_turn(turn);
+    if (turn != 0.0f) vrhead_turn(turn);          /* gira la vista y, en vrhead_frame, el rumbo del personaje */
     if (mv_vr_take_recenter()) vrcam_recenter();
     bridge_read(emu_ram, &bs);
     publish_state();
     vrcam_frame(emu_ram, &bs);
+    vrhead_frame(emu_ram, &bs, bs.moving);
     vrai_frame(&bs, f);
     if (test_cb) test_cb(c, f);
     vrgame_frame_end();
@@ -483,7 +485,9 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     VrCamConfig cfg;
     vrcam_config_default(&cfg);
     cfg.head = vr_ok ? head_fn : NULL;
+    cfg.calibrate = 1;                            /* altura/escala del usuario al recentrar (vr_calib.h) */
     vrcam_init(&cfg);
+    vrhead_init(NULL);
     pthread_mutex_lock(&MX); stats.cam_ok = vr_ok; pthread_mutex_unlock(&MX);
     if (vr_ok) vrai_on_exe_loaded();   /* IA de enemigos y cámaras: solo con la edición esperada; los parches se instalan en on_bound */
 }

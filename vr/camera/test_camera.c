@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "vr_camera.h"
+#include "vr_usermap.h"
 #include "vr_scene.h"
 #ifndef EXE_MAGIC
 /* Firma de 8 bytes de la cabecera del formato de ejecutable (construida en hex; se valida con memcmp). */
@@ -372,8 +373,8 @@ static void test_patch(void) {
 /* ===== §49: el mundo de vr_scene en el espacio del usuario coincide con vrcam_delta =====
  * Un punto del mundo del motor visto con la cámara del motor (V = M^T (W - E)) se lleva a la vista de la cabeza de presentación de dos maneras:
  *   (a) vrcam_delta (A V + b, mm, X der, Y abajo, Z delante);
- *   (b) vr_scene con opts.user_on: posición en el espacio del usuario (m) y luego la cabeza (derecha, arriba, atrás).
- * Deben coincidir para cualquier rumbo del cuerpo (theta), mirada del motor, giro de la cabeza y traslación física. Sin user_on (comportamiento
+ *   (b) vr_scene con opts.user_map_on: posición en el espacio del usuario (m) y luego la cabeza (derecha, arriba, atrás).
+ * Deben coincidir para cualquier rumbo del cuerpo (theta), mirada del motor, giro de la cabeza y traslación física. Sin user_map_on (comportamiento
  * anterior) solo coinciden cuando theta + 180 grados es múltiplo de 360. */
 static void test_predict(void) {
     /* predicción de mirada: el motor mira predict_s por delante de la cabeza (acotada) y el registro conserva la mirada real para el espacio del usuario */
@@ -414,7 +415,7 @@ static void us_scene_point(const VrCamRecord *r, const float V[3], int user_on, 
     VrSceneOpts so = vr_scene_opts_default();
     so.origin_mode = 1; so.origin_game[0] = (float)r->eye[0]; so.origin_game[1] = (float)r->eye[1] - 1600.0f; so.origin_game[2] = (float)r->eye[2];
     so.near_units = 1.0f; so.max_edge_m = 1000.0f;
-    if (user_on) { so.user_on = 1; so.user_theta_deg = r->theta_play_deg; memcpy(so.user_pos, r->p_ref, sizeof so.user_pos); }
+    if (user_on) vrcam_scene_user_map(&so, r, so.origin_game[1]);
     VrScene sc;
     CHECK(vr_scene_build(&t_dl, &bs, &so, &sc) == 0 && sc.nv == 3);
     /* el triángulo emitido puede tener los vértices permutados por el frente: game_view (exacta) lleva el punto de vista al espacio de salida */
@@ -450,7 +451,7 @@ static void test_userspace(void) {
         got[2] = -(h[8] * dd[0] + h[9] * dd[1] + h[10] * dd[2]);
         /* la altura del ojo del motor (1,6 m sobre el suelo del usuario) coincide con p_ref.y (1,6 m): sin desplazamiento vertical */
         NEAR(got[0], want[0], 0.004); NEAR(got[1], want[1], 0.004); NEAR(got[2], want[2], 0.004);
-        /* sin user_on: solo coincide si theta + 180 es múltiplo de 360 */
+        /* sin user_map_on: solo coincide si theta + 180 es múltiplo de 360 */
         float U0[3]; us_scene_point(&r, V, 0, U0);
         float d0[3] = {U0[0] - h[12], U0[1] - h[13], U0[2] - h[14]};
         float g0x = h[0] * d0[0] + h[1] * d0[1] + h[2] * d0[2], g0z = -(h[8] * d0[0] + h[9] * d0[1] + h[10] * d0[2]);
