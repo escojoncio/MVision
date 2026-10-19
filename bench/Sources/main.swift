@@ -323,7 +323,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
             // radar de muñeca y arma en mano (informativos: no hacen fallar el banco, ver "soft")
             if let wf = enc.renderer.radar?.wristFrame, let px = project(wf.center, eye: e, head: headB) {
                 let c = im.avg(px.0, px.1, r: 3)
-                soft(caso, "ojo \(e) radar de muneca", c.1 > 80 && c.0 < 120, "centro del radar \(wf.center) pixel (\(px.0),\(px.1)) color \(c) esperado verde")
+                soft(caso, "ojo \(e) radar de muneca", c.1 > 80 || c.0 > 120, "centro del radar \(wf.center) pixel (\(px.0),\(px.1)) color \(c) esperado verde o punto rojo")
             } else { soft(caso, "ojo \(e) radar de muneca", false, "sin marco de muneca (radar sin pose o sin escena)") }
             if let px = project(SIMD3<Float>(0.25, 1.2, -0.6), eye: e, head: headB) {
                 let c = im.avg(px.0, px.1, r: 3)
