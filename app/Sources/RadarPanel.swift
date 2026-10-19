@@ -299,6 +299,13 @@ final class RadarPanel {
         quadU.bezelColor = SIMD4<Float>(bezelColor.x, bezelColor.y, bezelColor.z, 1)
     }
 
+    /// Marco del quad del radar (espacio VR/recentrado) tras el último `updatePose`; nil sin pose válida. Lo usa el HUD de muñeca (XRPresent).
+    var wristFrame: (center: SIMD3<Float>, right: SIMD3<Float>, up: SIMD3<Float>, halfW: Float, halfH: Float)? {
+        guard quadValid else { return nil }
+        return (SIMD3<Float>(quadU.center.x, quadU.center.y, quadU.center.z), SIMD3<Float>(quadU.right.x, quadU.right.y, quadU.right.z),
+                SIMD3<Float>(quadU.up.x, quadU.up.y, quadU.up.z), quadU.center.w, quadU.right.w)
+    }
+
     // MARK: quad en el pase de escena
     private func quadPipeline(_ k: QKey) -> MTLRenderPipelineState? {
         if let p = quadPipes[k] { return p }

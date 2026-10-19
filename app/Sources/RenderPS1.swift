@@ -39,6 +39,16 @@ final class PS1Renderer {
     /// false: no se aplica el filtro de pantalla (la escena va directa al drawable, sin onda ni tinte).
     var screenFilterEnabled = true
 
+    /// Presentación (XRPresent.swift). false = pantalla de cine: se siguen aplicando los eventos de VRAM (la VRAM debe quedar al día) pero no se dibuja
+    /// el mundo 3D ni el panel 2D; el color y la profundidad se limpian igual.
+    var drawWorld = true
+    /// false = no se dibujan el radar de muñeca ni el arma en la mano (diorama: las vistas llevan otra transformación y el cuerpo no tiene sentido).
+    var drawBody = true
+    /// Cámara del juego de la última escena -> mundo VR (VrScene.game_view, columnas; vista del juego en unidades del motor -> metros).
+    private(set) var gameView = matrix_identity_float4x4
+    /// La última escena traía geometría 3D.
+    var sceneHas3D: Bool { has3D }
+
     // MARK: estado
     private let colorFormat: MTLPixelFormat
     private let depthFormat: MTLPixelFormat
@@ -71,13 +81,31 @@ final class PS1Renderer {
     private struct FilterFx {
         var needsPost = false
         var tint = SIMD3<Float>(1, 1, 1)
-        var cover = SIMD4<Float>(0, 0, 0, -1)       // xyz = color/255, w = modo de mezcla original o -1
+        // recubrimientos en orden de dibujo (xyz = color/255, w = modo de mezcla original o -1 = sin usar; los usados van primero)
+        var covers = [SIMD4<Float>](repeating: SIMD4<Float>(0, 0, 0, -1), count: Int(VR_POST_COVERS))
+        // líneas de exploración de las gafas (x = periodo en filas originales, y = fase, z = alto, w = modo o -1) y su color (w = ganancia)
+        var scan = SIMD4<Float>(0, 0, 0, -1)
+        var scanRGB = SIMD4<Float>(0, 0, 0, 1)
+        var scanAfter: Float = 0                    // recubrimientos dibujados antes de las líneas
+        // máscara de visión (máscara de gas, caja): tamaño de la imagen mostrada del motor y textura (anillo `frameTex`)
+        var frameArea = SIMD2<Float>(0, 0)
+        var frameOn = false
+        var frameRGB = SIMD3<Float>(0, 0, 0)        // color que se suma donde la máscara cierra del todo
+        var frameIdx = 0
+        var cxCol: Float = 160
         var projH: Float = 160, cyRow: Float = 128
         var nrows = 0
         var dv = [Float](repeating: 0, count: Int(VR_POST_ROWS))   // desplazamiento por fila de la imagen original (0 donde no hay tira)
     }
     private struct PostPlan { var sceneColor: [MTLTexture], sceneResolve: [MTLTexture], fxTex: [MTLTexture], dst: [MTLTexture] }
     private var fx = FilterFx()
+    /// Anillo de texturas R8 con la resta de la máscara de visión (VR_FRAME_W x VR_FRAME_H, una por escena distinta: la GPU puede seguir leyendo la anterior).
+    private var frameTex: [MTLTexture] = []
+    private var frameSum: UInt64 = 0
+    private var frameTexNext = 0
+    private var frameTexCur = -1
+    /// Ganancia de las líneas de exploración de las gafas (1 = fiel al original, 0 = sin líneas).
+    var scanlineGain: Float = 1
     private var fxTex: [MTLTexture] = []
     private var fxKey = ""
     private var postPipes: [String: MTLRenderPipelineState] = [:]
@@ -316,13 +344,82 @@ final class PS1Renderer {
         n.nrows = warp ? max(1, Int(f.nrows)) : 0
         let tc = (f.tint.0, f.tint.1, f.tint.2)
         n.tint = SIMD3<Float>(tc.0.isFinite ? min(max(tc.0, 0), 4) : 1, tc.1.isFinite ? min(max(tc.1, 0), 4) : 1, tc.2.isFinite ? min(max(tc.2, 0), 4) : 1)
-        if f.cover_abr >= 0 {
-            n.cover = SIMD4<Float>(f.cover_rgb.0, f.cover_rgb.1, f.cover_rgb.2, Float(f.cover_abr & 3))
+        // recubrimientos en orden (covers_rgb[4][3], covers_abr[4]); sin lista, el último (cover_rgb/cover_abr)
+        var nc = 0
+        withUnsafeBytes(of: f.covers_rgb) { (rgbRaw: UnsafeRawBufferPointer) -> Void in
+            withUnsafeBytes(of: f.covers_abr) { (abrRaw: UnsafeRawBufferPointer) -> Void in
+                let rgb = rgbRaw.bindMemory(to: Float.self)
+                let abr = abrRaw.bindMemory(to: Int32.self)
+                let cnt = min(Int(f.n_covers), Int(VR_POST_COVERS), abr.count, rgb.count / 3)
+                for i in 0..<max(cnt, 0) where abr[i] >= 0 {
+                    let c = SIMD3<Float>(rgb[3 * i], rgb[3 * i + 1], rgb[3 * i + 2])
+                    if c.x.isFinite && c.y.isFinite && c.z.isFinite {
+                        n.covers[nc] = SIMD4<Float>(min(max(c.x, 0), 1), min(max(c.y, 0), 1), min(max(c.z, 0), 1), Float(abr[i] & 3))
+                        nc += 1
+                    }
+                }
+            }
         }
+        if nc == 0 && f.cover_abr >= 0 {
+            n.covers[0] = SIMD4<Float>(f.cover_rgb.0, f.cover_rgb.1, f.cover_rgb.2, Float(f.cover_abr & 3))
+            nc = 1
+        }
+        // líneas de exploración (gafas): solo con >= 8 y un periodo coherente; no se usan datos no finitos
+        var scanned = false
+        if f.n_scan >= 8, f.scan_pitch.isFinite, f.scan_pitch >= 1, f.scan_pitch <= 64, f.scan_h.isFinite, f.scan_h > 0, f.scan_phase.isFinite,
+           f.scan_rgb.0.isFinite, f.scan_rgb.1.isFinite, f.scan_rgb.2.isFinite, scanlineGain > 0 {
+            n.scan = SIMD4<Float>(f.scan_pitch, f.scan_phase, min(f.scan_h, f.scan_pitch), Float(f.scan_abr & 3))
+            n.scanRGB = SIMD4<Float>(min(max(f.scan_rgb.0, 0), 1), min(max(f.scan_rgb.1, 0), 1), min(max(f.scan_rgb.2, 0), 1), scanlineGain)
+            n.scanAfter = Float(min(max(Int(f.scan_after), 0), Int(VR_POST_COVERS)))
+            scanned = true
+        }
+        // máscara de visión: se sube a la siguiente textura del anillo (solo si cambió)
+        var framed = false
+        if f.frame_on != 0, let fp = f.frame, f.frame_w == Int32(VR_FRAME_W), f.frame_h == Int32(VR_FRAME_H), f.area.2 > 0, f.area.3 > 0 {
+            if uploadFrame(fp, Int(f.frame_w), Int(f.frame_h)) {
+                n.frameIdx = frameTexCur
+                n.frameArea = SIMD2<Float>(Float(f.area.2), Float(f.area.3))
+                n.frameOn = true
+                let fr = (f.frame_rgb.0, f.frame_rgb.1, f.frame_rgb.2)
+                n.frameRGB = SIMD3<Float>(fr.0.isFinite ? min(max(fr.0, 0), 0.5) : 0, fr.1.isFinite ? min(max(fr.1, 0), 0.5) : 0, fr.2.isFinite ? min(max(fr.2, 0), 0.5) : 0)
+                framed = true
+            }
+        }
+        n.cxCol = f.cx_col.isFinite ? f.cx_col : 160
         n.projH = f.proj_h.isFinite && f.proj_h > 1 ? f.proj_h : 160
         n.cyRow = f.cy_row.isFinite ? f.cy_row : 128
         let tinted = abs(n.tint.x - 1) > 1e-3 || abs(n.tint.y - 1) > 1e-3 || abs(n.tint.z - 1) > 1e-3
-        n.needsPost = warp || tinted || n.cover.w >= 0
+        n.needsPost = warp || tinted || nc > 0 || scanned || framed
+    }
+
+    /// Sube la resta de la máscara de visión (w*h bytes) al anillo de texturas R8. Devuelve false si no se pudo (sin máscara). Reutiliza la última si el contenido no cambió.
+    private func uploadFrame(_ p: UnsafePointer<UInt8>, _ w: Int, _ h: Int) -> Bool {
+        guard ensureFrameTextures(), w == Int(VR_FRAME_W), h == Int(VR_FRAME_H) else { return false }
+        var sum: UInt64 = 1469598103934665603      // FNV-1a
+        for i in 0..<(w * h) { sum = (sum ^ UInt64(p[i])) &* 1099511628211 }
+        if sum == frameSum && frameTexCur >= 0 { return true }
+        let idx = frameTexNext % frameTex.count
+        frameTex[idx].replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: p, bytesPerRow: w)
+        frameTexNext = (idx + 1) % frameTex.count
+        frameTexCur = idx
+        frameSum = sum
+        return true
+    }
+
+    /// Crea el anillo de texturas de la máscara de visión (también hace de textura ficticia cuando no hay máscara: el shader siempre la enlaza).
+    private func ensureFrameTextures() -> Bool {
+        if !frameTex.isEmpty { return true }
+        var out: [MTLTexture] = []
+        for _ in 0..<8 {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: Int(VR_FRAME_W), height: Int(VR_FRAME_H), mipmapped: false)
+            d.usage = .shaderRead
+            d.storageMode = .shared
+            guard let t = device.makeTexture(descriptor: d) else { return false }
+            t.label = "VR mascara de vision"
+            out.append(t)
+        }
+        frameTex = out
+        return true
     }
 
     private func storeScene(_ sc: VrScene, _ newSlot: inout Bool) {
@@ -342,6 +439,11 @@ final class PS1Renderer {
         batches.removeAll(keepingCapacity: true)
         has3D = sc.has_3d != 0
         haveScene = true
+        let gv: [Float] = withUnsafeBytes(of: sc.game_view) { Array($0.bindMemory(to: Float.self)) }
+        if gv.count >= 16 && gv.allSatisfy({ $0.isFinite }) {
+            gameView = simd_float4x4(columns: (SIMD4<Float>(gv[0], gv[1], gv[2], gv[3]), SIMD4<Float>(gv[4], gv[5], gv[6], gv[7]),
+                                               SIMD4<Float>(gv[8], gv[9], gv[10], gv[11]), SIMD4<Float>(gv[12], gv[13], gv[14], gv[15])))
+        }
         guard let buf = slot.buf, let v = sc.v, nv > 0 else { return }
         memcpy(buf.contents(), v, nv * MemoryLayout<VrGpuVtx>.stride)
         slot.stOff = stOff
@@ -419,7 +521,7 @@ final class PS1Renderer {
         } else {
             groups.append((0, batches.count, Int.max))
         }
-        let doHud = gotNew || !hudDone
+        let doHud = (gotNew || !hudDone) && drawWorld
         // Filtro de pantalla: la escena se resuelve en texturas intermedias y un pase por ojo escribe el drawable (ver planPost).
         let plan = planPost(colorTargets: colorTargets, resolveTargets: resolveTargets, layered: layered)
         let sceneColor = plan?.sceneColor ?? colorTargets
@@ -527,7 +629,7 @@ final class PS1Renderer {
         let msaa = (colorTargets.first?.sampleCount ?? 1) > 1
         let dst = msaa ? resolveTargets : colorTargets
         guard let first = dst.first, postPipeline(format: first.pixelFormat, layered: layered) != nil,
-              let tex = filterTextures(like: dst) else { return nil }
+              ensureFrameTextures(), let tex = filterTextures(like: dst) else { return nil }
         if msaa { return PostPlan(sceneColor: colorTargets, sceneResolve: tex, fxTex: tex, dst: dst) }
         return PostPlan(sceneColor: tex, sceneResolve: [], fxTex: tex, dst: dst)
     }
@@ -536,16 +638,23 @@ final class PS1Renderer {
     /// Parámetros por ojo a partir de la proyección: fila del punto principal = H/2*(1+P[2][1]) y focal vertical = H/2*P[1][1] (px).
     private func encodePost(_ cb: MTLCommandBuffer, _ plan: PostPlan, projections: [simd_float4x4], layered: Bool) {
         guard let first = plan.dst.first, let pso = postPipeline(format: first.pixelFormat, layered: layered) else { return }
-        func eyeParams(_ i: Int, _ height: Int) -> SIMD4<Float> {
-            let h = Float(height)
-            guard !projections.isEmpty else { return SIMD4<Float>(h * 0.5, h * 0.5, 0, 0) }
+        // por ojo: x = fila del punto principal, y = focal vertical, z = columna del punto principal, w = focal horizontal (todo en píxeles de la textura)
+        func eyeParams(_ i: Int, _ width: Int, _ height: Int) -> SIMD4<Float> {
+            let h = Float(height), w = Float(width)
+            guard !projections.isEmpty else { return SIMD4<Float>(h * 0.5, h * 0.5, w * 0.5, h * 0.5) }
             let p = projections[min(i, projections.count - 1)]
-            return SIMD4<Float>(h * 0.5 * (1 + p.columns.2.y), h * 0.5 * p.columns.1.y, 0, 0)
+            return SIMD4<Float>(h * 0.5 * (1 + p.columns.2.y), h * 0.5 * p.columns.1.y, w * 0.5 * (1 - p.columns.2.x), w * 0.5 * p.columns.0.x)
         }
         var u = VrPostUniforms()
         u.tint = SIMD4<Float>(fx.tint.x, fx.tint.y, fx.tint.z, 0)
-        u.cover = fx.cover
-        u.cfg = SIMD4<Float>(fx.projH, fx.cyRow, Float(fx.nrows), 0)
+        u.covers = (fx.covers[0], fx.covers[1], fx.covers[2], fx.covers[3])
+        u.cfg = SIMD4<Float>(fx.projH, fx.cyRow, Float(fx.nrows), fx.cxCol)
+        u.scan = fx.scan
+        u.scan_rgb = fx.scanRGB
+        u.misc = SIMD4<Float>(fx.scanAfter, fx.frameRGB.x, fx.frameRGB.y, fx.frameRGB.z)
+        u.frame = SIMD4<Float>(fx.frameArea.x, fx.frameArea.y, fx.frameOn ? 1 : 0, 0)
+        guard !frameTex.isEmpty else { return }
+        let frameTexture = frameTex[min(max(fx.frameIdx, 0), frameTex.count - 1)]
         let dvCopy = fx.dv
         if layered {
             guard let src = plan.fxTex.first else { return }
@@ -555,12 +664,13 @@ final class PS1Renderer {
             pd.colorAttachments[0].storeAction = .store
             let n = max(1, min(viewCount, first.arrayLength))
             pd.renderTargetArrayLength = n
-            u.eye = (eyeParams(0, first.height), eyeParams(1, first.height))
+            u.eye = (eyeParams(0, first.width, first.height), eyeParams(1, first.width, first.height))
             guard let enc = cb.makeRenderCommandEncoder(descriptor: pd) else { return }
             enc.label = "VR post filtro (estéreo)"
             enc.setRenderPipelineState(pso)
             enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(first.width), height: Double(first.height), znear: 0, zfar: 1))
             enc.setFragmentTexture(src, index: 0)
+            enc.setFragmentTexture(frameTexture, index: 1)
             enc.setFragmentBytes(&u, length: MemoryLayout<VrPostUniforms>.stride, index: 0)
             dvCopy.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Void in
                 if let base = raw.baseAddress { enc.setFragmentBytes(base, length: raw.count, index: Int(VR_BUF_POST_DV)) }
@@ -574,13 +684,14 @@ final class PS1Renderer {
                 pd.colorAttachments[0].texture = dst
                 pd.colorAttachments[0].loadAction = .dontCare
                 pd.colorAttachments[0].storeAction = .store
-                let ep = eyeParams(i, dst.height)
+                let ep = eyeParams(i, dst.width, dst.height)
                 u.eye = (ep, ep)                                // el fragmento del ojo suelto usa eye[0]
                 guard let enc = cb.makeRenderCommandEncoder(descriptor: pd) else { continue }
                 enc.label = "VR post filtro (ojo \(i))"
                 enc.setRenderPipelineState(pso)
                 enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(dst.width), height: Double(dst.height), znear: 0, zfar: 1))
                 enc.setFragmentTexture(plan.fxTex[i], index: 0)
+                enc.setFragmentTexture(frameTexture, index: 1)
                 enc.setFragmentBytes(&u, length: MemoryLayout<VrPostUniforms>.stride, index: 0)
                 dvCopy.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Void in
                     if let base = raw.baseAddress { enc.setFragmentBytes(base, length: raw.count, index: Int(VR_BUF_POST_DV)) }
@@ -738,7 +849,7 @@ final class PS1Renderer {
         // Los defer corren al revés: este va ANTES de cerrar el codificador, tras dibujar el 3D (también si el guard de más abajo
         // retorna). Solo en el último segmento (el que resuelve el MSAA): el quad del radar y el arma se prueban contra la profundidad del 3D.
         defer {
-            if last {
+            if last && drawBody {
                 radar?.encodeQuad(enc, uniforms: uniforms, layered: amplify > 0, color: color.pixelFormat, depth: depth.pixelFormat, samples: samples)
                 weapon?.encode(encoder: enc, views: views, projections: projections, layered: amplify > 0, viewIndex: viewIndex)
             }
@@ -756,7 +867,7 @@ final class PS1Renderer {
         } else {
             enc.setViewport(viewportOverride.flatMap { viewIndex < $0.count ? $0[viewIndex] : nil } ?? vp0)
         }
-        guard haveScene, has3D, !seg.isEmpty, let buf = vtxSlots[curSlot].buf else { return }
+        guard haveScene, has3D, drawWorld, !seg.isEmpty, let buf = vtxSlots[curSlot].buf else { return }
         var u = uniforms
         enc.setVertexBuffer(buf, offset: 0, index: Int(VR_BUF_VERTS))
         enc.setVertexBuffer(buf, offset: vtxSlots[curSlot].stOff, index: Int(VR_BUF_STATES))

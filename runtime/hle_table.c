@@ -67,6 +67,8 @@ void hle_vrcam_overscan(Cpu *c);
 void hle_vrcam_padorg(Cpu *c);
 void hle_vrcam_trans(Cpu *c);
 void hle_vrcam_view(Cpu *c);
+void hle_vrfire_aalock(Cpu *c);
+void hle_vrfire_aaview(Cpu *c);
 void hle_vrfire_amissile(Cpu *c);
 void hle_vrfire_bullet(Cpu *c);
 void hle_vrfire_charge(Cpu *c);
@@ -145,6 +147,8 @@ const HleEntry hle_table[] = {
     {"vrcam_padorg", hle_vrcam_padorg},
     {"vrcam_trans", hle_vrcam_trans},
     {"vrcam_view", hle_vrcam_view},
+    {"vrfire_aalock", hle_vrfire_aalock},
+    {"vrfire_aaview", hle_vrfire_aaview},
     {"vrfire_amissile", hle_vrfire_amissile},
     {"vrfire_bullet", hle_vrfire_bullet},
     {"vrfire_charge", hle_vrfire_charge},
@@ -157,4 +161,4 @@ const HleEntry hle_table[] = {
     {"vrradar_draw", hle_vrradar_draw},
     {0, 0}
 };
-const unsigned hle_table_count = 76;
+const unsigned hle_table_count = 78;

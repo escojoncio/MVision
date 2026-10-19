@@ -31,6 +31,14 @@ $(OUT)/test_interp: $(RT) test_interp.c $(wildcard *.h)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_interp.c $(LDLIBS)
 
+$(OUT)/test_rtpatch: $(RT) test_rtpatch.c $(wildcard *.h)
+	@mkdir -p $(OUT)
+	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_rtpatch.c $(LDLIBS)
+
+$(OUT)/test_av: spu.c mdec.c test_av.c $(wildcard *.h)
+	@mkdir -p $(OUT)
+	$(CC) -I. $(CFLAGS) -o $@ spu.c mdec.c test_av.c -lm -lpthread
+
 $(OUT)/test_cdimg: $(RT) test_cdimg.c $(wildcard *.h)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_cdimg.c $(LDLIBS)
@@ -48,11 +56,13 @@ $(OUT)/headless_interp: $(RT) headless.c nogen.c $(wildcard *.h)
 .PHONY: test test_sys headless_interp
 headless_interp: $(OUT)/headless_interp
 
-test: $(OUT)/test_runtime $(OUT)/test_interp $(OUT)/test_hlebind $(OUT)/test_cdimg
+test: $(OUT)/test_runtime $(OUT)/test_interp $(OUT)/test_hlebind $(OUT)/test_rtpatch $(OUT)/test_cdimg $(OUT)/test_av
 	$(OUT)/test_runtime
 	$(OUT)/test_interp
 	$(OUT)/test_hlebind
+	$(OUT)/test_rtpatch
 	$(OUT)/test_cdimg
+	$(OUT)/test_av
 
 # Tabla nombre -> hle_<nombre> (hle_table.c va en el repo; esta regla la regenera tras tocar hle*.txt).
 # Incluye las HLE de las capas VR (cámara, cuerpo, radar, disparo); hle_vrcam_weak.c y hle_vrfire_weak.c aportan los símbolos si no se enlazan las reales.

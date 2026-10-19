@@ -27,6 +27,8 @@ final class XRRenderLoop {
 
     private var renderer: PS1Renderer!
     private var finalPass: XRFinalPass!
+    private var presenter: XRPresenter!                        // pantalla de cine, paneles del HUD, menú VR (XRPresent.swift)
+    private var wasBlocked = false
     private var targets: XRTargets
     private let colorFormat: MTLPixelFormat
     private let depthFormat: MTLPixelFormat
@@ -38,7 +40,6 @@ final class XRRenderLoop {
     private var recenterOrigin = matrix_identity_float4x4        // originFromRecentered
     private var recenterInverse = matrix_identity_float4x4
     private var needsRecenter = true                             // entrar = recentrar en el primer frame con tracking
-    private var hudModel = XRMath.translation(SIMD3<Float>(0, 1.5, -1.5)) * XRMath.scale(SIMD3<Float>(1.2, 0.9, 1))
     private var lastOriginFromDevice = XRMath.translation(SIMD3<Float>(0, 1.6, 0))
     private var everTracked = false
 
@@ -91,6 +92,10 @@ final class XRRenderLoop {
             return
         }
         finalPass = fp
+        let pr = XRPresenter(device: device)
+        pr.onRecenter = { XRControl.shared.requestRecenter() }
+        pr.onExit = { Task { @MainActor in await XRSession.shared.exitVR() } }
+        presenter = pr
 
         if WorldTrackingProvider.isSupported {
             let s = arSession, p = worldTracking
@@ -168,6 +173,7 @@ final class XRRenderLoop {
         if needsRecenter && tracked {
             applyRecenter(originFromDevice)
             needsRecenter = false
+            presenter.reanchor()
             VRInput.shared.recenter()      // giro del cuerpo a 0 y recentrado del rumbo de la cámara del motor
         }
 
@@ -183,8 +189,16 @@ final class XRRenderLoop {
         lastFrameTime = nowT
         var gs = MvVrGameState()
         mv_vrhost_game_state(&gs)
-        VRInput.shared.frame(head: tracked || !everTracked ? recentered : nil, dt: dt,
-                             gamePosture: gs.posture, menu: gs.menu != 0, recenter: recenterInverse)
+        // Menú VR (mantener el botón de menú izquierdo): mientras está abierto el juego no recibe entrada.
+        let blocked = presenter.updateInput(ControllerHub.shared.sample(), dt: dt, head: recentered)
+        if blocked {
+            if !wasBlocked { VRInput.shared.releaseAll() }
+            ControllerHub.shared.releaseAll(from: .vr)
+        } else {
+            VRInput.shared.frame(head: tracked || !everTracked ? recentered : nil, dt: dt,
+                                 gamePosture: gs.posture, menu: gs.menu != 0, recenter: recenterInverse)
+        }
+        wasBlocked = blocked
         // Hápticos del arma VR (disparo, recarga) y pose del radar de muñeca (antebrazo izquierdo tras la IK de vr/body).
         var hapticL: Float = 0, hapticR: Float = 0
         mv_vrgame_take_haptics(&hapticL, &hapticR)
@@ -213,17 +227,25 @@ final class XRRenderLoop {
         guard let cb = queue.makeCommandBuffer() else { return }
         cb.label = "mv.xr.frame"
 
-        renderer.encode(commandBuffer: cb, colorTargets: tgt.color, depthTargets: tgt.depth,
-                        resolveTargets: tgt.resolve, views: views, projections: projs,
-                        head: recentered, layered: layered)
-
         // Con destino sRGB/lineal el panel se muestrea por la vista sRGB (decodifica a lineal al leer).
         var hud: MTLTexture? = renderer.linearOutput ? renderer.hudTextureSRGB : renderer.hudTexture
         if hud != nil && hud!.textureType != .type2D { hud = nil }
+        // Presentación: mundo en primera persona, pantalla de cine o diorama, paneles del HUD, velo de transición y menú.
+        let pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, eyePx: Float(w), p00: projs[0].columns.0.x,
+                                     gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame())
+        renderer.drawWorld = pres.drawWorld
+        renderer.drawBody = pres.drawBody
+        var sceneViews = views
+        if let dm = pres.dioramaModel { sceneViews = views.map { $0 * dm } }
+
+        renderer.encode(commandBuffer: cb, colorTargets: tgt.color, depthTargets: tgt.depth,
+                        resolveTargets: tgt.resolve, views: sceneViews, projections: projs,
+                        head: recentered, layered: layered)
+
         let viewports = (0..<viewCount).map { drawable.views[$0].textureMap.viewport }
         finalPass.encode(commandBuffer: cb, colorTextures: colorTex, depthTextures: depthTex,
                          msaaDepth: sampleCount > 1 ? tgt.depth : nil, viewports: viewports,
-                         views: views, projections: projs, hudModel: hudModel, hud: hud, viewCount: viewCount)
+                         views: views, projections: projs, items: pres.items, viewCount: viewCount)
 
         drawable.encodePresent(commandBuffer: cb)
         cb.commit()
@@ -250,6 +272,12 @@ final class XRRenderLoop {
                          headPosition: SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z), headForward: fwd)
     }
 
+    /// Marco del radar de muñeca para los paneles del HUD del brazo (nil si el radar no tiene pose válida).
+    private func wristFrame() -> XRPresenter.Wrist? {
+        guard let f = renderer.radar?.wristFrame else { return nil }
+        return XRPresenter.Wrist(center: f.center, right: f.right, up: f.up, halfW: f.halfW, halfH: f.halfH)
+    }
+
     /// Proyección de Z invertida del ojo i (a partir de las tangentes de la vista).
     private func projection(_ drawable: LayerRenderer.Drawable, _ i: Int) -> simd_float4x4 {
         let r = drawable.depthRange
@@ -261,8 +289,6 @@ final class XRRenderLoop {
         let p = XRMath.position(originFromDevice)
         recenterOrigin = XRMath.translation(SIMD3<Float>(p.x, 0, p.z)) * XRMath.rotationY(XRMath.yaw(of: originFromDevice))
         recenterInverse = recenterOrigin.inverse
-        let headY = max(0.5, p.y)
-        hudModel = XRMath.translation(SIMD3<Float>(0, headY - 0.1, -1.5)) * XRMath.scale(SIMD3<Float>(1.2, 0.9, 1))
     }
 
     // MARK: gesto de recentrado

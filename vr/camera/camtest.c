@@ -59,6 +59,10 @@ static int f_act = -1, cur_t = -1, boot_shot, g_keep_ambig, g_fill_partial, g_fi
  *   dump t0 t1 paso                 panel PPM p_tNNNN cada `paso` frames
  *   shot t0 t1 paso                 original del juego (o_tNNNN = oráculo gpu.c) y, con la pose propia del motor, la vista previa VR a la misma
  *                                   resolución sin filtro (e_) y con filtro de pantalla (ef_), para comparar el efecto lado a lado
+ *                                   Con filtro de pantalla activo (clase 3/3b) escribe además g_tNNNN = escena 3D (e_) + post-proceso del visor (hud_emu_post2) con el ojo = pose del motor, comparable
+ *                                   con o_ (el log trae "[goggles] ... MAD"), y, con `dump`, pg_tNNNN = lo mismo en el campo ancho de p_ (la máscara de visión cubre todo el campo).
+ *                                   Equipar un objeto sin menús: poke t 800B5F46 <objeto,0> (objeto actual, s16) y poke t <0x800B5F28+(37+objeto)*2> 0100 (cantidad >= 0); objetos: 0 tabaco,
+ *                                   1 mira, 2-4 cajas, 5 visión nocturna, 6 térmica, 7 máscara de gas; la mira/marco de 1ª persona necesita además `pad t0 t1 1000` (triángulo) unos 40 fotogramas
  *   poke t addr hex                 escribe bytes (cadena hexadecimal) en la RAM del juego en el frame t (dirección del juego, hex)
  *   pokes t addr 'texto'            escribe una cadena ASCII terminada en cero
  *   gcall t func a0 a1 a2 a3 [a4 [sp]] llama a una función del juego (EXE) en el frame t con esos argumentos (hex; a4 va en la pila, [sp+16]); se
@@ -637,6 +641,17 @@ static void process_list(const GpuDrawList *l, int t, int f) {
         if (ow <= 640 && oh <= 512 && eh > 0) {
             render_list(l, &d, eh, eox - l->disp.x, eoy - l->disp.y, ow, oh, se, sp);
             char nm[64]; snprintf(nm, sizeof nm, "e_t%04d", t); write_ppm(outdir, nm, se, ow, oh);
+            if (last_filter_ok && last_filter.active) {   /* vista VR emulada: la escena 3D (e_) + el post-proceso del visor (hud_emu_post2 == vr_fs_post) con el ojo = pose del motor */
+                static float gs[640 * 512 * 3], gd[640 * 512 * 3]; static uint8_t go[640 * 512 * 3], gm[640 * 512];
+                for (int i = 0; i < ow * oh * 3; i++) gs[i] = se[i] / 255.0f;
+                hud_emu_post2(gs, gd, ow, oh, last_filter.cx_col, last_filter.cy_row, last_filter.proj_h, last_filter.proj_h, &last_filter);
+                for (int i = 0; i < ow * oh * 3; i++) { float v = gd[i] * 255.0f + 0.5f; go[i] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+                snprintf(nm, sizeof nm, "g_t%04d", t); write_ppm(outdir, nm, go, ow, oh);
+                /* comparación con el original: sin las zonas de HUD que van al panel (radar arriba a la derecha, icono abajo a la izquierda, mira de las gafas = capa 2D) */
+                for (int y = 0; y < oh; y++) for (int x = 0; x < ow; x++) gm[y * ow + x] = !((x > ow * 55 / 100 && y < oh * 30 / 100) || (x < ow * 30 / 100 && y > oh * 80 / 100));
+                fprintf(stderr, "[goggles] t=%d vista VR emulada (g_) vs original (o_): MAD %.2f (sin HUD) | escena sin post (e_) vs original: %.2f | recub=%d lineas=%d (periodo %.1f fase %.1f) mascara=%d\n", t,
+                        mad_img(go, orc, ow * oh, gm), mad_img(se, orc, ow * oh, gm), last_filter.n_covers, last_filter.n_scan, last_filter.scan_pitch, last_filter.scan_phase, last_filter.frame_on);
+            }
             { /* diferencia con el original a la misma pose (e_ vs o_): global (lo no pintado cuenta como negro) y solo lo pintado */
                 int npaint = 0; for (int i = 0; i < ow * oh; i++) npaint += sp[i] != 0;
                 const uint8_t *cmpi = (kstrip >= 0 && pre_w == ow && pre_h == oh) ? pre_img : orc;   /* bajo el agua: el original justo ANTES del filtro */
@@ -729,6 +744,13 @@ static void process_list(const GpuDrawList *l, int t, int f) {
         double c = 100.0 * cov / (PW * PH);
         sum_cov += c; n_cov++;
         char nm[64]; snprintf(nm, sizeof nm, "p_t%04d", t); write_ppm(outdir, nm, img, PW, PH);
+        if (scr_on && last_filter_ok && last_filter.active) {   /* campo ancho (el del visor, mayor que el del motor) + post-proceso del visor: la máscara cubre TODO el campo */
+            static float ws[PW * PH * 3], wd[PW * PH * 3]; static uint8_t wo[PW * PH * 3];
+            for (int i = 0; i < PW * PH * 3; i++) ws[i] = img[i] / 255.0f;
+            hud_emu_post2(ws, wd, PW, PH, PW / 2.0f, PH / 2.0f, fp, fp, &last_filter);
+            for (int i = 0; i < PW * PH * 3; i++) { float v = wd[i] * 255.0f + 0.5f; wo[i] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+            char nw[64]; snprintf(nw, sizeof nw, "pg_t%04d", t); write_ppm(outdir, nw, wo, PW, PH);
+        }
         if (scr_on && last_filter_ok && last_filter.active) {
             static uint8_t imf[PW * PH * 3];
             memcpy(imf, img, sizeof imf);

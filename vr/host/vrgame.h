@@ -45,10 +45,12 @@ void mv_vrgame_take_haptics(float *left, float *right);
 typedef struct {
     int32_t loader;          /* 0 sin pedir, 1 cargando, 2 listo, 3 fallo */
     int32_t active;          /* arma VR mostrada y mandando */
+    int32_t weapon;          /* arma VR mostrada (índice del puente), -1 ninguna */
     int32_t mag_rounds, chambered, mag_inserted;   /* arma VR */
     int32_t game_mag, game_reserve;                 /* munición del juego */
     int32_t reload_state;    /* VRR_* de vr_reload.h */
     uint32_t shots;          /* disparos VR desde el arranque */
+    uint32_t throws, places, dets, rejects;   /* lanzamientos de granada, colocaciones, detonaciones y eventos rechazados (sin munición, fuera de alcance) */
     uint32_t arms_driven;    /* brazos movidos por la IK desde el arranque */
 } MvVrGameStatus;
 void mv_vrgame_status(MvVrGameStatus *out);
@@ -58,6 +60,11 @@ struct BridgeState;
 void vrgame_reset(void);                       /* al cargar el EXE */
 void vrgame_set_enabled(int body_ok, int fire_ok);   /* HLE enlazadas con éxito (sin ellas no se mueven los brazos / no se dispara) */
 uint16_t vrgame_pad(uint16_t pad, const struct BridgeState *bs, uint8_t *ram);   /* una vez por VBlank, antes de aplicar el mando */
+/* Pruebas (bodyrun): función llamada al principio de vrgame_pad en cada VBlank (hilo de emulación) con el nº de VBlank desde que se instaló,
+ * el mando que pidió la app y el puente del VBlank anterior; devuelve el mando a usar. Dentro puede llamar a mv_vrgame_set_hand,
+ * mv_vr_set_head, etc.: así las manos sintéticas van sincronizadas con el VBlank y la prueba es determinista. NULL la quita. */
+typedef uint16_t (*VrGameDriver)(uint32_t vbl, uint16_t pad, const struct BridgeState *bs);
+void vrgame_set_driver(VrGameDriver f);
 void vrgame_frame_end(void);                   /* una vez por VBlank, tras el puente: publica el antebrazo y el estado */
 
 #ifdef __cplusplus

@@ -51,14 +51,82 @@ static int mkbin(const char *dir, const char *out) {
 
 typedef struct { uint32_t start, dur, every; uint16_t mask; } PadEv;
 static const PadEv PAD[] = {{120, 6, 0, 1u << 3}, {400, 6, 0, 1u << 3}, {0, 6, 97, 1u << 13}, {0, 6, 211, 1u << 7}};
+static uint32_t act_f;     /* fotograma en que el arma VR elegida pasó a estar activa (0 = aún no) */
+static uint32_t r1_at;     /* >0: toques de R1 (desequipar y equipar) para que el juego cree el arma elegida con --weapon */
+static PadEv XPAD[32];     /* --padx F:MASCARA_HEX:DUR[:CADA]: pulsaciones extra (p. ej. L1 = 0x400 para el menú de armas) */
+static int n_xpad, no_base_pad;
+typedef struct { int t0, t1; unsigned mask; } HPad;
+static HPad HP[32];
+static int n_hp;
 static uint16_t pad_at(uint32_t f) {
     uint16_t b = 0;
+    if (act_f) for (int i = 0; i < n_hp; i++) if ((int)(f - act_f) >= HP[i].t0 && (int)(f - act_f) < HP[i].t1) b |= (uint16_t)HP[i].mask;
+    for (int i = 0; i < n_xpad; i++) {
+        const PadEv *p = &XPAD[i];
+        if (p->every) { if (f >= p->start && (f - p->start) % p->every < p->dur) b |= p->mask; }
+        else if (f >= p->start && f < p->start + p->dur) b |= p->mask;
+    }
+    if (r1_at && ((f >= r1_at && f < r1_at + 6) || (f >= r1_at + 14 && f < r1_at + 20))) b |= 1u << 11;
+    if (no_base_pad && f >= no_base_pad) return b;   /* --nobase F: desde F solo los --padx (sin los pulsos de cruz/izquierda del guion base) */
     for (unsigned i = 0; i < sizeof PAD / sizeof PAD[0]; i++) {
         const PadEv *p = &PAD[i];
         if (p->every) { if (f >= p->every && f % p->every < p->dur) b |= p->mask; }
         else if (f >= p->start && f < p->start + p->dur) b |= p->mask;
     }
     return b;
+}
+
+
+/* ---- guion de manos sintéticas (--hands fichero): fotogramas clave para probar cada arma sin visor ----
+ *   k T  Rx Ry Rz Ryaw Rpitch Rroll Rtrig Rgrip Rlow Rup Rstick  Lx Ly Lz Lyaw Lpitch Lroll Ltrig Lgrip Llow Lup Lstick
+ *   p T0 T1 MASCARA_HEX        botones del mando del juego pulsados en T0 <= t < T1
+ *   T = fotogramas desde que el arma VR está activa (antes de eso, manos en reposo). Posiciones en m (espacio de usuario, cabeza en
+ *   (0,1.65,0)), ángulos en grados, entre claves se interpola linealmente (botones: los de la clave anterior). */
+typedef struct { int t; float v[22]; } HKey;
+static HKey HK[128];
+static int n_hk;
+static void hands_load(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) { perror(path); exit(1); }
+    char l[512];
+    while (fgets(l, sizeof l, f)) {
+        if (l[0] == 'k' && n_hk < 128) {
+            HKey *k = &HK[n_hk];
+            int n = sscanf(l, "k %d %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f", &k->t, &k->v[0], &k->v[1], &k->v[2], &k->v[3], &k->v[4], &k->v[5], &k->v[6], &k->v[7], &k->v[8], &k->v[9], &k->v[10],
+                           &k->v[11], &k->v[12], &k->v[13], &k->v[14], &k->v[15], &k->v[16], &k->v[17], &k->v[18], &k->v[19], &k->v[20], &k->v[21]);
+            if (n == 23) n_hk++; else fprintf(stderr, "[manos] línea inválida (%d campos): %s", n, l);
+        } else if (l[0] == 'p' && n_hp < 32) {
+            HPad *h = &HP[n_hp];
+            if (sscanf(l, "p %d %d %x", &h->t0, &h->t1, &h->mask) == 3) n_hp++;
+        }
+    }
+    fclose(f);
+}
+static void euler_q(float yaw, float pitch, float roll, float q[4]) {   /* grados; guiñada Y, cabeceo X, alabeo Z (orden Y X Z) */
+    float cy = cosf(yaw * 0.00872665f), sy = sinf(yaw * 0.00872665f), cp = cosf(pitch * 0.00872665f), sp = sinf(pitch * 0.00872665f),
+          cr = cosf(roll * 0.00872665f), sr = sinf(roll * 0.00872665f);
+    q[0] = sp * cy * cr + cp * sy * sr; q[1] = cp * sy * cr - sp * cy * sr; q[2] = cp * cy * sr - sp * sy * cr; q[3] = cp * cy * cr + sp * sy * sr;
+}
+static void hands_at(float t, MvVrHand out[2]) {   /* out[0] = izquierdo físico, out[1] = derecho */
+    float v[22];
+    int a = 0;
+    for (int i = 0; i < n_hk; i++) if (HK[i].t <= t) a = i;
+    int b = a + 1 < n_hk ? a + 1 : a;
+    float u = (b != a && HK[b].t > HK[a].t) ? (t - (float)HK[a].t) / (float)(HK[b].t - HK[a].t) : 0.0f;
+    if (u < 0) u = 0;
+    if (u > 1) u = 1;
+    for (int i = 0; i < 22; i++) v[i] = HK[a].v[i] + (HK[b].v[i] - HK[a].v[i]) * u;
+    for (int s = 0; s < 2; s++) {
+        const float *h = v + (s ? 0 : 11);     /* derecha = primer bloque de la línea, izquierda = segundo */
+        const float *st = HK[a].v + (s ? 0 : 11);
+        MvVrHand *o = &out[s];
+        memset(o, 0, sizeof *o);
+        o->valid = 1;
+        o->pos[0] = h[0]; o->pos[1] = h[1]; o->pos[2] = h[2];
+        euler_q(h[3], h[4], h[5], o->rot);
+        o->trigger = h[6]; o->grip = h[7];
+        o->low = st[8] > 0.5f; o->up = st[9] > 0.5f; o->stick = st[10] > 0.5f;
+    }
 }
 
 static void head_pose(float yaw_deg, float out[16]) {
@@ -73,6 +141,9 @@ int main(int argc, char **argv) {
     const char *exe = argv[1], *disc = argv[2];
     uint32_t nframes = argc > 3 && argv[3][0] != '-' ? (uint32_t)strtoul(argv[3], 0, 0) : 7000;
     int sweep = 1, scenes_on = 1;
+    int wlog = 500;               /* --wlog N: cada cuántos fotogramas se imprime el estado del arma VR */
+    int weapon_sel = 0;           /* --weapon N: arma del puente que se equipa (R1 dos veces) en vez de la pistola */
+    const char *hands_file = NULL;
     int vr_auto = 0;              /* --auto: recarga automática del arma VR y el botón de soltar cargador pulsado cuando está vacía */
     int vr_inv = 0;               /* --inv: inventario de prueba (pistola equipada con munición) en la copia de prueba, SOLO para pruebas */
     uint32_t inv_f = 0;
@@ -82,7 +153,25 @@ int main(int argc, char **argv) {
     const char *hud_dir = NULL;   /* --hud DIR F1,F2,..: vuelca (PPM) el HUD que dibujaría Metal (emulado en CPU) de la primera escena con frame >= Fi */
     uint32_t hud_at[16]; int n_hud = 0;
     static uint16_t evram[1024 * 512];   /* VRAM del renderer: solo eventos */
+    const char *fb_dir = NULL;   /* --fb DIR F1,F2,..: vuelca (PPM) el fotograma que muestra el host (lo que verá la pantalla de cine) en esos frames */
+    uint32_t fb_at[64]; int n_fb = 0;
+    int log_modes = 0;           /* --modes: imprime cada cambio del estado de vista (ver vr_view.h) y de las banderas del puente */
     for (int i = 3; i < argc; i++) {
+        if (!strcmp(argv[i], "--padx") && i + 1 < argc && n_xpad < 32) {
+            unsigned st = 0, mk = 0, du = 0, ev = 0;
+            if (sscanf(argv[++i], "%u:%x:%u:%u", &st, &mk, &du, &ev) >= 3) { XPAD[n_xpad].start = st; XPAD[n_xpad].mask = (uint16_t)mk; XPAD[n_xpad].dur = du; XPAD[n_xpad].every = ev; n_xpad++; }
+            continue;
+        }
+        if (!strcmp(argv[i], "--nobase") && i + 1 < argc) { no_base_pad = (int)strtoul(argv[++i], 0, 0); continue; }
+        if (!strcmp(argv[i], "--modes")) { log_modes = 1; continue; }
+        if (!strcmp(argv[i], "--fb") && i + 2 < argc) {
+            fb_dir = argv[++i];
+            char *dup = strdup(argv[++i]), *sv = NULL;
+            for (char *t = strtok_r(dup, ",", &sv); t && n_fb < 64; t = strtok_r(NULL, ",", &sv)) fb_at[n_fb++] = (uint32_t)strtoul(t, 0, 0);
+            free(dup);
+            mkdir(fb_dir, 0755);
+            continue;
+        }
         if (!strcmp(argv[i], "--scene-from") && i + 1 < argc) { scene_from = (uint32_t)strtoul(argv[++i], 0, 0); continue; }
         if (!strcmp(argv[i], "--hud") && i + 2 < argc) {
             hud_dir = argv[++i];
@@ -97,12 +186,21 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--vr")) vr_hands = 1;
         else if (!strcmp(argv[i], "--inv")) vr_inv = 1;
         else if (!strcmp(argv[i], "--auto")) vr_auto = 1;
+        else if (!strcmp(argv[i], "--wlog") && i + 1 < argc) wlog = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--weapon") && i + 1 < argc) weapon_sel = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--hands") && i + 1 < argc) hands_file = argv[++i];
     }
+    if (hands_file) hands_load(hands_file);
     const char *sigs = getenv("MV_SIGS");
     if (sigs) mv_host_set_sigs(sigs);
     mkdir("build-host", 0755);
     mkdir("build-host/card", 0755);
     mv_vrhost_install();
+    if (getenv("MV_AI")) {   /* MV_AI=percepcion,camaras,actividad (p. ej. 2,1,1; 0,0,0 = IA desactivada) */
+        int p = 1, cm = 1, ac = 1;
+        sscanf(getenv("MV_AI"), "%d,%d,%d", &p, &cm, &ac);
+        mv_vrhost_set_ai(p, cm, ac);
+    }
     if (vr_auto) mv_vrgame_set_options(1, 2);
     mv_host_set_turbo(getenv("MV_PACED") ? 0 : 1);   /* MV_PACED=1: al ritmo real (50 Hz) como en el visor */
     int r = mv_host_start(exe, disc, "build-host/card");
@@ -126,8 +224,41 @@ int main(int argc, char **argv) {
             MvVrGameState gs;
             mv_vrhost_game_state(&gs);
             if (gs.cam_active && !cam_f) cam_f = f;
-            if (vr_hands) {   /* mandos Sense sintéticos: derecho con el gatillo a pulsos (tras 150 frames de cámara VR), izquierdo quieto */
+            if (log_modes) {
+                static BridgeState *lb; static char lastm[256];
+                if (!lb) lb = malloc(sizeof *lb);
+                char cur[256] = "";
+                if (lb && mv_host_bridge(lb))
+                    snprintf(cur, sizeof cur, "game=%d ctl=%d cam=%d | cine=%d comms=%d pausa=%d menu=%d(%d) stop=%d | vista=%d motivo=%d", gs.game, gs.in_control, gs.cam_active,
+                             lb->cinematic, lb->comms, lb->paused, lb->menu_open, lb->menu_state, lb->stopped, gs.view_mode, gs.view_reason);
+                if (strcmp(cur, lastm)) { fprintf(stderr, "[modo] f=%u %s\n", f, cur); strcpy(lastm, cur); }
+            }
+            if (fb_dir) for (int q = 0; q < n_fb; q++) if (fb_at[q] && f >= fb_at[q]) {
+                fb_at[q] = 0;
+                static uint8_t *fbuf; if (!fbuf) fbuf = malloc(MV_HOST_FB_BYTES);
+                int fw = 0, fh = 0;
+                if (fbuf && mv_host_framebuffer(fbuf, MV_HOST_FB_BYTES, &fw, &fh, 0)) {
+                    char pth[512];
+                    snprintf(pth, sizeof pth, "%s/fb_%05u.ppm", fb_dir, f);
+                    FILE *pf = fopen(pth, "wb");
+                    if (pf) {
+                        fprintf(pf, "P6\n%d %d\n255\n", fw, fh);
+                        for (int k = 0; k < fw * fh; k++) fwrite(fbuf + 4 * k, 1, 3, pf);
+                        fclose(pf);
+                    }
+                    fprintf(stderr, "[fb] frame %u %dx%d -> %s\n", f, fw, fh, pth);
+                }
+            }
+            if (vr_hands) {   /* mandos Sense sintéticos: derecho con el gatillo a pulsos (tras 150 frames de cámara VR), izquierdo quieto; o el guion --hands */
                 MvVrHand h;
+                MvVrGameStatus g0; mv_vrgame_status(&g0);
+                if (n_hk && g0.active && g0.weapon == weapon_sel && !act_f) act_f = f;
+                if (n_hk) {
+                    MvVrHand hh[2];
+                    hands_at(act_f ? (float)(f - act_f) : -1.0f, hh);
+                    mv_vrgame_set_hand(1, &hh[1]);
+                    mv_vrgame_set_hand(0, &hh[0]);
+                } else {
                 memset(&h, 0, sizeof h);
                 h.valid = 1; h.rot[3] = 1;
                 h.pos[0] = 0.16f; h.pos[1] = 1.30f; h.pos[2] = -0.36f;
@@ -140,6 +271,7 @@ int main(int argc, char **argv) {
                 mv_vrgame_set_hand(1, &h);
                 h.pos[0] = -0.20f; h.pos[1] = 1.22f; h.pos[2] = -0.30f; h.trigger = 0; h.up = 0;
                 mv_vrgame_set_hand(0, &h);
+                }
             }
             if (vr_inv && cam_f && !inv_f && f > cam_f + 60) {   /* con el motor en pausa: arma 0 equipada y munición en las variables de partida */
                 inv_f = f;
@@ -150,13 +282,19 @@ int main(int argc, char **argv) {
                     *(int16_t *)(psx_ram + ((BA_VARS + 2u * (BRIDGE_V_WEAPON_AMMO + i)) & 0x1FFFFF)) = (int16_t)ammo[i];
                     *(int16_t *)(psx_ram + ((BA_VARS + 2u * (BRIDGE_V_WEAPON_MAX + i)) & 0x1FFFFF)) = (int16_t)mx[i];
                 }
-                *(int16_t *)(psx_ram + ((BA_VARS + 2u * BRIDGE_V_WEAPON) & 0x1FFFFF)) = 0;
+                *(int16_t *)(psx_ram + ((BA_VARS + 2u * BRIDGE_V_WEAPON) & 0x1FFFFF)) = (int16_t)weapon_sel;
                 mv_host_resume();
+                if (weapon_sel) r1_at = f + 10;
             }
-            if (vr_hands && f % 500 == 0 && cam_f) {
+            if (vr_hands && f % wlog == 0 && cam_f) {
                 MvVrGameStatus gst; mv_vrgame_status(&gst);
                 fprintf(stderr, "[vr] f=%u arma: carga=%d activa=%d cargador=%d recámara=%d dentro=%d | juego mag=%d reserva=%d recarga=%d disparos=%u brazos=%u arma_juego=%d\n", f, gst.loader, gst.active, gst.mag_rounds,
                         gst.chambered, gst.mag_inserted, gst.game_mag, gst.game_reserve, gst.reload_state, gst.shots, gst.arms_driven, gs.weapon);
+                { VrFireStats fs2; vrfire_stats(&fs2); fprintf(stderr, "[vr]   VR=%d lanz=%u colo=%u deton=%u rech=%u | fuego: pet=%u sust=%u pas=%u sup=%u cad=%u pulsa=%u | ammo_juego=%d/%d item=%d\n", gst.weapon, gst.throws, gst.places, gst.dets, gst.rejects,
+                        fs2.requests, fs2.subst, fs2.passed, fs2.skipped, fs2.expired, fs2.presses, gs.ammo, gs.ammo_max, gs.item);
+                  static BridgeState *lb2; if (!lb2) lb2 = malloc(sizeof *lb2);
+                  if (lb2 && mv_host_bridge(lb2)) fprintf(stderr, "[vr]   puente: 1ªp=%d zoom=%d cam1p=%d camtipo=%d vista=%d motivo=%d ojo=(%d,%d,%d) pies=%d estado=%x acc=%d\n", lb2->first_person, lb2->cam_zoom, lb2->cam_first_person, lb2->cam_type,
+                                                gs.view_mode, gs.view_reason, lb2->eye_pos[0], lb2->eye_pos[1], lb2->eye_pos[2], lb2->ctl_pos.y, lb2->player_status, lb2->player_action); }
             }
             if (f % 1000 == 0) {
                 MvVrHostStats s; mv_vrhost_stats(&s);

@@ -63,15 +63,21 @@ typedef struct {
 #define VR_MASK_SET 32u
 #define VR_MASK_CHK 64u
 
-/* Pase de post-proceso del filtro de pantalla (efecto submarino: onda vertical por fila + tinte + recubrimiento). Un pase por ojo con la escena
- * ya resuelta (una sola muestra) como entrada. Modelo (ver "Clase 3" en vr/scene/vr_scene.h): para la fila y del ojo (coordenada continua, centro de
- * píxel = y+0,5) con tangente t = (y - eye.x)/eye.y:  r = cfg.y + cfg.x*t;  d = dv[r] (interpolado entre centros de fila, 0 fuera de las filas con tira);
- * fila fuente y_src = y + eye.y*d/cfg.x  (== cy_img + f_eye*(r + d - cy_row)/proj_h);  salida = tinte * muestra(x, y_src), luego el recubrimiento. */
+/* Pase de post-proceso del filtro de pantalla (efecto submarino: onda vertical por fila + tinte + recubrimientos; objetos equipados: líneas de exploración de las
+ * gafas y máscara de visión de la máscara/caja). Un pase por ojo con la escena ya resuelta (una sola muestra) como entrada. Modelo (ver "Clase 3" y "Clase 3b" en
+ * vr/scene/vr_scene.h): para la fila y del ojo (coordenada continua, centro de píxel = y+0,5) con tangente t = (y - eye.x)/eye.y:  r = cfg.y + cfg.x*t;  d = dv[r]
+ * (interpolado entre centros de fila, 0 fuera de las filas con tira);  fila fuente y_src = y + eye.y*d/cfg.x  (== cy_img + f_eye*(r + d - cy_row)/proj_h);
+ * salida = tinte * muestra(x, y_src); luego los recubrimientos EN ORDEN, las líneas de exploración y la resta de la máscara de visión. */
 #define VR_POST_ROWS 512
+#define VR_POST_COVERS 4
 #define VR_BUF_POST_DV 1    /* constant float dv[VR_POST_ROWS]: desplazamiento fuente-destino por fila de la imagen original, 0 en las filas sin tira */
 typedef struct {
-    vector_float4 eye[2];   /* por ojo (amplification/array layer): x = fila del punto principal en píxeles, y = focal vertical en píxeles */
+    vector_float4 eye[2];   /* por ojo (amplification/array layer): x = fila del punto principal en píxeles, y = focal vertical en píxeles, z = columna del punto principal, w = focal horizontal */
     vector_float4 tint;     /* xyz = multiplicador por canal (espacio gamma original); w sin uso */
-    vector_float4 cover;    /* xyz = color/255 del recubrimiento semitransparente; w = modo de mezcla original (0..3) o -1 si no hay */
-    vector_float4 cfg;      /* x = proj_h del motor, y = cy_row (fila del centro óptico en filas de la imagen original), z = filas con datos (0 = sin onda) */
+    vector_float4 covers[VR_POST_COVERS];  /* xyz = color/255 del recubrimiento semitransparente; w = modo de mezcla original (0..3) o -1 si no hay (los usados van primero) */
+    vector_float4 cfg;      /* x = proj_h del motor, y = cy_row (fila del centro óptico en filas de la imagen original), z = filas con datos (0 = sin onda), w = cx_col (columna) */
+    vector_float4 scan;     /* líneas de exploración: x = periodo (filas originales), y = fase, z = alto de cada línea (filas), w = modo de mezcla (0..3) o -1 si no hay */
+    vector_float4 scan_rgb; /* xyz = color/255 de cada línea; w = ganancia (1 = fiel al original) */
+    vector_float4 misc;     /* x = nº de recubrimientos (de los de covers[]) que se dibujan ANTES de las líneas de exploración (el resto, después); yzw = color que se suma donde la máscara de visión cierra del todo */
+    vector_float4 frame;    /* máscara de visión: x,y = ancho y alto de la imagen mostrada del motor (px originales), z = 1 si hay máscara (texture(1)), w sin uso */
 } VrPostUniforms;

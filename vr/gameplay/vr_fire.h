@@ -98,7 +98,9 @@ void vrfire_read_game(const uint8_t *ram, const BridgeState *bs, VrFireGame *g);
 typedef struct VrFireIn {
     int active;              /* el jugador es controlable y el arma VR equipada es la del juego */
     WPose muzzle;            /* pose de WP_MUZZLE en espacio de usuario (delante = -Z local) */
-    int ready;               /* arma levantada/apuntando (solo para ARM_ON_RAISE) */
+    int ready;               /* arma levantada/apuntando (solo para ARM_ON_RAISE o con `raise`) */
+    int raise;               /* este VBlank se trata como ARM_ON_RAISE aunque la configuración sea ON_TRIGGER (lanzador antiaéreo: el visor
+                              * levantado mantiene el botón para que el juego tenga su mira y su buscador; ver vr_aa.h) */
     int fire;                /* flanco: el arma VR acaba de disparar (WGameBridge.fire) */
     WPose fire_pose;         /* pose de la boca en el instante de ese disparo (la bala sale con ella, no con la actual) */
     int trigger_held;        /* gatillo mantenido y modo automático (armas que disparan mientras se mantiene) */

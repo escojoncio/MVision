@@ -124,12 +124,14 @@ static struct {
     VrFireStats st;
     int flash_age;                       /* VBlanks desde la última bala sustituida (el resplandor solo la acompaña si es reciente) */
     float tpos[3], tvel[3]; VrFireMap tmap; int tok, tok_age;
+    float tvel_m[3], ttick_s, tupm;      /* velocidad de la mano (m/s, ejes del motor), tick del motor y unidades por metro: extrapolación hasta la creación */
 } S;
 
 #define INFL_LIFE 14
 #define AUTO_TAIL 6
 #define DISARM_WINDOW 60
 #define FLASH_LIFE 3             /* el resplandor se pide en el mismo tick que la bala; pasado esto es de otro (p. ej. un enemigo) */
+#define VRFIRE_THROW_G 9.81f      /* gravedad (m/s^2) de la mano real durante el retardo del lanzamiento */
 #define THROW_LIFE 90            /* datos de lanzamiento no consumidos caducan (la granada sale ~16 VBlanks tras soltar) */
 
 void vrfire_cfg_default(VrFireCfg *c) {
@@ -187,7 +189,7 @@ void vrfire_frame(const VrFireGame *g, const VrFireIn *in, VrFireOut *out) {
     int unserved = S.nq - S.ninfl;       /* peticiones sin liberación en curso */
     int want;
     if (g->hold_fires) want = autoh || S.nq > 0;
-    else want = unserved > 0 || (S.cfg.arm_mode == VRFIRE_ARM_ON_RAISE && in->ready);
+    else want = unserved > 0 || ((S.cfg.arm_mode == VRFIRE_ARM_ON_RAISE || in->raise) && in->ready);
     S.tphase++;
     switch (S.phase) {
     case P_IDLE:
@@ -259,7 +261,8 @@ int vrfire_set_throw(const float pos_user[3], const float vel_user_mps[3], float
     float w[3], v[3];
     vrfire_pos_to_world(&S.live_map, pos_user, w);
     vrfire_dir_to_world(&S.live_map, vel_user_mps, v);
-    for (int i = 0; i < 3; i++) { S.tpos[i] = w[i]; S.tvel[i] = v[i] * S.live_map.units_per_m * tick_s; }
+    for (int i = 0; i < 3; i++) { S.tpos[i] = w[i]; S.tvel[i] = v[i] * S.live_map.units_per_m * tick_s; S.tvel_m[i] = v[i]; }
+    S.ttick_s = tick_s; S.tupm = S.live_map.units_per_m;
     S.tok = finite3(S.tpos) && finite3(S.tvel); S.tok_age = 0;
     return S.tok;
 }
@@ -267,8 +270,16 @@ int vrfire_take_throw(int16_t pos[3], int16_t vel[3]) {
     if (S.nq > 0) { pop_req(); pop_infl(); }      /* el lanzamiento atiende a la petición pendiente (como cualquier proyectil) */
     if (!S.tok) { S.st.passed++; return 0; }
     S.st.subst++;
+    /* El juego crea la granada unos 16 VBlanks después de soltar (animación de lanzar): se adelanta la posición y se descuenta la gravedad
+     * de ese retardo para que continúe la trayectoria que llevaba la mano (VRFIRE_THROW_G m/s^2 sobre el eje Y del motor). */
+    float dt_s = (float)S.tok_age * (S.ttick_s * 0.5f);
+    if (dt_s > 0.6f) dt_s = 0.6f;
     for (int i = 0; i < 3; i++) {
         float p = S.tpos[i], v = S.tvel[i];
+        if (dt_s > 0 && S.tupm > 0) {
+            p += S.tvel_m[i] * S.tupm * dt_s;
+            if (i == 1) { p -= 0.5f * VRFIRE_THROW_G * S.tupm * dt_s * dt_s; v -= VRFIRE_THROW_G * S.tupm * dt_s * S.ttick_s; }
+        }
         pos[i] = (int16_t)(p > 32767 ? 32767 : p < -32768 ? -32768 : lrintf(p));
         vel[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : lrintf(v));
     }
