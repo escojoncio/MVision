@@ -12,8 +12,12 @@ extern "C" {
 
 /* Genera el fichero de prueba (cabecera + escena + mallas + VRAM). 0 = bien. */
 int ns_synth_write(const char *path);
+/* Antes de ns_synth_write: 1 = sin la instancia de malla ausente del almacén (escena completa: el renderer puede decidir «nativo»). */
+void ns_synth_set_complete(int on);
 /* Lo lee, prepara el almacén de mallas y publica la escena por el puente (ns_bridge_publish). 0 = bien. */
 int ns_synth_load(const char *path);
+/* Vuelve a publicar la escena cargada por el MISMO puente (escena fresca: el consumidor rechaza las de más de 250 ms). 0 = bien. */
+int ns_synth_republish(void);
 /* VRAM leída del fichero (1024*512 palabras) o NULL. */
 const uint16_t *ns_synth_vram(void);
 /* Posición de la cabeza (mundo VR, m) desde la que se renderiza el cubemap de comparación. */

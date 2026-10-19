@@ -72,6 +72,7 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
         s = 1.0 - clamp((z - U.fog_par.x) / max(U.fog_par.y, 1.0e-3), 0.0, 1.0);
     }
     float3 col = clamp(floor(raw * s), 0.0, 255.0);
+    col = clamp(floor(col * U.tint.xyz), 0.0, 255.0);   /* depuración «solo nativo»: tinte; (1,1,1) = identidad */
 
     /* mundo del motor -> mundo VR (m) */
     float3 pv = float3(dot(U.tovr[0].xyz, wp) + U.tovr[0].w,

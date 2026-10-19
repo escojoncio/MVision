@@ -134,7 +134,7 @@ final class RGRenderer {
     private var batches: [DrawBatch] = []
     /// VrScene.native_3d de la última lista: la escena admite el 3D nativo y sus batches 3D vienen marcados (skip_if_native).
     private var nativeSceneMarked = false
-#if !MV_BENCH
+#if !MV_BENCH || MV_BENCH_NATIVE
     /// Renderer nativo (vr/native): lee la escena de la RAM del motor del puente. nil si no hay biblioteca Metal. La decisión nativo/GPU se toma en cada fotograma.
     private(set) var native: NativeRenderer?
 #endif
@@ -142,7 +142,9 @@ final class RGRenderer {
     private var nativeSkip: UInt32 = 0     // batches marcados que NO se dibujan (NS_SKIP_*); 0 tras un fallo de este fotograma
     private var decidedSkip: UInt32 = 0    // la máscara decidida al principio del fotograma (para recuperar los grupos ya saltados si el dibujo nativo falla)
     private var nativeFailed = false       // el dibujo nativo falló en este fotograma: todo lo marcado vuelve a GPU
-#if !MV_BENCH
+    private var nativeOnly = false         // modo de depuración «solo nativo»: los batches 3D marcados NO se dibujan nunca por GPU (aunque la decisión sea GPU o el nativo falle) y el nativo va teñido
+    static let nativeOnlyTint = SIMD3<Float>(0.75, 1.0, 0.75)
+#if !MV_BENCH || MV_BENCH_NATIVE
     private var nativeMap: NativeRenderer.GpuMap?       // mapa mundo -> VR y cámara que declara la lista de la GPU (nil en cinemáticas / mundo no fiable): para la red de coherencia
 #endif
     private var gpuEyeVR: SIMD3<Float>?                 // VrScene.eye_vr de la lista actual
@@ -223,7 +225,7 @@ final class RGRenderer {
                            sampleCount: sampleCount, viewCount: self.viewCount, linearOutput: linearOutput)
         weapon = WeaponRenderer(device: device, colorFormat: colorFormat, depthFormat: depthFormat,
                                 sampleCount: sampleCount, viewCount: self.viewCount)
-#if !MV_BENCH
+#if !MV_BENCH || MV_BENCH_NATIVE
         if let lib = lib0, let n = NativeRenderer(device: device, library: lib, ringSize: 3) {
             n.bridge = mv_vrhost_native_bridge()
             // pipelines de los formatos conocidos (con y sin amplificación): nada se compila en el primer fotograma nativo
@@ -237,7 +239,7 @@ final class RGRenderer {
 #endif
     }
 
-#if !MV_BENCH
+#if !MV_BENCH || MV_BENCH_NATIVE
     deinit { mv_vrhost_native_renderer_ready(0) }
 #endif
 
@@ -249,23 +251,31 @@ final class RGRenderer {
     /// Línea de diagnóstico del render nativo frente a la lista de la GPU (1 vez por segundo, justo tras xr-diag): decisión, batches de la GPU saltados / dibujados, triángulos y caja VR de
     /// cada ruta, cámaras y coherencia. nil si no hay renderer nativo.
     func nativeDiagLine() -> String? {
-#if MV_BENCH
+#if MV_BENCH && !MV_BENCH_NATIVE
         return nil
 #else
         guard let n = native else { return nil }
         let box = gpuMarkedTris > 0
             ? String(format: "[%.1f %.1f %.1f]..[%.1f %.1f %.1f]", gpuMarkedMin.x, gpuMarkedMin.y, gpuMarkedMin.z, gpuMarkedMax.x, gpuMarkedMax.y, gpuMarkedMax.z) : "vacia"
-        return "nat-diag: modo=\(mv_vrhost_render_mode() != 0 ? "nativo" : "gpu") marcada=\(nativeSceneMarked) usa=\(nativeUse) saltar=\(nativeSkip) recuperado_por_fallo=\(nativeFailed) | " +
+        return "nat-diag: modo=\(Self.modeName()) marcada=\(nativeSceneMarked) usa=\(nativeUse) saltar=\(nativeSkip) recuperado_por_fallo=\(nativeFailed) | " +
             "lista GPU: tris_marcados=\(gpuMarkedTris) tris_no_marcados=\(gpuOtherTris) caja_VR_marcados=\(box) batches_3D_saltados=\(statSkipB) (tris \(statSkipTris)) batches_3D_dibujados=\(statDrawB) (tris \(statDrawTris)) | " +
             "nativo: " + n.drawnSummary(gpuEye: gpuEyeVR)
 #endif
     }
 
+    private static func modeName() -> String {
+#if MV_BENCH && !MV_BENCH_NATIVE
+        return "gpu"
+#else
+        switch mv_vrhost_render_mode() { case 0: return "gpu"; case 2: return "solo-nativo"; default: return "nativo" }
+#endif
+    }
+
     private func nativeLog() -> String {
-#if MV_BENCH
+#if MV_BENCH && !MV_BENCH_NATIVE
         return ""
 #else
-        let mode = mv_vrhost_render_mode() != 0 ? "nativo" : "gpu"
+        let mode = Self.modeName()
         guard let n = native else { return " | nativo: modo=\(mode) renderer=no" }
         return " | modo=\(mode) listo=\(mv_vrhost_native_available() != 0) marcada=\(nativeSceneMarked) usa=\(nativeUse) " + n.logLine()
 #endif
@@ -515,7 +525,7 @@ final class RGRenderer {
         has3D = sc.has_3d != 0
         nativeSceneMarked = sc.native_3d != 0
         gpuEyeVR = SIMD3<Float>(sc.eye_vr.0, sc.eye_vr.1, sc.eye_vr.2)
-#if !MV_BENCH
+#if !MV_BENCH || MV_BENCH_NATIVE
         nativeMap = nil
         if sc.user_space != 0 && sc.world_valid != 0 && sc.has_3d != 0 && sc.scale > 0 && sc.user_k > 0 {
             func flat<T>(_ t: T) -> [Float] { withUnsafeBytes(of: t) { Array($0.bindMemory(to: Float.self)) } }
@@ -636,9 +646,11 @@ final class RGRenderer {
         // Render nativo: se prepara SIEMPRE (reconoce épocas del almacén aunque no se dibuje: cinemáticas, menús) y se decide AHORA, con el estado real de este fotograma.
         // Si falta cualquier condición, nativeUse = false y no se salta ningún batch: nunca un fotograma sin 3D.
         nativeUse = false; nativeSkip = 0; decidedSkip = 0; nativeFailed = false
-#if !MV_BENCH
+#if !MV_BENCH || MV_BENCH_NATIVE
         if let n = native {
             let want = mv_vrhost_render_mode() != 0
+            nativeOnly = mv_vrhost_render_only_native() != 0
+            n.tint = nativeOnly ? Self.nativeOnlyTint : SIMD3<Float>(1, 1, 1)
             let c0 = sceneColor.first, d0 = depthTargets.first
             // Validación previa: todo lo que haría fallar a n.encode se comprueba aquí, antes de saltar ningún batch.
             let nTargets = layered ? viewCount : min(sceneColor.count, depthTargets.count)
@@ -663,6 +675,7 @@ final class RGRenderer {
             }
             let dec = n.decide(wantNative: want, sceneMarked: nativeSceneMarked, pipelinesReady: ready, gpuMap: nativeMap)
             if dec.native != 0 && canTry { nativeUse = true; nativeSkip = dec.skip; decidedSkip = dec.skip }
+            if nativeOnly && nativeSceneMarked { nativeSkip = UInt32.max }   // solo nativo: ningún batch 3D marcado por GPU, se decida lo que se decida
         }
 #endif
         var nextCmd = 0
@@ -1171,7 +1184,7 @@ final class RGRenderer {
         } else {
             enc.setViewport(isAux ? vp0 : (viewportOverride.flatMap { viewIndex < $0.count ? $0[viewIndex] : nil } ?? vp0))
         }
-#if !MV_BENCH
+#if !MV_BENCH || MV_BENCH_NATIVE
         // Escena nativa: en el último segmento del fotograma (la VRAM ya tiene todos los eventos de la lista), con las mismas vistas y proyecciones por ojo que la ruta
         // de la GPU y la profundidad inversa del sistema (no se escribe depthRange). Si falla, ns_native_fail y los batches de este segmento se dibujan por GPU.
         var skipMask = isAux ? 0 : nativeSkip   // la segunda vista y la pantalla 3D no llevan escena nativa: se dibujan enteras por GPU
@@ -1185,14 +1198,14 @@ final class RGRenderer {
             }
             let ok = !vps.isEmpty && n.encode(encoder: enc, vram: vram, viewProj: vps, eyes: eyes, layered: amplify > 0, colorFormat: color.pixelFormat,
                                               depthFormat: depth.pixelFormat, samples: samples, linear: linearOutput)
-            if !ok { n.fail(); skipMask = 0; nativeSkip = 0; nativeUse = false; nativeFailed = true }
+            if !ok { n.fail(); if !nativeOnly { skipMask = 0; nativeSkip = 0 }; nativeUse = false; nativeFailed = true }
         }
 #else
         let skipMask: UInt32 = 0
 #endif
         // Recuperación: si el dibujo nativo falló, los batches marcados de los grupos anteriores (ya saltados en sus pases) se dibujan ahora, en este mismo pase.
         var segDraw = seg
-        if last, !isAux, nativeFailed, decidedSkip != 0, range.lowerBound > 0 {
+        if last, !isAux, nativeFailed, !nativeOnly, decidedSkip != 0, range.lowerBound > 0 {
             let lost = (0..<range.lowerBound).filter { batches.indices.contains($0) && batches[$0].kind != 2 && (batches[$0].skip & decidedSkip) != 0 }
             segDraw = lost + seg
         }

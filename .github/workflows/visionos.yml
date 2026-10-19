@@ -56,6 +56,14 @@ jobs:
           xcodebuild -version
           system_profiler SPDisplaysDataType 2>/dev/null | head -20 || true
 
+      # Pruebas C sintéticas (sin datos del juego): firma de zona del extractor, mapa mundo -> VR nativo = lista de la GPU, puño previo a la captura.
+      - name: Pruebas C sintéticas (extractor, mapa nativo, cuerpo)
+        run: |
+          set -o pipefail
+          make -f vr/native/extract.mk test
+          make -C vr/camera test-native-coh
+          make -C vr/body test
+
       - name: Compilar el banco de render
         run: |
           set -o pipefail

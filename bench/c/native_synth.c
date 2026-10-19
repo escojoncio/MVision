@@ -368,6 +368,9 @@ static void add_inst(uint16_t flags, int16_t light, const uint64_t *ids, const N
     g_hdr.n_inst++;
 }
 
+static int g_no_missing;   /* 1: la escena no incluye la instancia con malla ausente (el renderer puede declarar «mallas completas» y decidir nativo) */
+void ns_synth_set_complete(int on) { g_no_missing = on != 0; }
+
 static void build_scene(void) {
     memset(&g_hdr, 0, sizeof g_hdr);
     g_nbuilt = 0;
@@ -422,7 +425,7 @@ static void build_scene(void) {
         add_inst(NS_IF_BLEND, -1, ids, xs, NULL, 2, 0);
     }
     /* malla ausente del almacén y pieza oculta: no se dibujan */
-    id1[0] = 0xDEADBEEF00000001ull; x1[0] = xf_rot_y(0, 0, 0, 0); add_inst(NS_IF_LIT, -1, id1, x1, NULL, 1, 0);
+    if (!g_no_missing) { id1[0] = 0xDEADBEEF00000001ull; x1[0] = xf_rot_y(0, 0, 0, 0); add_inst(NS_IF_LIT, -1, id1, x1, NULL, 1, 0); }
     id1[0] = idPillar; x1[0] = xf_rot_y(0, 300, 0, 1000); add_inst(NS_IF_LIT, -1, id1, x1, NULL, 1, NS_PF_HIDDEN);
     g_hdr.n_mesh = (uint32_t)g_nbuilt;
 }
@@ -477,6 +480,25 @@ uint32_t ns_synth_acked(void) { return g_acked; }
 
 #define RD(p, n, sz) do { if (fread((p), (sz), (n), f) != (size_t)(n)) { fclose(f); return -2; } } while (0)
 
+static NsInstance li[64]; static NsPiece lp[128]; static NsLight ll[8];
+static Hdr g_lh;
+
+/* Publica la escena cargada (cabecera `h`, listas li/lp/ll) por el puente g_br. */
+static int publish_loaded(const Hdr *h) {
+    NsScene *sc = ns_bridge_begin(g_br);
+    if (!sc) return -6;
+    g_epoch = 1; sc->game_frame = 1; sc->mesh_epoch = 1; sc->valid = NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK | NS_SV_TOVR_OK | NS_SV_PLAYER_OK; sc->units_per_m = 1000;
+    memcpy(sc->to_vr, h->to_vr, sizeof h->to_vr);
+    sc->cam = h->cam; sc->fog = h->fog; sc->global_light = h->global_light; sc->group_mask = h->group_mask;
+    memcpy(sc->bg_rgb, h->bg, sizeof h->bg);
+    memcpy(sc->inst, li, sizeof(NsInstance) * h->n_inst); sc->n_inst = h->n_inst;
+    memcpy(sc->piece, lp, sizeof(NsPiece) * h->n_piece); sc->n_piece = h->n_piece;
+    memcpy(sc->lights, ll, sizeof(NsLight) * h->n_light); sc->n_light = h->n_light;
+    ns_bridge_publish(g_br, (NsMeshStore *)&g_nlm);
+    return 0;
+}
+int ns_synth_republish(void) { return (g_loaded && g_br) ? publish_loaded(&g_lh) : -1; }
+
 int ns_synth_load(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
@@ -486,7 +508,6 @@ int ns_synth_load(const char *path) {
     Hdr h;
     RD(&h, 1, sizeof h);
     if (h.n_inst > 64 || h.n_piece > 128 || h.n_light > 8 || h.n_mesh > 32) { fclose(f); return -4; }
-    static NsInstance li[64]; static NsPiece lp[128]; static NsLight ll[8];
     RD(li, h.n_inst, sizeof(NsInstance));
     RD(lp, h.n_piece, sizeof(NsPiece));
     RD(ll, h.n_light, sizeof(NsLight));
@@ -513,16 +534,8 @@ int ns_synth_load(const char *path) {
     if (g_br) ns_bridge_destroy(g_br);
     g_br = ns_bridge_create(NULL);
     if (!g_br) return -5;
-    NsScene *sc = ns_bridge_begin(g_br);
-    if (!sc) return -6;
-    g_epoch = 1; sc->game_frame = 1; sc->mesh_epoch = 1; sc->valid = NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK | NS_SV_TOVR_OK | NS_SV_PLAYER_OK; sc->units_per_m = 1000;
-    memcpy(sc->to_vr, h.to_vr, sizeof h.to_vr);
-    sc->cam = h.cam; sc->fog = h.fog; sc->global_light = h.global_light; sc->group_mask = h.group_mask;
-    memcpy(sc->bg_rgb, h.bg, sizeof h.bg);
-    memcpy(sc->inst, li, sizeof(NsInstance) * h.n_inst); sc->n_inst = h.n_inst;
-    memcpy(sc->piece, lp, sizeof(NsPiece) * h.n_piece); sc->n_piece = h.n_piece;
-    memcpy(sc->lights, ll, sizeof(NsLight) * h.n_light); sc->n_light = h.n_light;
-    ns_bridge_publish(g_br, (NsMeshStore *)&g_nlm);
+    g_lh = h;
+    { int rc = publish_loaded(&g_lh); if (rc) return rc; }
     g_loaded = 1;
     return 0;
 }

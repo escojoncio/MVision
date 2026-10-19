@@ -88,6 +88,7 @@ typedef struct {
     vector_float4 tovr[3];          /* mundo del motor -> mundo VR, filas de la 3x4 (xyz, traslación en w) */
     vector_float4 fog_fwd;          /* xyz = adelante de la cámara del juego (mundo del motor); w = -dot(adelante, ojo): z_vista = dot(xyz, p) + w */
     vector_float4 fog_par;          /* x = inicio, y = longitud (unidades del motor), z = 1 si hay niebla, w = metros VR por unidad de `raise` */
+    vector_float4 tint;             /* xyz = factor de color por canal aplicado al color de vértice (1,1,1 = sin teñir; modo de depuración «solo nativo») */
 } NsGpuUniforms;
 #endif
 

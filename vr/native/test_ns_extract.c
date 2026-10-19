@@ -408,9 +408,23 @@ int main(void) {
     uint64_t idB = sc.piece[0].mesh_id;
     CHECK(sc.mesh_epoch == 1 && sc.zone_gen == 1);
     {
-        uint32_t mv = rd32_(DEF0 + 0x20 + 0x38);
-        w16(mv + 2, 4242);   /* un vértice del escenario cambia sin cambiar de dirección */
-        w16(rd32_(DEF0 + 0x20 + 0x58 + 0x38) + 2, 4141);
+        uint32_t m0 = DEF0 + 0x20, m1 = DEF0 + 0x20 + 0x58;
+        uint32_t mv = rd32_(m0 + 0x38);
+        /* regresión (época que subía en cada escena): vértices del escenario que se animan en el sitio (misma estructura) recodifican la malla pero NO son un cambio de zona */
+        w16(mv + 2, 4242); w16(rd32_(m1 + 0x38) + 2, 4141);
+        rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
+        CHECK(es.zone_changes == 0 && sc.zone_gen == 1 && sc.mesh_epoch == 1 && es.memo_stale >= 1 && sc.piece[0].mesh_id != idB);
+        w16(mv + 2, 4343);
+        rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
+        CHECK(es.zone_changes == 0 && sc.zone_gen == 1 && sc.mesh_epoch == 1);
+        /* ... y la misma RAM extraída dos veces no cambia nada */
+        rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
+        CHECK(es.zone_changes == 0 && es.memo_stale == 0 && es.mesh_new == 0 && sc.mesh_epoch == 1);
+        /* cambio ESTRUCTURAL de modelos conocidos del escenario (tabla de índices de caras): cambio de zona */
+        uint32_t vi0 = rd32_(m0 + 0x3C), vi1 = rd32_(m1 + 0x3C);
+        #define SWAPVI(vi) do { uint8_t t_ = ram[(vi) & 0x1FFFFF]; ram[(vi) & 0x1FFFFF] = ram[((vi) & 0x1FFFFF) + 1]; ram[((vi) & 0x1FFFFF) + 1] = t_; } while (0)
+        CHECK(ram[vi0 & 0x1FFFFF] != ram[(vi0 & 0x1FFFFF) + 1] && ram[vi1 & 0x1FFFFF] != ram[(vi1 & 0x1FFFFF) + 1]);
+        SWAPVI(vi0); SWAPVI(vi1);
         rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
         CHECK(es.zone_changes == 1 && es.epoch_opened == 1 && sc.zone_gen == 2 && sc.mesh_epoch == 2 && sc.piece[0].mesh_id != idB);
         CHECK(ns_store_get(st, idB) != NULL);                 /* la época anterior sigue legible hasta que el consumidor reconoce la nueva */
@@ -418,13 +432,38 @@ int main(void) {
         ns_store_ack(st, 2);
         CHECK(ns_store_get(st, idB) == NULL);                 /* reconocida la época 2 se libera la 1 */
         /* nuevo cambio sin reconocer la época 3: se sigue en la actual */
-        w16(mv + 2, 4343); w16(rd32_(DEF0 + 0x20 + 0x58 + 0x38) + 2, 4343);
+        SWAPVI(vi0); SWAPVI(vi1);
         rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
         CHECK(es.zone_changes == 1 && es.epoch_opened == 1 && sc.mesh_epoch == 3);
-        w16(mv + 2, 4444);
+        SWAPVI(vi0); SWAPVI(vi1);
         rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
         CHECK(es.zone_changes == 1 && es.epoch_opened == 0 && sc.mesh_epoch == 3 && sc.zone_gen == 4);
+        #undef SWAPVI
         CHECK(invariants(&sc, st));
+    }
+    /* vértices del escenario animados durante muchas escenas: la época no sube sin parar (solo por presión del almacén) y el almacén queda acotado */
+    {
+        fresh();
+        q1(O0);
+        rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
+        ns_store_ack(st, sc.mesh_epoch);
+        uint32_t mv = rd32_(DEF0 + 0x20 + 0x38), mv1 = rd32_(DEF0 + 0x20 + 0x58 + 0x38);
+        size_t one = ns_store_bytes(st);
+        ns_store_set_compact(st, one * 6);
+        uint32_t e0 = sc.mesh_epoch, g0 = sc.zone_gen, comp = 0, zc = 0, maxb = 0;
+        for (int i = 0; i < 300; i++) {
+            w16(mv + 2, 3000 + i); w16(mv1 + 2, 5000 + i);
+            rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
+            comp += es.compactions; zc += es.zone_changes;
+            CHECK(ns_store_get(st, sc.piece[0].mesh_id) != NULL);
+            ns_store_ack(st, sc.mesh_epoch);
+            if (ns_store_bytes(st) > maxb) maxb = (uint32_t)ns_store_bytes(st);
+        }
+        CHECK(zc == 0 && sc.zone_gen == g0);
+        CHECK(comp >= 1 && sc.mesh_epoch - e0 == comp && comp < 150);
+        CHECK(maxb < one * 16);
+        ns_store_set_compact(st, 0);
+        (void)rc;
     }
     /* sustitución total de las definiciones del escenario = cambio de zona */
     fresh();

@@ -95,8 +95,9 @@ void mv_vrhost_game_state(MvVrGameState *out);
  * ns_native_decide(&view, &(NsDecideIn){mv_vrhost_render_mode(), renderer_ok, mallas_subidas, scene.native_3d, ahora, 250 ms}, &d)  (vr/native/ns_bridge.h); si d.native pinta la
  * escena nativa y salta los batches con (b.skip_if_native & d.skip); si el dibujo nativo falla a mitad llama a ns_native_fail(&d) y pinta TODOS los batches en ese mismo fotograma.
  * No hay estado global "esta escena es nativa": solo el de cada escena (native_3d) y el de la decisión. */
-void mv_vrhost_set_render_mode(int native);
-int mv_vrhost_render_mode(void);                 /* modo pedido (0/1) */
+void mv_vrhost_set_render_mode(int mode);        /* 0 = GPU, 1 = nativo, 2 = SOLO nativo (depuración: nunca se dibujan los batches 3D de la GPU y el nativo va teñido) */
+int mv_vrhost_render_mode(void);                 /* modo pedido (0/1/2) */
+int mv_vrhost_render_only_native(void);          /* 1 si el modo pedido es «solo nativo» */
 int mv_vrhost_render_env_locked(void);           /* 1 si MV_RENDER fija el modo (el menú no puede cambiarlo) */
 int mv_vrhost_native_available(void);
 void mv_vrhost_native_renderer_ready(int ready); /* el renderer Metal nativo avisa de que puede dibujar el puente */
