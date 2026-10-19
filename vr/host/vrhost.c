@@ -18,6 +18,7 @@
 #include "vr_camera.h"
 #include "vr_heading.h"
 #include "vr_usermap.h"
+#include "vr_cine.h"
 #include "vr_fire.h"
 #include "vr_radar.h"
 #include "vr_radar_vrp.h"
@@ -112,6 +113,9 @@ static _Atomic uint64_t last_poll_ns;
 /* ------------------------------------------------------------------------------------------------ estado del hilo de emulación */
 static BridgeState bs;                   /* último puente leído */
 static VrView view;                      /* vista vigente: mundo / cine (vr_view.h) */
+static VrCine cine;                      /* planos de la cinemática del motor en curso (vr_cine.h) */
+static int last_scene3d, last_video;     /* de la última lista ensamblada: geometría 3D sustancial con cámara válida / fotograma de vídeo */
+static int last_cover;                   /* recubrimientos a pantalla completa (fundidos) de la última lista */
 static int vr_ok;                        /* EXE de la edición esperada: parche aplicado y HLE de cámara enlazadas */
 static int cap_on;
 static VrSceneOpts sopts;
@@ -275,6 +279,18 @@ static void build_one(const GpuDrawList *l, int si) {
     int32_t save_pos[3];
     int16_t save_axes[3][3];
     VrSceneOpts o = sopts;
+    int cine_cut = 0;
+    {   /* Cinemática del motor (ni mundo ni vídeo/2D puros): la cámara es la del guion, nunca la de la cabeza. Planos y origen fijo por plano. */
+        int rs = view.reason;
+        int cine_reason = rs == VRV_R_NO_GAME || rs == VRV_R_CINEMATIC || rs == VRV_R_LOST_CONTROL;
+        if (!cine_reason || (r && r->active)) vrcine_camera(&cine, 0, bs.eye_pos, (const float[9]){0});
+        else if (r) cine_cut = vrcine_camera(&cine, 1, r->eye, r->M);
+    }
+    int cine_cand = r && !r->active && cine.have;
+    if (cine_cand) {   /* origen fijo del plano: el mundo VR no se desplaza con el personaje dentro del plano */
+        o.origin_mode = 1;
+        for (int i = 0; i < 3; i++) o.origin_game[i] = (float)cine.origin[i];
+    }
     memcpy(save_pos, bs.eye_pos, sizeof save_pos);
     memcpy(save_axes, bs.eye_axes, sizeof save_axes);
     if (r) {
@@ -314,13 +330,33 @@ static void build_one(const GpuDrawList *l, int si) {
      * panel 2D, así que se reconstruye sin filtro y el fundido va al panel como antes. Con tiras (efecto submarino) se conserva el filtro. */
     /* Las gafas (líneas de exploración) y la máscara de visión (máscara de gas, caja) no son fundidos: se conserva el filtro (clase 3b) para que su tinte, sus líneas y su marco
      * cubran toda la vista; también un destello/fundido durante la partida (hay 3D y el jugador está en escena) se aplica sobre la vista en vez de en el panel. */
+    int cover_n = sc.filter.active ? sc.filter.n_covers : 0;
     int keep3b = sc.filter.n_scan > 0 || sc.filter.frame_on || (sc.has_3d && sc.world_valid);
+    if (cine_cand && (last_scene3d || sc.stats.n_tris3d >= 12)) keep3b = 0;   /* cinemática del motor: fundidos y destellos van al panel 2D de la pantalla 3D (el post-proceso por ojo no se aplica allí) */
     if (rc == 0 && o.screen_filter && sc.filter.active && sc.filter.n_strips == 0 && sc.filter.n_polys == 0 && !keep3b) {
         VrSceneOpts o2 = o;
         o2.screen_filter = 0;
         rc = vr_scene_build(hl, &bs, &o2, &sc);
     }
     double ms = (double)(mono_ns() - t0) * 1e-6;
+    if (rc == 0) {
+        last_scene3d = r && !r->active && sc.stats.n_tris3d >= 12;
+        last_cover = cover_n;
+        /* vídeo pregrabado: sin 3D y con una subida a VRAM que cubre al menos la mitad del área mostrada (fotograma descomprimido) */
+        int vid = 0;
+        if (!sc.has_3d) {
+            int dw = l->disp.w > 0 ? l->disp.w : 320, dh = l->disp.h > 0 ? l->disp.h : 240;
+            for (uint32_t i = 0; i < l->nops && !vid; i++) {
+                const GpuOp *op = &l->ops[i];
+                if (op->type == GPU_OP_UPLOAD && (int)op->rw * (int)op->rh * 2 >= dw * dh && (int)op->rw >= dw / 2) vid = 1;
+            }
+        }
+        last_video = vid;
+    }
+    sc.cine_active = view.kind == VRV_K_ENGINE;
+    sc.cine_shot = cine.shot;
+    sc.cine_cut = cine_cut;
+    sc.cine_cover = cover_n;
     memcpy(bs.eye_pos, save_pos, sizeof save_pos);
     memcpy(bs.eye_axes, save_axes, sizeof save_axes);
 
@@ -388,7 +424,10 @@ static void publish_state(void) {
         vin.cam_active = (uint8_t)(g.cam_active != 0);
         vin.cinematic = core && bs.cinematic; vin.comms = core && bs.comms; vin.paused = core && bs.paused;
         vin.menu_open = core && bs.menu_open; vin.stopped = core && bs.stopped;
+        vin.scene3d = (uint8_t)last_scene3d; vin.video = (uint8_t)last_video;
         g.view_mode = vrview_step(&view, &vin);
+        g.view_kind = view.kind;
+        g.cine_shot = cine.shot; g.cine_cuts = cine.cuts; g.cine_cover = last_cover;
         g.view_reason = view.reason;
         g.cinematic = vin.cinematic; g.comms = vin.comms; g.paused = vin.paused; g.menu_open = vin.menu_open; g.stopped = vin.stopped;
         g.item = core ? bs.item : -1;
@@ -450,6 +489,10 @@ static int head_fn(float m[16], double *t) {
 static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     vr_ok = 0;
     vrview_reset(&view);
+    memset(&cine, 0, sizeof cine);
+    vrcine_config_default(&cine.cfg);
+    vrcine_reset(&cine);
+    last_scene3d = last_video = last_cover = 0;
     hle_vrcam_reset();
     hle_vrradar_reset();
     vrradar_reset();

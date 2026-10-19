@@ -3,7 +3,7 @@ import simd
 
 /// Un elemento que dibuja el pase final dentro del espacio de la escena (todo en metros, espacio recentrado).
 struct XRDrawItem {
-    enum Kind { case screen, panel, menu, veil }
+    enum Kind { case screen, screen3d, panel, menu, veil }
     var kind: Kind
     var texture: MTLTexture?
     var model = matrix_identity_float4x4        // rígido: el origen es el centro del quad, +Z mira al usuario
@@ -15,6 +15,12 @@ struct XRDrawItem {
     var imgSize = SIMD2<Float>(1, 1)            // pantalla: tamaño de la imagen en texels
     var sharp: Float = 1                        // pantalla: 0 suave, 1 nítido, 2 píxel
     var opacity: Float = 1                      // veil: opacidad del negro
+    // screen3d: `texture` es un array de 2 capas (ojo izquierdo, derecho). Tinte y recubrimientos de pantalla del juego (espacio gamma, como VrFilter:
+    // w de cada recubrimiento = modo de mezcla original 0..3 o -1 = sin usar), y cómo leer/escribir los valores.
+    var tint = SIMD3<Float>(1, 1, 1)
+    var covers = [SIMD4<Float>](repeating: SIMD4<Float>(0, 0, 0, -1), count: 4)
+    var storedLinear = false                    // los valores de la textura ya son lineales (rgba16Float)
+    var outLinear = false                       // el destino es lineal: el shader convierte de gamma a lineal al final
 }
 
 /// Pase final de cada frame, tras RGRenderer.encode:
@@ -23,18 +29,24 @@ struct XRDrawItem {
 /// Layered: una pasada con `renderTargetArrayLength = vistas` y dibujo instanciado (instance = vista);
 /// dedicated: una pasada por vista.
 final class XRFinalPass {
-    private struct QuadUniforms {          // debe coincidir con XRQuadU de XRShaders.metal (192 B)
+    private struct QuadUniforms {          // debe coincidir con XRQuadU de XRShaders.metal (272 B)
         var mvp0 = matrix_identity_float4x4
         var mvp1 = matrix_identity_float4x4
         var uvrect = SIMD4<Float>(0, 0, 1, 1)
         var geom = SIMD4<Float>(1, 1, 2.5, 0)
         var tex = SIMD4<Float>(1, 1, 1, 1)
-        var cfg = SIMD4<UInt32>(0, 1, 0, 0)
+        var cfg = SIMD4<UInt32>(0, 1, 0, 0)         // x = vista base, y = columnas, z = bit0 destino lineal, bit1 valores guardados lineales
+        var fxTint = SIMD4<Float>(1, 1, 1, 0)
+        var fxCov0 = SIMD4<Float>(0, 0, 0, -1)
+        var fxCov1 = SIMD4<Float>(0, 0, 0, -1)
+        var fxCov2 = SIMD4<Float>(0, 0, 0, -1)
+        var fxCov3 = SIMD4<Float>(0, 0, 0, -1)
     }
 
     private let layered: Bool
     private let resolvePSO: MTLRenderPipelineState
     private let screenPSO: MTLRenderPipelineState
+    private let screen3dPSO: MTLRenderPipelineState
     private let panelPSO: MTLRenderPipelineState
     private let veilPSO: MTLRenderPipelineState
     private let dsAlways: MTLDepthStencilState
@@ -53,6 +65,7 @@ final class XRFinalPass {
               let drF = lib.makeFunction(name: "xr_depth_resolve" + sfx),
               let qV = lib.makeFunction(name: "xr_q_vertex" + sfx),
               let scF = lib.makeFunction(name: "xr_screen_fragment" + sfx),
+              let s3F = lib.makeFunction(name: "xr_screen3d_fragment" + sfx),
               let pnF = lib.makeFunction(name: "xr_panel_fragment" + sfx),
               let vlF = lib.makeFunction(name: "xr_veil_fragment" + sfx) else { return nil }
 
@@ -80,14 +93,16 @@ final class XRFinalPass {
         }
         // Las tiras de los quads usan topología de triángulos al escribir el índice de capa (layered), igual que el resto.
         let d2 = blended("mv.xr.screen", qV, scF, topology: true)
+        let d2b = blended("mv.xr.screen3d", qV, s3F, topology: true)
         let d3 = blended("mv.xr.panel", qV, pnF, topology: true)
         let d4 = blended("mv.xr.veil", fsV, vlF, topology: true)
 
         guard let p1 = try? device.makeRenderPipelineState(descriptor: d1),
               let p2 = try? device.makeRenderPipelineState(descriptor: d2),
+              let p2b = try? device.makeRenderPipelineState(descriptor: d2b),
               let p3 = try? device.makeRenderPipelineState(descriptor: d3),
               let p4 = try? device.makeRenderPipelineState(descriptor: d4) else { return nil }
-        resolvePSO = p1; screenPSO = p2; panelPSO = p3; veilPSO = p4
+        resolvePSO = p1; screenPSO = p2; screen3dPSO = p2b; panelPSO = p3; veilPSO = p4
 
         let a = MTLDepthStencilDescriptor()
         a.depthCompareFunction = .always; a.isDepthWriteEnabled = true
@@ -113,7 +128,7 @@ final class XRFinalPass {
         let resolve = msaaDepth != nil
         nDrawn.removeAll()
         defer {
-            lastCounts = "resolve=\(resolve) pantalla=\(nDrawn[.screen] ?? 0) panel=\(nDrawn[.panel] ?? 0) menu=\(nDrawn[.menu] ?? 0) velo=\(nDrawn[.veil] ?? 0) de \(items.count)"
+            lastCounts = "resolve=\(resolve) pantalla=\(nDrawn[.screen] ?? 0) pantalla3d=\(nDrawn[.screen3d] ?? 0) panel=\(nDrawn[.panel] ?? 0) menu=\(nDrawn[.menu] ?? 0) velo=\(nDrawn[.veil] ?? 0) de \(items.count)"
         }
         if !resolve && items.isEmpty { return }       // nada que hacer
         guard views.count >= 2, projections.count >= 2, viewports.count >= 1 else { return }
@@ -179,8 +194,11 @@ final class XRFinalPass {
             u.uvrect = it.uvrect
             u.geom = SIMD4<Float>(it.size.x, it.size.y, it.distance, it.curve)
             u.tex = SIMD4<Float>(it.imgSize.x, it.imgSize.y, it.sharp, it.kind == .screen ? 1 : it.opacity)
-            u.cfg = SIMD4<UInt32>(base, max(it.cols, 1), 0, 0)
-            enc.setRenderPipelineState(it.kind == .screen ? screenPSO : panelPSO)
+            u.cfg = SIMD4<UInt32>(base, max(it.cols, 1), (it.outLinear ? 1 : 0) | (it.storedLinear ? 2 : 0), 0)
+            u.fxTint = SIMD4<Float>(it.tint.x, it.tint.y, it.tint.z, 0)
+            if it.covers.count >= 4 { u.fxCov0 = it.covers[0]; u.fxCov1 = it.covers[1]; u.fxCov2 = it.covers[2]; u.fxCov3 = it.covers[3] }
+            u.tex.w = (it.kind == .screen || it.kind == .screen3d) ? 1 : it.opacity
+            enc.setRenderPipelineState(it.kind == .screen ? screenPSO : it.kind == .screen3d ? screen3dPSO : panelPSO)
             enc.setDepthStencilState(it.kind == .menu ? dsOverlay : dsHud)
             enc.setVertexBytes(&u, length: MemoryLayout<QuadUniforms>.stride, index: 0)
             enc.setFragmentBytes(&u, length: MemoryLayout<QuadUniforms>.stride, index: 0)

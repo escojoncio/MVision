@@ -280,3 +280,72 @@ void hud_emu_post2(const float *src, float *dst, int w, int h, float cx_img, flo
 void hud_emu_post(const float *src, float *dst, int w, int h, float cy_img, float f_eye, const VrFilter *f) {
     hud_emu_post2(src, dst, w, h, 0.5f * (float)w, cy_img, f_eye, f_eye, f);
 }
+
+/* ---- pase 3D por CPU (pantalla 3D) ---- */
+typedef struct { float x, y, z, w, u, v, c[3]; } V3;   /* x,y en píxeles; w = 1/(-z) */
+
+static void tri3d(const uint16_t *vram, HudImg *im, float *zb, const VrVtx *t, const V3 *p, uint32_t pass, int mode, int writez) {
+    float area = edge(p[0].x, p[0].y, p[1].x, p[1].y, p[2].x, p[2].y);
+    if (area == 0) return;
+    int x0 = (int)floorf(fminf(p[0].x, fminf(p[1].x, p[2].x))), x1 = (int)ceilf(fmaxf(p[0].x, fmaxf(p[1].x, p[2].x)));
+    int y0 = (int)floorf(fminf(p[0].y, fminf(p[1].y, p[2].y))), y1 = (int)ceilf(fmaxf(p[0].y, fmaxf(p[1].y, p[2].y)));
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > im->w) x1 = im->w; if (y1 > im->h) y1 = im->h;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
+            float px = x + 0.5f, py = y + 0.5f;
+            float w0 = edge(p[1].x, p[1].y, p[2].x, p[2].y, px, py) / area, w1 = edge(p[2].x, p[2].y, p[0].x, p[0].y, px, py) / area, w2 = 1.0f - w0 - w1;
+            if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+            float iw = w0 * p[0].w + w1 * p[1].w + w2 * p[2].w;   /* 1/profundidad interpolada linealmente en pantalla */
+            if (!(iw > 0)) continue;
+            float depth = 1.0f / iw;
+            size_t zi = (size_t)y * im->w + x;
+            if (depth >= zb[zi]) continue;
+            float b0 = w0 * p[0].w / iw, b1 = w1 * p[1].w / iw, b2 = w2 * p[2].w / iw;   /* corrección de perspectiva */
+            float u = b0 * p[0].u + b1 * p[1].u + b2 * p[2].u, v = b0 * p[0].v + b1 * p[1].v + b2 * p[2].v;
+            float col[3];
+            for (int k = 0; k < 3; k++) col[k] = b0 * p[0].c[k] + b1 * p[1].c[k] + b2 * p[2].c[k];
+            float rgb[3];
+            if (!frag(vram, &t[0], u, v, col, pass, rgb)) continue;
+            blend(&im->rgba[zi * 4], rgb, mode);
+            if (writez) zb[zi] = depth;
+        }
+}
+
+void hud_emu_run3d(const VrScene *s, uint16_t *vram, HudImg *im, float *zbuf, int zinit, const float view[16], const float tan_[4]) {
+    hud_cur_states = s->states; hud_cur_nstates = s->nstates;
+    const GpuDrawList *l = s->src;
+    if (im && zinit) for (size_t i = 0; i < (size_t)im->w * im->h; i++) zbuf[i] = 1e30f;
+    uint32_t next_ev = 0;
+    for (uint32_t bi = 0; bi < s->nb; bi++) {
+        const VrBatch *b = &s->b[bi];
+        while (next_ev < b->ev_end && next_ev < l->nops) { hud_emu_event(l, &l->ops[next_ev], vram); next_ev++; }
+        if (b->kind > 1 || !im) continue;
+        int hastex = 0;
+        for (uint32_t j = 0; j < b->count; j++) if (s->v[b->first + j].flags & VR_VF_TEXTURED) { hastex = 1; break; }
+        int semi = b->kind == 1;
+        for (uint32_t j = 0; j + 2 < b->count; j += 3) {
+            const VrVtx *t = &s->v[b->first + j];
+            V3 p[3];
+            int ok = 1;
+            for (int k = 0; k < 3; k++) {
+                const float *q = t[k].pos;
+                float x = view[0] * q[0] + view[4] * q[1] + view[8] * q[2] + view[12];
+                float y = view[1] * q[0] + view[5] * q[1] + view[9] * q[2] + view[13];
+                float z = view[2] * q[0] + view[6] * q[1] + view[10] * q[2] + view[14];
+                if (!(z < -0.02f)) { ok = 0; break; }
+                float tx = x / -z, ty = y / -z;
+                p[k].x = (tx + tan_[0]) / (tan_[0] + tan_[1]) * (float)im->w;
+                p[k].y = (tan_[2] - ty) / (tan_[2] + tan_[3]) * (float)im->h;
+                p[k].z = z; p[k].w = 1.0f / -z;
+                p[k].u = t[k].uv[0]; p[k].v = t[k].uv[1];
+                for (int c = 0; c < 3; c++) p[k].c[c] = (float)((t[k].rgba >> (8 * c)) & 255u) / 128.0f;
+            }
+            if (!ok) continue;   /* el ensamblador ya recortó contra el plano cercano de la cámara del juego; aquí solo se descarta lo que cae detrás del ojo */
+            if (semi) {
+                tri3d(vram, im, zbuf, t, p, hastex ? 1 : 0, b->blend, 0);
+                if (hastex) tri3d(vram, im, zbuf, t, p, 2, -1, 1);
+            } else tri3d(vram, im, zbuf, t, p, 0, -1, 1);
+        }
+    }
+    while (next_ev < l->nops) { hud_emu_event(l, &l->ops[next_ev], vram); next_ev++; }
+}

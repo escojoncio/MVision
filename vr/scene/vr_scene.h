@@ -236,6 +236,11 @@ typedef struct {
     VrStats stats;
     VrFilter filter;          /* resumen de la clase 3 (ver "Clase 3") */
     int user_space;           /* 1 si el mundo de salida está en el espacio del usuario (opts.user_map_on aplicado) */
+    /* --- cinemáticas del motor (vr/host/vr_cine.h; lo rellena el host, vr_scene_build lo deja a cero) --- */
+    int32_t cine_active;      /* 1: esta escena es de una cinemática del motor con 3D (presentación en pantalla 3D / dentro de la escena) */
+    uint32_t cine_shot;       /* nº de plano (sube en cada corte de cámara y al empezar la cinemática) */
+    int32_t cine_cut;         /* 1 si esta escena es el primer fotograma de un plano nuevo */
+    int32_t cine_cover;       /* nº de recubrimientos semitransparentes a pantalla completa (fundidos) detectados en la lista */
 } VrScene;
 
 typedef struct {
