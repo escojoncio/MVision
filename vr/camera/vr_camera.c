@@ -111,6 +111,10 @@ typedef struct {
     uint32_t draw_n;
     struct { uint32_t s0, s1, serial; } draw[64];  /* envíos al GPU: rango de seq y registro asociado (anillo) */
     VrCamStats st;
+    /* predicción de la mirada: última muestra de cabeza (guiñada/elevación del usuario) y velocidad angular suavizada (grados/s) */
+    uint32_t vb;                          /* VBlanks vistos (vrcam_frame) */
+    int hp_ok; float hp_yaw, hp_el; uint32_t hp_vb;
+    float w_yaw, w_el;
 } Vc;
 static Vc S;
 
@@ -121,6 +125,7 @@ void vrcam_config_default(VrCamConfig *c) {
     c->loco = VRCAM_LOCO_HEAD; c->eye_xz = VRCAM_EYE_AUTO;
     c->hide_head = 1; c->override_pad = 1;
     c->on_frames = 8; c->engine_h = 160; c->draw_lag = 0; c->pitch_limit_deg = 80.0f;
+    c->predict_s = 0.10f; c->predict_max_deg = 35.0f; c->vblank_hz = 50.0f;
 }
 void vrcam_init(const VrCamConfig *c) {
     memset(&S, 0, sizeof S);
@@ -128,6 +133,9 @@ void vrcam_init(const VrCamConfig *c) {
     if (S.cfg.units_per_m <= 0) S.cfg.units_per_m = 1000.0f;
     if (S.cfg.on_frames < 1) S.cfg.on_frames = 1;
     if (S.cfg.pitch_limit_deg < 5 || S.cfg.pitch_limit_deg > 89) S.cfg.pitch_limit_deg = 80.0f;
+    if (!(S.cfg.predict_s >= 0.0f && S.cfg.predict_s <= 0.5f)) S.cfg.predict_s = 0.0f;          /* NaN o fuera de rango: sin predicción */
+    if (!(S.cfg.predict_max_deg >= 0.0f && S.cfg.predict_max_deg <= 90.0f)) S.cfg.predict_max_deg = 35.0f;
+    if (!(S.cfg.vblank_hz >= 10.0f && S.cfg.vblank_hz <= 240.0f)) S.cfg.vblank_hz = 50.0f;
 }
 const VrCamConfig *vrcam_config(void) { return &S.cfg; }
 
@@ -206,6 +214,7 @@ static Body read_body(const uint8_t *ram) {
 /* ================================================== gancho de frame ================================================== */
 void vrcam_frame(const uint8_t *ram, const BridgeState *st) {
     if (!ram) return;
+    S.vb++;
     if (!st) { bridge_read(ram, &S.bs); st = &S.bs; }
     int ok = (st->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && st->has_player && st->in_control && S.cfg.head;
     if (ok) { if (S.ok_count < 1 << 20) S.ok_count++; } else S.ok_count = 0;
@@ -244,10 +253,30 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
         S.yaw_ref = a_yaw; S.extra = 0;
         S.p_ref[0] = h[12]; S.p_ref[1] = h[13]; S.p_ref[2] = h[14];
         S.have_ref = 1; S.need_recenter = 0; S.st.recenters++;
+        S.hp_ok = 0; S.w_yaw = S.w_el = 0.0f;   /* el salto del recentrado no es una velocidad */
     }
-    float view = S.cfg.loco == VRCAM_LOCO_BODY ? b.body_yaw + (a_yaw - S.yaw_ref) + S.extra : S.theta_play0 + S.extra + a_yaw;
+    /* Predicción: velocidad angular de la cabeza entre dos construcciones de cámara (suavizada) y adelanto de predict_s. Solo mueve el CENTRO del recorte del
+     * motor en el espacio del usuario (theta_play, que decide dónde cae el mundo, no cambia) y el cabeceo dado al motor. */
+    float p_yaw = a_yaw, p_el = elev;
+    {
+        float dt = S.hp_ok ? (float)(S.vb - S.hp_vb) / S.cfg.vblank_hz : 0.0f;
+        if (S.hp_ok && dt > 0.0f && dt <= 0.5f) {
+            float wy = wrap180(a_yaw - S.hp_yaw) / dt, we = (elev - S.hp_el) / dt;
+            S.w_yaw = 0.5f * S.w_yaw + 0.5f * wy; S.w_el = 0.5f * S.w_el + 0.5f * we;
+        } else if (!S.hp_ok || dt > 0.5f) S.w_yaw = S.w_el = 0.0f;
+        if (!S.hp_ok || dt > 0.0f) { S.hp_ok = 1; S.hp_yaw = a_yaw; S.hp_el = elev; S.hp_vb = S.vb; }
+        if (S.cfg.predict_s > 0.0f) {
+            float dy = S.w_yaw * S.cfg.predict_s, de = S.w_el * S.cfg.predict_s, m = S.cfg.predict_max_deg;
+            dy = dy > m ? m : (dy < -m ? -m : dy);
+            de = de > m ? m : (de < -m ? -m : de);
+            p_yaw = a_yaw + dy; p_el = elev + de;
+            p_el = p_el > 89.0f ? 89.0f : (p_el < -89.0f ? -89.0f : p_el);
+        }
+    }
+    float view = S.cfg.loco == VRCAM_LOCO_BODY ? b.body_yaw + (p_yaw - S.yaw_ref) + S.extra : S.theta_play0 + S.extra + p_yaw;
     view = wrap360(view);
-    float pitch = -elev;
+    float view_real = S.cfg.loco == VRCAM_LOCO_BODY ? b.body_yaw + (a_yaw - S.yaw_ref) + S.extra : S.theta_play0 + S.extra + a_yaw;
+    float pitch = -p_el;
     if (pitch > S.cfg.pitch_limit_deg) pitch = S.cfg.pitch_limit_deg;
     if (pitch < -S.cfg.pitch_limit_deg) pitch = -S.cfg.pitch_limit_deg;
 
@@ -273,11 +302,11 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
     if (sc < 16) sc = 16;
     if (sc > 32767) sc = 32767;
     p->screen = (int16_t)sc;
-    p->yaw_deg = view; p->pitch_deg = pitch; p->theta_play_deg = wrap360(view - a_yaw);
+    p->yaw_deg = view; p->pitch_deg = pitch; p->theta_play_deg = wrap360(view - p_yaw);
     memcpy(p->head, h, sizeof h);
     memcpy(p->p_ref, S.p_ref, sizeof S.p_ref);
 
-    S.view_yaw = view; S.theta_body = b.body_yaw;
+    S.view_yaw = wrap360(view_real); S.theta_body = b.body_yaw;   /* el rumbo del mando sigue la mirada real, no la prevista */
     S.latched = 1;
     S.st.vr_builds++;
     return 1;

@@ -72,6 +72,11 @@ static int f_act = -1, cur_t = -1, boot_shot, g_keep_ambig, g_fill_partial, g_fi
  *   peek t addr n                   vuelca n bytes de la RAM en el log; cmp t a b n: compara dos zonas de RAM
  *   keep_ambig 0|1                  (prueba) dibuja también los polígonos AMBIG junto a SAT/BEHIND que vr/scene descarta
  *   fill_partial 0|1                (prueba) quads con 3 vértices de vista limpios (sin SAT/BEHIND/AMBIG/DERIVED) y el 4.º sin posición: lo reconstruye como paralelogramo (v_k = v_a + v_b - v_opuesto, también uv y color)
+ *   escena t0 t1 paso [fovh fovv lat]  medición de pérdidas y huecos de la ruta propia (vr_scene tal como la monta el anfitrión): por lista, destino de cada primitiva
+ *                                   (emitida / parcial / AMBIG / cerca / detrás / enorme / degenerada), y cobertura de un visor de fovh x fovv grados con la pose de cabeza
+ *                                   del instante t+lat (lat en VBlanks: retardo de presentación) para: oráculo (todo lo que el juego emitió con vista completa), escena sin
+ *                                   espacio de usuario (como la IPA antigua) y escena en el espacio del usuario. Líneas "[esc]"; resumen "[esc-total]"
+ *   turn t grados                  vrcam_turn(grados) en el frame t (giro con el stick; + = izquierda), como hace el anfitrión
  *   end  t                          fin
  * Con guion no hay fases fijas; se registra cada 15 frames posición/estado/oxígeno y las primitivas 2D a pantalla completa. */
 typedef struct { int kind, t0, t1; unsigned mask; float a[4]; uint32_t u[7]; char s[160]; } ScrEv;
@@ -97,6 +102,8 @@ static void scr_load(const char *path) {
         else if (!strcmp(k, "peek")) { e.kind = 7; sscanf(l, "%*s %d %x %x", &e.t0, &e.u[0], &e.u[1]); }
         else if (!strcmp(k, "card")) { e.kind = 9; sscanf(l, "%*s %d", &e.t0); }
         else if (!strcmp(k, "cmp")) { e.kind = 8; sscanf(l, "%*s %d %x %x %x", &e.t0, &e.u[0], &e.u[1], &e.u[2]); }
+        else if (!strcmp(k, "escena")) { e.kind = 10; e.a[1] = 110; e.a[2] = 100; e.a[3] = 3; sscanf(l, "%*s %d %d %f %f %f %f", &e.t0, &e.t1, &e.a[0], &e.a[1], &e.a[2], &e.a[3]); }
+        else if (!strcmp(k, "turn")) { e.kind = 11; sscanf(l, "%*s %d %f", &e.t0, &e.a[0]); }   /* giro del mando (vrcam_turn, como el anfitrión) en el frame t */
         else if (!strcmp(k, "end")) { sscanf(l, "%*s %d", &scr_end); continue; }
         else continue;
         scr[nscr++] = e;
@@ -373,23 +380,23 @@ static double sum_cov; static int n_cov;
 static float hfov_prev = 100.0f;
 static GpuDisplay last_disp;
 
-static void phase_pose(int t, int f) {
-    (void)f;
-    g_yaw = g_elev = 0;
+static void pose_at(int t, float *gy, float *ge) {
+    *gy = *ge = 0;
     if (scr_on) {
         for (int i = 0; i < nscr; i++) if (scr[i].kind == 1 && t >= scr[i].t0 && t < scr[i].t1) {
             float k = scr[i].t1 > scr[i].t0 ? (float)(t - scr[i].t0) / (scr[i].t1 - scr[i].t0) : 0;
-            g_yaw = scr[i].a[0] + (scr[i].a[1] - scr[i].a[0]) * k; g_elev = scr[i].a[2] + (scr[i].a[3] - scr[i].a[2]) * k;
+            *gy = scr[i].a[0] + (scr[i].a[1] - scr[i].a[0]) * k; *ge = scr[i].a[2] + (scr[i].a[3] - scr[i].a[2]) * k;
         }
         return;
     }
     if (t < 120) return;
     if (t < 240) { if (t >= 228) return;   /* 12 frames quietos (el registro de cámara de la lista dibujada en t va ~5 frames por detrás) antes del barrido: el panel t=240 se dibuja con la pose de cabeza que se muestra */
-        int s = (t >> 1) & 1; g_yaw = s ? 20.0f : -20.0f; g_elev = s ? 30.0f : -30.0f; return; }
-    if (t < 960) { g_yaw = (float)(t - 240) * 0.5f; return; }
-    if (t < 1320) { g_elev = 60.0f * sinf((float)(t - 960) * 6.2831853f / 360.0f); return; }
-    g_yaw = 90.0f;
+        int s = (t >> 1) & 1; *gy = s ? 20.0f : -20.0f; *ge = s ? 30.0f : -30.0f; return; }
+    if (t < 960) { *gy = (float)(t - 240) * 0.5f; return; }
+    if (t < 1320) { *ge = 60.0f * sinf((float)(t - 960) * 6.2831853f / 360.0f); return; }
+    *gy = 90.0f;
 }
+static void phase_pose(int t, int f) { (void)f; pose_at(t, &g_yaw, &g_elev); }
 
 static double mad_img(const uint8_t *a, const uint8_t *b, int n, const uint8_t *mask) {
     double s = 0; int cnt = 0;
@@ -577,6 +584,195 @@ static void apply_epochs(const GpuDrawList *l, int kstrip, uint8_t *pre, int *pw
     }
     if (nev > (uint32_t)snap_max_ev) snap_max_ev = (int)nev;
 }
+/* ===================================== §49: medición de la ruta propia (pérdidas y huecos) =====================================
+ * Una lista dibujada llega al visor por vr_scene (montada como hace vr/host: con el registro de cámara de la lista). Aquí se cuenta,
+ * por lista, qué ha emitido el juego (primitivas con posición de vista) y qué ha llegado a la escena, y se mide la cobertura de un visor
+ * de fovh x fovv grados con la cabeza donde esté en el instante de presentación (t + lat) para tres casos:
+ *   E  oráculo      todo lo que el juego emitió con posición de vista completa, re-proyectado con vrcam_delta exacto a la pose de presentación;
+ *   Sa escena "vieja"  VrScene en ejes del juego (sin espacio de usuario), tal como la dibuja la IPA anterior (mundo sin girar);
+ *   Sn escena nueva    VrScene en el espacio del usuario (opts.user_on).
+ * Huecos = píxeles que E pinta y la escena no (pérdida de nuestra ruta) o, comparando varias ejecuciones, lo que el motor no emitió. */
+#define ESC_MAXW 440
+static float esc_f; static int esc_w, esc_h;
+static uint8_t esc_mask[3][ESC_MAXW * ESC_MAXW];
+static float esc_hm[16];   /* cabeza de presentación */
+static void esc_poly(uint8_t *m, const float *p /* n x {x,y,d} en la vista de la cabeza, m */, int n) {
+    float in[8][3], o[10][3]; int k = 0;
+    for (int i = 0; i < n; i++) memcpy(in[i], p + 3 * i, sizeof in[i]);
+    const float zn = 0.05f;
+    for (int i = 0; i < n; i++) {
+        const float *a = in[i], *b = in[(i + 1) % n];
+        int ia = a[2] >= zn, ib = b[2] >= zn;
+        if (ia) memcpy(o[k++], a, 12);
+        if (ia != ib) { float t = (zn - a[2]) / (b[2] - a[2]); for (int c = 0; c < 3; c++) o[k][c] = a[c] + (b[c] - a[c]) * t; o[k][2] = zn; k++; }
+    }
+    if (k < 3) return;
+    float sx[10], sy[10];
+    for (int i = 0; i < k; i++) { sx[i] = esc_w * 0.5f + esc_f * o[i][0] / o[i][2]; sy[i] = esc_h * 0.5f - esc_f * o[i][1] / o[i][2]; }
+    for (int i = 1; i + 1 < k; i++) {
+        float x0 = sx[0], y0 = sy[0], x1 = sx[i], y1 = sy[i], x2 = sx[i + 1], y2 = sy[i + 1];
+        float den = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+        if (fabsf(den) < 1e-6f) continue;
+        int bx0 = (int)fmaxf(0, floorf(fminf(x0, fminf(x1, x2)))), bx1 = (int)fminf(esc_w - 1, ceilf(fmaxf(x0, fmaxf(x1, x2))));
+        int by0 = (int)fmaxf(0, floorf(fminf(y0, fminf(y1, y2)))), by1 = (int)fminf(esc_h - 1, ceilf(fmaxf(y0, fmaxf(y1, y2))));
+        for (int y = by0; y <= by1; y++) for (int x = bx0; x <= bx1; x++) {
+            float px = x + 0.5f, py = y + 0.5f;
+            float w0 = ((y1 - y2) * (px - x2) + (x2 - x1) * (py - y2)) / den, w1 = ((y2 - y0) * (px - x2) + (x0 - x2) * (py - y2)) / den, w2 = 1 - w0 - w1;
+            if (w0 >= -0.02f && w1 >= -0.02f && w2 >= -0.02f) m[y * esc_w + x] = 1;
+        }
+    }
+}
+/* punto del espacio del usuario (m) -> vista de la cabeza de presentación (x derecha, y arriba, d delante) */
+static void esc_head_view(const float U[3], float *o) {
+    float d[3] = {U[0] - esc_hm[12], U[1] - esc_hm[13], U[2] - esc_hm[14]};
+    o[0] = esc_hm[0] * d[0] + esc_hm[1] * d[1] + esc_hm[2] * d[2];
+    o[1] = esc_hm[4] * d[0] + esc_hm[5] * d[1] + esc_hm[6] * d[2];
+    o[2] = -(esc_hm[8] * d[0] + esc_hm[9] * d[1] + esc_hm[10] * d[2]);
+}
+static void esc_mask_scene(uint8_t *m, const VrScene *sc) {
+    memset(m, 0, (size_t)esc_w * esc_h);
+    for (uint32_t b = 0; b < sc->nb; b++) {
+        if (sc->b[b].kind > 1) continue;
+        for (uint32_t i = sc->b[b].first; i + 2 < sc->b[b].first + sc->b[b].count; i += 3) {
+            float p[9];
+            for (int k = 0; k < 3; k++) esc_head_view(sc->v[i + k].pos, p + 3 * k);
+            esc_poly(m, p, 3);
+        }
+    }
+}
+static uint8_t esc_fate[1 << 17];
+static void esc_set_head(int t, float *yawD, float *elD) {
+    float gy, ge; pose_at(t, &gy, &ge);
+    float y = gy * 3.14159265f / 180, e = ge * 3.14159265f / 180, cy = cosf(y), sy = sinf(y), ce = cosf(e), se = sinf(e);
+    float X[3] = {cy, 0, -sy}, Y[3] = {sy * se, ce, cy * se}, Z[3] = {sy * ce, -se, cy * ce};
+    float *m = esc_hm;
+    for (int i = 0; i < 3; i++) { m[i] = X[i]; m[4 + i] = Y[i]; m[8 + i] = Z[i]; }
+    m[3] = m[7] = m[11] = 0; m[12] = 0; m[13] = 1.6f; m[14] = 0; m[15] = 1;
+    vrcam_head_angles(m, yawD, elD);
+}
+/* escena como la monta vr/host (build_one): ojo y ejes del REGISTRO de la lista; origen bajo el ojo VR */
+static const VrScene *esc_build(const GpuDrawList *l, const VrCamRecord *r, int user_on) {
+    static VrScene sc;
+    BridgeState b2 = bs;
+    VrSceneOpts o = vr_scene_opts_default();
+    o.screen_filter = 1;
+    for (int i = 0; i < 3; i++) { b2.eye_pos[i] = r->eye[i]; for (int j = 0; j < 3; j++) b2.eye_axes[i][j] = (int16_t)lrintf(r->M[3 * i + j] * 4096.0f); }
+    if (r->active) {
+        float org[3]; vr_scene_player_origin(&b2, &o, org);
+        o.origin_mode = 1; o.origin_game[0] = (float)r->eye[0]; o.origin_game[1] = org[1]; o.origin_game[2] = (float)r->eye[2];
+    }
+    if (getenv("CAM_ESC_LEGACY")) { o.engine_near_clip = 1; o.recon_partial = 0; o.recon_ambig = 0; }   /* opciones previas a §49 */
+    if (user_on) { o.user_on = 1; o.user_theta_deg = r->theta_play_deg; memcpy(o.user_pos, r->p_ref, sizeof o.user_pos); }
+    vr_scene_set_fate(esc_fate, sizeof esc_fate);
+    int rc = vr_scene_build(l, &b2, &o, &sc);
+    vr_scene_set_fate(NULL, 0);
+    return rc == 0 ? &sc : NULL;
+}
+typedef struct {
+    uint32_t recon, unclip;
+    uint32_t lists, game_ops;                 /* primitivas con algún vértice de vista */
+    uint32_t fate[VR_FATE_COUNT];
+    uint32_t part_h[5][5][16];                /* parciales: [nv][nvalid][vflags] */
+    uint32_t amb_h[16];
+    double cov_e, cov_a, cov_n, hole_a, hole_n; uint32_t n_cov;
+    double off_h_abs, off_h_max, off_v_abs; uint32_t n_off;
+} EscAcc;
+static EscAcc eacc;
+static int esc_this(int t, float a[4]) {
+    if (!scr_on) return 0;
+    for (int i = 0; i < nscr; i++) if (scr[i].kind == 10 && t >= scr[i].t0 && t < scr[i].t1 && scr[i].a[0] >= 1 && (t - scr[i].t0) % (int)scr[i].a[0] == 0) { memcpy(a, scr[i].a, 4 * sizeof(float)); return 1; }
+    return 0;
+}
+static void esc_list(const GpuDrawList *l, const VrCamRecord *r, int t, const float a[4]) {
+    float fovh = a[1], fovv = a[2]; int lat = (int)a[3];
+    esc_f = (ESC_MAXW * 0.5f) / tanf(fovh * 3.14159265f / 360.0f);
+    esc_w = ESC_MAXW; esc_h = (int)lroundf(2 * esc_f * tanf(fovv * 3.14159265f / 360.0f)); if (esc_h > ESC_MAXW) esc_h = ESC_MAXW; if (esc_h < 8) esc_h = 8;
+    float yawD, elD; esc_set_head(t + lat, &yawD, &elD);
+    /* destino de cada primitiva (escena nueva) */
+    const VrScene *sn = esc_build(l, r, 1);
+    if (!sn) return;
+    uint32_t fc[VR_FATE_COUNT] = {0}, go = 0;
+    for (uint32_t i = 0; i < l->nops && i < sizeof esc_fate; i++) {
+        const GpuOp *o = &l->ops[i];
+        if (o->type != GPU_OP_POLY) continue;
+        int nvv = 0; unsigned uf = 0; for (int k = 0; k < o->nv; k++) { nvv += o->v[k].vvalid; if (o->v[k].vvalid) uf |= o->v[k].vflags; }
+        if (!nvv) continue;
+        go++; fc[esc_fate[i]]++;
+        if (esc_fate[i] == VR_FATE_PARTIAL) eacc.part_h[o->nv & 3 ? o->nv : 4][nvv & 3 ? nvv : 4][uf & 15]++;
+        if (esc_fate[i] == VR_FATE_AMBIG) eacc.amb_h[uf & 15]++;
+        static int dumped; if (getenv("CAM_ESC_DUMP") && dumped < 120 && esc_fate[i] >= VR_FATE_PARTIAL && esc_fate[i] <= VR_FATE_BEHIND) {
+            dumped++;
+            fprintf(stderr, "  [perdida] op%u fate=%d nv=%d flags=0x%x abr=%d tp=%d tex=(%d,%d) ph=%.0f ox=%.0f oy=%.0f dox=%d doy=%d:", i, esc_fate[i], o->nv, o->flags, o->abr, o->tp, o->tx, o->ty, o->proj_h, o->proj_ox, o->proj_oy, o->dox, o->doy);
+            for (int k = 0; k < o->nv; k++) fprintf(stderr, " [xy=(%d,%d) vv%d vf%d v=(%.0f,%.0f,%.0f)]", o->v[k].x, o->v[k].y, o->v[k].vvalid, o->v[k].vflags, o->v[k].vx, o->v[k].vy, o->v[k].vz);
+            fprintf(stderr, "\n");
+        }
+    }
+    /* cobertura: escena nueva */
+    esc_mask_scene(esc_mask[2], sn);
+    const VrScene *sa = esc_build(l, r, 0);
+    if (!sa) return;
+    esc_mask_scene(esc_mask[1], sa);
+    /* oráculo: todo polígono con todos los vértices de vista, re-proyectado con la pose de presentación */
+    VrCamDelta d;
+    memset(esc_mask[0], 0, (size_t)esc_w * esc_h);
+    if (vrcam_delta(r, esc_hm, &d)) {
+        for (uint32_t i = 0; i < l->nops; i++) {
+            const GpuOp *o = &l->ops[i];
+            if (o->type != GPU_OP_POLY) continue;
+            int ok = 1; for (int k = 0; k < o->nv; k++) ok &= o->v[k].vvalid;
+            if (!ok) continue;
+            float p[4][3];
+            for (int k = 0; k < o->nv; k++) {
+                float x, y, z; vtx_view(o, &o->v[k], &x, &y, &z);
+                float X = d.A[0] * x + d.A[1] * y + d.A[2] * z + d.b[0], Y = d.A[3] * x + d.A[4] * y + d.A[5] * z + d.b[1], Z = d.A[6] * x + d.A[7] * y + d.A[8] * z + d.b[2];
+                p[k][0] = X * 0.001f; p[k][1] = -Y * 0.001f; p[k][2] = Z * 0.001f;
+            }
+            esc_poly(esc_mask[0], &p[0][0], 3);
+            if (o->nv == 4) { float q[9]; memcpy(q, p[1], 9 * sizeof(float)); esc_poly(esc_mask[0], q, 3); }
+        }
+    }
+    uint32_t ne = 0, ina = 0, inn = 0, ha = 0, hn = 0, npx = (uint32_t)(esc_w * esc_h);
+    for (uint32_t i = 0; i < npx; i++) { ne += esc_mask[0][i]; ina += esc_mask[1][i]; inn += esc_mask[2][i]; ha += esc_mask[0][i] && !esc_mask[1][i]; hn += esc_mask[0][i] && !esc_mask[2][i]; }
+    /* desfase entre el eje del motor al construir (en el espacio del usuario) y la cabeza de presentación */
+    float plan_yaw = r->yaw_deg - r->theta_play_deg, plan_el = -r->pitch_deg;
+    float offh = fmodf(yawD - plan_yaw + 540.0f, 360.0f) - 180.0f, offv = elD - plan_el;
+    eacc.recon += sn->stats.n_recon; eacc.unclip += sn->stats.n_unclipped;
+    eacc.lists++; eacc.game_ops += go; for (int k = 0; k < VR_FATE_COUNT; k++) { eacc.fate[k] += fc[k]; }
+    eacc.cov_e += 100.0 * ne / npx; eacc.cov_a += 100.0 * ina / npx; eacc.cov_n += 100.0 * inn / npx;
+    eacc.hole_a += 100.0 * ha / npx; eacc.hole_n += 100.0 * hn / npx; eacc.n_cov++;
+    eacc.off_h_abs += fabsf(offh); eacc.off_v_abs += fabsf(offv); if (fabsf(offh) > eacc.off_h_max) eacc.off_h_max = fabsf(offh); eacc.n_off++;
+    uint32_t e3 = fc[VR_FATE_3D] + fc[VR_FATE_RECON];
+    fprintf(stderr, "[esc] t=%d cabeza(yaw %.1f el %.1f) eje-motor(yaw %.1f el %.1f) desfase(h %.1f v %.1f) theta=%.1f | juego %u -> escena %u (%.1f%%) 2D-no-contada | perdidas: parcial %u ambig %u cerca %u detras %u enorme %u degen %u nan %u deriv %u | cobertura%%: oraculo %.1f vieja %.1f nueva %.1f | huecos%% (oraculo y no escena): vieja %.1f nueva %.1f\n",
+            t, yawD, elD, plan_yaw, plan_el, offh, offv, r->theta_play_deg, go, e3, go ? 100.0 * e3 / go : 100.0, fc[VR_FATE_PARTIAL], fc[VR_FATE_AMBIG], fc[VR_FATE_NEAR], fc[VR_FATE_BEHIND],
+            fc[VR_FATE_HUGE], fc[VR_FATE_DEGEN], fc[VR_FATE_NAN], fc[VR_FATE_DERIVED], 100.0 * ne / npx, 100.0 * ina / npx, 100.0 * inn / npx, 100.0 * ha / npx, 100.0 * hn / npx);
+    if (getenv("CAM_ESC_PPM") && (eacc.lists % 8) == 1) {   /* [oráculo | vieja | nueva] */
+        static uint8_t im[ESC_MAXW * ESC_MAXW * 3 * 3];
+        int W3 = esc_w * 3;
+        for (int y = 0; y < esc_h; y++) for (int x = 0; x < esc_w; x++) for (int c = 0; c < 3; c++) {
+            uint8_t v = esc_mask[c][y * esc_w + x];
+            uint8_t *q = im + ((size_t)y * W3 + c * esc_w + x) * 3;
+            q[0] = v ? 200 : 20; q[1] = v ? 200 : 20; q[2] = v ? 200 : 20;
+            if (c > 0 && esc_mask[0][y * esc_w + x] && !v) { q[0] = 255; q[1] = 40; q[2] = 40; }   /* hueco: lo ve el oráculo y falta en la escena */
+        }
+        char nm[64]; snprintf(nm, sizeof nm, "esc_t%04d", t); write_ppm(outdir, nm, im, W3, esc_h);
+    }
+}
+static void esc_report(void) {
+    if (!eacc.lists) return;
+    EscAcc *e = &eacc;
+    fprintf(stderr, "[esc-total] listas %u: primitivas del juego con posición de vista %u; destino: emitidas %u (%.2f%%), parcial %u, ambig %u, cerca %u, detrás %u, enorme %u, degenerada %u, nan %u, derivada %u, reconstruida %u\n",
+            e->lists, e->game_ops, e->fate[VR_FATE_3D] + e->fate[VR_FATE_RECON], 100.0 * (e->fate[VR_FATE_3D] + e->fate[VR_FATE_RECON]) / (e->game_ops ? e->game_ops : 1), e->fate[VR_FATE_PARTIAL], e->fate[VR_FATE_AMBIG], e->fate[VR_FATE_NEAR],
+            e->fate[VR_FATE_BEHIND], e->fate[VR_FATE_HUGE], e->fate[VR_FATE_DEGEN], e->fate[VR_FATE_NAN], e->fate[VR_FATE_DERIVED], e->fate[VR_FATE_RECON]);
+    fprintf(stderr, "[esc-total] por lista: reconstruidas %.2f, sin recorte del motor (vértices detrás/cerca emitidos) %.2f\n", (double)e->recon / e->lists, (double)e->unclip / e->lists);
+    fprintf(stderr, "[esc-total] por lista: juego %.1f, perdidas: parcial %.2f ambig %.2f cerca %.2f detrás %.2f enorme %.2f degenerada %.2f\n", (double)e->game_ops / e->lists, (double)e->fate[VR_FATE_PARTIAL] / e->lists,
+            (double)e->fate[VR_FATE_AMBIG] / e->lists, (double)e->fate[VR_FATE_NEAR] / e->lists, (double)e->fate[VR_FATE_BEHIND] / e->lists, (double)e->fate[VR_FATE_HUGE] / e->lists, (double)e->fate[VR_FATE_DEGEN] / e->lists);
+    for (int nv = 3; nv <= 4; nv++) for (int nval = 1; nval < nv; nval++) for (int f = 0; f < 16; f++) if (e->part_h[nv][nval][f])
+        fprintf(stderr, "[esc-total]   parcial nv=%d con vista en %d: vflags=0x%x -> %u\n", nv, nval, f, e->part_h[nv][nval][f]);
+    for (int f = 0; f < 16; f++) if (e->amb_h[f]) fprintf(stderr, "[esc-total]   ambig vflags=0x%x -> %u\n", f, e->amb_h[f]);
+    if (e->n_cov) fprintf(stderr, "[esc-total] cobertura media del visor %%: oráculo %.1f, escena vieja %.1f, escena nueva %.1f; huecos medios (oráculo y no escena) %%: vieja %.2f, nueva %.2f; desfase eje motor-cabeza: medio %.1f max %.1f (h) %.1f (v) grados\n",
+            e->cov_e / e->n_cov, e->cov_a / e->n_cov, e->cov_n / e->n_cov, e->hole_a / e->n_cov, e->hole_n / e->n_cov, e->off_h_abs / e->n_off, e->off_h_max, e->off_v_abs / e->n_off);
+}
+
 static void process_list(const GpuDrawList *l, int t, int f) {
     lists_seen++;
     list_ref(l);
@@ -606,6 +802,7 @@ static void process_list(const GpuDrawList *l, int t, int f) {
     if (!r->active && !novr) return;
     if (t < 0) return;
     pair_ok++;
+    { float ea[4]; if (esc_this(t, ea)) esc_list(l, r, t, ea); }
     /* proyección del motor (primer polígono 3D con proyección) para el centro de la imagen del juego */
     float eh = 0, eox = 0, eoy = 0;
     for (uint32_t i = 0; i < l->nops; i++) if (l->ops[i].type == GPU_OP_POLY && l->ops[i].proj_h > 0) { eh = l->ops[i].proj_h; break; }
@@ -796,7 +993,7 @@ static int srv_frame = -1, srv_done;
 typedef struct { char name[96], path[400]; } SrvJob;
 static void state_reset_counters(void) {
     memset(sacc, 0, sizeof sacc); memset(&g_tot, 0, sizeof g_tot);
-    lists_seen = pair_ok = none_rec = 0; sum_cov = 0; n_cov = 0; nwerr = 0;
+    lists_seen = pair_ok = none_rec = 0; sum_cov = 0; n_cov = 0; nwerr = 0; memset(&eacc, 0, sizeof eacc);
     big_lists = big_water_lists = big_air_lists = big_water_ops = big_air_ops = 0; big_log = NULL;
     last_filter_ok = 0; hist_n = 0;
 }
@@ -924,6 +1121,7 @@ static void on_frame(Cpu *c, uint32_t f) {
     script_pad(f);
     static int novr;
     if (getenv("CAM_NOVR")) novr = 1;
+    if (scr_on && cur_t >= 0) for (int i = 0; i < nscr; i++) if (scr[i].kind == 11 && scr[i].t0 == cur_t) vrcam_turn(scr[i].a[0]);   /* giro del stick: como vrhost frame_hook, antes de bridge_read/vrcam_frame */
     bridge_read(emu_ram, &bs);
     vrcam_frame(emu_ram, &bs);
     if (f_act < 0 && (vrcam_active() || (getenv("CAM_NOVR") && bs.in_control && bs.has_player && f > 6000))) f_act = (int)f + 20;
@@ -959,6 +1157,7 @@ static void on_frame(Cpu *c, uint32_t f) {
         }
         fprintf(stderr, "[camtest] descartes acumulados (frames volcados): polis %u dibujados %u parciales %u detrás-del-todo %u ambig %u recortados %u 2D %u (sat %u deriv %u); regla anterior (todos fvalid) habría dibujado %u\n", g_tot.polys, g_tot.drawn, g_tot.partial, g_tot.behind, g_tot.ambig, g_tot.clipped, g_tot.nonvr2d, g_tot.sat, g_tot.derived, g_tot.legacy);
         if (srv_list && !srv_done) { fprintf(stderr, "[server] error: no se llegó al punto de instantánea (f=%u, t=%d); no se ejecutó ningún escenario\n", f, cur_t); exit(2); }
+        esc_report();
         world_report(getenv("CAM_KEEP_OVERSCAN") ? "(keep_overscan)" : "");
         if (scr_on) fprintf(stderr, "[camtest] vr_scene vs propio: centro/H del filtro %u comprobadas, %u discrepancias; polígonos con desplazamiento OFX corregido %u comprobadas, %u discrepancias\n", ref_chk, ref_bad, ofs_chk, ofs_bad);
         if (scr_on) fprintf(stderr, "[camtest] épocas de VRAM: máximo de eventos por lista %d (instantáneas %d)\n", snap_max_ev, MAXSNAP);
@@ -1025,6 +1224,7 @@ int main(int argc, char **argv) {
     if (getenv("CAM_HIDE")) cfg.hide_head = atoi(getenv("CAM_HIDE"));
     if (getenv("CAM_ENGINE_H")) cfg.engine_h = atoi(getenv("CAM_ENGINE_H"));
     if (getenv("CAM_KEEP_OVERSCAN")) cfg.keep_overscan = atoi(getenv("CAM_KEEP_OVERSCAN"));
+    if (getenv("CAM_PREDICT")) cfg.predict_s = (float)atof(getenv("CAM_PREDICT"));   /* s de predicción de mirada (0 = sin) */
     if (getenv("CAM_LAG")) cfg.draw_lag = atoi(getenv("CAM_LAG"));
     if (getenv("CAM_UP")) cfg.eye_up = (float)atof(getenv("CAM_UP"));
     if (getenv("CAM_FWD")) cfg.eye_fwd = (float)atof(getenv("CAM_FWD"));

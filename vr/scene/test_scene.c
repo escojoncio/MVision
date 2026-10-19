@@ -205,7 +205,7 @@ static void test_drops(void) {
     poly3(a2, b, c2, 0);
     poly3(h0, h1, h2, 0);
     poly3(a, b, nanp, 0);
-    VrSceneOpts o = vr_scene_opts_default();
+    VrSceneOpts o = vr_scene_opts_default(); o.engine_near_clip = 1;   /* comportamiento previo: recorte contra el plano del motor */
     VrScene s;
     CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0, "build");
     CHECK(s.stats.n_tris3d == 1 && s.stats.drop_near == 1 && s.stats.drop_degenerate == 1 && s.stats.drop_huge == 1 && s.stats.drop_nan == 1,
@@ -241,7 +241,7 @@ static void test_near_clip(void) {
     const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
     const int32_t e[3] = {0, 3000, 500};
     BridgeState bs; set_eye(&bs, R, e);
-    VrSceneOpts o = vr_scene_opts_default();
+    VrSceneOpts o = vr_scene_opts_default(); o.engine_near_clip = 1;
     o.origin_mode = 1;
     VrScene s;
     const float zn = o.near_units;
@@ -915,6 +915,65 @@ static void test_goggles_emu(void) {
     vr_scene_release();
 }
 
+static void test_recon_fate(void) {
+    /* quad con 3 vértices fiables y el 4º sin posición de vista: se reconstruye (plano z=2000, rayo de pantalla) */
+    reset();
+    GpuOp *q = add(GPU_OP_POLY);
+    q->nv = 4; q->flags = GPU_F_TEXTURED; q->tp = 1; q->tx = 320; q->ty = 256;
+    q->proj_h = 150.0f; q->proj_ox = 160.0f; q->proj_oy = 128.0f;
+    setv3(&q->v[0], -500, -300, 2000); setv3(&q->v[1], 500, -300, 2000); setv3(&q->v[2], -500, 400, 2000);
+    q->v[3].x = 190; q->v[3].y = 158;   /* 160 + 150*400/2000, 128 + 150*400/2000 */
+    /* otro quad igual pero con el 4º vértice saturado en pantalla: no se reconstruye */
+    GpuOp *q2 = add(GPU_OP_POLY);
+    *q2 = *q; q2->v[3].x = 2000;
+    /* triángulo con un vértice detrás del plano del motor (z<0): sin recorte del motor se emite entero */
+    float a[3] = {-500, 0, -300}, b[3] = {500, 0, 1500}, c[3] = {0, 500, 1500};
+    poly3(a, b, c, 0);
+    uint8_t fate[8];
+    VrScene s; VrSceneOpts o = vr_scene_opts_default();
+    vr_scene_set_fate(fate, sizeof fate);
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0, "build recon");
+    CHECK(s.stats.n_recon == 1, "n_recon %u", s.stats.n_recon);
+    CHECK(fate[0] == VR_FATE_3D, "destino quad reconstruido %u", fate[0]);
+    CHECK(fate[1] == VR_FATE_PARTIAL, "destino quad saturado %u", fate[1]);
+    CHECK(fate[2] == VR_FATE_3D && s.stats.n_unclipped == 1, "detrás: destino %u unclipped %u", fate[2], s.stats.n_unclipped);
+    int found = 0;   /* vértice reconstruido (400,400,2000) -> VR (0,4; -0,4; -2) */
+    for (uint32_t i = 0; i < s.nv; i++)
+        if (near_f(s.v[i].pos[0], 0.4f, 1e-3f) && near_f(s.v[i].pos[1], -0.4f, 1e-3f) && near_f(s.v[i].pos[2], -2.0f, 1e-3f)) found++;
+    CHECK(found >= 1, "vértice reconstruido ausente (%d)", found);
+    CHECK(s.nb >= 1 && s.stats.n_tris3d == 3, "triángulos %u", s.stats.n_tris3d);
+    o.recon_partial = 0;
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_recon == 0 && fate[0] == VR_FATE_PARTIAL, "sin recon: destino %u", fate[0]);
+    vr_scene_set_fate(NULL, 0);
+    vr_scene_release();
+}
+
+static void test_recon_diag_ambig(void) {
+    /* resplandor: solo las esquinas v0 y v3 (diagonal) tienen posición; v1 = (x3,y0), v2 = (x0,y3) a z constante */
+    reset();
+    GpuOp *q = add(GPU_OP_POLY);
+    q->nv = 4; q->flags = GPU_F_SEMI; q->abr = 1; q->tp = 1;
+    q->proj_h = 150.0f; q->proj_ox = 160.0f; q->proj_oy = 128.0f;
+    setv3(&q->v[0], -1000, -1000, 555); setv3(&q->v[3], 1000, 1000, 555);
+    /* AMBIG+SAT coherente (rectángulo) y no coherente (z de un vértice muy distinto) */
+    GpuOp *r1 = add(GPU_OP_POLY);
+    r1->nv = 4; r1->flags = GPU_F_TEXTURED; r1->tp = 1;
+    setv3(&r1->v[0], -3706, -1898, 3689); setv3(&r1->v[1], -2955, -1898, 186); setv3(&r1->v[2], -2955, -1898, 3689); setv3(&r1->v[3], -3706, -1898, 186);
+    for (int k = 0; k < 4; k++) r1->v[k].vflags = GPU_VF_AMBIG | GPU_VF_SAT;
+    GpuOp *r2 = add(GPU_OP_POLY);
+    *r2 = *r1; r2->v[1].vy = -2649; r2->v[1].vz = -502; r2->v[2].vx = -1000;
+    uint8_t fate[4];
+    VrScene s; VrSceneOpts o = vr_scene_opts_default();
+    vr_scene_set_fate(fate, sizeof fate);
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0, "build diag");
+    CHECK(s.stats.n_recon == 1 && s.stats.n_tris3d >= 4, "diag: recon %u tris %u", s.stats.n_recon, s.stats.n_tris3d);
+    CHECK(fate[0] == VR_FATE_3D && fate[1] == VR_FATE_3D && fate[2] == VR_FATE_AMBIG, "destinos %u %u %u", fate[0], fate[1], fate[2]);
+    o.recon_ambig = 0;
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && fate[1] == VR_FATE_AMBIG, "sin recon_ambig: %u", fate[1]);
+    vr_scene_set_fate(NULL, 0);
+    vr_scene_release();
+}
+
 int main(void) {
     test_basic();
     test_stability();
@@ -931,6 +990,8 @@ int main(void) {
     test_post_emu();
     test_goggles();
     test_goggles_emu();
+    test_recon_fate();
+    test_recon_diag_ambig();
     if (fails) { fprintf(stderr, "%d fallos\n", fails); return 1; }
     printf("test_scene: OK\n");
     return 0;
