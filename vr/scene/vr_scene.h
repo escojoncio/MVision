@@ -25,6 +25,16 @@
  * Un polígono con solo ALGUNOS vértices vvalid se descarta (opts.partial_to_2d lo manda a 2D, pero entonces aparecerá
  * como trozo de mundo en el HUD).
  *
+ * Reconstrucción de parciales (opts.recon_partial): un quad con exactamente 3 vértices de vista limpios (vflags==0) y el 4.º sin posición,
+ * pero con coordenadas de pantalla sin saturar (|x-dox-proj_ox| < 1000 px), recupera ese vértice: rayo (px/H, py/H, 1) cortado con el plano de
+ * los otros tres. Se exige t>0, plano no paralelo al rayo y z del vértice entre 0,2x y 5x del rango de los otros. VrStats.n_recon los cuenta.
+ *
+ * Espacio del usuario (opts.user_on): el mundo VR sale en los ejes del juego con el ojo del motor bajo el origen. La cabeza del visor vive en el
+ * espacio del usuario; la cámara del juego va girada theta_play (VrCamRecord) respecto de él. user_on aplica R_y(theta+180 grados)^T a todo el mundo
+ * y coloca el ojo del motor en p_ref (x,z), con lo que la escena queda donde la ve la cabeza al girar con el stick (comprobado contra vrcam_delta).
+ * Con engine_near_clip=0 (def.) no se recorta ni descarta contra el plano z=near_units de la cámara del motor: eso solo sirve para la vista del motor,
+ * no para una cabeza que mira a otro lado. VrStats.n_unclipped cuenta los polígonos que traían vértices así.
+ *
  * ---------------------------------------------------------------------------------------------------------
  * Espacio mundo VR y escala (ver vr_scene.c, "Escala")
  *   v_vr = S * Mmap * ( R_eye * v_vista + eye_pos - origen_juego )
@@ -174,6 +184,8 @@ typedef struct {
     uint32_t n_ref_group;     /* polígonos del grupo modal (centro del mundo) */
     uint32_t n_filter_scan;   /* rects finos semitransparentes de ancho de pantalla (líneas de exploración de las gafas) mandados a kind 3 */
     uint32_t n_filter_frame;  /* polígonos de la máscara de visión (marco de máscara/caja/mira) mandados a kind 3 y volcados en filter.frame */
+    uint32_t n_recon;         /* §49: polígonos de 4 vértices con un vértice sin posición de vista reconstruido (opts.recon_partial) */
+    uint32_t n_unclipped;     /* §49: triángulos emitidos con algún vértice por detrás/pegado al ojo del motor (z < near_units) sin recortar (engine_near_clip=0) */
 } VrStats;
 
 #define VR_FILTER_ROWS 512
@@ -222,6 +234,7 @@ typedef struct {
                                * el mundo (título/carga/zona). Con EYE válido pero world_valid 0 la matriz se aplica igualmente; sin EYE, cámara en el origen. */
     VrStats stats;
     VrFilter filter;          /* resumen de la clase 3 (ver "Clase 3") */
+    int user_space;           /* 1 si el mundo de salida está en el espacio del usuario (opts.user_on aplicado) */
 } VrScene;
 
 typedef struct {
@@ -245,9 +258,39 @@ typedef struct {
                                * HUD lo dejarían opaco. Se cuentan en VrStats.n_clear. 0 = emitirlos en la clase 2 (comportamiento previo) */
     int clip_all_near;        /* 1 recorta contra el plano cercano TODO polígono con algún vz < near_units (def. 0: solo los que traen
                                * GPU_VF_BEHIND; el resto con vz < near_units se descarta como siempre, salida idéntica a la previa) */
+    /* --- §49: espacio del usuario (al final: no rompe el layout) --- */
+    int user_on;              /* 1: el "mundo VR" de salida es el ESPACIO DEL USUARIO recentrado (el de la pose de la cabeza): se gira el mundo del juego
+                               * R_y(user_theta_deg + 180 grados)^T alrededor de la vertical y el ojo del motor cae en user_pos (x,z). Sin esto el mundo sale en los
+                               * ejes del juego y solo coincide con la cabeza cuando el rumbo del cuerpo es justo 180 grados (ver "Espacio del usuario" abajo). 0 = como antes */
+    float user_theta_deg;     /* VrCamRecord.theta_play_deg de la cámara con la que se dibujó la lista */
+    float user_pos[3];        /* VrCamRecord.p_ref: cabeza (m, espacio del usuario) a la que corresponde el ojo del motor; solo se usan x y z */
+    int engine_near_clip;     /* 1 = comportamiento anterior: recorta/descarta contra el plano z = near_units de la CÁMARA DEL MOTOR (una cabeza VR que mira a otro lado ve esa
+                               * geometría). 0 (def.): se emite todo polígono con posiciones de vista válidas, también con vértices detrás o pegados al ojo del motor; el plano cercano
+                               * lo recorta el renderer con el de la cabeza. Siguen los límites de arista (max_edge_m) y de área */
+    int recon_partial;        /* 1 (def.): polígonos de 4 vértices con exactamente 3 de vista limpios y el 4.º sin posición: el 4.º se reconstruye cortando su rayo de
+                               * pantalla con el plano de los otros tres (ver "Reconstrucción de parciales") en vez de descartar el polígono entero */
+    int recon_ambig;          /* 1 (def.): un polígono AMBIG junto a SAT/BEHIND ya no se descarta si sus vértices están en un orden de magnitud coherente (ver .c) */
 } VrSceneOpts;
 
 VrSceneOpts vr_scene_opts_default(void);
+
+/* Depuración/medición: destino de cada primitiva de la lista. Si se registra un búfer (uno por op de src->ops), vr_scene_build lo rellena. */
+enum {
+    VR_FATE_NONE = 0,      /* no es un polígono/rect/línea (eventos de VRAM) o no se evaluó */
+    VR_FATE_3D = 1,        /* polígono 3D emitido (algún triángulo) */
+    VR_FATE_2D = 2,        /* polígono 2D (sin posición de vista), rect o línea */
+    VR_FATE_PARTIAL = 3,   /* descartado: solo algunos vértices con posición de vista */
+    VR_FATE_AMBIG = 4,     /* descartado: AMBIG junto a SAT/BEHIND */
+    VR_FATE_NEAR = 5,      /* descartado: vz < near_units sin BEHIND */
+    VR_FATE_BEHIND = 6,    /* descartado: enteros detrás del plano cercano tras recortar */
+    VR_FATE_HUGE = 7,      /* descartado: arista mayor que max_edge_m */
+    VR_FATE_DEGEN = 8,     /* descartado: área nula */
+    VR_FATE_NAN = 9,       /* descartado: coordenadas no finitas */
+    VR_FATE_DERIVED = 10,  /* descartado: DERIVED con opts.drop_derived */
+    VR_FATE_RECON = 11,    /* emitido tras reconstruir un vértice sin posición o un AMBIG (recon_partial / recon_ambig) */
+    VR_FATE_COUNT
+};
+void vr_scene_set_fate(uint8_t *buf, uint32_t cap);   /* NULL para desactivar */
 /* Origen (suelo bajo el jugador, mundo del juego) que usa origin_mode 0; útil para fijar origin_game (modo 1). */
 void vr_scene_player_origin(const BridgeState *bs, const VrSceneOpts *o, float org[3]);
 

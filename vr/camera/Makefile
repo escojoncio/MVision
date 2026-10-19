@@ -24,9 +24,10 @@ PATCHFLAGS ?= --no-divide
 RECOMP := ../../tools/recomp/recomp.py
 
 all: $(OUT)/test_camera
-$(OUT)/test_camera: test_camera.c vr_camera.c vr_camera.h $(BR)/bridge.c $(BR)/bridge_addrs.c
+SC := ../scene
+$(OUT)/test_camera: test_camera.c vr_camera.c vr_camera.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(BR)/bridge.c $(BR)/bridge_addrs.c
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -I. -I$(BR) test_camera.c vr_camera.c $(BR)/bridge.c $(BR)/bridge_addrs.c -o $@ -lm
+	$(CC) $(CFLAGS) -I. -I$(BR) -I$(SC) -I$(RT) test_camera.c vr_camera.c $(SC)/vr_scene.c $(BR)/bridge.c $(BR)/bridge_addrs.c -o $@ -lm
 # EXE sintético (solo las instrucciones esperadas en los puntos de parche; sin datos del juego) para comparar vrcam_patch_ram con
 # patch_exe.py byte a byte. Si existe el EXE real (EXE=...), se prueba también con él.
 $(OUT)/syn/orig.exe: patch_exe.py
@@ -40,9 +41,9 @@ test: $(OUT)/test_camera $(OUT)/syn/patched.exe $(OUT)/syn/patched_wide.exe
 	VRCAM_EXE=$(OUT)/syn/orig.exe VRCAM_EXE_PATCHED=$(OUT)/syn/patched.exe VRCAM_EXE_PATCHED_WIDE=$(OUT)/syn/patched_wide.exe $(OUT)/test_camera
 	@if [ -f "$(EXE)" ]; then python3 patch_exe.py $(EXE) $(OUT)/syn/real_patched.exe --h 160 --hfov 140 --vfov 120 --no-divide && \
 	  VRCAM_EXE=$(EXE) VRCAM_EXE_PATCHED=$(OUT)/syn/real_patched.exe $(OUT)/test_camera; fi
-test-san: test_camera.c vr_camera.c vr_camera.h $(BR)/bridge.c $(BR)/bridge_addrs.c $(OUT)/syn/patched.exe $(OUT)/syn/patched_wide.exe
+test-san: test_camera.c vr_camera.c vr_camera.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(BR)/bridge.c $(BR)/bridge_addrs.c $(OUT)/syn/patched.exe $(OUT)/syn/patched_wide.exe
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -I. -I$(BR) test_camera.c vr_camera.c $(BR)/bridge.c $(BR)/bridge_addrs.c -o $(OUT)/test_camera_san -lm
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -I. -I$(BR) -I$(SC) -I$(RT) test_camera.c vr_camera.c $(SC)/vr_scene.c $(BR)/bridge.c $(BR)/bridge_addrs.c -o $(OUT)/test_camera_san -lm
 	VRCAM_EXE=$(OUT)/syn/orig.exe VRCAM_EXE_PATCHED=$(OUT)/syn/patched.exe VRCAM_EXE_PATCHED_WIDE=$(OUT)/syn/patched_wide.exe $(OUT)/test_camera_san
 
 # ---- EXE parcheado + C recompilado con los sustitutos (vr_names.json/hle_vrcam.txt) ----
@@ -74,7 +75,6 @@ $(RTP)/stamp: $(RTDEPS) runtime_seq.patch
 	touch $@
 $(RTSRC): $(RTP)/stamp
 OVOBJ := $(wildcard $(GENOV)/*.o)
-SC := ../scene
 $(OUT)/camtest: camtest.c vr_camera.c vr_camera_hle.c vrbody_weak.c vr_camera.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(SC)/hud_emu.c $(SC)/hud_emu.h $(BR)/bridge.c $(BR)/bridge_addrs.c $(RD)/ref_raster.c $(RTSRC) $(GENO) $(OVOBJ)
 	@mkdir -p $(OUT)
 	$(CLANG) -I. -I../body -I$(BR) -I$(SC) -I$(RTP) -I$(RD) -I$(OUT)/gen -O2 -g -Wall -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
