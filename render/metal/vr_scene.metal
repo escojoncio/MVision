@@ -172,3 +172,80 @@ fragment float4 vr_fs_unpremul(VrFullOut in [[stage_in]], texture2d<float, acces
     if (a <= 0.0) return float4(0.0);
     return float4(clamp(c.rgb / a, float3(0.0), float3(1.0)), clamp(a, 0.0, 1.0));
 }
+
+/* ---------------- post-proceso del filtro de pantalla (efecto submarino) ----------------
+ * Entrada: la escena de ese ojo ya RESUELTA (una muestra; el MSAA se resolvió al terminar la escena). Se lee con muestreo bilineal y
+ * dirección clamp. Salida: el drawable. No usa profundidad. El tinte y el recubrimiento van en el espacio gamma original (como el resto de
+ * la escena): si el destino es lineal (VR_FC_LINEAR_OUT) se convierte a gamma, se opera y se vuelve a lineal. */
+struct VrPostOut { float4 pos [[position]]; };
+struct VrPostOutL { float4 pos [[position]]; uint layer [[render_target_array_index]]; };
+
+vertex VrPostOut vr_vs_post(uint vid [[vertex_id]]) {
+    VrPostOut o;
+    o.pos = float4((vid == 1u) ? 3.0 : -1.0, (vid == 2u) ? 3.0 : -1.0, 0.0, 1.0);
+    return o;
+}
+
+vertex VrPostOutL vr_vs_post_layered(uint vid [[vertex_id]], uint iid [[instance_id]]) {
+    VrPostOutL o;
+    o.pos = float4((vid == 1u) ? 3.0 : -1.0, (vid == 2u) ? 3.0 : -1.0, 0.0, 1.0);
+    o.layer = iid;
+    return o;
+}
+
+inline float vr_gam1(float c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
+
+/* Fila fuente (coordenada continua en píxeles) para la fila de salida yc del ojo `eye`. */
+inline float vr_post_ysrc(float yc, uint eye, constant VrPostUniforms &u, constant float *dv) {
+    float d = 0.0;
+    int nrows = int(u.cfg.z);
+    if (nrows > 0 && u.eye[eye].y > 1.0 && u.cfg.x > 0.0) {
+        float t = (yc - u.eye[eye].x) / u.eye[eye].y;
+        float r = u.cfg.y + u.cfg.x * t;                  /* fila equivalente de la imagen original (continua) */
+        if (r >= 0.0 && r < float(VR_POST_ROWS)) {
+            float rr = r - 0.5;                           /* las filas tienen su centro en i + 0,5 */
+            float f = floor(rr);
+            int i0 = int(f);
+            float fr = rr - f;
+            int i1 = min(i0 + 1, VR_POST_ROWS - 1);
+            i0 = max(i0, 0);
+            d = mix(dv[i0], dv[i1], fr);
+        }
+        return yc + u.eye[eye].y * d / u.cfg.x;
+    }
+    return yc;
+}
+
+inline float4 vr_post_finish(float4 px, constant VrPostUniforms &u) {
+    float3 c = clamp(px.rgb, float3(0.0), float3(1.0));
+    if (kLinear) c = float3(vr_gam1(c.x), vr_gam1(c.y), vr_gam1(c.z));
+    c *= u.tint.xyz;
+    if (u.cover.w >= 0.0) {
+        int m = int(u.cover.w + 0.5);
+        float3 f = u.cover.xyz;
+        if (m == 0) c = 0.5 * c + 0.5 * f;
+        else if (m == 1) c = c + f;
+        else if (m == 2) c = c - f;
+        else c = c + 0.25 * f;
+    }
+    c = clamp(c, float3(0.0), float3(1.0));
+    if (kLinear) c = float3(vr_lin1(c.x), vr_lin1(c.y), vr_lin1(c.z));
+    return float4(c, px.a);   /* conserva el alfa de la escena */
+}
+
+fragment float4 vr_fs_post(VrPostOut in [[stage_in]], texture2d<float> src [[texture(0)]],
+                           constant VrPostUniforms &u [[buffer(0)]], constant float *dv [[buffer(VR_BUF_POST_DV)]]) {
+    constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
+    float ys = vr_post_ysrc(in.pos.y, 0u, u, dv);
+    float2 uv = float2(in.pos.x / float(src.get_width()), ys / float(src.get_height()));
+    return vr_post_finish(src.sample(smp, uv), u);
+}
+
+fragment float4 vr_fs_post_layered(VrPostOutL in [[stage_in]], texture2d_array<float> src [[texture(0)]],
+                                   constant VrPostUniforms &u [[buffer(0)]], constant float *dv [[buffer(VR_BUF_POST_DV)]]) {
+    constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
+    uint eye = min(in.layer, 1u);
+    float ys = vr_post_ysrc(in.pos.y, eye, u, dv);
+    float2 uv = float2(in.pos.x / float(src.get_width()), ys / float(src.get_height()));
+    return vr_post_finish(src.sample(smp, uv, in.layer), u);
+}

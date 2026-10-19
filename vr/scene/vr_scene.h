@@ -46,8 +46,8 @@
  *   vuelve a dibujar el búfer de pantalla sobre sí mismo en ~260 tiras de 2 px de alto texturizadas en 15 bits (tp=2) leyendo del propio
  *   búfer (desplazadas en vertical con una onda = distorsión) y moduladas por un color (verde = tinte submarino), y los fundidos/destellos
  *   son rectángulos semitransparentes que cubren la pantalla. En el panel HUD serían un recuadro enorme con una copia de la escena: MAL.
- *   Clasificación (solo primitivas 2D, es decir sin vvalid). OPT-IN: opts.screen_filter=0 por defecto (ESTADO ACTUAL: el renderer de app/ trata todo kind != 2 como 3D
- *   y pintaría estos triángulos, que están en píxeles, como geometría del mundo; activar solo cuando el renderer implemente la clase 3). Con 1:
+ *   Clasificación (solo primitivas 2D, es decir sin vvalid). OPT-IN: opts.screen_filter=0 por defecto (el renderer de app/ ya implementa la clase 3 con un post-proceso por ojo: ignora los batches kind 3 y
+ *   aplica VrScene.filter; vr/host lo activa con screen_filter=1; otros consumidores que no lo implementen deben dejarlo en 0). Con 1:
  *     a) copia de pantalla: texturizada con tp>=2 (15 bits, sin CLUT) cuyo rectángulo fuente (tx+u, ty+v, tamaño de la primitiva) solape >= 50 % de su área con el
         área MOSTRADA (src->disp; NO el recorte vigente) y cuyo destino sea de pantalla: una banda fina (alto <= 16) de >= 45 % del ancho de pantalla (las tiras)
         o >= 50 % del área mostrada. Un parche local que copia la pantalla (brillo alrededor de un retrato) queda en la clase 2.
@@ -66,9 +66,23 @@
  *                 píxel del ojo, calcular la fila PS1 equivalente r (por su ángulo vertical: r = area_h/2 + tan(ang)*H_motor, H_motor = proj_h del
  *                 motor), tomar d(r) (interpolado) y muestrear la imagen del ojo en el ángulo equivalente a la fila r + d(r).
  *     cover_rgb[3], cover_abr  último recubrimiento semitransparente (color/255 y modo de mezcla PS1) para pintarlo como capa fija.
+     proj_h, cx_col, cy_row  proyección del motor para convertir ángulos <-> filas de la imagen original: H (px por unidad de tangente) y centro óptico (columna, fila) RELATIVOS a area
+                 (cx_col = rx - area_x, cy_row = ry - area_y con (rx,ry) el centro del mundo de arriba; por defecto 160, centro de area). Se rellenan siempre
+                 (con o sin filtro). Modelo validado en camtest (error medio 0,9 sobre 255): para la fila y del ojo, con cy_img/f_eye = fila del punto principal y focal
+                 vertical del ojo en píxeles (tangente = (y-cy_img)/f_eye):  r = cy_row + proj_h*(y-cy_img)/f_eye;  d = dv[r] interpolado entre centros de fila (0 donde
+                 rowcov=0);  y_src = cy_img + f_eye*(r+d-cy_row)/proj_h;  out = tint * imagen_sin_filtrar(x, y_src)  (UNA pasada sobre la imagen sin filtrar, NO emular la copia
+                 en sitio: re-tintaría las filas con dv<0). du no se aplica (0 en la práctica). El tinte multiplica en el espacio gamma original y se aplica a toda la vista.
  *   El renderer aplica el filtro UNA vez por ojo, como capa fija en pantalla (anclada a la cabeza, no al mundo) DESPUÉS de dibujar 3D opaco y
  *   semitransparente y ANTES de componer el panel HUD (que no se distorsiona). Si filter.active==0 no hay nada que aplicar.
  *   Con opts.screen_filter=0 estas primitivas vuelven a la clase 2 (comportamiento anterior).
+ *
+ * Desplazamiento de proyección por primitiva (OFX/OFY) y centro del mundo
+ *   La proyección del motor es x_pantalla = OFX + H*vx/vz. Los sprites de resplandor/halo ponen OFX/OFY en su centro de pantalla y proyectan solo el desplazamiento local
+ *   (vx,vy = +-1000 a profundidad vz), así que (vx,vy,vz) NO es una posición de vista del mundo (pegaba el resplandor al centro de la vista). Para cada lista se calcula
+ *   una vez el CENTRO DEL MUNDO (rx,ry) = moda de (proj_ox+dox, proj_oy+doy) entre los polígonos 3D OPACOS con proj_h>0 (todos vvalid; si no hay ninguno, entre cualquier
+ *   polígono 3D; si tampoco, el primer polígono con proj_h>0) y para CADA vértice de un polígono 3D con proj_h>0 (opaco o semitransparente) la posición de vista es
+ *     p.x = vx + (proj_ox+dox-rx)*vz/proj_h,  p.y = vy + (proj_oy+doy-ry)*vz/proj_h,  p.z = vz
+ *   (para los polígonos normales proj_ox+dox == rx y no cambia nada). Con proj_h==0 no se corrige. VrStats.n_ofs_fix cuenta los polígonos corregidos.
  *
  * Realimentación (GpuOp.fbk, gpu.h): polígonos/rects 2D texturizados que muestrean UN texel del frame buffer (área de dibujo/visualización) que se
  *   está dibujando. La VRAM del renderer solo recibe eventos (fill/subida/copia), no lo pintado por primitivas, así que leerían un valor viejo.
@@ -146,6 +160,8 @@ typedef struct {
     uint32_t n_fb_baked;      /* triángulos 2D de primitivas de realimentación convertidos a color plano (GpuOp.fbk; ver "Realimentación") */
     uint32_t n_fb_clear;      /* primitivas de realimentación con texel transparente (0): descartadas */
     uint32_t n_clear;         /* rects opacos sin textura a pantalla completa (borrado/máscara); no se emiten con opts.drop_clear (def.) */
+    uint32_t n_ofs_fix;       /* polígonos 3D cuyo desplazamiento de proyección (OFX/OFY) difería del centro del mundo y se corrigió */
+    uint32_t n_ref_group;     /* polígonos del grupo modal (centro del mundo) */
 } VrStats;
 
 #define VR_FILTER_ROWS 512
@@ -158,6 +174,9 @@ typedef struct {
     float dv[VR_FILTER_ROWS], du[VR_FILTER_ROWS];  /* desplazamiento fuente-destino por fila (px PS1) */
     uint8_t rowcov[VR_FILTER_ROWS];
     float cover_rgb[3]; int cover_abr;  /* último recubrimiento semitransparente; cover_abr<0 si no hay */
+    /* proyección del motor (ver "Clase 3"): se rellenan siempre. Defecto 160 / centro de area (160,128 con 320x256). */
+    float proj_h;               /* H del motor (px por unidad de tangente) */
+    float cx_col, cy_row;       /* centro óptico: columna y fila relativas a area[0], area[1] */
 } VrFilter;
 
 typedef struct {

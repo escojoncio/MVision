@@ -75,10 +75,10 @@ $(RTP)/stamp: $(RTDEPS) runtime_seq.patch
 $(RTSRC): $(RTP)/stamp
 OVOBJ := $(wildcard $(GENOV)/*.o)
 SC := ../scene
-$(OUT)/camtest: camtest.c vr_camera.c vr_camera_hle.c vrbody_weak.c vr_camera.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(BR)/bridge.c $(BR)/bridge_addrs.c $(RD)/ref_raster.c $(RTSRC) $(GENO) $(OVOBJ)
+$(OUT)/camtest: camtest.c vr_camera.c vr_camera_hle.c vrbody_weak.c vr_camera.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(SC)/hud_emu.c $(SC)/hud_emu.h $(BR)/bridge.c $(BR)/bridge_addrs.c $(RD)/ref_raster.c $(RTSRC) $(GENO) $(OVOBJ)
 	@mkdir -p $(OUT)
 	$(CLANG) -I. -I../body -I$(BR) -I$(SC) -I$(RTP) -I$(RD) -I$(OUT)/gen -O2 -g -Wall -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
-	  -o $@ camtest.c vr_camera.c vr_camera_hle.c vrbody_weak.c $(SC)/vr_scene.c $(BR)/bridge.c $(BR)/bridge_addrs.c $(RD)/ref_raster.c $(RTSRC) $(GENO) $(OVOBJ) -lm
+	  -o $@ camtest.c vr_camera.c vr_camera_hle.c vrbody_weak.c $(SC)/vr_scene.c $(SC)/hud_emu.c $(BR)/bridge.c $(BR)/bridge_addrs.c $(RD)/ref_raster.c $(RTSRC) $(GENO) $(OVOBJ) -lm
 # GENC se evalúa al leer el Makefile: primero se genera el C y luego se vuelve a invocar make.
 camtest: gen
 	$(MAKE) $(OUT)/camtest

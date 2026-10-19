@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "vr_scene.h"
+#include "hud_emu.h"
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; fprintf(stderr, "FALLO %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
@@ -604,6 +605,110 @@ static void test_feedback(void) {
     vr_scene_release();
 }
 
+static void test_ofs_fix(void) {
+    /* desplazamiento de proyección por primitiva: sin cámara del motor, pos_vr = (0,001 vx, -0,001 vy, -0,001 vz) */
+    reset();
+    dl.disp.x = 320; dl.disp.y = 8; dl.disp.w = 320; dl.disp.h = 240;
+    float a[3] = {-500, -300, 2000}, b[3] = {500, -300, 2000}, c[3] = {0, 400, 2000};
+    for (int i = 0; i < 3; i++) {   /* 3 opacos con centro (480,136) = (160+320, 128+8): dox=320, doy=8, proj_ox=160, proj_oy=128 */
+        GpuOp *o = poly3(a, b, c, 0);
+        o->proj_h = 150.0f; o->proj_ox = 160.0f; o->proj_oy = 128.0f; o->dox = 320; o->doy = 8;
+    }
+    /* un opaco aislado con otro centro (no es la moda) */
+    GpuOp *odd = poly3(a, b, c, 0);
+    odd->proj_h = 150.0f; odd->proj_ox = 100.0f; odd->proj_oy = 128.0f; odd->dox = 320; odd->doy = 8;
+    /* resplandor semitransparente: centro propio (OFX 210+dox 330 = 540, OFY 100+doy 8 = 108), vx,vy locales +-1000 a vz 3000, proj_h 150 */
+    float ga[3] = {-1000, -1000, 3000}, gb[3] = {1000, -1000, 3000}, gc[3] = {0, 1000, 3000};
+    GpuOp *g = poly3(ga, gb, gc, 1);
+    g->proj_h = 150.0f; g->proj_ox = 210.0f; g->proj_oy = 100.0f; g->dox = 330; g->doy = 8;
+    VrScene s; VrSceneOpts o = vr_scene_opts_default();
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0, "build ofs");
+    CHECK(near_f(s.filter.proj_h, 150.0f, 1e-3f) && near_f(s.filter.cx_col, 160.0f, 1e-3f) && near_f(s.filter.cy_row, 128.0f, 1e-3f),
+          "filter proj %.2f %.2f %.2f", s.filter.proj_h, s.filter.cx_col, s.filter.cy_row);
+    CHECK(s.stats.n_ref_group == 3, "grupo modal %u", s.stats.n_ref_group);
+    CHECK(s.stats.n_ofs_fix == 2, "corregidos %u (el opaco aislado y el resplandor)", s.stats.n_ofs_fix);
+    /* resplandor: ex = 540-480 = 60 px, ey = 108-136 = -28 px: x += 60*3000/150 = 1200, y += -28*3000/150 = -560 */
+    int found = 0;
+    for (uint32_t i = 0; i < s.nv; i++) {
+        const VrVtx *v = &s.v[i];
+        if (!near_f(v->pos[2], -3.0f, 1e-4f)) continue;
+        float vx = v->pos[0] * 1000.0f, vy = -v->pos[1] * 1000.0f;
+        if ((near_f(vx, 200, 0.5f) && near_f(vy, -1560, 0.5f)) || (near_f(vx, 2200, 0.5f) && near_f(vy, -1560, 0.5f)) || (near_f(vx, 1200, 0.5f) && near_f(vy, 440, 0.5f))) found++;
+    }
+    CHECK(found == 3, "vértices corregidos del resplandor %d", found);
+    /* un opaco del grupo modal no cambia: (-500,-300,2000) */
+    int same = 0;
+    for (uint32_t i = 0; i < s.nv; i++) if (near_f(s.v[i].pos[0], -0.5f, 1e-4f) && near_f(s.v[i].pos[1], 0.3f, 1e-4f) && near_f(s.v[i].pos[2], -2.0f, 1e-4f)) same++;
+    CHECK(same >= 3, "polígonos normales sin cambio (%d)", same);
+    /* sin opacos: el centro sale de los semitransparentes (3D) */
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    g = poly3(ga, gb, gc, 1); g->proj_h = 150.0f; g->proj_ox = 210.0f; g->proj_oy = 100.0f;
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0, "build ofs semi");
+    CHECK(near_f(s.filter.cx_col, 210.0f, 1e-3f) && near_f(s.filter.cy_row, 100.0f, 1e-3f) && s.stats.n_ofs_fix == 0, "ref semi %.1f %.1f fix %u", s.filter.cx_col, s.filter.cy_row, s.stats.n_ofs_fix);
+    /* sin proyección: valores por defecto (centro del área) y ningún polígono corregido */
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    poly3(ga, gb, gc, 0);
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0, "build ofs def");
+    CHECK(near_f(s.filter.proj_h, 160.0f, 1e-3f) && near_f(s.filter.cx_col, 160.0f, 1e-3f) && near_f(s.filter.cy_row, 128.0f, 1e-3f) && s.stats.n_ofs_fix == 0, "defecto %.1f %.1f %.1f", s.filter.proj_h, s.filter.cx_col, s.filter.cy_row);
+    vr_scene_release();
+}
+
+static void test_post_emu(void) {
+    /* Modelo del post-proceso (hud_emu_post == vr_fs_post): imagen del ojo 200x480 cuyo valor R codifica la fila (y/h); ojo con cy_img=240, f_eye=400; motor con
+     * proj_h=160, centro (160,128). Tiras en las filas PS1 50..59 con dv=+3, y 60..69 con dv=-2; tinte (0,5; 1; 0,5). */
+    enum { W = 200, H = 480 };
+    static float src[W * H * 3], dst[W * H * 3];
+    for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { float *p = &src[((size_t)y * W + x) * 3]; p[0] = (y + 0.5f) / H; p[1] = 0.8f; p[2] = 0.4f; }
+    VrFilter f; memset(&f, 0, sizeof f);
+    f.active = 1; f.proj_h = 160.0f; f.cx_col = 160.0f; f.cy_row = 128.0f; f.cover_abr = -1;
+    f.tint[0] = 0.5f; f.tint[1] = 1.0f; f.tint[2] = 0.5f;
+    for (int i = 50; i < 60; i++) { f.rowcov[i] = 1; f.dv[i] = 3.0f; }
+    for (int i = 60; i < 70; i++) { f.rowcov[i] = 1; f.dv[i] = -2.0f; }
+    f.nrows = 70;
+    hud_emu_post(src, dst, W, H, 240.0f, 400.0f, &f);
+    /* fila de salida y con r = 128 + 160*(y+0,5-240)/400 = 55,5 -> y + 0,5 = 240 - 72,5*2,5 = 58,75: y = 58 (r = 55,4); en el interior de la tira dv=3: fuente = y+0,5 + 2,5*3 = 66,25 */
+    {
+        int y = 58;
+        float r = 128.0f + 160.0f * ((float)y + 0.5f - 240.0f) / 400.0f;
+        CHECK(r > 51.0f && r < 58.0f, "r=%.3f", r);
+        float want = ((float)y + 0.5f + 400.0f * 3.0f / 160.0f) / H;
+        CHECK(near_f(dst[((size_t)y * W + 7) * 3] / 0.5f, want, 1.5f / H), "interior tira dv=3: %.5f vs %.5f", dst[((size_t)y * W + 7) * 3] / 0.5f, want);
+        CHECK(near_f(dst[((size_t)y * W + 7) * 3 + 1], 0.8f, 1e-5f) && near_f(dst[((size_t)y * W + 7) * 3 + 2], 0.2f, 1e-5f), "tinte G/B");
+    }
+    /* r = 64,x -> dv=-2: fuente = y + 0,5 - 2,5*2 */
+    {
+        int y = 240 + (int)((64.5f - 128.0f) * 400.0f / 160.0f);   /* r ~ 64,5 */
+        float r = 128.0f + 160.0f * ((float)y + 0.5f - 240.0f) / 400.0f;
+        CHECK(r > 60.6f && r < 68.9f, "r2=%.3f", r);
+        float want = ((float)y + 0.5f - 400.0f * 2.0f / 160.0f) / H;
+        CHECK(near_f(dst[((size_t)y * W + 3) * 3] / 0.5f, want, 1.5f / H), "interior tira dv=-2: %.5f vs %.5f", dst[((size_t)y * W + 3) * 3] / 0.5f, want);
+    }
+    /* fuera de las tiras (arriba y abajo del todo, r > 70 o r < 0): sin desplazamiento, solo tinte */
+    for (int y = 0; y < H; y += 17) {
+        float r = 128.0f + 160.0f * ((float)y + 0.5f - 240.0f) / 400.0f;
+        if (r > 71.0f || r < 0.0f) CHECK(near_f(dst[((size_t)y * W) * 3] / 0.5f, (y + 0.5f) / H, 1e-5f), "fuera de tiras y=%d (r=%.1f)", y, r);
+    }
+    /* parámetros por ojo del Swift (encodePost): fila del punto principal = h/2*(1+P[2][1]) y focal = h/2*P[1][1] con P[1][1]=2/(u+d), P[2][1]=(u-d)/(u+d):
+     * el rayo de tangente +u cae en la fila 0 y el de -d en la fila h (tangentes asimétricas) */
+    {
+        const float up = 0.9f, dn = 0.7f, hh = 1000.0f, sy = 2.0f / (up + dn), cyp = (up - dn) / (up + dn);
+        float yc = hh * 0.5f * (1.0f + cyp), fe = hh * 0.5f * sy;
+        CHECK(near_f(yc - fe * up, 0.0f, 1e-3f) && near_f(yc + fe * dn, hh, 1e-3f), "parámetros del ojo: y(+u)=%.3f y(-d)=%.3f", yc - fe * up, yc + fe * dn);
+    }
+    /* sin filas con datos y tinte neutro: identidad; con recubrimiento modo 1 (B+F) suma */
+    memset(&f, 0, sizeof f);
+    f.proj_h = 160.0f; f.cy_row = 128.0f; f.tint[0] = f.tint[1] = f.tint[2] = 1.0f; f.cover_abr = -1;
+    hud_emu_post(src, dst, W, H, 240.0f, 400.0f, &f);
+    int same = 1;
+    for (int i = 0; i < W * H * 3; i++) if (!near_f(src[i], dst[i], 1e-6f)) same = 0;
+    CHECK(same, "identidad sin filtro");
+    f.cover_abr = 1; f.cover_rgb[0] = 0.25f; f.cover_rgb[1] = 0.5f; f.cover_rgb[2] = 0.0f;
+    hud_emu_post(src, dst, W, H, 240.0f, 400.0f, &f);
+    CHECK(near_f(dst[(100 * W) * 3 + 1], 1.0f, 1e-6f) && near_f(dst[(100 * W) * 3 + 2], 0.4f, 1e-6f), "recubrimiento aditivo");
+}
+
 int main(void) {
     test_basic();
     test_stability();
@@ -616,6 +721,8 @@ int main(void) {
     test_line_coverage();
     test_event_epochs();
     test_feedback();
+    test_ofs_fix();
+    test_post_emu();
     if (fails) { fprintf(stderr, "%d fallos\n", fails); return 1; }
     printf("test_scene: OK\n");
     return 0;
