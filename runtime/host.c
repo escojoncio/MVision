@@ -84,40 +84,16 @@ static void set_error(const char *fmt, ...) {
 static void publish_frame(void) {
     GpuDisplay d;
     gpu_get_display(&d);
-    int w = d.w, h = d.h;
-    if (w <= 0 || h <= 0) { w = 320; h = 240; d.enabled = 0; }
+    /* Marco completo del modo (ancho nominal con los márgenes negros del rango horizontal), no solo el área de VRAM activa:
+     * el hardware no muestra nada fuera del rango, y el contenido queda donde lo dejó el juego (ver GpuDisplay). */
+    int w = d.fw > 0 ? d.fw : d.w, h = d.h;
+    if (w <= 0 || h <= 0) { w = 320; h = 240; d.enabled = 0; d.fw = w; d.aw = w; d.h = h; d.pad_l = 0; }
     if (w > MV_HOST_MAX_W) w = MV_HOST_MAX_W;
     if (h > MV_HOST_MAX_H) h = MV_HOST_MAX_H;
+    d.fw = w; d.h = h;
+    if (d.pad_l + d.aw > w) d.aw = w - d.pad_l > 0 ? w - d.pad_l : 0;
     int back = fb_wr;       /* búfer propio del escritor: nadie más lo lee */
-    uint8_t *o = fb[back];
-    if (!d.enabled) {
-        memset(o, 0, (size_t)w * h * 4);
-        for (size_t i = 3; i < (size_t)w * h * 4; i += 4) o[i] = 255;
-    } else {
-        int d24 = d.depth24;
-        for (int y = 0; y < h; y++) {
-            uint8_t *p = o + (size_t)y * w * 4;
-            const uint16_t *row = gpu_vram[(d.y + y) & 511];
-            if (d24) {
-                const uint8_t *ln = (const uint8_t *)row;
-                for (int x = 0; x < w; x++, p += 4) {
-                    p[0] = ln[((d.x * 2) + x * 3 + 0) & 2047];
-                    p[1] = ln[((d.x * 2) + x * 3 + 1) & 2047];
-                    p[2] = ln[((d.x * 2) + x * 3 + 2) & 2047];
-                    p[3] = 255;
-                }
-            } else {
-                for (int x = 0; x < w; x++, p += 4) {
-                    uint16_t c = row[(d.x + x) & 1023];
-                    unsigned r = c & 31, g = (c >> 5) & 31, b = (c >> 10) & 31;
-                    p[0] = (uint8_t)(r << 3 | r >> 2);
-                    p[1] = (uint8_t)(g << 3 | g >> 2);
-                    p[2] = (uint8_t)(b << 3 | b >> 2);
-                    p[3] = 255;
-                }
-            }
-        }
-    }
+    gpu_present_rgba(&d, NULL, fb[back], (size_t)MV_HOST_MAX_W * MV_HOST_MAX_H);
     fb_meta[back].w = w; fb_meta[back].h = h; fb_meta[back].seq = ++fb_seq;
     unsigned old = atomic_exchange_explicit(&fb_state, (unsigned)back | 4u, memory_order_acq_rel);
     fb_wr = (int)(old & 3u);   /* el que estaba listo (leído o no) vuelve a ser mío */
@@ -220,7 +196,10 @@ static void on_frame(Cpu *c, uint32_t f) {
 
     {   /* Solo se convierte el vídeo si alguien lo mira (lectura en el último segundo); si no, 1 de cada 10 VBlanks. */
         uint64_t lr = atomic_load_explicit(&fb_read_ns, memory_order_relaxed);
-        if (f % 10 == 0 || (lr ? t_in - lr < 1000000000ull : f < 200)) publish_frame();
+        /* Con signo: si el lector marcó su lectura DESPUÉS de tomar t_in (carrera de microsegundos), la resta sin signo daba ~2^64 y
+         * se omitía la publicación de ese VBlank: el visor veía un fotograma repetido (reproducido: 2 de 5200 con un lector a alta
+         * frecuencia). */
+        if (f % 10 == 0 || (lr ? (int64_t)(t_in - lr) < 1000000000ll : f < 200)) publish_frame();
     }
 
     uint8_t sm, lg;
