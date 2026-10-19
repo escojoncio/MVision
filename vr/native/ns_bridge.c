@@ -238,6 +238,53 @@ int ns_coherence_flat(const float user_R[9], float k, float eye_h, const float p
     return ns_coherence(&in, out);
 }
 
+void ns_coh_cfg_default(NsCohCfg *c) {
+    if (!c) return;
+    c->pos_m = 1.0f; c->rot_deg = 30.0f;
+    c->gross_pos_m = 6.0f; c->gross_rot_deg = 90.0f;
+    c->legacy_pos_m = 0.2f; c->legacy_rot_deg = 8.0f;
+    c->persist_ns = 150000000ull;
+    c->return_frames = 3;
+}
+int ns_coh_step(NsCohState *st, const NsCohCfg *cfg, const NsCohOut *out, uint64_t now_ns) {
+    if (!st) return 1;
+    NsCohCfg d;
+    if (!cfg) { ns_coh_cfg_default(&d); cfg = &d; }
+    if (!out || !out->ok || !isfinite(out->d_probe) || !isfinite(out->d_rot)) {   /* no evaluable: se trata como salto grueso */
+        if (!st->incoherent) st->trips++;
+        st->incoherent = 1; st->why = NS_COH_WHY_POS; st->good_run = 0; st->over_since_ns = 0;
+        return 0;
+    }
+    st->frames++;
+    if (out->d_probe > st->worst_pos_m) st->worst_pos_m = out->d_probe;
+    if (out->d_rot > st->worst_rot_deg) st->worst_rot_deg = out->d_rot;
+    int pos_over = out->d_probe > cfg->pos_m, rot_over = out->d_rot > cfg->rot_deg;
+    int over = pos_over || rot_over;
+    int gross = out->d_probe > cfg->gross_pos_m || out->d_rot > cfg->gross_rot_deg;
+    int legacy = out->d_probe > cfg->legacy_pos_m || out->d_rot > cfg->legacy_rot_deg;
+    if (!over && legacy) st->tolerated++;
+    if (over) st->over++;
+    int why = (pos_over || out->d_probe > cfg->gross_pos_m) ? NS_COH_WHY_POS : NS_COH_WHY_ROT;
+    if (over) {
+        st->good_run = 0;
+        if (!st->over_since_ns) st->over_since_ns = now_ns ? now_ns : 1;
+        if (gross || now_ns - st->over_since_ns >= cfg->persist_ns) {
+            if (!st->incoherent) st->trips++;
+            st->incoherent = 1; st->why = why;
+        }
+    } else {
+        st->over_since_ns = 0;
+        st->good_run++;
+        if (st->incoherent && st->good_run >= cfg->return_frames) { st->incoherent = 0; st->why = NS_COH_WHY_NONE; }
+    }
+    return !st->incoherent;
+}
+void ns_coh_take_stats(NsCohState *st, NsCohStats *out) {
+    if (!st) return;
+    if (out) { out->frames = st->frames; out->tolerated = st->tolerated; out->over = st->over; out->trips = st->trips; out->worst_pos_m = st->worst_pos_m; out->worst_rot_deg = st->worst_rot_deg; }
+    st->frames = st->tolerated = st->over = st->trips = 0; st->worst_pos_m = st->worst_rot_deg = 0.0f;
+}
+
 /* ------------------------------------------------------------------------------------------------ decisión nativo/GPU */
 int ns_scene_native_ok(uint32_t valid) { return (valid & NS_NATIVE_NEED) == NS_NATIVE_NEED && !(valid & NS_NATIVE_BAD); }
 

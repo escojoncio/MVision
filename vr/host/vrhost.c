@@ -77,6 +77,7 @@ static const struct { const char *name; uint32_t addr; } FIRE_SITES[] = {
 };
 #define NFIRE (sizeof FIRE_SITES / sizeof FIRE_SITES[0])
 static int body_ok, fire_ok;
+static uint32_t ik_ap0, ik_dr0;          /* vrbody_stats.applies / arms_driven en la captura nativa de este fotograma (ns_ik_idle) */
 
 /* Huella del código del buscador antiaéreo (edición europea): prólogo de cada función y las dos llamadas internas que usa el sustituto
  * (aaview desde el paso; carga de H del canal desde aaview). Sin ella no se enlazan (las direcciones fijas no se verifican por firma). */
@@ -217,14 +218,8 @@ static void sm_sample(VrSmSample *smp, const VrScene *sc, const VrCamRecord *r) 
     if (!r || !r->active || !sc->user_space || !sc->has_3d || !sc->world_valid || sc->cine_active) return;
     float K = sc->user_k * sc->scale;
     if (!(K > 0.0f) || !isfinite(K)) return;
-    smp->valid = 1;
-    smp->game_s = (double)r->vbl / 50.0;
-    for (int i = 0; i < 3; i++) smp->B[i] = sc->origin_game[i];
-    memcpy(smp->R, sc->user_R, sizeof smp->R);   /* la reflexión de z de vr_scene se cancela: P = R * k*scale * (W - O) + c (ver vr_smooth.h) */
-    smp->K = K;
-    for (int i = 0; i < 3; i++) smp->c[i] = sc->user_p_ref[i] - sc->user_R[3 * i + 1] * sc->user_eye_h;
-    smp->turn_deg = r->turn_total_deg + turn_base;
-    smp->epoch = r->epoch + (exe_gen << 16);
+    /* la reflexión de z de vr_scene se cancela: P = R * k*scale * (W - O) + c (ver vr_smooth.h) */
+    vrsm_make_sample(smp, sc->origin_game, sc->user_R, K, sc->user_p_ref, sc->user_eye_h, (double)r->vbl / 50.0, r->turn_total_deg + turn_base, r->epoch + (exe_gen << 16), smp->t_wall);
 }
 
 static int grow(void **p, size_t *cap, size_t need, size_t esz) {
@@ -292,14 +287,19 @@ struct NsBridge *mv_vrhost_native_bridge(void) { return ns_bridge_get(); }
 /* Mundo del motor -> espacio recentrado del usuario (3x4 fila-mayor, metros): la MISMA regla que vr_scene con user_map_on (la reflexión de Z se cancela):
  *   P = R * (k * S * (W - origen)) - R * (0, eye_h, 0) + p_ref.
  * Contrato v2: mundo del motor Y arriba y mano derecha, sin inversión (la reflexión de Z de vr_scene se cancela con el mapa de usuario). */
-static int ns_world_to_vr(const VrCamRecord *r, float to_vr[12]) {
+static int ns_world_to_vr(const VrCamRecord *r, float to_vr[12], VrSmSample *smp) {
     VrSceneOpts o = sopts;
     float org[3];
     vr_scene_player_origin(&bs, &o, org);
     org[0] = (float)r->eye[0]; org[2] = (float)r->eye[2];   /* origen bajo el ojo VR de ese fotograma (como build_one) */
     vrcam_scene_user_map(&o, r, org[1]);
+    if (smp)   /* muestra del suavizador de ESTA escena (mismo registro, mismo mapa): sm_sample hace lo mismo para la lista de la GPU */
+        vrsm_make_sample(smp, org, o.user_R, o.user_k * o.scale, o.user_p_ref, o.user_eye_h_m, (double)r->vbl / 50.0, r->turn_total_deg + turn_base, r->epoch + (exe_gen << 16), now_s());
     return vrcam_native_to_vr(&o, org, to_vr);
 }
+/* Último empujón de una muestra de la escena nativa al suavizador (ns del reloj mono): mientras llegue, las escenas de la GPU marcadas para el nativo no empujan la suya. */
+static _Atomic uint64_t ns_smp_push_ns;
+#define NS_SMP_FRESH_NS 100000000ull
 
 /* Contexto de la captura (hilo de emulación, en la etapa «pantalla»): zona, cámara VR y mapa mundo -> usuario, y qué hacer con el jugador. */
 static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
@@ -311,17 +311,34 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
     for (int i = 0; i < 3; i++) sc->cam.eye[i] = (float)r->eye[i];
     memcpy(sc->cam.rot, r->M, sizeof sc->cam.rot);
     sc->cam.h = (float)r->screen; sc->cam.overscan_y = 1.0f; sc->cam.vr_active = 1;   /* con la cámara VR el motor no aplica el sobreescaneo (contrato v2) */
-    if (ns_world_to_vr(r, sc->to_vr)) sc->valid |= NS_SV_TOVR_OK;
+    VrSmSample nsmp;
+    if (ns_world_to_vr(r, sc->to_vr, &nsmp)) sc->valid |= NS_SV_TOVR_OK;
+    if (nsmp.valid && view.kind != VRV_K_ENGINE) {   /* el suavizador corrige la escena que se dibuja: la nativa lleva el último registro, la lista el anterior */
+        pthread_mutex_lock(&SMX);
+        sm_ensure();
+        vrsm_push(&SM, &nsmp, now_s());
+        pthread_mutex_unlock(&SMX);
+        atomic_store(&ns_smp_push_ns, mono_ns() | 1);
+    }
+    { VrBodyStats b; vrbody_stats(&b); ik_ap0 = b.applies; ik_dr0 = b.arms_driven; }
     o->player_key = ns_player_key(emu_ram);
     o->hide_head = 1;                                       /* primera persona: la cabeza propia no se dibuja (misma regla que vrcam_hide_head) */
     o->refresh_parts = body_ok ? NS_PARTS_ARMS : 0;
 }
 static void ns_post_ik(uint8_t *ram) { ns_hook_post_ik(ram); ns_cover_glue_post_ik(ram); }
+/* Capa de brazos inactiva: vrbody_apply corrió después de la captura de este fotograma y no manejó ningún brazo (mandos sin pose válida: en los registros, `pose_valida I=0 D=0`,
+ * `IK: aplicaciones=+25 brazos=+0` y 25 escenas «sin IK» por segundo => valid=0x47, escena-no-apta, GPU o mundo sin dibujar en solo nativo con el jugador quieto). */
+static int ns_ik_idle(void *u) {
+    (void)u;
+    VrBodyStats b;
+    vrbody_stats(&b);
+    return b.applies > ik_ap0 && b.arms_driven == ik_dr0;
+}
 
 /* Vigilancia por fotograma (hilo de emulación, tras el sincronismo): (M4) con la capa de cuerpo activa cada captura debe llevar la pose IK de los brazos
  * (ik_refresh crece a la par que captures); (B4) reintento de la instalación y reinstalación si otra overlay pisó la etapa. Se registra como mucho una vez por segundo. */
 static void ns_frame_check(void) {
-    static uint32_t cap0, ik0, miss0, pub0, nfr;
+    static uint32_t cap0, ik0, miss0, idle0, pub0, nfr;
     static uint64_t last_log_ns;
     NsHookStats st;
     ns_hook_stats(&st);
@@ -342,8 +359,8 @@ static void ns_frame_check(void) {
         static char cbuf[8192];
         if (ns_cover_glue_poll(cbuf, sizeof cbuf)) fputs(cbuf, stderr);
     }
-    uint32_t dcap = st.captures - cap0, dik = st.ik_refresh - ik0, dmiss = st.ik_missed - miss0;
-    cap0 = st.captures; ik0 = st.ik_refresh; miss0 = st.ik_missed;
+    uint32_t dcap = st.captures - cap0, dik = st.ik_refresh - ik0, dmiss = st.ik_missed - miss0, didle = st.ik_idle - idle0;
+    cap0 = st.captures; ik0 = st.ik_refresh; miss0 = st.ik_missed; idle0 = st.ik_idle;
     {   /* Diagnóstico por segundo (una línea cada una), siempre: qué extrajo el enganche del motor y cómo van las manos. Se mide todo junto para no ir a ciegas. */
         static NsExtractGlueStats g0;
         static VrBodyStats b0;
@@ -377,7 +394,7 @@ static void ns_frame_check(void) {
         }
     }
     if (body_ok && dcap > 0 && (dik < dcap || dmiss))
-        fprintf(stderr, "[vrhost] render nativo: %u capturas, %u con pose IK, %u sin IK (esas escenas se pintan por GPU); jugador enlazado %u\n", dcap, dik, dmiss, st.player_bound);
+        fprintf(stderr, "[vrhost] render nativo: %u capturas, %u con pose IK, %u con la capa de brazos inactiva (aptas, brazos del juego), %u sin IK (esas escenas se pintan por GPU); jugador enlazado %u\n", dcap, dik, didle, dmiss, st.player_bound);
 }
 
 /* ¿Esta escena de la lista ADMITE el 3D nativo? Solo cámara VR en primera persona (no cinemáticas) y 3D de mundo válido. No depende del modo ni del estado del puente:
@@ -425,12 +442,18 @@ int mv_host_scene(VrScene *out) {
     hc_disp = slot[i].hcmap;
 
     VrSmSample smp = slot[i].smp;
+    {   /* escena de la lista marcada para el nativo y muestra nativa reciente: el suavizador ya tiene la de la escena que se dibuja; la de la lista es de otro registro */
+        uint64_t np = atomic_load(&ns_smp_push_ns);
+        if (smp.valid && slot[i].sc.native_3d && np && mono_ns() - np < NS_SMP_FRESH_NS) smp.valid = -1;   /* -1 = no empujar */
+    }
     stats.delivered++;
     pthread_mutex_unlock(&MX);
-    pthread_mutex_lock(&SMX);
-    sm_ensure();
-    vrsm_push(&SM, &smp, now_s());
-    pthread_mutex_unlock(&SMX);
+    if (smp.valid >= 0) {
+        pthread_mutex_lock(&SMX);
+        sm_ensure();
+        vrsm_push(&SM, &smp, now_s());
+        pthread_mutex_unlock(&SMX);
+    }
     return 1;
 }
 
@@ -1245,6 +1268,7 @@ static void on_bound(void) {
         ns_hook_set_stage_cb(dump_at_stage);
         ns_hook_set_precapture_cb(vrbody_prefist);
         vrbody_set_apply_hook(ns_post_ik);
+        ns_hook_set_ik_idle(ns_ik_idle, NULL);
     }
     /* Disparo: todas o ninguna (con unas sí y otras no, el arma VR dispararía a medias). */
     fire_ok = 1;

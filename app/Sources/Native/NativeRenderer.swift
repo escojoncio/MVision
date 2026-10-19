@@ -209,11 +209,11 @@ final class NativeRenderer {
     private var cohWhy = ""
     // red de coherencia con la ruta de GPU (ver checkCoherence)
     private var incoherent = false
-    private var cohRun = 0
+    private var cohState = NsCohState()                       // veredicto con tolerancia al desfase de fotogramas (ns_coh_step)
+    private var cohCfg: NsCohCfg = { var c = NsCohCfg(); ns_coh_cfg_default(&c); return c }()
+    private var cohStats = NsCohStats()                       // acumulados desde la última línea de registro
     private(set) var cohDist: Float = -1
     static let whyIncoherent: Int32 = 100
-    static let cohThreshold: Float = 0.2
-    static let cohFramesToReturn = 3
     private var fogFwd = SIMD4<Float>(0, 0, 0, 0)
     private var fogPar = SIMD4<Float>(0, 1, 0, 0)
     // orden de los semitransparentes (persistente; se recalcula solo si cambia la escena o la cabeza se mueve)
@@ -826,12 +826,13 @@ final class NativeRenderer {
         var eyeVR: [Float]       // eye_vr
         var upm: Float           // unidades del motor por metro
     }
-    static let cohRotThreshold: Float = 8      // grados
 
     /// Red de coherencia: con el mundo fiable, la escena nativa y la lista de la GPU deben decir lo mismo del MISMO mundo. Se lleva el ojo nativo (y dos puntos de prueba) por el mapa
     /// mundo -> VR que declara la lista de la GPU (con su origen) y se compara con lo que da el to_vr de la escena nativa (ns_coherence); además se compara el giro de la cámara nativa con
-    /// game_view. Comparar «to_vr * ojo» con eye_vr NO sirve: el origen de la lista está bajo el ojo, así que ambos valen siempre p_ref (la cabeza). Más de 0,2 m o 8 grados:
-    /// incoherente (se cae a GPU); se vuelve a nativo tras 3 fotogramas coherentes seguidos. Sin mapa de la lista (cinemática, mundo no fiable) no se evalúa y se mantiene el estado.
+    /// game_view. Comparar «to_vr * ojo» con eye_vr NO sirve: el origen de la lista está bajo el ojo, así que ambos valen siempre p_ref (la cabeza).
+    /// El veredicto (ns_coh_step, vr/native/ns_bridge.c) tolera el desfase de fotogramas del motor entre la escena nativa y la lista (andando difieren hasta ~0,5 m y ~16 grados sin ser
+    /// un mundo distinto) y solo cae a GPU con un salto grueso o una discrepancia continuada por encima de la tolerancia. Sin mapa de la lista (cinemática, mundo no fiable) no se
+    /// evalúa y se mantiene el estado.
     private func checkCoherence(_ map: GpuMap?) -> Bool {
         cohEvaluated = false
         guard let m = map, (curValid & UInt32(truncatingIfNeeded: NS_SV_TOVR_OK)) != 0, m.userR.count == 9, m.pRef.count == 3, m.origin.count == 3, m.gameView.count == 16 else { return !incoherent }
@@ -840,17 +841,14 @@ final class NativeRenderer {
         let ok = ns_coherence_flat(m.userR, m.k, m.eyeH, m.pRef, m.origin, m.gameView, toVR12, ce, camRot9, m.upm, &out) != 0 && out.ok != 0
         cohOut = out
         cohEvaluated = true
-        guard ok, out.d_probe.isFinite, out.d_rot.isFinite else { incoherent = true; cohRun = 0; cohDist = -1; cohWhy = "no evaluable"; return false }
-        cohDist = out.d_probe
-        if out.d_probe > Self.cohThreshold || out.d_rot > Self.cohRotThreshold {
-            incoherent = true; cohRun = 0
-            cohWhy = out.d_probe > Self.cohThreshold ? "posicion" : "giro"
-        } else {
-            cohRun += 1
-            if incoherent && cohRun >= Self.cohFramesToReturn { incoherent = false }
-            if !incoherent { cohWhy = "" }
-        }
-        return !incoherent
+        let coherent = ns_coh_step(&cohState, &cohCfg, &out, ns_now_ns()) != 0   // out.ok == 0 (no evaluable) cuenta como salto grueso
+        incoherent = cohState.incoherent != 0
+        cohDist = ok && out.d_probe.isFinite ? out.d_probe : -1
+        let why = Int(cohState.why)
+        if why == Int(NS_COH_WHY_POS) { cohWhy = ok ? "posicion" : "no evaluable" }
+        else if why == Int(NS_COH_WHY_ROT) { cohWhy = "giro" }
+        else { cohWhy = "" }
+        return coherent
     }
 
     /// Decisión del fotograma (ns_native_decide): modo pedido, estado real del renderer, escena de la lista marcada y escena nativa apta y reciente, y coherencia con la lista.
@@ -1124,8 +1122,10 @@ final class NativeRenderer {
         let box = total > 0 ? String(format: "[%.1f %.1f %.1f]..[%.1f %.1f %.1f]", mn.x, mn.y, mn.z, mx.x, mx.y, mx.z) : "vacia"
         let nc = toVR * SIMD4<Float>(camEye.x, camEye.y, camEye.z, 1)
         let g = gpuEye ?? SIMD3<Float>(.nan, .nan, .nan)
+        ns_coh_take_stats(&cohState, &cohStats)
         let coh = cohEvaluated
-            ? String(format: "ojo=%.3fm sondas=%.3fm giro=%.2fgr", cohOut.d_eye, cohOut.d_probe, cohOut.d_rot) : "no evaluada"
+            ? String(format: "ojo=%.3fm sondas=%.3fm giro=%.2fgr | desfase_tolerado=%u/%u fuera_de_tolerancia=%u caidas_a_gpu=%u peor=%.3fm/%.2fgr", cohOut.d_eye, cohOut.d_probe, cohOut.d_rot,
+                      cohStats.tolerated, cohStats.frames, cohStats.over, cohStats.trips, cohStats.worst_pos_m, cohStats.worst_rot_deg) : "no evaluada"
         var s = "tris/ojo=\(statTrisEye) (escenario=\(statTrisStatic) dinamicos=\(statTrisDyn) semi=\(semiRuns.isEmpty ? 0 : semiN)) piezas=\(total) (escenario=\(statPcs.count) dinamicas=\(dynTex.count + dynFlat.count) semi=\(semis.count)) delante=\(front)/\(total) caja_VR=\(box)"
         s += String(format: " | camara: nativa=(%.2f %.2f %.2f) gpu=(%.2f %.2f %.2f) cabeza=(%.2f %.2f %.2f) d_nat_cabeza=%.2fm d_gpu_cabeza=%.2fm",
                     nc.x, nc.y, nc.z, g.x, g.y, g.z, headVR.x, headVR.y, headVR.z,
