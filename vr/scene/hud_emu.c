@@ -69,6 +69,7 @@ static void expand(uint32_t t, float *o) {
 }
 
 typedef struct { float x, y, u, v; } PV;
+extern const VrState *hud_cur_states; extern uint32_t hud_cur_nstates;
 
 /* fragmento: devuelve 0 si se descarta; rgb en [0,1] */
 static int frag(const uint16_t *vram, const VrVtx *v0, float u, float v, const float *col, uint32_t pass, float *rgb) {
@@ -122,7 +123,19 @@ static void draw_tri(const uint16_t *vram, HudImg *im, const VrVtx *t, int rx, i
     if (area == 0) return;
     int x0 = (int)floorf(fminf(p[0].x, fminf(p[1].x, p[2].x))), x1 = (int)ceilf(fmaxf(p[0].x, fmaxf(p[1].x, p[2].x)));
     int y0 = (int)floorf(fminf(p[0].y, fminf(p[1].y, p[2].y))), y1 = (int)ceilf(fmaxf(p[0].y, fmaxf(p[1].y, p[2].y)));
-    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > im->w) x1 = im->w; if (y1 > im->h) y1 = im->h;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > im->w) x1 = im->w;
+    if (y1 > im->h) y1 = im->h;
+    /* recorte vigente de la primitiva (E3/E4, inclusivo, coordenadas de VRAM como los vértices 2D): vr_fs_scene lo aplica sobre la posición original interpolada */
+    if (t[0].pad != 0xFFFFu && t[0].pad < hud_cur_nstates) {
+        const VrState *st = &hud_cur_states[t[0].pad];
+        int cx1 = st->cx1 - rx, cx2 = st->cx2 - rx + 1, cy1 = st->cy1 - ry, cy2 = st->cy2 - ry + 1;
+        if (x0 < cx1) x0 = cx1;
+        if (y0 < cy1) y0 = cy1;
+        if (x1 > cx2) x1 = cx2;
+        if (y1 > cy2) y1 = cy2;
+    }
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++) {
             float px = x + 0.5f, py = y + 0.5f;
@@ -348,4 +361,28 @@ void hud_emu_run3d(const VrScene *s, uint16_t *vram, HudImg *im, float *zbuf, in
         }
     }
     while (next_ev < l->nops) { hud_emu_event(l, &l->ops[next_ev], vram); next_ev++; }
+}
+
+/* Vista GL del ojo del motor (x der, y arriba, -z delante; metros) a partir de VrScene.game_view (columna-mayor: vértice de vista del juego (x der, y abajo, z adelante)
+ * -> mundo VR): view = k * diag(1,-1,-1) * A^-1 con traslación -M t. Con ella y las tangentes del motor, hud_emu_run3d reproduce la imagen del motor. */
+static int inv3(const float a[9], float o[9]) {
+    float c00 = a[4] * a[8] - a[5] * a[7], c01 = a[5] * a[6] - a[3] * a[8], c02 = a[3] * a[7] - a[4] * a[6];
+    float det = a[0] * c00 + a[1] * c01 + a[2] * c02;
+    if (fabsf(det) < 1e-30f) return 0;
+    float id = 1.0f / det;
+    o[0] = c00 * id; o[1] = (a[2] * a[7] - a[1] * a[8]) * id; o[2] = (a[1] * a[5] - a[2] * a[4]) * id;
+    o[3] = c01 * id; o[4] = (a[0] * a[8] - a[2] * a[6]) * id; o[5] = (a[2] * a[3] - a[0] * a[5]) * id;
+    o[6] = c02 * id; o[7] = (a[1] * a[6] - a[0] * a[7]) * id; o[8] = (a[0] * a[4] - a[1] * a[3]) * id;
+    return 1;
+}
+int hud_emu_game_view_gl(const VrScene *s, float view[16]) {
+    float A[9] = {s->game_view[0], s->game_view[4], s->game_view[8], s->game_view[1], s->game_view[5], s->game_view[9], s->game_view[2], s->game_view[6], s->game_view[10]};   /* fila-mayor */
+    float t[3] = {s->game_view[12], s->game_view[13], s->game_view[14]}, Ai[9];
+    if (!inv3(A, Ai)) return 0;
+    float k = s->scale > 0 ? s->scale : 0.001f, M[9];
+    for (int c = 0; c < 3; c++) { M[c] = k * Ai[c]; M[3 + c] = -k * Ai[3 + c]; M[6 + c] = -k * Ai[6 + c]; }
+    for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) view[c * 4 + r] = M[r * 3 + c];
+    for (int r = 0; r < 3; r++) view[12 + r] = -(M[r * 3] * t[0] + M[r * 3 + 1] * t[1] + M[r * 3 + 2] * t[2]);
+    view[3] = view[7] = view[11] = 0; view[15] = 1;
+    return 1;
 }

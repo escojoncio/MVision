@@ -28,6 +28,16 @@ $(BUILD)/vrprobe: vrprobe.c probe_raster.c probe_raster.h probe_view.c probe_vie
 	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
 	  -o $@ vrprobe.c probe_raster.c probe_view.c $(SRC_VR) $(SRC_RT) -lm -lpthread
 
+# probe2d: comparación por fotograma real (ref_raster) vs composición 2D+3D (vr/scene/hud_emu.c) con la cámara del juego
+$(BUILD)/probe2d: probe2d.c probe_raster.c probe_raster.h $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) $(wildcard $(VR)/*/*.h) ../../../render/ref_raster.c $(VR)/scene/hud_emu.c
+	@mkdir -p $(BUILD)
+	$(CC) $(INC) -I../../../render -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
+	  -o $@ probe2d.c probe_raster.c ../../../render/ref_raster.c $(VR)/scene/hud_emu.c $(SRC_VR) $(SRC_RT) -lm -lpthread
+
+run2d: $(BUILD)/probe2d $(SIGS)
+	@mkdir -p $(OUT)
+	MV_SIGS=$(SIGS) $(BUILD)/probe2d $(EXE) $(DISC) --out $(OUT) $(ARGS)
+
 $(SIGS): $(SIGS_REF)
 	@mkdir -p $(BUILD)
 	python3 -I ../../../tools/sig/hlesigs.py $< $@ $(wildcard $(RT)/hle*.txt)
@@ -44,4 +54,4 @@ selftest: $(BUILD)/selftest
 	cd $(BUILD) && ./selftest
 	python3 -I checkpng.py $(BUILD)/selftest.png 8 8
 
-.PHONY: run selftest
+.PHONY: run run2d selftest

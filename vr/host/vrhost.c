@@ -125,6 +125,8 @@ static int vr_ok;                        /* EXE de la edición esperada: parche 
 static int cap_on;
 static VrSceneOpts sopts;
 static void (*scene_tap)(const GpuDrawList *, const BridgeState *, const VrScene *, uint32_t);
+
+static MvVrListTap list_tap;             /* solo herramientas de prueba: ve cada lista y su escena recién ensamblada (hilo de emulación) */
 static uint32_t *pre;                    /* prefijo de eventos de VRAM por índice de op (compactación) */
 static size_t pre_cap;
 
@@ -348,6 +350,8 @@ static void build_one(const GpuDrawList *l, int si) {
     }
     double ms = (double)(mono_ns() - t0) * 1e-6;
     if (rc == 0 && scene_tap) scene_tap(hl, &bs, &sc, l->host_frame);
+
+    if (rc == 0 && list_tap) list_tap(l, hl, &sc, &o, &bs);
     if (rc == 0) {
         last_scene3d = r && !r->active && sc.stats.n_tris3d >= 12;
         last_cover = cover_n;
@@ -455,6 +459,8 @@ static void publish_state(void) {
 static void (*test_cb)(void *cpu, uint32_t frame);
 void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame)) { test_cb = cb; }
 void mv_vrhost_set_scene_tap(void (*cb)(const GpuDrawList *, const BridgeState *, const VrScene *, uint32_t)) { scene_tap = cb; }
+
+void mv_vrhost_set_list_tap(MvVrListTap cb) { list_tap = cb; }
 
 #ifdef MV_NOGEN
 /* Sin recorte en las overlays de zona (vr/camera, bitácora): algunas llevan su propia copia de la visibilidad de objetos y por pieza.
