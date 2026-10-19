@@ -27,6 +27,7 @@
 #include "vr_radar.h"
 #include "vr_radar_vrp.h"
 #include "vr_scene.h"
+#include "vr_smooth.h"
 #include "vr_view.h"
 #include "vrai.h"
 #include "vrgame.h"
@@ -103,6 +104,7 @@ typedef struct {
     VrBatch *rb;     size_t rb_cap;
     VrState *rst;    size_t rst_cap;
     VrRadarScene rs;
+    VrSmSample smp;                      /* muestra de la fluidez de la escena (vr_smooth.h): se alimenta al entregarla */
 } Slot;
 
 enum { S_FREE = 0, S_BUILD, S_QUEUED, S_HELD };
@@ -143,6 +145,68 @@ static uint64_t mono_ns(void) {
     return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 
+/* ------------------------------------------------------------------------------------------------ fluidez (vr_smooth.h) */
+static pthread_mutex_t SMX = PTHREAD_MUTEX_INITIALIZER;   /* protege SM (hilo de render: push al entregar, eval por fotograma) */
+static VrSmooth SM;
+static int sm_init;
+static double (*clock_fn)(void);
+static uint32_t exe_gen;                 /* cargas del ejecutable (cambia la época de las muestras) */
+static double turn_base;                 /* mv_vr_turn_total() - vrcam_turn_total() al reiniciar la cámara (vrcam_init pone el total a 0) */
+
+static double now_s(void) { return clock_fn ? clock_fn() : (double)mono_ns() * 1e-9; }
+void mv_vrhost_set_clock(double (*fn)(void)) { clock_fn = fn; }
+
+static void sm_ensure(void) {   /* con SMX */
+    if (sm_init) return;
+    VrSmoothCfg c;
+    vrsm_cfg_default(&c);
+    { const char *e = getenv("MV_SMOOTH"); if (e && e[0] == '0') c.enabled = 0; }
+    { const char *e = getenv("MV_SMOOTH_LEAD"); if (e) { float v = (float)atof(e); if (v >= 0.0f && v <= 0.1f) c.lead_s = v; } }
+    vrsm_init(&SM, &c);
+    sm_init = 1;
+}
+
+void mv_vrhost_set_smooth(int on) {
+    pthread_mutex_lock(&SMX);
+    sm_ensure();
+    SM.cfg.enabled = on != 0;
+    if (!on) vrsm_reset(&SM);
+    pthread_mutex_unlock(&SMX);
+}
+
+void mv_vrhost_smooth(VrSmCorr *out) {
+    if (!out) return;
+    pthread_mutex_lock(&SMX);
+    sm_ensure();
+    vrsm_eval(&SM, now_s(), mv_vr_turn_total(), out);
+    pthread_mutex_unlock(&SMX);
+}
+
+void mv_vrhost_smooth_stats(VrSmoothStats *s) {
+    if (!s) return;
+    pthread_mutex_lock(&SMX);
+    sm_ensure();
+    vrsm_stats(&SM, s);
+    pthread_mutex_unlock(&SMX);
+}
+
+/* Muestra de una escena recién ensamblada (hilo de emulación). valid = mundo en espacio de usuario con cámara VR en primera persona. */
+static void sm_sample(VrSmSample *smp, const VrScene *sc, const VrCamRecord *r) {
+    memset(smp, 0, sizeof *smp);
+    smp->t_wall = now_s();
+    if (!r || !r->active || !sc->user_space || !sc->has_3d || !sc->world_valid || sc->cine_active) return;
+    float K = sc->user_k * sc->scale;
+    if (!(K > 0.0f) || !isfinite(K)) return;
+    smp->valid = 1;
+    smp->game_s = (double)r->vbl / 50.0;
+    for (int i = 0; i < 3; i++) smp->B[i] = sc->origin_game[i];
+    memcpy(smp->R, sc->user_R, sizeof smp->R);   /* la reflexión de z de vr_scene se cancela: P = R * k*scale * (W - O) + c (ver vr_smooth.h) */
+    smp->K = K;
+    for (int i = 0; i < 3; i++) smp->c[i] = sc->user_p_ref[i] - sc->user_R[3 * i + 1] * sc->user_eye_h;
+    smp->turn_deg = r->turn_total_deg + turn_base;
+    smp->epoch = r->epoch + (exe_gen << 16);
+}
+
 static int grow(void **p, size_t *cap, size_t need, size_t esz) {
     if (need <= *cap) return 1;
     size_t n = *cap * 2;
@@ -168,8 +232,14 @@ int mv_host_scene(VrScene *out) {
     held = i;
     *out = slot[i].sc;
     hc_disp = slot[i].hcmap;
+
+    VrSmSample smp = slot[i].smp;
     stats.delivered++;
     pthread_mutex_unlock(&MX);
+    pthread_mutex_lock(&SMX);
+    sm_ensure();
+    vrsm_push(&SM, &smp, now_s());
+    pthread_mutex_unlock(&SMX);
     return 1;
 }
 
@@ -381,6 +451,7 @@ static void build_one(const GpuDrawList *l, int si) {
     memcpy(bs.eye_pos, save_pos, sizeof save_pos);
     memcpy(bs.eye_axes, save_axes, sizeof save_axes);
 
+    sm_sample(&slot[si].smp, &sc, r);   /* (r = registro de cámara de la lista; antes de fill_slot: sc.v/b son memoria interna de vr_scene) */
     int ok = rc == 0 && fill_slot(&slot[si], hl, &sc) == 0 && fill_radar(&slot[si], &rscene, hl->nops) == 0;
     memset(&slot[si].hcmap, 0, sizeof slot[si].hcmap);
     if (ok && hc_on && r && r->active && sc.user_space && sc.world_valid) {
@@ -648,6 +719,8 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     cfg.calibrate = 1;                            /* altura/escala del usuario al recentrar (vr_calib.h) */
     vrcam_init(&cfg);
     vrhead_init(NULL);
+    exe_gen++;
+    turn_base = mv_vr_turn_total() - vrcam_turn_total();
     pthread_mutex_lock(&MX); stats.cam_ok = vr_ok; pthread_mutex_unlock(&MX);
     if (vr_ok) vrai_on_exe_loaded();   /* IA de enemigos y cámaras: solo con la edición esperada; los parches se instalan en on_bound */
 }

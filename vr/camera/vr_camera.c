@@ -105,6 +105,7 @@ typedef struct {
     int zoom_capped;                      /* VBlanks que faltan para dar por terminado el recorte de zoom (el juego pidió más que el tope) */
     int zoom_cap;                         /* >0: tope de la distancia de pantalla que pide el juego (vista de la cabeza sin aumento) */
     float theta_play0, yaw_ref, extra;    /* grados */
+    double turn_total;                    /* suma de todos los giros del stick (no se envuelve ni se reinicia al recentrar) */
     float p_ref[3];
     VrCalib calib;                        /* altura/escala del último recentrado */
     float view_yaw, theta_body;           /* último frame VR */
@@ -269,7 +270,8 @@ const VrCalib *vrcam_calib(void) { return &S.calib; }
 void vrcam_set_user_eye_height(float m) { S.cfg.user_eye_m = isfinite(m) && m > 0 ? m : 0.0f; S.need_recenter = 1; }
 int vrcam_zoom_capped(void) { return S.zoom_capped > 0; }
 void vrcam_set_zoom_cap(int cap) { S.zoom_cap = cap > 0 ? (cap > 32767 ? 32767 : cap) : 0; }
-void vrcam_turn(float deg) { S.extra = wrap180(S.extra + deg); }
+void vrcam_turn(float deg) { S.extra = wrap180(S.extra + deg); if (isfinite(deg)) S.turn_total += (double)deg; }
+double vrcam_turn_total(void) { return S.turn_total; }
 int vrcam_active(void) { return S.latched; }
 float vrcam_view_yaw_deg(void) { return S.view_yaw; }
 int vrcam_pad_origin(void) {
@@ -383,6 +385,9 @@ void vrcam_commit(const uint8_t *ram, const VrCamPlan *p) {
     }
     r->screen = rd_s16(ram, VC_CHANNEL_MAIN + BCH_SCREEN);
     r->units_per_m = S.cfg.units_per_m * (S.cfg.calibrate && S.calib.scale > 0 ? S.calib.scale : 1.0f);
+    r->turn_total_deg = S.turn_total;
+    r->epoch = S.st.recenters;
+    r->vbl = S.vb;
     if (r->active) {
         r->yaw_deg = p->yaw_deg; r->pitch_deg = p->pitch_deg; r->theta_play_deg = p->theta_play_deg;
         memcpy(r->p_ref, p->p_ref, sizeof r->p_ref);

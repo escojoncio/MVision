@@ -1,0 +1,90 @@
+#pragma once
+/* vr_smooth: fluidez de la locomoción. El juego publica una escena nueva a su ritmo (25-50 por segundo) y el visor dibuja a 90-100 Hz con la ÚLTIMA escena:
+ * al andar el mundo avanzaba a saltos (judder) y al girar con el stick la vista llegaba con el retardo de toda la tubería. Este módulo (matemática pura, sin
+ * dependencias; hilo de render) calcula por fotograma de render una corrección RÍGIDA del mundo de la escena vigente (giro sobre el eje vertical de la cabeza
+ * de referencia + traslación) que lo lleva a donde estaría con el personaje y la vista del instante de presentación.
+ *
+ * Modelo (ver bitácora). Con la correspondencia mundo -> usuario de vr_scene (VrSceneOpts.user_map_*), un punto del mundo del juego W cae en la escena i en
+ *     P_i(W) = c + R_i * K * (W - O_i)        c = p_ref - (0, h_ojo, 0),  K = 1/unidades_por_metro,  O_i = origen de la escena (ojo del motor)
+ * y en el instante t de presentación debe caer en  P(W) = c + R(t) * K * (W - O(t)),  R(t) = R(delta) * R_i, delta = giro del stick pedido y aún no visto en la
+ * escena (en grados, + izquierda). Entonces  P = Q (P_i - c) + c - Q R_i K (O(t) - O_i),  Q = R(delta): giro de `delta` sobre la vertical que pasa por p_ref
+ * más una traslación. Se aplica SOLO a la geometría del mundo (el arma, el radar y las manos van en el espacio del usuario y no se tocan).
+ *  - Giro: delta = lead * (giro total pedido ahora - giro total que traía la cámara de la escena): inmediato, por fotograma, sin retardo de tubería.
+ *  - Traslación: la posición del cuerpo B (el origen O menos el adelanto del ojo, que depende de la mirada prevista) se extrapola con la velocidad medida entre las
+ *    dos últimas escenas (en tiempo de juego, sin la fluctuación del reloj de la emulación) hasta el instante de presentación; el error de predicción al llegar una
+ *    escena nueva se disipa con una exponencial (sin saltos y sin retardo en régimen). Cortes (teletransporte, cambio de época, hueco largo) reinician.
+ * Reloj: `t` es cualquier reloj monótono en segundos (el mismo para las marcas de las escenas y para vrsm_eval). */
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct VrSmSample {
+    int valid;           /* 1: escena de mundo en espacio de usuario con cámara VR (la corrección tiene sentido); 0: cualquier otra (menú, cine, vídeo) */
+    double t_wall;       /* instante (reloj monótono, s) en que el hilo de emulación ensambló la escena */
+    double game_s;       /* tiempo de juego de esa escena (VBlank * 0,02 s): monótono y sin fluctuación */
+    float B[3];          /* posición del cuerpo (unidades del juego): origen de la escena menos el adelanto del ojo */
+    float R[9];          /* VrScene.user_R (fila-mayor) */
+    float K;             /* user_k * scale = metros por unidad del juego de esa escena */
+    float c[3];          /* centro del giro: user_p_ref - (0, user_eye_h, 0) */
+    double turn_deg;     /* giro total del stick (grados, + izquierda) que ya traía la cámara de la escena, en la escala de vrsm_eval(turn_req) */
+    uint32_t epoch;      /* cambia con cada recentrado / recarga del ejecutable: sin continuidad entre épocas distintas */
+} VrSmSample;
+
+typedef struct VrSmoothCfg {
+    int enabled;         /* 0: corrección siempre identidad (comportamiento anterior) */
+    float lead_s;        /* adelanto del instante de presentación respecto a `t` de vrsm_eval (defecto 0,012: un fotograma de render) */
+    float blend_s;       /* constante de tiempo con la que se disipa el error de predicción al llegar una escena (defecto 0,045) */
+    float turn_lead;     /* 0..1: fracción del giro pendiente que se aplica ya (defecto 1: inmediato) */
+    float vel_new;       /* peso de la velocidad nueva en la suavizada (defecto 0,6) */
+    float pll_gain;      /* ganancia de fase del reloj de escenas (defecto 0,15) */
+    float cut_units;     /* salto del cuerpo entre dos escenas (unidades del juego, x-z) que se toma por corte, no por movimiento (defecto 2500) */
+    float max_gap_s;     /* hueco sin escenas tras el cual se reinicia (defecto 0,5) */
+    float max_turn_deg;  /* giro pendiente máximo creíble; mayor = reinicio (defecto 400) */
+} VrSmoothCfg;
+
+typedef struct VrSmoothStats {
+    uint32_t pushes, resets, evals, active_evals;
+    double sum_shift_m, max_shift_m;   /* módulo de la traslación aplicada (m) */
+    double max_delta_deg;              /* mayor giro pendiente aplicado */
+    double max_err_m;                  /* mayor error de predicción absorbido al llegar una escena (m) */
+    double sum_err_m;
+    double rho;                        /* segundos de juego por segundo real (la emulación va a tiempo real = 1) */
+    double period_s;                   /* periodo entre escenas (s reales) */
+} VrSmoothStats;
+
+typedef struct VrSmooth {
+    VrSmoothCfg cfg;
+    int have;
+    VrSmSample cur;
+    double ts;               /* instante suavizado (reloj de los `t`) de la escena vigente */
+    double rho, period;
+    float vel[3];            /* unidades del juego por segundo de juego */
+    float err[3];            /* error de predicción pendiente de disipar (unidades) */
+    double t_err;            /* instante de presentación en que nació err */
+    int have_prev_game;
+    double rho_g0, rho_w0;   /* ancla de la ventana de medida de rho (tiempo de juego y real) */
+    int rho_anchor;
+    VrSmoothStats st;
+} VrSmooth;
+
+typedef struct VrSmCorr {
+    int active;              /* 0: usar la identidad */
+    float m[16];             /* corrección 4x4 columna-mayor: P' = m * P (espacio del usuario) */
+    float delta_deg;         /* giro aplicado (+ izquierda) */
+    float shift_m[3];        /* desplazamiento del cuerpo respecto a la escena (m, espacio del usuario) */
+} VrSmCorr;
+
+void vrsm_cfg_default(VrSmoothCfg *c);
+void vrsm_init(VrSmooth *s, const VrSmoothCfg *c);   /* NULL = valores por defecto */
+void vrsm_reset(VrSmooth *s);                         /* olvida la escena vigente (cambio de modo: menú, cine...) */
+/* Llamar cuando el renderer toma una escena nueva. `t_now` = reloj actual. */
+void vrsm_push(VrSmooth *s, const VrSmSample *sm, double t_now);
+/* Corrección para el fotograma que se está codificando. `turn_req_deg` = giro total pedido por el usuario hasta ahora (misma escala que turn_deg). */
+void vrsm_eval(VrSmooth *s, double t_now, double turn_req_deg, VrSmCorr *out);
+void vrsm_stats(const VrSmooth *s, VrSmoothStats *out);
+
+#ifdef __cplusplus
+}
+#endif

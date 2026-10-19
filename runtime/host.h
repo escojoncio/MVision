@@ -84,6 +84,8 @@ void mv_vr_clear_head(void);
 /* Giro del espacio de juego del usuario (giro por pasos / suave del mando): grados, + = a la IZQUIERDA. Se acumula y se
  * aplica en el siguiente VBlank. Thread-safe. */
 void mv_vr_turn(float deg);
+/* Suma de todos los giros pedidos con mv_vr_turn desde el arranque (grados, + = izquierda; no se envuelve ni se borra al aplicarlos). Thread-safe. */
+double mv_vr_turn_total(void);
 /* Pide recentrar la cámara VR del juego (la posición y mirada actuales de la cabeza pasan a ser el origen). Thread-safe. */
 void mv_vr_recenter(void);
 /* Altura de ojos del usuario de pie (m) para la calibración de altura/escala de la cámara VR; 0 = estimar con la altura de la cabeza al recentrar.
