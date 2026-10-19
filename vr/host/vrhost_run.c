@@ -347,6 +347,17 @@ int main(int argc, char **argv) {
                         fprintf(stderr, "  [filtro] activo=%d tiras=%d polis=%d cubiertas=%d n_scan=%d marco=%d (polígonos de marco %u) proj_h=%.1f centro=(%.1f,%.1f) cover_abr=%d rgb=(%.2f,%.2f,%.2f)\n",
                                 ff->active, ff->n_strips, ff->n_polys, ff->n_covers, ff->n_scan, ff->frame_on, sc.stats.n_filter_frame, ff->proj_h, ff->cx_col, ff->cy_row, ff->cover_abr,
                                 ff->cover_rgb[0], ff->cover_rgb[1], ff->cover_rgb[2]);
+                        if (ff->frame_on && ff->frame) {   /* caja de las celdas abiertas (resta < 255) de la máscara y su perfil por fila */
+                            int x0 = 999, x1 = -1, y0 = 999, y1 = -1;
+                            for (int y = 0; y < ff->frame_h; y++) for (int x = 0; x < ff->frame_w; x++)
+                                if (ff->frame[y * ff->frame_w + x] < 255) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+                            fprintf(stderr, "  [marco] %dx%d celdas abiertas x %d..%d y %d..%d (celda = 2 px de pantalla del juego)\n", ff->frame_w, ff->frame_h, x0, x1, y0, y1);
+                            for (int y = 0; y < ff->frame_h; y += 8) {
+                                int a = -1, b = -1;
+                                for (int x = 0; x < ff->frame_w; x++) if (ff->frame[y * ff->frame_w + x] < 255) { if (a < 0) a = x; b = x; }
+                                fprintf(stderr, "    fila %3d: %d..%d\n", y, a, b);
+                            }
+                        }
                     }
                     if (getenv("HUD_VERTS")) {   /* vértices de los batches kind 2 */
                         for (uint32_t bi = 0; bi < sc.nb; bi++) {

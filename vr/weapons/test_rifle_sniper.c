@@ -321,8 +321,9 @@ static void test_scope(const char *dir) {
     CHECK(s->aux.active && s->aux.target_part == SNIPER_PT_LENS && (s->aux.overlay & WO_RETICLE));
     dump_scope(dir, "scope_6x_rest", s);
     float fov6 = s->aux.fov_y;
-    printf("sniper: mira ACTIVA a %.0f mm; 6x -> fov %.2f grados\n", 50.0, fov6 * 57.3f);
-    CHECK(fabsf(fov6 - 2 * atanf(tanf(0.5236f) / 6)) < 1e-3f);
+    printf("sniper: mira ACTIVA a %.0f mm; %.3fx -> fov %.2f grados\n", 50.0, sniper_zoom(s), fov6 * 57.3f);
+    CHECK(sniper_zoom(s) == SNIPER_ZOOM_GAME);                                   /* el aumento del original es el de por defecto */
+    CHECK(fabsf(fov6 - 2 * atanf(128.0f / 3000.0f)) < 1e-5f);                    /* 3000/320 sobre el lienzo de 256 px */
     /* cámara en el objetivo, delante del ojo */
     CHECK(s->aux.camera.p.z < ep.p.z);
     /* histéresis: 12 cm sigue activa, 20 cm se apaga */
@@ -331,7 +332,7 @@ static void test_scope(const char *dir) {
     /* zoom */
     in.head.p.z = ep.p.z + 0.05f; step(s, &in, WR_MANUAL, 10);
     in.buttons[0] = WB_A; step(s, &in, WR_MANUAL, 1); in.buttons[0] = 0;
-    CHECK(sniper_zoom(s) == 10.0f);
+    CHECK(fabsf(sniper_zoom(s) - SNIPER_ZOOM_GAME * 0.5f) < 1e-4f);
     step(s, &in, WR_MANUAL, 40); dump_scope(dir, "scope_10x_sway", s);
     /* balanceo: amplitud en 6 s con 1 mano, 2 manos y tranquilizante */
     float amp[4];

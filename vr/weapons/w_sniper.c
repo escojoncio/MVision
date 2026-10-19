@@ -42,7 +42,8 @@ static const GunCfg sniper_cfg = {
     .floor_drop = 1.65f, .can_select = 0, .has_safety = 1, .start_semi = 1,
 };
 
-static const float zoom_levels[3] = { 4.0f, 6.0f, 10.0f };
+/* El original tiene un único aumento: distancia de pantalla 3000 frente a 320 (9,375x). Los otros dos niveles (A) son una comodidad VR. */
+static const float zoom_levels[3] = { SNIPER_ZOOM_GAME, SNIPER_ZOOM_GAME * 0.5f, SNIPER_ZOOM_GAME * 1.5f };
 
 typedef struct {
     GunState g;
@@ -58,7 +59,7 @@ typedef struct {
 static void sniper_init(WeaponState *s) {
     SniperState *n = (SniperState *)s;
     gun_init(&n->g, &w_sniper, &sniper_cfg);   /* limpia el estado entero (incluida la extensión) */
-    n->zoom_i = 1; n->stock = n->stock_goal = 0.5f; n->sr = 0xBEEF1234u;
+    n->zoom_i = 0; n->stock = n->stock_goal = 0.5f; n->sr = 0xBEEF1234u;
 }
 
 void sniper_set_steady(WeaponState *s, float v) {
@@ -100,8 +101,10 @@ static void sniper_update(WeaponState *s, const WInput *in, WReloadMode rm, cons
     float amp_t = sup * (1.0f - 0.95f * n->steady);
     n->sw_t += dt;
     const float tp = 6.2831853f;
-    float pb = amp_b * 0.0055f * (sinf(tp * 0.21f * n->sw_t) + 0.35f * sinf(tp * 0.53f * n->sw_t + 1.3f));
-    float yb = amp_b * 0.0040f * (sinf(tp * 0.16f * n->sw_t + 0.7f) + 0.30f * sinf(tp * 0.41f * n->sw_t));
+    /* Amplitudes y frecuencias medidas en el original (animación de apuntar tumbado de la cámara, 4096 = vuelta): guiñada 13 unidades pico a
+     * pico (~1,1 grados) con picos espectrales en 0,39 y 0,58 Hz; cabeceo 8 unidades (~0,7 grados) en 0,19 y 0,39 Hz. */
+    float pb = amp_b * SNIPER_SWAY_PITCH * (sinf(tp * 0.19f * n->sw_t) + 0.35f * sinf(tp * 0.39f * n->sw_t + 1.3f));
+    float yb = amp_b * SNIPER_SWAY_YAW * (sinf(tp * 0.39f * n->sw_t + 0.7f) + 0.30f * sinf(tp * 0.58f * n->sw_t));
     float k = dt * 28.0f; if (k > 1) k = 1;
     n->tr_x += (wcore_rand(&n->sr) - n->tr_x) * k;
     n->tr_y += (wcore_rand(&n->sr) - n->tr_y) * k;
@@ -122,7 +125,8 @@ static void sniper_update(WeaponState *s, const WInput *in, WReloadMode rm, cons
     float z = zoom_levels[n->zoom_i];
     s->aux.active = n->scoped;
     s->aux.camera = cp;
-    s->aux.fov_y = 2.0f * atanf(tanf(SNIPER_BASE_FOV * 0.5f) / z);
+    /* la textura cuadrada cubre el lienzo del juego en vertical (256 px): campo = 2 atan(128 / (320 z)) (vr_scope.h) */
+    s->aux.fov_y = 2.0f * atanf(128.0f / (320.0f * z));
     s->aux.target_part = SNIPER_PT_LENS;
     s->aux.width = s->aux.height = SNIPER_VIEW_SIZE;
     s->aux.use_game_camera = 0;
