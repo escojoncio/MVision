@@ -498,11 +498,13 @@ func fluidezScenario(_ caso: String, layered: Bool, color: [MTLTexture], depth: 
     }
     var k = 0
     var meas: [Double] = [], ideal: [Double] = []
+    var lastOx = 0.0, lastTurn = 0.0
     for i in 0..<frames {
         let t = Double(i) / 100.0
         while t >= Double(k) / sceneHz + 0.002 {
             let tg = Double(k) / sceneHz
-            bench_publish_motion(tg, tg, walkV * tg / K, 0, turnReq(tg - pipelineLag))
+            lastOx = walkV * tg / K; lastTurn = turnReq(tg - pipelineLag)
+            bench_publish_motion(tg, tg, lastOx, 0, lastTurn)
             k += 1
         }
         bench_smooth_set_time(t, turnReq(t))
@@ -523,10 +525,28 @@ func fluidezScenario(_ caso: String, layered: Bool, color: [MTLTexture], depth: 
         } }
         guard sw > 2000 else { check(caso, "marcador visible", false, "fotograma \(i): el cubo rojo no se ve (peso \(sw))"); return nil }
         meas.append(sx / sw)
+        // Referencia ideal: la MISMA escena dibujada por el mismo camino pero con el mundo exacto del instante t + lead (sin suavizador); así el
+        // centroide del cubo (que no es la proyección de su centro) se compara con su propio valor ideal.
         let te = t + lead
-        let pw = rotY(turnReq(t), marker - SIMD3<Double>(walkV * te, 0, 0))
-        guard let pp = projF(pw) else { return nil }
-        ideal.append(pp.0)
+        bench_publish_geom(walkV * te / K, 0, turnReq(t))
+        enc.smoothMotion = false
+        guard let cb2 = queue.makeCommandBuffer() else { return nil }
+        let ok2 = enc.encode(commandBuffer: cb2, gs: gs, originFromDevice: head, recenterInverse: matrix_identity_float4x4, dt: 0.01,
+                             eyes: eyes, depthRange: depthRange, colorTextures: color, depthTextures: depth, systemProjections: nil, debugAxes: [])
+        enc.smoothMotion = smooth
+        let buf2 = ok2 ? blitEye(cb2, color, layered: layered, eye: 0) : nil
+        cb2.commit(); cb2.waitUntilCompleted()
+        guard cb2.status == .completed, let b2 = buf2 else { check(caso, "render ideal", false, "estado \(cb2.status.rawValue)"); return nil }
+        let px2 = b2.contents().assumingMemoryBound(to: UInt8.self)
+        var sw2 = 0.0, sx2 = 0.0
+        for y in 0..<EH { for x in 0..<EW {
+            let o = (y * EW + x) * 4
+            let w = max(0.0, Double(px2[o + 2]) - (Double(px2[o + 1]) + Double(px2[o])) * 0.5)
+            if w > 8 { sw2 += w; sx2 += w * Double(x) }
+        } }
+        guard sw2 > 2000 else { check(caso, "marcador ideal visible", false, "fotograma \(i)"); return nil }
+        ideal.append(sx2 / sw2)
+        bench_publish_geom(lastOx, 0, lastTurn)     // deja la escena vigente tal como la publicó el juego
     }
     var steps: [Double] = []
     for i in 1..<meas.count { steps.append(abs(meas[i] - meas[i - 1])) }
