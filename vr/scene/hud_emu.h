@@ -22,3 +22,6 @@ void hud_emu_to_rgb(const HudImg *im, uint8_t *rgb);
  * espacio gamma); cy_img/f_eye = fila del punto principal y focal vertical del ojo en píxeles (de la proyección: h/2*(1+P[2][1]) y h/2*P[1][1]); f = VrFilter de la escena.
  * Muestreo bilineal con clamp, igual que el sampler del shader. Las filas sin tira (rowcov=0) no se desplazan; el tinte y el recubrimiento se aplican a toda la vista. */
 void hud_emu_post(const float *src, float *dst, int w, int h, float cy_img, float f_eye, const VrFilter *f);
+/* Como hud_emu_post pero con el punto principal y la focal HORIZONTALES del ojo (cx_img, fx_eye, en píxeles) y con la clase 3b: varios recubrimientos en orden,
+ * líneas de exploración y máscara de visión (f->frame). Replica vr_fs_post de vr_scene.metal; hud_emu_post la llama con cx_img = w/2 y fx_eye = f_eye. */
+void hud_emu_post2(const float *src, float *dst, int w, int h, float cx_img, float cy_img, float fx_eye, float f_eye, const VrFilter *f);

@@ -35,6 +35,7 @@
 #include <string.h>
 #include "cpu.h"
 #include "hlebind.h"
+#include "rtpatch.h"
 #include "disc_img.h"
 #include "sys.h"
 
@@ -256,6 +257,7 @@ static int is_fixed_decl(const char *name) {
 }
 int hle_bind_fixed(const char *name, uint32_t addr) {
     if ((addr & 3) || (addr & 0x1FFFFFFFu) < 0x10000u || (addr & 0x1FFFFFFFu) >= PSX_RAM_SIZE) return -1;
+    if (rt_patch_is(addr)) return -1;     /* ya hay una sustitución en ejecución (rtpatch.c): el intérprete la preferiría y la HLE quedaría muda */
     for (unsigned t = 0; t < hle_table_count; t++) {
         if (strcmp(hle_table[t].name, name)) continue;
         unsigned before = nbound;

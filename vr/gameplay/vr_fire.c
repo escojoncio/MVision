@@ -110,12 +110,13 @@ void vrfire_read_game(const uint8_t *ram, const BridgeState *bs, VrFireGame *g) 
 }
 
 /* ================================================== pulsación ================================================== */
-typedef struct { WPose pose; VrFireMap map; int age; } Req;
+typedef struct { WPose pose; VrFireMap map; int age; int life; } Req;
 enum { P_IDLE, P_HOLD, P_REL };
 static struct {
     VrFireCfg cfg;
     Req q[NQ]; int nq;
     int infl[NQ], ninfl;                 /* liberaciones que aún no han producido proyectil (edad) */
+    int infl_life;                       /* vida de esas liberaciones (INFL_LIFE; más si hay una petición de vida larga en curso) */
     int phase, tphase;
     int disarm_t;                        /* VBlanks restantes en que un proyectil sin petición se suprime */
     int auto_tail;                       /* VBlanks tras soltar el gatillo en que aún salen balas del juego con la pose viva */
@@ -124,12 +125,14 @@ static struct {
     VrFireStats st;
     int flash_age;                       /* VBlanks desde la última bala sustituida (el resplandor solo la acompaña si es reciente) */
     float tpos[3], tvel[3]; VrFireMap tmap; int tok, tok_age;
+    float tvel_m[3], ttick_s, tupm;      /* velocidad de la mano (m/s, ejes del motor), tick del motor y unidades por metro: extrapolación hasta la creación */
 } S;
 
 #define INFL_LIFE 14
 #define AUTO_TAIL 6
 #define DISARM_WINDOW 60
 #define FLASH_LIFE 3             /* el resplandor se pide en el mismo tick que la bala; pasado esto es de otro (p. ej. un enemigo) */
+#define VRFIRE_THROW_G 9.81f      /* gravedad (m/s^2) de la mano real durante el retardo del lanzamiento */
 #define THROW_LIFE 90            /* datos de lanzamiento no consumidos caducan (la granada sale ~16 VBlanks tras soltar) */
 
 void vrfire_cfg_default(VrFireCfg *c) {
@@ -139,6 +142,7 @@ void vrfire_cfg_default(VrFireCfg *c) {
 }
 void vrfire_init(const VrFireCfg *c) {
     memset(&S, 0, sizeof S);
+    S.infl_life = INFL_LIFE;
     if (c) S.cfg = *c; else vrfire_cfg_default(&S.cfg);
     if (S.cfg.press_vbl < 2) S.cfg.press_vbl = 2;
     if (S.cfg.release_vbl < 2) S.cfg.release_vbl = 2;
@@ -155,7 +159,7 @@ const VrFireMat *vrfire_last_subst(void) { return &S.last; }
 static void pop_req(void) { if (S.nq > 0) { memmove(&S.q[0], &S.q[1], sizeof(Req) * (size_t)(S.nq - 1)); S.nq--; } }
 static void pop_infl(void) { if (S.ninfl > 0) { memmove(&S.infl[0], &S.infl[1], sizeof(int) * (size_t)(S.ninfl - 1)); S.ninfl--; } }
 
-static void reset_machine(void) { S.nq = 0; S.ninfl = 0; S.phase = P_IDLE; S.tphase = 0; S.auto_live = 0; }
+static void reset_machine(void) { S.nq = 0; S.ninfl = 0; S.infl_life = INFL_LIFE; S.phase = P_IDLE; S.tphase = 0; S.auto_live = 0; }
 
 void vrfire_frame(const VrFireGame *g, const VrFireIn *in, VrFireOut *out) {
     out->square = 0; out->engaged = 0;
@@ -169,25 +173,28 @@ void vrfire_frame(const VrFireGame *g, const VrFireIn *in, VrFireOut *out) {
     }
     S.live = in->muzzle; S.live_map = *in->map; S.live_ok = 1;
     for (int i = 0; i < S.nq;) {
-        if (++S.q[i].age > S.cfg.req_window) { memmove(&S.q[i], &S.q[i + 1], sizeof(Req) * (size_t)(S.nq - i - 1)); S.nq--; S.st.expired++; }
+        if (++S.q[i].age > (S.q[i].life > S.cfg.req_window ? S.q[i].life : S.cfg.req_window)) { memmove(&S.q[i], &S.q[i + 1], sizeof(Req) * (size_t)(S.nq - i - 1)); S.nq--; S.st.expired++; }
         else i++;
     }
     for (int i = 0; i < S.ninfl;) {
-        if (++S.infl[i] > INFL_LIFE) { memmove(&S.infl[i], &S.infl[i + 1], sizeof(int) * (size_t)(S.ninfl - i - 1)); S.ninfl--; }
+        if (++S.infl[i] > S.infl_life) { memmove(&S.infl[i], &S.infl[i + 1], sizeof(int) * (size_t)(S.ninfl - i - 1)); S.ninfl--; }
         else i++;
     }
+    if (S.nq == 0 && S.ninfl == 0) S.infl_life = INFL_LIFE;
     int autoh = g->hold_fires && in->trigger_held;
     S.auto_live = autoh;
     if (autoh) S.auto_tail = AUTO_TAIL;
     if (in->fire && !autoh) {
         if (S.nq == NQ) { pop_req(); S.st.expired++; }
-        S.q[S.nq].pose = in->fire_pose; S.q[S.nq].map = *in->map; S.q[S.nq].age = 0; S.nq++;
+        int life = in->fire_life > 0 ? (in->fire_life > 600 ? 600 : in->fire_life) : 0;
+        S.q[S.nq].pose = in->fire_pose; S.q[S.nq].map = *in->map; S.q[S.nq].age = 0; S.q[S.nq].life = life; S.nq++;
+        if (life > S.infl_life) S.infl_life = life;
         S.st.requests++;
     }
     int unserved = S.nq - S.ninfl;       /* peticiones sin liberación en curso */
     int want;
     if (g->hold_fires) want = autoh || S.nq > 0;
-    else want = unserved > 0 || (S.cfg.arm_mode == VRFIRE_ARM_ON_RAISE && in->ready);
+    else want = unserved > 0 || ((S.cfg.arm_mode == VRFIRE_ARM_ON_RAISE || in->raise) && in->ready);
     S.tphase++;
     switch (S.phase) {
     case P_IDLE:
@@ -259,7 +266,8 @@ int vrfire_set_throw(const float pos_user[3], const float vel_user_mps[3], float
     float w[3], v[3];
     vrfire_pos_to_world(&S.live_map, pos_user, w);
     vrfire_dir_to_world(&S.live_map, vel_user_mps, v);
-    for (int i = 0; i < 3; i++) { S.tpos[i] = w[i]; S.tvel[i] = v[i] * S.live_map.units_per_m * tick_s; }
+    for (int i = 0; i < 3; i++) { S.tpos[i] = w[i]; S.tvel[i] = v[i] * S.live_map.units_per_m * tick_s; S.tvel_m[i] = v[i]; }
+    S.ttick_s = tick_s; S.tupm = S.live_map.units_per_m;
     S.tok = finite3(S.tpos) && finite3(S.tvel); S.tok_age = 0;
     return S.tok;
 }
@@ -267,8 +275,16 @@ int vrfire_take_throw(int16_t pos[3], int16_t vel[3]) {
     if (S.nq > 0) { pop_req(); pop_infl(); }      /* el lanzamiento atiende a la petición pendiente (como cualquier proyectil) */
     if (!S.tok) { S.st.passed++; return 0; }
     S.st.subst++;
+    /* El juego crea la granada unos 16 VBlanks después de soltar (animación de lanzar): se adelanta la posición y se descuenta la gravedad
+     * de ese retardo para que continúe la trayectoria que llevaba la mano (VRFIRE_THROW_G m/s^2 sobre el eje Y del motor). */
+    float dt_s = (float)S.tok_age * (S.ttick_s * 0.5f);
+    if (dt_s > 0.6f) dt_s = 0.6f;
     for (int i = 0; i < 3; i++) {
         float p = S.tpos[i], v = S.tvel[i];
+        if (dt_s > 0 && S.tupm > 0) {
+            p += S.tvel_m[i] * S.tupm * dt_s;
+            if (i == 1) { p -= 0.5f * VRFIRE_THROW_G * S.tupm * dt_s * dt_s; v -= VRFIRE_THROW_G * S.tupm * dt_s * S.ttick_s; }
+        }
         pos[i] = (int16_t)(p > 32767 ? 32767 : p < -32768 ? -32768 : lrintf(p));
         vel[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : lrintf(v));
     }

@@ -13,11 +13,15 @@
  *   vrfire_charge     (matriz*, pos*, adherida, bando, seg)  carga adhesiva
  *   vrfire_grenade    (pos*, velocidad*, mecha, tipo, modelo) granada de mano
  *   vrfire_hide       (canal, índice)                        etapa de recorte por objeto; después oculta el arma del juego
+ *   vrfire_aalock     (actor)                                paso del buscador de blancos del lanzador antiaéreo (vr_aa.h)
+ *   vrfire_aaview     ()                                     carga la matriz del canal 3D principal en la GTE (lo llama el buscador)
  */
 #include <stdint.h>
+#include <string.h>
 #include "cpu.h"
 #include "sys.h"
 #include "vr_fire.h"
+#include "vr_aa.h"
 
 #define RAM_MASK 0x1FFFFFu
 #define A0 c->r[4]
@@ -30,7 +34,8 @@
 /* Zona propia (kernel, RAM baja libre): 2 matrices de 32 B + 2 vectores de 8 B. Si el runtime se reinicia, llamar a
  * hle_vrfire_reset(). */
 static uint32_t zbuf;
-void hle_vrfire_reset(void) { zbuf = 0; }
+static int aa_pending, aa_swapped;       /* buscador antiaéreo (más abajo) */
+void hle_vrfire_reset(void) { zbuf = 0; aa_pending = 0; aa_swapped = 0; }
 #define Z_BULLET 0
 #define Z_FLASH  32
 #define Z_POS    64
@@ -105,4 +110,54 @@ void hle_vrfire_grenade(Cpu *c) {
 void hle_vrfire_hide(Cpu *c) {
     rt_orig(c, "vrfire_hide");
     if (vrfire_hide_enabled()) vrfire_hide_weapon(psx_ram);
+}
+
+/* ---- buscador de blancos del lanzador antiaéreo (vr_aa.h) ----
+ * El actor del buscador llama UNA vez a aaview (0x800711ac: H de la GTE, rotación y traslación del canal 3D principal) y con esa
+ * GTE proyecta los blancos; el canal solo lo lee aaview (comprobado en el código del paso). Por eso la sustitución se hace
+ * DENTRO de aaview y solo mientras dura esa llamada: se escribe en el canal la matriz del visor VR y la H del juego, se llama al
+ * original (la GTE queda cargada con la vista del visor) y se restauran al instante las dos zonas de memoria del canal. Así el
+ * canal nunca queda sustituido fuera de esa llamada (ni si el paso cambia de hilo o cede). Al terminar el paso, SI aaview corrió
+ * con el visor, se recarga la GTE con la vista del juego (el estado que dejaría el original: rotación, traslación y H); si el
+ * original no llegó a llamar a aaview (se destruye a sí mismo), la GTE no se toca. */
+#define CH_MAIN   0x800B2B7Cu
+#define CH_VIEW   (CH_MAIN + 0x10u)     /* MATRIX mundo->vista (32 B) */
+#define CH_SCREEN (CH_MAIN + 0x50u)     /* s16 distancia de pantalla */
+
+/* aa_pending: dentro de un paso con visor, el siguiente aaview usa aa_view. aa_swapped: aaview corrió con el visor en este paso. */
+static VrFireMat aa_view;
+
+void hle_vrfire_aaview(Cpu *c) {
+    if (!aa_pending) { rt_orig(c, "vrfire_aaview"); return; }
+    aa_pending = 0;                      /* una sola vez por paso */
+    uint8_t save[32];
+    int16_t focal = 0;
+    memcpy(save, psx_ram + (CH_VIEW & RAM_MASK), sizeof save);
+    memcpy(&focal, psx_ram + (CH_SCREEN & RAM_MASK), 2);
+    int16_t h16 = (int16_t)vraa_view_focal(focal);
+    vrfire_store_mat(psx_ram, CH_VIEW, &aa_view);
+    memcpy(psx_ram + (CH_SCREEN & RAM_MASK), &h16, 2);
+    vraa_note_h((float)h16);
+    rt_orig(c, "vrfire_aaview");
+    memcpy(psx_ram + (CH_VIEW & RAM_MASK), save, sizeof save);
+    memcpy(psx_ram + (CH_SCREEN & RAM_MASK), &focal, 2);
+    aa_swapped = 1;
+}
+
+void hle_vrfire_aalock(Cpu *c) {
+    uint32_t actor = A0;
+    aa_swapped = 0;
+    aa_pending = vraa_take_view(&aa_view);
+    rt_orig(c, "vrfire_aalock");
+    aa_pending = 0;
+    int sw = aa_swapped;
+    aa_swapped = 0;
+    if (sw) {
+        uint32_t keep[6] = {c->r[2], c->r[3], c->r[4], c->r[5], c->r[6], c->r[7]};
+        uint32_t ra = c->r[31];
+        rt_orig(c, "vrfire_aaview");     /* GTE otra vez con la vista del juego (aa_pending ya es 0) */
+        for (int i = 0; i < 6; i++) c->r[2 + i] = keep[i];
+        c->r[31] = ra;
+    }
+    vraa_after_step(psx_ram, actor, sw);
 }

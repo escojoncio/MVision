@@ -1,9 +1,6 @@
 /* Unión de vr_perception con el runtime (parches de función por dirección). Requiere cpu.h del runtime.
- * Contrato esperado del mecanismo de parches (vr/camera):
- *   int  rt_patch(uint32_t addr, FuncPtr fn);   registra `fn` en lugar de la función que empieza en `addr`, también
- *                                               para llamadas directas dentro de la overlay; 0 = ok
- *   void rt_unpatch(uint32_t addr);
- *   void rt_call_orig(Cpu *c, uint32_t addr);   ejecuta el código original de `addr` (sin parche) como una llamada
+ * Usa el mecanismo de sustitución de función del runtime (runtime/rtpatch.h): rt_patch_fn con guarda de hash (el bloque de
+ * cada función se hashea al localizarla; si otra overlay se carga encima el parche queda inerte), rt_unpatch y rt_call_orig.
  * `fn` recibe el estado de CPU de la llamada (a0 = r[4]) y vuelve como lo haría la función. */
 #pragma once
 #include "vr_perception.h"

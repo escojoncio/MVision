@@ -1,15 +1,16 @@
 #include "vr_perception_rt.h"
 #include "vr_cameras.h"
 #include "cpu.h"
+#include <string.h>
 #include "sys.h"
 
-extern int  rt_patch(uint32_t addr, FuncPtr fn);
-extern void rt_unpatch(uint32_t addr);
-extern void rt_call_orig(Cpu *c, uint32_t addr);
+#include "rtpatch.h"
+#include "vr_ai_scan.h"
 
 static VrpCtx G;
 static Cpu *cur;                  /* CPU de la llamada que se está sustituyendo */
 static uint32_t patched[2];
+static RtPatchGuard hguard[2];     /* hash del bloque de cada función al localizarla: si otra carga lo pisa el parche queda inerte */
 static int inited;
 static int use_gather = 1;
 
@@ -60,11 +61,12 @@ static void unpatch_all(void) {
 static void sync_patches(void) {
     if (!inited || !G.sites.found || !G.cfg.enabled) { unpatch_all(); return; }
     if (!patched[0]) {
-        if (rt_patch(G.sites.vision, hook_vision)) { G.sites.found = 0; return; }
+        /* Sin guarda de hash no se parchea (un parche sin validar podría quedar vivo sobre otra overlay). */
+        if (!hguard[0].nwords || rt_patch_fn(G.sites.vision, hook_vision, &hguard[0])) { G.sites.found = 0; return; }
         patched[0] = G.sites.vision;
     }
     int g = use_gather && G.sites.gather;
-    if (g && !patched[1]) { if (rt_patch(G.sites.gather, hook_gather) == 0) patched[1] = G.sites.gather; }
+    if (g && !patched[1]) { if (hguard[1].nwords && rt_patch_fn(G.sites.gather, hook_gather, &hguard[1]) == 0) patched[1] = G.sites.gather; }
     else if (!g && patched[1]) { rt_unpatch(patched[1]); patched[1] = 0; }
 }
 
@@ -94,6 +96,14 @@ int vrp_rt_overlay(uint32_t lo, uint32_t hi) {
     int nc = vrc_locate(psx_ram, lo, hi, cs, 8);
     if (vrc_is_sensor_func(cs, nc, s.vision) || (s.gather && vrc_is_sensor_func(cs, nc, s.gather))) return 0;
     G.sites = s;
+    memset(hguard, 0, sizeof hguard);
+    for (int i = 0; i < 2; i++) {
+        uint32_t a = i ? s.gather : s.vision, fs, fe;
+        if (a && vai_func_bounds(psx_ram, a, lo, hi, &fs, &fe) && fs == a && fe - fs <= 4u * 4096u) {
+            hguard[i].nwords = (fe - fs) / 4;
+            hguard[i].hash = rt_code_hash(fs, hguard[i].nwords);
+        }
+    }
     sync_patches();
     return G.sites.found;
 }

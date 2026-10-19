@@ -1,4 +1,5 @@
-/* Pruebas del lanzamisiles antiaéreo: adquisición, bloqueo, disparo, pérdida de blanco y recarga.
+/* Pruebas del lanzamisiles antiaéreo: reflejo del buscador del juego (estado, progreso, háptico), disparo y recarga.
+ * El fijado de blanco lo hace el juego (vr/gameplay/vr_aa.h): aquí solo se comprueba que el arma NO inventa un buscador.
  * Compilar: cc -I. -Wall -O1 test_aa.c w_aa.c wcore.c -lm -o test_aa (sin mallas compiladas) */
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,7 +13,7 @@ static int fails = 0, checks = 0;
 
 /* ---- puente simulado ---- */
 static struct {
-    int reserve, fired, takes, steers, dry, tone, locked, mag_in, mag_out, haptics;
+    int reserve, fired, takes, steers, dry, tone, locked, mag_in, mag_out, haptics, targets_calls;
     int ntg; WVec3 tg[4];
     int proj_active; WPose proj;
     float last_yaw, last_pit;
@@ -27,7 +28,7 @@ static void b_snd(int id, int ev) {
     if (ev == WS_DRY) G.dry++; else if (ev == WS_LOCK_TONE) G.tone++; else if (ev == WS_LOCKED) G.locked++;
     else if (ev == WS_MAG_IN) G.mag_in++; else if (ev == WS_MAG_OUT) G.mag_out++;
 }
-static int b_targets(WVec3 *o, int max) { int n = G.ntg < max ? G.ntg : max; for (int i = 0; i < n; i++) o[i] = G.tg[i]; return n; }
+static int b_targets(WVec3 *o, int max) { G.targets_calls++; int n = G.ntg < max ? G.ntg : max; for (int i = 0; i < n; i++) o[i] = G.tg[i]; return n; }
 static int b_proj(int id, WPose *o) { (void)id; if (G.proj_active) *o = G.proj; return G.proj_active; }
 static void b_steer(int id, float y, float p) { (void)id; G.steers++; G.last_yaw = y; G.last_pit = p; }
 static WGameBridge BR = { b_reserve, b_take, b_fire, b_hap, b_snd, b_targets, b_proj, b_steer, NULL };
@@ -49,58 +50,65 @@ static void step(WReloadMode rm, float secs) {
     int n = (int)(secs * 90 + 0.5f);
     for (int i = 0; i < n; i++) w_aa.update(S, &in, rm, &BR);
 }
-/* Blanco a `range` m en el eje del tubo con desvío angular (rad) horizontal. */
-static void put_target(float range, float off) {
-    WPose e = wcore_point_world(S, &in, WP_EYE);
-    WVec3 d = wv(sinf(off), 0, -cosf(off));
-    G.ntg = 1; G.tg[0] = wv_add(e.p, wv_scale(wquat_rotate(e.q, d), range));
-}
+/* Estado del buscador del juego que el anfitrión pasaría: visor levantado, con/sin blanco, fotogramas con el mismo blanco. */
+static void game_lock(int sight, int target, int frames) { AAGameLock g = {sight, target, frames}; aa_feed_game_lock(S, &g); }
 static WPose magwell(void) { return wcore_point_world(S, &in, WP_MAGWELL); }
 
 int main(void) {
-    /* ---------- 1. arranque y enfriado ---------- */
+    /* ---------- 1. arranque ---------- */
     reset(3);
     step(WR_MANUAL, 0.05f);
     CHECK(S->phase == AA_P_READY && S->mag_rounds == 1 && G.reserve == 2 && G.takes == 1, "carga inicial fase=%d res=%d", S->phase, G.reserve);
-    CHECK(aa_lock_state(S) == AA_LK_COOL, "debe enfriar");
-    put_target(200, 0.01f);
-    step(WR_MANUAL, 0.5f);
-    CHECK(aa_lock_state(S) == AA_LK_COOL && G.tone == 0, "no adquiere enfriando");
-    step(WR_MANUAL, 0.6f);
-    CHECK(aa_lock_state(S) != AA_LK_COOL, "enfriado terminado");
-    CHECK(S->aux.active && !S->aux.use_game_camera && S->aux.target_part == 8 && S->aux.overlay == (WO_RETICLE | WO_LOCK_BOX | WO_TELEMETRY),
-          "aux mal configurada");
+    CHECK(aa_lock_state(S) == AA_LK_STBY, "tubo listo, visor sin levantar (estado %d)", aa_lock_state(S));
+    CHECK(S->aux.active == 0, "sin vista auxiliar: la mira es la del juego");
+    CHECK(G.targets_calls == 0 && G.tone == 0 && G.locked == 0, "el arma no consulta blancos ni emite tonos de fijación (los hace el juego)");
+    { WPose e = aa_sight_pose(S, &in); WPose e2 = wcore_point_world(S, &in, WP_EYE);
+      CHECK(fabsf(e.p.x - e2.p.x) < 1e-6f && fabsf(e.p.y - e2.p.y) < 1e-6f && fabsf(e.p.z - e2.p.z) < 1e-6f && fabsf(e.q.w - e2.q.w) < 1e-6f, "aa_sight_pose = WP_EYE en mundo"); }
 
-    /* ---------- 2. adquisición -> bloqueo ---------- */
-    reset(3); step(WR_MANUAL, 1.2f);
-    put_target(200, 0.02f);                      /* 1,1 grados: dentro del cono (4) */
-    step(WR_MANUAL, 0.8f);
-    CHECK(aa_lock_state(S) == AA_LK_ACQ, "adquiriendo (estado %d)", aa_lock_state(S));
-    CHECK(G.tone >= 3, "tonos crecientes (%d)", G.tone);
-    float p1 = aa_lock_progress(S);
-    CHECK(p1 > 0.4f && p1 < 0.6f, "progreso a 0,8 s = %.2f", p1);
-    int tones_half = G.tone;
-    step(WR_MANUAL, 0.6f);
-    CHECK(aa_lock_state(S) == AA_LK_ACQ, "aún sin bloqueo a 1,4 s");
-    CHECK(G.tone - tones_half >= 3, "tono más rápido en la 2a mitad (%d vs %d)", G.tone - tones_half, tones_half);
-    step(WR_MANUAL, 0.3f);
-    CHECK(aa_lock_state(S) == AA_LK_LOCKED && G.locked == 1, "bloqueado a 1,7 s, WS_LOCKED=%d", G.locked);
-    step(WR_MANUAL, 0.5f);
-    CHECK(G.locked == 1 && aa_lock_state(S) == AA_LK_LOCKED, "bloqueo estable, un solo evento");
+    /* ---------- 2. reflejo del buscador del juego ---------- */
+    reset(3); step(WR_MANUAL, 0.1f);
+    G.targets_calls = 0;
+    game_lock(1, 0, 0); step(WR_MANUAL, 0.05f);
+    CHECK(aa_lock_state(S) == AA_LK_SEARCH && aa_lock_progress(S) == 0, "buscador del juego activo sin blanco: buscando");
+    int hap0 = G.haptics;
+    game_lock(1, 1, 1); step(WR_MANUAL, 0.05f);
+    CHECK(aa_lock_state(S) == AA_LK_ACQ, "el juego sigue un blanco: adquiriendo");
+    CHECK(G.haptics > hap0, "háptico al empezar a seguir un blanco");
+    game_lock(1, 1, 6); step(WR_MANUAL, 0.05f);
+    CHECK(fabsf(aa_lock_progress(S) - 0.5f) < 1e-4f, "progreso = fotogramas / %d (%.3f)", AA_BOX_FRAMES, aa_lock_progress(S));
+    game_lock(1, 1, 11); step(WR_MANUAL, 0.05f);
+    CHECK(aa_lock_state(S) == AA_LK_ACQ && aa_lock_progress(S) < 1.0f, "11 fotogramas: marco aún abriéndose");
+    hap0 = G.haptics;
+    game_lock(1, 1, 12); step(WR_MANUAL, 0.05f);
+    CHECK(aa_lock_state(S) == AA_LK_LOCKED && aa_lock_progress(S) == 1.0f, "12 fotogramas: marco cerrado");
+    CHECK(G.haptics >= hap0 + 2, "háptico al cerrarse el marco (%d)", G.haptics - hap0);
+    hap0 = G.haptics;
+    game_lock(1, 1, 40); step(WR_MANUAL, 0.5f);
+    CHECK(aa_lock_state(S) == AA_LK_LOCKED && G.haptics == hap0, "bloqueo estable, sin háptico repetido");
+    CHECK(G.tone == 0 && G.locked == 0 && G.targets_calls == 0, "el arma sigue sin emitir tonos ni consultar blancos");
+    game_lock(1, 0, 0); step(WR_MANUAL, 0.05f);
+    CHECK(aa_lock_state(S) == AA_LK_SEARCH && aa_lock_progress(S) == 0, "el juego soltó el blanco");
+    game_lock(0, 0, 0); step(WR_MANUAL, 0.05f);
+    CHECK(aa_lock_state(S) == AA_LK_STBY, "visor bajado: en espera");
+    aa_feed_game_lock(S, NULL); step(WR_MANUAL, 0.05f);
+    CHECK(aa_lock_state(S) == AA_LK_STBY, "sin datos: en espera");
 
-    /* ---------- 3. disparo con bloqueo y guiado ---------- */
+    /* ---------- 3. disparo (con bloqueo del juego) ---------- */
+    reset(3); step(WR_MANUAL, 0.1f);
+    game_lock(1, 1, 30); step(WR_MANUAL, 0.1f);
+    CHECK(aa_lock_state(S) == AA_LK_LOCKED, "bloqueado");
     in.trigger[0] = 1.0f;
-    G.proj_active = 1; G.proj.p = wv(0, 1.4f, -2); G.proj.q = wquat_identity();
     step(WR_MANUAL, 0.05f);
     CHECK(G.fired == 1 && S->mag_rounds == 0 && S->phase == AA_P_SPENT, "disparo");
     CHECK(fabsf(G.last_muzzle.p.z - wcore_point_world(S, &in, WP_MUZZLE).p.z) < 0.2f, "boca de fuego");
-    CHECK(aa_lock_state(S) == AA_LK_OFF, "buscador apagado tras disparo");
-    CHECK(G.steers > 0, "guía el misil hacia el blanco bloqueado");
-    CHECK(fabsf(G.last_yaw) <= 1.0f, "steer acotado");
+    CHECK(aa_lock_state(S) == AA_LK_OFF, "tras el disparo el tubo está gastado");
+    CHECK(G.steers == 0, "el arma no guía el misil (lo persigue el juego)");
+    game_lock(1, 1, 40); step(WR_MANUAL, 0.1f);
+    CHECK(aa_lock_state(S) == AA_LK_OFF, "con el tubo gastado el estado sigue apagado aunque el buscador del juego siga vivo");
     in.trigger[0] = 0; step(WR_MANUAL, 0.1f);
     in.trigger[0] = 1; int dry0 = G.dry; step(WR_MANUAL, 0.05f);
     CHECK(G.dry == dry0 + 1 && G.fired == 1, "gatillo en seco con tubo gastado");
-    in.trigger[0] = 0; G.proj_active = 0; step(WR_MANUAL, 0.5f);
+    in.trigger[0] = 0; step(WR_MANUAL, 0.5f);
 
     /* ---------- 4. recarga manual completa ---------- */
     in.buttons[0] = WB_MAG_RELEASE; step(WR_MANUAL, 0.05f); in.buttons[0] = 0;
@@ -141,37 +149,15 @@ int main(void) {
     CHECK(S->channel[WCH_MAG] == 0 && S->channel[WCH_CUSTOM0] == 0, "tubo en su sitio");
     in.grip[1] = 0;
 
-    /* ---------- 5. disparo sin bloqueo (tras enfriar) ---------- */
-    G.ntg = 0; G.steers = 0; step(WR_MANUAL, 1.2f);
+    /* ---------- 5. disparo sin bloqueo ---------- */
+    G.steers = 0; game_lock(1, 0, 0); step(WR_MANUAL, 0.1f);
     CHECK(aa_lock_state(S) == AA_LK_SEARCH, "buscando");
     in.trigger[0] = 1; step(WR_MANUAL, 0.05f);
     CHECK(G.fired == 2 && G.steers == 0, "sin bloqueo sale recto, sin guiado");
     in.trigger[0] = 0;
-
-    /* ---------- 6. pérdida de blanco y reinicio ---------- */
-    reset(3); step(WR_MANUAL, 1.2f);
-    put_target(300, 0.0f); step(WR_MANUAL, 1.0f);
-    CHECK(aa_lock_state(S) == AA_LK_ACQ, "acq");
-    put_target(300, 0.25f);                    /* fuera del cono ampliado */
-    step(WR_MANUAL, 0.1f);                      /* menos que la gracia */
-    put_target(300, 0.0f); step(WR_MANUAL, 0.1f);
-    CHECK(aa_lock_progress(S) > 0.6f, "microcorte tolerado (%.2f)", aa_lock_progress(S));
-    put_target(300, 0.25f); step(WR_MANUAL, 0.4f);
-    CHECK(aa_lock_state(S) == AA_LK_SEARCH && aa_lock_progress(S) == 0, "pérdida reinicia");
-    put_target(300, 0.0f); step(WR_MANUAL, 1.0f);
-    CHECK(aa_lock_state(S) == AA_LK_ACQ, "reinicia desde cero (no bloquea a 1,0 s)");
-    step(WR_MANUAL, 0.8f);
-    CHECK(aa_lock_state(S) == AA_LK_LOCKED, "bloquea tras 1,6 s");
-    /* blanco fuera de alcance mínimo/máximo */
-    reset(3); step(WR_MANUAL, 1.2f); put_target(600, 0); step(WR_MANUAL, 1);
-    CHECK(aa_lock_state(S) == AA_LK_SEARCH, "fuera de alcance máximo");
-    put_target(5, 0); step(WR_MANUAL, 1);
-    CHECK(aa_lock_state(S) == AA_LK_SEARCH, "dentro de alcance mínimo");
-    /* dos blancos: elige el más cercano al eje */
-    put_target(200, 0.05f);
-    { WPose e = wcore_point_world(S, &in, WP_EYE); G.tg[1] = wv_add(e.p, wv(sinf(0.01f) * 300, 0, -300)); G.ntg = 2; }
-    step(WR_MANUAL, 0.3f);
-    CHECK(aa_lock_state(S) == AA_LK_ACQ && fabsf(st.tgt.z - G.tg[1].z) < 1.0f, "elige el más centrado");
+    /* disparo a la cadera (visor sin levantar): sale igual, sin bloqueo */
+    reset(3); step(WR_MANUAL, 0.1f); in.trigger[0] = 0; step(WR_MANUAL, 0.05f); in.trigger[0] = 1; step(WR_MANUAL, 0.05f);
+    CHECK(G.fired == 1 && aa_lock_state(S) == AA_LK_OFF, "a la cadera: el disparo sale");
 
     /* ---------- 7. sin reserva ---------- */
     reset(0); step(WR_MANUAL, 0.1f);
@@ -192,15 +178,6 @@ int main(void) {
     reset(3); step(WR_AUTOMATIC, 1.2f); in.trigger[0] = 1; step(WR_AUTOMATIC, 0.05f); in.trigger[0] = 0;
     step(WR_AUTOMATIC, 3.5f);
     CHECK(S->phase == AA_P_READY && S->mag_rounds == 1 && G.reserve == 1, "automático recarga solo (fase %d)", S->phase);
-
-    /* ---------- 9. overlay ---------- */
-    reset(3); step(WR_MANUAL, 1.2f); put_target(250, 0.015f); step(WR_MANUAL, 0.9f);
-    static uint32_t img[AA_VIEW_W * AA_VIEW_H];
-    for (int i = 0; i < AA_VIEW_W * AA_VIEW_H; i++) img[i] = 0xFF303840u;
-    aa_draw_overlay(S, img, AA_VIEW_W, AA_VIEW_H);
-    int changed = 0; for (int i = 0; i < AA_VIEW_W * AA_VIEW_H; i++) changed += img[i] != 0xFF303840u;
-    CHECK(changed > 300, "overlay dibuja (%d px)", changed);
-    CHECK(st.tgt_on_screen && fabsf(st.ndc_x) < 1 && fabsf(st.ndc_y) < 0.2f, "blanco proyectado en pantalla ndc=(%.2f,%.2f)", st.ndc_x, st.ndc_y);
 
     /* sin mallas compiladas: los huecos se asocian por nombre de pieza (weapon_part_mesh) */
     CHECK(w_aa.meshes == NULL && w_aa.nmeshes == 0 && w_aa.mesh_names, "w_aa no debe llevar mallas compiladas");

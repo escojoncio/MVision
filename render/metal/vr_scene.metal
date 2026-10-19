@@ -216,36 +216,80 @@ inline float vr_post_ysrc(float yc, uint eye, constant VrPostUniforms &u, consta
     return yc;
 }
 
-inline float4 vr_post_finish(float4 px, constant VrPostUniforms &u) {
+/* Mezcla de un color de recubrimiento/línea (f) sobre c con el modo de mezcla original m (0: B/2+F/2, 1: B+F, 2: B-F, 3: B+F/4) y peso w (1 = completo). */
+inline float3 vr_post_blend(float3 c, float3 f, int m, float w) {
+    if (m == 0) return mix(c, 0.5 * c + 0.5 * f, w);
+    if (m == 1) return c + f * w;
+    if (m == 2) return c - f * w;
+    return c + 0.25 * f * w;
+}
+
+/* Peso (0..1) de las líneas de exploración en la fila de salida yc del ojo `eye` (fila original equivalente r = cy_row + proj_h*t). Con las líneas más finas que
+ * ~3 píxeles del ojo se usa la media (alto/periodo) para no producir muaré. Sin líneas: 0. */
+inline float vr_post_scan(float yc, uint eye, constant VrPostUniforms &u) {
+    if (u.scan.w < 0.0 || u.scan.x < 1.0 || u.eye[eye].y <= 1.0 || u.cfg.x <= 0.0) return 0.0;
+    float pitch = u.scan.x;
+    float duty = clamp(u.scan.z / pitch, 0.0, 1.0);
+    float r = u.cfg.y + u.cfg.x * ((yc - u.eye[eye].x) / u.eye[eye].y);
+    float t = fract((r - u.scan.y) / pitch);          /* 0..1 dentro del periodo; la línea cubre [0, duty) */
+    float pe = pitch * u.eye[eye].y / u.cfg.x;        /* píxeles del ojo por periodo */
+    float e = pitch / max(pe, 1e-3);                  /* filas originales por píxel del ojo */
+    float edge = max(e, 1e-4);
+    float w = clamp((duty - t) * pitch / edge + 0.5, 0.0, 1.0) * clamp(t * pitch / edge + 0.5, 0.0, 1.0);
+    return mix(w, duty, clamp((3.0 - pe) * 0.5, 0.0, 1.0));
+}
+
+/* Resta de la máscara de visión en el píxel (px,py) del ojo `eye`: fuera de la imagen original = 1 (negro). */
+inline float vr_post_frame(float2 pix, uint eye, constant VrPostUniforms &u, texture2d<float> frm) {
+    if (u.frame.z < 0.5 || u.eye[eye].y <= 1.0 || u.eye[eye].w <= 1.0 || u.cfg.x <= 0.0 || u.frame.x <= 0.0 || u.frame.y <= 0.0) return 0.0;
+    float k = u.cfg.x;
+    float cx = u.cfg.w + k * ((pix.x - u.eye[eye].z) / u.eye[eye].w);
+    float cy = u.cfg.y + k * ((pix.y - u.eye[eye].x) / u.eye[eye].y);
+    float2 uv = float2(cx / u.frame.x, cy / u.frame.y);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+    constexpr sampler fsm(coord::normalized, address::clamp_to_edge, filter::linear);
+    return clamp(frm.sample(fsm, uv, level(0)).r, 0.0, 1.0);
+}
+
+inline float4 vr_post_finish(float4 px, constant VrPostUniforms &u, float scanw, float framesub) {
     float3 c = clamp(px.rgb, float3(0.0), float3(1.0));
     if (kLinear) c = float3(vr_gam1(c.x), vr_gam1(c.y), vr_gam1(c.z));
     c *= u.tint.xyz;
-    if (u.cover.w >= 0.0) {
-        int m = int(u.cover.w + 0.5);
-        float3 f = u.cover.xyz;
-        if (m == 0) c = 0.5 * c + 0.5 * f;
-        else if (m == 1) c = c + f;
-        else if (m == 2) c = c - f;
-        else c = c + 0.25 * f;
+    bool scanPending = scanw > 0.0;
+    int scanAfter = int(u.misc.x + 0.5);
+    for (int i = 0; i < VR_POST_COVERS; i++) {
+        if (scanPending && i >= scanAfter) {         /* las líneas se dibujaron tras `scanAfter` recubrimientos */
+            c = clamp(vr_post_blend(c, u.scan_rgb.xyz, int(u.scan.w + 0.5), scanw * u.scan_rgb.w), float3(0.0), float3(1.0));
+            scanPending = false;
+        }
+        float m = u.covers[i].w;
+        if (m < 0.0) break;
+        c = vr_post_blend(c, u.covers[i].xyz, int(m + 0.5), 1.0);
+        c = clamp(c, float3(0.0), float3(1.0));      /* la PS1 satura tras cada primitiva */
+    }
+    if (scanPending) c = clamp(vr_post_blend(c, u.scan_rgb.xyz, int(u.scan.w + 0.5), scanw * u.scan_rgb.w), float3(0.0), float3(1.0));
+    if (framesub > 0.0) {
+        c = max(c - float3(framesub), float3(0.0));
+        c += u.misc.yzw * smoothstep(0.85, 1.0, framesub);   /* interior cerrado (caja: cartón oscuro; resto: 0 = negro) */
     }
     c = clamp(c, float3(0.0), float3(1.0));
     if (kLinear) c = float3(vr_lin1(c.x), vr_lin1(c.y), vr_lin1(c.z));
     return float4(c, px.a);   /* conserva el alfa de la escena */
 }
 
-fragment float4 vr_fs_post(VrPostOut in [[stage_in]], texture2d<float> src [[texture(0)]],
+fragment float4 vr_fs_post(VrPostOut in [[stage_in]], texture2d<float> src [[texture(0)]], texture2d<float> frm [[texture(1)]],
                            constant VrPostUniforms &u [[buffer(0)]], constant float *dv [[buffer(VR_BUF_POST_DV)]]) {
     constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
     float ys = vr_post_ysrc(in.pos.y, 0u, u, dv);
     float2 uv = float2(in.pos.x / float(src.get_width()), ys / float(src.get_height()));
-    return vr_post_finish(src.sample(smp, uv), u);
+    return vr_post_finish(src.sample(smp, uv), u, vr_post_scan(in.pos.y, 0u, u), vr_post_frame(in.pos.xy, 0u, u, frm));
 }
 
-fragment float4 vr_fs_post_layered(VrPostOutL in [[stage_in]], texture2d_array<float> src [[texture(0)]],
+fragment float4 vr_fs_post_layered(VrPostOutL in [[stage_in]], texture2d_array<float> src [[texture(0)]], texture2d<float> frm [[texture(1)]],
                                    constant VrPostUniforms &u [[buffer(0)]], constant float *dv [[buffer(VR_BUF_POST_DV)]]) {
     constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
     uint eye = min(in.layer, 1u);
     float ys = vr_post_ysrc(in.pos.y, eye, u, dv);
     float2 uv = float2(in.pos.x / float(src.get_width()), ys / float(src.get_height()));
-    return vr_post_finish(src.sample(smp, uv, in.layer), u);
+    return vr_post_finish(src.sample(smp, uv, in.layer), u, vr_post_scan(in.pos.y, eye, u), vr_post_frame(in.pos.xy, eye, u, frm));
 }

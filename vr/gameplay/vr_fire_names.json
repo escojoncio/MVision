@@ -7,5 +7,7 @@
   "vrfire_mine":     {"target": "8006c4b4", "how": "exact", "doc": "coloca la mina direccional (matriz, suelo)"},
   "vrfire_charge":   {"target": "8006b69c", "how": "exact", "doc": "coloca la carga adhesiva (matriz, pos, adherida, bando, seg)"},
   "vrfire_grenade":  {"target": "8006af98", "how": "exact", "doc": "lanza la granada de mano (pos, velocidad, mecha, tipo, modelo)"},
-  "vrfire_hide":     {"target": "80018c8c", "how": "exact", "doc": "etapa de recorte por objeto de un canal (canal, índice)"}
+  "vrfire_hide":     {"target": "80018c8c", "how": "exact", "doc": "etapa de recorte por objeto de un canal (canal, índice)"},
+  "vrfire_aalock":   {"target": "80071fc8", "how": "exact", "doc": "paso (actualización) del buscador de blancos del lanzador antiaéreo (actor)"},
+  "vrfire_aaview":   {"target": "800711ac", "how": "exact", "doc": "carga la matriz del canal 3D principal en la GTE (la usa el buscador)"}
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import GameController
 import UniformTypeIdentifiers
 
 @main
@@ -7,9 +8,10 @@ struct MVApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: XRSession.windowID) {
             ContentView()
                 .environmentObject(model)
+                .xrCompactWhenImmersive()   // en VR la ventana se reduce a una barra pequeña, sin destruirla (ver XRSession.swift)
                 .onAppear {
                     model.start()
                     // VR: el compositor pausa/reanuda el espacio inmersivo (quitarse el visor, menús del sistema).
@@ -31,12 +33,16 @@ struct MVApp: App {
                 }
         }
         .defaultSize(width: 1024, height: 768)
+        .windowResizability(.contentSize)
         XRImmersiveScene()
     }
 }
 
 struct ContentView: View {
     @EnvironmentObject var model: GameModel
+    @FocusState private var controllerFocus: Bool
+    @ObservedObject private var xr = XRSession.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
@@ -61,6 +67,15 @@ struct ContentView: View {
                     reintentar: nil)
             }
         }
+        // visionOS entrega los botones del mando por GameController solo a la app que lo declara en una vista con foco.
+        .modifier(GameControllerEventsModifier())
+        .focusable()
+        .focusEffectDisabled()
+        .focused($controllerFocus)
+        .onAppear { controllerFocus = true }
+        // Al abrir/cerrar el espacio inmersivo o reactivarse la ventana el foco puede perderse: se reasigna.
+        .onChange(of: xr.state) { _, _ in refocus() }
+        .onChange(of: scenePhase) { _, _ in refocus() }
         .fileImporter(isPresented: $model.showPicker, allowedContentTypes: [.folder], allowsMultipleSelection: false) { model.folderPicked($0) }
         .alert("Carpeta", isPresented: Binding(get: { model.aviso != nil }, set: { if !$0 { model.aviso = nil } })) {
             Button("Aceptar", role: .cancel) {}
@@ -92,6 +107,13 @@ struct MessageView: View {
 }
 
 /// Pantalla de elegir la carpeta del juego (primera vez, permiso perdido o nombre incorrecto).
+extension ContentView {
+    func refocus() {
+        controllerFocus = false
+        DispatchQueue.main.async { controllerFocus = true }
+    }
+}
+
 struct FolderPromptView: View {
     @EnvironmentObject var model: GameModel
     let aviso: String?
@@ -116,5 +138,16 @@ struct FolderPromptView: View {
             }
         }
         .padding(40)
+    }
+}
+
+/// `handlesGameControllerEvents` existe desde visionOS 2; el destino mínimo del proyecto es anterior.
+struct GameControllerEventsModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(visionOS 2.0, *) {
+            content.handlesGameControllerEvents(matching: .gamepad)
+        } else {
+            content
+        }
     }
 }

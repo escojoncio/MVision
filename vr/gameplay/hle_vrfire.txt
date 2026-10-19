@@ -10,3 +10,5 @@ vrfire_mine
 vrfire_charge
 vrfire_grenade
 vrfire_hide
+vrfire_aalock
+vrfire_aaview

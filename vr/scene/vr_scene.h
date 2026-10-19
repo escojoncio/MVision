@@ -76,6 +76,16 @@
  *   semitransparente y ANTES de componer el panel HUD (que no se distorsiona). Si filter.active==0 no hay nada que aplicar.
  *   Con opts.screen_filter=0 estas primitivas vuelven a la clase 2 (comportamiento anterior).
  *
+ * Clase 3b = objetos equipados (gafas de visión nocturna/térmica, máscara de gas, caja, mira) — misma clase 3, tres piezas nuevas de VrFilter
+ *   a) varios recubrimientos: covers_*[] (los 4 últimos, en orden; p. ej. el tinte aditivo de las gafas y un destello/fundido a la vez). El 1.º tinte NV es verde aditivo
+ *      (56,120,40), el térmico rojo aditivo (80,0,0); la paleta ya viene convertida por el propio juego (se reescribe la CLUT en VRAM), no hay que hacer nada en 3D.
+ *   b) líneas de exploración: rects semitransparentes SIN textura, de >= 90 % del ancho de la imagen mostrada y alto <= 2, repetidos cada `scan_pitch` filas (gafas: 1 fila cada 2, resta 64/255).
+ *      No salen en el panel: n_scan/scan_* las describen para repintarlas en la vista (fila PS1 equivalente r = cy_row + proj_h*tan; cobertura = (r - scan_phase) mod pitch < scan_h).
+ *   c) máscara de visión (frame): con >= 8 polígonos planos de restar-blanco u opacos negros Y >= 8 polígonos degradados semitransparentes de resta, SIN textura, 2D (la mira
+ *      de la máscara de gas, de la caja y de otros visores): todos se emiten a kind 3 y se vuelcan sumados en filter.frame (resta por celda, 160x128). El renderer la aplica en
+ *      el espacio angular de la cabeza (celda = fila/columna PS1 equivalentes), con resta total (255) fuera de la imagen original; así el marco rodea TODO el campo del visor en vez
+ *      de quedar en el panel flotante.
+ *
  * Desplazamiento de proyección por primitiva (OFX/OFY) y centro del mundo
  *   La proyección del motor es x_pantalla = OFX + H*vx/vz. Los sprites de resplandor/halo ponen OFX/OFY en su centro de pantalla y proyectan solo el desplazamiento local
  *   (vx,vy = +-1000 a profundidad vz), así que (vx,vy,vz) NO es una posición de vista del mundo (pegaba el resplandor al centro de la vista). Para cada lista se calcula
@@ -162,9 +172,14 @@ typedef struct {
     uint32_t n_clear;         /* rects opacos sin textura a pantalla completa (borrado/máscara); no se emiten con opts.drop_clear (def.) */
     uint32_t n_ofs_fix;       /* polígonos 3D cuyo desplazamiento de proyección (OFX/OFY) difería del centro del mundo y se corrigió */
     uint32_t n_ref_group;     /* polígonos del grupo modal (centro del mundo) */
+    uint32_t n_filter_scan;   /* rects finos semitransparentes de ancho de pantalla (líneas de exploración de las gafas) mandados a kind 3 */
+    uint32_t n_filter_frame;  /* polígonos de la máscara de visión (marco de máscara/caja/mira) mandados a kind 3 y volcados en filter.frame */
 } VrStats;
 
 #define VR_FILTER_ROWS 512
+#define VR_FILTER_COVERS 4
+#define VR_FRAME_W 160
+#define VR_FRAME_H 128
 typedef struct {
     int active;                 /* 1 si hay primitivas de clase 3 */
     int n_strips, n_polys, n_cover;
@@ -177,6 +192,18 @@ typedef struct {
     /* proyección del motor (ver "Clase 3"): se rellenan siempre. Defecto 160 / centro de area (160,128 con 320x256). */
     float proj_h;               /* H del motor (px por unidad de tangente) */
     float cx_col, cy_row;       /* centro óptico: columna y fila relativas a area[0], area[1] */
+    /* --- objetos equipados (gafas, máscara, caja): ver "Clase 3b" --- */
+    int n_covers;               /* recubrimientos semitransparentes en orden de dibujo (los VR_FILTER_COVERS últimos); cover_rgb/cover_abr = el último */
+    float covers_rgb[VR_FILTER_COVERS][3]; int covers_abr[VR_FILTER_COVERS];
+    int n_scan;                 /* líneas de exploración detectadas (0 = no hay) */
+    float scan_rgb[3]; int scan_abr;   /* color/255 y modo de mezcla PS1 de cada línea (gafas: 64/255 y resta) */
+    float scan_pitch, scan_phase, scan_h;   /* periodo (filas PS1), fila de la primera línea mod periodo (relativa a area[1]) y alto de cada línea */
+    int scan_after;             /* nº de covers_*[] (de los conservados) dibujados ANTES de las líneas: el orden importa (p. ej. tinte, líneas, y luego el velo gris de la mira) */
+    int frame_on;               /* 1 si hay máscara de visión: frame[] válido */
+    const uint8_t *frame;       /* frame_w*frame_h bytes: resta (0..255 = 0..1, por canal, en espacio gamma original) que la máscara aplica a cada celda de la imagen mostrada
+                                 * (arriba-izquierda primero; la imagen mostrada area[2]x area[3] se divide en frame_w x frame_h celdas). Fuera de la imagen: 255. Misma vida que v/b */
+    int frame_w, frame_h;
+    float frame_rgb[3];         /* color (gamma, 0..1) que se suma donde la máscara cierra del todo (resta ~255): negro (0,0,0) salvo con la caja equipada (interior de cartón oscuro) */
 } VrFilter;
 
 typedef struct {

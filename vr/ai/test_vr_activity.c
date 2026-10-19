@@ -139,28 +139,28 @@ static void test_frame_and_decisions(void) {
     CHECK(A.tracked[0].in_range == 1);
     CHECK(A.tracked[1].dist == 30265);   /* sqrt(30000^2 + 4000^2) */
     CHECK(A.tracked[1].in_range == (A.tracked[1].dist <= A.zone_diag));
-    /* bound_mode */
-    CHECK(vra_bound_mode(&A, 0x80170000u, 0x32d, 1, 0) == 2);      /* cuerpo del soldado cercano: 0 -> 2 */
-    CHECK(vra_bound_mode(&A, 0x80172000u, 0x6d, 1, 0) == 2);       /* su arma */
-    CHECK(vra_bound_mode(&A, 0x80170000u, 0x32d, 1, 1) == 1);      /* ya distinto de 0: intacto */
-    CHECK(vra_bound_mode(&A, 0x80170000u, 0x32d | 0x80, 1, 0) == 0);   /* invisible */
-    CHECK(vra_bound_mode(&A, 0x80170000u, 0x32d, 2, 0) == 0);      /* otro grupo de mapas */
-    CHECK(vra_bound_mode(&A, 0x80170000u, 0x32d, 0, 0) == 2);      /* grupo 0 = siempre */
-    CHECK(vra_bound_mode(&A, 0x80199000u, 0x32d, 1, 0) == 0);      /* objeto no seguido */
-    CHECK(vra_bound_mode(&A, 0x80178000u, 0x2d, 1, 0) == 0);       /* cámara de juego: no seguida */
+    /* clip_state */
+    CHECK(vra_clip_state(&A, 0x80170000u, 0x32d, 1, 0) == 2);      /* cuerpo del soldado cercano: 0 -> 2 */
+    CHECK(vra_clip_state(&A, 0x80172000u, 0x6d, 1, 0) == 2);       /* su arma */
+    CHECK(vra_clip_state(&A, 0x80170000u, 0x32d, 1, 1) == 1);      /* ya distinto de 0: intacto */
+    CHECK(vra_clip_state(&A, 0x80170000u, 0x32d | 0x80, 1, 0) == 0);   /* invisible */
+    CHECK(vra_clip_state(&A, 0x80170000u, 0x32d, 2, 0) == 0);      /* otro grupo de mapas */
+    CHECK(vra_clip_state(&A, 0x80170000u, 0x32d, 0, 0) == 2);      /* grupo 0 = siempre */
+    CHECK(vra_clip_state(&A, 0x80199000u, 0x32d, 1, 0) == 0);      /* objeto no seguido */
+    CHECK(vra_clip_state(&A, 0x80178000u, 0x2d, 1, 0) == 0);       /* cámara de juego: no seguida */
     CHECK(vra_class_of_objs(&A, 0x80176000u) == VRA_CLASS_SENSOR);
     CHECK(vra_class_of_objs(&A, 0) == VRA_CLASS_OTHER);
 
     /* conmutadores separados */
     vra_set_mode(&A, VRA_CLASS_SENSOR, VRA_ORIGINAL);
     vra_frame(&A, ram, &st);
-    CHECK(vra_bound_mode(&A, 0x80176000u, 0x2d, 1, 0) == 0);       /* sensor en ORIGINAL: intacto */
-    CHECK(vra_bound_mode(&A, 0x80170000u, 0x32d, 1, 0) == 2);      /* soldado en VR */
+    CHECK(vra_clip_state(&A, 0x80176000u, 0x2d, 1, 0) == 0);       /* sensor en ORIGINAL: intacto */
+    CHECK(vra_clip_state(&A, 0x80170000u, 0x32d, 1, 0) == 2);      /* soldado en VR */
     vra_set_mode(&A, VRA_CLASS_SENSOR, VRA_VR);
     vra_set_mode(&A, VRA_CLASS_SOLDIER, VRA_ORIGINAL);
     vra_frame(&A, ram, &st);
-    CHECK(vra_bound_mode(&A, 0x80170000u, 0x32d, 1, 0) == 0);
-    CHECK(vra_bound_mode(&A, 0x80176000u, 0x2d, 1, 0) == 2);
+    CHECK(vra_clip_state(&A, 0x80170000u, 0x32d, 1, 0) == 0);
+    CHECK(vra_clip_state(&A, 0x80176000u, 0x2d, 1, 0) == 2);
     CHECK(vra_get_mode(&A, VRA_CLASS_SOLDIER) == VRA_ORIGINAL && vra_get_mode(&A, VRA_CLASS_SENSOR) == VRA_VR);
     vra_set_mode(&A, VRA_CLASS_SOLDIER, VRA_VR);
 
@@ -199,7 +199,7 @@ static void test_frame_and_decisions(void) {
     /* estado de partida no válido: todo inactivo y vacío */
     st.valid = 0;
     CHECK(vra_frame(&A, ram, &st) == 0);
-    CHECK(!A.active && vra_bound_mode(&A, 0x80170000u, 0x32d, 1, 0) == 0 && vra_class_of_objs(&A, 0x80170000u) == VRA_CLASS_OTHER);
+    CHECK(!A.active && vra_clip_state(&A, 0x80170000u, 0x32d, 1, 0) == 0 && vra_class_of_objs(&A, 0x80170000u) == VRA_CLASS_OTHER);
     st.valid = BRIDGE_OK_ALL_CORE; st.has_player = 0;
     CHECK(vra_frame(&A, ram, &st) == 0 && !A.active);
     st.has_player = 1;
@@ -229,11 +229,11 @@ static void test_los_and_audit(void) {
     VraAudit au[8];
     int n = vra_audit(&A, ram, au, 8);
     CHECK(n == 2);
-    CHECK(au[0].why == VRA_WHY_BOUND_ZERO);        /* activo en rango pero bound_mode==0: el gancho aún no actuó */
+    CHECK(au[0].why == VRA_WHY_CLIP_ZERO);        /* activo en rango pero clip_state==0: el gancho aún no actuó */
     CHECK(au[1].why & VRA_WHY_NO_LOS);
     w16(0x80170000u + 0x32, 2);                    /* el gancho ya escribió 2 */
     vra_audit(&A, ram, au, 8);
-    CHECK(au[0].why == 0 && au[0].bound_mode == 2);
+    CHECK(au[0].why == 0 && au[0].clip_state == 2);
     w32(0x80170000u + 0x28, 0x32d | 0x80);
     vra_audit(&A, ram, au, 8);
     CHECK(au[0].why & VRA_WHY_INVISIBLE);
@@ -298,13 +298,13 @@ static void test_respect_original(void) {
     mk_objs(0x80174000u, 0x80175000u, 16, 0x32d, 1, 0, 3000, 1000, -3000);
     w32(a1 + 156, 0x80174000u);
     for (int i = 0; i < VRA_WARMUP; i++) vra_frame(&A, ram, &st);
-    CHECK(vra_bound_mode(&A, 0x80170000u, 0x32d, 1, 0) == 2 && vra_bound_mode(&A, 0x80174000u, 0x32d, 1, 0) == 2);
+    CHECK(vra_clip_state(&A, 0x80170000u, 0x32d, 1, 0) == 2 && vra_clip_state(&A, 0x80174000u, 0x32d, 1, 0) == 2);
     st.game_status = 0x200;                      /* enemigos apagados: solo afecta a soldados */
     vra_frame(&A, ram, &st);
-    CHECK(vra_bound_mode(&A, 0x80170000u, 0x32d, 1, 0) == 0 && vra_bound_mode(&A, 0x80174000u, 0x32d, 1, 0) == 2);
+    CHECK(vra_clip_state(&A, 0x80170000u, 0x32d, 1, 0) == 0 && vra_clip_state(&A, 0x80174000u, 0x32d, 1, 0) == 2);
     st.game_status = 0; st.pause_level = 2;      /* pausa: ninguno */
     vra_frame(&A, ram, &st);
-    CHECK(vra_bound_mode(&A, 0x80170000u, 0x32d, 1, 0) == 0 && vra_bound_mode(&A, 0x80174000u, 0x32d, 1, 0) == 0);
+    CHECK(vra_clip_state(&A, 0x80170000u, 0x32d, 1, 0) == 0 && vra_clip_state(&A, 0x80174000u, 0x32d, 1, 0) == 0);
     w16(0x80180000u + 6, 0); w16(0x80180000u, 100);
     CHECK(vra_pointcheck_fixup(&A, ram, 0x80180000u, 1) == 0 && r16(0x80180006u) == 0);
     st.pause_level = 0;
@@ -354,7 +354,7 @@ static void test_fuzz(void) {
         for (int f = 0; f < VRA_WARMUP + 1; f++) vra_frame(&A, ram, &st);
         VraAudit au[VRA_MAX_TRACKED];
         vra_audit(&A, ram, au, VRA_MAX_TRACKED);
-        for (int i = 0; i < 20; i++) vra_bound_mode(&A, RND(), RND(), RND(), (int)(RND() % 3));
+        for (int i = 0; i < 20; i++) vra_clip_state(&A, RND(), RND(), RND(), (int)(RND() % 3));
         vra_pointcheck_fixup(&A, ram, RND(), (int)(RND() % 300));
         vra_zone_diag(ram, NULL);
     }

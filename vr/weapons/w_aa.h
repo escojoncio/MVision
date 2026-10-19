@@ -1,21 +1,24 @@
-/* Lanzamisiles antiaéreo al hombro ("aa"): API propia que extiende el contrato sin tocar weapon.h.
+/* Lanzamisiles antiaéreo al hombro ("aa"): tubo de un solo uso y recarga por sustitución del tubo.
  *
- * Pantalla integrada: pieza "screen" (uv 0..1, u→derecha, v→abajo) orientada hacia el ojo.
- * La app renderiza la escena del juego con WeaponState.aux (cámara = eje del tubo desde WP_EYE,
- * fov estrecho), llama a aa_draw_overlay() sobre el buffer RGBA y lo sube a la textura de la pieza.
- * La pantalla está activa mientras se empuña el arma (update se llama): se ve de reojo. */
+ * El FIJADO DE BLANCO NO se hace aquí: lo hace el propio juego (vr/gameplay/vr_aa.h: el buscador del juego corre con la
+ * vista del visor de este lanzador y el misil persigue el blanco que ese buscador deja). El arma solo refleja el estado
+ * del buscador del juego (aa_feed_game_lock: lo alimenta el anfitrión una vez por VBlank) para el háptico y para el
+ * estado visible (aa_lock_state / aa_lock_progress). La mira y el marco de fijación son los del HUD del juego; el tono
+ * de fijación es el del juego. Sin vista auxiliar ni superposición propia.
+ *
+ * El visor (WP_EYE) es el punto desde el que se mira: el anfitrión lo pasa a vr_aa (vraa_gesture / vraa_set_scope). */
 #pragma once
 #include "weapon.h"
 
 extern const WeaponDef w_aa;
 
-/* Estados del buscador (aa_lock_state). */
+/* Estados del visor (aa_lock_state), reflejo del buscador del juego. */
 typedef enum {
     AA_LK_OFF,      /* sin tubo útil (gastado / ausente) */
-    AA_LK_COOL,     /* enfriando el detector tras montar tubo: no adquiere */
-    AA_LK_SEARCH,   /* buscando: ningún blanco en el cono */
-    AA_LK_ACQ,      /* blanco en el cono, tono de adquisición creciente */
-    AA_LK_LOCKED    /* bloqueo: tono continuo (WS_LOCKED) */
+    AA_LK_STBY,     /* tubo listo, visor sin levantar: el juego no tiene mira ni buscador */
+    AA_LK_SEARCH,   /* mirando por el visor, ningún blanco en el cono */
+    AA_LK_ACQ,      /* el juego sigue un blanco, marco cerrándose */
+    AA_LK_LOCKED    /* marco cerrado (el juego lleva 12 o más fotogramas con el mismo blanco) */
 } AALock;
 
 /* Fases de la máquina de estados (WeaponState.phase). */
@@ -31,49 +34,37 @@ typedef enum {
 } AAPhase;
 
 /* Parámetros de ajuste (documentados en bitacora.md). */
-#define AA_CONE_RAD        0.0698f   /* semiángulo de adquisición: 4,0 grados */
-#define AA_TRACK_MULT      1.4f      /* tolerancia de mantenimiento de un blanco ya seguido */
-#define AA_LOCK_TIME       1.6f      /* s con el blanco en el cono hasta el bloqueo */
-#define AA_GRACE_TIME      0.25f     /* s fuera del cono antes de perderlo (reinicia) */
-#define AA_COOL_TIME       1.0f      /* s de enfriado tras acoplar un tubo */
-#define AA_RANGE_MIN       15.0f
-#define AA_RANGE_MAX       450.0f
-#define AA_VIEW_FOV        0.2094f   /* 12 grados verticales de la pantalla */
-#define AA_VIEW_W          256
-#define AA_VIEW_H          192
+#define AA_BOX_FRAMES      12        /* fotogramas con el mismo blanco hasta que el marco del juego termina de cerrarse */
 #define AA_SLIDE_TRAVEL    0.30f     /* m de carrera de encaje del tubo */
+
+/* Estado del buscador del juego (lo rellena el anfitrión desde vr_aa: VrAaLock). */
+typedef struct {
+    int sight;       /* el buscador del juego está activo este VBlank (visor levantado y mira del juego creada) */
+    int target;      /* el juego sigue un blanco */
+    int frames;      /* fotogramas seguidos con el mismo blanco */
+} AAGameLock;
 
 typedef struct {
     WeaponState base;
     int lk;                   /* AALock */
-    float lock_t;             /* s acumulados con el blanco en cono */
-    float grace;              /* s fuera de cono */
-    float cool_t;
-    float beep_t;             /* temporizador del tono de adquisición */
-    int tgt_valid;
-    WVec3 tgt;                /* última posición mundo del blanco seguido */
-    float tgt_range;
-    float ndc_x, ndc_y;       /* blanco en pantalla (-1..1) */
-    int tgt_on_screen;
-    int guiding;              /* misil en vuelo guiado hacia tgt */
-    WVec3 guide_tgt;
+    AAGameLock gl;            /* último estado del buscador del juego */
     int trig_armed;           /* gatillo ya apretado (1 al equipar: hay que soltarlo antes de disparar) */
     int dry_lat;              /* aviso de "sin tubos" ya emitido */
-    float rel_timer;          /* temporizadores de recarga */
     float drop_v;             /* velocidad de caída del tubo gastado */
     int carry_valid;          /* el tubo nuevo viaja con la mano de apoyo */
     WVec3 ins_hand0;          /* mano en el inicio del empuje */
-    float flash_t;            /* parpadeo de la pantalla */
     uint32_t seed;
 } AAState;
 
-/* Estado del buscador y progreso de adquisición (0..1). */
+/* Estado del visor y progreso de cierre del marco (0..1) según el buscador del juego. */
 int aa_lock_state(const WeaponState *s);
 float aa_lock_progress(const WeaponState *s);
+/* El anfitrión pasa el estado del buscador del juego una vez por VBlank (antes de update). g == NULL: sin datos. */
+void aa_feed_game_lock(WeaponState *s, const AAGameLock *g);
 /* Pose mundo del tubo de repuesto mientras viaja en la mano (mesh "tube" de mesh_names, origen en su
  * centro). Devuelve 0 si no hay tubo en la mano. */
 int aa_spare_pose(const WeaponState *s, const WInput *in, WPose *out);
 /* Zona de la espalda donde está el tubo de repuesto (mundo); radio en m. */
 WVec3 aa_back_zone(const WInput *in, float *radius);
-/* Dibuja retícula, caja de fijación y telemetría sobre el RGBA de la vista (w*h). */
-void aa_draw_overlay(const WeaponState *s, uint32_t *rgba, int w, int h);
+/* Pose mundo del visor (WP_EYE): el punto desde el que mira el buscador del juego (para vraa_gesture/vraa_set_scope). */
+WPose aa_sight_pose(const WeaponState *s, const WInput *in);

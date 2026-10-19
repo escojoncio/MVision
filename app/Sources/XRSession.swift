@@ -40,11 +40,35 @@ final class XRControl {
     func notifyPaused(_ p: Bool) { lock.lock(); let h = pausedHook; lock.unlock(); h?(p) }
 }
 
+/// Acción de cerrar el espacio inmersivo, guardada para poder usarla desde el menú VR (la ventana NO se cierra nunca al entrar en VR:
+/// en visionOS los botones del mando solo llegan si una vista viva y con foco los pide; en VR la ventana se reduce a una barra pequeña,
+/// ver XRCompactModifier).
+struct XRWindowActions {
+    var dismissSpace: () async -> Void
+}
+
+/// Reduce la ventana a una barra pequeña mientras el espacio inmersivo está abierto, sin destruir la vista (sigue viva y con foco).
+/// Requiere `.windowResizability(.contentSize)` en el WindowGroup. Fuera de VR no restringe el tamaño (ideal 1024x768).
+struct XRCompactModifier: ViewModifier {
+    @ObservedObject private var xr = XRSession.shared
+    func body(content: Content) -> some View {
+        let c = xr.state == .open
+        content.frame(minWidth: c ? 360 : 480, idealWidth: c ? 360 : 1024, maxWidth: c ? 360 : .infinity,
+                      minHeight: c ? 90 : 360, idealHeight: c ? 90 : 768, maxHeight: c ? 90 : .infinity)
+    }
+}
+extension View {
+    func xrCompactWhenImmersive() -> some View { modifier(XRCompactModifier()) }
+}
+
 /// Estado del espacio inmersivo para la interfaz (MainActor).
 @MainActor
 final class XRSession: ObservableObject {
     static let shared = XRSession()
     static let spaceID = "mv-immersive"
+    static let windowID = "mv-main"
+    /// Las registra la ventana (XRControlsView) al aparecer.
+    var windowActions: XRWindowActions?
 
     enum State { case closed, opening, open }
     @Published var state: State = .closed
@@ -76,6 +100,7 @@ final class XRSession: ObservableObject {
         // Mientras el espacio está abierto manda VRInput (Sense o mando normal); el mando de la ventana se calla.
         InputManager.shared.setSuspended(true)
         VRInput.shared.start()
+        ControllerHub.shared.attachEventInteractions()
         l.start()
     }
 
@@ -95,11 +120,18 @@ final class XRSession: ObservableObject {
         state = .opening
         let r = await action(id: Self.spaceID)
         switch r {
-        case .opened: break                      // state pasa a .open en attach()
+        case .opened: break                      // state pasa a .open en attach(); la ventana se reduce sola (XRCompactModifier)
         case .userCancelled: state = .closed
         case .error: state = .closed; lastError = "No se pudo abrir el espacio inmersivo."
         @unknown default: state = .closed
         }
+    }
+
+    /// Salir de VR desde el menú del inmersivo (la ventana puede estar oculta): cierra el espacio con la acción guardada.
+    func exitVR() async {
+        guard state != .closed else { return }
+        if let a = windowActions { await a.dismissSpace() }
+        detach()
     }
 
     func close(_ action: DismissImmersiveSpaceAction) async {
@@ -141,7 +173,12 @@ struct XRControlsView: View {
         .padding(12)
         .background(.regularMaterial, in: Capsule())
         .onChange(of: running) { _, now in autoEnterIfNeeded(now) }
-        .onAppear { autoEnterIfNeeded(running) }
+        .onAppear {
+            // Se copian las acciones (valores) para poder usarlas cuando la ventana ya no exista.
+            let ds = dismissSpace
+            xr.windowActions = XRWindowActions(dismissSpace: { await ds() })
+            autoEnterIfNeeded(running)
+        }
     }
 
     private func autoEnterIfNeeded(_ isRunning: Bool) {
