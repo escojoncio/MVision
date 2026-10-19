@@ -6,7 +6,7 @@
 
 typedef struct { int w, h; float tx, ty, near; } PrCam;       /* tx, ty = tangentes de la mitad del campo de visión */
 typedef struct { float R[9]; float p[3]; } PrEye;             /* pc = R * (pw - p): X derecha, Y arriba, Z atrás (delante = -Z) */
-typedef struct { int w, h; float *z; } PrBuf;                 /* z = profundidad más cercana por píxel (1e30 = fondo) */
+typedef struct { int w, h; float *z; int *id; int cur; } PrBuf;   /* id (opcional, w*h): índice del triángulo que dejó cada píxel (cur = el que se rasteriza) */                 /* z = profundidad más cercana por píxel (1e30 = fondo) */
 
 /* Ojo a partir de la pose de la cabeza (16 floats columna-mayor: X der, Y arriba, Z atrás, posición). side: -1 izquierdo, +1 derecho; ipd en m. */
 void pr_eye_from_head(const float head[16], int side, float ipd, PrEye *e);
