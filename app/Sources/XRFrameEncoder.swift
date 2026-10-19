@@ -35,6 +35,7 @@ final class XRFrameEncoder {
     static var fallbackDefault = true
     var fallbackEnabled = XRFrameEncoder.fallbackDefault
     private var fallback: XRFallbackEnv?
+    private var axes: XRDebugAxes?
     var bootSeconds: Double = 3          // duración del arranque con entorno mínimo siempre visible
     private var firstEncodeT: CFTimeInterval = 0
     private(set) var projSource = "propia"
@@ -47,6 +48,7 @@ final class XRFrameEncoder {
                               sampleCount: sampleCount, viewCount: 2)
         presenter = XRPresenter(device: device)
         fallback = XRFallbackEnv(device: device)
+        axes = XRDebugAxes(device: device)
         targets = XRTargets(device: device)
         self.layered = layered
         self.sampleCount = sampleCount
@@ -99,7 +101,8 @@ final class XRFrameEncoder {
     /// Devuelve false si no se pudo (texturas vacías, destinos MSAA).
     func encode(commandBuffer cb: MTLCommandBuffer, gs: MvVrGameState, originFromDevice: simd_float4x4, recenterInverse: simd_float4x4,
                 dt: Float, eyes: [XREyeView], depthRange: SIMD2<Float>, colorTextures colorTex: [MTLTexture],
-                depthTextures depthTex: [MTLTexture], systemProjections: [simd_float4x4]? = nil) -> Bool {
+                depthTextures depthTex: [MTLTexture], systemProjections: [simd_float4x4]? = nil,
+                debugAxes: [XRAxisFrame] = []) -> Bool {
         guard eyes.count >= viewCount, !colorTex.isEmpty, !depthTex.isEmpty else { return false }
         frameNo += 1
         let recentered = recenterInverse * originFromDevice
@@ -163,6 +166,10 @@ final class XRFrameEncoder {
                 let extra = fb.items(head: recentered, now: nowT0 - firstEncodeT, frame: frameNo, linear: renderer.linearOutput, waiting: !arranque)
                 pres.items.insert(contentsOf: extra, at: 0)
             }
+        }
+        // Ejes de depuración (opción del menú VR): marcos de los mandos y de las manos del personaje, solo en el mundo.
+        if !debugAxes.isEmpty, pres.drawWorld, let ax = axes {
+            pres.items.insert(contentsOf: ax.items(frames: debugAxes, linear: renderer.linearOutput), at: 0)
         }
         renderer.encode(commandBuffer: cb, colorTargets: tgt.color, depthTargets: tgt.depth,
                         resolveTargets: tgt.resolve, views: sceneViews, projections: projs,

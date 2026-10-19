@@ -222,7 +222,8 @@ final class XRRenderLoop {
         }
         let ok = encoder.encode(commandBuffer: cb, gs: gs, originFromDevice: originFromDevice, recenterInverse: recenterInverse, dt: dt,
                                 eyes: eyes, depthRange: drawable.depthRange, colorTextures: drawable.colorTextures,
-                                depthTextures: drawable.depthTextures, systemProjections: sysProj)
+                                depthTextures: drawable.depthTextures, systemProjections: sysProj,
+                                debugAxes: debugAxisFrames(recenterInverse: recenterInverse))
         if !ok {
             // Como antes del refactor: sin codificar no se presenta el fotograma. El aviso sale como mucho 1 vez por segundo.
             if nowT - lastEncFailLog >= 1 {
@@ -251,6 +252,39 @@ final class XRRenderLoop {
             }
         }
         cb.commit()
+    }
+
+    /// Marcos de depuración (opción "Ejes de depuración" del menú VR), en el espacio recentrado: por mano, la pose del dispositivo (corto), el agarre
+    /// (medio) y el apuntado (largo) que entrega el sistema; el marco efectivo de la mano del personaje tras la IK (origen en el centro de la palma) y la pose del arma
+    /// (posición del agarre, orientación del apuntado). Si el agarre y la mano del personaje se solapan, la IK llega al objetivo.
+    private func debugAxisFrames(recenterInverse: simd_float4x4) -> [XRAxisFrame] {
+        guard encoder.presenter.cfg.debugAxes else { return [] }
+        func mat(_ pos: SIMD3<Float>, _ rot: SIMD4<Float>) -> simd_float4x4 {
+            var m = simd_matrix4x4(simd_quatf(vector: rot))
+            m.columns.3 = SIMD4<Float>(pos.x, pos.y, pos.z, 1)
+            return recenterInverse * m
+        }
+        func capi(_ kind: Int32, _ side: Int32) -> simd_float4x4? {
+            var g = [Float](repeating: 0, count: 16)
+            guard mv_vrgame_debug_frame(kind, side, &g) != 0 else { return nil }
+            return simd_float4x4(columns: (SIMD4<Float>(g[0], g[1], g[2], g[3]), SIMD4<Float>(g[4], g[5], g[6], g[7]),
+                                           SIMD4<Float>(g[8], g[9], g[10], g[11]), SIMD4<Float>(g[12], g[13], g[14], g[15])))
+        }
+        var out: [XRAxisFrame] = []
+        for hand in 0..<2 {
+            let p = VRInputPose.shared.pose(hand: hand)
+            if p.tracked {
+                out.append(XRAxisFrame(model: mat(p.position, p.rotation), length: 0.05, thickness: 0.003))             // dispositivo
+                if p.hasLocations {
+                    out.append(XRAxisFrame(model: mat(p.gripPosition, p.gripRotation), length: 0.10, thickness: 0.004))  // agarre del sistema
+                    out.append(XRAxisFrame(model: mat(p.aimPosition, p.aimRotation), length: 0.18, thickness: 0.003))    // apuntado del sistema
+                }
+            }
+            // Los marcos de C ya vienen en el espacio recentrado.
+            if let h = capi(1, Int32(hand)) { out.append(XRAxisFrame(model: h, length: 0.08, thickness: 0.005)) }        // mano del personaje (IK)
+        }
+        if let w = capi(2, 0) { out.append(XRAxisFrame(model: w, length: 0.22, thickness: 0.002)) }                        // arma
+        return out
     }
 
     /// Coloca el radar de muñeca en el antebrazo izquierdo: pose tras la IK del cuerpo; sin ella, el agarre del mando izquierdo.

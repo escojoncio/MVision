@@ -350,6 +350,10 @@ struct XRLayerConfiguration: CompositorLayerConfiguration {
 
 /// Escena inmersiva (estilo .full) que registra MVApp.
 struct XRImmersiveScene: Scene {
+    /// Ocultar las manos y brazos reales del usuario durante el espacio inmersivo (se ven los del personaje). Preferencia del sistema
+    /// (`upperLimbVisibility`: solo una petición, SwiftUI visionOS 1+ en Scene y View). Se cambia desde el menú VR (`xr.view.hideHands`).
+    @AppStorage("xr.view.hideHands") private var hideRealHands = true
+
     var body: some Scene {
         ImmersiveSpace(id: XRSession.spaceID) {
             CompositorLayer(configuration: XRLayerConfiguration()) { layerRenderer in
@@ -357,5 +361,6 @@ struct XRImmersiveScene: Scene {
             }
         }
         .immersionStyle(selection: .constant(.full), in: .full)
+        .upperLimbVisibility(hideRealHands ? .hidden : .automatic)
     }
 }
