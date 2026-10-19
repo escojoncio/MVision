@@ -55,8 +55,8 @@ test: $(OUT)/test_runtime $(OUT)/test_interp $(OUT)/test_hlebind $(OUT)/test_cdi
 	$(OUT)/test_cdimg
 
 # Tabla nombre -> hle_<nombre> (hle_table.c va en el repo; esta regla la regenera tras tocar hle*.txt).
-# Incluye las HLE de la capa de cámara VR (vr/camera/hle_vrcam.txt); hle_vrcam_weak.c aporta los símbolos si no se enlaza vr_camera_hle.c.
-HLETXT = $(wildcard hle*.txt) ../vr/camera/hle_vrcam.txt
+# Incluye las HLE de las capas VR (cámara, cuerpo, radar, disparo); hle_vrcam_weak.c y hle_vrfire_weak.c aportan los símbolos si no se enlazan las reales.
+HLETXT = $(wildcard hle*.txt) ../vr/camera/hle_vrcam.txt ../vr/body/hle_vrbody.txt ../vr/radar/hle_vrradar.txt ../vr/gameplay/hle_vrfire.txt
 .PHONY: hle_table check_hle_table
 hle_table:
 	python3 ../tools/recomp/hletab.py $(HLETXT) > hle_table.c

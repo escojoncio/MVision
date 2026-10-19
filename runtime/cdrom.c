@@ -291,6 +291,13 @@ int cd_select_disc(int n) {
     return 0;
 }
 int cd_current_disc(void) { return cur; }
+int cd_current_source(char *path, size_t n, int *is_dir) {
+    if (!ndiscs || !path || !n) return -1;
+    const Disc *d = &discs[cur];
+    if (snprintf(path, n, "%s", d->root) >= (int)n) return -1;
+    if (is_dir) *is_dir = d->img == NULL;
+    return 0;
+}
 int cd_disc_count(void) { return ndiscs; }
 
 int cd_find(const char *path, uint32_t *lba, uint32_t *size) {
@@ -387,6 +394,36 @@ static void invoke2(Cpu *c, uint32_t fn, uint32_t a0, uint32_t a1) {
 
 static void stat_result(uint8_t *r) { memset(r, 0, 8); r[0] = 0x02 | (reading ? 0x20 : 0); }
 
+/* Ritmo de entrega: la unidad real da 75 (x1) o 150 (x2, modo 0x80) sectores/s. El juego depende de ello:
+ * su cargador procesa los ficheros de recursos conforme llegan los datos y descomprime cada imagen en
+ * un bloque temporal que solo se recicla al empezar el siguiente frame de dibujo; con datos ilimitados
+ * agota el pool en un único frame y descarta imágenes (p. ej. el texto parpadeante del título). El
+ * crédito se mide en tiempo virtual (sectores * CD_HZ); MV_CDFAST=1 vuelve al cupo fijo de 16 por IRQ. */
+#define CD_HZ 33868800u
+#define CD_BURST 16
+/* Sectores a entregar tras dt ciclos virtuales: acumula en *credit (sectores * CD_HZ) a 75/s (x1) o 150/s (x2), con tope de
+ * CD_BURST para que una pausa larga del anfitrión no provoque un chorro. Función pura (probada en test_cdimg). */
+uint32_t cd_rate_take(uint64_t *credit, uint64_t dt, int dbl) {
+    *credit += dt * (dbl ? 150u : 75u);
+    if (*credit > (uint64_t)CD_BURST * CD_HZ) *credit = (uint64_t)CD_BURST * CD_HZ;
+    uint32_t n = (uint32_t)(*credit / CD_HZ);
+    *credit -= (uint64_t)n * CD_HZ;
+    return n;
+}
+static uint64_t cd_t0, cd_credit;
+void cd_rate_reset(void) { cd_t0 = sys_cycles(); cd_credit = 0; }
+static int cd_allow(void) {
+    static int fast = -1;
+    if (fast < 0) { const char *e = getenv("MV_CDFAST"); fast = e && *e && *e != '0'; }
+    if (fast) return CD_BURST;
+    static unsigned mult;
+    if (!mult) { const char *e = getenv("MV_CDX"); mult = e && atoi(e) > 0 ? (unsigned)atoi(e) : 1; }
+    uint64_t now = sys_cycles();
+    uint32_t n = cd_rate_take(&cd_credit, (now > cd_t0 ? now - cd_t0 : 0) * mult, (mode & 0x80) != 0);
+    cd_t0 = now;
+    return (int)n;
+}
+
 static void deliver(Cpu *c, int max) {
     if (in_delivery) return;
     in_delivery = 1;
@@ -431,7 +468,8 @@ void cd_pump(Cpu *c) {
         for (int i = 0; i < 8; i++) mem_w8(c, RESULT_ADDR + i, r[i]);
         invoke2(c, sync_cb, code, RESULT_ADDR);
     }
-    deliver(c, 16);
+    if (in_delivery) return;   /* reentrada: no consumir crédito que deliver() descartaría */
+    if (reading) deliver(c, cd_allow()); else cd_rate_reset();
 }
 int cd_busy(void) { return syncq_n || (reading && !in_delivery); }
 
@@ -458,6 +496,7 @@ static int control(Cpu *c, uint32_t com, uint32_t param, uint32_t result) {
         if (ndiscs && (pos == discs[cur].dir_a || pos == discs[cur].dir_b)) {
             if (++rescans > 3 && ndiscs > 1) { cd_select_disc(cur ^ 1); rescans = 0; }
         } else if (pos > 23) rescans = 0;
+        if (!reading) cd_rate_reset();
         reading = 1;
         break;
     case 0x09: case 0x08: case 0x0A: /* Pause / Stop / Init */

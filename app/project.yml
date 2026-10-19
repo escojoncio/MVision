@@ -49,6 +49,11 @@ targets:
           - "$(SRCROOT)/.stage/vr/camera"
           - "$(SRCROOT)/.stage/vr/input"
           - "$(SRCROOT)/.stage/vr/host"
+          - "$(SRCROOT)/.stage/vr/body"
+          - "$(SRCROOT)/.stage/vr/radar"
+          - "$(SRCROOT)/.stage/vr/hands"
+          - "$(SRCROOT)/.stage/vr/weapons"
+          - "$(SRCROOT)/.stage/vr/gameplay"
           - "$(SRCROOT)/.stage/metal"
         MTL_HEADER_SEARCH_PATHS: "$(SRCROOT)/.stage/metal"
         GENERATE_INFOPLIST_FILE: NO

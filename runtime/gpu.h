@@ -108,9 +108,20 @@ typedef struct {
     uint32_t data_off, data_n; /* UPLOAD: píxeles (uint16) en GpuDrawList.data, por filas */
     uint32_t seq;            /* orden global desde enable */
     int16_t dox, doy;        /* offset de dibujo E5 vigente (ya sumado en v[].x,y y fx,fy; restarlo da la coordenada cruda de la GTE) */
+    uint8_t fbk;             /* POLY/RECT texturizado: 1 = REALIMENTACIÓN resuelta (ver abajo); fbt vale */
+    uint16_t fbt;            /* con fbk: texel único muestreado (RGB555 + bit15 = semitransparente) tras CLUT, con la VRAM del oráculo justo antes de dibujar; 0 = transparente (no pinta nada) */
     float proj_h, proj_ox, proj_oy; /* POLY/LINE con algún vértice vvalid: H de la GTE y OFX/OFY en píxeles (0 si no). Con
                                      * ellos y vx,vy,vz se re-proyecta por ojo: x = proj_ox + proj_h*(vx -/+ e)/vz. */
 } GpuOp;
+
+/* Realimentación: polígonos/sprites texturizados cuya textura (o CLUT) cae en el área de dibujo o de visualización (el frame buffer que
+ * se está pintando) y que muestrean UN solo texel (tras CLUT) en todos sus píxeles (cubren <= 2 texels por eje). El consumidor que
+ * recibe la VRAM solo por eventos NO ve lo dibujado por primitivas, así que ese texel sería obsoleto: la captura lo resuelve y lo deja
+ * en GpuOp.fbk/fbt. El consumidor debe tratar la primitiva como NO texturizada, con color = color de vértice * fbt / 128 (como la GPU:
+ * (texel5 * color) >> 4 por canal; TEXTURA CRUDA: el texel tal cual), semitransparente (modo abr) solo si GPU_F_SEMI && fbt bit 15, y
+ * descartada si fbt == 0. El rasterizador de referencia (ref_raster) no usa estos campos: sigue leyendo la VRAM. */
+typedef struct { uint32_t cand, baked, cleared, nonuniform; } GpuFbStats;   /* candidatas en frame buffer / resueltas con texel / resueltas transparentes / con >1 valor (sin resolver) */
+extern GpuFbStats gpu_fb_stats;
 
 enum { GPU_CLOSE_FLIP = 1, GPU_CLOSE_VBLANK = 2 };
 
@@ -136,6 +147,12 @@ uint32_t gpu_capture_dropped(void);
 /* Número de secuencia (GpuOp.seq) que tendrá la PRÓXIMA primitiva capturada: permite a un sustituto HLE delimitar qué
  * primitivas emitió una llamada (p.ej. un envío de lista al GPU): las que cumplan antes <= seq < después. */
 uint32_t gpu_capture_seq(void);
+/* Marcas en la lista de dibujo: un paquete GP0 con comando 0x04 (NOP en el hardware real y en el oráculo) y carga útil de
+ * 24 bits `id` llama al gancho (si la captura está encendida) con el id y el número de secuencia que tendrá la PRÓXIMA primitiva
+ * capturada. Permite a un sustituto HLE, que inserta paquetes de marca en la OT antes/después de lo que dibuja una función, delimitar
+ * qué primitivas capturadas son suyas (rango de seq): el dibujo real ocurre más tarde, al recorrer la tabla de ordenación. Se llama en el hilo de emulación. */
+typedef void (*GpuMarkHook)(uint32_t id, uint32_t seq);
+void gpu_capture_set_mark_hook(GpuMarkHook h);
 
 /* Enlace antiguo (solo float, sin vista) con la GTE; el actual es gpu_capture_hiprec / GpuHpHook (abajo). Dado el SXY entero que escribió el juego (sin offset, con signo), devuelve 1 y
  * rellena la posición float si el último RTPS/RTPT produjo exactamente ese SXY. La GTE (gte.c) mantendrá una

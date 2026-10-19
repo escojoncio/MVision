@@ -70,6 +70,11 @@
  *   semitransparente y ANTES de componer el panel HUD (que no se distorsiona). Si filter.active==0 no hay nada que aplicar.
  *   Con opts.screen_filter=0 estas primitivas vuelven a la clase 2 (comportamiento anterior).
  *
+ * Realimentación (GpuOp.fbk, gpu.h): polígonos/rects 2D texturizados que muestrean UN texel del frame buffer (área de dibujo/visualización) que se
+ *   está dibujando. La VRAM del renderer solo recibe eventos (fill/subida/copia), no lo pintado por primitivas, así que leerían un valor viejo.
+ *   Aquí salen SIN textura (flags sin TEXTURED/RAW), con color = color de vértice * texel / 128 (crudo: el texel), semitransparentes solo si
+ *   GPU_F_SEMI y el bit 15 del texel; texel 0 = transparente => no se emiten (VrStats.n_fb_clear). Solo clases 2D (los 3D con fbk se tratan como antes).
+ *
  * Orden y VRAM
  *   - Los vértices de cada clase mantienen el orden de dibujo original. Los batches se emiten por "épocas": una
  *     época es el tramo de la lista entre dos eventos de VRAM (GPU_OP_FILL / GPU_OP_VCOPY / GPU_OP_UPLOAD). Dentro
@@ -138,6 +143,8 @@ typedef struct {
     uint32_t n_filter_polys, n_filter_rects; /* primitivas 2D de filtro de pantalla mandadas a kind 3 (copias de pantalla) */
     uint32_t n_filter_cover;  /* recubrimientos semitransparentes a pantalla completa mandados a kind 3 */
     uint32_t n_filter_tris;   /* triángulos kind 3 */
+    uint32_t n_fb_baked;      /* triángulos 2D de primitivas de realimentación convertidos a color plano (GpuOp.fbk; ver "Realimentación") */
+    uint32_t n_fb_clear;      /* primitivas de realimentación con texel transparente (0): descartadas */
     uint32_t n_clear;         /* rects opacos sin textura a pantalla completa (borrado/máscara); no se emiten con opts.drop_clear (def.) */
 } VrStats;
 

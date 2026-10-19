@@ -17,6 +17,8 @@ const FuncName rt_func_names[] = {{0xFFFFFFFFu, ""}};
 const unsigned rt_func_name_count = 0;
 const uint32_t rt_entry = 0;
 
+static uint8_t *stage_ref;
+static size_t stage_ref_n;
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FALLO %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
 
@@ -28,7 +30,26 @@ static void wfile(const char *dir, const char *name, size_t n, unsigned seed) {
     fclose(f);
 }
 
+/* Ritmo de entrega de sectores: x2 = 3 por frame PAL (150/s), x1 = 1,5; sin chorro tras una pausa larga. */
+static void test_rate(void) {
+    uint64_t cr = 0, tot = 0;
+    const uint64_t frame = 33868800u / 50;
+    for (int i = 0; i < 50; i++) { uint32_t n = cd_rate_take(&cr, frame, 1); CHECK(n == 3); tot += n; }
+    CHECK(tot == 150);
+    cr = 0; tot = 0;
+    for (int i = 0; i < 100; i++) { uint32_t n = cd_rate_take(&cr, frame, 0); CHECK(n == 1 || n == 2); tot += n; }
+    CHECK(tot == 150);                                   /* 75/s durante 2 s */
+    cr = 0;
+    CHECK(cd_rate_take(&cr, 33868800ull * 10, 1) == 16);  /* tope de ráfaga */
+    CHECK(cd_rate_take(&cr, 0, 1) == 0);                  /* sin tiempo no hay sectores */
+    cr = 0;
+    uint64_t sub = 33868800u / 150 - 1;                   /* justo menos de un sector */
+    CHECK(cd_rate_take(&cr, sub, 1) == 0);
+    CHECK(cd_rate_take(&cr, 2, 1) == 1);
+}
+
 int main(void) {
+    test_rate();
     char root[] = "/tmp/mvcdimgXXXXXX";
     if (!mkdtemp(root)) { perror("mkdtemp"); return 1; }
     char d[1024], img[1024], img1[1024];
@@ -38,16 +59,42 @@ int main(void) {
     {   /* SYSTEM.CNF legible para la identificación por contenido */
         char p[1100]; snprintf(p, sizeof p, "%s/SYSTEM.CNF", d);
         FILE *sf = fopen(p, "wb");
-        fputs("BOOT = cdrom:\\SLES_017.34;1\r\nTCB = 4\r\nEVENT = 16\r\nSTACK = 801FFFF0\r\n", sf);
+        fputs("BOOT = cdrom:\\SLES_000.42;1\r\nTCB = 4\r\nEVENT = 16\r\nSTACK = 801FFFF0\r\n", sf);
         fclose(sf);
     }
     wfile(d, "BOOT.EXE", 5000, 2);
     wfile(sub, "B.DAT", 3000, 3);
     wfile(sub, "C.STR", 4 * 2336, 4);
+    {   /* archivo de stages sintético (tabla de entradas nombre[8] + sector, >= 1 MiB) entre ficheros que no lo son */
+        char p[1100]; snprintf(p, sizeof p, "%s/STG.DAT", sub);
+        size_t n = (1u << 20) + 5000;
+        uint8_t *b = malloc(n);
+        for (size_t i = 0; i < n; i++) b[i] = (uint8_t)((i * 7 + (i >> 9)) & 255);
+        uint32_t tsz = 12 * 4;
+        memcpy(b, &tsz, 4);
+        static const char *nm[4] = {"init", "st01", "st02", "st03"};
+        for (uint32_t i = 0; i < 4; i++) {
+            uint32_t sec = 2 + i * 3;
+            memset(b + 4 + 12 * i, 0, 12);
+            memcpy(b + 4 + 12 * i, nm[i], strlen(nm[i]));
+            memcpy(b + 4 + 12 * i + 8, &sec, 4);
+        }
+        FILE *sf = fopen(p, "wb"); fwrite(b, 1, n, sf); fclose(sf);
+        stage_ref = b; stage_ref_n = n;
+    }
     snprintf(img, sizeof img, "%s/disc.bin", root);
     snprintf(img1, sizeof img1, "%s/disc1.bin", root);
 
     CHECK(cd_open(d) == 1);
+    {   /* origen del disco montado y carga del archivo de stages desde la carpeta */
+        char src[1100]; int isd = -1;
+        CHECK(cd_current_source(src, sizeof src, &isd) == 0 && isd == 1 && !strcmp(src, d));
+        CHECK(cd_current_source(src, 4, &isd) != 0);          /* búfer corto: error, no trunca en silencio */
+        size_t ln = 0;
+        uint8_t *a = disc_load_stage_archive(d, 1, &ln);
+        CHECK(a && ln == stage_ref_n && !memcmp(a, stage_ref, ln));
+        free(a);
+    }
     uint8_t pvd[2048];
     CHECK(cd_read_sector(16, pvd, 0) == 0 && !memcmp(pvd + 1, "CD001", 5));
     uint32_t total = 0;
@@ -110,21 +157,33 @@ int main(void) {
         CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
     }
 
+    {   /* archivo de stages desde la imagen (MODE2 y MODE1): mismo contenido; sin tabla de stages (disco sin él) = NULL */
+        for (int v = 0; v < 2; v++) {
+            size_t ln = 0;
+            uint8_t *a = disc_load_stage_archive(v ? img1 : img, 0, &ln);
+            CHECK(a && ln == stage_ref_n && !memcmp(a, stage_ref, ln));
+            free(a);
+        }
+        size_t ln = 7;
+        CHECK(disc_load_stage_archive("/nonexistent/x.bin", 0, &ln) == NULL && ln == 0);
+        CHECK(disc_load_stage_archive("/nonexistent", 1, &ln) == NULL);
+    }
+
     /* Rutas y .cue como los de un volcado real: espacios, corchetes y paréntesis en carpeta y nombre, CRLF, BOM, comillas
      * o no, '\' en el nombre; escaneo de carpeta; errores de E/S (fichero truncado tras abrir) sin cuelgue ni caché envenenada. */
     {
         char dir[1200], bin[1400], cue[1400], cmd[3000];
-        snprintf(dir, sizeof dir, "%s/MGS Vision/[SLES-01734] (Spain)", root);
+        snprintf(dir, sizeof dir, "%s/Carpeta Juego/[SLES-00042] (Region)", root);
         snprintf(cmd, sizeof cmd, "mkdir -p '%s'", dir);
         if (system(cmd)) {}
-        snprintf(bin, sizeof bin, "%s/SLES-01734 (Spain) (Disc 1).bin", dir);
-        snprintf(cue, sizeof cue, "%s/SLES-01734 (Spain) (Disc 1).cue", dir);
+        snprintf(bin, sizeof bin, "%s/SLES-00042 (Region) (Disc 1).bin", dir);
+        snprintf(cue, sizeof cue, "%s/SLES-00042 (Region) (Disc 1).cue", dir);
         snprintf(cmd, sizeof cmd, "cp '%s' '%s'", img, bin);
         CHECK(system(cmd) == 0);
         static const char *cues[] = {
-            "FILE \"SLES-01734 (Spain) (Disc 1).bin\" BINARY\r\n  TRACK 01 MODE2/2352\r\n    INDEX 01 00:00:00\r\n",
-            "\xEF\xBB\xBF" "FILE SLES-01734 (Spain) (Disc 1).bin BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n",
-            "file \"x\\sles-01734 (spain) (disc 1).BIN\" binary\n  track 01 mode2/2352\n    index 01 00:00:00\n",
+            "FILE \"SLES-00042 (Region) (Disc 1).bin\" BINARY\r\n  TRACK 01 MODE2/2352\r\n    INDEX 01 00:00:00\r\n",
+            "\xEF\xBB\xBF" "FILE SLES-00042 (Region) (Disc 1).bin BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n",
+            "file \"x\\sles-00042 (region) (disc 1).BIN\" binary\n  track 01 mode2/2352\n    index 01 00:00:00\n",
         };
         uint8_t ref[2340], got[2340];
         for (unsigned v = 0; v < sizeof cues / sizeof *cues; v++) {
@@ -136,7 +195,7 @@ int main(void) {
             if (!h) continue;
             CHECK(disc_img_sectors(h) == total && disc_img_tracks(h) == 1 && disc_img_nfiles(h) == 1);
             DiscId id;
-            CHECK(disc_img_identify(h, &id) == 0 && id.serial == 1734 && !strcmp(id.datadir, "DATA"));
+            CHECK(disc_img_identify(h, &id) == 0 && id.serial == 42 && !strcmp(id.datadir, "DATA"));
             uint8_t a[2048], b[2048];
             for (uint32_t l = 0; l < total; l += 7) {
                 CHECK(disc_img_read_user(h, l, a) == 0);
@@ -147,8 +206,8 @@ int main(void) {
             disc_img_close(h);
         }
         DiscEntry ents[4];
-        snprintf(cmd, sizeof cmd, "%s/MGS Vision", root);
-        CHECK(disc_scan_dir(cmd, ents, 4) == 1 && !ents[0].is_dir && strstr(ents[0].path, "[SLES-01734] (Spain)/") != NULL);
+        snprintf(cmd, sizeof cmd, "%s/Carpeta Juego", root);
+        CHECK(disc_scan_dir(cmd, ents, 4) == 1 && !ents[0].is_dir && strstr(ents[0].path, "[SLES-00042] (Region)/") != NULL);
         /* montaje por cd_open con la ruta tal cual (disco 2 tras la carpeta) */
         CHECK(cd_open(cue) == 2);
         cd_select_disc(1);

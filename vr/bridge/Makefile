@@ -35,7 +35,7 @@ $(OUT)/bridge_dump: bridge_dump.c bridge.c bridge_addrs.c bridge.h bridge_addrs.
 	clang -I. -I$(RT) -I$(GEN) -O2 -g -Wall -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
 	  -o $@ bridge_dump.c bridge.c bridge_addrs.c $(RTSRC) $(GEN)/*.c $(OVOBJ)
 dump: $(OUT)/bridge_dump
-# Guion que entra en partida (hacia el fotograma 3000-4000); ARGS añade/ajusta opciones
+# Guion que entra en partida (hacia el fotograma 3300-4400; el disco va a ritmo real); ARGS añade/ajusta opciones
 SCRIPT ?= --pad 120:start,400:start --pad-every 97:circle --pad-every 211:left
 run: dump
 	MV_DISC=$(DISC) $(OUT)/bridge_dump $(EXE) $(ARGS)

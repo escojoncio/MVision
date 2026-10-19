@@ -602,3 +602,96 @@ int disc_extract_dataexe(const char *path, int is_dir, const char *outfile) {
     if (rc) remove(outfile);
     return rc;
 }
+
+/* ---------------- archivo de stages en memoria ---------------- */
+
+/* Comienzo del fichero: u32 tamaño de tabla (múltiplo de 12) y entradas {nombre[8] ASCII relleno de ceros, sector u32} con
+ * sectores dentro del fichero. size = tamaño del fichero en bytes. */
+static int looks_like_stage_table(const uint8_t *b, size_t have, uint64_t size) {
+    if (have < 16 || size < (1u << 20)) return 0;
+    uint32_t tsz = rd32(b);
+    if (!tsz || tsz % 12 || tsz > 2040 || 4u + tsz > have) return 0;
+    uint32_t n = tsz / 12, ok = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint8_t *e = b + 4 + 12 * i;
+        int k = 0, bad = 0;
+        while (k < 8 && e[k]) { if (!(isalnum(e[k]) || e[k] == '_')) bad = 1; k++; }
+        for (int j = k; j < 8; j++) if (e[j]) bad = 1;
+        if (bad || !k) return 0;
+        if ((uint64_t)rd32(e + 8) * DISC_USER >= size) return 0;
+        ok++;
+    }
+    return ok >= 4;
+}
+
+#define STAGE_MAX_BYTES (512u << 20)
+
+uint8_t *disc_load_stage_archive(const char *path, int is_dir, size_t *len) {
+    if (len) *len = 0;
+    if (!path) return NULL;
+    DiscId id;
+    uint8_t *out = NULL;
+    if (is_dir) {
+        if (disc_dir_identify(path, &id) || !id.datadir[0]) return NULL;
+        char dp[2048];
+        if (snprintf(dp, sizeof dp, "%s/%s", path, id.datadir) >= (int)sizeof dp) return NULL;
+        DIR *d = opendir(dp);
+        if (!d) return NULL;
+        struct dirent *e;
+        while (!out && (e = readdir(d))) {
+            if (e->d_name[0] == '.') continue;
+            char fp[2304];
+            if (snprintf(fp, sizeof fp, "%s/%s", dp, e->d_name) >= (int)sizeof fp) continue;
+            FILE *f = fopen(fp, "rb");
+            if (!f) continue;
+            uint8_t hd[2048];
+            size_t hn = fread(hd, 1, sizeof hd, f);
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            if (sz > 0 && (uint64_t)sz <= STAGE_MAX_BYTES && looks_like_stage_table(hd, hn, (uint64_t)sz)) {
+                uint8_t *buf = malloc((size_t)sz);
+                rewind(f);
+                if (buf && fread(buf, 1, (size_t)sz, f) == (size_t)sz) { out = buf; if (len) *len = (size_t)sz; }
+                else free(buf);
+            }
+            fclose(f);
+        }
+        closedir(d);
+        return out;
+    }
+    DiscImg *h = disc_img_open(path);
+    if (!h) return NULL;
+    uint8_t sec[DISC_USER];
+    IsoEnt *ents = NULL, *sub = NULL;
+    if (disc_img_identify(h, &id) || !id.datadir[0]) goto done;
+    if (disc_img_read_user(h, 16, sec) || memcmp(sec + 1, "CD001", 5)) goto done;
+    ents = malloc(ISO_MAX * sizeof *ents); sub = malloc(ISO_MAX * sizeof *sub);
+    if (!ents || !sub) goto done;
+    {
+        int n = iso_list(h, rd32(sec + 156 + 2), rd32(sec + 156 + 10), ents, ISO_MAX);
+        for (int i = 0; i < n && !out; i++) {
+            if (!ents[i].dir || strcasecmp(ents[i].name, id.datadir)) continue;
+            int m = iso_list(h, ents[i].lba, ents[i].size, sub, ISO_MAX);
+            for (int j = 0; j < m && !out; j++) {
+                if (sub[j].dir || sub[j].size < (1u << 20) || sub[j].size > STAGE_MAX_BYTES) continue;
+                if (disc_img_read_user(h, sub[j].lba, sec) || !looks_like_stage_table(sec, DISC_USER, sub[j].size)) continue;
+                uint8_t *buf = malloc(sub[j].size);
+                if (!buf) continue;
+                uint32_t ns = (sub[j].size + DISC_USER - 1) / DISC_USER;
+                int bad = 0;
+                for (uint32_t s = 0; s < ns && !bad; s++) {
+                    uint8_t b[DISC_USER];
+                    if (disc_img_read_user(h, sub[j].lba + s, b)) { bad = 1; break; }
+                    uint32_t k = sub[j].size - s * DISC_USER;
+                    memcpy(buf + (size_t)s * DISC_USER, b, k < DISC_USER ? k : DISC_USER);
+                }
+                if (bad) { free(buf); continue; }
+                out = buf; if (len) *len = sub[j].size;
+            }
+        }
+    }
+done:
+    free(ents); free(sub);
+    disc_img_close(h);
+    return out;
+}

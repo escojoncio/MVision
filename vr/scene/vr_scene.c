@@ -144,6 +144,19 @@ static int clip_near(const CV *in, int n, float zn, CV *out) {
     return m;
 }
 
+/* Realimentación (GpuOp.fbk, ver gpu.h): color de vértice modulado por el texel único que la captura resolvió, como lo hace la GPU
+ * ((texel5 * c) >> 4 por canal; crudo: el texel). Devuelve el RGBA empaquetado (a=255). */
+static uint32_t fb_color(const GpuOp *op, const GpuVtx *c) {
+    uint16_t t = op->fbt;
+    uint8_t out[3];
+    for (int k = 0; k < 3; k++) {
+        int t5 = (t >> (5 * k)) & 31, e = (t5 << 3) | (t5 >> 2);
+        int cc = k == 0 ? c->r : k == 1 ? c->g : c->b;
+        out[k] = (op->flags & GPU_F_RAW) ? (uint8_t)e : q8(e * (float)cc / 128.0f);
+    }
+    return pack_rgba(out[0], out[1], out[2]);
+}
+
 static int has_player_ok(const BridgeState *bs) {
     return bs && bs->has_player && (bs->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE;
 }
@@ -394,8 +407,10 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             if (nval && !o.partial_to_2d) { out->stats.drop_partial++; continue; }
             out->stats.n_poly2d++;
             if (o.drop_2d_all) continue;
+            int fb = op->fbk != 0;
+            if (fb && !op->fbt) { out->stats.n_fb_clear++; continue; }   /* texel 0 = transparente: no pinta nada */
             int fcls = 0;
-            {
+            if (!fb) {
                 int bx0 = 1 << 20, by0 = 1 << 20, bx1 = -(1 << 20), by1 = -(1 << 20), bu0 = 1 << 20, bv0 = 1 << 20, bu1 = -(1 << 20), bv1 = -(1 << 20);
                 for (int k = 0; k < nv; k++) {
                     const GpuVtx *g = &op->v[k];
@@ -411,15 +426,23 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                     const GpuVtx *g = &op->v[idx[q][k]];
                     fill_vtx(&t->v[k], op, g, gour, (uint16_t)(f | VR_F_2D | (fcls ? VR_F_FILTER : 0)), sid);
                     t->v[k].pos[0] = g->x; t->v[k].pos[1] = g->y; t->v[k].pos[2] = 0;
+                    if (fb) {   /* sin textura: color = vértice * texel; flags sin TEXTURED/RAW */
+                        t->v[k].rgba = fb_color(op, gour ? g : &op->v[0]);
+                        t->v[k].uv[0] = t->v[k].uv[1] = 0; t->v[k].flags &= (uint16_t)~(GPU_F_TEXTURED | GPU_F_RAW);
+                    }
                 }
-                t->ev_end = g_next[i]; t->src_op = i; t->kind = fcls ? 3 : 2; t->blend = semi ? (op->abr & 3) : 0xFF;
+                int semi_e = fb ? semi && (op->fbt & 0x8000) : semi;
+                t->ev_end = g_next[i]; t->src_op = i; t->kind = fcls ? 3 : 2; t->blend = semi_e ? (op->abr & 3) : 0xFF;
+                if (fb) out->stats.n_fb_baked++;
                 out->stats.n_tris2d += fcls ? 0 : 1; out->stats.n_filter_tris += fcls ? 1 : 0;
             }
         } else if (op->type == GPU_OP_RECT) {
             out->stats.n_rect++;
             if (o.drop_2d_all) continue;
             const GpuVtx *g = &op->v[0];
-            int fcls = filter_class(&o, dl, op, 1, g->x, g->y, g->x + op->rw, g->y + op->rh, g->u, g->v, g->u, g->v);
+            int fb = op->fbk != 0;
+            if (fb && !op->fbt) { out->stats.n_fb_clear++; continue; }
+            int fcls = fb ? 0 : filter_class(&o, dl, op, 1, g->x, g->y, g->x + op->rw, g->y + op->rh, g->u, g->v, g->u, g->v);
             if (fcls) filter_note(out, op, fcls, 1, &tint_w);
             else if (!semi && !(op->flags & GPU_F_TEXTURED) && (double)op->rw * op->rh >= 0.9 * (double)dl->disp.w * dl->disp.h) {
                 /* borrado/máscara a pantalla completa: en el panel HUD (alfa premultiplicado, cleared a transparente) lo dejaría OPACO e
@@ -439,8 +462,14 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                     fill_vtx(&t->v[k], op, g, 0, (uint16_t)(f | VR_F_2D | VR_F_RECT | (fcls ? VR_F_FILTER : 0)), sid);
                     t->v[k].pos[0] = cx[j]; t->v[k].pos[1] = cy[j]; t->v[k].pos[2] = 0;
                     t->v[k].uv[0] = cu[j]; t->v[k].uv[1] = cv[j];
+                    if (fb) {
+                        t->v[k].rgba = fb_color(op, g);
+                        t->v[k].uv[0] = t->v[k].uv[1] = 0; t->v[k].flags &= (uint16_t)~(GPU_F_TEXTURED | GPU_F_RAW | GPU_F_FLIPX | GPU_F_FLIPY);
+                    }
                 }
-                t->ev_end = g_next[i]; t->src_op = i; t->kind = fcls ? 3 : 2; t->blend = semi ? (op->abr & 3) : 0xFF;
+                int semi_e = fb ? semi && (op->fbt & 0x8000) : semi;
+                t->ev_end = g_next[i]; t->src_op = i; t->kind = fcls ? 3 : 2; t->blend = semi_e ? (op->abr & 3) : 0xFF;
+                if (fb) out->stats.n_fb_baked++;
                 out->stats.n_tris2d += fcls ? 0 : 1; out->stats.n_filter_tris += fcls ? 1 : 0;
             }
         } else { /* LINE: cuadrilátero de 1 px */

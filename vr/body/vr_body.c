@@ -346,6 +346,10 @@ static struct {
     int armed;
     VrBodyStats st;
     VrBodyDebug dbg[2];
+    /* vista del último apply (para volver del mundo del motor al espacio del usuario en vrbody_forearm_pose) */
+    int view_ok;
+    float view_eye[3], view_pref[3], view_T[9], view_upm;
+    float fore_q[2][4];                /* orientación de la mano (espacio del usuario, con hand_rot_offset) del último apply */
     /* copia de lo escrito en el último apply, hasta vrbody_restore */
     int pending;
     int pend_n;
@@ -558,6 +562,7 @@ int vrbody_apply(uint8_t *ram) {
     /* relación usuario -> mundo del motor */
     float th = (view.theta_deg + 180.0f) * DEG, cs = cosf(th), sn = sinf(th);
     const float T[9] = {cs, 0, sn, 0, 1, 0, -sn, 0, cs};
+    G.view_ok = 1; v_cp(G.view_eye, view.eye); v_cp(G.view_pref, view.p_ref); memcpy(G.view_T, T, sizeof T); G.view_upm = view.units_per_m;
 
     int driven = 0, ns = 0;
     for (int s = 0; s < 2; s++) {
@@ -590,6 +595,7 @@ int vrbody_apply(uint8_t *ram) {
         float Pw[3]; m_mulv(Pw, T, Pm); v_scale(Pw, Pw, view.units_per_m); v_add(Pw, Pw, view.eye);
         float Ru[9], Rq[4];
         { float qo[4] = {cfg->hand_rot_offset[s][0], cfg->hand_rot_offset[s][1], cfg->hand_rot_offset[s][2], cfg->hand_rot_offset[s][3]}; q_normalize(qo); q_mul(Rq, h->q, qo); }
+        memcpy(G.fore_q[s], Rq, sizeof Rq);
         vrbody_quat_to_mat(Rq, Ru);
         float Rw[9]; m_mulm(Rw, T, Ru);                                    /* ejes del marco de mano en el mundo */
         float zc[3]; m_col(zc, Rw, 2);
@@ -656,4 +662,31 @@ int vrbody_apply(uint8_t *ram) {
     G.st.arms_driven += (uint32_t)driven;
     if (driven && G.hook) G.hook(ram);
     return driven;
+}
+
+/* Antebrazo tras la IK, en el espacio del usuario (metros): codo y muñeca resueltos (con los límites aplicados) y la dirección
+ * del dorso (eje +Y del marco de mano de vr_pose.h, sin la componente a lo largo del hueso). Solo vale tras un vrbody_apply que
+ * moviera ese brazo y con el fundido casi completo; si no, 0 y el llamador usa otra fuente (la pose del mando). */
+int vrbody_forearm_pose(int side, VrBodyForearm *out) {
+    if (!out || (side != 0 && side != 1) || !G.view_ok) return 0;
+    const VrBodyDebug *d = &G.dbg[side];
+    if (!d->driven || d->w < 0.3f || !(G.view_upm > 1.0f)) return 0;
+    float tr[9]; m_transpose(tr, G.view_T);
+    const float *src[2] = {d->sol.elbow, d->sol.wrist};
+    float *dst[2] = {out->elbow, out->wrist};
+    for (int k = 0; k < 2; k++) {
+        float v[3]; v_sub(v, src[k], G.view_eye);
+        m_mulv(v, tr, v);
+        v_scale(v, v, 1.0f / G.view_upm);
+        v_add(dst[k], v, G.view_pref);
+        if (!all_finite(dst[k], 3)) return 0;
+    }
+    float Ru[9], dorsal[3], bone[3], b[3];
+    vrbody_quat_to_mat(G.fore_q[side], Ru);
+    m_col(dorsal, Ru, 1);
+    v_sub(bone, out->wrist, out->elbow);
+    if (v_norm(b, bone, NULL) < 1e-4f) return 0;
+    float tmp[3]; v_madd(tmp, dorsal, b, -v_dot(dorsal, b));
+    if (v_norm(out->dorsal, tmp, NULL) < 1e-3f) return 0;
+    return 1;
 }

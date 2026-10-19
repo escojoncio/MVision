@@ -84,6 +84,9 @@ int  vrhands_build(VrHandsRig *r, const WeaponState *s, const VrHandsPose *weapo
  * en un búfer que no se toca hasta la siguiente llamada. vrhands_post_clear() publica "nada". */
 void vrhands_post(const VrHandsFrame *f);
 void vrhands_post_clear(void);
+/* Lo último publicado, en un búfer que no se toca hasta la siguiente llamada (mismas reglas que mv_host_hands, que es su envoltorio
+ * débil; marca el frame como "en uso" hasta mv_host_hands_done). 1 si hay algo que dibujar. */
+int vrhands_fetch(VrHandsFrame *out);
 /* Liberar un arma enlazada (vértices, índices, atlas): los punteros de un frame publicado apuntan a ESOS datos y el renderer
  * los lee en su hilo al subir una malla/textura nueva. Orden seguro: vrhands_post_clear(); esperar a que
  * vrhands_render_busy() sea 0 (el renderer llama a mv_host_hands_done() al terminar de usar el frame); vrhands_unbind();

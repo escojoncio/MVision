@@ -2,7 +2,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include "cpu.h"
+#include <string.h>
 #include "gte_vectors.h"
+#include "gpu.h"
 
 const FuncEntry rt_func_table[] = {{0, 0}};
 const unsigned rt_func_count = 0;
@@ -166,6 +168,86 @@ static void t_gte_regs16(Cpu *c) {
     EQ(gte_mfc2(c, 7), 0x20 + 0x30 + 0x100);
 }
 
+/* Captura de realimentación: primitivas texturizadas de 1 texel que leen el frame buffer (GpuOp.fbk/fbt, gpu.h). */
+static uint32_t pxy(int x, int y) { return (uint32_t)(x & 0xFFFF) | (uint32_t)(y & 0xFFFF) << 16; }
+static void fb_quad(uint32_t cmd, uint32_t col, int x0, int y0, int x1, int y1, int u1, int v1, uint32_t clut, uint32_t tpage) {
+    gpu_gp0(cmd << 24 | col); gpu_gp0(pxy(x0, y0)); gpu_gp0(clut << 16);
+    gpu_gp0(pxy(x1, y0)); gpu_gp0(tpage << 16 | (uint32_t)u1);
+    gpu_gp0(pxy(x0, y1)); gpu_gp0((uint32_t)v1 << 8);
+    gpu_gp0(pxy(x1, y1)); gpu_gp0((uint32_t)v1 << 8 | (uint32_t)u1);
+}
+static uint32_t fb_hash(void) { uint32_t h = 2166136261u; for (int y = 0; y < 512; y++) for (int x = 0; x < 1024; x++) { h ^= gpu_vram[y][x]; h *= 16777619u; } return h; }
+/* Dibuja la secuencia de la prueba; con cap=1 devuelve las ops en `out` (copiadas). */
+static uint32_t fb_seq(int cap, GpuOp *out, uint32_t *nout) {
+    gpu_reset();
+    memset(gpu_vram, 0, sizeof gpu_vram);
+    if (cap) gpu_capture_enable(1);
+    gpu_gp0(0xE3000000); gpu_gp0(0xE4000000 | 319 | 239 << 10); gpu_gp0(0xE5000000);
+    gpu_vram[0][0] = 0xC3E0;                 /* texel 15 bits en el frame buffer: bit15=1, g=31, b=16 */
+    gpu_vram[0][1] = 0x0000;                 /* transparente */
+    gpu_vram[0][2] = 0x2108;                 /* texel distinto */
+    gpu_vram[0][512] = 0x0033;               /* 4 bits, página x=512 (fuera del frame buffer): índice 3 en u=0 */
+    gpu_vram[10][3] = 0x7C00;                /* CLUT (0,10) dentro del frame buffer */
+    gpu_vram[0][704] = 0x6666;               /* textura legítima fuera del frame buffer (no transparente: si se resolviera por error saldría fbk=1) */
+    gpu_vram[0][704 + 1] = 0x6666;
+    gpu_vram[30][2] = 0x4321;                /* CLUT de 8 bits (0,30) dentro del frame buffer */
+    gpu_vram[0][8] = gpu_vram[1][8] = 0x5555; /* destino de la ventana de textura */
+    gpu_vram[0][3] = gpu_vram[0][4] = 0x7777; /* para el sprite volteado */
+    /* 0: 15 bits, quad 40x8 con uv 0..1 -> texel (0,0) en el frame buffer; SEMI, modulado por color 0x80 80 40 */
+    fb_quad(0x2E, 0x408080, 80, 100, 120, 108, 1, 1, 0, 0x100 | 0x20);
+    /* 1: 4 bits, texel fuera del frame buffer pero CLUT dentro (clut x=0,y=10 -> 0x000 | 10<<6) */
+    fb_quad(0x2C, 0x808080, 80, 120, 120, 128, 1, 1, 10 << 6, 8 | 0x00 | 0 << 7);
+    /* 2: 15 bits, texel 0 (transparente) en el frame buffer: u=1 y uv 1..1 (todos los vértices en (1,0)) */
+    gpu_gp0(0x2C000000 | 0x808080); gpu_gp0(pxy(80, 140)); gpu_gp0(1); gpu_gp0(pxy(120, 140)); gpu_gp0(0x100 << 16 | 1);
+    gpu_gp0(pxy(80, 148)); gpu_gp0(1); gpu_gp0(pxy(120, 148)); gpu_gp0(1);
+    /* 3: 15 bits, textura fuera del frame buffer (tpage x=704 = 11*64) 1 texel: NO se resuelve */
+    gpu_gp0(0x2C808080); gpu_gp0(pxy(80, 160)); gpu_gp0(0); gpu_gp0(pxy(120, 160)); gpu_gp0((0x100u | 11) << 16 | 0);
+    gpu_gp0(pxy(80, 168)); gpu_gp0(0); gpu_gp0(pxy(120, 168)); gpu_gp0(0);
+    /* 4: rect 2x1 con dos texels distintos en el frame buffer (u 0..1: 0xC3E0 y 0x0000): no uniforme */
+    gpu_gp0(0xE1000100); gpu_gp0(0x64808080); gpu_gp0(pxy(200, 100)); gpu_gp0(0); gpu_gp0(pxy(2, 1) );
+    /* 5: rect 1x1 en el frame buffer con raw (0x6D = rect 1x1 textura cruda) en u=2 (0x2108) */
+    gpu_gp0(0x6D808080); gpu_gp0(pxy(210, 100)); gpu_gp0(2);
+    /* 6: poligono con uv 0..8 en el frame buffer: no es candidato (cubre mas de 2 texels) */
+    fb_quad(0x2C, 0x808080, 80, 180, 120, 188, 8, 8, 0, 0x100);
+    /* 7: 8 bits, página fuera (x=704) con índice 2 en u=0, CLUT (0,30) en el frame buffer */
+    gpu_vram[0][704] = 0x6602;
+    fb_quad(0x2C, 0x808080, 80, 200, 120, 208, 0, 0, 30 << 6, 0x80 | 11);
+    /* 8: ventana de textura: máscara x total, desplazamiento 1 (u siempre 8); sin ella u=0,1 darían dos valores */
+    gpu_gp0(0xE2000000 | 31 | 1 << 10);
+    fb_quad(0x2C, 0x808080, 80, 210, 120, 218, 1, 1, 0, 0x100);
+    gpu_gp0(0xE2000000);
+    /* 9: sprite 2x1 volteado en x, u=4 -> texels 4,3 (ambos 0x7777); sin volteo serían 4,5 (distintos) */
+    gpu_gp0(0xE1000100 | 1 << 12); gpu_gp0(0x64808080); gpu_gp0(pxy(200, 120)); gpu_gp0(4); gpu_gp0(pxy(2, 1));
+    gpu_gp0(0xE1000100);
+    /* 10: el polígono cubre su propio texel (0,0): los píxeles posteriores leerían lo ya dibujado -> no se resuelve */
+    fb_quad(0x2C, 0x808080, 0, 0, 8, 8, 1, 1, 0, 0x100);
+    gpu_gp1(0x05000000); gpu_gp1(0x05000000 | 100);  /* cierra el frame */
+    uint32_t h = fb_hash();
+    if (cap) {
+        const GpuDrawList *l = gpu_capture_frame();
+        if (l) { *nout = l->nops < 16 ? l->nops : 16; memcpy(out, l->ops, *nout * sizeof *out); } else *nout = 0;
+        gpu_capture_enable(0);
+    }
+    return h;
+}
+static void t_gpu_feedback(void) {
+    GpuOp ops[16]; uint32_t n = 0;
+    uint32_t h_on = fb_seq(1, ops, &n), h_off = fb_seq(0, NULL, NULL);
+    EQ(h_on, h_off);                         /* la sonda no altera el oráculo */
+    EQ(n, 11);
+    EQ(ops[0].fbk, 1); EQ(ops[0].fbt, 0xC3E0); EQ(ops[0].flags & GPU_F_SEMI, GPU_F_SEMI);
+    EQ(ops[1].fbk, 1); EQ(ops[1].fbt, 0x7C00);   /* 4 bits: índice 3 de la página fuera, CLUT en el frame buffer */
+    EQ(ops[2].fbk, 1); EQ(ops[2].fbt, 0);        /* transparente */
+    EQ(ops[3].fbk, 0);                           /* texel legítimo fuera del frame buffer */
+    EQ(ops[4].fbk, 0);                           /* rect 2x1 con 2 valores: no uniforme */
+    EQ(ops[5].fbk, 1); EQ(ops[5].fbt, 0x2108);   /* rect 1x1 */
+    EQ(ops[6].fbk, 0);                           /* cubre 8 texels */
+    EQ(ops[7].fbk, 1); EQ(ops[7].fbt, 0x4321);   /* 8 bits: índice 2, CLUT en el frame buffer */
+    EQ(ops[8].fbk, 1); EQ(ops[8].fbt, 0x5555);   /* ventana de textura */
+    EQ(ops[9].fbk, 1); EQ(ops[9].fbt, 0x7777);   /* volteo */
+    EQ(ops[10].fbk, 0);                          /* se pisa su propia textura */
+}
+
 int main(void) {
     Cpu c = {0};
     t_mem(&c);
@@ -173,6 +255,7 @@ int main(void) {
     t_gte(&c);
     t_gte_regs16(&c);
     t_gte_vec(&c);
+    t_gpu_feedback();
     printf(fails ? "%d fallos\n" : "runtime: todas las pruebas OK\n", fails);
     return fails != 0;
 }

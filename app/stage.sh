@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepara app/.stage/ con los fuentes que compila el target (todo local, fuera del repo; .stage/ está ignorado):
 #   .stage/runtime  runtime/*.c y *.h (sin headless ni pruebas; nogen.c entra: el runtime corre sin código generado)
-#   .stage/vr/<x>   vr/{bridge,camera,input,scene,host}: solo el código de biblioteca (sin pruebas ni herramientas con main)
+#   .stage/vr/<x>   vr/{bridge,camera,input,scene,host,body,radar,hands,weapons,gameplay}: solo el código de biblioteca (sin pruebas ni herramientas con main)
 #   .stage/metal    render/metal/vr_*.metal y vr_types.h (ps1_gpu.metal es del renderer de referencia: no entra)
 #   .stage/res      sigs_hle.json (firmas del SDK enmascaradas, sin código del juego)
 #   .stage/extras   ficheros Swift opcionales (EXTRAS_DIR)
@@ -22,11 +22,13 @@ for f in ../runtime/*.c ../runtime/*.h; do
   cp "$f" .stage/runtime/
 done
 
-for d in bridge camera input scene host; do
+# Excluidos: pruebas (test_*), herramientas con main (camtest, vrhost_run, bodytest, radar_run, gptest*, hands_preview, hud_probe/hud_emu)
+# más hle_vrfire_weak.c (ya está en runtime/). vrbody_weak.c entra: los símbolos fuertes de vr/body lo sustituyen al enlazar.
+for d in bridge camera input scene host body radar hands weapons gameplay; do
   mkdir -p ".stage/vr/$d"
   for f in ../vr/$d/*.c ../vr/$d/*.h; do
     [ -f "$f" ] || continue
-    case "$(basename "$f")" in test_*|*_dump.c|camtest.c|vrhost_run.c) continue ;; esac
+    case "$(basename "$f")" in test_*|*_dump.c|camtest.c|vrhost_run.c|bodytest.c|radar_run.c|gptest*|hands_preview.c|hud_probe.c|hud_emu.c|hud_emu.h|hle_vrfire_weak.c) continue ;; esac
     cp "$f" ".stage/vr/$d/"
   done
 done

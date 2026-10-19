@@ -214,7 +214,9 @@ static void on_frame(Cpu *c, uint32_t f) {
     uint64_t t_in = mono_ns();
     atomic_store(&frames, f);
     uint64_t pr = atomic_load_explicit(&pad_req, memory_order_relaxed);
-    pad_set_state(0, (uint16_t)pr, (uint8_t)(pr >> 16), (uint8_t)(pr >> 24), (uint8_t)(pr >> 32), (uint8_t)(pr >> 40));
+    uint16_t pb = (uint16_t)pr;
+    if (hooks.pad) pb = hooks.pad(pb);
+    pad_set_state(0, pb, (uint8_t)(pr >> 16), (uint8_t)(pr >> 24), (uint8_t)(pr >> 32), (uint8_t)(pr >> 40));
 
     {   /* Solo se convierte el vídeo si alguien lo mira (lectura en el último segundo); si no, 1 de cada 10 VBlanks. */
         uint64_t lr = atomic_load_explicit(&fb_read_ns, memory_order_relaxed);

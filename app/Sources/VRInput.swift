@@ -11,6 +11,7 @@ struct VRInputSettings: Equatable {
     var vignette: Float = 0.6         // 0..1
     var locomotionFromHand = false    // false: relativa a la cabeza
     var rightHanded = true            // mano dominante
+    var weaponReload = 0              // recarga del arma VR: 0 manual, 1 simplificada, 2 automática
     var allowProne = true
     var headHeight: Float = 0         // altura de pie calibrada en metros; 0 = autocalibrar
     var crouchDrop: Float = 0.35
@@ -27,6 +28,7 @@ struct VRInputSettings: Equatable {
         if has("vignette") { s.vignette = d.float(forKey: prefix + "vignette") }
         if has("locoHand") { s.locomotionFromHand = d.bool(forKey: prefix + "locoHand") }
         if has("rightHanded") { s.rightHanded = d.bool(forKey: prefix + "rightHanded") }
+        if has("wreload") { s.weaponReload = min(max(d.integer(forKey: prefix + "wreload"), 0), 2) }
         if has("prone") { s.allowProne = d.bool(forKey: prefix + "prone") }
         if has("height") { s.headHeight = d.float(forKey: prefix + "height") }
         if has("crouch") { s.crouchDrop = d.float(forKey: prefix + "crouch") }
@@ -41,6 +43,7 @@ struct VRInputSettings: Equatable {
         d.set(vignette, forKey: Self.prefix + "vignette")
         d.set(locomotionFromHand, forKey: Self.prefix + "locoHand")
         d.set(rightHanded, forKey: Self.prefix + "rightHanded")
+        d.set(weaponReload, forKey: Self.prefix + "wreload")
         d.set(allowProne, forKey: Self.prefix + "prone")
         d.set(headHeight, forKey: Self.prefix + "height")
         d.set(crouchDrop, forKey: Self.prefix + "crouch")
@@ -132,6 +135,7 @@ final class VRInput: @unchecked Sendable {
         c.crouch_drop_m = settings.crouchDrop
         c.prone_drop_m = settings.proneDrop
         vr_input_set_cfg(&state, &c)
+        mv_vrgame_set_options(settings.rightHanded ? 1 : 0, Int32(settings.weaponReload))   // mano y recarga del arma VR
         if applyHeight, settings.headHeight > 0 { vr_input_set_height(&state, settings.headHeight) }
     }
 
@@ -177,10 +181,41 @@ final class VRInput: @unchecked Sendable {
         return h
     }
 
+    /// Pose del mando en el espacio recentrado (el mismo en que llega la cabeza): `recenter` = inversa del origen de recentrado.
+    private static func recentered(_ p: VRInputPose.Pose, _ recenter: simd_float4x4) -> VRInputPose.Pose {
+        guard p.tracked else { return p }
+        var m = simd_matrix4x4(simd_quatf(vector: p.rotation))
+        m.columns.3 = SIMD4<Float>(p.position.x, p.position.y, p.position.z, 1)
+        let r = recenter * m
+        let q = simd_quatf(simd_float3x3(
+            SIMD3<Float>(r.columns.0.x, r.columns.0.y, r.columns.0.z),
+            SIMD3<Float>(r.columns.1.x, r.columns.1.y, r.columns.1.z),
+            SIMD3<Float>(r.columns.2.x, r.columns.2.y, r.columns.2.z)))
+        var out = p
+        out.position = SIMD3<Float>(r.columns.3.x, r.columns.3.y, r.columns.3.z)
+        out.rotation = q.vector
+        return out
+    }
+
+    /// Entrega el mando (pose recentrada y botones) a la capa de jugabilidad en C (brazos, radar de muñeca, arma VR).
+    private static func publish(_ s: ControllerHub.HandSnapshot, _ pose: VRInputPose.Pose, side: Int32) {
+        var h = MvVrHand()
+        h.valid = (s.present && pose.tracked) ? 1 : 0
+        h.pos = (pose.position.x, pose.position.y, pose.position.z)
+        h.rot = (pose.rotation.x, pose.rotation.y, pose.rotation.z, pose.rotation.w)
+        h.trigger = s.trigger
+        h.grip = s.grip
+        h.low = s.low ? 1 : 0
+        h.up = s.up ? 1 : 0
+        h.stick = s.stickClick ? 1 : 0
+        mv_vrgame_set_hand(side, &h)
+    }
+
     /// Un fotograma: lee, procesa y envía al juego. `head` = transformación cabeza->origen (deviceAnchor) o nil.
     /// `gamePosture` del puente RAM (0 de pie, 1 agachado, 2 tumbado, -1 desconocida). Devuelve el pad enviado.
     @discardableResult
-    func frame(head: simd_float4x4?, dt: Float, gamePosture: Int32 = -1, menu: Bool = false) -> vr_pad_t {
+    func frame(head: simd_float4x4?, dt: Float, gamePosture: Int32 = -1, menu: Bool = false,
+               recenter: simd_float4x4 = matrix_identity_float4x4) -> vr_pad_t {
         let sample = hub.sample()
 
         var f = vr_input_frame_t()
@@ -200,6 +235,11 @@ final class VRInput: @unchecked Sendable {
         switch sample.kind {
         case .sense:
             mode = VRI_MODE_SENSE
+            // Poses de los mandos en el espacio recentrado (como la cabeza) y entrega a la capa de jugabilidad (por mano física).
+            let pl = Self.recentered(VRInputPose.shared.pose(hand: 0), recenter)
+            let pr = Self.recentered(VRInputPose.shared.pose(hand: 1), recenter)
+            Self.publish(sample.left, pl, side: 0)
+            Self.publish(sample.right, pr, side: 1)
             var l = sample.left, r = sample.right
             // Con un solo Sense: su stick pasa a ser el de mover (el de girar queda quieto; se gira con el cuerpo) y,
             // en los menús, el botón inferior también confirma (el confirmar normal es el gatillo del otro mando).
@@ -214,16 +254,16 @@ final class VRInput: @unchecked Sendable {
                 // El mando solo hace de mano dominante; la otra mano es la sintética.
                 if dominantRight { l = other; r = lone } else { l = lone; r = other }
             }
-            let pl = VRInputPose.shared.pose(hand: 0), pr = VRInputPose.shared.pose(hand: 1)
             f.hand = (Self.hand(l, pose: pl), Self.hand(r, pose: pr))
         case .gamepad:
+            mv_vrgame_clear_hands()
             f.pad_buttons = sample.pad.buttons
             f.pad_lx = sample.pad.lx
             f.pad_ly = sample.pad.ly
             f.pad_rx = sample.pad.rx
             f.pad_ry = sample.pad.ry
         case .none:
-            break
+            mv_vrgame_clear_hands()
         }
 
         lock.lock()

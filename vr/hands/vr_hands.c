@@ -293,7 +293,7 @@ int vrhands_render_busy(void) {
     return b;
 }
 
-__attribute__((weak)) int mv_host_hands(VrHandsFrame *out) {
+int vrhands_fetch(VrHandsFrame *out) {
     if (!out) return 0;
     int rc = 0;
     pthread_mutex_lock(&g_mx);
@@ -307,3 +307,6 @@ __attribute__((weak)) int mv_host_hands(VrHandsFrame *out) {
     pthread_mutex_unlock(&g_mx);
     return rc;
 }
+
+/* Implementación débil: el integrador puede definir la suya (p. ej. compensar la latencia de la mano con vrhands_fetch). */
+__attribute__((weak)) int mv_host_hands(VrHandsFrame *out) { return vrhands_fetch(out); }

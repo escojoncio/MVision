@@ -15,6 +15,9 @@ typedef struct MvHostHooks {
     void (*start)(void);
     /* En cada VBlank (CPU parada), tras aplicar el mando y publicar el vídeo y antes del ritmo/pausa. */
     void (*frame)(Cpu *c, uint32_t frame);
+    /* En cada VBlank, justo ANTES de aplicar el mando al juego: filtra los botones del mando (activo alto) que pidió la app. La capa de
+     * disparo/recarga VR (vr/gameplay) suelta/pulsa el botón de ataque y R1/R2 aquí. NULL = sin filtro. */
+    uint16_t (*pad)(uint16_t buttons);
 } MvHostHooks;
 void mv_host_set_hooks(const MvHostHooks *h);   /* copia; NULL los quita */
 

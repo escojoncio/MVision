@@ -46,7 +46,7 @@ typedef struct {
     char boot[32];      /* ejecutable de arranque de SYSTEM.CNF (BOOT=cdrom:\X;1 -> "X", tal cual está escrito) */
     char datadir[32];   /* primer directorio de la raíz ("" si no hay) */
     char dataexe[32];   /* primer fichero PS-X EXE del directorio de datos ("" si no hay) */
-    int serial;         /* dígitos del nombre de arranque (SLES_017.34 -> 1734), 0 si no hay */
+    int serial;         /* dígitos del nombre de arranque (SLES_000.42 -> 42), 0 si no hay */
     int number;         /* nº de disco 1..n asignado por disc_scan_dir (0 = sin asignar) */
 } DiscId;
 
@@ -69,6 +69,12 @@ int disc_scan_dir(const char *dir, DiscEntry out[], int max);
 /* Copia el ejecutable de datos del disco (DiscId.datadir/dataexe) a "outfile". "path" = .cue/.bin o carpeta (is_dir).
  * 0 = bien; -1 = el disco no es legible, no tiene ejecutable de datos o falló la escritura. */
 int disc_extract_dataexe(const char *path, int is_dir, const char *outfile);
+
+/* Carga en memoria el archivo de stages (el fichero grande del directorio de datos cuyo comienzo es una tabla de entradas
+ * nombre[8] + sector: u32 tamaño de tabla y entradas de 12 B) del disco "path" (.cue/.bin o carpeta extraída, is_dir). Abre su
+ * PROPIO lector (no toca el del motor): se puede llamar desde otro hilo mientras el juego corre. Devuelve un búfer de malloc
+ * (el llamador lo libera con free) y su tamaño en *len; NULL si el disco no es legible o no tiene ese fichero. */
+uint8_t *disc_load_stage_archive(const char *path, int is_dir, size_t *len);
 
 /* Solo el nombre final de una ruta: el registro no debe llevar rutas del dispositivo ni de la carpeta elegida. */
 static inline const char *mv_base(const char *p) { const char *s = strrchr(p, '/'); return s ? s + 1 : p; }

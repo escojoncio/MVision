@@ -61,11 +61,22 @@ void hle_VSyncCallback(Cpu *c);
 void hle_firstfile(Cpu *c);
 void hle_longjmp(Cpu *c);
 void hle_setjmp(Cpu *c);
+void hle_vrbody_sort(Cpu *c);
 void hle_vrcam_draw(Cpu *c);
 void hle_vrcam_overscan(Cpu *c);
 void hle_vrcam_padorg(Cpu *c);
 void hle_vrcam_trans(Cpu *c);
 void hle_vrcam_view(Cpu *c);
+void hle_vrfire_amissile(Cpu *c);
+void hle_vrfire_bullet(Cpu *c);
+void hle_vrfire_charge(Cpu *c);
+void hle_vrfire_flash_a(Cpu *c);
+void hle_vrfire_flash_b(Cpu *c);
+void hle_vrfire_grenade(Cpu *c);
+void hle_vrfire_hide(Cpu *c);
+void hle_vrfire_mine(Cpu *c);
+void hle_vrfire_rmissile(Cpu *c);
+void hle_vrradar_draw(Cpu *c);
 
 const HleEntry hle_table[] = {
     {"CdControl", hle_CdControl},
@@ -128,11 +139,22 @@ const HleEntry hle_table[] = {
     {"firstfile", hle_firstfile},
     {"longjmp", hle_longjmp},
     {"setjmp", hle_setjmp},
+    {"vrbody_sort", hle_vrbody_sort},
     {"vrcam_draw", hle_vrcam_draw},
     {"vrcam_overscan", hle_vrcam_overscan},
     {"vrcam_padorg", hle_vrcam_padorg},
     {"vrcam_trans", hle_vrcam_trans},
     {"vrcam_view", hle_vrcam_view},
+    {"vrfire_amissile", hle_vrfire_amissile},
+    {"vrfire_bullet", hle_vrfire_bullet},
+    {"vrfire_charge", hle_vrfire_charge},
+    {"vrfire_flash_a", hle_vrfire_flash_a},
+    {"vrfire_flash_b", hle_vrfire_flash_b},
+    {"vrfire_grenade", hle_vrfire_grenade},
+    {"vrfire_hide", hle_vrfire_hide},
+    {"vrfire_mine", hle_vrfire_mine},
+    {"vrfire_rmissile", hle_vrfire_rmissile},
+    {"vrradar_draw", hle_vrradar_draw},
     {0, 0}
 };
-const unsigned hle_table_count = 65;
+const unsigned hle_table_count = 76;
