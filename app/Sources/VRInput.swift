@@ -140,7 +140,16 @@ final class VRInput: @unchecked Sendable {
         c.prone_drop_m = settings.proneDrop
         vr_input_set_cfg(&state, &c)
         mv_vrgame_set_options(settings.rightHanded ? 1 : 0, Int32(settings.weaponReload))   // mano y recarga del arma VR
-        if applyHeight, settings.headHeight > 0 { vr_input_set_height(&state, settings.headHeight) }
+        if applyHeight, settings.headHeight > 0 {
+            vr_input_set_height(&state, settings.headHeight)
+            Self.pushEyeHeight(settings.headHeight)
+        }
+    }
+
+    /// Altura de ojos de pie para la calibración de la cámara VR (escala usuario -> personaje). Solo se pasa si es plausible de pie (1,2..2,3 m): una
+    /// "altura" calibrada sentado (cabeza ~1,04 m) no es la de pie, y entonces la capa C la estima con la altura de la cabeza al recentrar.
+    private static func pushEyeHeight(_ h: Float) {
+        mv_vr_set_user_eye_height(h >= 1.2 && h <= 2.3 ? h : 0)
     }
 
     // MARK: - Conexión
@@ -304,7 +313,7 @@ final class VRInput: @unchecked Sendable {
         // Guardar la altura calibrada para la próxima sesión si cambió de forma apreciable.
         let h = vr_input_height(&state)
         let saveHeight = h > 0 && abs(h - settings.headHeight) > 0.03
-        if saveHeight { settings.headHeight = h }
+        if saveHeight { settings.headHeight = h; Self.pushEyeHeight(h) }
         let toSave = settings
         lock.unlock()
         if saveHeight { toSave.save() }

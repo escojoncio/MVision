@@ -86,6 +86,9 @@ void mv_vr_clear_head(void);
 void mv_vr_turn(float deg);
 /* Pide recentrar la cámara VR del juego (la posición y mirada actuales de la cabeza pasan a ser el origen). Thread-safe. */
 void mv_vr_recenter(void);
+/* Altura de ojos del usuario de pie (m) para la calibración de altura/escala de la cámara VR; 0 = estimar con la altura de la cabeza al recentrar.
+ * Se aplica en el siguiente VBlank y recentra (vrcam_set_user_eye_height). Thread-safe. Valores no finitos o fuera de 0..3 se ignoran. */
+void mv_vr_set_user_eye_height(float m);
 
 #ifdef __cplusplus
 }
