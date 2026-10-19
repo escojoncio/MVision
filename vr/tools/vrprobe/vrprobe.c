@@ -39,6 +39,7 @@
 #include "gpu.h"
 #include "host.h"
 #include "probe_raster.h"
+#include "probe_view.h"
 #include "sys.h"
 #include "vr_body.h"
 #include "vr_camera.h"
@@ -48,8 +49,9 @@
 /* ------------------------------------------------------------------------------------------------ constantes */
 #define RAMM 0x1FFFFFu
 #define RING 8192
-#define SETTLE 6                /* fotogramas de VBlank que se esperan tras mover la cabeza antes de medir una vista estática */
-#define VIEW_FRAMES 12
+static int g_settle = 6, g_vf = 12;   /* --asentar N: más fotogramas tras mover la cabeza antes de medir (la cámara del motor tarda ~7 VBlanks en converger) */
+#define SETTLE g_settle         /* fotogramas de VBlank que se esperan tras mover la cabeza antes de medir una vista estática */
+#define VIEW_FRAMES g_vf
 #define EYE_W 128               /* resolución por ojo del rasterizador de cobertura */
 #define TILE 64
 #define IPD 0.063f
@@ -61,9 +63,9 @@
 #define LAG_PRESENT 1           /* fotogramas de VBlank entre la pose con la que se construye la escena y la pose con la que se presenta */
 #define MAXZ 8
 
-enum { CK_NONE = 0, CK_SWEEP, CK_HSMOOTH, CK_TSMOOTH, CK_TSTEPS, CK_HANDS };
-enum { SG_BOOT, SG_ZONE, SG_SWEEP, SG_HSMOOTH, SG_TSMOOTH, SG_TSTEPS, SG_HANDS, SG_PERF, SG_FLUSH, SG_END };
-static const char *CK_NAME[] = {"-", "barrido", "giro_c", "giro_s", "giro_p", "manos"};
+enum { CK_NONE = 0, CK_SWEEP, CK_HSMOOTH, CK_TSMOOTH, CK_TSTEPS, CK_HANDS, CK_AGUA };
+enum { SG_BOOT, SG_ZONE, SG_SWEEP, SG_HSMOOTH, SG_TSMOOTH, SG_TSTEPS, SG_HANDS, SG_PERF, SG_FLUSH, SG_AGUA, SG_END };
+static const char *CK_NAME[] = {"-", "barrido", "giro_c", "giro_s", "giro_p", "manos", "agua"};
 static const float PITCHES[NPITCH] = {0, -30, 30, -60, 60};
 
 /* ------------------------------------------------------------------------------------------------ umbrales */
@@ -257,6 +259,190 @@ static void put_head(float yaw, float pitch, float y, float m[16], uint32_t f) {
     mv_vr_set_head(m, (double)f * 0.02);
 }
 
+
+/* ---- agua: estaciones (zona inicial) con rejilla de vistas hacia abajo; volcado por vista de los polígonos y su destino en vr_scene ---- */
+typedef struct { char t; int a, b, c; unsigned d; } AgStep;   /* t: 'm' mover (a=lx, b=ly, c=fotogramas, d=botones), 'w' esperar c, 'v' rejilla de vistas (a=etiqueta), 'p' botones solo (d, c fotogramas) */
+static AgStep AG[64];
+static int nag;
+static int G_AGUA, G_PRE, G_AGDUMP;
+static const char *g_ref_in, *g_ref_out;   /* --ref-in/--ref-out: referencia omnidireccional de la zona 0 compartida entre ejecuciones (comparar configuraciones contra el mismo conjunto) */
+#define AG_AGE (g_settle + 4)   /* la cámara del motor tarda ~7 VBlanks en converger con la cabeza: el volcado se toma después */
+static const float AG_PITCH[] = {0, -30, -45, -60, -75, -90};
+#define AG_NP 6
+#define AG_NY 8
+static uint8_t g_fatebuf[1 << 16];
+static uint32_t g_tsrcbuf[1 << 17];
+static const VrScene *g_agsc;
+static uint8_t g_opcls[1 << 16], g_keepbuf[1 << 16];
+static char g_agdir[600];
+static void ag_parse(const char *spec) {
+    /* "m:lx:ly:frames[:botones_hex];w:frames;v;p:botones_hex:frames" */
+    char *d = strdup(spec), *sv = NULL;
+    nag = 0;
+    for (char *t = strtok_r(d, ";", &sv); t && nag < 63; t = strtok_r(NULL, ";", &sv)) {
+        AgStep *a = &AG[nag];
+        memset(a, 0, sizeof *a);
+        a->t = t[0];
+        if (a->t == 'm') { unsigned dd = 0; sscanf(t, "m:%d:%d:%d:%x", &a->a, &a->b, &a->c, &dd); a->d = dd; }
+        else if (a->t == 'w') sscanf(t, "w:%d", &a->c);
+        else if (a->t == 'p') { unsigned dd = 0; sscanf(t, "p:%x:%d", &dd, &a->c); a->d = dd; }
+        else if (a->t == 'v') { a->a = nag; }
+        else if (a->t == 'x') { a->a = nag; float y = 0, pi = 0; unsigned dd = 0; sscanf(t, "x:%f:%f:%x", &y, &pi, &dd); a->b = (int)y; a->c = (int)pi; a->d = dd; }
+        else continue;
+        nag++;
+    }
+    free(d);
+}
+
+/* relleno plano de un triángulo de pantalla (orden de dibujo) para el volcado de agua: colorea cada polígono por su destino en vr_scene */
+static void ag_fill(uint8_t *im, int W, int H, const float p[3][2], const uint8_t c[3]) {
+    /* la GPU rechaza el triángulo si una arista supera 1023 en X o 511 en Y */
+    for (int a = 0; a < 3; a++) { int b = (a + 1) % 3; if (fabsf(p[a][0] - p[b][0]) > 1023.0f || fabsf(p[a][1] - p[b][1]) > 511.0f) return; }
+    float minx = p[0][0], maxx = minx, miny = p[0][1], maxy = miny;
+    for (int k = 1; k < 3; k++) { if (p[k][0] < minx) minx = p[k][0]; if (p[k][0] > maxx) maxx = p[k][0]; if (p[k][1] < miny) miny = p[k][1]; if (p[k][1] > maxy) maxy = p[k][1]; }
+    int x0 = (int)fmaxf(minx, 0), x1 = (int)fminf(maxx, W - 1), y0 = (int)fmaxf(miny, 0), y1 = (int)fminf(maxy, H - 1);
+    float ar = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
+    if (fabsf(ar) < 1e-6f) return;
+    for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) {
+        float fx = x + 0.5f, fy = y + 0.5f;
+        float w0 = ((p[1][0] - fx) * (p[2][1] - fy) - (p[2][0] - fx) * (p[1][1] - fy)) / ar;
+        float w1 = ((p[2][0] - fx) * (p[0][1] - fy) - (p[0][0] - fx) * (p[2][1] - fy)) / ar;
+        float w2 = 1.0f - w0 - w1;
+        if (w0 < -1e-4f || w1 < -1e-4f || w2 < -1e-4f) continue;
+        uint8_t *q = im + ((size_t)y * W + x) * 3; q[0] = c[0]; q[1] = c[1]; q[2] = c[2];
+    }
+}
+
+/* Fidelidad de la escena frente al fotograma real DENTRO del encuadre del motor: se rasteriza la escena con la cámara del propio motor (320x256) y se compara con la
+ * imagen que mostró la GPU, sin el HUD (máscara = cajas de las primitivas 2D). Variantes: sin los polígonos con vértice AMBIG / BEHIND / SAT / solo limpios: el efecto de
+ * quitar una clase en el error dice si esa clase aporta geometría correcta o basura. */
+static void ag_mad(const GpuDrawList *dl, const Intent *in, const uint8_t *orig, const char *base) {
+    (void)in; (void)base;
+    enum { W = 320, H = 256 };
+    static uint8_t mask[W * H], sim[W * H * 3];
+    memset(mask, 0, sizeof mask);
+    uint32_t nops = dl->nops < sizeof g_opcls ? dl->nops : (uint32_t)sizeof g_opcls;
+    for (uint32_t i = 0; i < nops; i++) {
+        const GpuOp *op = &dl->ops[i];
+        int cls = 5;   /* 5 = no 3D */
+        if (op->type == GPU_OP_POLY) {
+            int nv = op->nv == 4 ? 4 : 3, nval = 0; unsigned uf = 0;
+            for (int k = 0; k < nv; k++) { nval += op->v[k].vvalid; if (op->v[k].vvalid) uf |= op->v[k].vflags; }
+            if (nval == nv) cls = (uf & 4) ? 0 : (uf & 2) ? 1 : (uf & 1) ? 2 : 3;   /* 0 AMBIG, 1 BEHIND, 2 SAT, 3 limpio */
+        }
+        g_opcls[i] = (uint8_t)cls;
+        if (cls == 5 && (op->type == GPU_OP_POLY || op->type == GPU_OP_RECT || op->type == GPU_OP_LINE)) {
+            int x0 = 1 << 20, y0 = 1 << 20, x1 = -(1 << 20), y1 = -(1 << 20), n = op->type == GPU_OP_RECT || op->type == GPU_OP_LINE ? 1 : (op->nv == 4 ? 4 : 3);
+            for (int k = 0; k < n; k++) { int x = op->v[k].x - dl->disp.x, y = op->v[k].y - dl->disp.y; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+            if (op->type == GPU_OP_RECT) { x1 = x0 + op->rw; y1 = y0 + op->rh; }
+            else if (op->type == GPU_OP_LINE) { int xb = op->v[1].x - dl->disp.x, yb = op->v[1].y - dl->disp.y; if (xb < x0) x0 = xb; if (xb > x1) x1 = xb; if (yb < y0) y0 = yb; if (yb > y1) y1 = yb; }
+            if ((long)(x1 - x0 + 1) * (y1 - y0 + 1) > (long)W * H / 6) continue;   /* recubrimientos/borrados grandes no son HUD */
+            for (int y = y0 < 0 ? 0 : y0; y <= y1 && y < H; y++) for (int x = x0 < 0 ? 0 : x0; x <= x1 && x < W; x++) mask[y * W + x] = 1;
+        }
+    }
+    static const char *NM[5] = {"todo", "sinAMBIG", "sinBEHIND", "sinSAT", "limpios"};
+    char line[300]; int off = snprintf(line, sizeof line, "[agmad] view=%d", in->view);
+    PvCam pc; pv_cam_engine(&pc, g_agsc, W, H);
+    for (int var = 0; var < 5; var++) {
+        for (uint32_t i = 0; i < nops; i++) {
+            int c = g_opcls[i], keep = 1;
+            if (var == 1) keep = c != 0; else if (var == 2) keep = c != 1; else if (var == 3) keep = c != 2; else if (var == 4) keep = c == 3 || c == 5;
+            g_keepbuf[i] = (uint8_t)keep;
+        }
+        pv_render(g_agsc, &pc, sim, 24, 0.05f, g_tsrcbuf, g_keepbuf, nops);
+        double sum = 0; long n = 0, bad = 0;
+        for (int k = 0; k < W * H; k++) {
+            if (mask[k]) continue;
+            int d = 0;
+            for (int ch = 0; ch < 3; ch++) { int dd = abs((int)orig[k * 3 + ch] - (int)sim[k * 3 + ch]); if (dd > d) d = dd; }
+            sum += d; n++; if (d > 48) bad++;
+        }
+        off += snprintf(line + off, sizeof line - (size_t)off, " %s=%.2f/%.1f%%", NM[var], n ? sum / (double)n : 0.0, n ? 100.0 * (double)bad / (double)n : 0.0);
+    }
+    fprintf(stderr, "%s\n", line);
+}
+static void ag_png(const GpuDrawList *dl, const Intent *in, const char *base) {
+    enum { W = 320, H = 256 };
+    static uint8_t im[W * H * 3];
+    memset(im, 0, sizeof im);
+    static const uint8_t COL[VR_FATE_COUNT][3] = {{0,0,0},{150,150,150},{40,60,200},{230,40,40},{230,40,230},{255,150,0},{240,240,0},{0,220,220},{0,150,0},{255,255,255},{120,80,0},{200,200,120}};
+    for (uint32_t i = 0; i < dl->nops; i++) {
+        const GpuOp *op = &dl->ops[i];
+        if (op->type != GPU_OP_POLY) continue;
+        int f = i < sizeof g_fatebuf ? g_fatebuf[i] : 0; if (f >= VR_FATE_COUNT) f = 0;
+        uint8_t c[3] = {COL[f][0], COL[f][1], COL[f][2]};
+        if (f == 1 || f == 11) { int sh = 70 + (int)(i * 7 % 150); c[0] = c[1] = c[2] = (uint8_t)sh; if (f == 11) c[2] = 255; }
+        float p[4][2];
+        int n = op->nv == 4 ? 4 : 3;
+        for (int k = 0; k < n; k++) { p[k][0] = (float)op->v[k].x - dl->disp.x; p[k][1] = (float)op->v[k].y - dl->disp.y; }
+        float t0[3][2] = {{p[0][0],p[0][1]},{p[1][0],p[1][1]},{p[2][0],p[2][1]}};
+        ag_fill(im, W, H, t0, c);
+        if (n == 4) { float t1[3][2] = {{p[1][0],p[1][1]},{p[3][0],p[3][1]},{p[2][0],p[2][1]}}; ag_fill(im, W, H, t1, c); }
+    }
+    (void)in;
+    char pth[760]; snprintf(pth, sizeof pth, "%s.png", base);
+    pr_write_png(pth, W, H, im);
+    {   /* la escena de vr_scene vista por CPU desde la cabeza (campo 100°) y con el campo del motor (90° ~ el del fotograma real) */
+        enum { VW = 256 };
+        static uint8_t vi[VW * VW * 3];
+        if (g_agsc) {
+            PvCam pc;
+            pv_cam_head(&pc, in->head, 100.0f, VW, VW);
+            pv_render(g_agsc, &pc, vi, 24, 0.05f, NULL, NULL, 0);
+            snprintf(pth, sizeof pth, "%s_v.png", base);
+            pr_write_png(pth, VW, VW, vi);
+            static uint8_t ve[320 * 256 * 3];   /* con la cámara del motor: comparable pixel a pixel con el fotograma real (sin HUD) */
+            pv_cam_engine(&pc, g_agsc, 320, 256);
+            pv_render(g_agsc, &pc, ve, 24, 0.05f, NULL, NULL, 0);
+            snprintf(pth, sizeof pth, "%s_e.png", base);
+            pr_write_png(pth, 320, 256, ve);
+        }
+    }
+    {   /* el fotograma real del juego tal como lo mostró (VRAM del oráculo) */
+        static uint8_t rgba[1024 * 512 * 4], rgb[1024 * 512 * 3];
+        size_t n = gpu_present_rgba(&dl->disp, NULL, rgba, 1024 * 512);
+        int fw = dl->disp.fw > 0 ? dl->disp.fw : dl->disp.w, hh = dl->disp.h;
+        if (n && fw > 0 && hh > 0 && (size_t)fw * hh <= n) {
+            for (size_t k = 0; k < (size_t)fw * hh; k++) { rgb[k * 3] = rgba[k * 4]; rgb[k * 3 + 1] = rgba[k * 4 + 1]; rgb[k * 3 + 2] = rgba[k * 4 + 2]; }
+            snprintf(pth, sizeof pth, "%s_o.png", base);
+            pr_write_png(pth, fw, hh, rgb);
+            if (g_agsc && fw == 320 && hh == 256) ag_mad(dl, in, rgb, base);
+        }
+    }
+}
+static void ag_tap(const GpuDrawList *dl, const BridgeState *bs, const VrScene *sc, uint32_t f) {
+    const Intent *in = &ring[f % RING];
+    if (getenv("VRPROBE_DEBUG") && in->kind) { static int nn; if (nn++ < 80) fprintf(stderr, "[tap] f=%u in.f=%u kind=%d age=%d st=%d z=%d view=%d\n", f, in->f, in->kind, in->age, in->store, in->zone, in->view); }
+    static int last_view = -1;
+    int sw = G_AGDUMP && in->kind == CK_SWEEP && in->store >= 1;
+    if (in->f != f || (in->kind != CK_AGUA && !sw) || in->age < AG_AGE || in->view == last_view) return;
+    if (sw && (in->age > AG_AGE + 1 || in->zone != 0)) return;
+    last_view = in->view;
+    g_agsc = sc;
+    char p[700];
+    if (sw) snprintf(p, sizeof p, "%s/w%03d.txt", g_agdir, in->view); else snprintf(p, sizeof p, "%s/s%02d_v%02d.txt", g_agdir, in->view / 64, in->view % 64);
+    FILE *o = fopen(p, "w");
+    if (!o) return;
+    fprintf(o, "# view=%d yaw=%.1f pitch=%.1f f=%u stage=%.8s in_water=%d stance=%d ppos=%d,%d,%d eye=%d,%d,%d ctl_h=%d nops=%u scene_tris3d=%u semi=%u\n", in->view, in->yaw, in->pitch, f, bs->stage_code, bs->in_water, bs->stance,
+            bs->player_pos.x, bs->player_pos.y, bs->player_pos.z, bs->eye_pos[0], bs->eye_pos[1], bs->eye_pos[2], bs->ctl_height, dl->nops, sc->stats.n_tris3d, 0);
+    fprintf(o, "# stats: poly3d=%u recon=%u drop_ambig=%u drop_near=%u drop_behind=%u drop_huge=%u drop_degen=%u drop_partial=%u unclipped=%u clipped=%u\n", sc->stats.n_poly3d, sc->stats.n_recon, sc->stats.drop_ambig, sc->stats.drop_near, sc->stats.drop_behind,
+            sc->stats.drop_huge, sc->stats.drop_degenerate, sc->stats.drop_partial, sc->stats.n_unclipped, sc->stats.n_clipped);
+    for (uint32_t i = 0; i < dl->nops; i++) {
+        const GpuOp *op = &dl->ops[i];
+        if (op->type != GPU_OP_POLY) continue;
+        int any = 0;
+        for (int k = 0; k < (op->nv == 4 ? 4 : 3); k++) any |= op->v[k].vvalid;
+        if (!any) continue;
+        fprintf(o, "P %u fate=%d nv=%d fl=%x abr=%d tp=%d tx=%d ty=%d clx=%d cly=%d ph=%.1f pox=%.1f poy=%.1f dox=%d doy=%d seq=%u\n", i, i < sizeof g_fatebuf ? g_fatebuf[i] : -1, op->nv, op->flags, op->abr, op->tp, op->tx, op->ty, op->clx, op->cly, op->proj_h, op->proj_ox, op->proj_oy, op->dox, op->doy, op->seq);
+        for (int k = 0; k < (op->nv == 4 ? 4 : 3); k++) {
+            const GpuVtx *v = &op->v[k];
+            fprintf(o, "  V x=%d y=%d u=%d v=%d rgb=%02x%02x%02x vv=%d vf=%d view=%.0f,%.0f,%.0f\n", v->x, v->y, v->u, v->v, v->r, v->g, v->b, v->vvalid, v->vflags, v->vx, v->vy, v->vz);
+        }
+    }
+    fclose(o);
+    { char b[720]; if (sw) snprintf(b, sizeof b, "%s/w%03d", g_agdir, in->view); else snprintf(b, sizeof b, "%s/s%02d_v%02d", g_agdir, in->view / 64, in->view % 64); ag_png(dl, in, b); }
+}
+
 static void seg_next(void) { cur++; segk = 0; pose_age = 0; }
 
 static void step(Cpu *c, uint32_t f) {
@@ -390,6 +576,39 @@ static void step(Cpu *c, uint32_t f) {
             usleep(20000);
         }
         advance = 1;
+        break;
+    }
+    case SG_AGUA: {
+        /* sub-programa AG[]: cada paso tiene su cuenta; segk es el contador global del segmento, ag_k/ag_c el paso y el fotograma dentro del paso */
+        static int ag_k, ag_c;
+        if (segk == 0) { ag_k = 0; ag_c = 0; }
+        if (ag_k >= nag) { advance = 1; break; }
+        const AgStep *a = &AG[ag_k];
+        cmd_yaw = cmd_pitch = 0;
+        if (a->t == 'x') {
+            if (ag_c >= VIEW_FRAMES) { ag_k++; ag_c = 0; break; }
+            cmd_pitch = (float)a->c; cmd_yaw = (float)a->b;
+            pose_age = ag_c; store = ag_c == SETTLE ? 2 : 1; kind = CK_AGUA; view = (a->a % 64) * 64;
+            atomic_store(&g_lockstep, 1);
+            mv_host_pad((uint16_t)a->d, 128, 128, 128, 128);
+            ag_c++;
+        } else if (a->t == 'v') {
+            int nvw = AG_NP * AG_NY;
+            int v = ag_c / VIEW_FRAMES, ag = ag_c % VIEW_FRAMES;
+            if (v >= nvw) { ag_k++; ag_c = 0; break; }
+            cmd_pitch = AG_PITCH[v / AG_NY]; cmd_yaw = (float)(v % AG_NY) * (360.0f / AG_NY);
+            pose_age = ag; store = ag == SETTLE ? 2 : 1; kind = CK_AGUA; view = (a->a % 64) * 64 + v;
+            atomic_store(&g_lockstep, 1);
+            mv_host_pad(0, 128, 128, 128, 128);
+            ag_c++;
+        } else {
+            int n = a->c;
+            if (ag_c >= n) { ag_k++; ag_c = 0; break; }
+            if (a->t == 'm') mv_host_pad((uint16_t)a->d, (uint8_t)(a->a + 128), (uint8_t)(a->b + 128), 128, 128);
+            else if (a->t == 'p') mv_host_pad((uint16_t)a->d, 128, 128, 128, 128);
+            else mv_host_pad(0, 128, 128, 128, 128);
+            ag_c++;
+        }
         break;
     }
     case SG_END:
@@ -1023,6 +1242,15 @@ static void eval_zone(int zi) {
             ref_add(&R, P);
         }
     }
+    if (zi == 0 && g_ref_in) {
+        FILE *rf = fopen(g_ref_in, "rb"); uint64_t nn = 0;
+        if (rf && fread(&nn, 8, 1, rf) == 1) { float t9[9]; for (uint64_t i = 0; i < nn && fread(t9, sizeof t9, 1, rf) == 1; i++) ref_add(&R, t9); }
+        if (rf) fclose(rf);
+    }
+    if (zi == 0 && g_ref_out) {
+        FILE *rf = fopen(g_ref_out, "wb"); uint64_t nn = R.n;
+        if (rf) { fwrite(&nn, 8, 1, rf); fwrite(R.t, sizeof(float) * 9, R.n, rf); fclose(rf); }
+    }
     REP("  referencia omnidireccional: %zu triángulos únicos (%zu escenas guardadas)\n", R.n, z->n);
 
     /* --- barrido --- */
@@ -1305,6 +1533,12 @@ int main(int argc, char **argv) {
                 if (!strcmp(t, "giro_c")) G_CONT = 1; else if (!strcmp(t, "stick")) G_STICK = 1; else if (!strcmp(t, "manos")) G_MANOS = 1; else if (!strcmp(t, "rend")) G_REND = 1;
             }
             free(d);
+        } else if (!strcmp(argv[i], "--agua") && i + 1 < argc) { G_AGUA = 1; ag_parse(argv[++i]);
+        } else if (!strcmp(argv[i], "--pre") && i + 1 < argc) { G_PRE = 1; ag_parse(argv[++i]);
+        } else if (!strcmp(argv[i], "--ref-in") && i + 1 < argc) { g_ref_in = argv[++i];
+        } else if (!strcmp(argv[i], "--ref-out") && i + 1 < argc) { g_ref_out = argv[++i];
+        } else if (!strcmp(argv[i], "--agdump")) { G_AGDUMP = 1;
+        } else if (!strcmp(argv[i], "--asentar") && i + 1 < argc) { g_settle = atoi(argv[++i]); if (g_settle < 2) g_settle = 2; g_vf = g_settle + 6;
         } else if (!strcmp(argv[i], "--sin-control")) { G_CONTROL = 0;
         } else if (!strcmp(argv[i], "--th") && i + 1 < argc) {
             char *kv = argv[++i], *eq = strchr(kv, '=');
@@ -1336,13 +1570,16 @@ int main(int argc, char **argv) {
         char *sv = NULL;
         for (char *t = strtok_r(zlist, ",", &sv); t && nzones < MAXZ; t = strtok_r(NULL, ",", &sv)) g_zname[nzones++] = strdup(t);
     }
+    if (G_PRE) nzones = 1;
     for (int i = 0; i < MAXZ; i++) zone_ok_flag[i] = 1;
 
     /* programa */
     nprog = 0;
     PROG[nprog++] = (Seg){SG_BOOT, 0, 0};
+    if (G_AGUA) { PROG[nprog++] = (Seg){SG_ZONE, 0, 0}; PROG[nprog++] = (Seg){SG_AGUA, 0, 0}; nzones = 0; }
     for (int z = 0; z < nzones; z++) {
         PROG[nprog++] = (Seg){SG_ZONE, z, 0};
+        if (G_PRE && z == 0) PROG[nprog++] = (Seg){SG_AGUA, 0, 0};
         PROG[nprog++] = (Seg){SG_SWEEP, z, 0};
         if (G_CONT) PROG[nprog++] = (Seg){SG_HSMOOTH, z, 0};
         if (G_STICK) { PROG[nprog++] = (Seg){SG_TSMOOTH, z, 0}; PROG[nprog++] = (Seg){SG_TSTEPS, z, 0}; }
@@ -1358,6 +1595,7 @@ int main(int argc, char **argv) {
     if (getenv("VRPROBE_TAG")) snprintf(g_xp_tag, sizeof g_xp_tag, "%s_", getenv("VRPROBE_TAG"));
     mv_vrhost_install();
     mv_vrhost_set_test_hook(hook);
+    if (G_AGUA || G_AGDUMP) { snprintf(g_agdir, sizeof g_agdir, "%s/agua", g_out); mkdir(g_agdir, 0755); vr_scene_set_fate(g_fatebuf, sizeof g_fatebuf); vr_scene_set_tri_src(g_tsrcbuf, sizeof g_tsrcbuf / sizeof g_tsrcbuf[0]); mv_vrhost_set_scene_tap(ag_tap); }
     mv_host_set_turbo(1);
     float m0[16]; head_matrix(0, 0, 0, H_STAND, 0, m0); mv_vr_set_head(m0, 0.0);
     int r = mv_host_start(exe, disc, card);

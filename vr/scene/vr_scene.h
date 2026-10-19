@@ -343,6 +343,8 @@ enum {
     VR_FATE_COUNT
 };
 void vr_scene_set_fate(uint8_t *buf, uint32_t cap);   /* NULL para desactivar */
+/* (pruebas) Rellena buf[k] con el índice de op de origen del triángulo k de VrScene.v (orden de salida). NULL para desactivar. */
+void vr_scene_set_tri_src(uint32_t *buf, uint32_t cap);
 /* Origen (suelo bajo el jugador, mundo del juego) que usa origin_mode 0; útil para fijar origin_game (modo 1). */
 void vr_scene_player_origin(const BridgeState *bs, const VrSceneOpts *o, float org[3]);
 
