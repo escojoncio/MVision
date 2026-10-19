@@ -32,9 +32,7 @@ struct MVApp: App {
                 }
         }
         .defaultSize(width: 1024, height: 768)
-        .handlesGameControllerEvents(matching: .gamepad)
         XRImmersiveScene()
-            .handlesGameControllerEvents(matching: .gamepad)
     }
 }
 
