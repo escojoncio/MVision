@@ -25,6 +25,7 @@
 #include "vr_gesture.h"
 #include "vrgame.h"
 #include "vrhost.h"
+#include "vr_body.h"
 
 static const struct { const char *n; int bit; } PN[] = {
     {"select", 0}, {"l3", 1}, {"r3", 2}, {"start", 3}, {"up", 4}, {"right", 5}, {"down", 6}, {"left", 7},
@@ -149,8 +150,10 @@ static void print_bs(uint32_t t, const BridgeState *b) {
 static uint16_t std_pad(uint32_t v) {
     uint16_t b = 0;
     if ((v >= 120 && v < 126) || (v >= 400 && v < 406)) b |= 1u << 3;
-    if (v >= 97 && v % 97 < 6) b |= 1u << 13;
-    if (v >= 211 && v % 211 < 6) b |= 1u << 7;
+    if (v < 2000) {
+        if (v >= 97 && v % 97 < 6) b |= 1u << 13;
+        if (v >= 211 && v % 211 < 6) b |= 1u << 7;
+    } else if (v % 83 < 6) b |= (1u << 13) | (1u << 14);   /* confirmar + cruz: avanza el comunicador y salta la escena inicial (mapa de menús del visor) */
     return b;
 }
 
@@ -165,9 +168,15 @@ static HrEv hramps[16]; static int nhramps;
 static float hc_fade;
 static double hc_max_corr, hc_max_fade; static uint32_t hc_n_hit, hc_n_fade;
 static float prev_ctl[2]; static int have_prev_ctl;
-static void hand_set(int side, float x, float y, float z, float grip) {
+static void hand_set(int side, float x, float y, float z, float grip, float trig) {
     MvVrHand h; memset(&h, 0, sizeof h);
-    h.valid = 1; h.rot[3] = 1; h.pos[0] = x; h.pos[1] = y; h.pos[2] = z; h.grip = grip;
+    h.valid = 1; h.rot[3] = 1;
+    { /* BR_HROLL / BR_HPITCH (grados): giro de la mano sobre el eje de los dedos (z) y sobre x, para mirar el puño de lado/por la palma (pruebas) */
+      const char *er = getenv("BR_HROLL"), *ep = getenv("BR_HPITCH");
+      float r = er ? (float)atof(er) * 3.14159265f / 360.0f : 0, pp = ep ? (float)atof(ep) * 3.14159265f / 360.0f : 0;
+      float qz[4] = {0, 0, sinf(side ? -r : r), cosf(r)}, qx[4] = {sinf(pp), 0, 0, cosf(pp)};
+      h.rot[0] = qx[3] * qz[0] + qx[0] * qz[3]; h.rot[1] = -qx[0] * qz[2]; h.rot[2] = qx[3] * qz[2] + qx[2] * qz[3]; h.rot[3] = qx[3] * qz[3] - qx[0] * qz[0]; }
+    h.pos[0] = x; h.pos[1] = y; h.pos[2] = z; h.grip = grip; h.trigger = trig;
     mv_vrgame_set_hand(side, &h);
 }
 static float lerpf(float a, float b, float t) { return a + (b - a) * (t < 0 ? 0 : t > 1 ? 1 : t); }
@@ -192,26 +201,34 @@ static int world_to_user(const float W[3], float u[3]) {
     return 1;
 }
 static void hands_for(uint32_t t, const BridgeState *bs) {
-    float gR = 0;
+    float gR = 0, tR = 0, gL = 0;        /* agarre (puño) y gatillo de la mano derecha; puño de la izquierda */
+    float lx = -0.2f, ly = head_y - 0.40f, lz = -0.15f;
     float rx = 0.2f, ry = head_y - 0.40f, rz = -0.15f;  /* reposo, mano derecha (a 0,40 m bajo la cabeza) */
-    if (scn && (!strcmp(scn, "punch") || !strcmp(scn, "punch_noenemy") || !strcmp(scn, "punch_slow"))) {
+    if (scn && (!strcmp(scn, "punch") || !strcmp(scn, "punch_noenemy") || !strcmp(scn, "punch_slow") || !strcmp(scn, "punch_open"))) {
         uint32_t k = t < 230 ? 999 : (t - 230) % 40;
-        int n = !strcmp(scn, "punch_slow") ? 60 : 6;
-        if (k < (uint32_t)n) rz = lerpf(-0.15f, -0.75f, (float)(k + 1) / n);
-        else if (k < (uint32_t)n + 10) rz = lerpf(-0.75f, -0.15f, (float)(k - n + 1) / 10);
+        gR = gL = strcmp(scn, "punch_open") ? 1.0f : 0.0f;   /* punch_open: la MISMA trayectoria con la mano abierta (no debe golpear) */
+        /* puños cerrados (el agarre NO es el gatillo): golpear nunca debe agarrar */
+        /* golpe realista: 0,6 m en 0,28 s con perfil suave (media 2,1 m/s, pico ~4 m/s) y vuelta en 0,3 s */
+        int n = !strcmp(scn, "punch_slow") ? 60 : 14;
+        if (k < (uint32_t)n) { float u = (float)(k + 1) / n; rz = lerpf(-0.15f, -0.75f, u * u * (3 - 2 * u)); }
+        else if (k < (uint32_t)n + 15) { float u = (float)(k - n + 1) / 15; rz = lerpf(-0.75f, -0.15f, u * u * (3 - 2 * u)); }
+    } else if (scn && !strcmp(scn, "fist")) {         /* manos delante de la vista; el agarre (grip) se cierra progresivamente de 230 a 290 y se abre de 420 a 480 */
+        rx = 0.14f; lx = -0.14f; ry = ly = head_y - 0.38f; rz = lz = -0.30f;
+        float u = t < 230 ? 0.0f : (t < 290 ? (float)(t - 230) / 60.0f : (t < 420 ? 1.0f : (t < 480 ? 1.0f - (float)(t - 420) / 60.0f : 0.0f)));
+        gR = gL = u;
     } else if (scn && !strcmp(scn, "grab") && bs && bs->n_enemies > 0) {
         const BridgeEnemy *e = &bs->enemies[0];
         float W[3] = {(float)e->pos.x, (float)e->pos.y + 450.0f, (float)e->pos.z}, u[3];
-        if (t >= 215 && world_to_user(W, u)) { rx = u[0]; ry = u[1]; rz = u[2]; }
-        if (t >= 225 && t < 360) gR = 1.0f;
-        if ((t >= 300 && t < 308) || (t >= 322 && t < 330)) gR = 0.1f;   /* aflojar y apretar de nuevo: toques */
+        if (t >= 215 && world_to_user(W, u)) { rx = u[0] + 0.05f; ry = u[1]; rz = u[2]; lx = u[0] - 0.05f; ly = u[1]; lz = u[2]; }
+        if (t >= 225 && t < 360) tR = 1.0f;                                 /* AGARRAR = gatillo con la mano en el cuello */
+        if ((t >= 300 && t < 308) || (t >= 322 && t < 330)) tR = 0.1f;      /* aflojar y apretar de nuevo: toques */
     } else if (scn && !strcmp(scn, "knock")) {
         uint32_t k = t < 70 ? 999 : (t - 70) % 40;
         if (k < 6) rz = lerpf(-0.15f, 0.4f, (float)(k + 1) / 6);
         else if (k < 16) rz = lerpf(0.4f, -0.15f, (float)(k - 5) / 10);
     }
-    hand_set(1, rx, ry, rz, gR);
-    hand_set(0, -0.2f, head_y - 0.40f, -0.15f, 0);
+    hand_set(1, rx, ry, rz, gR, tR);
+    hand_set(0, lx, ly, lz, gL, 0);
 }
 
 static uint32_t last_st = 0xFFFFFFFFu; static int last_act = -1;
@@ -375,8 +392,9 @@ int main(int argc, char **argv) {
     mv_host_pause();
     usleep(100000);
     poll_run = 0; if (have_pt) pthread_join(pt, NULL);
-    fprintf(stderr, "[bodyrun] eventos de gestos: golpe %u agarre %u apretón %u soltar %u pared(golpe) %u asomar %u contacto-pared %u daño %u\n", vrbodyg_event_count(VRG_EV_PUNCH), vrbodyg_event_count(VRG_EV_GRAB),
-            vrbodyg_event_count(VRG_EV_SQUEEZE), vrbodyg_event_count(VRG_EV_RELEASE), vrbodyg_event_count(VRG_EV_KNOCK), vrbodyg_event_count(VRG_EV_PEEK), vrbodyg_event_count(VRG_EV_WALL), vrbodyg_event_count(VRG_EV_HURT));
+    fprintf(stderr, "[bodyrun] eventos de gestos: golpe %u agarre %u apretón %u soltar %u pared(golpe) %u asomar %u contacto-pared %u daño %u impacto %u golpe-botón %u\n", vrbodyg_event_count(VRG_EV_PUNCH), vrbodyg_event_count(VRG_EV_GRAB),
+            vrbodyg_event_count(VRG_EV_SQUEEZE), vrbodyg_event_count(VRG_EV_RELEASE), vrbodyg_event_count(VRG_EV_KNOCK), vrbodyg_event_count(VRG_EV_PEEK), vrbodyg_event_count(VRG_EV_WALL), vrbodyg_event_count(VRG_EV_HURT), vrbodyg_event_count(VRG_EV_IMPACT), vrbodyg_event_count(VRG_EV_JAB));
+    { VrBodyStats bst; vrbody_stats(&bst); fprintf(stderr, "[bodyrun] cuerpo: apply %u brazos %u puños %u malla-no-reconocida %u\n", bst.applies, bst.arms_driven, bst.fist_applies, bst.fist_skipped); }
     if (use_hc) fprintf(stderr, "[hc-resumen] VBlanks con recorte=%u con fundido=%u corr max=%.3f m fade max=%.2f\n", hc_n_hit, hc_n_fade, hc_max_corr, hc_max_fade);
     if (n_cam > 0) fprintf(stderr, "[loco-resumen] construcciones=%.0f distancia ojo-modelo(xz) media=%.1f max=%.1f unidades (vs modelo del fotograma anterior: media=%.1f)\n", n_cam, sum_cam / n_cam, max_cam, sum_prev / n_cam);
     return 0;

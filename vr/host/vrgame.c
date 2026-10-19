@@ -647,16 +647,17 @@ static WPose wpose_of(const GripPose *g) {
 }
 
 static VrGameDriver drv_fn;
-int vrgame_hand_raw(int side, float p[3], float *grip, double *t_s) {
+int vrgame_hand_raw(int side, float p[3], float *grip, float *trig, double *t_s) {
     if (side < 0 || side > 1) return 0;
     pthread_mutex_lock(&HM);
     GripPose g = grip_locked(&hand_in[side], mono_ns());
-    float gr = hand_in[side].grip;
+    float gr = hand_in[side].grip, tg = hand_in[side].trigger;
     uint64_t tn = hand_in[side].t_ns;
     pthread_mutex_unlock(&HM);
     if (!g.valid) return 0;
     memcpy(p, g.p, sizeof g.p);
     if (grip) *grip = gr;
+    if (trig) *trig = tg;
     if (t_s) *t_s = drv_fn ? 0.0 : (double)tn * 1e-9;     /* con guion de pruebas (VBlanks más rápidos que el reloj) el tiempo es el del VBlank: lo pone el consumidor */
     return 1;
 }
