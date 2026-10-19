@@ -6,6 +6,7 @@
 
 unsigned long ns_dump_oob;
 
+#define SLURP_MAX (16u << 20)   /* tope de cualquier fichero del volcado */
 static uint8_t *slurp(const char *dir, const char *name, size_t *n) {
     char p[640];
     snprintf(p, sizeof p, "%s/%s", dir, name);
@@ -14,7 +15,7 @@ static uint8_t *slurp(const char *dir, const char *name, size_t *n) {
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (sz < 0) { fclose(f); return NULL; }
+    if (sz < 0 || (unsigned long)sz > SLURP_MAX) { fclose(f); return NULL; }
     uint8_t *b = (uint8_t *)malloc((size_t)sz + 1);
     if (!b) { fclose(f); return NULL; }
     size_t r = fread(b, 1, (size_t)sz, f);
@@ -42,11 +43,12 @@ NsDump *ns_dump_open(const char *dir) {
     free(g);
     d->meta = (char *)slurp(dir, "meta.txt", NULL);
     uint8_t *lb = slurp(dir, "list.bin", &n);
-    if (lb && n >= 36) {
+    if (lb && n >= 4 * 8) {
         uint32_t h[7]; memcpy(h, lb, sizeof h);
         uint32_t szd; memcpy(&szd, lb + sizeof h, 4);
         size_t off = sizeof h + 4;
-        if (h[0] == 0x314C534Eu && h[1] == sizeof(GpuOp) && szd == sizeof(GpuDisplay) && n >= off + sizeof(GpuDisplay) + (size_t)h[2] * sizeof(GpuOp) + (size_t)h[3] * 2) {
+        if (h[0] == 0x314C534Eu && h[1] == sizeof(GpuOp) && szd == sizeof(GpuDisplay) && h[2] <= (SLURP_MAX / sizeof(GpuOp)) && h[3] <= (SLURP_MAX / 2) &&
+            n == off + sizeof(GpuDisplay) + (size_t)h[2] * sizeof(GpuOp) + (size_t)h[3] * 2) {
             GpuDrawList *l = &d->list;
             l->nops = h[2]; l->ndata = h[3]; l->index = h[4]; l->host_frame = h[5]; l->reason = (int)h[6];
             memcpy(&l->disp, lb + off, sizeof l->disp); off += sizeof l->disp;
@@ -57,7 +59,7 @@ NsDump *ns_dump_open(const char *dir) {
                 memcpy(l->data, lb + off, (size_t)l->ndata * 2);
                 l->cap_ops = l->nops; l->cap_data = l->ndata;
                 d->has_list = 1;
-            }
+            } else { free(l->ops); free(l->data); memset(l, 0, sizeof *l); }
         }
     }
     free(lb);
@@ -108,14 +110,19 @@ int ns_dump_meta_floats(const NsDump *d, const char *key, float *out, int n) {
     return k;
 }
 
+/* Puntero RAM válido del motor: segmentos de usuario, cacheado y no cacheado, dentro de los 2 MiB (con espejos hasta 8 MiB) y FUERA de los primeros 64 KiB (vectores y área reservada
+ * del sistema: ningún objeto del juego vive ahí; un 0 o un valor pequeño es un puntero nulo o un entero). */
 int ns_ptr_ok(uint32_t a) {
-    uint32_t seg = a >> 29;   /* KUSEG 0, KSEG0 4, KSEG1 5 */
-    return (seg == 0 || seg == 4 || seg == 5) && (a & 0x1FFFFFu) < NS_DUMP_RAM_SIZE && (a & 0x1FFFFFFFu) < 0x00800000u;
+    uint32_t seg = a >> 29;
+    uint32_t o = a & 0x1FFFFFFFu;
+    return (seg == 0 || seg == 4 || seg == 5) && o < 0x00800000u && (o & 0x1FFFFFu) >= 0x10000u;
 }
 static const uint8_t *at(const NsDump *d, uint32_t a, uint32_t n) {
-    uint32_t o = a & 0x1FFFFFFFu;
-    if (!ns_ptr_ok(a) || (o & 0x1FFFFFu) + n > NS_DUMP_RAM_SIZE) { ns_dump_oob++; return NULL; }
-    return d->ram + (o & 0x1FFFFFu);
+    uint32_t seg = a >> 29, o = a & 0x1FFFFFFFu;
+    if (!d || !d->ram || !(seg == 0 || seg == 4 || seg == 5) || o >= 0x00800000u || n == 0 || n > NS_DUMP_RAM_SIZE) { ns_dump_oob++; return NULL; }
+    o &= 0x1FFFFFu;
+    if (o + n > NS_DUMP_RAM_SIZE) { ns_dump_oob++; return NULL; }
+    return d->ram + o;
 }
 uint32_t ns_r32(const NsDump *d, uint32_t a) { const uint8_t *p = at(d, a, 4); uint32_t v = 0; if (p) memcpy(&v, p, 4); return v; }
 uint16_t ns_r16(const NsDump *d, uint32_t a) { const uint8_t *p = at(d, a, 2); uint16_t v = 0; if (p) memcpy(&v, p, 2); return v; }
