@@ -3,5 +3,6 @@
   "vrcam_padorg":   {"target": "80016d98", "how": "exact", "doc": "fija el origen angular del mando"},
   "vrcam_trans":    {"target": "8001e840", "how": "exact", "doc": "etapa de transformación de vértices (tras el recorte por objeto)"},
   "vrcam_draw":     {"target": "80018110", "how": "exact", "doc": "envía al GPU la lista de primitivas ya ordenada del frame"},
+  "vrcam_pack":     {"target": "8001e1fc", "how": "exact", "doc": "etapa de polígono de la transformación: orientación (NCLIP) y z de ordenación de cada paquete"},
   "vrcam_overscan": {"target": "80017780", "how": "exact", "doc": "ajuste vertical de la matriz de pantalla"}
 }

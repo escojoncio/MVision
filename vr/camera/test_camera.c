@@ -324,7 +324,7 @@ static void test_patch(void) {
     uint32_t base, size, base2, size2;
     memset(a, 0, sizeof a); memset(b, 0, sizeof b);
     CHECK(load_exe(eo, a, &base, &size) && load_exe(ep, b, &base2, &size2) && base == base2 && size == size2);
-    CHECK(vrcam_patch_ram(a, &p) == 45);       /* 44 inmediatos de recorte + subdivisión; "punto visible" intacto */
+    CHECK(vrcam_patch_ram(a, &p) == 51);       /* 44 inmediatos de recorte + subdivisión + 6 de sin-recorte; "punto visible" intacto */
     CHECK(memcmp(a + (base & 0x1FFFFF), b + (base & 0x1FFFFF), size) == 0);   /* coincide byte a byte con patch_exe.py */
     /* "punto visible" y subdivisión realmente intactos sin sus opciones */
     { uint32_t w; memcpy(&w, a + (0x8001c440u & 0x1FFFFF), 4); CHECK((int16_t)(w & 0xFFFF) == 192);
@@ -333,14 +333,14 @@ static void test_patch(void) {
     if (ew) {
         static uint8_t cw[BRIDGE_RAM_SIZE]; uint32_t b3, s3; VrCamPatch pw = p; pw.wide_points = 1;
         memset(cw, 0, sizeof cw); memset(b, 0, sizeof b);
-        CHECK(load_exe(eo, cw, &b3, &s3) && load_exe(ew, b, &base2, &size2) && vrcam_patch_ram(cw, &pw) == 57);
+        CHECK(load_exe(eo, cw, &b3, &s3) && load_exe(ew, b, &base2, &size2) && vrcam_patch_ram(cw, &pw) == 63);
         CHECK(memcmp(cw + (b3 & 0x1FFFFF), b + (base2 & 0x1FFFFF), s3) == 0);
     }
     /* doble aplicación: ya no coincide con lo esperado */
     CHECK(vrcam_patch_ram(a, &p) == -1);
     /* todo o nada: un solo sitio distinto (otra edición del EXE) -> -1 y la RAM queda idéntica, sea cual sea el sitio */
     {
-        static const uint32_t bad_sites[] = {0x80018b40u, 0x8001e4b8u, 0x8001e6f4u, 0x8001c604u, 0x8001A11Cu};
+        static const uint32_t bad_sites[] = {0x80018b40u, 0x8001e4b8u, 0x8001e6f4u, 0x8001c604u, 0x8001A11Cu, 0x80018D00u, 0x8001E29Cu};
         for (unsigned k = 0; k < sizeof bad_sites / sizeof *bad_sites; k++) {
             memset(a, 0, sizeof a); load_exe(eo, a, &base, &size);
             uint32_t w; memcpy(&w, a + (bad_sites[k] & 0x1FFFFF), 4); w ^= 1u; memcpy(a + (bad_sites[k] & 0x1FFFFF), &w, 4);
@@ -356,14 +356,17 @@ static void test_patch(void) {
         /* parámetros no finitos o enormes: rechazados / sin desbordar */
         memset(a, 0, sizeof a); load_exe(eo, a, &base, &size);
         VrCamPatch pn = p; pn.hfov_deg = NAN; CHECK(vrcam_patch_ram(a, &pn) == -1);
-        pn = p; pn.vfov_deg = 180; pn.engine_h = 2000000000; CHECK(vrcam_patch_ram(a, &pn) == 45);   /* caja limitada a 1020 */
+        pn = p; pn.vfov_deg = 180; pn.engine_h = 2000000000; CHECK(vrcam_patch_ram(a, &pn) == 51);   /* caja limitada a 1020 */
         { uint32_t w2; memcpy(&w2, a + (0x80018b54u & 0x1FFFFF), 4); CHECK((int16_t)(w2 & 0xFFFF) == 1021); }
     }
     memset(a, 0, sizeof a); load_exe(eo, a, &base, &size);
     /* sin subdivisión y con otra caja */
     memset(a, 0, sizeof a); load_exe(eo, a, &base, &size);
     p.no_divide = 0; p.engine_h = 320; p.hfov_deg = 110; p.vfov_deg = 90;
-    CHECK(vrcam_patch_ram(a, &p) == 44);
+    CHECK(vrcam_patch_ram(a, &p) == 50);   /* 44 inmediatos + 6 sitios sin recorte */
+    memset(a, 0, sizeof a); load_exe(eo, a, &base, &size);
+    p.no_cull = 0; CHECK(vrcam_patch_ram(a, &p) == 44); p.no_cull = 1;
+    memset(a, 0, sizeof a); load_exe(eo, a, &base, &size); CHECK(vrcam_patch_ram(a, &p) == 50);
     CHECK(vrcam_patch_ram(a, &p) == -1);
     p.hfov_deg = 10; memset(a, 0, sizeof a); load_exe(eo, a, &base, &size); CHECK(vrcam_patch_ram(a, &p) == -1);   /* parámetros fuera de rango */
 }

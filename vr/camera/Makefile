@@ -20,7 +20,7 @@ DISC ?= ../../gamedata/disc
 HFOV ?= 140
 VFOV ?= 120
 HH ?= 160
-PATCHFLAGS ?= --no-divide
+PATCHFLAGS ?= --no-divide --no-cull
 RECOMP := ../../tools/recomp/recomp.py
 
 all: $(OUT)/test_camera
@@ -31,14 +31,14 @@ $(OUT)/test_camera: test_camera.c vr_camera.c vr_camera.h $(BR)/bridge.c $(BR)/b
 # patch_exe.py byte a byte. Si existe el EXE real (EXE=...), se prueba también con él.
 $(OUT)/syn/orig.exe: patch_exe.py
 	@mkdir -p $(OUT)/syn
-	python3 -I -c "import struct,sys; sys.path.insert(0,'.'); import patch_exe as P; b=0x80010000; n=0x9D000; d=bytearray(0x800+n); d[:8]=bytes.fromhex('50532d5820455845'); struct.pack_into('<IIII',d,0x10,b,0,b,n); [struct.pack_into('<I',d,0x800+a-b,(P.OLD[r][0]<<26)|(P.OLD[r][1]&0xFFFF)) for a,r in P.SITES]; struct.pack_into('<I',d,0x800+0x8001A11C-b,0x24020800); open('$@','wb').write(d)"
+	python3 -I -c "import struct,sys; sys.path.insert(0,'.'); import patch_exe as P; b=0x80010000; n=0x9D000; d=bytearray(0x800+n); d[:8]=bytes.fromhex('50532d5820455845'); struct.pack_into('<IIII',d,0x10,b,0,b,n); [struct.pack_into('<I',d,0x800+a-b,(P.OLD[r][0]<<26)|(P.OLD[r][1]&0xFFFF)) for a,r in P.SITES]; struct.pack_into('<I',d,0x800+0x8001A11C-b,0x24020800); [struct.pack_into('<I',d,0x800+a-b,o) for n,a,o,w in P.NOCULL]; open('$@','wb').write(d)"
 $(OUT)/syn/patched.exe: $(OUT)/syn/orig.exe patch_exe.py
-	python3 patch_exe.py $< $@ --h 160 --hfov 140 --vfov 120 --no-divide
+	python3 patch_exe.py $< $@ --h 160 --hfov 140 --vfov 120 --no-divide --no-cull
 $(OUT)/syn/patched_wide.exe: $(OUT)/syn/orig.exe patch_exe.py
-	python3 patch_exe.py $< $@ --h 160 --hfov 140 --vfov 120 --no-divide --wide-points
+	python3 patch_exe.py $< $@ --h 160 --hfov 140 --vfov 120 --no-divide --no-cull --wide-points
 test: $(OUT)/test_camera $(OUT)/syn/patched.exe $(OUT)/syn/patched_wide.exe
 	VRCAM_EXE=$(OUT)/syn/orig.exe VRCAM_EXE_PATCHED=$(OUT)/syn/patched.exe VRCAM_EXE_PATCHED_WIDE=$(OUT)/syn/patched_wide.exe $(OUT)/test_camera
-	@if [ -f "$(EXE)" ]; then python3 patch_exe.py $(EXE) $(OUT)/syn/real_patched.exe --h 160 --hfov 140 --vfov 120 --no-divide && \
+	@if [ -f "$(EXE)" ]; then python3 patch_exe.py $(EXE) $(OUT)/syn/real_patched.exe --h 160 --hfov 140 --vfov 120 --no-divide --no-cull && \
 	  VRCAM_EXE=$(EXE) VRCAM_EXE_PATCHED=$(OUT)/syn/real_patched.exe $(OUT)/test_camera; fi
 test-san: test_camera.c vr_camera.c vr_camera.h $(BR)/bridge.c $(BR)/bridge_addrs.c $(OUT)/syn/patched.exe $(OUT)/syn/patched_wide.exe
 	@mkdir -p $(OUT)

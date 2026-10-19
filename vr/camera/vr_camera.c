@@ -401,7 +401,19 @@ static const struct { uint32_t addr; uint8_t role; } PATCH_SITES[] = {
 #define DIVIDE_OLD  0x24020800u
 #define DIVIDE_NEW  0x3C027FFFu
 
-void vrcam_patch_default(VrCamPatch *p) { p->engine_h = 160; p->hfov_deg = 140; p->vfov_deg = 120; p->no_divide = 1; p->wide_points = 0; }
+/* Sin recorte del motor (equivalente a NOCULL de patch_exe.py): cada sitio es UNA instrucción de rama; se comprueba la palabra original
+ * (todo o nada) y se escribe la nueva. Efecto de cada uno: ver patch_exe.py y la bitácora. */
+static const struct { uint32_t addr, old, neu; } NOCULL_SITES[] = {
+    {0x80018D00u, 0x104000B0u, 0x00000000u},   /* DG_BoundChanl: objeto con máscara de mapa fuera del mapa actual -> oculto */
+    {0x80018D0Cu, 0x104000ADu, 0x100000ADu},   /* DG_BoundChanl: caja envolvente del objeto (8 esquinas proyectadas) -> siempre dentro */
+    {0x800188F8u, 0x104000B3u, 0x100000B3u},   /* DG_BoundObjs: caja envolvente por pieza -> siempre dentro */
+    {0x8001BAE0u, 0x104000D5u, 0x00000000u},   /* DG_PrimChanl: primitivas del motor con máscara de mapa */
+    {0x8001DB10u, 0x10400026u, 0x00000000u},   /* DG_SortChanl: idem al ordenar */
+    {0x8001E29Cu, 0x1040000Eu, 0x1000000Eu},   /* etapa de polígono: descarte por códigos de pantalla de los vértices */
+};
+#define NOCULL_N ((int)(sizeof NOCULL_SITES / sizeof *NOCULL_SITES))
+
+void vrcam_patch_default(VrCamPatch *p) { p->engine_h = 160; p->hfov_deg = 140; p->vfov_deg = 120; p->no_divide = 1; p->wide_points = 0; p->no_cull = 1; }
 
 int vrcam_patch_ram(uint8_t *ram, const VrCamPatch *pp) {
     VrCamPatch d; if (!pp) { vrcam_patch_default(&d); pp = &d; }
@@ -411,6 +423,7 @@ int vrcam_patch_ram(uint8_t *ram, const VrCamPatch *pp) {
         int op = (int)(w >> 26), imm = (int16_t)(w & 0xFFFF);
         if (op != PATCH_OLD[PATCH_SITES[i].role].op || imm != PATCH_OLD[PATCH_SITES[i].role].imm) return -1;
     }
+    for (int i = 0; i < NOCULL_N; i++) if (rd_u32(ram, NOCULL_SITES[i].addr) != NOCULL_SITES[i].old) return -1;   /* ídem: se comprueban siempre */
     if (rd_u32(ram, DIVIDE_SITE) != DIVIDE_OLD) return -1;   /* se comprueba siempre: confirma la edición del EXE aunque no se use */
     double dx = (double)pp->engine_h * tan((double)pp->hfov_deg * (PI_F / 360.0));
     double dy = (double)pp->engine_h * tan((double)pp->vfov_deg * (PI_F / 360.0));
@@ -430,5 +443,6 @@ int vrcam_patch_ram(uint8_t *ram, const VrCamPatch *pp) {
         n++;
     }
     if (pp->no_divide) { uint32_t w = DIVIDE_NEW; memcpy(ram + (DIVIDE_SITE & RAM_MASK), &w, 4); n++; }
+    if (pp->no_cull) for (int i = 0; i < NOCULL_N; i++) { uint32_t w = NOCULL_SITES[i].neu; memcpy(ram + (NOCULL_SITES[i].addr & RAM_MASK), &w, 4); n++; }
     return n;
 }

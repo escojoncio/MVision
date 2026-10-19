@@ -149,8 +149,10 @@ typedef struct VrCamPatch {
     float hfov_deg, vfov_deg;/* campo TOTAL que debe cubrir el recorte alrededor de la dirección del motor */
     int no_divide;           /* 1: desactiva la subdivisión de polígonos cercanos (recomendado) */
     int wide_points;         /* 1: ensancha también las 3 comprobaciones de "punto visible" (12 sitios; solo pruebas: ver vr_camera.c) */
+    int no_cull;             /* 1 (defecto): el motor dibuja SIEMPRE todo lo cargado, sin recorte por mapa/sala, caja de pantalla ni códigos de vértice
+                              * (los sitios de la visibilidad para DIBUJAR; la de lógica -DG_PointCheck, campo +0x32 leído por la IA- no cambia) */
 } VrCamPatch;
-void vrcam_patch_default(VrCamPatch *p);                   /* 160, 140, 120, no_divide = 1, wide_points = 0 */
+void vrcam_patch_default(VrCamPatch *p);                   /* 160, 140, 120, no_divide = 1, wide_points = 0, no_cull = 1 */
 int vrcam_patch_ram(uint8_t *ram, const VrCamPatch *p);
 
 /* Matemática pura (sin estado) */
