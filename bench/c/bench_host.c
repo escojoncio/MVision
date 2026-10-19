@@ -269,7 +269,7 @@ static void rot_y(double a_deg, float R[9]) {
     float r[9] = {(float)cs, 0, (float)-sn, 0, 1, 0, (float)sn, 0, (float)cs};
     memcpy(R, r, sizeof r);
 }
-void bench_publish_motion(double t_wall, double game_s, double ox_units, double oz_units, double turn_deg) {
+void bench_publish_geom(double ox_units, double oz_units, double turn_deg) {
     float R[9];
     rot_y(turn_deg, R);
     const float K = 0.001f;
@@ -279,13 +279,18 @@ void bench_publish_motion(double t_wall, double game_s, double ox_units, double 
         g_v[i] = g_vbase[i];
         for (int r = 0; r < 3; r++) g_v[i].pos[r] = (float)(R[3 * r] * b[0] + R[3 * r + 1] * b[1] + R[3 * r + 2] * b[2]);
     }
+    g_scene_pending = g_scene_loaded;
+}
+void bench_publish_motion(double t_wall, double game_s, double ox_units, double oz_units, double turn_deg) {
+    float R[9];
+    rot_y(turn_deg, R);
+    bench_publish_geom(ox_units, oz_units, turn_deg);
     memset(&g_sample, 0, sizeof g_sample);
     g_sample.valid = 1; g_sample.t_wall = t_wall; g_sample.game_s = game_s;
     g_sample.B[0] = (float)ox_units; g_sample.B[2] = (float)oz_units;
     memcpy(g_sample.R, R, sizeof R);
-    g_sample.K = K; g_sample.turn_deg = turn_deg; g_sample.epoch = 1;
+    g_sample.K = 0.001f; g_sample.turn_deg = turn_deg; g_sample.epoch = 1;
     g_sample_pending = 1;
-    g_scene_pending = g_scene_loaded;
 }
 void mv_vrhost_smooth(VrSmCorr *out) { sm_ready(); vrsm_eval(&g_sm, g_clock, g_turn_req, out); }
 void mv_vrhost_smooth_stats(VrSmoothStats *s) { sm_ready(); vrsm_stats(&g_sm, s); }
