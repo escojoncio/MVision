@@ -63,6 +63,7 @@ jobs:
           make -f vr/native/extract.mk test
           make -C vr/camera test-native-coh
           make -C vr/body test
+          make -C vr/scene test-split
 
       - name: Compilar el banco de render
         run: |

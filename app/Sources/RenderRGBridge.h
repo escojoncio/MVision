@@ -3,6 +3,7 @@
 #pragma once
 #include "gpu.h"
 #include "vr_scene.h"
+#include "vr_split.h"
 #include "vr_types.h"
 
 /* Escena VR del siguiente frame del juego (la implementa el integrador en runtime/host.c). Devuelve != 0 y rellena

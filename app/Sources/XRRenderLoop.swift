@@ -203,7 +203,7 @@ final class XRRenderLoop {
             _ = headCorr.withUnsafeMutableBufferPointer { c in mv_vrhost_head_limit(nil, dt, c.baseAddress, &headFade) }   // libera el fundido
             headCorr = [0, 0, 0]
         }
-        presenter.collisionFade = max(0, min(1, headFade))
+        presenter.collisionFade = XRDiag.shared.settings.noLayers ? 0 : max(0, min(1, headFade))      // diagnóstico «sin capas finales»: sin oscurecimiento por colisión
         let renderRecenterInverse = (headCorr[0] != 0 || headCorr[1] != 0 || headCorr[2] != 0)
             ? XRMath.translation(SIMD3<Float>(headCorr[0], headCorr[1], headCorr[2])) * recenterInverse : recenterInverse
         // Menú VR (mantener el botón de menú izquierdo): mientras está abierto el juego no recibe entrada.
@@ -236,10 +236,11 @@ final class XRRenderLoop {
             sysProj = (0..<viewCount).map { drawable.computeProjection(viewIndex: $0) }
         }
         encoder.comfortVignette = blocked ? 0 : VRInput.shared.vignette      // viñeta de confort (vr_input: crece al girar con el stick / moverse)
+        let rateInfo = rateMapInfo(drawable)
         let ok = encoder.encode(commandBuffer: cb, gs: gs, originFromDevice: originFromDevice, recenterInverse: renderRecenterInverse, dt: dt,
                                 eyes: eyes, depthRange: drawable.depthRange, colorTextures: drawable.colorTextures,
                                 depthTextures: drawable.depthTextures, systemProjections: sysProj,
-                                debugAxes: debugAxisFrames(recenterInverse: recenterInverse))
+                                debugAxes: debugAxisFrames(recenterInverse: recenterInverse), rateMapInfo: rateInfo)
         if !ok {
             // Como antes del refactor: sin codificar no se presenta el fotograma. El aviso sale como mucho 1 vez por segundo.
             if nowT - lastEncFailLog >= 1 {
@@ -322,6 +323,18 @@ final class XRRenderLoop {
         let fwd = simd_normalize(-SIMD3<Float>(head.columns.2.x, head.columns.2.y, head.columns.2.z))
         radar.updatePose(forearm: forearm, leftGrip: grip,
                          headPosition: SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z), headForward: fwd)
+    }
+
+    /// Mapas de tasa de rasterización (foveación) que trae el drawable y cómo se tratan: la app NO asigna ninguno a ningún pase (la configuración del espacio desactiva la
+    /// foveación) y dibuja con la textura completa. Solo para el registro de diagnóstico (1 vez por segundo): cuántos trae, su tamaño de pantalla y físico por capa.
+    private func rateMapInfo(_ d: LayerRenderer.Drawable) -> String {
+        let maps = d.rasterizationRateMaps
+        var t = "drawable trae \(maps.count), foveacion de la configuracion=\(layerRenderer.configuration.isFoveationEnabled), usado por la app=no"
+        for (i, m) in maps.enumerated() {
+            let ss = m.screenSize, ps = m.physicalSize(layer: 0)
+            t += " | mapa\(i): pantalla=\(ss.width)x\(ss.height) fisico(capa0)=\(ps.width)x\(ps.height) capas=\(m.layerCount)"
+        }
+        return t
     }
 
     /// Objetivo del drawable (visionOS 26+); solo para el registro.

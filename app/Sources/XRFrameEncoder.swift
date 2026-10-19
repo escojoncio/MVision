@@ -39,6 +39,9 @@ final class XRFrameEncoder {
     /// Viñeta de confort 0..1 (la calcula vr_input: crece al girar con el stick / moverse); 0 = sin viñeta. La app la fija cada fotograma.
     var comfortVignette: Float = 0
     private(set) var lastSmooth = VrSmCorr()
+    /// Lectura sin bloqueo de unos píxeles del drawable final (diagnóstico, 1 vez por segundo).
+    private var probe: XRPixelProbe?
+    private var probeT: CFTimeInterval = 0
 
     init?(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat, layered: Bool, sampleCount: Int) {
         guard let fp = XRFinalPass(device: device, colorFormat: colorFormat, depthFormat: depthFormat, layered: layered) else { return nil }
@@ -48,6 +51,7 @@ final class XRFrameEncoder {
         presenter = XRPresenter(device: device)
         axes = XRDebugAxes(device: device)
         targets = XRTargets(device: device)
+        probe = XRPixelProbe(device: device)
         self.layered = layered
         self.sampleCount = sampleCount
     }
@@ -70,9 +74,12 @@ final class XRFrameEncoder {
     }
 
     /// Proyección de Z invertida del ojo (a partir de las tangentes y el rango de profundidad del sistema, en metros).
-    static func projection(_ e: XREyeView, depthRange r: SIMD2<Float>) -> simd_float4x4 {
+    static func projection(_ e: XREyeView, depthRange r: SIMD2<Float>, nearOverride: Float = 0) -> simd_float4x4 {
         let p = planes(r)
-        return XRMath.projection(tangents: e.tangents, near: p.near, far: p.far)
+        // Diagnóstico: plano cercano fijado (el lejano se conserva, con al menos 4x el cercano para que la proyección sea válida).
+        let n = nearOverride > 0 ? nearOverride : p.near
+        let f = nearOverride > 0 ? max(p.far, n * 4) : p.far
+        return XRMath.projection(tangents: e.tangents, near: n, far: f)
     }
 
     /// ¿Es `m` una proyección de Z invertida utilizable (la que devuelve `computeProjection` con la convención rightUpBack)? Forma
@@ -108,24 +115,36 @@ final class XRFrameEncoder {
     func encode(commandBuffer cb: MTLCommandBuffer, gs: MvVrGameState, originFromDevice: simd_float4x4, recenterInverse: simd_float4x4,
                 dt: Float, eyes: [XREyeView], depthRange: SIMD2<Float>, colorTextures colorTex: [MTLTexture],
                 depthTextures depthTex: [MTLTexture], systemProjections: [simd_float4x4]? = nil,
-                debugAxes: [XRAxisFrame] = []) -> Bool {
+                debugAxes: [XRAxisFrame] = [], rateMapInfo: String = "") -> Bool {
         guard eyes.count >= viewCount, !colorTex.isEmpty, !depthTex.isEmpty else { return false }
         frameNo += 1
         let recentered = recenterInverse * originFromDevice
+
+        // Interruptores de diagnóstico (submenú «Diagnóstico»; XRDiag): se leen en cada fotograma, así que valen en vivo.
+        let dg = XRDiag.shared.settings
+        let effSamples = (dg.msaa1 || sampleCount <= 1) ? 1 : sampleCount      // MSAA 1x: se dibuja directo en el drawable, sin resolve
+        renderer.sampleCount = effSamples
+        renderer.backgroundColor = dg.magentaClear ? MTLClearColor(red: 1, green: 0, blue: 1, alpha: 1) : MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        renderer.diagNoZ = dg.noZTest
+        renderer.diagSplitMeters = dg.splitMeters
+        renderer.screenFilterEnabled = !dg.noLayers      // el filtro de pantalla (tinte, recubrimientos, máscara de visión) es una capa final
 
         // Vistas y proyecciones por ojo.
         var views: [simd_float4x4] = []
         var projs: [simd_float4x4] = []
         for i in 0..<viewCount {
             views.append((recenterInverse * originFromDevice * eyes[i].transform).inverse)
-            projs.append(Self.projection(eyes[i], depthRange: depthRange))
+            projs.append(Self.projection(eyes[i], depthRange: depthRange, nearOverride: dg.nearPlane))
         }
         let ownProjs = projs
         // Proyección: la del sistema (`drawable.computeProjection`, la referencia de Apple, con el rango de profundidad que usa el
         // compositor para reproyectar) si tiene la forma de Z invertida esperada y concuerda con las tangentes; si no, la propia.
         var planesUsed = Self.planes(depthRange)
+        if dg.nearPlane > 0 { planesUsed = (dg.nearPlane, max(planesUsed.far, dg.nearPlane * 4), planesUsed.valid) }
         projSource = "propia"
-        if let sp = systemProjections, sp.count >= viewCount {
+        if dg.projMode == 1 { projNote = "forzada la propia (diagnostico)" }
+        else if dg.nearPlane > 0 { projNote = "plano cercano fijado: se usa la propia (diagnostico)" }
+        else if let sp = systemProjections, sp.count >= viewCount {
             let issue = (0..<viewCount).compactMap { Self.systemProjectionIssue(sp[$0], tangents: eyes[$0].tangents) }.first
             if issue == nil, let pl = Self.planes(of: sp[0]) {
                 projs = Array(sp.prefix(viewCount))
@@ -137,7 +156,7 @@ final class XRFrameEncoder {
 
         let w = colorTex[0].width, h = colorTex[0].height
         guard let tgt = targets.get(width: w, height: h, layered: layered, views: viewCount,
-                                    samples: sampleCount, colorFormat: colorTex[0].pixelFormat, depthFormat: depthTex[0].pixelFormat,
+                                    samples: effSamples, colorFormat: colorTex[0].pixelFormat, depthFormat: depthTex[0].pixelFormat,
                                     drawableColor: colorTex, drawableDepth: depthTex) else { return false }
 
         // Con destino sRGB/lineal el panel se muestrea por la vista sRGB (decodifica a lineal al leer).
@@ -152,8 +171,12 @@ final class XRFrameEncoder {
         if !(ipd > 0.05 && ipd < 0.08) { ipd = 0.063 }
         var pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, eyePx: Float(w), p00: projs[0].columns.0.x,
                                      gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame(), ipd: ipd, shot: renderer.sceneShot)
+        if dg.noLayers {
+            // Sin capas finales: ni velo (transición, fundido de corte), ni viñeta, ni pantalla de cine / pantalla 3D; solo el mundo, el HUD 2D y los textos (menú).
+            pres.items.removeAll { $0.kind == .veil || $0.kind == .vignette || $0.kind == .screen || $0.kind == .screen3d }
+        }
         renderer.drawWorld = pres.drawWorld
-        renderer.drawBody = pres.drawBody
+        renderer.drawBody = pres.drawBody && !dg.noLayers      // radar y arma en la mano se dibujan encima del mundo, dentro del pase de escena
         renderer.drawEyes = pres.drawEyes
         renderer.stereoRequest = pres.stereo
         if let sr = pres.stereo { renderer.prepareStereo(width: sr.width, height: sr.height) }
@@ -190,11 +213,11 @@ final class XRFrameEncoder {
             if sinMundo { fbReason = nowT0 - firstEncodeT < 3 ? "arranque" : "nada que dibujar" }
         }
         // Ejes de depuración (opción del menú VR): marcos de los mandos y de las manos del personaje, solo en el mundo.
-        if !debugAxes.isEmpty, pres.drawWorld, let ax = axes {
+        if !debugAxes.isEmpty, pres.drawWorld, !dg.noLayers, let ax = axes {
             pres.items.insert(contentsOf: ax.items(frames: debugAxes, linear: renderer.linearOutput), at: 0)
         }
         // Viñeta de confort: oscurece la periferia al girar / moverse (solo en el mundo en primera persona). Va debajo del velo y del menú.
-        if comfortVignette > 0.01 && pres.drawWorld && pres.dioramaModel == nil && pres.stereo == nil {
+        if comfortVignette > 0.01 && !dg.noLayers && pres.drawWorld && pres.dioramaModel == nil && pres.stereo == nil {
             var vg = XRDrawItem(kind: .vignette, texture: nil)
             vg.opacity = min(max(comfortVignette, 0), 1)
             vg.vig = (0..<2).map { i -> SIMD4<Float> in
@@ -224,8 +247,15 @@ final class XRFrameEncoder {
             }
         }
         finalPass.encode(commandBuffer: cb, colorTextures: colorTex, depthTextures: depthTex,
-                         msaaDepth: sampleCount > 1 ? tgt.depth : nil, viewports: eyes.map { $0.viewport },
+                         msaaDepth: effSamples > 1 ? tgt.depth : nil, viewports: eyes.map { $0.viewport },
                          views: views, projections: projs, items: pres.items, viewCount: viewCount)
+
+        // Muestra de píxeles del color FINAL (tras el pase final, antes de presentar): 1 vez por segundo, un blit a un búfer pequeño; el resultado llega en el manejador de finalización.
+        let nowP = CACurrentMediaTime()
+        if let pr = probe, nowP - probeT >= 1 {
+            probeT = nowP
+            pr.encode(commandBuffer: cb, colorTextures: colorTex, layered: layered, eyes: eyes, viewCount: viewCount)
+        }
 
         // Diagnóstico (1 vez por segundo): qué se decidió y qué se dibujó.
         let now = CACurrentMediaTime()
@@ -259,6 +289,31 @@ final class XRFrameEncoder {
             lastDiag = d
             log(d)
             if let nd = renderer.nativeDiagLine() { log(nd) }
+            // Línea de diagnóstico del hueco: interruptores, triángulos largos / que cruzan el plano cercano en cada ruta, mapa de tasa, viewport y color final muestreado.
+            var vpTxt: [String] = []
+            for i in 0..<min(eyes.count, 2) {
+                let v = eyes[i].viewport, t = colorTex[min(i, colorTex.count - 1)]
+                let same = Int(v.originX) == 0 && Int(v.originY) == 0 && Int(v.width) == t.width && Int(v.height) == t.height
+                if same {
+                    vpTxt.append("ojo\(i)=textura completa")
+                } else {
+                    let geo = String(format: "(%.0f,%.0f %.0fx%.0f) textura=%ldx%ld DISTINTO", v.originX, v.originY, v.width, v.height, t.width, t.height)
+                    vpTxt.append("ojo\(i)=" + geo)
+                }
+            }
+            let c0 = colorTex[0]
+            let nearTxt = String(format: "%.3f", planesUsed.near)
+            var dl = "diag-huecos: " + XRDiag.summary(dg)
+            dl += " | msaa-efectivo=\(effSamples) proyeccion=\(projSource) cercano-usado=\(nearTxt)m"
+            dl += " | " + renderer.diagLine(near: planesUsed.near, bigEdge: 12)
+            let rm: String = rateMapInfo.isEmpty ? "n/d" : rateMapInfo
+            let rmNote: String = dg.ignoreRateMap ? "; interruptor «sin mapa» activo: sin efecto" : ""
+            dl += " | mapa-tasa: " + rm + " (la app no asigna ningun mapa al pase" + rmNote + ")"
+            dl += " | viewport vs textura: " + vpTxt.joined(separator: ", ") + " (el pase de escena usa la textura completa)"
+            dl += " | drawable: fmt=\(c0.pixelFormat.rawValue) soloFramebuffer=\(c0.isFramebufferOnly) uso=\(c0.usage.rawValue)"
+            let px: String = probe?.last ?? "n/d"
+            dl += " | color final (3 columnas x 3 filas al 35/50/65 % y 60/75/90 % de cada ojo): " + px
+            log(dl)
         }
         return true
     }
@@ -339,5 +394,106 @@ final class XRTargets {
         let t = device.makeTexture(descriptor: d)
         t?.label = label
         return t
+    }
+}
+
+
+/// Lectura SIN BLOQUEO de unos píxeles del drawable final: un blit de 1x1 por muestra a un búfer compartido pequeño, codificado en el mismo command buffer del fotograma
+/// (tras el pase final); el contenido se decodifica en el manejador de finalización, sin esperar en el hilo de render. Muestras por ojo: 3 columnas (35/50/65 % del
+/// ancho del viewport) x 3 filas (60/75/90 % del alto), es decir, el centro-inferior de la imagen donde aparece el hueco.
+final class XRPixelProbe {
+    static let cols: [Float] = [0.35, 0.5, 0.65]
+    static let rows: [Float] = [0.60, 0.75, 0.90]
+    static let perEye = 9
+    private static let slot = 16                 // bytes por muestra en el búfer
+    private let buf: MTLBuffer
+    private let lock = NSLock()
+    private var text = "sin muestra aun"
+    private var busy = false
+
+    init?(device: MTLDevice) {
+        guard let b = device.makeBuffer(length: 2 * XRPixelProbe.perEye * XRPixelProbe.slot, options: .storageModeShared) else { return nil }
+        b.label = "mv.xr.probe"
+        buf = b
+    }
+
+    /// Último resultado (de hace como mucho un par de segundos).
+    var last: String { lock.lock(); defer { lock.unlock() }; return text }
+
+    private func set(_ t: String) { lock.lock(); text = t; busy = false; lock.unlock() }
+
+    private static func half(_ h: UInt16) -> Float {
+        let sign: Float = (h & 0x8000) != 0 ? -1 : 1
+        let e = Int((h >> 10) & 0x1F), m = Float(h & 0x3FF)
+        if e == 0 { return sign * m * powf(2, -24) }
+        if e == 31 { return m == 0 ? sign * Float.infinity : Float.nan }
+        return sign * (1 + m / 1024) * powf(2, Float(e - 15))
+    }
+
+    func encode(commandBuffer cb: MTLCommandBuffer, colorTextures: [MTLTexture], layered: Bool, eyes: [XREyeView], viewCount: Int) {
+        lock.lock()
+        if busy { lock.unlock(); return }
+        lock.unlock()
+        guard let t0 = colorTextures.first else { return }
+        let fmt = t0.pixelFormat
+        let bpp: Int
+        switch fmt {
+        case .bgra8Unorm, .bgra8Unorm_srgb, .rgba8Unorm, .rgba8Unorm_srgb: bpp = 4
+        case .rgba16Float: bpp = 8
+        default: set("formato \(fmt.rawValue) sin decodificar"); return
+        }
+        if t0.isFramebufferOnly { set("el drawable es solo-framebuffer: no se puede leer"); return }
+        guard let blit = cb.makeBlitCommandEncoder() else { return }
+        blit.label = "mv.xr.probe"
+        let n = min(viewCount, eyes.count, 2)
+        var targets: [(tex: MTLTexture, slice: Int)] = []
+        for e in 0..<n {
+            if layered { targets.append((t0, e)) }
+            else if e < colorTextures.count { targets.append((colorTextures[e], 0)) }
+        }
+        for (e, tg) in targets.enumerated() {
+            let vp = eyes[e].viewport
+            var k = 0
+            for r in Self.rows {
+                for c in Self.cols {
+                    let x = min(max(Int(vp.originX + Double(c) * vp.width), 0), tg.tex.width - 1)
+                    let y = min(max(Int(vp.originY + Double(r) * vp.height), 0), tg.tex.height - 1)
+                    blit.copy(from: tg.tex, sourceSlice: tg.slice, sourceLevel: 0, sourceOrigin: MTLOrigin(x: x, y: y, z: 0), sourceSize: MTLSize(width: 1, height: 1, depth: 1),
+                              to: buf, destinationOffset: (e * Self.perEye + k) * Self.slot, destinationBytesPerRow: bpp, destinationBytesPerImage: bpp)
+                    k += 1
+                }
+            }
+        }
+        blit.endEncoding()
+        lock.lock(); busy = true; lock.unlock()
+        let count = targets.count
+        let fmtCopy = fmt
+        cb.addCompletedHandler { [weak self] _ in
+            guard let self = self else { return }
+            let base = self.buf.contents()
+            var out: [String] = []
+            var black = 0, total = 0
+            for e in 0..<count {
+                var parts: [String] = []
+                for k in 0..<Self.perEye {
+                    let p = base + (e * Self.perEye + k) * Self.slot
+                    let r: Float, g: Float, b: Float
+                    switch fmtCopy {
+                    case .bgra8Unorm, .bgra8Unorm_srgb:
+                        let q = p.assumingMemoryBound(to: UInt8.self); r = Float(q[2]); g = Float(q[1]); b = Float(q[0])
+                    case .rgba8Unorm, .rgba8Unorm_srgb:
+                        let q = p.assumingMemoryBound(to: UInt8.self); r = Float(q[0]); g = Float(q[1]); b = Float(q[2])
+                    default:
+                        let q = p.assumingMemoryBound(to: UInt16.self)
+                        r = Self.half(q[0]) * 255; g = Self.half(q[1]) * 255; b = Self.half(q[2]) * 255
+                    }
+                    total += 1
+                    if r == 0 && g == 0 && b == 0 { black += 1 }
+                    parts.append(String(format: "%.0f,%.0f,%.0f", r, g, b))
+                }
+                out.append("ojo\(e): " + parts.joined(separator: " "))
+            }
+            self.set(out.joined(separator: " | ") + " | negro-puro(0,0,0)=\(black)/\(total)")
+        }
     }
 }

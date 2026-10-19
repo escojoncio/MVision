@@ -152,6 +152,15 @@ final class NativeRenderer {
     var enabled = true
     /// Factor de color por canal del dibujo nativo ((1,1,1) = sin teñir). Lo pone el llamador antes de `encode` (modo de depuración «solo nativo»).
     var tint = SIMD3<Float>(1, 1, 1)
+    /// Diagnóstico: umbral (m de mundo VR) para partir en CPU los triángulos con una arista más larga al subir cada malla (0 = no partir). Cambiarlo vuelve a subir todas las mallas.
+    var splitMeters: Float = 0
+    /// Diagnóstico: sin prueba de profundidad (opacos: siempre pasan y escriben; semitransparentes: siempre pasan, sin escribir).
+    var noZTest = false
+    private var appliedSplit: Float = 0
+    private var splitLocalEdge: Float = 0            // el umbral en unidades locales del motor (mismo valor para todas las mallas de la escena)
+    private static let splitExtraPerMesh = 50_000    // tope de seguridad: triángulos añadidos como mucho por malla
+    private static let splitExtraTotal = 600_000     // y en total mientras dure el ajuste
+    private var splitMeshStat = 0, splitTrisStat = 0, splitAddedStat = 0, splitWeldStat = 0, splitCapStat = 0, splitFailStat = 0
 
     // MARK: sincronización con la GPU
     private let lock = NSLock()
@@ -244,6 +253,8 @@ final class NativeRenderer {
     private var badTags = Set<String>()       // ídem para un formato de destino entero (prewarm)
     private let dsOpaque: MTLDepthStencilState
     private let dsSemi: MTLDepthStencilState
+    private let dsOpaqueNoZ: MTLDepthStencilState
+    private let dsSemiNoZ: MTLDepthStencilState
 
     // MARK: estadísticas (hilo de render)
     private(set) var isActive = false
@@ -270,7 +281,13 @@ final class NativeRenderer {
         d1.depthCompareFunction = .greaterEqual; d1.isDepthWriteEnabled = true
         let d2 = MTLDepthStencilDescriptor()
         d2.depthCompareFunction = .greaterEqual; d2.isDepthWriteEnabled = false
-        guard let s1 = device.makeDepthStencilState(descriptor: d1), let s2 = device.makeDepthStencilState(descriptor: d2) else { return nil }
+        let d3 = MTLDepthStencilDescriptor()
+        d3.depthCompareFunction = .always; d3.isDepthWriteEnabled = true
+        let d4 = MTLDepthStencilDescriptor()
+        d4.depthCompareFunction = .always; d4.isDepthWriteEnabled = false
+        guard let s1 = device.makeDepthStencilState(descriptor: d1), let s2 = device.makeDepthStencilState(descriptor: d2),
+              let s3 = device.makeDepthStencilState(descriptor: d3), let s4 = device.makeDepthStencilState(descriptor: d4) else { return nil }
+        dsOpaqueNoZ = s3; dsSemiNoZ = s4
         self.device = device; self.library = library; self.queue = queue
         self.ringSize = max(2, ringSize)
         vertPool = vp; triPool = tp
@@ -344,6 +361,14 @@ final class NativeRenderer {
 
     // MARK: caché de mallas
 
+    /// Libera todas las mallas subidas (los rangos vuelven al pool cuando la GPU termina lo que los usaba) y reinicia el recuento del partido.
+    private func invalidateAllMeshes() {
+        for (_, m) in meshes { releaseMesh(m) }
+        meshes.removeAll()
+        meshesChanged = true
+        splitMeshStat = 0; splitTrisStat = 0; splitAddedStat = 0; splitWeldStat = 0; splitCapStat = 0; splitFailStat = 0
+    }
+
     private func releaseMesh(_ m: NativeGpuMesh) {
         if m.ntri > 0 { pendingFree.append((serial, m.vertStart, m.nverts, m.triStart, m.ntri)) }
         meshesChanged = true
@@ -367,13 +392,42 @@ final class NativeRenderer {
         let bb = pm.pointee.bbox
         gm.bmin = SIMD3<Float>(Float(bb.0), Float(bb.1), Float(bb.2)); gm.bmax = SIMD3<Float>(Float(bb.3), Float(bb.4), Float(bb.5))
         if nv == 0 || nt == 0 || pm.pointee.verts == nil || pm.pointee.faces == nil { meshes[key] = gm; return nil }
-        guard let vs = allocRetry(vertPool, nv, seq: seq, store: store) else { frameFailures += 1; totalFailures += 1; return nil }
-        guard let ts = allocRetry(triPool, nt, seq: seq, store: store) else { vertPool.release(vs, nv); frameFailures += 1; totalFailures += 1; return nil }
-        gm.vertStart = vs; gm.nverts = nv; gm.triStart = ts; gm.ntri = nt
+        // Diagnóstico «partir triángulos grandes»: se empaqueta a memoria temporal (índices locales), se parten los triángulos de arista > umbral y el resultado (vértices originales
+        // + añadidos, esquinas, centroides y modos de mezcla) es lo que se sube. Los triángulos con vértices soldados no se tocan. Con tope de seguridad por malla y en total.
+        var split = NsGpuSplit()
+        var splitOK = false
+        var tv: UnsafeMutablePointer<NsGpuVert>?
+        var tc: UnsafeMutablePointer<NsGpuCorner>?
+        var tcen: UnsafeMutablePointer<Float>?
+        var tabr: UnsafeMutablePointer<UInt8>?
+        defer {
+            tv?.deallocate(); tc?.deallocate(); tcen?.deallocate(); tabr?.deallocate()
+            if splitOK { ns_gpu_split_free(&split) }
+        }
+        let wantSemiArrays = (gm.flags & UInt32(truncatingIfNeeded: NS_MF_BLEND)) != 0
+        if splitLocalEdge > 0 && splitAddedStat < Self.splitExtraTotal {
+            let tvp = UnsafeMutablePointer<NsGpuVert>.allocate(capacity: nv)
+            let tcp = UnsafeMutablePointer<NsGpuCorner>.allocate(capacity: nt * 3)
+            tv = tvp; tc = tcp
+            if wantSemiArrays {
+                tcen = UnsafeMutablePointer<Float>.allocate(capacity: 3 * nt)
+                tabr = UnsafeMutablePointer<UInt8>.allocate(capacity: nt)
+            }
+            ns_gpu_pack(pm, baked, tvp, tcp, 0, tcen, tabr)
+            let cap = UInt32(min(nt + Self.splitExtraPerMesh, Int(Int32.max / 4)))
+            let rc = ns_gpu_split(tvp, UInt32(nv), tcp, UInt32(nt), tcen, tabr, splitLocalEdge, cap, &split)
+            if rc == 0 { splitOK = true } else if rc < 0 { splitFailStat += 1 }
+            splitWeldStat += Int(split.n_skip_weld)
+        }
+        let nvOut = splitOK ? Int(split.nverts) : nv
+        let ntOut = splitOK ? Int(split.ntris) : nt
+        guard let vs = allocRetry(vertPool, nvOut, seq: seq, store: store) else { frameFailures += 1; totalFailures += 1; return nil }
+        guard let ts = allocRetry(triPool, ntOut, seq: seq, store: store) else { vertPool.release(vs, nvOut); frameFailures += 1; totalFailures += 1; return nil }
+        gm.vertStart = vs; gm.nverts = nvOut; gm.triStart = ts; gm.ntri = ntOut
         gm.semi = (gm.flags & UInt32(truncatingIfNeeded: NS_MF_BLEND)) != 0
         if gm.semi {
-            gm.centroid = UnsafeMutablePointer<Float>.allocate(capacity: 3 * nt)
-            gm.abr = UnsafeMutablePointer<UInt8>.allocate(capacity: nt)
+            gm.centroid = UnsafeMutablePointer<Float>.allocate(capacity: 3 * ntOut)
+            gm.abr = UnsafeMutablePointer<UInt8>.allocate(capacity: ntOut)
         }
         var textured = false
         for f in 0..<Int(pm.pointee.n_faces) where pm.pointee.faces[f].texid != 0 { textured = true; break }
@@ -381,7 +435,21 @@ final class NativeRenderer {
         gm.flat = !gm.semi && !textured
         let vptr = vertPool.buffer.contents().assumingMemoryBound(to: NsGpuVert.self) + vs
         let cptr = triPool.buffer.contents().assumingMemoryBound(to: NsGpuCorner.self) + ts * 3
-        ns_gpu_pack(pm, baked, vptr, cptr, UInt32(vs), gm.centroid, gm.abr)
+        if splitOK, let sv = split.verts, let sc = split.corners {
+            memcpy(vptr, sv, nvOut * MemoryLayout<NsGpuVert>.stride)
+            memcpy(cptr, sc, ntOut * 3 * MemoryLayout<NsGpuCorner>.stride)
+            ns_gpu_rebase_corners(cptr, UInt32(ntOut * 3), UInt32(vs))
+            if gm.semi, let c = gm.centroid, let a = gm.abr, let scen = split.centroid, let sab = split.abr {
+                memcpy(c, scen, 3 * ntOut * MemoryLayout<Float>.stride)
+                memcpy(a, sab, ntOut)
+            }
+            splitMeshStat += 1
+            splitTrisStat += Int(split.n_split)
+            splitAddedStat += ntOut - nt
+            splitCapStat += Int(split.n_skip_cap)
+        } else {
+            ns_gpu_pack(pm, baked, vptr, cptr, UInt32(vs), gm.centroid, gm.abr)
+        }
         meshes[key] = gm
         meshesChanged = true
         return gm
@@ -422,6 +490,18 @@ final class NativeRenderer {
         let t0 = Self.nowNs()
         let seq = sc.pointee.seq
         lastSeq = seq
+        // Diagnóstico: umbral de partido en unidades locales (m por unidad del motor = norma de la primera columna de to_vr); un cambio del ajuste vuelve a subir todas las mallas.
+        if splitMeters != appliedSplit {
+            appliedSplit = splitMeters
+            invalidateAllMeshes()
+        }
+        if splitMeters > 0 {
+            let t3 = ns_scene_to_vr(sc)!
+            let col = (t3[0] * t3[0] + t3[4] * t3[4] + t3[8] * t3[8]).squareRoot()
+            let upm0 = sc.pointee.units_per_m > 1 ? sc.pointee.units_per_m : 1000
+            let mpu: Float = (col.isFinite && col > 1e-9) ? col : 1 / upm0
+            splitLocalEdge = splitMeters / mpu
+        } else { splitLocalEdge = 0 }
         lastEpoch = sc.pointee.mesh_epoch
         if fresh { statScenes += 1 }
         frameFailures = 0; frameMisses = 0
@@ -812,7 +892,7 @@ final class NativeRenderer {
         enc.setVertexBytes(&u, length: MemoryLayout<NsGpuUniforms>.stride, index: Int(NSG_BUF_UNI))
 
         // opacos: escenario en una llamada por clase (lista de triángulos), luego los dinámicos por pieza (índice = instance_id)
-        enc.setDepthStencilState(dsOpaque)
+        enc.setDepthStencilState(noZTest ? dsOpaqueNoZ : dsOpaque)
         let os = MemoryLayout<NsGpuOrder>.stride
         if let sb = slot.staticBuf {
             if slot.nTex > 0, let p = pso(0, -1, order: true, flat: false) {
@@ -844,7 +924,7 @@ final class NativeRenderer {
         }
         // semitransparentes, de atrás adelante
         if !semiRuns.isEmpty, let ob = slot.orderBuf {
-            enc.setDepthStencilState(dsSemi)
+            enc.setDepthStencilState(noZTest ? dsSemiNoZ : dsSemi)
             enc.setVertexBuffer(ob, offset: 0, index: Int(NSG_BUF_ORDER))
             var curMode = -1
             for r in semiRuns {
@@ -900,6 +980,32 @@ final class NativeRenderer {
                     simd_length(SIMD3<Float>(nc.x, nc.y, nc.z) - headVR), gpuEye != nil ? simd_length(g - headVR) : Float.nan)
         s += " | coherencia: " + coh + (incoherent ? " INCOHERENTE(\(cohWhy))" : "") + " | escena nativa valid=0x" + String(curValid, radix: 16)
         return s
+    }
+
+    /// Diagnóstico (1 vez por segundo): triángulos con alguna arista > `big` m y que cruzan el plano cercano entre los que se dibujan en la escena actual (cada pieza una vez), y el
+    /// recuento del partido de triángulos grandes. `view` = mundo VR -> ojo del primer ojo. Recorre las mallas subidas: no se llama por fotograma.
+    func diagScan(view: simd_float4x4, near: Float, big: Float) -> String {
+        var acc = NsGpuScan()
+        var seen = Set<Int>()
+        let verts = vertPool.buffer.contents().assumingMemoryBound(to: NsGpuVert.self)
+        let corners = triPool.buffer.contents().assumingMemoryBound(to: NsGpuCorner.self)
+        func scan(_ gi: Int, _ gm: NativeGpuMesh) {
+            guard gi >= 0, gi < table.count, gm.ntri > 0, !seen.contains(gi) else { return }
+            seen.insert(gi)
+            let m = view * toVR * world4(table[gi])
+            let c = m.columns
+            let f: [Float] = [c.0.x, c.0.y, c.0.z, c.0.w, c.1.x, c.1.y, c.1.z, c.1.w, c.2.x, c.2.y, c.2.z, c.2.w, c.3.x, c.3.y, c.3.z, c.3.w]
+            ns_gpu_scan(verts, corners + gm.triStart * 3, UInt32(gm.ntri), f, near, big, &acc)
+        }
+        for it in dynTex where it.piece < meshOf.count { if let gm = meshOf[it.piece] { scan(it.piece, gm) } }
+        for it in dynFlat where it.piece < meshOf.count { if let gm = meshOf[it.piece] { scan(it.piece, gm) } }
+        for it in statPcs { scan(it.piece, it.mesh) }
+        for it in semis { scan(it.piece, it.mesh) }
+        var t = String(format: "tris=%u largos=%u cruzan_cercano=%u largos_y_cruzan=%u arista_max=%.1fm (piezas=%d)", acc.tris, acc.big, acc.cross, acc.big_cross, acc.max_edge, seen.count)
+        if splitMeters > 0 {
+            t += " partido: mallas=\(splitMeshStat) tris_partidos=\(splitTrisStat) tris_añadidos=\(splitAddedStat) sin_partir_por_soldadura=\(splitWeldStat) sin_partir_por_tope=\(splitCapStat) fallos=\(splitFailStat)"
+        } else { t += " partido=no" }
+        return t
     }
 
     /// Línea de registro (una vez por segundo): estado del renderer nativo y de la última decisión.
