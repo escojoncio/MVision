@@ -250,9 +250,14 @@ static void test_records(void) {
     w32(eye + 0x14, 1234); w32(eye + 0x18, 5); w32(eye + 0x1C, (uint32_t)-77);
     CHECK(vrcam_last_record() == NULL);
     CHECK(vrcam_plan(ram, 320, &p) == 1);
+    CHECK(vrcam_turn_total() == 0.0);
+    vrcam_turn(12.5f); vrcam_turn(-2.5f); vrcam_turn(NAN);
+    NEAR(vrcam_turn_total(), 10.0, 1e-9);   /* fluidez: suma de los giros del stick, sin envolver */
     vrcam_commit(ram, &p);
     const VrCamRecord *r = vrcam_last_record();
     CHECK(r && r->serial == 1 && r->active && r->eye[0] == 1234 && r->eye[2] == -77 && r->screen == 320);
+    VrCamStats cst; vrcam_stats(&cst);
+    CHECK(r && r->turn_total_deg == 10.0 && r->vbl == (uint32_t)c.on_frames && r->epoch == cst.recenters);
     NEAR(r->M[0], 1, 1e-6); NEAR(r->M[4], 1, 1e-6); NEAR(r->M[8], 1, 1e-6);
     /* envíos: rango de seq -> registro vigente */
     vrcam_note_draw(100, 200);

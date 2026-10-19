@@ -490,6 +490,9 @@ final class RGRenderer {
         }
     }
 
+    /// Fluidez: vistas del pase de la escena, calculadas tras tomar las escenas nuevas (ver XRFrameEncoder). nil = las recibidas.
+    var viewsHook: (() -> [simd_float4x4])?
+
     // MARK: encode
     func encode(commandBuffer: MTLCommandBuffer, colorTargets: [MTLTexture], depthTargets: [MTLTexture],
                 resolveTargets: [MTLTexture], views: [simd_float4x4], projections: [simd_float4x4],
@@ -530,6 +533,7 @@ final class RGRenderer {
             gotNew = true
         }
         encodeVram(commandBuffer, preCmds.map { $0.cmd }, fs)
+        let sceneV = viewsHook?() ?? views
 
         // 2) grupos de batches con el mismo ev_end: antes de cada grupo se aplican los eventos pendientes de VRAM.
         //    Repetición de una escena ya vista (reproyección): un solo grupo, sin eventos (la VRAM ya está en su estado final).
@@ -559,7 +563,7 @@ final class RGRenderer {
             if lastG, let sr = stereoRequest, drawWorld, gotNew || stereoDirty || stereoRendered == false { encodeStereo(commandBuffer, sr) }
             if doHud { encodeHud(commandBuffer, range: g.0..<g.1, first: firstG) }
             encodeScenePasses(commandBuffer, range: g.0..<g.1, first: firstG, last: lastG, colorTargets: sceneColor,
-                              depthTargets: depthTargets, resolveTargets: sceneResolve, views: views,
+                              depthTargets: depthTargets, resolveTargets: sceneResolve, views: sceneV,
                               projections: projections, head: head, layered: layered)
         }
         if let p = plan { encodePost(commandBuffer, p, projections: projections, layered: layered) }

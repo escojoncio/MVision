@@ -8,3 +8,7 @@ void bench_scene_post(void);     /* la entrega como escena nueva en el siguiente
 void bench_enable_radar(int on);
 void bench_enable_weapon(int on);
 void bench_set_cine_camera(int on);   /* game_view de la escena = cámara del juego a 1,6 m mirando a -Z (pantalla 3D) */
+void bench_smooth_config(int enabled, float lead_s);   /* fluidez: vr_smooth con ese adelanto (s); <0 = el de defecto */
+void bench_smooth_set_time(double t, double turn_req_deg);
+void bench_publish_geom(double ox_units, double oz_units, double turn_deg);   /* misma geometría que bench_publish_motion pero sin muestra para el suavizador (referencia ideal) */
+void bench_publish_motion(double t_wall, double game_s, double ox_units, double oz_units, double turn_deg);   /* escena nueva: personaje en O, giro del stick turn_deg */

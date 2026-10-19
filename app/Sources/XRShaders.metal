@@ -227,3 +227,32 @@ fragment float4 xr_veil_fragment_layered(XRVOutL in [[stage_in]], constant float
 {
     return float4(0.0, 0.0, 0.0, saturate(c.x));
 }
+
+/* Viñeta de confort: oscurece la periferia (negro con alfa) según el ángulo al eje óptico de cada ojo. p.x = intensidad 0..1, p.y = vista base (dedicated);
+ * e0/e1 = por ojo (centro óptico x, y en píxeles del destino; tangentes por píxel x, y). Va con el triángulo de xr_fs_vertex. */
+struct XRVigU {
+    float4 p;
+    float4 e0;
+    float4 e1;
+};
+
+static float4 xr_vig_color(float2 px, uint eye, constant XRVigU &u)
+{
+    float4 e = eye == 0 ? u.e0 : u.e1;
+    float2 t = (px - e.xy) * e.zw;
+    float a = atan(length(t));                 // ángulo al eje (rad)
+    float s = saturate(u.p.x);
+    float inner = mix(1.00, 0.45, s);          // desde dónde oscurece: ~57 grados (casi nada) .. ~26 grados (fuerte)
+    float alpha = smoothstep(inner, inner + 0.50, a) * (0.55 + 0.45 * s);
+    return float4(0.0, 0.0, 0.0, saturate(alpha));
+}
+
+fragment float4 xr_vignette_fragment(XRVOut in [[stage_in]], constant XRVigU &u [[buffer(0)]])
+{
+    return xr_vig_color(in.pos.xy, uint(u.p.y), u);
+}
+
+fragment float4 xr_vignette_fragment_layered(XRVOutL in [[stage_in]], constant XRVigU &u [[buffer(0)]])
+{
+    return xr_vig_color(in.pos.xy, in.layer, u);
+}
