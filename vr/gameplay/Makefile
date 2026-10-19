@@ -20,7 +20,7 @@ SIGS ?= ../../gamedata/hle_sigs.json
 SCRIPT ?= gp_script.txt
 FRAMES ?= 12000
 
-all: $(OUT)/test_fire $(OUT)/test_reload $(OUT)/test_aa
+all: $(OUT)/test_fire $(OUT)/test_reload $(OUT)/test_aa $(OUT)/test_scope $(OUT)/test_missile
 $(OUT)/test_fire: test_fire.c vr_fire.c vr_fire.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) $(INC) test_fire.c vr_fire.c -o $@ -lm
@@ -30,18 +30,30 @@ $(OUT)/test_reload: test_reload.c vr_reload.c vr_reload.h
 $(OUT)/test_aa: test_aa_game.c vr_aa.c vr_aa.h vr_fire.c vr_fire.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) $(INC) test_aa_game.c vr_aa.c vr_fire.c -o $@ -lm
-test: $(OUT)/test_fire $(OUT)/test_reload $(OUT)/test_aa
+$(OUT)/test_scope: test_scope.c vr_scope.c vr_scope.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) $(INC) test_scope.c vr_scope.c -o $@ -lm
+$(OUT)/test_missile: test_missile.c vr_missile.c vr_missile.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) $(INC) test_missile.c vr_missile.c -o $@ -lm
+test: $(OUT)/test_fire $(OUT)/test_reload $(OUT)/test_aa $(OUT)/test_scope $(OUT)/test_missile
 	$(OUT)/test_fire
 	$(OUT)/test_reload
 	$(OUT)/test_aa
-test-san: test_fire.c vr_fire.c vr_fire.h test_reload.c vr_reload.c vr_reload.h test_aa_game.c vr_aa.c vr_aa.h
+	$(OUT)/test_scope
+	$(OUT)/test_missile
+test-san: test_fire.c vr_fire.c vr_fire.h test_reload.c vr_reload.c vr_reload.h test_aa_game.c vr_aa.c vr_aa.h test_scope.c vr_scope.c test_missile.c vr_missile.c
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined $(INC) test_fire.c vr_fire.c -o $(OUT)/test_fire_san -lm
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined $(INC) test_reload.c vr_reload.c -o $(OUT)/test_reload_san -lm
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined $(INC) test_aa_game.c vr_aa.c vr_fire.c -o $(OUT)/test_aa_san -lm
 	$(OUT)/test_fire_san
 	$(OUT)/test_reload_san
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined $(INC) test_scope.c vr_scope.c -o $(OUT)/test_scope_san -lm
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined $(INC) test_missile.c vr_missile.c -o $(OUT)/test_missile_san -lm
 	$(OUT)/test_aa_san
+	$(OUT)/test_scope_san
+	$(OUT)/test_missile_san
 
 # ---- herramienta de validación (gptest): copia del runtime con la tabla HLE ampliada con los sustitutos de disparo ----
 RTP := $(OUT)/rt

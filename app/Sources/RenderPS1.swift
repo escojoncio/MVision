@@ -376,7 +376,7 @@ final class PS1Renderer {
         }
         // máscara de visión: se sube a la siguiente textura del anillo (solo si cambió)
         var framed = false
-        if f.frame_on != 0, let fp = f.frame, f.frame_w == Int32(VR_FRAME_W), f.frame_h == Int32(VR_FRAME_H), f.area.2 > 0, f.area.3 > 0 {
+        if f.frame_on != 0, !suppressFrame, let fp = f.frame, f.frame_w == Int32(VR_FRAME_W), f.frame_h == Int32(VR_FRAME_H), f.area.2 > 0, f.area.3 > 0 {
             if uploadFrame(fp, Int(f.frame_w), Int(f.frame_h)) {
                 n.frameIdx = frameTexCur
                 n.frameArea = SIMD2<Float>(Float(f.area.2), Float(f.area.3))
@@ -533,6 +533,8 @@ final class PS1Renderer {
             var pend: [VramCmd] = []
             while nextCmd < listCmds.count && (listCmds[nextCmd].op < g.2) { pend.append(listCmds[nextCmd].cmd); nextCmd += 1 }
             encodeVram(commandBuffer, pend, fs)
+            // Segunda vista (mira / misil): una sola vez, con la VRAM tal como queda tras los eventos del último grupo, ANTES del pase del ojo que la muestrea.
+            if lastG, let a = auxRequest, drawWorld, drawBody { encodeAux(commandBuffer, a) }
             if doHud { encodeHud(commandBuffer, range: g.0..<g.1, first: firstG) }
             encodeScenePasses(commandBuffer, range: g.0..<g.1, first: firstG, last: lastG, colorTargets: sceneColor,
                               depthTargets: depthTargets, resolveTargets: sceneResolve, views: views,
@@ -543,6 +545,61 @@ final class PS1Renderer {
         if nextCmd < listCmds.count { encodeVram(commandBuffer, listCmds[nextCmd...].map { $0.cmd }, fs) }
         radar?.renderTexture(commandBuffer, vram: vram)      // VRAM ya en su estado final de la lista
         if doHud { finishHud(commandBuffer); hudDone = true }
+    }
+
+    // MARK: segunda vista de la escena (mira óptica del francotirador, cámara del misil guiado)
+    /// Petición de la segunda vista de este fotograma: matrices en el espacio recentrado (el de la cabeza), tamaño de la textura y posición de la cámara.
+    struct AuxView {
+        var view: simd_float4x4
+        var proj: simd_float4x4
+        var width: Int
+        var height: Int
+        var pos: SIMD4<Float>
+    }
+    var auxRequest: AuxView?
+    /// Vista especial vigente (la fija el bucle de render antes de encode); el arma la dibuja con auxImage / el HUD.
+    var special: MvVrSpecialView?
+    /// No aplicar la máscara de visión del juego (la abertura de la mira la dibuja la lente).
+    var suppressFrame = false
+    private var auxColor: MTLTexture?
+    private var auxDepth: MTLTexture?
+    private var auxRaw: MTLTexture?        // vista de auxColor sin decodificación sRGB: el shader del arma convierte a lineal una sola vez
+    private var auxKey = ""
+    /// true si los valores de auxRaw ya son lineales (destino de coma flotante): el shader los lleva a gamma antes de mezclar.
+    var auxStoredLinear: Bool { colorFormat == .rgba16Float }
+    /// Imagen de la segunda vista para el shader de las vistas especiales (nil si no hay).
+    var auxImage: MTLTexture? { auxRaw }
+
+    private func ensureAux(_ w: Int, _ h: Int) -> Bool {
+        let key = "\(w)x\(h)/\(colorFormat.rawValue)/\(depthFormat.rawValue)"
+        if key == auxKey, auxColor != nil, auxDepth != nil { return true }
+        guard w >= 16, h >= 16, w <= 2048, h <= 2048 else { return false }
+        let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorFormat, width: w, height: h, mipmapped: false)
+        cd.usage = [.renderTarget, .shaderRead, .pixelFormatView]
+        cd.storageMode = .private
+        let dd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: depthFormat, width: w, height: h, mipmapped: false)
+        dd.usage = .renderTarget
+        dd.storageMode = .private
+        guard let c = device.makeTexture(descriptor: cd), let d = device.makeTexture(descriptor: dd) else { return false }
+        c.label = "VR segunda vista (color)"; d.label = "VR segunda vista (profundidad)"
+        var raw: MTLTexture? = c
+        switch colorFormat {
+        case .bgra8Unorm_srgb: raw = c.makeTextureView(pixelFormat: .bgra8Unorm)
+        case .rgba8Unorm_srgb: raw = c.makeTextureView(pixelFormat: .rgba8Unorm)
+        default: break
+        }
+        auxColor = c; auxDepth = d; auxRaw = raw ?? c; auxKey = key
+        return true
+    }
+
+    private func encodeAux(_ cb: MTLCommandBuffer, _ a: AuxView) {
+        guard haveScene, has3D, !batches.isEmpty, ensureAux(a.width, a.height), let c = auxColor, let d = auxDepth else { return }
+        var u = VrSceneUniforms()
+        let m = a.proj * a.view
+        u.view_proj = (m, m)
+        u.head = a.pos
+        encodeScene(cb, range: 0..<batches.count, first: true, last: false, color: c, depth: d, resolve: nil, uniforms: u, amplify: 0,
+                    viewIndex: 0, views: [], projections: [], isAux: true)
     }
 
     private func encodeScenePasses(_ cb: MTLCommandBuffer, range: Range<Int>, first: Bool, last: Bool,
@@ -818,7 +875,7 @@ final class PS1Renderer {
     /// first: limpia color/profundidad; si no, carga. last: resuelve el color (MSAA); si no, lo guarda sin resolver.
     private func encodeScene(_ cb: MTLCommandBuffer, range: Range<Int>, first: Bool, last: Bool, color: MTLTexture,
                              depth: MTLTexture, resolve: MTLTexture?, uniforms: VrSceneUniforms, amplify: Int, viewIndex: Int = 0,
-                             views: [simd_float4x4] = [], projections: [simd_float4x4] = []) {
+                             views: [simd_float4x4] = [], projections: [simd_float4x4] = [], isAux: Bool = false) {
         let seg = range.filter { batches.indices.contains($0) && batches[$0].kind != 2 }
         if !first && seg.isEmpty && !last { return }
         let samples = color.sampleCount
@@ -844,9 +901,9 @@ final class PS1Renderer {
             pd.stencilAttachment.storeAction = .dontCare
         }
         if amplify > 0 { pd.renderTargetArrayLength = amplify }
-        if let m = rasterizationRateMap { pd.rasterizationRateMap = m }
+        if let m = rasterizationRateMap, !isAux { pd.rasterizationRateMap = m }
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pd) else { return }
-        enc.label = amplify > 0 ? "PS1 escena (estéreo, amplificación)" : "PS1 escena (ojo \(viewIndex))"
+        enc.label = isAux ? "PS1 escena (segunda vista)" : amplify > 0 ? "PS1 escena (estéreo, amplificación)" : "PS1 escena (ojo \(viewIndex))"
         defer { enc.endEncoding() }
         // Los defer corren al revés: este va ANTES de cerrar el codificador, tras dibujar el 3D (también si el guard de más abajo
         // retorna). Solo en el último segmento (el que resuelve el MSAA): el quad del radar y el arma se prueban contra la profundidad del 3D.
@@ -854,6 +911,11 @@ final class PS1Renderer {
             if last && drawBody {
                 radar?.encodeQuad(enc, uniforms: uniforms, layered: amplify > 0, color: color.pixelFormat, depth: depth.pixelFormat, samples: samples)
                 weapon?.encode(encoder: enc, views: views, projections: projections, layered: amplify > 0, viewIndex: viewIndex)
+                if let sv = special {
+                    // Con el filtro de pantalla el HUD se muestrea por la vista que corresponda al destino: aquí el panel del HUD en bruto (gamma)
+                    weapon?.encodeSpecial(encoder: enc, view: sv, aux: auxImage, auxLinear: auxStoredLinear, hud: hudTexture, views: views,
+                                          projections: projections, layered: amplify > 0, viewIndex: viewIndex)
+                }
             }
         }
         enc.setCullMode(.none)
@@ -867,7 +929,7 @@ final class PS1Renderer {
             }
             enc.setVertexAmplificationCount(amplify, viewMappings: &maps)
         } else {
-            enc.setViewport(viewportOverride.flatMap { viewIndex < $0.count ? $0[viewIndex] : nil } ?? vp0)
+            enc.setViewport(isAux ? vp0 : (viewportOverride.flatMap { viewIndex < $0.count ? $0[viewIndex] : nil } ?? vp0))
         }
         guard haveScene, has3D, drawWorld, !seg.isEmpty, let buf = vtxSlots[curSlot].buf else { return }
         var u = uniforms

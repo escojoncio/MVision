@@ -298,7 +298,7 @@ static void g_update(WeaponState *s, const WInput *in, WReloadMode rm, const WGa
 
         int end = 0;
         if (gs->seen && !have) end = 1;
-        else if (!gs->seen && gs->flight_t > 0.8f) end = 3;
+        else if (!gs->seen && gs->flight_t > GD_CREATE_GRACE) end = 3;     /* el juego tarda ~0,65 s (32 VBlanks) en crear el misil tras el disparo */
         else if (gs->fuel <= 0) end = 2;
         if (end) {
             gs->ended_by = end;
