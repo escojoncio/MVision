@@ -170,6 +170,7 @@ static void setup(VrpCtx *x, VrpPreset p) {
     memset(RAM, 0, sizeof RAM);
     VrpHost h = {NULL, fake, guard_fn};
     vrp_init(x, RAM, &h, p);
+    x->cfg.range_scale = 1.0f;   /* estas pruebas miden el modelo con el alcance original; el factor del menú se prueba en test_head.c */
     fk_force = -1; guard_on = guard_enters = guard_exits = 0;
     static const VrpLayout LA = {"A", 2956, 2958, 2960, 2962, 3108, 3112};
     x->sites.found = 1; x->sites.vision = VISION; x->sites.lay = &LA; x->sites.eye_global = GLOBAL_EYE;

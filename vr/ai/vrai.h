@@ -36,6 +36,15 @@ VrpConfig vrai_perception_config(void);
 /* Movimiento del jugador en VR (cabeza/manos) que cuenta como "se mueve" para la regla de periferia. */
 void vrai_set_motion(int moving);
 
+/* Menú VR «IA: alcance de visión»: factor 1,0 / 1,5 (defecto) / 2,0 (1..3) sobre el alcance de visión y la zona de sospecha de los SOLDADOS (se aplica dentro de la
+ * rutina de visión del motor: alcance del soldado ampliado, con el cono, la línea de visión y las demás reglas originales). No afecta a las cámaras de vigilancia. */
+void vrai_set_range_scale(float scale);
+float vrai_get_range_scale(void);
+/* Los enemigos ven también la cabeza VR (asomarse): interruptor (defecto 1; en el ajuste de percepción «original» nunca) y desplazamiento de la cabeza respecto del
+ * ojo del personaje en unidades del motor (vrp_head_offset), una vez por VBlank desde el hilo de emulación; NULL = sin cabeza válida. */
+void vrai_set_head_perception(int on);
+void vrai_feed_head(const float off[3]);
+
 void vrai_on_exe_loaded(void);                        /* EXE ya en RAM: olvida el estado anterior */
 int  vrai_on_bound(void);                             /* 0 = parches del ejecutable instalados; <0 = no (edición distinta o sin hueco) */
 void vrai_frame(const struct BridgeState *bs, uint32_t frame);
