@@ -8,7 +8,8 @@
  *     mínimos cuadrados (la manopla ya viene algo inclinada hacia la palma);
  *   - deformación de flexión ("bend") a lo largo de ese eje: la dirección de la punta gira con tres articulaciones suaves (MCP, PIP, DIP) hasta las
  *     direcciones absolutas de `head_deg`; cada vértice conserva su desplazamiento lateral respecto al eje (comprimido por el lado interior) y su z;
- *   - el pulgar gira como un cuerpo rígido (con peso creciente desde su base) alrededor del eje de la palma, cruzando hacia el meñique;
+ *   - el pulgar es una cadena de 2 articulaciones (base con eje inclinado 45 grados respecto al de los dedos, y punta) que se cierra POR FUERA de los dedos doblados, apoyado sobre las falanges
+ *     medias del índice y el corazón; los ángulos se resuelven para que la punta llegue ahí y el agarre los escala;
  *   - las normales giran con el vértice al que pertenecen (el que las usa en las caras); las UV y las caras no se tocan: mismo color y textura.
  * grip 0 devuelve la malla de entrada tal cual; 1 = puño cerrado. Sin estado (se puede llamar desde cualquier hilo). */
 #pragma once
@@ -34,7 +35,10 @@ typedef struct {
     float joint2, joint3;    /* posición de PIP y DIP a lo largo de los dedos (fracción de su longitud desde los nudillos) */
     float soft;              /* semiancho de cada articulación (fracción de la longitud de los dedos) */
     float inner_k, outer_k;  /* escala del desplazamiento lateral con el puño cerrado: lado de la palma / lado del dorso */
-    float thumb_deg;         /* giro del pulgar con el puño cerrado */
+    float thumb_tilt_deg;    /* inclinación del eje de la articulación de la base del pulgar respecto al eje de flexión de los dedos (45 grados, hacia el lado de los dedos) */
+    float thumb_joint;       /* posición de la articulación de la punta a lo largo del pulgar (fracción desde la base, 0,5) */
+    float thumb_soft;        /* semiancho de la mezcla de la articulación de la punta (fracción de la longitud del pulgar, 0,12) */
+    float thumb_base_deg, thumb_tip_deg;   /* tope de giro de la base (110) y de la punta (80) con el puño cerrado */
 } VrFistParams;
 
 void vrfist_params_default(VrFistParams *p);
