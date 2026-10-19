@@ -67,3 +67,27 @@ enum XRMath {
         return true
     }
 }
+
+/// Cámaras de la pantalla 3D (cinemáticas del motor). Réplica de `vrcine_eye` de vr/host/vr_cine.c (probada allí): mantener sincronizado.
+/// Pareja de cámaras PARALELAS con ventana desplazada: el plano a `conv` m de la cámara del juego queda sin paralaje (en el plano de la pantalla), lo más cercano
+/// sale de ella y lo lejano queda detrás. Con el campo de visión igual al ángulo que la pantalla ocupa desde el usuario y la separación igual a su IPD la escena se ve
+/// a escala real. No depende de la pose de la cabeza.
+enum XRStereo {
+    static let convergence: Float = 3.0
+
+    /// `gameView`: VrScene.game_view (vista del motor en unidades -> mundo VR en metros). `eye`: 0 izquierdo, 1 derecho. Devuelve la vista (mundo VR -> espacio del ojo GL:
+    /// x derecha, y arriba, -z delante) y las tangentes del frusto (izquierda, derecha, arriba, abajo; positivas) o nil si los datos no son válidos.
+    static func eye(gameView gv: simd_float4x4, eye: Int, ipd: Float, conv: Float, tanX: Float, tanY: Float) -> (view: simd_float4x4, tangents: SIMD4<Float>)? {
+        guard XRMath.isFinite(gv), ipd > 0.01, conv > 0.1, tanX > 0.05, tanY > 0.05 else { return nil }
+        let det = simd_determinant(gv)
+        guard det.isFinite, abs(det) > 1e-13 else { return nil }
+        let s: Float = 0.001                                         // metros por unidad del motor
+        let f = simd_float4x4(diagonal: SIMD4<Float>(s, -s, -s, 1))  // vista del motor (x der, y abajo, z delante) -> GL (x der, y arriba, -z delante)
+        let o: Float = eye == 0 ? -0.5 * ipd : 0.5 * ipd             // posición del ojo en x de la cámara
+        let view = XRMath.translation(SIMD3<Float>(-o, 0, 0)) * f * gv.inverse
+        guard XRMath.isFinite(view) else { return nil }
+        let sh = 0.5 * ipd / conv                                    // desplazamiento de la ventana (tangente)
+        let t = eye == 0 ? SIMD4<Float>(tanX - sh, tanX + sh, tanY, tanY) : SIMD4<Float>(tanX + sh, tanX - sh, tanY, tanY)
+        return (view, t)
+    }
+}

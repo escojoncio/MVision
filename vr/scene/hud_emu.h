@@ -25,3 +25,9 @@ void hud_emu_post(const float *src, float *dst, int w, int h, float cy_img, floa
 /* Como hud_emu_post pero con el punto principal y la focal HORIZONTALES del ojo (cx_img, fx_eye, en píxeles) y con la clase 3b: varios recubrimientos en orden,
  * líneas de exploración y máscara de visión (f->frame). Replica vr_fs_post de vr_scene.metal; hud_emu_post la llama con cx_img = w/2 y fx_eye = f_eye. */
 void hud_emu_post2(const float *src, float *dst, int w, int h, float cx_img, float cy_img, float fx_eye, float f_eye, const VrFilter *f);
+
+/* Emula por CPU el pase 3D (kind 0 y 1) del renderer para una cámara dada: `view` (columna-mayor, mundo VR en metros -> espacio del ojo GL: x der, y arriba, -z delante) y las
+ * tangentes tan_ = {izquierda, derecha, arriba, abajo} (positivas). Dibuja en `im` (RGBA premultiplicado, ya con el contenido previo que se quiera conservar) con z-buffer propio
+ * (`zbuf`, w*h floats, se inicializa a 1e30 si zinit). Aplica en orden los eventos de VRAM como hud_emu_run. Sirve para ver en Linux la escena que la pantalla 3D mostraría
+ * a cada ojo (no replica MSAA ni el filtro de pantalla). Si im == NULL solo aplica los eventos. */
+void hud_emu_run3d(const VrScene *s, uint16_t *vram, HudImg *im, float *zbuf, int zinit, const float view[16], const float tan_[4]);

@@ -149,6 +149,9 @@ void bench_make_scene(void) {
     g_scene_loaded = 1;
 }
 void bench_scene_post(void) { g_scene_pending = g_scene_loaded; }
+/* Cámara del juego de la escena (VrScene.game_view: vista del motor en unidades -> mundo VR en metros): a 1,6 m de altura mirando a -Z, 0,001 m por unidad (como en el juego). */
+static int g_cine_cam;
+void bench_set_cine_camera(int on) { g_cine_cam = on; }
 
 int mv_host_scene(VrScene *out) {
     if (!g_scene_pending) return 0;
@@ -158,6 +161,10 @@ int mv_host_scene(VrScene *out) {
     out->has_3d = 1;
     out->src = &g_list;
     out->game_view[0] = out->game_view[5] = out->game_view[10] = out->game_view[15] = 1.0f;
+    if (g_cine_cam) {
+        out->game_view[0] = 0.001f; out->game_view[5] = -0.001f; out->game_view[10] = -0.001f; out->game_view[13] = 1.6f;
+        out->cine_active = 1; out->cine_shot = 1;
+    }
     out->scale = 0.001f;
     out->world_valid = 1;
     out->filter.proj_h = 160; out->filter.cx_col = 160; out->filter.cy_row = 128;

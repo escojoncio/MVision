@@ -20,7 +20,7 @@ SRC_VR := ../bridge/bridge.c ../bridge/bridge_addrs.c ../camera/vr_camera.c ../c
   ../body/vr_body.c ../body/vr_body_cam.c ../body/vr_pose.c ../radar/vr_radar.c ../radar/vr_radar_hle.c \
   ../hands/vr_hands.c $(filter-out ../weapons/test_%.c,$(wildcard ../weapons/*.c)) \
   ../gameplay/vr_fire.c ../gameplay/vr_fire_hle.c ../gameplay/vr_aa.c ../gameplay/vr_missile.c ../gameplay/vr_scope.c ../gameplay/vr_reload.c \
-  ../ai/vrai.c ../ai/vr_ai_scan.c ../ai/vr_perception.c ../ai/vr_perception_rt.c ../ai/vr_cameras.c ../ai/vr_activity.c ../ai/vr_activity_rt.c vrgame.c vrbodyg.c vr_view.c vrhost.c
+  ../ai/vrai.c ../ai/vr_ai_scan.c ../ai/vr_perception.c ../ai/vr_perception_rt.c ../ai/vr_cameras.c ../ai/vr_activity.c ../ai/vr_activity_rt.c vrgame.c vrbodyg.c vr_view.c vr_cine.c vrhost.c
 SRC_RT := $(filter-out $(RT)/headless.c $(RT)/test_%.c $(RT)/wip_%.c,$(wildcard $(RT)/*.c))
 INC := -I. -I$(RT) -I../bridge -I../camera -I../input -I../scene -I../body -I../radar -I../hands -I../weapons -I../gameplay -I../ai
 
@@ -55,8 +55,13 @@ $(OUT)/test_view: test_view.c vr_view.c vr_view.h
 	@mkdir -p $(OUT)
 	$(CC) -I. $(CFLAGS) -o $@ test_view.c vr_view.c
 
-test: $(OUT)/test_view
+$(OUT)/test_cine: test_cine.c vr_cine.c vr_cine.h
+	@mkdir -p $(OUT)
+	$(CC) -I. $(CFLAGS) -o $@ test_cine.c vr_cine.c -lm
+
+test: $(OUT)/test_view $(OUT)/test_cine
 	$(OUT)/test_view
+	$(OUT)/test_cine
 
 .PHONY: check run test
 
@@ -67,6 +72,14 @@ $(OUT)/bodyrun: bodyrun.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrg
 	  -o $@ bodyrun.c $(SRC_VR) $(SRC_RT) -lm -lpthread
 .PHONY: bodyrun
 bodyrun: $(OUT)/bodyrun
+
+# Cinemáticas del motor en 3D: clasificación, planos y emulación por CPU de la pantalla 3D estéreo (cinerun.c).
+$(OUT)/cinerun: cinerun.c ../scene/hud_emu.c ../scene/hud_emu.h vr_cine.h $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h
+	@mkdir -p $(OUT)
+	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
+	  -o $@ cinerun.c ../scene/hud_emu.c $(SRC_VR) $(SRC_RT) -lm -lpthread
+.PHONY: cinerun
+cinerun: $(OUT)/cinerun
 
 # Recorrido título -> partida con acciones de Sense sintéticas y la tabla de mandos de vr_input (padrun.c).
 $(OUT)/padrun: padrun.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
