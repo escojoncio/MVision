@@ -348,6 +348,7 @@ final class ControllerHub: @unchecked Sendable {
 
     private func readPad(_ c: GCController?) -> PadSnapshot? {
         guard let g = c?.extendedGamepad else { return nil }
+        let k = Self.bit
         var b: UInt16 = 0
         func set(_ bit: UInt16, _ v: Bool) { if v { b |= bit } }
         set(k.select, Self.on(g.buttonOptions))
