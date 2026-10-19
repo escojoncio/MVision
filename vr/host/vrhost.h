@@ -34,6 +34,11 @@ void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame));
 /* Toma de pruebas: se llama en el hilo de emulación justo tras ensamblar cada escena (antes de copiarla al slot), con la lista, el puente y la escena. NULL = sin toma. */
 void mv_vrhost_set_scene_tap(void (*cb)(const GpuDrawList *dl, const BridgeState *bs, const VrScene *sc, uint32_t frame));
 
+/* Solo pruebas (vr/tools/vrprobe/probe2d): se llama en el hilo de emulación con cada lista capturada completa (`full`), la lista sin las primitivas del radar
+ * que se ensambló (`hud`), la escena resultante (memoria interna de vr_scene: valida solo durante la llamada), las opciones y el puente con la cámara de la lista. */
+typedef void (*MvVrListTap)(const GpuDrawList *full, const GpuDrawList *hud, const VrScene *sc, const VrSceneOpts *o, const BridgeState *bs);
+void mv_vrhost_set_list_tap(MvVrListTap cb);
+
 /* Escena VR del siguiente frame (contrato en app/Sources/RenderRGBridge.h). Una por llamada y sin saltarse ninguna;
  * los punteros de `out` valen hasta la siguiente llamada. Llamarla es lo que activa la captura de la GPU: sin llamadas durante
  * ~1,5 s se apaga (ventana plana) y al volver la primera lista trae la VRAM completa (vram_init). Thread-safe. */

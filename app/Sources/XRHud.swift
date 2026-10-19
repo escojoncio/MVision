@@ -15,6 +15,9 @@ struct XRDrawItem {
     var imgSize = SIMD2<Float>(1, 1)            // pantalla: tamaño de la imagen en texels
     var sharp: Float = 1                        // pantalla: 0 suave, 1 nítido, 2 píxel
     var opacity: Float = 1                      // veil: opacidad del negro
+    /// Texto/HUD (subtítulos, mensajes, créditos, alertas, panel 2D flotante, HUD de muñeca): se dibuja SIEMPRE encima del mundo, el cuerpo y el arma
+    /// (sin prueba de profundidad ni escritura) y después de ellos; la posición 3D del panel se conserva (estereoscopía), solo cambia la oclusión.
+    var onTop = false
     // screen3d: `texture` es un array de 2 capas (ojo izquierdo, derecho). Tinte y recubrimientos de pantalla del juego (espacio gamma, como VrFilter:
     // w de cada recubrimiento = modo de mezcla original 0..3 o -1 = sin usar), y cómo leer/escribir los valores.
     var tint = SIMD3<Float>(1, 1, 1)
@@ -199,7 +202,7 @@ final class XRFinalPass {
             if it.covers.count >= 4 { u.fxCov0 = it.covers[0]; u.fxCov1 = it.covers[1]; u.fxCov2 = it.covers[2]; u.fxCov3 = it.covers[3] }
             u.tex.w = (it.kind == .screen || it.kind == .screen3d) ? 1 : it.opacity
             enc.setRenderPipelineState(it.kind == .screen ? screenPSO : it.kind == .screen3d ? screen3dPSO : panelPSO)
-            enc.setDepthStencilState(it.kind == .menu ? dsOverlay : dsHud)
+            enc.setDepthStencilState(it.kind == .menu || it.onTop ? dsOverlay : dsHud)
             enc.setVertexBytes(&u, length: MemoryLayout<QuadUniforms>.stride, index: 0)
             enc.setFragmentBytes(&u, length: MemoryLayout<QuadUniforms>.stride, index: 0)
             enc.setFragmentTexture(tex, index: 0)

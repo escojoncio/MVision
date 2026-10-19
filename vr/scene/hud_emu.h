@@ -31,3 +31,6 @@ void hud_emu_post2(const float *src, float *dst, int w, int h, float cx_img, flo
  * (`zbuf`, w*h floats, se inicializa a 1e30 si zinit). Aplica en orden los eventos de VRAM como hud_emu_run. Sirve para ver en Linux la escena que la pantalla 3D mostraría
  * a cada ojo (no replica MSAA ni el filtro de pantalla). Si im == NULL solo aplica los eventos. */
 void hud_emu_run3d(const VrScene *s, uint16_t *vram, HudImg *im, float *zbuf, int zinit, const float view[16], const float tan_[4]);
+
+/* Vista GL del ojo del motor (metros) desde VrScene.game_view, para hud_emu_run3d con las tangentes del motor (tan_ = {cx, W-cx, cy, H-cy} / proj_h). 0 si game_view no es invertible. */
+int hud_emu_game_view_gl(const VrScene *s, float view[16]);

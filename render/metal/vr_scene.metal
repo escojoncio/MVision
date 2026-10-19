@@ -22,11 +22,15 @@ struct VrVOut {
     uint tpage [[flat]];
     uint clut_flags [[flat]]; /* clut | flags << 16 */
     uint tw [[flat]];         /* ventana de textura E2: twmx | twmy<<8 | twox<<16 | twoy<<24 (0 = sin ventana) */
+    float2 orig;              /* HUD 2D: posición original interpolada (coordenadas de VRAM como los vértices); 0 en la escena 3D */
+    float4 clip [[flat]];     /* recorte vigente de la primitiva (E3/E4) como [x1, y1, x2+1, y2+1) en las mismas coordenadas; sin recorte en la escena 3D */
 };
 
-inline VrVOut vr_pack(const device VrGpuVtx &v, const device VrGpuState *states, float4 clip) {
+inline VrVOut vr_pack(const device VrGpuVtx &v, const device VrGpuState *states, float4 clip, bool hud = false) {
     VrVOut o;
     o.pos = clip;
+    o.orig = float2(0.0);
+    o.clip = float4(-1.0e9, -1.0e9, 1.0e9, 1.0e9);
     o.uv = float2(v.uv[0], v.uv[1]);
     uint c = v.rgba;
     o.col = float3(float(c & 255u), float((c >> 8) & 255u), float((c >> 16) & 255u)) * (1.0 / 128.0);
@@ -36,7 +40,9 @@ inline VrVOut vr_pack(const device VrGpuVtx &v, const device VrGpuState *states,
     if (uint(v.pad) != 0xFFFFu) {
         const device VrGpuState &st = states[uint(v.pad)];
         o.tw = uint(st.tw[0]) | (uint(st.tw[1]) << 8) | (uint(st.tw[2]) << 16) | (uint(st.tw[3]) << 24);
+        if (hud) o.clip = float4(float(st.clip[0]), float(st.clip[1]), float(st.clip[2]) + 1.0, float(st.clip[3]) + 1.0);
     }
+    if (hud) o.orig = float2(v.pos[0], v.pos[1]);
     return o;
 }
 
@@ -64,7 +70,7 @@ vertex VrVOut vr_vs_hud(uint vid [[vertex_id]], const device VrGpuVtx *verts [[b
     const device VrGpuVtx &v = verts[vid];
     float x = (v.pos[0] - h.rect.x) / h.rect.z * 2.0 - 1.0;
     float y = 1.0 - (v.pos[1] - h.rect.y) / h.rect.w * 2.0;
-    return vr_pack(v, states, float4(x, y, 0.0, 1.0));
+    return vr_pack(v, states, float4(x, y, 0.0, 1.0), true);
 }
 
 /* ---------------- muestreo de VRAM ---------------- */
@@ -101,6 +107,8 @@ inline float3 vr_expand(uint t) {
 inline float vr_lin1(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
 
 fragment float4 vr_fs_scene(VrVOut in [[stage_in]], texture2d<ushort, access::read> vram [[texture(0)]]) {
+    /* recorte de la primitiva (solo HUD 2D; en 3D el recorte es todo el plano): las ventanas, cuadros de texto y letras con recorte no se salen de su caja */
+    if (in.orig.x < in.clip.x || in.orig.y < in.clip.y || in.orig.x >= in.clip.z || in.orig.y >= in.clip.w) discard_fragment();
     uint flags = in.clut_flags >> 16;
     uint clut = in.clut_flags & 0xFFFFu;
     float3 rgb;
