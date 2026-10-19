@@ -295,7 +295,7 @@ static void test_actors_and_screen(void) {
     put_pos(&a, 0, 100, 100, 3000); put_rect(&a, 50, 50, 100, 100);
     for (int b = 0; b < 2; b++) { w16(a.pk[b], 9); w8(a.pk[b] + 7, 0x2E); }
     uint32_t sm = actor_add(3, NAME_SMOKE, 0x80); w32(sm + 0x30, a.addr);
-    /* sombra de personaje */
+    /* sombra de objeto */
     uint32_t sh = actor_add(4, NAME_SHADOW, 0x100);
     uint32_t objs = alloc(0x48 + 0x5C + 64), pk0 = alloc(52), pk1 = alloc(52);
     w32(sh + 0x28, objs); w32(sh + 0x90, 1);
@@ -326,7 +326,7 @@ static void test_actors_and_screen(void) {
     CHECK(s->items[0].role == NSFX_ROLE_SMOKE, "papel por actor dueño: %s", ns_fx_role_name(s->items[0].role));
     CHECK(s->n_shadow_objs == 1 && s->shadow_objs[0] == objs, "objeto de sombra reclamado");
     const NsFxItem *q = &s->items[1];
-    CHECK(q->role == NSFX_ROLE_SHADOW_OBJ && (q->flags & NSFX_F_FROM_OBJ) && q->shape == NSFX_SH_QUAD, "sombra de personaje");
+    CHECK(q->role == NSFX_ROLE_SHADOW_OBJ && (q->flags & NSFX_F_FROM_OBJ) && q->shape == NSFX_SH_QUAD, "sombra de objeto");
     for (int v = 0; v < 4; v++) CHECK(NEAR(q->pos[v][0], CW[v][0], 0.6) && NEAR(q->pos[v][1], CW[v][1], 0.6) && NEAR(q->pos[v][2], CW[v][2], 0.6), "esquina %d de la sombra en el orden del paquete (%.1f,%.1f,%.1f)", v, q->pos[v][0], q->pos[v][1], q->pos[v][2]);
     CHECK(q->abr == 2 && q->clut == 0x4455 && q->raise == 150 && q->uv[2][0] == 16, "estado de la sombra abr=%u clut=0x%X", q->abr, q->clut);
     CHECK(s->screen.water.active && s->screen.water.present && NEAR(s->screen.water.tint[0], 100 / 128.0, 1e-6) && NEAR(s->screen.water.box_max[2], 9000, 0), "agua");
