@@ -485,12 +485,12 @@ static void test_glue(void) {
 /* El marco de la mano del modelo sigue el marco de vr_pose.h: dedos (-Y local) = -Z de la mano, palma (derecha +X local /
  * izquierda -X local) = -Y de la mano, pulgar (+Z local) = -X (derecha) / +X (izquierda). Comprobado sobre las matrices escritas
  * en la RAM, con orientaciones de mano distintas, sin usar hand_map. */
-static void test_hand_axes(void) {
+static void hand_axes_run(float roll_deg) {
     VrBodyConfig cfg; vrbody_config_default(&cfg);
     int tested = 0;
     for (int seed = 0; seed < 30; seed++) {
         build_body(200 + seed);
-        vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+        vrbody_init(&cfg); vrbody_set_view_fn(view_fn); vrbody_set_hand_roll(roll_deg);
         float th = (g_view.theta_deg + 180) * 3.14159265f / 180, cs = cosf(th), sn = sinf(th);
         float T[9] = {cs, 0, sn, 0, 1, 0, -sn, 0, cs};
         float yaw = (float)(seed % 5 - 2) * 0.25f;
@@ -507,10 +507,12 @@ static void test_hand_axes(void) {
             int n = vrbody_apply(RAM);
             if (f == 39 && n == 2) {
                 float Ru[9]; { float q[4] = {0, sinf(yaw / 2), 0, cosf(yaw / 2)}; vrbody_quat_to_mat(q, Ru); }
-                float Rw[9]; mm(Rw, T, Ru);
-                float fing[3] = {-Rw[2], -Rw[5], -Rw[8]}, up[3] = {Rw[1], Rw[4], Rw[7]}, xm[3] = {Rw[0], Rw[3], Rw[6]};
                 for (int s = 0; s < 2; s++) {
                     const VrBodyDebug *d = vrbody_debug(s);
+                    /* marco de la mano pedido = agarre x giro sobre el eje de los dedos (izquierda +roll, derecha -roll) */
+                    float ph = (s ? -roll_deg : roll_deg) * 3.14159265f / 180, cz = cosf(ph), sz = sinf(ph);
+                    float Rz[9] = {cz, -sz, 0, sz, cz, 0, 0, 0, 1}, Rh[9], Rw[9]; mm(Rh, Ru, Rz); mm(Rw, T, Rh);
+                    float fing[3] = {-Rw[2], -Rw[5], -Rw[8]}, up[3] = {Rw[1], Rw[4], Rw[7]}, xm[3] = {Rw[0], Rw[3], Rw[6]};
                     if (d->sol.flags & (VRARM_WRIST_LIMIT | VRARM_SHOULDER_LIMIT | VRARM_STRETCHED)) continue;
                     float R[9], t[3]; load_xf(part_addr(s ? 4 : 9), R, t);
                     float lx[3] = {R[0], R[3], R[6]}, ly[3] = {R[1], R[4], R[7]}, lz[3] = {R[2], R[5], R[8]};
@@ -538,6 +540,91 @@ static void test_hand_axes(void) {
         }
     }
     CHECK(tested >= 20, "pocas manos comprobadas: %d", tested);
+}
+static void test_hand_axes(void) {
+    hand_axes_run(0.0f);      /* sin giro: marco de vr_pose.h tal cual */
+    hand_axes_run(90.0f);
+    hand_axes_run(45.0f);     /* defecto */
+}
+
+/* Valor por defecto (45 grados): con el marco de agarre alineado con el mundo la mano del personaje queda girada 45 grados sobre el eje de los dedos
+ * (palma hacia dentro y abajo, dorso hacia fuera y arriba), no plana "sobre las piernas" ni en apretón de manos. */
+static void test_default_roll(void) {
+    VrBodyConfig cfg; vrbody_config_default(&cfg);
+    CHECK(fabsf(cfg.hand_roll_deg - 45.0f) < 1e-4f, "roll por defecto");
+    float sn = sinf(45.0f * 3.14159265f / 180), cs = cosf(45.0f * 3.14159265f / 180);
+    for (int s = 0; s < 2; s++) {
+        float q[4] = {cfg.hand_rot_offset[s][0], cfg.hand_rot_offset[s][1], cfg.hand_rot_offset[s][2], cfg.hand_rot_offset[s][3]}, M[9];
+        vrbody_quat_to_mat(q, M);   /* hand = grip * M: columnas de la mano en el marco del agarre */
+        float dors[3] = {M[1], M[4], M[7]}, xh[3] = {M[0], M[3], M[6]};
+        CHECK(fabsf(dors[0] - (s ? 1.0f : -1.0f) * sn) < 1e-4f && fabsf(dors[1] - cs) < 1e-4f, "dorso mano %d: %g %g", s, dors[0], dors[1]);
+        CHECK(fabsf((s ? -xh[1] : xh[1]) - sn) < 1e-4f, "pulgar mano %d: %g", s, xh[1]);
+    }
+}
+
+/* Golpe sintético (botón sin gesto) y agarre de enemigo: la MANO del personaje se mueve (no solo el codo) y vuelve al mando. */
+static void hands_at_rest(const float T[9]) {
+    for (int s = 0; s < 2; s++) {      /* a 250 mm delante y 120 bajo cada hombro, en el marco del torso */
+        float Rt1[9], tt1[3], sh[3], Rs_[9]; load_xf(part_addr(1), Rt1, tt1); load_xf(part_addr(s ? 2 : 7), Rs_, sh);
+        float want[3]; for (int k = 0; k < 3; k++) want[k] = sh[k] + Rt1[3 * k + 2] * 250.0f - Rt1[3 * k + 1] * 120.0f;
+        float dw[3] = {want[0] - g_view.eye[0], want[1] - g_view.eye[1], want[2] - g_view.eye[2]};
+        float Tt[9] = {T[0], T[3], T[6], T[1], T[4], T[7], T[2], T[5], T[8]}, pu[3]; mv(pu, Tt, dw);
+        set_hand(s, pu[0] / 1000 + g_view.p_ref[0], pu[1] / 1000 + g_view.p_ref[1], pu[2] / 1000 + g_view.p_ref[2], 0.0f);
+    }
+}
+static void wrist_pos(int s, float w[3]) { float R[9]; load_xf(part_addr(s ? 4 : 9), R, w); }
+static void test_jab_and_grab(void) {
+    VrBodyConfig cfg; vrbody_config_default(&cfg);
+    for (int seed = 0; seed < 12; seed++) {
+        build_body(300 + seed);
+        vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+        float th = (g_view.theta_deg + 180) * 3.14159265f / 180, cs = cosf(th), sn = sinf(th);
+        float T[9] = {cs, 0, sn, 0, 1, 0, -sn, 0, cs};
+        float Rt1[9], tt1[3]; load_xf(part_addr(1), Rt1, tt1);
+        float fw[3] = {Rt1[2], 0, Rt1[8]}; float fl = lenv(fw); fw[0] /= fl; fw[2] /= fl;
+        float lf[3] = {fw[2], 0, -fw[0]};                      /* izquierda del personaje mirando hacia fw */
+        float rest[2][3];
+        for (int f = 0; f < 40; f++) { hands_at_rest(T); memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM); if (f == 39) { wrist_pos(0, rest[0]); wrist_pos(1, rest[1]); } vrbody_restore(RAM); }
+        /* a) golpe sintético de la mano derecha del personaje: avanza y vuelve; la otra mano no se mueve */
+        vrbody_set_jab(1, fw);
+        float maxfwd = 0, maxl = 0, endd = 0;
+        for (int f = 0; f < 40; f++) {
+            hands_at_rest(T); memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM);
+            float w1[3], w0[3]; wrist_pos(1, w1); wrist_pos(0, w0);
+            float d[3] = {w1[0] - rest[1][0], w1[1] - rest[1][1], w1[2] - rest[1][2]};
+            float fwd = d[0] * fw[0] + d[2] * fw[2]; if (fwd > maxfwd) maxfwd = fwd;
+            float dl[3] = {w0[0] - rest[0][0], w0[1] - rest[0][1], w0[2] - rest[0][2]}; if (lenv(dl) > maxl) maxl = lenv(dl);
+            if (f == 39) endd = lenv(d);
+            vrbody_restore(RAM);
+        }
+        CHECK(maxfwd > 150.0f, "el golpe sintético no mueve la mano: %g mm (semilla %d)", maxfwd, seed);
+        CHECK(maxl < 3.0f, "la otra mano se movió %g mm", maxl);
+        CHECK(endd < 3.0f, "la mano no vuelve tras el golpe: %g mm", endd);
+        VrBodyStats st; vrbody_stats(&st); CHECK(st.jab_applies > 5, "jab_applies %u", st.jab_applies);
+        /* b) agarre: las dos manos van al cuello (a ambos lados) y vuelven al soltar */
+        float Sh0[3], Sh1[3], Rq[9]; load_xf(part_addr(7), Rq, Sh0); load_xf(part_addr(2), Rq, Sh1);
+        VrBodyGrab gr; memset(&gr, 0, sizeof gr); gr.active = 1;
+        for (int k = 0; k < 3; k++) { gr.neck[k] = 0.5f * (Sh0[k] + Sh1[k]) + fw[k] * 450.0f; gr.left[k] = lf[k]; }
+        gr.neck[1] += 0;
+        float dmin[2] = {1e9f, 1e9f};
+        for (int f = 0; f < 40; f++) {
+            hands_at_rest(T); vrbody_set_grab(&gr); memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM);
+            if (f == 39)
+                for (int s = 0; s < 2; s++) {
+                    float w[3]; wrist_pos(s, w);
+                    float C[3]; for (int k = 0; k < 3; k++) C[k] = gr.neck[k] + (s == 0 ? 1.0f : -1.0f) * lf[k] * cfg.grab_spread_mm;
+                    float d[3] = {w[0] - C[0], w[1] - C[1], w[2] - C[2]}; dmin[s] = lenv(d);
+                }
+            vrbody_restore(RAM);
+        }
+        for (int s = 0; s < 2; s++) CHECK(dmin[s] < 140.0f, "la mano %d no llega al cuello: %g mm (semilla %d)", s, dmin[s], seed);
+        vrbody_stats(&st); CHECK(st.grab_applies > 20, "grab_applies %u", st.grab_applies);
+        /* soltar (sin refrescar): vuelven al mando */
+        for (int f = 0; f < 60; f++) { hands_at_rest(T); memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM); vrbody_restore(RAM); }
+        hands_at_rest(T); memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM);
+        for (int s = 0; s < 2; s++) { float w[3]; wrist_pos(s, w); float d[3] = {w[0] - rest[s][0], w[1] - rest[s][1], w[2] - rest[s][2]}; CHECK(lenv(d) < 4.0f, "la mano %d no vuelve al mando: %g mm", s, lenv(d)); }
+        vrbody_restore(RAM);
+    }
 }
 
 /* Brazos siempre dibujados: si el motor dejó a 0 el contador de visibilidad (+0x4C) de piezas del brazo, la IK lo fuerza durante la
@@ -633,7 +720,7 @@ int main(void) {
     test_natural_elbow();
     test_continuity();
     test_glue();
-    test_hand_axes();
+    test_hand_axes(); test_default_roll(); test_jab_and_grab();
     test_visibility();
     test_mirror();
     test_fuzz();
