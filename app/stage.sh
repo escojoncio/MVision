@@ -34,11 +34,14 @@ for d in bridge camera input scene host body radar hands weapons gameplay ai; do
   done
 done
 
-# vr/native: sólo el escritor de volcados y los tipos del contrato (el cargador ns_dump.c, el rasterizador de referencia y las herramientas son de escritorio)
+# vr/native: el escritor de volcados, los tipos del contrato y el puente/empaquetado del renderer nativo (el cargador ns_dump.c, el rasterizador de referencia y las herramientas son de escritorio)
 mkdir -p .stage/vr/native
 cp ../vr/native/ns_types.h ../vr/native/ns_dump.h ../vr/native/ns_dumpw.c .stage/vr/native/
+# Renderer nativo: puente de escena (triple búfer), empaquetado para la GPU y tipos compartidos con el shader. Sin test_*, sin tools/, sin ns_cpuref (validador de escritorio).
+cp ../vr/native/ns_pub.h ../vr/native/ns_bridge.h ../vr/native/ns_bridge.c ../vr/native/ns_gpu.h ../vr/native/ns_gpu.c ../vr/native/ns_gpu_types.h .stage/vr/native/
 
 cp ../render/metal/vr_*.metal ../render/metal/vr_types.h .stage/metal/
+cp ../vr/native/ns_gpu_types.h .stage/metal/   # lo incluye app/Sources/Native/NativeShaders.metal
 cp "$SIGS_HLE" .stage/res/sigs_hle.json
 
 if [ -n "${EXTRAS_DIR:-}" ]; then
