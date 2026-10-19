@@ -12,6 +12,8 @@ static int last_rc = NS_HOOK_PATCH_FAIL - 1;
 static NsStageCb stage_cb;
 
 void ns_hook_set_stage_cb(NsStageCb cb) { stage_cb = cb; }
+static NsPreCb pre_cb;
+void ns_hook_set_precapture_cb(NsPreCb cb) { pre_cb = cb; }
 int ns_hook_installed(void) { return atomic_load(&installed); }
 unsigned ns_hook_stale_count(void) { return atomic_load(&stale_n); }
 int ns_hook_last_rc(void) { return last_rc; }
@@ -24,6 +26,7 @@ static void stage_wrap(Cpu *c) {
     uint32_t chan = c->r[4];
     rt_call_orig(c, NS_STAGE_ADDR);
     if (chan != NS_MAIN_CHANNEL) return;
+    if (pre_cb) pre_cb(emu_ram);
     ns_capture(emu_ram, emu_scratch);
     if (stage_cb) stage_cb(c);
 }

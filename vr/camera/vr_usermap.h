@@ -20,3 +20,19 @@ static inline void vrcam_scene_user_map(VrSceneOpts *o, const VrCamRecord *r, fl
     o->user_eye_h_m = ((float)r->eye[1] - floor_y) / upm;
     memcpy(o->user_p_ref, r->p_ref, sizeof o->user_p_ref);
 }
+
+/* Mapa mundo del motor -> espacio recentrado del usuario para el render NATIVO (3x4 fila-mayor, metros). UNICA definición, la misma regla que aplica vr_scene_build
+ * con user_map_on a los vértices de la lista de la GPU (la reflexión de Z de vr_scene se cancela entre la vista->mundo y el mapa de usuario):
+ *   P = R * (k * (W - origen)) + p_ref - R * (0, eye_h, 0),   k = user_k * scale = 1 / unidades-por-metro.
+ * `o` debe traer user_map_* ya fijados (vrcam_scene_user_map) y `org` es el origen del mundo VR (origin_game de la lista: bajo el ojo VR de ese fotograma).
+ * Devuelve 0 si la escala no es válida. La prueba vr/camera/test_native_coh.c comprueba que el nativo y la lista de la GPU caen en el mismo sitio. */
+static inline int vrcam_native_to_vr(const VrSceneOpts *o, const float org[3], float to_vr[12]) {
+    float k = o->user_k * o->scale;
+    if (!(k > 0.0f) || !isfinite(k)) return 0;
+    for (int i = 0; i < 3; i++) {
+        float c = o->user_p_ref[i] - o->user_R[3 * i + 1] * o->user_eye_h_m, a = 0.0f;
+        for (int j = 0; j < 3; j++) { to_vr[4 * i + j] = o->user_R[3 * i + j] * k; a += to_vr[4 * i + j] * org[j]; }
+        to_vr[4 * i + 3] = c - a;
+    }
+    return 1;
+}

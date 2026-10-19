@@ -28,6 +28,12 @@ SC := ../scene
 $(OUT)/test_camera: test_camera.c vr_camera.c vr_camera.h vr_usermap.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(BR)/bridge.c $(BR)/bridge_addrs.c
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -I. -I$(BR) -I$(SC) -I$(RT) test_camera.c vr_camera.c $(SC)/vr_scene.c $(BR)/bridge.c $(BR)/bridge_addrs.c -o $@ -lm
+# Prueba sintética: el render nativo cae en el mismo sitio que la lista de la GPU (mismo mapa mundo -> usuario) y la red de coherencia lo comprueba.
+$(OUT)/test_native_coh: test_native_coh.c vr_usermap.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(BR)/bridge.c $(BR)/bridge_addrs.c ../native/ns_bridge.c ../native/ns_bridge.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -I. -I$(BR) -I$(SC) -I$(RT) -I../native test_native_coh.c $(SC)/vr_scene.c $(BR)/bridge.c $(BR)/bridge_addrs.c ../native/ns_bridge.c -lm -lpthread -o $@
+test-native-coh: $(OUT)/test_native_coh
+	$(OUT)/test_native_coh
 # EXE sintético (solo las instrucciones esperadas en los puntos de parche; sin datos del juego) para comparar vrcam_patch_ram con
 # patch_exe.py byte a byte. Si existe el EXE real (EXE=...), se prueba también con él.
 $(OUT)/syn/orig.exe: patch_exe.py
@@ -37,7 +43,8 @@ $(OUT)/syn/patched.exe: $(OUT)/syn/orig.exe patch_exe.py
 	python3 patch_exe.py $< $@ --h 160 --hfov 140 --vfov 120 --no-divide --no-cull
 $(OUT)/syn/patched_wide.exe: $(OUT)/syn/orig.exe patch_exe.py
 	python3 patch_exe.py $< $@ --h 160 --hfov 140 --vfov 120 --no-divide --no-cull --wide-points
-test: $(OUT)/test_camera $(OUT)/syn/patched.exe $(OUT)/syn/patched_wide.exe
+test: $(OUT)/test_camera $(OUT)/syn/patched.exe $(OUT)/syn/patched_wide.exe $(OUT)/test_native_coh
+	$(OUT)/test_native_coh
 	VRCAM_EXE=$(OUT)/syn/orig.exe VRCAM_EXE_PATCHED=$(OUT)/syn/patched.exe VRCAM_EXE_PATCHED_WIDE=$(OUT)/syn/patched_wide.exe $(OUT)/test_camera
 	@if [ -f "$(EXE)" ]; then python3 patch_exe.py $(EXE) $(OUT)/syn/real_patched.exe --h 160 --hfov 140 --vfov 120 --no-divide --no-cull && \
 	  VRCAM_EXE=$(EXE) VRCAM_EXE_PATCHED=$(OUT)/syn/real_patched.exe $(OUT)/test_camera; fi
@@ -91,7 +98,7 @@ snap: camtest
 	CAM_SERVER=$(abspath $(LIST)) MV_DISC=$(DISC) $(OUT)/camtest $(OUT)/exe/main.exe $(FRAMES) $(OUT)/snap
 clean:
 	rm -rf $(OUT)
-.PHONY: all test test-san gen camtest run snap clean
+.PHONY: all test test-san gen camtest run snap clean test-native-coh
 
 # ---- rumbo del personaje (vr_heading) y calibración de altura/escala (vr_calib): pruebas sin datos del juego ----
 $(OUT)/test_heading: test_heading.c vr_heading.c vr_heading.h vr_calib.h vr_camera.c vr_camera.h $(BR)/bridge.c $(BR)/bridge_addrs.c

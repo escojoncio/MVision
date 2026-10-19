@@ -33,6 +33,7 @@
 #include "vrgame.h"
 #include "hle.h"
 #include "ns_dump.h"
+#include "ns_extract.h"
 #include "ns_hook.h"
 #include "ns_hook_rt.h"
 #include "ns_player.h"
@@ -236,6 +237,7 @@ static _Atomic int render_req = MV_RENDER_DEFAULT_NATIVE, render_locked, rendere
 static int dump_point;                   /* 1 = el volcado en curso se tomó en el punto de enganche */
 /* Definición DÉBIL vacía (una referencia débil sin definir no enlaza en Mach-O): ns_extract la sustituye con una fuerte que registra el extractor en el enganche. */
 __attribute__((weak)) void ns_extract_register(void) {}
+__attribute__((weak)) void ns_extract_glue_stats(NsExtractGlueStats *o) { if (o) memset(o, 0, sizeof *o); }   /* idem: la fuerte está en ns_extract_glue.c */
 _Static_assert(NS_PLAYER_BODY_PTR == BA_PLAYER_BODY, "ns_player y el puente deben coincidir en el puntero del jugador");
 static void dump_at_stage(Cpu *c);
 static int ns_gate(void *u);
@@ -278,14 +280,7 @@ static int ns_world_to_vr(const VrCamRecord *r, float to_vr[12]) {
     vr_scene_player_origin(&bs, &o, org);
     org[0] = (float)r->eye[0]; org[2] = (float)r->eye[2];   /* origen bajo el ojo VR de ese fotograma (como build_one) */
     vrcam_scene_user_map(&o, r, org[1]);
-    float k = o.user_k * o.scale;
-    if (!(k > 0.0f) || !isfinite(k)) return 0;
-    for (int i = 0; i < 3; i++) {
-        float c = o.user_p_ref[i] - o.user_R[3 * i + 1] * o.user_eye_h_m, a = 0.0f;
-        for (int j = 0; j < 3; j++) { to_vr[4 * i + j] = o.user_R[3 * i + j] * k; a += to_vr[4 * i + j] * org[j]; }
-        to_vr[4 * i + 3] = c - a;
-    }
-    return 1;
+    return vrcam_native_to_vr(&o, org, to_vr);
 }
 
 /* Contexto de la captura (hilo de emulación, en la etapa «pantalla»): zona, cámara VR y mapa mundo -> usuario, y qué hacer con el jugador. */
@@ -308,7 +303,7 @@ static void ns_post_ik(uint8_t *ram) { ns_hook_post_ik(ram); }
 /* Vigilancia por fotograma (hilo de emulación, tras el sincronismo): (M4) con la capa de cuerpo activa cada captura debe llevar la pose IK de los brazos
  * (ik_refresh crece a la par que captures); (B4) reintento de la instalación y reinstalación si otra overlay pisó la etapa. Se registra como mucho una vez por segundo. */
 static void ns_frame_check(void) {
-    static uint32_t cap0, ik0, miss0, nfr;
+    static uint32_t cap0, ik0, miss0, pub0, nfr;
     static uint64_t last_log_ns;
     NsHookStats st;
     ns_hook_stats(&st);
@@ -327,6 +322,38 @@ static void ns_frame_check(void) {
     last_log_ns = t;
     uint32_t dcap = st.captures - cap0, dik = st.ik_refresh - ik0, dmiss = st.ik_missed - miss0;
     cap0 = st.captures; ik0 = st.ik_refresh; miss0 = st.ik_missed;
+    {   /* Diagnóstico por segundo (una línea cada una), siempre: qué extrajo el enganche del motor y cómo van las manos. Se mide todo junto para no ir a ciegas. */
+        static NsExtractGlueStats g0;
+        static VrBodyStats b0;
+        NsExtractGlueStats g;
+        ns_extract_glue_stats(&g);
+        if (st.captures || g.calls)
+            fprintf(stderr, "[captura] por s: escenas=%u publicadas=%u sin_IK=%u | ultima: cola=%u instancias=%u escenario=%u piezas=%u ocultas=%u descartes(grupo=%u oculto=%u otros=%u) | por s: mallas_nuevas=%u memo_obsoleto=%u cambios_zona=%u epocas=%u almacen_lleno=%u\n",
+                    dcap, st.published - pub0, dmiss, g.last_queue, g.last_inst, g.last_static, g.last_pieces, g.last_hidden_pieces, g.last_drop_group, g.last_drop_hidden, g.last_drop_other,
+                    g.mesh_new - g0.mesh_new, g.memo_stale - g0.memo_stale, g.zone_changes - g0.zone_changes, g.epoch_opened - g0.epoch_opened, g.store_full - g0.store_full);
+        g0 = g; pub0 = st.published;
+        if (body_ok) {
+            VrBodyStats b;
+            vrbody_stats(&b);
+            float raw[2] = {0, 0};
+            int32_t ok[2] = {0, 0};
+            mv_vrgame_grip_diag(raw, ok);
+            const VrBodyConfig *bc = vrbody_config();
+            float minc = bc ? bc->fist_min_grip : 0.03f;
+            const char *est[2];
+            float cur[2], w[2];
+            int drv[2];
+            for (int i = 0; i < 2; i++) {
+                const VrBodyDebug *d = vrbody_debug(i);
+                cur[i] = d ? d->grip : 0.0f; w[i] = d ? d->w : 0.0f; drv[i] = d ? d->driven : 0;
+                est[i] = !drv[i] ? "sin_IK" : cur[i] * w[i] >= 0.9f ? "puno" : cur[i] * w[i] >= minc ? "cerrando" : "abierta";
+            }
+            fprintf(stderr, "[manos] grip_crudo I=%.2f D=%.2f pose_valida I=%d D=%d | aplicado I=%.2f D=%.2f peso I=%.2f D=%.2f | estado I=%s D=%s | puno_malla: deformadas=+%u omitidas=+%u (fist=%d minimo=%.2f) | IK: aplicaciones=+%u brazos=+%u\n",
+                    raw[0], raw[1], (int)ok[0], (int)ok[1], cur[0], cur[1], w[0], w[1], est[0], est[1],
+                    b.fist_applies - b0.fist_applies, b.fist_skipped - b0.fist_skipped, bc ? bc->fist_enabled : -1, minc, b.applies - b0.applies, b.arms_driven - b0.arms_driven);
+            b0 = b;
+        }
+    }
     if (body_ok && dcap > 0 && (dik < dcap || dmiss))
         fprintf(stderr, "[vrhost] render nativo: %u capturas, %u con pose IK, %u sin IK (esas escenas se pintan por GPU); jugador enlazado %u\n", dcap, dik, dmiss, st.player_bound);
 }
@@ -1064,6 +1091,7 @@ static void on_bound(void) {
         int rc = ns_hook_install();
         if (rc != NS_HOOK_OK) fprintf(stderr, "[vrhost] enganche del render nativo no instalado (%d): el 3D sale de la lista de la GPU\n", rc);
         ns_hook_set_stage_cb(dump_at_stage);
+        ns_hook_set_precapture_cb(vrbody_prefist);
         vrbody_set_apply_hook(ns_post_ik);
     }
     /* Disparo: todas o ninguna (con unas sí y otras no, el arma VR dispararía a medias). */

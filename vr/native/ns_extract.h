@@ -62,6 +62,13 @@ typedef struct NsExtractStats {
     uint32_t oob_reads;            /* lecturas de RAM rechazadas por estar fuera de rango */
 } NsExtractStats;
 
+/* Contadores acumulados del extractor del enganche (ns_extract_glue.c) para el registro de diagnóstico; los acumulados solo crecen (la interfaz hace diferencias por segundo). */
+typedef struct NsExtractGlueStats {
+    uint32_t calls, mesh_new, memo_stale, zone_changes, epoch_opened, store_full, drop_group, drop_hidden, drop_other, queue_sum;   /* acumulados */
+    uint32_t last_queue, last_inst, last_static, last_pieces, last_hidden_pieces, last_drop_group, last_drop_hidden, last_drop_other;   /* última escena */
+} NsExtractGlueStats;
+void ns_extract_glue_stats(NsExtractGlueStats *out);
+
 typedef struct {
     const uint32_t *shadow_objs;   /* direcciones de objetos que son sombras (NsFxScene.shadow_objs): no se emiten */
     uint32_t n_shadow;

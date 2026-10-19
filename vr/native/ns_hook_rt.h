@@ -12,6 +12,9 @@ enum { NS_HOOK_OK = 0, NS_HOOK_BAD_CODE = -1, NS_HOOK_BAD_TABLE = -2, NS_HOOK_PA
 /* Se llama tras la captura (misma llamada de la etapa, hilo de emulación) con la CPU: lo usa el volcado en el punto de enganche. NULL = nada. */
 typedef void (*NsStageCb)(Cpu *c);
 void ns_hook_set_stage_cb(NsStageCb cb);
+/* Se llama justo ANTES de ns_capture con la RAM del juego (p. ej. para dejar el puño aplicado a la malla de la mano que se va a extraer). NULL = nada. */
+typedef void (*NsPreCb)(uint8_t *ram);
+void ns_hook_set_precapture_cb(NsPreCb cb);
 
 /* Valida la forma de la etapa (prólogo de pila y entrada de la tabla) y la sustituye por la envoltura. Devuelve NS_HOOK_*. Idempotente. */
 int ns_hook_install(void);

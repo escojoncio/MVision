@@ -118,6 +118,7 @@ private final class NativeGpuMesh {
     var centroid: UnsafeMutablePointer<Float>?   // 3 por triángulo (solo semitransparentes)
     var abr: UnsafeMutablePointer<UInt8>?        // modo de mezcla por triángulo
     var lastUsed: UInt32 = 0
+    var bmin = SIMD3<Float>(0, 0, 0), bmax = SIMD3<Float>(0, 0, 0)   // caja local (unidades del motor), solo para el registro de diagnóstico
     init(id: UInt64) { self.id = id }
     deinit { centroid?.deallocate(); abr?.deallocate() }
 }
@@ -183,11 +184,20 @@ final class NativeRenderer {
     private var staticGen = 0
     private var toVR = matrix_identity_float4x4
     private var camEye = SIMD3<Float>(0, 0, 0)     // ojo de la cámara del motor (mundo del motor) de la escena actual
+    private var toVR12 = [Float](repeating: 0, count: 12)   // to_vr de la escena actual (3x4 fila-mayor), tal cual se usa
+    private var camRot9 = [Float](repeating: 0, count: 9)   // vista -> mundo del motor de la cámara de la escena actual (fila-mayor)
+    private var curValid: UInt32 = 0                         // NsScene.valid de la escena actual
+    /// Cabeza (mundo VR, m) de este fotograma: la pone el llamador antes de beginFrame (solo diagnóstico).
+    var headVR = SIMD3<Float>(0, 0, 0)
+    private var lastView0 = matrix_identity_float4x4         // vista del primer ojo (solo diagnóstico)
+    private(set) var statTrisEye = 0, statTrisStatic = 0, statTrisDyn = 0   // triángulos enviados por ojo en el último encode
+    private var cohOut = NsCohOut()
+    private var cohEvaluated = false
+    private var cohWhy = ""
     // red de coherencia con la ruta de GPU (ver checkCoherence)
     private var incoherent = false
     private var cohRun = 0
     private(set) var cohDist: Float = -1
-    private var cohLogNs: UInt64 = 0
     static let whyIncoherent: Int32 = 100
     static let cohThreshold: Float = 0.2
     static let cohFramesToReturn = 3
@@ -320,6 +330,9 @@ final class NativeRenderer {
         haveView = true
         var ip = NsInterp()
         ns_interp_begin(b, &view, &ip)
+        // Sin interpolación entre escenas: la fluidez de XRFrameEncoder ya corrige la VISTA con la muestra de cada escena (igual que para la lista de la GPU); interpolar además
+        // la escena nativa (que también mueve to_vr con el jugador) compensaría dos veces el mismo movimiento. Se dibuja siempre la escena actual.
+        ip.enabled = 0
         let fresh = view.fresh != 0
         ingest(scene: cur, store: view.store, interp: &ip, fresh: fresh)
         // Todas las mallas de la época de esta escena están copiadas en la GPU: el productor puede liberar la anterior (protocolo de ns_types.h). Siempre, se
@@ -349,6 +362,8 @@ final class NativeRenderer {
         let nv = Int(pm.pointee.n_verts), nt = Int(ns_gpu_tri_count(pm))
         gm.flags = pm.pointee.flags
         gm.depthBias = pm.pointee.depth_bias
+        let bb = pm.pointee.bbox
+        gm.bmin = SIMD3<Float>(Float(bb.0), Float(bb.1), Float(bb.2)); gm.bmax = SIMD3<Float>(Float(bb.3), Float(bb.4), Float(bb.5))
         if nv == 0 || nt == 0 || pm.pointee.verts == nil || pm.pointee.faces == nil { meshes[key] = gm; return nil }
         guard let vs = allocRetry(vertPool, nv, seq: seq, store: store) else { frameFailures += 1; totalFailures += 1; return nil }
         guard let ts = allocRetry(triPool, nt, seq: seq, store: store) else { vertPool.release(vs, nv); frameFailures += 1; totalFailures += 1; return nil }
@@ -477,7 +492,10 @@ final class NativeRenderer {
             tv = simd_float4x4(columns: (SIMD4<Float>(t[0], t[4], t[8], 0), SIMD4<Float>(t[1], t[5], t[9], 0), SIMD4<Float>(t[2], t[6], t[10], 0), SIMD4<Float>(t[3], t[7], t[11], 1)))
         } else { dynTex.removeAll(); dynFlat.removeAll(); semis.removeAll(); statPcs.removeAll(); pieceCount = 0 }
         toVR = tv
+        curValid = sc.pointee.valid
+        for i in 0..<12 { toVR12[i] = t[i].isFinite ? t[i] : 0 }
         let rot = ns_scene_cam_rot(sc)!, eye = ns_scene_cam_eye(sc)!
+        for i in 0..<9 { camRot9[i] = rot[i] }
         let fwd = SIMD3<Float>(rot[2], rot[5], rot[8])
         let eyeP = SIMD3<Float>(eye[0], eye[1], eye[2])
         fogFwd = SIMD4<Float>(fwd.x, fwd.y, fwd.z, -simd_dot(fwd, eyeP))
@@ -519,6 +537,7 @@ final class NativeRenderer {
     func beginFrame(commandBuffer cb: MTLCommandBuffer, sortView: simd_float4x4, draw: Bool) -> Bool {
         checkThread()
         let t0 = Self.nowNs()
+        lastView0 = sortView
         serial += 1
         let my = serial
         var ix = -1
@@ -613,32 +632,50 @@ final class NativeRenderer {
     /// El render nativo se puede dibujar entero en este fotograma: ranura preparada, todas las mallas de la escena subidas y las pipelines listas.
     var frameReady: Bool { isActive && current != nil && frameFailures == 0 && frameMisses == 0 }
 
-    /// Decisión del fotograma (ns_native_decide): modo pedido, estado real del renderer, escena de la lista marcada y escena nativa apta y reciente.
-    /// Nunca deja un fotograma sin 3D: si algo falta, native = 0 y skip = 0.
-    /// Red de coherencia: con el mundo fiable (`worldValid`), la cámara nativa en VR (toVR * ojo del motor) debe coincidir con `eyeVR` (la de la ruta de GPU, VrScene.eye_vr).
-    /// Más de 0,2 m de distancia: incoherente (se cae a GPU); se vuelve a nativo tras 3 fotogramas coherentes seguidos. Sin mundo fiable no se evalúa y se mantiene el estado.
-    /// La distancia se escribe al registro una vez por segundo.
-    private func checkCoherence(eyeVR: SIMD3<Float>?, worldValid: Bool) -> Bool {
-        guard worldValid, let e = eyeVR, e.x.isFinite, e.y.isFinite, e.z.isFinite else { return !incoherent }
-        let c = toVR.columns
-        let p = c.0 * camEye.x + c.1 * camEye.y + c.2 * camEye.z + c.3
-        let d = simd_length(SIMD3<Float>(p.x, p.y, p.z) - e)
-        guard d.isFinite else { incoherent = true; cohRun = 0; cohDist = -1; return false }
-        cohDist = d
-        if d > Self.cohThreshold { incoherent = true; cohRun = 0 }
-        else { cohRun += 1; if incoherent && cohRun >= Self.cohFramesToReturn { incoherent = false } }
-        let now = Self.nowNs()
-        if now &- cohLogNs >= 1_000_000_000 {
-            cohLogNs = now
-            print(String(format: "[NativeRenderer] coherencia: distancia=%.3f m %@", d, incoherent ? "incoherente" : "coherente"))
+    /// Lo que la lista de la GPU declara del mundo y de la cámara (VrScene): mapa mundo del motor -> VR del espacio de usuario, origen de la lista y vista del juego.
+    struct GpuMap {
+        var userR: [Float]       // user_R (fila-mayor 3x3)
+        var k: Float             // user_k * scale (m por unidad del motor)
+        var eyeH: Float          // user_eye_h
+        var pRef: [Float]        // user_p_ref
+        var origin: [Float]      // origin_game
+        var gameView: [Float]    // game_view (columna-mayor 4x4)
+        var eyeVR: [Float]       // eye_vr
+        var upm: Float           // unidades del motor por metro
+    }
+    static let cohRotThreshold: Float = 8      // grados
+
+    /// Red de coherencia: con el mundo fiable, la escena nativa y la lista de la GPU deben decir lo mismo del MISMO mundo. Se lleva el ojo nativo (y dos puntos de prueba) por el mapa
+    /// mundo -> VR que declara la lista de la GPU (con su origen) y se compara con lo que da el to_vr de la escena nativa (ns_coherence); además se compara el giro de la cámara nativa con
+    /// game_view. Comparar «to_vr * ojo» con eye_vr NO sirve: el origen de la lista está bajo el ojo, así que ambos valen siempre p_ref (la cabeza). Más de 0,2 m o 8 grados:
+    /// incoherente (se cae a GPU); se vuelve a nativo tras 3 fotogramas coherentes seguidos. Sin mapa de la lista (cinemática, mundo no fiable) no se evalúa y se mantiene el estado.
+    private func checkCoherence(_ map: GpuMap?) -> Bool {
+        cohEvaluated = false
+        guard let m = map, (curValid & UInt32(truncatingIfNeeded: NS_SV_TOVR_OK)) != 0, m.userR.count == 9, m.pRef.count == 3, m.origin.count == 3, m.gameView.count == 16 else { return !incoherent }
+        var out = NsCohOut()
+        let ce: [Float] = [camEye.x, camEye.y, camEye.z]
+        let ok = ns_coherence_flat(m.userR, m.k, m.eyeH, m.pRef, m.origin, m.gameView, toVR12, ce, camRot9, m.upm, &out) != 0 && out.ok != 0
+        cohOut = out
+        cohEvaluated = true
+        guard ok, out.d_probe.isFinite, out.d_rot.isFinite else { incoherent = true; cohRun = 0; cohDist = -1; cohWhy = "no evaluable"; return false }
+        cohDist = out.d_probe
+        if out.d_probe > Self.cohThreshold || out.d_rot > Self.cohRotThreshold {
+            incoherent = true; cohRun = 0
+            cohWhy = out.d_probe > Self.cohThreshold ? "posicion" : "giro"
+        } else {
+            cohRun += 1
+            if incoherent && cohRun >= Self.cohFramesToReturn { incoherent = false }
+            if !incoherent { cohWhy = "" }
         }
         return !incoherent
     }
 
-    func decide(wantNative: Bool, sceneMarked: Bool, pipelinesReady: Bool, eyeVR: SIMD3<Float>? = nil, worldValid: Bool = false) -> NsDecision {
+    /// Decisión del fotograma (ns_native_decide): modo pedido, estado real del renderer, escena de la lista marcada y escena nativa apta y reciente, y coherencia con la lista.
+    /// Nunca deja un fotograma sin 3D: si algo falta, native = 0 y skip = 0.
+    func decide(wantNative: Bool, sceneMarked: Bool, pipelinesReady: Bool, gpuMap: GpuMap? = nil) -> NsDecision {
         var d = NsDecision()
         if !haveView { d.why = Int32(NS_WHY_NOSCENE); lastDecision = d; return d }
-        let coherent = checkCoherence(eyeVR: eyeVR, worldValid: worldValid)
+        let coherent = checkCoherence(gpuMap)
         var inp = NsDecideIn(want_native: wantNative ? 1 : 0, renderer_ok: (enabled && pipelinesReady && isActive) ? 1 : 0,
                              meshes_ok: frameReady ? 1 : 0, scene_marked: sceneMarked ? 1 : 0, now_ns: ns_now_ns(), max_age_ns: 250_000_000)
         ns_native_decide(&view, &inp, &d)
@@ -820,8 +857,46 @@ final class NativeRenderer {
                 statDraws += 1
             }
         }
+        statTrisStatic = slot.staticBuf != nil ? slot.nTex + slot.nFlat : 0
+        statTrisDyn = dynTex.reduce(0) { $0 + $1.ntri } + dynFlat.reduce(0) { $0 + $1.ntri }
+        statTrisEye = statTrisStatic + statTrisDyn + (semiRuns.isEmpty ? 0 : semiN)
         cpuEncodeMs += (Double(Self.nowNs() - t0) / 1e6 - cpuEncodeMs) * 0.05
         return true
+    }
+
+    /// Resumen para el registro (1 vez por segundo, una línea con el de la lista de la GPU; ver RGRenderer.nativeDiag): triángulos enviados por ojo, caja envolvente en mundo VR de lo
+    /// dibujado, piezas delante de la vista, cámara nativa frente a la de la GPU y a la cabeza, y la última comprobación de coherencia. Recorre las piezas: no se llama por fotograma.
+    func drawnSummary(gpuEye: SIMD3<Float>?) -> String {
+        var mn = SIMD3<Float>(repeating: .greatestFiniteMagnitude), mx = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+        var total = 0, front = 0
+        func add(_ gi: Int, _ gm: NativeGpuMesh) {
+            guard gi >= 0, gi < table.count else { return }
+            let m = toVR * world4(table[gi])
+            var c = SIMD3<Float>(0, 0, 0)
+            for i in 0..<8 {
+                let q = m * SIMD4<Float>((i & 1) == 0 ? gm.bmin.x : gm.bmax.x, (i & 2) == 0 ? gm.bmin.y : gm.bmax.y, (i & 4) == 0 ? gm.bmin.z : gm.bmax.z, 1)
+                let v = SIMD3<Float>(q.x, q.y, q.z)
+                guard v.x.isFinite, v.y.isFinite, v.z.isFinite else { return }
+                mn = pointwiseMin(mn, v); mx = pointwiseMax(mx, v); c += v * 0.125
+            }
+            total += 1
+            if (lastView0 * SIMD4<Float>(c.x, c.y, c.z, 1)).z < 0 { front += 1 }   // delante de la vista (Metal mira a -z)
+        }
+        for it in dynTex where it.piece < meshOf.count { if let gm = meshOf[it.piece] { add(it.piece, gm) } }
+        for it in dynFlat where it.piece < meshOf.count { if let gm = meshOf[it.piece] { add(it.piece, gm) } }
+        for it in statPcs { add(it.piece, it.mesh) }
+        for it in semis { add(it.piece, it.mesh) }
+        let box = total > 0 ? String(format: "[%.1f %.1f %.1f]..[%.1f %.1f %.1f]", mn.x, mn.y, mn.z, mx.x, mx.y, mx.z) : "vacia"
+        let nc = toVR * SIMD4<Float>(camEye.x, camEye.y, camEye.z, 1)
+        let g = gpuEye ?? SIMD3<Float>(.nan, .nan, .nan)
+        let coh = cohEvaluated
+            ? String(format: "ojo=%.3fm sondas=%.3fm giro=%.2fgr", cohOut.d_eye, cohOut.d_probe, cohOut.d_rot) : "no evaluada"
+        var s = "tris/ojo=\(statTrisEye) (escenario=\(statTrisStatic) dinamicos=\(statTrisDyn) semi=\(semiRuns.isEmpty ? 0 : semiN)) piezas=\(total) (escenario=\(statPcs.count) dinamicas=\(dynTex.count + dynFlat.count) semi=\(semis.count)) delante=\(front)/\(total) caja_VR=\(box)"
+        s += String(format: " | camara: nativa=(%.2f %.2f %.2f) gpu=(%.2f %.2f %.2f) cabeza=(%.2f %.2f %.2f) d_nat_cabeza=%.2fm d_gpu_cabeza=%.2fm",
+                    nc.x, nc.y, nc.z, g.x, g.y, g.z, headVR.x, headVR.y, headVR.z,
+                    simd_length(SIMD3<Float>(nc.x, nc.y, nc.z) - headVR), gpuEye != nil ? simd_length(g - headVR) : Float.nan)
+        s += " | coherencia: " + coh + (incoherent ? " INCOHERENTE(\(cohWhy))" : "") + " | escena nativa valid=0x" + String(curValid, radix: 16)
+        return s
     }
 
     /// Línea de registro (una vez por segundo): estado del renderer nativo y de la última decisión.

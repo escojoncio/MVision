@@ -1417,3 +1417,14 @@ for (cada batch b) if (!vr_batch_skipped(&b, d.skip)) dibujar(b);   // d.skip==0
 **E. Espera de ranura.** `slotSem.wait` con 50 ms de tope; si vence, ese fotograma va por GPU.
 
 **Glue del extractor.** Confirmado: el scratch real es `emu_scratch[0x400]` (1024 B, `runtime/mem.c`), pasado por `ns_hook_rt.c` a `ns_capture`; el `1024` del glue es correcto.
+
+---
+
+## Render nativo: correcciones tras la primera prueba en visor (rama fix-nativo1)
+
+Causas y cambios (todo verificado solo con pruebas sintéticas locales; falta prueba en visor):
+- **Coherencia tautológica:** `ns_coherence` comparaba la cámara nativa con un ojo que el origen del mapa ya hacía igual por construcción (coh = 0.000 siempre). Ahora se calcula de forma independiente (`ns_coherence_flat`, `vrcam_native_to_vr` en `vr/camera/vr_usermap.h`, mismo mapa que usa `ns_world_to_vr` en `vr/host/vrhost.c`). Prueba: `vr/camera/test_native_coh.c` (`make -C vr/camera test-native-coh`): los puntos del mundo caen en el mismo sitio por la ruta nativa y por la lista de la GPU, también en modo zurdo.
+- **Manos sin cerrar en nativo:** la captura (`ns_hook_rt.c` stage_wrap) ocurre antes de `vrbody_apply`, así que la malla de la mano se extraía abierta; además la firma de la malla (`model_sig`, `ns_extract.c`) muestreaba datos obsoletos. Cambios: `vrbody_prefist` (`vr/body/vr_body.c`) aplica el puño con el agarre del último apply antes de `ns_capture` (callback `ns_hook_set_precapture_cb`, registrado en `vrhost.c`); `vrbody_restore` ahora también restaura si solo hay puño pendiente. Pruebas en `vr/body/test_body.c` y `vr/native/test_ns_extract.c`.
+- **Diagnóstico:** una línea por segundo `[captura]`/`[manos]` (triángulos por ojo, caja VR de lo dibujado, cámara nativa vs GPU vs cabeza, lotes GPU omitidos/dibujados, agarre bruto, puño, estado) y xr-diag a 1/s. Interpolación nativa desactivada (doble compensación con la corrección de vistas).
+- **Funcional (pruebas sintéticas):** matrices/unidades/mapa de usuario idénticos en ambas rutas; puño previo a captura; restauración byte a byte.
+- **Pendiente:** confirmar con el nuevo log por qué la época del almacén cambia en cada escena; los "agujeros" probablemente son descartes a nivel de objeto del motor (cola/ocultos/grupos): ver contadores nuevos; código Swift (NativeRenderer, RenderRG, XRFrameEncoder, XRRenderLoop) sin compilar localmente, revisar en CI.

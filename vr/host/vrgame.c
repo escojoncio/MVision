@@ -211,6 +211,16 @@ int32_t mv_vrgame_hand_calibration(int32_t side, float q[4]) { return vrbody_get
 void mv_vrgame_set_hand_calibration(int32_t side, const float q[4]) { vrbody_set_calibration(side, q); }
 uint32_t mv_vrgame_calibration_serial(void) { return cal_serial; }
 /* Una vez por VBlank (hilo de emulación): cuenta atrás de la calibración con háptico. La calibración tiene prioridad sobre el cabeceo/alabeo configurados de esa mano. */
+/* Diagnóstico de las manos: agarre CRUDO que llegó del visor y si la pose del agarre era válida (si no lo era, al cuerpo se le pasa 0). 0 = izquierda, 1 = derecha. */
+static _Atomic float grip_diag_raw[2];
+static _Atomic int grip_diag_ok[2];
+void mv_vrgame_grip_diag(float raw[2], int32_t valid[2]) {
+    for (int i = 0; i < 2; i++) {
+        if (raw) raw[i] = atomic_load_explicit(&grip_diag_raw[i], memory_order_relaxed);
+        if (valid) valid[i] = atomic_load_explicit(&grip_diag_ok[i], memory_order_relaxed);
+    }
+}
+
 static void calib_tick(float dt) {
     float t = cal_countdown;
     if (t <= 0) return;
@@ -731,6 +741,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     /* cuerpo: agarre de cada mano y mano dominante (la IK de los brazos lee las poses por vrpose_get_hands) */
     vrbody_set_dominant(right ? 1 : 0);
     for (int i = 0; i < 2; i++) vrbody_set_grip(i, gp[i].valid ? hs[i].grip : 0.0f);
+    for (int i = 0; i < 2; i++) { atomic_store_explicit(&grip_diag_raw[i], hs[i].grip, memory_order_relaxed); atomic_store_explicit(&grip_diag_ok[i], gp[i].valid ? 1 : 0, memory_order_relaxed); }
 
     /* carga bajo demanda: el arma equipada que tiene modelo y aún no se ha pedido */
     load_poll();
