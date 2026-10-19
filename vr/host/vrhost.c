@@ -16,6 +16,7 @@
 #include "host_hooks.h"
 #include "vr_body.h"
 #include "vr_camera.h"
+#include "vr_heading.h"
 #include "vr_fire.h"
 #include "vr_radar.h"
 #include "vr_radar_vrp.h"
@@ -264,6 +265,21 @@ static const VrCamRecord *list_record(const GpuDrawList *l, int *has3d) {
     return NULL;
 }
 
+/* Mundo del juego -> espacio recentrado del usuario (VrSceneOpts.user_map_on). Con la cámara VR el motor dibuja con el ojo en p_ref y el
+ * espacio del usuario girado theta + 180 grados respecto al mundo (W = ojo + upm * T (P - p_ref), T = R_y(theta + 180)): sin esta
+ * correspondencia el mundo se vería girado (rumbo del personaje, giro del stick), con el suelo a la altura equivocada (sentado) y sin
+ * la escala de la calibración, y el cuerpo/brazos del personaje no coincidirían con la cabeza ni las manos reales. */
+static void user_map_from_record(VrSceneOpts *o, const VrCamRecord *r, float floor_y) {
+    float th = (r->theta_play_deg + 180.0f) * (3.14159265f / 180.0f), cs = cosf(th), sn = sinf(th);
+    const float R[9] = {cs, 0, -sn, 0, 1, 0, sn, 0, cs};
+    float upm = r->units_per_m > 1.0f ? r->units_per_m : 1000.0f;
+    o->user_map_on = 1;
+    memcpy(o->user_R, R, sizeof R);
+    o->user_k = 1.0f / (o->scale * upm);
+    o->user_eye_h_m = ((float)r->eye[1] - floor_y) / upm;
+    memcpy(o->user_p_ref, r->p_ref, sizeof o->user_p_ref);
+}
+
 static void build_one(const GpuDrawList *l, int si) {
     /* Los polígonos de una lista se transformaron con la cámara construida un frame del motor ANTES de que el VBlank lea la
      * RAM: la matriz de vista del puente puede ser ya la siguiente. El registro de cámara de la lista (vrcam) trae la correcta. */
@@ -290,6 +306,9 @@ static void build_one(const GpuDrawList *l, int si) {
             vr_scene_player_origin(&bs, &o, org);
             o.origin_mode = 1;
             o.origin_game[0] = (float)r->eye[0]; o.origin_game[1] = org[1]; o.origin_game[2] = (float)r->eye[2];
+#ifndef MV_NO_USER_MAP     /* (solo pruebas A/B: sin la correspondencia mundo -> usuario, como antes de §49) */
+            user_map_from_record(&o, r, org[1]);
+#endif
         }
     }
     /* Radar de muñeca: se separa del HUD (la escena del HUD se ensambla con la lista SIN sus primitivas) y su propia escena se
@@ -403,11 +422,12 @@ void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame)) { test_cb = 
 
 static void frame_hook(Cpu *c, uint32_t f) {
     float turn = mv_vr_take_turn();
-    if (turn != 0.0f) vrcam_turn(turn);
+    if (turn != 0.0f) vrhead_turn(turn);          /* gira la vista y, en vrhead_frame, el rumbo del personaje */
     if (mv_vr_take_recenter()) vrcam_recenter();
     bridge_read(emu_ram, &bs);
     publish_state();
     vrcam_frame(emu_ram, &bs);
+    vrhead_frame(emu_ram, &bs, bs.moving);
     vrai_frame(&bs, f);
     if (test_cb) test_cb(c, f);
     vrgame_frame_end();
@@ -479,7 +499,9 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     VrCamConfig cfg;
     vrcam_config_default(&cfg);
     cfg.head = vr_ok ? head_fn : NULL;
+    cfg.calibrate = 1;                            /* altura/escala del usuario al recentrar (vr_calib.h) */
     vrcam_init(&cfg);
+    vrhead_init(NULL);
     pthread_mutex_lock(&MX); stats.cam_ok = vr_ok; pthread_mutex_unlock(&MX);
     if (vr_ok) vrai_on_exe_loaded();   /* IA de enemigos y cámaras: solo con la edición esperada; los parches se instalan en on_bound */
 }
