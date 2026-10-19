@@ -17,9 +17,12 @@
 #include "vr_fire.h"
 #include "vr_hands.h"
 #include "vr_pose.h"
+#include "vr_missile.h"
 #include "vr_reload.h"
 #include "w_aa.h"
+#include "w_guided.h"
 #include "w_rifle.h"
+#include "w_sniper.h"
 #include "w_throw.h"
 #include "wcut.h"
 #include "wload.h"
@@ -103,6 +106,8 @@ static int opt_right = 1, opt_reload = WR_MANUAL;
 static float goff_p[3] = {0, 0, 0}, goff_q[4] = {0, 0, 0, 1};
 static float hap_out[2];
 static MvVrGameStatus pub_status;
+static MvVrSpecialView pub_special;      /* vista especial del arma (mira, visor, pantalla del misil) */
+static int opt_missile_view;               /* 0 pantalla en el lanzador, 1 pantalla grande ante la cara */
 static MvVrForearm pub_fore[2];
 static int pub_fore_ok[2];
 static GripPose pub_sim_hand;      /* mano del arma con la que se simuló el último frame publicado (compensación de latencia) */
@@ -203,6 +208,18 @@ void mv_vrgame_status(MvVrGameStatus *out) {
     if (!out) return;
     pthread_mutex_lock(&HM);
     *out = pub_status;
+    pthread_mutex_unlock(&HM);
+}
+int32_t mv_vrgame_special_view(MvVrSpecialView *out) {
+    if (!out) return 0;
+    pthread_mutex_lock(&HM);
+    *out = pub_special;
+    pthread_mutex_unlock(&HM);
+    return out->kind != MV_VIEW_NONE;
+}
+void mv_vrgame_set_missile_view(int32_t mode) {
+    pthread_mutex_lock(&HM);
+    opt_missile_view = mode == 1;
     pthread_mutex_unlock(&HM);
 }
 
@@ -343,6 +360,9 @@ static struct {
     int floor_ok;
     int det_t;                  /* VBlanks restantes pulsando el botón de detonación */
     WGameBridge br;
+    VrMissile mis;              /* misil guiado del juego vigilado (vr_missile.h) */
+    uint32_t mis_serial;        /* nº de misiles creados visto por última vez (vrfire_last_missile) */
+    float steady;               /* efecto del tranquilizante suavizado (0..1) */
     VrReloadOut ro;             /* última salida de la recarga */
     uint32_t shots, arms, throws, places, dets, rejects;
     int last_disc;
@@ -353,6 +373,7 @@ static void publish_off(void) {
     vrhands_post_clear();
     pthread_mutex_lock(&HM);
     pub_sim_valid = 0;
+    memset(&pub_special, 0, sizeof pub_special);
     pthread_mutex_unlock(&HM);
 }
 
@@ -381,6 +402,110 @@ static void cb_haptic(int hand, float strength, float seconds) {
     right = opt_right;
     int side = hand == 0 ? (right ? 1 : 0) : (right ? 0 : 1);   /* hand 0 = mano del arma */
     if (isfinite(strength) && strength > hap_out[side]) hap_out[side] = strength > 1 ? 1 : strength;
+    pthread_mutex_unlock(&HM);
+}
+
+/* Misil guiado: pose del misil del juego (actor vigilado por vr_missile) en el espacio de usuario; -Z = dirección de vuelo. */
+static void pose_look(const float d[3], float q[4]) {
+    float f[3] = {d[0], d[1], d[2]};
+    float fl = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+    if (!(fl > 1e-6f)) { q[0] = q[1] = q[2] = 0; q[3] = 1; return; }
+    for (int i = 0; i < 3; i++) f[i] /= fl;
+    float r[3] = {f[1] * 0 - f[2] * 1, f[2] * 0 - f[0] * 0, f[0] * 1 - f[1] * 0};      /* delante x arriba(0,1,0) */
+    float rl = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+    if (rl < 1e-4f) { r[0] = 1; r[1] = 0; r[2] = 0; rl = 1; }                         /* mirando recto arriba/abajo */
+    for (int i = 0; i < 3; i++) r[i] /= rl;
+    float u[3] = {r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]};   /* derecha x delante: sale arriba (+Y) */
+    float m[16] = {r[0], r[1], r[2], 0, u[0], u[1], u[2], 0, -f[0], -f[1], -f[2], 0, 0, 0, 0, 1};
+    q_from_m16(m, q);
+}
+static int cb_projectile(int id, WPose *out) {
+    if (id != 3 || !out || !G.mis.alive || !G.map.valid) return 0;
+    float w[3] = {(float)G.mis.pos[0], (float)G.mis.pos[1], (float)G.mis.pos[2]}, u[3], d[3], q[4];
+    float dw[3] = {G.mis.dir[0], G.mis.dir[1], G.mis.dir[2]};
+    vrfire_pos_from_world(&G.map, w, u);
+    vrfire_dir_from_world(&G.map, dw, d);
+    if (!finite_n(u, 3) || !finite_n(d, 3)) return 0;
+    pose_look(d, q);
+    out->p.x = u[0]; out->p.y = u[1]; out->p.z = u[2];
+    out->q.x = q[0]; out->q.y = q[1]; out->q.z = q[2]; out->q.w = q[3];
+    return 1;
+}
+static void cb_steer(int id, float yaw, float pitch) { if (id == 3) vrmis_steer(yaw, pitch); }
+
+/* ---- vistas especiales (mira óptica, visor antiaéreo, pantalla del misil): descriptor para la app (ver vrgame.h) ---- */
+#define SCOPE_TEX 384            /* lado (texels) de la textura de la mira */
+#define SCOPE_LENS_D 0.040f      /* diámetro de la lente (el ocular de la mira), m */
+#define AA_SIGHT_DIST 3.0f       /* distancia (m) a la que se coloca el HUD del visor (colimado: se ve a esa distancia con el tamaño angular del juego) */
+static void put_pose(const WPose *w, float p[3], float q[4]) {
+    p[0] = w->p.x; p[1] = w->p.y; p[2] = w->p.z;
+    q[0] = w->q.x; q[1] = w->q.y; q[2] = w->q.z; q[3] = w->q.w;
+}
+static void special_view(int gid, WeaponState *st, const WeaponDef *def, const WPose *W, const WInput *in) {
+    MvVrSpecialView sv;
+    int fullscreen;
+    memset(&sv, 0, sizeof sv);
+    pthread_mutex_lock(&HM);
+    fullscreen = opt_missile_view;
+    pthread_mutex_unlock(&HM);
+    if (gid == 9) {
+        sv.kind = MV_VIEW_SCOPE;
+        sv.blend = st->channel[WCH_SCREEN];
+        sv.zoom = sniper_zoom(st);
+        sv.cam_valid = st->aux.active || sv.blend > 0.01f;
+        put_pose(&st->aux.camera, sv.cam_pos, sv.cam_rot);
+        sv.cam_fov_y = st->aux.fov_y;
+        sv.tex_w = sv.tex_h = SCOPE_TEX;
+        WPose lens = wpose_mul(*W, def->parts[SNIPER_PT_LENS].rest);
+        put_pose(&lens, sv.surf_pos, sv.surf_rot);
+        sv.surf_w = sv.surf_h = SCOPE_LENS_D;
+        sv.round = 1;
+        sv.suppress_frame = 1;                   /* la máscara de visión del juego es la abertura de la mira: aquí la dibuja vr_scope en la lente */
+        sv.hide_hud = sv.blend > 0.25f;
+        vrcam_set_zoom_cap(320);                 /* la cabeza no se acerca: el aumento está en la lente */
+    } else {
+        vrcam_set_zoom_cap(0);
+        if (gid == 4) {
+            VrAaSight sg;
+            vraa_sight(&sg);
+            if (sg.active && sg.half_fov_deg > 0.5f && sg.half_fov_deg < 80.0f) {
+                float t = tanf(sg.half_fov_deg * (3.14159265f / 180.0f));
+                WVec3 fwd = wquat_rotate(sg.pose.q, wv(0, 0, -1));
+                WPose pn = sg.pose;
+                pn.p = wv_add(sg.pose.p, wv_scale(fwd, AA_SIGHT_DIST));
+                sv.kind = MV_VIEW_AA_SIGHT;
+                sv.blend = 1.0f;
+                put_pose(&pn, sv.surf_pos, sv.surf_rot);
+                sv.surf_w = 2.0f * AA_SIGHT_DIST * t;
+                sv.surf_h = sv.surf_w * 0.75f;           /* la imagen de la consola (320 x 256) se muestra a 4:3 */
+                sv.uv[0] = 0; sv.uv[1] = 0; sv.uv[2] = 1; sv.uv[3] = 1;
+                sv.hide_hud = 1;
+                sv.locked = sg.locked; sv.converged = sg.converged;
+            }
+        } else if (gid == 3 && st->phase != G_IDLE) {
+            const GuidedState *gs = (const GuidedState *)st;
+            WPose pnl;
+            float pw = 0.1f, ph = 0.075f;
+            float e = guided_view_panel(st, in, &pnl, &pw, &ph);
+            sv.kind = MV_VIEW_MISSILE;
+            sv.blend = e;
+            if (fullscreen) {        /* pantalla grande fija ante la cara (comodidad: la cabeza no se mueve nunca) */
+                WVec3 c = wv_add(in->head.p, wquat_rotate(in->head.q, wv(0, -0.05f, -1.1f)));
+                pnl.p = c; pnl.q = in->head.q; pw = 1.4f; ph = 1.05f;
+                sv.fullscreen = 1; sv.blend = 1.0f;
+            }
+            put_pose(&pnl, sv.surf_pos, sv.surf_rot);
+            sv.surf_w = pw; sv.surf_h = ph;
+            sv.cam_valid = st->phase == G_FLIGHT && G.mis.alive;
+            put_pose(&st->aux.camera, sv.cam_pos, sv.cam_rot);
+            sv.cam_fov_y = st->aux.fov_y;
+            sv.tex_w = GD_VIEW_W; sv.tex_h = GD_VIEW_H;
+            sv.noise = gs->noise;
+            sv.ended = st->phase == G_STATIC;
+        }
+    }
+    pthread_mutex_lock(&HM);
+    pub_special = sv;
     pthread_mutex_unlock(&HM);
 }
 
@@ -467,6 +592,9 @@ static void init_once(void) {
     G.br.ammo_take = cb_ammo_take;
     G.br.fire = cb_fire;
     G.br.haptic = cb_haptic;
+    G.br.projectile = cb_projectile;
+    G.br.steer = cb_steer;
+    vrmis_reset();
     G.ro.sync_rounds = G.ro.sync_chambered = -1;
     G.cur = -1;
     w_throw_set_hook(launch_hook, NULL);
@@ -585,6 +713,9 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     if (mode && !G.mag_weapon) { ro.fire_allowed = G.ammo_game > 0; ro.state = VRR_READY; ro.busy = 0; }
 
     if (!mode) {
+        vrcam_set_zoom_cap(0);           /* sin mira VR la cabeza recibe el aumento del juego tal cual */
+        memset(&G.mis, 0, sizeof G.mis);
+        { uint32_t ser; vrfire_last_missile(&ser); G.mis_serial = ser; }
         vraa_set_scope(0, NULL, NULL);
         vraa_gesture(NULL, NULL, 0);     /* sin arma o sin mano rastreada: el gesto del visor se reinicia (sin estado viejo al volver) */
         if (G.active) {
@@ -673,6 +804,19 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     } else {
         vraa_set_scope(0, NULL, NULL);
     }
+    /* misil guiado del juego: se vigila el actor que crea el juego (vr_missile.h); las demás armas lo ignoran */
+    {
+        uint32_t ser;
+        uint32_t act = vrfire_last_missile(&ser);
+        if (gid == 3 && ser != G.mis_serial) vrmis_begin(act);
+        G.mis_serial = ser;
+        if (gid == 3) vrmis_poll(ram, &G.mis); else memset(&G.mis, 0, sizeof G.mis);
+    }
+    if (gid == 9) {      /* francotirador: el tranquilizante del juego (temporizador distinto de cero) estabiliza la mira; suavizado para no dar saltos */
+        int16_t tq; memcpy(&tq, ram + (0x800B5FBAu & 0x1FFFFFu), 2);
+        G.steady += ((tq > 0 ? 1.0f : 0.0f) - G.steady) * 0.02f;
+        sniper_set_steady(st, G.steady);
+    }
     def->update(st, &in, (WReloadMode)rmode, &G.br);
     G.boot_done = 1;      /* la primera actualización es la del arranque del arma */
 
@@ -713,6 +857,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
             fi.ready = aim;
             fi.raise = 1;
         }
+        special_view(gid, st, def, &W, &in);
     }
     fi.fire = G.fire_edge && ro.fire_allowed;
     fi.fire_pose = G.fire_pose;
@@ -736,6 +881,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     }
     if (ro.busy) out = (uint16_t)(out & ~ro.pad_mask);
     out |= ro.pad_force;
+    if (gid == 3 && bs->in_control && G.mis.alive) out |= vrmis_pad(vrcam_pad_origin());   /* guiado: la cruceta del juego (vr_missile.h) */
     if (fo.engaged && fo.square) out |= PAD_SQUARE;
     if (G.det_t > 0) { G.det_t--; if (bs->in_control) out |= PAD_DETONATE; }
     G.ro = ro;

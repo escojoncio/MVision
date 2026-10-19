@@ -100,6 +100,7 @@ typedef struct {
     VrCamConfig cfg;
     int ok_count, want, latched;          /* decisión por frame (gancho) / por cámara (construcción) */
     int have_ref, need_recenter;
+    int zoom_cap;                         /* >0: tope de la distancia de pantalla que pide el juego (vista de la cabeza sin aumento) */
     float theta_play0, yaw_ref, extra;    /* grados */
     float p_ref[3];
     float view_yaw, theta_body;           /* último frame VR */
@@ -214,6 +215,7 @@ void vrcam_frame(const uint8_t *ram, const BridgeState *st) {
 }
 
 void vrcam_recenter(void) { S.need_recenter = 1; }
+void vrcam_set_zoom_cap(int cap) { S.zoom_cap = cap > 0 ? (cap > 32767 ? 32767 : cap) : 0; }
 void vrcam_turn(float deg) { S.extra = wrap180(S.extra + deg); }
 int vrcam_active(void) { return S.latched; }
 float vrcam_view_yaw_deg(void) { return S.view_yaw; }
@@ -263,6 +265,7 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
     if (track < 600.0f) track = 600.0f;
     for (int i = 0; i < 3; i++) p->to[i] = sat16(from[i] + d[i] * track);
 
+    if (S.zoom_cap > 0 && zoom > S.zoom_cap) zoom = (int16_t)S.zoom_cap;     /* mira VR: el aumento va en el visor del arma, no en la cabeza */
     int sc = S.cfg.engine_h > 0 ? (int)((int64_t)zoom * S.cfg.engine_h / 320) : zoom;
     if (sc < 16) sc = 16;
     if (sc > 32767) sc = 32767;

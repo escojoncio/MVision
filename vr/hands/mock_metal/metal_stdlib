@@ -55,4 +55,22 @@ enum class address { clamp_to_edge, repeat };
 enum class access { sample, read, write };
 struct sampler { constexpr sampler(filter, address) {} };
 template <typename T, access A = access::sample> struct texture2d { float4 sample(sampler, float2) const { return float4(0.0f); } };
+
+// --- ampliación para las vistas especiales (vr_fs_spc) ---
+inline float2 operator+(float2 a, float2 b) { return float2(a.x + b.x, a.y + b.y); }
+inline float2 operator-(float2 a, float2 b) { return float2(a.x - b.x, a.y - b.y); }
+inline float2 operator-(float2 a, float s) { return float2(a.x - s, a.y - s); }
+inline float2 operator*(float2 a, float2 b) { return float2(a.x * b.x, a.y * b.y); }
+inline float2 operator*(float s, float2 a) { return float2(a.x * s, a.y * s); }
+inline float3 operator*(float s, float3 a) { return float3(a.x * s, a.y * s, a.z * s); }
+inline float3 &operator*=(float3 &a, float s) { a = a * s; return a; }
+inline float dot(float2 a, float2 b) { return a.x * b.x + a.y * b.y; }
+inline float2 abs(float2 a) { return float2(std::fabs(a.x), std::fabs(a.y)); }
+inline float2 floor(float2 a) { return float2(std::floor(a.x), std::floor(a.y)); }
+using std::abs; using std::floor; using std::sin;
+inline float fract(float x) { return x - std::floor(x); }
+inline float max(float a, float b) { return a > b ? a : b; }
+inline float clamp(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+inline float mix(float a, float b, float t) { return a + (b - a) * t; }
+inline float3 mix(float3 a, float3 b, float t) { return a + (b - a) * t; }
 }

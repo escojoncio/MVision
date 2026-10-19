@@ -230,6 +230,10 @@ final class XRRenderLoop {
         // Con destino sRGB/lineal el panel se muestrea por la vista sRGB (decodifica a lineal al leer).
         var hud: MTLTexture? = renderer.linearOutput ? renderer.hudTextureSRGB : renderer.hudTexture
         if hud != nil && hud!.textureType != .type2D { hud = nil }
+        // Vista especial del arma (mira óptica, visor antiaéreo, pantalla del misil): la publica vr/host por VBlank.
+        var sv = MvVrSpecialView()
+        var special = mv_vrgame_special_view(&sv) != 0
+        if special && sv.hide_hud != 0 { hud = nil }          // el panel plano del HUD sobra mientras se mira por la mira / el visor
         // Presentación: mundo en primera persona, pantalla de cine o diorama, paneles del HUD, velo de transición y menú.
         let pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, eyePx: Float(w), p00: projs[0].columns.0.x,
                                      gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame())
@@ -237,6 +241,10 @@ final class XRRenderLoop {
         renderer.drawBody = pres.drawBody
         var sceneViews = views
         if let dm = pres.dioramaModel { sceneViews = views.map { $0 * dm } }
+        if pres.dioramaModel != nil || !pres.drawWorld { special = false }
+        renderer.special = special ? sv : nil
+        renderer.suppressFrame = special && sv.kind == Int32(MV_VIEW_SCOPE) && sv.suppress_frame != 0
+        renderer.auxRequest = special ? auxView(sv, drawable) : nil
 
         renderer.encode(commandBuffer: cb, colorTargets: tgt.color, depthTargets: tgt.depth,
                         resolveTargets: tgt.resolve, views: sceneViews, projections: projs,
@@ -276,6 +284,23 @@ final class XRRenderLoop {
     private func wristFrame() -> XRPresenter.Wrist? {
         guard let f = renderer.radar?.wristFrame else { return nil }
         return XRPresenter.Wrist(center: f.center, right: f.right, up: f.up, halfW: f.halfW, halfH: f.halfH)
+    }
+
+    /// Segunda vista de la escena pedida por el arma (cámara del visor / del misil): matrices en el espacio recentrado. nil si no hace falta renderizarla.
+    private func auxView(_ sv: MvVrSpecialView, _ drawable: LayerRenderer.Drawable) -> PS1Renderer.AuxView? {
+        let wantsAux = sv.kind == Int32(MV_VIEW_SCOPE) || (sv.kind == Int32(MV_VIEW_MISSILE) && sv.ended == 0)
+        guard wantsAux, sv.cam_valid != 0, sv.tex_w >= 16, sv.tex_h >= 16, sv.tex_w <= 2048, sv.tex_h <= 2048 else { return nil }
+        let vals = [sv.cam_pos.0, sv.cam_pos.1, sv.cam_pos.2, sv.cam_rot.0, sv.cam_rot.1, sv.cam_rot.2, sv.cam_rot.3, sv.cam_fov_y]
+        guard vals.allSatisfy({ $0.isFinite }), sv.cam_fov_y > 0.005, sv.cam_fov_y < 2.5 else { return nil }
+        let q = simd_quatf(ix: sv.cam_rot.0, iy: sv.cam_rot.1, iz: sv.cam_rot.2, r: sv.cam_rot.3).normalized
+        var cam = simd_float4x4(q)
+        cam.columns.3 = simd_float4(sv.cam_pos.0, sv.cam_pos.1, sv.cam_pos.2, 1)
+        let t = tan(sv.cam_fov_y * 0.5)
+        let aspect = Float(sv.tex_w) / Float(sv.tex_h)
+        let r = drawable.depthRange
+        let proj = XRMath.projection(tangents: SIMD4<Float>(t * aspect, t * aspect, t, t), near: min(r.x, r.y), far: max(r.x, r.y))
+        return PS1Renderer.AuxView(view: cam.inverse, proj: proj, width: Int(sv.tex_w), height: Int(sv.tex_h),
+                                   pos: simd_float4(sv.cam_pos.0, sv.cam_pos.1, sv.cam_pos.2, 1))
     }
 
     /// Proyección de Z invertida del ojo i (a partir de las tangentes de la vista).

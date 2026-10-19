@@ -55,6 +55,40 @@ typedef struct {
 } MvVrGameStatus;
 void mv_vrgame_status(MvVrGameStatus *out);
 
+/* ---- vistas especiales del arma (hilo de render) ----
+ * El arma equipada puede pedir una segunda vista de la escena o un HUD anclado a ella:
+ *  - MV_VIEW_SCOPE: mira óptica del francotirador. La app renderiza la escena una segunda vez desde `cam_*` (campo vertical cam_fov_y, textura
+ *    cuadrada tex_w x tex_h) y la muestra en un disco (la lente) en `surf_*` con la abertura y retícula de vr_scope.h por encima. `blend` = apertura del
+ *    iris (0 = ojo lejos: no hace falta renderizar). La cabeza NO se acerca (el aumento solo está en la lente): suppress_frame pide no aplicar la
+ *    máscara de visión del juego y hide_hud ocultar el panel plano del HUD mientras se mira.
+ *  - MV_VIEW_AA_SIGHT: visor del lanzador antiaéreo. El HUD del propio juego (mira + marco de fijación, en la textura del HUD) se dibuja en un
+ *    rectángulo anclado delante del visor (`surf_*`, ya a la distancia y tamaño angular del juego); `uv` = subrectángulo (x, y, w, h) de la textura del HUD
+ *    que cubre el rectángulo (el centro óptico del juego es el centro del rectángulo). hide_hud = 1.
+ *  - MV_VIEW_MISSILE: vista del misil guiado en vuelo. Segunda vista de la escena desde `cam_*` (la posición y dirección del misil del juego) mostrada en
+ *    una pantalla (`surf_*`, rectángulo; `blend` 0 = pantallita del lanzador .. 1 = visor grande ante el ojo) con ruido/estática (`noise`) y, al terminar el
+ *    vuelo, `ended` = 1 (solo estática). `fullscreen` = pantalla grande fija ante la cara (opción de comodidad; la cabeza nunca se mueve).
+ * Poses en el espacio recentrado (el de la cabeza); cara visible de la superficie = +Z local; delante de la cámara = -Z local. */
+enum { MV_VIEW_NONE = 0, MV_VIEW_SCOPE = 1, MV_VIEW_AA_SIGHT = 2, MV_VIEW_MISSILE = 3 };
+typedef struct {
+    int32_t kind;
+    float blend;
+    int32_t cam_valid;
+    float cam_pos[3], cam_rot[4], cam_fov_y;
+    int32_t tex_w, tex_h;
+    float surf_pos[3], surf_rot[4], surf_w, surf_h;
+    int32_t round;              /* la superficie es un disco de diámetro surf_w */
+    float uv[4];                /* AA: subrectángulo de la textura del HUD */
+    int32_t hide_hud, suppress_frame;
+    int32_t locked, converged;  /* AA: blanco fijado / marco cerrado */
+    float zoom;                 /* SCOPE: aumento */
+    int32_t fullscreen, ended;  /* MISSILE */
+    float noise;                /* MISSILE: 0..1 */
+} MvVrSpecialView;
+/* Vista especial vigente (1 = hay; 0 = ninguna). Se publica una vez por VBlank. */
+int32_t mv_vrgame_special_view(MvVrSpecialView *out);
+/* Misil guiado: 0 = pantalla en el lanzador (se agranda ante el ojo al mirar por la mirilla), 1 = pantalla grande fija ante la cara. */
+void mv_vrgame_set_missile_view(int32_t mode);
+
 /* ---- uso interno (vrhost.c) ---- */
 struct BridgeState;
 void vrgame_reset(void);                       /* al cargar el EXE */
