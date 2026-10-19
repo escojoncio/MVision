@@ -37,6 +37,8 @@ struct XRViewConfig {
     var hideRealHands = true        // pide al sistema ocultar tus manos y brazos reales mientras dura el espacio inmersivo (se ven los del personaje)
     var debugAxes = false           // dibuja los ejes de los mandos (dispositivo, agarre, apuntado) y de las manos del personaje
     var renderMode = 1              // motor de dibujo: 0 = lista de la GPU, 1 = escena nativa leída de la RAM (si está disponible; vr/native), 2 = SOLO nativo (depuración: nunca se dibuja el 3D de la GPU y el nativo va teñido)
+    var aiRange = 1                 // IA de enemigos: alcance de visión, índice de aiRanges (0 = x1, 1 = x1,5, 2 = x2)
+    var aiHead = true               // IA de enemigos: ven también la cabeza VR (no solo el ojo del personaje)
     var smoothMotion = true         // fluidez de la locomoción: el mundo se corrige por fotograma de render (giro del stick y avance extrapolados entre escenas del juego)
 
     enum Cutscene: String, CaseIterable { case stereo, cinema, diorama, scene }
@@ -46,6 +48,17 @@ struct XRViewConfig {
     static let hudScales: [Float] = [0.6, 0.8, 1.0, 1.3]
     static let wristScales: [Float] = [0.16, 0.2, 0.26, 0.34]
     static let dioramaScales: [Float] = [0.10, 0.15, 0.22]
+    static let aiRanges: [Float] = [1.0, 1.5, 2.0]
+    static let aiRangeNames = ["x1", "x1,5", "x2"]
+
+    /// Aplica los ajustes de la IA al motor (vr/ai): alcance de visión y visión con la cabeza VR. Idempotente; se llama al arrancar y tras cada cambio del menú.
+    static func applyAI(range: Int, head: Bool) {
+#if !MV_BENCH
+        mv_vrhost_set_ai_range(aiRanges[min(max(range, 0), aiRanges.count - 1)])
+        mv_vrhost_set_ai_head(head ? 1 : 0)
+#endif
+    }
+    static func applyStoredAI() { let c = load(); applyAI(range: c.aiRange, head: c.aiHead) }
 
     private static func f(_ k: String, _ d: Float, _ lo: Float, _ hi: Float) -> Float {
         guard UserDefaults.standard.object(forKey: k) != nil else { return d }
@@ -83,6 +96,9 @@ struct XRViewConfig {
         c.hideRealHands = b("xr.view.hideHands", true)
         c.debugAxes = b("xr.view.debugAxes", false)
         c.smoothMotion = b("xr.view.smoothMotion", true)
+        let ar = UserDefaults.standard.integer(forKey: "xr.ai.range")
+        c.aiRange = UserDefaults.standard.object(forKey: "xr.ai.range") == nil ? 1 : min(max(ar, 0), aiRanges.count - 1)
+        c.aiHead = b("xr.ai.head", true)
         c.renderMode = Self.storedRenderMode()
         return c
     }
@@ -105,6 +121,8 @@ struct XRViewConfig {
         d.set(hideRealHands, forKey: "xr.view.hideHands")
         d.set(debugAxes, forKey: "xr.view.debugAxes")
         d.set(smoothMotion, forKey: "xr.view.smoothMotion")
+        d.set(aiRange, forKey: "xr.ai.range")
+        d.set(aiHead, forKey: "xr.ai.head")
         d.set(renderMode, forKey: "xr.view.renderMode")
     }
 }
@@ -195,7 +213,12 @@ struct XRNav: Equatable {
 }
 
 enum XRMenuItem: Int, CaseIterable {
-    case resume, recenter, calibrateHands, width, distance, curve, sharp, integerScale, smooth2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, renderMode, turnMode, vignette, hideHands, debugAxes, diagnostics, exit
+    case resume, recenter, calibrateHands, width, distance, curve, sharp, integerScale, smooth2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, renderMode, turnMode, vignette, hideHands, debugAxes, aiMenu, diagnostics, exit
+}
+
+/// Submenú «IA de enemigos».
+enum XRAIItem: Int, CaseIterable {
+    case back, range, head
 }
 
 /// Submenú «Diagnóstico» (interruptores en vivo de XRDiag).
@@ -242,7 +265,7 @@ final class XRPresenter {
     // Menú
     private(set) var menuOpen = false
     private var sel = 0
-    private var page = 0                  // 0 = menú principal, 1 = submenú «Diagnóstico»
+    private var page = 0                  // 0 = menú principal, 1 = submenú «Diagnóstico», 2 = submenú «IA de enemigos»
     private var menuDirty = true
     private var menuModel = matrix_identity_float4x4
     private var menuTex: [MTLTexture] = []
@@ -257,12 +280,13 @@ final class XRPresenter {
     var onRecenter: (() -> Void)?
     var onExit: (() -> Void)?
 
-    private static let menuW = 1024, menuH = 1060
+    private static let menuW = 1024, menuH = 1140     // 24 filas de 40 px desde y = 106 + pie de ayuda
 
     init(device: MTLDevice) {
         cinema = XRCinema(device: device)
 #if !MV_BENCH
         mv_vrhost_set_hud2d_smooth(Int32(XRViewConfig.load().smooth2D))
+        XRViewConfig.applyStoredAI()
 #endif
         if cinema == nil { Storage.log("xr: no se pudo crear la textura de la pantalla de cine") }
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: Self.menuW, height: Self.menuH, mipmapped: false)
@@ -307,7 +331,7 @@ final class XRPresenter {
             if nav.left && !p.left { activate(dir: -1) }
             if nav.right && !p.right { activate(dir: 1) }
             if nav.select && !p.select { activate(dir: 1) }
-            if nav.back && !p.back { if page != 0 { leaveDiag() } else { closeMenu() } }
+            if nav.back && !p.back { if page != 0 { leaveSub() } else { closeMenu() } }
         } else {
             prevNav = XRNav()
         }
@@ -366,11 +390,25 @@ final class XRPresenter {
         return list[(best + dir + list.count) % list.count]
     }
 
-    private var rowCount: Int { page == 0 ? XRMenuItem.allCases.count : XRDiagItem.allCases.count }
+    private var rowCount: Int { page == 0 ? XRMenuItem.allCases.count : (page == 1 ? XRDiagItem.allCases.count : XRAIItem.allCases.count) }
 
-    private func leaveDiag() {
+    private func leaveSub() {
+        sel = page == 2 ? XRMenuItem.aiMenu.rawValue : XRMenuItem.diagnostics.rawValue
         page = 0
-        sel = XRMenuItem.diagnostics.rawValue
+        menuDirty = true
+    }
+
+    private func activateAI(dir: Int) {
+        guard let it = XRAIItem(rawValue: sel) else { return }
+        switch it {
+        case .back: leaveSub()
+        case .range:
+            let n = XRViewConfig.aiRanges.count
+            cfg.aiRange = (cfg.aiRange + (dir < 0 ? n - 1 : 1)) % n
+        case .head: cfg.aiHead.toggle()
+        }
+        XRViewConfig.applyAI(range: cfg.aiRange, head: cfg.aiHead)
+        cfg.save()
         menuDirty = true
     }
 
@@ -385,7 +423,7 @@ final class XRPresenter {
         guard let it = XRDiagItem(rawValue: sel) else { return }
         let d = XRDiag.shared
         switch it {
-        case .back: leaveDiag()
+        case .back: leaveSub()
         case .reset: if dir >= 0 { d.reset() }
         case .magenta: d.update { $0.magentaClear.toggle() }
         case .split: d.update { $0.splitMeters = stepList($0.splitMeters, XRDiag.splitChoices, dir) }
@@ -403,6 +441,7 @@ final class XRPresenter {
 
     private func activate(dir: Int) {
         if page == 1 { activateDiag(dir: dir); return }
+        if page == 2 { activateAI(dir: dir); return }
         guard let it = XRMenuItem(rawValue: sel) else { return }
         switch it {
         case .resume: closeMenu()
@@ -435,6 +474,7 @@ final class XRPresenter {
         case .vignette: Self.cycleVignette(dir)
         case .hideHands: cfg.hideRealHands.toggle(); cfg.save()      // la escena lo lee de UserDefaults (@AppStorage): se guarda al momento
         case .debugAxes: cfg.debugAxes.toggle()
+        case .aiMenu: if dir >= 0 { page = 2; sel = 0 }
         case .diagnostics: if dir >= 0 { page = 1; sel = 0 }
         case .exit: cfg.save(); onExit?()
         }
@@ -466,6 +506,15 @@ final class XRPresenter {
 
     private func rows() -> [(String, String)] {
         if page == 1 { return diagRows() }
+        if page == 2 {
+            return XRAIItem.allCases.map { it -> (String, String) in
+                switch it {
+                case .back: return ("Volver", "")
+                case .range: return ("IA: alcance de visión", XRViewConfig.aiRangeNames[min(max(cfg.aiRange, 0), XRViewConfig.aiRangeNames.count - 1)])
+                case .head: return ("IA: ver la cabeza VR", cfg.aiHead ? "Sí" : "No")
+                }
+            }
+        }
         func m(_ v: Float) -> String { String(format: "%.1f m", v).replacingOccurrences(of: ".", with: ",") }
         func yn(_ b: Bool) -> String { b ? "Sí" : "No" }
         let curveName = ["Plana", "Suave", "Media", "Fuerte"]
@@ -500,6 +549,7 @@ final class XRPresenter {
             case .vignette: return ("Viñeta de confort", Self.vignetteName())
             case .hideHands: return ("Ocultar mis manos reales", yn(cfg.hideRealHands))
             case .debugAxes: return ("Ejes de mandos y manos", yn(cfg.debugAxes))
+            case .aiMenu: return ("IA de enemigos", "▸")
             case .diagnostics: return ("Diagnóstico", XRDiag.shared.settings.isNormal ? "▸" : "activo ▸")
             case .exit: return ("Salir de VR", "")
             }
@@ -576,7 +626,7 @@ final class XRPresenter {
         UIColor(white: 0.07, alpha: 1).setFill()
         UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: w, height: h), cornerRadius: 56).fill()
         let title: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 44, weight: .semibold), .foregroundColor: UIColor.white]
-        ((page == 1 ? "Diagnóstico" : "Opciones VR") as NSString).draw(at: CGPoint(x: 60, y: 36), withAttributes: title)
+        ((page == 1 ? "Diagnóstico" : (page == 2 ? "IA de enemigos" : "Opciones VR")) as NSString).draw(at: CGPoint(x: 60, y: 36), withAttributes: title)
         let right = NSMutableParagraphStyle()
         right.alignment = .right
         let rowH: CGFloat = 40
@@ -598,7 +648,7 @@ final class XRPresenter {
             }
         }
         let help: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 24), .foregroundColor: UIColor(white: 0.6, alpha: 1)]
-        ((page == 1 ? "Palanca: mover y cambiar · Gatillo: elegir · B: volver · Menú: cerrar" : "Palanca: mover y cambiar · Gatillo: elegir · B: cerrar · Menú: cerrar") as NSString).draw(at: CGPoint(x: 60, y: CGFloat(h) - 56), withAttributes: help)
+        ((page != 0 ? "Palanca: mover y cambiar · Gatillo: elegir · B: volver · Menú: cerrar" : "Palanca: mover y cambiar · Gatillo: elegir · B: cerrar · Menú: cerrar") as NSString).draw(at: CGPoint(x: 60, y: CGFloat(h) - 56), withAttributes: help)
         UIGraphicsPopContext()
         guard let data = ctx.data else { return }
         menuIdx = (menuIdx + 1) % menuTex.count
