@@ -1189,3 +1189,32 @@ Descartes de la red tras el arreglo: zona 0 = 1408 (modelo 947, arista 459, lejo
 **Herramientas locales** (necesitan disco real, no se empaquetan; excluidas en `app/stage.sh`): `smoothrun.c` (medida sin visor) y `smooth_replay.c` (reproduce una traza por el suavizador).
 
 **Límites.** Swift/Metal sin verificar en visor. Rampas de aceleración y paradas dejan sacudidas moderadas; ante un bloqueo largo la extrapolación se acota. Solapa con `locomocion` en `vr_camera.{c,h}` y `vrhost.c` (campos de registro y gancho de carga del ejecutable): al fusionar, conservar ambos.
+
+
+## 65. Integración `integra-vr3` (tercera-persona + vertices + agua + capa-2d + codec-saltar + locomocion + punos(brazos-gestos) + fluidez) sobre main bdd46f6 — 2026-10-19
+
+**Numeración.** Cada rama numeró su sección como §56 (punos, §57). Aquí: §56 tercera-persona, §57 vertices, §58 agua, §59 capa-2d, §60 codec-saltar, §61 locomocion, §62 brazos-gestos, §63 punos, §64 fluidez. Los comentarios `§56`/`§57` dentro del código remiten a la sección de su rama de origen según esta tabla. `cero-huecos` NO está incluida (se unirá después).
+
+**Conflictos resueltos (se conserva todo).** `vr_scene.h/.c` (campos `n_filter_ghost`/`drop_ghost` + coherencia `chk_*`/`incoh[]`/`coherence`; `g_tcause` y `g_tsrc`), `vrhost.c/.h` (`scene_tap` del probador de agua y `list_tap` de probe2d; `hc_disp` de headcol y muestra de suavizado en `mv_host_scene`), `test_scene.c` (test_coherence, test_compose_view, test_clip_2d, test_user_map_linear), `Makefile` de `vr/host` y `vrprobe` (`vr_headcol.c` + `vr_fist.c`), `bodyrun.c` (`hand_set` con gatillo + variables de headcol + resúmenes), `XRFrameEncoder` (`sin-contenido` + diagnóstico de fluidez), `XRHud` (`onTop` + `vig`), `XRRenderLoop` (viñeta + `renderRecenterInverse`), `app/stage.sh` (`fuzzrun.c`, `smoothrun.c`, `smooth_replay.c` excluidos).
+
+**Coherencias comprobadas (lectura de código + pruebas).**
+- Suavizado y colisión de cabeza: `renderRecenterInverse` (con la corrección de `vr_headcol`) entra como `recenterInverse` al codificador; la corrección de fluidez `M` se aplica después a las vistas del pase de escena (`vista * M`). El pase final (paneles, manos, arma) usa las vistas sin `M`. `vr_headcol` se alimenta de la escena sin suavizar: el residuo es el desplazamiento de `M` (centímetros).
+- Ojo adelantado (`joint_lead`) y suavizado: la muestra de `vr_smooth` toma `origin_game` del registro (ya con el ojo adelantado) y su `vbl`; no hay doble cuenta (el adelanto sustituye al retardo de un fotograma, no se acumula).
+- `turn_total` y `vr_heading`: `vrhead_turn` llama a `vrcam_turn`, que suma al total; el giro hacia la marcha (`walk_dps`) y el seguimiento de torso escriben solo el rumbo del personaje y la cámara por defecto (`VRCAM_LOCO_HEAD`) no depende del rumbo del cuerpo, así que no mueven `turn_total`.
+- Paneles sin profundidad (`onTop`, `dsOverlay`) y pantallas que se recolocan: las pantallas de cine/3D siguen el ancla perezosa, el HUD usa su propio `hudYaw`; ambos se dibujan en el pase final y la viñeta va debajo del velo/menú.
+- Destino mínimo visionOS 2.0 (`project.yml`) para `persistentSystemOverlays(.hidden)` sin `#available`.
+- Sin `try!`, `as!`, desenvoltura forzada ni `fatalError` nuevos en Swift (grep del diff contra main).
+- Gestos: el golpe exige puño (`grip`), el agarre exige gatillo con la mano junto al cuello; `bodyrun --tp 150:1100:1`: `punch` 6 golpes / 0 agarres / 434 puños, `punch_open` 0 golpes / 0 puños, `grab` 3 agarres y 3 soltados.
+
+**Pruebas.** `make test` en `runtime` y `test_sys`; `make test` en `vr/{ai,body,box,bridge,camera,gameplay,hands,host,input,radar,scene,weapons}`; `test-heading`, `test-headcol`, `test-*-san` de camera/scene/body/input/bridge; `make -C vr/host test check`; `vrprobe selftest`: todo verde. Swift/Metal NO se compila en Linux: lo verifica la CI de macOS.
+
+**Probador, zona inicial (s00a), referencia COMPARTIDA** (unión de las geometrías de ambas ejecuciones, 93 136 triángulos; el `vrprobe` de main se parcheó localmente con `--ref-in/--ref-out`, sin commitear):
+
+| | barrido hueco medio/p95/máx % | giro cabeza | stick suave/pasos | manos | explotados | VBlank/s |
+|---|---|---|---|---|---|---|
+| main (bdd46f6) | 3,37 / 12,57 / 25,37 | 5,8 | 4,0 / 4,3 | 8/8, 0,2 cm | (sin detector) | 159 |
+| integra-vr3 | 3,45 / 12,83 / 25,40 | 5,9 | 4,1 / 4,3 | 8/8, 0,2 cm | 0 de 1 322 759 | 131 |
+
+Con referencia propia de cada una: main 3,25 / 11,93 / 25,37; integra-vr3 2,44 / 9,25 / 25,40. Sin regresión de huecos; los umbrales de hueco (2 %) siguen sin cumplirse en ambos (`MV_NOCULL=00` por defecto; lo ataca `cero-huecos`).
+
+**Pendiente.** Unir `cero-huecos` (conflictos previstos con `agua` en `vrprobe.c`/`vrhost.c` y con `vertices` en `vr_scene.c`/`gte.c`) y repetir la huella de IA por VBlank (`VRPROBE_IAHASH`, `MV_NOCULL=00` frente a `FF`); verificar en visor todo lo marcado como sin verificar en §56-§64.
