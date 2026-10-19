@@ -25,5 +25,7 @@ void mv_host_set_hooks(const MvHostHooks *h);   /* copia; NULL los quita */
  * función "take" devuelve lo pendiente y lo borra (hilo de emulación). */
 float mv_vr_take_turn(void);
 int mv_vr_take_recenter(void);
+/* Devuelve 1 y la altura de ojos pedida (m; 0 = estimar) si hay una pendiente (hilo de emulación). */
+int mv_vr_take_user_eye_height(float *m);
 /* Segundos desde la última pose de cabeza publicada (mv_vr_set_head); < 0 si no hay. */
 double mv_vr_head_age(void);

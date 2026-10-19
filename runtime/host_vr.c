@@ -15,6 +15,8 @@ static int VR_VALID = 0;
 static struct timespec VR_STAMP;
 static float VR_TURN;
 static int VR_RECENTER;
+static float VR_EYE_H;      /* altura de ojos de pie pedida (m); 0 = estimar al recentrar */
+static int VR_EYE_H_SET;
 
 void mv_vr_set_head(const float m[16], double t)
 {
@@ -74,6 +76,24 @@ int mv_vr_take_recenter(void)
     pthread_mutex_lock(&VR_MX);
     int r = VR_RECENTER;
     VR_RECENTER = 0;
+    pthread_mutex_unlock(&VR_MX);
+    return r;
+}
+
+void mv_vr_set_user_eye_height(float m)
+{
+    if (!isfinite(m) || m < 0.0f || m > 3.0f) return;
+    pthread_mutex_lock(&VR_MX);
+    VR_EYE_H = m; VR_EYE_H_SET = 1;
+    pthread_mutex_unlock(&VR_MX);
+}
+
+int mv_vr_take_user_eye_height(float *m)
+{
+    pthread_mutex_lock(&VR_MX);
+    int r = VR_EYE_H_SET;
+    if (r && m) *m = VR_EYE_H;
+    VR_EYE_H_SET = 0;
     pthread_mutex_unlock(&VR_MX);
     return r;
 }

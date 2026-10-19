@@ -448,6 +448,7 @@ void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame)) { test_cb = 
 static void frame_hook(Cpu *c, uint32_t f) {
     float turn = mv_vr_take_turn();
     if (turn != 0.0f) vrhead_turn(turn);          /* gira la vista y, en vrhead_frame, el rumbo del personaje */
+    { float eh; if (mv_vr_take_user_eye_height(&eh)) vrcam_set_user_eye_height(eh); }
     if (mv_vr_take_recenter()) vrcam_recenter();
     bridge_read(emu_ram, &bs);
     publish_state();

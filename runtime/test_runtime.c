@@ -6,6 +6,8 @@
 #include "gte_vectors.h"
 #include "gpu.h"
 #include "hle.h"
+#include "host.h"
+#include "host_hooks.h"
 
 const FuncEntry rt_func_table[] = {{0, 0}};
 const unsigned rt_func_count = 0;
@@ -316,6 +318,19 @@ static void t_display(void) {
     gpu_get_display(&d); EQ(d.w, 320); EQ(d.aw, 319); EQ(d.fw, 320); EQ(d.pad_l, 0);
 }
 
+/* altura de ojos del usuario (host -> capa de cámara): se entrega una vez, valores inválidos se ignoran */
+static void t_eye_height(void) {
+    float m = -1.0f;
+    EQ(mv_vr_take_user_eye_height(&m), 0);
+    mv_vr_set_user_eye_height(1.78f);
+    EQ(mv_vr_take_user_eye_height(&m), 1); EQ((int)(m * 100.0f + 0.5f), 178);
+    EQ(mv_vr_take_user_eye_height(&m), 0);
+    mv_vr_set_user_eye_height(0.0f);        /* 0 = estimar */
+    EQ(mv_vr_take_user_eye_height(&m), 1); EQ((int)m, 0);
+    mv_vr_set_user_eye_height(-1.0f); mv_vr_set_user_eye_height(9.0f); mv_vr_set_user_eye_height(1.0f / 0.0f);
+    EQ(mv_vr_take_user_eye_height(&m), 0);
+}
+
 int main(void) {
     Cpu c = {0};
     t_mem(&c);
@@ -325,6 +340,7 @@ int main(void) {
     t_gte_vec(&c);
     t_gpu_feedback();
     t_display();
+    t_eye_height();
     printf(fails ? "%d fallos\n" : "runtime: todas las pruebas OK\n", fails);
     return fails != 0;
 }
