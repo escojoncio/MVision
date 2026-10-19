@@ -2,6 +2,7 @@
  * La GTE en float para VR irá aparte; esta es la fuente de verdad del comportamiento original.
  * Semántica según la documentación pública del hardware (MAC 44 bits, saturaciones, flags, UNR). */
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include "cpu.h"
 #include "gpu.h"   /* GpuHpInfo (solo el tipo; la GTE no depende del rasterizador) */
@@ -320,8 +321,21 @@ static void hp_learn(int n, const GpuHpInfo *const *cand) {
             if (++hp_pair[q][i][j][b] > 0x3FFFFFFFu) for (int k = 0; k < HP_NB; k++) hp_pair[q][i][j][k] >>= 1;
         }
 }
+/* Coherencia espacial (§56): los vértices de una misma primitiva están cerca en el espacio de VISTA (la posición de vista es correcta aunque el SXY
+ * sature; lo que está lejos en pantalla no lo está en 3D). Penalización suave en bits, 0 en el mismo punto y creciente con la distancia: desempata
+ * candidatos de igual secuencia y evita elegir un vértice lejano de otro objeto cuando la secuencia no basta. Peso HP_SPATIAL_W (env MV_HPSPATIAL;
+ * 0 = desactivada; def. 1,0); escala 4096 unidades de vista. */
+static float hp_spatial_w = -1.0f;
+static inline float hp_spatial(const GpuHpInfo *a, const GpuHpInfo *b) {
+    if (hp_spatial_w < 0) { const char *e = getenv("MV_HPSPATIAL"); hp_spatial_w = e ? (float)atof(e) : 1.0f; }
+    if (hp_spatial_w == 0.0f) return 0.0f;
+    float dx = a->vx - b->vx, dy = a->vy - b->vy, dz = a->vz - b->vz;
+    float d = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (!(d == d)) return 0.0f;
+    return -hp_spatial_w * log2f(1.0f + d * (1.0f / 4096.0f));
+}
 static inline float hp_pair_score(int q, int i, const GpuHpInfo *ci, int j, const GpuHpInfo *cj) {
-    return hp_ll(q, j, i, cj->seq, ci->seq) + hp_ll(q, i, j, ci->seq, cj->seq);
+    return hp_ll(q, j, i, cj->seq, ci->seq) + hp_ll(q, i, j, ci->seq, cj->seq) + hp_spatial(ci, cj);
 }
 
 /* ¿El candidato ya lo tomó otro vértice de la primitiva? (dos vértices con el mismo SXY son vértices distintos del mismo SXY) */
