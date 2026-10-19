@@ -37,8 +37,10 @@ done
 # vr/native: el escritor de volcados, los tipos del contrato y el puente/empaquetado del renderer nativo (el cargador ns_dump.c, el rasterizador de referencia y las herramientas son de escritorio)
 mkdir -p .stage/vr/native
 cp ../vr/native/ns_types.h ../vr/native/ns_dump.h ../vr/native/ns_dumpw.c .stage/vr/native/
-# Renderer nativo: puente de escena (triple búfer), empaquetado para la GPU y tipos compartidos con el shader. Sin test_*, sin tools/, sin ns_cpuref (validador de escritorio).
-cp ../vr/native/ns_pub.h ../vr/native/ns_bridge.h ../vr/native/ns_bridge.c ../vr/native/ns_gpu.h ../vr/native/ns_gpu.c ../vr/native/ns_gpu_types.h .stage/vr/native/
+# puente productor/consumidor, jugador y enganche de la captura (integración del renderer nativo)
+cp ../vr/native/ns_bridge.[ch] ../vr/native/ns_player.[ch] ../vr/native/ns_hook.[ch] ../vr/native/ns_hook_rt.[ch] .stage/vr/native/
+# renderer Metal nativo: empaquetado para la GPU y almacén débil (sin test_*, sin tools/, sin ns_cpuref: validador de escritorio)
+cp ../vr/native/ns_gpu.[ch] ../vr/native/ns_gpu_types.h ../vr/native/ns_store_weak.c .stage/vr/native/
 
 cp ../render/metal/vr_*.metal ../render/metal/vr_types.h .stage/metal/
 cp ../vr/native/ns_gpu_types.h .stage/metal/   # lo incluye app/Sources/Native/NativeShaders.metal

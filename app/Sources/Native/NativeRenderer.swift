@@ -5,7 +5,7 @@ import simd
 // Renderer nativo: dibuja la escena leída de la RAM del motor (NsScene, vr/native/ns_types.h) con las cámaras VR, en lugar de la salida de la GPU.
 //
 // Flujo por fotograma de visor (100 Hz):
-//   prepareFrame(sortView:)  toma la NsScene más reciente del puente (mv_native_acquire) si hay una nueva, sube a la GPU las mallas que aún no están, construye
+//   prepareFrame(sortView:)  toma las dos últimas NsScene del puente (ns_bridge_acquire; interpola entre ellas) y sube a la GPU las mallas nuevas, construye
 //                            la tabla de piezas y ordena de atrás adelante los triángulos semitransparentes respecto a la cabeza.
 //   encode(encoder:...)      dentro del pase de escena ya abierto (el llamador fija viewports/amplificación): pase opaco con z (una llamada por pieza) y pase
 //                            semitransparente (lista ordenada, 4 modos de mezcla de función fija). Sin ningún culling.
@@ -204,15 +204,20 @@ final class NativeRenderer {
 
     // MARK: puente
 
-    /// Toma la escena más reciente del puente si es nueva y la prepara. Devuelve true si se preparó una escena nueva.
+    /// Puente de escenas (NsBridge de vr/native/ns_bridge.h; la app usa `mv_vrhost_native_bridge()`). Sin puente no se dibuja nada.
+    var bridge: OpaquePointer?
+    /// bit NS_SV_TOVR_OK de NsScene.valid (ns_bridge.h): la escena está en el mundo VR del usuario (cámara VR en primera persona).
+    private static let svToVrOK: UInt32 = 64
+
+    /// Toma la escena del puente (cada fotograma: la interpolación entre las dos últimas escenas depende de la hora) y prepara la tabla de piezas.
     @discardableResult
     func refresh() -> Bool {
-        let seq = mv_native_seq()
-        if seq == 0 || seq == lastSeq { return false }
-        var store: OpaquePointer? = nil
-        guard let sc = mv_native_acquire(&store) else { return false }
-        defer { mv_native_release(sc) }
-        ingest(scene: sc, store: store)
+        guard let b = bridge else { return false }
+        var view = NsView()
+        guard ns_bridge_acquire(b, ns_now_ns(), &view) != 0, let cur = view.cur else { return false }
+        var ip = NsInterp()
+        ns_interp_begin(b, &view, &ip)
+        ingest(scene: cur, store: view.store, interp: &ip, fresh: view.fresh != 0)
         return true
     }
 
@@ -282,12 +287,14 @@ final class NativeRenderer {
     }
 
     /// Prepara la escena: sube mallas nuevas, construye la tabla de piezas y las listas de dibujo. Copia todo lo necesario (no guarda punteros de `sc`).
-    func ingest(scene sc: UnsafePointer<NsScene>, store: OpaquePointer?) {
+    func ingest(scene sc: UnsafePointer<NsScene>, store: OpaquePointer?, interp ip: inout NsInterp, fresh: Bool) {
         let seq = sc.pointee.seq
         lastSeq = seq
-        statScenes += 1
+        if fresh { statScenes += 1 }
         lastEpoch = sc.pointee.mesh_epoch
-        guard sc.pointee.version == UInt32(truncatingIfNeeded: NS_VERSION), sc.pointee.inst != nil, sc.pointee.piece != nil else { return }
+        guard sc.pointee.version == UInt32(truncatingIfNeeded: NS_VERSION), sc.pointee.size == UInt32(MemoryLayout<NsScene>.size),
+              sc.pointee.inst != nil, sc.pointee.piece != nil else { return }
+        let inWorld = (sc.pointee.valid & Self.svToVrOK) != 0
         let nInst = Int(min(sc.pointee.n_inst, sc.pointee.cap_inst))
         let nPiece = Int(min(sc.pointee.n_piece, sc.pointee.cap_piece))
 
@@ -321,7 +328,12 @@ final class NativeRenderer {
                 var parentGlobal: Int32 = -1
                 var parentNV: UInt32 = 0
                 if pk >= 0 && pk < cnt, let pm = meshOf[first + pk] { parentGlobal = Int32(first + pk); parentNV = UInt32(pm.nverts) }
-                ns_gpu_make_piece(sc, instPtr, piecePtr, gm.flags, Int32(gm.depthBias), UInt32(gm.vertStart), parentGlobal, parentNV, &table[gi])
+                var pc = piecePtr.pointee
+                var xf = NsXf()
+                if ip.enabled != 0 && ns_interp_piece(&ip, UInt32(ii), UInt32(k), &xf) != 0 { pc.world = xf }
+                withUnsafePointer(to: &pc) { pcp in
+                    ns_gpu_make_piece(sc, instPtr, pcp, gm.flags, Int32(gm.depthBias), UInt32(gm.vertStart), parentGlobal, parentNV, &table[gi])
+                }
                 if !inGroup || (piecePtr.pointee.flags & hidden) != 0 { table[gi].flags &= ~drawFlag; continue }
                 if gm.opaquePass { p.draws.append(DrawItem(piece: gi, triStart: gm.triStart, ntri: gm.ntri)) }
                 if gm.semi { p.semis.append(SemiItem(piece: gi, mesh: gm)) }
@@ -329,9 +341,10 @@ final class NativeRenderer {
         }
         p.pieces = table
         // transformación mundo del motor -> VR y niebla
-        let t = ns_scene_to_vr(sc)
+        var t = [Float](repeating: 0, count: 12)
+        if ip.enabled != 0 { ns_interp_to_vr(&ip, &t) } else { let src = ns_scene_to_vr(sc); for i in 0..<12 { t[i] = src[i] } }
         var tv = matrix_identity_float4x4
-        var finite = true
+        var finite = inWorld
         for i in 0..<12 where !t[i].isFinite { finite = false }
         if finite {
             tv = simd_float4x4(columns: (SIMD4<Float>(t[0], t[4], t[8], 0), SIMD4<Float>(t[1], t[5], t[9], 0), SIMD4<Float>(t[2], t[6], t[10], 0), SIMD4<Float>(t[3], t[7], t[11], 1)))
@@ -347,10 +360,10 @@ final class NativeRenderer {
         p.gen = genCounter
         prepared = p
         statPieces = p.draws.count
-        gcMeshes(seq: seq, store: store)
+        if fresh { gcMeshes(seq: seq, store: store) }
         statMeshes = meshes.count
         // Todas las mallas de la época de esta escena están ya copiadas en la GPU: el productor puede liberar la época anterior (protocolo de ns_types.h).
-        if store != nil { mv_native_ack(store, sc.pointee.mesh_epoch) }
+        if fresh, let st = store { ns_store_ack(st, sc.pointee.mesh_epoch) }
     }
 
     /// Libera las mallas que ya no están en el almacén (id desaparecido) y, con la caché llena, las que llevan mucho sin usarse.

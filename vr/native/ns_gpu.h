@@ -44,6 +44,11 @@ typedef struct {
  * rasterizador de referencia). Escribe como mucho cap entradas en out/abr_out y devuelve cuántas. */
 size_t ns_gpu_sort_semi(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out, uint8_t *abr_out, size_t cap);
 
+/* Accesores para Swift (los arrays fijos de C llegan como tuplas) */
+static inline const float *ns_scene_to_vr(const NsScene *s) { return s->to_vr; }
+static inline const float *ns_scene_cam_rot(const NsScene *s) { return s->cam.rot; }
+static inline const float *ns_scene_cam_eye(const NsScene *s) { return s->cam.eye; }
+
 #ifdef __cplusplus
 }
 #endif

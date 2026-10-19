@@ -3,7 +3,7 @@ import Metal
 import simd
 
 // Banco del renderer nativo (macOS, Apple Silicon, CI): carga una NativeScene sintética desde un fichero de prueba generado por código
-// (bench/c/native_synth.c; ningún dato del juego), la publica por el puente (mv_native_*), la dibuja con NativeRenderer en un cubemap (6 caras) con Metal y la
+// (bench/c/native_synth.c; ningún dato del juego), la publica por el puente (ns_bridge_*), la dibuja con NativeRenderer en un cubemap (6 caras) con Metal y la
 // compara con la salida del rasterizador de referencia por CPU (ns_cpuref) para la MISMA escena. Criterios: diferencia media < 2/255 y huecos 0.
 // Además prueba: estéreo con amplificación de vértices frente a un pase por ojo, MSAA 4x, la caché y el ack tras un cambio de mesh_epoch y el sesgo de orden (decals).
 // Sube las imágenes (referencia, Metal, diferencia, panoramas) como artefacto.
@@ -52,6 +52,7 @@ guard let vram = device.makeTexture(descriptor: vtd) else { print("FALLO: sin te
 vram.replace(region: MTLRegionMake2D(0, 0, 1024, 512), mipmapLevel: 0, withBytes: vramPtr, bytesPerRow: 2048)
 
 guard let nr = NativeRenderer(device: device, library: library, ringSize: 3) else { print("FALLO: NativeRenderer no se pudo crear"); exit(2) }
+nr.bridge = ns_synth_bridge()
 
 var headArr = [Float](repeating: 0, count: 3)
 ns_synth_head(&headArr)

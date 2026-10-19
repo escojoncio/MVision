@@ -1,6 +1,6 @@
 /* Escena nativa SINTÉTICA para el banco del renderer Metal (ningún dato del juego): una sala cerrada con suelo y paredes de mapa (color precalculado),
  * pilares y esfera sombreados con luz, un modelo articulado con vértices welded, semitransparentes de los 4 modos mezclados con opacos, triángulos
- * y niebla. Se genera por código en un fichero de prueba, se vuelve a leer, se publica por el puente (mv_native_*) y se adapta a ns_cpuref para
+ * y niebla. Se genera por código en un fichero de prueba, se vuelve a leer, se publica por el puente (ns_bridge_*) y se adapta a ns_cpuref para
  * tener la imagen de referencia. El adaptador reimplementa a propósito, de forma independiente, la lógica de color/niebla/welded del renderer. */
 #include "native_synth.h"
 #include "ns_bridge.h"
@@ -455,6 +455,8 @@ static NsMesh g_lm[32];
 static uint32_t g_nlm;
 static uint16_t g_lvram[1024 * 512];
 static int g_loaded;
+static NsBridge *g_br;
+NsBridge *ns_synth_bridge(void) { return g_br; }
 static float g_head[3] = {0.3f, 1.6f, 0.5f};
 
 static NsBaked g_lb[32];
@@ -508,17 +510,19 @@ int ns_synth_load(const char *path) {
     RD(g_lvram, 1024 * 512, 2);
     fclose(f);
 
-    if (mv_native_init(0, 0, 0, 0) != 0) return -5;
-    NsScene *sc = mv_native_begin();
+    if (g_br) ns_bridge_destroy(g_br);
+    g_br = ns_bridge_create(NULL);
+    if (!g_br) return -5;
+    NsScene *sc = ns_bridge_begin(g_br);
     if (!sc) return -6;
-    g_epoch = 1; sc->game_frame = 1; sc->mesh_epoch = 1; sc->valid = NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK; sc->units_per_m = 1000;
+    g_epoch = 1; sc->game_frame = 1; sc->mesh_epoch = 1; sc->valid = NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK | NS_SV_TOVR_OK; sc->units_per_m = 1000;
     memcpy(sc->to_vr, h.to_vr, sizeof h.to_vr);
     sc->cam = h.cam; sc->fog = h.fog; sc->global_light = h.global_light; sc->group_mask = h.group_mask;
     memcpy(sc->bg_rgb, h.bg, sizeof h.bg);
     memcpy(sc->inst, li, sizeof(NsInstance) * h.n_inst); sc->n_inst = h.n_inst;
     memcpy(sc->piece, lp, sizeof(NsPiece) * h.n_piece); sc->n_piece = h.n_piece;
     memcpy(sc->lights, ll, sizeof(NsLight) * h.n_light); sc->n_light = h.n_light;
-    mv_native_publish(sc, (const NsMeshStore *)&g_nlm);
+    ns_bridge_publish(g_br, (NsMeshStore *)&g_nlm);
     g_loaded = 1;
     return 0;
 }
@@ -634,13 +638,12 @@ static void adapt(const NsScene *sc, TriList *out) {
 }
 
 size_t ns_synth_ref_tris(NsRTri **out) {
-    const NsMeshStore *store = NULL;
-    const NsScene *sc = mv_native_acquire(&store);
+    NsView view; memset(&view, 0, sizeof view);
+    const NsScene *sc = (g_br && ns_bridge_acquire(g_br, ns_now_ns(), &view)) ? view.cur : NULL;
     *out = NULL;
     if (!sc) return 0;
     TriList tl; memset(&tl, 0, sizeof tl);
     adapt(sc, &tl);
-    mv_native_release(sc);
     *out = tl.t;
     return tl.n;
 }
@@ -654,9 +657,9 @@ int ns_synth_publish_decal(uint32_t epoch) {
         if (i == M_DECAL) idDecal = g_lm[i].id;
     }
     if (!idBase || !idDecal) return -2;
-    NsScene *sc = mv_native_begin();
+    NsScene *sc = ns_bridge_begin(g_br);
     if (!sc) return -3;
-    g_epoch = epoch; sc->game_frame = 2; sc->mesh_epoch = epoch; sc->valid = NS_SV_GAME | NS_SV_LISTS_OK; sc->units_per_m = 1000;
+    g_epoch = epoch; sc->game_frame = 2; sc->mesh_epoch = epoch; sc->valid = NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_TOVR_OK; sc->units_per_m = 1000;
     float tv[12] = {0.001f, 0, 0, 0, 0, 0.001f, 0, 0, 0, 0, -0.001f, 0};
     memcpy(sc->to_vr, tv, sizeof tv);
     sc->cam.rot[0] = 1; sc->cam.rot[4] = -1; sc->cam.rot[8] = 1; sc->cam.h = 320;
@@ -669,17 +672,16 @@ int ns_synth_publish_decal(uint32_t epoch) {
         NsPiece *p = &sc->piece[sc->n_piece++];
         p->mesh_id = ids[k]; p->world = id; p->parent = -1; p->baked_ver = 1;
     }
-    mv_native_publish(sc, (const NsMeshStore *)&g_nlm);
+    ns_bridge_publish(g_br, (NsMeshStore *)&g_nlm);
     return 0;
 }
 
 long ns_synth_ref_cube(int n, float znear, NsRBuf faces[6], NsRStats *st) {
-    const NsMeshStore *store = NULL;
-    const NsScene *sc = mv_native_acquire(&store);
+    NsView view; memset(&view, 0, sizeof view);
+    const NsScene *sc = (g_br && ns_bridge_acquire(g_br, ns_now_ns(), &view)) ? view.cur : NULL;
     if (!sc) return -1;
     TriList tl; memset(&tl, 0, sizeof tl);
     adapt(sc, &tl);
-    mv_native_release(sc);
     NsRScene rs = {tl.t, tl.n, g_lvram};
     NsRCam pose;
     ns_cam_basis(&pose, g_head, &POSE[0], &POSE[3], &POSE[6], 90.0f, n, n);

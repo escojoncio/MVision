@@ -33,6 +33,10 @@
 #include "vrgame.h"
 #include "hle.h"
 #include "ns_dump.h"
+#include "ns_hook.h"
+#include "ns_hook_rt.h"
+#include "ns_player.h"
+#include "bridge_addrs.h"
 
 void hle_vrcam_reset(void);   /* vr_camera_hle.c */
 void hle_vrradar_reset(void); /* vr/radar/vr_radar_hle.c */
@@ -218,6 +222,78 @@ static int grow(void **p, size_t *cap, size_t need, size_t esz) {
     if (!q) return 0;
     *p = q; *cap = n;
     return 1;
+}
+
+
+/* ------------------------------------------------------------------------------------------------ render nativo (vr/native) */
+/* Defecto del modo de render: 0 = gpu. Pasará a 1 cuando extractor (ns_extract) y renderer Metal estén integrados. */
+#ifndef MV_RENDER_DEFAULT_NATIVE
+#define MV_RENDER_DEFAULT_NATIVE 0
+#endif
+#define NS_FRESH_NS 250000000ull         /* antigüedad máxima de la última escena nativa para quitar el 3D de la lista */
+static NsBridge *ns_br;
+static _Atomic int render_req = MV_RENDER_DEFAULT_NATIVE, render_locked, renderer_ready, render_eff;
+static int dump_point;                   /* 1 = el volcado en curso se tomó en el punto de enganche */
+/* Definición DÉBIL vacía (una referencia débil sin definir no enlaza en Mach-O): ns_extract la sustituye con una fuerte que registra el extractor en el enganche. */
+__attribute__((weak)) void ns_extract_register(void) {}
+_Static_assert(NS_PLAYER_BODY_PTR == BA_PLAYER_BODY, "ns_player y el puente deben coincidir en el puntero del jugador");
+static void dump_at_stage(Cpu *c);
+
+void mv_vrhost_set_render_mode(int native) { if (!atomic_load(&render_locked)) atomic_store(&render_req, native != 0); }
+int mv_vrhost_render_mode(void) { return atomic_load(&render_req); }
+int mv_vrhost_render_env_locked(void) { return atomic_load(&render_locked); }
+void mv_vrhost_native_renderer_ready(int ready) { atomic_store(&renderer_ready, ready != 0); }
+int mv_vrhost_native_available(void) { return ns_hook_has_extractor() && ns_hook_installed() && atomic_load(&renderer_ready); }
+struct NsBridge *mv_vrhost_native_bridge(void) { return ns_br; }
+
+/* Mundo del motor -> espacio recentrado del usuario (3x4 fila-mayor, metros): la MISMA regla que vr_scene con user_map_on (la reflexión de Z se cancela):
+ *   P = R * (k * S * (W - origen)) - R * (0, eye_h, 0) + p_ref.
+ * Contrato v2: mundo del motor Y arriba y mano derecha, sin inversión (la reflexión de Z de vr_scene se cancela con el mapa de usuario). */
+static int ns_world_to_vr(const VrCamRecord *r, float to_vr[12]) {
+    VrSceneOpts o = sopts;
+    float org[3];
+    vr_scene_player_origin(&bs, &o, org);
+    org[0] = (float)r->eye[0]; org[2] = (float)r->eye[2];   /* origen bajo el ojo VR de ese fotograma (como build_one) */
+    vrcam_scene_user_map(&o, r, org[1]);
+    float k = o.user_k * o.scale;
+    if (!(k > 0.0f) || !isfinite(k)) return 0;
+    for (int i = 0; i < 3; i++) {
+        float c = o.user_p_ref[i] - o.user_R[3 * i + 1] * o.user_eye_h_m, a = 0.0f;
+        for (int j = 0; j < 3; j++) { to_vr[4 * i + j] = o.user_R[3 * i + j] * k; a += to_vr[4 * i + j] * org[j]; }
+        to_vr[4 * i + 3] = c - a;
+    }
+    return 1;
+}
+
+/* Contexto de la captura (hilo de emulación, en la etapa «pantalla»): zona, cámara VR y mapa mundo -> usuario, y qué hacer con el jugador. */
+static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
+    (void)u;
+    sc->area_id = (uint16_t)bs.area_id;
+    const VrCamRecord *r = vrcam_last_record();
+    int core = (bs.valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs.has_player;
+    if (!r || !r->active || !core) return;                 /* cinemática / sin cámara VR: sin mapa VR, el 3D sigue saliendo de la lista de la GPU */
+    for (int i = 0; i < 3; i++) sc->cam.eye[i] = (float)r->eye[i];
+    memcpy(sc->cam.rot, r->M, sizeof sc->cam.rot);
+    sc->cam.h = (float)r->screen; sc->cam.overscan_y = 1.0f; sc->cam.vr_active = 1;   /* con la cámara VR el motor no aplica el sobreescaneo (contrato v2) */
+    if (ns_world_to_vr(r, sc->to_vr)) sc->valid |= NS_SV_TOVR_OK;
+    o->player_key = ns_player_key(emu_ram);
+    o->hide_head = 1;                                       /* primera persona: la cabeza propia no se dibuja (misma regla que vrcam_hide_head) */
+    o->refresh_parts = body_ok ? NS_PARTS_ARMS : 0;
+}
+static void ns_post_ik(uint8_t *ram) { ns_hook_post_ik(ram); }
+
+/* ¿Esta escena de la lista lleva el 3D nativo? Solo con cámara VR en primera persona (no cinemáticas), modo pedido, medios disponibles y escena reciente. */
+static int native_for_scene(const VrCamRecord *r, const VrScene *sc, int cine_cand) {
+    if (!atomic_load(&render_req) || !mv_vrhost_native_available()) return 0;
+    if (!r || !r->active || cine_cand || !sc->has_3d || !sc->world_valid || view.kind == VRV_K_ENGINE) return 0;
+    return ns_hook_native_ready(mono_ns(), NS_FRESH_NS);
+}
+/* Quita los batches 3D (kind 0/1): los eventos de VRAM se aplican de forma incremental por ev_end, así que quitar batches no rompe la sincronía. */
+static void strip_3d(Slot *s) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < s->sc.nb; i++) if (s->b[i].kind >= 2) s->b[n++] = s->b[i];
+    s->sc.nb = n;
+    s->sc.native_3d = 1;
 }
 
 /* ------------------------------------------------------------------------------------------------ cola de escenas */
@@ -454,7 +530,10 @@ static void build_one(const GpuDrawList *l, int si) {
     memcpy(bs.eye_axes, save_axes, sizeof save_axes);
 
     sm_sample(&slot[si].smp, &sc, r);   /* (r = registro de cámara de la lista; antes de fill_slot: sc.v/b son memoria interna de vr_scene) */
+    int native_now = rc == 0 && native_for_scene(r, &sc, cine_cand);
     int ok = rc == 0 && fill_slot(&slot[si], hl, &sc) == 0 && fill_radar(&slot[si], &rscene, hl->nops) == 0;
+    if (ok && native_now) strip_3d(&slot[si]);   /* el casco de colisión de la cabeza (abajo) sigue alimentándose de la geometría de la lista, que no se toca */
+    atomic_store(&render_eff, ok && native_now);
     memset(&slot[si].hcmap, 0, sizeof slot[si].hcmap);
     if (ok && hc_on && r && r->active && sc.user_space && sc.world_valid) {
         VrHcMap hm;
@@ -542,6 +621,7 @@ static void publish_state(void) {
         g.cinematic = vin.cinematic; g.comms = vin.comms; g.paused = vin.paused; g.menu_open = vin.menu_open; g.stopped = vin.stopped;
         g.item = core ? bs.item : -1;
         g.alert_mode = core ? bs.alert_mode : 0;
+        g.render_req = atomic_load(&render_req); g.render_native = atomic_load(&render_eff); g.native_avail = mv_vrhost_native_available();
         g.ammo = -1; g.ammo_max = -1;
         if (core && bs.weapon >= 0 && bs.weapon < BRIDGE_N_WEAPONS) { g.ammo = bs.weapon_ammo[bs.weapon]; g.ammo_max = bs.weapon_max[bs.weapon]; }
     }
@@ -738,7 +818,7 @@ static void dump_capture(Cpu *c, uint32_t f, const GpuDrawList *l) {
         } else list_trunc = 1;
     }
     int n = 0;
-    MP("dump_index=%u\ngame_frame=%u\nvblank=%u\n", ++dump_count, f, (unsigned)hle_frame_count());
+    MP("dump_index=%u\ngame_frame=%u\nvblank=%u\npoint=%s\n", ++dump_count, f, (unsigned)hle_frame_count(), dump_point ? "stage" : "frame");
     if (DB.has_list) MP("list_index=%u\n", l->index);
     if (list_trunc) MP("list_omitted=1\n");
     MP("area_id=%d\ngame=%d\nin_control=%d\nposture=%d\nview_mode=%d\n", bs.area_id, bs.has_player, bs.in_control, bs.stance, view.kind);
@@ -765,7 +845,20 @@ static void dump_capture(Cpu *c, uint32_t f, const GpuDrawList *l) {
 }
 #undef MP
 
+/* Volcado en el punto de enganche (etapa «pantalla», justo tras la captura nativa): la RAM es la misma que lee el extractor. Sin lista de la GPU (la última
+ * cerrada no corresponde a este instante). Se usa con el modo nativo pedido o con MV_DUMP_AT=stage; si no, el volcado se toma en el gancho de frame como siempre. */
+static void dump_at_stage(Cpu *c) {
+    static int env = -1;
+    if (env < 0) { const char *e = getenv("MV_DUMP_AT"); env = e && !strcmp(e, "stage"); }
+    if (!env && !atomic_load(&render_req)) return;
+    dump_point = 1;
+    dump_capture(c, (uint32_t)hle_frame_count(), NULL);   /* no hace nada si no hay un pedido sin atender */
+    dump_point = 0;
+}
+
 static void frame_hook_body(Cpu *c, uint32_t f) {
+    ns_hook_set_frame((uint32_t)hle_frame_count());
+    ns_hook_tick(emu_ram);                        /* publica la escena nativa capturada en este fotograma de juego */
 #ifdef MV_NOGEN
     if (vr_ok) ovp_frame();
 #endif
@@ -829,6 +922,10 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     vrcine_config_default(&cine.cfg);
     vrcine_reset(&cine);
     last_scene3d = last_video = last_cover = 0;
+    ns_hook_reset();
+#ifdef MV_NOGEN
+    ns_hook_uninstall();
+#endif
     hle_vrcam_reset();
     hle_vrradar_reset();
     vrradar_reset();
@@ -899,6 +996,13 @@ static void on_bound(void) {
         vrbody_set_enabled(1);
         body_ok = 1;
     }
+    /* Render nativo: envoltura de la etapa «pantalla» (valida la forma del código) y pose IK de los brazos hacia la escena pendiente. */
+    {
+        int rc = ns_hook_install();
+        if (rc != NS_HOOK_OK) fprintf(stderr, "[vrhost] enganche del render nativo no instalado (%d): el 3D sale de la lista de la GPU\n", rc);
+        ns_hook_set_stage_cb(dump_at_stage);
+        vrbody_set_apply_hook(ns_post_ik);
+    }
     /* Disparo: todas o ninguna (con unas sí y otras no, el arma VR dispararía a medias). */
     fire_ok = 1;
     for (unsigned i = 0; i < NFIRE; i++) {
@@ -941,6 +1045,18 @@ void mv_vrhost_set_ai(int perception, int cameras, int activity) {
 }
 
 void mv_vrhost_install(void) {
+    if (!ns_br) {
+        NsBridgeCaps bc = {512, 8192, 256, 2048};
+        ns_br = ns_bridge_create(&bc);
+        ns_hook_init(ns_br);
+        ns_hook_set_context(ns_ctx, NULL);
+        const char *e = getenv("MV_RENDER");
+        if (e && *e) {
+            if (!strcmp(e, "nativo") || !strcmp(e, "native")) { atomic_store(&render_req, 1); atomic_store(&render_locked, 1); }
+            else if (!strcmp(e, "gpu")) { atomic_store(&render_req, 0); atomic_store(&render_locked, 1); }
+        }
+        ns_extract_register();
+    }
     vrai_set_perception_listener(radar_perception);
     MvHostHooks h;
     memset(&h, 0, sizeof h);

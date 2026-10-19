@@ -163,8 +163,38 @@ final class VRInput: @unchecked Sendable {
         guard !started else { return }
         started = true
         hub.onChange = { [weak self] in self?.controllersChanged() }
+        Self.restoreHandCalibration()
         hub.start()
         controllersChanged()
+    }
+
+    // MARK: - Calibración de manos ("Calibrar manos" del menú VR): corrección fija agarre -> mano del personaje (cuaternión por mano), persistida
+
+    private static let handCalKey = "vri.handCal2"          // [versión, izq x,y,z,w, der x,y,z,w]
+    private static let handCalVersion = 1.0
+    private static var handCalSerial: UInt32 = 0
+
+    /// Restaura la calibración guardada (9 números: versión 1 + izquierda x,y,z,w + derecha x,y,z,w; un cuaternión nulo = sin calibrar; versión o tamaño distintos se ignoran).
+    static func restoreHandCalibration(_ d: UserDefaults = .standard) {
+        guard let a = d.array(forKey: handCalKey) as? [Double], a.count == 9, a[0] == handCalVersion, a.allSatisfy({ $0.isFinite }) else { handCalSerial = mv_vrgame_calibration_serial(); return }
+        for s in 0..<2 {
+            let q: [Float] = (0..<4).map { Float(a[1 + 4 * s + $0]) }       // C rechaza normas fuera de 0,5..2 y cuaterniones nulos
+            mv_vrgame_set_hand_calibration(Int32(s), q)
+        }
+        handCalSerial = mv_vrgame_calibration_serial()
+    }
+
+    /// Guarda la calibración cuando cambia (la hace o la borra el hilo del juego).
+    static func persistHandCalibrationIfChanged(_ d: UserDefaults = .standard) {
+        let sr = mv_vrgame_calibration_serial()
+        guard sr != handCalSerial else { return }
+        handCalSerial = sr
+        var out = [Double](repeating: 0, count: 9); out[0] = handCalVersion
+        for s in 0..<2 {
+            var q: [Float] = [0, 0, 0, 0]
+            if mv_vrgame_hand_calibration(Int32(s), &q) != 0 { for i in 0..<4 { out[1 + 4 * s + i] = Double(q[i]) } }
+        }
+        d.set(out, forKey: handCalKey)
     }
 
     /// Conexión tardía incluida: cada alta/baja de un mando vuelve a pedir el seguimiento del conjunto actual.
@@ -258,6 +288,7 @@ final class VRInput: @unchecked Sendable {
             sample.pad.buttons &= ~UInt16(0x6)
         }
         if dumpBuzz > 0 { rumble(dumpBuzz, dumpBuzz) }
+        Self.persistHandCalibrationIfChanged()
 
         var f = vr_input_frame_t()
         f.dt = dt

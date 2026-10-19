@@ -2,13 +2,11 @@
  *  1. emulación en C de ns_vertex (NativeShaders.metal) sobre los búferes de ns_gpu.c, comparada triángulo a triángulo con el adaptador independiente de la
  *     referencia (posiciones VR, colores de vértice con luz/niebla/color precalculado/welded);
  *  2. orden de los semitransparentes frente a una ordenación de fuerza bruta;
- *  3. puente de triple búfer (una hebra y con productor/consumidor concurrentes). */
+ *  El puente (ns_bridge) tiene sus propias pruebas: vr/native/integra.mk. */
 #include "native_synth.h"
 #include "ns_bridge.h"
 #include "ns_gpu.h"
 #include <math.h>
-#include <stdatomic.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,8 +57,10 @@ static void emu_vertex(const NsGpuVert *verts, const NsGpuCorner *c, const NsGpu
 }
 
 static void test_emulation(void) {
-    const NsMeshStore *store = NULL;
-    const NsScene *sc = mv_native_acquire(&store);
+    NsView view; memset(&view, 0, sizeof view);
+    CHECK(ns_bridge_acquire(ns_synth_bridge(), ns_now_ns(), &view) == 1);
+    const NsScene *sc = view.cur;
+    const NsMeshStore *store = view.store;
     CHECK(sc != NULL);
     if (!sc) return;
     NsRTri *ref = NULL;
@@ -136,7 +136,6 @@ static void test_emulation(void) {
     CHECK(badcol == 0);
     CHECK(semi_pieces == 2);
     free(verts); free(corners); free(pieces); free(ref);
-    mv_native_release(sc);
 }
 
 /* ---------------- 2. orden de los semitransparentes ---------------- */
@@ -175,69 +174,6 @@ static void test_sort(void) {
     free(bf); free(out); free(ab);
 }
 
-/* ---------------- 3. puente ---------------- */
-static atomic_int stop;
-static void *producer(void *arg) {
-    (void)arg;
-    uint32_t n = 0;
-    while (!atomic_load(&stop)) {
-        NsScene *s = mv_native_begin();
-        if (!s) continue;
-        n++;
-        s->game_frame = n;
-        s->n_inst = 8;
-        for (uint32_t i = 0; i < 8; i++) { s->inst[i].key = n * 7u + i; s->inst[i].n_pieces = (uint16_t)(n & 0xFFFF); }
-        mv_native_publish(s, (const NsMeshStore *)(uintptr_t)n);
-        if ((n & 63) == 0) usleep(50);
-    }
-    return NULL;
-}
-static void test_bridge(void) {
-    CHECK(mv_native_init(16, 16, 4, 4) == 0);
-    CHECK(mv_native_seq() == 0);
-    const NsMeshStore *st = NULL;
-    CHECK(mv_native_acquire(&st) == NULL);
-    NsScene *a = mv_native_begin();
-    CHECK(a && a->cap_inst == 16 && a->n_inst == 0 && a->version == NS_VERSION);
-    mv_native_publish(a, (const NsMeshStore *)(uintptr_t)11);
-    CHECK(mv_native_seq() == 1);
-    const NsScene *r = mv_native_acquire(&st);
-    CHECK(r == a && (uintptr_t)st == 11 && r->seq == 1);
-    /* la escena tomada no se reutiliza hasta la siguiente acquire: el productor nunca recibe esa ranura */
-    for (int i = 0; i < 10; i++) {
-        NsScene *b = mv_native_begin();
-        CHECK(b != NULL && b != r);
-        mv_native_publish(b, NULL);
-    }
-    CHECK(r->seq == 1);                       /* intacta */
-    mv_native_release(r);
-    CHECK(r->size == sizeof(NsScene) && r->slot_gen >= 1);
-    CHECK(mv_native_init(16, 16, 4, 4) == 0);   /* reinit */
-    /* concurrente */
-    pthread_t th; atomic_store(&stop, 0);
-    pthread_create(&th, NULL, producer, NULL);
-    uint32_t last = 0; long reads = 0, torn = 0;
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    for (;;) {
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-        if ((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 > 400) break;
-        const NsScene *s = mv_native_acquire(&st);
-        if (!s) continue;
-        uint32_t f = s->game_frame;
-        int ok = s->n_inst == 8 && s->game_frame == s->seq && s->inst[7].key == f * 7u + 7u && s->inst[0].n_pieces == (uint16_t)(f & 0xFFFF) && (uintptr_t)st == f;
-        if (!ok) torn++;
-        if (f < last) torn++;
-        last = f; reads++;
-        mv_native_release(s);
-    }
-    atomic_store(&stop, 1);
-    pthread_join(th, NULL);
-    printf("puente: %ld lecturas, última escena %u, corrompidas %ld\n", reads, last, torn);
-    CHECK(torn == 0 && reads > 1000);
-    mv_native_shutdown();
-}
-
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : ".";
     char p[1024];
@@ -246,7 +182,6 @@ int main(int argc, char **argv) {
     CHECK(ns_synth_load(p) == 0);
     test_emulation();
     test_sort();
-    test_bridge();
     printf(fails ? "FALLOS: %d\n" : "OK: todas las pruebas pasan\n", fails);
     return fails ? 1 : 0;
 }
