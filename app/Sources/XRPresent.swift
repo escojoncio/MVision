@@ -2,7 +2,9 @@ import Foundation
 import Metal
 import simd
 import CoreGraphics
+#if !MV_BENCH
 import UIKit
+#endif
 
 // Presentación en VR de todo lo que NO es el juego en primera persona (ver bitácora, "Presentación en VR").
 //  - Pantalla de cine: el fotograma completo que dibuja el juego (título, menús, radio, cargas, vídeos, cinemáticas del motor, ventanas de
@@ -193,6 +195,7 @@ final class XRPresenter {
 
     // MARK: entrada / menú
 
+#if !MV_BENCH
     /// Entrada del menú VR. Devuelve true si el juego NO debe recibir la entrada de este fotograma (menú abierto, o recién cerrado
     /// con algo aún pulsado: evita un disparo o un movimiento accidental).
     func updateInput(_ s: ControllerHub.Sample, dt: Float, head: simd_float4x4) -> Bool {
@@ -250,6 +253,8 @@ final class XRPresenter {
         if b & (1 << 12) != 0 { n.back = true }                     // triángulo
         return n
     }
+
+#endif
 
     private func openMenu(head: simd_float4x4) {
         menuOpen = true
@@ -325,6 +330,9 @@ final class XRPresenter {
     }
 
     private func drawMenu() {
+#if MV_BENCH
+        return
+#else
         guard !menuTex.isEmpty else { return }
         let w = Self.menuW, h = Self.menuH
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
@@ -362,6 +370,7 @@ final class XRPresenter {
         guard let data = ctx.data else { return }
         menuIdx = (menuIdx + 1) % menuTex.count
         menuTex[menuIdx].replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: data, bytesPerRow: w * 4)
+#endif
     }
 
     // MARK: composición
@@ -510,6 +519,26 @@ final class XRPresenter {
             }
         }
         return r
+    }
+
+    /// Resumen para el registro (1 vez por segundo): qué presentación está activa, dónde está anclada la pantalla y qué se dibuja.
+    func diagnostics(items: [XRDrawItem]) -> String {
+        var n = [XRDrawItem.Kind: Int]()
+        for it in items { n[it.kind, default: 0] += 1 }
+        let a = anchor.columns.3
+        var d = "mostrando=\(shown) " + String(format: "velo=%.2f ancla=(%.2f %.2f %.2f) rumbo=%.0fgrados alturaAncla=%.2f", veil, a.x, a.y, a.z,
+                                               XRMath.yaw(of: anchor) * 180 / .pi, anchorY)
+        d += " items: pantalla=\(n[.screen] ?? 0) panel=\(n[.panel] ?? 0) menu=\(n[.menu] ?? 0) velo=\(n[.veil] ?? 0)"
+        if let c = cinema {
+            d += " cine: fotograma=\(c.haveFrame) \(c.w)x\(c.h) tex=\(c.texture(srgb: true).map { "\($0.width)x\($0.height)/fmt\($0.pixelFormat.rawValue)" } ?? "nil")"
+        } else {
+            d += " cine: sin textura"
+        }
+        for it in items where it.kind == .screen {
+            let p = it.model.columns.3
+            d += String(format: " pantalla: pos=(%.2f %.2f %.2f) tam=%.2fx%.2f dist=%.2f curva=%.2f", p.x, p.y, p.z, it.size.x, it.size.y, it.distance, it.curve)
+        }
+        return d
     }
 
     private static func dioramaOK(_ m: simd_float4x4) -> Bool {
