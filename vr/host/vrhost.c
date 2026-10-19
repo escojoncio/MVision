@@ -94,6 +94,7 @@ typedef struct {
     VrVtx *v;        size_t v_cap;
     VrBatch *b;      size_t b_cap;
     VrState *st;     size_t st_cap;
+    uint8_t *tc;     size_t tc_cap;          /* VrScene.tri_cause (un byte por triángulo) */
     VrScene sc;
     uint8_t frm[VR_FRAME_W * VR_FRAME_H];    /* copia de VrFilter.frame (máscara de visión: la memoria de vr_scene se reutiliza en la siguiente lista) */
     VrVtx *rv;       size_t rv_cap;          /* escena del radar de muñeca (copia propia; ev_end en índices de `list`) */
@@ -182,9 +183,10 @@ static void drop_queue(void) {
 static int fill_slot(Slot *s, const GpuDrawList *l, const VrScene *sc) {
     size_t nv = sc->v ? sc->nv : 0, nb = sc->b ? sc->nb : 0, ns = sc->states ? sc->nstates : 0;
     if (!grow((void **)&s->v, &s->v_cap, nv, sizeof *s->v) || !grow((void **)&s->b, &s->b_cap, nb, sizeof *s->b) ||
-        !grow((void **)&s->st, &s->st_cap, ns, sizeof *s->st))
+        !grow((void **)&s->st, &s->st_cap, ns, sizeof *s->st) || !grow((void **)&s->tc, &s->tc_cap, nv / 3 + 1, sizeof *s->tc))
         return -1;
     if (nv) memcpy(s->v, sc->v, nv * sizeof *s->v);
+    if (nv && sc->tri_cause) memcpy(s->tc, sc->tri_cause, nv / 3); else memset(s->tc, 0, nv / 3 + 1);
     if (nb) memcpy(s->b, sc->b, nb * sizeof *s->b);
     if (ns) memcpy(s->st, sc->states, ns * sizeof *s->st);
 
@@ -234,6 +236,7 @@ static int fill_slot(Slot *s, const GpuDrawList *l, const VrScene *sc) {
     s->sc.v = nv ? s->v : NULL;
     s->sc.b = nb ? s->b : NULL;
     s->sc.states = ns ? s->st : NULL;
+    s->sc.tri_cause = nv ? s->tc : NULL;
     s->sc.src = &s->list;
     if (sc->filter.frame_on && sc->filter.frame && sc->filter.frame_w == VR_FRAME_W && sc->filter.frame_h == VR_FRAME_H) {
         memcpy(s->frm, sc->filter.frame, sizeof s->frm);
@@ -625,6 +628,7 @@ static void on_start(void) {
     cap_on = 0;
     gpu_capture_set_mark_hook(vrradar_on_mark);   /* runtime_mark.patch */
     sopts = vr_scene_opts_default();
+    { const char *c = getenv("MV_COH"); if (c) sopts.coherence = atoi(c); }   /* A/B de la red de seguridad de vértices (§56); def. activa */
     sopts.screen_filter = 1;   /* el renderer de la app aplica la clase 3 (post-proceso por ojo: onda, tinte y recubrimiento; RenderRG.swift) */
 }
 
