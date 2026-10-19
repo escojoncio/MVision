@@ -182,6 +182,15 @@ final class NativeRenderer {
     private var staticDirty = true
     private var staticGen = 0
     private var toVR = matrix_identity_float4x4
+    private var camEye = SIMD3<Float>(0, 0, 0)     // ojo de la cámara del motor (mundo del motor) de la escena actual
+    // red de coherencia con la ruta de GPU (ver checkCoherence)
+    private var incoherent = false
+    private var cohRun = 0
+    private(set) var cohDist: Float = -1
+    private var cohLogNs: UInt64 = 0
+    static let whyIncoherent: Int32 = 100
+    static let cohThreshold: Float = 0.2
+    static let cohFramesToReturn = 3
     private var fogFwd = SIMD4<Float>(0, 0, 0, 0)
     private var fogPar = SIMD4<Float>(0, 1, 0, 0)
     // orden de los semitransparentes (persistente; se recalcula solo si cambia la escena o la cabeza se mueve)
@@ -219,6 +228,8 @@ final class NativeRenderer {
     private var pipes: [PKey: MTLRenderPipelineState] = [:]
     private var failed = Set<String>()
     private var readyOK = Set<String>()
+    private var badPipes = Set<PKey>()        // caché negativa: una pipeline que no compiló no se reintenta cada fotograma
+    private var badTags = Set<String>()       // ídem para un formato de destino entero (prewarm)
     private let dsOpaque: MTLDepthStencilState
     private let dsSemi: MTLDepthStencilState
 
@@ -470,6 +481,7 @@ final class NativeRenderer {
         let fwd = SIMD3<Float>(rot[2], rot[5], rot[8])
         let eyeP = SIMD3<Float>(eye[0], eye[1], eye[2])
         fogFwd = SIMD4<Float>(fwd.x, fwd.y, fwd.z, -simd_dot(fwd, eyeP))
+        camEye = eyeP
         let upm = sc.pointee.units_per_m > 1 ? sc.pointee.units_per_m : 1000
         fogPar = SIMD4<Float>(sc.pointee.fog.start, max(sc.pointee.fog.len, 1e-3), sc.pointee.fog.active != 0 ? 1 : 0, 0.05 / upm)
         if fresh { gcMeshes(seq: seq, store: store, force: false) }
@@ -511,10 +523,13 @@ final class NativeRenderer {
         let my = serial
         var ix = -1
         if draw && enabled {
-            slotSem.wait()
-            lock.lock()
-            if let f = slotBusy.firstIndex(of: false) { slotBusy[f] = true; ix = f }
-            lock.unlock()
+            // Sin bloqueo largo: si la GPU no libera ranura en 50 ms, este fotograma va por GPU (no se espera).
+            if slotSem.wait(timeout: .now() + .milliseconds(50)) == .success {
+                lock.lock()
+                if let f = slotBusy.firstIndex(of: false) { slotBusy[f] = true; ix = f }
+                lock.unlock()
+                if ix < 0 { slotSem.signal() }
+            }
         }
         let slotIx = ix
         cb.addCompletedHandler { [weak self] _ in self?.frameDone(serial: my, slot: slotIx) }
@@ -600,12 +615,35 @@ final class NativeRenderer {
 
     /// Decisión del fotograma (ns_native_decide): modo pedido, estado real del renderer, escena de la lista marcada y escena nativa apta y reciente.
     /// Nunca deja un fotograma sin 3D: si algo falta, native = 0 y skip = 0.
-    func decide(wantNative: Bool, sceneMarked: Bool, pipelinesReady: Bool) -> NsDecision {
+    /// Red de coherencia: con el mundo fiable (`worldValid`), la cámara nativa en VR (toVR * ojo del motor) debe coincidir con `eyeVR` (la de la ruta de GPU, VrScene.eye_vr).
+    /// Más de 0,2 m de distancia: incoherente (se cae a GPU); se vuelve a nativo tras 3 fotogramas coherentes seguidos. Sin mundo fiable no se evalúa y se mantiene el estado.
+    /// La distancia se escribe al registro una vez por segundo.
+    private func checkCoherence(eyeVR: SIMD3<Float>?, worldValid: Bool) -> Bool {
+        guard worldValid, let e = eyeVR, e.x.isFinite, e.y.isFinite, e.z.isFinite else { return !incoherent }
+        let c = toVR.columns
+        let p = c.0 * camEye.x + c.1 * camEye.y + c.2 * camEye.z + c.3
+        let d = simd_length(SIMD3<Float>(p.x, p.y, p.z) - e)
+        guard d.isFinite else { incoherent = true; cohRun = 0; cohDist = -1; return false }
+        cohDist = d
+        if d > Self.cohThreshold { incoherent = true; cohRun = 0 }
+        else { cohRun += 1; if incoherent && cohRun >= Self.cohFramesToReturn { incoherent = false } }
+        let now = Self.nowNs()
+        if now &- cohLogNs >= 1_000_000_000 {
+            cohLogNs = now
+            print(String(format: "[NativeRenderer] coherencia: distancia=%.3f m %@", d, incoherent ? "incoherente" : "coherente"))
+        }
+        return !incoherent
+    }
+
+    func decide(wantNative: Bool, sceneMarked: Bool, pipelinesReady: Bool, eyeVR: SIMD3<Float>? = nil, worldValid: Bool = false) -> NsDecision {
         var d = NsDecision()
         if !haveView { d.why = Int32(NS_WHY_NOSCENE); lastDecision = d; return d }
+        let coherent = checkCoherence(eyeVR: eyeVR, worldValid: worldValid)
         var inp = NsDecideIn(want_native: wantNative ? 1 : 0, renderer_ok: (enabled && pipelinesReady && isActive) ? 1 : 0,
                              meshes_ok: frameReady ? 1 : 0, scene_marked: sceneMarked ? 1 : 0, now_ns: ns_now_ns(), max_age_ns: 250_000_000)
         ns_native_decide(&view, &inp, &d)
+        if d.native != 0 && !(statInstances > 0 && pieceCount > 0) { d.native = 0; d.skip = 0; d.why = Int32(NS_WHY_INVALID) }
+        if d.native != 0 && !coherent { d.native = 0; d.skip = 0; d.why = Self.whyIncoherent }
         lastDecision = d
         return d
     }
@@ -619,6 +657,7 @@ final class NativeRenderer {
 
     private func pipeline(_ k: PKey) -> MTLRenderPipelineState? {
         if let p = pipes[k] { return p }
+        if badPipes.contains(k) { return nil }
         do {
             let fc = MTLFunctionConstantValues()
             var pass = k.pass, lin = k.linear, flat = k.flat
@@ -629,6 +668,7 @@ final class NativeRenderer {
             let vsName = ((k.pass == 1 || k.order) ? "ns_vs_order" : "ns_vs_piece") + (k.layered ? "_amp" : "")
             guard let vs = library.makeFunction(name: vsName) else {
                 if !failed.contains(vsName) { failed.insert(vsName); print("[NativeRenderer] falta \(vsName)") }
+                badPipes.insert(k)
                 return nil
             }
             let d = MTLRenderPipelineDescriptor()
@@ -666,6 +706,7 @@ final class NativeRenderer {
             pipes[k] = ps
             return ps
         } catch {
+            badPipes.insert(k)
             let key = "\(k)"
             if !failed.contains(key) { failed.insert(key); print("[NativeRenderer] pipeline: \(error)") }
             return nil
@@ -678,6 +719,7 @@ final class NativeRenderer {
     func prewarm(layered: Bool, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat, samples: Int, linear: Bool) -> Bool {
         let tag = "\(layered)/\(colorFormat.rawValue)/\(depthFormat.rawValue)/\(samples)/\(linear)"
         if readyOK.contains(tag) { return true }
+        if badTags.contains(tag) { return false }
         var ok = true
         for order in [false, true] {
             for flat in [false, true] {
@@ -687,11 +729,17 @@ final class NativeRenderer {
         for m in 0..<4 {
             if pipeline(PKey(layered: layered, pass: 1, mode: m, order: true, flat: false, color: colorFormat, depth: depthFormat, samples: samples, linear: linear)) == nil { ok = false }
         }
-        if ok { readyOK.insert(tag) }
+        if ok { readyOK.insert(tag) } else { badTags.insert(tag) }
         return ok
     }
 
     // MARK: dibujo
+
+    /// Comprobación previa a `encode` (sin dibujar): hay ranura preparada y las pipelines de este formato están listas. Si es true, `encode` no falla por estas causas.
+    func canEncode(layered: Bool, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat, samples: Int, linear: Bool) -> Bool {
+        guard isActive, current?.pieceBuf != nil else { return false }
+        return prewarm(layered: layered, colorFormat: colorFormat, depthFormat: depthFormat, samples: samples, linear: linear)
+    }
 
     /// Dibuja la escena en el pase abierto `enc` (el llamador ya fijó viewports y, si `layered`, la amplificación de vértices a 2 vistas; profundidad inversa, limpia a 0;
     /// NO se escribe depthRange). `viewProj[i]` = proyección * vista del ojo i; `eyes[i]` = posición del ojo en el mundo VR (m). Con un solo pase por ojo se pasa el ojo en [0].
@@ -780,7 +828,7 @@ final class NativeRenderer {
     func logLine() -> String {
         let why = ["ok", "modo", "renderer", "mallas", "lista-sin-marca", "sin-escena", "escena-vieja", "escena-no-apta", "fallo-dibujo"]
         let w = Int(lastDecision.why)
-        return "nativo: decision=\(lastDecision.native != 0 ? "nativo" : "gpu") motivo=\(w >= 0 && w < why.count ? why[w] : "\(w)") skip=\(lastDecision.skip) " +
+        return "nativo: decision=\(lastDecision.native != 0 ? "nativo" : "gpu") motivo=\(w == Int(Self.whyIncoherent) ? "incoherente" : (w >= 0 && w < why.count ? why[w] : "\(w)")) coh=\(String(format: "%.3f", cohDist))m skip=\(lastDecision.skip) " +
                "instancias=\(statInstances) piezas=\(statPieces) mallas=\(statMeshes) semi=\(statSemiTris) dibujos=\(statDraws) fallos=\(frameFailures)/\(totalFailures) ausentes=\(frameMisses) " +
                "escenas=\(statScenes) epoca=\(lastEpoch) cpu(prepare)=\(String(format: "%.2f", cpuPrepareMs))ms cpu(encode)=\(String(format: "%.2f", cpuEncodeMs))ms"
     }
