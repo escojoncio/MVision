@@ -1,4 +1,5 @@
 #include "vr_view.h"
+#include <stdio.h>
 #include <string.h>
 
 void vrview_reset(VrView *v) {
@@ -14,12 +15,15 @@ void vrview_reset(VrView *v) {
     v->to_engine = 3;              /* entrar en cinemática de motor: 60 ms de 3D seguido */
     v->from_engine = 10;           /* salir: 200 ms sin 3D (un fundido o un corte no deben parpadear) */
     v->to_other = 3;
+    v->prev_reason = VRV_R_NO_GAME;
+    v->to_comms = 12;              /* 240 ms de radio antes de dejar el mundo (= VRCAM_COMMS_GRACE) */
+    v->pend_max = 150;             /* 3 s esperando la cámara VR tras una radio o una escena */
 }
 
 int vrview_kind_of(const VrViewIn *in) {
     if (!in) return VRV_K_UI;
     int r = vrview_reason(in);
-    if (r == VRV_R_WORLD) return VRV_K_WORLD;
+    if (r == VRV_R_WORLD || r == VRV_R_SELECTOR || r == VRV_R_PAUSE_WORLD) return VRV_K_WORLD;
     /* Cinemática del motor: sin control del jugador y con 3D; con o sin jugador en escena (las introducciones no lo tienen). Radio, pausa,
      * detenido y ventana de armas/objetos son 2D del juego aunque el motor dibuje 3D detrás. */
     if (in->scene3d && (r == VRV_R_NO_GAME || r == VRV_R_CINEMATIC || r == VRV_R_LOST_CONTROL || r == VRV_R_DEAD)) return VRV_K_ENGINE;
@@ -40,12 +44,13 @@ const char *vrview_kind_name(int k) {
 int vrview_reason(const VrViewIn *in) {
     if (!in) return VRV_R_NO_GAME;
     if (!in->game) return VRV_R_NO_GAME;
+    if (in->comms) return VRV_R_COMMS;          /* la radio es 2D del juego aunque el motor la abra durante una escena */
     if (in->cinematic) return VRV_R_CINEMATIC;
-    if (in->comms) return VRV_R_COMMS;
     if (in->stopped) return VRV_R_STOPPED;
-    if (in->paused) return VRV_R_PAUSED;
-    if (in->menu_open) return VRV_R_MENU;
     if (in->dead) return VRV_R_DEAD;
+    /* Ventanas 2D del juego en partida: con la cámara VR activa el mundo no se toca (primera persona) y la ventana va en un panel. */
+    if (in->paused) return in->cam_active ? VRV_R_PAUSE_WORLD : VRV_R_PAUSED;
+    if (in->menu_open) return in->cam_active ? VRV_R_SELECTOR : VRV_R_MENU;
     if (!in->in_control) return VRV_R_LOST_CONTROL;
     if (!in->cam_active) return VRV_R_NO_CAM;
     return VRV_R_WORLD;
@@ -54,12 +59,23 @@ int vrview_reason(const VrViewIn *in) {
 int vrview_step(VrView *v, const VrViewIn *in) {
     if (!v) return VRV_CINEMA;
     int r = vrview_reason(in);
+    if (in && in->cam_active) v->cam_seen = 1;
+    /* Regla de destino: sin cámara VR pero con control (fin de radio / de escena / pérdida de seguimiento) el destino es el MUNDO, no el cine: se congela la vista
+     * (modo y clase) y la app oscurece, hasta que la cámara vuelve. Solo si la cámara ha existido alguna vez y por un tiempo acotado. */
+    if (r == VRV_R_NO_CAM && v->cam_seen && v->pend_run < v->pend_max) { v->pend_run++; r = VRV_R_PENDING; }
+    else if (r != VRV_R_NO_CAM) v->pend_run = 0;
+    int old_mode = v->mode, old_kind = v->kind, old_reason = v->reason;
+    v->prev_reason = old_reason;
     v->reason = r;
-    v->want = r == VRV_R_WORLD ? VRV_WORLD : VRV_CINEMA;
+    if (r == VRV_R_PENDING) {
+        v->want = v->mode; v->run = 0; v->want_kind = v->kind; v->kind_run = 0; v->changed = r != old_reason ? VRV_CH_REASON : 0;
+        return v->mode;
+    }
+    v->want = (r == VRV_R_WORLD || r == VRV_R_SELECTOR || r == VRV_R_PAUSE_WORLD) ? VRV_WORLD : VRV_CINEMA;
     if (v->want == v->mode) {
         v->run = 0;
     } else {
-        int need = v->want == VRV_CINEMA ? v->to_cine : v->to_world;
+        int need = v->want == VRV_CINEMA ? (r == VRV_R_COMMS ? v->to_comms : v->to_cine) : v->to_world;
         if (need < 1) need = 1;
         if (++v->run >= need) {
             v->mode = v->want;
@@ -74,10 +90,11 @@ int vrview_step(VrView *v, const VrViewIn *in) {
     } else {
         int need = k == VRV_K_ENGINE ? v->to_engine : v->kind == VRV_K_ENGINE ? v->from_engine : v->to_other;
         if (k == VRV_K_WORLD) need = v->to_world;      /* el mundo y el modo de vista usan el mismo umbral */
-        if (v->kind == VRV_K_WORLD) need = v->to_cine;
+        if (v->kind == VRV_K_WORLD) need = r == VRV_R_COMMS ? v->to_comms : v->to_cine;
         if (need < 1) need = 1;
         if (++v->kind_run >= need) { v->kind = k; v->kind_run = 0; v->kind_switches++; }
     }
+    v->changed = (v->mode != old_mode ? VRV_CH_MODE : 0) | (v->kind != old_kind ? VRV_CH_KIND : 0) | (r != old_reason ? VRV_CH_REASON : 0);
     return v->mode;
 }
 
@@ -93,6 +110,22 @@ const char *vrview_reason_name(int r) {
     case VRV_R_LOST_CONTROL: return "sin control";
     case VRV_R_NO_CAM: return "sin cámara VR";
     case VRV_R_DEAD: return "muerte";
+    case VRV_R_SELECTOR: return "selector de armas/objetos sobre el mundo";
+    case VRV_R_PAUSE_WORLD: return "pausa sobre el mundo";
+    case VRV_R_PENDING: return "transición: esperando cámara VR";
     default: return "?";
     }
+}
+
+int vrview_describe(const VrView *v, const VrViewIn *in, char *buf, int n) {
+    if (!v || !buf || n <= 0) return 0;
+    VrViewIn z;
+    if (!in) { memset(&z, 0, sizeof z); in = &z; }
+    int r = snprintf(buf, (size_t)n,
+        "[vista] cambio:%s%s%s modo=%s clase=%s motivo=%s (antes: %s) | puente: partida=%d control=%d camVR=%d escena=%d radio=%d pausa=%d menu=%d detenido=%d muerte=%d 3D=%d video=%d",
+        (v->changed & VRV_CH_MODE) ? " modo" : "", (v->changed & VRV_CH_KIND) ? " clase" : "", (v->changed & VRV_CH_REASON) ? " motivo" : "",
+        v->mode == VRV_WORLD ? "mundo" : "cine", vrview_kind_name(v->kind), vrview_reason_name(v->reason), vrview_reason_name(v->prev_reason),
+        in->game, in->in_control, in->cam_active, in->cinematic, in->comms, in->paused, in->menu_open, in->stopped, in->dead, in->scene3d, in->video);
+    if (r < 0) { buf[0] = 0; return 0; }
+    return r >= n ? n - 1 : r;
 }

@@ -237,6 +237,7 @@ final class XRPresenter {
     private var shotView = matrix_identity_float4x4
     private var shotSeen: UInt32 = 0
     private var cutVeil: Float = 0
+    private var pendVeil: Float = 0       // velo mientras la vista espera a la cámara VR (VRV_R_PENDING)
 
     // Menú
     private(set) var menuOpen = false
@@ -649,7 +650,10 @@ final class XRPresenter {
             case .cinema: break
             }
         }
-        if target != .world || shown != .world { cinema?.update(); cinema?.setHighRes(hqFull) }
+        // Transición con control pero sin cámara VR todavía (fin de radio / de escena, VRV_R_PENDING = 12): la vista queda congelada y se oscurece; nunca se enseña el fotograma
+        // plano del motor (cenital, baja resolución) como paso intermedio. El destino es el mundo.
+        let pending = gs.view_reason == 12
+        if (target != .world || shown != .world) && !pending { cinema?.update(); cinema?.setHighRes(hqFull) }
         // Dentro de la escena: la cámara del plano se fija al empezar el plano; en cada corte nuevo anclaje y fundido rápido (0,15 s).
         if shown != .scene { shotView = gameView; shotSeen = shot }
         if shot != shotSeen {
@@ -766,8 +770,22 @@ final class XRPresenter {
             r.dioramaModel = anchor * XRMath.translation(SIMD3<Float>(0, anchorY - 0.1, -1.3)) * f * gameView.inverse
         }
 
+        // 5b) ventana 2D del juego sobre el mundo (selector de armas/objetos, pausa): el mundo sigue en primera persona y la capa 2D completa va en un panel flotante delante,
+        //     por delante de la geometría. Sustituye a los paneles sueltos del HUD mientras dura (la capa 2D ya los trae).
+        let overlay2D = shown == .world && gs.view_mode == 1 && XRMenuPanelLayout.isOverlay(reason: gs.view_reason)
+        if overlay2D, let h = hud {
+            var it = XRDrawItem(kind: .panel, texture: h)
+            it.model = XRMenuPanelLayout.model(position: hp, yaw: hudYaw)
+            it.uvrect = SIMD4<Float>(0, 0, 1, 1)
+            it.size = SIMD2<Float>(XRMenuPanelLayout.width, XRMenuPanelLayout.width * 0.75)
+            it.distance = XRMenuPanelLayout.distance
+            it.opacity = 1
+            it.onTop = true
+            r.items.append(it)
+        }
+
         // 6) paneles del HUD (mundo y diorama; en el cine el HUD ya va dentro de la imagen)
-        if shown != .cinema && shown != .stereo && cfg.hudPanels, let h = hud {
+        if shown != .cinema && shown != .stereo && cfg.hudPanels && !overlay2D, let h = hud {
             let frame = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw)
             let sc = cfg.hudScale
             var wm: (n: SIMD3<Float>, ok: Bool)?
@@ -804,7 +822,8 @@ final class XRPresenter {
         }
 
         // 7) velo de transición y menú
-        let veilNow = max(veil, cutVeil, collisionFade)
+        if pending { pendVeil = min(1, pendVeil + d / 0.15) } else { pendVeil = max(0, pendVeil - d / 0.28) }
+        let veilNow = max(veil, cutVeil, collisionFade, pendVeil)
         if veilNow > 0.001 {
             var v = XRDrawItem(kind: .veil, texture: nil)
             v.opacity = veilNow

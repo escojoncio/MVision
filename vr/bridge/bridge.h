@@ -160,6 +160,8 @@ typedef struct BridgeState {
     uint8_t in_control;  /* el jugador controla a su personaje ahora (ni escena, ni comunicador, ni pausa, ni menú) */
     uint8_t on_screen_text; /* hay voz/subtítulos en curso (flujo de voz) */
     uint8_t has_player;  /* hay jugador en escena: PLAYER_POS+CTL+ST válidos (falso en título/carga/cambio de zona) */
+    uint8_t cam_ctl;     /* la cabeza del usuario sigue llevando la cámara: in_control, o ventana de armas/objetos / pausa abiertas en partida sin otra causa
+                          * (ni escena, ni comunicador, ni juego detenido, ni muerte). Es lo que mantiene activa la cámara VR con un menú 2D encima. */
 } BridgeState;
 
 /* Lee el estado completo. `ram` apunta a 2 MB (BRIDGE_RAM_SIZE) en el orden de la RAM de la consola (el byte

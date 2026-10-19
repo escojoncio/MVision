@@ -773,8 +773,19 @@ func runMenuLayout() {
     check("prof-relleno", "proyección no invertida o distancia nula: nil", XRMath.depthValue(projection: pInf, meters: 0) == nil && XRMath.depthValue(projection: matrix_identity_float4x4, meters: 50) == nil, "")
     check("prof-relleno", "ajustes normales: relleno activado, profundidad constante apagada", XRDiag.Settings().fillDepth && !XRDiag.Settings().flatDepth && XRDiag.Settings().isNormal, "")
     // Legibilidad del cine
-    check("cine-legible", "sin partida (1) y detenido (4) son escenas de texto", XRCinemaLayout.legible(reason: 1) && XRCinemaLayout.legible(reason: 4), "")
-    check("cine-legible", "mundo, radio, cinemática y pausa no cambian", !XRCinemaLayout.legible(reason: 0) && !XRCinemaLayout.legible(reason: 2) && !XRCinemaLayout.legible(reason: 3) && !XRCinemaLayout.legible(reason: 5), "")
+    check("cine-legible", "sin partida (1), radio/códec (3) y detenido (4) son escenas de texto", XRCinemaLayout.legible(reason: 1) && XRCinemaLayout.legible(reason: 3) && XRCinemaLayout.legible(reason: 4), "")
+    check("cine-legible", "mundo, cinemática, pausa y selector no cambian", !XRCinemaLayout.legible(reason: 0) && !XRCinemaLayout.legible(reason: 2) && !XRCinemaLayout.legible(reason: 5) && !XRCinemaLayout.legible(reason: 10) && !XRCinemaLayout.legible(reason: 11), "")
+    check("selector-panel", "solo selector (10) y pausa sobre el mundo (11) llevan panel flotante", XRMenuPanelLayout.isOverlay(reason: 10) && XRMenuPanelLayout.isOverlay(reason: 11) && !XRMenuPanelLayout.isOverlay(reason: 0) && !XRMenuPanelLayout.isOverlay(reason: 3) && !XRMenuPanelLayout.isOverlay(reason: 6), "")
+    do {
+        let head = XRMath.translation(SIMD3<Float>(0.3, 1.6, -0.2)) * XRMath.rotationY(0.7)
+        let m = XRMenuPanelLayout.model(position: XRMath.position(head), yaw: 0.7)
+        let c = m.columns.3, hp = XRMath.position(head)
+        let horiz = ((c.x - hp.x) * (c.x - hp.x) + (c.z - hp.z) * (c.z - hp.z)).squareRoot()
+        check("selector-panel", "a 0,95 m delante de la cabeza y a su altura", abs(horiz - XRMenuPanelLayout.distance) < 1e-3 && abs(hp.y - c.y - XRMenuPanelLayout.drop) < 1e-3, String(format: "%.3f m", horiz))
+        let f4 = XRMath.rotationY(0.7) * SIMD4<Float>(0, 0, -1, 0)
+        let fwd = simd_normalize(SIMD3<Float>(f4.x, 0, f4.z))
+        check("selector-panel", "en la dirección del rumbo del HUD", simd_dot(simd_normalize(SIMD3<Float>(c.x - hp.x, 0, c.z - hp.z)), fwd) > 0.999, "")
+    }
     check("cine-legible", "ancho +25 % con tope de 4,5 m", abs(XRCinemaLayout.width(base: 3.0, legible: true) - 3.75) < 1e-4 && XRCinemaLayout.width(base: 4.5, legible: true) == 4.5 && XRCinemaLayout.width(base: 3.0, legible: false) == 3.0, "")
     check("cine-legible", "curvatura limitada a 0,12 solo en texto", XRCinemaLayout.curve(base: 0.7, legible: true) == 0.12 && XRCinemaLayout.curve(base: 0.0, legible: true) == 0 && XRCinemaLayout.curve(base: 0.7, legible: false) == 0.7, "")
     check("cine-legible", "nitidez nunca suave en texto; píxel se respeta", XRCinemaLayout.sharp(base: 0, legible: true) == 1 && XRCinemaLayout.sharp(base: 2, legible: true) == 2 && XRCinemaLayout.sharp(base: 0, legible: false) == 0, "")
