@@ -108,7 +108,7 @@ guard let queue = device.makeCommandQueue() else { print("FALLO: sin cola Metal"
 let EW = 1024, EH = 1024                 // tamaño por ojo
 let colorFormat = MTLPixelFormat.bgra8Unorm_srgb
 let depthFormat = MTLPixelFormat.depth32Float
-let depthRange = SIMD2<Float>(1000, 0.1)  // (lejos, cerca) en metros: el renderer toma min/max, como con el sistema
+var depthRange = SIMD2<Float>(1000, 0.1)  // (lejos, cerca) en metros: el renderer toma min/max, como con el sistema
 let IPD: Float = 0.063
 let eyes: [XREyeView] = [
     XREyeView(transform: XRMath.translation(SIMD3<Float>(-IPD / 2, 0, 0)), tangents: SIMD4<Float>(1.30, 1.05, 1.10, 1.10),
@@ -122,7 +122,7 @@ func headPose(_ p: SIMD3<Float>, yaw: Float) -> simd_float4x4 { XRMath.translati
 /// Pixel (x derecha, y abajo; nil si detrás de la cámara) donde cae un punto del mundo en el ojo `e` con la cabeza `head`.
 func project(_ world: SIMD3<Float>, eye e: Int, head: simd_float4x4) -> (Int, Int)? {
     let v = (head * eyes[e].transform).inverse
-    let p = XRFrameEncoder.projection(eyes[e], depthRange: depthRange)
+    let p = XRFrameEncoder.projection(eyes[e], depthRange: SIMD2<Float>(1000, 0.1))
     let c = p * v * SIMD4<Float>(world, 1)
     guard c.w > 0.01 else { return nil }
     let nx = c.x / c.w, ny = c.y / c.w
@@ -203,10 +203,11 @@ func report(_ caso: String, _ imgs: [Img], notice: Bool = false) {
 
 // MARK: casos
 
-struct Cfg { var name: String; var layered: Bool; var msaa: Int }
+struct Cfg { var name: String; var layered: Bool; var msaa: Int; var range = SIMD2<Float>(1000, 0.1) }
 
 func runCase(_ cfg: Cfg, first: Bool) {
     firstConfig = first
+    depthRange = cfg.range
     print("\n######## \(cfg.name) ########")
     if cfg.layered && !device.supportsVertexAmplificationCount(2) { annot("warning", cfg.name, "sin amplificacion de vertices x2: caso omitido"); return }
     if cfg.msaa > 1 && !device.supportsTextureSampleCount(cfg.msaa) { annot("warning", cfg.name, "sin msaa \(cfg.msaa): caso omitido"); return }
@@ -288,8 +289,8 @@ func runCase(_ cfg: Cfg, first: Bool) {
                 ("cubo azul", SIMD3<Float>(1.5, 0.5, -3), (0, 0, 255)),
                 ("cubo amarillo cercano (oclusion)", SIMD3<Float>(0, 1.6, -8), (255, 255, 0)),
                 ("cubo verde lejano visible", SIMD3<Float>(1.3, 1.6, -7.5), (0, 255, 0)),
-                ("suelo oscuro", SIMD3<Float>(0.5, 0, -1.5), (70, 70, 70)),
-                ("suelo claro", SIMD3<Float>(1.5, 0, -1.5), (150, 150, 150)),
+                ("suelo oscuro", SIMD3<Float>(1.5, 0, -2.5), (70, 70, 70)),
+                ("suelo claro", SIMD3<Float>(0.5, 0, -2.5), (150, 150, 150)),
             ]
             for p in pts {
                 guard let px = project(p.1, eye: e, head: headB) else { check(caso, "ojo \(e) \(p.0)", false, "detras de la camara"); continue }
@@ -313,6 +314,11 @@ func runCase(_ cfg: Cfg, first: Bool) {
 
 for (n, cfg) in [Cfg(name: "layered-msaa4", layered: true, msaa: 4), Cfg(name: "dedicated-msaa4", layered: false, msaa: 4), Cfg(name: "layered-msaa1", layered: true, msaa: 1)].enumerated() {
     runCase(cfg, first: n == 0)
+}
+// Rangos de profundidad que el sistema podría devolver (orden/valores distintos): la imagen debe salir igual
+for (nm, r) in [("rango-1-0", SIMD2<Float>(1, 0)), ("rango-0.1-1000", SIMD2<Float>(0.1, 1000)), ("rango-0.3-50", SIMD2<Float>(50, 0.3)),
+                ("rango-0-0", SIMD2<Float>(0, 0)), ("rango-1e-3-1e5", SIMD2<Float>(1e5, 1e-3))] {
+    runCase(Cfg(name: "layered-msaa4-" + nm, layered: true, msaa: 4, range: r), first: false)
 }
 print("\nresumen: \(failures) comprobaciones falladas")
 if failures > 0 {
