@@ -88,7 +88,7 @@ typedef struct Arena {
 
 typedef struct {
     uint32_t addr, def;       /* direcciones físicas del modelo y de su definición (0 = libre: la dirección 0 no es válida) */
-    uint64_t sig, id, baked_hash;
+    uint64_t sig, zsig, id, baked_hash;   /* sig: contenido completo (recodificar); zsig: solo estructura, sin vértices ni normales (cambio de zona) */
     uint32_t baked_ver;
     uint16_t n_faces;
     int16_t parent, bias;
@@ -107,6 +107,7 @@ struct NsMeshStore {
     _Atomic(Arena *) cur, prev;
     _Atomic uint32_t ack;
     size_t limit;
+    size_t compact;           /* umbral de compactación en bytes (0 = automático: 1/4 del tope, mínimo 8 MiB) */
     uint32_t zone_gen;
     uint32_t baked_counter;   /* versiones de color únicas en toda la vida del almacén (no se reinician con la época) */
     Memo *memo;
@@ -151,6 +152,7 @@ void ns_store_destroy(NsMeshStore *s) {
     free(s->memo); free(s->w); free(s);
 }
 void ns_store_set_limit(NsMeshStore *s, size_t bytes) { if (s) s->limit = bytes; }
+void ns_store_set_compact(NsMeshStore *s, size_t bytes) { if (s) s->compact = bytes; }
 uint32_t ns_store_zone_gen(const NsMeshStore *s) { return s ? s->zone_gen : 0; }
 uint32_t ns_store_epoch(const NsMeshStore *s) { Arena *c = s ? atomic_load(&((NsMeshStore *)s)->cur) : NULL; return c ? c->epoch : 0; }
 void ns_store_ack(NsMeshStore *s, uint32_t epoch) {
@@ -381,6 +383,21 @@ static uint64_t model_sig(Ctx *c, uint32_t m, uint32_t def) {
     return h;
 }
 
+/* Firma ESTRUCTURAL del modelo (cabecera, tablas de caras/índices/texturas), sin las posiciones de vértices ni las normales: un modelo del escenario cuyos vértices se
+ * animan en el sitio (misma dirección, misma estructura) cambia de `model_sig` en cada fotograma pero NO es un cambio de zona. Solo esta firma dispara el cambio de zona. */
+static uint64_t model_zsig(Ctx *c, uint32_t m) {
+    Ram *r = &c->r;
+    const uint8_t *hd = at(r, m, 0x58);
+    if (!hd) return 0;
+    uint64_t h = ns_hash64(NS_HASH64_INIT, hd, 0x58);
+    int32_t nf = rs32(r, m + 4);
+    if (nf < 0 || nf > MAX_FACES) return h;
+    h = sample(r, h, rd32(r, m + 0x3C), (uint32_t)nf * 4u);
+    h = sample(r, h, rd32(r, m + 0x48), (uint32_t)nf * 4u);
+    h = sample(r, h, rd32(r, m + 0x50), (uint32_t)nf * 2u);
+    return h;
+}
+
 /* Sesgo de profundidad derivado del flag del modelo: (4 - bits 12-13) * 250, positivo con 0x100 y negativo con 0x200 (sin ninguno: 0). */
 static int16_t bias_of(uint32_t mflag) {
     if (!(mflag & 0x300u)) return 0;
@@ -589,9 +606,9 @@ static int resolve_piece(Ctx *c, uint32_t model, uint32_t def, uint32_t rgbs, ui
         Memo *use = slot ? slot : &tmp;
         use->baked_ver = 0; use->baked_hash = 0;
         int rc = decode_model(c, model, def, want_baked, use, &id);
-        if (rc == 0) { if (slot) { slot->sig = sig; slot->empty = 1; slot->id = 0; } else S->memo_full++; if (slot) { /* queda memorizado como vacío */ } return RES_HIDDEN; }
+        if (rc == 0) { if (slot) { slot->sig = sig; slot->zsig = model_zsig(c, model); slot->empty = 1; slot->id = 0; } else S->memo_full++; if (slot) { /* queda memorizado como vacío */ } return RES_HIDDEN; }
         if (rc < 0) { if (slot) { memset(slot, 0, sizeof *slot); } if (rc == -1) S->drop_bad_model++; return rc == -2 ? RES_FULL : RES_HIDDEN; }
-        use->sig = sig; use->id = id; use->empty = 0;
+        use->sig = sig; use->zsig = model_zsig(c, model); use->id = id; use->empty = 0;
         if (!slot) S->memo_full++;
         me = use;
     }
@@ -839,10 +856,15 @@ int ns_extract_ex(NsScene *sc, NsMeshStore *st, const uint8_t *ram, size_t ram_s
                 for (int k = 0; k < cand[i].nm && !changed; k++) {
                     uint32_t m = rd32(r, cand[i].o + 0x48u + 0x5Cu * (uint32_t)k + 0x40u);
                     Memo *me = memo_find(st, norm_addr(m), norm_addr(cand[i].def));
-                    if (me && !me->empty && me->sig != model_sig(&c, m, cand[i].def)) changed = 1;
+                    if (me && !me->empty && me->zsig != model_zsig(&c, m)) changed = 1;
                 }
             }
             if (changed) do_zone_change(st, S);
+            else {   /* compactación: los modelos con vértices animados generan una malla nueva por fotograma; al pasar de 1/4 del tope (mín. 8 MiB) se abre época y se re-extrae solo lo que se usa */
+                size_t th = st->compact;
+                if (!th) { th = st->limit / 4u; if (th < ((size_t)8u << 20)) th = (size_t)8u << 20; }
+                if (ns_store_bytes(st) > th && ns_store_new_epoch(st)) { memo_clear(st); S->epoch_opened = 1; S->compactions++; }
+            }
             sc->mesh_epoch = ns_store_epoch(st); sc->zone_gen = st->zone_gen;
         }
 

@@ -1,6 +1,9 @@
 /* Puente C -> Swift del banco de render: el mismo que la app + los datos sintéticos de bench/c/bench_host.c. */
 #include "Bridging-Header.h"   /* app/Sources/Bridging-Header.h */
 
+#include "c/native_synth.h"   /* escena nativa sintética (la misma del banco del renderer nativo) */
+void bench_set_native_marks(int on);   /* la lista de la GPU marca sus batches 3D (skip_if_native) y declara native_3d */
+void bench_make_native_e2e_scene(const uint16_t *vram);   /* escena de extremo a extremo: un cuadrilátero rojo enorme delante de la cabeza (0.3, 1.6, 0.5) */
 void bench_make_pattern(void);   /* fotograma 2D 320x240 de prueba (pantalla de cine) */
 void bench_touch_frame(void);
 void bench_make_scene(void);     /* escena VR sintética: suelo, cubos, sprite 2D */

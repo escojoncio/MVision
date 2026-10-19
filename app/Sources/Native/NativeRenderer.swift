@@ -150,6 +150,8 @@ final class NativeRenderer {
     /// Puente de escenas (NsBridge de vr/native/ns_bridge.h; la app usa `mv_vrhost_native_bridge()`). Sin puente no se dibuja nada.
     var bridge: OpaquePointer?
     var enabled = true
+    /// Factor de color por canal del dibujo nativo ((1,1,1) = sin teñir). Lo pone el llamador antes de `encode` (modo de depuración «solo nativo»).
+    var tint = SIMD3<Float>(1, 1, 1)
 
     // MARK: sincronización con la GPU
     private let lock = NSLock()
@@ -801,6 +803,7 @@ final class NativeRenderer {
         u.tovr = (SIMD4<Float>(c.0.x, c.1.x, c.2.x, c.3.x), SIMD4<Float>(c.0.y, c.1.y, c.2.y, c.3.y), SIMD4<Float>(c.0.z, c.1.z, c.2.z, c.3.z))
         u.fog_fwd = fogFwd
         u.fog_par = fogPar
+        u.tint = SIMD4<Float>(tint.x, tint.y, tint.z, 0)
         enc.setCullMode(.none)
         enc.setFragmentTexture(vram, index: 0)
         enc.setVertexBuffer(vertPool.buffer, offset: 0, index: Int(NSG_BUF_VERTS))

@@ -615,6 +615,118 @@ func runFluidez(layered: Bool) {
 
 runFluidez(layered: true)
 runFluidez(layered: false)
+// ---------- Render nativo de extremo a extremo ----------
+// Ejecuta el código REAL de la app (XRFrameEncoder -> RGRenderer.encode/encodeScene -> NativeRenderer.encode) con una lista de la GPU sintética cuyo UNICO batch 3D (marcado, como hace
+// vrhost.c) es un cuadrilátero ROJO puro que cubre todo el campo de visión, y una escena nativa sintética (la sala de native_synth.c; ningún rojo puro). Si la sustitución falla (el
+// nativo no se dibuja, o la lista de la GPU no salta sus batches marcados) se ve rojo. Comprueba los dos ojos en cada caso.
+struct Fractions { var red = 0.0, nonBlack = 0.0, sumR = 0.0, sumG = 0.0 }
+func fractions(_ im: Img) -> Fractions {
+    var f = Fractions(); var nRed = 0, nNB = 0
+    for i in stride(from: 0, to: im.w * im.h * 4, by: 4) {
+        let b = Int(im.bgra[i]), g = Int(im.bgra[i + 1]), r = Int(im.bgra[i + 2])
+        if r > 170 && g < 70 && b < 70 { nRed += 1 }
+        if max(r, g, b) > 12 { nNB += 1; f.sumR += Double(r); f.sumG += Double(g) }
+    }
+    f.red = Double(nRed) / Double(im.w * im.h); f.nonBlack = Double(nNB) / Double(im.w * im.h)
+    return f
+}
+
+func runNativeE2E(layered: Bool, msaa: Int, infinite: Bool = false) {
+    let tag = "nativo-e2e-\(layered ? "layered" : "dedicated")-msaa\(msaa)" + (infinite ? "-sistema-inf" : "")
+    print("\n######## \(tag) ########")
+    if layered && !device.supportsVertexAmplificationCount(2) { annot("warning", tag, "sin amplificacion de vertices x2: caso omitido"); return }
+    if msaa > 1 && !device.supportsTextureSampleCount(msaa) { annot("warning", tag, "sin msaa \(msaa): caso omitido"); return }
+    // infinite: proyeccion del sistema con plano lejano INFINITO (P22 = 0) y rango degenerado (inf, 0.1), como en el visor: el nativo no puede quedar detras del plano lejano ni recortado
+    depthRange = infinite ? SIMD2<Float>(Float.infinity, 0.1) : SIMD2<Float>(1000, 0.1); sysInf = infinite
+    defer { sysInf = false; depthRange = SIMD2<Float>(1000, 0.1) }
+    setDefaults(curve: 0.35, sharp: 1)
+    let scenePath = outDir + "/e2e-escena-nativa.nsy"
+    ns_synth_set_complete(1)
+    guard ns_synth_write(scenePath) == 0, ns_synth_load(scenePath) == 0, let vramPtr = ns_synth_vram() else { check(tag, "escena nativa sintetica", false, "no se pudo generar/cargar"); return }
+    guard let tg = makeTargets(layered: layered) else { check(tag, "texturas", false, "no se pudieron crear"); return }
+    guard let enc = XRFrameEncoder(device: device, colorFormat: colorFormat, depthFormat: depthFormat, layered: layered, sampleCount: msaa) else {
+        check(tag, "codificador", false, "XRFrameEncoder no se pudo crear"); return
+    }
+    guard let nat = enc.renderer.native else { check(tag, "renderer nativo creado", false, "RGRenderer.native es nil (biblioteca sin ns_*?)"); return }
+    check(tag, "renderer nativo listo (pipelines)", mv_vrhost_native_available() != 0, "mv_vrhost_native_available=\(mv_vrhost_native_available())")
+    let bridge = ns_synth_bridge()
+    var gs = MvVrGameState(); gs.view_mode = 1; gs.game = 1; gs.in_control = 1; gs.cam_active = 1; gs.first_person = 1
+    let head = headPose(SIMD3<Float>(0.3, 1.6, 0.5), yaw: 0)
+
+    func scenario(_ label: String, mode: Int32, withBridge: Bool, marks: Bool = true) -> (imgs: [Img], f: [Fractions], diag: String)? {
+        mv_vrhost_set_render_mode(mode)
+        nat.bridge = withBridge ? bridge : nil
+        bench_make_pattern()
+        bench_make_native_e2e_scene(vramPtr)
+        bench_set_native_marks(marks ? 1 : 0)
+        bench_enable_radar(0); bench_enable_weapon(0)
+        bench_scene_post()
+        guard let imgs = render(enc, layered: layered, color: tg.color, depth: tg.depth, gs: gs, frames: 80, head: { _ in head },
+                                before: { _ in if withBridge { _ = ns_synth_republish() } }) else { check(tag + "/" + label, "render", false, "fallo al renderizar"); return nil }
+        report(tag + "-" + label, imgs, notice: false)
+        let diag = enc.renderer.nativeDiagLine() ?? "(sin nat-diag)"
+        print("[diag] \(label): \(diag)")
+        return (imgs, imgs.map(fractions), diag)
+    }
+    func checkEyes(_ caso: String, _ name: String, _ r: (imgs: [Img], f: [Fractions], diag: String), _ ok: (Fractions) -> Bool, _ expect: String) {
+        for e in 0..<2 {
+            let f = r.f[e]
+            check(caso, "ojo \(e) \(name)", ok(f), String(format: "rojo %.1f %%, no negro %.1f %% (esperado: %@) | %@", f.red * 100, f.nonBlack * 100, expect, r.diag))
+        }
+    }
+
+    // (a) modo GPU: se ven los batches de la GPU (rojo) aunque la lista venga marcada y haya escena nativa
+    if let a = scenario("a-gpu", mode: 0, withBridge: true) {
+        checkEyes(tag + "/a-gpu", "los batches GPU se ven (rojo > 80 %)", a, { $0.red > 0.80 }, "rojo > 80 %")
+    }
+    // (b) modo nativo: los pixeles del mundo vienen del nativo y NO de los batches GPU
+    var bRes: (imgs: [Img], f: [Fractions], diag: String)?
+    if let b = scenario("b-nativo", mode: 1, withBridge: true) {
+        bRes = b
+        checkEyes(tag + "/b-nativo", "sin rojo de la GPU y con pixeles nativos", b, { $0.red < 0.01 && $0.nonBlack > 0.30 }, "rojo < 1 %, no negro > 30 %")
+        check(tag + "/b-nativo", "la decision fue nativo", b.diag.contains("usa=true"), b.diag)
+        check(tag + "/b-nativo", "se saltaron batches de la GPU", !b.diag.contains("batches_3D_saltados=0 "), b.diag)
+        // (c) los dos ojos con imagen nativa y con paralaje (no la misma imagen)
+        var diffSum = 0, n = 0
+        for i in stride(from: 0, to: b.imgs[0].w * b.imgs[0].h * 4, by: 16) { diffSum += abs(Int(b.imgs[0].bgra[i + 2]) - Int(b.imgs[1].bgra[i + 2])) + abs(Int(b.imgs[0].bgra[i + 1]) - Int(b.imgs[1].bgra[i + 1])); n += 1 }
+        soft(tag + "/b-nativo", "los dos ojos difieren (paralaje)", Double(diffSum) / Double(max(n, 1)) > 0.05, String(format: "diferencia media %.3f", Double(diffSum) / Double(max(n, 1))))
+    }
+    // (d) solo nativo: igual que (b) pero teñido (verde / rojo sube) y, SIN escena nativa, ni rastro del 3D de la GPU
+    if let d = scenario("d-solo-nativo", mode: 2, withBridge: true) {
+        checkEyes(tag + "/d-solo-nativo", "sin rojo de la GPU y con pixeles nativos", d, { $0.red < 0.01 && $0.nonBlack > 0.30 }, "rojo < 1 %, no negro > 30 %")
+        if let b = bRes {
+            for e in 0..<2 where b.f[e].sumR > 1000 && d.f[e].sumR > 1000 {
+                let rb = b.f[e].sumG / b.f[e].sumR, rd = d.f[e].sumG / d.f[e].sumR
+                check(tag + "/d-solo-nativo", "ojo \(e) teñido (G/R sube)", rd > rb * 1.05, String(format: "G/R nativo %.3f, solo nativo %.3f", rb, rd))
+            }
+        }
+    }
+    if let d2 = scenario("d2-solo-nativo-sin-escena", mode: 2, withBridge: false) {
+        checkEyes(tag + "/d2-solo-nativo-sin-escena", "no se dibuja el 3D de la GPU aunque la decision sea GPU", d2, { $0.red < 0.01 }, "rojo < 1 %")
+    }
+    // (e) modo nativo sin escena nativa: nunca un fotograma sin 3D -> la GPU lo dibuja
+    if let e2 = scenario("e-nativo-sin-escena", mode: 1, withBridge: false) {
+        checkEyes(tag + "/e-nativo-sin-escena", "cae a la GPU (rojo > 80 %)", e2, { $0.red > 0.80 }, "rojo > 80 %")
+    }
+    // (f) escena NO marcada (cinematica): se dibuja por GPU aunque el modo sea nativo
+    if let f2 = scenario("f-sin-marcas", mode: 1, withBridge: true, marks: false) {
+        checkEyes(tag + "/f-sin-marcas", "escena sin marcas: GPU (rojo > 80 %)", f2, { $0.red > 0.80 }, "rojo > 80 %")
+    }
+    // vuelta a GPU: el tinte y el estado se restablecen
+    if let g = scenario("g-gpu-final", mode: 0, withBridge: true) {
+        checkEyes(tag + "/g-gpu-final", "de nuevo GPU (rojo > 80 %)", g, { $0.red > 0.80 }, "rojo > 80 %")
+    }
+    mv_vrhost_set_render_mode(0)
+    bench_set_native_marks(0)
+}
+
+if !CommandLine.arguments.contains("--sin-nativo") {
+    runNativeE2E(layered: true, msaa: 4)
+    runNativeE2E(layered: false, msaa: 4)
+    runNativeE2E(layered: true, msaa: 1)
+    runNativeE2E(layered: true, msaa: 4, infinite: true)
+}
+
 print("\nresumen: \(failures) comprobaciones falladas")
 if !warnList.isEmpty { annot("warning", "banco de render (informativo)", warnList.prefix(30).joined(separator: "\n")) }
 if failures > 0 {

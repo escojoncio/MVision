@@ -35,7 +35,7 @@ struct XRViewConfig {
     var wristHandSide = false       // false: los paneles se apilan hacia el codo (encima del radar); true: hacia la mano
     var hideRealHands = true        // pide al sistema ocultar tus manos y brazos reales mientras dura el espacio inmersivo (se ven los del personaje)
     var debugAxes = false           // dibuja los ejes de los mandos (dispositivo, agarre, apuntado) y de las manos del personaje
-    var nativeRender = true         // motor de dibujo: false = lista de la GPU, true = escena nativa leída de la RAM (solo si está disponible; vr/native)
+    var renderMode = 1              // motor de dibujo: 0 = lista de la GPU, 1 = escena nativa leída de la RAM (si está disponible; vr/native), 2 = SOLO nativo (depuración: nunca se dibuja el 3D de la GPU y el nativo va teñido)
     var smoothMotion = true         // fluidez de la locomoción: el mundo se corrige por fotograma de render (giro del stick y avance extrapolados entre escenas del juego)
 
     enum Cutscene: String, CaseIterable { case stereo, cinema, diorama, scene }
@@ -53,6 +53,13 @@ struct XRViewConfig {
     }
     private static func b(_ k: String, _ d: Bool) -> Bool {
         UserDefaults.standard.object(forKey: k) == nil ? d : UserDefaults.standard.bool(forKey: k)
+    }
+
+    /// Modo guardado: «xr.view.renderMode» (0/1/2); sin él, el ajuste antiguo «xr.view.render» (Bool).
+    static func storedRenderMode() -> Int {
+        let d = UserDefaults.standard
+        if let m = d.object(forKey: "xr.view.renderMode") as? Int { return min(max(m, 0), 2) }
+        return (d.object(forKey: "xr.view.render") as? Bool ?? true) ? 1 : 0
     }
 
     static func load() -> XRViewConfig {
@@ -73,7 +80,7 @@ struct XRViewConfig {
         c.hideRealHands = b("xr.view.hideHands", true)
         c.debugAxes = b("xr.view.debugAxes", false)
         c.smoothMotion = b("xr.view.smoothMotion", true)
-        c.nativeRender = b("xr.view.render", true)
+        c.renderMode = Self.storedRenderMode()
         return c
     }
 
@@ -94,7 +101,7 @@ struct XRViewConfig {
         d.set(hideRealHands, forKey: "xr.view.hideHands")
         d.set(debugAxes, forKey: "xr.view.debugAxes")
         d.set(smoothMotion, forKey: "xr.view.smoothMotion")
-        d.set(nativeRender, forKey: "xr.view.render")
+        d.set(renderMode, forKey: "xr.view.renderMode")
     }
 }
 
@@ -331,7 +338,7 @@ final class XRPresenter {
         case .wristScale: cfg.wristScale = cycle(cfg.wristScale, XRViewConfig.wristScales, dir)
         case .wristSide: cfg.wristHandSide.toggle()
         case .smoothMotion: cfg.smoothMotion.toggle(); cfg.save()
-        case .renderMode: cfg.nativeRender.toggle(); cfg.save(); Self.applyRender(cfg.nativeRender)
+        case .renderMode: cfg.renderMode = ((cfg.renderMode + (dir < 0 ? 2 : 1)) % 3); cfg.save(); Self.applyRender(cfg.renderMode)
         case .turnMode: Self.cycleTurnMode(dir)
         case .vignette: Self.cycleVignette(dir)
         case .hideHands: cfg.hideRealHands.toggle(); cfg.save()      // la escena lo lee de UserDefaults (@AppStorage): se guarda al momento
@@ -372,7 +379,7 @@ final class XRPresenter {
             case .wristScale: return ("Tamaño en la muñeca", "\(Int((cfg.wristScale * 100).rounded())) cm")
             case .wristSide: return ("Lado en la muñeca", cfg.wristHandSide ? "Hacia la mano" : "Hacia el codo")
             case .smoothMotion: return ("Suavizado del movimiento", yn(cfg.smoothMotion))
-            case .renderMode: return ("Motor de dibujo", Self.renderName(cfg.nativeRender))
+            case .renderMode: return ("Motor de dibujo", Self.renderName(cfg.renderMode))
             case .turnMode: return ("Giro con la palanca derecha", Self.turnModeName())
             case .vignette: return ("Viñeta de confort", Self.vignetteName())
             case .hideHands: return ("Ocultar mis manos reales", yn(cfg.hideRealHands))
@@ -383,21 +390,23 @@ final class XRPresenter {
     }
 
     // Motor de dibujo (vr/host/vrhost.h): GPU = reconstrucción desde la lista de dibujo; Nativo = escena leída de la RAM del motor. Con MV_RENDER en el entorno el modo está fijado.
-    private static func applyRender(_ native: Bool) {
+    private static func applyRender(_ mode: Int) {
 #if !MV_BENCH
-        mv_vrhost_set_render_mode(native ? 1 : 0)
+        mv_vrhost_set_render_mode(Int32(mode))
 #endif
     }
-    private static func renderName(_ native: Bool) -> String {
+    private static func renderName(_ mode: Int) -> String {
 #if MV_BENCH
-        return native ? "Nativo" : "GPU"
+        return ["GPU", "Nativo", "Solo nativo (depuración)"][min(max(mode, 0), 2)]
 #else
-        if mv_vrhost_render_env_locked() != 0 { return mv_vrhost_render_mode() != 0 ? "Nativo (fijado)" : "GPU (fijado)" }
-        if !native { return "GPU" }
-        return mv_vrhost_native_available() != 0 ? "Nativo" : "Nativo (aún no disponible: GPU)"
+        if mv_vrhost_render_env_locked() != 0 {
+            switch mv_vrhost_render_mode() { case 0: return "GPU (fijado)"; case 2: return "Solo nativo (fijado)"; default: return "Nativo (fijado)" }
+        }
+        if mode <= 0 { return "GPU" }
+        if mv_vrhost_native_available() == 0 { return mode >= 2 ? "Solo nativo (aún no disponible)" : "Nativo (aún no disponible: GPU)" }
+        return mode >= 2 ? "Solo nativo (depuración, teñido)" : "Nativo"
 #endif
     }
-
     // Giro del stick y viñeta de confort: viven en los ajustes de vr_input (VRInputSettings, "vri.*"). El banco de render no enlaza VRInput.
     private static let turnModes: [(String, Bool, Float)] = [("Por pasos de 30°", false, 30), ("Por pasos de 45°", false, 45), ("Suave", true, 30)]
     private static let vignetteLevels: [(String, Float)] = [("No", 0), ("Suave", 0.35), ("Media", 0.6), ("Fuerte", 0.9)]

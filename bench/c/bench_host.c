@@ -11,6 +11,7 @@
 #include "vr_scene.h"
 #include "vr_smooth.h"
 #include <math.h>
+#include "ns_bridge.h"
 
 /* ---------- fotograma 2D (pantalla de cine): patrón de prueba 320x240 ---------- */
 static uint8_t g_fb[320 * 240 * 4];
@@ -169,6 +170,32 @@ static int g_sample_pending, g_sm_ready;
 static double g_clock, g_turn_req;
 static void sm_ready(void) { if (!g_sm_ready) { vrsm_init(&g_sm, NULL); g_sm_ready = 1; } }
 
+/* ---------- render nativo (banco de extremo a extremo): estado que en la app vive en vrhost.c ---------- */
+static int g_rmode, g_nready, g_marks;
+void mv_vrhost_set_render_mode(int mode) { g_rmode = mode <= 0 ? 0 : mode >= 2 ? 2 : 1; }
+int mv_vrhost_render_mode(void) { return g_rmode; }
+int mv_vrhost_render_only_native(void) { return g_rmode == 2; }
+int mv_vrhost_render_env_locked(void) { return 0; }
+int mv_vrhost_native_available(void) { return g_nready; }
+void mv_vrhost_native_renderer_ready(int ready) { g_nready = ready != 0; }
+struct NsBridge *mv_vrhost_native_bridge(void) { return NULL; }   /* el banco asigna NativeRenderer.bridge a mano (puente de la escena sintética) */
+/* La lista de la GPU marca sus batches 3D como vrhost.c (mark_3d) y declara que admite el 3D nativo. */
+void bench_set_native_marks(int on) { g_marks = on != 0; }
+/* Escena de extremo a extremo: UN batch 3D (kind 0) con un cuadrilátero ROJO puro enorme a 1 m delante de la cabeza (0.3, 1.6, 0.5) mirando a -Z; sin eventos de VRAM, con la
+ * VRAM de la escena nativa sintética (`vram`: 1024x512 palabras, NULL = la del banco). Si se dibujara, tapa todo el campo de visión de los dos ojos. */
+void bench_make_native_e2e_scene(const uint16_t *vram) {
+    bench_make_scene();
+    g_nv = 0; g_nb = 0;
+    const float x0 = 0.3f - 6.0f, x1 = 0.3f + 6.0f, y0 = 1.6f - 6.0f, y1 = 1.6f + 6.0f, z = -0.5f;
+    float a[3] = {x0, y0, z}, b[3] = {x1, y0, z}, c[3] = {x1, y1, z}, d[3] = {x0, y1, z};
+    quad3(a, b, c, d, rgba(255, 0, 0));
+    batch(0, 0, 0);
+    g_list.nops = 0; g_list.ndata = 0;
+    if (vram) memcpy(g_vram_init, vram, sizeof g_vram_init);
+    memcpy(g_vbase, g_v, g_nv * sizeof g_v[0]);
+    g_scene_loaded = 1;
+}
+
 int mv_host_scene(VrScene *out) {
     if (!g_scene_pending) return 0;
     g_scene_pending = 0;
@@ -181,6 +208,12 @@ int mv_host_scene(VrScene *out) {
     if (g_cine_cam) {
         out->game_view[0] = 0.001f; out->game_view[5] = -0.001f; out->game_view[10] = -0.001f; out->game_view[13] = 1.6f;
         out->cine_active = 1; out->cine_shot = 1;
+    }
+    if (g_marks) {
+        out->native_3d = 1;
+        for (uint32_t i = 0; i < g_nb; i++) g_b[i].skip_if_native = g_b[i].kind == 0 ? VR_SKIP_WORLD : g_b[i].kind == 1 ? VR_SKIP_FX : 0;
+    } else {
+        for (uint32_t i = 0; i < g_nb; i++) g_b[i].skip_if_native = 0;
     }
     out->scale = 0.001f;
     out->world_valid = 1;

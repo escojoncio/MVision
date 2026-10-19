@@ -57,6 +57,7 @@ typedef struct NsExtractStats {
     uint32_t bias_mismatch;        /* piezas cuyo sesgo de profundidad guardado no coincide con el derivado del flag del modelo (diagnóstico) */
     uint32_t zone_changes;         /* cambios de zona detectados en esta llamada */
     uint32_t epoch_opened;         /* 1 si se abrió una época nueva del almacén */
+    uint32_t compactions;          /* 1 si la época se abrió por presión del almacén (sin cambio de zona) */
     uint32_t store_full;           /* mallas/colores rechazados por el tope del almacén */
     uint32_t n_lights;
     uint32_t oob_reads;            /* lecturas de RAM rechazadas por estar fuera de rango */
@@ -85,6 +86,7 @@ void ns_store_set_limit(NsMeshStore *st, size_t bytes);   /* tope de bytes (amba
 int ns_store_new_epoch(NsMeshStore *st);
 uint32_t ns_store_count(const NsMeshStore *st);           /* mallas vivas (ambas épocas) */
 size_t ns_store_bytes(const NsMeshStore *st);
+void ns_store_set_compact(NsMeshStore *st, size_t bytes);   /* umbral de bytes a partir del cual se abre época para descartar mallas obsoletas (0 = automático) */
 uint32_t ns_store_zone_gen(const NsMeshStore *st);
 void ns_store_reset(NsMeshStore *st);   /* cambio de ejecutable: vacía la memoria de direcciones, sube zone_gen y abre época si se puede (productor) */
 int ns_store_is_stub(void);             /* siempre 0: sirve a la prueba de enlace (si el almacén fuese un sustituto débil devolvería 1) */

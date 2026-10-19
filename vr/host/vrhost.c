@@ -245,7 +245,8 @@ static void ns_frame_check(void);
 static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u);
 _Static_assert(VR_SKIP_WORLD == NS_SKIP_WORLD && VR_SKIP_FX == NS_SKIP_FX, "las marcas de batch y la decisión del consumidor deben coincidir");
 
-void mv_vrhost_set_render_mode(int native) { if (!atomic_load(&render_locked)) atomic_store(&render_req, native != 0); }
+void mv_vrhost_set_render_mode(int mode) { if (!atomic_load(&render_locked)) atomic_store(&render_req, mode <= 0 ? 0 : mode >= 2 ? 2 : 1); }   /* 0 gpu, 1 nativo, 2 solo nativo (depuración) */
+int mv_vrhost_render_only_native(void) { return atomic_load(&render_req) == 2; }
 int mv_vrhost_render_mode(void) { return atomic_load(&render_req); }
 int mv_vrhost_render_env_locked(void) { return atomic_load(&render_locked); }
 void mv_vrhost_native_renderer_ready(int ready) { atomic_store(&renderer_ready, ready != 0); }
@@ -1141,6 +1142,7 @@ void mv_vrhost_install(void) {
         const char *e = getenv("MV_RENDER");
         if (e && *e) {
             if (!strcmp(e, "nativo") || !strcmp(e, "native")) { atomic_store(&render_req, 1); atomic_store(&render_locked, 1); }
+            else if (!strcmp(e, "solo-nativo") || !strcmp(e, "native-only")) { atomic_store(&render_req, 2); atomic_store(&render_locked, 1); }
             else if (!strcmp(e, "gpu")) { atomic_store(&render_req, 0); atomic_store(&render_locked, 1); }
         }
         ns_extract_register();
