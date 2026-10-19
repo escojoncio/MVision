@@ -64,7 +64,7 @@ struct ContentView: View {
             }
         }
         // visionOS entrega los botones del mando por GameController solo a la app que lo declara en una vista con foco.
-        .handlesGameControllerEvents(matching: .gamepad)
+        .modifier(GameControllerEventsModifier())
         .focusable()
         .focusEffectDisabled()
         .focused($controllerFocus)
@@ -124,5 +124,16 @@ struct FolderPromptView: View {
             }
         }
         .padding(40)
+    }
+}
+
+/// `handlesGameControllerEvents` existe desde visionOS 2; el destino mínimo del proyecto es anterior.
+struct GameControllerEventsModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(visionOS 2.0, *) {
+            content.handlesGameControllerEvents(matching: .gamepad)
+        } else {
+            content
+        }
     }
 }

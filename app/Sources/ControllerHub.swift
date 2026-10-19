@@ -174,6 +174,7 @@ final class ControllerHub: @unchecked Sendable {
     /// queda a cero (solo el botón de menú llega). Se añade `GCEventInteraction` (tipo gamepad) a la vista raíz de cada
     /// ventana de la app. Idempotente. Hilo principal.
     func attachEventInteractions() {
+        guard #available(visionOS 2.0, *) else { return }
         var added = 0
         for scene in UIApplication.shared.connectedScenes {
             guard let ws = scene as? UIWindowScene else { continue }
