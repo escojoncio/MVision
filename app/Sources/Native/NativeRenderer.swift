@@ -342,7 +342,7 @@ final class NativeRenderer {
         p.pieces = table
         // transformación mundo del motor -> VR y niebla
         var t = [Float](repeating: 0, count: 12)
-        if ip.enabled != 0 { ns_interp_to_vr(&ip, &t) } else { let src = ns_scene_to_vr(sc); for i in 0..<12 { t[i] = src[i] } }
+        if ip.enabled != 0 { ns_interp_to_vr(&ip, &t) } else { let src = ns_scene_to_vr(sc)!; for i in 0..<12 { t[i] = src[i] } }
         var tv = matrix_identity_float4x4
         var finite = inWorld
         for i in 0..<12 where !t[i].isFinite { finite = false }
@@ -350,7 +350,7 @@ final class NativeRenderer {
             tv = simd_float4x4(columns: (SIMD4<Float>(t[0], t[4], t[8], 0), SIMD4<Float>(t[1], t[5], t[9], 0), SIMD4<Float>(t[2], t[6], t[10], 0), SIMD4<Float>(t[3], t[7], t[11], 1)))
         } else { p.draws.removeAll(); p.semis.removeAll() }
         p.toVR = tv
-        let rot = ns_scene_cam_rot(sc), eye = ns_scene_cam_eye(sc)
+        let rot = ns_scene_cam_rot(sc)!, eye = ns_scene_cam_eye(sc)!
         let fwd = SIMD3<Float>(rot[2], rot[5], rot[8])
         let eyeP = SIMD3<Float>(eye[0], eye[1], eye[2])
         p.fogFwd = SIMD4<Float>(fwd.x, fwd.y, fwd.z, -simd_dot(fwd, eyeP))
