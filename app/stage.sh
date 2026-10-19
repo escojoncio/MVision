@@ -2,6 +2,7 @@
 # Prepara app/.stage/ con los fuentes que compila el target (todo local, fuera del repo; .stage/ está ignorado):
 #   .stage/runtime  runtime/*.c y *.h (sin headless ni pruebas; nogen.c entra: el runtime corre sin código generado)
 #   .stage/vr/<x>   vr/{bridge,camera,input,scene,host,body,radar,hands,weapons,gameplay,ai}: solo el código de biblioteca (sin pruebas ni herramientas con main)
+#   (vr/tools/ -el probador local vrprobe, que usa el disco real- NO se copia: la lista de directorios de arriba es cerrada)
 #   .stage/metal    render/metal/vr_*.metal y vr_types.h (rg_gpu.metal es del renderer de referencia: no entra)
 #   .stage/res      sigs_hle.json (firmas del SDK enmascaradas, sin código del juego)
 #   .stage/extras   ficheros Swift opcionales (EXTRAS_DIR)
