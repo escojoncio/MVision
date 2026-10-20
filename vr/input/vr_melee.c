@@ -77,6 +77,18 @@ void vrm_frame(Vrm *v, const VrmEng *e, const VrmFrame *f) {
         else v->hist_n[s] = 0;
     }
     v->hold = f->hold; v->swinging = f->swinging;
+    if (v->retry_ttl > 0) {          /* golpe perdido sobre un enemigo en reacción: se repite en cuanto alguno pueda recibirlo y el puño siga cerca */
+        v->retry_ttl--;
+        int s = v->retry_side, done = 0;
+        if (s >= 0 && s < 2 && f->fist_ok[s] && f->fist_closed[s] && !v->p_punch && !v->in_punch) {
+            En en[MAXEN]; int n = scan(e, 0, en); const float zero[3] = {0, 0, 0};
+            if (n && nearest(f->fist[s], en, n, zero) <= 700.0f) {
+                v->p_punch = 1; v->p_punch_side = s; v->p_punch_ttl = v->ttl_frames; v->retry_ttl = 0; v->n_requeue++;
+                say(v, "[gest] golpe encolado: el enemigo ya puede recibirlo, se repite (mano=%d)", s); done = 1;
+            }
+        }
+        if (!done && v->retry_ttl == 0) say(v, "[gest] golpe encolado: caducó el margen sin poder repetirlo");
+    }
     if (!v->grab_owned) v->squeeze_pend = 0;
     if (f->squeeze) { v->squeeze_pend = 1; }
     if (f->punch_side >= 0 && f->punch_side < 2) { v->p_punch = 1; v->p_punch_side = f->punch_side; v->p_punch_ttl = v->ttl_frames; }
@@ -193,7 +205,17 @@ void vrm_post_hit(Vrm *v, const VrmEng *e, uint32_t work, uint32_t result) {
     float half[3]; for (int k = 0; k < 3; k++) half[k] = r16(e, work + VRM_W_TARGET + 16 + 2u * (uint32_t)k);
     En en[MAXEN]; int n = scan(e, 0, en);
     float d = n ? nearest(v->ctx_origin, en, n, half) : -1.0f;
-    if (reg) v->n_hit++; else { v->n_miss++; if (!n) v->n_nobody++; }
+    if (reg) v->n_hit++; else {
+        v->n_miss++;
+        if (!n) {
+            v->n_nobody++;
+            /* ¿hay un enemigo vivo y disponible pero en reacción (sin el bit de daño)? Se encola el golpe */
+            for (int i = 0; i < 64; i++) {
+                uint32_t b = VRM_TARGETS + 72u * (uint32_t)i; uint16_t cl = (uint16_t)r16(e, b);
+                if (r16(e, b + 2) == 2 && (cl & 1) && !(cl & 0x20) && !(cl & 4) && r16(e, b + 0x26) > 0) { v->retry_ttl = VRM_RETRY_FRAMES; v->retry_side = v->p_punch_side; break; }
+            }
+        }
+    }
     say(v, "[gest] golpe etapa %d: %s con el puño VR (%.0f,%.0f,%.0f mm), a %.2f m de la caja del enemigo, vida quitada=%u", v->stage,
         reg ? "REGISTRADO por el motor" : (n ? "FALLO" : "FALLO, ningún enemigo golpeable (en reacción o caído)"), v->ctx_origin[0], v->ctx_origin[1], v->ctx_origin[2], d > 0 ? d / 1000.0f : (d < 0 ? -1.0f : 0.0f), result);
 }
@@ -217,6 +239,7 @@ int vrm_punch_tick(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time) {
     if (!v->enable) return 0;
     if (v->p_punch) {
         if (v->combo_q < 2) { v->combo_q++; v->n_combo++; say(v, "[gest] golpe encadenado (combo) mano=%d en el tiempo %u de la animación", v->p_punch_side, time); }
+        else { v->n_qfull++; say(v, "[gest] golpe descartado: la cola del combo está llena (tiempo %u)", time); }
         v->p_punch = 0;
     }
     if (time == 0) { v->combo_q = v->combo_q > 2 ? 2 : v->combo_q; v->hold_n = 0; return 0; }
