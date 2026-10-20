@@ -612,7 +612,8 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     }
     if (w > VW) w = VW;
     if (h > VH) h = VH;
-    if (!full) aw = w;
+    if (!full) { aw = l->disp.aw > 0 && l->disp.aw < w ? l->disp.aw : w; }   /* panel: rectángulo nominal, pero lo que el rango deja fuera (basura de VRAM) no se dibuja */
+    if (full && !l->disp.enabled) aw = 0;   /* pantalla apagada: negro, como el fotograma normal */
     int ux0 = 0, uy0 = 0, ux1 = 0, uy1 = 0;   /* sucio de esta lista */
     /* Modo original: el rasterizado es el EXACTO de la GPU original (escala 1: 5 bits, tramado, mismo muestreo de texels) y la salida lo replica S x S (vecino más próximo
      * a escala entera): el texto sale idéntico en forma y color y nítido. Excepción: fotograma completo en 24 bits (vídeo), que necesita los 8 bits por canal. */

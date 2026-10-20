@@ -429,6 +429,47 @@ static void edge_case(const char *name, uint32_t mode, int x1, int x2, int y1, i
     free_list(c);
 }
 
+
+/* modo de 24 bits (vídeo) con rango no estándar: el fondo de la pantalla completa debe ser el marco de la GPU (8 bits por canal, márgenes negros) */
+static void codec24_case(void) {
+    gpu_capture_enable(0);
+    gpu_reset();
+    gpu_gp1(0x03000000);
+    gpu_gp1(0x08000000 | 0x40 | 0x10);   /* 384, 24 bits */
+    gpu_gp1(0x06000000 | (uint32_t)(0x230 + 12 * 7) | (uint32_t)(0x230 + 12 * 7 + 330 * 7) << 12);
+    gpu_gp1(0x07000000 | 0x13u | (0x13u + 240) << 10);
+    gpu_gp1(0x05000000 | 256u << 10);
+    env(0, 0, 1023, 511, 0, 0, 0);
+    uint32_t r = 77123u;
+    for (int y = 0; y < 240; y++) for (int x = 0; x < 600; x++) { r ^= r << 13; r ^= r >> 17; r ^= r << 5; gpu_vram[y][x] = (uint16_t)r; }
+    gpu_capture_vram_start(1);
+    gpu_capture_enable(1);
+    env(0, 0, 1023, 511, 10, 0, 0);
+    gpu_gp0(0x60204060); gpu_gp0(xy(900, 300)); gpu_gp0(xy(4, 4));   /* fuera de la zona mostrada */
+    gpu_gp1(0x05000000);
+    const GpuDrawList *l = gpu_capture_frame();
+    gpu_capture_vram_start(0);
+    VrScene sc;
+    GpuDrawList *c = l ? run_list(l, &sc) : NULL;
+    CHECK(c != NULL, "24 bits: lista");
+    if (!c) return;
+    GpuDisplay cd = c->disp;
+    CHECK(cd.depth24 && cd.pad_l == 12 && cd.aw == 330, "24 bits: pantalla pad_l=%d aw=%d", cd.pad_l, cd.aw);
+    size_t fwh = (size_t)cd.fw * cd.h;
+    uint8_t *ref = (uint8_t *)malloc(fwh * 4);
+    CHECK(gpu_present_rgba(&cd, NULL, ref, fwh) == fwh, "24 bits: marco");
+    VrLayer2D *L = vl2d_new();
+    vl2d_set_options(L, 2, VL_SMOOTH_ORIGINAL);
+    vl2d_run(L, c, &sc, 1);
+    int w = 0, h = 0, bad = 0;
+    const uint8_t *rg = vl2d_rgba(L, &w, &h);
+    CHECK(rg && w == cd.fw * 2 && h == cd.h * 2, "24 bits: capa %dx%d, marco %dx%d", w, h, cd.fw, cd.h);
+    for (int y = 0; y < h && rg && w == cd.fw * 2; y++) for (int x = 0; x < w; x++)
+        if (memcmp(&rg[((size_t)y * w + x) * 4], &ref[((size_t)(y / 2) * cd.fw + x / 2) * 4], 3)) bad++;
+    CHECK(bad == 0, "24 bits con rango no estándar: %d muestras distintas del marco de la GPU", bad);
+    vl2d_free(L); free(ref); free_list(c);
+}
+
 static void semi_mask_cases(void) {
     /* A. relleno semitransparente sobre negro (4 modos de mezcla): visible y igual a la GPU original. CLUT: 1 = blanco semitransparente, 2 = verde opaco (contorno), 3 = rojo semi */
     uint16_t font[64 * 8];
@@ -521,6 +562,11 @@ int main(void) {
     edge_case("512x240", 2, 0x27B, 0xC7B, 0x13, 0x13 + 240);
     edge_case("512x256", 2, 0x27B, 0xC7B, 0x13, 0x13 + 256);
     edge_case("320 con rango ampliado a 352", 1, 0x270 - 16 * 8, 0xC70 + 16 * 8, 0x13, 0x13 + 240);
+    edge_case("codec: modo 384, rango 318", 0x40, 0x230, 0x230 + 318 * 7, 0x13, 0x13 + 240);
+    edge_case("codec: modo 384, rango 300 desplazado 10", 0x40, 0x230 + 10 * 7, 0x230 + 310 * 7, 0x13, 0x13 + 240);
+    edge_case("codec: 384 entrelazado 480 lineas", 0x40 | 0x24, 0x230, 0xCB0, 0x13, 0x13 + 240);
+    edge_case("codec: 640 entrelazado 480 lineas", 0x03 | 0x24, 0x280, 0xC80, 0x13, 0x13 + 240);
+    codec24_case();
     edge_case("320 con rango reducido a 288", 1, 0x270 + 16 * 8, 0x270 + 304 * 8, 0x13, 0x13 + 240);
     semi_mask_cases();
     offlist_text();
