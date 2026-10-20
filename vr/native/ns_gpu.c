@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 uint32_t ns_gpu_tri_count(const NsMesh *m) {
     uint32_t n = 0;
@@ -563,7 +564,9 @@ const char *ns_gpu_fx_role_name(int role) { return role >= 0 && role < FXR_COUNT
  * a una profundidad inventada sobre el rayo de pantalla) NO lo hace. Por cada clave se guarda una referencia (posición en espacio de cabeza y en el mundo del motor); cuando la cabeza se ha movido lo bastante
  * respecto a ella (dexp = lo que habría cambiado si estuviera en el mundo) se compara lo que cambió de verdad: en cabeza (dh) y en el mundo (dw), en metros VR. */
 typedef struct { uint64_t key; uint32_t seen, born; float hs[3], pw[3]; uint8_t state, nlock, nworld, nwander, used; } TrkEnt;
-enum { TRK_N = 16384, TRK_PROBE = 16, TRK_STALE = 90 };
+enum { TRK_N = 16384, TRK_PROBE = 16, TRK_STALE = 90,
+       TRK_WORLD_AFTER = 50,   /* fotogramas (~1 s) sin evidencia de SIGUE tras los que un efecto quieto en el mundo del motor pasa a MUNDO */
+       TRK_YOUNG = 12 };       /* vida corta: menos de TRK_YOUNG fotogramas desde su nacimiento */
 struct NsGpuFxTrack { TrkEnt *e; uint32_t tick; };
 NsGpuFxTrack *ns_gpu_fx_track_create(void) {
     NsGpuFxTrack *t = (NsGpuFxTrack *)calloc(1, sizeof *t);
@@ -574,6 +577,9 @@ NsGpuFxTrack *ns_gpu_fx_track_create(void) {
 }
 void ns_gpu_fx_track_destroy(NsGpuFxTrack *t) { if (t) { free(t->e); free(t); } }
 void ns_gpu_fx_track_reset(NsGpuFxTrack *t) { if (t) { memset(t->e, 0, sizeof(TrkEnt) * TRK_N); t->tick = 0; } }
+/* Petición de reinicio desde otro hilo (recentrado: el espacio de cabeza y el mundo VR saltan juntos): la atiende el siguiente ns_gpu_fx_build_ex con seguimiento. */
+static atomic_int g_trk_reset_req;
+void ns_gpu_fx_track_request_reset(void) { atomic_store(&g_trk_reset_req, 1); }
 static TrkEnt *trk_slot(NsGpuFxTrack *t, uint64_t key, int *fresh) {
     uint32_t h = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 40) & (TRK_N - 1u), spare = TRK_N;
     for (int i = 0; i < TRK_PROBE; i++, h = (h + 1) & (TRK_N - 1u)) {
@@ -589,8 +595,9 @@ static TrkEnt *trk_slot(NsGpuFxTrack *t, uint64_t key, int *fresh) {
 }
 static float v3len(const float *a) { return sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]); }
 /* Actualiza un efecto seguido y devuelve su estado (NSG_FS_*). hs_now: posición en cabeza; cc_now / pw_now: centro en el mundo VR y en el del motor. dist_hold: distancia de retención (0 = ninguna). */
-static int trk_update(NsGpuFxTrack *t, uint64_t key, const float *M, const float head[3], const float ax[3][3], const float hs_now[3], const float cc_now[3], const float pw_now[3], float hold_m) {
+static int trk_update(NsGpuFxTrack *t, uint64_t key, const float *M, const float head[3], const float ax[3][3], const float hs_now[3], const float cc_now[3], const float pw_now[3], float hold_m, int *young) {
     int fresh = 0;
+    *young = 1;
     TrkEnt *e = trk_slot(t, key, &fresh);
     if (!e) return NSG_FS_WORLD;   /* sin sitio: no se sabe nada, se trata como mundo */
     const float dist = v3len(hs_now);
@@ -601,6 +608,7 @@ static int trk_update(NsGpuFxTrack *t, uint64_t key, const float *M, const float
         return e->state;
     }
     e->seen = t->tick;
+    *young = (t->tick - e->born) < (uint32_t)TRK_YOUNG;
     float cref[3], d[3], hexp[3];
     fx_vr(M, e->pw, cref);
     for (int r = 0; r < 3; r++) d[r] = cref[r] - head[r];
@@ -626,6 +634,10 @@ static int trk_update(NsGpuFxTrack *t, uint64_t key, const float *M, const float
             if (e->nwander >= 2) e->state = (hold_m > 0.0f && dist < hold_m) ? NSG_FS_WANDER : NSG_FS_WORLD;
         }
         memcpy(e->hs, hs_now, sizeof e->hs); memcpy(e->pw, pw_now, sizeof e->pw);
+    } else if (e->state == NSG_FS_UNKNOWN && e->nlock == 0 && t->tick - e->born >= (uint32_t)TRK_WORLD_AFTER) {
+        /* ~1 s sin que la cabeza se haya movido lo bastante para decidir (ni indicio de SIGUE): si el efecto está quieto en el mundo del motor, se da por anclado al mundo */
+        const float dw0 = v3len((float[3]){cc_now[0] - cref[0], cc_now[1] - cref[1], cc_now[2] - cref[2]});
+        if (dw0 <= 2.0f * eps) e->state = NSG_FS_WORLD;
     }
     return e->state;
 }
@@ -785,6 +797,7 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
     if (trk) {
         for (int r = 0; r < 3; r++) { hax[0][r] = prm->head_right[r]; hax[1][r] = prm->head_up[r]; }
         hax[2][0] = hax[0][1] * hax[1][2] - hax[0][2] * hax[1][1]; hax[2][1] = hax[0][2] * hax[1][0] - hax[0][0] * hax[1][2]; hax[2][2] = hax[0][0] * hax[1][1] - hax[0][1] * hax[1][0];
+        if (atomic_exchange(&g_trk_reset_req, 0)) ns_gpu_fx_track_reset(trk);   /* recentrado pedido desde otro hilo */
         trk->tick++;
     }
 
@@ -879,8 +892,9 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
         int trk_state = NSG_FS_WORLD, trk_drop = 0, trk_oncam = 0;
         float trk_hs[3] = {0, 0, 0};
         {   /* seguimiento (antes del adelanto de carteles: lo que cuenta es el sitio verdadero) */
-            const int oncam_hard = prm->drop_oncam && (e->flags & NS_EF_ON_CAMERA) && e->role != FXR_VIEW_OVERLAY;
-            if (trk || oncam_hard) {
+            const int oncam_cand = prm->drop_oncam && (e->flags & NS_EF_ON_CAMERA) && e->role != FXR_VIEW_OVERLAY;
+            if (trk || oncam_cand) {
+                int young = 1, oncam_hard = 0;
                 float cc[3] = {0, 0, 0}, pw[3] = {0, 0, 0};
                 const int npw = (e->kind == NS_EK_BILLBOARD) ? 1 : ((e->flags & NS_EF_LINE) || e->nv == 2) ? 2 : nq;
                 for (int v = 0; v < nq; v++) for (int r = 0; r < 3; r++) cc[r] += q[v][r] / (float)nq;
@@ -889,11 +903,17 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
                 else if (npw == 2) { float a2[3], b2[3]; fx_vr(M, e->p[0], a2); fx_vr(M, e->p[1], b2); for (int r = 0; r < 3; r++) cc[r] = 0.5f * (a2[r] + b2[r]); }
                 float d[3] = {cc[0] - prm->head[0], cc[1] - prm->head[1], cc[2] - prm->head[2]};
                 for (int a = 0; a < 3; a++) trk_hs[a] = d[0] * hax[a][0] + d[1] * hax[a][1] + d[2] * hax[a][2];
-                if (trk) { trk_state = trk_update(trk, ns_gpu_fx_key(e), M, prm->head, (const float (*)[3])hax, trk_hs, cc, pw, prm->hold_near_m); out->n_tracked++; }
+                if (trk) { trk_state = trk_update(trk, ns_gpu_fx_key(e), M, prm->head, (const float (*)[3])hax, trk_hs, cc, pw, prm->hold_near_m, &young); out->n_tracked++; }
                 const float dd = v3len(trk_hs);
+                /* pegado a la cámara por bandera (sin papel de pantalla): solo se descarta si además SIGUE, o si está a menos de 1 m (una bandera sola, lejos, no dice nada) */
+                oncam_hard = oncam_cand && (trk_state == NSG_FS_FOLLOW || dd < 1.0f);
+                const int is_fill = (e->src_key >> 24) == 0xF1u;
                 if (oncam_hard) { trk_state = NSG_FS_FOLLOW; trk_oncam = 1; trk_drop = 2; }
-                else if (trk_state == NSG_FS_FOLLOW || trk_state == NSG_FS_WANDER) trk_drop = 1;
-                else if (trk_state == NSG_FS_UNKNOWN && prm->hold_near_m > 0.0f && dd < prm->hold_near_m) trk_drop = 3;
+                else if (trk_state == NSG_FS_FOLLOW) {
+                    /* SIGUE: solo se descarta si es relleno, o si está a menos de 0,6 m Y ocupa más de ~10 grados (la envoltura del jugador, un velo); vaho y partículas pequeñas que van con el jugador se conservan */
+                    if (is_fill || (dd < 0.6f && fx_ang_deg(q, nq, prm->head) > 10.0f)) trk_drop = 1;
+                } else if (trk_state == NSG_FS_WANDER) trk_drop = 1;
+                else if (trk_state == NSG_FS_UNKNOWN && prm->hold_near_m > 0.0f && dd < prm->hold_near_m && !(young && dd < 0.15f)) trk_drop = 3;   /* los de vida corta a menos de 15 cm, mientras no se demuestre que SIGUEN, se dibujan */
                 int overlay_kept = 0;
                 if (trk_drop && e->role == FXR_VIEW_OVERLAY) { trk_drop = 0; overlay_kept = 1; trk_oncam = 2; }   /* recubrimiento de pantalla intencionado: se conserva, pero queda en el registro */
                 if (trk_state == NSG_FS_WORLD) out->n_world++;

@@ -81,7 +81,8 @@ typedef struct {
     int v_cov, v_bad;      /* píxeles que el panel toca / de ellos, los que no coinciden con el emulador al componerlos sobre el mundo (diferencia > 2 niveles de 5 bits) */
     int v_out;             /* píxeles que el panel NO toca y donde el mundo reproducido difiere del emulador (hueco del modelo, informativo) */
     int v_lost2d;          /* primitivas 2D texturadas sobre la pantalla que no fueron al panel ni al filtro (informativo: se pierden si el nativo no las dibuja) */
-    int v_patched;         /* píxeles sustituidos por la imagen del emulador (todos los de la zona mostrada si fallback) */
+    int v_patched;         /* píxeles sustituidos (los malos; con respaldo, los tocados por el panel dilatados 1 px): opacos con el color del emulador o recuperados por resta */
+    int v_sub, v_transp;   /* de ellos: recuperados por resta (emulador - mundo reproducido) / dejados transparentes por no ser fiable el mundo reproducido */
     double v_ms;           /* coste de la verificación (mundo reproducido + comparación), ms: el trabajador asíncrono lo descuenta de su medida de carga (la escala adaptativa no debe bajar por verificar) */
     int v_mean_milli;      /* diferencia media por canal (niveles de 8 bits x 1000) de los píxeles malos */
 } VrL2Info;

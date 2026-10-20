@@ -33,11 +33,13 @@ static struct {
 /* Cobertura que vería el usuario dentro de la vista del juego: lo que cubre el nativo MÁS lo que rellena ns_fill (ns_fill_run: (MATCH+SPLIT+SUBDIV+LOCKED+rellenados) / (tris - pose)).
  * Con menos de FG_COV_MIN triángulos sin pose no hay escena que medir (cover_pct vale 100 sin denominador): no cuenta. Con G.mx tomado. */
 static void fill_cover_note(const NsFillStats *st, uint32_t frame) {
-    uint32_t pose = st->cls[NF_POSE_PLAYER] + st->cls[NF_POSE_OTHER];
+    uint32_t pose = st->cls[NF_POSE_PLAYER] + st->cls[NF_POSE_OTHER] + st->cls[NF_SKIP_NEAR];   /* como el denominador de ns_fill_run: lo pegado a la cámara tampoco cuenta */
     if (st->tris < pose + FG_COV_MIN) return;
     int pct = (int)(st->cover_pct + 0.5f);
     G.cov_pct = pct < 0 ? 0 : pct > 100 ? 100 : pct; G.cov_frame = frame; G.cov_valid = 1;
 }
+
+static void cover_clear(void);
 
 static void *worker(void *arg) {
     (void)arg;
@@ -66,7 +68,7 @@ static void *worker(void *arg) {
         if (rc == 0 && haveZone) { zlast_g = zg; zlast_e = ep; zlast_ok = 1; }
         if (zchg) ns_fill_reset(ns_fill_session_fill(s));
         pthread_mutex_lock(&G.mx);
-        if (rc == 0) fill_cover_note(&st, frame);   /* la medida describe ESTA lista aunque un reset descarte sus efectos */
+        if (rc == 0 && (rgen == G.rgen || zchg)) fill_cover_note(&st, frame);   /* una medida de la escena anterior (reset pedido durante la ejecución) no repone la que el reset borró; con zona nueva la lista ya es la de la zona nueva */
         if (rgen != G.rgen || zchg) { G.n_out = 0; if (zchg) G.rgen++; }   /* reset pedido durante la ejecución, o zona nueva: el resultado es de la escena anterior */
         else if (rc == 0) {
             uint32_t n = 0; const NsEffect *e = ns_fill_session_effects(s, &n);
@@ -93,7 +95,7 @@ static int ensure_started(void) {   /* con G.mx tomado */
         G.every = n ? (unsigned)strtoul(n, NULL, 10) : 1u;
         if (!G.every) G.every = 1u;
         G.init = 1;
-        if (e && e[0] == '0') G.off = 1;
+        if (e && e[0] == '0') { G.off = 1; cover_clear(); }   /* MV_FILL=0: ninguna medida de relleno */
     }
     if (G.off) return 0;
     if (!G.ram) {
@@ -165,7 +167,9 @@ int ns_fill_glue_last(uint32_t *frame, int *pct) {
     return ok;
 }
 
-void ns_fill_glue_reset(void) { pthread_mutex_lock(&G.mx); G.reset = 1; G.rgen++; G.n_out = 0; pthread_mutex_unlock(&G.mx); }
+/* Cambio de escena / de clase de vista: la medida de cobertura es de la escena anterior y no debe sobrevivir (la siguiente la repone) */
+static void cover_clear(void) { G.cov_valid = 0; G.cov_frame = 0; G.cov_pct = 0; }
+void ns_fill_glue_reset(void) { pthread_mutex_lock(&G.mx); G.reset = 1; G.rgen++; G.n_out = 0; cover_clear(); pthread_mutex_unlock(&G.mx); }
 
 #ifdef NS_FILL_GLUE_TEST
 /* Solo pruebas: registra una medida de cobertura como la haría el trabajador tras una ejecución. */

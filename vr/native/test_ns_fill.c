@@ -280,6 +280,11 @@ static void test_intro_cover(void) {
     NsFillStats po; memset(&po, 0, sizeof po); po.tris = 40; po.cls[NF_POSE_PLAYER] = 36; po.cover_pct = 100.0f;
     ns_fill_glue_test_cover(&po, 950);
     CHECK(fr == 813 && ns_fill_glue_last(&fr, &pct) == 1 && fr == 813, "solo pose: no cuenta");
+    /* M1: el reinicio (cambio de escena / de clase de vista) borra la medida de cobertura: la de la escena anterior no sobrevive */
+    ns_fill_glue_reset();
+    CHECK(ns_fill_glue_last(&fr, &pct) == 0, "M1: tras ns_fill_glue_reset no hay medida");
+    ns_fill_glue_test_cover(&st, 1200);
+    CHECK(ns_fill_glue_last(&fr, &pct) == 1 && fr == 1200 && pct >= 95, "M1: la medida siguiente la repone");
     /* escena que el relleno no puede reponer (todo detrás de la cámara): cobertura total baja */
     GpuOp bad[24];
     for (int i = 0; i < 24; i++) { bad[i] = list_of(-3000 + 250 * i, -500, 4000, 200, 0); for (int k = 0; k < 4; k++) bad[i].v[k].vflags = GPU_VF_BEHIND; }
@@ -346,16 +351,50 @@ static void test_world_anchor_and_headlock(void) {
 }
 static void test_near_skip(void) {
     NsFill *f = ns_fill_create(); NsFillCfg cfg; ns_fill_cfg_default(&cfg); NsFillStats st; NsFillCam cam = cam_id();
-    float v[4][3] = {{-300, -300, 100}, {300, -300, 100}, {-300, 300, 100}, {300, 300, 100}};   /* centro a 100 u del ojo, 60 cm de lado */
+    float v[4][3] = {{-150, -150, 100}, {150, -150, 100}, {-150, 150, 100}, {150, 150, 100}};   /* centro a 100 u del ojo, 30 cm de lado: pequeño */
     GpuOp near = list_quad(v, 0, TX, CLX);
     step(f, NULL, &near, 1, &cam, NULL, &cfg, 1, &st);
     CHECK(st.filled_tris == 0 && st.cls[NF_SKIP_NEAR] == 2, "junto a la cabeza: no se rellena (junto=%u relleno=%u)", st.cls[NF_SKIP_NEAR], st.filled_tris);
     GpuOp far = list_of(-500, -500, 4000, 1000, 0);
     step(f, NULL, &far, 1, &cam, NULL, &cfg, 2, &st);
     CHECK(st.filled_tris == 2 && st.cls[NF_SKIP_NEAR] == 0, "lejos: se rellena");
+    /* M7: una pared grande (aristas > 50 cm) que pasa a 10 cm del ojo NUNCA se omite */
+    float wl[4][3] = {{-300, -300, 100}, {300, -300, 100}, {-300, 300, 100}, {300, 300, 100}};
+    GpuOp wall = list_quad(wl, 0, TX, CLX);
+    ns_fill_reset(f); step(f, NULL, &wall, 1, &cam, NULL, &cfg, 3, &st);
+    CHECK(st.cls[NF_SKIP_NEAR] == 0 && st.filled_tris == 2, "M7: pared grande a 10 cm: no se omite (junto=%u relleno=%u)", st.cls[NF_SKIP_NEAR], st.filled_tris);
+    /* M7: la distancia es al punto MÁS CERCANO del triángulo, no a su centro: A=(0,0,220) a 220 u, centro del primer triángulo a 269 u (> 250) */
+    float nq[4][3] = {{0, 0, 220}, {330, 0, 220}, {0, 330, 220}, {330, 330, 220}};
+    GpuOp nearest = list_quad(nq, 0, TX, CLX);
+    ns_fill_reset(f); step(f, NULL, &nearest, 1, &cam, NULL, &cfg, 4, &st);
+    CHECK(st.cls[NF_SKIP_NEAR] == 1 && st.filled_tris == 1, "M7: punto mas cercano a 22 cm, centro a 27 cm: se omite el triangulo A,B,D y no el B,D,C (junto=%u relleno=%u)", st.cls[NF_SKIP_NEAR], st.filled_tris);
     cfg.near_skip = 0;
-    ns_fill_reset(f); step(f, NULL, &near, 1, &cam, NULL, &cfg, 3, &st);
+    ns_fill_reset(f); step(f, NULL, &near, 1, &cam, NULL, &cfg, 5, &st);
     CHECK(st.filled_tris == 2, "regla apagada: se rellena (%u)", st.filled_tris);
+    ns_fill_destroy(f);
+}
+/* M2 / M3: cobertura. Lo omitido por cercano sale del denominador (como la pose); lo que recorta el tope de salida sale del numerador. */
+static void test_cover_near_cap(void) {
+    NsFill *f = ns_fill_create(); NsFillCfg cfg; ns_fill_cfg_default(&cfg); NsFillStats st; NsFillCam cam = cam_id();
+    GpuOp ops[24];
+    float v[4][3] = {{-150, -150, 100}, {150, -150, 100}, {-150, 150, 100}, {150, 150, 100}};
+    for (int i = 0; i < 12; i++) ops[i] = list_of(-3000 + 250 * i, -500, 4000 + 40 * i, 200, 0);
+    for (int i = 12; i < 24; i++) ops[i] = list_quad(v, 0, TX, CLX);
+    CHECK(step(f, NULL, ops, 24, &cam, NULL, &cfg, 1, &st) == 0, "run");
+    CHECK(st.cls[NF_SKIP_NEAR] == 24 && st.cover_pct > 95.0f, "M2: 24 triangulos pegados al ojo no cuentan como escena sin cubrir: cobertura %.1f%% (junto=%u)", st.cover_pct, st.cls[NF_SKIP_NEAR]);
+    NsFillStats pr = st;
+    /* el glue aplica la misma regla: solo escena pegada al ojo = nada que medir */
+    memset(&pr, 0, sizeof pr); pr.tris = 24; pr.cls[NF_SKIP_NEAR] = 24; pr.cover_pct = 100.0f;
+    uint32_t fr = 0; int pct = 0;
+    ns_fill_glue_reset();
+    ns_fill_glue_test_cover(&pr, 10);
+    CHECK(ns_fill_glue_last(&fr, &pct) == 0, "M2: solo triangulos pegados al ojo: el glue no mide");
+    ns_fill_destroy(f);
+    f = ns_fill_create(); ns_fill_cfg_default(&cfg);
+    cfg.max_out = 10;
+    for (int i = 0; i < 24; i++) ops[i] = list_of(-3000 + 250 * i, -500, 4000 + 40 * i, 200, 0);
+    CHECK(step(f, NULL, ops, 24, &cam, NULL, &cfg, 1, &st) == 0, "run tope");
+    CHECK(st.cls[NF_SKIP_CAP] > 0 && st.cover_pct < 85.0f && st.cover_pct > 40.0f, "M3: el tope recorto %u rellenos: cobertura %.1f%% (no 100)", st.cls[NF_SKIP_CAP], st.cover_pct);
     ns_fill_destroy(f);
 }
 /* Tubería completa: relleno -> ns_gpu_fx_build con seguimiento. Mundo: dibujado y fijo con la cabeza girando; pegado a la vista: se detecta y se descarta. */
@@ -408,6 +447,7 @@ int main(void) {
     test_triangle_and_format();
     test_world_anchor_and_headlock();
     test_near_skip();
+    test_cover_near_cap();
     test_pipeline_follow();
     test_glue();
     test_glue_stale();

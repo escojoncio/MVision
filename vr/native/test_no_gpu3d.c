@@ -91,6 +91,11 @@ int main(void) {
     CHECK(strstr(vh, "int mv_vrhost_render_mode(void) { return 1; }") != NULL, "mv_vrhost_render_mode devuelve siempre «nativo»");
     CHECK(strstr(vh, "int mv_vrhost_render_only_native(void) { return 0; }") != NULL, "no existe «solo nativo»");
     CHECK(count(vh, "!strcmp(e, \"gpu\")") == 0 && count(vh, "atomic_store(&render_req, 0)") == 0, "MV_RENDER=gpu no cambia el modo");
+    /* B6: el recentrado reinicia el seguimiento de efectos (el espacio de cabeza salta); hold_near 15 cm */
+    { char *vi = slurp("app/Sources/VRInput.swift", 1);
+      CHECK(vi && strstr(vi, "ns_gpu_fx_track_request_reset()") != NULL, "VRInput.recenter reinicia el seguimiento de efectos");
+      CHECK(strstr(nr, "prm.hold_near_m = 0.15") != NULL, "retencion de cercanos a 15 cm");
+      free(vi); }
     /* 7) la colisión de la cabeza usa solo la escena nativa (sin listas de la GPU) */
     CHECK(count(vh, "vrhc_feed_scene(") == 0 || count(vh, "vrhc_feed_scene(&") == 0, "la colisión de la cabeza no se alimenta de la lista de la GPU");
     /* 8) cine: fmv / motor / respaldo (la lista de la GPU no se dibuja en 3D en ninguno; el respaldo es la imagen de la VRAM en la pantalla de cine plana) */

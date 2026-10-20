@@ -56,8 +56,9 @@ typedef struct {
     uint32_t max_out;          /* tope de efectos de salida (def. 6000) */
     float cut_dist, cut_cos;   /* corte de cámara: ojo movido más de cut_dist (def. 3000) o eje Z girado con coseno < cut_cos (def. 0,7) -> se vacía la persistencia */
     int bias;                  /* NsEffect.depth_bias de lo que corrige texturas / parcial (def. 2) */
-    float near_skip;           /* un triángulo cuyo centro queda a menos de near_skip unidades del ojo (def. 250 = 25 cm) no se rellena: es la envoltura del propio jugador / geometría pegada al plano de la cámara, que desproyectada
+    float near_skip;           /* un triángulo pequeño (ver near_edge_max) cuyo punto MÁS CERCANO queda a menos de near_skip unidades del ojo (def. 250 = 25 cm) no se rellena: es la envoltura del propio jugador / geometría pegada al plano de la cámara, que desproyectada
                                 * queda rígida a la cabeza (0 = sin regla) */
+    float near_edge_max;       /* near_skip solo omite triángulos pequeños: arista máxima < near_edge_max (def. 500 = 50 cm; 0 = sin límite). Las paredes grandes nunca se omiten por cercanas */
     float view_match;          /* radio (unidades de vista) con el que un relleno nuevo hereda la identidad de uno visto hace poco con la MISMA firma en la misma posición de VISTA aunque su sitio en el mundo haya cambiado: es lo que
                                 * delata a lo pegado a la cámara (def. 24; 0 = solo por mundo) */
     void *dbg;                 /* FILE* opcional (herramientas): una línea por triángulo que se rellena o se descarta, con su causa */

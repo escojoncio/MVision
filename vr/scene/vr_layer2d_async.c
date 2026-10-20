@@ -214,8 +214,8 @@ int vl2a_report(VrL2Async *A, char *buf, int n) {
     pthread_mutex_lock(&A->mx);
     static const char *sm[3] = {"original", "nitido", "suave"};
     int sd = A->info.smooth < 0 || A->info.smooth > 2 ? 0 : A->info.smooth;
-    char vbuf[200];   /* panel sobre la pantalla 3D del motor: píxeles del panel / distintos del emulador (tras componer sobre el mundo reproducido), sustituidos, huecos del modelo fuera del panel y 2D perdidas */
-    if (A->info.verify) snprintf(vbuf, sizeof vbuf, "si panel_px=%d distintos=%d dif_malos=%.3f sustituidos=%d mundo_distinto_fuera=%d perdidas_2d=%d coste=%.1fms", A->info.v_cov, A->info.v_bad, A->info.v_mean_milli / 1000.0, A->info.v_patched, A->info.v_out, A->info.v_lost2d, A->info.v_ms);
+    char vbuf[300];   /* panel sobre la pantalla 3D del motor: píxeles del panel / distintos del emulador (tras componer sobre el mundo reproducido), sustituidos, huecos del modelo fuera del panel y 2D perdidas */
+    if (A->info.verify) snprintf(vbuf, sizeof vbuf, "si panel_px=%d distintos=%d dif_malos=%.3f sustituidos=%d(resta=%d transparentes=%d) mundo_distinto_fuera=%d perdidas_2d=%d coste=%.1fms", A->info.v_cov, A->info.v_bad, A->info.v_mean_milli / 1000.0, A->info.v_patched, A->info.v_sub, A->info.v_transp, A->info.v_out, A->info.v_lost2d, A->info.v_ms);
     else snprintf(vbuf, sizeof vbuf, "%s", A->info.verify_req ? "pedida_no_aplicable(sin vram_end, 24 bits, escala>1 o sin clasificacion)" : "no");
     int r = snprintf(buf, (size_t)n,
         "[capa2d] escala=%d(raster %d, objetivo %d) retraso=%u envios=%u descartes=%u ejecutados=%u publicadas=%u caidas_shader(-1)=%u trabajador=%.1fms suavizado=%s vram_start=%s vram_end=%s marco=%dx%d aw=%d pad_l=%d %s prims=%d mascara=%d solo_vram=%d fidelidad=%d/%d dif=%.3f respaldo_emulador=%s | verificacion=%s",

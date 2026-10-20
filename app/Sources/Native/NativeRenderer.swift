@@ -966,8 +966,8 @@ final class NativeRenderer {
         // Unica red de seguridad: un efecto con el centro a menos de 5 cm de la cabeza se descarta. near_log_m: radio del registro `fx-cerca`.
         prm.comfort_deg = 0; prm.comfort_dmin_m = 0; prm.oncam_drop_m = 0; prm.near_log_m = 0.5; prm.drop_inside_m = 0.05
         // Nada va fijo a la cabeza salvo los recubrimientos de pantalla (papel VIEW_OVERLAY, que se dibujan aparte): lo pegado a la cámara por bandera se descarta; lo que mantiene su posición en espacio de cabeza
-        // mientras la cabeza se mueve respecto al mundo del motor, también (SIGUE); lo cercano (< 30 cm) hasta no demostrar que está anclado al mundo, se retiene.
-        prm.track = fxTrack; prm.hold_near_m = 0.30; prm.drop_oncam = 1
+        // mientras la cabeza se mueve respecto al mundo del motor, también (SIGUE); lo cercano (< 15 cm) hasta no demostrar que está anclado al mundo, se retiene.
+        prm.track = fxTrack; prm.hold_near_m = 0.15; prm.drop_oncam = 1
         prm.depth_row = (-sortView.columns.0.z, -sortView.columns.1.z, -sortView.columns.2.z, -sortView.columns.3.z)
         let rc: Int32 = toVR12.withUnsafeBufferPointer { (tv) -> Int32 in
             withUnsafePointer(to: &fxCam) { (camP) -> Int32 in

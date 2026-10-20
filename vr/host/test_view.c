@@ -202,6 +202,20 @@ int main(void) {
             CHECK(vrview_cover_feed(&fi, &sn, 1500, 1, 1015, 97, 1, 1190, 50) == 0, "todo caducado: sin medida");
             CHECK(vrview_cover_feed(&fi, &sn, 300, 1, 290, 90, 0, 0, 0) == 1 && fi.cover_new == 1 && sn == 290, "el contador retrocede (carga): medida nueva");
             CHECK(vrview_cover_feed(NULL, &sn, 1, 0, 0, 0, 0, 0, 0) == 0 && vrview_cover_feed(&fi, NULL, 1, 0, 0, 0, 0, 0, 0) == 0, "punteros nulos");
+            /* M1: gana la medida MÁS RECIENTE de las dos fuentes (no siempre la del relleno); empate: el relleno */
+            { VrViewIn ni; memset(&ni, 0, sizeof ni); uint32_t sx = 0;
+              CHECK(vrview_cover_feed(&ni, &sx, 1000, 1, 990, 99, 1, 998, 30) == 1 && ni.cover_src == 1 && ni.cover1 == 31 && sx == 998, "M1: nativo mas reciente que el relleno: gana el nativo (src %d)", ni.cover_src);
+              CHECK(vrview_cover_feed(&ni, &sx, 1030, 1, 1025, 99, 1, 1025, 30) == 1 && ni.cover_src == 2 && ni.cover1 == 100, "M1: empate: el relleno");
+              CHECK(vrview_cover_feed(&ni, &sx, 1100, 1, 1040, 99, 1, 1090, 30) == 1 && ni.cover_src == 1, "M1: relleno vigente pero mas viejo que el nativo: el nativo"); }
+            /* M1: la ventana de histéresis no mezcla fuentes: al cambiar de fuente se reinicia */
+            { VrView wv; vrview_reset(&wv); VrViewIn wi; memset(&wi, 0, sizeof wi); wi.scene3d = 1;
+              wi.cover_src = 2; wi.cover1 = 11; wi.cover_new = 1; vrview_step(&wv, &wi);
+              wi.cover_new = 1; vrview_step(&wv, &wi);
+              CHECK(__builtin_popcount(wv.cov_bad_mask) == 2 && wv.cov_src == 2, "M1: dos malas del relleno en la ventana (%d)", __builtin_popcount(wv.cov_bad_mask));
+              wi.cover_src = 1; wi.cover1 = 11; wi.cover_new = 1; vrview_step(&wv, &wi);
+              CHECK(__builtin_popcount(wv.cov_bad_mask) == 1 && wv.cov_src == 1, "M1: cambia la fuente: ventana nueva, solo cuenta la medida nueva (%d)", __builtin_popcount(wv.cov_bad_mask));
+              wi.cover_src = 2; wi.cover1 = 100; wi.cover_new = 1; vrview_step(&wv, &wi);
+              CHECK(wv.cov_bad_mask == 0 && __builtin_popcount(wv.cov_good_mask) == 1 && wv.cov_src == 2, "M1: de vuelta a la otra fuente: ventana nueva otra vez"); }
         }
         /* (a) FMV: el decodificador activo gana al 3D y a la falta de partida; 12 fotogramas de gracia los pone el host */
         vrview_reset(&m);
