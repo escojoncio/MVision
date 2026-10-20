@@ -121,6 +121,39 @@ static void t_contact(void) {
     }
 }
 
+static vrg_in_t grab_setup(void);
+/* barrido continuo y reglas de agarre vs puño */
+static void t_rules(void) {
+    vrg_out_t o; vrg_t g;
+    /* puño a ~4 m/s con fotogramas de 0,09 s (0,36 m por fotograma, un fotograma perdido): ningún fotograma cae dentro de la cápsula fina, el segmento sí la cruza */
+    vrg_init(&g); g.cfg.body_radius = 0.02f; g.cfg.fist_radius = 0.02f; g.cfg.contact_tol = 0.0f; g.cfg.melee_range = 0;
+    vrg_in_t in = base(); in.dt = 0.09f; in.n_en = 1; in.en[0].p[0] = 0.0f; in.en[0].p[1] = 1.0f; in.en[0].p[2] = 0.5f; in.fist_btn[1] = 1;
+    in.hand[1][0] = -1.3f; in.hand[1][1] = 1.2f; in.hand[1][2] = 0.5f; settle(&g, &in, 8);
+    int ev = 0, ct = 0;
+    for (int i = 1; i <= 8; i++) { in.hand[1][0] = -1.3f + 0.36f * i; upd(&g, &in, &o); if (o.punch_side == 1) { ev++; ct = o.gest.contact; } }
+    CHECK(ev == 1);                                                    /* x = -0.94,-0.58,-0.22,0.14...: el enemigo en x=0 se salta entre dos fotogramas */
+    (void)ct;
+    /* acercamiento rápido con pulsación tardía (el botón se pulsa a mitad del movimiento): puño, nunca agarre */
+    vrg_init(&g); in = grab_setup(); in.hand[1][0] = 0.1f; in.hand[1][1] = 1.4f; in.hand[1][2] = 0.4f; settle(&g, &in, 12);
+    int gs = 0, pn = 0;
+    for (int i = 1; i <= 14; i++) { in.hand[1][2] = 0.4f + 0.08f * i; if (i == 4) in.fist_btn[1] = 1; upd(&g, &in, &o); gs += o.grab_start; pn += o.punch_side == 1; }
+    CHECK(gs == 0 && pn >= 1);
+    /* mano quieta en el cuello + pulsación: agarre (llega al motor tras el margen) */
+    vrg_init(&g); in = grab_setup(); in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 1.15f; settle(&g, &in, 12);
+    in.fist_btn[1] = 1; upd(&g, &in, &o); CHECK(o.grab_start == 0 && o.grab_why && !strcmp(o.grab_why, "pendiente"));
+    gs = 0; pn = 0; for (int i = 0; i < 10; i++) { upd(&g, &in, &o); gs += o.grab_start; pn += o.punch_side >= 0; }
+    CHECK(gs == 1 && pn == 0);
+    /* pulsación y golpe inmediato: el agarre pendiente se cancela y sale el puño */
+    vrg_init(&g); in = grab_setup(); in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 1.0f; settle(&g, &in, 12);
+    in.fist_btn[1] = 1; upd(&g, &in, &o); gs = 0; pn = 0; int canc = 0;
+    for (int i = 1; i <= 8; i++) { in.hand[1][2] = 1.0f + 0.1f * i; upd(&g, &in, &o); gs += o.grab_start; pn += o.punch_side == 1; canc += o.grab_why && !strcmp(o.grab_why, "cancelado_puno"); }
+    CHECK(gs == 0 && pn == 1 && canc >= 1);
+    /* mano rápida al pulsar: motivo mano_rapida */
+    vrg_init(&g); in = grab_setup(); in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 0.75f; settle(&g, &in, 12);
+    for (int i = 1; i <= 4; i++) { in.hand[1][2] = 0.75f + 0.06f * i; upd(&g, &in, &o); }
+    in.fist_btn[1] = 1; in.hand[1][2] += 0.06f; upd(&g, &in, &o);  CHECK(o.grab_start == 0 && o.punch_side == 1 && o.grab_why && (!strcmp(o.grab_why, "tras_golpe") || !strcmp(o.grab_why, "mano_rapida")));   /* el puño sale en el mismo fotograma */
+}
+
 /* andar rápido (cuerpo, cabeza y manos juntos 4 m/s): no es un golpe */
 static void t_walk(void) {
     vrg_t g; vrg_init(&g); vrg_in_t in = with_enemy(); in.fist_btn[1] = 1; vrg_out_t o; int cnt = 0;
@@ -132,6 +165,8 @@ static void t_walk(void) {
     CHECK(cnt == 0);
 }
 
+/* el agarre llega al motor tras un margen de 0,15 s sin que la mano se lance: avanza hasta que arranque (o 10 VBlanks) */
+static void pgrab(vrg_t *g, vrg_in_t *in, vrg_out_t *o) { for (int i = 0; i < 10; i++) { upd(g, in, o); if (o->grab_start) return; } }
 /* enemigo a 0,4 m delante del cuerpo mirando a +Z (le damos la espalda): cuello (0,1.45,1.3) y espalda (0,1.2,1.05) */
 static vrg_in_t grab_setup(void) {
     vrg_in_t in = base(); in.n_en = 1; in.en[0].p[0] = 0; in.en[0].p[1] = 1.0f; in.en[0].p[2] = 1.3f; in.en[0].yaw = 0;
@@ -143,7 +178,7 @@ static void t_grab(void) {
     /* mano derecha abierta cerca del cuello; se PULSA R1 -> agarre directo */
     in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 1.15f;
     settle(&g, &in, 12);
-    in.fist_btn[1] = 1; upd(&g, &in, &o);
+    in.fist_btn[1] = 1; pgrab(&g, &in, &o);
     CHECK(o.grab_start == 1 && o.grab_side == 1 && o.grab_en == 0 && o.grab_hold == 1 && o.event == VRG_EV_GRAB);
     CHECK(o.grab_why && !strcmp(o.grab_why, "ok"));
     CHECK(!(o.press & VRG_SQUARE) && (o.mask & VRG_R1));
@@ -159,12 +194,12 @@ static void t_grab(void) {
     in.fist_btn[1] = 1; upd(&g, &in, &o); CHECK(o.grab_start == 0 && o.grab_why && !strcmp(o.grab_why, "mano_lejos"));
     /* justo en el límite: 0,28 m del cuello sí, 0,34 m no */
     vrg_init(&g); in = grab_setup(); in.hand[1][0] = 0.28f; in.hand[1][1] = 1.45f; in.hand[1][2] = 1.3f; settle(&g, &in, 12);
-    in.fist_btn[1] = 1; upd(&g, &in, &o); CHECK(o.grab_start == 1);
+    in.fist_btn[1] = 1; pgrab(&g, &in, &o); CHECK(o.grab_start == 1);
     vrg_init(&g); in = grab_setup(); in.hand[1][0] = 0.34f; in.hand[1][1] = 1.45f; in.hand[1][2] = 1.3f; settle(&g, &in, 12);
     in.fist_btn[1] = 1; upd(&g, &in, &o); CHECK(o.grab_start == 0);
     /* la espalda también vale: 0,1 m de (0,1.2,1.05) */
     vrg_init(&g); in = grab_setup(); in.hand[0][0] = 0.0f; in.hand[0][1] = 1.2f; in.hand[0][2] = 1.0f; settle(&g, &in, 12);
-    in.fist_btn[0] = 1; upd(&g, &in, &o); CHECK(o.grab_start == 1 && o.grab_side == 0);
+    in.fist_btn[0] = 1; pgrab(&g, &in, &o); CHECK(o.grab_start == 1 && o.grab_side == 0);
     /* REGLA DURA: con el puño ya cerrado (botón mantenido de antes) NUNCA se agarra, ni aunque la mano llegue al cuello */
     vrg_init(&g); in = grab_setup(); in.fist_btn[1] = 1; in.hand[1][0] = 0.6f; in.hand[1][1] = 1.2f; in.hand[1][2] = 0.5f; settle(&g, &in, 30);
     int st = 0; const char *why = NULL;
@@ -184,7 +219,7 @@ static void t_grab(void) {
     CHECK(pe == 1);
     in.fist_btn[1] = 0; upd(&g, &in, &o); in.fist_btn[1] = 1; in.hand[1][2] = 1.15f; upd(&g, &in, &o);   /* soltar y pulsar justo después del golpe */
     CHECK(o.grab_start == 0 && o.grab_why && !strcmp(o.grab_why, "tras_golpe"));
-    settle(&g, &in, 30); in.fist_btn[1] = 0; settle(&g, &in, 3); in.fist_btn[1] = 1; upd(&g, &in, &o); CHECK(o.grab_start == 1);   /* pasado el tiempo, sí */
+    settle(&g, &in, 30); in.fist_btn[1] = 0; settle(&g, &in, 3); in.fist_btn[1] = 1; pgrab(&g, &in, &o); CHECK(o.grab_start == 1);   /* pasado el tiempo, sí */
     /* un golpe con el puño estando agarrado = apretar/rematar */
     vrg_init(&g); in = grab_setup(); in.holding = 1; in.hand[0][2] = 0.4f; in.fist_btn[0] = 1; in.hand[0][0] = -0.2f; settle(&g, &in, 12);
     int sqz = 0, pun = 0; for (int i = 1; i <= 8; i++) { in.hand[0][2] = 0.4f + 0.1f * i; upd(&g, &in, &o); sqz += o.squeeze; pun += o.punch_side >= 0; }
@@ -236,7 +271,7 @@ static void t_chest(void) {
     float c1[3]; chest_center(&in, 1, c1);
     in.n_en = 1; in.en[0].p[0] = c1[0]; in.en[0].p[1] = c1[1] - 0.45f; in.en[0].p[2] = c1[2] + 0.1f; in.en[0].yaw = 0;
     memcpy(in.hand[1], c1, sizeof c1); settle(&g, &in, 12);
-    in.fist_btn[1] = 1; upd(&g, &in, &o);
+    in.fist_btn[1] = 1; pgrab(&g, &in, &o);
     CHECK(o.grab_start == 1 && o.menu_open[1] == 0 && !(o.press & VRG_R1));
     /* si el agarre no es posible (puño... enemigo caído), cae a la ventana */
     vrg_init(&g); in.en[0].down = 1; in.fist_btn[1] = 0; settle(&g, &in, 12); in.fist_btn[1] = 1; upd(&g, &in, &o);
@@ -301,7 +336,7 @@ static void t_robust(void) {
 }
 
 int main(void) {
-    t_punch(); t_contact(); t_walk(); t_grab(); t_chest(); t_knock(); t_peek(); t_robust();
+    t_punch(); t_contact(); t_rules(); t_walk(); t_grab(); t_chest(); t_knock(); t_peek(); t_robust();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails != 0;
 }

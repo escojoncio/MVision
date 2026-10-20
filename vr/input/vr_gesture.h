@@ -55,6 +55,9 @@ typedef struct {
     float cooldown_s;        /* entre golpes (0,2) */
     float contact_speed;     /* golpe por CONTACTO: velocidad mínima (relativa a la cabeza) del puño que atraviesa el volumen del enemigo, en cualquier dirección salvo hacia la cabeza (0,8 m/s) */
     float body_radius, body_low, body_high;   /* cápsula del cuerpo del enemigo sobre su posición del motor (cintura): radio 0,28, 0,5 por debajo, 0,65 por encima */
+    float grab_slow_speed;   /* agarre solo si al pulsar (y durante grab_delay_s) la mano va más lenta que esto respecto a la cabeza (0,5 m/s); más rápido es un PUÑO */
+    float grab_delay_s;      /* el agarre no llega al motor hasta pasado este margen (0,15 s) sin que la mano se haya lanzado: así un golpe inmediato lo cancela */
+    float contact_latch_s;   /* un contacto del puño con el cuerpo sigue valiendo este tiempo (0,15 s): el puño puede cerrarse o acabar el enfriamiento justo después */
     float fist_radius, contact_tol;           /* esfera del puño (0,12) y tolerancia extra (0,05) */
 } vrg_cfg_t;
 
@@ -148,6 +151,10 @@ typedef struct {
     float item_t[2];         /* s con el clic de stick mantenido (dominante, otra) */
     vrg_gest_t gpk[2];       /* mejor registro del movimiento en curso por mano (se emite al terminar) */
     float prev_head[3], prev_fwd[2]; int have_head;
+    float prev_hand[2][3]; int prev_hand_ok[2];   /* mano (mundo) del VBlank anterior: barrido continuo contra la cápsula del enemigo */
+    float contact_t[2];      /* s restantes del contacto recordado por mano */
+    int disarm[2];           /* tras un golpe por contacto no vale otro hasta que el puño frene (un mismo movimiento no pega dos veces) */
+    float gp_t[2]; int gp_en[2];   /* agarre pendiente (s hasta que llegue al motor) y enemigo */
 } vrg_t;
 
 void vrg_cfg_defaults(vrg_cfg_t *c);
