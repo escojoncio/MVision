@@ -1072,6 +1072,7 @@ static DumpBuf *dbc = &DBS[0];                /* el juego en el que copia el hil
 #define DB (*dbc)
 static int slot_busy[2];                      /* bajo DMX: el juego de búferes tiene una copia sin escribir aún */
 static struct { int slot; char dir[512]; } jobq[2];
+static int dump_wait;                         /* bajo DMX: ganchos de fotograma que lleva esperando la captura del punto de enganche (pareja) */
 static int job_n, job_writing, dump_acc;      /* bajo DMX: copias pendientes de escribir, escritura en curso, resultado acumulado del pedido (1 ok, 2 parcial, -1 error) */
 
 static void *dump_worker(void *arg) {
@@ -1092,6 +1093,7 @@ static void *dump_worker(void *arg) {
         NsDumpSrc s = { d->ram, d->scratch, d->vram, d->gte, d->has_list ? &d->list : NULL, haveimg ? d->rgba : NULL, haveimg ? fw : 0, haveimg ? fh : 0, d->meta };
         int rc = ns_dump_write(dir, &s);
         fprintf(stderr, "[vrhost] volcado %s: %s\n", dir, rc == 0 ? "ok" : rc > 0 ? "parcial" : "ERROR");
+        fprintf(stderr, rc < 0 ? "[volcado] fallo: no se pudo escribir %s\n" : "[volcado] escrito: %s%s\n", dir, rc > 0 ? " (parcial)" : "");
         pthread_mutex_lock(&DMX);
         int r = rc == 0 ? 1 : rc > 0 ? 2 : -1;
         if (dump_acc == 0 || r == -1 || (r == 2 && dump_acc == 1)) dump_acc = r;
@@ -1145,6 +1147,7 @@ static int dump_request(const char *dir, const char *dir2) {
         if (pair) snprintf(dump_dir2, sizeof dump_dir2, "%s", dir2);
         dump_need = pair ? (DN_STAGE | DN_FRAME) : DN_ANY;
         dump_acc = 0;
+        dump_wait = 0;
         dump_state = DS_REQ; dump_res = 0; rc = 0;
     }
     pthread_mutex_unlock(&DMX);
@@ -1311,6 +1314,16 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
 static void frame_hook(Cpu *c, uint32_t f) {
     ns_cpu_last = c;
     frame_hook_body(c, f);
+    /* El volcado funciona SIEMPRE (intro, menús, títulos, cinemáticas, muerte): la captura del punto de enganche solo existe cuando el extractor nativo corre (con escena de partida); sin
+     * ella la pareja esperaba para siempre y el gesto acababa en «sin resultado». Tras 3 ganchos de fotograma sin esa captura se descarta y se vuelca solo el final del fotograma. */
+    pthread_mutex_lock(&DMX);
+    if (dump_state == DS_REQ && (dump_need & DN_STAGE)) {
+        if (++dump_wait >= 3) {
+            dump_need &= ~DN_STAGE;
+            fprintf(stderr, "[volcado] sin captura del punto de enganche (no hay escena nativa en este momento): se vuelca solo el final del fotograma\n");
+        }
+    }
+    pthread_mutex_unlock(&DMX);
     dump_capture(c, f, NULL);   /* si el pedido no se atendió con una lista (sin consumidor, cola llena, sin lista nueva), se vuelca sin ella */
 }
 

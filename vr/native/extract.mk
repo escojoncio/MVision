@@ -73,3 +73,18 @@ test-net: $(B)/test_ns_net
 test-net-san:
 	$(MAKE) -f vr/native/extract.mk test-net B=vr/native/build-extract-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 .PHONY: test-net test-net-san
+
+# Pantalla 3D de las cinemáticas reproducida fuera de la app (ns_cinema_ref + herramienta nscine sobre volcados; ver tools/nscine.c).
+#   make -f vr/native/extract.mk nscine       compila vr/native/build-extract/nscine
+CINSRC := vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_cpuref.c vr/native/ns_cinema.c vr/native/ns_cinema_ref.c vr/native/ns_gpu.c
+$(B)/nscine: vr/native/tools/nscine.c vr/native/ns_dump.c $(CINSRC) vr/native/ns_cinema_ref.h vr/native/ns_cinema.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/tools/nscine.c vr/native/ns_dump.c $(CINSRC) -lm -lpthread -o $@
+nscine: $(B)/nscine
+.PHONY: nscine
+
+# Regresión sintética de la pantalla 3D de las cinemáticas (orientación y descarte por detrás): make -f vr/native/extract.mk test-cine
+$(B)/test_ns_cine: vr/native/test_ns_cine.c vr/native/ns_cinema.c vr/native/ns_cinema_ref.c vr/native/ns_cpuref.c vr/native/ns_gpu.c vr/native/ns_cinema_ref.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/test_ns_cine.c vr/native/ns_cinema.c vr/native/ns_cinema_ref.c vr/native/ns_cpuref.c vr/native/ns_gpu.c -lm -lpthread -o $@
+test-cine: $(B)/test_ns_cine
+	$(B)/test_ns_cine
+.PHONY: test-cine

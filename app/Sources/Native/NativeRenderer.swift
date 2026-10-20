@@ -241,6 +241,7 @@ final class NativeRenderer {
     /// La última escena del puente es VÁLIDA (partida, listas y escenario completos) pero NO apta para primera persona (sin TOVR_OK o PLAYER_OK: vehículos, ascensores, zonas
     /// especiales, jugador sin enlazar tras un cambio de zona). Con histéresis (4 fotogramas para entrar, 3 aptos para salir): entonces se pinta con la cámara del juego.
     private(set) var sceneUnfit = false
+    private var cullBack = false
     private var unfitFrames = 0, fitFrames = 0
     private var fogScene = NsFog()
     private var lastView0 = matrix_identity_float4x4         // vista del primer ojo (solo diagnóstico)
@@ -599,6 +600,7 @@ final class NativeRenderer {
               sc.pointee.inst != nil, sc.pointee.piece != nil else { hold(); return false }
         let validBits = sc.pointee.valid
         let cinema = cinemaGameView != nil
+        cullBack = cinema        // cinemática: caras de una sola cara descartadas por detrás desde la cámara del juego (ver NsGpuUniforms.cull_eye)
         do {
             let c = sc.pointee.cam
             if c.h.isFinite && c.h > 8 && c.h < 4096 { camH = c.h }
@@ -1252,6 +1254,7 @@ final class NativeRenderer {
         let fv = fromVR12
         u.fromvr = (SIMD4<Float>(fv[0], fv[1], fv[2], fv[3]), SIMD4<Float>(fv[4], fv[5], fv[6], fv[7]), SIMD4<Float>(fv[8], fv[9], fv[10], fv[11]))
         u.misc = SIMD4<Float>(layered ? 0 : Float(max(0, min(1, eyeIndex))), 0, 0, 0)
+        u.cull_eye = cullBack ? SIMD4<Float>(camEye.x, camEye.y, camEye.z, 1) : SIMD4<Float>(0, 0, 0, 0)
         enc.setCullMode(.none)
         enc.setFragmentTexture(vram, index: 0)
         enc.setVertexBuffer(vertPool.buffer, offset: 0, index: Int(NSG_BUF_VERTS))
