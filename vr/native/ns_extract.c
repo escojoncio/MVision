@@ -304,6 +304,11 @@ void ns_store_reset(NsMeshStore *s) {
 }
 /* 0: este es el almacén real del extractor (en la app no hay otra definición de ns_store_*; ver la prueba de enlace del banco). */
 int ns_store_is_stub(void) { return 0; }
+/* Mallas propias del productor (manos nuevas): se copian a la época actual. El id lo pone quien llama (ns_mesh_content_hash). 1 = añadida, 0 = ya estaba, -1 = no cabe / malla inválida. */
+int ns_store_put(NsMeshStore *s, const NsMesh *m) {
+    if (!s || !m || !m->verts || !m->faces || !m->n_verts || !m->n_faces || (m->n_norms && !m->norms)) return -1;
+    return store_add_mesh(s, m);
+}
 
 /* ---------------------------------------------------------------------------------------------------------------- contexto */
 typedef struct {

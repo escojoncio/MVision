@@ -51,3 +51,14 @@ test-solid: $(B)/test_ns_solid
 test-solid-san:
 	$(MAKE) -f vr/native/extract.mk test-solid B=vr/native/build-extract-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 .PHONY: nssolid test-solid test-solid-san
+
+# Manos articuladas propias (ns_hand + vr/body/vr_hand_mesh): escena y manopla sintéticas.
+#   make -f vr/native/extract.mk test-hand
+HANDSRC := vr/native/ns_hand.c vr/native/ns_player.c vr/native/ns_solid.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_gpu.c vr/body/vr_hand_mesh.c
+$(B)/test_ns_hand: vr/native/test_ns_hand.c $(HANDSRC) vr/native/ns_hand.h vr/body/vr_hand_mesh.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native -Ivr/body vr/native/test_ns_hand.c $(HANDSRC) -lm -lpthread -o $@
+test-hand: $(B)/test_ns_hand
+	$(B)/test_ns_hand
+test-hand-san:
+	$(MAKE) -f vr/native/extract.mk test-hand B=vr/native/build-extract-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+.PHONY: test-hand test-hand-san

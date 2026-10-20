@@ -89,7 +89,10 @@ size_t ns_store_bytes(const NsMeshStore *st);
 void ns_store_set_compact(NsMeshStore *st, size_t bytes);   /* umbral de bytes a partir del cual se abre época para descartar mallas obsoletas (0 = automático) */
 uint32_t ns_store_zone_gen(const NsMeshStore *st);
 void ns_store_reset(NsMeshStore *st);   /* cambio de ejecutable: vacía la memoria de direcciones, sube zone_gen y abre época si se puede (productor) */
-int ns_store_is_stub(void);             /* siempre 0: sirve a la prueba de enlace (si el almacén fuese un sustituto débil devolvería 1) */
+int ns_store_is_stub(void);
+/* Productor: añade a la época actual una malla que NO viene de la RAM del motor (las manos propias, ns_hand). Copia los datos. Si ya está en la época actual no hace nada
+ * (hay que volver a ofrecerla cada fotograma: tras abrirse una época nueva la anterior deja de contar). 1 = añadida, 0 = ya estaba, -1 = no cabe o malla inválida. */
+int ns_store_put(NsMeshStore *st, const NsMesh *m);             /* siempre 0: sirve a la prueba de enlace (si el almacén fuese un sustituto débil devolvería 1) */
 
 /* ---- escena ---- */
 /* Reserva las tablas con al menos NS_MIN_* de capacidad (se sube al mínimo). 0 = bien. */

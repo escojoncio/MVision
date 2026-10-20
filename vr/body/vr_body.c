@@ -17,6 +17,7 @@
 #include <string.h>
 #include "vr_body.h"
 #include "vr_fist.h"
+#include "vr_hand_mesh.h"
 #include "../bridge/bridge_addrs.h"
 
 #define PI_F 3.14159265358979f
@@ -379,7 +380,7 @@ static struct {
     int pend_n;
     Saved sv[6];
     FistSave fs[2];
-    struct { int ok; uint32_t model; float side, grip; } pf[2];     /* mano y agarre del último apply, para vrbody_prefist */
+    struct { int ok; uint32_t model; float side, grip; float R[9], t[3]; } pf[2];     /* mano y agarre del último apply, para vrbody_prefist; R,t = marco de mundo de la pieza mano tras la IK */
 } G;
 
 /* Giro de agarre -> mano alrededor del eje de los dedos (z local de la mano): izquierda +deg, derecha -deg (ver VrBodyConfig.hand_roll_deg). */
@@ -486,6 +487,31 @@ void vrbody_init(const VrBodyConfig *c) {
 const VrBodyConfig *vrbody_config(void) { return &G.cfg; }
 void vrbody_set_view_fn(VrBodyViewFn fn) { G.view_fn = fn; }
 void vrbody_set_apply_hook(VrBodyHook fn) { G.hook = fn; }
+void vrbody_set_fist_enabled(int on) { G.cfg.fist_enabled = on ? 1 : 0; }
+
+int vrbody_hand_state(int side, float *grip, float R[9], float t[3]) {
+    if (side < 0 || side > 1 || !G.pf[side].ok) return 0;
+    if (grip) *grip = G.pf[side].grip;
+    if (R) memcpy(R, G.pf[side].R, sizeof G.pf[side].R);
+    if (t) memcpy(t, G.pf[side].t, sizeof G.pf[side].t);
+    return 1;
+}
+
+/* Punto de golpe de la mano nueva (vr_hand_mesh): yemas con la mano abierta, nudillos con el puño, en el MUNDO del motor (mm). Mano de dimensiones por defecto (la forma
+ * nominal de la mano del personaje); solo se usa para el ataque cuerpo a cuerpo, donde la diferencia de milímetros no importa. */
+int vrbody_fist_point(int side, float out[3]) {
+    static VrHand hand[2];
+    static int built[2];
+    if (side < 0 || side > 1 || !out || !G.pf[side].ok) return 0;
+    if (!built[side]) { if (vrhand_build(&hand[side], NULL, side == 1 ? 1 : -1) != 0) return 0; built[side] = 1; }
+    float xf[VRHAND_BONES][12], p[3];
+    vrhand_pose(&hand[side], G.pf[side].grip, xf);
+    vrhand_fist_point(&hand[side], xf, p);
+    const float *R = G.pf[side].R, *t = G.pf[side].t;
+    for (int i = 0; i < 3; i++) out[i] = R[3 * i] * p[0] + R[3 * i + 1] * p[1] + R[3 * i + 2] * p[2] + t[i];
+    return all_finite(out, 3);
+}
+
 void vrbody_set_grip(int side, float v) { if ((side == 0 || side == 1) && isfinite(v)) G.hand[side].grip_set = clampf(v, 0.0f, 1.0f); }
 void vrbody_set_dominant(int side) { G.cfg.dominant = side ? 1 : 0; }
 void vrbody_set_armed(int on) { G.armed = on ? 1 : 0; }
@@ -925,6 +951,7 @@ int vrbody_apply(uint8_t *ram) {
             G.dbg_frame_ok[s] = all_finite(f, 16);
         }
         G.pf[s].ok = 1; G.pf[s].model = pw.model; G.pf[s].side = -rig.side; G.pf[s].grip = h->grip_cur * we_w;
+        memcpy(G.pf[s].R, nw[2].R, sizeof G.pf[s].R); memcpy(G.pf[s].t, nw[2].t, sizeof G.pf[s].t);
         if (cfg->fist_enabled && h->grip_cur * we_w >= cfg->fist_min_grip) fist_apply(ram, s, pw.model, -rig.side, h->grip_cur * we_w);
         dbg->driven = 1; dbg->w = h->w; dbg->grip = h->grip_cur; v_cp(dbg->target_wrist, wt); memcpy(dbg->target_hand, Rtb, sizeof Rtb); dbg->sol = sol;
         driven++;

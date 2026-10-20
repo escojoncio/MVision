@@ -146,6 +146,42 @@ static void t_hook(void) {
 static NsDecideIn din(uint64_t now) { NsDecideIn d = {1, 1, 1, 1, now, 250000000ull}; return d; }
 static int n_gpu_batches(const uint8_t *skip_if_native, int n, const NsDecision *d) { int k = 0; for (int i = 0; i < n; i++) if (!(skip_if_native[i] & d->skip)) k++; return k; }
 
+/* Cierre de la escena (ns_hook_set_finalize): solo con jugador enlazado y escena apta, con el mapa y tras la IK, antes de publicar. */
+static int fin_calls, fin_bound, fin_parts4; static float fin_x;
+static void fin_cb(NsScene *s, NsMeshStore *st, const NsPlayerMap *m, void *u) {
+    (void)st; (void)u;
+    fin_calls++; fin_bound = m->bound; fin_parts4 = m->part[4].n; fin_x = s->piece[1 + 4].world.m[3];
+    s->n_inst--;   /* se nota en lo publicado */
+}
+static void t_finalize(void) {
+    setup_ram();
+    NsBridge *b = ns_bridge_create(NULL);
+    ns_hook_init(b);
+    ns_hook_set_extractor(extract, NULL, (NsMeshStore *)0x42);
+    ns_hook_set_context(ctx, NULL);
+    ns_hook_set_finalize(fin_cb, NULL);
+    ctx_key = OBJ; ctx_hide = 1; ctx_refresh = NS_PARTS_ARMS;
+    NsView v;
+    ns_capture(RAM, NULL);
+    put_part(4, 1024, 4242);
+    ns_hook_post_ik(RAM);
+    ns_hook_tick(RAM);
+    CHECK(fin_calls == 1 && fin_bound && fin_parts4 == 2 && fin_x == 4242.0f, "cierre tras la IK con el mapa del jugador (n=%d x=%.0f)", fin_calls, fin_x);
+    CHECK(ns_bridge_acquire(b, ns_now_ns(), &v) && v.cur->n_inst == 2, "lo que cambia el cierre sale publicado");
+    /* escena no apta (la IK no llegó): no se llama */
+    setup_ram(); fin_calls = 0;
+    ns_capture(RAM, NULL); ns_hook_tick(RAM);
+    CHECK(fin_calls == 0, "sin IK ni PLAYER_OK no hay cierre (%d)", fin_calls);
+    /* sin jugador */
+    ctx_key = 0; ns_capture(RAM, NULL); ns_hook_tick(RAM);
+    CHECK(fin_calls == 0, "sin jugador no hay cierre");
+    /* sin cierre registrado: normal */
+    ctx_key = OBJ; ns_hook_set_finalize(NULL, NULL); ns_capture(RAM, NULL); put_part(4, 1024, 1); ns_hook_post_ik(RAM); ns_hook_tick(RAM);
+    CHECK(fin_calls == 0, "NULL desengancha");
+    ns_hook_init(NULL);
+    ns_bridge_destroy(b);
+}
+
 static void t_decide(void) {
     /* escena publicada con los bits que pida cada caso; devuelve la decisión del consumidor */
     setup_ram();
@@ -253,7 +289,7 @@ static void t_decide(void) {
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     RAM = (uint8_t *)calloc(1, 0x200000);
-    t_player(); t_hook(); t_decide();
+    t_player(); t_hook(); t_finalize(); t_decide();
     free(RAM);
     printf(fails ? "ns_hook: %d fallos\n" : "ns_hook: todas las pruebas OK\n", fails);
     return fails != 0;

@@ -1,5 +1,6 @@
 /* ns_adapt: ver ns_adapt.h. */
 #include "ns_adapt.h"
+#include "ns_hand.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,7 +78,7 @@ size_t ns_adapt_scene(const NsScene *sc, const NsMeshStore *st, const NsAdaptOpt
 
     for (uint32_t ii = 0; ii < sc->n_inst; ii++) {
         const NsInstance *in = &sc->inst[ii];
-        if (opt && opt->skip_key && in->key == opt->skip_key) { S->drop_skip_inst += in->n_pieces; continue; }
+        if ((opt && opt->skip_key && in->key == opt->skip_key) || ns_key_is_hand(in->key)) { S->drop_skip_inst += in->n_pieces; continue; }
         for (uint32_t k = 0; k < in->n_pieces; k++) {
             uint32_t pi = in->first_piece + k;
             if (pi >= sc->n_piece) break;

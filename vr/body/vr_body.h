@@ -151,6 +151,13 @@ void vrbody_set_grip(int side, float v);     /* side 0 izquierda / 1 derecha; v 
 void vrbody_set_dominant(int side);          /* 0 izquierda / 1 derecha */
 void vrbody_set_armed(int on);               /* la mano dominante empuña un arma: pose cerrada como mínimo armed_grip */
 void vrbody_set_enabled(int on);
+/* Puño deformado de la malla del motor (vr_fist): 0 la desactiva (las manos nuevas de ns_hand ya hacen el puño); cambia la configuración en caliente. */
+void vrbody_set_fist_enabled(int on);
+/* Estado de la mano en el último apply (hilo de emulación): agarre efectivo 0..1 y marco de mundo de la pieza mano tras la IK (R fila-mayor 3x3, t en mm del motor). 0 si ese
+ * brazo no se manejó. side 0 izquierda / 1 derecha. R y t pueden ser NULL. */
+int vrbody_hand_state(int side, float *grip, float R[9], float t[3]);
+/* Punto de golpe (yemas / nudillos de la mano articulada) en el mundo del motor, mm; 0 si el brazo no se manejó en el último apply. */
+int vrbody_fist_point(int side, float out[3]);
 
 /* Agarre de un enemigo (gestos de vr/input): mientras `active`, las DOS manos del personaje se pegan con una transición suave a los lados del cuello del enemigo
  * (la izquierda a su lado `left` del cuello, la derecha al otro; dedos hacia el cuello, palma girada grab_roll_deg) y vuelven al mando al soltar. `neck` y `left` en el

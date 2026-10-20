@@ -68,6 +68,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
                 for (int i = 0; i < 3; i++) { in.hand[s][i] = w[i] * 0.001f; mf.fist[s][i] = w[i]; }
                 in.grip[s] = gr; in.trig[s] = tg;
                 mf.fist_ok[s] = 1; mf.fist_closed[s] = in.fist_btn[s];
+                { float fp[3]; if (mv_vrhost_hands_new() && vrbody_fist_point(s, fp)) for (int i = 0; i < 3; i++) mf.fist[s][i] = fp[i]; }   /* el golpe sale de los nudillos de la mano nueva, no del mando */
                 float dmm = mv_vrhost_wall_distance(w, 400.0f);     /* geometría estática de la escena (la de la colisión de la cabeza) */
                 in.wall_valid[s] = dmm >= 0.0f; in.wall_dist[s] = dmm >= 0.0f ? dmm * 0.001f : 1.0f;
             }

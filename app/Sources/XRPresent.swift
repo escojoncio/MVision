@@ -38,6 +38,7 @@ struct XRViewConfig {
     var debugAxes = false           // dibuja los ejes de los mandos (dispositivo, agarre, apuntado) y de las manos del personaje
     var aiRange = 1                 // IA de enemigos: alcance de visión, índice de aiRanges (0 = x1, 1 = x1,5, 2 = x2)
     var aiHead = true               // IA de enemigos: ven también la cabeza VR (no solo el ojo del personaje)
+    var newHands = true             // manos del personaje en primera persona: nuevas (articuladas, con puño propio) u originales del motor
     var smoothMotion = true         // fluidez de la locomoción: el mundo se corrige por fotograma de render (giro del stick y avance extrapolados entre escenas del juego)
 
     enum Cutscene: String, CaseIterable { case stereo, cinema, diorama, scene }
@@ -57,7 +58,13 @@ struct XRViewConfig {
         mv_vrhost_set_ai_head(head ? 1 : 0)
 #endif
     }
-    static func applyStoredAI() { let c = load(); applyAI(range: c.aiRange, head: c.aiHead) }
+    /// Manos nuevas/originales del personaje en el render nativo (vr/host): idempotente; se llama al arrancar y tras cada cambio del menú.
+    static func applyHands(_ on: Bool) {
+#if !MV_BENCH
+        mv_vrhost_set_hands_new(on ? 1 : 0)
+#endif
+    }
+    static func applyStoredAI() { let c = load(); applyAI(range: c.aiRange, head: c.aiHead); applyHands(c.newHands) }
 
     private static func f(_ k: String, _ d: Float, _ lo: Float, _ hi: Float) -> Float {
         guard UserDefaults.standard.object(forKey: k) != nil else { return d }
@@ -88,6 +95,7 @@ struct XRViewConfig {
         c.hideRealHands = b("xr.view.hideHands", true)
         c.debugAxes = b("xr.view.debugAxes", false)
         c.smoothMotion = b("xr.view.smoothMotion", true)
+        c.newHands = b("xr.hands.new", true)
         let ar = UserDefaults.standard.integer(forKey: "xr.ai.range")
         c.aiRange = UserDefaults.standard.object(forKey: "xr.ai.range") == nil ? 1 : min(max(ar, 0), aiRanges.count - 1)
         c.aiHead = b("xr.ai.head", true)
@@ -112,6 +120,7 @@ struct XRViewConfig {
         d.set(hideRealHands, forKey: "xr.view.hideHands")
         d.set(debugAxes, forKey: "xr.view.debugAxes")
         d.set(smoothMotion, forKey: "xr.view.smoothMotion")
+        d.set(newHands, forKey: "xr.hands.new")
         d.set(aiRange, forKey: "xr.ai.range")
         d.set(aiHead, forKey: "xr.ai.head")
     }
@@ -203,7 +212,7 @@ struct XRNav: Equatable {
 }
 
 enum XRMenuItem: Int, CaseIterable {
-    case resume, recenter, calibrateHands, width, distance, curve, sharp, integerScale, smooth2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, debugAxes, aiMenu, diagnostics, exit
+    case resume, recenter, calibrateHands, width, distance, curve, sharp, integerScale, smooth2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, newHands, debugAxes, aiMenu, diagnostics, exit
 }
 
 /// Submenú «IA de enemigos».
@@ -462,6 +471,7 @@ final class XRPresenter {
         case .turnMode: Self.cycleTurnMode(dir)
         case .vignette: Self.cycleVignette(dir)
         case .hideHands: cfg.hideRealHands.toggle(); cfg.save()      // la escena lo lee de UserDefaults (@AppStorage): se guarda al momento
+        case .newHands: cfg.newHands.toggle(); XRViewConfig.applyHands(cfg.newHands); cfg.save()
         case .debugAxes: cfg.debugAxes.toggle()
         case .aiMenu: if dir >= 0 { page = 2; sel = 0 }
         case .diagnostics: if dir >= 0 { page = 1; sel = 0 }
@@ -536,6 +546,7 @@ final class XRPresenter {
             case .turnMode: return ("Giro con la palanca derecha", Self.turnModeName())
             case .vignette: return ("Viñeta de confort", Self.vignetteName())
             case .hideHands: return ("Ocultar mis manos reales", yn(cfg.hideRealHands))
+            case .newHands: return ("Manos del personaje", cfg.newHands ? "Nuevas" : "Originales")
             case .debugAxes: return ("Ejes de mandos y manos", yn(cfg.debugAxes))
             case .aiMenu: return ("IA de enemigos", "▸")
             case .diagnostics: return ("Diagnóstico", XRDiag.shared.settings.isNormal ? "▸" : "activo ▸")
