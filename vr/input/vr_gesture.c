@@ -9,11 +9,11 @@ void vrg_cfg_defaults(vrg_cfg_t *c) {
     memset(c, 0, sizeof *c);
     c->enable = 1; c->fist_required = 1; c->fist_haptic = 0.12f; c->item_hold_s = 0.35f; c->punch_dir_cos = 0.35f; c->trig_on = 0.6f; c->trig_off = 0.3f; c->punch = c->grab = c->knock = c->peek = 1;
     c->right_handed = 1;
-    c->punch_speed = 1.0f; c->knock_speed = 0.4f; c->knock_touch = 0.08f; c->knock_cooldown_s = 0.25f; c->knock_enemy_m = 1.0f; c->reach_min = 0.20f; c->melee_range = 3.0f; c->front_cos = 0.5f;
-    c->grab_range = 1.3f; c->neck_radius = 0.30f; c->neck_height = 0.45f; c->back_dist = 0.25f; c->grab_after_punch_s = 0.3f;
-    c->chest_down = 0.37f; c->chest_side = 0.15f; c->chest_fwd = 0.12f; c->chest_radius = 0.22f;
-    c->grip_on = 0.65f; c->grip_off = 0.35f; c->peek_on = 0.12f; c->peek_off = 0.06f; c->cooldown_s = 0.2f;
-    c->throw_speed = 1.2f; c->throw_reach = 0.30f; c->grab_slow_speed = 0.5f; c->grab_delay_s = 0.3f; c->contact_latch_s = 0.15f; c->contact_speed = 0.8f; c->body_radius = 0.28f; c->body_low = 0.5f; c->body_high = 0.65f; c->fist_radius = 0.12f; c->contact_tol = 0.05f;
+    c->punch_speed = 0.5f; c->knock_speed = 0.4f; c->knock_touch = 0.08f; c->knock_cooldown_s = 0.25f; c->knock_enemy_m = 1.0f; c->reach_min = 0.20f; c->melee_range = 3.0f; c->front_cos = 0.5f;
+    c->grab_range = 1.3f; c->neck_radius = 0.36f; c->neck_height = 0.45f; c->back_dist = 0.25f; c->grab_after_punch_s = 0.2f;
+    c->chest_down = 0.37f; c->chest_side = 0.15f; c->chest_fwd = 0.12f; c->chest_radius = 0.28f;
+    c->grip_on = 0.65f; c->grip_off = 0.35f; c->peek_on = 0.12f; c->peek_off = 0.06f; c->cooldown_s = 0.12f;
+    c->throw_speed = 1.0f; c->throw_reach = 0.30f; c->grab_slow_speed = 0.9f; c->grab_delay_s = 0.3f; c->contact_latch_s = 0.15f; c->contact_speed = 0.5f; c->body_radius = 0.28f; c->body_low = 0.5f; c->body_high = 0.65f; c->fist_radius = 0.12f; c->contact_tol = 0.05f;
 }
 void vrg_reset(vrg_t *g) {
     vrg_cfg_t c = g->cfg;
@@ -68,7 +68,7 @@ static int hand_vel(vrg_t *g, int s, const float p[3], double t, float v[3]) {
 }
 
 void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
-    memset(out, 0, sizeof *out); out->punch_side = -1; out->knock_side = -1; out->throw_side = -1; out->knock_try_side = -1; out->grab_side_try = -1; out->grab_side = -1; out->grab_en = -1;
+    memset(out, 0, sizeof *out); out->punch_side = -1; out->knock_side = -1; out->throw_side = -1; out->knock_try_side = -1; out->grab_side_try = -1; out->grab_side = -1; out->grab_en = -1; out->chest_try = -1; out->chest_dist = -1.0f;
     const vrg_cfg_t *c = &g->cfg;
     float dt = (fin(in->dt) && in->dt > 0.001f) ? (in->dt > 0.1f ? 0.1f : in->dt) : 0.02f;
     int ok = c->enable && in->active && fin3(in->body) && fin3(in->head) && fin3(in->head_u) && fin(in->yaw);
@@ -301,7 +301,8 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
             if (busy && !grabbing) why = "manos_ocupadas";
             else if (in->stance >= 2) why = "ocupado";
             else if (g->settle > 0) why = "calma";
-            else if (g->cool > 0) why = "enfriamiento";
+            else if (g->cool > 0 || g->disarm[s]) why = "enfriamiento";
+            else if (g->gp_t[s] > 0 && !dir_ok) why = "agarre_pendiente";   /* agarre pendiente junto al cuello: un tirón de lado/atrás/abajo no es un puño (el contacto con el cuerpo no cuenta) */   /* disarm: el mismo barrido ya disparó (hasta que la mano frene) */
             else if (c->fist_required && (!fst[s] || (((g->menu_hold >> s) & 1) && !(spd[s] >= sp_min && (contact || (dir_ok && ne >= 0 && nd <= c->melee_range)))))) why = "sin_puno";
             else if (!contact && spd[s] < c->punch_speed) why = "lento";
             else if (!contact && !dir_ok) why = "dir";
@@ -354,6 +355,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
     /* zona del pecho de cada mano (ventana de objetos = izquierda, armas = derecha): se calcula con la cabeza y el rumbo del torso del
      * personaje (el cuerpo del jugador), no con coordenadas fijas del espacio de seguimiento: vale sentado, de pie o girado */
     int chest[2] = {0, 0};
+    float chest_d[2] = {-1, -1};
     {
         float fx = sinf(in->yaw), fz = cosf(in->yaw), lx = fz, lz = -fx;     /* delante y izquierda del torso */
         for (int s = 0; s < 2; s++) {
@@ -361,7 +363,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
             float sd = s == 0 ? 1.0f : -1.0f;
             float ctr[3] = {in->head[0] + fx * c->chest_fwd + lx * c->chest_side * sd, in->head[1] - c->chest_down, in->head[2] + fz * c->chest_fwd + lz * c->chest_side * sd};
             float dx = in->hand[s][0] - ctr[0], dy = in->hand[s][1] - ctr[1], dz = in->hand[s][2] - ctr[2];
-            chest[s] = sqrtf(dx * dx + dy * dy + dz * dz) <= c->chest_radius;
+            chest_d[s] = sqrtf(dx * dx + dy * dy + dz * dz); chest[s] = chest_d[s] <= c->chest_radius;
             if (chest[s] && !g->chest_prev[s] && !fst[s] && g->warm == 0 && g->chest_cool[s] <= 0) { g->chest_cool[s] = 0.5f; if (out->haptic[s] < 0.15f) out->haptic[s] = 0.15f; }   /* aviso al entrar en la zona */
             g->chest_prev[s] = chest[s];
             if (g->chest_cool[s] > 0) g->chest_cool[s] -= dt;
@@ -381,6 +383,15 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
             if (g->gp_t[s] > 0) {          /* agarre pendiente: tirón = lanzamiento; mano lanzada hacia el enemigo = puño; si no, llega al motor al acabar el margen */
                 g->gp_t[s] -= dt;
                 int pull = 0; float ty = 0;
+                /* la mano se lanza HACIA el enemigo (puño): cancela. Una mano rápida que se aleja o va de lado es un tirón en preparación: no cancela */
+                int toward_fast = 0;
+                if (spd[s] >= c->grab_slow_speed && g->prev_hand_ok[s] && g->gp_en[s] >= 0 && g->gp_en[s] < in->n_en) {
+                    const float *en2 = in->en[g->gp_en[s]].p;
+                    float wx = (in->hand[s][0] - g->prev_hand[s][0]) / dt, wz = (in->hand[s][2] - g->prev_hand[s][2]) / dt;
+                    float fx2 = en2[0] - in->hand[s][0], fz2 = en2[2] - in->hand[s][2];
+                    float wl = sqrtf(wx * wx + wz * wz), fl2 = sqrtf(fx2 * fx2 + fz2 * fz2);
+                    toward_fast = (wl > 0.1f && fl2 > 0.02f) ? (wx * fx2 + wz * fz2) / (wl * fl2) >= 0.3f : spd[s] >= 2.0f * c->grab_slow_speed;
+                }
                 if (fst[s] && !grabbing && !grab_start && spd[s] >= c->throw_speed && g->prev_hand_ok[s] && g->gp_en[s] >= 0 && g->gp_en[s] < in->n_en) {
                     const float *en = in->en[g->gp_en[s]].p;
                     float vx = (in->hand[s][0] - g->prev_hand[s][0]) / dt, vy = (in->hand[s][1] - g->prev_hand[s][1]) / dt, vz = (in->hand[s][2] - g->prev_hand[s][2]) / dt;
@@ -397,7 +408,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                     g->gp_t[s] = 0; grab_start = started = 1; g->grab_side = s; g->grab_en = g->gp_en[s]; g->impact_t = 0;
                     out->grab_start = 1; out->grab_hold = 1; out->event = VRG_EV_THROW; out->haptic[s] = 1.0f;
                     out->throw_side = s; out->throw_yaw = ty; out->grab_why = "lanzamiento"; out->grab_dist = hd[s]; out->grab_side_try = s;
-                } else if (grabbing || !fst[s] || (!near_now && !g->gp_only[s]) || spd[s] >= c->grab_slow_speed || g->since_punch < c->grab_after_punch_s) {
+                } else if (grabbing || !fst[s] || (!(hd[s] >= 0 && hd[s] <= 1.5f * c->neck_radius) && !g->gp_only[s]) || toward_fast || g->since_punch < c->grab_after_punch_s) {
                     g->gp_t[s] = 0; out->grab_why = (!fst[s]) ? "cancelado_soltado" : "cancelado_puno"; out->grab_dist = hd[s]; out->grab_side_try = s;
                 } else if (g->gp_t[s] <= 0 && !grab_start) {
                     if (g->gp_only[s]) { out->grab_why = "sin_tiron"; out->grab_dist = hd[s]; out->grab_side_try = s; }
@@ -422,6 +433,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                     out->grab_why = why; out->grab_dist = hd[s]; out->grab_side_try = s;
                     if (!strcmp(why, "ok")) { g->gp_t[s] = c->grab_delay_s; g->gp_en[s] = ne; g->gp_only[s] = near_body; started = 1; out->grab_why = "pendiente"; }
                 }
+                if (!started && !chest[s]) { out->chest_try = s; out->chest_dist = chest_d[s]; }
                 if (!started && chest[s]) { g->menu_hold |= 1 << s; out->menu_open[s] = 1; out->haptic[s] = 0.2f; if (!out->event) out->event = VRG_EV_MENU; }
             } else if (edge[s] && grabbing && !grab_start) {
                 /* ya agarrando: cada pulsación nueva aprieta (y remata tras el décimo apretón) */
@@ -438,7 +450,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
     if (g->grab_side >= 0 && ne >= 0) g->grab_en = ne;
     for (int s = 0; s < 2; s++) {      /* ventana abierta: se mantiene mientras se mantenga el botón (R1 = armas, L1 = objetos del motor) */
         if (!((g->menu_hold >> s) & 1)) continue;
-        if (tr[s] && fst[s]) { out->menu_open[s] = 1; out->press |= (uint16_t)(s == (c->right_handed ? 1 : 0) ? VRG_R1 : VRG_L1);   /* mano dominante = R1 (armas), la otra = L1 (objetos) */ }
+        if (tr[s] && fst[s]) { out->menu_open[s] = 1; out->press |= (uint16_t)(s == (c->right_handed ? 1 : 0) ? VRG_R2 : VRG_L2);   /* mano dominante = R2 (armas), la otra = L2 (objetos): son los botones que abren las ventanas del juego (R1/L1 no) */ }
         else g->menu_hold &= ~(1 << s);
     }
     if (fist_guard) out->mask |= (uint16_t)(VRG_R1 | VRG_L1);
@@ -450,7 +462,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
         if (st[0] && st[1]) st[0] = st[1] = 0;
         for (int k = 0; k < 2; k++) {
             if (st[k] && free_hands) g->item_t[k] += dt; else g->item_t[k] = 0;
-            if (g->item_t[k] >= c->item_hold_s) out->press |= (uint16_t)(k == 0 ? VRG_R1 : VRG_L1);
+            if (g->item_t[k] >= c->item_hold_s) out->press |= (uint16_t)(k == 0 ? VRG_R2 : VRG_L2);
         }
     }
     for (int s = 0; s < 2; s++) { if (tr[s]) { memcpy(g->prev_hand[s], in->hand[s], sizeof g->prev_hand[s]); g->prev_hand_ok[s] = 1; } else g->prev_hand_ok[s] = 0; }

@@ -84,9 +84,10 @@ void vr_input_cfg_defaults(vri_cfg_t *c) {
     m->stick_dom = VRI_PAD_R3;    m->stick_off = VRI_PAD_L3;
     m->menu_dom = VRI_PAD_START;  m->menu_off = VRI_PAD_SELECT;
     m->chord_off = 0;
-    m->menu_trig = VRI_PAD_CIRCLE | VRI_PAD_CROSS;
-    m->menu_low = VRI_PAD_CIRCLE | VRI_PAD_CROSS;
-    m->menu_up = VRI_PAD_CROSS;
+    /* Capa de MENÚ = mando ORIGINAL (códec, radio, menús, pausa, escenas, ventana de armas/objetos): un botón del Sense por botón del mando, sin fusionar. */
+    m->menu_trig = VRI_PAD_R2;  m->menu_trig_off = VRI_PAD_L2;
+    m->menu_low = VRI_PAD_CROSS;  m->menu_low_off = VRI_PAD_SQUARE;
+    m->menu_up = VRI_PAD_CIRCLE;  m->menu_up_off = VRI_PAD_TRIANGLE;
 }
 
 static void sanitize(vri_cfg_t *c) {
@@ -187,9 +188,9 @@ static uint16_t map_sense(vr_input_t *s, const vr_input_frame_t *f, bool menu, i
         if (menu) s->grip_tap[role] = 0.0f;
         if (g_out) b |= role == 0 ? m->grip_dom : m->grip_off;
         if (chord) { if (trig) b |= m->chord_off; }
-        else if (trig) b |= menu ? m->menu_trig : (role == 0 ? m->trig_dom : m->trig_off);
-        if (h->buttons & VRI_H_LOW) b |= menu ? m->menu_low : (role == 0 ? m->low_dom : m->low_off);
-        if (h->buttons & VRI_H_UP) b |= menu ? m->menu_up : (role == 0 ? m->up_dom : m->up_off);
+        else if (trig) b |= menu ? (role == 0 ? m->menu_trig : m->menu_trig_off) : (role == 0 ? m->trig_dom : m->trig_off);
+        if (h->buttons & VRI_H_LOW) b |= menu ? (role == 0 ? m->menu_low : m->menu_low_off) : (role == 0 ? m->low_dom : m->low_off);
+        if (h->buttons & VRI_H_UP) b |= menu ? (role == 0 ? m->menu_up : m->menu_up_off) : (role == 0 ? m->up_dom : m->up_off);
         if (h->buttons & VRI_H_STICK) b |= role == 0 ? m->stick_dom : m->stick_off;
         if (h->buttons & VRI_H_MENU) b |= role == 0 ? m->menu_dom : m->menu_off;
     }
@@ -204,10 +205,10 @@ uint16_t vr_input_sense_plain(const vri_cfg_t *cfg, const vri_hand_t hand[2]) {
     float sx = 0, sy = 0;
     for (int role = 0; role < 2; role++) {
         const vri_hand_t *h = &hand[role == 0 ? dom : 1 - dom];
-        if (fin0(h->trigger) > 0.55f) b |= m->menu_trig;
+        if (fin0(h->trigger) > 0.55f) b |= role == 0 ? m->menu_trig : m->menu_trig_off;
         if (fin0(h->grip) > 0.55f) b |= role == 0 ? m->grip_dom : m->grip_off;
-        if (h->buttons & VRI_H_LOW) b |= m->menu_low;
-        if (h->buttons & VRI_H_UP) b |= m->menu_up;
+        if (h->buttons & VRI_H_LOW) b |= role == 0 ? m->menu_low : m->menu_low_off;
+        if (h->buttons & VRI_H_UP) b |= role == 0 ? m->menu_up : m->menu_up_off;
         if (h->buttons & VRI_H_STICK) b |= role == 0 ? m->stick_dom : m->stick_off;
         if (h->buttons & VRI_H_MENU) b |= role == 0 ? m->menu_dom : m->menu_off;
         float x = fin0(h->stick_x), y = fin0(h->stick_y);
@@ -295,8 +296,9 @@ no_change:
  * cruceta/stick desvía la intención (elegir respuesta) y detiene el avance hasta soltar. */
 static uint16_t hold_advance(vr_input_t *s, const vr_input_frame_t *f, uint16_t b, float dt) {
     const vri_cfg_t *c = &s->cfg;
-    bool face = false;
-    for (int i = 0; i < 2; i++) if (f->hand[i].buttons & (VRI_H_LOW | VRI_H_UP)) face = true;
+    /* solo CRUZ de la mano dominante (A) mantenida sola: el resto de botones (círculo, cuadrado, triángulo...) son los originales y no se tocan */
+    const vri_hand_t *dh = &f->hand[c->dominant_hand ? 1 : 0];
+    bool face = (dh->buttons & VRI_H_LOW) && !(dh->buttons & VRI_H_UP) && !(f->hand[c->dominant_hand ? 0 : 1].buttons & (VRI_H_LOW | VRI_H_UP));
     bool dpad = (b & (VRI_PAD_UP | VRI_PAD_DOWN | VRI_PAD_LEFT | VRI_PAD_RIGHT)) != 0;
     if (c->mode != VRI_MODE_SENSE || c->hold_advance_s <= 0.0f || !f->comms || !face || dpad) {
         s->adv_hold = 0.0f; s->adv_active = false; s->adv_phase = 0.0f;
@@ -307,7 +309,7 @@ static uint16_t hold_advance(vr_input_t *s, const vr_input_frame_t *f, uint16_t 
     if (!s->adv_active) { s->adv_active = true; s->adv_phase = 0.0f; }
     float period = c->adv_on_s + c->adv_off_s;
     s->adv_phase = fmodf(s->adv_phase + dt, period);
-    b = (uint16_t)(b & ~(VRI_PAD_CIRCLE | VRI_PAD_CROSS));
+    b = (uint16_t)(b & ~VRI_PAD_CROSS);
     if (s->adv_phase < c->adv_on_s) b |= VRI_PAD_CROSS;
     return b;
 }

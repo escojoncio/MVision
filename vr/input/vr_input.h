@@ -81,8 +81,9 @@ typedef struct {
      * (R2 por defecto); no emite ni L1 ni L2. 0 = sin acorde. Solo en juego (no en menús). */
     uint16_t chord_off;
     /* En menús (jugador fuera de control: título, menús, comunicador, escenas, pausa) los botones de las dos manos pasan por
-     * estas máscaras en vez de las del juego: gatillo y cara baja = confirmar (+ avanzar texto/saltar escena), cara alta = cancelar. */
-    uint16_t menu_trig, menu_low, menu_up;
+     * estas máscaras en vez de las del juego: mando ORIGINAL sin remapeo VR: dominante gatillo R2, A cruz, B círculo; la otra gatillo L2, A cuadrado, B triángulo; agarres R1/L1, clics R3/L3, Menú start/select, stick = cruceta. */
+    uint16_t menu_trig, menu_low, menu_up;          /* mano dominante (defecto R2 / cruz / círculo) */
+    uint16_t menu_trig_off, menu_low_off, menu_up_off;  /* la otra mano (defecto L2 / cuadrado / triángulo) */
 } vri_map_t;
 
 typedef struct {

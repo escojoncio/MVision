@@ -1934,3 +1934,7 @@ Solo código y pruebas sintéticas; NO se ejecutó el juego; Swift sin compilar 
 - **Pruebas nuevas/ajustadas:** `test_layer2d` (B respaldo limitado a lo tocado + resto transparente + resta numéricamente igual al hardware sobre el mundo reproducido; A1 umbral relativo 64/4256 < 2 %, mínimo absoluto 49 vs 64; A2 mundo no fiable -> transparente); `test_ns_fill` (M7 pared grande / punto más cercano, M2, M3, M1 reset); `test_view` (M1 más reciente, ventana por fuente); `test_ns_gpu_fx` (M4 `t_hold_world`, M5, M6, B6 reinicio); `test_no_gpu3d` (VRInput llama al reinicio, hold 0.15).
 - **Verde con gcc:** extract.mk (test, test-fill, test-fill-san, test-cover), fx.mk (test, test-san), vr/scene (test, test-layer2d), vr/host test, integra.mk test.
 - **Pendiente próxima sesión:** compilar Swift en CI (`NativeRenderer.swift` hold 0.15, `VRInput.swift` llamada nueva); probar en visor que la intro/créditos con respaldo no opacan la pantalla 3D y el log `[capa2d] ... sustituidos=N(resta transparentes)`; revisar `fx-sigue` tras M5 (los seguidos conservados ya no aparecen como descartes).
+
+## j-control (en curso)
+- Hecho: capa de MENÚ = mando original (`vr_input.c` menu_*: R2/L2, cruz/cuadrado, círculo/triángulo; `vrbodyg.c` no toca el mando fuera de control); ventana de armas/objetos por el pecho = R2/L2 (antes R1/L1, que no abren nada) y se mantiene con `menu_open`; agarre/lanzamiento/golpe reajustados con el log (`vr_gesture.c`).
+- Pendiente: radar y HUD de muñeca anclados a la pose del mando izquierdo (Swift); pruebas host.

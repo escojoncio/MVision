@@ -23,7 +23,7 @@ extern "C" {
 
 #define VRG_MAX_EN 8
 enum { VRG_R3 = 1u << 2, VRG_L3 = 1u << 1 };   /* clic del stick (bits del mando del juego, mismos que vr_input) */
-enum { VRG_R2 = 1u << 9, VRG_SQUARE = 1u << 15, VRG_CIRCLE = 1u << 13, VRG_TRIANGLE = 1u << 12, VRG_R1 = 1u << 11, VRG_L1 = 1u << 10 };
+enum { VRG_L2 = 1u << 8, VRG_R2 = 1u << 9, VRG_SQUARE = 1u << 15, VRG_CIRCLE = 1u << 13, VRG_TRIANGLE = 1u << 12, VRG_R1 = 1u << 11, VRG_L1 = 1u << 10 };
 enum { VRG_EV_NONE = 0, VRG_EV_PUNCH = 1, VRG_EV_GRAB = 2, VRG_EV_SQUEEZE = 3, VRG_EV_RELEASE = 4, VRG_EV_KNOCK = 5, VRG_EV_PEEK = 6, VRG_EV_WALL = 7, VRG_EV_HURT = 8,
        VRG_EV_IMPACT = 9, VRG_EV_MENU = 10, VRG_EV_THROW = 11 };
 
@@ -110,7 +110,7 @@ typedef struct {
     int punch_side;          /* -1 nada; 0/1: lanzar el golpe del motor (mano física que lo dio) */
     int grab_start;          /* 1: lanzar el agarre del motor este VBlank (mano grab_side, enemigo grab_en) */
     int grab_hold;           /* 1: el botón del puño sigue pulsado durante el agarre (mantiene el agarre del motor) */
-    int menu_open[2];        /* ventana abierta por la mano física (0 objetos/L1, 1 armas/R1) mientras se mantiene el botón; vr vrg_out.press ya lleva L1/R1 */
+    int menu_open[2];        /* ventana abierta por la mano física (0 objetos/L2, 1 armas/R2) mientras se mantiene el botón del puño; vrg_out.press ya lleva L2/R2 */
     int knock_side;          /* -1 nada; 0/1: llamar con los nudillos (acción del motor) con esa mano */
     const char *knock_why;   /* motivo del último intento de toque de este VBlank ("ok", "lento", "enfriamiento", "enemigo", "no_pegado", "lejos_de_la_pared"...) */
     float knock_speed, knock_dist; int knock_try_side;
@@ -118,6 +118,7 @@ typedef struct {
     const char *grab_why;    /* motivo del último intento de agarre de este VBlank (NULL: ninguno): "ok", "mano_lejos", "cuerpo_lejos", "puno_cerrado", "tras_golpe"... */
     float grab_dist;         /* distancia de la mano al cuello/espalda en ese intento (m) */
     int grab_side_try;
+    int chest_try; float chest_dist;   /* pulsación fuera de la zona del pecho (mano, distancia al centro de la zona en m) para el registro [gest]; -1 ninguna */
     int grab_side;           /* mano física que sujeta (-1 ninguna) mientras el agarre dura (para pegar las manos al cuello) */
     int throw_side;          /* -1 nada; 0/1: lanzamiento (agarre + tirón) con esa mano este VBlank (grab_start también vale 1) */
     float throw_yaw;         /* rumbo del tirón proyectado en el suelo (rad, delante = (sin, cos)) */
