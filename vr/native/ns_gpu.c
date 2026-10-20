@@ -303,6 +303,7 @@ void ns_gpu_make_piece(const NsScene *sc, const NsInstance *inst, const NsPiece 
     o->flags = NSG_PF_DRAW;
     o->raise = (float)depth_bias;
     if (parent_global >= 0) { o->parent = parent_global; o->parent_nverts = parent_nverts; }
+    if (!(inst->flags & NS_IF_STATIC)) o->flags |= NSG_PF_NET;   /* objetos dinámicos: red de seguridad de vértices (el escenario es fijo y trae triángulos legítimamente enormes: agua, cielo) */
 
     /* luz: la de la instancia (o la global); ambiente propio solo con NS_IF_OWN_AMBIENT */
     const NsLight *L = (inst->light >= 0 && (uint32_t)inst->light < sc->n_light) ? &sc->lights[inst->light] : &sc->global_light;
@@ -330,6 +331,122 @@ void ns_gpu_make_piece(const NsScene *sc, const NsInstance *inst, const NsPiece 
             o->fog = 1.0f - ns_gpu_fog_f(&sc->fog, ns_gpu_game_z(&sc->cam, rp));
         }
     }
+}
+
+/* ------------------------------------------------------------------------------------------------ red de seguridad de vértices (réplica en C de ns_vertex / ns_net_* de NativeShaders.metal) */
+static void net_mul34(const float *m, const float p[3], float o[3]) {
+    o[0] = m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3];
+    o[1] = m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7];
+    o[2] = m[8] * p[0] + m[9] * p[1] + m[10] * p[2] + m[11];
+}
+
+float ns_gpu_mesh_radius(const NsMesh *m) {
+    if (!m || !m->verts) return 0.0f;
+    float r2 = 0.0f;
+    for (uint32_t i = 0; i < m->n_verts; i++) {
+        float x = (float)m->verts[i].x, y = (float)m->verts[i].y, z = (float)m->verts[i].z, d = x * x + y * y + z * z;
+        if (d > r2) r2 = d;
+    }
+    return sqrtf(r2);
+}
+
+void ns_gpu_vert_world(const NsGpuVert *pool, const NsGpuPiece *tbl, uint32_t gi, uint32_t vabs, float out[3]) {
+    const NsGpuPiece *P = &tbl[gi];
+    const NsGpuVert *V = &pool[vabs];
+    net_mul34(P->w, V->p, out);
+    if (P->flags & NSG_PF_NOWELD) return;
+    uint32_t w = V->weld;
+    int pi = P->parent;
+    uint32_t pn = P->parent_nverts;
+    for (int d = 0; d < NSG_WELD_DEPTH; d++) {
+        if (w == NSG_NO_WELD || pi < 0 || w >= pn) break;
+        const NsGpuPiece *Q = &tbl[pi];
+        const NsGpuVert *PV = &pool[Q->vert_base + w];
+        net_mul34(Q->w, PV->p, out);
+        if (Q->flags & NSG_PF_NOWELD) break;
+        w = PV->weld; pi = Q->parent; pn = Q->parent_nverts;
+    }
+}
+
+uint32_t ns_gpu_net_piece(const NsGpuVert *pool, const NsGpuPiece *tbl, uint32_t gi, uint32_t nverts, float mpu, NsGpuNetPiece *out) {
+    NsGpuNetPiece local;
+    NsGpuNetPiece *o = out ? out : &local;
+    memset(o, 0, sizeof *o);
+    const NsGpuPiece *P = &tbl[gi];
+    uint32_t causes = 0;
+    float mx = 0.0f;
+    for (int c = 0; c < 3; c++) {
+        float n2 = P->w[c] * P->w[c] + P->w[4 + c] * P->w[4 + c] + P->w[8 + c] * P->w[8 + c];
+        if (!(n2 <= 1e30f)) n2 = 1e30f;   /* NaN/inf -> enorme */
+        float n = sqrtf(n2);
+        if (n > mx) mx = n;
+    }
+    for (int i = 0; i < 12; i++) if (!isfinite(P->w[i])) mx = 1e30f;
+    if (fabsf(P->w[3]) > 1.6e7f || fabsf(P->w[7]) > 1.6e7f || fabsf(P->w[11]) > 1.6e7f) mx = 1e30f;
+    o->max_scale = mx;
+    if (mx > NSG_NET_MAT_SCALE) causes |= NSG_NET_MAT;
+    /* soldaduras: el vértice soldado debe caer cerca de donde lo pone la propia malla (en pose coherente, <= ~0,4 m en los datos reales) */
+    if (!(P->flags & NSG_PF_NOWELD) && P->parent >= 0) {
+        const float gap_u = NSG_NET_WELD_GAP_M / (mpu > 0.0f ? mpu : 1.0f);
+        for (uint32_t i = 0; i < nverts; i++) {
+            const NsGpuVert *V = &pool[P->vert_base + i];
+            if (V->weld == NSG_NO_WELD) continue;
+            o->n_welded++;
+            float own[3], wp[3];
+            net_mul34(P->w, V->p, own);
+            ns_gpu_vert_world(pool, tbl, gi, P->vert_base + i, wp);
+            float dx = wp[0] - own[0], dy = wp[1] - own[1], dz = wp[2] - own[2], d = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (!(d <= gap_u)) { o->n_gap++; causes |= NSG_NET_WELD; }
+            if (isfinite(d) && d * mpu > o->max_gap_m) o->max_gap_m = d * mpu;
+            else if (!isfinite(d)) o->max_gap_m = 1e30f;
+        }
+    }
+    o->causes = causes;
+    return causes;
+}
+
+/* Decisión por triángulo (la misma que el shader). Devuelve NSG_NET_FAR / NSG_NET_EDGE (o 0) y el peor valor en metros (distancia al origen de la pieza / exceso de arista). */
+static uint32_t net_tri(const NsGpuVert *pool, const NsGpuPiece *tbl, uint32_t gi, const uint32_t v[3], float mpu, float *far_m, float *edge_m) {
+    const NsGpuPiece *P = &tbl[gi];
+    float wp[3][3];
+    for (int k = 0; k < 3; k++) ns_gpu_vert_world(pool, tbl, gi, v[k], wp[k]);
+    const float org[3] = {P->w[3], P->w[7], P->w[11]};
+    const float slack_u = NSG_NET_SLACK_M / (mpu > 0.0f ? mpu : 1.0f);
+    uint32_t bad = 0;
+    for (int k = 0; k < 3; k++) {
+        float dx = wp[k][0] - org[0], dy = wp[k][1] - org[1], dz = wp[k][2] - org[2], d = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (P->rest_r > 0.0f && !(d <= NSG_NET_FAR_RATIO * P->rest_r + slack_u)) bad |= NSG_NET_FAR;
+        if (!isfinite(d)) d = 1e30f;
+        if (d * mpu > *far_m) *far_m = d * mpu;
+        int k2 = (k + 1) % 3;
+        const float *a = pool[v[k]].p, *b = pool[v[k2]].p;
+        float lx = a[0] - b[0], ly = a[1] - b[1], lz = a[2] - b[2], l = sqrtf(lx * lx + ly * ly + lz * lz);
+        float ex = wp[k][0] - wp[k2][0], ey = wp[k][1] - wp[k2][1], ez = wp[k][2] - wp[k2][2], e = sqrtf(ex * ex + ey * ey + ez * ez);
+        if (!(e <= NSG_NET_EDGE_RATIO * l + slack_u)) bad |= NSG_NET_EDGE;
+        if (!isfinite(e)) e = 1e30f;
+        float ex_m = (e - NSG_NET_EDGE_RATIO * l) * mpu;
+        if (ex_m > *edge_m) *edge_m = ex_m;
+    }
+    return bad;
+}
+
+uint32_t ns_gpu_net_tris(const NsGpuVert *pool, const NsGpuCorner *corners, uint32_t ntri, const NsGpuPiece *tbl, uint32_t gi, float mpu, NsGpuNetTris *acc) {
+    if (!(tbl[gi].flags & NSG_PF_NET)) return 0;
+    uint32_t n = 0;
+    for (uint32_t t = 0; t < ntri; t++) {
+        const uint32_t v[3] = {corners[3u * t].v, corners[3u * t + 1].v, corners[3u * t + 2].v};
+        float far_m = 0.0f, edge_m = 0.0f;
+        uint32_t b = net_tri(pool, tbl, gi, v, mpu, &far_m, &edge_m);
+        if (acc) {
+            acc->tris++;
+            if (far_m > acc->worst_far_m) acc->worst_far_m = far_m;
+            if (edge_m > acc->worst_edge_m) acc->worst_edge_m = edge_m;
+            if (b & NSG_NET_FAR) acc->bad_far++;
+            if (b & NSG_NET_EDGE) acc->bad_edge++;
+        }
+        if (b) n++;
+    }
+    return n;
 }
 
 typedef struct { uint32_t key, piece, tri, abr; float depth; } SortItem;   /* 20 B */

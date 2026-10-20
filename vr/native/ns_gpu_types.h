@@ -47,8 +47,20 @@ typedef uint8_t ns_u8;
 #define NSG_PF_SHADE  1u     /* se sombrea con la luz de la pieza (si la esquina no lleva color precalculado) */
 #define NSG_PF_VFOG   2u     /* niebla por vértice (escenario); si no, `fog` por pieza (objeto) */
 #define NSG_PF_DRAW   4u     /* se dibuja (malla presente y pieza visible) */
+#define NSG_PF_NET    8u     /* red de seguridad de vértices activa (piezas de objetos dinámicos, no del escenario): el shader colapsa los triángulos con vértices lejos de la pieza o aristas desproporcionadas */
+#define NSG_PF_NOWELD 16u    /* ignorar las soldaduras de esta pieza (la costura con el padre quedó inconsistente este fotograma): sus vértices usan su propia posición local */
 
 #define NSG_NO_WELD 0xFFu
+#define NSG_WELD_DEPTH 4     /* soldaduras encadenadas que se siguen (hijo -> padre -> abuelo ...): el adaptador de la referencia llega a 8, en los datos reales no pasa de 1 */
+
+/* Red de seguridad contra «explosiones de vértices» (triángulos estirados hasta lejos). Solo piezas NSG_PF_NET. Todas las distancias en metros de mundo VR (m por unidad = norma
+ * de la 1.ª columna de to_vr): un triángulo se colapsa si (a) algún vértice queda a más de NSG_NET_FAR_RATIO * (radio de reposo de la malla) + NSG_NET_SLACK_M del origen de su pieza,
+ * o (b) alguna arista mide más de NSG_NET_EDGE_RATIO * (la misma arista en espacio local) + NSG_NET_SLACK_M. En datos reales sin fallo: 0 triángulos (ver test_ns_net.c). */
+#define NSG_NET_FAR_RATIO  1.5f
+#define NSG_NET_EDGE_RATIO 2.0f
+#define NSG_NET_SLACK_M    1.0f
+#define NSG_NET_WELD_GAP_M 1.0f   /* una soldadura cuyo vértice del padre cae a más de esto de la posición propia del vértice => NSG_PF_NOWELD */
+#define NSG_NET_MAT_SCALE  1.5f   /* una columna de la matriz de pieza con norma mayor => matriz corrupta (a medio actualizar): la pieza no se dibuja */
 #define NSG_INTENSITY_MAX 7.99975586f   /* = NS_INTENSITY_MAX (0x7FFF/4096) de ns_types.h */
 
 /* Vértice local (unidades del motor). weld: NSG_NO_WELD o índice de vértice del modelo PADRE (NsPiece.parent) cuya posición transformada lo sustituye. */
@@ -76,7 +88,8 @@ typedef struct {
     float fog;           /* multiplicador de niebla del objeto (1 = sin niebla) */
     float raise;         /* sesgo de orden de la malla (unidades del motor) */
     ns_u32 parent_nverts;/* nº de vértices de la malla del padre (acota los welded) */
-    ns_u32 pad[2];
+    float rest_r;        /* radio de reposo de la malla (máx. |v| local, unidades del motor): referencia de la red de seguridad (0 = sin dato: la red no actúa) */
+    ns_u32 pad;
 } NsGpuPiece;                                                                                       /* 164 B */
 
 /* Entrada de la lista ordenada de semitransparentes: una por triángulo. */

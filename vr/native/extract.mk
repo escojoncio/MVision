@@ -62,3 +62,14 @@ test-hand: $(B)/test_ns_hand
 test-hand-san:
 	$(MAKE) -f vr/native/extract.mk test-hand B=vr/native/build-extract-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 .PHONY: test-hand test-hand-san
+
+# Red de seguridad de vértices (ns_gpu_net_*, réplica de NativeShaders.metal), soldaduras encadenadas, manos propias e interpolación: pruebas sintéticas.
+#   make -f vr/native/extract.mk test-net
+NETSRC := vr/native/ns_gpu.c vr/native/ns_adapt.c vr/native/ns_extract.c vr/native/ns_light.c vr/native/ns_bridge.c vr/body/vr_hand_mesh.c
+$(B)/test_ns_net: vr/native/test_ns_net.c $(NETSRC) vr/native/ns_gpu.h vr/native/ns_gpu_types.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Ivr/native -Ivr/body vr/native/test_ns_net.c $(NETSRC) -lm -lpthread -o $@
+test-net: $(B)/test_ns_net
+	$(B)/test_ns_net
+test-net-san:
+	$(MAKE) -f vr/native/extract.mk test-net B=vr/native/build-extract-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+.PHONY: test-net test-net-san

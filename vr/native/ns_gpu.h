@@ -50,6 +50,20 @@ void ns_gpu_scan(const NsGpuVert *verts, const NsGpuCorner *corners, uint32_t nt
 void ns_gpu_make_piece(const NsScene *sc, const NsInstance *inst, const NsPiece *p, uint32_t mesh_flags, int depth_bias, uint32_t vert_base,
                        int parent_global, uint32_t parent_nverts, NsGpuPiece *out);
 
+/* ---- Red de seguridad de vértices (réplica en C de la del shader NativeShaders.metal; la usa el renderer para contar y registrar causas, y las pruebas) ---- */
+enum { NSG_NET_MAT = 1, NSG_NET_WELD = 2, NSG_NET_FAR = 4, NSG_NET_EDGE = 8 };   /* causas: matriz corrupta / soldadura inconsistente / vértice lejos de la pieza / arista desproporcionada */
+typedef struct { uint32_t causes; float max_scale; float max_gap_m; uint32_t n_welded, n_gap; } NsGpuNetPiece;
+typedef struct { uint32_t tris, bad_far, bad_edge; float worst_far_m, worst_edge_m; } NsGpuNetTris;
+/* Radio de reposo de la malla: máx. |v| local (unidades del motor). */
+float ns_gpu_mesh_radius(const NsMesh *m);
+/* Posición de mundo del motor del vértice ABSOLUTO vabs de la pieza gi, con la misma semántica que ns_vertex: soldadura al vértice del padre, encadenada hasta NSG_WELD_DEPTH niveles; NSG_PF_NOWELD la ignora. */
+void ns_gpu_vert_world(const NsGpuVert *pool, const NsGpuPiece *tbl, uint32_t gi, uint32_t vabs, float out[3]);
+/* Comprobación de PIEZA (una vez por fotograma, tras rellenar la tabla): matriz corrupta (NSG_NET_MAT: no dibujar la pieza) y soldaduras cuyo vértice del padre se aleja más de NSG_NET_WELD_GAP_M de
+ * la posición propia (NSG_NET_WELD: poner NSG_PF_NOWELD). nverts = nº de vértices de la malla de la pieza; mpu = metros VR por unidad del motor. Devuelve las causas. */
+uint32_t ns_gpu_net_piece(const NsGpuVert *pool, const NsGpuPiece *tbl, uint32_t gi, uint32_t nverts, float mpu, NsGpuNetPiece *out);
+/* Triángulos de la pieza que el shader colapsaría (solo piezas NSG_PF_NET); acumula contadores y peores valores en acc (puede ser NULL). Devuelve cuántos. corners: 3*ntri esquinas con índices absolutos. */
+uint32_t ns_gpu_net_tris(const NsGpuVert *pool, const NsGpuCorner *corners, uint32_t ntri, const NsGpuPiece *tbl, uint32_t gi, float mpu, NsGpuNetTris *acc);
+
 /* Factor de niebla f (0..1) a la profundidad z de la cámara del juego (unidades del motor): 0 sin niebla. */
 float ns_gpu_fog_f(const NsFog *fog, float z);
 /* Profundidad de vista de la cámara del juego de un punto del mundo del motor. */
