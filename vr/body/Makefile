@@ -7,7 +7,7 @@
 CC ?= gcc
 CFLAGS ?= -O2 -g -Wall -Wextra -std=gnu11
 OUT ?= ../../build-body
-SRC := vr_body.c vr_pose.c vr_fist.c
+SRC := vr_body.c vr_pose.c vr_fist.c vr_hand_mesh.c
 
 all: test
 $(OUT)/test_body: test_body.c $(SRC) vr_body.h vr_pose.h
@@ -16,17 +16,23 @@ $(OUT)/test_body: test_body.c $(SRC) vr_body.h vr_pose.h
 $(OUT)/test_fist: test_fist.c vr_fist.c vr_fist.h test_fist_mesh.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -I. test_fist.c vr_fist.c -o $@ -lm
-test: $(OUT)/test_body $(OUT)/test_fist
+$(OUT)/test_hand_mesh: test_hand_mesh.c vr_hand_mesh.c vr_hand_mesh.h test_fist_mesh.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -I. test_hand_mesh.c vr_hand_mesh.c -o $@ -lm
+test: $(OUT)/test_body $(OUT)/test_fist $(OUT)/test_hand_mesh
 	$(OUT)/test_body
 	$(OUT)/test_fist
-test-san: test_body.c $(SRC) vr_body.h vr_pose.h vr_fist.h test_fist.c test_fist_mesh.h
+	$(OUT)/test_hand_mesh
+test-san: test_body.c $(SRC) vr_body.h vr_pose.h vr_fist.h test_fist.c test_fist_mesh.h test_hand_mesh.c vr_hand_mesh.c vr_hand_mesh.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -I. test_fist.c vr_fist.c -o $(OUT)/test_fist_san -lm
 	$(OUT)/test_fist_san
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -I. test_hand_mesh.c vr_hand_mesh.c -o $(OUT)/test_hand_mesh_san -lm
+	$(OUT)/test_hand_mesh_san
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -I. test_body.c $(SRC) -o $(OUT)/test_body_san -lm
 	$(OUT)/test_body_san
 clean:
-	rm -f $(OUT)/test_body $(OUT)/test_body_san $(OUT)/test_fist $(OUT)/test_fist_san
+	rm -f $(OUT)/test_body $(OUT)/test_body_san $(OUT)/test_fist $(OUT)/test_fist_san $(OUT)/test_hand_mesh $(OUT)/test_hand_mesh_san
 .PHONY: all test test-san clean
 
 # ---------------------------------------------------------------------------------------------------------------

@@ -40,6 +40,7 @@
 #include "ns_fx.h"
 #include "ns_hook.h"
 #include "ns_hook_rt.h"
+#include "ns_hand.h"
 #include "ns_player.h"
 #include "ns_solid.h"
 #include "bridge_addrs.h"
@@ -252,6 +253,13 @@ __attribute__((weak)) void ns_extract_glue_stats(NsExtractGlueStats *o) { if (o)
 __attribute__((weak)) void ns_cover_glue_post_ik(const uint8_t *ram) { (void)ram; }
 __attribute__((weak)) void ns_cover_glue_submit(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; }
 __attribute__((weak)) size_t ns_cover_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
+/* Manos nuevas (ns_hand.c, solo en la app; vr/body/vr_hand_mesh.c): definición débil vacía para las pruebas de escritorio, donde la manopla del motor se queda como está. */
+__attribute__((weak)) int ns_hand_apply(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const NsHandIn *in) { (void)sc; (void)st; (void)map; (void)in; return 0; }
+static _Atomic int hands_new = 1;        /* menú VR «Manos: nuevas / originales» (defecto nuevas) */
+void mv_vrhost_set_hands_new(int on) { atomic_store(&hands_new, on ? 1 : 0); }
+int mv_vrhost_hands_new(void) { return atomic_load(&hands_new); }
+static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, void *u);
+static void hands_precapture(uint8_t *ram);
 _Static_assert(NS_PLAYER_BODY_PTR == BA_PLAYER_BODY, "ns_player y el puente deben coincidir en el puntero del jugador");
 static void dump_at_stage(Cpu *c);
 static int ns_gate(void *u);
@@ -280,6 +288,7 @@ static NsBridge *ns_bridge_get(void) {
             ns_hook_set_context(ns_ctx, NULL);
             ns_hook_set_gate(ns_gate, NULL);
             ns_hook_set_scene_tap(ns_solid_tap, NULL);
+            ns_hook_set_finalize(ns_hands_finalize, NULL);
             atomic_store(&ns_br, b);
         }
     }
@@ -333,6 +342,22 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
     o->player_key = ns_player_key(emu_ram);
     o->hide_head = 1;                                       /* primera persona: la cabeza propia no se dibuja (misma regla que vrcam_hide_head) */
     o->refresh_parts = body_ok ? NS_PARTS_ARMS : 0;
+}
+/* Manos nuevas: cierre de la escena (hilo de emulación, ns_hook_tick, escena apta con el jugador enlazado). Agarre y brazos manejados de la IK del último vrbody_apply. */
+static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, void *u) {
+    (void)u;
+    NsHandIn in;
+    memset(&in, 0, sizeof in);
+    in.enabled = atomic_load(&hands_new);
+    if (!in.enabled) return;
+    for (int s = 0; s < 2; s++) { float g = 0; in.driven[s] = vrbody_hand_state(s, &g, NULL, NULL); in.grip[s] = in.driven[s] ? g : 0.0f; }
+    ns_hand_apply(sc, st, map, &in);
+}
+/* Antes de cada captura: con las manos nuevas Y el render nativo en uso, la malla de la manopla del motor NO se deforma en puño (la mano nueva hace el puño y su forma
+ * de reposo debe ser estable); con la lista de la GPU (o manos originales) sigue el puño deformado de siempre. */
+static void hands_precapture(uint8_t *ram) {
+    vrbody_set_fist_enabled(!(atomic_load(&hands_new) && atomic_load(&renderer_ready)));
+    vrbody_prefist(ram);
 }
 /* Colisión de la cabeza con la escena NATIVA (vr_headcol): la escena trae el escenario y los objetos sólidos en 360 grados, también lo que está detrás o a los lados de la
  * cámara del juego (la lista de la GPU solo trae lo que ésta ve). Se recoge en el hilo de emulación justo antes de publicar la escena (ns_hook_set_scene_tap) y REEMPLAZA la
@@ -1341,7 +1366,7 @@ static void on_bound(void) {
         int rc = ns_hook_install();
         if (rc != NS_HOOK_OK) fprintf(stderr, "[vrhost] enganche del render nativo no instalado (%d): el 3D sale de la lista de la GPU\n", rc);
         ns_hook_set_stage_cb(dump_at_stage);
-        ns_hook_set_precapture_cb(vrbody_prefist);
+        ns_hook_set_precapture_cb(hands_precapture);
         vrbody_set_apply_hook(ns_post_ik);
         ns_hook_set_ik_idle(ns_ik_idle, NULL);
     }

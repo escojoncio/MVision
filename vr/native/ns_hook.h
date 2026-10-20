@@ -65,6 +65,10 @@ void ns_hook_set_ik_idle(NsIkIdleFn fn, void *user);
  * ns_hook_tick. Solo lectura, no debe tardar (colisión de la cabeza: vr_headcol alimentada con la geometría 360 grados). NULL = nada. */
 typedef void (*NsSceneTapFn)(const NsScene *sc, const NsMeshStore *store, void *user);
 void ns_hook_set_scene_tap(NsSceneTapFn fn, void *user);
+/* Cierre de la escena (hilo de emulación): en ns_hook_tick, con la escena pendiente COMPLETA (tras el contexto y la IK, solo si salió apta: NS_SV_PLAYER_OK), el mapa del
+ * jugador enlazado y el almacén, justo antes del observador y de publicar. Puede añadir instancias propias a la escena (manos nuevas: ns_hand_apply). NULL = nada. */
+typedef void (*NsFinalizeFn)(NsScene *sc, NsMeshStore *store, const NsPlayerMap *map, void *user);
+void ns_hook_set_finalize(NsFinalizeFn fn, void *user);
 void ns_hook_set_frame(uint32_t vblank_count);          /* para NsScene.vblank (si el extractor lo dejó a 0) */
 
 void ns_capture(const uint8_t *ram, const uint8_t *scratch);

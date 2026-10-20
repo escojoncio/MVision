@@ -866,6 +866,28 @@ static void test_fist_glue(void) {
     /* desactivado por configuración */
     { VrBodyConfig c2 = cfg; c2.fist_enabled = 0; vrbody_init(&c2); vrbody_set_view_fn(view_fn);
       run_fist_frames(1.0f, 40, &driven); CHECK(mesh_diff(0, nv) == 0 && mesh_diff(1, nv) == 0, "fist_enabled = 0: malla rígida"); vrbody_restore(RAM); }
+    /* vrbody_set_fist_enabled(0) en caliente (las manos nuevas hacen el puño) y estado de la mano para el golpe */
+    { vrbody_init(&cfg); vrbody_set_view_fn(view_fn); vrbody_set_fist_enabled(0);
+      run_fist_frames(1.0f, 60, &driven);
+      CHECK(mesh_diff(0, nv) == 0 && mesh_diff(1, nv) == 0 && vrbody_config()->fist_enabled == 0, "vrbody_set_fist_enabled(0): malla rígida");
+      float g = -1, R[9], t[3], fp1[3], fp0[3];
+      CHECK(vrbody_hand_state(1, &g, R, t) && vrbody_hand_state(0, NULL, NULL, NULL) && g > 0.9f, "estado de la mano derecha tras el apply (agarre %.2f)", g);
+      float det = R[0] * (R[4] * R[8] - R[5] * R[7]) - R[1] * (R[3] * R[8] - R[5] * R[6]) + R[2] * (R[3] * R[7] - R[4] * R[6]);
+      CHECK(fabsf(det - 1.0f) < 0.01f, "rotación de la mano: det %.4f", det);
+      CHECK(!vrbody_hand_state(2, &g, R, t) && !vrbody_hand_state(-1, &g, R, t), "lado inválido");
+      CHECK(vrbody_fist_point(1, fp1), "punto de golpe con puño");
+      float d1 = sqrtf((fp1[0] - t[0]) * (fp1[0] - t[0]) + (fp1[1] - t[1]) * (fp1[1] - t[1]) + (fp1[2] - t[2]) * (fp1[2] - t[2]));
+      vrbody_restore(RAM);
+      run_fist_frames(0.0f, 60, &driven);
+      vrbody_hand_state(1, NULL, NULL, t);
+      CHECK(vrbody_fist_point(1, fp0), "punto de golpe con la mano abierta");
+      float d0 = sqrtf((fp0[0] - t[0]) * (fp0[0] - t[0]) + (fp0[1] - t[1]) * (fp0[1] - t[1]) + (fp0[2] - t[2]) * (fp0[2] - t[2]));
+      CHECK(d1 > 40.0f && d1 < 130.0f && d0 > d1 + 20.0f, "nudillos (%.0f mm) más cerca de la muñeca que las yemas (%.0f mm)", d1, d0);
+      float nope[3];
+      vrbody_restore(RAM);
+      vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+      CHECK(!vrbody_fist_point(1, nope) && !vrbody_fist_point(2, nope) && !vrbody_fist_point(1, NULL), "sin apply no hay punto");
+      vrbody_init(&cfg); vrbody_set_view_fn(view_fn); }
     /* malla no reconocida (recuentos absurdos): se deja rígida y se cuenta */
     { vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
       w32(PMODELS + 0x3C * 4 + 0x34, 500); memcpy(RAM0, RAM, RAMSZ);

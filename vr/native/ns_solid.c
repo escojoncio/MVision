@@ -1,5 +1,6 @@
 /* ns_solid: ver ns_solid.h. */
 #include "ns_solid.h"
+#include "ns_hand.h"
 #include <math.h>
 #include <string.h>
 
@@ -44,7 +45,7 @@ size_t ns_solid_collect(const NsScene *sc, const NsMeshStore *st, const NsSolidO
     float wp[256][3];
     for (uint32_t ii = 0; ii < sc->n_inst; ii++) {
         const NsInstance *in = &sc->inst[ii];
-        if (opt && opt->skip_key && in->key == opt->skip_key) { S->inst_skipped++; continue; }
+        if ((opt && opt->skip_key && in->key == opt->skip_key) || ns_key_is_hand(in->key)) { S->inst_skipped++; continue; }
         if (in->flags & NS_IF_SHADOW) continue;
         const int is_static = (in->flags & NS_IF_STATIC) != 0;
         S->inst_used++;

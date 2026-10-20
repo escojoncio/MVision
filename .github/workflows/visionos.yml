@@ -62,6 +62,7 @@ jobs:
           set -o pipefail
           make -f vr/native/extract.mk test
           make -f vr/native/extract.mk test-solid
+          make -f vr/native/extract.mk test-hand
           make -C vr/camera test-headcol
           make -C vr/camera test-native-coh
           make -C vr/body test
