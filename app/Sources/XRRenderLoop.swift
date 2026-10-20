@@ -318,21 +318,25 @@ final class XRRenderLoop {
         return out
     }
 
-    /// Coloca el radar de muñeca en el antebrazo izquierdo: pose tras la IK del cuerpo; sin ella, el agarre del mando izquierdo.
+    /// Coloca el radar (y con él el HUD de muñeca) en la MUÑECA izquierda anclado a la pose del MANDO izquierdo, con una orientación fija tipo reloj
+    /// (vrradar_arm_from_controller: muñeca = origen del agarre, codo a 0,27 m por detrás del eje del mando, dorso = eje +Y del mando). Sigue el movimiento real
+    /// del brazo y no rota con los errores del esqueleto de la IK. Solo si el mando no tiene pose se recurre al antebrazo de la IK.
     private func updateRadarPose(head: simd_float4x4) {
         guard let radar = encoder.renderer.radar else { return }
-        var fa = MvVrForearm()
-        var forearm: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>)?
-        if mv_vrgame_forearm(0, &fa) != 0 {
-            forearm = (SIMD3<Float>(fa.elbow.0, fa.elbow.1, fa.elbow.2),
-                       SIMD3<Float>(fa.wrist.0, fa.wrist.1, fa.wrist.2),
-                       SIMD3<Float>(fa.dorsal.0, fa.dorsal.1, fa.dorsal.2))
-        }
         var grip: simd_float4x4?
         var g = [Float](repeating: 0, count: 16)
         if mv_vrgame_hand_matrix(0, &g) != 0 {
             grip = simd_float4x4(columns: (SIMD4<Float>(g[0], g[1], g[2], g[3]), SIMD4<Float>(g[4], g[5], g[6], g[7]),
                                            SIMD4<Float>(g[8], g[9], g[10], g[11]), SIMD4<Float>(g[12], g[13], g[14], g[15])))
+        }
+        var forearm: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>)?
+        if grip == nil {
+            var fa = MvVrForearm()
+            if mv_vrgame_forearm(0, &fa) != 0 {
+                forearm = (SIMD3<Float>(fa.elbow.0, fa.elbow.1, fa.elbow.2),
+                           SIMD3<Float>(fa.wrist.0, fa.wrist.1, fa.wrist.2),
+                           SIMD3<Float>(fa.dorsal.0, fa.dorsal.1, fa.dorsal.2))
+            }
         }
         let fwd = simd_normalize(-SIMD3<Float>(head.columns.2.x, head.columns.2.y, head.columns.2.z))
         radar.updatePose(forearm: forearm, leftGrip: grip,
