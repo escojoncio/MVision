@@ -73,14 +73,63 @@ int main(void) {
         CK(vrm_move_target(&V, &ENG, W + VRM_W_TARGET, vec) == 1);
         CK(g16(vec) == (far ? 3000 : 900));
         CK(vrm_move_target(&V, &ENG, W + 8, vec) == 0);        /* otro blanco: no se toca */
-        vrm_post_hit(&V, &ENG, W, 1);
-        if (far) { CK(V.n_miss == 1 && V.n_hit == 0); CK(logged("FALLO")); } else { CK(V.n_hit == 1); CK(logged("IMPACTO")); }
+        if (!far) p16(VRM_TARGETS + 6, 4);                      /* el motor marca el daño al solaparse */
+        vrm_post_hit(&V, &ENG, W, 0);
+        if (far) { CK(V.n_miss == 1 && V.n_hit == 0); CK(logged("FALLO")); } else { CK(V.n_hit == 1); CK(logged("REGISTRADO")); }
         CK(!V.ctx_hit);
     }
 
-    /* combo: una petición nueva durante la animación marca el bit 0x20 */
+    /* el resultado del motor (vida quitada) es 0 en un puñetazo: lo que cuenta es que el contador de aturdimiento baje o la bandera de daño se marque */
+    fresh(); enemy(0, 1000, 0, 0);
+    { uint32_t b = VRM_TARGETS; p16(b + 0x2A, 7);
+      VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 500.0f; f.fist[0][1] = 100.0f; f.fist[0][2] = 0;
+      vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      p16(W + VRM_W_TARGET + 16, 400); p16(W + VRM_W_TARGET + 18, 200); p16(W + VRM_W_TARGET + 20, 400);
+      vrm_pre_hit(&V, &ENG, W);
+      p16(b + 0x2A, 6); p16(b + 6, 4);                                    /* lo que hace el motor al solaparse */
+      vrm_post_hit(&V, &ENG, W, 0);
+      CK(V.n_hit == 1 && V.n_miss == 0); CK(logged("REGISTRADO")); }
+    fresh(); enemy(0, 3000, 0, 0);                                         /* el motor no toca nada: fallo, sin reintentos */
+    { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 0; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      vrm_pre_hit(&V, &ENG, W); vrm_post_hit(&V, &ENG, W, 0); CK(V.n_hit == 0 && V.n_miss == 1); CK(logged("FALLO")); }
+    fresh(); enemy(0, 400, 0, 0); p16(VRM_TARGETS, 1 | 2);               /* enemigo en reacción (sin el bit de daño): nadie golpeable */
+    { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 400; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      vrm_pre_hit(&V, &ENG, W); vrm_post_hit(&V, &ENG, W, 0); CK(V.n_nobody == 1 && logged("ningún enemigo golpeable")); }
+    /* historia larga del puño: la muestra más cercana al enemigo (hace ~0,3 s) sigue disponible */
+    fresh(); enemy(0, 1000, 0, 0);
+    { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 900; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      VrmFrame h = fr(); h.fist_ok[0] = h.fist_closed[0] = 1; for (int i = 0; i < 18; i++) { h.fist[0][0] = 900.0f - 40.0f * (float)i; vrm_frame(&V, &ENG, &h); }
+      vrm_pre_hit(&V, &ENG, W); CK(V.ctx_hit && V.ctx_origin[0] >= 800.0f); vrm_post_hit(&V, &ENG, W, 0); }
+    /* patada (etapa 3): no se sustituye el origen */
+    fresh(); enemy(0, 400, 0, 0);
+    { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 400; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      vrm_pre_hit(&V, &ENG, W); vrm_post_hit(&V, &ENG, W, 0); vrm_pre_hit(&V, &ENG, W); vrm_post_hit(&V, &ENG, W, 0);
+      vrm_pre_hit(&V, &ENG, W); CK(V.stage == 3 && !V.ctx_hit); vrm_post_hit(&V, &ENG, W, 0); CK(logged("patada")); }
+
+    /* combo golpe-golpe-patada: las peticiones se encolan y el bit 0x20 se pone en los instantes 6 y 13 (aunque lleguen fuera de las ventanas del botón) */
     fresh(); { VrmFrame f = fr(); f.punch_side = 0; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
-        VrmFrame g = fr(); g.punch_side = 1; vrm_frame(&V, &ENG, &g); vrm_punch_tick(&V, &ENG, W, 3);
+        VrmFrame q = fr(); q.punch_side = 1; vrm_frame(&V, &ENG, &q);      /* segunda petición temprana */
+        CK(vrm_punch_tick(&V, &ENG, W, 2) == 0); CK(!(g16(W + VRM_W_LOCAL) & 0x20) && V.combo_q == 1);
+        VrmFrame t = fr(); t.punch_side = 0; vrm_frame(&V, &ENG, &t);      /* tercera, también antes del 6: se conserva para el 13 */
+        CK(vrm_punch_tick(&V, &ENG, W, 5) == 0); CK(V.combo_q == 2);
+        CK(vrm_punch_tick(&V, &ENG, W, 6) == 0); CK(g16(W + VRM_W_LOCAL) & 0x20); CK(V.combo_q == 1);
+        p16(W + VRM_W_LOCAL, g16(W + VRM_W_LOCAL) & ~0x20);                 /* el motor consume el bit */
+        CK(vrm_punch_tick(&V, &ENG, W, 9) == 0); CK(!(g16(W + VRM_W_LOCAL) & 0x20));
+        CK(vrm_punch_tick(&V, &ENG, W, 13) == 0); CK(g16(W + VRM_W_LOCAL) & 0x20); CK(V.combo_q == 0); }
+    /* espera en el instante de decisión mientras el brazo se mueve: la animación no avanza y no se ejecuta el original; sin brazo en movimiento no espera */
+    fresh(); { VrmFrame f = fr(); f.punch_side = 0; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+        VrmFrame s = fr(); s.swinging = 1; vrm_frame(&V, &ENG, &s);
+        int held = 0; for (int i = 0; i < 20; i++) { p32(W + VRM_W_ANIMT, 7); if (vrm_punch_tick(&V, &ENG, W, 6)) { held++; CK(g32(W + VRM_W_ANIMT) == 6); } else break; }
+        CK(held == VRM_HOLD_MAX);
+        /* la petición llega durante la espera: se concede el segundo golpe */
+        fresh(); VrmFrame f2 = fr(); f2.punch_side = 0; vrm_frame(&V, &ENG, &f2); vrm_action_input(&V, &ENG, W);
+        vrm_frame(&V, &ENG, &s); p32(W + VRM_W_ANIMT, 7); CK(vrm_punch_tick(&V, &ENG, W, 6) == 1);
+        VrmFrame r = fr(); r.punch_side = 1; r.swinging = 1; vrm_frame(&V, &ENG, &r); CK(vrm_punch_tick(&V, &ENG, W, 6) == 0); CK(g16(W + VRM_W_LOCAL) & 0x20);
+        fresh(); VrmFrame f3 = fr(); f3.punch_side = 0; vrm_frame(&V, &ENG, &f3); vrm_action_input(&V, &ENG, W); CK(vrm_punch_tick(&V, &ENG, W, 6) == 0); CK(V.n_hold == 0); }
+
+    /* combo: una petición nueva durante la animación se encola y marca el bit 0x20 en el instante 6 */
+    fresh(); { VrmFrame f = fr(); f.punch_side = 0; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+        VrmFrame g = fr(); g.punch_side = 1; vrm_frame(&V, &ENG, &g); vrm_punch_tick(&V, &ENG, W, 3); vrm_punch_tick(&V, &ENG, W, 6);
         CK(g16(W + VRM_W_LOCAL) & 0x20); CK(V.n_combo == 1); }
 
     /* petición caducada: motivo registrado */

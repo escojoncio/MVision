@@ -52,7 +52,10 @@ typedef struct {
     float neck_height;       /* altura del cuello sobre la posición del enemigo (0,45 m, posición del motor = cintura) */
     float grip_on, grip_off; /* histéresis del agarre (0,65 / 0,35) */
     float peek_on, peek_off; /* inclinación lateral de la cabeza para asomarse (0,12 / 0,06 m) */
-    float cooldown_s;        /* entre golpes (0,3) */
+    float cooldown_s;        /* entre golpes (0,2) */
+    float contact_speed;     /* golpe por CONTACTO: velocidad mínima (relativa a la cabeza) del puño que atraviesa el volumen del enemigo, en cualquier dirección salvo hacia la cabeza (0,8 m/s) */
+    float body_radius, body_low, body_high;   /* cápsula del cuerpo del enemigo sobre su posición del motor (cintura): radio 0,28, 0,5 por debajo, 0,65 por encima */
+    float fist_radius, contact_tol;           /* esfera del puño (0,12) y tolerancia extra (0,05) */
 } vrg_cfg_t;
 
 typedef struct {
@@ -82,7 +85,7 @@ typedef struct {
     int stick_dom, stick_off; /* clic del stick de la mano dominante / de la otra (R3 / L3 del mando del juego) */
     int fist_btn[2];         /* botón del puño pulsado por mano física (R1 de la dominante / L1 de la otra, ya mapeados): ESTO decide puño y agarre; el grip analógico solo es la pose */
     int n_en;
-    struct { float p[3]; float yaw; int down; int vital; } en[VRG_MAX_EN];
+    struct { float p[3]; float yaw; int down; int vital; int blocked; } en[VRG_MAX_EN];   /* blocked: hay geometría estática entre la cabeza y el enemigo (no se puede golpear a través de una pared) */
 } vrg_in_t;
 
 /* Intento de golpe (una mano con el puño o un movimiento casi rápido): para el registro [gest] del visor. reason es una cadena estática. */
@@ -90,6 +93,7 @@ typedef struct {
     int valid, side;
     float speed, fcos, rcos, reach, dist, grip;   /* m/s, coseno hacia delante, coseno radial, alcance (m), distancia al enemigo más cercano (-1 ninguno), agarre */
     int fist;
+    int contact;             /* el puño atraviesa el volumen del cuerpo de un enemigo (golpe por contacto) */
     const char *reason;      /* "detras" (enemigo a tiro pero no delante), "ok", "lento", "dir", "alcance", "sin_enemigo", "lejos", "sin_puno", "enfriamiento", "calma", "ocupado", "manos_ocupadas" */
 } vrg_gest_t;
 
@@ -112,6 +116,7 @@ typedef struct {
     int grab_side;           /* mano física que sujeta (-1 ninguna) mientras el agarre dura (para pegar las manos al cuello) */
     int grab_en;             /* índice del enemigo sujetado (en `en`) o -1 */
     vrg_gest_t gest;         /* intento de golpe de este VBlank (valid = 0: ninguno) */
+    int swinging;            /* 1: algún puño cerrado se mueve a velocidad de golpe (un golpe en marcha): la animación del combo del motor espera la próxima petición */
 } vrg_out_t;
 
 typedef struct {
