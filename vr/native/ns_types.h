@@ -256,6 +256,25 @@ enum {
 };
 enum { NS_TR_INST = 1u, NS_TR_PIECE = 2u, NS_TR_LIGHT = 4u, NS_TR_EFFECT = 8u };
 
+/* ---------------------------------------------------------------------------------------------------------------- efectos de pantalla completa
+ * Estado de agua, anillo (máscara de gas), fundido y modos de visión leído de la RAM (copia plana de NsFxScreen, ns_fx.h). El renderer los hace en nativo
+ * (ns_screen.h): tinte y ondulación en el MUNDO (volumen de agua), recubrimientos en la pantalla del ojo. Mundo del motor para el volumen. */
+enum { NS_SFX_WATER = 1u, NS_SFX_GAS = 2u, NS_SFX_FADE = 4u, NS_SFX_FLASH = 8u, NS_SFX_MODE_A = 16u, NS_SFX_MODE_B = 32u, NS_SFX_AUX = 64u };
+typedef struct {
+    uint32_t flags;      /* NS_SFX_*: efectos activos */
+    uint32_t status;     /* palabra de estado global cruda */
+    float water_min[3], water_max[3];   /* volumen de agua en el mundo del motor (la cara superior de Y es la superficie; Y arriba) */
+    float water_tint[3]; /* multiplicador por canal */
+    uint32_t water_phase;/* contador de fotogramas de la onda */
+    int32_t water_wave_rows, water_wave_period, water_bar_rows;
+    float gas_intensity, gas_inner_px, gas_outer_px, gas_aspect, gas_pulse;   /* anillo: radios horizontales en píxeles del motor, razón vertical/horizontal */
+    float gas_in[3], gas_out[3];        /* color 0..1 del borde interior / exterior (con intensidad y pulso) */
+    int32_t gas_abr;
+    float fade_amount;   /* 0..1 */
+    int32_t fade_white, fade_in;
+} NsScreenFx;
+NS_STATIC_ASSERT(screenfx, sizeof(NsScreenFx) == 120);
+
 typedef struct NsScene {
     uint32_t size;       /* sizeof(NsScene) de quien la rellenó: el consumidor rechaza la escena si no coincide con el suyo */
     uint32_t version;    /* NS_VERSION */
@@ -280,6 +299,7 @@ typedef struct NsScene {
     NsFog fog;
     float bg_rgb[3];     /* color de fondo del canal de fondo 0..255 */
     NsLight global_light;/* luz global (el objeto por defecto del motor); lights[] la repite si alguna instancia la usa */
+    NsScreenFx screen;   /* efectos de pantalla completa (agua, anillo, fundido, modos de visión); válido con NS_SV_FX */
 
     uint32_t n_inst, cap_inst;     NsInstance *inst;
     uint32_t n_piece, cap_piece;   NsPiece *piece;

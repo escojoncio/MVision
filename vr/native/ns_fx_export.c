@@ -39,3 +39,26 @@ uint32_t ns_fx_export(const NsFxScene *sc, int include_culled, NsEffect *out, ui
     }
     return n;
 }
+
+void ns_fx_export_screen(const NsFxScene *sc, NsScreenFx *o) {
+    if (!o) return;
+    memset(o, 0, sizeof *o);
+    if (!sc) return;
+    const NsFxScreen *s = &sc->screen;
+    o->status = s->status;
+    if (s->water.active) {
+        o->flags |= NS_SFX_WATER;
+        memcpy(o->water_min, s->water.box_min, sizeof o->water_min); memcpy(o->water_max, s->water.box_max, sizeof o->water_max); memcpy(o->water_tint, s->water.tint, sizeof o->water_tint);
+        o->water_phase = s->water.phase; o->water_wave_rows = s->water.wave_rows; o->water_wave_period = s->water.wave_period; o->water_bar_rows = s->water.bar_rows;
+    }
+    if (s->gas.active) {
+        o->flags |= NS_SFX_GAS;
+        o->gas_intensity = s->gas.intensity; o->gas_inner_px = s->gas.inner_px; o->gas_outer_px = s->gas.outer_px; o->gas_aspect = s->gas.aspect; o->gas_pulse = s->gas.pulse_amp;
+        memcpy(o->gas_in, s->gas.col_inner, sizeof o->gas_in); memcpy(o->gas_out, s->gas.col_outer, sizeof o->gas_out); o->gas_abr = s->gas.abr & 3;
+    }
+    if (s->fade.active) { o->flags |= NS_SFX_FADE; o->fade_amount = s->fade.amount; o->fade_white = s->fade.white; o->fade_in = s->fade.fade_in; }
+    if (s->flash) o->flags |= NS_SFX_FLASH;
+    if (s->mode_a) o->flags |= NS_SFX_MODE_A;
+    if (s->mode_b) o->flags |= NS_SFX_MODE_B;
+    if (s->aux) o->flags |= NS_SFX_AUX;
+}

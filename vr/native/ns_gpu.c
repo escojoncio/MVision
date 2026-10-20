@@ -332,7 +332,7 @@ void ns_gpu_make_piece(const NsScene *sc, const NsInstance *inst, const NsPiece 
     }
 }
 
-typedef struct { uint32_t key, piece, tri, abr; } SortItem;   /* 16 B */
+typedef struct { uint32_t key, piece, tri, abr; float depth; } SortItem;   /* 20 B */
 /* float -> entero sin signo con el mismo orden (los negativos antes que los positivos) */
 static uint32_t ordered_bits(float f) {
     uint32_t b; memcpy(&b, &f, 4);
@@ -348,6 +348,9 @@ void ns_gpu_sort_free(NsGpuSortScratch *sc) {
 /* Ordenación por radix LSD (3 pasadas de 11 bits) sobre la clave de 32 bits = ~bits_ordenados(profundidad): estable, así que el empate de profundidad conserva el
  * orden de entrada (el criterio de la referencia). Sin malloc por fotograma: el scratch crece y se reutiliza. */
 size_t ns_gpu_sort_semi(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out, uint8_t *abr_out, size_t cap, NsGpuSortScratch *scratch) {
+    return ns_gpu_sort_semi_ex(src, nsrc, out, abr_out, NULL, cap, scratch);
+}
+size_t ns_gpu_sort_semi_ex(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out, uint8_t *abr_out, float *depth_out, size_t cap, NsGpuSortScratch *scratch) {
     size_t total = 0;
     for (size_t s = 0; s < nsrc; s++) total += src[s].ntri;
     if (!total || !cap) return 0;
@@ -371,7 +374,7 @@ size_t ns_gpu_sort_semi(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out, u
             float depth = g->zrow[0] * c[0] + g->zrow[1] * c[1] + g->zrow[2] * c[2] + g->zrow[3];
             if (!(depth == depth)) depth = 0.0f;                     /* NaN */
             a[n].key = ~ordered_bits(depth);                          /* mayor profundidad primero */
-            a[n].piece = g->piece; a[n].tri = g->tri_base + t; a[n].abr = g->abr[t];
+            a[n].piece = g->piece; a[n].tri = g->tri_base + t; a[n].abr = g->abr[t]; a[n].depth = depth;
             n++;
         }
     }
@@ -393,7 +396,7 @@ size_t ns_gpu_sort_semi(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out, u
     }
     /* a = ordenado de atrás adelante. Con tope se descartan los MÁS LEJANOS (el principio de la lista). */
     size_t first = n > cap ? n - cap : 0, m = n - first;
-    for (size_t i = 0; i < m; i++) { out[i].piece = a[first + i].piece; out[i].tri = a[first + i].tri; abr_out[i] = (uint8_t)a[first + i].abr; }
+    for (size_t i = 0; i < m; i++) { out[i].piece = a[first + i].piece; out[i].tri = a[first + i].tri; abr_out[i] = (uint8_t)a[first + i].abr; if (depth_out) depth_out[i] = a[first + i].depth; }
     if (!scratch) ns_gpu_sort_free(&local);
     return m;
 }
@@ -430,6 +433,10 @@ static float fx_len_scale(const float *m) {   /* metros por unidad del motor: lo
 
 int ns_gpu_fx_build(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm, NsGpuFxVert *verts, uint32_t cap_verts, NsGpuFxRun *runs, uint32_t cap_runs,
                     uint64_t *keys, uint32_t cap_keys, NsGpuFxOut *out) {
+    return ns_gpu_fx_build_ex(fx, n_fx, prm, verts, cap_verts, runs, cap_runs, keys, cap_keys, NULL, 0, out);
+}
+int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm, NsGpuFxVert *verts, uint32_t cap_verts, NsGpuFxRun *runs, uint32_t cap_runs,
+                       uint64_t *keys, uint32_t cap_keys, NsGpuFxSemiItem *items, uint32_t cap_items, NsGpuFxOut *out) {
     if (!out) return -1;
     memset(out, 0, sizeof *out);
     if (!prm || !prm->to_vr || !prm->cam || prm->n_eyes < 1 || prm->n_eyes > 2 || (n_fx && (!fx || !verts || !keys)) || (n_fx && !runs)) return -1;
@@ -462,6 +469,7 @@ int ns_gpu_fx_build(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm,
         float q[4][3];       /* esquinas en el mundo VR */
         float uvs[4][2];
         float cols[4][3];
+        float fz[4] = {0, 0, 0, 0};   /* profundidad de la cámara del juego de cada esquina (niebla) */
         uint32_t mask = all_eyes;
         int nq = 0, tri_only = 0;
         for (int v = 0; v < 4; v++) { uvs[v][0] = e->uv[v][0]; uvs[v][1] = e->uv[v][1]; for (int c = 0; c < 3; c++) cols[v][c] = e->rgb[v][c]; }
@@ -479,6 +487,7 @@ int ns_gpu_fx_build(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm,
                 float x0 = e->box[0] * k, y0 = e->box[1] * k / ys, x1 = e->box[2] * k, y1 = e->box[3] * k / ys;
                 const float ox[4] = {x0, x1, x0, x1}, oy[4] = {y0, y0, y1, y1};
                 for (int v = 0; v < 4; v++) for (int r = 0; r < 3; r++) q[v][r] = c[r] + prm->head_right[r] * ox[v] * L - prm->head_up[r] * oy[v] * L;
+                { float zc = ns_gpu_game_z(prm->cam, e->p[0]); fz[0] = fz[1] = fz[2] = fz[3] = zc; }
                 nq = 4; out->n_billboard++;
             }
         } else if ((e->flags & NS_EF_LINE) || e->nv == 2) {
@@ -505,13 +514,14 @@ int ns_gpu_fx_build(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm,
                     /* uv/color: extremo 0 para las esquinas 0,1 y extremo 1 para 2,3 */
                     for (int c = 0; c < 3; c++) { cols[2][c] = cols[1][c]; cols[3][c] = cols[1][c]; cols[1][c] = cols[0][c]; }
                     uvs[2][0] = uvs[1][0]; uvs[2][1] = uvs[1][1]; uvs[3][0] = uvs[1][0]; uvs[3][1] = uvs[1][1]; uvs[1][0] = uvs[0][0]; uvs[1][1] = uvs[0][1];
+                    fz[0] = fz[1] = ns_gpu_game_z(prm->cam, e->p[0]); fz[2] = fz[3] = ns_gpu_game_z(prm->cam, e->p[1]);
                     nq = 4; out->n_ribbon++;
                 }
             }
         } else {
             nq = e->nv == 3 ? 3 : 4;
             tri_only = nq == 3;
-            for (int v = 0; v < nq; v++) { if (!fx_finite3(e->p[v])) ok = 0; else fx_vr(M, e->p[v], q[v]); }
+            for (int v = 0; v < nq; v++) { if (!fx_finite3(e->p[v])) ok = 0; else { fx_vr(M, e->p[v], q[v]); fz[v] = ns_gpu_game_z(prm->cam, e->p[v]); } }
             if (ok) out->n_poly++;
             if (ok && (e->flags & NS_EF_ONESIDE)) {
                 float a[3], b[3], n[3];
@@ -526,6 +536,11 @@ int ns_gpu_fx_build(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm,
         }
         if (ok) for (int v = 0; v < nq; v++) if (!fx_finite3(q[v])) ok = 0;
         if (!ok) { out->n_skipped++; continue; }
+        if (prm->fog && prm->fog->active && prm->fog->len > 0.0f)
+            for (int v = 0; v < nq; v++) {
+                const float s = 1.0f - ns_gpu_fog_f(prm->fog, fz[v]);
+                cols[v][0] *= s; cols[v][1] *= s; cols[v][2] *= s;
+            }
         if (out->n_keys < cap_keys) keys[out->n_keys++] = ns_gpu_fx_key(e);
         if (mask == 0) continue;   /* confirmado (el motor tampoco lo dibujaría desde aquí) pero sin triángulos */
         const int semi_f = (e->flags & NS_EF_SEMI) != 0, tex = (e->flags & NS_EF_TEXTURED) != 0;
@@ -554,7 +569,8 @@ int ns_gpu_fx_build(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm,
                 float cx[3] = {0, 0, 0};
                 for (int v = 0; v < nq; v++) for (int r = 0; r < 3; r++) cx[r] += q[v][r] / (float)nq;
                 float dx = cx[0] - prm->head[0], dy = cx[1] - prm->head[1], dz = cx[2] - prm->head[2];
-                semi[nsemi].depth = dx * dx + dy * dy + dz * dz; semi[nsemi].first = tn; semi[nsemi].count = (uint32_t)nt; semi[nsemi].abr = (uint8_t)(e->abr & 3u); semi[nsemi].order = nsemi;
+                semi[nsemi].depth = prm->has_depth_row ? prm->depth_row[0] * cx[0] + prm->depth_row[1] * cx[1] + prm->depth_row[2] * cx[2] + prm->depth_row[3]
+                                                       : dx * dx + dy * dy + dz * dz; semi[nsemi].first = tn; semi[nsemi].count = (uint32_t)nt; semi[nsemi].abr = (uint8_t)(e->abr & 3u); semi[nsemi].order = nsemi;
                 nsemi++; tn += (uint32_t)nt;
             }
         }
@@ -568,9 +584,35 @@ int ns_gpu_fx_build(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm,
         if (out->n_runs && runs[out->n_runs - 1].abr == semi[s].abr && runs[out->n_runs - 1].start + runs[out->n_runs - 1].count == w) runs[out->n_runs - 1].count += semi[s].count;
         else if (out->n_runs < cap_runs) { runs[out->n_runs].start = w; runs[out->n_runs].count = semi[s].count; runs[out->n_runs].abr = semi[s].abr; out->n_runs++; }
         else { /* sin sitio para otro run: se mezcla en el último (el orden relativo se conserva) */ runs[out->n_runs - 1].count += semi[s].count; }
+        if (items && out->n_sitems < cap_items) {
+            NsGpuFxSemiItem *it = &items[out->n_sitems++];
+            it->depth = semi[s].depth; it->start = w; it->count = semi[s].count; it->abr = semi[s].abr;
+        }
         w += semi[s].count;
     }
     out->n_semi = w - nv;
     free(semi); free(tmp);
     return 0;
+}
+
+/* ------------------------------------------------------------------------------------------------------------ pasada semitransparente única */
+size_t ns_gpu_semi_merge(const float *mesh_depth, const uint8_t *mesh_abr, size_t n_mesh, const NsGpuFxSemiItem *fx, size_t n_fx, NsGpuSemiRun *runs, size_t cap_runs,
+                         int *truncated) {
+    if (truncated) *truncated = 0;
+    if (!runs || !cap_runs) { if (truncated && (n_mesh || n_fx)) *truncated = 1; return 0; }
+    size_t i = 0, j = 0, n = 0;
+    while (i < n_mesh || j < n_fx) {
+        int take_mesh;
+        if (i >= n_mesh) take_mesh = 0;
+        else if (j >= n_fx) take_mesh = 1;
+        else take_mesh = mesh_depth[i] >= fx[j].depth;   /* el más lejano primero; empate: malla antes que efecto */
+        uint32_t kind = take_mesh ? 0u : 1u, start, count;
+        uint8_t abr;
+        if (take_mesh) { start = (uint32_t)i; count = 1; abr = (uint8_t)(mesh_abr[i] & 3u); i++; }
+        else { start = fx[j].start; count = fx[j].count; abr = (uint8_t)(fx[j].abr & 3u); j++; }
+        if (n && runs[n - 1].kind == kind && runs[n - 1].abr == abr && runs[n - 1].start + runs[n - 1].count == start) { runs[n - 1].count += count; continue; }
+        if (n >= cap_runs) { if (truncated) *truncated = 1; break; }
+        runs[n].kind = kind; runs[n].start = start; runs[n].count = count; runs[n].abr = abr; n++;
+    }
+    return n;
 }

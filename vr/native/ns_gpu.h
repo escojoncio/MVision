@@ -74,6 +74,8 @@ void ns_gpu_sort_free(NsGpuSortScratch *sc);
  * rasterizador de referencia), con radix sort estable sobre la clave de 32 bits. Escribe como mucho cap entradas en out/abr_out y devuelve cuántas; si hay más
  * de cap se descartan los MÁS LEJANOS. scratch puede ser NULL (reserva y libera dentro: solo pruebas). */
 size_t ns_gpu_sort_semi(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out, uint8_t *abr_out, size_t cap, NsGpuSortScratch *scratch);
+/* Igual y, si depth_out != NULL, escribe también la profundidad de cada entrada ordenada (para intercalar con los efectos). */
+size_t ns_gpu_sort_semi_ex(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out, uint8_t *abr_out, float *depth_out, size_t cap, NsGpuSortScratch *scratch);
 
 
 /* ---- Efectos nativos (NsScene.effects): geometría por fotograma ----
@@ -91,16 +93,34 @@ typedef struct {
     float head_right[3], head_up[3];    /* ejes de la cabeza en el mundo VR (unitarios, ortogonales) */
     float eyes[2][3]; int n_eyes;       /* ojos (mundo VR, m): 1 o 2 */
     float px_z_min, px_z_ref;           /* profundidad mínima fiable de un tamaño en píxeles y la de referencia si no (0 = 32 y 1000) */
+    const NsFog *fog;                   /* niebla de la escena (NULL = sin niebla). Cada vértice se multiplica por 1 - ns_gpu_fog_f(z de la cámara del juego), como las mallas */
+    int has_depth_row;                  /* 1: los semitransparentes se ordenan por la MISMA profundidad que las mallas (depth_row sobre el centro, mundo VR) y no por la distancia a la cabeza */
+    float depth_row[4];                 /* profundidad (positiva hacia delante) = depth_row[0..2] . centro + depth_row[3] */
 } NsGpuFxParams;
 typedef struct { uint32_t start, count; uint8_t abr; } NsGpuFxRun;   /* start/count en vértices del búfer completo */
+/* Un efecto semitransparente en el búfer (ya ordenado de atrás adelante): para intercalarlo con los triángulos semitransparentes de las mallas (ns_gpu_semi_merge). */
+typedef struct { float depth; uint32_t start, count; uint8_t abr; } NsGpuFxSemiItem;
 typedef struct {
-    uint32_t n_opaque, n_semi, n_runs, n_keys;
+    uint32_t n_opaque, n_semi, n_runs, n_keys, n_sitems;
     uint32_t n_items, n_skipped;        /* efectos entrados / descartados (no finitos, degenerados) */
     uint32_t n_billboard, n_ribbon, n_poly;
 } NsGpuFxOut;
 /* Capacidades: verts >= 12 * n_fx (peor caso: cartel semitransparente texturizado = 6 + 6), runs >= n_fx, keys >= n_fx. 0 = bien; <0 parámetros inválidos. */
 int ns_gpu_fx_build(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm, NsGpuFxVert *verts, uint32_t cap_verts, NsGpuFxRun *runs, uint32_t cap_runs,
                     uint64_t *keys, uint32_t cap_keys, NsGpuFxOut *out);
+/* Igual que ns_gpu_fx_build y, si items != NULL, escribe un NsGpuFxSemiItem por efecto semitransparente en el orden de dibujo (cap_items >= n_fx). */
+int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm, NsGpuFxVert *verts, uint32_t cap_verts, NsGpuFxRun *runs, uint32_t cap_runs,
+                       uint64_t *keys, uint32_t cap_keys, NsGpuFxSemiItem *items, uint32_t cap_items, NsGpuFxOut *out);
+
+/* ---- Una sola pasada semitransparente ordenada: mallas y efectos intercalados ----
+ * Entra la lista de triángulos de malla ya ordenada (ns_gpu_sort_semi_ex: profundidad + modo por entrada, de atrás adelante) y los efectos semitransparentes (ya
+ * ordenados). Sale una lista de tramos en el orden de dibujo: tipo 0 = triángulos [start, start+count) de la lista de mallas; tipo 1 = vértices del búfer de efectos.
+ * A igual profundidad va primero la malla (el efecto se pinta encima). Tramos contiguos del mismo tipo y modo de mezcla se unen. Devuelve los tramos escritos
+ * (si cap_runs no basta se detiene y se pone *truncated). */
+typedef struct { uint32_t kind; uint32_t start, count; uint8_t abr; } NsGpuSemiRun;
+size_t ns_gpu_semi_merge(const float *mesh_depth, const uint8_t *mesh_abr, size_t n_mesh, const NsGpuFxSemiItem *fx, size_t n_fx, NsGpuSemiRun *runs, size_t cap_runs,
+                         int *truncated);
+
 /* Clave de 64 bits (no nula) de un efecto: la misma que ns_fx_item_key de ns_fx.h. */
 static inline uint64_t ns_gpu_fx_key(const NsEffect *e) { return ((uint64_t)e->src_key << 32) | ((uint64_t)e->idx << 8) | (uint64_t)e->sub; }
 

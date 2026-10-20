@@ -39,6 +39,7 @@ static int glue_extract(const uint8_t *ram, const uint8_t *scratch, NsScene *out
         int trunc = 0;
         out->n_effect = ns_fx_export(g_fx, 1, out->effects, out->cap_effect, &trunc);
         if (trunc) { out->truncated |= NS_TR_EFFECT; out->n_dropped_effect = g_fx->n_items > out->n_effect ? g_fx->n_items - out->n_effect : 0; }
+        ns_fx_export_screen(g_fx, &out->screen);
         out->fx_seq = ++g_fx_seq;
         out->valid |= NS_SV_FX;
     }

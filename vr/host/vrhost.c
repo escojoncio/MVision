@@ -236,7 +236,8 @@ static int grow(void **p, size_t *cap, size_t need, size_t esz) {
 
 
 /* ------------------------------------------------------------------------------------------------ render nativo (vr/native) */
-/* Defecto del modo de render: 1 = nativo (extractor y renderer Metal integrados). El menú VR «Motor de dibujo» o MV_RENDER=gpu vuelven a la lista de la GPU. */
+/* El 3D del mundo y los efectos de pantalla salen SIEMPRE del render nativo. Ya no existe el modo «gpu» (ni en el menú VR ni en MV_RENDER): la lista de la GPU solo alimenta
+ * la capa 2D (HUD, menús, radio, códec, textos, radar), los eventos de VRAM y las marcas de efectos. `render_req` se conserva (siempre 1) por compatibilidad de la interfaz. */
 #ifndef MV_RENDER_DEFAULT_NATIVE
 #define MV_RENDER_DEFAULT_NATIVE 1
 #endif
@@ -259,9 +260,9 @@ static void ns_frame_check(void);
 static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u);
 _Static_assert(VR_SKIP_WORLD == NS_SKIP_WORLD && VR_SKIP_FX == NS_SKIP_FX, "las marcas de batch y la decisión del consumidor deben coincidir");
 
-void mv_vrhost_set_render_mode(int mode) { if (!atomic_load(&render_locked)) atomic_store(&render_req, mode <= 0 ? 0 : mode >= 2 ? 2 : 1); }   /* 0 gpu, 1 nativo, 2 solo nativo (depuración) */
-int mv_vrhost_render_only_native(void) { return atomic_load(&render_req) == 2; }
-int mv_vrhost_render_mode(void) { return atomic_load(&render_req); }
+void mv_vrhost_set_render_mode(int mode) { (void)mode; atomic_store(&render_req, 1); }   /* sin efecto: solo hay render nativo */
+int mv_vrhost_render_only_native(void) { return 0; }
+int mv_vrhost_render_mode(void) { return 1; }
 int mv_vrhost_render_env_locked(void) { return atomic_load(&render_locked); }
 void mv_vrhost_native_renderer_ready(int ready) { atomic_store(&renderer_ready, ready != 0); }
 int mv_vrhost_native_available(void) { return ns_hook_has_extractor() && ns_hook_installed() && atomic_load(&renderer_ready); }
@@ -475,7 +476,7 @@ static int dump_stage_mode(void) {
 }
 static int ns_gate(void *u) {
     (void)u;
-    if (atomic_load(&render_req) && atomic_load(&renderer_ready)) return 1;
+    if (atomic_load(&renderer_ready)) return 1;
     return dump_stage_mode() && atomic_load(&dump_state) == DS_REQ;
 }
 
@@ -783,13 +784,11 @@ static void build_one(const GpuDrawList *l, int si) {
     if (ok && hc_on && r && r->active && sc.user_space && sc.world_valid) {
         VrHcMap hm;
         if (vrhc_map_from_record(&hm, r)) {
-            float jt[16][3];
-            int nj = vrcam_model_joints(emu_ram, jt, 16);
             pthread_mutex_lock(&HCMX);
             float dx = hc_last_eye[0] - hm.eye[0], dz = hc_last_eye[2] - hm.eye[2];
             if (hc_have_eye && dx * dx + dz * dz > (4.0f * hm.upm) * (4.0f * hm.upm)) vrhc_reset();   /* salto (otra zona): sin fantasmas del mundo anterior */
             memcpy(hc_last_eye, hm.eye, sizeof hc_last_eye); hc_have_eye = 1;
-            vrhc_feed_scene(&hm, &sc, (const float (*)[3])jt, nj);
+            /* La colisión de la cabeza se alimenta SOLO de la escena nativa (ns_solid_tap); la lista de la GPU ya no aporta geometría (aquí solo se fija el mapa usuario <-> mundo) */
             pthread_mutex_unlock(&HCMX);
             slot[si].hcmap = hm;
         }
@@ -1182,7 +1181,7 @@ static int dump_wants_stage(void) {   /* hay una pareja pendiente que aún neces
     return r;
 }
 static void dump_at_stage(Cpu *c) {
-    if (!dump_stage_mode() && !atomic_load(&render_req) && !dump_wants_stage()) return;
+    if (!dump_stage_mode() && !atomic_load(&renderer_ready) && !dump_wants_stage()) return;
     dump_point = 1;
     dump_capture(c, (uint32_t)hle_frame_count(), NULL);   /* no hace nada si no hay un pedido sin atender */
     dump_point = 0;
@@ -1391,9 +1390,9 @@ void mv_vrhost_install(void) {
         ns_bridge_get();
         const char *e = getenv("MV_RENDER");
         if (e && *e) {
+            /* MV_RENDER solo admite «nativo» (el defecto). «gpu» y «solo-nativo» ya no existen: se avisa y se ignora (nunca se dibuja el 3D de la lista de la GPU). */
             if (!strcmp(e, "nativo") || !strcmp(e, "native")) { atomic_store(&render_req, 1); atomic_store(&render_locked, 1); }
-            else if (!strcmp(e, "solo-nativo") || !strcmp(e, "native-only")) { atomic_store(&render_req, 2); atomic_store(&render_locked, 1); }
-            else if (!strcmp(e, "gpu")) { atomic_store(&render_req, 0); atomic_store(&render_locked, 1); }
+            else fprintf(stderr, "[vrhost] MV_RENDER=%s ignorado: el 3D sale siempre del render nativo\n", e);
         }
         ns_extract_register();
     }

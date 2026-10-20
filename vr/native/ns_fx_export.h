@@ -8,3 +8,6 @@
 /* include_culled: 0 omite los elementos que el motor no emitió en ese fotograma (NSFX_F_ENGINE_CULLED); 1 los entrega (el renderer decide por su cámara).
  * Devuelve el nº de efectos escritos (<= cap). `truncated` (opcional) se pone a 1 si no cupieron todos. */
 uint32_t ns_fx_export(const NsFxScene *sc, int include_culled, NsEffect *out, uint32_t cap, int *truncated);
+
+/* Copia plana del estado de los efectos de pantalla completa (NsFxScene.screen) al contrato (NsScene.screen). */
+void ns_fx_export_screen(const NsFxScene *sc, NsScreenFx *out);

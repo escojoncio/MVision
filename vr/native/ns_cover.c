@@ -524,6 +524,18 @@ size_t ns_cover_format(const NsCoverResult *r, uint32_t frame, char *buf, size_t
         r->cause[NC_POSE][1], r->cause[NC_OTHERTEX][1], r->cause[NC_PARTIAL][1], r->cause[NC_ABSENT][1], r->cause[NC_BILLBOARD][1],
         r->tex_page, r->tex_clut, r->tex_uv, r->nat_tris, r->nat_tris - r->nat_used,
         r->rev[NR_BEHIND], r->rev[NR_NEAR], r->rev[NR_OFF], r->rev[NR_BACK], r->rev[NR_FAR], r->rev[NR_HIDDEN], r->rev[NR_BIG], r->rev[NR_EXTRA], r->shift_mean_px, r->shift_bad, r->col_n, r->col_bad, r->col_mean, r->ms);
+    {   /* por CLASE: mallas opacas, mallas semitransparentes, efectos (ns_fx: agua / carteles y sprites / resto) y jugador (pose: brazos con IK, la lista manda) */
+        uint32_t mo = 0, ms = 0, to = 0, ts = 0;
+        for (int c = 0; c < NC_N; c++) { to += r->cause[c][0]; ts += r->cause[c][1]; }
+        mo = r->cause[NC_MATCH][0] + r->cause[NC_SPLIT][0] + r->cause[NC_SUBDIV][0];
+        ms = r->cause[NC_MATCH][1] + r->cause[NC_SPLIT][1] + r->cause[NC_SUBDIV][1];
+        uint32_t pose = r->cause[NC_POSE][0] + r->cause[NC_POSE][1];
+        uint32_t tot = to + ts + r->fx_tris, cov = mo + ms + r->fx_tris;
+        uint32_t tot_np = tot - pose;
+        APP("[cobertura] clases: mallas_opacas=%u/%u (%.1f%%) mallas_semi=%u/%u (%.1f%%) efectos=%u/%u (agua=%u sprites=%u otros=%u) jugador_pose=%u | total=%u/%u (%.1f%%) sin_pose=%u/%u (%.1f%%)\n",
+            mo, to, to ? 100.0 * mo / to : 100.0, ms, ts, ts ? 100.0 * ms / ts : 100.0, r->fx_tris, r->fx_tris, r->fx_water, r->fx_sprite, r->fx_other, pose,
+            cov, tot, tot ? 100.0 * cov / tot : 100.0, cov, tot_np, tot_np ? 100.0 * cov / tot_np : 100.0);
+    }
     for (uint32_t i = 0; i < r->n_worst; i++) {
         const NsCoverGroup *g = &r->worst[i];
         APP("[cobertura]   peor %u: %s%s n=%u objeto=%08x pieza=%u malla=%08x tpage=%04x clut=%04x zmin=%.0f\n", i + 1, ns_cover_cause_name[g->cause], g->semi ? "(semi)" : "", g->n, g->key, g->piece, g->mesh, g->tpage, g->clut, g->zmin);

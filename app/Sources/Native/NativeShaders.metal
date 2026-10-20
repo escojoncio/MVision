@@ -22,6 +22,7 @@ struct NsVOut {
     float3 col;              /* byte de color por vértice (128 = neutro), interpolado */
     uint tpage [[flat]];
     uint clutf [[flat]];     /* clut | flags << 16 */
+    float3 ew;               /* posición en el mundo del motor (el agua vive en el mundo: tinte y onda dependen de ella, no de la cabeza) */
 };
 
 static float3 ns_mul34(const device float *m, float3 p)
@@ -92,6 +93,7 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
     o.col = col;
     o.tpage = uint(c.tpage);
     o.clutf = uint(c.clut) | (cf << 16);
+    o.ew = wp;
     return o;
 }
 
@@ -143,8 +145,11 @@ static NsVOut ns_fx_vertex(uint vid, uint amp, const device NsGpuFxVert *fv, con
 {
     const device NsGpuFxVert &V = fv[vid];
     NsVOut o;
-    /* polígono de una cara que este ojo no ve: triángulo degenerado (los tres vértices llevan la misma máscara) */
-    o.pos = ((V.eyes >> amp) & 1u) != 0u ? U.view_proj[amp] * float4(V.p[0], V.p[1], V.p[2], 1.0) : float4(0.0);
+    /* polígono de una cara que este ojo no ve: triángulo degenerado (los tres vértices llevan la misma máscara). Sin amplificación el ojo del pase viene en U.misc.x */
+    const uint eye = amp + uint(U.misc.x);
+    o.pos = ((V.eyes >> eye) & 1u) != 0u ? U.view_proj[amp] * float4(V.p[0], V.p[1], V.p[2], 1.0) : float4(0.0);
+    const float3 pv = float3(V.p[0], V.p[1], V.p[2]);
+    o.ew = float3(dot(U.fromvr[0].xyz, pv) + U.fromvr[0].w, dot(U.fromvr[1].xyz, pv) + U.fromvr[1].w, dot(U.fromvr[2].xyz, pv) + U.fromvr[2].w);
     o.uv = float2(V.u, V.v);
     o.col = clamp(floor(clamp(float3(V.col[0], V.col[1], V.col[2]), 0.0, 255.0) * U.tint.xyz), 0.0, 255.0);
     o.tpage = V.tpage;
@@ -188,18 +193,32 @@ static float ns_lin1(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055
 
 /* Pase 0 (opaco): caras no semitransparentes completas; en las semitransparentes solo los texels con bit15 = 0 (las sin textura no entran).
  * Pase 1 (semitransparente): solo los texels con bit15 = 1 de las texturizadas y todo lo sin textura. Alfa = cobertura (1 donde se escribe). */
-fragment float4 ns_fs(NsVOut in [[stage_in]], texture2d<ushort, access::read> vram [[texture(0)]])
+fragment float4 ns_fs(NsVOut in [[stage_in]], texture2d<ushort, access::read> vram [[texture(0)]],
+                      constant NsGpuUniforms &U [[buffer(NSG_BUF_UNI)]])
 {
     uint flags = in.clutf >> 16;
     uint clut = in.clutf & 0xFFFFu;
     bool semi = (flags & NSG_CF_SEMI) != 0u;
     float3 col = clamp(in.col, 0.0, 255.0);
+    /* agua (ns_screen_water_ref): en el volumen, o en todo si la cabeza está dentro. Tinte multiplicativo y onda de texels que dependen solo de la posición del mundo. */
+    bool wet = false;
+    float2 wd = float2(0.0);
+    float3 wtint = float3(1.0);
+    if (U.water_min.w > 0.5) {
+        bool inside = all(in.ew >= U.water_min.xyz) && all(in.ew <= U.water_max.xyz);
+        wet = inside || U.water_tint.w > 0.5;
+        if (wet) {
+            wtint = U.water_tint.xyz;
+            wd = float2(U.water_wave.x * sin(U.water_wave.y * in.ew.y + U.water_wave.z),
+                        0.5 * U.water_wave.x * sin(U.water_wave.y * (in.ew.x + in.ew.z) + U.water_wave.z));
+        }
+    }
     float3 rgb;
     if (kNsFlat) {
         /* malla opaca sin textura: ni lectura de VRAM ni descarte */
         rgb = col / 255.0;
     } else if ((flags & NSG_CF_TEX) != 0u) {
-        uint tn = ns_texel(vram, in.tpage, clut, int(floor(in.uv.x + 1.0e-4)), int(floor(in.uv.y + 1.0e-4)));
+        uint tn = ns_texel(vram, in.tpage, clut, int(floor(in.uv.x + 1.0e-4 + wd.x)), int(floor(in.uv.y + 1.0e-4 + wd.y)));
         if (tn == 0u) discard_fragment();
         bool b15 = (tn & 0x8000u) != 0u;
         if (kNsPass == 0u) { if (semi && b15) discard_fragment(); }
@@ -210,6 +229,65 @@ fragment float4 ns_fs(NsVOut in [[stage_in]], texture2d<ushort, access::read> vr
         if (kNsPass == 0u && semi) discard_fragment();
         rgb = col / 255.0;
     }
+    if (wet) rgb = clamp(rgb * wtint, 0.0, 1.0);
     if (kNsLinear) rgb = float3(ns_lin1(rgb.x), ns_lin1(rgb.y), ns_lin1(rgb.z));
     return float4(rgb, 1.0);
+}
+
+/* ---------------- recubrimientos de pantalla del ojo (ns_screen_overlay_ref) ----------------
+ * Un triángulo que cubre la pantalla; el fragmento reconstruye las tangentes del ojo (t = (ndc + c) / s con la proyección del ojo) y de ellas los píxeles del motor
+ * (px = t * H): no dependen de la resolución del ojo y siguen a la cabeza como en la pantalla del motor. Sin prueba de profundidad. */
+struct NsOvOut {
+    float4 pos [[position]];
+    float2 ndc;
+    uint eye [[flat]];
+};
+vertex NsOvOut ns_vs_overlay(uint vid [[vertex_id]])
+{
+    float2 p = float2((vid << 1) & 2u, vid & 2u);
+    NsOvOut o;
+    o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);
+    o.ndc = p * 2.0 - 1.0;
+    o.eye = 0u;
+    return o;
+}
+vertex NsOvOut ns_vs_overlay_amp(uint vid [[vertex_id]], ushort amp [[amplification_id]])
+{
+    NsOvOut o = ns_vs_overlay(vid);
+    o.eye = uint(amp);
+    return o;
+}
+static float ns_sstep(float e0, float e1, float x)
+{
+    if (e1 <= e0) return x >= e1 ? 1.0 : 0.0;
+    float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+fragment float4 ns_fs_overlay(NsOvOut in [[stage_in]], constant NsGpuOverlayU &U [[buffer(NSG_BUF_OVERLAY)]])
+{
+    const float4 ep = in.eye == 0u ? float4(U.eye0[0], U.eye0[1], U.eye0[2], U.eye0[3]) : float4(U.eye1[0], U.eye1[1], U.eye1[2], U.eye1[3]);   /* P00, P11, P02, P12 */
+    const float2 t = (in.ndc + ep.zw) / ep.xy;
+    const float H = U.ov.p[3] > 0.0 ? U.ov.p[3] : 160.0;
+    const float px = t.x * H, py = t.y * H;
+    float3 F = float3(U.ov.rgb[0], U.ov.rgb[1], U.ov.rgb[2]);
+    float a = U.ov.amount;
+    if (U.ov.kind == NSG_OV_RING) {
+        float asp = U.ov.p[2] > 0.0 ? U.ov.p[2] : 1.0;
+        float r = sqrt(px * px + (py / asp) * (py / asp));
+        float c = ns_sstep(U.ov.p[0], U.ov.p[1], r);
+        F = mix(F, float3(U.ov.rgb2[0], U.ov.rgb2[1], U.ov.rgb2[2]), c);
+        a *= c;
+    } else if (U.ov.kind == NSG_OV_SCAN) {
+        float per = U.ov.p[0] > 0.0 ? U.ov.p[0] : 2.0;
+        float ph = py / per + U.ov.p[1];
+        a *= (ph - floor(ph)) < U.ov.p[2] ? 1.0 : 0.0;
+    } else if (U.ov.kind == NSG_OV_BARS) {
+        float lim = 120.0 - U.ov.p[0];
+        a *= ns_sstep(lim - U.ov.p[1], lim + U.ov.p[1], fabs(py));
+    }
+    if (kNsLinear) F = float3(ns_lin1(F.x), ns_lin1(F.y), ns_lin1(F.z));
+    /* mezcla de fábrica: abr0 (alfa = a/2, mezcla de color con el destino), abr1/abr2 (suma/resta de F*a), abr3 (suma de F*a/4) */
+    if (U.ov.abr == 0u) return float4(F, 0.5 * a);
+    if (U.ov.abr == 3u) return float4(F * a * 0.25, 1.0);
+    return float4(F * a, 1.0);
 }

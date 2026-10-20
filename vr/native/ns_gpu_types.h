@@ -101,11 +101,37 @@ typedef struct {
     vector_float4 tovr[3];          /* mundo del motor -> mundo VR, filas de la 3x4 (xyz, traslación en w) */
     vector_float4 fog_fwd;          /* xyz = adelante de la cámara del juego (mundo del motor); w = -dot(adelante, ojo): z_vista = dot(xyz, p) + w */
     vector_float4 fog_par;          /* x = inicio, y = longitud (unidades del motor), z = 1 si hay niebla, w = metros VR por unidad de `raise` */
-    vector_float4 tint;             /* xyz = factor de color por canal aplicado al color de vértice (1,1,1 = sin teñir; modo de depuración «solo nativo») */
+    vector_float4 tint;             /* xyz = factor de color por canal aplicado al color de vértice (1,1,1 = sin teñir; fundido a negro del último fotograma válido) */
+    /* agua (ns_screen): el tinte y la ondulación viven en el MUNDO. w de water_min = 1 si hay volumen de agua; w de water_tint = 1 si la cabeza está dentro (se tiñe todo) */
+    vector_float4 water_min, water_max, water_tint;
+    vector_float4 water_wave;       /* x = amplitud (texels), y = frecuencia espacial (rad por unidad del motor), z = fase (rad) */
+    vector_float4 fromvr[3];        /* mundo VR -> mundo del motor, filas de la 3x4 (xyz, traslación en w) */
+    vector_float4 misc;             /* x = índice de ojo del pase cuando NO hay amplificación (0/1: máscara de caras de los efectos) */
 } NsGpuUniforms;
 #endif
 
+/* ---- Recubrimientos de pantalla del ojo (ns_screen): fundido, destello, modos de visión, anillo, líneas de exploración y barras. Una pasada de pantalla completa cada uno. ---- */
+#define NSG_MAX_OVERLAYS 8
+#define NSG_BUF_OVERLAY 0    /* ns_fs_overlay: NsGpuOverlayU en setFragmentBytes(index 0) */
+enum { NSG_OV_NONE = 0, NSG_OV_COVER = 1, NSG_OV_RING = 2, NSG_OV_SCAN = 3, NSG_OV_BARS = 4 };
+typedef struct {
+    ns_u32 kind;         /* NSG_OV_* */
+    ns_u32 abr;          /* modo de mezcla original 0 (B+F)/2, 1 B+F, 2 B-F, 3 B+F/4 */
+    float amount;        /* COVER/SCAN/BARS: intensidad 0..1 */
+    float rgb[3];        /* color 0..1 (RING: borde interior) */
+    float rgb2[3];       /* RING: borde exterior */
+    float p[4];          /* RING: radio interior px, radio exterior px, razón vertical/horizontal, H del motor. SCAN: periodo en filas del motor, fase, proporción cubierta, H. BARS: fracción de altura NDC */
+} NsGpuOverlay;                                                                                     /* 52 B */
+/* Parámetros del ojo para pasar de NDC a tangentes: t = (ndc + (P20, P21)) / (P00, P11). eye[i] = {P00, P11, P20, P21}. */
+typedef struct { NsGpuOverlay ov; float eye0[4], eye1[4]; } NsGpuOverlayU;                          /* 84 B */
+typedef struct {
+    float water_min[4], water_max[4], water_tint[4], water_wave[4];   /* ver NsGpuUniforms */
+    ns_u32 n_overlays, pad0, pad1, pad2;
+    NsGpuOverlay ov[NSG_MAX_OVERLAYS];                                 /* en orden de dibujo */
+} NsGpuScreen;
+
 #ifndef __METAL_VERSION__
+typedef char ns_gpu_chk_overlay[(sizeof(NsGpuOverlay) == 52) ? 1 : -1];
 typedef char ns_gpu_chk_vert[(sizeof(NsGpuVert) == 16) ? 1 : -1];
 typedef char ns_gpu_chk_corner[(sizeof(NsGpuCorner) == 28) ? 1 : -1];
 typedef char ns_gpu_chk_piece[(sizeof(NsGpuPiece) == 164) ? 1 : -1];

@@ -778,6 +778,7 @@ int ns_extract_ex(NsScene *sc, NsMeshStore *st, const uint8_t *ram, size_t ram_s
     memset(&sc->cam, 0, sizeof sc->cam); memset(&sc->fog, 0, sizeof sc->fog);
     sc->bg_rgb[0] = sc->bg_rgb[1] = sc->bg_rgb[2] = 0;
     memset(&sc->global_light, 0, sizeof sc->global_light);
+    memset(&sc->screen, 0, sizeof sc->screen);
     if (!ram || !st) return -1;
     sc->mesh_epoch = ns_store_epoch(st); sc->zone_gen = st->zone_gen;
 

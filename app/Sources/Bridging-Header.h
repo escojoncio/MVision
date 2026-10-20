@@ -8,3 +8,6 @@
 #include "vr_scope.h"
 #include "RenderRGBridge.h"
 #include "ns_gpu.h"      /* renderer nativo: empaquetado para la GPU (estructuras compartidas con el shader) */
+#include "ns_screen.h"   /* efectos de pantalla completa nativos (agua, anillo, fundidos, modos de visión) */
+#include "ns_present.h"  /* qué se enseña cuando el nativo no está listo: repetir el último válido o fundir a negro */
+#include "ns_cinema.h"   /* cinemáticas del motor con el render nativo desde la cámara del juego */

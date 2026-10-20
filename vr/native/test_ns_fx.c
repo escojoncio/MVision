@@ -721,6 +721,131 @@ static void test_degenerate(void) {
     ns_fx_scene_destroy(s);
 }
 
+
+/* Clase 23 (formato libre) y paquetes propios: la forma sale del comando del paquete; se reconstruyen a la profundidad del paquete y casan exactos con la GPU. */
+static TPrim mkfree(int n, int psz, int flags) {
+    int t0[3] = {0, 0, 0};
+    TPrim p = mkprim(23, flags, n, 4096, t0, 0);
+    p.pk[0] = alloc((uint32_t)(psz * n)); p.pk[1] = alloc((uint32_t)(psz * n));
+    w16(p.addr + 0x30, psz); w16(p.addr + 0x32, 4); w16(p.addr + 0x34, 8); w16(p.addr + 0x36, 8);
+    w32(p.addr + 0x40, p.pk[0]); w32(p.addr + 0x44, p.pk[1]);
+    return p;
+}
+static void test_free_kind(void) {
+    reset(); memset(LASTNODE, 0, sizeof LASTNODE);
+    TPrim f = mkfree(6, 52, 0);
+    const int SZ = 1500, PS = 52;
+    static const int xs[4] = {-40, 30, -35, 40}, ys[4] = {-30, -28, 25, 33};
+    for (int b = 0; b < 2; b++) {
+        uint32_t base = f.pk[b];
+        for (int j = 0; j < 6; j++) { uint32_t pk = base + (uint32_t)(PS * j); w16(pk, SZ); }
+        uint32_t pk;
+        /* 0: cuadrilátero texturizado semitransparente (0x2E): xy@8 uvclut@12 xy@16 uvtpage@20 ... */
+        pk = base; w8(pk + 7, 0x2E);
+        for (int v = 0; v < 4; v++) { w16(pk + 8 + 8u * (uint32_t)v, xs[v]); w16(pk + 10 + 8u * (uint32_t)v, ys[v]); w8(pk + 12 + 8u * (uint32_t)v, 10 + v); w8(pk + 13 + 8u * (uint32_t)v, 20 + v); }
+        w16(pk + 14, 0x7C10); w16(pk + 22, 0x1A | (1 << 5) | (1 << 7));
+        /* 1: triángulo plano (0x20) */
+        pk = base + (uint32_t)PS; w8(pk + 7, 0x20); w8(pk + 4, 90); w8(pk + 5, 91); w8(pk + 6, 92);
+        for (int v = 0; v < 3; v++) { w16(pk + 8 + 4u * (uint32_t)v, xs[v] + 3); w16(pk + 10 + 4u * (uint32_t)v, ys[v] + 3); }
+        /* 2: cuadrilátero degradado (0x38) */
+        pk = base + (uint32_t)(2 * PS); w8(pk + 7, 0x38);
+        for (int v = 0; v < 4; v++) { w16(pk + 8 + 8u * (uint32_t)v, xs[v] - 5); w16(pk + 10 + 8u * (uint32_t)v, ys[v] - 5); }
+        w8(pk + 4, 10); w8(pk + 12, 40); w8(pk + 20, 80); w8(pk + 28, 120);
+        /* 3: línea plana (0x42, semitransparente) */
+        pk = base + (uint32_t)(3 * PS); w8(pk + 7, 0x42); w8(pk + 4, 200);
+        w16(pk + 8, -20); w16(pk + 10, -10); w16(pk + 12, 25); w16(pk + 14, 12);
+        /* 4: sprite 8x8 (0x76) */
+        pk = base + (uint32_t)(4 * PS); w8(pk + 7, 0x76); w16(pk + 8, 5); w16(pk + 10, -6); w8(pk + 12, 32); w8(pk + 13, 48); w16(pk + 14, 0x7C20);
+        /* 5: rectángulo de tamaño libre (0x62) */
+        pk = base + (uint32_t)(5 * PS); w8(pk + 7, 0x62); w16(pk + 8, -10); w16(pk + 10, 4); w16(pk + 12, 14); w16(pk + 14, 6);
+    }
+    queue_commit(0);
+    int r; NsFxScene *s = run(0, &r);
+    CHECK(r == 0 && s->n_items == 6 && s->stats.n_free == 1, "clase 23: items=%u libres=%u", s->n_items, s->stats.n_free);
+    if (s->n_items == 6) {
+        static const int shape[6] = {NSFX_SH_QUAD, NSFX_SH_TRI, NSFX_SH_QUAD, NSFX_SH_RIBBON, NSFX_SH_BILLBOARD, NSFX_SH_BILLBOARD};
+        for (int k = 0; k < 6; k++) CHECK(s->items[k].shape == shape[k] && s->items[k].kind == 23, "elemento %d forma=%d clase=%d", k, s->items[k].shape, s->items[k].kind);
+        const NsFxItem *q = &s->items[0];
+        CHECK((q->flags & NSFX_F_TEXTURED) && (q->flags & NSFX_F_SEMI) && q->abr == 1 && q->tp == 1 && q->clut == 0x7C10 && q->uv[2][0] == 12 && q->uv[2][1] == 22, "textura del cuadrilátero libre (abr=%d tp=%d clut=%04x)", q->abr, q->tp, q->clut);
+        CHECK(!(s->items[1].flags & NSFX_F_TEXTURED) && s->items[1].rgb[0][0] == 90, "triángulo plano con su color");
+        CHECK((s->items[2].flags & NSFX_F_GOURAUD) && s->items[2].rgb[0][0] == 10 && s->items[2].rgb[1][0] == 40 && s->items[2].rgb[2][0] == 80 && s->items[2].rgb[3][0] == 120, "degradado: un color por vértice");
+        CHECK((s->items[3].flags & NSFX_F_SEMI) && s->items[3].width[0] > 0 && s->items[3].pcls == 0, "línea libre: cinta");
+        CHECK((s->items[4].flags & NSFX_F_TEXTURED) && (s->items[4].flags & NSFX_F_TPAGE_UNKNOWN) && s->items[4].sw == 8 && s->items[4].sh == 8, "sprite 8x8 libre");
+        CHECK(!(s->items[5].flags & NSFX_F_TEXTURED) && s->items[5].sw == 14 && s->items[5].sh == 6, "rectángulo libre de tamaño del paquete");
+        /* reproyección: la posición de mundo reconstruida vuelve a las coordenadas del paquete (factor vertical incluido) */
+        for (int v = 0; v < 4; v++) {
+            double w[3] = {q->pos[v][0], q->pos[v][1], q->pos[v][2]}, sx, sy, z;
+            CHECK(ref_proj(w, &sx, &sy, &z) && NEAR(sx, xs[v], 0.6) && NEAR(sy, ys[v], 0.6) && NEAR(z, SZ, 1.0), "reproyección v%d: (%.2f %.2f) esperado (%d %d)", v, sx, sy, xs[v], ys[v]);
+        }
+        /* casación exacta con la GPU: el cuadrilátero libre y el triángulo plano salen como FX */
+        GpuOp o[3]; GpuDrawList dl; memset(&dl, 0, sizeof dl); memset(o, 0, sizeof o); dl.ops = o; dl.nops = 3; dl.disp.w = 320; dl.disp.h = 240;
+        o[0].type = GPU_OP_POLY; o[0].nv = 4; o[0].flags = GPU_F_TEXTURED | GPU_F_SEMI | GPU_F_QUAD; o[0].tp = 1;
+        for (int v = 0; v < 4; v++) { o[0].v[v].x = (int16_t)xs[v]; o[0].v[v].y = (int16_t)ys[v]; o[0].v[v].u = (uint8_t)(10 + v); o[0].v[v].v = (uint8_t)(20 + v); }
+        o[1].type = GPU_OP_POLY; o[1].nv = 3;
+        for (int v = 0; v < 3; v++) { o[1].v[v].x = (int16_t)(xs[v] + 3); o[1].v[v].y = (int16_t)(ys[v] + 3); o[1].v[v].r = 90; o[1].v[v].g = 91; o[1].v[v].b = 92; }
+        o[2].type = GPU_OP_LINE; o[2].nv = 2; o[2].flags = GPU_F_SEMI; o[2].v[0].x = -20; o[2].v[0].y = -10; o[2].v[1].x = 25; o[2].v[1].y = 12; o[2].v[0].r = 200;
+        uint8_t c[3]; int32_t it[3];
+        CHECK(ns_fx_classify(RAM, s, &dl, c, NULL, it, NULL) == 0 && c[0] == NSFX_OP_FX && it[0] == 0 && c[1] == NSFX_OP_FX && it[1] == 1 && c[2] == NSFX_OP_FX && it[2] == 3,
+              "casan exactos: %d/%d/%d items %d/%d/%d", c[0], c[1], c[2], it[0], it[1], it[2]);
+    }
+    ns_fx_scene_destroy(s);
+    /* comando que no dibuja (ni 0): sin elemento; polilínea con terminador: sin elemento; paquete sin profundidad: no emitido */
+    reset(); memset(LASTNODE, 0, sizeof LASTNODE);
+    TPrim g = mkfree(3, 52, 0);
+    for (int b = 0; b < 2; b++) {
+        w16(g.pk[b], 1500); w8(g.pk[b] + 7, 0x00);
+        w16(g.pk[b] + 52, 1500); w8(g.pk[b] + 52 + 7, 0x4A);
+        w16(g.pk[b] + 104, 0); w8(g.pk[b] + 104 + 7, 0x2C);
+    }
+    queue_commit(0);
+    s = run(0, &r);
+    CHECK(r == 0 && s->n_items == 0, "paquetes libres sin dibujo interpretable: %u elementos", s->n_items);
+    ns_fx_scene_destroy(s);
+    /* línea con la bandera de paquetes propios en una clase normal de línea: cinta en el plano del paquete */
+    reset(); memset(LASTNODE, 0, sizeof LASTNODE);
+    int t0[3] = {0, 0, 0};
+    TPrim ln = mkprim(3, 0x2000, 1, 4096, t0, 0);
+    for (int b = 0; b < 2; b++) { uint32_t pk = ln.pk[b]; w16(pk, 800); w8(pk + 7, 0x52); pk_xy(pk, 3, 0, -30, -5); pk_xy(pk, 3, 1, 44, 17); w8(pk + 4, 30); w8(pk + 12, 60); }
+    queue_commit(0);
+    s = run(0, &r);
+    CHECK(r == 0 && s->n_items == 1 && s->items[0].shape == NSFX_SH_RIBBON, "línea de paquetes propios: items=%u", s->n_items);
+    if (s->n_items == 1) {
+        for (int e = 0; e < 2; e++) { double w[3] = {s->items[0].pos[e][0], s->items[0].pos[e][1], s->items[0].pos[e][2]}, sx, sy, z; ref_proj(w, &sx, &sy, &z); CHECK(NEAR(sx, e ? 44 : -30, 0.6) && NEAR(sy, e ? 17 : -5, 0.6), "extremo %d (%.2f %.2f)", e, sx, sy); }
+        CHECK(s->items[0].rgb[0][0] == 30 && s->items[0].rgb[1][0] == 60, "colores de los extremos");
+    }
+    ns_fx_scene_destroy(s);
+}
+
+/* casación por pantalla: destello grande (vértices saturados, color animado y 1-2 px de desfase) -> FX; el HUD (sin posición de vista) y lo distinto, no */
+static void test_classify_screen(void) {
+    NsFxScene *sc = ns_fx_scene_create(4);
+    if (!sc) { CHECK(0, "escena"); return; }
+    sc->cam.y_scale = 1.0f; sc->n_items = 1;
+    NsFxItem *it = &sc->items[0]; memset(it, 0, sizeof *it);
+    it->shape = NSFX_SH_BILLBOARD; it->nv = 4; it->flags = NSFX_F_SEMI | NSFX_F_TEXTURED; it->abr = 1; it->tpage = 0x1A | (1 << 5) | (1 << 7); it->tp = 1; it->ptp = 1; it->clut = 0x3c70;
+    it->pcls = 2; it->pnv = 4; it->pu0 = 64; it->pv0 = 96; it->sz = 5000; it->rgb[0][0] = it->rgb[0][1] = it->rgb[0][2] = 72;
+    static const int16_t sx[4] = {-694, -607, -694, -607}, sy[4] = {-141, -141, -54, -54};
+    for (int v = 0; v < 4; v++) { it->sxy[v][0] = sx[v]; it->sxy[v][1] = sy[v]; }
+    GpuOp ops[3]; memset(ops, 0, sizeof ops);
+    GpuDrawList dl; memset(&dl, 0, sizeof dl); dl.ops = ops; dl.nops = 3;
+    for (int k = 0; k < 3; k++) {
+        GpuOp *o = &ops[k];
+        o->type = GPU_OP_POLY; o->nv = 4; o->flags = GPU_F_TEXTURED | GPU_F_SEMI | GPU_F_QUAD; o->abr = 1; o->tp = 1; o->tx = 640; o->ty = 256; o->dox = 160; o->doy = 128;
+        for (int v = 0; v < 4; v++) {
+            o->v[v].x = (int16_t)(sx[v] + 160 + (k == 0 ? 1 : 0)); o->v[v].y = (int16_t)(sy[v] + 128 + (k == 0 ? -1 : 0));
+            o->v[v].u = (uint8_t)(64 + 31 * (v & 1)); o->v[v].v = (uint8_t)(96 + 31 * (v >> 1)); o->v[v].r = o->v[v].g = o->v[v].b = 64;
+            o->v[v].vvalid = k != 1; o->v[v].vx = (v & 1) ? 1000.0f : -1000.0f; o->v[v].vy = (v >> 1) ? 1000.0f : -1000.0f; o->v[v].vz = 3656.0f; o->v[v].vflags = v == 1 || v == 2 ? GPU_VF_DERIVED : 0;
+        }
+    }
+    ops[2].v[0].x = (int16_t)(ops[2].v[0].x + 40);   /* otra posición: no es el mismo paquete */
+    uint8_t cls[3] = {NSFX_OP_2D, NSFX_OP_2D, NSFX_OP_2D}; int32_t item[3] = {-1, -1, -1};
+    uint32_t ch = ns_fx_classify_near(sc, NULL, &dl, cls, item);
+    CHECK(ch == 1 && cls[0] == NSFX_OP_FX && item[0] == 0, "destello por pantalla: cls=%d item=%d cambiadas=%u", cls[0], item[0], ch);
+    CHECK(cls[1] == NSFX_OP_2D, "sin posición de vista (HUD): 2D");
+    CHECK(cls[2] == NSFX_OP_2D, "elemento ya reclamado / otra posición: 2D");
+    ns_fx_scene_destroy(sc);
+}
+
 static void test_xform(void) {
     NsFxCam cam; memset(&cam, 0, sizeof cam); cam.det_neg = 1;
     NsFxXform x = ns_fx_xform_default(); x.origin[0] = 1000; x.origin[1] = 0; x.origin[2] = -2000;
@@ -825,6 +950,8 @@ int main(void) {
     test_degenerate();
     test_garbage();
     test_classify_near();
+    test_free_kind();
+    test_classify_screen();
     free(RAM);
     printf("%s: %d comprobaciones, %d fallos\n", g_fail ? "FALLA" : "OK", g_checks, g_fail);
     return g_fail != 0;
