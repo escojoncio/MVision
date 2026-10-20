@@ -275,6 +275,7 @@ final class NativeRenderer {
     /// Geometría de los efectos de la escena actual, en el mundo VR y orientada a la cabeza (se construye en beginFrame con ns_gpu_fx_build). El renderer solo da por
     /// dibujado (la lista de la GPU ya no dibuja nada en 3D).
     private var fxEffects: [NsEffect] = []
+    private var fillBuf: [NsEffect] = []              // relleno por la verdad del motor (ns_fill_glue_fetch)
     private var fxCam = NsCamera()
     private var fxHas = false                      // la escena trae efectos (NS_SV_FX) y es apta para dibujar en el mundo
     private var fxVerts: UnsafeMutablePointer<NsGpuFxVert>?
@@ -759,6 +760,12 @@ final class NativeRenderer {
                 if n > 0 { fxEffects.append(contentsOf: UnsafeBufferPointer(start: fp, count: n)) }
             }
             fxHas = true
+        }
+        // relleno por la verdad del motor (ns_fill_glue): triángulos que la lista de la GPU dibuja y el nativo no tiene, ya en el mundo del motor; pasan por buildFx como un efecto más
+        if (validBits & UInt32(truncatingIfNeeded: NS_SV_FX)) != 0 {
+            if fillBuf.isEmpty { fillBuf = [NsEffect](repeating: NsEffect(), count: 6000) }
+            let nf = Int(fillBuf.withUnsafeMutableBufferPointer { ns_fill_glue_fetch($0.baseAddress, UInt32($0.count)) })
+            if nf > 0 { fxEffects.append(contentsOf: fillBuf[0..<nf]); fxHas = true }
         }
         curValid = validBits
         for i in 0..<12 { toVR12[i] = t[i] }
