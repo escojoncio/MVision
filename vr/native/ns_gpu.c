@@ -536,6 +536,23 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
         }
         if (ok) for (int v = 0; v < nq; v++) if (!fx_finite3(q[v])) ok = 0;
         if (!ok) { out->n_skipped++; continue; }
+        {   /* orden de dibujo del motor: sesgo `raise` por elemento y adelanto de los carteles */
+            float pull = (prm->raise_m > 0.0f) ? (float)e->depth_bias * prm->raise_m : 0.0f;
+            float cc[3] = {0, 0, 0};
+            for (int v = 0; v < nq; v++) for (int r = 0; r < 3; r++) cc[r] += q[v][r] / (float)nq;
+            float dv[3] = {cc[0] - prm->head[0], cc[1] - prm->head[1], cc[2] - prm->head[2]};
+            float dist = sqrtf(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]);
+            if (e->kind == NS_EK_BILLBOARD && prm->board_pull > 0.0f && nq == 4) {
+                float w[3] = {q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]}, h[3] = {q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]};
+                float hw = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]), hh = sqrtf(h[0] * h[0] + h[1] * h[1] + h[2] * h[2]);
+                pull += 0.5f * (hw > hh ? hw : hh) * prm->board_pull;
+            }
+            if (dist > 1e-4f && pull != 0.0f) {
+                float lim = 0.3f * dist; if (pull > lim) pull = lim; if (pull < -lim) pull = -lim;
+                float f = (dist - pull) / dist;   /* escalar desde la cabeza: la proyección no cambia, la profundidad sí */
+                for (int v = 0; v < nq; v++) for (int r = 0; r < 3; r++) q[v][r] = prm->head[r] + (q[v][r] - prm->head[r]) * f;
+            }
+        }
         if (prm->fog && prm->fog->active && prm->fog->len > 0.0f)
             for (int v = 0; v < nq; v++) {
                 const float s = 1.0f - ns_gpu_fog_f(prm->fog, fz[v]);

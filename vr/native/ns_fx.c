@@ -740,7 +740,9 @@ static void learn_put(uint32_t prim, uint16_t tpage, uint16_t clut, int abr, int
     }
     atomic_store_explicit(&g_learn[slot], learn_pack(key, tpage, clut, abr, has), memory_order_relaxed);
 }
-void ns_fx_learn_reset(void) { memset(&g_shadow_tex, 0, sizeof g_shadow_tex); for (uint32_t i = 0; i < LEARN_N; i++) atomic_store_explicit(&g_learn[i], 0, memory_order_relaxed); }
+/* Por papel: última página / modo aprendidos para cualquier primitiva de ese papel (respaldo de las primitivas que aún no se han visto en una lista). */
+static struct { uint8_t has, abr; uint16_t tpage; } g_role_learn[NSFX_ROLE_COUNT];
+void ns_fx_learn_reset(void) { memset(&g_shadow_tex, 0, sizeof g_shadow_tex); memset(g_role_learn, 0, sizeof g_role_learn); for (uint32_t i = 0; i < LEARN_N; i++) atomic_store_explicit(&g_learn[i], 0, memory_order_relaxed); }
 uint32_t ns_fx_learn(const NsFxScene *sc, const GpuDrawList *dl, const int32_t *item) {
     uint32_t n = 0;
     if (!sc || !dl || !item) return 0;
@@ -759,6 +761,10 @@ uint32_t ns_fx_learn(const NsFxScene *sc, const GpuDrawList *dl, const int32_t *
         if (o->flags & GPU_F_SEMI) has |= L_ABR;
         if (!has) continue;
         learn_put(it->prim, tpage, clut, o->abr & 3, has);
+        if (it->role < NSFX_ROLE_COUNT) {
+            if (has & L_TPAGE) { g_role_learn[it->role].tpage = tpage; g_role_learn[it->role].has |= L_TPAGE; }
+            if (has & L_ABR) { g_role_learn[it->role].abr = (uint8_t)(o->abr & 3); g_role_learn[it->role].has |= L_ABR; }
+        }
         n++;
     }
     return n;
@@ -768,7 +774,10 @@ static void apply_learned(NsFxScene *S) {
         NsFxItem *it = &S->items[i];
         if (!(it->flags & (NSFX_F_TPAGE_UNKNOWN | NSFX_F_ABR_UNKNOWN)) || (it->flags & NSFX_F_FROM_OBJ)) continue;
         uint16_t tp16, cl; int abr, has;
-        if (!learn_get(it->prim, &tp16, &cl, &abr, &has)) continue;
+        if (!learn_get(it->prim, &tp16, &cl, &abr, &has)) {   /* primitiva nueva: lo último aprendido para su papel */
+            if (it->role >= NSFX_ROLE_COUNT || !g_role_learn[it->role].has) continue;
+            tp16 = g_role_learn[it->role].tpage; abr = g_role_learn[it->role].abr; cl = 0; has = g_role_learn[it->role].has;
+        }
         if ((it->flags & NSFX_F_TPAGE_UNKNOWN) && (has & L_TPAGE)) {
             it->tpage = tp16; it->tp = (uint8_t)((tp16 >> 7) & 3);
             if (!it->clut && (has & L_CLUT)) it->clut = cl;
