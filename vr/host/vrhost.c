@@ -147,7 +147,7 @@ static BridgeState bs;                   /* último puente leído */
  * la escala baja sola si el trabajador tarda (mide su propio coste) y sube al recuperarse. */
 static VrL2Async *l2a;
 static _Atomic int l2d_enabled = 1;
-static _Atomic int l2d_smooth = VL_SMOOTH_SHARP;
+static _Atomic int l2d_smooth = VL_SMOOTH_ORIGINAL;   /* original = rasterizado exacto de la GPU y replicado a escala entera: el texto sale idéntico y nítido */
 static int l2d_target = 4;
 static VrView view;                      /* vista vigente: mundo / cine (vr_view.h) */
 static VrCine cine;                      /* planos de la cinemática del motor en curso (vr_cine.h) */
@@ -857,6 +857,7 @@ static void capture_set(int on) {
     if (on == cap_on) return;
     if (on) {
         gpu_capture_hiprec(1);
+        gpu_capture_vram_start(atomic_load(&l2d_enabled));   /* la capa 2D parte de la VRAM REAL de cada lista, no de un espejo por eventos */
         gpu_capture_enable(1);          /* la primera lista trae vram_init */
         vrradar_reset();                /* idem: seq vuelve a 0 */
         pthread_mutex_lock(&MX); stats.cap_resyncs++; pthread_mutex_unlock(&MX);

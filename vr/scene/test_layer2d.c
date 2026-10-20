@@ -164,8 +164,198 @@ static void classify(void) {
     g_sc = sc;
 }
 
+
+/* ---- texto de 4 bpp con la fuente y la CLUT subidas por un camino FUERA DE LA LISTA (sin eventos: DMA, escritura directa del juego, dibujo a VRAM) ---- */
+static GpuDrawList *dup_list(const GpuDrawList *l) {
+    GpuDrawList *d = (GpuDrawList *)calloc(1, sizeof *d);
+    *d = *l;
+    d->ops = (GpuOp *)malloc((l->nops + 1) * sizeof(GpuOp)); if (l->nops) memcpy(d->ops, l->ops, l->nops * sizeof(GpuOp));
+    d->data = (uint16_t *)malloc((l->ndata + 1) * 2); if (l->ndata) memcpy(d->data, l->data, (size_t)l->ndata * 2);
+    d->cap_ops = d->cap_data = 0;
+    d->vram_init = l->vram_init ? (uint16_t *)memcpy(malloc(sizeof gpu_vram), l->vram_init, sizeof gpu_vram) : NULL;
+    d->vram_start = l->vram_start ? (uint16_t *)memcpy(malloc(sizeof gpu_vram), l->vram_start, sizeof gpu_vram) : NULL;
+    d->vram_after = NULL;
+    return d;
+}
+static void free_list(GpuDrawList *d) { if (!d) return; free(d->ops); free(d->data); free(d->vram_init); free(d->vram_start); free(d); }
+
+static void offlist_text(void) {
+    /* fuente 4 bpp: 16 glifos de 8x8 en (640,0), índices 0..3 (0 = transparente); CLUT en (0,500) con 4 colores (uno con bit 15) */
+    uint16_t font[64 * 8];   /* 64 halfwords de ancho (256 texels) x 8 filas */
+    memset(font, 0, sizeof font);
+    uint32_t r = 24681357u;
+    for (int gl = 0; gl < 16; gl++)
+        for (int v = 0; v < 8; v++)
+            for (int u = 0; u < 8; u++) {
+                r ^= r << 13; r ^= r >> 17; r ^= r << 5;
+                int idx = (r % 5 < 2) ? 0 : (int)(1 + (r >> 8) % 3);
+                int tu = gl * 8 + u;
+                font[v * 64 + (tu >> 2)] = (uint16_t)(font[v * 64 + (tu >> 2)] | (idx << ((tu & 3) * 4)));
+            }
+    const uint16_t clut[16] = {0, 0x7FFF, 0x03E0, 0x8000 | 0x7C1F, 0x0210};
+    uint32_t clutw = 0 | 500u << 6;
+
+    gpu_capture_enable(0);
+    gpu_reset();
+    gpu_gp1(0x08000001); gpu_gp1(0x03000000); gpu_gp1(0x05000000 | 256u << 10);
+    env(0, 0, 1023, 511, 0, 0, 0);
+    gpu_gp0(0x02000000); gpu_gp0(xy(0, 0)); gpu_gp0(xy(320, 240));   /* fondo negro */
+    /* (basura previa en la zona de la fuente y la CLUT: lo bueno llegará sin pasar por eventos de la lista) */
+    for (int y = 0; y < 8; y++) for (int x = 0; x < 64; x++) gpu_vram[y][640 + x] = (uint16_t)(0x1111 * ((x + y) & 3));
+    for (int i = 0; i < 16; i++) gpu_vram[500][i] = 0x7C00;
+    gpu_capture_vram_start(1);
+    gpu_capture_enable(1);
+    /* lista 1: la CLUT se DIBUJA a VRAM (sprite crudo de 15 bits: render a textura; la lista no lleva ningún evento de VRAM que la contenga) y la fuente la deja el
+     * juego en VRAM por un camino que no pasa por la lista (escritura directa, como un DMA no capturado) */
+    {
+        uint16_t src[16];
+        for (int i = 0; i < 16; i++) src[i] = (uint16_t)(clut[i] & 0x7FFF);
+        upload(512, 100, 16, 1, src);   /* origen de la CLUT (evento de subida normal; el destino se dibuja) */
+        env(0, 0, 1023, 511, 8u | 2u << 7, 0, 0);   /* página 15 bits en (512,0) */
+        gpu_gp0(0x65000000); gpu_gp0(xy(0, 500)); gpu_gp0(100u << 8 | 0u); gpu_gp0(xy(16, 1));
+        for (int y = 0; y < 8; y++) for (int x = 0; x < 64; x++) gpu_vram[y][640 + x] = font[y * 64 + x];
+        env(0, 0, 319, 239, 10, 0, 0);
+        gpu_gp0(0x60204060); gpu_gp0(xy(600, 300)); gpu_gp0(xy(10, 10));   /* fuera de la zona mostrada */
+    }
+    gpu_gp1(0x05000000);
+    const GpuDrawList *l1 = gpu_capture_frame();
+    GpuDrawList *c1 = l1 ? dup_list(l1) : NULL;
+    CHECK(c1 && c1->vram_init && c1->vram_start, "lista 1 con vram_init y vram_start");
+    CHECK(gpu_vram[500][1] == 0x7FFF && gpu_vram[500][2] == 0x03E0, "la CLUT dibujada quedó en la VRAM del oráculo");
+    /* lista 2: texto con sprites 8x8, un cuadrilátero 8x8 con UV 0..7 en 8 píxeles (como los sprites-polígono) y un rect de 16x16 */
+    env(0, 0, 319, 239, 10, 0, 0);
+    for (int i = 0; i < 16; i++) { gpu_gp0(0x64u << 24 | 0x808080); gpu_gp0(xy(16 + i * 10, 20)); gpu_gp0(clutw << 16 | (uint32_t)(i * 8)); gpu_gp0(xy(8, 8)); }   /* 0x65: sprite libre; aquí 0x64 + tamaño en la palabra */
+    for (int i = 0; i < 8; i++) {
+        gpu_gp0(0x2C808080);
+        gpu_gp0(xy(16 + i * 12, 50)); gpu_gp0(clutw << 16 | (uint32_t)(i * 8));
+        gpu_gp0(xy(16 + i * 12 + 8, 50)); gpu_gp0(10u << 16 | (uint32_t)(i * 8 + 7));
+        gpu_gp0(xy(16 + i * 12, 58)); gpu_gp0((uint32_t)7 << 8 | (uint32_t)(i * 8));
+        gpu_gp0(xy(16 + i * 12 + 8, 58)); gpu_gp0((uint32_t)7 << 8 | (uint32_t)(i * 8 + 7));
+    }
+    for (int i = 0; i < 4; i++) { gpu_gp0(0x7Cu << 24 | 0x808080); gpu_gp0(xy(20 + i * 18, 80)); gpu_gp0(clutw << 16 | (uint32_t)(i * 8)); }   /* 16x16 */
+    for (int i = 0; i < 8; i++) gpu_capture_vblank();   /* cierre de reserva (sin cambio de búfer mostrado) */
+    const GpuDrawList *l2 = gpu_capture_frame();
+    GpuDrawList *c2 = l2 ? dup_list(l2) : NULL;
+    CHECK(c2 && !c2->vram_init && c2->vram_start, "lista 2 solo con vram_start (init=%p start=%p idx1=%u idx2=%u)", c2 ? (void *)c2->vram_init : 0, c2 ? (void *)c2->vram_start : 0, c1 ? c1->index : 99, c2 ? c2->index : 99);
+    gpu_capture_vram_start(0);
+    if (!c1 || !c2) { free_list(c1); free_list(c2); return; }
+
+    VrSceneOpts o = vr_scene_opts_default();
+    o.drop_clear = 0;
+    VrScene s1, s2;
+    CHECK(vr_scene_build(c1, NULL, &o, &s1) == 0, "escena 1");
+    CHECK(vr_scene_build(c2, NULL, &o, &s2) == 0, "escena 2");
+    int n2 = 0;
+    for (uint32_t i = 0; i < c2->nops; i++) if (s2.op_dest[i] == 2) n2++;
+    CHECK(n2 >= 28, "texto de la lista 2 al panel 2D (%d)", n2);
+
+    /* 1. escala 1, modo original: igual bit a bit que la GPU original (fondo negro) */
+    VrLayer2D *T = vl2d_new();
+    vl2d_set_options(T, 1, VL_SMOOTH_ORIGINAL);
+    vl2d_run(T, c1, &s1, 0);
+    CHECK(vl2d_run(T, c2, &s2, 0) == 1, "texto fuera de lista: vl2d_run");
+    int tw = 0, th = 0;
+    const VrLayerPx *tp = vl2d_px(T, &tw, &th);
+    int bad = 0, drawn = 0;
+    for (int y = 0; y < 240 && tp; y++) for (int x = 0; x < 320; x++) {
+        const VrLayerPx *p = &tp[y * 320 + x];
+        uint8_t bg[3] = {0, 0, 0}, o5[3];
+        vl2d_compose5(p, bg, o5);
+        if (p->t != 256) drawn++;
+        for (int k = 0; k < 3; k++) if (o5[k] != (p->t == 256 ? 0 : pix5(x, y, k))) { if (bad < 5) printf("  dif (%d,%d) capa=%d,%d,%d gpu=%d,%d,%d t=%d\n", x, y, o5[0], o5[1], o5[2], pix5(x, y, 0), pix5(x, y, 1), pix5(x, y, 2), p->t); bad++; break; }
+    }
+    CHECK(drawn > 800, "el texto toca píxeles (%d)", drawn);
+    CHECK(bad == 0, "texto 4 bpp con fuente y CLUT fuera de la lista: %d píxeles distintos de la GPU original", bad);
+
+    /* 2. control: sin vram_start (solo eventos) la fuente y la CLUT salen con basura: la prueba detecta el fallo de antes */
+    {
+        uint16_t *keep = c2->vram_start; c2->vram_start = NULL;
+        VrLayer2D *E = vl2d_new();
+        vl2d_set_options(E, 1, VL_SMOOTH_ORIGINAL);
+        vl2d_run(E, c1, &s1, 0);
+        vl2d_run(E, c2, &s2, 0);
+        const VrLayerPx *ep = vl2d_px(E, &tw, &th);
+        int ebad = 0;
+        for (int y = 0; y < 240 && ep; y++) for (int x = 0; x < 320; x++) {
+            const VrLayerPx *p = &ep[y * 320 + x];
+            uint8_t bg[3] = {0, 0, 0}, o5[3];
+            vl2d_compose5(p, bg, o5);
+            for (int k = 0; k < 3; k++) if (o5[k] != (p->t == 256 ? 0 : pix5(x, y, k))) { ebad++; break; }
+        }
+        CHECK(ebad > 200, "control sin vram_start: debe diferir de la GPU original (%d)", ebad);
+        c2->vram_start = keep;
+        vl2d_free(E);
+    }
+
+    /* 3. escala 4, modo original: cada píxel nativo se replica 4x4 con el color exacto de la GPU original (texto nítido, sin deformar) */
+    {
+        VrLayer2D *H = vl2d_new();
+        vl2d_set_options(H, 4, VL_SMOOTH_ORIGINAL);
+        vl2d_run(H, c1, &s1, 0);
+        CHECK(vl2d_run(H, c2, &s2, 0) == 1, "vl2d_run x4 original");
+        int hw = 0, hh = 0;
+        const uint8_t *hp = vl2d_rgba(H, &hw, &hh);
+        CHECK(hp && hw == 1280 && hh == 960, "dimensiones %dx%d", hw, hh);
+        int hbad = 0, hop = 0;
+        for (int y = 0; y < 240 && hp; y++) for (int x = 0; x < 320; x++) {
+            int cov = 0;
+            for (int sj = 0; sj < 4; sj++) for (int si = 0; si < 4; si++) {
+                const uint8_t *q = &hp[((y * 4 + sj) * hw + x * 4 + si) * 4];
+                const uint8_t *q0 = &hp[((y * 4) * hw + x * 4) * 4];
+                if (memcmp(q, q0, 4)) hbad++;   /* las 16 muestras del píxel son idénticas */
+                if (q[3] == 255) cov++;
+            }
+            if (cov == 16) {
+                hop++;
+                const uint8_t *q = &hp[((y * 4) * hw + x * 4) * 4];
+                for (int k = 0; k < 3; k++) { int v = pix5(x, y, k); if (q[k] != ((v << 3) | (v >> 2))) hbad++; }
+            }
+        }
+        CHECK(hbad == 0 && hop > 800, "x4 original: %d muestras distintas del original replicado (%d píxeles opacos)", hbad, hop);
+        /* repetir (zona sucia) da lo mismo */
+        vl2d_run(H, c2, &s2, 0);
+        hp = vl2d_rgba(H, &hw, &hh);
+        int rbad = 0;
+        for (int y = 0; y < 240 && hp; y++) for (int x = 0; x < 320; x++) {
+            const uint8_t *q = &hp[((y * 4) * hw + x * 4) * 4];
+            if (q[3] == 255) for (int k = 0; k < 3; k++) { int v = pix5(x, y, k); if (q[k] != ((v << 3) | (v >> 2))) rbad++; }
+        }
+        CHECK(rbad == 0, "x4 original repetido: %d diferencias", rbad);
+        /* informativo: el mismo texto en modo nítido (alta resolución + EPX) frente al original replicado: píxeles nativos cuyo color medio difiere */
+        {
+            VrLayer2D *N = vl2d_new();
+            vl2d_set_options(N, 4, VL_SMOOTH_SHARP);
+            vl2d_run(N, c1, &s1, 0); vl2d_run(N, c2, &s2, 0);
+            int nw = 0, nh = 0, ndiff = 0;
+            const uint8_t *np = vl2d_rgba(N, &nw, &nh);
+            for (int y = 0; y < 240 && np; y++) for (int x = 0; x < 320; x++) {
+                int d = 0;
+                for (int sj = 0; sj < 4; sj++) for (int si = 0; si < 4; si++) if (memcmp(&np[((y * 4 + sj) * nw + x * 4 + si) * 4], &hp[((y * 4 + sj) * hw + x * 4 + si) * 4], 4)) d = 1;
+                ndiff += d;
+            }
+            printf("  texto fuera de lista: nitido x4 difiere del original en %d de %d px nativos del texto\n", ndiff, hop);
+            vl2d_free(N);
+        }
+        /* 4. hilo trabajador: las dos listas encoladas de golpe (la primera puede saltarse: la segunda trae su VRAM) dan la misma capa */
+        VrL2Async *A = vl2a_new();
+        vl2a_options(A, 4, VL_SMOOTH_ORIGINAL);
+        vl2a_submit(A, c1, s1.op_dest, 0, 1);
+        vl2a_submit(A, c2, s2.op_dest, 0, 0);
+        vl2a_flush(A);
+        const uint8_t *ap = NULL; int aw = 0, ah = 0, af = 0; uint32_t aseq = 0;
+        int ar = vl2a_acquire(A, &ap, &aw, &ah, &af, &aseq);
+        CHECK(ar >= 0 && ap && aw == hw && ah == hh && memcmp(ap, hp, (size_t)hw * hh * 4) == 0, "capa asincrona (texto fuera de lista) identica a la sincrona");
+        vl2a_release(A);
+        vl2a_free(A);
+        vl2d_free(H);
+    }
+    vl2d_free(T);
+    free_list(c1); free_list(c2);
+}
+
 int main(void) {
     gen_atlas();
+    offlist_text();
 
     /* ---- fondo negro, escala 1: IGUAL bit a bit a la GPU original ---- */
     build_list(0x0000);

@@ -25,7 +25,7 @@ struct XRViewConfig {
     var distance: Float = 2.5       // distancia de la pantalla (m)
     var curve: Float = 0.35         // 0 plana .. 1 cilindro con el usuario en el eje
     var sharp = 1                   // 0 suave, 1 nítida (bilineal de píxel fijo), 2 píxel (vecino más próximo)
-    var smooth2D = 1                // suavizado de la capa 2D (HUD, menús, créditos, pantalla de cine): 0 original, 1 nítido (píxel art), 2 suave
+    var smooth2D = 0                // suavizado de la capa 2D (HUD, menús, créditos, pantalla de cine): 0 original, 1 nítido (píxel art), 2 suave
     var integerScale = false        // ajusta el ancho para que cada texel ocupe un número entero de píxeles del visor
     var cutscene: Cutscene = .stereo // cinemáticas del motor: pantalla 3D (defecto), pantalla de cine, diorama o dentro de la escena
     var dioramaScale: Float = 0.15  // metros por metro del motor (0,15: una sala de 8 m cabe en ~1,2 m)
@@ -83,8 +83,8 @@ struct XRViewConfig {
         let s = UserDefaults.standard.integer(forKey: "xr.view.sharp")
         c.sharp = UserDefaults.standard.object(forKey: "xr.view.sharp") == nil ? 1 : min(max(s, 0), 2)
         c.integerScale = b("xr.view.integer", false)
-        let s2 = UserDefaults.standard.integer(forKey: "xr.view.smooth2d")
-        c.smooth2D = UserDefaults.standard.object(forKey: "xr.view.smooth2d") == nil ? 1 : min(max(s2, 0), 2)
+        let s2 = UserDefaults.standard.integer(forKey: "xr.view.smooth2d2")   // clave nueva: el defecto pasó de «nítido» a «original» (el texto no se deforma)
+        c.smooth2D = UserDefaults.standard.object(forKey: "xr.view.smooth2d2") == nil ? 0 : min(max(s2, 0), 2)
         c.cutscene = Cutscene(rawValue: UserDefaults.standard.string(forKey: "xr.view.cutscene2") ?? "") ?? .stereo
         c.dioramaScale = f("xr.view.dioramaScale", 0.15, 0.03, 0.5)
         c.hudPanels = b("xr.view.hud", true)
@@ -109,7 +109,7 @@ struct XRViewConfig {
         d.set(Double(curve), forKey: "xr.view.curve")
         d.set(sharp, forKey: "xr.view.sharp")
         d.set(integerScale, forKey: "xr.view.integer")
-        d.set(smooth2D, forKey: "xr.view.smooth2d")
+        d.set(smooth2D, forKey: "xr.view.smooth2d2")
         d.set(cutscene.rawValue, forKey: "xr.view.cutscene2")
         d.set(Double(dioramaScale), forKey: "xr.view.dioramaScale")
         d.set(hudPanels, forKey: "xr.view.hud")
