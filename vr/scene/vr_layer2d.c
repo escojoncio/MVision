@@ -30,6 +30,7 @@ struct VrLayer2D {
     uint8_t *nat; size_t nat_cap;                             /* imagen nativa descodificada de la zona mostrada (fondo de la pantalla de cine) */
     uint16_t *vsnap;                                          /* copia de la VRAM espejo al empezar la lista (verificación del panel: la pasada del mundo la modifica y se restaura) */
     uint8_t *w5; size_t w5_cap;                               /* el mundo del panel (todo salvo las primitivas 2D del panel) en la zona mostrada: aw x h x 3, 5 bits por canal */
+    uint8_t *vmap; size_t vmap_cap;                           /* mapa por píxel de la verificación (tocado / mundo distinto fuera / distinto) */
     int fb_hold;                                              /* listas que faltan de respaldo exacto tras una verificación fallida (anti-parpadeo) */
 };
 
@@ -38,7 +39,7 @@ VrLayer2D *vl2d_new(void) {
     if (L) { L->scale = 4; L->smooth = VL_SMOOTH_ORIGINAL; L->R = 1; L->PW = 1; L->PH = 1; L->LW = 1; L->LH = 1; }
     return L;
 }
-void vl2d_free(VrLayer2D *L) { if (!L) return; free(L->vsnap); free(L->w5); free(L->natm); free(L->px); free(L->rgba); free(L->nat); free(L); }
+void vl2d_free(VrLayer2D *L) { if (!L) return; free(L->vsnap); free(L->w5); free(L->vmap); free(L->natm); free(L->px); free(L->rgba); free(L->nat); free(L); }
 void vl2d_reset(VrLayer2D *L) { if (!L) return; L->have_vram = 0; L->valid = 0; }
 void vl2d_set_options(VrLayer2D *L, int scale, int smooth) {
     if (!L) return;
@@ -735,7 +736,8 @@ static void fidelity(VrLayer2D *L, const GpuDisplay *d, const uint16_t *vend) {
  * la imagen del emulador (vram_end). Si no lo es (rasterizado distinto, una primitiva clasificada fuera del panel que se pinta DESPUÉS de una del panel, mezclas que el modelo no representa),
  * ese píxel se sustituye por el del emulador (exacto) y, si son demasiados, todo el panel pasa a ser la imagen del emulador (respaldo exacto, como en pantalla completa). */
 #define VERIFY_TOL 2          /* diferencia máxima por canal (niveles de 5 bits) que se acepta: redondeos de la composición de mezclas sobre un mundo que el modelo no conoce al bit */
-#define VERIFY_BAD_MIN 8      /* píxeles del panel distintos a partir de los cuales todo el panel pasa a la imagen del emulador */
+#define VERIFY_BAD_MIN 64     /* mínimo absoluto de píxeles del panel distintos para el respaldo de los píxeles que toca el panel */
+#define VERIFY_BAD_PCT 2      /* y más de este porcentaje de los píxeles que toca el panel */
 #define VERIFY_HOLD 12        /* listas que se mantiene el respaldo exacto tras un fallo (~0,5 s): sin parpadeo entre panel y respaldo */
 
 static double l2_now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec * 1e3 + (double)t.tv_nsec * 1e-6; }
@@ -783,16 +785,43 @@ static int world_pass(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int
     return 1;
 }
 
-/* Compone el panel (escala 1, ya pintado) sobre el mundo y lo compara con la imagen del emulador. Sustituye los píxeles del panel que difieren, o todo el panel si son demasiados o aún dura el
- * respaldo. Rellena la información de verificación. Devuelve 1 si todo el panel pasó a ser la imagen del emulador. */
+/* Compone el panel (escala 1, ya pintado) sobre el mundo y lo compara con la imagen del emulador. Sustituye los píxeles del panel que difieren, o, si son demasiados (más del VERIFY_BAD_PCT % de los
+ * tocados y al menos VERIFY_BAD_MIN) o aún dura el respaldo, TODOS los píxeles que toca el panel dilatados 1 px: el resto de la capa sigue transparente (el 3D del motor, que es fiable, se ve por debajo;
+ * el respaldo nunca opaca la pantalla entera). Lo que se pone en cada píxel sustituido NO es la imagen del emulador tal cual (llevaría dentro el mundo PS1, que taparía el 3D del motor):
+ *   - panel opaco en ese píxel (t = 0): el color del emulador (el mundo no se ve);
+ *   - panel semitransparente: la contribución del panel = emulador - mundo reproducido (con recorte), como suma / resta sobre lo que haya debajo;
+ *   - mundo reproducido no fiable (fuera del panel no coincide con el emulador: en más del 5 % de lo no tocado o en el entorno 3x3 del píxel): transparente.
+ * Rellena la información de verificación. Devuelve 1 si se aplicó el respaldo (la capa entera se vuelve a codificar). */
+static void recover_px(VrLayerPx *p, uint16_t emu, const uint8_t w[3], int reliable, int *nsub, int *ntransp) {
+    const int f[3] = {emu & 31, (emu >> 5) & 31, (emu >> 10) & 31};
+    p->m = (uint8_t)(emu >> 15);
+    if (p->t == 0) { for (int k = 0; k < 3; k++) { p->c[k] = (uint8_t)f[k]; p->d[k] = 0; } return; }   /* opaco: el color exacto del hardware */
+    int mx = 0;
+    for (int k = 0; k < 3; k++) { int e = abs(f[k] - (int)w[k]); if (e > mx) mx = e; }
+    p->t = 256;   /* lo de debajo (el 3D del motor) pasa entero; el panel solo suma / resta su parte */
+    if (!reliable || mx <= VERIFY_TOL) { for (int k = 0; k < 3; k++) p->c[k] = p->d[k] = 0; (*ntransp)++; return; }
+    for (int k = 0; k < 3; k++) {
+        int dl = f[k] - (int)w[k];
+        p->c[k] = (uint8_t)(dl > 0 ? (dl > 31 ? 31 : dl) : 0);
+        p->d[k] = (uint8_t)(dl < 0 ? (-dl > 31 ? 31 : -dl) * 4 : 0);
+    }
+    (*nsub)++;
+}
+
 static int verify_panel(VrLayer2D *L, const GpuDisplay *d, const uint16_t *vend, int lost2d) {
     VrL2Info *I = &L->info;
     int aw = L->aw, h = L->h, PW = L->PW;
+    const int xw = aw < L->w ? aw : L->w;   /* columnas verificadas */
+    size_t need = (size_t)(xw > 0 ? xw : 1) * (h > 0 ? h : 1);
+    if (need > L->vmap_cap) { uint8_t *q = (uint8_t *)realloc(L->vmap, need); if (!q) return 0; L->vmap = q; L->vmap_cap = need; }
+    uint8_t *vm = L->vmap;
+    memset(vm, 0, need);
+    enum { VM_COV = 1, VM_OUT = 2, VM_BAD = 4 };
     long cov = 0, bad = 0, out = 0, sum = 0;
     for (int y = 0; y < h; y++) {
         int py = (d->y + y) & (VH - 1);
         const uint8_t *wq = &L->w5[(size_t)y * aw * 3];
-        for (int x = 0; x < aw && x < L->w; x++) {
+        for (int x = 0; x < xw; x++) {
             uint16_t t = vend[(size_t)py * VW + ((d->x + x) & (VW - 1))];
             const VrLayerPx *p = &L->px[(size_t)y * PW + x];
             int f[3] = {t & 31, (t >> 5) & 31, (t >> 10) & 31}, mxd = 0, dsum = 0;
@@ -800,39 +829,45 @@ static int verify_panel(VrLayer2D *L, const GpuDisplay *d, const uint16_t *vend,
             uint8_t o5[3];
             vl2d_compose5(p, &wq[x * 3], o5);
             for (int k = 0; k < 3; k++) { int e = abs((int)o5[k] - f[k]); if (e > mxd) mxd = e; dsum += e; }
-            if (covered) { cov++; if (mxd > VERIFY_TOL) { bad++; sum += dsum; } }
-            else if (abs((int)wq[x * 3] - f[0]) > VERIFY_TOL || abs((int)wq[x * 3 + 1] - f[1]) > VERIFY_TOL || abs((int)wq[x * 3 + 2] - f[2]) > VERIFY_TOL) out++;
+            uint8_t *m = &vm[(size_t)y * xw + x];
+            if (covered) { *m |= VM_COV; cov++; if (mxd > VERIFY_TOL) { *m |= VM_BAD; bad++; sum += dsum; } }
+            else if (abs((int)wq[x * 3] - f[0]) > VERIFY_TOL || abs((int)wq[x * 3 + 1] - f[1]) > VERIFY_TOL || abs((int)wq[x * 3 + 2] - f[2]) > VERIFY_TOL) { *m |= VM_OUT; out++; }
         }
     }
     I->verify = 1; I->v_cov = (int)cov; I->v_bad = (int)bad; I->v_out = (int)out; I->v_lost2d = lost2d;
     I->v_mean_milli = bad ? (int)(sum * 1000L * 255L / (31L * 3L * bad)) : 0;
-    int whole = bad >= VERIFY_BAD_MIN || L->fb_hold > 0;
-    if (bad >= VERIFY_BAD_MIN) L->fb_hold = VERIFY_HOLD; else if (L->fb_hold > 0) L->fb_hold--;
+    const int trigger = bad >= VERIFY_BAD_MIN && bad * 100L > cov * VERIFY_BAD_PCT;   /* relativo al panel (más de VERIFY_BAD_PCT %) con un mínimo absoluto */
+    int whole = trigger || L->fb_hold > 0;
+    if (trigger) L->fb_hold = VERIFY_HOLD; else if (L->fb_hold > 0) L->fb_hold--;
     if (!whole && !bad) return 0;
-    /* sustitución por la imagen exacta del emulador: opaca (t = 0, sin resta pendiente) */
-    long patched = 0;
+    long patched = 0; int nsub = 0, ntransp = 0;
+    /* el mundo reproducido solo es fiable si coincide con el hardware fuera del panel: globalmente (más del 5 % de lo no tocado distinto = el modelo no entiende esta escena) y, además, en el entorno 3x3 */
+    const int world_bad = out * 100L > ((long)xw * h - cov) * 5L;
     for (int y = 0; y < h; y++) {
         int py = (d->y + y) & (VH - 1);
         const uint8_t *wq = &L->w5[(size_t)y * aw * 3];
-        for (int x = 0; x < aw && x < L->w; x++) {
-            uint16_t t = vend[(size_t)py * VW + ((d->x + x) & (VW - 1))];
-            VrLayerPx *p = &L->px[(size_t)y * PW + x];
-            if (!whole) {
-                uint8_t o5[3];
-                int covered = !(p->t == 256 && !p->c[0] && !p->c[1] && !p->c[2] && !p->d[0] && !p->d[1] && !p->d[2]);
-                if (!covered) continue;
-                vl2d_compose5(p, &wq[x * 3], o5);
-                int mx = abs((int)o5[0] - (int)(t & 31)); int e1 = abs((int)o5[1] - (int)((t >> 5) & 31)), e2 = abs((int)o5[2] - (int)((t >> 10) & 31));
-                if (e1 > mx) mx = e1;
-                if (e2 > mx) mx = e2;
-                if (mx <= VERIFY_TOL) continue;
+        for (int x = 0; x < xw; x++) {
+            const uint8_t m = vm[(size_t)y * xw + x];
+            int sel = 0, unreliable = 0;
+            if (whole) {   /* píxeles tocados por el panel dilatados 1 px */
+                for (int dy = -1; dy <= 1 && !sel; dy++) for (int dx = -1; dx <= 1; dx++) {
+                    int yy = y + dy, xx = x + dx;
+                    if (yy < 0 || yy >= h || xx < 0 || xx >= xw) continue;
+                    if (vm[(size_t)yy * xw + xx] & VM_COV) { sel = 1; break; }
+                }
+            } else sel = (m & VM_BAD) != 0;
+            if (!sel) continue;
+            unreliable = world_bad;
+            for (int dy = -1; dy <= 1 && !unreliable; dy++) for (int dx = -1; dx <= 1; dx++) {
+                int yy = y + dy, xx = x + dx;
+                if (yy < 0 || yy >= h || xx < 0 || xx >= xw) continue;
+                if (vm[(size_t)yy * xw + xx] & VM_OUT) { unreliable = 1; break; }
             }
-            p->c[0] = (uint8_t)(t & 31); p->c[1] = (uint8_t)((t >> 5) & 31); p->c[2] = (uint8_t)((t >> 10) & 31);
-            p->d[0] = p->d[1] = p->d[2] = 0; p->t = 0; p->m = (uint8_t)(t >> 15);
+            recover_px(&L->px[(size_t)y * PW + x], vend[(size_t)py * VW + ((d->x + x) & (VW - 1))], &wq[x * 3], !unreliable, &nsub, &ntransp);
             patched++;
         }
     }
-    I->v_patched = (int)patched;
+    I->v_patched = (int)patched; I->v_sub = nsub; I->v_transp = ntransp;
     if (whole) I->fallback = 1;
     return whole;
 }

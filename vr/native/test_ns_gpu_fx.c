@@ -409,9 +409,9 @@ static void t_follow(void) {
     NsGpuFxTrack *trk = ns_gpu_fx_track_create();
     CHECK(trk != NULL, "crear el seguimiento");
     P.track = trk; P.hold_near_m = 0.3f; P.drop_oncam = 1; P.n_eyes = 1;
-    enum { N = 8, FR = 70 };
+    enum { N = 11, FR = 70 };
     NsEffect fx[N];
-    int drawn_last[N] = {0}, ever_drawn[N] = {0}, drawn_first[N] = {0};
+    int drawn_last[N] = {0}, ever_drawn[N] = {0}, drawn_first[N] = {0}, drawn_after_reset = -1;
     float cen[N][3], cen_prev[N][3]; int have_prev[N] = {0};
     float world_dev[N] = {0};
     NsGpuFxFollowAcc acc; ns_gpu_fx_follow_reset(&acc);
@@ -424,9 +424,9 @@ static void t_follow(void) {
         float vr[3], en[3];
         /* 0: de mundo, a 2 m, quieto */
         fx[0] = quad(2000, -1600, 2500, 40); fx[0].src_key = 0x80100000u;
-        /* 1: pegado a la cabeza a 0,8 m de frente: el motor lo recoloca cada fotograma en el mismo sitio de la vista */
-        for (int a = 0; a < 3; a++) vr[a] = head[a] + 0.10f * right[a] + 0.0f * up[a] + 0.8f * fwd[a];
-        vr_to_engine(vr, en); fx[1] = quad(en[0], en[1], en[2], 40); fx[1].src_key = 0x80100100u;
+        /* 1: pegado a la cabeza a 0,5 m de frente y grande (20 cm: > 10 grados): el motor lo recoloca cada fotograma en el mismo sitio de la vista */
+        for (int a = 0; a < 3; a++) vr[a] = head[a] + 0.10f * right[a] + 0.0f * up[a] + 0.5f * fwd[a];
+        vr_to_engine(vr, en); fx[1] = quad(en[0], en[1], en[2], 100); fx[1].src_key = 0x80100100u;
         /* 2: de mundo, a 20 cm de la cabeza al principio (cerca): retenido hasta demostrar que es del mundo */
         {
             float h0[3], r0[3], u0[3];
@@ -437,8 +437,8 @@ static void t_follow(void) {
         }
         /* 3: pegado a la cámara por bandera, no es de pantalla */
         fx[3] = board(0, 0, 3000, 40, NSFX_ROLE_LIGHT, NS_EF_ON_CAMERA | NS_EF_WORLD_SIZE); fx[3].box[0] = fx[3].box[1] = -40; fx[3].box[2] = fx[3].box[3] = 40; fx[3].src_key = 0x80100300u;
-        /* 4: pegado a la cámara por bandera y pegado a la cabeza de verdad, pero recubrimiento de pantalla: intencionado, se conserva (y queda en el registro) */
-        for (int a = 0; a < 3; a++) vr[a] = head[a] + 1.0f * fwd[a];
+        /* 4: (a 0,5 m, grande) pegado a la cámara por bandera y pegado a la cabeza de verdad, pero recubrimiento de pantalla: intencionado, se conserva (y queda en el registro) */
+        for (int a = 0; a < 3; a++) vr[a] = head[a] + 0.5f * fwd[a];
         vr_to_engine(vr, en); fx[4] = quad(en[0], en[1], en[2], 100); fx[4].src_key = 0x80100400u; fx[4].role = NSFX_ROLE_VIEW_OVERLAY; fx[4].flags |= NS_EF_ON_CAMERA;
         /* 5: cerca de la cabeza y vagando (colocado cada fotograma a 0,2 m en una dirección distinta del mundo: ni de cabeza ni de mundo) */
         { float ang = (float)t * 1.7f; vr[0] = head[0] + 0.2f * cosf(ang); vr[1] = head[1] + 0.05f * sinf(ang * 0.7f); vr[2] = head[2] + 0.2f * sinf(ang); vr_to_engine(vr, en); fx[5] = quad(en[0], en[1], en[2], 20); fx[5].src_key = 0x80100500u; }
@@ -447,6 +447,18 @@ static void t_follow(void) {
         /* 7: pegado a la cabeza a 3 m (cielo que se mueve con el ojo): se detecta aunque esté lejos */
         for (int a = 0; a < 3; a++) vr[a] = head[a] - 0.4f * right[a] + 0.3f * up[a] + 3.0f * fwd[a];
         vr_to_engine(vr, en); fx[7] = quad(en[0], en[1], en[2], 100); fx[7].src_key = 0x80100700u;
+        /* 8: M5: partícula pequeña (4 cm, < 10 grados) que va con la cabeza a 0,4 m (vaho): SIGUE pero se conserva */
+        for (int a = 0; a < 3; a++) vr[a] = head[a] - 0.05f * right[a] + 0.4f * fwd[a];
+        vr_to_engine(vr, en); fx[8] = quad(en[0], en[1], en[2], 20); fx[8].src_key = 0x80100800u;
+        /* 9: M6: ON_CAMERA sin papel de pantalla a 0,5 m, quieto en el mundo del motor (no sigue): a menos de 1 m se descarta */
+        { float h0[3], r0[3], u0[3]; head_pose(0, h0, r0, u0);
+          float f0[3] = {r0[1] * u0[2] - r0[2] * u0[1], r0[2] * u0[0] - r0[0] * u0[2], r0[0] * u0[1] - r0[1] * u0[0]};
+          for (int a = 0; a < 3; a++) vr[a] = h0[a] + 0.5f * f0[a];
+          vr_to_engine(vr, en); fx[9] = quad(en[0], en[1], en[2], 40); fx[9].src_key = 0x80100900u; fx[9].flags |= NS_EF_ON_CAMERA; }
+        /* 10: M6: ON_CAMERA sin papel de pantalla, a 2 m y pegado a la cabeza: SIGUE => se descarta */
+        for (int a = 0; a < 3; a++) vr[a] = head[a] + 0.1f * right[a] + 2.0f * fwd[a];
+        vr_to_engine(vr, en); fx[10] = quad(en[0], en[1], en[2], 100); fx[10].src_key = 0x80100A00u; fx[10].flags |= NS_EF_ON_CAMERA;
+        if (t == 40) ns_gpu_fx_track_request_reset();   /* B6: recentrado: el seguimiento olvida todo antes de procesar este fotograma */
         NsGpuFxVert vb[12 * N + 12]; NsGpuFxRun runs[N + 1]; uint64_t keys[N + 1];
         CHECK(ns_gpu_fx_build(fx, N, &P, vb, 12 * N + 12, runs, N + 1, keys, N + 1, &o) == 0, "build");
         ns_gpu_fx_follow_accum(&acc, &o);
@@ -472,28 +484,33 @@ static void t_follow(void) {
             ever_drawn[i] = 1;
             if (t == 0) drawn_first[i] = 1;
         }
+        if (t == 40) drawn_after_reset = drawn[1];
         if (t == FR - 1) for (int i = 0; i < N; i++) drawn_last[i] = drawn[i];
     }
     CHECK(drawn_last[0] && ever_drawn[0] && world_dev[0] < 1e-4f, "de mundo a 2 m: siempre dibujado y en el MISMO sitio del mundo con la cabeza girando (desviacion %.6f m)", world_dev[0]);
-    CHECK(!drawn_last[1], "pegado a la cabeza a 0,8 m: descartado");
+    CHECK(!drawn_last[1], "pegado a la cabeza a 0,5 m y grande: descartado");
+    CHECK(drawn_after_reset == 1, "B6: tras pedir el reinicio (recentrado) el fotograma siguiente olvida lo aprendido: se dibuja mientras no se demuestre de nuevo (%d)", drawn_after_reset);
     CHECK(!drawn_first[2] && drawn_last[2] && world_dev[2] < 1e-4f, "cercano de mundo: retenido al principio, luego dibujado y anclado (desviacion %.6f m)", world_dev[2]);
-    CHECK(!drawn_last[3] && !ever_drawn[3], "ON_CAMERA que no es de pantalla: nunca se dibuja");
+    CHECK(drawn_last[3] && ever_drawn[3], "M6: ON_CAMERA sin papel de pantalla, lejos (3 m) y quieto en el mundo: no basta la bandera, se dibuja");
+    CHECK(!drawn_last[9] && !ever_drawn[9], "M6: ON_CAMERA sin papel de pantalla a menos de 1 m: se descarta");
+    CHECK(!drawn_last[10], "M6: ON_CAMERA sin papel de pantalla que ademas SIGUE (a 2 m): se descarta");
+    CHECK(drawn_last[8] && ever_drawn[8], "M5: particula pequena que va con la cabeza (< 10 grados): se conserva");
     CHECK(drawn_last[4] && ever_drawn[4], "recubrimiento de pantalla (VIEW_OVERLAY) ON_CAMERA: se conserva");
     CHECK(!drawn_last[5], "cercano que vaga: descartado");
     CHECK(drawn_last[6] && ever_drawn[6], "enemigo lejano que se mueve solo: se dibuja");
-    CHECK(!drawn_last[7], "pegado a la cabeza a 3 m: descartado aunque este lejos");
-    CHECK(o.n_follow == 3 && o.n_wander == 1 && o.n_tracked == N, "contadores: sigue=%u vaga=%u seguidos=%u", o.n_follow, o.n_wander, o.n_tracked);   /* sigue: 1, 3 (ON_CAMERA) y 7; vaga: 5 */
+    CHECK(drawn_last[7], "M5: pegado a la cabeza a 3 m (mas de 0,6 m): se detecta pero se conserva");
+    CHECK(o.n_follow >= 3 && o.n_wander == 1 && o.n_tracked == N, "contadores: sigue=%u vaga=%u seguidos=%u", o.n_follow, o.n_wander, o.n_tracked);   /* sigue: 1, 7, 8 y 10; vaga: 5 */
     /* registro del detector: papel, origen, clave */
     int found1 = 0, found7 = 0, foundf = 0, found4 = 0;
     for (uint32_t k = 0; k < acc.n_rec; k++) {
         if (acc.rec[k].f.src_key == 0x80100100u && acc.rec[k].f.state == NSG_FS_FOLLOW && acc.rec[k].f.origin == NSG_ORIGIN_FX) found1 = 1;
-        if (acc.rec[k].f.src_key == 0x80100700u && acc.rec[k].f.state == NSG_FS_FOLLOW) found7 = 1;
-        if (acc.rec[k].f.src_key == 0x80100300u && acc.rec[k].f.oncam == 1 && acc.rec[k].f.role == NSFX_ROLE_LIGHT) foundf = 1;
+        if (acc.rec[k].f.src_key == 0x80100700u) found7 = 1;   /* conservado: no es un descarte, no se registra */
+        if (acc.rec[k].f.src_key == 0x80100900u && acc.rec[k].f.oncam == 1) foundf = 1;
         if (acc.rec[k].f.src_key == 0x80100400u && acc.rec[k].f.oncam == 2 && acc.rec[k].f.role == NSFX_ROLE_VIEW_OVERLAY) found4 = 1;
     }
-    CHECK(found1 && found7 && foundf && found4, "el detector registra los pegados: %d %d %d %d", found1, found7, foundf, found4);
+    CHECK(found1 && !found7 && foundf && found4, "el detector registra los descartes (y no los conservados): %d %d %d %d", found1, found7, foundf, found4);
     char txt[2048]; size_t n = ns_gpu_fx_follow_describe(&acc, txt, sizeof txt);
-    CHECK(n > 0 && strstr(txt, "fx-sigue") && strstr(txt, "origen=fx") && strstr(txt, "sigue") && strstr(txt, "rol=light"), "texto del registro: %s", txt);
+    CHECK(n > 0 && strstr(txt, "fx-sigue") && strstr(txt, "origen=fx") && strstr(txt, "sigue") && strstr(txt, "origen=fx"), "texto del registro: %s", txt);
     /* origen relleno: la clave 0xF1... se marca como relleno */
     NsEffect fill = quad(2000, -1600, 2500, 40); fill.src_key = 0xF1000007u;
     { float head[3], right[3], up[3]; head_pose(0, head, right, up); }
@@ -515,6 +532,44 @@ static void t_follow(void) {
     P.track = NULL; P.hold_near_m = 0; P.drop_oncam = 0;
 }
 
+/* M4: un efecto a 10 cm de la cabeza con la cabeza quieta (no hay forma de distinguir mundo de cabeza):
+ *  - vida corta (< 12 fotogramas) a menos de 15 cm y sin demostrar que SIGUE: se dibuja;
+ *  - mas viejo: retenido;
+ *  - a los ~50 fotogramas sin indicio de SIGUE y quieto en el mundo del motor: MUNDO, se dibuja;
+ *  - si luego la cabeza se mueve y resulta que va pegado a ella: vuelve a detectarse (SIGUE) y se descarta. */
+static void t_hold_world(void) {
+    NsGpuFxTrack *trk = ns_gpu_fx_track_create();
+    P.track = trk; P.hold_near_m = 0.15f; P.drop_oncam = 1; P.n_eyes = 1;
+    memset(P.head, 0, sizeof P.head); P.head_right[0] = 1; P.head_right[1] = P.head_right[2] = 0; P.head_up[0] = 0; P.head_up[1] = 1; P.head_up[2] = 0;
+    memcpy(P.eyes[0], P.head, sizeof P.head);
+    int drawn[100]; int follow_seen = 0;
+    NsGpuFxOut o;
+    for (int t = 0; t < 100; t++) {
+        NsEffect e;
+        if (t < 60) { e = quad(0, 0, 100, 60); }   /* quieto en el motor: (0, 0, 0,1 m) */
+        else {   /* la cabeza gira 4 grados por fotograma; el efecto se recoloca cada fotograma a 10 cm delante (pegado a la cabeza) */
+            float yaw = (float)(t - 59) * 4.0f * 3.14159265f / 180.0f, fwd[3] = {sinf(yaw), 0, cosf(yaw)};
+            P.head_right[0] = cosf(yaw); P.head_right[1] = 0; P.head_right[2] = -sinf(yaw);
+            float vr[3] = {0.1f * fwd[0], 0, 0.1f * fwd[2]}, en[3]; vr_to_engine(vr, en);
+            e = quad(en[0], en[1], en[2], 60);
+        }
+        e.src_key = 0x80100B00u;
+        NsGpuFxVert vb[24]; NsGpuFxRun runs[2]; uint64_t keys[2];
+        CHECK(ns_gpu_fx_build(&e, 1, &P, vb, 24, runs, 2, keys, 2, &o) == 0, "build");
+        drawn[t] = o.n_opaque + o.n_semi > 0;
+        if (t >= 60 && o.n_follow) follow_seen = 1;
+    }
+    int young_ok = 1, held_ok = 1;
+    for (int t = 0; t < 12; t++) if (!drawn[t]) young_ok = 0;
+    for (int t = 12; t < 49; t++) if (drawn[t]) held_ok = 0;
+    CHECK(young_ok, "M4: vida corta (< 12 fotogramas) a menos de 15 cm sin demostrar que sigue: se dibuja");
+    CHECK(held_ok, "M4: a partir de 12 fotogramas, sin demostrar que esta en el mundo: retenido");
+    CHECK(drawn[50] && drawn[51] && drawn[59], "M4: ~50 fotogramas quieto en el mundo del motor sin indicio de SIGUE: pasa a MUNDO y se dibuja (f49=%d f50=%d)", drawn[49], drawn[50]);
+    CHECK(follow_seen && !drawn[99], "M4: si luego va pegado a la cabeza se detecta y se descarta (sigue=%d dibujado=%d)", follow_seen, drawn[99]);
+    ns_gpu_fx_track_destroy(trk);
+    P.track = NULL; P.hold_near_m = 0; P.drop_oncam = 0;
+}
+
 int main(void) {
     setup();
     t_poly();
@@ -529,6 +584,7 @@ int main(void) {
     setup(); t_comfort();
     setup(); t_world_size();
     setup(); t_follow();
+    setup(); t_hold_world();
     printf("%s: %d comprobaciones, %d fallos\n", g_fail ? "FALLA" : "OK", g_checks, g_fail);
     return g_fail != 0;
 }

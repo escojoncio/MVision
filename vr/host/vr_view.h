@@ -87,6 +87,7 @@ typedef struct {
     int pend_run;
     /* --- fidelidad del render nativo en escenas del motor (con histéresis por medidas) --- */
     int cov_state;         /* 0 sin medidas (por defecto: de fiar solo con partida), 1 fiel, 2 no fiel */
+    uint8_t cov_src;       /* fuente (VrViewIn.cover_src) de las medidas de la ventana: si cambia, la ventana se reinicia (no se mezclan nativo y nativo+relleno) */
     unsigned cov_bad_mask, cov_good_mask;   /* últimas `cov_win` medidas: bit a 1 = por debajo de cov_lo / por encima de cov_hi */
     int cov_idle;          /* fotogramas seguidos sin 3D (pasados cov_forget se olvidan las medidas) */
     int cov_hi, cov_lo;    /* umbrales de cobertura (%): >= hi medida buena, < lo medida mala, entre medias cuenta como ninguna */

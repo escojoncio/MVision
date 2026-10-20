@@ -107,6 +107,7 @@ typedef struct NsGpuFxTrack NsGpuFxTrack;   /* estado del seguimiento entre foto
 NsGpuFxTrack *ns_gpu_fx_track_create(void);
 void ns_gpu_fx_track_destroy(NsGpuFxTrack *t);
 void ns_gpu_fx_track_reset(NsGpuFxTrack *t);   /* olvida todo (cambio de escena, recentrado) */
+void ns_gpu_fx_track_request_reset(void);       /* desde cualquier hilo (recentrado): el siguiente ns_gpu_fx_build_ex con seguimiento olvida todo antes de procesar */
 typedef struct {
     const float *to_vr;                 /* 12: mundo del motor -> mundo VR (m), 3x4 fila-mayor */
     const NsCamera *cam;                /* cámara del juego de la escena (profundidad de los carteles, sentido del mundo) */
@@ -130,8 +131,10 @@ typedef struct {
     float drop_inside_m;
     /* Seguimiento de lo que va pegado a la cabeza (detector "sigue a la cámara"). track != NULL: cada efecto (clave ns_gpu_fx_key; los rellenos de ns_fill llevan identidad estable) se sigue entre
      * fotogramas y se compara su posición en ESPACIO DE CABEZA con la que tendría si estuviera anclado al mundo del motor. Constante en la cabeza mientras la cabeza se mueve respecto al mundo =>
-     * SIGUE (se descarta, confirmado). Cercano (< hold_near_m, 0 = sin regla) y todavía sin demostrar que está anclado al mundo => retenido (no se dibuja); cercano que ni sigue ni está quieto en el
-     * mundo => VAGA (se descarta). drop_oncam != 0: los NS_EF_ON_CAMERA que no son recubrimientos de pantalla (papel VIEW_OVERLAY) se descartan siempre. Todo lo demás va anclado al mundo. */
+     * SIGUE (se descarta, confirmado, solo si es relleno o está a menos de 0,6 m con más de ~10 grados; el resto, vaho y partículas pequeñas, se conserva). Cercano (< hold_near_m, 0 = sin regla) y todavía sin
+     * demostrar que está anclado al mundo => retenido (no se dibuja), salvo los de vida corta (< 12 fotogramas) a menos de 15 cm, que se dibujan; ~50 fotogramas quieto en el mundo del motor sin indicio de
+     * SIGUE => MUNDO. Cercano que ni sigue ni está quieto en el mundo => VAGA (se descarta). drop_oncam != 0: un NS_EF_ON_CAMERA que no es recubrimiento de pantalla (papel VIEW_OVERLAY) se descarta si
+     * además SIGUE o está a menos de 1 m. Todo lo demás va anclado al mundo. */
     NsGpuFxTrack *track;
     float hold_near_m;
     int drop_oncam;

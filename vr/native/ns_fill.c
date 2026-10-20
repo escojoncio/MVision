@@ -17,7 +17,7 @@ void ns_fill_cfg_default(NsFillCfg *c) {
     c->pose_fill = 0; c->fix_texture = 1; c->fill_partial_semi = 0;
     c->keep_frames = 15; c->max_out = 6000;
     c->cut_dist = 3000.0f; c->cut_cos = 0.7f; c->bias = 2;
-    c->near_skip = 250.0f; c->view_match = 24.0f;
+    c->near_skip = 250.0f; c->near_edge_max = 500.0f; c->view_match = 24.0f;
 }
 
 #define CELL 256.0f      /* rejilla de esquinas */
@@ -66,6 +66,31 @@ const NsEffect *ns_fill_effects(const NsFill *f, uint32_t *n) { if (n) *n = f ? 
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec * 1e3 + (double)t.tv_nsec * 1e-6; }
 
 /* ---------------------------------------------------------------------------------------------------------------- geometría */
+/* Cuadrado de la distancia del origen (el ojo, en espacio de vista) al punto MÁS CERCANO del triángulo abc (Ericson, "Real-Time Collision Detection" 5.1.5). */
+static double tri_origin_d2(const float *A, const float *B, const float *C) {
+    double a[3], b[3], c[3];
+    for (int k = 0; k < 3; k++) { a[k] = A[k]; b[k] = B[k]; c[k] = C[k]; }
+#define DOT(p, q) ((p)[0] * (q)[0] + (p)[1] * (q)[1] + (p)[2] * (q)[2])
+    double ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, ac[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+    double ap[3] = {-a[0], -a[1], -a[2]}, bp[3] = {-b[0], -b[1], -b[2]}, cp[3] = {-c[0], -c[1], -c[2]};
+    double d1 = DOT(ab, ap), d2 = DOT(ac, ap), q[3];
+    int done = 0;
+    if (d1 <= 0 && d2 <= 0) { q[0] = a[0]; q[1] = a[1]; q[2] = a[2]; done = 1; }
+    double d3_ = DOT(ab, bp), d4 = DOT(ac, bp);
+    if (!done && d3_ >= 0 && d4 <= d3_) { q[0] = b[0]; q[1] = b[1]; q[2] = b[2]; done = 1; }
+    double vc = d1 * d4 - d3_ * d2;
+    if (!done && vc <= 0 && d1 >= 0 && d3_ <= 0) { double v = d1 / (d1 - d3_); for (int k = 0; k < 3; k++) q[k] = a[k] + v * ab[k]; done = 1; }
+    double d5 = DOT(ab, cp), d6 = DOT(ac, cp);
+    if (!done && d6 >= 0 && d5 <= d6) { q[0] = c[0]; q[1] = c[1]; q[2] = c[2]; done = 1; }
+    double vb = d5 * d2 - d1 * d6;
+    if (!done && vb <= 0 && d2 >= 0 && d6 <= 0) { double w = d2 / (d2 - d6); for (int k = 0; k < 3; k++) q[k] = a[k] + w * ac[k]; done = 1; }
+    double va = d3_ * d6 - d5 * d4;
+    if (!done && va <= 0 && (d4 - d3_) >= 0 && (d5 - d6) >= 0) { double w = (d4 - d3_) / ((d4 - d3_) + (d5 - d6)); for (int k = 0; k < 3; k++) q[k] = b[k] + w * (c[k] - b[k]); done = 1; }
+    if (!done) { double den = 1.0 / (va + vb + vc), v = vb * den, w = vc * den; for (int k = 0; k < 3; k++) q[k] = a[k] + ab[k] * v + ac[k] * w; }
+#undef DOT
+    return q[0] * q[0] + q[1] * q[1] + q[2] * q[2];
+}
+
 static double d3(const float *a, const float *b) { double x = (double)a[0] - b[0], y = (double)a[1] - b[1], z = (double)a[2] - b[2]; return sqrt(x * x + y * y + z * z); }
 static void sub3(const float *a, const float *b, double *o) { for (int i = 0; i < 3; i++) o[i] = (double)a[i] - b[i]; }
 static void crs(const double *a, const double *b, double *o) { o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0]; }
@@ -675,8 +700,10 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
             ok[h] = 1;
             if (tr[h].fill && gate >= 0) { tr[h].cls = gate; tr[h].fill = 0; }
             else if (tr[h].fill && cfg.near_skip > 0.0f) {   /* centro a menos de near_skip del ojo: envoltura del jugador / pegado al plano de la cámara, rígido a la cabeza una vez en el mundo */
-                float mx = (g.v[ci[0]][0] + g.v[ci[1]][0] + g.v[ci[2]][0]) / 3.0f, my = (g.v[ci[0]][1] + g.v[ci[1]][1] + g.v[ci[2]][1]) / 3.0f, mz = (g.v[ci[0]][2] + g.v[ci[1]][2] + g.v[ci[2]][2]) / 3.0f;
-                if (mx * mx + my * my + mz * mz < cfg.near_skip * cfg.near_skip) { tr[h].cls = NF_SKIP_NEAR; tr[h].fill = 0; }
+                /* distancia al punto MÁS CERCANO del triángulo (no a su centro) y solo si es pequeño (arista máxima < near_edge_max): una pared grande que pasa a 20 cm del ojo nunca se omite */
+                const float *pa = g.v[ci[0]], *pb = g.v[ci[1]], *pc = g.v[ci[2]];
+                const double emx = fmax(d3(pa, pb), fmax(d3(pb, pc), d3(pa, pc)));
+                if ((cfg.near_edge_max <= 0.0f || emx < cfg.near_edge_max) && tri_origin_d2(pa, pb, pc) < (double)cfg.near_skip * cfg.near_skip) { tr[h].cls = NF_SKIP_NEAR; tr[h].fill = 0; }
             }
             S->cls[tr[h].cls]++;
         }
@@ -785,7 +812,9 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
     uint32_t cov = S->cls[NF_MATCH] + S->cls[NF_SPLIT] + S->cls[NF_SUBDIV] + S->cls[NF_LOCKED];
     uint32_t pose = S->cls[NF_POSE_PLAYER] + S->cls[NF_POSE_OTHER];
     uint32_t fill_cls = S->cls[NF_FILL_ABSENT] + S->cls[NF_FILL_OTHERTEX] + S->cls[NF_FILL_PARTIAL] + S->cls[NF_FILL_SPRITE] + S->cls[NF_FILL_TEXFIX];
-    uint32_t denom = S->tris > pose ? S->tris - pose : 0;
+    uint32_t nearskip = S->cls[NF_SKIP_NEAR];   /* envoltura del jugador / pegado a la cámara: no es escena, fuera del denominador igual que la pose */
+    uint32_t denom = S->tris > pose + nearskip ? S->tris - pose - nearskip : 0;
+    if (S->cls[NF_SKIP_CAP] > 0) fill_cls = fill_cls > S->cls[NF_SKIP_CAP] ? fill_cls - S->cls[NF_SKIP_CAP] : 0;   /* el tope de salida recortó rellenos que se habían contado: no se ven */
     /* los POSE que se rellenan (pose_fill) cuentan como cubiertos */
     uint32_t posefilled = cfg.pose_fill ? S->cls[NF_POSE_OTHER] : 0;
     S->cover_pct = denom ? 100.0f * (float)(cov + fill_cls + posefilled) / (float)denom : 100.0f;

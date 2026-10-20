@@ -100,6 +100,7 @@ int vrview_step(VrView *v, const VrViewIn *in) {
             v->cov_idle = 0;
             if (in->cover_new && in->cover1 > 0) {
                 int pct = (int)in->cover1 - 1;
+                if (in->cover_src != v->cov_src) { v->cov_good_mask = v->cov_bad_mask = 0; v->cov_src = in->cover_src; }   /* otra fuente (nativo / nativo + relleno): ventana nueva, sin mezclar */
                 unsigned wm = (1u << v->cov_win) - 1u;
                 v->cov_bad_mask = ((v->cov_bad_mask << 1) | (pct < v->cov_lo ? 1u : 0u)) & wm;
                 v->cov_good_mask = ((v->cov_good_mask << 1) | (pct >= v->cov_hi ? 1u : 0u)) & wm;
@@ -108,7 +109,7 @@ int vrview_step(VrView *v, const VrViewIn *in) {
                 else if (v->cov_state == 0 && pct >= v->cov_hi) v->cov_state = 1;   /* la PRIMERA medida de una escena, si es buena, ya es fiable (introducciones: sin partida, el nativo + relleno cubre ~99 % desde el primer fotograma; esperar 3 buenas de 4 son ~3 s de imagen plana). Una mala sola no cambia nada */
             }
         } else if (++v->cov_idle >= v->cov_forget) {
-            v->cov_state = 0; v->cov_good_mask = v->cov_bad_mask = 0; v->cov_idle = v->cov_forget;
+            v->cov_state = 0; v->cov_good_mask = v->cov_bad_mask = 0; v->cov_src = 0; v->cov_idle = v->cov_forget;
         }
         eff.cover1 = v->cov_state == 1 ? 101 : v->cov_state == 2 ? 1 : 0;
         eff.cover_new = 0;
@@ -212,8 +213,10 @@ int vrview_cine_describe(const VrView *v, const VrViewIn *in, char *buf, int n) 
 int vrview_cover_feed(VrViewIn *in, uint32_t *seen, uint32_t vb, int has_fill, uint32_t fill_frame, int fill_pct, int has_nat, uint32_t nat_frame, int nat_pct) {
     if (!in || !seen) return 0;
     uint32_t cf; int cp, src;
-    if (has_fill && vb >= fill_frame && vb - fill_frame <= 150u) { cf = fill_frame; cp = fill_pct; src = 2; }
-    else if (has_nat && vb >= nat_frame && vb - nat_frame <= 150u) { cf = nat_frame; cp = nat_pct; src = 1; }
+    const int okf = has_fill && vb >= fill_frame && vb - fill_frame <= 150u, okn = has_nat && vb >= nat_frame && vb - nat_frame <= 150u;
+    /* la medida MÁS RECIENTE de las dos (empate: la del relleno, que incluye al nativo): una medida vieja de una fuente no tapa a la nueva de la otra */
+    if (okf && (!okn || fill_frame >= nat_frame)) { cf = fill_frame; cp = fill_pct; src = 2; }
+    else if (okn) { cf = nat_frame; cp = nat_pct; src = 1; }
     else return 0;
     in->cover1 = (uint8_t)(cp < 0 ? 1 : cp > 100 ? 101 : cp + 1);
     in->cover_src = (uint8_t)src;
