@@ -46,5 +46,5 @@ echo "== Swift (NativeRenderer de la app + banco) =="
 XCC=()
 for i in "${INC[@]}"; do XCC+=(-Xcc "$i"); done
 xcrun swiftc -O -swift-version 5 -import-objc-header bench/NativeBridge.h "${XCC[@]}" \
-  app/Sources/Native/NativeRenderer.swift bench/native/main.swift "${OBJ[@]}" -o "$OUT/nbench"
+  app/Sources/XRMath.swift app/Sources/Native/NativeRenderer.swift bench/native/main.swift "${OBJ[@]}" -o "$OUT/nbench"
 echo "OK: $OUT/nbench"

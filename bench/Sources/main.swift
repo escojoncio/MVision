@@ -291,8 +291,9 @@ func runCase(_ cfg: Cfg, first: Bool) {
         bench_enable_weapon(0)
         let headA = headPose(SIMD3<Float>(0.10, 1.60, 0.20), yaw: 0.45)
         let headB = headPose(SIMD3<Float>(0.35, 1.45, -0.10), yaw: 0.20)      // la cabeza se mueve tras anclar: el encuadre de la escena NO debe cambiar
+        // Menos fotogramas que XRPresenter.engineBadFrames (72): sin escena nativa del motor, pasado ese umbral la presentación cae por diseño al respaldo (pantalla de cine) y reinicia el velo.
         var gs = MvVrGameState(); gs.view_mode = 0; gs.view_kind = 2
-        guard let imgs = render(enc, layered: cfg.layered, color: tg.color, depth: tg.depth, gs: gs, frames: 80, head: { $0 == 79 ? headB : headA }) else {
+        guard let imgs = render(enc, layered: cfg.layered, color: tg.color, depth: tg.depth, gs: gs, frames: 60, head: { $0 == 59 ? headB : headA }) else {
             check(caso, "render", false, "fallo al renderizar"); bench_set_cine_camera(0); break stereoBlock
         }
         bench_set_cine_camera(0)
