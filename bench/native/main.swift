@@ -154,7 +154,7 @@ func renderViews(n: Int, views: [simd_float4x4], projs: [simd_float4x4], eyes: [
         }
         let vps = layered ? [projs[0] * views[0], projs[1] * views[1]] : [projs[p] * views[p]]
         let eyeList = layered ? [eyes[0], eyes[1]] : [eyes[p]]
-        if !nr.encode(encoder: enc, vram: vram, viewProj: vps, eyes: eyeList, layered: layered, colorFormat: format, depthFormat: .depth32Float, samples: samples, linear: false) { print("AVISO: encode devolvió false") }
+        if !nr.encode(encoder: enc, vram: vram, viewProj: vps, projections: layered ? [projs[0], projs[1]] : [projs[p]], eyes: eyeList, layered: layered, colorFormat: format, depthFormat: .depth32Float, samples: samples, linear: false) { print("AVISO: encode devolvió false") }
         enc.endEncoding()
         cpu += CFAbsoluteTimeGetCurrent() - t0
         var bufs: [MTLBuffer] = []
