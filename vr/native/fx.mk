@@ -18,6 +18,11 @@ $(B)/test_ns_gpu_fx: vr/native/test_ns_gpu_fx.c $(SRC) $(GPUSRC) $(HDR) vr/nativ
 	$(CC) $(CF) vr/native/test_ns_gpu_fx.c $(SRC) $(GPUSRC) -lm -o $@
 $(B)/test_ns_gpu_fx_san: vr/native/test_ns_gpu_fx.c $(SRC) $(GPUSRC) $(HDR) vr/native/ns_gpu.h vr/native/ns_gpu_types.h | $(B)
 	$(CC) $(CF) -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined vr/native/test_ns_gpu_fx.c $(SRC) $(GPUSRC) -lm -o $@
+CMPSRC = vr/native/ns_fxcmp.c
+$(B)/test_ns_fxcmp: vr/native/test_ns_fxcmp.c $(SRC) $(GPUSRC) $(CMPSRC) $(HDR) vr/native/ns_fxcmp.h vr/native/ns_gpu.h | $(B)
+	$(CC) $(CF) vr/native/test_ns_fxcmp.c $(SRC) $(GPUSRC) $(CMPSRC) -lm -o $@
+$(B)/test_ns_fxcmp_san: vr/native/test_ns_fxcmp.c $(SRC) $(GPUSRC) $(CMPSRC) $(HDR) vr/native/ns_fxcmp.h vr/native/ns_gpu.h | $(B)
+	$(CC) $(CF) -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined vr/native/test_ns_fxcmp.c $(SRC) $(GPUSRC) $(CMPSRC) -lm -o $@
 SCRSRC = vr/native/ns_screen.c
 $(B)/test_ns_screen: vr/native/test_ns_screen.c $(SCRSRC) vr/native/ns_screen.h vr/native/ns_gpu_types.h $(HDR) | $(B)
 	$(CC) $(CF) vr/native/test_ns_screen.c $(SCRSRC) -lm -o $@
@@ -33,15 +38,17 @@ $(B)/test_no_gpu3d: vr/native/test_no_gpu3d.c app/Sources/RenderRG.swift app/Sou
 $(B)/ns_fx_dump: vr/native/ns_fx_dump.c $(SRC) $(HDR) | $(B)
 	$(CC) $(CF) vr/native/ns_fx_dump.c $(SRC) -lm -o $@
 dump: $(B)/ns_fx_dump
-test: $(B)/test_ns_fx $(B)/test_ns_gpu_fx $(B)/test_ns_screen $(B)/test_ns_present $(B)/test_no_gpu3d
+test: $(B)/test_ns_fx $(B)/test_ns_gpu_fx $(B)/test_ns_fxcmp $(B)/test_ns_screen $(B)/test_ns_present $(B)/test_no_gpu3d
 	$(B)/test_ns_fx
 	$(B)/test_ns_gpu_fx
+	$(B)/test_ns_fxcmp
 	$(B)/test_ns_screen
 	$(B)/test_ns_present
 	$(B)/test_no_gpu3d
-test-san: $(B)/test_ns_fx_san $(B)/test_ns_gpu_fx_san $(B)/test_ns_screen_san $(B)/test_ns_present_san $(B)/test_no_gpu3d
+test-san: $(B)/test_ns_fx_san $(B)/test_ns_gpu_fx_san $(B)/test_ns_fxcmp_san $(B)/test_ns_screen_san $(B)/test_ns_present_san $(B)/test_no_gpu3d
 	$(B)/test_ns_fx_san
 	$(B)/test_ns_gpu_fx_san
+	$(B)/test_ns_fxcmp_san
 	$(B)/test_ns_screen_san
 	$(B)/test_ns_present_san
 	$(B)/test_no_gpu3d

@@ -252,6 +252,7 @@ __attribute__((weak)) void ns_extract_glue_stats(NsExtractGlueStats *o) { if (o)
 /* Comprobación de cobertura de la lista de la GPU por la escena nativa (ns_cover_glue.c, solo en la app): definiciones débiles vacías para las pruebas de escritorio. */
 __attribute__((weak)) void ns_cover_glue_post_ik(const uint8_t *ram) { (void)ram; }
 __attribute__((weak)) void ns_cover_glue_submit(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; }
+__attribute__((weak)) void ns_cover_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame, const float *eye, const float *M) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; (void)eye; (void)M; }
 __attribute__((weak)) size_t ns_cover_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
 /* Manos nuevas (ns_hand.c, solo en la app; vr/body/vr_hand_mesh.c): definición débil vacía para las pruebas de escritorio, donde la manopla del motor se queda como está. */
 __attribute__((weak)) int ns_hand_apply(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const NsHandIn *in) { (void)sc; (void)st; (void)map; (void)in; return 0; }
@@ -695,6 +696,7 @@ static const uint64_t *fx_classify_list(const GpuDrawList *hl, const VrCamRecord
     NsFxListCam lc;
     if (r) { for (int i = 0; i < 3; i++) lc.eye[i] = (float)r->eye[i]; memcpy(lc.M, r->M, sizeof lc.M); }
     ns_fx_classify_near(hx_fx, r ? &lc : NULL, hl, hx_cls, hx_item);
+    ns_fx_learn(hx_fx, hl, hx_item);   /* página de textura y modo de mezcla que el paquete no trae: se recuerdan para los fotogramas siguientes */
     for (size_t i = 0; i < n; i++) {
         uint64_t k = 0;
         if ((hx_cls[i] == NSFX_OP_FX || hx_cls[i] == NSFX_OP_FX_PACK) && hx_item[i] >= 0 && (uint32_t)hx_item[i] < hx_fx->n_items) k = ns_fx_item_key(&hx_fx->items[hx_item[i]]);
@@ -1263,7 +1265,12 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
             break;
         }
         build_one(l, si);
-        ns_cover_glue_submit(emu_ram, emu_scratch, l->ops, l->nops, f);   /* 1 de cada N: instantánea y comprobación de cobertura en otro hilo */
+        {
+            int h3 = 0; const VrCamRecord *cr = (bs.valid & BRIDGE_OK_EYE) ? list_record(l, &h3) : NULL;
+            float ce[3], cm[9];
+            if (cr) { for (int i = 0; i < 3; i++) ce[i] = (float)cr->eye[i]; memcpy(cm, cr->M, sizeof cm); }
+            ns_cover_glue_submit_cam(emu_ram, emu_scratch, l->ops, l->nops, f, cr ? ce : NULL, cr ? cm : NULL);   /* con la cámara de la lista */
+        }   /* 1 de cada N: instantánea y comprobación de cobertura en otro hilo */
         dump_capture(c, f, l);
         if (!cap_on) break;
     }

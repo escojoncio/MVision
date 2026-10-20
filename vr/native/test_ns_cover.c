@@ -246,6 +246,7 @@ static void test_many(void) {
 /* ns_cover_run con una RAM sin escena (menú, vídeo): error limpio, sin caer; y el enlace/hilo de la app (ns_cover_glue) con la misma RAM: nunca bloquea ni imprime. */
 void ns_cover_glue_post_ik(const uint8_t *ram);
 void ns_cover_glue_submit(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame);
+void ns_cover_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame, const float *eye, const float *M);
 size_t ns_cover_glue_poll(char *buf, size_t cap);
 static void test_run_and_glue(void) {
     uint8_t *ram = (uint8_t *)calloc(1, 0x200000);
@@ -264,6 +265,14 @@ static void test_run_and_glue(void) {
     nanosleep(&ts, NULL);
     ns_cover_glue_poll(buf, sizeof buf);   /* puede haber texto o no según el hilo; solo debe ser seguro */
     CHECK(ns_cover_glue_poll(buf, sizeof buf) == 0, "el texto se consume una vez");
+    { float eye[3] = {0, 0, 0}, M[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+      for (int i = 0; i < 40; i++) { ns_cover_glue_post_ik(ram); ns_cover_glue_submit_cam(ram, NULL, ops, 1, (uint32_t)i, eye, M); }
+      nanosleep(&ts, NULL); ns_cover_glue_poll(buf, sizeof buf); }   /* con la cámara de la lista: seguro */
+    {   /* ns_cover_run con la cámara de la lista: no cae con RAM sin escena */
+      NsCover *c2 = ns_cover_create(); NsCoverCfg cfg; float eye[3] = {0, 0, 0}, M[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+      ns_cover_cfg_default(&cfg); cfg.list_eye = eye; cfg.list_M = M;
+      NsCoverResult r2; ns_cover_run(c2, ram, NULL, ops, 1, &cfg, &r2); CHECK(r2.nat_tris == 0, "cámara de la lista, RAM sin escena");
+      ns_cover_destroy(c2); }
     ns_cover_glue_submit(ram, NULL, ops, 0, 1);   /* lista vacía: ignorada */
     ns_cover_glue_submit(NULL, NULL, ops, 1, 1);
     free(ram);

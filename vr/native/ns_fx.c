@@ -1,6 +1,7 @@
 /* ns_fx: extracción de efectos del motor desde la RAM y clasificación (candidata) de la lista de la GPU. Formato y semántica: docs/efectos_nativos.md. */
 #include "ns_fx.h"
 #include <math.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -590,6 +591,8 @@ static void do_prim(Ctx *c, uint32_t p, int role_owner) {
 }
 
 /* ------------------------------------------------------------------------------------------------ sombras de objeto (malla de una pieza) */
+/* Textura de la última sombra emitida (persiste entre fotogramas; solo la toca el hilo de extracción). */
+static struct { uint8_t valid, tp, abr, rgb[3]; uint16_t tpage, clut; uint8_t uvq[4][2]; } g_shadow_tex;
 static void do_shadow(Ctx *c, uint32_t node) {
     const uint8_t *m = c->ram; NsFxScene *S = c->sc; const NsFxCam *cam = &S->cam; const NsFxTuning *T = &c->opt->tune;
     uint32_t objs = rdu32(m, node + 0x28);
@@ -600,14 +603,16 @@ static void do_shadow(Ctx *c, uint32_t node) {
     if ((flag & 0x80) || !rds32(m, node + 0x90)) return;
     if (group && !(group & c->map)) return;
     float R[3][3], Tt[3]; mat_world(m, objs, R, Tt);
-    float hx = T->shadow_half * (float)rds16(m, objs + 0x48) / 4096.0f, hz = T->shadow_half * (float)rds16(m, objs + 0x48 + 16) / 4096.0f;
+    /* La matriz del objeto YA lleva la escala de la sombra (la de la pieza es la misma): aplicarla también al semilado la contaba dos veces (cuadrado ~15 veces menor que
+     * el paquete real del motor: error de 5-16 px contra 0,8-1,7 px con el semilado sin escalar, medido sobre volcados). */
+    float hx = T->shadow_half, hz = T->shadow_half;
     float loc[4][3] = {{-hx, 0, -hz}, {hx, 0, -hz}, {-hx, 0, hz}, {hx, 0, hz}};
     float wc[4][3], vc[4][3];
     for (int i = 0; i < 4; i++) { xf(R, Tt, loc[i], wc[i]); w2v(cam, wc[i], vc[i]); }
     uint32_t piece = objs + 0x48, pk = rdu32(m, piece + 0x54 + 4u * (uint32_t)c->buf);
     int have = ptr_ok(pk) && rds16(m, piece + 0x52) > 0 && in_ram(pk, 52);
     Dec d; memset(&d, 0, sizeof d);
-    int order[4] = {0, 1, 2, 3}, sz = 0;
+    int order[4] = {0, 1, 2, 3}, sz = 0, permuted_ok = 0, tex_cached = 0;
     if (have) {
         dec_pack(m, pk, KIND_P4TG, 4, 8, 12, 4, &d);
         sz = d.sz;
@@ -622,7 +627,7 @@ static void do_shadow(Ctx *c, uint32_t node) {
                 }
                 if (best < 0 || (used & (1 << best))) okm = 0; else { used |= 1 << best; ord[v] = best; }
             }
-            if (okm) memcpy(order, ord, sizeof order);
+            if (okm) { memcpy(order, ord, sizeof order); permuted_ok = 1; }
         }
     }
     NsFxItem *it = new_item(c); if (!it) return;
@@ -639,11 +644,21 @@ static void do_shadow(Ctx *c, uint32_t node) {
         if (!(d.code & 2)) it->flags &= (uint16_t)~NSFX_F_SEMI, it->gflags &= (uint16_t)~GPU_F_SEMI;
     } else it->flags |= NSFX_F_TPAGE_UNKNOWN;
     if (!have || sz == 0) it->flags |= NSFX_F_ENGINE_CULLED | NSFX_F_LOW_CONF;
+    if (have && sz != 0 && d.nv == 4 && d.tpage && permuted_ok) {   /* emitida: se guarda su textura para las sombras que el motor no emita en otros fotogramas */
+        g_shadow_tex.valid = 1; g_shadow_tex.tpage = d.tpage; g_shadow_tex.clut = d.clut; g_shadow_tex.tp = (uint8_t)((d.tpage >> 7) & 3); g_shadow_tex.abr = (uint8_t)((d.tpage >> 5) & 3);
+        for (int v = 0; v < 4; v++) { g_shadow_tex.uvq[order[v]][0] = d.u[v]; g_shadow_tex.uvq[order[v]][1] = d.v[v]; }
+        for (int k = 0; k < 3; k++) g_shadow_tex.rgb[k] = d.rgb[0][k];
+    } else if (!(have && d.nv == 4 && d.tpage) && g_shadow_tex.valid) {   /* no emitida: textura real de la última emitida (el paquete de este fotograma no la trae) */
+        it->tpage = g_shadow_tex.tpage; it->clut = g_shadow_tex.clut; it->tp = g_shadow_tex.tp; it->abr = g_shadow_tex.abr; it->ptp = 255;
+        it->flags = (uint16_t)((it->flags & ~NSFX_F_TPAGE_UNKNOWN) | NSFX_F_LEARNED | NSFX_F_SEMI); it->gflags |= GPU_F_SEMI;
+        for (int v = 0; v < 4; v++) { d.u[v] = g_shadow_tex.uvq[order[v]][0]; d.v[v] = g_shadow_tex.uvq[order[v]][1]; for (int k = 0; k < 3; k++) d.rgb[v][k] = g_shadow_tex.rgb[k]; }
+        have = 1; tex_cached = 1;
+    }
     for (int v = 0; v < 4; v++) {
         int q = order[v];
         memcpy(it->pos[v], wc[q], sizeof wc[q]); memcpy(it->vpos[v], vc[q], sizeof vc[q]);
         it->uv[v][0] = d.u[v]; it->uv[v][1] = d.v[v];
-        for (int k = 0; k < 3; k++) it->rgb[v][k] = have ? d.rgb[v][k] : 128;
+        for (int k = 0; k < 3; k++) it->rgb[v][k] = (have || tex_cached) ? d.rgb[v][k] : 128;
         if (c->opt->check_reproj && have && sz != 0 && vc[q][2] > 1) {
             float sx = cam->proj_h * vc[q][0] / vc[q][2], sy = cam->proj_h * vc[q][1] / vc[q][2];
             if (fabsf(sx) < 600 && fabsf(sy) < 600) chk_add(c, sx, sy, d.x[v], d.y[v]);
@@ -699,6 +714,71 @@ static void run_buffer(Ctx *c, const ActorRec *ar, int na) {
     for (int i = 0; i < c->nq; i++) do_prim(c, c->qprim[i], c->qrole[i]);
     for (int i = 0; i < na; i++) if (code_of_hash(ar[i].hash) == NSFX_ROLE_SHADOW_OBJ) do_shadow(c, ar[i].node);
 }
+/* ------------------------------------------------------------------------------------------------ aprendizaje de página / modo de mezcla */
+/* Tabla global sin bloqueos (una palabra de 64 bits por entrada): clave = dirección de la primitiva (19 bits), carga = página, paleta, modo de mezcla. */
+#define LEARN_N 1024u
+static _Atomic uint64_t g_learn[LEARN_N];
+enum { L_TPAGE = 1, L_ABR = 2, L_CLUT = 4 };
+static uint32_t learn_key(uint32_t prim) { return (prim & 0x1FFFFFu) >> 2; }
+static uint32_t learn_slot(uint32_t key) { uint32_t h = key * 0x9E3779B1u; return (h >> 8) & (LEARN_N - 1u); }
+static uint64_t learn_pack(uint32_t key, uint16_t tpage, uint16_t clut, int abr, int has) { return (uint64_t)tpage | ((uint64_t)clut << 16) | ((uint64_t)(abr & 3) << 32) | ((uint64_t)(has & 7) << 34) | (1ull << 37) | ((uint64_t)key << 38); }
+static int learn_get(uint32_t prim, uint16_t *tpage, uint16_t *clut, int *abr, int *has) {
+    uint32_t key = learn_key(prim), h = learn_slot(key);
+    for (uint32_t n = 0; n < 8; n++, h = (h + 1) & (LEARN_N - 1u)) {
+        uint64_t e = atomic_load_explicit(&g_learn[h], memory_order_relaxed);
+        if (!((e >> 37) & 1)) return 0;
+        if ((uint32_t)(e >> 38) == key) { *tpage = (uint16_t)e; *clut = (uint16_t)(e >> 16); *abr = (int)((e >> 32) & 3); *has = (int)((e >> 34) & 7); return 1; }
+    }
+    return 0;
+}
+static void learn_put(uint32_t prim, uint16_t tpage, uint16_t clut, int abr, int has) {
+    uint32_t key = learn_key(prim), h0 = learn_slot(key), h = h0;
+    uint32_t slot = h0;
+    for (uint32_t n = 0; n < 8; n++, h = (h + 1) & (LEARN_N - 1u)) {
+        uint64_t e = atomic_load_explicit(&g_learn[h], memory_order_relaxed);
+        if (!((e >> 37) & 1) || (uint32_t)(e >> 38) == key) { slot = h; break; }
+    }
+    atomic_store_explicit(&g_learn[slot], learn_pack(key, tpage, clut, abr, has), memory_order_relaxed);
+}
+void ns_fx_learn_reset(void) { memset(&g_shadow_tex, 0, sizeof g_shadow_tex); for (uint32_t i = 0; i < LEARN_N; i++) atomic_store_explicit(&g_learn[i], 0, memory_order_relaxed); }
+uint32_t ns_fx_learn(const NsFxScene *sc, const GpuDrawList *dl, const int32_t *item) {
+    uint32_t n = 0;
+    if (!sc || !dl || !item) return 0;
+    for (uint32_t i = 0; i < dl->nops; i++) {
+        int32_t k = item[i]; if (k < 0 || (uint32_t)k >= sc->n_items) continue;
+        const NsFxItem *it = &sc->items[k]; const GpuOp *o = &dl->ops[i];
+        if (it->flags & NSFX_F_FROM_OBJ) continue;
+        if (!(it->flags & (NSFX_F_TPAGE_UNKNOWN | NSFX_F_ABR_UNKNOWN | NSFX_F_LEARNED))) continue;
+        if (o->type != GPU_OP_POLY && o->type != GPU_OP_RECT && o->type != GPU_OP_LINE) continue;
+        int has = 0; uint16_t tpage = 0, clut = 0;
+        if ((it->flags & NSFX_F_TEXTURED) && (o->flags & GPU_F_TEXTURED)) {
+            tpage = (uint16_t)(((o->tx / 64) & 15) | (((o->ty / 256) & 1) << 4) | ((o->abr & 3) << 5) | ((o->tp & 3) << 7));
+            clut = (uint16_t)(((o->clx / 16) & 63) | ((o->cly & 511) << 6));
+            has |= L_TPAGE | L_CLUT;
+        }
+        if (o->flags & GPU_F_SEMI) has |= L_ABR;
+        if (!has) continue;
+        learn_put(it->prim, tpage, clut, o->abr & 3, has);
+        n++;
+    }
+    return n;
+}
+static void apply_learned(NsFxScene *S) {
+    for (uint32_t i = 0; i < S->n_items; i++) {
+        NsFxItem *it = &S->items[i];
+        if (!(it->flags & (NSFX_F_TPAGE_UNKNOWN | NSFX_F_ABR_UNKNOWN)) || (it->flags & NSFX_F_FROM_OBJ)) continue;
+        uint16_t tp16, cl; int abr, has;
+        if (!learn_get(it->prim, &tp16, &cl, &abr, &has)) continue;
+        if ((it->flags & NSFX_F_TPAGE_UNKNOWN) && (has & L_TPAGE)) {
+            it->tpage = tp16; it->tp = (uint8_t)((tp16 >> 7) & 3);
+            if (!it->clut && (has & L_CLUT)) it->clut = cl;
+            it->flags = (uint16_t)((it->flags & ~NSFX_F_TPAGE_UNKNOWN) | NSFX_F_LEARNED);
+            if (!(it->flags & NSFX_F_ABR_UNKNOWN)) it->abr = (uint8_t)((tp16 >> 5) & 3);
+        }
+        if ((it->flags & NSFX_F_ABR_UNKNOWN) && (has & L_ABR)) { it->abr = (uint8_t)abr; it->flags = (uint16_t)((it->flags & ~NSFX_F_ABR_UNKNOWN) | NSFX_F_LEARNED); }
+    }
+}
+
 static int score(const NsFxScene *S) { return (int)S->stats.chk_n - 2 * (int)S->stats.chk_bad; }
 typedef struct { uint32_t addr; int k; } PA;
 static int pa_cmp(const void *a, const void *b) { uint32_t x = ((const PA *)a)->addr, y = ((const PA *)b)->addr; return x < y ? -1 : x > y; }
@@ -758,6 +838,7 @@ int ns_fx_extract(const uint8_t *ram, const NsFxOpts *opt_in, NsFxScene *out) {
             free(keep);
         }
     }
+    apply_learned(out);
     pm_build(out);
     free(ar); free(c);
     return 0;

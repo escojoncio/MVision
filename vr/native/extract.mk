@@ -25,7 +25,7 @@ clean:
 # Cobertura de la lista de la GPU por la escena nativa (ns_cover): prueba sintética y herramienta de volcados.
 #   make -f vr/native/extract.mk test-cover    pruebas sintéticas de ns_cover
 #   make -f vr/native/extract.mk nscover       compila vr/native/build-extract/nscover (ver tools/nscover.c)
-COVSRC := vr/native/ns_cover.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_fx.c
+COVSRC := vr/native/ns_cover.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_fx.c vr/native/ns_fxcmp.c vr/native/ns_fx_export.c vr/native/ns_gpu.c
 $(B)/test_ns_cover: vr/native/test_ns_cover.c vr/native/ns_cover_glue.c $(COVSRC) vr/native/ns_cover.h $(HDR) | $(B)
 	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/test_ns_cover.c vr/native/ns_cover_glue.c $(COVSRC) -lm -lpthread -o $@
 $(B)/nscover: vr/native/tools/nscover.c vr/native/ns_dump.c $(COVSRC) vr/native/ns_cover.h $(HDR) | $(B)

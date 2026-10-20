@@ -22,6 +22,7 @@
 #include "gpu.h"
 #include "ns_adapt.h"
 #include "ns_fx.h"
+#include "ns_fxcmp.h"
 #include "ns_types.h"
 
 #ifdef __cplusplus
@@ -72,6 +73,8 @@ typedef struct {
     NsCoverGroup extra[3];                             /* peores grupos de nativos visibles sin pareja (cause = NC_N) */
     NsCoverGroup shift[3];                             /* peores grupos de MATCH desplazados > 2 px (cause = NC_N + 2) */
     NsCoverGroup color[3];                             /* peores grupos de MATCH con color distinto (cause = NC_N + 1) */
+    NsFxCmpResult fxc;                                 /* medida de los efectos nativos frente a la lista (ns_fxcmp.h); fxc_ok = 1 si se midió */
+    int fxc_ok;
     double ms;
 } NsCoverResult;
 
