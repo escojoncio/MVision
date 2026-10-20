@@ -1656,3 +1656,25 @@ Prueba (`make -C vr/host test`, `test_smooth.c`, caso «nativa +1 registro»): a
 - Workflow: se añaden `fx.mk test`, `vr/input test`, `vr/ai test-head`, `vr/host test` a las pruebas C del job de visionOS.
 - Pruebas en Linux (gcc; el clang del entorno no trae runtime de sanitizadores): runtime, vr/scene (test, test-san, test-split, test-layer2d), vr/native (extract/integra/fx/dump/luz test y test-san, test-solid, test-cover(-san), test-tsan, Makefile), vr/camera (test, heading, headcol, native-coh y sus -san), body, input, bridge, hands, gameplay, box, weapons (+wload), radar, host, ai (test, activity, cameras, head y sus -san): todo en verde.
 - Pendiente: compilar Swift/Metal en el CI y probar en visor (efectos nativos, capa 2D HQ con ventanas de selector/pausa, submenú de IA, golpes por lógica del motor).
+
+
+## 88. Render 3D solo nativo y efectos de pantalla nativos (rama `final2`, sobre `final` 55f0b23) — 2026-10-20 (solo código, pruebas sintéticas y volcados existentes; NO se ejecutó el juego; Swift/Metal sin compilar aquí, lo verifica el CI)
+**Requisito:** el 3D del mundo y de los efectos sale únicamente del renderer nativo; los efectos de pantalla completa son nativos y cómodos en VR; las cinemáticas del motor también se pintan con el nativo.
+**A. Efectos al 100 % (`vr/native`)**
+- `ns_fx.c`: formato libre (kind 23, `dec_free`) y FREEPACKS decodificados; segunda pasada que clasifica por posición en pantalla. `test_ns_fx` 20008 comprobaciones.
+- `NsScreenFx` (120 B) en `NsScene.screen`, exportado desde `NsFxScreen` (`ns_fx_export`, `ns_extract_glue`).
+- `ns_screen.{h,c}` (nuevo): agua en el mundo (tinte y onda por posición del mundo), barras, modo de visión A/B con exploración, anillo de gas, destello con suavizado y fundido blanco/negro como lista ordenada de recubrimientos del ojo. Ya no se usa `VrFilter`. `test_ns_screen` 43 comprobaciones.
+- Destello (clut 3c70): se trata como recubrimiento de destello (suavizado `flash_slew`), no como geometría.
+- Niebla en efectos (`NsGpuFxParams.fog`): `1 - ns_gpu_fog_f(z)` por vértice. Una sola pasada semitransparente: `ns_gpu_semi_merge` intercala mallas y efectos (`test_ns_gpu_fx` 61).
+- `NativeShaders.metal`/`NativeRenderer.swift`: agua en el fragmento, pipeline de recubrimientos, uniformes de pantalla, cara del ojo para efectos de una cara.
+**B. Se quita el render viejo**
+- `RenderRG.swift`: ya no dibuja los lotes kind 0/1 ni existen el post-proceso de pantalla, la máscara de visión, los estados de profundidad del 3D ni el modo «gpu». `pipeline(_:)` solo construye HUD. La lista de la GPU aporta eventos de VRAM, capa 2D (HUD, menús, radio, códec), radar y el mapa de coherencia (solo registro; `gpu3DTris` cuenta lo que NO se dibuja).
+- `ns_present.{h,c}` (nuevo): `CURRENT` / `HOLD` (último válido reproyectado con la cabeza actual) / `BLACK` (fundido suave). La red de coherencia y las condiciones de caída pasan a bits `why` de registro. `test_ns_present` 641.
+- Cinemáticas: `ns_cinema.{h,c}` (A, t, H, OFX/OFY, sobredimensión 66/64); `encodeStereo` pinta la escena nativa por ojo (cámaras paralelas, ventana desplazada) en la textura de la pantalla 3D, solo si cambia la escena, la petición o el fundido; la capa 2D va encima. Segunda vista (mira, misil) también con el nativo.
+- `vrhost.c/.h`: `MV_RENDER=gpu` y el elemento de menú VR de modo de render se ignoran/eliminan; captura de la escena sólo con el renderer listo; la colisión de la cabeza usa solo la escena nativa.
+- Código muerto: los sombreadores `vr_vs_scene*` y los tipos de la lista (`skip_if_native`, `VrFilter`) siguen compilados pero sin uso (los necesitan tests y banco).
+**C. Pruebas**
+- `make -f vr/native/fx.mk test test-san` (incluye `test_no_gpu3d`: comprueba en los fuentes que no hay dibujo 3D por la lista de la GPU ni modo gpu, y que el nativo, la presentación y las cinemáticas están cableados). Resto de suites de C en verde con `CC=gcc` (extract, solid, cover, headcol, native-coh, body, split, layer2d, input, ai-head, host) y sus variantes -san.
+- Banco (`bench/`): los cubos/suelo de la lista de la GPU deben NO verse; fluidez omitida (el marcador era un cubo de la GPU); E2E nativo: nunca rojo de la GPU en ningún caso, repetir/negro sin escena. Adaptado sin ejecutar.
+**Cobertura (`nscover`, volcado de un fotograma; la herramienta ahora imprime la línea «clases»):** mallas opacas 739/822 (89,9 %), semitransparentes 175/177 (98,9 %), efectos 54/54 (agua 46, carteles 6, otros 2), jugador (brazos, pose) 85 sin cubrir por diseño: total 968/1053 (91,9 %), **sin pose 968/968 (100 %)**. El volcado no contiene kind 23 ni FREEPACKS: solo cubierto por pruebas sintéticas.
+**Pendiente / riesgos:** compilar Swift/Metal en el CI y probar en visor; colores de los modos de visión y aspecto del destello son ajustes (`NsScreenCfg`); el centro OFX/OFY se supone el centro de la pantalla; las escenas sin jugador enlazado o sin `TOVR_OK` (muerte, vehículos) mantienen el último fotograma ~1,5 s y luego funden a negro en vez de caer a la GPU; el orden de los semitransparentes de la segunda vista usa la vista del ojo.

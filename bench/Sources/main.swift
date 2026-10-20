@@ -299,7 +299,8 @@ func runCase(_ cfg: Cfg, first: Bool) {
         report(caso, imgs, notice: true)
         print("[diag] última: \(enc.lastDiag)")
         check(caso, "presentacion = pantalla 3D", "\(enc.presenter.shown)" == "stereo", "mostrando=\(enc.presenter.shown)")
-        check(caso, "imagen estereo dibujada", enc.renderer.stereoRendered, "stereoRendered=\(enc.renderer.stereoRendered)")
+        // Sin escena nativa (la lista sintética de la GPU no trae mundo del motor) la pantalla 3D no se dibuja: informativo. El dibujo nativo de cinemáticas se prueba en runNativeE2E.
+        soft(caso, "imagen estereo dibujada por el nativo", enc.renderer.stereoRendered, "stereoRendered=\(enc.renderer.stereoRendered)")
         check(caso, "velo disipado", enc.presenter.veil < 0.01, "velo=\(enc.presenter.veil)")
         let W: Float = 3.0, D: Float = 2.5
         let tanX = W / (2 * D), tanY = tanX * 0.75
@@ -311,7 +312,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
         var disparity: [String: Int] = [:]
         for e in 0..<2 {
             let im = imgs[e]
-            check(caso, "ojo \(e) no negro", im.nonBlack > 0.10, String(format: "%.1f %% de pixeles no negros (minimo 10 %%)", im.nonBlack * 100))
+            soft(caso, "ojo \(e) no negro", im.nonBlack > 0.10, String(format: "%.1f %% de pixeles no negros (minimo 10 %%; el mundo de la lista de la GPU ya no se dibuja)", im.nonBlack * 100))
             guard let cam = XRStereo.eye(gameView: gv, eye: e, ipd: IPD, conv: XRStereo.convergence, tanX: tanX, tanY: tanY) else { check(caso, "camara estereo", false, "XRStereo.eye devolvio nil"); continue }
             let pts: [(String, SIMD3<Float>, (Int, Int, Int))] = [
                 ("cubo rojo", SIMD3<Float>(-1.2, 0.5, -3), (255, 0, 0)),
@@ -330,7 +331,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
                 let w = anchor * XRMath.translation(SIMD3<Float>(0, anchorY, -D)) * local
                 guard let px = project(SIMD3<Float>(w.x, w.y, w.z), eye: e, head: headB) else { check(caso, "ojo \(e) \(p.0)", false, "detras de la camara"); continue }
                 let col = im.avg(px.0, px.1, r: 2)
-                check(caso, "ojo \(e) \(p.0)", near(col, p.2, 50), "pixel (\(px.0),\(px.1)) color \(col) esperado \(p.2)")
+                check(caso, "ojo \(e) \(p.0) NO dibujado por la GPU", !near(col, p.2, 50), "pixel (\(px.0),\(px.1)) color \(col): la lista de la GPU no se dibuja jamas en 3D (\(p.2) = dibujado)")
                 if p.0 == "cubo rojo" { disparity["rojo\(e)"] = px.0 }
             }
         }
@@ -390,7 +391,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
         check(caso, "velo disipado", enc.presenter.veil < 0.01, "velo=\(enc.presenter.veil)")
         for e in 0..<2 {
             let im = imgs[e]
-            check(caso, "ojo \(e) no negro", im.nonBlack > 0.25, String(format: "%.1f %% de pixeles no negros (minimo 25 %%)", im.nonBlack * 100))
+            soft(caso, "ojo \(e) no negro", im.nonBlack > 0.02, String(format: "%.1f %% de pixeles no negros (el mundo de la lista de la GPU ya no se dibuja: quedan panel, radar, arma y ejes)", im.nonBlack * 100))
             let pts: [(String, SIMD3<Float>, (Int, Int, Int))] = [
                 ("cubo rojo", SIMD3<Float>(-1.2, 0.5, -3), (255, 0, 0)),
                 ("cubo azul", SIMD3<Float>(1.5, 0.5, -3), (0, 0, 255)),
@@ -402,7 +403,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
             for p in pts {
                 guard let px = project(p.1, eye: e, head: headB) else { check(caso, "ojo \(e) \(p.0)", false, "detras de la camara"); continue }
                 let c = im.avg(px.0, px.1, r: 2)
-                check(caso, "ojo \(e) \(p.0)", near(c, p.2, 45), "pixel (\(px.0),\(px.1)) color \(c) esperado \(p.2)")
+                check(caso, "ojo \(e) \(p.0) NO dibujado por la GPU", !near(c, p.2, 45), "pixel (\(px.0),\(px.1)) color \(c): la lista de la GPU no se dibuja jamas en 3D (\(p.2) = dibujado)")
             }
             // cuadro texturizado desde la VRAM (eventos de relleno y subida aplicados antes del lote)
             let texPts: [(String, Float, Float, (Int, Int, Int))] = [
@@ -411,7 +412,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
             for t in texPts {
                 guard let px = project(SIMD3<Float>(t.1, t.2, -5), eye: e, head: headB) else { check(caso, "ojo \(e) \(t.0)", false, "detras de la camara"); continue }
                 let c = im.avg(px.0, px.1, r: 2)
-                check(caso, "ojo \(e) \(t.0)", near(c, t.3, 45), "pixel (\(px.0),\(px.1)) color \(c) esperado \(t.3)")
+                check(caso, "ojo \(e) \(t.0) NO dibujado por la GPU", !near(c, t.3, 45), "pixel (\(px.0),\(px.1)) color \(c): cuadro texturizado de la lista de la GPU (\(t.3) = dibujado)")
             }
             // ejes de depuración: un píxel de cada color puro cerca del punto medio de cada eje
             for (nm, d, col) in [("X rojo", SIMD3<Float>(1, 0, 0), (255, 0, 0)), ("Y verde", SIMD3<Float>(0, 1, 0), (0, 255, 0)), ("Z azul", SIMD3<Float>(0, 0, 1), (0, 0, 255))] {
@@ -424,12 +425,9 @@ func runCase(_ cfg: Cfg, first: Bool) {
             if let wf = enc.renderer.radar?.wristFrame, let px = project(wf.center, eye: e, head: headB) {
                 let c = im.avg(px.0, px.1, r: 3)
                 if radarCover {
-                    check(caso, "ojo \(e) radar tapado por el cubo ciano (profundidad normal)", near(c, (0, 255, 255), 80), "centro del radar \(wf.center) pixel (\(px.0),\(px.1)) color \(c) esperado ciano; verde/rojo = el radar se pinta por encima del mundo")
-                    let ex = wf.center + wf.right * (wf.halfW * 0.9)
-                    if let pe = project(ex, eye: e, head: headB) {
-                        let ce = im.avg(pe.0, pe.1, r: 1)
-                        soft(caso, "ojo \(e) radar visible fuera del cubo", ce.1 > 80 && ce.2 < 200, "borde del radar pixel (\(pe.0),\(pe.1)) color \(ce) esperado verde")
-                    }
+                    // el cubo ciano de la lista de la GPU ya no se dibuja: no hay nada que tape el radar (la oclusión contra el mundo nativo se prueba con la escena nativa)
+                    check(caso, "ojo \(e) el cubo ciano de la lista de la GPU NO se dibuja", !near(c, (0, 255, 255), 80), "centro del radar \(wf.center) pixel (\(px.0),\(px.1)) color \(c); ciano = dibujado por la GPU")
+                    soft(caso, "ojo \(e) radar de muneca visible", c.1 > 80 || c.0 > 120, "centro del radar pixel (\(px.0),\(px.1)) color \(c) esperado verde o punto rojo")
                 } else {
                     soft(caso, "ojo \(e) radar de muneca", c.1 > 80 || c.0 > 120, "centro del radar \(wf.center) pixel (\(px.0),\(px.1)) color \(c) esperado verde o punto rojo")
                 }
@@ -447,11 +445,11 @@ func runCase(_ cfg: Cfg, first: Bool) {
             let w = frame * local
             if let px = project(SIMD3<Float>(w.x, w.y, w.z), eye: e, head: headB) {
                 let c = im.avg(px.0, px.1, r: 2)
-                check(caso, "ojo \(e) HUD magenta (encima del cubo ciano que lo tapa)", c.0 > 150 && c.2 > 150 && c.1 < 150, "pixel (\(px.0),\(px.1)) color \(c) esperado magenta (R,B > 150, G < 150); ciano (0,255,255) = el mundo tapa el panel")
+                check(caso, "ojo \(e) HUD magenta", c.0 > 150 && c.2 > 150 && c.1 < 150, "pixel (\(px.0),\(px.1)) color \(c) esperado magenta (R,B > 150, G < 150)")
                 // el cubo ciano existe: un píxel de su cara a un lado del rectángulo del panel (misma línea de visión del cubo, fuera del rectángulo magenta) es ciano
                 if let q = project(SIMD3<Float>(-0.133, 1.776, -0.94), eye: e, head: headB) {
                     let cc = im.avg(q.0, q.1, r: 1)
-                    soft(caso, "ojo \(e) cubo ciano delante del panel visible", near(cc, (0, 255, 255), 80), "pixel (\(q.0),\(q.1)) color \(cc) esperado ciano")
+                    check(caso, "ojo \(e) cubo ciano de la GPU ausente junto al panel", !near(cc, (0, 255, 255), 80), "pixel (\(q.0),\(q.1)) color \(cc); ciano = dibujado por la GPU")
                 }
             } else { check(caso, "ojo \(e) HUD magenta", false, "detras de la camara") }
         }
@@ -613,8 +611,9 @@ func runFluidez(layered: Bool) {
     enc.smoothMotion = true
 }
 
-runFluidez(layered: true)
-runFluidez(layered: false)
+// La fluidez se medía siguiendo un cubo de la lista de la GPU, que ya no se dibuja en 3D. La reproyección del mundo nativo con la cabeza actual la cubren las pruebas de vr/native
+// (ns_present, ns_cinema) y los casos nativos de abajo; este escenario queda compilado pero sin ejecutar.
+annot("notice", "fluidez", "omitida: el marcador era un cubo de la lista de la GPU (no se dibuja en 3D); ver pruebas nativas")
 // ---------- Render nativo de extremo a extremo ----------
 // Ejecuta el código REAL de la app (XRFrameEncoder -> RGRenderer.encode/encodeScene -> NativeRenderer.encode) con una lista de la GPU sintética cuyo UNICO batch 3D (marcado, como hace
 // vrhost.c) es un cuadrilátero ROJO puro que cubre todo el campo de visión, y una escena nativa sintética (la sala de native_synth.c; ningún rojo puro). Si la sustitución falla (el
@@ -654,7 +653,7 @@ func runNativeE2E(layered: Bool, msaa: Int, infinite: Bool = false) {
     let head = headPose(SIMD3<Float>(0.3, 1.6, 0.5), yaw: 0)
 
     func scenario(_ label: String, mode: Int32, withBridge: Bool, marks: Bool = true) -> (imgs: [Img], f: [Fractions], diag: String)? {
-        mv_vrhost_set_render_mode(mode)
+        _ = mode   // el modo ya no existe (solo hay render nativo); se conserva el parámetro por legibilidad de los casos
         nat.bridge = withBridge ? bridge : nil
         bench_make_pattern()
         bench_make_native_e2e_scene(vramPtr)
@@ -675,48 +674,31 @@ func runNativeE2E(layered: Bool, msaa: Int, infinite: Bool = false) {
         }
     }
 
-    // (a) modo GPU: se ven los batches de la GPU (rojo) aunque la lista venga marcada y haya escena nativa
-    if let a = scenario("a-gpu", mode: 0, withBridge: true) {
-        checkEyes(tag + "/a-gpu", "los batches GPU se ven (rojo > 80 %)", a, { $0.red > 0.80 }, "rojo > 80 %")
-    }
-    // (b) modo nativo: los pixeles del mundo vienen del nativo y NO de los batches GPU
-    var bRes: (imgs: [Img], f: [Fractions], diag: String)?
-    if let b = scenario("b-nativo", mode: 1, withBridge: true) {
-        bRes = b
-        checkEyes(tag + "/b-nativo", "sin rojo de la GPU y con pixeles nativos", b, { $0.red < 0.01 && $0.nonBlack > 0.30 }, "rojo < 1 %, no negro > 30 %")
-        check(tag + "/b-nativo", "la decision fue nativo", b.diag.contains("usa=true"), b.diag)
-        check(tag + "/b-nativo", "se saltaron batches de la GPU", !b.diag.contains("batches_3D_saltados=0 "), b.diag)
-        // (c) los dos ojos con imagen nativa y con paralaje (no la misma imagen)
+    // La lista de la GPU de esta prueba trae UN batch 3D rojo puro que cubre todo el campo de visión: no debe verse en NINGÚN caso (el 3D sale solo del render nativo).
+    // (a) escena nativa y lista marcada: pixeles nativos, nada de rojo
+    var aRes: (imgs: [Img], f: [Fractions], diag: String)?
+    if let a = scenario("a-nativo", mode: 1, withBridge: true) {
+        aRes = a
+        checkEyes(tag + "/a-nativo", "sin rojo de la GPU y con pixeles nativos", a, { $0.red < 0.01 && $0.nonBlack > 0.30 }, "rojo < 1 %, no negro > 30 %")
+        check(tag + "/a-nativo", "el nativo dibuja", a.diag.contains("nativo dibujado=true"), a.diag)
         var diffSum = 0, n = 0
-        for i in stride(from: 0, to: b.imgs[0].w * b.imgs[0].h * 4, by: 16) { diffSum += abs(Int(b.imgs[0].bgra[i + 2]) - Int(b.imgs[1].bgra[i + 2])) + abs(Int(b.imgs[0].bgra[i + 1]) - Int(b.imgs[1].bgra[i + 1])); n += 1 }
-        soft(tag + "/b-nativo", "los dos ojos difieren (paralaje)", Double(diffSum) / Double(max(n, 1)) > 0.05, String(format: "diferencia media %.3f", Double(diffSum) / Double(max(n, 1))))
+        for i in stride(from: 0, to: a.imgs[0].w * a.imgs[0].h * 4, by: 16) { diffSum += abs(Int(a.imgs[0].bgra[i + 2]) - Int(a.imgs[1].bgra[i + 2])) + abs(Int(a.imgs[0].bgra[i + 1]) - Int(a.imgs[1].bgra[i + 1])); n += 1 }
+        soft(tag + "/a-nativo", "los dos ojos difieren (paralaje)", Double(diffSum) / Double(max(n, 1)) > 0.05, String(format: "diferencia media %.3f", Double(diffSum) / Double(max(n, 1))))
     }
-    // (d) solo nativo: igual que (b) pero teñido (verde / rojo sube) y, SIN escena nativa, ni rastro del 3D de la GPU
-    if let d = scenario("d-solo-nativo", mode: 2, withBridge: true) {
-        checkEyes(tag + "/d-solo-nativo", "sin rojo de la GPU y con pixeles nativos", d, { $0.red < 0.01 && $0.nonBlack > 0.30 }, "rojo < 1 %, no negro > 30 %")
-        if let b = bRes {
-            for e in 0..<2 where b.f[e].sumR > 1000 && d.f[e].sumR > 1000 {
-                let rb = b.f[e].sumG / b.f[e].sumR, rd = d.f[e].sumG / d.f[e].sumR
-                check(tag + "/d-solo-nativo", "ojo \(e) teñido (G/R sube)", rd > rb * 1.05, String(format: "G/R nativo %.3f, solo nativo %.3f", rb, rd))
-            }
-        }
+    // (b) lista SIN marcas (antes: cinemática -> GPU): tampoco se dibuja el 3D de la lista
+    if let b = scenario("b-sin-marcas", mode: 1, withBridge: true, marks: false) {
+        checkEyes(tag + "/b-sin-marcas", "sin rojo de la GPU", b, { $0.red < 0.01 }, "rojo < 1 %")
     }
-    if let d2 = scenario("d2-solo-nativo-sin-escena", mode: 2, withBridge: false) {
-        checkEyes(tag + "/d2-solo-nativo-sin-escena", "no se dibuja el 3D de la GPU aunque la decision sea GPU", d2, { $0.red < 0.01 }, "rojo < 1 %")
+    // (c) sin escena nativa: nunca la GPU. Se repite el último fotograma nativo válido (si es reciente) o se funde a negro; jamás rojo
+    if let c = scenario("c-sin-escena", mode: 1, withBridge: false) {
+        checkEyes(tag + "/c-sin-escena", "sin rojo de la GPU aunque falte la escena nativa", c, { $0.red < 0.01 }, "rojo < 1 %")
+        soft(tag + "/c-sin-escena", "se repite el último fotograma válido o se funde a negro", c.diag.contains("repite") || c.diag.contains("negro") || c.diag.contains("hold") || c.diag.contains("black"), c.diag)
+        _ = aRes
     }
-    // (e) modo nativo sin escena nativa: nunca un fotograma sin 3D -> la GPU lo dibuja
-    if let e2 = scenario("e-nativo-sin-escena", mode: 1, withBridge: false) {
-        checkEyes(tag + "/e-nativo-sin-escena", "cae a la GPU (rojo > 80 %)", e2, { $0.red > 0.80 }, "rojo > 80 %")
+    // (d) vuelta a la escena nativa: se recupera
+    if let d = scenario("d-recuperacion", mode: 1, withBridge: true) {
+        checkEyes(tag + "/d-recuperacion", "pixeles nativos de nuevo y sin rojo", d, { $0.red < 0.01 && $0.nonBlack > 0.30 }, "rojo < 1 %, no negro > 30 %")
     }
-    // (f) escena NO marcada (cinematica): se dibuja por GPU aunque el modo sea nativo
-    if let f2 = scenario("f-sin-marcas", mode: 1, withBridge: true, marks: false) {
-        checkEyes(tag + "/f-sin-marcas", "escena sin marcas: GPU (rojo > 80 %)", f2, { $0.red > 0.80 }, "rojo > 80 %")
-    }
-    // vuelta a GPU: el tinte y el estado se restablecen
-    if let g = scenario("g-gpu-final", mode: 0, withBridge: true) {
-        checkEyes(tag + "/g-gpu-final", "de nuevo GPU (rojo > 80 %)", g, { $0.red > 0.80 }, "rojo > 80 %")
-    }
-    mv_vrhost_set_render_mode(0)
     bench_set_native_marks(0)
 }
 

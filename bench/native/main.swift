@@ -106,7 +106,7 @@ func makeTexture(_ fmt: MTLPixelFormat, _ n: Int, layers: Int, samples: Int, lab
 }
 
 struct RenderResult { var rgba: [[Float]]; var cpuMs: Double }
-var lastDec = NsDecision()
+var lastDec = NsPresentOut()
 
 /// Dibuja `views` (cámaras de Metal) con NativeRenderer. layered: un solo pase con amplificación a las 2 primeras vistas; si no, un pase por vista.
 /// Devuelve RGBA (float, 0..1) por vista, la alfa = cobertura.
@@ -127,7 +127,7 @@ func renderViews(n: Int, views: [simd_float4x4], projs: [simd_float4x4], eyes: [
         guard let cb = queue.makeCommandBuffer() else { return nil }
         let t0 = CFAbsoluteTimeGetCurrent()
         nr.beginFrame(commandBuffer: cb, sortView: views[p], draw: true)
-        lastDec = nr.decide(wantNative: true, sceneMarked: true, pipelinesReady: nr.prewarm(layered: layered, colorFormat: format, depthFormat: .depth32Float, samples: samples, linear: false))
+        lastDec = nr.present(ready: nr.prewarm(layered: layered, colorFormat: format, depthFormat: .depth32Float, samples: samples, linear: false))
         let pd = MTLRenderPassDescriptor()
         pd.colorAttachments[0].texture = colorMS
         pd.colorAttachments[0].loadAction = .clear
@@ -331,11 +331,10 @@ if let r = renderViews(n: 64, views: [down], projs: [proj], eyes: [SIMD3<Float>(
     check("decal (base visible fuera)", near(e, (200, 40, 40)), "borde \(e), esperado (200,40,40)")
     writePNG("decal.png", 64, 64, rgb)
 }
-check("decisión nativo", lastDec.native == 1 && lastDec.skip == UInt32(NS_SKIP_WORLD), "native=\(lastDec.native) skip=\(lastDec.skip) motivo=\(lastDec.why) (escena de decals apta y reciente)")
-let dOff = nr.decide(wantNative: false, sceneMarked: true, pipelinesReady: true)
-check("decisión modo gpu", dOff.native == 0 && dOff.skip == 0 && Int(dOff.why) == Int(NS_WHY_MODE), "native=\(dOff.native) skip=\(dOff.skip) motivo=\(dOff.why)")
-let dUn = nr.decide(wantNative: true, sceneMarked: false, pipelinesReady: true)
-check("decisión sin marca", dUn.native == 0 && dUn.skip == 0, "native=\(dUn.native) skip=\(dUn.skip) motivo=\(dUn.why)")
+check("presentación: escena actual", lastDec.mode == Int32(NS_PR_CURRENT) && lastDec.fade == 1, "modo=\(lastDec.mode) fade=\(lastDec.fade) motivo=\(lastDec.why) (escena de decals apta y reciente)")
+// sin pipelines listas no hay «modo GPU»: se repite el último fotograma válido (fade 1 al principio) o se funde a negro, nunca la lista de la GPU
+let pHold = nr.present(ready: false)
+check("presentación sin pipelines: repetir el último válido", pHold.mode == Int32(NS_PR_HOLD) || pHold.mode == Int32(NS_PR_BLACK), "modo=\(pHold.mode) fade=\(pHold.fade)")
 check("ack de época", ns_synth_acked() == 2, "época reconocida \(ns_synth_acked()), esperada 2")
 print(nr.diagnostics())
 

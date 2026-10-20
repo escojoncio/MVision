@@ -175,20 +175,16 @@ static void v2w(const NsFxCam *c, const float v_in[3], float w[3]) {
     float v[3] = {v_in[0] - c->inv_t[0], v_in[1] / c->y_scale - c->inv_t[1], v_in[2] - c->inv_t[2]};
     for (int r = 0; r < 3; r++) w[r] = c->axes[r][0] * v[0] + c->axes[r][1] * v[1] + c->axes[r][2] * v[2];
 }
-static void vg2w(const NsFxCam *c, const float v_in[3], float w[3]) {
-    float v[3] = {v_in[0] - c->inv_t[0], v_in[1] - c->inv_t[1], v_in[2] - c->inv_t[2]};
-    for (int r = 0; r < 3; r++) w[r] = c->axes[r][0] * v[0] + c->axes[r][1] * v[1] + c->axes[r][2] * v[2];
-}
 
 /* ------------------------------------------------------------------------------------------------ paquetes */
-enum { KIND_S2F = 0, KIND_S4G = 5, KIND_SPR = 6, KIND_SPR8 = 7, KIND_SPR16 = 8, KIND_BOX = 9, KIND_BOX1 = 10, KIND_BOX8 = 11, KIND_BOX16 = 12,
+enum { KIND_S2F = 0, KIND_S2G = 3, KIND_S4G = 5, KIND_SPR = 6, KIND_SPR8 = 7, KIND_SPR16 = 8, KIND_BOX = 9, KIND_BOX1 = 10, KIND_BOX8 = 11, KIND_BOX16 = 12,
        KIND_P3F = 13, KIND_P4F = 14, KIND_P3G = 15, KIND_P4G = 16, KIND_P3T = 17, KIND_P4T = 18, KIND_P3TG = 19, KIND_P4TG = 20,
        KIND_S2T = 21, KIND_S2TG = 22, KIND_FREE = 23 };
 enum { T_INVISIBLE = 0x100, T_ON_CAMERA = 0x200, T_RECT = 0x400, T_SORTONLY = 0x800, T_ONESIDE = 0x1000, T_FREEPACKS = 0x2000 };
 enum { C_LINE = 0, C_RECT = 1, C_POLY = 2 };
 
 typedef struct {
-    int cls, nv;
+    int cls, nv, kind;   /* kind: clase efectiva del paquete (para formato libre, la deducida del comando) */
     int x[4], y[4];
     uint8_t u[4], v[4], rgb[4][3], code;
     int textured, gouraud, semi, raw;
@@ -204,6 +200,7 @@ static int kind_gouraud(int k) { return (k >= 3 && k <= 5) || k == KIND_P3G || k
 static int dec_pack(const uint8_t *m, uint32_t b, int kind, int verts, int voff, int vst, int nvdec, Dec *d) {
     memset(d, 0, sizeof *d);
     if (kind == KIND_FREE || kind < 0 || kind > 23) return -1;
+    d->kind = kind;
     d->sz = (int)rdu16(m, b);
     d->code = (uint8_t)rd8(m, b + 7);
     d->textured = kind_textured(kind);
@@ -238,6 +235,34 @@ static int dec_pack(const uint8_t *m, uint32_t b, int kind, int verts, int voff,
         for (int c = 0; c < 3; c++) d->rgb[v][c] = (uint8_t)rd8(m, b + co + (uint32_t)c);
     }
     if (d->textured) { d->clut = (uint16_t)rdu16(m, b + (uint32_t)voff + 6); d->tpage = (uint16_t)rdu16(m, b + (uint32_t)(voff + vst) + 6); }
+    return 0;
+}
+
+/* Paquete de FORMATO LIBRE (clase 23 y primitivas con paquetes propios): la forma no la fija la clase sino el COMANDO de dibujo que lleva el propio paquete (byte 7, el mismo
+ * que ve la GPU): 0x20..0x3F polígono (bit 3 = cuadrilátero, bit 2 = texturizado, bit 4 = degradado, bit 1 = semitransparente, bit 0 = sin modular), 0x40..0x5F línea,
+ * 0x60..0x7F rectángulo (0x60 tamaño libre, 0x64 sprite con tamaño, +8 = 1x1, +0x10 = 8x8, +0x18 = 16x16). La disposición de campos es la del paquete de hardware con
+ * etiqueta (ver docs): se reutiliza dec_pack con la clase equivalente. Devuelve 0, o -1 si el comando no dibuja nada que se pueda interpretar. */
+static int dec_free(const uint8_t *m, uint32_t b, Dec *d) {
+    int cmd = (int)rd8(m, b + 7);
+    int kind, verts, voff = 8, vst;
+    if (cmd >= 0x20 && cmd <= 0x3F) {
+        int quad = (cmd & 8) != 0, tex = (cmd & 4) != 0, gou = (cmd & 0x10) != 0;
+        verts = quad ? 4 : 3;
+        if (tex) { kind = gou ? (quad ? KIND_P4TG : KIND_P3TG) : (quad ? KIND_P4T : KIND_P3T); vst = gou ? 12 : 8; }
+        else { kind = gou ? (quad ? KIND_P4G : KIND_P3G) : (quad ? KIND_P4F : KIND_P3F); vst = gou ? 8 : 4; }
+    } else if (cmd >= 0x40 && cmd <= 0x5F) {
+        if (cmd & 8) return -1;   /* polilínea con terminador: sin longitud conocida */
+        int gou = (cmd & 0x10) != 0;
+        kind = gou ? KIND_S2G : KIND_S2F; verts = 2; vst = gou ? 8 : 4;
+    } else if (cmd >= 0x60 && cmd <= 0x7F) {
+        int sz = (cmd >> 3) & 3;   /* 0 libre, 1 1x1, 2 8x8, 3 16x16 */
+        int spr = (cmd & 4) != 0;
+        verts = 1; vst = 0;
+        if (spr) kind = sz == 0 ? KIND_SPR : sz == 1 ? KIND_SPR : sz == 2 ? KIND_SPR8 : KIND_SPR16;
+        else kind = sz == 0 ? KIND_BOX : sz == 1 ? KIND_BOX1 : sz == 2 ? KIND_BOX8 : KIND_BOX16;
+    } else return -1;
+    if (dec_pack(m, b, kind, verts, voff, vst, 0, d) < 0) return -1;
+    if ((cmd & 0x60) == 0x60 && (cmd & 0x18) == 0x08) { d->w = d->h = 1; }   /* 1x1: dec_pack deja w/h por defecto a 1 solo para BOX1; el sprite 1x1 no trae tamaño */
     return 0;
 }
 
@@ -308,8 +333,9 @@ static int heuristic_role(const NsFxItem *it) {
 }
 
 /* Rellena lo común del elemento y los datos del paquete para casarlo con la lista de la GPU. */
-static void fill_common(NsFxItem *it, uint32_t prim, int j, int kind, const Dec *d, int16_t raise, int sz) {
-    it->prim = prim; it->idx = (uint16_t)j; it->kind = (uint8_t)kind; it->raise = raise; it->sz = sz;
+static void fill_common(NsFxItem *it, uint32_t prim, int j, int kind_in, const Dec *d, int16_t raise, int sz) {
+    const int kind = kind_in == KIND_FREE ? d->kind : kind_in;   /* la forma del paquete libre sale de su comando; it->kind conserva 23 */
+    it->prim = prim; it->idx = (uint16_t)j; it->kind = (uint8_t)kind_in; it->raise = raise; it->sz = sz;
     if (d->semi) it->flags |= NSFX_F_SEMI;
     if (d->textured) it->flags |= NSFX_F_TEXTURED;
     if (d->gouraud) it->flags |= NSFX_F_GOURAUD;
@@ -371,9 +397,9 @@ static void do_prim(Ctx *c, uint32_t p, int role_owner) {
     if (type & T_INVISIBLE) { S->stats.n_invisible++; return; }
     if (group && !(group & c->map)) { S->stats.n_wrong_map++; return; }
     if (n <= 0 || n > 8192 || psz < 8 || psz > 64 || verts < 1 || verts > 4 || !ptr_ok(packs) || !in_ram(packs, (uint32_t)n * (uint32_t)psz) || kind > 23) { S->stats.n_bad++; return; }
-    if (kind == KIND_FREE) { S->stats.n_free++; return; }
+    if (kind == KIND_FREE) S->stats.n_free++;   /* formato libre: se interpreta por el comando de cada paquete (dec_free) y se trata como paquete ya proyectado */
     if (!c->opt->include_viewlocked && (type & T_ON_CAMERA)) return;
-    int rectmode = (type & T_RECT) != 0, freepacks = (type & T_FREEPACKS) != 0, oncam = (type & T_ON_CAMERA) != 0, oneside = (type & T_ONESIDE) != 0;
+    int rectmode = (type & T_RECT) != 0, freepacks = (type & T_FREEPACKS) != 0 || kind == KIND_FREE, oncam = (type & T_ON_CAMERA) != 0, oneside = (type & T_ONESIDE) != 0;
     int is_line = kind <= KIND_S4G, is_tex_line = kind == KIND_S2T || kind == KIND_S2TG;
     int vcount = is_tex_line ? 2 : verts;
     if (!freepacks) {
@@ -388,7 +414,7 @@ static void do_prim(Ctx *c, uint32_t p, int role_owner) {
     for (int j = 0; j < n; j++) {
         uint32_t b = packs + (uint32_t)j * (uint32_t)psz;
         Dec d;
-        if (dec_pack(m, b, kind, verts, voff, vst, is_tex_line ? 4 : 0, &d) < 0) continue;
+        if ((kind == KIND_FREE ? dec_free(m, b, &d) : dec_pack(m, b, kind, verts, voff, vst, is_tex_line ? 4 : 0, &d)) < 0) continue;
         int sz = d.sz, culled = sz == 0;
         if (culled && !c->opt->include_engine_culled) continue;
         float wv[4][3], vv[4][3]; int nvp = 0;
@@ -404,8 +430,26 @@ static void do_prim(Ctx *c, uint32_t p, int role_owner) {
         }
         if (freepacks) {
             /* El motor ya proyectó el paquete con su propia función: se reconstruye a la profundidad del paquete (plano de la cámara del motor). */
-            if (culled || d.cls == C_LINE) { if (culled) S->stats.n_culled++; continue; }
+            if (culled) { S->stats.n_culled++; continue; }
             float z = eff_z(T, (float)sz);
+            if (d.cls == C_LINE) {   /* línea ya proyectada: cinta en el plano de profundidad del paquete, un segmento por par de vértices */
+                float pxw = (d.textured ? T->line_tex_px : T->line_px);
+                for (int sgi = 0; sgi + 1 < d.nv; sgi++) {
+                    NsFxItem *it = new_item(c); if (!it) return;
+                    fill_common(it, p, j, kind, &d, raise, sz);
+                    it->sub = (uint16_t)sgi; it->shape = NSFX_SH_RIBBON; it->nv = 2; it->role = (uint8_t)(role_prim ? role_prim : NSFX_ROLE_BEAM);
+                    if (!d.textured) { it->pcls = C_LINE; it->pnv = 2; memset(it->sxy, 0, sizeof it->sxy); for (int e = 0; e < 2; e++) { it->sxy[e][0] = (int16_t)d.x[sgi + e]; it->sxy[e][1] = (int16_t)d.y[sgi + e]; } }
+                    for (int e = 0; e < 2; e++) {
+                        float vv2[3] = {(float)d.x[sgi + e] * z / H, (float)d.y[sgi + e] * z / H, z};
+                        v2w(cam, vv2, it->pos[e]); memcpy(it->vpos[e], vv2, sizeof vv2);
+                        it->width[e] = pxw * z / H;
+                        memcpy(it->rgb[e], d.rgb[(sgi + e) < d.nv ? sgi + e : 0], 3);
+                    }
+                    if (d.textured) { it->uv[0][0] = d.u[0]; it->uv[0][1] = d.v[0]; it->uv[1][0] = d.u[1]; it->uv[1][1] = d.v[1]; }
+                    count_item(c, it);
+                }
+                continue;
+            }
             float vx[4][3]; int nn = d.cls == C_RECT ? 4 : d.nv;
             int bx0 = 99999, by0 = 99999, bx1 = -99999, by1 = -99999, sx[4], sy[4];
             if (d.cls == C_RECT) { sx[0] = d.x[0]; sy[0] = d.y[0]; sx[1] = d.x[0] + d.w; sy[1] = d.y[0]; sx[2] = d.x[0]; sy[2] = d.y[0] + d.h; sx[3] = d.x[0] + d.w; sy[3] = d.y[0] + d.h; }
@@ -420,7 +464,7 @@ static void do_prim(Ctx *c, uint32_t p, int role_owner) {
                 it->shape = NSFX_SH_BILLBOARD; it->nv = 4; it->flags |= NSFX_F_PXSIZE;
                 float cxs = 0.5f * (float)(bx0 + bx1), cys = 0.5f * (float)(by0 + by1);
                 float cv[3] = {cxs * z / H, cys * z / H, z};
-                vg2w(cam, cv, it->pos[0]); memcpy(it->vpos[0], cv, sizeof cv);
+                v2w(cam, cv, it->pos[0]); memcpy(it->vpos[0], cv, sizeof cv);
                 float hw = 0.5f * (float)(bx1 - bx0) * z / H, hh = 0.5f * (float)(by1 - by0) * z / (H * ys);
                 it->off[0] = -hw; it->off[1] = -hh; it->off[2] = hw; it->off[3] = hh;
                 it->box_px[0] = -0.5f * (float)(bx1 - bx0); it->box_px[1] = -0.5f * (float)(by1 - by0); it->box_px[2] = -it->box_px[0]; it->box_px[3] = -it->box_px[1];
@@ -438,7 +482,7 @@ static void do_prim(Ctx *c, uint32_t p, int role_owner) {
                 }
             } else {
                 it->shape = nn == 3 ? NSFX_SH_TRI : NSFX_SH_QUAD; it->nv = (uint8_t)nn;
-                for (int v = 0; v < nn; v++) { vg2w(cam, vx[v], it->pos[v]); memcpy(it->vpos[v], vx[v], sizeof vx[v]); it->uv[v][0] = d.u[v]; it->uv[v][1] = d.v[v]; }
+                for (int v = 0; v < nn; v++) { v2w(cam, vx[v], it->pos[v]); memcpy(it->vpos[v], vx[v], sizeof vx[v]); it->uv[v][0] = d.u[v]; it->uv[v][1] = d.v[v]; }
                 if (oneside) set_face(it, cam);
             }
             if (!it->role) it->role = (uint8_t)heuristic_role(it);
@@ -924,16 +968,11 @@ static void idx_add_prims(Idx *ix, const uint8_t *m, const NsFxScene *sc) {
             uint32_t b = pk + (uint32_t)j * (uint32_t)psz;
             if (!rdu16(m, b)) continue;
             if (!sortonly && pm_find(sc, p, (uint32_t)j) >= 0) continue;   /* ya indexado desde el elemento */
-            int cls = sortonly ? NSFX_OP_2D : kind == KIND_FREE ? NSFX_OP_2D : hidden ? NSFX_OP_FX_PACK : NSFX_OP_2D;   /* visible y sin elemento: la GPU lo dibuja */
+            int cls = sortonly ? NSFX_OP_2D : hidden ? NSFX_OP_FX_PACK : NSFX_OP_2D;   /* visible y sin elemento: la GPU lo dibuja */
             Dec d;
-            if (kind == KIND_FREE) {   /* formato libre: se asume una lista de vértices xy con los parámetros de la primitiva */
-                memset(&d, 0, sizeof d);
-                d.cls = verts == 2 ? C_LINE : C_POLY; d.nv = verts; d.sz = (int)rdu16(m, b); d.code = (uint8_t)rd8(m, b + 7); d.semi = (d.code & 2) != 0;
-                if (verts < 2) continue;
-                for (int v = 0; v < verts; v++) { d.x[v] = rds16(m, b + (uint32_t)(voff + vst * v)); d.y[v] = rds16(m, b + (uint32_t)(voff + vst * v) + 2); }
-                for (int c = 0; c < 3; c++) d.rgb[0][c] = (uint8_t)rd8(m, b + 4u + (uint32_t)c);
-            } else if (dec_pack(m, b, kind, verts, voff, vst, (kind == KIND_S2T || kind == KIND_S2TG) ? 4 : 0, &d) < 0) continue;
-            ent_put_dec(ix, &d, cls, -1, (d.textured && kind >= KIND_P3T) ? (int)((d.tpage >> 7) & 3) : 255);
+            if (kind == KIND_FREE) { if (dec_free(m, b, &d) < 0) continue; }
+            else if (dec_pack(m, b, kind, verts, voff, vst, (kind == KIND_S2T || kind == KIND_S2TG) ? 4 : 0, &d) < 0) continue;
+            ent_put_dec(ix, &d, cls, -1, (d.textured && d.kind >= KIND_P3T && d.kind != KIND_FREE) ? (int)((d.tpage >> 7) & 3) : 255);
         }
     }
 }
@@ -1040,8 +1079,7 @@ uint32_t ns_fx_classify_near(const NsFxScene *sc, const NsFxListCam *lc, const G
     if (!sc || !dl || !cls || !item || !sc->n_items || !dl->nops) return 0;
     uint32_t cand = 0;
     for (uint32_t i = 0; i < sc->n_items; i++) { const NsFxItem *it = &sc->items[i]; if (it->shape == NSFX_SH_QUAD || it->shape == NSFX_SH_TRI) cand++; }
-    if (!cand) return 0;
-    NearSig *tab = (NearSig *)malloc(sizeof(NearSig) * cand);
+    NearSig *tab = (NearSig *)malloc(sizeof(NearSig) * (cand ? cand : 1));
     float (*vl)[4][3] = (float (*)[4][3])malloc(sizeof(float) * 12 * sc->n_items);   /* vértices de cada elemento en la vista de la lista */
     if (!tab || !vl) { free(tab); free(vl); return 0; }
     uint32_t nt = 0;
@@ -1122,6 +1160,32 @@ uint32_t ns_fx_classify_near(const NsFxScene *sc, const NsFxListCam *lc, const G
                 for (int v = 0; v < nv; v++) for (int r = 0; r < 3; r++) c[r] += vl[ii][v][r] / (float)nv;
                 float d = (c[0] - cx[0]) * (c[0] - cx[0]) + (c[1] - cx[1]) * (c[1] - cx[1]) + (c[2] - cx[2]) * (c[2] - cx[2]);
                 if (d < bestd) { bestd = d; best = (int32_t)ii; }
+            }
+            if (best >= 0) { used[best] = 1; cls[oi] = NSFX_OP_FX; item[oi] = best; changed++; }
+        }
+        /* Tercera pasada, por PANTALLA: polígonos con posición de vista (el HUD no la tiene) que casan con el paquete de un elemento por firma exacta (nº de vértices, textura,
+         * modo de color, semitransparencia, u/v0) y por posición de pantalla a pocos píxeles. Cubre los carteles/destellos grandes cuyos vértices están saturados o
+         * fuera de la pantalla (su posición de vista de la lista es la de un cartel ±1000, que no sirve para medir) y los paquetes que se movieron 1-2 px entre la RAM y la lista. */
+        for (uint32_t oi = 0; oi < dl->nops; oi++) {
+            const GpuOp *o = &dl->ops[oi];
+            if (cls[oi] != NSFX_OP_2D || o->type != GPU_OP_POLY || o->nv < 3 || o->nv > 4) continue;
+            int ok = 1;
+            for (int v = 0; v < o->nv; v++) if (!o->v[v].vvalid) { ok = 0; break; }
+            if (!ok) continue;
+            const int tex = (o->flags & GPU_F_TEXTURED) != 0, semi = (o->flags & GPU_F_SEMI) != 0;
+            float bestd = 1e30f; int32_t best = -1;
+            for (uint32_t ii = 0; ii < sc->n_items; ii++) {
+                const NsFxItem *it = &sc->items[ii];
+                if (used[ii] || it->pcls != 2 || it->pnv != o->nv || (it->flags & (NSFX_F_ENGINE_CULLED | NSFX_F_LOW_CONF))) continue;
+                if (((it->flags & NSFX_F_TEXTURED) != 0) != tex || ((it->flags & NSFX_F_SEMI) != 0) != semi) continue;
+                if (tex && (it->pu0 != o->v[0].u || it->pv0 != o->v[0].v || (it->ptp != 255 && it->ptp != o->tp))) continue;
+                float worst = 0;   /* el color NO se compara: los destellos y halos lo animan entre el paquete de la RAM y el de la lista */
+                for (int v = 0; v < o->nv && worst <= 3.0f; v++) {
+                    float dx = (float)(o->v[v].x - o->dox - it->sxy[v][0]), dy = (float)(o->v[v].y - o->doy - it->sxy[v][1]);
+                    float d = fmaxf(fabsf(dx), fabsf(dy));
+                    if (d > worst) worst = d;
+                }
+                if (worst <= 3.0f && worst < bestd) { bestd = worst; best = (int32_t)ii; }
             }
             if (best >= 0) { used[best] = 1; cls[oi] = NSFX_OP_FX; item[oi] = best; changed++; }
         }

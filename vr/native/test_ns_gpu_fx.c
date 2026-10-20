@@ -156,6 +156,81 @@ static void t_export_roundtrip(void) {
     ns_fx_scene_destroy(sc);
 }
 
+
+/* Niebla en los efectos: color *= 1 - clamp((z - inicio)/largo), con z = profundidad de la cámara del juego (la fórmula de las mallas) */
+static void t_fog(void) {
+    NsFog fog; memset(&fog, 0, sizeof fog);
+    fog.active = 1; fog.start = 1000; fog.len = 2000;
+    P.fog = &fog;
+    NsEffect fx[4];
+    fx[0] = quad(0, 0, 500, 50);  fx[0].idx = 1; fx[0].flags = NS_EF_TEXTURED;                                   /* antes del inicio: intacto */
+    fx[1] = quad(0, 0, 2000, 50); fx[1].idx = 2; fx[1].flags = NS_EF_TEXTURED;                                   /* mitad: 1 - 0.5 */
+    fx[2] = quad(0, 0, 9000, 50); fx[2].idx = 3; fx[2].flags = NS_EF_TEXTURED;                                   /* pasado el final: negro */
+    fx[3] = quad(0, 0, 2000, 50); fx[3].idx = 4; fx[3].flags = NS_EF_SEMI | NS_EF_TEXTURED; fx[3].abr = 1;       /* aditivo: se apaga */
+    NsGpuFxVert vb[96]; NsGpuFxRun runs[8]; uint64_t keys[8]; NsGpuFxOut o;
+    CHECK(build(fx, 4, vb, runs, keys, &o) == 0, "build niebla");
+    CHECK(fabsf(vb[0].col[0] - 128.0f) < 1e-3f, "sin niebla antes del inicio %f", vb[0].col[0]);
+    CHECK(fabsf(vb[6].col[0] - 64.0f) < 1e-3f && fabsf(vb[6].col[2] - 64.0f) < 1e-3f, "niebla a medias %f", vb[6].col[0]);
+    CHECK(fabsf(vb[12].col[1]) < 1e-3f, "niebla total %f", vb[12].col[1]);
+    float want = 128.0f * (1.0f - ns_gpu_fog_f(&fog, 2000.0f));
+    CHECK(fabsf(vb[6].col[0] - want) < 1e-3f, "misma fórmula que las mallas");
+    int found = 0;
+    for (uint32_t i = 0; i < o.n_semi; i++) if (fabsf(vb[o.n_opaque + i].col[0] - 64.0f) < 1e-3f) found = 1;
+    CHECK(found, "el semitransparente también lleva niebla");
+    /* cartel: toda la cara a la profundidad del centro */
+    NsEffect b; memset(&b, 0, sizeof b);
+    b.kind = NS_EK_BILLBOARD; b.nv = 1; b.src_key = 0x80100000u; b.ref_h = 320; b.p[0][2] = 2000; b.box[0] = -10; b.box[1] = -10; b.box[2] = 10; b.box[3] = 10;
+    for (int v = 0; v < 4; v++) for (int c = 0; c < 3; c++) b.rgb[v][c] = 128;
+    b.flags = NS_EF_TEXTURED;
+    CHECK(build(&b, 1, vb, runs, keys, &o) == 0 && fabsf(vb[0].col[0] - 64.0f) < 1e-3f && fabsf(vb[5].col[0] - 64.0f) < 1e-3f, "cartel con niebla");
+    /* sin niebla activa: intacto */
+    fog.active = 0;
+    CHECK(build(fx, 4, vb, runs, keys, &o) == 0 && fabsf(vb[6].col[0] - 128.0f) < 1e-3f, "niebla inactiva");
+    P.fog = NULL;
+}
+
+/* Una sola pasada semitransparente: mallas y efectos intercalados por profundidad */
+static void t_merge(void) {
+    /* mallas: profundidades 9 8 5 5 2 (de atrás adelante), modos 1 1 2 2 1 */
+    float md[5] = {9, 8, 5, 5, 2}; uint8_t ma[5] = {1, 1, 2, 2, 1};
+    NsGpuFxSemiItem fx[3] = {{8.5f, 100, 6, 1}, {5.0f, 106, 6, 2}, {1.0f, 112, 6, 1}};
+    NsGpuSemiRun r[16]; int tr = 0;
+    size_t n = ns_gpu_semi_merge(md, ma, 5, fx, 3, r, 16, &tr);
+    /* orden esperado: M0(9) F0(8.5) M1(8) M2(5) M3(5) F1(5) M4(2) F2(1) -> M0 | F0 | M1 | M2M3 | F1 | M4 | F2 */
+    CHECK(n == 7 && !tr, "7 tramos n=%zu", n);
+    CHECK(r[0].kind == 0 && r[0].start == 0 && r[0].count == 1 && r[0].abr == 1, "M0");
+    CHECK(r[1].kind == 1 && r[1].start == 100 && r[1].count == 6, "F0 entre medias");
+    CHECK(r[2].kind == 0 && r[2].start == 1 && r[2].count == 1, "M1");
+    CHECK(r[3].kind == 0 && r[3].start == 2 && r[3].count == 2 && r[3].abr == 2, "M2M3 unidas");
+    CHECK(r[4].kind == 1 && r[4].start == 106 && r[4].abr == 2, "F1 detrás de la malla a igual profundidad");
+    CHECK(r[5].kind == 0 && r[5].start == 4 && r[6].kind == 1 && r[6].start == 112, "cola");
+    /* efectos contiguos del mismo modo se unen */
+    NsGpuFxSemiItem f2[2] = {{4, 0, 6, 1}, {3, 6, 6, 1}};
+    n = ns_gpu_semi_merge(NULL, NULL, 0, f2, 2, r, 16, &tr);
+    CHECK(n == 1 && r[0].count == 12, "efectos unidos");
+    /* sin efectos: sólo mallas; sin nada: 0 */
+    n = ns_gpu_semi_merge(md, ma, 5, NULL, 0, r, 16, &tr);
+    CHECK(n == 3 && r[0].count == 2 && r[1].count == 2 && r[2].count == 1, "sólo mallas");
+    CHECK(ns_gpu_semi_merge(NULL, NULL, 0, NULL, 0, r, 16, &tr) == 0 && !tr, "vacío");
+    /* tope de tramos */
+    n = ns_gpu_semi_merge(md, ma, 5, fx, 3, r, 3, &tr);
+    CHECK(n == 3 && tr, "truncado");
+    /* integración: ordenación con profundidad de malla + efectos con la misma fila de profundidad */
+    NsGpuFxSemiItem items[8]; NsGpuFxVert vb[64]; NsGpuFxRun runs[8]; uint64_t keys[8]; NsGpuFxOut o;
+    NsEffect e[3];
+    for (int i = 0; i < 3; i++) { e[i] = quad(0, 0, 2000.0f * (float)(i + 1), 50); e[i].idx = (uint8_t)(i + 1); e[i].flags = NS_EF_SEMI; e[i].abr = (uint8_t)(i & 1); }
+    P.has_depth_row = 1; P.depth_row[2] = 1.0f;   /* profundidad = z del mundo VR */
+    CHECK(ns_gpu_fx_build_ex(e, 3, &P, vb, 64, runs, 8, keys, 8, items, 8, &o) == 0 && o.n_sitems == 3, "items");
+    CHECK(items[0].depth > items[1].depth && items[1].depth > items[2].depth && fabsf(items[0].depth - 6.0f) < 1e-4f, "items ordenados de atrás adelante (%f)", items[0].depth);
+    CHECK(items[0].start == o.n_opaque && items[1].start == items[0].start + 6, "items contiguos");
+    P.has_depth_row = 0;
+    /* ordenación de mallas con profundidad de salida */
+    float cen[6] = {0, 0, 1, 0, 0, 3}; uint8_t ab[2] = {0, 1};
+    NsGpuSemiSrc src = { 7, 0, 2, cen, ab, {0, 0, 1, 0} };
+    NsGpuOrder ord[2]; uint8_t abo[2]; float dep[2];
+    CHECK(ns_gpu_sort_semi_ex(&src, 1, ord, abo, dep, 2, NULL) == 2 && ord[0].tri == 1 && dep[0] == 3.0f && dep[1] == 1.0f && abo[0] == 1, "sort con profundidad");
+}
+
 int main(void) {
     setup();
     t_poly();
@@ -163,6 +238,8 @@ int main(void) {
     setup(); t_ribbon();
     setup(); t_oneside();
     setup(); t_limits();
+    setup(); t_fog();
+    setup(); t_merge();
     t_export_roundtrip();
     printf("%s: %d comprobaciones, %d fallos\n", g_fail ? "FALLA" : "OK", g_checks, g_fail);
     return g_fail != 0;

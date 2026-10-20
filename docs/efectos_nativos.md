@@ -96,3 +96,16 @@ El factor vertical se midió reproyectando paquetes reales de polígonos de mund
 - `ns_fx_export.{h,c}`: `NsFxScene.items` → `NsEffect[]` (`NS_EK_QUAD` con 2/3/4 vértices; `NS_EK_BILLBOARD` con `box` en píxeles y `ref_h`; líneas con `NS_EF_LINE` y `width_px`; pegado a cámara con posiciones de vista; `depth_bias` = `raise`). Los efectos de pantalla completa se leen de `NsFxScene.screen`.
 - Todo se lee de la RAM con comprobación de punteros; capacidad por defecto 4096 elementos.
 - Conversión mundo → VR: `ns_fx_to_vr` aplica la misma regla que `vr_scene` (escala 0,001, origen, espejo Z si el determinante de la vista es negativo, mapa de usuario opcional).
+
+## 9. Efectos de pantalla en el renderer nativo (sin post-proceso de la lista de la GPU)
+
+`NsFxScreen` → `NsScreenFx` (`NsScene.screen`) → `ns_screen_build` (`vr/native/ns_screen.{h,c}`) produce, por fotograma, **parámetros del mundo** y una **lista ordenada de recubrimientos**:
+
+- **Agua**: volumen en el mundo del motor. El tinte multiplicativo y la onda de texels los aplica el sombreador de fragmentos por posición del mundo (`ew` y `fromvr` en el sombreador), de modo que el efecto está anclado al mundo y no gira con la cabeza. Si la cabeza está dentro del volumen se aplica a todo el mundo. Las barras del original son recubrimientos opcionales (`bars_gain`, 0,85 por defecto).
+- **Recubrimientos** (un triángulo de pantalla completa por recubrimiento, sin profundidad, tras todo el mundo; las tangentes salen de la proyección de cada ojo, así que no dependen de la resolución): barras, tinte del modo de visión A/B más líneas de exploración finas, anillo de gas, destello (con suavizado temporal `flash_slew`) y fundido a negro/blanco. Orden fijo: barras, modo, anillo, destello, fundido.
+- **Niebla en los efectos**: cada vértice de efecto lleva `1 - ns_gpu_fog_f(z)`, la misma fórmula que las mallas.
+- **Una sola pasada semitransparente** de atrás adelante: `ns_gpu_semi_merge` intercala los triángulos semitransparentes de las mallas con los efectos semitransparentes (profundidad de la vista de ordenación).
+- **Formato libre (kind 23) y FREEPACKS**: `ns_fx.c` los decodifica (`dec_free`) y los clasifica por posición en pantalla; el diseño de los campos se dedujo del código y no se pudo contrastar con un volcado que los contenga.
+- **Presentación** (`ns_present.{h,c}`): `CURRENT` (escena vigente), `HOLD` (se repite el último fotograma nativo válido con la cabeza actual, 1500 ms) y `BLACK` (fundido suave a negro, 700 ms). No existe un modo que dibuje el 3D de la lista de la GPU.
+- **Cinemáticas del motor** (`ns_cinema.{h,c}`): se pinta la escena nativa desde la cámara del juego (A, t, H, desplazamiento OFX/OFY, sobredimensión de la vista 66/64, espejo si el determinante es negativo) con dos cámaras paralelas de ventana desplazada, en la textura de la pantalla 3D; la capa 2D va encima.
+- Pruebas: `make -f vr/native/fx.mk test test-san` (`test_ns_fx`, `test_ns_gpu_fx`, `test_ns_screen`, `test_ns_present`, `test_no_gpu3d`). `test_no_gpu3d` lee los fuentes Swift/Metal/C y falla si reaparece un camino de dibujo 3D por la lista de la GPU o el modo «gpu».

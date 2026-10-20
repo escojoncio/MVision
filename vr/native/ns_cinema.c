@@ -1,0 +1,65 @@
+#include "ns_cinema.h"
+#include <math.h>
+#include <string.h>
+
+static int fin(const float *p, int n) { for (int i = 0; i < n; i++) if (!isfinite(p[i])) return 0; return 1; }
+
+/* inversa de una afín en orden de columnas (la fila inferior se ignora y se toma (0,0,0,1)) */
+static int inv_affine(const float g[16], double o[16]) {
+    double a = g[0], d = g[1], gg = g[2];           /* columna 0 = (a, d, g) */
+    double b = g[4], e = g[5], h = g[6];            /* columna 1 */
+    double c = g[8], f = g[9], i = g[10];           /* columna 2 */
+    double det = a * (e * i - f * h) - b * (d * i - f * gg) + c * (d * h - e * gg);
+    if (!(fabs(det) > 1e-18)) return 0;
+    double r[9] = { (e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det,
+                    (f * gg - d * i) / det, (a * i - c * gg) / det, (c * d - a * f) / det,
+                    (d * h - e * gg) / det, (b * gg - a * h) / det, (a * e - b * d) / det };   /* fila-mayor de la inversa 3x3 */
+    memset(o, 0, 16 * sizeof(double));
+    for (int row = 0; row < 3; row++) for (int col = 0; col < 3; col++) o[col * 4 + row] = r[row * 3 + col];
+    for (int row = 0; row < 3; row++) o[12 + row] = -(r[row * 3] * g[12] + r[row * 3 + 1] * g[13] + r[row * 3 + 2] * g[14]);
+    o[15] = 1;
+    return 1;
+}
+
+int ns_cinema_to_vr(const NsCamera *cam, const float gv[16], float out[12]) {
+    if (!cam || !gv || !out || !fin(gv, 16) || !fin(cam->rot, 9) || !fin(cam->eye, 3)) return 0;
+    double ginv[16];
+    if (!inv_affine(gv, ginv)) return 0;
+    const double ys = (cam->overscan_y > 0.5f && cam->overscan_y < 2.0f) ? cam->overscan_y : (double)NS_OVERSCAN_Y;
+    /* V = S R^T (fila i de R^T = columna i de R) */
+    double V[9];
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) V[i * 3 + j] = cam->rot[j * 3 + i] * (i == 1 ? ys : 1.0);
+    for (int row = 0; row < 3; row++) {
+        double m[3];
+        for (int j = 0; j < 3; j++) m[j] = gv[0 * 4 + row] * V[0 * 3 + j] + gv[1 * 4 + row] * V[1 * 3 + j] + gv[2 * 4 + row] * V[2 * 3 + j];
+        for (int j = 0; j < 3; j++) out[row * 4 + j] = (float)m[j];
+        out[row * 4 + 3] = (float)(gv[12 + row] - (m[0] * cam->eye[0] + m[1] * cam->eye[1] + m[2] * cam->eye[2]));
+    }
+    return fin(out, 12);
+}
+
+int ns_cinema_eye(const float gv[16], int eye, float ipd, float conv, float tan_x, float tan_y, float view[16], float tangents[4]) {
+    if (!gv || !view || !tangents || !fin(gv, 16) || !(ipd > 0.01f) || !(conv > 0.1f) || !(tan_x > 0.05f) || !(tan_y > 0.05f)) return 0;
+    double gi[16];
+    if (!inv_affine(gv, gi)) return 0;
+    const double s = 0.001, o = eye == 0 ? -0.5 * ipd : 0.5 * ipd;
+    /* view = T(-o,0,0) * diag(s,-s,-s,1) * ginv */
+    const double fd[3] = { s, -s, -s };
+    for (int col = 0; col < 4; col++) {
+        for (int row = 0; row < 3; row++) view[col * 4 + row] = (float)(fd[row] * gi[col * 4 + row]);
+        view[col * 4 + 3] = (float)(col == 3 ? 1.0 : 0.0);
+    }
+    view[12] = (float)(fd[0] * gi[12] - o);   /* T(-o) suma -o en x de la columna de traslación (la fila inferior de f*ginv es (0,0,0,1)) */
+    const float sh = 0.5f * ipd / conv;
+    if (eye == 0) { tangents[0] = tan_x - sh; tangents[1] = tan_x + sh; } else { tangents[0] = tan_x + sh; tangents[1] = tan_x - sh; }
+    tangents[2] = tan_y; tangents[3] = tan_y;
+    return fin(view, 16);
+}
+
+void ns_cinema_projection(const float t[4], float n, float f, float out[16]) {
+    const float l = t[0], r = t[1], u = t[2], d = t[3];
+    const float sx = 2 / (l + r), sy = 2 / (u + d), cx = (r - l) / (l + r), cy = (u - d) / (u + d);
+    const float a = n / (f - n), b = n * f / (f - n);
+    memset(out, 0, 16 * sizeof(float));
+    out[0] = sx; out[5] = sy; out[8] = cx; out[9] = cy; out[10] = a; out[11] = -1; out[14] = b;
+}

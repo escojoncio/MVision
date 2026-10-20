@@ -18,13 +18,31 @@ $(B)/test_ns_gpu_fx: vr/native/test_ns_gpu_fx.c $(SRC) $(GPUSRC) $(HDR) vr/nativ
 	$(CC) $(CF) vr/native/test_ns_gpu_fx.c $(SRC) $(GPUSRC) -lm -o $@
 $(B)/test_ns_gpu_fx_san: vr/native/test_ns_gpu_fx.c $(SRC) $(GPUSRC) $(HDR) vr/native/ns_gpu.h vr/native/ns_gpu_types.h | $(B)
 	$(CC) $(CF) -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined vr/native/test_ns_gpu_fx.c $(SRC) $(GPUSRC) -lm -o $@
+SCRSRC = vr/native/ns_screen.c
+$(B)/test_ns_screen: vr/native/test_ns_screen.c $(SCRSRC) vr/native/ns_screen.h vr/native/ns_gpu_types.h $(HDR) | $(B)
+	$(CC) $(CF) vr/native/test_ns_screen.c $(SCRSRC) -lm -o $@
+$(B)/test_ns_screen_san: vr/native/test_ns_screen.c $(SCRSRC) vr/native/ns_screen.h vr/native/ns_gpu_types.h $(HDR) | $(B)
+	$(CC) $(CF) -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined vr/native/test_ns_screen.c $(SCRSRC) -lm -o $@
+PRSRC = vr/native/ns_present.c vr/native/ns_cinema.c
+$(B)/test_ns_present: vr/native/test_ns_present.c $(PRSRC) vr/native/ns_present.h vr/native/ns_cinema.h vr/native/ns_types.h | $(B)
+	$(CC) $(CF) vr/native/test_ns_present.c $(PRSRC) -lm -o $@
+$(B)/test_ns_present_san: vr/native/test_ns_present.c $(PRSRC) vr/native/ns_present.h vr/native/ns_cinema.h vr/native/ns_types.h | $(B)
+	$(CC) $(CF) -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined vr/native/test_ns_present.c $(PRSRC) -lm -o $@
+$(B)/test_no_gpu3d: vr/native/test_no_gpu3d.c app/Sources/RenderRG.swift app/Sources/Native/NativeRenderer.swift app/Sources/Native/NativeShaders.metal vr/host/vrhost.c | $(B)
+	$(CC) $(CF) vr/native/test_no_gpu3d.c -o $@
 $(B)/ns_fx_dump: vr/native/ns_fx_dump.c $(SRC) $(HDR) | $(B)
 	$(CC) $(CF) vr/native/ns_fx_dump.c $(SRC) -lm -o $@
 dump: $(B)/ns_fx_dump
-test: $(B)/test_ns_fx $(B)/test_ns_gpu_fx
+test: $(B)/test_ns_fx $(B)/test_ns_gpu_fx $(B)/test_ns_screen $(B)/test_ns_present $(B)/test_no_gpu3d
 	$(B)/test_ns_fx
 	$(B)/test_ns_gpu_fx
-test-san: $(B)/test_ns_fx_san $(B)/test_ns_gpu_fx_san
+	$(B)/test_ns_screen
+	$(B)/test_ns_present
+	$(B)/test_no_gpu3d
+test-san: $(B)/test_ns_fx_san $(B)/test_ns_gpu_fx_san $(B)/test_ns_screen_san $(B)/test_ns_present_san $(B)/test_no_gpu3d
 	$(B)/test_ns_fx_san
 	$(B)/test_ns_gpu_fx_san
+	$(B)/test_ns_screen_san
+	$(B)/test_ns_present_san
+	$(B)/test_no_gpu3d
 .PHONY: dump test test-san

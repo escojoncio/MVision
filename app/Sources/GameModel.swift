@@ -66,7 +66,6 @@ final class GameModel: ObservableObject {
         }
         mv_host_set_sigs(sigs)
         mv_vrhost_install()   // capa VR (cámara, escenas): antes de arrancar el motor
-        mv_vrhost_set_render_mode(Int32(XRViewConfig.storedRenderMode()))   // motor de dibujo elegido en el menú VR (MV_RENDER del entorno manda)
         XRViewConfig.applyStoredAI()   // IA de enemigos: alcance de visión y visión con la cabeza VR (ajustes del menú VR)
 
         let r = mv_host_start(exe.path, discs.joined(separator: ";"), Storage.cardDir.path)   // el hilo de emulación lee del disco con el acceso de seguridad aún abierto

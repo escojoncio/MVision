@@ -85,27 +85,20 @@ typedef struct {
     uint32_t cine_cuts;      /* cortes de cámara detectados desde que se cargó el ejecutable */
     int32_t cine_cover;      /* fundidos/destellos (recubrimientos a pantalla completa) en la última lista */
     /* --- render nativo --- */
-    int32_t render_req;      /* modo pedido: 0 = GPU (reconstrucción desde la lista de dibujo), 1 = nativo */
+    int32_t render_req;      /* modo pedido: siempre 1 (nativo) */
     int32_t native_avail;    /* 1 si el modo nativo se puede usar (extractor registrado, enganche instalado y renderer Metal listo) */
 } MvVrGameState;
 void mv_vrhost_game_state(MvVrGameState *out);
 
-/* ---- Modo de render (nativo | gpu) ----
- * gpu: el 3D se reconstruye de la lista de dibujo de la GPU (comportamiento histórico). nativo: el 3D sale de la escena que el extractor lee de la RAM
- * (vr/native, puente ns_bridge) y la capa 2D (HUD, menús, radio, textos, radar y HUD de muñeca) sigue saliendo de la lista de la GPU. Las cinemáticas
- * del motor y todo lo que no tenga cámara VR se dibujan SIEMPRE como pantalla estereoscópica con la cámara del juego (desde la lista).
- * Elección: variable de entorno MV_RENDER=nativo|gpu (gana y fija el modo) o mv_vrhost_set_render_mode (menú VR). Defecto: nativo (MV_RENDER_DEFAULT_NATIVE en vrhost.c
- * pasará a 1 cuando extractor y renderer estén integrados). El modo nativo solo se activa de verdad si mv_vrhost_native_available() y llega una escena válida;
- * si no, se sigue con la lista de la GPU (nunca pantalla vacía). Cualquier hilo.
- * QUIÉN DECIDE: el que DIBUJA, en cada fotograma, con su estado real. La lista de la GPU llega entera; si la escena admite el 3D nativo trae VrScene.native_3d = 1 y los
- * batches 3D marcados (VrBatch.skip_if_native). El render hace  ns_bridge_acquire(mv_vrhost_native_bridge(), ns_now_ns(), &view)  y
- * ns_native_decide(&view, &(NsDecideIn){mv_vrhost_render_mode(), renderer_ok, mallas_subidas, scene.native_3d, ahora, 250 ms}, &d)  (vr/native/ns_bridge.h); si d.native pinta la
- * escena nativa y salta los batches con (b.skip_if_native & d.skip); si el dibujo nativo falla a mitad llama a ns_native_fail(&d) y pinta TODOS los batches en ese mismo fotograma.
- * No hay estado global "esta escena es nativa": solo el de cada escena (native_3d) y el de la decisión. */
-void mv_vrhost_set_render_mode(int mode);        /* 0 = GPU, 1 = nativo, 2 = SOLO nativo (depuración: nunca se dibujan los batches 3D de la GPU y el nativo va teñido) */
-int mv_vrhost_render_mode(void);                 /* modo pedido (0/1/2) */
-int mv_vrhost_render_only_native(void);          /* 1 si el modo pedido es «solo nativo» */
-int mv_vrhost_render_env_locked(void);           /* 1 si MV_RENDER fija el modo (el menú no puede cambiarlo) */
+/* ---- Render ----
+ * El 3D del mundo (también las cinemáticas del motor, desde la cámara del juego) y los efectos de pantalla salen SIEMPRE del render nativo: la escena que el extractor lee
+ * de la RAM (vr/native, puente ns_bridge). Si en un fotograma el nativo no está listo se repite el último válido (reproyectado con la cabeza) o se funde a negro
+ * (ns_present.h): no hay modo «GPU» ni caída a la lista de dibujo. La capa 2D (HUD, menús, radio, códec, textos, radar y HUD de muñeca) sigue saliendo de la lista de la GPU.
+ * Las funciones de modo se conservan por compatibilidad de la interfaz: el modo es siempre «nativo» y mv_vrhost_set_render_mode no tiene efecto; MV_RENDER=gpu se ignora. */
+void mv_vrhost_set_render_mode(int mode);        /* sin efecto (solo hay render nativo) */
+int mv_vrhost_render_mode(void);                 /* siempre 1 (nativo) */
+int mv_vrhost_render_only_native(void);          /* siempre 0 */
+int mv_vrhost_render_env_locked(void);           /* 1 si MV_RENDER fija el modo */
 int mv_vrhost_native_available(void);
 void mv_vrhost_native_renderer_ready(int ready); /* el renderer Metal nativo avisa de que puede dibujar el puente */
 struct NsBridge;
