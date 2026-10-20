@@ -18,9 +18,11 @@ void vrview_reset(VrView *v) {
     v->prev_reason = VRV_R_NO_GAME;
     v->to_comms = 12;              /* 240 ms de radio antes de dejar el mundo (= VRCAM_COMMS_GRACE) */
     v->pend_max = 150;             /* 3 s esperando la cámara VR tras una radio o una escena */
-    v->cov_hi = 55;                /* cobertura >= 55 %: el nativo representa lo que el motor dibuja */
-    v->cov_lo = 35;                /* cobertura <= 35 %: no (introducciones y demos medidas: 0,1 - 30 %; cinemáticas con partida 67 - 99 %) */
-    v->cov_need = 2;               /* medidas seguidas para cambiar de opinión (~1 s: una sola medida mala no corta una cinemática) */
+    v->cov_hi = 80;                /* medida buena: >= 80 % (cinemáticas con partida 67 - 99 %, muerte 22 - 98 %) */
+    v->cov_lo = 62;                /* medida mala: < 62 % (introducciones 0,1 - 30 %; muerte medida en volcado: 58,9 % con 660 triángulos ausentes = el lugar de la muerte fuera de la cola) */
+    v->cov_win = 4;                /* decide sobre las últimas 4 medidas (~4 s): las de una escena que barre zonas no cubiertas alternan buenas y malas */
+    v->cov_need_bad = 2;           /* 2 malas de 4 pierden la fiabilidad (la cinemática sin medida o fiel es de fiar hasta entonces) */
+    v->cov_need_good = 3;          /* 3 buenas de 4 la recuperan */
     v->cov_forget = 50;            /* 1 s sin 3D: la siguiente escena parte de cero */
 }
 
@@ -98,12 +100,14 @@ int vrview_step(VrView *v, const VrViewIn *in) {
             v->cov_idle = 0;
             if (in->cover_new && in->cover1 > 0) {
                 int pct = (int)in->cover1 - 1;
-                if (pct >= v->cov_hi) { v->cov_good++; v->cov_bad = 0; if (v->cov_good >= v->cov_need) v->cov_state = 1; }
-                else if (pct <= v->cov_lo) { v->cov_bad++; v->cov_good = 0; if (v->cov_bad >= v->cov_need) v->cov_state = 2; }
-                else { v->cov_good = v->cov_bad = 0; }
+                unsigned wm = (1u << v->cov_win) - 1u;
+                v->cov_bad_mask = ((v->cov_bad_mask << 1) | (pct < v->cov_lo ? 1u : 0u)) & wm;
+                v->cov_good_mask = ((v->cov_good_mask << 1) | (pct >= v->cov_hi ? 1u : 0u)) & wm;
+                if (__builtin_popcount(v->cov_bad_mask) >= v->cov_need_bad) v->cov_state = 2;
+                else if (__builtin_popcount(v->cov_good_mask) >= v->cov_need_good) v->cov_state = 1;
             }
         } else if (++v->cov_idle >= v->cov_forget) {
-            v->cov_state = 0; v->cov_good = v->cov_bad = 0; v->cov_idle = v->cov_forget;
+            v->cov_state = 0; v->cov_good_mask = v->cov_bad_mask = 0; v->cov_idle = v->cov_forget;
         }
         eff.cover1 = v->cov_state == 1 ? 101 : v->cov_state == 2 ? 1 : 0;
         eff.cover_new = 0;
