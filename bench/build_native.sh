@@ -6,7 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT=bench/build_native
 rm -rf "$OUT" && mkdir -p "$OUT"
-INC=(-Ivr/native -Ibench/c)
+# -Iruntime: ns_fx.h incluye "gpu.h" (runtime/), que ns_extract_glue.c arrastra; -Ivr/scene: cabeceras de la capa 2D
+INC=(-Iruntime -Ivr/native -Ivr/scene -Ibench/c)
 
 echo "== shaders Metal =="
 xcrun -sdk macosx metal -c -Ivr/native app/Sources/Native/NativeShaders.metal -o "$OUT/native.air"
@@ -34,6 +35,11 @@ if xcrun nm -m "$OUT/test_native_link" | grep -i "weak" | grep "ns_store_"; then
 fi
 for sym in ns_store_get ns_store_get_baked ns_store_epoch ns_store_ack ns_store_is_stub; do
   xcrun nm -g "$OUT/l_ns_extract.o" | grep -q " T _$sym\$" || { echo "error: el extractor no define $sym"; exit 1; }
+done
+
+echo "== comprobación de compilación de lo nuevo que el banco no enlaza (ns_solid, cobertura, capa 2D, manos) =="
+for f in vr/native/ns_solid.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_cover.c vr/native/ns_cover_glue.c vr/native/ns_hand.c vr/body/vr_hand_mesh.c vr/scene/vr_layer2d.c vr/scene/vr_layer2d_async.c; do
+  xcrun clang -c -O1 -Wall -Wextra -std=gnu11 "${INC[@]}" -Ivr/body "$f" -o "$OUT/chk_$(basename "$f" .c).o"
 done
 
 echo "== Swift (NativeRenderer de la app + banco) =="
