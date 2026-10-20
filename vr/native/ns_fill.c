@@ -7,7 +7,7 @@
 #include <time.h>
 
 const char *const ns_fill_cls_name[NF_N] = {"exacto", "otra_diagonal", "subdividido", "pegado_a_camara", "pose_jugador", "pose_otro", "ausente", "otra_textura", "parcial", "sprite", "textura_corregida",
-                                            "detras", "ambiguo", "incoherente", "arista", "lejos", "nan", "texel_unico", "parcial_semi", "tope"};
+                                            "detras", "ambiguo", "incoherente", "arista", "lejos", "nan", "texel_unico", "parcial_semi", "junto_a_cabeza", "tope"};
 
 void ns_fill_cfg_default(NsFillCfg *c) {
     memset(c, 0, sizeof *c);
@@ -17,6 +17,7 @@ void ns_fill_cfg_default(NsFillCfg *c) {
     c->pose_fill = 0; c->fix_texture = 1; c->fill_partial_semi = 0;
     c->keep_frames = 15; c->max_out = 6000;
     c->cut_dist = 3000.0f; c->cut_cos = 0.7f; c->bias = 2;
+    c->near_skip = 250.0f; c->view_match = 24.0f;
 }
 
 #define CELL 256.0f      /* rejilla de esquinas */
@@ -28,7 +29,7 @@ void ns_fill_cfg_default(NsFillCfg *c) {
 
 typedef struct { float p[3][3]; float c[3]; float r; uint16_t page, clut; float u[3], v[3]; uint8_t textured, dyn, player; uint32_t inst, piece, face; float lo[3], hi[3]; float n[3], dp; } FTri;
 
-typedef struct { NsEffect e; float c[3]; uint32_t sig; uint32_t last; uint8_t claimed; } FRec;
+typedef struct { NsEffect e; float c[3]; float vc[3]; uint32_t sig; uint32_t last; uint32_t id; uint8_t claimed; } FRec;
 
 struct NsFill {
     /* índice nativo */
@@ -44,6 +45,8 @@ struct NsFill {
     int32_t *ph_head, *ph_next; size_t ph_nb, ph_cap;
     NsEffect *out; size_t out_cap, out_n;
     int have_last; float last_eye[3], last_fwd[3]; uint32_t last_frame;
+    uint32_t next_id;                  /* identidad estable de lo rellenado (se hereda al reencontrarlo por mundo o por vista) */
+    int32_t *vh_head, *vh_next; size_t vh_nb, vh_cap;   /* índice por posición de VISTA de lo visto hace poco (para reconocer lo pegado a la cabeza) */
     const NsRTri *idx_tris; size_t idx_n; uint32_t idx_player;   /* índice ya construido para esta escena (lo deja ns_fill_probe para ns_fill_run) */
     float surf_pad;   /* margen con el que se inflaron las cajas de la rejilla de superficies (tope de la tolerancia de «sobre la superficie») */
 };
@@ -52,7 +55,7 @@ NsFill *ns_fill_create(void) { return (NsFill *)calloc(1, sizeof(NsFill)); }
 void ns_fill_destroy(NsFill *f) {
     if (!f) return;
     free(f->nt); free(f->cg_head); free(f->cg_next); free(f->sg_head); free(f->sg_node_next); free(f->sg_node_tri); free(f->big); free(f->tg_head); free(f->tg_next); free(f->stamp);
-    free(f->alive); free(f->nw); free(f->ph_head); free(f->ph_next); free(f->out);
+    free(f->alive); free(f->nw); free(f->ph_head); free(f->ph_next); free(f->vh_head); free(f->vh_next); free(f->out);
     free(f);
 }
 void ns_fill_reset(NsFill *f) { if (f) { f->alive_n = 0; f->out_n = 0; f->have_last = 0; } }
@@ -518,6 +521,7 @@ static int make_effect(const GpuOp *o, const OpGeo *g, const int *idx, int n, in
     e->depth_bias = (int16_t)bias; e->abr = (uint8_t)(o->abr & 3);
     e->tpage = textured ? op_page(o) : 0; e->clut = textured ? op_clut(o) : 0;
     e->src_key = NF_SRC_KEY | (seq_id & 0xFFFFFFu); e->idx = (uint16_t)idx[0]; e->sub = (uint8_t)n;
+    memcpy(&e->box[0], &seq_id, sizeof seq_id);   /* operación de la lista (solo herramientas): src_key pasa a ser la identidad estable al persistir */
     for (int k = 0; k < n; k++) {
         const GpuVtx *v = &o->v[idx[k]];
         memcpy(e->p[k], g->w[idx[k]], sizeof e->p[k]);
@@ -569,11 +573,12 @@ float ns_fill_probe(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32
     return n ? (float)hit / (float)n : -1.0f;
 }
 
-static int rec_push(NsFill *f, const NsEffect *e) {
+static int rec_push(NsFill *f, const NsEffect *e, const float vc[3]) {
     GROW(f->nw, f->nw_cap, f->nw_n + 1);
     FRec *r = &f->nw[f->nw_n++];
     memset(r, 0, sizeof *r);
     r->e = *e;
+    memcpy(r->vc, vc, sizeof r->vc);
     for (int a = 0; a < 3; a++) { float s = 0; for (int k = 0; k < e->nv; k++) s += e->p[k][a]; r->c[a] = s / (float)e->nv; }
     r->sig = sig_of(e->tpage, e->clut, e->flags, e->nv, e->uv);
     return 0;
@@ -669,20 +674,28 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
             classify_tri(f, &cfg, o, ci, &g, textured, &tr[h], oi, h);
             ok[h] = 1;
             if (tr[h].fill && gate >= 0) { tr[h].cls = gate; tr[h].fill = 0; }
+            else if (tr[h].fill && cfg.near_skip > 0.0f) {   /* centro a menos de near_skip del ojo: envoltura del jugador / pegado al plano de la cámara, rígido a la cabeza una vez en el mundo */
+                float mx = (g.v[ci[0]][0] + g.v[ci[1]][0] + g.v[ci[2]][0]) / 3.0f, my = (g.v[ci[0]][1] + g.v[ci[1]][1] + g.v[ci[2]][1]) / 3.0f, mz = (g.v[ci[0]][2] + g.v[ci[1]][2] + g.v[ci[2]][2]) / 3.0f;
+                if (mx * mx + my * my + mz * mz < cfg.near_skip * cfg.near_skip) { tr[h].cls = NF_SKIP_NEAR; tr[h].fill = 0; }
+            }
             S->cls[tr[h].cls]++;
         }
         /* emisión: cuadrilátero entero si las dos mitades se rellenan igual, si no cada mitad */
         if (nv == 4 && ok[0] && ok[1] && tr[0].fill && tr[1].fill && tr[0].bias == tr[1].bias) {
             static const int I4[4] = {0, 1, 2, 3};
             NsEffect e;
-            if (make_effect(o, &g, I4, 4, tr[0].bias, o->seq, &e)) { rec_push(f, &e); S->filled_tris += 2; }
+            float vc[3] = {0, 0, 0};
+            for (int k = 0; k < 4; k++) for (int r = 0; r < 3; r++) vc[r] += g.v[k][r] * 0.25f;
+            if (make_effect(o, &g, I4, 4, tr[0].bias, o->seq, &e)) { rec_push(f, &e, vc); S->filled_tris += 2; }
             else S->cls[NF_SKIP_FB] += 2;
         } else {
             for (int h = 0; h < ntri; h++) {
                 if (!ok[h] || !tr[h].fill) continue;
                 const int ci[3] = {h ? 1 : 0, h ? 2 : 1, h ? 3 : 2};
                 NsEffect e;
-                if (make_effect(o, &g, ci, 3, tr[h].bias, o->seq * 2u + (uint32_t)h, &e)) { rec_push(f, &e); S->filled_tris++; }
+                float vc[3];
+                for (int r = 0; r < 3; r++) vc[r] = (g.v[ci[0]][r] + g.v[ci[1]][r] + g.v[ci[2]][r]) / 3.0f;
+                if (make_effect(o, &g, ci, 3, tr[h].bias, o->seq * 2u + (uint32_t)h, &e)) { rec_push(f, &e, vc); S->filled_tris++; }
                 else S->cls[NF_SKIP_FB]++;
             }
         }
@@ -704,6 +717,17 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
                 uint32_t b = hcell(cell_of(f->alive[i].c[0], 64.0f), cell_of(f->alive[i].c[1], 64.0f), cell_of(f->alive[i].c[2], 64.0f)) & (uint32_t)(nb - 1);
                 f->ph_next[i] = f->ph_head[b]; f->ph_head[b] = (int32_t)i;
             }
+            const float vm = cfg.view_match;
+            if (vm > 0.0f) {   /* índice por VISTA de lo visto hace poco (lo persistido de hace más no tiene una posición de vista vigente) */
+                GROW(f->vh_head, f->vh_nb, nb); GROW(f->vh_next, f->vh_cap, nprev);
+                for (size_t i = 0; i < nb; i++) f->vh_head[i] = -1;
+                for (size_t i = 0; i < nprev; i++) {
+                    f->vh_next[i] = -1;
+                    if (frame - f->alive[i].last > 3u) continue;
+                    uint32_t b = hcell(cell_of(f->alive[i].vc[0], 64.0f), cell_of(f->alive[i].vc[1], 64.0f), cell_of(f->alive[i].vc[2], 64.0f)) & (uint32_t)(nb - 1);
+                    f->vh_next[i] = f->vh_head[b]; f->vh_head[b] = (int32_t)i;
+                }
+            }
             for (size_t k = 0; k < f->nw_n; k++) {
                 FRec *r = &f->nw[k];
                 int32_t cx = cell_of(r->c[0], 64.0f), cy = cell_of(r->c[1], 64.0f), cz = cell_of(r->c[2], 64.0f);
@@ -711,10 +735,25 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
                     uint32_t b = hcell(cx + dx, cy + dy, cz + dz) & (uint32_t)(nb - 1);
                     for (int32_t i = f->ph_head[b]; i >= 0; i = f->ph_next[i]) {
                         FRec *p = &f->alive[i];
-                        if (!p->claimed && p->sig == r->sig && d3(p->c, r->c) <= 48.0) p->claimed = 1;
+                        if (!p->claimed && p->sig == r->sig && d3(p->c, r->c) <= 48.0) { p->claimed = 1; if (!r->id) r->id = p->id; }
+                    }
+                }
+                if (vm > 0.0f) {
+                    int32_t vx = cell_of(r->vc[0], 64.0f), vy = cell_of(r->vc[1], 64.0f), vz = cell_of(r->vc[2], 64.0f);
+                    for (int dx = -1; dx <= 1; dx++) for (int dy = -1; dy <= 1; dy++) for (int dz = -1; dz <= 1; dz++) {
+                        uint32_t b = hcell(vx + dx, vy + dy, vz + dz) & (uint32_t)(nb - 1);
+                        for (int32_t i = f->vh_head[b]; i >= 0; i = f->vh_next[i]) {
+                            FRec *p = &f->alive[i];
+                            if (!p->claimed && p->sig == r->sig && d3(p->vc, r->vc) <= vm) { p->claimed = 1; if (!r->id) r->id = p->id; }   /* misma firma y misma posición de vista: el mismo elemento aunque el mundo haya cambiado */
+                        }
                     }
                 }
             }
+        }
+        for (size_t k = 0; k < f->nw_n; k++) {   /* identidad estable: heredada o nueva */
+            FRec *r = &f->nw[k];
+            if (!r->id) { f->next_id = (f->next_id + 1u) & 0xFFFFFFu; if (!f->next_id) f->next_id = 1u; r->id = f->next_id; }
+            r->e.src_key = NF_SRC_KEY | r->id;
         }
         for (size_t k = 0; k < f->nw_n; k++) f->nw[k].last = frame;
         size_t nnew = f->nw_n;
@@ -760,11 +799,11 @@ size_t ns_fill_format(const NsFillStats *s, uint32_t frame, char *buf, size_t ca
     int n = snprintf(buf, cap,
         "[relleno] fr=%u lista: tris3D=%u (poligonos=%u sin_vista=%u reconstruidos=%u degenerados=%u efectos_excluidos=%u) | cubierto_nativo=%u (exacto=%u otra_diagonal=%u subdividido=%u pegado_a_camara=%u) %.1f%% | "
         "rellenado=%u (ausente=%u otra_textura=%u parcial=%u sprite=%u textura_corregida=%u) | pose=%u (jugador=%u otro=%u) | sin_posicion_fiable: detras=%u ambiguo=%u incoherente=%u arista=%u lejos=%u nan=%u texel_unico=%u parcial_semi=%u | "
-        "cobertura(nativo+relleno, sin pose)=%.1f%% | camara=%s | salida=%u (persistentes=%u retirados: vista=%u edad=%u corte=%u tope=%u) | nativo: tris=%u dinamicos=%u | %.2f ms (indice %.2f, casar %.2f, persistencia %.2f)\n",
+        "junto_a_cabeza=%u | cobertura(nativo+relleno, sin pose)=%.1f%% | camara=%s | salida=%u (persistentes=%u retirados: vista=%u edad=%u corte=%u tope=%u) | nativo: tris=%u dinamicos=%u | %.2f ms (indice %.2f, casar %.2f, persistencia %.2f)\n",
         frame, s->tris, s->polys3d, s->no_view, s->recon, s->degenerate, s->skipped_ops, s->cls[NF_MATCH] + s->cls[NF_SPLIT] + s->cls[NF_SUBDIV] + s->cls[NF_LOCKED], s->cls[NF_MATCH], s->cls[NF_SPLIT], s->cls[NF_SUBDIV], s->cls[NF_LOCKED], s->nat_pct,
         s->filled_tris, s->cls[NF_FILL_ABSENT], s->cls[NF_FILL_OTHERTEX], s->cls[NF_FILL_PARTIAL], s->cls[NF_FILL_SPRITE], s->cls[NF_FILL_TEXFIX], pose, s->cls[NF_POSE_PLAYER], s->cls[NF_POSE_OTHER],
         s->cls[NF_SKIP_BEHIND], s->cls[NF_SKIP_AMBIG], s->cls[NF_SKIP_INCOH], s->cls[NF_SKIP_EDGE], s->cls[NF_SKIP_FAR], s->cls[NF_SKIP_NAN], s->cls[NF_SKIP_FB], s->cls[NF_SKIP_PARTIAL_SEMI],
-        s->cover_pct, s->cam_src == 0 ? "lista" : s->cam_src == 1 ? "RAM(la de la lista casa peor)" : "RAM(sin camara en la lista)", s->n_out, s->persisted, s->retired_view, s->retired_age, s->retired_cut, s->cls[NF_SKIP_CAP], s->nat_tris, s->nat_dyn, s->ms_total, s->ms_index, s->ms_match, s->ms_persist);
+        s->cls[NF_SKIP_NEAR], s->cover_pct, s->cam_src == 0 ? "lista" : s->cam_src == 1 ? "RAM(la de la lista casa peor)" : "RAM(sin camara en la lista)", s->n_out, s->persisted, s->retired_view, s->retired_age, s->retired_cut, s->cls[NF_SKIP_CAP], s->nat_tris, s->nat_dyn, s->ms_total, s->ms_index, s->ms_match, s->ms_persist);
     if (n < 0) return 0;
     return (size_t)n < cap ? (size_t)n : cap - 1;
 }

@@ -83,7 +83,8 @@ int main(int argc, char **argv) {
     FILE *det = getenv("NSFILL_DETALLE") ? fopen(getenv("NSFILL_DETALLE"), "w") : NULL;
     for (uint32_t i = 0; i < nfx; i++) {
         const NsEffect *e = &fx[i];
-        uint32_t id = e->src_key & 0xFFFFFFu;
+        uint32_t id; memcpy(&id, &e->box[0], sizeof id);   /* operación de origen (ns_fill la deja en box[0]; src_key es la identidad estable) */
+        id &= 0xFFFFFFu;
         uint32_t seq = e->nv == 4 ? id : id >> 1;
         const GpuOp *o = NULL;
         for (uint32_t j = 0; j < dl->list.nops; j++) if ((dl->list.ops[j].seq & 0xFFFFFFu) == seq && dl->list.ops[j].type == GPU_OP_POLY) { o = &dl->list.ops[j]; break; }

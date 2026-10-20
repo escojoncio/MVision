@@ -2,6 +2,7 @@
  * persistencia (retirada por vista, edad y corte), textura corregida, triángulos y cuadriláteros, y el hilo trabajador (ns_fill_glue). */
 #include "ns_fill.h"
 #include "ns_fill_glue.h"
+#include "ns_gpu.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -288,6 +289,114 @@ static void test_intro_cover(void) {
     ns_fill_destroy(f); free(N.t); free(N.s);
 }
 
+/* ---- ancla al mundo y pegado a la cabeza ---- */
+/* cámara que gira `yaw` alrededor del eje Y del motor (vista -> mundo fila-mayor: columnas X derecha, Y abajo, Z delante) */
+static NsFillCam cam_yaw(float yaw_deg, float ex) {
+    NsFillCam c = cam_id(); float a = yaw_deg * 3.14159265f / 180.0f;
+    c.R[0] = cosf(a); c.R[2] = sinf(a); c.R[6] = -sinf(a); c.R[8] = cosf(a); c.eye[0] = ex;
+    return c;
+}
+static void world_to_view(const NsFillCam *c, const float w[3], float v[3]) {   /* v = R^T (w - eye) */
+    float d[3] = {w[0] - c->eye[0], w[1] - c->eye[1], w[2] - c->eye[2]};
+    for (int r = 0; r < 3; r++) v[r] = c->R[r] * d[0] + c->R[3 + r] * d[1] + c->R[6 + r] * d[2];
+}
+static GpuOp list_world_quad(const NsFillCam *c, float x0, float y0, float zc, float s) {   /* cuadrilátero del mundo visto desde la cámara */
+    float w[4][3] = {{x0, y0, zc}, {x0 + s, y0, zc}, {x0, y0 + s, zc}, {x0 + s, y0 + s, zc}}, v[4][3];
+    for (int k = 0; k < 4; k++) world_to_view(c, w[k], v[k]);
+    return list_quad(v, 0, TX, CLX);
+}
+static void centroid(const NsEffect *e, float c[3]) {
+    c[0] = c[1] = c[2] = 0;
+    for (int k = 0; k < e->nv; k++) for (int a = 0; a < 3; a++) c[a] += e->p[k][a] / (float)e->nv;
+}
+static void test_world_anchor_and_headlock(void) {
+    NsFill *fw = ns_fill_create(), *fl = ns_fill_create(); NsFillCfg cfg; ns_fill_cfg_default(&cfg); NsFillStats st;
+    float cw0[3] = {0, 0, 0}, dev = 0, move_lock = 0; uint32_t key_w = 0, key_l = 0; int same_w = 1, same_l = 1; float cl0[3] = {0, 0, 0};
+    /* cámara que gira 4 grados por fotograma (y avanza 20 u): el relleno del mundo no se mueve; el de la vista fija sí (el motor lo recoloca) y conserva la identidad */
+    GpuOp locked_ref;
+    for (int t = 0; t < 14; t++) {
+        NsFillCam cam = cam_yaw(4.0f * (float)t, 20.0f * (float)t);
+        GpuOp w = list_world_quad(&cam, 1500, -400, 6000, 700);
+        step(fw, NULL, &w, 1, &cam, NULL, &cfg, (uint32_t)(10 + t), &st);
+        uint32_t n; const NsEffect *e = ns_fill_effects(fw, &n);
+        CHECK(n == 1 && e, "mundo: salidas=%u (sin estelas)", n);
+        if (n == 1) {
+            float c[3]; centroid(&e[0], c);
+            if (t == 0) { memcpy(cw0, c, sizeof c); key_w = e[0].src_key; }
+            else { float d = sqrtf((c[0] - cw0[0]) * (c[0] - cw0[0]) + (c[1] - cw0[1]) * (c[1] - cw0[1]) + (c[2] - cw0[2]) * (c[2] - cw0[2])); if (d > dev) dev = d; if (e[0].src_key != key_w) same_w = 0; }
+        }
+        /* pegado a la cámara: misma posición de VISTA en todos los fotogramas (sitio de vista (200,-100,1200)) */
+        float v[4][3] = {{200, -100, 1200}, {600, -100, 1200}, {200, 300, 1200}, {600, 300, 1200}};
+        GpuOp l = list_quad(v, 0, TX, CLX); locked_ref = l;
+        step(fl, NULL, &l, 1, &cam, NULL, &cfg, (uint32_t)(10 + t), &st);
+        e = ns_fill_effects(fl, &n);
+        CHECK(n == 1 && e, "pegado: salidas=%u (la identidad por vista evita las estelas)", n);
+        if (n == 1) {
+            float c[3]; centroid(&e[0], c);
+            if (t == 0) { memcpy(cl0, c, sizeof c); key_l = e[0].src_key; }
+            else { float d = sqrtf((c[0] - cl0[0]) * (c[0] - cl0[0]) + (c[1] - cl0[1]) * (c[1] - cl0[1]) + (c[2] - cl0[2]) * (c[2] - cl0[2])); if (d > move_lock) move_lock = d; if (e[0].src_key != key_l) same_l = 0; }
+        }
+    }
+    (void)locked_ref;
+    CHECK(dev < 2.0f, "relleno de mundo con la cabeza girando: el sitio en el mundo es constante (desviacion %.2f u)", dev);
+    CHECK(same_w, "el relleno de mundo conserva la identidad");
+    CHECK(move_lock > 100.0f, "lo pegado a la vista cambia de sitio en el mundo (%.0f u): es lo que delata que sigue a la cabeza", move_lock);
+    CHECK(same_l && (key_l >> 24) == 0xF1u, "lo pegado a la vista conserva la identidad estable aunque el mundo cambie");
+    ns_fill_destroy(fw); ns_fill_destroy(fl);
+}
+static void test_near_skip(void) {
+    NsFill *f = ns_fill_create(); NsFillCfg cfg; ns_fill_cfg_default(&cfg); NsFillStats st; NsFillCam cam = cam_id();
+    float v[4][3] = {{-300, -300, 100}, {300, -300, 100}, {-300, 300, 100}, {300, 300, 100}};   /* centro a 100 u del ojo, 60 cm de lado */
+    GpuOp near = list_quad(v, 0, TX, CLX);
+    step(f, NULL, &near, 1, &cam, NULL, &cfg, 1, &st);
+    CHECK(st.filled_tris == 0 && st.cls[NF_SKIP_NEAR] == 2, "junto a la cabeza: no se rellena (junto=%u relleno=%u)", st.cls[NF_SKIP_NEAR], st.filled_tris);
+    GpuOp far = list_of(-500, -500, 4000, 1000, 0);
+    step(f, NULL, &far, 1, &cam, NULL, &cfg, 2, &st);
+    CHECK(st.filled_tris == 2 && st.cls[NF_SKIP_NEAR] == 0, "lejos: se rellena");
+    cfg.near_skip = 0;
+    ns_fill_reset(f); step(f, NULL, &near, 1, &cam, NULL, &cfg, 3, &st);
+    CHECK(st.filled_tris == 2, "regla apagada: se rellena (%u)", st.filled_tris);
+    ns_fill_destroy(f);
+}
+/* Tubería completa: relleno -> ns_gpu_fx_build con seguimiento. Mundo: dibujado y fijo con la cabeza girando; pegado a la vista: se detecta y se descarta. */
+static void test_pipeline_follow(void) {
+    NsFill *f = ns_fill_create(); NsFillCfg cfg; ns_fill_cfg_default(&cfg); NsFillStats st;
+    NsGpuFxTrack *trk = ns_gpu_fx_track_create();
+    static const float to_vr[12] = {0.001f, 0, 0, 0, 0, 0.001f, 0, 0, 0, 0, 0.001f, 0};
+    NsCamera nc; memset(&nc, 0, sizeof nc); nc.rot[0] = nc.rot[4] = nc.rot[8] = 1; nc.h = 160; nc.overscan_y = 1;
+    int drawn_w = 0, drawn_l_last = 1, follow_fill = 0; float devw = 0, cprev[3] = {0, 0, 0}; int have = 0;
+    for (int t = 0; t < 40; t++) {
+        NsFillCam cam = cam_yaw(3.0f * (float)t, 10.0f * (float)t);
+        GpuOp ops[2];
+        ops[0] = list_world_quad(&cam, 1500, -400, 6000, 700);
+        float v[4][3] = {{200, -100, 1200}, {600, -100, 1200}, {200, 300, 1200}, {600, 300, 1200}};
+        ops[1] = list_quad(v, 0, TX, CLX);
+        step(f, NULL, ops, 2, &cam, NULL, &cfg, (uint32_t)(10 + t), &st);
+        uint32_t n; const NsEffect *e = ns_fill_effects(f, &n);
+        CHECK(n == 2, "salidas=%u", n);
+        NsEffect all[4]; memcpy(all, e, sizeof(NsEffect) * (n < 4 ? n : 4));
+        NsGpuFxParams P; memset(&P, 0, sizeof P);
+        P.to_vr = to_vr; P.cam = &nc; P.track = trk; P.hold_near_m = 0.3f; P.n_eyes = 1;
+        for (int a = 0; a < 3; a++) { P.head[a] = cam.eye[a] * 0.001f; P.head_right[a] = cam.R[3 * a]; P.head_up[a] = cam.R[3 * a + 1]; P.eyes[0][a] = P.head[a]; }
+        NsGpuFxVert vb[64]; NsGpuFxRun runs[4]; uint64_t keys[4]; NsGpuFxOut o;
+        CHECK(ns_gpu_fx_build(all, n, &P, vb, 64, runs, 4, keys, 4, &o) == 0, "build");
+        uint32_t nverts = o.n_opaque + o.n_semi;
+        if (t == 39) drawn_l_last = nverts >= 12;   /* si el pegado se dibujara habria dos cuadrilateros (12 vertices) */
+        if (o.n_follow_fill) follow_fill = 1;
+        if (nverts >= 6) {   /* la primera salida dibujada es la de mundo (se emite primero) */
+            drawn_w++;
+            float c[3] = {0, 0, 0};
+            for (int k = 0; k < 6; k++) for (int a = 0; a < 3; a++) c[a] += vb[k].p[a] / 6.0f;
+            if (have) { float d = sqrtf((c[0] - cprev[0]) * (c[0] - cprev[0]) + (c[1] - cprev[1]) * (c[1] - cprev[1]) + (c[2] - cprev[2]) * (c[2] - cprev[2])); if (d > devw) devw = d; }
+            memcpy(cprev, c, sizeof c); have = 1;
+        }
+    }
+    CHECK(drawn_w >= 38 && devw < 0.003f, "mundo: dibujado siempre y fijo en el mundo VR con la cabeza girando y avanzando (desviacion %.5f m, dibujado %d)", devw, drawn_w);
+    CHECK(follow_fill && !drawn_l_last, "lo pegado a la vista (relleno) se detecta como SIGUE y se descarta");
+    ns_gpu_fx_track_destroy(trk);
+    ns_fill_destroy(f);
+}
+
 int main(void) {
     test_intro_cover();
     test_fill_and_match();
@@ -297,6 +406,9 @@ int main(void) {
     test_gates_and_2d();
     test_persistence();
     test_triangle_and_format();
+    test_world_anchor_and_headlock();
+    test_near_skip();
+    test_pipeline_follow();
     test_glue();
     test_glue_stale();
     if (fails) { printf("test_ns_fill: %d FALLOS\n", fails); return 1; }

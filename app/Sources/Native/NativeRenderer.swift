@@ -287,6 +287,10 @@ final class NativeRenderer {
     private var fxOut = NsGpuFxOut()
     // Registro de efectos cerca de la cabeza (ventana de 1 s): `fxNear` acumula, `fxNearSnap` es la ultima ventana completa (la que se escribe en el registro)
     private var fxNear = NsGpuFxNearAcc(), fxNearSnap = NsGpuFxNearAcc(), fxNearT0: Double = 0
+    // Detector "sigue a la cámara": seguimiento por efecto entre fotogramas (fx y relleno) y su registro de 1 s (`fx-sigue`)
+    private var fxTrack: OpaquePointer?
+    private var fxTrackLive = false
+    private var fxFollow = NsGpuFxFollowAcc(), fxFollowSnap = NsGpuFxFollowAcc()
     private var fxAllowed = false                  // este fotograma se dibujarán los efectos (pipelines listas para todos los formatos comprobados)
     private var fxTagsOK = Set<String>()           // formatos de destino con las pipelines de efectos compiladas
     private(set) var statFxItems = 0, statFxTris = 0, statFxBillboards = 0, statFxRibbons = 0, statFxPolys = 0, statFxSkipped = 0
@@ -376,6 +380,7 @@ final class NativeRenderer {
 
     deinit {
         fxVerts?.deallocate()
+        if let t = fxTrack { ns_gpu_fx_track_destroy(t) }
         semiOrder.deallocate(); semiAbr.deallocate(); semiDepth.deallocate()
         ns_gpu_sort_free(&semiScratch)
     }
@@ -928,7 +933,12 @@ final class NativeRenderer {
         slot.nFxOpaque = 0; slot.nFxSemi = 0
         fxItemCount = 0
         statFxItems = 0; statFxTris = 0
-        guard fxHas, !fxEffects.isEmpty else { fxAllowed = fxHas; return }
+        guard fxHas, !fxEffects.isEmpty else {
+            if fxTrackLive, let t = fxTrack { ns_gpu_fx_track_reset(t); fxTrackLive = false }   // sin efectos: el seguimiento no debe cruzar una escena
+            fxAllowed = fxHas; return
+        }
+        if fxTrack == nil { fxTrack = ns_gpu_fx_track_create() }
+        fxTrackLive = true
         let n = fxEffects.count
         let cap = 12 * n + 12
         if fxVertCap < cap {
@@ -955,6 +965,9 @@ final class NativeRenderer {
         // Los efectos se colocan con la geometria del propio motor (tamano en mundo exacto, ver ns_fx.c): aqui NO se encogen ni se quitan (comfort_deg = 0, oncam_drop_m = 0).
         // Unica red de seguridad: un efecto con el centro a menos de 5 cm de la cabeza se descarta. near_log_m: radio del registro `fx-cerca`.
         prm.comfort_deg = 0; prm.comfort_dmin_m = 0; prm.oncam_drop_m = 0; prm.near_log_m = 0.5; prm.drop_inside_m = 0.05
+        // Nada va fijo a la cabeza salvo los recubrimientos de pantalla (papel VIEW_OVERLAY, que se dibujan aparte): lo pegado a la cámara por bandera se descarta; lo que mantiene su posición en espacio de cabeza
+        // mientras la cabeza se mueve respecto al mundo del motor, también (SIGUE); lo cercano (< 30 cm) hasta no demostrar que está anclado al mundo, se retiene.
+        prm.track = fxTrack; prm.hold_near_m = 0.30; prm.drop_oncam = 1
         prm.depth_row = (-sortView.columns.0.z, -sortView.columns.1.z, -sortView.columns.2.z, -sortView.columns.3.z)
         let rc: Int32 = toVR12.withUnsafeBufferPointer { (tv) -> Int32 in
             withUnsafePointer(to: &fxCam) { (camP) -> Int32 in
@@ -986,7 +999,8 @@ final class NativeRenderer {
             let now = ProcessInfo.processInfo.systemUptime
             var hd: [Float] = [head.x, head.y, head.z], rt: [Float] = [right.x, right.y, right.z]
             ns_gpu_fx_near_accum(&fxNear, &out, &hd, &rt, Float(now.truncatingRemainder(dividingBy: 1000)))
-            if now - fxNearT0 >= 1.0 { fxNearSnap = fxNear; ns_gpu_fx_near_reset(&fxNear); fxNearT0 = now }
+            ns_gpu_fx_follow_accum(&fxFollow, &out)
+            if now - fxNearT0 >= 1.0 { fxNearSnap = fxNear; ns_gpu_fx_near_reset(&fxNear); fxFollowSnap = fxFollow; ns_gpu_fx_follow_reset(&fxFollow); fxNearT0 = now }
         }
         let total = Int(out.n_opaque + out.n_semi)
         statFxItems = Int(out.n_keys); statFxTris = total / 3
@@ -1499,6 +1513,13 @@ final class NativeRenderer {
         return "[" + String(cString: buf) + "] |"
     }
 
+    /// Resumen de la ultima ventana de 1 s del detector "sigue a la cámara" (ver ns_gpu_fx_follow_describe): efectos y rellenos con posición constante en espacio de cabeza mientras la cabeza se mueve.
+    private func fxFollowText() -> String {
+        var buf = [CChar](repeating: 0, count: 2048)
+        _ = ns_gpu_fx_follow_describe(&fxFollowSnap, &buf, 2048)
+        return "[" + String(cString: buf) + "] |"
+    }
+
     /// Línea de registro (una vez por segundo): estado del renderer nativo y de la última decisión.
     func logLine() -> String {
         let lp = lastPresent
@@ -1511,7 +1532,7 @@ final class NativeRenderer {
                "instancias=\(statInstances) piezas=\(statPieces) mallas=\(statMeshes) semi=\(statSemiTris) tramos_semi=\(mergedN) dibujos=\(statDraws) fallos=\(frameFailures)/\(totalFailures) ausentes=\(frameMisses) " +
                "efectos=\(statFxItems) (carteles=\(statFxBillboards) cintas=\(statFxRibbons) poligonos=\(statFxPolys) descartados=\(statFxSkipped) tris=\(statFxTris) dibujados=\(fxAllowed ? "si" : "no")) " +
                "pantalla=[agua=\(screenOut.water_min.3 > 0.5 ? "si" : "no") recubrimientos=\(overlays.count)] " +
-               "\(fxNearText()) " +
+               "\(fxNearText()) \(fxFollowText()) " +
                "escenas=\(statScenes) epoca=\(lastEpoch) cpu(prepare)=\(String(format: "%.2f", cpuPrepareMs))ms cpu(encode)=\(String(format: "%.2f", cpuEncodeMs))ms"
     }
 
