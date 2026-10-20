@@ -19,6 +19,7 @@ int main(int argc, char **argv) {
     ns_cover_cfg_default(&cfg);
     float lm[9], le[3];   /* cámara con la que se emitió la lista, si el volcado la trae */
     if (ns_dump_meta_floats(dl, "rec_M", lm, 9) == 9 && ns_dump_meta_floats(dl, "rec_eye", le, 3) == 3) { cfg.list_M = lm; cfg.list_eye = le; }
+    if (getenv("NSCOVER_MAXDET")) cfg.max_detail = (uint32_t)strtoul(getenv("NSCOVER_MAXDET"), NULL, 10);   /* triángulos sin pareja clasificados a fondo (defecto 512) */
     const char *dp = getenv("NSCOVER_DETALLE");   /* fichero de detalle: una línea por triángulo sin pareja */
     if (dp) cfg.dbg = fopen(dp, "w");
     int rc = ns_cover_run(c, d->ram, d->scratch, dl->list.ops, dl->list.nops, &cfg, &r);

@@ -7,6 +7,12 @@
 #include <string.h>
 
 static int fails;
+/* Las pruebas heredadas miden la cola sola: el escaneo de objetos fuera de cola se prueba aparte. */
+static int ex_noscan(NsScene *sc, NsMeshStore *st, const uint8_t *ram, size_t n, const uint8_t *scr, size_t sn, NsExtractStats *S) {
+    NsExtractOpts o; memset(&o, 0, sizeof o); o.no_extra_scan = 1;
+    return ns_extract_ex(sc, st, ram, n, scr, sn, &o, S);
+}
+#define ns_extract ex_noscan
 #define CHECK(c) do { if (!(c)) { printf("FALLO %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
 
 static uint8_t *ram;
@@ -291,13 +297,13 @@ int main(void) {
     /* sombras: lista del módulo de efectos y heurística */
     {
         uint32_t skip[1] = {O1};
-        NsExtractOpts xo; memset(&xo, 0, sizeof xo); xo.shadow_objs = skip; xo.n_shadow = 1;
+        NsExtractOpts xo; memset(&xo, 0, sizeof xo); xo.shadow_objs = skip; xo.n_shadow = 1; xo.no_extra_scan = 1;
         rc = ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &xo, &es);
         CHECK(rc == 0 && es.shadow_omitted == 1 && sc.n_shadow_omitted == 1 && sc.n_inst == 3 && !find_inst(&sc, O1));
         q2(O11, O1);
         rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
         CHECK(rc == 0 && sc.n_inst == 2 && sc.n_shadow_omitted == 0);
-        memset(&xo, 0, sizeof xo); xo.detect_shadows = 1;
+        memset(&xo, 0, sizeof xo); xo.detect_shadows = 1; xo.no_extra_scan = 1;
         rc = ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &xo, &es);
         CHECK(rc == 0 && sc.n_inst == 1 && sc.n_shadow_omitted == 1 && es.shadow_omitted == 1 && find_inst(&sc, O1));
     }
@@ -507,7 +513,7 @@ int main(void) {
         CHECK(invariants(&s2, st));
         ns_scene_free(&s2);
         CHECK(ns_scene_alloc_exact(&s2, 8, 8, 4, 1) == 0);
-        NsExtractOpts xo; memset(&xo, 0, sizeof xo); xo.max_pieces = 3;   /* tope global por llamada */
+        NsExtractOpts xo; memset(&xo, 0, sizeof xo); xo.max_pieces = 3; xo.no_extra_scan = 1;   /* tope global por llamada */
         q2(O0, O1);
         rc = ns_extract_ex(&s2, st, ram, NS_RAM_SIZE, NULL, 0, &xo, &es);
         CHECK(s2.n_piece == 2 && s2.n_dropped_inst == 1 && (s2.truncated & NS_TR_PIECE));
@@ -536,12 +542,54 @@ int main(void) {
         CHECK(ok == 300);
         CHECK(inv == 300);
     }
+    /* Objetos dibujados por el motor pero ausentes de la cola principal */
+    {
+        NsExtractStats a, b; NsExtractOpts o0; memset(&o0, 0, sizeof o0); o0.no_extra_scan = 1;
+        fresh(); q1(O0);
+        uint32_t ok_o = object(0x0D, 1, 1, DEF0, LIGHTG);                 /* válido: dinámico, sin ocultar */
+        w32(piece(ok_o, 0) + 0x40, DEF0 + 0x20); wmat(piece(ok_o, 0), 4096, 7, 0, 0);
+        uint32_t hid = object(0x8D, 1, 1, DEF0, LIGHTG);                  /* oculto (reserva): no se dibuja */
+        w32(piece(hid, 0) + 0x40, DEF0 + 0x20); wmat(piece(hid, 0), 4096, 9, 0, 0);
+        uint32_t stat = object(0x03, 1, 1, DEF0, LIGHTG);                 /* precoloreado sin luz: estático */
+        w32(piece(stat, 0) + 0x40, DEF0 + 0x20); wmat(piece(stat, 0), 4096, 11, 0, 0);
+        uint32_t grp = object(0x0D, 4, 1, DEF0, LIGHTG);                  /* grupo no activo */
+        w32(piece(grp, 0) + 0x40, DEF0 + 0x20); wmat(piece(grp, 0), 4096, 13, 0, 0);
+        uint32_t nomd = object(0x0D, 1, 1, DEF0, LIGHTG);                 /* sin firma de modelo (def+0x20) */
+        w32(piece(nomd, 0) + 0x40, DEF0 + 0x40); wmat(piece(nomd, 0), 4096, 15, 0, 0);
+        memset(&a, 0, sizeof a); memset(&b, 0, sizeof b);
+        CHECK(ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &o0, &a) == 0);
+        uint32_t base = sc.n_inst;
+        CHECK(a.extra_objs == 0);
+        CHECK(ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, NULL, &b) == 0);
+        CHECK(b.extra_objs >= 1);
+        CHECK(sc.n_inst == base + b.extra_objs);
+        int has[5] = {0, 0, 0, 0, 0}, dup = 0;
+        const uint32_t want[5] = {ok_o, hid, stat, grp, nomd};
+        for (uint32_t i = 0; i < sc.n_inst; i++) {
+            for (int k = 0; k < 5; k++) if (sc.inst[i].key == (0x80000000u | (want[k] & 0x1FFFFFFFu))) has[k]++;
+            for (uint32_t j = 0; j < i; j++) if (sc.inst[i].key == sc.inst[j].key) dup++;
+        }
+        CHECK(has[0] == 1);                    /* el válido entra una sola vez */
+        CHECK(has[1] == 0 && has[2] == 0 && has[3] == 0 && has[4] == 0);
+        CHECK(dup == 0);
+        /* sin duplicados: una segunda extracción da lo mismo; y el objeto de la cola no se repite */
+        NsExtractStats c; memset(&c, 0, sizeof c);
+        CHECK(ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, NULL, &c) == 0);
+        CHECK(c.extra_objs == b.extra_objs && sc.n_inst == base + c.extra_objs);
+        /* un objeto presente en la cola no se repite al escanear */
+        fresh(); q2(O0, O1);
+        memset(&b, 0, sizeof b);
+        CHECK(ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, NULL, &b) == 0);
+        dup = 0;
+        for (uint32_t i = 0; i < sc.n_inst; i++) for (uint32_t j = 0; j < i; j++) if (sc.inst[i].key == sc.inst[j].key) dup++;
+        CHECK(dup == 0);
+    }
     /* RAM totalmente aleatoria con el canal apuntando a la cola */
     for (int it = 0; it < 50; it++) {
         unsigned seed = 777u + (unsigned)it;
         for (size_t i = 0; i < NS_RAM_SIZE; i++) { seed = seed * 1664525u + 1013904223u; ram[i] = (uint8_t)(seed >> 24); }
         w16(CHAN + 0x56, 40); w32(CHAN + 0x58, QUEUE);
-        rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
+        rc = ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, NULL, &es);
         NsRTri *t2 = NULL; NsAdaptStats a2;
         ns_adapt_scene(&sc, st, &ao, &t2, &a2); free(t2);
         CHECK(rc == 0 && invariants(&sc, st));

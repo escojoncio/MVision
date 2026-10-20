@@ -581,6 +581,7 @@ final class RGRenderer {
     private func prepareNative(commandBuffer: MTLCommandBuffer, colorTargets: [MTLTexture], depthTargets: [MTLTexture], sceneV: [simd_float4x4],
                                projections: [simd_float4x4], head: simd_float4x4, layered: Bool) {
         nativeDraw = false
+        stereoHealthy = false
 #if !MV_BENCH || MV_BENCH_NATIVE
         guard let n = native else { nativeDrawnLast = false; return }
         n.tint = SIMD3<Float>(1, 1, 1)
@@ -638,8 +639,14 @@ final class RGRenderer {
         let out = n.present(ready: ready, gpuMap: nativeMap)
         nativeDraw = ready && out.mode != Int32(NS_PR_BLACK)
         nativeDrawnLast = nativeDraw
+        // Pantalla 3D sana: el render nativo dibuja la escena ACTUAL (ni repetida ni a negro) en las dos cámaras. Si no, el presentador cae a la pantalla de cine (imagen de la VRAM).
+        stereoHealthy = ready && stereoWanted && out.mode == Int32(NS_PR_CURRENT)
+#else
+        stereoHealthy = true      // banco sin render nativo: la pantalla 3D no depende de él
 #endif
     }
+    /// Último fotograma: la pantalla 3D de la cinemática se dibujó con la escena nativa actual (la fija prepareNative; XRPresenter la usa para caer al respaldo de la VRAM).
+    private(set) var stereoHealthy = false
 
     // MARK: segunda vista de la escena (mira óptica del francotirador, cámara del misil guiado)
     /// Petición de la segunda vista de este fotograma: matrices en el espacio recentrado (el de la cabeza), tamaño de la textura y posición de la cámara.
@@ -699,7 +706,11 @@ final class RGRenderer {
         var height: Int
     }
     var stereoRequest: StereoRequest? {
-        didSet { if stereoRequest != oldValue { stereoDirty = true } }
+        didSet {
+            if stereoRequest != oldValue { stereoDirty = true }
+            // Al salir de la pantalla 3D se olvida su imagen: la siguiente escena del motor no debe empezar enseñando el último fotograma de la anterior (caché obsoleta).
+            if stereoRequest == nil { stereoRendered = false }
+        }
     }
     private var stereoDirty = true
     private var stereoSeq: UInt32 = 0

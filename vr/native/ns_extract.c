@@ -768,6 +768,47 @@ static void do_zone_change(NsMeshStore *st, NsExtractStats *S) {
     if (ns_store_new_epoch(st)) S->epoch_opened = 1;
 }
 
+
+/* Objetos dinámicos que el motor dibuja SIN pasar por la cola del canal principal (medido: el cuerpo y el arma del jugador en la escena de muerte / introducción, 222 de
+ * 1882 triángulos de la lista sin dueño; las cinemáticas con partida sí los llevan en la cola). Están en el mismo almacén de objetos que los de la cola, con la misma
+ * cabecera: grupo activo, flag sin «oculto» (0x80) y con textura, 1..MAX_EXTRA_PIECES piezas, puntero de definición en RAM y el modelo de la primera pieza = definición + 0x20
+ * (firma que cumplen todos los objetos de las cinemáticas y del juego medidos). Los pooled-pero-ocultos (flag 0x8d) y el escenario precolorado (zona) NO entran: lo primero
+ * no se dibuja (medido) y lo segundo cambiaría de zona. Sin culling, sin duplicar los de la cola (`seen`). Escanea la RAM a pasos de 8 bytes (~0,3 ms). */
+#define MAX_EXTRA_PIECES 64
+#define EXTRA_LO 0x80010000u
+#define EXTRA_HI 0x80200000u
+static int scan_extra_objects(Ram *r, uint32_t gmask, const uint32_t *seen, uint32_t nseen, Cand *cand, uint32_t *ncand, uint32_t cap, NsExtractStats *S) {
+    uint32_t added = 0;
+    const uint8_t *b = r->b;
+    for (uint32_t o = EXTRA_LO; o + 0x48u + 0x5Cu <= EXTRA_HI && *ncand < cap; o += 8u) {
+        uint32_t off = o & ADDR_MASK;
+        if (off + 0x48u + 0x5Cu > r->size) break;
+        int16_t nm; memcpy(&nm, b + off + 0x2Eu, 2);
+        if (nm < 1 || nm > MAX_EXTRA_PIECES) continue;
+        uint32_t fl; memcpy(&fl, b + off + 0x28u, 4);
+        if ((fl & OF_HIDDEN) || !(fl & OF_TEXTURED) || fl >= 0x1000u) continue;
+        if ((fl & OF_PRECOLORED) && !(fl & OF_LIT)) continue;                       /* escenario de zona: solo por la cola */
+        uint16_t gid; memcpy(&gid, b + off + 0x2Cu, 2);
+        if (gid == 0 || !(gid & gmask)) continue;
+        uint32_t def; memcpy(&def, b + off + 0x24u, 4);
+        if (def < EXTRA_LO || def >= EXTRA_HI || (def & 3u)) continue;
+        if (!ok_rng(r, o + 0x48u, 0x5Cu * (uint32_t)nm)) continue;
+        uint32_t m0; memcpy(&m0, b + off + 0x48u + 0x40u, 4);
+        if (m0 != def + 0x20u) continue;
+        uint32_t on = norm_addr(o);
+        int dup = 0;
+        for (uint32_t k = 0; k < nseen && !dup; k++) dup = seen[k] == on;
+        for (uint32_t k = 0; k < *ncand && !dup; k++) dup = norm_addr(cand[k].o) == on;
+        if (dup) continue;
+        Cand cd;
+        cd.o = o; cd.flag = fl; cd.gid = gid; cd.nm = nm; cd.def = def; cd.is_static = 0;
+        cand[(*ncand)++] = cd;
+        added++;
+    }
+    S->extra_objs += added;
+    return (int)added;
+}
+
 int ns_extract_ex(NsScene *sc, NsMeshStore *st, const uint8_t *ram, size_t ram_size, const uint8_t *scratch, size_t scratch_size, const NsExtractOpts *opt, NsExtractStats *stats) {
     (void)scratch; (void)scratch_size;
     NsExtractStats dummy;
@@ -855,6 +896,8 @@ int ns_extract_ex(NsScene *sc, NsMeshStore *st, const uint8_t *ram, size_t ram_s
             }
             cand[ncand++] = cd;
         }
+
+        if (!(opt && opt->no_extra_scan)) scan_extra_objects(r, gmask, seen, nseen, cand, &ncand, MAX_QUEUE, S);
 
         /* cambio de zona: sustitución total de las definiciones del escenario o firmas distintas en modelos conocidos del escenario */
         {

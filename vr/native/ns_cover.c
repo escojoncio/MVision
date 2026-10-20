@@ -13,7 +13,7 @@ const char *const ns_cover_rev_name[NR_N] = {"detras", "plano_cercano", "fuera_d
 void ns_cover_cfg_default(NsCoverCfg *c) {
     memset(c, 0, sizeof *c);
     c->tol_base = 20.0f; c->tol_z = 0.004f; c->surf_tol = 80.0f;
-    c->screen_w = 320; c->screen_h = 256; c->max_detail = 512;
+    c->screen_w = 320; c->screen_h = 256; c->max_detail = 4096;
 }
 
 #define GUARD 1024.0f   /* el motor no dibuja fuera de ±1024 px (rango de las coordenadas de pantalla) */
@@ -154,7 +154,7 @@ int ns_cover_core(const NsRTri *tris, const NsAdaptSrc *src, size_t n, const NsC
     if (!(cfg.surf_tol > 0)) cfg.surf_tol = 80.0f;
     if (cfg.screen_w <= 0) cfg.screen_w = 320;
     if (cfg.screen_h <= 0) cfg.screen_h = 256;
-    if (!cfg.max_detail) cfg.max_detail = 512;
+    if (!cfg.max_detail) cfg.max_detail = 4096;
     memset(out, 0, sizeof *out);
     out->list_ops = nops; out->nat_tris = (uint32_t)n;
     if (!cam || (n && (!tris || !src))) return -1;

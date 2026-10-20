@@ -152,6 +152,8 @@ static int l2d_target = 4;
 static VrView view;                      /* vista vigente: mundo / cine (vr_view.h) */
 static VrCine cine;                      /* planos de la cinemática del motor en curso (vr_cine.h) */
 static int last_scene3d, last_video;     /* de la última lista ensamblada: geometría 3D sustancial con cámara válida / fotograma de vídeo */
+static uint32_t mdec_seen_total, mdec_last_vb;   /* contador del MDEC en la última lectura / VBlank en que creció (0 = nunca) */
+static uint32_t cover_seen_frame;        /* fotograma de la última medida de cobertura entregada a la vista */
 static int last_cover;                   /* recubrimientos a pantalla completa (fundidos) de la última lista */
 static int vr_ok;                        /* EXE de la edición esperada: parche aplicado y HLE de cámara enlazadas */
 static int cap_on;
@@ -254,6 +256,9 @@ __attribute__((weak)) void ns_cover_glue_post_ik(const uint8_t *ram) { (void)ram
 __attribute__((weak)) void ns_cover_glue_submit(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; }
 __attribute__((weak)) void ns_cover_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame, const float *eye, const float *M) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; (void)eye; (void)M; }
 __attribute__((weak)) size_t ns_cover_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
+__attribute__((weak)) int ns_cover_glue_last(uint32_t *frame, int *pct) { (void)frame; (void)pct; return 0; }   /* última cobertura medida (fotograma de la lista, %) */
+/* Decodificador de vídeo (runtime/mdec.c): palabras entregadas desde el arranque. En las pruebas de escritorio sin MDEC vale siempre 0 (no hay FMV). */
+__attribute__((weak)) uint32_t mdec_out_words_total(void) { return 0; }
 /* Manos nuevas (ns_hand.c, solo en la app; vr/body/vr_hand_mesh.c): definición débil vacía para las pruebas de escritorio, donde la manopla del motor se queda como está. */
 __attribute__((weak)) int ns_hand_apply(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const NsHandIn *in) { (void)sc; (void)st; (void)map; (void)in; return 0; }
 static _Atomic int hands_new = 1;        /* menú VR «Manos: nuevas / originales» (defecto nuevas) */
@@ -706,6 +711,17 @@ static const uint64_t *fx_classify_list(const GpuDrawList *hl, const VrCamRecord
     return hx_key;
 }
 
+/* Subidas de la lista (CPU -> VRAM) que cubren el área mostrada: mide un fotograma de vídeo descomprimido tanto si llega de una vez como en tiras de 16 px (decodificador
+ * del juego). Sin solapes entre subidas del mismo fotograma, que es lo normal (vr_view.h). */
+static int list_uploads_cover_display(const GpuDrawList *l) {
+    long long sum = 0;
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *op = &l->ops[i];
+        if (op->type == GPU_OP_UPLOAD) sum += vrview_upload_area(l->disp.x, l->disp.y, l->disp.w, l->disp.h, l->disp.depth24, op->rx, op->ry, op->rw, op->rh);
+    }
+    return vrview_uploads_cover(sum, l->disp.w, l->disp.h, l->disp.depth24);
+}
+
 static void build_one(const GpuDrawList *l, int si) {
     /* Los polígonos de una lista se transformaron con la cámara construida un frame del motor ANTES de que el VBlank lea la
      * RAM: la matriz de vista del puente puede ser ya la siguiente. El registro de cámara de la lista (vrcam) trae la correcta. */
@@ -781,15 +797,10 @@ static void build_one(const GpuDrawList *l, int si) {
     if (rc == 0) {
         last_scene3d = r && !r->active && sc.stats.n_tris3d >= 12;
         last_cover = cover_n;
-        /* vídeo pregrabado: sin 3D y con una subida a VRAM que cubre al menos la mitad del área mostrada (fotograma descomprimido) */
+        /* vídeo pregrabado: sin 3D y con subidas a VRAM que cubren (juntas) al menos el 60 % del área mostrada. Un FMV real sube tiras de 16 px (una por columna de
+         * macrobloques), no un solo rectángulo: se suma el área de cada subida recortada al rectángulo mostrado (en medias palabras: 24 bits = 3/2 por píxel). */
         int vid = 0;
-        if (!sc.has_3d) {
-            int dw = l->disp.w > 0 ? l->disp.w : 320, dh = l->disp.h > 0 ? l->disp.h : 240;
-            for (uint32_t i = 0; i < l->nops && !vid; i++) {
-                const GpuOp *op = &l->ops[i];
-                if (op->type == GPU_OP_UPLOAD && (int)op->rw * (int)op->rh * 2 >= dw * dh && (int)op->rw >= dw / 2) vid = 1;
-            }
-        }
+        if (!sc.has_3d) vid = list_uploads_cover_display(l);
         last_video = vid;
     }
     sc.cine_active = view.kind == VRV_K_ENGINE;
@@ -805,7 +816,7 @@ static void build_one(const GpuDrawList *l, int si) {
         if (!l2a) l2a = vl2a_new();
         if (l2a) {
             vl2a_options(l2a, l2d_target, atomic_load(&l2d_smooth));
-            int l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO;
+            int l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO || view.kind == VRV_K_BACKUP;
             vl2a_submit(l2a, hl, rc == 0 && sc.op_dest && sc.n_op_dest >= hl->nops ? sc.op_dest : NULL, l2_full, 0);
             { static uint64_t l2_log_ns; uint64_t nn = mono_ns();   /* una línea por segundo */
               if (nn - l2_log_ns >= 1000000000ull) { char lb[512]; l2_log_ns = nn; if (vl2a_report(l2a, lb, sizeof lb) > 0) fprintf(stderr, "%s\n", lb); } }
@@ -896,11 +907,29 @@ static void publish_state(void) {
         vin.menu_open = core && bs.menu_open; vin.stopped = core && bs.stopped;
         vin.dead = (uint8_t)(core && (((bs.valid & BRIDGE_OK_LIFE) && bs.life_max > 0 && bs.life <= 0) || (bs.player_status & BRIDGE_PS_GAME_OVER) || (bs.game_status & BRIDGE_GS_GAME_OVER)));
         vin.scene3d = (uint8_t)last_scene3d; vin.video = (uint8_t)last_video;
+        {   /* FMV: el decodificador de vídeo entregó píxeles en los últimos 12 VBlank (~0,24 s; un FMV da un fotograma cada 3-4) */
+            uint32_t vb = (uint32_t)hle_frame_count(), tot = mdec_out_words_total();
+            if (tot - mdec_seen_total >= 64u) mdec_last_vb = vb ? vb : 1u;
+            mdec_seen_total = tot;
+            vin.mdec = mdec_last_vb != 0 && vb - mdec_last_vb <= 12u;
+            /* cobertura del render nativo sobre la lista (hilo trabajador, ~1 por segundo): solo si es reciente (3 s) y nueva desde la última vez */
+            uint32_t cf = 0; int cp = 0;
+            if (ns_cover_glue_last(&cf, &cp) && vb >= cf && vb - cf <= 150u) {
+                vin.cover1 = (uint8_t)(cp < 0 ? 1 : cp > 100 ? 101 : cp + 1);
+                vin.cover_new = cf != cover_seen_frame;
+                cover_seen_frame = cf;
+            }
+        }
         g.view_mode = vrview_step(&view, &vin);
         if (view.changed) {     /* cada cambio de modo / clase / motivo de la vista queda en el registro con su causa (banderas del puente incluidas) */
             char vb[512];
             vrview_describe(&view, &vin, vb, sizeof vb);
             fprintf(stderr, "%s | vb=%u modoBruto=%d\n", vb, (unsigned)hle_frame_count(), view.want);
+        }
+        if (view.changed & VRV_CH_KIND) {   /* qué se le enseña al usuario en cine (fmv / motor / respaldo) y por qué */
+            char cb[640];
+            vrview_cine_describe(&view, &vin, cb, sizeof cb);
+            fprintf(stderr, "%s | vb=%u\n", cb, (unsigned)hle_frame_count());
         }
         g.view_kind = view.kind;
         g.cine_shot = cine.shot; g.cine_cuts = cine.cuts; g.cine_cover = last_cover;

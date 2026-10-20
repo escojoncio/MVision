@@ -40,7 +40,7 @@ typedef struct {
     int screen_w, screen_h;    /* pantalla de referencia (def. 320x256) */
     void *dbg;                 /* FILE* opcional (herramientas): una línea por triángulo sin pareja y por nativo de más */
     const float *list_eye, *list_M;   /* cámara con la que se emitió la lista (ojo en el mundo y vista->mundo fila-mayor); NULL = la de la RAM */
-    uint32_t max_detail;       /* máximo de triángulos sin pareja que se clasifican a fondo (def. 512); el resto cuenta como ABSENT sin dueño */
+    uint32_t max_detail;       /* máximo de triángulos sin pareja que se clasifican a fondo (def. 4096: con menos, lo no clasificado contaba como AUSENTE y la cobertura salía subestimada); el resto cuenta como ABSENT sin dueño */
 } NsCoverCfg;
 void ns_cover_cfg_default(NsCoverCfg *c);
 

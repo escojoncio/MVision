@@ -85,7 +85,7 @@ typedef struct {
     int32_t item;            /* objeto equipado, -1 ninguno */
     int32_t alert_mode;      /* 0 normal, 1 interferencia, 2 evasión, 3 alerta */
     /* --- cinemáticas del motor (vr_view.h, vr_cine.h) --- */
-    int32_t view_kind;       /* VRV_K_*: 0 2D, 1 mundo, 2 cinemática del motor (3D estereoscópico), 3 vídeo pregrabado */
+    int32_t view_kind;       /* VRV_K_*: 0 2D, 1 mundo, 2 cinemática del motor (3D estereoscópico), 3 vídeo pregrabado, 4 respaldo (3D del motor sin render nativo fiel: imagen de la VRAM en la pantalla de cine) */
     uint32_t cine_shot;      /* plano en curso de la cinemática (sube en cada corte de cámara) */
     uint32_t cine_cuts;      /* cortes de cámara detectados desde que se cargó el ejecutable */
     int32_t cine_cover;      /* fundidos/destellos (recubrimientos a pantalla completa) en la última lista */

@@ -80,7 +80,7 @@ typedef struct {
     uint32_t nops, nrad;
     uint32_t lost;                   /* listas perdidas desde la anterior */
     int video;
-    int kind, mode, reason;          /* clase de vista del host (VRV_K_*: 0 2D, 1 mundo, 2 cinemática del motor, 3 vídeo), modo (1 mundo, 0 cine) y motivo */
+    int kind, mode, reason;          /* clase de vista del host (VRV_K_*: 0 2D, 1 mundo, 2 cinemática del motor, 3 vídeo, 4 respaldo), modo (1 mundo, 0 cine) y motivo */
     uint32_t cpy_disp;               /* píxeles del área mostrada escritos por copias/subidas de VRAM (contenido que el panel/escena no reproduce) */
 } FRec;
 static FRec *FR;
@@ -189,10 +189,10 @@ typedef struct { uint32_t magic, index, host_frame, nops, ndata, has_vram; GpuDi
 static int g_dump_r[16][2], g_ndump;
 static int g_last_dumped = -100;
 static uint16_t *vS;
-static int g_dump_kind[4], g_dump_max = 800, g_dump_cnt;   /* --dump-kind 1,2: toda lista de esas clases de vista (hasta --dump-max) */
+static int g_dump_kind[8], g_dump_max = 800, g_dump_cnt;   /* --dump-kind 1,2: toda lista de esas clases de vista (hasta --dump-max) */
 static int want_dump(uint32_t idx) {
     for (int i = 0; i < g_ndump; i++) if ((int)idx >= g_dump_r[i][0] && (int)idx <= g_dump_r[i][1]) return 1;
-    if (g_dump_kind[g_gs.view_kind & 3] && g_dump_cnt < g_dump_max) return 1;
+    if (g_dump_kind[g_gs.view_kind & 7] && g_dump_cnt < g_dump_max) return 1;
     return 0;
 }
 static void dump_list(const GpuDrawList *full, const uint8_t *israd, const VrSceneOpts *o, const BridgeState *bs, const VrScene *sc, const uint16_t *start) {
@@ -555,7 +555,7 @@ int main(int argc, char **argv) {
             for (char *t = strtok_r(d, ",", &sv); t; t = strtok_r(NULL, ",", &sv)) { v[k++ & 1] = atoi(t); if (!(k & 1) && g_ndump < 16) { g_dump_r[g_ndump][0] = v[0]; g_dump_r[g_ndump][1] = v[1]; g_ndump++; } }
             free(d);
         }
-        else if (!strcmp(argv[i], "--dump-kind") && i + 1 < argc) { char *d = strdup(argv[++i]), *sv = NULL; for (char *t = strtok_r(d, ",", &sv); t; t = strtok_r(NULL, ",", &sv)) g_dump_kind[atoi(t) & 3] = 1; free(d); }
+        else if (!strcmp(argv[i], "--dump-kind") && i + 1 < argc) { char *d = strdup(argv[++i]), *sv = NULL; for (char *t = strtok_r(d, ",", &sv); t; t = strtok_r(NULL, ",", &sv)) g_dump_kind[atoi(t) & 7] = 1; free(d); }
         else if (!strcmp(argv[i], "--dump-max") && i + 1 < argc) g_dump_max = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--replay") && i + 1 < argc) g_replay = argv[++i];
         else if (!strcmp(argv[i], "--ops") && i + 1 < argc) { sscanf(argv[++i], "%d,%d", &g_ops_a, &g_ops_b); }
