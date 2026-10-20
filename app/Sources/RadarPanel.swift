@@ -269,21 +269,22 @@ final class RadarPanel {
     }
 
     // MARK: anclaje
-    /// Calcula el quad en el antebrazo. `forearm`: codo, muñeca y dirección al dorso del antebrazo izquierdo tras la IK (espacio VR,
-    /// metros); si es nil se usa la pose del agarre del mando izquierdo. `headForward` unitario.
+    /// Calcula el quad en la muñeca. Prioridad: `leftGrip` (pose del mando izquierdo, orientación fija tipo reloj). `forearm` (codo, muñeca y dorso del
+    /// antebrazo tras la IK, espacio VR, metros) solo si el mando no tiene pose. `headForward` unitario.
     func updatePose(forearm: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>)?, leftGrip: simd_float4x4?,
                     headPosition: SIMD3<Float>, headForward: SIMD3<Float>) {
         var arm = VrRadarArm()
         var ok = false
-        if let f = forearm {
+        if var g = leftGrip {            // prioridad: pose del mando izquierdo (no rota con los errores de la IK)
+            ok = withUnsafePointer(to: &g) { p in
+                p.withMemoryRebound(to: Float.self, capacity: 16) { vrradar_arm_from_controller($0, &arm) != 0 }
+            }
+        }
+        if !ok, let f = forearm {
             arm.elbow = (f.elbow.x, f.elbow.y, f.elbow.z)
             arm.wrist = (f.wrist.x, f.wrist.y, f.wrist.z)
             arm.dorsal = (f.dorsal.x, f.dorsal.y, f.dorsal.z)
             ok = true
-        } else if var g = leftGrip {
-            ok = withUnsafePointer(to: &g) { p in
-                p.withMemoryRebound(to: Float.self, capacity: 16) { vrradar_arm_from_controller($0, &arm) != 0 }
-            }
         }
         var q = VrRadarQuad()
         let aspect = rect.w > 0 && rect.z > 0 ? rect.z / rect.w : 71.0 / 54.0

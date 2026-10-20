@@ -48,7 +48,7 @@ static void t_punch(void) {
     CHECK(run_punch(&g, in, 1, 0.6f, 6, &sq, NULL) == 1);                 /* puño + golpe rápido = petición de golpe */
     CHECK(sq == 0);                                                        /* nunca un cuadrado sintético */
     vrg_init(&g); CHECK(run_punch(&g, in, 0, 0.6f, 6, NULL, NULL) == 0);   /* mano abierta: nada */
-    vrg_init(&g); CHECK(run_punch(&g, in, 1, 0.6f, 60, NULL, NULL) == 0);  /* lento */
+    vrg_init(&g); CHECK(run_punch(&g, in, 1, 0.6f, 90, NULL, NULL) == 0);  /* lento (0,33 m/s) */
     vrg_init(&g); vrg_in_t aw = in; aw.weapon = 0; CHECK(run_punch(&g, aw, 1, 0.6f, 6, NULL, NULL) == 0);   /* con arma: nada */
     vrg_init(&g); vrg_in_t ne = in; ne.n_en = 0; CHECK(run_punch(&g, ne, 1, 0.6f, 6, NULL, NULL) == 0);
     vrg_init(&g); vrg_in_t fa = in; fa.en[0].p[2] = 9; CHECK(run_punch(&g, fa, 1, 0.6f, 6, NULL, NULL) == 0);
@@ -111,7 +111,7 @@ static void t_contact(void) {
         memcpy(m.hand[1], c1, sizeof c1); settle(&g, &m, 12); m.fist_btn[1] = 1; upd(&g, &m, &o);
         CHECK(o.menu_open[1] == 1);
         int ev = 0, still = 0; float x[3];
-        for (int i = 1; i <= 14; i++) { for (int k = 0; k < 3; k++) x[k] = c1[k] + ((k == 2 ? 0.55f : (k == 0 ? -0.1f : 0.0f)) * (i > 8 ? 1.0f : i / 8.0f)); memcpy(m.hand[1], x, sizeof x); upd(&g, &m, &o); ev += o.punch_side == 1; still += (o.press & VRG_R1) != 0 && ev > 0; }
+        for (int i = 1; i <= 14; i++) { for (int k = 0; k < 3; k++) x[k] = c1[k] + ((k == 2 ? 0.55f : (k == 0 ? -0.1f : 0.0f)) * (i > 8 ? 1.0f : i / 8.0f)); memcpy(m.hand[1], x, sizeof x); upd(&g, &m, &o); ev += o.punch_side == 1; still += (o.press & VRG_R2) != 0 && ev > 0; }
         CHECK(ev >= 1); CHECK(still == 0);
     }
     /* umbrales reales del registro: 1,38 m/s hacia delante con alcance 0,25 m y un enemigo a 0,5 m es un golpe */
@@ -175,6 +175,7 @@ static void t_throw(void) {
     float shoulder[3] = {0.4f, 1.2f, 1.3f};
     CHECK(run_throw(in, shoulder, side, 6, &yaw, &gs, &pn) == 1 && fabsf(yaw - 1.5708f) < 0.3f);                                       /* junto al hombro/brazo */
     CHECK(run_throw(in, neck, fwd, 6, &yaw, &gs, &pn) == 0 && gs == 0);                                                                /* hacia el enemigo: puño, no lanzamiento */
+    CHECK(run_throw(in, neck, side, 16, &yaw, &gs, &pn) == 1 && fabsf(yaw - 1.5708f) < 0.3f);                                        /* tirón del registro real (~1,5 m/s, acelerando desde parado): no cancela el agarre pendiente */
     CHECK(run_throw(in, neck, back, 80, &yaw, &gs, &pn) == 0 && gs == 1);                                                              /* tirón lento: agarre */
     vrg_in_t fl = in; fl.n_en = 0; CHECK(run_throw(fl, neck, back, 6, &yaw, &gs, &pn) == 0);                                           /* sin enemigo */
 }
@@ -264,20 +265,20 @@ static void t_chest(void) {
         float c0[3], c1[3]; chest_center(&in, 0, c0); chest_center(&in, 1, c1);
         /* manos fuera de la zona: pulsar = puño solamente */
         settle(&g, &in, 12);
-        in.fist_btn[0] = 1; upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L1)); in.fist_btn[0] = 0; settle(&g, &in, 3);
+        in.fist_btn[0] = 1; upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L2)); in.fist_btn[0] = 0; settle(&g, &in, 3);
         /* mano izquierda en su zona -> pulsar L1 abre objetos (L1 del motor) y se mantiene */
         memcpy(in.hand[0], c0, sizeof c0); settle(&g, &in, 12);
         in.fist_btn[0] = 1; upd(&g, &in, &o);
-        CHECK(o.menu_open[0] == 1 && (o.press & VRG_L1) && !(o.press & VRG_R1) && o.grab_start == 0);
-        int kept = 0; for (int i = 0; i < 25; i++) { in.hand[0][2] += 0.01f; upd(&g, &in, &o); kept += (o.press & VRG_L1) != 0; }   /* la mano puede moverse: sigue abierta */
+        CHECK(o.menu_open[0] == 1 && (o.press & VRG_L2) && !(o.press & VRG_R2) && o.grab_start == 0);
+        int kept = 0; for (int i = 0; i < 25; i++) { in.hand[0][2] += 0.01f; upd(&g, &in, &o); kept += (o.press & VRG_L2) != 0; }   /* la mano puede moverse: sigue abierta */
         CHECK(kept == 25);
-        in.fist_btn[0] = 0; upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L1));
+        in.fist_btn[0] = 0; upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L2));
         /* mano derecha en su zona -> R1 (armas) */
         settle(&g, &in, 5); memcpy(in.hand[1], c1, sizeof c1); settle(&g, &in, 12);
-        in.fist_btn[1] = 1; upd(&g, &in, &o); CHECK(o.menu_open[1] == 1 && (o.press & VRG_R1) && !(o.press & VRG_L1));
+        in.fist_btn[1] = 1; upd(&g, &in, &o); CHECK(o.menu_open[1] == 1 && (o.press & VRG_R2) && !(o.press & VRG_L2));
         in.fist_btn[1] = 0; settle(&g, &in, 3);
         /* la mano derecha en la zona IZQUIERDA no abre nada (cada zona es de su mano) */
-        memcpy(in.hand[1], c0, sizeof c0); settle(&g, &in, 12); in.fist_btn[1] = 1; upd(&g, &in, &o); CHECK(o.menu_open[1] == 0 && !(o.press & VRG_R1));
+        memcpy(in.hand[1], c0, sizeof c0); settle(&g, &in, 12); in.fist_btn[1] = 1; upd(&g, &in, &o); CHECK(o.menu_open[1] == 0 && !(o.press & VRG_R2));
         in.fist_btn[1] = 0; settle(&g, &in, 3);
         /* 0,5 m fuera de la zona: no */
         memcpy(in.hand[0], c0, sizeof c0); in.hand[0][1] -= 0.5f; settle(&g, &in, 12); in.fist_btn[0] = 1; upd(&g, &in, &o); CHECK(o.menu_open[0] == 0);
@@ -285,7 +286,7 @@ static void t_chest(void) {
         /* regla dura: puño ya cerrado y la mano ENTRA en la zona: no se abre la ventana */
         in.hand[0][1] -= 0.0f; memcpy(in.hand[0], base().hand[0], sizeof in.hand[0]); in.hand[0][0] += in.head[0]; in.hand[0][2] += in.head[2];
         in.fist_btn[0] = 1; settle(&g, &in, 12);
-        memcpy(in.hand[0], c0, sizeof c0); upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L1));
+        memcpy(in.hand[0], c0, sizeof c0); upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L2));
         in.fist_btn[0] = 0; settle(&g, &in, 3);
         /* aviso háptico corto al entrar en la zona con la mano libre */
         vrg_init(&g); in.hand[1][0] = 5; in.hand[1][1] = 1.0f; settle(&g, &in, 12);
@@ -297,7 +298,7 @@ static void t_chest(void) {
     in.n_en = 1; in.en[0].p[0] = c1[0]; in.en[0].p[1] = c1[1] - 0.45f; in.en[0].p[2] = c1[2] + 0.1f; in.en[0].yaw = 0;
     memcpy(in.hand[1], c1, sizeof c1); settle(&g, &in, 12);
     in.fist_btn[1] = 1; pgrab(&g, &in, &o);
-    CHECK(o.grab_start == 1 && o.menu_open[1] == 0 && !(o.press & VRG_R1));
+    CHECK(o.grab_start == 1 && o.menu_open[1] == 0 && !(o.press & VRG_R2));
     /* si el agarre no es posible (puño... enemigo caído), cae a la ventana */
     vrg_init(&g); in.en[0].down = 1; in.fist_btn[1] = 0; settle(&g, &in, 12); in.fist_btn[1] = 1; upd(&g, &in, &o);
     CHECK(o.grab_start == 0 && o.menu_open[1] == 1);

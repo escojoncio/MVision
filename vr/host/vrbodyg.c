@@ -34,7 +34,9 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
     G.cfg.right_handed = right_handed;
     int core = bs && (bs->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs->has_player;
     /* R2 = DISPARAR: con arma equipada es el botón de ataque del juego; sin arma no hace nada. El cuadrado físico sigue como en el original. */
-    if (pad & VRG_R2) {
+    const uint16_t pad_in = pad;
+    const int ctl = core && bs->in_control;          /* capa de JUEGO VR; si no (códec, radio, menús, pausa, escenas, ventana de armas/objetos) capa de MENÚ: mando original sin tocar */
+    if ((pad & VRG_R2) && ctl) {
         pad = (uint16_t)(pad & ~VRG_R2);
         if (core && bs->weapon >= 0) pad |= VRG_SQUARE;
     }
@@ -100,7 +102,9 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
             in.n_en++;
         }
     }
+    const int mh_keep = G.menu_hold;                 /* vrg_update lo borra al perder el control, pero con la ventana abierta debe sobrevivir */
     vrg_update(&G, &in, &out);
+    if (!ctl) G.menu_hold = (core && bs->menu_open) ? mh_keep : 0;
     {   /* registro [gest] (va al log del visor): cada intento con su motivo, y cada evento */
         static const char *evn[] = {"", "golpe", "agarre", "apreton", "soltar", "pared", "asomar", "pared2", "dano", "impacto", "ventana", "lanzamiento"};
         static unsigned vb;
@@ -109,6 +113,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
             const vrg_gest_t *q = &out.gest;
             fprintf(stderr, "[gest] vb=%u mano=%d %s v=%.2f m/s adelante=%.2f radial=%.2f alcance=%.2f enemigo=%.2f m grip=%.2f puno=%d contacto=%d\n", vb, q->side, q->reason, q->speed, q->fcos, q->rcos, q->reach, q->dist, q->grip, q->fist, q->contact);
         }
+        if (out.chest_try >= 0) fprintf(stderr, "[gest] vb=%u pecho_fuera mano=%d distancia=%.2f m (zona %.2f m)\n", vb, out.chest_try, out.chest_dist, G.cfg.chest_radius);
         if (out.grab_why) fprintf(stderr, "[gest] vb=%u agarre %s mano=%d distancia=%.2f m (cuello/espalda, limite 0,30)\n", vb, out.grab_why, out.grab_side_try, out.grab_dist);
         if (out.knock_why) fprintf(stderr, "[gest] vb=%u toque en la pared %s mano=%d v=%.2f m/s distancia=%.3f m\n", vb, out.knock_why, out.knock_try_side, out.knock_speed, out.knock_dist);
         if (out.event > 0 && out.event < 12) fprintf(stderr, "[gest] vb=%u evento=%s armas_libres=%d\n", vb, evn[out.event], in.weapon < 0);
@@ -141,5 +146,18 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
     }
     if (out.event > 0 && out.event < 16) n_events[out.event]++;
     if (out.haptic[0] > 0 || out.haptic[1] > 0) { vrgame_haptic(0, out.haptic[0]); vrgame_haptic(1, out.haptic[1]); }
+    if (!ctl) {
+        /* Capa de MENÚ: ningún gesto toca el mando. Única excepción: la ventana de armas/objetos abierta con el gesto del pecho se mantiene mientras
+         * se mantenga el botón del puño (R1/L1 del mando): R2/L2 sostenido y el puño no llega a la ventana. */
+        uint16_t r = pad_in;
+        if (core && bs->menu_open) {
+            for (int s = 0; s < 2; s++) {
+                if (!((G.menu_hold >> s) & 1)) continue;
+                uint16_t fb = s == domside ? VRG_R1 : VRG_L1, wb = s == domside ? VRG_R2 : VRG_L2;
+                if (pad_in & fb) r = (uint16_t)((r & ~fb) | wb); else G.menu_hold &= ~(1 << s);
+            }
+        }
+        return r;
+    }
     return (uint16_t)((pad & ~out.mask) | out.press);
 }
