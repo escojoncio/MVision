@@ -56,7 +56,7 @@ final class DumpCapture: @unchecked Sendable {
             requestedAt = 0
             lock.unlock()
             mv_vrhost_cancel_dump()
-            Storage.log("volcado: sin resultado en 10 s")
+            Storage.log("[volcado] fallo: sin resultado en 10 s (el anfitrión no llegó a copiar el fotograma)")
             buzz = (now + 0.25, 0.8)
             lock.lock()
         }
@@ -66,7 +66,7 @@ final class DumpCapture: @unchecked Sendable {
                 busy = false; requestedAt = 0
                 if r > 0 { buzz = (now + 0.7, 1.0) }
                 else { buzz = (now + 0.25, 0.8) }
-                if r < 0 { Storage.log("volcado: ERROR al escribir") }
+                Storage.log(r < 0 ? "[volcado] fallo: error al escribir en disco" : r == 2 ? "[volcado] escrito (parcial: alguna parte accesoria falló)" : "[volcado] escrito")
             }
         }
         if let p = pendingBuzz { buzz = (now + p.dur, p.amp); pendingBuzz = nil }
@@ -92,7 +92,12 @@ final class DumpCapture: @unchecked Sendable {
     private func startRequest(_ now: Double) {
         lock.lock()
         let root = rootURL
-        if busy || root == nil { lock.unlock(); if root == nil { armed = false; buzz = (now + 0.25, 0.8) }; return }
+        if busy || root == nil {
+            lock.unlock()
+            if root == nil { armed = false; buzz = (now + 0.25, 0.8); Storage.log("[volcado] fallo: carpeta Dumps aún sin resolver") }
+            return
+        }
+        Storage.log("[volcado] gesto aceptado")
         busy = true
         requestedAt = 0                       // aún preparando: el plazo de 5 s cuenta desde que el anfitrión acepta
         lock.unlock()
@@ -102,7 +107,7 @@ final class DumpCapture: @unchecked Sendable {
             let fm = FileManager.default
             do { try fm.createDirectory(at: root!, withIntermediateDirectories: true) }
             catch {
-                Storage.log("volcado: no se puede crear Dumps (\(error.localizedDescription))")
+                Storage.log("[volcado] fallo: no se puede crear Dumps (\(error.localizedDescription))")
                 fail(); return
             }
             if !counterReady {
@@ -120,8 +125,8 @@ final class DumpCapture: @unchecked Sendable {
             let dirFrame = root!.appendingPathComponent(base + "_frame", isDirectory: true)
             if mv_vrhost_request_dump_pair(dirStage.path, dirFrame.path) == 0 {
                 lock.lock(); requestedAt = CFAbsoluteTimeGetCurrent(); lock.unlock()
-                Storage.log("volcado pedido (pareja stage+frame): \(base)")
-            } else { fail() }
+                Storage.log("[volcado] pedido (pareja stage+frame): \(base)")
+            } else { Storage.log("[volcado] fallo: el anfitrión rechazó el pedido (ocupado o sin búferes)"); fail() }
         }
     }
 

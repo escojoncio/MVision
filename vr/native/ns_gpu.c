@@ -36,6 +36,7 @@ void ns_gpu_pack(const NsMesh *m, const NsBaked *baked, NsGpuVert *verts, NsGpuC
             c->tpage = fc->tpage; c->clut = fc->clut;
             uint32_t fl = 0;
             if (hastex) fl |= NSG_CF_TEX;
+            if (!(m->flags & NS_MF_TWOSIDED)) fl |= NSG_CF_ONESIDED;
             if (semi) fl |= NSG_CF_SEMI | (ab << 2);
             if (paint_mesh && (fc->flags & NS_FF_BAKED_OK) && 4u * f + (uint32_t)k < baked->n_colors) { fl |= NSG_CF_PAINT; c->paint = baked->rgba[4u * f + (uint32_t)k] & 0xFFFFFFu; }
             c->flags = (uint16_t)fl;
@@ -749,4 +750,11 @@ size_t ns_gpu_semi_merge(const float *mesh_depth, const uint8_t *mesh_abr, size_
         runs[n].kind = kind; runs[n].start = start; runs[n].count = count; runs[n].abr = abr; n++;
     }
     return n;
+}
+
+int ns_gpu_tri_back(const float p0[3], const float p1[3], const float p2[3], const float eye[3]) {
+    float e1[3], e2[3], r[3];
+    for (int a = 0; a < 3; a++) { e1[a] = p1[a] - p0[a]; e2[a] = p2[a] - p0[a]; r[a] = p0[a] - eye[a]; }
+    const float cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2], cz = e1[0] * e2[1] - e1[1] * e2[0];
+    return r[0] * cx + r[1] * cy + r[2] * cz <= 0.0f;
 }
