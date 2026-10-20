@@ -13,12 +13,18 @@
 struct VrLayer2D {
     uint16_t vram[VH][VW];   /* espejo: solo eventos de VRAM (subidas, copias, rellenos) */
     int have_vram;
+    const uint16_t *vend;        /* VRAM real al cerrar la lista (solo durante vl2d_run) y mapa de bloques 16x16 de VRAM dibujados por la lista: sus texels se leen de ahí */
+    uint8_t drawn[32 * 64];
+    VrL2Info info;
+    int pad, aw;                 /* ventana visible dentro de la capa (pantalla completa): columnas [pad, pad+aw) de w, el resto negro */
+    uint8_t *natm; size_t natm_cap;   /* bit 15 (máscara) de la VRAM mostrada, por píxel nativo */
     int scale, smooth;
     VrLayerPx *px; size_t px_cap;
     uint8_t *rgba; size_t rgba_cap;
     int w, h, ox, oy, valid;     /* zona mostrada en píxeles nativos y su origen en VRAM */
-    int LW, LH;                  /* w*scale, h*scale */
-    int cur_scale;               /* escala con la que están inicializados px/rgba */
+    int LW, LH;                  /* tamaño de la salida RGBA: w*scale, h*scale */
+    int R, PW, PH;               /* escala de RASTERIZADO (1 en modo original: exacto de 5 bits y replicado; = scale en los demás) y tamaño de px: w*R, h*R */
+    int cur_scale;               /* clave (R, escala, modo) con la que están inicializados px/rgba */
     int dx0, dy0, dx1, dy1;      /* rectángulo sucio (muestras, [x0,x1) [y0,y1)) de la lista anterior; vacío si dx1 <= dx0 */
     uint16_t tc[65536]; uint32_t ts[65536]; uint32_t stamp;   /* caché de texels de la primitiva en curso */
     uint32_t qc[262144]; uint32_t qs[262144];                 /* caché del modo nítido por cuarto de texel: texel que cubre | color corregido << 16 */
@@ -27,10 +33,10 @@ struct VrLayer2D {
 
 VrLayer2D *vl2d_new(void) {
     VrLayer2D *L = (VrLayer2D *)calloc(1, sizeof(VrLayer2D));
-    if (L) { L->scale = 4; L->smooth = VL_SMOOTH_SHARP; }
+    if (L) { L->scale = 4; L->smooth = VL_SMOOTH_ORIGINAL; L->R = 1; L->PW = 1; L->PH = 1; L->LW = 1; L->LH = 1; }
     return L;
 }
-void vl2d_free(VrLayer2D *L) { if (!L) return; free(L->px); free(L->rgba); free(L->nat); free(L); }
+void vl2d_free(VrLayer2D *L) { if (!L) return; free(L->natm); free(L->px); free(L->rgba); free(L->nat); free(L); }
 void vl2d_reset(VrLayer2D *L) { if (!L) return; L->have_vram = 0; L->valid = 0; }
 void vl2d_set_options(VrLayer2D *L, int scale, int smooth) {
     if (!L) return;
@@ -61,8 +67,8 @@ static inline void lplot(Ctx *c, int sx, int sy, int r, int g, int b, int dith, 
     int mx = VW * S - 1, my = VH * S - 1;
     int lx = ((sx & mx) - ((L->ox * S) & mx)) & mx;
     int ly = ((sy & my) - ((L->oy * S) & my)) & my;
-    if (lx >= L->LW || ly >= L->LH) return;
-    VrLayerPx *p = &L->px[(size_t)ly * L->LW + lx];
+    if (lx >= L->PW || ly >= L->PH || lx < L->pad * S || lx >= (L->pad + L->aw) * S) return;
+    VrLayerPx *p = &L->px[(size_t)ly * L->PW + lx];
     if (c->mask_chk && p->m) return;
     r = r < 0 ? 0 : r > 255 ? 255 : r;
     g = g < 0 ? 0 : g > 255 ? 255 : g;
@@ -111,6 +117,12 @@ static inline void lplot(Ctx *c, int sx, int sy, int r, int g, int b, int dith, 
 }
 
 /* ---------------- texturas (gpu.c texel + caché) ---------------- */
+/* Texel de VRAM: del espejo, o de la VRAM al cerrar la lista si ese bloque lo dibujó una primitiva de la lista (render a textura) */
+static inline uint16_t vget(const VrLayer2D *L, int x, int y) {
+    if (L->vend && L->drawn[(y >> 4) * 64 + (x >> 4)]) return L->vend[y * VW + x];
+    return L->vram[y][x];
+}
+
 static inline uint16_t texel_raw(const VrLayer2D *L, const GpuOp *o, int u, int v) {
     u &= 255; v &= 255;
     u = (u & ~(o->twmx * 8)) | ((o->twox & o->twmx) * 8);
@@ -118,15 +130,15 @@ static inline uint16_t texel_raw(const VrLayer2D *L, const GpuOp *o, int u, int 
     int y = (o->ty + v) & 511;
     switch (o->tp) {
     case 0: {
-        uint16_t w = L->vram[y][(o->tx + (u >> 2)) & 1023];
-        return L->vram[o->cly & 511][(o->clx + ((w >> ((u & 3) * 4)) & 15)) & 1023];
+        uint16_t w = vget(L, (o->tx + (u >> 2)) & 1023, y);
+        return vget(L, (o->clx + ((w >> ((u & 3) * 4)) & 15)) & 1023, o->cly & 511);
     }
     case 1: {
-        uint16_t w = L->vram[y][(o->tx + (u >> 1)) & 1023];
-        return L->vram[o->cly & 511][(o->clx + ((w >> ((u & 1) * 8)) & 255)) & 1023];
+        uint16_t w = vget(L, (o->tx + (u >> 1)) & 1023, y);
+        return vget(L, (o->clx + ((w >> ((u & 1) * 8)) & 255)) & 1023, o->cly & 511);
     }
     default:
-        return L->vram[y][(o->tx + u) & 1023];
+        return vget(L, (o->tx + u) & 1023, y);
     }
 }
 
@@ -468,19 +480,29 @@ void vl2d_encode(const VrLayerPx *p, int hq, uint8_t rgba[4]) {
 
 /* ---------------- fondo de la pantalla de cine: zona mostrada de la VRAM espejo ampliada ---------------- */
 static void fill_backdrop(VrLayer2D *L, const GpuDisplay *d) {
-    int S = L->scale, mode = L->smooth, w = L->w, h = L->h;
+    int S = L->R, mode = L->smooth, w = L->w, h = L->h;
     size_t need = (size_t)w * h * 3;
     if (need > L->nat_cap) { uint8_t *q = (uint8_t *)realloc(L->nat, need); if (!q) return; L->nat = q; L->nat_cap = need; }
-    for (int y = 0; y < h; y++) {   /* imagen nativa descodificada (15 o 24 bits) */
+    if ((size_t)w * h > L->natm_cap) { uint8_t *q = (uint8_t *)realloc(L->natm, (size_t)w * h); if (!q) return; L->natm = q; L->natm_cap = (size_t)w * h; }
+    int pad = L->pad, aw = L->aw;
+    for (int y = 0; y < h; y++) {   /* imagen nativa descodificada (15 o 24 bits); fuera de la ventana visible (márgenes del rango) negro, como el hardware */
         int py = (d->y + y) & (VH - 1);
-        uint8_t *o = &L->nat[(size_t)y * w * 3];
-        if (d->depth24) { const uint8_t *ln = (const uint8_t *)L->vram[py]; for (int x = 0; x < w * 3; x++) o[x] = ln[((d->x * 2) + x) & 2047]; }
-        else for (int x = 0; x < w; x++) { uint16_t t = L->vram[py][(d->x + x) & (VW - 1)]; o[x * 3] = (uint8_t)ex8(t & 31); o[x * 3 + 1] = (uint8_t)ex8((t >> 5) & 31); o[x * 3 + 2] = (uint8_t)ex8((t >> 10) & 31); }
+        uint8_t *o = &L->nat[(size_t)y * w * 3], *om = &L->natm[(size_t)y * w];
+        memset(o, 0, (size_t)w * 3); memset(om, 0, (size_t)w);
+        for (int x = pad; x < pad + aw && x < w; x++) {
+            int xs = x - pad;
+            if (d->depth24) { const uint8_t *ln = (const uint8_t *)L->vram[py]; for (int k = 0; k < 3; k++) o[x * 3 + k] = ln[((d->x * 2) + xs * 3 + k) & 2047]; }
+            else {
+                uint16_t t = L->vram[py][(d->x + xs) & (VW - 1)];
+                o[x * 3] = (uint8_t)ex8(t & 31); o[x * 3 + 1] = (uint8_t)ex8((t >> 5) & 31); o[x * 3 + 2] = (uint8_t)ex8((t >> 10) & 31);
+                om[x] = (uint8_t)(t >> 15);   /* bit de máscara del píxel de VRAM: una primitiva con «comprobar máscara» no lo pisa (gpu.c plot) */
+            }
+        }
     }
-    int *xi = (int *)malloc((size_t)L->LW * 2 * sizeof(int));
+    int *xi = (int *)malloc((size_t)L->PW * 2 * sizeof(int));
     if (!xi) return;
-    int *wxi = xi + L->LW;
-    for (int lx = 0; lx < L->LW; lx++) {   /* columna nativa izquierda y peso (0..256) del vecino derecho */
+    int *wxi = xi + L->PW;
+    for (int lx = 0; lx < L->PW; lx++) {   /* columna nativa izquierda y peso (0..256) del vecino derecho */
         if (mode == VL_SMOOTH_ORIGINAL || S == 1) { xi[lx] = lx / S; wxi[lx] = 0; continue; }
         double fx = (lx + 0.5) / S - 0.5;
         int x0 = (int)floor(fx);
@@ -488,7 +510,7 @@ static void fill_backdrop(VrLayer2D *L, const GpuDisplay *d) {
         if (mode == VL_SMOOTH_SHARP) { double q = (wx - 0.5) * S + 0.5; wx = q < 0 ? 0 : q > 1 ? 1 : q; }
         xi[lx] = x0; wxi[lx] = (int)(wx * 256.0 + 0.5);
     }
-    for (int ly = 0; ly < L->LH; ly++) {
+    for (int ly = 0; ly < L->PH; ly++) {
         int y0, wy;
         if (mode == VL_SMOOTH_ORIGINAL || S == 1) { y0 = ly / S; wy = 0; }
         else {
@@ -500,8 +522,8 @@ static void fill_backdrop(VrLayer2D *L, const GpuDisplay *d) {
         }
         int ya = y0 < 0 ? 0 : y0 >= h ? h - 1 : y0, yb = y0 + 1 < 0 ? 0 : y0 + 1 >= h ? h - 1 : y0 + 1;
         const uint8_t *ra = &L->nat[(size_t)ya * w * 3], *rb = &L->nat[(size_t)yb * w * 3];
-        VrLayerPx *p = &L->px[(size_t)ly * L->LW];
-        for (int lx = 0; lx < L->LW; lx++, p++) {
+        VrLayerPx *p = &L->px[(size_t)ly * L->PW];
+        for (int lx = 0; lx < L->PW; lx++, p++) {
             int xa = xi[lx] < 0 ? 0 : xi[lx] >= w ? w - 1 : xi[lx], xb = xi[lx] + 1 < 0 ? 0 : xi[lx] + 1 >= w ? w - 1 : xi[lx] + 1;
             int wx = wxi[lx];
             for (int k = 0; k < 3; k++) {
@@ -513,36 +535,38 @@ static void fill_backdrop(VrLayer2D *L, const GpuDisplay *d) {
                 }
                 p->c[k] = (uint8_t)(S == 1 ? v >> 3 : v);
             }
-            p->m = 0; p->t = 0; p->d[0] = p->d[1] = p->d[2] = 0;
+            p->m = L->natm[(size_t)(ly / S) * w + lx / S]; p->t = 0; p->d[0] = p->d[1] = p->d[2] = 0;
         }
     }
     free(xi);
 }
 
 /* ---------------- lista ---------------- */
-static int ensure(VrLayer2D *L, size_t npx) {
+static int ensure(VrLayer2D *L, size_t npx, size_t nout) {
     if (npx > L->px_cap) {
         VrLayerPx *q = (VrLayerPx *)realloc(L->px, npx * sizeof *q);
         if (!q) return 0;
         L->px = q; L->px_cap = npx; L->cur_scale = 0;   /* el contenido ya no es válido: reinicialización completa */
     }
-    if (npx * 4 > L->rgba_cap) {
-        uint8_t *q = (uint8_t *)realloc(L->rgba, npx * 4);
+    if (nout * 4 > L->rgba_cap) {
+        uint8_t *q = (uint8_t *)realloc(L->rgba, nout * 4);
         if (!q) return 0;
-        L->rgba = q; L->rgba_cap = npx * 4; L->cur_scale = 0;
+        L->rgba = q; L->rgba_cap = nout * 4; L->cur_scale = 0;
     }
     return 1;
 }
 
-static void blank(VrLayer2D *L, int x0, int y0, int x1, int y1) {   /* [x0,x1) x [y0,y1) en muestras: capa transparente */
+static void blank(VrLayer2D *L, int x0, int y0, int x1, int y1) {   /* [x0,x1) x [y0,y1) en muestras de px: capa transparente (y su salida RGBA, k veces mayor en modo original) */
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    if (x1 > L->LW) x1 = L->LW;
-    if (y1 > L->LH) y1 = L->LH;
+    if (x1 > L->PW) x1 = L->PW;
+    if (y1 > L->PH) y1 = L->PH;
+    if (x1 <= x0) return;
+    int k = L->LW / L->PW;
     for (int y = y0; y < y1; y++) {
-        VrLayerPx *p = &L->px[(size_t)y * L->LW + x0];
+        VrLayerPx *p = &L->px[(size_t)y * L->PW + x0];
         for (int x = x0; x < x1; x++, p++) { memset(p, 0, sizeof *p); p->t = 256; }
-        memset(&L->rgba[((size_t)y * L->LW + x0) * 4], 0, (size_t)(x1 - x0) * 4);
+        for (int j = 0; j < k; j++) memset(&L->rgba[((size_t)(y * k + j) * L->LW + (size_t)x0 * k) * 4], 0, (size_t)(x1 - x0) * k * 4);
     }
 }
 
@@ -569,35 +593,60 @@ static void op_box(const GpuOp *o, int S, int *x0, int *y0, int *x1, int *y1) {
 int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     if (!L || !l) return 0;
     L->valid = 0;
-    if (l->vram_init) { memcpy(L->vram, l->vram_init, sizeof L->vram); L->have_vram = 1; }
+    /* La VRAM de partida es la REAL del emulador al inicio de la lista (vram_start, cada lista) o, si el productor no la da, la instantánea de la primera lista/resincronización
+     * (vram_init) más los eventos: así una subida o un relleno que no pasen por la lista (DMA, copias, escrituras del juego) nunca dejan texels basura en fuentes y CLUT. */
+    { const uint16_t *v0 = l->vram_start ? l->vram_start : l->vram_init; if (v0) { memcpy(L->vram, v0, sizeof L->vram); L->have_vram = 1; } }
     int draw = sc && sc->op_dest && sc->n_op_dest >= l->nops && L->have_vram;
-    int S = L->scale;
+    int S = L->scale;   /* escala de la SALIDA */
+    int R = S;          /* escala de rasterizado */
     int w = l->disp.w > 0 ? l->disp.w : 320, h = l->disp.h > 0 ? l->disp.h : 240;
+    int pad = 0, aw = 0, oxe = l->disp.x;
+    if (full) {   /* pantalla completa: el MARCO del hardware (fw x h, como gpu_present_rgba): el rango horizontal puede ser mayor o menor que el nominal (créditos, códec) */
+        int fw = l->disp.fw > 0 ? l->disp.fw : w;
+        if (fw > VW) fw = VW;
+        pad = l->disp.pad_l > 0 ? l->disp.pad_l : 0;
+        aw = l->disp.aw > 0 ? l->disp.aw : fw;
+        if (pad > fw) pad = fw;
+        if (pad + aw > fw) aw = fw - pad;
+        w = fw; oxe = l->disp.x - pad;
+    }
     if (w > VW) w = VW;
     if (h > VH) h = VH;
+    if (!full) { aw = l->disp.aw > 0 && l->disp.aw < w ? l->disp.aw : w; }   /* panel: rectángulo nominal, pero lo que el rango deja fuera (basura de VRAM) no se dibuja */
+    if (full && !l->disp.enabled) aw = 0;   /* pantalla apagada: negro, como el fotograma normal */
     int ux0 = 0, uy0 = 0, ux1 = 0, uy1 = 0;   /* sucio de esta lista */
+    /* Modo original: el rasterizado es el EXACTO de la GPU original (escala 1: 5 bits, tramado, mismo muestreo de texels) y la salida lo replica S x S (vecino más próximo
+     * a escala entera): el texto sale idéntico en forma y color y nítido. Excepción: fotograma completo en 24 bits (vídeo), que necesita los 8 bits por canal. */
+    if (L->smooth == VL_SMOOTH_ORIGINAL && !(full && l->disp.depth24)) R = 1;
     if (draw) {
-        size_t npx = (size_t)w * S * h * S;
-        if (npx > (size_t)6 * 1024 * 6 * 512) draw = 0;   /* tope de memoria (con escala 6 una pantalla de 640x480 son 11 Mpx) */
-        else if (!ensure(L, npx)) draw = 0;
+        size_t nout = (size_t)w * S * h * S, npx = (size_t)w * R * h * R;
+        if (nout > (size_t)6 * 1024 * 6 * 512) draw = 0;   /* tope de memoria (con escala 6 una pantalla de 640x480 son 11 Mpx) */
+        else if (!ensure(L, npx, nout)) draw = 0;
     }
     if (draw) {
-        if (L->cur_scale != S || L->w != w || L->h != h || L->ox != l->disp.x || L->oy != l->disp.y) {
-            L->w = w; L->h = h; L->ox = l->disp.x; L->oy = l->disp.y; L->LW = w * S; L->LH = h * S;
-            L->cur_scale = S;
-            L->dx0 = L->dy0 = 0; L->dx1 = L->LW; L->dy1 = L->LH;   /* reinicialización completa */
+        int key = (R << 8) | (S << 4) | L->smooth;
+        if (L->cur_scale != key || L->w != w || L->h != h || L->ox != oxe || L->oy != l->disp.y || L->pad != pad || L->aw != aw) {
+            L->w = w; L->h = h; L->ox = oxe; L->oy = l->disp.y; L->pad = pad; L->aw = aw; L->LW = w * S; L->LH = h * S;
+            L->R = R; L->PW = w * R; L->PH = h * R;
+            L->cur_scale = key;
+            L->dx0 = L->dy0 = 0; L->dx1 = L->PW; L->dy1 = L->PH;   /* reinicialización completa */
         }
         blank(L, L->dx0, L->dy0, L->dx1, L->dy1);
         L->dx0 = L->dy0 = L->dx1 = L->dy1 = 0;
-        ux0 = L->LW; uy0 = L->LH; ux1 = 0; uy1 = 0;
+        ux0 = L->PW; uy0 = L->PH; ux1 = 0; uy1 = 0;
         if (full) {
             fill_backdrop(L, &l->disp);
-            ux0 = 0; uy0 = 0; ux1 = L->LW; uy1 = L->LH;
+            ux0 = 0; uy0 = 0; ux1 = L->PW; uy1 = L->PH;
         }
     }
+    L->vend = l->vram_end;
+    memset(&L->info, 0, sizeof L->info);
+    L->info.fw = w; L->info.h = h; L->info.aw = aw; L->info.pad = pad; L->info.scale = S; L->info.raster = R; L->info.smooth = L->smooth; L->info.full = full;
+    L->info.used_start = l->vram_start != NULL; L->info.used_end = l->vram_end != NULL;
+    memset(L->drawn, 0, sizeof L->drawn);
     Ctx c0;
     memset(&c0, 0, sizeof c0);
-    c0.L = L; c0.S = S; c0.hq = S > 1; c0.smooth = L->smooth; c0.cmax = c0.hq ? 255 : 31;
+    c0.L = L; c0.S = R; c0.hq = R > 1; c0.smooth = L->smooth; c0.cmax = c0.hq ? 255 : 31;
     for (uint32_t i = 0; i < l->nops; i++) {
         const GpuOp *o = &l->ops[i];
         switch (o->type) {
@@ -605,11 +654,28 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
         case GPU_OP_UPLOAD: ev_upload(L, o, l); break;
         case GPU_OP_VCOPY: ev_copy(L, o); break;
         case GPU_OP_POLY: case GPU_OP_RECT: case GPU_OP_LINE: {
+            if (l->vram_end) {   /* ¿dibuja fuera de la zona mostrada? (render a textura): esos bloques de VRAM se leen de la VRAM al cerrar */
+                int a, b, e, f;
+                op_box(o, 1, &a, &b, &e, &f);
+                if (a < o->cx1) a = o->cx1;
+                if (b < o->cy1) b = o->cy1;
+                if (e > o->cx2 + 1) e = o->cx2 + 1;
+                if (f > o->cy2 + 1) f = o->cy2 + 1;
+                if (a < 0) a = 0;
+                if (b < 0) b = 0;
+                if (e > VW) e = VW;
+                if (f > VH) f = VH;
+                int inside = a >= l->disp.x && e <= l->disp.x + l->disp.w && b >= l->disp.y && f <= l->disp.y + l->disp.h;
+                if (!inside && e > a && f > b)
+                    for (int by = b >> 4; by <= (f - 1) >> 4; by++) for (int bx = a >> 4; bx <= (e - 1) >> 4; bx++) L->drawn[by * 64 + bx] = 1;
+            }
             if (!draw) break;
             if (!full && sc->op_dest[i] != 2) break;
+            L->info.prims++;
+            if (o->flags & GPU_F_MASK_CHK) L->info.mask_prims++;
             Ctx c = c0;
             c.o = o;
-            c.cx1 = o->cx1 * S; c.cy1 = o->cy1 * S; c.cx2 = (o->cx2 + 1) * S - 1; c.cy2 = (o->cy2 + 1) * S - 1;
+            c.cx1 = o->cx1 * R; c.cy1 = o->cy1 * R; c.cx2 = (o->cx2 + 1) * R - 1; c.cy2 = (o->cy2 + 1) * R - 1;
             c.semi = !!(o->flags & GPU_F_SEMI);
             c.mask_chk = !!(o->flags & GPU_F_MASK_CHK); c.mask_set = !!(o->flags & GPU_F_MASK_SET);
             c.abr = o->abr;
@@ -643,8 +709,8 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
             }
             if (!full) {
                 int a, b, e, f;
-                op_box(o, S, &a, &b, &e, &f);
-                a -= L->ox * S; e -= L->ox * S; b -= L->oy * S; f -= L->oy * S;
+                op_box(o, R, &a, &b, &e, &f);
+                a -= L->ox * R; e -= L->ox * R; b -= L->oy * R; f -= L->oy * R;
                 if (a < ux0) ux0 = a;
                 if (b < uy0) uy0 = b;
                 if (e > ux1) ux1 = e;
@@ -658,16 +724,22 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
         default: break;
         }
     }
+    L->vend = NULL;
     if (!draw) return 0;
     if (ux0 < 0) ux0 = 0;
     if (uy0 < 0) uy0 = 0;
-    if (ux1 > L->LW) ux1 = L->LW;
-    if (uy1 > L->LH) uy1 = L->LH;
+    if (ux1 > L->PW) ux1 = L->PW;
+    if (uy1 > L->PH) uy1 = L->PH;
     if (ux1 > ux0 && uy1 > uy0) {
+        int k = L->LW / L->PW;   /* replicado de salida (1 salvo en modo original) */
         for (int y = uy0; y < uy1; y++) {
-            const VrLayerPx *p = &L->px[(size_t)y * L->LW + ux0];
-            uint8_t *q = &L->rgba[((size_t)y * L->LW + ux0) * 4];
-            for (int x = ux0; x < ux1; x++, p++, q += 4) vl2d_encode(p, c0.hq, q);
+            const VrLayerPx *p = &L->px[(size_t)y * L->PW + ux0];
+            uint8_t *q = &L->rgba[((size_t)y * k * L->LW + (size_t)ux0 * k) * 4];
+            for (int x = ux0; x < ux1; x++, p++, q += 4 * k) {
+                vl2d_encode(p, c0.hq, q);
+                for (int i = 1; i < k; i++) memcpy(q + 4 * i, q, 4);
+            }
+            for (int j = 1; j < k; j++) memcpy(&L->rgba[((size_t)(y * k + j) * L->LW + (size_t)ux0 * k) * 4], &L->rgba[((size_t)y * k * L->LW + (size_t)ux0 * k) * 4], (size_t)(ux1 - ux0) * k * 4);
         }
         L->dx0 = ux0; L->dy0 = uy0; L->dx1 = ux1; L->dy1 = uy1;
     }
@@ -683,8 +755,9 @@ const uint8_t *vl2d_rgba(const VrLayer2D *L, int *w, int *h) {
 }
 const VrLayerPx *vl2d_px(const VrLayer2D *L, int *w, int *h) {
     if (!L || !L->valid) return NULL;
-    if (w) *w = L->LW;
-    if (h) *h = L->LH;
+    if (w) *w = L->PW;
+    if (h) *h = L->PH;
     return L->px;
 }
+void vl2d_info(const VrLayer2D *L, VrL2Info *o) { if (o) { if (L) *o = L->info; else memset(o, 0, sizeof *o); } }
 const uint16_t *vl2d_vram(const VrLayer2D *L) { return L ? &L->vram[0][0] : NULL; }
