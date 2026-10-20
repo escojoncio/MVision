@@ -122,6 +122,7 @@ static void t_contact(void) {
 }
 
 static vrg_in_t grab_setup(void);
+static void t_throw(void);
 /* barrido continuo y reglas de agarre vs puño */
 static void t_rules(void) {
     vrg_out_t o; vrg_t g;
@@ -141,7 +142,7 @@ static void t_rules(void) {
     /* mano quieta en el cuello + pulsación: agarre (llega al motor tras el margen) */
     vrg_init(&g); in = grab_setup(); in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 1.15f; settle(&g, &in, 12);
     in.fist_btn[1] = 1; upd(&g, &in, &o); CHECK(o.grab_start == 0 && o.grab_why && !strcmp(o.grab_why, "pendiente"));
-    gs = 0; pn = 0; for (int i = 0; i < 10; i++) { upd(&g, &in, &o); gs += o.grab_start; pn += o.punch_side >= 0; }
+    gs = 0; pn = 0; for (int i = 0; i < 22; i++) { upd(&g, &in, &o); gs += o.grab_start; pn += o.punch_side >= 0; }
     CHECK(gs == 1 && pn == 0);
     /* pulsación y golpe inmediato: el agarre pendiente se cancela y sale el puño */
     vrg_init(&g); in = grab_setup(); in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 1.0f; settle(&g, &in, 12);
@@ -152,6 +153,30 @@ static void t_rules(void) {
     vrg_init(&g); in = grab_setup(); in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 0.75f; settle(&g, &in, 12);
     for (int i = 1; i <= 4; i++) { in.hand[1][2] = 0.75f + 0.06f * i; upd(&g, &in, &o); }
     in.fist_btn[1] = 1; in.hand[1][2] += 0.06f; upd(&g, &in, &o);  CHECK(o.grab_start == 0 && o.punch_side == 1 && o.grab_why && (!strcmp(o.grab_why, "tras_golpe") || !strcmp(o.grab_why, "mano_rapida")));   /* el puño sale en el mismo fotograma */
+}
+
+/* lanzamiento: botón pulsado junto al enemigo + tirón rápido en <= 0,3 s */
+static int run_throw(vrg_in_t in, const float p0[3], const float d[3], int n, float *yaw, int *grabs, int *punches) {
+    vrg_t g; vrg_out_t o; vrg_init(&g); memcpy(in.hand[1], p0, 3 * sizeof(float)); settle(&g, &in, 12);
+    in.fist_btn[1] = 1; upd(&g, &in, &o); int th = 0, gs = 0, pn = 0;
+    for (int i = 1; i <= n + 3; i++) { float t = i > n ? 1.0f : (float)i / n; for (int k = 0; k < 3; k++) in.hand[1][k] = p0[k] + d[k] * t; upd(&g, &in, &o);
+        if (o.throw_side == 1) { th++; if (yaw) *yaw = o.throw_yaw; if (!o.grab_start || o.event != VRG_EV_THROW) th += 100; } gs += o.grab_start; pn += o.punch_side >= 0; }
+    if (grabs) *grabs = gs;
+    if (punches) *punches = pn;
+    return th;
+}
+static void t_throw(void) {
+    vrg_in_t in = grab_setup(); float yaw = 0; int gs, pn;
+    float neck[3] = {0.1f, 1.45f, 1.15f};
+    float back[3] = {0, 0, -0.5f}, side[3] = {0.5f, 0, 0}, down[3] = {0, -0.5f, 0}, fwd[3] = {0, 0, 0.5f};
+    CHECK(run_throw(in, neck, back, 6, &yaw, &gs, &pn) == 1 && fabsf(fabsf(yaw) - 3.14159f) < 0.3f && gs == 1 && pn == 0);        /* hacia atrás del jugador */
+    CHECK(run_throw(in, neck, side, 6, &yaw, &gs, &pn) == 1 && fabsf(yaw - 1.5708f) < 0.3f);                                          /* hacia un lado */
+    CHECK(run_throw(in, neck, down, 6, &yaw, &gs, &pn) == 1 && fabsf(fabsf(yaw) - 3.14159f) < 0.3f);                                   /* hacia abajo: lejos del enemigo */
+    float shoulder[3] = {0.4f, 1.2f, 1.3f};
+    CHECK(run_throw(in, shoulder, side, 6, &yaw, &gs, &pn) == 1 && fabsf(yaw - 1.5708f) < 0.3f);                                       /* junto al hombro/brazo */
+    CHECK(run_throw(in, neck, fwd, 6, &yaw, &gs, &pn) == 0 && gs == 0);                                                                /* hacia el enemigo: puño, no lanzamiento */
+    CHECK(run_throw(in, neck, back, 80, &yaw, &gs, &pn) == 0 && gs == 1);                                                              /* tirón lento: agarre */
+    vrg_in_t fl = in; fl.n_en = 0; CHECK(run_throw(fl, neck, back, 6, &yaw, &gs, &pn) == 0);                                           /* sin enemigo */
 }
 
 /* andar rápido (cuerpo, cabeza y manos juntos 4 m/s): no es un golpe */
@@ -166,7 +191,7 @@ static void t_walk(void) {
 }
 
 /* el agarre llega al motor tras un margen de 0,15 s sin que la mano se lance: avanza hasta que arranque (o 10 VBlanks) */
-static void pgrab(vrg_t *g, vrg_in_t *in, vrg_out_t *o) { for (int i = 0; i < 10; i++) { upd(g, in, o); if (o->grab_start) return; } }
+static void pgrab(vrg_t *g, vrg_in_t *in, vrg_out_t *o) { for (int i = 0; i < 22; i++) { upd(g, in, o); if (o->grab_start) return; } }
 /* enemigo a 0,4 m delante del cuerpo mirando a +Z (le damos la espalda): cuello (0,1.45,1.3) y espalda (0,1.2,1.05) */
 static vrg_in_t grab_setup(void) {
     vrg_in_t in = base(); in.n_en = 1; in.en[0].p[0] = 0; in.en[0].p[1] = 1.0f; in.en[0].p[2] = 1.3f; in.en[0].yaw = 0;
@@ -190,7 +215,7 @@ static void t_grab(void) {
     in.fist_btn[1] = 0; upd(&g, &in, &o); CHECK(o.grab_hold == 0 && o.event == VRG_EV_RELEASE);
     int sq = 0; in.fist_btn[1] = 1; upd(&g, &in, &o); sq += o.squeeze; CHECK(sq == 1 && o.event == VRG_EV_SQUEEZE && o.grab_start == 0);
     /* mano lejos del cuello/espalda (0,5 m): no agarra, motivo */
-    vrg_init(&g); in = grab_setup(); in.hand[1][0] = 0.5f; in.hand[1][1] = 1.45f; in.hand[1][2] = 1.15f; settle(&g, &in, 12);
+    vrg_init(&g); in = grab_setup(); in.hand[1][0] = 1.0f; in.hand[1][1] = 1.45f; in.hand[1][2] = 1.15f; settle(&g, &in, 12);
     in.fist_btn[1] = 1; upd(&g, &in, &o); CHECK(o.grab_start == 0 && o.grab_why && !strcmp(o.grab_why, "mano_lejos"));
     /* justo en el límite: 0,28 m del cuello sí, 0,34 m no */
     vrg_init(&g); in = grab_setup(); in.hand[1][0] = 0.28f; in.hand[1][1] = 1.45f; in.hand[1][2] = 1.3f; settle(&g, &in, 12);
@@ -336,7 +361,7 @@ static void t_robust(void) {
 }
 
 int main(void) {
-    t_punch(); t_contact(); t_rules(); t_walk(); t_grab(); t_chest(); t_knock(); t_peek(); t_robust();
+    t_punch(); t_contact(); t_rules(); t_throw(); t_walk(); t_grab(); t_chest(); t_knock(); t_peek(); t_robust();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails != 0;
 }

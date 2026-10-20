@@ -92,7 +92,11 @@ void vrm_frame(Vrm *v, const VrmEng *e, const VrmFrame *f) {
     if (!v->grab_owned) v->squeeze_pend = 0;
     if (f->squeeze) { v->squeeze_pend = 1; }
     if (f->punch_side >= 0 && f->punch_side < 2) { v->p_punch = 1; v->p_punch_side = f->punch_side; v->p_punch_ttl = v->ttl_frames; }
-    if (f->grab_start && f->grab_side >= 0 && f->grab_side < 2) { v->p_grab = 1; v->p_grab_side = f->grab_side; v->p_grab_ttl = v->ttl_frames; }
+    if (f->grab_start && f->grab_side >= 0 && f->grab_side < 2) {
+        v->p_grab = 1; v->p_grab_side = f->grab_side; v->p_grab_ttl = v->ttl_frames;
+        v->throw_arm = f->throw_side >= 0 && f->throw_side < 2 && isfinite(f->throw_yaw);
+        if (v->throw_arm) { float t = f->throw_yaw * (4096.0f / 6.2831853f); v->throw_dir = ((int)lrintf(t) % 4096 + 4096) % 4096; }
+    }
 }
 
 /* origen del puñetazo: de las últimas muestras con el puño cerrado, la más cercana a algún enemigo (la animación del motor llega unos
@@ -164,8 +168,9 @@ void vrm_post_grab(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time) {
     v->ctx_grab = 0; v->ctx_ok = 0;
     if (r32(e, work + VRM_W_PTARGET) && r16(e, work + VRM_W_LOCAL) == 0) {
         say(v, "[gest] agarre iniciado (presa tomada con la caja centrada en la mano: %.0f,%.0f,%.0f mm)", v->ctx_origin[0], v->ctx_origin[1], v->ctx_origin[2]);
+        if (v->throw_arm) { v->throw_arm = 0; v->throw_left = VRM_THROW_FRAMES; v->throw_started = 0; v->n_throw++; say(v, "[gest] lanzamiento: se arrastra al enemigo %d fotogramas con rumbo %d (4096 = vuelta) y se suelta", VRM_THROW_FRAMES, v->throw_dir); }
     } else {
-        v->grab_owned = 0; v->n_grab_rejected++;
+        v->grab_owned = 0; v->n_grab_rejected++; if (v->throw_arm) { v->throw_arm = 0; say(v, "[gest] lanzamiento cancelado: el motor no encontró presa"); }
         say(v, "[gest] agarre rechazado por el motor: ninguna presa en la caja centrada en la mano (%.0f,%.0f,%.0f mm)", v->ctx_origin[0], v->ctx_origin[1], v->ctx_origin[2]);
     }
 }
@@ -271,6 +276,12 @@ int vrm_hold_tick(Vrm *v, const VrmEng *e, uint32_t work) {
     uint16_t status = okr(pad, 4) ? (uint16_t)r16(e, pad) : 0, press = okr(pad, 4) ? (uint16_t)r16(e, pad + 2) : 0;
     int held = v->hold || (status & VRM_PAD_ACT), sq = v->squeeze_pend || (press & VRM_PAD_ACT);
     if (!okr(tg, 72) || r16(e, tg + 38) < 1 || fr >= 90 || r16(e, tg + 66) == 0) { end_hold(v, e, work); v->squeeze_pend = 0; return 1; }
+    if (v->throw_left > 0) {                          /* lanzamiento: rumbo del tirón + arrastre, luego soltar */
+        w32(e, VRM_G_MOVEDIR, (uint32_t)v->throw_dir);
+        e->call(e->user, VRM_FN_START, work, VRM_ST_DRAG);
+        if (--v->throw_left == 0) { w32(e, VRM_G_MOVEDIR, 0xFFFFFFFFu); end_hold(v, e, work); say(v, "[gest] lanzamiento terminado"); }
+        return 1;
+    }
     if (sq) {
         v->squeeze_pend = 0; v->n_squeeze++;
         e->call(e->user, VRM_FN_START, work, VRM_ST_SQUEEZE);
@@ -298,7 +309,7 @@ int vrm_squeeze_tick(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time) {
 
 void vrm_pre_drag(Vrm *v, const VrmEng *e, uint32_t work, uint16_t *saved) {
     *saved = 0xFFFF;
-    if (!v->enable || !v->grab_owned || !v->hold) return;
+    if (!v->enable || !v->grab_owned || !(v->hold || v->throw_left > 0)) return;
     uint32_t pad = r32(e, work + VRM_W_PAD);
     if (!okr(pad, 4)) return;
     *saved = (uint16_t)r16(e, pad); w16(e, pad, (int16_t)(*saved | VRM_PAD_ACT));
