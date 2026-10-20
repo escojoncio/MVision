@@ -102,7 +102,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
     }
     vrg_update(&G, &in, &out);
     {   /* registro [gest] (va al log del visor): cada intento con su motivo, y cada evento */
-        static const char *evn[] = {"", "golpe", "agarre", "apreton", "soltar", "pared", "asomar", "pared2", "dano", "impacto", "ventana"};
+        static const char *evn[] = {"", "golpe", "agarre", "apreton", "soltar", "pared", "asomar", "pared2", "dano", "impacto", "ventana", "lanzamiento"};
         static unsigned vb;
         vb++;
         if (out.gest.valid) {
@@ -111,12 +111,12 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
         }
         if (out.grab_why) fprintf(stderr, "[gest] vb=%u agarre %s mano=%d distancia=%.2f m (cuello/espalda, limite 0,30)\n", vb, out.grab_why, out.grab_side_try, out.grab_dist);
         if (out.knock_why) fprintf(stderr, "[gest] vb=%u toque en la pared %s mano=%d v=%.2f m/s distancia=%.3f m\n", vb, out.knock_why, out.knock_try_side, out.knock_speed, out.knock_dist);
-        if (out.event > 0 && out.event < 11) fprintf(stderr, "[gest] vb=%u evento=%s armas_libres=%d\n", vb, evn[out.event], in.weapon < 0);
+        if (out.event > 0 && out.event < 12) fprintf(stderr, "[gest] vb=%u evento=%s armas_libres=%d\n", vb, evn[out.event], in.weapon < 0);
     }
     /* decisiones del cuerpo -> motor (ganchos de vr/input/vr_melee): ninguna pasa por botones */
     mf.punch_side = out.punch_side; mf.knock_side = out.knock_side;
     mf.grab_start = out.grab_start; mf.grab_side = out.grab_side_try >= 0 && out.grab_start ? out.grab_side_try : out.grab_side;
-    mf.hold = out.grab_hold; mf.swinging = out.swinging; mf.squeeze = out.squeeze;
+    mf.throw_side = out.throw_side; mf.throw_yaw = out.throw_yaw; mf.hold = out.grab_hold; mf.swinging = out.swinging; mf.squeeze = out.squeeze;
     {
         static int warned;
         if (!vrmelee_rt_installed()) {

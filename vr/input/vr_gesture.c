@@ -13,7 +13,7 @@ void vrg_cfg_defaults(vrg_cfg_t *c) {
     c->grab_range = 1.3f; c->neck_radius = 0.30f; c->neck_height = 0.45f; c->back_dist = 0.25f; c->grab_after_punch_s = 0.3f;
     c->chest_down = 0.37f; c->chest_side = 0.15f; c->chest_fwd = 0.12f; c->chest_radius = 0.22f;
     c->grip_on = 0.65f; c->grip_off = 0.35f; c->peek_on = 0.12f; c->peek_off = 0.06f; c->cooldown_s = 0.2f;
-    c->grab_slow_speed = 0.5f; c->grab_delay_s = 0.15f; c->contact_latch_s = 0.15f; c->contact_speed = 0.8f; c->body_radius = 0.28f; c->body_low = 0.5f; c->body_high = 0.65f; c->fist_radius = 0.12f; c->contact_tol = 0.05f;
+    c->throw_speed = 1.2f; c->throw_reach = 0.30f; c->grab_slow_speed = 0.5f; c->grab_delay_s = 0.3f; c->contact_latch_s = 0.15f; c->contact_speed = 0.8f; c->body_radius = 0.28f; c->body_low = 0.5f; c->body_high = 0.65f; c->fist_radius = 0.12f; c->contact_tol = 0.05f;
 }
 void vrg_reset(vrg_t *g) {
     vrg_cfg_t c = g->cfg;
@@ -68,7 +68,7 @@ static int hand_vel(vrg_t *g, int s, const float p[3], double t, float v[3]) {
 }
 
 void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
-    memset(out, 0, sizeof *out); out->punch_side = -1; out->knock_side = -1; out->knock_try_side = -1; out->grab_side_try = -1; out->grab_side = -1; out->grab_en = -1;
+    memset(out, 0, sizeof *out); out->punch_side = -1; out->knock_side = -1; out->throw_side = -1; out->knock_try_side = -1; out->grab_side_try = -1; out->grab_side = -1; out->grab_en = -1;
     const vrg_cfg_t *c = &g->cfg;
     float dt = (fin(in->dt) && in->dt > 0.001f) ? (in->dt > 0.1f ? 0.1f : in->dt) : 0.02f;
     int ok = c->enable && in->active && fin3(in->body) && fin3(in->head) && fin3(in->head_u) && fin(in->yaw);
@@ -378,14 +378,34 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
             if (!tr[s]) continue;
             int near_now = hd[s] >= 0 && hd[s] <= c->neck_radius;
             int started = 0;
-            if (g->gp_t[s] > 0) {          /* agarre pendiente: se cancela si la mano se lanza (es un puño), suelta el botón o se aleja; si no, llega al motor al acabar el margen */
+            if (g->gp_t[s] > 0) {          /* agarre pendiente: tirón = lanzamiento; mano lanzada hacia el enemigo = puño; si no, llega al motor al acabar el margen */
                 g->gp_t[s] -= dt;
-                if (grabbing || !fst[s] || !near_now || spd[s] >= c->grab_slow_speed || g->since_punch < c->grab_after_punch_s) {
+                int pull = 0; float ty = 0;
+                if (fst[s] && !grabbing && !grab_start && spd[s] >= c->throw_speed && g->prev_hand_ok[s] && g->gp_en[s] >= 0 && g->gp_en[s] < in->n_en) {
+                    const float *en = in->en[g->gp_en[s]].p;
+                    float vx = (in->hand[s][0] - g->prev_hand[s][0]) / dt, vy = (in->hand[s][1] - g->prev_hand[s][1]) / dt, vz = (in->hand[s][2] - g->prev_hand[s][2]) / dt;
+                    float ex = en[0] - in->hand[s][0], ey = en[1] + 0.2f - in->hand[s][1], ez = en[2] - in->hand[s][2];
+                    float vl = sqrtf(vx * vx + vy * vy + vz * vz); (void)ey;
+                    float vh = sqrtf(vx * vx + vz * vz), eh = sqrtf(ex * ex + ez * ez);
+                    if (vh < 0.35f * vl) {                    /* tirón vertical: hacia abajo vale (lejos del enemigo, hacia el jugador); hacia arriba no */
+                        if (vy < 0 && vl > 0.3f) { pull = 1; ty = atan2f(in->body[0] - en[0], in->body[2] - en[2]); }
+                    } else if (eh < 0.02f || (vx * ex + vz * ez) / (vh * eh) < 0.3f) {   /* en el plano del suelo, no hacia el enemigo (eso es un puño) */
+                        pull = 1; ty = atan2f(vx, vz);
+                    }
+                }
+                if (pull && !grab_start) {
+                    g->gp_t[s] = 0; grab_start = started = 1; g->grab_side = s; g->grab_en = g->gp_en[s]; g->impact_t = 0;
+                    out->grab_start = 1; out->grab_hold = 1; out->event = VRG_EV_THROW; out->haptic[s] = 1.0f;
+                    out->throw_side = s; out->throw_yaw = ty; out->grab_why = "lanzamiento"; out->grab_dist = hd[s]; out->grab_side_try = s;
+                } else if (grabbing || !fst[s] || (!near_now && !g->gp_only[s]) || spd[s] >= c->grab_slow_speed || g->since_punch < c->grab_after_punch_s) {
                     g->gp_t[s] = 0; out->grab_why = (!fst[s]) ? "cancelado_soltado" : "cancelado_puno"; out->grab_dist = hd[s]; out->grab_side_try = s;
                 } else if (g->gp_t[s] <= 0 && !grab_start) {
-                    grab_start = started = 1; g->grab_side = s; g->grab_en = g->gp_en[s] >= 0 && g->gp_en[s] < in->n_en ? g->gp_en[s] : ne;
-                    out->grab_why = "ok"; out->grab_dist = hd[s]; out->grab_side_try = s;
-                    out->grab_start = 1; out->grab_hold = 1; out->event = VRG_EV_GRAB; out->haptic[s] = 0.9f; g->impact_t = 0;
+                    if (g->gp_only[s]) { out->grab_why = "sin_tiron"; out->grab_dist = hd[s]; out->grab_side_try = s; }
+                    else {
+                        grab_start = started = 1; g->grab_side = s; g->grab_en = g->gp_en[s] >= 0 && g->gp_en[s] < in->n_en ? g->gp_en[s] : ne;
+                        out->grab_why = "ok"; out->grab_dist = hd[s]; out->grab_side_try = s;
+                        out->grab_start = 1; out->grab_hold = 1; out->event = VRG_EV_GRAB; out->haptic[s] = 0.9f; g->impact_t = 0;
+                    }
                 } else started = 1;
             }
             if (edge[s] && !grabbing && !grab_start && g->gp_t[s] <= 0 && !started) {
@@ -396,10 +416,11 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                     else if (g->since_punch < c->grab_after_punch_s) why = "tras_golpe";
                     else if (g->settle > 0) why = "calma";
                     else if (nd > c->grab_range) why = "cuerpo_lejos";
-                    else if (!near_now) why = "mano_lejos";
+                    int near_body = !near_now && seg_dist(in->hand[s], in->en[ne].p, c->body_low, c->body_high) <= c->body_radius + c->throw_reach;   /* hombro / brazo: solo para lanzar */
+                    if (!near_now && !near_body) why = "mano_lejos";
                     else if (spd[s] >= c->grab_slow_speed) why = "mano_rapida";   /* acercándose a pegar: es un puño */
                     out->grab_why = why; out->grab_dist = hd[s]; out->grab_side_try = s;
-                    if (!strcmp(why, "ok")) { g->gp_t[s] = c->grab_delay_s; g->gp_en[s] = ne; started = 1; out->grab_why = "pendiente"; }
+                    if (!strcmp(why, "ok")) { g->gp_t[s] = c->grab_delay_s; g->gp_en[s] = ne; g->gp_only[s] = near_body; started = 1; out->grab_why = "pendiente"; }
                 }
                 if (!started && chest[s]) { g->menu_hold |= 1 << s; out->menu_open[s] = 1; out->haptic[s] = 0.2f; if (!out->event) out->event = VRG_EV_MENU; }
             } else if (edge[s] && grabbing && !grab_start) {

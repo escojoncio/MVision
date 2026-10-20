@@ -43,7 +43,7 @@ static void world(void) {
     p32(W + VRM_W_PAD, PAD);
     p32(W + VRM_W_ANIMFN, 0x80052D1Cu);
 }
-static VrmFrame fr(void) { VrmFrame f; memset(&f, 0, sizeof f); f.punch_side = f.knock_side = -1; f.grab_side = -1; return f; }
+static VrmFrame fr(void) { VrmFrame f; memset(&f, 0, sizeof f); f.punch_side = f.knock_side = -1; f.grab_side = -1; f.throw_side = -1; return f; }
 static Vrm V;
 static void fresh(void) { world(); vrm_init(&V); V.log = lg; }
 
@@ -173,6 +173,18 @@ int main(void) {
       /* 9 fotogramas sin botón: suelta */
       VrmFrame o = fr(); for (int i = 0; i < 9; i++) { vrm_frame(&V, &ENG, &o); vrm_hold_tick(&V, &ENG, W); }
       CK(!V.grab_owned); CK(logged("agarre terminado")); }
+    /* lanzamiento: el agarre se arma con el tirón, arrastra con el rumbo y suelta */
+    fresh(); enemy(0, 500, 0, 0);
+    { VrmFrame f = fr(); f.grab_start = 1; f.grab_side = 0; f.fist_ok[0] = 1; f.throw_side = 0; f.throw_yaw = 3.14159265f; vrm_frame(&V, &ENG, &f);
+      vrm_action_input(&V, &ENG, W); vrm_pre_grab(&V, &ENG, W, 0);
+      p32(W + VRM_W_PTARGET, VRM_TARGETS); p16(W + VRM_W_LOCAL, 0); vrm_post_grab(&V, &ENG, W, 0);
+      CK(logged("lanzamiento:")); CK(V.throw_left == VRM_THROW_FRAMES); CK(V.throw_dir == 2048);
+      VrmFrame o = fr(); int n = 0; ncalls = 0;
+      while (V.grab_owned && n < 40) { vrm_frame(&V, &ENG, &o); vrm_hold_tick(&V, &ENG, W); if (n == 0) { CK(g32(VRM_G_MOVEDIR) == 2048); CK(started(VRM_ST_DRAG)); } n++; }
+      CK(n == VRM_THROW_FRAMES); CK(!V.grab_owned); CK(logged("lanzamiento terminado")); }
+    /* tirón sin presa: lanzamiento cancelado */
+    fresh(); { VrmFrame f = fr(); f.grab_start = 1; f.grab_side = 1; f.fist_ok[1] = 1; f.throw_side = 1; f.throw_yaw = 0.5f; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      vrm_pre_grab(&V, &ENG, W, 0); vrm_post_grab(&V, &ENG, W, 0); CK(logged("lanzamiento cancelado")); CK(V.throw_left == 0); }
     /* 10 apretones = remate */
     fresh(); enemy(0, 500, 0, 0);
     { VrmFrame f = fr(); f.grab_start = 1; f.grab_side = 0; f.fist_ok[0] = 1; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
