@@ -40,6 +40,9 @@ do { library = try device.makeLibrary(URL: URL(fileURLWithPath: libPath)) } catc
 // MARK: escena sintética
 
 let scenePath = outDir + "/scene.nsy"
+// NativeRenderer.ingest descarta la escena ENTERA si alguna malla falta en el almacén (conserva la anterior; sin ella no hay nada que repetir): la escena sintética no
+// debe llevar la instancia con malla ausente (igual que las pruebas e2e del banco antiguo).
+ns_synth_set_complete(1)
 check("escena", ns_synth_write(scenePath) == 0, "generada en \(scenePath)")
 let lr = ns_synth_load(scenePath)
 check("escena", lr == 0, "cargada y publicada por el puente (código \(lr))")
