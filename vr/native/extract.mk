@@ -88,3 +88,18 @@ $(B)/test_ns_cine: vr/native/test_ns_cine.c vr/native/ns_cinema.c vr/native/ns_c
 test-cine: $(B)/test_ns_cine
 	$(B)/test_ns_cine
 .PHONY: test-cine
+
+# Relleno por la verdad del motor (ns_fill): pruebas sintéticas y herramienta de volcados.
+#   make -f vr/native/extract.mk test-fill     pruebas sintéticas de ns_fill
+#   make -f vr/native/extract.mk nsfill        compila vr/native/build-extract/nsfill (ver tools/nsfill.c)
+FILLSRC := vr/native/ns_fill.c vr/native/ns_fill_run.c vr/native/ns_cover.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_fx.c vr/native/ns_fxcmp.c vr/native/ns_fx_export.c vr/native/ns_gpu.c vr/native/ns_player.c
+$(B)/test_ns_fill: vr/native/test_ns_fill.c vr/native/ns_fill_glue.c $(FILLSRC) vr/native/ns_fill.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/test_ns_fill.c vr/native/ns_fill_glue.c $(FILLSRC) -lm -lpthread -o $@
+$(B)/nsfill: vr/native/tools/nsfill.c vr/native/ns_dump.c $(FILLSRC) vr/native/ns_fill.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/tools/nsfill.c vr/native/ns_dump.c $(FILLSRC) -lm -lpthread -o $@
+nsfill: $(B)/nsfill
+test-fill: $(B)/test_ns_fill
+	$(B)/test_ns_fill
+test-fill-san:
+	$(MAKE) -f vr/native/extract.mk test-fill B=vr/native/build-extract-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+.PHONY: nsfill test-fill test-fill-san
