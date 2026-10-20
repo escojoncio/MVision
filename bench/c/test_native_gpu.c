@@ -34,10 +34,16 @@ static void emu_vertex(const NsGpuVert *verts, const NsGpuCorner *c, const NsGpu
     const NsGpuVert *V = &verts[c->v];
     float wp[3];
     mul34(P->w, V->p, wp);
-    if (V->weld != NSG_NO_WELD && P->parent >= 0 && V->weld < P->parent_nverts) {
-        const NsGpuPiece *Q = &pieces[P->parent];
-        const NsGpuVert *PV = &verts[Q->vert_base + V->weld];
-        mul34(Q->w, PV->p, wp);
+    {   /* soldaduras encadenadas (hijo -> padre -> abuelo), como ns_world_pos del shader */
+        uint32_t wl = V->weld; int pi2 = P->parent; uint32_t pn = P->parent_nverts;
+        for (int d = 0; d < NSG_WELD_DEPTH && !(P->flags & NSG_PF_NOWELD); d++) {
+            if (wl == NSG_NO_WELD || pi2 < 0 || wl >= pn) break;
+            const NsGpuPiece *Q = &pieces[pi2];
+            const NsGpuVert *PV = &verts[Q->vert_base + wl];
+            mul34(Q->w, PV->p, wp);
+            if (Q->flags & NSG_PF_NOWELD) break;
+            wl = PV->weld; pi2 = Q->parent; pn = Q->parent_nverts;
+        }
     }
     float raw[3];
     if (c->flags & NSG_CF_PAINT) {

@@ -295,6 +295,7 @@ final class XRFrameEncoder {
             lastDiag = d
             log(d)
             if let nd = renderer.nativeDiagLine() { log(nd) }
+            if let nl = renderer.nativeNetLine() { log(nl) }
             // Línea de diagnóstico del hueco: interruptores, triángulos largos / que cruzan el plano cercano en cada ruta, mapa de tasa, viewport y color final muestreado.
             var vpTxt: [String] = []
             for i in 0..<min(eyes.count, 2) {
