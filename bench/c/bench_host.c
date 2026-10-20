@@ -289,6 +289,15 @@ void mv_host_hands_done(void) {}
 int32_t mv_vrgame_special_view(MvVrSpecialView *out) { (void)out; return 0; }
 int32_t mv_vrgame_forearm(int32_t side, MvVrForearm *out) { (void)side; (void)out; return 0; }
 int32_t mv_vrgame_hand_matrix(int32_t side, float m[16]) { (void)side; (void)m; return 0; }
+/* Calibración de manos, IA de enemigos y manos nuevas: el menú del visor (XRPresent.swift) los llama; el banco no los usa. */
+void mv_vrgame_calibrate_hands(float delay_s) { (void)delay_s; }
+float mv_vrgame_calibration_countdown(void) { return 0.0f; }
+void mv_vrgame_clear_hand_calibration(void) {}
+int32_t mv_vrgame_hand_calibration(int32_t side, float q[4]) { (void)side; (void)q; return 0; }
+void mv_vrhost_set_ai_range(float scale) { (void)scale; }
+void mv_vrhost_set_ai_head(int on) { (void)on; }
+void mv_vrhost_set_hands_new(int on) { (void)on; }
+int mv_vrhost_hands_new(void) { return 1; }
 void mv_host_note_render(int kind) { (void)kind; }
 
 /* ---------- fluidez sintética (vr_smooth): el mundo avanza/gira con el personaje y el juego publica escenas a su ritmo ----------
