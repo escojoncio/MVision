@@ -181,11 +181,11 @@ static void test_polygon_and_billboard(void) {
         uint32_t ne = ns_fx_export(s, 1, ef, 8, &trunc);
         CHECK(ne == 2 && trunc == 0, "export n=%u (el sprite sin página no se exporta)", ne);
         CHECK(ef[0].kind == NS_EK_QUAD && ef[0].nv == 4 && (ef[0].flags & NS_EF_TEXTURED) && ef[0].tpage == q->tpage && NEAR(ef[0].p[2][2], 2600, 0.01), "export quad");
-        CHECK(ef[1].kind == NS_EK_BILLBOARD && NEAR(ef[1].ref_h, 320, 1e-6) && NEAR(ef[1].box[0], -300 * 320.0 / b->vpos[0][2], 0.01) && NEAR(ef[1].box[3], 200 * 320.0 / b->vpos[0][2], 0.01), "export billboard box (%.2f %.2f)", ef[1].box[0], ef[1].box[3]);
+        CHECK(ef[1].kind == NS_EK_BILLBOARD && (ef[1].flags & NS_EF_WORLD_SIZE) && NEAR(ef[1].ref_h, 320, 1e-6) && NEAR(ef[1].box[0], b->off[0], 1e-4) && NEAR(ef[1].box[3], b->off[3], 1e-4) && NEAR(ef[1].box[0], -300, 0.01) && NEAR(ef[1].box[3], 200 / NS_OVERSCAN_Y, 0.1), "export billboard box en mundo (%.2f %.2f)", ef[1].box[0], ef[1].box[3]);
         { NsFxScene *sm = s; NsFxItem *sprite = &sm->items[2]; uint16_t sv = sprite->flags;
           sprite->flags = (uint16_t)((sv & ~NSFX_F_TPAGE_UNKNOWN) | NSFX_F_LEARNED);   /* con la página aprendida sí */
           ne = ns_fx_export(s, 1, ef, 8, &trunc); sprite->flags = sv;
-          CHECK(ne == 3 && NEAR(ef[2].box[0], -8, 0.01) && NEAR(ef[2].box[2], 8, 0.01) && NEAR(ef[2].box[1], -8, 0.05) && NEAR(ef[2].box[3], 8, 0.05), "export sprite en px (%.2f %.2f %.2f %.2f)", ef[2].box[0], ef[2].box[1], ef[2].box[2], ef[2].box[3]); }
+          CHECK(ne == 3 && (ef[2].flags & NS_EF_WORLD_SIZE) && NEAR(ef[2].box[0], c->off[0], 1e-3) && NEAR(ef[2].box[2], c->off[2], 1e-3) && NEAR(ef[2].box[1], c->off[1], 1e-3) && NEAR(ef[2].box[3], c->off[3], 1e-3), "export sprite: tamaño en mundo = el de la proyección (%.2f %.2f %.2f %.2f)", ef[2].box[0], ef[2].box[1], ef[2].box[2], ef[2].box[3]); }
         ne = ns_fx_export(s, 1, ef, 1, &trunc); CHECK(ne == 1 && trunc == 1, "export truncado");
     }
     ns_fx_scene_destroy(s);
@@ -754,7 +754,7 @@ static void test_head_and_px(void) {
         const NsFxItem *p = &s->items[i];
         if (!(p->flags & NSFX_F_PXSIZE)) continue;
         found++;
-        CHECK(isfinite(p->off[0]) && p->off[2] - p->off[0] > 1.0f && p->off[3] - p->off[1] > 1.0f, "tamaño en píxeles con z diminuta: caja visible (%.2f)", p->off[2] - p->off[0]);
+        CHECK(isfinite(p->off[0]) && p->off[2] - p->off[0] > 0.0f && p->off[2] - p->off[0] < 5.0f, "tamaño en píxeles con z diminuta: el de su profundidad real, sin inflar a una de referencia (%.2f)", p->off[2] - p->off[0]);
     }
     CHECK(found >= 1, "elemento de tamaño en píxeles");
     ns_fx_scene_destroy(s);
@@ -984,6 +984,53 @@ static void test_classify_near(void) {
     ns_fx_scene_destroy(sc);
 }
 
+
+/* Tamaño en mundo de los sprites de tamaño en píxeles: el de la z REAL del motor al emitirse, aprendido por clave; sin emisión no se inventa una profundidad */
+static void spr_packet(const TPrim *sp, int sz, double wx, double wy, double wz) {
+    double w[3] = {wx, wy, wz}, sx, sy, z; ref_proj(w, &sx, &sy, &z);
+    for (int b = 0; b < 2; b++) { uint32_t pk = sp->pk[b]; w16(pk, sz); w8(pk + 7, 0x66); w16(pk + 8, (int)lround(sx) - 8); w16(pk + 10, (int)lround(sy) - 8); w8(pk + 12, 16); w8(pk + 13, 32); w16(pk + 14, 0x1234); w16(pk + 16, 16); w16(pk + 18, 16); }
+}
+static void test_learned_size(void) {
+    reset(); ns_fx_learn_reset();
+    int t0[3] = {0, 0, 0};
+    TPrim sp = mkprim(6, 0x400, 1, 4096, t0, 0), sp2 = mkprim(6, 0x400, 1, 4096, t0, 0);
+    put_pos(&sp, 0, 900, 300, 1200); put_rect(&sp, 8, 8, 16, 16);
+    put_pos(&sp2, 0, -900, 300, 1200); put_rect(&sp2, 8, 8, 16, 16);
+    spr_packet(&sp, 5, 900, 300, 1200);          /* emitido */
+    spr_packet(&sp2, 0, -900, 300, 1200);        /* NO emitido y nunca visto */
+    queue_commit(0);
+    int r; NsFxScene *s = run(0, &r);
+    const NsFxItem *a = NULL, *b2 = NULL;
+    for (uint32_t i = 0; i < s->n_items; i++) { if (s->items[i].prim == sp.addr) a = &s->items[i]; if (s->items[i].prim == sp2.addr) b2 = &s->items[i]; }
+    CHECK(r == 0 && a && b2, "dos sprites extraídos");
+    if (!a || !b2) { ns_fx_scene_destroy(s); return; }
+    double w[3] = {900, 300, 1200}, v[3]; ref_view(w, v);
+    float w1 = a->off[2] - a->off[0];
+    CHECK(!(a->flags & NSFX_F_NOSIZE) && !(a->flags & NSFX_F_ENGINE_CULLED) && NEAR(w1, 16 * v[2] / G_H, 0.5), "emitido: ancho en mundo = px * z / H con la z real (%.2f vs %.2f)", w1, 16 * v[2] / G_H);
+    CHECK((b2->flags & NSFX_F_ENGINE_CULLED) && (b2->flags & NSFX_F_NOSIZE), "no emitido y sin tamaño aprendido: NOSIZE (flags 0x%X)", b2->flags);
+    for (uint32_t i = 0; i < s->n_items; i++) s->items[i].flags &= (uint16_t)~NSFX_F_TPAGE_UNKNOWN;   /* la página no es lo que se prueba */
+    { NsEffect ef[8]; int tr; uint32_t n = ns_fx_export(s, 1, ef, 8, &tr); int has2 = 0;
+      for (uint32_t i = 0; i < n; i++) if (ef[i].src_key == sp2.addr) has2 = 1;
+      CHECK(!has2, "el sprite sin tamaño no se exporta (nunca se infla con una profundidad de referencia)"); }
+    ns_fx_scene_destroy(s);
+    /* siguiente fotograma: el motor ya no lo emite (sz = 0) y la cámara/posición dan otra z: el tamaño en mundo sigue siendo el aprendido */
+    put_pos(&sp, 0, 900, 300, 3600); spr_packet(&sp, 0, 900, 300, 3600);
+    queue_commit(0);
+    s = run(0, &r); a = NULL;
+    for (uint32_t i = 0; i < s->n_items; i++) if (s->items[i].prim == sp.addr) a = &s->items[i];
+    CHECK(a && (a->flags & NSFX_F_ENGINE_CULLED) && !(a->flags & NSFX_F_NOSIZE) && NEAR(a->off[2] - a->off[0], w1, 1e-3), "no emitido: tamaño en mundo aprendido de su emisión (%.2f vs %.2f)", a ? a->off[2] - a->off[0] : -1.0, w1);
+    for (uint32_t i = 0; i < s->n_items; i++) s->items[i].flags &= (uint16_t)~NSFX_F_TPAGE_UNKNOWN;
+    { NsEffect ef[8]; int tr; uint32_t n = ns_fx_export(s, 1, ef, 8, &tr), ok = 0;
+      for (uint32_t i = 0; i < n; i++) if (ef[i].src_key == sp.addr && (ef[i].flags & NS_EF_WORLD_SIZE) && NEAR(ef[i].box[2] - ef[i].box[0], w1, 1e-3)) ok = 1;
+      CHECK(ok, "exportado con el tamaño aprendido y NS_EF_WORLD_SIZE"); }
+    ns_fx_scene_destroy(s);
+    /* tras reiniciar el aprendizaje ya no hay tamaño */
+    ns_fx_learn_reset(); s = run(0, &r); a = NULL;
+    for (uint32_t i = 0; i < s->n_items; i++) if (s->items[i].prim == sp.addr) a = &s->items[i];
+    CHECK(a && (a->flags & NSFX_F_NOSIZE), "sin aprendizaje: NOSIZE");
+    ns_fx_scene_destroy(s);
+}
+
 int main(void) {
     install_test_table();
     RAM = (uint8_t *)calloc(NSFX_RAM_SIZE, 1);
@@ -1007,6 +1054,7 @@ int main(void) {
     test_classify_near();
     test_free_kind();
     test_classify_screen();
+    test_learned_size();
     free(RAM);
     printf("%s: %d comprobaciones, %d fallos\n", g_fail ? "FALLA" : "OK", g_checks, g_fail);
     return g_fail != 0;
