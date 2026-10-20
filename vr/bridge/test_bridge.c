@@ -182,6 +182,31 @@ static void test_modes(void) {
     p32(BA_GAME_STATUS, 0x104A0000u);   /* escena con mando retirado */
     bridge_read(ram, &s);
     CHECK(s.cinematic && !s.in_control && strcmp(bridge_mode_name(&s), "escena") == 0);
+    /* cámara del jugador (agachado / reptando / primera persona del juego) con radar+vida+menú apagados: NO es escena; no jugable o DEMO sí lo siguen siendo */
+    build_game();
+    p32(BA_GAME_STATUS, 0x004A0000u); p32(BA_PLAYER_STATUS, BRIDGE_PS_SQUAT);
+    bridge_read(ram, &s);
+    CHECK(!s.cinematic);
+    build_game();
+    p32(BA_GAME_STATUS, 0x004A0000u); p32(BA_PLAYER_STATUS, BRIDGE_PS_GROUND);
+    bridge_read(ram, &s);
+    CHECK(!s.cinematic);
+    build_game();
+    p32(BA_GAME_STATUS, 0x004A0000u); p32(BA_PLAYER_STATUS, BRIDGE_PS_WATCH);
+    bridge_read(ram, &s);
+    CHECK(!s.cinematic);
+    build_game();
+    p32(BA_GAME_STATUS, 0x004A0000u); p32(BA_PLAYER_STATUS, BRIDGE_PS_SQUAT | BRIDGE_PS_NOT_PLAYABLE);
+    bridge_read(ram, &s);
+    CHECK(s.cinematic);
+    build_game();
+    p32(BA_GAME_STATUS, 0x104A0000u); p32(BA_PLAYER_STATUS, BRIDGE_PS_SQUAT);   /* con el mando retirado por el guion sigue siendo escena */
+    bridge_read(ram, &s);
+    CHECK(s.cinematic);
+    build_game();
+    p32(BA_GAME_STATUS, BRIDGE_GS_DEMO); p32(BA_PLAYER_STATUS, BRIDGE_PS_SQUAT);
+    bridge_read(ram, &s);
+    CHECK(s.cinematic);
     build_game();
     p32(BA_GAME_STATUS, BRIDGE_GS_DEMO);
     bridge_read(ram, &s);

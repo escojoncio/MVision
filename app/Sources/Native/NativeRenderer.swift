@@ -182,6 +182,9 @@ final class NativeRenderer {
     private var meshesChanged = false
     private var frameFailures = 0                // mallas que no cupieron en este fotograma (se reintentan en el siguiente)
     private var frameMisses = 0                  // mallas pedidas por la escena y ausentes del almacén
+    private var missStreak = 0                   // escenas nuevas seguidas con mallas ausentes
+    private var missTolerated = false            // las ausentes llevan >= missGrace escenas seguidas: no van a llegar (otro modelo de la zona); se dibuja lo que hay y el relleno cubre el resto
+    private static let missGrace = 25            // ~1 s de escenas: lo transitorio (mallas que aún se hornean) sigue conservando la escena anterior
     private var totalFailures = 0
 
     // MARK: red de seguridad de vértices (ver ns_gpu_types.h NSG_NET_*): contadores desde la última línea de registro y detalle por (instancia, pieza, malla)
@@ -652,7 +655,11 @@ final class NativeRenderer {
                 newMeshOf[first + k] = acquireMesh(id: pp.pointee.mesh_id, ver: pp.pointee.baked_ver, store: store, seq: seq)
             }
         }
-        guard frameMisses == 0, frameFailures == 0 else {
+        // Mallas ausentes: una escena con piezas sin malla NO se descarta para siempre (en las cinemáticas sin partida llegaron a ser decenas de ausentes durante minutos: se repetía la última
+        // escena y la pantalla 3D caía a la pantalla plana). Pasada la gracia se dibuja lo que hay (las piezas sin malla se omiten más abajo) y el relleno global cubre lo que falta.
+        if frameMisses > 0 && frameFailures == 0 { if fresh { missStreak += 1 }; missTolerated = missStreak >= Self.missGrace }
+        else if frameMisses == 0 { missStreak = 0; missTolerated = false }
+        guard frameFailures == 0, frameMisses == 0 || missTolerated else {
             // lo ya subido de esta escena también se conserva (la próxima vez no hará falta volver a subirlo)
             hold(); for m in newMeshOf { m?.lastUsed = seq }
             return false
@@ -1045,7 +1052,7 @@ final class NativeRenderer {
     // MARK: presentación (actual / último válido / negro)
 
     /// El render nativo se puede dibujar entero en este fotograma: ranura preparada, todas las mallas de la escena subidas y las pipelines listas.
-    var frameReady: Bool { isActive && current != nil && frameFailures == 0 && frameMisses == 0 }
+    var frameReady: Bool { isActive && current != nil && frameFailures == 0 && (frameMisses == 0 || missTolerated) }
 
     /// Lo que la lista de la GPU declara del mundo y de la cámara (VrScene): mapa mundo del motor -> VR del espacio de usuario, origen de la lista y vista del juego.
     struct GpuMap {

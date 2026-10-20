@@ -410,8 +410,14 @@ static uint32_t read_mode(Ram m, BridgeState *s) {
     s->stopped = (s->pause_level & 1) != 0;
     s->on_screen_text = (g & BRIDGE_GS_VOX_STREAM) != 0;
     /* Escena: demo del motor, o escena con el mando retirado (menú y radar anulados a la vez) */
-    s->cinematic = (g & (BRIDGE_GS_DEMO | BRIDGE_GS_PADDEMO)) != 0 ||
-                   ((g & BRIDGE_GS_MENU_DISABLE) && (g & BRIDGE_GS_LIFE_OFF) && (g & BRIDGE_GS_RADAR_OFF));
+    /* La cámara del jugador (primera persona forzada del juego, agachado, reptando bajo algo, conductos) NO es una cinemática: el motor apaga radar / vida / menú en esas
+     * cámaras y la heurística de "mando retirado" las confundía con una escena (la vista pasaba a la pantalla 3D en vez de seguir en el mundo con la cabeza VR). Solo la
+     * demo del motor (DEMO / PADDEMO) o un estado NO jugable del jugador siguen siendo escena con certeza. */
+    int scripted = (g & (BRIDGE_GS_DEMO | BRIDGE_GS_PADDEMO)) != 0;
+    int player_cam = (s->first_person || s->crouching || s->prone || s->cam_first_person != 0) &&
+                     !(s->player_status & (BRIDGE_PS_NOT_PLAYABLE | BRIDGE_PS_GAME_OVER)) && !(g & (BRIDGE_GS_GAME_OVER | BRIDGE_GS_PADMASK | BRIDGE_GS_PADRELEASE));   /* PADMASK / PADRELEASE: el guion retiró el mando = escena de verdad */
+    s->cinematic = scripted ||
+                   (((g & BRIDGE_GS_MENU_DISABLE) && (g & BRIDGE_GS_LIFE_OFF) && (g & BRIDGE_GS_RADAR_OFF)) && !player_cam);
     s->in_control = !s->cinematic && !s->comms && !s->paused && !s->menu_open && !s->stopped &&
                     !(g & BRIDGE_GS_GAME_OVER);
     return BRIDGE_OK_MODE;
