@@ -45,6 +45,15 @@ static void insert_worst(NsFxCmpResult *r, const NsFxCmpRow *row) {
     r->worst[pos] = *row;
 }
 
+/* El hardware recorta las coordenadas de pantalla a 11 bits con signo: una operación con un vértice en -1024 / 1023 (o marcado GPU_VF_SAT) ya no describe la geometría del elemento. */
+static int op_saturated(const GpuOp *o) {
+    for (int v = 0; v < o->nv && v < 4; v++) {
+        int x = o->v[v].x - o->dox, y = o->v[v].y - o->doy;
+        if (x <= -1024 || x >= 1023 || y <= -1024 || y >= 1023 || (o->v[v].vvalid && (o->v[v].vflags & GPU_VF_SAT))) return 1;
+    }
+    if (o->type == GPU_OP_RECT) { int x = o->v[0].x - o->dox + o->rw, y = o->v[0].y - o->doy + o->rh; if (x >= 1023 || y >= 1023 || o->v[0].x - o->dox <= -1024 || o->v[0].y - o->doy <= -1024) return 1; }
+    return 0;
+}
 static int fcmpf(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return x < y ? -1 : x > y; }
 
 int ns_fxcmp_run(const NsFxScene *sc, const NsFxListCam *lc, const float *to_vr, const GpuDrawList *dl, const uint8_t *cls, const int32_t *item, const uint8_t *exact, NsFxCmpResult *out) {
@@ -116,6 +125,7 @@ int ns_fxcmp_run(const NsFxScene *sc, const NsFxListCam *lc, const float *to_vr,
             else if ((o->v[v].vflags & GPU_VF_SAT) || o->v[v].vz < 64.0f) clipped = 1;   /* el motor recortó el vértice contra la pantalla / plano cercano: su posición no es la del elemento */
         }
         if (all_view && clipped) { out->n_clip++; continue; }
+        if (!all_view && op_saturated(o)) { out->n_sat++; continue; }
         if (!all_view && o->type == GPU_OP_POLY && (it->shape == NSFX_SH_QUAD || it->shape == NSFX_SH_TRI)) { out->n_clip++; continue; }   /* polígono de mundo con algún vértice detrás de la cámara o sin vista: recortado */
         float zc = 0, cn[3] = {0, 0, 0};
         for (int k = 0; k < nq; k++) { for (int r = 0; r < 3; r++) cn[r] += lv[k][r] / (float)nq; }
@@ -245,8 +255,8 @@ size_t ns_fxcmp_format(const NsFxCmpResult *r, uint32_t frame, char *buf, size_t
     if (!buf || !cap) return 0;
     size_t o = 0;
 #define APP(...) do { if (o < cap) { int w_ = snprintf(buf + o, cap - o, __VA_ARGS__); if (w_ > 0) o += (size_t)w_ < cap - o ? (size_t)w_ : cap - o - 1; } } while (0)
-    APP("[fx-cmp] fr=%u ops_efecto=%u medidas=%u (vista=%u pantalla=%u tolerante=%u) sin_medida=%u recortadas=%u cara_oculta=%u | posicion: media=%.1fmm (%.2fpx) p90=%.1fmm max=%.1fmm fuera(>3px y >30mm)=%u | tamano nativo/lista: media=x%.2f fuera[0.8,1.25]=%u | mezcla_distinta=%u textura_distinta=%u pagina_o_clut_distinta=%u (pagina_supuesta=%u abr_supuesto=%u) | elementos=%u no_emitidos=%u (dentro_de_pantalla=%u) fiables=%u sin_operacion=%u huerfanas(semi_3d=%u semi_rect=%u)\n",
-        frame, r->n_ops_fx, r->n_cmp, r->n_view, r->n_screen, r->n_near, r->n_nomeas, r->n_clip, r->n_noface, r->pos_mean_mm, r->pos_mean_px, r->pos_p90_mm, r->pos_max_mm, r->pos_bad,
+    APP("[fx-cmp] fr=%u ops_efecto=%u medidas=%u (vista=%u pantalla=%u tolerante=%u) sin_medida=%u recortadas=%u saturadas=%u cara_oculta=%u | posicion: media=%.1fmm (%.2fpx) p90=%.1fmm max=%.1fmm fuera(>3px y >30mm)=%u | tamano nativo/lista: media=x%.2f fuera[0.8,1.25]=%u | mezcla_distinta=%u textura_distinta=%u pagina_o_clut_distinta=%u (pagina_supuesta=%u abr_supuesto=%u) | elementos=%u no_emitidos=%u (dentro_de_pantalla=%u) fiables=%u sin_operacion=%u huerfanas(semi_3d=%u semi_rect=%u)\n",
+        frame, r->n_ops_fx, r->n_cmp, r->n_view, r->n_screen, r->n_near, r->n_nomeas, r->n_clip, r->n_sat, r->n_noface, r->pos_mean_mm, r->pos_mean_px, r->pos_p90_mm, r->pos_max_mm, r->pos_bad,
         r->ratio_mean, r->size_bad, r->blend_bad, r->tex_bad, r->page_bad, r->unk_page, r->unk_abr, r->n_items, r->n_items_culled, r->n_culled_inview, r->n_items_reliable, r->n_items_unclaimed, r->n_orphan_semi3d, r->n_orphan_rect_semi);
     for (uint32_t i = 0; i < r->n_worst; i++) {
         const NsFxCmpRow *w = &r->worst[i];

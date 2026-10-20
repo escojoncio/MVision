@@ -211,7 +211,8 @@ enum {
     NS_EF_GOURAUD = 4u,
     NS_EF_ONESIDE = 8u,  /* sólo anverso */
     NS_EF_LINE = 16u,    /* línea (dibujar como cinta de ancho `width_px`) */
-    NS_EF_ON_CAMERA = 32u/* informativo: pegado a la cámara del motor; las posiciones ya vienen en el MUNDO del motor con la cámara de la escena (que en VR es la de la cabeza) */
+    NS_EF_ON_CAMERA = 32u,/* informativo: pegado a la cámara del motor; las posiciones ya vienen en el MUNDO del motor con la cámara de la escena (que en VR es la de la cabeza) */
+    NS_EF_WORLD_SIZE = 64u /* BILLBOARD: box[] son semiextensiones en UNIDADES DEL MOTOR del plano de la vista (x derecha, y abajo, con el factor vertical ya aplicado), sin depender de ninguna profundidad; LINE: width_px es la anchura en unidades del motor */
 };
 typedef struct {
     uint8_t kind;        /* NS_EK_* */

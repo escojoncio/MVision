@@ -119,6 +119,8 @@ typedef struct {
      * a más de 1 m no hay tope. Un efecto que lo supera se REDUCE alrededor de su centro (nunca se desplaza). Los pegados a la cámara del motor (NS_EF_ON_CAMERA o papel de superficie
      * de vista) no tienen emisor en el mundo: con el centro a menos de oncam_drop_m (0 = no) se descartan (cuentan como confirmados). near_log_m (0 = 0,5 m): radio del registro de cercanos. */
     float comfort_deg, comfort_dmin_m, oncam_drop_m, near_log_m;
+    /* Red de seguridad extrema, independiente de comfort_deg: se descarta (confirmado) el efecto con el centro a menos de drop_inside_m de la cabeza (0 = no). Los efectos bien colocados no se tocan. */
+    float drop_inside_m;
 } NsGpuFxParams;
 typedef struct { uint32_t start, count; uint8_t abr; } NsGpuFxRun;   /* start/count en vértices del búfer completo */
 /* Un efecto semitransparente en el búfer (ya ordenado de atrás adelante): para intercalarlo con los triángulos semitransparentes de las mallas (ns_gpu_semi_merge). */

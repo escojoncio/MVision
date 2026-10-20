@@ -118,3 +118,7 @@ El factor vertical se midió reproyectando paquetes reales de polígonos de mund
 - Pegados a la camara del motor (`NS_EF_ON_CAMERA` o papel VIEW_OVERLAY): no tienen emisor en el mundo; con el centro a menos de `oncam_drop_m` (1,5 m) se descartan. Descartar cuenta como confirmado (la clave entra en `keys`: la ruta de la GPU no los redibuja).
 - Los recubrimientos intencionados de pantalla (fundido, gas, agua, modos de vision) NO pasan por aqui: son `NsScreenFx`.
 - Registro (1 s): `fx-cerca(<0.5m): ...` dentro de la linea `nat-diag` (acumulador `NsGpuFxNearAcc`): fotogramas, con cercanos, en movimiento (>0,3 m/s o >30 grados/s), maximos de cercanos / pegados / pantalla, reducidos, descartados, carteles con profundidad de referencia y, por efecto, papel, forma, ON_CAMERA, distancia, tamano, angulo antes->despues, accion y origen (primitiva/paquete).
+
+## Tamano en mundo (sin profundidad de referencia)
+- Un cartel/sprite de tamano en pixeles mide `px * z / H` con la z de vista REAL del vertice del motor y se exporta con `NS_EF_WORLD_SIZE` (semiextensiones en unidades del motor, independientes de cualquier profundidad). El tamano se aprende por clave (`ns_fx_item_key`) al emitirse; un elemento que el motor no emite usa el aprendido, y sin el no se exporta (`NSFX_F_NOSIZE`). Antes los no emitidos salian con la profundidad de referencia 1000 (hasta 2000 m de lado).
+- La comodidad (tope angular / descartes de pegados a la camara) queda como opcion en `ns_gpu_fx_build_ex`; la app solo usa `drop_inside_m = 0,05`.

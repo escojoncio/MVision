@@ -375,8 +375,24 @@ static void set_face(NsFxItem *it, const NsFxCam *cam) {
     if (l > 1e-6f) for (int i = 0; i < 3; i++) it->fn[i] = s * n[i] / l;
     it->flags |= NSFX_F_ONESIDE;
 }
-/* Profundidad con la que se convierte un tamaño en píxeles a mundo: la real si es fiable, si no la de referencia (el cartel no debe quedar invisible). */
-static float eff_z(const NsFxTuning *t, float z) { return z >= t->px_z_min ? z : t->px_z_ref; }
+/* Profundidad con la que se convierte un tamaño en píxeles a mundo: SIEMPRE la real del motor (z de vista del vértice, la misma con la que el motor dibujó el sprite). Sin profundidad de
+ * referencia: un cartel que el motor no emitió no tiene tamaño en píxeles válido (el paquete conserva el de otro fotograma) y se resuelve con el tamaño en mundo aprendido de su última
+ * emisión (g_szl); sin él no se exporta (NSFX_F_NOSIZE). Los campos px_z_min/px_z_ref de NsFxTuning ya no se usan. */
+static float eff_z(float z) { return z > 1.0f ? z : 1.0f; }
+/* Tamaño en mundo aprendido por elemento (clave ns_fx_item_key): off[4] de un cartel o width[2] de una cinta. Solo lo toca el hilo de extracción. */
+enum { SZL_N = 2048, SZL_PROBE = 8 };
+static struct { uint64_t key; float v[4]; } g_szl[SZL_N];
+static uint32_t szl_slot(uint64_t key) { return (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 40) & (SZL_N - 1u); }
+static void szl_put(uint64_t key, const float v[4]) {
+    uint32_t h = szl_slot(key), w = h;
+    for (int i = 0; i < SZL_PROBE; i++, h = (h + 1) & (SZL_N - 1u)) { if (g_szl[h].key == key || !g_szl[h].key) { w = h; break; } if (i == 0) w = h; }
+    g_szl[w].key = key; memcpy(g_szl[w].v, v, sizeof g_szl[w].v);
+}
+static int szl_get(uint64_t key, float v[4]) {
+    uint32_t h = szl_slot(key);
+    for (int i = 0; i < SZL_PROBE; i++, h = (h + 1) & (SZL_N - 1u)) if (g_szl[h].key == key) { memcpy(v, g_szl[h].v, sizeof g_szl[h].v); return 1; }
+    return 0;
+}
 static void set_uv_rect(NsFxItem *it, const Dec *d) {
     it->uv[0][0] = d->u[0]; it->uv[0][1] = d->v[0];
     int u1 = d->u[0] + (d->w > 0 ? d->w - 1 : 0), v1 = d->v[0] + (d->h > 0 ? d->h - 1 : 0);
@@ -432,7 +448,7 @@ static void do_prim(Ctx *c, uint32_t p, int role_owner) {
         if (freepacks) {
             /* El motor ya proyectó el paquete con su propia función: se reconstruye a la profundidad del paquete (plano de la cámara del motor). */
             if (culled) { S->stats.n_culled++; continue; }
-            float z = eff_z(T, (float)sz);
+            float z = eff_z((float)sz);
             if (d.cls == C_LINE) {   /* línea ya proyectada: cinta en el plano de profundidad del paquete, un segmento por par de vértices */
                 float pxw = (d.textured ? T->line_tex_px : T->line_px);
                 for (int sgi = 0; sgi + 1 < d.nv; sgi++) {
@@ -490,7 +506,7 @@ static void do_prim(Ctx *c, uint32_t p, int role_owner) {
             count_item(c, it); continue;
         }
         if (rectmode) {
-            float z = vv[0][2], ze = eff_z(T, z);
+            float z = vv[0][2], ze = eff_z(z);
             NsFxItem *it = new_item(c); if (!it) return;
             fill_common(it, p, j, kind, &d, raise, sz);
             it->shape = NSFX_SH_BILLBOARD; it->nv = 4;
@@ -501,10 +517,17 @@ static void do_prim(Ctx *c, uint32_t p, int role_owner) {
             if (ptr_ok(rect)) { rx = rds16(m, rect); ry = rds16(m, rect + 2); rw = rds16(m, rect + 4); rh = rds16(m, rect + 6); }
             float l, t, r, bt;
             if (verts == 1 || d.cls == C_RECT) {
-                float k = ze / H;
-                l = (float)(-rx) * k; t = (float)(-ry) * k / ys; r = l + (float)d.w * k; bt = t + (float)d.h * k / ys;
                 it->flags |= NSFX_F_PXSIZE;
                 it->box_px[0] = (float)-rx; it->box_px[1] = (float)-ry; it->box_px[2] = (float)(d.w - rx); it->box_px[3] = (float)(d.h - ry);
+                if (!culled && z >= 1.0f) {   /* emitido: tamaño en mundo = px * z / H con la z real del vértice; se aprende para cuando el motor deje de emitirlo */
+                    float k = z / H, lv[4];
+                    l = (float)(-rx) * k; t = (float)(-ry) * k / ys; r = l + (float)d.w * k; bt = t + (float)d.h * k / ys;
+                    lv[0] = l; lv[1] = t; lv[2] = r; lv[3] = bt; szl_put(ns_fx_item_key(it), lv);
+                } else {
+                    float lv[4];
+                    if (szl_get(ns_fx_item_key(it), lv)) { l = lv[0]; t = lv[1]; r = lv[2]; bt = lv[3]; }
+                    else { l = t = r = bt = 0; it->flags |= NSFX_F_NOSIZE; }
+                }
             } else {
                 l = (float)(-rx); t = (float)(-ry) / ys; r = (float)(rw - rx); bt = (float)(rh - ry) / ys;
                 float k = H / ze;
@@ -541,10 +564,16 @@ static void do_prim(Ctx *c, uint32_t p, int role_owner) {
                 }
                 if (oncam) it->flags |= NSFX_F_VIEWLOCKED;
                 if (culled) it->flags |= NSFX_F_ENGINE_CULLED;
-                for (int e = 0; e < 2; e++) {
-                    memcpy(it->pos[e], wv[sgi + e], sizeof wv[0]); memcpy(it->vpos[e], vv[sgi + e], sizeof vv[0]);
-                    float z = eff_z(T, vv[sgi + e][2]); it->width[e] = pxw * z / H;
-                    memcpy(it->rgb[e], d.rgb[(sgi + e) < d.nv ? sgi + e : 0], 3);
+                {
+                    float wl[4];
+                    int own = !culled && vv[sgi][2] >= 1.0f && vv[sgi + 1][2] >= 1.0f;
+                    if (own) { wl[0] = pxw * vv[sgi][2] / H; wl[1] = pxw * vv[sgi + 1][2] / H; wl[2] = wl[3] = 0; szl_put(ns_fx_item_key(it), wl); }
+                    else if (!szl_get(ns_fx_item_key(it), wl)) { wl[0] = pxw * eff_z(vv[sgi][2]) / H; wl[1] = pxw * eff_z(vv[sgi + 1][2]) / H; }
+                    for (int e = 0; e < 2; e++) {
+                        memcpy(it->pos[e], wv[sgi + e], sizeof wv[0]); memcpy(it->vpos[e], vv[sgi + e], sizeof vv[0]);
+                        it->width[e] = wl[e];
+                        memcpy(it->rgb[e], d.rgb[(sgi + e) < d.nv ? sgi + e : 0], 3);
+                    }
                 }
                 if (d.textured) { it->uv[0][0] = d.u[0]; it->uv[0][1] = d.v[0]; it->uv[1][0] = d.u[1]; it->uv[1][1] = d.v[1]; }
                 it->role = (uint8_t)(role_prim ? role_prim : heuristic_role(it));
@@ -560,9 +589,16 @@ static void do_prim(Ctx *c, uint32_t p, int role_owner) {
             it->shape = NSFX_SH_BILLBOARD; it->nv = 4; it->flags |= NSFX_F_PXSIZE;
             if (oncam) it->flags |= NSFX_F_VIEWLOCKED;
             if (culled) it->flags |= NSFX_F_ENGINE_CULLED;
-            float z = vv[0][2], k = eff_z(T, z) / H;
+            float z = vv[0][2];
             memcpy(it->pos[0], wv[0], sizeof wv[0]); memcpy(it->vpos[0], vv[0], sizeof vv[0]);
-            it->off[0] = 0; it->off[1] = 0; it->off[2] = (float)d.w * k; it->off[3] = (float)d.h * k / ys;
+            if (!culled && z >= 1.0f) {
+                float k = z / H, lv[4] = {0, 0, (float)d.w * k, (float)d.h * k / ys};
+                memcpy(it->off, lv, sizeof lv); szl_put(ns_fx_item_key(it), lv);
+            } else {
+                float lv[4];
+                if (szl_get(ns_fx_item_key(it), lv)) memcpy(it->off, lv, sizeof lv);
+                else { memset(it->off, 0, sizeof it->off); it->flags |= NSFX_F_NOSIZE; }
+            }
             it->box_px[0] = 0; it->box_px[1] = 0; it->box_px[2] = (float)d.w; it->box_px[3] = (float)d.h;
             set_uv_rect(it, &d);
             it->role = (uint8_t)(role_prim ? role_prim : heuristic_role(it));
@@ -742,7 +778,7 @@ static void learn_put(uint32_t prim, uint16_t tpage, uint16_t clut, int abr, int
 }
 /* Por papel: última página / modo aprendidos para cualquier primitiva de ese papel (respaldo de las primitivas que aún no se han visto en una lista). */
 static struct { uint8_t has, abr; uint16_t tpage; } g_role_learn[NSFX_ROLE_COUNT];
-void ns_fx_learn_reset(void) { memset(&g_shadow_tex, 0, sizeof g_shadow_tex); memset(g_role_learn, 0, sizeof g_role_learn); for (uint32_t i = 0; i < LEARN_N; i++) atomic_store_explicit(&g_learn[i], 0, memory_order_relaxed); }
+void ns_fx_learn_reset(void) { memset(g_szl, 0, sizeof g_szl); memset(&g_shadow_tex, 0, sizeof g_shadow_tex); memset(g_role_learn, 0, sizeof g_role_learn); for (uint32_t i = 0; i < LEARN_N; i++) atomic_store_explicit(&g_learn[i], 0, memory_order_relaxed); }
 uint32_t ns_fx_learn(const NsFxScene *sc, const GpuDrawList *dl, const int32_t *item) {
     uint32_t n = 0;
     if (!sc || !dl || !item) return 0;
