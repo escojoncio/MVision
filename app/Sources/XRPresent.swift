@@ -39,6 +39,7 @@ struct XRViewConfig {
     var aiRange = 1                 // IA de enemigos: alcance de visión, índice de aiRanges (0 = x1, 1 = x1,5, 2 = x2)
     var aiHead = true               // IA de enemigos: ven también la cabeza VR (no solo el ojo del personaje)
     var newHands = true             // manos del personaje en primera persona: nuevas (articuladas, con puño propio) u originales del motor
+    var follow2D = true             // pantallas 2D (cine, pantalla 3D, ventanas del juego, menú VR): siguen la cabeza en cada fotograma (true) o quedan fijas en el mundo (false)
     var smoothMotion = true         // fluidez de la locomoción: el mundo se corrige por fotograma de render (giro del stick y avance extrapolados entre escenas del juego)
 
     enum Cutscene: String, CaseIterable { case stereo, cinema, diorama, scene }
@@ -95,6 +96,7 @@ struct XRViewConfig {
         c.hideRealHands = b("xr.view.hideHands", true)
         c.debugAxes = b("xr.view.debugAxes", false)
         c.smoothMotion = b("xr.view.smoothMotion", true)
+        c.follow2D = b("xr.view.follow2d", true)
         c.newHands = b("xr.hands.new", true)
         let ar = UserDefaults.standard.integer(forKey: "xr.ai.range")
         c.aiRange = UserDefaults.standard.object(forKey: "xr.ai.range") == nil ? 1 : min(max(ar, 0), aiRanges.count - 1)
@@ -120,6 +122,7 @@ struct XRViewConfig {
         d.set(hideRealHands, forKey: "xr.view.hideHands")
         d.set(debugAxes, forKey: "xr.view.debugAxes")
         d.set(smoothMotion, forKey: "xr.view.smoothMotion")
+        d.set(follow2D, forKey: "xr.view.follow2d")
         d.set(newHands, forKey: "xr.hands.new")
         d.set(aiRange, forKey: "xr.ai.range")
         d.set(aiHead, forKey: "xr.ai.head")
@@ -212,7 +215,7 @@ struct XRNav: Equatable {
 }
 
 enum XRMenuItem: Int, CaseIterable {
-    case resume, recenter, calibrateHands, width, distance, curve, sharp, integerScale, smooth2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, newHands, debugAxes, aiMenu, diagnostics, exit
+    case resume, recenter, calibrateHands, width, distance, follow2D, curve, sharp, integerScale, smooth2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, newHands, debugAxes, aiMenu, diagnostics, exit
 }
 
 /// Submenú «IA de enemigos».
@@ -255,6 +258,10 @@ final class XRPresenter {
     private var anchorY: Float = 1.5
     private var hudYaw: Float = 0
     private var hudInit = false
+    // Seguimiento continuo de la cabeza por las pantallas 2D (opción «Pantallas 2D: siguen la cabeza»).
+    private var follow = XRFollowState()
+    private var followSnap = true
+    private var prevOverlay2D = false
     // Dentro de la escena: cámara del plano (vista del motor -> mundo VR al empezar el plano) y plano visto
     private var shotView = matrix_identity_float4x4
     private var shotSeen: UInt32 = 0
@@ -279,7 +286,7 @@ final class XRPresenter {
     var onRecenter: (() -> Void)?
     var onExit: (() -> Void)?
 
-    private static let menuW = 1024, menuH = 1140     // 24 filas de 40 px desde y = 106 + pie de ayuda
+    private static let menuW = 1024, menuH = 1180     // 25 filas de 40 px desde y = 106 + pie de ayuda
 
     init(device: MTLDevice) {
         cinema = XRCinema(device: device)
@@ -300,7 +307,8 @@ final class XRPresenter {
     }
 
     /// Recentrado manual: la pantalla se recoloca delante de la cabeza la próxima vez que se muestre (o ahora, si ya está).
-    func reanchor() { needAnchor = true }
+    /// También se salta el suavizado (la cabeza cambia de espacio al recentrar) y se reinicia el rumbo del HUD.
+    func reanchor() { needAnchor = true; followSnap = true; hudInit = false }
 
     // MARK: entrada / menú
 
@@ -373,6 +381,7 @@ final class XRPresenter {
         menuDirty = true
         prevNav = XRNav()
         menuModel = XRMenuLayout.model(head: head)      // cerca, abajo e inclinado hacia la cara: nunca sobre la pantalla de cine / códec
+        followSnap = true                               // el menú sale ya delante de la cabeza; después la sigue
     }
 
     private func closeMenu() {
@@ -450,6 +459,7 @@ final class XRPresenter {
             if dir < 0 { mv_vrgame_clear_hand_calibration() } else { mv_vrgame_calibrate_hands(3.0); closeMenu() }
         case .width: cfg.width = cycle(cfg.width, XRViewConfig.widths, dir)
         case .distance: cfg.distance = cycle(cfg.distance, XRViewConfig.distances, dir)
+        case .follow2D: cfg.follow2D.toggle(); needAnchor = true; followSnap = true; cfg.save()      // al fijarlas, se anclan donde está la cabeza ahora
         case .curve: cfg.curve = cycle(cfg.curve, XRViewConfig.curves, dir)
         case .sharp: cfg.sharp = (cfg.sharp + dir + 3) % 3
         case .integerScale: cfg.integerScale.toggle()
@@ -530,6 +540,7 @@ final class XRPresenter {
                 return ("Calibrar manos", cd > 0 ? "brazos rectos: \(Int(cd.rounded(.up))) s" : (have ? "Hecha (izq. borra)" : "Sin calibrar"))
             case .width: return ("Tamaño de la pantalla", m(cfg.width))
             case .distance: return ("Distancia de la pantalla", m(cfg.distance))
+            case .follow2D: return ("Pantallas 2D", cfg.follow2D ? "Siguen la cabeza" : "Fijas en el mundo")
             case .curve: return ("Curvatura de la pantalla", curveName[ci])
             case .sharp: return ("Nitidez de la imagen", ["Suave", "Nítida", "Píxel"][min(max(cfg.sharp, 0), 2)])
             case .integerScale: return ("Escalado entero", yn(cfg.integerScale))
@@ -715,11 +726,18 @@ final class XRPresenter {
         // 3) anclas
         let hp = XRMath.position(head)
         let hy = XRMath.yaw(of: head)
+        // Ventana 2D del juego sobre el mundo (selector de armas/objetos, pausa): ver 5b.
+        let overlay2D = shown == .world && gs.view_mode == 1 && XRMenuPanelLayout.isOverlay(reason: gs.view_reason)
+        // Seguimiento de la cabeza por fotograma de render (todo el tiempo, para que al activar la opción o abrir una pantalla ya esté en su sitio). Se salta el suavizado
+        // al recentrar, al abrir el menú, al aparecer una ventana 2D y al colocar una pantalla nueva tras la transición (el velo está en negro).
+        XRFollow.step(&follow, head: head, dt: d, snap: followSnap || (overlay2D && !prevOverlay2D) || (needAnchor && shown != .world))
+        followSnap = false
+        prevOverlay2D = overlay2D
         if needAnchor && shown != .world {
             anchorY = max(0.8, hp.y - (shown == .scene ? 0 : 0.05))
             anchor = XRMath.translation(SIMD3<Float>(hp.x, 0, hp.z)) * XRMath.rotationY(hy)
             needAnchor = false
-        } else if shown == .cinema || shown == .stereo {
+        } else if (shown == .cinema || shown == .stereo) && !cfg.follow2D {
             // Seguimiento perezoso de la pantalla (cine y pantalla 3D): al mirar a otro lado más de ~35 grados o alejarse más de 0,5 m, la pantalla se
             // recoloca suavemente delante de la vista (antes se quedaba donde se creó: muerte, cámaras de evento y escenas cortas se perdían a la espalda).
             // La cabeza dentro de la zona muerta no la mueve, así que no hay arrastre al mirar alrededor de la imagen.
@@ -755,7 +773,7 @@ final class XRPresenter {
                 if texPx.isFinite, texPx > 1 { W = max(1, texPx.rounded()) * Float(c.width) / ppm }
             }
             var it = XRDrawItem(kind: .screen, texture: tex)
-            it.model = anchor * XRMath.translation(SIMD3<Float>(0, anchorY, -D))
+            it.model = screenModel(D)
             it.size = SIMD2<Float>(W, W * 0.75)
             it.distance = D
             let cv = XRCinemaLayout.curve(base: cfg.curve, legible: leg)
@@ -773,7 +791,7 @@ final class XRPresenter {
             let tanX = max(0.2, W / (2 * D)), tanY = tanX * 0.75      // campo de visión = ángulo que la pantalla ocupa desde el usuario (escala real)
             do {
                 r.stereo = RGRenderer.StereoRequest(ipd: ipd, convergence: XRStereo.convergence, tanX: tanX, tanY: tanY, width: Self.stereoW, height: Self.stereoH)
-                let model = anchor * XRMath.translation(SIMD3<Float>(0, anchorY, -D))
+                let model = screenModel(D)
                 var it = XRDrawItem(kind: .screen3d, texture: nil)
                 it.model = model
                 it.size = SIMD2<Float>(W, W * 0.75)
@@ -814,10 +832,10 @@ final class XRPresenter {
 
         // 5b) ventana 2D del juego sobre el mundo (selector de armas/objetos, pausa): el mundo sigue en primera persona y la capa 2D completa va en un panel flotante delante,
         //     por delante de la geometría. Sustituye a los paneles sueltos del HUD mientras dura (la capa 2D ya los trae).
-        let overlay2D = shown == .world && gs.view_mode == 1 && XRMenuPanelLayout.isOverlay(reason: gs.view_reason)
         if overlay2D, let h = hud {
             var it = XRDrawItem(kind: .panel, texture: h)
-            it.model = XRMenuPanelLayout.model(position: hp, yaw: hudYaw)
+            it.model = cfg.follow2D ? XRFollow.model(follow, distance: XRMenuPanelLayout.distance, drop: XRMenuPanelLayout.drop)
+                                    : XRMenuPanelLayout.model(position: hp, yaw: hudYaw)
             it.uvrect = SIMD4<Float>(0, 0, 1, 1)
             it.size = SIMD2<Float>(XRMenuPanelLayout.width, XRMenuPanelLayout.width * 0.75)
             it.distance = XRMenuPanelLayout.distance
@@ -872,6 +890,7 @@ final class XRPresenter {
             r.items.append(v)
         }
         if menuOpen {
+            if cfg.follow2D { menuModel = XRMenuLayout.model(position: follow.pos, yaw: follow.yaw) }
             if menuDirty { drawMenu(); menuDirty = false }
             if !menuTex.isEmpty {
                 var it = XRDrawItem(kind: .menu, texture: linear ? menuTexSRGB[menuIdx] : menuTex[menuIdx])
@@ -882,6 +901,11 @@ final class XRPresenter {
             }
         }
         return r
+    }
+
+    /// Pantalla de cine / pantalla 3D: `D` m delante de la cabeza suavizada (siguen la cabeza) o en el ancla fija del mundo.
+    private func screenModel(_ D: Float) -> simd_float4x4 {
+        cfg.follow2D ? XRFollow.model(follow, distance: D, drop: 0.05) : anchor * XRMath.translation(SIMD3<Float>(0, anchorY, -D))
     }
 
     /// Fotogramas seguidos sin render nativo sano en la pantalla 3D tras los que se cae al respaldo (~0,8 s a 72-90 Hz).
@@ -898,6 +922,7 @@ final class XRPresenter {
         let a = anchor.columns.3
         var d = "mostrando=\(shown) " + String(format: "velo=%.2f ancla=(%.2f %.2f %.2f) rumbo=%.0fgrados alturaAncla=%.2f", veil, a.x, a.y, a.z,
                                                XRMath.yaw(of: anchor) * 180 / .pi, anchorY)
+        d += " pantallas2D=" + (cfg.follow2D ? "siguen" : "fijas")
         d += " items: pantalla=\(n[.screen] ?? 0) pantalla3d=\(n[.screen3d] ?? 0) panel=\(n[.panel] ?? 0) menu=\(n[.menu] ?? 0) velo=\(n[.veil] ?? 0)"
         if let c = cinema {
             d += " cine: fotograma=\(c.haveFrame) \(c.w)x\(c.h) tex=\(c.texture(srgb: true).map { "\($0.width)x\($0.height)/fmt\($0.pixelFormat.rawValue)" } ?? "nil")"
