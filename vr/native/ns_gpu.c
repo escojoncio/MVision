@@ -1,5 +1,6 @@
 #include "ns_gpu.h"
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -548,6 +549,103 @@ static float fx_len_scale(const float *m) {   /* metros por unidad del motor: lo
     return (float)(s / 3.0);
 }
 
+
+/* ---- Comodidad VR de los efectos cerca de la cabeza ---- */
+/* Papeles (mismos valores que NSFX_ROLE_*; test_ns_gpu_fx lo comprueba). */
+enum { FXR_SURFACE = 14, FXR_WATER_SURFACE = 15, FXR_VIEW_OVERLAY = 22, FXR_COUNT = 23 };
+static const char *const k_fx_role_names[FXR_COUNT] = {"none", "light", "bubble", "smoke", "spark", "droplet", "splash", "ripple", "tracer", "beam", "decal", "shadow", "shadow_obj", "plasma",
+                                                       "surface", "water_surface", "ambient", "cone", "trail", "strip", "particle", "sprite_anim", "view_overlay"};
+const char *ns_gpu_fx_role_name(int role) { return role >= 0 && role < FXR_COUNT ? k_fx_role_names[role] : "?"; }
+float ns_gpu_fx_comfort_cap_deg(float d, float x, float dmin) {
+    if (!(x > 0.0f)) return 1e9f;
+    if (!(dmin > 0.0f)) dmin = 0.12f;
+    if (!(d > dmin)) return 0.0f;
+    if (d < 0.3f) { float t = (d - dmin) / (0.3f - dmin); t = t * t * (3.0f - 2.0f * t); return x * t; }
+    if (d < 1.0f) return x + (90.0f - x) * (d - 0.3f) / 0.7f;
+    return 1e9f;
+}
+/* Diámetro angular (grados) del polígono visto desde la cabeza: mayor ángulo entre dos esquinas. Una esquina en la cabeza cuenta como 180. */
+static float fx_ang_deg(float q[4][3], int nq, const float *head) {
+    float u[4][3];
+    for (int v = 0; v < nq; v++) {
+        float dx = q[v][0] - head[0], dy = q[v][1] - head[1], dz = q[v][2] - head[2], l = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!(l > 1e-4f)) return 180.0f;
+        u[v][0] = dx / l; u[v][1] = dy / l; u[v][2] = dz / l;
+    }
+    float best = 0.0f;
+    for (int a = 0; a < nq; a++) for (int b = a + 1; b < nq; b++) {
+        float c = u[a][0] * u[b][0] + u[a][1] * u[b][1] + u[a][2] * u[b][2];
+        if (c > 1.0f) { c = 1.0f; } else if (c < -1.0f) { c = -1.0f; }
+        float g = acosf(c) * (180.0f / 3.14159265f);
+        if (g > best) best = g;
+    }
+    return best;
+}
+static float fx_size_m(float q[4][3], int nq) {
+    float best = 0.0f;
+    for (int a = 0; a < nq; a++) for (int b = a + 1; b < nq; b++) {
+        float dx = q[a][0] - q[b][0], dy = q[a][1] - q[b][1], dz = q[a][2] - q[b][2], l = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (l > best) best = l;
+    }
+    return best;
+}
+static void fx_rec_insert(NsGpuFxNear *rec, uint32_t *n, const NsGpuFxNear *r) {
+    uint32_t pos = *n;
+    for (uint32_t i = 0; i < *n; i++) if (rec[i].src_key == r->src_key && rec[i].idx == r->idx) {   /* mismo origen: se queda el mayor */
+        if (r->deg_raw <= rec[i].deg_raw) return;
+        for (uint32_t k = i; k + 1 < *n; k++) rec[k] = rec[k + 1];
+        (*n)--; break;
+    }
+    pos = *n;
+    if (pos >= NSG_FXN_MAX) { if (r->deg_raw <= rec[NSG_FXN_MAX - 1].deg_raw) return; pos = NSG_FXN_MAX - 1; } else (*n)++;
+    rec[pos] = *r;
+    while (pos > 0 && rec[pos].deg_raw > rec[pos - 1].deg_raw) { NsGpuFxNear t = rec[pos]; rec[pos] = rec[pos - 1]; rec[pos - 1] = t; pos--; }
+}
+void ns_gpu_fx_near_reset(NsGpuFxNearAcc *a) { if (a) memset(a, 0, sizeof *a); }
+void ns_gpu_fx_near_accum(NsGpuFxNearAcc *a, const NsGpuFxOut *o, const float head[3], const float right[3], float t) {
+    if (!a || !o) return;
+    int moving = 0;
+    if (head && right && a->has_prev && t > a->prev_t + 1e-4f) {
+        float dt = t - a->prev_t, dx = head[0] - a->prev_head[0], dy = head[1] - a->prev_head[1], dz = head[2] - a->prev_head[2];
+        float v = sqrtf(dx * dx + dy * dy + dz * dz) / dt;
+        float c = right[0] * a->prev_right[0] + right[1] * a->prev_right[1] + right[2] * a->prev_right[2];
+        if (c > 1.0f) { c = 1.0f; } else if (c < -1.0f) { c = -1.0f; }
+        float w = acosf(c) * (180.0f / 3.14159265f) / dt;
+        if (isfinite(v) && v > a->max_speed_mps) a->max_speed_mps = v;
+        if (isfinite(w) && w > a->max_turn_dps) a->max_turn_dps = w;
+        moving = (isfinite(v) && v > 0.3f) || (isfinite(w) && w > 30.0f);
+    }
+    if (head && right) { for (int i = 0; i < 3; i++) { a->prev_head[i] = head[i]; a->prev_right[i] = right[i]; } a->prev_t = t; a->has_prev = 1; }
+    a->frames++;
+    if (moving) a->frames_moving++;
+    if (o->n_near) { a->frames_near++; if (moving) a->frames_moving_near++; }
+    if (o->n_near > a->max_near) a->max_near = o->n_near;
+    if (o->n_near_oncam > a->max_near_oncam) a->max_near_oncam = o->n_near_oncam;
+    if (o->n_near_screen > a->max_near_screen) a->max_near_screen = o->n_near_screen;
+    if (o->n_shrunk > a->max_shrunk) a->max_shrunk = o->n_shrunk;
+    if (o->n_zref > a->max_zref) a->max_zref = o->n_zref;
+    a->sum_drop_inside += o->n_drop_inside; a->sum_drop_oncam += o->n_drop_oncam;
+    for (uint32_t i = 0; i < o->n_rec && i < NSG_FXN_MAX; i++) {
+        if (o->rec[i].deg_raw > a->max_deg_raw) a->max_deg_raw = o->rec[i].deg_raw;
+        fx_rec_insert(a->rec, &a->n_rec, &o->rec[i]);
+    }
+}
+size_t ns_gpu_fx_near_describe(const NsGpuFxNearAcc *a, char *buf, size_t cap) {
+    if (!buf || !cap) return 0;
+    buf[0] = 0;
+    if (!a) return 0;
+    static const char *const act[4] = {"intacto", "reducido", "descartado_dentro", "descartado_pegado"};
+    int n = snprintf(buf, cap, "fx-cerca(<0.5m): fotogramas=%u con_cercanos=%u en_movimiento=%u (con_cercanos=%u) max_vel=%.2fm/s max_giro=%.0fgr/s | max_cercanos=%u (pegados=%u pantalla=%u) reducidos=%u descartados(dentro=%u pegados=%u) cartel_prof_ref=%u max_ang=%.0fgr",
+                     a->frames, a->frames_near, a->frames_moving, a->frames_moving_near, a->max_speed_mps, a->max_turn_dps, a->max_near, a->max_near_oncam, a->max_near_screen, a->max_shrunk,
+                     a->sum_drop_inside, a->sum_drop_oncam, a->max_zref, a->max_deg_raw);
+    for (uint32_t i = 0; i < a->n_rec && n > 0 && (size_t)n < cap; i++) {
+        const NsGpuFxNear *r = &a->rec[i];
+        n += snprintf(buf + n, cap - (size_t)n, " | [rol=%s %s%s d=%.2fm tam=%.2fm ang=%.0f->%.0fgr %s prim=%08x/%u]", ns_gpu_fx_role_name(r->role), r->kind == NS_EK_BILLBOARD ? "cartel" : "poligono",
+                      (r->flags & NS_EF_ON_CAMERA) ? " ON_CAMERA" : "", r->dist_m, r->size_m, r->deg_raw, r->deg_after, act[r->action & 3], r->src_key, r->idx);
+    }
+    return n > 0 ? ((size_t)n < cap ? (size_t)n : cap - 1) : 0;
+}
+
 int ns_gpu_fx_build(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm, NsGpuFxVert *verts, uint32_t cap_verts, NsGpuFxRun *runs, uint32_t cap_runs,
                     uint64_t *keys, uint32_t cap_keys, NsGpuFxOut *out) {
     return ns_gpu_fx_build_ex(fx, n_fx, prm, verts, cap_verts, runs, cap_runs, keys, cap_keys, NULL, 0, out);
@@ -588,7 +686,7 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
         float cols[4][3];
         float fz[4] = {0, 0, 0, 0};   /* profundidad de la cámara del juego de cada esquina (niebla) */
         uint32_t mask = all_eyes;
-        int nq = 0, tri_only = 0;
+        int nq = 0, tri_only = 0, used_zref = 0;
         for (int v = 0; v < 4; v++) { uvs[v][0] = e->uv[v][0]; uvs[v][1] = e->uv[v][1]; for (int c = 0; c < 3; c++) cols[v][c] = e->rgb[v][c]; }
         if (e->kind == NS_EK_BILLBOARD) {
             if (!fx_finite3(e->p[0]) || !(e->ref_h > 0)) ok = 0;
@@ -599,13 +697,13 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
                 const float *E = prm->cam->eye;
                 float z = 0;
                 for (int r = 0; r < 3; r++) z += (e->p[0][r] - E[r]) * R[3 * r + 2];
-                if (z < zmin) z = zref;
+                if (z < zmin) { z = zref; used_zref = 1; }
                 float k = z / e->ref_h;
                 float x0 = e->box[0] * k, y0 = e->box[1] * k / ys, x1 = e->box[2] * k, y1 = e->box[3] * k / ys;
                 const float ox[4] = {x0, x1, x0, x1}, oy[4] = {y0, y0, y1, y1};
                 for (int v = 0; v < 4; v++) for (int r = 0; r < 3; r++) q[v][r] = c[r] + prm->head_right[r] * ox[v] * L - prm->head_up[r] * oy[v] * L;
                 { float zc = ns_gpu_game_z(prm->cam, e->p[0]); fz[0] = fz[1] = fz[2] = fz[3] = zc; }
-                nq = 4; out->n_billboard++;
+                nq = 4; out->n_billboard++; if (used_zref) out->n_zref++;
             }
         } else if ((e->flags & NS_EF_LINE) || e->nv == 2) {
             if (!fx_finite3(e->p[0]) || !fx_finite3(e->p[1])) ok = 0;
@@ -670,13 +768,46 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
                 for (int v = 0; v < nq; v++) for (int r = 0; r < 3; r++) q[v][r] = prm->head[r] + (q[v][r] - prm->head[r]) * f;
             }
         }
+        int dropped = 0;
+        {   /* comodidad VR y registro de los cercanos (después del adelanto: es lo que ven los ojos) */
+            const float nearm = prm->near_log_m > 0.0f ? prm->near_log_m : 0.5f;
+            float cc[3] = {0, 0, 0};
+            for (int v = 0; v < nq; v++) for (int r = 0; r < 3; r++) cc[r] += q[v][r] / (float)nq;
+            const float dc = sqrtf((cc[0] - prm->head[0]) * (cc[0] - prm->head[0]) + (cc[1] - prm->head[1]) * (cc[1] - prm->head[1]) + (cc[2] - prm->head[2]) * (cc[2] - prm->head[2]));
+            const int oncam = (e->flags & NS_EF_ON_CAMERA) != 0, screen = oncam || e->role == FXR_VIEW_OVERLAY;
+            const int env = e->role == FXR_SURFACE || e->role == FXR_WATER_SURFACE;   /* superficies del entorno (agua, paneles): no son sprites, no se reducen */
+            const int watch = dc < nearm;
+            float deg0 = 0.0f, deg1 = 0.0f; int action = NSG_FXN_KEPT;
+            if (watch || prm->comfort_deg > 0.0f || (screen && prm->oncam_drop_m > 0.0f)) deg0 = deg1 = fx_ang_deg(q, nq, prm->head);
+            if (screen && prm->oncam_drop_m > 0.0f && dc < prm->oncam_drop_m) { dropped = 1; action = NSG_FXN_DROP_ONCAM; out->n_drop_oncam++; deg1 = 0.0f; }
+            else if (prm->comfort_deg > 0.0f && !env) {
+                const float cap = ns_gpu_fx_comfort_cap_deg(dc, prm->comfort_deg, prm->comfort_dmin_m);
+                if (cap <= 0.0f) { dropped = 1; action = NSG_FXN_DROP_INSIDE; out->n_drop_inside++; deg1 = 0.0f; }
+                else if (deg0 > cap) {
+                    for (int it = 0; it < 4 && deg1 > cap * 1.001f; it++) {   /* la reducción no es lineal con el ángulo: se afina */
+                        const float sc = cap / deg1 < 0.98f ? cap / deg1 : 0.98f;
+                        for (int v = 0; v < nq; v++) for (int r = 0; r < 3; r++) q[v][r] = cc[r] + (q[v][r] - cc[r]) * sc;
+                        deg1 = fx_ang_deg(q, nq, prm->head);
+                    }
+                    action = NSG_FXN_SHRUNK; out->n_shrunk++;
+                }
+            }
+            if (watch || action == NSG_FXN_DROP_ONCAM) {
+                if (watch) { out->n_near++; if (oncam) out->n_near_oncam++; if (screen) out->n_near_screen++; }
+                NsGpuFxNear r; memset(&r, 0, sizeof r);
+                r.src_key = e->src_key; r.idx = e->idx; r.flags = e->flags; r.role = e->role; r.kind = e->kind; r.action = (uint8_t)action; r.screen = (uint8_t)screen;
+                r.dist_m = dc; r.size_m = fx_size_m(q, nq); r.deg_raw = deg0; r.deg_after = deg1;
+                if (action == NSG_FXN_SHRUNK) { /* tamaño original */ r.size_m = fx_size_m(q, nq) * (deg1 > 1e-3f ? deg0 / deg1 : 1.0f); }
+                fx_rec_insert(out->rec, &out->n_rec, &r);
+            }
+        }
         if (prm->fog && prm->fog->active && prm->fog->len > 0.0f)
             for (int v = 0; v < nq; v++) {
                 const float s = 1.0f - ns_gpu_fog_f(prm->fog, fz[v]);
                 cols[v][0] *= s; cols[v][1] *= s; cols[v][2] *= s;
             }
         if (out->n_keys < cap_keys) keys[out->n_keys++] = ns_gpu_fx_key(e);
-        if (mask == 0) continue;   /* confirmado (el motor tampoco lo dibujaría desde aquí) pero sin triángulos */
+        if (mask == 0 || dropped) continue;   /* confirmado (el motor tampoco lo dibujaría desde aquí) pero sin triángulos */
         const int semi_f = (e->flags & NS_EF_SEMI) != 0, tex = (e->flags & NS_EF_TEXTURED) != 0;
         const uint32_t cf = (uint32_t)((tex ? NSG_CF_TEX : 0u) | (semi_f ? NSG_CF_SEMI : 0u) | ((uint32_t)(e->abr & 3u) << 2));
         const uint32_t clutf = (uint32_t)e->clut | (cf << 16);

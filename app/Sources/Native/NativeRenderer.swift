@@ -281,6 +281,8 @@ final class NativeRenderer {
     private var fxRunsBuf: [NsGpuFxRun] = []
     private var fxKeysBuf: [UInt64] = []
     private var fxOut = NsGpuFxOut()
+    // Registro de efectos cerca de la cabeza (ventana de 1 s): `fxNear` acumula, `fxNearSnap` es la ultima ventana completa (la que se escribe en el registro)
+    private var fxNear = NsGpuFxNearAcc(), fxNearSnap = NsGpuFxNearAcc(), fxNearT0: Double = 0
     private var fxAllowed = false                  // este fotograma se dibujarán los efectos (pipelines listas para todos los formatos comprobados)
     private var fxTagsOK = Set<String>()           // formatos de destino con las pipelines de efectos compiladas
     private(set) var statFxItems = 0, statFxTris = 0, statFxBillboards = 0, statFxRibbons = 0, statFxPolys = 0, statFxSkipped = 0
@@ -937,6 +939,9 @@ final class NativeRenderer {
         prm.has_depth_row = 1
         prm.raise_m = fogPar.w        // sesgo `raise` del motor por elemento, con la misma unidad que las mallas
         prm.board_pull = 1            // carteles (halos, destellos): adelantados media extension hacia la cabeza, sin cambiar lo que se ve
+        // comodidad VR: ningun efecto ocupa mas de 20 grados a 0,3 m de la cabeza (sube hasta 90 grados a 1 m), los que nacen a menos de 12 cm se descartan y los pegados a la camara del motor
+        // (sin emisor en el mundo: vaho, gotas, niebla de pantalla) se descartan a menos de 1,5 m. Los recubrimientos intencionados de pantalla (fundido, gas, agua) van por NsScreenFx, no por aqui.
+        prm.comfort_deg = 20; prm.comfort_dmin_m = 0.12; prm.oncam_drop_m = 1.5; prm.near_log_m = 0.5
         prm.depth_row = (-sortView.columns.0.z, -sortView.columns.1.z, -sortView.columns.2.z, -sortView.columns.3.z)
         let rc: Int32 = toVR12.withUnsafeBufferPointer { (tv) -> Int32 in
             withUnsafePointer(to: &fxCam) { (camP) -> Int32 in
@@ -964,6 +969,12 @@ final class NativeRenderer {
         }
         guard rc == 0 else { return }
         fxOut = out
+        do {   // registro de cercanos: se acumula y cada segundo se congela la ventana para el registro
+            let now = ProcessInfo.processInfo.systemUptime
+            var hd: [Float] = [head.x, head.y, head.z], rt: [Float] = [right.x, right.y, right.z]
+            ns_gpu_fx_near_accum(&fxNear, &out, &hd, &rt, Float(now.truncatingRemainder(dividingBy: 1000)))
+            if now - fxNearT0 >= 1.0 { fxNearSnap = fxNear; ns_gpu_fx_near_reset(&fxNear); fxNearT0 = now }
+        }
         let total = Int(out.n_opaque + out.n_semi)
         statFxItems = Int(out.n_keys); statFxTris = total / 3
         statFxBillboards = Int(out.n_billboard); statFxRibbons = Int(out.n_ribbon); statFxPolys = Int(out.n_poly); statFxSkipped = Int(out.n_skipped)
@@ -1467,6 +1478,13 @@ final class NativeRenderer {
         return t
     }
 
+    /// Resumen de la ultima ventana de 1 s de efectos cerca de la cabeza (ver ns_gpu_fx_near_describe).
+    private func fxNearText() -> String {
+        var buf = [CChar](repeating: 0, count: 1536)
+        _ = ns_gpu_fx_near_describe(&fxNearSnap, &buf, 1536)
+        return "[" + String(cString: buf) + "] |"
+    }
+
     /// Línea de registro (una vez por segundo): estado del renderer nativo y de la última decisión.
     func logLine() -> String {
         let lp = lastPresent
@@ -1479,6 +1497,7 @@ final class NativeRenderer {
                "instancias=\(statInstances) piezas=\(statPieces) mallas=\(statMeshes) semi=\(statSemiTris) tramos_semi=\(mergedN) dibujos=\(statDraws) fallos=\(frameFailures)/\(totalFailures) ausentes=\(frameMisses) " +
                "efectos=\(statFxItems) (carteles=\(statFxBillboards) cintas=\(statFxRibbons) poligonos=\(statFxPolys) descartados=\(statFxSkipped) tris=\(statFxTris) dibujados=\(fxAllowed ? "si" : "no")) " +
                "pantalla=[agua=\(screenOut.water_min.3 > 0.5 ? "si" : "no") recubrimientos=\(overlays.count)] " +
+               "\(fxNearText()) " +
                "escenas=\(statScenes) epoca=\(lastEpoch) cpu(prepare)=\(String(format: "%.2f", cpuPrepareMs))ms cpu(encode)=\(String(format: "%.2f", cpuEncodeMs))ms"
     }
 

@@ -222,6 +222,8 @@ typedef struct {
     uint8_t sub;         /* segmento dentro del paquete (polilíneas): con src_key e idx identifica el elemento entre fotogramas (ver ns_fx_item_key) */
     uint16_t tpage, clut;
     uint16_t idx;        /* índice del paquete dentro de la primitiva */
+    uint8_t role;        /* NSFX_ROLE_* del extractor (solo informativo: registro y comodidad; 0 = desconocido). Ocupa el relleno: el tamaño no cambia */
+    uint8_t _pad;
     float p[4][3];       /* QUAD: vértices en mundo del motor (ya con la matriz del grupo aplicada); BILLBOARD: p[0] = centro */
     uint8_t rgb[4][3];   /* color por vértice 0..255 (128 = neutro con textura) */
     uint8_t uv[4][2];    /* texels en la página */
