@@ -17,7 +17,7 @@ struct VRInputSettings: Equatable {
     var headHeight: Float = 0         // altura de pie calibrada en metros; 0 = autocalibrar
     var crouchDrop: Float = 0.35
     var proneDrop: Float = 0.80
-    var holdAdvance: Float = 0.5      // segundos con A/B mantenido para avanzar toda la radio (0 = desactivado)
+    var holdAdvance: Float = 0.5      // segundos con A (cruz) de la mano dominante mantenido para avanzar los textos de la radio con toques de cruz (0 = desactivado); nunca toca círculo ni el resto
 
     private static let prefix = "vri."
 
