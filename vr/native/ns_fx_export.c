@@ -9,6 +9,8 @@ uint32_t ns_fx_export(const NsFxScene *sc, int include_culled, NsEffect *out, ui
     for (uint32_t i = 0; i < sc->n_items; i++) {
         const NsFxItem *it = &sc->items[i];
         if (!include_culled && (it->flags & NSFX_F_ENGINE_CULLED)) continue;
+        /* Sprite texturizado sin página (ni aprendida de una lista anterior): el renderer lo dibujaría con la página 0, una textura que no es la suya. Mejor esperar a aprenderla. */
+        if ((it->flags & NSFX_F_TEXTURED) && (it->flags & NSFX_F_TPAGE_UNKNOWN)) continue;
         if (n >= cap) { if (truncated) *truncated = 1; break; }
         NsEffect *e = &out[n++];
         memset(e, 0, sizeof *e);

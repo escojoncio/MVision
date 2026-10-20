@@ -38,7 +38,7 @@ for sym in ns_store_get ns_store_get_baked ns_store_epoch ns_store_ack ns_store_
 done
 
 echo "== comprobación de compilación de lo nuevo que el banco no enlaza (ns_solid, cobertura, capa 2D, manos) =="
-for f in vr/native/ns_solid.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_cover.c vr/native/ns_cover_glue.c vr/native/ns_hand.c vr/body/vr_hand_mesh.c vr/scene/vr_layer2d.c vr/scene/vr_layer2d_async.c; do
+for f in vr/native/ns_solid.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_cover.c vr/native/ns_fxcmp.c vr/native/ns_cover_glue.c vr/native/ns_hand.c vr/body/vr_hand_mesh.c vr/scene/vr_layer2d.c vr/scene/vr_layer2d_async.c; do
   xcrun clang -c -O1 -Wall -Wextra -std=gnu11 "${INC[@]}" -Ivr/body "$f" -o "$OUT/chk_$(basename "$f" .c).o"
 done
 

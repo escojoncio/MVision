@@ -84,6 +84,34 @@ static void t_billboard(void) {
     CHECK(fabsf(s[1].p[0] - s[0].p[0]) < 0.12f, "tamano acotado %f", s[1].p[0] - s[0].p[0]);
 }
 
+static void t_raise_pull(void) {
+    NsGpuFxVert vb[64]; NsGpuFxRun runs[4]; uint64_t keys[4]; NsGpuFxOut o;
+    /* sesgo raise: el cuadrilátero se acerca a la cabeza raise * raise_m (escalado desde la cabeza) */
+    NsEffect q = quad(0, 0, 4000, 100); q.depth_bias = 200;
+    P.raise_m = 0.0005f;   /* 200 -> 0,1 m */
+    CHECK(build(&q, 1, vb, runs, keys, &o) == 0, "raise");
+    CHECK(fabsf(vb[0].p[2] - 3.9f) < 0.01f, "z con raise %f (4.0 - 0.1)", vb[0].p[2]);
+    P.raise_m = 0;
+    CHECK(build(&q, 1, vb, runs, keys, &o) == 0 && fabsf(vb[0].p[2] - 4.0f) < 1e-5f, "sin raise_m no cambia");
+    /* cartel: board_pull adelanta media extensión sin cambiar la proyección */
+    NsEffect e; memset(&e, 0, sizeof e);
+    e.kind = NS_EK_BILLBOARD; e.nv = 4; e.flags = NS_EF_TEXTURED | NS_EF_SEMI; e.abr = 1; e.src_key = 0x80200000u; e.tpage = 0x1a;
+    e.p[0][0] = 500; e.p[0][1] = -200; e.p[0][2] = 3200; e.ref_h = 320.0f; e.box[0] = -16; e.box[1] = -16; e.box[2] = 16; e.box[3] = 16;
+    for (int v = 0; v < 4; v++) for (int c = 0; c < 3; c++) e.rgb[v][c] = 128;
+    NsGpuFxVert a[16], b[16];
+    CHECK(build(&e, 1, a, runs, keys, &o) == 0, "cartel base");
+    const NsGpuFxVert *sa = &a[o.n_opaque];
+    float pa[3] = {sa[0].p[0], sa[0].p[1], sa[0].p[2]}, wa = sa[1].p[0] - sa[0].p[0];
+    P.board_pull = 1.0f;
+    CHECK(build(&e, 1, b, runs, keys, &o) == 0, "cartel adelantado");
+    const NsGpuFxVert *sb = &b[o.n_opaque];
+    float wb = sb[1].p[0] - sb[0].p[0];
+    CHECK(sb[0].p[2] < pa[2] - 0.05f && sb[0].p[2] > 0.69f * pa[2], "mas cerca: z %f -> %f", pa[2], sb[0].p[2]);
+    CHECK(fabsf(sb[0].p[0] / sb[0].p[2] - pa[0] / pa[2]) < 1e-4f && fabsf(sb[0].p[1] / sb[0].p[2] - pa[1] / pa[2]) < 1e-4f, "misma direccion desde la cabeza");
+    CHECK(fabsf(wb / sb[0].p[2] - wa / pa[2]) < 1e-4f, "mismo tamano angular");
+    P.board_pull = 0;
+}
+
 static void t_ribbon(void) {
     NsEffect e; memset(&e, 0, sizeof e);
     e.kind = NS_EK_QUAD; e.nv = 2; e.flags = NS_EF_LINE | NS_EF_SEMI; e.abr = 1; e.src_key = 0x80300000u;
@@ -235,6 +263,7 @@ int main(void) {
     setup();
     t_poly();
     setup(); t_billboard();
+    setup(); t_raise_pull();
     setup(); t_ribbon();
     setup(); t_oneside();
     setup(); t_limits();

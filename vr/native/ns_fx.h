@@ -90,7 +90,8 @@ enum {
     NSFX_F_ABR_UNKNOWN = 256,  /* semitransparente SIN modo de mezcla en el paquete: `abr` = 1 supuesto; ns_fx_resolve_items lo toma de la GPU */
     NSFX_F_FROM_OBJ = 512,     /* viene de un objeto de malla (sombra) y no de una primitiva */
     NSFX_F_TPAGE_UNKNOWN = 1024, /* sprite texturizado: la página de textura no está en el paquete; ns_fx_resolve_items la toma de la GPU */
-    NSFX_F_LOW_CONF = 2048     /* sin profundidad en el paquete (sz == 0): posiciones de mundo válidas, pero ni la reproyección ni la casación con la GPU son fiables */
+    NSFX_F_LOW_CONF = 2048,    /* sin profundidad en el paquete (sz == 0): posiciones de mundo válidas, pero ni la reproyección ni la casación con la GPU son fiables */
+    NSFX_F_LEARNED = 4096      /* la página de textura y/o el modo de mezcla no estaban en el paquete y se tomaron de una lista de la GPU anterior (ns_fx_learn) o de la última sombra emitida */
 };
 
 typedef struct {
@@ -301,6 +302,13 @@ int ns_fx_classify(const uint8_t *ram, const NsFxScene *sc, const GpuDrawList *d
  * no la haya confirmado (confirmed[i] == 0; confirmed == NULL = nada confirmado). Los eventos de VRAM siempre se aplican a la VRAM. Devuelve cuántas
  * operaciones salen por la GPU. */
 uint32_t ns_fx_gpu_mask(const uint8_t *cls, const uint8_t *confirmed, uint32_t n, uint8_t *gpu);
+
+/* APRENDIZAJE entre fotogramas (global, sin bloqueos: seguro entre hilos). Los sprites y las primitivas planas semitransparentes no traen en su paquete la página de
+ * textura ni el modo de mezcla (los fija un comando de modo de dibujo aparte): sin ellos el renderer los dibujaría con la página 0. Tras clasificar una lista, ns_fx_learn
+ * guarda por primitiva lo que la GPU usó para los elementos casados con esos datos desconocidos; ns_fx_extract lo aplica a los siguientes fotogramas
+ * (NSFX_F_LEARNED). Devuelve cuántos elementos aprendió. */
+uint32_t ns_fx_learn(const NsFxScene *sc, const GpuDrawList *dl, const int32_t *item);
+void ns_fx_learn_reset(void);
 
 /* Tras classify: rellena de las primitivas de la GPU casadas (item[i] = índice o -1) lo que el paquete no trae (página de textura, modo de mezcla).
  * Devuelve cuántos elementos se completaron. */
