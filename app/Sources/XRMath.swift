@@ -168,6 +168,8 @@ enum XRCinemaLayout {
 /// Seguimiento suave de la cabeza por las pantallas 2D (cine, pantalla 3D, ventanas del juego, menú VR). Funciones puras (las prueba el banco).
 /// Estándar VR de «lazy follow» por fotograma: la pantalla sigue la posición y el rumbo de la cabeza con un filtro exponencial independiente de la tasa de
 /// fotogramas (alfa = 1 - exp(-dt/tau), tau corto) y se mantiene NIVELADA (sin alabeo; el cabeceo sigue a la cabeza solo a la mitad y con tope de ~15 grados).
+/// Zona muerta pequeña (2,5 grados de rumbo, 3 de cabeceo, 3 cm) para que el temblor y la respiración no muevan la pantalla: mientras el error de la pose
+/// respecto a la cabeza quede dentro, la pantalla está quieta; fuera, la sigue filtrando solo el exceso (sin saltos al cruzar el borde).
 struct XRFollowState {
     var pos = SIMD3<Float>(0, 1.6, 0)
     var yaw: Float = 0
@@ -176,7 +178,10 @@ struct XRFollowState {
 }
 
 enum XRFollow {
-    static let tau: Float = 0.10            // constante de tiempo (s): 0,08..0,15 s
+    static let tau: Float = 0.12            // constante de tiempo (s): 0,08..0,15 s
+    static let deadYaw: Float = 2.5 * Float.pi / 180     // rad: zona muerta del rumbo
+    static let deadPitch: Float = 3.0 * Float.pi / 180   // rad: zona muerta del cabeceo (de la pose ya con ganancia)
+    static let deadPos: Float = 0.03                // m: zona muerta de la posición
     static let pitchGain: Float = 0.5
     static let maxPitch: Float = 0.26       // rad (~15 grados)
     static let snapDistance: Float = 3.0    // m: un salto de cabeza mayor (teletransporte, recentrado del sistema) no se persigue, se salta
@@ -213,10 +218,14 @@ enum XRFollow {
             return
         }
         let k = alpha(dt: min(dt, 0.1), tau: tau)
-        s.pos += (t.pos - s.pos) * k
-        s.yaw = wrap(s.yaw + wrap(t.yaw - s.yaw) * k)
-        s.pitch += (t.pitch - s.pitch) * k
+        let dp = t.pos - s.pos, dl = simd_length(dp)
+        if dl > deadPos { s.pos += dp * ((dl - deadPos) / dl * k) }
+        s.yaw = wrap(s.yaw + excess(wrap(t.yaw - s.yaw), deadYaw) * k)
+        s.pitch += excess(t.pitch - s.pitch, deadPitch) * k
     }
+
+    /// Parte del error `e` que sobrepasa la zona muerta `dead` (0 dentro de ella; con el signo de `e`).
+    static func excess(_ e: Float, _ dead: Float) -> Float { abs(e) <= dead ? 0 : e - (e > 0 ? dead : -dead) }
 
     /// Modelo (centro de la pantalla, +Z hacia el usuario): `distance` m delante de la cabeza suavizada y `drop` m por debajo de los ojos. Sin alabeo.
     static func model(_ s: XRFollowState, distance: Float, drop: Float) -> simd_float4x4 {
@@ -232,14 +241,14 @@ struct XRRecenterJump {
 
 /// Detección del recentrado del sistema (Digital Crown). visionOS no avisa de él ni en CompositorServices ni en ARKit: al recentrar mueve el origen del
 /// espacio y la pose del dispositivo (`originFromAnchorTransform`) da un salto instantáneo. Se detecta comparando cada pose con la extrapolada de la
-/// velocidad del fotograma anterior: una cabeza real no tiene un residuo de 10 cm ni de 8 grados en 10 ms; tras un hueco largo (pausa, seguimiento perdido)
-/// se compara en bruto con umbrales mayores. El salto de rumbo se ignora si se mira casi vertical (el rumbo es entonces poco fiable).
+/// velocidad del fotograma anterior: una cabeza real no tiene un residuo de 10 cm ni de 8 grados en 10 ms. SOLO se juzga entre fotogramas normales
+/// (dt <= `maxDt`): con un hueco mayor (pausa, seguimiento perdido, tirón del sistema) no hay forma de distinguir un recentrado de una cabeza que se movió
+/// mientras no se la veía, así que el detector se reinicia y la pose nueva pasa a ser la referencia (sin declarar salto). El salto de rumbo se ignora si se
+/// mira casi vertical (el rumbo es entonces poco fiable).
 struct XRRecenterDetector {
     static let posThreshold: Float = 0.10       // m de residuo en un paso normal
     static let yawThreshold: Float = 0.14       // rad (~8 grados)
-    static let gap: Float = 0.25                // s: más que esto es un hueco, no un paso
-    static let gapPosThreshold: Float = 0.6     // m
-    static let gapYawThreshold: Float = 0.7     // rad (~40 grados)
+    static let maxDt: Double = 0.05             // s: más que esto entre muestras es un hueco, no un paso
     static let maxSpeed: Float = 8              // m/s, tope de la velocidad extrapolada
     static let maxYawRate: Float = 17           // rad/s (~1000 grados/s)
 
@@ -259,23 +268,23 @@ struct XRRecenterDetector {
         let p = XRMath.position(m), y = XRMath.yaw(of: m)
         let f = -SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z)
         let yawOK = hypotf(f.x, f.z) > 0.5
+        let prevT = lastT
         defer { lastPos = p; lastYaw = y; lastYawOK = yawOK; lastT = time }
-        guard have else { have = true; return nil }
-        let dt = Float(time - lastT)
+        guard have else { have = true; vel = SIMD3<Float>(0, 0, 0); yawRate = 0; return nil }
+        if time - prevT > Self.maxDt {      // hueco: reinicio sin juicio
+            vel = SIMD3<Float>(0, 0, 0); yawRate = 0
+            return nil
+        }
+        let dt = Float(time - prevT)
         let dp = p - lastPos
         let bothOK = yawOK && lastYawOK
         let dy = bothOK ? XRFollow.wrap(y - lastYaw) : 0
-        let jump: Bool
-        if dt > Self.gap {
-            jump = simd_length(dp) > Self.gapPosThreshold || abs(dy) > Self.gapYawThreshold
-        } else {
-            jump = simd_length(dp - vel * dt) > Self.posThreshold || abs(XRFollow.wrap(dy - yawRate * dt)) > Self.yawThreshold
-        }
+        let jump = simd_length(dp - vel * dt) > Self.posThreshold || abs(XRFollow.wrap(dy - yawRate * dt)) > Self.yawThreshold
         if jump {
             vel = SIMD3<Float>(0, 0, 0); yawRate = 0
             return XRRecenterJump(dPos: dp, dYaw: dy)
         }
-        if dt > 0.0005 && dt <= Self.gap {
+        if dt > 0.0005 {
             var nv = dp / dt
             let sp = simd_length(nv)
             if sp > Self.maxSpeed { nv *= Self.maxSpeed / sp }

@@ -607,6 +607,7 @@ final class RGRenderer {
         n.headVR = SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z)
         // Cámara del juego: cinemática del motor (view_kind ENGINE) o escena válida pero no apta para primera persona (sin TOVR_OK/PLAYER_OK: vehículos, ascensores, zonas especiales,
         // jugador sin enlazar tras un cambio de zona), en CUALQUIER modo de cinemática (pantalla 3D, diorama, dentro de la escena). Nunca negro por eso.
+        n.screenMode = screenMode
         n.cinemaGameView = ((engineView || n.sceneUnfit) && Self.viewOK(gameView)) ? gameView : nil
         var sortView = sceneV.first ?? matrix_identity_float4x4
         var eyeList: [SIMD3<Float>] = eyesWanted ? sceneV.prefix(min(2, nTargets)).map(eyeOf) : []
@@ -787,6 +788,8 @@ final class RGRenderer {
 
     /// La escena es una cinemática del motor (VRV_K_ENGINE, view_kind 2): la fija XRFrameEncoder antes de `encode`. Fuerza la colocación desde la cámara del juego.
     var engineView = false
+    /// La escena nativa se muestra en una pantalla (pantalla 3D o cine): único caso con descarte de reversos (ver NativeRenderer.screenMode).
+    var screenMode = false
     /// La escena nativa actual pide la pantalla 3D porque es válida pero no apta para primera persona (con histéresis): XRPresenter la muestra en estéreo hasta que vuelva a ser apta.
     var sceneNeedsGameCam: Bool {
 #if !MV_BENCH || MV_BENCH_NATIVE

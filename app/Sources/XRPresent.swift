@@ -260,6 +260,9 @@ final class XRPresenter {
     private var hudInit = false
     // Seguimiento continuo de la cabeza por las pantallas 2D (opción «Pantallas 2D: siguen la cabeza»).
     private var follow = XRFollowState()
+    private var menuFollow = XRFollowState()   // seguimiento propio del menú VR: se congela mientras se interactúa con él
+    private var menuHold: Float = 0            // s que quedan de congelación tras la última entrada sobre el menú
+    private var menuSnap = false
     private var followSnap = true
     private var prevOverlay2D = false
     // Dentro de la escena: cámara del plano (vista del motor -> mundo VR al empezar el plano) y plano visto
@@ -339,8 +342,12 @@ final class XRPresenter {
             if nav.right && !p.right { activate(dir: 1) }
             if nav.select && !p.select { activate(dir: 1) }
             if nav.back && !p.back { if page != 0 { leaveSub() } else { closeMenu() } }
+            // Entrada activa sobre el menú (direcciones, selección, mando o Sense con algo pulsado/inclinado): el menú se congela 0,6 s tras la última.
+            if nav.up || nav.down || nav.left || nav.right || nav.select || nav.back || s.pad.active || s.left.active || s.right.active { menuHold = 0.6 }
+            else { menuHold = max(0, menuHold - dt) }
         } else {
             prevNav = XRNav()
+            menuHold = 0
         }
         if !menuOpen && blockUntilNeutral {
             // Tras cerrar: entrada bloqueada hasta que todo esté en neutro (máx. 2 s: un stick con deriva o un grip sostenido no la dejan bloqueada).
@@ -382,6 +389,7 @@ final class XRPresenter {
         prevNav = XRNav()
         menuModel = XRMenuLayout.model(head: head)      // cerca, abajo e inclinado hacia la cara: nunca sobre la pantalla de cine / códec
         followSnap = true                               // el menú sale ya delante de la cabeza; después la sigue
+        menuSnap = true; menuHold = 0
     }
 
     private func closeMenu() {
@@ -730,7 +738,10 @@ final class XRPresenter {
         let overlay2D = shown == .world && gs.view_mode == 1 && XRMenuPanelLayout.isOverlay(reason: gs.view_reason)
         // Seguimiento de la cabeza por fotograma de render (todo el tiempo, para que al activar la opción o abrir una pantalla ya esté en su sitio). Se salta el suavizado
         // al recentrar, al abrir el menú, al aparecer una ventana 2D y al colocar una pantalla nueva tras la transición (el velo está en negro).
-        XRFollow.step(&follow, head: head, dt: d, snap: followSnap || (overlay2D && !prevOverlay2D) || (needAnchor && shown != .world))
+        let snapNow = followSnap || (overlay2D && !prevOverlay2D) || (needAnchor && shown != .world)
+        XRFollow.step(&follow, head: head, dt: d, snap: snapNow)
+        // El menú VR se queda quieto mientras haya un puntero, rayo o entrada activa sobre él (menuHold > 0): no se mueve bajo el dedo; al soltar vuelve a seguir la cabeza.
+        if !(menuOpen && menuHold > 0) { XRFollow.step(&menuFollow, head: head, dt: d, snap: snapNow || menuSnap); menuSnap = false }
         followSnap = false
         prevOverlay2D = overlay2D
         if needAnchor && shown != .world {
@@ -890,7 +901,7 @@ final class XRPresenter {
             r.items.append(v)
         }
         if menuOpen {
-            if cfg.follow2D { menuModel = XRMenuLayout.model(position: follow.pos, yaw: follow.yaw) }
+            if cfg.follow2D && menuHold <= 0 { menuModel = XRMenuLayout.model(position: menuFollow.pos, yaw: menuFollow.yaw) }
             if menuDirty { drawMenu(); menuDirty = false }
             if !menuTex.isEmpty {
                 var it = XRDrawItem(kind: .menu, texture: linear ? menuTexSRGB[menuIdx] : menuTex[menuIdx])

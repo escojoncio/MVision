@@ -6,3 +6,4 @@
 #include "ns_cinema.h"
 #include "ns_cpuref.h"
 #include "native_synth.h"
+#include "ns_fill_glue.h"   /* NativeRenderer.ingest recoge el relleno; en el banco lo sustituye bench/c/fill_stub.c (sin relleno) */

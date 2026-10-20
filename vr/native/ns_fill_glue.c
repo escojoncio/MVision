@@ -10,6 +10,11 @@
 #define FG_MAX_OPS 8192u
 #define FG_RAM 0x200000u
 #define FG_OUT 6000u
+#define FG_STALE 20u   /* fotogramas sin ejecución tras los que el resultado deja de servirse */
+#define FG_KEEP 5u     /* fotogramas que se conserva el resultado anterior ante un fallo puntual del trabajador */
+
+/* a - b en fotogramas; devuelve UINT32_MAX si el contador retrocedió (carga de partida): el resultado es de otra época */
+static uint32_t fdiff(uint32_t a, uint32_t b) { return a >= b ? a - b : 0xFFFFFFFFu; }
 
 static struct {
     pthread_mutex_t mx; pthread_cond_t cv; pthread_t th;
@@ -19,12 +24,14 @@ static struct {
     GpuOp *ops; uint32_t nops, frame;
     int have_cam, list_vr; float cam_eye[3], cam_M[9];
     NsEffect *out; uint32_t n_out;      /* resultado vigente (copia) */
+    uint32_t res_frame, sub_frame, rgen;   /* fotograma del último resultado / de la última lista recibida / generación de reset */
     char text[1024]; int text_new; unsigned runs, fails, skipped_busy; uint64_t seen_frame;
 } G = {.mx = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
 
 static void *worker(void *arg) {
     (void)arg;
     NsFillSession *s = ns_fill_session_create();
+    uint32_t zlast_g = 0, zlast_e = 0; int zlast_ok = 0;
     for (;;) {
         pthread_mutex_lock(&G.mx);
         while (!G.job) pthread_cond_wait(&G.cv, &G.mx);
@@ -34,6 +41,7 @@ static void *worker(void *arg) {
         memcpy(ceye, G.cam_eye, sizeof ceye); memcpy(cM, G.cam_M, sizeof cM);
         if (G.have_cam) { ro.list_eye = ceye; ro.list_M = cM; ro.list_vr = G.list_vr; }
         int rst = G.reset; G.reset = 0;
+        uint32_t rgen = G.rgen;
         pthread_mutex_unlock(&G.mx);
         /* G.ram / G.ops / G.scratch son del trabajador mientras job == 1 */
         int rc = -3;
@@ -42,17 +50,25 @@ static void *worker(void *arg) {
             if (rst) ns_fill_reset(ns_fill_session_fill(s));
             rc = ns_fill_session_run(s, G.ram, G.scratch, G.ops, nops, &ro, NULL, frame, &st, NULL);
         }
+        uint32_t zg = 0, ep = 0; int haveZone = s && ns_fill_session_zone(s, &zg, &ep) == 0;
+        int zchg = rc == 0 && haveZone && zlast_ok && (zg != zlast_g || ep != zlast_e);   /* cambio de zona o de época del extractor */
+        if (rc == 0 && haveZone) { zlast_g = zg; zlast_e = ep; zlast_ok = 1; }
+        if (zchg) ns_fill_reset(ns_fill_session_fill(s));
         pthread_mutex_lock(&G.mx);
-        if (rc == 0) {
+        if (rgen != G.rgen || zchg) { G.n_out = 0; if (zchg) G.rgen++; }   /* reset pedido durante la ejecución, o zona nueva: el resultado es de la escena anterior */
+        else if (rc == 0) {
             uint32_t n = 0; const NsEffect *e = ns_fill_session_effects(s, &n);
             if (n > FG_OUT) n = FG_OUT;
             if (n) memcpy(G.out, e, (size_t)n * sizeof(NsEffect));
-            G.n_out = n; G.runs++;
+            G.n_out = n; G.runs++; G.res_frame = frame;
             if (frame - G.seen_frame >= 60u || !G.seen_frame) {   /* ~1 línea por segundo a 60 fotogramas */
                 G.seen_frame = frame;
                 ns_fill_format(&st, frame, G.text, sizeof G.text); G.text_new = 1;
             }
-        } else { G.fails++; G.n_out = 0; }   /* sin escena (menú, vídeo): nada que rellenar */
+        } else {   /* fallo puntual: se conserva el resultado anterior unos pocos fotogramas; después, sin escena (menú, vídeo): nada que rellenar */
+            G.fails++;
+            if (fdiff(frame, G.res_frame) > FG_KEEP) G.n_out = 0;
+        }
         G.job = 0; G.busy = 0;
         pthread_mutex_unlock(&G.mx);
     }
@@ -89,15 +105,17 @@ void ns_fill_glue_post_ik(const uint8_t *ram) {
 }
 
 void ns_fill_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame, const float *eye, const float *M, int list_vr) {
-    if (G.off || !ram || !ops || !nops || nops > FG_MAX_OPS) return;
+    if (G.off || !ram || !ops || nops > FG_MAX_OPS) return;
     pthread_mutex_lock(&G.mx);
     if (!ensure_started()) { pthread_mutex_unlock(&G.mx); return; }
+    G.sub_frame = frame;
+    if (!nops) { G.reset = 1; G.rgen++; G.n_out = 0; G.snap_valid = 0; pthread_mutex_unlock(&G.mx); return; }   /* lista vacía = sin 3D */
     unsigned cnt = ++G.counter;
     if (cnt % G.every != 0) { G.snap_valid = 0; pthread_mutex_unlock(&G.mx); return; }
     if (G.busy) { G.skipped_busy++; G.snap_valid = 0; pthread_mutex_unlock(&G.mx); return; }
     int has3d = 0;
     for (uint32_t i = 0; i < nops && !has3d; i++) has3d = ops[i].type == GPU_OP_POLY && ops[i].v[0].vvalid;
-    if (!has3d) { G.snap_valid = 0; pthread_mutex_unlock(&G.mx); return; }
+    if (!has3d) { G.snap_valid = 0; G.reset = 1; G.rgen++; G.n_out = 0; pthread_mutex_unlock(&G.mx); return; }   /* pantalla 2D: la persistencia no vale para la siguiente escena */
     if (G.snap_valid) { uint8_t *t = G.ram; G.ram = G.snap; G.snap = t; }   /* la instantánea con la pose IK pasa al trabajador sin copiarla otra vez */
     else memcpy(G.ram, ram, FG_RAM);
     G.snap_valid = 0;
@@ -114,7 +132,7 @@ uint32_t ns_fill_glue_fetch(NsEffect *cap, uint32_t max) {
     uint32_t n = 0;
     if (!cap || !max) return 0;
     pthread_mutex_lock(&G.mx);
-    if (!G.off && G.out && G.n_out) { n = G.n_out < max ? G.n_out : max; memcpy(cap, G.out, (size_t)n * sizeof(NsEffect)); }
+    if (!G.off && G.out && G.n_out && fdiff(G.sub_frame, G.res_frame) <= FG_STALE) { n = G.n_out < max ? G.n_out : max; memcpy(cap, G.out, (size_t)n * sizeof(NsEffect)); }
     pthread_mutex_unlock(&G.mx);
     return n;
 }
@@ -127,4 +145,13 @@ size_t ns_fill_glue_poll(char *buf, size_t cap) {
     return n;
 }
 
-void ns_fill_glue_reset(void) { pthread_mutex_lock(&G.mx); G.reset = 1; G.n_out = 0; pthread_mutex_unlock(&G.mx); }
+void ns_fill_glue_reset(void) { pthread_mutex_lock(&G.mx); G.reset = 1; G.rgen++; G.n_out = 0; pthread_mutex_unlock(&G.mx); }
+
+#ifdef NS_FILL_GLUE_TEST
+/* Solo pruebas: coloca un resultado vigente a mano (sin escena real) para comprobar la caducidad y los vaciados. */
+void ns_fill_glue_test_set(const NsEffect *e, uint32_t n, uint32_t res_frame, uint32_t sub_frame) {
+    pthread_mutex_lock(&G.mx);
+    if (ensure_started() && n <= FG_OUT) { if (n) memcpy(G.out, e, (size_t)n * sizeof(NsEffect)); G.n_out = n; G.res_frame = res_frame; G.sub_frame = sub_frame; }
+    pthread_mutex_unlock(&G.mx);
+}
+#endif

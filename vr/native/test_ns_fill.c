@@ -217,6 +217,27 @@ static void test_triangle_and_format(void) {
     ns_fill_destroy(f);
 }
 
+void ns_fill_glue_test_set(const NsEffect *e, uint32_t n, uint32_t res_frame, uint32_t sub_frame);
+
+/* Relleno fantasma: el resultado caduca si el trabajador lleva > 20 fotogramas sin ejecutar, y una lista sin 3D lo vacía. */
+static void test_glue_stale(void) {
+    NsEffect out[16], one; memset(&one, 0, sizeof one); one.nv = 3;
+    static uint8_t ram[0x200000]; uint8_t scr[1024]; memset(scr, 0, sizeof scr);
+    ns_fill_glue_test_set(&one, 1, 100, 110);
+    CHECK(ns_fill_glue_fetch(out, 16) == 1, "reciente: se sirve");
+    ns_fill_glue_test_set(&one, 1, 100, 120);
+    CHECK(ns_fill_glue_fetch(out, 16) == 1, "20 fotogramas: aún se sirve");
+    ns_fill_glue_test_set(&one, 1, 100, 121);
+    CHECK(ns_fill_glue_fetch(out, 16) == 0, "21 fotogramas sin ejecución: no se sirve (relleno fantasma)");
+    ns_fill_glue_test_set(&one, 1, 500, 10);
+    CHECK(ns_fill_glue_fetch(out, 16) == 0, "contador retrocedido (carga de partida): no se sirve");
+    ns_fill_glue_test_set(&one, 1, 100, 105);
+    CHECK(ns_fill_glue_fetch(out, 16) == 1, "de nuevo vigente");
+    GpuOp op2d = list_of(-500, -500, 4000, 1000, 0); op2d.v[0].vvalid = 0;
+    ns_fill_glue_submit_cam(ram, scr, &op2d, 1, 106, NULL, NULL, 0);
+    CHECK(ns_fill_glue_fetch(out, 16) == 0, "lista sin 3D: vaciado");
+}
+
 static void test_glue(void) {
     NsEffect out[16];
     CHECK(ns_fill_glue_fetch(out, 16) == 0, "sin trabajo: nada");
@@ -241,6 +262,7 @@ int main(void) {
     test_persistence();
     test_triangle_and_format();
     test_glue();
+    test_glue_stale();
     if (fails) { printf("test_ns_fill: %d FALLOS\n", fails); return 1; }
     printf("test_ns_fill: OK\n");
     return 0;

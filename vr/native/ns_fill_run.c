@@ -40,6 +40,12 @@ void ns_fill_session_destroy(NsFillSession *s) {
     free(s);
 }
 NsFill *ns_fill_session_fill(NsFillSession *s) { return s ? s->fill : NULL; }
+int ns_fill_session_zone(const NsFillSession *s, uint32_t *zone_gen, uint32_t *epoch) {
+    if (!s || !s->ok) return -1;
+    if (zone_gen) *zone_gen = s->sc.zone_gen;
+    if (epoch) *epoch = s->sc.mesh_epoch;
+    return 0;
+}
 const NsEffect *ns_fill_session_effects(const NsFillSession *s, uint32_t *n) { return s ? ns_fill_effects(s->fill, n) : (n ? (*n = 0, NULL) : NULL); }
 
 int ns_fill_session_run(NsFillSession *s, const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, const NsFillRunOpts *ro, const NsFillCfg *cfg_in, uint32_t frame,
@@ -69,9 +75,11 @@ int ns_fill_session_run(NsFillSession *s, const uint8_t *ram, const uint8_t *scr
         skip = (uint8_t *)calloc(nops, 1);
     }
     NsFxListCam fxlc; const NsFxListCam *fxplc = NULL;
+    int fx_fail = 0;   /* sin la clasificación de efectos no se sabe qué excluir: rellenar así duplicaría lo que ns_fx ya dibuja */
     if (s->fx && skip && s->fx_cap >= nops) {
         NsFxOpts fo = ns_fx_opts_default();
-        if (ns_fx_extract(ram, &fo, s->fx) == 0) {
+        if (ns_fx_extract(ram, &fo, s->fx) != 0) fx_fail = 1;
+        else {
             GpuDrawList dl;
             memset(&dl, 0, sizeof dl);
             dl.ops = (GpuOp *)ops; dl.nops = nops;
@@ -85,9 +93,11 @@ int ns_fill_session_run(NsFillSession *s, const uint8_t *ram, const uint8_t *scr
                     if (isfx) for (int k = 0; k < o->nv; k++) if (!o->v[k].vvalid) isfx = 0;
                     skip[i] = (uint8_t)isfx;
                 }
-            }
+            } else fx_fail = 1;
         }
     }
+    if (nops && !(s->fx && skip && s->fx_cap >= nops)) fx_fail = 1;
+    if (fx_fail) { free(skip); free(tr); free(src); return -3; }
     double t3 = now_ms();
     s->ms_extract = t1 - t0; s->ms_adapt = t2 - t1; s->ms_fx = t3 - t2;
     NsFillNative nat = {tr, src, n, &s->sc};

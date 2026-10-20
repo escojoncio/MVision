@@ -36,14 +36,14 @@ func runVistaTests() {
             return st.yaw
         }
         let a = settle(hz: 100, seconds: 0.1), b = settle(hz: 60, seconds: 0.1), c = settle(hz: 30, seconds: 0.1)
-        let want = 1 - expf(-0.1 / XRFollow.tau)
+        let want = (1 - XRFollow.deadYaw) * (1 - expf(-0.1 / XRFollow.tau))     // el filtro solo persigue lo que sobrepasa la zona muerta
         check(tag, "respuesta a un escalon igual a 100, 60 y 30 Hz (1 - exp(-t/tau))", abs(a - want) < 0.01 && abs(b - want) < 0.01 && abs(c - want) < 0.01,
               String(format: "100 Hz %.3f, 60 Hz %.3f, 30 Hz %.3f, esperado %.3f", a, b, c, want))
         check(tag, "tau en 0,08..0,15 s", XRFollow.tau >= 0.08 && XRFollow.tau <= 0.15, "\(XRFollow.tau)")
         check(tag, "alfa: 0 con dt <= 0, 1 con tau <= 0, creciente con dt", XRFollow.alpha(dt: 0, tau: 0.1) == 0 && XRFollow.alpha(dt: 0.01, tau: 0) == 1
               && XRFollow.alpha(dt: 0.02, tau: 0.1) > XRFollow.alpha(dt: 0.01, tau: 0.1), "")
         let settled = settle(hz: 100, seconds: 0.6)
-        check(tag, "converge a la cabeza en 0,6 s", abs(settled - 1.0) < 0.01, String(format: "%.4f rad", settled))
+        check(tag, "converge a la cabeza (menos la zona muerta) en 0,6 s", abs(settled - (1.0 - XRFollow.deadYaw)) < 0.01, String(format: "%.4f rad", settled))
     }
 
     // --- tiempo real: seguimiento continuo con la cabeza girando
@@ -54,7 +54,8 @@ func runVistaTests() {
         XRFollow.step(&st, head: pose(SIMD3<Float>(0, 1.6, 0), yaw: 0), dt: 0.01, snap: true)
         for _ in 0..<300 { yaw += w * 0.01; XRFollow.step(&st, head: pose(SIMD3<Float>(0, 1.6, 0), yaw: yaw), dt: 0.01) }
         let lag = XRFollow.wrap(yaw - st.yaw)
-        check(tag, "girando a 90 grados/s el retraso estacionario es ~ w*tau", abs(lag - w * XRFollow.tau) < 0.02, String(format: "%.3f rad (esperado %.3f)", lag, w * XRFollow.tau))
+        check(tag, "girando a 90 grados/s el retraso estacionario es ~ w*tau + zona muerta", abs(lag - (w * XRFollow.tau + XRFollow.deadYaw)) < 0.02,
+              String(format: "%.3f rad (esperado %.3f)", lag, w * XRFollow.tau + XRFollow.deadYaw))
         // camino corto por el salto de 180 grados
         var s2 = XRFollowState()
         XRFollow.step(&s2, head: pose(SIMD3<Float>(0, 1.6, 0), yaw: 3.0), dt: 0.01, snap: true)
@@ -87,7 +88,7 @@ func runVistaTests() {
         var st = XRFollowState()
         XRFollow.step(&st, head: pose(SIMD3<Float>(0, 1.6, 0), yaw: 0), dt: 0.01, snap: true)
         for _ in 0..<100 { XRFollow.step(&st, head: pose(SIMD3<Float>(1.0, 1.6, -1.0), yaw: 0), dt: 0.01) }
-        check(tag, "la posicion sigue a la cabeza (1 s)", simd_length(st.pos - SIMD3<Float>(1.0, 1.6, -1.0)) < 0.01, String(format: "%.4f m", simd_length(st.pos - SIMD3<Float>(1.0, 1.6, -1.0))))
+        check(tag, "la posicion sigue a la cabeza (1 s, dentro de la zona muerta de 3 cm)", simd_length(st.pos - SIMD3<Float>(1.0, 1.6, -1.0)) < XRFollow.deadPos + 0.005, String(format: "%.4f m", simd_length(st.pos - SIMD3<Float>(1.0, 1.6, -1.0))))
         // salto grande de la cabeza (> 3 m): no se persigue
         var s3 = XRFollowState()
         XRFollow.step(&s3, head: pose(SIMD3<Float>(0, 1.6, 0), yaw: 0), dt: 0.01, snap: true)
@@ -99,6 +100,49 @@ func runVistaTests() {
         var bad = matrix_identity_float4x4; bad.columns.3.x = .nan
         XRFollow.step(&s4, head: bad, dt: 0.01)
         check(tag, "una cabeza no finita se ignora", s4.pos.x.isFinite && abs(s4.yaw - 0.2) < 1e-5, "")
+    }
+
+    // --- zona muerta: el temblor y la respiración no mueven la pantalla; un giro de 30 grados sí la sigue
+    do {
+        var st = XRFollowState()
+        let base = pose(SIMD3<Float>(0.2, 1.6, -0.1), yaw: 0.4, pitch: 0.1)
+        XRFollow.step(&st, head: base, dt: 0.01, snap: true)
+        let ref = st
+        var n = Noise()
+        var maxMove: Float = 0, maxYaw: Float = 0, maxPitch: Float = 0
+        for i in 0..<900 {                                           // 10 s a 90 Hz
+            let t = Float(i) / 90
+            let breath = sinf(2 * .pi * 0.25 * t)                   // respiración: 4 mm y 0,8 grados a 0,25 Hz
+            let tremor = 0.6 * deg * n.next()                       // temblor: 0,6 grados y 3 mm por muestra
+            let p = SIMD3<Float>(0.2 + 0.003 * n.next(), 1.6 + 0.004 * breath + 0.003 * n.next(), -0.1 + 0.003 * n.next())
+            XRFollow.step(&st, head: pose(p, yaw: 0.4 + tremor, pitch: 0.1 + 0.8 * deg * breath + 0.6 * deg * n.next()), dt: 1 / 90)
+            maxMove = max(maxMove, simd_length(st.pos - ref.pos))
+            maxYaw = max(maxYaw, abs(st.yaw - ref.yaw)); maxPitch = max(maxPitch, abs(st.pitch - ref.pitch))
+        }
+        check(tag, "zona muerta: temblor y respiracion no mueven la pantalla (10 s)", maxMove == 0 && maxYaw == 0 && maxPitch == 0,
+              String(format: "pos %.5f m, rumbo %.5f rad, cabeceo %.5f rad", maxMove, maxYaw, maxPitch))
+        check(tag, "zona muerta: 2,5 grados / 3 grados / 3 cm", abs(XRFollow.deadYaw - 2.5 * deg) < 1e-5 && abs(XRFollow.deadPitch - 3 * deg) < 1e-5 && abs(XRFollow.deadPos - 0.03) < 1e-6, "")
+        // un giro de 30 grados la sigue (hasta quedar a la zona muerta de la cabeza)
+        var s2 = XRFollowState()
+        XRFollow.step(&s2, head: pose(SIMD3<Float>(0, 1.6, 0), yaw: 0), dt: 0.01, snap: true)
+        let turned = pose(SIMD3<Float>(0, 1.6, 0), yaw: 30 * deg)
+        var firstMove = -1
+        for i in 0..<180 { XRFollow.step(&s2, head: turned, dt: 1 / 90); if firstMove < 0 && abs(s2.yaw) > 1e-4 { firstMove = i } }
+        let rem = abs(XRFollow.wrap(30 * deg - s2.yaw))
+        check(tag, "giro de 30 grados: la pantalla lo sigue (queda a la zona muerta)", s2.yaw > 25 * deg && abs(rem - XRFollow.deadYaw) < 0.5 * deg, String(format: "queda a %.2f grados", rem / deg))
+        check(tag, "giro de 30 grados: empieza a moverse en cuanto sale de la zona muerta", firstMove == 0, "primer paso=\(firstMove)")
+        // cabeceo: 20 grados de cabeza = 10 de objetivo; se sigue hasta 3 grados del objetivo
+        var s3 = XRFollowState()
+        XRFollow.step(&s3, head: pose(SIMD3<Float>(0, 1.6, 0), yaw: 0), dt: 0.01, snap: true)
+        for _ in 0..<180 { XRFollow.step(&s3, head: pose(SIMD3<Float>(0, 1.6, 0), yaw: 0, pitch: 20 * deg), dt: 1 / 90) }
+        check(tag, "cabeceo: 20 grados de cabeza -> 10 de objetivo, seguido hasta la zona muerta", abs(s3.pitch - (10 * deg - XRFollow.deadPitch)) < 0.5 * deg, String(format: "%.2f grados", s3.pitch / deg))
+        // posicion: 2 cm no mueven; 20 cm si
+        var s4 = XRFollowState()
+        XRFollow.step(&s4, head: pose(SIMD3<Float>(0, 1.6, 0), yaw: 0), dt: 0.01, snap: true)
+        for _ in 0..<90 { XRFollow.step(&s4, head: pose(SIMD3<Float>(0.02, 1.6, 0), yaw: 0), dt: 1 / 90) }
+        let still = simd_length(s4.pos - SIMD3<Float>(0, 1.6, 0)) == 0
+        for _ in 0..<180 { XRFollow.step(&s4, head: pose(SIMD3<Float>(0.2, 1.6, 0), yaw: 0), dt: 1 / 90) }
+        check(tag, "posicion: 2 cm quieta, 20 cm la sigue hasta 3 cm", still && abs(simd_length(s4.pos - SIMD3<Float>(0.2, 1.6, 0)) - XRFollow.deadPos) < 0.005, String(format: "%.4f m", simd_length(s4.pos - SIMD3<Float>(0.2, 1.6, 0))))
     }
 
     // --- menu VR: la versión con posición/rumbo coincide con la de la cabeza
@@ -164,14 +208,47 @@ func runVistaTests() {
             for i in 0..<20 { if d.observe(pose(SIMD3<Float>(i >= 10 ? 0.8 : 0, 1.6, 0), yaw: 0), time: Double(i) * 0.01) != nil { got = true } }
             check(tag, "salto de 0,8 m detectado", got, "")
         }
-        // hueco (pausa / seguimiento perdido): 1 s
-        for (g, expect) in [(Float(20), false), (50, true)] {
+        // hueco (pausa / seguimiento perdido): 1 s. Con más de 50 ms entre muestras no se juzga: ni 20 ni 50 grados son un recentrado
+        for g in [Float(20), 50, 90] {
             run("hueco") { d in
                 _ = d.observe(pose(SIMD3<Float>(0, 1.6, 0), yaw: 0), time: 0)
                 _ = d.observe(pose(SIMD3<Float>(0, 1.6, 0), yaw: 0), time: 0.01)
                 let j = d.observe(pose(SIMD3<Float>(0, 1.6, 0), yaw: g * deg), time: 1.01)
-                check(tag, "tras un hueco de 1 s, giro de \(Int(g)) grados: \(expect ? "detectado" : "ignorado")", (j != nil) == expect, "")
+                check(tag, "tras un hueco de 1 s, giro de \(Int(g)) grados: ignorado", j == nil, "")
             }
+        }
+        // pausa con giro de 90 grados y desplazamiento de 1 m: sin recentrado, ni en la primera pose ni en las siguientes
+        run("pausa") { d in
+            var jumps = 0
+            for i in 0..<20 { if d.observe(pose(SIMD3<Float>(0, 1.6, 0), yaw: 0), time: Double(i) * 0.01) != nil { jumps += 1 } }
+            for i in 0..<20 { if d.observe(pose(SIMD3<Float>(1.0, 1.6, 0), yaw: 90 * deg), time: 5.0 + Double(i) * 0.01) != nil { jumps += 1 } }
+            check(tag, "pausa de 5 s con giro de 90 grados y 1 m: sin recentrar", jumps == 0, "saltos=\(jumps)")
+        }
+        // pausa + reset explícito (pausar/reanudar o perder el seguimiento): la primera pose es la referencia
+        run("pausa-reset") { d in
+            _ = d.observe(pose(SIMD3<Float>(0, 1.6, 0), yaw: 0), time: 0)
+            _ = d.observe(pose(SIMD3<Float>(0, 1.6, 0), yaw: 0), time: 0.01)
+            d.reset()
+            check(tag, "reset al reanudar: la primera pose no es un salto aunque sea otra (dt corto)", d.observe(pose(SIMD3<Float>(1.0, 1.6, 0), yaw: 90 * deg), time: 0.02) == nil, "")
+        }
+        // tiron del sistema de 200 ms con la cabeza girando acelerada (400 grados/s): el yaw avanza 80 grados en el hueco; sin recentrar, y luego sigue sin falsos
+        run("tiron") { d in
+            var jumps = 0
+            var yaw: Float = 0
+            var t = 0.0
+            for i in 0..<30 { yaw += (i < 10 ? 100 : 400) * deg * 0.01; t += 0.01; if d.observe(pose(SIMD3<Float>(0, 1.6, 0), yaw: yaw), time: t) != nil { jumps += 1 } }
+            yaw += 400 * deg * 0.2; t += 0.2
+            if d.observe(pose(SIMD3<Float>(0.3, 1.6, 0), yaw: yaw), time: t) != nil { jumps += 1 }
+            for _ in 0..<30 { yaw += 400 * deg * 0.01; t += 0.01; if d.observe(pose(SIMD3<Float>(0.3, 1.6, 0), yaw: yaw), time: t) != nil { jumps += 1 } }
+            check(tag, "tiron de 200 ms con giro acelerado: sin recentrar", jumps == 0, "saltos=\(jumps)")
+        }
+        // corona real tras una pausa: el detector se rearma con la primera pose y vuelve a detectar el salto entre fotogramas normales
+        run("corona-tras-pausa") { d in
+            var found = 0
+            for i in 0..<10 { _ = d.observe(pose(SIMD3<Float>(0, 1.6, 0), yaw: 0), time: Double(i) * 0.01) }
+            for i in 0..<10 { _ = d.observe(pose(SIMD3<Float>(2.0, 1.6, 0), yaw: 1.0), time: 3.0 + Double(i) * 0.01) }
+            for i in 0..<10 { if d.observe(pose(SIMD3<Float>(2.4, 1.6, -0.3), yaw: 1.0 + 35 * deg), time: 3.1 + Double(i) * 0.01) != nil { found += 1 } }
+            check(tag, "corona tras una pausa: se detecta una vez", found == 1, "detecciones=\(found)")
         }
         // mirando casi vertical el rumbo no es fiable: un cambio de rumbo se ignora, el de posicion no
         run("vertical") { d in
