@@ -25,7 +25,7 @@ extern "C" {
 enum { VRG_R3 = 1u << 2, VRG_L3 = 1u << 1 };   /* clic del stick (bits del mando del juego, mismos que vr_input) */
 enum { VRG_R2 = 1u << 9, VRG_SQUARE = 1u << 15, VRG_CIRCLE = 1u << 13, VRG_TRIANGLE = 1u << 12, VRG_R1 = 1u << 11, VRG_L1 = 1u << 10 };
 enum { VRG_EV_NONE = 0, VRG_EV_PUNCH = 1, VRG_EV_GRAB = 2, VRG_EV_SQUEEZE = 3, VRG_EV_RELEASE = 4, VRG_EV_KNOCK = 5, VRG_EV_PEEK = 6, VRG_EV_WALL = 7, VRG_EV_HURT = 8,
-       VRG_EV_IMPACT = 9, VRG_EV_MENU = 10 };
+       VRG_EV_IMPACT = 9, VRG_EV_MENU = 10, VRG_EV_THROW = 11 };
 
 typedef struct {
     int enable;              /* 0: el módulo no hace nada (modo botón) */
@@ -55,8 +55,10 @@ typedef struct {
     float cooldown_s;        /* entre golpes (0,2) */
     float contact_speed;     /* golpe por CONTACTO: velocidad mínima (relativa a la cabeza) del puño que atraviesa el volumen del enemigo, en cualquier dirección salvo hacia la cabeza (0,8 m/s) */
     float body_radius, body_low, body_high;   /* cápsula del cuerpo del enemigo sobre su posición del motor (cintura): radio 0,28, 0,5 por debajo, 0,65 por encima */
+    float throw_speed;       /* lanzamiento: tirón de la mano con el botón pulsado junto al cuerpo del enemigo, >= esta velocidad (1,2 m/s) en grab_delay_s, no hacia el enemigo */
+    float throw_reach;       /* distancia máxima de la mano al cuerpo (cápsula) del enemigo para poder lanzar: hombro, cuello o brazo (0,30 m más el radio del cuerpo) */
     float grab_slow_speed;   /* agarre solo si al pulsar (y durante grab_delay_s) la mano va más lenta que esto respecto a la cabeza (0,5 m/s); más rápido es un PUÑO */
-    float grab_delay_s;      /* el agarre no llega al motor hasta pasado este margen (0,15 s) sin que la mano se haya lanzado: así un golpe inmediato lo cancela */
+    float grab_delay_s;      /* el agarre no llega al motor hasta pasado este margen (0,3 s) sin que la mano se haya lanzado: así un golpe inmediato lo cancela */
     float contact_latch_s;   /* un contacto del puño con el cuerpo sigue valiendo este tiempo (0,15 s): el puño puede cerrarse o acabar el enfriamiento justo después */
     float fist_radius, contact_tol;           /* esfera del puño (0,12) y tolerancia extra (0,05) */
 } vrg_cfg_t;
@@ -117,6 +119,8 @@ typedef struct {
     float grab_dist;         /* distancia de la mano al cuello/espalda en ese intento (m) */
     int grab_side_try;
     int grab_side;           /* mano física que sujeta (-1 ninguna) mientras el agarre dura (para pegar las manos al cuello) */
+    int throw_side;          /* -1 nada; 0/1: lanzamiento (agarre + tirón) con esa mano este VBlank (grab_start también vale 1) */
+    float throw_yaw;         /* rumbo del tirón proyectado en el suelo (rad, delante = (sin, cos)) */
     int grab_en;             /* índice del enemigo sujetado (en `en`) o -1 */
     vrg_gest_t gest;         /* intento de golpe de este VBlank (valid = 0: ninguno) */
     int swinging;            /* 1: algún puño cerrado se mueve a velocidad de golpe (un golpe en marcha): la animación del combo del motor espera la próxima petición */
@@ -154,7 +158,7 @@ typedef struct {
     float prev_hand[2][3]; int prev_hand_ok[2];   /* mano (mundo) del VBlank anterior: barrido continuo contra la cápsula del enemigo */
     float contact_t[2];      /* s restantes del contacto recordado por mano */
     int disarm[2];           /* tras un golpe por contacto no vale otro hasta que el puño frene (un mismo movimiento no pega dos veces) */
-    float gp_t[2]; int gp_en[2];   /* agarre pendiente (s hasta que llegue al motor) y enemigo */
+    float gp_t[2]; int gp_en[2], gp_only[2];   /* gp_only: pulsado junto al cuerpo (no al cuello): solo vale para lanzar */   /* agarre pendiente (s hasta que llegue al motor) y enemigo */
 } vrg_t;
 
 void vrg_cfg_defaults(vrg_cfg_t *c);
