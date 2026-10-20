@@ -7,7 +7,7 @@
 #include <time.h>
 
 #define NJOB 16
-#define L2A_STALE 3
+#define L2A_STALE 12   /* listas sin capa nueva antes de dejar de mostrarla (~0,5 s a 25 listas/s). Mejor un HUD algo viejo que volver al shader antiguo, que rompía los textos */
 #define SLOW_MS 12.0
 #define FAST_MS 3.0
 #define RECOVER 240
@@ -56,7 +56,8 @@ static void *worker(void *arg) {
         while (!A->count && !A->quit) pthread_cond_wait(&A->cv_job, &A->mx);
         if (!A->count && A->quit) break;
         Job *j = &A->job[A->head];
-        int later = A->count > 1;          /* hay listas más nuevas esperando: de esta solo se aplican los eventos */
+        int later = A->count > 1;          /* hay listas más nuevas esperando: si esta trae la VRAM real de partida no hace falta ni aplicarla (la siguiente trae la suya); si no, solo se aplican sus eventos */
+        int skip = later && A->job[(A->head + 1) % NJOB].has_vram;   /* la siguiente trae su propia VRAM de partida: esta no hace falta */
         A->busy = 1;
         int wi = 0, scale = A->cur;
         while (wi == A->pub || wi == A->held) wi++;   /* búfer libre (de 3, con 2 ocupados como máximo) */
@@ -68,7 +69,7 @@ static void *worker(void *arg) {
         memset(&sc, 0, sizeof sc);
         if (draw) { sc.op_dest = j->opd; sc.n_op_dest = j->l.nops; }
         double t0 = now_ms();
-        int have = vl2d_run(A->L, &j->l, draw ? &sc : NULL, j->full);
+        int have = skip ? 0 : vl2d_run(A->L, &j->l, draw ? &sc : NULL, j->full);
         double ms = now_ms() - t0;
         int w = 0, h = 0;
         const uint8_t *px = have ? vl2d_rgba(A->L, &w, &h) : NULL;
@@ -101,7 +102,7 @@ VrL2Async *vl2a_new(void) {
     pthread_mutex_init(&A->mx, NULL); pthread_cond_init(&A->cv_job, NULL); pthread_cond_init(&A->cv_idle, NULL);
     A->L = vl2d_new();
     A->pub = -1; A->held = -1; A->cur = 4;
-    atomic_store(&A->target, 4); atomic_store(&A->smooth, VL_SMOOTH_SHARP);
+    atomic_store(&A->target, 4); atomic_store(&A->smooth, VL_SMOOTH_ORIGINAL);
     if (!A->L || pthread_create(&A->th, NULL, worker, A) != 0) { vl2a_free(A); return NULL; }
     A->started = 1;
     return A;
@@ -138,15 +139,18 @@ int vl2a_submit(VrL2Async *A, const GpuDrawList *l, const uint8_t *op_dest, int 
     Job *j = &A->job[(A->head + A->count) % NJOB];
     /* El trabajo en curso es el de `head`; el hueco nuevo nunca coincide con él (count < NJOB). */
     int ok = grow((void **)&j->ops, &j->ops_cap, l->nops, sizeof(GpuOp)) && grow((void **)&j->data, &j->data_cap, l->ndata, 2) &&
-             grow((void **)&j->opd, &j->opd_cap, l->nops, 1) && (!l->vram_init || (j->vram || (j->vram = malloc(sizeof(uint16_t) * 1024 * 512))));
+             grow((void **)&j->opd, &j->opd_cap, l->nops, 1) && ((!l->vram_init && !l->vram_start) || (j->vram || (j->vram = malloc(sizeof(uint16_t) * 1024 * 512))));
     if (ok) {
         j->l = *l;
         if (l->nops) memcpy(j->ops, l->ops, l->nops * sizeof(GpuOp));
         if (l->ndata) memcpy(j->data, l->data, (size_t)l->ndata * 2);
         j->l.ops = j->ops; j->l.data = j->data;
         j->l.cap_ops = j->l.cap_data = 0; j->l.vram_after = NULL;
-        j->has_vram = l->vram_init != NULL;
-        if (j->has_vram) { memcpy(j->vram, l->vram_init, sizeof(uint16_t) * 1024 * 512); j->l.vram_init = j->vram; } else j->l.vram_init = NULL;
+        /* VRAM de partida: la real al abrir la lista (vram_start, cada lista) o la instantánea de la primera/resincronización (vram_init). Una sola copia de 1 MB en el hilo de emulación. */
+        const uint16_t *v0 = l->vram_start ? l->vram_start : l->vram_init;
+        j->has_vram = v0 != NULL;
+        if (j->has_vram) memcpy(j->vram, v0, sizeof(uint16_t) * 1024 * 512);
+        j->l.vram_init = NULL; j->l.vram_start = j->has_vram ? j->vram : NULL;
         j->has_opd = op_dest != NULL;
         if (op_dest && l->nops) memcpy(j->opd, op_dest, l->nops);
         j->full = full; j->reset = reset; j->lseq = ++A->sub_seq;

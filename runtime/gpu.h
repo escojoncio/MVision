@@ -149,6 +149,7 @@ typedef struct {
     GpuOp *ops; uint32_t nops, cap_ops;  /* privado: cap_ops */
     uint16_t *data; uint32_t ndata, cap_data;
     uint16_t *vram_init;     /* NULL salvo primera lista / resincronización: VRAM [512][1024] al INICIO del frame */
+    uint16_t *vram_start;    /* NULL salvo gpu_capture_vram_start(1): VRAM REAL [512][1024] al INICIO de CADA lista (los eventos de la lista se aplican encima) */
     uint16_t *vram_after;    /* solo gpu_capture_enable(2): VRAM del oráculo al CERRAR (para verificar) */
 } GpuDrawList;
 
@@ -156,6 +157,9 @@ typedef struct {
 void gpu_capture_enable(int mode);
 /* Siguiente lista cerrada aún no entregada (FIFO), o NULL. Válida hasta la siguiente llamada. */
 const GpuDrawList *gpu_capture_frame(void);
+/* Con 1, cada lista trae vram_start (copia de 1 MB de la VRAM real al abrirla): consumidores que no pueden fiarse de reconstruir la VRAM solo con los eventos de la lista
+ * (capa 2D: fuentes y CLUT subidas por DMA, copias o dibujos a VRAM). Vale para las listas que se abran a partir de la llamada. */
+void gpu_capture_vram_start(int on);
 /* VBlank del host (cierre de reserva para juegos sin doble búfer). */
 void gpu_capture_vblank(void);
 /* Listas perdidas por cola llena (la siguiente entregada trae vram_init). */
