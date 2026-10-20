@@ -103,6 +103,10 @@ size_t ns_gpu_sort_semi_ex(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out
  *                                 el bit 15 a 0)
  *   [n_opaque, n_opaque + n_semi) pase 1 (semitransparente), de atrás adelante respecto a la cabeza, en runs de igual modo de mezcla (`runs`)
  * `keys` recibe la identidad (ns_fx_item_key) de cada efecto que ha entrado en el dibujo: el renderer solo lo da por CONFIRMADO si dibuja de verdad. */
+typedef struct NsGpuFxTrack NsGpuFxTrack;   /* estado del seguimiento entre fotogramas (opaco) */
+NsGpuFxTrack *ns_gpu_fx_track_create(void);
+void ns_gpu_fx_track_destroy(NsGpuFxTrack *t);
+void ns_gpu_fx_track_reset(NsGpuFxTrack *t);   /* olvida todo (cambio de escena, recentrado) */
 typedef struct {
     const float *to_vr;                 /* 12: mundo del motor -> mundo VR (m), 3x4 fila-mayor */
     const NsCamera *cam;                /* cámara del juego de la escena (profundidad de los carteles, sentido del mundo) */
@@ -124,17 +128,31 @@ typedef struct {
     float comfort_deg, comfort_dmin_m, oncam_drop_m, near_log_m;
     /* Red de seguridad extrema, independiente de comfort_deg: se descarta (confirmado) el efecto con el centro a menos de drop_inside_m de la cabeza (0 = no). Los efectos bien colocados no se tocan. */
     float drop_inside_m;
+    /* Seguimiento de lo que va pegado a la cabeza (detector "sigue a la cámara"). track != NULL: cada efecto (clave ns_gpu_fx_key; los rellenos de ns_fill llevan identidad estable) se sigue entre
+     * fotogramas y se compara su posición en ESPACIO DE CABEZA con la que tendría si estuviera anclado al mundo del motor. Constante en la cabeza mientras la cabeza se mueve respecto al mundo =>
+     * SIGUE (se descarta, confirmado). Cercano (< hold_near_m, 0 = sin regla) y todavía sin demostrar que está anclado al mundo => retenido (no se dibuja); cercano que ni sigue ni está quieto en el
+     * mundo => VAGA (se descarta). drop_oncam != 0: los NS_EF_ON_CAMERA que no son recubrimientos de pantalla (papel VIEW_OVERLAY) se descartan siempre. Todo lo demás va anclado al mundo. */
+    NsGpuFxTrack *track;
+    float hold_near_m;
+    int drop_oncam;
 } NsGpuFxParams;
 typedef struct { uint32_t start, count; uint8_t abr; } NsGpuFxRun;   /* start/count en vértices del búfer completo */
 /* Un efecto semitransparente en el búfer (ya ordenado de atrás adelante): para intercalarlo con los triángulos semitransparentes de las mallas (ns_gpu_semi_merge). */
 typedef struct { float depth; uint32_t start, count; uint8_t abr; } NsGpuFxSemiItem;
 /* Registro de efectos cercanos a la cabeza (por fotograma, los de mayor tamaño angular). accion: 0 intacto, 1 reducido, 2 descartado por nacer dentro de la cabeza, 3 descartado por ir pegado a la cámara. */
-enum { NSG_FXN_MAX = 6, NSG_FXN_KEPT = 0, NSG_FXN_SHRUNK = 1, NSG_FXN_DROP_INSIDE = 2, NSG_FXN_DROP_ONCAM = 3 };
+enum { NSG_FXN_MAX = 6, NSG_FXN_KEPT = 0, NSG_FXN_SHRUNK = 1, NSG_FXN_DROP_INSIDE = 2, NSG_FXN_DROP_ONCAM = 3, NSG_FXN_DROP_FOLLOW = 4, NSG_FXN_HELD = 5 };
 typedef struct {
     uint32_t src_key; uint16_t idx; uint16_t flags;   /* origen (primitiva y paquete) y NS_EF_* */
     uint8_t role, kind, action, screen;               /* papel (NSFX_ROLE_*), NS_EK_*, accion, 1 = efecto de pantalla (ON_CAMERA o papel de superficie de vista) */
     float dist_m, size_m, deg_raw, deg_after;         /* distancia centro-cabeza, mayor lado/diagonal (m), tamaño angular antes y después de la comodidad */
 } NsGpuFxNear;
+/* Detector "sigue a la cámara": estado de un efecto seguido. SIN_VERIFICAR = cercano aún sin demostrar que está en el mundo (retenido); SIGUE = fijo a la cabeza; VAGA = cercano e inestable. */
+enum { NSG_FS_UNKNOWN = 0, NSG_FS_WORLD = 1, NSG_FS_FOLLOW = 2, NSG_FS_WANDER = 3 };
+enum { NSG_FXF_MAX = 8, NSG_ORIGIN_FX = 0, NSG_ORIGIN_FILL = 1 };
+typedef struct {
+    uint32_t src_key; uint16_t idx; uint8_t sub, role, kind, state, origin, oncam;   /* origen: NSG_ORIGIN_* (los rellenos llevan 0xF1 en el byte alto de src_key) */
+    float dist_m, size_m, hs[3];        /* distancia y mayor lado (m); posición en espacio de cabeza (m: derecha, arriba, delante) */
+} NsGpuFxFollow;
 typedef struct {
     uint32_t n_opaque, n_semi, n_runs, n_keys, n_sitems;
     uint32_t n_items, n_skipped;        /* efectos entrados / descartados (no finitos, degenerados) */
@@ -144,6 +162,10 @@ typedef struct {
     uint32_t n_zref;                    /* carteles de tamaño en píxeles con poca profundidad (se usó la de referencia: tamaño de mundo inflado) */
     uint32_t n_rec;                     /* entradas válidas de rec[] */
     NsGpuFxNear rec[NSG_FXN_MAX];       /* los de mayor deg_raw */
+    uint32_t n_follow, n_wander, n_held, n_world;   /* seguimiento: descartados por ir fijos a la cabeza / por vagar cerca / retenidos sin verificar / verificados en el mundo */
+    uint32_t n_follow_fill, n_tracked;  /* de los SIGUE, cuántos son relleno; efectos seguidos */
+    uint32_t n_fol;                     /* entradas válidas de fol[] */
+    NsGpuFxFollow fol[NSG_FXF_MAX];     /* los SIGUE / VAGA / retenidos más cercanos a la cabeza */
 } NsGpuFxOut;
 /* Acumulador de registro (1 s): cuántos y cuáles efectos cerca de la cabeza, y si el jugador andaba o giraba. */
 typedef struct {
@@ -158,6 +180,15 @@ void ns_gpu_fx_near_accum(NsGpuFxNearAcc *acc, const NsGpuFxOut *o, const float 
 /* Una línea de texto (sin salto de línea) con el resumen; devuelve su longitud. Llamar después ns_gpu_fx_near_reset. */
 size_t ns_gpu_fx_near_describe(const NsGpuFxNearAcc *acc, char *buf, size_t cap);
 void ns_gpu_fx_near_reset(NsGpuFxNearAcc *acc);
+/* Acumulador del detector (ventana de 1 s): qué efectos / rellenos iban fijos a la cabeza, con papel, origen y clave. */
+typedef struct { NsGpuFxFollow f; uint32_t frames; } NsGpuFxFollowRec;
+typedef struct {
+    uint32_t frames, frames_follow, frames_held, max_follow, max_wander, max_held, max_follow_fill, sum_follow, sum_held, max_tracked, max_world;
+    uint32_t n_rec; NsGpuFxFollowRec rec[NSG_FXF_MAX];
+} NsGpuFxFollowAcc;
+void ns_gpu_fx_follow_accum(NsGpuFxFollowAcc *acc, const NsGpuFxOut *o);
+size_t ns_gpu_fx_follow_describe(const NsGpuFxFollowAcc *acc, char *buf, size_t cap);
+void ns_gpu_fx_follow_reset(NsGpuFxFollowAcc *acc);
 const char *ns_gpu_fx_role_name(int role);
 /* Tope angular (grados) de la comodidad para un efecto con el centro a `d` m de la cabeza; 1e9 = sin tope; 0 = descartar. */
 float ns_gpu_fx_comfort_cap_deg(float d, float x_deg, float dmin_m);
