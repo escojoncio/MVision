@@ -261,6 +261,7 @@ __attribute__((weak)) int ns_cover_glue_last(uint32_t *frame, int *pct) { (void)
 __attribute__((weak)) void ns_fill_glue_post_ik(const uint8_t *ram) { (void)ram; }
 __attribute__((weak)) void ns_fill_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame, const float *eye, const float *M, int list_vr) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; (void)eye; (void)M; (void)list_vr; }
 __attribute__((weak)) size_t ns_fill_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
+__attribute__((weak)) void ns_fill_glue_reset(void) {}
 /* Decodificador de vídeo (runtime/mdec.c): palabras entregadas desde el arranque. En las pruebas de escritorio sin MDEC vale siempre 0 (no hay FMV). */
 __attribute__((weak)) uint32_t mdec_out_words_total(void) { return 0; }
 /* Manos nuevas (ns_hand.c, solo en la app; vr/body/vr_hand_mesh.c): definición débil vacía para las pruebas de escritorio, donde la manopla del motor se queda como está. */
@@ -935,6 +936,10 @@ static void publish_state(void) {
             char cb[640];
             vrview_cine_describe(&view, &vin, cb, sizeof cb);
             fprintf(stderr, "%s | vb=%u\n", cb, (unsigned)hle_frame_count());
+        }
+        {   /* cambio de clase de vista (mundo / cinemática / 2D...): la persistencia del relleno es de la escena anterior */
+            static int fill_last_kind = -1;
+            if (view.kind != fill_last_kind) { if (fill_last_kind >= 0) ns_fill_glue_reset(); fill_last_kind = view.kind; }
         }
         g.view_kind = view.kind;
         g.cine_shot = cine.shot; g.cine_cuts = cine.cuts; g.cine_cover = last_cover;

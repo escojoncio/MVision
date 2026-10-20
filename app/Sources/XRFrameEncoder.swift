@@ -180,6 +180,7 @@ final class XRFrameEncoder {
             // Sin capas finales: ni velo (transición, fundido de corte), ni viñeta, ni pantalla de cine / pantalla 3D; solo el mundo, el HUD 2D y los textos (menú).
             pres.items.removeAll { $0.kind == .veil || $0.kind == .vignette || $0.kind == .screen || $0.kind == .screen3d }
         }
+        renderer.screenMode = pres.stereo != nil || !pres.drawWorld
         renderer.engineView = gs.view_kind == 2          // cinemática del motor: el render nativo coloca la escena desde la cámara del juego
         renderer.drawWorld = pres.drawWorld
         renderer.drawBody = pres.drawBody && !dg.noLayers      // radar y arma en la mano se dibujan encima del mundo, dentro del pase de escena

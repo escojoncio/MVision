@@ -114,10 +114,10 @@ final class XRRenderLoop {
         loop: while !stopped {
             switch layerRenderer.state {
             case .paused:
-                if !wasPaused { wasPaused = true; XRControl.shared.notifyPaused(true) }
+                if !wasPaused { wasPaused = true; jumpDetector.reset(); XRControl.shared.notifyPaused(true) }
                 layerRenderer.waitUntilRunning()
             case .running:
-                if wasPaused { wasPaused = false; XRControl.shared.notifyPaused(false) }
+                if wasPaused { wasPaused = false; jumpDetector.reset(); XRControl.shared.notifyPaused(false) }
                 autoreleasepool { renderFrame() }
             case .invalidated:
                 break loop
@@ -177,7 +177,9 @@ final class XRRenderLoop {
         if tracked { trackedFrames += 1 } else { untrackedFrames += 1 }
         // Recentrado del sistema (Digital Crown): visionOS mueve el origen del espacio y la pose del dispositivo salta. Se trata como un recentrado propio:
         // el origen de usuario, las pantallas y paneles, el ancla y el rumbo del mundo VR (vr_heading) se recalculan sobre la cabeza actual.
-        if tracked, let j = jumpDetector.observe(originFromDevice, time: seconds) {
+        // Sin seguimiento (o tras una pausa) el detector se reinicia: la primera pose válida es la referencia y no puede ser un salto.
+        if !tracked { jumpDetector.reset() }
+        else if let j = jumpDetector.observe(originFromDevice, time: seconds) {
             needsRecenter = true; recenterSource = "corona"; recenterJump = j
         }
         if needsRecenter && tracked {

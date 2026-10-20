@@ -120,6 +120,8 @@ typedef struct {
 int ns_fill_session_run(NsFillSession *s, const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, const NsFillRunOpts *ro, const NsFillCfg *cfg,
                         uint32_t frame, NsFillStats *st, int *cam_used);
 const NsEffect *ns_fill_session_effects(const NsFillSession *s, uint32_t *n);
+/* generación de zona y época del extractor de la última ejecución (cambian al cambiar de zona/escena); -1 si no hay sesión */
+int ns_fill_session_zone(const NsFillSession *s, uint32_t *zone_gen, uint32_t *epoch);
 NsFill *ns_fill_session_fill(NsFillSession *s);
 /* Herramientas (con keep_native): escena nativa adaptada de la última ejecución, máscara de operaciones excluidas (efectos) y cámara usada. Válidos hasta la siguiente ejecución. */
 int ns_fill_session_native(const NsFillSession *s, NsFillNative *nat, const uint8_t **skip, NsFillCam *cam);

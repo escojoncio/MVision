@@ -242,6 +242,8 @@ final class NativeRenderer {
     /// especiales, jugador sin enlazar tras un cambio de zona). Con histéresis (4 fotogramas para entrar, 3 aptos para salir): entonces se pinta con la cámara del juego.
     private(set) var sceneUnfit = false
     private var cullBack = false
+    /// El llamador lo pone antes de beginFrame: la escena se dibuja en una pantalla (pantalla 3D o cine), no en el diorama, dentro de la escena ni en la vista de mundo.
+    var screenMode = false
     private var unfitFrames = 0, fitFrames = 0
     private var fogScene = NsFog()
     private var lastView0 = matrix_identity_float4x4         // vista del primer ojo (solo diagnóstico)
@@ -603,7 +605,6 @@ final class NativeRenderer {
               sc.pointee.inst != nil, sc.pointee.piece != nil else { hold(); return false }
         let validBits = sc.pointee.valid
         let cinema = cinemaGameView != nil
-        cullBack = cinema        // cinemática: caras de una sola cara descartadas por detrás desde la cámara del juego (ver NsGpuUniforms.cull_eye)
         do {
             let c = sc.pointee.cam
             if c.h.isFinite && c.h > 8 && c.h < 4096 { camH = c.h }
@@ -775,6 +776,9 @@ final class NativeRenderer {
         let eyeP = SIMD3<Float>(eye[0], eye[1], eye[2])
         fogFwd = SIMD4<Float>(fwd.x, fwd.y, fwd.z, -simd_dot(fwd, eyeP))
         camEye = eyeP
+        // Descarte de reversos desde la cámara del juego (ver NsGpuUniforms.cull_eye): SOLO en los modos de pantalla (pantalla 3D y cine). En diorama, dentro de la escena y en la vista de mundo
+        // con la escena no apta (sceneUnfit) no hay descarte. Se fija junto a camEye para que ojo y bandera sean siempre de la misma escena.
+        cullBack = cinema && screenMode
         let upm = sc.pointee.units_per_m > 1 ? sc.pointee.units_per_m : 1000
         fogPar = SIMD4<Float>(sc.pointee.fog.start, max(sc.pointee.fog.len, 1e-3), sc.pointee.fog.active != 0 ? 1 : 0, 0.05 / upm)
         if fresh { gcMeshes(seq: seq, store: store, force: false) }
