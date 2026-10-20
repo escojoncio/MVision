@@ -52,7 +52,7 @@ void vl2d_set_options(VrLayer2D *L, int scale, int smooth);
 /* VRAM de partida de cada lista: l->vram_start (la REAL del emulador al abrirla, gpu_capture_vram_start(1)) si viene; si no, la de la primera lista/resincronización (vram_init) con los eventos
  * de las anteriores. Con vram_start la capa no depende de que todas las escrituras de VRAM (DMA, copias, dibujos a VRAM) generen eventos.
  * Procesa UNA lista (todas, en orden, aunque la escena falle: sin vram_start la VRAM espejo debe ver todos los eventos). sc == NULL, o sin sc->op_dest, solo aplica los
- * eventos. Con escena dibuja las primitivas con op_dest == 2 en su orden original, intercaladas con los eventos de VRAM; con `full` != 0 dibuja TODAS las
+ * eventos (salvo con `full`: el fotograma completo dibuja todas las primitivas y no necesita la clasificación de la escena). Con escena dibuja las primitivas con op_dest == 2 en su orden original, intercaladas con los eventos de VRAM; con `full` != 0 dibuja TODAS las
  * primitivas sobre el área mostrada de la VRAM espejo ampliada (pantalla de cine: el fotograma entero a alta resolución, vídeo incluido; la salida es opaca).
  * `l` debe ser la lista con la que se ensambló sc. Devuelve 1 si hay capa nueva (vl2d_rgba / vl2d_px válidos hasta la siguiente llamada), 0 si no. */
 int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full);
@@ -65,8 +65,20 @@ const VrLayerPx *vl2d_px(const VrLayer2D *L, int *w, int *h);
 const uint16_t *vl2d_vram(const VrLayer2D *L);
 
 /* Datos de la última ejecución para el log [capa2d]: marco (fw x h, aw visibles desde pad_l), escala de salida y de rasterizado, suavizado, si partió de vram_start / usó vram_end, y primitivas con «comprobar máscara». */
-typedef struct { int fw, h, aw, pad, scale, raster, smooth, full, used_start, used_end, mask_prims, prims; } VrL2Info;
+typedef struct {
+    int fw, h, aw, pad, scale, raster, smooth, full, used_start, used_end, mask_prims, prims;
+    int mirror_prims;      /* primitivas que solo actualizaron la VRAM espejo (destino fuera de la zona mostrada: render a textura, búfer alterno) */
+    int fid_n, fid_bad;    /* pantalla completa a escala 1 con la VRAM real al cerrar (vram_end): píxeles visibles comparados y píxeles distintos de la imagen del emulador */
+    int fid_mean_milli;    /* diferencia media por canal (niveles de 8 bits x 1000) de esa comparación */
+    int fallback;          /* 1 = la capa no era fiel (fid_bad > 0) y se usó la imagen exacta del emulador (vram_end) */
+} VrL2Info;
 void vl2d_info(const VrLayer2D *L, VrL2Info *out);
+
+/* Medida de fidelidad (pruebas, herramientas de volcado): compara la capa RGBA (w x h, escala `scale`; el píxel nativo (x,y) se toma en (x*scale, y*scale)) con una imagen RGBA de referencia
+ * rw x rh (el marco de la GPU o el frame.png de un volcado). mean = diferencia media absoluta por canal (0..255), pct = % de píxeles distintos, max = mayor diferencia de un canal. Devuelve 0 si
+ * las dimensiones no encajan. */
+typedef struct { double mean, pct; long n, bad; int max; } VrL2Diff;
+int vl2d_compare(const uint8_t *rgba, int w, int h, int scale, const uint8_t *ref, int rw, int rh, VrL2Diff *out);
 
 /* Composición de un píxel de la capa de ESCALA 1 sobre un mundo de 5 bits por canal (bg5) -> 5 bits (out5). */
 void vl2d_compose5(const VrLayerPx *p, const uint8_t bg5[3], uint8_t out5[3]);

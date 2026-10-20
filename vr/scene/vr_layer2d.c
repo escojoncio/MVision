@@ -13,8 +13,6 @@
 struct VrLayer2D {
     uint16_t vram[VH][VW];   /* espejo: solo eventos de VRAM (subidas, copias, rellenos) */
     int have_vram;
-    const uint16_t *vend;        /* VRAM real al cerrar la lista (solo durante vl2d_run) y mapa de bloques 16x16 de VRAM dibujados por la lista: sus texels se leen de ahí */
-    uint8_t drawn[32 * 64];
     VrL2Info info;
     int pad, aw;                 /* ventana visible dentro de la capa (pantalla completa): columnas [pad, pad+aw) de w, el resto negro */
     uint8_t *natm; size_t natm_cap;   /* bit 15 (máscara) de la VRAM mostrada, por píxel nativo */
@@ -55,13 +53,38 @@ typedef struct {
     int cx1, cy1, cx2, cy2;       /* recorte en muestras (inclusivo) */
     int semi, mask_chk, mask_set, abr;
     int fixed;                    /* primitiva de realimentación: un solo texel (op->fbt) */
+    uint16_t (*vdst)[VW];         /* != NULL: el destino es la VRAM espejo (escala 1, 15 bits, igual que gpu.c plot), no la capa: dibujos fuera de la zona mostrada / fotograma completo */
     int umin, umax, vmin, vmax;   /* caja de texels de la primitiva (el filtrado no sale de ella: sin sangrado entre sprites del atlas) */
 } Ctx;
 
 /* ---------------- escritura de muestra ---------------- */
 /* sx, sy: muestra en VRAM (x*S+si). r,g,b: 0..255 (escala 1: valor de 8 bits previo al canal de 5; escala > 1: color final). */
+static inline void vplot(Ctx *c, int x, int y, int r, int g, int b, int dith, int semi, int mbit) {   /* gpu.c plot, sobre la VRAM espejo */
+    uint16_t *p = &c->vdst[y & (VH - 1)][x & (VW - 1)];
+    if (c->mask_chk && (*p & 0x8000)) return;
+    if (dith) { int d = dither_m[y & 3][x & 3]; r += d; g += d; b += d; }
+    r = r < 0 ? 0 : r > 255 ? 255 : r;
+    g = g < 0 ? 0 : g > 255 ? 255 : g;
+    b = b < 0 ? 0 : b > 255 ? 255 : b;
+    r >>= 3; g >>= 3; b >>= 3;
+    if (semi) {
+        int br = *p & 31, bg = (*p >> 5) & 31, bb = (*p >> 10) & 31;
+        switch (c->abr) {
+        case 0: r = (br + r) >> 1; g = (bg + g) >> 1; b = (bb + b) >> 1; break;
+        case 1: r += br; g += bg; b += bb; break;
+        case 2: r = br - r; g = bg - g; b = bb - b; break;
+        default: r = br + (r >> 2); g = bg + (g >> 2); b = bb + (b >> 2); break;
+        }
+        r = r < 0 ? 0 : r > 31 ? 31 : r;
+        g = g < 0 ? 0 : g > 31 ? 31 : g;
+        b = b < 0 ? 0 : b > 31 ? 31 : b;
+    }
+    *p = (uint16_t)(r | (g << 5) | (b << 10) | ((mbit | c->mask_set) ? 0x8000 : 0));
+}
+
 static inline void lplot(Ctx *c, int sx, int sy, int r, int g, int b, int dith, int semi, int mbit) {
     if (sx < c->cx1 || sx > c->cx2 || sy < c->cy1 || sy > c->cy2) return;
+    if (c->vdst) { vplot(c, sx, sy, r, g, b, dith, semi, mbit); return; }
     VrLayer2D *L = c->L;
     int S = c->S;
     int mx = VW * S - 1, my = VH * S - 1;
@@ -117,11 +140,9 @@ static inline void lplot(Ctx *c, int sx, int sy, int r, int g, int b, int dith, 
 }
 
 /* ---------------- texturas (gpu.c texel + caché) ---------------- */
-/* Texel de VRAM: del espejo, o de la VRAM al cerrar la lista si ese bloque lo dibujó una primitiva de la lista (render a textura) */
-static inline uint16_t vget(const VrLayer2D *L, int x, int y) {
-    if (L->vend && L->drawn[(y >> 4) * 64 + (x >> 4)]) return L->vend[y * VW + x];
-    return L->vram[y][x];
-}
+/* Texel de VRAM: del espejo. Los dibujos de la lista a zonas fuera de la mostrada (render a textura) se aplican al espejo EN ORDEN (vplot), así que una textura
+ * compuesta varias veces en la misma lista (mismo búfer de composición reutilizado) se lee con el contenido que tenía en cada momento. */
+static inline uint16_t vget(const VrLayer2D *L, int x, int y) { return L->vram[y][x]; }
 
 static inline uint16_t texel_raw(const VrLayer2D *L, const GpuOp *o, int u, int v) {
     u &= 255; v &= 255;
@@ -158,7 +179,7 @@ static inline uint16_t texel_cl(Ctx *c, int u, int v) {   /* limitado a la caja 
 
 /* texel exacto (escala 1) */
 static inline void tex_plot(Ctx *c, int sx, int sy, int u, int v, int r, int g, int b, int raw, int semi, int dith) {
-    uint16_t t = c->fixed ? c->o->fbt : texel(c, u, v);
+    uint16_t t = c->fixed ? c->o->fbt : c->vdst ? texel_raw(c->L, c->o, u, v) : texel(c, u, v);   /* con vdst sin caché: la primitiva puede leer lo que ella misma escribe (como gpu.c) */
     if (!t) return;
     int tr = t & 31, tg = (t >> 5) & 31, tb = (t >> 10) & 31;
     int R, G, B;
@@ -411,33 +432,71 @@ static void do_line(Ctx *c) {
 }
 
 /* ---------------- eventos de VRAM (gpu.c cmd_fill / cmd_copy / subida) ---------------- */
-static void ev_fill(VrLayer2D *L, const GpuOp *o) {
-    for (int j = 0; j < o->rh; j++)
-        for (int i = 0; i < o->rw; i++) L->vram[(o->ry + j) & (VH - 1)][(o->rx + i) & (VW - 1)] = o->fill15;
-}
+/* Un evento escribe SIEMPRE en la VRAM espejo y, según `sink`, también en la capa (sus píxeles son opacos: lo que la GPU deja en la VRAM mostrada):
+ *   SINK_NONE   solo el espejo (la capa se construye al final a partir del espejo, o no hay capa);
+ *   SINK_FULL   fotograma completo a alta resolución: el relleno, la subida y la copia que caen en la zona visible se pintan en la capa en su orden (borrados y copias
+ *               de fondo que quitan lo dibujado antes: sin esto quedan restos de fotogramas anteriores);
+ *   SINK_PANEL  panel sobre el mundo: solo las copias VRAM->VRAM CUYO ORIGEN ESTÁ FUERA de la zona mostrada (texto compuesto fuera de pantalla y copiado a ella); el texel 0 es transparente
+ *               (el fondo negro de la composición no tapa el mundo). Los rellenos y las subidas a la zona mostrada no se pintan en el panel (borrado del fotograma / vídeo: el mundo es el nativo). */
+enum { SINK_NONE = 0, SINK_FULL = 1, SINK_PANEL = 2 };
 
-static void ev_upload(VrLayer2D *L, const GpuOp *o, const GpuDrawList *l) {
-    if (!l->data || o->rw <= 0 || o->rh <= 0) return;
-    int mchk = !!(o->flags & GPU_F_MASK_CHK), mset = !!(o->flags & GPU_F_MASK_SET);
-    for (uint32_t i = 0; i < o->data_n && i < (uint32_t)(o->rw * o->rh) && o->data_off + i < l->ndata; i++) {
-        int x = (o->rx + (int)(i % (uint32_t)o->rw)) & (VW - 1), y = (o->ry + (int)(i / (uint32_t)o->rw)) & (VH - 1);
-        uint16_t *p = &L->vram[y][x];
-        if (mchk && (*p & 0x8000)) continue;
-        *p = (uint16_t)(l->data[o->data_off + i] | (mset ? 0x8000 : 0));
+/* un píxel de VRAM (vx,vy) con valor v15 a la capa (si cae en la ventana visible): bloque R x R, opaco */
+static void px_put(VrLayer2D *L, int vx, int vy, uint16_t v15, int mchk, int mset, int skip0) {
+    if (skip0 && !v15) return;
+    int nx = (vx - L->ox) & (VW - 1), ny = (vy - L->oy) & (VH - 1);
+    if (nx >= L->w || ny >= L->h || nx < L->pad || nx >= L->pad + L->aw) return;
+    int R = L->R;
+    int c5[3] = {v15 & 31, (v15 >> 5) & 31, (v15 >> 10) & 31};
+    for (int j = 0; j < R; j++) {
+        VrLayerPx *p = &L->px[(size_t)(ny * R + j) * L->PW + (size_t)nx * R];
+        for (int i = 0; i < R; i++, p++) {
+            if (mchk && p->m) continue;
+            for (int k = 0; k < 3; k++) { p->c[k] = (uint8_t)(R > 1 ? ex8(c5[k]) : c5[k]); p->d[k] = 0; }
+            p->t = 0;
+            p->m = (uint8_t)(((v15 >> 15) | mset) ? 1 : 0);
+        }
     }
 }
 
-static void ev_copy(VrLayer2D *L, const GpuOp *o) {
+static int rect_hit(int ax, int ay, int aw, int ah, int bx0, int by0, int bx1, int by1) { return ax < bx1 && ax + aw > bx0 && ay < by1 && ay + ah > by0; }
+
+static void ev_apply(VrLayer2D *L, const GpuOp *o, const GpuDrawList *l, int sink) {
     int mchk = !!(o->flags & GPU_F_MASK_CHK), mset = !!(o->flags & GPU_F_MASK_SET);
-    uint16_t line[VW];
-    int ww = o->rw > VW ? VW : o->rw;
-    for (int j = 0; j < o->rh; j++) {
-        int sy = (o->sy + j) & (VH - 1), dy = (o->ry + j) & (VH - 1);
-        for (int i = 0; i < ww; i++) line[i] = L->vram[sy][(o->sx + i) & (VW - 1)];
-        for (int i = 0; i < ww; i++) {
-            uint16_t *p = &L->vram[dy][(o->rx + i) & (VW - 1)];
+    if (o->type == GPU_OP_FILL) {
+        for (int j = 0; j < o->rh; j++)
+            for (int i = 0; i < o->rw; i++) {
+                int vx = (o->rx + i) & (VW - 1), vy = (o->ry + j) & (VH - 1);
+                L->vram[vy][vx] = o->fill15;
+                if (sink == SINK_FULL) px_put(L, vx, vy, o->fill15, 0, 0, 0);
+            }
+    } else if (o->type == GPU_OP_UPLOAD) {
+        if (!l->data || o->rw <= 0 || o->rh <= 0) return;
+        for (uint32_t i = 0; i < o->data_n && i < (uint32_t)(o->rw * o->rh) && o->data_off + i < l->ndata; i++) {
+            int x = (o->rx + (int)(i % (uint32_t)o->rw)) & (VW - 1), y = (o->ry + (int)(i / (uint32_t)o->rw)) & (VH - 1);
+            uint16_t *p = &L->vram[y][x];
+            uint16_t v = l->data[o->data_off + i];
+            if (sink == SINK_FULL) px_put(L, x, y, v, mchk, mset, 0);
             if (mchk && (*p & 0x8000)) continue;
-            *p = (uint16_t)(line[i] | (mset ? 0x8000 : 0));
+            *p = (uint16_t)(v | (mset ? 0x8000 : 0));
+        }
+    } else if (o->type == GPU_OP_VCOPY) {
+        uint16_t line[VW];
+        int ww = o->rw > VW ? VW : o->rw;
+        int paint = sink == SINK_FULL;
+        if (sink == SINK_PANEL) {   /* origen fuera de la zona mostrada Y destino dentro: composición fuera de pantalla copiada a la pantalla */
+            int wx0 = L->ox + L->pad, wx1 = wx0 + L->aw, wy0 = L->oy, wy1 = L->oy + L->h;
+            paint = !rect_hit(o->sx, o->sy, ww, o->rh, wx0, wy0, wx1, wy1) && rect_hit(o->rx, o->ry, ww, o->rh, wx0, wy0, wx1, wy1);
+        }
+        for (int j = 0; j < o->rh; j++) {
+            int sy = (o->sy + j) & (VH - 1), dy = (o->ry + j) & (VH - 1);
+            for (int i = 0; i < ww; i++) line[i] = L->vram[sy][(o->sx + i) & (VW - 1)];
+            for (int i = 0; i < ww; i++) {
+                int dx = (o->rx + i) & (VW - 1);
+                uint16_t *p = &L->vram[dy][dx];
+                if (paint) px_put(L, dx, dy, line[i], mchk, mset, sink == SINK_PANEL);
+                if (mchk && (*p & 0x8000)) continue;
+                *p = (uint16_t)(line[i] | (mset ? 0x8000 : 0));
+            }
         }
     }
 }
@@ -479,7 +538,7 @@ void vl2d_encode(const VrLayerPx *p, int hq, uint8_t rgba[4]) {
 }
 
 /* ---------------- fondo de la pantalla de cine: zona mostrada de la VRAM espejo ampliada ---------------- */
-static void fill_backdrop(VrLayer2D *L, const GpuDisplay *d) {
+static void fill_backdrop(VrLayer2D *L, const GpuDisplay *d, const uint16_t *src) {   /* src: VRAM 1024x512 (el espejo, o la real al cerrar la lista) */
     int S = L->R, mode = L->smooth, w = L->w, h = L->h;
     size_t need = (size_t)w * h * 3;
     if (need > L->nat_cap) { uint8_t *q = (uint8_t *)realloc(L->nat, need); if (!q) return; L->nat = q; L->nat_cap = need; }
@@ -491,9 +550,9 @@ static void fill_backdrop(VrLayer2D *L, const GpuDisplay *d) {
         memset(o, 0, (size_t)w * 3); memset(om, 0, (size_t)w);
         for (int x = pad; x < pad + aw && x < w; x++) {
             int xs = x - pad;
-            if (d->depth24) { const uint8_t *ln = (const uint8_t *)L->vram[py]; for (int k = 0; k < 3; k++) o[x * 3 + k] = ln[((d->x * 2) + xs * 3 + k) & 2047]; }
+            if (d->depth24) { const uint8_t *ln = (const uint8_t *)(src + (size_t)py * VW); for (int k = 0; k < 3; k++) o[x * 3 + k] = ln[((d->x * 2) + xs * 3 + k) & 2047]; }
             else {
-                uint16_t t = L->vram[py][(d->x + xs) & (VW - 1)];
+                uint16_t t = src[(size_t)py * VW + ((d->x + xs) & (VW - 1))];
                 o[x * 3] = (uint8_t)ex8(t & 31); o[x * 3 + 1] = (uint8_t)ex8((t >> 5) & 31); o[x * 3 + 2] = (uint8_t)ex8((t >> 10) & 31);
                 om[x] = (uint8_t)(t >> 15);   /* bit de máscara del píxel de VRAM: una primitiva con «comprobar máscara» no lo pisa (gpu.c plot) */
             }
@@ -590,13 +649,89 @@ static void op_box(const GpuOp *o, int S, int *x0, int *y0, int *x1, int *y1) {
     *x0 = (a - 1) * S; *y0 = (b - 1) * S; *x1 = (c + 1) * S; *y1 = (d + 1) * S;
 }
 
+/* caja de la primitiva recortada al área de dibujo y a la VRAM: [x0,x1) x [y0,y1); 0 si queda vacía */
+static int prim_bbox(const GpuOp *o, int *x0, int *y0, int *x1, int *y1) {
+    int a = 1 << 20, b = 1 << 20, c = -(1 << 20), d = -(1 << 20);
+    if (o->type == GPU_OP_RECT) { a = o->v[0].x; b = o->v[0].y; c = a + o->rw; d = b + o->rh; }
+    else {
+        int n = o->type == GPU_OP_LINE ? 2 : (o->nv == 4 ? 4 : 3);
+        for (int i = 0; i < n; i++) {
+            if (o->v[i].x < a) a = o->v[i].x;
+            if (o->v[i].y < b) b = o->v[i].y;
+            if (o->v[i].x + 1 > c) c = o->v[i].x + 1;
+            if (o->v[i].y + 1 > d) d = o->v[i].y + 1;
+        }
+    }
+    if (a < o->cx1) a = o->cx1;
+    if (b < o->cy1) b = o->cy1;
+    if (c > o->cx2 + 1) c = o->cx2 + 1;
+    if (d > o->cy2 + 1) d = o->cy2 + 1;
+    if (a < 0) a = 0;
+    if (b < 0) b = 0;
+    if (c > VW) c = VW;
+    if (d > VH) d = VH;
+    *x0 = a; *y0 = b; *x1 = c; *y1 = d;
+    return c > a && d > b;
+}
+
+/* Rasteriza la primitiva (poligono/rect/linea) con el contexto c (destino ya fijado: capa o espejo) */
+static void raster_prim(Ctx *c, const GpuOp *o) {
+    if (o->flags & GPU_F_TEXTURED) {   /* caja de texels de la primitiva */
+        int n = o->type == GPU_OP_RECT ? 1 : (o->nv == 4 ? 4 : 3);
+        int umin = 255, umax = 0, vmin = 255, vmax = 0;
+        if (o->type == GPU_OP_RECT) {
+            int u0 = o->v[0].u, v0 = o->v[0].v;
+            int u1 = (o->flags & GPU_F_FLIPX) ? u0 - (o->rw - 1) : u0 + (o->rw - 1), v1 = (o->flags & GPU_F_FLIPY) ? v0 - (o->rh - 1) : v0 + (o->rh - 1);
+            umin = u0 < u1 ? u0 : u1; umax = u0 < u1 ? u1 : u0; vmin = v0 < v1 ? v0 : v1; vmax = v0 < v1 ? v1 : v0;
+        } else {
+            for (int k = 0; k < n; k++) {
+                if (o->v[k].u < umin) umin = o->v[k].u;
+                if (o->v[k].u > umax) umax = o->v[k].u;
+                if (o->v[k].v < vmin) vmin = o->v[k].v;
+                if (o->v[k].v > vmax) vmax = o->v[k].v;
+            }
+        }
+        if (umax > 255) umax = 255;
+        if (vmax > 255) vmax = 255;
+        if (umin < 0) umin = 0;
+        if (vmin < 0) vmin = 0;
+        c->umin = umin; c->umax = umax; c->vmin = vmin; c->vmax = vmax;
+        if (!c->vdst) {
+            VrLayer2D *L = c->L;
+            L->stamp++;
+            if (L->stamp == 0) { memset(L->ts, 0, sizeof L->ts); memset(L->qs, 0, sizeof L->qs); L->stamp = 1; }
+        }
+    }
+    if (o->type == GPU_OP_POLY) do_poly(c);
+    else if (o->type == GPU_OP_RECT) do_rect(c);
+    else do_line(c);
+}
+
+/* Fidelidad del fotograma completo frente a la imagen REAL del emulador (la VRAM al cerrar la lista, que es lo que muestra el hardware): la capa a escala 1 debe ser idéntica. */
+static void fidelity(VrLayer2D *L, const GpuDisplay *d, const uint16_t *vend) {
+    VrL2Info *I = &L->info;
+    long n = 0, bad = 0, sum = 0;
+    for (int y = 0; y < L->h; y++) {
+        int py = (d->y + y) & (VH - 1);
+        for (int x = L->pad; x < L->pad + L->aw && x < L->w; x++, n++) {
+            uint16_t t = vend[(size_t)py * VW + ((d->x + (x - L->pad)) & (VW - 1))];
+            const VrLayerPx *p = &L->px[(size_t)y * L->PW + x];
+            int e0 = (t & 31) - p->c[0], e1 = ((t >> 5) & 31) - p->c[1], e2 = ((t >> 10) & 31) - p->c[2];
+            if (e0 | e1 | e2) { bad++; sum += abs(e0) + abs(e1) + abs(e2); }
+        }
+    }
+    I->fid_n = (int)n; I->fid_bad = (int)bad;
+    I->fid_mean_milli = n ? (int)(sum * 1000L * 255L / (31L * 3L * n)) : 0;   /* media por canal en niveles de 8 bits (x1000) */
+}
+
 int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     if (!L || !l) return 0;
     L->valid = 0;
     /* La VRAM de partida es la REAL del emulador al inicio de la lista (vram_start, cada lista) o, si el productor no la da, la instantánea de la primera lista/resincronización
      * (vram_init) más los eventos: así una subida o un relleno que no pasen por la lista (DMA, copias, escrituras del juego) nunca dejan texels basura en fuentes y CLUT. */
     { const uint16_t *v0 = l->vram_start ? l->vram_start : l->vram_init; if (v0) { memcpy(L->vram, v0, sizeof L->vram); L->have_vram = 1; } }
-    int draw = sc && sc->op_dest && sc->n_op_dest >= l->nops && L->have_vram;
+    /* panel: hace falta la clasificación de la escena (op_dest); fotograma completo: no (dibuja TODAS las primitivas), así que también hay capa exacta si la escena no se pudo ensamblar */
+    int draw = L->have_vram && (full || (sc && sc->op_dest && sc->n_op_dest >= l->nops));
     int S = L->scale;   /* escala de la SALIDA */
     int R = S;          /* escala de rasterizado */
     int w = l->disp.w > 0 ? l->disp.w : 320, h = l->disp.h > 0 ? l->disp.h : 240;
@@ -623,6 +758,12 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
         if (nout > (size_t)6 * 1024 * 6 * 512) draw = 0;   /* tope de memoria (con escala 6 una pantalla de 640x480 son 11 Mpx) */
         else if (!ensure(L, npx, nout)) draw = 0;
     }
+    /* Fotograma completo a escala 1 («original», 15 bits): la VRAM espejo es la ÚNICA fuente de verdad. Se ejecuta la lista entera sobre ella EN ORDEN (todas las primitivas con la
+     * aritmética de gpu.c, los rellenos, subidas y copias, los dibujos a zonas fuera de la mostrada que luego se usan de textura o se copian) y al final se lee la zona mostrada: es
+     * exactamente lo que muestra el hardware. Antes la zona mostrada se copiaba al INICIO y las primitivas se pintaban encima: los borrados y copias de fondo (rellenos, VRAM->VRAM) que
+     * quitan lo dibujado antes no se aplicaban (restos / textos duplicados), y lo compuesto fuera de pantalla se leía con el estado final de la lista. */
+    int vmode = draw && full && R == 1;
+    int sink = !draw || vmode ? SINK_NONE : full ? SINK_FULL : SINK_PANEL;
     if (draw) {
         int key = (R << 8) | (S << 4) | L->smooth;
         if (L->cur_scale != key || L->w != w || L->h != h || L->ox != oxe || L->oy != l->disp.y || L->pad != pad || L->aw != aw) {
@@ -635,41 +776,46 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
         L->dx0 = L->dy0 = L->dx1 = L->dy1 = 0;
         ux0 = L->PW; uy0 = L->PH; ux1 = 0; uy1 = 0;
         if (full) {
-            fill_backdrop(L, &l->disp);
+            if (!vmode) fill_backdrop(L, &l->disp, &L->vram[0][0]);
             ux0 = 0; uy0 = 0; ux1 = L->PW; uy1 = L->PH;
         }
     }
-    L->vend = l->vram_end;
     memset(&L->info, 0, sizeof L->info);
     L->info.fw = w; L->info.h = h; L->info.aw = aw; L->info.pad = pad; L->info.scale = S; L->info.raster = R; L->info.smooth = L->smooth; L->info.full = full;
     L->info.used_start = l->vram_start != NULL; L->info.used_end = l->vram_end != NULL;
-    memset(L->drawn, 0, sizeof L->drawn);
+    /* zona mostrada (visible) en VRAM: solo lo que cae aquí se pinta en la capa; el resto de dibujos solo actualiza la VRAM espejo (se usa luego como textura o se copia) */
+    int wx0 = l->disp.x, wx1 = l->disp.x + (aw > 0 ? aw : 0), wy0 = l->disp.y, wy1 = l->disp.y + h;
     Ctx c0;
     memset(&c0, 0, sizeof c0);
     c0.L = L; c0.S = R; c0.hq = R > 1; c0.smooth = L->smooth; c0.cmax = c0.hq ? 255 : 31;
     for (uint32_t i = 0; i < l->nops; i++) {
         const GpuOp *o = &l->ops[i];
         switch (o->type) {
-        case GPU_OP_FILL: ev_fill(L, o); break;
-        case GPU_OP_UPLOAD: ev_upload(L, o, l); break;
-        case GPU_OP_VCOPY: ev_copy(L, o); break;
+        case GPU_OP_FILL: case GPU_OP_UPLOAD: case GPU_OP_VCOPY: ev_apply(L, o, l, sink); break;
         case GPU_OP_POLY: case GPU_OP_RECT: case GPU_OP_LINE: {
-            if (l->vram_end) {   /* ¿dibuja fuera de la zona mostrada? (render a textura): esos bloques de VRAM se leen de la VRAM al cerrar */
-                int a, b, e, f;
-                op_box(o, 1, &a, &b, &e, &f);
-                if (a < o->cx1) a = o->cx1;
-                if (b < o->cy1) b = o->cy1;
-                if (e > o->cx2 + 1) e = o->cx2 + 1;
-                if (f > o->cy2 + 1) f = o->cy2 + 1;
-                if (a < 0) a = 0;
-                if (b < 0) b = 0;
-                if (e > VW) e = VW;
-                if (f > VH) f = VH;
-                int inside = a >= l->disp.x && e <= l->disp.x + l->disp.w && b >= l->disp.y && f <= l->disp.y + l->disp.h;
-                if (!inside && e > a && f > b)
-                    for (int by = b >> 4; by <= (f - 1) >> 4; by++) for (int bx = a >> 4; bx <= (e - 1) >> 4; bx++) L->drawn[by * 64 + bx] = 1;
-            }
             if (!draw) break;
+            int bx0, by0, bx1, by1;
+            if (!prim_bbox(o, &bx0, &by0, &bx1, &by1)) break;
+            int inside = bx0 >= wx0 && bx1 <= (full ? wx1 : l->disp.x + w) && by0 >= wy0 && by1 <= wy1;   /* destino enteramente en la zona mostrada (panel: el rectángulo nominal) */
+            int hit = bx0 < wx1 && bx1 > wx0 && by0 < wy1 && by1 > wy0;           /* destino con alguna parte en la zona mostrada */
+            if (vmode || !inside) {   /* actualiza la VRAM espejo (todo en fotograma completo; en el panel solo lo que sale de la zona mostrada: render a textura, búfer alterno) */
+                Ctx cm = c0;
+                cm.S = 1; cm.hq = 0; cm.smooth = 0; cm.cmax = 31;
+                cm.vdst = L->vram; cm.o = o;
+                cm.cx1 = o->cx1; cm.cy1 = o->cy1; cm.cx2 = o->cx2; cm.cy2 = o->cy2;
+                cm.semi = !!(o->flags & GPU_F_SEMI);
+                cm.mask_chk = !!(o->flags & GPU_F_MASK_CHK); cm.mask_set = !!(o->flags & GPU_F_MASK_SET);
+                cm.abr = o->abr;
+                int skip = 0;
+                if (o->fbk && o->type != GPU_OP_LINE && !vmode) {   /* panel: la VRAM espejo no tiene lo dibujado en la zona mostrada: texel único resuelto por la captura */
+                    if (!o->fbt || !(o->flags & GPU_F_TEXTURED)) skip = 1;
+                    cm.fixed = 1;
+                }
+                if (!skip) raster_prim(&cm, o);
+                if (!vmode) L->info.mirror_prims++;
+            }
+            if (vmode) { L->info.prims++; if (o->flags & GPU_F_MASK_CHK) L->info.mask_prims++; break; }
+            if (!hit) break;                                   /* no toca la zona mostrada: no se pinta en la capa */
             if (!full && sc->op_dest[i] != 2) break;
             L->info.prims++;
             if (o->flags & GPU_F_MASK_CHK) L->info.mask_prims++;
@@ -684,29 +830,6 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
                 if (!(o->flags & GPU_F_TEXTURED)) break;
                 c.fixed = 1;
             }
-            if (o->flags & GPU_F_TEXTURED) {   /* caja de texels de la primitiva */
-                int n = o->type == GPU_OP_RECT ? 1 : (o->nv == 4 ? 4 : 3);
-                int umin = 255, umax = 0, vmin = 255, vmax = 0;
-                if (o->type == GPU_OP_RECT) {
-                    int u0 = o->v[0].u, v0 = o->v[0].v;
-                    int u1 = (o->flags & GPU_F_FLIPX) ? u0 - (o->rw - 1) : u0 + (o->rw - 1), v1 = (o->flags & GPU_F_FLIPY) ? v0 - (o->rh - 1) : v0 + (o->rh - 1);
-                    umin = u0 < u1 ? u0 : u1; umax = u0 < u1 ? u1 : u0; vmin = v0 < v1 ? v0 : v1; vmax = v0 < v1 ? v1 : v0;
-                } else {
-                    for (int k = 0; k < n; k++) {
-                        if (o->v[k].u < umin) umin = o->v[k].u;
-                        if (o->v[k].u > umax) umax = o->v[k].u;
-                        if (o->v[k].v < vmin) vmin = o->v[k].v;
-                        if (o->v[k].v > vmax) vmax = o->v[k].v;
-                    }
-                }
-                if (umax > 255) umax = 255;
-                if (vmax > 255) vmax = 255;
-                if (umin < 0) umin = 0;
-                if (vmin < 0) vmin = 0;
-                c.umin = umin; c.umax = umax; c.vmin = vmin; c.vmax = vmax;
-                L->stamp++;
-                if (L->stamp == 0) { memset(L->ts, 0, sizeof L->ts); memset(L->qs, 0, sizeof L->qs); L->stamp = 1; }
-            }
             if (!full) {
                 int a, b, e, f;
                 op_box(o, R, &a, &b, &e, &f);
@@ -716,16 +839,20 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
                 if (e > ux1) ux1 = e;
                 if (f > uy1) uy1 = f;
             }
-            if (o->type == GPU_OP_POLY) do_poly(&c);
-            else if (o->type == GPU_OP_RECT) do_rect(&c);
-            else do_line(&c);
+            raster_prim(&c, o);
             break;
         }
         default: break;
         }
     }
-    L->vend = NULL;
     if (!draw) return 0;
+    if (vmode) {
+        fill_backdrop(L, &l->disp, &L->vram[0][0]);
+        if (l->vram_end && !l->disp.depth24) {   /* (24 bits: el marco no es la lectura de 15 bits) medida de fidelidad contra la imagen real; si la capa no es idéntica, se usa la imagen exacta del emulador (respaldo) */
+            fidelity(L, &l->disp, l->vram_end);
+            if (L->info.fid_bad > 0) { fill_backdrop(L, &l->disp, l->vram_end); L->info.fallback = 1; }
+        }
+    }
     if (ux0 < 0) ux0 = 0;
     if (uy0 < 0) uy0 = 0;
     if (ux1 > L->PW) ux1 = L->PW;
@@ -744,6 +871,28 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
         L->dx0 = ux0; L->dy0 = uy0; L->dx1 = ux1; L->dy1 = uy1;
     }
     L->valid = 1;
+    return 1;
+}
+
+/* Comparación de una capa RGBA (escala `scale`, el pixel nativo (x,y) se toma en (x*scale, y*scale)) con una imagen de referencia RGBA de rw x rh (frame.png del volcado o el marco de la GPU). */
+int vl2d_compare(const uint8_t *rgba, int w, int h, int scale, const uint8_t *ref, int rw, int rh, VrL2Diff *out) {
+    if (out) memset(out, 0, sizeof *out);
+    if (!rgba || !ref || scale < 1 || rw <= 0 || rh <= 0 || w < rw * scale || h < rh * scale) return 0;
+    long bad = 0, sum = 0;
+    int mx = 0;
+    for (int y = 0; y < rh; y++)
+        for (int x = 0; x < rw; x++) {
+            const uint8_t *p = &rgba[((size_t)(y * scale) * w + (size_t)(x * scale)) * 4], *q = &ref[((size_t)y * rw + x) * 4];
+            int d = 0;
+            for (int k = 0; k < 3; k++) { int e = abs((int)p[k] - (int)q[k]); d += e; if (e > mx) mx = e; }
+            if (d) bad++;
+            sum += d;
+        }
+    if (out) {
+        out->n = (long)rw * rh; out->bad = bad; out->max = mx;
+        out->mean = (double)sum / (3.0 * (double)out->n);
+        out->pct = 100.0 * (double)bad / (double)out->n;
+    }
     return 1;
 }
 
