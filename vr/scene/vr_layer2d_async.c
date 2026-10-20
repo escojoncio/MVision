@@ -17,6 +17,7 @@ typedef struct {
     GpuOp *ops; size_t ops_cap;
     uint16_t *data; size_t data_cap;
     uint16_t *vram; int has_vram;
+    uint16_t *vend; int has_vend;   /* VRAM real al cerrar la lista (texturas dibujadas durante ella) */
     uint8_t *opd; size_t opd_cap; int has_opd;
     int full, reset;
     uint32_t lseq;                 /* nº de envío */
@@ -114,7 +115,7 @@ void vl2a_free(VrL2Async *A) {
         pthread_mutex_lock(&A->mx); A->quit = 1; pthread_cond_broadcast(&A->cv_job); pthread_mutex_unlock(&A->mx);
         pthread_join(A->th, NULL);
     }
-    for (int i = 0; i < NJOB; i++) { free(A->job[i].ops); free(A->job[i].data); free(A->job[i].vram); free(A->job[i].opd); }
+    for (int i = 0; i < NJOB; i++) { free(A->job[i].ops); free(A->job[i].data); free(A->job[i].vram); free(A->job[i].vend); free(A->job[i].opd); }
     for (int i = 0; i < 3; i++) free(A->out[i].px);
     vl2d_free(A->L);
     pthread_mutex_destroy(&A->mx); pthread_cond_destroy(&A->cv_job); pthread_cond_destroy(&A->cv_idle);
@@ -139,7 +140,8 @@ int vl2a_submit(VrL2Async *A, const GpuDrawList *l, const uint8_t *op_dest, int 
     Job *j = &A->job[(A->head + A->count) % NJOB];
     /* El trabajo en curso es el de `head`; el hueco nuevo nunca coincide con él (count < NJOB). */
     int ok = grow((void **)&j->ops, &j->ops_cap, l->nops, sizeof(GpuOp)) && grow((void **)&j->data, &j->data_cap, l->ndata, 2) &&
-             grow((void **)&j->opd, &j->opd_cap, l->nops, 1) && ((!l->vram_init && !l->vram_start) || (j->vram || (j->vram = malloc(sizeof(uint16_t) * 1024 * 512))));
+             grow((void **)&j->opd, &j->opd_cap, l->nops, 1) && ((!l->vram_init && !l->vram_start) || (j->vram || (j->vram = malloc(sizeof(uint16_t) * 1024 * 512)))) &&
+             (!l->vram_end || j->vend || (j->vend = malloc(sizeof(uint16_t) * 1024 * 512)));
     if (ok) {
         j->l = *l;
         if (l->nops) memcpy(j->ops, l->ops, l->nops * sizeof(GpuOp));
@@ -151,6 +153,9 @@ int vl2a_submit(VrL2Async *A, const GpuDrawList *l, const uint8_t *op_dest, int 
         j->has_vram = v0 != NULL;
         if (j->has_vram) memcpy(j->vram, v0, sizeof(uint16_t) * 1024 * 512);
         j->l.vram_init = NULL; j->l.vram_start = j->has_vram ? j->vram : NULL;
+        j->has_vend = l->vram_end != NULL;
+        if (j->has_vend) memcpy(j->vend, l->vram_end, sizeof(uint16_t) * 1024 * 512);
+        j->l.vram_end = j->has_vend ? j->vend : NULL;
         j->has_opd = op_dest != NULL;
         if (op_dest && l->nops) memcpy(j->opd, op_dest, l->nops);
         j->full = full; j->reset = reset; j->lseq = ++A->sub_seq;

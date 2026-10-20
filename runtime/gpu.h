@@ -150,6 +150,7 @@ typedef struct {
     uint16_t *data; uint32_t ndata, cap_data;
     uint16_t *vram_init;     /* NULL salvo primera lista / resincronización: VRAM [512][1024] al INICIO del frame */
     uint16_t *vram_start;    /* NULL salvo gpu_capture_vram_start(1): VRAM REAL [512][1024] al INICIO de CADA lista (los eventos de la lista se aplican encima) */
+    uint16_t *vram_end;      /* NULL salvo gpu_capture_vram_start(1): VRAM REAL al CERRAR la lista (incluye lo dibujado a VRAM durante ella: render a textura) */
     uint16_t *vram_after;    /* solo gpu_capture_enable(2): VRAM del oráculo al CERRAR (para verificar) */
 } GpuDrawList;
 
