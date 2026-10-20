@@ -78,6 +78,34 @@ int main(void) {
         CK(!V.ctx_hit);
     }
 
+    /* puño a 0,3 m de la superficie del cuerpo: el motor dice 0 -> reintento único con el origen en el cuerpo (queda en el volumen) y la caja del jugador se restaura */
+    fresh(); enemy(0, 1000, 0, 0);
+    { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 500.0f; f.fist[0][1] = 100.0f; f.fist[0][2] = 0;
+      vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      p16(W + VRM_W_TARGET + 16, 60); p16(W + VRM_W_TARGET + 18, 60); p16(W + VRM_W_TARGET + 20, 60);
+      vrm_pre_hit(&V, &ENG, W);
+      CK(g16(W + VRM_W_TARGET + 16) >= VRM_FIST_BOX_MM);                  /* caja ensanchada durante la comprobación */
+      CK(vrm_post_hit(&V, &ENG, W, 0) == 1);                              /* motor=0 y el puño pasa a 0,3 m del cuerpo: reintento */
+      CK(g16(W + VRM_W_TARGET + 16) == 60);                                /* caja original restaurada */
+      CK(V.retried && V.ctx_hit && V.ctx_origin[0] == 1000.0f);
+      vrm_pre_hit(&V, &ENG, W);
+      uint32_t vec = 0x80100000u; CK(vrm_move_target(&V, &ENG, W + VRM_W_TARGET, vec) == 1); CK(g16(vec) == 1000);
+      CK(vrm_post_hit(&V, &ENG, W, 1) == 0);                              /* el reintento no se repite */
+      CK(V.n_retry == 1 && V.n_retry_ok == 1 && V.n_hit == 1); CK(logged("REINTENTO")); CK(g16(W + VRM_W_TARGET + 18) == 60); }
+    /* puño a 2 m del cuerpo: sin reintento */
+    fresh(); enemy(0, 3000, 0, 0);
+    { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 0; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      vrm_pre_hit(&V, &ENG, W); CK(vrm_post_hit(&V, &ENG, W, 0) == 0); CK(V.n_retry == 0 && V.n_miss == 1); }
+    /* sin enemigos golpeables en el motor (en reacción): fallo anotado, sin reintento */
+    fresh(); enemy(0, 400, 0, 0); p16(VRM_TARGETS, 1 | 2);               /* sin el bit de daño */
+    { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 400; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      vrm_pre_hit(&V, &ENG, W); CK(vrm_post_hit(&V, &ENG, W, 0) == 0); CK(V.n_nobody == 1 && logged("ningún enemigo golpeable")); }
+    /* historia larga del puño: la muestra más cercana al enemigo (hace ~0,3 s) sigue disponible */
+    fresh(); enemy(0, 1000, 0, 0);
+    { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 900; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      VrmFrame h = fr(); h.fist_ok[0] = h.fist_closed[0] = 1; for (int i = 0; i < 18; i++) { h.fist[0][0] = 900.0f - 40.0f * (float)i; vrm_frame(&V, &ENG, &h); }
+      vrm_pre_hit(&V, &ENG, W); CK(V.ctx_fist[0] >= 800.0f);   /* dentro de la caja del enemigo (800..1200), no la última muestra (220) */ vrm_post_hit(&V, &ENG, W, 1); }
+
     /* combo: una petición nueva durante la animación marca el bit 0x20 */
     fresh(); { VrmFrame f = fr(); f.punch_side = 0; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
         VrmFrame g = fr(); g.punch_side = 1; vrm_frame(&V, &ENG, &g); vrm_punch_tick(&V, &ENG, W, 3);

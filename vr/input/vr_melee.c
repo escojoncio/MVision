@@ -158,21 +158,67 @@ void vrm_post_grab(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time) {
     }
 }
 
+/* punto del cuerpo del enemigo más cercano al puño (mm), dentro de VRM_SNAP_MM de su caja: el origen del reintento (centro horizontal del cuerpo, altura del puño acotada a la caja) */
+static int snap_origin(const float fist[3], const En *en, int n, float out[3]) {
+    const float zero[3] = {0, 0, 0}; float best = 1e9f; int bi = -1;
+    for (int i = 0; i < n; i++) { float d = box_dist(fist, &en[i], zero); if (d < best) { best = d; bi = i; } }
+    if (bi < 0 || best > (float)VRM_SNAP_MM) return 0;
+    out[0] = en[bi].c[0]; out[2] = en[bi].c[2];
+    float lo = en[bi].c[1] - en[bi].h[1], hi = en[bi].c[1] + en[bi].h[1];
+    out[1] = fist[1] < lo ? lo : (fist[1] > hi ? hi : fist[1]);
+    return 1;
+}
+static void box_widen(Vrm *v, const VrmEng *e, uint32_t work) {
+    v->box_work = work; v->box_saved = 1;
+    for (int k = 0; k < 3; k++) {
+        int16_t h = r16(e, work + VRM_W_TARGET + 16 + 2u * (uint32_t)k); v->box_save[k] = h;
+        if (h < VRM_FIST_BOX_MM) w16(e, work + VRM_W_TARGET + 16 + 2u * (uint32_t)k, VRM_FIST_BOX_MM);
+    }
+}
+static void box_restore(Vrm *v, const VrmEng *e) {
+    if (!v->box_saved) return;
+    for (int k = 0; k < 3; k++) w16(e, v->box_work + VRM_W_TARGET + 16 + 2u * (uint32_t)k, v->box_save[k]);
+    v->box_saved = 0;
+}
+
 void vrm_pre_hit(Vrm *v, const VrmEng *e, uint32_t work) {
     if (!v->enable || !v->in_punch || r32(e, work + VRM_W_ANIMFN) != VRM_FN_PUNCH) return;
+    if (v->retried) { box_widen(v, e, work); return; }      /* reintento: el origen ya está en ctx_origin */
     float o[3], d;
     v->stage++;
     if (!pick_origin(v, e, o, &d)) { say(v, "[gest] golpe etapa %d: sin puño VR con seguimiento; el motor usa su origen", v->stage); return; }
     v->ctx_hit = 1; v->ctx_ok = 1; v->ctx_target = work + VRM_W_TARGET; memcpy(v->ctx_origin, o, sizeof o);
+    memcpy(v->ctx_fist, o, sizeof o);
+    box_widen(v, e, work);
 }
-void vrm_post_hit(Vrm *v, const VrmEng *e, uint32_t work, uint32_t result) {
-    if (!v->ctx_hit) return;
+int vrm_post_hit(Vrm *v, const VrmEng *e, uint32_t work, uint32_t result) {
+    if (!v->ctx_hit) return 0;
     v->ctx_hit = 0; v->ctx_ok = 0;
-    float half[3]; for (int k = 0; k < 3; k++) half[k] = r16(e, work + VRM_W_TARGET + 16 + 2u * (uint32_t)k);
+    float half[3]; for (int k = 0; k < 3; k++) half[k] = v->box_saved ? (float)(v->box_save[k] < VRM_FIST_BOX_MM ? VRM_FIST_BOX_MM : v->box_save[k]) : (float)r16(e, work + VRM_W_TARGET + 16 + 2u * (uint32_t)k);
+    box_restore(v, e);
     En en[MAXEN]; int n = scan(e, 0, en);
     float d = n ? nearest(v->ctx_origin, en, n, half) : -1.0f;
-    if (n && d <= 0) { v->n_hit++; say(v, "[gest] golpe etapa %d: IMPACTO con el puño VR (%.0f,%.0f,%.0f mm), motor=%u", v->stage, v->ctx_origin[0], v->ctx_origin[1], v->ctx_origin[2], result); }
-    else { v->n_miss++; say(v, "[gest] golpe etapa %d: FALLO, el puño VR queda a %.2f m del enemigo más cercano", v->stage, d < 0 ? -1.0f : d / 1000.0f); }
+    int vr_hit = n && d <= 0;
+    if (v->retried) {
+        v->retried = 0;
+        if (result) { v->n_retry_ok++; v->n_hit++; if (v->n_miss) v->n_miss--; }
+        say(v, "[gest] golpe etapa %d: REINTENTO centrado en el cuerpo (%.0f,%.0f,%.0f mm), motor=%u", v->stage, v->ctx_origin[0], v->ctx_origin[1], v->ctx_origin[2], result);
+        return 0;
+    }
+    if (!n) { v->n_nobody++; v->n_miss++; say(v, "[gest] golpe etapa %d: FALLO, ningún enemigo golpeable en el motor (en reacción o caído), motor=%u", v->stage, result); return 0; }
+    if (vr_hit) v->n_hit++; else v->n_miss++;
+    say(v, "[gest] golpe etapa %d: %s con el puño VR (%.0f,%.0f,%.0f mm), a %.2f m del cuerpo, motor=%u", v->stage, vr_hit ? "IMPACTO" : "FALLO",
+        v->ctx_origin[0], v->ctx_origin[1], v->ctx_origin[2], d > 0 ? d / 1000.0f : 0.0f, result);
+    /* el motor no registró el golpe aunque el puño toca (o pasa a dos palmos de) el cuerpo: se repite UNA vez con el origen en el cuerpo del enemigo */
+    if (!result) {
+        float so[3];
+        if (snap_origin(v->ctx_fist, en, n, so)) {
+            memcpy(v->ctx_origin, so, sizeof so);
+            v->ctx_hit = 1; v->ctx_ok = 1; v->ctx_target = work + VRM_W_TARGET; v->retried = 1; v->n_retry++;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 int vrm_move_target(Vrm *v, const VrmEng *e, uint32_t target, uint32_t vec) {

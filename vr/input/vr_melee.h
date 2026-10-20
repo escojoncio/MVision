@@ -87,7 +87,9 @@ typedef struct {
     float fist[2][3];         /* puño VR en el mundo del motor (mm) */
 } VrmFrame;
 
-#define VRM_HIST 10
+#define VRM_HIST 24             /* ~0,4 s de muestras del puño: el estado de golpe del motor comprueba el impacto varios fotogramas después del gesto */
+#define VRM_FIST_BOX_MM 180     /* semitamaño mínimo (mm) de la caja del jugador mientras dura la comprobación de impacto: puño ~120 mm + tolerancia */
+#define VRM_SNAP_MM 450         /* si el puño pasa a menos de esto (mm) de la caja del enemigo, el reintento centra el origen en su cuerpo */
 typedef struct Vrm {
     int enable;
     int ttl_frames;           /* vida de una petición (VBlanks, 8) */
@@ -101,12 +103,15 @@ typedef struct Vrm {
     float fist[2][3];
     float hist[2][VRM_HIST][3]; unsigned char hist_cl[2][VRM_HIST]; int hist_n[2], hist_i[2];
     /* contexto de los ganchos */
-    int ctx_hit, ctx_grab, ctx_ok; uint32_t ctx_target; float ctx_origin[3];
+    int ctx_hit, ctx_grab, ctx_ok; uint32_t ctx_target; float ctx_origin[3], ctx_fist[3];
     int stage;                /* etapa del golpe en curso (1..3) */
+    int retried;              /* la comprobación de impacto en curso es el reintento centrado en el cuerpo */
+    int16_t box_save[3]; int box_saved;   /* caja original del blanco del jugador (se ensancha mientras dura la comprobación) */
+    uint32_t box_work;
     int grab_owned;           /* la presa en curso la inició el cuerpo VR */
     int in_punch;             /* el estado de golpe está en curso por una petición VR */
     /* contadores */
-    unsigned n_punch, n_combo, n_hit, n_miss, n_grab, n_grab_rejected, n_squeeze, n_expired, n_knock;
+    unsigned n_punch, n_combo, n_hit, n_miss, n_retry, n_retry_ok, n_nobody, n_grab, n_grab_rejected, n_squeeze, n_expired, n_knock;
 } Vrm;
 
 void vrm_init(Vrm *v);
@@ -120,7 +125,7 @@ int  vrm_action_input(Vrm *v, const VrmEng *e, uint32_t work);                  
 void vrm_pre_grab(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time);       /* 0x80059D44 antes del original */
 void vrm_post_grab(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time);
 void vrm_pre_hit(Vrm *v, const VrmEng *e, uint32_t work);                       /* 0x80050FD4 */
-void vrm_post_hit(Vrm *v, const VrmEng *e, uint32_t work, uint32_t result);
+int  vrm_post_hit(Vrm *v, const VrmEng *e, uint32_t work, uint32_t result);   /* 1 = repetir la llamada original (reintento centrado en el cuerpo); el contexto ya está preparado */
 int  vrm_move_target(Vrm *v, const VrmEng *e, uint32_t target, uint32_t vec);   /* 0x8002DF1C: 1 si cambió el centro */
 void vrm_punch_tick(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time);     /* 0x8005A2A4 antes del original */
 int  vrm_hold_tick(Vrm *v, const VrmEng *e, uint32_t work);                     /* 0x8005A5C8: 1 = resuelto */
