@@ -457,17 +457,19 @@ int ns_cover_run(NsCover *c, const uint8_t *ram, const uint8_t *scratch, const G
     size_t n = ns_adapt_scene(&c->sc, c->st, &ao, &tr, &as);
     NsCoverCam cam;
     memset(&cam, 0, sizeof cam);
-    const float *R = c->sc.cam.rot, *E = c->sc.cam.eye;   /* vista -> mundo; mundo -> vista = R^T (p - eye) */
+    /* La lista se emitió con la cámara de un fotograma ANTES que la RAM del gancho: con la de la lista las mallas y los efectos se miden contra la misma vista. */
+    const float *R = (cfg && cfg->list_eye && cfg->list_M) ? cfg->list_M : c->sc.cam.rot, *E = (cfg && cfg->list_eye && cfg->list_M) ? cfg->list_eye : c->sc.cam.eye;   /* vista -> mundo; mundo -> vista = R^T (p - eye) */
     for (int r = 0; r < 3; r++) for (int k = 0; k < 3; k++) cam.A[3 * r + k] = R[3 * k + r];
     for (int r = 0; r < 3; r++) cam.t[r] = -(cam.A[3 * r] * E[0] + cam.A[3 * r + 1] * E[1] + cam.A[3 * r + 2] * E[2]);
     cam.fog_far = c->sc.fog.active ? c->sc.fog.start + c->sc.fog.len : 0.0f;
     /* Efectos: lo que el motor genera aparte de las mallas (ondas de agua, carteles, destellos...) se extrae de la misma RAM; las operaciones de la lista que
      * casan con un elemento (exacto o tolerante, ver ns_fx_classify_near) se cuentan como cubiertas por él y no entran en la comparación con las mallas. */
-    uint8_t *fxcls = NULL; int32_t *fxit = NULL; GpuOp *rest = NULL;
+    uint8_t *fxcls = NULL, *fxcls0 = NULL; int32_t *fxit = NULL; GpuOp *rest = NULL;
+    NsFxListCam fxlc; const NsFxListCam *fxplc = NULL; int fx_done = 0;
     uint32_t nrest = 0, f_tris = 0, f_water = 0, f_sprite = 0, f_other = 0;
     if (nops) {
         if (!c->fx) c->fx = ns_fx_scene_create(0);
-        fxcls = (uint8_t *)calloc(nops, 1); fxit = (int32_t *)malloc(sizeof(int32_t) * nops); rest = (GpuOp *)malloc(sizeof(GpuOp) * nops);
+        fxcls = (uint8_t *)calloc(nops, 1); fxcls0 = (uint8_t *)calloc(nops, 1); fxit = (int32_t *)malloc(sizeof(int32_t) * nops); rest = (GpuOp *)malloc(sizeof(GpuOp) * nops);
     }
     GpuDrawList dl;
     memset(&dl, 0, sizeof dl);
@@ -477,9 +479,10 @@ int ns_cover_run(NsCover *c, const uint8_t *ram, const uint8_t *scratch, const G
             dl.ops = (GpuOp *)ops; dl.nops = nops;
             for (uint32_t i = 0; i < nops; i++) fxit[i] = -1;
             if (ns_fx_classify(ram, c->fx, &dl, fxcls, NULL, fxit, NULL) == 0) {
-                NsFxListCam lc; const NsFxListCam *plc = NULL;
-                if (cfg && cfg->list_eye && cfg->list_M) { memcpy(lc.eye, cfg->list_eye, sizeof lc.eye); memcpy(lc.M, cfg->list_M, sizeof lc.M); plc = &lc; }
-                ns_fx_classify_near(c->fx, plc, &dl, fxcls, fxit);
+                if (cfg && cfg->list_eye && cfg->list_M) { memcpy(fxlc.eye, cfg->list_eye, sizeof fxlc.eye); memcpy(fxlc.M, cfg->list_M, sizeof fxlc.M); fxplc = &fxlc; }
+                if (fxcls0) memcpy(fxcls0, fxcls, nops);
+                ns_fx_classify_near(c->fx, fxplc, &dl, fxcls, fxit);
+                fx_done = 1;
             } else memset(fxcls, 0, nops);
         }
     }
@@ -505,7 +508,8 @@ int ns_cover_run(NsCover *c, const uint8_t *ram, const uint8_t *scratch, const G
         out->cover_pct = 100.0f * (float)(cov + f_tris) / (float)out->list_tris;
         out->exact_pct = 100.0f * (float)(out->cause[NC_MATCH][0] + out->cause[NC_MATCH][1]) / (float)out->list_tris;
     }
-    free(fxcls); free(fxit); free(rest);
+    if (rc == 0 && fx_done && fxcls && fxit) out->fxc_ok = ns_fxcmp_run(c->fx, fxplc, c->sc.to_vr, &dl, fxcls, fxit, fxcls0, &out->fxc) == 0;
+    free(fxcls); free(fxcls0); free(fxit); free(rest);
     free(tr); free(src);
     return rc;
 }
@@ -552,6 +556,7 @@ size_t ns_cover_format(const NsCoverResult *r, uint32_t frame, char *buf, size_t
         const NsCoverGroup *g = &r->extra[i];
         APP("[cobertura]   nativo_de_mas %u: n=%u objeto=%08x pieza=%u malla=%08x tpage=%04x clut=%04x zmin=%.0f\n", i + 1, g->n, g->key, g->piece, g->mesh, g->tpage, g->clut, g->zmin);
     }
+    if (r->fxc_ok) o += ns_fxcmp_format(&r->fxc, frame, buf + o, cap - o);
 #undef APP
     return o;
 }

@@ -110,6 +110,10 @@ typedef struct {
     const NsFog *fog;                   /* niebla de la escena (NULL = sin niebla). Cada vértice se multiplica por 1 - ns_gpu_fog_f(z de la cámara del juego), como las mallas */
     int has_depth_row;                  /* 1: los semitransparentes se ordenan por la MISMA profundidad que las mallas (depth_row sobre el centro, mundo VR) y no por la distancia a la cabeza */
     float depth_row[4];                 /* profundidad (positiva hacia delante) = depth_row[0..2] . centro + depth_row[3] */
+    /* Orden de dibujo del motor. raise_m: metros VR por unidad de `depth_bias` (como las mallas: el efecto se acerca a la cabeza esa distancia; 0 = ignorar). board_pull: fracción de la
+     * mitad del tamaño con la que se adelanta un CARTEL hacia la cabeza (escalado desde la cabeza: se ve igual); el motor lo pinta plano en pantalla según su profundidad y un halo
+     * de 2 m en una lámpara de techo no se recorta contra el techo; 0 = sin adelantar. */
+    float raise_m, board_pull;
 } NsGpuFxParams;
 typedef struct { uint32_t start, count; uint8_t abr; } NsGpuFxRun;   /* start/count en vértices del búfer completo */
 /* Un efecto semitransparente en el búfer (ya ordenado de atrás adelante): para intercalarlo con los triángulos semitransparentes de las mallas (ns_gpu_semi_merge). */

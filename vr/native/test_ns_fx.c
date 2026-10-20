@@ -179,11 +179,14 @@ static void test_polygon_and_billboard(void) {
     {   /* adaptador al contrato */
         NsEffect ef[8]; int trunc = 9;
         uint32_t ne = ns_fx_export(s, 1, ef, 8, &trunc);
-        CHECK(ne == 3 && trunc == 0, "export n=%u", ne);
+        CHECK(ne == 2 && trunc == 0, "export n=%u (el sprite sin página no se exporta)", ne);
         CHECK(ef[0].kind == NS_EK_QUAD && ef[0].nv == 4 && (ef[0].flags & NS_EF_TEXTURED) && ef[0].tpage == q->tpage && NEAR(ef[0].p[2][2], 2600, 0.01), "export quad");
         CHECK(ef[1].kind == NS_EK_BILLBOARD && NEAR(ef[1].ref_h, 320, 1e-6) && NEAR(ef[1].box[0], -300 * 320.0 / b->vpos[0][2], 0.01) && NEAR(ef[1].box[3], 200 * 320.0 / b->vpos[0][2], 0.01), "export billboard box (%.2f %.2f)", ef[1].box[0], ef[1].box[3]);
-        CHECK(NEAR(ef[2].box[0], -8, 0.01) && NEAR(ef[2].box[2], 8, 0.01) && NEAR(ef[2].box[1], -8, 0.05) && NEAR(ef[2].box[3], 8, 0.05), "export sprite en px (%.2f %.2f %.2f %.2f)", ef[2].box[0], ef[2].box[1], ef[2].box[2], ef[2].box[3]);
-        ne = ns_fx_export(s, 1, ef, 2, &trunc); CHECK(ne == 2 && trunc == 1, "export truncado");
+        { NsFxScene *sm = s; NsFxItem *sprite = &sm->items[2]; uint16_t sv = sprite->flags;
+          sprite->flags = (uint16_t)((sv & ~NSFX_F_TPAGE_UNKNOWN) | NSFX_F_LEARNED);   /* con la página aprendida sí */
+          ne = ns_fx_export(s, 1, ef, 8, &trunc); sprite->flags = sv;
+          CHECK(ne == 3 && NEAR(ef[2].box[0], -8, 0.01) && NEAR(ef[2].box[2], 8, 0.01) && NEAR(ef[2].box[1], -8, 0.05) && NEAR(ef[2].box[3], 8, 0.05), "export sprite en px (%.2f %.2f %.2f %.2f)", ef[2].box[0], ef[2].box[1], ef[2].box[2], ef[2].box[3]); }
+        ne = ns_fx_export(s, 1, ef, 1, &trunc); CHECK(ne == 1 && trunc == 1, "export truncado");
     }
     ns_fx_scene_destroy(s);
 
@@ -299,9 +302,9 @@ static void test_actors_and_screen(void) {
     uint32_t sh = actor_add(4, NAME_SHADOW, 0x100);
     uint32_t objs = alloc(0x48 + 0x5C + 64), pk0 = alloc(52), pk1 = alloc(52);
     w32(sh + 0x28, objs); w32(sh + 0x90, 1);
-    w16(objs + 0, 4096); w16(objs + 8, 4096); w16(objs + 16, 4096); w32(objs + 20, 2000); w32(objs + 24, 0); w32(objs + 28, 5000);
+    w16(objs + 0, 1024); w16(objs + 8, 4096); w16(objs + 16, 512);   /* la matriz del objeto lleva la escala: x 1024 -> media 1000, z 512 -> media 500 */ w32(objs + 20, 2000); w32(objs + 24, 0); w32(objs + 28, 5000);
     w32(objs + 0x28, 0); w16(objs + 0x2C, 1); w16(objs + 0x2E, 1);
-    w16(objs + 0x48, 1024); w16(objs + 0x48 + 16, 512);   /* escala x 1024 -> media 1000, z 512 -> media 500 */
+    w16(objs + 0x48, 1024); w16(objs + 0x48 + 16, 512);   /* la de la pieza (misma escala) no se aplica otra vez */
     w16(objs + 0x48 + 0x52, 1); w32(objs + 0x48 + 0x54, pk0); w32(objs + 0x48 + 0x58, pk1); w16(objs + 0x48 + 0x50, 150);
     double CW[4][3] = {{3000, 0, 5500}, {1000, 0, 5500}, {3000, 0, 4500}, {1000, 0, 4500}};   /* orden de paquete: (+,+) (-,+) (+,-) (-,-) en (x,z) */
     for (int b = 0; b < 2; b++) {
@@ -335,9 +338,60 @@ static void test_actors_and_screen(void) {
     CHECK(s->screen.mode_a == 1 && s->screen.mode_b == 0 && s->screen.status == 4, "modo de visión a");
     CHECK(s->screen.gas.active && NEAR(s->screen.gas.intensity, 1.0, 1e-6) && NEAR(s->screen.gas.col_inner[0], 30 / 255.0, 1e-3) && NEAR(s->screen.gas.col_outer[0], 100 / 255.0, 1e-3) && NEAR(s->screen.gas.aspect, 3205 / 4096.0, 1e-4), "gas activo");
     ns_fx_scene_destroy(s);
+    /* el motor no emite la sombra en otro fotograma: se usa la textura de la última emitida (no página 0 / modo supuesto) */
+    w16(objs + 0x48 + 0x52, 0);
+    s = run(0, &r);
+    {
+        const NsFxItem *z = &s->items[1];
+        CHECK(z->role == NSFX_ROLE_SHADOW_OBJ && (z->flags & NSFX_F_LEARNED) && !(z->flags & NSFX_F_TPAGE_UNKNOWN) && z->clut == 0x4455 && z->abr == 2 && z->uv[0][0] + z->uv[1][0] + z->uv[2][0] + z->uv[3][0] == 48 && z->tpage != 0, "sombra no emitida con la textura aprendida (tpage=0x%X clut=0x%X flags=0x%X)", z->tpage, z->clut, z->flags);
+        CHECK(NEAR((z->pos[0][0] + z->pos[3][0]) * 0.5, 2000, 0.6) && NEAR((z->pos[0][2] + z->pos[3][2]) * 0.5, 5000, 0.6) && NEAR(fabsf(z->pos[3][0] - z->pos[0][0]), 2000, 0.6), "geometría de la no emitida (centro y lado)");
+    }
+    ns_fx_scene_destroy(s);
+    w16(objs + 0x48 + 0x52, 1);
     w32(NSFX_A_STATUS, 8);   /* modo b: el motor no dibuja el anillo */
     s = run(0, &r);
     CHECK(s->screen.gas.present && !s->screen.gas.active && s->screen.mode_b == 1, "gas apagado con el modo b");
+    ns_fx_scene_destroy(s);
+}
+
+static void test_learn(void) {
+    reset();
+    memset(LASTNODE, 0, sizeof LASTNODE);
+    int t0[3] = {0, 0, 0};
+    TPrim sp = mkprim(6, 0x400, 1, 4096, t0, 0);
+    put_pos(&sp, 0, 900, 300, 1200); put_rect(&sp, 8, 8, 16, 16);
+    {
+        double w[3] = {900, 300, 1200}, sx, sy, z; ref_proj(w, &sx, &sy, &z);
+        for (int b = 0; b < 2; b++) { uint32_t pk = sp.pk[b]; w16(pk, 5); w8(pk + 7, 0x66); w16(pk + 8, (int)lround(sx) - 8); w16(pk + 10, (int)lround(sy) - 8); w8(pk + 12, 16); w8(pk + 13, 32); w16(pk + 14, 0x1234); w16(pk + 16, 16); w16(pk + 18, 16); }
+    }
+    TPrim sp2 = mkprim(6, 0x400, 1, 4096, t0, 0);   /* otra primitiva del mismo tipo: sin pareja en la lista, hereda lo aprendido por papel */
+    put_pos(&sp2, 0, -900, 300, 1200); put_rect(&sp2, 8, 8, 16, 16);
+    {
+        double w[3] = {-900, 300, 1200}, sx, sy, z; ref_proj(w, &sx, &sy, &z);
+        for (int b = 0; b < 2; b++) { uint32_t pk = sp2.pk[b]; w16(pk, 5); w8(pk + 7, 0x66); w16(pk + 8, (int)lround(sx) - 8); w16(pk + 10, (int)lround(sy) - 8); w8(pk + 12, 16); w8(pk + 13, 32); w16(pk + 14, 0x2345); w16(pk + 16, 16); w16(pk + 18, 16); }
+    }
+    queue_commit(0);
+    ns_fx_learn_reset();
+    int r; NsFxScene *s = run(0, &r);
+    CHECK(r == 0 && s->n_items == 2 && (s->items[0].flags & NSFX_F_TPAGE_UNKNOWN) && (s->items[0].flags & NSFX_F_ABR_UNKNOWN) && !(s->items[0].flags & NSFX_F_LEARNED), "sprite sin página ni modo (flags 0x%X)", s->items[0].flags);
+    GpuOp op; memset(&op, 0, sizeof op);
+    op.type = GPU_OP_RECT; op.flags = GPU_F_TEXTURED | GPU_F_SEMI; op.rw = 16; op.rh = 16; op.tx = 704; op.ty = 256; op.tp = 1; op.abr = 2; op.clx = 16 * 3; op.cly = 500;
+    GpuDrawList dl; memset(&dl, 0, sizeof dl); dl.ops = &op; dl.nops = 1; dl.disp.w = 320; dl.disp.h = 240;
+    int32_t item[1] = {0};
+    CHECK(ns_fx_learn(s, &dl, item) == 1, "aprende una operación");
+    ns_fx_scene_destroy(s);
+    s = run(0, &r);
+    {
+        const NsFxItem *it = &s->items[0];
+        CHECK(r == 0 && (it->flags & NSFX_F_LEARNED) && !(it->flags & (NSFX_F_TPAGE_UNKNOWN | NSFX_F_ABR_UNKNOWN)), "aplicado (flags 0x%X)", it->flags);
+        const NsFxItem *i2 = &s->items[1];
+        CHECK(s->items[0].prim != i2->prim && (i2->flags & NSFX_F_LEARNED) && !(i2->flags & NSFX_F_TPAGE_UNKNOWN) && i2->tpage == it->tpage && i2->abr == 2 && i2->clut == 0x2345, "primitiva nueva con lo aprendido por papel (flags 0x%X tpage 0x%X clut 0x%X)", i2->flags, i2->tpage, i2->clut);
+        CHECK(it->tpage == (11 | (1 << 4) | (2 << 5) | (1 << 7)) && it->abr == 2 && it->tp == 1 && it->clut == 0x1234, "página 0x%X abr %u clut 0x%X", it->tpage, it->abr, it->clut);
+    }
+    ns_fx_scene_destroy(s);
+    ns_fx_learn_reset();
+    s = run(0, &r);
+    CHECK(r == 0 && (s->items[0].flags & NSFX_F_TPAGE_UNKNOWN) && (s->items[1].flags & NSFX_F_TPAGE_UNKNOWN) && !(s->items[1].flags & NSFX_F_LEARNED), "sin lo aprendido sigue desconocida");
     ns_fx_scene_destroy(s);
 }
 
@@ -938,6 +992,7 @@ int main(void) {
     test_lines_and_oncamera();
     test_actors_and_screen();
     test_classify();
+    test_learn();
     test_xform();
     test_stays_2d();
     test_sortonly_wins();

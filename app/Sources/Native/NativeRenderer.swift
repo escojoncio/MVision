@@ -935,6 +935,8 @@ final class NativeRenderer {
         prm.cam = nil
         // los efectos semitransparentes se ordenan por la MISMA profundidad que los triángulos de las mallas (la de la vista de ordenación), para poder intercalarlos
         prm.has_depth_row = 1
+        prm.raise_m = fogPar.w        // sesgo `raise` del motor por elemento, con la misma unidad que las mallas
+        prm.board_pull = 1            // carteles (halos, destellos): adelantados media extension hacia la cabeza, sin cambiar lo que se ve
         prm.depth_row = (-sortView.columns.0.z, -sortView.columns.1.z, -sortView.columns.2.z, -sortView.columns.3.z)
         let rc: Int32 = toVR12.withUnsafeBufferPointer { (tv) -> Int32 in
             withUnsafePointer(to: &fxCam) { (camP) -> Int32 in
