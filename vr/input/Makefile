@@ -25,8 +25,14 @@ test: $(B)/test_vr_input $(B)/test_vr_gesture $(B)/test_vr_melee
 	$(B)/test_vr_input
 	$(B)/test_vr_gesture
 	$(B)/test_vr_melee
+# rutinas reales del motor interpretadas sobre una instantánea de RAM local (VRM_DUMPS=<dir con body.bin>; sin ella la prueba se omite)
+RTSRC = $(addprefix ../../runtime/,$(filter-out headless.c test_%.c wip_%.c nogen.c,$(notdir $(wildcard ../../runtime/*.c))))
+$(B)/test_vr_melee_real: test_vr_melee_real.c ../host/vr_melee_rt.c $(B)/libvr_input.a | $(B)
+	$(CC) -O1 -g -w -std=gnu11 -I. -I../host -I../../runtime $< ../host/vr_melee_rt.c $(RTSRC) $(B)/libvr_input.a -lm -lpthread -o $@
+test-real: $(B)/test_vr_melee_real
+	$(B)/test_vr_melee_real
 test-san:
 	$(MAKE) test B=build-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 clean:
 	rm -rf build build-san
-.PHONY: all test test-san clean
+.PHONY: all test test-real test-san clean

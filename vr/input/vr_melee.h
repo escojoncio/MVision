@@ -81,6 +81,7 @@ typedef struct {
     int grab_start, grab_side;/* petición de agarre y mano que lo pide */
     int knock_side;           /* -1 nada; 0/1: toque en la pared */
     int hold;                 /* el botón del puño sigue pulsado */
+    int swinging;             /* puño cerrado con el brazo en movimiento rápido (un golpe en marcha): la animación del combo espera */
     int squeeze;              /* apretar/rematar */
     int fist_ok[2];           /* puño con seguimiento */
     int fist_closed[2];       /* botón del puño pulsado */
@@ -88,8 +89,9 @@ typedef struct {
 } VrmFrame;
 
 #define VRM_HIST 24             /* ~0,4 s de muestras del puño: el estado de golpe del motor comprueba el impacto varios fotogramas después del gesto */
-#define VRM_FIST_BOX_MM 180     /* semitamaño mínimo (mm) de la caja del jugador mientras dura la comprobación de impacto: puño ~120 mm + tolerancia */
-#define VRM_SNAP_MM 450         /* si el puño pasa a menos de esto (mm) de la caja del enemigo, el reintento centra el origen en su cuerpo */
+#define VRM_T_COMBO1 6          /* instantes de la animación del golpe en que el motor decide el segundo golpe y la patada */
+#define VRM_T_COMBO2 13
+#define VRM_HOLD_MAX 12         /* fotogramas máximos que la animación espera en cada instante de decisión si el brazo sigue en movimiento */
 typedef struct Vrm {
     int enable;
     int ttl_frames;           /* vida de una petición (VBlanks, 8) */
@@ -105,13 +107,12 @@ typedef struct Vrm {
     /* contexto de los ganchos */
     int ctx_hit, ctx_grab, ctx_ok; uint32_t ctx_target; float ctx_origin[3], ctx_fist[3];
     int stage;                /* etapa del golpe en curso (1..3) */
-    int retried;              /* la comprobación de impacto en curso es el reintento centrado en el cuerpo */
-    int16_t box_save[3]; int box_saved;   /* caja original del blanco del jugador (se ensancha mientras dura la comprobación) */
-    uint32_t box_work;
+    int combo_q, hold_n, swinging;   /* peticiones de golpe encoladas durante la animación, fotogramas de espera en el instante de decisión y brazo en movimiento */
+    int16_t snap[64][3]; int snap_ok;   /* instantánea de los blancos antes de la comprobación de impacto */
     int grab_owned;           /* la presa en curso la inició el cuerpo VR */
     int in_punch;             /* el estado de golpe está en curso por una petición VR */
     /* contadores */
-    unsigned n_punch, n_combo, n_hit, n_miss, n_retry, n_retry_ok, n_nobody, n_grab, n_grab_rejected, n_squeeze, n_expired, n_knock;
+    unsigned n_punch, n_combo, n_hit, n_miss, n_hold, n_nobody, n_grab, n_grab_rejected, n_squeeze, n_expired, n_knock;
 } Vrm;
 
 void vrm_init(Vrm *v);
@@ -125,9 +126,9 @@ int  vrm_action_input(Vrm *v, const VrmEng *e, uint32_t work);                  
 void vrm_pre_grab(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time);       /* 0x80059D44 antes del original */
 void vrm_post_grab(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time);
 void vrm_pre_hit(Vrm *v, const VrmEng *e, uint32_t work);                       /* 0x80050FD4 */
-int  vrm_post_hit(Vrm *v, const VrmEng *e, uint32_t work, uint32_t result);   /* 1 = repetir la llamada original (reintento centrado en el cuerpo); el contexto ya está preparado */
+void vrm_post_hit(Vrm *v, const VrmEng *e, uint32_t work, uint32_t result);   /* result = vida quitada (0 en un puñetazo: NO es fallo) */
 int  vrm_move_target(Vrm *v, const VrmEng *e, uint32_t target, uint32_t vec);   /* 0x8002DF1C: 1 si cambió el centro */
-void vrm_punch_tick(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time);     /* 0x8005A2A4 antes del original */
+int  vrm_punch_tick(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time);     /* 0x8005A2A4 antes del original: 1 = no ejecutarlo (espera en el instante de decisión) */
 int  vrm_hold_tick(Vrm *v, const VrmEng *e, uint32_t work);                     /* 0x8005A5C8: 1 = resuelto */
 int  vrm_squeeze_tick(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time);   /* 0x8005A6D4: 1 = remate (no ejecutar el resto) */
 void vrm_pre_drag(Vrm *v, const VrmEng *e, uint32_t work, uint16_t *saved);     /* 0x8005A100 */
