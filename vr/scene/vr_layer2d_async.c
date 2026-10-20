@@ -83,12 +83,13 @@ static void *worker(void *arg) {
         int ok = 0;
         if (px && w > 0 && h > 0 && grow((void **)&o->px, &o->cap, (size_t)w * h * 4, 1)) {
             memcpy(o->px, px, (size_t)w * h * 4);
-            o->w = w; o->h = h; o->full = j->full; ok = 1;
+            o->w = w; o->h = h; o->full = j->full == VL_FULL; ok = 1;   /* (VL_PANEL_VERIFIED sigue siendo un panel) */
         }
 
         pthread_mutex_lock(&A->mx);
         if (!skip) { A->n_run++; if (draw) A->info = inf; }
         if (draw) {
+            if (inf.verify && inf.v_ms > 0 && inf.v_ms < ms) ms -= inf.v_ms;   /* la verificación (pantalla 3D del motor) no cuenta para la escala adaptativa: el panel se ve igual de nítido */
             A->work_ms = ms;
             if (ms > SLOW_MS && A->cur > 1) { A->cur--; A->fast = 0; }
             else if (ms < FAST_MS && A->cur < atomic_load(&A->target) && ms * (double)((A->cur + 1) * (A->cur + 1)) / (double)(A->cur * A->cur) < SLOW_MS * 0.8) {   /* el coste crece con la escala al cuadrado: solo se sube si cabría */ if (++A->fast >= RECOVER) { A->cur++; A->fast = 0; } }
@@ -213,11 +214,14 @@ int vl2a_report(VrL2Async *A, char *buf, int n) {
     pthread_mutex_lock(&A->mx);
     static const char *sm[3] = {"original", "nitido", "suave"};
     int sd = A->info.smooth < 0 || A->info.smooth > 2 ? 0 : A->info.smooth;
+    char vbuf[200];   /* panel sobre la pantalla 3D del motor: píxeles del panel / distintos del emulador (tras componer sobre el mundo reproducido), sustituidos, huecos del modelo fuera del panel y 2D perdidas */
+    if (A->info.verify) snprintf(vbuf, sizeof vbuf, "si panel_px=%d distintos=%d dif_malos=%.3f sustituidos=%d mundo_distinto_fuera=%d perdidas_2d=%d coste=%.1fms", A->info.v_cov, A->info.v_bad, A->info.v_mean_milli / 1000.0, A->info.v_patched, A->info.v_out, A->info.v_lost2d, A->info.v_ms);
+    else snprintf(vbuf, sizeof vbuf, "%s", A->info.verify_req ? "pedida_no_aplicable(sin vram_end, 24 bits, escala>1 o sin clasificacion)" : "no");
     int r = snprintf(buf, (size_t)n,
-        "[capa2d] escala=%d(raster %d, objetivo %d) retraso=%u envios=%u descartes=%u ejecutados=%u publicadas=%u caidas_shader(-1)=%u trabajador=%.1fms suavizado=%s vram_start=%s vram_end=%s marco=%dx%d aw=%d pad_l=%d %s prims=%d mascara=%d solo_vram=%d fidelidad=%d/%d dif=%.3f respaldo_emulador=%s",
+        "[capa2d] escala=%d(raster %d, objetivo %d) retraso=%u envios=%u descartes=%u ejecutados=%u publicadas=%u caidas_shader(-1)=%u trabajador=%.1fms suavizado=%s vram_start=%s vram_end=%s marco=%dx%d aw=%d pad_l=%d %s prims=%d mascara=%d solo_vram=%d fidelidad=%d/%d dif=%.3f respaldo_emulador=%s | verificacion=%s",
         A->cur, A->info.raster, atomic_load(&A->target), A->have_pub ? A->sub_seq - A->pub_sub_seq : 0, A->n_sub, A->n_skip, A->n_run, A->n_pub, A->n_neg, A->work_ms, sm[sd],
         A->info.used_start ? "si" : "no", A->info.used_end ? "si" : "no", A->info.fw, A->info.h, A->info.aw, A->info.pad, A->info.full ? "completa" : "panel", A->info.prims, A->info.mask_prims,
-        A->info.mirror_prims, A->info.fid_n - A->info.fid_bad, A->info.fid_n, A->info.fid_mean_milli / 1000.0, A->info.fallback ? "SI" : "no");
+        A->info.mirror_prims, A->info.fid_n - A->info.fid_bad, A->info.fid_n, A->info.fid_mean_milli / 1000.0, A->info.fallback ? "SI" : "no", vbuf);
     A->n_sub = A->n_skip = A->n_run = A->n_neg = A->n_pub = 0;
     pthread_mutex_unlock(&A->mx);
     return r;

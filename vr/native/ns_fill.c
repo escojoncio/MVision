@@ -760,11 +760,11 @@ size_t ns_fill_format(const NsFillStats *s, uint32_t frame, char *buf, size_t ca
     int n = snprintf(buf, cap,
         "[relleno] fr=%u lista: tris3D=%u (poligonos=%u sin_vista=%u reconstruidos=%u degenerados=%u efectos_excluidos=%u) | cubierto_nativo=%u (exacto=%u otra_diagonal=%u subdividido=%u pegado_a_camara=%u) %.1f%% | "
         "rellenado=%u (ausente=%u otra_textura=%u parcial=%u sprite=%u textura_corregida=%u) | pose=%u (jugador=%u otro=%u) | sin_posicion_fiable: detras=%u ambiguo=%u incoherente=%u arista=%u lejos=%u nan=%u texel_unico=%u parcial_semi=%u | "
-        "cobertura(nativo+relleno, sin pose)=%.1f%% | salida=%u (persistentes=%u retirados: vista=%u edad=%u corte=%u tope=%u) | nativo: tris=%u dinamicos=%u | %.2f ms (indice %.2f, casar %.2f, persistencia %.2f)\n",
+        "cobertura(nativo+relleno, sin pose)=%.1f%% | camara=%s | salida=%u (persistentes=%u retirados: vista=%u edad=%u corte=%u tope=%u) | nativo: tris=%u dinamicos=%u | %.2f ms (indice %.2f, casar %.2f, persistencia %.2f)\n",
         frame, s->tris, s->polys3d, s->no_view, s->recon, s->degenerate, s->skipped_ops, s->cls[NF_MATCH] + s->cls[NF_SPLIT] + s->cls[NF_SUBDIV] + s->cls[NF_LOCKED], s->cls[NF_MATCH], s->cls[NF_SPLIT], s->cls[NF_SUBDIV], s->cls[NF_LOCKED], s->nat_pct,
         s->filled_tris, s->cls[NF_FILL_ABSENT], s->cls[NF_FILL_OTHERTEX], s->cls[NF_FILL_PARTIAL], s->cls[NF_FILL_SPRITE], s->cls[NF_FILL_TEXFIX], pose, s->cls[NF_POSE_PLAYER], s->cls[NF_POSE_OTHER],
         s->cls[NF_SKIP_BEHIND], s->cls[NF_SKIP_AMBIG], s->cls[NF_SKIP_INCOH], s->cls[NF_SKIP_EDGE], s->cls[NF_SKIP_FAR], s->cls[NF_SKIP_NAN], s->cls[NF_SKIP_FB], s->cls[NF_SKIP_PARTIAL_SEMI],
-        s->cover_pct, s->n_out, s->persisted, s->retired_view, s->retired_age, s->retired_cut, s->cls[NF_SKIP_CAP], s->nat_tris, s->nat_dyn, s->ms_total, s->ms_index, s->ms_match, s->ms_persist);
+        s->cover_pct, s->cam_src == 0 ? "lista" : s->cam_src == 1 ? "RAM(la de la lista casa peor)" : "RAM(sin camara en la lista)", s->n_out, s->persisted, s->retired_view, s->retired_age, s->retired_cut, s->cls[NF_SKIP_CAP], s->nat_tris, s->nat_dyn, s->ms_total, s->ms_index, s->ms_match, s->ms_persist);
     if (n < 0) return 0;
     return (size_t)n < cap ? (size_t)n : cap - 1;
 }

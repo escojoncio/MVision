@@ -161,6 +161,48 @@ int main(void) {
         VrViewIn nob = ci; nob.scene3d = 0; nob.cover1 = 0;
         for (int n = 0; n < 60; n++) vrview_step(&m, &nob);
         CHECK(m.cov_state == 0, "medidas olvidadas sin 3D");
+        /* (d) INTRO EN 3D (cobertura de nativo + relleno global): la medida del registro de la intro (nativo solo 1,7 / 0,8 / 0,3 %%; con el relleno 98,8 / 99,4 / 98,3 %%) */
+        {
+            VrView iv; vrview_reset(&iv);
+            VrViewIn ii; memset(&ii, 0, sizeof ii); ii.scene3d = 1;
+            uint32_t seen = 0;
+            for (int n = 0; n < 3; n++) vrview_step(&iv, &ii);
+            CHECK(iv.kind == VRV_K_BACKUP, "intro sin medida: respaldo");
+            /* el relleno mide en el fotograma 813: primera medida buena = fiable al instante (3 fotogramas de histéresis a motor) */
+            CHECK(vrview_cover_feed(&ii, &seen, 816, 1, 813, 99, 1, 800, 2) == 1 && ii.cover1 == 100 && ii.cover_src == 2 && ii.cover_new == 1, "la medida con relleno gana a la del nativo solo (src %d)", ii.cover_src);
+            for (int n = 0; n < 4; n++) { vrview_step(&iv, &ii); ii.cover_new = 0; }
+            CHECK(iv.kind == VRV_K_ENGINE && iv.cov_state == 1, "intro con nativo+relleno 99 %%: motor (3D), clase %d estado %d", iv.kind, iv.cov_state);
+            vrview_cine_describe(&iv, &ii, buf, sizeof buf);
+            CHECK(strstr(buf, "tipo=motor") && strstr(buf, "relleno global") && strstr(buf, "cobertura=99%(nativo+relleno)"), "registro intro motor: %s", buf);
+            /* las medidas siguientes (50 fotogramas) mantienen el motor; el nativo solo (34 %%, lo que veía el criterio anterior) ya no decide */
+            static const int fillm[] = { 99, 98, 99, 98, 99 };
+            uint32_t vb = 816 + 25;
+            for (unsigned q = 0; q < sizeof fillm / sizeof *fillm; q++, vb += 25) {
+                vrview_cover_feed(&ii, &seen, vb + 3, 1, vb, fillm[q], 1, vb - 5, 34);
+                for (int n = 0; n < 30; n++) { vrview_step(&iv, &ii); ii.cover_new = 0; CHECK(iv.kind == VRV_K_ENGINE, "intro medida %d%%: sigue en 3D", fillm[q]); }
+            }
+            /* sin relleno (apagado o sin escena) vale el nativo solo, que en la intro es bajo: respaldo plano (la cobertura TOTAL sigue siendo baja) */
+            VrView jv; vrview_reset(&jv); VrViewIn jj; memset(&jj, 0, sizeof jj); jj.scene3d = 1; uint32_t seen2 = 0; uint32_t b2 = 900;
+            for (int q = 0; q < 3; q++, b2 += 25) { vrview_cover_feed(&jj, &seen2, b2 + 2, 0, 0, 0, 1, b2, 34 - q * 10); for (int n = 0; n < 30; n++) { vrview_step(&jv, &jj); jj.cover_new = 0; } }
+            CHECK(jv.kind == VRV_K_BACKUP && jv.cov_state == 2 && jj.cover_src == 1, "sin relleno y nativo 34 %%: respaldo (clase %d)", jv.kind);
+            /* con relleno pero cobertura total baja (escena que el relleno no puede reponer): respaldo */
+            VrView kv; vrview_reset(&kv); VrViewIn kk; memset(&kk, 0, sizeof kk); kk.scene3d = 1; uint32_t seen3 = 0; uint32_t b3 = 900;
+            for (int q = 0; q < 3; q++, b3 += 25) { vrview_cover_feed(&kk, &seen3, b3 + 2, 1, b3, 40, 1, b3, 30); for (int n = 0; n < 30; n++) { vrview_step(&kv, &kk); kk.cover_new = 0; } }
+            CHECK(kv.kind == VRV_K_BACKUP && kv.cov_state == 2, "nativo+relleno 40 %%: respaldo (clase %d)", kv.kind);
+            /* una primera medida MALA sola no cambia el estado (sin partida: sigue el respaldo; con partida: el extractor) */
+            VrView lv; vrview_reset(&lv); VrViewIn ll = world(); ll.in_control = 0; ll.cinematic = 1; ll.scene3d = 1; ll.cover1 = 11; ll.cover_new = 1;
+            vrview_step(&lv, &ll); ll.cover_new = 0; for (int n = 0; n < 10; n++) vrview_step(&lv, &ll);
+            CHECK(lv.cov_state == 0 && lv.kind == VRV_K_ENGINE, "una primera medida mala no cambia nada con partida");
+            /* vrview_cover_feed: espaciado, caducidad, retroceso del contador (carga de partida), punteros nulos */
+            VrViewIn fi; memset(&fi, 0, sizeof fi); uint32_t sn = 0;
+            CHECK(vrview_cover_feed(&fi, &sn, 1000, 1, 990, 97, 0, 0, 0) == 1 && fi.cover_new == 1 && sn == 990, "primera medida: nueva");
+            CHECK(vrview_cover_feed(&fi, &sn, 1001, 1, 991, 97, 0, 0, 0) == 1 && fi.cover_new == 0 && sn == 990 && fi.cover1 == 98, "a menos de 25 fotogramas: vigente pero no nueva");
+            CHECK(vrview_cover_feed(&fi, &sn, 1020, 1, 1015, 12, 0, 0, 0) == 1 && fi.cover_new == 1 && sn == 1015 && fi.cover1 == 13, "a 25 fotogramas: nueva");
+            CHECK(vrview_cover_feed(&fi, &sn, 1200, 1, 1015, 97, 1, 1190, 50) == 1 && fi.cover_src == 1 && fi.cover1 == 51, "relleno caducado (> 150 fotogramas): se usa el nativo");
+            CHECK(vrview_cover_feed(&fi, &sn, 1500, 1, 1015, 97, 1, 1190, 50) == 0, "todo caducado: sin medida");
+            CHECK(vrview_cover_feed(&fi, &sn, 300, 1, 290, 90, 0, 0, 0) == 1 && fi.cover_new == 1 && sn == 290, "el contador retrocede (carga): medida nueva");
+            CHECK(vrview_cover_feed(NULL, &sn, 1, 0, 0, 0, 0, 0, 0) == 0 && vrview_cover_feed(&fi, NULL, 1, 0, 0, 0, 0, 0, 0) == 0, "punteros nulos");
+        }
         /* (a) FMV: el decodificador activo gana al 3D y a la falta de partida; 12 fotogramas de gracia los pone el host */
         vrview_reset(&m);
         VrViewIn fv; memset(&fv, 0, sizeof fv); fv.mdec = 1;

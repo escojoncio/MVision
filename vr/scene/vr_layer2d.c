@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <time.h>
 #define VW 1024
 #define VH 512
 
@@ -27,6 +28,9 @@ struct VrLayer2D {
     uint16_t tc[65536]; uint32_t ts[65536]; uint32_t stamp;   /* caché de texels de la primitiva en curso */
     uint32_t qc[262144]; uint32_t qs[262144];                 /* caché del modo nítido por cuarto de texel: texel que cubre | color corregido << 16 */
     uint8_t *nat; size_t nat_cap;                             /* imagen nativa descodificada de la zona mostrada (fondo de la pantalla de cine) */
+    uint16_t *vsnap;                                          /* copia de la VRAM espejo al empezar la lista (verificación del panel: la pasada del mundo la modifica y se restaura) */
+    uint8_t *w5; size_t w5_cap;                               /* el mundo del panel (todo salvo las primitivas 2D del panel) en la zona mostrada: aw x h x 3, 5 bits por canal */
+    int fb_hold;                                              /* listas que faltan de respaldo exacto tras una verificación fallida (anti-parpadeo) */
 };
 
 VrLayer2D *vl2d_new(void) {
@@ -34,7 +38,7 @@ VrLayer2D *vl2d_new(void) {
     if (L) { L->scale = 4; L->smooth = VL_SMOOTH_ORIGINAL; L->R = 1; L->PW = 1; L->PH = 1; L->LW = 1; L->LH = 1; }
     return L;
 }
-void vl2d_free(VrLayer2D *L) { if (!L) return; free(L->natm); free(L->px); free(L->rgba); free(L->nat); free(L); }
+void vl2d_free(VrLayer2D *L) { if (!L) return; free(L->vsnap); free(L->w5); free(L->natm); free(L->px); free(L->rgba); free(L->nat); free(L); }
 void vl2d_reset(VrLayer2D *L) { if (!L) return; L->have_vram = 0; L->valid = 0; }
 void vl2d_set_options(VrLayer2D *L, int scale, int smooth) {
     if (!L) return;
@@ -724,9 +728,121 @@ static void fidelity(VrLayer2D *L, const GpuDisplay *d, const uint16_t *vend) {
     I->fid_mean_milli = n ? (int)(sum * 1000L * 255L / (31L * 3L * n)) : 0;   /* media por canal en niveles de 8 bits (x1000) */
 }
 
+/* ---------------- verificación del panel (pantalla 3D del motor + panel 2D encima) ----------------
+ * La pantalla completa se verifica contra la imagen real del emulador (fidelity). El panel no puede compararse tal cual: debajo va el mundo NATIVO. Pero la imagen del hardware es, por construcción,
+ *     hardware = (mundo: todas las primitivas que NO van al panel, en orden) + (primitivas del panel encima)
+ * así que se reproduce el mundo SIN las primitivas del panel (misma aritmética, espejo aparte) y se compone el panel encima con vl2d_compose5: en los píxeles que el panel toca, el resultado debe ser
+ * la imagen del emulador (vram_end). Si no lo es (rasterizado distinto, una primitiva clasificada fuera del panel que se pinta DESPUÉS de una del panel, mezclas que el modelo no representa),
+ * ese píxel se sustituye por el del emulador (exacto) y, si son demasiados, todo el panel pasa a ser la imagen del emulador (respaldo exacto, como en pantalla completa). */
+#define VERIFY_TOL 2          /* diferencia máxima por canal (niveles de 5 bits) que se acepta: redondeos de la composición de mezclas sobre un mundo que el modelo no conoce al bit */
+#define VERIFY_BAD_MIN 8      /* píxeles del panel distintos a partir de los cuales todo el panel pasa a la imagen del emulador */
+#define VERIFY_HOLD 12        /* listas que se mantiene el respaldo exacto tras un fallo (~0,5 s): sin parpadeo entre panel y respaldo */
+
+static double l2_now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec * 1e3 + (double)t.tv_nsec * 1e-6; }
+
+static int world_pass(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int aw, int h, int *lost2d) {
+    if (!L->vsnap) { L->vsnap = (uint16_t *)malloc(sizeof L->vram); if (!L->vsnap) return 0; }
+    size_t need = (size_t)aw * h * 3;
+    if (need > L->w5_cap) { uint8_t *q = (uint8_t *)realloc(L->w5, need); if (!q) return 0; L->w5 = q; L->w5_cap = need; }
+    memcpy(L->vsnap, L->vram, sizeof L->vram);
+    int wx0 = l->disp.x, wx1 = l->disp.x + aw, wy0 = l->disp.y, wy1 = l->disp.y + h;
+    Ctx c0;
+    memset(&c0, 0, sizeof c0);
+    c0.L = L; c0.S = 1; c0.cmax = 31;
+    *lost2d = 0;
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *o = &l->ops[i];
+        if (o->type == GPU_OP_FILL || o->type == GPU_OP_UPLOAD || o->type == GPU_OP_VCOPY) { ev_apply(L, o, l, SINK_NONE); continue; }
+        if (o->type != GPU_OP_POLY && o->type != GPU_OP_RECT && o->type != GPU_OP_LINE) continue;
+        int bx0, by0, bx1, by1;
+        if (!prim_bbox(o, &bx0, &by0, &bx1, &by1)) continue;
+        int hit = bx0 < wx1 && bx1 > wx0 && by0 < wy1 && by1 > wy0;
+        if (hit && sc->op_dest[i] == 2) continue;   /* primitiva del panel: no es mundo */
+        if (hit && sc->op_dest[i] == 0 && (o->flags & GPU_F_TEXTURED)) {   /* informativo: 2D texturado que cae en la pantalla y no va al panel (ni a ningún filtro): si el nativo no lo dibuja, se pierde */
+            int n = o->type == GPU_OP_RECT ? 1 : o->type == GPU_OP_LINE ? 2 : (o->nv == 4 ? 4 : 3), v3 = 0;
+            for (int k = 0; k < n; k++) v3 |= o->v[k].vvalid;
+            if (!v3) (*lost2d)++;
+        }
+        Ctx cm = c0;
+        cm.vdst = L->vram; cm.o = o;
+        cm.cx1 = o->cx1; cm.cy1 = o->cy1; cm.cx2 = o->cx2; cm.cy2 = o->cy2;
+        cm.semi = !!(o->flags & GPU_F_SEMI);
+        cm.mask_chk = !!(o->flags & GPU_F_MASK_CHK); cm.mask_set = !!(o->flags & GPU_F_MASK_SET);
+        cm.abr = o->abr;
+        raster_prim(&cm, o);
+    }
+    for (int y = 0; y < h; y++) {
+        int py = (l->disp.y + y) & (VH - 1);
+        uint8_t *q = &L->w5[(size_t)y * aw * 3];
+        for (int x = 0; x < aw; x++, q += 3) {
+            uint16_t t = L->vram[py][(l->disp.x + x) & (VW - 1)];
+            q[0] = (uint8_t)(t & 31); q[1] = (uint8_t)((t >> 5) & 31); q[2] = (uint8_t)((t >> 10) & 31);
+        }
+    }
+    memcpy(L->vram, L->vsnap, sizeof L->vram);
+    return 1;
+}
+
+/* Compone el panel (escala 1, ya pintado) sobre el mundo y lo compara con la imagen del emulador. Sustituye los píxeles del panel que difieren, o todo el panel si son demasiados o aún dura el
+ * respaldo. Rellena la información de verificación. Devuelve 1 si todo el panel pasó a ser la imagen del emulador. */
+static int verify_panel(VrLayer2D *L, const GpuDisplay *d, const uint16_t *vend, int lost2d) {
+    VrL2Info *I = &L->info;
+    int aw = L->aw, h = L->h, PW = L->PW;
+    long cov = 0, bad = 0, out = 0, sum = 0;
+    for (int y = 0; y < h; y++) {
+        int py = (d->y + y) & (VH - 1);
+        const uint8_t *wq = &L->w5[(size_t)y * aw * 3];
+        for (int x = 0; x < aw && x < L->w; x++) {
+            uint16_t t = vend[(size_t)py * VW + ((d->x + x) & (VW - 1))];
+            const VrLayerPx *p = &L->px[(size_t)y * PW + x];
+            int f[3] = {t & 31, (t >> 5) & 31, (t >> 10) & 31}, mxd = 0, dsum = 0;
+            int covered = !(p->t == 256 && !p->c[0] && !p->c[1] && !p->c[2] && !p->d[0] && !p->d[1] && !p->d[2]);
+            uint8_t o5[3];
+            vl2d_compose5(p, &wq[x * 3], o5);
+            for (int k = 0; k < 3; k++) { int e = abs((int)o5[k] - f[k]); if (e > mxd) mxd = e; dsum += e; }
+            if (covered) { cov++; if (mxd > VERIFY_TOL) { bad++; sum += dsum; } }
+            else if (abs((int)wq[x * 3] - f[0]) > VERIFY_TOL || abs((int)wq[x * 3 + 1] - f[1]) > VERIFY_TOL || abs((int)wq[x * 3 + 2] - f[2]) > VERIFY_TOL) out++;
+        }
+    }
+    I->verify = 1; I->v_cov = (int)cov; I->v_bad = (int)bad; I->v_out = (int)out; I->v_lost2d = lost2d;
+    I->v_mean_milli = bad ? (int)(sum * 1000L * 255L / (31L * 3L * bad)) : 0;
+    int whole = bad >= VERIFY_BAD_MIN || L->fb_hold > 0;
+    if (bad >= VERIFY_BAD_MIN) L->fb_hold = VERIFY_HOLD; else if (L->fb_hold > 0) L->fb_hold--;
+    if (!whole && !bad) return 0;
+    /* sustitución por la imagen exacta del emulador: opaca (t = 0, sin resta pendiente) */
+    long patched = 0;
+    for (int y = 0; y < h; y++) {
+        int py = (d->y + y) & (VH - 1);
+        const uint8_t *wq = &L->w5[(size_t)y * aw * 3];
+        for (int x = 0; x < aw && x < L->w; x++) {
+            uint16_t t = vend[(size_t)py * VW + ((d->x + x) & (VW - 1))];
+            VrLayerPx *p = &L->px[(size_t)y * PW + x];
+            if (!whole) {
+                uint8_t o5[3];
+                int covered = !(p->t == 256 && !p->c[0] && !p->c[1] && !p->c[2] && !p->d[0] && !p->d[1] && !p->d[2]);
+                if (!covered) continue;
+                vl2d_compose5(p, &wq[x * 3], o5);
+                int mx = abs((int)o5[0] - (int)(t & 31)); int e1 = abs((int)o5[1] - (int)((t >> 5) & 31)), e2 = abs((int)o5[2] - (int)((t >> 10) & 31));
+                if (e1 > mx) mx = e1;
+                if (e2 > mx) mx = e2;
+                if (mx <= VERIFY_TOL) continue;
+            }
+            p->c[0] = (uint8_t)(t & 31); p->c[1] = (uint8_t)((t >> 5) & 31); p->c[2] = (uint8_t)((t >> 10) & 31);
+            p->d[0] = p->d[1] = p->d[2] = 0; p->t = 0; p->m = (uint8_t)(t >> 15);
+            patched++;
+        }
+    }
+    I->v_patched = (int)patched;
+    if (whole) I->fallback = 1;
+    return whole;
+}
+
 int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     if (!L || !l) return 0;
     L->valid = 0;
+    const int verify_req = full == VL_PANEL_VERIFIED;   /* panel con verificación contra la imagen del emulador (pantalla 3D del motor + panel) */
+    if (verify_req) full = 0;
+    if (!verify_req) L->fb_hold = 0;
     /* La VRAM de partida es la REAL del emulador al inicio de la lista (vram_start, cada lista) o, si el productor no la da, la instantánea de la primera lista/resincronización
      * (vram_init) más los eventos: así una subida o un relleno que no pasen por la lista (DMA, copias, escrituras del juego) nunca dejan texels basura en fuentes y CLUT. */
     { const uint16_t *v0 = l->vram_start ? l->vram_start : l->vram_init; if (v0) { memcpy(L->vram, v0, sizeof L->vram); L->have_vram = 1; } }
@@ -764,6 +880,12 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
      * quitan lo dibujado antes no se aplicaban (restos / textos duplicados), y lo compuesto fuera de pantalla se leía con el estado final de la lista. */
     int vmode = draw && full && R == 1;
     int sink = !draw || vmode ? SINK_NONE : full ? SINK_FULL : SINK_PANEL;
+    /* verificación del panel: solo a escala 1 «original» de 15 bits, con la imagen real al cerrar la lista y la clasificación de la escena */
+    int verify = verify_req && draw && !full && R == 1 && l->vram_end && !l->disp.depth24 && sc && sc->op_dest && sc->n_op_dest >= l->nops;
+    int lost2d = 0;
+    double v_t0 = verify ? l2_now_ms() : 0.0, v_ms = 0.0;
+    if (verify && !world_pass(L, l, sc, aw, h, &lost2d)) verify = 0;
+    if (verify) v_ms = l2_now_ms() - v_t0;
     if (draw) {
         int key = (R << 8) | (S << 4) | L->smooth;
         if (L->cur_scale != key || L->w != w || L->h != h || L->ox != oxe || L->oy != l->disp.y || L->pad != pad || L->aw != aw) {
@@ -783,6 +905,7 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     memset(&L->info, 0, sizeof L->info);
     L->info.fw = w; L->info.h = h; L->info.aw = aw; L->info.pad = pad; L->info.scale = S; L->info.raster = R; L->info.smooth = L->smooth; L->info.full = full;
     L->info.used_start = l->vram_start != NULL; L->info.used_end = l->vram_end != NULL;
+    L->info.verify_req = verify_req;
     /* zona mostrada (visible) en VRAM: solo lo que cae aquí se pinta en la capa; el resto de dibujos solo actualiza la VRAM espejo (se usa luego como textura o se copia) */
     int wx0 = l->disp.x, wx1 = l->disp.x + (aw > 0 ? aw : 0), wy0 = l->disp.y, wy1 = l->disp.y + h;
     Ctx c0;
@@ -852,6 +975,11 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
             fidelity(L, &l->disp, l->vram_end);
             if (L->info.fid_bad > 0) { fill_backdrop(L, &l->disp, l->vram_end); L->info.fallback = 1; }
         }
+    }
+    if (verify) {
+        double t1 = l2_now_ms();
+        if (verify_panel(L, &l->disp, l->vram_end, lost2d)) { ux0 = 0; uy0 = 0; ux1 = L->PW; uy1 = L->PH; }   /* respaldo exacto: toda la capa cambia */
+        L->info.v_ms = v_ms + (l2_now_ms() - t1);
     }
     if (ux0 < 0) ux0 = 0;
     if (uy0 < 0) uy0 = 0;

@@ -126,6 +126,17 @@ int main(int argc, char **argv) {
         printf("panel     (escala 1): %ld píxeles opacos (dif media %.4f / 255, distintos %ld = %.3f%%), %ld semitransparentes | primitivas al panel %d, solo VRAM %d\n", op, op ? sum / (3.0 * op) : 0.0, bad, op ? 100.0 * bad / op : 0.0, semi, in.prims, in.mirror_prims);
         if (bad) rc = 1;
     }
+    {   /* panel verificado (pantalla 3D del motor + panel): se compone sobre el mundo reproducido y se compara con la VRAM del volcado (= la imagen del hardware) */
+        GpuDrawList lv = l; lv.vram_end = d->vram;
+        VrLayer2D *L2 = vl2d_new();
+        vl2d_set_options(L2, 1, VL_SMOOTH_ORIGINAL);
+        if (vl2d_run(L2, &lv, &sc, VL_PANEL_VERIFIED)) {
+            vl2d_info(L2, &in);
+            printf("panel verificado: %s | píxeles del panel %d, distintos del hardware %d (dif media %.3f), sustituidos %d, mundo distinto fuera del panel %d, 2D perdidas %d, respaldo %s\n",
+                   in.verify ? "aplicado" : "no aplicable", in.v_cov, in.v_bad, in.v_mean_milli / 1000.0, in.v_patched, in.v_out, in.v_lost2d, in.fallback ? "SI" : "no");
+        }
+        vl2d_free(L2);
+    }
     printf(rc ? "RESULTADO: DIFERENCIAS\n" : "RESULTADO: OK\n");
     vl2d_free(L); free(ref); ns_dump_close(d);
     return rc;

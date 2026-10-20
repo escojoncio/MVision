@@ -214,6 +214,9 @@ static void test_triangle_and_format(void) {
     CHECK(n == 1 && e[0].nv == 3, "nv=%d", n ? e[0].nv : -1);
     char buf[2048]; size_t l = ns_fill_format(&st, 1, buf, sizeof buf);
     CHECK(l > 20 && l < sizeof buf, "formato len=%zu", l);
+    CHECK(strstr(buf, "camara=lista") != NULL, "el registro dice qué cámara usó: %s", buf);
+    st.cam_src = 2; ns_fill_format(&st, 1, buf, sizeof buf);
+    CHECK(strstr(buf, "camara=RAM(sin camara en la lista)") != NULL, "cámara de la RAM por falta de registro: %s", buf);
     ns_fill_destroy(f);
 }
 
@@ -253,7 +256,40 @@ static void test_glue(void) {
     CHECK(ns_fill_glue_fetch(out, 16) == 0, "tras reset: nada");
 }
 
+/* INTRO: escena 3D del motor sin partida y con el nativo vacío o en otro sitio (cobertura del nativo solo ~0 %): el relleno la repone y la cobertura total (la que decide motor / respaldo)
+ * sale alta; el glue la publica con ns_fill_glue_last. La escena que el relleno NO puede reponer (sin posición fiable) mantiene la cobertura total baja. */
+void ns_fill_glue_test_cover(const NsFillStats *st, uint32_t frame);
+static void test_intro_cover(void) {
+    NsFill *f = ns_fill_create(); NsFillCfg cfg; ns_fill_cfg_default(&cfg); NsFillCam cam = cam_id(); NsFillStats st;
+    GpuOp ops[24];
+    for (int i = 0; i < 24; i++) ops[i] = list_of(-3000 + 250 * i, -500, 4000 + 40 * i, 200, 0);
+    Nat N = {0};
+    nat_quad(&N, 90000, 90000, 4000, 1000, PAGE, CLUT, 0xAAAA0009u);   /* el nativo existe pero no está en la vista de la lista */
+    CHECK(step(f, &N, ops, 24, &cam, NULL, &cfg, 1, &st) == 0, "run intro");
+    CHECK(st.nat_pct < 1.0f && st.cover_pct > 95.0f, "intro: nativo %.1f%% -> nativo+relleno %.1f%%", st.nat_pct, st.cover_pct);
+    uint32_t fr = 0; int pct = -1;
+    ns_fill_glue_last(&fr, &pct);   /* sin medida previa no falla */
+    ns_fill_glue_test_cover(&st, 813);
+    CHECK(ns_fill_glue_last(&fr, &pct) == 1 && fr == 813 && pct >= 95 && pct <= 100, "glue_last: fr=%u pct=%d", fr, pct);
+    /* pocas primitivas: no hay escena que medir (cover_pct vale 100 sin denominador) y no pisa la medida buena */
+    NsFillStats few; memset(&few, 0, sizeof few); few.tris = 3; few.cover_pct = 100.0f;
+    ns_fill_glue_test_cover(&few, 900);
+    CHECK(ns_fill_glue_last(&fr, &pct) == 1 && fr == 813, "sin escena suficiente: no cuenta (fr=%u)", fr);
+    /* solo pose (jugador): tampoco */
+    NsFillStats po; memset(&po, 0, sizeof po); po.tris = 40; po.cls[NF_POSE_PLAYER] = 36; po.cover_pct = 100.0f;
+    ns_fill_glue_test_cover(&po, 950);
+    CHECK(fr == 813 && ns_fill_glue_last(&fr, &pct) == 1 && fr == 813, "solo pose: no cuenta");
+    /* escena que el relleno no puede reponer (todo detrás de la cámara): cobertura total baja */
+    GpuOp bad[24];
+    for (int i = 0; i < 24; i++) { bad[i] = list_of(-3000 + 250 * i, -500, 4000, 200, 0); for (int k = 0; k < 4; k++) bad[i].v[k].vflags = GPU_VF_BEHIND; }
+    ns_fill_reset(f);
+    CHECK(step(f, NULL, bad, 24, &cam, NULL, &cfg, 2, &st) == 0, "run detras");
+    CHECK(st.cover_pct < 20.0f, "tris detrás de la cámara: cobertura total %.1f%% (baja: respaldo)", st.cover_pct);
+    ns_fill_destroy(f); free(N.t); free(N.s);
+}
+
 int main(void) {
+    test_intro_cover();
     test_fill_and_match();
     test_camera_ys();
     test_locked_alt_cam();

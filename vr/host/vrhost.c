@@ -262,6 +262,7 @@ __attribute__((weak)) void ns_fill_glue_post_ik(const uint8_t *ram) { (void)ram;
 __attribute__((weak)) void ns_fill_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame, const float *eye, const float *M, int list_vr) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; (void)eye; (void)M; (void)list_vr; }
 __attribute__((weak)) size_t ns_fill_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
 __attribute__((weak)) void ns_fill_glue_reset(void) {}
+__attribute__((weak)) int ns_fill_glue_last(uint32_t *frame, int *pct) { (void)frame; (void)pct; return 0; }   /* última cobertura medida con el relleno (fotograma de la lista, %) */
 /* Decodificador de vídeo (runtime/mdec.c): palabras entregadas desde el arranque. En las pruebas de escritorio sin MDEC vale siempre 0 (no hay FMV). */
 __attribute__((weak)) uint32_t mdec_out_words_total(void) { return 0; }
 /* Manos nuevas (ns_hand.c, solo en la app; vr/body/vr_hand_mesh.c): definición débil vacía para las pruebas de escritorio, donde la manopla del motor se queda como está. */
@@ -822,10 +823,12 @@ static void build_one(const GpuDrawList *l, int si) {
         if (!l2a) l2a = vl2a_new();
         if (l2a) {
             vl2a_options(l2a, l2d_target, atomic_load(&l2d_smooth));
-            int l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO || view.kind == VRV_K_BACKUP;
+            /* pantalla de cine (UI / vídeo / respaldo): fotograma entero, verificado contra la imagen del emulador. Pantalla 3D del motor (cinemáticas, créditos o texto sobre una escena): el panel 2D va
+             * ENCIMA de la escena nativa, así que se verifica también (reproduce el mundo sin el panel, compone y compara con el emulador; donde no coincide usa la imagen exacta del emulador). */
+            int l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO || view.kind == VRV_K_BACKUP ? VL_FULL : view.kind == VRV_K_ENGINE ? VL_PANEL_VERIFIED : VL_PANEL;
             vl2a_submit(l2a, hl, rc == 0 && sc.op_dest && sc.n_op_dest >= hl->nops ? sc.op_dest : NULL, l2_full, 0);
             { static uint64_t l2_log_ns; uint64_t nn = mono_ns();   /* una línea por segundo */
-              if (nn - l2_log_ns >= 1000000000ull) { char lb[512]; l2_log_ns = nn; if (vl2a_report(l2a, lb, sizeof lb) > 0) fprintf(stderr, "%s\n", lb); } }
+              if (nn - l2_log_ns >= 1000000000ull) { char lb[1024]; l2_log_ns = nn; if (vl2a_report(l2a, lb, sizeof lb) > 0) fprintf(stderr, "%s\n", lb); } }
         }
     }
     sm_sample(&slot[si].smp, &sc, r);   /* (r = registro de cámara de la lista; antes de fill_slot: sc.v/b son memoria interna de vr_scene) */
@@ -918,13 +921,10 @@ static void publish_state(void) {
             if (tot - mdec_seen_total >= 64u) mdec_last_vb = vb ? vb : 1u;
             mdec_seen_total = tot;
             vin.mdec = mdec_last_vb != 0 && vb - mdec_last_vb <= 12u;
-            /* cobertura del render nativo sobre la lista (hilo trabajador, ~1 por segundo): solo si es reciente (3 s) y nueva desde la última vez */
-            uint32_t cf = 0; int cp = 0;
-            if (ns_cover_glue_last(&cf, &cp) && vb >= cf && vb - cf <= 150u) {
-                vin.cover1 = (uint8_t)(cp < 0 ? 1 : cp > 100 ? 101 : cp + 1);
-                vin.cover_new = cf != cover_seen_frame;
-                cover_seen_frame = cf;
-            }
+            /* La cobertura que decide motor / respaldo es la de lo que se ve dentro de la vista del juego: nativo + relleno global (ns_fill), si no el nativo solo (vrview_cover_feed) */
+            uint32_t cf = 0, ff = 0; int cp = 0, fp = 0;
+            int hn = ns_cover_glue_last(&cf, &cp), hf = ns_fill_glue_last(&ff, &fp);
+            vrview_cover_feed(&vin, &cover_seen_frame, vb, hf, ff, fp, hn, cf, cp);
         }
         g.view_mode = vrview_step(&view, &vin);
         if (view.changed) {     /* cada cambio de modo / clase / motivo de la vista queda en el registro con su causa (banderas del puente incluidas) */
