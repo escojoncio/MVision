@@ -20,7 +20,7 @@ VrL2Async *vl2a_new(void);
 void vl2a_free(VrL2Async *A);
 /* Escala objetivo (1..6) y suavizado (VL_SMOOTH_*); cualquier hilo. */
 void vl2a_options(VrL2Async *A, int scale, int smooth);
-/* Hilo de emulación: encola la lista (copia). op_dest (nops bytes) NULL = escena fallida: solo eventos. full: ver vl2d_run. reset != 0: olvida la VRAM espejo antes. Devuelve 1 si se encoló. */
+/* Hilo de emulación: encola la lista (copia). op_dest (nops bytes) NULL = escena fallida: solo eventos. full: VL_PANEL / VL_FULL / VL_PANEL_VERIFIED (vr_layer2d.h; el verificado se publica como panel, full = 0). reset != 0: olvida la VRAM espejo antes. Devuelve 1 si se encoló. */
 int vl2a_submit(VrL2Async *A, const GpuDrawList *l, const uint8_t *op_dest, int full, int reset);
 /* Consumidor: -1 = no hay capa utilizable (apagada, sin resultado o con retraso excesivo); 0 = la misma que la última adquirida; 1 = nueva (px/w/h/full/seq válidos hasta vl2a_release). */
 int vl2a_acquire(VrL2Async *A, const uint8_t **px, int *w, int *h, int *full, uint32_t *seq);

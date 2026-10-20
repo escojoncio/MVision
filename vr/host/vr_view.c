@@ -105,6 +105,7 @@ int vrview_step(VrView *v, const VrViewIn *in) {
                 v->cov_good_mask = ((v->cov_good_mask << 1) | (pct >= v->cov_hi ? 1u : 0u)) & wm;
                 if (__builtin_popcount(v->cov_bad_mask) >= v->cov_need_bad) v->cov_state = 2;
                 else if (__builtin_popcount(v->cov_good_mask) >= v->cov_need_good) v->cov_state = 1;
+                else if (v->cov_state == 0 && pct >= v->cov_hi) v->cov_state = 1;   /* la PRIMERA medida de una escena, si es buena, ya es fiable (introducciones: sin partida, el nativo + relleno cubre ~99 % desde el primer fotograma; esperar 3 buenas de 4 son ~3 s de imagen plana). Una mala sola no cambia nada */
             }
         } else if (++v->cov_idle >= v->cov_forget) {
             v->cov_state = 0; v->cov_good_mask = v->cov_bad_mask = 0; v->cov_idle = v->cov_forget;
@@ -189,7 +190,8 @@ int vrview_cine_describe(const VrView *v, const VrViewIn *in, char *buf, int n) 
                        : "subidas de vídeo que cubren el área de pantalla de la VRAM y sin 3D";
         break;
     case VRV_K_ENGINE:
-        why = v->cov_state == 1 ? "3D del motor y el render nativo representa la lista (cobertura medida buena): pantalla estereoscópica"
+        why = v->cov_state == 1 ? (in->cover_src == 2 ? "3D del motor y el render nativo + el relleno global representan la lista (cobertura medida buena): pantalla estereoscópica"
+                                                      : "3D del motor y el render nativo representa la lista (cobertura medida buena): pantalla estereoscópica")
                                 : "3D del motor con partida y sin medida de cobertura: se fía del extractor";
         break;
     case VRV_K_BACKUP:
@@ -199,12 +201,25 @@ int vrview_cine_describe(const VrView *v, const VrViewIn *in, char *buf, int n) 
     case VRV_K_WORLD: why = "primera persona"; break;
     default: why = "2D del juego (menú, título, radio, carga...): pantalla de cine"; break;
     }
-    char cov[24];
-    if (in->cover1 > 0) snprintf(cov, sizeof cov, "%d%%", (int)in->cover1 - 1); else snprintf(cov, sizeof cov, "sin medir");
+    char cov[40];
+    if (in->cover1 > 0) snprintf(cov, sizeof cov, "%d%%%s", (int)in->cover1 - 1, in->cover_src == 2 ? "(nativo+relleno)" : in->cover_src == 1 ? "(nativo)" : ""); else snprintf(cov, sizeof cov, "sin medir");
     int r = snprintf(buf, (size_t)n, "[cine] tipo=%s motivo=%s | razon=%s partida=%d 3D=%d mdec=%d subidas=%d cobertura=%s estado_cobertura=%d(0 sin medir, 1 fiel, 2 no fiel)",
                      vrview_cine_type(v->kind), why, vrview_reason_name(v->reason), in->game, in->scene3d, in->mdec, in->video, cov, v->cov_state);
     if (r < 0) { buf[0] = 0; return 0; }
     return r >= n ? n - 1 : r;
+}
+
+int vrview_cover_feed(VrViewIn *in, uint32_t *seen, uint32_t vb, int has_fill, uint32_t fill_frame, int fill_pct, int has_nat, uint32_t nat_frame, int nat_pct) {
+    if (!in || !seen) return 0;
+    uint32_t cf; int cp, src;
+    if (has_fill && vb >= fill_frame && vb - fill_frame <= 150u) { cf = fill_frame; cp = fill_pct; src = 2; }
+    else if (has_nat && vb >= nat_frame && vb - nat_frame <= 150u) { cf = nat_frame; cp = nat_pct; src = 1; }
+    else return 0;
+    in->cover1 = (uint8_t)(cp < 0 ? 1 : cp > 100 ? 101 : cp + 1);
+    in->cover_src = (uint8_t)src;
+    in->cover_new = 0;
+    if (cf != *seen && (*seen == 0 || cf < *seen || cf - *seen >= VRV_COVER_SPACING)) { in->cover_new = 1; *seen = cf; }
+    return 1;
 }
 
 long long vrview_upload_area(int dx, int dy, int dw, int dh, int depth24, int x, int y, int w, int h) {

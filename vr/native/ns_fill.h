@@ -79,6 +79,7 @@ typedef struct {
     float cover_pct;                              /* % de los triángulos 3D (sin POSE) cubiertos por nativo + relleno: (MATCH+SPLIT+SUBDIV+rellenados) / (tris - POSE) */
     float nat_pct;                                /* lo mismo contando solo el nativo */
     double ms_index, ms_match, ms_persist, ms_total;
+    int cam_src;                                  /* solo en la sesión completa: cámara con la que se desproyectó: 0 la de la lista, 1 la de la RAM, 2 la de la RAM porque la lista no trajo cámara (sin registro de cámara válido) */
     double ms_extract, ms_adapt, ms_fx;           /* solo en la sesión completa (ns_fill_run.c): extracción de la RAM, adaptación a triángulos de mundo, clasificación de efectos; ya sumados a ms_total */
 } NsFillStats;
 

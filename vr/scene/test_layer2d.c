@@ -750,6 +750,164 @@ static void semi_mask_cases(void) {
     }
 }
 
+
+/* ---------------- panel verificado (pantalla 3D del motor + panel 2D encima) ---------------- */
+/* Escena: mundo (cuadrilátero con degradado + triángulo), texto opaco de 4 glifos, un fundido B/2+F/2 y, si occ > 0, un rectángulo del MUNDO dibujado DESPUÉS del texto (orden roto: el
+ * panel no puede reproducirlo). op_dest: 0 mundo, 2 panel. Devuelve la lista (con vram_end del hardware). */
+static GpuDrawList *panel_scene(int occ, uint8_t *opd, int *nopd) {
+    uint16_t font[64 * 8];
+    memset(font, 0, sizeof font);
+    for (int gl = 0; gl < 4; gl++) for (int v = 0; v < 8; v++) for (int u = 0; u < 8; u++) {
+        int tu = gl * 8 + u, idx = 1 + (u + v + gl) % 3;
+        font[v * 64 + (tu >> 2)] = (uint16_t)(font[v * 64 + (tu >> 2)] | (idx << ((tu & 3) * 4)));
+    }
+    const uint16_t clut[4] = {0, 0x7FFF, 0x03E0, 0x7C1F};
+    gpu_capture_enable(0);
+    gpu_reset();
+    gpu_gp1(0x08000001); gpu_gp1(0x03000000); gpu_gp1(0x05000000 | 256u << 10);
+    env(0, 0, 1023, 511, 0, 0, 0);
+    gpu_gp0(0x02000000); gpu_gp0(xy(0, 0)); gpu_gp0(xy(512, 256));
+    upload(640, 0, 64, 8, font); upload(0, 500, 4, 1, clut);
+    gpu_capture_vram_start(1);
+    gpu_capture_enable(1);
+    env(0, 0, 319, 239, 10, 0, 0);
+    /* mundo: cuadrilátero con degradado y un triángulo */
+    gpu_gp0(0x38000000 | 0x200000); gpu_gp0(xy(0, 0)); gpu_gp0(0x00A000); gpu_gp0(xy(319, 0)); gpu_gp0(0xA00000); gpu_gp0(xy(0, 239)); gpu_gp0(0x808080); gpu_gp0(xy(319, 239));
+    gpu_gp0(0x30000000 | 0x4040FF); gpu_gp0(xy(160, 50)); gpu_gp0(0xFF4040); gpu_gp0(xy(260, 180)); gpu_gp0(0x40FF40); gpu_gp0(xy(80, 200));
+    /* panel: texto (glifos de la CLUT: opacos de colores) y fundido B/2+F/2 */
+    for (int i = 0; i < 4; i++) { gpu_gp0(0x64u << 24 | 0x808080); gpu_gp0(xy(20 + i * 10, 30)); gpu_gp0(0u << 16 | 500u << 22 | (uint32_t)(i * 8)); gpu_gp0(xy(8, 8)); }
+    env(0, 0, 319, 239, 10, 0, 0);
+    gpu_gp0(0x62000000 | 0xC0A060); gpu_gp0(xy(150, 100)); gpu_gp0(xy(100, 40));       /* 0x62: rectángulo monocromo semitransparente */
+    if (occ > 0) { gpu_gp0(0x60000000 | 0x20FF20); gpu_gp0(xy(18, 28)); gpu_gp0(xy(occ, occ)); }   /* mundo DESPUÉS del texto, encima de él */
+    gpu_gp1(0x05000000);
+    const GpuDrawList *l = gpu_capture_frame();
+    gpu_capture_vram_start(0);
+    if (!l) return NULL;
+    GpuDrawList *c = dup_list(l);
+    *nopd = (int)c->nops;
+    for (int i = 0; i < *nopd && i < 64; i++) opd[i] = (i == 0 || i == 1 || (occ > 0 && i == *nopd - 1)) ? 0 : 2;
+    return c;
+}
+
+/* todo píxel opaco de la capa (escala 1) es igual a la imagen del hardware */
+static int opaque_vs_hw(VrLayer2D *L, const GpuDisplay *d, int *n_opaque) {
+    int w = 0, h = 0, bad = 0, n = 0;
+    const VrLayerPx *p = vl2d_px(L, &w, &h);
+    if (!p) return -1;
+    for (int y = 0; y < h; y++) for (int x = 0; x < w && x < d->aw; x++) {
+        const VrLayerPx *q = &p[(size_t)y * w + x];
+        if (q->t != 0 || q->d[0] || q->d[1] || q->d[2]) continue;
+        n++;
+        uint16_t v = gpu_vram[d->y + y][d->x + x];
+        if (q->c[0] != (v & 31) || q->c[1] != ((v >> 5) & 31) || q->c[2] != ((v >> 10) & 31)) bad++;
+    }
+    if (n_opaque) *n_opaque = n;
+    return bad;
+}
+
+static void panel_verified(void) {
+    uint8_t opd[64]; int nops = 0;
+    VrScene sc; memset(&sc, 0, sizeof sc);
+    GpuDrawList *ok = panel_scene(0, opd, &nops);
+    CHECK(ok && nops == 7 && ok->vram_end, "panel verificado: lista de %d primitivas con vram_end", nops);
+    if (!ok || nops != 7) { free_list(ok); return; }
+    GpuDisplay d = ok->disp;
+    sc.op_dest = opd; sc.n_op_dest = (uint32_t)nops;
+    /* A. panel fiel: se verifica, no hay diferencias, no hay respaldo y la capa es IGUAL a la del panel sin verificar */
+    VrLayer2D *Lp = vl2d_new(), *Lv = vl2d_new();
+    vl2d_set_options(Lp, 1, VL_SMOOTH_ORIGINAL); vl2d_set_options(Lv, 1, VL_SMOOTH_ORIGINAL);
+    CHECK(vl2d_run(Lp, ok, &sc, VL_PANEL) == 1 && vl2d_run(Lv, ok, &sc, VL_PANEL_VERIFIED) == 1, "A: capas");
+    VrL2Info iv; vl2d_info(Lv, &iv);
+    CHECK(iv.verify == 1 && iv.v_cov > 400 && iv.v_bad == 0 && iv.fallback == 0 && iv.v_patched == 0, "A: panel fiel: verificado %d, tocados %d, distintos %d, respaldo %d, sustituidos %d", iv.verify, iv.v_cov, iv.v_bad, iv.fallback, iv.v_patched);
+    CHECK(iv.v_out == 0, "A: el mundo reproducido coincide con el hardware fuera del panel (%d px)", iv.v_out);
+    { int w1, h1, w2, h2; const uint8_t *a = vl2d_rgba(Lp, &w1, &h1), *b = vl2d_rgba(Lv, &w2, &h2);
+      CHECK(a && b && w1 == w2 && h1 == h2 && !memcmp(a, b, (size_t)w1 * h1 * 4), "A: verificar un panel fiel no cambia ni un byte"); }
+    int nop = 0;
+    CHECK(opaque_vs_hw(Lv, &d, &nop) == 0 && nop > 200, "A: píxeles opacos del panel = hardware (%d opacos)", nop);
+    /* sin vram_end: no se puede verificar; sigue siendo el panel */
+    { GpuDrawList nv = *ok; nv.vram_end = NULL; VrLayer2D *Ln = vl2d_new(); vl2d_set_options(Ln, 1, VL_SMOOTH_ORIGINAL);
+      vl2d_run(Ln, &nv, &sc, VL_PANEL_VERIFIED); VrL2Info in; vl2d_info(Ln, &in);
+      CHECK(in.verify_req == 1 && in.verify == 0 && in.fallback == 0, "sin vram_end: pedida y no aplicable");
+      int w1, h1, w2, h2; const uint8_t *a = vl2d_rgba(Lp, &w1, &h1), *b = vl2d_rgba(Ln, &w2, &h2);
+      CHECK(a && b && w1 == w2 && !memcmp(a, b, (size_t)w1 * h1 * 4), "sin vram_end: el panel es el de siempre");
+      vl2d_free(Ln); }
+    /* B. el panel pierde la fidelidad (color del texto distinto al del hardware: p. ej. otro rasterizado): sin verificar la capa difiere del hardware; verificada, la capa es el hardware */
+    { GpuDrawList *bad = dup_list(ok);
+      for (int i = 2; i < 6; i++) bad->ops[i].v[0].r = bad->ops[i].v[0].g = bad->ops[i].v[0].b = 0x40;
+      VrLayer2D *Lb = vl2d_new(), *Lb2 = vl2d_new(); vl2d_set_options(Lb, 4, VL_SMOOTH_ORIGINAL); vl2d_set_options(Lb2, 4, VL_SMOOTH_ORIGINAL);
+      vl2d_run(Lb, bad, &sc, VL_PANEL);
+      int nb = 0; opaque_vs_hw(Lb, &d, &nb);   /* (a escala 4 original vl2d_px es la capa de rasterizado 1x) */
+      CHECK(opaque_vs_hw(Lb, &d, NULL) > 20, "B: sin verificar, el texto roto difiere del hardware (%d px)", opaque_vs_hw(Lb, &d, NULL));
+      CHECK(vl2d_run(Lb2, bad, &sc, VL_PANEL_VERIFIED) == 1, "B: capa");
+      VrL2Info ib; vl2d_info(Lb2, &ib);
+      CHECK(ib.verify == 1 && ib.v_bad >= 8 && ib.fallback == 1 && ib.v_patched >= d.aw * d.h, "B: respaldo exacto: distintos %d, sustituidos %d, respaldo %d", ib.v_bad, ib.v_patched, ib.fallback);
+      int nbb = 0;
+      CHECK(opaque_vs_hw(Lb2, &d, &nbb) == 0 && nbb >= d.aw * d.h, "B: la capa verificada es la imagen del hardware (%d opacos de %d)", nbb, d.aw * d.h);
+      /* salida RGBA a escala 4: el hardware replicado, opaco, con el mismo marco */
+      int w = 0, h = 0; const uint8_t *rg = vl2d_rgba(Lb2, &w, &h);
+      size_t fwh = (size_t)d.fw * d.h; uint8_t *ref = (uint8_t *)malloc(fwh * 4);
+      GpuDisplay dd = d;
+      CHECK(gpu_present_rgba(&dd, NULL, ref, fwh) == fwh, "B: marco de la GPU");
+      int diff = 0;
+      for (int y = 0; y < h && rg; y++) for (int x = 0; x < d.aw * 4 && x < w; x++)
+          if (memcmp(&rg[((size_t)y * w + x) * 4], &ref[((size_t)(y / 4) * d.fw + d.pad_l + x / 4) * 4], 3) || rg[((size_t)y * w + x) * 4 + 3] != 255) diff++;
+      CHECK(diff == 0, "B: RGBA a x4 idéntico al marco del hardware (%d muestras distintas)", diff);
+      free(ref);
+      /* C. antirrebote: tras un fallo el respaldo dura 12 listas aunque el panel vuelva a ser fiel; después se recupera y no quedan restos del respaldo */
+      int fb = 0;
+      for (int i = 0; i < 12; i++) { vl2d_run(Lb2, ok, &sc, VL_PANEL_VERIFIED); vl2d_info(Lb2, &ib); fb += ib.fallback; }
+      CHECK(fb == 12, "C: 12 listas de respaldo tras el fallo (%d)", fb);
+      vl2d_run(Lb2, ok, &sc, VL_PANEL_VERIFIED); vl2d_info(Lb2, &ib);
+      CHECK(ib.fallback == 0 && ib.v_bad == 0, "C: recuperado (respaldo %d, distintos %d)", ib.fallback, ib.v_bad);
+      VrLayer2D *Lf = vl2d_new(); vl2d_set_options(Lf, 4, VL_SMOOTH_ORIGINAL); vl2d_run(Lf, ok, &sc, VL_PANEL);
+      int w1, h1, w2, h2; const uint8_t *a = vl2d_rgba(Lf, &w1, &h1), *b = vl2d_rgba(Lb2, &w2, &h2);
+      CHECK(a && b && w1 == w2 && !memcmp(a, b, (size_t)w1 * h1 * 4), "C: sin restos del respaldo: igual a un panel recién creado");
+      /* un modo sin verificar reinicia la cuenta */
+      vl2d_run(Lb2, bad, &sc, VL_PANEL_VERIFIED); vl2d_run(Lb2, ok, &sc, VL_PANEL); vl2d_run(Lb2, ok, &sc, VL_PANEL_VERIFIED); vl2d_info(Lb2, &ib);
+      CHECK(ib.fallback == 0, "C: salir de la pantalla 3D reinicia el antirrebote");
+      vl2d_free(Lf); vl2d_free(Lb); vl2d_free(Lb2); free_list(bad); }
+    {   /* coste (informativo): el panel verificado frente al panel sin verificar, en la misma lista */
+        double t0 = now_ms();
+        for (int i = 0; i < 100; i++) vl2d_run(Lp, ok, &sc, VL_PANEL);
+        double t1 = now_ms();
+        for (int i = 0; i < 100; i++) vl2d_run(Lv, ok, &sc, VL_PANEL_VERIFIED);
+        double t2 = now_ms();
+        printf("  panel: %.2f ms/lista sin verificar, %.2f ms/lista verificado (mundo a pantalla completa: 1 cuadrilátero + 1 triángulo)\n", (t1 - t0) / 100, (t2 - t1) / 100);
+    }
+    vl2d_free(Lp); vl2d_free(Lv); free_list(ok);
+    /* D. orden roto: una primitiva del MUNDO dibujada encima del texto. Grande (20x20): respaldo exacto; pequeña (4x4, solapa 4 px del texto): solo se sustituyen esos píxeles */
+    for (int sz = 20; sz >= 4; sz -= 16) {
+        GpuDrawList *oc = panel_scene(sz, opd, &nops);
+        CHECK(oc && nops == 8, "D%d: lista de %d primitivas", sz, nops);
+        if (!oc || nops != 8) { free_list(oc); continue; }
+        sc.op_dest = opd; sc.n_op_dest = (uint32_t)nops;
+        GpuDisplay d2 = oc->disp;
+        VrLayer2D *L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+        vl2d_run(L, oc, &sc, VL_PANEL_VERIFIED);
+        VrL2Info io; vl2d_info(L, &io);
+        int nopq = 0;
+        CHECK(opaque_vs_hw(L, &d2, &nopq) == 0, "D%d: todo píxel opaco = hardware tras verificar", sz);
+        if (sz == 20) CHECK(io.v_bad >= 8 && io.fallback == 1, "D20: distintos %d, respaldo %d", io.v_bad, io.fallback);
+        else CHECK(io.v_bad > 0 && io.v_bad < 8 && io.fallback == 0 && io.v_patched == io.v_bad, "D4: distintos %d, sustituidos %d, respaldo %d", io.v_bad, io.v_patched, io.fallback);
+        vl2d_free(L); free_list(oc);
+    }
+    /* E. asíncrono: el modo verificado publica un PANEL (full = 0), la línea [capa2d] lo cuenta */
+    {
+        GpuDrawList *oc = panel_scene(0, opd, &nops);
+        VrL2Async *A = vl2a_new();
+        vl2a_options(A, 4, VL_SMOOTH_ORIGINAL);
+        CHECK(vl2a_submit(A, oc, opd, VL_PANEL_VERIFIED, 1) == 1, "E: encolada");
+        vl2a_flush(A);
+        const uint8_t *px = NULL; int w = 0, h = 0, full = -1; uint32_t seq = 0;
+        int r = vl2a_acquire(A, &px, &w, &h, &full, &seq);
+        CHECK(r == 1 && px && full == 0, "E: capa publicada como panel (r=%d full=%d)", r, full);
+        vl2a_release(A);
+        char lb[1024]; vl2a_report(A, lb, sizeof lb);
+        CHECK(strstr(lb, "panel prims=") && strstr(lb, "verificacion=si panel_px=") && strstr(lb, "distintos=0") && strstr(lb, "respaldo_emulador=no"), "E: línea de registro: %s", lb);
+        vl2a_free(A); free_list(oc);
+    }
+}
+
 int main(void) {
     gen_atlas();
     edge_case("320x240", 1, 0x270, 0xC70, 0x13, 0x13 + 240);
@@ -768,6 +926,7 @@ int main(void) {
     semi_mask_cases();
     offscreen_compose();
     offlist_text();
+    panel_verified();
 
     /* ---- fondo negro, escala 1: IGUAL bit a bit a la GPU original ---- */
     build_list(0x0000);

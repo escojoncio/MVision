@@ -41,6 +41,11 @@ enum { VL_SMOOTH_ORIGINAL = 0, VL_SMOOTH_SHARP = 1, VL_SMOOTH_SOFT = 2 };
 
 typedef struct VrLayer2D VrLayer2D;
 
+/* Modo de vl2d_run (parámetro `full`): VL_PANEL = solo las primitivas que vr_scene mandó al panel (mundo VR / mundo debajo); VL_FULL = fotograma completo del emulador (pantalla de cine); VL_PANEL_VERIFIED = panel
+ * encima de la pantalla 3D del motor (cinemáticas, créditos sobre una escena): igual que VL_PANEL pero se COMPARA con la imagen real del emulador (vram_end) y, donde difiere, se usa la del emulador
+ * (ver verify_panel en vr_layer2d.c). Los valores 0 y 1 son los de siempre (`full` booleano). */
+enum { VL_PANEL = 0, VL_FULL = 1, VL_PANEL_VERIFIED = 2 };
+
 VrLayer2D *vl2d_new(void);
 void vl2d_free(VrLayer2D *L);
 /* Olvida la VRAM espejo: hasta la siguiente lista con vram_start/vram_init no hay capa (vl2d_run devuelve 0 y rgba NULL). */
@@ -70,7 +75,15 @@ typedef struct {
     int mirror_prims;      /* primitivas que solo actualizaron la VRAM espejo (destino fuera de la zona mostrada: render a textura, búfer alterno) */
     int fid_n, fid_bad;    /* pantalla completa a escala 1 con la VRAM real al cerrar (vram_end): píxeles visibles comparados y píxeles distintos de la imagen del emulador */
     int fid_mean_milli;    /* diferencia media por canal (niveles de 8 bits x 1000) de esa comparación */
-    int fallback;          /* 1 = la capa no era fiel (fid_bad > 0) y se usó la imagen exacta del emulador (vram_end) */
+    int fallback;          /* 1 = la capa no era fiel (fid_bad > 0, o en el panel verificado v_bad >= umbral / respaldo en curso) y se usó la imagen exacta del emulador (vram_end) */
+    int verify_req;        /* se pidió VL_PANEL_VERIFIED */
+    int verify;            /* 1 = el panel se verificó en esta lista (escala 1 original, con vram_end y clasificación) */
+    int v_cov, v_bad;      /* píxeles que el panel toca / de ellos, los que no coinciden con el emulador al componerlos sobre el mundo (diferencia > 2 niveles de 5 bits) */
+    int v_out;             /* píxeles que el panel NO toca y donde el mundo reproducido difiere del emulador (hueco del modelo, informativo) */
+    int v_lost2d;          /* primitivas 2D texturadas sobre la pantalla que no fueron al panel ni al filtro (informativo: se pierden si el nativo no las dibuja) */
+    int v_patched;         /* píxeles sustituidos por la imagen del emulador (todos los de la zona mostrada si fallback) */
+    double v_ms;           /* coste de la verificación (mundo reproducido + comparación), ms: el trabajador asíncrono lo descuenta de su medida de carga (la escala adaptativa no debe bajar por verificar) */
+    int v_mean_milli;      /* diferencia media por canal (niveles de 8 bits x 1000) de los píxeles malos */
 } VrL2Info;
 void vl2d_info(const VrLayer2D *L, VrL2Info *out);
 

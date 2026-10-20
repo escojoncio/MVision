@@ -52,8 +52,9 @@ typedef struct {
     uint8_t dead;          /* vida a cero (o fin de partida) con partida en curso: la cámara del motor muestra la muerte en tercera persona */
     uint8_t video;         /* la última lista es un fotograma de vídeo pregrabado (subidas a VRAM que cubren la zona mostrada, sin 3D) */
     uint8_t mdec;          /* decodificador de vídeo (MDEC) activo en los últimos fotogramas: hay un FMV reproduciéndose (más fiable que `video`; gana al 3D) */
-    uint8_t cover1;        /* cobertura de la lista de la GPU por la escena nativa en % + 1 (0 = sin medida vigente) */
+    uint8_t cover1;        /* cobertura de la lista de la GPU por lo que se VE dentro de la vista del juego, en % + 1 (0 = sin medida vigente): escena nativa + relleno global (ns_fill) si hay relleno, si no el nativo solo */
     uint8_t cover_new;     /* 1 en el fotograma en que llega una medida nueva en `cover1` */
+    uint8_t cover_src;     /* de dónde viene `cover1` (solo registro): 0 ninguna, 1 nativo solo, 2 nativo + relleno */
 } VrViewIn;
 
 /* Qué es lo que se ve (con histéresis propia, ver VrView.kind):
@@ -118,6 +119,13 @@ int vrview_uploads_cover(long long sum, int dw, int dh, int depth24);
 /* Nombre corto del tipo de cine: fmv / motor / respaldo / 2d / mundo. */
 const char *vrview_cine_type(int kind);
 const char *vrview_reason_name(int reason);
+
+/* Entrega a la vista la medida de cobertura vigente (rellena in->cover1 / cover_new / cover_src). La cobertura que decide motor / respaldo es la de lo que el usuario VE dentro de la
+ * vista del juego: escena nativa + relleno global (ns_fill) cuando hay relleno (has_fill); si no, la del nativo solo (has_nat). vb = fotograma actual; una medida de hace más de 150 fotogramas
+ * (3 s) ya no vale. El relleno mide casi cada fotograma, el nativo solo cada 25: para que la ventana de vrview_step siga representando ~4 s, solo se acepta como NUEVA una medida a >= 25
+ * fotogramas de la anterior aceptada (la primera de una escena, al instante). *seen = fotograma de la última medida aceptada (estado del llamador). Devuelve 1 si hay medida vigente. */
+#define VRV_COVER_SPACING 25u
+int vrview_cover_feed(VrViewIn *in, uint32_t *seen, uint32_t vb, int has_fill, uint32_t fill_frame, int fill_pct, int has_nat, uint32_t nat_frame, int nat_pct);
 
 #ifdef __cplusplus
 }

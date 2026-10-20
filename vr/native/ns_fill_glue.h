@@ -16,6 +16,9 @@ void ns_fill_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const G
 uint32_t ns_fill_glue_fetch(NsEffect *cap, uint32_t max);
 /* Texto de registro (~1 por segundo) del trabajador; devuelve su longitud, 0 si no hay nada nuevo. */
 size_t ns_fill_glue_poll(char *buf, size_t cap);
+/* Cualquier hilo: última medida de COBERTURA de la lista de la GPU por el nativo + el relleno (lo que se ve dentro de la vista del juego): fotograma de la lista y % (0..100), sin pose. 0 si no hay
+ * ninguna (relleno apagado o aún sin escena 3D). La decisión motor/respaldo de la vista (vrhost -> vr_view) la usa en vez de la del nativo solo (ns_cover_glue_last). */
+int ns_fill_glue_last(uint32_t *frame, int *pct);
 /* Vacía la persistencia (cambio de zona conocido). */
 void ns_fill_glue_reset(void);
 #ifdef __cplusplus
