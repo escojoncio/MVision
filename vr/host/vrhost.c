@@ -258,6 +258,9 @@ __attribute__((weak)) int ns_hand_apply(NsScene *sc, NsMeshStore *st, const NsPl
 static _Atomic int hands_new = 1;        /* menú VR «Manos: nuevas / originales» (defecto nuevas) */
 void mv_vrhost_set_hands_new(int on) { atomic_store(&hands_new, on ? 1 : 0); }
 int mv_vrhost_hands_new(void) { return atomic_load(&hands_new); }
+/* Predicado ÚNICO: las manos nuevas están en uso (ajuste activado Y render nativo listo). Lo usan el cierre de la escena, la supresión del puño deformado y el punto de golpe. */
+static int hands_active(void) { return atomic_load(&hands_new) && atomic_load(&renderer_ready); }
+int mv_vrhost_hands_active(void) { return hands_active(); }
 static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, void *u);
 static void hands_precapture(uint8_t *ram);
 _Static_assert(NS_PLAYER_BODY_PTR == BA_PLAYER_BODY, "ns_player y el puente deben coincidir en el puntero del jugador");
@@ -348,7 +351,7 @@ static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *m
     (void)u;
     NsHandIn in;
     memset(&in, 0, sizeof in);
-    in.enabled = atomic_load(&hands_new);
+    in.enabled = hands_active();
     if (!in.enabled) return;
     for (int s = 0; s < 2; s++) { float g = 0; in.driven[s] = vrbody_hand_state(s, &g, NULL, NULL); in.grip[s] = in.driven[s] ? g : 0.0f; }
     ns_hand_apply(sc, st, map, &in);
@@ -356,7 +359,7 @@ static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *m
 /* Antes de cada captura: con las manos nuevas Y el render nativo en uso, la malla de la manopla del motor NO se deforma en puño (la mano nueva hace el puño y su forma
  * de reposo debe ser estable); con la lista de la GPU (o manos originales) sigue el puño deformado de siempre. */
 static void hands_precapture(uint8_t *ram) {
-    vrbody_set_fist_enabled(!(atomic_load(&hands_new) && atomic_load(&renderer_ready)));
+    vrbody_set_fist_suppressed(hands_active());
     vrbody_prefist(ram);
 }
 /* Colisión de la cabeza con la escena NATIVA (vr_headcol): la escena trae el escenario y los objetos sólidos en 360 grados, también lo que está detrás o a los lados de la

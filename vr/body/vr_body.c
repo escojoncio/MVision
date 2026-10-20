@@ -376,6 +376,7 @@ static struct {
     float dbg_frame[2][16];            /* marco efectivo de la mano tras la IK (espacio del usuario, m; ver vrbody_debug_hand_frame) */
     int dbg_frame_ok[2];
     /* copia de lo escrito en el último apply, hasta vrbody_restore */
+    int fist_suppress;           /* el anfitrión suprime el puño deformado (no se borra con vrbody_init) */
     int pending;
     int pend_n;
     Saved sv[6];
@@ -473,10 +474,10 @@ void vrbody_config_default(VrBodyConfig *c) {
     c->smooth_tau_s = 0.02f; c->frame_dt_s = 0.02f; c->blend_s = 0.25f; c->max_hand_jump_m = 3.0f;
 }
 void vrbody_init(const VrBodyConfig *c) {
-    VrBodyViewFn fn = G.view_fn; VrBodyHook hk = G.hook;
+    VrBodyViewFn fn = G.view_fn; VrBodyHook hk = G.hook; int sup = G.fist_suppress;
     typeof(G.cal) cal; cal_lock(); memcpy(cal, G.cal, sizeof cal); cal_unlock();
     memset(&G, 0, sizeof G);
-    G.view_fn = fn; G.hook = hk; cal_lock(); memcpy(G.cal, cal, sizeof cal); cal_unlock();
+    G.view_fn = fn; G.hook = hk; G.fist_suppress = sup; cal_lock(); memcpy(G.cal, cal, sizeof cal); cal_unlock();
     if (c) G.cfg = *c; else vrbody_config_default(&G.cfg);
     if (!(G.cfg.frame_dt_s > 1e-4f && G.cfg.frame_dt_s < 1.0f)) G.cfg.frame_dt_s = 0.02f;
     if (!(G.cfg.blend_s >= 0)) G.cfg.blend_s = 0.25f;
@@ -487,7 +488,9 @@ void vrbody_init(const VrBodyConfig *c) {
 const VrBodyConfig *vrbody_config(void) { return &G.cfg; }
 void vrbody_set_view_fn(VrBodyViewFn fn) { G.view_fn = fn; }
 void vrbody_set_apply_hook(VrBodyHook fn) { G.hook = fn; }
-void vrbody_set_fist_enabled(int on) { G.cfg.fist_enabled = on ? 1 : 0; }
+/* Supresión del puño deformado por el anfitrión (manos nuevas): aparte de la configuración del usuario (cfg.fist_enabled), que no se toca. */
+static int fist_on(void) { return G.cfg.fist_enabled && !G.fist_suppress; }
+void vrbody_set_fist_suppressed(int on) { G.fist_suppress = on ? 1 : 0; }
 
 int vrbody_hand_state(int side, float *grip, float R[9], float t[3]) {
     if (side < 0 || side > 1 || !G.pf[side].ok) return 0;
@@ -497,17 +500,21 @@ int vrbody_hand_state(int side, float *grip, float R[9], float t[3]) {
     return 1;
 }
 
-/* Punto de golpe de la mano nueva (vr_hand_mesh): yemas con la mano abierta, nudillos con el puño, en el MUNDO del motor (mm). Mano de dimensiones por defecto (la forma
- * nominal de la mano del personaje); solo se usa para el ataque cuerpo a cuerpo, donde la diferencia de milímetros no importa. */
+/* Punto de golpe de la mano nueva (vr_hand_mesh): los NUDILLOS con la pose de puño (agarre 1) y un desplazamiento CONSTANTE en el marco de la mano, sin interpolar con el
+ * agarre (el golpe no cambia de sitio al abrir o cerrar la mano). Mano de dimensiones por defecto. Mundo del motor, mm. 0 si el brazo no se manejó en el último apply. */
 int vrbody_fist_point(int side, float out[3]) {
-    static VrHand hand[2];
+    static float off[2][3];
     static int built[2];
     if (side < 0 || side > 1 || !out || !G.pf[side].ok) return 0;
-    if (!built[side]) { if (vrhand_build(&hand[side], NULL, side == 1 ? 1 : -1) != 0) return 0; built[side] = 1; }
-    float xf[VRHAND_BONES][12], p[3];
-    vrhand_pose(&hand[side], G.pf[side].grip, xf);
-    vrhand_fist_point(&hand[side], xf, p);
-    const float *R = G.pf[side].R, *t = G.pf[side].t;
+    if (!built[side]) {
+        VrHand hand;
+        if (vrhand_build(&hand, NULL, side == 1 ? 1 : -1) != 0) return 0;
+        float xf[VRHAND_BONES][12];
+        vrhand_pose(&hand, 1.0f, xf);
+        vrhand_fist_point(&hand, xf, off[side]);
+        built[side] = 1;
+    }
+    const float *R = G.pf[side].R, *t = G.pf[side].t, *p = off[side];
     for (int i = 0; i < 3; i++) out[i] = R[3 * i] * p[0] + R[3 * i + 1] * p[1] + R[3 * i + 2] * p[2] + t[i];
     return all_finite(out, 3);
 }
@@ -664,7 +671,7 @@ static void fist_apply(uint8_t *ram, int s, uint32_t model, float side_sign, flo
 /* Puño previo a la captura de la escena nativa: la captura ocurre antes de vrbody_apply, así que la malla de la mano saldría abierta.
  * Se aplica con el agarre y la mano del último vrbody_apply (un fotograma de retraso en el agarre); vrbody_restore lo devuelve. */
 void vrbody_prefist(uint8_t *ram) {
-    if (!ram || !G.cfg.enabled || !G.cfg.fist_enabled) return;
+    if (!ram || !G.cfg.enabled || !fist_on()) return;
     for (int s = 0; s < 2; s++) {
         if (!G.pf[s].ok) continue;
         float g = G.pf[s].grip;
@@ -952,7 +959,7 @@ int vrbody_apply(uint8_t *ram) {
         }
         G.pf[s].ok = 1; G.pf[s].model = pw.model; G.pf[s].side = -rig.side; G.pf[s].grip = h->grip_cur * we_w;
         memcpy(G.pf[s].R, nw[2].R, sizeof G.pf[s].R); memcpy(G.pf[s].t, nw[2].t, sizeof G.pf[s].t);
-        if (cfg->fist_enabled && h->grip_cur * we_w >= cfg->fist_min_grip) fist_apply(ram, s, pw.model, -rig.side, h->grip_cur * we_w);
+        if (fist_on() && h->grip_cur * we_w >= cfg->fist_min_grip) fist_apply(ram, s, pw.model, -rig.side, h->grip_cur * we_w);
         dbg->driven = 1; dbg->w = h->w; dbg->grip = h->grip_cur; v_cp(dbg->target_wrist, wt); memcpy(dbg->target_hand, Rtb, sizeof Rtb); dbg->sol = sol;
         driven++;
     }

@@ -298,6 +298,7 @@ void mv_vrhost_set_ai_range(float scale) { (void)scale; }
 void mv_vrhost_set_ai_head(int on) { (void)on; }
 void mv_vrhost_set_hands_new(int on) { (void)on; }
 int mv_vrhost_hands_new(void) { return 1; }
+int mv_vrhost_hands_active(void) { return 1; }
 void mv_host_note_render(int kind) { (void)kind; }
 
 /* ---------- fluidez sintética (vr_smooth): el mundo avanza/gira con el personaje y el juego publica escenas a su ritmo ----------

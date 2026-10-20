@@ -284,6 +284,13 @@ static void test_guards(void) {
     w.map.inst = 77;
     CHECK(ns_hand_apply(&w.sc, w.st, &w.map, &in) == 0, "mapa hostil");
     world_free(&w);
+    /* parte con pieza encadenada: solo se oculta la de la malla de la manopla */
+    world_init(&w, 8, 64, 1); ns_hand_reset();
+    w.map.part[NS_PART_HAND_R].n = 2; w.map.part[NS_PART_HAND_R].idx[1] = 0;      /* la segunda pieza es otra malla (el escenario) */
+    w.sc.piece[0].flags = 0;
+    ns_hand_apply(&w.sc, w.st, &w.map, &in);
+    CHECK((w.sc.piece[1 + NS_PART_HAND_R].flags & NS_PF_HIDDEN) && !(w.sc.piece[0].flags & NS_PF_HIDDEN), "solo se oculta la pieza con la malla de la manopla");
+    world_free(&w);
     /* una pieza de la manopla ya oculta por el juego: las nuevas también */
     world_init(&w, 8, 64, 1); ns_hand_reset();
     w.sc.piece[1 + NS_PART_HAND_R].flags = NS_PF_HIDDEN;
@@ -329,15 +336,28 @@ static void test_flat_and_epoch(void) {
     CHECK(ns_store_get(w.st, id0) != NULL, "tras el ack sigue disponible");
     ns_hand_stats(&st);
     CHECK(st.rebuilt == 2, "no se reconstruye por cambiar de época (%u)", st.rebuilt);
-    /* otra manopla (otro id): se reconstruye */
+    /* otra manopla (otro id): una reconstrucción como mucho cada 30 fotogramas, mientras tanto se siguen usando las mallas anteriores */
     Glove g2; make_glove(&g2, 1, 1, 0x9999);
     ns_store_put(w.st, &g2.m);
-    w.sc.n_inst = 2; w.sc.n_piece = 17;
-    w.sc.piece[1 + NS_PART_HAND_R].flags = 0; w.sc.piece[1 + NS_PART_HAND_L].flags = 0;
-    w.sc.piece[1 + NS_PART_HAND_R].mesh_id = g2.m.id;
-    ns_hand_apply(&w.sc, w.st, &w.map, &in);
+    uint32_t bytes0 = (uint32_t)ns_store_bytes(w.st);
+    for (int f = 0; f < 10; f++) {      /* la manopla cambia de id a cada fotograma */
+        Glove gf; make_glove(&gf, 1, 1, 0xA000u + (uint64_t)f); ns_store_put(w.st, &gf.m);
+        w.sc.n_inst = 2; w.sc.n_piece = 17;
+        w.sc.piece[1 + NS_PART_HAND_R].flags = 0; w.sc.piece[1 + NS_PART_HAND_L].flags = 0;
+        w.sc.piece[1 + NS_PART_HAND_R].mesh_id = gf.m.id;
+        ns_hand_apply(&w.sc, w.st, &w.map, &in);
+    }
     ns_hand_stats(&st);
-    CHECK(st.rebuilt == 3, "otra manopla: reconstrucción (%u)", st.rebuilt);
+    CHECK(st.rebuilt == 2, "id inestable: sin reconstrucciones nuevas (%u)", st.rebuilt);
+    CHECK(ns_store_bytes(w.st) < bytes0 + 12000, "el almacén no crece con la manopla inestable (%zu -> %zu)", (size_t)bytes0, ns_store_bytes(w.st));
+    for (int f = 0; f < 30; f++) {
+        w.sc.n_inst = 2; w.sc.n_piece = 17;
+        w.sc.piece[1 + NS_PART_HAND_R].flags = 0; w.sc.piece[1 + NS_PART_HAND_L].flags = 0;
+        w.sc.piece[1 + NS_PART_HAND_R].mesh_id = g2.m.id;
+        ns_hand_apply(&w.sc, w.st, &w.map, &in);
+    }
+    ns_hand_stats(&st);
+    CHECK(st.rebuilt == 3, "pasados 30 fotogramas, reconstrucción (%u)", st.rebuilt);
     world_free(&w);
     /* almacén lleno: no se pone ni se oculta nada */
     world_init(&w, 8, 64, 1); ns_hand_reset();

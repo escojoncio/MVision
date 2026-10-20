@@ -14,7 +14,10 @@ typedef struct {
     NsFace f[NS_HAND_BONES][VRHAND_MAX_F];
     NsMesh mesh[NS_HAND_BONES];
     int textured;
+    uint32_t last_build;         /* fotograma (S.st.frames) de la última construcción */
+    uint32_t next_try;           /* no volver a intentar construir antes de este fotograma (tras un fallo) */
 } HandCache;
+#define NS_HAND_REBUILD_FRAMES 30u   /* como mucho una (re)construcción cada N fotogramas: una manopla que cambie de id a cada fotograma no hace crecer el almacén */
 
 static struct { HandCache c[2]; NsHandStats st; } S;   /* índice 0 = izquierda, 1 = derecha */
 
@@ -142,9 +145,13 @@ static int one_hand(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const 
     if (sc->n_inst + 1 > sc->cap_inst || sc->n_piece + NS_HAND_BONES > sc->cap_piece) { S.st.no_room++; return 0; }
     HandCache *c = &S.c[h];
     if (!c->valid || c->glove_id != g->id) {
-        if (!build(c, side, g)) { c->valid = 0; S.st.no_mesh++; return 0; }
-        S.st.rebuilt++;
-        if (!c->textured) S.st.flat++;
+        if (!c->valid && S.st.frames < c->next_try) { S.st.no_mesh++; return 0; }                       /* fallo reciente: no reintentar todavía */
+        if (!c->valid || S.st.frames - c->last_build >= NS_HAND_REBUILD_FRAMES) {                        /* manopla distinta: reconstruir como mucho cada N fotogramas */
+            if (!build(c, side, g)) { c->valid = 0; c->next_try = S.st.frames + NS_HAND_REBUILD_FRAMES; S.st.no_mesh++; return 0; }
+            c->last_build = S.st.frames;
+            S.st.rebuilt++;
+            if (!c->textured) S.st.flat++;
+        }                                                                                                 /* si no, se sigue con las mallas anteriores */
     }
     for (int k = 0; k < NS_HAND_BONES; k++) if (ns_store_put(st, &c->mesh[k]) < 0) { S.st.put_fail++; return 0; }
     float xf[NS_HAND_BONES][12];
@@ -164,7 +171,10 @@ static int one_hand(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const 
         p->flags = gp->flags & NS_PF_HIDDEN;
     }
     sc->n_inst++; sc->n_piece += NS_HAND_BONES;
-    for (int i = 0; i < map->part[part].n; i++) sc->piece[map->part[part].idx[i]].flags |= NS_PF_HIDDEN;
+    for (int i = 0; i < map->part[part].n; i++) {                                    /* solo las piezas con la malla de la manopla (no otras encadenadas) */
+        NsPiece *hp = &sc->piece[map->part[part].idx[i]];
+        if (hp->mesh_id == gp->mesh_id) hp->flags |= NS_PF_HIDDEN;
+    }
     S.st.applied++;
     return 1;
 }

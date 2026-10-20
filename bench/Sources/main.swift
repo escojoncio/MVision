@@ -339,7 +339,10 @@ func runCase(_ cfg: Cfg, first: Bool) {
         // así que sus posiciones en los ojos del usuario difieren como las de un objeto de la pantalla (no como las de uno lejano)
         if let a = disparity["rojo0"], let b = disparity["rojo1"] { print("[diag] cubo rojo: x ojo izq \(a) der \(b)") }
         // la cabeza no cambia el encuadre: segunda imagen con otra pose y misma escena -> la imagen del juego en la pantalla es la misma textura
-        check(caso, "texturas estereo con tamano", enc.renderer.stereoImage?.arrayLength == 2, "arrayLength=\(String(describing: enc.renderer.stereoImage?.arrayLength))")
+        // La textura de la pantalla 3D se reserva en cuanto se pide (prepareStereo) pero `stereoImage` solo la devuelve una vez dibujada por el nativo (aquí no hay escena nativa): se
+        // comprueba la reservada (array de 2 ojos) y, si hay imagen, que sea la misma.
+        check(caso, "texturas estereo con tamano", enc.renderer.stereoAllocatedLength == 2, "arrayLength reservada=\(enc.renderer.stereoAllocatedLength)")
+        if let si = enc.renderer.stereoImage { check(caso, "imagen estereo = array de 2 ojos", si.arrayLength == 2, "arrayLength=\(si.arrayLength)") }
     }
 
     // ---------- B: mundo ----------
@@ -418,7 +421,10 @@ func runCase(_ cfg: Cfg, first: Bool) {
             for (nm, d, col) in [("X rojo", SIMD3<Float>(1, 0, 0), (255, 0, 0)), ("Y verde", SIMD3<Float>(0, 1, 0), (0, 255, 0)), ("Z azul", SIMD3<Float>(0, 0, 1), (0, 0, 255))] {
                 guard let px = project(axOrigin + d * 0.15, eye: e, head: headB) else { check(caso, "ojo \(e) eje \(nm)", false, "detras de la camara"); continue }
                 var found = false
-                for dy in -5...5 { for dx in -5...5 where !found { found = near(im.rgb(px.0 + dx, px.1 + dy), col, 60) } }
+                // El color real de cada eje es el de su textura (XRDebugAxes: rojo 255,40,40; verde 50,255,60; azul 70,110,255): el azul puro (0,0,255) quedaba a 70/110 de él y solo
+                // pasaba por la conversión de la salida; se acepta el color de la textura o el puro.
+                let alt: (Int, Int, Int) = nm.hasPrefix("Z") ? (70, 110, 255) : col
+                for dy in -5...5 { for dx in -5...5 where !found { let q = im.rgb(px.0 + dx, px.1 + dy); found = near(q, col, 60) || near(q, alt, 60) } }
                 check(caso, "ojo \(e) eje \(nm)", found, "ningun pixel \(col) cerca de (\(px.0),\(px.1))")
             }
             // radar de muñeca y arma en mano (informativos: no hacen fallar el banco, ver "soft")
