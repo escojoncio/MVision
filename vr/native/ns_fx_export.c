@@ -14,7 +14,7 @@ uint32_t ns_fx_export(const NsFxScene *sc, int include_culled, NsEffect *out, ui
         if (n >= cap) { if (truncated) *truncated = 1; break; }
         NsEffect *e = &out[n++];
         memset(e, 0, sizeof *e);
-        e->depth_bias = it->raise; e->abr = it->abr; e->tpage = it->tpage; e->clut = it->clut; e->src_key = it->prim; e->idx = it->idx; e->sub = (uint8_t)(it->sub & 0xFF);
+        e->depth_bias = it->raise; e->abr = it->abr; e->tpage = it->tpage; e->clut = it->clut; e->src_key = it->prim; e->idx = it->idx; e->role = it->role; e->sub = (uint8_t)(it->sub & 0xFF);
         e->flags = (uint16_t)(((it->flags & NSFX_F_SEMI) ? NS_EF_SEMI : 0) | ((it->flags & NSFX_F_TEXTURED) ? NS_EF_TEXTURED : 0) | ((it->flags & NSFX_F_GOURAUD) ? NS_EF_GOURAUD : 0) |
                               ((it->flags & NSFX_F_ONESIDE) ? NS_EF_ONESIDE : 0) | ((it->flags & NSFX_F_VIEWLOCKED) ? NS_EF_ON_CAMERA : 0));
         memcpy(e->rgb, it->rgb, sizeof e->rgb); memcpy(e->uv, it->uv, sizeof e->uv);

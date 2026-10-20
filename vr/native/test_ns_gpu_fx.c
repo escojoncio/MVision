@@ -259,6 +259,106 @@ static void t_merge(void) {
     CHECK(ns_gpu_sort_semi_ex(&src, 1, ord, abo, dep, 2, NULL) == 2 && ord[0].tri == 1 && dep[0] == 3.0f && dep[1] == 1.0f && abo[0] == 1, "sort con profundidad");
 }
 
+
+/* ---- comodidad VR: efectos cerca de la cabeza ---- */
+static NsEffect board(float x, float y, float z, float half_px, uint8_t role, uint16_t flags) {
+    NsEffect e; memset(&e, 0, sizeof e);
+    e.kind = NS_EK_BILLBOARD; e.nv = 4; e.flags = (uint16_t)(NS_EF_TEXTURED | NS_EF_SEMI | flags); e.abr = 1; e.role = role; e.src_key = 0x80300000u + (uint32_t)(z * 7.0f); e.tpage = 0x1a; e.clut = 0x3db1;
+    e.p[0][0] = x; e.p[0][1] = y; e.p[0][2] = z; e.ref_h = 320.0f; e.box[0] = -half_px; e.box[1] = -half_px; e.box[2] = half_px; e.box[3] = half_px;
+    for (int v = 0; v < 4; v++) for (int c = 0; c < 3; c++) e.rgb[v][c] = 128;
+    return e;
+}
+/* mayor ángulo (grados) entre dos esquinas del primer cuadrilátero de la salida (vértices 0,1,2 y 5), visto desde la cabeza (origen) */
+static float out_deg(const NsGpuFxVert *v) {
+    const int idx[4] = {0, 1, 2, 5}; float u[4][3], best = 0;
+    for (int i = 0; i < 4; i++) { const float *p = v[idx[i]].p; float l = sqrtf(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]); for (int c = 0; c < 3; c++) u[i][c] = p[c] / l; }
+    for (int a = 0; a < 4; a++) for (int b = a + 1; b < 4; b++) { float d = u[a][0] * u[b][0] + u[a][1] * u[b][1] + u[a][2] * u[b][2]; if (d > 1) d = 1; float g = acosf(d) * 57.29578f; if (g > best) best = g; }
+    return best;
+}
+static void t_comfort(void) {
+    NsGpuFxVert vb[128], ref[128]; NsGpuFxRun runs[16]; uint64_t keys[16]; NsGpuFxOut o;
+    /* tope: 0 dentro de la cabeza, X a 0,3 m, 90 a 1 m, sin tope más allá; continuo y creciente */
+    CHECK(ns_gpu_fx_comfort_cap_deg(0.10f, 20, 0) == 0.0f && ns_gpu_fx_comfort_cap_deg(0.12f, 20, 0) == 0.0f, "dentro de la cabeza: descartar");
+    CHECK(fabsf(ns_gpu_fx_comfort_cap_deg(0.3f, 20, 0) - 20.0f) < 1e-3f && fabsf(ns_gpu_fx_comfort_cap_deg(1.0f - 1e-4f, 20, 0) - 90.0f) < 0.1f && ns_gpu_fx_comfort_cap_deg(1.5f, 20, 0) > 1e8f, "tope 20 / 90 / libre");
+    { float prev = -1; int mono = 1; for (float d = 0.121f; d < 1.0f; d += 0.01f) { float c = ns_gpu_fx_comfort_cap_deg(d, 20, 0); if (c < prev - 1e-4f) mono = 0; prev = c; } CHECK(mono, "tope creciente con la distancia"); }
+    CHECK(ns_gpu_fx_comfort_cap_deg(0.05f, 0, 0) > 1e8f, "X = 0: desactivado");
+
+    /* desactivado (comfort_deg = 0): el cartel de 320 px a 0,25 m no se toca */
+    NsEffect big = board(0, 0, 250, 160, NSFX_ROLE_LIGHT, 0);
+    CHECK(build(&big, 1, ref, runs, keys, &o) == 0 && o.n_opaque + o.n_semi > 0 && o.n_shrunk == 0, "sin comodidad");
+    float raw = out_deg(&ref[o.n_opaque]);
+    CHECK(raw > 45.0f, "el cartel de pantalla completa a 0,25 m ocupa %.0f grados (el motor lo hace asi)", raw);
+    CHECK(o.n_near == 1 && o.n_rec == 1 && o.rec[0].role == NSFX_ROLE_LIGHT && o.rec[0].action == NSG_FXN_KEPT && fabsf(o.rec[0].dist_m - 0.25f) < 1e-3f, "registro del cercano: n=%u", o.n_near);
+
+    P.comfort_deg = 20; P.comfort_dmin_m = 0; P.oncam_drop_m = 1.5f;
+    /* reducido alrededor del centro: tope respetado, centro igual */
+    CHECK(build(&big, 1, vb, runs, keys, &o) == 0 && o.n_shrunk == 1 && o.n_keys == 1, "reducido");
+    float cap = ns_gpu_fx_comfort_cap_deg(0.25f, 20, 0), got = out_deg(&vb[o.n_opaque]);
+    CHECK(got <= cap * 1.01f && got > cap * 0.8f, "tamano angular %.1f <= tope %.1f (antes %.0f)", got, cap, raw);
+    { const NsGpuFxVert *a = &vb[o.n_opaque], *r = &ref[0]; float cx = 0, rx = 0, cz = 0, rz = 0; const int ix[4] = {0, 1, 2, 5};
+      NsGpuFxOut o0; build(&big, 1, ref, runs, keys, &o0); r = &ref[o0.n_opaque];
+      for (int i = 0; i < 4; i++) { cx += a[ix[i]].p[0] / 4; rx += r[ix[i]].p[0] / 4; cz += a[ix[i]].p[2] / 4; rz += r[ix[i]].p[2] / 4; }
+      CHECK(fabsf(cx - rx) < 1e-4f && fabsf(cz - rz) < 1e-4f, "el centro no se mueve (%f %f)", cx - rx, cz - rz); }
+    CHECK(o.rec[0].action == NSG_FXN_SHRUNK && o.rec[0].deg_raw > 45.0f && o.rec[0].deg_after <= cap * 1.01f, "registro: reducido %.0f->%.0f", o.rec[0].deg_raw, o.rec[0].deg_after);
+
+    /* nace dentro de la cabeza: descartado pero confirmado (la clave entra: el motor no lo redibuja) */
+    NsEffect in = board(0, 0, 50, 8, NSFX_ROLE_SPARK, 0);
+    CHECK(build(&in, 1, vb, runs, keys, &o) == 0 && o.n_drop_inside == 1 && o.n_opaque + o.n_semi == 0 && o.n_keys == 1 && keys[0] == ns_gpu_fx_key(&in), "dentro de la cabeza: descartado y confirmado");
+
+    /* pegado a la cámara del motor: descartado a < 1,5 m, se conserva más lejos y si oncam_drop_m = 0 */
+    NsEffect fog = board(0, 0, 1000, 40, NSFX_ROLE_VIEW_OVERLAY, NS_EF_ON_CAMERA), far = board(0, 0, 2000, 40, NSFX_ROLE_VIEW_OVERLAY, NS_EF_ON_CAMERA);
+    CHECK(build(&fog, 1, vb, runs, keys, &o) == 0 && o.n_drop_oncam == 1 && o.n_opaque + o.n_semi == 0 && o.n_keys == 1, "ON_CAMERA a 1 m: descartado y confirmado");
+    CHECK(o.n_rec == 1 && o.rec[0].action == NSG_FXN_DROP_ONCAM && o.rec[0].screen == 1 && o.n_near == 0, "ON_CAMERA descartado queda en el registro aunque no sea < 0,5 m");
+    CHECK(build(&far, 1, vb, runs, keys, &o) == 0 && o.n_drop_oncam == 0 && o.n_semi > 0, "ON_CAMERA a 2 m se conserva");
+    NsEffect scr = board(0, 0, 2000, 40, NSFX_ROLE_VIEW_OVERLAY, 0);   /* papel de superficie de vista sin la bandera */
+    scr.p[0][2] = 1000;
+    CHECK(build(&scr, 1, vb, runs, keys, &o) == 0 && o.n_drop_oncam == 1, "papel VIEW_OVERLAY tambien es de pantalla");
+    P.oncam_drop_m = 0;
+    CHECK(build(&fog, 1, vb, runs, keys, &o) == 0 && o.n_drop_oncam == 0 && o.n_semi > 0, "oncam_drop_m = 0: se conserva");
+    P.oncam_drop_m = 1.5f;
+
+    /* lo lejano no se toca: halo de 3 m a 3 m, y un halo grande a 1,2 m (sin tope) */
+    NsEffect halo = board(0, 0, 3000, 160, NSFX_ROLE_LIGHT, 0), mid = board(0, 0, 1200, 160, NSFX_ROLE_LIGHT, 0), two[2] = {halo, mid};
+    NsGpuFxVert vb2[128];
+    P.comfort_deg = 0; CHECK(build(two, 2, ref, runs, keys, &o) == 0, "ref");
+    P.comfort_deg = 20; CHECK(build(two, 2, vb2, runs, keys, &o) == 0 && o.n_shrunk == 0 && o.n_drop_inside == 0 && memcmp(ref, vb2, sizeof(NsGpuFxVert) * (o.n_opaque + o.n_semi)) == 0, "a mas de 1 m: identico");
+
+    /* poca profundidad: cartel en píxeles con z < 32 (referencia 1000): el tamaño de mundo se infla, la comodidad lo acota y se cuenta */
+    NsEffect zr = board(0, 0, 20, 160, NSFX_ROLE_LIGHT, 0);
+    zr.p[0][2] = 20; /* 2 cm: z menor que el mínimo fiable; el centro queda dentro de la cabeza */
+    CHECK(build(&zr, 1, vb, runs, keys, &o) == 0 && o.n_zref == 1 && o.n_drop_inside == 1, "z < zmin: cuenta de referencia usada y descartado por estar dentro de la cabeza");
+    zr.p[0][2] = 300; zr.p[0][0] = 0; P.px_z_min = 400;   /* cartel de 0,3 m con z < zmin => 1000 en lugar de 300: 3.3x mas grande */
+    CHECK(build(&zr, 1, vb, runs, keys, &o) == 0 && o.n_zref == 1 && o.n_shrunk == 1 && out_deg(&vb[o.n_opaque]) <= ns_gpu_fx_comfort_cap_deg(0.3f, 20, 0) * 1.01f, "cartel inflado por la profundidad de referencia queda acotado");
+    P.px_z_min = 0;
+
+    /* superficies del entorno (agua, paneles) no son sprites: ni se reducen ni se descartan */
+    NsEffect wq = quad(0, 0, 400, 300); wq.role = NSFX_ROLE_WATER_SURFACE; wq.flags = NS_EF_SEMI; wq.abr = 1;
+    P.comfort_deg = 0; build(&wq, 1, ref, runs, keys, &o);
+    P.comfort_deg = 20; CHECK(build(&wq, 1, vb, runs, keys, &o) == 0 && o.n_shrunk == 0 && memcmp(ref, vb, sizeof(NsGpuFxVert) * (o.n_opaque + o.n_semi)) == 0, "superficie de agua intacta");
+    NsEffect pq = quad(0, 0, 400, 300); pq.role = NSFX_ROLE_SPARK; pq.flags = NS_EF_SEMI; pq.abr = 1;
+    CHECK(build(&pq, 1, vb, runs, keys, &o) == 0 && o.n_shrunk == 1, "el mismo polígono con papel de chispa si se reduce");
+
+    /* registro: texto con papel, ON_CAMERA, distancia y ángulos; y el acumulador */
+    { NsEffect set[3] = {board(0, 0, 250, 160, NSFX_ROLE_LIGHT, 0), board(0, 0, 400, 40, NSFX_ROLE_DROPLET, NS_EF_ON_CAMERA), board(0, 0, 450, 40, NSFX_ROLE_SMOKE, 0)};
+      NsGpuFxNearAcc acc; ns_gpu_fx_near_reset(&acc);
+      CHECK(build(set, 3, vb, runs, keys, &o) == 0 && o.n_near == 3 && o.n_near_oncam == 1 && o.n_near_screen == 1 && o.n_drop_oncam == 1 && o.n_shrunk == 1, "tres cercanos (<0,5 m: %u) 1 pegado", o.n_near);
+      float h0[3] = {0, 1.6f, 0}, h1[3] = {1.0f, 1.6f, 0}, r0[3] = {1, 0, 0}, r1[3] = {0.7071f, 0, 0.7071f};
+      ns_gpu_fx_near_accum(&acc, &o, h0, r0, 10.0f);
+      ns_gpu_fx_near_accum(&acc, &o, h1, r1, 10.5f);   /* 2 m/s y 90 grados en 0,5 s */
+      CHECK(acc.frames == 2 && acc.frames_near == 2 && acc.frames_moving == 1 && acc.frames_moving_near == 1 && fabsf(acc.max_speed_mps - 2.0f) < 0.01f && fabsf(acc.max_turn_dps - 90.0f) < 1.0f, "acumulador: mov=%u v=%.2f w=%.0f", acc.frames_moving, acc.max_speed_mps, acc.max_turn_dps);
+      char txt[1536]; size_t n = ns_gpu_fx_near_describe(&acc, txt, sizeof txt);
+      CHECK(n > 100 && n < sizeof txt && strstr(txt, "rol=light") && strstr(txt, "rol=droplet ") && strstr(txt, "ON_CAMERA") && strstr(txt, "reducido") && strstr(txt, "descartado_pegado") && strstr(txt, "en_movimiento=1") && !strchr(txt, '\n'), "texto del registro: %s", txt);
+      CHECK(ns_gpu_fx_near_describe(&acc, txt, 40) < 40, "descripcion acotada al buffer");
+      ns_gpu_fx_near_reset(&acc); CHECK(acc.frames == 0 && acc.n_rec == 0, "reset");
+    }
+    /* roles: la tabla de nombres coincide con la del extractor */
+    for (int k = 0; k < NSFX_ROLE_COUNT; k++) CHECK(strcmp(ns_gpu_fx_role_name(k), ns_fx_role_name(k)) == 0, "papel %d: %s vs %s", k, ns_gpu_fx_role_name(k), ns_fx_role_name(k));
+    /* el papel del extractor llega al efecto exportado */
+    { NsFxScene *sc = ns_fx_scene_create(0); NsFxItem *it = &sc->items[0]; memset(it, 0, sizeof *it); it->shape = NSFX_SH_BILLBOARD; it->nv = 4; it->role = NSFX_ROLE_VIEW_OVERLAY; it->flags = NSFX_F_VIEWLOCKED | NSFX_F_PXSIZE; sc->n_items = 1; sc->cam.proj_h = 320; sc->cam.y_scale = 1;
+      NsEffect fx[1]; int tr = 0; CHECK(ns_fx_export(sc, 1, fx, 1, &tr) == 1 && fx[0].role == NSFX_ROLE_VIEW_OVERLAY && (fx[0].flags & NS_EF_ON_CAMERA), "export con papel y ON_CAMERA");
+      ns_fx_scene_destroy(sc); }
+}
+
 int main(void) {
     setup();
     t_poly();
@@ -270,6 +370,7 @@ int main(void) {
     setup(); t_fog();
     setup(); t_merge();
     t_export_roundtrip();
+    setup(); t_comfort();
     printf("%s: %d comprobaciones, %d fallos\n", g_fail ? "FALLA" : "OK", g_checks, g_fail);
     return g_fail != 0;
 }
