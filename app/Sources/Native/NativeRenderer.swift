@@ -939,9 +939,9 @@ final class NativeRenderer {
         prm.has_depth_row = 1
         prm.raise_m = fogPar.w        // sesgo `raise` del motor por elemento, con la misma unidad que las mallas
         prm.board_pull = 1            // carteles (halos, destellos): adelantados media extension hacia la cabeza, sin cambiar lo que se ve
-        // comodidad VR: ningun efecto ocupa mas de 20 grados a 0,3 m de la cabeza (sube hasta 90 grados a 1 m), los que nacen a menos de 12 cm se descartan y los pegados a la camara del motor
-        // (sin emisor en el mundo: vaho, gotas, niebla de pantalla) se descartan a menos de 1,5 m. Los recubrimientos intencionados de pantalla (fundido, gas, agua) van por NsScreenFx, no por aqui.
-        prm.comfort_deg = 20; prm.comfort_dmin_m = 0.12; prm.oncam_drop_m = 1.5; prm.near_log_m = 0.5
+        // Los efectos se colocan con la geometria del propio motor (tamano en mundo exacto, ver ns_fx.c): aqui NO se encogen ni se quitan (comfort_deg = 0, oncam_drop_m = 0).
+        // Unica red de seguridad: un efecto con el centro a menos de 5 cm de la cabeza se descarta. near_log_m: radio del registro `fx-cerca`.
+        prm.comfort_deg = 0; prm.comfort_dmin_m = 0; prm.oncam_drop_m = 0; prm.near_log_m = 0.5; prm.drop_inside_m = 0.05
         prm.depth_row = (-sortView.columns.0.z, -sortView.columns.1.z, -sortView.columns.2.z, -sortView.columns.3.z)
         let rc: Int32 = toVR12.withUnsafeBufferPointer { (tv) -> Int32 in
             withUnsafePointer(to: &fxCam) { (camP) -> Int32 in

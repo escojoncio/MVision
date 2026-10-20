@@ -91,6 +91,7 @@ enum {
     NSFX_F_FROM_OBJ = 512,     /* viene de un objeto de malla (sombra) y no de una primitiva */
     NSFX_F_TPAGE_UNKNOWN = 1024, /* sprite texturizado: la página de textura no está en el paquete; ns_fx_resolve_items la toma de la GPU */
     NSFX_F_LOW_CONF = 2048,    /* sin profundidad en el paquete (sz == 0): posiciones de mundo válidas, pero ni la reproyección ni la casación con la GPU son fiables */
+    NSFX_F_NOSIZE = 8192,      /* cartel de tamaño en píxeles que el motor no emitió este fotograma y del que no hay tamaño en mundo aprendido: no se exporta (nunca se inventa una profundidad) */
     NSFX_F_LEARNED = 4096      /* la página de textura y/o el modo de mezcla no estaban en el paquete y se tomaron de una lista de la GPU anterior (ns_fx_learn) o de la última sombra emitida */
 };
 
@@ -189,8 +190,8 @@ typedef struct {
     float line_px;        /* grosor de las líneas de color plano, en píxeles */
     float line_tex_px;    /* grosor de las líneas texturizadas, en píxeles */
     float shadow_half;    /* semilado del cuadrado base de los objetos de sombra, antes de escalar */
-    float px_z_min;       /* profundidad mínima con la que un tamaño en píxeles se convierte a mundo */
-    float px_z_ref;       /* profundidad de referencia que se usa si la real es menor */
+    float px_z_min;       /* SIN USO (antes: profundidad mínima fiable de un tamaño en píxeles). Los tamaños se convierten con la z real del motor */
+    float px_z_ref;       /* SIN USO (antes: profundidad de referencia). Un cartel sin emisión usa su tamaño en mundo aprendido o no se exporta */
     float ring_outer_px;  /* radio horizontal exterior del anillo */
     int ring_segments;    /* polígonos del anillo */
     int wave_rows, wave_period, bar_rows;   /* ondulación y barras bajo el agua */

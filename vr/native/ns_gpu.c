@@ -689,7 +689,8 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
         int nq = 0, tri_only = 0, used_zref = 0;
         for (int v = 0; v < 4; v++) { uvs[v][0] = e->uv[v][0]; uvs[v][1] = e->uv[v][1]; for (int c = 0; c < 3; c++) cols[v][c] = e->rgb[v][c]; }
         if (e->kind == NS_EK_BILLBOARD) {
-            if (!fx_finite3(e->p[0]) || !(e->ref_h > 0)) ok = 0;
+            const int wsz = (e->flags & NS_EF_WORLD_SIZE) != 0;
+            if (!fx_finite3(e->p[0]) || (!wsz && !(e->ref_h > 0))) ok = 0;
             else {
                 float c[3];
                 fx_vr(M, e->p[0], c);
@@ -697,9 +698,14 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
                 const float *E = prm->cam->eye;
                 float z = 0;
                 for (int r = 0; r < 3; r++) z += (e->p[0][r] - E[r]) * R[3 * r + 2];
-                if (z < zmin) { z = zref; used_zref = 1; }
-                float k = z / e->ref_h;
-                float x0 = e->box[0] * k, y0 = e->box[1] * k / ys, x1 = e->box[2] * k, y1 = e->box[3] * k / ys;
+                float x0, y0, x1, y1;
+                if (wsz) {   /* tamaño en mundo (unidades del motor del plano de la vista): no depende de ninguna profundidad */
+                    x0 = e->box[0]; y0 = e->box[1]; x1 = e->box[2]; y1 = e->box[3];
+                } else {     /* heredado: caja en píxeles a la profundidad de la cámara del juego */
+                    if (z < zmin) { z = zref; used_zref = 1; }
+                    float k = z / e->ref_h;
+                    x0 = e->box[0] * k; y0 = e->box[1] * k / ys; x1 = e->box[2] * k; y1 = e->box[3] * k / ys;
+                }
                 const float ox[4] = {x0, x1, x0, x1}, oy[4] = {y0, y0, y1, y1};
                 for (int v = 0; v < 4; v++) for (int r = 0; r < 3; r++) q[v][r] = c[r] + prm->head_right[r] * ox[v] * L - prm->head_up[r] * oy[v] * L;
                 { float zc = ns_gpu_game_z(prm->cam, e->p[0]); fz[0] = fz[1] = fz[2] = fz[3] = zc; }
@@ -718,7 +724,7 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
                 for (int r = 0; r < 3; r++) z += (e->p[0][r] - E[r]) * R[3 * r + 2];
                 if (z < zmin) z = zref;
                 float wpx = e->width_px > 0 ? e->width_px : 1.0f;
-                float half = 0.5f * wpx * z / (prm->cam->h > 0 ? prm->cam->h : 320.0f) * L;   /* anchura en el mundo VR */
+                float half = ((e->flags & NS_EF_WORLD_SIZE) ? 0.5f * wpx : 0.5f * wpx * z / (prm->cam->h > 0 ? prm->cam->h : 320.0f)) * L;   /* anchura en el mundo VR */
                 float dl = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
                 if (!(dl > 1e-9f) || !(l > 1e-4f * dl)) ok = 0;   /* línea nula o vista de punta (la cabeza sobre ella, a menos de 0,1 mm) */
                 else {
@@ -778,8 +784,9 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
             const int env = e->role == FXR_SURFACE || e->role == FXR_WATER_SURFACE;   /* superficies del entorno (agua, paneles): no son sprites, no se reducen */
             const int watch = dc < nearm;
             float deg0 = 0.0f, deg1 = 0.0f; int action = NSG_FXN_KEPT;
-            if (watch || prm->comfort_deg > 0.0f || (screen && prm->oncam_drop_m > 0.0f)) deg0 = deg1 = fx_ang_deg(q, nq, prm->head);
+            if (watch || prm->comfort_deg > 0.0f || prm->drop_inside_m > 0.0f || (screen && prm->oncam_drop_m > 0.0f)) deg0 = deg1 = fx_ang_deg(q, nq, prm->head);
             if (screen && prm->oncam_drop_m > 0.0f && dc < prm->oncam_drop_m) { dropped = 1; action = NSG_FXN_DROP_ONCAM; out->n_drop_oncam++; deg1 = 0.0f; }
+            else if (prm->drop_inside_m > 0.0f && !env && dc < prm->drop_inside_m) { dropped = 1; action = NSG_FXN_DROP_INSIDE; out->n_drop_inside++; deg1 = 0.0f; }
             else if (prm->comfort_deg > 0.0f && !env) {
                 const float cap = ns_gpu_fx_comfort_cap_deg(dc, prm->comfort_deg, prm->comfort_dmin_m);
                 if (cap <= 0.0f) { dropped = 1; action = NSG_FXN_DROP_INSIDE; out->n_drop_inside++; deg1 = 0.0f; }

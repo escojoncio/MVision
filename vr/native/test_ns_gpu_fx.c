@@ -359,6 +359,45 @@ static void t_comfort(void) {
       ns_fx_scene_destroy(sc); }
 }
 
+/* Tamaño en mundo (NS_EF_WORLD_SIZE): no depende de ninguna profundidad; red de seguridad mínima; nada se encoge ni se quita si está bien colocado */
+static void t_world_size(void) {
+    NsGpuFxVert vb[64]; NsGpuFxRun runs[8]; uint64_t keys[8]; NsGpuFxOut o;
+    /* halo de 2 m (semiextensión 1000 unidades) a 8 m delante, 3 cm delante de la cámara y DETRÁS de la cámara: siempre 2 m de lado, nunca 2000 m */
+    const float zs[4] = {8000, 400, 30, -9000};
+    for (int i = 0; i < 4; i++) {
+        NsEffect e = board(0, 0, zs[i], 0, NSFX_ROLE_LIGHT, NS_EF_WORLD_SIZE);
+        e.box[0] = -1000; e.box[1] = -1000; e.box[2] = 1000; e.box[3] = 1000;
+        e.ref_h = 320;
+        CHECK(build(&e, 1, vb, runs, keys, &o) == 0 && o.n_opaque + o.n_semi > 0 && o.n_zref == 0, "halo z=%.0f", zs[i]);
+        const NsGpuFxVert *v = &vb[o.n_opaque];
+        float w = v[1].p[0] - v[0].p[0], h = fabsf(v[0].p[1] - v[2].p[1]);
+        CHECK(fabsf(w - 2.0f) < 1e-4f && fabsf(h - 2.0f) < 1e-4f, "z=%.0f: lado %.3f x %.3f m (2 m en cualquier profundidad)", zs[i], w, h);
+    }
+    /* centro y orientación a la cabeza intactos, y con ref_h = 0 también vale (no depende de la proyección) */
+    { NsEffect e = board(500, -200, 3000, 0, NSFX_ROLE_LIGHT, NS_EF_WORLD_SIZE); e.box[0] = -50; e.box[1] = -40; e.box[2] = 70; e.box[3] = 40; e.ref_h = 0;
+      CHECK(build(&e, 1, vb, runs, keys, &o) == 0 && o.n_opaque + o.n_semi > 0, "ref_h = 0 en modo mundo");
+      const NsGpuFxVert *v = &vb[o.n_opaque];
+      CHECK(fabsf(v[0].p[0] - (0.5f - 0.05f)) < 1e-5f && fabsf(v[1].p[0] - (0.5f + 0.07f)) < 1e-5f && fabsf(v[0].p[1] - 0.24f) < 1e-5f && fabsf(v[2].p[1] - 0.16f) < 1e-5f, "semiextensiones asimétricas en mundo"); }
+    /* cinta: anchura en mundo */
+    { NsEffect e; memset(&e, 0, sizeof e); e.kind = NS_EK_QUAD; e.nv = 2; e.flags = NS_EF_LINE | NS_EF_WORLD_SIZE | NS_EF_SEMI; e.abr = 1; e.src_key = 0x80400000u; e.width_px = 100; /* 0,1 m */
+      e.p[0][0] = 0; e.p[0][1] = 0; e.p[0][2] = -5000; e.p[1][0] = 0; e.p[1][1] = 1000; e.p[1][2] = -5000;   /* detrás de la cámara */
+      CHECK(build(&e, 1, vb, runs, keys, &o) == 0 && o.n_opaque + o.n_semi > 0, "cinta");
+      const NsGpuFxVert *v = &vb[o.n_opaque];
+      float w = sqrtf((v[1].p[0] - v[0].p[0]) * (v[1].p[0] - v[0].p[0]) + (v[1].p[1] - v[0].p[1]) * (v[1].p[1] - v[0].p[1]) + (v[1].p[2] - v[0].p[2]) * (v[1].p[2] - v[0].p[2]));
+      CHECK(fabsf(w - 0.1f) < 1e-4f, "anchura de la cinta %.4f m (0,1 en cualquier profundidad)", w); }
+    /* red de seguridad: sin comfort_deg ni oncam_drop_m solo se descarta (confirmado) lo que nace a menos de drop_inside_m; un pegado a la cámara a 0,5 m queda tal cual */
+    P.comfort_deg = 0; P.oncam_drop_m = 0; P.drop_inside_m = 0.05f;
+    NsEffect in = board(0, 0, 30, 0, NSFX_ROLE_SPARK, NS_EF_WORLD_SIZE), ok5 = board(0, 0, 60, 0, NSFX_ROLE_SPARK, NS_EF_WORLD_SIZE);
+    in.box[0] = in.box[1] = -10; in.box[2] = in.box[3] = 10; ok5.box[0] = ok5.box[1] = -10; ok5.box[2] = ok5.box[3] = 10; in.ref_h = ok5.ref_h = 320;
+    CHECK(build(&in, 1, vb, runs, keys, &o) == 0 && o.n_drop_inside == 1 && o.n_keys == 1 && o.n_opaque + o.n_semi == 0, "a 3 cm: descartado y confirmado");
+    CHECK(build(&ok5, 1, vb, runs, keys, &o) == 0 && o.n_drop_inside == 0 && o.n_opaque + o.n_semi > 0, "a 6 cm: se dibuja");
+    NsEffect fog = board(0, 0, 500, 0, NSFX_ROLE_VIEW_OVERLAY, NS_EF_ON_CAMERA | NS_EF_WORLD_SIZE); fog.box[0] = fog.box[1] = -400; fog.box[2] = fog.box[3] = 400; fog.ref_h = 320;
+    NsGpuFxVert vr[64]; P.drop_inside_m = 0; CHECK(build(&fog, 1, vr, runs, keys, &o) == 0, "ref");
+    P.drop_inside_m = 0.05f;
+    CHECK(build(&fog, 1, vb, runs, keys, &o) == 0 && o.n_shrunk == 0 && o.n_drop_oncam == 0 && memcmp(vr, vb, sizeof(NsGpuFxVert) * (o.n_opaque + o.n_semi)) == 0 && o.n_opaque + o.n_semi > 0,
+          "pegado a la cámara a 0,5 m, colocado como el motor: ni se encoge ni se quita");
+}
+
 int main(void) {
     setup();
     t_poly();
@@ -371,6 +410,7 @@ int main(void) {
     setup(); t_merge();
     t_export_roundtrip();
     setup(); t_comfort();
+    setup(); t_world_size();
     printf("%s: %d comprobaciones, %d fallos\n", g_fail ? "FALLA" : "OK", g_checks, g_fail);
     return g_fail != 0;
 }
