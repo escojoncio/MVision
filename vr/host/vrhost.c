@@ -805,6 +805,8 @@ static void build_one(const GpuDrawList *l, int si) {
             vl2a_options(l2a, l2d_target, atomic_load(&l2d_smooth));
             int l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO;
             vl2a_submit(l2a, hl, rc == 0 && sc.op_dest && sc.n_op_dest >= hl->nops ? sc.op_dest : NULL, l2_full, 0);
+            { static uint64_t l2_log_ns; uint64_t nn = mono_ns();   /* una línea por segundo */
+              if (nn - l2_log_ns >= 1000000000ull) { char lb[512]; l2_log_ns = nn; if (vl2a_report(l2a, lb, sizeof lb) > 0) fprintf(stderr, "%s\n", lb); } }
         }
     }
     sm_sample(&slot[si].smp, &sc, r);   /* (r = registro de cámara de la lista; antes de fill_slot: sc.v/b son memoria interna de vr_scene) */

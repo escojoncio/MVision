@@ -27,6 +27,8 @@ int vl2a_acquire(VrL2Async *A, const uint8_t **px, int *w, int *h, int *full, ui
 void vl2a_release(VrL2Async *A);
 /* Estadísticas: escala actual, ms del último dibujo del trabajador, ms máximos de vl2a_submit, retraso en listas de la última capa publicada. */
 void vl2a_stats(VrL2Async *A, int *scale, double *work_ms, double *submit_ms_max, uint32_t *lag);
+/* Línea de log «[capa2d] ...» con los contadores desde la llamada anterior (los pone a cero). Devuelve la longitud escrita. */
+int vl2a_report(VrL2Async *A, char *buf, int n);
 /* Pruebas: espera a que la cola quede vacía. */
 void vl2a_flush(VrL2Async *A);
 

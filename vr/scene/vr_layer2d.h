@@ -64,6 +64,10 @@ const VrLayerPx *vl2d_px(const VrLayer2D *L, int *w, int *h);
 /* VRAM espejo 1024x512 (pruebas). */
 const uint16_t *vl2d_vram(const VrLayer2D *L);
 
+/* Datos de la última ejecución para el log [capa2d]: marco (fw x h, aw visibles desde pad_l), escala de salida y de rasterizado, suavizado, si partió de vram_start / usó vram_end, y primitivas con «comprobar máscara». */
+typedef struct { int fw, h, aw, pad, scale, raster, smooth, full, used_start, used_end, mask_prims, prims; } VrL2Info;
+void vl2d_info(const VrLayer2D *L, VrL2Info *out);
+
 /* Composición de un píxel de la capa de ESCALA 1 sobre un mundo de 5 bits por canal (bg5) -> 5 bits (out5). */
 void vl2d_compose5(const VrLayerPx *p, const uint8_t bg5[3], uint8_t out5[3]);
 /* Codificación a RGBA8 no premultiplicado (la que usa vl2d_run). hq = 1 con color de 8 bits (escala > 1). */

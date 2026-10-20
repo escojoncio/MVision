@@ -2,6 +2,7 @@
 #include "vr_layer2d.h"
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -36,6 +37,8 @@ struct VrL2Async {
     Out out[3]; int pub, held, have_pub;        /* índice publicado / en uso por el consumidor (-1) */
     uint32_t sub_seq, pub_sub_seq, acq_seq;     /* envíos / envío al que corresponde lo publicado / último adquirido */
     double work_ms, submit_max;
+    uint32_t n_sub, n_skip, n_run, n_neg, n_pub;   /* contadores del log [capa2d] */
+    VrL2Info info;
 };
 
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec * 1e-6; }
@@ -70,8 +73,10 @@ static void *worker(void *arg) {
         memset(&sc, 0, sizeof sc);
         if (draw) { sc.op_dest = j->opd; sc.n_op_dest = j->l.nops; }
         double t0 = now_ms();
+        if (skip) A->n_skip++;   /* (contador leído bajo el mutex en vl2a_report; incremento sin él: solo informativo) */
         int have = skip ? 0 : vl2d_run(A->L, &j->l, draw ? &sc : NULL, j->full);
         double ms = now_ms() - t0;
+        VrL2Info inf; vl2d_info(A->L, &inf);
         int w = 0, h = 0;
         const uint8_t *px = have ? vl2d_rgba(A->L, &w, &h) : NULL;
         Out *o = &A->out[wi];
@@ -82,11 +87,13 @@ static void *worker(void *arg) {
         }
 
         pthread_mutex_lock(&A->mx);
+        if (!skip) { A->n_run++; if (draw) A->info = inf; }
         if (draw) {
             A->work_ms = ms;
             if (ms > SLOW_MS && A->cur > 1) { A->cur--; A->fast = 0; }
             else if (ms < FAST_MS && A->cur < atomic_load(&A->target) && ms * (double)((A->cur + 1) * (A->cur + 1)) / (double)(A->cur * A->cur) < SLOW_MS * 0.8) {   /* el coste crece con la escala al cuadrado: solo se sube si cabría */ if (++A->fast >= RECOVER) { A->cur++; A->fast = 0; } }
             else A->fast = 0;
+            if (ok) A->n_pub++;
             if (ok) { o->seq = j->lseq; A->pub = wi; A->have_pub = 1; A->pub_sub_seq = j->lseq; }
             else A->have_pub = 0;           /* lista sin capa (o fallo): el renderer usa el shader */
         }
@@ -158,7 +165,7 @@ int vl2a_submit(VrL2Async *A, const GpuDrawList *l, const uint8_t *op_dest, int 
         j->l.vram_end = j->has_vend ? j->vend : NULL;
         j->has_opd = op_dest != NULL;
         if (op_dest && l->nops) memcpy(j->opd, op_dest, l->nops);
-        j->full = full; j->reset = reset; j->lseq = ++A->sub_seq;
+        j->full = full; j->reset = reset; j->lseq = ++A->sub_seq; A->n_sub++;
         A->count++;
         pthread_cond_signal(&A->cv_job);
     }
@@ -171,7 +178,7 @@ int vl2a_submit(VrL2Async *A, const GpuDrawList *l, const uint8_t *op_dest, int 
 int vl2a_acquire(VrL2Async *A, const uint8_t **px, int *w, int *h, int *full, uint32_t *seq) {
     if (!A) return -1;
     pthread_mutex_lock(&A->mx);
-    if (!A->have_pub || A->pub < 0 || A->sub_seq - A->pub_sub_seq > L2A_STALE) { A->held = -1; pthread_mutex_unlock(&A->mx); return -1; }
+    if (!A->have_pub || A->pub < 0 || A->sub_seq - A->pub_sub_seq > L2A_STALE) { A->held = -1; A->n_neg++; pthread_mutex_unlock(&A->mx); return -1; }
     int r = 0;
     if (A->held != A->pub || A->out[A->pub].seq != A->acq_seq) {
         A->held = A->pub; A->acq_seq = A->out[A->pub].seq; r = 1;
@@ -199,6 +206,20 @@ void vl2a_stats(VrL2Async *A, int *scale, double *work_ms, double *submit_ms_max
     if (submit_ms_max) { *submit_ms_max = A->submit_max; A->submit_max = 0; }
     if (lag) *lag = A->have_pub ? A->sub_seq - A->pub_sub_seq : 0;
     pthread_mutex_unlock(&A->mx);
+}
+
+int vl2a_report(VrL2Async *A, char *buf, int n) {
+    if (!A || !buf || n <= 0) return 0;
+    pthread_mutex_lock(&A->mx);
+    static const char *sm[3] = {"original", "nitido", "suave"};
+    int sd = A->info.smooth < 0 || A->info.smooth > 2 ? 0 : A->info.smooth;
+    int r = snprintf(buf, (size_t)n,
+        "[capa2d] escala=%d(raster %d, objetivo %d) retraso=%u envios=%u descartes=%u ejecutados=%u publicadas=%u caidas_shader(-1)=%u trabajador=%.1fms suavizado=%s vram_start=%s vram_end=%s marco=%dx%d aw=%d pad_l=%d %s prims=%d mascara=%d",
+        A->cur, A->info.raster, atomic_load(&A->target), A->have_pub ? A->sub_seq - A->pub_sub_seq : 0, A->n_sub, A->n_skip, A->n_run, A->n_pub, A->n_neg, A->work_ms, sm[sd],
+        A->info.used_start ? "si" : "no", A->info.used_end ? "si" : "no", A->info.fw, A->info.h, A->info.aw, A->info.pad, A->info.full ? "completa" : "panel", A->info.prims, A->info.mask_prims);
+    A->n_sub = A->n_skip = A->n_run = A->n_neg = A->n_pub = 0;
+    pthread_mutex_unlock(&A->mx);
+    return r;
 }
 
 void vl2a_flush(VrL2Async *A) {
