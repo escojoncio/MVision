@@ -83,6 +83,20 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
             in.en[in.n_en].p[0] = e->pos.x * 0.001f; in.en[in.n_en].p[1] = e->pos.y * 0.001f; in.en[in.n_en].p[2] = e->pos.z * 0.001f;
             in.en[in.n_en].yaw = (float)e->rot.y * (6.2831853f / 4096.0f);
             in.en[in.n_en].down = e->down; in.en[in.n_en].vital = e->vital;
+            {   /* pared de por medio: muestras cada 100 mm del segmento cabeza -> pecho del enemigo (sin los extremos: el enemigo puede estar junto a un muro) con la geometría estática de la colisión de la cabeza; solo cerca (el golpe por contacto no pasa de ahí) */
+                float hx = in.head[0] * 1000.0f, hy = in.head[1] * 1000.0f, hz = in.head[2] * 1000.0f;
+                float tx = (float)e->pos.x, ty = (float)e->pos.y + 300.0f, tz = (float)e->pos.z;
+                float dx = tx - hx, dy = ty - hy, dz = tz - hz, len = sqrtf(dx * dx + dy * dy + dz * dz);
+                int blocked = 0;
+                if (len > 600.0f && len < 2500.0f) {
+                    for (float t = 200.0f; t < len - 300.0f && !blocked; t += 100.0f) {
+                        float q[3] = {hx + dx * t / len, hy + dy * t / len, hz + dz * t / len};
+                        float d = mv_vrhost_wall_distance(q, 60.0f);
+                        if (d >= 0.0f && d < 60.0f) blocked = 1;
+                    }
+                }
+                in.en[in.n_en].blocked = blocked;
+            }
             in.n_en++;
         }
     }
@@ -93,7 +107,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
         vb++;
         if (out.gest.valid) {
             const vrg_gest_t *q = &out.gest;
-            fprintf(stderr, "[gest] vb=%u mano=%d %s v=%.2f m/s adelante=%.2f radial=%.2f alcance=%.2f enemigo=%.2f m grip=%.2f puno=%d\n", vb, q->side, q->reason, q->speed, q->fcos, q->rcos, q->reach, q->dist, q->grip, q->fist);
+            fprintf(stderr, "[gest] vb=%u mano=%d %s v=%.2f m/s adelante=%.2f radial=%.2f alcance=%.2f enemigo=%.2f m grip=%.2f puno=%d contacto=%d\n", vb, q->side, q->reason, q->speed, q->fcos, q->rcos, q->reach, q->dist, q->grip, q->fist, q->contact);
         }
         if (out.grab_why) fprintf(stderr, "[gest] vb=%u agarre %s mano=%d distancia=%.2f m (cuello/espalda, limite 0,30)\n", vb, out.grab_why, out.grab_side_try, out.grab_dist);
         if (out.knock_why) fprintf(stderr, "[gest] vb=%u toque en la pared %s mano=%d v=%.2f m/s distancia=%.3f m\n", vb, out.knock_why, out.knock_try_side, out.knock_speed, out.knock_dist);
