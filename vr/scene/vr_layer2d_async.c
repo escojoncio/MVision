@@ -2,12 +2,13 @@
 #include "vr_layer2d.h"
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #define NJOB 16
-#define L2A_STALE 3
+#define L2A_STALE 12   /* listas sin capa nueva antes de dejar de mostrarla (~0,5 s a 25 listas/s). Mejor un HUD algo viejo que volver al shader antiguo, que rompía los textos */
 #define SLOW_MS 12.0
 #define FAST_MS 3.0
 #define RECOVER 240
@@ -17,6 +18,7 @@ typedef struct {
     GpuOp *ops; size_t ops_cap;
     uint16_t *data; size_t data_cap;
     uint16_t *vram; int has_vram;
+    uint16_t *vend; int has_vend;   /* VRAM real al cerrar la lista (texturas dibujadas durante ella) */
     uint8_t *opd; size_t opd_cap; int has_opd;
     int full, reset;
     uint32_t lseq;                 /* nº de envío */
@@ -35,6 +37,8 @@ struct VrL2Async {
     Out out[3]; int pub, held, have_pub;        /* índice publicado / en uso por el consumidor (-1) */
     uint32_t sub_seq, pub_sub_seq, acq_seq;     /* envíos / envío al que corresponde lo publicado / último adquirido */
     double work_ms, submit_max;
+    uint32_t n_sub, n_skip, n_run, n_neg, n_pub;   /* contadores del log [capa2d] */
+    VrL2Info info;
 };
 
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec * 1e-6; }
@@ -56,7 +60,8 @@ static void *worker(void *arg) {
         while (!A->count && !A->quit) pthread_cond_wait(&A->cv_job, &A->mx);
         if (!A->count && A->quit) break;
         Job *j = &A->job[A->head];
-        int later = A->count > 1;          /* hay listas más nuevas esperando: de esta solo se aplican los eventos */
+        int later = A->count > 1;          /* hay listas más nuevas esperando: si esta trae la VRAM real de partida no hace falta ni aplicarla (la siguiente trae la suya); si no, solo se aplican sus eventos */
+        int skip = later && A->job[(A->head + 1) % NJOB].has_vram;   /* la siguiente trae su propia VRAM de partida: esta no hace falta */
         A->busy = 1;
         int wi = 0, scale = A->cur;
         while (wi == A->pub || wi == A->held) wi++;   /* búfer libre (de 3, con 2 ocupados como máximo) */
@@ -68,8 +73,10 @@ static void *worker(void *arg) {
         memset(&sc, 0, sizeof sc);
         if (draw) { sc.op_dest = j->opd; sc.n_op_dest = j->l.nops; }
         double t0 = now_ms();
-        int have = vl2d_run(A->L, &j->l, draw ? &sc : NULL, j->full);
+        if (skip) A->n_skip++;   /* (contador leído bajo el mutex en vl2a_report; incremento sin él: solo informativo) */
+        int have = skip ? 0 : vl2d_run(A->L, &j->l, draw ? &sc : NULL, j->full);
         double ms = now_ms() - t0;
+        VrL2Info inf; vl2d_info(A->L, &inf);
         int w = 0, h = 0;
         const uint8_t *px = have ? vl2d_rgba(A->L, &w, &h) : NULL;
         Out *o = &A->out[wi];
@@ -80,11 +87,13 @@ static void *worker(void *arg) {
         }
 
         pthread_mutex_lock(&A->mx);
+        if (!skip) { A->n_run++; if (draw) A->info = inf; }
         if (draw) {
             A->work_ms = ms;
             if (ms > SLOW_MS && A->cur > 1) { A->cur--; A->fast = 0; }
             else if (ms < FAST_MS && A->cur < atomic_load(&A->target) && ms * (double)((A->cur + 1) * (A->cur + 1)) / (double)(A->cur * A->cur) < SLOW_MS * 0.8) {   /* el coste crece con la escala al cuadrado: solo se sube si cabría */ if (++A->fast >= RECOVER) { A->cur++; A->fast = 0; } }
             else A->fast = 0;
+            if (ok) A->n_pub++;
             if (ok) { o->seq = j->lseq; A->pub = wi; A->have_pub = 1; A->pub_sub_seq = j->lseq; }
             else A->have_pub = 0;           /* lista sin capa (o fallo): el renderer usa el shader */
         }
@@ -101,7 +110,7 @@ VrL2Async *vl2a_new(void) {
     pthread_mutex_init(&A->mx, NULL); pthread_cond_init(&A->cv_job, NULL); pthread_cond_init(&A->cv_idle, NULL);
     A->L = vl2d_new();
     A->pub = -1; A->held = -1; A->cur = 4;
-    atomic_store(&A->target, 4); atomic_store(&A->smooth, VL_SMOOTH_SHARP);
+    atomic_store(&A->target, 4); atomic_store(&A->smooth, VL_SMOOTH_ORIGINAL);
     if (!A->L || pthread_create(&A->th, NULL, worker, A) != 0) { vl2a_free(A); return NULL; }
     A->started = 1;
     return A;
@@ -113,7 +122,7 @@ void vl2a_free(VrL2Async *A) {
         pthread_mutex_lock(&A->mx); A->quit = 1; pthread_cond_broadcast(&A->cv_job); pthread_mutex_unlock(&A->mx);
         pthread_join(A->th, NULL);
     }
-    for (int i = 0; i < NJOB; i++) { free(A->job[i].ops); free(A->job[i].data); free(A->job[i].vram); free(A->job[i].opd); }
+    for (int i = 0; i < NJOB; i++) { free(A->job[i].ops); free(A->job[i].data); free(A->job[i].vram); free(A->job[i].vend); free(A->job[i].opd); }
     for (int i = 0; i < 3; i++) free(A->out[i].px);
     vl2d_free(A->L);
     pthread_mutex_destroy(&A->mx); pthread_cond_destroy(&A->cv_job); pthread_cond_destroy(&A->cv_idle);
@@ -138,18 +147,25 @@ int vl2a_submit(VrL2Async *A, const GpuDrawList *l, const uint8_t *op_dest, int 
     Job *j = &A->job[(A->head + A->count) % NJOB];
     /* El trabajo en curso es el de `head`; el hueco nuevo nunca coincide con él (count < NJOB). */
     int ok = grow((void **)&j->ops, &j->ops_cap, l->nops, sizeof(GpuOp)) && grow((void **)&j->data, &j->data_cap, l->ndata, 2) &&
-             grow((void **)&j->opd, &j->opd_cap, l->nops, 1) && (!l->vram_init || (j->vram || (j->vram = malloc(sizeof(uint16_t) * 1024 * 512))));
+             grow((void **)&j->opd, &j->opd_cap, l->nops, 1) && ((!l->vram_init && !l->vram_start) || (j->vram || (j->vram = malloc(sizeof(uint16_t) * 1024 * 512)))) &&
+             (!l->vram_end || j->vend || (j->vend = malloc(sizeof(uint16_t) * 1024 * 512)));
     if (ok) {
         j->l = *l;
         if (l->nops) memcpy(j->ops, l->ops, l->nops * sizeof(GpuOp));
         if (l->ndata) memcpy(j->data, l->data, (size_t)l->ndata * 2);
         j->l.ops = j->ops; j->l.data = j->data;
         j->l.cap_ops = j->l.cap_data = 0; j->l.vram_after = NULL;
-        j->has_vram = l->vram_init != NULL;
-        if (j->has_vram) { memcpy(j->vram, l->vram_init, sizeof(uint16_t) * 1024 * 512); j->l.vram_init = j->vram; } else j->l.vram_init = NULL;
+        /* VRAM de partida: la real al abrir la lista (vram_start, cada lista) o la instantánea de la primera/resincronización (vram_init). Una sola copia de 1 MB en el hilo de emulación. */
+        const uint16_t *v0 = l->vram_start ? l->vram_start : l->vram_init;
+        j->has_vram = v0 != NULL;
+        if (j->has_vram) memcpy(j->vram, v0, sizeof(uint16_t) * 1024 * 512);
+        j->l.vram_init = NULL; j->l.vram_start = j->has_vram ? j->vram : NULL;
+        j->has_vend = l->vram_end != NULL;
+        if (j->has_vend) memcpy(j->vend, l->vram_end, sizeof(uint16_t) * 1024 * 512);
+        j->l.vram_end = j->has_vend ? j->vend : NULL;
         j->has_opd = op_dest != NULL;
         if (op_dest && l->nops) memcpy(j->opd, op_dest, l->nops);
-        j->full = full; j->reset = reset; j->lseq = ++A->sub_seq;
+        j->full = full; j->reset = reset; j->lseq = ++A->sub_seq; A->n_sub++;
         A->count++;
         pthread_cond_signal(&A->cv_job);
     }
@@ -162,7 +178,7 @@ int vl2a_submit(VrL2Async *A, const GpuDrawList *l, const uint8_t *op_dest, int 
 int vl2a_acquire(VrL2Async *A, const uint8_t **px, int *w, int *h, int *full, uint32_t *seq) {
     if (!A) return -1;
     pthread_mutex_lock(&A->mx);
-    if (!A->have_pub || A->pub < 0 || A->sub_seq - A->pub_sub_seq > L2A_STALE) { A->held = -1; pthread_mutex_unlock(&A->mx); return -1; }
+    if (!A->have_pub || A->pub < 0 || A->sub_seq - A->pub_sub_seq > L2A_STALE) { A->held = -1; A->n_neg++; pthread_mutex_unlock(&A->mx); return -1; }
     int r = 0;
     if (A->held != A->pub || A->out[A->pub].seq != A->acq_seq) {
         A->held = A->pub; A->acq_seq = A->out[A->pub].seq; r = 1;
@@ -190,6 +206,20 @@ void vl2a_stats(VrL2Async *A, int *scale, double *work_ms, double *submit_ms_max
     if (submit_ms_max) { *submit_ms_max = A->submit_max; A->submit_max = 0; }
     if (lag) *lag = A->have_pub ? A->sub_seq - A->pub_sub_seq : 0;
     pthread_mutex_unlock(&A->mx);
+}
+
+int vl2a_report(VrL2Async *A, char *buf, int n) {
+    if (!A || !buf || n <= 0) return 0;
+    pthread_mutex_lock(&A->mx);
+    static const char *sm[3] = {"original", "nitido", "suave"};
+    int sd = A->info.smooth < 0 || A->info.smooth > 2 ? 0 : A->info.smooth;
+    int r = snprintf(buf, (size_t)n,
+        "[capa2d] escala=%d(raster %d, objetivo %d) retraso=%u envios=%u descartes=%u ejecutados=%u publicadas=%u caidas_shader(-1)=%u trabajador=%.1fms suavizado=%s vram_start=%s vram_end=%s marco=%dx%d aw=%d pad_l=%d %s prims=%d mascara=%d",
+        A->cur, A->info.raster, atomic_load(&A->target), A->have_pub ? A->sub_seq - A->pub_sub_seq : 0, A->n_sub, A->n_skip, A->n_run, A->n_pub, A->n_neg, A->work_ms, sm[sd],
+        A->info.used_start ? "si" : "no", A->info.used_end ? "si" : "no", A->info.fw, A->info.h, A->info.aw, A->info.pad, A->info.full ? "completa" : "panel", A->info.prims, A->info.mask_prims);
+    A->n_sub = A->n_skip = A->n_run = A->n_neg = A->n_pub = 0;
+    pthread_mutex_unlock(&A->mx);
+    return r;
 }
 
 void vl2a_flush(VrL2Async *A) {

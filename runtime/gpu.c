@@ -161,8 +161,12 @@ static struct {
     GpuHpResolve hpres;
 } cap;
 
+static int cap_vs;   /* gpu_capture_vram_start: fuera de `cap` (gpu_capture_enable(0) lo pone a cero) */
+
 static void cap_list_reset(GpuDrawList *l) {
     l->nops = l->ndata = 0;
+    free(l->vram_start); l->vram_start = NULL;
+    free(l->vram_end); l->vram_end = NULL;
     free(l->vram_init); l->vram_init = NULL;
     free(l->vram_after); l->vram_after = NULL;
 }
@@ -174,7 +178,13 @@ static void cap_begin(void) {
         if (cap.cur.vram_init) memcpy(cap.cur.vram_init, gpu_vram, sizeof gpu_vram);
         cap.need_snap = 0;
     }
+    if (cap_vs) {   /* VRAM real al abrir la lista (la anterior acaba de cerrarse: no hay subida a medias) */
+        cap.cur.vram_start = malloc(sizeof gpu_vram);
+        if (cap.cur.vram_start) memcpy(cap.cur.vram_start, gpu_vram, sizeof gpu_vram);
+    }
 }
+
+void gpu_capture_vram_start(int on) { cap_vs = on != 0; }
 
 static GpuOp *cap_new(int type) {
     GpuDrawList *l = &cap.cur;
@@ -217,6 +227,10 @@ static void cap_close(int reason) {
     c->host_frame = hle_frame_count();
     c->reason = reason;
     gpu_get_display(&c->disp);
+    if (cap_vs) {
+        c->vram_end = malloc(sizeof gpu_vram);
+        if (c->vram_end) memcpy(c->vram_end, gpu_vram, sizeof gpu_vram);
+    }
     if (cap.verify) {
         c->vram_after = malloc(sizeof gpu_vram);
         if (c->vram_after) memcpy(c->vram_after, gpu_vram, sizeof gpu_vram);

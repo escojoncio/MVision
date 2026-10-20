@@ -147,7 +147,7 @@ static BridgeState bs;                   /* último puente leído */
  * la escala baja sola si el trabajador tarda (mide su propio coste) y sube al recuperarse. */
 static VrL2Async *l2a;
 static _Atomic int l2d_enabled = 1;
-static _Atomic int l2d_smooth = VL_SMOOTH_SHARP;
+static _Atomic int l2d_smooth = VL_SMOOTH_ORIGINAL;   /* original = rasterizado exacto de la GPU y replicado a escala entera: el texto sale idéntico y nítido */
 static int l2d_target = 4;
 static VrView view;                      /* vista vigente: mundo / cine (vr_view.h) */
 static VrCine cine;                      /* planos de la cinemática del motor en curso (vr_cine.h) */
@@ -807,6 +807,8 @@ static void build_one(const GpuDrawList *l, int si) {
             vl2a_options(l2a, l2d_target, atomic_load(&l2d_smooth));
             int l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO;
             vl2a_submit(l2a, hl, rc == 0 && sc.op_dest && sc.n_op_dest >= hl->nops ? sc.op_dest : NULL, l2_full, 0);
+            { static uint64_t l2_log_ns; uint64_t nn = mono_ns();   /* una línea por segundo */
+              if (nn - l2_log_ns >= 1000000000ull) { char lb[512]; l2_log_ns = nn; if (vl2a_report(l2a, lb, sizeof lb) > 0) fprintf(stderr, "%s\n", lb); } }
         }
     }
     sm_sample(&slot[si].smp, &sc, r);   /* (r = registro de cámara de la lista; antes de fill_slot: sc.v/b son memoria interna de vr_scene) */
@@ -859,6 +861,7 @@ static void capture_set(int on) {
     if (on == cap_on) return;
     if (on) {
         gpu_capture_hiprec(1);
+        gpu_capture_vram_start(atomic_load(&l2d_enabled));   /* la capa 2D parte de la VRAM REAL de cada lista, no de un espejo por eventos */
         gpu_capture_enable(1);          /* la primera lista trae vram_init */
         vrradar_reset();                /* idem: seq vuelve a 0 */
         pthread_mutex_lock(&MX); stats.cap_resyncs++; pthread_mutex_unlock(&MX);
