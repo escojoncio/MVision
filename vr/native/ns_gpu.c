@@ -670,7 +670,7 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
                 for (int v = 0; v < nq; v++) for (int r = 0; r < 3; r++) q[v][r] = prm->head[r] + (q[v][r] - prm->head[r]) * f;
             }
         }
-        if (prm->fog && prm->fog->active && prm->fog->len > 0.0f)
+        if (prm->fog && prm->fog->active && prm->fog->len > 0.0f && !(e->flags & NS_EF_NOFOG))
             for (int v = 0; v < nq; v++) {
                 const float s = 1.0f - ns_gpu_fog_f(prm->fog, fz[v]);
                 cols[v][0] *= s; cols[v][1] *= s; cols[v][2] *= s;
