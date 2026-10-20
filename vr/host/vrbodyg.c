@@ -116,7 +116,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
     /* decisiones del cuerpo -> motor (ganchos de vr/input/vr_melee): ninguna pasa por botones */
     mf.punch_side = out.punch_side; mf.knock_side = out.knock_side;
     mf.grab_start = out.grab_start; mf.grab_side = out.grab_side_try >= 0 && out.grab_start ? out.grab_side_try : out.grab_side;
-    mf.hold = out.grab_hold; mf.squeeze = out.squeeze;
+    mf.hold = out.grab_hold; mf.swinging = out.swinging; mf.squeeze = out.squeeze;
     {
         static int warned;
         if (!vrmelee_rt_installed()) {

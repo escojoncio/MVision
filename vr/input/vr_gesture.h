@@ -116,6 +116,7 @@ typedef struct {
     int grab_side;           /* mano física que sujeta (-1 ninguna) mientras el agarre dura (para pegar las manos al cuello) */
     int grab_en;             /* índice del enemigo sujetado (en `en`) o -1 */
     vrg_gest_t gest;         /* intento de golpe de este VBlank (valid = 0: ninguno) */
+    int swinging;            /* 1: algún puño cerrado se mueve a velocidad de golpe (un golpe en marcha): la animación del combo del motor espera la próxima petición */
 } vrg_out_t;
 
 typedef struct {

@@ -273,6 +273,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
             float sp_min = c->contact_speed > 0 && c->contact_speed < c->punch_speed ? c->contact_speed : c->punch_speed;
             int near_swing = spd[s] >= (g->swing[s] ? 0.4f : 0.6f) * sp_min;
             g->swing[s] = near_swing;
+            if (near_swing && fst[s] && !(busy && !grabbing) && !grabbing) out->swinging = 1;
             float fcos = spd[s] > 1e-3f ? fv[s] / spd[s] : 0.0f, rcos = spd[s] > 1e-3f ? rad[s] / spd[s] : 0.0f;
             const char *why = "ok";
             int dir_ok = fcos >= c->punch_dir_cos && rcos >= c->punch_dir_cos;

@@ -39,15 +39,10 @@ static void h_grab(Cpu *c) {
     vrm_post_grab(vrmelee_instance(), &e, w, t);
 }
 static void h_hit(Cpu *c) {
-    VrmEng e = eng(c); uint32_t w = A0, a1 = A1, a2 = c->r[6], a3 = c->r[7];
+    VrmEng e = eng(c); uint32_t w = A0;
     vrm_pre_hit(vrmelee_instance(), &e, w);
     rt_call_orig(c, VRM_FN_HIT);
-    if (vrm_post_hit(vrmelee_instance(), &e, w, c->r[2])) {      /* reintento único con el origen en el cuerpo del enemigo */
-        c->r[4] = w; c->r[5] = a1; c->r[6] = a2; c->r[7] = a3;
-        vrm_pre_hit(vrmelee_instance(), &e, w);
-        rt_call_orig(c, VRM_FN_HIT);
-        vrm_post_hit(vrmelee_instance(), &e, w, c->r[2]);
-    }
+    vrm_post_hit(vrmelee_instance(), &e, w, c->r[2]);
 }
 static void h_move(Cpu *c) {
     VrmEng e = eng(c);
@@ -56,7 +51,7 @@ static void h_move(Cpu *c) {
 }
 static void h_punch_tick(Cpu *c) {
     VrmEng e = eng(c);
-    vrm_punch_tick(vrmelee_instance(), &e, A0, A1);
+    if (vrm_punch_tick(vrmelee_instance(), &e, A0, A1)) return;
     rt_call_orig(c, VRM_FN_PUNCH_TICK);
 }
 static void h_hold_tick(Cpu *c) {
