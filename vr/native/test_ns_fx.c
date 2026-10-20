@@ -364,10 +364,16 @@ static void test_learn(void) {
         double w[3] = {900, 300, 1200}, sx, sy, z; ref_proj(w, &sx, &sy, &z);
         for (int b = 0; b < 2; b++) { uint32_t pk = sp.pk[b]; w16(pk, 5); w8(pk + 7, 0x66); w16(pk + 8, (int)lround(sx) - 8); w16(pk + 10, (int)lround(sy) - 8); w8(pk + 12, 16); w8(pk + 13, 32); w16(pk + 14, 0x1234); w16(pk + 16, 16); w16(pk + 18, 16); }
     }
+    TPrim sp2 = mkprim(6, 0x400, 1, 4096, t0, 0);   /* otra primitiva del mismo tipo: sin pareja en la lista, hereda lo aprendido por papel */
+    put_pos(&sp2, 0, -900, 300, 1200); put_rect(&sp2, 8, 8, 16, 16);
+    {
+        double w[3] = {-900, 300, 1200}, sx, sy, z; ref_proj(w, &sx, &sy, &z);
+        for (int b = 0; b < 2; b++) { uint32_t pk = sp2.pk[b]; w16(pk, 5); w8(pk + 7, 0x66); w16(pk + 8, (int)lround(sx) - 8); w16(pk + 10, (int)lround(sy) - 8); w8(pk + 12, 16); w8(pk + 13, 32); w16(pk + 14, 0x2345); w16(pk + 16, 16); w16(pk + 18, 16); }
+    }
     queue_commit(0);
     ns_fx_learn_reset();
     int r; NsFxScene *s = run(0, &r);
-    CHECK(r == 0 && s->n_items == 1 && (s->items[0].flags & NSFX_F_TPAGE_UNKNOWN) && (s->items[0].flags & NSFX_F_ABR_UNKNOWN) && !(s->items[0].flags & NSFX_F_LEARNED), "sprite sin página ni modo (flags 0x%X)", s->items[0].flags);
+    CHECK(r == 0 && s->n_items == 2 && (s->items[0].flags & NSFX_F_TPAGE_UNKNOWN) && (s->items[0].flags & NSFX_F_ABR_UNKNOWN) && !(s->items[0].flags & NSFX_F_LEARNED), "sprite sin página ni modo (flags 0x%X)", s->items[0].flags);
     GpuOp op; memset(&op, 0, sizeof op);
     op.type = GPU_OP_RECT; op.flags = GPU_F_TEXTURED | GPU_F_SEMI; op.rw = 16; op.rh = 16; op.tx = 704; op.ty = 256; op.tp = 1; op.abr = 2; op.clx = 16 * 3; op.cly = 500;
     GpuDrawList dl; memset(&dl, 0, sizeof dl); dl.ops = &op; dl.nops = 1; dl.disp.w = 320; dl.disp.h = 240;
@@ -378,12 +384,14 @@ static void test_learn(void) {
     {
         const NsFxItem *it = &s->items[0];
         CHECK(r == 0 && (it->flags & NSFX_F_LEARNED) && !(it->flags & (NSFX_F_TPAGE_UNKNOWN | NSFX_F_ABR_UNKNOWN)), "aplicado (flags 0x%X)", it->flags);
+        const NsFxItem *i2 = &s->items[1];
+        CHECK(s->items[0].prim != i2->prim && (i2->flags & NSFX_F_LEARNED) && !(i2->flags & NSFX_F_TPAGE_UNKNOWN) && i2->tpage == it->tpage && i2->abr == 2 && i2->clut == 0x2345, "primitiva nueva con lo aprendido por papel (flags 0x%X tpage 0x%X clut 0x%X)", i2->flags, i2->tpage, i2->clut);
         CHECK(it->tpage == (11 | (1 << 4) | (2 << 5) | (1 << 7)) && it->abr == 2 && it->tp == 1 && it->clut == 0x1234, "página 0x%X abr %u clut 0x%X", it->tpage, it->abr, it->clut);
     }
     ns_fx_scene_destroy(s);
     ns_fx_learn_reset();
     s = run(0, &r);
-    CHECK(r == 0 && (s->items[0].flags & NSFX_F_TPAGE_UNKNOWN) && !(s->items[0].flags & NSFX_F_LEARNED), "sin lo aprendido sigue desconocida");
+    CHECK(r == 0 && (s->items[0].flags & NSFX_F_TPAGE_UNKNOWN) && (s->items[1].flags & NSFX_F_TPAGE_UNKNOWN) && !(s->items[1].flags & NSFX_F_LEARNED), "sin lo aprendido sigue desconocida");
     ns_fx_scene_destroy(s);
 }
 
