@@ -25,6 +25,7 @@ static struct {
     GpuOp *ops;
     uint32_t nops, frame, snap_counter;
     int snap_valid, job, busy;
+    int have_cam; float cam_eye[3], cam_M[9];   /* cámara con la que se emitió la lista de esta tarea */
     char text[8192];
     int text_new;
     unsigned skipped_busy, runs, fails;
@@ -37,6 +38,8 @@ static void *worker(void *arg) {
         pthread_mutex_lock(&G.mx);
         while (!G.job) pthread_cond_wait(&G.cv, &G.mx);
         uint32_t frame = G.frame, nops = G.nops;
+        int jcam = G.have_cam; float ceye[3], cM[9];
+        memcpy(ceye, G.cam_eye, sizeof ceye); memcpy(cM, G.cam_M, sizeof cM);
         pthread_mutex_unlock(&G.mx);
         /* G.ram / G.ops / G.scratch solo los toca el hilo de emulación mientras busy == 0; con job == 1 son del trabajador */
         char buf[sizeof G.text];
@@ -46,6 +49,7 @@ static void *worker(void *arg) {
         if (c && r) {
             NsCoverCfg cfg;
             ns_cover_cfg_default(&cfg);
+            if (jcam) { cfg.list_eye = ceye; cfg.list_M = cM; }
             rc = ns_cover_run(c, G.ram, G.scratch, G.ops, nops, &cfg, r);
             if (rc == 0) ns_cover_format(r, frame, buf, sizeof buf);
         }
@@ -92,7 +96,7 @@ void ns_cover_glue_post_ik(const uint8_t *ram) {
 }
 
 /* Hilo de emulación, al cerrarse una lista de la GPU. Barato salvo 1 de cada N llamadas. */
-void ns_cover_glue_submit(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame) {
+void ns_cover_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame, const float *eye, const float *M) {
     if (G.off || !ram || !ops || !nops || nops > COVER_MAX_OPS) return;
     pthread_mutex_lock(&G.mx);
     if (!ensure_started() || !G.every) { pthread_mutex_unlock(&G.mx); return; }
@@ -111,10 +115,14 @@ void ns_cover_glue_submit(const uint8_t *ram, const uint8_t *scratch, const GpuO
     G.snap_valid = 0;
     if (scratch) memcpy(G.scratch, scratch, sizeof G.scratch); else memset(G.scratch, 0, sizeof G.scratch);
     memcpy(G.ops, ops, (size_t)nops * sizeof(GpuOp));
+    G.have_cam = eye && M;
+    if (G.have_cam) { memcpy(G.cam_eye, eye, sizeof G.cam_eye); memcpy(G.cam_M, M, sizeof G.cam_M); }
     G.nops = nops; G.frame = frame; G.busy = 1; G.job = 1;
     pthread_cond_signal(&G.cv);
     pthread_mutex_unlock(&G.mx);
 }
+
+void ns_cover_glue_submit(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame) { ns_cover_glue_submit_cam(ram, scratch, ops, nops, frame, NULL, NULL); }
 
 /* Cualquier hilo: copia el último texto de registro aún no leído (cabe en cap) y devuelve su longitud; 0 si no hay nada nuevo. */
 size_t ns_cover_glue_poll(char *buf, size_t cap) {
