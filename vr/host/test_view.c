@@ -130,19 +130,32 @@ int main(void) {
         CHECK(m.kind == VRV_K_ENGINE, "cinemática con partida y sin medida: motor");
         vrview_cine_describe(&m, &ci, buf, sizeof buf);
         CHECK(strstr(buf, "tipo=motor") != NULL, "registro motor: %s", buf);
-        static const int cut[] = { 68, 69, 16, 69, 70 };
+        static const int cut[] = { 68, 69, 16, 85, 90, 92, 95 };   /* cinemática real: la medida de 16 % (corte de plano) no la corta */
         for (unsigned q = 0; q < sizeof cut / sizeof *cut; q++) {
             ci.cover1 = (uint8_t)(cut[q] + 1); ci.cover_new = 1;
             for (int n = 0; n < 50; n++) { vrview_step(&m, &ci); ci.cover_new = 0; CHECK(m.kind == VRV_K_ENGINE, "cinemática medida %d%%: sigue en motor", cut[q]); }
         }
+        ci.cover1 = 5; ci.cover_new = 1; vrview_step(&m, &ci); ci.cover_new = 0; for (int n = 0; n < 40; n++) vrview_step(&m, &ci);
+        CHECK(m.kind == VRV_K_ENGINE, "una medida mala aislada no basta");
         ci.cover1 = 4; ci.cover_new = 1; vrview_step(&m, &ci); ci.cover_new = 0; for (int n = 0; n < 40; n++) vrview_step(&m, &ci);
-        CHECK(m.kind == VRV_K_ENGINE, "una medida mala no basta");
-        ci.cover1 = 3; ci.cover_new = 1; vrview_step(&m, &ci); ci.cover_new = 0; for (int n = 0; n < 40; n++) vrview_step(&m, &ci);
-        CHECK(m.kind == VRV_K_BACKUP, "dos medidas malas seguidas: respaldo");
-        /* una medida en zona gris (35-55 %) no cambia nada */
+        CHECK(m.kind == VRV_K_BACKUP, "dos malas de las últimas 4: respaldo");
+        /* muerte medida: 58,9 % del volcado (660 triángulos ausentes) cuenta como mala; 57,9 / 88,6 / 22,1 / 98,5 / 97,2 % del registro: la fiabilidad sigue la ventana */
+        vrview_reset(&m);
+        VrViewIn dd = world(); dd.in_control = 0; dd.dead = 1; dd.scene3d = 1;
+        for (int n = 0; n < 5; n++) vrview_step(&m, &dd);
+        CHECK(m.kind == VRV_K_ENGINE, "muerte con partida y sin medida: motor");
+        static const int death[] = { 58, 59 };
+        for (unsigned q = 0; q < 2; q++) { dd.cover1 = (uint8_t)(death[q] + 1); dd.cover_new = 1; vrview_step(&m, &dd); dd.cover_new = 0; for (int n = 0; n < 40; n++) vrview_step(&m, &dd); }
+        CHECK(m.kind == VRV_K_BACKUP && m.reason == VRV_R_DEAD, "muerte con 58-59 %%: respaldo (imagen fiel de la VRAM)");
+        static const int death2[] = { 89, 22, 99 };
+        for (unsigned q = 0; q < 3; q++) { dd.cover1 = (uint8_t)(death2[q] + 1); dd.cover_new = 1; vrview_step(&m, &dd); dd.cover_new = 0; for (int n = 0; n < 40; n++) vrview_step(&m, &dd); }
+        CHECK(m.kind == VRV_K_BACKUP, "alternar buenas y malas no devuelve al motor");
+        for (int q = 0; q < 3; q++) { dd.cover1 = 98; dd.cover_new = 1; vrview_step(&m, &dd); dd.cover_new = 0; for (int n = 0; n < 40; n++) vrview_step(&m, &dd); }
+        CHECK(m.kind == VRV_K_ENGINE, "3 buenas seguidas la recuperan");
+        /* medidas en zona gris (62-80 %%) no cambian nada */
         vrview_reset(&m);
         for (int n = 0; n < 5; n++) vrview_step(&m, &ci);
-        for (int q = 0; q < 6; q++) { ci.cover1 = 46; ci.cover_new = 1; vrview_step(&m, &ci); ci.cover_new = 0; for (int n = 0; n < 15; n++) vrview_step(&m, &ci); }
+        for (int q = 0; q < 6; q++) { ci.cover1 = 71; ci.cover_new = 1; vrview_step(&m, &ci); ci.cover_new = 0; for (int n = 0; n < 15; n++) vrview_step(&m, &ci); }
         CHECK(m.kind == VRV_K_ENGINE && m.cov_state == 0, "zona gris: sin cambios");
         /* sin 3D 1 s las medidas se olvidan: la siguiente escena parte del estado por defecto */
         VrViewIn nob = ci; nob.scene3d = 0; nob.cover1 = 0;

@@ -86,10 +86,10 @@ typedef struct {
     int pend_run;
     /* --- fidelidad del render nativo en escenas del motor (con histéresis por medidas) --- */
     int cov_state;         /* 0 sin medidas (por defecto: de fiar solo con partida), 1 fiel, 2 no fiel */
-    int cov_good, cov_bad; /* medidas seguidas por encima / por debajo de los umbrales */
+    unsigned cov_bad_mask, cov_good_mask;   /* últimas `cov_win` medidas: bit a 1 = por debajo de cov_lo / por encima de cov_hi */
     int cov_idle;          /* fotogramas seguidos sin 3D (pasados cov_forget se olvidan las medidas) */
-    int cov_hi, cov_lo;    /* umbrales de cobertura (%): >= hi fiel, <= lo no fiel, entre medias no cambia nada */
-    int cov_need, cov_forget;
+    int cov_hi, cov_lo;    /* umbrales de cobertura (%): >= hi medida buena, < lo medida mala, entre medias cuenta como ninguna */
+    int cov_win, cov_need_bad, cov_need_good, cov_forget;   /* ventana de medidas, malas para perder la fiabilidad, buenas para recuperarla, fotogramas sin 3D para olvidar */
     int cam_seen;          /* la cámara VR ha estado activa alguna vez (si no, no hay transición que esperar: edición no reconocida) */
     unsigned changed;      /* tras vrview_step: VRV_CH_* de lo que cambió en ese fotograma (0 = nada) */
 } VrView;
