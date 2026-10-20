@@ -147,6 +147,9 @@ enum XRMenuPanelLayout {
 enum XRCinemaLayout {
     /// Motivos de vista (VRV_R_*) cuya pantalla lleva texto pequeño de 1 px (títulos, créditos, nombres de la intro, pantallas de resultado, códec): sin partida, radio y juego detenido.
     static func legible(reason: Int32) -> Bool { reason == 1 || reason == 3 || reason == 4 }
+    /// Igual, y además los fotogramas emulados de un FMV (clase 3) o del respaldo de una escena del motor (clase 4, view_kind de vr_view.h): imagen de la VRAM a pantalla completa, grande,
+    /// plana y con el escalado de píxel fijo (nítida), sin la deformación del cilindro.
+    static func legible(reason: Int32, kind: Int32) -> Bool { legible(reason: reason) || kind == 3 || kind == 4 }
     /// Ancho de la pantalla (m): un 25 % mayor para esas escenas (hasta 4,5 m).
     static func width(base: Float, legible: Bool) -> Float { legible ? min(base * 1.25, 4.5) : base }
     /// Curvatura: el cilindro deforma la rejilla de píxeles (trazos de 1 px de grosor desigual); en escenas de texto se limita a 0,12.

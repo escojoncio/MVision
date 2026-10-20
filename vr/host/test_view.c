@@ -55,7 +55,12 @@ int main(void) {
         memset(&k, 0, sizeof k);
         CHECK(vrview_kind_of(&k) == VRV_K_UI, "título sin 3D = 2D");
         k.scene3d = 1;
-        CHECK(vrview_kind_of(&k) == VRV_K_ENGINE, "sin partida y con 3D = cinemática del motor (introducción)");
+        CHECK(vrview_kind_of(&k) == VRV_K_BACKUP, "sin partida y con 3D y sin medida = respaldo (imagen de la VRAM): el extractor no es de fiar");
+        k.cover1 = 101;
+        CHECK(vrview_kind_of(&k) == VRV_K_ENGINE, "sin partida y con 3D pero con cobertura medida buena = cinemática del motor");
+        k.cover1 = 1;
+        CHECK(vrview_kind_of(&k) == VRV_K_BACKUP, "con cobertura medida mala = respaldo");
+        k.cover1 = 0;
         k.game = 1; k.cinematic = 1;
         CHECK(vrview_kind_of(&k) == VRV_K_ENGINE, "cinemática con jugador en escena");
         k.cinematic = 0; k.comms = 1;
@@ -68,14 +73,18 @@ int main(void) {
         k.video = 1;
         CHECK(vrview_kind_of(&k) == VRV_K_VIDEO, "vídeo pregrabado");
         k.scene3d = 1;
-        CHECK(vrview_kind_of(&k) == VRV_K_ENGINE, "con 3D no es vídeo");
+        CHECK(vrview_kind_of(&k) == VRV_K_BACKUP, "con 3D no es vídeo (sin partida y sin medida: respaldo)");
+        k.mdec = 1;
+        CHECK(vrview_kind_of(&k) == VRV_K_VIDEO, "decodificador de vídeo activo = FMV aunque quede 3D detrás");
+        k.paused = 0; k.game = 1; k.paused = 1;
+        CHECK(vrview_kind_of(&k) == VRV_K_UI, "pausa con MDEC = 2D");
         k = world();
         CHECK(vrview_kind_of(&k) == VRV_K_WORLD, "mundo");
         VrView w;
         vrview_reset(&w);
         VrViewIn e;
         memset(&e, 0, sizeof e);
-        e.scene3d = 1;
+        e.game = 1; e.scene3d = 1;       /* con partida: el extractor es de fiar sin medidas (cinemática real) */
         for (int n = 0; n < 2; n++) vrview_step(&w, &e);
         CHECK(w.kind == VRV_K_UI, "entrar en cinemática exige %d fotogramas", w.to_engine);
         vrview_step(&w, &e);
@@ -91,7 +100,77 @@ int main(void) {
         e.video = 1;
         for (int n = 0; n < 3; n++) vrview_step(&w, &e);
         CHECK(w.kind == VRV_K_VIDEO, "vídeo");
-        for (int q = 0; q <= VRV_K_VIDEO; q++) CHECK(vrview_kind_name(q)[0] != '?', "nombre %d", q);
+        for (int q = 0; q <= VRV_K_BACKUP; q++) CHECK(vrview_kind_name(q)[0] != '?' && vrview_cine_type(q)[0] != '?', "nombre %d", q);
+    }
+    /* --- los tres casos del cine: fmv / motor / respaldo, con la intro medida (cobertura 30,2 26,4 26,2 27,8 14,9 0,1 0,6 0,1 0,1 1,4 0,2 %) --- */
+    {
+        char buf[700];
+        /* (c) introducción sin partida: respaldo desde el primer fotograma y se queda, aunque llegue 1 sola medida buena */
+        VrView m; vrview_reset(&m);
+        VrViewIn in; memset(&in, 0, sizeof in); in.scene3d = 1;
+        for (int n = 0; n < 3; n++) vrview_step(&m, &in);
+        CHECK(m.kind == VRV_K_BACKUP && m.mode == VRV_CINEMA && (m.changed & VRV_CH_KIND), "intro: respaldo a los 3 fotogramas (clase %d)", m.kind);
+        vrview_cine_describe(&m, &in, buf, sizeof buf);
+        CHECK(strstr(buf, "[cine] tipo=respaldo motivo=") && strstr(buf, "sin partida"), "registro respaldo: %s", buf);
+        static const int intro[] = { 30, 26, 26, 28, 15, 0, 1, 0, 0, 1, 0 };
+        for (unsigned q = 0; q < sizeof intro / sizeof *intro; q++) {
+            in.cover1 = (uint8_t)(intro[q] + 1); in.cover_new = 1;
+            for (int n = 0; n < 50; n++) { vrview_step(&m, &in); in.cover_new = 0; CHECK(m.kind == VRV_K_BACKUP, "intro medida %d%%: sigue en respaldo (n=%d)", intro[q], n); }
+        }
+        CHECK(m.cov_state == 2, "intro: cobertura mala = no fiel");
+        vrview_cine_describe(&m, &in, buf, sizeof buf);
+        CHECK(strstr(buf, "tipo=respaldo") && strstr(buf, "cobertura baja") && strstr(buf, "cobertura=0%"), "registro respaldo medido: %s", buf);
+        in.cover1 = 91; in.cover_new = 1; vrview_step(&m, &in); in.cover_new = 0;
+        for (int n = 0; n < 40; n++) vrview_step(&m, &in);
+        CHECK(m.kind == VRV_K_BACKUP, "una sola medida buena no basta");
+        /* (b) escena del motor con partida: motor; una medida mala aislada (15,9 %) no la corta; dos seguidas sí */
+        vrview_reset(&m);
+        VrViewIn ci = world(); ci.in_control = 0; ci.cinematic = 1; ci.scene3d = 1;
+        for (int n = 0; n < 5; n++) vrview_step(&m, &ci);
+        CHECK(m.kind == VRV_K_ENGINE, "cinemática con partida y sin medida: motor");
+        vrview_cine_describe(&m, &ci, buf, sizeof buf);
+        CHECK(strstr(buf, "tipo=motor") != NULL, "registro motor: %s", buf);
+        static const int cut[] = { 68, 69, 16, 69, 70 };
+        for (unsigned q = 0; q < sizeof cut / sizeof *cut; q++) {
+            ci.cover1 = (uint8_t)(cut[q] + 1); ci.cover_new = 1;
+            for (int n = 0; n < 50; n++) { vrview_step(&m, &ci); ci.cover_new = 0; CHECK(m.kind == VRV_K_ENGINE, "cinemática medida %d%%: sigue en motor", cut[q]); }
+        }
+        ci.cover1 = 4; ci.cover_new = 1; vrview_step(&m, &ci); ci.cover_new = 0; for (int n = 0; n < 40; n++) vrview_step(&m, &ci);
+        CHECK(m.kind == VRV_K_ENGINE, "una medida mala no basta");
+        ci.cover1 = 3; ci.cover_new = 1; vrview_step(&m, &ci); ci.cover_new = 0; for (int n = 0; n < 40; n++) vrview_step(&m, &ci);
+        CHECK(m.kind == VRV_K_BACKUP, "dos medidas malas seguidas: respaldo");
+        /* una medida en zona gris (35-55 %) no cambia nada */
+        vrview_reset(&m);
+        for (int n = 0; n < 5; n++) vrview_step(&m, &ci);
+        for (int q = 0; q < 6; q++) { ci.cover1 = 46; ci.cover_new = 1; vrview_step(&m, &ci); ci.cover_new = 0; for (int n = 0; n < 15; n++) vrview_step(&m, &ci); }
+        CHECK(m.kind == VRV_K_ENGINE && m.cov_state == 0, "zona gris: sin cambios");
+        /* sin 3D 1 s las medidas se olvidan: la siguiente escena parte del estado por defecto */
+        VrViewIn nob = ci; nob.scene3d = 0; nob.cover1 = 0;
+        for (int n = 0; n < 60; n++) vrview_step(&m, &nob);
+        CHECK(m.cov_state == 0, "medidas olvidadas sin 3D");
+        /* (a) FMV: el decodificador activo gana al 3D y a la falta de partida; 12 fotogramas de gracia los pone el host */
+        vrview_reset(&m);
+        VrViewIn fv; memset(&fv, 0, sizeof fv); fv.mdec = 1;
+        for (int n = 0; n < 3; n++) vrview_step(&m, &fv);
+        CHECK(m.kind == VRV_K_VIDEO && m.mode == VRV_CINEMA, "FMV (MDEC) sin partida: vídeo");
+        vrview_cine_describe(&m, &fv, buf, sizeof buf);
+        CHECK(strstr(buf, "[cine] tipo=fmv motivo=") && strstr(buf, "MDEC"), "registro fmv: %s", buf);
+        fv.scene3d = 1;
+        for (int n = 0; n < 20; n++) { vrview_step(&m, &fv); CHECK(m.kind == VRV_K_VIDEO, "FMV con restos de 3D detrás: sigue siendo vídeo"); }
+        fv.mdec = 0; fv.scene3d = 0; fv.video = 1;
+        for (int n = 0; n < 5; n++) vrview_step(&m, &fv);
+        CHECK(m.kind == VRV_K_VIDEO, "FMV detectado por subidas a pantalla completa");
+        vrview_cine_describe(&m, &fv, buf, sizeof buf);
+        CHECK(strstr(buf, "tipo=fmv") && strstr(buf, "subidas"), "registro fmv por subidas: %s", buf);
+        fv.video = 0;
+        for (int n = 0; n < 5; n++) vrview_step(&m, &fv);
+        CHECK(m.kind == VRV_K_UI, "fin del vídeo: 2D");
+        vrview_cine_describe(&m, &fv, buf, sizeof buf);
+        CHECK(strstr(buf, "tipo=2d") != NULL, "registro 2d: %s", buf);
+        CHECK(vrview_cine_describe(NULL, &fv, buf, sizeof buf) == 0 && vrview_cine_describe(&m, NULL, buf, sizeof buf) > 0 && vrview_cine_describe(&m, &fv, buf, 5) == 4, "describe cine robusto");
+        /* el vídeo gana a todo salvo la pausa */
+        VrViewIn pv; memset(&pv, 0, sizeof pv); pv.game = 1; pv.paused = 1; pv.mdec = 1;
+        CHECK(vrview_kind_of(&pv) == VRV_K_UI, "pausa con vídeo = 2D");
     }
     /* --- máquina de estados: selector de armas/objetos y pausa (el mundo no se interrumpe) --- */
     {
@@ -195,6 +274,29 @@ int main(void) {
         vrview_reset(&m); for (int n = 0; n < 5; n++) vrview_step(&m, &w2);
         for (int n = 0; n < m.pend_max + 5; n++) vrview_step(&m, &none);
         CHECK(m.reason == VRV_R_NO_CAM && m.mode == VRV_CINEMA, "espera acotada: pasados %d fotogramas, cine", m.pend_max);
+    }
+    /* --- detección de fotograma de vídeo por subidas a VRAM --- */
+    {
+        long long sum = 0;
+        sum = vrview_upload_area(0, 0, 320, 240, 0, 0, 0, 320, 240);
+        CHECK(sum == 320 * 240 && vrview_uploads_cover(sum, 320, 240, 0), "rectángulo entero");
+        sum = 0; for (int c = 0; c < 20; c++) sum += vrview_upload_area(0, 0, 320, 240, 0, c * 16, 0, 16, 240);
+        CHECK(vrview_uploads_cover(sum, 320, 240, 0), "20 tiras de 16 px (FMV real)");
+        sum = 0; for (int c = 0; c < 11; c++) sum += vrview_upload_area(0, 0, 320, 240, 0, c * 16, 0, 16, 240);
+        CHECK(!vrview_uploads_cover(sum, 320, 240, 0), "11 de 20 tiras (55 %%): no");
+        sum = 0; for (int c = 0; c < 12; c++) sum += vrview_upload_area(0, 0, 320, 240, 0, c * 16, 0, 16, 240);
+        CHECK(vrview_uploads_cover(sum, 320, 240, 0), "12 de 20 tiras (60 %%): sí");
+        sum = 0; for (int c = 0; c < 20; c++) sum += vrview_upload_area(0, 0, 320, 240, 0, 640 + c * 16, 0, 16, 240);
+        CHECK(sum == 0 && !vrview_uploads_cover(sum, 320, 240, 0), "subidas fuera del área mostrada (texturas): no");
+        sum = vrview_upload_area(0, 0, 320, 240, 0, 256, 0, 256, 256);
+        CHECK(sum == 64 * 240 && !vrview_uploads_cover(sum, 320, 240, 0), "una textura que solo roza el área: no");
+        sum = 0; for (int c = 0; c < 20; c++) sum += vrview_upload_area(0, 0, 320, 240, 1, c * 24, 0, 24, 240);
+        CHECK(sum == 480 * 240 && vrview_uploads_cover(sum, 320, 240, 1), "24 bits: 20 tiras de 24 media-palabras");
+        sum = 0; for (int c = 0; c < 12; c++) sum += vrview_upload_area(0, 0, 320, 240, 1, c * 16, 0, 16, 240);
+        CHECK(!vrview_uploads_cover(sum, 320, 240, 1), "24 bits: 12 tiras de 16 media-palabras (40 %%) no llegan");
+        sum = vrview_upload_area(0, 256, 384, 256, 0, 0, 256, 384, 256);
+        CHECK(vrview_uploads_cover(sum, 384, 256, 0), "área mostrada en la mitad inferior de la VRAM");
+        CHECK(vrview_upload_area(0, 0, 0, 0, 0, 0, 0, 320, 240) == 320 * 240, "área nominal por defecto 320x240");
     }
     fprintf(stderr, fails ? "test_view: %d FALLOS\n" : "test_view: OK\n", fails);
     return fails ? 1 : 0;
