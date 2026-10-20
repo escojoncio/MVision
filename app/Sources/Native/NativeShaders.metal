@@ -93,8 +93,19 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
     bool net = false;
     if ((P.flags & NSG_PF_NET) != 0u) net = ns_net_bad(corner_index - corner_index % 3u, piece_index, verts, corners, pieces, U);
 
-    /* color: precalculado de la cara, luz de la pieza o neutro; después niebla (hacia negro) y byte entero */
     uint cf = uint(c.flags);
+    /* cara de una sola cara vista por detrás desde la cámara del juego (cinemáticas): el motor no la dibuja (techos vistos desde arriba, reversos de las salas). Los tres vértices deciden igual:
+     * sentido del triángulo (A,B,D) / (B,C,D) como el del perímetro, dot(p0 - ojo, (p1-p0)x(p2-p0)) > 0 = anverso. Réplica en C: ns_gpu_tri_back (ns_gpu.c). */
+    bool back = false;
+    if ((cf & NSG_CF_ONESIDED) != 0u && U.cull_eye.w > 0.5) {
+        uint f0 = corner_index - corner_index % 3u;
+        float3 q0 = ns_world_pos(verts[corners[f0].v], P, verts, pieces);
+        float3 q1 = ns_world_pos(verts[corners[f0 + 1u].v], P, verts, pieces);
+        float3 q2 = ns_world_pos(verts[corners[f0 + 2u].v], P, verts, pieces);
+        back = dot(q0 - U.cull_eye.xyz, cross(q1 - q0, q2 - q0)) <= 0.0;
+    }
+
+    /* color: precalculado de la cara, luz de la pieza o neutro; después niebla (hacia negro) y byte entero */
     float3 raw;
     if ((cf & NSG_CF_PAINT) != 0u) {
         uint pc = c.paint;
@@ -133,7 +144,7 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
 
     NsVOut o;
     o.pos = U.view_proj[amp] * float4(pv, 1.0);
-    if (net) o.pos = float4(0.0, 0.0, 2.0, 1.0);   /* triángulo colapsado: los tres vértices en el mismo punto fuera del volumen de recorte */
+    if (net || back) o.pos = float4(0.0, 0.0, 2.0, 1.0);   /* triángulo colapsado: los tres vértices en el mismo punto fuera del volumen de recorte */
     o.uv = float2(float(c.u), float(c.t));
     o.col = col;
     o.tpage = uint(c.tpage);

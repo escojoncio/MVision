@@ -57,6 +57,9 @@ typedef struct { uint32_t tris, bad_far, bad_edge; float worst_far_m, worst_edge
 /* Radio de reposo de la malla: máx. |v| local (unidades del motor). */
 float ns_gpu_mesh_radius(const NsMesh *m);
 /* Posición de mundo del motor del vértice ABSOLUTO vabs de la pieza gi, con la misma semántica que ns_vertex: soldadura al vértice del padre, encadenada hasta NSG_WELD_DEPTH niveles; NSG_PF_NOWELD la ignora. */
+/* Réplica en C del descarte por detrás del sombreador (ns_vertex): 1 si el triángulo (p0,p1,p2; orden de ns_gpu_pack) de una malla de una sola cara se ve por detrás desde `eye`
+ * (mundo del motor): dot(p0 - eye, (p1-p0)x(p2-p0)) <= 0. Solo con cull_eye.w = 1 (cinemáticas). */
+int ns_gpu_tri_back(const float p0[3], const float p1[3], const float p2[3], const float eye[3]);
 void ns_gpu_vert_world(const NsGpuVert *pool, const NsGpuPiece *tbl, uint32_t gi, uint32_t vabs, float out[3]);
 /* Comprobación de PIEZA (una vez por fotograma, tras rellenar la tabla): matriz corrupta (NSG_NET_MAT: no dibujar la pieza) y soldaduras cuyo vértice del padre se aleja más de NSG_NET_WELD_GAP_M de
  * la posición propia (NSG_NET_WELD: poner NSG_PF_NOWELD). nverts = nº de vértices de la malla de la pieza; mpu = metros VR por unidad del motor. Devuelve las causas. */
