@@ -229,6 +229,15 @@ final class RGRenderer {
 #endif
     }
 
+    /// Línea de la red de seguridad de vértices del render nativo (1 vez por segundo; reinicia sus contadores). nil si no hay renderer nativo.
+    func nativeNetLine() -> String? {
+#if MV_BENCH && !MV_BENCH_NATIVE
+        return nil
+#else
+        return native?.netLine()
+#endif
+    }
+
     /// Línea de diagnóstico del hueco (1 vez por segundo): triángulos con arista > bigEdge m y que cruzan el plano cercano en el render nativo (recorre las mallas subidas).
     func diagLine(near: Float, bigEdge: Float) -> String {
         var t = String(format: "arista>%.0fm y cruce del plano cercano (%.3f m): ", bigEdge, near)
