@@ -4,6 +4,9 @@
  * grande, para todo lo que no es control en primera persona: título, menús, radio, cargas, vídeos, cinemáticas del motor, fin de
  * partida, pausa). C99 puro, sin dependencias de plataforma; lo prueba test_view.c.
  *
+ * Clasificación del cine (ver `VRV_K_*`): fmv / motor / respaldo. La pantalla estereoscópica (motor) solo se usa si el render nativo representa de verdad lo
+ * que el motor dibuja (cobertura medida; sin medir: solo con partida); si no, el respaldo enseña el fotograma emulado entero (área de pantalla de la VRAM).
+ *
  * Política (ver bitácora, "Presentación en VR"):
  *   - MUNDO si hay partida (puente completo + jugador), la cámara VR del juego está activa y, o bien el jugador controla a su personaje, o bien
  *     hay una ventana 2D del juego encima (armas/objetos = VRV_R_SELECTOR, pausa = VRV_R_PAUSE_WORLD) sin otra causa (escena, radio, detenido, muerte):
@@ -47,7 +50,10 @@ typedef struct {
     /* --- clasificación de lo que NO es mundo (al final: no rompe inicializaciones posicionales) --- */
     uint8_t scene3d;       /* la última lista capturada trae geometría 3D sustancial con cámara del motor válida */
     uint8_t dead;          /* vida a cero (o fin de partida) con partida en curso: la cámara del motor muestra la muerte en tercera persona */
-    uint8_t video;         /* la última lista es un fotograma de vídeo pregrabado (subida grande a la zona mostrada, sin 3D) */
+    uint8_t video;         /* la última lista es un fotograma de vídeo pregrabado (subidas a VRAM que cubren la zona mostrada, sin 3D) */
+    uint8_t mdec;          /* decodificador de vídeo (MDEC) activo en los últimos fotogramas: hay un FMV reproduciéndose (más fiable que `video`; gana al 3D) */
+    uint8_t cover1;        /* cobertura de la lista de la GPU por la escena nativa en % + 1 (0 = sin medida vigente) */
+    uint8_t cover_new;     /* 1 en el fotograma en que llega una medida nueva en `cover1` */
 } VrViewIn;
 
 /* Qué es lo que se ve (con histéresis propia, ver VrView.kind):
@@ -56,7 +62,9 @@ typedef struct {
  *           controlable). Se presenta en 3D estereoscópico (pantalla 3D) en vez de en la pantalla de cine plana.
  *   VIDEO   vídeo pregrabado (fotogramas descomprimidos subidos a VRAM): siempre pantalla de cine
  *   UI      menús, títulos, cargas, códec/radio, pausa, ventanas de armas/objetos, resultados: 2D, pantalla de cine */
-enum { VRV_K_UI = 0, VRV_K_WORLD, VRV_K_ENGINE, VRV_K_VIDEO };
+enum { VRV_K_UI = 0, VRV_K_WORLD, VRV_K_ENGINE, VRV_K_VIDEO, VRV_K_BACKUP };
+/* VRV_K_BACKUP: escena 3D del motor en la que el render nativo NO es fiel (extractor sin escena apta en ese modo: introducciones, demos sin partida, cobertura baja):
+ *   se enseña el fotograma emulado completo (área de pantalla de la VRAM) en la pantalla de cine plana, escalado con calidad. La lista de la GPU no se dibuja en 3D jamás. */
 
 typedef struct {
     int mode;              /* VrViewMode vigente (con histéresis) */
@@ -76,6 +84,12 @@ typedef struct {
     int to_comms;          /* fotogramas de radio seguidos antes de pasar de mundo a la pantalla de cine (el códec debe estar ya dibujado) */
     int pend_max;          /* fotogramas máximos de VRV_R_PENDING seguidos; pasados, sin cámara VR = cine (cámara no disponible) */
     int pend_run;
+    /* --- fidelidad del render nativo en escenas del motor (con histéresis por medidas) --- */
+    int cov_state;         /* 0 sin medidas (por defecto: de fiar solo con partida), 1 fiel, 2 no fiel */
+    unsigned cov_bad_mask, cov_good_mask;   /* últimas `cov_win` medidas: bit a 1 = por debajo de cov_lo / por encima de cov_hi */
+    int cov_idle;          /* fotogramas seguidos sin 3D (pasados cov_forget se olvidan las medidas) */
+    int cov_hi, cov_lo;    /* umbrales de cobertura (%): >= hi medida buena, < lo medida mala, entre medias cuenta como ninguna */
+    int cov_win, cov_need_bad, cov_need_good, cov_forget;   /* ventana de medidas, malas para perder la fiabilidad, buenas para recuperarla, fotogramas sin 3D para olvidar */
     int cam_seen;          /* la cámara VR ha estado activa alguna vez (si no, no hay transición que esperar: edición no reconocida) */
     unsigned changed;      /* tras vrview_step: VRV_CH_* de lo que cambió en ese fotograma (0 = nada) */
 } VrView;
@@ -93,6 +107,16 @@ int vrview_step(VrView *v, const VrViewIn *in);
 /* Clase de lo que se ve para unas entradas dadas (función pura, sin histéresis). */
 int vrview_kind_of(const VrViewIn *in);
 const char *vrview_kind_name(int kind);
+/* Fiabilidad del render nativo para una escena del motor con estas entradas (función pura): 1 = fiel. Sin medida vigente: solo con partida (puente completo + jugador). */
+int vrview_native_trusted(const VrViewIn *in);
+/* Línea de registro «[cine] tipo=fmv|motor|respaldo motivo=...» para el tipo VIGENTE (v->kind); tipos que no son de cine (mundo / 2D) → «tipo=2d|mundo». Devuelve la longitud. */
+int vrview_cine_describe(const VrView *v, const VrViewIn *in, char *buf, int n);
+/* Detección de fotograma de vídeo por subidas a VRAM: área (media-palabras) de la subida (x,y,w,h) recortada al rectángulo mostrado (dx,dy,dw,dh; dw en píxeles del modo) y
+ * veredicto con la suma de varias subidas: 1 si cubren >= 60 % del área mostrada (24 bits: 3/2 media-palabras por píxel). Vale para un rectángulo entero y para tiras de 16 px. */
+long long vrview_upload_area(int dx, int dy, int dw, int dh, int depth24, int x, int y, int w, int h);
+int vrview_uploads_cover(long long sum, int dw, int dh, int depth24);
+/* Nombre corto del tipo de cine: fmv / motor / respaldo / 2d / mundo. */
+const char *vrview_cine_type(int kind);
 const char *vrview_reason_name(int reason);
 
 #ifdef __cplusplus

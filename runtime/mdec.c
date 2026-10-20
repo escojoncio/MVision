@@ -2,9 +2,14 @@
  * Comandos: 1 = decodificar macrobloques (RLE ya generado por la CPU), 2 = tablas de
  * cuantización, 3 = tabla de escala de la IDCT. Se decodifica en cuanto llega el último
  * parámetro del comando; la salida queda en una FIFO que se lee por registro o DMA1. */
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include "mdec.h"
+
+/* Palabras de píxeles que el decodificador ha entregado desde el arranque (DMA1 o lectura por registro): un reproductor de vídeo activo las hace crecer. */
+static _Atomic uint32_t mdec_words_out;
+uint32_t mdec_out_words_total(void) { return atomic_load_explicit(&mdec_words_out, memory_order_relaxed); }
 
 static inline int32_t rnd(float f) { return (int32_t)(f + (f >= 0 ? 0.5f : -0.5f)); }
 
@@ -211,6 +216,7 @@ uint32_t mdec_dma_out(uint32_t *dst, uint32_t words) {
     uint32_t i = 0;
     for (; i < words && M.out_rd < M.out_n; i++) dst[i] = M.out[M.out_rd++];
     for (uint32_t j = i; j < words; j++) dst[j] = 0;
+    if (i) atomic_fetch_add_explicit(&mdec_words_out, i, memory_order_relaxed);
     return i;
 }
 
@@ -228,8 +234,9 @@ static uint32_t status(void) {
 
 uint32_t mdec_io_read(uint32_t addr, int size) {
     uint32_t v;
-    if ((addr & 0xF) < 4) v = M.out_rd < M.out_n ? M.out[M.out_rd++] : 0;
-    else v = status();
+    if ((addr & 0xF) < 4) {
+        if (M.out_rd < M.out_n) { v = M.out[M.out_rd++]; atomic_fetch_add_explicit(&mdec_words_out, 1u, memory_order_relaxed); } else v = 0;
+    } else v = status();
     if (size == 2) v = (addr & 2) ? v >> 16 : v & 0xFFFF;
     return v;
 }

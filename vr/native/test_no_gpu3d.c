@@ -93,6 +93,19 @@ int main(void) {
     CHECK(count(vh, "!strcmp(e, \"gpu\")") == 0 && count(vh, "atomic_store(&render_req, 0)") == 0, "MV_RENDER=gpu no cambia el modo");
     /* 7) la colisión de la cabeza usa solo la escena nativa (sin listas de la GPU) */
     CHECK(count(vh, "vrhc_feed_scene(") == 0 || count(vh, "vrhc_feed_scene(&") == 0, "la colisión de la cabeza no se alimenta de la lista de la GPU");
+    /* 8) cine: fmv / motor / respaldo (la lista de la GPU no se dibuja en 3D en ninguno; el respaldo es la imagen de la VRAM en la pantalla de cine plana) */
+    CHECK(strstr(vh, "vrview_cine_describe(&view, &vin") != NULL && strstr(vh, "mdec_out_words_total()") != NULL, "vrhost registra [cine] tipo=... y lee el decodificador de vídeo");
+    CHECK(strstr(vh, "ns_cover_glue_last(&cf, &cp)") != NULL && strstr(vh, "vin.cover_new") != NULL, "vrhost alimenta la vista con la cobertura medida del render nativo");
+    CHECK(strstr(vh, "vrview_uploads_cover(") != NULL, "vídeo por subidas a pantalla completa (tiras incluidas)");
+    CHECK(strstr(vh, "view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO || view.kind == VRV_K_BACKUP") != NULL, "la capa 2D entera acompaña al respaldo");
+    CHECK(strstr(xp, "engineHealthy") != NULL && strstr(xp, "engineBackup") != NULL && strstr(xp, "tipo=respaldo") != NULL, "XRPresent cae al respaldo si el nativo no dibuja la pantalla 3D");
+    CHECK(strstr(xp, "XRCinemaLayout.legible(reason: Int32(gs.view_reason), kind: gs.view_kind)") != NULL, "el vídeo y el respaldo se presentan grandes, planos y nítidos");
+    CHECK(strstr(xe, "engineHealthy: renderer.stereoHealthy") != NULL && strstr(rg, "stereoHealthy = ready && stereoWanted") != NULL, "salud de la pantalla 3D desde el renderer");
+    CHECK(strstr(rg, "if stereoRequest == nil { stereoRendered = false }") != NULL, "la imagen de la pantalla 3D no sobrevive a la escena (caché)");
+    {   /* en cine plano (clases 0, 3 y 4) la imagen sale de la VRAM, sin capa 2D duplicada encima ni mundo: el bloque de la pantalla de cine solo añade UN elemento */
+        int items = count_range(xp, "if shown == .cinema, let c = cinema, let tex = c.texture(srgb: linear) {", "if shown == .stereo, Self.gameViewOK(gameView) {", "r.items.append(");
+        CHECK(items == 1, "la pantalla de cine añade un único elemento (la imagen de la VRAM) (%d)", items);
+    }
     printf("test_no_gpu3d: %d comprobaciones, %d fallos\n", checks, fails);
     if (!fails) printf("TODO OK\n");
     return fails ? 1 : 0;

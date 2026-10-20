@@ -61,6 +61,7 @@ typedef struct NsExtractStats {
     uint32_t store_full;           /* mallas/colores rechazados por el tope del almacén */
     uint32_t n_lights;
     uint32_t oob_reads;            /* lecturas de RAM rechazadas por estar fuera de rango */
+    uint32_t extra_objs;           /* objetos dinámicos fuera de la cola del canal principal añadidos por el escaneo (cuerpo del jugador en la muerte / introducción) */
 } NsExtractStats;
 
 /* Contadores acumulados del extractor del enganche (ns_extract_glue.c) para el registro de diagnóstico; los acumulados solo crecen (la interfaz hace diferencias por segundo). */
@@ -75,6 +76,7 @@ typedef struct {
     uint32_t n_shadow;
     int detect_shadows;            /* 1: además, heurística propia (objeto de una pieza con una cara plana translúcida iluminada) */
     uint32_t max_pieces;           /* tope global de piezas por llamada (0 = la capacidad de la escena) */
+    int no_extra_scan;             /* 1: no buscar objetos dinámicos fuera de la cola del canal principal (comparaciones A/B) */
 } NsExtractOpts;
 
 /* ---- almacén de mallas (implementa el protocolo de ns_types.h «Entrega»: dos épocas vivas, ack del consumidor) ---- */
