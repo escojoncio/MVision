@@ -121,6 +121,7 @@ private final class NativeGpuMesh {
     var abr: UnsafeMutablePointer<UInt8>?        // modo de mezcla por triángulo
     var lastUsed: UInt32 = 0
     var bmin = SIMD3<Float>(0, 0, 0), bmax = SIMD3<Float>(0, 0, 0)   // caja local (unidades del motor), solo para el registro de diagnóstico
+    var restR: Float = 0      // radio de reposo (máx. |v| local, unidades del motor): referencia de la red de seguridad de vértices
     init(id: UInt64) { self.id = id }
     deinit { centroid?.deallocate(); abr?.deallocate() }
 }
@@ -182,6 +183,12 @@ final class NativeRenderer {
     private var frameFailures = 0                // mallas que no cupieron en este fotograma (se reintentan en el siguiente)
     private var frameMisses = 0                  // mallas pedidas por la escena y ausentes del almacén
     private var totalFailures = 0
+
+    // MARK: red de seguridad de vértices (ver ns_gpu_types.h NSG_NET_*): contadores desde la última línea de registro y detalle por (instancia, pieza, malla)
+    private struct NetKey: Hashable { let inst: UInt32; let piece: Int; let mesh: UInt64 }
+    private struct NetRec { var n = 0; var causes: UInt32 = 0; var tris: UInt32 = 0; var gap: Float = 0; var far: Float = 0; var edge: Float = 0; var scale: Float = 0 }
+    private var netRecs: [NetKey: NetRec] = [:]
+    private var netScenes = 0, netPieces = 0, netPiecesMat = 0, netPiecesWeld = 0, netTrisCollapsed = 0, netTrisFar = 0, netTrisEdge = 0, netTrisSeen = 0
 
     // MARK: escena preparada (búferes persistentes: nada se reserva por fotograma salvo crecimiento)
     private struct DrawItem { var piece: Int; var triStart: Int; var ntri: Int }
@@ -466,6 +473,7 @@ final class NativeRenderer {
         gm.depthBias = pm.pointee.depth_bias
         let bb = pm.pointee.bbox
         gm.bmin = SIMD3<Float>(Float(bb.0), Float(bb.1), Float(bb.2)); gm.bmax = SIMD3<Float>(Float(bb.3), Float(bb.4), Float(bb.5))
+        gm.restR = ns_gpu_mesh_radius(pm)
         if nv == 0 || nt == 0 || pm.pointee.verts == nil || pm.pointee.faces == nil { meshes[key] = gm; return nil }
         // Diagnóstico «partir triángulos grandes»: se empaqueta a memoria temporal (índices locales), se parten los triángulos de arista > umbral y el resultado (vértices originales
         // + añadidos, esquinas, centroides y modos de mezcla) es lo que se sube. Los triángulos con vértices soldados no se tocan. Con tope de seguridad por malla y en total.
@@ -649,7 +657,15 @@ final class NativeRenderer {
         semis.removeAll(keepingCapacity: true); statPcs.removeAll(keepingCapacity: true)
         if table.count < nPiece { table.append(contentsOf: repeatElement(NsGpuPiece(), count: nPiece - table.count)) }
         meshOf = newMeshOf
-        // 2) tabla de piezas y listas
+        // 2) tabla de piezas y listas. Por instancia, en tres pasos: (a) tabla de todas sus piezas (las soldaduras miran la tabla del padre), (b) red de seguridad de PIEZA (matriz
+        // corrupta: no se dibuja; soldadura inconsistente: se ignoran sus soldaduras), (c) listas de dibujo y recuento de los triángulos que el shader colapsará.
+        let netVerts = vertPool.buffer.contents().assumingMemoryBound(to: NsGpuVert.self)
+        let netCorners = triPool.buffer.contents().assumingMemoryBound(to: NsGpuCorner.self)
+        let netCol = (t[0] * t[0] + t[4] * t[4] + t[8] * t[8]).squareRoot()
+        let netMpu: Float = (netCol.isFinite && netCol > 1e-7) ? netCol : 0       // metros VR por unidad del motor (0 = no medible: sin comprobación en CPU; el shader sigue vigilando)
+        let netMat = UInt32(truncatingIfNeeded: NSG_NET_MAT), netWeld = UInt32(truncatingIfNeeded: NSG_NET_WELD)
+        let noWeldFlag = UInt32(truncatingIfNeeded: NSG_PF_NOWELD)
+        if fresh { netScenes += 1 }
         for ii in 0..<nInst {
             let instPtr = UnsafePointer(sc.pointee.inst + ii)
             let first = Int(instPtr.pointee.first_piece), cnt = Int(instPtr.pointee.n_pieces)
@@ -657,6 +673,8 @@ final class NativeRenderer {
             let isStatic = (instPtr.pointee.flags & staticFlag) != 0
             let zm = UInt32(instPtr.pointee.zone_mask)
             let inGroup = groupMask == 0 || zm == 0 || (zm & groupMask) != 0
+            let instKey = instPtr.pointee.key
+            // (a) tabla
             for k in 0..<cnt {
                 let gi = first + k
                 guard let gm = meshOf[gi] else { table[gi] = NsGpuPiece(); continue }
@@ -671,7 +689,50 @@ final class NativeRenderer {
                 withUnsafePointer(to: &pc) { pcp in
                     ns_gpu_make_piece(sc, instPtr, pcp, gm.flags, Int32(gm.depthBias), UInt32(gm.vertStart), parentGlobal, parentNV, &table[gi])
                 }
-                if !inGroup || (piecePtr.pointee.flags & hidden) != 0 { table[gi].flags &= ~drawFlag; continue }
+                table[gi].rest_r = gm.restR
+                if !inGroup || (piecePtr.pointee.flags & hidden) != 0 { table[gi].flags &= ~drawFlag }
+            }
+            // (b) red de seguridad de pieza (solo objetos dinámicos que se van a dibujar)
+            if !isStatic && netMpu > 0 {
+                for k in 0..<cnt {
+                    let gi = first + k
+                    guard let gm = meshOf[gi], (table[gi].flags & drawFlag) != 0 else { continue }
+                    var np = NsGpuNetPiece()
+                    let causes = table.withUnsafeBufferPointer { ns_gpu_net_piece(netVerts, $0.baseAddress!, UInt32(gi), UInt32(gm.nverts), netMpu, &np) }
+                    if fresh { netPieces += 1 }
+                    if causes == 0 { continue }
+                    if (causes & netMat) != 0 { table[gi].flags &= ~drawFlag }
+                    else if (causes & netWeld) != 0 { table[gi].flags |= noWeldFlag }
+                    if fresh {
+                        if (causes & netMat) != 0 { netPiecesMat += 1 }
+                        if (causes & netWeld) != 0 { netPiecesWeld += 1 }
+                        var r = netRecs[NetKey(inst: instKey, piece: k, mesh: gm.id)] ?? NetRec()
+                        r.n += 1; r.causes |= causes
+                        r.gap = max(r.gap, np.max_gap_m); r.scale = max(r.scale, np.max_scale)
+                        netRecs[NetKey(inst: instKey, piece: k, mesh: gm.id)] = r
+                    }
+                }
+            }
+            // (c) listas de dibujo (y recuento de lo que colapsa la red del shader)
+            for k in 0..<cnt {
+                let gi = first + k
+                guard let gm = meshOf[gi] else { continue }
+                if (table[gi].flags & drawFlag) == 0 { continue }
+                if !isStatic && netMpu > 0 && fresh {
+                    var acc = NsGpuNetTris()
+                    let n = table.withUnsafeBufferPointer { ns_gpu_net_tris(netVerts, netCorners + gm.triStart * 3, UInt32(gm.ntri), $0.baseAddress!, UInt32(gi), netMpu, &acc) }
+                    netTrisSeen += Int(acc.tris)
+                    if n > 0 {
+                        netTrisCollapsed += Int(n); netTrisFar += Int(acc.bad_far); netTrisEdge += Int(acc.bad_edge)
+                        let key = NetKey(inst: instKey, piece: k, mesh: gm.id)
+                        var r = netRecs[key] ?? NetRec()
+                        r.n += 1; r.tris = max(r.tris, n)
+                        if acc.bad_far > 0 { r.causes |= UInt32(truncatingIfNeeded: NSG_NET_FAR) }
+                        if acc.bad_edge > 0 { r.causes |= UInt32(truncatingIfNeeded: NSG_NET_EDGE) }
+                        r.far = max(r.far, acc.worst_far_m); r.edge = max(r.edge, acc.worst_edge_m)
+                        netRecs[key] = r
+                    }
+                }
                 if gm.opaquePass {
                     if isStatic { statPcs.append((gi, gm)) }
                     else if gm.flat { dynFlat.append(DrawItem(piece: gi, triStart: gm.triStart, ntri: gm.ntri)) }
@@ -1378,6 +1439,29 @@ final class NativeRenderer {
         if splitMeters > 0 {
             t += " partido: mallas=\(splitMeshStat) tris_partidos=\(splitTrisStat) tris_añadidos=\(splitAddedStat) sin_partir_por_soldadura=\(splitWeldStat) sin_partir_por_tope=\(splitCapStat) fallos=\(splitFailStat)"
         } else { t += " partido=no" }
+        return t
+    }
+
+    /// Red de seguridad de vértices (una vez por segundo; reinicia los contadores): piezas con matriz corrupta (no se dibujan), con soldadura inconsistente (se dibujan sin soldar) y triángulos que
+    /// el shader colapsa (vértice lejos de la pieza / arista desproporcionada), y el detalle por instancia, pieza y malla con la causa y el peor valor.
+    func netLine() -> String {
+        func causeNames(_ c: UInt32) -> String {
+            var n: [String] = []
+            if (c & UInt32(truncatingIfNeeded: NSG_NET_MAT)) != 0 { n.append("matriz_corrupta") }
+            if (c & UInt32(truncatingIfNeeded: NSG_NET_WELD)) != 0 { n.append("soldadura_inconsistente") }
+            if (c & UInt32(truncatingIfNeeded: NSG_NET_FAR)) != 0 { n.append("vertice_lejos_de_la_pieza") }
+            if (c & UInt32(truncatingIfNeeded: NSG_NET_EDGE)) != 0 { n.append("arista_desproporcionada") }
+            return n.isEmpty ? "?" : n.joined(separator: "+")
+        }
+        var t = "red-vertices: escenas=\(netScenes) piezas_vigiladas=\(netPieces) tris_vigilados=\(netTrisSeen) | piezas: matriz_corrupta=\(netPiecesMat) soldadura_inconsistente=\(netPiecesWeld) | tris_colapsados=\(netTrisCollapsed) (lejos=\(netTrisFar) arista=\(netTrisEdge))"
+        let top = netRecs.sorted { $0.value.n > $1.value.n }.prefix(8)
+        for (k, r) in top {
+            t += " | inst=" + String(k.inst, radix: 16) + " pieza=\(k.piece) malla=" + String(k.mesh, radix: 16) + " causa=" + causeNames(r.causes) + " veces=\(r.n) tris=\(r.tris)"
+            t += String(format: " salto_soldadura=%.2fm lejos=%.2fm exceso_arista=%.2fm escala=%.2f", r.gap, r.far, r.edge, r.scale)
+        }
+        if netRecs.count > 8 { t += " | (+\(netRecs.count - 8) mas)" }
+        netRecs.removeAll(keepingCapacity: true)
+        netScenes = 0; netPieces = 0; netPiecesMat = 0; netPiecesWeld = 0; netTrisCollapsed = 0; netTrisFar = 0; netTrisEdge = 0; netTrisSeen = 0
         return t
     }
 

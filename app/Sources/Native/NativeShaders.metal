@@ -32,6 +32,53 @@ static float3 ns_mul34(const device float *m, float3 p)
                   m[8] * p.x + m[9] * p.y + m[10] * p.z + m[11]);
 }
 
+/* Posición de mundo del motor de un vértice: la suya, o (soldadura) la del vértice del padre transformada con la matriz del padre, encadenada hasta NSG_WELD_DEPTH niveles
+ * (si el vértice del padre también está soldado, se sigue al abuelo: mismo criterio que ns_adapt de la referencia). NSG_PF_NOWELD (soldadura inconsistente este fotograma) la ignora.
+ * Réplica en C: ns_gpu_vert_world (ns_gpu.c). */
+static float3 ns_world_pos(const device NsGpuVert &V, const device NsGpuPiece &P, const device NsGpuVert *verts, const device NsGpuPiece *pieces)
+{
+    float3 wp = ns_mul34(&P.w[0], float3(V.p[0], V.p[1], V.p[2]));
+    if ((P.flags & NSG_PF_NOWELD) != 0u) return wp;
+    uint w = V.weld;
+    int pi = P.parent;
+    uint pn = P.parent_nverts;
+    for (int d = 0; d < NSG_WELD_DEPTH; d++) {
+        if (w == NSG_NO_WELD || pi < 0 || w >= pn) break;
+        const device NsGpuPiece &Q = pieces[uint(pi)];
+        const device NsGpuVert &PV = verts[Q.vert_base + w];
+        wp = ns_mul34(&Q.w[0], float3(PV.p[0], PV.p[1], PV.p[2]));
+        if ((Q.flags & NSG_PF_NOWELD) != 0u) break;
+        w = PV.weld; pi = Q.parent; pn = Q.parent_nverts;
+    }
+    return wp;
+}
+
+/* Red de seguridad contra «explosiones de vértices»: ¿se colapsa el triángulo que empieza en la esquina `first`? (solo piezas NSG_PF_NET, objetos dinámicos). Se colapsa si algún vértice
+ * queda lejos del origen de su pieza (mas de NSG_NET_FAR_RATIO veces el radio de reposo de la malla + holgura) o si alguna arista mide mucho más que en reposo (NSG_NET_EDGE_RATIO veces + holgura).
+ * Las tres esquinas toman la MISMA decisión (se calcula con el triángulo entero), así que el triángulo desaparece entero. Réplica en C: net_tri (ns_gpu.c). */
+static bool ns_net_bad(uint first, uint piece_index, const device NsGpuVert *verts, const device NsGpuCorner *corners,
+                       const device NsGpuPiece *pieces, constant NsGpuUniforms &U)
+{
+    const device NsGpuPiece &P = pieces[piece_index];
+    float mpu = length(float3(U.tovr[0].x, U.tovr[1].x, U.tovr[2].x));      /* metros VR por unidad del motor */
+    float slack = NSG_NET_SLACK_M / max(mpu, 1.0e-9);
+    float3 org = float3(P.w[3], P.w[7], P.w[11]);
+    float3 wp[3];
+    float3 lp[3];
+    for (uint k = 0u; k < 3u; k++) {
+        const device NsGpuVert &V = verts[corners[first + k].v];
+        lp[k] = float3(V.p[0], V.p[1], V.p[2]);
+        wp[k] = ns_world_pos(V, P, verts, pieces);
+    }
+    bool bad = false;
+    for (uint k = 0u; k < 3u; k++) {
+        uint k2 = (k + 1u) % 3u;
+        if (P.rest_r > 0.0 && !(length(wp[k] - org) <= NSG_NET_FAR_RATIO * P.rest_r + slack)) bad = true;
+        if (!(length(wp[k] - wp[k2]) <= NSG_NET_EDGE_RATIO * length(lp[k] - lp[k2]) + slack)) bad = true;
+    }
+    return bad;
+}
+
 static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
                         const device NsGpuVert *verts, const device NsGpuCorner *corners,
                         const device NsGpuPiece *pieces, constant NsGpuUniforms &U)
@@ -40,14 +87,11 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
     const device NsGpuPiece &P = pieces[piece_index];
     const device NsGpuVert &V = verts[c.v];
 
-    /* posición en el mundo del motor; los vértices welded toman la posición transformada del vértice del padre */
-    float3 lp = float3(V.p[0], V.p[1], V.p[2]);
-    float3 wp = ns_mul34(&P.w[0], lp);
-    if (V.weld != NSG_NO_WELD && P.parent >= 0 && V.weld < P.parent_nverts) {
-        const device NsGpuPiece &Q = pieces[uint(P.parent)];
-        const device NsGpuVert &PV = verts[Q.vert_base + V.weld];
-        wp = ns_mul34(&Q.w[0], float3(PV.p[0], PV.p[1], PV.p[2]));
-    }
+    /* posición en el mundo del motor; los vértices welded toman la posición transformada del vértice del padre (encadenadas) */
+    float3 wp = ns_world_pos(V, P, verts, pieces);
+    /* red de seguridad (objetos dinámicos): un triángulo estirado hasta lejos se colapsa entero */
+    bool net = false;
+    if ((P.flags & NSG_PF_NET) != 0u) net = ns_net_bad(corner_index - corner_index % 3u, piece_index, verts, corners, pieces, U);
 
     /* color: precalculado de la cara, luz de la pieza o neutro; después niebla (hacia negro) y byte entero */
     uint cf = uint(c.flags);
@@ -89,6 +133,7 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
 
     NsVOut o;
     o.pos = U.view_proj[amp] * float4(pv, 1.0);
+    if (net) o.pos = float4(0.0, 0.0, 2.0, 1.0);   /* triángulo colapsado: los tres vértices en el mismo punto fuera del volumen de recorte */
     o.uv = float2(float(c.u), float(c.t));
     o.col = col;
     o.tpage = uint(c.tpage);
