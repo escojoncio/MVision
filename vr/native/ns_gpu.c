@@ -557,6 +557,117 @@ enum { FXR_SURFACE = 14, FXR_WATER_SURFACE = 15, FXR_VIEW_OVERLAY = 22, FXR_COUN
 static const char *const k_fx_role_names[FXR_COUNT] = {"none", "light", "bubble", "smoke", "spark", "droplet", "splash", "ripple", "tracer", "beam", "decal", "shadow", "shadow_obj", "plasma",
                                                        "surface", "water_surface", "ambient", "cone", "trail", "strip", "particle", "sprite_anim", "view_overlay"};
 const char *ns_gpu_fx_role_name(int role) { return role >= 0 && role < FXR_COUNT ? k_fx_role_names[role] : "?"; }
+
+/* ---- Seguimiento: ¿va este efecto pegado a la cabeza? ----
+ * Un efecto anclado al mundo del motor cambia su posición en espacio de cabeza cuando la cabeza se mueve (andar, girar); uno pegado a la cámara (o a la propia jugadora, o colocado cada fotograma
+ * a una profundidad inventada sobre el rayo de pantalla) NO lo hace. Por cada clave se guarda una referencia (posición en espacio de cabeza y en el mundo del motor); cuando la cabeza se ha movido lo bastante
+ * respecto a ella (dexp = lo que habría cambiado si estuviera en el mundo) se compara lo que cambió de verdad: en cabeza (dh) y en el mundo (dw), en metros VR. */
+typedef struct { uint64_t key; uint32_t seen, born; float hs[3], pw[3]; uint8_t state, nlock, nworld, nwander, used; } TrkEnt;
+enum { TRK_N = 16384, TRK_PROBE = 16, TRK_STALE = 90 };
+struct NsGpuFxTrack { TrkEnt *e; uint32_t tick; };
+NsGpuFxTrack *ns_gpu_fx_track_create(void) {
+    NsGpuFxTrack *t = (NsGpuFxTrack *)calloc(1, sizeof *t);
+    if (!t) return NULL;
+    t->e = (TrkEnt *)calloc(TRK_N, sizeof(TrkEnt));
+    if (!t->e) { free(t); return NULL; }
+    return t;
+}
+void ns_gpu_fx_track_destroy(NsGpuFxTrack *t) { if (t) { free(t->e); free(t); } }
+void ns_gpu_fx_track_reset(NsGpuFxTrack *t) { if (t) { memset(t->e, 0, sizeof(TrkEnt) * TRK_N); t->tick = 0; } }
+static TrkEnt *trk_slot(NsGpuFxTrack *t, uint64_t key, int *fresh) {
+    uint32_t h = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 40) & (TRK_N - 1u), spare = TRK_N;
+    for (int i = 0; i < TRK_PROBE; i++, h = (h + 1) & (TRK_N - 1u)) {
+        TrkEnt *e = &t->e[h];
+        if (e->used && e->key == key) { *fresh = 0; return e; }
+        if ((!e->used || t->tick - e->seen > TRK_STALE) && spare == TRK_N) spare = h;
+    }
+    if (spare == TRK_N) return NULL;
+    *fresh = 1;
+    memset(&t->e[spare], 0, sizeof(TrkEnt));
+    t->e[spare].used = 1; t->e[spare].key = key;
+    return &t->e[spare];
+}
+static float v3len(const float *a) { return sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]); }
+/* Actualiza un efecto seguido y devuelve su estado (NSG_FS_*). hs_now: posición en cabeza; cc_now / pw_now: centro en el mundo VR y en el del motor. dist_hold: distancia de retención (0 = ninguna). */
+static int trk_update(NsGpuFxTrack *t, uint64_t key, const float *M, const float head[3], const float ax[3][3], const float hs_now[3], const float cc_now[3], const float pw_now[3], float hold_m) {
+    int fresh = 0;
+    TrkEnt *e = trk_slot(t, key, &fresh);
+    if (!e) return NSG_FS_WORLD;   /* sin sitio: no se sabe nada, se trata como mundo */
+    const float dist = v3len(hs_now);
+    if (fresh || t->tick - e->seen > 12u) {   /* nuevo, o reaparece tras un hueco: referencia nueva */
+        if (!fresh) { e->state = NSG_FS_UNKNOWN; e->nlock = e->nworld = e->nwander = 0; }
+        e->born = t->tick; memcpy(e->hs, hs_now, sizeof e->hs); memcpy(e->pw, pw_now, sizeof e->pw);
+        e->seen = t->tick;
+        return e->state;
+    }
+    e->seen = t->tick;
+    float cref[3], d[3], hexp[3];
+    fx_vr(M, e->pw, cref);
+    for (int r = 0; r < 3; r++) d[r] = cref[r] - head[r];
+    for (int a = 0; a < 3; a++) hexp[a] = d[0] * ax[a][0] + d[1] * ax[a][1] + d[2] * ax[a][2];
+    float dx[3] = {hexp[0] - e->hs[0], hexp[1] - e->hs[1], hexp[2] - e->hs[2]};
+    const float dexp = v3len(dx);
+    const float l0 = v3len(e->hs), l1 = v3len(hexp);
+    (void)l1;
+    const float eps = 0.004f + 0.01f * l0;   /* ruido: cuantización del motor (1 mm) y pequeños errores de la pose de la cabeza, proporcional a la distancia */
+    if (dexp > 6.0f * eps) {   /* la cabeza se ha movido lo bastante respecto a este efecto como para distinguir mundo de cabeza */
+        float dh3[3] = {hs_now[0] - e->hs[0], hs_now[1] - e->hs[1], hs_now[2] - e->hs[2]}, dw3[3] = {cc_now[0] - cref[0], cc_now[1] - cref[1], cc_now[2] - cref[2]};
+        const float dh = v3len(dh3), dw = v3len(dw3);
+        const int world = dw <= 0.35f * dexp + 2.0f * eps;
+        const int follow = !world && dh <= 0.25f * dexp + eps && dw >= 0.5f * dexp;
+        if (world) {
+            e->nworld = (uint8_t)(e->nworld < 250 ? e->nworld + 1 : 250); e->nlock = 0; e->nwander = 0;
+            if (e->state != NSG_FS_FOLLOW || e->nworld >= 2) e->state = NSG_FS_WORLD;
+        } else if (follow) {
+            e->nlock = (uint8_t)(e->nlock < 250 ? e->nlock + 1 : 250); e->nworld = 0; e->nwander = 0;
+            if (e->nlock >= 2) e->state = NSG_FS_FOLLOW;
+        } else {   /* se mueve por su cuenta (enemigo, proyectil): lejos es legítimo; cerca de la cabeza y sin ancla, no */
+            e->nwander = (uint8_t)(e->nwander < 250 ? e->nwander + 1 : 250); e->nlock = 0; e->nworld = 0;
+            if (e->nwander >= 2) e->state = (hold_m > 0.0f && dist < hold_m) ? NSG_FS_WANDER : NSG_FS_WORLD;
+        }
+        memcpy(e->hs, hs_now, sizeof e->hs); memcpy(e->pw, pw_now, sizeof e->pw);
+    }
+    return e->state;
+}
+void ns_gpu_fx_follow_reset(NsGpuFxFollowAcc *a) { if (a) memset(a, 0, sizeof *a); }
+void ns_gpu_fx_follow_accum(NsGpuFxFollowAcc *a, const NsGpuFxOut *o) {
+    if (!a || !o) return;
+    a->frames++;
+    const uint32_t bad = o->n_follow + o->n_wander;
+    if (bad) { a->frames_follow++; a->sum_follow += bad; }
+    if (o->n_held) { a->frames_held++; a->sum_held += o->n_held; }
+    if (o->n_follow > a->max_follow) a->max_follow = o->n_follow;
+    if (o->n_wander > a->max_wander) a->max_wander = o->n_wander;
+    if (o->n_held > a->max_held) a->max_held = o->n_held;
+    if (o->n_follow_fill > a->max_follow_fill) a->max_follow_fill = o->n_follow_fill;
+    if (o->n_tracked > a->max_tracked) a->max_tracked = o->n_tracked;
+    if (o->n_world > a->max_world) a->max_world = o->n_world;
+    for (uint32_t i = 0; i < o->n_fol && i < NSG_FXF_MAX; i++) {
+        const NsGpuFxFollow *f = &o->fol[i];
+        uint32_t k = 0;
+        for (; k < a->n_rec; k++) if (a->rec[k].f.src_key == f->src_key && a->rec[k].f.idx == f->idx && a->rec[k].f.sub == f->sub) break;
+        if (k < a->n_rec) { a->rec[k].f = *f; a->rec[k].frames++; continue; }
+        if (a->n_rec < NSG_FXF_MAX) k = a->n_rec++;
+        else { uint32_t m = 0; for (uint32_t j = 1; j < a->n_rec; j++) if (a->rec[j].frames < a->rec[m].frames) m = j; if (a->rec[m].frames > 1u) continue; k = m; }
+        a->rec[k].f = *f; a->rec[k].frames = 1;
+    }
+}
+size_t ns_gpu_fx_follow_describe(const NsGpuFxFollowAcc *a, char *buf, size_t cap) {
+    if (!buf || !cap) return 0;
+    buf[0] = 0;
+    if (!a) return 0;
+    static const char *const st[4] = {"sin_verificar", "mundo", "sigue", "vaga"};
+    int n = snprintf(buf, cap, "fx-sigue(cabeza-fija): fotogramas=%u con_sigue_o_vaga=%u con_retenidos=%u max(sigue=%u vaga=%u retenidos=%u relleno=%u) seguidos=%u en_mundo=%u",
+                     a->frames, a->frames_follow, a->frames_held, a->max_follow, a->max_wander, a->max_held, a->max_follow_fill, a->max_tracked, a->max_world);
+    for (uint32_t i = 0; i < a->n_rec && n > 0 && (size_t)n < cap; i++) {
+        const NsGpuFxFollowRec *r = &a->rec[i];
+        n += snprintf(buf + n, cap - (size_t)n, " | [rol=%s origen=%s %s%s %s d=%.2fm tam=%.2fm cab=(%.2f %.2f %.2f) prim=%08x/%u fr=%u]", ns_gpu_fx_role_name(r->f.role), r->f.origin == NSG_ORIGIN_FILL ? "relleno" : "fx",
+                      r->f.kind == NS_EK_BILLBOARD ? "cartel" : "poligono", r->f.oncam == 2 ? " PANTALLA(conservado)" : r->f.oncam ? " ON_CAMERA" : "", st[r->f.state & 3], r->f.dist_m, r->f.size_m, r->f.hs[0], r->f.hs[1], r->f.hs[2],
+                      r->f.src_key, r->f.idx, r->frames);
+    }
+    return n > 0 ? ((size_t)n < cap ? (size_t)n : cap - 1) : 0;
+}
+
 float ns_gpu_fx_comfort_cap_deg(float d, float x, float dmin) {
     if (!(x > 0.0f)) return 1e9f;
     if (!(dmin > 0.0f)) dmin = 0.12f;
@@ -635,14 +746,14 @@ size_t ns_gpu_fx_near_describe(const NsGpuFxNearAcc *a, char *buf, size_t cap) {
     if (!buf || !cap) return 0;
     buf[0] = 0;
     if (!a) return 0;
-    static const char *const act[4] = {"intacto", "reducido", "descartado_dentro", "descartado_pegado"};
+    static const char *const act[6] = {"intacto", "reducido", "descartado_dentro", "descartado_pegado", "descartado_sigue", "retenido"};
     int n = snprintf(buf, cap, "fx-cerca(<0.5m): fotogramas=%u con_cercanos=%u en_movimiento=%u (con_cercanos=%u) max_vel=%.2fm/s max_giro=%.0fgr/s | max_cercanos=%u (pegados=%u pantalla=%u) reducidos=%u descartados(dentro=%u pegados=%u) cartel_prof_ref=%u max_ang=%.0fgr",
                      a->frames, a->frames_near, a->frames_moving, a->frames_moving_near, a->max_speed_mps, a->max_turn_dps, a->max_near, a->max_near_oncam, a->max_near_screen, a->max_shrunk,
                      a->sum_drop_inside, a->sum_drop_oncam, a->max_zref, a->max_deg_raw);
     for (uint32_t i = 0; i < a->n_rec && n > 0 && (size_t)n < cap; i++) {
         const NsGpuFxNear *r = &a->rec[i];
-        n += snprintf(buf + n, cap - (size_t)n, " | [rol=%s %s%s d=%.2fm tam=%.2fm ang=%.0f->%.0fgr %s prim=%08x/%u]", ns_gpu_fx_role_name(r->role), r->kind == NS_EK_BILLBOARD ? "cartel" : "poligono",
-                      (r->flags & NS_EF_ON_CAMERA) ? " ON_CAMERA" : "", r->dist_m, r->size_m, r->deg_raw, r->deg_after, act[r->action & 3], r->src_key, r->idx);
+        n += snprintf(buf + n, cap - (size_t)n, " | [rol=%s origen=%s %s%s d=%.2fm tam=%.2fm ang=%.0f->%.0fgr %s prim=%08x/%u]", ns_gpu_fx_role_name(r->role), (r->src_key >> 24) == 0xF1u ? "relleno" : "fx", r->kind == NS_EK_BILLBOARD ? "cartel" : "poligono",
+                      (r->flags & NS_EF_ON_CAMERA) ? " ON_CAMERA" : "", r->dist_m, r->size_m, r->deg_raw, r->deg_after, act[r->action < 6 ? r->action : 0], r->src_key, r->idx);
     }
     return n > 0 ? ((size_t)n < cap ? (size_t)n : cap - 1) : 0;
 }
@@ -669,6 +780,13 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
     const float zmin = prm->px_z_min > 0 ? prm->px_z_min : 32.0f, zref = prm->px_z_ref > 0 ? prm->px_z_ref : 1000.0f;
     const float ys = NS_OVERSCAN_Y;
     const uint32_t all_eyes = prm->n_eyes == 2 ? 3u : 1u;
+    NsGpuFxTrack *const trk = prm->track;
+    float hax[3][3];   /* ejes de la cabeza: derecha, arriba, delante (mundo VR) */
+    if (trk) {
+        for (int r = 0; r < 3; r++) { hax[0][r] = prm->head_right[r]; hax[1][r] = prm->head_up[r]; }
+        hax[2][0] = hax[0][1] * hax[1][2] - hax[0][2] * hax[1][1]; hax[2][1] = hax[0][2] * hax[1][0] - hax[0][0] * hax[1][2]; hax[2][2] = hax[0][0] * hax[1][1] - hax[0][1] * hax[1][0];
+        trk->tick++;
+    }
 
     FxSemi *semi = (FxSemi *)malloc(sizeof(FxSemi) * n_fx);
     if (!semi) return -1;
@@ -758,6 +876,46 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
         }
         if (ok) for (int v = 0; v < nq; v++) if (!fx_finite3(q[v])) ok = 0;
         if (!ok) { out->n_skipped++; continue; }
+        int trk_state = NSG_FS_WORLD, trk_drop = 0, trk_oncam = 0;
+        float trk_hs[3] = {0, 0, 0};
+        {   /* seguimiento (antes del adelanto de carteles: lo que cuenta es el sitio verdadero) */
+            const int oncam_hard = prm->drop_oncam && (e->flags & NS_EF_ON_CAMERA) && e->role != FXR_VIEW_OVERLAY;
+            if (trk || oncam_hard) {
+                float cc[3] = {0, 0, 0}, pw[3] = {0, 0, 0};
+                const int npw = (e->kind == NS_EK_BILLBOARD) ? 1 : ((e->flags & NS_EF_LINE) || e->nv == 2) ? 2 : nq;
+                for (int v = 0; v < nq; v++) for (int r = 0; r < 3; r++) cc[r] += q[v][r] / (float)nq;
+                for (int v = 0; v < npw; v++) for (int r = 0; r < 3; r++) pw[r] += e->p[v][r] / (float)npw;
+                if (e->kind == NS_EK_BILLBOARD) fx_vr(M, e->p[0], cc);
+                else if (npw == 2) { float a2[3], b2[3]; fx_vr(M, e->p[0], a2); fx_vr(M, e->p[1], b2); for (int r = 0; r < 3; r++) cc[r] = 0.5f * (a2[r] + b2[r]); }
+                float d[3] = {cc[0] - prm->head[0], cc[1] - prm->head[1], cc[2] - prm->head[2]};
+                for (int a = 0; a < 3; a++) trk_hs[a] = d[0] * hax[a][0] + d[1] * hax[a][1] + d[2] * hax[a][2];
+                if (trk) { trk_state = trk_update(trk, ns_gpu_fx_key(e), M, prm->head, (const float (*)[3])hax, trk_hs, cc, pw, prm->hold_near_m); out->n_tracked++; }
+                const float dd = v3len(trk_hs);
+                if (oncam_hard) { trk_state = NSG_FS_FOLLOW; trk_oncam = 1; trk_drop = 2; }
+                else if (trk_state == NSG_FS_FOLLOW || trk_state == NSG_FS_WANDER) trk_drop = 1;
+                else if (trk_state == NSG_FS_UNKNOWN && prm->hold_near_m > 0.0f && dd < prm->hold_near_m) trk_drop = 3;
+                int overlay_kept = 0;
+                if (trk_drop && e->role == FXR_VIEW_OVERLAY) { trk_drop = 0; overlay_kept = 1; trk_oncam = 2; }   /* recubrimiento de pantalla intencionado: se conserva, pero queda en el registro */
+                if (trk_state == NSG_FS_WORLD) out->n_world++;
+                if (!overlay_kept) {
+                    if (trk_state == NSG_FS_FOLLOW) { out->n_follow++; if ((e->src_key >> 24) == 0xF1u) out->n_follow_fill++; }
+                    else if (trk_state == NSG_FS_WANDER) out->n_wander++;
+                    else if (trk_drop == 3) out->n_held++;
+                }
+                if (trk_drop || overlay_kept) {   /* registro: los más cercanos a la cabeza */
+                    NsGpuFxFollow fr; memset(&fr, 0, sizeof fr);
+                    fr.src_key = e->src_key; fr.idx = e->idx; fr.sub = e->sub; fr.role = e->role; fr.kind = e->kind; fr.state = (uint8_t)trk_state; fr.oncam = (uint8_t)trk_oncam;
+                    fr.origin = (uint8_t)((e->src_key >> 24) == 0xF1u ? NSG_ORIGIN_FILL : NSG_ORIGIN_FX);
+                    fr.dist_m = dd; fr.size_m = fx_size_m(q, nq); memcpy(fr.hs, trk_hs, sizeof fr.hs);
+                    uint32_t pos = out->n_fol;
+                    if (pos >= NSG_FXF_MAX) { if (fr.dist_m >= out->fol[NSG_FXF_MAX - 1].dist_m) pos = NSG_FXF_MAX; else pos = NSG_FXF_MAX - 1; } else out->n_fol++;
+                    if (pos < NSG_FXF_MAX) {
+                        out->fol[pos] = fr;
+                        while (pos > 0 && out->fol[pos].dist_m < out->fol[pos - 1].dist_m) { NsGpuFxFollow t2 = out->fol[pos]; out->fol[pos] = out->fol[pos - 1]; out->fol[pos - 1] = t2; pos--; }
+                    }
+                }
+            }
+        }
         {   /* orden de dibujo del motor: sesgo `raise` por elemento y adelanto de los carteles */
             float pull = (prm->raise_m > 0.0f) ? (float)e->depth_bias * prm->raise_m : 0.0f;
             float cc[3] = {0, 0, 0};
@@ -785,8 +943,11 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
             const int env = e->role == FXR_SURFACE || e->role == FXR_WATER_SURFACE;   /* superficies del entorno (agua, paneles): no son sprites, no se reducen */
             const int watch = dc < nearm;
             float deg0 = 0.0f, deg1 = 0.0f; int action = NSG_FXN_KEPT;
-            if (watch || prm->comfort_deg > 0.0f || prm->drop_inside_m > 0.0f || (screen && prm->oncam_drop_m > 0.0f)) deg0 = deg1 = fx_ang_deg(q, nq, prm->head);
-            if (screen && prm->oncam_drop_m > 0.0f && dc < prm->oncam_drop_m) { dropped = 1; action = NSG_FXN_DROP_ONCAM; out->n_drop_oncam++; deg1 = 0.0f; }
+            if (watch || trk_drop || prm->comfort_deg > 0.0f || prm->drop_inside_m > 0.0f || (screen && prm->oncam_drop_m > 0.0f)) deg0 = deg1 = fx_ang_deg(q, nq, prm->head);
+            if (trk_drop == 2) { dropped = 1; action = NSG_FXN_DROP_ONCAM; out->n_drop_oncam++; deg1 = 0.0f; }
+            else if (trk_drop == 1) { dropped = 1; action = NSG_FXN_DROP_FOLLOW; deg1 = 0.0f; }
+            else if (trk_drop == 3) { dropped = 1; action = NSG_FXN_HELD; deg1 = 0.0f; }
+            else if (screen && prm->oncam_drop_m > 0.0f && dc < prm->oncam_drop_m) { dropped = 1; action = NSG_FXN_DROP_ONCAM; out->n_drop_oncam++; deg1 = 0.0f; }
             else if (prm->drop_inside_m > 0.0f && !env && dc < prm->drop_inside_m) { dropped = 1; action = NSG_FXN_DROP_INSIDE; out->n_drop_inside++; deg1 = 0.0f; }
             else if (prm->comfort_deg > 0.0f && !env) {
                 const float cap = ns_gpu_fx_comfort_cap_deg(dc, prm->comfort_deg, prm->comfort_dmin_m);
@@ -800,7 +961,7 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
                     action = NSG_FXN_SHRUNK; out->n_shrunk++;
                 }
             }
-            if (watch || action == NSG_FXN_DROP_ONCAM) {
+            if (watch || action == NSG_FXN_DROP_ONCAM || action == NSG_FXN_DROP_FOLLOW || action == NSG_FXN_HELD) {
                 if (watch) { out->n_near++; if (oncam) out->n_near_oncam++; if (screen) out->n_near_screen++; }
                 NsGpuFxNear r; memset(&r, 0, sizeof r);
                 r.src_key = e->src_key; r.idx = e->idx; r.flags = e->flags; r.role = e->role; r.kind = e->kind; r.action = (uint8_t)action; r.screen = (uint8_t)screen;

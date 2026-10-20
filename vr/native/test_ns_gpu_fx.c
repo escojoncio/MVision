@@ -398,6 +398,123 @@ static void t_world_size(void) {
           "pegado a la cámara a 0,5 m, colocado como el motor: ni se encoge ni se quita");
 }
 
+/* ---- seguimiento: lo pegado a la cabeza se detecta y descarta; lo anclado al mundo no se mueve con la cabeza ---- */
+static void head_pose(int t, float head[3], float right[3], float up[3]) {   /* la cabeza gira 3 grados y avanza 5 mm por fotograma */
+    float yaw = (float)t * 3.0f * 3.14159265f / 180.0f;
+    head[0] = 0.005f * (float)t; head[1] = 1.6f; head[2] = 0.0f;
+    right[0] = cosf(yaw); right[1] = 0; right[2] = -sinf(yaw); up[0] = 0; up[1] = 1; up[2] = 0;
+}
+static void vr_to_engine(const float v[3], float e[3]) { e[0] = v[0] / 0.001f; e[1] = -v[1] / 0.001f; e[2] = v[2] / 0.001f; }
+static void t_follow(void) {
+    NsGpuFxTrack *trk = ns_gpu_fx_track_create();
+    CHECK(trk != NULL, "crear el seguimiento");
+    P.track = trk; P.hold_near_m = 0.3f; P.drop_oncam = 1; P.n_eyes = 1;
+    enum { N = 8, FR = 70 };
+    NsEffect fx[N];
+    int drawn_last[N] = {0}, ever_drawn[N] = {0}, drawn_first[N] = {0};
+    float cen[N][3], cen_prev[N][3]; int have_prev[N] = {0};
+    float world_dev[N] = {0};
+    NsGpuFxFollowAcc acc; ns_gpu_fx_follow_reset(&acc);
+    NsGpuFxOut o;
+    for (int t = 0; t < FR; t++) {
+        float head[3], right[3], up[3], fwd[3];
+        head_pose(t, head, right, up);
+        fwd[0] = right[1] * up[2] - right[2] * up[1]; fwd[1] = right[2] * up[0] - right[0] * up[2]; fwd[2] = right[0] * up[1] - right[1] * up[0];
+        memcpy(P.head, head, sizeof head); memcpy(P.head_right, right, sizeof right); memcpy(P.head_up, up, sizeof up); memcpy(P.eyes[0], head, sizeof head);
+        float vr[3], en[3];
+        /* 0: de mundo, a 2 m, quieto */
+        fx[0] = quad(2000, -1600, 2500, 40); fx[0].src_key = 0x80100000u;
+        /* 1: pegado a la cabeza a 0,8 m de frente: el motor lo recoloca cada fotograma en el mismo sitio de la vista */
+        for (int a = 0; a < 3; a++) vr[a] = head[a] + 0.10f * right[a] + 0.0f * up[a] + 0.8f * fwd[a];
+        vr_to_engine(vr, en); fx[1] = quad(en[0], en[1], en[2], 40); fx[1].src_key = 0x80100100u;
+        /* 2: de mundo, a 20 cm de la cabeza al principio (cerca): retenido hasta demostrar que es del mundo */
+        {
+            float h0[3], r0[3], u0[3];
+            head_pose(0, h0, r0, u0);
+            float f0[3] = {r0[1] * u0[2] - r0[2] * u0[1], r0[2] * u0[0] - r0[0] * u0[2], r0[0] * u0[1] - r0[1] * u0[0]};
+            for (int a = 0; a < 3; a++) vr[a] = h0[a] + 0.2f * f0[a];
+            vr_to_engine(vr, en); fx[2] = quad(en[0], en[1], en[2], 20); fx[2].src_key = 0x80100200u;
+        }
+        /* 3: pegado a la cámara por bandera, no es de pantalla */
+        fx[3] = board(0, 0, 3000, 40, NSFX_ROLE_LIGHT, NS_EF_ON_CAMERA | NS_EF_WORLD_SIZE); fx[3].box[0] = fx[3].box[1] = -40; fx[3].box[2] = fx[3].box[3] = 40; fx[3].src_key = 0x80100300u;
+        /* 4: pegado a la cámara por bandera y pegado a la cabeza de verdad, pero recubrimiento de pantalla: intencionado, se conserva (y queda en el registro) */
+        for (int a = 0; a < 3; a++) vr[a] = head[a] + 1.0f * fwd[a];
+        vr_to_engine(vr, en); fx[4] = quad(en[0], en[1], en[2], 100); fx[4].src_key = 0x80100400u; fx[4].role = NSFX_ROLE_VIEW_OVERLAY; fx[4].flags |= NS_EF_ON_CAMERA;
+        /* 5: cerca de la cabeza y vagando (colocado cada fotograma a 0,2 m en una dirección distinta del mundo: ni de cabeza ni de mundo) */
+        { float ang = (float)t * 1.7f; vr[0] = head[0] + 0.2f * cosf(ang); vr[1] = head[1] + 0.05f * sinf(ang * 0.7f); vr[2] = head[2] + 0.2f * sinf(ang); vr_to_engine(vr, en); fx[5] = quad(en[0], en[1], en[2], 20); fx[5].src_key = 0x80100500u; }
+        /* 6: enemigo lejano que camina por su cuenta (2,5 m): legítimo */
+        { vr[0] = 1.0f + 0.01f * (float)t; vr[1] = 1.5f; vr[2] = 2.5f; vr_to_engine(vr, en); fx[6] = quad(en[0], en[1], en[2], 40); fx[6].src_key = 0x80100600u; }
+        /* 7: pegado a la cabeza a 3 m (cielo que se mueve con el ojo): se detecta aunque esté lejos */
+        for (int a = 0; a < 3; a++) vr[a] = head[a] - 0.4f * right[a] + 0.3f * up[a] + 3.0f * fwd[a];
+        vr_to_engine(vr, en); fx[7] = quad(en[0], en[1], en[2], 100); fx[7].src_key = 0x80100700u;
+        NsGpuFxVert vb[12 * N + 12]; NsGpuFxRun runs[N + 1]; uint64_t keys[N + 1];
+        CHECK(ns_gpu_fx_build(fx, N, &P, vb, 12 * N + 12, runs, N + 1, keys, N + 1, &o) == 0, "build");
+        ns_gpu_fx_follow_accum(&acc, &o);
+        /* quién se dibuja: los que no están en fol[] */
+        int drawn[N], rank = 0;
+        for (int i = 0; i < N; i++) {
+            drawn[i] = 1;
+            for (uint32_t k = 0; k < o.n_fol; k++) if (o.fol[k].src_key == fx[i].src_key && o.fol[k].oncam != 2) drawn[i] = 0;
+        }
+        for (int i = 0; i < N; i++) {
+            if (!drawn[i]) continue;
+            const NsGpuFxVert *v = &vb[6 * rank++];
+            float c[3] = {0, 0, 0};
+            for (int k = 0; k < 6; k++) for (int a = 0; a < 3; a++) c[a] += v[k].p[a] / 6.0f;
+            memcpy(cen[i], c, sizeof c);
+            if (have_prev[i] && (i == 0 || i == 2)) {
+                float dd = 0;
+                for (int a = 0; a < 3; a++) dd += (c[a] - cen_prev[i][a]) * (c[a] - cen_prev[i][a]);
+                dd = sqrtf(dd);
+                if (dd > world_dev[i]) world_dev[i] = dd;
+            }
+            memcpy(cen_prev[i], c, sizeof c); have_prev[i] = 1;
+            ever_drawn[i] = 1;
+            if (t == 0) drawn_first[i] = 1;
+        }
+        if (t == FR - 1) for (int i = 0; i < N; i++) drawn_last[i] = drawn[i];
+    }
+    CHECK(drawn_last[0] && ever_drawn[0] && world_dev[0] < 1e-4f, "de mundo a 2 m: siempre dibujado y en el MISMO sitio del mundo con la cabeza girando (desviacion %.6f m)", world_dev[0]);
+    CHECK(!drawn_last[1], "pegado a la cabeza a 0,8 m: descartado");
+    CHECK(!drawn_first[2] && drawn_last[2] && world_dev[2] < 1e-4f, "cercano de mundo: retenido al principio, luego dibujado y anclado (desviacion %.6f m)", world_dev[2]);
+    CHECK(!drawn_last[3] && !ever_drawn[3], "ON_CAMERA que no es de pantalla: nunca se dibuja");
+    CHECK(drawn_last[4] && ever_drawn[4], "recubrimiento de pantalla (VIEW_OVERLAY) ON_CAMERA: se conserva");
+    CHECK(!drawn_last[5], "cercano que vaga: descartado");
+    CHECK(drawn_last[6] && ever_drawn[6], "enemigo lejano que se mueve solo: se dibuja");
+    CHECK(!drawn_last[7], "pegado a la cabeza a 3 m: descartado aunque este lejos");
+    CHECK(o.n_follow == 3 && o.n_wander == 1 && o.n_tracked == N, "contadores: sigue=%u vaga=%u seguidos=%u", o.n_follow, o.n_wander, o.n_tracked);   /* sigue: 1, 3 (ON_CAMERA) y 7; vaga: 5 */
+    /* registro del detector: papel, origen, clave */
+    int found1 = 0, found7 = 0, foundf = 0, found4 = 0;
+    for (uint32_t k = 0; k < acc.n_rec; k++) {
+        if (acc.rec[k].f.src_key == 0x80100100u && acc.rec[k].f.state == NSG_FS_FOLLOW && acc.rec[k].f.origin == NSG_ORIGIN_FX) found1 = 1;
+        if (acc.rec[k].f.src_key == 0x80100700u && acc.rec[k].f.state == NSG_FS_FOLLOW) found7 = 1;
+        if (acc.rec[k].f.src_key == 0x80100300u && acc.rec[k].f.oncam == 1 && acc.rec[k].f.role == NSFX_ROLE_LIGHT) foundf = 1;
+        if (acc.rec[k].f.src_key == 0x80100400u && acc.rec[k].f.oncam == 2 && acc.rec[k].f.role == NSFX_ROLE_VIEW_OVERLAY) found4 = 1;
+    }
+    CHECK(found1 && found7 && foundf && found4, "el detector registra los pegados: %d %d %d %d", found1, found7, foundf, found4);
+    char txt[2048]; size_t n = ns_gpu_fx_follow_describe(&acc, txt, sizeof txt);
+    CHECK(n > 0 && strstr(txt, "fx-sigue") && strstr(txt, "origen=fx") && strstr(txt, "sigue") && strstr(txt, "rol=light"), "texto del registro: %s", txt);
+    /* origen relleno: la clave 0xF1... se marca como relleno */
+    NsEffect fill = quad(2000, -1600, 2500, 40); fill.src_key = 0xF1000007u;
+    { float head[3], right[3], up[3]; head_pose(0, head, right, up); }
+    ns_gpu_fx_track_reset(trk);
+    int fol_fill = 0;
+    for (int t = 0; t < 12; t++) {
+        float head[3], right[3], up[3], fwd[3], vr[3], en[3];
+        head_pose(t, head, right, up);
+        fwd[0] = right[1] * up[2] - right[2] * up[1]; fwd[1] = right[2] * up[0] - right[0] * up[2]; fwd[2] = right[0] * up[1] - right[1] * up[0];
+        memcpy(P.head, head, sizeof head); memcpy(P.head_right, right, sizeof right); memcpy(P.head_up, up, sizeof up); memcpy(P.eyes[0], head, sizeof head);
+        for (int a = 0; a < 3; a++) vr[a] = head[a] + 0.6f * fwd[a];
+        vr_to_engine(vr, en); fill = quad(en[0], en[1], en[2], 100); fill.src_key = 0xF1000007u;
+        NsGpuFxVert vb[24]; NsGpuFxRun runs[2]; uint64_t keys[2];
+        CHECK(ns_gpu_fx_build(&fill, 1, &P, vb, 24, runs, 2, keys, 2, &o) == 0, "build relleno");
+        if (o.n_follow_fill) fol_fill = 1;
+    }
+    CHECK(fol_fill && o.n_fol >= 1 && o.fol[0].origin == NSG_ORIGIN_FILL, "relleno pegado a la cabeza: detectado con origen relleno");
+    ns_gpu_fx_track_destroy(trk);
+    P.track = NULL; P.hold_near_m = 0; P.drop_oncam = 0;
+}
+
 int main(void) {
     setup();
     t_poly();
@@ -411,6 +528,7 @@ int main(void) {
     t_export_roundtrip();
     setup(); t_comfort();
     setup(); t_world_size();
+    setup(); t_follow();
     printf("%s: %d comprobaciones, %d fallos\n", g_fail ? "FALLA" : "OK", g_checks, g_fail);
     return g_fail != 0;
 }
