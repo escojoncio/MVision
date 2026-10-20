@@ -211,6 +211,7 @@ enum {
     NS_EF_GOURAUD = 4u,
     NS_EF_ONESIDE = 8u,  /* sólo anverso */
     NS_EF_LINE = 16u,    /* línea (dibujar como cinta de ancho `width_px`) */
+    NS_EF_NOFOG = 64u,   /* el color ya lleva la niebla del motor (relleno por la lista de la GPU, ns_fill): ns_gpu_fx_build NO le aplica la de la escena */
     NS_EF_ON_CAMERA = 32u/* informativo: pegado a la cámara del motor; las posiciones ya vienen en el MUNDO del motor con la cámara de la escena (que en VR es la de la cabeza) */
 };
 typedef struct {
