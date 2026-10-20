@@ -95,7 +95,7 @@ int main(void) {
     CHECK(count(vh, "vrhc_feed_scene(") == 0 || count(vh, "vrhc_feed_scene(&") == 0, "la colisión de la cabeza no se alimenta de la lista de la GPU");
     /* 8) cine: fmv / motor / respaldo (la lista de la GPU no se dibuja en 3D en ninguno; el respaldo es la imagen de la VRAM en la pantalla de cine plana) */
     CHECK(strstr(vh, "vrview_cine_describe(&view, &vin") != NULL && strstr(vh, "mdec_out_words_total()") != NULL, "vrhost registra [cine] tipo=... y lee el decodificador de vídeo");
-    CHECK(strstr(vh, "ns_cover_glue_last(&cf, &cp)") != NULL && strstr(vh, "vin.cover_new") != NULL, "vrhost alimenta la vista con la cobertura medida del render nativo");
+    CHECK(strstr(vh, "ns_cover_glue_last(&cf, &cp)") != NULL && strstr(vh, "ns_fill_glue_last(&ff, &fp)") != NULL && strstr(vh, "vrview_cover_feed(&vin") != NULL, "vrhost alimenta la vista con la cobertura medida del render nativo");
     CHECK(strstr(vh, "vrview_uploads_cover(") != NULL, "vídeo por subidas a pantalla completa (tiras incluidas)");
     CHECK(strstr(vh, "view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO || view.kind == VRV_K_BACKUP") != NULL, "la capa 2D entera acompaña al respaldo");
     CHECK(strstr(xp, "engineHealthy") != NULL && strstr(xp, "engineBackup") != NULL && strstr(xp, "tipo=respaldo") != NULL, "XRPresent cae al respaldo si el nativo no dibuja la pantalla 3D");
