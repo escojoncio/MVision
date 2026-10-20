@@ -15,6 +15,7 @@ struct VrLayer2D {
     int have_vram;
     const uint16_t *vend;        /* VRAM real al cerrar la lista (solo durante vl2d_run) y mapa de bloques 16x16 de VRAM dibujados por la lista: sus texels se leen de ahí */
     uint8_t drawn[32 * 64];
+    VrL2Info info;
     int pad, aw;                 /* ventana visible dentro de la capa (pantalla completa): columnas [pad, pad+aw) de w, el resto negro */
     uint8_t *natm; size_t natm_cap;   /* bit 15 (máscara) de la VRAM mostrada, por píxel nativo */
     int scale, smooth;
@@ -638,6 +639,9 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
         }
     }
     L->vend = l->vram_end;
+    memset(&L->info, 0, sizeof L->info);
+    L->info.fw = w; L->info.h = h; L->info.aw = aw; L->info.pad = pad; L->info.scale = S; L->info.raster = R; L->info.smooth = L->smooth; L->info.full = full;
+    L->info.used_start = l->vram_start != NULL; L->info.used_end = l->vram_end != NULL;
     memset(L->drawn, 0, sizeof L->drawn);
     Ctx c0;
     memset(&c0, 0, sizeof c0);
@@ -666,6 +670,8 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
             }
             if (!draw) break;
             if (!full && sc->op_dest[i] != 2) break;
+            L->info.prims++;
+            if (o->flags & GPU_F_MASK_CHK) L->info.mask_prims++;
             Ctx c = c0;
             c.o = o;
             c.cx1 = o->cx1 * R; c.cy1 = o->cy1 * R; c.cx2 = (o->cx2 + 1) * R - 1; c.cy2 = (o->cy2 + 1) * R - 1;
@@ -752,4 +758,5 @@ const VrLayerPx *vl2d_px(const VrLayer2D *L, int *w, int *h) {
     if (h) *h = L->PH;
     return L->px;
 }
+void vl2d_info(const VrLayer2D *L, VrL2Info *o) { if (o) { if (L) *o = L->info; else memset(o, 0, sizeof *o); } }
 const uint16_t *vl2d_vram(const VrLayer2D *L) { return L ? &L->vram[0][0] : NULL; }
