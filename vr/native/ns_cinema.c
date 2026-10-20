@@ -56,6 +56,17 @@ int ns_cinema_eye(const float gv[16], int eye, float ipd, float conv, float tan_
     return fin(view, 16);
 }
 
+int ns_cinema_window(const NsCamera *cam, float *tan_x, float *tan_y, float shift[4]) {
+    if (!cam || !(cam->h > 8.0f) || !isfinite(cam->h)) return 0;
+    const float H = cam->h;
+    float ox = (isfinite(cam->ofx) && cam->ofx > 0.0f && cam->ofx < 320.0f) ? cam->ofx : 160.0f;
+    float oy = (isfinite(cam->ofy) && cam->ofy > 0.0f && cam->ofy < 240.0f) ? cam->ofy : 120.0f;
+    if (tan_x) *tan_x = 160.0f / H;
+    if (tan_y) *tan_y = 120.0f / H;
+    if (shift) { const float dx = (ox - 160.0f) / H, dy = (oy - 120.0f) / H; shift[0] = dx; shift[1] = -dx; shift[2] = dy; shift[3] = -dy; }
+    return 1;
+}
+
 void ns_cinema_projection(const float t[4], float n, float f, float out[16]) {
     const float l = t[0], r = t[1], u = t[2], d = t[3];
     const float sx = 2 / (l + r), sy = 2 / (u + d), cx = (r - l) / (l + r), cy = (u - d) / (u + d);

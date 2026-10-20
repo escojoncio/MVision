@@ -228,6 +228,13 @@ final class NativeRenderer {
     private var overlays: [NsGpuOverlay] = []
     private var fromVR12: [Float] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
     private var lastScreenNs: UInt64 = 0
+    /// H REAL y centro de proyección (OFX/OFY, píxeles de la pantalla de 320x240 del motor) de la cámara de la escena preparada: los radios y filas de los efectos de pantalla y la
+    /// ventana de la pantalla 3D de las cinemáticas salen de ellos (no de constantes). OFX/OFY desconocidos (0) = el centro.
+    private(set) var camH: Float = 320, camOfx: Float = 160, camOfy: Float = 120
+    /// La última escena del puente es VÁLIDA (partida, listas y escenario completos) pero NO apta para primera persona (sin TOVR_OK o PLAYER_OK: vehículos, ascensores, zonas
+    /// especiales, jugador sin enlazar tras un cambio de zona). Con histéresis (4 fotogramas para entrar, 3 aptos para salir): entonces se pinta con la cámara del juego.
+    private(set) var sceneUnfit = false
+    private var unfitFrames = 0, fitFrames = 0
     private var fogScene = NsFog()
     private var lastView0 = matrix_identity_float4x4         // vista del primer ojo (solo diagnóstico)
     private(set) var statTrisEye = 0, statTrisStatic = 0, statTrisDyn = 0   // triángulos enviados por ojo en el último encode
@@ -324,7 +331,7 @@ final class NativeRenderer {
 
     init?(device: MTLDevice, library: MTLLibrary, ringSize: Int = 3, queue: DispatchQueue? = nil) {
         guard MemoryLayout<NsGpuVert>.stride == 16, MemoryLayout<NsGpuCorner>.stride == 28, MemoryLayout<NsGpuPiece>.stride == 164,
-              MemoryLayout<NsGpuOrder>.stride == 8, MemoryLayout<NsGpuFxVert>.stride == 44, MemoryLayout<NsGpuOverlay>.stride == 52, MemoryLayout<NsGpuOverlayU>.stride == 84 else {
+              MemoryLayout<NsGpuOrder>.stride == 8, MemoryLayout<NsGpuFxVert>.stride == 44, MemoryLayout<NsGpuOverlay>.stride == 52, MemoryLayout<NsGpuOverlayU>.stride == 116 else {
             print("[NativeRenderer] layout de estructuras inesperado: vert=\(MemoryLayout<NsGpuVert>.stride) corner=\(MemoryLayout<NsGpuCorner>.stride) piece=\(MemoryLayout<NsGpuPiece>.stride) order=\(MemoryLayout<NsGpuOrder>.stride) fx=\(MemoryLayout<NsGpuFxVert>.stride)")
             return nil
         }
@@ -343,12 +350,12 @@ final class NativeRenderer {
               let s5 = device.makeDepthStencilState(descriptor: d4) else { return nil }   // (recubrimientos: siempre pasan y no escriben = d4)
         dsOpaqueNoZ = s3; dsSemiNoZ = s4; dsOverlay = s5
         self.device = device; self.library = library; self.queue = queue
-        self.ringSize = max(2, ringSize)
+        self.ringSize = max(6, ringSize)
         vertPool = vp; triPool = tp
         dsOpaque = s1; dsSemi = s2
-        ring = (0..<max(2, ringSize)).map { _ in Slot() }
-        slotBusy = [Bool](repeating: false, count: max(2, ringSize))
-        slotSem = DispatchSemaphore(value: max(2, ringSize))
+        ring = (0..<max(6, ringSize)).map { _ in Slot() }
+        slotBusy = [Bool](repeating: false, count: max(6, ringSize))
+        slotSem = DispatchSemaphore(value: max(6, ringSize))
         semiOrder = UnsafeMutablePointer<NsGpuOrder>.allocate(capacity: Self.maxSemiTris)
         semiAbr = UnsafeMutablePointer<UInt8>.allocate(capacity: Self.maxSemiTris)
         semiDepth = UnsafeMutablePointer<Float>.allocate(capacity: Self.maxSemiTris)
@@ -404,6 +411,13 @@ final class NativeRenderer {
         guard ns_bridge_acquire(b, ns_now_ns(), &v) != 0, let cur = v.cur else { return }
         view = v
         haveView = true
+        do {
+            let vb = cur.pointee.valid
+            let need = UInt32(truncatingIfNeeded: NS_SV_GAME) | UInt32(truncatingIfNeeded: NS_SV_LISTS_OK) | UInt32(truncatingIfNeeded: NS_SV_MAP_OK)
+            let bad = UInt32(truncatingIfNeeded: NS_SV_MAP_INCOMPLETE) | UInt32(truncatingIfNeeded: NS_SV_STORE_FULL)
+            if ns_scene_native_ok(vb) != 0 { fitFrames += 1; unfitFrames = 0; if fitFrames >= 3 { sceneUnfit = false } }
+            else if (vb & need) == need && (vb & bad) == 0 { unfitFrames += 1; fitFrames = 0; if unfitFrames >= 4 { sceneUnfit = true } }
+        }
         var ip = NsInterp()
         ns_interp_begin(b, &view, &ip)
         // Sin interpolación entre escenas: la fluidez de XRFrameEncoder ya corrige la VISTA con la muestra de cada escena (igual que para la lista de la GPU); interpolar además
@@ -431,10 +445,14 @@ final class NativeRenderer {
         meshesChanged = true
     }
 
+    private var lastForceGc: UInt64 = 0          // fotograma (serial) del último barrido forzado de mallas
     private func allocRetry(_ pool: NativePool, _ n: Int, seq: UInt32, store: OpaquePointer?) -> Int? {
         if let s = pool.allocate(n) { return s }
-        // sin sitio: liberar todo lo que esta escena no usa y recuperar lo que la GPU ya terminó, y reintentar una vez
-        gcMeshes(seq: seq, store: store, force: true)
+        // sin sitio: recuperar lo que la GPU ya terminó y, como mucho UNA vez cada 10 fotogramas, liberar todo lo que esta escena no usa (el barrido recorre todas las mallas); reintentar
+        if serial &- lastForceGc >= 10 || lastForceGc == 0 {
+            lastForceGc = serial == 0 ? 1 : serial
+            gcMeshes(seq: seq, store: store, force: true)
+        }
         reclaim()
         return pool.allocate(n)
     }
@@ -573,6 +591,12 @@ final class NativeRenderer {
               sc.pointee.inst != nil, sc.pointee.piece != nil else { hold(); return false }
         let validBits = sc.pointee.valid
         let cinema = cinemaGameView != nil
+        do {
+            let c = sc.pointee.cam
+            if c.h.isFinite && c.h > 8 && c.h < 4096 { camH = c.h }
+            camOfx = (c.ofx.isFinite && c.ofx > 0 && c.ofx < 320) ? c.ofx : 160
+            camOfy = (c.ofy.isFinite && c.ofy > 0 && c.ofy < 240) ? c.ofy : 120
+        }
         // Aptitud. Primera persona: la del contrato (ns_scene_native_ok). Cinemática: no hay cámara VR ni jugador, basta con escenario y listas completas.
         let cinemaNeed = UInt32(truncatingIfNeeded: NS_SV_GAME) | UInt32(truncatingIfNeeded: NS_SV_LISTS_OK) | UInt32(truncatingIfNeeded: NS_SV_MAP_OK)
         let cinemaBad = UInt32(truncatingIfNeeded: NS_SV_MAP_INCOMPLETE) | UInt32(truncatingIfNeeded: NS_SV_STORE_FULL)
@@ -722,8 +746,9 @@ final class NativeRenderer {
         let my = serial
         var ix = -1
         if draw && enabled {
-            // Sin bloqueo largo: si la GPU no libera ranura en 50 ms, este fotograma va por GPU (no se espera).
-            if slotSem.wait(timeout: .now() + .milliseconds(50)) == .success {
+            // El anillo (ver init) tiene más ranuras que fotogramas en vuelo del bucle de render (3) más los que ya terminaron pero aún no ejecutaron su `frameDone`, así que siempre hay
+            // una libre: la espera solo se agota si la GPU lleva más de 250 ms colgada. En ese caso el fotograma no tiene ranura y se REPITE lo último (ns_present); no hay ruta de GPU.
+            if slotSem.wait(timeout: .now() + .milliseconds(250)) == .success {
                 lock.lock()
                 if let f = slotBusy.firstIndex(of: false) { slotBusy[f] = true; ix = f }
                 lock.unlock()
@@ -787,6 +812,7 @@ final class NativeRenderer {
         lastScreenNs = now
         let c = sortView.inverse.columns.3
         let head: [Float] = [c.x, c.y, c.z]
+        screenCfg.proj_h = camH
         var fxIn = screenFx
         if !screenEffectsEnabled { fxIn.flags = 0 }
         else if suppressRing { fxIn.flags &= ~UInt32(NS_SFX_GAS) }
@@ -1133,13 +1159,13 @@ final class NativeRenderer {
         guard isActive, let slot = current, let pb = slot.pieceBuf, !viewProj.isEmpty, !eyes.isEmpty else { return false }
         guard prewarm(layered: layered, colorFormat: colorFormat, depthFormat: depthFormat, samples: samples, linear: linear) else { return false }
         let t0 = Self.nowNs()
-        let drawFx = fxAllowed && (slot.nFxOpaque + slot.nFxSemi) > 0 && slot.fxBuf != nil
+        var drawFx = fxAllowed && (slot.nFxOpaque + slot.nFxSemi) > 0 && slot.fxBuf != nil
         func psoFx(_ pass: UInt32, _ mode: Int) -> MTLRenderPipelineState? {
             pipes[PKey(layered: layered, pass: pass, mode: mode, order: pass == 1, flat: false, color: colorFormat, depth: depthFormat, samples: samples, linear: linear, fx: true)]
         }
         if drawFx, slot.nFxOpaque > 0 || slot.nFxSemi > 0 {
-            // todas las pipelines de efectos deben estar (prewarm): si faltara una, el fotograma se repite (ns_present) en lugar de perder efectos
-            guard psoFx(0, -1) != nil, (0..<4).allSatisfy({ psoFx(1, $0) != nil }) else { return false }
+            // si faltara alguna pipeline de efectos, SOLO se omiten los efectos (el mundo se dibuja entero): nunca se pierde el fotograma por eso
+            if psoFx(0, -1) == nil || !(0..<4).allSatisfy({ psoFx(1, $0) != nil }) { drawFx = false }
         }
         func pso(_ pass: UInt32, _ mode: Int, order: Bool, flat: Bool) -> MTLRenderPipelineState? {
             pipes[PKey(layered: layered, pass: pass, mode: mode, order: order, flat: flat, color: colorFormat, depth: depthFormat, samples: samples, linear: linear)]
@@ -1219,6 +1245,7 @@ final class NativeRenderer {
             var curKind: UInt32 = 99, curMode = -1
             for i in 0..<mergedN {
                 let r = mergedRuns[i]
+                if r.kind != 0 && !drawFx { continue }   // tramo de efectos con los efectos no permitidos: se omite, el resto del orden sigue
                 let mode = Int(r.abr & 3)
                 if r.kind != curKind {
                     curKind = r.kind; curMode = -1
@@ -1228,8 +1255,7 @@ final class NativeRenderer {
                         enc.setVertexBuffer(ob, offset: 0, index: Int(NSG_BUF_ORDER))
                         enc.setDepthBias(0, slopeScale: 0, clamp: 0)
                     } else {
-                        guard drawFx, let fb = slot.fxBuf else { restoreMeshVerts(); return false }
-                        enc.setVertexBuffer(fb, offset: 0, index: Int(NSG_BUF_FX))
+                        enc.setVertexBuffer(slot.fxBuf, offset: 0, index: Int(NSG_BUF_FX))   // (drawFx implica fxBuf)
                         enc.setDepthBias(fxDepthBias, slopeScale: fxSlopeBias, clamp: 0)
                     }
                 }
@@ -1248,7 +1274,7 @@ final class NativeRenderer {
             enc.setDepthBias(0, slopeScale: 0, clamp: 0)
         }
         // recubrimientos de pantalla del ojo (fundidos, destello, modos de visión, anillo, barras), encima de todo lo del mundo
-        drawOverlays(enc, projections: projections, layered: layered, colorFormat: colorFormat, depthFormat: depthFormat, samples: samples, linear: linear)
+        drawOverlays(enc, viewProj: viewProj, projections: projections, layered: layered, colorFormat: colorFormat, depthFormat: depthFormat, samples: samples, linear: linear)
         statTrisStatic = slot.staticBuf != nil ? slot.nTex + slot.nFlat : 0
         statTrisDyn = dynTex.reduce(0) { $0 + $1.ntri } + dynFlat.reduce(0) { $0 + $1.ntri }
         statTrisEye = statTrisStatic + statTrisDyn + semiN
@@ -1258,13 +1284,22 @@ final class NativeRenderer {
 
     /// Recubrimientos de pantalla del ojo (NsGpuScreen.ov, en orden de dibujo): un triángulo a pantalla completa por recubrimiento, sin profundidad. Las tangentes del ojo salen de su
     /// proyección (t = (ndc + P[2].xy) / (P[0][0], P[1][1])), así que no dependen de la resolución del ojo ni giran con nada que no sea la cabeza.
-    private func drawOverlays(_ enc: MTLRenderCommandEncoder, projections: [simd_float4x4], layered: Bool, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat, samples: Int, linear: Bool) {
+    private func drawOverlays(_ enc: MTLRenderCommandEncoder, viewProj: [simd_float4x4], projections: [simd_float4x4], layered: Bool, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat, samples: Int, linear: Bool) {
         guard !overlays.isEmpty, !projections.isEmpty else { return }
         let tag = "\(layered)/\(colorFormat.rawValue)/\(depthFormat.rawValue)/\(samples)/\(linear)"
         guard ovTagsOK.contains(tag) else { return }
         func eyeP(_ i: Int) -> (Float, Float, Float, Float) {
             let p = projections[min(i, projections.count - 1)]
             return (p.columns.0.x, p.columns.1.y, p.columns.2.x, p.columns.2.y)
+        }
+        // eje Y del mundo VR en el espacio de vista de cada ojo = columna 1 de la matriz de vista (vista = P^-1 * (P V)); lo usan las líneas de exploración ancladas al mundo
+        func upView(_ i: Int) -> (Float, Float, Float, Float) {
+            let k = min(i, viewProj.count - 1), pk = min(i, projections.count - 1)
+            let v = projections[pk].inverse * viewProj[k]
+            let c = v.columns.1
+            let l = (c.x * c.x + c.y * c.y + c.z * c.z).squareRoot()
+            guard l.isFinite, l > 1e-6 else { return (0, 1, 0, 0) }
+            return (c.x / l, c.y / l, c.z / l, 0)
         }
         enc.setDepthStencilState(dsOverlay)
         enc.setDepthBias(0, slopeScale: 0, clamp: 0)
@@ -1275,6 +1310,8 @@ final class NativeRenderer {
             ou.ov = ov
             ou.eye0 = eyeP(0)
             ou.eye1 = layered ? eyeP(1) : eyeP(0)
+            ou.up0 = upView(0)
+            ou.up1 = layered ? upView(1) : upView(0)
             enc.setFragmentBytes(&ou, length: MemoryLayout<NsGpuOverlayU>.stride, index: Int(NSG_BUF_OVERLAY))
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             statDraws += 1

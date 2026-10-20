@@ -240,8 +240,9 @@ typedef struct {
     float overscan_y;    /* factor vertical de la proyección del motor con SU cámara: 66/64 (medido; error de reproyección 0,85-1,3 px frente a 14-24 px con 58/64).
                           * Las matrices de RAM NO lo llevan aplicado: el motor multiplica por él la Y proyectada. Con vr_active = 1 el motor no lo aplica y vale 1,0 */
     int32_t vr_active;   /* 1 si esta cámara es la que la capa VR le dio al motor (cabeza); 0 la propia del juego */
+    float ofx, ofy;      /* centro de proyección en la pantalla del motor (registros de cálculo OFX/OFY, píxeles; 320x240 de referencia). 0 = desconocido: se toma el centro (160, 120). Lo fija el anfitrión (ctx) */
 } NsCamera;
-NS_STATIC_ASSERT(camera, sizeof(NsCamera) == 60);
+NS_STATIC_ASSERT(camera, sizeof(NsCamera) == 68);
 #define NS_OVERSCAN_Y (66.0f / 64.0f)
 
 enum {

@@ -1,7 +1,7 @@
 #include "ns_present.h"
 #include <string.h>
 
-NsPresentCfg ns_present_cfg_default(void) { NsPresentCfg c = { 1500ull * 1000000ull, 700ull * 1000000ull, 250ull * 1000000ull }; return c; }
+NsPresentCfg ns_present_cfg_default(void) { NsPresentCfg c = { 9300ull * 1000000ull, 700ull * 1000000ull, 250ull * 1000000ull }; return c; }
 void ns_present_reset(NsPresentState *s) { if (s) memset(s, 0, sizeof *s); }
 
 int ns_present_step(NsPresentState *s, const NsPresentCfg *cfgp, const NsPresentIn *in, NsPresentOut *out) {

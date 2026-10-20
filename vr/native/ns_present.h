@@ -14,7 +14,7 @@ enum { NS_PR_CURRENT = 0, NS_PR_HOLD = 1, NS_PR_BLACK = 2 };   /* NO existe un m
 enum { NS_PRW_NO_RENDERER = 1, NS_PRW_NO_SCENE = 2, NS_PRW_UNFIT = 4, NS_PRW_MESHES = 8, NS_PRW_STALE = 16, NS_PRW_INCOHERENT = 32, NS_PRW_NO_PIPES = 64 };
 
 typedef struct { uint64_t hold_ns; uint64_t fade_ns; uint64_t stale_ns; } NsPresentCfg;   /* repetir sin fundir, duración del fundido, antigüedad que solo se registra */
-NsPresentCfg ns_present_cfg_default(void);   /* 1500 ms, 700 ms, 250 ms */
+NsPresentCfg ns_present_cfg_default(void);   /* 9300 ms, 700 ms, 250 ms: el negro solo llega si NO hay ninguna escena dibujable durante 10 s */
 
 typedef struct { int have_good; uint64_t last_good_ns; uint32_t held_frames, black_frames; uint64_t n_current, n_hold, n_black; } NsPresentState;
 void ns_present_reset(NsPresentState *s);

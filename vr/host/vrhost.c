@@ -306,9 +306,14 @@ static _Atomic uint64_t ns_smp_push_ns;
 #define NS_SMP_FRESH_NS 100000000ull
 
 /* Contexto de la captura (hilo de emulación, en la etapa «pantalla»): zona, cámara VR y mapa mundo -> usuario, y qué hacer con el jugador. */
+static Cpu *ns_cpu_last;   /* CPU del último enganche de fotograma (hilo de emulación, el mismo que llama a ns_ctx): para leer los registros de cálculo OFX/OFY */
 static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
     (void)u;
     sc->area_id = (uint16_t)bs.area_id;
+    if (ns_cpu_last) {   /* centro de proyección de la pantalla del motor (control 24/25 de la GTE, 16.16): lo usan los efectos de pantalla y la ventana de la pantalla 3D */
+        float ox = (float)((int32_t)gte_cfc2(ns_cpu_last, 24)) / 65536.0f, oy = (float)((int32_t)gte_cfc2(ns_cpu_last, 25)) / 65536.0f;
+        if (ox > 0.0f && ox < 320.0f && oy > 0.0f && oy < 240.0f) { sc->cam.ofx = ox; sc->cam.ofy = oy; }
+    }
     const VrCamRecord *r = vrcam_last_record();
     int core = (bs.valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs.has_player;
     if (!r || !r->active || !core) return;                 /* cinemática / sin cámara VR: sin mapa VR, el 3D sigue saliendo de la lista de la GPU */
@@ -1237,6 +1242,7 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
 }
 
 static void frame_hook(Cpu *c, uint32_t f) {
+    ns_cpu_last = c;
     frame_hook_body(c, f);
     dump_capture(c, f, NULL);   /* si el pedido no se atendió con una lista (sin consumidor, cola llena, sin lista nueva), se vuelca sin ella */
 }

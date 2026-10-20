@@ -39,19 +39,19 @@ static void test_present(void) {
     /* fallo prolongado: repetir hasta hold_ns, luego fundido suave y negro */
     uint64_t t0 = 3000 * MS;
     float prev = 1.0f; int monotone = 1;
-    for (uint64_t dt = 10; dt < 3000; dt += 10) {
+    for (uint64_t dt = 50; dt < 12000; dt += 50) {
         NsPresentIn x = good(t0 + dt * MS); x.meshes_ok = 0;
         int m = ns_present_step(&st, &cfg, &x, &o);
         CHECK(m == NS_PR_HOLD || m == NS_PR_BLACK, "modo %d", m);
         if (o.fade > prev + 1e-6f) monotone = 0;
         prev = o.fade;
-        if (dt <= 1500) CHECK(o.mode == NS_PR_HOLD && o.fade == 1.0f, "dentro de la espera dt=%llu", (unsigned long long)dt);
-        if (dt > 1500 && dt < 2200) CHECK(o.mode == NS_PR_HOLD && o.fade > 0.0f && o.fade < 1.0f, "fundiendo dt=%llu fade=%f", (unsigned long long)dt, o.fade);
-        if (dt >= 2200) CHECK(o.mode == NS_PR_BLACK && o.fade == 0.0f, "negro dt=%llu", (unsigned long long)dt);
+        if (dt <= 9300) CHECK(o.mode == NS_PR_HOLD && o.fade == 1.0f, "dentro de la espera dt=%llu", (unsigned long long)dt);
+        if (dt > 9300 && dt < 10000) CHECK(o.mode == NS_PR_HOLD && o.fade > 0.0f && o.fade < 1.0f, "fundiendo dt=%llu fade=%f", (unsigned long long)dt, o.fade);
+        if (dt >= 10000) CHECK(o.mode == NS_PR_BLACK && o.fade == 0.0f, "negro dt=%llu", (unsigned long long)dt);
     }
     CHECK(monotone, "el fundido solo baja");
     /* vuelve a ser válido: imagen entera de nuevo, sin saltos de estado */
-    NsPresentIn r = good(t0 + 4000 * MS);
+    NsPresentIn r = good(t0 + 14000 * MS);
     CHECK(ns_present_step(&st, &cfg, &r, &o) == NS_PR_CURRENT && o.fade == 1.0f, "recupera");
     CHECK(st.n_current > 0 && st.n_hold > 0 && st.n_black > 0, "contadores");
 }
@@ -128,6 +128,31 @@ static void test_cinema(void) {
             CHECK(fabsf(ndcx - tests[k][0] / 160.0f) < 2e-3f && fabsf(ndcy + tests[k][1] / 120.0f) < 2e-3f,
                   "ojo %d punto %d: ndc (%f, %f) esperado (%f, %f)", eye, k, ndcx, ndcy, tests[k][0] / 160.0f, -tests[k][1] / 120.0f);
             CHECK(c[3] > 0, "delante");
+        }
+    }
+    /* H REAL y centro OFX/OFY de la escena (no los 320/160/120 fijos): ventana descentrada, el píxel X = OFX + x_rel cae en ndc (X-160)/160 */
+    {
+        NsCamera c2 = cam; c2.h = 256.0f; c2.ofx = 180.0f; c2.ofy = 100.0f;
+        float tx2, ty2, sh[4];
+        CHECK(ns_cinema_window(&c2, &tx2, &ty2, sh) == 1 && fabsf(tx2 - 160.0f / 256.0f) < 1e-6f && fabsf(ty2 - 120.0f / 256.0f) < 1e-6f, "ventana con H real");
+        CHECK(fabsf(sh[0] - 20.0f / 256.0f) < 1e-6f && fabsf(sh[1] + 20.0f / 256.0f) < 1e-6f && fabsf(sh[2] + 20.0f / 256.0f) < 1e-6f && fabsf(sh[3] - 20.0f / 256.0f) < 1e-6f, "desplazamiento OFX/OFY");
+        NsCamera c3 = cam; c3.ofx = 0; c3.ofy = 0;
+        CHECK(ns_cinema_window(&c3, &tx2, &ty2, sh) == 1 && sh[0] == 0 && sh[2] == 0, "OFX/OFY desconocidos = centro");
+        c3.h = 0; CHECK(ns_cinema_window(&c3, &tx2, &ty2, sh) == 0, "H inválida rechazada");
+        ns_cinema_window(&c2, &tx2, &ty2, sh);
+        for (int k = 0; k < 4; k++) {
+            float z = conv / 0.001f, H2 = c2.h;
+            float v[3] = { tests[k][0] * z / H2, tests[k][1] * z / (H2 * NS_OVERSCAN_Y), z }, p[3];
+            for (int r = 0; r < 3; r++) p[r] = cam.eye[r] + cam.rot[r * 3 + 0] * v[0] + cam.rot[r * 3 + 1] * v[1] + cam.rot[r * 3 + 2] * v[2];
+            float w[3]; xf34(tv, p, w);
+            float view[16], tan4[4], P[16], e[4], c[4];
+            ns_cinema_eye(gv, 0, ipd, conv, tx2, ty2, view, tan4);
+            for (int i = 0; i < 4; i++) tan4[i] += sh[i];
+            ns_cinema_projection(tan4, 0.05f, 800.0f, P);
+            mat_vec(view, w, e);
+            for (int r = 0; r < 4; r++) c[r] = P[r] * e[0] + P[4 + r] * e[1] + P[8 + r] * e[2] + P[12 + r] * e[3];
+            float X = c2.ofx + tests[k][0], Y = c2.ofy + tests[k][1];
+            CHECK(fabsf(c[0] / c[3] - (X - 160.0f) / 160.0f) < 2e-3f && fabsf(c[1] / c[3] + (Y - 120.0f) / 120.0f) < 2e-3f, "ventana descentrada punto %d", k);
         }
     }
     /* el punto fuera del plano de convergencia tiene paralaje entre ojos; la altura es idéntica */

@@ -77,7 +77,13 @@ int main(void) {
     /* 5) cinemáticas con el render nativo, en estéreo, en la textura de la pantalla 3D */
     CHECK(strstr(nr, "ns_cinema_to_vr") != NULL && strstr(nr, "cinemaGameView") != NULL, "NativeRenderer coloca la escena desde la cámara del juego (ns_cinema)");
     CHECK(count_range(rg, "private func encodeStereo", "private func encodeAux", "cams: cams") >= 1, "encodeStereo dibuja con el render nativo (cams)");
-    CHECK(strstr(rg, "n.cinemaGameView = stereoWanted ? gameView : nil") != NULL, "prepareNative activa la cámara del juego en cinemáticas");
+    CHECK(strstr(rg, "n.cinemaGameView = ((engineView || n.sceneUnfit)") != NULL, "cámara del juego en cinemáticas del motor Y en escenas no aptas para primera persona");
+    CHECK(strstr(xp, "gameCamScene") != NULL && strstr(xp, "target = .stereo") != NULL, "XRPresent pide la pantalla 3D con una escena válida no apta (nunca negro)");
+    CHECK(strstr(rg, "n.camH") != NULL && strstr(rg, "160 / n.camH") != NULL, "la pantalla 3D usa la H real de la escena (tangentes 160/H, 120/H) y OFX/OFY");
+    CHECK(count(sh, "ns_vs_overlay(") == 1, "ningún vertex llama a otro vertex (helper ns_overlay_vertex)");
+    CHECK(strstr(sh, "ns_overlay_vertex") != NULL, "helper de vértice de los recubrimientos");
+    CHECK(strstr(nr, "if r.kind != 0 && !drawFx { continue }") != NULL, "con los efectos no permitidos se omiten los tramos de efectos (continue), no se pierde el fotograma");
+    CHECK(strstr(nr, "serial &- lastForceGc >= 10") != NULL, "barrido forzado de mallas como mucho cada 10 fotogramas");
     CHECK(strstr(xe, "renderer.stereoImage") != NULL, "la imagen estéreo llega a la pantalla 3D");
     /* 6) sin modo «gpu» en el menú, el modelo ni el host */
     CHECK(count(xp, "renderMode") == 0 && count(gm, "renderMode") == 0, "el menú VR y el modelo ya no tienen modo de render");
