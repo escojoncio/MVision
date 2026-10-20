@@ -72,6 +72,55 @@ static void t_punch(void) {
     CHECK((o.mask & VRG_R1) && (o.mask & VRG_L1));                         /* R1/L1 nunca llegan al juego */
 }
 
+/* golpe por CONTACTO: el puño atraviesa el volumen del enemigo, en cualquier dirección razonable; sin pared de por medio */
+static int run_path(vrg_t *g, vrg_in_t in, const float a[3], const float b[3], int n, int fist, int *contact) {
+    vrg_out_t o; int ev = 0;
+    in.fist_btn[1] = fist; in.hand[1][0] = a[0]; in.hand[1][1] = a[1]; in.hand[1][2] = a[2];
+    settle(g, &in, 12);
+    for (int i = 1; i <= n + 10; i++) {
+        float t = i > n ? 1.0f : (float)i / n;
+        for (int k = 0; k < 3; k++) in.hand[1][k] = a[k] + (b[k] - a[k]) * t;
+        upd(g, &in, &o);
+        if (o.punch_side == 1) { ev++; if (contact && o.gest.valid) *contact = o.gest.contact; }
+    }
+    return ev;
+}
+static void chest_center(const vrg_in_t *in, int s, float c[3]);
+static void t_contact(void) {
+    vrg_t g; vrg_in_t in = base(); in.n_en = 1; in.en[0].p[0] = 0; in.en[0].p[1] = 1.0f; in.en[0].p[2] = 0.9f; in.fist_btn[1] = 1;
+    float a[3] = {0.2f, 1.2f, 0.1f}, b[3] = {0.1f, 1.2f, 0.6f};            /* directo corto: el puño acaba a 0,3 m del eje del enemigo (dentro del cuerpo + tolerancia) */
+    int ct = 0;
+    vrg_init(&g); CHECK(run_path(&g, in, a, b, 8, 1, &ct) == 1);                          /* puño a 0,3 m del cuerpo que impacta */
+    vrg_init(&g); CHECK(run_path(&g, in, a, b, 8, 0, NULL) == 0);                          /* sin el botón del puño: nada */
+    vrg_init(&g); CHECK(run_path(&g, in, a, b, 70, 1, NULL) == 0);                         /* puño lento (0,1 m/s): no impacta */
+    /* gancho: arco lateral a la altura del pecho que cruza el volumen (sin avance radial) */
+    float h0[3] = {-0.4f, 1.3f, 0.55f}, h1[3] = {0.4f, 1.3f, 0.55f};
+    vrg_init(&g); CHECK(run_path(&g, in, h0, h1, 14, 1, &ct) == 1 && ct == 1);
+    vrg_init(&g); vrg_in_t fl = in; fl.n_en = 0; CHECK(run_path(&g, fl, h0, h1, 14, 1, NULL) == 0);   /* sin enemigo: nada */
+    /* enemigo detrás de una pared (blocked): no impacta */
+    vrg_init(&g); vrg_in_t bl = in; bl.en[0].blocked = 1; CHECK(run_path(&g, bl, a, b, 8, 1, NULL) == 0);
+    vrg_init(&g); CHECK(run_path(&g, bl, h0, h1, 14, 1, NULL) == 0);
+    /* enemigo caído o muy lejos del puño: no */
+    vrg_init(&g); vrg_in_t dn = in; dn.en[0].down = 1; dn.en[0].p[2] = 9; CHECK(run_path(&g, dn, a, b, 8, 1, NULL) == 0);
+    /* recogerse hacia la cabeza dentro del volumen no es un golpe */
+    float r0[3] = {0.1f, 1.2f, 0.6f}, r1[3] = {0.2f, 1.2f, 0.1f};
+    vrg_init(&g); vrg_in_t cl = in; cl.en[0].p[2] = 0.4f; CHECK(run_path(&g, cl, r0, r1, 8, 1, NULL) == 0);
+    /* puño cerrado en la zona del pecho (ventana abierta) y enemigo delante: el golpe cancela la ventana y pega */
+    {
+        vrg_out_t o; vrg_init(&g); vrg_in_t m = in; m.fist_btn[1] = 0; float c1[3]; chest_center(&m, 1, c1);
+        memcpy(m.hand[1], c1, sizeof c1); settle(&g, &m, 12); m.fist_btn[1] = 1; upd(&g, &m, &o);
+        CHECK(o.menu_open[1] == 1);
+        int ev = 0, still = 0; float x[3];
+        for (int i = 1; i <= 14; i++) { for (int k = 0; k < 3; k++) x[k] = c1[k] + ((k == 2 ? 0.55f : (k == 0 ? -0.1f : 0.0f)) * (i > 8 ? 1.0f : i / 8.0f)); memcpy(m.hand[1], x, sizeof x); upd(&g, &m, &o); ev += o.punch_side == 1; still += (o.press & VRG_R1) != 0 && ev > 0; }
+        CHECK(ev >= 1); CHECK(still == 0);
+    }
+    /* umbrales reales del registro: 1,38 m/s hacia delante con alcance 0,25 m y un enemigo a 0,5 m es un golpe */
+    {
+        vrg_init(&g); vrg_in_t q = base(); q.n_en = 1; q.en[0].p[2] = 0.7f; q.en[0].p[1] = 1.0f; float s0[3] = {0.2f, 1.2f, 0.05f}, s1[3] = {0.2f, 1.2f, 0.28f};
+        CHECK(run_path(&g, q, s0, s1, 9, 1, NULL) == 1);
+    }
+}
+
 /* andar rápido (cuerpo, cabeza y manos juntos 4 m/s): no es un golpe */
 static void t_walk(void) {
     vrg_t g; vrg_init(&g); vrg_in_t in = with_enemy(); in.fist_btn[1] = 1; vrg_out_t o; int cnt = 0;
@@ -252,7 +301,7 @@ static void t_robust(void) {
 }
 
 int main(void) {
-    t_punch(); t_walk(); t_grab(); t_chest(); t_knock(); t_peek(); t_robust();
+    t_punch(); t_contact(); t_walk(); t_grab(); t_chest(); t_knock(); t_peek(); t_robust();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails != 0;
 }

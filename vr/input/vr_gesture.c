@@ -7,12 +7,13 @@ static int fin3(const float *v) { return fin(v[0]) && fin(v[1]) && fin(v[2]); }
 
 void vrg_cfg_defaults(vrg_cfg_t *c) {
     memset(c, 0, sizeof *c);
-    c->enable = 1; c->fist_required = 1; c->fist_haptic = 0.12f; c->item_hold_s = 0.35f; c->punch_dir_cos = 0.5f; c->trig_on = 0.6f; c->trig_off = 0.3f; c->punch = c->grab = c->knock = c->peek = 1;
+    c->enable = 1; c->fist_required = 1; c->fist_haptic = 0.12f; c->item_hold_s = 0.35f; c->punch_dir_cos = 0.35f; c->trig_on = 0.6f; c->trig_off = 0.3f; c->punch = c->grab = c->knock = c->peek = 1;
     c->right_handed = 1;
-    c->punch_speed = 1.3f; c->knock_speed = 0.4f; c->knock_touch = 0.08f; c->knock_cooldown_s = 0.25f; c->knock_enemy_m = 1.0f; c->reach_min = 0.30f; c->melee_range = 3.0f; c->front_cos = 0.5f;
+    c->punch_speed = 1.0f; c->knock_speed = 0.4f; c->knock_touch = 0.08f; c->knock_cooldown_s = 0.25f; c->knock_enemy_m = 1.0f; c->reach_min = 0.20f; c->melee_range = 3.0f; c->front_cos = 0.5f;
     c->grab_range = 1.3f; c->neck_radius = 0.30f; c->neck_height = 0.45f; c->back_dist = 0.25f; c->grab_after_punch_s = 0.3f;
     c->chest_down = 0.37f; c->chest_side = 0.15f; c->chest_fwd = 0.12f; c->chest_radius = 0.22f;
     c->grip_on = 0.65f; c->grip_off = 0.35f; c->peek_on = 0.12f; c->peek_off = 0.06f; c->cooldown_s = 0.2f;
+    c->contact_speed = 0.8f; c->body_radius = 0.28f; c->body_low = 0.5f; c->body_high = 0.65f; c->fist_radius = 0.12f; c->contact_tol = 0.05f;
 }
 void vrg_reset(vrg_t *g) {
     vrg_cfg_t c = g->cfg;
@@ -20,6 +21,13 @@ void vrg_reset(vrg_t *g) {
     g->cfg = c; g->grab_side = -1; g->warm = 2; g->since_punch = 10.0f;
 }
 void vrg_init(vrg_t *g) { memset(g, 0, sizeof *g); vrg_cfg_defaults(&g->cfg); g->grab_side = -1; g->warm = 2; g->since_punch = 10.0f; }
+
+/* distancia (m) de un punto al eje vertical (segmento) del cuerpo de un enemigo; el cuerpo es una cápsula sobre ese eje */
+static float seg_dist(const float p[3], const float e[3], float lo, float hi) {
+    float y = p[1], y0 = e[1] - lo, y1 = e[1] + hi;
+    float dy = y < y0 ? y0 - y : (y > y1 ? y - y1 : 0.0f), dx = p[0] - e[0], dz = p[2] - e[2];
+    return sqrtf(dx * dx + dy * dy + dz * dz);
+}
 
 static float hdist(const float *a, const float *b) { float dx = a[0] - b[0], dz = a[2] - b[2]; return sqrtf(dx * dx + dz * dz); }
 
@@ -132,14 +140,14 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
     /* enemigo más cercano (horizontal) */
     int ne = -1; float nd = 1e9f;
     for (int i = 0; i < in->n_en && i < VRG_MAX_EN; i++) {
-        if (in->en[i].down || !fin3(in->en[i].p)) continue;
+        if (in->en[i].down || in->en[i].blocked || !fin3(in->en[i].p)) continue;   /* tras una pared no cuenta para el golpe */
         float d = hdist(in->en[i].p, in->body);
         if (d < nd) { nd = d; ne = i; }
     }
     /* enemigo más cercano DELANTE (ángulo con la mirada <= acos(front_cos); la mirada = el rumbo del jugador, que sigue a la cabeza) para el golpe */
     int nf = -1; float ndf = 1e9f;
     for (int i = 0; i < in->n_en && i < VRG_MAX_EN; i++) {
-        if (in->en[i].down || !fin3(in->en[i].p)) continue;
+        if (in->en[i].down || in->en[i].blocked || !fin3(in->en[i].p)) continue;
         float dx = in->en[i].p[0] - in->body[0], dz = in->en[i].p[2] - in->body[2], d = sqrtf(dx * dx + dz * dz);
         if (d < 0.05f) { if (d < ndf) { ndf = d; nf = i; } continue; }       /* encima de nosotros: cuenta */
         if ((dx * sinf(in->yaw) + dz * cosf(in->yaw)) / d >= c->front_cos && d < ndf) { ndf = d; nf = i; }
@@ -262,28 +270,42 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
         int busy = !(free_hands && !in->on_wall) ? 1 : 0;
         for (int s = 0; s < 2; s++) {
             if (!tr[s]) continue;
-            int near_swing = spd[s] >= (g->swing[s] ? 0.4f : 0.6f) * c->punch_speed;
+            float sp_min = c->contact_speed > 0 && c->contact_speed < c->punch_speed ? c->contact_speed : c->punch_speed;
+            int near_swing = spd[s] >= (g->swing[s] ? 0.4f : 0.6f) * sp_min;
             g->swing[s] = near_swing;
+            if (near_swing && fst[s] && !(busy && !grabbing) && !grabbing) out->swinging = 1;
             float fcos = spd[s] > 1e-3f ? fv[s] / spd[s] : 0.0f, rcos = spd[s] > 1e-3f ? rad[s] / spd[s] : 0.0f;
             const char *why = "ok";
             int dir_ok = fcos >= c->punch_dir_cos && rcos >= c->punch_dir_cos;
+            /* golpe por CONTACTO (como en los juegos VR): el puño (esfera) atraviesa el cuerpo (cápsula) de un enemigo no tumbado y sin pared de por medio, con velocidad
+             * suficiente en cualquier dirección razonable (ganchos, directos, cortos), salvo recogiéndose hacia la cabeza. No exige alcance, ángulo ni distancia al enemigo. */
+            int contact = 0;
+            if (!grabbing && c->contact_speed > 0 && spd[s] >= c->contact_speed && rcos > -0.25f) {
+                float rr = c->body_radius + c->fist_radius + c->contact_tol;
+                for (int i = 0; i < in->n_en && i < VRG_MAX_EN && !contact; i++) {
+                    if (in->en[i].down || in->en[i].blocked || !fin3(in->en[i].p)) continue;
+                    if (seg_dist(in->hand[s], in->en[i].p, c->body_low, c->body_high) <= rr) contact = 1;
+                }
+            }
             if (busy && !grabbing) why = "manos_ocupadas";
             else if (in->stance >= 2) why = "ocupado";
             else if (g->settle > 0) why = "calma";
             else if (g->cool > 0) why = "enfriamiento";
-            else if (c->fist_required && (!fst[s] || ((g->menu_hold >> s) & 1))) why = "sin_puno";
-            else if (spd[s] < c->punch_speed) why = "lento";
-            else if (!dir_ok) why = "dir";
-            else if (reach[s] < c->reach_min) why = "alcance";
-            else if (!grabbing && c->melee_range > 0 && ne < 0) why = "sin_enemigo";
-            else if (!grabbing && c->melee_range > 0 && nd > c->melee_range) why = "lejos";
-            else if (!grabbing && c->melee_range > 0 && nf < 0) why = "detras";
+            else if (c->fist_required && (!fst[s] || (((g->menu_hold >> s) & 1) && !(spd[s] >= sp_min && (contact || (dir_ok && ne >= 0 && nd <= c->melee_range)))))) why = "sin_puno";
+            else if (!contact && spd[s] < c->punch_speed) why = "lento";
+            else if (!contact && !dir_ok) why = "dir";
+            else if (!contact && reach[s] < c->reach_min) why = "alcance";
+            else if (!contact && !grabbing && c->melee_range > 0 && ne < 0) why = "sin_enemigo";
+            else if (!contact && !grabbing && c->melee_range > 0 && nd > c->melee_range) why = "lejos";
+            else if (!contact && !grabbing && c->melee_range > 0 && nf < 0) why = "detras";
             int fire = !strcmp(why, "ok");
+            /* un puño cerrado dentro de la zona del pecho abrió la ventana del motor (guardia con los puños arriba): un golpe de verdad en pelea la cancela */
+            if (fire && ((g->menu_hold >> s) & 1)) { g->menu_hold &= ~(1 << s); out->menu_open[s] = 0; }
             vrg_gest_t *pk = &g->gpk[s];
             if (near_swing && !(busy && !grabbing)) {
                 if (!pk->valid || spd[s] >= pk->speed || fire) {
                     pk->valid = 1; pk->side = s; pk->speed = spd[s]; pk->fcos = fcos; pk->rcos = rcos; pk->reach = reach[s]; pk->dist = ne >= 0 ? nd : -1.0f;
-                    pk->grip = fin(in->grip[s]) ? in->grip[s] : 0.0f; pk->fist = fst[s]; pk->reason = why;
+                    pk->grip = fin(in->grip[s]) ? in->grip[s] : 0.0f; pk->fist = fst[s]; pk->contact = contact; pk->reason = why;
                 }
                 if (fire && !out->gest.valid) { out->gest = *pk; pk->valid = 0; }
             } else if (pk->valid && !out->gest.valid) {

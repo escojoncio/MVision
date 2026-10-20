@@ -76,7 +76,7 @@ void vrm_frame(Vrm *v, const VrmEng *e, const VrmFrame *f) {
         if (f->fist_ok[s]) { memcpy(v->fist[s], f->fist[s], sizeof v->fist[s]); push_hist(v, s, f->fist[s], f->fist_closed[s]); }
         else v->hist_n[s] = 0;
     }
-    v->hold = f->hold;
+    v->hold = f->hold; v->swinging = f->swinging;
     if (!v->grab_owned) v->squeeze_pend = 0;
     if (f->squeeze) { v->squeeze_pend = 1; }
     if (f->punch_side >= 0 && f->punch_side < 2) { v->p_punch = 1; v->p_punch_side = f->punch_side; v->p_punch_ttl = v->ttl_frames; }
@@ -131,7 +131,7 @@ int vrm_action_input(Vrm *v, const VrmEng *e, uint32_t work) {
         }
         e->call(e->user, VRM_FN_START, work, VRM_FN_PUNCH);
         w32(e, work + VRM_W_FLAGS, r32(e, work + VRM_W_FLAGS) | 4u);
-        v->p_punch = 0; v->in_punch = 1; v->stage = 0; v->n_punch++;
+        v->p_punch = 0; v->in_punch = 1; v->stage = 0; v->n_punch++; v->combo_q = 0; v->hold_n = 0;
         say(v, "[gest] golpe disparado mano=%d (estado de golpe del motor)", v->p_punch_side);
         return 1;
     }
@@ -158,21 +158,44 @@ void vrm_post_grab(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time) {
     }
 }
 
+/* instantánea de los blancos enemigos (vida, contador de aturdimiento y bandera de daño) para saber si la comprobación de impacto del motor surtió efecto.
+ * OJO: el resultado (v0) de la comprobación es la vida quitada; el golpe de puño quita 0 de vida y solo baja el contador de aturdimiento (+0x2A) y marca
+ * la bandera de daño (+6, bit 4), así que v0 == 0 NO significa fallo. */
+static void snap_targets(const VrmEng *e, int16_t out[64][3]) {
+    for (int i = 0; i < 64; i++) {
+        uint32_t b = VRM_TARGETS + 72u * (uint32_t)i;
+        out[i][0] = (int16_t)(r16(e, b + 0x26)); out[i][1] = (int16_t)(r16(e, b + 0x2A)); out[i][2] = (int16_t)(r16(e, b + 6) & 4);
+    }
+}
+static int snap_changed(const VrmEng *e, int16_t old[64][3]) {
+    for (int i = 0; i < 64; i++) {
+        uint32_t b = VRM_TARGETS + 72u * (uint32_t)i;
+        if (r16(e, b + 2) != 2) continue;
+        if (r16(e, b + 0x26) < old[i][0] || r16(e, b + 0x2A) < old[i][1] || ((r16(e, b + 6) & 4) && !old[i][2])) return 1;
+    }
+    return 0;
+}
+
 void vrm_pre_hit(Vrm *v, const VrmEng *e, uint32_t work) {
     if (!v->enable || !v->in_punch || r32(e, work + VRM_W_ANIMFN) != VRM_FN_PUNCH) return;
     float o[3], d;
     v->stage++;
+    snap_targets(e, v->snap); v->snap_ok = 1;
+    if (v->stage >= 3) return;                /* patada: la caja del propio motor delante del cuerpo */
     if (!pick_origin(v, e, o, &d)) { say(v, "[gest] golpe etapa %d: sin puño VR con seguimiento; el motor usa su origen", v->stage); return; }
     v->ctx_hit = 1; v->ctx_ok = 1; v->ctx_target = work + VRM_W_TARGET; memcpy(v->ctx_origin, o, sizeof o);
 }
 void vrm_post_hit(Vrm *v, const VrmEng *e, uint32_t work, uint32_t result) {
-    if (!v->ctx_hit) return;
+    int reg = v->snap_ok && snap_changed(e, v->snap);
+    v->snap_ok = 0;
+    if (!v->ctx_hit) { if (v->stage >= 3) { if (reg) v->n_hit++; else v->n_miss++; say(v, "[gest] golpe etapa %d (patada): %s", v->stage, reg ? "REGISTRADO por el motor" : "sin efecto"); } return; }
     v->ctx_hit = 0; v->ctx_ok = 0;
     float half[3]; for (int k = 0; k < 3; k++) half[k] = r16(e, work + VRM_W_TARGET + 16 + 2u * (uint32_t)k);
     En en[MAXEN]; int n = scan(e, 0, en);
     float d = n ? nearest(v->ctx_origin, en, n, half) : -1.0f;
-    if (n && d <= 0) { v->n_hit++; say(v, "[gest] golpe etapa %d: IMPACTO con el puño VR (%.0f,%.0f,%.0f mm), motor=%u", v->stage, v->ctx_origin[0], v->ctx_origin[1], v->ctx_origin[2], result); }
-    else { v->n_miss++; say(v, "[gest] golpe etapa %d: FALLO, el puño VR queda a %.2f m del enemigo más cercano", v->stage, d < 0 ? -1.0f : d / 1000.0f); }
+    if (reg) v->n_hit++; else { v->n_miss++; if (!n) v->n_nobody++; }
+    say(v, "[gest] golpe etapa %d: %s con el puño VR (%.0f,%.0f,%.0f mm), a %.2f m de la caja del enemigo, vida quitada=%u", v->stage,
+        reg ? "REGISTRADO por el motor" : (n ? "FALLO" : "FALLO, ningún enemigo golpeable (en reacción o caído)"), v->ctx_origin[0], v->ctx_origin[1], v->ctx_origin[2], d > 0 ? d / 1000.0f : (d < 0 ? -1.0f : 0.0f), result);
 }
 
 int vrm_move_target(Vrm *v, const VrmEng *e, uint32_t target, uint32_t vec) {
@@ -186,13 +209,28 @@ int vrm_move_target(Vrm *v, const VrmEng *e, uint32_t target, uint32_t vec) {
     return 1;
 }
 
-void vrm_punch_tick(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time) {
-    (void)time;
-    if (!v->enable || !v->p_punch) return;
-    /* nueva petición durante la animación: continuación del combo (el motor mira este bit en los tiempos 6 y 13) */
-    w16(e, work + VRM_W_LOCAL, (int16_t)(r16(e, work + VRM_W_LOCAL) | 0x20));
-    v->p_punch = 0; v->n_combo++;
-    say(v, "[gest] golpe encadenado (combo) mano=%d en el tiempo %u de la animación", v->p_punch_side, time);
+/* rutina por fotograma del golpe. El motor decide el combo en dos instantes de la animación: tiempo 6 (segundo golpe) y tiempo 13 (patada), mirando el bit 0x20 del
+ * acumulado de entrada. Un golpe VR dura más que una pulsación de botón, así que (1) las peticiones se encolan (hasta 2) y el bit se pone justo en el instante de
+ * decisión en vez de al llegar la petición, y (2) si el brazo sigue en movimiento (v->swinging) y todavía no hay petición, la animación espera en ese instante
+ * hasta VRM_HOLD_MAX fotogramas (se reescribe el tiempo y no se ejecuta la rutina original, que daría la cadena por terminada). Devuelve 1 = no ejecutar el original. */
+int vrm_punch_tick(Vrm *v, const VrmEng *e, uint32_t work, uint32_t time) {
+    if (!v->enable) return 0;
+    if (v->p_punch) {
+        if (v->combo_q < 2) { v->combo_q++; v->n_combo++; say(v, "[gest] golpe encadenado (combo) mano=%d en el tiempo %u de la animación", v->p_punch_side, time); }
+        v->p_punch = 0;
+    }
+    if (time == 0) { v->combo_q = v->combo_q > 2 ? 2 : v->combo_q; v->hold_n = 0; return 0; }
+    if (time == VRM_T_COMBO1 || time == VRM_T_COMBO2) {
+        if (v->combo_q > 0) {
+            v->combo_q--; v->hold_n = 0;
+            w16(e, work + VRM_W_LOCAL, (int16_t)(r16(e, work + VRM_W_LOCAL) | 0x20));
+        } else if (v->swinging && v->hold_n < VRM_HOLD_MAX) {
+            v->hold_n++; v->n_hold++;
+            w32(e, work + VRM_W_ANIMT, time);          /* el despachador ya la dejó en time+1: se queda en el mismo instante */
+            return 1;
+        } else v->hold_n = 0;
+    }
+    return 0;
 }
 
 static void end_hold(Vrm *v, const VrmEng *e, uint32_t work) {

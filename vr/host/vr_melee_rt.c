@@ -51,7 +51,7 @@ static void h_move(Cpu *c) {
 }
 static void h_punch_tick(Cpu *c) {
     VrmEng e = eng(c);
-    vrm_punch_tick(vrmelee_instance(), &e, A0, A1);
+    if (vrm_punch_tick(vrmelee_instance(), &e, A0, A1)) return;
     rt_call_orig(c, VRM_FN_PUNCH_TICK);
 }
 static void h_hold_tick(Cpu *c) {
