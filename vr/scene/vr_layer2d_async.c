@@ -68,13 +68,13 @@ static void *worker(void *arg) {
         pthread_mutex_unlock(&A->mx);
 
         if (j->reset) vl2d_reset(A->L);
-        int draw = j->has_opd && !later;
+        int draw = (j->has_opd || j->full) && !later;   /* fotograma completo: no necesita la clasificación de la escena (capa exacta aunque vr_scene_build fallase) */
         vl2d_set_options(A->L, scale, atomic_load(&A->smooth));
         memset(&sc, 0, sizeof sc);
-        if (draw) { sc.op_dest = j->opd; sc.n_op_dest = j->l.nops; }
+        if (draw && j->has_opd) { sc.op_dest = j->opd; sc.n_op_dest = j->l.nops; }
         double t0 = now_ms();
         if (skip) A->n_skip++;   /* (contador leído bajo el mutex en vl2a_report; incremento sin él: solo informativo) */
-        int have = skip ? 0 : vl2d_run(A->L, &j->l, draw ? &sc : NULL, j->full);
+        int have = skip ? 0 : vl2d_run(A->L, &j->l, draw && j->has_opd ? &sc : NULL, j->full);
         double ms = now_ms() - t0;
         VrL2Info inf; vl2d_info(A->L, &inf);
         int w = 0, h = 0;
@@ -214,9 +214,10 @@ int vl2a_report(VrL2Async *A, char *buf, int n) {
     static const char *sm[3] = {"original", "nitido", "suave"};
     int sd = A->info.smooth < 0 || A->info.smooth > 2 ? 0 : A->info.smooth;
     int r = snprintf(buf, (size_t)n,
-        "[capa2d] escala=%d(raster %d, objetivo %d) retraso=%u envios=%u descartes=%u ejecutados=%u publicadas=%u caidas_shader(-1)=%u trabajador=%.1fms suavizado=%s vram_start=%s vram_end=%s marco=%dx%d aw=%d pad_l=%d %s prims=%d mascara=%d",
+        "[capa2d] escala=%d(raster %d, objetivo %d) retraso=%u envios=%u descartes=%u ejecutados=%u publicadas=%u caidas_shader(-1)=%u trabajador=%.1fms suavizado=%s vram_start=%s vram_end=%s marco=%dx%d aw=%d pad_l=%d %s prims=%d mascara=%d solo_vram=%d fidelidad=%d/%d dif=%.3f respaldo_emulador=%s",
         A->cur, A->info.raster, atomic_load(&A->target), A->have_pub ? A->sub_seq - A->pub_sub_seq : 0, A->n_sub, A->n_skip, A->n_run, A->n_pub, A->n_neg, A->work_ms, sm[sd],
-        A->info.used_start ? "si" : "no", A->info.used_end ? "si" : "no", A->info.fw, A->info.h, A->info.aw, A->info.pad, A->info.full ? "completa" : "panel", A->info.prims, A->info.mask_prims);
+        A->info.used_start ? "si" : "no", A->info.used_end ? "si" : "no", A->info.fw, A->info.h, A->info.aw, A->info.pad, A->info.full ? "completa" : "panel", A->info.prims, A->info.mask_prims,
+        A->info.mirror_prims, A->info.fid_n - A->info.fid_bad, A->info.fid_n, A->info.fid_mean_milli / 1000.0, A->info.fallback ? "SI" : "no");
     A->n_sub = A->n_skip = A->n_run = A->n_neg = A->n_pub = 0;
     pthread_mutex_unlock(&A->mx);
     return r;

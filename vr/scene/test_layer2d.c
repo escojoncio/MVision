@@ -458,16 +458,213 @@ static void codec24_case(void) {
     size_t fwh = (size_t)cd.fw * cd.h;
     uint8_t *ref = (uint8_t *)malloc(fwh * 4);
     CHECK(gpu_present_rgba(&cd, NULL, ref, fwh) == fwh, "24 bits: marco");
+    for (int sm = 2; sm <= 2; sm++) {   /* escala >= 2 (R=S): a escala 1 el marco de 24 bits se reduce a 5 bits por canal (limitación conocida) */
     VrLayer2D *L = vl2d_new();
-    vl2d_set_options(L, 2, VL_SMOOTH_ORIGINAL);
+    vl2d_set_options(L, sm, VL_SMOOTH_ORIGINAL);
     vl2d_run(L, c, &sc, 1);
     int w = 0, h = 0, bad = 0;
     const uint8_t *rg = vl2d_rgba(L, &w, &h);
-    CHECK(rg && w == cd.fw * 2 && h == cd.h * 2, "24 bits: capa %dx%d, marco %dx%d", w, h, cd.fw, cd.h);
-    for (int y = 0; y < h && rg && w == cd.fw * 2; y++) for (int x = 0; x < w; x++)
-        if (memcmp(&rg[((size_t)y * w + x) * 4], &ref[((size_t)(y / 2) * cd.fw + x / 2) * 4], 3)) bad++;
+    CHECK(rg && w == cd.fw * sm && h == cd.h * sm, "24 bits: capa %dx%d, marco %dx%d", w, h, cd.fw, cd.h);
+    for (int y = 0; y < h && rg && w == cd.fw * sm; y++) for (int x = 0; x < w; x++)
+        if (memcmp(&rg[((size_t)y * w + x) * 4], &ref[((size_t)(y / sm) * cd.fw + x / sm) * 4], 3)) bad++;
     CHECK(bad == 0, "24 bits con rango no estándar: %d muestras distintas del marco de la GPU", bad);
-    vl2d_free(L); free(ref); free_list(c);
+    vl2d_free(L);
+    }
+    free(ref); free_list(c);
+}
+
+
+/* ---- composición fuera de pantalla (render a textura) + borrados/copias a la zona mostrada + doble búfer: la causa de los textos duplicados del códec y la intro ----
+ * El juego compone texto en una zona de VRAM FUERA de las dos pantallas (otra área de dibujo y otro offset), la reutiliza varias veces en la misma lista, la copia (VRAM->VRAM) o la usa de textura
+ * sobre el búfer que se muestra, y antes borra con un relleno lo que quedó de fotogramas anteriores. El resultado debe ser IGUAL, bit a bit, al marco de la GPU original (gpu_present_rgba). */
+static void draw_env(int x1, int y1, int x2, int y2, int ox, int oy, uint32_t e1, uint32_t e6) {
+    gpu_gp0(0xE1000000 | e1);
+    gpu_gp0(0xE2000000);
+    gpu_gp0(0xE3000000 | (uint32_t)x1 | (uint32_t)y1 << 10);
+    gpu_gp0(0xE4000000 | (uint32_t)x2 | (uint32_t)y2 << 10);
+    gpu_gp0(0xE5000000 | (uint32_t)(ox & 0x7FF) | (uint32_t)(oy & 0x7FF) << 11);
+    gpu_gp0(0xE6000000 | e6);
+}
+static void comp_text(int seq, uint32_t bg, uint32_t clutw) {   /* compone un "renglón" distinto en la zona (512,256) de 128x32 con otra área de dibujo y offset */
+    draw_env(512, 256, 639, 287, 512, 256, 10, 0);
+    gpu_gp0(0x02000000 | bg); gpu_gp0(xy(512, 256)); gpu_gp0(xy(128, 32));
+    for (int i = 0; i < 12; i++) {
+        gpu_gp0(0x64u << 24 | 0x808080u); gpu_gp0(xy(2 + i * 10, 3 + (i & 1) * 12)); gpu_gp0(clutw << 16 | (uint32_t)(((i * 7 + seq * 5) & 3) * 8)); gpu_gp0(xy(8, 8));
+    }
+}
+static GpuDrawList *offscreen_list(void) {
+    uint16_t font[64 * 8];
+    memset(font, 0, sizeof font);
+    for (int gl = 0; gl < 4; gl++) for (int v = 0; v < 8; v++) for (int u = 0; u < 8; u++) {
+        int tu = gl * 8 + u, idx = 1 + (u * 3 + v + gl * 5) % 3;
+        font[v * 64 + (tu >> 2)] = (uint16_t)(font[v * 64 + (tu >> 2)] | (idx << ((tu & 3) * 4)));
+    }
+    const uint16_t clut[4] = {0, 0x7FFF, 0x03E0, 0x7C1F};
+    gpu_capture_enable(0);
+    gpu_reset();
+    gpu_gp1(0x03000000);
+    gpu_gp1(0x08000001);
+    gpu_gp1(0x06000000 | 0x270u | 0xC70u << 12);
+    gpu_gp1(0x07000000 | 0x13u | (0x13u + 256) << 10);
+    gpu_gp1(0x05000000 | 256u << 10);   /* se muestra el búfer B (y=256); el juego dibuja en A (y=0) y al final lo muestra */
+    env(0, 0, 1023, 511, 0, 0, 0);
+    for (int y = 0; y < 256; y++) for (int x = 0; x < 320; x++) gpu_vram[y][x] = (uint16_t)(((x >> 3) & 31) | (((y >> 3) & 15) << 5) | 0x0400);   /* A: restos del fotograma de hace 2 */
+    uint32_t r = 1234567u;
+    for (int y = 16; y < 64; y++) for (int x = 96; x < 224; x++) { r ^= r << 13; r ^= r >> 17; r ^= r << 5; gpu_vram[y][x] = (uint16_t)(0x4210 | (r & 0x3DEF)); }   /* texto fantasma de un fotograma anterior */
+    upload(640, 0, 64, 8, font);
+    upload(0, 500, 4, 1, clut);
+    gpu_capture_vram_start(1);
+    gpu_capture_enable(1);
+    uint32_t clutw = 0 | 500u << 6;
+    /* 1. composición fuera de pantalla -> se COPIA (VRAM->VRAM) a la zona mostrada tras borrarla con un relleno */
+    comp_text(1, 0x00600808u, clutw);
+    draw_env(0, 0, 319, 255, 0, 0, 10, 0);
+    gpu_gp0(0x02101010u); gpu_gp0(xy(96, 16)); gpu_gp0(xy(128, 48));
+    gpu_gp0(0x80000000u); gpu_gp0(xy(512, 256)); gpu_gp0(xy(96, 20)); gpu_gp0(xy(128, 32));
+    /* 2. la misma zona se reutiliza (otro renglón) y se usa de TEXTURA (15 bits, página en (512,256)) sobre la pantalla */
+    comp_text(2, 0x00086008u, clutw);
+    draw_env(0, 0, 319, 255, 0, 0, 8 | 1 << 4 | 2 << 7, 0);
+    gpu_gp0(0x64u << 24 | 0x808080u); gpu_gp0(xy(100, 120)); gpu_gp0(0); gpu_gp0(xy(96, 24));
+    /* 3. otra vez, con un tercer renglón */
+    comp_text(3, 0x08080860u, clutw);
+    draw_env(0, 0, 319, 255, 0, 0, 8 | 1 << 4 | 2 << 7, 0);
+    gpu_gp0(0x64u << 24 | 0x808080u); gpu_gp0(xy(100, 160)); gpu_gp0(0); gpu_gp0(xy(96, 24));
+    /* 4. texto normal en la pantalla y un sprite semitransparente encima de lo copiado */
+    draw_env(0, 0, 319, 255, 0, 0, 10 | 1 << 5, 0);
+    for (int i = 0; i < 6; i++) { gpu_gp0(0x66u << 24 | 0x808080u); gpu_gp0(xy(100 + i * 12, 30)); gpu_gp0(clutw << 16 | (uint32_t)((i & 3) * 8)); gpu_gp0(xy(16, 16)); }
+    draw_env(0, 0, 319, 255, 0, 0, 10, 0);
+    for (int i = 0; i < 20; i++) { gpu_gp0(0x64u << 24 | 0x808080u); gpu_gp0(xy(20 + i * 9, 220)); gpu_gp0(clutw << 16 | (uint32_t)((i & 3) * 8)); gpu_gp0(xy(8, 8)); }
+    /* 5. efecto de pantalla (la intro): tiras que leen de textura el PROPIO búfer que se dibuja (página 15 bits en (0,0)) y lo reescriben desplazado: la textura es lo dibujado antes en esta lista */
+    draw_env(0, 0, 319, 255, 0, 0, 2 << 7, 0);
+    for (int i = 0; i < 12; i++) { gpu_gp0(0x64u << 24 | 0x808080u); gpu_gp0(xy(48 + (i & 1) * 3, 70 + i * 2)); gpu_gp0((uint32_t)((70 + i * 2) << 8 | 40)); gpu_gp0(xy(64, 2)); }
+    gpu_gp1(0x05000000);   /* cambio de búfer: cierra la lista y muestra A */
+    const GpuDrawList *l = gpu_capture_frame();
+    gpu_capture_vram_start(0);
+    return l ? dup_list(l) : NULL;
+}
+
+static void offscreen_compose(void) {
+    GpuDrawList *c0 = offscreen_list();
+    CHECK(c0 != NULL && c0->vram_start && c0->vram_end, "composicion fuera de pantalla: lista con vram_start/vram_end");
+    if (!c0) return;
+    VrScene sc;
+    VrSceneOpts o = vr_scene_opts_default();
+    o.drop_clear = 0;
+    CHECK(vr_scene_build(c0, NULL, &o, &sc) == 0, "composicion fuera de pantalla: escena");
+    GpuDisplay cd = c0->disp;
+    size_t fwh = (size_t)cd.fw * cd.h;
+    uint8_t *ref = (uint8_t *)malloc(fwh * 4);
+    CHECK(gpu_present_rgba(&cd, NULL, ref, fwh) == fwh, "composicion fuera de pantalla: marco");
+    /* los renglones 2 y 3 de la composición son distintos en la imagen real (si no, la prueba no distinguiría el estado final del instantáneo) */
+    int distinct = 0;
+    for (int y = 0; y < 24; y++) for (int x = 0; x < 96; x++)
+        if (memcmp(&ref[((size_t)(120 + y) * cd.fw + 100 + x) * 4], &ref[((size_t)(160 + y) * cd.fw + 100 + x) * 4], 3)) distinct++;
+    CHECK(distinct > 200, "composicion fuera de pantalla: los dos renglones texturizados difieren en la imagen real (%d)", distinct);
+    /* A. fotograma completo, sin la VRAM real de cierre: la capa por sí sola (raster) debe ser idéntica a la GPU original, a escala 1 y replicada x4 */
+    GpuDrawList cn = *c0; cn.vram_end = NULL;
+    for (int sm = 1; sm <= 4; sm += 3) {
+        VrLayer2D *L = vl2d_new();
+        vl2d_set_options(L, sm, VL_SMOOTH_ORIGINAL);
+        CHECK(vl2d_run(L, &cn, &sc, 1) == 1, "composicion x%d: vl2d_run", sm);
+        int w = 0, h = 0;
+        const uint8_t *rg = vl2d_rgba(L, &w, &h);
+        VrL2Diff df;
+        int okc = vl2d_compare(rg, w, h, sm, ref, cd.fw, cd.h, &df);
+        CHECK(okc, "composicion x%d: dimensiones capa %dx%d marco %dx%d", sm, w, h, cd.fw, cd.h);
+        if (okc) printf("  composicion fuera de pantalla, capa completa x%d vs GPU: dif media %.4f, píxeles distintos %.3f%% (%ld de %ld), max %d\n", sm, df.mean, df.pct, df.bad, df.n, df.max);
+        CHECK(okc && df.bad == 0, "composicion x%d: %ld píxeles (%.3f%%, dif media %.3f) distintos del marco de la GPU", sm, df.bad, df.pct, df.mean);
+        VrL2Info in; vl2d_info(L, &in);
+        CHECK(in.fallback == 0, "composicion x%d: sin vram_end no hay respaldo", sm);
+        vl2d_free(L);
+    }
+    /* A2. fotograma completo sin escena (vr_scene_build falló): la capa sigue siendo exacta */
+    {
+        VrLayer2D *L = vl2d_new();
+        vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+        CHECK(vl2d_run(L, &cn, NULL, 1) == 1, "composicion sin escena: vl2d_run");
+        int w = 0, h = 0;
+        const uint8_t *rg = vl2d_rgba(L, &w, &h);
+        VrL2Diff df;
+        int okc = vl2d_compare(rg, w, h, 1, ref, cd.fw, cd.h, &df);
+        CHECK(okc && df.bad == 0, "composicion sin escena: %ld píxeles distintos del marco de la GPU", okc ? df.bad : -1L);
+        vl2d_free(L);
+    }
+    /* B. con la VRAM real de cierre: fidelidad 100 % y sin respaldo */
+    {
+        VrLayer2D *L = vl2d_new();
+        vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+        vl2d_run(L, c0, &sc, 1);
+        VrL2Info in; vl2d_info(L, &in);
+        CHECK(in.fid_n > 70000 && in.fid_bad == 0 && in.fallback == 0, "composicion con vram_end: fidelidad %d/%d, respaldo %d", in.fid_n - in.fid_bad, in.fid_n, in.fallback);
+        vl2d_free(L);
+    }
+    /* C. capa NO fiel (se pierde la copia VRAM->VRAM del hardware): la medida lo detecta y se usa la imagen exacta del emulador */
+    {
+        GpuDrawList *t = dup_list(c0);
+        int dropped = 0;
+        for (uint32_t i = 0; i < t->nops; i++) if (t->ops[i].type == GPU_OP_VCOPY) { t->ops[i].type = GPU_OP_DOWNLOAD; dropped++; }
+        CHECK(dropped == 1, "composicion: una copia VRAM->VRAM en la lista (%d)", dropped);
+        VrScene s2;
+        vr_scene_build(t, NULL, &o, &s2);
+        GpuDrawList tn = *t; tn.vram_end = NULL;
+        VrLayer2D *L = vl2d_new();
+        vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+        vl2d_run(L, &tn, &s2, 1);
+        int w = 0, h = 0;
+        VrL2Diff df;
+        const uint8_t *rgn = vl2d_rgba(L, &w, &h);
+        vl2d_compare(rgn, w, h, 1, ref, cd.fw, cd.h, &df);
+        CHECK(df.bad > 500, "composicion sin la copia: la capa se aparta de la GPU (%ld píxeles) y la medida lo ve", df.bad);
+        vl2d_run(L, t, &s2, 1);   /* con vram_end: respaldo exacto */
+        VrL2Info in; vl2d_info(L, &in);
+        rgn = vl2d_rgba(L, &w, &h);
+        vl2d_compare(rgn, w, h, 1, ref, cd.fw, cd.h, &df);
+        CHECK(in.fallback == 1 && in.fid_bad > 500 && df.bad == 0, "composicion no fiel: respaldo=%d (fid_bad %d), tras el respaldo %ld píxeles distintos de la GPU", in.fallback, in.fid_bad, df.bad);
+        printf("  capa no fiel: %d píxeles distintos, dif media %d/1000 niveles -> respaldo con la imagen del emulador: %ld distintos\n", in.fid_bad, in.fid_mean_milli, df.bad);
+        vl2d_free(L);
+        free_list(t);
+    }
+    /* D. panel sobre el mundo: solo se pintan las primitivas con destino en la zona mostrada. Todo píxel opaco de la capa es el de la GPU (ni restos de la composición fuera de pantalla
+     *    ni el estado final de la lista en las texturas); las copias desde fuera de la pantalla aparecen. */
+    {
+        VrLayer2D *L = vl2d_new();
+        vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+        CHECK(vl2d_run(L, c0, &sc, 0) == 1, "composicion panel: vl2d_run");
+        int w = 0, h = 0;
+        const uint8_t *rg = vl2d_rgba(L, &w, &h);
+        long op = 0, bad = 0, copied = 0;
+        for (int y = 0; y < h && rg; y++) for (int x = 0; x < w; x++) {
+            const uint8_t *p = &rg[((size_t)y * w + x) * 4];
+            if (p[3] != 255) continue;
+            if (y >= 70 && y < 94) continue;   /* tiras que releen la pantalla (efecto de pantalla): el panel no tiene el mundo/imagen de debajo; es trabajo del filtro o de la pantalla completa */
+            op++;
+            if (memcmp(p, &ref[((size_t)y * cd.fw + x) * 4], 3)) bad++;
+            if (y >= 20 && y < 52 && x >= 96 && x < 224) copied++;
+        }
+        CHECK(rg && op > 3000 && bad == 0, "composicion panel: %ld píxeles opacos, %ld distintos de la GPU", op, bad);
+        CHECK(copied > 2000, "composicion panel: la copia VRAM->VRAM desde fuera de pantalla aparece (%ld píxeles)", copied);
+        VrL2Info in; vl2d_info(L, &in);
+        CHECK(in.mirror_prims >= 24, "composicion panel: %d primitivas solo a la VRAM espejo", in.mirror_prims);
+        vl2d_free(L);
+    }
+    /* E. alta resolución "nítido" (R=S): los borrados/copias a la zona mostrada también llegan a la capa */
+    {
+        VrLayer2D *L = vl2d_new();
+        vl2d_set_options(L, 2, VL_SMOOTH_SHARP);
+        vl2d_run(L, &cn, &sc, 1);
+        int w = 0, h = 0;
+        const uint8_t *rg = vl2d_rgba(L, &w, &h);
+        long ghost = 0;
+        for (int y = 24; y < 56 && rg; y++) for (int x = 100; x < 220; x++) {   /* región copiada: ningún píxel puede conservar el texto fantasma de la VRAM de partida */
+            const uint8_t *p = &rg[((size_t)(y * 2) * w + x * 2) * 4], *q = &ref[((size_t)y * cd.fw + x) * 4];
+            int d = abs(p[0] - q[0]) + abs(p[1] - q[1]) + abs(p[2] - q[2]);
+            if (d > 24) ghost++;
+        }
+        CHECK(rg && ghost < 40, "composicion x2 nitido: restos del fotograma anterior en la región copiada (%ld)", ghost);
+        vl2d_free(L);
+    }
+    free(ref);
+    free_list(c0);
 }
 
 static void semi_mask_cases(void) {
@@ -569,6 +766,7 @@ int main(void) {
     codec24_case();
     edge_case("320 con rango reducido a 288", 1, 0x270 + 16 * 8, 0x270 + 304 * 8, 0x13, 0x13 + 240);
     semi_mask_cases();
+    offscreen_compose();
     offlist_text();
 
     /* ---- fondo negro, escala 1: IGUAL bit a bit a la GPU original ---- */
