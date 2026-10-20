@@ -704,6 +704,8 @@ final class RGRenderer {
     private var stereoKey = ""
     /// Imagen estéreo (array de 2 capas, valores tal como se guardaron: gamma en los formatos sRGB) o nil si aún no se dibujó.
     var stereoImage: MTLTexture? { stereoRendered ? stereoRaw : nil }
+    /// Capas de la textura de la pantalla 3D ya reservada (aunque aún no se haya dibujado nada en ella; 0 = sin reservar). El banco comprueba que es un array de 2.
+    var stereoAllocatedLength: Int { stereoTex?.arrayLength ?? 0 }
     /// Los valores de `stereoImage` ya son lineales (destino de coma flotante).
     var stereoStoredLinear: Bool { colorFormat == .rgba16Float }
     /// Los efectos de pantalla de la cinemática (fundidos, destello...) los dibuja el render nativo dentro de la propia pantalla 3D (recubrimientos del ojo): aquí no hay tinte ni recubrimientos.

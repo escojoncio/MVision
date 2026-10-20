@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 OUT=bench/build_native
 rm -rf "$OUT" && mkdir -p "$OUT"
 # -Iruntime: ns_fx.h incluye "gpu.h" (runtime/), que ns_extract_glue.c arrastra; -Ivr/scene: cabeceras de la capa 2D
-INC=(-Iruntime -Ivr/native -Ivr/scene -Ibench/c)
+INC=(-Ivr/bridge -Iruntime -Ivr/native -Ivr/scene -Ibench/c)
 
 echo "== shaders Metal =="
 xcrun -sdk macosx metal -c -Ivr/native app/Sources/Native/NativeShaders.metal -o "$OUT/native.air"

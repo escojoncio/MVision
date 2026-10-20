@@ -37,6 +37,7 @@ void mv_vrhost_set_ai_head(int on);
  * Cualquier hilo. Las cinemáticas y la cámara del juego conservan siempre las manos originales. */
 void mv_vrhost_set_hands_new(int on);
 int mv_vrhost_hands_new(void);
+int mv_vrhost_hands_active(void);   /* ajuste activado Y render nativo listo */
 /* Solo para herramientas de prueba (vr/ai/test_ai_run): función llamada en el gancho de VBlank del hilo de emulación tras la capa VR (cpu = Cpu*). */
 void mv_vrhost_set_test_hook(void (*cb)(void *cpu, uint32_t frame));
 /* Toma de pruebas: se llama en el hilo de emulación justo tras ensamblar cada escena (antes de copiarla al slot), con la lista, el puente y la escena. NULL = sin toma. */
