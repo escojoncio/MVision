@@ -444,7 +444,7 @@ void ns_cover_destroy(NsCover *c) {
     free(c);
 }
 
-int ns_cover_run(NsCover *c, const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, const NsCoverCfg *cfg, NsCoverResult *out) {
+static int cover_run_once(NsCover *c, const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, const NsCoverCfg *cfg, NsCoverResult *out) {
     if (!c || !c->ok || !ram || !out) return -1;
     memset(out, 0, sizeof *out);
     if (ns_extract_ex(&c->sc, c->st, ram, NS_RAM_SIZE, scratch, scratch ? 1024u : 0u, NULL, NULL) != 0) return -2;
@@ -559,4 +559,17 @@ size_t ns_cover_format(const NsCoverResult *r, uint32_t frame, char *buf, size_t
     if (r->fxc_ok) o += ns_fxcmp_format(&r->fxc, frame, buf + o, cap - o);
 #undef APP
     return o;
+}
+
+/* El registro de cámara de la lista puede estar OBSOLETO (intro, muerte, cinemáticas del motor que no pasan por la cámara VR: conserva la cámara de la pantalla de título): la medida
+ * saldría 0 % con una escena nativa perfecta (volcado de la muerte: 0,0 % con él y 87,4 % con la cámara de la RAM) y la app abandonaría la pantalla 3D. Si con la cámara de la lista la
+ * cobertura es baja se vuelve a medir con la de la RAM (la de la propia escena) y se queda la mejor. */
+int ns_cover_run(NsCover *c, const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, const NsCoverCfg *cfg, NsCoverResult *out) {
+    int rc = cover_run_once(c, ram, scratch, ops, nops, cfg, out);
+    if (rc != 0 || !cfg || !cfg->list_eye || !cfg->list_M || out->cover_pct >= 80.0f) return rc;
+    NsCoverCfg c2 = *cfg;
+    c2.list_eye = NULL; c2.list_M = NULL;
+    NsCoverResult r2;
+    if (cover_run_once(c, ram, scratch, ops, nops, &c2, &r2) == 0 && r2.cover_pct > out->cover_pct) { *out = r2; return 0; }
+    return 0;   /* ganó la de la lista: `out` conserva esa medida */
 }

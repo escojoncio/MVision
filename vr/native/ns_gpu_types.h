@@ -42,6 +42,7 @@ typedef uint8_t ns_u8;
 #define NSG_CF_SEMI   2u     /* malla semitransparente */
 #define NSG_CF_ABR(f) (((f) >> 2) & 3u)   /* bits 2-3: modo de mezcla */
 #define NSG_CF_PAINT  16u    /* color precalculado válido en .paint */
+#define NSG_CF_ONESIDED 32u  /* cara de una sola cara (modelo sin NS_MF_TWOSIDED): con NsGpuUniforms.cull_eye.w = 1 el sombreador la descarta vista por detrás (regla del anverso del motor) */
 
 /* Marcas de pieza */
 #define NSG_PF_SHADE  1u     /* se sombrea con la luz de la pieza (si la esquina no lleva color precalculado) */
@@ -120,6 +121,7 @@ typedef struct {
     vector_float4 water_wave;       /* x = amplitud (texels), y = frecuencia espacial (rad por unidad del motor), z = fase (rad) */
     vector_float4 fromvr[3];        /* mundo VR -> mundo del motor, filas de la 3x4 (xyz, traslación en w) */
     vector_float4 misc;             /* x = índice de ojo del pase cuando NO hay amplificación (0/1: máscara de caras de los efectos) */
+    vector_float4 cull_eye;         /* xyz = ojo de la cámara del JUEGO en el mundo del motor; w = 1: descartar las caras NSG_CF_ONESIDED vistas por detrás (cinemáticas: la cámara queda fuera de las salas y el motor no dibuja los techos desde arriba); 0 = doble cara (primera persona) */
 } NsGpuUniforms;
 #endif
 
