@@ -12,6 +12,7 @@ NsScreenCfg ns_screen_cfg_default(void) {
     c.mode_a_rgb[0] = 0.20f; c.mode_a_rgb[1] = 1.00f; c.mode_a_rgb[2] = 0.30f;   /* visión A: verde */
     c.mode_b_rgb[0] = 1.00f; c.mode_b_rgb[1] = 0.35f; c.mode_b_rgb[2] = 0.20f;   /* visión B: rojizo */
     c.flash_gain = 0.55f; c.flash_slew = 6.0f; c.fade_slew = 0.0f;
+    c.proj_h = 0.0f;
     return c;
 }
 void ns_screen_state_reset(NsScreenState *s) { memset(s, 0, sizeof *s); }
@@ -58,6 +59,7 @@ int ns_screen_build(const NsScreenFx *fx, const float to_vr[12], const float hea
     float inv[12]; int have_inv = ns_screen_invert34(to_vr, inv);
     if (have_inv && fromvr) memcpy(fromvr, inv, sizeof inv);
     const unsigned f = fx->flags;
+    const float H = (cfg.proj_h > 8.0f && cfg.proj_h < 4096.0f) ? cfg.proj_h : 320.0f;   /* H real de la escena */
     /* agua: volumen en el mundo del motor; la cabeza dentro tiñe todo */
     if ((f & NS_SFX_WATER) && have_inv) {
         float he[3]; ns_screen_xform34(inv, head_vr, he);
@@ -71,7 +73,7 @@ int ns_screen_build(const NsScreenFx *fx, const float to_vr[12], const float hea
         out->water_wave[2] = 6.2831853f * (float)(fx->water_phase % (unsigned)per) / (float)per;
         if (inside && fx->water_bar_rows > 0 && cfg.bars_gain > 0) {
             NsGpuOverlay *o = add_ov(out, NSG_OV_BARS, 2, cfg.bars_gain);
-            if (o) { o->rgb[0] = o->rgb[1] = o->rgb[2] = 1; o->p[0] = (float)fx->water_bar_rows; o->p[1] = cfg.bars_soft; o->p[3] = 160.0f; }
+            if (o) { o->rgb[0] = o->rgb[1] = o->rgb[2] = 1; o->p[0] = (float)fx->water_bar_rows; o->p[1] = cfg.bars_soft; o->p[3] = H; }
         }
     }
     /* modos de visión: tinte + líneas de exploración */
@@ -81,7 +83,7 @@ int ns_screen_build(const NsScreenFx *fx, const float to_vr[12], const float hea
         NsGpuOverlay *o = add_ov(out, NSG_OV_COVER, 0, cfg.mode_amount);
         if (o) { o->rgb[0] = c[0]; o->rgb[1] = c[1]; o->rgb[2] = c[2]; }
         if (cfg.scan_gain > 0 && (o = add_ov(out, NSG_OV_SCAN, 2, cfg.scan_gain)) != NULL) {
-            o->rgb[0] = o->rgb[1] = o->rgb[2] = 1; o->p[0] = cfg.scan_period; o->p[1] = 0; o->p[2] = cfg.scan_cover; o->p[3] = 160.0f;
+            o->rgb[0] = o->rgb[1] = o->rgb[2] = 1; o->p[0] = cfg.scan_period; o->p[1] = 0; o->p[2] = cfg.scan_cover; o->p[3] = H;
         }
     }
     /* anillo (máscara de gas) */
@@ -89,7 +91,7 @@ int ns_screen_build(const NsScreenFx *fx, const float to_vr[12], const float hea
         NsGpuOverlay *o = add_ov(out, NSG_OV_RING, (unsigned)fx->gas_abr & 3u, clamp01(fx->gas_intensity));
         if (o) {
             for (int k = 0; k < 3; k++) { o->rgb[k] = fx->gas_in[k]; o->rgb2[k] = fx->gas_out[k]; }
-            o->p[0] = fx->gas_inner_px; o->p[1] = fx->gas_outer_px; o->p[2] = fx->gas_aspect > 0 ? fx->gas_aspect : 1.0f; o->p[3] = 160.0f;
+            o->p[0] = fx->gas_inner_px; o->p[1] = fx->gas_outer_px; o->p[2] = 1.0f; o->p[3] = H;   /* viñeta circular: sin razón vertical (no gira con la cabeza) */
         }
     }
     /* destello (suma de blanco, limitado) */
@@ -115,26 +117,28 @@ static float sstep(float e0, float e1, float x) {
     if (e1 <= e0) return x >= e1 ? 1.0f : 0.0f;
     float t = clamp01((x - e0) / (e1 - e0)); return t * t * (3.0f - 2.0f * t);
 }
-void ns_screen_overlay_ref(const NsGpuOverlay *ov, float tx, float ty, const float b[3], float out[3]) {
+void ns_screen_overlay_ref(const NsGpuOverlay *ov, float tx, float ty, float ydir, const float b[3], float out[3]) {
     float F[3] = { ov->rgb[0], ov->rgb[1], ov->rgb[2] };
     float a = ov->amount;                                     /* intensidad efectiva por píxel */
-    const float H = ov->p[3] > 0 ? ov->p[3] : 160.0f;
+    const float H = ov->p[3] > 0 ? ov->p[3] : 320.0f;
     const float px = tx * H, py = ty * H;
     switch (ov->kind) {
     case NSG_OV_RING: {
-        float asp = ov->p[2] > 0 ? ov->p[2] : 1.0f;
-        float r = sqrtf(px * px + (py / asp) * (py / asp));
+        float r = sqrtf(px * px + py * py);
         float c = sstep(ov->p[0], ov->p[1], r);
         for (int k = 0; k < 3; k++) F[k] = ov->rgb[k] + (ov->rgb2[k] - ov->rgb[k]) * c;
         a *= c; break; }
     case NSG_OV_SCAN: {
+        /* anclada al mundo: la fase sale de la ELEVACIÓN del rayo en el mundo VR (en filas del motor: ángulo * H), no de la fila de pantalla */
         float per = ov->p[0] > 0 ? ov->p[0] : 2.0f;
-        float ph = py / per + ov->p[1];
+        float yd = ydir < -1.0f ? -1.0f : (ydir > 1.0f ? 1.0f : ydir);
+        float ph = asinf(yd) * H / per + ov->p[1];
         float fr = ph - floorf(ph);
         a *= fr < ov->p[2] ? 1.0f : 0.0f; break; }
     case NSG_OV_BARS: {
-        float lim = 120.0f - ov->p[0];                        /* media pantalla del motor = 120 filas */
-        a *= sstep(lim - ov->p[1], lim + ov->p[1], fabsf(py)); break; }
+        float lim = 120.0f - ov->p[0];                        /* media pantalla del motor = 120 filas; viñeta CIRCULAR (las barras del original no giran con la cabeza) */
+        float r = sqrtf(px * px + py * py);
+        a *= sstep(lim - 10.0f * ov->p[1], lim + 10.0f * ov->p[1], r); break; }
     default: break;
     }
     for (int k = 0; k < 3; k++) {

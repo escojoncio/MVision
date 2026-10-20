@@ -17,6 +17,11 @@ int ns_cinema_to_vr(const NsCamera *cam, const float gv[16], float out[12]);
  * 0 si los datos no son válidos. */
 int ns_cinema_eye(const float gv[16], int eye, float ipd, float conv, float tan_x, float tan_y, float view[16], float tangents[4]);
 
+/* Tangentes base de la ventana de la pantalla del motor con la H REAL de la escena (cam->h) y su centro de proyección (cam->ofx/ofy; 0 = centro 160/120):
+ * x_px = OFX + H*vx/vz  =>  izquierda = OFX/H, derecha = (320-OFX)/H, arriba = OFY/H, abajo = (240-OFY)/H. Devuelve tan_x = 160/H, tan_y = 120/H (para ns_cinema_eye) y el
+ * desplazamiento del centro `shift` = {dx, -dx, dy, -dy} (tangentes) que se SUMA a las tangentes de ns_cinema_eye. 0 si H no es válida. */
+int ns_cinema_window(const NsCamera *cam, float *tan_x, float *tan_y, float shift[4]);
+
 /* Proyección de Z invertida (réplica de XRMath.projection) a partir de las tangentes. */
 void ns_cinema_projection(const float tangents[4], float znear, float zfar, float out[16]);
 

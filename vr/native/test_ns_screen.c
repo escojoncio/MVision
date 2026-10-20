@@ -81,17 +81,24 @@ static void test_water(void) {
 }
 
 static void test_bars(void) {
+    /* las barras pasan a viñeta circular: p0 = filas, p1 = suavizado (x10 px); centro intacto, periferia oscura, igual en cualquier dirección (no gira con la cabeza) */
     NsGpuOverlay ov; memset(&ov, 0, sizeof ov);
-    ov.kind = NSG_OV_BARS; ov.abr = 2; ov.amount = 1; ov.rgb[0] = ov.rgb[1] = ov.rgb[2] = 1; ov.p[0] = 10; ov.p[1] = 2; ov.p[3] = 160;
-    float b[3] = { 0.8f, 0.8f, 0.8f }, o[3];
-    ns_screen_overlay_ref(&ov, 0, 0, b, o);
+    ov.kind = NSG_OV_BARS; ov.abr = 2; ov.amount = 1; ov.rgb[0] = ov.rgb[1] = ov.rgb[2] = 1; ov.p[0] = 10; ov.p[1] = 4; ov.p[3] = 160;
+    float b[3] = { 0.8f, 0.8f, 0.8f }, o[3], o2[3], o3[3];
+    ns_screen_overlay_ref(&ov, 0, 0, 0.0f, b, o);
     CHECK(near(o[0], 0.8f, 1e-5f), "centro intacto");
-    ns_screen_overlay_ref(&ov, 0, 118.0f / 160.0f, b, o);
-    CHECK(near(o[0], 0.0f, 1e-5f), "barra negra arriba (%f)", o[0]);
-    ns_screen_overlay_ref(&ov, 0.3f, -118.0f / 160.0f, b, o);
-    CHECK(near(o[0], 0.0f, 1e-5f), "barra negra abajo");
-    ns_screen_overlay_ref(&ov, 0, 100.0f / 160.0f, b, o);
-    CHECK(near(o[0], 0.8f, 1e-5f), "justo antes de la barra");
+    ns_screen_overlay_ref(&ov, 60.0f / 160.0f, 0.0f, 0.0f, b, o);
+    CHECK(near(o[0], 0.8f, 1e-5f), "r=60 px intacto");
+    ns_screen_overlay_ref(&ov, 0.0f, 170.0f / 160.0f, 0.0f, b, o);
+    CHECK(near(o[0], 0.0f, 1e-5f), "periferia negra arriba (%f)", o[0]);
+    ns_screen_overlay_ref(&ov, 170.0f / 160.0f, 0.0f, 0.0f, b, o2);
+    ns_screen_overlay_ref(&ov, 120.0f / 160.0f, 120.0f / 160.0f, 0.0f, b, o3);
+    CHECK(near(o2[0], 0.0f, 1e-5f) && near(o3[0], o[0] + (o3[0] - o[0]), 1e-5f), "mismo valor a igual radio (no depende de la orientación)");
+    ov.amount = 0.5f;
+    ns_screen_overlay_ref(&ov, 0.0f, 130.0f / 160.0f, 0.0f, b, o);
+    ns_screen_overlay_ref(&ov, 130.0f / 160.0f, 0.0f, 0.0f, b, o2);
+    ns_screen_overlay_ref(&ov, -130.0f / 160.0f, 0.0f, 0.0f, b, o3);
+    CHECK(near(o[0], o2[0], 1e-5f) && near(o[0], o3[0], 1e-5f) && o[0] > 0.0f && o[0] < 0.8f, "viñeta simétrica y progresiva (%f)", o[0]);
 }
 
 static void test_ring(void) {
@@ -99,20 +106,25 @@ static void test_ring(void) {
     fx.flags = NS_SFX_GAS; fx.gas_intensity = 1; fx.gas_inner_px = 60; fx.gas_outer_px = 120; fx.gas_aspect = 0.75f; fx.gas_abr = 1;
     fx.gas_in[0] = 0; fx.gas_in[1] = 0.2f; fx.gas_in[2] = 0; fx.gas_out[0] = 0.6f; fx.gas_out[1] = 0.6f; fx.gas_out[2] = 0;
     NsGpuScreen o; float inv[12], head[3] = {0};
-    CHECK(ns_screen_build(&fx, TOVR, head, 0.016f, NULL, NULL, &o, inv) == 1 && o.ov[0].kind == NSG_OV_RING && o.ov[0].abr == 1, "anillo");
+    NsScreenCfg cfg = ns_screen_cfg_default(); cfg.proj_h = 160.0f;
+    CHECK(ns_screen_build(&fx, TOVR, head, 0.016f, &cfg, NULL, &o, inv) == 1 && o.ov[0].kind == NSG_OV_RING && o.ov[0].abr == 1, "anillo");
+    CHECK(o.ov[0].p[3] == 160.0f, "H real de la escena");
     float b[3] = { 0.1f, 0.1f, 0.1f }, r[3];
-    ns_screen_overlay_ref(&o.ov[0], 0, 0, b, r);
+    ns_screen_overlay_ref(&o.ov[0], 0, 0, 0.0f, b, r);
     CHECK(near(r[0], 0.1f, 1e-5f) && near(r[1], 0.1f, 1e-5f), "centro libre");
-    ns_screen_overlay_ref(&o.ov[0], 130.0f / 160.0f, 0, b, r);
+    ns_screen_overlay_ref(&o.ov[0], 130.0f / 160.0f, 0, 0.0f, b, r);
     CHECK(near(r[0], 0.7f, 1e-4f) && near(r[1], 0.7f, 1e-4f), "borde exterior (%f)", r[0]);
-    /* eje vertical: el radio se divide por la razón */
-    float ty = 0.75f * 130.0f / 160.0f;
-    ns_screen_overlay_ref(&o.ov[0], 0, ty, b, r);
-    CHECK(near(r[0], 0.7f, 1e-3f), "razón vertical (%f)", r[0]);
-    /* simetría izquierda/derecha y arriba/abajo (no gira con nada) */
-    float r2[3]; ns_screen_overlay_ref(&o.ov[0], -130.0f / 160.0f, 0, b, r2);
-    CHECK(r[0] == r2[0] || near(r2[0], 0.7f, 1e-4f), "simetría");
-    fx.gas_intensity = 0; CHECK(ns_screen_build(&fx, TOVR, head, 0.016f, NULL, NULL, &o, inv) == 0, "intensidad 0 no dibuja");
+    /* viñeta circular: el mismo radio da el mismo color en cualquier dirección (sin razón vertical: no hay patrón que gire con la cabeza) */
+    float r2[3], r3[3];
+    ns_screen_overlay_ref(&o.ov[0], 0, 130.0f / 160.0f, 0.0f, b, r2);
+    ns_screen_overlay_ref(&o.ov[0], -130.0f / 160.0f, 0, 0.0f, b, r3);
+    CHECK(near(r2[0], r[0], 1e-4f) && near(r3[0], r[0], 1e-4f), "circular y simétrico");
+    /* H distinta: los píxeles del motor se convierten con la H real (a H = 320 el mismo radio en tangentes es el doble de píxeles) */
+    cfg.proj_h = 320.0f; ns_screen_build(&fx, TOVR, head, 0.016f, &cfg, NULL, &o, inv);
+    CHECK(o.ov[0].p[3] == 320.0f, "H = 320");
+    ns_screen_overlay_ref(&o.ov[0], 130.0f / 320.0f, 0, 0.0f, b, r);
+    CHECK(near(r[0], 0.7f, 1e-4f), "130 px con H = 320 (%f)", r[0]);
+    fx.gas_intensity = 0; CHECK(ns_screen_build(&fx, TOVR, head, 0.016f, &cfg, NULL, &o, inv) == 0, "intensidad 0 no dibuja");
 }
 
 static void test_fade_flash(void) {
@@ -122,17 +134,17 @@ static void test_fade_flash(void) {
     fx.flags = NS_SFX_FADE; fx.fade_amount = 0.5f; fx.fade_white = 0;
     CHECK(ns_screen_build(&fx, TOVR, head, 0.016f, &cfg, NULL, &o, inv) == 1 && o.ov[0].abr == 2, "fundido a negro resta");
     float b[3] = { 0.8f, 0.6f, 0.4f }, r[3];
-    ns_screen_overlay_ref(&o.ov[0], 0.2f, 0.1f, b, r);
+    ns_screen_overlay_ref(&o.ov[0], 0.2f, 0.1f, 0.0f, b, r);
     CHECK(near(r[0], 0.3f, 1e-5f) && near(r[1], 0.1f, 1e-5f) && near(r[2], 0.0f, 1e-5f), "negro 50 %%: %f %f %f", r[0], r[1], r[2]);
     fx.fade_amount = 1; ns_screen_build(&fx, TOVR, head, 0.016f, &cfg, NULL, &o, inv);
-    ns_screen_overlay_ref(&o.ov[0], 0.2f, 0.1f, b, r);
+    ns_screen_overlay_ref(&o.ov[0], 0.2f, 0.1f, 0.0f, b, r);
     CHECK(r[0] == 0 && r[1] == 0 && r[2] == 0, "negro total");
     fx.fade_white = 1; ns_screen_build(&fx, TOVR, head, 0.016f, &cfg, NULL, &o, inv);
     CHECK(o.ov[0].abr == 1, "fundido a blanco suma");
-    ns_screen_overlay_ref(&o.ov[0], 0.2f, 0.1f, b, r);
+    ns_screen_overlay_ref(&o.ov[0], 0.2f, 0.1f, 0.0f, b, r);
     CHECK(r[0] == 1 && r[1] == 1 && r[2] == 1, "blanco total");
     /* el fundido es uniforme en toda la pantalla (no depende de la dirección de la vista) */
-    float r2[3]; ns_screen_overlay_ref(&o.ov[0], -0.9f, 0.7f, b, r2);
+    float r2[3]; ns_screen_overlay_ref(&o.ov[0], -0.9f, 0.7f, 0.0f, b, r2);
     CHECK(r2[0] == r[0], "uniforme");
     /* destello */
     fx.flags = NS_SFX_FLASH;
@@ -151,30 +163,30 @@ static void test_modes(void) {
     NsScreenFx fx; base_fx(&fx);
     NsGpuScreen o; float inv[12], head[3] = {0};
     fx.flags = NS_SFX_MODE_A;
-    int n = ns_screen_build(&fx, TOVR, head, 0.016f, NULL, NULL, &o, inv);
+    NsScreenCfg cfg = ns_screen_cfg_default(); cfg.proj_h = 160.0f;
+    int n = ns_screen_build(&fx, TOVR, head, 0.016f, &cfg, NULL, &o, inv);
     CHECK(n == 2 && o.ov[0].kind == NSG_OV_COVER && o.ov[1].kind == NSG_OV_SCAN, "modo A: tinte y líneas (n=%d)", n);
-    NsScreenCfg cfg = ns_screen_cfg_default();
     float b[3] = { 0.5f, 0.5f, 0.5f }, r[3];
-    ns_screen_overlay_ref(&o.ov[0], 0, 0, b, r);
+    ns_screen_overlay_ref(&o.ov[0], 0, 0, 0.0f, b, r);
     CHECK(r[1] > r[0] && r[1] > r[2], "tinte verde (%f %f %f)", r[0], r[1], r[2]);
-    fx.flags = NS_SFX_MODE_B; ns_screen_build(&fx, TOVR, head, 0.016f, NULL, NULL, &o, inv);
-    ns_screen_overlay_ref(&o.ov[0], 0, 0, b, r);
+    fx.flags = NS_SFX_MODE_B; ns_screen_build(&fx, TOVR, head, 0.016f, &cfg, NULL, &o, inv);
+    ns_screen_overlay_ref(&o.ov[0], 0, 0, 0.0f, b, r);
     CHECK(r[0] > r[1] && r[0] > r[2], "tinte rojizo B (%f %f %f)", r[0], r[1], r[2]);
-    /* líneas: alternan por filas del motor, nunca giran con la cabeza (dependen de ty) */
+    /* líneas ANCLADAS AL MUNDO: la fase depende solo de la elevación del rayo en el mundo (ydir), no de la fila de pantalla ni de la posición horizontal */
     float lit = 0, dark = 0;
-    for (int i = 0; i < 40; i++) {
-        float ty = (float)i * 0.25f / cfg.scan_period / 160.0f * cfg.scan_period; (void)ty;
-        float t = ((float)i * 0.25f) / 160.0f;
-        ns_screen_overlay_ref(&o.ov[1], 0, t, b, r);
+    for (int i = 0; i < 80; i++) {
+        float yd = -0.2f + 0.005f * (float)i;
+        ns_screen_overlay_ref(&o.ov[1], 0.3f, 0.4f, yd, b, r);
         if (r[0] < 0.5f - 1e-6f) dark++; else lit++;
     }
-    CHECK(dark > 5 && lit > 5, "líneas alternan (%g oscuras, %g claras)", dark, lit);
-    float r2[3]; ns_screen_overlay_ref(&o.ov[1], 0.7f, 0.1f, b, r); ns_screen_overlay_ref(&o.ov[1], -0.7f, 0.1f, b, r2);
-    CHECK(r[0] == r2[0], "las líneas no dependen de x");
+    CHECK(dark > 5 && lit > 5, "líneas alternan con la elevación (%g oscuras, %g claras)", dark, lit);
+    float r2[3];
+    ns_screen_overlay_ref(&o.ov[1], 0.7f, 0.1f, 0.05f, b, r); ns_screen_overlay_ref(&o.ov[1], -0.7f, -0.5f, 0.05f, b, r2);
+    CHECK(r[0] == r2[0], "mismo rayo vertical del mundo = misma línea, sea cual sea la posición en pantalla (no giran con la cabeza)");
     /* varias banderas a la vez: orden de dibujo estable */
     fx.flags = NS_SFX_MODE_A | NS_SFX_GAS | NS_SFX_FADE | NS_SFX_FLASH | NS_SFX_WATER; fx.gas_intensity = 0.5f; fx.fade_amount = 0.2f;
     fx.water_max[0] = fx.water_max[1] = fx.water_max[2] = 10;
-    n = ns_screen_build(&fx, TOVR, head, 0.016f, NULL, NULL, &o, inv);
+    n = ns_screen_build(&fx, TOVR, head, 0.016f, &cfg, NULL, &o, inv);
     CHECK(n <= NSG_MAX_OVERLAYS && o.ov[n - 1].kind == NSG_OV_COVER && o.ov[n - 1].abr == 2, "el fundido (a negro) va el último (abr=%u)", n ? o.ov[n - 1].abr : 9u);
 }
 

@@ -194,7 +194,7 @@ final class RGRenderer {
         weapon = WeaponRenderer(device: device, colorFormat: colorFormat, depthFormat: depthFormat,
                                 sampleCount: sampleCount, viewCount: self.viewCount)
 #if !MV_BENCH || MV_BENCH_NATIVE
-        if let lib = lib0, let n = NativeRenderer(device: device, library: lib, ringSize: 3) {
+        if let lib = lib0, let n = NativeRenderer(device: device, library: lib, ringSize: 6) {
             n.bridge = mv_vrhost_native_bridge()
             // pipelines de los formatos conocidos (con y sin amplificación): nada se compila en el primer fotograma nativo
             var warmed = true
@@ -588,14 +588,16 @@ final class RGRenderer {
         var stereoCams: [(view: simd_float4x4, tangents: SIMD4<Float>)] = []
         if drawWorld, let sr = stereoRequest, ensureStereo(sr.width, sr.height) {
             for e in 0..<2 {
-                if let cam = XRStereo.eye(gameView: gameView, eye: e, ipd: sr.ipd, conv: sr.convergence, tanX: sr.tanX, tanY: sr.tanY) { stereoCams.append((view: cam.view, tangents: cam.tangents)) }
+                if let cam = stereoCamera(e, sr) { stereoCams.append((view: cam.view, tangents: cam.tangents)) }
             }
         }
         let stereoWanted = stereoCams.count == 2
         let auxWanted = drawWorld && drawBody && auxRequest != nil && haveScene
         let want = eyesWanted || stereoWanted || auxWanted
         n.headVR = SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z)
-        n.cinemaGameView = stereoWanted ? gameView : nil
+        // Cámara del juego: cinemática del motor (view_kind ENGINE) o escena válida pero no apta para primera persona (sin TOVR_OK/PLAYER_OK: vehículos, ascensores, zonas especiales,
+        // jugador sin enlazar tras un cambio de zona), en CUALQUIER modo de cinemática (pantalla 3D, diorama, dentro de la escena). Nunca negro por eso.
+        n.cinemaGameView = ((engineView || n.sceneUnfit) && Self.viewOK(gameView)) ? gameView : nil
         var sortView = sceneV.first ?? matrix_identity_float4x4
         var eyeList: [SIMD3<Float>] = eyesWanted ? sceneV.prefix(min(2, nTargets)).map(eyeOf) : []
         if stereoWanted {
@@ -761,6 +763,39 @@ final class RGRenderer {
     }
 
 
+    /// La escena es una cinemática del motor (VRV_K_ENGINE, view_kind 2): la fija XRFrameEncoder antes de `encode`. Fuerza la colocación desde la cámara del juego.
+    var engineView = false
+    /// La escena nativa actual pide la pantalla 3D porque es válida pero no apta para primera persona (con histéresis): XRPresenter la muestra en estéreo hasta que vuelva a ser apta.
+    var sceneNeedsGameCam: Bool {
+#if !MV_BENCH || MV_BENCH_NATIVE
+        return native?.sceneUnfit ?? false
+#else
+        return false
+#endif
+    }
+    private static func viewOK(_ m: simd_float4x4) -> Bool {
+        guard XRMath.isFinite(m) else { return false }
+        let det = simd_determinant(m)
+        return det.isFinite && abs(det) > 1e-13
+    }
+    /// Cámara de un ojo de la pantalla 3D: ventana del motor con la H REAL de la escena (tangentes 160/H y 120/H) y su centro de proyección OFX/OFY (ns_cinema_window); sin escena nativa,
+    /// las tangentes de la petición. Réplica de XRStereo.eye + desplazamiento del centro.
+    private func stereoCamera(_ e: Int, _ r: StereoRequest) -> (view: simd_float4x4, tangents: SIMD4<Float>)? {
+        var tx = r.tanX, ty = r.tanY
+        var sh = SIMD4<Float>(0, 0, 0, 0)
+#if !MV_BENCH || MV_BENCH_NATIVE
+        if let n = native, n.camH > 8 {
+            tx = 160 / n.camH; ty = 120 / n.camH
+            let dx = (n.camOfx - 160) / n.camH, dy = (n.camOfy - 120) / n.camH
+            sh = SIMD4<Float>(dx, -dx, dy, -dy)
+        }
+#endif
+        guard let cam = XRStereo.eye(gameView: gameView, eye: e, ipd: r.ipd, conv: r.convergence, tanX: tx, tanY: ty) else { return nil }
+        let t = cam.tangents + sh
+        guard t.x > 0.01, t.y > 0.01, t.z > 0.01, t.w > 0.01 else { return nil }
+        return (cam.view, t)
+    }
+
     /// Pantalla 3D: el render nativo desde la cámara del juego (A, t, H, OFX/OFY, sobredimensión 66/64: ns_cinema), un pase por ojo con cámaras paralelas y ventana desplazada. Se vuelve
     /// a dibujar solo si cambió la escena nativa, la petición o el fundido de la presentación; si no, las texturas valen. Con el render nativo no listo no se toca la imagen anterior.
     private func encodeStereo(_ cb: MTLCommandBuffer, _ r: StereoRequest, gotNew: Bool) {
@@ -771,7 +806,7 @@ final class RGRenderer {
         if !(gotNew || stereoDirty || !stereoRendered || n.sceneSeq != stereoSeq || fade != stereoFade) { return }
         var rendered = 0
         for e in 0..<2 {
-            guard let cam = XRStereo.eye(gameView: gameView, eye: e, ipd: r.ipd, conv: r.convergence, tanX: r.tanX, tanY: r.tanY) else { return }
+            guard let cam = stereoCamera(e, r) else { return }
             var u = VrSceneUniforms()
             let proj = XRMath.projection(tangents: cam.tangents, near: 0.05, far: 800)
             let m = proj * cam.view

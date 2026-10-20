@@ -242,20 +242,22 @@ struct NsOvOut {
     float2 ndc;
     uint eye [[flat]];
 };
-vertex NsOvOut ns_vs_overlay(uint vid [[vertex_id]])
+static NsOvOut ns_overlay_vertex(uint vid, uint eye)
 {
     float2 p = float2((vid << 1) & 2u, vid & 2u);
     NsOvOut o;
     o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);
     o.ndc = p * 2.0 - 1.0;
-    o.eye = 0u;
+    o.eye = eye;
     return o;
+}
+vertex NsOvOut ns_vs_overlay(uint vid [[vertex_id]])
+{
+    return ns_overlay_vertex(vid, 0u);
 }
 vertex NsOvOut ns_vs_overlay_amp(uint vid [[vertex_id]], ushort amp [[amplification_id]])
 {
-    NsOvOut o = ns_vs_overlay(vid);
-    o.eye = uint(amp);
-    return o;
+    return ns_overlay_vertex(vid, uint(amp));
 }
 static float ns_sstep(float e0, float e1, float x)
 {
@@ -266,24 +268,29 @@ static float ns_sstep(float e0, float e1, float x)
 fragment float4 ns_fs_overlay(NsOvOut in [[stage_in]], constant NsGpuOverlayU &U [[buffer(NSG_BUF_OVERLAY)]])
 {
     const float4 ep = in.eye == 0u ? float4(U.eye0[0], U.eye0[1], U.eye0[2], U.eye0[3]) : float4(U.eye1[0], U.eye1[1], U.eye1[2], U.eye1[3]);   /* P00, P11, P02, P12 */
+    const float3 upv = in.eye == 0u ? float3(U.up0[0], U.up0[1], U.up0[2]) : float3(U.up1[0], U.up1[1], U.up1[2]);   /* eje Y del mundo VR en el espacio de vista del ojo */
     const float2 t = (in.ndc + ep.zw) / ep.xy;
-    const float H = U.ov.p[3] > 0.0 ? U.ov.p[3] : 160.0;
+    const float H = U.ov.p[3] > 0.0 ? U.ov.p[3] : 320.0;
     const float px = t.x * H, py = t.y * H;
     float3 F = float3(U.ov.rgb[0], U.ov.rgb[1], U.ov.rgb[2]);
     float a = U.ov.amount;
     if (U.ov.kind == NSG_OV_RING) {
-        float asp = U.ov.p[2] > 0.0 ? U.ov.p[2] : 1.0;
-        float r = sqrt(px * px + (py / asp) * (py / asp));
+        /* viñeta circular: invariante al giro de la cabeza sobre su eje */
+        float r = sqrt(px * px + py * py);
         float c = ns_sstep(U.ov.p[0], U.ov.p[1], r);
         F = mix(F, float3(U.ov.rgb2[0], U.ov.rgb2[1], U.ov.rgb2[2]), c);
         a *= c;
     } else if (U.ov.kind == NSG_OV_SCAN) {
+        /* líneas ancladas al MUNDO: la fase sale de la elevación del rayo en el mundo VR (ángulo * H = filas del motor), no de la fila de pantalla */
         float per = U.ov.p[0] > 0.0 ? U.ov.p[0] : 2.0;
-        float ph = py / per + U.ov.p[1];
+        float yd = clamp(dot(upv, normalize(float3(t.x, t.y, -1.0))), -1.0, 1.0);
+        float ph = asin(yd) * H / per + U.ov.p[1];
         a *= (ph - floor(ph)) < U.ov.p[2] ? 1.0 : 0.0;
     } else if (U.ov.kind == NSG_OV_BARS) {
+        /* las barras de bajo el agua pasan a viñeta circular (no giran con la cabeza) */
         float lim = 120.0 - U.ov.p[0];
-        a *= ns_sstep(lim - U.ov.p[1], lim + U.ov.p[1], fabs(py));
+        float r = sqrt(px * px + py * py);
+        a *= ns_sstep(lim - 10.0 * U.ov.p[1], lim + 10.0 * U.ov.p[1], r);
     }
     if (kNsLinear) F = float3(ns_lin1(F.x), ns_lin1(F.y), ns_lin1(F.z));
     /* mezcla de fábrica: abr0 (alfa = a/2, mezcla de color con el destino), abr1/abr2 (suma/resta de F*a), abr3 (suma de F*a/4) */

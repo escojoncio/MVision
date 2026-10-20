@@ -28,6 +28,7 @@ typedef struct {
     float flash_gain;       /* intensidad máxima del destello (VR: menos de 1 para no deslumbrar) */
     float flash_slew;       /* variación máxima por segundo del destello */
     float fade_slew;        /* variación máxima por segundo del fundido (<=0: sin límite) */
+    float proj_h;           /* H REAL de la cámara de la escena (NsCamera.h); <= 0: 320 (normal). Los radios y filas del motor se convierten a tangentes con ella */
 } NsScreenCfg;
 NsScreenCfg ns_screen_cfg_default(void);
 
@@ -46,7 +47,9 @@ void ns_screen_xform34(const float m[12], const float p[3], float out[3]);
 
 /* ---- referencias de CPU (lo mismo que ns_fs / ns_fs_overlay) ---- */
 /* Aplica un recubrimiento al color de fondo b (0..1) en el punto de tangentes (tx, ty); H = distancia de pantalla del motor. Devuelve el color (sin recortar a 0..1 salvo al final). */
-void ns_screen_overlay_ref(const NsGpuOverlay *ov, float tx, float ty, const float b[3], float out[3]);
+/* ydir: componente vertical (mundo VR, Y arriba) del rayo unitario del píxel; solo lo usa SCAN (las líneas están ancladas al mundo, no giran con la cabeza). RING y BARS son
+ * viñetas circulares (invariantes al giro de la cabeza sobre su eje), el resto de recubrimientos son uniformes. */
+void ns_screen_overlay_ref(const NsGpuOverlay *ov, float tx, float ty, float ydir, const float b[3], float out[3]);
 /* Agua en el mundo: ew = posición del fragmento en el mundo del motor; uv += desplazamiento; col *= tinte. Devuelve 1 si el fragmento está afectado. */
 int ns_screen_water_ref(const float wmin[4], const float wmax[4], const float wtint[4], const float wwave[4], const float ew[3], float *du, float *dv, float col[3]);
 

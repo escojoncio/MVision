@@ -173,11 +173,13 @@ final class XRFrameEncoder {
         if !(ipd > 0.05 && ipd < 0.08) { ipd = 0.063 }
         presenter.hqFull = renderer.hqFull
         var pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, eyePx: Float(w), p00: projs[0].columns.0.x,
-                                     gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame(), ipd: ipd, shot: renderer.sceneShot)
+                                     gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame(), ipd: ipd, shot: renderer.sceneShot,
+                                     gameCamScene: renderer.sceneNeedsGameCam)
         if dg.noLayers {
             // Sin capas finales: ni velo (transición, fundido de corte), ni viñeta, ni pantalla de cine / pantalla 3D; solo el mundo, el HUD 2D y los textos (menú).
             pres.items.removeAll { $0.kind == .veil || $0.kind == .vignette || $0.kind == .screen || $0.kind == .screen3d }
         }
+        renderer.engineView = gs.view_kind == 2          // cinemática del motor: el render nativo coloca la escena desde la cámara del juego
         renderer.drawWorld = pres.drawWorld
         renderer.drawBody = pres.drawBody && !dg.noLayers      // radar y arma en la mano se dibujan encima del mundo, dentro del pase de escena
         renderer.drawEyes = pres.drawEyes

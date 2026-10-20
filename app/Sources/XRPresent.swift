@@ -658,7 +658,7 @@ final class XRPresenter {
 
     /// `hud`: panel 2D (textura del renderer, ya la vista sRGB si el destino es lineal). `eyePx`/`p00`: ancho en píxeles de un ojo y P[0][0].
     func compose(gs: MvVrGameState, head: simd_float4x4, dt: Float, hud: MTLTexture?, eyePx: Float, p00: Float,
-                 gameView: simd_float4x4, linear: Bool, wrist: Wrist? = nil, ipd: Float = 0.063, shot: UInt32 = 0) -> Result {
+                 gameView: simd_float4x4, linear: Bool, wrist: Wrist? = nil, ipd: Float = 0.063, shot: UInt32 = 0, gameCamScene: Bool = false) -> Result {
         // 1) qué toca mostrar. view_kind 2 (vr_view.h, VRV_K_ENGINE) = cinemática del motor con 3D y cámara del guion; los vídeos pregrabados (3), los menús, el códec/radio,
         //    las cargas, la pausa y las ventanas de armas/objetos (0) siguen en la pantalla de cine.
         var target: Display = gs.view_mode == 1 ? .world : .cinema
@@ -670,6 +670,9 @@ final class XRPresenter {
             case .cinema: break
             }
         }
+        // Escena válida pero no apta para primera persona (vehículos, ascensores, zonas especiales, jugador sin enlazar): se pinta con la cámara del juego en la pantalla 3D, nunca en negro,
+        // y se vuelve al mundo en cuanto la escena es apta otra vez (RGRenderer.sceneNeedsGameCam, con histéresis).
+        if target == .world && gameCamScene && Self.gameViewOK(gameView) { target = .stereo }
         // Transición con control pero sin cámara VR todavía (fin de radio / de escena, VRV_R_PENDING = 12): la vista queda congelada y se oscurece; nunca se enseña el fotograma
         // plano del motor (cenital, baja resolución) como paso intermedio. El destino es el mundo.
         let pending = gs.view_reason == 12

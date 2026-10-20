@@ -120,10 +120,11 @@ typedef struct {
     float amount;        /* COVER/SCAN/BARS: intensidad 0..1 */
     float rgb[3];        /* color 0..1 (RING: borde interior) */
     float rgb2[3];       /* RING: borde exterior */
-    float p[4];          /* RING: radio interior px, radio exterior px, razón vertical/horizontal, H del motor. SCAN: periodo en filas del motor, fase, proporción cubierta, H. BARS: fracción de altura NDC */
+    float p[4];          /* RING: radio interior px, radio exterior px, (sin uso: viñeta circular), H REAL del motor. SCAN: periodo en filas del motor, fase, proporción cubierta, H. BARS: filas del motor de la viñeta y suavizado, H */
 } NsGpuOverlay;                                                                                     /* 52 B */
 /* Parámetros del ojo para pasar de NDC a tangentes: t = (ndc + (P20, P21)) / (P00, P11). eye[i] = {P00, P11, P20, P21}. */
-typedef struct { NsGpuOverlay ov; float eye0[4], eye1[4]; } NsGpuOverlayU;                          /* 84 B */
+/* up0/up1: eje Y del mundo VR expresado en el espacio de vista del ojo (columna 1 de la matriz de vista; w sin uso): SCAN ancla sus líneas a la elevación del rayo en el mundo. */
+typedef struct { NsGpuOverlay ov; float eye0[4], eye1[4]; float up0[4], up1[4]; } NsGpuOverlayU;     /* 116 B */
 typedef struct {
     float water_min[4], water_max[4], water_tint[4], water_wave[4];   /* ver NsGpuUniforms */
     ns_u32 n_overlays, pad0, pad1, pad2;
