@@ -1,3 +1,4 @@
+import Foundation
 import simd
 
 /// Utilidades de matrices del módulo inmersivo. Convenciones: mano derecha, Y arriba, -Z delante,
@@ -120,9 +121,13 @@ enum XRMenuLayout {
 
     /// Modelo del panel (centro del quad, +Z hacia el usuario) para una cabeza `head` (espacio recentrado).
     static func model(head: simd_float4x4) -> simd_float4x4 {
-        let p = XRMath.position(head)
+        model(position: XRMath.position(head), yaw: XRMath.yaw(of: head))
+    }
+
+    /// Igual, para una posición de cabeza y un rumbo dados (la pose suavizada de `XRFollow` cuando las pantallas 2D siguen la cabeza).
+    static func model(position p: SIMD3<Float>, yaw: Float) -> simd_float4x4 {
         let pitch = atan2f(drop, distance)      // inclina el panel hacia la cara: -pitch gira +Z hacia arriba
-        return XRMath.translation(p) * XRMath.rotationY(XRMath.yaw(of: head)) * XRMath.translation(SIMD3<Float>(0, -drop, -distance)) * XRMath.rotationX(-pitch)
+        return XRMath.translation(p) * XRMath.rotationY(yaw) * XRMath.translation(SIMD3<Float>(0, -drop, -distance)) * XRMath.rotationX(-pitch)
     }
 
     /// Altura del panel (m) para una textura de `w` x `h` px.
@@ -158,4 +163,141 @@ enum XRCinemaLayout {
     static func sharp(base: Int, legible: Bool) -> Int { legible ? max(base, 1) : base }
     /// Escalado entero (cada texel = nº entero de píxeles del visor): siempre en esas escenas.
     static func integerScale(base: Bool, legible: Bool) -> Bool { base || legible }
+}
+
+/// Seguimiento suave de la cabeza por las pantallas 2D (cine, pantalla 3D, ventanas del juego, menú VR). Funciones puras (las prueba el banco).
+/// Estándar VR de «lazy follow» por fotograma: la pantalla sigue la posición y el rumbo de la cabeza con un filtro exponencial independiente de la tasa de
+/// fotogramas (alfa = 1 - exp(-dt/tau), tau corto) y se mantiene NIVELADA (sin alabeo; el cabeceo sigue a la cabeza solo a la mitad y con tope de ~15 grados).
+struct XRFollowState {
+    var pos = SIMD3<Float>(0, 1.6, 0)
+    var yaw: Float = 0
+    var pitch: Float = 0
+    var valid = false
+}
+
+enum XRFollow {
+    static let tau: Float = 0.10            // constante de tiempo (s): 0,08..0,15 s
+    static let pitchGain: Float = 0.5
+    static let maxPitch: Float = 0.26       // rad (~15 grados)
+    static let snapDistance: Float = 3.0    // m: un salto de cabeza mayor (teletransporte, recentrado del sistema) no se persigue, se salta
+
+    static func wrap(_ a: Float) -> Float { atan2f(sinf(a), cosf(a)) }
+
+    /// Factor del filtro exponencial para un paso `dt` (0 si dt <= 0; 1 si tau <= 0).
+    static func alpha(dt: Float, tau: Float) -> Float {
+        guard dt > 0, dt.isFinite else { return 0 }
+        guard tau > 0 else { return 1 }
+        return 1 - expf(-dt / tau)
+    }
+
+    /// Cabeceo de la mirada (rad, + = mirar arriba).
+    static func pitch(of m: simd_float4x4) -> Float {
+        let f = -SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z)
+        let l = simd_length(f)
+        guard l > 1e-6, l.isFinite else { return 0 }
+        return asinf(min(max(f.y / l, -1), 1))
+    }
+
+    /// Pose objetivo para una cabeza `head`: posición, rumbo y cabeceo recortado.
+    static func target(head: simd_float4x4) -> (pos: SIMD3<Float>, yaw: Float, pitch: Float) {
+        (XRMath.position(head), XRMath.yaw(of: head), min(max(pitch(of: head) * pitchGain, -maxPitch), maxPitch))
+    }
+
+    /// Un paso por fotograma de render. `snap` (o el primer paso, o un salto de la cabeza > `snapDistance`) coloca la pose directamente sobre la cabeza.
+    static func step(_ s: inout XRFollowState, head: simd_float4x4, dt: Float, tau: Float = XRFollow.tau, snap: Bool = false) {
+        guard XRMath.isFinite(head) else { return }
+        let t = target(head: head)
+        guard t.pos.x.isFinite, t.pos.y.isFinite, t.pos.z.isFinite, t.yaw.isFinite else { return }
+        if snap || !s.valid || simd_length(t.pos - s.pos) > snapDistance {
+            s.pos = t.pos; s.yaw = t.yaw; s.pitch = t.pitch; s.valid = true
+            return
+        }
+        let k = alpha(dt: min(dt, 0.1), tau: tau)
+        s.pos += (t.pos - s.pos) * k
+        s.yaw = wrap(s.yaw + wrap(t.yaw - s.yaw) * k)
+        s.pitch += (t.pitch - s.pitch) * k
+    }
+
+    /// Modelo (centro de la pantalla, +Z hacia el usuario): `distance` m delante de la cabeza suavizada y `drop` m por debajo de los ojos. Sin alabeo.
+    static func model(_ s: XRFollowState, distance: Float, drop: Float) -> simd_float4x4 {
+        XRMath.translation(s.pos) * XRMath.rotationY(s.yaw) * XRMath.rotationX(s.pitch) * XRMath.translation(SIMD3<Float>(0, -drop, -distance))
+    }
+}
+
+/// Salto de la pose del dispositivo entre dos fotogramas: posición (m) y rumbo (rad).
+struct XRRecenterJump {
+    var dPos: SIMD3<Float>
+    var dYaw: Float
+}
+
+/// Detección del recentrado del sistema (Digital Crown). visionOS no avisa de él ni en CompositorServices ni en ARKit: al recentrar mueve el origen del
+/// espacio y la pose del dispositivo (`originFromAnchorTransform`) da un salto instantáneo. Se detecta comparando cada pose con la extrapolada de la
+/// velocidad del fotograma anterior: una cabeza real no tiene un residuo de 10 cm ni de 8 grados en 10 ms; tras un hueco largo (pausa, seguimiento perdido)
+/// se compara en bruto con umbrales mayores. El salto de rumbo se ignora si se mira casi vertical (el rumbo es entonces poco fiable).
+struct XRRecenterDetector {
+    static let posThreshold: Float = 0.10       // m de residuo en un paso normal
+    static let yawThreshold: Float = 0.14       // rad (~8 grados)
+    static let gap: Float = 0.25                // s: más que esto es un hueco, no un paso
+    static let gapPosThreshold: Float = 0.6     // m
+    static let gapYawThreshold: Float = 0.7     // rad (~40 grados)
+    static let maxSpeed: Float = 8              // m/s, tope de la velocidad extrapolada
+    static let maxYawRate: Float = 17           // rad/s (~1000 grados/s)
+
+    private var lastPos = SIMD3<Float>(0, 0, 0)
+    private var lastYaw: Float = 0
+    private var lastYawOK = false
+    private var lastT: Double = 0
+    private var vel = SIMD3<Float>(0, 0, 0)
+    private var yawRate: Float = 0
+    private var have = false
+
+    mutating func reset() { have = false; vel = SIMD3<Float>(0, 0, 0); yawRate = 0 }
+
+    /// Alimenta la pose del dispositivo (origen ARKit -> dispositivo) en el instante `time` (s). Devuelve el salto si lo hay.
+    mutating func observe(_ m: simd_float4x4, time: Double) -> XRRecenterJump? {
+        guard XRMath.isFinite(m), time.isFinite, !have || time > lastT else { return nil }
+        let p = XRMath.position(m), y = XRMath.yaw(of: m)
+        let f = -SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z)
+        let yawOK = hypotf(f.x, f.z) > 0.5
+        defer { lastPos = p; lastYaw = y; lastYawOK = yawOK; lastT = time }
+        guard have else { have = true; return nil }
+        let dt = Float(time - lastT)
+        let dp = p - lastPos
+        let bothOK = yawOK && lastYawOK
+        let dy = bothOK ? XRFollow.wrap(y - lastYaw) : 0
+        let jump: Bool
+        if dt > Self.gap {
+            jump = simd_length(dp) > Self.gapPosThreshold || abs(dy) > Self.gapYawThreshold
+        } else {
+            jump = simd_length(dp - vel * dt) > Self.posThreshold || abs(XRFollow.wrap(dy - yawRate * dt)) > Self.yawThreshold
+        }
+        if jump {
+            vel = SIMD3<Float>(0, 0, 0); yawRate = 0
+            return XRRecenterJump(dPos: dp, dYaw: dy)
+        }
+        if dt > 0.0005 && dt <= Self.gap {
+            var nv = dp / dt
+            let sp = simd_length(nv)
+            if sp > Self.maxSpeed { nv *= Self.maxSpeed / sp }
+            vel = nv
+            yawRate = bothOK ? min(max(dy / dt, -Self.maxYawRate), Self.maxYawRate) : 0
+        } else {
+            vel = SIMD3<Float>(0, 0, 0); yawRate = 0
+        }
+        return nil
+    }
+}
+
+/// Línea de registro del recentrado y delta entre dos orígenes (funciones puras).
+enum XRRecenter {
+    /// `[recentrado] fuente=<corona|menu|boton|gesto|inicio> delta=<m>m,<grados>grados`
+    static func logLine(source: String, dPos: Float, dYaw: Float) -> String {
+        "[recentrado] fuente=\(source) delta=" + String(format: "%.2fm,%.1fgrados", dPos, abs(dYaw) * 180 / .pi)
+    }
+
+    /// Distancia (m, en horizontal) y giro (rad) entre dos orígenes de recentrado.
+    static func originDelta(old: simd_float4x4, new: simd_float4x4) -> (dPos: Float, dYaw: Float) {
+        let d = XRMath.position(new) - XRMath.position(old)
+        return (hypotf(d.x, d.z), XRFollow.wrap(XRMath.yaw(of: new) - XRMath.yaw(of: old)))
+    }
 }

@@ -46,6 +46,9 @@ final class XRRenderLoop {
     private var needsRecenter = true                             // entrar = recentrar en el primer frame con tracking
     private var lastOriginFromDevice = XRMath.translation(SIMD3<Float>(0, 1.6, 0))
     private var everTracked = false
+    private var recenterSource = "inicio"                        // quién pidió el recentrado pendiente (para el registro)
+    private var recenterJump: XRRecenterJump?                    // salto de la pose del sistema que lo provocó (corona)
+    private var jumpDetector = XRRecenterDetector()              // el recentrado del sistema (Digital Crown) mueve el origen de ARKit: se detecta por el salto
 
     // Pinza mantenida (gesto de recentrado). Escrito por onSpatialEvent (otro hilo).
     private let gestureLock = NSLock()
@@ -140,8 +143,8 @@ final class XRRenderLoop {
         guard let frame = layerRenderer.queryNextFrame() else { return }
 
         frame.startUpdate()
-        if XRControl.shared.takeRecenterRequest() { needsRecenter = true }
-        if consumeLongPinch() { needsRecenter = true }
+        if let src = XRControl.shared.takeRecenterRequest() { needsRecenter = true; recenterSource = src }
+        if consumeLongPinch() { needsRecenter = true; recenterSource = "gesto" }
         frame.endUpdate()
 
         guard let timing = frame.predictTiming() else { return }
@@ -172,9 +175,18 @@ final class XRRenderLoop {
             everTracked = true
         }
         if tracked { trackedFrames += 1 } else { untrackedFrames += 1 }
+        // Recentrado del sistema (Digital Crown): visionOS mueve el origen del espacio y la pose del dispositivo salta. Se trata como un recentrado propio:
+        // el origen de usuario, las pantallas y paneles, el ancla y el rumbo del mundo VR (vr_heading) se recalculan sobre la cabeza actual.
+        if tracked, let j = jumpDetector.observe(originFromDevice, time: seconds) {
+            needsRecenter = true; recenterSource = "corona"; recenterJump = j
+        }
         if needsRecenter && tracked {
+            let oldOrigin = recenterOrigin
             applyRecenter(originFromDevice)
             needsRecenter = false
+            let delta = recenterJump.map { (dPos: simd_length($0.dPos), dYaw: $0.dYaw) } ?? XRRecenter.originDelta(old: oldOrigin, new: recenterOrigin)
+            Storage.log(XRRecenter.logLine(source: recenterSource, dPos: delta.dPos, dYaw: delta.dYaw))
+            recenterSource = "menu"; recenterJump = nil
             presenter.reanchor()
             VRInput.shared.recenter()      // giro del cuerpo a 0 y recentrado del rumbo de la cámara del motor
         }

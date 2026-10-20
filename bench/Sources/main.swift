@@ -782,6 +782,7 @@ func runMenuLayout() {
 }
 
 runMenuLayout()
+runVistaTests()
 
 print("\nresumen: \(failures) comprobaciones falladas")
 if !warnList.isEmpty { annot("warning", "banco de render (informativo)", warnList.prefix(30).joined(separator: "\n")) }
