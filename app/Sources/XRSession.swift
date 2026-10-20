@@ -32,12 +32,14 @@ enum XRSettings {
 final class XRControl {
     static let shared = XRControl()
     private let lock = NSLock()
-    private var recenter = false
+    private var recenter: String?
     private var pausedHook: ((Bool) -> Void)?
 
     /// Pide recentrar (origen = posición y rumbo actuales de la cabeza, a la altura del suelo) en el próximo frame.
-    func requestRecenter() { lock.lock(); recenter = true; lock.unlock() }
-    func takeRecenterRequest() -> Bool { lock.lock(); defer { lock.unlock() }; let r = recenter; recenter = false; return r }
+    /// `source` va al registro (`[recentrado] fuente=...`): menu, boton, gesto...
+    func requestRecenter(source: String = "menu") { lock.lock(); recenter = source; lock.unlock() }
+    /// Fuente de la petición pendiente (nil si no hay ninguna); la consume.
+    func takeRecenterRequest() -> String? { lock.lock(); defer { lock.unlock() }; let r = recenter; recenter = nil; return r }
 
     /// El bucle de render avisa (hilo propio) cuando el compositor pausa (true) o reanuda (false) el espacio.
     func setPausedHook(_ h: ((Bool) -> Void)?) { lock.lock(); pausedHook = h; lock.unlock() }
@@ -301,7 +303,7 @@ struct XRControlsView: View {
                             Text("Invisible (segura)").tag("hidden")
                             Text("Cerrada (prueba)").tag("closed")
                         }
-                        Button("Recentrar") { XRControl.shared.requestRecenter() }
+                        Button("Recentrar") { XRControl.shared.requestRecenter(source: "boton") }
                         Button("Cambiar carpeta") { model.changeFolder() }
                     }
                 }
