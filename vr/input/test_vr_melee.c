@@ -100,6 +100,21 @@ int main(void) {
     { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 900; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
       VrmFrame h = fr(); h.fist_ok[0] = h.fist_closed[0] = 1; for (int i = 0; i < 18; i++) { h.fist[0][0] = 900.0f - 40.0f * (float)i; vrm_frame(&V, &ENG, &h); }
       vrm_pre_hit(&V, &ENG, W); CK(V.ctx_hit && V.ctx_origin[0] >= 800.0f); vrm_post_hit(&V, &ENG, W, 0); }
+    /* enemigo en reacción: el golpe se encola y se repite en cuanto puede recibirlo; caduca pasado el margen */
+    fresh(); enemy(0, 400, 0, 0); p16(VRM_TARGETS, 1 | 2);
+    { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 400; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      vrm_pre_hit(&V, &ENG, W); vrm_post_hit(&V, &ENG, W, 0); CK(V.retry_ttl > 0);
+      V.in_punch = 0; VrmFrame h = fr(); h.fist_ok[0] = h.fist_closed[0] = 1; h.fist[0][0] = 400;
+      vrm_frame(&V, &ENG, &h); CK(!V.p_punch);                              /* sigue en reacción */
+      p16(VRM_TARGETS, 1 | 2 | 4); vrm_frame(&V, &ENG, &h); CK(V.p_punch && V.n_requeue == 1 && logged("ya puede recibirlo")); }
+    fresh(); enemy(0, 400, 0, 0); p16(VRM_TARGETS, 1 | 2);
+    { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 400; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      vrm_pre_hit(&V, &ENG, W); vrm_post_hit(&V, &ENG, W, 0); V.in_punch = 0; VrmFrame h = fr(); h.fist_ok[0] = h.fist_closed[0] = 1; h.fist[0][0] = 400;
+      for (int i = 0; i < VRM_RETRY_FRAMES + 2; i++) vrm_frame(&V, &ENG, &h); CK(!V.p_punch && logged("caducó el margen")); }
+    /* cola del combo llena: se registra */
+    fresh(); { VrmFrame f = fr(); f.punch_side = 0; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+        for (int i = 0; i < 3; i++) { VrmFrame q = fr(); q.punch_side = 1; vrm_frame(&V, &ENG, &q); vrm_punch_tick(&V, &ENG, W, 2); }
+        CK(V.combo_q == 2 && V.n_qfull == 1 && logged("cola del combo está llena")); }
     /* patada (etapa 3): no se sustituye el origen */
     fresh(); enemy(0, 400, 0, 0);
     { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 400; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);

@@ -91,6 +91,7 @@ typedef struct {
 #define VRM_HIST 24             /* ~0,4 s de muestras del puño: el estado de golpe del motor comprueba el impacto varios fotogramas después del gesto */
 #define VRM_T_COMBO1 6          /* instantes de la animación del golpe en que el motor decide el segundo golpe y la patada */
 #define VRM_T_COMBO2 13
+#define VRM_RETRY_FRAMES 24     /* margen (VBlanks, ~0,4 s) para repetir un golpe que cayó sobre un enemigo en reacción */
 #define VRM_HOLD_MAX 12         /* fotogramas máximos que la animación espera en cada instante de decisión si el brazo sigue en movimiento */
 typedef struct Vrm {
     int enable;
@@ -107,12 +108,13 @@ typedef struct Vrm {
     /* contexto de los ganchos */
     int ctx_hit, ctx_grab, ctx_ok; uint32_t ctx_target; float ctx_origin[3], ctx_fist[3];
     int stage;                /* etapa del golpe en curso (1..3) */
+    int retry_ttl, retry_side;   /* golpe a un enemigo en reacción: se reintenta durante VRM_RETRY_FRAMES VBlanks en cuanto pueda recibirlo */
     int combo_q, hold_n, swinging;   /* peticiones de golpe encoladas durante la animación, fotogramas de espera en el instante de decisión y brazo en movimiento */
     int16_t snap[64][3]; int snap_ok;   /* instantánea de los blancos antes de la comprobación de impacto */
     int grab_owned;           /* la presa en curso la inició el cuerpo VR */
     int in_punch;             /* el estado de golpe está en curso por una petición VR */
     /* contadores */
-    unsigned n_punch, n_combo, n_hit, n_miss, n_hold, n_nobody, n_grab, n_grab_rejected, n_squeeze, n_expired, n_knock;
+    unsigned n_punch, n_combo, n_hit, n_miss, n_hold, n_nobody, n_requeue, n_qfull, n_grab, n_grab_rejected, n_squeeze, n_expired, n_knock;
 } Vrm;
 
 void vrm_init(Vrm *v);
