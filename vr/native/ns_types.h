@@ -211,7 +211,8 @@ enum {
     NS_EF_GOURAUD = 4u,
     NS_EF_ONESIDE = 8u,  /* sólo anverso */
     NS_EF_LINE = 16u,    /* línea (dibujar como cinta de ancho `width_px`) */
-    NS_EF_ON_CAMERA = 32u/* informativo: pegado a la cámara del motor; las posiciones ya vienen en el MUNDO del motor con la cámara de la escena (que en VR es la de la cabeza) */
+    NS_EF_ON_CAMERA = 32u,/* informativo: pegado a la cámara del motor; las posiciones ya vienen en el MUNDO del motor con la cámara de la escena (que en VR es la de la cabeza) */
+    NS_EF_WORLD_SIZE = 64u /* BILLBOARD: box[] son semiextensiones en UNIDADES DEL MOTOR del plano de la vista (x derecha, y abajo, con el factor vertical ya aplicado), sin depender de ninguna profundidad; LINE: width_px es la anchura en unidades del motor */
 };
 typedef struct {
     uint8_t kind;        /* NS_EK_* */
@@ -222,6 +223,8 @@ typedef struct {
     uint8_t sub;         /* segmento dentro del paquete (polilíneas): con src_key e idx identifica el elemento entre fotogramas (ver ns_fx_item_key) */
     uint16_t tpage, clut;
     uint16_t idx;        /* índice del paquete dentro de la primitiva */
+    uint8_t role;        /* NSFX_ROLE_* del extractor (solo informativo: registro y comodidad; 0 = desconocido). Ocupa el relleno: el tamaño no cambia */
+    uint8_t _pad;
     float p[4][3];       /* QUAD: vértices en mundo del motor (ya con la matriz del grupo aplicada); BILLBOARD: p[0] = centro */
     uint8_t rgb[4][3];   /* color por vértice 0..255 (128 = neutro con textura) */
     uint8_t uv[4][2];    /* texels en la página */

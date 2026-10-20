@@ -39,6 +39,7 @@ typedef struct {
 typedef struct {
     uint32_t n_ops_fx;          /* operaciones de la lista casadas con un elemento (FX) */
     uint32_t n_cmp, n_view, n_screen, n_noface, n_nomeas, n_clip;   /* medidas hechas (por vista / por pantalla), omitidas por cara oculta, sin medida posible; n_clip: polígonos que el motor recortó (vértices saturados o a menos de 64 del plano cercano), no comparables */
+    uint32_t n_sat;             /* operaciones de la lista con alguna coordenada de pantalla saturada (11 bits: -1024..1023): el propio motor las recortó, su posición/tamaño no son los del elemento; NO se miden */
     uint32_t n_near;            /* de las medidas, casadas por la pasada tolerante (no exacta) */
     float pos_mean_mm, pos_p90_mm, pos_max_mm, pos_mean_px;
     float ratio_mean;           /* media geométrica nativo/lista del tamaño */

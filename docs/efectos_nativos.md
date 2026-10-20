@@ -112,3 +112,13 @@ El factor vertical se midió reproyectando paquetes reales de polígonos de mund
 
 - **Escena válida no apta para primera persona** (vehículos, ascensores, zonas especiales): se coloca con la cámara del juego y se enseña en la pantalla 3D; vuelve al mundo al ser apta (histéresis). La ventana de la pantalla 3D usa la H real y OFX/OFY de la escena (`ns_cinema_window`).
 - **Recubrimientos**: RING y BARS son viñetas circulares; SCAN está anclado al mundo (elevación del rayo). Ninguno gira con la cabeza.
+
+## Comodidad VR de los efectos cerca de la cabeza (ns_gpu_fx_build_ex)
+- Tope angular por distancia del centro a la cabeza: 0 a <= `comfort_dmin_m` (0,12 m: se descarta, "nace dentro de la cabeza"), X (20 grados) a 0,3 m, 90 grados a 1 m, sin tope a mas de 1 m. Un efecto que lo supera se REDUCE alrededor de su centro (no se mueve). Los papeles SURFACE y WATER_SURFACE (entorno) quedan fuera.
+- Pegados a la camara del motor (`NS_EF_ON_CAMERA` o papel VIEW_OVERLAY): no tienen emisor en el mundo; con el centro a menos de `oncam_drop_m` (1,5 m) se descartan. Descartar cuenta como confirmado (la clave entra en `keys`: la ruta de la GPU no los redibuja).
+- Los recubrimientos intencionados de pantalla (fundido, gas, agua, modos de vision) NO pasan por aqui: son `NsScreenFx`.
+- Registro (1 s): `fx-cerca(<0.5m): ...` dentro de la linea `nat-diag` (acumulador `NsGpuFxNearAcc`): fotogramas, con cercanos, en movimiento (>0,3 m/s o >30 grados/s), maximos de cercanos / pegados / pantalla, reducidos, descartados, carteles con profundidad de referencia y, por efecto, papel, forma, ON_CAMERA, distancia, tamano, angulo antes->despues, accion y origen (primitiva/paquete).
+
+## Tamano en mundo (sin profundidad de referencia)
+- Un cartel/sprite de tamano en pixeles mide `px * z / H` con la z de vista REAL del vertice del motor y se exporta con `NS_EF_WORLD_SIZE` (semiextensiones en unidades del motor, independientes de cualquier profundidad). El tamano se aprende por clave (`ns_fx_item_key`) al emitirse; un elemento que el motor no emite usa el aprendido, y sin el no se exporta (`NSFX_F_NOSIZE`). Antes los no emitidos salian con la profundidad de referencia 1000 (hasta 2000 m de lado).
+- La comodidad (tope angular / descartes de pegados a la camara) queda como opcion en `ns_gpu_fx_build_ex`; la app solo usa `drop_inside_m = 0,05`.
