@@ -1720,3 +1720,11 @@ Prueba (`make -C vr/host test`, `test_smooth.c`, caso «nativa +1 registro»): a
 - Cámara: el extractor (RAM, canal +0x30) da eye=(-1345,-3155,4635), H=247, rot con giro libre; la lista de la GPU trae `proj_h=247` y OFX/OFY=0 (registros GTE a 0 = centro): coinciden (H y centro correctos). `rec_eye=(0,8315,5556)`, `rec_screen=320` del meta es el registro de cámara de vrcam OBSOLETO (el de la pantalla de título): la cámara de la muerte no pasa por `vrcam_view`. No afecta a la pantalla 3D (el nativo se coloca con `sc.cam` de la RAM y la vista estéreo con `gv^-1`: `gv` se cancela), solo a la lista de la GPU (no se dibuja). Escala y cámara están bien; el defecto es geometría ausente.
 - Arreglo (`vr_view`): la fiabilidad ya no es «2 medidas seguidas» sino una ventana de las 4 últimas medidas con umbrales más exigentes: mala < 62 %, buena >= 80 %, 2 malas de 4 => respaldo (imagen fiel de la VRAM), 3 buenas de 4 => vuelve el motor. La muerte medida (58,9 %) y las del registro (57,9 / 22,1 %) pierden la pantalla 3D; las cinemáticas reales (67-99 %, un 15,9 % aislado) la conservan. Pruebas en `test_view` con esas series.
 - Pendiente: si se quiere la muerte en 3D hay que extraer el escenario de zona (polígonos sin objeto en la cola, `ausente=660`).
+
+## G-cine (3): objetos dibujados que no estaban en la cola principal
+
+- Causa: en las escenas de acción el cuerpo y el arma del jugador (flag 0x0d, no ocultos) los dibuja el motor pero no figuran en la cola del canal principal; el extractor solo recorría la cola, así que faltaban 222 triángulos (`ausente`).
+- Cambio: `scan_extra_objects` en `ns_extract.c` recorre la RAM de objetos buscando la firma del objeto (flag sin HIDDEN y texturado, grupo activo, definición alineada, pieza 0 con modelo = definición + 0x20), sin descartar por cámara y sin duplicar los de la cola. Opción `no_extra_scan` y contador `extra_objs`.
+- `ns_cover`: `max_detail` por defecto 512 -> 4096 (con 512 lo no clasificado contaba como ausente).
+- Cifras (volcado de la muerte): cobertura con detalle completo 74.8% -> 87.4%, `ausente` 222 -> 0 (98.3% sin contar "pose", que son desfases de animación del escenario); con la medida por defecto antigua 58.9% -> 72.3%. Volcado del túnel: 91.9%, sin cambios.
+- Se mantienen la detección de cobertura y el respaldo plano como red de seguridad.
