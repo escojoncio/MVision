@@ -684,13 +684,15 @@ final class NativeRenderer {
         let netMat = UInt32(truncatingIfNeeded: NSG_NET_MAT), netWeld = UInt32(truncatingIfNeeded: NSG_NET_WELD)
         let noWeldFlag = UInt32(truncatingIfNeeded: NSG_PF_NOWELD)
         if fresh { netScenes += 1 }
+        // Pantalla 3D con el escenario nativo inservible (intros sin partida: la malla de la RAM es de otra zona; el nativo casa < 10 % con la lista y el relleno cubre >= 80 %): solo se dibujan los objetos dinámicos.
+        let sceneryStale = cinema && ns_fill_glue_scenery_stale() != 0
         for ii in 0..<nInst {
             let instPtr = UnsafePointer(sc.pointee.inst + ii)
             let first = Int(instPtr.pointee.first_piece), cnt = Int(instPtr.pointee.n_pieces)
             guard first + cnt <= nPiece else { continue }
             let isStatic = (instPtr.pointee.flags & staticFlag) != 0
             let zm = UInt32(instPtr.pointee.zone_mask)
-            let inGroup = groupMask == 0 || zm == 0 || (zm & groupMask) != 0
+            let inGroup = (groupMask == 0 || zm == 0 || (zm & groupMask) != 0) && !(isStatic && sceneryStale)
             let instKey = instPtr.pointee.key
             // (a) tabla
             for k in 0..<cnt {

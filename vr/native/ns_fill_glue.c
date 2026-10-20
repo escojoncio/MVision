@@ -26,7 +26,7 @@ static struct {
     int have_cam, list_vr; float cam_eye[3], cam_M[9];
     NsEffect *out; uint32_t n_out;      /* resultado vigente (copia) */
     uint32_t res_frame, sub_frame, rgen;   /* fotograma del último resultado / de la última lista recibida / generación de reset */
-    uint32_t cov_frame; int cov_pct, cov_valid;   /* última medida de cobertura (nativo + relleno, sin pose): fotograma de la lista y % */
+    uint32_t cov_frame; int cov_pct, cov_nat, cov_valid;   /* última medida de cobertura (nativo + relleno, sin pose): fotograma de la lista y % */
     char text[1024]; int text_new; unsigned runs, fails, skipped_busy; uint64_t seen_frame;
 } G = {.mx = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
 
@@ -37,8 +37,10 @@ static void fill_cover_note(const NsFillStats *st, uint32_t frame) {
     if (st->tris < pose + FG_COV_MIN) return;
     int pct = (int)(st->cover_pct + 0.5f);
     G.cov_pct = pct < 0 ? 0 : pct > 100 ? 100 : pct; G.cov_frame = frame; G.cov_valid = 1;
+    { int np = (int)(st->nat_pct + 0.5f); G.cov_nat = np < 0 ? 0 : np > 100 ? 100 : np; }
 }
 
+enum { FG_SCENERY_NAT_PCT = 10, FG_SCENERY_FILL_PCT = 80 };
 static void cover_clear(void);
 
 static void *worker(void *arg) {
@@ -159,6 +161,16 @@ size_t ns_fill_glue_poll(char *buf, size_t cap) {
     return n;
 }
 
+/* Escenario nativo inservible: la última medida (nativo + relleno sobre la lista de la GPU) dice que el nativo casa con menos del 10 % de lo que el motor dibuja y el relleno cubre >= 80 %
+ * (introducciones y escenas sin partida: la malla del escenario en la RAM es de otra zona, no la de la escena). Dibujarlo pone geometría ajena (suelos de otra zona) junto al relleno.
+ * Los objetos dinámicos (personajes) no se ven afectados. 0 con MV_FILL=0, sin medida o con `ns_fill_glue_reset` reciente. */
+int ns_fill_glue_scenery_stale(void) {
+    pthread_mutex_lock(&G.mx);
+    int r = !G.off && G.cov_valid && G.cov_nat < FG_SCENERY_NAT_PCT && G.cov_pct >= FG_SCENERY_FILL_PCT;
+    pthread_mutex_unlock(&G.mx);
+    return r;
+}
+
 int ns_fill_glue_last(uint32_t *frame, int *pct) {
     pthread_mutex_lock(&G.mx);
     int ok = !G.off && G.cov_valid;
@@ -168,7 +180,7 @@ int ns_fill_glue_last(uint32_t *frame, int *pct) {
 }
 
 /* Cambio de escena / de clase de vista: la medida de cobertura es de la escena anterior y no debe sobrevivir (la siguiente la repone) */
-static void cover_clear(void) { G.cov_valid = 0; G.cov_frame = 0; G.cov_pct = 0; }
+static void cover_clear(void) { G.cov_valid = 0; G.cov_frame = 0; G.cov_pct = 0; G.cov_nat = 0; }
 void ns_fill_glue_reset(void) { pthread_mutex_lock(&G.mx); G.reset = 1; G.rgen++; G.n_out = 0; cover_clear(); pthread_mutex_unlock(&G.mx); }
 
 #ifdef NS_FILL_GLUE_TEST

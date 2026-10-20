@@ -285,6 +285,13 @@ static void test_intro_cover(void) {
     CHECK(ns_fill_glue_last(&fr, &pct) == 0, "M1: tras ns_fill_glue_reset no hay medida");
     ns_fill_glue_test_cover(&st, 1200);
     CHECK(ns_fill_glue_last(&fr, &pct) == 1 && fr == 1200 && pct >= 95, "M1: la medida siguiente la repone");
+    /* j-render: escenario nativo inservible (nativo < 10 %, nativo + relleno >= 80 %) */
+    CHECK(ns_fill_glue_scenery_stale() == 1, "escenario inservible: nativo %.1f%% y total %.1f%%", st.nat_pct, st.cover_pct);
+    { NsFillStats ok = st; ok.nat_pct = 85.0f; ok.cover_pct = 98.0f; ns_fill_glue_test_cover(&ok, 1300);
+      CHECK(ns_fill_glue_scenery_stale() == 0, "escenario que casa (85 %%): se dibuja"); }
+    ns_fill_glue_reset();
+    CHECK(ns_fill_glue_scenery_stale() == 0, "sin medida: no se descarta nada");
+    ns_fill_glue_test_cover(&st, 1400);
     /* escena que el relleno no puede reponer (todo detrás de la cámara): cobertura total baja */
     GpuOp bad[24];
     for (int i = 0; i < 24; i++) { bad[i] = list_of(-3000 + 250 * i, -500, 4000, 200, 0); for (int k = 0; k < 4; k++) bad[i].v[k].vflags = GPU_VF_BEHIND; }
