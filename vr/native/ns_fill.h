@@ -17,6 +17,8 @@
  *   sin posición fiable     vértices BEHIND (vz <= 0), AMBIG junto a SAT, aristas desproporcionadas (red de seguridad), texel único transparente -> no se rellena (contado).
  *   2D                      polígonos sin vvalid (HUD, texto): fuera (van a la capa 2D).
  *   efectos                 las operaciones que ns_fx ya cubre (carteles, ondas...) las excluye el llamador con skip_op (ns_fill_run.c lo hace).
+ * Identidad: cada relleno lleva una identidad estable (NsEffect.src_key = 0xF1000000 | id) que hereda al reencontrarse (misma firma de textura y sitio de mundo a <= 48 u, o sitio de VISTA a <= view_match u);
+ *   el renderer la usa para detectar lo que sigue a la cabeza (ns_gpu_fx_build con seguimiento). La operación de la lista de origen queda en la caja box[0] (bits de un uint32) solo para herramientas.
  * Persistencia: lo rellenado se ancla al MUNDO y se conserva keep_frames fotogramas tras verse por última vez (para que al girar la cabeza fuera de la vista del
  * motor no desaparezca de golpe); se retira de inmediato si su sitio está dentro de la vista actual y el motor ya no lo dibuja, o si la cámara salta (corte).
  *
@@ -54,6 +56,10 @@ typedef struct {
     uint32_t max_out;          /* tope de efectos de salida (def. 6000) */
     float cut_dist, cut_cos;   /* corte de cámara: ojo movido más de cut_dist (def. 3000) o eje Z girado con coseno < cut_cos (def. 0,7) -> se vacía la persistencia */
     int bias;                  /* NsEffect.depth_bias de lo que corrige texturas / parcial (def. 2) */
+    float near_skip;           /* un triángulo cuyo centro queda a menos de near_skip unidades del ojo (def. 250 = 25 cm) no se rellena: es la envoltura del propio jugador / geometría pegada al plano de la cámara, que desproyectada
+                                * queda rígida a la cabeza (0 = sin regla) */
+    float view_match;          /* radio (unidades de vista) con el que un relleno nuevo hereda la identidad de uno visto hace poco con la MISMA firma en la misma posición de VISTA aunque su sitio en el mundo haya cambiado: es lo que
+                                * delata a lo pegado a la cámara (def. 24; 0 = solo por mundo) */
     void *dbg;                 /* FILE* opcional (herramientas): una línea por triángulo que se rellena o se descarta, con su causa */
 } NsFillCfg;
 void ns_fill_cfg_default(NsFillCfg *c);
@@ -63,7 +69,7 @@ enum {
     NF_MATCH = 0, NF_SPLIT, NF_SUBDIV, NF_LOCKED,            /* cubiertos por el nativo (LOCKED: pegado a la cámara, casa con la cámara alternativa) */
     NF_POSE_PLAYER, NF_POSE_OTHER,                           /* no se rellenan: jugador / otro objeto dinámico */
     NF_FILL_ABSENT, NF_FILL_OTHERTEX, NF_FILL_PARTIAL, NF_FILL_SPRITE, NF_FILL_TEXFIX,   /* se rellenan */
-    NF_SKIP_BEHIND, NF_SKIP_AMBIG, NF_SKIP_INCOH, NF_SKIP_EDGE, NF_SKIP_FAR, NF_SKIP_NAN, NF_SKIP_FB, NF_SKIP_PARTIAL_SEMI, NF_SKIP_CAP,   /* sin posición fiable / vacío / tope */
+    NF_SKIP_BEHIND, NF_SKIP_AMBIG, NF_SKIP_INCOH, NF_SKIP_EDGE, NF_SKIP_FAR, NF_SKIP_NAN, NF_SKIP_FB, NF_SKIP_PARTIAL_SEMI, NF_SKIP_NEAR, NF_SKIP_CAP,   /* sin posición fiable / vacío / tope */
     NF_N
 };
 extern const char *const ns_fill_cls_name[NF_N];
