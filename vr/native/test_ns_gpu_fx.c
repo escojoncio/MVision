@@ -84,6 +84,24 @@ static void t_billboard(void) {
     CHECK(fabsf(s[1].p[0] - s[0].p[0]) < 0.12f, "tamano acotado %f", s[1].p[0] - s[0].p[0]);
 }
 
+/* j-render: un cartel de menos de 1 px del motor (destello lejano) se dibuja con 1 px como el hardware, no con 0,2 px; uno mayor no cambia */
+static void t_min_px(void) {
+    NsEffect e; memset(&e, 0, sizeof e);
+    e.kind = NS_EK_BILLBOARD; e.nv = 4; e.flags = NS_EF_TEXTURED | NS_EF_SEMI | NS_EF_WORLD_SIZE; e.abr = 1; e.src_key = 0x80210000u; e.tpage = 0x1a; e.clut = 0x3db1;
+    e.p[0][0] = 500; e.p[0][1] = -200; e.p[0][2] = 3200;
+    e.box[0] = -1; e.box[1] = -1; e.box[2] = 1; e.box[3] = 1;   /* 2 unidades = 0,2 px a z = 3200 (1 px = 10 unidades) */
+    for (int v = 0; v < 4; v++) { e.uv[v][0] = (uint8_t)(v & 1 ? 63 : 0); e.uv[v][1] = (uint8_t)(v >> 1 ? 63 : 0); for (int c = 0; c < 3; c++) e.rgb[v][c] = 128; }
+    NsGpuFxVert vb[64]; NsGpuFxRun runs[4]; uint64_t keys[4]; NsGpuFxOut o;
+    CHECK(build(&e, 1, vb, runs, keys, &o) == 0 && o.n_billboard == 1, "billboard pequeno");
+    const NsGpuFxVert *s = &vb[o.n_opaque];
+    float w = s[1].p[0] - s[0].p[0];
+    CHECK(fabsf(w - 0.010f) < 2e-4f, "minimo de 1 px: ancho %f (0,01 m)", w);
+    e.box[0] = -50; e.box[2] = 50; e.box[1] = -50; e.box[3] = 50;   /* 10 px: no se toca */
+    CHECK(build(&e, 1, vb, runs, keys, &o) == 0, "billboard 10px");
+    s = &vb[o.n_opaque];
+    CHECK(fabsf((s[1].p[0] - s[0].p[0]) - 0.100f) < 1e-4f, "10 px sin cambio: %f", s[1].p[0] - s[0].p[0]);
+}
+
 static void t_raise_pull(void) {
     NsGpuFxVert vb[64]; NsGpuFxRun runs[4]; uint64_t keys[4]; NsGpuFxOut o;
     /* sesgo raise: el cuadrilátero se acerca a la cabeza raise * raise_m (escalado desde la cabeza) */
@@ -494,21 +512,21 @@ static void t_follow(void) {
     CHECK(drawn_last[3] && ever_drawn[3], "M6: ON_CAMERA sin papel de pantalla, lejos (3 m) y quieto en el mundo: no basta la bandera, se dibuja");
     CHECK(!drawn_last[9] && !ever_drawn[9], "M6: ON_CAMERA sin papel de pantalla a menos de 1 m: se descarta");
     CHECK(!drawn_last[10], "M6: ON_CAMERA sin papel de pantalla que ademas SIGUE (a 2 m): se descarta");
-    CHECK(drawn_last[8] && ever_drawn[8], "M5: particula pequena que va con la cabeza (< 10 grados): se conserva");
+    CHECK(!drawn_last[8], "j-render: particula pequena que va con la cabeza (< 10 grados): SIGUE confirmado -> se descarta (efecto de espacio de pantalla)");
     CHECK(drawn_last[4] && ever_drawn[4], "recubrimiento de pantalla (VIEW_OVERLAY) ON_CAMERA: se conserva");
     CHECK(!drawn_last[5], "cercano que vaga: descartado");
     CHECK(drawn_last[6] && ever_drawn[6], "enemigo lejano que se mueve solo: se dibuja");
-    CHECK(drawn_last[7], "M5: pegado a la cabeza a 3 m (mas de 0,6 m): se detecta pero se conserva");
+    CHECK(!drawn_last[7], "j-render: pegado a la cabeza a 3 m: SIGUE confirmado -> se descarta (< 30 m)");
     CHECK(o.n_follow >= 3 && o.n_wander == 1 && o.n_tracked == N, "contadores: sigue=%u vaga=%u seguidos=%u", o.n_follow, o.n_wander, o.n_tracked);   /* sigue: 1, 7, 8 y 10; vaga: 5 */
     /* registro del detector: papel, origen, clave */
     int found1 = 0, found7 = 0, foundf = 0, found4 = 0;
     for (uint32_t k = 0; k < acc.n_rec; k++) {
         if (acc.rec[k].f.src_key == 0x80100100u && acc.rec[k].f.state == NSG_FS_FOLLOW && acc.rec[k].f.origin == NSG_ORIGIN_FX) found1 = 1;
-        if (acc.rec[k].f.src_key == 0x80100700u) found7 = 1;   /* conservado: no es un descarte, no se registra */
+        if (acc.rec[k].f.src_key == 0x80100700u) found7 = 1;   /* descartado (SIGUE a < 30 m): se registra */
         if (acc.rec[k].f.src_key == 0x80100900u && acc.rec[k].f.oncam == 1) foundf = 1;
         if (acc.rec[k].f.src_key == 0x80100400u && acc.rec[k].f.oncam == 2 && acc.rec[k].f.role == NSFX_ROLE_VIEW_OVERLAY) found4 = 1;
     }
-    CHECK(found1 && !found7 && foundf && found4, "el detector registra los descartes (y no los conservados): %d %d %d %d", found1, found7, foundf, found4);
+    CHECK(found1 && found7 && foundf && found4, "el detector registra los descartes: %d %d %d %d", found1, found7, foundf, found4);
     char txt[2048]; size_t n = ns_gpu_fx_follow_describe(&acc, txt, sizeof txt);
     CHECK(n > 0 && strstr(txt, "fx-sigue") && strstr(txt, "origen=fx") && strstr(txt, "sigue") && strstr(txt, "origen=fx"), "texto del registro: %s", txt);
     /* origen relleno: la clave 0xF1... se marca como relleno */
@@ -573,7 +591,7 @@ static void t_hold_world(void) {
 int main(void) {
     setup();
     t_poly();
-    setup(); t_billboard();
+    setup(); t_billboard(); t_min_px();
     setup(); t_raise_pull();
     setup(); t_ribbon();
     setup(); t_oneside();

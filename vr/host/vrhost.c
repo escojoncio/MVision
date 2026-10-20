@@ -930,7 +930,7 @@ static void publish_state(void) {
         if (view.changed) {     /* cada cambio de modo / clase / motivo de la vista queda en el registro con su causa (banderas del puente incluidas) */
             char vb[512];
             vrview_describe(&view, &vin, vb, sizeof vb);
-            fprintf(stderr, "%s | vb=%u modoBruto=%d\n", vb, (unsigned)hle_frame_count(), view.want);
+            fprintf(stderr, "%s | vb=%u modoBruto=%d | gs=%08x ps=%08x postura=%d 1p=%d cam1p=%d camtipo=%d\n", vb, (unsigned)hle_frame_count(), view.want, (unsigned)bs.game_status, (unsigned)bs.player_status, (int)bs.stance, (int)bs.first_person, (int)bs.cam_first_person, (int)bs.cam_type);
         }
         if (view.changed & VRV_CH_KIND) {   /* qué se le enseña al usuario en cine (fmv / motor / respaldo) y por qué */
             char cb[640];

@@ -131,12 +131,13 @@ typedef struct {
     float drop_inside_m;
     /* Seguimiento de lo que va pegado a la cabeza (detector "sigue a la cámara"). track != NULL: cada efecto (clave ns_gpu_fx_key; los rellenos de ns_fill llevan identidad estable) se sigue entre
      * fotogramas y se compara su posición en ESPACIO DE CABEZA con la que tendría si estuviera anclado al mundo del motor. Constante en la cabeza mientras la cabeza se mueve respecto al mundo =>
-     * SIGUE (se descarta, confirmado, solo si es relleno o está a menos de 0,6 m con más de ~10 grados; el resto, vaho y partículas pequeñas, se conserva). Cercano (< hold_near_m, 0 = sin regla) y todavía sin
+     * SIGUE (se descarta, confirmado, a cualquier distancia < follow_far_m, def. 30 m; más lejos = cielo / fondo, que va con la cabeza a propósito). Cercano (< hold_near_m, 0 = sin regla) y todavía sin
      * demostrar que está anclado al mundo => retenido (no se dibuja), salvo los de vida corta (< 12 fotogramas) a menos de 15 cm, que se dibujan; ~50 fotogramas quieto en el mundo del motor sin indicio de
      * SIGUE => MUNDO. Cercano que ni sigue ni está quieto en el mundo => VAGA (se descarta). drop_oncam != 0: un NS_EF_ON_CAMERA que no es recubrimiento de pantalla (papel VIEW_OVERLAY) se descarta si
      * además SIGUE o está a menos de 1 m. Todo lo demás va anclado al mundo. */
     NsGpuFxTrack *track;
     float hold_near_m;
+    float follow_far_m;   /* distancia (m) a partir de la cual un SIGUE ya no se descarta (cielo, fondos); 0 = 30 */
     int drop_oncam;
 } NsGpuFxParams;
 typedef struct { uint32_t start, count; uint8_t abr; } NsGpuFxRun;   /* start/count en vértices del búfer completo */

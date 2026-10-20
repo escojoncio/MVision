@@ -838,6 +838,16 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
                     float k = z / e->ref_h;
                     x0 = e->box[0] * k; y0 = e->box[1] * k / ys; x1 = e->box[2] * k; y1 = e->box[3] * k / ys;
                 }
+                {   /* tamaño MÍNIMO de 1 píxel del motor a esta profundidad: el hardware nunca dibuja un sprite de menos de 1 px (redondea hacia arriba), pero el cartel nativo conserva el tamaño
+                     * continuo y los destellos lejanos / burbujas salían a 0,5-0,7 px (medido con ns_fxcmp en el registro: light x0,54-0,69, bubble x0,72) = «efectos escalados en pequeño». */
+                    const float hc = prm->cam->h > 0 ? prm->cam->h : 320.0f;
+                    if (z > 1.0f) {
+                        const float k1 = z / hc;
+                        if (x1 - x0 < k1 && x1 >= x0) { const float m = 0.5f * (x0 + x1); x0 = m - 0.5f * k1; x1 = m + 0.5f * k1; }
+                        const float k1y = k1 / ys;
+                        if (y1 - y0 < k1y && y1 >= y0) { const float m = 0.5f * (y0 + y1); y0 = m - 0.5f * k1y; y1 = m + 0.5f * k1y; }
+                    }
+                }
                 const float ox[4] = {x0, x1, x0, x1}, oy[4] = {y0, y0, y1, y1};
                 for (int v = 0; v < 4; v++) for (int r = 0; r < 3; r++) q[v][r] = c[r] + prm->head_right[r] * ox[v] * L - prm->head_up[r] * oy[v] * L;
                 { float zc = ns_gpu_game_z(prm->cam, e->p[0]); fz[0] = fz[1] = fz[2] = fz[3] = zc; }
@@ -857,6 +867,7 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
                 if (z < zmin) z = zref;
                 float wpx = e->width_px > 0 ? e->width_px : 1.0f;
                 float half = ((e->flags & NS_EF_WORLD_SIZE) ? 0.5f * wpx : 0.5f * wpx * z / (prm->cam->h > 0 ? prm->cam->h : 320.0f)) * L;   /* anchura en el mundo VR */
+                if (z > 1.0f) { const float hmin = 0.5f * (z / (prm->cam->h > 0 ? prm->cam->h : 320.0f)) * L; if (half < hmin) half = hmin; }   /* mínimo de 1 px del motor, como el hardware */
                 float dl = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
                 if (!(dl > 1e-9f) || !(l > 1e-4f * dl)) ok = 0;   /* línea nula o vista de punta (la cabeza sobre ella, a menos de 0,1 mm) */
                 else {
@@ -910,8 +921,11 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
                 const int is_fill = (e->src_key >> 24) == 0xF1u;
                 if (oncam_hard) { trk_state = NSG_FS_FOLLOW; trk_oncam = 1; trk_drop = 2; }
                 else if (trk_state == NSG_FS_FOLLOW) {
-                    /* SIGUE: solo se descarta si es relleno, o si está a menos de 0,6 m Y ocupa más de ~10 grados (la envoltura del jugador, un velo); vaho y partículas pequeñas que van con el jugador se conservan */
-                    if (is_fill || (dd < 0.6f && fx_ang_deg(q, nq, prm->head) > 10.0f)) trk_drop = 1;
+                    /* SIGUE (2 evidencias seguidas: su sitio en la cabeza no cambia mientras la cabeza se mueve y en el mundo sí): es un efecto de espacio de pantalla (nieve / lluvia / vaho /
+                     * destellos que el motor recoloca delante de la cámara cada fotograma) y en VR iría pegado a la cabeza. Medido en el registro (build final5): 84 carteles/polígonos a la vez
+                     * con la cabeza girando a 350 gr/s, todos conservados por la regla anterior (< 0,6 m y > 10 grados). Se descarta a cualquier distancia salvo el cielo y los fondos lejanos
+                     * (>= follow_far_m, def. 30 m: infinitos por construcción, siguen la cabeza a propósito). */
+                    if (is_fill || dd < (prm->follow_far_m > 0.0f ? prm->follow_far_m : 30.0f)) trk_drop = 1;
                 } else if (trk_state == NSG_FS_WANDER) trk_drop = 1;
                 else if (trk_state == NSG_FS_UNKNOWN && prm->hold_near_m > 0.0f && dd < prm->hold_near_m && !(young && dd < 0.15f)) trk_drop = 3;   /* los de vida corta a menos de 15 cm, mientras no se demuestre que SIGUEN, se dibujan */
                 int overlay_kept = 0;
