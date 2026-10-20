@@ -6,6 +6,8 @@
 #include <stdint.h>
 
 void mdec_reset(void);
+/* Palabras entregadas por el decodificador desde el arranque (contador monótono, seguro entre hilos): su crecimiento = hay un vídeo (FMV) reproduciéndose. */
+uint32_t mdec_out_words_total(void);
 uint32_t mdec_io_read(uint32_t addr, int size);
 void mdec_io_write(uint32_t addr, uint32_t v, int size);
 /* DMA0: palabras de RAM principal -> puerto de comando/datos. */

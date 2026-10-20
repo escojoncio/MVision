@@ -669,11 +669,19 @@ final class XRPresenter {
 
     /// `hud`: panel 2D (textura del renderer, ya la vista sRGB si el destino es lineal). `eyePx`/`p00`: ancho en píxeles de un ojo y P[0][0].
     func compose(gs: MvVrGameState, head: simd_float4x4, dt: Float, hud: MTLTexture?, eyePx: Float, p00: Float,
-                 gameView: simd_float4x4, linear: Bool, wrist: Wrist? = nil, ipd: Float = 0.063, shot: UInt32 = 0, gameCamScene: Bool = false) -> Result {
+                 gameView: simd_float4x4, linear: Bool, wrist: Wrist? = nil, ipd: Float = 0.063, shot: UInt32 = 0, gameCamScene: Bool = false, engineHealthy: Bool = true) -> Result {
         // 1) qué toca mostrar. view_kind 2 (vr_view.h, VRV_K_ENGINE) = cinemática del motor con 3D y cámara del guion; los vídeos pregrabados (3), los menús, el códec/radio,
         //    las cargas, la pausa y las ventanas de armas/objetos (0) siguen en la pantalla de cine.
         var target: Display = gs.view_mode == 1 ? .world : .cinema
-        if target == .cinema && gs.view_kind == 2 && Self.gameViewOK(gameView) {
+        // Escena del motor (clase 2) con la pantalla 3D: si el render nativo no dibuja la escena actual durante ~0,8 s (repite la última, negro, sin pipelines...), se cae al RESPALDO: el
+        // fotograma emulado entero (área de pantalla de la VRAM) en la pantalla de cine. Se mantiene hasta que la clase deja de ser «motor». La lista de la GPU jamás se dibuja en 3D.
+        if gs.view_kind == 2 {
+            if shown == .stereo { engineBadRun = engineHealthy ? 0 : engineBadRun + 1 }
+            if engineBadRun >= Self.engineBadFrames && !engineBackup { engineBackup = true; cineNote = "[cine] tipo=respaldo motivo=el render nativo no dibuja la escena actual (\(engineBadRun) fotogramas seguidos): imagen fiel de la VRAM en la pantalla de cine" }
+        } else {
+            if engineBackup || engineBadRun != 0 { engineBackup = false; engineBadRun = 0 }
+        }
+        if target == .cinema && gs.view_kind == 2 && !engineBackup && Self.gameViewOK(gameView) {
             switch cfg.cutscene {
             case .stereo: target = .stereo
             case .diorama: target = .diorama
@@ -738,7 +746,7 @@ final class XRPresenter {
 
         // 4) pantalla de cine (también como respaldo del diorama sin geometría)
         if shown == .cinema, let c = cinema, let tex = c.texture(srgb: linear) {
-            let leg = XRCinemaLayout.legible(reason: Int32(gs.view_reason))
+            let leg = XRCinemaLayout.legible(reason: Int32(gs.view_reason), kind: gs.view_kind)
             var W = XRCinemaLayout.width(base: cfg.width, legible: leg)
             let D = cfg.distance
             if XRCinemaLayout.integerScale(base: cfg.integerScale, legible: leg), p00 > 0, eyePx > 0, c.width > 0 {
@@ -875,6 +883,13 @@ final class XRPresenter {
         }
         return r
     }
+
+    /// Fotogramas seguidos sin render nativo sano en la pantalla 3D tras los que se cae al respaldo (~0,8 s a 72-90 Hz).
+    static let engineBadFrames = 72
+    private var engineBadRun = 0
+    private var engineBackup = false
+    /// Nota para el registro (`[cine] tipo=respaldo motivo=...`) que el bucle de render recoge una sola vez (nil si no hay nada nuevo).
+    var cineNote: String?
 
     /// Resumen para el registro (1 vez por segundo): qué presentación está activa, dónde está anclada la pantalla y qué se dibuja.
     func diagnostics(items: [XRDrawItem]) -> String {

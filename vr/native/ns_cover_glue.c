@@ -28,6 +28,7 @@ static struct {
     char text[8192];
     int text_new;
     unsigned skipped_busy, runs, fails;
+    uint32_t last_frame; int last_pct, last_valid;   /* última medida numérica: fotograma de la lista y cobertura en % redondeada */
 } G = {.mx = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
 
 static void *worker(void *arg) {
@@ -49,9 +50,14 @@ static void *worker(void *arg) {
             rc = ns_cover_run(c, G.ram, G.scratch, G.ops, nops, &cfg, r);
             if (rc == 0) ns_cover_format(r, frame, buf, sizeof buf);
         }
+        int pct = (rc == 0 && r) ? (int)(r->cover_pct + 0.5f) : 0;
         free(r);
         pthread_mutex_lock(&G.mx);
-        if (rc == 0) { memcpy(G.text, buf, sizeof G.text); G.text_new = 1; G.runs++; } else G.fails++;   /* rc != 0: sin escena (menú, vídeo): nada que decir */
+        if (rc == 0) {
+            memcpy(G.text, buf, sizeof G.text); G.text_new = 1; G.runs++;
+            G.last_frame = frame; G.last_valid = 1;
+            G.last_pct = pct < 0 ? 0 : pct > 100 ? 100 : pct;
+        } else G.fails++;   /* rc != 0: sin escena (menú, vídeo): nada que decir */
         G.job = 0; G.busy = 0;
         pthread_mutex_unlock(&G.mx);
     }
@@ -129,4 +135,13 @@ size_t ns_cover_glue_poll(char *buf, size_t cap) {
     }
     pthread_mutex_unlock(&G.mx);
     return n;
+}
+
+/* Cualquier hilo: última medida de cobertura (fotograma de la lista y % de la lista de la GPU que representa la escena nativa). 0 si aún no hay ninguna. */
+int ns_cover_glue_last(uint32_t *frame, int *pct) {
+    pthread_mutex_lock(&G.mx);
+    int ok = G.last_valid;
+    if (ok) { if (frame) *frame = G.last_frame; if (pct) *pct = G.last_pct; }
+    pthread_mutex_unlock(&G.mx);
+    return ok;
 }
