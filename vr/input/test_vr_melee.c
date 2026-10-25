@@ -95,6 +95,14 @@ int main(void) {
     fresh(); enemy(0, 400, 0, 0); p16(VRM_TARGETS, 1 | 2);               /* enemigo en reacción (sin el bit de daño): nadie golpeable */
     { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 400; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
       vrm_pre_hit(&V, &ENG, W); vrm_post_hit(&V, &ENG, W, 0); CK(V.n_nobody == 1 && logged("ningún enemigo golpeable")); }
+    /* NUEVO: el enemigo pegado al puño está en reacción pero hay OTRO golpeable lejos (n > 0): el golpe se encola igualmente */
+    fresh(); enemy(0, 400, 0, 0); p16(VRM_TARGETS, 1 | 2); enemy(1, 5000, 0, 0);
+    { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 400; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      vrm_pre_hit(&V, &ENG, W); vrm_post_hit(&V, &ENG, W, 0); CK(V.n_miss == 1 && V.retry_ttl > 0); }
+    /* el enemigo en reacción NO es el más cercano al puño (otro golpeable está más cerca): sin reintento */
+    fresh(); enemy(0, 1000, 0, 0); p16(VRM_TARGETS, 1 | 2); enemy(1, 700, 0, 0);
+    { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 400; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+      vrm_pre_hit(&V, &ENG, W); vrm_post_hit(&V, &ENG, W, 0); CK(V.n_miss == 1 && V.retry_ttl == 0); }
     /* historia larga del puño: la muestra más cercana al enemigo (hace ~0,3 s) sigue disponible */
     fresh(); enemy(0, 1000, 0, 0);
     { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 900; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);

@@ -118,7 +118,12 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
         vb++;
         if (out.gest.valid) {
             const vrg_gest_t *q = &out.gest;
-            fprintf(stderr, "[gest] vb=%u mano=%d %s v=%.2f m/s adelante=%.2f radial=%.2f alcance=%.2f enemigo=%.2f m grip=%.2f puno=%d contacto=%d\n", vb, q->side, q->reason, q->speed, q->fcos, q->rcos, q->reach, q->dist, q->grip, q->fist, q->contact);
+            float ang = -1.0f, nd = 1e9f;   /* ángulo (grados) entre el rumbo del jugador y la dirección al enemigo más cercano; -1 sin enemigos */
+            for (int i = 0; i < in.n_en && i < VRG_MAX_EN; i++) {
+                float dx = in.en[i].p[0] - in.body[0], dz = in.en[i].p[2] - in.body[2], d = sqrtf(dx * dx + dz * dz);
+                if (d < nd && d > 1e-4f) { nd = d; float c = (dx * sinf(in.yaw) + dz * cosf(in.yaw)) / d; ang = acosf(c > 1.0f ? 1.0f : (c < -1.0f ? -1.0f : c)) * (180.0f / 3.14159265f); }
+            }
+            fprintf(stderr, "[gest] vb=%u mano=%d %s v=%.2f m/s adelante=%.2f radial=%.2f alcance=%.2f enemigo=%.2f m grip=%.2f puno=%d contacto=%d ang_enemigo=%.0f grados\n", vb, q->side, q->reason, q->speed, q->fcos, q->rcos, q->reach, q->dist, q->grip, q->fist, q->contact, ang);
         }
         for (int s = 0; s < 2; s++) {
             const char *rs = out.pecho[s].opened ? "abierta" : "rechazada";

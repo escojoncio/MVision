@@ -62,6 +62,14 @@ void vl2d_set_options(VrLayer2D *L, int scale, int smooth);
  * `l` debe ser la lista con la que se ensambló sc. Devuelve 1 si hay capa nueva (vl2d_rgba / vl2d_px válidos hasta la siguiente llamada), 0 si no. */
 int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full);
 
+/* Menú sobre la mano (solo panel): con `on` != 0 vl2d_run guarda la caja de las primitivas del panel que NO estaban en la última lista dibujada con `on` == 0 (créditos y HUD que el juego
+ * dibuja durante la partida no cuentan; clave por primitiva: tipo, banderas, vértices o rect, página de textura, CLUT y u,v). Con `on` == 0 cada lista dibujada renueva esa lista base.
+ * vl2d_menu_rect (tras vl2d_run con capa): rect UV [u0, v0, u1, v1] (0..1, de la capa mostrada) de la ventana nueva; 0 si no hay base, nunca hubo primitivas nuevas o su área pasa del 60 % del marco.
+ * Histéresis: mientras el menú siga activo el último rect válido se conserva (una lista sin primitivas nuevas no lo borra) y solo crece con primitivas nuevas que lo toquen o estén a < 8 px;
+ * vl2d_set_menu(0) lo olvida. */
+void vl2d_set_menu(VrLayer2D *L, int on);
+int vl2d_menu_rect(const VrLayer2D *L, float uv[4]);
+
 /* Capa RGBA8 no premultiplicada de la última llamada con capa; w x h = (zona mostrada) * escala. NULL si no hay. */
 const uint8_t *vl2d_rgba(const VrLayer2D *L, int *w, int *h);
 /* Estado interno por píxel (pruebas): mismas dimensiones. NULL si no hay capa. */
@@ -83,6 +91,7 @@ typedef struct {
     int v_lost2d;          /* primitivas 2D texturadas sobre la pantalla que no fueron al panel ni al filtro (informativo: se pierden si el nativo no las dibuja) */
     int v_patched;         /* píxeles sustituidos (los malos; con respaldo, los tocados por el panel dilatados 1 px): opacos con el color del emulador o recuperados por resta */
     int v_sub, v_transp;   /* de ellos: recuperados por resta (emulador - mundo reproducido) / dejados transparentes por no ser fiable el mundo reproducido */
+    int menu_new, menu_base;   /* ventana de menú sobre la mano: primitivas del panel NUEVAS respecto a la lista previa sin menú / primitivas de esa lista base (vl2d_set_menu) */
     double v_ms;           /* coste de la verificación (mundo reproducido + comparación), ms: el trabajador asíncrono lo descuenta de su medida de carga (la escala adaptativa no debe bajar por verificar) */
     int v_mean_milli;      /* diferencia media por canal (niveles de 8 bits x 1000) de los píxeles malos */
 } VrL2Info;

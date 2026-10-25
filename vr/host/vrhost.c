@@ -1075,6 +1075,7 @@ int mv_vrhost_hud2d_smooth(void) { return atomic_load(&l2d_smooth); }
 void mv_vrhost_hud2d_stats(int *scale, double *ms) { double sm; uint32_t lag; if (l2a) vl2a_stats(l2a, scale, ms, &sm, &lag); else { if (scale) *scale = 0; if (ms) *ms = 0; } }
 int mv_vrhost_hud2d_acquire(const uint8_t **px, int *w, int *h, int *full, uint32_t *seq) { return l2a ? vl2a_acquire(l2a, px, w, h, full, seq) : -1; }
 void mv_vrhost_hud2d_release(void) { if (l2a) vl2a_release(l2a); }
+int mv_vrhost_hud2d_menu_rect(float uv[4]) { return l2a ? vl2a_acquire_menu_rect(l2a, uv) : 0; }
 int mv_vrhost_hud2d_layer(int *mode, int *view) { return l2a ? vl2a_acquire_info(l2a, mode, view) : 0; }
 int mv_vrhost_hud2d_accept(int mode, int layer_view, int cur_view, int overlay) { return vl2a_layer_accept(mode, layer_view, cur_view, overlay); }
 void mv_vrhost_set_headcol(int enable, float radius_m) {
@@ -1534,6 +1535,7 @@ static void on_start(void) {
 /* Mando que ve el juego (hilo de emulación, cada VBlank, antes de aplicarlo): arma VR, disparo y recarga (vrgame.c). `bs` es el puente
  * del VBlank anterior. */
 static uint16_t pad_hook(uint16_t buttons) {
+    vrgame_set_gloves(body_ok && !native_mode(), &gpu_vram[0][0]);   /* manos propias (vr_glove) solo con la lista de la GPU: el render nativo trae sus manos */
     return vrgame_pad(buttons, &bs, emu_ram);
 }
 

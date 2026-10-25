@@ -1,5 +1,5 @@
 # Manos/armas en el renderer VR (vr/hands). Uso (desde la raíz del repo):
-#   make -C vr/hands test          pruebas sintéticas (no necesitan datos del juego)
+#   make -C vr/hands test          pruebas sintéticas (no necesitan datos del juego) + vr_glove (con volcados reales de MV_DUMP o /home/claude/mv2/Dumps/d0001_* si existen)
 #   make -C vr/hands test-san      lo mismo con ASan/UBSan
 #   make -C vr/hands preview       render de referencia por software de las pistolas 36f6/21b6 (necesita gamedata/stages.bin)
 #                                  -> PNG en OUT (por defecto build/preview); STAGES=ruta, STAGE=init
@@ -28,8 +28,12 @@ $(B)/test_hands: test_hands.c $(B)/vr_hands.o $(WB)/libweapons.a
 $(B)/hands_preview: hands_preview.c $(B)/vr_hands.o $(WB)/libweapons.a ../../tools/wmodel/wprev.c
 	$(CC) $(CFLAGS) -Wno-misleading-indentation -DVRH_PREVIEW_BUILD $(INC) -I../../tools/wmodel hands_preview.c ../../tools/wmodel/wprev.c $(B)/vr_hands.o $(WB)/libweapons.a -lm -lpthread -o $@
 
-test: $(B)/test_hands
+$(B)/test_glove: test_glove.c vr_glove.c vr_glove.h vr_hands_frame.h ../body/vr_fist.c ../body/vr_fist.h | $(B)
+	$(CC) $(CFLAGS) -I. -I../body test_glove.c vr_glove.c ../body/vr_fist.c -lm -o $@
+
+test: $(B)/test_hands $(B)/test_glove
 	$(B)/test_hands
+	$(B)/test_glove
 test-san:
 	$(MAKE) test B=build-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 preview: $(B)/hands_preview

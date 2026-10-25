@@ -506,7 +506,23 @@ static void t_chest_phys(void) {
     }
 }
 
+
+/* ---- NUEVO: golpes seguidos con la MISMA mano sin parar (boxeo): cada vaivén hacia delante con el puño cerrado es un golpe ---- */
+static void t_repeat(void) {
+    vrg_t g; vrg_init(&g); vrg_in_t in = with_enemy(); vrg_out_t o; int cnt = 0;
+    in.fist_btn[1] = 1; settle(&g, &in, 12);
+    /* vaivén de 0,5 s de periodo (2 Hz), amplitud 0,25 m, sin pausa: 6 avances en 3 s; el ENEMIGO a 1,5 m */
+    for (int i = 0; i < 150; i++) {
+        float ph = (float)i * 0.02f * 2.0f * 3.14159265f / 0.5f;
+        in.hand[1][2] = 0.35f + 0.25f * (-cosf(ph)); in.hand[1][1] = 1.2f - 0.12f * sinf(ph);   /* elipse: el puño nunca se detiene (vuelve por abajo) */
+        upd(&g, &in, &o); cnt += o.punch_side == 1;
+    }
+    printf("t_repeat: golpes=%d de 6 avances\n", cnt);
+    CHECK(cnt >= 5);
+}
+
 int main(void) {
+    t_repeat();
     t_punch(); t_contact(); t_rules(); t_throw(); t_walk(); t_grab(); t_chest(); t_chest_phys(); t_trigmenu(); t_knock(); t_peek(); t_robust();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails != 0;

@@ -117,6 +117,7 @@ typedef struct Vrm {
     int16_t snap[64][3]; int snap_ok;   /* instantánea de los blancos antes de la comprobación de impacto */
     int grab_owned;           /* la presa en curso la inició el cuerpo VR */
     int in_punch;             /* el estado de golpe está en curso por una petición VR */
+    unsigned vb_now, punch_vb, lat_hit;   /* diagnóstico: contador de VBlanks, VBlank de la última petición de golpe y VBlanks hasta pre_hit */
     /* contadores */
     unsigned n_punch, n_combo, n_hit, n_miss, n_hold, n_nobody, n_requeue, n_qfull, n_throw, n_grab, n_grab_rejected, n_squeeze, n_expired, n_knock;
 } Vrm;

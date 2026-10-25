@@ -318,7 +318,8 @@ final class XRRenderLoop {
         return out
     }
 
-    /// Coloca el radar (y con él el HUD de muñeca) sobre el ANTEBRAZO izquierdo dibujado (IK: mv_vrgame_forearm), a along_m de la muñeca y lift_m sobre su eje.
+    private var lastRadarLiveLog = 0.0       // systemUptime del último registro [radar] del antebrazo vivo
+    /// Coloca el radar (y con él el HUD de muñeca) sobre el ANTEBRAZO izquierdo dibujado (IK: mv_vrgame_forearm), a along_m de la muñeca y lift_m (0,065 m: sobre el radio máximo del antebrazo del guante) sobre su eje. Usa el mismo antebrazo que dibuja el guante (mv_vrgame_forearm_live, 90 Hz).
     /// El eje +Z del agarre del mando va inclinado ~35 grados respecto al antebrazo (el panel flotaba): el mando (vrradar_arm_from_controller) solo es reserva
     /// si la IK no da antebrazo válido (vrradar_pick_arm).
     private func updateRadarPose(head: simd_float4x4) {
@@ -331,10 +332,18 @@ final class XRRenderLoop {
         }
         var forearm: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>)?
         var fa = MvVrForearm()
-        if mv_vrgame_forearm(0, &fa) != 0 {
+        var devMM: Float = 0, ageMS: Float = 0
+        // El antebrazo que se dibuja (guante, 90 Hz: IK del motor repetida con el agarre vivo); si no hay guante vivo, el de la IK del motor (25 Hz).
+        let live = mv_vrgame_forearm_live(0, &fa, &devMM, &ageMS) != 0
+        if live || mv_vrgame_forearm(0, &fa) != 0 {
             forearm = (SIMD3<Float>(fa.elbow.0, fa.elbow.1, fa.elbow.2),
                        SIMD3<Float>(fa.wrist.0, fa.wrist.1, fa.wrist.2),
                        SIMD3<Float>(fa.dorsal.0, fa.dorsal.1, fa.dorsal.2))
+        }
+        let nowUp = ProcessInfo.processInfo.systemUptime
+        if nowUp - lastRadarLiveLog >= 1.0 {
+            lastRadarLiveLog = nowUp
+            Storage.log("[radar] antebrazo=\(live ? "guante vivo" : (forearm != nil ? "IK 25 Hz" : "mando")) desvio_mm=\(live ? String(format: "%.1f", devMM) : "n/d") edad_IK_ms=\(live ? String(format: "%.1f", ageMS) : "n/d")")
         }
         let fwd = simd_normalize(-SIMD3<Float>(head.columns.2.x, head.columns.2.y, head.columns.2.z))
         radar.updatePose(forearm: forearm, leftGrip: grip,

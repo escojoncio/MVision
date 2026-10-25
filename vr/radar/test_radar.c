@@ -499,10 +499,11 @@ static void t_anchor(void) {
         for (int k = 0; k < 3; k++) { dst[k][0] = cy * src[k][0] + sy * src[k][2]; dst[k][1] = src[k][1]; dst[k][2] = -sy * src[k][0] + cy * src[k][2]; }
         float rg[16] = {X[0], X[1], X[2], 0, Y[0], Y[1], Y[2], 0, Z[0], Z[1], Z[2], 0, -0.25f, 1.10f, -0.40f, 1};
         VrRadarArm ra; VrRadarQuad rq; VrRadarWristCfg dc = vrradar_wrist_cfg_default();
-        CHECK(NEAR(dc.along_m, 0.13, 1e-6) && NEAR(dc.lift_m, 0.04, 1e-6), "hueso: 0,13 m al codo (muñeca, antes de la mano) y 0,04 m sobre el dorso por defecto");
+        CHECK(NEAR(dc.along_m, 0.13, 1e-6) && NEAR(dc.lift_m, 0.065, 1e-6), "hueso: 0,13 m al codo (muñeca, antes de la mano) y 0,065 m sobre el dorso por defecto");
+        CHECK(dc.lift_m >= 0.063f, "hueso: lift_m %.4f por encima del radio máximo del antebrazo del guante (55 mm + holgura)", dc.lift_m);
         CHECK(vrradar_arm_from_controller(rg, &ra) && vrradar_wrist_quad(&ra, &dc, 71.0f / 54.0f, &rq), "hueso: cuadro del agarre girado");
         for (int i = 0; i < 3; i++) {
-            float want = rg[12 + i] + 0.13f * Z[i] + 0.04f * Y[i];
+            float want = rg[12 + i] + 0.13f * Z[i] + 0.065f * Y[i];
             CHECK(NEAR(rq.center[i], want, 1e-5), "hueso: centro[%d] %.5f esperado %.5f", i, rq.center[i], want);
             CHECK(NEAR(rq.normal[i], Y[i], 1e-5), "hueso: normal[%d] %.5f esperado %.5f", i, rq.normal[i], Y[i]);
         }
@@ -524,7 +525,7 @@ static void t_anchor(void) {
         CHECK(NEAR(lenv(eq.normal), 1, 1e-5) && NEAR(dotv(eq.normal, ax), 0, 1e-5), "ojo: normal unitaria y perpendicular al antebrazo");
         CHECK(dotv(eq.normal, toe) > 0.95f, "ojo: la normal apunta a la cabeza (%.3f)", dotv(eq.normal, toe));
         CHECK(NEAR(dotv(d, ax), ec.along_m, 1e-5) && NEAR(dotv(d, eq.normal), ec.lift_m, 1e-5), "ojo: %.3f m a lo largo, %.3f m sobre el antebrazo", dotv(d, ax), dotv(d, eq.normal));
-        CHECK(NEAR(ec.along_m, 0.13, 1e-6) && NEAR(ec.lift_m, 0.04, 1e-6), "ojo: valores por defecto 0,13 / 0,04");
+        CHECK(NEAR(ec.along_m, 0.13, 1e-6) && NEAR(ec.lift_m, 0.065, 1e-6), "ojo: valores por defecto 0,13 / 0,065");
         float cr2[3]; crossv(cr2, eq.right, eq.up);
         CHECK(NEAR(dotv(cr2, eq.normal), 1, 1e-5) && NEAR(dotv(eq.right, ax), -1, 1e-5), "ojo: ejes de mano derecha, derecha = hacia la mano");
         CHECK(dotv(eq.normal, (float[3]){0, 1, 0}) > 0, "ojo: la cara mira hacia arriba (cabeza encima)");

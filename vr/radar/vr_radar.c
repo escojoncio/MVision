@@ -365,7 +365,7 @@ static int finite3(const float v[3]) { return isfinite(v[0]) && isfinite(v[1]) &
 
 VrRadarWristCfg vrradar_wrist_cfg_default(void) {
     VrRadarWristCfg c;
-    c.width_m = 0.07f; c.height_m = 0.0f; c.along_m = 0.13f; c.lift_m = 0.04f; c.bezel_m = 0.004f; c.bezel_back_m = 0.002f;
+    c.width_m = 0.07f; c.height_m = 0.0f; c.along_m = 0.13f; c.lift_m = 0.065f; c.bezel_m = 0.004f; c.bezel_back_m = 0.002f;
     c.rot90 = 0; c.gaze_boost = 0.35f; c.gaze_cos_in = 0.93f; c.gaze_cos_out = 0.75f;
     return c;
 }

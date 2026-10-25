@@ -15,6 +15,7 @@
 #include "vr_camera.h"
 #include "vr_aa.h"
 #include "vr_fire.h"
+#include "vr_glove.h"
 #include "vr_hands.h"
 #include "vr_pose.h"
 #include "vr_missile.h"
@@ -111,6 +112,18 @@ static MvVrSpecialView pub_special;      /* vista especial del arma (mira, visor
 static int opt_missile_view;               /* 0 pantalla en el lanzador, 1 pantalla grande ante la cara */
 static MvVrForearm pub_fore[2];
 static int pub_fore_ok[2];
+/* Guantes (brazo + antebrazo + mano originales con la IK repetida con el agarre vivo, ver vr_glove.h y vrbody_arm_resolve). La simulación construye mallas+atlas en un hueco libre
+ * de tres (publicado / en lectura por el renderer / en construcción) y publica el estado de la IK de cada brazo; el hilo de render compone cada frame (mv_host_hands). */
+static VrGlove *glv[3];
+static int glv_pub = -1, glv_read = -1;
+static int glv_on;                         /* modo gpu con la IK enlazada (vrgame_set_gloves) */
+static const uint16_t *glv_vram;
+static VrBodyArmLive pub_live[2];
+static int pub_live_ok[2];
+static uint64_t pub_live_ns[2];            /* instante del último apply de la IK que produjo pub_live */
+static uint32_t pub_live_applies;
+#define GLOVE_REBUILD_VB 15u               /* VBlanks mínimos entre comprobaciones/reconstrucciones del guante ya publicado */
+#define GLOVE_MAX_AGE_NS 250000000ull      /* IK más vieja que esto: sin guante (el motor dejó de aplicar el cuerpo: cinemática, menú) */
 static GripPose pub_sim_hand;      /* mano del arma con la que se simuló el último frame publicado (compensación de latencia) */
 static int pub_sim_valid;
 
@@ -453,6 +466,9 @@ void vrgame_reset(void) {
     memset(&G.ro, 0, sizeof G.ro);
     G.ro.sync_rounds = G.ro.sync_chambered = -1;
     publish_off();      /* un arma publicada antes de reiniciar el motor no debe quedarse dibujada */
+    pthread_mutex_lock(&HM);
+    glv_pub = -1; pub_live_ok[0] = pub_live_ok[1] = 0;      /* los huecos se reutilizan (el renderer puede estar leyendo uno) */
+    pthread_mutex_unlock(&HM);
 }
 void vrgame_set_enabled(int body_ok, int fire_ok) { G.body_ok = body_ok; G.fire_ok = fire_ok; }
 
@@ -710,6 +726,50 @@ void vrgame_haptic(int side, float s) {
     pthread_mutex_unlock(&HM);
 }
 
+/* ---- guantes: construcción (hilo de emulación) ---- */
+void vrgame_set_gloves(int on, const uint16_t *vram) {
+    pthread_mutex_lock(&HM);
+    glv_on = on != 0; glv_vram = vram;
+    pthread_mutex_unlock(&HM);
+}
+/* Una vez por VBlank, con la RAM del juego en reposo (sin matrices IK ni mallas deformadas escritas por vr/body): lee los 6 modelos de los brazos, y si lo que lee (geometría, CLUT, texels) cambió
+ * construye mallas y atlas en un hueco libre y lo publica. own_hands solo se activa con un guante publicado: nunca se ocultan los brazos del juego sin tener con qué sustituirlos. */
+static void glove_update(const uint8_t *ram) {
+    static int last_rc = 1;
+    static unsigned since_build = GLOVE_REBUILD_VB;
+    pthread_mutex_lock(&HM);
+    int on = glv_on && G.body_ok;
+    const uint16_t *vram = glv_vram;
+    int pub = glv_pub, rd = glv_read;
+    uint64_t ph = pub >= 0 ? glv[pub]->hash : 0;
+    pthread_mutex_unlock(&HM);
+    if (!on || !vram) { vrbody_set_own_hands(0); return; }
+    vrbody_set_own_hands(pub >= 0);
+    uint32_t md[2][3];
+    if (since_build < GLOVE_REBUILD_VB) since_build++;
+    if (!ram || vrbody_ram_dirty() || !vrbody_player_models(ram, md)) return;
+    if (pub >= 0 && since_build < GLOVE_REBUILD_VB) return;   /* con guante publicado, a lo sumo una comprobación/reconstrucción cada GLOVE_REBUILD_VB VBlanks */
+    since_build = 0;
+    int slot = 0;
+    while (slot == pub || slot == rd) slot++;                 /* hay uno libre: solo 2 excluidos de 3 */
+    if (!glv[slot]) glv[slot] = vrglove_create();
+    if (!glv[slot]) return;
+    int rc = vrglove_build(glv[slot], ram, vram, md, ph);
+    if (rc == 1) {
+        pthread_mutex_lock(&HM);
+        glv_pub = slot;
+        pthread_mutex_unlock(&HM);
+        vrbody_set_own_hands(1);
+    } else if (rc < 0 && pub >= 0) {      /* el guante publicado ya no es reconstruible: vuelven los brazos del juego */
+        pthread_mutex_lock(&HM);
+        glv_pub = -1;
+        pthread_mutex_unlock(&HM);
+        vrbody_set_own_hands(0);
+    }
+    if (rc < 0 && rc != last_rc) fprintf(stderr, "[guante] no se pudo construir (rc=%d): se siguen dibujando los brazos del juego\n", rc);
+    last_rc = rc;
+}
+
 static uint32_t drv_vbl;
 void vrgame_set_driver(VrGameDriver f) { drv_fn = f; drv_vbl = 0; }
 
@@ -728,6 +788,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     int core = bs && (bs->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs->has_player;
 
     calib_tick(dt);
+    glove_update(ram);
 
     /* manos (una sola toma coherente) */
     HandSlot hs[2];
@@ -985,7 +1046,13 @@ void vrgame_frame_end(void) {
     }
     VrBodyStats bst;
     vrbody_stats(&bst);
+    VrBodyArmLive al[2];
+    int aok[2];
+    for (int i = 0; i < 2; i++) aok[i] = G.body_ok && vrbody_arm_live(i, &al[i]);
+    uint64_t tnow = mono_ns();
     pthread_mutex_lock(&HM);
+    if (bst.applies != pub_live_applies) { pub_live_applies = bst.applies; pub_live_ns[0] = pub_live_ns[1] = tnow; }   /* instante del último apply (también sin brazos movidos) */
+    for (int i = 0; i < 2; i++) { pub_live_ok[i] = aok[i]; if (aok[i]) pub_live[i] = al[i]; }
     for (int i = 0; i < 2; i++) { pub_fore_ok[i] = ok[i]; if (ok[i]) pub_fore[i] = f[i]; }
     pub_status.arms_driven = bst.arms_driven;
     pub_status.loader = G.cur >= 0 ? atomic_load(&SL[G.cur].state) : pub_status.loader;
@@ -996,11 +1063,104 @@ void vrgame_frame_end(void) {
 /* Compensación de latencia: el arma se simula en el hilo del motor a la cadencia del VBlank y su frame trae la mano de ese instante.
  * Aquí, al pedirlo el renderer, se mueve todo el frame (las piezas del arma, no los objetos sueltos) con el movimiento rígido de la
  * mano desde entonces hasta ahora: D = H_ahora * inv(H_sim). Se ignora si el salto es incoherente (recentrado, pérdida de seguimiento). */
-int mv_host_hands(VrHandsFrame *out) {
-    static VrHandsMesh buf[VRH_MAX_MESHES];
-    int rc;
+/* IK del guante repetida con el agarre vivo (HM tomado). 1 = válido. dev_mm: desvío del agarre vivo respecto al simulado; age_ms: edad de la IK. */
+static int live_arm_locked(int side, uint64_t now, VrBodyArmLive *a, GripPose *gn, VrBodyArmPose *ap, float *dev_mm, float *age_ms) {
+    if (!pub_live_ok[side] || now - pub_live_ns[side] > GLOVE_MAX_AGE_NS) return 0;
+    *gn = grip_locked(&hand_in[side], now);
+    if (!gn->valid) return 0;
+    *a = pub_live[side];
+    if (vrbody_arm_resolve(a, gn->p, gn->q, ap) != 0) return 0;
+    if (dev_mm) *dev_mm = 1000.0f * sqrtf((gn->p[0] - a->grip_p[0]) * (gn->p[0] - a->grip_p[0]) + (gn->p[1] - a->grip_p[1]) * (gn->p[1] - a->grip_p[1]) + (gn->p[2] - a->grip_p[2]) * (gn->p[2] - a->grip_p[2]));
+    if (age_ms) *age_ms = (float)((double)(now - pub_live_ns[side]) * 1e-6);
+    return 1;
+}
+
+int32_t mv_vrgame_forearm_live(int32_t side, MvVrForearm *out, float *dev_mm, float *age_ms) {
+    if (!out || side < 0 || side > 1) return 0;
+    VrBodyArmLive a; GripPose gn; VrBodyArmPose ap;
     uint64_t now = mono_ns();
     pthread_mutex_lock(&HM);
+    int ok = live_arm_locked(side, now, &a, &gn, &ap, dev_mm, age_ms);
+    pthread_mutex_unlock(&HM);
+    if (!ok) return 0;
+    float m[16], bone[3], b[3], d[3];
+    m16_from_pq(gn.p, gn.q, m);
+    for (int i = 0; i < 3; i++) { bone[i] = ap.wrist[i] - ap.elbow[i]; d[i] = m[4 + i]; }       /* +Y del agarre = dorso (como vrbody_forearm_pose) */
+    float bl = sqrtf(bone[0] * bone[0] + bone[1] * bone[1] + bone[2] * bone[2]);
+    if (!(bl > 1e-4f)) return 0;
+    for (int i = 0; i < 3; i++) b[i] = bone[i] / bl;
+    float dp = d[0] * b[0] + d[1] * b[1] + d[2] * b[2];
+    for (int i = 0; i < 3; i++) d[i] -= b[i] * dp;
+    float dl = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (!(dl > 1e-3f)) return 0;
+    for (int i = 0; i < 3; i++) { out->elbow[i] = ap.elbow[i]; out->wrist[i] = ap.wrist[i]; out->dorsal[i] = d[i] / dl; }
+    return 1;
+}
+
+/* Mallas del guante del frame (HM tomado): una por pieza y lado, vértices ya en el espacio VR (VRH_MF_DYNAMIC, modelo = identidad). Devuelve cuántas añadió a `mesh` (como mucho `room`) y,
+ * si añadió, rellena `tex` con el atlas y marca el hueco como en lectura hasta mv_host_hands_done. */
+static VrGloveOut glv_out[2][2];                  /* [paridad del frame][lado]: el frame anterior sigue en uso por el renderer */
+static unsigned glv_par;
+static float glv_grip[2]; static uint64_t glv_grip_ns[2];
+static int glove_emit(uint64_t now, VrHandsMesh *mesh, int room, VrHandsTex *tex) {
+    if (!glv_on || glv_pub < 0 || room < 6) return 0;
+    const VrGlove *g = glv[glv_pub];
+    if (!g || !g->valid) return 0;
+    const VrBodyConfig *bc = vrbody_config();
+    int n = 0;
+    glv_par ^= 1u;
+    for (int side = 0; side < 2; side++) {
+        VrBodyArmLive a; GripPose gn; VrBodyArmPose ap;
+        if (!live_arm_locked(side, now, &a, &gn, &ap, NULL, NULL)) { glv_grip_ns[side] = 0; continue; }
+        /* agarre: el del mando a la cadencia del renderer (suavizado como el de vr/body, 0,06 s), con el mínimo del arma/golpe y el fundido de la IK */
+        float tgt = fminf(fmaxf(fmaxf(hand_in[side].grip, a.grip_floor), 0.0f), 1.0f) * a.fade;
+        float dt = glv_grip_ns[side] ? (float)((double)(now - glv_grip_ns[side]) * 1e-9) : 1.0f;
+        glv_grip_ns[side] = now;
+        if (dt > 0.2f) glv_grip[side] = tgt;
+        else glv_grip[side] += (1.0f - expf(-fmaxf(dt, 0.0f) / 0.06f)) * (tgt - glv_grip[side]);
+        VrGlovePose pz;
+        memset(&pz, 0, sizeof pz);
+        memcpy(pz.org[0], ap.shoulder, sizeof pz.org[0]); memcpy(pz.org[1], ap.elbow, sizeof pz.org[1]); memcpy(pz.org[2], ap.wrist, sizeof pz.org[2]);
+        memcpy(pz.R[0], ap.R_upper, sizeof pz.R[0]); memcpy(pz.R[1], ap.R_fore, sizeof pz.R[1]); memcpy(pz.R[2], ap.R_hand, sizeof pz.R[2]);
+        pz.upm = a.upm; pz.grip = glv_grip[side];
+        if (bc && bc->fist_enabled) { pz.fist = &bc->fist; pz.fist_min = bc->fist_min_grip; }
+        VrGloveOut *o = &glv_out[glv_par][side];
+        if (vrglove_pose(g, side, &pz, o) != 0) continue;
+        for (int k = 0; k < 3; k++) {
+            const VrGlovePiece *P = &g->p[side][k];
+            if (!o->nv[k] || !P->nidx_out) continue;
+            VrHandsMesh *m = &mesh[n++];
+            memset(m, 0, sizeof *m);
+            m->mesh_id = 0x80000000u | (g->id << 4) | (uint32_t)(side * 3 + k);
+            m->tex_id = 0x80000000u | g->id;
+            m->model[0] = m->model[5] = m->model[10] = m->model[15] = 1.0f;
+            m->verts = o->v[k]; m->nverts = o->nv[k];
+            m->idx = P->idx; m->nidx = P->nidx_out;
+            m->flags = VRH_MF_DYNAMIC;
+        }
+    }
+    if (n > 0) {
+        tex->id = 0x80000000u | g->id; tex->w = g->aw; tex->h = g->ah; tex->rgba = g->atlas;
+        glv_read = glv_pub;
+    }
+    return n;
+}
+
+/* El renderer termina con el frame: se libera la lectura del arma (vr_hands) y la del guante. */
+void mv_host_hands_done(void) {
+    vrhands_release();
+    pthread_mutex_lock(&HM);
+    glv_read = -1;
+    pthread_mutex_unlock(&HM);
+}
+
+int mv_host_hands(VrHandsFrame *out) {
+    static VrHandsMesh buf[VRH_MAX_MESHES];
+    static VrHandsTex tbuf[VRH_MAX_BOUND + 1];
+    int rc, copied = 0;
+    uint64_t now = mono_ns();
+    pthread_mutex_lock(&HM);
+    glv_read = -1;
     rc = vrhands_fetch(out);
     if (rc && pub_sim_valid && out->meshes && out->nmeshes > 0 && out->nmeshes <= VRH_MAX_MESHES) {
         int w = opt_right ? 1 : 0;
@@ -1026,8 +1186,30 @@ int mv_host_hands(VrHandsFrame *out) {
                             buf[k].model[4 * c + r] = D[r] * M[4 * c + 0] + D[4 + r] * M[4 * c + 1] + D[8 + r] * M[4 * c + 2] + D[12 + r] * M[4 * c + 3];
                 }
                 out->meshes = buf;
+                copied = 1;
             }
         }
+    }
+    /* guantes: se añaden a la lista del arma (o forman la lista solos) */
+    int nw = rc && out->meshes && out->nmeshes > 0 && out->nmeshes <= VRH_MAX_MESHES ? out->nmeshes : 0;
+    VrHandsTex gtex;
+    memset(&gtex, 0, sizeof gtex);
+    VrHandsMesh gm[6];
+    int ng = nw + 6 <= VRH_MAX_MESHES ? glove_emit(now, gm, 6, &gtex) : 0;
+    if (ng > 0) {
+        if (!rc) {                       /* sin arma: iluminación por defecto de vr/hands */
+            VrHandsConfig hc;
+            vrhands_default_config(&hc);
+            memset(out, 0, sizeof *out);
+            memcpy(out->light_dir, hc.light_dir, sizeof out->light_dir); out->ambient = hc.ambient; out->diffuse = hc.diffuse;
+        } else if (!copied) memcpy(buf, out->meshes, (size_t)nw * sizeof buf[0]);
+        memcpy(buf + nw, gm, (size_t)ng * sizeof buf[0]);
+        out->meshes = buf; out->nmeshes = nw + ng;
+        int nt = rc && out->tex && out->ntex > 0 ? (out->ntex > VRH_MAX_BOUND ? VRH_MAX_BOUND : out->ntex) : 0;
+        if (nt) memcpy(tbuf, out->tex, (size_t)nt * sizeof tbuf[0]);
+        tbuf[nt] = gtex;
+        out->tex = tbuf; out->ntex = nt + 1;
+        rc = 1;
     }
     pthread_mutex_unlock(&HM);
     return rc;

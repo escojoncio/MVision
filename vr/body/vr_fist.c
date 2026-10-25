@@ -6,10 +6,10 @@
 #define DEG (3.14159265358979f / 180.0f)
 
 void vrfist_params_default(VrFistParams *p) {
-    p->head_deg[0] = 80.0f; p->head_deg[1] = 150.0f; p->head_deg[2] = 198.0f;
+    p->head_deg[0] = 100.0f; p->head_deg[1] = 150.0f; p->head_deg[2] = 198.0f;
     p->joint2 = 0.45f; p->joint3 = 0.78f; p->soft = 0.12f;
     p->inner_k = 0.45f; p->outer_k = 0.9f;
-    p->thumb_tilt_deg = 45.0f; p->thumb_joint = 0.5f; p->thumb_soft = 0.12f; p->thumb_base_deg = 110.0f; p->thumb_tip_deg = 80.0f;
+    p->thumb_tilt_deg = 45.0f; p->thumb_joint = 0.5f; p->thumb_soft = 0.12f; p->thumb_base_deg = 35.0f; p->thumb_tip_deg = 0.0f;
 }
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -142,10 +142,9 @@ int vrfist_deform(const VrFistMesh *m, float side_sign, float grip, const VrFist
         dA[i] = a - a0;
     }
 
-    /* pulgar: cadena de 2 articulaciones (base y punta). La base gira alrededor de un eje inclinado `thumb_tilt_deg` (45) respecto al eje de flexión de los dedos (Z) hacia el lado de los dedos,
-     * de modo que el pulgar baja hacia la palma Y se cierra sobre los dedos; la punta flexiona en el mismo plano. Los ángulos (puño cerrado) se resuelven por búsqueda en rejilla para que la punta
-     * acabe POR FUERA de los dedos doblados, sobre las falanges medias del índice y el corazón (el centro de la hilera de dedos), nunca cruzando por dentro de la palma. El agarre escala los dos
-     * ángulos, así que el movimiento es continuo y a medias el pulgar queda a medio camino. */
+    /* pulgar: flexión propia y limitada, independiente de la de los dedos. La base gira `thumb_base_deg * grip` (35 grados) alrededor de un eje inclinado `thumb_tilt_deg` (45) respecto al eje de flexión de los
+     * dedos (Z) hacia el lado de los dedos, de modo que el pulgar baja hacia la palma y se acerca a los dedos sin atravesarlos ni doblarse de forma rara; la punta puede flexionar `thumb_tip_deg * grip`
+     * (0 por defecto) en el mismo plano. El movimiento es continuo y proporcional al agarre. */
     float tcz = 0, mcz = 0; int nt = 0, nm = 0;
     float tsmin = 1e9f, tsmax = -1e9f;
     for (int i = 0; i < nv; i++) {
@@ -160,64 +159,23 @@ int vrfist_deform(const VrFistMesh *m, float side_sign, float grip, const VrFist
         float sgz = tcz >= mcz ? 1.0f : -1.0f;
         float range = tsmax - tsmin + 1.0f;
         float B[3] = {0, 0, 0}, Tp[3] = {0, 0, 0}; int nb = 0, ntp = 0;
-        float xlo = 1e9f, xhi = -1e9f, zlo = 1e9f, zhi = -1e9f;
         for (int i = 0; i < nv; i++) {
             if (!is_thumb[i]) continue;
             float s = -X[i][1];
             if (s <= tsmin + 0.2f * range) { for (int k = 0; k < 3; k++) B[k] += X[i][k]; nb++; }
             if (s >= tsmax - 0.2f * range) { for (int k = 0; k < 3; k++) Tp[k] += X[i][k]; ntp++; }
-            if (X[i][0] < xlo) xlo = X[i][0];
-            if (X[i][0] > xhi) xhi = X[i][0];
-            if (X[i][2] < zlo) zlo = X[i][2];
-            if (X[i][2] > zhi) zhi = X[i][2];
         }
         if (nb > 0 && ntp > 0) {
             for (int k = 0; k < 3; k++) { B[k] /= (float)nb; Tp[k] /= (float)ntp; }
             float dv[3] = {Tp[0] - B[0], Tp[1] - B[1], Tp[2] - B[2]}, Lt = sqrtf(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]);
             if (Lt > 8.0f) {
                 float dir0[3] = {dv[0] / Lt, dv[1] / Lt, dv[2] / Lt};
-                /* objetivo de la punta: por fuera de la falange media del índice/corazón con el puño cerrado */
-                float Cxf[NSTEP + 2], Cyf[NSTEP + 2], Ahf[NSTEP + 2];
-                curve_build(&cv, 1.0f, Cxf, Cyf, Ahf);
-                float tm = 0.5f * (t2 + t3); int km = (int)(tm / STEP); if (km > ns - 1) km = ns - 1; if (km < 0) km = 0;
-                float am = Ahf[km];
-                float dmin = 0, zmaxf = -1e9f, zminf = 1e9f;
-                for (int i = 0; i < nv; i++) if (is_main[i] && t[i] > 0.0f) {
-                    if (d[i] < dmin) dmin = d[i];
-                    if (X[i][2] > zmaxf) zmaxf = X[i][2];
-                    if (X[i][2] < zminf) zminf = X[i][2];
-                }
-                float thick = fminf(xhi - xlo, zhi - zlo); if (thick < 4.0f) thick = 4.0f;
-                float off = dmin * prm->outer_k - 0.5f * thick;
-                float T[3] = {x0 + Cxf[km] + off * cosf(am), y0 + Cyf[km] + off * sinf(am), 0};
-                float W = zmaxf - zminf;
-                T[2] = sgz > 0 ? zmaxf - 0.25f * W : zminf + 0.25f * W;   /* entre el índice y el corazón */
                 /* ejes: base inclinada `thumb_tilt_deg` respecto a Z hacia el lado de los dedos */
                 float tau = prm->thumb_tilt_deg * DEG;
                 tax1[0] = sgz * sinf(tau); tax1[1] = 0; tax1[2] = cosf(tau);
                 float jf = prm->thumb_joint < 0.2f ? 0.2f : (prm->thumb_joint > 0.8f ? 0.8f : prm->thumb_joint);
                 float J0[3] = {B[0] + dv[0] * jf, B[1] + dv[1] * jf, B[2] + dv[2] * jf};
-                float phmax = prm->thumb_base_deg, psmax = prm->thumb_tip_deg;
-                float best = 1e30f, bph = 0, bps = 0;
-                for (float ph = 0; ph <= phmax + 0.01f; ph += 2.0f) {
-                    float r1[3];
-                    for (int k = 0; k < 3; k++) r1[k] = Tp[k] - B[k];
-                    float p1r[3]; rot_axis(tax1, ph * DEG, r1, p1r);
-                    float jr[3] = {J0[0] - B[0], J0[1] - B[1], J0[2] - B[2]}, j1r[3]; rot_axis(tax1, ph * DEG, jr, j1r);
-                    float d1[3]; rot_axis(tax1, ph * DEG, dir0, d1);
-                    float ax2[3], dd = tax1[0] * d1[0] + tax1[1] * d1[1] + tax1[2] * d1[2];
-                    for (int k = 0; k < 3; k++) ax2[k] = tax1[k] - dd * d1[k];
-                    float nl = sqrtf(ax2[0] * ax2[0] + ax2[1] * ax2[1] + ax2[2] * ax2[2]);
-                    if (nl < 0.2f) continue;
-                    for (int k = 0; k < 3; k++) ax2[k] /= nl;
-                    for (float ps = 0; ps <= psmax + 0.01f; ps += 2.0f) {
-                        float rr[3] = {p1r[0] - j1r[0], p1r[1] - j1r[1], p1r[2] - j1r[2]}, p2r[3]; rot_axis(ax2, ps * DEG, rr, p2r);
-                        float e0 = B[0] + j1r[0] + p2r[0] - T[0], e1 = B[1] + j1r[1] + p2r[1] - T[1], e2 = B[2] + j1r[2] + p2r[2] - T[2];
-                        float cost = e0 * e0 + e1 * e1 + e2 * e2 + 0.004f * (ph * ph + ps * ps);
-                        if (cost < best) { best = cost; bph = ph; bps = ps; }
-                    }
-                }
-                tph = g * bph * DEG; tps = g * bps * DEG;
+                tph = g * prm->thumb_base_deg * DEG; tps = g * prm->thumb_tip_deg * DEG;     /* flexión propia y limitada, proporcional al agarre (no sigue la curva de los dedos) */
                 /* piel: segmento 1 (base -> J) gira con R1; segmento 2 (J -> punta) con R2 sobre R1; mezcla suave alrededor de J */
                 float J1r[3], jr[3] = {J0[0] - B[0], J0[1] - B[1], J0[2] - B[2]}; rot_axis(tax1, tph, jr, J1r);
                 float d1[3]; rot_axis(tax1, tph, dir0, d1);

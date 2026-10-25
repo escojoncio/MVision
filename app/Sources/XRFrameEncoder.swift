@@ -177,7 +177,7 @@ final class XRFrameEncoder {
         presenter.hqFull = renderer.hqFull
         var pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, eyePx: Float(w), p00: projs[0].columns.0.x,
                                      gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame(), ipd: ipd, shot: renderer.sceneShot,
-                                     gameCamScene: renderer.sceneNeedsGameCam, engineHealthy: renderer.stereoHealthy, stereo2DInside: renderer.stereo2DInside)
+                                     gameCamScene: renderer.sceneNeedsGameCam, engineHealthy: renderer.stereoHealthy, stereo2DInside: renderer.stereo2DInside, hudMenuUV: renderer.hudMenuUV)
         if let note = presenter.cineNote { presenter.cineNote = nil; log(note) }
         if dg.noLayers {
             // Sin capas finales: ni velo (transición, fundido de corte), ni viñeta, ni pantalla de cine / pantalla 3D; solo el mundo, el HUD 2D y los textos (menú).

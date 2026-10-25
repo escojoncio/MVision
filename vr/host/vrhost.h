@@ -136,6 +136,8 @@ int mv_vrhost_hud2d_acquire(const uint8_t **px, int *w, int *h, int *full, uint3
 void mv_vrhost_hud2d_release(void);
 /* Modo (VL_PANEL=0 / VL_FULL=1 / VL_PANEL_VERIFIED=2) y etiqueta de vista ((view_kind << 8) | view_reason) de la capa adquirida; solo entre acquire (>= 0) y release. 1 si hay capa. Hilo de render. */
 int mv_vrhost_hud2d_layer(int *mode, int *view);
+/* Entre mv_vrhost_hud2d_acquire (>= 0) y mv_vrhost_hud2d_release: rect UV [u0, v0, u1, v1] de la ventana de menú (selector sobre el mundo) dentro de la capa adquirida; 0 si no hay (usar la capa entera). Hilo de render. */
+int mv_vrhost_hud2d_menu_rect(float uv[4]);
 /* ¿Vale una capa (mode, layer_view) para la vista vigente cur_view? Con overlay (ventana 2D del menú sobre el mundo) solo VL_PANEL; siempre la misma clase de vista (view_kind). */
 int mv_vrhost_hud2d_accept(int mode, int layer_view, int cur_view, int overlay);
 

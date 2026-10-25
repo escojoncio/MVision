@@ -835,6 +835,92 @@ static void scale_step_cases(void) {
     CHECK(cur == 4 && fast == 0, "escala: en el objetivo no sube: cur=%d fast=%d", cur, fast);
 }
 
+/* ---- menú sobre la mano: rect = caja de las primitivas 2D NUEVAS respecto a la lista previa sin menú (los créditos que ya se dibujaban no cuentan) ---- */
+static GpuDrawList *with_window(const GpuDrawList *base, int x, int y, int w, int h, uint8_t *opd, int *nopd) {
+    GpuDrawList *d = dup_list(base);
+    d->ops = (GpuOp *)realloc(d->ops, (base->nops + 3) * sizeof(GpuOp));
+    GpuOp a = d->ops[base->nops - 1];             /* rectángulo monocromo semitransparente del texto/fundido: se reutiliza como ventana */
+    a.v[0].x = (int16_t)x; a.v[0].y = (int16_t)y; a.rw = (int16_t)w; a.rh = (int16_t)h;
+    GpuOp b = a; b.v[0].x = (int16_t)(x + 10); b.v[0].y = (int16_t)(y + 10); b.rw = (int16_t)(w / 2); b.rh = (int16_t)(h / 2);   /* dentro de la primera */
+    d->ops[base->nops] = a; d->ops[base->nops + 1] = b;
+    d->nops = base->nops + 2;
+    for (uint32_t i = 0; i < d->nops; i++) opd[i] = i < 2 ? 0 : 2;
+    *nopd = (int)d->nops;
+    return d;
+}
+static void menu_rect_cases(void) {
+    uint8_t opd1[64], opd2[64]; int n1 = 0, n2 = 0;
+    GpuDrawList *l1 = panel_scene(0, opd1, &n1);
+    if (!l1) { CHECK(0, "menu: lista"); return; }
+    GpuDrawList *l2 = with_window(l1, 200, 120, 80, 60, opd2, &n2);
+    VrScene s1, s2; memset(&s1, 0, sizeof s1); memset(&s2, 0, sizeof s2);
+    s1.op_dest = opd1; s1.n_op_dest = (uint32_t)n1; s2.op_dest = opd2; s2.n_op_dest = (uint32_t)n2;
+    VrLayer2D *L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    float uv[4] = {0, 0, 0, 0};
+    CHECK(vl2d_run(L, l1, &s1, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 0, "menu: sin menú no hay rect");
+    vl2d_set_menu(L, 1);
+    CHECK(vl2d_run(L, l2, &s2, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu: ventana nueva -> rect");
+    VrL2Info in; vl2d_info(L, &in);
+    float ex[4] = {(float)(199 - l1->disp.x) / (float)in.fw, (float)(119 - l1->disp.y) / (float)in.h, (float)(281 - l1->disp.x) / (float)in.fw, (float)(181 - l1->disp.y) / (float)in.h};
+    for (int k = 0; k < 4; k++) CHECK(uv[k] > ex[k] - 0.002f && uv[k] < ex[k] + 0.002f, "menu: uv[%d]=%.4f esperado %.4f", k, (double)uv[k], (double)ex[k]);
+    CHECK(in.menu_new == 2 && in.menu_base >= 4, "menu: prims nuevas=%d base=%d", in.menu_new, in.menu_base);
+    float uv1[4]; memcpy(uv1, uv, sizeof uv1);
+    CHECK(vl2d_run(L, l1, &s1, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu: fotograma sin prims nuevas conserva el rect");
+    for (int k = 0; k < 4; k++) CHECK(uv[k] == uv1[k], "menu: el rect conservado cambió (uv[%d])", k);
+    CHECK(vl2d_run(L, l2, &s2, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu: el baseline no se pisa con el menú activo");
+    /* créditos que aparecen LEJOS del menú abierto no amplían el rect; sí lo amplía una primitiva nueva que lo toca */
+    uint8_t opd4[64], opd5[64]; int n4 = 0, n5 = 0;
+    GpuDrawList *l4 = with_window(l2, 20, 200, 40, 20, opd4, &n4);        /* l2 + ventana lejana */
+    GpuDrawList *l5 = with_window(l2, 270, 150, 40, 40, opd5, &n5);       /* l2 + ventana que solapa el borde de la del menú (200..280, 120..180) */
+    VrScene s4, s5; memset(&s4, 0, sizeof s4); memset(&s5, 0, sizeof s5);
+    s4.op_dest = opd4; s4.n_op_dest = (uint32_t)n4; s5.op_dest = opd5; s5.n_op_dest = (uint32_t)n5;
+    CHECK(vl2d_run(L, l4, &s4, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu: con créditos lejanos sigue habiendo rect");
+    for (int k = 0; k < 4; k++) CHECK(uv[k] == uv1[k], "menu: los créditos lejanos ampliaron el rect (uv[%d]=%.4f antes %.4f)", k, (double)uv[k], (double)uv1[k]);
+    CHECK(vl2d_run(L, l5, &s5, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1 && uv[2] > uv1[2] + 0.001f, "menu: una prim nueva que toca el rect lo amplía (u1=%.4f antes %.4f)", (double)uv[2], (double)uv1[2]);
+    vl2d_set_menu(L, 0);
+    CHECK(vl2d_run(L, l1, &s1, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 0, "menu: al salir del selector se olvida el rect");
+    vl2d_set_menu(L, 1);
+    CHECK(vl2d_run(L, l1, &s1, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 0, "menu: reabrir sin prims nuevas no resucita el rect");
+    {   /* sin rect previo, la ventana lejana SÍ cuenta (prueba de que está dentro de la zona mostrada y de que lo anterior es la histéresis) */
+        VrLayer2D *L2 = vl2d_new(); vl2d_set_options(L2, 1, VL_SMOOTH_ORIGINAL);
+        vl2d_run(L2, l1, &s1, VL_PANEL); vl2d_set_menu(L2, 1);
+        CHECK(vl2d_run(L2, l4, &s4, VL_PANEL) == 1 && vl2d_menu_rect(L2, uv) == 1 && uv[0] < uv1[0] - 0.01f, "menu: sin rect previo la ventana lejana cuenta (u0=%.4f)", (double)uv[0]);
+        vl2d_free(L2);
+    }
+    vl2d_set_menu(L, 0); vl2d_run(L, l1, &s1, VL_PANEL); vl2d_set_menu(L, 1);   /* baseline otra vez para lo que sigue */
+    CHECK(vl2d_run(L, l2, &s2, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu: ventana nueva -> rect (2)");
+    free_list(l4); free_list(l5);
+    vl2d_set_menu(L, 0);
+    CHECK(vl2d_run(L, l2, &s2, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 0, "menu: menú apagado, sin rect");
+    vl2d_set_menu(L, 1);
+    CHECK(vl2d_run(L, l2, &s2, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 0, "menu: el baseline se renovó con la lista sin menú");
+    vl2d_free(L);
+    /* ventana que ocupa más del 60 % del marco: no sirve de recorte */
+    uint8_t opd3[64]; int n3 = 0;
+    GpuDrawList *l3 = with_window(l1, 4, 4, 310, 230, opd3, &n3);
+    VrScene s3; memset(&s3, 0, sizeof s3); s3.op_dest = opd3; s3.n_op_dest = (uint32_t)n3;
+    L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    vl2d_run(L, l1, &s1, VL_PANEL); vl2d_set_menu(L, 1);
+    CHECK(vl2d_run(L, l3, &s3, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 0, "menu: área > 60 %% no es rect");
+    vl2d_free(L);
+    /* asíncrono: el rect solo se calcula con la vista selector (VRV_R_SELECTOR = 10) y viaja con la capa publicada */
+    {
+        VrL2Async *A = vl2a_new(); vl2a_options(A, 1, VL_SMOOTH_ORIGINAL);
+        const uint8_t *px = NULL; int w = 0, h = 0, full = -1; uint32_t seq = 0;
+        vl2a_set_view(A, (1 << 8) | 0);
+        CHECK(vl2a_submit(A, l1, opd1, VL_PANEL, 1) == 1, "menu async: encolada 1"); vl2a_flush(A);
+        CHECK(vl2a_acquire(A, &px, &w, &h, &full, &seq) == 1 && vl2a_acquire_menu_rect(A, uv) == 0, "menu async: sin selector no hay rect");
+        vl2a_release(A);
+        vl2a_set_view(A, (1 << 8) | 10);
+        CHECK(vl2a_submit(A, l2, opd2, VL_PANEL, 0) == 1, "menu async: encolada 2"); vl2a_flush(A);
+        CHECK(vl2a_acquire(A, &px, &w, &h, &full, &seq) >= 0 && vl2a_acquire_menu_rect(A, uv) == 1 && uv[0] < uv[2] && uv[1] < uv[3] && uv[2] <= 1.0f, "menu async: con selector hay rect");
+        vl2a_release(A);
+        CHECK(vl2a_acquire_menu_rect(A, uv) == 0, "menu async: sin capa adquirida no hay rect");
+        vl2a_free(A);
+    }
+    free_list(l1); free_list(l2); free_list(l3);
+}
+
 static void panel_verified(void) {
     uint8_t opd[64]; int nops = 0;
     VrScene sc; memset(&sc, 0, sizeof sc);
@@ -1063,6 +1149,7 @@ int main(void) {
     offlist_text();
     panel_verified();
     scale_step_cases();
+    menu_rect_cases();
 
     /* ---- fondo negro, escala 1: IGUAL bit a bit a la GPU original ---- */
     build_list(0x0000);

@@ -228,6 +228,8 @@ int vrpose_get_hands(VrHandPose out[2]) { memcpy(out, g_hands, sizeof g_hands); 
 static VrBodyView g_view;
 static int g_view_ok;
 static int view_fn(VrBodyView *v) { if (!g_view_ok) return 0; *v = g_view; return 1; }
+/* Configuración de las pruebas anteriores al torso que sigue la mirada: el torso original no se toca (el nuevo comportamiento tiene sus propias pruebas). */
+static void legacy_cfg(VrBodyConfig *c) { vrbody_config_default(c); c->torso_follow = 0; }
 
 static void w16(uint32_t a, int16_t v) { memcpy(RAM + (a & 0x1FFFFF), &v, 2); }
 static void w32(uint32_t a, int32_t v) { memcpy(RAM + (a & 0x1FFFFF), &v, 4); }
@@ -311,7 +313,7 @@ static void set_hand(int s, float x, float y, float z, float yaw) {
 static int is_arm_part(int i) { return i == 2 || i == 3 || i == 4 || i == 7 || i == 8 || i == 9; }
 
 static void test_glue(void) {
-    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0;
+    VrBodyConfig cfg; legacy_cfg(&cfg); cfg.hand_pitch_deg = 0;
     vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
     /* a) sin manos: no toca nada */
     build_body(1);
@@ -335,6 +337,7 @@ static void test_glue(void) {
                     if (RAM[a] == RAM0[a]) continue;
                     int inside = 0;
                     for (int p = 0; p < 16 && !inside; p++) if (is_arm_part(p) && a >= (part_addr(p) & 0x1FFFFF) && a < (part_addr(p) & 0x1FFFFF) + 0x40) inside = 1;
+                    for (int p = 0; p < 16 && !inside; p++) if (a >= ((PMODELS + 0x3C * (uint32_t)p) & 0x1FFFFF) && a < ((PMODELS + 0x3C * (uint32_t)p) & 0x1FFFFF) + 4) inside = 1;   /* model[0]: MF_TWO_SIDED */
                     if (!inside) diff_outside++;
                 }
                 CHECK(diff_outside == 0, "bytes fuera de las 6 piezas modificados: %d", diff_outside);
@@ -489,7 +492,7 @@ static void test_glue(void) {
 /* mode 0: pose = marco de vr_pose.h (sin cabeceo); 1: mando de seguimiento con apuntado (agarre inclinado 35 grados, cabeceo automático); 2: sin apuntado (cabeceo fijo -35);
  * 3: calibrado con vrbody_calibrate_hands; 4: como 1 con el apuntado ausente 3 fotogramas antes de medir (se mantiene el último cabeceo); 5: apuntado ausente desde el fotograma 20 con cabeceo fijo 0 (tras 10 fotogramas vuelve al fijo: dedos 35 grados arriba). En 1..3 el marco esperado de la mano es el del apuntado horizontal (guiñada de la pose) girado el alabeo. */
 static void hand_axes_run(float roll_deg, int mode) {
-    VrBodyConfig cfg; vrbody_config_default(&cfg); if (mode == 0 || mode == 5) cfg.hand_pitch_deg = 0;
+    VrBodyConfig cfg; legacy_cfg(&cfg); if (mode == 0 || mode == 5) cfg.hand_pitch_deg = 0;
     int tested = 0;
     for (int seed = 0; seed < 30; seed++) {
         build_body(200 + seed);
@@ -651,7 +654,7 @@ static void hands_at_rest(const float T[9]) {
 }
 static void wrist_pos(int s, float w[3]) { float R[9]; load_xf(part_addr(s ? 4 : 9), R, w); }
 static void test_jab_and_grab(void) {
-    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0;
+    VrBodyConfig cfg; legacy_cfg(&cfg); cfg.hand_pitch_deg = 0;
     for (int seed = 0; seed < 12; seed++) {
         build_body(300 + seed);
         vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
@@ -708,7 +711,7 @@ static void test_jab_and_grab(void) {
  * transformación y restore lo devuelve; la cabeza (parte 6, oculta a propósito) y el resto no se tocan. */
 static void test_visibility(void) {
     for (int force = 0; force < 2; force++) {
-        VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0; cfg.force_arm_visible = force;
+        VrBodyConfig cfg; legacy_cfg(&cfg); cfg.hand_pitch_deg = 0; cfg.force_arm_visible = force;
         vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
         build_body(77);
         static const int ARMS[6] = {2, 3, 4, 7, 8, 9};
@@ -758,9 +761,235 @@ static void test_mirror(void) {
     CHECK(tested > 3000 && bad == 0, "simetría izquierda/derecha: %d de %d no son espejo", bad, tested);
 }
 
+/* Cuerpo completo: los 16 modelos pasan a doble cara (bit 0x400 de model[0]) durante el dibujado y restore devuelve sus banderas. */
+static void test_two_sided(void) {
+    VrBodyConfig cfg; legacy_cfg(&cfg); cfg.hand_pitch_deg = 0;
+    build_body(401); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+    for (int i = 0; i < 16; i++) w32(PMODELS + 0x3C * (uint32_t)i, (i & 1) ? 0x1 : 0x10001);
+    memcpy(RAM0, RAM, sizeof RAM);
+    set_hand(0, -0.25f, 1.3f, -0.4f, 0.3f); set_hand(1, 0.30f, 1.25f, -0.45f, -0.2f);
+    for (int f = 0; f < 5; f++) {
+        memcpy(RAM, RAM0, sizeof RAM);
+        vrbody_apply(RAM);
+        for (int i = 0; i < 16; i++) CHECK((r32(PMODELS + 0x3C * (uint32_t)i) & 0x400) != 0 && (r32(PMODELS + 0x3C * (uint32_t)i) & ~0x400) == ((i & 1) ? 0x1 : 0x10001), "modelo %d sin doble cara tras apply: %x", i, r32(PMODELS + 0x3C * (uint32_t)i));
+        vrbody_restore(RAM);
+        for (int i = 0; i < 16; i++) CHECK(r32(PMODELS + 0x3C * (uint32_t)i) == ((i & 1) ? 0x1 : 0x10001), "modelo %d no restaurado: %x", i, r32(PMODELS + 0x3C * (uint32_t)i));
+        CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "doble cara: restore no devuelve la RAM");
+    }
+    /* sin manos no se toca nada */
+    memset(g_hands, 0, sizeof g_hands); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+    memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM); CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "doble cara sin manos: RAM tocada");
+    /* el juego ya tenía el bit: se conserva tras restore; dos piezas con el mismo modelo no corrompen la restauración */
+    set_hand(0, -0.25f, 1.3f, -0.4f, 0.3f); set_hand(1, 0.30f, 1.25f, -0.45f, -0.2f);
+    w32(PMODELS, 0x10401); w32(part_addr(12) + 0x40, (int32_t)(PMODELS + 0x3C * 11)); memcpy(RAM0, RAM, sizeof RAM);
+    vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+    for (int f = 0; f < 3; f++) { memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM); vrbody_restore(RAM); CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "doble cara: bit previo / modelo compartido (f=%d)", f); }
+    /* si el juego cambió la bandera entre apply y restore, no se pisa */
+    memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM); w32(PMODELS + 0x3C * 3, 0x777); vrbody_restore(RAM);
+    CHECK(r32(PMODELS + 0x3C * 3) == 0x777, "restore pisó una bandera cambiada por el juego");
+}
+
+/* own_hands: las piezas de los brazos movidas se ocultan (+0x4C = 0) y restore las devuelve; sin la bandera no se ocultan. */
+static void test_own_hands(void) {
+    static const int ARMS[6] = {2, 3, 4, 7, 8, 9};
+    for (int own = 0; own < 2; own++) {
+        VrBodyConfig cfg; legacy_cfg(&cfg); cfg.hand_pitch_deg = 0; cfg.own_hands = own;
+        build_body(402); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+        for (int f = 0; f < 30; f++) {
+            set_hand(0, -0.25f, 1.3f, -0.4f, 0.3f); set_hand(1, 0.30f, 1.25f, -0.45f, -0.2f);
+            memcpy(RAM, RAM0, sizeof RAM);
+            int n = vrbody_apply(RAM);
+            if (n == 2) {
+                for (int k = 0; k < 6; k++) CHECK(r16(part_addr(ARMS[k]) + 0x4C) == (own ? 0 : 2), "own_hands=%d: visibilidad de la pieza %d = %d", own, ARMS[k], r16(part_addr(ARMS[k]) + 0x4C));
+                for (int i = 0; i < 16; i++) if (!is_arm_part(i)) CHECK(r16(part_addr(i) + 0x4C) == 2, "own_hands: pieza %d tocada", i);
+            }
+            vrbody_restore(RAM);
+            for (int k = 0; k < 6; k++) CHECK(r16(part_addr(ARMS[k]) + 0x4C) == 2, "restore devuelve la visibilidad (pieza %d, own=%d)", ARMS[k], own);
+            CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "own_hands: restore no devuelve la RAM");
+        }
+    }
+}
+
+/* own_hands: solo se ocultan las tres piezas del lado que la IK movió; el lado sin seguimiento conserva la animación (y la visibilidad) del juego; restore las devuelve; sin manos no se toca nada. */
+static void test_own_hands_both(void) {
+    static const int ARMS[6] = {2, 3, 4, 7, 8, 9};
+    for (int only = 0; only < 3; only++) {      /* 0: solo la izquierda, 1: solo la derecha, 2: ninguna */
+        VrBodyConfig cfg; legacy_cfg(&cfg); cfg.hand_pitch_deg = 0; cfg.own_hands = 1;
+        build_body(410 + only); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+        for (int f = 0; f < 20; f++) {
+            memset(g_hands, 0, sizeof g_hands);
+            if (only == 0) set_hand(0, -0.25f, 1.3f, -0.4f, 0.3f);
+            if (only == 1) set_hand(1, 0.30f, 1.25f, -0.45f, -0.2f);
+            memcpy(RAM, RAM0, sizeof RAM);
+            int n = vrbody_apply(RAM);
+            if (only < 2 && f > 10) CHECK(n == 1, "own_hands: un solo brazo movido (n=%d)", n);
+            if (n == 1) {      /* un lado movido: sus 3 piezas ocultas, las 3 del otro lado intactas */
+                int hid_a = 0, hid_b = 0;
+                for (int k = 0; k < 3; k++) { hid_a += r16(part_addr(ARMS[k]) + 0x4C) == 0; hid_b += r16(part_addr(ARMS[k + 3]) + 0x4C) == 0; }
+                CHECK((hid_a == 3 && hid_b == 0) || (hid_a == 0 && hid_b == 3), "own_hands (solo=%d): solo el lado movido se oculta (a=%d b=%d)", only, hid_a, hid_b);
+            }
+            if (only == 2) for (int k = 0; k < 6; k++) CHECK(r16(part_addr(ARMS[k]) + 0x4C) == 2, "own_hands (sin manos): pieza %d oculta", ARMS[k]);
+            for (int i = 0; i < 16; i++) if (!is_arm_part(i)) CHECK(r16(part_addr(i) + 0x4C) == 2, "own_hands: pieza %d tocada", i);
+            CHECK(only == 2 ? !vrbody_ram_dirty() : vrbody_ram_dirty(), "own_hands: ram_dirty tras apply (solo=%d)", only);
+            vrbody_restore(RAM);
+            CHECK(!vrbody_ram_dirty() && memcmp(RAM, RAM0, sizeof RAM) == 0, "own_hands: restore devuelve la RAM (solo=%d)", only);
+        }
+    }
+    /* vrbody_set_own_hands en caliente */
+    VrBodyConfig cfg; legacy_cfg(&cfg); cfg.hand_pitch_deg = 0;
+    build_body(413); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+    set_hand(0, -0.25f, 1.3f, -0.4f, 0.3f);
+    vrbody_apply(RAM); CHECK(r16(part_addr(2) + 0x4C) == 2, "sin own_hands no se oculta"); vrbody_restore(RAM);
+    vrbody_set_own_hands(1);
+    vrbody_apply(RAM); CHECK((r16(part_addr(2) + 0x4C) == 0) != (r16(part_addr(9) + 0x4C) == 0), "vrbody_set_own_hands(1) oculta solo el lado movido"); vrbody_restore(RAM);
+    vrbody_set_own_hands(0);
+    vrbody_apply(RAM); CHECK(r16(part_addr(2) + 0x4C) == 2, "vrbody_set_own_hands(0)"); vrbody_restore(RAM);
+}
+
+/* vrbody_player_models y vrbody_arm_live / vrbody_arm_resolve: la IK con el agarre simulado reproduce el apply; con el agarre desplazado mueve muñeca y mano rígidamente. */
+static void test_arm_live(void) {
+    uint32_t md[2][3];
+    build_body(420);
+    CHECK(vrbody_player_models(RAM, md) == 1, "player_models");
+    static const int PI_[2][3] = {{7, 8, 9}, {2, 3, 4}};
+    for (int s = 0; s < 2; s++) for (int k = 0; k < 3; k++) CHECK(md[s][k] == PMODELS + 0x3C * (uint32_t)PI_[s][k], "modelo lado %d pieza %d: %x", s, k, md[s][k]);
+    int16_t keep = r16(PARTSET + 0x2E); w16(PARTSET + 0x2E, 3); CHECK(vrbody_player_models(RAM, md) == 0, "player_models con pocas piezas"); w16(PARTSET + 0x2E, keep);
+    int tested = 0, shifted = 0, rotated = 0;
+    for (int seed = 0; seed < 20; seed++) {
+        VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0;
+        build_body(430 + seed); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+        for (int f = 0; f < 40; f++) {
+            set_hand(0, -0.25f + 0.002f * f, 1.3f, -0.4f, 0.3f); set_hand(1, 0.30f, 1.25f, -0.45f - 0.001f * f, -0.2f);
+            memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM);
+            if (f < 39) vrbody_restore(RAM);
+        }
+        for (int s = 0; s < 2; s++) {
+            VrBodyArmLive a; VrBodyForearm fa; VrBodyArmPose o;
+            CHECK(vrbody_arm_live(s, &a) == 1 && vrbody_forearm_pose(s, &fa) == 1, "arm_live disponible (lado %d)", s);
+            CHECK(a.fade > 0.99f && a.upm == 1000.0f && a.rig.side == (s == 0 ? 1.0f : -1.0f), "arm_live: fundido/escala/lado");
+            CHECK(vrbody_arm_resolve(&a, a.grip_p, a.grip_q, &o) == 0, "resolve con el agarre simulado");
+            float de = 0, dw = 0;
+            for (int j = 0; j < 3; j++) { de = fmaxf(de, fabsf(o.elbow[j] - fa.elbow[j])); dw = fmaxf(dw, fabsf(o.wrist[j] - fa.wrist[j])); }
+            CHECK(de < 1e-3f && dw < 1e-3f, "resolve (agarre simulado) = apply: codo %g m, muñeca %g m (lado %d)", de, dw, s);
+            tested++;
+            if ((o.flags & ~(unsigned)VRARM_WRIST_LIMIT) == 0) {      /* el límite de la muñeca no mueve la muñeca */
+                float lp[3] = {a.grip_p[0] + 0.01f, a.grip_p[1] - 0.005f, a.grip_p[2] + 0.008f};
+                VrBodyArmPose o2;
+                CHECK(vrbody_arm_resolve(&a, lp, a.grip_q, &o2) == 0, "resolve desplazado");
+                if ((o2.flags & ~(unsigned)VRARM_WRIST_LIMIT) == 0 && o2.err_mm < 0.5f) {
+                    float dx[3] = {0.01f, -0.005f, 0.008f}; float e = 0;
+                    for (int j = 0; j < 3; j++) e = fmaxf(e, fabsf((o2.wrist[j] - o.wrist[j]) - dx[j]));
+                    CHECK(e < 2e-3f, "la muñeca sigue al agarre vivo: error %g m", e);
+                    CHECK(fabsf(o2.shoulder[0] - o.shoulder[0]) + fabsf(o2.shoulder[1] - o.shoulder[1]) + fabsf(o2.shoulder[2] - o.shoulder[2]) < 1e-6f, "el hombro no se mueve");
+                    shifted++;
+                }
+                /* giro de 8 grados del agarre vivo en torno al propio agarre: la muñeca gira rígidamente alrededor del punto del agarre */
+                float h = 8.0f * 0.0174532925f * 0.5f, qy[4] = {0, sinf(h), 0, cosf(h)}, ql[4], ct[3] = {0, 0, 0};
+                (void)ct;
+                { const float *b = a.grip_q;     /* ql = qy * grip_q */
+                  ql[0] = qy[3] * b[0] + qy[0] * b[3] + qy[1] * b[2] - qy[2] * b[1]; ql[1] = qy[3] * b[1] - qy[0] * b[2] + qy[1] * b[3] + qy[2] * b[0];
+                  ql[2] = qy[3] * b[2] + qy[0] * b[1] - qy[1] * b[0] + qy[2] * b[3]; ql[3] = qy[3] * b[3] - qy[0] * b[0] - qy[1] * b[1] - qy[2] * b[2]; }
+                VrBodyArmPose o3;
+                CHECK(vrbody_arm_resolve(&a, a.grip_p, ql, &o3) == 0, "resolve girado");
+                if ((o3.flags & ~(unsigned)VRARM_WRIST_LIMIT) == 0 && o3.err_mm < 0.5f) {
+                    float c = cosf(8.0f * 0.0174532925f), sn = sinf(8.0f * 0.0174532925f);
+                    float d[3] = {a.wrist[0] - a.grip_p[0], a.wrist[1] - a.grip_p[1], a.wrist[2] - a.grip_p[2]};
+                    float want[3] = {a.grip_p[0] + c * d[0] + sn * d[2], a.grip_p[1] + d[1], a.grip_p[2] - sn * d[0] + c * d[2]};
+                    float e = 0; for (int j = 0; j < 3; j++) e = fmaxf(e, fabsf(o3.wrist[j] - want[j]));
+                    CHECK(e < 2e-3f, "la muñeca gira con el agarre vivo: error %g m", e);
+                    rotated++;
+                }
+            }
+        }
+        vrbody_restore(RAM);
+    }
+    CHECK(tested == 40 && shifted > 10 && rotated > 10, "arm_live: cobertura (%d, desplazados %d, girados %d)", tested, shifted, rotated);
+    float nan3[3] = {NAN, 0, 0}, q[4] = {0, 0, 0, 1}; VrBodyArmLive a0; VrBodyArmPose o0; memset(&a0, 0, sizeof a0);
+    CHECK(vrbody_arm_resolve(&a0, nan3, q, &o0) == -1 && vrbody_arm_resolve(NULL, q, q, &o0) == -1, "resolve: entrada no válida");
+    CHECK(vrbody_arm_live(2, &a0) == 0 && vrbody_arm_live(0, NULL) == 0, "arm_live: lado/puntero inválidos");
+}
+
+/* torso_follow: el torso hereda la pelvis del reposo (rumbo distinto de la mirada); con la mirada real como guiñada del torso los hombros quedan
+ * donde las manos naturales los esperan. */
+static float yaw_of(uint32_t part) { float R[9], t[3]; load_xf(part_addr((int)part), R, t); return atan2f(R[2], R[8]) * 57.2957795f; }
+static float wrap180t(float a) { while (a > 180) a -= 360; while (a < -180) a += 360; return a; }
+static void torso_run(int seed, int follow, float off_deg, float *yaw_err, float *yawY, float *dP5, float reach[2], float err[2], int *same_after) {
+    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0; cfg.torso_follow = follow;
+    build_body(seed); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+    float gaze = wrap180t(yaw_of(1) + off_deg);
+    g_view.gaze_yaw_deg = gaze;
+    float gr = gaze * 3.14159265f / 180, c = cosf(gr), s = sinf(gr);
+    float Rn[9] = {c, 0, s, 0, 1, 0, -s, 0, c};
+    float R5[9], P5[3]; load_xf(part_addr(5), R5, P5);
+    float n5[3] = {0, 305, -55}, rn5[3]; mv(rn5, Rn, n5);
+    float t1[3] = {P5[0] - rn5[0], P5[1] - rn5[1], P5[2] - rn5[2]};
+    float th = (g_view.theta_deg + 180) * 3.14159265f / 180, cs = cosf(th), sn = sinf(th);
+    float T[9] = {cs, 0, sn, 0, 1, 0, -sn, 0, cs}, Tt[9] = {cs, 0, -sn, 0, 1, 0, sn, 0, cs};
+    float zc[3] = {T[2], T[5], T[8]};
+    for (int f = 0; f < 160; f++) {
+        for (int sd = 0; sd < 2; sd++) {     /* muñeca a 480 mm delante y 100 bajo el hombro del torso corregido (alcance 94 %) */
+            float so[3], sh[3], want[3], dw[3], pu[3];
+            so[0] = TOFF[sd ? 2 : 7][0]; so[1] = TOFF[sd ? 2 : 7][1]; so[2] = TOFF[sd ? 2 : 7][2];
+            mv(sh, Rn, so);
+            for (int k = 0; k < 3; k++) { sh[k] += t1[k]; want[k] = sh[k] + Rn[3 * k + 2] * 480.0f - Rn[3 * k + 1] * 100.0f; }
+            for (int k = 0; k < 3; k++) want[k] += zc[k] * 55.0f * -1.0f;      /* centro de la palma: la muñeca queda 55 mm detrás (+Z de la mano) */
+            for (int k = 0; k < 3; k++) dw[k] = want[k] - g_view.eye[k];
+            mv(pu, Tt, dw);
+            set_hand(sd, pu[0] / 1000 + g_view.p_ref[0], pu[1] / 1000 + g_view.p_ref[1], pu[2] / 1000 + g_view.p_ref[2], 0);
+        }
+        memcpy(RAM, RAM0, sizeof RAM);
+        vrbody_apply(RAM);
+        if (f == 159) {
+            float Rt[9], tt[3], Rp[9], Pp[3]; load_xf(part_addr(1), Rt, tt); load_xf(part_addr(5), Rp, Pp);
+            *yaw_err = wrap180t(yaw_of(1) - gaze); *yawY = Rt[4];
+            *dP5 = sqrtf((Pp[0] - P5[0]) * (Pp[0] - P5[0]) + (Pp[1] - P5[1]) * (Pp[1] - P5[1]) + (Pp[2] - P5[2]) * (Pp[2] - P5[2]));
+            for (int sd = 0; sd < 2; sd++) { reach[sd] = vrbody_debug(sd)->sol.reach; err[sd] = vrbody_debug(sd)->sol.err_mm; }
+        }
+        vrbody_restore(RAM);
+    }
+    *same_after = memcmp(RAM, RAM0, sizeof RAM) == 0;
+}
+static void test_torso_follow(void) {
+    int bad_off = 0;
+    for (int seed = 0; seed < 8; seed++) {
+        float ye, yy, dp, re[2], er[2]; int same;
+        torso_run(500 + seed, 0, 50.0f, &ye, &yy, &dp, re, er, &same);
+        CHECK(er[1] > 80.0f, "torso_follow=0: el brazo derecho debería fallar (semilla %d): %g mm", seed, er[1]);
+        CHECK(same, "torso_follow=0: restore");
+        CHECK(fabsf(ye) > 20.0f, "torso_follow=0 no debe girar el torso: %g", ye);
+        torso_run(500 + seed, 1, 50.0f, &ye, &yy, &dp, re, er, &same);
+        CHECK(fabsf(ye) <= 1.0f, "guiñada del torso = mirada: error %g grados (semilla %d)", ye, seed);
+        CHECK(yy > 0.99f, "torso sin inclinación: Y.y = %g", yy);
+        CHECK(dp < 2.0f, "el cuello se movió %g mm", dp);
+        CHECK(fabsf(re[1] - re[0]) < 0.1f, "alcance asimétrico: %g vs %g", re[0], re[1]);
+        CHECK(er[0] < 20.0f && er[1] < 20.0f, "error de brazo con torso_follow=1: %g / %g mm (semilla %d)", er[0], er[1], seed);
+        CHECK(same, "torso_follow=1: restore devuelve la RAM (incluida la pieza 1)");
+        (void)bad_off;
+    }
+    /* zona muerta: mirada a 10 grados del torso => el torso no se mueve; a 20 => sigue hasta alcanzarla */
+    { float ye, yy, dp, re[2], er[2]; int same;
+      torso_run(520, 1, 10.0f, &ye, &yy, &dp, re, er, &same);
+      CHECK(fabsf(ye + 10.0f) < 3.0f && same, "dentro de la zona muerta el torso no sigue: error %g", ye);
+      torso_run(520, 1, 20.0f, &ye, &yy, &dp, re, er, &same);
+      CHECK(fabsf(ye) <= 1.0f && same, "fuera de la zona muerta el torso alcanza la mirada: error %g", ye); }
+    /* inclinado más de 35 grados (agachado/tumbado): no se toca */
+    { VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0;
+      build_body(530); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+      float R[9], t[3]; load_xf(part_addr(1), R, t);
+      float Rx[9] = {1, 0, 0, 0, cosf(1.05f), -sinf(1.05f), 0, sinf(1.05f), cosf(1.05f)}, Rn[9]; mm(Rn, R, Rx);
+      float Re[9]; for (int i = 0; i < 9; i++) Re[i] = r16(BA_VIEW_CHANNEL + BCH_CAM_INV + 2 * i) / 4096.0f;
+      float Rs[9], ts[3]; mm(Rs, Re, Rn); mv(ts, Re, t); for (int k = 0; k < 3; k++) ts[k] += (float)r32(BA_VIEW_CHANNEL + BCH_CAM_INV + 0x14 + 4 * k);
+      store_xf(part_addr(1), Rn, t); store_xf(part_addr(1) + 0x20, Rs, ts); memcpy(RAM0, RAM, sizeof RAM);
+      g_view.gaze_yaw_deg = wrap180t(yaw_of(1) + 90.0f);
+      set_hand(0, -0.25f, 1.3f, -0.4f, 0); set_hand(1, 0.30f, 1.25f, -0.45f, 0);
+      VrBodyStats a, b; vrbody_stats(&a);
+      for (int f = 0; f < 5; f++) { memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM); CHECK(memcmp(RAM + (part_addr(1) & 0x1FFFFF), RAM0 + (part_addr(1) & 0x1FFFFF), 0x40) == 0, "torso inclinado 60 grados: no debe tocarse"); vrbody_restore(RAM); }
+      vrbody_stats(&b); CHECK(b.torso_applies == a.torso_applies, "torso inclinado: torso_applies"); }
+}
+
 /* RAM corrupta: no debe caerse ni escribir fuera */
 static void test_fuzz(void) {
-    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0;
+    VrBodyConfig cfg; legacy_cfg(&cfg); cfg.hand_pitch_deg = 0;
     build_body(90); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
     set_hand(0, -0.2f, 1.3f, -0.4f, 0); set_hand(1, 0.2f, 1.3f, -0.4f, 0);
     for (int it = 0; it < 3000; it++) {
@@ -822,7 +1051,7 @@ static void run_fist_frames(float grip, int frames, int *driven_last) {
 static void test_fist_glue(void) {
     VrBodyStats st0, st1;
     int driven = 0;
-    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0;
+    VrBodyConfig cfg; legacy_cfg(&cfg); cfg.hand_pitch_deg = 0;
     vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
     build_body(31); install_hand_mesh(0, 1); install_hand_mesh(1, 0); memcpy(RAM0, RAM, RAMSZ);
     /* mano abierta: la malla no se toca */
@@ -912,6 +1141,7 @@ int main(void) {
     test_glue();
     test_hand_axes(); test_hand_pitch_api(); test_default_roll(); test_jab_and_grab();
     test_visibility();
+    test_two_sided(); test_own_hands(); test_own_hands_both(); test_arm_live(); test_torso_follow();
     test_fist_glue();
     test_mirror();
     test_fuzz();

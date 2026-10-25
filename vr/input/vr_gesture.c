@@ -276,7 +276,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
             float sp_min = c->contact_speed > 0 && c->contact_speed < c->punch_speed ? c->contact_speed : c->punch_speed;
             int near_swing = spd[s] >= (g->swing[s] ? 0.4f : 0.6f) * sp_min;
             g->swing[s] = near_swing;
-            if (!near_swing) g->disarm[s] = 0;
+            if (!near_swing || (!grabbing && g->since_punch >= 0.4f)) g->disarm[s] = 0;   /* rearme: al frenar la mano o 0,4 s tras el golpe (un puño que no para no bloquea el siguiente) */
             if (near_swing && fst[s] && !(busy && !grabbing) && !grabbing) out->swinging = 1;
             float fcos = spd[s] > 1e-3f ? fv[s] / spd[s] : 0.0f, rcos = spd[s] > 1e-3f ? rad[s] / spd[s] : 0.0f;
             const char *why = "ok";

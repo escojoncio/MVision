@@ -58,6 +58,7 @@ static void push_hist(Vrm *v, int s, const float p[3], int closed) {
 }
 void vrm_frame(Vrm *v, const VrmEng *e, const VrmFrame *f) {
     if (!v->enable) { v->p_punch = v->p_grab = 0; v->hold = 0; v->squeeze_pend = 0; return; }
+    v->vb_now++;
     if (v->p_punch && --v->p_punch_ttl <= 0) {
         v->p_punch = 0; v->n_expired++;
         say(v, "[gest] golpe rechazado: el motor no aceptó la acción (estado=%08x)", r32(e, r32(e, VRM_PLAYER_CTRL) - 0x20 + VRM_W_ANIMFN));
@@ -83,7 +84,7 @@ void vrm_frame(Vrm *v, const VrmEng *e, const VrmFrame *f) {
         if (s >= 0 && s < 2 && f->fist_ok[s] && f->fist_closed[s] && !v->p_punch && !v->in_punch) {
             En en[MAXEN]; int n = scan(e, 0, en); const float zero[3] = {0, 0, 0};
             if (n && nearest(f->fist[s], en, n, zero) <= 700.0f) {
-                v->p_punch = 1; v->p_punch_side = s; v->p_punch_ttl = v->ttl_frames; v->retry_ttl = 0; v->n_requeue++;
+                v->p_punch = 1; v->p_punch_side = s; v->p_punch_ttl = v->ttl_frames; v->punch_vb = v->vb_now; v->retry_ttl = 0; v->n_requeue++;
                 say(v, "[gest] golpe encolado: el enemigo ya puede recibirlo, se repite (mano=%d)", s); done = 1;
             }
         }
@@ -91,7 +92,7 @@ void vrm_frame(Vrm *v, const VrmEng *e, const VrmFrame *f) {
     }
     if (!v->grab_owned) v->squeeze_pend = 0;
     if (f->squeeze) { v->squeeze_pend = 1; }
-    if (f->punch_side >= 0 && f->punch_side < 2) { v->p_punch = 1; v->p_punch_side = f->punch_side; v->p_punch_ttl = v->ttl_frames; }
+    if (f->punch_side >= 0 && f->punch_side < 2) { v->p_punch = 1; v->p_punch_side = f->punch_side; v->p_punch_ttl = v->ttl_frames; v->punch_vb = v->vb_now; }
     if (f->grab_start && f->grab_side >= 0 && f->grab_side < 2) {
         v->p_grab = 1; v->p_grab_side = f->grab_side; v->p_grab_ttl = v->ttl_frames;
         v->throw_arm = f->throw_side >= 0 && f->throw_side < 2 && isfinite(f->throw_yaw);
@@ -196,7 +197,7 @@ static int snap_changed(const VrmEng *e, int16_t old[64][3]) {
 void vrm_pre_hit(Vrm *v, const VrmEng *e, uint32_t work) {
     if (!v->enable || !v->in_punch || r32(e, work + VRM_W_ANIMFN) != VRM_FN_PUNCH) return;
     float o[3], d;
-    v->stage++;
+    v->stage++; if (v->punch_vb) v->lat_hit = v->vb_now - v->punch_vb;
     snap_targets(e, v->snap); v->snap_ok = 1;
     if (v->stage >= 3) return;                /* patada: la caja del propio motor delante del cuerpo */
     if (!pick_origin(v, e, o, &d)) { say(v, "[gest] golpe etapa %d: sin puño VR con seguimiento; el motor usa su origen", v->stage); return; }
@@ -212,17 +213,20 @@ void vrm_post_hit(Vrm *v, const VrmEng *e, uint32_t work, uint32_t result) {
     float d = n ? nearest(v->ctx_origin, en, n, half) : -1.0f;
     if (reg) v->n_hit++; else {
         v->n_miss++;
-        if (!n) {
-            v->n_nobody++;
-            /* ¿hay un enemigo vivo y disponible pero en reacción (sin el bit de daño)? Se encola el golpe */
-            for (int i = 0; i < 64; i++) {
-                uint32_t b = VRM_TARGETS + 72u * (uint32_t)i; uint16_t cl = (uint16_t)r16(e, b);
-                if (r16(e, b + 2) == 2 && (cl & 1) && !(cl & 0x20) && !(cl & 4) && r16(e, b + 0x26) > 0) { v->retry_ttl = VRM_RETRY_FRAMES; v->retry_side = v->p_punch_side; break; }
+        if (!n) v->n_nobody++;
+        /* ¿hay un enemigo vivo y disponible pero en reacción (sin el bit de daño)? Se encola el golpe. Con otros golpeables (n > 0) solo cuenta si es el más cercano al puño (no más lejos que el golpeable más próximo) y está pegado a él (<= 700 mm) */
+        for (int i = 0; i < 64; i++) {
+            uint32_t b = VRM_TARGETS + 72u * (uint32_t)i; uint16_t cl = (uint16_t)r16(e, b);
+            if (r16(e, b + 2) == 2 && (cl & 1) && !(cl & 0x20) && !(cl & 4) && r16(e, b + 0x26) > 0) {
+                En re; for (int k = 0; k < 3; k++) { re.c[k] = r16(e, b + 8 + 2u * (uint32_t)k); re.h[k] = r16(e, b + 16 + 2u * (uint32_t)k); } re.vital = 1;
+                const float zero[3] = {0, 0, 0};
+                float dre = box_dist(v->ctx_origin, &re, zero);
+                if (!n || (dre <= 700.0f && dre <= d)) { v->retry_ttl = VRM_RETRY_FRAMES; v->retry_side = v->p_punch_side; break; }
             }
         }
     }
-    say(v, "[gest] golpe etapa %d: %s con el puño VR (%.0f,%.0f,%.0f mm), a %.2f m de la caja del enemigo, vida quitada=%u", v->stage,
-        reg ? "REGISTRADO por el motor" : (n ? "FALLO" : "FALLO, ningún enemigo golpeable (en reacción o caído)"), v->ctx_origin[0], v->ctx_origin[1], v->ctx_origin[2], d > 0 ? d / 1000.0f : (d < 0 ? -1.0f : 0.0f), result);
+    say(v, "[gest] golpe etapa %d: %s con el puño VR (%.0f,%.0f,%.0f mm), a %.2f m de la caja del enemigo, vida quitada=%u, latencia=%u VBlanks desde la petición hasta pre_hit", v->stage,
+        reg ? "REGISTRADO por el motor" : (n ? "FALLO" : "FALLO, ningún enemigo golpeable (en reacción o caído)"), v->ctx_origin[0], v->ctx_origin[1], v->ctx_origin[2], d > 0 ? d / 1000.0f : (d < 0 ? -1.0f : 0.0f), result, v->lat_hit);
 }
 
 int vrm_move_target(Vrm *v, const VrmEng *e, uint32_t target, uint32_t vec) {

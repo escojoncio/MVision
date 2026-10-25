@@ -29,6 +29,9 @@ int vl2a_acquire(VrL2Async *A, const uint8_t **px, int *w, int *h, int *full, ui
 void vl2a_release(VrL2Async *A);
 /* Consumidor, entre vl2a_acquire (r >= 0) y vl2a_release: modo (VL_PANEL / VL_FULL / VL_PANEL_VERIFIED) y etiqueta de vista (vl2a_set_view) del trabajo que produjo la capa adquirida. 0 si no hay capa. */
 int vl2a_acquire_info(VrL2Async *A, int *mode, int *view);
+/* Consumidor, entre vl2a_acquire (r >= 0) y vl2a_release: rect UV [u0, v0, u1, v1] (0..1) de la ventana de menú de la capa adquirida (primitivas nuevas respecto a la lista previa sin menú, vl2d_menu_rect);
+ * solo hay rect si el trabajo era de la vista selector (VRV_R_SELECTOR). 0 si no hay. */
+int vl2a_acquire_menu_rect(VrL2Async *A, float uv[4]);
 /* ¿Vale la capa (mode, layer_view) para la vista vigente cur_view? (función pura). La capa debe ser de la misma clase de vista (kind = view >> 8: una capa retrasada de los créditos, kind motor, no entra en el
  * mundo) y, con overlay (ventana 2D del menú sobre el mundo, hudTexture = VL_PANEL), solo VL_PANEL. */
 int vl2a_layer_accept(int mode, int layer_view, int cur_view, int overlay);

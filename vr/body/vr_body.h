@@ -96,6 +96,7 @@ typedef struct VrBodyView {
     float p_ref[3];          /* posición de la cabeza (m, espacio del usuario) a la que corresponde `eye` */
     float theta_deg;         /* giro espacio de usuario -> mundo del motor: T = R_y(theta + 180 grados) */
     float units_per_m;       /* 1000 */
+    float gaze_yaw_deg;      /* guiñada de la mirada REAL del usuario en el mundo del motor (misma escala que el rumbo del cuerpo: 0 = +Z, + hacia +X); la usa torso_follow */
 } VrBodyView;
 typedef int (*VrBodyViewFn)(VrBodyView *out);    /* devuelve 1 y rellena `out` si hay vista; 0 si no */
 void vrbody_set_view_fn(VrBodyViewFn fn);
@@ -108,6 +109,7 @@ typedef struct VrBodyConfig {
     /* piezas del modelo [0] = izquierda, [1] = derecha: hombro, codo, muñeca */
     int part_arm[2][3];          /* {{7,8,9},{2,3,4}} */
     int part_torso;              /* 1 */
+    int part_neck;               /* 5: hijo del torso; su origen (cuello) queda fijo al enderezar el torso (torso_follow) */
     int min_parts;               /* 16: modelos con menos piezas se ignoran */
     /* mano */
     float grip_to_wrist_mm;      /* de la pose (centro de palma) a la muñeca del modelo, a lo largo del dedo; defecto 55 */
@@ -123,6 +125,10 @@ typedef struct VrBodyConfig {
     int fist_enabled;            /* 1 (defecto): con el agarre cerrado la malla de la mano del personaje se deforma en un puño (vr_fist); 0 = mano rígida */
     float fist_min_grip;         /* agarre (ya suavizado y fundido) a partir del cual se deforma la malla; defecto 0,03 */
     VrFistParams fist;           /* forma del puño (ángulos de las falanges, pulgar...) */
+    int own_hands;               /* 0 (defecto): 1 = las piezas brazo/antebrazo/mano de cada lado MOVIDO por la IK (2,3,4 / 7,8,9) se ocultan (visibilidad +0x4C = 0) porque el anfitrión dibuja manos propias; restore las devuelve */
+    int torso_follow;            /* 1 (defecto): el torso (y el cuello) se gira en guiñada hacia la mirada real, sin inclinación, para que los hombros no hereden la pelvis del reposo (pie adelantado). Cadera y piernas no se tocan */
+    float torso_yaw_tau_s;       /* constante del filtro de la guiñada del torso; defecto 0.25 */
+    float torso_deadzone_deg;    /* desvío mirada-torso a partir del cual el torso empieza a seguir (histéresis: sigue hasta alcanzarla); defecto 15 */
     int force_arm_visible;       /* 1 (defecto): si el motor dejó a 0 la visibilidad de una pieza del brazo movida por la IK, se fuerza durante la transformación (brazos siempre dibujados) */
     float armed_grip;            /* agarre mínimo de la mano dominante con arma (vrbody_set_armed); defecto 0.85 */
     /* codo */
@@ -191,13 +197,23 @@ int vrbody_calib_offset(const float grip_q[4], float roll_signed_deg, float out_
 /* ------------------------------------------------------------------ pegamento sobre la RAM ----------------------- */
 /* Sustituye las matrices de los brazos para el frame en curso (etapa de transformación). Devuelve el nº de brazos
  * modificados (0 si no hay vista VR, el modelo no es el esperado, el objeto está fuera de pantalla o no hay manos).
- * Escribe en la RAM del juego SOLO world+screen (64 B) de las piezas de los brazos, y guarda su valor original. */
+ * Escribe en la RAM del juego world+screen (64 B) de las piezas de los brazos, y guarda su valor original. */
+/* Además (con al menos una mano seguida): activa MF_TWO_SIDED (0x400 en model[0]) en los modelos de las 16 piezas; con torso_follow reescribe world+screen del torso y el cuello;
+ * con own_hands oculta las tres piezas de cada brazo movido por la IK (el lado no movido conserva la animación del juego). Todo se devuelve en vrbody_restore. */
 int  vrbody_apply(uint8_t *ram);
 /* Devuelve esas piezas a su valor original (idempotente; sin efecto si no hay nada pendiente). */
 void vrbody_restore(uint8_t *ram);
 void vrbody_prefist(uint8_t *ram);   /* puño antes de la captura nativa (usa el agarre del último apply) */
 /* 1 si hay matrices IK escritas sin restaurar (diagnóstico). */
 int  vrbody_pending(void);
+/* 1 si la RAM del juego tiene algo escrito por esta capa sin restaurar (matrices IK, visibilidad, banderas de modelo o malla de mano deformada en puño): lo que se lea de la RAM
+ * en ese instante no es el modelo en reposo. Lo comprueba quien lee mallas del jugador desde otro punto (vr/hands/vr_glove). */
+int  vrbody_ram_dirty(void);
+/* Activa/desactiva own_hands sin reiniciar el estado (el anfitrión lo activa solo cuando sus manos propias están listas). */
+void vrbody_set_own_hands(int on);
+/* Direcciones de modelo (model*) de las piezas brazo, antebrazo y mano de cada lado: models[0] = izquierdo {7,8,9}, models[1] = derecho {2,3,4} (cfg.part_arm).
+ * 1 = las 6 legibles con la jerarquía esperada; 0 = no (models sin definir). */
+int  vrbody_player_models(const uint8_t *ram, uint32_t models[2][3]);
 
 typedef struct VrBodyStats {
     uint32_t applies, arms_driven, restores;
@@ -205,6 +221,7 @@ typedef struct VrBodyStats {
     uint32_t grab_applies;       /* brazos movidos con una mano pegada al enemigo (att > 0) */
     uint32_t jab_applies;        /* brazos movidos con un golpe sintético en curso */
     uint32_t fist_applies, fist_skipped, fist_pre;   /* mallas de mano deformadas en puño / mallas no reconocidas (se dejan rígidas) */
+    uint32_t torso_applies;      /* frames con el torso girado hacia la mirada */
     uint32_t stretched, too_close, shoulder_limit, wrist_limit, bad_solve, stale_dropped, vis_forced;
 } VrBodyStats;
 void vrbody_stats(VrBodyStats *s);
@@ -214,6 +231,35 @@ void vrbody_stats(VrBodyStats *s);
  * 0 = no (el llamador cae al mando). Mismo layout que VrRadarArm (vr_radar.h). */
 typedef struct { float elbow[3], wrist[3], dorsal[3]; } VrBodyForearm;
 int vrbody_forearm_pose(int side, VrBodyForearm *out);
+
+/* Estado de un brazo del último apply para REPETIR la IK con la mano viva (a más cadencia que el motor): todo en el espacio del usuario (m; orientaciones
+ * en ese mismo espacio, no en el del motor). `rig` y `lim` en unidades del motor; upm = unidades del motor por metro. wrist/hand son el objetivo ya fundido y
+ * grip_p/grip_q la pose del agarre (filtrada) con la que se calculó: la mano viva desplaza ese objetivo con el movimiento rígido de agarre simulado -> agarre vivo.
+ * 1 = válido (brazo movido por la IK en el último apply); 0 = no. */
+typedef struct VrBodyArmLive {
+    VrArmRig rig; VrArmLimits lim;
+    float upm;
+    float shoulder[3];           /* hombro del torso enderezado */
+    float torso[9];              /* marco del torso */
+    float pole[3];               /* hacia dónde apunta el codo (unitario) */
+    float wrist[3];              /* objetivo de la muñeca */
+    float hand[9];               /* orientación objetivo de la pieza mano */
+    float grip_p[3], grip_q[4];  /* agarre (filtrado) del que sale el objetivo */
+    float grip;                  /* agarre efectivo del apply (ya multiplicado por el fundido) */
+    float grip_floor;            /* mínimo del agarre mientras empuña un arma (armed_grip) o golpea (1) */
+    float fade;                  /* peso de fundido 0..1 (suavizado) */
+} VrBodyArmLive;
+int vrbody_arm_live(int side, VrBodyArmLive *out);
+/* Brazo resuelto (espacio del usuario, m): origen de las piezas brazo, antebrazo y mano y sus orientaciones (columnas = ejes locales de la pieza). */
+typedef struct VrBodyArmPose {
+    float shoulder[3], elbow[3], wrist[3];
+    float R_upper[9], R_fore[9], R_hand[9];
+    float err_mm;
+    unsigned flags;              /* VRARM_* */
+} VrBodyArmPose;
+/* Pura. Repite la IK con el agarre vivo (live_p, live_q; cuaternión x,y,z,w): muñeca y mano del objetivo se mueven con D = vivo * inv(agarre simulado), el hombro, el torso y el
+ * codo polar son los del apply. Con el agarre vivo = grip_p/grip_q reproduce la solución del apply. 0 = bien; -1 = entrada no finita o IK inválida. */
+int vrbody_arm_resolve(const VrBodyArmLive *a, const float live_p[3], const float live_q[4], VrBodyArmPose *out);
 
 /* Marco EFECTIVO de la mano del personaje tras la IK, en el espacio del usuario (m): 4x4 columna-mayor (columnas = ejes x, y, z y origen) en el MISMO marco que el
  * agarre entregado por vrpose_get_hands (sin hand_rot_offset ni el giro de cierre de los dedos: -Z hacia los dedos) y el origen en el centro de la palma que resulta de la muñeca resuelta. Si el

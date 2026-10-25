@@ -92,6 +92,8 @@ int vrhands_fetch(VrHandsFrame *out);
  * vrhands_render_busy() sea 0 (el renderer llama a mv_host_hands_done() al terminar de usar el frame); vrhands_unbind();
  * liberar el modelo. Sin mv_host_hands_done() (renderer antiguo) busy no vuelve a 0 hasta la siguiente lectura. */
 int vrhands_render_busy(void);
+/* Fin de la lectura del frame entregado por vrhands_fetch (lo que hace la implementación débil de mv_host_hands_done; un integrador que defina la suya la llama). */
+void vrhands_release(void);
 
 /* Conversión de la pose de mano a/desde WPose (útil para el integrador). */
 WPose vrhands_pose_to_w(const VrHandsPose *p);

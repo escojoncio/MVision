@@ -26,6 +26,9 @@ final class RGRenderer {
     private(set) var hudTexture: MTLTexture?
     /// Vista sRGB de hudTexture por si el pase que la muestrea escribe en un destino lineal (decodifica al muestrear).
     private(set) var hudTextureSRGB: MTLTexture?
+    /// Rect UV (u0, v0, u1, v1; margen del 1 %) de la ventana de menú dentro de hudTexture: las primitivas 2D nuevas respecto al HUD de antes de abrir el menú. nil = usar la capa entera (créditos incluidos).
+    private(set) var hudMenuUV: SIMD4<Float>?
+    private var menuUVBuf = [Float](repeating: 0, count: 4)   // destino reutilizado de mv_vrhost_hud2d_menu_rect
     /// Suavizado bilineal de texels (respeta transparencia). Por defecto nearest.
     var textureFilter = false
     /// true si el destino es sRGB/lineal (se deduce del formato; ajustable antes del primer encode).
@@ -182,7 +185,7 @@ final class RGRenderer {
     private func dropStaleLayer() {
 #if !MV_BENCH
         if hudHQ && mv_vrhost_hud2d_accept(hudHQMode, hudHQView, layerView, layerOverlay ? 1 : 0) == 0 {
-            hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB
+            hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB; hudMenuUV = nil
         }
 #endif
     }
@@ -546,14 +549,14 @@ final class RGRenderer {
         // La capa nueva (retrasada: el trabajador va por detrás de la vista) se rechaza si es de otra vista o, en el menú, no es VL_PANEL: se conserva la anterior válida (arriba) o el HUD de siempre.
         let accepted = usable && mv_vrhost_hud2d_layer(&lMode, &lView) != 0 && mv_vrhost_hud2d_accept(lMode, lView, layerView, ov) != 0
         if !accepted {
-            if hudHQ && !usable { hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB }
+            if hudHQ && !usable { hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB; hudMenuUV = nil }
             hqFull = nil
             return
         }
         let W = Int(w), H = Int(h)
         if full != 0 {
             if r == 1 || hqFull == nil { hqFull = (Array(UnsafeBufferPointer(start: px!, count: W * H * 4)), W, H, seq) }
-            if hudHQ { hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB }
+            if hudHQ { hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB; hudMenuUV = nil }
             return
         }
         hqFull = nil
@@ -575,6 +578,11 @@ final class RGRenderer {
         }
         hudTexture = hudHQRing[hudHQIdx]; hudTextureSRGB = hudHQRingSRGB[hudHQIdx]
         hudHQ = true; hudHQMode = lMode; hudHQView = lView
+        if lMode == 0 && mv_vrhost_hud2d_menu_rect(&menuUVBuf) != 0 {
+            hudMenuUV = SIMD4<Float>(max(0, menuUVBuf[0] - 0.01), max(0, menuUVBuf[1] - 0.01), min(1, menuUVBuf[2] + 0.01), min(1, menuUVBuf[3] + 0.01))
+        } else if lMode == 0 && (lView & 255) == 10 && hudMenuUV != nil {
+            // selector (VRV_R_SELECTOR = 10) sin rect en esta capa: se conserva el último válido (nil solo al salir del selector)
+        } else { hudMenuUV = nil }
 #endif
     }
 

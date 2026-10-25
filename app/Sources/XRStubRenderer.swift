@@ -9,6 +9,7 @@ final class RGRenderer {
     /// Textura del panel 2D (HUD/menús). Opcional; el bucle la dibuja a ~1,5 m si no es nil.
     var hudTexture: MTLTexture?
     var hudTextureSRGB: MTLTexture?
+    var hudMenuUV: SIMD4<Float>?
     var linearOutput = false
 
     init(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat, sampleCount: Int, viewCount: Int) {

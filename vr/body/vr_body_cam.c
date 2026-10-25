@@ -12,6 +12,7 @@ static int cam_view(VrBodyView *out) {
     for (int i = 0; i < 3; i++) { out->eye[i] = (float)r->eye[i]; out->p_ref[i] = r->p_ref[i]; }
     out->theta_deg = r->theta_play_deg;
     out->units_per_m = r->units_per_m;
+    out->gaze_yaw_deg = vrcam_view_yaw_deg();       /* mirada real del usuario (la usa torso_follow) */
     return 1;
 }
 

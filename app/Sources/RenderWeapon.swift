@@ -84,9 +84,20 @@ final class WeaponRenderer {
         var tex: MTLTexture; var w: Int; var h: Int; var seen = 0
         init(tex: MTLTexture, w: Int, h: Int) { self.tex = tex; self.w = w; self.h = h }
     }
+    /// Mallas DINÁMICAS (VRH_MF_DYNAMIC: guante, vértices nuevos en cada frame): solo se cachean los índices (por mesh_id; cambia si cambia la topología).
+    private final class IdxGPU {
+        var ibuf: MTLBuffer; var nidx: Int; var seen = 0
+        init(ibuf: MTLBuffer, nidx: Int) { self.ibuf = ibuf; self.nidx = nidx }
+    }
+    private var idxCache: [UInt32: IdxGPU] = [:]
     private var meshCache: [UInt32: MeshGPU] = [:]
     private var texCache: [UInt32: TexGPU] = [:]
     private var tick = 0
+    /// Anillo de búferes para los vértices de las mallas dinámicas (el shader los lee como `device`, no `constant`: setVertexBytes no sirve). Cada encode usa el hueco tick % dynSlots
+    /// (6 = 3 fotogramas en vuelo x 2 ojos del modo no layered) y reparte dynMeshes bloques de dynBlock bytes (un bloque por malla).
+    private var dynRing: [MTLBuffer] = []
+    private var dynUsed = 0
+    private static let dynSlots = 6, dynMeshes = 8, dynBlock = 4096
     /// Último frame recibido (para el segundo ojo del modo no layered: misma lista, no se vuelve a pedir).
     private var lastFrame: VrHandsFrame?
     private static let staleTicks = 600   // llamadas a encode sin verlo antes de liberar una malla/textura
@@ -190,7 +201,43 @@ final class WeaponRenderer {
     private func evictStale() {
         if tick % 120 != 0 { return }
         meshCache = meshCache.filter { tick - $0.value.seen <= WeaponRenderer.staleTicks }
+        idxCache = idxCache.filter { tick - $0.value.seen <= WeaponRenderer.staleTicks }
         texCache = texCache.filter { tick - $0.value.seen <= WeaponRenderer.staleTicks }
+    }
+
+    /// Dibuja una malla dinámica (guante): los vértices (<= 4096 bytes) se copian a un bloque del anillo dynRing, los índices del caché. La matriz `model` es la identidad (vértices ya en el espacio VR).
+    private func drawDynamic(_ encoder: MTLRenderCommandEncoder, _ m: VrHandsMesh, texture: MTLTexture?) {
+        let nv = Int(m.nverts), ni = Int(m.nidx)
+        let vlen = nv * MemoryLayout<VrHandsVertex>.stride
+        guard nv > 0, ni >= 3, ni % 3 == 0, vlen <= WeaponRenderer.dynBlock, dynUsed < WeaponRenderer.dynMeshes, let v = m.verts, let ix = m.idx else { return }
+        for i in 0..<ni where Int(ix[i]) >= nv { return }
+        if dynRing.isEmpty {
+            var ring: [MTLBuffer] = []
+            for k in 0..<WeaponRenderer.dynSlots {
+                guard let b = device.makeBuffer(length: WeaponRenderer.dynMeshes * WeaponRenderer.dynBlock, options: .storageModeShared) else { return }
+                b.label = "WPN vértices dinámicos \(k)"
+                ring.append(b)
+            }
+            dynRing = ring
+        }
+        let vb = dynRing[tick % WeaponRenderer.dynSlots]
+        let voff = dynUsed * WeaponRenderer.dynBlock
+        dynUsed += 1
+        (vb.contents() + voff).copyMemory(from: UnsafeRawPointer(v), byteCount: vlen)
+        let g: IdxGPU
+        if let c = idxCache[m.mesh_id], c.nidx == ni {
+            c.seen = tick; g = c
+        } else {
+            guard let ib = device.makeBuffer(bytes: UnsafeRawPointer(ix), length: ni * 2, options: .storageModeShared) else { return }
+            ib.label = "WPN índices dinámicos \(m.mesh_id)"
+            g = IdxGPU(ibuf: ib, nidx: ni); g.seen = tick
+            idxCache[m.mesh_id] = g
+        }
+        var d = WpnDrawU(model: WeaponRenderer.matrix(m))
+        encoder.setVertexBuffer(vb, offset: voff, index: 0)                                // VR_WPN_BUF_VERTS
+        encoder.setVertexBytes(&d, length: MemoryLayout<WpnDrawU>.stride, index: 2)        // VR_WPN_BUF_DRAW
+        encoder.setFragmentTexture(texture, index: 0)
+        encoder.drawIndexedPrimitives(type: .triangle, indexCount: g.nidx, indexType: .uint16, indexBuffer: g.ibuf, indexBufferOffset: 0)
     }
 
     private static func matrix(_ m: VrHandsMesh) -> simd_float4x4 {
@@ -205,6 +252,7 @@ final class WeaponRenderer {
     /// Llamar con el encoder del ÚLTIMO segmento de escena (el que resuelve el MSAA), tras los lotes opacos del juego.
     func encode(encoder: MTLRenderCommandEncoder, views: [simd_float4x4], projections: [simd_float4x4], layered: Bool, viewIndex: Int = 0) {
         tick += 1
+        dynUsed = 0
         defer { evictStale() }
         // El frame de mv_host_hands (y los vértices/atlas a los que apunta) debe vivir hasta que se termine de usar: se avisa al
         // salir del último uso (layered: este mismo encode; no layered: el segundo ojo reutiliza la lista del primero, así que
@@ -269,6 +317,10 @@ final class WeaponRenderer {
         let white = whiteTexture
         for i in 0..<count {
             let m = meshes[i]
+            if m.flags & UInt32(VRH_MF_DYNAMIC) != 0 {
+                drawDynamic(encoder, m, texture: m.tex_id != 0 ? (texById[m.tex_id] ?? white) : white)
+                continue
+            }
             guard let g = mesh(for: m) else { continue }
             var d = WpnDrawU(model: WeaponRenderer.matrix(m))
             encoder.setVertexBuffer(g.vbuf, offset: 0, index: 0)                           // VR_WPN_BUF_VERTS

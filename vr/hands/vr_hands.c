@@ -281,11 +281,12 @@ void vrhands_post_clear(void) {
 }
 
 /* El renderer avisa de que ya no usa el frame entregado por mv_host_hands (ni sus punteros a vértices/atlas). */
-__attribute__((weak)) void mv_host_hands_done(void) {
+void vrhands_release(void) {
     pthread_mutex_lock(&g_mx);
     g_reading = -1;
     pthread_mutex_unlock(&g_mx);
 }
+__attribute__((weak)) void mv_host_hands_done(void) { vrhands_release(); }
 int vrhands_render_busy(void) {
     pthread_mutex_lock(&g_mx);
     int b = g_reading >= 0;

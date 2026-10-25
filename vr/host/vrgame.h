@@ -43,6 +43,10 @@ void mv_vrgame_set_grip_offset(const float p[3], const float q[4]);
 typedef struct { float elbow[3], wrist[3], dorsal[3]; } MvVrForearm;   /* mismo layout que VrRadarArm */
 /* Antebrazo tras la IK del último VBlank (espacio recentrado, m). 1 = válido; 0 = el llamador usa el mando. */
 int32_t mv_vrgame_forearm(int32_t side, MvVrForearm *out);
+/* Antebrazo del GUANTE (el que se dibuja a la cadencia del renderer): la IK del último fotograma del motor repetida con el agarre ACTUAL del mando (vrbody_arm_resolve), mismo marco y
+ * mismos datos que mv_vrgame_forearm. dev_mm = desvío (mm) del agarre vivo respecto al agarre con el que se simuló la IK; age_ms = edad de esa IK; ambos pueden ser NULL.
+ * 1 = válido; 0 = no hay guante vivo (el llamador cae a mv_vrgame_forearm o al mando). */
+int32_t mv_vrgame_forearm_live(int32_t side, MvVrForearm *out, float *dev_mm, float *age_ms);
 /* Pose del agarre (marco de vr/body) como matriz 4x4 columna-mayor; 1 si el mando está rastreado. */
 int32_t mv_vrgame_hand_matrix(int32_t side, float m[16]);
 /* Marcos de depuración (m, espacio recentrado; 4x4 columna-mayor: columnas = ejes x, y, z y origen). kind: 0 = lo que pide el mando (agarre con el
@@ -105,6 +109,9 @@ void mv_vrgame_set_missile_view(int32_t mode);
 struct BridgeState;
 void vrgame_reset(void);                       /* al cargar el EXE */
 void vrgame_set_enabled(int body_ok, int fire_ok);   /* HLE enlazadas con éxito (sin ellas no se mueven los brazos / no se dispara) */
+/* Manos propias (guantes de vr/hands/vr_glove): on = modo gpu con la IK enlazada; vram = VRAM del emulador (1024 x 512 halfwords) de la que se decodifica el atlas. Hilo de emulación,
+ * antes de vrgame_pad. Con on = 0 (o sin guante construido) las piezas de los brazos del juego se dibujan como siempre; con el guante listo se ocultan las de cada brazo movido por la IK (own_hands). */
+void vrgame_set_gloves(int on, const uint16_t *vram);
 uint16_t vrgame_pad(uint16_t pad, const struct BridgeState *bs, uint8_t *ram);   /* una vez por VBlank, antes de aplicar el mando */
 /* Pruebas (bodyrun): función llamada al principio de vrgame_pad en cada VBlank (hilo de emulación) con el nº de VBlank desde que se instaló,
  * el mando que pidió la app y el puente del VBlank anterior; devuelve el mando a usar. Dentro puede llamar a mv_vrgame_set_hand,

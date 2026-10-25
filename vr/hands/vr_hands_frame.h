@@ -32,7 +32,10 @@ typedef struct { int32_t valid; float pos[3]; float rot[4]; } VrHandsPose;
 typedef struct { float pos[3]; float nrm[3]; float uv[2]; uint8_t rgba[4]; } VrHandsVertex;
 typedef char vrhands_check_vertex_size[(sizeof(VrHandsVertex) == 36) ? 1 : -1];
 
-enum { VRH_MF_HELD = 1 };   /* VrHandsMesh.flags: objeto suelto (no es pieza del arma) */
+/* VrHandsMesh.flags: HELD = objeto suelto (no es pieza del arma); DYNAMIC = los vértices cambian en cada frame (manos/antebrazos del guante, vr_glove.h): el renderer NO cachea el
+ * búfer de vértices (los copia cada fotograma a un anillo de búferes; nverts * 36 <= 4096) y cachea solo los índices por mesh_id (que cambia si cambia la topología). El renderer ignora `model`
+ * (identidad: los vértices ya vienen en el espacio VR). */
+enum { VRH_MF_HELD = 1, VRH_MF_DYNAMIC = 2 };
 
 typedef struct {
     uint32_t mesh_id;

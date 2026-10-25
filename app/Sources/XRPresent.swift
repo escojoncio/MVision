@@ -689,7 +689,7 @@ final class XRPresenter {
 
     /// `hud`: panel 2D (textura del renderer, ya la vista sRGB si el destino es lineal). `eyePx`/`p00`: ancho en píxeles de un ojo y P[0][0].
     func compose(gs: MvVrGameState, head: simd_float4x4, dt: Float, hud: MTLTexture?, eyePx: Float, p00: Float,
-                 gameView: simd_float4x4, linear: Bool, wrist: Wrist? = nil, ipd: Float = 0.063, shot: UInt32 = 0, gameCamScene: Bool = false, engineHealthy: Bool = true, stereo2DInside: Bool = false) -> Result {
+                 gameView: simd_float4x4, linear: Bool, wrist: Wrist? = nil, ipd: Float = 0.063, shot: UInt32 = 0, gameCamScene: Bool = false, engineHealthy: Bool = true, stereo2DInside: Bool = false, hudMenuUV: SIMD4<Float>? = nil) -> Result {
         // 1) qué toca mostrar. view_kind 2 (vr_view.h, VRV_K_ENGINE) = cinemática del motor con 3D y cámara del guion; los vídeos pregrabados (3), los menús, el códec/radio,
         //    las cargas, la pausa y las ventanas de armas/objetos (0) siguen en la pantalla de cine.
         var target: Display = gs.view_mode == 1 ? .world : .cinema
@@ -858,24 +858,28 @@ final class XRPresenter {
                 }
             }
             var it = XRDrawItem(kind: .panel, texture: h)
+            // Con rect de la ventana (hudMenuUV) solo ella va en el panel de la mano: el resto de la capa (créditos que el juego dibuja durante la partida) se queda en los paneles del HUD (6).
+            let mr = hudMenuUV ?? SIMD4<Float>(0, 0, 1, 1)
+            let mw = mr.z - mr.x, mh = (mr.w - mr.y) * 0.75, mmax = max(mw, mh, 0.01)     // tamaño relativo (ancho, alto con el aspecto 4:3 de la capa)
             if let hm = onHand {
                 it.model = hm
-                it.size = SIMD2<Float>(XRMenuPanelLayout.handWidth, XRMenuPanelLayout.handWidth * 0.75)
+                if hudMenuUV != nil { it.size = SIMD2<Float>(XRMenuPanelLayout.handWidth * mw / mmax, XRMenuPanelLayout.handWidth * mh / mmax) }
+                else { it.size = SIMD2<Float>(XRMenuPanelLayout.handWidth, XRMenuPanelLayout.handWidth * 0.75) }
                 it.distance = simd_length(XRMath.position(hm) - hp)
             } else {
                 it.model = cfg.follow2D ? XRFollow.model(follow, distance: XRMenuPanelLayout.distance, drop: XRMenuPanelLayout.drop)
                                         : XRMenuPanelLayout.model(position: hp, yaw: hudYaw)
-                it.size = SIMD2<Float>(XRMenuPanelLayout.width, XRMenuPanelLayout.width * 0.75)
+                it.size = SIMD2<Float>(XRMenuPanelLayout.width * mw, XRMenuPanelLayout.width * mh)       // sin rect: mw = 1, mh = 0,75 (la capa entera)
                 it.distance = XRMenuPanelLayout.distance
             }
-            it.uvrect = SIMD4<Float>(0, 0, 1, 1)
+            it.uvrect = mr
             it.opacity = 1
             it.onTop = true
             r.items.append(it)
         }
 
         // 6) paneles del HUD (mundo y diorama; en el cine el HUD ya va dentro de la imagen)
-        if shown != .cinema && shown != .stereo && cfg.hudPanels && !overlay2D, let h = hud {
+        if shown != .cinema && shown != .stereo && cfg.hudPanels && (!overlay2D || hudMenuUV != nil), let h = hud {
             let frame = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw)
             let sc = cfg.hudScale
             var wm: (n: SIMD3<Float>, ok: Bool)?
@@ -890,6 +894,8 @@ final class XRPresenter {
                 }
             }
             for (i, rg) in Self.hudRegions.enumerated() {
+                // Con la ventana del menú en la mano, las zonas del HUD que cruzan su rect no se dibujan (ya va en el panel de la mano); las demás siguen (vida, créditos...).
+                if overlay2D, let m = hudMenuUV, m.x < rg.u1 && m.z > rg.u0 && m.y < rg.v1 && m.w > rg.v0 { continue }
                 var it = XRDrawItem(kind: .panel, texture: h)
                 if Self.wristSlot[i] >= 0, let w = wrist, let m = wm, m.ok {
                     // Plano del radar (+0,002 m hacia el espectador para no solaparse con el cuerpo), hacia el codo (-derecha) o la mano.
