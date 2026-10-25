@@ -239,10 +239,10 @@ static int grow(void **p, size_t *cap, size_t need, size_t esz) {
 
 
 /* ------------------------------------------------------------------------------------------------ render nativo (vr/native) */
-/* El 3D del mundo y los efectos de pantalla salen SIEMPRE del render nativo. Ya no existe el modo «gpu» (ni en el menú VR ni en MV_RENDER): la lista de la GPU solo alimenta
- * la capa 2D (HUD, menús, radio, códec, textos, radar), los eventos de VRAM y las marcas de efectos. `render_req` se conserva (siempre 1) por compatibilidad de la interfaz. */
+/* Modo de render: 0 = gpu (DEFECTO: el 3D sale de la lista de la GPU con los vértices de vista de la GTE en alta precisión, estilo PGXP; el render nativo no captura ni dibuja),
+ * 1 = nativo (MV_RENDER=nativo: la escena que el extractor lee de la RAM; la lista de la GPU solo alimenta la capa 2D, los eventos de VRAM y las marcas de efectos). */
 #ifndef MV_RENDER_DEFAULT_NATIVE
-#define MV_RENDER_DEFAULT_NATIVE 1
+#define MV_RENDER_DEFAULT_NATIVE 0
 #endif
 static NsBridge *_Atomic ns_br;          /* se crea una sola vez (ns_bridge_get); nunca se destruye */
 static pthread_mutex_t NSMX = PTHREAD_MUTEX_INITIALIZER;
@@ -271,7 +271,7 @@ static _Atomic int hands_new = 1;        /* menú VR «Manos: nuevas / originale
 void mv_vrhost_set_hands_new(int on) { atomic_store(&hands_new, on ? 1 : 0); }
 int mv_vrhost_hands_new(void) { return atomic_load(&hands_new); }
 /* Predicado ÚNICO: las manos nuevas están en uso (ajuste activado Y render nativo listo). Lo usan el cierre de la escena, la supresión del puño deformado y el punto de golpe. */
-static int hands_active(void) { return atomic_load(&hands_new) && atomic_load(&renderer_ready); }
+static int hands_active(void) { return atomic_load(&hands_new) && atomic_load(&renderer_ready) && atomic_load(&render_req) != 0; }
 int mv_vrhost_hands_active(void) { return hands_active(); }
 static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, void *u);
 static void hands_precapture(uint8_t *ram);
@@ -283,9 +283,10 @@ static void ns_frame_check(void);
 static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u);
 _Static_assert(VR_SKIP_WORLD == NS_SKIP_WORLD && VR_SKIP_FX == NS_SKIP_FX, "las marcas de batch y la decisión del consumidor deben coincidir");
 
-void mv_vrhost_set_render_mode(int mode) { (void)mode; atomic_store(&render_req, 1); }   /* sin efecto: solo hay render nativo */
-int mv_vrhost_render_only_native(void) { return 0; }
-int mv_vrhost_render_mode(void) { return 1; }
+void mv_vrhost_set_render_mode(int mode) { if (!atomic_load(&render_locked)) atomic_store(&render_req, mode <= 0 ? 0 : 1); }   /* 0 gpu, 1 (o más) nativo */
+int mv_vrhost_render_only_native(void) { return 0; }   /* el modo «solo nativo» ya no existe */
+int mv_vrhost_render_mode(void) { return atomic_load(&render_req) ? 1 : 0; }
+static int native_mode(void) { return atomic_load(&render_req) != 0; }   /* modo nativo pedido (el defecto es gpu) */
 int mv_vrhost_render_env_locked(void) { return atomic_load(&render_locked); }
 void mv_vrhost_native_renderer_ready(int ready) { atomic_store(&renderer_ready, ready != 0); }
 int mv_vrhost_native_available(void) { return ns_hook_has_extractor() && ns_hook_installed() && atomic_load(&renderer_ready); }
@@ -500,7 +501,7 @@ static void ns_frame_check(void) {
 /* ¿Esta escena de la lista ADMITE el 3D nativo? Solo cámara VR en primera persona (no cinemáticas) y 3D de mundo válido. No depende del modo ni del estado del puente:
  * el productor no decide nada, solo marca (mark_3d); quien dibuja decide con ns_native_decide y su estado real de ese fotograma (A1). */
 static int native_for_scene(const VrCamRecord *r, const VrScene *sc, int cine_cand) {
-    return r && r->active && !cine_cand && sc->has_3d && sc->world_valid && view.kind != VRV_K_ENGINE;
+    return native_mode() && r && r->active && !cine_cand && sc->has_3d && sc->world_valid && view.kind != VRV_K_ENGINE;   /* en el modo gpu nada se marca: la lista se dibuja entera */
 }
 /* Marca los batches 3D (NO quita ninguno): kind 0 -> VR_SKIP_WORLD, kind 1 -> VR_SKIP_FX. Con sc.native_3d = 0 no hay marcas y se dibuja todo. */
 static void mark_3d(Slot *s) {
@@ -522,7 +523,7 @@ static int dump_stage_mode(void) {
 }
 static int ns_gate(void *u) {
     (void)u;
-    if (atomic_load(&renderer_ready)) return 1;
+    if (atomic_load(&render_req) && atomic_load(&renderer_ready)) return 1;
     return dump_stage_mode() && atomic_load(&dump_state) == DS_REQ;
 }
 
@@ -729,6 +730,36 @@ static int list_uploads_cover_display(const GpuDrawList *l) {
     return vrview_uploads_cover(sum, l->disp.w, l->disp.h, l->disp.depth24);
 }
 
+/* Registro «[gpu3d]» (hilo de emulación, una línea por segundo como mucho): qué hizo el ensamblador con las primitivas de las listas de ese segundo. Es el único diagnóstico del visor. */
+#define GPU3D_NEAR_EYE_M 0.25f   /* modo gpu: ningún triángulo 3D con un vértice a menos de esta distancia (m) del ojo del motor (VrSceneOpts.eye_near_m) */
+static struct { uint32_t lists, prims, p3d, tris3d, p2d, near_drop, near_clip, behind_drop, nohp; int cam_head; uint64_t t_log; } g3;
+static void gpu3d_note(const VrScene *sc, const VrCamRecord *r) {
+    const VrStats *st = &sc->stats;
+    g3.lists++;
+    g3.prims += st->n_poly + st->n_rect + st->n_line;
+    g3.p3d += st->n_poly3d;
+    g3.tris3d += st->n_tris3d;
+    g3.p2d += st->n_poly2d + st->n_rect + st->n_line;
+    g3.near_drop += st->n_near_eye;
+    g3.near_clip += st->n_clipped;
+    g3.behind_drop += st->drop_behind;
+    g3.nohp += st->drop_partial;
+    g3.cam_head = r && r->active;
+}
+static void gpu3d_log(void) {
+    uint64_t t = mono_ns();
+    if (t - g3.t_log < 1000000000ull) return;
+    uint64_t t0 = g3.t_log;
+    g3.t_log = t;
+    if (!t0) return;   /* la primera llamada solo arranca el reloj */
+    fprintf(stderr, "[gpu3d] fotograma=%u listas=%u prims=%u 3D_con_hp=%u (triangulos=%u) plano2D=%u cerca_descartados=%u cerca_recortados=%u detras_descartados=%u 3D_sin_hp(respaldo)=%u | render=%s hp=%d vista=%s camara=%s\n",
+            (unsigned)hle_frame_count(), g3.lists, g3.prims, g3.p3d, g3.tris3d, g3.p2d, g3.near_drop, g3.near_clip, g3.behind_drop, g3.nohp,
+            native_mode() ? "nativo" : "gpu", gte_hp_enabled(), vrview_cine_type(view.kind), g3.cam_head ? "head" : "game");
+    int ch = g3.cam_head;
+    memset(&g3, 0, sizeof g3);
+    g3.cam_head = ch; g3.t_log = t;
+}
+
 static void build_one(const GpuDrawList *l, int si) {
     /* Los polígonos de una lista se transformaron con la cámara construida un frame del motor ANTES de que el VBlank lea la
      * RAM: la matriz de vista del puente puede ser ya la siguiente. El registro de cámara de la lista (vrcam) trae la correcta. */
@@ -738,6 +769,7 @@ static void build_one(const GpuDrawList *l, int si) {
     int32_t save_pos[3];
     int16_t save_axes[3][3];
     VrSceneOpts o = sopts;
+    if (!native_mode()) o.eye_near_m = GPU3D_NEAR_EYE_M;   /* modo gpu: nada pegado al ojo, recorte contra el plano cercano (ver vr_scene.h) */
     int cine_cut = 0;
     {   /* Cinemática del motor (ni mundo ni vídeo/2D puros): la cámara es la del guion, nunca la de la cabeza. Planos y origen fijo por plano. */
         int rs = view.reason;
@@ -792,12 +824,14 @@ static void build_one(const GpuDrawList *l, int si) {
     int cover_n = sc.filter.active ? sc.filter.n_covers : 0;
     int keep3b = sc.filter.n_scan > 0 || sc.filter.frame_on || (sc.has_3d && sc.world_valid);
     if (cine_cand && (last_scene3d || sc.stats.n_tris3d >= 12)) keep3b = 0;   /* cinemática del motor: fundidos y destellos van al panel 2D de la pantalla 3D (el post-proceso por ojo no se aplica allí) */
+    if (!native_mode()) keep3b = 0;   /* modo gpu: sin post-proceso por ojo, fundidos, destellos, gafas y marco de máscara van al panel 2D (solo las tiras de agua, que no tienen panel, quedan en la clase 3 sin dibujar) */
     if (rc == 0 && o.screen_filter && sc.filter.active && sc.filter.n_strips == 0 && sc.filter.n_polys == 0 && !keep3b) {
         VrSceneOpts o2 = o;
         o2.screen_filter = 0;
         rc = vr_scene_build(hl, &bs, &o2, &sc);
     }
     double ms = (double)(mono_ns() - t0) * 1e-6;
+    if (rc == 0) gpu3d_note(&sc, r);
     if (rc == 0 && scene_tap) scene_tap(hl, &bs, &sc, l->host_frame);
 
     if (rc == 0 && list_tap) list_tap(l, hl, &sc, &o, &bs);
@@ -841,11 +875,15 @@ static void build_one(const GpuDrawList *l, int si) {
     if (ok && hc_on && r && r->active && sc.user_space && sc.world_valid) {
         VrHcMap hm;
         if (vrhc_map_from_record(&hm, r)) {
+            float jt[16][3];
+            int nj = native_mode() ? 0 : vrcam_model_joints(emu_ram, jt, 16);
             pthread_mutex_lock(&HCMX);
             float dx = hc_last_eye[0] - hm.eye[0], dz = hc_last_eye[2] - hm.eye[2];
             if (hc_have_eye && dx * dx + dz * dz > (4.0f * hm.upm) * (4.0f * hm.upm)) vrhc_reset();   /* salto (otra zona): sin fantasmas del mundo anterior */
             memcpy(hc_last_eye, hm.eye, sizeof hc_last_eye); hc_have_eye = 1;
-            /* La colisión de la cabeza se alimenta SOLO de la escena nativa (ns_solid_tap); la lista de la GPU ya no aporta geometría (aquí solo se fija el mapa usuario <-> mundo) */
+            /* Modo nativo: la colisión de la cabeza se alimenta SOLO de la escena nativa (ns_solid_tap) y aquí solo se fija el mapa usuario <-> mundo. Modo gpu: no hay captura nativa
+             * (ns_gate), así que el escenario sale de la lista de la GPU (lo que ve la cámara). */
+            if (!native_mode()) vrhc_feed_scene(&hm, &sc, (const float (*)[3])jt, nj);
             pthread_mutex_unlock(&HCMX);
             slot[si].hcmap = hm;
         }
@@ -916,6 +954,7 @@ static void publish_state(void) {
         vin.menu_open = core && bs.menu_open; vin.stopped = core && bs.stopped;
         vin.dead = (uint8_t)(core && (((bs.valid & BRIDGE_OK_LIFE) && bs.life_max > 0 && bs.life <= 0) || (bs.player_status & BRIDGE_PS_GAME_OVER) || (bs.game_status & BRIDGE_GS_GAME_OVER)));
         vin.scene3d = (uint8_t)last_scene3d; vin.video = (uint8_t)last_video;
+        vin.gpu3d = (uint8_t)!native_mode();   /* modo gpu: una escena 3D del motor es ENGINE sin mirar la cobertura nativa y se entra sin histéresis (vr_view.h) */
         {   /* FMV: el decodificador de vídeo entregó píxeles en los últimos 12 VBlank (~0,24 s; un FMV da un fotograma cada 3-4) */
             uint32_t vb = (uint32_t)hle_frame_count(), tot = mdec_out_words_total();
             if (tot - mdec_seen_total >= 64u) mdec_last_vb = vb ? vb : 1u;
@@ -930,7 +969,7 @@ static void publish_state(void) {
         if (view.changed) {     /* cada cambio de modo / clase / motivo de la vista queda en el registro con su causa (banderas del puente incluidas) */
             char vb[512];
             vrview_describe(&view, &vin, vb, sizeof vb);
-            fprintf(stderr, "%s | vb=%u modoBruto=%d | gs=%08x ps=%08x postura=%d 1p=%d cam1p=%d camtipo=%d\n", vb, (unsigned)hle_frame_count(), view.want, (unsigned)bs.game_status, (unsigned)bs.player_status, (int)bs.stance, (int)bs.first_person, (int)bs.cam_first_person, (int)bs.cam_type);
+            fprintf(stderr, "%s | vb=%u modoBruto=%d render=%s | gs=%08x ps=%08x postura=%d 1p=%d cam1p=%d camtipo=%d\n", vb, (unsigned)hle_frame_count(), view.want, native_mode() ? "nativo" : "gpu", (unsigned)bs.game_status, (unsigned)bs.player_status, (int)bs.stance, (int)bs.first_person, (int)bs.cam_first_person, (int)bs.cam_type);
         }
         if (view.changed & VRV_CH_KIND) {   /* qué se le enseña al usuario en cine (fmv / motor / respaldo) y por qué */
             char cb[640];
@@ -1261,7 +1300,7 @@ static int dump_wants_stage(void) {   /* hay una pareja pendiente que aún neces
     return r;
 }
 static void dump_at_stage(Cpu *c) {
-    if (!dump_stage_mode() && !atomic_load(&renderer_ready) && !dump_wants_stage()) return;
+    if (!dump_stage_mode() && !(atomic_load(&render_req) && atomic_load(&renderer_ready)) && !dump_wants_stage()) return;
     dump_point = 1;
     dump_capture(c, (uint32_t)hle_frame_count(), NULL);   /* no hace nada si no hay un pedido sin atender */
     dump_point = 0;
@@ -1296,6 +1335,8 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
     uint64_t lp = atomic_load(&last_poll_ns), now = mono_ns();
     int want = lp && now - lp < 1500000000ull;
     capture_set(want);
+    if (cap_on && !gte_hp_enabled()) gpu_capture_hiprec(1);   /* el 3D de la lista necesita los vértices de vista de la GTE en alta precisión (también en el modo gpu tras cualquier apagado externo) */
+    gpu3d_log();
     if (!cap_on) return;   /* sin consumidor de escenas no hay lista: frame_hook vuelca sin ella */
     gpu_capture_vblank();
     for (;;) {
@@ -1487,9 +1528,10 @@ void mv_vrhost_install(void) {
         ns_bridge_get();
         const char *e = getenv("MV_RENDER");
         if (e && *e) {
-            /* MV_RENDER solo admite «nativo» (el defecto). «gpu» y «solo-nativo» ya no existen: se avisa y se ignora (nunca se dibuja el 3D de la lista de la GPU). */
+            /* MV_RENDER=gpu (defecto) | nativo. «solo-nativo» ya no existe: se avisa y se ignora. */
             if (!strcmp(e, "nativo") || !strcmp(e, "native")) { atomic_store(&render_req, 1); atomic_store(&render_locked, 1); }
-            else fprintf(stderr, "[vrhost] MV_RENDER=%s ignorado: el 3D sale siempre del render nativo\n", e);
+            else if (!strcmp(e, "gpu")) { atomic_store(&render_req, 0); atomic_store(&render_locked, 1); }
+            else fprintf(stderr, "[vrhost] MV_RENDER=%s ignorado: valores admitidos gpu (defecto) y nativo\n", e);
         }
         ns_extract_register();
     }

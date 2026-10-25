@@ -214,6 +214,7 @@ typedef struct {
     uint32_t chk_bad[4];      /* ... los que NO reproducen su SXY (más de coh_px): [0] normales, [1] saturados, [2] detrás de la cámara, [3] ambiguos */
     uint32_t drop_incoh;      /* triángulos descartados por la red de seguridad (opts.coherence) */
     uint32_t incoh[VR_INC_N]; /* ... por causa (VR_INC_*) */
+    uint32_t n_near_eye;      /* modo gpu (opts.eye_near_m): triángulos descartados por tener un vértice a menos de eye_near_m del ojo del motor */
 } VrStats;
 
 #define VR_FILTER_ROWS 512
@@ -339,6 +340,13 @@ typedef struct {
     float coh_stretch;        /* reservado (0 = desactivado) */
     float coh_synth_edge_m;   /* arista máxima (m) de los triángulos con vértices reconstruidos o derivados (no salen de la GTE); def. 20 */
     float coh_flag_edge_m;    /* arista máxima (m) de los triángulos con algún vértice dudoso (ambiguo / saturado / detrás / reconstruido / derivado / desplazamiento de proyección); def. 32 */
+
+    /* --- modo gpu (el 3D de la lista de la GPU con vértices de vista de la GTE; al final: 0 = comportamiento anterior) ---
+     * eye_near_m > 0: (1) se descarta todo triángulo 3D con algún vértice a menos de eye_near_m metros del ojo del motor (distancia euclídea en el espacio de vista, en metros del espacio de
+     * salida: opts.scale, y opts.user_k si user_map_on); VrStats.n_near_eye. Es lo que pega al ojo (efectos, partes del propio cuerpo) y nunca debe verse proyectado sobre la cara.
+     * (2) el recorte contra el plano z = near_units se hace SIEMPRE (como engine_near_clip = 1 con clip forzado): un triángulo parcialmente delante se recorta (n_clipped), uno entero
+     * detrás se descarta (drop_behind), y un triángulo que lleva GPU_VF_BEHIND en algún vértice pero no tiene ninguno realmente detrás del plano (dato incoherente) se descarta también (drop_behind). */
+    float eye_near_m;
 } VrSceneOpts;
 
 VrSceneOpts vr_scene_opts_default(void);

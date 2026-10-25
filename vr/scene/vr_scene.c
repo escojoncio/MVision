@@ -666,7 +666,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 if ((uf & GPU_VF_AMBIG) && (uf & (GPU_VF_SAT | GPU_VF_BEHIND)) && !(o.recon_ambig && nv == 4 && quad_coherent(op))) { out->stats.drop_ambig++; fate_set(i, VR_FATE_AMBIG); continue; }
                 if ((uf & GPU_VF_DERIVED) && o.drop_derived) { out->stats.drop_derived++; fate_set(i, VR_FATE_DERIVED); continue; }
                 out->stats.n_poly3d++;
-                int clipmode = (uf & GPU_VF_BEHIND) != 0 || o.clip_all_near;
+                int clipmode = (uf & GPU_VF_BEHIND) != 0 || o.clip_all_near || o.eye_near_m > 0;
                 if (uf & GPU_VF_BEHIND) out->stats.n_poly_behind++;
                 CV cv[4];
                 int ofs_fixed = 0;
@@ -690,9 +690,21 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                     int nanv = 0, near = 0, behind = 0;
                     for (int k = 0; k < 3; k++) {
                         if (!isfinite(g3[k]->p[0]) || !isfinite(g3[k]->p[1]) || !isfinite(g3[k]->p[2])) nanv = 1;
-                        else if (g3[k]->p[2] < o.near_units) { if (o.engine_near_clip) near = 1; else behind = 1; }
+                        else if (g3[k]->p[2] < o.near_units) { if (o.engine_near_clip || o.eye_near_m > 0) near = 1; else behind = 1; }
                     }
                     if (nanv) { out->stats.drop_nan++; fate_set(i, VR_FATE_NAN); continue; }
+                    if (o.eye_near_m > 0) {   /* modo gpu: nada a menos de eye_near_m del ojo (ver VrSceneOpts.eye_near_m) */
+                        double ke = (double)o.scale * (o.user_map_on && o.user_k > 0 ? (double)o.user_k : 1.0), dmin = 1e30;
+                        int tb = 0;
+                        for (int k = 0; k < 3; k++) {
+                            const float *a = g3[k]->p;
+                            double d = sqrt((double)a[0]*a[0] + (double)a[1]*a[1] + (double)a[2]*a[2]) * ke;
+                            if (d < dmin) dmin = d;
+                            tb |= (op->v[idx[q][k]].vflags & GPU_VF_BEHIND) != 0;
+                        }
+                        if (dmin < (double)o.eye_near_m) { out->stats.n_near_eye++; fate_set(i, VR_FATE_NEAR); continue; }
+                        if (tb && !near) { out->stats.drop_behind++; fate_set(i, VR_FATE_BEHIND); continue; }   /* BEHIND declarado y ningún vértice detrás del plano: dato incoherente */
+                    }
                     {   /* red de seguridad (§56): triángulo con vértices incoherentes -> fuera (y contado por causa) */
                         int why = -1;
                         unsigned bm = (1u << idx[q][0]) | (1u << idx[q][1]) | (1u << idx[q][2]);

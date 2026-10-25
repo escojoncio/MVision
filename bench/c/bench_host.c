@@ -171,7 +171,7 @@ static double g_clock, g_turn_req;
 static void sm_ready(void) { if (!g_sm_ready) { vrsm_init(&g_sm, NULL); g_sm_ready = 1; } }
 
 /* ---------- render nativo (banco de extremo a extremo): estado que en la app vive en vrhost.c ---------- */
-static int g_rmode, g_nready, g_marks;
+static int g_rmode = 1, g_nready, g_marks;   /* el banco parte en modo nativo (los casos existentes comprueban que la lista de la GPU no se dibuja); el defecto de la app es gpu */
 void mv_vrhost_set_render_mode(int mode) { g_rmode = mode <= 0 ? 0 : mode >= 2 ? 2 : 1; }
 int mv_vrhost_render_mode(void) { return g_rmode; }
 int mv_vrhost_render_only_native(void) { return g_rmode == 2; }

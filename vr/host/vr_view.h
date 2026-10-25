@@ -55,6 +55,7 @@ typedef struct {
     uint8_t cover1;        /* cobertura de la lista de la GPU por lo que se VE dentro de la vista del juego, en % + 1 (0 = sin medida vigente): escena nativa + relleno global (ns_fill) si hay relleno, si no el nativo solo */
     uint8_t cover_new;     /* 1 en el fotograma en que llega una medida nueva en `cover1` */
     uint8_t cover_src;     /* de dónde viene `cover1` (solo registro): 0 ninguna, 1 nativo solo, 2 nativo + relleno */
+    uint8_t gpu3d;         /* modo de render gpu: el 3D sale de la lista de la GPU, no del render nativo. Una escena 3D del motor es ENGINE siempre (sin depender de la cobertura nativa, nunca BACKUP) y se entra sin histéresis */
 } VrViewIn;
 
 /* Qué es lo que se ve (con histéresis propia, ver VrView.kind):
@@ -65,7 +66,7 @@ typedef struct {
  *   UI      menús, títulos, cargas, códec/radio, pausa, ventanas de armas/objetos, resultados: 2D, pantalla de cine */
 enum { VRV_K_UI = 0, VRV_K_WORLD, VRV_K_ENGINE, VRV_K_VIDEO, VRV_K_BACKUP };
 /* VRV_K_BACKUP: escena 3D del motor en la que el render nativo NO es fiel (extractor sin escena apta en ese modo: introducciones, demos sin partida, cobertura baja):
- *   se enseña el fotograma emulado completo (área de pantalla de la VRAM) en la pantalla de cine plana, escalado con calidad. La lista de la GPU no se dibuja en 3D jamás. */
+ *   se enseña el fotograma emulado completo (área de pantalla de la VRAM) en la pantalla de cine plana, escalado con calidad. Solo con el render nativo: en el modo gpu (VrViewIn.gpu3d) no existe. */
 
 typedef struct {
     int mode;              /* VrViewMode vigente (con histéresis) */

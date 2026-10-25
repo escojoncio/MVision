@@ -41,7 +41,7 @@ int vrview_kind_of(const VrViewIn *in) {
     /* Escena 3D del motor: sin control del jugador y con 3D; con o sin jugador en escena (las introducciones no lo tienen). Radio, pausa, detenido y ventana de
      * armas/objetos son 2D del juego aunque el motor dibuje 3D detrás. Pantalla estereoscópica solo si el render nativo es fiel; si no, respaldo (VRAM). */
     if (in->scene3d && (r == VRV_R_NO_GAME || r == VRV_R_CINEMATIC || r == VRV_R_LOST_CONTROL || r == VRV_R_DEAD))
-        return vrview_native_trusted(in) ? VRV_K_ENGINE : VRV_K_BACKUP;
+        return in->gpu3d || vrview_native_trusted(in) ? VRV_K_ENGINE : VRV_K_BACKUP;   /* modo gpu: el 3D sale de la lista de la GPU, la cobertura nativa no interviene */
     if (in->video && r != VRV_R_PAUSED) return VRV_K_VIDEO;
     return VRV_K_UI;
 }
@@ -138,7 +138,7 @@ int vrview_step(VrView *v, const VrViewIn *in) {
     if (k == v->kind) {
         v->kind_run = 0;
     } else {
-        int need = k == VRV_K_ENGINE ? v->to_engine : v->kind == VRV_K_ENGINE ? v->from_engine : v->to_other;
+        int need = k == VRV_K_ENGINE ? (in && in->gpu3d ? 1 : v->to_engine) : v->kind == VRV_K_ENGINE ? v->from_engine : v->to_other;   /* modo gpu: a ENGINE al instante */
         if (k == VRV_K_WORLD) need = v->to_world;      /* el mundo y el modo de vista usan el mismo umbral */
         if (v->kind == VRV_K_WORLD) need = r == VRV_R_COMMS ? v->to_comms : v->to_cine;
         if (need < 1) need = 1;
@@ -172,10 +172,10 @@ int vrview_describe(const VrView *v, const VrViewIn *in, char *buf, int n) {
     VrViewIn z;
     if (!in) { memset(&z, 0, sizeof z); in = &z; }
     int r = snprintf(buf, (size_t)n,
-        "[vista] cambio:%s%s%s modo=%s clase=%s motivo=%s (antes: %s) | puente: partida=%d control=%d camVR=%d escena=%d radio=%d pausa=%d menu=%d detenido=%d muerte=%d 3D=%d video=%d",
+        "[vista] cambio:%s%s%s modo=%s clase=%s motivo=%s (antes: %s) | puente: partida=%d control=%d camVR=%d escena=%d radio=%d pausa=%d menu=%d detenido=%d muerte=%d 3D=%d video=%d gpu3d=%d",
         (v->changed & VRV_CH_MODE) ? " modo" : "", (v->changed & VRV_CH_KIND) ? " clase" : "", (v->changed & VRV_CH_REASON) ? " motivo" : "",
         v->mode == VRV_WORLD ? "mundo" : "cine", vrview_kind_name(v->kind), vrview_reason_name(v->reason), vrview_reason_name(v->prev_reason),
-        in->game, in->in_control, in->cam_active, in->cinematic, in->comms, in->paused, in->menu_open, in->stopped, in->dead, in->scene3d, in->video);
+        in->game, in->in_control, in->cam_active, in->cinematic, in->comms, in->paused, in->menu_open, in->stopped, in->dead, in->scene3d, in->video, in->gpu3d);
     if (r < 0) { buf[0] = 0; return 0; }
     return r >= n ? n - 1 : r;
 }
@@ -191,6 +191,7 @@ int vrview_cine_describe(const VrView *v, const VrViewIn *in, char *buf, int n) 
                        : "subidas de vídeo que cubren el área de pantalla de la VRAM y sin 3D";
         break;
     case VRV_K_ENGINE:
+        if (in->gpu3d) { why = "3D del motor dibujado desde la lista de la GPU con vértices de vista de la GTE (modo gpu, sin depender de la cobertura nativa): pantalla estereoscópica"; break; }
         why = v->cov_state == 1 ? (in->cover_src == 2 ? "3D del motor y el render nativo + el relleno global representan la lista (cobertura medida buena): pantalla estereoscópica"
                                                       : "3D del motor y el render nativo representa la lista (cobertura medida buena): pantalla estereoscópica")
                                 : "3D del motor con partida y sin medida de cobertura: se fía del extractor";
