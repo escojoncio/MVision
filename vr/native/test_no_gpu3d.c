@@ -51,9 +51,9 @@ int main(void) {
     char *xe = slurp("app/Sources/XRFrameEncoder.swift", 1);
     if (!rg || !nr || !sh || !vh || !xp || !gm || !xe) return 1;
 
-    /* 1) RenderRG: el modo gpu dibuja los lotes 3D; nada de la maquinaria antigua de saltar lotes ante el nativo ni del post-proceso por ojo */
-    const char *forbidden[] = { "skip_if_native", "nativeSkip", "decidedSkip", "nativeOnly", "nativeUse", "nativeFailed", "fxConfirmed", "VrFilter",
-                                "storeFilter", "planPost", "encodePost", "postPipeline", "scanlineGain", "render_only_native", ".decide(", "VR_SKIP_" };
+    /* 1) RenderRG: el modo gpu dibuja los lotes 3D; nada de la maquinaria antigua de saltar lotes ante el nativo (el post-proceso por ojo SÍ existe, solo en el modo gpu: ver 2b) */
+    const char *forbidden[] = { "skip_if_native", "nativeSkip", "decidedSkip", "nativeOnly", "nativeUse", "nativeFailed", "fxConfirmed",
+                                "scanlineGain", "render_only_native", ".decide(", "VR_SKIP_" };
     for (size_t i = 0; i < sizeof forbidden / sizeof *forbidden; i++) CHECK(count(rg, forbidden[i]) == 0, "RenderRG.swift conserva «%s» (maquinaria antigua de sustitución por el nativo)", forbidden[i]);
     CHECK(count(rg, "guard k.hud") == 0, "pipeline(_:) construye también los pipelines de escena (sin guard k.hud)");
     CHECK(strstr(rg, "mv_vrhost_render_mode() == 0") != NULL && strstr(rg, "private(set) var gpuMode = true") != NULL, "RenderRG lee el modo (0 = gpu) y arranca en gpu");
@@ -61,7 +61,8 @@ int main(void) {
     CHECK(strstr(rg, "d1.depthCompareFunction = .greaterEqual; d1.isDepthWriteEnabled = true") != NULL && strstr(rg, "d2.depthCompareFunction = .greaterEqual; d2.isDepthWriteEnabled = false") != NULL,
           "opaco: prueba + escritura de profundidad; semitransparente: solo prueba (Z invertida)");
     CHECK(count(rg, ".cullMode") == 0 && count(rg, "setCullMode(.none)") >= 2, "sin descarte de reversos (la PS1 no lo tiene)");
-    CHECK(count(rg, "drawPrimitives") == 3, "RenderRG.swift: HUD (encodeHud), su paso final y drawGPU dibujan primitivas (hay %d)", count(rg, "drawPrimitives"));
+    CHECK(count(rg, "drawPrimitives") == 5, "RenderRG.swift: HUD (encodeHud), su paso final, drawGPU y el post-proceso (estéreo + ojo suelto) dibujan primitivas (hay %d)", count(rg, "drawPrimitives"));
+    CHECK(count_range(rg, "private func encodePost(", "private func encodeVram(", "drawPrimitives") == 2, "encodePost: un triángulo a pantalla completa por ojo (estéreo con instancias / ojo suelto)");
     CHECK(count_range(rg, "private func encodeHud", "private func encodeScene(", "drawPrimitives") == 2, "dos drawPrimitives en encodeHud/finishHud");
     CHECK(count_range(rg, "private func encodeScene(", "private func drawGPU(", "drawPrimitives") == 0, "encodeScene no dibuja primitivas directamente (delega en drawGPU)");
     CHECK(count_range(rg, "private func drawGPU(", NULL, "drawPrimitives") == 1, "drawGPU es el único dibujo de la lista de la GPU en 3D");
@@ -75,6 +76,19 @@ int main(void) {
     /* 2) el 3D de la lista se cuenta y el HUD solo toma kind 2 */
     CHECK(strstr(rg, "gpu3DTris") != NULL, "el 3D de la lista se registra (gpu3DTris)");
     CHECK(count_range(rg, "private func encodeHud", "private func encodeScene(", "batches[$0].kind == 2") >= 1, "el HUD filtra los lotes kind 2");
+    /* 2b) filtro de pantalla (clase 3: bajo el agua) en el modo gpu: las tiras no se dibujan, la escena de los ojos pasa por un post-proceso por ojo con VrScene.filter */
+    CHECK(strstr(rg, "private func storeFilter(_ f: VrFilter)") != NULL && strstr(rg, "guard gpuMode, screenFilterEnabled, f.active != 0 else { return }") != NULL && strstr(rg, "        storeFilter(sc.filter)\n") != NULL, "VrScene.filter se resume al guardar la escena (solo modo gpu)");
+    CHECK(strstr(rg, "if kind == 3 { continue }") != NULL, "los lotes kind 3 no se dibujan como geometría ni HUD");
+    CHECK(strstr(rg, "let plan = gpuMode ? planPost(colorTargets: colorTargets, resolveTargets: resolveTargets, layered: layered) : nil") != NULL, "el plan del post-proceso solo existe en el modo gpu");
+    CHECK(strstr(rg, "colorTargets: sceneColor, depthTargets: depthTargets,") != NULL && strstr(rg, "resolveTargets: sceneResolve, views: sceneV,") != NULL, "el pase gpu de los ojos escribe en las texturas del plan");
+    CHECK(strstr(rg, "if let p = plan { encodePost(commandBuffer, p, projections: projections, layered: layered) }") != NULL, "el post-proceso se codifica tras el último grupo (radar y arma incluidos)");
+    CHECK(strstr(rg, "guard fx.needsPost, screenFilterEnabled, drawWorld, drawEyes, drawBody, haveScene, has3D, viewportOverride == nil, rasterizationRateMap == nil else { return nil }") != NULL, "el post-proceso solo se hace con mundo y ojos dibujados");
+    CHECK(strstr(rg, "\"vr_fs_post_layered\" : \"vr_fs_post\"") != NULL && strstr(rg, "\"vr_vs_post_layered\" : \"vr_vs_post\"") != NULL, "pipelines del post-proceso (con y sin amplificación)");
+    CHECK(strstr(rg, "post=\\(statPost)") != NULL, "el registro de la escena cuenta los pases de post-proceso");
+    { char *ms = slurp("render/metal/vr_scene.metal", 1);
+      CHECK(ms && strstr(ms, "fragment float4 vr_fs_post(") != NULL && strstr(ms, "fragment float4 vr_fs_post_layered(") != NULL, "sombreadores del post-proceso en vr_scene.metal");
+      free(ms); }
+
     /* 3) presentación: repetir el último válido o negro; nunca GPU */
     CHECK(strstr(rg, "n.present(ready:") != NULL, "prepareNative usa ns_present (repetir último válido / negro)");
     CHECK(strstr(rg, "NS_PR_BLACK") != NULL, "el modo negro de la presentación está cableado");
@@ -119,6 +133,7 @@ int main(void) {
     CHECK(strstr(vh, "if (!native_mode()) keep3b = 0;") != NULL, "modo gpu: fundidos y destellos al panel 2D");
     CHECK(strstr(vh, "gpu_capture_hiprec(1)") != NULL && strstr(vh, "if (cap_on && !gte_hp_enabled()) gpu_capture_hiprec(1);") != NULL, "vértices de vista de la GTE en alta precisión siempre que haya captura");
     CHECK(strstr(vh, "\"[gpu3d] fotograma=%u") != NULL && strstr(vh, "gpu3d_log();") != NULL && strstr(vh, "gpu3d_note(&sc, r);") != NULL, "registro [gpu3d] una vez por segundo");
+    CHECK(strstr(vh, "post=%u | render=%s") != NULL && strstr(vh, "g3.post += sc->b[i].kind == 3") != NULL, "registro [gpu3d]: lotes de filtro de pantalla (post=N)");
     { char *vw = slurp("vr/host/vr_view.c", 1), *vs = slurp("vr/scene/vr_scene.c", 1);
       CHECK(vw && strstr(vw, "return in->gpu3d || vrview_native_trusted(in) ? VRV_K_ENGINE : VRV_K_BACKUP;") != NULL, "vr_view: en el modo gpu una escena 3D es ENGINE sin mirar la cobertura nativa");
       CHECK(vw && strstr(vw, "(in && in->gpu3d ? 1 : v->to_engine)") != NULL, "vr_view: entrada a ENGINE sin histéresis en el modo gpu");

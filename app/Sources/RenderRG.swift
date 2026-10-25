@@ -107,6 +107,38 @@ final class RGRenderer {
     private var pipeFull: MTLRenderPipelineState?
     private var failed = Set<String>()
 
+    // filtro de pantalla (post-proceso por ojo, SOLO modo gpu: bajo el agua las tiras de la clase 3 de vr_scene no se dibujan, las sustituye este pase)
+    private struct FilterFx {
+        var needsPost = false
+        var tint = SIMD3<Float>(1, 1, 1)
+        // recubrimientos en orden de dibujo (xyz = color/255, w = modo de mezcla original o -1 = sin usar; los usados van primero)
+        var covers = [SIMD4<Float>](repeating: SIMD4<Float>(0, 0, 0, -1), count: Int(VR_POST_COVERS))
+        // líneas de exploración de las gafas (x = periodo en filas originales, y = fase, z = alto, w = modo o -1) y su color (w = ganancia)
+        var scan = SIMD4<Float>(0, 0, 0, -1)
+        var scanRGB = SIMD4<Float>(0, 0, 0, 1)
+        var scanAfter: Float = 0                    // recubrimientos dibujados antes de las líneas
+        // máscara de visión (máscara de gas, caja): tamaño de la imagen mostrada del motor y textura (anillo `frameTex`)
+        var frameArea = SIMD2<Float>(0, 0)
+        var frameOn = false
+        var frameRGB = SIMD3<Float>(0, 0, 0)        // color que se suma donde la máscara cierra del todo
+        var frameIdx = 0
+        var cxCol: Float = 160
+        var projH: Float = 160, cyRow: Float = 128
+        var nrows = 0
+        var dv = [Float](repeating: 0, count: Int(VR_POST_ROWS))   // desplazamiento por fila de la imagen original (0 donde no hay tira)
+    }
+    private struct PostPlan { var sceneColor: [MTLTexture], sceneResolve: [MTLTexture], fxTex: [MTLTexture], dst: [MTLTexture] }
+    private var fx = FilterFx()
+    /// Anillo de texturas R8 con la resta de la máscara de visión (VR_FRAME_W x VR_FRAME_H, una por escena distinta: la GPU puede seguir leyendo la anterior).
+    private var frameTex: [MTLTexture] = []
+    private var frameSum: UInt64 = 0
+    private var frameTexNext = 0
+    private var frameTexCur = -1
+    private var fxTex: [MTLTexture] = []
+    private var fxKey = ""
+    private var postPipes: [String: MTLRenderPipelineState] = [:]
+    private var statPost = 0                        // pases de post-proceso (ojos) codificados en el último encode (registro)
+
     // escena persistente (se repite hasta que llegue otra)
     /// Lote de la lista de la GPU. Solo los de HUD (kind 2) se dibujan; los de 3D (kind 0/1) se conservan únicamente por su `evEnd` (orden de los eventos de VRAM) y para el diagnóstico.
     private struct DrawBatch { var first: Int, count: Int, kind: Int, mode: Int, semi: Bool, hasTex: Bool, evEnd: Int }
@@ -240,7 +272,7 @@ final class RGRenderer {
 
     /// Resumen para el registro (1 vez por segundo): estado de la escena y trabajo del último `encode`.
     func diagnostics() -> String {
-        "modo3D=\(gpuMode ? "gpu" : "nativo") tiene3D=\(has3D) hayEscena=\(haveScene) lotes=\(batches.count) (3D de la lista\(gpuMode ? "" : ", NO se dibujan")=\(batches.filter { $0.kind != 2 }.count) 2D=\(batches.filter { $0.kind == 2 }.count)) pases=\(statPasses) dibujos=\(statDraws) drawWorld=\(drawWorld) drawBody=\(drawBody) msaa=\(sampleCount) lineal=\(linearOutput) radar=\(radar != nil)" + nativeLog()
+        "modo3D=\(gpuMode ? "gpu" : "nativo") tiene3D=\(has3D) hayEscena=\(haveScene) lotes=\(batches.count) (3D de la lista\(gpuMode ? "" : ", NO se dibujan")=\(batches.filter { $0.kind != 2 }.count) 2D=\(batches.filter { $0.kind == 2 }.count)) pases=\(statPasses) dibujos=\(statDraws) post=\(statPost) filtro=\(fx.needsPost) drawWorld=\(drawWorld) drawBody=\(drawBody) msaa=\(sampleCount) lineal=\(linearOutput) radar=\(radar != nil)" + nativeLog()
     }
 
     /// Línea de diagnóstico del render nativo (1 vez por segundo, justo tras xr-diag): qué se presentó (actual / último válido repetido / negro), triángulos de la lista de la GPU
@@ -413,7 +445,103 @@ final class RGRenderer {
         }
     }
 
-    /// Resumen del filtro de pantalla de la escena (VrScene.filter, contrato en vr_scene.h "Clase 3"): se conserva hasta la siguiente escena.
+    /// Resumen del filtro de pantalla de la escena (VrScene.filter, contrato en vr_scene.h "Clase 3"): se conserva hasta la siguiente escena. Solo en el modo gpu.
+    private func storeFilter(_ f: VrFilter) {
+        func clampOr(_ v: Float, _ lo: Float, _ hi: Float, _ d: Float) -> Float { v.isFinite ? min(max(v, lo), hi) : d }
+        var n = FilterFx()
+        defer { fx = n }
+        guard gpuMode, screenFilterEnabled, f.active != 0 else { return }
+        var warp = false
+        withUnsafeBytes(of: f.dv) { (dvRaw: UnsafeRawBufferPointer) -> Void in
+            withUnsafeBytes(of: f.rowcov) { (covRaw: UnsafeRawBufferPointer) -> Void in
+                let dvp = dvRaw.bindMemory(to: Float.self)
+                let rows = min(n.dv.count, dvp.count, covRaw.count)
+                for i in 0..<rows where covRaw[i] != 0 {
+                    let d = dvp[i]
+                    if d.isFinite && abs(d) < 64 { n.dv[i] = d; if d != 0 { warp = true } }
+                }
+            }
+        }
+        n.nrows = warp ? max(1, Int(f.nrows)) : 0
+        let tc = (f.tint.0, f.tint.1, f.tint.2)
+        n.tint = SIMD3<Float>(clampOr(tc.0, 0, 4, 1), clampOr(tc.1, 0, 4, 1), clampOr(tc.2, 0, 4, 1))
+        // recubrimientos en orden (covers_rgb[4][3], covers_abr[4]); sin lista, el último (cover_rgb/cover_abr)
+        var nc = 0
+        withUnsafeBytes(of: f.covers_rgb) { (rgbRaw: UnsafeRawBufferPointer) -> Void in
+            withUnsafeBytes(of: f.covers_abr) { (abrRaw: UnsafeRawBufferPointer) -> Void in
+                let rgb = rgbRaw.bindMemory(to: Float.self)
+                let abr = abrRaw.bindMemory(to: Int32.self)
+                let cnt = min(Int(f.n_covers), Int(VR_POST_COVERS), abr.count, rgb.count / 3)
+                for i in 0..<max(cnt, 0) where abr[i] >= 0 {
+                    let c = SIMD3<Float>(rgb[3 * i], rgb[3 * i + 1], rgb[3 * i + 2])
+                    if c.x.isFinite && c.y.isFinite && c.z.isFinite {
+                        n.covers[nc] = SIMD4<Float>(clampOr(c.x, 0, 1, 0), clampOr(c.y, 0, 1, 0), clampOr(c.z, 0, 1, 0), Float(Int(abr[i]) & 3))
+                        nc += 1
+                    }
+                }
+            }
+        }
+        if nc == 0 && f.cover_abr >= 0 {
+            n.covers[0] = SIMD4<Float>(clampOr(f.cover_rgb.0, 0, 1, 0), clampOr(f.cover_rgb.1, 0, 1, 0), clampOr(f.cover_rgb.2, 0, 1, 0), Float(Int(f.cover_abr) & 3))
+            nc = 1
+        }
+        // líneas de exploración (gafas): solo con >= 8 y un periodo coherente; no se usan datos no finitos
+        var scanned = false
+        if f.n_scan >= 8, f.scan_pitch.isFinite, f.scan_pitch >= 1, f.scan_pitch <= 64, f.scan_h.isFinite, f.scan_h > 0, f.scan_phase.isFinite,
+           f.scan_rgb.0.isFinite, f.scan_rgb.1.isFinite, f.scan_rgb.2.isFinite {
+            n.scan = SIMD4<Float>(f.scan_pitch, f.scan_phase, min(f.scan_h, f.scan_pitch), Float(f.scan_abr & 3))
+            n.scanRGB = SIMD4<Float>(clampOr(f.scan_rgb.0, 0, 1, 0), clampOr(f.scan_rgb.1, 0, 1, 0), clampOr(f.scan_rgb.2, 0, 1, 0), 1)   // ganancia 1 = fiel al original
+            n.scanAfter = Float(min(max(Int(f.scan_after), 0), Int(VR_POST_COVERS)))
+            scanned = true
+        }
+        // máscara de visión: se sube a la siguiente textura del anillo (solo si cambió)
+        var framed = false
+        if f.frame_on != 0, !suppressFrame, let fp = f.frame, f.frame_w == Int32(VR_FRAME_W), f.frame_h == Int32(VR_FRAME_H), f.area.2 > 0, f.area.3 > 0 {
+            if uploadFrame(fp, Int(f.frame_w), Int(f.frame_h)) {
+                n.frameIdx = frameTexCur
+                n.frameArea = SIMD2<Float>(Float(f.area.2), Float(f.area.3))
+                n.frameOn = true
+                let fr = (f.frame_rgb.0, f.frame_rgb.1, f.frame_rgb.2)
+                n.frameRGB = SIMD3<Float>(clampOr(fr.0, 0, 0.5, 0), clampOr(fr.1, 0, 0.5, 0), clampOr(fr.2, 0, 0.5, 0))
+                framed = true
+            }
+        }
+        n.cxCol = f.cx_col.isFinite ? f.cx_col : 160
+        n.projH = f.proj_h.isFinite && f.proj_h > 1 ? f.proj_h : 160
+        n.cyRow = f.cy_row.isFinite ? f.cy_row : 128
+        let tinted = abs(n.tint.x - 1) > 1e-3 || abs(n.tint.y - 1) > 1e-3 || abs(n.tint.z - 1) > 1e-3
+        n.needsPost = warp || tinted || nc > 0 || scanned || framed
+    }
+
+    /// Sube la resta de la máscara de visión (w*h bytes) al anillo de texturas R8. Devuelve false si no se pudo (sin máscara). Reutiliza la última si el contenido no cambió.
+    private func uploadFrame(_ p: UnsafePointer<UInt8>, _ w: Int, _ h: Int) -> Bool {
+        guard ensureFrameTextures(), w == Int(VR_FRAME_W), h == Int(VR_FRAME_H) else { return false }
+        var sum: UInt64 = 1469598103934665603      // FNV-1a
+        for i in 0..<(w * h) { sum = (sum ^ UInt64(p[i])) &* 1099511628211 }
+        if sum == frameSum && frameTexCur >= 0 { return true }
+        let idx = frameTexNext % frameTex.count
+        frameTex[idx].replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: p, bytesPerRow: w)
+        frameTexNext = (idx + 1) % frameTex.count
+        frameTexCur = idx
+        frameSum = sum
+        return true
+    }
+
+    /// Crea el anillo de texturas de la máscara de visión (también hace de textura ficticia cuando no hay máscara: el shader siempre la enlaza).
+    private func ensureFrameTextures() -> Bool {
+        if !frameTex.isEmpty { return true }
+        var out: [MTLTexture] = []
+        for _ in 0..<8 {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: Int(VR_FRAME_W), height: Int(VR_FRAME_H), mipmapped: false)
+            d.usage = .shaderRead
+            d.storageMode = .shared
+            guard let t = device.makeTexture(descriptor: d) else { return false }
+            t.label = "VR mascara de vision"
+            out.append(t)
+        }
+        frameTex = out
+        return true
+    }
 
     private func takeLayer2D() {
 #if MV_BENCH
@@ -460,6 +588,7 @@ final class RGRenderer {
     /// Guarda la escena de la lista de la GPU: vértices y estados para el panel 2D (HUD), los lotes con su `ev_end` (orden de los eventos de VRAM), la cámara del juego y los datos de
     /// cinemática. Los lotes de 3D (kind 0/1) NO se dibujan: el mundo sale del render nativo.
     private func storeScene(_ sc: VrScene, _ newSlot: inout Bool) {
+        storeFilter(sc.filter)
         let nv = Int(sc.nv)
         if !newSlot { curSlot = (curSlot + 1) % 3; newSlot = true }
         let slot = vtxSlots[curSlot]
@@ -510,7 +639,7 @@ final class RGRenderer {
             cnt -= cnt % 3
             if cnt <= 0 { continue }
             let kind = Int(bt.kind)
-            if kind == 3 { continue }   // filtro de pantalla de la lista: ya no se usa (los efectos de pantalla salen del render nativo)
+            if kind == 3 { continue }   // filtro de pantalla: no es geometría ni HUD; en el modo gpu lo aplica el post-proceso por ojo con VrScene.filter (storeFilter / planPost), en el nativo los efectos salen del render nativo
             var hasTex = false
             if kind != 0 {   // 2D y 3D semitransparente: decide las dos pasadas por texel (bit 15); el opaco no lo necesita
                 for j in first..<(first + cnt) where (v[j].flags & texBit) != 0 { hasTex = true; break }
@@ -534,7 +663,7 @@ final class RGRenderer {
         let fs = frames[frameNo % 3]
         frameNo += 1
         fs.used = 0
-        statDraws = 0; statPasses = 0
+        statDraws = 0; statPasses = 0; statPost = 0
 #if !MV_BENCH || MV_BENCH_NATIVE
         gpuMode = mv_vrhost_render_mode() == 0      // 0 = gpu (defecto), 1 = nativo
 #else
@@ -589,6 +718,10 @@ final class RGRenderer {
         // Modo gpu: no hay nada nativo que preparar; la pantalla 3D se considera sana (el 3D sale de la lista) salvo que encodeStereo falle.
         if gpuMode { nativeDraw = false; nativeDrawnLast = false; stereoHealthy = true }
         else { prepareNative(commandBuffer: commandBuffer, colorTargets: colorTargets, depthTargets: depthTargets, sceneV: sceneV, projections: projections, head: head, layered: layered) }
+        // Filtro de pantalla (modo gpu): la escena se resuelve en texturas intermedias y un pase por ojo escribe el drawable (ver planPost). Nativo: nunca (plan = nil).
+        let plan = gpuMode ? planPost(colorTargets: colorTargets, resolveTargets: resolveTargets, layered: layered) : nil
+        let sceneColor = plan?.sceneColor ?? colorTargets
+        let sceneResolve = plan?.sceneResolve ?? resolveTargets
         var nextCmd = 0
         for (gi, g) in groups.enumerated() {
             let firstG = gi == 0, lastG = gi == groups.count - 1
@@ -604,13 +737,14 @@ final class RGRenderer {
             // El mundo de los ojos. Nativo: UN pase tras el último grupo (la VRAM ya tiene todos los eventos de la lista). Modo gpu: un pase por grupo de lotes con los mismos
             // eventos de VRAM (el primero limpia, el último resuelve el MSAA y dibuja radar y arma), con las vistas por ojo.
             if gpuMode {
-                encodeScenePasses(commandBuffer, range: g.0..<g.1, first: firstG, last: lastG, colorTargets: colorTargets, depthTargets: depthTargets,
-                                  resolveTargets: resolveTargets, views: sceneV, projections: projections, head: head, layered: layered)
+                encodeScenePasses(commandBuffer, range: g.0..<g.1, first: firstG, last: lastG, colorTargets: sceneColor, depthTargets: depthTargets,
+                                  resolveTargets: sceneResolve, views: sceneV, projections: projections, head: head, layered: layered)
             } else if lastG {
                 encodeScenePasses(commandBuffer, colorTargets: colorTargets, depthTargets: depthTargets, resolveTargets: resolveTargets,
                                   views: sceneV, projections: projections, head: head, layered: layered)
             }
         }
+        if let p = plan { encodePost(commandBuffer, p, projections: projections, layered: layered) }
         // eventos restantes de la lista (tras el último lote) para dejar la VRAM en sincronía con el oráculo
         if nextCmd < listCmds.count { encodeVram(commandBuffer, listCmds[nextCmd...].map { $0.cmd }, fs) }
         radar?.renderTexture(commandBuffer, vram: vram)      // VRAM ya en su estado final de la lista
@@ -771,8 +905,12 @@ final class RGRenderer {
     var stereoAllocatedLength: Int { stereoTex?.arrayLength ?? 0 }
     /// Los valores de `stereoImage` ya son lineales (destino de coma flotante).
     var stereoStoredLinear: Bool { colorFormat == .rgba16Float }
-    /// Los efectos de pantalla de la cinemática (fundidos, destello...) los dibuja el render nativo dentro de la propia pantalla 3D (recubrimientos del ojo): aquí no hay tinte ni recubrimientos.
-    var screenFx: (tint: SIMD3<Float>, covers: [SIMD4<Float>]) { (SIMD3<Float>(1, 1, 1), []) }
+    /// Nativo: los efectos de pantalla de la cinemática (fundidos, destello...) los dibuja el render nativo dentro de la propia pantalla 3D (recubrimientos del ojo): aquí no hay tinte ni
+    /// recubrimientos. Modo gpu: la escena de una cinemática no pasa por el post-proceso de los ojos, así que se devuelven el tinte y los recubrimientos de la última escena (espacio gamma).
+    var screenFx: (tint: SIMD3<Float>, covers: [SIMD4<Float>]) {
+        if gpuMode { return (fx.tint, fx.covers) }
+        return (SIMD3<Float>(1, 1, 1), [])
+    }
 
     func prepareStereo(width: Int, height: Int) { _ = ensureStereo(width, height) }
 
@@ -971,6 +1109,142 @@ final class RGRenderer {
                 let cams = draw ? NativeCams(viewProj: [m], projections: [projections[i]], eyes: [eyePos(views[i])], eyeIndex: i) : nil
                 _ = encodeScene(cb, color: colorTargets[i], depth: depthTargets[i], resolve: i < resolveTargets.count ? resolveTargets[i] : nil, uniforms: u,
                                 amplify: 0, viewIndex: i, views: views, projections: projections, isAux: false, last: last, cams: cams, first: first, gpuRange: gr)
+            }
+        }
+    }
+
+    // MARK: filtro de pantalla (post-proceso)
+    private func postPipeline(format: MTLPixelFormat, layered: Bool) -> MTLRenderPipelineState? {
+        let key = "\(format.rawValue)-\(layered)-\(linearOutput)"
+        if let p = postPipes[key] { return p }
+        if failed.contains(key) { return nil }      // ya falló: no reintentar (compilar un pipeline por fotograma)
+        guard let lib = library else { failed.insert(key); return nil }
+        do {
+            let fc = MTLFunctionConstantValues()
+            var lin = linearOutput
+            fc.setConstantValue(&lin, type: .bool, index: Int(VR_FC_LINEAR_OUT))
+            let fs = try lib.makeFunction(name: layered ? "vr_fs_post_layered" : "vr_fs_post", constantValues: fc)
+            guard let vs = lib.makeFunction(name: layered ? "vr_vs_post_layered" : "vr_vs_post") else { failed.insert(key); return nil }
+            let d = MTLRenderPipelineDescriptor()
+            d.label = "VR post filtro de pantalla"
+            d.vertexFunction = vs
+            d.fragmentFunction = fs
+            d.colorAttachments[0].pixelFormat = format
+            if layered { d.inputPrimitiveTopology = .triangle }   // requerido al escribir render_target_array_index
+            let p = try device.makeRenderPipelineState(descriptor: d)
+            postPipes[key] = p
+            return p
+        } catch {
+            if !failed.contains(key) { failed.insert(key); print("[Renderer] pipeline post: \(error)") }
+            return nil
+        }
+    }
+
+    /// Texturas intermedias (una muestra) con la forma y el formato de los destinos; se recrean si cambian.
+    private func filterTextures(like dst: [MTLTexture]) -> [MTLTexture]? {
+        let key = dst.map { "\($0.textureType.rawValue)/\($0.width)x\($0.height)x\($0.arrayLength)/\($0.pixelFormat.rawValue)" }.joined(separator: ",")
+        if key == fxKey && fxTex.count == dst.count { return fxTex }
+        var out: [MTLTexture] = []
+        for t in dst {
+            guard t.textureType == .type2D || t.textureType == .type2DArray else { return nil }
+            let d = MTLTextureDescriptor()
+            d.textureType = t.textureType
+            d.pixelFormat = t.pixelFormat
+            d.width = t.width
+            d.height = t.height
+            d.arrayLength = t.arrayLength
+            d.mipmapLevelCount = 1
+            d.sampleCount = 1
+            d.usage = [.renderTarget, .shaderRead]
+            d.storageMode = .private
+            guard let nt = device.makeTexture(descriptor: d) else { return nil }
+            nt.label = "VR escena sin filtrar"
+            out.append(nt)
+        }
+        fxTex = out
+        fxKey = key
+        return out
+    }
+
+    /// Plan del filtro: con MSAA la escena se resuelve en `fxTex` en vez de en el drawable; sin MSAA se dibuja directa en `fxTex`. nil = sin filtro
+    /// (no hace falta, está desactivado, o no es viable: viewport propio o mapa de tasas de rasterización, texturas que no son 2D, falta el pipeline).
+    private func planPost(colorTargets: [MTLTexture], resolveTargets: [MTLTexture], layered: Bool) -> PostPlan? {
+        // Sin mundo dibujado (pantalla de cine, diorama o escena sin 3D) no hay nada que filtrar: el pase solo pintaría tinte/marco sobre el fondo limpio.
+        guard fx.needsPost, screenFilterEnabled, drawWorld, drawEyes, drawBody, haveScene, has3D, viewportOverride == nil, rasterizationRateMap == nil else { return nil }
+        let msaa = (colorTargets.first?.sampleCount ?? 1) > 1
+        let dst = msaa ? resolveTargets : colorTargets
+        guard let first = dst.first, postPipeline(format: first.pixelFormat, layered: layered) != nil,
+              ensureFrameTextures(), let tex = filterTextures(like: dst) else { return nil }
+        if msaa { return PostPlan(sceneColor: colorTargets, sceneResolve: tex, fxTex: tex, dst: dst) }
+        return PostPlan(sceneColor: tex, sceneResolve: [], fxTex: tex, dst: dst)
+    }
+
+    /// Pase de post-proceso por ojo: lee la escena resuelta (fxTex) y escribe el drawable con la onda por fila, el tinte y el recubrimiento.
+    /// Parámetros por ojo a partir de la proyección: fila del punto principal = H/2*(1+P[2][1]) y focal vertical = H/2*P[1][1] (px).
+    private func encodePost(_ cb: MTLCommandBuffer, _ plan: PostPlan, projections: [simd_float4x4], layered: Bool) {
+        guard let first = plan.dst.first, let pso = postPipeline(format: first.pixelFormat, layered: layered) else { return }
+        // por ojo: x = fila del punto principal, y = focal vertical, z = columna del punto principal, w = focal horizontal (todo en píxeles de la textura)
+        func eyeParams(_ i: Int, _ width: Int, _ height: Int) -> SIMD4<Float> {
+            let h = Float(height), w = Float(width)
+            guard !projections.isEmpty else { return SIMD4<Float>(h * 0.5, h * 0.5, w * 0.5, h * 0.5) }
+            let p = projections[min(i, projections.count - 1)]
+            return SIMD4<Float>(h * 0.5 * (1 + p.columns.2.y), h * 0.5 * p.columns.1.y, w * 0.5 * (1 - p.columns.2.x), w * 0.5 * p.columns.0.x)
+        }
+        var u = VrPostUniforms()
+        u.tint = SIMD4<Float>(fx.tint.x, fx.tint.y, fx.tint.z, 0)
+        u.covers = (fx.covers[0], fx.covers[1], fx.covers[2], fx.covers[3])
+        u.cfg = SIMD4<Float>(fx.projH, fx.cyRow, Float(fx.nrows), fx.cxCol)
+        u.scan = fx.scan
+        u.scan_rgb = fx.scanRGB
+        u.misc = SIMD4<Float>(fx.scanAfter, fx.frameRGB.x, fx.frameRGB.y, fx.frameRGB.z)
+        u.frame = SIMD4<Float>(fx.frameArea.x, fx.frameArea.y, fx.frameOn ? 1 : 0, 0)
+        guard !frameTex.isEmpty else { return }
+        let frameTexture = frameTex[min(max(fx.frameIdx, 0), frameTex.count - 1)]
+        let dvCopy = fx.dv
+        if layered {
+            guard let src = plan.fxTex.first else { return }
+            let pd = MTLRenderPassDescriptor()
+            pd.colorAttachments[0].texture = first
+            pd.colorAttachments[0].loadAction = .dontCare      // el triángulo cubre todo
+            pd.colorAttachments[0].storeAction = .store
+            let n = max(1, min(viewCount, first.arrayLength))
+            pd.renderTargetArrayLength = n
+            u.eye = (eyeParams(0, first.width, first.height), eyeParams(1, first.width, first.height))
+            guard let enc = cb.makeRenderCommandEncoder(descriptor: pd) else { return }
+            enc.label = "VR post filtro (estéreo)"
+            enc.setRenderPipelineState(pso)
+            enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(first.width), height: Double(first.height), znear: 0, zfar: 1))
+            enc.setFragmentTexture(src, index: 0)
+            enc.setFragmentTexture(frameTexture, index: 1)
+            enc.setFragmentBytes(&u, length: MemoryLayout<VrPostUniforms>.stride, index: 0)
+            dvCopy.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Void in
+                if let base = raw.baseAddress { enc.setFragmentBytes(base, length: raw.count, index: Int(VR_BUF_POST_DV)) }
+            }
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3, instanceCount: n)
+            enc.endEncoding()
+            statPost += 1
+        } else {
+            for i in 0..<min(plan.dst.count, plan.fxTex.count, viewCount, projections.count) {
+                let dst = plan.dst[i]
+                let pd = MTLRenderPassDescriptor()
+                pd.colorAttachments[0].texture = dst
+                pd.colorAttachments[0].loadAction = .dontCare
+                pd.colorAttachments[0].storeAction = .store
+                let ep = eyeParams(i, dst.width, dst.height)
+                u.eye = (ep, ep)                                // el fragmento del ojo suelto usa eye[0]
+                guard let enc = cb.makeRenderCommandEncoder(descriptor: pd) else { continue }
+                enc.label = "VR post filtro (ojo \(i))"
+                enc.setRenderPipelineState(pso)
+                enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(dst.width), height: Double(dst.height), znear: 0, zfar: 1))
+                enc.setFragmentTexture(plan.fxTex[i], index: 0)
+                enc.setFragmentTexture(frameTexture, index: 1)
+                enc.setFragmentBytes(&u, length: MemoryLayout<VrPostUniforms>.stride, index: 0)
+                dvCopy.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Void in
+                    if let base = raw.baseAddress { enc.setFragmentBytes(base, length: raw.count, index: Int(VR_BUF_POST_DV)) }
+                }
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                enc.endEncoding()
+                statPost += 1
             }
         }
     }

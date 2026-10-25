@@ -732,7 +732,7 @@ static int list_uploads_cover_display(const GpuDrawList *l) {
 
 /* Registro «[gpu3d]» (hilo de emulación, una línea por segundo como mucho): qué hizo el ensamblador con las primitivas de las listas de ese segundo. Es el único diagnóstico del visor. */
 #define GPU3D_NEAR_EYE_M 0.25f   /* modo gpu: ningún triángulo 3D con un vértice a menos de esta distancia (m) del ojo del motor (VrSceneOpts.eye_near_m) */
-static struct { uint32_t lists, prims, p3d, tris3d, p2d, near_drop, near_clip, behind_drop, nohp; int cam_head; uint64_t t_log; } g3;
+static struct { uint32_t lists, prims, p3d, tris3d, p2d, near_drop, near_clip, behind_drop, nohp, post; int cam_head; uint64_t t_log; } g3;
 static void gpu3d_note(const VrScene *sc, const VrCamRecord *r) {
     const VrStats *st = &sc->stats;
     g3.lists++;
@@ -744,6 +744,7 @@ static void gpu3d_note(const VrScene *sc, const VrCamRecord *r) {
     g3.near_clip += st->n_clipped;
     g3.behind_drop += st->drop_behind;
     g3.nohp += st->drop_partial;
+    for (uint32_t i = 0; sc->b && i < sc->nb; i++) g3.post += sc->b[i].kind == 3;   /* lotes de filtro de pantalla (clase 3: el post-proceso por ojo del renderer los sustituye) */
     g3.cam_head = r && r->active;
 }
 static void gpu3d_log(void) {
@@ -752,8 +753,8 @@ static void gpu3d_log(void) {
     uint64_t t0 = g3.t_log;
     g3.t_log = t;
     if (!t0) return;   /* la primera llamada solo arranca el reloj */
-    fprintf(stderr, "[gpu3d] fotograma=%u listas=%u prims=%u 3D_con_hp=%u (triangulos=%u) plano2D=%u cerca_descartados=%u cerca_recortados=%u detras_descartados=%u 3D_sin_hp(respaldo)=%u | render=%s hp=%d vista=%s camara=%s\n",
-            (unsigned)hle_frame_count(), g3.lists, g3.prims, g3.p3d, g3.tris3d, g3.p2d, g3.near_drop, g3.near_clip, g3.behind_drop, g3.nohp,
+    fprintf(stderr, "[gpu3d] fotograma=%u listas=%u prims=%u 3D_con_hp=%u (triangulos=%u) plano2D=%u cerca_descartados=%u cerca_recortados=%u detras_descartados=%u 3D_sin_hp(respaldo)=%u post=%u | render=%s hp=%d vista=%s camara=%s\n",
+            (unsigned)hle_frame_count(), g3.lists, g3.prims, g3.p3d, g3.tris3d, g3.p2d, g3.near_drop, g3.near_clip, g3.behind_drop, g3.nohp, g3.post,
             native_mode() ? "nativo" : "gpu", gte_hp_enabled(), vrview_cine_type(view.kind), g3.cam_head ? "head" : "game");
     int ch = g3.cam_head;
     memset(&g3, 0, sizeof g3);
@@ -824,7 +825,7 @@ static void build_one(const GpuDrawList *l, int si) {
     int cover_n = sc.filter.active ? sc.filter.n_covers : 0;
     int keep3b = sc.filter.n_scan > 0 || sc.filter.frame_on || (sc.has_3d && sc.world_valid);
     if (cine_cand && (last_scene3d || sc.stats.n_tris3d >= 12)) keep3b = 0;   /* cinemática del motor: fundidos y destellos van al panel 2D de la pantalla 3D (el post-proceso por ojo no se aplica allí) */
-    if (!native_mode()) keep3b = 0;   /* modo gpu: sin post-proceso por ojo, fundidos, destellos, gafas y marco de máscara van al panel 2D (solo las tiras de agua, que no tienen panel, quedan en la clase 3 sin dibujar) */
+    if (!native_mode()) keep3b = 0;   /* modo gpu: fundidos, destellos, gafas y marco de máscara van al panel 2D; solo con tiras de agua (que no tienen panel) se conserva la clase 3 y el renderer la aplica con su post-proceso por ojo (RenderRG.planPost) */
     if (rc == 0 && o.screen_filter && sc.filter.active && sc.filter.n_strips == 0 && sc.filter.n_polys == 0 && !keep3b) {
         VrSceneOpts o2 = o;
         o2.screen_filter = 0;
