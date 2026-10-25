@@ -26,6 +26,7 @@
 #include <string.h>
 #include "cpu.h"
 #include "hlebind.h"
+#include "hps.h"
 #include "rtpatch.h"
 #include "sys.h"
 
@@ -56,7 +57,7 @@ static Block **tab;               /* EMU_RAM_SIZE/4 punteros, creado en el prime
 enum {
     O_NOP, O_SLL, O_SRL, O_SRA, O_SLLV, O_SRLV, O_SRAV, O_ADDU, O_SUBU, O_AND, O_OR, O_XOR, O_NOR, O_SLT, O_SLTU,
     O_MFHI, O_MFLO, O_MTHI, O_MTLO, O_MULT, O_MULTU, O_DIV, O_DIVU,
-    O_ADDIU, O_SLTI, O_SLTIU, O_ANDI, O_ORI, O_XORI, O_LI,
+    O_MOVE, O_ADDIU, O_SLTI, O_SLTIU, O_ANDI, O_ORI, O_XORI, O_LI,
     O_LB, O_LH, O_LW, O_LBU, O_LHU, O_LWL, O_LWR, O_SB, O_SH, O_SW, O_SWL, O_SWR, O_LD0,
     O_MFC0, O_MTC0, O_RFE, O_MFC2, O_CFC2, O_MTC2, O_CTC2, O_LWC2, O_SWC2, O_GTE,
     O_SYS, O_BRK, O_END_MTC0, O_END_SYS, O_END_BRK, O_UNIMPL, O_FALL,
@@ -224,6 +225,8 @@ static int decode_simple(uint32_t w, uint32_t pc, Op *o, unsigned *dst, int *end
         }
         if (rd == 0) return 0;
         *dst = rd;
+        /* move (or/addu con $zero): copia también la etiqueta de vértice de la GTE (hps.h) */
+        if ((id == O_OR || id == O_ADDU) && (rs == 0 || rt == 0)) { *o = mk(O_MOVE, rd, rs ? rs : rt, 0, 0, 0); return 1; }
         *o = mk(id, rd, rs, rt, sa, 0);
         return 1;
     }
@@ -501,7 +504,7 @@ static void run(Cpu *c, uint32_t pc, Block *first) {
 #define L(x) lbl[O_##x] = &&L_##x
         L(NOP); L(SLL); L(SRL); L(SRA); L(SLLV); L(SRLV); L(SRAV); L(ADDU); L(SUBU); L(AND); L(OR); L(XOR); L(NOR); L(SLT); L(SLTU);
         L(MFHI); L(MFLO); L(MTHI); L(MTLO); L(MULT); L(MULTU); L(DIV); L(DIVU);
-        L(ADDIU); L(SLTI); L(SLTIU); L(ANDI); L(ORI); L(XORI); L(LI);
+        L(MOVE); L(ADDIU); L(SLTI); L(SLTIU); L(ANDI); L(ORI); L(XORI); L(LI);
         L(LB); L(LH); L(LW); L(LBU); L(LHU); L(LWL); L(LWR); L(SB); L(SH); L(SW); L(SWL); L(SWR); L(LD0);
         L(MFC0); L(MTC0); L(RFE); L(MFC2); L(CFC2); L(MTC2); L(CTC2); L(LWC2); L(SWC2); L(GTE);
         L(SYS); L(BRK); L(END_MTC0); L(END_SYS); L(END_BRK); L(UNIMPL); L(FALL);
@@ -579,6 +582,7 @@ L_DIVU: {
         uint32_t n = r[ip->s], d = r[ip->t];
         if (d == 0) { c->hi = n; c->lo = 0xFFFFFFFFu; } else { c->lo = n / d; c->hi = n % d; }
     } NEXT();
+L_MOVE: r[ip->d] = r[ip->s]; if (__builtin_expect(hps_on, 0)) c->hpt[ip->d] = c->hpt[ip->s]; NEXT();
 L_ADDIU: r[ip->t] = r[ip->s] + ip->imm; NEXT();
 L_SLTI: r[ip->t] = (int32_t)r[ip->s] < (int32_t)ip->imm; NEXT();
 L_SLTIU: r[ip->t] = r[ip->s] < ip->imm; NEXT();
@@ -586,28 +590,47 @@ L_ANDI: r[ip->t] = r[ip->s] & ip->imm; NEXT();
 L_ORI: r[ip->t] = r[ip->s] | ip->imm; NEXT();
 L_XORI: r[ip->t] = r[ip->s] ^ ip->imm; NEXT();
 L_LI: r[ip->t] = ip->imm; NEXT();
-L_LB: r[ip->t] = (uint32_t)(int32_t)(int8_t)rd8(c, EA()); NEXT();
-L_LH: r[ip->t] = (uint32_t)(int32_t)(int16_t)rd16(c, EA()); NEXT();
-L_LW: r[ip->t] = rd32(c, EA()); NEXT();
-L_LBU: r[ip->t] = rd8(c, EA()); NEXT();
-L_LHU: r[ip->t] = rd16(c, EA()); NEXT();
-L_LWL: r[ip->t] = mem_lwl(c, EA(), r[ip->t]); NEXT();
-L_LWR: r[ip->t] = mem_lwr(c, EA(), r[ip->t]); NEXT();
-L_SB: wr8(c, EA(), (uint8_t)r[ip->t]); NEXT();
-L_SH: wr16(c, EA(), (uint16_t)r[ip->t]); NEXT();
-L_SW: wr32(c, EA(), r[ip->t]); NEXT();
+/* Sombra de vértices de la GTE por dirección (hps.h): lw copia la etiqueta de la palabra al registro, sw la copia del registro a la palabra
+ * (solo si el valor sigue siendo la clave del vértice) y toda otra carga/escritura la borra. Las ALU no la borran (la comprobación de valor basta). */
+#define HPT_CLR(x) do { if (__builtin_expect(hps_on, 0)) c->hpt[x] = 0; } while (0)
+#define HPM_CLR(ea) do { if (__builtin_expect(hps_on, 0)) hps_set(ea, 0); } while (0)
+L_LB: r[ip->t] = (uint32_t)(int32_t)(int8_t)rd8(c, EA()); HPT_CLR(ip->t); NEXT();
+L_LH: r[ip->t] = (uint32_t)(int32_t)(int16_t)rd16(c, EA()); HPT_CLR(ip->t); NEXT();
+L_LW: { uint32_t ea = EA(); r[ip->t] = rd32(c, ea); if (__builtin_expect(hps_on, 0)) c->hpt[ip->t] = hps_get(ea); } NEXT();
+L_LBU: r[ip->t] = rd8(c, EA()); HPT_CLR(ip->t); NEXT();
+L_LHU: r[ip->t] = rd16(c, EA()); HPT_CLR(ip->t); NEXT();
+L_LWL: r[ip->t] = mem_lwl(c, EA(), r[ip->t]); HPT_CLR(ip->t); NEXT();
+L_LWR: r[ip->t] = mem_lwr(c, EA(), r[ip->t]); HPT_CLR(ip->t); NEXT();
+L_SB: { uint32_t ea = EA(); wr8(c, ea, (uint8_t)r[ip->t]); HPM_CLR(ea); } NEXT();
+L_SH: { uint32_t ea = EA(); wr16(c, ea, (uint16_t)r[ip->t]); HPM_CLR(ea); } NEXT();
+L_SW: {
+        uint32_t ea = EA(), v = r[ip->t];
+        wr32(c, ea, v);
+        if (__builtin_expect(hps_on, 0)) { uint32_t g = c->hpt[ip->t]; hps_set(ea, g && gte_hp_tag_ok(g, v) ? g : 0); }
+    } NEXT();
 L_SWL: mem_swl(c, EA(), r[ip->t]); NEXT();
 L_SWR: mem_swr(c, EA(), r[ip->t]); NEXT();
 L_LD0: if (ip->sa == 1) (void)rd8(c, EA()); else if (ip->sa == 2) (void)rd16(c, EA()); else (void)rd32(c, EA()); NEXT();
 L_MFC0: r[ip->t] = cop0_read(c, ip->d); NEXT();
 L_MTC0: cop0_write(c, ip->d, r[ip->t]); NEXT();
 L_RFE: cop0_rfe(c); NEXT();
-L_MFC2: { uint32_t v = gte_mfc2(c, ip->d); if (!ip->sa) r[ip->t] = v; } NEXT();
+L_MFC2: {
+        uint32_t v = gte_mfc2(c, ip->d);
+        if (!ip->sa) { r[ip->t] = v; if (__builtin_expect(hps_on, 0)) c->hpt[ip->t] = ip->d - 12u < 4u ? gte_hp_sxy_tag(ip->d, v) : 0; }
+    } NEXT();
 L_CFC2: r[ip->t] = gte_cfc2(c, ip->d); NEXT();
-L_MTC2: gte_mtc2(c, ip->d, r[ip->t]); NEXT();
+L_MTC2: gte_mtc2(c, ip->d, r[ip->t]); if (__builtin_expect(hps_on, 0) && ip->d - 12u < 4u) gte_hp_sxy_set(ip->d, c->hpt[ip->t], r[ip->t]); NEXT();
 L_CTC2: gte_ctc2(c, ip->d, r[ip->t]); NEXT();
-L_LWC2: gte_lwc2(c, ip->t, rd32(c, EA())); NEXT();
-L_SWC2: wr32(c, EA(), gte_swc2(c, ip->t)); NEXT();
+L_LWC2: {
+        uint32_t ea = EA(), v = rd32(c, ea);
+        gte_lwc2(c, ip->t, v);
+        if (__builtin_expect(hps_on, 0) && ip->t - 12u < 4u) gte_hp_sxy_set(ip->t, hps_get(ea), v);
+    } NEXT();
+L_SWC2: {
+        uint32_t ea = EA(), v = gte_swc2(c, ip->t);
+        wr32(c, ea, v);
+        if (__builtin_expect(hps_on, 0)) hps_set(ea, ip->t - 12u < 4u ? gte_hp_sxy_tag(ip->t, v) : 0);
+    } NEXT();
 L_GTE: gte_cmd(c, ip->imm); NEXT();
 /* ip puede apuntar a un bloque invalidado y liberado cuando el hilo vuelve de una excepción/conmutación: se copia antes. */
 L_END_MTC0: { uint32_t nx = ip->imm; cop0_write(c, ip->d, r[ip->t]); pc = nx; } goto dispatch;

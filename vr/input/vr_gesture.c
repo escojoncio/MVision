@@ -11,7 +11,7 @@ void vrg_cfg_defaults(vrg_cfg_t *c) {
     c->right_handed = 1;
     c->punch_speed = 0.5f; c->knock_speed = 0.4f; c->knock_touch = 0.08f; c->knock_cooldown_s = 0.25f; c->knock_enemy_m = 1.0f; c->reach_min = 0.20f; c->melee_range = 3.0f; c->front_cos = 0.5f;
     c->grab_range = 1.3f; c->neck_radius = 0.36f; c->neck_height = 0.45f; c->back_dist = 0.25f; c->grab_after_punch_s = 0.2f;
-    c->chest_down = 0.30f; c->chest_fwd = 0.18f; c->chest_radius = 0.15f; c->chest_depth = 0.05f; c->chest_hold_s = 0.30f;
+    c->chest_side = 0.16f; c->chest_down = 0.26f; c->chest_fwd = -0.02f; c->chest_radius = 0.15f; c->chest_hold_s = 0.30f;
     c->grip_on = 0.65f; c->grip_off = 0.35f; c->peek_on = 0.12f; c->peek_off = 0.06f; c->cooldown_s = 0.12f;
     c->throw_speed = 1.0f; c->throw_reach = 0.30f; c->grab_slow_speed = 0.9f; c->grab_delay_s = 0.3f; c->contact_latch_s = 0.15f; c->contact_speed = 0.5f; c->body_radius = 0.28f; c->body_low = 0.5f; c->body_high = 0.65f; c->fist_radius = 0.12f; c->contact_tol = 0.05f;
 }
@@ -352,20 +352,30 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
             hd[s] = d1 < d2 ? d1 : d2;
         }
     }
-    /* zona del pecho (ventana de objetos = izquierda, armas = derecha): UN punto, bajo la cabeza y delante del torso (rumbo del personaje, no
-     * coordenadas fijas del espacio de seguimiento: vale sentado, de pie o girado). La mano debe estar a chest_radius del punto Y delante del plano del torso. */
-    int chest[2] = {0, 0};
-    float chest_d[2] = {-1, -1}, chest_z[2] = {0, 0};
+    /* zonas de menú, UNA POR MANO (ventana de objetos = mano izquierda en su lado izquierdo, armas = mano derecha en el derecho): puntos fijos respecto a la cabeza en marco
+     * de guiñada (rumbo del personaje, no coordenadas fijas del espacio de seguimiento: vale sentado, de pie o girado). La mano debe estar a chest_radius de SU punto. */
+    int chest[2] = {0, 0}, trg[2] = {0, 0}, tedge[2] = {0, 0};
+    float chest_d[2] = {-1, -1};
+    uint16_t trig_mask = 0;
+    for (int s = 0; s < 2; s++) {      /* gatillo de cada mano (histéresis trig_on/trig_off): abre su ventana dentro de su zona */
+        if (!tr[s]) { g->trig_dn[s] = 0; continue; }
+        float tv = fin(in->trig[s]) ? in->trig[s] : 0.0f;
+        int was = g->trig_dn[s];
+        trg[s] = was ? tv > c->trig_off : tv >= c->trig_on;
+        tedge[s] = trg[s] && !was && g->warm == 0;       /* un gatillo ya mantenido al recuperar el control NO es una pulsación */
+        g->trig_dn[s] = trg[s];
+    }
     {
-        float fx = sinf(in->yaw), fz = cosf(in->yaw);     /* delante del torso */
-        float ctr[3] = {in->head[0] + fx * c->chest_fwd, in->head[1] - c->chest_down, in->head[2] + fz * c->chest_fwd};
+        float fx = sinf(in->yaw), fz = cosf(in->yaw);     /* delante del torso; a la derecha del usuario = (-fz, fx) */
         for (int s = 0; s < 2; s++) {
             if (!tr[s]) { g->chest_prev[s] = 0; continue; }
+            float side = s == 0 ? -c->chest_side : c->chest_side;
+            float ctr[3] = {in->head[0] + fx * c->chest_fwd - fz * side, in->head[1] - c->chest_down, in->head[2] + fz * c->chest_fwd + fx * side};
             float dx = in->hand[s][0] - ctr[0], dy = in->hand[s][1] - ctr[1], dz = in->hand[s][2] - ctr[2];
             chest_d[s] = sqrtf(dx * dx + dy * dy + dz * dz);
-            chest_z[s] = (in->hand[s][0] - in->head[0]) * fx + (in->hand[s][2] - in->head[2]) * fz;
-            chest[s] = chest_d[s] <= c->chest_radius && chest_z[s] > c->chest_depth;
-            if (chest[s] && !g->chest_prev[s] && !fst[s] && g->warm == 0 && g->chest_cool[s] <= 0) { g->chest_cool[s] = 0.5f; if (out->haptic[s] < 0.15f) out->haptic[s] = 0.15f; }   /* aviso al entrar en la zona */
+            chest[s] = chest_d[s] <= c->chest_radius;
+            if (chest[s]) trig_mask |= (uint16_t)(s == (c->right_handed ? 1 : 0) ? VRG_R2 : VRG_L2);   /* dentro de su zona el gatillo no llega al juego (ni disparo ni acción) */
+            if (chest[s] && !g->chest_prev[s] && !trg[s] && g->warm == 0 && g->chest_cool[s] <= 0) { g->chest_cool[s] = 0.5f; if (out->haptic[s] < 0.15f) out->haptic[s] = 0.15f; }   /* aviso al entrar en la zona */
             g->chest_prev[s] = chest[s];
             if (g->chest_cool[s] > 0) g->chest_cool[s] -= dt;
         }
@@ -421,7 +431,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                 } else started = 1;
             }
             if (edge[s] && !grabbing && !grab_start && g->gp_t[s] <= 0 && !started) {
-                /* PRIORIDAD al pulsar: 1) cuello/espalda de un enemigo = agarre; 2) zona del pecho = ventana; 3) puño (no hace falta nada más) */
+                /* al pulsar: cuello/espalda de un enemigo = agarre; si no, puño (la ventana de la zona del pecho es del gatillo, no del puño) */
                 if (ne >= 0 && nd <= 3.0f) {
                     const char *why = "ok";
                     if (!free_hands || in->on_wall || in->stance >= 2) why = "manos_ocupadas";
@@ -434,10 +444,6 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                     out->grab_why = why; out->grab_dist = hd[s]; out->grab_side_try = s;
                     if (!strcmp(why, "ok")) { g->gp_t[s] = c->grab_delay_s; g->gp_en[s] = ne; g->gp_only[s] = near_body; started = 1; out->grab_why = "pendiente"; }
                 }
-                if (!started && !((g->menu_hold >> s) & 1)) {      /* intento de ventana del pecho: fuera de la zona se rechaza ya; dentro, el puño debe mantenerse chest_hold_s */
-                    if (chest[s]) { g->chest_live[s] = 1; g->chest_t[s] = 0; }
-                    else { out->pecho[s].valid = 1; out->pecho[s].dist = chest_d[s]; out->pecho[s].depth = chest_z[s]; out->pecho[s].reason = chest_d[s] > c->chest_radius ? "lejos" : "detras"; }
-                }
             } else if (edge[s] && grabbing && !grab_start) {
                 /* ya agarrando: cada pulsación nueva aprieta (y remata tras el décimo apretón) */
                 out->squeeze = 1; out->grab_hold = 1; out->event = VRG_EV_SQUEEZE; out->haptic[s] = 0.5f;
@@ -447,33 +453,40 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
             }
             g->near_prev[s] = near_now;
         }
-        for (int s = 0; s < 2; s++) {      /* intento en curso: el puño sigue pulsado dentro de la zona; al cumplir chest_hold_s se abre la ventana */
-            if (!g->chest_live[s] || edge[s]) continue;      /* en el fotograma de la pulsación el tiempo es 0 */
-            const char *why = NULL;
-            if (!tr[s]) why = "sin_seguimiento";
-            else if (!fst[s]) why = "soltado";
-            else if (!chest[s]) why = chest_d[s] > c->chest_radius ? "salio_zona" : "detras";
-            else if (grabbing || grab_start || g->gp_t[s] > 0) why = "agarre";
-            if (!why) {
-                g->chest_t[s] += dt;
-                if (g->chest_t[s] + 1e-3f < c->chest_hold_s) continue;
-                g->menu_hold |= 1 << s; out->menu_open[s] = 1; out->haptic[s] = 0.2f; if (!out->event) out->event = VRG_EV_MENU;
-                why = "ok";
-            }
-            out->pecho[s].valid = 1; out->pecho[s].opened = !strcmp(why, "ok"); out->pecho[s].hold = g->chest_t[s]; out->pecho[s].reason = why;
-            out->pecho[s].dist = tr[s] ? chest_d[s] : -1.0f; out->pecho[s].depth = tr[s] ? chest_z[s] : 0.0f;
-            g->chest_live[s] = 0;
-        }
         if (in->holding && !out->grab_hold && (fst[0] || fst[1])) out->grab_hold = 1;
         if (g->grab_side >= 0) { out->grab_side = g->grab_side; out->grab_en = g->grab_en; }
-    } else { g->grab_side = -1; g->chest_live[0] = g->chest_live[1] = 0; }
+    } else g->grab_side = -1;
     if (g->grab_side >= 0 && ne >= 0) g->grab_en = ne;
-    for (int s = 0; s < 2; s++) {      /* ventana abierta: se mantiene mientras se mantenga el botón (R1 = armas, L1 = objetos del motor) */
+    /* ventana del pecho: el GATILLO de la mano apretado (flanco) abre un intento; fuera de la zona se rechaza ya; dentro, debe mantenerse chest_hold_s */
+    for (int s = 0; s < 2; s++) {
+        if (!tedge[s] || ((g->menu_hold >> s) & 1)) continue;
+        if (chest[s]) { g->chest_live[s] = 1; g->chest_t[s] = 0; }
+        else { out->pecho[s].valid = 1; out->pecho[s].dist = chest_d[s]; out->pecho[s].reason = "lejos"; }
+    }
+    for (int s = 0; s < 2; s++) {      /* intento en curso: el gatillo sigue apretado dentro de la zona; al cumplir chest_hold_s se abre la ventana */
+        if (!g->chest_live[s] || tedge[s]) continue;      /* en el fotograma de la pulsación el tiempo es 0 */
+        const char *why = NULL;
+        if (!tr[s]) why = "sin_seguimiento";
+        else if (!trg[s]) why = "soltado";
+        else if (!chest[s]) why = "salio_zona";
+        else if (grabbing || grab_start || g->gp_t[s] > 0) why = "agarre";
+        if (!why) {
+            g->chest_t[s] += dt;
+            if (g->chest_t[s] + 1e-3f < c->chest_hold_s) continue;
+            g->menu_hold |= 1 << s; out->menu_open[s] = 1; out->haptic[s] = 0.2f; if (!out->event) out->event = VRG_EV_MENU;
+            why = "ok";
+        }
+        out->pecho[s].valid = 1; out->pecho[s].opened = !strcmp(why, "ok"); out->pecho[s].hold = g->chest_t[s]; out->pecho[s].reason = why;
+        out->pecho[s].dist = tr[s] ? chest_d[s] : -1.0f;
+        g->chest_live[s] = 0;
+    }
+    for (int s = 0; s < 2; s++) {      /* ventana abierta: se mantiene mientras se mantenga el gatillo de la mano (R2 = armas, L2 = objetos del motor) */
         if (!((g->menu_hold >> s) & 1)) continue;
-        if (tr[s] && fst[s]) { out->menu_open[s] = 1; out->press |= (uint16_t)(s == (c->right_handed ? 1 : 0) ? VRG_R2 : VRG_L2);   /* mano dominante = R2 (armas), la otra = L2 (objetos): son los botones que abren las ventanas del juego (R1/L1 no) */ }
+        if (tr[s] && trg[s]) { out->menu_open[s] = 1; out->press |= (uint16_t)(s == (c->right_handed ? 1 : 0) ? VRG_R2 : VRG_L2);   /* mano dominante = R2 (armas), la otra = L2 (objetos): son los botones que abren las ventanas del juego (R1/L1 no) */ }
         else g->menu_hold &= ~(1 << s);
     }
     if (fist_guard) out->mask |= (uint16_t)(VRG_R1 | VRG_L1);
+    out->mask |= trig_mask;
 
     /* ventana de objetos (R1) / armas (L1): con las manos libres los grips no las abren; mantener el clic del stick de cada mano sí */
     {

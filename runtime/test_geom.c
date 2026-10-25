@@ -316,6 +316,38 @@ static void t_saturated(void) {
     gte_hp_enable(0);
 }
 
+/* Quad con dos vértices saturados en la misma esquina y decoys más cercanos en la secuencia: la elección por secuencia/cercanía falla, pero solo UNA combinación de
+ * candidatos hace el cuadrilátero coplanar y con orden de tira válido (v1/v3 intercambiados también es coplanar, pero cruza). */
+static void t_coplanar_combo(void) {
+    gte_reset(); gte_hp_enable(1);
+    setup_cam(0, 0, 0, 500, 160, 120);
+    const int v0[3] = {-200, -100, 1500}, v1[3] = {26000, 21000, 1800}, v2[3] = {-100, 300, 1100};
+    const int v3[3] = {v1[0] + v2[0] - v0[0], v1[1] + v2[1] - v0[1], v1[2] + v2[2] - v0[2]};
+    int sx[4], sy[4];
+    sxy_split(rtps_sxy(v0[0], v0[1], v0[2]), &sx[0], &sy[0]);
+    rtps_sxy(30000, 31000, 600); rtps_sxy(28000, 30000, 650);        /* decoys pegados al ancla v0 en la secuencia */
+    sxy_split(rtps_sxy(v1[0], v1[1], v1[2]), &sx[1], &sy[1]);
+    rtps_sxy(29000, 33000, 700);
+    sxy_split(rtps_sxy(v2[0], v2[1], v2[2]), &sx[2], &sy[2]);
+    rtps_sxy(31000, 29000, 620); rtps_sxy(27000, 32000, 640);        /* decoys pegados al ancla v2 */
+    sxy_split(rtps_sxy(v3[0], v3[1], v3[2]), &sx[3], &sy[3]);
+    CHECK(sx[1] == 0x3FF && sy[1] == 0x3FF && sx[3] == 0x3FF && sy[3] == 0x3FF && sx[0] < 0x3FF && sx[2] < 0x3FF, "v1,v3 no saturan en la esquina");
+    GpuHpInfo r[4]; uint8_t g[4];
+    CHECK(gte_hp_resolve(4, sx, sy, r, g) == 4, "quad no resuelto");
+    CHECK(fabsf(r[1].vx - v1[0]) < 1e-2 && fabsf(r[1].vy - v1[1]) < 1e-2 && fabsf(r[1].vz - v1[2]) < 1e-2, "v1 no es el verdadero (%f %f %f)", r[1].vx, r[1].vy, r[1].vz);
+    CHECK(fabsf(r[3].vx - v3[0]) < 1e-2 && fabsf(r[3].vy - v3[1]) < 1e-2 && fabsf(r[3].vz - v3[2]) < 1e-2, "v3 no es el verdadero (%f %f %f)", r[3].vx, r[3].vy, r[3].vz);
+    CHECK(!(r[1].flags & GPU_VF_AMBIG) && !(r[3].flags & GPU_VF_AMBIG), "la combinacion coplanar unica no debe quedar AMBIG (flags %d %d)", r[1].flags, r[3].flags);
+    /* sin combinacion coplanar (el v3 verdadero no se transformó): se conserva la elección por secuencia, AMBIG */
+    gte_hp_frame(); gte_hp_frame();
+    sxy_split(rtps_sxy(v0[0], v0[1], v0[2]), &sx[0], &sy[0]);
+    rtps_sxy(30000, 31000, 600); rtps_sxy(28000, 30000, 650);
+    sxy_split(rtps_sxy(v1[0], v1[1], v1[2]), &sx[1], &sy[1]);
+    sxy_split(rtps_sxy(v2[0], v2[1], v2[2]), &sx[2], &sy[2]);
+    rtps_sxy(27000, 32000, 640);
+    CHECK(gte_hp_resolve(4, sx, sy, r, g) == 4 && g[3], "sin combinacion coplanar: debe devolver algo");
+    gte_hp_enable(0);
+}
+
 /* Captura: polígono con un vértice saturado y otro detrás de la cámara -> vvalid en todos, fvalid solo en los normales. */
 static void t_capture_sat(void) {
     gte_reset(); gpu_reset(); gte_hp_enable(0);
@@ -335,6 +367,30 @@ static void t_capture_sat(void) {
         CHECK(o->v[1].vvalid && !o->v[1].fvalid && o->v[1].vflags == GPU_VF_SAT && fabsf(o->v[1].vx - 30000) < 1e-2, "v1 saturado: vvalid=%d fvalid=%d flags=%d vx=%f", o->v[1].vvalid, o->v[1].fvalid, o->v[1].vflags, o->v[1].vx);
         CHECK(o->v[2].vvalid && !o->v[2].fvalid && (o->v[2].vflags & GPU_VF_BEHIND) && o->v[2].vz < 0, "v2 detras: vvalid=%d vflags=%d vz=%f", o->v[2].vvalid, o->v[2].vflags, o->v[2].vz);
         CHECK(o->proj_h == 400.0f, "proj_h");
+    }
+    gpu_capture_hiprec(0); gpu_capture_enable(0);
+}
+
+/* La proyección (H, OFX, OFY) de una primitiva sale de un vértice fiable, no del último resuelto: si el último es un candidato con banderas (SAT/AMBIG) de otra proyección, no debe ganar. */
+static void t_proj_trusted(void) {
+    gte_reset(); gpu_reset(); gte_hp_enable(0);
+    gpu_capture_enable(1); gpu_capture_hiprec(1);
+    setup_cam(0, 0, 0, 500, 160, 120);
+    int vv[3][3] = {{-200, -100, 1500}, {200, -100, 1500}, {-200, 100, 1500}};
+    int qx[4], qy[4]; rtpt3((const int (*)[3])vv, qx, qy);
+    /* v3: candidatos saturados en la esquina (0x3FF,0x3FF) con OTRA proyección (OFX=500, OFY=300) */
+    setup_cam(0, 0, 0, 500, 500, 300);
+    rtps_sxy(30000, 30000, 600); rtps_sxy(31000, 32000, 700);
+    qx[3] = 0x3FF; qy[3] = 0x3FF;
+    gpu_gp0(0x28FFFFFFu);
+    for (int i = 0; i < 4; i++) gpu_gp0((uint32_t)(qx[i] & 0xFFFF) | ((uint32_t)qy[i] << 16));
+    gpu_gp1(0x05000000u | 0); gpu_gp1(0x05000000u | 100);
+    const GpuDrawList *l = gpu_capture_frame();
+    CHECK(l != NULL && l->nops >= 1, "sin lista");
+    if (l && l->nops >= 1) {
+        const GpuOp *o = &l->ops[l->nops - 1];
+        CHECK(o->nv == 4 && o->v[3].vvalid && o->v[3].vflags != 0, "v3 debia salir con banderas (vflags %d)", o->v[3].vflags);
+        CHECK(o->proj_h == 500.0f && o->proj_ox == 160.0f && o->proj_oy == 120.0f, "proyeccion del op de un vertice AMBIG: ox=%f oy=%f", o->proj_ox, o->proj_oy);
     }
     gpu_capture_hiprec(0); gpu_capture_enable(0);
 }
@@ -371,7 +427,9 @@ int main(void) {
     t_table();
     t_capture();
     t_saturated();
+    t_coplanar_combo();
     t_capture_sat();
+    t_proj_trusted();
     t_sprite();
     if (fails) { printf("test_geom: %d FALLOS\n", fails); return 1; }
     printf("test_geom: todas las pruebas OK\n");

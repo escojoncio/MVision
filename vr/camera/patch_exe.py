@@ -14,7 +14,7 @@ inmediato. El resultado es un ejecutable con el mismo tamaño que se recompila c
 (`make gen EXE=...`); el original no se modifica.
 
 Uso:
-  patch_exe.py ORIGINAL SALIDA [--hfov 140] [--vfov 120] [--h 160] [--margin 1.0] [--no-divide] [--no-cull] [--wide-points]
+  patch_exe.py ORIGINAL SALIDA [--hfov 179] [--vfov 179] [--h 160] [--margin 1.0] [--no-divide] [--no-cull] [--wide-points]
   patch_exe.py ORIGINAL --check            comprueba los puntos sin escribir
   patch_exe.py --table                     imprime la tabla de puntos
 
@@ -180,7 +180,7 @@ def main(a):
     if len(a) < 2:
         print("falta SALIDA"); return 1
     opt = lambda k, dflt: float(a[a.index(k) + 1]) if k in a else dflt
-    h, hfov, vfov, margin = opt("--h", 160.0), opt("--hfov", 140.0), opt("--vfov", 120.0), opt("--margin", 1.0)
+    h, hfov, vfov, margin = opt("--h", 160.0), opt("--hfov", 179.0), opt("--vfov", 179.0), opt("--margin", 1.0)
     hx, hy = box(h, hfov, vfov, margin)
     wide = "--wide-points" in a
     if not output_ok(src, a[1]):

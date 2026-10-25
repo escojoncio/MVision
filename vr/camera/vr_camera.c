@@ -39,7 +39,8 @@
  *    estado 0 no generan paquetes (se liberan a los 8 frames) y la IA de los enemigos lo usa como "no está en
  *    cámara" (giran sin suavizar y, fuera de cámara, se reubican por su ruta; ver vr/ai). patch_exe.py cambia las 44
  *    constantes inmediatas de recorte (caja a la medida de --hfov/--vfov) sin tocar H: el recorte pasa a cubrir ~140 x
- *    120 grados alrededor de la dirección del motor. Efecto en el juego (revisión): el estado de recorte del bloque
+ *    120 grados alrededor de la dirección del motor (valor inicial); por defecto ahora la caja es la máxima (+-1020 px, límite de la GTE; ~162 x 162 grados con H=160 y
+ *    ~143 grados con H=340 de las cinemáticas), para que el culling del motor no abra agujeros en la periferia al girar la cabeza. Efecto en el juego (revisión): el estado de recorte del bloque
  *    alimenta a la IA, así que los enemigos dentro de 140 x 120 grados ya cuentan como "en cámara" (coincide con lo que
  *    ve el usuario; vr/ai además lo fuerza para los activos). La detección de las cámaras de vigilancia NO depende
  *    del recorte (solo su matriz de luz). Las comprobaciones de "punto visible" (0x8001c440, 0x8001c4d8, 0x8001c5e8; caja
@@ -536,7 +537,7 @@ int vrcam_scan_overlay(const uint8_t *ram, uint32_t lo, uint32_t hi, VrCamOvSite
     return n;
 }
 
-void vrcam_patch_default(VrCamPatch *p) { p->engine_h = 160; p->hfov_deg = 140; p->vfov_deg = 120; p->no_divide = 1; p->wide_points = 0; p->no_cull = VRCAM_NOCULL_ALL; }
+void vrcam_patch_default(VrCamPatch *p) { p->engine_h = 160; p->hfov_deg = 179; p->vfov_deg = 179; p->no_divide = 1; p->wide_points = 0; p->no_cull = VRCAM_NOCULL_ALL; }
 
 int vrcam_patch_ram(uint8_t *ram, const VrCamPatch *pp) {
     VrCamPatch d; if (!pp) { vrcam_patch_default(&d); pp = &d; }

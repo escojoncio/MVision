@@ -4,6 +4,7 @@
 typedef struct Cpu {
     uint32_t r[32];
     uint32_t hi, lo;
+    uint32_t hpt[32];   /* etiqueta de vértice de la GTE por registro (hps.h; solo la rellena el intérprete con la alta precisión encendida) */
 } Cpu;
 
 typedef void (*FuncPtr)(Cpu *c);

@@ -67,8 +67,8 @@ final class RadarPanel {
     var wrist: VrRadarWristCfg = vrradar_wrist_cfg_default()
     /// Resolución de la textura respecto al radar del original (71x54 px): 4 = 284x216.
     let scale = 4
-    /// Normal del panel con el mando = +Y del agarre (dorso de la mano: convención de vr/body y vrgame.h, "-Z dedos, +Y dorso"). NO verificado en un mando real: si el panel
-    /// sale por el lado de la palma (oculto dentro de la mano), poner true para invertir la normal.
+    /// Dorso de respaldo = +Y del agarre (convención de vr/body y vrgame.h, "-Z dedos, +Y dorso"). Solo se usa si la cabeza está casi sobre el eje del antebrazo (< 2 cm): normalmente
+    /// la normal del panel apunta a la cabeza (vrradar_wrist_quad_eye) y esto no interviene. true invierte ese dorso de respaldo.
     var flipDorsal = false
 
     // MARK: estado público
@@ -298,7 +298,8 @@ final class RadarPanel {
         }
         var q = VrRadarQuad()
         let aspect = rect.w > 0 && rect.z > 0 ? rect.z / rect.w : 71.0 / 54.0
-        quadValid = ok && vrradar_wrist_quad(&arm, &wrist, aspect, &q) != 0
+        let eye: [Float] = [headPosition.x, headPosition.y, headPosition.z]
+        quadValid = ok && vrradar_wrist_quad_eye(&arm, &wrist, aspect, eye, &q) != 0      // la cara del panel gira alrededor del antebrazo hacia la cabeza
         let now = ProcessInfo.processInfo.systemUptime
         if now - lastRadarLog >= 1.0 {      // una vez por segundo: el hueso invisible (centro del panel) y su normal; la oclusion la decide la GPU (sin consulta de visibilidad: n/d)
             lastRadarLog = now
@@ -308,7 +309,6 @@ final class RadarPanel {
             Storage.log("[radar] fuente=\(source) hueso=\(pos) normal=\(nrm) panel=\(quadValid ? "valido" : "invalido") presente=\(present) visible/ocluido=n/d flipDorsal=\(flipDorsal)")
         }
         guard quadValid else { glow = 0; return }
-        let eye: [Float] = [headPosition.x, headPosition.y, headPosition.z]
         let fwd: [Float] = [headForward.x, headForward.y, headForward.z]
         glow = vrradar_gaze(&q, eye, fwd, &wrist)
         quadU.center = SIMD4<Float>(q.center.0, q.center.1, q.center.2, q.half_w)

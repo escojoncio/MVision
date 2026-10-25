@@ -216,10 +216,13 @@ typedef struct {
     uint32_t res_prims, res_amb, res_pivot;        /* gte_hp_resolve: primitivas, vértices con >1 candidato, primitivas sin ancla */
     uint32_t ev_verts, ev_ok, ev_amb, ev_amb_ok;   /* autoevaluación (gte_hp_eval): vértices evaluados / acertados / ambiguos / ambiguos acertados */
     uint32_t ev_hi, ev_hi_ok, ev_anc, ev_anc_ok;   /* ... de ellos: de confianza alta (sin AMBIG) / en primitivas con alguna ancla única */
+    uint32_t res_addr, res_val;                    /* vértices de primitivas resueltos por DIRECCIÓN de memoria (hps.h) / por valor de SXY */
 } GteHpStats;
 typedef int (*GpuHpHook)(int sx, int sy, GpuHpInfo *out);
-/* Asociación por primitiva (la que usa gpu_capture_hiprec): n SXY crudos (sin offset de dibujo) -> out[i], ok[i]=1 si se resolvió. */
-typedef int (*GpuHpResolve)(int n, const int *sx, const int *sy, GpuHpInfo *out, uint8_t *ok);
+/* Asociación por primitiva (la que usa gpu_capture_hiprec): n SXY crudos (sin offset de dibujo) -> out[i], ok[i]=1 si se resolvió.
+ * addr[i]/word[i] (addr NULL o addr[i]==0 = desconocida): dirección de memoria y palabra de la que la GPU leyó el vértice i; la sombra por
+ * dirección del intérprete (hps.h) lo resuelve sin ambigüedad y, si no, se cae a la asociación por valor. */
+typedef int (*GpuHpResolve)(int n, const int *sx, const int *sy, const uint32_t *addr, const uint32_t *word, GpuHpInfo *out, uint8_t *ok);
 void gpu_capture_set_hp_hook(GpuHpHook h);
 void gpu_capture_hiprec(int on);
 /* gte.c */
@@ -228,5 +231,6 @@ int gte_hp_enabled(void);
 void gte_hp_frame(void);
 int gte_hp_lookup(int sx, int sy, GpuHpInfo *out);   /* solo vértices normales (flags==0), el más reciente */
 int gte_hp_resolve(int n, const int *sx, const int *sy, GpuHpInfo *out, uint8_t *ok); /* ver gte.c; devuelve nº resueltos */
+int gte_hp_resolve_a(int n, const int *sx, const int *sy, const uint32_t *addr, const uint32_t *word, GpuHpInfo *out, uint8_t *ok); /* idem, con la dirección de cada palabra de vértice */
 void gte_hp_eval(int on, int ex, int ey); /* autoevaluación de la heurística (solo medición; ver gte.c) */
 void gte_hp_stats(GteHpStats *s);

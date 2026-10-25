@@ -33,7 +33,7 @@ static struct {
 } g;
 
 /* Acumulador de comandos GP0 */
-static uint32_t fifo[16];
+static uint32_t fifo[16], fifo_a[16];   /* fifo_a: dirección de RAM de cada palabra (0 = no viene de memoria) */
 static int fifo_n, fifo_need;
 static enum { ST_CMD, ST_POLYLINE, ST_UPLOAD, } st;
 /* Transferencias CPU<->VRAM */
@@ -249,6 +249,9 @@ static void cap_refresh_disp(void) {
 
 static GpuHpInfo cap_proj;
 static uint32_t cap_seq[4];
+/* Dirección de memoria y palabra de cada vértice de la primitiva en curso (0 = desconocida: escritura directa por GP0, no por DMA/lista).
+ * Los rellena cmd_poly/exec_cmd justo antes de la captura y cap_resolve los consume y pone a cero. */
+static uint32_t cap_va[4], cap_vw[4];
 /* Datos básicos del vértice (el enlace con la GTE se resuelve después, por primitiva: cap_resolve). */
 static void cap_vtx(GpuVtx *o, const Vtx *v, int tex) {
     o->x = (int16_t)v->x; o->y = (int16_t)v->y;
@@ -263,15 +266,22 @@ static void cap_resolve(GpuVtx *o, const Vtx *v, int nv) {
     if (cap.hpres) {
         int sx[4], sy[4]; GpuHpInfo h[4]; uint8_t ok[4];
         for (int i = 0; i < nv; i++) { sx[i] = v[i].x - g.ox; sy[i] = v[i].y - g.oy; }
-        cap.hpres(nv, sx, sy, h, ok);
+        cap.hpres(nv, sx, sy, cap_va, cap_vw, h, ok);
+        int pbest = -1, prank = -1;   /* proyección de la primitiva: del último vértice más fiable (sin banderas > solo SAT/BEHIND > AMBIG); un candidato AMBIG puede ser de otra proyección */
+        for (int i = 0; i < nv; i++) {
+            if (!ok[i]) continue;
+            int rk = (h[i].flags & GPU_VF_AMBIG) ? 0 : h[i].flags ? 1 : 2;
+            if (rk >= prank) { prank = rk; pbest = i; }
+        }
         for (int i = 0; i < nv; i++) {
             if (!ok[i]) continue;
             o[i].vvalid = 1; o[i].vflags = h[i].flags;
             o[i].vx = h[i].vx; o[i].vy = h[i].vy; o[i].vz = h[i].vz; o[i].fz = h[i].fz;
             o[i].fx = h[i].fx + (float)g.ox; o[i].fy = h[i].fy + (float)g.oy;
             o[i].fvalid = !(h[i].flags & (GPU_VF_SAT | GPU_VF_BEHIND));
-            cap_proj = h[i]; cap_seq[i] = h[i].seq;
+            cap_seq[i] = h[i].seq;
         }
+        if (pbest >= 0) cap_proj = h[pbest];
     } else if (cap.hphook) {
         for (int i = 0; i < nv; i++) {
             GpuHpInfo h;
@@ -289,6 +299,7 @@ static void cap_resolve(GpuVtx *o, const Vtx *v, int nv) {
             }
         }
     }
+    memset(cap_va, 0, sizeof cap_va);
 }
 
 /* Sprite de 4 vértices del que el juego proyectó solo dos esquinas diagonales (0,3 o 1,2) y construyó las otras dos en
@@ -557,7 +568,7 @@ static GpuMarkHook mark_hook;
 void gpu_capture_set_mark_hook(GpuMarkHook h) { mark_hook = h; }
 void gpu_capture_set_float_hook(GpuFloatHook h) { cap.hook = h; }
 void gpu_capture_set_hp_hook(GpuHpHook h) { cap.hphook = h; }
-void gpu_capture_hiprec(int on) { gte_hp_enable(on); cap.hphook = NULL; cap.hpres = on ? gte_hp_resolve : NULL; }
+void gpu_capture_hiprec(int on) { gte_hp_enable(on); cap.hphook = NULL; cap.hpres = on ? gte_hp_resolve_a : NULL; }
 
 static void cap_display_start_changed(void) {
     if (g.dx != cap.last_dx || g.dy != cap.last_dy) {
@@ -636,6 +647,7 @@ static void cmd_poly(const uint32_t *w) {
     for (int i = 0; i < nv; i++) {
         if (i > 0 && gour) col = w[k++] & 0xFFFFFF;
         uint32_t xy = w[k++];
+        if (cap.on) { cap_va[i] = fifo_a[k - 1]; cap_vw[i] = xy; }
         v[i].x = sext11(xy) + g.ox;
         v[i].y = sext11(xy >> 16) + g.oy;
         v[i].r = col & 255; v[i].g = (col >> 8) & 255; v[i].b = (col >> 16) & 255;
@@ -861,6 +873,7 @@ static void exec_cmd(const uint32_t *w) {
         int gour = (op >> 4) & 1, semi = (op >> 1) & 1;
         Vtx a = line_v(w[0], w[1]);
         Vtx b = gour ? line_v(w[2], w[3]) : line_v(w[0], w[2]);
+        if (cap.on) { cap_va[0] = fifo_a[1]; cap_vw[0] = w[1]; cap_va[1] = fifo_a[gour ? 3 : 2]; cap_vw[1] = gour ? w[3] : w[2]; }
         gpu_stats.line++;
         do_line(a, b, gour, semi);
         if (op & 8) { st = ST_POLYLINE; pl_last = b; pl_col = gour ? w[2] : w[0]; pl_op = op; pl_wait_col = gour; }
@@ -875,7 +888,9 @@ static void exec_cmd(const uint32_t *w) {
     /* 0x00, 0x01 (caché), 0x03 y 0xE0/0xE7+ = nop */
 }
 
-void gpu_gp0(uint32_t w) {
+static void gp0_word(uint32_t w, uint32_t addr);
+void gpu_gp0(uint32_t w) { gp0_word(w, 0); }
+static void gp0_word(uint32_t w, uint32_t addr) {
     switch (st) {
     case ST_UPLOAD:
         upload_px((uint16_t)w);
@@ -897,6 +912,7 @@ void gpu_gp0(uint32_t w) {
         break;
     }
     if (fifo_n == 0) fifo_need = cmd_len(w >> 24);
+    fifo_a[fifo_n] = addr;
     fifo[fifo_n++] = w;
     if (fifo_n >= fifo_need) { fifo_n = 0; exec_cmd(fifo); }
 }
@@ -1035,7 +1051,7 @@ void gpu_draw_list(uint32_t addr) {
     for (unsigned guard = 0; guard < 0x100000; guard++) {
         uint32_t h = ram32(addr);
         unsigned n = h >> 24;
-        for (unsigned i = 0; i < n; i++) gpu_gp0(ram32(addr + 4 + 4 * i));
+        for (unsigned i = 0; i < n; i++) gp0_word(ram32(addr + 4 + 4 * i), (addr + 4 + 4 * i) & 0x1FFFFC);
         if (h & 0x800000) return; /* terminador 0xFFFFFF (bit 23) */
         addr = h & 0x1FFFFC;
     }
@@ -1048,7 +1064,7 @@ void gpu_dma2(uint32_t madr, uint32_t bcr, uint32_t chcr) {
     case 0: case 1: {
         uint32_t words = (chcr >> 9) & 3 ? (bcr & 0xFFFF) * (bcr >> 16) : (bcr & 0xFFFF ? bcr & 0xFFFF : 0x10000);
         for (uint32_t i = 0; i < words; i++, a += 4) {
-            if (chcr & 1) gpu_gp0(ram32(a));
+            if (chcr & 1) gp0_word(ram32(a), a & 0x1FFFFC);
             else { uint32_t v = gpu_read(); memcpy(&emu_ram[a & 0x1FFFFC], &v, 4); }
         }
         break;
@@ -1221,7 +1237,7 @@ void hle_gfx_list2(Cpu *c) { hle_gfx_list(c); }
 void hle_gfx_prim(Cpu *c) {
     uint32_t h = mem_r32(c, A0);
     unsigned n = h >> 24;
-    for (unsigned i = 0; i < n; i++) gpu_gp0(mem_r32(c, A0 + 4 + 4 * i));
+    for (unsigned i = 0; i < n; i++) gp0_word(mem_r32(c, A0 + 4 + 4 * i), A0 + 4 + 4 * i);
     V0 = 0;
 }
 

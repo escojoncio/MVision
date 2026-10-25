@@ -731,8 +731,8 @@ static int list_uploads_cover_display(const GpuDrawList *l) {
 }
 
 /* Registro «[gpu3d]» (hilo de emulación, una línea por segundo como mucho): qué hizo el ensamblador con las primitivas de las listas de ese segundo. Es el único diagnóstico del visor. */
-#define GPU3D_NEAR_EYE_M 0.25f   /* modo gpu: ningún triángulo 3D con un vértice a menos de esta distancia (m) del ojo del motor (VrSceneOpts.eye_near_m) */
-static struct { uint32_t lists, prims, p3d, tris3d, p2d, near_drop, near_clip, behind_drop, nohp, post; int cam_head; uint64_t t_log; } g3;
+#define GPU3D_NEAR_EYE_M 0.10f   /* modo gpu: ningún triángulo 3D pequeño con TODOS sus vértices a menos de esta distancia (m) del ojo del motor (VrSceneOpts.eye_near_m) */
+static struct { uint32_t lists, prims, p3d, tris3d, p2d, near_drop, near_clip, behind_drop, nohp, post, ambig, incoh, recon, huge, nan; int cam_head; uint64_t t_log; } g3;
 static void gpu3d_note(const VrScene *sc, const VrCamRecord *r) {
     const VrStats *st = &sc->stats;
     g3.lists++;
@@ -744,6 +744,7 @@ static void gpu3d_note(const VrScene *sc, const VrCamRecord *r) {
     g3.near_clip += st->n_clipped;
     g3.behind_drop += st->drop_behind;
     g3.nohp += st->drop_partial;
+    g3.ambig += st->drop_ambig; g3.incoh += st->drop_incoh; g3.recon += st->n_recon; g3.huge += st->drop_huge; g3.nan += st->drop_nan;
     for (uint32_t i = 0; sc->b && i < sc->nb; i++) g3.post += sc->b[i].kind == 3;   /* lotes de filtro de pantalla (clase 3: el post-proceso por ojo del renderer los sustituye) */
     g3.cam_head = r && r->active;
 }
@@ -753,9 +754,13 @@ static void gpu3d_log(void) {
     uint64_t t0 = g3.t_log;
     g3.t_log = t;
     if (!t0) return;   /* la primera llamada solo arranca el reloj */
-    fprintf(stderr, "[gpu3d] fotograma=%u listas=%u prims=%u 3D_con_hp=%u (triangulos=%u) plano2D=%u cerca_descartados=%u cerca_recortados=%u detras_descartados=%u 3D_sin_hp(respaldo)=%u post=%u | render=%s hp=%d vista=%s camara=%s\n",
-            (unsigned)hle_frame_count(), g3.lists, g3.prims, g3.p3d, g3.tris3d, g3.p2d, g3.near_drop, g3.near_clip, g3.behind_drop, g3.nohp, g3.post,
-            native_mode() ? "nativo" : "gpu", gte_hp_enabled(), vrview_cine_type(view.kind), g3.cam_head ? "head" : "game");
+    static GteHpStats hs_prev;   /* vértices de primitivas resueltos por dirección de memoria (hps.h) / por valor de SXY, del último segundo */
+    GteHpStats hs;
+    gte_hp_stats(&hs);
+    fprintf(stderr, "[gpu3d] fotograma=%u listas=%u prims=%u 3D_con_hp=%u (triangulos=%u) plano2D=%u cerca_descartados=%u cerca_recortados=%u detras_descartados=%u 3D_sin_hp(respaldo)=%u post=%u drop_ambig=%u drop_partial=%u drop_incoh=%u reconstruidos=%u drop_huge=%u drop_nan=%u | render=%s hp=%d vista=%s camara=%s hp_por_direccion=%u hp_por_valor=%u\n",
+            (unsigned)hle_frame_count(), g3.lists, g3.prims, g3.p3d, g3.tris3d, g3.p2d, g3.near_drop, g3.near_clip, g3.behind_drop, g3.nohp, g3.post, g3.ambig, g3.nohp, g3.incoh, g3.recon, g3.huge, g3.nan,
+            native_mode() ? "nativo" : "gpu", gte_hp_enabled(), vrview_cine_type(view.kind), g3.cam_head ? "head" : "game", hs.res_addr - hs_prev.res_addr, hs.res_val - hs_prev.res_val);
+    hs_prev = hs;
     int ch = g3.cam_head;
     memset(&g3, 0, sizeof g3);
     g3.cam_head = ch; g3.t_log = t;
@@ -770,7 +775,7 @@ static void build_one(const GpuDrawList *l, int si) {
     int32_t save_pos[3];
     int16_t save_axes[3][3];
     VrSceneOpts o = sopts;
-    if (!native_mode()) o.eye_near_m = GPU3D_NEAR_EYE_M;   /* modo gpu: nada pegado al ojo, recorte contra el plano cercano (ver vr_scene.h) */
+    if (!native_mode()) { o.eye_near_m = GPU3D_NEAR_EYE_M; o.line3d_px = 1.0f; }   /* modo gpu: nada pegado al ojo, recorte contra el plano cercano; líneas del mundo en 3D (ver vr_scene.h) */
     int cine_cut = 0;
     {   /* Cinemática del motor (ni mundo ni vídeo/2D puros): la cámara es la del guion, nunca la de la cabeza. Planos y origen fijo por plano. */
         int rs = view.reason;

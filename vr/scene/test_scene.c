@@ -1005,6 +1005,64 @@ static void test_recon_diag_ambig(void) {
     vr_scene_release();
 }
 
+/* AMBIG junto a SAT/BEHIND en un cuadrilátero no coherente: si UN solo vértice es AMBIG y los otros tres son fiables (sin banderas, o solo SAT con una coordenada
+ * sin saturar que reproduce la GTE), el paralelogramo v_a + v_b - v_opuesto lo reconstruye (si reproduce su SXY saturado); si no, se descarta. */
+static GpuOp *ambig_quad(const float P[4][3], const uint8_t fl[4], const int sxy[4][2]) {
+    GpuOp *q = add(GPU_OP_POLY);
+    q->nv = 4; q->flags = GPU_F_TEXTURED; q->tp = 1; q->tx = 320; q->ty = 256;
+    q->proj_h = 150.0f; q->proj_ox = 0.0f; q->proj_oy = 0.0f;
+    for (int k = 0; k < 4; k++) {
+        setv3(&q->v[k], P[k][0], P[k][1], P[k][2]);
+        q->v[k].vflags = fl[k]; if (fl[k]) q->v[k].fvalid = 0;
+        q->v[k].x = (int16_t)sxy[k][0]; q->v[k].y = (int16_t)sxy[k][1];
+        q->v[k].u = (uint8_t)(20 * (k & 1)); q->v[k].v = (uint8_t)(20 * (k >> 1)); q->v[k].r = q->v[k].g = q->v[k].b = 128;
+    }
+    return q;
+}
+static void test_recon_ambig_quad(void) {
+    VrScene s; VrSceneOpts o = vr_scene_opts_default();
+    uint8_t fate[4];
+    vr_scene_set_fate(fate, sizeof fate);
+    /* v0=(-500,-300,1000) v1=(2500,-300,1000) v2=(-500,400,200); el v3 verdadero (2500,400,200) satura en x (0.75*2500 = 1875 > 1023) */
+    const int sxy[4][2] = {{-75, -45}, {375, -45}, {-375, 300}, {1023, 300}};
+    const uint8_t fj[4] = {0, 0, 0, GPU_VF_AMBIG | GPU_VF_SAT | GPU_VF_BEHIND};
+    float P[4][3] = {{-500, -300, 1000}, {2500, -300, 1000}, {-500, 400, 200}, {50000, -90000, -2996}};
+    /* a) un AMBIG, tres limpios: reconstruido (2 triángulos, el vértice verdadero en VR (2,5; -0,4; -0,2)) */
+    reset(); ambig_quad(P, fj, sxy);
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 2 && s.stats.n_recon == 1 && s.stats.drop_ambig == 0, "a) tris %u recon %u ambig %u", s.stats.n_tris3d, s.stats.n_recon, s.stats.drop_ambig);
+    CHECK(fate[0] == VR_FATE_3D, "a) destino %u", fate[0]);
+    int found = 0;
+    for (uint32_t i = 0; i < s.nv; i++) if (near_f(s.v[i].pos[0], 2.5f, 2e-3f) && near_f(s.v[i].pos[1], -0.4f, 2e-3f) && near_f(s.v[i].pos[2], -0.2f, 2e-3f)) found++;
+    CHECK(found >= 1, "a) vértice reconstruido ausente (%d)", found);
+    /* b) dos AMBIG: no hay reconstrucción -> descartado */
+    { uint8_t f2[4] = {0, GPU_VF_AMBIG | GPU_VF_SAT, 0, GPU_VF_AMBIG | GPU_VF_SAT | GPU_VF_BEHIND}; float Q[4][3]; memcpy(Q, P, sizeof Q); Q[1][2] = -800;
+      reset(); ambig_quad(Q, f2, sxy);
+      CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.drop_ambig == 1 && s.stats.n_recon == 0, "b) tris %u ambig %u", s.stats.n_tris3d, s.stats.drop_ambig); }
+    /* c) el paralelogramo no reproduce el SXY registrado del vértice (y=700 en vez de 300): descartado */
+    { const int bad[4][2] = {{-75, -45}, {375, -45}, {-375, 300}, {1023, 700}};
+      reset(); ambig_quad(P, fj, bad);
+      CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.drop_ambig == 1, "c) tris %u ambig %u", s.stats.n_tris3d, s.stats.drop_ambig); }
+    /* d) uno de los tres "fiables" está detrás de la cámara (BEHIND sin AMBIG): no es fiable -> descartado */
+    { uint8_t f3[4] = {0, GPU_VF_SAT | GPU_VF_BEHIND, 0, GPU_VF_AMBIG | GPU_VF_SAT}; float Q[4][3]; memcpy(Q, P, sizeof Q); Q[1][2] = -500;
+      reset(); ambig_quad(Q, f3, sxy);
+      CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.drop_ambig == 1, "d) tris %u ambig %u", s.stats.n_tris3d, s.stats.drop_ambig); }
+    /* e) un fiable solo SAT (x saturada, y sin saturar y coherente con la GTE): sí vale. v1=(9000,-300,1000) -> v3 = v1+v2-v0 = (9000,400,200) */
+    { uint8_t f4[4] = {0, GPU_VF_SAT, 0, GPU_VF_AMBIG | GPU_VF_SAT}; float Q[4][3]; memcpy(Q, P, sizeof Q); Q[1][0] = 9000;
+      const int e4[4][2] = {{-75, -45}, {1023, -45}, {-375, 300}, {1023, 300}};
+      reset(); ambig_quad(Q, f4, e4);
+      CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 2 && s.stats.n_recon == 1, "e) tris %u recon %u", s.stats.n_tris3d, s.stats.n_recon);
+      /* f) el SAT tiene las dos coordenadas saturadas: su SXY no informa, no es fiable -> descartado */
+      const int g4[4][2] = {{-75, -45}, {1023, 1023}, {-375, 300}, {1023, 300}};
+      Q[1][1] = 9000;
+      reset(); ambig_quad(Q, f4, g4);
+      CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.drop_ambig == 1, "f) tris %u ambig %u", s.stats.n_tris3d, s.stats.drop_ambig); }
+    /* g) sin recon_ambig: nunca se reconstruye */
+    reset(); ambig_quad(P, fj, sxy); o.recon_ambig = 0;
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.drop_ambig == 1, "g) tris %u ambig %u", s.stats.n_tris3d, s.stats.drop_ambig);
+    vr_scene_set_fate(NULL, 0);
+    vr_scene_release();
+}
+
 /* Correspondencia mundo -> espacio del usuario (user_map_on): el ojo del motor cae en p_ref, lo que está delante del ojo del motor queda delante
  * del usuario (-Z) con el giro theta, el suelo queda bajo la cabeza a la altura del ojo y la escala k cambia las distancias. */
 static void test_user_map(void) {
@@ -1214,8 +1272,13 @@ static void test_gpu_eye_near(void) {
         reset();
         const float W[4][3] = {{0, 0, 200}, {200, 0, 400}, {0, 200, 400}, {0, 0, 0}};
         polyN(3, W, z4, 0);
-        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.n_near_eye == 1, "un vértice a 0,2 m: descartado");
-        /* la escala de salida cuenta: con escala 0,002 el vértice a 200 unidades está a 0,4 m */
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.n_near_eye == 0, "un vértice a 0,2 m y los otros lejos: se conserva (tris %u near %u)", s.stats.n_tris3d, s.stats.n_near_eye);
+        /* todos los vértices dentro de eye_near_m (efecto pegado a la cara): descartado */
+        reset();
+        const float F[4][3] = {{0, 0, 150}, {100, 0, 200}, {0, 100, 200}, {0, 0, 0}};
+        polyN(3, F, z4, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.n_near_eye == 1, "todos a < 0,25 m: descartado (near %u)", s.stats.n_near_eye);
+        /* la escala de salida cuenta: con escala 0,002 los vértices a 150-200 unidades están a 0,3-0,4 m (fuera de eye_near_m) */
         VrSceneOpts o2 = o; o2.scale = 0.002f;
         CHECK(vr_scene_build(&dl, &bs, &o2, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.n_near_eye == 0, "la distancia usa opts.scale");
         /* pared grande (aristas de 2 m) con un vértice a 0,1 m: NO se descarta (se ve a través de ella si se borra) */
@@ -1305,7 +1368,147 @@ static void test_user_map_linear(void) {
     vr_scene_release();
 }
 
+/* Ventana de la pantalla 3D de las cinemáticas: debe salir de la H real y del centro de la lista (no de la pantalla virtual) para registrar con el panel 2D */
+static GpuOp *proj_poly(float H, float ox, float oy) {
+    float a[3] = {0, 0, 2000}, b[3] = {1000, 0, 2000}, c[3] = {0, 1000, 2000};
+    GpuOp *o = poly3(a, b, c, 0);
+    o->proj_h = H; o->proj_ox = ox; o->proj_oy = oy;
+    return o;
+}
+static void test_screen_window(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    VrSceneOpts o = vr_scene_opts_default();
+    o.origin_mode = 1;
+    VrScene s;
+    /* créditos: H=360, centro (160,120) en un área de 320x240 -> tangentes 160/360 y 120/360 (no la ventana virtual de la pantalla) */
+    reset(); dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 240;
+    proj_poly(360.0f, 160.0f, 120.0f);
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.filter.proj_ok, "build ventana");
+    VrScreenWindow w = vr_scene_screen_window(&s.filter);
+    CHECK(w.ok && near_f(w.left, 160.0f / 360.0f, 1e-5f) && near_f(w.right, 160.0f / 360.0f, 1e-5f) &&
+          near_f(w.up, 120.0f / 360.0f, 1e-5f) && near_f(w.down, 120.0f / 360.0f, 1e-5f), "ventana centrada %d %.4f %.4f %.4f %.4f", w.ok, w.left, w.right, w.up, w.down);
+    /* centro desplazado (OFX/OFY) y área 320x256 en (0,8): la ventana se desplaza y la parte baja/alta se reparte según cy_row */
+    reset(); dl.disp.x = 0; dl.disp.y = 8; dl.disp.w = 320; dl.disp.h = 256;
+    proj_poly(300.0f, 180.0f, 100.0f);   /* cx_col = 180, cy_row = 100 - 8 = 92 */
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0, "build desplazada");
+    w = vr_scene_screen_window(&s.filter);
+    CHECK(w.ok && near_f(w.left, 180.0f / 300.0f, 1e-5f) && near_f(w.right, 140.0f / 300.0f, 1e-5f) &&
+          near_f(w.up, 92.0f / 300.0f, 1e-5f) && near_f(w.down, 164.0f / 300.0f, 1e-5f), "ventana desplazada %d %.4f %.4f %.4f %.4f", w.ok, w.left, w.right, w.up, w.down);
+    /* sin polígonos con proyección: no hay ventana (el consumidor usa la de la petición) */
+    reset(); dl.disp.w = 320; dl.disp.h = 240;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && !s.filter.proj_ok && !vr_scene_screen_window(&s.filter).ok, "sin proyección: sin ventana");
+    CHECK(!vr_scene_screen_window(NULL).ok, "NULL");
+    /* centro óptico fuera de la imagen: no válido */
+    VrFilter bad = s.filter; bad.proj_ok = 1; bad.proj_h = 360; bad.cx_col = 400; bad.cy_row = 120; bad.area[2] = 320; bad.area[3] = 240;
+    CHECK(!vr_scene_screen_window(&bad).ok, "centro fuera de la imagen");
+    vr_scene_release();
+}
+
+/* Línea del mundo con los dos extremos de vista -> cuadrilátero 3D con grosor en píxeles (opts.line3d_px) */
+static GpuOp *line3(float x0, float y0, float z0, float x1, float y1, float z1, float H, float ox, float oy) {
+    GpuOp *o = add(GPU_OP_LINE);
+    o->nv = 2; o->proj_h = H; o->proj_ox = ox; o->proj_oy = oy;
+    float P[2][3] = {{x0, y0, z0}, {x1, y1, z1}};
+    for (int i = 0; i < 2; i++) {
+        GpuVtx *v = &o->v[i];
+        setv3(v, P[i][0], P[i][1], P[i][2]);
+        float nf = H / P[i][2];
+        v->x = (int16_t)floorf(ox + nf * P[i][0]); v->y = (int16_t)floorf(oy + nf * P[i][1]);   /* SXY que reproduce el modelo de la GTE */
+        v->r = 200; v->g = 100; v->b = 50;
+    }
+    return o;
+}
+static void view_to_vr(const VrScene *s, const float v[3], float out[3]) {
+    for (int r = 0; r < 3; r++) out[r] = s->game_view[0 + r] * v[0] + s->game_view[4 + r] * v[1] + s->game_view[8 + r] * v[2] + s->game_view[12 + r];
+}
+static void test_line3d(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    VrSceneOpts o = vr_scene_opts_default();
+    o.origin_mode = 1;
+    VrScene s;
+    /* a) por defecto (line3d_px = 0): sigue yendo al plano 2D */
+    reset(); dl.disp.w = 320; dl.disp.h = 240;
+    line3(100, 50, 1800, 500, -100, 1800, 360, 160, 120);
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.n_line3d == 0 && s.nv == 6 && (s.v[0].flags & VR_F_2D), "línea por defecto: 2D");
+    /* b) con line3d_px = 1: 2 triángulos 3D, sin VR_F_2D, el cuadrilátero rodea el segmento con grosor 1 px a esa profundidad */
+    o.line3d_px = 1.0f;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 2 && s.stats.n_line3d == 1 && s.nv == 6 && s.has_3d, "línea 3D: tris %u", s.stats.n_tris3d);
+    CHECK(s.nb == 1 && s.b[0].kind == 0 && s.b[0].blend == 0xFF && s.op_dest && s.op_dest[0] == 0, "línea 3D: lote opaco y op_dest 0");
+    {
+        int ok2d = 0;
+        for (uint32_t i = 0; i < s.nv; i++) ok2d |= (s.v[i].flags & (VR_F_2D | VR_F_LINE)) != 0;
+        CHECK(!ok2d, "línea 3D: sin banderas 2D");
+        float u[6][3]; int nu = 0;
+        for (uint32_t i = 0; i < s.nv; i++) {
+            int dup = 0;
+            for (int k = 0; k < nu; k++) if (near_f(u[k][0], s.v[i].pos[0], 1e-5f) && near_f(u[k][1], s.v[i].pos[1], 1e-5f) && near_f(u[k][2], s.v[i].pos[2], 1e-5f)) dup = 1;
+            if (!dup && nu < 6) memcpy(u[nu++], s.v[i].pos, sizeof u[0]);
+        }
+        CHECK(nu == 4, "línea 3D: 4 esquinas únicas (%d)", nu);
+        if (nu == 4) {
+            float dmin = 1e9f, dmax = 0, mid[3] = {0, 0, 0}, want[3], mv[3] = {300, -25, 1800};
+            for (int a = 0; a < 4; a++) {
+                for (int c = 0; c < 3; c++) mid[c] += u[a][c] * 0.25f;
+                for (int b = a + 1; b < 4; b++) {
+                    float d = sqrtf((u[a][0]-u[b][0])*(u[a][0]-u[b][0]) + (u[a][1]-u[b][1])*(u[a][1]-u[b][1]) + (u[a][2]-u[b][2])*(u[a][2]-u[b][2]));
+                    dmin = fminf(dmin, d); dmax = fmaxf(dmax, d);
+                }
+            }
+            view_to_vr(&s, mv, want);
+            CHECK(near_f(dmin, 1.0f / 360.0f * 1800.0f * 0.001f, 2e-4f), "grosor 1 px a 1,8 m = 5 mm (%.5f)", dmin);
+            CHECK(near_f(dmax, (sqrtf(400.0f * 400.0f + 150.0f * 150.0f) + 5.0f) * 0.001f, 2e-3f), "largo = segmento + 1 px (%.5f)", dmax);
+            CHECK(near_f(mid[0], want[0], 1e-4f) && near_f(mid[1], want[1], 1e-4f) && near_f(mid[2], want[2], 1e-4f), "centro del cuadrilátero = centro del segmento");
+        }
+        /* el frente mira a la cámara del juego (ambos triángulos) */
+        for (uint32_t t = 0; t < s.nv / 3; t++) {
+            const VrVtx *v = &s.v[3 * t];
+            float e1[3], e2[3], n[3], tc[3];
+            for (int c = 0; c < 3; c++) { e1[c] = v[1].pos[c] - v[0].pos[c]; e2[c] = v[2].pos[c] - v[0].pos[c]; tc[c] = s.eye_vr[c] - v[0].pos[c]; }
+            n[0] = e1[1]*e2[2]-e1[2]*e2[1]; n[1] = e1[2]*e2[0]-e1[0]*e2[2]; n[2] = e1[0]*e2[1]-e1[1]*e2[0];
+            CHECK(n[0]*tc[0] + n[1]*tc[1] + n[2]*tc[2] > 0, "línea 3D: frente hacia la cámara (tri %u)", t);
+        }
+    }
+    /* c) semitransparente: lote semitransparente con su modo */
+    reset(); dl.disp.w = 320; dl.disp.h = 240;
+    { GpuOp *l = line3(100, 50, 1800, 500, -100, 1800, 360, 160, 120); l->flags = GPU_F_SEMI; l->abr = 1; }
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_line3d == 1 && s.nb == 1 && s.b[0].kind == 1 && s.b[0].blend == 1, "línea semitransparente: kind 1, blend 1");
+    /* d) el SXY no reproduce el modelo (coincidencia con un vértice de HUD): se queda en 2D */
+    reset(); dl.disp.w = 320; dl.disp.h = 240;
+    { GpuOp *l = line3(100, 50, 1800, 500, -100, 1800, 360, 160, 120); l->v[1].x = (int16_t)(l->v[1].x + 12); }
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_line3d == 0 && s.stats.n_tris3d == 0 && (s.v[0].flags & VR_F_2D), "SXY incoherente: 2D");
+    /* e) un solo extremo con posición de vista, o sin proyección: 2D */
+    reset(); dl.disp.w = 320; dl.disp.h = 240;
+    { GpuOp *l = line3(100, 50, 1800, 500, -100, 1800, 360, 160, 120); l->v[1].vvalid = 0; }
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_line3d == 0 && (s.v[0].flags & VR_F_2D), "un extremo sin vista: 2D");
+    reset(); dl.disp.w = 320; dl.disp.h = 240;
+    { GpuOp *l = line3(100, 50, 1800, 500, -100, 1800, 360, 160, 120); l->proj_h = 0; }
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_line3d == 0 && (s.v[0].flags & VR_F_2D), "sin proj_h: 2D");
+    /* f) plano cercano: ambos extremos delante del plano -> fuera (detrás); uno detrás -> recortado en el plano */
+    reset(); dl.disp.w = 320; dl.disp.h = 240;
+    line3(100, 50, 1800, 300, -60, 3600, 360, 160, 120);
+    VrSceneOpts on = o; on.near_units = 4000.0f;
+    CHECK(vr_scene_build(&dl, &bs, &on, &s) == 0 && s.stats.n_line3d == 0 && s.stats.n_tris3d == 0 && s.stats.drop_behind == 1, "línea entera detrás: descartada (behind %u)", s.stats.drop_behind);
+    on.near_units = 2700.0f;
+    CHECK(vr_scene_build(&dl, &bs, &on, &s) == 0 && s.stats.n_line3d == 1 && s.stats.n_clipped == 1 && s.nv == 6, "línea a caballo del plano: recortada");
+    for (uint32_t i = 0; i < s.nv; i++) {
+        float zv = (s.eye_vr[2] - s.v[i].pos[2]) / s.scale;
+        CHECK(zv >= on.near_units - 0.05f, "línea recortada: z=%f < plano cercano", zv);
+    }
+    /* g) pegada al ojo del motor (eye_near_m): fuera, como los triángulos pequeños */
+    reset(); dl.disp.w = 320; dl.disp.h = 240;
+    line3(10, 5, 200, 30, -6, 200, 360, 160, 120);   /* a 0,2 m del ojo, extremos muy próximos entre sí */
+    on = o; on.eye_near_m = 0.25f;
+    CHECK(vr_scene_build(&dl, &bs, &on, &s) == 0 && s.stats.n_line3d == 0 && s.stats.n_near_eye == 1, "línea pegada al ojo: descartada (near %u)", s.stats.n_near_eye);
+    vr_scene_release();
+}
+
 int main(void) {
+    test_screen_window();
+    test_line3d();
     test_basic();
     test_stability();
     test_classes_and_events();
@@ -1324,6 +1527,7 @@ int main(void) {
     test_goggles_emu();
     test_recon_fate();
     test_recon_diag_ambig();
+    test_recon_ambig_quad();
     test_user_map();
     test_coherence();
 

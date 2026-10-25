@@ -47,9 +47,8 @@ typedef struct {
     float grab_range;        /* distancia máxima cuerpo-enemigo para agarrar (1,3 m) */
     float neck_radius;       /* radio de la mano al cuello o a la espalda del enemigo para agarrar (0,30 m) */
     float back_dist;         /* la espalda: punto a esta distancia (0,25 m) detrás del enemigo, a 0,2 m de altura */
-    float chest_down, chest_fwd, chest_radius;   /* zona del pecho (m), UN punto para las dos manos: bajo la cabeza 0,30 (eje vertical del mundo), delante del torso 0,18, radio 0,15 */
-    float chest_depth;       /* la mano debe estar delante del plano del torso (producto escalar de mano-cabeza con el rumbo > esta profundidad, 0,05 m) */
-    float chest_hold_s;      /* puño mantenido sin interrupción dentro de la zona este tiempo (0,30 s) para abrir la ventana; salir de la zona o soltar lo reinicia */
+    float chest_side, chest_down, chest_fwd, chest_radius;   /* zonas de menú (m), UNA POR MANO, fijas respecto a la cabeza en marco de guiñada (rumbo del personaje): la mano izquierda (objetos, L2) a su lado izquierdo y la derecha (armas, R2) al derecho; lateral 0,16 hacia cada lado, 0,26 bajo la cabeza (eje vertical del mundo), delante -0,02, radio 0,15, medidas en el registro del visor con las manos donde el usuario pulsó */
+    float chest_hold_s;      /* gatillo de la mano (L2 izquierda, R2 derecha) mantenido sin interrupción dentro de SU zona este tiempo (0,30 s) para abrir la ventana; salir de la zona o soltar lo reinicia. Dentro de la zona el gatillo no llega al juego (mask) */
     float grab_after_punch_s;/* sin agarres tras un golpe durante este tiempo (0,3 s) */
     float neck_height;       /* altura del cuello sobre la posición del enemigo (0,45 m, posición del motor = cintura) */
     float grip_on, grip_off; /* histéresis del agarre (0,65 / 0,35) */
@@ -112,7 +111,7 @@ typedef struct {
     int punch_side;          /* -1 nada; 0/1: lanzar el golpe del motor (mano física que lo dio) */
     int grab_start;          /* 1: lanzar el agarre del motor este VBlank (mano grab_side, enemigo grab_en) */
     int grab_hold;           /* 1: el botón del puño sigue pulsado durante el agarre (mantiene el agarre del motor) */
-    int menu_open[2];        /* ventana abierta por la mano física (0 objetos/L2, 1 armas/R2) mientras se mantiene el botón del puño; vrg_out.press ya lleva L2/R2 */
+    int menu_open[2];        /* ventana abierta por la mano física (0 objetos/L2, 1 armas/R2) mientras se mantiene el gatillo; vrg_out.press ya lleva L2/R2 */
     int knock_side;          /* -1 nada; 0/1: llamar con los nudillos (acción del motor) con esa mano */
     const char *knock_why;   /* motivo del último intento de toque de este VBlank ("ok", "lento", "enfriamiento", "enemigo", "no_pegado", "lejos_de_la_pared"...) */
     float knock_speed, knock_dist; int knock_try_side;
@@ -120,7 +119,7 @@ typedef struct {
     const char *grab_why;    /* motivo del último intento de agarre de este VBlank (NULL: ninguno): "ok", "mano_lejos", "cuerpo_lejos", "puno_cerrado", "tras_golpe"... */
     float grab_dist;         /* distancia de la mano al cuello/espalda en ese intento (m) */
     int grab_side_try;
-    struct { int valid, opened; float dist, depth, hold; const char *reason; } pecho[2];   /* intento de ventana del pecho por mano física (puño pulsado): distancia al punto (m), profundidad delante del torso (m), tiempo mantenido (s), resultado y motivo (cadena estática) para el registro [pecho] */
+    struct { int valid, opened; float dist, hold; const char *reason; } pecho[2];   /* intento de ventana por mano física (gatillo apretado): distancia a SU zona (m), tiempo mantenido (s), resultado y motivo (cadena estática) para el registro [pecho] */
     int grab_side;           /* mano física que sujeta (-1 ninguna) mientras el agarre dura (para pegar las manos al cuello) */
     int throw_side;          /* -1 nada; 0/1: lanzamiento (agarre + tirón) con esa mano este VBlank (grab_start también vale 1) */
     float throw_yaw;         /* rumbo del tirón proyectado en el suelo (rad, delante = (sin, cos)) */
@@ -136,7 +135,8 @@ typedef struct {
     float cool;
     float since_punch;       /* s desde el último golpe */
     int near_prev[2];
-    int menu_hold, chest_prev[2], chest_live[2];   /* chest_live: intento en curso (puño pulsado dentro de la zona) */
+    int menu_hold, chest_prev[2], chest_live[2];   /* chest_live: intento en curso (gatillo apretado dentro de la zona) */
+    int trig_dn[2];          /* gatillo de cada mano apretado (histéresis trig_on/trig_off) */
     float chest_cool[2], chest_t[2];
     int peek_on;
     float knock_cool[2], cool_knock; double kn_t[2][3]; float kn_d[2][3]; int kn_n[2], kn_toward[2];

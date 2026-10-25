@@ -36,9 +36,10 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
     /* R2 = DISPARAR: con arma equipada es el botón de ataque del juego; sin arma no hace nada. El cuadrado físico sigue como en el original. */
     const uint16_t pad_in = pad;
     const int ctl = core && bs->in_control;          /* capa de JUEGO VR; si no (códec, radio, menús, pausa, escenas, ventana de armas/objetos) capa de MENÚ: mando original sin tocar */
+    int r2_fire = 0;                                  /* el cuadrado de este fotograma viene del gatillo (no del botón físico) */
     if ((pad & VRG_R2) && ctl) {
         pad = (uint16_t)(pad & ~VRG_R2);
-        if (core && bs->weapon >= 0) pad |= VRG_SQUARE;
+        if (core && bs->weapon >= 0) { r2_fire = !(pad & VRG_SQUARE); pad |= VRG_SQUARE; }
     }
     vrg_in_t in;
     memset(&in, 0, sizeof in);
@@ -115,7 +116,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
         }
         for (int s = 0; s < 2; s++) {
             const char *rs = out.pecho[s].opened ? "abierta" : "rechazada";
-            if (out.pecho[s].valid) fprintf(stderr, "[pecho] vb=%u mano=%d dist=%.3f m (max %.2f) delante=%.3f m (min %.2f) mantenido=%.2f s (min %.2f) resultado=%s motivo=%s\n", vb, s, out.pecho[s].dist, G.cfg.chest_radius, out.pecho[s].depth, G.cfg.chest_depth, out.pecho[s].hold, G.cfg.chest_hold_s, rs, out.pecho[s].reason);
+            if (out.pecho[s].valid) fprintf(stderr, "[pecho] vb=%u mano=%d zona=%s (%.2f m a su lado, %.2f m bajo la cabeza, %.2f m delante) dist=%.3f m (max %.2f) mantenido=%.2f s (min %.2f) resultado=%s motivo=%s\n", vb, s, s == 0 ? "izquierda" : "derecha", G.cfg.chest_side, G.cfg.chest_down, G.cfg.chest_fwd, out.pecho[s].dist, G.cfg.chest_radius, out.pecho[s].hold, G.cfg.chest_hold_s, rs, out.pecho[s].reason);
         }
         if (out.grab_why) fprintf(stderr, "[gest] vb=%u agarre %s mano=%d distancia=%.2f m (cuello/espalda, limite 0,30)\n", vb, out.grab_why, out.grab_side_try, out.grab_dist);
         if (out.knock_why) fprintf(stderr, "[gest] vb=%u toque en la pared %s mano=%d v=%.2f m/s distancia=%.3f m\n", vb, out.knock_why, out.knock_try_side, out.knock_speed, out.knock_dist);
@@ -151,16 +152,18 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
     if (out.haptic[0] > 0 || out.haptic[1] > 0) { vrgame_haptic(0, out.haptic[0]); vrgame_haptic(1, out.haptic[1]); }
     if (!ctl) {
         /* Capa de MENÚ: ningún gesto toca el mando. Única excepción: la ventana de armas/objetos abierta con el gesto del pecho se mantiene mientras
-         * se mantenga el botón del puño (R1/L1 del mando): R2/L2 sostenido y el puño no llega a la ventana. */
+         * se mantenga el gatillo de esa mano (R2/L2 del mando, que ya llega tal cual a la ventana). */
         uint16_t r = pad_in;
         if (core && bs->menu_open) {
             for (int s = 0; s < 2; s++) {
                 if (!((G.menu_hold >> s) & 1)) continue;
-                uint16_t fb = s == domside ? VRG_R1 : VRG_L1, wb = s == domside ? VRG_R2 : VRG_L2;
-                if (pad_in & fb) r = (uint16_t)((r & ~fb) | wb); else G.menu_hold &= ~(1 << s);
+                uint16_t wb = s == domside ? VRG_R2 : VRG_L2;
+                if (!(pad_in & wb)) G.menu_hold &= ~(1 << s);
             }
         }
         return r;
     }
-    return (uint16_t)((pad & ~out.mask) | out.press);
+    uint16_t res = (uint16_t)((pad & ~out.mask) | out.press);
+    if (r2_fire && (out.mask & VRG_R2)) res = (uint16_t)(res & ~VRG_SQUARE);   /* gatillo dentro de la zona de menú: no dispara */
+    return res;
 }

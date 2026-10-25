@@ -39,8 +39,8 @@
  *   el dorso del antebrazo/mano (la cara "superior/exterior": la que mira a la cara con el brazo flexionado delante). Sin IK:
  *   vrradar_arm_from_controller() deduce VrRadarArm de la pose del agarre del mando izquierdo (convención OpenXR: -Z hacia los
  *   dedos, +Y hacia el dorso con la mano plana).
- *   HUESO INVISIBLE del panel con el mando: punto del antebrazo a along_m (0,07 m) del origen del agarre hacia el codo (+Z del agarre), desplazado lift_m
- *   (0,035 m) a lo largo del dorso (+Y del agarre = normal del panel, lejos de la palma: convención de vr/body y vrgame.h). Sigue la pose REAL del mando 1:1,
+ *   HUESO INVISIBLE del panel con el mando: punto del antebrazo a along_m (0,13 m) del origen del agarre hacia el codo (+Z del agarre), desplazado lift_m
+ *   (0,04 m) a lo largo de la normal del panel (vrradar_wrist_quad_eye: hacia la cabeza, girando alrededor del eje del antebrazo; sin ojo, +Y del agarre = dorso, convención de vr/body y vrgame.h). Sigue la pose REAL del mando 1:1,
  *   rígido y sin suavizado; la oclusión por el brazo del personaje la da la prueba de profundidad (RadarPanel). Si en un dispositivo +Y resultara ser el lado
  *   de la palma, RadarPanel.flipDorsal invierte la normal.
  *   El quad queda sobre el dorso, a `along_m` de la muñeca hacia el codo, con el eje "derecha" de la imagen hacia la mano (como la
@@ -111,8 +111,8 @@ typedef struct { float elbow[3], wrist[3], dorsal[3]; } VrRadarArm;   /* espacio
 typedef struct {
     float width_m;       /* ancho de la pantalla (def. 0,07) */
     float height_m;      /* alto; <= 0: proporcional a la ventana del radar (def. 0 -> 71:54) */
-    float along_m;       /* del centro de la muñeca (origen del agarre) al centro del quad, hacia el codo (def. 0,07) */
-    float lift_m;        /* del eje del antebrazo al plano de la pantalla, a lo largo de la normal del dorso (def. 0,035) */
+    float along_m;       /* del centro de la muñeca (origen del agarre) al centro del quad, hacia el codo (def. 0,13: antebrazo justo antes de la mano) */
+    float lift_m;        /* del eje del antebrazo al plano de la pantalla, a lo largo de la normal del panel (def. 0,04) */
     float bezel_m;       /* ancho del marco oscuro (def. 0,004) */
     float bezel_back_m;  /* el marco queda tanto por detrás del plano de la pantalla (def. 0,002) */
     int   rot90;         /* giro extra de la imagen en pasos de 90° (def. 0) */
@@ -131,6 +131,9 @@ typedef struct {
 VrRadarWristCfg vrradar_wrist_cfg_default(void);
 /* aspect = w/h de la ventana del radar (71/54) para height_m <= 0. Devuelve 1 si la pose es válida (finitos, hueso no nulo). */
 int vrradar_wrist_quad(const VrRadarArm *arm, const VrRadarWristCfg *cfg, float aspect, VrRadarQuad *out);
+/* Igual, pero con la cara del panel girada alrededor del eje del antebrazo hacia `eye` (cabeza, mismo espacio; la normal queda perpendicular al antebrazo y apunta a la cabeza).
+ * eye NULL, no finito o casi sobre el eje (< 2 cm): normal = dorso, como vrradar_wrist_quad. */
+int vrradar_wrist_quad_eye(const VrRadarArm *arm, const VrRadarWristCfg *cfg, float aspect, const float eye[3], VrRadarQuad *out);
 /* Sin IK: pose de agarre del mando izquierdo (columna-mayor, espacio VR) -> antebrazo aproximado (antebrazo 0,27 m, hacia atrás). */
 int vrradar_arm_from_controller(const float grip[16], VrRadarArm *out);
 /* Brillo extra 0..gaze_boost según el ángulo entre la mirada (eye, forward unitario) y el quad; 0 si el quad da la espalda. */

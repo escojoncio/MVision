@@ -54,7 +54,7 @@ FRAMES ?= 9000
 
 $(OUT)/exe/main.exe: $(CAM)/patch_exe.py $(EXE)
 	@mkdir -p $(OUT)/exe
-	python3 $(CAM)/patch_exe.py $(EXE) $@ --h 160 --hfov 140 --vfov 120 --no-divide
+	python3 $(CAM)/patch_exe.py $(EXE) $@ --h 160 --hfov 179 --vfov 179 --no-divide
 	cp $(dir $(EXE))extra_funcs.txt $(OUT)/exe/ 2>/dev/null || true
 $(OUT)/extra_names.json: $(CAM)/vr_names.json vr_names_body.json
 	python3 -I -c "import json,sys; d=json.load(open('$(CAM)/vr_names.json')); d.update(json.load(open('vr_names_body.json'))); json.dump(d,open('$@','w'))"

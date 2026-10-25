@@ -3,7 +3,9 @@
 #include <setjmp.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "cpu.h"
+#include "gpu.h"
 
 void interp_call(Cpu *c, uint32_t entry);
 extern int interp_log_enabled;
@@ -52,7 +54,7 @@ static void emit(uint32_t w) { mem_w32(NULL, pc_asm, w); pc_asm += 4; }
 #define J(a) J_(2, a)
 #define JALR(d, s) R_(0, s, 0, d, 0, 9)
 #define JR(s) R_(0, s, 0, 0, 0, 8)
-enum { V0 = 2, V1 = 3, A0 = 4, A1 = 5, T0 = 8, T1 = 9, T2 = 10, S0 = 16, SP = 29, RA = 31 };
+enum { V0 = 2, V1 = 3, A0 = 4, A1 = 5, T0 = 8, T1 = 9, T2 = 10, T3 = 11, T4 = 12, T5 = 13, S0 = 16, SP = 29, RA = 31 };
 
 static void reset(Cpu *c) {
     memset(c, 0, sizeof *c);
@@ -242,6 +244,68 @@ static void t_dma_inval(Cpu *c) {
     EQ(interp_invalidations - before, 1);
 }
 
+
+/* Asociación de vértices de la GTE por DIRECCIÓN de memoria (PGXP): dos vértices saturados con el mismo SXY se guardan (swc2) en
+ * direcciones distintas, el juego los copia a un paquete con lw/sw (uno vía move) y la GPU debe recuperar el vértice de CADA palabra.
+ * Por valor es ambiguo: gana el candidato más cercano en la secuencia de la GTE (A), y el paquete pide B primero. */
+#define SWC2(t, s, i) I_(58, s, t, i)
+#define MFC2(t, d) R_(18, 0, t, d, 0, 0)
+static void gte_cam(void) {
+    gte_ctc2(NULL, 0, 0x1000); gte_ctc2(NULL, 1, 0); gte_ctc2(NULL, 2, 0x1000); gte_ctc2(NULL, 3, 0); gte_ctc2(NULL, 4, 0x1000);
+    gte_ctc2(NULL, 5, 0); gte_ctc2(NULL, 6, 0); gte_ctc2(NULL, 7, 0);
+    gte_ctc2(NULL, 24, 160u << 16); gte_ctc2(NULL, 25, 120u << 16); gte_ctc2(NULL, 26, 500);
+}
+static void gte_rtps(int x, int y, int z) {
+    gte_mtc2(NULL, 0, (uint32_t)(x & 0xFFFF) | ((uint32_t)y << 16)); gte_mtc2(NULL, 1, (uint32_t)(int16_t)z);
+    gte_cmd(NULL, 0x0180001u);
+}
+static void t_hp_addr(Cpu *c) {
+    gte_reset(); gpu_reset(); gpu_capture_enable(1); gpu_capture_hiprec(1);
+    gte_cam();
+    pc_asm = 0x80020400; emit(SWC2(15, A0, 0)); emit(JR_RA); emit(NOP);                          /* swc2 SXY2 -> (a0) */
+    pc_asm = 0x80020440; emit(MFC2(T0, 15)); emit(SW(T0, A0, 0)); emit(JR_RA); emit(NOP);        /* mfc2 + sw */
+    pc_asm = 0x80020500;                                                                         /* paquete: tri plano v0=B v1=A v2=N */
+    emit(LUI(T3, 0x8003));
+    emit(LUI(T4, 0x04FF)); emit(ORI(T4, T4, 0xFFFF)); emit(SW(T4, T3, 0));
+    emit(LUI(T4, 0x20FF)); emit(ORI(T4, T4, 0xFFFF)); emit(SW(T4, T3, 4));
+    emit(LUI(T0, 0x8001));
+    emit(LW(T1, T0, 4)); emit(SW(T1, T3, 8));
+    emit(LW(T1, T0, 0)); emit(ADDU(T2, T1, 0)); emit(SW(T2, T3, 12));
+    emit(LW(T1, T0, 8)); emit(SW(T1, T3, 16));
+    emit(JR_RA); emit(NOP);
+    reset(c);
+    gte_rtps(0, 0, 1000);        c->r[A0] = 0x80010008u; interp_call(c, 0x80020440);   /* N: normal (160,120) */
+    gte_rtps(30000, 30000, 600); c->r[A0] = 0x80010000u; interp_call(c, 0x80020400);   /* A: satura (0x3FF,0x3FF) */
+    gte_rtps(20000, 32000, 900); c->r[A0] = 0x80010004u; interp_call(c, 0x80020400);   /* B: mismo SXY saturado */
+    EQ(mem_r32(c, 0x80010000u), mem_r32(c, 0x80010004u));
+    interp_call(c, 0x80020500);
+    gpu_draw_list(0x80030000u);
+    gpu_gp1(0x05000000u | 0); gpu_gp1(0x05000000u | 100);   /* cierra el frame */
+    const GpuDrawList *l = gpu_capture_frame();
+    EQ(l != NULL && l->nops >= 1, 1);
+    if (l && l->nops >= 1) {
+        const GpuOp *o = &l->ops[l->nops - 1];
+        static const float ex[3][3] = {{20000, 32000, 900}, {30000, 30000, 600}, {0, 0, 1000}};
+        for (int i = 0; i < 3; i++) {
+            int ok = o->v[i].vvalid && fabsf(o->v[i].vx - ex[i][0]) < 1e-2f && fabsf(o->v[i].vy - ex[i][1]) < 1e-2f && fabsf(o->v[i].vz - ex[i][2]) < 1e-2f;
+            if (!ok) printf("v%d vista %f %f %f (valid %d)\n", i, o->v[i].vx, o->v[i].vy, o->v[i].vz, o->v[i].vvalid);
+            EQ(ok, 1);
+            EQ((o->v[i].vflags & GPU_VF_AMBIG) != 0, 0);
+        }
+    }
+    GteHpStats hs; gte_hp_stats(&hs);
+    EQ(hs.res_addr, 3);
+    /* una escritura sin etiqueta (constante) en la palabra de v0 la invalida: v0 cae al método por valor, v1 y v2 siguen por dirección */
+    pc_asm = 0x80020600;
+    emit(LUI(T5, 0x03FF)); emit(ORI(T5, T5, 0x03FF)); emit(LUI(T3, 0x8003)); emit(SW(T5, T3, 8)); emit(JR_RA); emit(NOP);
+    interp_call(c, 0x80020600);
+    gpu_draw_list(0x80030000u);
+    gpu_gp1(0x05000000u | 200);
+    gte_hp_stats(&hs);
+    EQ(hs.res_addr, 5);
+    gpu_capture_hiprec(0); gpu_capture_enable(0);
+}
+
 int main(void) {
     Cpu c;
     interp_log_enabled = 0;
@@ -254,6 +318,7 @@ int main(void) {
     t_link_slot(&c);
     t_codewrite(&c);
     t_dma_inval(&c);
+    t_hp_addr(&c);
     printf(fails ? "%d fallos\n" : "intérprete: todas las pruebas OK\n", fails);
     return fails != 0;
 }

@@ -20,7 +20,7 @@
  *   - BEHIND (vz<=0) en algún vértice: el polígono se recorta (Sutherland-Hodgman, por triángulo del par (0,1,2),(1,2,3)) contra el plano
  *     z = opts.near_units en espacio de vista, interpolando posición de vista, UV y color; cada triángulo da 0, 1 o 2 triángulos (un quad hasta 4).
  *     Los que no traen BEHIND y tienen vz < near_units se descartan (drop_near), como antes.
- *   - AMBIG junto a SAT/BEHIND: se descarta (drop_ambig). AMBIG solo: se acepta.
+ *   - AMBIG junto a SAT/BEHIND: se descarta (drop_ambig) salvo cuadrilátero coherente o con un único AMBIG reconstruible por paralelogramo (recon_ambig). AMBIG solo: se acepta.
  *   - DERIVED: se acepta (opts.drop_derived=1 los descarta).
  * Un polígono con solo ALGUNOS vértices vvalid se descarta (opts.partial_to_2d lo manda a 2D, pero entonces aparecerá
  * como trozo de mundo en el HUD).
@@ -215,6 +215,7 @@ typedef struct {
     uint32_t drop_incoh;      /* triángulos descartados por la red de seguridad (opts.coherence) */
     uint32_t incoh[VR_INC_N]; /* ... por causa (VR_INC_*) */
     uint32_t n_near_eye;      /* modo gpu (opts.eye_near_m): triángulos descartados por tener un vértice a menos de eye_near_m del ojo del motor */
+    uint32_t n_line3d;        /* opts.line3d_px: líneas con los dos extremos de vista emitidas como cuadrilátero 3D (2 triángulos en n_tris3d) */
 } VrStats;
 
 #define VR_FILTER_ROWS 512
@@ -233,6 +234,7 @@ typedef struct {
     /* proyección del motor (ver "Clase 3"): se rellenan siempre. Defecto 160 / centro de area (160,128 con 320x256). */
     float proj_h;               /* H del motor (px por unidad de tangente) */
     float cx_col, cy_row;       /* centro óptico: columna y fila relativas a area[0], area[1] */
+    int proj_ok;                /* 1 si proj_h/cx_col/cy_row salen de polígonos de la lista (centro del mundo); 0 = valores por defecto (la lista no tiene proyección) */
     /* --- objetos equipados (gafas, máscara, caja): ver "Clase 3b" --- */
     int n_covers;               /* recubrimientos semitransparentes en orden de dibujo (los VR_FILTER_COVERS últimos); cover_rgb/cover_abr = el último */
     float covers_rgb[VR_FILTER_COVERS][3]; int covers_abr[VR_FILTER_COVERS];
@@ -342,14 +344,24 @@ typedef struct {
     float coh_flag_edge_m;    /* arista máxima (m) de los triángulos con algún vértice dudoso (ambiguo / saturado / detrás / reconstruido / derivado / desplazamiento de proyección); def. 32 */
 
     /* --- modo gpu (el 3D de la lista de la GPU con vértices de vista de la GTE; al final: 0 = comportamiento anterior) ---
-     * eye_near_m > 0: (1) se descarta todo triángulo 3D con algún vértice a menos de eye_near_m metros del ojo del motor (distancia euclídea en el espacio de vista, en metros del espacio de
+     * eye_near_m > 0: (1) se descarta todo triángulo 3D pequeño (arista máx < 0,5 m) con TODOS sus vértices a menos de eye_near_m metros del ojo del motor (distancia euclídea en el espacio de vista, en metros del espacio de
      * salida: opts.scale, y opts.user_k si user_map_on); VrStats.n_near_eye. Es lo que pega al ojo (efectos, partes del propio cuerpo) y nunca debe verse proyectado sobre la cara.
      * (2) el recorte contra el plano z = near_units se hace SIEMPRE (como engine_near_clip = 1 con clip forzado): un triángulo parcialmente delante se recorta (n_clipped), uno entero
      * detrás se descarta (drop_behind), y un triángulo que lleva GPU_VF_BEHIND en algún vértice pero no tiene ninguno realmente detrás del plano (dato incoherente) se descarta también (drop_behind). */
     float eye_near_m;
+    /* line3d_px > 0: una línea (GPU_OP_LINE) con los DOS extremos de vista fiables (vvalid, sin banderas salvo SAT, y que reproducen su SXY con el modelo de la GTE a coh_px) y proj_h > 0 sale
+     * como cuadrilátero 3D (2 triángulos, kind 0/1 según SEMI, sin textura) en vez de al plano 2D: grosor line3d_px píxeles originales a la profundidad de cada extremo, alargado medio
+     * grosor en cada extremo (como la línea 2D), recortado contra z = near_units. Si no cumple, sigue yendo al plano 2D. 0 (def.) = siempre 2D. */
+    float line3d_px;
 } VrSceneOpts;
 
 VrSceneOpts vr_scene_opts_default(void);
+
+/* Ventana de la proyección del motor sobre la imagen mostrada (area[2] x area[3]) en tangentes de vista: columna 0 .. area_w a -cx_col/H .. (area_w-cx_col)/H, fila 0 .. area_h
+ * a -cy_row/H .. (area_h-cy_row)/H. La pantalla 3D de las cinemáticas usa exactamente esta ventana para que el 3D registre pixel a pixel con el panel 2D (que cubre area). ok = 0 si
+ * el filtro no trae proyección (proj_ok == 0), H o el área no son válidos. */
+typedef struct { int ok; float left, right, up, down; } VrScreenWindow;
+VrScreenWindow vr_scene_screen_window(const VrFilter *f);
 
 /* Depuración/medición: destino de cada primitiva de la lista. Si se registra un búfer (uno por op de src->ops), vr_scene_build lo rellena. */
 enum {

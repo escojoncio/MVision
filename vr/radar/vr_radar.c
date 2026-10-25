@@ -365,12 +365,16 @@ static int finite3(const float v[3]) { return isfinite(v[0]) && isfinite(v[1]) &
 
 VrRadarWristCfg vrradar_wrist_cfg_default(void) {
     VrRadarWristCfg c;
-    c.width_m = 0.07f; c.height_m = 0.0f; c.along_m = 0.07f; c.lift_m = 0.035f; c.bezel_m = 0.004f; c.bezel_back_m = 0.002f;
+    c.width_m = 0.07f; c.height_m = 0.0f; c.along_m = 0.13f; c.lift_m = 0.04f; c.bezel_m = 0.004f; c.bezel_back_m = 0.002f;
     c.rot90 = 0; c.gaze_boost = 0.35f; c.gaze_cos_in = 0.93f; c.gaze_cos_out = 0.75f;
     return c;
 }
 
 int vrradar_wrist_quad(const VrRadarArm *arm, const VrRadarWristCfg *cfg_, float aspect, VrRadarQuad *q) {
+    return vrradar_wrist_quad_eye(arm, cfg_, aspect, NULL, q);
+}
+
+int vrradar_wrist_quad_eye(const VrRadarArm *arm, const VrRadarWristCfg *cfg_, float aspect, const float eye[3], VrRadarQuad *q) {
     if (!q) return 0;
     memset(q, 0, sizeof *q);
     if (!arm) return 0;
@@ -380,7 +384,15 @@ int vrradar_wrist_quad(const VrRadarArm *arm, const VrRadarWristCfg *cfg_, float
     if (!norm3(a)) return 0;
     float d = dot3(arm->dorsal, a);
     float n[3] = {arm->dorsal[0] - a[0] * d, arm->dorsal[1] - a[1] * d, arm->dorsal[2] - a[2] * d};
-    if (!norm3(n)) return 0;
+    int n_ok = norm3(n);
+    if (eye && finite3(eye)) {      /* cara hacia los ojos: giro alrededor del eje del antebrazo (componente de ojo - punto del eje perpendicular a él) */
+        float p[3] = {arm->wrist[0] + a[0] * cfg.along_m, arm->wrist[1] + a[1] * cfg.along_m, arm->wrist[2] + a[2] * cfg.along_m};
+        float e[3] = {eye[0] - p[0], eye[1] - p[1], eye[2] - p[2]};
+        float ed = dot3(e, a);
+        float en[3] = {e[0] - a[0] * ed, e[1] - a[1] * ed, e[2] - a[2] * ed};
+        if (dot3(en, en) > 0.02f * 0.02f && norm3(en)) { memcpy(n, en, sizeof n); n_ok = 1; }   /* ojo casi sobre el eje: se queda el dorso */
+    }
+    if (!n_ok) return 0;
     float r[3] = {-a[0], -a[1], -a[2]}, u[3];
     cross3(u, n, r);
     for (int k = 0; k < (cfg.rot90 & 3); k++) {          /* (r,u) -> (u,-r) */

@@ -179,7 +179,7 @@ typedef struct VrCamPatch {
                               * (los sitios de la visibilidad para DIBUJAR; la de lógica -la prueba de punto visible, campo +0x32 leído por la IA- no cambia) */
 } VrCamPatch;
 #define VRCAM_NOCULL_ALL 0x3F
-void vrcam_patch_default(VrCamPatch *p);                   /* 160, 140, 120, no_divide = 1, wide_points = 0, no_cull = 1 */
+void vrcam_patch_default(VrCamPatch *p);                   /* 160, 179, 179 (caja +-1020 px), no_divide = 1, wide_points = 0, no_cull = 1 */
 int vrcam_patch_ram(uint8_t *ram, const VrCamPatch *p);
 
 /* HLE de la etapa de polígono (re-emisión de paquetes poco fiables, ver bitácora): contadores y interruptor (0 = solo el original). */

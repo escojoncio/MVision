@@ -589,6 +589,9 @@ final class RGRenderer {
     /// cinemática. Los lotes de 3D (kind 0/1) NO se dibujan: el mundo sale del render nativo.
     private func storeScene(_ sc: VrScene, _ newSlot: inout Bool) {
         storeFilter(sc.filter)
+        var scFilter = sc.filter
+        let win = vr_scene_screen_window(&scFilter)
+        if win.ok != 0 { stereoWindow = SIMD4<Float>(win.left, win.right, win.up, win.down) }   // una lista sin proyección (texto, fundido) conserva la de la última con 3D
         let nv = Int(sc.nv)
         if !newSlot { curSlot = (curSlot + 1) % 3; newSlot = true }
         let slot = vtxSlots[curSlot]
@@ -899,6 +902,9 @@ final class RGRenderer {
     private var stereoMSAAColor: MTLTexture?
     private var stereoDepth: MTLTexture?
     private var stereoKey = ""
+    /// Ventana de la proyección del motor de la última escena con 3D (tangentes izquierda, derecha, arriba, abajo; vr_scene_screen_window): la pantalla 3D del modo gpu la usa tal cual para que el
+    /// 3D registre con el panel 2D, que cubre la misma imagen mostrada (H real y centro OFX/OFY, no la ventana virtual de la petición).
+    private var stereoWindow: SIMD4<Float>?
     /// Imagen estéreo (array de 2 capas, valores tal como se guardaron: gamma en los formatos sRGB) o nil si aún no se dibujó.
     var stereoImage: MTLTexture? { stereoRendered ? stereoRaw : nil }
     /// Capas de la textura de la pantalla 3D ya reservada (aunque aún no se haya dibujado nada en ella; 0 = sin reservar). El banco comprueba que es un array de 2.
@@ -995,6 +1001,12 @@ final class RGRenderer {
             sh = SIMD4<Float>(dx, -dx, dy, -dy)
         }
 #endif
+        if gpuMode, let w = stereoWindow {
+            // Modo gpu: la ventana REAL de la escena (H y OFX/OFY de la lista sobre la imagen mostrada), la misma que cubre el panel 2D: el 3D registra con él.
+            tx = 0.5 * (w.x + w.y); ty = 0.5 * (w.z + w.w)
+            let dx = 0.5 * (w.x - w.y), dy = 0.5 * (w.z - w.w)
+            sh = SIMD4<Float>(dx, -dx, dy, -dy)
+        }
         guard let cam = XRStereo.eye(gameView: gameView, eye: e, ipd: r.ipd, conv: r.convergence, tanX: tx, tanY: ty) else { return nil }
         let t = cam.tangents + sh
         guard t.x > 0.01, t.y > 0.01, t.z > 0.01, t.w > 0.01 else { return nil }
@@ -1037,18 +1049,46 @@ final class RGRenderer {
     private func encodeStereoGPU(_ cb: MTLCommandBuffer, _ r: StereoRequest, gotNew: Bool) {
         guard ensureStereo(r.width, r.height), let d = stereoDepth, stereoSlices.count == 2 else { stereoHealthy = false; return }
         if !((gotNew && has3D) || stereoDirty || !stereoRendered) { return }
+        // Onda por fila del agua (filter.dv): la escena se resuelve en texturas intermedias y un pase por ojo la copia a la pantalla desplazando las filas (encodePost con warpOnly).
+        // El tinte y los recubrimientos NO se hornean aquí: los aplica la pantalla al presentar (screenFx), también en listas sin 3D (fundidos).
+        let pre: [MTLTexture]? = (fx.nrows > 0 && screenFilterEnabled && ensureFrameTextures() && postPipeline(format: colorFormat, layered: false) != nil) ? stereoPreTextures() : nil
+        var projs: [simd_float4x4] = []
         for e in 0..<2 {
             guard let cam = stereoCamera(e, r) else { stereoHealthy = false; return }
             var u = VrSceneUniforms()
-            let m = XRMath.projection(tangents: cam.tangents, near: 0.05, far: 800) * cam.view
+            let proj = XRMath.projection(tangents: cam.tangents, near: 0.05, far: 800)
+            projs.append(proj)
+            let m = proj * cam.view
             u.view_proj = (m, m)
             u.head = SIMD4<Float>(0, 0, 0, 1)
-            let color = stereoMSAAColor ?? stereoSlices[e]
-            _ = encodeScene(cb, color: color, depth: d, resolve: stereoMSAAColor != nil ? stereoSlices[e] : nil, uniforms: u, amplify: 0, viewIndex: 0,
+            let target = pre?[e] ?? stereoSlices[e]
+            let color = stereoMSAAColor ?? target
+            _ = encodeScene(cb, color: color, depth: d, resolve: stereoMSAAColor != nil ? target : nil, uniforms: u, amplify: 0, viewIndex: 0,
                             views: [], projections: [], isAux: true, last: true, cams: nil, first: true, gpuRange: 0..<batches.count)
         }
+        if let p = pre { encodePost(cb, PostPlan(sceneColor: p, sceneResolve: [], fxTex: p, dst: stereoSlices), projections: projs, layered: false, warpOnly: true) }
         stereoRendered = true
         stereoDirty = false
+    }
+
+    private var stereoPre: [MTLTexture] = []
+    private var stereoPreKey = ""
+    /// Dos texturas 2D (una por ojo) con la forma y el formato de las capas de la pantalla 3D: la escena sin onda, antes del pase de post. Se recrean si cambia la pantalla 3D.
+    private func stereoPreTextures() -> [MTLTexture]? {
+        if stereoPreKey == stereoKey, stereoPre.count == 2 { return stereoPre }
+        guard let ref = stereoSlices.first else { return nil }
+        var out: [MTLTexture] = []
+        for e in 0..<2 {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorFormat, width: ref.width, height: ref.height, mipmapped: false)
+            d.usage = [.renderTarget, .shaderRead]
+            d.storageMode = .private
+            guard let t = device.makeTexture(descriptor: d) else { return nil }
+            t.label = "VR pantalla 3D (ojo \(e), sin onda)"
+            out.append(t)
+        }
+        stereoPre = out
+        stereoPreKey = stereoKey
+        return out
     }
 
     /// Segunda vista (mira óptica / cámara del misil): el render nativo (o, en el modo gpu, la lista de la GPU) desde la cámara pedida, a la textura auxiliar.
@@ -1181,7 +1221,8 @@ final class RGRenderer {
 
     /// Pase de post-proceso por ojo: lee la escena resuelta (fxTex) y escribe el drawable con la onda por fila, el tinte y el recubrimiento.
     /// Parámetros por ojo a partir de la proyección: fila del punto principal = H/2*(1+P[2][1]) y focal vertical = H/2*P[1][1] (px).
-    private func encodePost(_ cb: MTLCommandBuffer, _ plan: PostPlan, projections: [simd_float4x4], layered: Bool) {
+    /// `warpOnly`: pantalla 3D de las cinemáticas (2 ojos sueltos): solo la onda por fila; sin tinte, recubrimientos, líneas ni máscara (los pone la pantalla al presentar).
+    private func encodePost(_ cb: MTLCommandBuffer, _ plan: PostPlan, projections: [simd_float4x4], layered: Bool, warpOnly: Bool = false) {
         guard let first = plan.dst.first, let pso = postPipeline(format: first.pixelFormat, layered: layered) else { return }
         // por ojo: x = fila del punto principal, y = focal vertical, z = columna del punto principal, w = focal horizontal (todo en píxeles de la textura)
         func eyeParams(_ i: Int, _ width: Int, _ height: Int) -> SIMD4<Float> {
@@ -1198,6 +1239,13 @@ final class RGRenderer {
         u.scan_rgb = fx.scanRGB
         u.misc = SIMD4<Float>(fx.scanAfter, fx.frameRGB.x, fx.frameRGB.y, fx.frameRGB.z)
         u.frame = SIMD4<Float>(fx.frameArea.x, fx.frameArea.y, fx.frameOn ? 1 : 0, 0)
+        if warpOnly {
+            u.tint = SIMD4<Float>(1, 1, 1, 0)
+            let off = SIMD4<Float>(0, 0, 0, -1)
+            u.covers = (off, off, off, off)
+            u.scan = SIMD4<Float>(0, 0, 0, -1)
+            u.frame = SIMD4<Float>(0, 0, 0, 0)
+        }
         guard !frameTex.isEmpty else { return }
         let frameTexture = frameTex[min(max(fx.frameIdx, 0), frameTex.count - 1)]
         let dvCopy = fx.dv
@@ -1224,7 +1272,7 @@ final class RGRenderer {
             enc.endEncoding()
             statPost += 1
         } else {
-            for i in 0..<min(plan.dst.count, plan.fxTex.count, viewCount, projections.count) {
+            for i in 0..<min(plan.dst.count, plan.fxTex.count, warpOnly ? 2 : viewCount, projections.count) {
                 let dst = plan.dst[i]
                 let pd = MTLRenderPassDescriptor()
                 pd.colorAttachments[0].texture = dst

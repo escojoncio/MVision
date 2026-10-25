@@ -6,7 +6,9 @@
 #include <string.h>
 #include "cpu.h"
 #include "gpu.h"   /* GpuHpInfo (solo el tipo; la GTE no depende del rasterizador) */
+#include "hps.h"
 
+static uint32_t hp_sxyt[3];   /* etiqueta de vértice (hps.h) de SXY0..2: ver "Asociación por dirección" */
 static int32_t D[32];   /* datos */
 static int32_t C[32];   /* control */
 static uint32_t flag;
@@ -89,6 +91,7 @@ static void push_sz(int32_t z) { SZ(0) = SZ(1); SZ(1) = SZ(2); SZ(2) = SZ(3); SZ
 static void push_sxy(int32_t x, int32_t y) {
     SXY(0) = SXY(1); SXY(1) = SXY(2);
     SXY(2) = (int32_t)((uint32_t)(x & 0xFFFF) | ((uint32_t)y << 16));
+    hp_sxyt[0] = hp_sxyt[1]; hp_sxyt[1] = hp_sxyt[2]; hp_sxyt[2] = 0;
 }
 
 /* --- división UNR --- */
@@ -194,6 +197,21 @@ static int hp_on, hp_dirty, hp_ev_on, hp_ev_x = 100, hp_ev_y = 80;
 static uint32_t hp_gen, hp_seq;
 static GteHpStats hp_st;
 
+/* ---- Asociación por DIRECCIÓN de memoria (hps.h; estándar de oro de PGXP) ----
+ * Por valor de SXY, dos vértices saturados con el mismo SXY son indistinguibles y la elección por secuencia puede fallar (quads de suelo
+ * pegados a la cámara con 2 vértices saturados). El intérprete etiqueta cada palabra SXY que el juego guarda (swc2 / mfc2+sw), la propaga
+ * en lw/sw/move/lwc2/mtc2 y la GPU resuelve cada palabra de vértice de la primitiva por su dirección. Cada vértice de la GTE se copia al
+ * pool (indexado por seq; tag = seq+1, 0 = ninguno) con su clave de 32 bits (el SXY empujado): la etiqueta solo vale mientras el valor que
+ * hay en memoria/registro sea esa clave y el vértice no haya caducado (HP_ADDR_GEN cierres de frame) ni lo haya sobrescrito el pool. */
+#define HP_POOL 32768
+#define HP_ADDR_GEN 4
+typedef struct { uint32_t tag, key, gen; GpuHpInfo i; } HpPoolE;
+static HpPoolE hp_pool[HP_POOL];
+int hps_on;
+uint32_t hps_mem[HPS_WORDS];
+uint32_t hps_bm[HPS_WORDS / 32 + 1];
+static int hps_dirty;
+
 #define HP_NB 87
 static uint32_t hp_pair[3][4][4][HP_NB]; /* clase: 0 triángulo, 1 quad, 2 línea (no se mezclan: otro patrón de escritura) */
 static void hp_clear(void) {
@@ -203,10 +221,12 @@ static void hp_clear(void) {
         memset(&hp_ring, 0, sizeof hp_ring); memset(&hp_evr, 0, sizeof hp_evr);
         hp_dirty = 0;
     }
+    if (hps_dirty) { memset(hp_pool, 0, sizeof hp_pool); memset(hps_mem, 0, sizeof hps_mem); memset(hps_bm, 0, sizeof hps_bm); hps_dirty = 0; }
+    memset(hp_sxyt, 0, sizeof hp_sxyt);
     hp_gen = hp_seq = 0;
     memset(&hp_st, 0, sizeof hp_st);
 }
-void gte_hp_enable(int on) { hp_on = on; }
+void gte_hp_enable(int on) { hp_on = on; hps_on = on; }
 int gte_hp_enabled(void) { return hp_on; }
 void gte_hp_frame(void) { hp_gen++; hp_st.gen_stored = 0; }
 void gte_hp_stats(GteHpStats *s) { *s = hp_st; }
@@ -398,6 +418,57 @@ static int hp_select(int n, const GpuHpInfo *(*c)[HP_MAXC], const int *cnt, int 
     return 0;
 }
 
+/* Cuadrilátero de vértices de vista coplanar (distancia del 4.º al plano de los otros tres < 1 % de la mayor arista), sin triángulos degenerados y con orden de tira
+ * válido: las normales de (0,1,2) y (1,2,3) apuntan en sentidos opuestos (intercambiar v1 y v3 también es coplanar, pero cruza el cuadrilátero). */
+static int hp_quad_planar(const GpuHpInfo *const p[4]) {
+    float e1[3], e2[3], e3[3], f1[3], f2[3];
+    const float *a = &p[0]->vx, *b = &p[1]->vx, *c = &p[2]->vx, *d = &p[3]->vx;
+    for (int k = 0; k < 3; k++) { e1[k] = b[k] - a[k]; e2[k] = c[k] - a[k]; e3[k] = d[k] - a[k]; f1[k] = c[k] - b[k]; f2[k] = d[k] - b[k]; }
+    float n[3] = {e1[1]*e2[2] - e1[2]*e2[1], e1[2]*e2[0] - e1[0]*e2[2], e1[0]*e2[1] - e1[1]*e2[0]};
+    float m[3] = {f1[1]*f2[2] - f1[2]*f2[1], f1[2]*f2[0] - f1[0]*f2[2], f1[0]*f2[1] - f1[1]*f2[0]};
+    float nn = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]), mn = sqrtf(m[0]*m[0] + m[1]*m[1] + m[2]*m[2]);
+    float l1 = sqrtf(e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2]), l2 = sqrtf(e2[0]*e2[0] + e2[1]*e2[1] + e2[2]*e2[2]), l3 = sqrtf(e3[0]*e3[0] + e3[1]*e3[1] + e3[2]*e3[2]);
+    float lm = fmaxf(l1, fmaxf(l2, l3));
+    if (!(nn > 1e-3f * lm * lm) || !(mn > 1e-3f * lm * lm) || !isfinite(nn + mn)) return 0;
+    if (!(fabsf(n[0]*e3[0] + n[1]*e3[1] + n[2]*e3[2]) / nn < 0.01f * lm)) return 0;
+    return n[0]*m[0] + n[1]*m[1] + n[2]*m[2] < 0;
+}
+
+/* Cuadrilátero con candidatos ambiguos (mismo SXY, típico de los saturados): si la elección por secuencia no es plana, se prueban las combinaciones de candidatos
+ * (hasta HP_MAXC por vértice con 1-2 ambiguos; menos con más) y se toma la plana de mayor verosimilitud. Si es la única plana de verosimilitud comparable, los
+ * vértices dejan de ser AMBIG. Sin combinación plana (cuadrilátero no plano, vértice no registrado) no cambia nada. */
+static void hp_planar_fix(const GpuHpInfo *(*c)[HP_MAXC], const int *cnt, int *idx, uint8_t *low) {
+    int pv[4], np = 0, any_low = 0;
+    for (int i = 0; i < 4; i++) {
+        if (cnt[i] < 1 || idx[i] < 0) return;
+        if (cnt[i] > 1) { pv[np++] = i; any_low |= low[i]; }
+    }
+    if (!np || !any_low) return;
+    const GpuHpInfo *cur[4];
+    for (int i = 0; i < 4; i++) cur[i] = c[i][idx[i]];
+    if (hp_quad_planar(cur)) return;
+    int lim = np <= 2 ? HP_MAXC : np == 3 ? 12 : 8, K[4] = {1, 1, 1, 1}, ci[4] = {0, 0, 0, 0}, best[4] = {0, 0, 0, 0}, nbest = 0, nclose = 0;
+    for (int a = 0; a < np; a++) K[pv[a]] = cnt[pv[a]] < lim ? cnt[pv[a]] : lim;
+    float bests = -1e30f;
+    for (;;) {
+        const GpuHpInfo *t[4];
+        for (int i = 0; i < 4; i++) t[i] = c[i][ci[i]];
+        int dup = 0;
+        for (int i = 0; i < 4 && !dup; i++) for (int j = i + 1; j < 4; j++) if (t[i] == t[j]) { dup = 1; break; }
+        if (!dup && hp_quad_planar(t)) {
+            float sc = 0;
+            for (int i = 0; i < 4; i++) for (int j = i + 1; j < 4; j++) sc += hp_pair_score(1, i, t[i], j, t[j]);
+            if (!nbest || sc > bests) { nclose = nbest && sc - bests < HP_MARGIN; memcpy(best, ci, sizeof best); bests = sc; nbest = 1; }
+            else if (bests - sc < HP_MARGIN) nclose = 1;
+        }
+        int a = 0;   /* siguiente combinación (contador mixto sobre los vértices ambiguos) */
+        for (; a < np; a++) { int v = pv[a]; if (++ci[v] < K[v]) break; ci[v] = 0; }
+        if (a == np) break;
+    }
+    if (!nbest) return;
+    for (int a = 0; a < np; a++) { idx[pv[a]] = best[pv[a]]; low[pv[a]] = (uint8_t)nclose; }
+}
+
 /* Autoevaluación (gte_hp_eval): ventana artificial |sx-OFX|<ex, |sy-OFY|<ey; fuera de ella la clave se recorta al borde
  * (como un SXY saturado). hp_evr guarda esos vértices por clave recortada; aquí se compara con la resolución sin recorte. */
 static inline void hp_evkey(const GpuHpInfo *t, int sx, int sy, int *kx, int *ky) {
@@ -432,12 +503,38 @@ static void hp_eval(int n, const int *sx, const int *sy, const GpuHpInfo *truth)
     }
 }
 
-int gte_hp_resolve(int n, const int *sx, const int *sy, GpuHpInfo *out, uint8_t *ok) {
+int gte_hp_tag_ok(uint32_t tag, uint32_t v) {
+    if (!tag) return 0;
+    const HpPoolE *e = &hp_pool[(tag - 1) & (HP_POOL - 1)];
+    return e->tag == tag && e->key == v && (uint32_t)(hp_gen - e->gen) <= HP_ADDR_GEN;
+}
+uint32_t gte_hp_sxy_tag(int r, uint32_t v) {
+    if (r < 12 || r > 15) return 0;
+    uint32_t t = hp_sxyt[r == 15 ? 2 : r - 12];
+    return gte_hp_tag_ok(t, v) ? t : 0;
+}
+void gte_hp_sxy_set(int r, uint32_t tag, uint32_t v) {
+    if (r < 12 || r > 15) return;
+    hp_sxyt[r == 15 ? 2 : r - 12] = gte_hp_tag_ok(tag, v) ? tag : 0;
+}
+
+/* Resolución de una primitiva. addr/word (opcionales; addr[i] == 0 = dirección desconocida): palabra de vértice i y dirección de la que la
+ * leyó la GPU; si la sombra por dirección la reconoce, ese vértice es EXACTO (ancla única, sin AMBIG) y el resto se resuelve por valor
+ * como siempre, usándolo de ancla. */
+int gte_hp_resolve_a(int n, const int *sx, const int *sy, const uint32_t *addr, const uint32_t *word, GpuHpInfo *out, uint8_t *ok) {
     const GpuHpInfo *c[4][HP_MAXC]; int cnt[4] = {0, 0, 0, 0}, idx[4], got = 0;
+    const GpuHpInfo *known[4] = {0, 0, 0, 0};
     if (n > 4) n = 4;
     if (n <= 0) return 0;
     hp_st.res_prims++;
-    for (int i = 0; i < n; i++) cnt[i] = hp_gather(sx[i], sy[i], c[i], HP_MAXC);
+    for (int i = 0; i < n; i++) {
+        if (addr && addr[i] && hps_on) {
+            uint32_t tag = hps_get(addr[i]);
+            if (gte_hp_tag_ok(tag, word[i])) known[i] = &hp_pool[(tag - 1) & (HP_POOL - 1)].i;
+        }
+        if (known[i]) { c[i][0] = known[i]; cnt[i] = 1; }
+        else cnt[i] = hp_gather(sx[i], sy[i], c[i], HP_MAXC);
+    }
     uint8_t low[4];
     int unamb = hp_select(n, c, cnt, idx, low);
     if (unamb && n >= 2) {
@@ -455,16 +552,21 @@ int gte_hp_resolve(int n, const int *sx, const int *sy, GpuHpInfo *out, uint8_t 
         }
         if (same) low[i] = 0;
     }
+    if (n == 4) hp_planar_fix(c, cnt, idx, low);
     int all_norm = 1;
     for (int i = 0; i < n; i++) {
         hp_st.lookups++;
         ok[i] = idx[i] >= 0;
-        if (ok[i]) { out[i] = *c[i][idx[i]]; got++; hp_st.hits++; all_norm &= out[i].flags == 0; if (low[i]) out[i].flags |= GPU_VF_AMBIG; }
+        if (ok[i]) {
+            out[i] = *c[i][idx[i]]; got++; hp_st.hits++; all_norm &= out[i].flags == 0; if (low[i]) out[i].flags |= GPU_VF_AMBIG;
+            if (known[i]) hp_st.res_addr++; else hp_st.res_val++;
+        }
         else all_norm = 0;
     }
     if (hp_ev_on && all_norm) hp_eval(n, sx, sy, out);
     return got;
 }
+int gte_hp_resolve(int n, const int *sx, const int *sy, GpuHpInfo *out, uint8_t *ok) { return gte_hp_resolve_a(n, sx, sy, NULL, NULL, out, ok); }
 
 /* Registro de un vértice RTPS/RTPT tras empujar SXY (sx,sy ya saturados). */
 static void hp_vertex(int v, int sf, int sx, int sy, int sat) {
@@ -491,6 +593,11 @@ static void hp_vertex(int v, int sf, int sx, int sy, int sat) {
     in.vx = (float)P[0]; in.vy = (float)P[1]; in.vz = (float)P[2];
     in.h = (float)h; in.ofx = (float)((double)OFX / 65536.0); in.ofy = (float)((double)OFY / 65536.0);
     in.flags = (uint8_t)fl; in.seq = hp_seq++;
+    {   /* pool por dirección: clave = el SXY que acaba de empujar push_sxy */
+        HpPoolE *pe = &hp_pool[in.seq & (HP_POOL - 1)];
+        pe->tag = in.seq + 1; pe->key = (uint32_t)SXY(2); pe->gen = hp_gen; pe->i = in;
+        hp_sxyt[2] = pe->tag; hps_dirty = 1;
+    }
     if (fl) { hp_ring_push(&hp_ring, sx, sy, &in); hp_st.flagged++; hp_st.stored++; }
     else {
         hp_store(sx, sy, (uint32_t)sz, &in);
@@ -712,6 +819,7 @@ void gte_mtc2(Cpu *c, int r, uint32_t v) {
     (void)c;
     switch (r) {
     case 15: push_sxy(LO16(v), HI16(v)); break;
+    case 12: case 13: case 14: D[r] = (int32_t)v; hp_sxyt[r - 12] = 0; break;
     case 28:
         D[28] = (int32_t)(v & 0x7FFF);
         IR(1) = (int32_t)((v & 0x1F) << 7);

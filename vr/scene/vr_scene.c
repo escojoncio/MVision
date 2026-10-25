@@ -40,6 +40,7 @@ VrSceneOpts vr_scene_opts_default(void) {
     o.engine_near_clip = 0;   /* §49: todo lo que el juego emite llega al renderer; el plano cercano es el de la cabeza */
     o.recon_partial = 1; o.recon_ambig = 1;
     o.coherence = 1;   /* §56: red de seguridad contra vértices incoherentes */
+    o.line3d_px = 0.0f;   /* opt-in: lo activa el anfitrión en modo gpu (vr/host) */
     o.coh_px = 2.5f; o.coh_edge_m = 60.0f; o.coh_far_m = 150.0f; o.coh_stretch = 0.0f; o.coh_flag_edge_m = 32.0f; o.coh_synth_edge_m = 20.0f;
     return o;
 }
@@ -221,6 +222,38 @@ static int vtx_model_ok(const GpuOp *op, const GpuVtx *v, float tol) {
     return fabs(ex - (double)(v->x - op->dox)) <= tol && fabs(ey - (double)(v->y - op->doy)) <= tol;
 }
 
+/* Vértice del que fiarse para reconstruir otro: sin banderas, o solo SAT con z > 0, que reproduce su SXY con el modelo de la GTE y con alguna coordenada sin saturar
+ * (con las dos saturadas el SXY no informa de la posición). AMBIG/BEHIND/DERIVED no son fiables. */
+static int vtx_trusted(const GpuOp *op, const GpuVtx *v, float tol) {
+    if (!isfinite(v->vx + v->vy + v->vz) || (v->vflags & ~GPU_VF_SAT)) return 0;
+    if (!v->vflags) return 1;
+    if (!(v->vz > 0) || !vtx_model_ok(op, v, tol)) return 0;
+    int sx = v->x - op->dox, sy = v->y - op->doy;
+    return !((sx <= -1024 || sx >= 1023) && (sy <= -1024 || sy >= 1023));
+}
+
+/* AMBIG junto a SAT/BEHIND en un cuadrilátero no coherente: gte_hp_resolve no pudo elegir entre candidatos con el mismo SXY saturado. Si UN solo vértice es AMBIG y
+ * los otros tres son fiables, el paralelogramo (suma de sus dos vecinos menos el opuesto; v0<->v3, v1<->v2 en el orden de la GPU) lo reconstruye, siempre que el
+ * resultado reproduzca el SXY registrado de ese vértice (incluida su saturación) y el cuadrilátero quede coherente. Rellena *rc y devuelve 1; 0 si no se puede. */
+static int repair_ambig_quad(const GpuOp *op, float tol, GpuOp *rc) {
+    int bad = -1;
+    for (int k = 0; k < 4; k++) {
+        if (!op->v[k].vvalid) return 0;
+        if (op->v[k].vflags & GPU_VF_AMBIG) { if (bad >= 0) return 0; bad = k; }
+    }
+    if (bad < 0) return 0;
+    for (int k = 0; k < 4; k++) if (k != bad && !vtx_trusted(op, &op->v[k], tol)) return 0;
+    int opp = 3 - bad, a = (bad == 0 || bad == 3) ? 1 : 0, b = 3 - a;
+    *rc = *op;
+    GpuVtx *g = &rc->v[bad];
+    g->vx = op->v[a].vx + op->v[b].vx - op->v[opp].vx;
+    g->vy = op->v[a].vy + op->v[b].vy - op->v[opp].vy;
+    g->vz = op->v[a].vz + op->v[b].vz - op->v[opp].vz;
+    g->vflags = g->vz <= 0 ? (uint8_t)(GPU_VF_BEHIND | GPU_VF_SAT) : 0;
+    if (!isfinite(g->vx + g->vy + g->vz) || !vtx_model_ok(rc, g, tol) || !quad_coherent(rc)) return 0;
+    return 1;
+}
+
 /* Sutherland-Hodgman contra el plano z = zn (se conserva z >= zn) de un polígono de n<=3 vértices -> <=4. Devuelve m. */
 static int clip_near(const CV *in, int n, float zn, CV *out) {
     int m = 0;
@@ -262,6 +295,93 @@ typedef struct { float m[3][3]; float t[3]; } Aff; /* v_vr = m*v + t */
 
 static void xf(const Aff *a, const CV *v, float *out) {
     for (int r = 0; r < 3; r++) out[r] = a->m[r][0] * v->p[0] + a->m[r][1] * v->p[1] + a->m[r][2] * v->p[2] + a->t[r];
+}
+
+VrScreenWindow vr_scene_screen_window(const VrFilter *f) {
+    VrScreenWindow w = {0, 0, 0, 0, 0};
+    if (!f || !f->proj_ok || !(f->proj_h > 1.0f) || !isfinite(f->proj_h) || !isfinite(f->cx_col) || !isfinite(f->cy_row)) return w;
+    float aw = (float)f->area[2], ah = (float)f->area[3];
+    if (!(aw > 0.0f) || !(ah > 0.0f)) return w;
+    w.left = f->cx_col / f->proj_h; w.right = (aw - f->cx_col) / f->proj_h;
+    w.up = f->cy_row / f->proj_h;   w.down = (ah - f->cy_row) / f->proj_h;
+    w.ok = w.left > 0.0f && w.right > 0.0f && w.up > 0.0f && w.down > 0.0f;   /* el centro óptico debe caer dentro de la imagen */
+    return w;
+}
+
+/* Línea 3D (opts.line3d_px, ver vr_scene.h). Devuelve 0 si no aplica (la línea sigue al plano 2D), 1 si emitió 2 triángulos, 2 si la descartó (contada). */
+static int line_3d(VrScene *out, const VrSceneOpts *o, const GpuOp *op, uint32_t i, uint32_t ev_end, uint16_t f, uint16_t sid, int gour, int semi,
+                   const WorldRef *wr, const Aff *A, size_t *nt) {
+    if (!(o->line3d_px > 0.0f) || !(op->proj_h > 0.0f) || !isfinite(op->proj_h) || !op->v[0].vvalid || !op->v[1].vvalid) return 0;
+    for (int k = 0; k < 2; k++)
+        if (!vtx_trusted(op, &op->v[k], o->coh_px) || !vtx_model_ok(op, &op->v[k], o->coh_px)) return 0;
+    CV c[2];
+    for (int k = 0; k < 2; k++) cv_from(&c[k], op, &op->v[k], gour, wr, NULL);
+    if (!isfinite(c[0].p[0] + c[0].p[1] + c[0].p[2] + c[1].p[0] + c[1].p[1] + c[1].p[2])) { out->stats.drop_nan++; fate_set(i, VR_FATE_NAN); return 2; }
+    float zn = o->near_units;
+    if (c[0].p[2] < zn || c[1].p[2] < zn) {   /* recorte contra el plano cercano: el extremo de detrás se acerca al plano por el segmento */
+        if (c[0].p[2] < zn && c[1].p[2] < zn) { out->stats.drop_behind++; fate_set(i, VR_FATE_BEHIND); return 2; }
+        int b = c[0].p[2] < zn ? 0 : 1;
+        const CV a = c[1 - b];
+        float t = (zn - c[b].p[2]) / (a.p[2] - c[b].p[2]);
+        for (int k = 0; k < 3; k++) c[b].p[k] += (a.p[k] - c[b].p[k]) * t;
+        c[b].p[2] = zn;
+        c[b].r += (a.r - c[b].r) * t; c[b].g += (a.g - c[b].g) * t; c[b].b += (a.b - c[b].b) * t;
+        out->stats.n_clipped++;
+    }
+    if (o->eye_near_m > 0.0f) {   /* como los triángulos: pieza pequeña ENTERA pegada al ojo del motor -> fuera */
+        double ke = (double)o->scale * (o->user_map_on && o->user_k > 0 ? (double)o->user_k : 1.0), dmax = 0;
+        for (int k = 0; k < 2; k++) {
+            double d = sqrt((double)c[k].p[0]*c[k].p[0] + (double)c[k].p[1]*c[k].p[1] + (double)c[k].p[2]*c[k].p[2]) * ke;
+            if (d > dmax) dmax = d;
+        }
+        double ex = (double)c[0].p[0] - c[1].p[0], ey = (double)c[0].p[1] - c[1].p[1], ez = (double)c[0].p[2] - c[1].p[2];
+        if (dmax < (double)o->eye_near_m && sqrt(ex*ex + ey*ey + ez*ez) * ke < 0.5) { out->stats.n_near_eye++; fate_set(i, VR_FATE_NEAR); return 2; }
+    }
+    /* cuadrilátero en tangentes de pantalla (x/z, y/z): medio grosor hw = line3d_px/2/H; los extremos se alargan hw, como la línea 2D */
+    float hw = 0.5f * o->line3d_px / op->proj_h, sx[2], sy[2];
+    for (int k = 0; k < 2; k++) { sx[k] = c[k].p[0] / c[k].p[2]; sy[k] = c[k].p[1] / c[k].p[2]; }
+    float dx = sx[1] - sx[0], dy = sy[1] - sy[0], l = sqrtf(dx*dx + dy*dy), ux = 1.0f, uy = 0.0f;
+    if (l > 1e-9f) { ux = dx / l; uy = dy / l; }   /* punto: cuadrado */
+    float nx = -uy, ny = ux;
+    CV q[4];
+    float p[4][3];
+    for (int k = 0; k < 4; k++) {
+        int e = k >> 1;
+        float su = e ? 1.0f : -1.0f, sn = (k & 1) ? 1.0f : -1.0f, z = c[e].p[2];
+        q[k] = c[e];
+        q[k].p[0] = (sx[e] + su * ux * hw + sn * nx * hw) * z;
+        q[k].p[1] = (sy[e] + su * uy * hw + sn * ny * hw) * z;
+        xf(A, &q[k], p[k]);
+        if (!isfinite(p[k][0] + p[k][1] + p[k][2])) { out->stats.drop_nan++; fate_set(i, VR_FATE_NAN); return 2; }
+    }
+    float me = o->max_edge_m * o->max_edge_m;
+    for (int k = 1; k < 4; k++) {
+        float e0 = p[k][0] - p[0][0], e1 = p[k][1] - p[0][1], e2 = p[k][2] - p[0][2];
+        if (!(e0*e0 + e1*e1 + e2*e2 <= me)) { out->stats.drop_huge++; fate_set(i, VR_FATE_HUGE); return 2; }
+    }
+    static const int idx[2][3] = {{0, 1, 2}, {1, 2, 3}};
+    for (int tq = 0; tq < 2; tq++) {
+        const float *a = p[idx[tq][0]], *b = p[idx[tq][1]], *d = p[idx[tq][2]];
+        float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, e2[3] = {d[0] - a[0], d[1] - a[1], d[2] - a[2]};
+        float nrm[3] = {e1[1]*e2[2] - e1[2]*e2[1], e1[2]*e2[0] - e1[0]*e2[2], e1[0]*e2[1] - e1[1]*e2[0]};
+        float tc[3] = {out->eye_vr[0] - a[0], out->eye_vr[1] - a[1], out->eye_vr[2] - a[2]};
+        int flip = (nrm[0]*tc[0] + nrm[1]*tc[1] + nrm[2]*tc[2]) < 0;   /* frente = cara que vio la cámara del juego (como los polígonos) */
+        int ord[3] = {0, flip ? 2 : 1, flip ? 1 : 2};
+        Tri *t = &g_tri[(*nt)++];
+        uint16_t ff = (uint16_t)((f & ~GPU_F_TEXTURED) | (flip ? VR_F_FLIPPED : 0));
+        for (int k = 0; k < 3; k++) {
+            int j = idx[tq][ord[k]];
+            fill_cv(&t->v[k], op, &q[j], ff, sid);
+            memcpy(t->v[k].pos, p[j], sizeof t->v[k].pos);
+        }
+        t->ev_end = ev_end; t->src_op = i; t->cause = 0;
+        t->kind = semi ? 1 : 0; t->blend = semi ? (op->abr & 3) : 0xFF;
+        out->stats.n_tris3d++;
+        if (flip) out->stats.n_flipped++;
+    }
+    out->stats.n_line3d++;
+    if (i < g_fate_cap) g_fate[i] = VR_FATE_3D;
+    return 1;
 }
 
 void vr_scene_player_origin(const BridgeState *bs, const VrSceneOpts *o, float org[3]) {
@@ -494,6 +614,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     WorldRef wref;
     list_ref(dl, &wref);
     out->stats.n_ref_group = wref.n;
+    out->filter.proj_ok = wref.ok ? 1 : 0;
     out->filter.proj_h = wref.ok ? wref.h : 160.0f;
     out->filter.cx_col = wref.ok ? wref.rx - (float)dl->disp.x : (dl->disp.w > 0 ? 0.5f * (float)dl->disp.w : 160.0f);
     out->filter.cy_row = wref.ok ? wref.ry - (float)dl->disp.y : (dl->disp.h > 0 ? 0.5f * (float)dl->disp.h : 128.0f);
@@ -654,6 +775,16 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 }
             }
         }
+        GpuOp rc2;   /* AMBIG+SAT/BEHIND no coherente con un solo vértice AMBIG: paralelogramo (ver repair_ambig_quad) */
+        if (op->type == GPU_OP_POLY && o.recon_ambig && op->nv == 4 && op->proj_h > 0 && isfinite(op->proj_h)) {
+            unsigned uf4 = 0; int nv4 = 0;
+            for (int k = 0; k < 4; k++) { nv4 += op->v[k].vvalid; if (op->v[k].vvalid) uf4 |= op->v[k].vflags; }
+            if (nv4 == 4 && (uf4 & GPU_VF_AMBIG) && (uf4 & (GPU_VF_SAT | GPU_VF_BEHIND)) && !quad_coherent(op) && repair_ambig_quad(op, o.coh_px, &rc2)) {
+                op = &rc2;
+                out->stats.n_recon++; recon_flag = 1;
+                fate_set(i, VR_FATE_RECON);
+            }
+        }
         if (op->type == GPU_OP_POLY) {
             out->stats.n_poly++;
             int nv = op->nv == 4 ? 4 : 3, nval = 0;
@@ -694,21 +825,21 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                     }
                     if (nanv) { out->stats.drop_nan++; fate_set(i, VR_FATE_NAN); continue; }
                     if (o.eye_near_m > 0) {   /* modo gpu: nada a menos de eye_near_m del ojo (ver VrSceneOpts.eye_near_m) */
-                        double ke = (double)o.scale * (o.user_map_on && o.user_k > 0 ? (double)o.user_k : 1.0), dmin = 1e30;
+                        double ke = (double)o.scale * (o.user_map_on && o.user_k > 0 ? (double)o.user_k : 1.0), dmax = 0;
                         int tb = 0;
                         for (int k = 0; k < 3; k++) {
                             const float *a = g3[k]->p;
                             double d = sqrt((double)a[0]*a[0] + (double)a[1]*a[1] + (double)a[2]*a[2]) * ke;
-                            if (d < dmin) dmin = d;
+                            if (d > dmax) dmax = d;
                             tb |= (op->v[idx[q][k]].vflags & GPU_VF_BEHIND) != 0;
                         }
-                        double emax = 0;   /* solo piezas pequeñas (efectos, partículas): paredes/suelos junto a la cabeza se recortan, no se borran */
+                        double emax = 0;   /* solo piezas pequeñas ENTERAS dentro de eye_near_m (efectos, partículas pegados a la cara): paredes/suelos/barandillas con un vértice cerca se recortan (plano cercano), no se borran */
                         for (int k = 0; k < 3; k++) {
                             const float *a = g3[k]->p, *b = g3[(k + 1) % 3]->p;
                             double dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2], e = sqrt(dx*dx + dy*dy + dz*dz) * ke;
                             if (e > emax) emax = e;
                         }
-                        if (dmin < (double)o.eye_near_m && emax < 0.5) { out->stats.n_near_eye++; fate_set(i, VR_FATE_NEAR); continue; }
+                        if (dmax < (double)o.eye_near_m && emax < 0.5) { out->stats.n_near_eye++; fate_set(i, VR_FATE_NEAR); continue; }
                         if (tb && !near) { out->stats.drop_behind++; fate_set(i, VR_FATE_BEHIND); continue; }   /* BEHIND declarado y ningún vértice detrás del plano: dato incoherente */
                     }
                     {   /* red de seguridad (§56): triángulo con vértices incoherentes -> fuera (y contado por causa) */
@@ -852,6 +983,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             }
         } else { /* LINE: cuadrilátero de 1 px */
             out->stats.n_line++;
+            if (line_3d(out, &o, op, i, g_next[i], f, sid, gour, semi, &wref, &A, &nt)) continue;   /* línea del mundo: cuadrilátero 3D (opts.line3d_px) */
             fate_set(i, VR_FATE_2D);
             if (o.drop_2d_all) continue;
             const GpuVtx *a = &op->v[0], *b = &op->v[1];
