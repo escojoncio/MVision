@@ -289,6 +289,7 @@ void mv_host_hands_done(void) {}
 int32_t mv_vrgame_special_view(MvVrSpecialView *out) { (void)out; return 0; }
 int32_t mv_vrgame_forearm(int32_t side, MvVrForearm *out) { (void)side; (void)out; return 0; }
 int32_t mv_vrgame_hand_matrix(int32_t side, float m[16]) { (void)side; (void)m; return 0; }
+int32_t mv_vrgame_menu_hand(void) { return -1; }   /* mano que mantiene abierta la ventana de armas/objetos: el banco no tiene menú del pecho */
 /* Calibración de manos, IA de enemigos y manos nuevas: el menú del visor (XRPresent.swift) los llama; el banco no los usa. */
 void mv_vrgame_calibrate_hands(float delay_s) { (void)delay_s; }
 float mv_vrgame_calibration_countdown(void) { return 0.0f; }
