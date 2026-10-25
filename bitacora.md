@@ -23,7 +23,7 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 - Créditos mal.
 - Radar detrás de la mano (invisible).
 **Causa de fondo (confirmada por el código):** el 3D sale solo del render nativo (`vr/native/`, ~14.400 líneas de heurísticas: mallas reconstruidas desde la RAM + relleno + respaldo plano). El camino tipo PGXP (vértices de vista del GTE asociados a cada primitiva, `runtime/gte.c` hp, `gpu_capture_hiprec`) existe pero está apagado (`hp_on=0`) y el modo "gpu" se eliminó (`vrhost.c:242-249`, `MV_RENDER` solo acepta nativo).
-**Pendiente de probar en visor (build de `main` con k-pgxp):** escenas/códec/créditos en 3D sin imagen plana; efectos sin pegarse a la cara; modelos sin ver a través; menús solo con la mano en el pecho; radar visible en la muñeca. Swift/Metal solo compilado por el CI.
+**Build OK en CI (run 40209655805, IPA de `main` 64e36ce; Swift/Metal compilan). Pendiente de probar en visor:** escenas/códec/créditos en 3D sin imagen plana; efectos sin pegarse a la cara; modelos sin ver a través; menús solo con la mano en el pecho; radar visible en la muñeca. Swift/Metal solo compilado por el CI.
 **Qué mirar en el log:** `[gpu3d]` (hp vs sin hp, cerca_descartados, recortados, post, camara=head), `[vista]` (sin BACKUP), `[pecho]` (dist/profundidad/motivo de cada intento), `[radar]` (si el panel queda en la palma: `flipDorsal = true`).
 **Límites conocidos:** semitransparentes no ocluyen el radar; con tiras de agua y sin 3D en el fotograma se pierden los fundidos; precalentado de pipelines gpu no portado (primer fotograma compila).
 
