@@ -61,7 +61,7 @@ int main(void) {
     CHECK(strstr(rg, "d1.depthCompareFunction = .greaterEqual; d1.isDepthWriteEnabled = true") != NULL && strstr(rg, "d2.depthCompareFunction = .greaterEqual; d2.isDepthWriteEnabled = false") != NULL,
           "opaco: prueba + escritura de profundidad; semitransparente: solo prueba (Z invertida)");
     CHECK(count(rg, ".cullMode") == 0 && count(rg, "setCullMode(.none)") >= 2, "sin descarte de reversos (la PS1 no lo tiene)");
-    CHECK(count(rg, "drawPrimitives") == 5, "RenderRG.swift: HUD (encodeHud), su paso final, drawGPU y el post-proceso (estéreo + ojo suelto) dibujan primitivas (hay %d)", count(rg, "drawPrimitives"));
+    CHECK(count(rg, "drawPrimitives") == 6, "RenderRG.swift: HUD (encodeHud), su paso final, el 2D dentro del estéreo (encodeStereo2D), drawGPU y el post-proceso (estéreo + ojo suelto) dibujan primitivas (hay %d)", count(rg, "drawPrimitives"));
     CHECK(count_range(rg, "private func encodePost(", "private func encodeVram(", "drawPrimitives") == 2, "encodePost: un triángulo a pantalla completa por ojo (estéreo con instancias / ojo suelto)");
     CHECK(count_range(rg, "private func encodeHud", "private func encodeScene(", "drawPrimitives") == 2, "dos drawPrimitives en encodeHud/finishHud");
     CHECK(count_range(rg, "private func encodeScene(", "private func drawGPU(", "drawPrimitives") == 0, "encodeScene no dibuja primitivas directamente (delega en drawGPU)");
@@ -128,12 +128,12 @@ int main(void) {
     /* 7) la colisión de la cabeza: escena nativa en el modo nativo, lista de la GPU en el modo gpu (sin captura nativa) */
     CHECK(strstr(vh, "if (!native_mode()) vrhc_feed_scene(&hm, &sc") != NULL, "modo gpu: la colisión de la cabeza se alimenta de la lista de la GPU");
     /* 7b) cercanía al ojo, vista y registro del modo gpu */
-    CHECK(strstr(vh, "if (!native_mode()) { o.eye_near_m = GPU3D_NEAR_EYE_M; o.line3d_px = 1.0f; }") != NULL && strstr(vh, "#define GPU3D_NEAR_EYE_M 0.10f") != NULL, "modo gpu: nada a menos de 0,10 m del ojo (vr_scene eye_near_m)");
+    CHECK(strstr(vh, "if (!native_mode()) { o.eye_near_m = GPU3D_NEAR_EYE_M; o.line3d_px = 1.0f; o.coplanar_m = 0.005f; }") != NULL && strstr(vh, "#define GPU3D_NEAR_EYE_M 0.10f") != NULL, "modo gpu: nada a menos de 0,10 m del ojo (vr_scene eye_near_m)");
     CHECK(strstr(vh, "vin.gpu3d = (uint8_t)!native_mode();") != NULL, "la vista recibe el modo gpu (ENGINE directo, sin respaldo)");
-    CHECK(strstr(vh, "if (!native_mode()) keep3b = 0;") != NULL, "modo gpu: fundidos y destellos al panel 2D");
+    CHECK(strstr(vh, "int keep3b = vrhost_keep_filter(native_mode(), cine_cand,") != NULL, "modo gpu: fundidos y destellos al panel 2D (vrhost_keep_filter decide qué filtro se conserva)");
     CHECK(strstr(vh, "gpu_capture_hiprec(1)") != NULL && strstr(vh, "if (cap_on && !gte_hp_enabled()) gpu_capture_hiprec(1);") != NULL, "vértices de vista de la GTE en alta precisión siempre que haya captura");
     CHECK(strstr(vh, "\"[gpu3d] fotograma=%u") != NULL && strstr(vh, "gpu3d_log();") != NULL && strstr(vh, "gpu3d_note(&sc, r);") != NULL, "registro [gpu3d] una vez por segundo");
-    CHECK(strstr(vh, "post=%u drop_ambig=%u drop_partial=%u drop_incoh=%u reconstruidos=%u drop_huge=%u drop_nan=%u | render=%s") != NULL && strstr(vh, "g3.post += sc->b[i].kind == 3") != NULL, "registro [gpu3d]: lotes de filtro de pantalla (post=N)");
+    CHECK(strstr(vh, "post=%u drop_ambig=%u drop_partial=%u drop_incoh=%u reconstruidos=%u drop_huge=%u drop_nan=%u n_rect=%u n_rect_semi_tex=%u | render=%s") != NULL && strstr(vh, "g3.post += sc->b[i].kind == 3") != NULL, "registro [gpu3d]: lotes de filtro de pantalla (post=N)");
     { char *vw = slurp("vr/host/vr_view.c", 1), *vs = slurp("vr/scene/vr_scene.c", 1);
       CHECK(vw && strstr(vw, "return in->gpu3d || vrview_native_trusted(in) ? VRV_K_ENGINE : VRV_K_BACKUP;") != NULL, "vr_view: en el modo gpu una escena 3D es ENGINE sin mirar la cobertura nativa");
       CHECK(vw && strstr(vw, "(in && in->gpu3d ? 1 : v->to_engine)") != NULL, "vr_view: entrada a ENGINE sin histéresis en el modo gpu");
@@ -149,7 +149,7 @@ int main(void) {
     CHECK(strstr(xp, "engineHealthy") != NULL && strstr(xp, "engineBackup") != NULL && strstr(xp, "tipo=respaldo") != NULL, "XRPresent cae al respaldo si el nativo no dibuja la pantalla 3D");
     CHECK(strstr(xp, "XRCinemaLayout.legible(reason: Int32(gs.view_reason), kind: gs.view_kind)") != NULL, "el vídeo y el respaldo se presentan grandes, planos y nítidos");
     CHECK(strstr(xe, "engineHealthy: renderer.stereoHealthy") != NULL && strstr(rg, "stereoHealthy = ready && stereoWanted") != NULL, "salud de la pantalla 3D desde el renderer");
-    CHECK(strstr(rg, "if stereoRequest == nil { stereoRendered = false }") != NULL, "la imagen de la pantalla 3D no sobrevive a la escena (caché)");
+    CHECK(strstr(rg, "if stereoRequest == nil { stereoRendered = false;") != NULL, "la imagen de la pantalla 3D no sobrevive a la escena (caché)");
     {   /* en cine plano (clases 0, 3 y 4) la imagen sale de la VRAM, sin capa 2D duplicada encima ni mundo: el bloque de la pantalla de cine solo añade UN elemento */
         int items = count_range(xp, "if shown == .cinema, let c = cinema, let tex = c.texture(srgb: linear) {", "if shown == .stereo, Self.gameViewOK(gameView) {", "r.items.append(");
         CHECK(items == 1, "la pantalla de cine añade un único elemento (la imagen de la VRAM) (%d)", items);

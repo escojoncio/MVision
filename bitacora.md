@@ -4,49 +4,42 @@ Runtime nativo para Apple Vision Pro: el juego (recompilación estática del EXE
 Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP_REPO`, `DECOMP_COMMIT`, `SDK_REPO`); zonas por número. Histórico completo de secciones 1-103: `git log -p bitacora.md` (antes de la compactación del 2026-10-25).
 
 ## Last done
-- 2026-10-25 `6769f25` (IPA run 40219771232, artifact MVision-ipa 12608811575; el push sin `[ipa]` no genera IPA: lanzar `gh workflow run visionos.yml --ref main -f solo_render=false`):
-  - Menús: `vr_gesture.c` dos zonas fijas por mano en marco de guiñada (izq 0,16 m a la izquierda, 0,26 m bajo la cabeza, −0,02 delante; der simétrica; sacadas de la marca L1+L2+R1+R2 del log 2026-10-25 l.5951), radio 0,15, se abre con el GATILLO de esa mano mantenido 0,30 s (histéresis `trig_on/off`), el agarre ya no abre; gatillo enmascarado (`out.mask`) solo con la mano dentro de su zona. Quitado `chest_depth`. `[pecho] zona=`.
-  - Radar: `vr_radar.c` `along_m` 0,13 / `lift_m` 0,04 (muñeca) y `vrradar_wrist_quad_eye` (normal girada alrededor del antebrazo hacia el ojo; `RadarPanel.swift` pasa `headPosition`).
-  - Agujeros: PGXP por dirección (`runtime/hps.h`, `gte.c` pool+etiquetas `gte_hp_resolve_a`, `interp.c` lw/sw/move/lwc2/mtc2, `mem.c`, `cpu.h` `hpt[32]`, `gpu.c` dirección por palabra); solo intérprete (`MV_NOGEN`), no `tools/recomp` ni memcpy BIOS. `gte.c` `hp_planar_fix`; `gpu.c` `cap_resolve` proj del vértice más fiable; `vr_scene.c` `repair_ambig_quad`, regla cercana solo si TODOS los vértices < `GPU3D_NEAR_EYE_M` (0,10). Culling del juego ampliado a ±1020 (`vrcam_patch_default` fov 179, `patch_exe.py`).
-  - Render: `RenderRG.swift` `stereoCamera` con H/centro reales de la lista (`vr_scene_screen_window`); agua en cinemáticas: `stereoPreTextures` + `encodePost(warpOnly:)`; `vr_scene.c` `line_3d` (líneas con hp a quad 3D de 1 px).
-  - `[gpu3d]` nuevos: drop_ambig/partial/incoh, reconstruidos, drop_huge/nan, hp_por_direccion/hp_por_valor.
-- 2026-10-25 rama `k-pgxp` (fusionada en `main`): 3D desde la lista de la GPU con vértices de vista del GTE, por defecto (`vrhost.c` `MV_RENDER_DEFAULT_NATIVE 0`, `MV_RENDER=nativo` vuelve al nativo); `RenderRG.swift` `gpuMode`/`drawGPU`/`dsOpaque`/`dsSemi` (Z invertida, semitransparente sin escritura, sin descarte de reversos) recuperado de `a6cc811^`, más post-proceso de pantalla (agua/filtros, `planPost`/`encodePost`).
-- `vr_view.c`: con `gpu3d` una escena 3D es ENGINE al instante; BACKUP (imagen plana VRAM) nunca en modo gpu.
-- `vr_scene.c` (`eye_near_m` 0,25 m, `GPU3D_NEAR_EYE_M` en vrhost.c): se descarta un triángulo con vértice < 0,25 m del ojo SOLO si su arista máxima < 0,5 m (efectos); paredes se recortan contra el plano cercano.
-- `vr_gesture.c`: pecho = cabeza −0,30 m vertical +0,18 m al frente (un punto), radio 0,15, delante del torso > 0,05 m, puño 0,30 s dentro; reinicio al perder seguimiento. `[pecho]` en `vrbodyg.c`.
-- Radar: `vr_radar.c` hueso a 0,07 m hacia el codo y 0,035 m sobre +Y del grip (dorso); `RadarPanel.swift` `flipDorsal` (false) y `[radar]` 1/s; dibujado tras la lista con la misma profundidad (lo ocluye el brazo opaco).
-- Registros nuevos: `[gpu3d]` 1/s (prims, hp, 2D, near, recortes, detrás, post, modo, vista, cámara), `[vista]` en cada cambio.
-- Bitácora compactada (1953 -> <150 líneas).
-- final6 (`main`): integra j-render (mallas ausentes toleradas, escenario nativo inservible no se dibuja, SIGUE descartado < 30 m, carteles >= 1 px) y j-control (capa de menú = mando original, ventanas por el pecho R2/L2, umbrales de gestos, radar anclado al mando izquierdo).
-- final5: verificación del panel 2D contra el emulador (`vr_layer2d.c` `verify_panel`), cobertura nativo+relleno (`vrview_cover_feed`), seguimiento de efectos (`ns_gpu.c` `trk_update`).
+- 2026-10-25 `069da3f` (IPA run 40228394774, artifact MVision-ipa 12612262250; ipa OK, render-test rojo solo por `vr/native/test_no_gpu3d.c` desfasado, corregido en el commit siguiente):
+  - Cine/créditos: 2D (kind 2) compuesto DENTRO de las texturas estéreo (`RenderRG.swift` `encodeStereo2D`, `stereoBase` por ojo con `stereoBaseStale`, `stereoWindow` solo de la lista actual); listas sin 3D pintan su 2D sobre la base; `vrhost_stereo2d_inside` (vr_view.h) decide si se quita el panel hp2 (`XRPresent.swift`). `vr_scene.c` `keep_late_clear` (TILE opaco ≥90 % tras el 3D se conserva = relleno de créditos) y `veil_as_2d` (velo semi a kind 2), ambos solo gpu+ENGINE.
+  - Mezcla semitransparente en gamma: `render/metal/vr_blend.h` (C+MSL), `vr_fs_scene_blend` con `[[color(0)]]` + function constant `VR_FC_BLEND`; sin mezcla fija en pipelines semi.
+  - Efectos de pantalla completa: `vrhost_keep_filter` (vr_view.h) en gpu conserva el filtro en mundo/cine con 3D (alarma/destellos a `planPost`, no al panel HUD).
+  - Coplanares: `vr_scene.c` `coplanar_lift` (posterior en orden de lista más cerca del ojo 0,2 mm·min(d,50)), `coplanar_m` 0 por defecto, 0,005 solo en gpu; tope 400k pares.
+  - Capa 2D async: `Out.mode/view`, `vl2a_layer_accept` (el overlay del menú solo acepta VL_PANEL de su vista), `vl2a_acquire` solo "nuevo" si cambia el seq; `vl2a_scale_step` estimación lineal, RECOVER 60.
+  - Menús L2/R2: zona en marco físico (`vr_gesture.c` `hfs` desde `hrel`+`head_fwd`, reserva `in->yaw` si !fwd_ok), centro (±0,16, −0,26, −0,02), radio 0,15 entrar / 0,20 salir, `chest_lock` (una apertura por pulsación). Panel sobre la mano que lo abre: `mv_vrgame_menu_hand` (atómico), `XRMath.handModel` (0,30 m, +0,12 m, mín 0,45 m del ojo); sin mano → layout 1,40 m.
+  - Radar: `vrradar_pick_arm` (antebrazo IK primero, mando de reserva); `[radar] fuente=IK|mando` + distancia al segmento codo-muñeca.
+  - Volcado gpu con list.bin (`vr/host/vrdump.h`). Logs nuevos: `[estereo]`, `[geom]`, `[gpu3d] n_rect/n_rect_semi_tex`, `[pecho]` con hf/upm/yaws/rearme.
+- 2026-10-25 `6769f25`: menús zona fija+gatillo, radar muñeca, PGXP por dirección, stereoCamera con H real (probado: no funcionaba, ver log de 069da3f pendiente).
 
 ## Current state
-**Probado en visor (log 2026-10-25, build 64e36ce) — NO funcionaba:** menús abiertos lejos del cuerpo; radar pegado al hueso de la muñeca; agujeros en el 3D; 2D/créditos mal; agua de la intro mal; faltan efectos/polígonos.
-**Build OK `6769f25` (todas las pruebas C pasan; Swift/Metal compilan en CI). Pendiente de probar en visor:** todo lo de "Last done". Unverified: huecos en suelo pegado a la cámara (medido en volcado d0018 sin sombra: 5,2 %, debería caer con PGXP por dirección), coste de `hp_planar_fix` (hasta 8⁴ combinaciones por quad), efectos del culling ±1020 (IA ve a todos "en cámara", más prims/OT).
-**Qué mirar en el log:** `[gpu3d]` hp_por_direccion vs hp_por_valor, drop_ambig, cerca_descartados; `[pecho] zona=`; `[radar]`; xr-diag `mostrando=stereo post=1` en la intro.
-**Pendiente:** mezcla semitransparente en gamma (hoy lineal: aditivos oscuros) — `vr_fs_scene`; RECT/sprites en 3D (`cap_rect` sin hp); PGXP por dirección en memcpy BIOS/polilíneas; scanlines/máscara en cinemáticas; `test_geom` 2 fallos previos (esquina compartida/sin ancla, término espacial), `test_gpu` no enlaza (`rt_orig`), `vrhost_run` no enlaza (`ns_fx_*`).
+**Pendiente de probar en visor (`069da3f`):** todo lo de "Last done". Swift/Metal compilan en CI.
+**Qué mirar en el log:** `[estereo]` (ok, lista3D vs lista2D), `[geom]` (grupos H, coplanares), `[pecho]` (hf real de la mano al abrir, rearme), `[radar] fuente=IK`, `[capa2d]` escala en créditos.
+**Unverified:** causa de "geometría rota" (cobertura hp 99,2 %; sospecha z-fight de coplanares, sin confirmar); `[[color(0)]]` con MSAA/amplificación (coste por muestra); texto de créditos por `vr_fs_scene_blend` (antes un shader similar "rompía los textos", L2A_STALE); radar sobre `mv_vrgame_forearm` a tasa del juego (posibles tirones a 90 Hz).
+**Pendiente:** créditos 100 % planos tipo original si hiciera falta (`vrview_kind_of` necesita umbral `flat2d` medido con log de créditos); RECT/sprites en 3D; PGXP por dirección en memcpy BIOS; scanlines en cinemáticas; `test_geom` 2 fallos previos, `test_gpu`/`vrhost_run` no enlazan.
 **Límites conocidos:** semitransparentes no ocluyen el radar; precalentado de pipelines gpu no portado.
 
 ## Decisions
-- Menús: zona fija por mano + gatillo; nada de calibración.
-- Dirección 2026-10-25: el 3D pasa a ser la lista de primitivas del propio juego con profundidad del GTE (tipo PGXP), con la cámara del juego movida por la cabeza (`vr/camera`); primitivas sin GTE (HUD, texto, efectos de pantalla) a un plano a distancia fija; sin respaldo plano ni render nativo por defecto.
-- No emular/reproducir sesiones en la nube (coste); diagnósticos solo con logs del visor, que deben medir todo de una vez.
+- Menús: zona fija por mano en marco físico + gatillo, una apertura por pulsación; panel sobre la mano que lo abre.
+- Créditos: como en el juego original (sin reinterpretar).
+- 3D = lista de primitivas del juego con profundidad GTE (tipo PGXP), cámara movida por la cabeza; 2D de pantalla compuesto en la misma imagen estéreo.
+- No emular/reproducir sesiones en la nube; diagnósticos con logs del visor que midan todo de una vez.
 - Una sola build completa por bloque de trabajo.
-- Capa de menú = mando original sin fusionar (j-control).
 
 ## Files in play
-- `runtime/gte.c`, `runtime/gpu.{c,h}` (hp / vértices de vista).
-- `vr/host/vrhost.{c,h}`, `vr/host/vr_view.{c,h}` (selección de render, respaldo).
-- `vr/scene/vr_scene.{c,h}`, `render/metal/vr_*`, `app/Sources/RenderRG.swift`, `app/Sources/Native/NativeRenderer.swift`, `app/Sources/XRPresent.swift`, `XRRenderLoop.swift`.
-- `vr/camera/` (cámara del juego atada a la cabeza).
-- `runtime/hps.h`, `runtime/interp.c`, `runtime/mem.c` (PGXP por dirección).
-- `vr/input/vr_gesture.{h,c}`, `vr/host/vrbodyg.c` (pecho), `vr/radar/`, `vr/body/`, `RadarPanel` en Swift.
+- `app/Sources/RenderRG.swift`, `XRPresent.swift`, `XRFrameEncoder.swift`, `XRMath.swift`, `RadarPanel.swift`, `XRRenderLoop.swift`.
+- `render/metal/vr_scene.metal`, `vr_blend.h`, `vr_types.h`.
+- `vr/scene/vr_scene.{c,h}`, `vr_layer2d_async.{c,h}`; `vr/host/vrhost.c`, `vr_view.h`, `vrdump.h`, `vrbodyg.c`; `vr/input/vr_gesture.{c,h}`; `vr/radar/vr_radar.{c,h}`.
+- `vr/native/test_no_gpu3d.c` (test de texto sobre fuentes: actualizar al cambiar esas líneas).
 
 ## Comandos
 - Runtime: `cd runtime && make gen GEN=… EXE=../gamedata/main.exe NAMES=../gamedata/names_eu.json && make GEN=… OUT=… CC=clang && make test test_sys`.
-- Pruebas VR: `make -C vr/host test`, `make -C vr/scene test test-layer2d`, `make -C vr/input test`, `make -C vr/body test`, `make -C vr/radar test`, `make -f vr/native/extract.mk test`, `make -f vr/native/fx.mk test`.
-- Swift/Metal: solo los compila el CI (`.github/workflows/visionos.yml`, push a `main` -> IPA como artifact).
-- Datos locales (nunca al repo): `gamedata/` (EXE, nombres, stages, disco extraído).
+- Pruebas VR: `make -C vr/host test`, `make -C vr/scene test test-layer2d test-split`, `make -C vr/input test`, `make -C vr/body test`, `make -C vr/radar test`, `make -f vr/native/extract.mk test`, `make -f vr/native/fx.mk test`.
+- Swift/Metal: solo CI. IPA: `gh workflow run visionos.yml --ref main -f solo_render=false` (push sin `[ipa]` no genera IPA).
+- Datos locales (nunca al repo): `gamedata/`.
 
 ## Module index
 - (sin notas/ todavía)
