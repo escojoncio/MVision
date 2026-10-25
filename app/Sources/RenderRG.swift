@@ -6,10 +6,13 @@ import Foundation
 // Consume la API C de vr_scene.h (mv_host_scene) y dibuja: (1) la VRAM de la consola mantenida en GPU, (2) el panel 2D
 // (HUD) en hudTexture y (3) el mundo 3D en estéreo.
 //
-// EL 3D SALE SOLO DEL RENDER NATIVO (Native/NativeRenderer.swift, escena leída de la RAM del motor): el mundo, sus efectos y los efectos de pantalla completa (agua, fundidos,
-// destello, modos de visión, anillo de gas, barras). La lista de la GPU NUNCA se dibuja en 3D: solo aporta los eventos de VRAM, la capa 2D (HUD, menús, radio, códec, textos),
-// el radar y el mapa de coherencia (solo registro). Si el nativo no está listo en un fotograma se REPITE el último fotograma nativo válido (con la cabeza actual) o se funde
-// suavemente a negro (vr/native/ns_present.h). Las cinemáticas del motor se pintan con el mismo render nativo desde la cámara del juego, en estéreo, en la textura de la pantalla 3D.
+// DOS MODOS DE 3D (mv_vrhost_render_mode, vrhost.h):
+//  - gpu (DEFECTO, `gpuMode`): el 3D sale de la lista de dibujo de la GPU del propio juego con los vértices de vista de la GTE (vr_scene.c, kind 0 opaco / kind 1 semitransparente, en metros
+//    del mundo VR). Profundidad con prueba y escritura para lo opaco, solo prueba para lo semitransparente, en el orden de envío, sin descarte de reversos. Lo que no tiene vértices de vista
+//    (HUD, textos, créditos, fundidos y destellos) va al panel 2D (takeLayer2D / encodeHud). El render nativo no se prepara ni dibuja.
+//  - nativo (MV_RENDER=nativo): Native/NativeRenderer.swift, escena leída de la RAM del motor: el mundo, sus efectos y los efectos de pantalla completa. La lista de la GPU solo aporta los
+//    eventos de VRAM, la capa 2D, el radar y el mapa de coherencia. Si el nativo no está listo en un fotograma se REPITE el último fotograma nativo válido o se funde a negro
+//    (vr/native/ns_present.h). Las cinemáticas del motor se pintan con el mismo render desde la cámara del juego, en estéreo, en la textura de la pantalla 3D.
 //
 // Convenciones (contrato del bucle inmersivo): Z invertida (cerca = 1): profundidad limpiada a 0 y compare >=;
 // views = mundo->ojo, projections = ojo->clip (clip = P * V * mundo); mundo en metros, Y arriba, -Z delante.
@@ -41,8 +44,11 @@ final class RGRenderer {
     // MARK: diagnóstico del hueco (submenú «Diagnóstico»; XRDiag). Lo fija XRFrameEncoder cada fotograma.
     /// Sin prueba de profundidad en el mundo (opacos: siempre pasan y escriben; semitransparentes: siempre pasan, sin escribir).
     var diagNoZ = false
-    /// Umbral (m) para partir en CPU los triángulos con una arista más larga en el render nativo. 0 = no partir.
+    /// Umbral (m) para partir en CPU los triángulos con una arista más larga en el render nativo. 0 = no partir (el modo gpu no parte).
     var diagSplitMeters: Float = 0
+    /// Sesgo de profundidad de las semitransparentes del modo gpu (evita z-fighting con decales coplanares).
+    var semiDepthBias: Float = 4
+    var semiSlopeBias: Float = 2
     private var diagView0 = matrix_identity_float4x4          // vista (mundo VR -> ojo) del primer ojo de la escena del último fotograma
 
     /// Presentación (XRPresent.swift). false = pantalla de cine: se siguen aplicando los eventos de VRAM (la VRAM debe quedar al día) pero no se dibuja
@@ -84,6 +90,13 @@ final class RGRenderer {
     private var csFill: MTLComputePipelineState?
     private var csUpload: MTLComputePipelineState?
     private var csCopy: MTLComputePipelineState?
+    // modo gpu: Z invertida (cerca = 1, compare >=). Opaco: prueba + escritura; semitransparente: solo prueba. NoZ = interruptor de diagnóstico.
+    private var dsOpaque: MTLDepthStencilState?
+    private var dsSemi: MTLDepthStencilState?
+    private var dsOpaqueNoZ: MTLDepthStencilState?
+    private var dsSemiNoZ: MTLDepthStencilState?
+    /// Modo de 3D de este fotograma: true = lista de la GPU (defecto), false = render nativo. Lo fija `encode` leyendo mv_vrhost_render_mode().
+    private(set) var gpuMode = true
 
     private struct PKey: Hashable {
         var hud: Bool, layered: Bool, filter: Bool, linear: Bool
@@ -116,7 +129,7 @@ final class RGRenderer {
     private var nativeMap: NativeRenderer.GpuMap?       // mapa mundo -> VR y cámara que declara la lista de la GPU (nil en cinemáticas / mundo no fiable): SOLO para el registro de coherencia
 #endif
     private var gpuEyeVR: SIMD3<Float>?                 // VrScene.eye_vr de la lista actual (registro)
-    private var gpu3DTris = 0                           // triángulos 3D de la lista de la GPU de la última escena: NO se dibujan (registro)
+    private var gpu3DTris = 0                           // triángulos 3D de la lista de la GPU de la última escena (se dibujan solo en el modo gpu; registro)
     private var has3D = false
     private var haveScene = false
     private var hudRect = simd_float4(0, 0, 320, 240)
@@ -189,6 +202,18 @@ final class RGRenderer {
             }
             csFill = cp("vr_k_fill"); csUpload = cp("vr_k_upload"); csCopy = cp("vr_k_copy")
         }
+        let d1 = MTLDepthStencilDescriptor()
+        d1.depthCompareFunction = .greaterEqual; d1.isDepthWriteEnabled = true
+        dsOpaque = device.makeDepthStencilState(descriptor: d1)
+        let d2 = MTLDepthStencilDescriptor()
+        d2.depthCompareFunction = .greaterEqual; d2.isDepthWriteEnabled = false
+        dsSemi = device.makeDepthStencilState(descriptor: d2)
+        let d3 = MTLDepthStencilDescriptor()
+        d3.depthCompareFunction = .always; d3.isDepthWriteEnabled = true
+        dsOpaqueNoZ = device.makeDepthStencilState(descriptor: d3)
+        let d4 = MTLDepthStencilDescriptor()
+        d4.depthCompareFunction = .always; d4.isDepthWriteEnabled = false
+        dsSemiNoZ = device.makeDepthStencilState(descriptor: d4)
         radar = RadarPanel(device: device, library: library, colorFormat: colorFormat, depthFormat: depthFormat,
                            sampleCount: sampleCount, viewCount: self.viewCount, linearOutput: linearOutput)
         weapon = WeaponRenderer(device: device, colorFormat: colorFormat, depthFormat: depthFormat,
@@ -215,7 +240,7 @@ final class RGRenderer {
 
     /// Resumen para el registro (1 vez por segundo): estado de la escena y trabajo del último `encode`.
     func diagnostics() -> String {
-        "tiene3D=\(has3D) hayEscena=\(haveScene) lotes=\(batches.count) (3D de la lista, NO se dibujan=\(batches.filter { $0.kind != 2 }.count) 2D=\(batches.filter { $0.kind == 2 }.count)) pases=\(statPasses) dibujos=\(statDraws) drawWorld=\(drawWorld) drawBody=\(drawBody) msaa=\(sampleCount) lineal=\(linearOutput) radar=\(radar != nil)" + nativeLog()
+        "modo3D=\(gpuMode ? "gpu" : "nativo") tiene3D=\(has3D) hayEscena=\(haveScene) lotes=\(batches.count) (3D de la lista\(gpuMode ? "" : ", NO se dibujan")=\(batches.filter { $0.kind != 2 }.count) 2D=\(batches.filter { $0.kind == 2 }.count)) pases=\(statPasses) dibujos=\(statDraws) drawWorld=\(drawWorld) drawBody=\(drawBody) msaa=\(sampleCount) lineal=\(linearOutput) radar=\(radar != nil)" + nativeLog()
     }
 
     /// Línea de diagnóstico del render nativo (1 vez por segundo, justo tras xr-diag): qué se presentó (actual / último válido repetido / negro), triángulos de la lista de la GPU
@@ -224,7 +249,7 @@ final class RGRenderer {
 #if MV_BENCH && !MV_BENCH_NATIVE
         return nil
 #else
-        guard let n = native else { return nil }
+        guard !gpuMode, let n = native else { return nil }
         return "nat-diag: 3D de la lista de la GPU (no se dibuja jamas): tris=\(gpu3DTris) | nativo dibujado=\(nativeDraw) | " + n.logLine() + " | " + n.drawnSummary(gpuEye: gpuEyeVR)
 #endif
     }
@@ -234,7 +259,7 @@ final class RGRenderer {
 #if MV_BENCH && !MV_BENCH_NATIVE
         return nil
 #else
-        return native?.netLine()
+        return gpuMode ? nil : native?.netLine()
 #endif
     }
 
@@ -253,6 +278,7 @@ final class RGRenderer {
 #if MV_BENCH && !MV_BENCH_NATIVE
         return ""
 #else
+        if gpuMode { return " | gpu3D: dibujos=\(statDraws) tris3D=\(gpu3DTris)" }
         guard let n = native else { return " | nativo: renderer=no (sin 3D)" }
         return " | listo=\(mv_vrhost_native_available() != 0) dibuja=\(nativeDraw) " + n.logLine()
 #endif
@@ -262,7 +288,7 @@ final class RGRenderer {
     // MARK: pipelines
     private func pipeline(_ k: PKey) -> MTLRenderPipelineState? {
         if let p = pipes[k] { return p }
-        guard k.hud, let lib = library else { return nil }   // solo el HUD de la lista de la GPU: el 3D es del render nativo
+        guard let lib = library else { return nil }
         do {
             let fc = MTLFunctionConstantValues()
             var f = k.filter, l = k.linear, pass = k.pass
@@ -270,7 +296,7 @@ final class RGRenderer {
             fc.setConstantValue(&l, type: .bool, index: Int(VR_FC_LINEAR_OUT))
             fc.setConstantValue(&pass, type: .uint, index: Int(VR_FC_PASS))
             let fs = try lib.makeFunction(name: "vr_fs_scene", constantValues: fc)
-            let vsName = "vr_vs_hud"
+            let vsName = k.hud ? "vr_vs_hud" : (k.layered ? "vr_vs_scene_amp" : "vr_vs_scene")
             guard let vs = lib.makeFunction(name: vsName) else { return nil }
             let d = MTLRenderPipelineDescriptor()
             d.label = "\(vsName) pass\(k.pass) blend\(k.mode)"
@@ -278,8 +304,13 @@ final class RGRenderer {
             d.fragmentFunction = fs
             d.rasterSampleCount = k.samples
             d.inputPrimitiveTopology = .triangle
+            if k.layered { d.maxVertexAmplificationCount = viewCount }
             let ca = d.colorAttachments[0]!
             ca.pixelFormat = k.color
+            if !k.hud {
+                d.depthAttachmentPixelFormat = k.depth
+                if k.depth == .depth32Float_stencil8 { d.stencilAttachmentPixelFormat = k.depth }
+            }
             if k.mode >= 0 {
                 ca.isBlendingEnabled = true
                 // Los 4 modos del original (B = destino, F = fragmento). blendColor = 0,5 (modo 0) o 0,25 (modo 3).
@@ -481,12 +512,12 @@ final class RGRenderer {
             let kind = Int(bt.kind)
             if kind == 3 { continue }   // filtro de pantalla de la lista: ya no se usa (los efectos de pantalla salen del render nativo)
             var hasTex = false
-            if kind == 2 {
+            if kind != 0 {   // 2D y 3D semitransparente: decide las dos pasadas por texel (bit 15); el opaco no lo necesita
                 for j in first..<(first + cnt) where (v[j].flags & texBit) != 0 { hasTex = true; break }
             }
             let semi = kind == 1 || (kind == 2 && bt.blend <= 3)   // blend 0xFF = opaco
             batches.append(DrawBatch(first: first, count: cnt, kind: kind, mode: Int(bt.blend) & 3, semi: semi, hasTex: hasTex, evEnd: Int(bt.ev_end)))
-            if kind != 2 { gpu3DTris += cnt / 3 }   // registro: 3D de la lista que NO se dibuja
+            if kind != 2 { gpu3DTris += cnt / 3 }   // registro: 3D de la lista (se dibuja solo en el modo gpu)
         }
     }
 
@@ -504,6 +535,11 @@ final class RGRenderer {
         frameNo += 1
         fs.used = 0
         statDraws = 0; statPasses = 0
+#if !MV_BENCH || MV_BENCH_NATIVE
+        gpuMode = mv_vrhost_render_mode() == 0      // 0 = gpu (defecto), 1 = nativo
+#else
+        gpuMode = true
+#endif
 
         // 1) escenas nuevas: eventos de VRAM + capa 2D. Si llegan varias listas, los eventos de las anteriores se
         //    aplican enteros al principio y solo se usa la última.
@@ -550,7 +586,9 @@ final class RGRenderer {
         takeLayer2D()
         let doHud = (gotNew || !hudDone) && drawWorld && !hudHQ
         // Render nativo: se prepara SIEMPRE (reconoce épocas del almacén aunque no se dibuje: menús) y lo que no se pueda dibujar se REPITE (último válido) o se funde a negro.
-        prepareNative(commandBuffer: commandBuffer, colorTargets: colorTargets, depthTargets: depthTargets, sceneV: sceneV, projections: projections, head: head, layered: layered)
+        // Modo gpu: no hay nada nativo que preparar; la pantalla 3D se considera sana (el 3D sale de la lista) salvo que encodeStereo falle.
+        if gpuMode { nativeDraw = false; nativeDrawnLast = false; stereoHealthy = true }
+        else { prepareNative(commandBuffer: commandBuffer, colorTargets: colorTargets, depthTargets: depthTargets, sceneV: sceneV, projections: projections, head: head, layered: layered) }
         var nextCmd = 0
         for (gi, g) in groups.enumerated() {
             let firstG = gi == 0, lastG = gi == groups.count - 1
@@ -563,8 +601,12 @@ final class RGRenderer {
             // la petición o el fundido de la presentación (la cabeza no interviene: la imagen es la misma hasta entonces).
             if lastG, let sr = stereoRequest, drawWorld { encodeStereo(commandBuffer, sr, gotNew: gotNew) }
             if doHud { encodeHud(commandBuffer, range: g.0..<g.1, first: firstG) }
-            // El mundo de los ojos: UN pase tras el último grupo (la VRAM ya tiene todos los eventos de la lista), con las vistas por ojo.
-            if lastG {
+            // El mundo de los ojos. Nativo: UN pase tras el último grupo (la VRAM ya tiene todos los eventos de la lista). Modo gpu: un pase por grupo de lotes con los mismos
+            // eventos de VRAM (el primero limpia, el último resuelve el MSAA y dibuja radar y arma), con las vistas por ojo.
+            if gpuMode {
+                encodeScenePasses(commandBuffer, range: g.0..<g.1, first: firstG, last: lastG, colorTargets: colorTargets, depthTargets: depthTargets,
+                                  resolveTargets: resolveTargets, views: sceneV, projections: projections, head: head, layered: layered)
+            } else if lastG {
                 encodeScenePasses(commandBuffer, colorTargets: colorTargets, depthTargets: depthTargets, resolveTargets: resolveTargets,
                                   views: sceneV, projections: projections, head: head, layered: layered)
             }
@@ -793,7 +835,7 @@ final class RGRenderer {
     /// La escena nativa actual pide la pantalla 3D porque es válida pero no apta para primera persona (con histéresis): XRPresenter la muestra en estéreo hasta que vuelva a ser apta.
     var sceneNeedsGameCam: Bool {
 #if !MV_BENCH || MV_BENCH_NATIVE
-        return native?.sceneUnfit ?? false
+        return gpuMode ? false : (native?.sceneUnfit ?? false)
 #else
         return false
 #endif
@@ -809,7 +851,7 @@ final class RGRenderer {
         var tx = r.tanX, ty = r.tanY
         var sh = SIMD4<Float>(0, 0, 0, 0)
 #if !MV_BENCH || MV_BENCH_NATIVE
-        if let n = native, n.camH > 8 {
+        if !gpuMode, let n = native, n.camH > 8 {
             tx = 160 / n.camH; ty = 120 / n.camH
             let dx = (n.camOfx - 160) / n.camH, dy = (n.camOfy - 120) / n.camH
             sh = SIMD4<Float>(dx, -dx, dy, -dy)
@@ -824,6 +866,7 @@ final class RGRenderer {
     /// Pantalla 3D: el render nativo desde la cámara del juego (A, t, H, OFX/OFY, sobredimensión 66/64: ns_cinema), un pase por ojo con cámaras paralelas y ventana desplazada. Se vuelve
     /// a dibujar solo si cambió la escena nativa, la petición o el fundido de la presentación; si no, las texturas valen. Con el render nativo no listo no se toca la imagen anterior.
     private func encodeStereo(_ cb: MTLCommandBuffer, _ r: StereoRequest, gotNew: Bool) {
+        if gpuMode { encodeStereoGPU(cb, r, gotNew: gotNew); return }
         guard nativeDraw, ensureStereo(r.width, r.height), let d = stereoDepth, stereoSlices.count == 2 else { return }
 #if !MV_BENCH || MV_BENCH_NATIVE
         guard let n = native else { return }
@@ -851,8 +894,37 @@ final class RGRenderer {
         stereoDirty = false
     }
 
-    /// Segunda vista (mira óptica / cámara del misil): el render nativo desde la cámara pedida, a la textura auxiliar.
+    /// Pantalla 3D en el modo gpu: la lista de la GPU (todos los lotes 3D, con la VRAM tal como queda tras los eventos de la lista) desde las dos cámaras estéreo de la petición. Una lista
+    /// sin 3D (fundido, texto) conserva la imagen anterior; si no hay cámara o texturas, `stereoHealthy` baja y XRPresent cae al cine plano.
+    private func encodeStereoGPU(_ cb: MTLCommandBuffer, _ r: StereoRequest, gotNew: Bool) {
+        guard ensureStereo(r.width, r.height), let d = stereoDepth, stereoSlices.count == 2 else { stereoHealthy = false; return }
+        if !((gotNew && has3D) || stereoDirty || !stereoRendered) { return }
+        for e in 0..<2 {
+            guard let cam = stereoCamera(e, r) else { stereoHealthy = false; return }
+            var u = VrSceneUniforms()
+            let m = XRMath.projection(tangents: cam.tangents, near: 0.05, far: 800) * cam.view
+            u.view_proj = (m, m)
+            u.head = SIMD4<Float>(0, 0, 0, 1)
+            let color = stereoMSAAColor ?? stereoSlices[e]
+            _ = encodeScene(cb, color: color, depth: d, resolve: stereoMSAAColor != nil ? stereoSlices[e] : nil, uniforms: u, amplify: 0, viewIndex: 0,
+                            views: [], projections: [], isAux: true, last: true, cams: nil, first: true, gpuRange: 0..<batches.count)
+        }
+        stereoRendered = true
+        stereoDirty = false
+    }
+
+    /// Segunda vista (mira óptica / cámara del misil): el render nativo (o, en el modo gpu, la lista de la GPU) desde la cámara pedida, a la textura auxiliar.
     private func encodeAux(_ cb: MTLCommandBuffer, _ a: AuxView) {
+        if gpuMode {
+            guard haveScene, has3D, !batches.isEmpty, ensureAux(a.width, a.height), let c = auxColor, let d = auxDepth else { return }
+            var u = VrSceneUniforms()
+            let m = a.proj * a.view
+            u.view_proj = (m, m)
+            u.head = a.pos
+            _ = encodeScene(cb, color: c, depth: d, resolve: nil, uniforms: u, amplify: 0, viewIndex: 0, views: [], projections: [], isAux: true, last: false, cams: nil,
+                            first: true, gpuRange: 0..<batches.count)
+            return
+        }
         guard nativeDraw, haveScene, ensureAux(a.width, a.height), let c = auxColor, let d = auxDepth else { return }
         var u = VrSceneUniforms()
         let m = a.proj * a.view
@@ -872,9 +944,12 @@ final class RGRenderer {
     private var nativeEncodeFails = 0
 
     /// El mundo de los ojos: un pase por ojo (o uno con amplificación a 2 vistas), SOLO con el render nativo.
-    private func encodeScenePasses(_ cb: MTLCommandBuffer, colorTargets: [MTLTexture], depthTargets: [MTLTexture], resolveTargets: [MTLTexture],
+    private func encodeScenePasses(_ cb: MTLCommandBuffer, range: Range<Int>? = nil, first: Bool = true, last: Bool = true,
+                                   colorTargets: [MTLTexture], depthTargets: [MTLTexture], resolveTargets: [MTLTexture],
                                    views: [simd_float4x4], projections: [simd_float4x4], head: simd_float4x4, layered: Bool) {
         let n = min(views.count, projections.count)
+        // Modo gpu: los lotes 3D de `range` (nil = todos) se dibujan solo si hay mundo y ojos; si no, el pase se limpia igual (primer grupo) y no dibuja.
+        let gr: Range<Int>? = (gpuMode && drawWorld && drawEyes) ? (range ?? 0..<batches.count) : nil
         func eyePos(_ v: simd_float4x4) -> SIMD3<Float> { let t = v.inverse.columns.3; return SIMD3<Float>(t.x, t.y, t.z) }
         let draw = nativeDraw && drawEyes
         if layered {
@@ -886,7 +961,7 @@ final class RGRenderer {
             let cams = draw ? NativeCams(viewProj: (0..<cnt).map { projections[$0] * views[$0] }, projections: Array(projections.prefix(cnt)),
                                          eyes: (0..<cnt).map { eyePos(views[$0]) }, eyeIndex: 0) : nil
             _ = encodeScene(cb, color: c, depth: d, resolve: resolveTargets.first, uniforms: u, amplify: cnt, views: views, projections: projections,
-                            isAux: false, last: true, cams: cams)
+                            isAux: false, last: last, cams: cams, first: first, gpuRange: gr)
         } else {
             for i in 0..<min(colorTargets.count, depthTargets.count) where i < n {
                 var u = VrSceneUniforms()
@@ -895,7 +970,7 @@ final class RGRenderer {
                 u.head = head.columns.3
                 let cams = draw ? NativeCams(viewProj: [m], projections: [projections[i]], eyes: [eyePos(views[i])], eyeIndex: i) : nil
                 _ = encodeScene(cb, color: colorTargets[i], depth: depthTargets[i], resolve: i < resolveTargets.count ? resolveTargets[i] : nil, uniforms: u,
-                                amplify: 0, viewIndex: i, views: views, projections: projections, isAux: false, last: true, cams: cams)
+                                amplify: 0, viewIndex: i, views: views, projections: projections, isAux: false, last: last, cams: cams, first: first, gpuRange: gr)
             }
         }
     }
@@ -1015,13 +1090,17 @@ final class RGRenderer {
     /// `last`: resuelve el color (MSAA); si no, lo guarda sin resolver y no dibuja radar ni arma (segunda vista). Devuelve true si el render nativo dibujó (false si no había que dibujar o falló).
     @discardableResult
     private func encodeScene(_ cb: MTLCommandBuffer, color: MTLTexture, depth: MTLTexture, resolve: MTLTexture?, uniforms: VrSceneUniforms, amplify: Int, viewIndex: Int = 0,
-                             views: [simd_float4x4] = [], projections: [simd_float4x4] = [], isAux: Bool = false, last: Bool, cams: NativeCams?) -> Bool {
+                             views: [simd_float4x4] = [], projections: [simd_float4x4] = [], isAux: Bool = false, last: Bool, cams: NativeCams?,
+                             first: Bool = true, gpuRange: Range<Int>? = nil) -> Bool {
+        // Modo gpu: lotes 3D (kind 0/1) del rango, en el orden de envío. Un grupo intermedio sin lotes 3D no abre pase.
+        let seg: [Int] = gpuRange.map { r in r.filter { batches.indices.contains($0) && batches[$0].kind != 2 } } ?? []
+        if gpuMode && !first && !last && seg.isEmpty { return false }
         let samples = color.sampleCount
         statPasses += 1
         let pd = MTLRenderPassDescriptor()
         let ca = pd.colorAttachments[0]!
         ca.texture = color
-        ca.loadAction = .clear
+        ca.loadAction = first ? .clear : .load
         ca.clearColor = backgroundColor
         if samples > 1, last, let r = resolve {
             ca.resolveTexture = r
@@ -1031,7 +1110,7 @@ final class RGRenderer {
         }
         let da = pd.depthAttachment!
         da.texture = depth
-        da.loadAction = .clear
+        da.loadAction = first ? .clear : .load
         da.clearDepth = 0            // Z invertida
         da.storeAction = .store      // la profundidad MSAA la resuelve el pase final del bucle
         if depth.pixelFormat == .depth32Float_stencil8 {
@@ -1070,6 +1149,10 @@ final class RGRenderer {
         } else {
             enc.setViewport(isAux ? vp0 : (viewportOverride.flatMap { viewIndex < $0.count ? $0[viewIndex] : nil } ?? vp0))
         }
+        if gpuRange != nil {   // modo gpu: la lista de la GPU, con las mismas vistas y proyecciones por ojo (profundidad inversa del sistema: no se escribe depthRange)
+            drawGPU(enc, seg, color: color, depth: depth, uniforms: uniforms, amplify: amplify)
+            return true
+        }
 #if !MV_BENCH || MV_BENCH_NATIVE
         // El mundo: render nativo con las mismas vistas y proyecciones por ojo y la profundidad inversa del sistema (no se escribe depthRange). Si falla, el pase queda limpio y el
         // fotograma siguiente se repite (ns_present: último válido) o se funde a negro; se cuenta para el registro.
@@ -1081,5 +1164,51 @@ final class RGRenderer {
         }
 #endif
         return false
+    }
+
+    /// Modo gpu: dibuja los lotes 3D `seg` (índices de `batches`, en el orden de envío) en el codificador del pase. Opaco (kind 0): profundidad con prueba y escritura. Semitransparente (kind 1):
+    /// prueba sin escritura, mezcla de función fija por modo y, si el lote lleva texturas, segunda pasada para los texels sin bit 15 (opacos). Sin descarte de reversos (cull .none, ya fijado).
+    private func drawGPU(_ enc: MTLRenderCommandEncoder, _ seg: [Int], color: MTLTexture, depth: MTLTexture, uniforms: VrSceneUniforms, amplify: Int) {
+        guard haveScene, has3D, !seg.isEmpty, let buf = vtxSlots[curSlot].buf else { return }
+        var u = uniforms
+        enc.setVertexBuffer(buf, offset: 0, index: Int(VR_BUF_VERTS))
+        enc.setVertexBuffer(buf, offset: vtxSlots[curSlot].stOff, index: Int(VR_BUF_STATES))
+        enc.setVertexBytes(&u, length: MemoryLayout<VrSceneUniforms>.stride, index: Int(VR_BUF_UNI))
+        enc.setFragmentTexture(vram, index: 0)
+        let stride = MemoryLayout<VrGpuVtx>.stride
+        let samples = color.sampleCount
+        func key(_ pass: UInt32, _ mode: Int) -> PKey {
+            PKey(hud: false, layered: amplify > 0, filter: textureFilter, linear: linearOutput, pass: pass, mode: mode,
+                 color: color.pixelFormat, depth: depth.pixelFormat, samples: samples)
+        }
+        func draw(_ bt: DrawBatch, _ k: PKey) {
+            guard let p = pipeline(k) else { return }
+            enc.setRenderPipelineState(p)
+            enc.setVertexBufferOffset(bt.first * stride, index: Int(VR_BUF_VERTS))
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: bt.count)
+            statDraws += 1
+        }
+        var curKind = -1
+        for i in seg {
+            let bt = batches[i]
+            if bt.kind != curKind {
+                curKind = bt.kind
+                if curKind == 0 {
+                    enc.setDepthStencilState(diagNoZ ? dsOpaqueNoZ : dsOpaque)
+                    enc.setDepthBias(0, slopeScale: 0, clamp: 0)
+                } else {
+                    enc.setDepthStencilState(diagNoZ ? dsSemiNoZ : dsSemi)
+                    enc.setDepthBias(semiDepthBias, slopeScale: semiSlopeBias, clamp: 0)   // Z invertida: + = hacia la cámara
+                }
+            }
+            if bt.kind == 0 {
+                draw(bt, key(0, -1))
+            } else {
+                let a: Float = bt.mode == 3 ? 0.25 : 0.5
+                enc.setBlendColor(red: a, green: a, blue: a, alpha: a)
+                draw(bt, key(bt.hasTex ? 1 : 0, bt.mode))
+                if bt.hasTex { draw(bt, key(2, -1)) }
+            }
+        }
     }
 }

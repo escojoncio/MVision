@@ -1189,6 +1189,84 @@ static void test_clip_2d(void) {
 
 /* El contrato que usa vr/host/vr_smooth: con user_map, un punto del mundo del juego W cae en P = c + R * (k * scale) * (W - O), c = p_ref - R col1 * eye_h, tanto con la
  * cámara del motor directa (det > 0) como reflejada (det < 0: la reflexión de z de vr_scene se cancela). */
+/* ---- modo gpu: distancia al ojo, recorte cercano y 2D al panel (VrSceneOpts.eye_near_m) ---- */
+static void test_gpu_eye_near(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    VrSceneOpts o = vr_scene_opts_default();
+    o.origin_mode = 1;
+    VrScene s;
+    const uint8_t z4[4] = {0, 0, 0, 0};
+    /* a) un triángulo a 0,1 m del ojo (100 unidades = 0,1 m con escala 0,001): fuera con eye_near_m; sin él (comportamiento previo) se emite */
+    {
+        reset();
+        const float P[4][3] = {{0, 0, 100}, {60, 0, 100}, {0, 60, 100}, {0, 0, 0}};
+        polyN(3, P, z4, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.n_near_eye == 0, "sin eye_near_m: emitido (tris %u)", s.stats.n_tris3d);
+        o.eye_near_m = 0.25f;
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.nv == 0 && s.stats.n_near_eye == 1, "a 0,1 m: descartado (tris %u, near_eye %u)", s.stats.n_tris3d, s.stats.n_near_eye);
+        /* a 0,3 m (y con un vértice a 0,2 m, descartado): el límite es el vértice más cercano */
+        reset();
+        const float Q[4][3] = {{0, 0, 300}, {60, 0, 300}, {0, 60, 300}, {0, 0, 0}};
+        polyN(3, Q, z4, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.n_near_eye == 0, "a 0,3 m: se conserva");
+        reset();
+        const float W[4][3] = {{0, 0, 200}, {600, 0, 900}, {0, 600, 900}, {0, 0, 0}};
+        polyN(3, W, z4, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.n_near_eye == 1, "un vértice a 0,2 m: descartado");
+        /* la escala de salida cuenta: con escala 0,002 el vértice a 200 unidades está a 0,4 m */
+        VrSceneOpts o2 = o; o2.scale = 0.002f;
+        CHECK(vr_scene_build(&dl, &bs, &o2, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.n_near_eye == 0, "la distancia usa opts.scale");
+    }
+    /* b) un triángulo a caballo del plano cercano se RECORTA (no se descarta): 2 vértices delante, 1 detrás (BEHIND) -> cuadrilátero = 2 triángulos, ninguno pegado al ojo */
+    {
+        reset();
+        const float P[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, -1000}, {0, 0, 0}};
+        const uint8_t fl[4] = {0, 0, GPU_VF_BEHIND, 0};
+        polyN(3, P, fl, 1);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 2 && s.stats.n_clipped == 1 && s.stats.n_near_eye == 0 && s.stats.drop_behind == 0,
+              "a caballo del plano: recortado (tris %u clip %u near %u behind %u)", s.stats.n_tris3d, s.stats.n_clipped, s.stats.n_near_eye, s.stats.drop_behind);
+        for (uint32_t i = 0; i < s.nv; i++) {
+            float zv = (s.eye_vr[2] - s.v[i].pos[2]) / s.scale;
+            CHECK(zv >= o.near_units - 0.05f, "vértice recortado a z=%f < plano cercano", zv);
+        }
+        /* entero detrás: descartado (cuenta como detrás) */
+        reset();
+        const float B[4][3] = {{0, 0, -500}, {1000, 0, -500}, {0, 1000, -700}, {0, 0, 0}};
+        const uint8_t fb[4] = {GPU_VF_BEHIND, GPU_VF_BEHIND, GPU_VF_BEHIND, 0};
+        polyN(3, B, fb, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.drop_behind == 1, "entero detrás: descartado (behind %u)", s.stats.drop_behind);
+        /* BEHIND declarado sin ningún vértice detrás del plano (dato incoherente): descartado */
+        reset();
+        const float G[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, 2000}, {0, 0, 0}};
+        const uint8_t fg[4] = {GPU_VF_BEHIND, 0, 0, 0};
+        polyN(3, G, fg, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.drop_behind == 1, "BEHIND incoherente: descartado (tris %u)", s.stats.n_tris3d);
+        /* sin BEHIND y con un vértice detrás del plano (antes: descartado como drop_near con engine_near_clip): ahora se recorta */
+        reset();
+        const float N[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, -300}, {0, 0, 0}};
+        polyN(3, N, z4, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 2 && s.stats.n_clipped == 1, "vértice detrás sin bandera: recortado");
+    }
+    /* c) una primitiva 2D (rect de HUD / texto) va al panel: batch kind 2, op_dest = 2, posición en píxeles de pantalla, nunca como 3D (aunque haya 3D pegado al ojo en la lista) */
+    {
+        reset();
+        const float P[4][3] = {{0, 0, 100}, {60, 0, 100}, {0, 60, 100}, {0, 0, 0}};
+        polyN(3, P, z4, 0);                                         /* op0: 3D a 0,1 m (descartado) */
+        rect2d(20, 30, 16, 8, 0, 0, GPU_F_TEXTURED, 0, 320, 0, 128, 128, 128);   /* op1: 2D */
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0, "build 2D");
+        int k3 = 0, k2 = 0;
+        for (uint32_t i = 0; i < s.nb; i++) { if (s.b[i].kind <= 1) k3++; else if (s.b[i].kind == 2) k2++; }
+        CHECK(k3 == 0 && k2 == 1 && s.stats.n_tris3d == 0 && s.stats.n_near_eye == 1, "3D=%d 2D=%d tris3d=%u near=%u", k3, k2, s.stats.n_tris3d, s.stats.n_near_eye);
+        CHECK(s.op_dest && s.n_op_dest >= 2 && s.op_dest[0] == 0 && s.op_dest[1] == 2, "op_dest: 3D descartado = 0, rect = 2 (panel)");
+        int ok2d = s.nv > 0;
+        for (uint32_t i = 0; i < s.nv; i++) ok2d &= (s.v[i].flags & VR_F_2D) != 0 && s.v[i].pos[2] == 0.0f && s.v[i].pos[0] >= 20.0f && s.v[i].pos[0] <= 36.0f && s.v[i].pos[1] >= 30.0f && s.v[i].pos[1] <= 38.0f;
+        CHECK(ok2d, "el rect 2D conserva coordenadas de pantalla y VR_F_2D");
+    }
+    vr_scene_release();
+}
+
 static void test_user_map_linear(void) {
     for (int mirrored = 0; mirrored < 2; mirrored++) {
         float R[3][3] = {{-1, 0, 0}, {0, -1, 0}, {0, 0, 1}};
@@ -1248,6 +1326,7 @@ int main(void) {
     test_clip_2d();
 
     test_user_map_linear();
+    test_gpu_eye_near();
     if (fails) { fprintf(stderr, "%d fallos\n", fails); return 1; }
     printf("test_scene: OK\n");
     return 0;

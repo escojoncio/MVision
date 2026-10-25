@@ -367,6 +367,32 @@ int main(void) {
         CHECK(vrview_uploads_cover(sum, 384, 256, 0), "área mostrada en la mitad inferior de la VRAM");
         CHECK(vrview_upload_area(0, 0, 0, 0, 0, 0, 0, 320, 240) == 320 * 240, "área nominal por defecto 320x240");
     }
+    {   /* modo gpu (VrViewIn.gpu3d): el 3D de la lista de la GPU no depende de la cobertura nativa; nunca respaldo; a ENGINE al instante */
+        VrView g;
+        VrViewIn k;
+        memset(&k, 0, sizeof k);
+        k.scene3d = 1; k.gpu3d = 1;            /* sin partida, sin medida de cobertura (cover1 = 0): con el nativo sería BACKUP */
+        CHECK(vrview_kind_of(&k) == VRV_K_ENGINE, "gpu: 3D del motor sin partida y sin cobertura = ENGINE, no respaldo");
+        k.cover1 = 1; k.cover_src = 1;         /* cobertura medida 0 %: con el nativo, BACKUP */
+        CHECK(vrview_kind_of(&k) == VRV_K_ENGINE, "gpu: cobertura nativa 0 %% no cuenta");
+        k.gpu3d = 0;
+        CHECK(vrview_kind_of(&k) == VRV_K_BACKUP, "nativo: la misma entrada sigue siendo respaldo");
+        k.gpu3d = 1;
+        vrview_reset(&g);
+        vrview_step(&g, &k);
+        CHECK(g.kind == VRV_K_ENGINE && (g.changed & VRV_CH_KIND), "gpu: ENGINE en el primer fotograma (sin histéresis de %d)", g.to_engine);
+        vrview_reset(&g);
+        k.gpu3d = 0; k.cover1 = 0; k.game = 1;
+        vrview_step(&g, &k);
+        CHECK(g.kind == VRV_K_UI, "nativo: la histéresis de entrada sigue (kind %d tras 1 fotograma)", g.kind);
+        for (int i = 0; i < 20; i++) { memset(&k, 0, sizeof k); k.scene3d = 1; k.gpu3d = 1; vrview_step(&g, &k); CHECK(g.kind != VRV_K_BACKUP, "gpu: nunca respaldo"); }
+        k.game = 1; k.in_control = 1; k.cam_active = 1; k.scene3d = 1;         /* mundo con 3D: sigue siendo mundo */
+        CHECK(vrview_kind_of(&k) == VRV_K_WORLD, "gpu: el mundo no cambia");
+        memset(&k, 0, sizeof k); k.scene3d = 1; k.gpu3d = 1; k.mdec = 1;       /* vídeo (MDEC) sin cambios */
+        CHECK(vrview_kind_of(&k) == VRV_K_VIDEO, "gpu: el vídeo MDEC sigue siendo vídeo");
+        { char buf[512]; vrview_reset(&g); memset(&k, 0, sizeof k); k.scene3d = 1; k.gpu3d = 1; vrview_step(&g, &k); vrview_cine_describe(&g, &k, buf, sizeof buf);
+          CHECK(strstr(buf, "tipo=motor") && strstr(buf, "modo gpu"), "registro gpu: %s", buf); }
+    }
     fprintf(stderr, fails ? "test_view: %d FALLOS\n" : "test_view: OK\n", fails);
     return fails ? 1 : 0;
 }
