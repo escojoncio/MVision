@@ -47,7 +47,9 @@ typedef struct {
     float grab_range;        /* distancia máxima cuerpo-enemigo para agarrar (1,3 m) */
     float neck_radius;       /* radio de la mano al cuello o a la espalda del enemigo para agarrar (0,30 m) */
     float back_dist;         /* la espalda: punto a esta distancia (0,25 m) detrás del enemigo, a 0,2 m de altura */
-    float chest_down, chest_side, chest_fwd, chest_radius;   /* zona del pecho (m): bajo la cabeza 0,37, a cada lado 0,15, delante 0,12, radio 0,22 */
+    float chest_down, chest_fwd, chest_radius;   /* zona del pecho (m), UN punto para las dos manos: bajo la cabeza 0,30 (eje vertical del mundo), delante del torso 0,18, radio 0,15 */
+    float chest_depth;       /* la mano debe estar delante del plano del torso (producto escalar de mano-cabeza con el rumbo > esta profundidad, 0,05 m) */
+    float chest_hold_s;      /* puño mantenido sin interrupción dentro de la zona este tiempo (0,30 s) para abrir la ventana; salir de la zona o soltar lo reinicia */
     float grab_after_punch_s;/* sin agarres tras un golpe durante este tiempo (0,3 s) */
     float neck_height;       /* altura del cuello sobre la posición del enemigo (0,45 m, posición del motor = cintura) */
     float grip_on, grip_off; /* histéresis del agarre (0,65 / 0,35) */
@@ -118,7 +120,7 @@ typedef struct {
     const char *grab_why;    /* motivo del último intento de agarre de este VBlank (NULL: ninguno): "ok", "mano_lejos", "cuerpo_lejos", "puno_cerrado", "tras_golpe"... */
     float grab_dist;         /* distancia de la mano al cuello/espalda en ese intento (m) */
     int grab_side_try;
-    int chest_try; float chest_dist;   /* pulsación fuera de la zona del pecho (mano, distancia al centro de la zona en m) para el registro [gest]; -1 ninguna */
+    struct { int valid, opened; float dist, depth, hold; const char *reason; } pecho[2];   /* intento de ventana del pecho por mano física (puño pulsado): distancia al punto (m), profundidad delante del torso (m), tiempo mantenido (s), resultado y motivo (cadena estática) para el registro [pecho] */
     int grab_side;           /* mano física que sujeta (-1 ninguna) mientras el agarre dura (para pegar las manos al cuello) */
     int throw_side;          /* -1 nada; 0/1: lanzamiento (agarre + tirón) con esa mano este VBlank (grab_start también vale 1) */
     float throw_yaw;         /* rumbo del tirón proyectado en el suelo (rad, delante = (sin, cos)) */
@@ -134,8 +136,8 @@ typedef struct {
     float cool;
     float since_punch;       /* s desde el último golpe */
     int near_prev[2];
-    int menu_hold, chest_prev[2];
-    float chest_cool[2];
+    int menu_hold, chest_prev[2], chest_live[2];   /* chest_live: intento en curso (puño pulsado dentro de la zona) */
+    float chest_cool[2], chest_t[2];
     int peek_on;
     float knock_cool[2], cool_knock; double kn_t[2][3]; float kn_d[2][3]; int kn_n[2], kn_toward[2];
     int grab_side;           /* -1 ninguno; mano que sujeta */

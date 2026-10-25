@@ -67,6 +67,9 @@ final class RadarPanel {
     var wrist: VrRadarWristCfg = vrradar_wrist_cfg_default()
     /// Resolución de la textura respecto al radar del original (71x54 px): 4 = 284x216.
     let scale = 4
+    /// Normal del panel con el mando = +Y del agarre (dorso de la mano: convención de vr/body y vrgame.h, "-Z dedos, +Y dorso"). NO verificado en un mando real: si el panel
+    /// sale por el lado de la palma (oculto dentro de la mano), poner true para invertir la normal.
+    var flipDorsal = false
 
     // MARK: estado público
     private(set) var texture: MTLTexture?
@@ -107,6 +110,7 @@ final class RadarPanel {
     private var sampler: MTLSamplerState?
     private var quadU = RadarQuadU()
     private var failed = Set<String>()
+    private var lastRadarLog = 0.0       // systemUptime del último registro [radar]
 
     init(device: MTLDevice, library: MTLLibrary?, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
          sampleCount: Int, viewCount: Int, linearOutput: Bool) {
@@ -275,9 +279,14 @@ final class RadarPanel {
                     headPosition: SIMD3<Float>, headForward: SIMD3<Float>) {
         var arm = VrRadarArm()
         var ok = false
+        var source = "ninguna"
         if var g = leftGrip {            // prioridad: pose del mando izquierdo (no rota con los errores de la IK)
             ok = withUnsafePointer(to: &g) { p in
                 p.withMemoryRebound(to: Float.self, capacity: 16) { vrradar_arm_from_controller($0, &arm) != 0 }
+            }
+            if ok {
+                source = "mando"
+                if flipDorsal { arm.dorsal = (-arm.dorsal.0, -arm.dorsal.1, -arm.dorsal.2) }
             }
         }
         if !ok, let f = forearm {
@@ -285,10 +294,19 @@ final class RadarPanel {
             arm.wrist = (f.wrist.x, f.wrist.y, f.wrist.z)
             arm.dorsal = (f.dorsal.x, f.dorsal.y, f.dorsal.z)
             ok = true
+            source = "IK"
         }
         var q = VrRadarQuad()
         let aspect = rect.w > 0 && rect.z > 0 ? rect.z / rect.w : 71.0 / 54.0
         quadValid = ok && vrradar_wrist_quad(&arm, &wrist, aspect, &q) != 0
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - lastRadarLog >= 1.0 {      // una vez por segundo: el hueso invisible (centro del panel) y su normal; la oclusion la decide la GPU (sin consulta de visibilidad: n/d)
+            lastRadarLog = now
+            func f3(_ v: Float) -> String { String(format: "%.3f", v) }
+            let pos = quadValid ? "(\(f3(q.center.0)) \(f3(q.center.1)) \(f3(q.center.2)))" : "n/d"
+            let nrm = quadValid ? "(\(f3(q.normal.0)) \(f3(q.normal.1)) \(f3(q.normal.2)))" : "n/d"
+            Storage.log("[radar] fuente=\(source) hueso=\(pos) normal=\(nrm) panel=\(quadValid ? "valido" : "invalido") presente=\(present) visible/ocluido=n/d flipDorsal=\(flipDorsal)")
+        }
         guard quadValid else { glow = 0; return }
         let eye: [Float] = [headPosition.x, headPosition.y, headPosition.z]
         let fwd: [Float] = [headForward.x, headForward.y, headForward.z]

@@ -113,7 +113,10 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
             const vrg_gest_t *q = &out.gest;
             fprintf(stderr, "[gest] vb=%u mano=%d %s v=%.2f m/s adelante=%.2f radial=%.2f alcance=%.2f enemigo=%.2f m grip=%.2f puno=%d contacto=%d\n", vb, q->side, q->reason, q->speed, q->fcos, q->rcos, q->reach, q->dist, q->grip, q->fist, q->contact);
         }
-        if (out.chest_try >= 0) fprintf(stderr, "[gest] vb=%u pecho_fuera mano=%d distancia=%.2f m (zona %.2f m)\n", vb, out.chest_try, out.chest_dist, G.cfg.chest_radius);
+        for (int s = 0; s < 2; s++) {
+            const char *rs = out.pecho[s].opened ? "abierta" : "rechazada";
+            if (out.pecho[s].valid) fprintf(stderr, "[pecho] vb=%u mano=%d dist=%.3f m (max %.2f) delante=%.3f m (min %.2f) mantenido=%.2f s (min %.2f) resultado=%s motivo=%s\n", vb, s, out.pecho[s].dist, G.cfg.chest_radius, out.pecho[s].depth, G.cfg.chest_depth, out.pecho[s].hold, G.cfg.chest_hold_s, rs, out.pecho[s].reason);
+        }
         if (out.grab_why) fprintf(stderr, "[gest] vb=%u agarre %s mano=%d distancia=%.2f m (cuello/espalda, limite 0,30)\n", vb, out.grab_why, out.grab_side_try, out.grab_dist);
         if (out.knock_why) fprintf(stderr, "[gest] vb=%u toque en la pared %s mano=%d v=%.2f m/s distancia=%.3f m\n", vb, out.knock_why, out.knock_try_side, out.knock_speed, out.knock_dist);
         if (out.event > 0 && out.event < 12) fprintf(stderr, "[gest] vb=%u evento=%s armas_libres=%d\n", vb, evn[out.event], in.weapon < 0);

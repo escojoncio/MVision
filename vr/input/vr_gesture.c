@@ -11,7 +11,7 @@ void vrg_cfg_defaults(vrg_cfg_t *c) {
     c->right_handed = 1;
     c->punch_speed = 0.5f; c->knock_speed = 0.4f; c->knock_touch = 0.08f; c->knock_cooldown_s = 0.25f; c->knock_enemy_m = 1.0f; c->reach_min = 0.20f; c->melee_range = 3.0f; c->front_cos = 0.5f;
     c->grab_range = 1.3f; c->neck_radius = 0.36f; c->neck_height = 0.45f; c->back_dist = 0.25f; c->grab_after_punch_s = 0.2f;
-    c->chest_down = 0.37f; c->chest_side = 0.15f; c->chest_fwd = 0.12f; c->chest_radius = 0.28f;
+    c->chest_down = 0.30f; c->chest_fwd = 0.18f; c->chest_radius = 0.15f; c->chest_depth = 0.05f; c->chest_hold_s = 0.30f;
     c->grip_on = 0.65f; c->grip_off = 0.35f; c->peek_on = 0.12f; c->peek_off = 0.06f; c->cooldown_s = 0.12f;
     c->throw_speed = 1.0f; c->throw_reach = 0.30f; c->grab_slow_speed = 0.9f; c->grab_delay_s = 0.3f; c->contact_latch_s = 0.15f; c->contact_speed = 0.5f; c->body_radius = 0.28f; c->body_low = 0.5f; c->body_high = 0.65f; c->fist_radius = 0.12f; c->contact_tol = 0.05f;
 }
@@ -68,7 +68,7 @@ static int hand_vel(vrg_t *g, int s, const float p[3], double t, float v[3]) {
 }
 
 void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
-    memset(out, 0, sizeof *out); out->punch_side = -1; out->knock_side = -1; out->throw_side = -1; out->knock_try_side = -1; out->grab_side_try = -1; out->grab_side = -1; out->grab_en = -1; out->chest_try = -1; out->chest_dist = -1.0f;
+    memset(out, 0, sizeof *out); out->punch_side = -1; out->knock_side = -1; out->throw_side = -1; out->knock_try_side = -1; out->grab_side_try = -1; out->grab_side = -1; out->grab_en = -1;
     const vrg_cfg_t *c = &g->cfg;
     float dt = (fin(in->dt) && in->dt > 0.001f) ? (in->dt > 0.1f ? 0.1f : in->dt) : 0.02f;
     int ok = c->enable && in->active && fin3(in->body) && fin3(in->head) && fin3(in->head_u) && fin(in->yaw);
@@ -352,18 +352,19 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
             hd[s] = d1 < d2 ? d1 : d2;
         }
     }
-    /* zona del pecho de cada mano (ventana de objetos = izquierda, armas = derecha): se calcula con la cabeza y el rumbo del torso del
-     * personaje (el cuerpo del jugador), no con coordenadas fijas del espacio de seguimiento: vale sentado, de pie o girado */
+    /* zona del pecho (ventana de objetos = izquierda, armas = derecha): UN punto, bajo la cabeza y delante del torso (rumbo del personaje, no
+     * coordenadas fijas del espacio de seguimiento: vale sentado, de pie o girado). La mano debe estar a chest_radius del punto Y delante del plano del torso. */
     int chest[2] = {0, 0};
-    float chest_d[2] = {-1, -1};
+    float chest_d[2] = {-1, -1}, chest_z[2] = {0, 0};
     {
-        float fx = sinf(in->yaw), fz = cosf(in->yaw), lx = fz, lz = -fx;     /* delante y izquierda del torso */
+        float fx = sinf(in->yaw), fz = cosf(in->yaw);     /* delante del torso */
+        float ctr[3] = {in->head[0] + fx * c->chest_fwd, in->head[1] - c->chest_down, in->head[2] + fz * c->chest_fwd};
         for (int s = 0; s < 2; s++) {
             if (!tr[s]) { g->chest_prev[s] = 0; continue; }
-            float sd = s == 0 ? 1.0f : -1.0f;
-            float ctr[3] = {in->head[0] + fx * c->chest_fwd + lx * c->chest_side * sd, in->head[1] - c->chest_down, in->head[2] + fz * c->chest_fwd + lz * c->chest_side * sd};
             float dx = in->hand[s][0] - ctr[0], dy = in->hand[s][1] - ctr[1], dz = in->hand[s][2] - ctr[2];
-            chest_d[s] = sqrtf(dx * dx + dy * dy + dz * dz); chest[s] = chest_d[s] <= c->chest_radius;
+            chest_d[s] = sqrtf(dx * dx + dy * dy + dz * dz);
+            chest_z[s] = (in->hand[s][0] - in->head[0]) * fx + (in->hand[s][2] - in->head[2]) * fz;
+            chest[s] = chest_d[s] <= c->chest_radius && chest_z[s] > c->chest_depth;
             if (chest[s] && !g->chest_prev[s] && !fst[s] && g->warm == 0 && g->chest_cool[s] <= 0) { g->chest_cool[s] = 0.5f; if (out->haptic[s] < 0.15f) out->haptic[s] = 0.15f; }   /* aviso al entrar en la zona */
             g->chest_prev[s] = chest[s];
             if (g->chest_cool[s] > 0) g->chest_cool[s] -= dt;
@@ -433,8 +434,10 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                     out->grab_why = why; out->grab_dist = hd[s]; out->grab_side_try = s;
                     if (!strcmp(why, "ok")) { g->gp_t[s] = c->grab_delay_s; g->gp_en[s] = ne; g->gp_only[s] = near_body; started = 1; out->grab_why = "pendiente"; }
                 }
-                if (!started && !chest[s]) { out->chest_try = s; out->chest_dist = chest_d[s]; }
-                if (!started && chest[s]) { g->menu_hold |= 1 << s; out->menu_open[s] = 1; out->haptic[s] = 0.2f; if (!out->event) out->event = VRG_EV_MENU; }
+                if (!started && !((g->menu_hold >> s) & 1)) {      /* intento de ventana del pecho: fuera de la zona se rechaza ya; dentro, el puño debe mantenerse chest_hold_s */
+                    if (chest[s]) { g->chest_live[s] = 1; g->chest_t[s] = 0; }
+                    else { out->pecho[s].valid = 1; out->pecho[s].dist = chest_d[s]; out->pecho[s].depth = chest_z[s]; out->pecho[s].reason = chest_d[s] > c->chest_radius ? "lejos" : "detras"; }
+                }
             } else if (edge[s] && grabbing && !grab_start) {
                 /* ya agarrando: cada pulsación nueva aprieta (y remata tras el décimo apretón) */
                 out->squeeze = 1; out->grab_hold = 1; out->event = VRG_EV_SQUEEZE; out->haptic[s] = 0.5f;
@@ -443,6 +446,23 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                 out->grab_why = "puno_cerrado"; out->grab_dist = hd[s]; out->grab_side_try = s;   /* regla dura: botón ya mantenido = nunca agarra */
             }
             g->near_prev[s] = near_now;
+        }
+        for (int s = 0; s < 2; s++) {      /* intento en curso: el puño sigue pulsado dentro de la zona; al cumplir chest_hold_s se abre la ventana */
+            if (!g->chest_live[s] || edge[s]) continue;      /* en el fotograma de la pulsación el tiempo es 0 */
+            const char *why = NULL;
+            if (!tr[s]) why = "sin_seguimiento";
+            else if (!fst[s]) why = "soltado";
+            else if (!chest[s]) why = chest_d[s] > c->chest_radius ? "salio_zona" : "detras";
+            else if (grabbing || grab_start || g->gp_t[s] > 0) why = "agarre";
+            if (!why) {
+                g->chest_t[s] += dt;
+                if (g->chest_t[s] + 1e-3f < c->chest_hold_s) continue;
+                g->menu_hold |= 1 << s; out->menu_open[s] = 1; out->haptic[s] = 0.2f; if (!out->event) out->event = VRG_EV_MENU;
+                why = "ok";
+            }
+            out->pecho[s].valid = 1; out->pecho[s].opened = !strcmp(why, "ok"); out->pecho[s].hold = g->chest_t[s]; out->pecho[s].reason = why;
+            out->pecho[s].dist = tr[s] ? chest_d[s] : -1.0f; out->pecho[s].depth = tr[s] ? chest_z[s] : 0.0f;
+            g->chest_live[s] = 0;
         }
         if (in->holding && !out->grab_hold && (fst[0] || fst[1])) out->grab_hold = 1;
         if (g->grab_side >= 0) { out->grab_side = g->grab_side; out->grab_en = g->grab_en; }

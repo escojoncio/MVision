@@ -85,7 +85,8 @@ static int run_path(vrg_t *g, vrg_in_t in, const float a[3], const float b[3], i
     }
     return ev;
 }
-static void chest_center(const vrg_in_t *in, int s, float c[3]);
+static void chest_center(const vrg_in_t *in, float c[3]);
+static int hold_fist(vrg_t *g, vrg_in_t *in, int s, int after, vrg_out_t *o);
 static void t_contact(void) {
     vrg_t g; vrg_in_t in = base(); in.n_en = 1; in.en[0].p[0] = 0; in.en[0].p[1] = 1.0f; in.en[0].p[2] = 0.9f; in.fist_btn[1] = 1;
     float a[3] = {0.2f, 1.2f, 0.1f}, b[3] = {0.1f, 1.2f, 0.6f};            /* directo corto: el puño acaba a 0,3 m del eje del enemigo (dentro del cuerpo + tolerancia) */
@@ -107,8 +108,8 @@ static void t_contact(void) {
     vrg_init(&g); vrg_in_t cl = in; cl.en[0].p[2] = 0.4f; CHECK(run_path(&g, cl, r0, r1, 8, 1, NULL) == 0);
     /* puño cerrado en la zona del pecho (ventana abierta) y enemigo delante: el golpe cancela la ventana y pega */
     {
-        vrg_out_t o; vrg_init(&g); vrg_in_t m = in; m.fist_btn[1] = 0; float c1[3]; chest_center(&m, 1, c1);
-        memcpy(m.hand[1], c1, sizeof c1); settle(&g, &m, 12); m.fist_btn[1] = 1; upd(&g, &m, &o);
+        vrg_out_t o; vrg_init(&g); vrg_in_t m = in; m.fist_btn[1] = 0; float c1[3]; chest_center(&m, c1);
+        memcpy(m.hand[1], c1, sizeof c1); settle(&g, &m, 12); hold_fist(&g, &m, 1, 15, &o);
         CHECK(o.menu_open[1] == 1);
         int ev = 0, still = 0; float x[3];
         for (int i = 1; i <= 14; i++) { for (int k = 0; k < 3; k++) x[k] = c1[k] + ((k == 2 ? 0.55f : (k == 0 ? -0.1f : 0.0f)) * (i > 8 ? 1.0f : i / 8.0f)); memcpy(m.hand[1], x, sizeof x); upd(&g, &m, &o); ev += o.punch_side == 1; still += (o.press & VRG_R2) != 0 && ev > 0; }
@@ -252,9 +253,15 @@ static void t_grab(void) {
     CHECK(sqz >= 1 && pun == 0);
 }
 
-static void chest_center(const vrg_in_t *in, int s, float c[3]) {
-    float fx = sinf(in->yaw), fz = cosf(in->yaw), lx = fz, lz = -fx, sd = s == 0 ? 1.0f : -1.0f;
-    c[0] = in->head[0] + fx * 0.12f + lx * 0.15f * sd; c[1] = in->head[1] - 0.37f; c[2] = in->head[2] + fz * 0.12f + lz * 0.15f * sd;
+static void chest_center(const vrg_in_t *in, float c[3]) {   /* un solo punto para las dos manos: 0,30 m bajo la cabeza, 0,18 m delante del torso */
+    float fx = sinf(in->yaw), fz = cosf(in->yaw);
+    c[0] = in->head[0] + fx * 0.18f; c[1] = in->head[1] - 0.30f; c[2] = in->head[2] + fz * 0.18f;
+}
+/* pulsa el puño de la mano `s` y lo mantiene `after` fotogramas más (0,02 s cada uno); devuelve 1 si la ventana se abrió en algún fotograma */
+static int hold_fist(vrg_t *g, vrg_in_t *in, int s, int after, vrg_out_t *o) {
+    int opened = 0; in->fist_btn[s] = 1;
+    for (int i = 0; i <= after; i++) { upd(g, in, o); opened |= o->menu_open[s] && (o->press & (VRG_L2 | VRG_R2)); }
+    return opened;
 }
 static void t_chest(void) {
     for (int mode = 0; mode < 4; mode++) {            /* 0 de pie, 1 sentado, 2 girado 90 grados, 3 girado y sentado */
@@ -262,45 +269,64 @@ static void t_chest(void) {
         in.head[1] = (mode & 1) ? 1.05f : 1.65f; in.head[0] = 0.3f; in.head[2] = -0.4f;
         in.yaw = (mode & 2) ? 1.5707963f : 0.0f;
         in.head_fwd[0] = sinf(in.yaw); in.head_fwd[1] = cosf(in.yaw);
-        float c0[3], c1[3]; chest_center(&in, 0, c0); chest_center(&in, 1, c1);
+        float c0[3]; chest_center(&in, c0);
         /* manos fuera de la zona: pulsar = puño solamente */
         settle(&g, &in, 12);
-        in.fist_btn[0] = 1; upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L2)); in.fist_btn[0] = 0; settle(&g, &in, 3);
-        /* mano izquierda en su zona -> pulsar L1 abre objetos (L1 del motor) y se mantiene */
+        CHECK(hold_fist(&g, &in, 0, 0, &o) == 0 && o.pecho[0].valid && !o.pecho[0].opened && !strcmp(o.pecho[0].reason, "lejos") && o.pecho[0].dist > 0.15f);   /* [pecho] del rechazo */
+        CHECK(!hold_fist(&g, &in, 0, 25, &o) && o.menu_open[0] == 0 && !(o.press & VRG_L2)); in.fist_btn[0] = 0; settle(&g, &in, 3);
+        /* mano izquierda en el pecho: 0,2 s no abre, 0,28 s tampoco; 0,30 s abre objetos (L2 del motor) y se mantiene */
         memcpy(in.hand[0], c0, sizeof c0); settle(&g, &in, 12);
-        in.fist_btn[0] = 1; upd(&g, &in, &o);
+        CHECK(!hold_fist(&g, &in, 0, 10, &o)); in.fist_btn[0] = 0; upd(&g, &in, &o);
+        CHECK(o.pecho[0].valid && !o.pecho[0].opened && !strcmp(o.pecho[0].reason, "soltado") && fabsf(o.pecho[0].hold - 0.2f) < 0.005f); settle(&g, &in, 3);
+        CHECK(!hold_fist(&g, &in, 0, 14, &o)); in.fist_btn[0] = 0; settle(&g, &in, 3);
+        CHECK(hold_fist(&g, &in, 0, 15, &o));
         CHECK(o.menu_open[0] == 1 && (o.press & VRG_L2) && !(o.press & VRG_R2) && o.grab_start == 0);
+        CHECK(o.pecho[0].valid && o.pecho[0].opened && !strcmp(o.pecho[0].reason, "ok") && o.pecho[0].hold > 0.29f && o.pecho[0].dist < 0.01f && o.pecho[0].depth > 0.17f);
         int kept = 0; for (int i = 0; i < 25; i++) { in.hand[0][2] += 0.01f; upd(&g, &in, &o); kept += (o.press & VRG_L2) != 0; }   /* la mano puede moverse: sigue abierta */
         CHECK(kept == 25);
         in.fist_btn[0] = 0; upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L2));
-        /* mano derecha en su zona -> R1 (armas) */
-        settle(&g, &in, 5); memcpy(in.hand[1], c1, sizeof c1); settle(&g, &in, 12);
-        in.fist_btn[1] = 1; upd(&g, &in, &o); CHECK(o.menu_open[1] == 1 && (o.press & VRG_R2) && !(o.press & VRG_L2));
+        /* mano derecha en el mismo punto -> R2 (armas) */
+        settle(&g, &in, 5); memcpy(in.hand[1], c0, sizeof c0); settle(&g, &in, 12);
+        CHECK(hold_fist(&g, &in, 1, 15, &o)); CHECK(o.menu_open[1] == 1 && (o.press & VRG_R2) && !(o.press & VRG_L2));
         in.fist_btn[1] = 0; settle(&g, &in, 3);
-        /* la mano derecha en la zona IZQUIERDA no abre nada (cada zona es de su mano) */
-        memcpy(in.hand[1], c0, sizeof c0); settle(&g, &in, 12); in.fist_btn[1] = 1; upd(&g, &in, &o); CHECK(o.menu_open[1] == 0 && !(o.press & VRG_R2));
-        in.fist_btn[1] = 0; settle(&g, &in, 3);
+        /* salir de la zona antes de 0,30 s reinicia el tiempo: no abre ni al volver */
+        settle(&g, &in, 12); memcpy(in.hand[0], c0, sizeof c0); settle(&g, &in, 12);
+        { int op = 0; in.fist_btn[0] = 1; for (int i = 0; i < 40; i++) { if (i == 8) in.hand[0][1] -= 0.5f; if (i == 9) in.hand[0][1] += 0.5f; upd(&g, &in, &o); op |= o.menu_open[0]; } CHECK(!op); }
+        in.fist_btn[0] = 0; settle(&g, &in, 3);
+        /* mano colgando al costado (0,20 m lateral, 0,60 m bajo la cabeza): NO abre ni manteniendo el puño 1 s */
+        for (int s = 0; s < 2; s++) {
+            float lx = cosf(in.yaw), lz = -sinf(in.yaw), sd = s == 0 ? 1.0f : -1.0f;
+            in.fist_btn[s] = 0; settle(&g, &in, 12);
+            in.hand[s][0] = in.head[0] + lx * 0.20f * sd; in.hand[s][1] = in.head[1] - 0.60f; in.hand[s][2] = in.head[2] + lz * 0.20f * sd;
+            settle(&g, &in, 12);
+            CHECK(!hold_fist(&g, &in, s, 50, &o)); in.fist_btn[s] = 0; settle(&g, &in, 3);
+        }
+        /* detrás del plano del torso (a 0,14 m del punto pero con 0,04 m de profundidad): no */
+        memcpy(in.hand[0], c0, sizeof c0); in.hand[0][0] -= sinf(in.yaw) * 0.14f; in.hand[0][2] -= cosf(in.yaw) * 0.14f; settle(&g, &in, 12);
+        CHECK(hold_fist(&g, &in, 0, 0, &o) == 0 && !strcmp(o.pecho[0].reason, "detras") && o.pecho[0].depth < 0.05f);
+        CHECK(!hold_fist(&g, &in, 0, 25, &o)); in.fist_btn[0] = 0; settle(&g, &in, 3);
         /* 0,5 m fuera de la zona: no */
-        memcpy(in.hand[0], c0, sizeof c0); in.hand[0][1] -= 0.5f; settle(&g, &in, 12); in.fist_btn[0] = 1; upd(&g, &in, &o); CHECK(o.menu_open[0] == 0);
+        memcpy(in.hand[0], c0, sizeof c0); in.hand[0][1] -= 0.5f; settle(&g, &in, 12); CHECK(!hold_fist(&g, &in, 0, 25, &o));
         in.fist_btn[0] = 0; settle(&g, &in, 3);
         /* regla dura: puño ya cerrado y la mano ENTRA en la zona: no se abre la ventana */
-        in.hand[0][1] -= 0.0f; memcpy(in.hand[0], base().hand[0], sizeof in.hand[0]); in.hand[0][0] += in.head[0]; in.hand[0][2] += in.head[2];
+        memcpy(in.hand[0], base().hand[0], sizeof in.hand[0]); in.hand[0][0] += in.head[0]; in.hand[0][2] += in.head[2];
         in.fist_btn[0] = 1; settle(&g, &in, 12);
         memcpy(in.hand[0], c0, sizeof c0); upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L2));
+        settle(&g, &in, 25); upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L2));
         in.fist_btn[0] = 0; settle(&g, &in, 3);
         /* aviso háptico corto al entrar en la zona con la mano libre */
         vrg_init(&g); in.hand[1][0] = 5; in.hand[1][1] = 1.0f; settle(&g, &in, 12);
-        memcpy(in.hand[1], c1, sizeof c1); upd(&g, &in, &o); CHECK(o.haptic[1] > 0.1f && o.haptic[1] < 0.3f);
+        memcpy(in.hand[1], c0, sizeof c0); upd(&g, &in, &o); CHECK(o.haptic[1] > 0.1f && o.haptic[1] < 0.3f);
     }
     /* prioridad: cuello de un enemigo dentro de la zona del pecho -> agarre, no ventana */
     vrg_out_t o; vrg_t g; vrg_init(&g); vrg_in_t in = base(); in.body[2] = 0.0f;
-    float c1[3]; chest_center(&in, 1, c1);
+    float c1[3]; chest_center(&in, c1);
     in.n_en = 1; in.en[0].p[0] = c1[0]; in.en[0].p[1] = c1[1] - 0.45f; in.en[0].p[2] = c1[2] + 0.1f; in.en[0].yaw = 0;
     memcpy(in.hand[1], c1, sizeof c1); settle(&g, &in, 12);
     in.fist_btn[1] = 1; pgrab(&g, &in, &o);
     CHECK(o.grab_start == 1 && o.menu_open[1] == 0 && !(o.press & VRG_R2));
     /* si el agarre no es posible (puño... enemigo caído), cae a la ventana */
-    vrg_init(&g); in.en[0].down = 1; in.fist_btn[1] = 0; settle(&g, &in, 12); in.fist_btn[1] = 1; upd(&g, &in, &o);
+    vrg_init(&g); in.en[0].down = 1; in.fist_btn[1] = 0; settle(&g, &in, 12); CHECK(hold_fist(&g, &in, 1, 15, &o));
     CHECK(o.grab_start == 0 && o.menu_open[1] == 1);
     /* la ventana abierta bloquea el golpe de esa mano */
     int pc = 0; for (int i = 1; i <= 6; i++) { in.hand[1][2] += 0.1f; upd(&g, &in, &o); pc += o.punch_side >= 0; } CHECK(pc == 0);

@@ -39,6 +39,10 @@
  *   el dorso del antebrazo/mano (la cara "superior/exterior": la que mira a la cara con el brazo flexionado delante). Sin IK:
  *   vrradar_arm_from_controller() deduce VrRadarArm de la pose del agarre del mando izquierdo (convención OpenXR: -Z hacia los
  *   dedos, +Y hacia el dorso con la mano plana).
+ *   HUESO INVISIBLE del panel con el mando: punto del antebrazo a along_m (0,07 m) del origen del agarre hacia el codo (+Z del agarre), desplazado lift_m
+ *   (0,035 m) a lo largo del dorso (+Y del agarre = normal del panel, lejos de la palma: convención de vr/body y vrgame.h). Sigue la pose REAL del mando 1:1,
+ *   rígido y sin suavizado; la oclusión por el brazo del personaje la da la prueba de profundidad (RadarPanel). Si en un dispositivo +Y resultara ser el lado
+ *   de la palma, RadarPanel.flipDorsal invierte la normal.
  *   El quad queda sobre el dorso, a `along_m` de la muñeca hacia el codo, con el eje "derecha" de la imagen hacia la mano (como la
  *   corona de un reloj de pulsera izquierdo: el norte del radar queda hacia delante con el antebrazo cruzado ante el pecho).
  *
@@ -107,8 +111,8 @@ typedef struct { float elbow[3], wrist[3], dorsal[3]; } VrRadarArm;   /* espacio
 typedef struct {
     float width_m;       /* ancho de la pantalla (def. 0,07) */
     float height_m;      /* alto; <= 0: proporcional a la ventana del radar (def. 0 -> 71:54) */
-    float along_m;       /* del centro de la muñeca al centro del quad, hacia el codo (def. 0,085) */
-    float lift_m;        /* del eje del antebrazo al plano de la pantalla (radio del brazo + grosor; def. 0,042) */
+    float along_m;       /* del centro de la muñeca (origen del agarre) al centro del quad, hacia el codo (def. 0,07) */
+    float lift_m;        /* del eje del antebrazo al plano de la pantalla, a lo largo de la normal del dorso (def. 0,035) */
     float bezel_m;       /* ancho del marco oscuro (def. 0,004) */
     float bezel_back_m;  /* el marco queda tanto por detrás del plano de la pantalla (def. 0,002) */
     int   rot90;         /* giro extra de la imagen en pasos de 90° (def. 0) */
