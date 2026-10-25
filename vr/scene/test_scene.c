@@ -1212,12 +1212,17 @@ static void test_gpu_eye_near(void) {
         polyN(3, Q, z4, 0);
         CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.n_near_eye == 0, "a 0,3 m: se conserva");
         reset();
-        const float W[4][3] = {{0, 0, 200}, {600, 0, 900}, {0, 600, 900}, {0, 0, 0}};
+        const float W[4][3] = {{0, 0, 200}, {200, 0, 400}, {0, 200, 400}, {0, 0, 0}};
         polyN(3, W, z4, 0);
         CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 0 && s.stats.n_near_eye == 1, "un vértice a 0,2 m: descartado");
         /* la escala de salida cuenta: con escala 0,002 el vértice a 200 unidades está a 0,4 m */
         VrSceneOpts o2 = o; o2.scale = 0.002f;
         CHECK(vr_scene_build(&dl, &bs, &o2, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.n_near_eye == 0, "la distancia usa opts.scale");
+        /* pared grande (aristas de 2 m) con un vértice a 0,1 m: NO se descarta (se ve a través de ella si se borra) */
+        reset();
+        const float G[4][3] = {{0, 0, 100}, {2000, 0, 100}, {0, 2000, 100}, {0, 0, 0}};
+        polyN(3, G, z4, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.n_near_eye == 0, "pared grande junto al ojo: se conserva");
     }
     /* b) un triángulo a caballo del plano cercano se RECORTA (no se descarta): 2 vértices delante, 1 detrás (BEHIND) -> cuadrilátero = 2 triángulos, ninguno pegado al ojo */
     {

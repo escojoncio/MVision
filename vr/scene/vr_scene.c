@@ -702,7 +702,13 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                             if (d < dmin) dmin = d;
                             tb |= (op->v[idx[q][k]].vflags & GPU_VF_BEHIND) != 0;
                         }
-                        if (dmin < (double)o.eye_near_m) { out->stats.n_near_eye++; fate_set(i, VR_FATE_NEAR); continue; }
+                        double emax = 0;   /* solo piezas pequeñas (efectos, partículas): paredes/suelos junto a la cabeza se recortan, no se borran */
+                        for (int k = 0; k < 3; k++) {
+                            const float *a = g3[k]->p, *b = g3[(k + 1) % 3]->p;
+                            double dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2], e = sqrt(dx*dx + dy*dy + dz*dz) * ke;
+                            if (e > emax) emax = e;
+                        }
+                        if (dmin < (double)o.eye_near_m && emax < 0.5) { out->stats.n_near_eye++; fate_set(i, VR_FATE_NEAR); continue; }
                         if (tb && !near) { out->stats.drop_behind++; fate_set(i, VR_FATE_BEHIND); continue; }   /* BEHIND declarado y ningún vértice detrás del plano: dato incoherente */
                     }
                     {   /* red de seguridad (§56): triángulo con vértices incoherentes -> fuera (y contado por causa) */

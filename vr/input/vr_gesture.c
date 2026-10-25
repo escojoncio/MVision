@@ -466,7 +466,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
         }
         if (in->holding && !out->grab_hold && (fst[0] || fst[1])) out->grab_hold = 1;
         if (g->grab_side >= 0) { out->grab_side = g->grab_side; out->grab_en = g->grab_en; }
-    } else g->grab_side = -1;
+    } else { g->grab_side = -1; g->chest_live[0] = g->chest_live[1] = 0; }
     if (g->grab_side >= 0 && ne >= 0) g->grab_en = ne;
     for (int s = 0; s < 2; s++) {      /* ventana abierta: se mantiene mientras se mantenga el botón (R1 = armas, L1 = objetos del motor) */
         if (!((g->menu_hold >> s) & 1)) continue;
