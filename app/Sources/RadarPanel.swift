@@ -273,29 +273,25 @@ final class RadarPanel {
     }
 
     // MARK: anclaje
-    /// Calcula el quad en la muñeca. Prioridad: `leftGrip` (pose del mando izquierdo, orientación fija tipo reloj). `forearm` (codo, muñeca y dorso del
-    /// antebrazo tras la IK, espacio VR, metros) solo si el mando no tiene pose. `headForward` unitario.
+    /// Calcula el quad en la muñeca. Prioridad (vrradar_pick_arm): `forearm` (codo, muñeca y dorso del antebrazo tras la IK, espacio VR, metros: es el brazo que se
+    /// dibuja, el panel queda a lift_m de su eje) si es válido; si no, `leftGrip` (pose del mando izquierdo). `headForward` unitario.
     func updatePose(forearm: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>)?, leftGrip: simd_float4x4?,
                     headPosition: SIMD3<Float>, headForward: SIMD3<Float>) {
         var arm = VrRadarArm()
-        var ok = false
-        var source = "ninguna"
-        if var g = leftGrip {            // prioridad: pose del mando izquierdo (no rota con los errores de la IK)
-            ok = withUnsafePointer(to: &g) { p in
-                p.withMemoryRebound(to: Float.self, capacity: 16) { vrradar_arm_from_controller($0, &arm) != 0 }
-            }
-            if ok {
-                source = "mando"
-                if flipDorsal { arm.dorsal = (-arm.dorsal.0, -arm.dorsal.1, -arm.dorsal.2) }
-            }
+        var gripArr: [Float] = []
+        if let g = leftGrip {
+            for col in [g.columns.0, g.columns.1, g.columns.2, g.columns.3] { gripArr += [col.x, col.y, col.z, col.w] }
         }
-        if !ok, let f = forearm {
-            arm.elbow = (f.elbow.x, f.elbow.y, f.elbow.z)
-            arm.wrist = (f.wrist.x, f.wrist.y, f.wrist.z)
-            arm.dorsal = (f.dorsal.x, f.dorsal.y, f.dorsal.z)
-            ok = true
-            source = "IK"
+        let ikArr: [VrRadarArm] = forearm.map { f in
+            [VrRadarArm(elbow: (f.elbow.x, f.elbow.y, f.elbow.z), wrist: (f.wrist.x, f.wrist.y, f.wrist.z), dorsal: (f.dorsal.x, f.dorsal.y, f.dorsal.z))]
+        } ?? []
+        // arrays vacios -> baseAddress nil -> el parametro NULL de C
+        let pick: Int32 = gripArr.withUnsafeBufferPointer { gp in
+            ikArr.withUnsafeBufferPointer { ip in vrradar_pick_arm(gp.baseAddress, ip.baseAddress, &arm) }
         }
+        let ok = pick != 0
+        let source = pick == 1 ? "IK" : (pick == 2 ? "mando" : "ninguna")
+        if pick == 2 && flipDorsal { arm.dorsal = (-arm.dorsal.0, -arm.dorsal.1, -arm.dorsal.2) }
         var q = VrRadarQuad()
         let aspect = rect.w > 0 && rect.z > 0 ? rect.z / rect.w : 71.0 / 54.0
         let eye: [Float] = [headPosition.x, headPosition.y, headPosition.z]
@@ -306,7 +302,14 @@ final class RadarPanel {
             func f3(_ v: Float) -> String { String(format: "%.3f", v) }
             let pos = quadValid ? "(\(f3(q.center.0)) \(f3(q.center.1)) \(f3(q.center.2)))" : "n/d"
             let nrm = quadValid ? "(\(f3(q.normal.0)) \(f3(q.normal.1)) \(f3(q.normal.2)))" : "n/d"
-            Storage.log("[radar] fuente=\(source) hueso=\(pos) normal=\(nrm) panel=\(quadValid ? "valido" : "invalido") presente=\(present) visible/ocluido=n/d flipDorsal=\(flipDorsal)")
+            var segD = "n/d"      // distancia del centro del panel al segmento codo-muñeca de la fuente usada
+            if quadValid {
+                let c = SIMD3<Float>(q.center.0, q.center.1, q.center.2), w = SIMD3<Float>(arm.wrist.0, arm.wrist.1, arm.wrist.2)
+                let ab = SIMD3<Float>(arm.elbow.0, arm.elbow.1, arm.elbow.2) - w
+                let t = min(max(simd_dot(c - w, ab) / max(simd_dot(ab, ab), 1e-9), 0), 1)
+                segD = f3(simd_length(c - (w + ab * t)))
+            }
+            Storage.log("[radar] fuente=\(source) distCentroSegmentoCodoMuneca=\(segD) hueso=\(pos) normal=\(nrm) panel=\(quadValid ? "valido" : "invalido") presente=\(present) visible/ocluido=n/d flipDorsal=\(flipDorsal)")
         }
         guard quadValid else { glow = 0; return }
         let fwd: [Float] = [headForward.x, headForward.y, headForward.z]

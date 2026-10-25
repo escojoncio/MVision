@@ -265,6 +265,7 @@ final class XRPresenter {
     private var menuSnap = false
     private var followSnap = true
     private var prevOverlay2D = false
+    private var overlayHand = -1               // mano física (0 izq, 1 der) que abrió la ventana 2D del juego mientras dura; -1 = sin mano (pausa, sin pose)
     // Dentro de la escena: cámara del plano (vista del motor -> mundo VR al empezar el plano) y plano visto
     private var shotView = matrix_identity_float4x4
     private var shotSeen: UInt32 = 0
@@ -688,7 +689,7 @@ final class XRPresenter {
 
     /// `hud`: panel 2D (textura del renderer, ya la vista sRGB si el destino es lineal). `eyePx`/`p00`: ancho en píxeles de un ojo y P[0][0].
     func compose(gs: MvVrGameState, head: simd_float4x4, dt: Float, hud: MTLTexture?, eyePx: Float, p00: Float,
-                 gameView: simd_float4x4, linear: Bool, wrist: Wrist? = nil, ipd: Float = 0.063, shot: UInt32 = 0, gameCamScene: Bool = false, engineHealthy: Bool = true) -> Result {
+                 gameView: simd_float4x4, linear: Bool, wrist: Wrist? = nil, ipd: Float = 0.063, shot: UInt32 = 0, gameCamScene: Bool = false, engineHealthy: Bool = true, stereo2DInside: Bool = false) -> Result {
         // 1) qué toca mostrar. view_kind 2 (vr_view.h, VRV_K_ENGINE) = cinemática del motor con 3D y cámara del guion; los vídeos pregrabados (3), los menús, el códec/radio,
         //    las cargas, la pausa y las ventanas de armas/objetos (0) siguen en la pantalla de cine.
         var target: Display = gs.view_mode == 1 ? .world : .cinema
@@ -811,8 +812,9 @@ final class XRPresenter {
                 it.cols = cfg.curve > 0.01 ? 48 : 1
                 it.opacity = 1
                 r.items.append(it)
-                // subtítulos, créditos y bandas del juego (panel 2D completo) sobre la misma pantalla, 4 mm por delante
-                if let h = hud {
+                // subtítulos, créditos y bandas del juego (panel 2D completo) sobre la misma pantalla, 4 mm por delante. Con stereo2DInside (modo gpu) el 2D ya va dentro de las texturas de la pantalla 3D
+                // (registrado con el 3D de su misma lista): no se pone el panel aparte.
+                if let h = hud, !stereo2DInside {
                     var hp2 = XRDrawItem(kind: .panel, texture: h)
                     hp2.model = model * XRMath.translation(SIMD3<Float>(0, 0, 0.004))
                     hp2.uvrect = SIMD4<Float>(0, 0, 1, 1)
@@ -843,13 +845,30 @@ final class XRPresenter {
 
         // 5b) ventana 2D del juego sobre el mundo (selector de armas/objetos, pausa): el mundo sigue en primera persona y la capa 2D completa va en un panel flotante delante,
         //     por delante de la geometría. Sustituye a los paneles sueltos del HUD mientras dura (la capa 2D ya los trae).
+        //     Si la abrió una mano (gesto del pecho: L2 izquierda, R2 derecha) el panel va sobre esa mano, de cara a la cabeza, y la sigue mientras dura; sin mano o sin pose válida, delante de la cabeza.
+        if !overlay2D { overlayHand = -1 } else if overlayHand < 0 { overlayHand = Int(mv_vrgame_menu_hand()) }
         if overlay2D, let h = hud {
+            var onHand: simd_float4x4?
+            if overlayHand >= 0 {
+                var g = [Float](repeating: 0, count: 16)
+                if mv_vrgame_hand_matrix(Int32(overlayHand), &g) != 0 {
+                    let grip = simd_float4x4(columns: (SIMD4<Float>(g[0], g[1], g[2], g[3]), SIMD4<Float>(g[4], g[5], g[6], g[7]),
+                                                       SIMD4<Float>(g[8], g[9], g[10], g[11]), SIMD4<Float>(g[12], g[13], g[14], g[15])))
+                    onHand = XRMenuPanelLayout.handModel(grip: grip, head: hp)
+                }
+            }
             var it = XRDrawItem(kind: .panel, texture: h)
-            it.model = cfg.follow2D ? XRFollow.model(follow, distance: XRMenuPanelLayout.distance, drop: XRMenuPanelLayout.drop)
-                                    : XRMenuPanelLayout.model(position: hp, yaw: hudYaw)
+            if let hm = onHand {
+                it.model = hm
+                it.size = SIMD2<Float>(XRMenuPanelLayout.handWidth, XRMenuPanelLayout.handWidth * 0.75)
+                it.distance = simd_length(XRMath.position(hm) - hp)
+            } else {
+                it.model = cfg.follow2D ? XRFollow.model(follow, distance: XRMenuPanelLayout.distance, drop: XRMenuPanelLayout.drop)
+                                        : XRMenuPanelLayout.model(position: hp, yaw: hudYaw)
+                it.size = SIMD2<Float>(XRMenuPanelLayout.width, XRMenuPanelLayout.width * 0.75)
+                it.distance = XRMenuPanelLayout.distance
+            }
             it.uvrect = SIMD4<Float>(0, 0, 1, 1)
-            it.size = SIMD2<Float>(XRMenuPanelLayout.width, XRMenuPanelLayout.width * 0.75)
-            it.distance = XRMenuPanelLayout.distance
             it.opacity = 1
             it.onTop = true
             r.items.append(it)

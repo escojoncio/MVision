@@ -821,6 +821,7 @@ static void test_goggles(void) {
           near_f(s.filter.covers_rgb[1][0], 90 / 255.0f, 1e-4f) && near_f(s.filter.cover_rgb[0], 90 / 255.0f, 1e-4f), "dos recubrimientos");
     reset();
     dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    poly3(a, b, c, 0);   /* con 3D: sin él los velos pasan a la clase 2 (veil_as_2d implícito) */
     for (int i = 0; i < 6; i++) rect2d(0, 0, 320, 256, 0, 0, GPU_F_SEMI, 0, 0, 0, (uint8_t)(10 * (i + 1)), 0, 0)->abr = (uint8_t)(i & 3);
     CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.filter.n_covers == VR_FILTER_COVERS && near_f(s.filter.covers_rgb[0][0], 30 / 255.0f, 1e-4f) && near_f(s.filter.covers_rgb[3][0], 60 / 255.0f, 1e-4f) &&
           s.filter.covers_abr[0] == 2 && s.filter.covers_abr[3] == 1, "6 recubrimientos: se conservan los 4 últimos (n %d, [0]=%.0f abr %d)", s.filter.n_covers, s.filter.covers_rgb[0][0] * 255, s.filter.covers_abr[0]);
@@ -1506,6 +1507,206 @@ static void test_line3d(void) {
     vr_scene_release();
 }
 
+/* Cinemática con letterbox (captura: franja negra 2D desplazada ~195 filas respecto de la imagen 3D). El 3D y las bandas de la misma lista (2 TILE negros (0,0,320,27) y (0,210,320,46)) deben
+ * registrar entre sí: la ventana de la lista (H=200, OFX/OFY 160/118, disp 320x256) lleva cada vértice 3D a la fila del panel 2D (v de textura = SXY.y / 256). */
+static void test_cine_letterbox(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    VrSceneOpts o = vr_scene_opts_default();
+    o.origin_mode = 1;
+    reset(); dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    const float H = 200.0f, OFX = 160.0f, OFY = 118.0f;
+    float Pw[3][3] = {{-400, -200, 2000}, {800, -200, 2000}, {0, 600, 2000}};
+    GpuOp *po = poly3(Pw[0], Pw[1], Pw[2], 0);
+    po->proj_h = H; po->proj_ox = OFX; po->proj_oy = OFY;
+    int sx[3], sy[3];
+    for (int k = 0; k < 3; k++) {
+        sx[k] = (int)lrintf(OFX + H * Pw[k][0] / Pw[k][2]); sy[k] = (int)lrintf(OFY + H * Pw[k][1] / Pw[k][2]);   /* SXY de la GTE */
+        po->v[k].x = (int16_t)sx[k]; po->v[k].y = (int16_t)sy[k];
+    }
+    rect2d(0, 0, 320, 27, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    rect2d(0, 210, 320, 46, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    VrScene s;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.has_3d && s.filter.proj_ok, "build letterbox");
+    VrScreenWindow w = vr_scene_screen_window(&s.filter);
+    CHECK(w.ok && near_f(w.left, 0.8f, 1e-5f) && near_f(w.right, 0.8f, 1e-5f) && near_f(w.up, 118.0f / 200.0f, 1e-5f) && near_f(w.down, 138.0f / 200.0f, 1e-5f),
+          "ventana de la lista %d %.4f %.4f %.4f %.4f", w.ok, w.left, w.right, w.up, w.down);
+    /* bandas: dos lotes kind 2 con y en [0,27) y [210,256) */
+    int n2 = 0, bad2 = 0;
+    float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
+    for (uint32_t i = 0; i < s.nb; i++) {
+        if (s.b[i].kind != 2) continue;
+        for (uint32_t j = 0; j < s.b[i].count; j++) {
+            float y = s.v[s.b[i].first + j].pos[1];
+            int band = y < 128.0f ? 0 : 1;
+            lo[band] = fminf(lo[band], y); hi[band] = fmaxf(hi[band], y);
+            n2++;
+            if (!(near_f(y, 0, 1e-4f) || near_f(y, 27, 1e-4f) || near_f(y, 210, 1e-4f) || near_f(y, 256, 1e-4f))) bad2++;
+        }
+    }
+    CHECK(n2 == 12 && bad2 == 0 && near_f(lo[0], 0, 1e-4f) && near_f(hi[0], 27, 1e-4f) && near_f(lo[1], 210, 1e-4f) && near_f(hi[1], 256, 1e-4f),
+          "bandas 2D: vértices %d fuera de lugar %d, banda alta [%.1f,%.1f] baja [%.1f,%.1f]", n2, bad2, lo[0], hi[0], lo[1], hi[1]);
+    /* 3D: vértice VR -> vista del juego (inversa de game_view) -> ventana de la lista -> fila de la textura 3D; debe caer en SXY.y / 256 (error < 0,5 fila) */
+    const float *g = s.game_view;
+    float k2 = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
+    int matched = 0, n3 = 0;
+    for (uint32_t i = 0; i < s.nb; i++) {
+        if (s.b[i].kind == 2) continue;
+        for (uint32_t j = 0; j < s.b[i].count; j++) {
+            const float *p = s.v[s.b[i].first + j].pos;
+            float d[3] = {p[0] - g[12], p[1] - g[13], p[2] - g[14]};
+            float vx = (g[0] * d[0] + g[1] * d[1] + g[2] * d[2]) / k2, vy = (g[4] * d[0] + g[5] * d[1] + g[6] * d[2]) / k2, vz = (g[8] * d[0] + g[9] * d[1] + g[10] * d[2]) / k2;
+            float col = (w.left + vx / vz) / (w.left + w.right) * 320.0f, row = (w.up + vy / vz) / (w.up + w.down) * 256.0f;   /* v * 256 */
+            n3++;
+            for (int k = 0; k < 3; k++) if (fabsf(col - (float)sx[k]) < 0.5f && fabsf(row - (float)sy[k]) < 0.5f) { matched++; break; }
+        }
+    }
+    CHECK(n3 == 3 && matched == 3, "3D registra con el panel: %d de %d vértices en SXY (error < 0,5 fila)", matched, n3);
+    /* estadísticas del diagnóstico [geom]: un grupo (H,ofx,ofy) con la única primitiva 3D */
+    CHECK(s.stats.n_ref_groups == 1 && s.stats.n_ref_total == 1 && s.stats.n_ref_group == 1, "grupos %u total %u dominante %u", s.stats.n_ref_groups, s.stats.n_ref_total, s.stats.n_ref_group);
+    vr_scene_release();
+}
+
+/* Diagnóstico [geom]: grupos de centro de proyección y cuadriláteros aceptados sin coplanaridad */
+static void test_geom_stats(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    VrSceneOpts o = vr_scene_opts_default();
+    o.origin_mode = 1; o.coherence = 0;   /* SXY sin rellenar */
+    VrScene s;
+    reset(); dl.disp.w = 320; dl.disp.h = 256;
+    proj_poly(200.0f, 160.0f, 118.0f); proj_poly(200.0f, 160.0f, 118.0f); proj_poly(200.0f, 100.0f, 118.0f);
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_ref_groups == 2 && s.stats.n_ref_total == 3 && s.stats.n_ref_group == 2,
+          "grupos %u total %u dominante %u (esperado 2, 3, 2)", s.stats.n_ref_groups, s.stats.n_ref_total, s.stats.n_ref_group);
+    const uint8_t z4[4] = {0, 0, 0, 0};
+    const float Qc[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, 2000}, {1000, 1000, 2000}};
+    const float Qn[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, 2000}, {1000, 1000, 2300}};
+    reset(); polyN(4, Qc, z4, 0); polyN(4, Qn, z4, 0);
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_quad3d == 2 && s.stats.n_quad_noncoh == 1, "cuadriláteros %u no coplanares %u (esperado 2, 1)", s.stats.n_quad3d, s.stats.n_quad_noncoh);
+    vr_scene_release();
+}
+
+/* Orden de dibujo del juego (OT): primitivas 3D coplanares (< 5 mm) que se solapan se desplazan hacia el ojo 0,2 mm por metro de distancia (máx. 50 m) según su orden; la posterior gana el z-fight */
+static float dist_eye(const VrScene *s, const float *p) {
+    return sqrtf((p[0] - s->eye_vr[0]) * (p[0] - s->eye_vr[0]) + (p[1] - s->eye_vr[1]) * (p[1] - s->eye_vr[1]) + (p[2] - s->eye_vr[2]) * (p[2] - s->eye_vr[2]));
+}
+static void test_coplanar(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    VrSceneOpts o = vr_scene_opts_default();
+    o.origin_mode = 1;
+    o.coplanar_m = 0.005f;
+    VrSceneOpts off = o; off.coplanar_m = 0.0f;
+    VrScene s0, s;
+    static VrVtx base[64];
+    float A[3][3] = {{-1000, -500, 2000}, {1000, -500, 2000}, {0, 1000, 2000}};
+    float B[3][3] = {{-200, -100, 2000}, {200, -100, 2000}, {0, 200, 2000}};   /* dentro de A, coplanar */
+    float C[3][3] = {{-50, -50, 2000}, {50, -50, 2000}, {0, 50, 2000}};        /* dentro de B */
+    /* a) A, B, C coplanares y apiladas: cada una más cerca del ojo que la anterior */
+    reset(); poly3(A[0], A[1], A[2], 0); poly3(B[0], B[1], B[2], 0); poly3(C[0], C[1], C[2], 0);
+    CHECK(vr_scene_build(&dl, &bs, &off, &s0) == 0 && s0.nv == 9, "build base");
+    memcpy(base, s0.v, 9 * sizeof(VrVtx));
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.nv == 9, "build coplanar");
+    int a_same = 1, ordered = 1;
+    for (int k = 0; k < 3; k++) {
+        float dA = dist_eye(&s, s.v[k].pos);
+        float sB = dist_eye(&s0, base[3 + k].pos) - dist_eye(&s, s.v[3 + k].pos), sC = dist_eye(&s0, base[6 + k].pos) - dist_eye(&s, s.v[6 + k].pos);   /* acercamiento de cada una */
+        a_same &= near_f(dA, dist_eye(&s0, base[k].pos), 1e-6f);
+        ordered &= sB > 0.0003f && sC > sB + 0.0003f;   /* ~0,4 mm por nivel a 2 m: B un nivel, C dos */
+    }
+    CHECK(a_same, "la primera primitiva no se mueve");
+    CHECK(ordered, "la posterior queda más cerca del ojo (B 1 nivel, C 2 niveles)");
+    CHECK(s.stats.n_coplanar == 3, "pares coplanares %u (esperado 3: B-A, C-A, C-B)", s.stats.n_coplanar);
+    /* la posición en pantalla no cambia: el vértice se mueve por su rayo al ojo */
+    {
+        const float *p0 = base[3].pos, *p1 = s.v[3].pos;
+        float a[3], b[3];
+        for (int c = 0; c < 3; c++) { a[c] = p0[c] - s.eye_vr[c]; b[c] = p1[c] - s.eye_vr[c]; }
+        float la = sqrtf(a[0]*a[0] + a[1]*a[1] + a[2]*a[2]), lb = sqrtf(b[0]*b[0] + b[1]*b[1] + b[2]*b[2]);
+        CHECK(near_f(a[0] / la, b[0] / lb, 1e-5f) && near_f(a[1] / la, b[1] / lb, 1e-5f) && near_f(a[2] / la, b[2] / lb, 1e-5f), "mismo rayo al ojo");
+    }
+    /* b) no coplanar (a 10 cm): sin cambio */
+    float B2[3][3] = {{-200, -100, 2100}, {200, -100, 2100}, {0, 200, 2100}};
+    reset(); poly3(A[0], A[1], A[2], 0); poly3(B2[0], B2[1], B2[2], 0);
+    CHECK(vr_scene_build(&dl, &bs, &off, &s0) == 0 && s0.nv == 6, "build base b");
+    memcpy(base, s0.v, 6 * sizeof(VrVtx));
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.nv == 6 && memcmp(base, s.v, 6 * sizeof(VrVtx)) == 0 && s.stats.n_coplanar == 0, "no coplanar: sin cambios");
+    /* c) coplanar pero sin solape en el plano: sin cambio */
+    float B3[3][3] = {{1500, -500, 2000}, {1900, -500, 2000}, {1700, 0, 2000}};
+    reset(); poly3(A[0], A[1], A[2], 0); poly3(B3[0], B3[1], B3[2], 0);
+    CHECK(vr_scene_build(&dl, &bs, &off, &s0) == 0 && s0.nv == 6, "build base c");
+    memcpy(base, s0.v, 6 * sizeof(VrVtx));
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.nv == 6 && memcmp(base, s.v, 6 * sizeof(VrVtx)) == 0 && s.stats.n_coplanar == 0, "sin solape: sin cambios");
+    /* d) mitades de un mismo cuadrilátero (arista compartida, misma primitiva): sin cambio */
+    const uint8_t z4[4] = {0, 0, 0, 0};
+    const float Q[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, 2000}, {1000, 1000, 2000}};
+    reset(); polyN(4, Q, z4, 0);
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.nv == 6 && s.stats.n_coplanar == 0, "mitades de un cuadrilátero: sin pares (%u)", s.stats.n_coplanar);
+    /* e) semitransparentes: no escriben profundidad, no se tocan */
+    reset(); poly3(A[0], A[1], A[2], 1); poly3(B[0], B[1], B[2], 1);
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.nv == 6 && s.stats.n_coplanar == 0, "semitransparentes: sin pares (%u)", s.stats.n_coplanar);
+    vr_scene_release();
+}
+
+/* Crédito sobre el 3D de la intro (ruta ENGINE estéreo): el borrado opaco POSTERIOR al 3D es el relleno de los créditos y se conserva (keep_late_clear); el velo semitransparente
+ * de una lista sin 3D no se pierde en fx.covers (clase 3) sino que se pinta como 2D. */
+static int op_has_kind2(const VrScene *s, uint32_t op) {
+    return s->op_dest && op < s->n_op_dest && s->op_dest[op] == 2;
+}
+static void test_late_clear_veil(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    float a[3] = {0, 0, 2000}, b[3] = {1000, 0, 2000}, c[3] = {0, 1000, 2000};
+    VrScene s;
+    /* 1) [3D, TILE opaco 320x240 sin textura, glifo 4bpp] con keep_late_clear: el TILE se emite en la clase 2 */
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 240;
+    poly3(a, b, c, 0);                                                                       /* op0 3D */
+    rect2d(0, 0, 320, 240, 0, 0, 0, 0, 0, 0, 0, 0, 0);                                       /* op1 TILE opaco sin textura */
+    rect2d(16, 16, 40, 20, 0, 0, GPU_F_TEXTURED, 0, 960, 256, 128, 128, 128);               /* op2 glifo 4bpp */
+    VrSceneOpts o = vr_scene_opts_default();
+    CHECK(o.keep_late_clear == 0 && o.veil_as_2d == 0, "defectos: keep_late_clear y veil_as_2d desactivados");
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_clear == 1 && !op_has_kind2(&s, 1), "por defecto el TILE tardio se descarta: n_clear %u", s.stats.n_clear);
+    o.keep_late_clear = 1;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.has_3d, "build keep_late_clear");
+    CHECK(s.stats.n_clear == 0 && op_has_kind2(&s, 1) && op_has_kind2(&s, 2), "TILE tardio emitido: n_clear %u", s.stats.n_clear);
+    /* control: el TILE ANTES del 3D (borrado de inicio de lista) se sigue descartando */
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 240;
+    rect2d(0, 0, 320, 240, 0, 0, 0, 0, 0, 0, 0, 0, 0);                                       /* op0 TILE */
+    poly3(a, b, c, 0);                                                                       /* op1 3D */
+    rect2d(16, 16, 40, 20, 0, 0, GPU_F_TEXTURED, 0, 960, 256, 128, 128, 128);               /* op2 glifo */
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_clear == 1 && !op_has_kind2(&s, 0) && op_has_kind2(&s, 2), "TILE previo al 3D sigue descartado: n_clear %u", s.stats.n_clear);
+    /* sin ningun 3D no hay "tardio": se descarta */
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 240;
+    rect2d(0, 0, 320, 240, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_clear == 1 && !op_has_kind2(&s, 0), "TILE sin 3D se descarta: n_clear %u", s.stats.n_clear);
+
+    /* 2) velo semitransparente negro 320x240 con screen_filter=1 en una lista SIN 3D: kind 2 y no cuenta como recubrimiento */
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 240;
+    rect2d(16, 16, 40, 20, 0, 0, GPU_F_TEXTURED, 0, 960, 256, 128, 128, 128);               /* op0 texto */
+    rect2d(0, 0, 320, 240, 0, 0, GPU_F_SEMI, 0, 0, 0, 0, 0, 0)->abr = 2;                      /* op1 velo negro */
+    o = vr_scene_opts_default(); o.screen_filter = 1;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && !s.has_3d, "build velo sin 3D");
+    CHECK(op_has_kind2(&s, 1) && s.stats.n_filter_cover == 0 && s.filter.n_covers == 0 && s.filter.n_cover == 0, "velo sin 3D: kind 2 (cover %u)", s.stats.n_filter_cover);
+    /* con 3D en la lista y sin veil_as_2d sigue siendo el recubrimiento de la clase 3 (comportamiento previo) */
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 240;
+    poly3(a, b, c, 0);
+    rect2d(0, 0, 320, 240, 0, 0, GPU_F_SEMI, 0, 0, 0, 0, 0, 0)->abr = 2;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.has_3d && s.stats.n_filter_cover == 1 && s.filter.n_covers == 1 && !op_has_kind2(&s, 1), "velo con 3D: clase 3 (cover %u)", s.stats.n_filter_cover);
+    /* con veil_as_2d (se compone dentro del estereo) el velo sobre el 3D tambien va como 2D y no se duplica en fx.covers */
+    o.veil_as_2d = 1;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.has_3d && s.stats.n_filter_cover == 0 && s.filter.n_covers == 0 && op_has_kind2(&s, 1), "velo con veil_as_2d: kind 2 (cover %u)", s.stats.n_filter_cover);
+    vr_scene_release();
+}
+
 int main(void) {
     test_screen_window();
     test_line3d();
@@ -1516,6 +1717,7 @@ int main(void) {
     test_state();
     test_near_clip();
     test_filter();
+    test_late_clear_veil();
     test_ghost();
     test_gte_scale_and_validity();
     test_line_coverage();
@@ -1536,6 +1738,9 @@ int main(void) {
 
     test_user_map_linear();
     test_gpu_eye_near();
+    test_cine_letterbox();
+    test_geom_stats();
+    test_coplanar();
     if (fails) { fprintf(stderr, "%d fallos\n", fails); return 1; }
     printf("test_scene: OK\n");
     return 0;

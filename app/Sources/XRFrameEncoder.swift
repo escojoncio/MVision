@@ -162,6 +162,9 @@ final class XRFrameEncoder {
                                     drawableColor: colorTex, drawableDepth: depthTex) else { return false }
 
         // Con destino sRGB/lineal el panel se muestrea por la vista sRGB (decodifica a lineal al leer).
+        // La vista vigente antes de leer el panel 2D: una capa del anillo de otra vista (créditos al abrir el menú) se descarta ya en este fotograma.
+        renderer.layerView = (Int32(gs.view_kind) << 8) | Int32(gs.view_reason & 255)
+        renderer.layerOverlay = gs.view_mode == 1 && XRMenuPanelLayout.isOverlay(reason: gs.view_reason)
         var hud: MTLTexture? = renderer.linearOutput ? renderer.hudTextureSRGB : renderer.hudTexture
         if hud != nil && hud!.textureType != .type2D { hud = nil }
         // Vista especial del arma (mira óptica, visor antiaéreo, pantalla del misil): la publica vr/host por VBlank.
@@ -174,7 +177,7 @@ final class XRFrameEncoder {
         presenter.hqFull = renderer.hqFull
         var pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, eyePx: Float(w), p00: projs[0].columns.0.x,
                                      gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame(), ipd: ipd, shot: renderer.sceneShot,
-                                     gameCamScene: renderer.sceneNeedsGameCam, engineHealthy: renderer.stereoHealthy)
+                                     gameCamScene: renderer.sceneNeedsGameCam, engineHealthy: renderer.stereoHealthy, stereo2DInside: renderer.stereo2DInside)
         if let note = presenter.cineNote { presenter.cineNote = nil; log(note) }
         if dg.noLayers {
             // Sin capas finales: ni velo (transición, fundido de corte), ni viñeta, ni pantalla de cine / pantalla 3D; solo el mundo, el HUD 2D y los textos (menú).

@@ -3,6 +3,7 @@
  * vea el juego. Hilo de emulación, una vez por VBlank (vrgame_pad). Ver vr_gesture.h para los gestos y bitacora para lo medido. */
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,8 +24,12 @@ static unsigned n_events[16];
 void mv_vrgame_set_gestures(int32_t enable, int32_t mask) {
     en_all = enable != 0; en_mask = (int)mask & 0xF;
 }
-void vrbodyg_reset(void) { if (inited) vrg_reset(&G); }
+static _Atomic int32_t g_menu_hand = -1;       /* publicado por el hilo de juego (pub_menu_hand); el hilo de render solo lo lee */
+static void pub_menu_hand(void) { int h = inited ? G.menu_hold : 0; atomic_store(&g_menu_hand, h & 1 ? 0 : (h & 2 ? 1 : -1)); }
+void vrbodyg_reset(void) { if (inited) { vrg_reset(&G); pub_menu_hand(); } }
 unsigned vrbodyg_event_count(int ev) { return ev >= 0 && ev < 16 ? n_events[ev] : 0; }
+/* mano física que mantiene abierta la ventana de armas/objetos con el gesto del pecho (0 izquierda = L2, 1 derecha = R2); -1 ninguna. Lectura atómica del valor publicado al final de la actualización del mando. */
+int32_t mv_vrgame_menu_hand(void) { return atomic_load(&g_menu_hand); }
 
 static int act_holds(int a) { return a == 7 || a == 38 || a == 124; }
 
@@ -106,6 +111,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
     const int mh_keep = G.menu_hold;                 /* vrg_update lo borra al perder el control, pero con la ventana abierta debe sobrevivir */
     vrg_update(&G, &in, &out);
     if (!ctl) G.menu_hold = (core && bs->menu_open) ? mh_keep : 0;
+    pub_menu_hand();
     {   /* registro [gest] (va al log del visor): cada intento con su motivo, y cada evento */
         static const char *evn[] = {"", "golpe", "agarre", "apreton", "soltar", "pared", "asomar", "pared2", "dano", "impacto", "ventana", "lanzamiento"};
         static unsigned vb;
@@ -116,7 +122,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
         }
         for (int s = 0; s < 2; s++) {
             const char *rs = out.pecho[s].opened ? "abierta" : "rechazada";
-            if (out.pecho[s].valid) fprintf(stderr, "[pecho] vb=%u mano=%d zona=%s (%.2f m a su lado, %.2f m bajo la cabeza, %.2f m delante) dist=%.3f m (max %.2f) mantenido=%.2f s (min %.2f) resultado=%s motivo=%s\n", vb, s, s == 0 ? "izquierda" : "derecha", G.cfg.chest_side, G.cfg.chest_down, G.cfg.chest_fwd, out.pecho[s].dist, G.cfg.chest_radius, out.pecho[s].hold, G.cfg.chest_hold_s, rs, out.pecho[s].reason);
+            if (out.pecho[s].valid) fprintf(stderr, "[pecho] vb=%u mano=%d zona=%s (%.2f m a su lado, %.2f m bajo la cabeza, %.2f m delante) hf=(lat %.3f, alt %.3f, delante %.3f) m upm=%.0f yaw_personaje=%.1f yaw_cabeza=%.1f grados dist=%.3f m (max %.2f) mantenido=%.2f s (min %.2f) resultado=%s motivo=%s rearme=%s\n", vb, s, s == 0 ? "izquierda" : "derecha", G.cfg.chest_side, G.cfg.chest_down, G.cfg.chest_fwd, out.pecho[s].hf[0], out.pecho[s].hf[1], out.pecho[s].hf[2], map.units_per_m, in.yaw * (180.0f / 3.14159265f), atan2f(in.head_fwd[0], in.head_fwd[1]) * (180.0f / 3.14159265f), out.pecho[s].dist, G.cfg.chest_radius, out.pecho[s].hold, G.cfg.chest_hold_s, rs, out.pecho[s].reason, out.pecho[s].rearm ? "bloqueado_hasta_soltar_gatillo" : "armado");
         }
         if (out.grab_why) fprintf(stderr, "[gest] vb=%u agarre %s mano=%d distancia=%.2f m (cuello/espalda, limite 0,30)\n", vb, out.grab_why, out.grab_side_try, out.grab_dist);
         if (out.knock_why) fprintf(stderr, "[gest] vb=%u toque en la pared %s mano=%d v=%.2f m/s distancia=%.3f m\n", vb, out.knock_why, out.knock_try_side, out.knock_speed, out.knock_dist);
@@ -160,6 +166,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
                 uint16_t wb = s == domside ? VRG_R2 : VRG_L2;
                 if (!(pad_in & wb)) G.menu_hold &= ~(1 << s);
             }
+            pub_menu_hand();
         }
         return r;
     }

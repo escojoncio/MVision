@@ -1,19 +1,23 @@
 /* Shaders de la escena VR (3D estéreo + panel HUD 2D). SIN COMPILAR (escrito sin toolchain Metal): revisar en la
  * primera compilación. Reimplementa el muestreo paletizado de rg_gpu.metal (sin tocar rg_*). Diseño: ver RenderRG.swift.
  *
- * Semitransparencia: la mezcla es de función fija (estado de pipeline, 4 modos). El bit 15 del texel decide por
- * fragmento si un polígono texturizado semitransparente mezcla: se hace en dos pasadas del mismo lote con VR_FC_PASS
+ * Semitransparencia: el original mezcla en gamma (0,5B+0,5F, B+F, B-F, B+0,25F). Con vr_fs_scene_blend (VR_FC_BLEND 0..3) la mezcla la hace el shader leyendo el destino
+ * ([[color(0)]], mezcla programable de la GPU de Apple; el pipeline lleva isBlendingEnabled = false); vr_fs_scene no lee el destino: si el destino es sRGB se pasa a gamma, se mezcla y se vuelve a lineal.
+ * El bit 15 del texel decide por fragmento si un polígono texturizado semitransparente mezcla: se hace en dos pasadas del mismo lote con VR_FC_PASS
  * (1 = solo texels con bit15 -> pipeline con mezcla; 2 = solo texels sin bit15 -> pipeline opaco). */
 #include <metal_stdlib>
 #include "vr_types.h"
+#include "vr_blend.h"
 using namespace metal;
 
 constant bool fcFilter [[function_constant(VR_FC_FILTER)]];
 constant bool fcLinear [[function_constant(VR_FC_LINEAR_OUT)]];
 constant uint fcPass [[function_constant(VR_FC_PASS)]];
+constant int fcBlend [[function_constant(VR_FC_BLEND)]];
 constant bool kFilter = is_function_constant_defined(fcFilter) ? fcFilter : false;
 constant bool kLinear = is_function_constant_defined(fcLinear) ? fcLinear : false;
 constant uint kPass = is_function_constant_defined(fcPass) ? fcPass : 0u;
+constant int kBlend = is_function_constant_defined(fcBlend) ? fcBlend : -1;
 
 struct VrVOut {
     float4 pos [[position]];
@@ -105,8 +109,10 @@ inline float3 vr_expand(uint t) {
 }
 
 inline float vr_lin1(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
+inline float vr_gam1(float c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
 
-fragment float4 vr_fs_scene(VrVOut in [[stage_in]], texture2d<ushort, access::read> vram [[texture(0)]]) {
+/* Color del fragmento (espacio gamma, 0..1) con el muestreo de VRAM; descarta los fragmentos recortados/transparentes. Cuerpo común de vr_fs_scene y vr_fs_scene_blend. */
+inline float3 vr_scene_rgb(VrVOut in, texture2d<ushort, access::read> vram) {
     /* recorte de la primitiva (solo HUD 2D; en 3D el recorte es todo el plano): las ventanas, cuadros de texto y letras con recorte no se salen de su caja */
     if (in.orig.x < in.clip.x || in.orig.y < in.clip.y || in.orig.x >= in.clip.z || in.orig.y >= in.clip.w) discard_fragment();
     uint flags = in.clut_flags >> 16;
@@ -157,9 +163,23 @@ fragment float4 vr_fs_scene(VrVOut in [[stage_in]], texture2d<ushort, access::re
         if (kPass == 2u) discard_fragment();
         rgb = in.col * (128.0 / 255.0);
     }
-    rgb = clamp(rgb, float3(0.0), float3(1.0));
+    return clamp(rgb, float3(0.0), float3(1.0));
+}
+
+fragment float4 vr_fs_scene(VrVOut in [[stage_in]], texture2d<ushort, access::read> vram [[texture(0)]]) {
+    float3 rgb = vr_scene_rgb(in, vram);
     if (kLinear) rgb = float3(vr_lin1(rgb.x), vr_lin1(rgb.y), vr_lin1(rgb.z));
     return float4(rgb, 1.0);
+}
+
+/* Igual que vr_fs_scene pero mezcla en el shader (modo kBlend 0..3) sobre el destino, que se lee con [[color(0)]] (pipeline sin mezcla de función fija). */
+fragment float4 vr_fs_scene_blend(VrVOut in [[stage_in]], texture2d<ushort, access::read> vram [[texture(0)]], float4 dst [[color(0)]]) {
+    float3 rgb = vr_scene_rgb(in, vram);
+    float3 b = clamp(dst.rgb, float3(0.0), float3(1.0));
+    if (kLinear) b = float3(vr_gam1(b.x), vr_gam1(b.y), vr_gam1(b.z));
+    float3 m = float3(vr_blend1(kBlend, b.x, rgb.x), vr_blend1(kBlend, b.y, rgb.y), vr_blend1(kBlend, b.z, rgb.z));
+    if (kLinear) m = float3(vr_lin1(m.x), vr_lin1(m.y), vr_lin1(m.z));
+    return float4(m, kBlend == 0 ? 0.5 + 0.5 * dst.a : dst.a);   /* alfa como la mezcla fija de antes: modo 0 = 0,5·1 + 0,5·Ad; el resto, Ad */
 }
 
 /* ---------------- HUD: de alfa premultiplicado (interno, rgba16f) a NO premultiplicado ---------------- */
@@ -200,8 +220,6 @@ vertex VrPostOutL vr_vs_post_layered(uint vid [[vertex_id]], uint iid [[instance
     o.layer = iid;
     return o;
 }
-
-inline float vr_gam1(float c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
 
 /* Fila fuente (coordenada continua en píxeles) para la fila de salida yc del ojo `eye`. */
 inline float vr_post_ysrc(float yc, uint eye, constant VrPostUniforms &u, constant float *dv) {

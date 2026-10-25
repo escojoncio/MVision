@@ -805,6 +805,36 @@ static int opaque_vs_hw(VrLayer2D *L, const GpuDisplay *d, int *n_opaque) {
     return bad;
 }
 
+/* Escala adaptativa (vl2a_scale_step): tras un pico se recupera aunque el coste no baje de 3 ms, y solo si la escala siguiente cabría (coste * (c+1)/c < 0,8 * 12 ms; medido en visor: 3,5 ms a escala 1 y 8,3 ms a escala 3, crecimiento ~lineal). */
+static void scale_step_cases(void) {
+    int cur = 2, fast = 0;
+    for (int i = 0; i < 300; i++) cur = vl2a_scale_step(cur, 4, 3.5, &fast);
+    CHECK(cur >= 3, "escala: ms=3,5 constante desde 2, tras 300 pasos cur=%d (>= 3)", cur);
+    cur = 1; fast = 0;
+    for (int i = 0; i < 300; i++) cur = vl2a_scale_step(cur, 4, 3.5, &fast);
+    CHECK(cur >= 2, "escala: ms=3,5 constante desde 1, tras 300 pasos cur=%d (>= 2)", cur);
+    cur = 3; fast = 0;
+    for (int i = 0; i < 300; i++) cur = vl2a_scale_step(cur, 4, 8.3, &fast);
+    CHECK(cur == 3, "escala: ms=8,3 en escala 3 (a 4 costaria 11 ms > 9,6) no sube: cur=%d", cur);
+    cur = 1; fast = 0;
+    for (int i = 0; i < 59; i++) cur = vl2a_scale_step(cur, 4, 2.0, &fast);
+    CHECK(cur == 1, "escala: no sube antes de 60 trabajos seguidos: cur=%d", cur);
+    cur = vl2a_scale_step(cur, 4, 2.0, &fast);
+    CHECK(cur == 2, "escala: sube al 60 trabajo: cur=%d", cur);
+    cur = 3; fast = 59;
+    cur = vl2a_scale_step(cur, 4, 13.0, &fast);
+    CHECK(cur == 2 && fast == 0, "escala: ms > 12 baja y reinicia: cur=%d fast=%d", cur, fast);
+    cur = 1; fast = 5;
+    cur = vl2a_scale_step(cur, 4, 13.0, &fast);
+    CHECK(cur == 1 && fast == 0, "escala: no baja de 1: cur=%d", cur);
+    cur = 2; fast = 50;
+    cur = vl2a_scale_step(cur, 4, 8.0, &fast);   /* 8 * 2,25 = 18 > 9,6: no cabe */
+    CHECK(cur == 2 && fast == 0, "escala: no cabe -> reinicia el contador: cur=%d fast=%d", cur, fast);
+    cur = 4; fast = 30;
+    cur = vl2a_scale_step(cur, 4, 1.0, &fast);
+    CHECK(cur == 4 && fast == 0, "escala: en el objetivo no sube: cur=%d fast=%d", cur, fast);
+}
+
 static void panel_verified(void) {
     uint8_t opd[64]; int nops = 0;
     VrScene sc; memset(&sc, 0, sizeof sc);
@@ -985,6 +1015,32 @@ static void panel_verified(void) {
         CHECK(strstr(lb, "panel prims=") && strstr(lb, "verificacion=si panel_px=") && strstr(lb, "distintos=0") && strstr(lb, "respaldo_emulador=no"), "E: línea de registro: %s", lb);
         vl2a_free(A); free_list(oc);
     }
+    /* F. el modo y la vista del trabajo viajan con la capa publicada; el overlay del menú solo acepta VL_PANEL de la misma vista (créditos retrasados no entran en el menú) */
+    {
+        GpuDrawList *oc = panel_scene(0, opd, &nops);
+        VrL2Async *A = vl2a_new();
+        vl2a_options(A, 4, VL_SMOOTH_ORIGINAL);
+        const int V_ENGINE = (2 << 8) | 3, V_WORLD = (1 << 8) | 10;
+        const uint8_t *px = NULL; int w = 0, h = 0, full = -1, mode = -1, view = -1; uint32_t seq = 0;
+        vl2a_set_view(A, V_ENGINE);
+        CHECK(vl2a_submit(A, oc, opd, VL_PANEL_VERIFIED, 1) == 1, "F: encolada verificada");
+        vl2a_flush(A);
+        CHECK(vl2a_acquire(A, &px, &w, &h, &full, &seq) == 1 && vl2a_acquire_info(A, &mode, &view) == 1 && mode == VL_PANEL_VERIFIED && view == V_ENGINE, "F: modo verificado (mode=%d view=%d)", mode, view);
+        vl2a_release(A);
+        vl2a_set_view(A, V_WORLD);
+        CHECK(vl2a_submit(A, oc, opd, VL_PANEL, 0) == 1, "F: encolada panel");
+        vl2a_flush(A);
+        CHECK(vl2a_acquire(A, &px, &w, &h, &full, &seq) == 1 && vl2a_acquire_info(A, &mode, &view) == 1 && mode == VL_PANEL && view == V_WORLD, "F: modo panel (mode=%d view=%d)", mode, view);
+        vl2a_release(A);
+        vl2a_free(A); free_list(oc);
+        /* aceptación (mode, vista de la capa, vista vigente, overlay) */
+        CHECK(vl2a_layer_accept(VL_PANEL, V_WORLD, V_WORLD, 1) == 1, "F: overlay acepta VL_PANEL de su vista");
+        CHECK(vl2a_layer_accept(VL_PANEL_VERIFIED, V_ENGINE, V_WORLD, 1) == 0, "F: overlay rechaza la capa verificada de los créditos");
+        CHECK(vl2a_layer_accept(VL_PANEL_VERIFIED, V_WORLD, V_WORLD, 1) == 0, "F: overlay rechaza mode != VL_PANEL aunque la vista coincida");
+        CHECK(vl2a_layer_accept(VL_PANEL, V_ENGINE, V_WORLD, 1) == 0 && vl2a_layer_accept(VL_PANEL, V_ENGINE, V_WORLD, 0) == 0, "F: capa de otra vista (kind) rechazada");
+        CHECK(vl2a_layer_accept(VL_PANEL_VERIFIED, V_ENGINE, (2 << 8) | 7, 0) == 1, "F: sin overlay, misma vista (otro reason) y modo verificado = vale");
+        CHECK(vl2a_layer_accept(VL_PANEL, (1 << 8) | 0, V_WORLD, 1) == 1, "F: otro reason dentro de la misma vista mundo vale");
+    }
 }
 
 int main(void) {
@@ -1006,6 +1062,7 @@ int main(void) {
     offscreen_compose();
     offlist_text();
     panel_verified();
+    scale_step_cases();
 
     /* ---- fondo negro, escala 1: IGUAL bit a bit a la GPU original ---- */
     build_list(0x0000);
@@ -1242,6 +1299,8 @@ int main(void) {
         const uint8_t *sp = vl2d_rgba(LS, &sw, &sh);
         CHECK(ap && sp && aw == sw && ah == sh && memcmp(ap, sp, (size_t)sw * sh * 4) == 0, "capa asincrona identica a la sincrona");
         CHECK(vl2a_acquire(A, &ap, &aw, &ah, &afull, &aseq) == 0, "vl2a_acquire repetida = misma");
+        vl2a_release(A);
+        CHECK(vl2a_acquire(A, &ap, &aw, &ah, &afull, &aseq) == 0 && ap != NULL, "vl2a_acquire tras release sin publicar = no nueva");
         vl2a_release(A);
         vl2d_free(LS);
         /* ráfaga ritmada a 50 listas/s (sin vram_init: solo ops): coste de encolar y retraso */

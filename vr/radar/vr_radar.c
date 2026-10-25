@@ -431,6 +431,15 @@ int vrradar_arm_from_controller(const float g[16], VrRadarArm *out) {
     return 1;
 }
 
+int vrradar_pick_arm(const float grip[16], const VrRadarArm *ik, VrRadarArm *out) {
+    if (!out) return 0;
+    if (ik && finite3(ik->elbow) && finite3(ik->wrist) && finite3(ik->dorsal)) {
+        float a[3] = {ik->elbow[0] - ik->wrist[0], ik->elbow[1] - ik->wrist[1], ik->elbow[2] - ik->wrist[2]};
+        if (norm3(a)) { *out = *ik; return 1; }
+    }
+    return grip && vrradar_arm_from_controller(grip, out) ? 2 : 0;
+}
+
 static float sstep(float a, float b, float x) {
     if (b <= a) return x >= b ? 1.0f : 0.0f;
     float t = (x - a) / (b - a);

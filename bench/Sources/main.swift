@@ -775,6 +775,25 @@ func runMenuLayout() {
         let fwd = simd_normalize(SIMD3<Float>(f4.x, 0, f4.z))
         check("selector-panel", "en la dirección del rumbo del HUD", simd_dot(simd_normalize(SIMD3<Float>(c.x - hp.x, 0, c.z - hp.z)), fwd) > 0.999, "")
     }
+    do {   // panel sobre la mano que abrió la ventana
+        let head = SIMD3<Float>(0.3, 1.0, -0.2)
+        let grip = XRMath.translation(SIMD3<Float>(-0.1, 0.8, -0.5)) * XRMath.rotationX(2.5)     // giro cualquiera del agarre: no debe influir
+        let m = XRMenuPanelLayout.handModel(grip: grip, head: head)
+        let c = m.map { XRMath.position($0) } ?? .zero
+        check("selector-panel", "mano: centro 0,12 m sobre la mano", m != nil && abs(c.x + 0.1) < 1e-5 && abs(c.z + 0.5) < 1e-5 && abs(c.y - (0.8 + XRMenuPanelLayout.handLift)) < 1e-5, String(describing: c))
+        if let m = m {
+            let n = SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z), r = SIMD3<Float>(m.columns.0.x, m.columns.0.y, m.columns.0.z), u = SIMD3<Float>(m.columns.1.x, m.columns.1.y, m.columns.1.z)
+            check("selector-panel", "mano: la cara (+Z) mira a la cabeza", simd_dot(n, simd_normalize(head - c)) > 0.9999, "")
+            check("selector-panel", "mano: base ortonormal de mano derecha, derecha horizontal y arriba hacia arriba", abs(simd_length(r) - 1) < 1e-4 && abs(simd_length(u) - 1) < 1e-4 && abs(simd_dot(r, u)) < 1e-4 && abs(r.y) < 1e-5 && u.y > 0 && simd_dot(simd_cross(r, u), n) > 0.9999, "")
+        }
+        let near = SIMD3<Float>(0.0, 1.0, -0.4)      // cabeza a ~0,16 m del centro: se aleja a 0,45 m del ojo sin cambiar el rayo cabeza -> centro
+        let mn = XRMenuPanelLayout.handModel(grip: grip, head: near)
+        let cn = mn.map { XRMath.position($0) } ?? .zero
+        let c0 = SIMD3<Float>(-0.1, 0.8 + XRMenuPanelLayout.handLift, -0.5)
+        check("selector-panel", "mano: ojo -> centro >= 0,45 m, mismo rayo", mn != nil && abs(simd_length(cn - near) - XRMenuPanelLayout.handMinEye) < 1e-4 && simd_dot(simd_normalize(cn - near), simd_normalize(c0 - near)) > 0.9999, String(describing: cn))
+        check("selector-panel", "mano: tamaño 0,30 m", XRMenuPanelLayout.handWidth == 0.30, "")
+        check("selector-panel", "mano: cabeza justo encima o pose no finita -> nil (reserva)", XRMenuPanelLayout.handModel(grip: grip, head: SIMD3<Float>(-0.1, 2.0, -0.5)) == nil && XRMenuPanelLayout.handModel(grip: XRMath.translation(SIMD3<Float>(.nan, 0, 0)), head: head) == nil, "")
+    }
     check("cine-legible", "ancho +25 % con tope de 4,5 m", abs(XRCinemaLayout.width(base: 3.0, legible: true) - 3.75) < 1e-4 && XRCinemaLayout.width(base: 4.5, legible: true) == 4.5 && XRCinemaLayout.width(base: 3.0, legible: false) == 3.0, "")
     check("cine-legible", "curvatura limitada a 0,12 solo en texto", XRCinemaLayout.curve(base: 0.7, legible: true) == 0.12 && XRCinemaLayout.curve(base: 0.0, legible: true) == 0 && XRCinemaLayout.curve(base: 0.7, legible: false) == 0.7, "")
     check("cine-legible", "nitidez nunca suave en texto; píxel se respeta", XRCinemaLayout.sharp(base: 0, legible: true) == 1 && XRCinemaLayout.sharp(base: 2, legible: true) == 2 && XRCinemaLayout.sharp(base: 0, legible: false) == 0, "")

@@ -393,6 +393,27 @@ int main(void) {
         { char buf[512]; vrview_reset(&g); memset(&k, 0, sizeof k); k.scene3d = 1; k.gpu3d = 1; vrview_step(&g, &k); vrview_cine_describe(&g, &k, buf, sizeof buf);
           CHECK(strstr(buf, "tipo=motor") && strstr(buf, "modo gpu"), "registro gpu: %s", buf); }
     }
+    {   /* vrhost_keep_filter: ¿el recubrimiento (alarma roja, destellos, fundidos) se conserva como post-proceso por ojo en vez de ir al panel HUD? */
+        /* (native, cine_cand, scene3d, has_3d, world_valid, n_scan, frame_on, n_strips) */
+        CHECK(vrhost_keep_filter(0, 0, 0, 1, 1, 0, 0, 0) == 1, "gpu + mundo (has_3d y world_valid) = conserva el filtro");
+        CHECK(vrhost_keep_filter(0, 1, 1, 0, 0, 0, 0, 0) == 1, "gpu + cinemática con 3D = conserva el filtro");
+        CHECK(vrhost_keep_filter(0, 0, 0, 1, 0, 0, 0, 0) == 0 && vrhost_keep_filter(0, 0, 0, 0, 1, 0, 0, 0) == 0, "gpu sin mundo valido = al panel");
+        CHECK(vrhost_keep_filter(0, 0, 0, 0, 0, 0, 0, 0) == 0, "gpu en menu = al panel");
+        CHECK(vrhost_keep_filter(0, 0, 0, 0, 0, 0, 0, 2) == 1, "gpu + tiras de agua = conserva el filtro");
+        CHECK(vrhost_keep_filter(1, 0, 0, 1, 1, 0, 0, 0) == 1, "nativo + mundo");
+        CHECK(vrhost_keep_filter(1, 0, 0, 0, 0, 1, 0, 0) == 1 && vrhost_keep_filter(1, 0, 0, 0, 0, 0, 1, 0) == 1, "nativo: gafas y marco de mascara");
+        CHECK(vrhost_keep_filter(1, 1, 1, 1, 1, 1, 1, 0) == 0, "nativo + cinemática con 3D = al panel");
+        CHECK(vrhost_keep_filter(1, 1, 0, 1, 1, 0, 0, 0) == 1, "nativo + cinemática sin 3D sustancial: sigue la regla del mundo");
+        CHECK(vrhost_keep_filter(1, 0, 0, 0, 0, 0, 0, 0) == 0, "nativo en menu = al panel");
+    }
+    {   /* vrhost_stereo2d_inside: ¿el 2D de la lista va dentro de las texturas de la pantalla 3D (y no en el panel aparte)? */
+        /* (gpu, lista con 3D o base guardada, compuesto dentro del estéreo) */
+        CHECK(vrhost_stereo2d_inside(1, 1, 1) == 1, "gpu + 3D/base + compuesto = dentro");
+        CHECK(vrhost_stereo2d_inside(1, 1, 0) == 0, "gpu pero el estéreo no pudo componer esta lista = panel aparte (hp2)");
+        CHECK(vrhost_stereo2d_inside(1, 0, 1) == 0, "gpu sin 3D ni base sobre la que componer = panel aparte");
+        CHECK(vrhost_stereo2d_inside(0, 1, 1) == 0 && vrhost_stereo2d_inside(0, 0, 0) == 0, "nativo = panel aparte");
+        CHECK(vrhost_stereo2d_inside(1, 0, 0) == 0, "gpu sin nada = panel aparte");
+    }
     fprintf(stderr, fails ? "test_view: %d FALLOS\n" : "test_view: OK\n", fails);
     return fails ? 1 : 0;
 }

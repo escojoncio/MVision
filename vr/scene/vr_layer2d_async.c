@@ -10,8 +10,16 @@
 #define NJOB 16
 #define L2A_STALE 12   /* listas sin capa nueva antes de dejar de mostrarla (~0,5 s a 25 listas/s). Mejor un HUD algo viejo que volver al shader antiguo, que rompía los textos */
 #define SLOW_MS 12.0
-#define FAST_MS 3.0
-#define RECOVER 240
+#define RECOVER 60
+
+/* Escala adaptativa: baja si el trabajo pasa de SLOW_MS; sube tras RECOVER trabajos seguidos en que la escala siguiente cabría (medido en visor: 3,5 ms a escala 1 y 8,3 ms a escala 3, el coste crece ~lineal con la escala). */
+int vl2a_scale_step(int cur, int target, double ms, int *fast) {
+    if (ms > SLOW_MS && cur > 1) { *fast = 0; return cur - 1; }
+    if (cur < target && ms * (double)(cur + 1) / (double)cur < SLOW_MS * 0.8) {
+        if (++*fast >= RECOVER) { *fast = 0; return cur + 1; }
+    } else *fast = 0;
+    return cur;
+}
 
 typedef struct {
     GpuDrawList l;                 /* ops/data/vram_init apuntan a la memoria propia de abajo */
@@ -20,11 +28,11 @@ typedef struct {
     uint16_t *vram; int has_vram;
     uint16_t *vend; int has_vend;   /* VRAM real al cerrar la lista (texturas dibujadas durante ella) */
     uint8_t *opd; size_t opd_cap; int has_opd;
-    int full, reset;
+    int full, reset, view;         /* view: etiqueta de vista al encolar (vl2a_set_view) */
     uint32_t lseq;                 /* nº de envío */
 } Job;
 
-typedef struct { uint8_t *px; size_t cap; int w, h, full; uint32_t seq; } Out;
+typedef struct { uint8_t *px; size_t cap; int w, h, full, mode, view; uint32_t seq; } Out;   /* mode: VL_* con que se dibujó; view: etiqueta de vista del trabajo */
 
 struct VrL2Async {
     pthread_t th; int started;
@@ -32,7 +40,7 @@ struct VrL2Async {
     Job job[NJOB]; int head, count; int busy;   /* cola circular */
     int quit;
     VrLayer2D *L;
-    _Atomic int target, smooth;
+    _Atomic int target, smooth, view_tag;
     int cur, fast;
     Out out[3]; int pub, held, have_pub;        /* índice publicado / en uso por el consumidor (-1) */
     uint32_t sub_seq, pub_sub_seq, acq_seq;     /* envíos / envío al que corresponde lo publicado / último adquirido */
@@ -83,7 +91,7 @@ static void *worker(void *arg) {
         int ok = 0;
         if (px && w > 0 && h > 0 && grow((void **)&o->px, &o->cap, (size_t)w * h * 4, 1)) {
             memcpy(o->px, px, (size_t)w * h * 4);
-            o->w = w; o->h = h; o->full = j->full == VL_FULL; ok = 1;   /* (VL_PANEL_VERIFIED sigue siendo un panel) */
+            o->w = w; o->h = h; o->full = j->full == VL_FULL; o->mode = j->full; o->view = j->view; ok = 1;   /* (VL_PANEL_VERIFIED sigue siendo un panel) */
         }
 
         pthread_mutex_lock(&A->mx);
@@ -91,9 +99,7 @@ static void *worker(void *arg) {
         if (draw) {
             if (inf.verify && inf.v_ms > 0 && inf.v_ms < ms) ms -= inf.v_ms;   /* la verificación (pantalla 3D del motor) no cuenta para la escala adaptativa: el panel se ve igual de nítido */
             A->work_ms = ms;
-            if (ms > SLOW_MS && A->cur > 1) { A->cur--; A->fast = 0; }
-            else if (ms < FAST_MS && A->cur < atomic_load(&A->target) && ms * (double)((A->cur + 1) * (A->cur + 1)) / (double)(A->cur * A->cur) < SLOW_MS * 0.8) {   /* el coste crece con la escala al cuadrado: solo se sube si cabría */ if (++A->fast >= RECOVER) { A->cur++; A->fast = 0; } }
-            else A->fast = 0;
+            A->cur = vl2a_scale_step(A->cur, atomic_load(&A->target), ms, &A->fast);
             if (ok) A->n_pub++;
             if (ok) { o->seq = j->lseq; A->pub = wi; A->have_pub = 1; A->pub_sub_seq = j->lseq; }
             else A->have_pub = 0;           /* lista sin capa (o fallo): el renderer usa el shader */
@@ -139,6 +145,13 @@ void vl2a_options(VrL2Async *A, int scale, int smooth) {
     atomic_store(&A->smooth, smooth < 0 ? 0 : smooth > 2 ? 2 : smooth);
 }
 
+void vl2a_set_view(VrL2Async *A, int view) { if (A) atomic_store(&A->view_tag, view); }
+
+int vl2a_layer_accept(int mode, int layer_view, int cur_view, int overlay) {
+    if ((layer_view >> 8) != (cur_view >> 8)) return 0;
+    return !overlay || mode == VL_PANEL;
+}
+
 int vl2a_submit(VrL2Async *A, const GpuDrawList *l, const uint8_t *op_dest, int full, int reset) {
     if (!A || !l) return 0;
     double t0 = now_ms();
@@ -166,7 +179,7 @@ int vl2a_submit(VrL2Async *A, const GpuDrawList *l, const uint8_t *op_dest, int 
         j->l.vram_end = j->has_vend ? j->vend : NULL;
         j->has_opd = op_dest != NULL;
         if (op_dest && l->nops) memcpy(j->opd, op_dest, l->nops);
-        j->full = full; j->reset = reset; j->lseq = ++A->sub_seq; A->n_sub++;
+        j->full = full; j->reset = reset; j->view = atomic_load(&A->view_tag); j->lseq = ++A->sub_seq; A->n_sub++;
         A->count++;
         pthread_cond_signal(&A->cv_job);
     }
@@ -179,11 +192,10 @@ int vl2a_submit(VrL2Async *A, const GpuDrawList *l, const uint8_t *op_dest, int 
 int vl2a_acquire(VrL2Async *A, const uint8_t **px, int *w, int *h, int *full, uint32_t *seq) {
     if (!A) return -1;
     pthread_mutex_lock(&A->mx);
-    if (!A->have_pub || A->pub < 0 || A->sub_seq - A->pub_sub_seq > L2A_STALE) { A->held = -1; A->n_neg++; pthread_mutex_unlock(&A->mx); return -1; }
+    if (!A->have_pub || A->pub < 0 || A->sub_seq - A->pub_sub_seq > L2A_STALE) { A->held = -1; A->acq_seq = 0; A->n_neg++; pthread_mutex_unlock(&A->mx); return -1; }
     int r = 0;
-    if (A->held != A->pub || A->out[A->pub].seq != A->acq_seq) {
-        A->held = A->pub; A->acq_seq = A->out[A->pub].seq; r = 1;
-    }
+    A->held = A->pub;
+    if (A->out[A->pub].seq != A->acq_seq) { A->acq_seq = A->out[A->pub].seq; r = 1; }   /* nueva solo si lo publicado cambió desde la última adquisición (vl2a_release no la borra) */
     const Out *o = &A->out[A->held];
     if (px) *px = o->px;
     if (w) *w = o->w;
@@ -192,6 +204,15 @@ int vl2a_acquire(VrL2Async *A, const uint8_t **px, int *w, int *h, int *full, ui
     if (seq) *seq = o->seq;
     pthread_mutex_unlock(&A->mx);
     return r;
+}
+
+int vl2a_acquire_info(VrL2Async *A, int *mode, int *view) {
+    if (!A) return 0;
+    pthread_mutex_lock(&A->mx);
+    int ok = A->held >= 0;
+    if (ok) { if (mode) *mode = A->out[A->held].mode; if (view) *view = A->out[A->held].view; }
+    pthread_mutex_unlock(&A->mx);
+    return ok;
 }
 
 void vl2a_release(VrL2Async *A) {

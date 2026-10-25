@@ -1,5 +1,5 @@
 # vr_scene: ensamblador de escena estéreo. Uso (desde la raíz del repo):
-#   make -C vr/scene test        prueba sintética (no necesita datos del juego)
+#   make -C vr/scene test        prueba sintética (no necesita datos del juego) y vr_blend.h (mezclas semitransparentes en gamma, render/metal)
 #   make -C vr/scene test-san    lo mismo con ASan/UBSan (gcc)
 #   make -C vr/scene test-split  prueba de vr_split (partir triángulos largos, recuento de cruces del plano cercano)
 #   make -C vr/scene test-layer2d  capa 2D fiel (vr_layer2d.c) contra el oráculo gpu.c, escala 1 bit a bit y escala 4
@@ -30,8 +30,11 @@ $(B)/libvrscene.a: $(B)/vr_scene.o
 	rm -f $@ && ar rcs $@ $^
 $(B)/test_scene: test_scene.c hud_emu.c hud_emu.h $(B)/libvrscene.a
 	$(CC) $(CFLAGS) $(INC) test_scene.c hud_emu.c $(B)/libvrscene.a -lm -o $@
-test: $(B)/test_scene
+$(B)/test_blend: test_blend.c $(RN)/metal/vr_blend.h | $(B)
+	$(CC) $(CFLAGS) -I$(RN)/metal test_blend.c -lm -o $@
+test: $(B)/test_scene $(B)/test_blend
 	$(B)/test_scene
+	$(B)/test_blend
 test-san:
 	$(MAKE) test B=build-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 

@@ -47,7 +47,7 @@ typedef struct {
     float grab_range;        /* distancia máxima cuerpo-enemigo para agarrar (1,3 m) */
     float neck_radius;       /* radio de la mano al cuello o a la espalda del enemigo para agarrar (0,30 m) */
     float back_dist;         /* la espalda: punto a esta distancia (0,25 m) detrás del enemigo, a 0,2 m de altura */
-    float chest_side, chest_down, chest_fwd, chest_radius;   /* zonas de menú (m), UNA POR MANO, fijas respecto a la cabeza en marco de guiñada (rumbo del personaje): la mano izquierda (objetos, L2) a su lado izquierdo y la derecha (armas, R2) al derecho; lateral 0,16 hacia cada lado, 0,26 bajo la cabeza (eje vertical del mundo), delante -0,02, radio 0,15, medidas en el registro del visor con las manos donde el usuario pulsó */
+    float chest_side, chest_down, chest_fwd, chest_radius, chest_exit;   /* zonas de menú (m), UNA POR MANO, fijas respecto a la cabeza en el marco FÍSICO (metros reales, delante = head_fwd, hrel de la mano; sin escala del motor ni rumbo del personaje): la mano izquierda (objetos, L2) a su lado izquierdo y la derecha (armas, R2) al derecho; lateral 0,16 hacia cada lado, 0,26 bajo la cabeza, delante -0,02, radio 0,15 para entrar y chest_exit 0,20 para seguir dentro (histéresis), medidas en el registro del visor con las manos donde el usuario pulsó */
     float chest_hold_s;      /* gatillo de la mano (L2 izquierda, R2 derecha) mantenido sin interrupción dentro de SU zona este tiempo (0,30 s) para abrir la ventana; salir de la zona o soltar lo reinicia. Dentro de la zona el gatillo no llega al juego (mask) */
     float grab_after_punch_s;/* sin agarres tras un golpe durante este tiempo (0,3 s) */
     float neck_height;       /* altura del cuello sobre la posición del enemigo (0,45 m, posición del motor = cintura) */
@@ -119,7 +119,7 @@ typedef struct {
     const char *grab_why;    /* motivo del último intento de agarre de este VBlank (NULL: ninguno): "ok", "mano_lejos", "cuerpo_lejos", "puno_cerrado", "tras_golpe"... */
     float grab_dist;         /* distancia de la mano al cuello/espalda en ese intento (m) */
     int grab_side_try;
-    struct { int valid, opened; float dist, hold; const char *reason; } pecho[2];   /* intento de ventana por mano física (gatillo apretado): distancia a SU zona (m), tiempo mantenido (s), resultado y motivo (cadena estática) para el registro [pecho] */
+    struct { int valid, opened; float dist, hold; const char *reason; float hf[3]; int rearm; } pecho[2];   /* intento de ventana por mano física (gatillo apretado): distancia a SU zona (m), tiempo mantenido (s), resultado y motivo (cadena estática) para el registro [pecho]; hf = mano respecto a la cabeza en metros reales (derecha, arriba, delante); rearm = 1: apertura bloqueada hasta soltar el gatillo */
     int grab_side;           /* mano física que sujeta (-1 ninguna) mientras el agarre dura (para pegar las manos al cuello) */
     int throw_side;          /* -1 nada; 0/1: lanzamiento (agarre + tirón) con esa mano este VBlank (grab_start también vale 1) */
     float throw_yaw;         /* rumbo del tirón proyectado en el suelo (rad, delante = (sin, cos)) */
@@ -136,6 +136,7 @@ typedef struct {
     float since_punch;       /* s desde el último golpe */
     int near_prev[2];
     int menu_hold, chest_prev[2], chest_live[2];   /* chest_live: intento en curso (gatillo apretado dentro de la zona) */
+    int chest_lock[2];       /* tras abrir la ventana no hay otra apertura hasta soltar el gatillo (con seguimiento): perder y recuperar el seguimiento con el gatillo apretado no es una pulsación */
     int trig_dn[2];          /* gatillo de cada mano apretado (histéresis trig_on/trig_off) */
     float chest_cool[2], chest_t[2];
     int peek_on;

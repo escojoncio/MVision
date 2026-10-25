@@ -442,8 +442,72 @@ static void t_trigmenu(void) {
     vrg_init(&g); in = base(); memcpy(in.hand[0], c[0], sizeof c[0]); settle(&g, &in, 12); in.trig[1] = 1.0f; upd(&g, &in, &o); CHECK(!(o.mask & VRG_R2));
 }
 
+/* zona de menú en el marco FÍSICO: la cabeza/mano del mundo (escaladas) y el rumbo del personaje no intervienen; manda hrel + head_fwd */
+static void upd_phys(vrg_t *g, vrg_in_t *in, vrg_out_t *o) {
+    memcpy(in->head_u, in->head, sizeof in->head_u);
+    for (int s = 0; s < 2; s++) memcpy(in->hand_u[s], in->hand[s], sizeof in->hand_u[s]);
+    vrg_update(g, in, o);
+}
+/* mano `s` a (lat derecha, arriba, delante) de la cabeza en metros reales; el mundo va escalado por `sc` y con otro rumbo (in->yaw) a propósito */
+static void put_hf(vrg_in_t *in, int s, float lat, float up, float fwd, float sc) {
+    float fx = in->head_fwd[0], fz = in->head_fwd[1];
+    in->hrel[s][0] = -lat * fz + fwd * fx; in->hrel[s][1] = up; in->hrel[s][2] = lat * fx + fwd * fz;
+    for (int i = 0; i < 3; i++) in->hand[s][i] = in->head[i] + sc * in->hrel[s][i];
+}
+static vrg_in_t phys_base(void) {
+    vrg_in_t in = base();
+    in.head[0] = 0.255f; in.head[1] = 0.85f; in.head[2] = -0.34f;     /* mundo escalado 0,85 */
+    in.yaw = 0.0f; in.head_fwd[0] = 1.0f; in.head_fwd[1] = 0.0f;       /* cabeza girada 90 grados respecto al personaje */
+    return in;
+}
+/* aprieta el gatillo de `s` durante `n` fotogramas; devuelve cuántas veces se abrió la ventana (flancos de pecho.opened) */
+static int press_phys(vrg_t *g, vrg_in_t *in, int s, int n, vrg_out_t *o) {
+    int cnt = 0; in->trig[s] = 1.0f;
+    for (int i = 0; i < n; i++) { upd_phys(g, in, o); cnt += o->pecho[s].valid && o->pecho[s].opened; }
+    return cnt;
+}
+static void t_chest_phys(void) {
+    vrg_out_t o;
+    for (int s = 0; s < 2; s++) {
+        float sd = s == 0 ? -1.0f : 1.0f;
+        /* (a) mano en la zona física con el mundo escalado y el rumbo del personaje distinto del de la cabeza: abre */
+        vrg_t g; vrg_init(&g); vrg_in_t in = phys_base();
+        put_hf(&in, s, sd * 0.16f, -0.26f, -0.02f, 0.85f); for (int i = 0; i < 12; i++) upd_phys(&g, &in, &o);
+        CHECK(press_phys(&g, &in, s, 16, &o) == 1 && o.menu_open[s] == 1);
+        CHECK(o.pecho[s].rearm == 1 && fabsf(o.pecho[s].hf[0] - sd * 0.16f) < 0.005f && fabsf(o.pecho[s].hf[1] + 0.26f) < 0.005f && fabsf(o.pecho[s].hf[2] + 0.02f) < 0.005f);   /* hf para el registro [pecho] */
+        /* (b) gatillo mantenido 3 s en la zona: exactamente una apertura */
+        for (int i = 0; i < 135; i++) { int c = press_phys(&g, &in, s, 1, &o); CHECK(c == 0); }
+        /* el seguimiento se pierde un fotograma con el gatillo aún apretado: al volver NO se reabre */
+        in.tracked[s] = 0; upd_phys(&g, &in, &o); in.tracked[s] = 1;
+        CHECK(press_phys(&g, &in, s, 40, &o) == 0 && o.menu_open[s] == 0);
+        /* soltar el gatillo rearma: otra pulsación abre otra vez */
+        in.trig[s] = 0; for (int i = 0; i < 3; i++) upd_phys(&g, &in, &o);
+        CHECK(press_phys(&g, &in, s, 16, &o) == 1);
+        /* (c) 0,35 m fuera de la zona: no abre */
+        vrg_init(&g); in = phys_base();
+        put_hf(&in, s, sd * (0.16f + 0.35f), -0.26f, -0.02f, 0.85f); for (int i = 0; i < 12; i++) upd_phys(&g, &in, &o);
+        press_phys(&g, &in, s, 1, &o); CHECK(o.pecho[s].valid && o.pecho[s].reason && !strcmp(o.pecho[s].reason, "lejos"));
+        CHECK(press_phys(&g, &in, s, 40, &o) == 0 && o.menu_open[s] == 0);
+        /* histéresis: entra a 0,15, sigue dentro hasta 0,20; entrando de fuera a 0,18 no vale */
+        vrg_init(&g); in = phys_base(); in.trig[s] = 0;
+        put_hf(&in, s, sd * 0.16f, -0.26f, -0.02f, 0.85f); for (int i = 0; i < 12; i++) upd_phys(&g, &in, &o);
+        put_hf(&in, s, sd * 0.16f, -0.26f + 0.18f, -0.02f, 0.85f); upd_phys(&g, &in, &o);
+        CHECK(press_phys(&g, &in, s, 16, &o) == 1);
+        vrg_init(&g); in = phys_base();
+        put_hf(&in, s, sd * 0.16f, -0.26f + 0.18f, -0.02f, 0.85f); for (int i = 0; i < 12; i++) upd_phys(&g, &in, &o);
+        CHECK(press_phys(&g, &in, s, 16, &o) == 0);
+        /* (d) cabeza mirando casi al suelo (rumbo de la cabeza no válido, fwd_ok = 0): la zona usa el rumbo del personaje (in.yaw) como reserva y abre */
+        vrg_init(&g); in = phys_base(); in.yaw = 0.7f;
+        in.head_fwd[0] = sinf(in.yaw); in.head_fwd[1] = cosf(in.yaw);
+        put_hf(&in, s, sd * 0.16f, -0.26f, -0.02f, 0.85f);                       /* hrel construido con el rumbo del personaje */
+        in.head_fwd[0] = 0.05f; in.head_fwd[1] = 0.05f;                          /* casi vertical: |fwd| < 0,5 */
+        for (int i = 0; i < 12; i++) upd_phys(&g, &in, &o);
+        CHECK(press_phys(&g, &in, s, 16, &o) == 1 && o.menu_open[s] == 1);
+    }
+}
+
 int main(void) {
-    t_punch(); t_contact(); t_rules(); t_throw(); t_walk(); t_grab(); t_chest(); t_trigmenu(); t_knock(); t_peek(); t_robust();
+    t_punch(); t_contact(); t_rules(); t_throw(); t_walk(); t_grab(); t_chest(); t_chest_phys(); t_trigmenu(); t_knock(); t_peek(); t_robust();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails != 0;
 }

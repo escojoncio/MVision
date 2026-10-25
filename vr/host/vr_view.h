@@ -129,6 +129,22 @@ const char *vrview_reason_name(int reason);
 #define VRV_COVER_SPACING 25u
 int vrview_cover_feed(VrViewIn *in, uint32_t *seen, uint32_t vb, int has_fill, uint32_t fill_frame, int fill_pct, int has_nat, uint32_t nat_frame, int nat_pct);
 
+/* ¿Se conserva el recubrimiento de pantalla (clase 3b: alarma roja, destellos, fundidos, gafas, marco de máscara) como post-proceso por ojo en vez de pasar al panel 2D? (función pura; vrhost.c)
+ * Nativo: gafas, marco o mundo; una cinemática del motor con 3D (scene3d) lo manda al panel. Modo gpu: el mundo (has_3d y world_valid), la cinemática del motor con 3D y las tiras de agua
+ * (sin panel) lo conservan, y el renderer lo aplica con RenderRG.planPost; el resto va al panel. */
+static inline int vrhost_keep_filter(int native, int cine_cand, int scene3d, int has_3d, int world_valid, int n_scan, int frame_on, int n_strips) {
+    int world = has_3d && world_valid;
+    if (!native) return n_strips > 0 || world || (cine_cand && scene3d);
+    return (n_scan > 0 || frame_on || world) && !(cine_cand && scene3d);
+}
+
+/* ¿El 2D (lotes kind 2) de la lista actual va DENTRO de las texturas de la pantalla 3D en vez de en el panel aparte (hp2 de XRPresent)? (función pura; RenderRG.stereo2DInside)
+ * Solo en modo gpu, si hay una imagen 3D sobre la que componer (la lista trae 3D o hay una base 3D guardada) y el estéreo compuso de verdad esa lista (composed_in_stereo = 0 si
+ * falló la textura o la cámara y se cayó al cine plano): si no, el 2D se ve por el panel como antes. */
+static inline int vrhost_stereo2d_inside(int gpu, int list_has_3d_or_base, int composed_in_stereo) {
+    return gpu && list_has_3d_or_base && composed_in_stereo;
+}
+
 #ifdef __cplusplus
 }
 #endif

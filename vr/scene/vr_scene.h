@@ -216,6 +216,14 @@ typedef struct {
     uint32_t incoh[VR_INC_N]; /* ... por causa (VR_INC_*) */
     uint32_t n_near_eye;      /* modo gpu (opts.eye_near_m): triángulos descartados por tener un vértice a menos de eye_near_m del ojo del motor */
     uint32_t n_line3d;        /* opts.line3d_px: líneas con los dos extremos de vista emitidas como cuadrilátero 3D (2 triángulos en n_tris3d) */
+    uint32_t n_rect_semi_tex; /* rects semitransparentes con textura (subconjunto de n_rect; diagnóstico de la mezcla) */
+    /* --- diagnóstico [geom] --- */
+    uint32_t n_ref_groups;    /* centros de proyección distintos (H, OFX+dox, OFY+doy) de la pasada que fijó el centro del mundo (máx. 16 contados) */
+    uint32_t n_ref_total;     /* polígonos contados en esa pasada (n_ref_group / n_ref_total = fracción del grupo dominante) */
+    uint32_t n_quad3d;        /* cuadriláteros 3D aceptados (4 vértices con vista) */
+    uint32_t n_quad_noncoh;   /* ... de ellos, los que NO cumplen quad_coherent (4.º vértice fuera del plano de los otros tres) */
+    uint32_t n_coplanar;      /* pares (anterior, posterior) de triángulos opacos coplanares y solapados corregidos (opts.coplanar_m) */
+    uint32_t n_coplanar_skip; /* omisiones: triángulos sin revisar al agotar VR_COPLANAR_BUDGET + pares coplanares por encima de VR_COPLANAR_PAIRS; 0 = revisados todos */
 } VrStats;
 
 #define VR_FILTER_ROWS 512
@@ -353,6 +361,21 @@ typedef struct {
      * como cuadrilátero 3D (2 triángulos, kind 0/1 según SEMI, sin textura) en vez de al plano 2D: grosor line3d_px píxeles originales a la profundidad de cada extremo, alargado medio
      * grosor en cada extremo (como la línea 2D), recortado contra z = near_units. Si no cumple, sigue yendo al plano 2D. 0 (def.) = siempre 2D. */
     float line3d_px;
+    /* Z-fight de coplanares: el orden de dibujo del juego (OT) = orden de la lista, pero el render lo decide la profundidad. coplanar_m > 0 (def. 0 = desactivado; el anfitrión usa 0,005 = 5 mm en modo gpu): un triángulo opaco 3D posterior a otro cuyos tres
+     * vértices distan menos de coplanar_m de su plano (normales paralelas, cos > 0,999) y que se solapa con él EN ESE PLANO se desplaza hacia el ojo por el rayo de cada vértice (misma posición en pantalla)
+     * coplanar_lift * min(distancia al ojo, 50 m) metros por nivel de apilamiento (def. 0,0002 = 0,2 mm por metro, máx. 1 cm), para que gane la posterior como en la PS1. Los niveles se encadenan
+     * (una tercera sobre dos: 2 niveles, máx. 8). Mitades del mismo polígono y semitransparentes (sin escritura de profundidad) no cuentan. VrStats.n_coplanar. 0 = desactivado.
+     * Coste acotado: ordenación por X y barrido (solo pares con las cajas solapadas), como mucho VR_COPLANAR_BUDGET (400 000) pares candidatos y VR_COPLANAR_PAIRS (65536) pares coplanares por lista; el resto
+     * queda sin corregir (VrStats.n_coplanar_skip). */
+    float coplanar_m;
+    float coplanar_lift;
+    /* Créditos/texto SOBRE el 3D de una pantalla del motor (el panel 2D se compone dentro de la textura estéreo):
+     * keep_late_clear 1: el rect opaco sin textura a pantalla completa (drop_clear) que viene DESPUÉS de un triángulo 3D emitido (índice de op mayor) es el relleno de la pantalla y SÍ se emite en la
+     *   clase 2 (VrStats.n_clear no lo cuenta); los anteriores al primer 3D (borrado de inicio de lista) se siguen descartando. 0 (def.) = como antes.
+     * veil_as_2d 1: el recubrimiento semitransparente (clase 3, a)) se emite en la clase 2 y no entra en VrFilter.covers. Con screen_filter=1 se hace también (aunque valga 0) si la lista termina sin ningún
+     *   triángulo 3D (no hay vista sobre la que aplicar un post-proceso por ojo; se reensambla la lista con veil_as_2d=1). 0 (def.) = como antes. */
+    int keep_late_clear;
+    int veil_as_2d;
 } VrSceneOpts;
 
 VrSceneOpts vr_scene_opts_default(void);

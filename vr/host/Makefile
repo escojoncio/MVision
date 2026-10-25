@@ -1,6 +1,6 @@
 # Pegamento host <-> capa VR. Uso (desde la raíz del repo):
 #   make -C vr/host check          las direcciones de vrhost.c coinciden con vr/camera/vr_names.json
-#   make -C vr/host test           prueba de vr_view (motivos e histéresis de la vista mundo/cine)
+#   make -C vr/host test           prueba de vr_view (motivos e histéresis de la vista mundo/cine), vr_cine, vr_smooth y vrdump (selección de captura del volcado)
 #   make -C vr/host run            ejecuta el host completo en MV_NOGEN con datos locales (ver vrhost_run.c) y comprueba las escenas
 # Todo lo generado va a OUT (por defecto ../../build-host, ignorado por git); los datos del juego y el fichero de firmas
 # son locales y no se suben.
@@ -63,10 +63,15 @@ $(OUT)/test_smooth: test_smooth.c vr_smooth.c vr_smooth.h
 	@mkdir -p $(OUT)
 	$(CC) -I. $(CFLAGS) -o $@ test_smooth.c vr_smooth.c -lm
 
-test: $(OUT)/test_view $(OUT)/test_cine $(OUT)/test_smooth
+$(OUT)/test_dump_pick: test_dump_pick.c vrdump.h
+	@mkdir -p $(OUT)
+	$(CC) -I. $(CFLAGS) -o $@ test_dump_pick.c
+
+test: $(OUT)/test_view $(OUT)/test_cine $(OUT)/test_smooth $(OUT)/test_dump_pick
 	$(OUT)/test_view
 	$(OUT)/test_cine
 	$(OUT)/test_smooth
+	$(OUT)/test_dump_pick
 
 .PHONY: check run test
 

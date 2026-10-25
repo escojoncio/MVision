@@ -10,6 +10,7 @@
 #define VR_FC_FILTER 0      /* bool: suavizado bilineal de texels (respeta la transparencia 0x0000) */
 #define VR_FC_LINEAR_OUT 1  /* bool: el destino es lineal/sRGB: convertir gamma->lineal al escribir */
 #define VR_FC_PASS 2        /* uint: 0 todo; 1 solo texels semitransparentes (bit15=1) y sin textura; 2 solo texels opacos (bit15=0) */
+#define VR_FC_BLEND 3       /* int: -1 = opaco / mezcla de función fija (no definida = -1); 0..3 = modo de mezcla del original, hecho en el shader en espacio gamma leyendo el destino ([[color(0)]]; vr_blend.h) */
 
 /* VrGpuVtx.flags (el contrato de VrVtx no los definía: se asumen estos bits, == GPU_F_* de gpu.h) */
 #define VR_VF_TEXTURED 2

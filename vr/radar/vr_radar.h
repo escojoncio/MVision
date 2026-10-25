@@ -136,5 +136,8 @@ int vrradar_wrist_quad(const VrRadarArm *arm, const VrRadarWristCfg *cfg, float 
 int vrradar_wrist_quad_eye(const VrRadarArm *arm, const VrRadarWristCfg *cfg, float aspect, const float eye[3], VrRadarQuad *out);
 /* Sin IK: pose de agarre del mando izquierdo (columna-mayor, espacio VR) -> antebrazo aproximado (antebrazo 0,27 m, hacia atrás). */
 int vrradar_arm_from_controller(const float grip[16], VrRadarArm *out);
+/* Elige el antebrazo del anclaje: la IK (el brazo que se dibuja; el panel queda a lift_m de su eje) si es válida (finita, hueso no nulo); si no, el agarre del mando
+ * (puede ser NULL). Devuelve 1 = IK, 2 = mando, 0 = ninguna (out intacto o sin definir). */
+int vrradar_pick_arm(const float grip[16], const VrRadarArm *ik, VrRadarArm *out);
 /* Brillo extra 0..gaze_boost según el ángulo entre la mirada (eye, forward unitario) y el quad; 0 si el quad da la espalda. */
 float vrradar_gaze(const VrRadarQuad *q, const float eye[3], const float forward[3], const VrRadarWristCfg *cfg);

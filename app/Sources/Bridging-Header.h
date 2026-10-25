@@ -3,6 +3,7 @@
 #include "vr_input.h"
 #include "vrhost.h"
 #include "vrgame.h"
+#include "vr_view.h"    /* políticas puras de la vista (vrhost_stereo2d_inside) */
 #include "ns_bridge.h"
 #include "vr_hands_frame.h"
 #include "vr_scope.h"

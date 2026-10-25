@@ -3,7 +3,7 @@
 #   .stage/runtime  runtime/*.c y *.h (sin headless ni pruebas; nogen.c entra: el runtime corre sin código generado)
 #   .stage/vr/<x>   vr/{bridge,camera,input,scene,host,body,radar,hands,weapons,gameplay,ai}: solo el código de biblioteca (sin pruebas ni herramientas con main)
 #   (vr/tools/ -el probador local vrprobe, que usa el disco real- NO se copia: la lista de directorios de arriba es cerrada)
-#   .stage/metal    render/metal/vr_*.metal y vr_types.h (rg_gpu.metal es del renderer de referencia: no entra)
+#   .stage/metal    render/metal/vr_*.metal, vr_types.h y vr_blend.h (rg_gpu.metal es del renderer de referencia: no entra)
 #   .stage/res      sigs_hle.json (firmas del SDK enmascaradas, sin código del juego)
 #   .stage/extras   ficheros Swift opcionales (EXTRAS_DIR)
 # No se copia código generado ni el ejecutable del juego: el EXE sale del disco del usuario en tiempo de ejecución.
@@ -48,7 +48,7 @@ cp ../vr/native/ns_adapt.[ch] ../vr/native/ns_light.[ch] ../vr/native/ns_cpuref.
 cp ../vr/native/ns_fill.[ch] ../vr/native/ns_fill_run.c ../vr/native/ns_fill_glue.[ch] .stage/vr/native/   # relleno por la verdad del motor (ver ns_fill.h)
 cp ../vr/native/ns_hand.[ch] .stage/vr/native/   # manos articuladas propias en la escena nativa (usa vr/body/vr_hand_mesh.[ch], que ya entra con vr/body)
 
-cp ../render/metal/vr_*.metal ../render/metal/vr_types.h .stage/metal/
+cp ../render/metal/vr_*.metal ../render/metal/vr_types.h ../render/metal/vr_blend.h .stage/metal/
 cp ../vr/native/ns_gpu_types.h .stage/metal/   # lo incluye app/Sources/Native/NativeShaders.metal
 cp "$SIGS_HLE" .stage/res/sigs_hle.json
 

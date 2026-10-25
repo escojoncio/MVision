@@ -41,6 +41,7 @@ VrSceneOpts vr_scene_opts_default(void) {
     o.recon_partial = 1; o.recon_ambig = 1;
     o.coherence = 1;   /* §56: red de seguridad contra vértices incoherentes */
     o.line3d_px = 0.0f;   /* opt-in: lo activa el anfitrión en modo gpu (vr/host) */
+    o.coplanar_m = 0.0f; o.coplanar_lift = 0.0002f;   /* opt-in: lo activa el anfitrión en modo gpu (vr/host; 0,005 = 5 mm) */
     o.coh_px = 2.5f; o.coh_edge_m = 60.0f; o.coh_far_m = 150.0f; o.coh_stretch = 0.0f; o.coh_flag_edge_m = 32.0f; o.coh_synth_edge_m = 20.0f;
     return o;
 }
@@ -62,6 +63,10 @@ static uint32_t *g_next; static size_t g_next_cap;
 static uint8_t *g_fate; static uint32_t g_fate_cap;
 static uint32_t *g_tsrc_int; static size_t g_tsrc_int_cap;   /* op de origen de cada triángulo de salida (VrScene.tri_src) */
 static uint8_t *g_opd; static size_t g_opd_cap;   /* destino por op (VrScene.op_dest) */
+typedef struct { float x; uint32_t i; } CoKey;   /* z-fight de coplanares (más abajo) */
+static float *g_cpbox; static size_t g_cpbox_cap;   /* caja de cada triángulo: min xyz, max xyz */
+static CoKey *g_cpkey; static size_t g_cpkey_cap;
+static uint8_t *g_cplvl; static size_t g_cplvl_cap;
 static uint32_t *g_tsrc; static uint32_t g_tsrc_cap;   /* (pruebas) op de origen de cada triángulo de VrScene.v, en el orden de salida */
 void vr_scene_set_tri_src(uint32_t *buf, uint32_t cap) { g_tsrc = buf; g_tsrc_cap = buf ? cap : 0; }
 void vr_scene_set_fate(uint8_t *buf, uint32_t cap) { g_fate = buf; g_fate_cap = buf ? cap : 0; }
@@ -79,6 +84,8 @@ void vr_scene_release(void) {
     free(g_tri); free(g_vtx); free(g_tcause); free(g_bat); free(g_st); free(g_hash); free(g_next);
     g_tri = NULL; g_vtx = NULL; g_tcause = NULL; g_tcause_cap = 0; g_bat = NULL; g_st = NULL; g_hash = NULL; g_next = NULL;
     g_tri_cap = g_vtx_cap = g_bat_cap = g_st_cap = g_st_n = g_hash_cap = g_next_cap = 0;
+    free(g_cpbox); free(g_cpkey); free(g_cplvl);
+    g_cpbox = NULL; g_cpkey = NULL; g_cplvl = NULL; g_cpbox_cap = g_cpkey_cap = g_cplvl_cap = 0;
 }
 
 #define GROW(p, cap, need) do { if ((need) > (cap)) { size_t nc_ = (cap) ? (cap) : 256; while (nc_ < (need)) nc_ *= 2; \
@@ -122,7 +129,7 @@ static uint32_t pack_rgba(uint8_t r, uint8_t g, uint8_t b) { return (uint32_t)r 
 typedef struct { float p[3], u, v, r, g, b; } CV;
 
 /* Centro del mundo de la lista (ver vr_scene.h, "Desplazamiento de proyección"): moda de (proj_ox+dox, proj_oy+doy) cuantizada a 0,5 px. */
-typedef struct { int ok; float rx, ry, h; uint32_t n; } WorldRef;
+typedef struct { int ok; float rx, ry, h; uint32_t n, ng, nt; } WorldRef;   /* n = polígonos del grupo modal; ng = grupos distintos (máx. 16); nt = polígonos contados */
 static int poly_all_valid(const GpuOp *op) {
     int nv = op->nv == 4 ? 4 : 3;
     for (int k = 0; k < nv; k++) if (!op->v[k].vvalid) return 0;
@@ -145,7 +152,10 @@ static void list_ref(const GpuDrawList *dl, WorldRef *w) {
         }
         int best = -1;
         for (int k = 0; k < nh; k++) if (best < 0 || hb[k].n > hb[best].n) best = k;
-        if (best >= 0) { w->ok = 1; w->rx = hb[best].x * 0.5f; w->ry = hb[best].y * 0.5f; w->h = hb[best].h; w->n = hb[best].n; }
+        if (best >= 0) {
+            w->ok = 1; w->rx = hb[best].x * 0.5f; w->ry = hb[best].y * 0.5f; w->h = hb[best].h; w->n = hb[best].n;
+            w->ng = (uint32_t)nh; for (int k = 0; k < nh; k++) w->nt += hb[k].n;
+        }
     }
 }
 
@@ -490,7 +500,7 @@ static int filter_class(const VrSceneOpts *o, const GpuDrawList *dl, const GpuOp
     if ((op->flags & GPU_F_SEMI) && !(op->flags & GPU_F_TEXTURED)) { /* solo color plano/degradado: fundido, destello, tinte (un polígono texturizado a pantalla completa es contenido) */
         int cx0 = x0 > op->cx1 ? x0 : op->cx1, cy0 = y0 > op->cy1 ? y0 : op->cy1;
         int cx1 = x1 < op->cx2 + 1 ? x1 : op->cx2 + 1, cy1 = y1 < op->cy2 + 1 ? y1 : op->cy2 + 1;
-        if (isect_area(cx0, cy0, cx1, cy1, dx0, dy0, dx1, dy1) >= o->filter_min_cover * da) return 2;
+        if (isect_area(cx0, cy0, cx1, cy1, dx0, dy0, dx1, dy1) >= o->filter_min_cover * da) return o->veil_as_2d ? 0 : 2;   /* veil_as_2d: se queda en la clase 2 (se mezcla sobre el panel/la textura estéreo) */
         /* línea de exploración: tira fina de ancho de pantalla (alto <= 2, >= 90 % del ancho mostrado) */
         if (is_rect && (y1 - y0) <= 2 && (x1 - x0) * 10 >= 9 * dl->disp.w &&
             isect_area(x0, y0, x1, y1, dx0, dy0, dx1, dy1) >= 0.9 * (double)(x1 - x0) * (y1 - y0)) return 3;
@@ -596,6 +606,114 @@ static void filter_note(VrScene *out, const GpuOp *op, int cls, int is_rect, flo
     }
 }
 
+/* ---------------- z-fight de coplanares (VrSceneOpts.coplanar_m) ---------------- */
+#define VR_COPLANAR_BUDGET 400000u   /* pares candidatos (cajas solapadas en X) comparados como máximo por lista */
+#define VR_COPLANAR_PAIRS 65536u      /* pares coplanares solapados anotados como máximo por lista */
+#define VR_COPLANAR_LEVELS 8          /* niveles de apilamiento máximos */
+typedef struct { uint32_t lo, hi; } CoPair;
+static CoPair g_cppair[VR_COPLANAR_PAIRS];
+static int cmp_cokey(const void *a, const void *b) {
+    const CoKey *x = a, *y = b;
+    return x->x < y->x ? -1 : x->x > y->x ? 1 : (x->i > y->i) - (x->i < y->i);
+}
+static int cmp_copair(const void *a, const void *b) {
+    const CoPair *x = a, *y = b;
+    return x->hi != y->hi ? (x->hi > y->hi) - (x->hi < y->hi) : (x->lo > y->lo) - (x->lo < y->lo);
+}
+/* Solape con área de dos triángulos 2D (separación por los ejes de las aristas; tocarse o rozar a menos de eps no cuenta). */
+static int tri_overlap2(const float a[3][2], const float b[3][2], float eps) {
+    for (int w = 0; w < 2; w++) {
+        const float (*T)[2] = w ? b : a;
+        for (int k = 0; k < 3; k++) {
+            float ex = T[(k + 1) % 3][0] - T[k][0], ey = T[(k + 1) % 3][1] - T[k][1], l = sqrtf(ex * ex + ey * ey);
+            if (l < 1e-9f) continue;
+            float nx = -ey / l, ny = ex / l, amin = 1e30f, amax = -1e30f, bmin = 1e30f, bmax = -1e30f;
+            for (int j = 0; j < 3; j++) {
+                float pa = a[j][0] * nx + a[j][1] * ny, pb = b[j][0] * nx + b[j][1] * ny;
+                amin = fminf(amin, pa); amax = fmaxf(amax, pa); bmin = fminf(bmin, pb); bmax = fmaxf(bmax, pb);
+            }
+            if (amax <= bmin + eps || bmax <= amin + eps) return 0;
+        }
+    }
+    return 1;
+}
+/* Triángulos opacos 3D (kind 0) en el orden de la lista: el posterior coplanar (todos sus vértices a menos de coplanar_m del plano del anterior, normales paralelas) y solapado con él en ese plano se
+ * acerca al ojo por el rayo de cada vértice (misma posición en pantalla, uv sin cambio) coplanar_lift * min(distancia, 50 m) metros por nivel. 0 = bien, -2 = memoria. */
+static int coplanar_lift(VrScene *out, const VrSceneOpts *o, size_t nt) {
+    if (nt < 2) return 0;
+    GROW(g_cpbox, g_cpbox_cap, nt * 6);
+    GROW(g_cpkey, g_cpkey_cap, nt);
+    GROW(g_cplvl, g_cplvl_cap, nt);
+    memset(g_cplvl, 0, nt);
+    size_t nk = 0;
+    for (size_t t = 0; t < nt; t++) {
+        if (g_tri[t].kind != 0) continue;
+        float *bx = &g_cpbox[t * 6];
+        int ok = 1;
+        for (int c = 0; c < 3; c++) {
+            const float *p0 = g_tri[t].v[0].pos, *p1 = g_tri[t].v[1].pos, *p2 = g_tri[t].v[2].pos;
+            if (!isfinite(p0[c] + p1[c] + p2[c])) ok = 0;
+            bx[c] = fminf(p0[c], fminf(p1[c], p2[c])) - o->coplanar_m; bx[3 + c] = fmaxf(p0[c], fmaxf(p1[c], p2[c])) + o->coplanar_m;
+        }
+        if (ok) { g_cpkey[nk].x = bx[0]; g_cpkey[nk].i = (uint32_t)t; nk++; }
+    }
+    qsort(g_cpkey, nk, sizeof *g_cpkey, cmp_cokey);
+    size_t np = 0;
+    uint32_t cmp = 0;
+    for (size_t a = 0; a < nk; a++) {
+        const float *ba = &g_cpbox[(size_t)g_cpkey[a].i * 6];
+        for (size_t b = a + 1; b < nk && g_cpkey[b].x <= ba[3]; b++) {
+            if (++cmp > VR_COPLANAR_BUDGET) { out->stats.n_coplanar_skip += (uint32_t)(nk - a); a = nk; break; }
+            const float *bb = &g_cpbox[(size_t)g_cpkey[b].i * 6];
+            if (ba[1] > bb[4] || bb[1] > ba[4] || ba[2] > bb[5] || bb[2] > ba[5]) continue;
+            uint32_t lo = g_cpkey[a].i < g_cpkey[b].i ? g_cpkey[a].i : g_cpkey[b].i, hi = g_cpkey[a].i < g_cpkey[b].i ? g_cpkey[b].i : g_cpkey[a].i;
+            if (g_tri[lo].src_op == g_tri[hi].src_op) continue;
+            const float *pl = g_tri[lo].v[0].pos, *ql = g_tri[lo].v[1].pos, *rl = g_tri[lo].v[2].pos;
+            const float *ph = g_tri[hi].v[0].pos, *qh = g_tri[hi].v[1].pos, *rh = g_tri[hi].v[2].pos;
+            float e1[3], e2[3], f1[3], f2[3], nl[3], nh[3];
+            for (int c = 0; c < 3; c++) { e1[c] = ql[c] - pl[c]; e2[c] = rl[c] - pl[c]; f1[c] = qh[c] - ph[c]; f2[c] = rh[c] - ph[c]; }
+            nl[0] = e1[1]*e2[2] - e1[2]*e2[1]; nl[1] = e1[2]*e2[0] - e1[0]*e2[2]; nl[2] = e1[0]*e2[1] - e1[1]*e2[0];
+            nh[0] = f1[1]*f2[2] - f1[2]*f2[1]; nh[1] = f1[2]*f2[0] - f1[0]*f2[2]; nh[2] = f1[0]*f2[1] - f1[1]*f2[0];
+            float ll = sqrtf(nl[0]*nl[0] + nl[1]*nl[1] + nl[2]*nl[2]), lh = sqrtf(nh[0]*nh[0] + nh[1]*nh[1] + nh[2]*nh[2]);
+            if (!(ll > 1e-12f) || !(lh > 1e-12f)) continue;
+            for (int c = 0; c < 3; c++) { nl[c] /= ll; nh[c] /= lh; }
+            if (fabsf(nl[0]*nh[0] + nl[1]*nh[1] + nl[2]*nh[2]) < 0.999f) continue;
+            const float *vh[3] = {ph, qh, rh};
+            int near_plane = 1;
+            for (int k = 0; k < 3; k++) {
+                float d = nl[0]*(vh[k][0] - pl[0]) + nl[1]*(vh[k][1] - pl[1]) + nl[2]*(vh[k][2] - pl[2]);
+                if (fabsf(d) >= o->coplanar_m) near_plane = 0;
+            }
+            if (!near_plane) continue;
+            int ax = fabsf(nl[0]) >= fabsf(nl[1]) && fabsf(nl[0]) >= fabsf(nl[2]) ? 0 : fabsf(nl[1]) >= fabsf(nl[2]) ? 1 : 2, u = (ax + 1) % 3, v = (ax + 2) % 3;
+            float A2[3][2], B2[3][2];
+            const float *vl[3] = {pl, ql, rl};
+            for (int k = 0; k < 3; k++) { A2[k][0] = vl[k][u]; A2[k][1] = vl[k][v]; B2[k][0] = vh[k][u]; B2[k][1] = vh[k][v]; }
+            if (!tri_overlap2(A2, B2, 1e-4f)) continue;
+            if (np >= VR_COPLANAR_PAIRS) { out->stats.n_coplanar_skip++; continue; }
+            g_cppair[np].lo = lo; g_cppair[np].hi = hi; np++;
+        }
+    }
+    out->stats.n_coplanar = (uint32_t)np;
+    qsort(g_cppair, np, sizeof g_cppair[0], cmp_copair);   /* por posterior: el nivel del anterior ya es definitivo cuando se usa */
+    for (size_t k = 0; k < np; k++) {
+        unsigned l = g_cplvl[g_cppair[k].lo] + 1u;
+        if (l > VR_COPLANAR_LEVELS) l = VR_COPLANAR_LEVELS;
+        if (l > g_cplvl[g_cppair[k].hi]) g_cplvl[g_cppair[k].hi] = (uint8_t)l;
+    }
+    for (size_t t = 0; t < nt; t++) {
+        if (!g_cplvl[t]) continue;
+        for (int k = 0; k < 3; k++) {
+            float *p = g_tri[t].v[k].pos, d[3] = {out->eye_vr[0] - p[0], out->eye_vr[1] - p[1], out->eye_vr[2] - p[2]};
+            float dist = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+            if (!(dist > 1e-6f)) continue;
+            float off = (float)g_cplvl[t] * o->coplanar_lift * fminf(dist, 50.0f) / dist;
+            for (int c = 0; c < 3; c++) p[c] += d[c] * off;
+        }
+    }
+    return 0;
+}
+
 int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOpts *op_in, VrScene *out) {
     if (!dl || !out) return -1;
     VrSceneOpts o = op_in ? *op_in : vr_scene_opts_default();
@@ -613,7 +731,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     /* centro del mundo y proyección del motor (una vez por lista); VrFilter.proj_h/cx_col/cy_row se rellenan siempre */
     WorldRef wref;
     list_ref(dl, &wref);
-    out->stats.n_ref_group = wref.n;
+    out->stats.n_ref_group = wref.n; out->stats.n_ref_groups = wref.ng; out->stats.n_ref_total = wref.nt;
     out->filter.proj_ok = wref.ok ? 1 : 0;
     out->filter.proj_h = wref.ok ? wref.h : 160.0f;
     out->filter.cx_col = wref.ok ? wref.rx - (float)dl->disp.x : (dl->disp.w > 0 ? 0.5f * (float)dl->disp.w : 160.0f);
@@ -797,6 +915,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 if ((uf & GPU_VF_AMBIG) && (uf & (GPU_VF_SAT | GPU_VF_BEHIND)) && !(o.recon_ambig && nv == 4 && quad_coherent(op))) { out->stats.drop_ambig++; fate_set(i, VR_FATE_AMBIG); continue; }
                 if ((uf & GPU_VF_DERIVED) && o.drop_derived) { out->stats.drop_derived++; fate_set(i, VR_FATE_DERIVED); continue; }
                 out->stats.n_poly3d++;
+                if (nv == 4) { out->stats.n_quad3d++; if (!quad_coherent(op)) out->stats.n_quad_noncoh++; }
                 int clipmode = (uf & GPU_VF_BEHIND) != 0 || o.clip_all_near || o.eye_near_m > 0;
                 if (uf & GPU_VF_BEHIND) out->stats.n_poly_behind++;
                 CV cv[4];
@@ -945,6 +1064,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             }
         } else if (op->type == GPU_OP_RECT) {
             out->stats.n_rect++;
+            if (semi && (op->flags & GPU_F_TEXTURED)) out->stats.n_rect_semi_tex++;
             fate_set(i, VR_FATE_2D);
             if (o.drop_2d_all) continue;
             const GpuVtx *g = &op->v[0];
@@ -955,8 +1075,10 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             else if (!semi && !(op->flags & GPU_F_TEXTURED) && (double)op->rw * op->rh >= 0.9 * (double)dl->disp.w * dl->disp.h) {
                 /* borrado/máscara a pantalla completa: en el panel HUD (alfa premultiplicado, cleared a transparente) lo dejaría OPACO e
                  * ocultaría el mundo. Se cuenta y, con opts.drop_clear (def. 1), no se emite. */
-                out->stats.n_clear++;
-                if (o.drop_clear) continue;
+                if (!(o.keep_late_clear && out->stats.n_tris3d > 0)) {   /* keep_late_clear: tras un 3D es el relleno de los créditos y se emite */
+                    out->stats.n_clear++;
+                    if (o.drop_clear) continue;
+                }
             }
             float x0 = g->x, y0 = g->y, x1 = x0 + op->rw, y1 = y0 + op->rh;
             float u0 = g->u, v0 = g->v;
@@ -1031,6 +1153,8 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
         }
     }
 
+    if (o.coplanar_m > 0 && o.coplanar_lift > 0 && coplanar_lift(out, &o, nt) < 0) return -2;
+
     /* ---- ensamblado: épocas (mismo ev_end), dentro clase 0,1,2; batch nuevo al cambiar blend ---- */
     GROW(g_vtx, g_vtx_cap, nt * 3 + 3);
     GROW(g_tcause, g_tcause_cap, nt + 1);
@@ -1067,5 +1191,9 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     out->states = g_st; out->nstates = (uint32_t)g_st_n;
     out->has_3d = out->stats.n_tris3d > 0;
     out->stats.n_batches = (uint32_t)nb;
+    if (o.screen_filter && !o.veil_as_2d && out->stats.n_filter_cover > 0 && out->stats.n_tris3d == 0) {   /* sin 3D no hay vista donde aplicar el velo: va como 2D */
+        o.veil_as_2d = 1;
+        return vr_scene_build(dl, bs, &o, out);
+    }
     return 0;
 }

@@ -174,6 +174,18 @@ final class RGRenderer {
     private var hudHQRing: [MTLTexture] = [], hudHQRingSRGB: [MTLTexture] = []
     private var hudHQIdx = 0, hudHQW = 0, hudHQH = 0, hudHQSeq: UInt32 = 0
     private var hudHQ = false
+    private var hudHQMode: Int32 = 0, hudHQView: Int32 = 0   // modo (VL_*) y vista ((view_kind << 8) | view_reason) del trabajo que produjo la capa mostrada
+    /// Vista vigente y si la ventana 2D del menú (L2/R2, pausa) va sobre el mundo: las fija XRFrameEncoder antes de `encode`; takeLayer2D descarta con ellas las capas de otra vista o de otro modo.
+    var layerView: Int32 = 0 { didSet { dropStaleLayer() } }
+    var layerOverlay = false { didSet { dropStaleLayer() } }
+    /// La capa mostrada (anillo) ya no vale si la vista cambió (créditos -> menú) o la ventana del menú no admite su modo: fuera, vuelve el HUD de siempre.
+    private func dropStaleLayer() {
+#if !MV_BENCH
+        if hudHQ && mv_vrhost_hud2d_accept(hudHQMode, hudHQView, layerView, layerOverlay ? 1 : 0) == 0 {
+            hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB
+        }
+#endif
+    }
     private var statDraws = 0, statPasses = 0, statGroups = 0
 
     // por frame (anillo de 3 con semáforo)
@@ -323,11 +335,13 @@ final class RGRenderer {
         guard let lib = library else { return nil }
         do {
             let fc = MTLFunctionConstantValues()
-            var f = k.filter, l = k.linear, pass = k.pass
+            var f = k.filter, l = k.linear, pass = k.pass, bm = Int32(k.mode)
             fc.setConstantValue(&f, type: .bool, index: Int(VR_FC_FILTER))
             fc.setConstantValue(&l, type: .bool, index: Int(VR_FC_LINEAR_OUT))
             fc.setConstantValue(&pass, type: .uint, index: Int(VR_FC_PASS))
-            let fs = try lib.makeFunction(name: "vr_fs_scene", constantValues: fc)
+            // modo 0..3 (semitransparente): vr_fs_scene_blend mezcla en gamma leyendo el destino ([[color(0)]], sin mezcla de función fija); el resto, vr_fs_scene (no lee el destino)
+            if k.mode >= 0 { fc.setConstantValue(&bm, type: .int, index: Int(VR_FC_BLEND)) }
+            let fs = try lib.makeFunction(name: k.mode >= 0 ? "vr_fs_scene_blend" : "vr_fs_scene", constantValues: fc)
             let vsName = k.hud ? "vr_vs_hud" : (k.layered ? "vr_vs_scene_amp" : "vr_vs_scene")
             guard let vs = lib.makeFunction(name: vsName) else { return nil }
             let d = MTLRenderPipelineDescriptor()
@@ -342,32 +356,6 @@ final class RGRenderer {
             if !k.hud {
                 d.depthAttachmentPixelFormat = k.depth
                 if k.depth == .depth32Float_stencil8 { d.stencilAttachmentPixelFormat = k.depth }
-            }
-            if k.mode >= 0 {
-                ca.isBlendingEnabled = true
-                // Los 4 modos del original (B = destino, F = fragmento). blendColor = 0,5 (modo 0) o 0,25 (modo 3).
-                switch k.mode {
-                case 0: // 0,5B + 0,5F  (alfa: 0,5·1 + 0,5·Ad -> cobertura de panel premultiplicado)
-                    ca.rgbBlendOperation = .add
-                    ca.sourceRGBBlendFactor = .blendColor; ca.destinationRGBBlendFactor = .oneMinusBlendColor
-                    ca.alphaBlendOperation = .add
-                    ca.sourceAlphaBlendFactor = .blendAlpha; ca.destinationAlphaBlendFactor = .oneMinusBlendAlpha
-                case 1: // B + F
-                    ca.rgbBlendOperation = .add
-                    ca.sourceRGBBlendFactor = .one; ca.destinationRGBBlendFactor = .one
-                    ca.alphaBlendOperation = .add
-                    ca.sourceAlphaBlendFactor = .zero; ca.destinationAlphaBlendFactor = .one
-                case 2: // B - F
-                    ca.rgbBlendOperation = .reverseSubtract
-                    ca.sourceRGBBlendFactor = .one; ca.destinationRGBBlendFactor = .one
-                    ca.alphaBlendOperation = .add
-                    ca.sourceAlphaBlendFactor = .zero; ca.destinationAlphaBlendFactor = .one
-                default: // B + 0,25F
-                    ca.rgbBlendOperation = .add
-                    ca.sourceRGBBlendFactor = .blendColor; ca.destinationRGBBlendFactor = .one
-                    ca.alphaBlendOperation = .add
-                    ca.sourceAlphaBlendFactor = .zero; ca.destinationAlphaBlendFactor = .one
-                }
             }
             let p = try device.makeRenderPipelineState(descriptor: d)
             pipes[k] = p
@@ -551,8 +539,14 @@ final class RGRenderer {
         var w: Int32 = 0, h: Int32 = 0, full: Int32 = 0, seq: UInt32 = 0
         let r = mv_vrhost_hud2d_acquire(&px, &w, &h, &full, &seq)
         defer { if r >= 0 { mv_vrhost_hud2d_release() } }
-        if r < 0 || px == nil || w <= 0 || h <= 0 {
-            if hudHQ { hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB }
+        let ov: Int32 = layerOverlay ? 1 : 0
+        dropStaleLayer()
+        let usable = r >= 0 && px != nil && w > 0 && h > 0
+        var lMode: Int32 = 0, lView: Int32 = 0
+        // La capa nueva (retrasada: el trabajador va por detrás de la vista) se rechaza si es de otra vista o, en el menú, no es VL_PANEL: se conserva la anterior válida (arriba) o el HUD de siempre.
+        let accepted = usable && mv_vrhost_hud2d_layer(&lMode, &lView) != 0 && mv_vrhost_hud2d_accept(lMode, lView, layerView, ov) != 0
+        if !accepted {
+            if hudHQ && !usable { hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB }
             hqFull = nil
             return
         }
@@ -580,7 +574,7 @@ final class RGRenderer {
             hudHQSeq = seq
         }
         hudTexture = hudHQRing[hudHQIdx]; hudTextureSRGB = hudHQRingSRGB[hudHQIdx]
-        hudHQ = true
+        hudHQ = true; hudHQMode = lMode; hudHQView = lView
 #endif
     }
 
@@ -591,7 +585,7 @@ final class RGRenderer {
         storeFilter(sc.filter)
         var scFilter = sc.filter
         let win = vr_scene_screen_window(&scFilter)
-        if win.ok != 0 { stereoWindow = SIMD4<Float>(win.left, win.right, win.up, win.down) }   // una lista sin proyección (texto, fundido) conserva la de la última con 3D
+        stereoWindow = win.ok != 0 ? SIMD4<Float>(win.left, win.right, win.up, win.down) : nil   // la de ESTA lista (la misma que pareja con hudRect y los lotes); una lista sin proyección no hereda la de otra
         let nv = Int(sc.nv)
         if !newSlot { curSlot = (curSlot + 1) % 3; newSlot = true }
         let slot = vtxSlots[curSlot]
@@ -679,6 +673,7 @@ final class RGRenderer {
         var listCmds: [IdxCmd] = []
         var newSlot = false
         var gotNew = false
+        diagLists = 0; diagList3D = nil; diagList2D = nil
         for _ in 0..<4 {
             var sc = VrScene()
             if mv_host_scene(&sc) == 0 { break }
@@ -697,6 +692,9 @@ final class RGRenderer {
                 hudRect = hudInVRAMCoords ? simd_float4(Float(d.x), Float(d.y), w, h) : simd_float4(0, 0, w, h)
             }
             storeScene(sc, &newSlot)
+            diagLists += 1
+            if has3D { diagList3D = idx }
+            if batches.contains(where: { $0.kind == 2 }) { diagList2D = idx }
             radar?.ingest(device: device)       // escena del radar asociada a esta escena (mv_host_radar)
             gotNew = true
         }
@@ -889,7 +887,7 @@ final class RGRenderer {
         didSet {
             if stereoRequest != oldValue { stereoDirty = true }
             // Al salir de la pantalla 3D se olvida su imagen: la siguiente escena del motor no debe empezar enseñando el último fotograma de la anterior (caché obsoleta).
-            if stereoRequest == nil { stereoRendered = false }
+            if stereoRequest == nil { stereoRendered = false; stereoBaseValid = false; stereoBaseStale = false; stereoHas2D = false; stereoComposed = false }
         }
     }
     private var stereoDirty = true
@@ -902,9 +900,22 @@ final class RGRenderer {
     private var stereoMSAAColor: MTLTexture?
     private var stereoDepth: MTLTexture?
     private var stereoKey = ""
-    /// Ventana de la proyección del motor de la última escena con 3D (tangentes izquierda, derecha, arriba, abajo; vr_scene_screen_window): la pantalla 3D del modo gpu la usa tal cual para que el
-    /// 3D registre con el panel 2D, que cubre la misma imagen mostrada (H real y centro OFX/OFY, no la ventana virtual de la petición).
+    /// Ventana de la proyección del motor de la ÚLTIMA lista recibida (tangentes izquierda, derecha, arriba, abajo; vr_scene_screen_window; nil si esa lista no trae proyección): la pantalla 3D del modo gpu la usa tal
+    /// cual para que el 3D registre con los lotes 2D de la misma lista, que cubren la misma imagen mostrada (H real y centro OFX/OFY, no la ventana virtual de la petición).
     private var stereoWindow: SIMD4<Float>?
+    /// Diagnóstico `[estereo]`: listas recibidas en este fotograma y el índice de la lista que trae el 3D y de la que trae lotes 2D (nil = ninguna); último registro (ns).
+    private var diagLists = 0
+    private var diagList3D: UInt32?
+    private var diagList2D: UInt32?
+    private var stereoLogNs: UInt64 = 0
+    /// Modo gpu: los lotes 2D (bandas, subtítulos, alarma) de la lista se componen DENTRO de las texturas de la pantalla 3D; XRPresenter no pone entonces el panel 2D encima.
+    /// Solo si ESTA lista se compuso de verdad dentro (hay 3D o base 3D guardada y el estéreo no falló): si no, XRPresent pone el panel 2D aparte como antes (vrhost_stereo2d_inside).
+    var stereo2DInside: Bool { vrhost_stereo2d_inside(gpuMode ? 1 : 0, (has3D || stereoBaseValid) ? 1 : 0, stereoComposed ? 1 : 0) != 0 }
+    private var stereoComposed = false          // el estéreo del modo gpu compuso (3D o base + 2D) la última lista; false si falló la textura o la cámara
+    private var stereoBaseValid = false         // stereoBase guarda el 3D compuesto (tras 3D + onda) de la última vez que se dibujó
+    private var stereoBaseStale = false         // el 3D vigente (sin 2D) está solo en las texturas estéreo: stereoBase aún no lo guarda (copia perezosa en la siguiente lista solo-2D)
+    private var stereoHas2D = false             // las texturas estéreo llevan 2D encima de la base
+    private var stereoBase: [MTLTexture] = []   // por ojo: el 3D compuesto SIN 2D; cada lista nueva solo-2D parte de ella para pintar SU 2D (ver stereoBaseStale)
     /// Imagen estéreo (array de 2 capas, valores tal como se guardaron: gamma en los formatos sRGB) o nil si aún no se dibujó.
     var stereoImage: MTLTexture? { stereoRendered ? stereoRaw : nil }
     /// Capas de la textura de la pantalla 3D ya reservada (aunque aún no se haya dibujado nada en ella; 0 = sin reservar). El banco comprueba que es un array de 2.
@@ -966,6 +977,16 @@ final class RGRenderer {
         }
         guard let d = device.makeTexture(descriptor: dd) else { return false }
         d.label = "VR pantalla 3D (profundidad)"
+        var base: [MTLTexture] = []
+        for e in 0..<2 {
+            let bd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorFormat, width: w, height: h, mipmapped: false)
+            bd.usage = [.shaderRead]
+            bd.storageMode = .private
+            guard let bt = device.makeTexture(descriptor: bd) else { return false }
+            bt.label = "VR pantalla 3D (base ojo \(e))"
+            base.append(bt)
+        }
+        stereoBase = base; stereoBaseValid = false; stereoBaseStale = false; stereoHas2D = false
         stereoTex = t; stereoRaw = raw ?? t; stereoSlices = slices; stereoMSAAColor = msaa; stereoDepth = d; stereoKey = key
         stereoDirty = true
         return true
@@ -1047,14 +1068,31 @@ final class RGRenderer {
     /// Pantalla 3D en el modo gpu: la lista de la GPU (todos los lotes 3D, con la VRAM tal como queda tras los eventos de la lista) desde las dos cámaras estéreo de la petición. Una lista
     /// sin 3D (fundido, texto) conserva la imagen anterior; si no hay cámara o texturas, `stereoHealthy` baja y XRPresent cae al cine plano.
     private func encodeStereoGPU(_ cb: MTLCommandBuffer, _ r: StereoRequest, gotNew: Bool) {
-        guard ensureStereo(r.width, r.height), let d = stereoDepth, stereoSlices.count == 2 else { stereoHealthy = false; return }
-        if !((gotNew && has3D) || stereoDirty || !stereoRendered) { return }
+        guard ensureStereo(r.width, r.height), let d = stereoDepth, stereoSlices.count == 2, stereoBase.count == 2 else { stereoHealthy = false; stereoComposed = false; return }
+        logStereo()
+        let has2D = batches.contains { $0.kind == 2 }
+        // Lista SIN 3D con una base guardada: el 3D de la base vale (no se pinta una escena vacía encima); solo se rehace SU 2D (o se quita el de la lista anterior).
+        let useBase = !has3D && stereoBaseValid
+        let redraw3D = (gotNew && has3D) || ((stereoDirty || !stereoRendered) && !useBase)
+        let redo2D = !redraw3D && useBase && ((gotNew && (has2D || stereoHas2D)) || stereoDirty)
+        if !redraw3D && !redo2D { return }
+        // Sin ventana de ESTA lista no se dibuja un fotograma estéreo nuevo con 3D (registraría mal con los lotes 2D): se conserva el anterior entero (3D + 2D juntos).
+        if redraw3D && has3D && stereoWindow == nil { if !stereoRendered { stereoHealthy = false; stereoComposed = false }; return }
+        if !redraw3D {
+            // base -> texturas estéreo (3D sin 2D) y encima el 2D de ESTA lista; si la base aún no se guardó, las texturas ya son el 3D sin 2D: se copian a la base y se pinta encima
+            if stereoBaseStale { copyStereoBase(cb, toBase: true); stereoBaseStale = false } else { copyStereoBase(cb, toBase: false) }
+            encodeStereo2D(cb)
+            stereoHas2D = has2D
+            stereoComposed = true
+            stereoDirty = false
+            return
+        }
         // Onda por fila del agua (filter.dv): la escena se resuelve en texturas intermedias y un pase por ojo la copia a la pantalla desplazando las filas (encodePost con warpOnly).
         // El tinte y los recubrimientos NO se hornean aquí: los aplica la pantalla al presentar (screenFx), también en listas sin 3D (fundidos).
         let pre: [MTLTexture]? = (fx.nrows > 0 && screenFilterEnabled && ensureFrameTextures() && postPipeline(format: colorFormat, layered: false) != nil) ? stereoPreTextures() : nil
         var projs: [simd_float4x4] = []
         for e in 0..<2 {
-            guard let cam = stereoCamera(e, r) else { stereoHealthy = false; return }
+            guard let cam = stereoCamera(e, r) else { stereoHealthy = false; stereoComposed = false; return }
             var u = VrSceneUniforms()
             let proj = XRMath.projection(tangents: cam.tangents, near: 0.05, far: 800)
             projs.append(proj)
@@ -1067,8 +1105,84 @@ final class RGRenderer {
                             views: [], projections: [], isAux: true, last: true, cams: nil, first: true, gpuRange: 0..<batches.count)
         }
         if let p = pre { encodePost(cb, PostPlan(sceneColor: p, sceneResolve: [], fxTex: p, dst: stereoSlices), projections: projs, layered: false, warpOnly: true) }
+        if has2D { copyStereoBase(cb, toBase: true); stereoBaseStale = false } else { stereoBaseStale = true }   // base = 3D compuesto (con onda) sin 2D: solo se copia si esta lista pinta 2D encima; si no, la textura ya es la base
+        stereoBaseValid = true
+        encodeStereo2D(cb)
+        stereoHas2D = has2D
+        stereoComposed = true
         stereoRendered = true
         stereoDirty = false
+    }
+
+    /// Copia por ojo entre la capa de la textura de la pantalla 3D y `stereoBase` (toBase: capa -> base; si no, base -> capa).
+    private func copyStereoBase(_ cb: MTLCommandBuffer, toBase: Bool) {
+        guard let tex = stereoTex, stereoBase.count == 2, let blit = cb.makeBlitCommandEncoder() else { return }
+        let size = MTLSize(width: tex.width, height: tex.height, depth: 1)
+        let o0 = MTLOrigin(x: 0, y: 0, z: 0)
+        for e in 0..<2 {
+            if toBase {
+                blit.copy(from: tex, sourceSlice: e, sourceLevel: 0, sourceOrigin: o0, sourceSize: size, to: stereoBase[e], destinationSlice: 0, destinationLevel: 0, destinationOrigin: o0)
+            } else {
+                blit.copy(from: stereoBase[e], sourceSlice: 0, sourceLevel: 0, sourceOrigin: o0, sourceSize: size, to: tex, destinationSlice: e, destinationLevel: 0, destinationOrigin: o0)
+            }
+        }
+        blit.endEncoding()
+    }
+
+    /// Lotes 2D (kind 2) de la lista actual, dentro de las dos texturas de la pantalla 3D, tras el 3D y la onda del agua (el 2D no se deforma): vr_vs_hud con hudRect de la MISMA lista que los lotes 3D cubre
+    /// toda la textura, porque la ventana del 3D es exactamente la imagen mostrada. Un pase por ojo sobre la textura ya resuelta (1 muestra, sin profundidad: un pipeline sin profundidad no puede
+    /// ir en el pase con profundidad de la escena). Semitransparentes: mezcla en gamma en el shader (vr_fs_scene_blend).
+    private func encodeStereo2D(_ cb: MTLCommandBuffer) {
+        let seg = batches.indices.filter { batches[$0].kind == 2 }
+        guard haveScene, !seg.isEmpty, stereoSlices.count == 2, let buf = vtxSlots[curSlot].buf else { return }
+        let stride = MemoryLayout<VrGpuVtx>.stride
+        for e in 0..<2 {
+            let tex = stereoSlices[e]
+            let pd = MTLRenderPassDescriptor()
+            pd.colorAttachments[0].texture = tex
+            pd.colorAttachments[0].loadAction = .load
+            pd.colorAttachments[0].storeAction = .store
+            guard let enc = cb.makeRenderCommandEncoder(descriptor: pd) else { continue }
+            enc.label = "pantalla 3D: 2D (ojo \(e))"
+            statPasses += 1
+            enc.setCullMode(.none)
+            enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(tex.width), height: Double(tex.height), znear: 0, zfar: 1))
+            var hu = VrHudUniforms(); hu.rect = hudRect
+            enc.setVertexBuffer(buf, offset: 0, index: Int(VR_BUF_VERTS))
+            enc.setVertexBuffer(buf, offset: vtxSlots[curSlot].stOff, index: Int(VR_BUF_STATES))
+            enc.setVertexBytes(&hu, length: MemoryLayout<VrHudUniforms>.stride, index: Int(VR_BUF_UNI))
+            enc.setFragmentTexture(vram, index: 0)
+            for i in seg {
+                let bt = batches[i]
+                enc.setVertexBufferOffset(bt.first * stride, index: Int(VR_BUF_VERTS))
+                func draw(_ pass: UInt32, _ mode: Int) {
+                    let k = PKey(hud: true, layered: false, filter: textureFilter, linear: linearOutput, pass: pass, mode: mode,
+                                 color: tex.pixelFormat, depth: .invalid, samples: 1)
+                    guard let p = pipeline(k) else { return }
+                    enc.setRenderPipelineState(p)
+                    enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: bt.count)
+                    statDraws += 1
+                }
+                if bt.semi {
+                    draw(bt.hasTex ? 1 : 0, bt.mode)
+                    if bt.hasTex { draw(2, -1) }   // texels sin bit15: opacos
+                } else {
+                    draw(0, -1)
+                }
+            }
+            enc.endEncoding()
+        }
+    }
+
+    /// Registro `[estereo]` (1 por segundo, mientras haya pantalla 3D en el modo gpu): ventana L,R,U,D de la última lista, si es válida, H de la proyección, hudRect y qué listas llegaron en el fotograma.
+    private func logStereo() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        if now - stereoLogNs < 1_000_000_000 { return }
+        stereoLogNs = now
+        let w = stereoWindow
+        func f(_ x: Float?) -> String { x.map { String(format: "%.4f", $0) } ?? "-" }
+        func id(_ x: UInt32?) -> String { x.map { String($0) } ?? "-" }
+        print("[estereo] L=\(f(w?.x)) R=\(f(w?.y)) U=\(f(w?.z)) D=\(f(w?.w)) ok=\(w != nil) proj_h=\(String(format: "%.1f", fx.projH)) hudRect=(\(hudRect.x),\(hudRect.y),\(hudRect.z),\(hudRect.w)) listas=\(diagLists) lista3D=\(id(diagList3D)) lista2D=\(id(diagList2D)) tiene3D=\(has3D) dentro2D=\(gpuMode)")
     }
 
     private var stereoPre: [MTLTexture] = []
@@ -1379,8 +1493,6 @@ final class RGRenderer {
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: bt.count)
             }
             if bt.semi {
-                let a: Float = bt.mode == 3 ? 0.25 : 0.5
-                enc.setBlendColor(red: a, green: a, blue: a, alpha: a)
                 draw(bt.hasTex ? 1 : 0, bt.mode)
                 if bt.hasTex { draw(2, -1) }   // texels sin bit15: opacos
             } else {
@@ -1489,7 +1601,7 @@ final class RGRenderer {
     }
 
     /// Modo gpu: dibuja los lotes 3D `seg` (índices de `batches`, en el orden de envío) en el codificador del pase. Opaco (kind 0): profundidad con prueba y escritura. Semitransparente (kind 1):
-    /// prueba sin escritura, mezcla de función fija por modo y, si el lote lleva texturas, segunda pasada para los texels sin bit 15 (opacos). Sin descarte de reversos (cull .none, ya fijado).
+    /// prueba sin escritura, mezcla del modo en el shader (VR_FC_BLEND, en gamma) y, si el lote lleva texturas, segunda pasada para los texels sin bit 15 (opacos). Sin descarte de reversos (cull .none, ya fijado).
     private func drawGPU(_ enc: MTLRenderCommandEncoder, _ seg: [Int], color: MTLTexture, depth: MTLTexture, uniforms: VrSceneUniforms, amplify: Int) {
         guard haveScene, has3D, !seg.isEmpty, let buf = vtxSlots[curSlot].buf else { return }
         var u = uniforms
@@ -1526,8 +1638,6 @@ final class RGRenderer {
             if bt.kind == 0 {
                 draw(bt, key(0, -1))
             } else {
-                let a: Float = bt.mode == 3 ? 0.25 : 0.5
-                enc.setBlendColor(red: a, green: a, blue: a, alpha: a)
                 draw(bt, key(bt.hasTex ? 1 : 0, bt.mode))
                 if bt.hasTex { draw(bt, key(2, -1)) }
             }

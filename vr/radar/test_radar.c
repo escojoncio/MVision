@@ -672,6 +672,43 @@ static int ref_image(const char *dir, const char *texpath) {
     return 0;
 }
 
+/* distancia del punto p al segmento a-b */
+static float seg_dist3(const float p[3], const float a[3], const float b[3]) {
+    float ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, ap[3] = {p[0] - a[0], p[1] - a[1], p[2] - a[2]};
+    float t = dotv(ap, ab) / dotv(ab, ab); t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    float d[3] = {ap[0] - ab[0] * t, ap[1] - ab[1] * t, ap[2] - ab[2] * t};
+    return lenv(d);
+}
+/* El panel va sobre el antebrazo dibujado (IK), no sobre el eje del agarre (inclinado ~35 grados respecto al antebrazo); el mando solo es reserva */
+static void t_pick_arm(void) {
+    VrRadarWristCfg cfg = vrradar_wrist_cfg_default();
+    const float eye[3] = {0.10f, 1.60f, -0.20f};
+    VrRadarArm ik = {{0.10f, 1.00f, -0.30f + 0.27f}, {0.10f, 1.00f, -0.30f}, {0.0f, 1.0f, 0.0f}};   /* antebrazo horizontal, codo a +Z */
+    for (int sg = -1; sg <= 1; sg += 2) {
+        float th = sg * 0.6108652f, c = cosf(th), s = sinf(th);       /* Rx(+-35 grados): el eje +Z del agarre se separa del antebrazo */
+        float grip[16] = {1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, ik.wrist[0], ik.wrist[1], ik.wrist[2], 1};
+        VrRadarArm pa, ca; VrRadarQuad pq, cq;
+        CHECK(vrradar_pick_arm(grip, &ik, &pa) == 1 && vrradar_wrist_quad_eye(&pa, &cfg, 71.0f / 54.0f, eye, &pq), "pick: IK válida primero (sg=%d)", sg);
+        float dp = seg_dist3(pq.center, ik.wrist, ik.elbow);
+        CHECK(dp <= cfg.lift_m + 0.01f, "pick: centro a %.4f m del segmento codo-muñeca (max %.3f)", dp, cfg.lift_m + 0.01f);
+        CHECK(NEAR(pq.center[0], ik.wrist[0], 1e-4) && NEAR(dotv((float[3]){pq.center[0] - ik.wrist[0], pq.center[1] - ik.wrist[1], pq.center[2] - ik.wrist[2]}, (float[3]){0, 0, 1}), cfg.along_m, 1e-4), "pick: along_m 0,13 desde la muñeca IK");
+        if (sg < 0) {     /* ruta del mando sola: el panel sale del antebrazo (flota) */
+            CHECK(vrradar_arm_from_controller(grip, &ca) && vrradar_wrist_quad_eye(&ca, &cfg, 71.0f / 54.0f, eye, &cq), "pick: quad del mando");
+            float dc = seg_dist3(cq.center, ik.wrist, ik.elbow);
+            CHECK(dc > cfg.lift_m + 0.01f, "pick: la ruta del mando flota a %.4f m (debe superar %.3f)", dc, cfg.lift_m + 0.01f);
+        }
+        /* IK nula o inválida -> mando */
+        VrRadarArm zero = ik; memcpy(zero.elbow, zero.wrist, sizeof zero.elbow);
+        VrRadarArm nanik = ik; nanik.dorsal[1] = NAN;
+        CHECK(vrradar_pick_arm(grip, NULL, &pa) == 2 && NEAR(pa.elbow[2], ik.wrist[2] + 0.27f * c, 1e-5), "pick: IK nula -> mando");
+        CHECK(vrradar_pick_arm(grip, &zero, &pa) == 2, "pick: IK de hueso nulo -> mando");
+        CHECK(vrradar_pick_arm(grip, &nanik, &pa) == 2, "pick: IK con NaN -> mando");
+        CHECK(vrradar_pick_arm(NULL, &ik, &pa) == 1 && NEAR(pa.elbow[2], ik.elbow[2], 1e-6), "pick: sin mando -> IK");
+        grip[5] = NAN;
+        CHECK(vrradar_pick_arm(grip, &nanik, &pa) == 0 && vrradar_pick_arm(NULL, NULL, &pa) == 0 && vrradar_pick_arm(grip, &ik, NULL) == 0, "pick: nada válido -> 0");
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc >= 3 && !strcmp(argv[1], "--ref")) return ref_image(argv[2], argc > 3 ? argv[3] : NULL);
     t_marks();
@@ -682,6 +719,7 @@ int main(int argc, char **argv) {
     t_seq_restart();
     t_ot_marks();
     t_anchor();
+    t_pick_arm();
     fprintf(stderr, "test_radar: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

@@ -1,6 +1,7 @@
 /* vrhost: ver vrhost.h. Todo lo que toca el estado del runtime corre en el hilo de emulación (ganchos de host_hooks.h);
  * solo la cola de escenas, el BridgeState publicado y la marca de "hay consumidor" se comparten con otros hilos. */
 #include "vrhost.h"
+#include "vrdump.h"
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -512,9 +513,7 @@ static void mark_3d(Slot *s) {
 /* Compuerta de la captura (M1): con el modo gpu (o sin renderer nativo listo) no se captura ni se extrae nada, salvo para un volcado pendiente en el punto de enganche. */
 enum { DS_IDLE = 0, DS_REQ, DS_CAP, DS_WRITE };
 static _Atomic int dump_state;   /* escrito bajo DMX; la compuerta de la captura lo lee sin bloquear */
-/* Capturas pendientes del pedido en curso (bajo DMX): DN_ANY = la primera que llegue (pedido simple); DN_STAGE + DN_FRAME = pareja del mismo fotograma de juego
- * (primero el punto de enganche, justo tras la captura nativa; luego el final del fotograma). */
-enum { DN_STAGE = 1, DN_FRAME = 2, DN_ANY = 4 };
+/* Capturas pendientes del pedido en curso (bajo DMX; DN_*: vrdump.h). */
 static int dump_need;
 static int dump_stage_mode(void) {
     static int env = -1;
@@ -732,11 +731,13 @@ static int list_uploads_cover_display(const GpuDrawList *l) {
 
 /* Registro «[gpu3d]» (hilo de emulación, una línea por segundo como mucho): qué hizo el ensamblador con las primitivas de las listas de ese segundo. Es el único diagnóstico del visor. */
 #define GPU3D_NEAR_EYE_M 0.10f   /* modo gpu: ningún triángulo 3D pequeño con TODOS sus vértices a menos de esta distancia (m) del ojo del motor (VrSceneOpts.eye_near_m) */
-static struct { uint32_t lists, prims, p3d, tris3d, p2d, near_drop, near_clip, behind_drop, nohp, post, ambig, incoh, recon, huge, nan; int cam_head; uint64_t t_log; } g3;
+static struct { uint32_t lists, prims, p3d, tris3d, p2d, rect, rect_semi_tex, near_drop, near_clip, behind_drop, nohp, post, ambig, incoh, recon, huge, nan;
+              uint32_t groups_max, ref_n, ref_total, quad3d, quad_noncoh, tri_cause[5], cause_tris, coplanar, coplanar_skip;  int cam_head; uint64_t t_log; } g3;
 static void gpu3d_note(const VrScene *sc, const VrCamRecord *r) {
     const VrStats *st = &sc->stats;
     g3.lists++;
     g3.prims += st->n_poly + st->n_rect + st->n_line;
+    g3.rect += st->n_rect; g3.rect_semi_tex += st->n_rect_semi_tex;
     g3.p3d += st->n_poly3d;
     g3.tris3d += st->n_tris3d;
     g3.p2d += st->n_poly2d + st->n_rect + st->n_line;
@@ -745,6 +746,18 @@ static void gpu3d_note(const VrScene *sc, const VrCamRecord *r) {
     g3.behind_drop += st->drop_behind;
     g3.nohp += st->drop_partial;
     g3.ambig += st->drop_ambig; g3.incoh += st->drop_incoh; g3.recon += st->n_recon; g3.huge += st->drop_huge; g3.nan += st->drop_nan;
+    if (st->n_ref_groups > g3.groups_max) g3.groups_max = st->n_ref_groups;
+    g3.ref_n += st->n_ref_group; g3.ref_total += st->n_ref_total;
+    g3.quad3d += st->n_quad3d; g3.quad_noncoh += st->n_quad_noncoh;
+    g3.coplanar += st->n_coplanar; g3.coplanar_skip += st->n_coplanar_skip;
+    for (uint32_t i = 0; sc->b && sc->tri_cause && i < sc->nb; i++) {   /* causas de duda de los triángulos 3D (VR_TC_*) */
+        if (sc->b[i].kind > 1) continue;
+        for (uint32_t j = 0; j < sc->b[i].count; j += 3) {
+            uint8_t c = sc->tri_cause[(sc->b[i].first + j) / 3];
+            g3.cause_tris++;
+            for (int k = 0; k < 5; k++) g3.tri_cause[k] += (c >> k) & 1u;   /* VR_TC_AMBIG, SAT, BEHIND, RECON, DERIVED = bits 0..4 */
+        }
+    }
     for (uint32_t i = 0; sc->b && i < sc->nb; i++) g3.post += sc->b[i].kind == 3;   /* lotes de filtro de pantalla (clase 3: el post-proceso por ojo del renderer los sustituye) */
     g3.cam_head = r && r->active;
 }
@@ -757,10 +770,18 @@ static void gpu3d_log(void) {
     static GteHpStats hs_prev;   /* vértices de primitivas resueltos por dirección de memoria (hps.h) / por valor de SXY, del último segundo */
     GteHpStats hs;
     gte_hp_stats(&hs);
-    fprintf(stderr, "[gpu3d] fotograma=%u listas=%u prims=%u 3D_con_hp=%u (triangulos=%u) plano2D=%u cerca_descartados=%u cerca_recortados=%u detras_descartados=%u 3D_sin_hp(respaldo)=%u post=%u drop_ambig=%u drop_partial=%u drop_incoh=%u reconstruidos=%u drop_huge=%u drop_nan=%u | render=%s hp=%d vista=%s camara=%s hp_por_direccion=%u hp_por_valor=%u\n",
-            (unsigned)hle_frame_count(), g3.lists, g3.prims, g3.p3d, g3.tris3d, g3.p2d, g3.near_drop, g3.near_clip, g3.behind_drop, g3.nohp, g3.post, g3.ambig, g3.nohp, g3.incoh, g3.recon, g3.huge, g3.nan,
+    fprintf(stderr, "[gpu3d] fotograma=%u listas=%u prims=%u 3D_con_hp=%u (triangulos=%u) plano2D=%u cerca_descartados=%u cerca_recortados=%u detras_descartados=%u 3D_sin_hp(respaldo)=%u post=%u drop_ambig=%u drop_partial=%u drop_incoh=%u reconstruidos=%u drop_huge=%u drop_nan=%u n_rect=%u n_rect_semi_tex=%u | render=%s hp=%d vista=%s camara=%s hp_por_direccion=%u hp_por_valor=%u\n",
+            (unsigned)hle_frame_count(), g3.lists, g3.prims, g3.p3d, g3.tris3d, g3.p2d, g3.near_drop, g3.near_clip, g3.behind_drop, g3.nohp, g3.post, g3.ambig, g3.nohp, g3.incoh, g3.recon, g3.huge, g3.nan, g3.rect, g3.rect_semi_tex,
             native_mode() ? "nativo" : "gpu", gte_hp_enabled(), vrview_cine_type(view.kind), g3.cam_head ? "head" : "game", hs.res_addr - hs_prev.res_addr, hs.res_val - hs_prev.res_val);
     hs_prev = hs;
+    {   /* [geom]: geometría 3D sospechosa de la lista de la GPU (una línea por segundo) */
+        double ct = g3.cause_tris ? (double)g3.cause_tris : 1.0;
+        fprintf(stderr, "[geom] listas=%u grupos(H,ofx,ofy)_max=%u prims_en_dominante=%.1f%% (%u de %u) cuadrilateros=%u aceptados_sin_coplanaridad=%.1f%% (%u) tris=%u causa: AMBIG=%.1f%% SAT=%.1f%% BEHIND=%.1f%% RECON=%.1f%% DERIVED=%.1f%% | pares_coplanares_corregidos=%u sin_revisar=%u\n",
+                g3.lists, g3.groups_max, g3.ref_total ? 100.0 * g3.ref_n / g3.ref_total : 0.0, g3.ref_n, g3.ref_total,
+                g3.quad3d, g3.quad3d ? 100.0 * g3.quad_noncoh / g3.quad3d : 0.0, g3.quad_noncoh, g3.cause_tris,
+                100.0 * g3.tri_cause[0] / ct, 100.0 * g3.tri_cause[1] / ct, 100.0 * g3.tri_cause[2] / ct, 100.0 * g3.tri_cause[3] / ct, 100.0 * g3.tri_cause[4] / ct,
+                g3.coplanar, g3.coplanar_skip);
+    }
     int ch = g3.cam_head;
     memset(&g3, 0, sizeof g3);
     g3.cam_head = ch; g3.t_log = t;
@@ -775,7 +796,8 @@ static void build_one(const GpuDrawList *l, int si) {
     int32_t save_pos[3];
     int16_t save_axes[3][3];
     VrSceneOpts o = sopts;
-    if (!native_mode()) { o.eye_near_m = GPU3D_NEAR_EYE_M; o.line3d_px = 1.0f; }   /* modo gpu: nada pegado al ojo, recorte contra el plano cercano; líneas del mundo en 3D (ver vr_scene.h) */
+    if (!native_mode()) { o.eye_near_m = GPU3D_NEAR_EYE_M; o.line3d_px = 1.0f; o.coplanar_m = 0.005f; }   /* modo gpu: nada pegado al ojo, recorte contra el plano cercano; líneas del mundo en 3D; z-fight de coplanares solo aquí (ver vr_scene.h) */
+    if (!native_mode() && view.kind == VRV_K_ENGINE) { o.keep_late_clear = 1; o.veil_as_2d = 1; }   /* pantalla 3D del motor (gpu): el 2D se compone dentro del estéreo; el relleno opaco tras el 3D (créditos) y los velos se pintan como 2D */
     int cine_cut = 0;
     {   /* Cinemática del motor (ni mundo ni vídeo/2D puros): la cámara es la del guion, nunca la de la cabeza. Planos y origen fijo por plano. */
         int rs = view.reason;
@@ -828,9 +850,7 @@ static void build_one(const GpuDrawList *l, int si) {
     /* Las gafas (líneas de exploración) y la máscara de visión (máscara de gas, caja) no son fundidos: se conserva el filtro (clase 3b) para que su tinte, sus líneas y su marco
      * cubran toda la vista; también un destello/fundido durante la partida (hay 3D y el jugador está en escena) se aplica sobre la vista en vez de en el panel. */
     int cover_n = sc.filter.active ? sc.filter.n_covers : 0;
-    int keep3b = sc.filter.n_scan > 0 || sc.filter.frame_on || (sc.has_3d && sc.world_valid);
-    if (cine_cand && (last_scene3d || sc.stats.n_tris3d >= 12)) keep3b = 0;   /* cinemática del motor: fundidos y destellos van al panel 2D de la pantalla 3D (el post-proceso por ojo no se aplica allí) */
-    if (!native_mode()) keep3b = 0;   /* modo gpu: fundidos, destellos, gafas y marco de máscara van al panel 2D; solo con tiras de agua (que no tienen panel) se conserva la clase 3 y el renderer la aplica con su post-proceso por ojo (RenderRG.planPost) */
+    int keep3b = vrhost_keep_filter(native_mode(), cine_cand, (native_mode() && last_scene3d) || sc.stats.n_tris3d >= 12, sc.has_3d, sc.world_valid, sc.filter.n_scan, sc.filter.frame_on, sc.filter.n_strips);   /* cinemática del motor en nativo: fundidos y destellos van al panel 2D de la pantalla 3D (el post-proceso por ojo no se aplica allí); en gpu el mundo y la cinemática conservan el filtro y el renderer lo aplica con su post-proceso por ojo (RenderRG.planPost); gafas y marco de máscara fuera del mundo van al panel */
     if (rc == 0 && o.screen_filter && sc.filter.active && sc.filter.n_strips == 0 && sc.filter.n_polys == 0 && !keep3b) {
         VrSceneOpts o2 = o;
         o2.screen_filter = 0;
@@ -866,6 +886,7 @@ static void build_one(const GpuDrawList *l, int si) {
             /* pantalla de cine (UI / vídeo / respaldo): fotograma entero, verificado contra la imagen del emulador. Pantalla 3D del motor (cinemáticas, créditos o texto sobre una escena): el panel 2D va
              * ENCIMA de la escena nativa, así que se verifica también (reproduce el mundo sin el panel, compone y compara con el emulador; donde no coincide usa la imagen exacta del emulador). */
             int l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO || view.kind == VRV_K_BACKUP ? VL_FULL : view.kind == VRV_K_ENGINE ? VL_PANEL_VERIFIED : VL_PANEL;
+            vl2a_set_view(l2a, (view.kind << 8) | (view.reason & 255));   /* etiqueta de vista del trabajo: el overlay del menú descarta las capas retrasadas de otra vista (créditos) */
             vl2a_submit(l2a, hl, rc == 0 && sc.op_dest && sc.n_op_dest >= hl->nops ? sc.op_dest : NULL, l2_full, 0);
             { static uint64_t l2_log_ns; uint64_t nn = mono_ns();   /* una línea por segundo */
               if (nn - l2_log_ns >= 1000000000ull) { char lb[1024]; l2_log_ns = nn; if (vl2a_report(l2a, lb, sizeof lb) > 0) fprintf(stderr, "%s\n", lb); } }
@@ -1054,6 +1075,8 @@ int mv_vrhost_hud2d_smooth(void) { return atomic_load(&l2d_smooth); }
 void mv_vrhost_hud2d_stats(int *scale, double *ms) { double sm; uint32_t lag; if (l2a) vl2a_stats(l2a, scale, ms, &sm, &lag); else { if (scale) *scale = 0; if (ms) *ms = 0; } }
 int mv_vrhost_hud2d_acquire(const uint8_t **px, int *w, int *h, int *full, uint32_t *seq) { return l2a ? vl2a_acquire(l2a, px, w, h, full, seq) : -1; }
 void mv_vrhost_hud2d_release(void) { if (l2a) vl2a_release(l2a); }
+int mv_vrhost_hud2d_layer(int *mode, int *view) { return l2a ? vl2a_acquire_info(l2a, mode, view) : 0; }
+int mv_vrhost_hud2d_accept(int mode, int layer_view, int cur_view, int overlay) { return vl2a_layer_accept(mode, layer_view, cur_view, overlay); }
 void mv_vrhost_set_headcol(int enable, float radius_m) {
     pthread_mutex_lock(&HCMX);
     VrHcCfg c = *vrhc_config();
@@ -1200,7 +1223,7 @@ static int dump_request(const char *dir, const char *dir2) {
         if (dir2 && !pair) snprintf(dump_dir, sizeof dump_dir, "%s", dir2);
         else snprintf(dump_dir, sizeof dump_dir, "%s", dir);
         if (pair) snprintf(dump_dir2, sizeof dump_dir2, "%s", dir2);
-        dump_need = pair ? (DN_STAGE | DN_FRAME) : DN_ANY;
+        dump_need = dump_need_init(native_mode(), pair);   /* en gpu no hay punto de enganche: la pareja se reduce al final de fotograma, con la lista */
         dump_acc = 0;
         dump_wait = 0;
         dump_state = DS_REQ; dump_res = 0; rc = 0;
@@ -1242,10 +1265,7 @@ static void dump_capture(Cpu *c, uint32_t f, const GpuDrawList *l) {
     pthread_mutex_lock(&DMX);
     if (dump_state != DS_REQ) { pthread_mutex_unlock(&DMX); return; }
     /* qué captura toca en este punto: en la pareja, primero el enganche y, ya hecho, el final de fotograma (del mismo fotograma de juego) */
-    int bit = 0;
-    if (dump_point) bit = (dump_need & DN_STAGE) ? DN_STAGE : (dump_need & DN_ANY);
-    else if (dump_need & DN_ANY) bit = DN_ANY;
-    else if ((dump_need & DN_FRAME) && !(dump_need & DN_STAGE)) bit = DN_FRAME;
+    int bit = dump_pick_bit(dump_need, dump_point);
     int slot = (bit == DN_FRAME) ? 1 : 0;
     if (!bit || slot_busy[slot] || (slot == 1 && !DBS[1].ram)) { pthread_mutex_unlock(&DMX); return; }
     dbc = &DBS[slot];
@@ -1374,15 +1394,16 @@ static void frame_hook(Cpu *c, uint32_t f) {
     frame_hook_body(c, f);
     /* El volcado funciona SIEMPRE (intro, menús, títulos, cinemáticas, muerte): la captura del punto de enganche solo existe cuando el extractor nativo corre (con escena de partida); sin
      * ella la pareja esperaba para siempre y el gesto acababa en «sin resultado». Tras 3 ganchos de fotograma sin esa captura se descarta y se vuelca solo el final del fotograma. */
+    int hold = 0;
     pthread_mutex_lock(&DMX);
     if (dump_state == DS_REQ && (dump_need & DN_STAGE)) {
         if (++dump_wait >= 3) {
             dump_need &= ~DN_STAGE;
             fprintf(stderr, "[volcado] sin captura del punto de enganche (no hay escena nativa en este momento): se vuelca solo el final del fotograma\n");
         }
-    }
+    } else if (dump_state == DS_REQ && !native_mode() && ++dump_wait < 4) hold = 1;   /* modo gpu: la lista llega con el gancho; sin ella se espera hasta 4 ganchos antes de volcar sin lista */
     pthread_mutex_unlock(&DMX);
-    dump_capture(c, f, NULL);   /* si el pedido no se atendió con una lista (sin consumidor, cola llena, sin lista nueva), se vuelca sin ella */
+    if (!hold) dump_capture(c, f, NULL);   /* si el pedido no se atendió con una lista (sin consumidor, cola llena, sin lista nueva), se vuelca sin ella */
 }
 
 /* ------------------------------------------------------------------------------------------------ enganches de arranque */

@@ -143,6 +143,28 @@ enum XRMenuPanelLayout {
 
     static func isOverlay(reason: Int32) -> Bool { reason == 10 || reason == 11 }
 
+    static let handWidth: Float = 0.30      // m (panel sobre la mano que abrió la ventana); alto = 3/4 del ancho
+    static let handLift: Float = 0.12       // m por encima de la mano (vertical del mundo; el eje +Y del agarre puede apuntar hacia abajo)
+    static let handMinEye: Float = 0.45     // m: distancia mínima ojo -> centro del panel (más cerca no se enfoca); si hace falta se aleja a lo largo del rayo cabeza -> centro
+
+    /// Modelo del panel anclado a la mano que abrió la ventana: centro `handLift` sobre el origen del agarre `grip`, +Z (la cara) hacia la cabeza `head`, con el «arriba» de la
+    /// imagen en la vertical del mundo. nil si la pose no es finita o la cabeza está casi sobre la mano (el llamador usa `model(position:yaw:)` como reserva).
+    static func handModel(grip: simd_float4x4, head: SIMD3<Float>) -> simd_float4x4? {
+        guard XRMath.isFinite(grip), head.x.isFinite, head.y.isFinite, head.z.isFinite else { return nil }
+        var c = XRMath.position(grip) + SIMD3<Float>(0, handLift, 0)
+        let d = head - c
+        let len = simd_length(d)
+        guard len > 0.05 else { return nil }
+        let n = d / len
+        if len < handMinEye { c = head - n * handMinEye }
+        let r = simd_cross(SIMD3<Float>(0, 1, 0), n)
+        let rl = simd_length(r)
+        guard rl > 0.05 else { return nil }
+        let right = r / rl
+        let up = simd_cross(n, right)
+        return simd_float4x4(columns: (SIMD4<Float>(right, 0), SIMD4<Float>(up, 0), SIMD4<Float>(n, 0), SIMD4<Float>(c, 1)))
+    }
+
     /// Modelo del panel (centro del quad, +Z hacia el usuario) para una posición de cabeza `p` y un rumbo `yaw` (el del HUD, con zona muerta).
     static func model(position p: SIMD3<Float>, yaw: Float) -> simd_float4x4 {
         XRMath.translation(p) * XRMath.rotationY(yaw) * XRMath.translation(SIMD3<Float>(0, -drop, -distance))

@@ -134,6 +134,10 @@ void mv_vrhost_hud2d_stats(int *scale, double *ms);
 /* Capa 2D fiel (hilo trabajador): -1 sin capa utilizable (usar el shader), 0 la misma de antes, 1 nueva (px RGBA8 w x h válidos hasta mv_vrhost_hud2d_release; full = fotograma entero). Hilo de render. */
 int mv_vrhost_hud2d_acquire(const uint8_t **px, int *w, int *h, int *full, uint32_t *seq);
 void mv_vrhost_hud2d_release(void);
+/* Modo (VL_PANEL=0 / VL_FULL=1 / VL_PANEL_VERIFIED=2) y etiqueta de vista ((view_kind << 8) | view_reason) de la capa adquirida; solo entre acquire (>= 0) y release. 1 si hay capa. Hilo de render. */
+int mv_vrhost_hud2d_layer(int *mode, int *view);
+/* ¿Vale una capa (mode, layer_view) para la vista vigente cur_view? Con overlay (ventana 2D del menú sobre el mundo) solo VL_PANEL; siempre la misma clase de vista (view_kind). */
+int mv_vrhost_hud2d_accept(int mode, int layer_view, int cur_view, int overlay);
 
 typedef struct {
     uint32_t built;          /* escenas ensambladas */
