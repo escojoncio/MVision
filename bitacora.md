@@ -5,6 +5,7 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 
 ## Last done
 - 2026-10-25: `.claude/agents/coder.md`: maxTurns → 70
+- 2026-10-25: `CLAUDE.md` línea 1: regla de cumplir siempre el rol asignado.
 - 2026-10-25 `069da3f` (IPA run 40228394774, artifact MVision-ipa 12612262250; ipa OK; render-test verde en `a820452` tras actualizar `vr/native/test_no_gpu3d.c` y stub `mv_vrgame_menu_hand` en `bench/c/bench_host.c`; el código del IPA no cambia):
   - Cine/créditos: 2D (kind 2) compuesto DENTRO de las texturas estéreo (`RenderRG.swift` `encodeStereo2D`, `stereoBase` por ojo con `stereoBaseStale`, `stereoWindow` solo de la lista actual); listas sin 3D pintan su 2D sobre la base; `vrhost_stereo2d_inside` (vr_view.h) decide si se quita el panel hp2 (`XRPresent.swift`). `vr_scene.c` `keep_late_clear` (TILE opaco ≥90 % tras el 3D se conserva = relleno de créditos) y `veil_as_2d` (velo semi a kind 2), ambos solo gpu+ENGINE.
   - Mezcla semitransparente en gamma: `render/metal/vr_blend.h` (C+MSL), `vr_fs_scene_blend` con `[[color(0)]]` + function constant `VR_FC_BLEND`; sin mezcla fija en pipelines semi.
