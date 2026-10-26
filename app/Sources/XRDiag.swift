@@ -19,7 +19,7 @@ final class XRDiag {
         var noLayers = false
         /// Plano cercano fijado (m) con la proyección propia. 0 = el del sistema.
         var nearPlane: Float = 0
-        /// 0 = automática (la del sistema si es válida), 1 = la propia, 2 = la del sistema.
+        /// 0 = automática (por defecto: la del sistema, con su rango de profundidad, si es válida; si no, la propia), 1 = la propia, 2 = la del sistema.
         var projMode = 0
         /// Sin prueba de profundidad en el mundo (solo diagnóstico).
         var noZTest = false

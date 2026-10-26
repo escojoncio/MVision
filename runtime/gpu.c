@@ -576,6 +576,7 @@ void gpu_capture_vblank(void) {
 }
 uint32_t gpu_capture_dropped(void) { return cap.dropped; }
 uint32_t gpu_capture_seq(void) { return cap.seq; }
+uint32_t gpu_capture_next_index(void) { return cap.nframes; }
 static GpuMarkHook mark_hook;
 void gpu_capture_set_mark_hook(GpuMarkHook h) { mark_hook = h; }
 void gpu_capture_set_float_hook(GpuFloatHook h) { cap.hook = h; }

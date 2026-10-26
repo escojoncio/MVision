@@ -103,13 +103,13 @@ static void *worker(void *arg) {
         if (px && w > 0 && h > 0 && grow((void **)&o->px, &o->cap, (size_t)w * h * 4, 1)) {
             memcpy(o->px, px, (size_t)w * h * 4);
             o->w = w; o->h = h; o->full = j->full == VL_FULL; o->mode = j->full; o->view = j->view; ok = 1;
-            o->menu_ok = vl2d_menu_rect(A->L, o->menu_uv);
+            o->menu_ok = vl2d_menu_rect(A->L, o->menu_uv) && vl2d_menu_settled(A->L);   /* solo el rect asentado (la ventana se abre con animación): el panel de la mano no cambia de tamaño durante la apertura */
             if (draw && (j->view & 255) == VRV_R_SELECTOR) {   /* registro al cambiar el estado del rect */
                 int key = o->menu_ok ? 1 + (int)(o->menu_uv[0] * 100) + 101 * (int)(o->menu_uv[1] * 100) + 10201 * (int)(o->menu_uv[2] * 100) + 1030301 * (int)(o->menu_uv[3] * 100) : 0;
                 if (key != A->mlog) {
                     A->mlog = key;
                     if (o->menu_ok) fprintf(stderr, "[menu2d] rect=(%.3f,%.3f,%.3f,%.3f) prims_nuevas=%d base=%d\n", (double)o->menu_uv[0], (double)o->menu_uv[1], (double)o->menu_uv[2], (double)o->menu_uv[3], inf.menu_new, inf.menu_base);
-                    else fprintf(stderr, "[menu2d] sin rect (se usa la capa entera) prims_nuevas=%d base=%d\n", inf.menu_new, inf.menu_base);
+                    else fprintf(stderr, "[menu2d] sin rect asentado (el visor no dibuja la ventana todavía) prims_nuevas=%d base=%d\n", inf.menu_new, inf.menu_base);
                 }
             } else if (draw) A->mlog = 0;   /* (VL_PANEL_VERIFIED sigue siendo un panel) */
         }

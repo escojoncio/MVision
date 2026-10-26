@@ -18,18 +18,6 @@ void vrview_reset(VrView *v) {
     v->prev_reason = VRV_R_NO_GAME;
     v->to_comms = 12;              /* 240 ms de radio antes de dejar el mundo (= VRCAM_COMMS_GRACE) */
     v->pend_max = 150;             /* 3 s esperando la cámara VR tras una radio o una escena */
-    v->cov_hi = 80;                /* medida buena: >= 80 % (cinemáticas con partida 67 - 99 %, muerte 22 - 98 %) */
-    v->cov_lo = 62;                /* medida mala: < 62 % (introducciones 0,1 - 30 %; muerte medida en volcado: 58,9 % con 660 triángulos ausentes = el lugar de la muerte fuera de la cola) */
-    v->cov_win = 4;                /* decide sobre las últimas 4 medidas (~4 s): las de una escena que barre zonas no cubiertas alternan buenas y malas */
-    v->cov_need_bad = 2;           /* 2 malas de 4 pierden la fiabilidad (la cinemática sin medida o fiel es de fiar hasta entonces) */
-    v->cov_need_good = 3;          /* 3 buenas de 4 la recuperan */
-    v->cov_forget = 50;            /* 1 s sin 3D: la siguiente escena parte de cero */
-}
-
-int vrview_native_trusted(const VrViewIn *in) {
-    if (!in) return 0;
-    if (in->cover1 > 0) return (int)in->cover1 - 1 >= 45;      /* entrada ya filtrada por vrview_step: 101 = fiel, 1 = no fiel; crudo: umbral central */
-    return in->game != 0;                                      /* sin medida: el extractor solo es de fiar con partida (puente completo y jugador) */
 }
 
 int vrview_kind_of(const VrViewIn *in) {
@@ -39,9 +27,9 @@ int vrview_kind_of(const VrViewIn *in) {
     /* FMV: con el decodificador de vídeo activo el fotograma sale de la VRAM (no hay escena que dibujar): gana al 3D que el motor deje detrás. */
     if (in->mdec && r != VRV_R_PAUSED) return VRV_K_VIDEO;
     /* Escena 3D del motor: sin control del jugador y con 3D; con o sin jugador en escena (las introducciones no lo tienen). Radio, pausa, detenido y ventana de
-     * armas/objetos son 2D del juego aunque el motor dibuje 3D detrás. Pantalla estereoscópica solo si el render nativo es fiel; si no, respaldo (VRAM). */
+     * armas/objetos son 2D del juego aunque el motor dibuje 3D detrás. Siempre pantalla estereoscópica del render nativo (sin respaldo plano). */
     if (in->scene3d && (r == VRV_R_NO_GAME || r == VRV_R_CINEMATIC || r == VRV_R_LOST_CONTROL || r == VRV_R_DEAD))
-        return in->gpu3d || vrview_native_trusted(in) ? VRV_K_ENGINE : VRV_K_BACKUP;   /* modo gpu: el 3D sale de la lista de la GPU, la cobertura nativa no interviene */
+        return VRV_K_ENGINE;
     if (in->video && r != VRV_R_PAUSED) return VRV_K_VIDEO;
     return VRV_K_UI;
 }
@@ -52,7 +40,6 @@ const char *vrview_kind_name(int k) {
     case VRV_K_WORLD: return "mundo";
     case VRV_K_ENGINE: return "cinemática del motor";
     case VRV_K_VIDEO: return "vídeo";
-    case VRV_K_BACKUP: return "respaldo (imagen de la VRAM)";
     default: return "?";
     }
 }
@@ -63,7 +50,6 @@ const char *vrview_cine_type(int k) {
     case VRV_K_WORLD: return "mundo";
     case VRV_K_ENGINE: return "motor";
     case VRV_K_VIDEO: return "fmv";
-    case VRV_K_BACKUP: return "respaldo";
     default: return "?";
     }
 }
@@ -92,29 +78,6 @@ int vrview_step(VrView *v, const VrViewIn *in) {
     if (r == VRV_R_NO_CAM && v->cam_seen && v->pend_run < v->pend_max) { v->pend_run++; r = VRV_R_PENDING; }
     else if (r != VRV_R_NO_CAM) v->pend_run = 0;
     int old_mode = v->mode, old_kind = v->kind, old_reason = v->reason;
-    /* Fidelidad del render nativo (solo cuenta con 3D): medidas de cobertura con histéresis. Sin 3D durante `cov_forget` fotogramas se olvidan. */
-    VrViewIn eff;
-    if (in) {
-        eff = *in;
-        if (in->scene3d) {
-            v->cov_idle = 0;
-            if (in->cover_new && in->cover1 > 0) {
-                int pct = (int)in->cover1 - 1;
-                if (in->cover_src != v->cov_src) { v->cov_good_mask = v->cov_bad_mask = 0; v->cov_src = in->cover_src; }   /* otra fuente (nativo / nativo + relleno): ventana nueva, sin mezclar */
-                unsigned wm = (1u << v->cov_win) - 1u;
-                v->cov_bad_mask = ((v->cov_bad_mask << 1) | (pct < v->cov_lo ? 1u : 0u)) & wm;
-                v->cov_good_mask = ((v->cov_good_mask << 1) | (pct >= v->cov_hi ? 1u : 0u)) & wm;
-                if (__builtin_popcount(v->cov_bad_mask) >= v->cov_need_bad) v->cov_state = 2;
-                else if (__builtin_popcount(v->cov_good_mask) >= v->cov_need_good) v->cov_state = 1;
-                else if (v->cov_state == 0 && pct >= v->cov_hi) v->cov_state = 1;   /* la PRIMERA medida de una escena, si es buena, ya es fiable (introducciones: sin partida, el nativo + relleno cubre ~99 % desde el primer fotograma; esperar 3 buenas de 4 son ~3 s de imagen plana). Una mala sola no cambia nada */
-            }
-        } else if (++v->cov_idle >= v->cov_forget) {
-            v->cov_state = 0; v->cov_good_mask = v->cov_bad_mask = 0; v->cov_src = 0; v->cov_idle = v->cov_forget;
-        }
-        eff.cover1 = v->cov_state == 1 ? 101 : v->cov_state == 2 ? 1 : 0;
-        eff.cover_new = 0;
-        in = &eff;
-    }
     v->prev_reason = old_reason;
     v->reason = r;
     if (r == VRV_R_PENDING) {
@@ -138,7 +101,7 @@ int vrview_step(VrView *v, const VrViewIn *in) {
     if (k == v->kind) {
         v->kind_run = 0;
     } else {
-        int need = k == VRV_K_ENGINE ? (in && in->gpu3d ? 1 : v->to_engine) : v->kind == VRV_K_ENGINE ? v->from_engine : v->to_other;   /* modo gpu: a ENGINE al instante */
+        int need = k == VRV_K_ENGINE ? v->to_engine : v->kind == VRV_K_ENGINE ? v->from_engine : v->to_other;
         if (k == VRV_K_WORLD) need = v->to_world;      /* el mundo y el modo de vista usan el mismo umbral */
         if (v->kind == VRV_K_WORLD) need = r == VRV_R_COMMS ? v->to_comms : v->to_cine;
         if (need < 1) need = 1;
@@ -172,10 +135,10 @@ int vrview_describe(const VrView *v, const VrViewIn *in, char *buf, int n) {
     VrViewIn z;
     if (!in) { memset(&z, 0, sizeof z); in = &z; }
     int r = snprintf(buf, (size_t)n,
-        "[vista] cambio:%s%s%s modo=%s clase=%s motivo=%s (antes: %s) | puente: partida=%d control=%d camVR=%d escena=%d radio=%d pausa=%d menu=%d detenido=%d muerte=%d 3D=%d video=%d gpu3d=%d",
+        "[vista] cambio:%s%s%s modo=%s clase=%s motivo=%s (antes: %s) | puente: partida=%d control=%d camVR=%d escena=%d radio=%d pausa=%d menu=%d detenido=%d muerte=%d 3D=%d video=%d",
         (v->changed & VRV_CH_MODE) ? " modo" : "", (v->changed & VRV_CH_KIND) ? " clase" : "", (v->changed & VRV_CH_REASON) ? " motivo" : "",
         v->mode == VRV_WORLD ? "mundo" : "cine", vrview_kind_name(v->kind), vrview_reason_name(v->reason), vrview_reason_name(v->prev_reason),
-        in->game, in->in_control, in->cam_active, in->cinematic, in->comms, in->paused, in->menu_open, in->stopped, in->dead, in->scene3d, in->video, in->gpu3d);
+        in->game, in->in_control, in->cam_active, in->cinematic, in->comms, in->paused, in->menu_open, in->stopped, in->dead, in->scene3d, in->video);
     if (r < 0) { buf[0] = 0; return 0; }
     return r >= n ? n - 1 : r;
 }
@@ -190,40 +153,14 @@ int vrview_cine_describe(const VrView *v, const VrViewIn *in, char *buf, int n) 
         why = in->mdec ? "decodificador de vídeo activo (MDEC): fotograma de la VRAM, pantalla de cine plana"
                        : "subidas de vídeo que cubren el área de pantalla de la VRAM y sin 3D";
         break;
-    case VRV_K_ENGINE:
-        if (in->gpu3d) { why = "3D del motor dibujado desde la lista de la GPU con vértices de vista de la GTE (modo gpu, sin depender de la cobertura nativa): pantalla estereoscópica"; break; }
-        why = v->cov_state == 1 ? (in->cover_src == 2 ? "3D del motor y el render nativo + el relleno global representan la lista (cobertura medida buena): pantalla estereoscópica"
-                                                      : "3D del motor y el render nativo representa la lista (cobertura medida buena): pantalla estereoscópica")
-                                : "3D del motor con partida y sin medida de cobertura: se fía del extractor";
-        break;
-    case VRV_K_BACKUP:
-        why = v->cov_state == 2 ? "3D del motor pero el render nativo no representa la lista (cobertura baja): imagen fiel de la VRAM"
-                                : "3D del motor sin partida y sin medida fiable (el extractor no tiene escena apta en este modo): imagen fiel de la VRAM";
-        break;
+    case VRV_K_ENGINE: why = "3D del motor dibujado por el render nativo (escena leída de la RAM): pantalla estereoscópica"; break;
     case VRV_K_WORLD: why = "primera persona"; break;
     default: why = "2D del juego (menú, título, radio, carga...): pantalla de cine"; break;
     }
-    char cov[40];
-    if (in->cover1 > 0) snprintf(cov, sizeof cov, "%d%%%s", (int)in->cover1 - 1, in->cover_src == 2 ? "(nativo+relleno)" : in->cover_src == 1 ? "(nativo)" : ""); else snprintf(cov, sizeof cov, "sin medir");
-    int r = snprintf(buf, (size_t)n, "[cine] tipo=%s motivo=%s | razon=%s partida=%d 3D=%d mdec=%d subidas=%d cobertura=%s estado_cobertura=%d(0 sin medir, 1 fiel, 2 no fiel)",
-                     vrview_cine_type(v->kind), why, vrview_reason_name(v->reason), in->game, in->scene3d, in->mdec, in->video, cov, v->cov_state);
+    int r = snprintf(buf, (size_t)n, "[cine] tipo=%s motivo=%s | razon=%s partida=%d 3D=%d mdec=%d subidas=%d",
+                     vrview_cine_type(v->kind), why, vrview_reason_name(v->reason), in->game, in->scene3d, in->mdec, in->video);
     if (r < 0) { buf[0] = 0; return 0; }
     return r >= n ? n - 1 : r;
-}
-
-int vrview_cover_feed(VrViewIn *in, uint32_t *seen, uint32_t vb, int has_fill, uint32_t fill_frame, int fill_pct, int has_nat, uint32_t nat_frame, int nat_pct) {
-    if (!in || !seen) return 0;
-    uint32_t cf; int cp, src;
-    const int okf = has_fill && vb >= fill_frame && vb - fill_frame <= 150u, okn = has_nat && vb >= nat_frame && vb - nat_frame <= 150u;
-    /* la medida MÁS RECIENTE de las dos (empate: la del relleno, que incluye al nativo): una medida vieja de una fuente no tapa a la nueva de la otra */
-    if (okf && (!okn || fill_frame >= nat_frame)) { cf = fill_frame; cp = fill_pct; src = 2; }
-    else if (okn) { cf = nat_frame; cp = nat_pct; src = 1; }
-    else return 0;
-    in->cover1 = (uint8_t)(cp < 0 ? 1 : cp > 100 ? 101 : cp + 1);
-    in->cover_src = (uint8_t)src;
-    in->cover_new = 0;
-    if (cf != *seen && (*seen == 0 || cf < *seen || cf - *seen >= VRV_COVER_SPACING)) { in->cover_new = 1; *seen = cf; }
-    return 1;
 }
 
 long long vrview_upload_area(int dx, int dy, int dw, int dh, int depth24, int x, int y, int w, int h) {

@@ -927,7 +927,7 @@ static int apply_main(uint8_t *ram) {
             }
             q_mul(Rq, h->q, qo);
         }
-        memcpy(G.fore_q[s], h->q, sizeof h->q);     /* marco del AGARRE (sin hand_rot_offset): el radar de muñeca va en el lado +Y del agarre (arriba con el pulgar arriba), como antes */
+        memcpy(G.fore_q[s], h->q, sizeof h->q);     /* marco del AGARRE (sin hand_rot_offset). Su +Y NO es el dorso real (45 grados desviado con el roll por defecto): los consumidores del radar (vrgame: ruta viva y de reserva) calculan el dorso con vrradar_dorsal_from_grip(agarre, hand_rot_offset) */
         vrbody_quat_to_mat(Rq, Ru);
         float Rw[9]; m_mulm(Rw, T, Ru);                                    /* ejes del marco de mano en el mundo */
         float zc[3]; m_col(zc, Rw, 2);
@@ -1193,7 +1193,7 @@ int vrbody_debug_hand_frame(int side, float m[16]) {
 }
 
 /* Antebrazo tras la IK, en el espacio del usuario (metros): codo y muñeca resueltos (con los límites aplicados) y la dirección
- * del dorso (eje +Y del marco de mano de vr_pose.h, sin la componente a lo largo del hueso). Solo vale tras un vrbody_apply que
+ * del dorso del AGARRE (+Y del agarre, sin hand_rot_offset: no es el dorso real; vrgame lo sustituye con vrradar_dorsal_from_grip). Solo vale tras un vrbody_apply que
  * moviera ese brazo y con el fundido casi completo; si no, 0 y el llamador usa otra fuente (la pose del mando). */
 int vrbody_forearm_pose(int side, VrBodyForearm *out) {
     if (!out || (side != 0 && side != 1) || !G.view_ok) return 0;

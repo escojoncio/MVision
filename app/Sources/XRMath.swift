@@ -138,12 +138,32 @@ enum XRMenuLayout {
 /// completa del juego se dibuja como un panel flotante delante de la cabeza, por delante de la geometría (sin prueba de profundidad), en lugar de los paneles sueltos del HUD.
 enum XRMenuPanelLayout {
     static let distance: Float = 0.95       // m delante de la cabeza (en horizontal)
-    static let width: Float = 1.40          // m; alto = 3/4 del ancho (la capa 2D es 4:3)
+    static let width: Float = 1.40          // m por ancho de capa 2D (alto = aspecto real de la capa)
     static let drop: Float = 0.02           // m por debajo de los ojos
 
     static func isOverlay(reason: Int32) -> Bool { reason == 10 || reason == 11 }
 
-    static let handWidth: Float = 0.30      // m (panel sobre la mano que abrió la ventana); alto = 3/4 del ancho
+    static let handWidth: Float = 0.30      // m (panel sobre la mano con la capa entera, sin rect); alto = aspecto real de la capa
+    static let handLayerWidth: Float = 0.88 // m por ANCHO de capa en el panel de la mano con rect: densidad fija (la ventana de armas, 0,34 del ancho, mide 0,30 m); no depende de la escala de raster
+    static let handMaxSide: Float = 0.45    // m: lado máximo del panel de la mano
+
+    /// Tamaño (m) del panel de la mano: un recorte `uv` (u0, v0, u1, v1) de la capa con aspecto real `aspect` (alto/ancho en píxeles). Densidad de píxel FIJA (sin rect: la capa entera a `handWidth`)
+    /// y píxeles cuadrados (el alto lleva el aspecto de la capa, no 3/4). Solo depende del rect y del aspecto, nunca de la resolución del raster.
+    static func handSize(uv: SIMD4<Float>?, aspect: Float) -> SIMD2<Float> {
+        let a = aspect.isFinite && aspect > 0.3 && aspect < 1.2 ? aspect : 0.75
+        guard let r = uv, r.x.isFinite, r.y.isFinite, r.z.isFinite, r.w.isFinite else { return SIMD2<Float>(handWidth, handWidth * a) }
+        var s = SIMD2<Float>(handLayerWidth * max(r.z - r.x, 0.01), handLayerWidth * max(r.w - r.y, 0.01) * a)
+        let m = max(s.x, s.y)
+        if m > handMaxSide { s *= handMaxSide / m }
+        return s
+    }
+
+    /// Tamaño (m) de la ventana 2D delante de la cabeza (sin mano): como `handSize` pero con `width` m por ancho de capa.
+    static func frontSize(uv: SIMD4<Float>?, aspect: Float) -> SIMD2<Float> {
+        let a = aspect.isFinite && aspect > 0.3 && aspect < 1.2 ? aspect : 0.75
+        let r = uv ?? SIMD4<Float>(0, 0, 1, 1)
+        return SIMD2<Float>(width * max(r.z - r.x, 0.01), width * max(r.w - r.y, 0.01) * a)
+    }
     static let handLift: Float = 0.12       // m por encima de la mano (vertical del mundo; el eje +Y del agarre puede apuntar hacia abajo)
     static let handMinEye: Float = 0.45     // m: distancia mínima ojo -> centro del panel (más cerca no se enfoca); si hace falta se aleja a lo largo del rayo cabeza -> centro
 
@@ -174,9 +194,9 @@ enum XRMenuPanelLayout {
 enum XRCinemaLayout {
     /// Motivos de vista (VRV_R_*) cuya pantalla lleva texto pequeño de 1 px (títulos, créditos, nombres de la intro, pantallas de resultado, códec): sin partida, radio y juego detenido.
     static func legible(reason: Int32) -> Bool { reason == 1 || reason == 3 || reason == 4 }
-    /// Igual, y además los fotogramas emulados de un FMV (clase 3) o del respaldo de una escena del motor (clase 4, view_kind de vr_view.h): imagen de la VRAM a pantalla completa, grande,
+    /// Igual, y además los fotogramas emulados de un FMV (clase 3, view_kind de vr_view.h): imagen de la VRAM a pantalla completa, grande,
     /// plana y con el escalado de píxel fijo (nítida), sin la deformación del cilindro.
-    static func legible(reason: Int32, kind: Int32) -> Bool { legible(reason: reason) || kind == 3 || kind == 4 }
+    static func legible(reason: Int32, kind: Int32) -> Bool { legible(reason: reason) || kind == 3 }
     /// Ancho de la pantalla (m): un 25 % mayor para esas escenas (hasta 4,5 m).
     static func width(base: Float, legible: Bool) -> Float { legible ? min(base * 1.25, 4.5) : base }
     /// Curvatura: el cilindro deforma la rejilla de píxeles (trazos de 1 px de grosor desigual); en escenas de texto se limita a 0,12.
@@ -185,6 +205,20 @@ enum XRCinemaLayout {
     static func sharp(base: Int, legible: Bool) -> Int { legible ? max(base, 1) : base }
     /// Escalado entero (cada texel = nº entero de píxeles del visor): siempre en esas escenas.
     static func integerScale(base: Bool, legible: Bool) -> Bool { base || legible }
+    /// Ancho (m) con cada píxel LÓGICO del fotograma (`logicalWidth`: 320/384, no la textura, que lleva además la escala de raster) en un nº entero de píxeles del visor (`pixelsPerMeter`).
+    /// Depende solo del ancho lógico: cambiar la escala de raster de la capa cambia la nitidez, no el tamaño de la pantalla.
+    static func snappedWidth(_ w: Float, logicalWidth: Int, pixelsPerMeter ppm: Float) -> Float {
+        guard logicalWidth > 0, ppm.isFinite, ppm > 0 else { return w }
+        let texPx = w / Float(logicalWidth) * ppm
+        guard texPx.isFinite, texPx > 1 else { return w }
+        return max(1, texPx.rounded()) * Float(logicalWidth) / ppm
+    }
+    /// Alto/ancho real de la imagen mostrada (la textura lleva el tamaño lógico por la escala: la proporción es la misma a cualquier escala). 0,75 si no es plausible.
+    static func aspect(width: Int, height: Int) -> Float {
+        guard width > 0, height > 0 else { return 0.75 }
+        let a = Float(height) / Float(width)
+        return a.isFinite && a >= 0.5 && a <= 1.0 ? a : 0.75
+    }
 }
 
 /// Seguimiento suave de la cabeza por las pantallas 2D (cine, pantalla 3D, ventanas del juego, menú VR). Funciones puras (las prueba el banco).

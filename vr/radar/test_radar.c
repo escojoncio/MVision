@@ -458,10 +458,10 @@ static void t_anchor(void) {
     float d[3] = {q.center[0] - arm.wrist[0], q.center[1] - arm.wrist[1], q.center[2] - arm.wrist[2]};
     CHECK(NEAR(dotv(d, a), cfg.along_m, 1e-5) && NEAR(dotv(d, q.normal), cfg.lift_m, 1e-5), "posición: %.4f a lo largo, %.4f sobre", dotv(d, a), dotv(d, q.normal));
     CHECK(dotv(q.normal, arm.dorsal) > 0, "normal hacia el dorso");
-    CHECK(NEAR(q.half_w * 2, 0.07, 1e-6) && NEAR(q.half_w / q.half_h, 71.0 / 54.0, 1e-4), "tamaño 7 cm, proporción del radar");
+    CHECK(q.half_w * 2 >= 0.0899 && NEAR(q.half_w * 2, cfg.width_m, 1e-6) && NEAR(q.half_w / q.half_h, 71.0 / 54.0, 1e-4), "tamaño >= 9 cm (%.4f), proporción del radar", q.half_w * 2);
     float w[3] = {q.corners[1][0] - q.corners[0][0], q.corners[1][1] - q.corners[0][1], q.corners[1][2] - q.corners[0][2]};
-    CHECK(NEAR(lenv(w), 0.07, 1e-5), "esquinas");
-    CHECK(NEAR(q.model[0], q.right[0] * 0.07, 1e-5) && NEAR(q.model[12], q.center[0], 1e-6) && q.model[15] == 1.0f, "modelo");
+    CHECK(NEAR(lenv(w), cfg.width_m, 1e-5), "esquinas");
+    CHECK(NEAR(q.model[0], q.right[0] * cfg.width_m, 1e-5) && NEAR(q.model[12], q.center[0], 1e-6) && q.model[15] == 1.0f, "modelo");
     /* giro de 90° */
     VrRadarWristCfg c2 = cfg; c2.rot90 = 1;
     VrRadarQuad q2;
@@ -710,17 +710,18 @@ static void t_visibility(void) {
     CHECK(NEAR(vrradar_visibility(n, c, e, 0.5f, 0.075f), 1.0, 1e-6) && NEAR(vrradar_visibility(n, c, e, 0.5f, 5.0f), 1.0, 1e-6), "llega a 1 y no pasa");
     CHECK(NEAR(vrradar_visibility(n, c, e, 0.0f, 0.15f), 1.0, 1e-6), "fundido de 0,15 s");
     CHECK(NEAR(vrradar_visibility(n, c, e, 0.3f, 0.0f), 0.3, 1e-6), "dt 0: sin cambio");
-    eye_at(e, 44.0f); CHECK(vrradar_visibility(n, c, e, 0.0f, 1.0f) == 1.0f, "44 grados: aparece");
-    eye_at(e, 46.0f); CHECK(vrradar_visibility(n, c, e, 0.0f, 1.0f) == 0.0f, "46 grados desde oculto: sigue oculto (histéresis)");
-    eye_at(e, 54.0f);
-    CHECK(vrradar_visibility(n, c, e, 1.0f, 1.0f) == 1.0f, "54 grados desde visible: sigue visible");
-    CHECK(vrradar_visibility(n, c, e, 0.0f, 1.0f) == 0.0f, "54 grados desde oculto: sigue oculto");
-    eye_at(e, 56.0f);
-    CHECK(vrradar_visibility(n, c, e, 1.0f, 1.0f) == 0.0f, "56 grados: desaparece");
+    CHECK(VRRADAR_VIS_ON_DEG == 60.0f && VRRADAR_VIS_OFF_DEG == 75.0f && VRRADAR_VIS_FADE_S == 0.15f, "umbrales: aparece < 60, desaparece > 75, fundido 0,15 s");
+    eye_at(e, 59.0f); CHECK(vrradar_visibility(n, c, e, 0.0f, 1.0f) == 1.0f, "59 grados: aparece");
+    eye_at(e, 61.0f); CHECK(vrradar_visibility(n, c, e, 0.0f, 1.0f) == 0.0f, "61 grados desde oculto: sigue oculto (histéresis)");
+    eye_at(e, 74.0f);
+    CHECK(vrradar_visibility(n, c, e, 1.0f, 1.0f) == 1.0f, "74 grados desde visible: sigue visible");
+    CHECK(vrradar_visibility(n, c, e, 0.0f, 1.0f) == 0.0f, "74 grados desde oculto: sigue oculto");
+    eye_at(e, 76.0f);
+    CHECK(vrradar_visibility(n, c, e, 1.0f, 1.0f) == 0.0f, "76 grados: desaparece");
     CHECK(NEAR(vrradar_visibility(n, c, e, 1.0f, 0.075f), 0.5, 1e-6), "desaparece en 0,15 s");
     CHECK(NEAR(vrradar_visibility(n, c, e, 0.05f, 0.075f), 0.0, 1e-6), "no baja de 0");
     e[0] = 0; e[1] = 0; e[2] = -1; CHECK(vrradar_visibility(n, c, e, 1.0f, 1.0f) == 0.0f, "ojo detrás del panel: oculto");
-    /* barrido de ángulo 0 -> 90 -> 0 a 90 Hz: aparece al cruzar 45 bajando, se mantiene hasta 55 subiendo, y no reaparece hasta bajar de 45 */
+    /* barrido de ángulo 0 -> 90 -> 0 a 90 Hz: aparece al cruzar 60 bajando, se mantiene hasta 75 subiendo, y no reaparece hasta bajar de 60 */
     float v = 0; int off_at_up = -1, on_at_down = -1;
     for (int i = 0; i <= 900; i++) {
         float deg = i <= 450 ? i * 0.2f : (900 - i) * 0.2f;   /* 0 -> 90 -> 0, 0,2 grados por paso */
@@ -730,8 +731,8 @@ static void t_visibility(void) {
         if (i <= 450 && pv >= 0.999f && v < 0.999f && off_at_up < 0) off_at_up = i;
         if (i > 450 && pv <= 0.001f && v > 0.001f && on_at_down < 0) on_at_down = i;
     }
-    CHECK(off_at_up >= 0 && off_at_up * 0.2f >= 54.9f && off_at_up * 0.2f <= 56.0f, "subiendo: empieza a apagarse pasados 55 grados (paso %d = %.1f)", off_at_up, off_at_up * 0.2f);
-    CHECK(on_at_down >= 0 && (900 - on_at_down) * 0.2f <= 45.0f + 1e-3f, "bajando: reaparece al bajar de 45 grados (paso %d)", on_at_down);
+    CHECK(off_at_up >= 0 && off_at_up * 0.2f >= 74.9f && off_at_up * 0.2f <= 76.0f, "subiendo: empieza a apagarse pasados 75 grados (paso %d = %.1f)", off_at_up, off_at_up * 0.2f);
+    CHECK(on_at_down >= 0 && (900 - on_at_down) * 0.2f <= 60.0f + 1e-3f, "bajando: reaparece al bajar de 60 grados (paso %d)", on_at_down);
     /* entradas no válidas = fuera de la zona */
     eye_at(e, 0);
     float nan3[3] = {NAN, 0, 1}, z3[3] = {0, 0, 0};
@@ -739,6 +740,37 @@ static void t_visibility(void) {
     CHECK(vrradar_visibility(NULL, c, e, 1.0f, 1.0f) == 0.0f && vrradar_visibility(n, NULL, e, 1.0f, 1.0f) == 0.0f && vrradar_visibility(n, c, NULL, 1.0f, 1.0f) == 0.0f, "NULL: oculto");
     CHECK(vrradar_visibility(n, c, e, NAN, 1.0f) == 1.0f && vrradar_visibility(n, c, e, 7.0f, 0.0f) == 1.0f && vrradar_visibility(n, c, e, -3.0f, 0.0f) == 0.0f, "prev fuera de rango / NaN se acota");
     CHECK(vrradar_visibility(n, c, e, 0.0f, NAN) == 0.0f && vrradar_visibility(n, c, e, 0.0f, -1.0f) == 0.0f, "dt no válido: sin cambio");
+}
+
+/* Dorso REAL de la mano = +Y del marco de mano = agarre girado por hand_rot_offset (roll +45 grados alrededor del eje Z local, izquierda; -45 derecha), no +Y del agarre (45 grados desviado: el radar quedaba
+ * de lado y casi nunca mirando a la cara). La componente a lo largo del hueso se descarta. */
+static void t_dorsal_offset(void) {
+    const float I[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};       /* agarre sin girar: X derecha, Y arriba, Z hacia atrás (hacia el codo) */
+    const float bone[3] = {0, 0, 1};                                  /* dirección del antebrazo (cualquier sentido): hacia atrás */
+    float ql[4] = {0, 0, sinf(22.5f * 3.14159265f / 180.0f), cosf(22.5f * 3.14159265f / 180.0f)}, qr[4] = {0, 0, -ql[2], ql[3]}, o[3];
+    CHECK(vrradar_dorsal_from_grip(I, ql, bone, o) && NEAR(o[0], -0.70710678, 1e-5) && NEAR(o[1], 0.70710678, 1e-5) && NEAR(o[2], 0, 1e-5), "dorso izquierda: agarre girado +45 (%.3f %.3f %.3f)", o[0], o[1], o[2]);
+    CHECK(vrradar_dorsal_from_grip(I, qr, bone, o) && NEAR(o[0], 0.70710678, 1e-5) && NEAR(o[1], 0.70710678, 1e-5), "dorso derecha: agarre girado -45");
+    CHECK(vrradar_dorsal_from_grip(I, NULL, bone, o) && NEAR(o[0], 0, 1e-6) && NEAR(o[1], 1, 1e-6), "sin offset (NULL): +Y del agarre");
+    float qi[4] = {0, 0, 0, 1};
+    CHECK(vrradar_dorsal_from_grip(I, qi, bone, o) && NEAR(o[1], 1, 1e-6), "offset identidad: +Y del agarre");
+    /* ortogonal al hueso aunque éste vaya inclinado, y unitario */
+    float tilt[3] = {0, 0.5f, 0.8660254f}, o2[3];
+    CHECK(vrradar_dorsal_from_grip(I, ql, tilt, o2) && NEAR(lenv(o2), 1, 1e-5) && NEAR(dotv(o2, tilt), 0, 1e-5), "dorso ortogonal al hueso inclinado y unitario");
+    /* agarre girado en el mundo: gira con él (Y del agarre = (1,0,0)) */
+    const float G[16] = {0,1,0,0, -1,0,0,0, 0,0,1,0, 0.3f,1.1f,-0.4f,1};   /* rotación de +90 grados sobre Z: X->Y, Y->-X */
+    CHECK(vrradar_dorsal_from_grip(G, qi, bone, o) && NEAR(o[0], -1, 1e-6) && NEAR(o[1], 0, 1e-6), "agarre girado: el dorso gira con él");
+    /* entradas no válidas */
+    float bad[16]; memcpy(bad, I, sizeof bad); bad[5] = NAN;
+    float zero[3] = {0, 0, 0}, along_y[3] = {0, 1, 0};
+    CHECK(!vrradar_dorsal_from_grip(bad, ql, bone, o) && !vrradar_dorsal_from_grip(NULL, ql, bone, o) && !vrradar_dorsal_from_grip(I, ql, zero, o) && !vrradar_dorsal_from_grip(I, ql, bone, NULL), "entradas no válidas: 0");
+    CHECK(!vrradar_dorsal_from_grip(I, qi, along_y, o), "dorso paralelo al hueso: 0 (degenerado)");
+    /* el caso del registro: agarre inclinado 45 grados hacia el lado del pulgar (su +Y ya no es el dorso), ojo 35 cm sobre la muñeca: el dorso con el offset mira más al ojo que +Y del agarre */
+    float gtilt[16] = {1,0,0,0, 0.7071068f,0.7071068f,0,0, 0,0,1,0, 0,1,0,1}, d_old[3], d_new[3];
+    memcpy(d_old, &gtilt[4], sizeof d_old);   /* normal antigua: Y del agarre */
+    CHECK(vrradar_dorsal_from_grip(gtilt, ql, bone, d_new), "dorso del agarre inclinado");
+    float eye[3] = {0.0f, 1.35f, 0.0f}, to[3] = {eye[0] - 0, eye[1] - 1.0f, eye[2] - 0}, tl = lenv(to);
+    for (int i = 0; i < 3; i++) to[i] /= tl;
+    CHECK(dotv(d_new, to) > dotv(d_old, to) + 0.1f, "el dorso con el offset mira más al ojo (%.3f) que +Y del agarre (%.3f)", dotv(d_new, to), dotv(d_old, to));
 }
 
 /* El panel queda fijo al dorso del antebrazo (no gira hacia el ojo) y la visibilidad mide el ángulo dorso-ojo: de espaldas a la cabeza no se ve nunca */
@@ -899,6 +931,7 @@ int main(int argc, char **argv) {
     t_pick_arm();
     t_visibility();
     t_dorsal_visibility();
+    t_dorsal_offset();
     t_mesh_clearance();
     fprintf(stderr, "test_radar: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

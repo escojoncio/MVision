@@ -201,7 +201,25 @@ static int invariants(const NsScene *s, const NsMeshStore *store) {
     return ok;
 }
 
+/* Sincronía escena <-> VRAM: la escena lleva el índice (+1; 0 = desconocido) de la lista de la GPU que contiene su dibujo; el renderer solo la da por lista para una época de mallas nueva cuando la VRAM
+ * ya trae esa lista (las texturas de la zona nueva). Desconocida o sin VRAM conocida: siempre lista. */
+static void t_vram_sync(void) {
+    NsScene a;
+    memset(&a, 0, sizeof a);
+    CHECK(a.list_index == 0); /* list_index parte de 0 (desconocido) */
+    CHECK(ns_scene_vram_ready(&a, 0, 1) == 1 && ns_scene_vram_ready(&a, 12345, 1) == 1); /* list_index 0: siempre lista */
+    a.list_index = 11;      /* lista 10 */
+    CHECK(ns_scene_vram_ready(&a, 9, 1) == 0); /* VRAM en la lista 9, la escena es de la 10: espera */
+    CHECK(ns_scene_vram_ready(&a, 10, 1) == 1 && ns_scene_vram_ready(&a, 11, 1) == 1 && ns_scene_vram_ready(&a, 500, 1) == 1); /* VRAM en la 10 o posterior: lista */
+    CHECK(ns_scene_vram_ready(&a, 0, 0) == 1); /* sin lista de VRAM conocida: lista */
+    CHECK(ns_scene_vram_ready(NULL, 0, 1) == 1); /* escena NULL: lista */
+    a.list_index = 1u;      /* escena de la lista 0; el contador de 32 bits da la vuelta: la lista 0 es posterior a 0xFFFFFFFF */
+    CHECK(ns_scene_vram_ready(&a, 0xFFFFFFFFu, 1) == 0 && ns_scene_vram_ready(&a, 0, 1) == 1); /* contador que da la vuelta: lista 0 es posterior a 0xFFFFFFFF */
+    CHECK(sizeof(NsScene) % 4 == 0); /* tamaño múltiplo de 4 */
+}
+
 int main(void) {
+    t_vram_sync();
     ram = (uint8_t *)calloc(1, NS_RAM_SIZE);
     st = ns_store_create();
     CHECK(ns_scene_alloc(&sc, 1, 1, 1, 0) == 0);   /* se sube a los mínimos del contrato */

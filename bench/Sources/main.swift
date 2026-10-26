@@ -172,6 +172,8 @@ func blitEye(_ cb: MTLCommandBuffer, _ color: [MTLTexture], layered: Bool, eye: 
 func render(_ enc: XRFrameEncoder, layered: Bool, color: [MTLTexture], depth: [MTLTexture], gs: MvVrGameState, frames: Int,
             head: (Int) -> simd_float4x4, before: ((Int) -> Void)? = nil, axes: [XRAxisFrame] = []) -> [Img]? {
     var result: [Img]?
+    // Modo automático (0): el codificador usa la proyección del SISTEMA si se le entrega una válida (casos `sysInf`, lejano infinito) y, si no, la propia del rango de profundidad.
+    XRDiag.shared.update { $0.projMode = 0 }
     for i in 0..<frames {
         before?(i)
         guard let cb = queue.makeCommandBuffer() else { return nil }
@@ -291,7 +293,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
         bench_enable_weapon(0)
         let headA = headPose(SIMD3<Float>(0.10, 1.60, 0.20), yaw: 0.45)
         let headB = headPose(SIMD3<Float>(0.35, 1.45, -0.10), yaw: 0.20)      // la cabeza se mueve tras anclar: el encuadre de la escena NO debe cambiar
-        // Menos fotogramas que XRPresenter.engineBadFrames (72): sin escena nativa del motor, pasado ese umbral la presentación cae por diseño al respaldo (pantalla de cine) y reinicia el velo.
+        // 60 fotogramas: sin escena nativa del motor la presentación repite el último válido o funde a negro (ya no existe el respaldo plano) y reinicia el velo.
         var gs = MvVrGameState(); gs.view_mode = 0; gs.view_kind = 2
         guard let imgs = render(enc, layered: cfg.layered, color: tg.color, depth: tg.depth, gs: gs, frames: 60, head: { $0 == 59 ? headB : headA }) else {
             check(caso, "render", false, "fallo al renderizar"); bench_set_cine_camera(0); break stereoBlock
@@ -798,6 +800,26 @@ func runMenuLayout() {
     check("cine-legible", "curvatura limitada a 0,12 solo en texto", XRCinemaLayout.curve(base: 0.7, legible: true) == 0.12 && XRCinemaLayout.curve(base: 0.0, legible: true) == 0 && XRCinemaLayout.curve(base: 0.7, legible: false) == 0.7, "")
     check("cine-legible", "nitidez nunca suave en texto; píxel se respeta", XRCinemaLayout.sharp(base: 0, legible: true) == 1 && XRCinemaLayout.sharp(base: 2, legible: true) == 2 && XRCinemaLayout.sharp(base: 0, legible: false) == 0, "")
     check("cine-legible", "escalado entero forzado en texto", XRCinemaLayout.integerScale(base: false, legible: true) && !XRCinemaLayout.integerScale(base: false, legible: false), "")
+    do {   // tamaño de las ventanas 2D: solo depende del ancho lógico / rect y del aspecto real, nunca de la escala de raster
+        let ppm: Float = 2400
+        let w320 = XRCinemaLayout.snappedWidth(3.0, logicalWidth: 320, pixelsPerMeter: ppm)
+        let pxPerTexel: Float = w320 / 320 * ppm
+        let dWidth: Float = abs(w320 - 3.0), dTol: Float = 320 / ppm
+        check("ventana2d", "cine: el ancho entero cae en un nº entero de píxeles por texel lógico", abs(pxPerTexel - pxPerTexel.rounded()) < 1e-3 && dWidth < dTol, "\(w320)")
+        check("ventana2d", "cine: ancho lógico no válido o ppm no válido -> sin cambio", XRCinemaLayout.snappedWidth(3.0, logicalWidth: 0, pixelsPerMeter: ppm) == 3.0 && XRCinemaLayout.snappedWidth(3.0, logicalWidth: 320, pixelsPerMeter: 0) == 3.0, "")
+        let asp1: Float = XRCinemaLayout.aspect(width: 320, height: 256), asp2: Float = XRCinemaLayout.aspect(width: 1280, height: 1024)
+        let asp3: Float = XRCinemaLayout.aspect(width: 384 * 3, height: 256 * 3), asp0: Float = XRCinemaLayout.aspect(width: 0, height: 5)
+        let aspOK: Bool = abs(asp1 - 0.8) < 1e-6 && abs(asp2 - 0.8) < 1e-6 && abs(asp3 - Float(2.0 / 3.0)) < 1e-6 && asp0 == 0.75
+        check("ventana2d", "cine: aspecto real (320x256 = 0,8; 384x256 = 0,667; a cualquier escala) y reserva 0,75", aspOK, "")
+        let rl = SIMD4<Float>(0.034, 0.711, 0.375, 0.961)
+        let s0 = XRMenuPanelLayout.handSize(uv: rl, aspect: 0.8), s1 = XRMenuPanelLayout.handSize(uv: rl, aspect: 0.8)
+        let ratioWant: Float = (0.961 - 0.711) / (0.375 - 0.034) * 0.8
+        let ratioGot: Float = s0.y / s0.x
+        check("ventana2d", "mano: el tamaño depende solo del rect y del aspecto (estable) y los píxeles son cuadrados", s0 == s1 && abs(ratioGot - ratioWant) < 1e-5 && s0.x <= XRMenuPanelLayout.handMaxSide + 1e-6, "\(s0)")
+        let sf = XRMenuPanelLayout.handSize(uv: nil, aspect: 2.0 / 3.0)
+        let sfH: Float = XRMenuPanelLayout.handWidth * Float(2.0 / 3.0)
+        check("ventana2d", "mano sin rect: capa entera a 0,30 m con su aspecto", abs(sf.x - XRMenuPanelLayout.handWidth) < 1e-6 && abs(sf.y - sfH) < 1e-6, "\(sf)")
+    }
 }
 
 runMenuLayout()

@@ -18,6 +18,7 @@
 #include "vr_glove.h"
 #include "vr_hands.h"
 #include "vr_pose.h"
+#include "vr_radar.h"
 #include "vr_missile.h"
 #include "vr_reload.h"
 #include "w_aa.h"
@@ -1054,7 +1055,20 @@ void vrgame_frame_end(void) {
     pthread_mutex_lock(&HM);
     if (bst.applies != pub_live_applies) { pub_live_applies = bst.applies; pub_live_ns[0] = pub_live_ns[1] = tnow; }   /* instante del último apply (también sin brazos movidos) */
     for (int i = 0; i < 2; i++) { pub_live_ok[i] = aok[i]; if (aok[i]) pub_live[i] = al[i]; }
-    for (int i = 0; i < 2; i++) { pub_fore_ok[i] = ok[i]; if (ok[i]) pub_fore[i] = f[i]; }
+    {   /* dorso de reserva = el MISMO que la ruta viva (mv_vrgame_forearm_live): +Y del marco de MANO (agarre actual girado por hand_rot_offset), no el +Y del agarre (45 grados desviado); sin agarre válido no se publica (el consumidor usa otra fuente) */
+        const VrBodyConfig *bc = vrbody_config();
+        for (int i = 0; i < 2; i++) {
+            if (ok[i]) {
+                GripPose g = grip_locked(&hand_in[i], tnow);
+                float m[16], bone[3], d[3];
+                for (int k = 0; k < 3; k++) bone[k] = f[i].wrist[k] - f[i].elbow[k];
+                if (g.valid) m16_from_pq(g.p, g.q, m);
+                if (g.valid && vrradar_dorsal_from_grip(m, bc ? bc->hand_rot_offset[i] : NULL, bone, d)) memcpy(f[i].dorsal, d, sizeof d);
+                else ok[i] = 0;
+            }
+            pub_fore_ok[i] = ok[i]; if (ok[i]) pub_fore[i] = f[i];
+        }
+    }
     pub_status.arms_driven = bst.arms_driven;
     pub_status.loader = G.cur >= 0 ? atomic_load(&SL[G.cur].state) : pub_status.loader;
     pthread_mutex_unlock(&HM);
@@ -1084,17 +1098,14 @@ int32_t mv_vrgame_forearm_live(int32_t side, MvVrForearm *out, float *dev_mm, fl
     int ok = live_arm_locked(side, now, &a, &gn, &ap, dev_mm, age_ms);
     pthread_mutex_unlock(&HM);
     if (!ok) return 0;
-    float m[16], bone[3], b[3], d[3];
+    float m[16], bone[3], d[3];
     m16_from_pq(gn.p, gn.q, m);
-    for (int i = 0; i < 3; i++) { bone[i] = ap.wrist[i] - ap.elbow[i]; d[i] = m[4 + i]; }       /* +Y del agarre = dorso (como vrbody_forearm_pose) */
-    float bl = sqrtf(bone[0] * bone[0] + bone[1] * bone[1] + bone[2] * bone[2]);
-    if (!(bl > 1e-4f)) return 0;
-    for (int i = 0; i < 3; i++) b[i] = bone[i] / bl;
-    float dp = d[0] * b[0] + d[1] * b[1] + d[2] * b[2];
-    for (int i = 0; i < 3; i++) d[i] -= b[i] * dp;
-    float dl = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-    if (!(dl > 1e-3f)) return 0;
-    for (int i = 0; i < 3; i++) { out->elbow[i] = ap.elbow[i]; out->wrist[i] = ap.wrist[i]; out->dorsal[i] = d[i] / dl; }
+    for (int i = 0; i < 3; i++) bone[i] = ap.wrist[i] - ap.elbow[i];
+    if (!(sqrtf(bone[0] * bone[0] + bone[1] * bone[1] + bone[2] * bone[2]) > 1e-4f)) return 0;
+    /* Dorso = +Y del marco de MANO (agarre girado por hand_rot_offset: roll 45 grados), no +Y del agarre (45 grados desviado hacia el pulgar: el panel del radar quedaba de lado), sin la componente del hueso */
+    const VrBodyConfig *bc = vrbody_config();
+    if (!vrradar_dorsal_from_grip(m, bc ? bc->hand_rot_offset[side] : NULL, bone, d)) return 0;
+    for (int i = 0; i < 3; i++) { out->elbow[i] = ap.elbow[i]; out->wrist[i] = ap.wrist[i]; out->dorsal[i] = d[i]; }
     return 1;
 }
 

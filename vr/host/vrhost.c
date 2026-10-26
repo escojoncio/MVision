@@ -154,7 +154,6 @@ static VrView view;                      /* vista vigente: mundo / cine (vr_view
 static VrCine cine;                      /* planos de la cinemática del motor en curso (vr_cine.h) */
 static int last_scene3d, last_video;     /* de la última lista ensamblada: geometría 3D sustancial con cámara válida / fotograma de vídeo */
 static uint32_t mdec_seen_total, mdec_last_vb;   /* contador del MDEC en la última lectura / VBlank en que creció (0 = nunca) */
-static uint32_t cover_seen_frame;        /* fotograma de la última medida de cobertura entregada a la vista */
 static int last_cover;                   /* recubrimientos a pantalla completa (fundidos) de la última lista */
 static int vr_ok;                        /* EXE de la edición esperada: parche aplicado y HLE de cámara enlazadas */
 static int cap_on;
@@ -240,10 +239,10 @@ static int grow(void **p, size_t *cap, size_t need, size_t esz) {
 
 
 /* ------------------------------------------------------------------------------------------------ render nativo (vr/native) */
-/* Modo de render: 0 = gpu (DEFECTO: el 3D sale de la lista de la GPU con los vértices de vista de la GTE en alta precisión, estilo PGXP; el render nativo no captura ni dibuja),
- * 1 = nativo (MV_RENDER=nativo: la escena que el extractor lee de la RAM; la lista de la GPU solo alimenta la capa 2D, los eventos de VRAM y las marcas de efectos). */
+/* Modo de render: NATIVO es el único camino del mundo 3D (la escena que el extractor lee de la RAM); la lista de la GPU solo alimenta la capa 2D, los eventos de VRAM y las marcas de efectos.
+ * MV_RENDER=gpu ya no existe: se avisa y se ignora. */
 #ifndef MV_RENDER_DEFAULT_NATIVE
-#define MV_RENDER_DEFAULT_NATIVE 0
+#define MV_RENDER_DEFAULT_NATIVE 1
 #endif
 static NsBridge *_Atomic ns_br;          /* se crea una sola vez (ns_bridge_get); nunca se destruye */
 static pthread_mutex_t NSMX = PTHREAD_MUTEX_INITIALIZER;
@@ -257,13 +256,6 @@ __attribute__((weak)) void ns_cover_glue_post_ik(const uint8_t *ram) { (void)ram
 __attribute__((weak)) void ns_cover_glue_submit(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; }
 __attribute__((weak)) void ns_cover_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame, const float *eye, const float *M) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; (void)eye; (void)M; }
 __attribute__((weak)) size_t ns_cover_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
-__attribute__((weak)) int ns_cover_glue_last(uint32_t *frame, int *pct) { (void)frame; (void)pct; return 0; }   /* última cobertura medida (fotograma de la lista, %) */
-/* Relleno por la verdad del motor (ns_fill_glue.c, solo en la app): definiciones débiles vacías para las pruebas de escritorio. */
-__attribute__((weak)) void ns_fill_glue_post_ik(const uint8_t *ram) { (void)ram; }
-__attribute__((weak)) void ns_fill_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame, const float *eye, const float *M, int list_vr) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; (void)eye; (void)M; (void)list_vr; }
-__attribute__((weak)) size_t ns_fill_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
-__attribute__((weak)) void ns_fill_glue_reset(void) {}
-__attribute__((weak)) int ns_fill_glue_last(uint32_t *frame, int *pct) { (void)frame; (void)pct; return 0; }   /* última cobertura medida con el relleno (fotograma de la lista, %) */
 /* Decodificador de vídeo (runtime/mdec.c): palabras entregadas desde el arranque. En las pruebas de escritorio sin MDEC vale siempre 0 (no hay FMV). */
 __attribute__((weak)) uint32_t mdec_out_words_total(void) { return 0; }
 /* Manos nuevas (ns_hand.c, solo en la app; vr/body/vr_hand_mesh.c): definición débil vacía para las pruebas de escritorio, donde la manopla del motor se queda como está. */
@@ -284,10 +276,10 @@ static void ns_frame_check(void);
 static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u);
 _Static_assert(VR_SKIP_WORLD == NS_SKIP_WORLD && VR_SKIP_FX == NS_SKIP_FX, "las marcas de batch y la decisión del consumidor deben coincidir");
 
-void mv_vrhost_set_render_mode(int mode) { if (!atomic_load(&render_locked)) atomic_store(&render_req, mode <= 0 ? 0 : 1); }   /* 0 gpu, 1 (o más) nativo */
+void mv_vrhost_set_render_mode(int mode) { (void)mode; }   /* el modo gpu ya no existe: siempre nativo */
 int mv_vrhost_render_only_native(void) { return 0; }   /* el modo «solo nativo» ya no existe */
 int mv_vrhost_render_mode(void) { return atomic_load(&render_req) ? 1 : 0; }
-static int native_mode(void) { return atomic_load(&render_req) != 0; }   /* modo nativo pedido (el defecto es gpu) */
+static int native_mode(void) { return atomic_load(&render_req) != 0; }   /* siempre 1 (el modo gpu ya no existe) */
 int mv_vrhost_render_env_locked(void) { return atomic_load(&render_locked); }
 void mv_vrhost_native_renderer_ready(int ready) { atomic_store(&renderer_ready, ready != 0); }
 int mv_vrhost_native_available(void) { return ns_hook_has_extractor() && ns_hook_installed() && atomic_load(&renderer_ready); }
@@ -336,6 +328,7 @@ static Cpu *ns_cpu_last;   /* CPU del último enganche de fotograma (hilo de emu
 static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
     (void)u;
     sc->area_id = (uint16_t)bs.area_id;
+    sc->list_index = gpu_capture_next_index() + 1u;   /* la lista de la GPU que contendrá el dibujo de esta escena: el renderer no la dibuja con una época de mallas nueva antes de tener la VRAM de esa lista */
     if (ns_cpu_last) {   /* centro de proyección de la pantalla del motor (control 24/25 de la GTE, 16.16): lo usan los efectos de pantalla y la ventana de la pantalla 3D */
         float ox = (float)((int32_t)gte_cfc2(ns_cpu_last, 24)) / 65536.0f, oy = (float)((int32_t)gte_cfc2(ns_cpu_last, 25)) / 65536.0f;
         if (ox > 0.0f && ox < 320.0f && oy > 0.0f && oy < 240.0f) { sc->cam.ofx = ox; sc->cam.ofy = oy; }
@@ -416,7 +409,7 @@ static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u) {
     atomic_store_explicit(&hcn.last_tris, (uint32_t)n, memory_order_relaxed);
 }
 
-static void ns_post_ik(uint8_t *ram) { ns_hook_post_ik(ram); ns_cover_glue_post_ik(ram); ns_fill_glue_post_ik(ram); }
+static void ns_post_ik(uint8_t *ram) { ns_hook_post_ik(ram); ns_cover_glue_post_ik(ram); }
 /* Capa de brazos inactiva: vrbody_apply corrió después de la captura de este fotograma y no manejó ningún brazo (mandos sin pose válida: en los registros, `pose_valida I=0 D=0`,
  * `IK: aplicaciones=+25 brazos=+0` y 25 escenas «sin IK» por segundo => valid=0x47, escena-no-apta, GPU o mundo sin dibujar en solo nativo con el jugador quieto). */
 static int ns_ik_idle(void *u) {
@@ -449,7 +442,6 @@ static void ns_frame_check(void) {
     {   /* cobertura de la lista de la GPU por la escena nativa (resultado del hilo trabajador, ~1 por segundo) */
         static char cbuf[8192];
         if (ns_cover_glue_poll(cbuf, sizeof cbuf)) fputs(cbuf, stderr);
-        if (ns_fill_glue_poll(cbuf, sizeof cbuf)) fputs(cbuf, stderr);
     }
     {   /* colisión de la cabeza (una línea por segundo): de dónde sale la geometría y qué hizo la última consulta */
         static uint32_t hs0, hn0, ho0, hr0;
@@ -983,9 +975,9 @@ static void build_one(const GpuDrawList *l, int si) {
         if (!l2a) l2a = vl2a_new();
         if (l2a) {
             vl2a_options(l2a, l2d_target, atomic_load(&l2d_smooth));
-            /* pantalla de cine (UI / vídeo / respaldo): fotograma entero, verificado contra la imagen del emulador. Pantalla 3D del motor (cinemáticas, créditos o texto sobre una escena): el panel 2D va
+            /* pantalla de cine (UI / vídeo): fotograma entero, verificado contra la imagen del emulador. Pantalla 3D del motor (cinemáticas, créditos o texto sobre una escena): el panel 2D va
              * ENCIMA de la escena nativa, así que se verifica también (reproduce el mundo sin el panel, compone y compara con el emulador; donde no coincide usa la imagen exacta del emulador). */
-            int l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO || view.kind == VRV_K_BACKUP ? VL_FULL : view.kind == VRV_K_ENGINE ? VL_PANEL_VERIFIED : VL_PANEL;
+            int l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO ? VL_FULL : view.kind == VRV_K_ENGINE ? VL_PANEL_VERIFIED : VL_PANEL;
             vl2a_set_view(l2a, (view.kind << 8) | (view.reason & 255));   /* etiqueta de vista del trabajo: el overlay del menú descarta las capas retrasadas de otra vista (créditos) */
             vl2a_submit(l2a, hl, rc == 0 && sc.op_dest && sc.n_op_dest >= hl->nops ? sc.op_dest : NULL, l2_full, 0);
             { static uint64_t l2_log_ns; uint64_t nn = mono_ns();   /* una línea por segundo */
@@ -1081,16 +1073,11 @@ static void publish_state(void) {
         vin.menu_open = core && bs.menu_open; vin.stopped = core && bs.stopped;
         vin.dead = (uint8_t)(core && (((bs.valid & BRIDGE_OK_LIFE) && bs.life_max > 0 && bs.life <= 0) || (bs.player_status & BRIDGE_PS_GAME_OVER) || (bs.game_status & BRIDGE_GS_GAME_OVER)));
         vin.scene3d = (uint8_t)last_scene3d; vin.video = (uint8_t)last_video;
-        vin.gpu3d = (uint8_t)!native_mode();   /* modo gpu: una escena 3D del motor es ENGINE sin mirar la cobertura nativa y se entra sin histéresis (vr_view.h) */
         {   /* FMV: el decodificador de vídeo entregó píxeles en los últimos 12 VBlank (~0,24 s; un FMV da un fotograma cada 3-4) */
             uint32_t vb = (uint32_t)hle_frame_count(), tot = mdec_out_words_total();
             if (tot - mdec_seen_total >= 64u) mdec_last_vb = vb ? vb : 1u;
             mdec_seen_total = tot;
             vin.mdec = mdec_last_vb != 0 && vb - mdec_last_vb <= 12u;
-            /* La cobertura que decide motor / respaldo es la de lo que se ve dentro de la vista del juego: nativo + relleno global (ns_fill), si no el nativo solo (vrview_cover_feed) */
-            uint32_t cf = 0, ff = 0; int cp = 0, fp = 0;
-            int hn = ns_cover_glue_last(&cf, &cp), hf = ns_fill_glue_last(&ff, &fp);
-            vrview_cover_feed(&vin, &cover_seen_frame, vb, hf, ff, fp, hn, cf, cp);
         }
         g.view_mode = vrview_step(&view, &vin);
         if (view.changed) {     /* cada cambio de modo / clase / motivo de la vista queda en el registro con su causa (banderas del puente incluidas) */
@@ -1102,10 +1089,6 @@ static void publish_state(void) {
             char cb[640];
             vrview_cine_describe(&view, &vin, cb, sizeof cb);
             fprintf(stderr, "%s | vb=%u\n", cb, (unsigned)hle_frame_count());
-        }
-        {   /* cambio de clase de vista (mundo / cinemática / 2D...): la persistencia del relleno es de la escena anterior */
-            static int fill_last_kind = -1;
-            if (view.kind != fill_last_kind) { if (fill_last_kind >= 0) ns_fill_glue_reset(); fill_last_kind = view.kind; }
         }
         g.view_kind = view.kind;
         g.cine_shot = cine.shot; g.cine_cuts = cine.cuts; g.cine_cover = last_cover;
@@ -1485,7 +1468,6 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
             float ce[3], cm[9];
             if (cr) { for (int i = 0; i < 3; i++) ce[i] = (float)cr->eye[i]; memcpy(cm, cr->M, sizeof cm); }
             ns_cover_glue_submit_cam(emu_ram, emu_scratch, l->ops, l->nops, f, cr ? ce : NULL, cr ? cm : NULL);   /* con la cámara de la lista */
-            ns_fill_glue_submit_cam(emu_ram, emu_scratch, l->ops, l->nops, f, cr ? ce : NULL, cr ? cm : NULL, cr ? cr->active : 0);   /* relleno por la verdad del motor */
         }   /* 1 de cada N: instantánea y comprobación de cobertura en otro hilo */
         dump_capture(c, f, l);
         if (!cap_on) break;
@@ -1659,10 +1641,9 @@ void mv_vrhost_install(void) {
         ns_bridge_get();
         const char *e = getenv("MV_RENDER");
         if (e && *e) {
-            /* MV_RENDER=gpu (defecto) | nativo. «solo-nativo» ya no existe: se avisa y se ignora. */
-            if (!strcmp(e, "nativo") || !strcmp(e, "native")) { atomic_store(&render_req, 1); atomic_store(&render_locked, 1); }
-            else if (!strcmp(e, "gpu")) { atomic_store(&render_req, 0); atomic_store(&render_locked, 1); }
-            else fprintf(stderr, "[vrhost] MV_RENDER=%s ignorado: valores admitidos gpu (defecto) y nativo\n", e);
+            /* MV_RENDER=nativo (defecto y único). «gpu» y «solo-nativo» ya no existen: se avisa y se ignoran. */
+            if (!strcmp(e, "nativo") || !strcmp(e, "native")) atomic_store(&render_locked, 1);
+            else fprintf(stderr, "[vrhost] MV_RENDER=%s ignorado: el único modo es nativo\n", e);
         }
         ns_extract_register();
     }

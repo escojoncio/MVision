@@ -87,7 +87,7 @@ typedef struct {
     int32_t item;            /* objeto equipado, -1 ninguno */
     int32_t alert_mode;      /* 0 normal, 1 interferencia, 2 evasión, 3 alerta */
     /* --- cinemáticas del motor (vr_view.h, vr_cine.h) --- */
-    int32_t view_kind;       /* VRV_K_*: 0 2D, 1 mundo, 2 cinemática del motor (3D estereoscópico), 3 vídeo pregrabado, 4 respaldo (3D del motor sin render nativo fiel: imagen de la VRAM en la pantalla de cine) */
+    int32_t view_kind;       /* VRV_K_*: 0 2D, 1 mundo, 2 cinemática del motor (3D estereoscópico), 3 vídeo pregrabado */
     uint32_t cine_shot;      /* plano en curso de la cinemática (sube en cada corte de cámara) */
     uint32_t cine_cuts;      /* cortes de cámara detectados desde que se cargó el ejecutable */
     int32_t cine_cover;      /* fundidos/destellos (recubrimientos a pantalla completa) en la última lista */
@@ -98,13 +98,11 @@ typedef struct {
 void mv_vrhost_game_state(MvVrGameState *out);
 
 /* ---- Render ----
- * Dos modos (cualquier hilo). gpu (DEFECTO): el 3D del mundo (y de las cinemáticas del motor, desde la cámara del juego) sale de la lista de la GPU del propio juego con los vértices de
- * vista de la GTE en alta precisión (estilo PGXP, vr_scene.h); el render nativo no captura ni dibuja. Las primitivas sin vértices de vista (HUD, textos, créditos, fundidos y destellos a
- * pantalla completa) van a la capa 2D (panel) a su distancia fija, nunca proyectadas junto al ojo. nativo (MV_RENDER=nativo): la escena que el extractor lee de la RAM (vr/native, puente
- * ns_bridge); si en un fotograma no está lista se repite el último válido o se funde a negro (ns_present.h) y la lista de la GPU solo alimenta la capa 2D, los eventos de VRAM y las marcas.
- * Elección: MV_RENDER=gpu|nativo en el entorno (gana y fija el modo) o mv_vrhost_set_render_mode. «Solo nativo» ya no existe. */
-void mv_vrhost_set_render_mode(int mode);        /* 0 = gpu, otro valor = nativo (sin efecto si MV_RENDER fija el modo) */
-int mv_vrhost_render_mode(void);                 /* 0 = gpu, 1 = nativo */
+ * Un solo modo (cualquier hilo): NATIVO. El 3D del mundo, de las cinemáticas y sus efectos sale de la escena que el extractor lee de la RAM (vr/native, puente ns_bridge); si en un
+ * fotograma no está lista se repite el último válido o se funde a negro (ns_present.h). La lista de la GPU solo alimenta la capa 2D, los eventos de VRAM y las marcas de efectos.
+ * MV_RENDER=nativo es el defecto; «gpu» y «solo nativo» ya no existen (se ignoran). */
+void mv_vrhost_set_render_mode(int mode);        /* sin efecto: el modo es siempre nativo */
+int mv_vrhost_render_mode(void);                 /* siempre 1 = nativo */
 int mv_vrhost_render_only_native(void);          /* siempre 0 */
 int mv_vrhost_render_env_locked(void);           /* 1 si MV_RENDER fija el modo */
 int mv_vrhost_native_available(void);

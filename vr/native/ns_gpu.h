@@ -103,11 +103,6 @@ size_t ns_gpu_sort_semi_ex(const NsGpuSemiSrc *src, size_t nsrc, NsGpuOrder *out
  *                                 el bit 15 a 0)
  *   [n_opaque, n_opaque + n_semi) pase 1 (semitransparente), de atrás adelante respecto a la cabeza, en runs de igual modo de mezcla (`runs`)
  * `keys` recibe la identidad (ns_fx_item_key) de cada efecto que ha entrado en el dibujo: el renderer solo lo da por CONFIRMADO si dibuja de verdad. */
-typedef struct NsGpuFxTrack NsGpuFxTrack;   /* estado del seguimiento entre fotogramas (opaco) */
-NsGpuFxTrack *ns_gpu_fx_track_create(void);
-void ns_gpu_fx_track_destroy(NsGpuFxTrack *t);
-void ns_gpu_fx_track_reset(NsGpuFxTrack *t);   /* olvida todo (cambio de escena, recentrado) */
-void ns_gpu_fx_track_request_reset(void);       /* desde cualquier hilo (recentrado): el siguiente ns_gpu_fx_build_ex con seguimiento olvida todo antes de procesar */
 typedef struct {
     const float *to_vr;                 /* 12: mundo del motor -> mundo VR (m), 3x4 fila-mayor */
     const NsCamera *cam;                /* cámara del juego de la escena (profundidad de los carteles, sentido del mundo) */
@@ -122,59 +117,39 @@ typedef struct {
      * mitad del tamaño con la que se adelanta un CARTEL hacia la cabeza (escalado desde la cabeza: se ve igual); el motor lo pinta plano en pantalla según su profundidad y un halo
      * de 2 m en una lámpara de techo no se recorta contra el techo; 0 = sin adelantar. */
     float raise_m, board_pull;
-    /* Comodidad en VR (ver ns_gpu_fx_build_ex). comfort_deg = X: diámetro angular máximo (grados) de un efecto con el centro a 0,3 m de la cabeza (0 = desactivado: ni reduce ni descarta).
-     * Entre comfort_dmin_m y 0,3 m el tope sube desde 0 hasta X (por debajo de comfort_dmin_m, 0 = 0,12 m, el efecto nace "dentro de la cabeza": se descarta) y de 0,3 m a 1 m sube hasta 90 grados;
-     * a más de 1 m no hay tope. Un efecto que lo supera se REDUCE alrededor de su centro (nunca se desplaza). Los pegados a la cámara del motor (NS_EF_ON_CAMERA o papel de superficie
-     * de vista) no tienen emisor en el mundo: con el centro a menos de oncam_drop_m (0 = no) se descartan (cuentan como confirmados). near_log_m (0 = 0,5 m): radio del registro de cercanos. */
-    float comfort_deg, comfort_dmin_m, oncam_drop_m, near_log_m;
-    /* Red de seguridad extrema, independiente de comfort_deg: se descarta (confirmado) el efecto con el centro a menos de drop_inside_m de la cabeza (0 = no). Los efectos bien colocados no se tocan. */
+    /* near_log_m (0 = 0,5 m): radio del registro de cercanos (diagnóstico). */
+    float near_log_m;
+    /* Única red de seguridad: se descarta (confirmado) el efecto con el centro a menos de drop_inside_m de la cabeza (0 = no); las superficies del entorno (agua, paneles) no cuentan. Los efectos bien
+     * colocados no se tocan: el tamaño es de mundo (NS_EF_WORLD_SIZE, calculado una vez con la cámara del motor, igual para los dos ojos) y nada se encoge ni se retiene por «seguirse». Además se
+     * DESCARTA siempre (confirmado) todo NS_EF_ON_CAMERA que no sea de pantalla (papel VIEW_OVERLAY): no tiene emisor en el mundo. */
     float drop_inside_m;
-    /* Seguimiento de lo que va pegado a la cabeza (detector "sigue a la cámara"). track != NULL: cada efecto (clave ns_gpu_fx_key; los rellenos de ns_fill llevan identidad estable) se sigue entre
-     * fotogramas y se compara su posición en ESPACIO DE CABEZA con la que tendría si estuviera anclado al mundo del motor. Constante en la cabeza mientras la cabeza se mueve respecto al mundo =>
-     * SIGUE (se descarta, confirmado, a cualquier distancia < follow_far_m, def. 30 m; más lejos = cielo / fondo, que va con la cabeza a propósito). Cercano (< hold_near_m, 0 = sin regla) y todavía sin
-     * demostrar que está anclado al mundo => retenido (no se dibuja), salvo los de vida corta (< 12 fotogramas) a menos de 15 cm, que se dibujan; ~50 fotogramas quieto en el mundo del motor sin indicio de
-     * SIGUE => MUNDO. Cercano que ni sigue ni está quieto en el mundo => VAGA (se descarta). drop_oncam != 0: un NS_EF_ON_CAMERA que no es recubrimiento de pantalla (papel VIEW_OVERLAY) se descarta si
-     * además SIGUE o está a menos de 1 m. Todo lo demás va anclado al mundo. */
-    NsGpuFxTrack *track;
-    float hold_near_m;
-    float follow_far_m;   /* distancia (m) a partir de la cual un SIGUE ya no se descarta (cielo, fondos); 0 = 30 */
-    int drop_oncam;
 } NsGpuFxParams;
 typedef struct { uint32_t start, count; uint8_t abr; } NsGpuFxRun;   /* start/count en vértices del búfer completo */
 /* Un efecto semitransparente en el búfer (ya ordenado de atrás adelante): para intercalarlo con los triángulos semitransparentes de las mallas (ns_gpu_semi_merge). */
 typedef struct { float depth; uint32_t start, count; uint8_t abr; } NsGpuFxSemiItem;
-/* Registro de efectos cercanos a la cabeza (por fotograma, los de mayor tamaño angular). accion: 0 intacto, 1 reducido, 2 descartado por nacer dentro de la cabeza, 3 descartado por ir pegado a la cámara. */
-enum { NSG_FXN_MAX = 6, NSG_FXN_KEPT = 0, NSG_FXN_SHRUNK = 1, NSG_FXN_DROP_INSIDE = 2, NSG_FXN_DROP_ONCAM = 3, NSG_FXN_DROP_FOLLOW = 4, NSG_FXN_HELD = 5 };
+/* Registro de efectos cercanos a la cabeza (por fotograma, los de mayor tamaño angular). accion: 0 intacto, 2 descartado por nacer dentro de la cabeza (drop_inside_m), 3 descartado por ir pegado a la cámara sin ser de pantalla. */
+enum { NSG_FXN_MAX = 6, NSG_FXN_KEPT = 0, NSG_FXN_DROP_INSIDE = 2, NSG_FXN_DROP_ONCAM = 3 };
 typedef struct {
     uint32_t src_key; uint16_t idx; uint16_t flags;   /* origen (primitiva y paquete) y NS_EF_* */
     uint8_t role, kind, action, screen;               /* papel (NSFX_ROLE_*), NS_EK_*, accion, 1 = efecto de pantalla (ON_CAMERA o papel de superficie de vista) */
-    float dist_m, size_m, deg_raw, deg_after;         /* distancia centro-cabeza, mayor lado/diagonal (m), tamaño angular antes y después de la comodidad */
+    float dist_m, size_m, deg_raw;                    /* distancia centro-cabeza, mayor lado/diagonal (m), tamaño angular */
 } NsGpuFxNear;
-/* Detector "sigue a la cámara": estado de un efecto seguido. SIN_VERIFICAR = cercano aún sin demostrar que está en el mundo (retenido); SIGUE = fijo a la cabeza; VAGA = cercano e inestable. */
-enum { NSG_FS_UNKNOWN = 0, NSG_FS_WORLD = 1, NSG_FS_FOLLOW = 2, NSG_FS_WANDER = 3 };
-enum { NSG_FXF_MAX = 8, NSG_ORIGIN_FX = 0, NSG_ORIGIN_FILL = 1 };
-typedef struct {
-    uint32_t src_key; uint16_t idx; uint8_t sub, role, kind, state, origin, oncam;   /* origen: NSG_ORIGIN_* (los rellenos llevan 0xF1 en el byte alto de src_key) */
-    float dist_m, size_m, hs[3];        /* distancia y mayor lado (m); posición en espacio de cabeza (m: derecha, arriba, delante) */
-} NsGpuFxFollow;
 typedef struct {
     uint32_t n_opaque, n_semi, n_runs, n_keys, n_sitems;
     uint32_t n_items, n_skipped;        /* efectos entrados / descartados (no finitos, degenerados) */
     uint32_t n_billboard, n_ribbon, n_poly;
     uint32_t n_near, n_near_oncam, n_near_screen;   /* con el centro a menos de near_log_m; de ellos pegados a la cámara / de pantalla */
-    uint32_t n_shrunk, n_drop_inside, n_drop_oncam; /* comodidad: reducidos y descartados (los descartados cuentan como confirmados: el motor no los redibuja) */
+    uint32_t n_drop_inside, n_drop_oncam;           /* descartados (cuentan como confirmados: el motor no los redibuja): dentro de la cabeza / ON_CAMERA que no es de pantalla */
     uint32_t n_zref;                    /* carteles de tamaño en píxeles con poca profundidad (se usó la de referencia: tamaño de mundo inflado) */
     uint32_t n_rec;                     /* entradas válidas de rec[] */
     NsGpuFxNear rec[NSG_FXN_MAX];       /* los de mayor deg_raw */
-    uint32_t n_follow, n_wander, n_held, n_world;   /* seguimiento: descartados por ir fijos a la cabeza / por vagar cerca / retenidos sin verificar / verificados en el mundo */
-    uint32_t n_follow_fill, n_tracked;  /* de los SIGUE, cuántos son relleno; efectos seguidos */
-    uint32_t n_fol;                     /* entradas válidas de fol[] */
-    NsGpuFxFollow fol[NSG_FXF_MAX];     /* los SIGUE / VAGA / retenidos más cercanos a la cabeza */
+    uint32_t n_drawn;                   /* efectos que entran en la geometría de salida (ni descartados ni de una cara vistos por detrás) */
+    float min_dist_m;                   /* distancia mínima centro-cabeza de esos efectos (válida si n_drawn > 0) */
 } NsGpuFxOut;
 /* Acumulador de registro (1 s): cuántos y cuáles efectos cerca de la cabeza, y si el jugador andaba o giraba. */
 typedef struct {
     uint32_t frames, frames_near, frames_moving, frames_moving_near;
-    uint32_t max_near, max_near_oncam, max_near_screen, max_shrunk, max_zref, sum_drop_inside, sum_drop_oncam;
+    uint32_t max_near, max_near_oncam, max_near_screen, max_zref, sum_drop_inside, sum_drop_oncam;
     float max_deg_raw, max_speed_mps, max_turn_dps;
     int has_prev; float prev_head[3], prev_right[3], prev_t;
     uint32_t n_rec; NsGpuFxNear rec[NSG_FXN_MAX];
@@ -184,18 +159,7 @@ void ns_gpu_fx_near_accum(NsGpuFxNearAcc *acc, const NsGpuFxOut *o, const float 
 /* Una línea de texto (sin salto de línea) con el resumen; devuelve su longitud. Llamar después ns_gpu_fx_near_reset. */
 size_t ns_gpu_fx_near_describe(const NsGpuFxNearAcc *acc, char *buf, size_t cap);
 void ns_gpu_fx_near_reset(NsGpuFxNearAcc *acc);
-/* Acumulador del detector (ventana de 1 s): qué efectos / rellenos iban fijos a la cabeza, con papel, origen y clave. */
-typedef struct { NsGpuFxFollow f; uint32_t frames; } NsGpuFxFollowRec;
-typedef struct {
-    uint32_t frames, frames_follow, frames_held, max_follow, max_wander, max_held, max_follow_fill, sum_follow, sum_held, max_tracked, max_world;
-    uint32_t n_rec; NsGpuFxFollowRec rec[NSG_FXF_MAX];
-} NsGpuFxFollowAcc;
-void ns_gpu_fx_follow_accum(NsGpuFxFollowAcc *acc, const NsGpuFxOut *o);
-size_t ns_gpu_fx_follow_describe(const NsGpuFxFollowAcc *acc, char *buf, size_t cap);
-void ns_gpu_fx_follow_reset(NsGpuFxFollowAcc *acc);
 const char *ns_gpu_fx_role_name(int role);
-/* Tope angular (grados) de la comodidad para un efecto con el centro a `d` m de la cabeza; 1e9 = sin tope; 0 = descartar. */
-float ns_gpu_fx_comfort_cap_deg(float d, float x_deg, float dmin_m);
 /* Capacidades: verts >= 12 * n_fx (peor caso: cartel semitransparente texturizado = 6 + 6), runs >= n_fx, keys >= n_fx. 0 = bien; <0 parámetros inválidos. */
 int ns_gpu_fx_build(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm, NsGpuFxVert *verts, uint32_t cap_verts, NsGpuFxRun *runs, uint32_t cap_runs,
                     uint64_t *keys, uint32_t cap_keys, NsGpuFxOut *out);

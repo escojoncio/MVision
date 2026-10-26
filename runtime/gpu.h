@@ -168,6 +168,8 @@ uint32_t gpu_capture_dropped(void);
 /* Número de secuencia (GpuOp.seq) que tendrá la PRÓXIMA primitiva capturada: permite a un sustituto HLE delimitar qué
  * primitivas emitió una llamada (p.ej. un envío de lista al GPU): las que cumplan antes <= seq < después. */
 uint32_t gpu_capture_seq(void);
+/* GpuDrawList.index que tendrá la PRÓXIMA lista que se cierre (la que contendrá lo que el juego dibuje a partir de ahora): enlaza una escena capturada con su lista (NsScene.list_index = esto + 1). */
+uint32_t gpu_capture_next_index(void);
 /* Marcas en la lista de dibujo: un paquete GP0 con comando 0x04 (NOP en el hardware real y en el oráculo) y carga útil de
  * 24 bits `id` llama al gancho (si la captura está encendida) con el id y el número de secuencia que tendrá la PRÓXIMA primitiva
  * capturada. Permite a un sustituto HLE, que inserta paquetes de marca en la OT antes/después de lo que dibuja una función, delimitar

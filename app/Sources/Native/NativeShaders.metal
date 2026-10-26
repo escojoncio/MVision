@@ -4,7 +4,8 @@
  * el bit 15 del texel decide si un texel de una cara semitransparente se mezcla. Sin descarte de caras (doble cara) ni recorte en CPU.
  *
  * Dos rutas de vértices con la misma lógica (ns_vertex): por pieza (opacos: una llamada de dibujo por pieza, índice de pieza en un búfer de 4 bytes) y por lista
- * ordenada (semitransparentes: NsGpuOrder[] de atrás adelante, ya ordenada en CPU). Layout de los búferes: vr/native/ns_gpu_types.h. */
+ * ordenada (semitransparentes: NsGpuOrder[] de atrás adelante, ya ordenada en CPU). Layout de los búferes: vr/native/ns_gpu_types.h.
+ * Profundidad: Z invertida en depth32Float (limpia a 0, compare >=). */
 #include <metal_stdlib>
 #include "ns_gpu_types.h"
 using namespace metal;

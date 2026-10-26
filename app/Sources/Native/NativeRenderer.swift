@@ -280,7 +280,6 @@ final class NativeRenderer {
     /// Geometría de los efectos de la escena actual, en el mundo VR y orientada a la cabeza (se construye en beginFrame con ns_gpu_fx_build). El renderer solo da por
     /// dibujado (la lista de la GPU ya no dibuja nada en 3D).
     private var fxEffects: [NsEffect] = []
-    private var fillBuf: [NsEffect] = []              // relleno por la verdad del motor (ns_fill_glue_fetch)
     private var fxCam = NsCamera()
     private var fxHas = false                      // la escena trae efectos (NS_SV_FX) y es apta para dibujar en el mundo
     private var fxVerts: UnsafeMutablePointer<NsGpuFxVert>?
@@ -290,18 +289,23 @@ final class NativeRenderer {
     private var fxOut = NsGpuFxOut()
     // Registro de efectos cerca de la cabeza (ventana de 1 s): `fxNear` acumula, `fxNearSnap` es la ultima ventana completa (la que se escribe en el registro)
     private var fxNear = NsGpuFxNearAcc(), fxNearSnap = NsGpuFxNearAcc(), fxNearT0: Double = 0
-    // Detector "sigue a la cámara": seguimiento por efecto entre fotogramas (fx y relleno) y su registro de 1 s (`fx-sigue`)
-    private var fxTrack: OpaquePointer?
-    private var fxTrackLive = false
-    private var fxFollow = NsGpuFxFollowAcc(), fxFollowSnap = NsGpuFxFollowAcc()
     private var fxAllowed = false                  // este fotograma se dibujarán los efectos (pipelines listas para todos los formatos comprobados)
     private var fxTagsOK = Set<String>()           // formatos de destino con las pipelines de efectos compiladas
     private(set) var statFxItems = 0, statFxTris = 0, statFxBillboards = 0, statFxRibbons = 0, statFxPolys = 0, statFxSkipped = 0
 
     // MARK: vista actual del puente
     private var view = NsView()
-    private var haveView = false
     private var lastEpoch: UInt32 = 0
+    private var sceneAbsent = 0                       // fotogramas sin escena nativa del puente (se repitió la última válida); `[nativo] escena_ausente=N` en el registro
+    /// Sincronía de época (mallas y texturas): una escena de época de mallas NUEVA (cambio de zona) espera a que la VRAM del renderer traiga la lista de la GPU que contiene su dibujo (NsScene.list_index),
+    /// como mucho `syncWaitMax` fotogramas; mientras espera se repite la última escena válida (con su VRAM). `vramList`/`vramKnown`: índice de la última lista aplicada (lo fija RGRenderer antes de beginFrame).
+    var vramList: UInt32 = 0
+    var vramKnown = false
+    static let syncWaitMax = 6
+    private var syncHeld = false                      // la escena `view` está retenida: no se vuelve a tomar del puente (sus punteros valen hasta la siguiente toma)
+    private var syncWait = 0                          // fotogramas que lleva esperando la VRAM de la época nueva
+    private var syncHeldFrames = 0                    // total de fotogramas retenidos (registro `sync_epoca=N`)
+    private var syncEpoch: UInt32 = 0, syncHave = false   // época de la última escena aceptada
     private var lastSeq: UInt32 = 0
 
     // MARK: anillo por fotograma
@@ -383,7 +387,6 @@ final class NativeRenderer {
 
     deinit {
         fxVerts?.deallocate()
-        if let t = fxTrack { ns_gpu_fx_track_destroy(t) }
         semiOrder.deallocate(); semiAbr.deallocate(); semiDepth.deallocate()
         ns_gpu_sort_free(&semiScratch)
     }
@@ -425,13 +428,23 @@ final class NativeRenderer {
 
     /// Toma las escenas del puente, interpola, sube las mallas y reconoce la época. Se llama en CADA fotograma (beginFrame).
     private func drain() {
-        haveView = false
         curHaveScene = false; curFit = false; curMeshesOK = false
         guard enabled, let b = bridge else { return }
-        var v = NsView()
-        guard ns_bridge_acquire(b, ns_now_ns(), &v) != 0, let cur = v.cur else { return }
+        var v = view
+        // Sin escena nativa este fotograma: no se toca nada de lo preparado (se conserva la última escena válida y ns_present decide repetirla o fundir a negro); solo se cuenta. Nunca hay caída a la lista de la GPU.
+        if !syncHeld {      // (con la escena retenida no se vuelve a tomar del puente)
+            v = NsView()
+            guard ns_bridge_acquire(b, ns_now_ns(), &v) != 0 else { sceneAbsent += 1; return }
+        }
+        guard let cur = v.cur else { syncHeld = false; sceneAbsent += 1; return }
         view = v
-        haveView = true
+        // Misma época de mallas y texturas: la escena de una época NUEVA no se prepara (ni se reconoce la época) hasta que la VRAM traiga su lista, con tope de espera. Dentro de una época no espera nunca.
+        if view.fresh != 0, syncHave, cur.pointee.mesh_epoch != syncEpoch, ns_scene_vram_ready(cur, vramList, vramKnown ? 1 : 0) == 0, syncWait < Self.syncWaitMax {
+            syncWait += 1; syncHeld = true; syncHeldFrames += 1
+            return
+        }
+        syncHeld = false; syncWait = 0
+        syncEpoch = cur.pointee.mesh_epoch; syncHave = true
         do {
             let vb = cur.pointee.valid
             let need = UInt32(truncatingIfNeeded: NS_SV_GAME) | UInt32(truncatingIfNeeded: NS_SV_LISTS_OK) | UInt32(truncatingIfNeeded: NS_SV_MAP_OK)
@@ -656,7 +669,7 @@ final class NativeRenderer {
             }
         }
         // Mallas ausentes: una escena con piezas sin malla NO se descarta para siempre (en las cinemáticas sin partida llegaron a ser decenas de ausentes durante minutos: se repetía la última
-        // escena y la pantalla 3D caía a la pantalla plana). Pasada la gracia se dibuja lo que hay (las piezas sin malla se omiten más abajo) y el relleno global cubre lo que falta.
+        // escena y la pantalla 3D caía a la pantalla plana). Pasada la gracia se dibuja lo que hay (las piezas sin malla se omiten más abajo).
         if frameMisses > 0 && frameFailures == 0 { if fresh { missStreak += 1 }; missTolerated = missStreak >= Self.missGrace }
         else if frameMisses == 0 { missStreak = 0; missTolerated = false }
         guard frameFailures == 0, frameMisses == 0 || missTolerated else {
@@ -684,15 +697,13 @@ final class NativeRenderer {
         let netMat = UInt32(truncatingIfNeeded: NSG_NET_MAT), netWeld = UInt32(truncatingIfNeeded: NSG_NET_WELD)
         let noWeldFlag = UInt32(truncatingIfNeeded: NSG_PF_NOWELD)
         if fresh { netScenes += 1 }
-        // Pantalla 3D con el escenario nativo inservible (intros sin partida: la malla de la RAM es de otra zona; el nativo casa < 10 % con la lista y el relleno cubre >= 80 %): solo se dibujan los objetos dinámicos.
-        let sceneryStale = cinema && ns_fill_glue_scenery_stale() != 0
         for ii in 0..<nInst {
             let instPtr = UnsafePointer(sc.pointee.inst + ii)
             let first = Int(instPtr.pointee.first_piece), cnt = Int(instPtr.pointee.n_pieces)
             guard first + cnt <= nPiece else { continue }
             let isStatic = (instPtr.pointee.flags & staticFlag) != 0
             let zm = UInt32(instPtr.pointee.zone_mask)
-            let inGroup = (groupMask == 0 || zm == 0 || (zm & groupMask) != 0) && !(isStatic && sceneryStale)
+            let inGroup = groupMask == 0 || zm == 0 || (zm & groupMask) != 0
             let instKey = instPtr.pointee.key
             // (a) tabla
             for k in 0..<cnt {
@@ -776,12 +787,6 @@ final class NativeRenderer {
             }
             fxHas = true
         }
-        // relleno por la verdad del motor (ns_fill_glue): triángulos que la lista de la GPU dibuja y el nativo no tiene, ya en el mundo del motor; pasan por buildFx como un efecto más
-        if (validBits & UInt32(truncatingIfNeeded: NS_SV_FX)) != 0 {
-            if fillBuf.isEmpty { fillBuf = [NsEffect](repeating: NsEffect(), count: 6000) }
-            let nf = Int(fillBuf.withUnsafeMutableBufferPointer { ns_fill_glue_fetch($0.baseAddress, UInt32($0.count)) })
-            if nf > 0 { fxEffects.append(contentsOf: fillBuf[0..<nf]); fxHas = true }
-        }
         curValid = validBits
         for i in 0..<12 { toVR12[i] = t[i] }
         let rot = ns_scene_cam_rot(sc)!, eye = ns_scene_cam_eye(sc)!
@@ -851,7 +856,7 @@ final class NativeRenderer {
         drain()
         isActive = false; current = nil; currentIx = ix
         fxAllowed = false
-        guard draw, enabled, ix >= 0, haveView, pieceCount > 0, !(dynTex.isEmpty && dynFlat.isEmpty && semis.isEmpty && statPcs.isEmpty) else { return false }
+        guard draw, enabled, ix >= 0, pieceCount > 0, !(dynTex.isEmpty && dynFlat.isEmpty && semis.isEmpty && statPcs.isEmpty) else { return false }
         let slot = ring[ix]
         let bytes = pieceCount * MemoryLayout<NsGpuPiece>.stride
         if slot.pieceBuf == nil || slot.pieceBuf!.length < bytes {
@@ -942,12 +947,7 @@ final class NativeRenderer {
         slot.nFxOpaque = 0; slot.nFxSemi = 0
         fxItemCount = 0
         statFxItems = 0; statFxTris = 0
-        guard fxHas, !fxEffects.isEmpty else {
-            if fxTrackLive, let t = fxTrack { ns_gpu_fx_track_reset(t); fxTrackLive = false }   // sin efectos: el seguimiento no debe cruzar una escena
-            fxAllowed = fxHas; return
-        }
-        if fxTrack == nil { fxTrack = ns_gpu_fx_track_create() }
-        fxTrackLive = true
+        guard fxHas, !fxEffects.isEmpty else { fxAllowed = fxHas; return }
         let n = fxEffects.count
         let cap = 12 * n + 12
         if fxVertCap < cap {
@@ -971,12 +971,10 @@ final class NativeRenderer {
         prm.has_depth_row = 1
         prm.raise_m = fogPar.w        // sesgo `raise` del motor por elemento, con la misma unidad que las mallas
         prm.board_pull = 1            // carteles (halos, destellos): adelantados media extension hacia la cabeza, sin cambiar lo que se ve
-        // Los efectos se colocan con la geometria del propio motor (tamano en mundo exacto, ver ns_fx.c): aqui NO se encogen ni se quitan (comfort_deg = 0, oncam_drop_m = 0).
-        // Unica red de seguridad: un efecto con el centro a menos de 5 cm de la cabeza se descarta. near_log_m: radio del registro `fx-cerca`.
-        prm.comfort_deg = 0; prm.comfort_dmin_m = 0; prm.oncam_drop_m = 0; prm.near_log_m = 0.5; prm.drop_inside_m = 0.05
-        // Nada va fijo a la cabeza salvo los recubrimientos de pantalla (papel VIEW_OVERLAY, que se dibujan aparte): lo pegado a la cámara por bandera se descarta; lo que mantiene su posición en espacio de cabeza
-        // mientras la cabeza se mueve respecto al mundo del motor, también (SIGUE); lo cercano (< 15 cm) hasta no demostrar que está anclado al mundo, se retiene.
-        prm.track = fxTrack; prm.hold_near_m = 0.15; prm.drop_oncam = 1
+        // Los efectos se colocan con la geometria del propio motor: carteles y cintas con tamaño en mundo fijo (NS_EF_WORLD_SIZE, calculado una vez con la camara del motor en ns_fx.c; el mismo para los dos
+        // ojos), en su punto de mundo; no se encogen, no se retienen ni se siguen. Unica red de seguridad: un efecto con el centro a menos de 15 cm de la cabeza se descarta, y todo ON_CAMERA que no es de
+        // pantalla (papel VIEW_OVERLAY) tambien. near_log_m: radio del registro `fx-cerca`.
+        prm.near_log_m = 0.5; prm.drop_inside_m = 0.15
         prm.depth_row = (-sortView.columns.0.z, -sortView.columns.1.z, -sortView.columns.2.z, -sortView.columns.3.z)
         let rc: Int32 = toVR12.withUnsafeBufferPointer { (tv) -> Int32 in
             withUnsafePointer(to: &fxCam) { (camP) -> Int32 in
@@ -1008,8 +1006,7 @@ final class NativeRenderer {
             let now = ProcessInfo.processInfo.systemUptime
             var hd: [Float] = [head.x, head.y, head.z], rt: [Float] = [right.x, right.y, right.z]
             ns_gpu_fx_near_accum(&fxNear, &out, &hd, &rt, Float(now.truncatingRemainder(dividingBy: 1000)))
-            ns_gpu_fx_follow_accum(&fxFollow, &out)
-            if now - fxNearT0 >= 1.0 { fxNearSnap = fxNear; ns_gpu_fx_near_reset(&fxNear); fxFollowSnap = fxFollow; ns_gpu_fx_follow_reset(&fxFollow); fxNearT0 = now }
+            if now - fxNearT0 >= 1.0 { fxNearSnap = fxNear; ns_gpu_fx_near_reset(&fxNear); fxNearT0 = now }
         }
         let total = Int(out.n_opaque + out.n_semi)
         statFxItems = Int(out.n_keys); statFxTris = total / 3
@@ -1412,6 +1409,7 @@ final class NativeRenderer {
             guard l.isFinite, l > 1e-6 else { return (0, 1, 0, 0) }
             return (c.x / l, c.y / l, c.z / l, 0)
         }
+        enc.setCullMode(.none)       // sin descarte de caras en ningun pase del mundo (doble cara, como el motor)
         enc.setDepthStencilState(dsOverlay)
         enc.setDepthBias(0, slopeScale: 0, clamp: 0)
         for ov in overlays {
@@ -1522,13 +1520,6 @@ final class NativeRenderer {
         return "[" + String(cString: buf) + "] |"
     }
 
-    /// Resumen de la ultima ventana de 1 s del detector "sigue a la cámara" (ver ns_gpu_fx_follow_describe): efectos y rellenos con posición constante en espacio de cabeza mientras la cabeza se mueve.
-    private func fxFollowText() -> String {
-        var buf = [CChar](repeating: 0, count: 2048)
-        _ = ns_gpu_fx_follow_describe(&fxFollowSnap, &buf, 2048)
-        return "[" + String(cString: buf) + "] |"
-    }
-
     /// Línea de registro (una vez por segundo): estado del renderer nativo y de la última decisión.
     func logLine() -> String {
         let lp = lastPresent
@@ -1541,7 +1532,7 @@ final class NativeRenderer {
                "instancias=\(statInstances) piezas=\(statPieces) mallas=\(statMeshes) semi=\(statSemiTris) tramos_semi=\(mergedN) dibujos=\(statDraws) fallos=\(frameFailures)/\(totalFailures) ausentes=\(frameMisses) " +
                "efectos=\(statFxItems) (carteles=\(statFxBillboards) cintas=\(statFxRibbons) poligonos=\(statFxPolys) descartados=\(statFxSkipped) tris=\(statFxTris) dibujados=\(fxAllowed ? "si" : "no")) " +
                "pantalla=[agua=\(screenOut.water_min.3 > 0.5 ? "si" : "no") recubrimientos=\(overlays.count)] " +
-               "\(fxNearText()) \(fxFollowText()) " +
+               "\(fxNearText()) [nativo] escena_ausente=\(sceneAbsent) sync_epoca=\(syncHeldFrames) " +
                "escenas=\(statScenes) epoca=\(lastEpoch) cpu(prepare)=\(String(format: "%.2f", cpuPrepareMs))ms cpu(encode)=\(String(format: "%.2f", cpuEncodeMs))ms"
     }
 

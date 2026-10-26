@@ -77,12 +77,12 @@ final class RadarPanel {
     private(set) var present = false
     private(set) var quadValid = false
     private(set) var glow: Float = 0
-    /// Opacidad 0..1 del panel: solo se ve cuando la muñeca mira a la cara (vrradar_visibility: aparece < 45 grados, desaparece > 55, fundido 0,15 s). El marco (wristFrame) no depende de esto.
+    /// Opacidad 0..1 del panel: solo se ve cuando la muñeca mira a la cara (vrradar_visibility: aparece < 60 grados, desaparece > 75, fundido 0,15 s). El marco (wristFrame) no depende de esto.
     private(set) var visibility: Float = 0
     private var lastPoseTime = 0.0
-    /// Sesgo de profundidad hacia el ojo del quad (Z invertida: + = hacia la cámara), en unidades de r (ULP de profundidad float32): ~3e5 ≈ 1 cm a 0,3-0.6 m. Evita que quede dentro del guante
-    /// sin ignorar las oclusiones de otros objetos (más cerca de ~1 cm del panel sí lo tapan).
-    static let depthBiasToEye: Float = 3.0e5
+    /// Sesgo de profundidad hacia el ojo del quad (Z invertida: + = hacia la cámara), en unidades de r (ULP de profundidad float32): ~1e6 ≈ 3-4 cm a 0,3-0.6 m (plano cercano del mundo a 2 cm). El mundo nativo escribe su
+    /// propia profundidad en el mismo pase: el margen mayor evita que su cuantización o lo que quede pegado al brazo oculte el panel (sin medir en el visor). Sigue sin ignorar las oclusiones de objetos más cerca de ~4 cm del panel.
+    static let depthBiasToEye: Float = 1.0e6
 
     // MARK: privado
     private let device: MTLDevice

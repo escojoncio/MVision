@@ -55,12 +55,7 @@ int main(void) {
         memset(&k, 0, sizeof k);
         CHECK(vrview_kind_of(&k) == VRV_K_UI, "título sin 3D = 2D");
         k.scene3d = 1;
-        CHECK(vrview_kind_of(&k) == VRV_K_BACKUP, "sin partida y con 3D y sin medida = respaldo (imagen de la VRAM): el extractor no es de fiar");
-        k.cover1 = 101;
-        CHECK(vrview_kind_of(&k) == VRV_K_ENGINE, "sin partida y con 3D pero con cobertura medida buena = cinemática del motor");
-        k.cover1 = 1;
-        CHECK(vrview_kind_of(&k) == VRV_K_BACKUP, "con cobertura medida mala = respaldo");
-        k.cover1 = 0;
+        CHECK(vrview_kind_of(&k) == VRV_K_ENGINE, "sin partida y con 3D = escena del motor (siempre nativo, nunca imagen plana de la VRAM)");
         k.game = 1; k.cinematic = 1;
         CHECK(vrview_kind_of(&k) == VRV_K_ENGINE, "cinemática con jugador en escena");
         k.cinematic = 0; k.comms = 1;
@@ -73,7 +68,7 @@ int main(void) {
         k.video = 1;
         CHECK(vrview_kind_of(&k) == VRV_K_VIDEO, "vídeo pregrabado");
         k.scene3d = 1;
-        CHECK(vrview_kind_of(&k) == VRV_K_BACKUP, "con 3D no es vídeo (sin partida y sin medida: respaldo)");
+        CHECK(vrview_kind_of(&k) == VRV_K_ENGINE, "con 3D no es vídeo (sin MDEC): escena del motor");
         k.mdec = 1;
         CHECK(vrview_kind_of(&k) == VRV_K_VIDEO, "decodificador de vídeo activo = FMV aunque quede 3D detrás");
         k.paused = 0; k.game = 1; k.paused = 1;
@@ -100,123 +95,35 @@ int main(void) {
         e.video = 1;
         for (int n = 0; n < 3; n++) vrview_step(&w, &e);
         CHECK(w.kind == VRV_K_VIDEO, "vídeo");
-        for (int q = 0; q <= VRV_K_BACKUP; q++) CHECK(vrview_kind_name(q)[0] != '?' && vrview_cine_type(q)[0] != '?', "nombre %d", q);
+        for (int q = 0; q <= VRV_K_VIDEO; q++) CHECK(vrview_kind_name(q)[0] != '?' && vrview_cine_type(q)[0] != '?', "nombre %d", q);
     }
-    /* --- los tres casos del cine: fmv / motor / respaldo, con la intro medida (cobertura 30,2 26,4 26,2 27,8 14,9 0,1 0,6 0,1 0,1 1,4 0,2 %) --- */
+    /* --- el cine tiene dos casos del motor/2D y el vídeo; NUNCA una imagen plana del 3D (el mundo lo dibuja solo el render nativo) --- */
     {
         char buf[700];
-        /* (c) introducción sin partida: respaldo desde el primer fotograma y se queda, aunque llegue 1 sola medida buena */
         VrView m; vrview_reset(&m);
+        /* introducción sin partida (antes: respaldo plano): escena del motor a los 3 fotogramas */
         VrViewIn in; memset(&in, 0, sizeof in); in.scene3d = 1;
         for (int n = 0; n < 3; n++) vrview_step(&m, &in);
-        CHECK(m.kind == VRV_K_BACKUP && m.mode == VRV_CINEMA && (m.changed & VRV_CH_KIND), "intro: respaldo a los 3 fotogramas (clase %d)", m.kind);
+        CHECK(m.kind == VRV_K_ENGINE && m.mode == VRV_CINEMA && (m.changed & VRV_CH_KIND), "intro: motor a los 3 fotogramas (clase %d)", m.kind);
         vrview_cine_describe(&m, &in, buf, sizeof buf);
-        CHECK(strstr(buf, "[cine] tipo=respaldo motivo=") && strstr(buf, "sin partida"), "registro respaldo: %s", buf);
-        static const int intro[] = { 30, 26, 26, 28, 15, 0, 1, 0, 0, 1, 0 };
-        for (unsigned q = 0; q < sizeof intro / sizeof *intro; q++) {
-            in.cover1 = (uint8_t)(intro[q] + 1); in.cover_new = 1;
-            for (int n = 0; n < 50; n++) { vrview_step(&m, &in); in.cover_new = 0; CHECK(m.kind == VRV_K_BACKUP, "intro medida %d%%: sigue en respaldo (n=%d)", intro[q], n); }
+        CHECK(strstr(buf, "[cine] tipo=motor motivo=") && strstr(buf, "sin partida") && !strstr(buf, "respaldo"), "registro intro: %s", buf);
+        /* no existe ninguna combinación de entradas que dé una clase fuera de UI/WORLD/ENGINE/VIDEO */
+        for (unsigned bits = 0; bits < 2048; bits++) {
+            VrViewIn z; memset(&z, 0, sizeof z);
+            z.game = bits & 1; z.in_control = (bits >> 1) & 1; z.cam_active = (bits >> 2) & 1; z.cinematic = (bits >> 3) & 1; z.comms = (bits >> 4) & 1;
+            z.paused = (bits >> 5) & 1; z.dead = (bits >> 6) & 1; z.scene3d = (bits >> 7) & 1; z.video = (bits >> 8) & 1; z.mdec = (bits >> 9) & 1; z.menu_open = (bits >> 10) & 1;
+            int k = vrview_kind_of(&z);
+            CHECK(k >= VRV_K_UI && k <= VRV_K_VIDEO, "clase %d fuera de rango (entrada %u)", k, bits);
+            if (!z.mdec && !z.video && !z.paused && !z.menu_open && !z.comms && z.scene3d && !z.game) CHECK(k == VRV_K_ENGINE, "3D sin partida y sin vídeo = motor (entrada %u)", bits);
         }
-        CHECK(m.cov_state == 2, "intro: cobertura mala = no fiel");
-        vrview_cine_describe(&m, &in, buf, sizeof buf);
-        CHECK(strstr(buf, "tipo=respaldo") && strstr(buf, "cobertura baja") && strstr(buf, "cobertura=0%"), "registro respaldo medido: %s", buf);
-        in.cover1 = 91; in.cover_new = 1; vrview_step(&m, &in); in.cover_new = 0;
-        for (int n = 0; n < 40; n++) vrview_step(&m, &in);
-        CHECK(m.kind == VRV_K_BACKUP, "una sola medida buena no basta");
-        /* (b) escena del motor con partida: motor; una medida mala aislada (15,9 %) no la corta; dos seguidas sí */
+        /* cinemática y muerte con partida: motor y se quedan (no hay medida de cobertura que las pase a imagen plana) */
         vrview_reset(&m);
         VrViewIn ci = world(); ci.in_control = 0; ci.cinematic = 1; ci.scene3d = 1;
-        for (int n = 0; n < 5; n++) vrview_step(&m, &ci);
-        CHECK(m.kind == VRV_K_ENGINE, "cinemática con partida y sin medida: motor");
-        vrview_cine_describe(&m, &ci, buf, sizeof buf);
-        CHECK(strstr(buf, "tipo=motor") != NULL, "registro motor: %s", buf);
-        static const int cut[] = { 68, 69, 16, 85, 90, 92, 95 };   /* cinemática real: la medida de 16 % (corte de plano) no la corta */
-        for (unsigned q = 0; q < sizeof cut / sizeof *cut; q++) {
-            ci.cover1 = (uint8_t)(cut[q] + 1); ci.cover_new = 1;
-            for (int n = 0; n < 50; n++) { vrview_step(&m, &ci); ci.cover_new = 0; CHECK(m.kind == VRV_K_ENGINE, "cinemática medida %d%%: sigue en motor", cut[q]); }
-        }
-        ci.cover1 = 5; ci.cover_new = 1; vrview_step(&m, &ci); ci.cover_new = 0; for (int n = 0; n < 40; n++) vrview_step(&m, &ci);
-        CHECK(m.kind == VRV_K_ENGINE, "una medida mala aislada no basta");
-        ci.cover1 = 4; ci.cover_new = 1; vrview_step(&m, &ci); ci.cover_new = 0; for (int n = 0; n < 40; n++) vrview_step(&m, &ci);
-        CHECK(m.kind == VRV_K_BACKUP, "dos malas de las últimas 4: respaldo");
-        /* muerte medida: 58,9 % del volcado (660 triángulos ausentes) cuenta como mala; 57,9 / 88,6 / 22,1 / 98,5 / 97,2 % del registro: la fiabilidad sigue la ventana */
-        vrview_reset(&m);
+        for (int n = 0; n < 200; n++) { vrview_step(&m, &ci); CHECK(n < 3 || m.kind == VRV_K_ENGINE, "cinemática: sigue en motor (n=%d)", n); }
         VrViewIn dd = world(); dd.in_control = 0; dd.dead = 1; dd.scene3d = 1;
-        for (int n = 0; n < 5; n++) vrview_step(&m, &dd);
-        CHECK(m.kind == VRV_K_ENGINE, "muerte con partida y sin medida: motor");
-        static const int death[] = { 58, 59 };
-        for (unsigned q = 0; q < 2; q++) { dd.cover1 = (uint8_t)(death[q] + 1); dd.cover_new = 1; vrview_step(&m, &dd); dd.cover_new = 0; for (int n = 0; n < 40; n++) vrview_step(&m, &dd); }
-        CHECK(m.kind == VRV_K_BACKUP && m.reason == VRV_R_DEAD, "muerte con 58-59 %%: respaldo (imagen fiel de la VRAM)");
-        static const int death2[] = { 89, 22, 99 };
-        for (unsigned q = 0; q < 3; q++) { dd.cover1 = (uint8_t)(death2[q] + 1); dd.cover_new = 1; vrview_step(&m, &dd); dd.cover_new = 0; for (int n = 0; n < 40; n++) vrview_step(&m, &dd); }
-        CHECK(m.kind == VRV_K_BACKUP, "alternar buenas y malas no devuelve al motor");
-        for (int q = 0; q < 3; q++) { dd.cover1 = 98; dd.cover_new = 1; vrview_step(&m, &dd); dd.cover_new = 0; for (int n = 0; n < 40; n++) vrview_step(&m, &dd); }
-        CHECK(m.kind == VRV_K_ENGINE, "3 buenas seguidas la recuperan");
-        /* medidas en zona gris (62-80 %%) no cambian nada */
-        vrview_reset(&m);
-        for (int n = 0; n < 5; n++) vrview_step(&m, &ci);
-        for (int q = 0; q < 6; q++) { ci.cover1 = 71; ci.cover_new = 1; vrview_step(&m, &ci); ci.cover_new = 0; for (int n = 0; n < 15; n++) vrview_step(&m, &ci); }
-        CHECK(m.kind == VRV_K_ENGINE && m.cov_state == 0, "zona gris: sin cambios");
-        /* sin 3D 1 s las medidas se olvidan: la siguiente escena parte del estado por defecto */
-        VrViewIn nob = ci; nob.scene3d = 0; nob.cover1 = 0;
-        for (int n = 0; n < 60; n++) vrview_step(&m, &nob);
-        CHECK(m.cov_state == 0, "medidas olvidadas sin 3D");
-        /* (d) INTRO EN 3D (cobertura de nativo + relleno global): la medida del registro de la intro (nativo solo 1,7 / 0,8 / 0,3 %%; con el relleno 98,8 / 99,4 / 98,3 %%) */
-        {
-            VrView iv; vrview_reset(&iv);
-            VrViewIn ii; memset(&ii, 0, sizeof ii); ii.scene3d = 1;
-            uint32_t seen = 0;
-            for (int n = 0; n < 3; n++) vrview_step(&iv, &ii);
-            CHECK(iv.kind == VRV_K_BACKUP, "intro sin medida: respaldo");
-            /* el relleno mide en el fotograma 813: primera medida buena = fiable al instante (3 fotogramas de histéresis a motor) */
-            CHECK(vrview_cover_feed(&ii, &seen, 816, 1, 813, 99, 1, 800, 2) == 1 && ii.cover1 == 100 && ii.cover_src == 2 && ii.cover_new == 1, "la medida con relleno gana a la del nativo solo (src %d)", ii.cover_src);
-            for (int n = 0; n < 4; n++) { vrview_step(&iv, &ii); ii.cover_new = 0; }
-            CHECK(iv.kind == VRV_K_ENGINE && iv.cov_state == 1, "intro con nativo+relleno 99 %%: motor (3D), clase %d estado %d", iv.kind, iv.cov_state);
-            vrview_cine_describe(&iv, &ii, buf, sizeof buf);
-            CHECK(strstr(buf, "tipo=motor") && strstr(buf, "relleno global") && strstr(buf, "cobertura=99%(nativo+relleno)"), "registro intro motor: %s", buf);
-            /* las medidas siguientes (50 fotogramas) mantienen el motor; el nativo solo (34 %%, lo que veía el criterio anterior) ya no decide */
-            static const int fillm[] = { 99, 98, 99, 98, 99 };
-            uint32_t vb = 816 + 25;
-            for (unsigned q = 0; q < sizeof fillm / sizeof *fillm; q++, vb += 25) {
-                vrview_cover_feed(&ii, &seen, vb + 3, 1, vb, fillm[q], 1, vb - 5, 34);
-                for (int n = 0; n < 30; n++) { vrview_step(&iv, &ii); ii.cover_new = 0; CHECK(iv.kind == VRV_K_ENGINE, "intro medida %d%%: sigue en 3D", fillm[q]); }
-            }
-            /* sin relleno (apagado o sin escena) vale el nativo solo, que en la intro es bajo: respaldo plano (la cobertura TOTAL sigue siendo baja) */
-            VrView jv; vrview_reset(&jv); VrViewIn jj; memset(&jj, 0, sizeof jj); jj.scene3d = 1; uint32_t seen2 = 0; uint32_t b2 = 900;
-            for (int q = 0; q < 3; q++, b2 += 25) { vrview_cover_feed(&jj, &seen2, b2 + 2, 0, 0, 0, 1, b2, 34 - q * 10); for (int n = 0; n < 30; n++) { vrview_step(&jv, &jj); jj.cover_new = 0; } }
-            CHECK(jv.kind == VRV_K_BACKUP && jv.cov_state == 2 && jj.cover_src == 1, "sin relleno y nativo 34 %%: respaldo (clase %d)", jv.kind);
-            /* con relleno pero cobertura total baja (escena que el relleno no puede reponer): respaldo */
-            VrView kv; vrview_reset(&kv); VrViewIn kk; memset(&kk, 0, sizeof kk); kk.scene3d = 1; uint32_t seen3 = 0; uint32_t b3 = 900;
-            for (int q = 0; q < 3; q++, b3 += 25) { vrview_cover_feed(&kk, &seen3, b3 + 2, 1, b3, 40, 1, b3, 30); for (int n = 0; n < 30; n++) { vrview_step(&kv, &kk); kk.cover_new = 0; } }
-            CHECK(kv.kind == VRV_K_BACKUP && kv.cov_state == 2, "nativo+relleno 40 %%: respaldo (clase %d)", kv.kind);
-            /* una primera medida MALA sola no cambia el estado (sin partida: sigue el respaldo; con partida: el extractor) */
-            VrView lv; vrview_reset(&lv); VrViewIn ll = world(); ll.in_control = 0; ll.cinematic = 1; ll.scene3d = 1; ll.cover1 = 11; ll.cover_new = 1;
-            vrview_step(&lv, &ll); ll.cover_new = 0; for (int n = 0; n < 10; n++) vrview_step(&lv, &ll);
-            CHECK(lv.cov_state == 0 && lv.kind == VRV_K_ENGINE, "una primera medida mala no cambia nada con partida");
-            /* vrview_cover_feed: espaciado, caducidad, retroceso del contador (carga de partida), punteros nulos */
-            VrViewIn fi; memset(&fi, 0, sizeof fi); uint32_t sn = 0;
-            CHECK(vrview_cover_feed(&fi, &sn, 1000, 1, 990, 97, 0, 0, 0) == 1 && fi.cover_new == 1 && sn == 990, "primera medida: nueva");
-            CHECK(vrview_cover_feed(&fi, &sn, 1001, 1, 991, 97, 0, 0, 0) == 1 && fi.cover_new == 0 && sn == 990 && fi.cover1 == 98, "a menos de 25 fotogramas: vigente pero no nueva");
-            CHECK(vrview_cover_feed(&fi, &sn, 1020, 1, 1015, 12, 0, 0, 0) == 1 && fi.cover_new == 1 && sn == 1015 && fi.cover1 == 13, "a 25 fotogramas: nueva");
-            CHECK(vrview_cover_feed(&fi, &sn, 1200, 1, 1015, 97, 1, 1190, 50) == 1 && fi.cover_src == 1 && fi.cover1 == 51, "relleno caducado (> 150 fotogramas): se usa el nativo");
-            CHECK(vrview_cover_feed(&fi, &sn, 1500, 1, 1015, 97, 1, 1190, 50) == 0, "todo caducado: sin medida");
-            CHECK(vrview_cover_feed(&fi, &sn, 300, 1, 290, 90, 0, 0, 0) == 1 && fi.cover_new == 1 && sn == 290, "el contador retrocede (carga): medida nueva");
-            CHECK(vrview_cover_feed(NULL, &sn, 1, 0, 0, 0, 0, 0, 0) == 0 && vrview_cover_feed(&fi, NULL, 1, 0, 0, 0, 0, 0, 0) == 0, "punteros nulos");
-            /* M1: gana la medida MÁS RECIENTE de las dos fuentes (no siempre la del relleno); empate: el relleno */
-            { VrViewIn ni; memset(&ni, 0, sizeof ni); uint32_t sx = 0;
-              CHECK(vrview_cover_feed(&ni, &sx, 1000, 1, 990, 99, 1, 998, 30) == 1 && ni.cover_src == 1 && ni.cover1 == 31 && sx == 998, "M1: nativo mas reciente que el relleno: gana el nativo (src %d)", ni.cover_src);
-              CHECK(vrview_cover_feed(&ni, &sx, 1030, 1, 1025, 99, 1, 1025, 30) == 1 && ni.cover_src == 2 && ni.cover1 == 100, "M1: empate: el relleno");
-              CHECK(vrview_cover_feed(&ni, &sx, 1100, 1, 1040, 99, 1, 1090, 30) == 1 && ni.cover_src == 1, "M1: relleno vigente pero mas viejo que el nativo: el nativo"); }
-            /* M1: la ventana de histéresis no mezcla fuentes: al cambiar de fuente se reinicia */
-            { VrView wv; vrview_reset(&wv); VrViewIn wi; memset(&wi, 0, sizeof wi); wi.scene3d = 1;
-              wi.cover_src = 2; wi.cover1 = 11; wi.cover_new = 1; vrview_step(&wv, &wi);
-              wi.cover_new = 1; vrview_step(&wv, &wi);
-              CHECK(__builtin_popcount(wv.cov_bad_mask) == 2 && wv.cov_src == 2, "M1: dos malas del relleno en la ventana (%d)", __builtin_popcount(wv.cov_bad_mask));
-              wi.cover_src = 1; wi.cover1 = 11; wi.cover_new = 1; vrview_step(&wv, &wi);
-              CHECK(__builtin_popcount(wv.cov_bad_mask) == 1 && wv.cov_src == 1, "M1: cambia la fuente: ventana nueva, solo cuenta la medida nueva (%d)", __builtin_popcount(wv.cov_bad_mask));
-              wi.cover_src = 2; wi.cover1 = 100; wi.cover_new = 1; vrview_step(&wv, &wi);
-              CHECK(wv.cov_bad_mask == 0 && __builtin_popcount(wv.cov_good_mask) == 1 && wv.cov_src == 2, "M1: de vuelta a la otra fuente: ventana nueva otra vez"); }
-        }
+        vrview_reset(&m); for (int n = 0; n < 50; n++) vrview_step(&m, &dd);
+        CHECK(m.kind == VRV_K_ENGINE && m.reason == VRV_R_DEAD, "muerte con 3D: motor");
+
         /* (a) FMV: el decodificador activo gana al 3D y a la falta de partida; 12 fotogramas de gracia los pone el host */
         vrview_reset(&m);
         VrViewIn fv; memset(&fv, 0, sizeof fv); fv.mdec = 1;
@@ -367,31 +274,12 @@ int main(void) {
         CHECK(vrview_uploads_cover(sum, 384, 256, 0), "área mostrada en la mitad inferior de la VRAM");
         CHECK(vrview_upload_area(0, 0, 0, 0, 0, 0, 0, 320, 240) == 320 * 240, "área nominal por defecto 320x240");
     }
-    {   /* modo gpu (VrViewIn.gpu3d): el 3D de la lista de la GPU no depende de la cobertura nativa; nunca respaldo; a ENGINE al instante */
-        VrView g;
-        VrViewIn k;
-        memset(&k, 0, sizeof k);
-        k.scene3d = 1; k.gpu3d = 1;            /* sin partida, sin medida de cobertura (cover1 = 0): con el nativo sería BACKUP */
-        CHECK(vrview_kind_of(&k) == VRV_K_ENGINE, "gpu: 3D del motor sin partida y sin cobertura = ENGINE, no respaldo");
-        k.cover1 = 1; k.cover_src = 1;         /* cobertura medida 0 %: con el nativo, BACKUP */
-        CHECK(vrview_kind_of(&k) == VRV_K_ENGINE, "gpu: cobertura nativa 0 %% no cuenta");
-        k.gpu3d = 0;
-        CHECK(vrview_kind_of(&k) == VRV_K_BACKUP, "nativo: la misma entrada sigue siendo respaldo");
-        k.gpu3d = 1;
-        vrview_reset(&g);
-        vrview_step(&g, &k);
-        CHECK(g.kind == VRV_K_ENGINE && (g.changed & VRV_CH_KIND), "gpu: ENGINE en el primer fotograma (sin histéresis de %d)", g.to_engine);
-        vrview_reset(&g);
-        k.gpu3d = 0; k.cover1 = 0; k.game = 1;
-        vrview_step(&g, &k);
-        CHECK(g.kind == VRV_K_UI, "nativo: la histéresis de entrada sigue (kind %d tras 1 fotograma)", g.kind);
-        for (int i = 0; i < 20; i++) { memset(&k, 0, sizeof k); k.scene3d = 1; k.gpu3d = 1; vrview_step(&g, &k); CHECK(g.kind != VRV_K_BACKUP, "gpu: nunca respaldo"); }
-        k.game = 1; k.in_control = 1; k.cam_active = 1; k.scene3d = 1;         /* mundo con 3D: sigue siendo mundo */
-        CHECK(vrview_kind_of(&k) == VRV_K_WORLD, "gpu: el mundo no cambia");
-        memset(&k, 0, sizeof k); k.scene3d = 1; k.gpu3d = 1; k.mdec = 1;       /* vídeo (MDEC) sin cambios */
-        CHECK(vrview_kind_of(&k) == VRV_K_VIDEO, "gpu: el vídeo MDEC sigue siendo vídeo");
-        { char buf[512]; vrview_reset(&g); memset(&k, 0, sizeof k); k.scene3d = 1; k.gpu3d = 1; vrview_step(&g, &k); vrview_cine_describe(&g, &k, buf, sizeof buf);
-          CHECK(strstr(buf, "tipo=motor") && strstr(buf, "modo gpu"), "registro gpu: %s", buf); }
+    {   /* el 3D del motor es siempre la pantalla estereoscópica: ENGINE tras la histéresis de entrada, sin atajo ni respaldo */
+        VrView g; VrViewIn k; memset(&k, 0, sizeof k); k.scene3d = 1;
+        vrview_reset(&g); vrview_step(&g, &k);
+        CHECK(g.kind == VRV_K_UI, "la histéresis de entrada se mantiene (kind %d tras 1 fotograma)", g.kind);
+        for (int n = 0; n < 20; n++) { vrview_step(&g, &k); CHECK(g.kind == VRV_K_UI || g.kind == VRV_K_ENGINE, "nunca otra clase"); }
+        CHECK(g.kind == VRV_K_ENGINE, "ENGINE tras %d fotogramas", g.to_engine);
     }
     {   /* vrhost_keep_filter: ¿el recubrimiento (alarma roja, destellos, fundidos) se conserva como post-proceso por ojo en vez de ir al panel HUD? */
         /* (native, cine_cand, scene3d, has_3d, world_valid, n_scan, frame_on, n_strips) */

@@ -404,13 +404,12 @@ static void test_cover_near_cap(void) {
     CHECK(st.cls[NF_SKIP_CAP] > 0 && st.cover_pct < 85.0f && st.cover_pct > 40.0f, "M3: el tope recorto %u rellenos: cobertura %.1f%% (no 100)", st.cls[NF_SKIP_CAP], st.cover_pct);
     ns_fill_destroy(f);
 }
-/* Tubería completa: relleno -> ns_gpu_fx_build con seguimiento. Mundo: dibujado y fijo con la cabeza girando; pegado a la vista: se detecta y se descarta. */
+/* Tubería completa: relleno -> ns_gpu_fx_build (ya sin seguimiento de lo pegado a la cabeza). Mundo: dibujado y fijo con la cabeza girando. */
 static void test_pipeline_follow(void) {
     NsFill *f = ns_fill_create(); NsFillCfg cfg; ns_fill_cfg_default(&cfg); NsFillStats st;
-    NsGpuFxTrack *trk = ns_gpu_fx_track_create();
     static const float to_vr[12] = {0.001f, 0, 0, 0, 0, 0.001f, 0, 0, 0, 0, 0.001f, 0};
     NsCamera nc; memset(&nc, 0, sizeof nc); nc.rot[0] = nc.rot[4] = nc.rot[8] = 1; nc.h = 160; nc.overscan_y = 1;
-    int drawn_w = 0, drawn_l_last = 1, follow_fill = 0; float devw = 0, cprev[3] = {0, 0, 0}; int have = 0;
+    int drawn_w = 0; float devw = 0, cprev[3] = {0, 0, 0}; int have = 0;
     for (int t = 0; t < 40; t++) {
         NsFillCam cam = cam_yaw(3.0f * (float)t, 10.0f * (float)t);
         GpuOp ops[2];
@@ -422,13 +421,11 @@ static void test_pipeline_follow(void) {
         CHECK(n == 2, "salidas=%u", n);
         NsEffect all[4]; memcpy(all, e, sizeof(NsEffect) * (n < 4 ? n : 4));
         NsGpuFxParams P; memset(&P, 0, sizeof P);
-        P.to_vr = to_vr; P.cam = &nc; P.track = trk; P.hold_near_m = 0.3f; P.n_eyes = 1;
+        P.to_vr = to_vr; P.cam = &nc; P.n_eyes = 1;
         for (int a = 0; a < 3; a++) { P.head[a] = cam.eye[a] * 0.001f; P.head_right[a] = cam.R[3 * a]; P.head_up[a] = cam.R[3 * a + 1]; P.eyes[0][a] = P.head[a]; }
         NsGpuFxVert vb[64]; NsGpuFxRun runs[4]; uint64_t keys[4]; NsGpuFxOut o;
         CHECK(ns_gpu_fx_build(all, n, &P, vb, 64, runs, 4, keys, 4, &o) == 0, "build");
         uint32_t nverts = o.n_opaque + o.n_semi;
-        if (t == 39) drawn_l_last = nverts >= 12;   /* si el pegado se dibujara habria dos cuadrilateros (12 vertices) */
-        if (o.n_follow_fill) follow_fill = 1;
         if (nverts >= 6) {   /* la primera salida dibujada es la de mundo (se emite primero) */
             drawn_w++;
             float c[3] = {0, 0, 0};
@@ -438,8 +435,6 @@ static void test_pipeline_follow(void) {
         }
     }
     CHECK(drawn_w >= 38 && devw < 0.003f, "mundo: dibujado siempre y fijo en el mundo VR con la cabeza girando y avanzando (desviacion %.5f m, dibujado %d)", devw, drawn_w);
-    CHECK(follow_fill && !drawn_l_last, "lo pegado a la vista (relleno) se detecta como SIGUE y se descarta");
-    ns_gpu_fx_track_destroy(trk);
     ns_fill_destroy(f);
 }
 

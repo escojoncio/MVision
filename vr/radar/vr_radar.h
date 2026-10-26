@@ -109,7 +109,7 @@ int vrradar_build(const VrRadarSplit *s, VrRadarScene *out);
 /* ------------------------------------------------------------------------------------------------ anclaje */
 typedef struct { float elbow[3], wrist[3], dorsal[3]; } VrRadarArm;   /* espacio VR, metros */
 typedef struct {
-    float width_m;       /* ancho de la pantalla (def. 0,07) */
+    float width_m;       /* ancho de la pantalla (def. 0,095: >= 9 cm, el radar del juego es un tile de 69x52 px) */
     float height_m;      /* alto; <= 0: proporcional a la ventana del radar (def. 0 -> 71:54) */
     float along_m;       /* del centro de la muñeca (origen del agarre) al centro del quad, hacia el codo (def. 0,13: antebrazo justo antes de la mano) */
     float lift_m;        /* del eje del antebrazo al plano de la pantalla, a lo largo de la normal del panel, SIN malla del guante (def. 0,065: radio máximo del antebrazo del guante, 55 mm, + holgura) */
@@ -144,9 +144,13 @@ int vrradar_pick_arm(const float grip[16], const VrRadarArm *ik, VrRadarArm *out
 /* Visibilidad del panel (0..1): solo se ve cuando la muñeca mira a la cara. Ángulo entre la normal del panel (dorsal, fija: no depende del ojo) y la dirección panel -> ojo: < VRRADAR_VIS_ON_DEG aparece, > VRRADAR_VIS_OFF_DEG
  * desaparece; entre ambos conserva el estado (prev > 0 = visible o apareciendo). Fundido lineal de VRRADAR_VIS_FADE_S s: devuelve prev movido hacia 0/1 como mucho dt / FADE. Entradas no válidas
  * (NULL, no finitas, vectores nulos) = fuera de la zona. Pura: el llamador guarda prev. */
-#define VRRADAR_VIS_ON_DEG 45.0f
-#define VRRADAR_VIS_OFF_DEG 55.0f
+#define VRRADAR_VIS_ON_DEG 60.0f
+#define VRRADAR_VIS_OFF_DEG 75.0f
 #define VRRADAR_VIS_FADE_S 0.15f
 float vrradar_visibility(const float normal[3], const float center[3], const float eye[3], float prev, float dt);
 /* Brillo extra 0..gaze_boost según el ángulo entre la mirada (eye, forward unitario) y el quad; 0 si el quad da la espalda. */
+/* Dorso REAL de la mano (+Y del marco de mano de vr_pose.h) a partir del agarre (columna-mayor 4x4, espacio VR) y del hand_rot_offset de vr/body (cuaternión x,y,z,w, marco del mando -> marco de mano; NULL = identidad):
+ * R_agarre * R_offset * (0,1,0), sin la componente a lo largo del hueso del antebrazo (`bone`, cualquier sentido) y unitario. El +Y del agarre solo es el dorso con offset identidad: con el defecto (roll 45 grados)
+ * queda 45 grados desviado hacia el lado del pulgar. 0 si la entrada no es válida (NULL, no finita, hueso nulo, dorso paralelo al hueso); out intacto. */
+int vrradar_dorsal_from_grip(const float grip[16], const float rot_q[4], const float bone[3], float out[3]);
 float vrradar_gaze(const VrRadarQuad *q, const float eye[3], const float forward[3], const VrRadarWristCfg *cfg);

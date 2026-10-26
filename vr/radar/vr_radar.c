@@ -365,7 +365,7 @@ static int finite3(const float v[3]) { return isfinite(v[0]) && isfinite(v[1]) &
 
 VrRadarWristCfg vrradar_wrist_cfg_default(void) {
     VrRadarWristCfg c;
-    c.width_m = 0.07f; c.height_m = 0.0f; c.along_m = 0.13f; c.lift_m = 0.065f; c.skin_m = 0.008f; c.bezel_m = 0.004f; c.bezel_back_m = 0.002f;
+    c.width_m = 0.095f; c.height_m = 0.0f; c.along_m = 0.13f; c.lift_m = 0.065f; c.skin_m = 0.008f; c.bezel_m = 0.004f; c.bezel_back_m = 0.002f;
     c.rot90 = 0; c.gaze_boost = 0.35f; c.gaze_cos_in = 0.93f; c.gaze_cos_out = 0.75f;
     return c;
 }
@@ -479,4 +479,25 @@ float vrradar_gaze(const VrRadarQuad *q, const float eye[3], const float fwd[3],
     float face = -dot3(q->normal, to);
     float f = sstep(cfg.gaze_cos_out, cfg.gaze_cos_in, look) * sstep(0.1f, 0.5f, face);
     return f * (cfg.gaze_boost > 0 ? cfg.gaze_boost : 0.0f);
+}
+
+int vrradar_dorsal_from_grip(const float g[16], const float q_[4], const float bone[3], float out[3]) {
+    if (!g || !bone || !out) return 0;
+    for (int i = 0; i < 16; i++) if (!isfinite(g[i])) return 0;
+    float b[3] = {bone[0], bone[1], bone[2]};
+    if (!finite3(b) || !norm3(b)) return 0;
+    float c1[3] = {0.0f, 1.0f, 0.0f};      /* Rq * (0,1,0): columna 1 de la rotación del cuaternión (x,y,z,w) */
+    if (q_) {
+        float x = q_[0], y = q_[1], z = q_[2], w = q_[3], l = sqrtf(x * x + y * y + z * z + w * w);
+        if (!(l > 1e-6f) || !isfinite(l)) return 0;
+        x /= l; y /= l; z /= l; w /= l;
+        c1[0] = 2.0f * (x * y - z * w); c1[1] = 1.0f - 2.0f * (x * x + z * z); c1[2] = 2.0f * (y * z + x * w);
+    }
+    float d[3];
+    for (int i = 0; i < 3; i++) d[i] = g[0 + i] * c1[0] + g[4 + i] * c1[1] + g[8 + i] * c1[2];   /* R_agarre * (Rq * Y) */
+    float k = dot3(d, b);
+    for (int i = 0; i < 3; i++) d[i] -= b[i] * k;
+    if (!norm3(d)) return 0;
+    memcpy(out, d, sizeof d);
+    return 1;
 }

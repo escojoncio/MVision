@@ -113,7 +113,7 @@ El factor vertical se midió reproyectando paquetes reales de polígonos de mund
 - **Escena válida no apta para primera persona** (vehículos, ascensores, zonas especiales): se coloca con la cámara del juego y se enseña en la pantalla 3D; vuelve al mundo al ser apta (histéresis). La ventana de la pantalla 3D usa la H real y OFX/OFY de la escena (`ns_cinema_window`).
 - **Recubrimientos**: RING y BARS son viñetas circulares; SCAN está anclado al mundo (elevación del rayo). Ninguno gira con la cabeza.
 
-## Comodidad VR de los efectos cerca de la cabeza (ns_gpu_fx_build_ex)
+## Comodidad VR de los efectos cerca de la cabeza (ns_gpu_fx_build_ex) — ELIMINADA: `comfort` y `oncam_drop` ya no existen (solo queda el descarte a < 15 cm de la cabeza, `drop_inside_m`); el texto siguiente es histórico
 - Tope angular por distancia del centro a la cabeza: 0 a <= `comfort_dmin_m` (0,12 m: se descarta, "nace dentro de la cabeza"), X (20 grados) a 0,3 m, 90 grados a 1 m, sin tope a mas de 1 m. Un efecto que lo supera se REDUCE alrededor de su centro (no se mueve). Los papeles SURFACE y WATER_SURFACE (entorno) quedan fuera.
 - Pegados a la camara del motor (`NS_EF_ON_CAMERA` o papel VIEW_OVERLAY): no tienen emisor en el mundo; con el centro a menos de `oncam_drop_m` (1,5 m) se descartan. Descartar cuenta como confirmado (la clave entra en `keys`: la ruta de la GPU no los redibuja).
 - Los recubrimientos intencionados de pantalla (fundido, gas, agua, modos de vision) NO pasan por aqui: son `NsScreenFx`.

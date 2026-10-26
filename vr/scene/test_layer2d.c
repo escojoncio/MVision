@@ -961,7 +961,7 @@ static void menu_changing_cases(void) {
     vl2d_run(L, l1, &s1, VL_PANEL);
     for (int k = 0; k < 6; k++) {   /* sin menú: el radar cambia de lista en lista */
         uint8_t opd[64]; int n = 0;
-        const int rb[1][4] = {{250 + k, 10, 50, 40}};
+        const int rb[1][4] = {{250 + k, 150, 50, 40}};
         GpuDrawList *r = with_rects(l1, 1, rb, f2, opd, &n);
         VrScene sr; memset(&sr, 0, sizeof sr); sr.op_dest = opd; sr.n_op_dest = (uint32_t)n;
         CHECK(vl2d_run(L, r, &sr, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 0, "menu changing: lista %d sin menú, sin rect", k);
@@ -969,7 +969,7 @@ static void menu_changing_cases(void) {
     }
     vl2d_set_menu(L, 1);
     uint8_t opdm[64]; int nm = 0;
-    const int mb[2][4] = {{256, 10, 50, 40}, {60, 150, 40, 30}};   /* el radar sigue cambiando (y es mayor) + la ventana nueva */
+    const int mb[2][4] = {{256, 150, 50, 40}, {60, 150, 40, 30}};   /* el radar sigue cambiando (y es mayor) + la ventana nueva */
     GpuDrawList *m = with_rects(l1, 2, mb, f2, opdm, &nm);
     VrScene sm; memset(&sm, 0, sizeof sm); sm.op_dest = opdm; sm.n_op_dest = (uint32_t)nm;
     CHECK(vl2d_run(L, m, &sm, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu changing: con menú hay rect");
@@ -982,14 +982,14 @@ static void menu_changing_cases(void) {
     vl2d_run(L, l1, &s1, VL_PANEL);
     for (int k = 0; k < 6; k++) {
         uint8_t opd[64]; int n = 0;
-        const int rb[1][4] = {{250 + k, 10, 50, 40}};
+        const int rb[1][4] = {{250 + k, 150, 50, 40}};
         GpuDrawList *r = with_rects(l1, 1, rb, f2, opd, &n);
         VrScene sr; memset(&sr, 0, sizeof sr); sr.op_dest = opd; sr.n_op_dest = (uint32_t)n;
         vl2d_run(L, r, &sr, VL_PANEL);
         free_list(r);
     }
     vl2d_set_menu(L, 1);
-    const int mb2[1][4] = {{256, 10, 50, 40}};
+    const int mb2[1][4] = {{256, 150, 50, 40}};
     uint8_t opd2[64]; int n2 = 0;
     GpuDrawList *m2 = with_rects(l1, 1, mb2, f2, opd2, &n2);
     VrScene s2; memset(&s2, 0, sizeof s2); s2.op_dest = opd2; s2.n_op_dest = (uint32_t)n2;
@@ -1004,7 +1004,7 @@ static void menu_decoy_cases(void) {
     if (!l1) { CHECK(0, "menu decoy: lista"); return; }
     VrScene s1; memset(&s1, 0, sizeof s1); s1.op_dest = opd1; s1.n_op_dest = (uint32_t)n1;
     const uint16_t FW = 0;
-    const int b1[1][4] = {{270, 10, 20, 6}}, b3[2][4] = {{200, 120, 80, 60}, {276, 10, 20, 6}}, b4[1][4] = {{200, 120, 80, 60}}, b9[2][4] = {{200, 120, 80, 60}, {20, 200, 150, 40}};
+    const int b1[1][4] = {{270, 200, 20, 6}}, b3[2][4] = {{200, 120, 80, 60}, {276, 200, 20, 6}}, b4[1][4] = {{200, 120, 80, 60}}, b9[2][4] = {{200, 120, 80, 60}, {20, 200, 150, 40}};
     const uint16_t f2[2] = {FW, FW};
     GpuDrawList *g1 = with_rects(l1, 1, b1, f2, opd2, &n2);                 /* lista 1: solo la barra */
     VrScene sg1; memset(&sg1, 0, sizeof sg1); sg1.op_dest = opd2; sg1.n_op_dest = (uint32_t)n2;
@@ -1025,10 +1025,96 @@ static void menu_decoy_cases(void) {
     float ex[4] = {(float)(199 - l1->disp.x) / (float)in.fw, (float)(119 - l1->disp.y) / (float)in.h, (float)(281 - l1->disp.x) / (float)in.fw, (float)(181 - l1->disp.y) / (float)in.h};
     for (int k = 0; k < 4; k++) CHECK(uv[k] > ex[k] - 0.002f && uv[k] < ex[k] + 0.002f, "menu decoy: uv[%d]=%.4f esperado %.4f (la ventana, no la barra)", k, (double)uv[k], (double)ex[k]);
     float win[4]; memcpy(win, uv, sizeof win);
-    for (int i = 4; i <= 8; i++) CHECK(vl2d_run(L, g4, &sg4, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1 && uv[0] == win[0] && uv[2] == win[2], "menu decoy: lista %d", i);
-    CHECK(vl2d_run(L, g9, &sg9, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu decoy: lista 9");
-    for (int k = 0; k < 4; k++) CHECK(uv[k] == win[k], "menu decoy: tras 8 listas el rect queda congelado (uv[%d]=%.4f antes %.4f)", k, (double)uv[k], (double)win[k]);
+    for (int i = 4; i <= 11; i++) CHECK(vl2d_run(L, g4, &sg4, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1 && uv[0] == win[0] && uv[2] == win[2], "menu decoy: lista %d", i);
+    CHECK(vl2d_menu_settled(L) == 1, "menu decoy: 8 listas seguidas sin crecer -> asentado");
+    CHECK(vl2d_run(L, g9, &sg9, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu decoy: lista 12");
+    for (int k = 0; k < 4; k++) CHECK(uv[k] == win[k], "menu decoy: asentado el rect queda congelado (uv[%d]=%.4f antes %.4f)", k, (double)uv[k], (double)win[k]);
     vl2d_free(L); free_list(g1); free_list(g3); free_list(g4); free_list(g9); free_list(l1);
+}
+/* ventana del selector que se abre con animación (crece lista a lista): el rect solo crece (nunca se encoge ni oscila) mientras no está asentado, se publica cuando lo está (vl2d_menu_settled,
+ * 8 listas consecutivas sin crecer; tope 60) y desde entonces queda FIJO aunque aparezcan primitivas pegadas a él o la ventana se encoja; una caja opaca grande en la franja de créditos/vida (v < 0,35) nunca es la ventana */
+static void menu_settle_cases(void) {
+    uint8_t opd1[64]; int n1 = 0;
+    GpuDrawList *l1 = panel_scene(0, opd1, &n1);
+    if (!l1) { CHECK(0, "menu settle: lista"); return; }
+    VrScene s1; memset(&s1, 0, sizeof s1); s1.op_dest = opd1; s1.n_op_dest = (uint32_t)n1;
+    const uint16_t FW[1] = {0};
+    VrLayer2D *L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    float uv[4] = {0}, prev_u1 = 0, fin[4] = {0};
+    vl2d_run(L, l1, &s1, VL_PANEL);
+    CHECK(vl2d_menu_settled(L) == 0, "menu settle: sin selector no hay rect asentado");
+    vl2d_set_menu(L, 1);
+    VrL2Info in; vl2d_info(L, &in);
+    /* animación de 12 listas que crece; luego 7 listas quietas (aún sin asentar) y la 8.ª consecutiva sin crecer asienta (lista 20); después se encoge/oscila y aparece una caja pegada: rect fijo */
+    for (int k = 1; k <= 24; k++) {
+        int wk = k <= 12 ? 20 + 8 * k : k <= 20 ? 20 + 8 * 12 : (k & 1 ? 60 : 116);
+        const int bx[2][4] = {{200, 120, wk, 60}, {200 + 116 + 4, 130, 20, 20}};   /* segunda caja: pegada al borde final de la ventana (a 4 px) */
+        uint8_t opd[64]; int n = 0;
+        GpuDrawList *lk = with_rects(l1, k > 20 ? 2 : 1, bx, FW, opd, &n);
+        VrScene sk; memset(&sk, 0, sizeof sk); sk.op_dest = opd; sk.n_op_dest = (uint32_t)n;
+        int ok = vl2d_run(L, lk, &sk, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1;
+        CHECK(ok, "menu settle: lista %d con rect", k);
+        vl2d_info(L, &in);
+        CHECK(vl2d_menu_settled(L) == (k >= 20), "menu settle: lista %d asentado=%d (esperado %d)", k, vl2d_menu_settled(L), k >= 20);
+        if (k <= 20) { CHECK(uv[2] >= prev_u1 - 1e-6f, "menu settle: lista %d el rect se encogió (u1 %.4f antes %.4f)", k, (double)uv[2], (double)prev_u1); prev_u1 = uv[2]; }
+        if (k == 20) { memcpy(fin, uv, sizeof fin); CHECK(uv[2] > (200.0f + 116.0f) / (float)in.fw - 0.003f && uv[2] < (200.0f + 118.0f) / (float)in.fw, "menu settle: rect final = ventana abierta del todo, no cortada a las 8 listas (u1 %.4f)", (double)uv[2]); }
+        if (k > 20) for (int c = 0; c < 4; c++) CHECK(uv[c] == fin[c], "menu settle: lista %d el rect asentado cambió (uv[%d]=%.4f antes %.4f)", k, c, (double)uv[c], (double)fin[c]);
+        free_list(lk);
+    }
+    vl2d_set_menu(L, 0);
+    CHECK(vl2d_menu_settled(L) == 0, "menu settle: al salir del selector deja de estar asentado");
+    vl2d_free(L);
+    /* la escala de la capa baja y sube bajo carga (vl2a_scale_step): el rect va en UV de la zona nativa, así que un cambio de escala NO reinicia la elección ni el asentado */
+    {
+        L = vl2d_new(); vl2d_set_options(L, 4, VL_SMOOTH_ORIGINAL);
+        vl2d_run(L, l1, &s1, VL_PANEL); vl2d_set_menu(L, 1);
+        float u8[4] = {0}, uvs[4] = {0};
+        for (int k = 1; k <= 20; k++) {
+            if (k == 3 || k == 6) vl2d_set_options(L, k == 3 ? 2 : 1, VL_SMOOTH_ORIGINAL);
+            const int bx[1][4] = {{200, 120, 20 + 8 * (k > 8 ? 8 : k), 60}};
+            uint8_t opd[64]; int n = 0;
+            GpuDrawList *lk = with_rects(l1, 1, bx, FW, opd, &n);
+            VrScene sk; memset(&sk, 0, sizeof sk); sk.op_dest = opd; sk.n_op_dest = (uint32_t)n;
+            int ok = vl2d_run(L, lk, &sk, VL_PANEL) == 1 && vl2d_menu_rect(L, uvs) == 1;
+            CHECK(ok, "menu settle (escala): lista %d con rect", k);
+            CHECK(vl2d_menu_settled(L) == (k >= 16), "menu settle (escala): lista %d asentado=%d (esperado %d)", k, vl2d_menu_settled(L), k >= 16);
+            if (k == 16) memcpy(u8, uvs, sizeof u8);
+            if (k > 16) for (int c = 0; c < 4; c++) CHECK(uvs[c] == u8[c], "menu settle (escala): lista %d rect cambió (uv[%d])", k, c);
+            free_list(lk);
+        }
+        vl2d_free(L);
+    }
+    /* tope: una ventana que sigue creciendo (1 px por lista) se asienta igualmente a las 60 listas de crecimiento y queda fija */
+    {
+        L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+        vl2d_run(L, l1, &s1, VL_PANEL); vl2d_set_menu(L, 1);
+        float u60[4] = {0}, uc[4] = {0};
+        for (int k = 1; k <= 64; k++) {
+            const int bx[1][4] = {{200, 120, 20 + k, 60}};
+            uint8_t opd[64]; int n = 0;
+            GpuDrawList *lk = with_rects(l1, 1, bx, FW, opd, &n);
+            VrScene sk; memset(&sk, 0, sizeof sk); sk.op_dest = opd; sk.n_op_dest = (uint32_t)n;
+            int ok = vl2d_run(L, lk, &sk, VL_PANEL) == 1 && vl2d_menu_rect(L, uc) == 1;
+            CHECK(ok, "menu settle (tope): lista %d con rect", k);
+            CHECK(vl2d_menu_settled(L) == (k >= 60), "menu settle (tope): lista %d asentado=%d (esperado %d)", k, vl2d_menu_settled(L), k >= 60);
+            if (k == 60) memcpy(u60, uc, sizeof u60);
+            if (k > 60) for (int c = 0; c < 4; c++) CHECK(uc[c] == u60[c], "menu settle (tope): lista %d rect cambió (uv[%d])", k, c);
+            free_list(lk);
+        }
+        vl2d_free(L);
+    }
+    /* franja de créditos/vida: caja opaca grande arriba (v < 0,35) + ventana real abajo: el rect es la ventana */
+    const int bb[2][4] = {{10, 4, 280, 60}, {200, 150, 80, 60}};
+    const uint16_t f2[2] = {0, 0};
+    uint8_t opdb[64]; int nb = 0;
+    GpuDrawList *lb = with_rects(l1, 2, bb, f2, opdb, &nb);
+    VrScene sb; memset(&sb, 0, sizeof sb); sb.op_dest = opdb; sb.n_op_dest = (uint32_t)nb;
+    L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    vl2d_run(L, l1, &s1, VL_PANEL); vl2d_set_menu(L, 1);
+    CHECK(vl2d_run(L, lb, &sb, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu settle: ventana con caja grande en la franja superior -> rect");
+    vl2d_info(L, &in);
+    CHECK(uv[1] > 140.0f / (float)in.h && uv[0] > 190.0f / (float)in.fw, "menu settle: la franja superior (créditos/vida) no entra en el rect (u0 %.4f v0 %.4f)", (double)uv[0], (double)uv[1]);
+    vl2d_free(L); free_list(lb); free_list(l1);
 }
 /* doble búfer del juego: la zona mostrada alterna entre x = 0 y x = 320 cada fotograma. La clave de las primitivas es relativa a la zona mostrada y el rect conservado sobrevive al cambio
  * (si no, la mitad de los fotogramas todo el HUD cuenta como nuevo y el rect alterna entre la ventana y una caja mayor: el menú sale doble) */
@@ -1119,9 +1205,14 @@ static void menu_rect_cases(void) {
         CHECK(vl2a_acquire(A, &px, &w, &h, &full, &seq) == 1 && vl2a_acquire_menu_rect(A, uv) == 0, "menu async: sin selector no hay rect");
         vl2a_release(A);
         vl2a_set_view(A, (1 << 8) | 10);
-        CHECK(vl2a_submit(A, l2, opd2, VL_PANEL, 0) == 1, "menu async: encolada 2"); vl2a_flush(A);
-        CHECK(vl2a_acquire(A, &px, &w, &h, &full, &seq) >= 0 && vl2a_acquire_menu_rect(A, uv) == 1 && uv[0] < uv[2] && uv[1] < uv[3] && uv[2] <= 1.0f, "menu async: con selector hay rect");
-        vl2a_release(A);
+        for (int k = 1; k <= 9; k++) {   /* el rect solo viaja asentado: la lista 1 lo crea y 8 listas seguidas sin crecer (2..9) lo asientan (antes la ventana aún se está abriendo) */
+            CHECK(vl2a_submit(A, l2, opd2, VL_PANEL, 0) == 1, "menu async: encolada 2.%d", k); vl2a_flush(A);
+            int r = vl2a_acquire(A, &px, &w, &h, &full, &seq) >= 0;
+            int got = r && vl2a_acquire_menu_rect(A, uv);
+            if (k < 9) CHECK(r && !got, "menu async: lista %d aún sin rect asentado", k);
+            else CHECK(got && uv[0] < uv[2] && uv[1] < uv[3] && uv[2] <= 1.0f, "menu async: con selector hay rect (asentado)");
+            vl2a_release(A);
+        }
         CHECK(vl2a_acquire_menu_rect(A, uv) == 0, "menu async: sin capa adquirida no hay rect");
         vl2a_free(A);
     }
@@ -1360,6 +1451,7 @@ int main(void) {
     menu_pick_cases();
     menu_flip_cases();
     menu_decoy_cases();
+    menu_settle_cases();
     menu_changing_cases();
 
     /* ---- fondo negro, escala 1: IGUAL bit a bit a la GPU original ---- */

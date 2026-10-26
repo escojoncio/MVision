@@ -122,7 +122,6 @@ final class VRInput: @unchecked Sendable {
     func recenter() {
         resetBodyYaw(0)
         mv_vr_recenter()
-        ns_gpu_fx_track_request_reset()   // el seguimiento de efectos compara posiciones en espacio de cabeza: al recentrar saltan todas
     }
 
     /// Rumbo del mundo (cabeza+cuerpo) al que corresponde "stick arriba" del juego.

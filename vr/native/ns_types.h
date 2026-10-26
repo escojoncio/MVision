@@ -297,6 +297,7 @@ typedef struct NsScene {
     uint32_t fx_seq;     /* secuencia de la NsFxScene de esta escena (mismo game_frame); sólo vale si NS_SV_FX */
     uint32_t clock;      /* reloj de búfer: búfer doble del motor (0/1) */
     uint32_t group_mask; /* grupos de mapa activos */
+    uint32_t list_index; /* lista de la GPU (GpuDrawList.index) + 1 que contiene el dibujo de esta escena (la siguiente en cerrarse al capturarla); 0 = desconocida. Lo fija el enganche del anfitrión, no el extractor. Ver ns_scene_vram_ready */
     uint16_t area_id; uint16_t pad0;
     float units_per_m;   /* 1000 */
     float to_vr[12];     /* mundo del motor -> mundo VR (3x4 fila-mayor, metros); misma regla que vr_scene (ver arriba) */
@@ -323,6 +324,14 @@ uint32_t ns_store_epoch(const NsMeshStore *st);        /* época actual del prod
 void ns_store_ack(NsMeshStore *st, uint32_t epoch);
 
 /* ---------------------------------------------------------------------------------------------------------------- utilidades (cabecera, sin dependencias) */
+/* Sincronía escena <-> VRAM (consumidor): las texturas de una escena son las de la VRAM tras la lista NsScene.list_index - 1. Con una época de mallas NUEVA (cambio de zona) la escena no debe
+ * dibujarse antes de que la VRAM del renderer traiga esa lista (`vram_list` = índice de la última lista aplicada, `vram_known` = hay alguna): mallas y texturas de la misma época. 1 = lista
+ * (también si la escena no trae índice, no hay lista conocida o la escena es NULL). Aritmética con vuelta de 32 bits. */
+static inline int ns_scene_vram_ready(const NsScene *s, uint32_t vram_list, int vram_known) {
+    if (!s || s->list_index == 0u || !vram_known) return 1;
+    return (int32_t)(vram_list - (s->list_index - 1u)) >= 0;
+}
+
 /* FNV-1a de 64 bits encadenable, SIEMPRE campo a campo (nunca sobre un struct entero: el padding no está definido). */
 #define NS_HASH64_INIT 14695981039346656037ull
 static inline uint64_t ns_hash64(uint64_t h, const void *data, size_t n) {

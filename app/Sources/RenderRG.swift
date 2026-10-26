@@ -6,11 +6,9 @@ import Foundation
 // Consume la API C de vr_scene.h (mv_host_scene) y dibuja: (1) la VRAM de la consola mantenida en GPU, (2) el panel 2D
 // (HUD) en hudTexture y (3) el mundo 3D en estéreo.
 //
-// DOS MODOS DE 3D (mv_vrhost_render_mode, vrhost.h):
-//  - gpu (DEFECTO, `gpuMode`): el 3D sale de la lista de dibujo de la GPU del propio juego con los vértices de vista de la GTE (vr_scene.c, kind 0 opaco / kind 1 semitransparente, en metros
-//    del mundo VR). Profundidad con prueba y escritura para lo opaco, solo prueba para lo semitransparente, en el orden de envío, sin descarte de reversos. Lo que no tiene vértices de vista
-//    (HUD, textos, créditos, fundidos y destellos) va al panel 2D (takeLayer2D / encodeHud). El render nativo no se prepara ni dibuja.
-//  - nativo (MV_RENDER=nativo): Native/NativeRenderer.swift, escena leída de la RAM del motor: el mundo, sus efectos y los efectos de pantalla completa. La lista de la GPU solo aporta los
+// UN SOLO MODO DE 3D (mv_vrhost_render_mode devuelve siempre 1, vrhost.h): el nativo. El camino `gpuMode` (3D desde la lista de dibujo de la GPU con los vértices de vista de la GTE; vr_scene.c,
+// planPost, encodeStereoGPU...) ya no se alcanza salvo en el banco MV_BENCH sin render nativo: es código muerto que se conserva sin tocar.
+//  - nativo (único): Native/NativeRenderer.swift, escena leída de la RAM del motor: el mundo, sus efectos y los efectos de pantalla completa. La lista de la GPU solo aporta los
 //    eventos de VRAM, la capa 2D, el radar y el mapa de coherencia. Si el nativo no está listo en un fotograma se REPITE el último fotograma nativo válido o se funde a negro
 //    (vr/native/ns_present.h). Las cinemáticas del motor se pintan con el mismo render desde la cámara del juego, en estéreo, en la textura de la pantalla 3D.
 //
@@ -98,8 +96,8 @@ final class RGRenderer {
     private var dsSemi: MTLDepthStencilState?
     private var dsOpaqueNoZ: MTLDepthStencilState?
     private var dsSemiNoZ: MTLDepthStencilState?
-    /// Modo de 3D de este fotograma: true = lista de la GPU (defecto), false = render nativo. Lo fija `encode` leyendo mv_vrhost_render_mode().
-    private(set) var gpuMode = true
+    /// Modo de 3D de este fotograma: false = render nativo (el único camino del mundo; mv_vrhost_render_mode() devuelve siempre 1). `true` solo en el banco MV_BENCH sin render nativo.
+    private(set) var gpuMode = false
 
     private struct PKey: Hashable {
         var hud: Bool, layered: Bool, filter: Bool, linear: Bool
@@ -725,7 +723,7 @@ final class RGRenderer {
         let doHud = (gotNew || !hudDone) && drawWorld && !hudHQ
         // Render nativo: se prepara SIEMPRE (reconoce épocas del almacén aunque no se dibuje: menús) y lo que no se pueda dibujar se REPITE (último válido) o se funde a negro.
         // Modo gpu: no hay nada nativo que preparar; la pantalla 3D se considera sana (el 3D sale de la lista) salvo que encodeStereo falle.
-        if gpuMode { nativeDraw = false; nativeDrawnLast = false; stereoHealthy = true }
+        if gpuMode { nativeDraw = false; nativeDrawnLast = false }
         else { prepareNative(commandBuffer: commandBuffer, colorTargets: colorTargets, depthTargets: depthTargets, sceneV: sceneV, projections: projections, head: head, layered: layered) }
         // Filtro de pantalla (modo gpu): la escena se resuelve en texturas intermedias y un pase por ojo escribe el drawable (ver planPost). Nativo: nunca (plan = nil).
         let plan = gpuMode ? planPost(colorTargets: colorTargets, resolveTargets: resolveTargets, layered: layered) : nil
@@ -766,10 +764,10 @@ final class RGRenderer {
     private func prepareNative(commandBuffer: MTLCommandBuffer, colorTargets: [MTLTexture], depthTargets: [MTLTexture], sceneV: [simd_float4x4],
                                projections: [simd_float4x4], head: simd_float4x4, layered: Bool) {
         nativeDraw = false
-        stereoHealthy = false
 #if !MV_BENCH || MV_BENCH_NATIVE
         guard let n = native else { nativeDrawnLast = false; return }
         n.tint = SIMD3<Float>(1, 1, 1)
+        n.vramList = lastIndex ?? 0; n.vramKnown = lastIndex != nil      // índice de la última lista aplicada a la VRAM: sincronía de época de las mallas (NativeRenderer.drain)
         n.splitMeters = diagSplitMeters      // diagnóstico: partir triángulos grandes (cambiarlo vuelve a subir las mallas)
         n.noZTest = diagNoZ
         n.suppressRing = suppressFrame         // la abertura de la mira sustituye a la máscara de visión del juego
@@ -825,14 +823,8 @@ final class RGRenderer {
         let out = n.present(ready: ready, gpuMap: nativeMap)
         nativeDraw = ready && out.mode != Int32(NS_PR_BLACK)
         nativeDrawnLast = nativeDraw
-        // Pantalla 3D sana: el render nativo dibuja la escena ACTUAL (ni repetida ni a negro) en las dos cámaras. Si no, el presentador cae a la pantalla de cine (imagen de la VRAM).
-        stereoHealthy = ready && stereoWanted && out.mode == Int32(NS_PR_CURRENT)
-#else
-        stereoHealthy = true      // banco sin render nativo: la pantalla 3D no depende de él
 #endif
     }
-    /// Último fotograma: la pantalla 3D de la cinemática se dibujó con la escena nativa actual (la fija prepareNative; XRPresenter la usa para caer al respaldo de la VRAM).
-    private(set) var stereoHealthy = false
 
     // MARK: segunda vista de la escena (mira óptica del francotirador, cámara del misil guiado)
     /// Petición de la segunda vista de este fotograma: matrices en el espacio recentrado (el de la cabeza), tamaño de la textura y posición de la cámara.
@@ -1074,9 +1066,9 @@ final class RGRenderer {
     }
 
     /// Pantalla 3D en el modo gpu: la lista de la GPU (todos los lotes 3D, con la VRAM tal como queda tras los eventos de la lista) desde las dos cámaras estéreo de la petición. Una lista
-    /// sin 3D (fundido, texto) conserva la imagen anterior; si no hay cámara o texturas, `stereoHealthy` baja y XRPresent cae al cine plano.
+    /// sin 3D (fundido, texto) conserva la imagen anterior; si no hay cámara o texturas, `stereoComposed` baja (no se compone nada nuevo).
     private func encodeStereoGPU(_ cb: MTLCommandBuffer, _ r: StereoRequest, gotNew: Bool) {
-        guard ensureStereo(r.width, r.height), let d = stereoDepth, stereoSlices.count == 2, stereoBase.count == 2 else { stereoHealthy = false; stereoComposed = false; return }
+        guard ensureStereo(r.width, r.height), let d = stereoDepth, stereoSlices.count == 2, stereoBase.count == 2 else { stereoComposed = false; return }
         logStereo()
         let has2D = batches.contains { $0.kind == 2 }
         // Lista SIN 3D con una base guardada: el 3D de la base vale (no se pinta una escena vacía encima); solo se rehace SU 2D (o se quita el de la lista anterior).
@@ -1085,7 +1077,7 @@ final class RGRenderer {
         let redo2D = !redraw3D && useBase && ((gotNew && (has2D || stereoHas2D)) || stereoDirty)
         if !redraw3D && !redo2D { return }
         // Sin ventana de ESTA lista no se dibuja un fotograma estéreo nuevo con 3D (registraría mal con los lotes 2D): se conserva el anterior entero (3D + 2D juntos).
-        if redraw3D && has3D && stereoWindow == nil { if !stereoRendered { stereoHealthy = false; stereoComposed = false }; return }
+        if redraw3D && has3D && stereoWindow == nil { if !stereoRendered { stereoComposed = false }; return }
         if !redraw3D {
             // base -> texturas estéreo (3D sin 2D) y encima el 2D de ESTA lista; si la base aún no se guardó, las texturas ya son el 3D sin 2D: se copian a la base y se pinta encima
             if stereoBaseStale { copyStereoBase(cb, toBase: true); stereoBaseStale = false } else { copyStereoBase(cb, toBase: false) }
@@ -1100,7 +1092,7 @@ final class RGRenderer {
         let pre: [MTLTexture]? = (fx.nrows > 0 && screenFilterEnabled && ensureFrameTextures() && postPipeline(format: colorFormat, layered: false) != nil) ? stereoPreTextures() : nil
         var projs: [simd_float4x4] = []
         for e in 0..<2 {
-            guard let cam = stereoCamera(e, r) else { stereoHealthy = false; stereoComposed = false; return }
+            guard let cam = stereoCamera(e, r) else { stereoComposed = false; return }
             var u = VrSceneUniforms()
             let proj = XRMath.projection(tangents: cam.tangents, near: 0.05, far: 800)
             projs.append(proj)
