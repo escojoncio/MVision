@@ -4,7 +4,7 @@ Runtime nativo para Apple Vision Pro: el juego (recompilación estática del EXE
 Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP_REPO`, `DECOMP_COMMIT`, `SDK_REPO`); zonas por número. Histórico: `git log -p bitacora.md`.
 
 ## Last done
-- 2026-10-26 `3db74bb` (sin build aún; Swift/Metal sin compilar):
+- 2026-10-26 `3db74bb` (IPA run 40328464591, artifact MVision-ipa 12652870830; CI verde: render-test, probe, ipa):
   - 2D: raster fijo 1 (`vl2a_options_native`, `vr_layer2d_async.c`; llamada en `vrhost.c` ~979); xBR-lv2 x3 compute `xr_xbr3` (`XRShaders.metal`) + sharp-bilinear en `xr_panel_color`; `XRPixelScale.swift` (`MV_2D_FILTER` xbr|nearest); vídeo (`view_kind==3`) sin xBR; `hq8` conserva 24 bits a raster 1 (`vr_layer2d.c`).
   - Créditos en partida: regiones HUD 1 y 4 con `XRFramedLayout` (`XRMath.swift`, píxel cuadrado, 1,6 m, capa 1,30 m; región 1 ~7° izq/5,6° arriba).
   - Cinemáticas: `Cutscene.screen` por defecto (clave `xr.view.cutscene3`; `stereo` antiguo migra a `.screen`): mundo nativo desde cámara del juego, mono (ipd 0, `XRStereo.eye`/`ns_cinema.c` aceptan ipd>=0) en panel de cine; panel 2D con aspecto lógico. Diag `[cine3d]` (`XRFrameEncoder.swift`, `RenderRG.cine3dDiag`).
@@ -13,7 +13,7 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 - 2026-10-26 `cab3992`: mundo 3D solo con renderer nativo; lista GPU solo 2D (detalle: `git log -p bitacora.md`).
 
 ## Current state
-**Pendiente de probar en visor (`3db74bb`):** todo lo anterior; compilación Swift/Metal (solo CI).
+**Pendiente de probar en visor (`3db74bb`):** todo lo anterior.
 **Medido (log 26-oct, cab3992):** IK de brazos se aplica en juego (`brazos=+50`/25 applies); `sin_IK`/`jugador enlazado 0` solo en menú/cinemática/muerte. Cinemática del motor: el nativo dibujaba con cámara del juego en .stereo (5588 tris/ojo), pero el usuario veía el mundo "pausado" sin escenas → causa no confirmada; mirar `[cine3d]` (pantalla3d, seqNativo vs seqEstereo, drawEyes).
 **Unverified:** constantes xBR (umbral 0,1, rampa 1/6); xBR sobre retratos con tramado; mallas de brazo estiradas; reparto de giro antebrazo/mano; deslizamiento lateral de pies al girar pelvis; imagen 3D 0,75 vs panel 2D 0,8 en PAL; signo ±45° dorso radar; `sync_epoca`.
 **Qué mirar en el log:** `[cine3d]`, `[manos] ... estirados/factor_estirado`, `[capa2d]`, `[radar] visibilidad`, `[vista] cambio`.
