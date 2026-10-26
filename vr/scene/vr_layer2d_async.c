@@ -165,6 +165,8 @@ void vl2a_options(VrL2Async *A, int scale, int smooth) {
     atomic_store(&A->smooth, smooth < 0 ? 0 : smooth > 2 ? 2 : smooth);
 }
 
+void vl2a_options_native(VrL2Async *A) { vl2a_options(A, 1, VL_SMOOTH_ORIGINAL); }
+
 void vl2a_set_view(VrL2Async *A, int view) { if (A) atomic_store(&A->view_tag, view); }
 
 int vl2a_layer_accept(int mode, int layer_view, int cur_view, int overlay) {

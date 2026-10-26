@@ -351,7 +351,7 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
     { VrBodyStats b; vrbody_stats(&b); ik_ap0 = b.applies; ik_dr0 = b.arms_driven; }
     o->player_key = ns_player_key(emu_ram);
     o->hide_head = 1;                                       /* primera persona: la cabeza propia no se dibuja (misma regla que vrcam_hide_head) */
-    o->refresh_parts = body_ok ? NS_PARTS_ARMS : 0;
+    o->refresh_parts = body_ok ? NS_PARTS_BODY : 0;   /* brazos + pelvis, piernas, torso y cuello: torso_follow las reescribe tras la captura */
 }
 /* Manos nuevas: cierre de la escena (hilo de emulación, ns_hook_tick, escena apta con el jugador enlazado). Agarre y brazos manejados de la IK del último vrbody_apply. */
 static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, void *u) {
@@ -481,10 +481,12 @@ static void ns_frame_check(void) {
                 cur[i] = d ? d->grip : 0.0f; w[i] = d ? d->w : 0.0f; drv[i] = d ? d->driven : 0;
                 est[i] = !drv[i] ? "sin_IK" : cur[i] * w[i] >= 0.9f ? "puno" : cur[i] * w[i] >= minc ? "cerrando" : "abierta";
             }
-            fprintf(stderr, "[manos] grip_crudo I=%.2f D=%.2f pose_valida I=%d D=%d | aplicado I=%.2f D=%.2f peso I=%.2f D=%.2f | estado I=%s D=%s | puno_malla: deformadas=+%u omitidas=+%u (fist=%d minimo=%.2f) | IK: aplicaciones=+%u brazos=+%u | own_hands=%d glv_pub=%d piezas_ocultas=+%u\n",
+            fprintf(stderr, "[manos] grip_crudo I=%.2f D=%.2f pose_valida I=%d D=%d | aplicado I=%.2f D=%.2f peso I=%.2f D=%.2f | estado I=%s D=%s | puno_malla: deformadas=+%u omitidas=+%u (fist=%d minimo=%.2f) | IK: aplicaciones=+%u brazos=+%u | own_hands=%d glv_pub=%d piezas_ocultas=+%u | estirados=+%u hombro=+%u antebrazo_recortado=+%u factor_estirado medio=%.2f max=%.2f\n",
                     raw[0], raw[1], (int)ok[0], (int)ok[1], cur[0], cur[1], w[0], w[1], est[0], est[1],
                     b.fist_applies - b0.fist_applies, b.fist_skipped - b0.fist_skipped, bc ? bc->fist_enabled : -1, minc, b.applies - b0.applies, b.arms_driven - b0.arms_driven,
-                    bc ? bc->own_hands : -1, vrgame_glove_pub(), b.hidden_pieces - b0.hidden_pieces);
+                    bc ? bc->own_hands : -1, vrgame_glove_pub(), b.hidden_pieces - b0.hidden_pieces,
+                    b.stretched - b0.stretched, b.shoulder_limit - b0.shoulder_limit, b.wrist_limit - b0.wrist_limit,
+                    b.stretched > b0.stretched ? (b.stretch_sum - b0.stretch_sum) / (float)(b.stretched - b0.stretched) : 1.0f, b.stretch_max);
             fprintf(stderr, "[cuerpo] torso_follow=%d aplicado=+%u (guinada torso=%.1f mirada=%.1f dif=%.1f grados) | doble_cara: activa=%d modelos=+%u | piezas_cerca_ocultas=+%u\n",
                     bc ? bc->torso_follow : -1, b.torso_applies - b0.torso_applies, b.torso_yaw, b.torso_gaze, b.torso_gaze - b.torso_yaw,
                     (int)(b.two_sided - b0.two_sided > 0), b.two_sided - b0.two_sided, b.near_hidden - b0.near_hidden);
@@ -974,7 +976,7 @@ static void build_one(const GpuDrawList *l, int si) {
     if (atomic_load(&l2d_enabled)) {
         if (!l2a) l2a = vl2a_new();
         if (l2a) {
-            vl2a_options(l2a, l2d_target, atomic_load(&l2d_smooth));
+            vl2a_options_native(l2a);   /* raster 1 fijo (sin x4 ni escala adaptativa): el escalado y el filtro xBR los hace la GPU del renderer (XRShaders.metal xr_xbr3); l2d_target / l2d_smooth / MV_HUD2D_SCALE quedan sin efecto */
             /* pantalla de cine (UI / vídeo): fotograma entero, verificado contra la imagen del emulador. Pantalla 3D del motor (cinemáticas, créditos o texto sobre una escena): el panel 2D va
              * ENCIMA de la escena nativa, así que se verifica también (reproduce el mundo sin el panel, compone y compara con el emulador; donde no coincide usa la imagen exacta del emulador). */
             int l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO ? VL_FULL : view.kind == VRV_K_ENGINE ? VL_PANEL_VERIFIED : VL_PANEL;

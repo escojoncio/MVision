@@ -198,7 +198,7 @@ func render(_ enc: XRFrameEncoder, layered: Bool, color: [MTLTexture], depth: [M
 func setDefaults(width: Double = 3.0, distance: Double = 2.5, curve: Double, sharp: Int) {
     let d = UserDefaults.standard
     d.set(width, forKey: "xr.view.width"); d.set(distance, forKey: "xr.view.distance"); d.set(curve, forKey: "xr.view.curve")
-    d.set(sharp, forKey: "xr.view.sharp"); d.set(false, forKey: "xr.view.integer"); d.set("cinema", forKey: "xr.view.cutscene2")
+    d.set(sharp, forKey: "xr.view.sharp"); d.set(false, forKey: "xr.view.integer"); d.set("cinema", forKey: "xr.view.cutscene3")
     d.set(true, forKey: "xr.view.hud"); d.set(0.8, forKey: "xr.view.hudScale"); d.set(false, forKey: "xr.view.wristHud")
 }
 
@@ -279,7 +279,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
     stereoBlock: do {
         let caso = "\(cfg.name)/pantalla3d"
         setDefaults(curve: 0.0, sharp: 1)
-        UserDefaults.standard.set("stereo", forKey: "xr.view.cutscene2")
+        UserDefaults.standard.set("stereo", forKey: "xr.view.cutscene3")
         guard let tg = makeTargets(layered: cfg.layered) else { check(caso, "texturas", false, "no se pudieron crear"); break stereoBlock }
         guard let enc = XRFrameEncoder(device: device, colorFormat: colorFormat, depthFormat: depthFormat, layered: cfg.layered, sampleCount: cfg.msaa) else {
             check(caso, "codificador", false, "XRFrameEncoder no se pudo crear"); break stereoBlock
@@ -819,6 +819,16 @@ func runMenuLayout() {
         let sf = XRMenuPanelLayout.handSize(uv: nil, aspect: 2.0 / 3.0)
         let sfH: Float = XRMenuPanelLayout.handWidth * Float(2.0 / 3.0)
         check("ventana2d", "mano sin rect: capa entera a 0,30 m con su aspecto", abs(sf.x - XRMenuPanelLayout.handWidth) < 1e-6 && abs(sf.y - sfH) < 1e-6, "\(sf)")
+        // Región 1 del HUD de partida (créditos y textos; XRFramedLayout): píxeles cuadrados con el aspecto lógico de la capa, tamaño fijo (no depende de cfg.width ni de la ampliación xBR) y fuera del centro de la vista.
+        let r1 = SIMD4<Float>(0.00, 0.17, 0.35, 0.35)
+        let f320 = XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(320, 256)), f384 = XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(384, 256))
+        let want320: Float = (0.35 - 0.17) * 256 / (0.35 * 320), want384: Float = (0.35 - 0.17) * 256 / (0.35 * 384)
+        check("credito-region1", "píxeles cuadrados: alto/ancho = (dv * alto lógico) / (du * ancho lógico) (320x256 y 384x256), no 3/4", abs(f320.y / f320.x - want320) < 1e-5 && abs(f384.y / f384.x - want384) < 1e-5 && abs(f320.y / f320.x - 0.18 * 0.75 / 0.35) > 0.01, "\(f320) \(f384)")
+        check("credito-region1", "mismo píxel lógico en 320 y 384 de ancho (sin cambio de tamaño del texto)", abs(f320.x / (0.35 * 320) - f384.x / (0.35 * 384)) < 1e-6 && abs(f320.x / (0.35 * 320) - XRFramedLayout.pitch) < 1e-6, "")
+        let c1 = XRFramedLayout.center(uv: r1, layerPx: SIMD2<Float>(320, 256))
+        let ang: (Float) -> Float = { atan2f($0, XRFramedLayout.distance) * 180 / .pi }
+        check("credito-region1", "no tapa el centro de la vista: borde derecho a > 6 grados a la izquierda y borde inferior a > 4 grados arriba; la capa entera mide menos de 50 grados", ang(c1.x + f320.x / 2) < -6 && ang(c1.y - f320.y / 2) > 4 && 2 * ang(XRFramedLayout.layerWidth / 2) < 50, "\(c1)")
+        check("credito-region1", "tamaño lógico no plausible -> reserva 320x240", XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(.nan, 0)) == XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(320, 240)), "")
     }
 }
 

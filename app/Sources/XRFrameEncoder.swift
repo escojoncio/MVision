@@ -27,6 +27,7 @@ final class XRFrameEncoder {
     /// Destino del registro de diagnóstico (1 vez por segundo). La app lo apunta a Storage.log; el banco, a la salida estándar.
     var log: (String) -> Void = { _ in }
     private var diagT: CFTimeInterval = 0
+    private var cine3dT: CFTimeInterval = 0
     private(set) var lastDiag = ""
     private(set) var frameNo = 0
     private var axes: XRDebugAxes?
@@ -177,7 +178,8 @@ final class XRFrameEncoder {
         presenter.hqFull = renderer.hqFull
         var pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, eyePx: Float(w), p00: projs[0].columns.0.x,
                                      gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame(), ipd: ipd, shot: renderer.sceneShot,
-                                     gameCamScene: renderer.sceneNeedsGameCam, stereo2DInside: renderer.stereo2DInside, hudMenuUV: renderer.hudMenuUV)
+                                     gameCamScene: renderer.sceneNeedsGameCam, stereo2DInside: renderer.stereo2DInside, hudMenuUV: renderer.hudMenuUV, hudLogical: renderer.hudLogical)
+        presenter.encodeUpscale(cb)
         if dg.noLayers {
             // Sin capas finales: ni velo (transición, fundido de corte), ni viñeta, ni pantalla de cine / pantalla 3D; solo el mundo, el HUD 2D y los textos (menú).
             pres.items.removeAll { $0.kind == .veil || $0.kind == .vignette || $0.kind == .screen || $0.kind == .screen3d }
@@ -253,6 +255,16 @@ final class XRFrameEncoder {
                 pres.items[i].covers = fxs.covers
                 pres.items[i].storedLinear = renderer.stereoStoredLinear
                 pres.items[i].outLinear = renderer.linearOutput
+            }
+        }
+        // [cine3d] (1/s, solo mientras la vista es una cinemática del motor o se muestra la pantalla 3D): por qué se ve (o no) la pantalla en vez del mundo VR.
+        if gs.view_kind == 2 || presenter.shown == .stereo {
+            let nowC = CACurrentMediaTime()
+            if nowC - cine3dT >= 1 {
+                cine3dT = nowC
+                let s3 = pres.items.first(where: { $0.kind == .screen3d })
+                let t3 = s3 == nil ? "sin-item" : (s3!.texture.map { "\($0.width)x\($0.height)x\($0.arrayLength)" } ?? "nil")
+                log("[cine3d] clase=\(gs.view_kind) motivo=\(gs.view_reason) cutscene=\(presenter.cfg.cutscene.rawValue) mostrando=\(presenter.shown) velo=\(String(format: "%.2f", presenter.veil)) veloPend=\(String(format: "%.2f", presenter.pendVeil)) pantalla3d=\(t3) " + renderer.cine3dDiag())
             }
         }
         finalPass.encode(commandBuffer: cb, colorTextures: colorTex, depthTextures: depthTex,

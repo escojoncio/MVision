@@ -349,6 +349,26 @@ static void offlist_text(void) {
         CHECK(ar >= 0 && ap && aw == hw && ah == hh && memcmp(ap, hp, (size_t)hw * hh * 4) == 0, "capa asincrona (texto fuera de lista) identica a la sincrona");
         vl2a_release(A);
         vl2a_free(A);
+        /* 5. opciones del visor: aunque antes se pidiera x4 nítido (alta resolución + EPX, el borroso del visor), vl2a_options_native fija raster 1 original: la capa sale a 320x240 y la escala adaptativa no la mueve */
+        {
+            VrL2Async *N1 = vl2a_new();
+            vl2a_options(N1, 4, VL_SMOOTH_SHARP);
+            vl2a_options_native(N1);
+            vl2a_submit(N1, c1, s1.op_dest, 0, 1);
+            vl2a_submit(N1, c2, s2.op_dest, 0, 0);
+            vl2a_flush(N1);
+            const uint8_t *np1 = NULL; int nw1 = 0, nh1 = 0, nf1 = 0; uint32_t ns1 = 0;
+            int nr1 = vl2a_acquire(N1, &np1, &nw1, &nh1, &nf1, &ns1);
+            CHECK(nr1 >= 0 && np1 && nw1 == hw / 4 && nh1 == hh / 4, "opciones nativas: capa %dx%d (esperada %dx%d)", nw1, nh1, hw / 4, hh / 4);
+            for (int y = 0; y < nh1 && np1 && nw1 == hw / 4; y++) for (int x = 0; x < nw1; x++)
+                if (memcmp(&np1[((size_t)y * nw1 + x) * 4], &hp[((size_t)(y * 4) * hw + x * 4) * 4], 4)) { fails++; printf("FALLO: opciones nativas: el pixel (%d,%d) no es el del raster exacto\n", x, y); y = nh1; break; }
+            vl2a_release(N1);
+            for (int i = 0; i < 40; i++) { vl2a_submit(N1, c2, s2.op_dest, 0, 0); vl2a_flush(N1); }
+            int nsc = 0; double nwm, nsm; uint32_t nlag;
+            vl2a_stats(N1, &nsc, &nwm, &nsm, &nlag);
+            CHECK(nsc == 1, "opciones nativas: escala %d (fija 1)", nsc);
+            vl2a_free(N1);
+        }
         vl2d_free(H);
     }
     vl2d_free(T);
@@ -459,7 +479,7 @@ static void codec24_case(void) {
     size_t fwh = (size_t)cd.fw * cd.h;
     uint8_t *ref = (uint8_t *)malloc(fwh * 4);
     CHECK(gpu_present_rgba(&cd, NULL, ref, fwh) == fwh, "24 bits: marco");
-    for (int sm = 2; sm <= 2; sm++) {   /* escala >= 2 (R=S): a escala 1 el marco de 24 bits se reduce a 5 bits por canal (limitación conocida) */
+    for (int sm = 1; sm <= 2; sm++) {   /* escala 1 (el raster fijo del visor, filtro xBR en GPU) y 2: el marco de 24 bits conserva los 8 bits por canal a las dos */
     VrLayer2D *L = vl2d_new();
     vl2d_set_options(L, sm, VL_SMOOTH_ORIGINAL);
     vl2d_run(L, c, &sc, 1);

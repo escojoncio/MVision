@@ -135,8 +135,6 @@ static void q_slerp(float *o, const float *a, const float *b0, float t) {
     for (int i = 0; i < 4; i++) o[i] = ka * a[i] + kb * b[i];
     q_normalize(o);
 }
-/* Ángulo (rad, 0..pi) de un cuaternión */
-static float q_angle(const float *q) { return 2 * acosf(clampf(fabsf(q[3]), 0, 1)); }
 /* Descompone q = swing * twist con `twist` giro alrededor del eje unitario `ax` (en el marco de partida). */
 static void q_swing_twist(const float *q0, const float *ax, float *swing, float *twist) {
     float q[4] = {q0[0], q0[1], q0[2], q0[3]};
@@ -157,6 +155,13 @@ static float twist_angle(const float *tw, const float *ax) {
 }
 
 /* ======================================================= 2) solver ================================================ */
+void vrbody_stretch_bone(float R[9], const float off[3], float s) {
+    if (!(s > 1.0f) || !isfinite(s) || !all_finite(off, 3)) return;
+    float l[3], rl[3];
+    if (v_norm(l, off, NULL) < 1e-6f) return;
+    m_mulv(rl, R, l);
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) R[3 * i + j] += (s - 1.0f) * rl[i] * l[j];
+}
 void vrbody_limits_default(VrArmLimits *l) {
     l->elbow_min_deg = 32; l->reach_margin = 0.999f; l->shoulder_back = -0.80f; l->shoulder_cross = -0.85f;
     l->wrist_swing_deg = 70; l->forearm_share = 0.6f; l->forearm_twist_deg = 85; l->hand_twist_deg = 70;
@@ -203,7 +208,10 @@ int vrbody_solve_arm(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn 
     float d = v_len(v);
     float down[3]; v_scale(down, TY, -1.0f);
     float vh[3]; v_norm(vh, v, down);
-    float dd = d < dmin ? dmin : (d > dmax ? dmax : d);
+    /* fuera de alcance: ambos huesos se alargan por igual a lo largo de su eje (continuo: 1 en dmax) y la muñeca llega al objetivo; tope 2.5x */
+    const float sk = d > dmax ? fminf(d / dmax, 2.5f) : 1.0f;
+    const float L1e = L1 * sk, L2e = L2 * sk;
+    float dd = d < dmin ? dmin : (d > dmax ? fminf(d, dmax * sk) : d);
     if (d > dmax) flags |= VRARM_STRETCHED;
     if (d < dmin) flags |= VRARM_TOO_CLOSE;
     float W[3]; v_madd(W, S, vh, dd);
@@ -222,14 +230,15 @@ int vrbody_solve_arm(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn 
     }
 
     /* codo: ley de los cosenos en el plano (vh, pp) */
-    float cosA = clampf((L1 * L1 + dd * dd - L2 * L2) / (2 * L1 * dd), -1.0f, 1.0f);
+    float cosA = clampf((L1e * L1e + dd * dd - L2e * L2e) / (2 * L1e * dd), -1.0f, 1.0f);
     float sinA = sqrtf(fmaxf(0.0f, 1 - cosA * cosA));
     float E[3];
-    v_madd(E, S, vh, L1 * cosA); v_madd(E, E, pp, L1 * sinA);
-    float u[3]; v_sub(u, E, S); v_scale(u, u, 1.0f / L1);
+    v_madd(E, S, vh, L1e * cosA); v_madd(E, E, pp, L1e * sinA);
+    float u[3]; v_sub(u, E, S); v_scale(u, u, 1.0f / L1e);
 
-    /* límites del hombro (marco del torso) */
+    /* límites del hombro (marco del torso); con el brazo estirado la mano manda: el límite se desvanece entre sk = 1 y 1.1 (smoothstep) para que no haya saltos */
     {
+        float kf = clampf((sk - 1.0f) / 0.1f, 0.0f, 1.0f); kf = kf * kf * (3.0f - 2.0f * kf);
         float c[3] = {v_dot(u, TX) * side, v_dot(u, TY), v_dot(u, TZ)};   /* [0] hacia fuera, [1] arriba, [2] delante */
         float c0[3] = {c[0], c[1], c[2]};
         for (int pass = 0; pass < 2; pass++) {
@@ -245,12 +254,14 @@ int vrbody_solve_arm(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn 
                 }
             }
         }
-        if (fabsf(c[0] - c0[0]) + fabsf(c[1] - c0[1]) + fabsf(c[2] - c0[2]) > 1e-4f) {
+        if (kf < 1.0f && fabsf(c[0] - c0[0]) + fabsf(c[1] - c0[1]) + fabsf(c[2] - c0[2]) > 1e-4f) {
             flags |= VRARM_SHOULDER_LIMIT;
-            float un[3] = {0, 0, 0};
+            float un[3] = {0, 0, 0}, ul[3], ub[3];
             v_madd(un, un, TX, c[0] * side); v_madd(un, un, TY, c[1]); v_madd(un, un, TZ, c[2]);
-            v_norm(u, un, u);
-            v_madd(E, S, u, L1);
+            v_norm(ul, un, u);
+            for (int i = 0; i < 3; i++) ub[i] = ul[i] * (1.0f - kf) + u[i] * kf;
+            v_norm(u, ub, ul);
+            v_madd(E, S, u, L1e);
         }
     }
 
@@ -270,7 +281,7 @@ int vrbody_solve_arm(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn 
             flags |= VRARM_SHOULDER_LIMIT;
         }
     }
-    float W2[3]; v_madd(W2, E, f, L2);
+    float W2[3]; v_madd(W2, E, f, L2e);
 
     /* bisagra del codo: eje x local del brazo = v x pp (plano polar); se proyecta a cada hueso */
     float h[3]; v_cross(h, vh, pp);
@@ -280,7 +291,8 @@ int vrbody_solve_arm(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn 
     bone_frame(R_up, rig->elbow_off, u, h, hx);
     bone_frame(R_fa, rig->wrist_off, f, h, hx);
 
-    /* mano: giro (pronación) repartido entre antebrazo y mano; desvío (swing) limitado */
+    /* mano: la orientación del mando se respeta SIEMPRE. El antebrazo asume una parte del giro (pronación, solo apariencia, con su límite) y la mano
+     * absorbe el resto sin límite: R_fore * (resto) = orientación pedida. */
     float ax[3]; v_norm(ax, rig->wrist_off, (float[3]){0, -1, 0});
     float qf[4], qt[4], qrel[4], sw[4], tw[4];
     float hand_t[9]; vrbody_orthonormalize(in->hand, hand_t);
@@ -290,33 +302,27 @@ int vrbody_solve_arm(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn 
     q_mul(qrel, cqf, qt);
     q_swing_twist(qrel, ax, sw, tw);
     float tau = twist_angle(tw, ax);
-    float tau_f = clampf(clampf(lim->forearm_share, 0.0f, 1.0f) * tau, -lim->forearm_twist_deg * DEG, lim->forearm_twist_deg * DEG);
+    {   /* desenvolver el giro: continuo respecto al cálculo anterior (sin saltos de +-180 grados); sin anterior, el principal */
+        const float TWO_PI = 6.28318531f;
+        float ref = (in->has_prev && isfinite(in->tau_prev)) ? in->tau_prev : 0.0f;
+        tau = ref + (tau - ref) - TWO_PI * roundf((tau - ref) / TWO_PI);
+    }
+    const float tf_lim = lim->forearm_twist_deg * DEG;
+    float tf_want = clampf(clampf(lim->forearm_share, 0.0f, 1.0f) * tau, -tf_lim, tf_lim);
+    float tau_f = tf_want;
+    if (fabsf(clampf(lim->forearm_share, 0.0f, 1.0f) * tau) > tf_lim + 1e-6f) flags |= VRARM_WRIST_LIMIT;
+    if (in->has_prev && isfinite(in->tau_f_prev)) {   /* velocidad máxima del antebrazo: 25 grados por cálculo */
+        const float step = 25.0f * DEG;
+        tau_f = in->tau_f_prev + clampf(tf_want - in->tau_f_prev, -step, step);
+        if (tau_f != tf_want) flags |= VRARM_WRIST_LIMIT;
+    }
     if (fabsf(tau_f) > 1e-6f) { float Rt[9]; m_axis_angle(Rt, f, tau_f); m_mulm(R_fa, Rt, R_fa); }
-    vrbody_mat_to_quat(R_fa, qf);
-    q_conj(cqf, qf);
-    q_mul(qrel, cqf, qt);
-    q_swing_twist(qrel, ax, sw, tw);
-    float tau_h = twist_angle(tw, ax);
-    float tau_hc = clampf(tau_h, -lim->hand_twist_deg * DEG, lim->hand_twist_deg * DEG);
-    float sa = q_angle(sw), smax = clampf(lim->wrist_swing_deg, 1.0f, 170.0f) * DEG;
-    if (sa > smax) {
-        float idq[4] = {0, 0, 0, 1}, sw2[4];
-        q_slerp(sw2, idq, sw, smax / sa);
-        memcpy(sw, sw2, sizeof sw);
-        flags |= VRARM_WRIST_LIMIT;
-    }
-    if (tau_hc != tau_h) flags |= VRARM_WRIST_LIMIT;
-    {
-        float twc[4] = {ax[0] * sinf(tau_hc * 0.5f), ax[1] * sinf(tau_hc * 0.5f), ax[2] * sinf(tau_hc * 0.5f), cosf(tau_hc * 0.5f)};
-        float qh[4], Mh[9];
-        q_mul(qh, sw, twc); q_normalize(qh);
-        vrbody_quat_to_mat(qh, Mh);
-        m_mulm(out->R_hand, R_fa, Mh);
-    }
+    memcpy(out->R_hand, hand_t, sizeof hand_t);
     memcpy(out->R_upper, R_up, sizeof R_up);
     memcpy(out->R_fore, R_fa, sizeof R_fa);
     v_cp(out->elbow, E); v_cp(out->wrist, W2);
     out->reach = d / (L1 + L2);
+    out->stretch = sk; out->tau = tau; out->tau_f = tau_f;
     float dw[3]; v_sub(dw, W2, in->wrist);
     out->err_mm = v_len(dw);
     out->flags = flags;
@@ -328,6 +334,7 @@ typedef struct {
     int init;              /* filtro inicializado (con una pose válida) */
     int was_valid;
     float pos[3], q[4];    /* pose filtrada (espacio del usuario) */
+    int tau_ok; float tau, tau_f;   /* giro de la mano respecto al antebrazo del último cálculo (continuidad del antebrazo) */
     float aq[4]; int aim_ok; /* apuntado filtrado (si el mando lo entrega) */
     float pitch_s; int pitch_init, pitch_miss;   /* cabeceo automático suavizado, y fotogramas seguidos sin valor válido */
     float w;               /* peso de fundido 0..1 */
@@ -383,12 +390,13 @@ static struct {
     int fist_suppress;           /* el anfitrión suprime el puño deformado (no se borra con vrbody_init) */
     int pending;
     int pend_n;
-    Saved sv[8];                 /* 6 piezas de los brazos + torso y cuello (torso_follow) */
+    Saved sv[16];                /* 6 piezas de los brazos + torso y cuello + pelvis y piernas (torso_follow; como mucho 7) */
     struct { uint32_t addr, model; int16_t vis_old; } nh[64];   /* piezas ocultas por cercanía al ojo (hide_near), hasta vrbody_restore */
     int nh_n;
     int nh_ok; VrBodyView nh_view;   /* vista válida del último apply (hide_near la usa tras él) */
     ModelFlags mf[16];
-    int tf_init, tf_engaged; float tf_yaw;   /* guiñada filtrada del torso (grados) y si está siguiendo a la mirada */
+    int tf_init; float tf_yaw, tf_twist;   /* guiñada filtrada de la pelvis y torsión filtrada del pecho respecto a ella (grados) */
+    int pel_have; float pel_prev[3];       /* posición de la cadera del juego en el apply anterior (velocidad de marcha) */
     FistSave fs[2];
     struct { int ok; VrBodyArmLive a; } live[2];      /* estado del último apply para repetir la IK con la mano viva (vrbody_arm_live) */
     struct { int ok; uint32_t model; float side, grip; float R[9], t[3]; } pf[2];     /* mano y agarre del último apply, para vrbody_prefist; R,t = marco de mundo de la pieza mano tras la IK */
@@ -473,7 +481,8 @@ void vrbody_config_default(VrBodyConfig *c) {
     c->part_arm[1][0] = 2; c->part_arm[1][1] = 3; c->part_arm[1][2] = 4;
     c->part_torso = 1; c->part_neck = 5; c->min_parts = 16; c->force_arm_visible = 1;
     c->near_hide_m = 0.30f; c->near_hide_vtx_m = 0.12f;
-    c->torso_follow = 1; c->torso_yaw_tau_s = 0.25f; c->torso_deadzone_deg = 15.0f;
+    c->torso_follow = 1; c->torso_yaw_tau_s = 0.25f; c->torso_deadzone_deg = 40.0f;
+    c->torso_chest_share = 0.5f; c->torso_chest_max_deg = 30.0f; c->torso_hand_share = 0.3f; c->torso_walk_mps = 0.3f;
     c->grip_to_wrist_mm = 55.0f;
     c->hand_roll_deg = 45.0f;
     for (int s = 0; s < 2; s++) roll_offset(c->hand_roll_deg, s, c->hand_rot_offset[s]);
@@ -495,7 +504,11 @@ void vrbody_init(const VrBodyConfig *c) {
     if (!(G.cfg.blend_s >= 0)) G.cfg.blend_s = 0.25f;
     if (!(G.cfg.smooth_tau_s >= 0)) G.cfg.smooth_tau_s = 0;
     if (!(G.cfg.torso_yaw_tau_s >= 0)) G.cfg.torso_yaw_tau_s = 0.25f;
-    if (!(G.cfg.torso_deadzone_deg >= 0)) G.cfg.torso_deadzone_deg = 15.0f;
+    if (!(G.cfg.torso_deadzone_deg >= 0)) G.cfg.torso_deadzone_deg = 40.0f;
+    if (!(G.cfg.torso_chest_share >= 0 && G.cfg.torso_chest_share <= 1)) G.cfg.torso_chest_share = 0.5f;
+    if (!(G.cfg.torso_chest_max_deg >= 0 && G.cfg.torso_chest_max_deg <= 90)) G.cfg.torso_chest_max_deg = 30.0f;
+    if (!(G.cfg.torso_hand_share >= 0 && G.cfg.torso_hand_share <= 1)) G.cfg.torso_hand_share = 0.3f;
+    if (!(G.cfg.torso_walk_mps >= 0)) G.cfg.torso_walk_mps = 0.3f;
     if (!(G.cfg.grip_to_wrist_mm >= 0 && G.cfg.grip_to_wrist_mm < 400)) G.cfg.grip_to_wrist_mm = 55.0f;
     for (int s = 0; s < 2; s++) { G.hand[s].grip_set = 0; G.hand[s].grip_cur = 0; G.hand[s].jab_t = -1.0f; }
 }
@@ -713,6 +726,8 @@ void vrbody_prefist(uint8_t *ram) {
 
 static int apply_main(uint8_t *ram);
 static void hide_near(uint8_t *ram);
+static float g_dt_s;   /* tiempo emulado desde el apply anterior fijado por el anfitrión (0 = VrBodyConfig.frame_dt_s) */
+void vrbody_set_dt(float dt_s) { g_dt_s = (isfinite(dt_s) && dt_s > 0.0f) ? clampf(dt_s, 1e-3f, 0.2f) : 0.0f; }
 int vrbody_apply(uint8_t *ram) {
     G.nh_ok = 0;
     int n = apply_main(ram);
@@ -732,7 +747,7 @@ static int apply_main(uint8_t *ram) {
         !(view.units_per_m > 1.0f && view.units_per_m < 1e6f)) {
         G.st.skip_noview++;
         for (int s = 0; s < 2; s++) { G.hand[s].w = 0; G.hand[s].was_valid = 0; G.dbg[s].driven = 0; G.pf[s].ok = 0; }
-        G.tf_init = 0;
+        G.tf_init = 0; G.pel_have = 0;
         return 0;
     }
 
@@ -776,7 +791,7 @@ static int apply_main(uint8_t *ram) {
     /* ---- manos ---- */
     VrHandPose hp[2]; memset(hp, 0, sizeof hp);
     if (vrpose_get_hands(hp) < 0) memset(hp, 0, sizeof hp);
-    const float dt = cfg->frame_dt_s;
+    const float dt = g_dt_s > 0.0f ? g_dt_s : cfg->frame_dt_s;
     int any = 0;
     for (int s = 0; s < 2; s++) {
         Hand *h = &G.hand[s];
@@ -804,7 +819,7 @@ static int apply_main(uint8_t *ram) {
         h->was_valid = v;
         any |= v || h->w > 0;
     }
-    if (!any) { G.st.skip_nohands++; G.tf_init = 0; for (int s = 0; s < 2; s++) G.dbg[s].driven = 0, G.pf[s].ok = 0; return 0; }
+    if (!any) { G.st.skip_nohands++; G.tf_init = 0; G.pel_have = 0; for (int s = 0; s < 2; s++) G.dbg[s].driven = 0, G.pf[s].ok = 0; return 0; }
 
     /* relación usuario -> mundo del motor */
     float th = (view.theta_deg + 180.0f) * DEG, cs = cosf(th), sn = sinf(th);
@@ -827,23 +842,102 @@ static int apply_main(uint8_t *ram) {
         G.pending = 1;
     }
 
-    /* ---- torso doblado: el torso hereda la pelvis del reposo (pie adelantado); se gira en guiñada hacia la mirada real, sin inclinación, con el cuello fijo ---- */
+    /* ---- cuerpo (torso_follow, estilo VRIK): la pelvis tiene guiñada propia que sigue a la mirada con zona muerta y, al andar, a la dirección de marcha; las piernas del juego (su locomoción) giran rígidas con ella;
+     * el pecho se tuerce hacia la cabeza una fracción del desvío, sin inclinación, con el cuello fijo ---- */
     int tf_on = 0; Xf tf = torso_w;
     float Tq0[9]; vrbody_orthonormalize(torso_w.R, Tq0);
     {
         PartInfo pn; int ok = 0;
         if (cfg->torso_follow && isfinite(view.gaze_yaw_deg) && cfg->part_neck >= 0 && cfg->part_neck < nm && cfg->part_neck != it &&
             acosf(clampf(Tq0[4], -1.0f, 1.0f)) < 35.0f * DEG && read_part(ram, pset, cfg->part_neck, &pn) && pn.parent == it) ok = 1;
-        if (!ok) G.tf_init = 0;
+        if (!ok) { G.tf_init = 0; G.pel_have = 0; }
         else {
-            if (!G.tf_init) { G.tf_yaw = atan2f(Tq0[2], Tq0[8]) / DEG; G.tf_init = 1; G.tf_engaged = 0; }
-            float d = wrap180f(view.gaze_yaw_deg - G.tf_yaw);
-            if (fabsf(d) > cfg->torso_deadzone_deg) G.tf_engaged = 1;      /* histéresis: sigue hasta alcanzar la mirada */
-            if (G.tf_engaged) {
-                G.tf_yaw = wrap180f(G.tf_yaw + (cfg->torso_yaw_tau_s > 0 ? 1.0f - expf(-dt / cfg->torso_yaw_tau_s) : 1.0f) * d);
-                if (fabsf(wrap180f(view.gaze_yaw_deg - G.tf_yaw)) < 0.5f) G.tf_engaged = 0;
+            /* pelvis del juego: padre del torso, con su subárbol (piernas) = todo lo que cuelga de ella sin pasar por el torso */
+            const int ip = ptor.parent;
+            PartInfo ppel; Xf w0; float Rp0[9]; int pel_ok = 0;
+            if (ip >= 0 && ip < nm && ip != it && read_part(ram, pset, ip, &ppel)) {
+                xf_read(ram, ppel.addr + OBJ_WORLD, &w0);
+                vrbody_orthonormalize(w0.R, Rp0);
+                pel_ok = acosf(clampf(Rp0[4], -1.0f, 1.0f)) < 35.0f * DEG && all_finite(w0.t, 3);
             }
-            float cy = cosf(G.tf_yaw * DEG), sy = sinf(G.tf_yaw * DEG);
+            const float yaw_g = pel_ok ? atan2f(Rp0[2], Rp0[8]) / DEG : atan2f(Tq0[2], Tq0[8]) / DEG;
+            if (!G.tf_init) { G.tf_yaw = yaw_g; G.tf_twist = 0; G.tf_init = 1; G.pel_have = 0; }
+            const float gaze = view.gaze_yaw_deg;
+            const float a_f = cfg->torso_yaw_tau_s > 0 ? 1.0f - expf(-dt / cfg->torso_yaw_tau_s) : 1.0f;
+            /* objetivo del torso: la mirada y, si las manos están delante de ella, la dirección media de las manos */
+            float aim = gaze;
+            if (cfg->torso_hand_share > 0) {
+                float sx = 0, sz = 0;
+                for (int s = 0; s < 2; s++) {
+                    const Hand *hh = &G.hand[s];
+                    if (!hh->init || hh->w < 0.5f) continue;
+                    float Pm[3], Pw[3]; v_sub(Pm, hh->pos, view.p_ref); m_mulv(Pw, T, Pm); v_scale(Pw, Pw, view.units_per_m); v_add(Pw, Pw, view.eye);
+                    float hx = Pw[0] - view.eye[0], hz = Pw[2] - view.eye[2], hl = sqrtf(hx * hx + hz * hz);
+                    if (!(hl > 0.15f * view.units_per_m)) continue;
+                    if (fabsf(wrap180f(atan2f(hx, hz) / DEG - gaze)) > 60.0f) continue;
+                    sx += hx / hl; sz += hz / hl;
+                }
+                if (sx * sx + sz * sz > 0.01f) aim = wrap180f(gaze + cfg->torso_hand_share * wrap180f(atan2f(sx, sz) / DEG - gaze));
+            }
+            /* marcha: velocidad horizontal de la cadera del juego; la pelvis se alinea con la dirección de marcha (de espaldas, con la contraria) */
+            if (pel_ok) {
+                if (G.pel_have) {
+                    float dx = w0.t[0] - G.pel_prev[0], dz2 = w0.t[2] - G.pel_prev[2];
+                    float spd = sqrtf(dx * dx + dz2 * dz2) / view.units_per_m / dt;
+                    if (spd > cfg->torso_walk_mps && spd < 10.0f) {
+                        float hd = atan2f(dx, dz2) / DEG;
+                        if (fabsf(wrap180f(hd - gaze)) > 100.0f) hd = wrap180f(hd + 180.0f);
+                        float dh = wrap180f(hd - aim);      /* el objetivo de marcha no sale de la zona muerta de la mirada (si no, las dos correcciones se pelearían) */
+                        if (fabsf(dh) > cfg->torso_deadzone_deg) hd = wrap180f(aim + copysignf(cfg->torso_deadzone_deg, dh));
+                        G.tf_yaw = wrap180f(G.tf_yaw + a_f * wrap180f(hd - G.tf_yaw));
+                    }
+                }
+                v_cp(G.pel_prev, w0.t); G.pel_have = 1;
+            } else G.pel_have = 0;   /* pelvis fuera de rango: al volver no hay desplazamiento previo (sin falso «andando») */
+            /* zona muerta: la pelvis solo se arrastra cuando la mirada se aleja de ella más que la zona */
+            {
+                float d = wrap180f(aim - G.tf_yaw);
+                if (fabsf(d) > cfg->torso_deadzone_deg) G.tf_yaw = wrap180f(G.tf_yaw + a_f * wrap180f(aim - copysignf(cfg->torso_deadzone_deg, d) - G.tf_yaw));
+            }
+            /* pecho: torsión hacia la cabeza (parte del desvío, con tope), filtrada */
+            {
+                float tw_t = clampf(cfg->torso_chest_share * wrap180f(aim - G.tf_yaw), -cfg->torso_chest_max_deg, cfg->torso_chest_max_deg);
+                G.tf_twist += a_f * (tw_t - G.tf_twist);
+            }
+            const float pel_yaw = G.tf_yaw, chest_yaw = wrap180f(G.tf_yaw + G.tf_twist);
+
+            /* pelvis y piernas: rotación rígida en guiñada alrededor del origen de la pelvis */
+            if (pel_ok && fabsf(wrap180f(pel_yaw - yaw_g)) > 0.01f) {
+                int par[MAX_PARTS], member[MAX_PARTS], nmem = 0;
+                for (int j = 0; j < nm && j < MAX_PARTS; j++) { PartInfo pj; par[j] = read_part(ram, pset, j, &pj) ? pj.parent : -2; member[j] = 0; }
+                for (int j = 0; j < nm && j < MAX_PARTS; j++) {
+                    int cur = j;
+                    for (int st = 0; st < MAX_PARTS && cur >= 0 && cur < nm; st++) {
+                        if (cur == ip) { member[j] = 1; break; }
+                        if (cur == it) break;
+                        cur = par[cur];
+                    }
+                }
+                float dy = wrap180f(pel_yaw - yaw_g) * DEG, cd = cosf(dy), sd = sinf(dy);
+                const float Rd[9] = {cd, 0, sd, 0, 1, 0, -sd, 0, cd};
+                for (int j = 0; j < nm && j < MAX_PARTS && nmem < 7; j++) {
+                    PartInfo pj;
+                    if (!member[j] || !read_part(ram, pset, j, &pj)) continue;
+                    Xf wj, nj, scr; xf_read(ram, pj.addr + OBJ_WORLD, &wj);
+                    float rel[3]; v_sub(rel, wj.t, w0.t); m_mulv(rel, Rd, rel); v_add(nj.t, w0.t, rel);
+                    m_mulm(nj.R, Rd, wj.R); xf_quant(&nj);
+                    Saved *sv = &G.sv[ns++]; nmem++;
+                    sv->used = 1; sv->addr = pj.addr; sv->model = pj.model;
+                    memcpy(sv->raw, ram + (pj.addr & RAM_MASK), sizeof sv->raw);
+                    sv->vis_old = rd_s16(ram, pj.addr + OBJ_VIS); sv->vis_forced = 0; sv->vis_hidden = 0;
+                    xf_comp(&scr, &eye, &nj);
+                    xf_write(ram, pj.addr + OBJ_WORLD, &nj);
+                    xf_write(ram, pj.addr + OBJ_SCREEN, &scr);
+                }
+                if (nmem) { G.pending = 1; G.pend_n = ns; }
+            }
+
+            float cy = cosf(chest_yaw * DEG), sy = sinf(chest_yaw * DEG);
             Xf w5, n1, n5;
             xf_read(ram, pset + OBJS_FIRST + OBJ_SIZE * (uint32_t)cfg->part_neck + OBJ_WORLD, &w5);
             const float Ry[9] = {cy, 0, sy, 0, 1, 0, -sy, 0, cy};
@@ -860,7 +954,7 @@ static int apply_main(uint8_t *ram) {
                 xf_write(ram, tp[k]->addr + OBJ_WORLD, tx[k]);
                 xf_write(ram, tp[k]->addr + OBJ_SCREEN, &scr);
             }
-            G.pending = 1; G.pend_n = ns; G.st.torso_applies++; G.st.torso_yaw = G.tf_yaw; G.st.torso_gaze = view.gaze_yaw_deg;
+            G.pending = 1; G.pend_n = ns; G.st.torso_applies++; G.st.torso_yaw = chest_yaw; G.st.pelvis_yaw = pel_yaw; G.st.torso_gaze = view.gaze_yaw_deg;
             tf_on = 1; tf = n1;
         }
     }
@@ -869,7 +963,7 @@ static int apply_main(uint8_t *ram) {
         dbg->driven = 0;
         G.dbg_frame_ok[s] = 0;
         Hand *h = &G.hand[s];
-        if (h->w <= 0.0005f) continue;
+        if (h->w <= 0.0005f) { h->tau_ok = 0; continue; }
         int ia = cfg->part_arm[s][0], ie = cfg->part_arm[s][1], iw = cfg->part_arm[s][2];
         if (ia < 0 || ie < 0 || iw < 0 || ia >= nm || ie >= nm || iw >= nm || ia == ie || ie == iw) { G.st.skip_model++; continue; }
         PartInfo pa, pe, pw;
@@ -1001,8 +1095,10 @@ static int apply_main(uint8_t *ram) {
             if (v_norm(pn, pe_, NULL) > 5.0f) for (int i = 0; i < 3; i++) pole[i] = pn[i] * (1 - we_w) + pole_nat[i] * we_w;
         }
         VrArmIn in; v_cp(in.shoulder, Sh); memcpy(in.torso, Tq, sizeof Tq); v_cp(in.wrist, wt); memcpy(in.hand, Rtb, sizeof Rtb); v_cp(in.pole, pole);
+        in.has_prev = h->tau_ok; in.tau_prev = h->tau; in.tau_f_prev = h->tau_f;
         VrArmOut sol;
-        if (vrbody_solve_arm(&rig, &cfg->limits, &in, &sol) != 0) { G.st.bad_solve++; continue; }
+        if (vrbody_solve_arm(&rig, &cfg->limits, &in, &sol) != 0) { G.st.bad_solve++; h->tau_ok = 0; continue; }
+        h->tau_ok = 1; h->tau = sol.tau; h->tau_f = sol.tau_f;
         if (sol.flags & VRARM_STRETCHED) G.st.stretched++;
         if (sol.flags & VRARM_TOO_CLOSE) G.st.too_close++;
         if (sol.flags & VRARM_SHOULDER_LIMIT) G.st.shoulder_limit++;
@@ -1013,6 +1109,10 @@ static int apply_main(uint8_t *ram) {
         const float *Rin[3] = {sol.R_upper, sol.R_fore, sol.R_hand};
         Xf nw[3];
         for (int k = 0; k < 3; k++) memcpy(nw[k].R, Rin[k], sizeof nw[k].R);
+        if (sol.stretch > 1.0f) {   /* brazo estirado: la malla de cada hueso se alarga a lo largo de su eje */
+            G.st.stretch_sum += sol.stretch; if (sol.stretch > G.st.stretch_max) G.st.stretch_max = sol.stretch;
+            vrbody_stretch_bone(nw[0].R, rig.elbow_off, sol.stretch); vrbody_stretch_bone(nw[1].R, rig.wrist_off, sol.stretch);
+        }
         v_cp(nw[0].t, Sh); v_cp(nw[1].t, sol.elbow); v_cp(nw[2].t, sol.wrist);
         for (int k = 0; k < 3; k++) xf_quant(&nw[k]);
 
@@ -1058,6 +1158,8 @@ static int apply_main(uint8_t *ram) {
             float tr[9]; m_transpose(tr, T);
             memset(L, 0, sizeof *L);
             L->rig = rig; L->lim = cfg->limits; L->upm = view.units_per_m;
+            /* la ruta viva (vrbody_arm_resolve) parte del giro del antebrazo del ÚLTIMO apply (tau_prev, tau_f_prev): su antebrazo cambia como mucho 25 grados respecto a él */
+            L->has_prev = in.has_prev; L->tau_prev = in.tau_prev; L->tau_f_prev = in.tau_f_prev;
             float v[3];
             v_sub(v, Sh, view.eye); m_mulv(v, tr, v); v_scale(v, v, 1.0f / view.units_per_m); v_add(L->shoulder, v, view.p_ref);
             v_sub(v, wt, view.eye); m_mulv(v, tr, v); v_scale(v, v, 1.0f / view.units_per_m); v_add(L->wrist, v, view.p_ref);
@@ -1176,12 +1278,15 @@ int vrbody_arm_resolve(const VrBodyArmLive *a, const float live_p[3], const floa
     memcpy(in.torso, a->torso, sizeof in.torso);
     m_mulm(in.hand, Rd, a->hand);
     v_cp(in.pole, a->pole);
+    in.has_prev = a->has_prev; in.tau_prev = a->tau_prev; in.tau_f_prev = a->tau_f_prev;
     VrArmOut sol;
     if (vrbody_solve_arm(&a->rig, &a->lim, &in, &sol) != 0) return -1;
     float inv = 1.0f / a->upm;
     v_cp(out->shoulder, a->shoulder);
     v_scale(out->elbow, sol.elbow, inv); v_scale(out->wrist, sol.wrist, inv);
     memcpy(out->R_upper, sol.R_upper, sizeof out->R_upper); memcpy(out->R_fore, sol.R_fore, sizeof out->R_fore); memcpy(out->R_hand, sol.R_hand, sizeof out->R_hand);
+    vrbody_stretch_bone(out->R_upper, a->rig.elbow_off, sol.stretch); vrbody_stretch_bone(out->R_fore, a->rig.wrist_off, sol.stretch);
+    out->stretch = sol.stretch;
     out->err_mm = sol.err_mm / a->upm * 1000.0f; out->flags = sol.flags;
     return all_finite(out->elbow, 3) && all_finite(out->wrist, 3) && all_finite(out->R_hand, 9) ? 0 : -1;
 }

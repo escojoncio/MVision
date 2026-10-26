@@ -13,7 +13,7 @@ extern "C" {
  * (vista del motor en unidades -> mundo VR en metros). 0 si los datos no son finitos o gv es singular. */
 int ns_cinema_to_vr(const NsCamera *cam, const float gv[16], float out[12]);
 
-/* Cámara estéreo de la pantalla 3D (réplica de XRStereo.eye): vista (mundo VR -> ojo GL: x derecha, y arriba, -z delante) y tangentes (izquierda, derecha, arriba, abajo).
+/* (ipd 0 = pantalla de cine 3D mono: ambos ojos idénticos.) Cámara estéreo de la pantalla 3D (réplica de XRStereo.eye): vista (mundo VR -> ojo GL: x derecha, y arriba, -z delante) y tangentes (izquierda, derecha, arriba, abajo).
  * 0 si los datos no son válidos. */
 int ns_cinema_eye(const float gv[16], int eye, float ipd, float conv, float tan_x, float tan_y, float view[16], float tangents[4]);
 

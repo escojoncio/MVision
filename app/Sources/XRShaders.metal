@@ -160,8 +160,29 @@ static float4 xr_screen_color(float2 uv, constant XRQuadU &u, texture2d<float> t
     return float4(tex.sample(smp, p / full).rgb, 1.0);
 }
 
+/* Posición de muestreo «sharp-bilinear» (t en texels): cada texel es plano y solo se mezcla con el vecino en una banda de un píxel de pantalla alrededor de su borde; con minificación (m > 1) vuelve al
+ * bilineal. mode 2: vecino más próximo (escala entera nítida). Misma fórmula que xr_screen_color. */
+static float2 xr_sharp_pos(float2 t, int mode)
+{
+    float2 fw = fwidth(t);
+    float2 n = floor(t);
+    float2 f = t - n;
+    float2 fe = (mode == 2) ? float2(1e-4) : max(fw, float2(1e-4));
+    float2 a = clamp(0.5 - f / fe, 0.0, 0.5);
+    float2 b = clamp(0.5 - (1.0 - f) / fe, 0.0, 0.5);
+    float2 ps = n + 0.5 + b - a;
+    float m = max(fw.x, fw.y);
+    return (mode == 2) ? ps : mix(ps, t, saturate(m - 1.0));
+}
+
 static float4 xr_panel_color(float2 uv, constant XRQuadU &u, texture2d<float> tex, sampler smp)
 {
+    int pmode = int(u.cfg.w);                                   /* 0 bilineal (menú VR, HUD de reserva) / 1 sharp-bilinear (capa 2D con xBR) / 2 vecino más próximo */
+    if (pmode >= 1) {
+        float2 full = float2(tex.get_width(), tex.get_height());
+        float2 p = xr_sharp_pos(uv * full, pmode);
+        uv = clamp(p, float2(0.5), max(full - 0.5, float2(0.5))) / full;
+    }
     float4 c = tex.sample(smp, uv);
     float al = c.a * u.tex.w;
     if (al < 0.02) discard_fragment();                          /* no escribir profundidad en lo transparente */
@@ -231,6 +252,86 @@ fragment float4 xr_panel_fragment_layered(XRQVOutL in [[stage_in]], constant XRQ
                                           texture2d<float> tex [[texture(0)]], sampler smp [[sampler(0)]])
 {
     return xr_panel_color(in.uv, u, tex, smp);
+}
+
+/* ---- Escalado xBR-lv2 x3 de la capa 2D (una pasada) ----
+ * Entrada: la imagen 2D a resolución nativa (RGBA8 no premultiplicado, tal como la deja vr_layer2d; el orden de canales es el de la textura y el espacio es el guardado: gamma, la vista sRGB decodifica al muestrear).
+ * Salida: 3x3 por píxel, sin interpolar color en espacio lineal: solo se toma el píxel o una mezcla de dos vecinos en el borde de la diagonal.
+ * Por cada una de las 4 esquinas del píxel E (rotando el marco 90 grados) se mira el entorno de 5x5 (vecinos B C D F G H I y I4 I5 H5 F4 de la esquina inferior derecha):
+ *   edr  = hay un borde en diagonal (suma de distancias ponderadas YUV a un lado < al otro) y E difiere de F y de H;
+ *   left / up = el borde es de pendiente 2:1 hacia G (shallow) o hacia C (steep), con las condiciones lv2;
+ * y la subposición del píxel de salida decide cuánto del vecino más parecido (F o H) sustituye a E: 45 grados x + y > 1,5; 2:1 y + x/2 > 1 o x + y/2 > 1, con una rampa de 1/3 de píxel (casi sin mezcla).
+ * Transparencia: alfa 0 es un color propio (rgb a 0 y alfa en la distancia): xBR nunca mezcla el color de un píxel transparente con uno opaco (en el borde elige uno u otro entero).
+ * Es una implementación propia de xBR-lv2 con esa lógica de bordes, no una copia byte a byte del shader de Hyllian. */
+constant float XBR_EQ = 0.1;
+
+static float4 xbr_px(texture2d<float, access::read> src, int2 p, int2 sz)
+{
+    p = clamp(p, int2(0), sz - 1);
+    float4 c = src.read(uint2(p));
+    return c.a <= 0.0 ? float4(0.0) : c;
+}
+
+static float4 xbr_at(texture2d<float, access::read> src, int2 base, int2 r, int2 d, int a, int b, int2 sz)
+{
+    return xbr_px(src, base + a * r + b * d, sz);
+}
+
+static float xbr_wd(float4 a, float4 b)
+{
+    float3 d = a.rgb - b.rgb;
+    float y = dot(d, float3(0.299, 0.587, 0.114));
+    float u = dot(d, float3(-0.169, -0.331, 0.5));
+    float v = dot(d, float3(0.5, -0.419, -0.081));
+    return 48.0 * abs(y) + 7.0 * abs(u) + 6.0 * abs(v) + 48.0 * abs(a.a - b.a);
+}
+
+static bool xbr_eq(float4 a, float4 b) { return xbr_wd(a, b) < XBR_EQ; }
+
+static float4 xbr_mix(float4 a, float4 b, float t)
+{
+    if ((a.a <= 0.0) != (b.a <= 0.0)) return t >= 0.5 ? b : a;   /* transparente contra opaco: nunca se mezcla el color */
+    float aa = mix(a.a, b.a, t);
+    float3 c = (a.rgb * a.a * (1.0 - t) + b.rgb * b.a * t) / max(aa, 1e-4);
+    return float4(c, aa);
+}
+
+kernel void xr_xbr3(texture2d<float, access::read> src [[texture(0)]],
+                    texture2d<float, access::write> dst [[texture(1)]],
+                    constant uint2 &dims [[buffer(0)]],               /* tamaño de la imagen nativa (la textura puede ser mayor, como la del cine) */
+                    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= dims.x * 3u || gid.y >= dims.y * 3u) return;
+    int2 sz = int2(dims);
+    int2 o = int2(gid);
+    int2 base = int2(o.x / 3, o.y / 3);
+    float2 q = (float2(o - base * 3) + 0.5) / 3.0;                    /* subposición dentro del píxel, y hacia abajo */
+    float4 e = xbr_px(src, base, sz);
+    float4 res = e;
+    const int2 rr[4] = { int2(1, 0), int2(0, 1), int2(-1, 0), int2(0, -1) };
+    const int2 dd[4] = { int2(0, 1), int2(-1, 0), int2(0, -1), int2(1, 0) };
+    for (int k = 0; k < 4; k++) {
+        int2 r = rr[k], d = dd[k];
+        float4 B = xbr_at(src, base, r, d, 0, -1, sz), C = xbr_at(src, base, r, d, 1, -1, sz);
+        float4 D = xbr_at(src, base, r, d, -1, 0, sz), F = xbr_at(src, base, r, d, 1, 0, sz);
+        float4 G = xbr_at(src, base, r, d, -1, 1, sz), H = xbr_at(src, base, r, d, 0, 1, sz), I = xbr_at(src, base, r, d, 1, 1, sz);
+        float4 F4 = xbr_at(src, base, r, d, 2, 0, sz), I4 = xbr_at(src, base, r, d, 2, 1, sz);
+        float4 H5 = xbr_at(src, base, r, d, 0, 2, sz), I5 = xbr_at(src, base, r, d, 1, 2, sz);
+        bool edr = !xbr_eq(e, F) && !xbr_eq(e, H)
+                && (xbr_wd(e, C) + xbr_wd(e, G) + xbr_wd(I, H5) + xbr_wd(I, F4) + 4.0 * xbr_wd(H, F))
+                 < (xbr_wd(H, D) + xbr_wd(H, I5) + xbr_wd(F, B) + xbr_wd(F, I4) + 4.0 * xbr_wd(e, I));
+        if (edr) {
+            float fg = xbr_wd(F, G), hc = xbr_wd(H, C);
+            bool left = (2.0 * fg) <= hc && !xbr_eq(e, G) && !xbr_eq(D, G);
+            bool up = fg >= 2.0 * hc && !xbr_eq(e, C) && !xbr_eq(B, C);
+            float a = smoothstep(-0.1667, 0.1667, q.x + q.y - 1.5);
+            if (left) a = max(a, smoothstep(-0.1667, 0.1667, q.y + 0.5 * q.x - 1.0));
+            if (up) a = max(a, smoothstep(-0.1667, 0.1667, q.x + 0.5 * q.y - 1.0));
+            if (a > 0.0) res = xbr_mix(res, xbr_wd(e, F) <= xbr_wd(e, H) ? F : H, a);
+        }
+        q = float2(q.y, 1.0 - q.x);                                   /* siguiente esquina: el marco gira 90 grados */
+    }
+    dst.write(res, gid);
 }
 
 /* Velo negro a pantalla completa (transiciones mundo <-> cine): c.x = opacidad. Va con el triángulo de xr_fs_vertex. */

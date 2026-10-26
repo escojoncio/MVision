@@ -97,7 +97,7 @@ enum XRStereo {
     /// `gameView`: VrScene.game_view (vista del motor en unidades -> mundo VR en metros). `eye`: 0 izquierdo, 1 derecho. Devuelve la vista (mundo VR -> espacio del ojo GL:
     /// x derecha, y arriba, -z delante) y las tangentes del frusto (izquierda, derecha, arriba, abajo; positivas) o nil si los datos no son válidos.
     static func eye(gameView gv: simd_float4x4, eye: Int, ipd: Float, conv: Float, tanX: Float, tanY: Float) -> (view: simd_float4x4, tangents: SIMD4<Float>)? {
-        guard XRMath.isFinite(gv), ipd > 0.01, conv > 0.1, tanX > 0.05, tanY > 0.05 else { return nil }
+        guard XRMath.isFinite(gv), ipd >= 0, ipd.isFinite, conv > 0.1, tanX > 0.05, tanY > 0.05 else { return nil }
         let det = simd_determinant(gv)
         guard det.isFinite, abs(det) > 1e-13 else { return nil }
         let s: Float = 0.001                                         // metros por unidad del motor
@@ -188,6 +188,32 @@ enum XRMenuPanelLayout {
     /// Modelo del panel (centro del quad, +Z hacia el usuario) para una posición de cabeza `p` y un rumbo `yaw` (el del HUD, con zona muerta).
     static func model(position p: SIMD3<Float>, yaw: Float) -> simd_float4x4 {
         XRMath.translation(p) * XRMath.rotationY(yaw) * XRMath.translation(SIMD3<Float>(0, -drop, -distance))
+    }
+}
+
+/// Plano fijo a la cabeza de las regiones «de encuadre» del HUD de partida (XRPresenter.hudIsFramed: créditos y textos bajo la vida, «cualquier otra cosa»). Antes medía lo mismo que la pantalla de cine (cfg.width,
+/// hasta 4,5 m, a cfg.distance) con el alto fijo a 3/4: el aspecto no era el de la capa (320x256 = 0,8; 384x256 = 0,667) y con la pantalla grande el recorte crecía y su región central tapaba la vista. Ahora el píxel lógico del
+/// juego es cuadrado y de tamaño fijo (`pitch`), y la región se coloca en su sitio del encuadre a `distance`: la capa entera (320 px) mide `layerWidth` m (~44 grados), así que el recorte de créditos queda arriba a la izquierda,
+/// fuera del centro de la vista. `layerPx` = tamaño LÓGICO de la capa (no el de la textura: lleva la ampliación xBR).
+enum XRFramedLayout {
+    static let distance: Float = 1.6        // m delante de la cabeza
+    static let layerWidth: Float = 1.30     // m por 320 px lógicos
+    static let refWidthPx: Float = 320
+    static let pitch: Float = layerWidth / refWidthPx   // m por píxel lógico (horizontal y vertical)
+
+    /// Tamaño lógico válido de la capa; 320x240 si no es plausible.
+    static func layer(_ p: SIMD2<Float>) -> SIMD2<Float> {
+        p.x.isFinite && p.y.isFinite && p.x >= 64 && p.x <= 1024 && p.y >= 64 && p.y <= 1024 ? p : SIMD2<Float>(320, 240)
+    }
+    /// Tamaño (m) del recorte `uv` (u0, v0, u1, v1): píxeles cuadrados.
+    static func size(uv: SIMD4<Float>, layerPx: SIMD2<Float>) -> SIMD2<Float> {
+        let l = layer(layerPx)
+        return SIMD2<Float>(max(uv.z - uv.x, 0.01) * l.x * pitch, max(uv.w - uv.y, 0.01) * l.y * pitch)
+    }
+    /// Centro (m, x a la derecha, y arriba) del recorte respecto al centro del encuadre.
+    static func center(uv: SIMD4<Float>, layerPx: SIMD2<Float>) -> SIMD2<Float> {
+        let l = layer(layerPx)
+        return SIMD2<Float>(((uv.x + uv.z) / 2 - 0.5) * l.x * pitch, (0.5 - (uv.y + uv.w) / 2) * l.y * pitch)
     }
 }
 

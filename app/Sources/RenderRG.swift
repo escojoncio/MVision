@@ -175,6 +175,11 @@ final class RGRenderer {
     private var hudHQRing: [MTLTexture] = [], hudHQRingSRGB: [MTLTexture] = []
     private var hudHQIdx = 0, hudHQW = 0, hudHQH = 0, hudHQSeq: UInt32 = 0
     private var hudHQ = false
+    /// xBR-lv2 x3 de la capa 2D (XRPixelScaler, XR2DFilter.xbr): anillo de destinos paralelo a hudHQRing (mismo índice); hudTexture apunta a él en vez de a la capa nativa.
+    private var hudScaler: XRPixelScaler?
+    private var hudXbr: [MTLTexture] = [], hudXbrSRGB: [MTLTexture] = []
+    /// Tamaño LÓGICO (píxeles del juego) de la capa que muestra hudTexture: la textura puede llevar además la ampliación xBR (x3) o la escala del HUD de reserva (x4).
+    var hudLogical: SIMD2<Float> { hudHQ ? SIMD2<Float>(Float(hudHQW), Float(hudHQH)) : SIMD2<Float>(320, 240) }
     private var hudHQMode: Int32 = 0, hudHQView: Int32 = 0   // modo (VL_*) y vista ((view_kind << 8) | view_reason) del trabajo que produjo la capa mostrada
     /// Vista vigente y si la ventana 2D del menú (L2/R2, pausa) va sobre el mundo: las fija XRFrameEncoder antes de `encode`; takeLayer2D descarta con ellas las capas de otra vista o de otro modo.
     var layerView: Int32 = 0 { didSet { dropStaleLayer() } }
@@ -247,6 +252,7 @@ final class RGRenderer {
             }
             csFill = cp("vr_k_fill"); csUpload = cp("vr_k_upload"); csCopy = cp("vr_k_copy")
         }
+        if XR2DFilter.current == .xbr { hudScaler = XRPixelScaler(device: device) }
         let d1 = MTLDepthStencilDescriptor()
         d1.depthCompareFunction = .greaterEqual; d1.isDepthWriteEnabled = true
         dsOpaque = device.makeDepthStencilState(descriptor: d1)
@@ -532,7 +538,7 @@ final class RGRenderer {
         return true
     }
 
-    private func takeLayer2D() {
+    private func takeLayer2D(_ commandBuffer: MTLCommandBuffer) {
 #if MV_BENCH
         return
 #else
@@ -568,13 +574,26 @@ final class RGRenderer {
                 t.label = "HUD 2D fiel \(i)"; a.append(t); b.append(v)
             }
             hudHQRing = a; hudHQRingSRGB = b; hudHQW = W; hudHQH = H; hudHQSeq = 0
+            hudXbr = []; hudXbrSRGB = []
+            if hudScaler != nil {
+                for i in 0..<3 {
+                    guard let t = XRPixelScaler.makeTarget(device, width: W, height: H, label: "HUD 2D xBR \(i)") else { hudXbr = []; hudXbrSRGB = []; break }
+                    hudXbr.append(t.tex); hudXbrSRGB.append(t.srgb)
+                }
+            }
         }
-        if r == 1 || !hudHQ || hudHQSeq != seq {
+        let fresh = r == 1 || !hudHQ || hudHQSeq != seq
+        if fresh {
             hudHQIdx = (hudHQIdx + 1) % hudHQRing.count
             hudHQRing[hudHQIdx].replace(region: MTLRegionMake2D(0, 0, W, H), mipmapLevel: 0, withBytes: px!, bytesPerRow: W * 4)
             hudHQSeq = seq
+            if let sc = hudScaler, hudXbr.count == hudHQRing.count { sc.encode(commandBuffer, src: hudHQRing[hudHQIdx], dst: hudXbr[hudHQIdx], width: W, height: H) }
         }
-        hudTexture = hudHQRing[hudHQIdx]; hudTextureSRGB = hudHQRingSRGB[hudHQIdx]
+        if hudXbr.count == hudHQRing.count {
+            hudTexture = hudXbr[hudHQIdx]; hudTextureSRGB = hudXbrSRGB[hudHQIdx]
+        } else {
+            hudTexture = hudHQRing[hudHQIdx]; hudTextureSRGB = hudHQRingSRGB[hudHQIdx]
+        }
         hudHQ = true; hudHQMode = lMode; hudHQView = lView
         if lMode == 0 && mv_vrhost_hud2d_menu_rect(&menuUVBuf) != 0 {
             hudMenuUV = SIMD4<Float>(max(0, menuUVBuf[0] - 0.01), max(0, menuUVBuf[1] - 0.01), min(1, menuUVBuf[2] + 0.01), min(1, menuUVBuf[3] + 0.01))
@@ -719,7 +738,7 @@ final class RGRenderer {
         } else {
             groups.append((0, batches.count, Int.max))
         }
-        takeLayer2D()
+        takeLayer2D(commandBuffer)
         let doHud = (gotNew || !hudDone) && drawWorld && !hudHQ
         // Render nativo: se prepara SIEMPRE (reconoce épocas del almacén aunque no se dibuje: menús) y lo que no se pueda dibujar se REPITE (último válido) o se funde a negro.
         // Modo gpu: no hay nada nativo que preparar; la pantalla 3D se considera sana (el 3D sale de la lista) salvo que encodeStereo falle.
@@ -920,6 +939,18 @@ final class RGRenderer {
     var stereoImage: MTLTexture? { stereoRendered ? stereoRaw : nil }
     /// Capas de la textura de la pantalla 3D ya reservada (aunque aún no se haya dibujado nada en ella; 0 = sin reservar). El banco comprueba que es un array de 2.
     var stereoAllocatedLength: Int { stereoTex?.arrayLength ?? 0 }
+    /// Diagnóstico de la pantalla de cine 3D ([cine3d], lo pide XRFrameEncoder 1/s mientras la vista es una cinemática del motor): secuencia de la escena nativa actual frente a la de la última
+    /// imagen dibujada en las texturas (si divergen o no suben, la pantalla está congelada), cámara del juego usada (posición en el mundo VR y rumbo) y campo de visión horizontal de la ventana del motor.
+    func cine3dDiag() -> String {
+        var cur: UInt32 = 0, camH: Float = 0, cgv = false
+#if !MV_BENCH || MV_BENCH_NATIVE
+        if let n = native { cur = n.sceneSeq; camH = n.camH; cgv = n.cinemaGameView != nil }
+#endif
+        let p = gameView.columns.3, f = gameView.columns.2
+        let yaw = atan2(f.x, f.z) * 180 / Float.pi
+        let fov = camH > 8 ? 2 * atan(160 / camH) * 180 / Float.pi : 0
+        return "seqNativo=\(cur) seqEstereo=\(stereoSeq) estereoDibujado=\(stereoRendered) stereoImage=\(stereoImage == nil ? "nil" : "ok") engineView=\(engineView) cinemaGameView=\(cgv) drawWorld=\(drawWorld) drawEyes=\(drawEyes) camara=(\(String(format: "%.2f %.2f %.2f", p.x, p.y, p.z))) rumbo=\(Int(yaw.rounded()))gr fov=\(Int(fov.rounded()))gr"
+    }
     /// Los valores de `stereoImage` ya son lineales (destino de coma flotante).
     var stereoStoredLinear: Bool { colorFormat == .rgba16Float }
     /// Nativo: los efectos de pantalla de la cinemática (fundidos, destello...) los dibuja el render nativo dentro de la propia pantalla 3D (recubrimientos del ojo): aquí no hay tinte ni

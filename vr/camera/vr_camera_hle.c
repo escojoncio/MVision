@@ -60,6 +60,15 @@ void hle_vrcam_padorg(Cpu *c) {
  * hle_vrbody_sort al terminar el dibujado). */
 void hle_vrcam_trans(Cpu *c) {
     if (vrcam_active() && vrcam_config()->hide_head) vrcam_hide_head(emu_ram);
+    {   /* vrbody_apply corre una vez por frame DIBUJADO, no por VBlank: dt = VBlanks emulados desde el apply anterior (al menos uno) / vblank_hz */
+        static uint32_t prev_vb; static int prev_ok;
+        const VrCamRecord *r = vrcam_last_record();
+        if (r) {
+            uint32_t dv = prev_ok && r->vbl > prev_vb ? r->vbl - prev_vb : 1u;
+            vrbody_set_dt((float)dv / vrcam_config()->vblank_hz);
+            prev_vb = r->vbl; prev_ok = 1;
+        } else prev_ok = 0;
+    }
     vrbody_apply(emu_ram);
     rt_orig(c, "vrcam_trans");
 }

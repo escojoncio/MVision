@@ -24,7 +24,8 @@ struct VrLayer2D {
     int w, h, ox, oy, valid;     /* zona mostrada en píxeles nativos y su origen en VRAM */
     int LW, LH;                  /* tamaño de la salida RGBA: w*scale, h*scale */
     int R, PW, PH;               /* escala de RASTERIZADO (1 en modo original: exacto de 5 bits y replicado; = scale en los demás) y tamaño de px: w*R, h*R */
-    int cur_scale;               /* clave (R, escala, modo) con la que están inicializados px/rgba */
+    int hq8;                     /* px.c en 8 bits por canal (R > 1, o fotograma completo de 24 bits a R = 1); si no, 5 bits */
+    int cur_scale;               /* clave (R, escala, modo, hq8) con la que están inicializados px/rgba */
     int dx0, dy0, dx1, dy1;      /* rectángulo sucio (muestras, [x0,x1) [y0,y1)) de la lista anterior; vacío si dx1 <= dx0 */
     uint16_t tc[65536]; uint32_t ts[65536]; uint32_t stamp;   /* caché de texels de la primitiva en curso */
     uint32_t qc[262144]; uint32_t qs[262144];                 /* caché del modo nítido por cuarto de texel: texel que cubre | color corregido << 16 */
@@ -641,7 +642,7 @@ static void fill_backdrop(VrLayer2D *L, const GpuDisplay *d, const uint16_t *src
                     int top = ra[xa * 3 + k] * (256 - wx) + ra[xb * 3 + k] * wx, bot = rb[xa * 3 + k] * (256 - wx) + rb[xb * 3 + k] * wx;
                     v = (top * (256 - wy) + bot * wy + 32768) >> 16;
                 }
-                p->c[k] = (uint8_t)(S == 1 ? v >> 3 : v);
+                p->c[k] = (uint8_t)(L->hq8 ? v : v >> 3);
             }
             p->m = L->natm[(size_t)(ly / S) * w + lx / S]; p->t = 0; p->d[0] = p->d[1] = p->d[2] = 0;
         }
@@ -990,6 +991,8 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     /* Modo original: el rasterizado es el EXACTO de la GPU original (escala 1: 5 bits, tramado, mismo muestreo de texels) y la salida lo replica S x S (vecino más próximo
      * a escala entera): el texto sale idéntico en forma y color y nítido. Excepción: fotograma completo en 24 bits (vídeo), que necesita los 8 bits por canal. */
     if (L->smooth == VL_SMOOTH_ORIGINAL && !(full && l->disp.depth24)) R = 1;
+    const int hq8 = R > 1 || (full && l->disp.depth24);   /* vídeo de 24 bits a R = 1 (raster nativo del visor): se conservan los 8 bits por canal */
+    L->hq8 = hq8;
     if (draw) {
         size_t nout = (size_t)w * S * h * S, npx = (size_t)w * R * h * R;
         if (nout > (size_t)6 * 1024 * 6 * 512) draw = 0;   /* tope de memoria (con escala 6 una pantalla de 640x480 son 11 Mpx) */
@@ -1008,7 +1011,7 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     if (verify && !world_pass(L, l, sc, aw, h, &lost2d)) verify = 0;
     if (verify) v_ms = l2_now_ms() - v_t0;
     if (draw) {
-        int key = (R << 8) | (S << 4) | L->smooth;
+        int key = (hq8 << 12) | (R << 8) | (S << 4) | L->smooth;
         int zone = L->cur_scale != key || L->w != w || L->h != h || L->pad != pad || L->aw != aw;   /* otra zona mostrada (tamaño/escala); el cambio de búfer (ox, oy) no invalida el rect del menú: va relativo a ella */
         const int geom = L->w != w || L->h != h || L->pad != pad || L->aw != aw;   /* otro tamaño de zona (no la escala) */
         if (zone || L->ox != oxe || L->oy != l->disp.y) {
@@ -1040,7 +1043,7 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     int wx0 = l->disp.x, wx1 = l->disp.x + (aw > 0 ? aw : 0), wy0 = l->disp.y, wy1 = l->disp.y + h;
     Ctx c0;
     memset(&c0, 0, sizeof c0);
-    c0.L = L; c0.S = R; c0.hq = R > 1; c0.smooth = L->smooth; c0.cmax = c0.hq ? 255 : 31;
+    c0.L = L; c0.S = R; c0.hq = hq8; c0.smooth = L->smooth; c0.cmax = c0.hq ? 255 : 31;
     for (uint32_t i = 0; i < l->nops; i++) {
         const GpuOp *o = &l->ops[i];
         switch (o->type) {

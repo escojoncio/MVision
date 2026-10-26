@@ -25,6 +25,7 @@ extern "C" {
 #define NS_PLAYER_MAXPC 4                /* NsPiece por parte */
 #define NS_PART_HEAD 6
 #define NS_PARTS_ARMS ((1u << 2) | (1u << 3) | (1u << 4) | (1u << 7) | (1u << 8) | (1u << 9))   /* brazo/antebrazo/mano derechos e izquierdos */
+#define NS_PARTS_BODY (NS_PARTS_ARMS | (1u << 0) | (1u << 1) | (1u << 5) | (1u << 10) | (1u << 11) | (1u << 12) | (1u << 13) | (1u << 14) | (1u << 15))   /* + pelvis, torso, cuello y piernas (torso_follow) */
 
 typedef struct {
     int bound;                           /* 1 si se encontró la instancia del jugador */

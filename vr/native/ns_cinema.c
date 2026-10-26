@@ -39,7 +39,7 @@ int ns_cinema_to_vr(const NsCamera *cam, const float gv[16], float out[12]) {
 }
 
 int ns_cinema_eye(const float gv[16], int eye, float ipd, float conv, float tan_x, float tan_y, float view[16], float tangents[4]) {
-    if (!gv || !view || !tangents || !fin(gv, 16) || !(ipd > 0.01f) || !(conv > 0.1f) || !(tan_x > 0.05f) || !(tan_y > 0.05f)) return 0;
+    if (!gv || !view || !tangents || !fin(gv, 16) || !(ipd >= 0.0f) || !isfinite(ipd) || !(conv > 0.1f) || !(tan_x > 0.05f) || !(tan_y > 0.05f)) return 0;
     double gi[16];
     if (!inv_affine(gv, gi)) return 0;
     const double s = 0.001, o = eye == 0 ? -0.5 * ipd : 0.5 * ipd;

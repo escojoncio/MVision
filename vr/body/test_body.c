@@ -63,16 +63,22 @@ static void check_solution(const VrArmRig *rig, const VrArmLimits *lim, const Vr
     const float L1 = lenv(rig->elbow_off), L2 = lenv(rig->wrist_off);
     float d[3];
     for (int i = 0; i < 3; i++) d[i] = o->elbow[i] - in->shoulder[i];
-    CHECK(fabsf(lenv(d) - L1) < 0.02f, "hueso 1: %g vs %g", lenv(d), L1);
+    const float sc = o->stretch;      /* huesos escalados a lo largo de su eje cuando el objetivo está fuera de alcance */
+    CHECK(sc >= 1.0f && sc <= 2.5001f, "estirado fuera de rango: %g", sc);
+    CHECK(fabsf(lenv(d) - L1 * sc) < 0.02f * sc, "hueso 1: %g vs %g", lenv(d), L1 * sc);
     float d2[3]; for (int i = 0; i < 3; i++) d2[i] = o->wrist[i] - o->elbow[i];
-    CHECK(fabsf(lenv(d2) - L2) < 0.02f, "hueso 2: %g vs %g", lenv(d2), L2);
+    CHECK(fabsf(lenv(d2) - L2 * sc) < 0.02f * sc, "hueso 2: %g vs %g", lenv(d2), L2 * sc);
     CHECK(ortho_err(o->R_upper) < 1e-4f && fabsf(det3(o->R_upper) - 1) < 1e-4f, "R_upper no ortonormal");
     CHECK(ortho_err(o->R_fore) < 1e-4f && fabsf(det3(o->R_fore) - 1) < 1e-4f, "R_fore no ortonormal");
     CHECK(ortho_err(o->R_hand) < 1e-4f && fabsf(det3(o->R_hand) - 1) < 1e-4f, "R_hand no ortonormal");
     float t[3]; mv(t, o->R_upper, rig->elbow_off);
-    CHECK(fabsf(t[0] - d[0]) < 0.02f && fabsf(t[1] - d[1]) < 0.02f && fabsf(t[2] - d[2]) < 0.02f, "R_upper no lleva el codo a su sitio");
+    CHECK(fabsf(t[0] * sc - d[0]) < 0.02f * sc && fabsf(t[1] * sc - d[1]) < 0.02f * sc && fabsf(t[2] * sc - d[2]) < 0.02f * sc, "R_upper no lleva el codo a su sitio");
     mv(t, o->R_fore, rig->wrist_off);
-    CHECK(fabsf(t[0] - d2[0]) < 0.02f && fabsf(t[1] - d2[1]) < 0.02f && fabsf(t[2] - d2[2]) < 0.02f, "R_fore no lleva la muñeca a su sitio");
+    CHECK(fabsf(t[0] * sc - d2[0]) < 0.02f * sc && fabsf(t[1] * sc - d2[1]) < 0.02f * sc && fabsf(t[2] * sc - d2[2]) < 0.02f * sc, "R_fore no lleva la muñeca a su sitio");
+    /* la mano lleva SIEMPRE la orientación pedida: el giro que no cabe en el antebrazo lo absorbe la mano */
+    float ht[9]; vrbody_orthonormalize(in->hand, ht);
+    float he = 0; for (int i = 0; i < 9; i++) he = fmaxf(he, fabsf(ht[i] - o->R_hand[i]));
+    CHECK(he < 2e-3f, "R_hand no es la orientación pedida: %g", he);
     /* alcance */
     float v[3]; for (int i = 0; i < 3; i++) v[i] = in->wrist[i] - in->shoulder[i];
     float dist = lenv(v);
@@ -82,12 +88,11 @@ static void check_solution(const VrArmRig *rig, const VrArmLimits *lim, const Vr
     if (dist > dmax) {
         (*n_stretch)++;
         CHECK(o->flags & VRARM_STRETCHED, "falta STRETCHED");
-        /* estirado: sin alargar huesos; la mano en la dirección del objetivo, a lo sumo dmax */
-        CHECK(lenv(wv) <= ((o->flags & VRARM_SHOULDER_LIMIT) ? L1 + L2 : dmax) + 0.05f, "alcance %g > %g", lenv(wv), dmax);
-        if (!(o->flags & VRARM_SHOULDER_LIMIT)) {
-            float c = dotv(wv, v) / (lenv(wv) * dist);
-            CHECK(c > 0.9999f, "estirado fuera de la línea al objetivo %g", c);
-            CHECK(o->err_mm >= dist - dmax - 0.2f && o->err_mm <= dist - dmax + 0.2f, "err_mm %g vs %g", o->err_mm, dist - dmax);
+        /* estirado: los huesos se alargan y la muñeca queda EXACTAMENTE en el objetivo (hasta 4 veces el alcance) */
+        if (dist <= 2.5f * dmax) {
+            if (sc >= 1.1f) CHECK(o->err_mm < 0.05f, "estirado: muñeca separada del objetivo %g mm", o->err_mm);
+            CHECK(fabsf(sc - dist / dmax) < 1e-3f * sc, "factor de estirado %g vs %g", sc, dist / dmax);
+            if (sc >= 1.1f) CHECK(lenv(wv) > dmax, "estirado: alcance %g", lenv(wv));
         }
     } else if (dist >= dmin) {
         if (!(o->flags & VRARM_SHOULDER_LIMIT)) CHECK(o->err_mm < 0.03f, "no alcanzó el objetivo alcanzable: %g (flags %u)", o->err_mm, o->flags);
@@ -103,14 +108,10 @@ static void check_solution(const VrArmRig *rig, const VrArmLimits *lim, const Vr
     float u[3]; for (int i = 0; i < 3; i++) u[i] = -a[i] / lenv(a);
     float X[3] = {in->torso[0], in->torso[3], in->torso[6]}, Z[3] = {in->torso[2], in->torso[5], in->torso[8]};
     float out_c = dotv(u, X) * rig->side, fwd = dotv(u, Z);
+    if (sc <= 1.0f)   /* estirado: el brazo apunta al objetivo sin límite de hombro */
     CHECK(fwd >= lim->shoulder_back - 2e-3f, "hombro hacia atrás %g < %g", fwd, lim->shoulder_back);
+    if (sc <= 1.0f)
     CHECK(out_c >= lim->shoulder_cross - 2e-3f, "hombro cruzando %g < %g", out_c, lim->shoulder_cross);
-    /* muñeca: desvío de la mano respecto al antebrazo */
-    float Rrel[9], Tf[9] = {o->R_fore[0], o->R_fore[3], o->R_fore[6], o->R_fore[1], o->R_fore[4], o->R_fore[7], o->R_fore[2], o->R_fore[5], o->R_fore[8]};
-    mm(Rrel, Tf, o->R_hand);
-    float ax[3] = {WRI[0] / L2, WRI[1] / L2, WRI[2] / L2}, rv[3]; mv(rv, Rrel, ax);
-    float sw = acosf(fmaxf(-1, fminf(1, dotv(rv, ax))));
-    CHECK(sw <= lim->wrist_swing_deg * 3.14159265f / 180 + 0.003f, "desvío de muñeca %g", sw * 57.29578f);
 }
 
 static void test_solver(void) {
@@ -137,7 +138,7 @@ static void test_solver(void) {
         if (o.flags & VRARM_WRIST_LIMIT) n_flag_wrist++;
         check_solution(&rig, &lim, &in, &o, &n_stretch, &n_close);
     }
-    CHECK(n_stretch > 1000 && n_close > 100 && n_lim > 50 && n_flag_wrist > 100, "cobertura de casos: estirados %d cerca %d hombro %d muñeca %d", n_stretch, n_close, n_lim, n_flag_wrist);
+    CHECK(n_stretch > 1000 && n_close > 100 && n_lim > 50 && n_flag_wrist > 10, "cobertura de casos: estirados %d cerca %d hombro %d muñeca %d", n_stretch, n_close, n_lim, n_flag_wrist);
     printf("  solver: %d casos, estirados %d, demasiado cerca %d, límite de hombro %d, de muñeca %d\n", solved, n_stretch, n_close, n_lim, n_flag_wrist);
 }
 
@@ -166,6 +167,144 @@ static void test_solver_nonfinite(void) {
     for (int i = 0; i < 9; i++) in.torso[i] *= 1.003f;
     CHECK(vrbody_solve_arm(&rig, &lim, &in, &o) == 0 && isfinite(o.elbow[0]) && isfinite(o.R_hand[0]), "objetivo en el hombro con polar nulo");
     int s = 0, c = 0; check_solution(&rig, &lim, &in, &o, &s, &c);
+}
+
+/* Estirado continuo: cruzar el alcance máximo no da saltos y la muñeca siempre llega al objetivo */
+static void test_stretch_continuous(void) {
+    VrArmLimits lim; vrbody_limits_default(&lim);
+    const float L1 = lenv(ELB), L2 = lenv(WRI), dmax = (L1 + L2) * lim.reach_margin;
+    for (int side = -1; side <= 1; side += 2) {
+        VrArmRig rig = {(float)side, {ELB[0], ELB[1], ELB[2]}, {WRI[0], WRI[1], WRI[2]}};
+        VrArmIn in; memset(&in, 0, sizeof in);
+        in.torso[0] = in.torso[4] = in.torso[8] = 1; in.hand[0] = in.hand[4] = in.hand[8] = 1;
+        in.shoulder[0] = side * 190; in.shoulder[1] = 260; in.shoulder[2] = -29;
+        in.pole[0] = 0.45f * side; in.pole[1] = -1; in.pole[2] = -0.35f;
+        float dir[3] = {0.1f * side, 0.2f, 0.97f}; float dl = lenv(dir); for (int i = 0; i < 3; i++) dir[i] /= dl;
+        VrArmOut prev; int have = 0;
+        for (float k = 1.0f; k <= 2.001f; k += 0.002f) {
+            for (int i = 0; i < 3; i++) in.wrist[i] = in.shoulder[i] + dir[i] * dmax * k;
+            VrArmOut o; memset(&o, 0, sizeof o);
+            CHECK(vrbody_solve_arm(&rig, &lim, &in, &o) == 0, "solve");
+            if (k >= 1.1f) CHECK(o.err_mm < 0.05f, "k=%g: muñeca separada del objetivo %g mm", k, o.err_mm);   /* entre 1.0 y 1.1 el límite de hombro se desvanece */
+            CHECK(fabsf(o.stretch - (k > 1 ? k : 1.0f)) < 1e-3f, "k=%g: estirado %g", k, o.stretch);
+            if (have) {
+                float de = sqrtf((o.elbow[0] - prev.elbow[0]) * (o.elbow[0] - prev.elbow[0]) + (o.elbow[1] - prev.elbow[1]) * (o.elbow[1] - prev.elbow[1]) + (o.elbow[2] - prev.elbow[2]) * (o.elbow[2] - prev.elbow[2]));
+                CHECK(de < 8.0f, "k=%g: salto del codo %g mm", k, de);
+            }
+            prev = o; have = 1;
+        }
+        /* a ambos lados del alcance máximo el codo apenas se mueve */
+        VrArmOut oa, ob;
+        for (int i = 0; i < 3; i++) in.wrist[i] = in.shoulder[i] + dir[i] * dmax * 0.9999f;
+        CHECK(vrbody_solve_arm(&rig, &lim, &in, &oa) == 0, "solve");
+        for (int i = 0; i < 3; i++) in.wrist[i] = in.shoulder[i] + dir[i] * dmax * 1.0001f;
+        CHECK(vrbody_solve_arm(&rig, &lim, &in, &ob) == 0, "solve");
+        CHECK(fabsf(oa.elbow[0] - ob.elbow[0]) + fabsf(oa.elbow[1] - ob.elbow[1]) + fabsf(oa.elbow[2] - ob.elbow[2]) < 1.5f, "salto del codo al cruzar el alcance");
+    }
+}
+
+
+static float rot_angle(const float *A, const float *B) {      /* ángulo de A^T B */
+    float t = 0; for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) t += A[3 * i + j] * B[3 * i + j];
+    return acosf(fmaxf(-1, fminf(1, (t - 1) * 0.5f)));
+}
+
+/* vrbody_stretch_bone: lo largo del hueso se escala, lo perpendicular no */
+static void test_stretch_bone(void) {
+    float R[9]; rand_rot(R, 3.0f);
+    float off[3] = {ELB[0], ELB[1], ELB[2]}, a[3], b[3], p[3] = {off[1], -off[0], 0}, pa[3], pb[3];
+    mv(a, R, off); mv(pa, R, p);
+    float R2[9]; memcpy(R2, R, sizeof R);
+    vrbody_stretch_bone(R2, off, 2.0f);
+    mv(b, R2, off); mv(pb, R2, p);
+    CHECK(fabsf(lenv(b) - 2 * lenv(a)) < 1e-2f, "el hueso no se alarga: %g vs %g", lenv(b), 2 * lenv(a));
+    CHECK(fabsf(pb[0] - pa[0]) + fabsf(pb[1] - pa[1]) + fabsf(pb[2] - pa[2]) < 1e-3f, "lo perpendicular cambió");
+    float R3[9]; memcpy(R3, R, sizeof R); vrbody_stretch_bone(R3, off, 1.0f);
+    CHECK(memcmp(R3, R, sizeof R) == 0, "s = 1 no debe tocar la matriz");
+}
+
+/* La ruta de la mano viva (vrbody_arm_resolve) entrega las matrices ya alargadas: la malla llega al hueso siguiente */
+static void test_resolve_stretch(void) {
+    VrBodyArmLive a; memset(&a, 0, sizeof a);
+    vrbody_limits_default(&a.lim);
+    a.rig.side = 1; for (int i = 0; i < 3; i++) { a.rig.elbow_off[i] = ELB[i]; a.rig.wrist_off[i] = WRI[i]; }
+    a.upm = 1000;
+    a.shoulder[0] = 0.19f; a.shoulder[1] = 0.26f; a.shoulder[2] = -0.029f;
+    a.torso[0] = a.torso[4] = a.torso[8] = 1; a.hand[0] = a.hand[4] = a.hand[8] = 1;
+    a.pole[0] = 0.4f; a.pole[1] = -0.9f; a.pole[2] = -0.3f;
+    a.wrist[0] = 0.19f; a.wrist[1] = 0.26f; a.wrist[2] = 0.971f;       /* a 1 m del hombro: muy lejos del alcance (0,51 m) */
+    memcpy(a.grip_p, a.wrist, sizeof a.wrist); a.grip_q[3] = 1; a.fade = 1;
+    float q[4] = {0, 0, 0, 1};
+    VrBodyArmPose o; CHECK(vrbody_arm_resolve(&a, a.grip_p, q, &o) == 0, "resolve");
+    CHECK(o.stretch > 1.5f && o.stretch <= 2.5001f, "factor de estirado %g", o.stretch);
+    float t[3], d[3];
+    mv(t, o.R_upper, a.rig.elbow_off); for (int i = 0; i < 3; i++) d[i] = (o.elbow[i] - o.shoulder[i]) * 1000;
+    CHECK(fabsf(t[0] - d[0]) + fabsf(t[1] - d[1]) + fabsf(t[2] - d[2]) < 0.5f, "R_upper no alcanza el codo: %g,%g,%g vs %g,%g,%g", t[0], t[1], t[2], d[0], d[1], d[2]);
+    mv(t, o.R_fore, a.rig.wrist_off); for (int i = 0; i < 3; i++) d[i] = (o.wrist[i] - o.elbow[i]) * 1000;
+    CHECK(fabsf(t[0] - d[0]) + fabsf(t[1] - d[1]) + fabsf(t[2] - d[2]) < 0.5f, "R_fore no alcanza la muñeca");
+    VrBodyArmPose o2; a.wrist[2] = 0.45f; memcpy(a.grip_p, a.wrist, sizeof a.wrist);
+    CHECK(vrbody_arm_resolve(&a, a.grip_p, q, &o2) == 0 && fabsf(o2.stretch - 1.0f) < 1e-6f, "alcanzable: sin estirado");
+}
+
+/* El límite de hombro se desvanece con el estirado: sin saltos del codo al cruzar el alcance, también con objetivos que activan el límite */
+static void test_shoulder_blend(void) {
+    VrArmLimits lim; vrbody_limits_default(&lim);
+    const float dmax = (lenv(ELB) + lenv(WRI)) * lim.reach_margin;
+    int limited = 0;
+    for (int it = 0; it < 60; it++) {
+        VrArmRig rig = {(it & 1) ? 1.0f : -1.0f, {ELB[0], ELB[1], ELB[2]}, {WRI[0], WRI[1], WRI[2]}};
+        VrArmIn in; memset(&in, 0, sizeof in);
+        in.torso[0] = in.torso[4] = in.torso[8] = 1; in.hand[0] = in.hand[4] = in.hand[8] = 1;
+        in.shoulder[0] = rig.side * 190; in.shoulder[1] = 260; in.shoulder[2] = -29;
+        in.pole[0] = 0.45f * rig.side; in.pole[1] = -1; in.pole[2] = -0.35f;
+        float dir[3] = {frand(-1, 0.2f) * rig.side, frand(-0.5f, 0.5f), frand(-1, -0.2f)}, dl = lenv(dir);     /* hacia atrás / cruzando el pecho */
+        for (int i = 0; i < 3; i++) dir[i] /= dl;
+        VrArmOut prev; int have = 0; unsigned fl0 = 0;
+        for (float k = 0.97f; k <= 1.25f; k += 0.002f) {
+            for (int i = 0; i < 3; i++) in.wrist[i] = in.shoulder[i] + dir[i] * dmax * k;
+            VrArmOut o; memset(&o, 0, sizeof o);
+            CHECK(vrbody_solve_arm(&rig, &lim, &in, &o) == 0, "solve");
+            if (!have) fl0 = o.flags;
+            if (have && k >= 1.0f) {
+                float de = 0; for (int i = 0; i < 3; i++) de += (o.elbow[i] - prev.elbow[i]) * (o.elbow[i] - prev.elbow[i]);
+                CHECK(sqrtf(de) < 12.0f, "it %d k=%g: salto del codo %g mm", it, k, sqrtf(de));
+            }
+            prev = o; have = 1;
+        }
+        if (fl0 & VRARM_SHOULDER_LIMIT) limited++;
+    }
+    CHECK(limited > 5, "cobertura: casos con límite de hombro %d", limited);
+}
+
+/* El giro del antebrazo es continuo al pasar la mano por +-180 grados respecto al antebrazo; la mano sigue exacta */
+static void test_twist_continuity(void) {
+    VrArmLimits lim; vrbody_limits_default(&lim);
+    VrArmRig rig = {1.0f, {ELB[0], ELB[1], ELB[2]}, {WRI[0], WRI[1], WRI[2]}};
+    VrArmIn in; memset(&in, 0, sizeof in);
+    in.torso[0] = in.torso[4] = in.torso[8] = 1;
+    in.shoulder[0] = 190; in.shoulder[1] = 260; in.shoulder[2] = -29;
+    in.wrist[0] = 190; in.wrist[1] = 260; in.wrist[2] = 300;
+    in.pole[0] = 0.45f; in.pole[1] = -1; in.pole[2] = -0.35f;
+    VrArmOut prev; int have = 0; float jump_max = 0, tf_max = 0;
+    for (int a = 0; a <= 400; a += 2) {
+        float h[9], ax[3] = {0, 0, 1}, c = cosf(a * 0.0174532925f), s_ = sinf(a * 0.0174532925f);
+        (void)ax;
+        float Rz[9] = {c, -s_, 0, s_, c, 0, 0, 0, 1}, R0[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        mm(h, R0, Rz); memcpy(in.hand, h, sizeof h);      /* giro de la mano sobre su eje Z (el antebrazo apunta a +Z) */
+        VrArmOut o; memset(&o, 0, sizeof o);
+        in.has_prev = have; if (have) { in.tau_prev = prev.tau; in.tau_f_prev = prev.tau_f; }
+        CHECK(vrbody_solve_arm(&rig, &lim, &in, &o) == 0, "solve");
+        float he = 0; for (int i = 0; i < 9; i++) he = fmaxf(he, fabsf(o.R_hand[i] - h[i]));
+        CHECK(he < 2e-3f, "mano no exacta: %g", he);
+        if (have) {
+            float j = rot_angle(prev.R_fore, o.R_fore) * 57.29578f;
+            if (j > jump_max) jump_max = j;
+            float dtf = fabsf(o.tau_f - prev.tau_f) * 57.29578f; if (dtf > tf_max) tf_max = dtf;
+        }
+        prev = o; have = 1;
+    }
+    CHECK(jump_max < 8.0f, "el antebrazo salta %g grados entre pasos de 2 grados", jump_max);
+    CHECK(tf_max <= 25.01f, "giro del antebrazo por paso %g > 25 grados", tf_max);
 }
 
 /* El brazo es natural: con la mano delante del pecho el codo cuelga (por debajo de la recta hombro-muñeca) y hacia fuera */
@@ -346,13 +485,15 @@ static void test_glue(void) {
                     int pi[3] = {arm ? 2 : 7, arm ? 3 : 8, arm ? 4 : 9};
                     float R[3][9], t[3][3];
                     for (int k = 0; k < 3; k++) load_xf(part_addr(pi[k]), R[k], t[k]);
+                    int bone_stretched[2] = {0, 0};   /* hueso alargado por el estirado: su matriz ya no es una rotación pura */
                     for (int k = 0; k < 2; k++) {
                         float o[3], tl[3] = {(float)TOFF[pi[k + 1]][0], (float)TOFF[pi[k + 1]][1], (float)TOFF[pi[k + 1]][2]};
+                        { float ro[3]; mv(ro, R[k], tl); bone_stretched[k] = lenv(ro) > 1.002f * lenv(tl); }
                         mv(o, R[k], tl); for (int c = 0; c < 3; c++) o[c] += t[k][c];
                         float d[3] = {o[0] - t[k + 1][0], o[1] - t[k + 1][1], o[2] - t[k + 1][2]};
                         CHECK(lenv(d) < 1.8f, "hueso %d del brazo %d desconectado %g mm", k, arm, lenv(d));
                     }
-                    CHECK(ortho_err(R[0]) < 3e-3f && ortho_err(R[1]) < 3e-3f && ortho_err(R[2]) < 3e-3f, "matrices no ortonormales");
+                    CHECK((bone_stretched[0] || ortho_err(R[0]) < 3e-3f) && (bone_stretched[1] || ortho_err(R[1]) < 3e-3f) && ortho_err(R[2]) < 3e-3f, "matrices no ortonormales");
                     /* el hombro no se mueve (fijo al torso animado) */
                     float Ro[9], to[3]; load_xf(part_addr(pi[0]) , Ro, to);
                     int32_t a0 = r32(part_addr(pi[0]) + 0x14), b0 = (int32_t)((uint32_t)(RAM0[(part_addr(pi[0]) & 0x1FFFFF) + 0x14] | RAM0[(part_addr(pi[0]) & 0x1FFFFF) + 0x15] << 8 | RAM0[(part_addr(pi[0]) & 0x1FFFFF) + 0x16] << 16 | (uint32_t)RAM0[(part_addr(pi[0]) & 0x1FFFFF) + 0x17] << 24));
@@ -406,7 +547,7 @@ static void test_glue(void) {
         vrbody_restore(RAM);
     }
 
-    /* d) fuera de alcance: brazo extendido sin alargar huesos */
+    /* d) fuera de alcance: brazo extendido y huesos alargados; la muñeca llega al objetivo */
     build_body(78);
     vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
     for (int f = 0; f < 40; f++) {
@@ -418,8 +559,11 @@ static void test_glue(void) {
                 CHECK(d->sol.flags & VRARM_STRETCHED, "lejos: debería estirarse");
                 float S[3] = {(float)r32(part_addr(s ? 2 : 7) + 0x14), (float)r32(part_addr(s ? 2 : 7) + 0x18), (float)r32(part_addr(s ? 2 : 7) + 0x1C)};
                 float dd[3] = {d->sol.wrist[0] - S[0], d->sol.wrist[1] - S[1], d->sol.wrist[2] - S[2]};
-                CHECK(lenv(dd) <= (264.75f + 253.4f) + 0.1f, "brazo alargado: %g", lenv(dd));
+                CHECK(d->sol.stretch > 1.0f && (d->sol.err_mm < 1.0f || d->sol.stretch > 2.499f), "brazo estirado: factor %g, error %g mm", d->sol.stretch, d->sol.err_mm);
+                CHECK(lenv(dd) > (264.75f + 253.4f), "brazo no alargado: %g", lenv(dd));
             }
+            VrBodyStats bs_; vrbody_stats(&bs_);
+            CHECK(bs_.stretched > 0 && bs_.stretch_max > 1.0f && bs_.stretch_sum >= (float)bs_.stretched, "contadores de estirado: n=%u max=%g suma=%g", bs_.stretched, bs_.stretch_max, bs_.stretch_sum);
         }
         vrbody_restore(RAM);
     }
@@ -915,12 +1059,23 @@ static void test_arm_live(void) {
  * donde las manos naturales los esperan. */
 static float yaw_of(uint32_t part) { float R[9], t[3]; load_xf(part_addr((int)part), R, t); return atan2f(R[2], R[8]) * 57.2957795f; }
 static float wrap180t(float a) { while (a > 180) a -= 360; while (a < -180) a += 360; return a; }
+static struct { float pel_err, leg_rel_err, leg_dist_err; } TR;   /* pelvis: error de guiñada; piernas: giro relativo y distancia a la pelvis respecto al juego */
 static void torso_run(int seed, int follow, float off_deg, float *yaw_err, float *yawY, float *dP5, float reach[2], float err[2], int *same_after) {
-    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0; cfg.torso_follow = follow;
+    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0; cfg.torso_follow = follow; cfg.torso_hand_share = 0;
     build_body(seed); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
-    float gaze = wrap180t(yaw_of(1) + off_deg);
+    const float P0 = yaw_of(0);
+    float gaze = wrap180t(P0 + off_deg);
     g_view.gaze_yaw_deg = gaze;
-    float gr = gaze * 3.14159265f / 180, c = cosf(gr), s = sinf(gr);
+    /* esperado en reposo: la pelvis solo sale de la zona muerta; el pecho se tuerce una fracción del desvío hacia la mirada */
+    float expP = P0;
+    if (fabsf(off_deg) > cfg.torso_deadzone_deg) expP = wrap180t(gaze - (off_deg > 0 ? 1.0f : -1.0f) * cfg.torso_deadzone_deg);
+    float tw_ = cfg.torso_chest_share * wrap180t(gaze - expP);
+    tw_ = tw_ > cfg.torso_chest_max_deg ? cfg.torso_chest_max_deg : (tw_ < -cfg.torso_chest_max_deg ? -cfg.torso_chest_max_deg : tw_);
+    const float expC = wrap180t(expP + tw_);
+    const float leg_rel0 = wrap180t(yaw_of(10) - P0);
+    float lt0[3], l0[3], R_[9]; load_xf(part_addr(10), R_, lt0); load_xf(part_addr(0), R_, l0);
+    const float leg_d0 = sqrtf((lt0[0] - l0[0]) * (lt0[0] - l0[0]) + (lt0[1] - l0[1]) * (lt0[1] - l0[1]) + (lt0[2] - l0[2]) * (lt0[2] - l0[2]));
+    float gr = (follow ? expC : gaze) * 3.14159265f / 180, c = cosf(gr), s = sinf(gr);
     float Rn[9] = {c, 0, s, 0, 1, 0, -s, 0, c};
     float R5[9], P5[3]; load_xf(part_addr(5), R5, P5);
     float n5[3] = {0, 305, -55}, rn5[3]; mv(rn5, Rn, n5);
@@ -943,9 +1098,12 @@ static void torso_run(int seed, int follow, float off_deg, float *yaw_err, float
         vrbody_apply(RAM);
         if (f == 159) {
             float Rt[9], tt[3], Rp[9], Pp[3]; load_xf(part_addr(1), Rt, tt); load_xf(part_addr(5), Rp, Pp);
-            *yaw_err = wrap180t(yaw_of(1) - gaze); *yawY = Rt[4];
+            *yaw_err = wrap180t(yaw_of(1) - (follow ? expC : gaze));
+            { float lt[3], l[3], R2_[9]; load_xf(part_addr(10), R2_, lt); load_xf(part_addr(0), R2_, l);
+              TR.pel_err = wrap180t(yaw_of(0) - expP); TR.leg_rel_err = wrap180t(yaw_of(10) - yaw_of(0) - leg_rel0);
+              TR.leg_dist_err = sqrtf((lt[0] - l[0]) * (lt[0] - l[0]) + (lt[1] - l[1]) * (lt[1] - l[1]) + (lt[2] - l[2]) * (lt[2] - l[2])) - leg_d0; } *yawY = Rt[4];
             *dP5 = sqrtf((Pp[0] - P5[0]) * (Pp[0] - P5[0]) + (Pp[1] - P5[1]) * (Pp[1] - P5[1]) + (Pp[2] - P5[2]) * (Pp[2] - P5[2]));
-            for (int sd = 0; sd < 2; sd++) { reach[sd] = vrbody_debug(sd)->sol.reach; err[sd] = vrbody_debug(sd)->sol.err_mm; }
+            for (int sd = 0; sd < 2; sd++) { reach[sd] = vrbody_debug(sd)->sol.reach; err[sd] = vrbody_debug(sd)->sol.err_mm + (vrbody_debug(sd)->sol.stretch - 1.0f) * 517.6f; }   /* lo que falta de alcance: hoy se compensa estirando el brazo */
         }
         vrbody_restore(RAM);
     }
@@ -960,7 +1118,9 @@ static void test_torso_follow(void) {
         CHECK(same, "torso_follow=0: restore");
         CHECK(fabsf(ye) > 20.0f, "torso_follow=0 no debe girar el torso: %g", ye);
         torso_run(500 + seed, 1, 50.0f, &ye, &yy, &dp, re, er, &same);
-        CHECK(fabsf(ye) <= 1.0f, "guiñada del torso = mirada: error %g grados (semilla %d)", ye, seed);
+        CHECK(fabsf(ye) <= 1.0f, "guiñada del pecho esperada (pelvis en el borde de la zona muerta + torsión): error %g grados (semilla %d)", ye, seed);
+        CHECK(fabsf(TR.pel_err) <= 1.0f, "guiñada de la pelvis: error %g grados (semilla %d)", TR.pel_err, seed);
+        CHECK(fabsf(TR.leg_rel_err) <= 1.0f && fabsf(TR.leg_dist_err) <= 1.5f, "las piernas no giran rígidas con la pelvis: giro %g, distancia %g mm (semilla %d)", TR.leg_rel_err, TR.leg_dist_err, seed);
         CHECK(yy > 0.99f, "torso sin inclinación: Y.y = %g", yy);
         CHECK(dp < 2.0f, "el cuello se movió %g mm", dp);
         CHECK(fabsf(re[1] - re[0]) < 0.1f, "alcance asimétrico: %g vs %g", re[0], re[1]);
@@ -968,12 +1128,15 @@ static void test_torso_follow(void) {
         CHECK(same, "torso_follow=1: restore devuelve la RAM (incluida la pieza 1)");
         (void)bad_off;
     }
-    /* zona muerta: mirada a 10 grados del torso => el torso no se mueve; a 20 => sigue hasta alcanzarla */
-    { float ye, yy, dp, re[2], er[2]; int same;
-      torso_run(520, 1, 10.0f, &ye, &yy, &dp, re, er, &same);
-      CHECK(fabsf(ye + 10.0f) < 3.0f && same, "dentro de la zona muerta el torso no sigue: error %g", ye);
-      torso_run(520, 1, 20.0f, &ye, &yy, &dp, re, er, &same);
-      CHECK(fabsf(ye) <= 1.0f && same, "fuera de la zona muerta el torso alcanza la mirada: error %g", ye); }
+    /* zona muerta de la pelvis: dentro de ella (10, 20, -30 grados) la pelvis y las piernas no se mueven y solo el pecho se tuerce; fuera sigue a la mirada con la zona de margen */
+    { float offs[] = {10.0f, 20.0f, -30.0f, 70.0f, -90.0f};
+      for (unsigned k = 0; k < sizeof offs / sizeof *offs; k++) {
+        float ye, yy, dp, re[2], er[2]; int same;
+        torso_run(520 + (int)k, 1, offs[k], &ye, &yy, &dp, re, er, &same);
+        CHECK(fabsf(ye) <= 1.0f && same, "gaze %+g: pecho error %g", offs[k], ye);
+        CHECK(fabsf(TR.pel_err) <= 1.0f, "gaze %+g: pelvis error %g", offs[k], TR.pel_err);
+        CHECK(fabsf(TR.leg_rel_err) <= 1.0f && fabsf(TR.leg_dist_err) <= 1.5f, "gaze %+g: piernas no rígidas con la pelvis (%g, %g)", offs[k], TR.leg_rel_err, TR.leg_dist_err);
+      } }
     /* inclinado más de 35 grados (agachado/tumbado): no se toca */
     { VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0;
       build_body(530); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
@@ -987,6 +1150,101 @@ static void test_torso_follow(void) {
       VrBodyStats a, b; vrbody_stats(&a);
       for (int f = 0; f < 5; f++) { memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM); CHECK(memcmp(RAM + (part_addr(1) & 0x1FFFFF), RAM0 + (part_addr(1) & 0x1FFFFF), 0x40) == 0, "torso inclinado 60 grados: no debe tocarse"); vrbody_restore(RAM); }
       vrbody_stats(&b); CHECK(b.torso_applies == a.torso_applies, "torso inclinado: torso_applies"); }
+}
+
+
+/* Marcha y manos: la cadera del juego avanza en una dirección => la pelvis se alinea con ella (de espaldas, con la contraria) sin salir de la zona muerta de la mirada;
+ * las manos delante de la mirada tuercen un poco el pecho */
+static void place_hands_at(float yaw_deg, float spread_deg) {     /* ambas manos a 450 mm del ojo en el rumbo yaw +- spread */
+    float th = (g_view.theta_deg + 180) * 3.14159265f / 180, cs = cosf(th), sn = sinf(th);
+    float Tt[9] = {cs, 0, -sn, 0, 1, 0, sn, 0, cs};
+    for (int sd = 0; sd < 2; sd++) {
+        float y = (yaw_deg + (sd ? -spread_deg : spread_deg)) * 0.0174532925f, dw[3] = {sinf(y) * 450.0f, -100.0f, cosf(y) * 450.0f}, pu[3];
+        mv(pu, Tt, dw);
+        set_hand(sd, pu[0] / 1000 + g_view.p_ref[0], pu[1] / 1000 + g_view.p_ref[1], pu[2] / 1000 + g_view.p_ref[2], 0);
+    }
+}
+static void pelvis_run(int seed, float gaze_off, int walk, float head_off, float hands_off, float *pel, float *chest, float *gaze_out, float *head_out) {
+    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0;
+    build_body(seed); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+    const float P0 = yaw_of(0), gaze = wrap180t(P0 + gaze_off), H = wrap180t(P0 + head_off);
+    g_view.gaze_yaw_deg = gaze;
+    float R0[9], pos[3]; load_xf(part_addr(0), R0, pos);
+    for (int f = 0; f < 240; f++) {
+        place_hands_at(gaze + hands_off, 25.0f);
+        memcpy(RAM, RAM0, sizeof RAM);
+        if (walk) { pos[0] += sinf(H * 0.0174532925f) * 60.0f; pos[2] += cosf(H * 0.0174532925f) * 60.0f; store_xf(part_addr(0), R0, pos); }   /* 60 mm por 0,02 s = 3 m/s */
+        vrbody_apply(RAM);
+        if (f == 239) { *pel = yaw_of(0); *chest = yaw_of(1); }
+        vrbody_restore(RAM);
+    }
+    *gaze_out = gaze; *head_out = H;
+}
+static void test_pelvis_walk(void) {
+    float pel, ch, gz, hd;
+    /* parado, mirada dentro de la zona muerta: la pelvis no se mueve; el pecho se tuerce la mitad del desvío */
+    pelvis_run(600, 25.0f, 0, 0, 0, &pel, &ch, &gz, &hd);
+    CHECK(fabsf(wrap180t(pel - (gz - 25.0f))) < 1.0f, "parado: la pelvis se movió (%g)", wrap180t(pel - (gz - 25.0f)));
+    CHECK(fabsf(wrap180t(ch - (gz - 12.5f))) < 1.5f, "parado: torsión del pecho %g", wrap180t(ch - (gz - 25.0f)));
+    /* andando 30 grados a un lado de la mirada: la pelvis se alinea con la marcha */
+    pelvis_run(601, 0, 1, 30.0f, 0, &pel, &ch, &gz, &hd);
+    CHECK(fabsf(wrap180t(pel - hd)) < 2.0f, "andando: pelvis %g grados fuera de la marcha", wrap180t(pel - hd));
+    CHECK(fabsf(wrap180t(ch - (hd + (gz - hd) * 0.5f))) < 2.0f, "andando: el pecho queda entre la marcha y la mirada: %g", wrap180t(ch - (hd + (gz - hd) * 0.5f)));
+    /* andando de espaldas (marcha opuesta a la mirada): la pelvis mira a la mirada, no a la marcha */
+    pelvis_run(602, 0, 1, 180.0f, 0, &pel, &ch, &gz, &hd);
+    CHECK(fabsf(wrap180t(pel - gz)) < 2.0f, "de espaldas: la pelvis debe seguir mirando a la mirada: %g", wrap180t(pel - gz));
+    /* andando de lado a 90 grados (fuera de la zona muerta de 40): la pelvis se queda en el borde de la zona */
+    pelvis_run(603, 0, 1, 90.0f, 0, &pel, &ch, &gz, &hd);
+    CHECK(fabsf(wrap180t(pel - gz)) < 41.5f && fabsf(wrap180t(pel - gz)) > 35.0f, "de lado: la pelvis debe quedar en el borde de la zona muerta: %g", wrap180t(pel - gz));
+    /* manos delante, 30 grados a un lado de la mirada: el pecho se tuerce torso_hand_share * share de 30 grados */
+    pelvis_run(604, 0, 0, 0, 30.0f, &pel, &ch, &gz, &hd);
+    { float exp = 0.3f * 30.0f * 0.5f, got = wrap180t(ch - pel);
+      CHECK(fabsf(got - exp) < 1.5f, "manos: torsión del pecho %g, esperada %g", got, exp); }
+}
+
+
+/* dt medido: la velocidad de marcha se calcula con el tiempo emulado entre applies (vrbody_set_dt), no con frame_dt_s fijo */
+static float walk_yaw_with_dt(float dt, int use_dt) {
+    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0; cfg.torso_hand_share = 0;
+    build_body(620); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+    const float P0 = yaw_of(0); g_view.gaze_yaw_deg = P0;
+    float R0[9], pos[3]; load_xf(part_addr(0), R0, pos);
+    float res = 0;
+    for (int f = 0; f < 240; f++) {
+        place_hands_at(P0, 25.0f);
+        memcpy(RAM, RAM0, sizeof RAM);
+        pos[0] += 10.0f; store_xf(part_addr(0), R0, pos);          /* 10 mm por frame hacia +X (rumbo 90) */
+        if (use_dt) vrbody_set_dt(dt);
+        vrbody_apply(RAM);
+        if (f == 239) res = wrap180t(yaw_of(0) - P0);
+        vrbody_restore(RAM);
+    }
+    vrbody_set_dt(0);
+    return res;
+}
+static void test_dt_measured(void) {
+    float a = walk_yaw_with_dt(0, 0);         /* 10 mm / 0,02 s = 0,5 m/s: andando => la pelvis se alinea con +X (acotada a la zona muerta) */
+    float b = walk_yaw_with_dt(0.05f, 1);     /* 10 mm / 0,05 s = 0,2 m/s: parado => la pelvis no se mueve */
+    float c = walk_yaw_with_dt(0.005f, 1);    /* 2 m/s */
+    CHECK(fabsf(a) > 20.0f, "dt por defecto: debería andar (giro %g)", a);
+    CHECK(fabsf(b) < 1.0f, "dt = 0,05 s: 0,2 m/s no es marcha (giro %g)", b);
+    CHECK(fabsf(c) > 20.0f, "dt = 5 ms: debería andar (giro %g)", c);
+}
+/* Tras un hueco en el que la pelvis estuvo fuera de rango (inclinada), la primera posición válida no cuenta como desplazamiento (falso «andando») */
+static void test_pelvis_gap(void) {
+    VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0; cfg.torso_hand_share = 0;
+    build_body(630); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+    const float P0 = yaw_of(0); g_view.gaze_yaw_deg = P0;
+    float R0[9], pos[3]; load_xf(part_addr(0), R0, pos);
+    float Rx[9] = {1, 0, 0, 0, cosf(1.05f), -sinf(1.05f), 0, sinf(1.05f), cosf(1.05f)}, Rt[9]; mm(Rt, R0, Rx);
+    for (int f = 0; f < 4; f++) {
+        place_hands_at(P0, 25.0f);
+        memcpy(RAM, RAM0, sizeof RAM); store_xf(part_addr(0), f == 2 ? Rt : R0, pos);
+        if (f == 3) pos[0] += 100.0f, store_xf(part_addr(0), R0, pos);
+        vrbody_apply(RAM);
+        if (f == 3) CHECK(fabsf(wrap180t(yaw_of(0) - P0)) < 0.5f, "hueco con la pelvis inclinada: falso andando (giro %g)", wrap180t(yaw_of(0) - P0));
+        vrbody_restore(RAM);
+    }
 }
 
 /* RAM corrupta: no debe caerse ni escribir fuera */
@@ -1183,11 +1441,12 @@ int main(void) {
     test_solver();
     test_solver_nonfinite();
     test_natural_elbow();
+    test_stretch_continuous(); test_stretch_bone(); test_resolve_stretch(); test_shoulder_blend(); test_twist_continuity();
     test_continuity();
     test_glue();
     test_hand_axes(); test_hand_pitch_api(); test_default_roll(); test_jab_and_grab();
     test_visibility();
-    test_two_sided(); test_own_hands(); test_own_hands_both(); test_arm_live(); test_torso_follow();
+    test_two_sided(); test_own_hands(); test_own_hands_both(); test_arm_live(); test_torso_follow(); test_pelvis_walk(); test_dt_measured(); test_pelvis_gap();
     test_fist_glue();
     test_near_hide();
     test_mirror();

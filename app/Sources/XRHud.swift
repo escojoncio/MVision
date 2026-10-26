@@ -18,6 +18,7 @@ struct XRDrawItem {
     /// Solo TEXTOS (subtítulos, mensajes, créditos, alertas, panel 2D flotante; NO el HUD de muñeca ni el radar, que van pegados al brazo con profundidad): se dibuja SIEMPRE encima del mundo, el cuerpo y el arma
     /// (sin prueba de profundidad ni escritura) y después de ellos; la posición 3D del panel se conserva (estereoscopía), solo cambia la oclusión.
     var onTop = false
+    var pixelMode: UInt32 = 0                   // panel: muestreo de la capa 2D (XRQuadU.cfg.w): 0 bilineal, 1 sharp-bilinear (xBR), 2 vecino más próximo
     var vig: [SIMD4<Float>] = []                // vignette: por ojo (centro óptico x, y en píxeles del destino; tangentes por píxel x, y)
     // screen3d: `texture` es un array de 2 capas (ojo izquierdo, derecho). Tinte y recubrimientos de pantalla del juego (espacio gamma, como VrFilter:
     // w de cada recubrimiento = modo de mezcla original 0..3 o -1 = sin usar), y cómo leer/escribir los valores.
@@ -39,7 +40,7 @@ final class XRFinalPass {
         var uvrect = SIMD4<Float>(0, 0, 1, 1)
         var geom = SIMD4<Float>(1, 1, 2.5, 0)
         var tex = SIMD4<Float>(1, 1, 1, 1)
-        var cfg = SIMD4<UInt32>(0, 1, 0, 0)         // x = vista base, y = columnas, z = bit0 destino lineal, bit1 valores guardados lineales
+        var cfg = SIMD4<UInt32>(0, 1, 0, 0)         // x = vista base, y = columnas, z = bit0 destino lineal, bit1 valores guardados lineales, w = muestreo del panel 2D (0 bilineal, 1 sharp-bilinear, 2 vecino)
         var fxTint = SIMD4<Float>(1, 1, 1, 0)
         var fxCov0 = SIMD4<Float>(0, 0, 0, -1)
         var fxCov1 = SIMD4<Float>(0, 0, 0, -1)
@@ -244,7 +245,7 @@ final class XRFinalPass {
             u.uvrect = it.uvrect
             u.geom = SIMD4<Float>(it.size.x, it.size.y, it.distance, it.curve)
             u.tex = SIMD4<Float>(it.imgSize.x, it.imgSize.y, it.sharp, it.kind == .screen ? 1 : it.opacity)
-            u.cfg = SIMD4<UInt32>(base, max(it.cols, 1), (it.outLinear ? 1 : 0) | (it.storedLinear ? 2 : 0), 0)
+            u.cfg = SIMD4<UInt32>(base, max(it.cols, 1), (it.outLinear ? 1 : 0) | (it.storedLinear ? 2 : 0), it.kind == .panel ? it.pixelMode : 0)
             u.fxTint = SIMD4<Float>(it.tint.x, it.tint.y, it.tint.z, 0)
             if it.covers.count >= 4 { u.fxCov0 = it.covers[0]; u.fxCov1 = it.covers[1]; u.fxCov2 = it.covers[2]; u.fxCov3 = it.covers[3] }
             u.tex.w = (it.kind == .screen || it.kind == .screen3d) ? 1 : it.opacity

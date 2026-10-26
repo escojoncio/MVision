@@ -50,17 +50,17 @@ typedef struct VrArmLimits {
     float reach_margin;      /* fracción de L1+L2 que se usa como alcance máximo; defecto 0.999 */
     float shoulder_back;     /* componente "hacia delante" mínima del brazo superior (marco del torso, unitario); defecto -0.80 */
     float shoulder_cross;    /* componente "hacia fuera" mínima (negativa = cruza el pecho); defecto -0.85 */
-    float wrist_swing_deg;   /* desvío máximo de la mano respecto al eje del antebrazo (flexión/extensión/desviación); defecto 70 */
+    float wrist_swing_deg;   /* SIN USO (la mano lleva siempre la orientación del mando); se conserva por compatibilidad */
     float forearm_share;     /* parte del giro (pronación) que asume el antebrazo, 0..1; defecto 0.6 */
     float forearm_twist_deg; /* giro máximo del antebrazo sobre su eje; defecto 85 */
-    float hand_twist_deg;    /* giro máximo de la mano sobre el eje del antebrazo (respecto al antebrazo); defecto 70 */
+    float hand_twist_deg;    /* SIN USO (la mano absorbe todo el giro sobrante); se conserva por compatibilidad */
 } VrArmLimits;
 
 enum {
     VRARM_STRETCHED = 1,       /* objetivo fuera de alcance: brazo extendido, mano en el punto alcanzable más cercano */
     VRARM_TOO_CLOSE = 2,       /* objetivo más cerca que la flexión máxima del codo */
     VRARM_SHOULDER_LIMIT = 4,  /* se aplicó el límite del hombro */
-    VRARM_WRIST_LIMIT = 8,     /* se aplicó el límite de la muñeca/antebrazo */
+    VRARM_WRIST_LIMIT = 8,     /* el reparto del giro del antebrazo (apariencia) quedó recortado por forearm_twist_deg o por su velocidad máxima; la mano nunca se limita */
     VRARM_POLE_FALLBACK = 16   /* el vector polar era paralelo al brazo: se usó una alternativa */
 };
 
@@ -70,6 +70,8 @@ typedef struct VrArmIn {
     float wrist[3];          /* objetivo de la muñeca (mm, mundo) */
     float hand[9];           /* orientación objetivo de la pieza mano (columnas = ejes locales de la mano, en mundo) */
     float pole[3];           /* hacia dónde apunta el codo (mundo; se proyecta perpendicular al brazo) */
+    int has_prev;            /* 1: tau_prev/tau_f_prev son los del cálculo anterior de este brazo (giro del antebrazo continuo, sin saltos de +-180 grados) */
+    float tau_prev, tau_f_prev;   /* VrArmOut.tau y .tau_f del cálculo anterior (rad) */
 } VrArmIn;
 
 typedef struct VrArmOut {
@@ -77,10 +79,15 @@ typedef struct VrArmOut {
     float R_upper[9], R_fore[9], R_hand[9]; /* orientación de las piezas brazo, antebrazo y mano */
     float reach;                         /* distancia pedida hombro->muñeca / (L1 + L2) */
     float err_mm;                        /* distancia entre el objetivo de muñeca y la muñeca resultante */
+    float tau, tau_f;                    /* giro (rad) mano respecto al antebrazo, desenvuelto de forma continua, y la parte que asume el antebrazo (con su límite y su velocidad máxima) */
+    float stretch;                       /* escala de ambos huesos a lo largo de su eje (>= 1): objetivo más lejos que el alcance => brazo estirado, muñeca en el objetivo */
     unsigned flags;                      /* VRARM_* */
 } VrArmOut;
 
 void vrbody_limits_default(VrArmLimits *l);
+/* Alarga la matriz de un hueso (R de rotación pura que lleva `off` a la dirección del hueso) a lo largo de su eje local: R' = R (I + (s-1) l l^T), l = off/|off|. s <= 1 no hace nada.
+ * Es la que usan el apply y la ruta de la mano viva para que la malla alcance al hueso siguiente cuando el brazo se estira. */
+void vrbody_stretch_bone(float R[9], const float off[3], float s);
 /* 0 = bien; -1 = entrada no finita o rig inválido (out sin tocar). Longitud de huesos: |elbow_off|, |wrist_off|. */
 int vrbody_solve_arm(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn *in, VrArmOut *out);
 
@@ -126,9 +133,14 @@ typedef struct VrBodyConfig {
     float fist_min_grip;         /* agarre (ya suavizado y fundido) a partir del cual se deforma la malla; defecto 0,03 */
     VrFistParams fist;           /* forma del puño (ángulos de las falanges, pulgar...) */
     int own_hands;               /* 0 (defecto): 1 = las piezas brazo/antebrazo/mano de cada lado MOVIDO por la IK (2,3,4 / 7,8,9) se ocultan (visibilidad +0x4C = 0) porque el anfitrión dibuja manos propias; restore las devuelve */
-    int torso_follow;            /* 1 (defecto): el torso (y el cuello) se gira en guiñada hacia la mirada real, sin inclinación, para que los hombros no hereden la pelvis del reposo (pie adelantado). Cadera y piernas no se tocan */
-    float torso_yaw_tau_s;       /* constante del filtro de la guiñada del torso; defecto 0.25 */
-    float torso_deadzone_deg;    /* desvío mirada-torso a partir del cual el torso empieza a seguir (histéresis: sigue hasta alcanzarla); defecto 15 */
+    int torso_follow;            /* 1 (defecto): cuerpo estilo VRIK. La pelvis tiene guiñada propia (zona muerta torso_deadzone_deg respecto a la mirada; al andar se alinea con la dirección de marcha) y arrastra a las piernas del juego (su
+                                  * animación de locomoción, intacta, rotada rígidamente con la pelvis); el pecho (torso y cuello fijo) se tuerce hacia la cabeza una fracción del desvío, sin inclinación, para que los hombros no hereden la pelvis del reposo */
+    float torso_yaw_tau_s;       /* constante del filtro de la guiñada de la pelvis y el pecho; defecto 0.25 */
+    float torso_deadzone_deg;    /* zona muerta de la pelvis: mirada y pelvis no se separan más de esto (grados); la pelvis (con las piernas del juego) solo se arrastra al salir de ella; defecto 40 */
+    float torso_chest_share;     /* fracción del desvío mirada-pelvis que el pecho se tuerce hacia la cabeza (columna repartida entre cadera y pecho); defecto 0.5 */
+    float torso_chest_max_deg;   /* torsión máxima del pecho respecto a la pelvis; defecto 30 */
+    float torso_hand_share;      /* peso (0..1) de la dirección media de las manos, si están delante de la mirada, en la orientación objetivo del torso; defecto 0.3 */
+    float torso_walk_mps;        /* velocidad horizontal (m/s) de la cadera del juego a partir de la cual la pelvis se alinea con la dirección de marcha; defecto 0.3 */
     float near_hide_m;           /* 0,30 (defecto; 0 = desactivado): se ocultan (visibilidad +0x4C = 0, restaurable) las piezas del jugador, salvo piernas y pies (10-15) y los brazos que la IK mueve, cuyo centro en el
                                   * mundo queda DELANTE del ojo (proyección sobre la mirada horizontal > 0) y a menos de esta distancia (m): el cuerpo que se inclina al atacar no tapa la vista */
     float near_hide_vtx_m;       /* 0,12 (defecto; 0 = desactivado): ... o con algún vértice a menos de esta distancia (m) del ojo, esté donde esté el centro */
@@ -201,9 +213,13 @@ int vrbody_calib_offset(const float grip_q[4], float roll_signed_deg, float out_
 /* Sustituye las matrices de los brazos para el frame en curso (etapa de transformación). Devuelve el nº de brazos
  * modificados (0 si no hay vista VR, el modelo no es el esperado, el objeto está fuera de pantalla o no hay manos).
  * Escribe en la RAM del juego world+screen (64 B) de las piezas de los brazos, y guarda su valor original. */
-/* Además (con al menos una mano seguida): activa MF_TWO_SIDED (0x400 en model[0]) en los modelos de las 16 piezas; con torso_follow reescribe world+screen del torso y el cuello;
+/* Además (con al menos una mano seguida): activa MF_TWO_SIDED (0x400 en model[0]) en los modelos de las 16 piezas; con torso_follow reescribe world+screen de la pelvis y sus piernas, el torso y el cuello;
  * con own_hands oculta las tres piezas de cada brazo movido por la IK (el lado no movido conserva la animación del juego). Todo se devuelve en vrbody_restore. */
 int  vrbody_apply(uint8_t *ram);
+/* Tiempo (s) emulado desde el apply anterior: vrbody_apply se llama una vez por frame DIBUJADO del juego, no por VBlank. El anfitrión lo fija antes de cada apply
+ * (VBlanks transcurridos / vblank_hz, al menos uno); se acota a 0.2 s. Se usa en la velocidad de marcha y en todos los filtros (suavizado de mano, fundido, pelvis, pecho).
+ * 0 o no finito = vuelve a VrBodyConfig.frame_dt_s. */
+void vrbody_set_dt(float dt_s);
 /* Devuelve esas piezas a su valor original (idempotente; sin efecto si no hay nada pendiente). */
 void vrbody_restore(uint8_t *ram);
 void vrbody_prefist(uint8_t *ram);   /* puño antes de la captura nativa (usa el agarre del último apply) */
@@ -228,7 +244,9 @@ typedef struct VrBodyStats {
     uint32_t hidden_pieces;      /* piezas ocultas por own_hands (acumulado) */
     uint32_t near_hidden;        /* piezas ocultas por estar delante y pegadas al ojo (near_hide_m / near_hide_vtx_m; acumulado) */
     uint32_t two_sided;          /* modelos pasados a doble cara (acumulado) */
-    float torso_yaw, torso_gaze; /* guiñada del torso y de la mirada (grados) en el último frame con torso aplicado */
+    float torso_yaw, torso_gaze; /* guiñada del pecho y de la mirada (grados) en el último frame con torso aplicado */
+    float pelvis_yaw;            /* guiñada de la pelvis (grados) en ese frame */
+    float stretch_sum, stretch_max;   /* suma (de los brazos estirados) y máximo del factor de estirado */
     uint32_t stretched, too_close, shoulder_limit, wrist_limit, bad_solve, stale_dropped, vis_forced;
 } VrBodyStats;
 void vrbody_stats(VrBodyStats *s);
@@ -255,13 +273,15 @@ typedef struct VrBodyArmLive {
     float grip;                  /* agarre efectivo del apply (ya multiplicado por el fundido) */
     float grip_floor;            /* mínimo del agarre mientras empuña un arma (armed_grip) o golpea (1) */
     float fade;                  /* peso de fundido 0..1 (suavizado) */
+    int has_prev; float tau_prev, tau_f_prev;   /* giro del antebrazo del apply (ver VrArmIn) */
 } VrBodyArmLive;
 int vrbody_arm_live(int side, VrBodyArmLive *out);
 /* Brazo resuelto (espacio del usuario, m): origen de las piezas brazo, antebrazo y mano y sus orientaciones (columnas = ejes locales de la pieza). */
 typedef struct VrBodyArmPose {
     float shoulder[3], elbow[3], wrist[3];
-    float R_upper[9], R_fore[9], R_hand[9];
+    float R_upper[9], R_fore[9], R_hand[9];   /* R_upper y R_fore ya alargadas (vrbody_stretch_bone) con `stretch` */
     float err_mm;
+    float stretch;               /* >= 1: factor de estirado de los huesos */
     unsigned flags;              /* VRARM_* */
 } VrBodyArmPose;
 /* Pura. Repite la IK con el agarre vivo (live_p, live_q; cuaternión x,y,z,w): muñeca y mano del objetivo se mueven con D = vivo * inv(agarre simulado), el hombro, el torso y el

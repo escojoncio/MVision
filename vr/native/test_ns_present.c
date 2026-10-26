@@ -176,7 +176,13 @@ static void test_cinema(void) {
     CHECK(ns_cinema_to_vr(&cam, bad, o12) == 0 && ns_cinema_eye(bad, 0, ipd, conv, tanx, tany, v16, t4) == 0, "NaN rechazado");
     float sing[16] = {0};
     CHECK(ns_cinema_to_vr(&cam, sing, o12) == 0, "singular rechazado");
-    CHECK(ns_cinema_eye(gv, 0, 0.0f, conv, tanx, tany, v16, t4) == 0, "ipd inválido");
+    CHECK(ns_cinema_eye(gv, 0, -0.01f, conv, tanx, tany, v16, t4) == 0 && ns_cinema_eye(gv, 0, NAN, conv, tanx, tany, v16, t4) == 0, "ipd inválido");
+    /* pantalla de cine 3D (mono): IPD 0 es válido y ambos ojos dan exactamente la misma vista y tangentes */
+    {
+        float vl[16], vr[16], tl[4], tr[4];
+        CHECK(ns_cinema_eye(gv, 0, 0.0f, conv, tanx, tany, vl, tl) == 1 && ns_cinema_eye(gv, 1, 0.0f, conv, tanx, tany, vr, tr) == 1, "ipd 0 válido (mono)");
+        CHECK(memcmp(vl, vr, sizeof vl) == 0 && memcmp(tl, tr, sizeof tl) == 0 && tl[0] == tanx && tl[1] == tanx, "mono: ojos idénticos");
+    }
 }
 
 int main(void) {

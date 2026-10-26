@@ -20,6 +20,9 @@ VrL2Async *vl2a_new(void);
 void vl2a_free(VrL2Async *A);
 /* Escala objetivo (1..6) y suavizado (VL_SMOOTH_*); cualquier hilo. */
 void vl2a_options(VrL2Async *A, int scale, int smooth);
+/* Opciones del visor: raster NATIVO fijo (escala 1, suavizado original = rasterizado exacto de la GPU original, 24 bits conservados en vídeo). El escalado y el filtro de píxel art (xBR) los hace la GPU del renderer
+ * sobre esa capa 1x; la re-rasterización a x2..x6 de la CPU y la escala adaptativa ya no intervienen en la imagen. Equivale a vl2a_options(A, 1, VL_SMOOTH_ORIGINAL). */
+void vl2a_options_native(VrL2Async *A);
 /* Etiqueta de la vista vigente ((view_kind << 8) | view_reason de vr_view.h; la fija el hilo de emulación antes de vl2a_submit): cada trabajo la guarda y la capa publicada la conserva. */
 void vl2a_set_view(VrL2Async *A, int view);
 /* Hilo de emulación: encola la lista (copia). op_dest (nops bytes) NULL = escena fallida: solo eventos. full: VL_PANEL / VL_FULL / VL_PANEL_VERIFIED (vr_layer2d.h; el verificado se publica como panel, full = 0). reset != 0: olvida la VRAM espejo antes. Devuelve 1 si se encoló. */
