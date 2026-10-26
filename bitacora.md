@@ -16,6 +16,7 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 ## Current state
 **Pendiente de probar en visor (`cac83e1`):** todo lo anterior.
 **Cine sin imagen (causa no confirmada):** log 26-oct: pantalla3d=ok, estereoDibujado=true, color final muy oscuro (2-58/255). Leer `pantalla3d-pixeles` y `pasada=` en `[cine3d]`: si luminancia≈0 → render a textura vacío/cull; si >0 → composición del panel.
+**Pista (usuario):** al pulsar Start para saltar la cinemática se ve ~1 s la escena real → hipótesis (unverified): la capa 2D de cinemática (opaca/negra, 4 mm delante) tapa el panel 3D; comprobar alfa/fondo de esa capa con `pantalla3d-pixeles`.
 **Riesgo:** cinemáticas sin banderas DEMO/PAD* quedan en mundo VR; zona/intro sin control → cine plano 2D.
 **Unverified:** mallas de brazo estiradas; reparto de giro antebrazo/mano; deslizamiento lateral de pies al girar pelvis; imagen 3D 0,75 vs panel 2D 0,8 en PAL; signo ±45° dorso radar; `sync_epoca`.
 **Qué mirar en el log:** `[cine3d] pantalla3d-pixeles/pasada`, `[vista] cambio` al gatear/conductos, `[manos] ... estirados/factor_estirado`, `[capa2d]`, `[radar] visibilidad`, `[vista] cambio`.
