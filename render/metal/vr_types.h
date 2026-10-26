@@ -19,6 +19,7 @@
 #define VR_VF_FLIPX 128   /* rects texturizados: u decrece (== GPU_F_FLIPX) */
 #define VR_VF_FLIPY 256
 #define VR_VF_RECT 0x4000 /* == VR_F_RECT (vr_scene.h): los FLIP solo valen con este bit */
+#define VR_VF_BILLBOARD 0x0400 /* == VR_F_BILLBOARD (vr_scene.h): vr_vs_scene gira el vértice hacia el ojo con VrGpuState.bb */
 
 /* Índices de búfer / textura */
 #define VR_BUF_VERTS 0
@@ -36,12 +37,13 @@ typedef struct {
 } VrGpuVtx;
 typedef char vr_check_vtx_size[(sizeof(VrGpuVtx) == 32) ? 1 : -1];
 
-/* Espejo de VrState (vr_scene.h), 12 bytes: tw = twmx, twmy, twox, twoy (ventana de textura E2, unidades de 8 px). */
+/* Espejo de VrState (vr_scene.h), 60 bytes: tw = twmx, twmy, twox, twoy (ventana de textura E2, unidades de 8 px); bb = centro C, derecha R, abajo D, delante N (solo con VR_VF_BILLBOARD, si no ceros). */
 typedef struct {
     unsigned char tw[4];
     short clip[4];
+    float bb[12];
 } VrGpuState;
-typedef char vr_check_state_size[(sizeof(VrGpuState) == 12) ? 1 : -1];
+typedef char vr_check_state_size[(sizeof(VrGpuState) == 60) ? 1 : -1];
 
 typedef struct {
     matrix_float4x4 view_proj[2];  /* clip = P * V por ojo (índice = amplification_id; sin amplificación se usa [0]) */

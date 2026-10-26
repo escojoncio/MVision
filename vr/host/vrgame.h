@@ -47,6 +47,9 @@ int32_t mv_vrgame_forearm(int32_t side, MvVrForearm *out);
  * mismos datos que mv_vrgame_forearm. dev_mm = desvío (mm) del agarre vivo respecto al agarre con el que se simuló la IK; age_ms = edad de esa IK; ambos pueden ser NULL.
  * 1 = válido; 0 = no hay guante vivo (el llamador cae a mv_vrgame_forearm o al mando). */
 int32_t mv_vrgame_forearm_live(int32_t side, MvVrForearm *out, float *dev_mm, float *age_ms);
+/* Vértices (xyz consecutivos, m, mismo espacio que mv_vrgame_forearm_live) de la malla del antebrazo del guante con la pose viva; como mucho max_verts. Devuelve cuántos copió (0 = sin guante vivo:
+ * el llamador usa el radio por defecto). El radar de muñeca coloca el panel a radio real de la malla + holgura (vrradar_wrist_quad_mesh). */
+int32_t mv_vrgame_forearm_mesh(int32_t side, float *xyz, int32_t max_verts);
 /* Pose del agarre (marco de vr/body) como matriz 4x4 columna-mayor; 1 si el mando está rastreado. */
 int32_t mv_vrgame_hand_matrix(int32_t side, float m[16]);
 /* Marcos de depuración (m, espacio recentrado; 4x4 columna-mayor: columnas = ejes x, y, z y origen). kind: 0 = lo que pide el mando (agarre con el
@@ -140,6 +143,7 @@ unsigned vrbodyg_event_count(int ev);                                  /* VRG_EV
 uint16_t vrbodyg_pad(uint16_t pad, const struct BridgeState *bs, int right_handed);
 int32_t mv_vrgame_menu_hand(void);                                     /* mano física (0 izq, 1 der) que mantiene abierta la ventana de armas/objetos del gesto del pecho; -1 ninguna */
 int vrgame_hand_raw(int side, float p[3], float *grip, float *trig, double *t_s);   /* pose del agarre (espacio usuario, m), grip (puño), gatillo y marca de tiempo (s, monótono; 0 con guion de pruebas); 1 si hay seguimiento */
+int vrgame_glove_pub(void);                                              /* hueco publicado de los guantes (-1 = ninguno) */
 int vrgame_weapon_engaged(void);                                       /* arma VR mostrada o recarga en curso */
 void vrgame_haptic(int side, float strength);                          /* pulso háptico (0..1) a la mano física */
 void vrgame_frame_end(void);                   /* una vez por VBlank, tras el puente: publica el antebrazo y el estado */

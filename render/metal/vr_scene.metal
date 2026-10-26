@@ -50,12 +50,49 @@ inline VrVOut vr_pack(const device VrGpuVtx &v, const device VrGpuState *states,
     return o;
 }
 
+/* Carteles (VR_VF_BILLBOARD; mismas funciones en C: vr_eye_from_viewproj y vr_billboard_corner de vr/scene/vr_scene.c, con prueba en test_scene.c). Los resplandores de la PS1 son rectángulos de pantalla y salen como
+ * cuadriláteros perpendiculares al eje de la cámara del juego: al girar la cabeza se verían de canto. El vértice se descompone en la base (R, D, N) de la cámara del juego respecto del centro C y se recompone con la
+ * base girada por la rotación mínima que lleva N al rayo ojo->centro: mismos semiejes en metros, misma distancia al ojo, UV intacto. Sin ojo útil (sobre el centro o rayo opuesto a N) no cambia nada. */
+/* Ojo (mundo) de view_proj = P*V: el origen del espacio de vista es la intersección de los planos clip.x = 0, clip.y = 0, clip.w = 0 (filas 0, 1 y 3); no depende de la simetría de la proyección. */
+inline float3 vr_eye_pos(float4x4 m, thread bool &ok) {
+    float3 r0 = float3(m[0][0], m[1][0], m[2][0]), r1 = float3(m[0][1], m[1][1], m[2][1]), r3 = float3(m[0][3], m[1][3], m[2][3]);
+    float3 c13 = cross(r1, r3), c30 = cross(r3, r0), c01 = cross(r0, r1);
+    float det = dot(r0, c13);
+    ok = abs(det) > 1.0e-9;
+    return ok ? -(m[3][0] * c13 + m[3][1] * c30 + m[3][3] * c01) / det : float3(0.0);
+}
+inline float3 vr_billboard_pos(const device VrGpuState &st, float3 p, float3 eye) {
+    float3 C = float3(st.bb[0], st.bb[1], st.bb[2]), R = float3(st.bb[3], st.bb[4], st.bb[5]), D = float3(st.bb[6], st.bb[7], st.bb[8]), N = float3(st.bb[9], st.bb[10], st.bb[11]);
+    float3 f = C - eye;
+    float len = length(f);
+    if (!(len > 1.0e-4)) return p;
+    f /= len;
+    float c = dot(N, f);
+    if (!(c > -0.999)) return p;
+    float3 v = cross(N, f);
+    float k = 1.0 / (1.0 + c);
+    float3 d = p - C;
+    float a = dot(d, R), b = dot(d, D), n = dot(d, N);
+    float3 R2 = c * R + cross(v, R) + k * dot(v, R) * v;   /* rotación mínima N -> f (Rodrigues) */
+    float3 D2 = c * D + cross(v, D) + k * dot(v, D) * v;
+    return C + a * R2 + b * D2 + n * f;
+}
+inline float4 vr_clip_pos(const device VrGpuVtx &v, const device VrGpuState *states, float4x4 vp) {
+    float3 p = float3(v.pos[0], v.pos[1], v.pos[2]);
+    if ((uint(v.flags) & VR_VF_BILLBOARD) != 0u && uint(v.pad) != 0xFFFFu) {
+        bool ok;
+        float3 eye = vr_eye_pos(vp, ok);
+        if (ok) p = vr_billboard_pos(states[uint(v.pad)], p, eye);
+    }
+    return vp * float4(p, 1.0);
+}
+
 /* Sin amplificación (un pase por ojo): view_proj[0]. */
 vertex VrVOut vr_vs_scene(uint vid [[vertex_id]], const device VrGpuVtx *verts [[buffer(VR_BUF_VERTS)]],
                           constant VrSceneUniforms &u [[buffer(VR_BUF_UNI)]],
                           const device VrGpuState *states [[buffer(VR_BUF_STATES)]]) {
     const device VrGpuVtx &v = verts[vid];
-    return vr_pack(v, states, u.view_proj[0] * float4(v.pos[0], v.pos[1], v.pos[2], 1.0));
+    return vr_pack(v, states, vr_clip_pos(v, states, u.view_proj[0]));
 }
 
 /* Con amplificación de vértices (layered): el mapeo de vistas del encoder suma el índice de capa y de viewport. */
@@ -64,7 +101,7 @@ vertex VrVOut vr_vs_scene_amp(uint vid [[vertex_id]], ushort amp [[amplification
                               constant VrSceneUniforms &u [[buffer(VR_BUF_UNI)]],
                               const device VrGpuState *states [[buffer(VR_BUF_STATES)]]) {
     const device VrGpuVtx &v = verts[vid];
-    return vr_pack(v, states, u.view_proj[amp] * float4(v.pos[0], v.pos[1], v.pos[2], 1.0));
+    return vr_pack(v, states, vr_clip_pos(v, states, u.view_proj[amp]));
 }
 
 /* HUD 2D: pos.xy en las coordenadas de dibujo del original -> NDC del panel (rect = origen y tamaño visibles). Sin profundidad. */

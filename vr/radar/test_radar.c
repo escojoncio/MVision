@@ -6,9 +6,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <glob.h>
 #include "cpu.h"
 #include "sys.h"
 #include "vr_radar.h"
+#include "vr_glove.h"
 
 static int fails, checks;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fprintf(stderr, "FALLO %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); fails++; } } while (0)
@@ -710,6 +712,177 @@ static void t_pick_arm(void) {
     }
 }
 
+
+/* ------------------------------------------------------------------------------------------------ visibilidad: solo cuando la muñeca mira a la cara */
+static void eye_at(float e[3], float deg) { float r = deg * 3.14159265f / 180.0f; e[0] = sinf(r); e[1] = 0; e[2] = cosf(r); }   /* ojo a 1 m del panel, a `deg` de su normal (0,0,1) */
+static void t_visibility(void) {
+    const float n[3] = {0, 0, 1}, c[3] = {0, 0, 0};
+    float e[3];
+    eye_at(e, 0);
+    CHECK(NEAR(vrradar_visibility(n, c, e, 0.0f, 0.075f), 0.5, 1e-6), "aparece en 0,15 s: a mitad de fundido 0,5");
+    CHECK(NEAR(vrradar_visibility(n, c, e, 0.5f, 0.075f), 1.0, 1e-6) && NEAR(vrradar_visibility(n, c, e, 0.5f, 5.0f), 1.0, 1e-6), "llega a 1 y no pasa");
+    CHECK(NEAR(vrradar_visibility(n, c, e, 0.0f, 0.15f), 1.0, 1e-6), "fundido de 0,15 s");
+    CHECK(NEAR(vrradar_visibility(n, c, e, 0.3f, 0.0f), 0.3, 1e-6), "dt 0: sin cambio");
+    eye_at(e, 44.0f); CHECK(vrradar_visibility(n, c, e, 0.0f, 1.0f) == 1.0f, "44 grados: aparece");
+    eye_at(e, 46.0f); CHECK(vrradar_visibility(n, c, e, 0.0f, 1.0f) == 0.0f, "46 grados desde oculto: sigue oculto (histéresis)");
+    eye_at(e, 54.0f);
+    CHECK(vrradar_visibility(n, c, e, 1.0f, 1.0f) == 1.0f, "54 grados desde visible: sigue visible");
+    CHECK(vrradar_visibility(n, c, e, 0.0f, 1.0f) == 0.0f, "54 grados desde oculto: sigue oculto");
+    eye_at(e, 56.0f);
+    CHECK(vrradar_visibility(n, c, e, 1.0f, 1.0f) == 0.0f, "56 grados: desaparece");
+    CHECK(NEAR(vrradar_visibility(n, c, e, 1.0f, 0.075f), 0.5, 1e-6), "desaparece en 0,15 s");
+    CHECK(NEAR(vrradar_visibility(n, c, e, 0.05f, 0.075f), 0.0, 1e-6), "no baja de 0");
+    e[0] = 0; e[1] = 0; e[2] = -1; CHECK(vrradar_visibility(n, c, e, 1.0f, 1.0f) == 0.0f, "ojo detrás del panel: oculto");
+    /* barrido de ángulo 0 -> 90 -> 0 a 90 Hz: aparece al cruzar 45 bajando, se mantiene hasta 55 subiendo, y no reaparece hasta bajar de 45 */
+    float v = 0; int off_at_up = -1, on_at_down = -1;
+    for (int i = 0; i <= 900; i++) {
+        float deg = i <= 450 ? i * 0.2f : (900 - i) * 0.2f;   /* 0 -> 90 -> 0, 0,2 grados por paso */
+        eye_at(e, deg);
+        float pv = v; v = vrradar_visibility(n, c, e, v, 1.0f / 90.0f);
+        CHECK(v >= 0.0f && v <= 1.0f && fabsf(v - pv) <= 1.0f / 90.0f / VRRADAR_VIS_FADE_S + 1e-6f, "paso de fundido acotado");
+        if (i <= 450 && pv >= 0.999f && v < 0.999f && off_at_up < 0) off_at_up = i;
+        if (i > 450 && pv <= 0.001f && v > 0.001f && on_at_down < 0) on_at_down = i;
+    }
+    CHECK(off_at_up >= 0 && off_at_up * 0.2f >= 54.9f && off_at_up * 0.2f <= 56.0f, "subiendo: empieza a apagarse pasados 55 grados (paso %d = %.1f)", off_at_up, off_at_up * 0.2f);
+    CHECK(on_at_down >= 0 && (900 - on_at_down) * 0.2f <= 45.0f + 1e-3f, "bajando: reaparece al bajar de 45 grados (paso %d)", on_at_down);
+    /* entradas no válidas = fuera de la zona */
+    eye_at(e, 0);
+    float nan3[3] = {NAN, 0, 1}, z3[3] = {0, 0, 0};
+    CHECK(vrradar_visibility(nan3, c, e, 1.0f, 1.0f) == 0.0f && vrradar_visibility(z3, c, e, 1.0f, 1.0f) == 0.0f && vrradar_visibility(n, c, c, 1.0f, 1.0f) == 0.0f, "normal NaN / nula / ojo sobre el panel: oculto");
+    CHECK(vrradar_visibility(NULL, c, e, 1.0f, 1.0f) == 0.0f && vrradar_visibility(n, NULL, e, 1.0f, 1.0f) == 0.0f && vrradar_visibility(n, c, NULL, 1.0f, 1.0f) == 0.0f, "NULL: oculto");
+    CHECK(vrradar_visibility(n, c, e, NAN, 1.0f) == 1.0f && vrradar_visibility(n, c, e, 7.0f, 0.0f) == 1.0f && vrradar_visibility(n, c, e, -3.0f, 0.0f) == 0.0f, "prev fuera de rango / NaN se acota");
+    CHECK(vrradar_visibility(n, c, e, 0.0f, NAN) == 0.0f && vrradar_visibility(n, c, e, 0.0f, -1.0f) == 0.0f, "dt no válido: sin cambio");
+}
+
+/* ------------------------------------------------------------------------------------------------ el panel no atraviesa el antebrazo */
+static void sub3(float o[3], const float a[3], const float b[3]) { for (int i = 0; i < 3; i++) o[i] = a[i] - b[i]; }
+/* distancia de p al triángulo abc (punto más próximo, Ericson) */
+static float dist_pt_tri(const float p[3], const float a[3], const float b[3], const float c[3]) {
+    float ab[3], ac[3], ap[3]; sub3(ab, b, a); sub3(ac, c, a); sub3(ap, p, a);
+    float d1 = dotv(ab, ap), d2 = dotv(ac, ap), q[3];
+    if (d1 <= 0 && d2 <= 0) { memcpy(q, a, sizeof q); }
+    else {
+        float bp[3]; sub3(bp, p, b); float d3 = dotv(ab, bp), d4 = dotv(ac, bp);
+        float cp[3]; sub3(cp, p, c); float d5 = dotv(ab, cp), d6 = dotv(ac, cp);
+        float vc = d1 * d4 - d3 * d2, vb = d5 * d2 - d1 * d6, va = d3 * d6 - d5 * d4;
+        if (d3 >= 0 && d4 <= d3) memcpy(q, b, sizeof q);
+        else if (vc <= 0 && d1 >= 0 && d3 <= 0) { float t = d1 / (d1 - d3); for (int i = 0; i < 3; i++) q[i] = a[i] + t * ab[i]; }
+        else if (d6 >= 0 && d5 <= d6) memcpy(q, c, sizeof q);
+        else if (vb <= 0 && d2 >= 0 && d6 <= 0) { float t = d2 / (d2 - d6); for (int i = 0; i < 3; i++) q[i] = a[i] + t * ac[i]; }
+        else if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) { float t = (d4 - d3) / ((d4 - d3) + (d5 - d6)); for (int i = 0; i < 3; i++) q[i] = b[i] + t * (c[i] - b[i]); }
+        else { float den = 1.0f / (va + vb + vc), v = vb * den, w = vc * den; for (int i = 0; i < 3; i++) q[i] = a[i] + ab[i] * v + ac[i] * w; }
+    }
+    float d[3]; sub3(d, p, q);
+    return lenv(d);
+}
+/* distancia de p a la recta (w, a unitario) */
+static float dist_axis(const float p[3], const float w[3], const float a[3]) {
+    float d[3]; sub3(d, p, w);
+    float t = dotv(d, a), r[3] = {d[0] - a[0] * t, d[1] - a[1] * t, d[2] - a[2] * t};
+    return lenv(r);
+}
+static void basis_perp(const float a[3], float e1[3], float e2[3]) {
+    float t[3] = {fabsf(a[0]) < 0.8f ? 1.0f : 0.0f, fabsf(a[0]) < 0.8f ? 0.0f : 1.0f, 0.0f};
+    float d = dotv(t, a);
+    for (int i = 0; i < 3; i++) e1[i] = t[i] - a[i] * d;
+    float l = lenv(e1); for (int i = 0; i < 3; i++) e1[i] /= l;
+    crossv(e2, a, e1);
+}
+/* Para normales giradas 0..360 grados alrededor del eje: el centro del panel (y sus esquinas) quedan fuera de la malla, a >= skin_m de ella */
+static void t_mesh_clearance(void) {
+    VrRadarWristCfg cfg = vrradar_wrist_cfg_default();
+    CHECK(NEAR(cfg.skin_m, 0.008, 1e-9), "holgura por defecto 8 mm");
+    /* (a) cilindro de radio 0,055 (64 vértices por anillo, 4 anillos) y elipse 0,055 x 0,035: la elevación sigue el radio de cada dirección */
+    VrRadarArm arm = {{0.30f * 0.27f + 0.10f, 1.20f + 0.20f * 0.27f, -0.30f + 0.90f * 0.27f}, {0.10f, 1.20f, -0.30f}, {0, 1, 0}};
+    float a[3]; sub3(a, arm.elbow, arm.wrist); { float l = lenv(a); for (int i = 0; i < 3; i++) a[i] /= l; }
+    float e1[3], e2[3]; basis_perp(a, e1, e2);
+    for (int shape = 0; shape < 2; shape++) {
+        const float rx = 0.055f, ry = shape ? 0.035f : 0.055f;
+        float V[4 * 64 * 3];
+        for (int k = 0; k < 4; k++) for (int j = 0; j < 64; j++) {
+            float th = 6.2831853f * (float)j / 64.0f, st = 0.09f * (float)k;
+            for (int i = 0; i < 3; i++) V[(k * 64 + j) * 3 + i] = arm.wrist[i] + a[i] * st + e1[i] * rx * cosf(th) + e2[i] * ry * sinf(th);
+        }
+        float lo = 1e9f, hi = 0; int ok = 1;
+        for (int d = 0; d < 360; d += 5) {
+            float th = (float)d * 3.14159265f / 180.0f, nn[3], p[3], eye[3];
+            for (int i = 0; i < 3; i++) { nn[i] = e1[i] * cosf(th) + e2[i] * sinf(th); p[i] = arm.wrist[i] + a[i] * cfg.along_m; eye[i] = p[i] + nn[i] * 0.7f; }
+            VrRadarQuad q;
+            ok &= vrradar_wrist_quad_mesh(&arm, &cfg, 71.0f / 54.0f, eye, V, 4 * 64, &q) && q.valid && dotv(q.normal, nn) > 0.9999f;
+            float dc = dist_axis(q.center, arm.wrist, a);
+            if (d % 90 == 0) CHECK(NEAR(dc, (d % 180 == 0 ? rx : ry) + cfg.skin_m, 1e-5), "forma %d ángulo %d: centro a %.5f del eje, esperado radio + holgura %.5f", shape, d, dc, (d % 180 == 0 ? rx : ry) + cfg.skin_m);
+            /* fuera de la superficie lisa: elipse x²/rx² + y²/ry² > 1 en el plano perpendicular */
+            float rel[3]; sub3(rel, q.center, arm.wrist);
+            float x = dotv(rel, e1), y = dotv(rel, e2);
+            CHECK(x * x / (rx * rx) + y * y / (ry * ry) > 1.0f, "forma %d ángulo %d: centro dentro de la sección", shape, d);
+            for (int k = 0; k < 4; k++) CHECK(dist_axis(q.corners[k], arm.wrist, a) >= dc - 1e-5f, "forma %d ángulo %d: esquina %d más cerca del eje que el centro", shape, d, k);
+            lo = fminf(lo, dc); hi = fmaxf(hi, dc);
+        }
+        CHECK(ok, "forma %d: quad válido en todos los ángulos", shape);
+        if (shape == 1) CHECK(hi - lo > 0.015f, "elipse: la elevación cambia con el ángulo (%.4f..%.4f)", lo, hi);
+        else CHECK(hi - lo < 1e-3f, "cilindro: elevación constante (%.4f..%.4f)", lo, hi);
+    }
+    /* sin malla: lift_m fijo, como vrradar_wrist_quad_eye */
+    { float eye[3] = {0.1f, 1.9f, -0.3f}; VrRadarQuad q0, q1;
+      CHECK(vrradar_wrist_quad_eye(&arm, &cfg, 1.3f, eye, &q0) && vrradar_wrist_quad_mesh(&arm, &cfg, 1.3f, eye, NULL, 0, &q1) && NEAR(dist_axis(q1.center, arm.wrist, a), dist_axis(q0.center, arm.wrist, a), 1e-6) && NEAR(dist_axis(q0.center, arm.wrist, a), cfg.lift_m, 1e-5), "sin malla: lift_m");
+      float junk[3] = {NAN, 0, 0}; CHECK(vrradar_wrist_quad_mesh(&arm, &cfg, 1.3f, eye, junk, 1, &q1) && NEAR(dist_axis(q1.center, arm.wrist, a), cfg.lift_m, 1e-5), "malla no finita: lift_m");
+      float tiny[3] = {arm.wrist[0], arm.wrist[1], arm.wrist[2]}; CHECK(vrradar_wrist_quad_mesh(&arm, &cfg, 1.3f, eye, tiny, 1, &q1) && NEAR(dist_axis(q1.center, arm.wrist, a), cfg.lift_m, 1e-5), "radio < 1 cm: lift_m");
+      CHECK(!vrradar_wrist_quad_mesh(NULL, &cfg, 1.3f, eye, NULL, 0, &q1) && !vrradar_wrist_quad_mesh(&arm, &cfg, 1.3f, eye, NULL, 0, NULL), "NULL"); }
+    /* (b) malla real del antebrazo del guante (volcado d0001 de mv2, como test_glove): el panel nunca la atraviesa */
+    static uint8_t RAM[0x200000]; static uint16_t VRAM[1024 * 512];
+    glob_t gl; memset(&gl, 0, sizeof gl);
+    const char *env = getenv("MV_DUMP");
+    char rp[512], vp[512];
+    if (env) { snprintf(rp, sizeof rp, "%s/ram.bin", env); snprintf(vp, sizeof vp, "%s/vram.bin", env); }
+    else if (glob("/home/claude/mv2/Dumps/d0001_*/ram.bin", 0, NULL, &gl) == 0 && gl.gl_pathc > 0) { snprintf(rp, sizeof rp, "%s", gl.gl_pathv[0]); snprintf(vp, sizeof vp, "%.*svram.bin", (int)(strlen(gl.gl_pathv[0]) - 7), gl.gl_pathv[0]); }
+    else { fprintf(stderr, "  (sin volcado real: malla real omitida, solo el cilindro)\n"); globfree(&gl); return; }
+    globfree(&gl);
+    FILE *f = fopen(rp, "rb"), *fv = fopen(vp, "rb");
+    if (!f || !fv || fread(RAM, 1, sizeof RAM, f) != sizeof RAM || fread(VRAM, 1, sizeof VRAM, fv) != sizeof VRAM) { fprintf(stderr, "  (volcado ilegible: malla real omitida)\n"); if (f) fclose(f); if (fv) fclose(fv); return; }
+    fclose(f); fclose(fv);
+    #define R32(o) ((uint32_t)RAM[(o)] | ((uint32_t)RAM[(o) + 1] << 8) | ((uint32_t)RAM[(o) + 2] << 16) | ((uint32_t)RAM[(o) + 3] << 24))
+    uint32_t ob = R32(0xACBB0), ps = R32(ob & 0x1FFFFF);
+    static const int PI_[2][3] = {{7, 8, 9}, {2, 3, 4}};
+    uint32_t md[2][3];
+    for (int s = 0; s < 2; s++) for (int k = 0; k < 3; k++) md[s][k] = R32((ps + 0x48 + 0x5C * (uint32_t)PI_[s][k] + 0x40) & 0x1FFFFF);
+    #undef R32
+    VrGlove *g = vrglove_create();
+    CHECK(vrglove_build(g, RAM, VRAM, md, 0) == 1, "guante real construido");
+    if (!g->valid) { vrglove_destroy(g); return; }
+    VrGlovePose pz; memset(&pz, 0, sizeof pz);
+    for (int k = 0; k < 3; k++) pz.R[k][0] = pz.R[k][4] = pz.R[k][8] = 1;
+    pz.upm = 1010.7f;
+    pz.org[1][1] = -0.260f * 1000.0f / 1010.7f; pz.org[1][2] = -0.050f * 1000.0f / 1010.7f;
+    pz.org[2][1] = pz.org[1][1] - 0.249f * 1000.0f / 1010.7f; pz.org[2][2] = pz.org[1][2] + 0.047f * 1000.0f / 1010.7f;
+    VrGloveOut *o = calloc(1, sizeof *o);
+    for (int s = 0; s < 2; s++) {
+        CHECK(vrglove_pose(g, s, &pz, o) == 0 && o->nv[1] >= 8, "pose real del antebrazo (lado %d)", s);
+        const VrGlovePiece *P = &g->p[s][1];
+        VrRadarArm ra; memcpy(ra.elbow, pz.org[1], sizeof ra.elbow); memcpy(ra.wrist, pz.org[2], sizeof ra.wrist); ra.dorsal[0] = 1; ra.dorsal[1] = 0; ra.dorsal[2] = 0;
+        float aa[3]; sub3(aa, ra.elbow, ra.wrist); { float l = lenv(aa); for (int i = 0; i < 3; i++) aa[i] /= l; }
+        float b1[3], b2[3]; basis_perp(aa, b1, b2);
+        float V[VRGLOVE_MAXOUT * 3];
+        for (uint32_t j = 0; j < o->nv[1]; j++) memcpy(&V[j * 3], o->v[1][j].pos, 3 * sizeof(float));
+        float dmin = 1e9f, rmin = 1e9f, rmax = 0;
+        for (int d = 0; d < 360; d += 3) {
+            float th = (float)d * 3.14159265f / 180.0f, nn[3], pp[3], eye[3];
+            for (int i = 0; i < 3; i++) { nn[i] = b1[i] * cosf(th) + b2[i] * sinf(th); pp[i] = ra.wrist[i] + aa[i] * cfg.along_m; eye[i] = pp[i] + nn[i] * 0.7f; }
+            VrRadarQuad q;
+            CHECK(vrradar_wrist_quad_mesh(&ra, &cfg, 71.0f / 54.0f, eye, V, o->nv[1], &q) && q.valid, "lado %d ángulo %d: quad", s, d);
+            float pts[5][3]; memcpy(pts[0], q.center, sizeof pts[0]); for (int k = 0; k < 4; k++) memcpy(pts[k + 1], q.corners[k], sizeof pts[0]);
+            for (int k = 0; k < 5; k++) for (uint32_t t = 0; t + 2 < P->nidx_out; t += 3) {
+                float dd = dist_pt_tri(pts[k], o->v[1][P->idx[t]].pos, o->v[1][P->idx[t + 1]].pos, o->v[1][P->idx[t + 2]].pos);
+                dmin = fminf(dmin, dd);
+            }
+            float rc = dist_axis(q.center, ra.wrist, aa); rmin = fminf(rmin, rc); rmax = fmaxf(rmax, rc);
+        }
+        CHECK(dmin >= cfg.skin_m - 1e-4f, "lado %d: el panel (centro y esquinas) queda a %.4f m de la malla real (mínimo %.4f)", s, dmin, cfg.skin_m);
+        printf("  antebrazo real lado %d: elevación del centro %.3f..%.3f m según el ángulo, distancia mínima panel-malla %.4f m\n", s, rmin, rmax, dmin);
+        (void)P;
+    }
+    free(o); vrglove_destroy(g);
+}
+
 int main(int argc, char **argv) {
     if (argc >= 3 && !strcmp(argv[1], "--ref")) return ref_image(argv[2], argc > 3 ? argv[3] : NULL);
     t_marks();
@@ -721,6 +894,8 @@ int main(int argc, char **argv) {
     t_ot_marks();
     t_anchor();
     t_pick_arm();
+    t_visibility();
+    t_mesh_clearance();
     fprintf(stderr, "test_radar: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

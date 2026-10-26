@@ -22,9 +22,9 @@ INC := -I. -I$(RT) -I$(SC) -I$(BR) -I$(AI) -I$(RN)
 
 # ---- pruebas sintéticas ----
 SAN := -O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
-$(OUT)/test_radar: test_radar.c vr_radar.c vr_radar_hle.c vr_radar.h $(SC)/vr_scene.c $(SC)/vr_scene.h
+$(OUT)/test_radar: test_radar.c vr_radar.c vr_radar_hle.c vr_radar.h $(SC)/vr_scene.c $(SC)/vr_scene.h ../hands/vr_glove.c ../hands/vr_glove.h ../body/vr_fist.c
 	@mkdir -p $(OUT)
-	$(CC) $(SAN) $(INC) test_radar.c vr_radar.c vr_radar_hle.c $(SC)/vr_scene.c -lm -o $@
+	$(CC) $(SAN) $(INC) -I../hands -I../body test_radar.c vr_radar.c vr_radar_hle.c $(SC)/vr_scene.c ../hands/vr_glove.c ../body/vr_fist.c -lm -o $@
 MOCK := $(OUT)/mock
 $(MOCK)/metal_stdlib: msl_mock/metal_stdlib
 	@mkdir -p $(MOCK)/simd

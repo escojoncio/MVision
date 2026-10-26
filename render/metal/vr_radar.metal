@@ -19,7 +19,7 @@ struct RadarQuadU {
     float4 center;   /* xyz centro (m, mundo VR), w = half_w */
     float4 right;    /* xyz eje derecho unitario, w = half_h */
     float4 up;       /* xyz eje arriba unitario, w = bezel (ancho del marco, m) */
-    float4 params;   /* x = brillo (1 = normal; > 1 al mirarlo), y = bezel_back (m), z = 0 pantalla / 1 marco, w = reservado */
+    float4 params;   /* x = brillo (1 = normal; > 1 al mirarlo), y = bezel_back (m), z = 0 pantalla / 1 marco, w = opacidad 0..1 (fundido de vrradar_visibility) */
     float4 bezel_color; /* rgb del marco (en el espacio de la textura: gamma) */
 };
 
@@ -70,5 +70,6 @@ fragment float4 vr_fs_radar(RadarVOut in [[stage_in]], constant RadarQuadU &q [[
     }
     rgb = clamp(rgb, float3(0.0), float3(1.0));
     if (kRadarLinear) rgb = float3(radar_lin1(rgb.x), radar_lin1(rgb.y), radar_lin1(rgb.z));
-    return float4(rgb, 1.0);
+    float a = clamp(q.params.w, 0.0, 1.0);
+    return float4(rgb * a, a);   /* premultiplicado: la tubería mezcla con uno / 1 - alfa de origen */
 }

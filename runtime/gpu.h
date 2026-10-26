@@ -232,5 +232,6 @@ void gte_hp_frame(void);
 int gte_hp_lookup(int sx, int sy, GpuHpInfo *out);   /* solo vértices normales (flags==0), el más reciente */
 int gte_hp_resolve(int n, const int *sx, const int *sy, GpuHpInfo *out, uint8_t *ok); /* ver gte.c; devuelve nº resueltos */
 int gte_hp_resolve_a(int n, const int *sx, const int *sy, const uint32_t *addr, const uint32_t *word, GpuHpInfo *out, uint8_t *ok); /* idem, con la dirección de cada palabra de vértice */
+int gte_hp_resolve_addr(uint32_t addr, uint32_t word, GpuHpInfo *out); /* una palabra, SOLO por dirección (RECT/sprites; sin asociación por valor): 1 si vale */
 void gte_hp_eval(int on, int ex, int ey); /* autoevaluación de la heurística (solo medición; ver gte.c) */
 void gte_hp_stats(GteHpStats *s);

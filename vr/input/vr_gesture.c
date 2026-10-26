@@ -506,3 +506,33 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
     if (circle) out->press |= VRG_CIRCLE;
     if (triangle) out->press |= VRG_TRIANGLE;
 }
+
+uint16_t vrg_step_pad(vrg_t *g, const vrg_in_t *in, vrg_out_t *out, const vrg_pad_t *p) {
+    const int keep = g->menu_hold;                   /* vrg_update lo borra al perder el control, pero con la ventana abierta debe sobrevivir */
+    const int lost[2] = {g->hold_lost[0], g->hold_lost[1]};   /* ídem (vrg_reset lo pone a 0) */
+    vrg_update(g, in, out);
+    g->hold_lost[0] = lost[0]; g->hold_lost[1] = lost[1];
+    if (!p->ctl) g->menu_hold = p->menu_open ? keep : 0;
+    /* La ventana se sostiene con el gatillo FÍSICO de la mano (histéresis: ya abierta, basta trig > trig_off), no con el mando entrante: la capa de menú de vr_input solo lleva L2 de la
+     * mano no dominante tras su antirrebote (R2 de la dominante sí lo lleva siempre), y si el botón faltaba un VBlank el juego cerraba el selector y lo reabría en bucle.
+     * Un fallo breve del seguimiento de la mano (hasta VRG_HOLD_LOST_MAX VBlanks seguidos) no la suelta: vrg_update la habría cerrado, se restaura. */
+    uint16_t hold = 0;
+    for (int s = 0; s < 2; s++) {
+        if (!((keep >> s) & 1) && !((g->menu_hold >> s) & 1)) { g->hold_lost[s] = 0; continue; }
+        if (!p->tracked[s] && ((keep >> s) & 1) && (p->ctl || p->menu_open) && g->hold_lost[s] < VRG_HOLD_LOST_MAX) {
+            g->hold_lost[s]++; g->menu_hold |= 1 << s;
+            hold |= (uint16_t)(s == (g->cfg.right_handed ? 1 : 0) ? VRG_R2 : VRG_L2);
+            if (p->ctl) out->menu_open[s] = 1; else g->trig_dn[s] = 1;
+            continue;
+        }
+        if (!((g->menu_hold >> s) & 1)) { g->hold_lost[s] = 0; continue; }
+        if (!(p->tracked[s] && fin(p->trig[s]) && p->trig[s] > g->cfg.trig_off)) { g->menu_hold &= ~(1 << s); g->hold_lost[s] = 0; continue; }
+        g->hold_lost[s] = 0;
+        hold |= (uint16_t)(s == (g->cfg.right_handed ? 1 : 0) ? VRG_R2 : VRG_L2);
+        if (!p->ctl) g->trig_dn[s] = 1;              /* vrg_update lo reinició: al volver el control el gatillo sigue apretado (histéresis), no hay que superar trig_on otra vez */
+    }
+    if (!p->ctl) return (uint16_t)(p->pad_in | hold);
+    uint16_t res = (uint16_t)(((p->pad & ~out->mask) | out->press) | hold);
+    if (p->r2_fire && (out->mask & VRG_R2)) res = (uint16_t)(res & ~VRG_SQUARE);   /* gatillo dentro de la zona de menú: no dispara */
+    return res;
+}

@@ -365,7 +365,7 @@ static int finite3(const float v[3]) { return isfinite(v[0]) && isfinite(v[1]) &
 
 VrRadarWristCfg vrradar_wrist_cfg_default(void) {
     VrRadarWristCfg c;
-    c.width_m = 0.07f; c.height_m = 0.0f; c.along_m = 0.13f; c.lift_m = 0.065f; c.bezel_m = 0.004f; c.bezel_back_m = 0.002f;
+    c.width_m = 0.07f; c.height_m = 0.0f; c.along_m = 0.13f; c.lift_m = 0.065f; c.skin_m = 0.008f; c.bezel_m = 0.004f; c.bezel_back_m = 0.002f;
     c.rot90 = 0; c.gaze_boost = 0.35f; c.gaze_cos_in = 0.93f; c.gaze_cos_out = 0.75f;
     return c;
 }
@@ -375,6 +375,23 @@ int vrradar_wrist_quad(const VrRadarArm *arm, const VrRadarWristCfg *cfg_, float
 }
 
 int vrradar_wrist_quad_eye(const VrRadarArm *arm, const VrRadarWristCfg *cfg_, float aspect, const float eye[3], VrRadarQuad *q) {
+    return vrradar_wrist_quad_mesh(arm, cfg_, aspect, eye, NULL, 0, q);
+}
+
+/* Radio de la malla en la dirección n (unitaria, perpendicular al eje): máx. de dot(v - wrist, n) sobre los vértices; 0 si no hay o alguno no es finito. */
+static float mesh_radius(const float wrist[3], const float n[3], const float *verts, uint32_t nverts) {
+    if (!verts || !nverts) return 0.0f;
+    float r = -INFINITY;
+    for (uint32_t i = 0; i < nverts; i++) {
+        const float *v = verts + 3 * (size_t)i;
+        if (!finite3(v)) return 0.0f;
+        float d = (v[0] - wrist[0]) * n[0] + (v[1] - wrist[1]) * n[1] + (v[2] - wrist[2]) * n[2];
+        if (d > r) r = d;
+    }
+    return r;
+}
+
+int vrradar_wrist_quad_mesh(const VrRadarArm *arm, const VrRadarWristCfg *cfg_, float aspect, const float eye[3], const float *verts, uint32_t nverts, VrRadarQuad *q) {
     if (!q) return 0;
     memset(q, 0, sizeof *q);
     if (!arm) return 0;
@@ -403,8 +420,10 @@ int vrradar_wrist_quad_eye(const VrRadarArm *arm, const VrRadarWristCfg *cfg_, f
     float h = cfg.height_m > 0.0f ? cfg.height_m : cfg.width_m / (aspect > 0.1f ? aspect : 1.0f);
     q->half_w = cfg.width_m * 0.5f; q->half_h = h * 0.5f;
     q->bezel = cfg.bezel_m > 0 ? cfg.bezel_m : 0; q->bezel_back = cfg.bezel_back_m > 0 ? cfg.bezel_back_m : 0;
+    float lift = cfg.lift_m, rad = mesh_radius(arm->wrist, n, verts, nverts);
+    if (rad > 0.01f && isfinite(rad) && isfinite(cfg.skin_m)) lift = rad + (cfg.skin_m > 0.0f ? cfg.skin_m : 0.0f);   /* radio real de la malla en esa dirección + holgura */
     for (int i = 0; i < 3; i++) {
-        q->center[i] = arm->wrist[i] + a[i] * cfg.along_m + n[i] * cfg.lift_m;
+        q->center[i] = arm->wrist[i] + a[i] * cfg.along_m + n[i] * lift;
         q->right[i] = r[i]; q->up[i] = u[i]; q->normal[i] = n[i];
         q->corners[0][i] = q->center[i] - r[i] * q->half_w + u[i] * q->half_h;
         q->corners[1][i] = q->center[i] + r[i] * q->half_w + u[i] * q->half_h;
@@ -445,6 +464,22 @@ static float sstep(float a, float b, float x) {
     float t = (x - a) / (b - a);
     t = t < 0 ? 0 : (t > 1 ? 1 : t);
     return t * t * (3.0f - 2.0f * t);
+}
+
+float vrradar_visibility(const float normal[3], const float center[3], const float eye[3], float prev, float dt) {
+    prev = prev >= 1.0f ? 1.0f : (prev > 0.0f ? prev : 0.0f);   /* NaN -> 0 */
+    float target = 0.0f;
+    if (normal && center && eye && finite3(normal) && finite3(center) && finite3(eye)) {
+        float n[3] = {normal[0], normal[1], normal[2]}, e[3] = {eye[0] - center[0], eye[1] - center[1], eye[2] - center[2]};
+        if (norm3(n) && norm3(e)) {
+            const float rad = 3.14159265358979f / 180.0f;
+            float c = dot3(n, e);
+            target = c > cosf(VRRADAR_VIS_ON_DEG * rad) ? 1.0f : (c < cosf(VRRADAR_VIS_OFF_DEG * rad) ? 0.0f : (prev > 0.0f ? 1.0f : 0.0f));
+        }
+    }
+    float step = dt > 0.0f && isfinite(dt) ? dt / VRRADAR_VIS_FADE_S : 0.0f;
+    float d = target - prev;
+    return prev + (d > step ? step : (d < -step ? -step : d));
 }
 
 float vrradar_gaze(const VrRadarQuad *q, const float eye[3], const float fwd[3], const VrRadarWristCfg *cfg_) {

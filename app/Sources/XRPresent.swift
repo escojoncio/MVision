@@ -676,6 +676,11 @@ final class XRPresenter {
         var halfW: Float, halfH: Float
     }
 
+    /// Qué es HUD y qué no (vista mundo): las regiones de arriba son los recortes donde el juego dibuja su HUD (vida/oxígeno, alertas, radar, objeto, subtítulos, arma/munición): van a paneles
+    /// pequeños (o al antebrazo). La región del centro («cualquier otra cosa»: texto y créditos que salen durante la partida) NO es HUD: va en un plano fijo a la cabeza con el mismo
+    /// tamaño angular que la ventana de la lista en el cine (cfg.width a cfg.distance), alineado con el encuadre del juego, y no a un panel de HUD fuera de sitio.
+    private static let hudIsFramed = [false, false, false, true, false, false, false]
+
     /// Recorte del panel 2D -> ranura de la muñeca (-1: flota delante de la vista). La vida/oxígeno, el objeto y el arma/munición van al brazo.
     private static let wristSlot = [0, -1, -1, -1, 1, -1, 2]
 
@@ -897,6 +902,19 @@ final class XRPresenter {
                 // Con la ventana del menú en la mano, las zonas del HUD que cruzan su rect no se dibujan (ya va en el panel de la mano); las demás siguen (vida, créditos...).
                 if overlay2D, let m = hudMenuUV, m.x < rg.u1 && m.z > rg.u0 && m.y < rg.v1 && m.w > rg.v0 { continue }
                 var it = XRDrawItem(kind: .panel, texture: h)
+                if shown == .world && Self.hudIsFramed[i] {
+                    // Plano del encuadre del juego: la capa 2D entera (4:3) mediría cfg.width a cfg.distance (como la pantalla de cine); aquí solo se ve el recorte de la región, en su sitio del encuadre.
+                    let W = XRCinemaLayout.width(base: cfg.width, legible: XRCinemaLayout.legible(reason: Int32(gs.view_reason), kind: gs.view_kind)), D = cfg.distance   // mismo ancho que la pantalla de cine
+                    let cx = ((rg.u0 + rg.u1) / 2 - 0.5) * W, cy = (0.5 - (rg.v0 + rg.v1) / 2) * W * 0.75
+                    it.model = frame * XRMath.translation(SIMD3<Float>(cx, cy, -D))
+                    it.uvrect = SIMD4<Float>(rg.u0, rg.v0, rg.u1, rg.v1)
+                    it.size = SIMD2<Float>((rg.u1 - rg.u0) * W, (rg.v1 - rg.v0) * W * 0.75)
+                    it.distance = D
+                    it.opacity = 1
+                    it.onTop = true
+                    r.items.append(it)
+                    continue
+                }
                 if Self.wristSlot[i] >= 0, let w = wrist, let m = wm, m.ok {
                     // Plano del radar (+0,002 m hacia el espectador para no solaparse con el cuerpo), hacia el codo (-derecha) o la mano.
                     let dir: Float = cfg.wristHandSide ? 1 : -1

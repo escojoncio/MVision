@@ -384,6 +384,9 @@ static struct {
     int pending;
     int pend_n;
     Saved sv[8];                 /* 6 piezas de los brazos + torso y cuello (torso_follow) */
+    struct { uint32_t addr, model; int16_t vis_old; } nh[64];   /* piezas ocultas por cercanía al ojo (hide_near), hasta vrbody_restore */
+    int nh_n;
+    int nh_ok; VrBodyView nh_view;   /* vista válida del último apply (hide_near la usa tras él) */
     ModelFlags mf[16];
     int tf_init, tf_engaged; float tf_yaw;   /* guiñada filtrada del torso (grados) y si está siguiendo a la mirada */
     FistSave fs[2];
@@ -469,6 +472,7 @@ void vrbody_config_default(VrBodyConfig *c) {
     c->part_arm[0][0] = 7; c->part_arm[0][1] = 8; c->part_arm[0][2] = 9;
     c->part_arm[1][0] = 2; c->part_arm[1][1] = 3; c->part_arm[1][2] = 4;
     c->part_torso = 1; c->part_neck = 5; c->min_parts = 16; c->force_arm_visible = 1;
+    c->near_hide_m = 0.30f; c->near_hide_vtx_m = 0.12f;
     c->torso_follow = 1; c->torso_yaw_tau_s = 0.25f; c->torso_deadzone_deg = 15.0f;
     c->grip_to_wrist_mm = 55.0f;
     c->hand_roll_deg = 45.0f;
@@ -633,6 +637,11 @@ void vrbody_restore(uint8_t *ram) {
         s->used = 0;
     }
     G.pend_n = 0;
+    for (int i = 0; i < G.nh_n; i++) {
+        if (ptr_ok(G.nh[i].addr, OBJ_SIZE) && rd_u32(ram, G.nh[i].addr + OBJ_MODEL) == G.nh[i].model) wr_s16(ram, G.nh[i].addr + OBJ_VIS, G.nh[i].vis_old);
+        else G.st.stale_dropped++;
+    }
+    G.nh_n = 0;
     for (int i = 0; i < 16; i++) {
         ModelFlags *m = &G.mf[i];
         if (!m->used) continue;
@@ -702,7 +711,16 @@ void vrbody_prefist(uint8_t *ram) {
     }
 }
 
+static int apply_main(uint8_t *ram);
+static void hide_near(uint8_t *ram);
 int vrbody_apply(uint8_t *ram) {
+    G.nh_ok = 0;
+    int n = apply_main(ram);
+    hide_near(ram);
+    return n;
+}
+
+static int apply_main(uint8_t *ram) {
     G.st.applies++;
     if (G.pending) { G.st.stale_dropped++; vrbody_restore(ram); }      /* un apply anterior sin restore: primero devolver sus originales */
     G.live[0].ok = G.live[1].ok = 0;
@@ -718,6 +736,7 @@ int vrbody_apply(uint8_t *ram) {
         return 0;
     }
 
+    G.nh_ok = 1; G.nh_view = view;
     /* ---- modelo del jugador ---- */
     uint32_t ob = rd_u32(ram, BA_PLAYER_BODY);
     if (!ptr_ok(ob, 8)) { G.st.skip_model++; return 0; }
@@ -804,7 +823,7 @@ int vrbody_apply(uint8_t *ram) {
         if (dup) continue;                                             /* mismo modelo en dos piezas: se guarda una sola vez */
         ModelFlags *m = &G.mf[i];
         m->used = 1; m->addr = mdl; m->flags_old = rd_u32(ram, mdl + MDL_FLAGS);
-        wr_i32(ram, mdl + MDL_FLAGS, (int32_t)(m->flags_old | MF_TWO_SIDED));
+        wr_i32(ram, mdl + MDL_FLAGS, (int32_t)(m->flags_old | MF_TWO_SIDED)); G.st.two_sided++;
         G.pending = 1;
     }
 
@@ -841,7 +860,7 @@ int vrbody_apply(uint8_t *ram) {
                 xf_write(ram, tp[k]->addr + OBJ_WORLD, tx[k]);
                 xf_write(ram, tp[k]->addr + OBJ_SCREEN, &scr);
             }
-            G.pending = 1; G.pend_n = ns; G.st.torso_applies++;
+            G.pending = 1; G.pend_n = ns; G.st.torso_applies++; G.st.torso_yaw = G.tf_yaw; G.st.torso_gaze = view.gaze_yaw_deg;
             tf_on = 1; tf = n1;
         }
     }
@@ -1011,7 +1030,7 @@ int vrbody_apply(uint8_t *ram) {
                 int16_t tv = rd_s16(ram, ptor.addr + OBJ_VIS);
                 if (tv > 0) { wr_s16(ram, pi[k]->addr + OBJ_VIS, tv); sv->vis_forced = 1; G.st.vis_forced++; }
             }
-            if (cfg->own_hands) { wr_s16(ram, pi[k]->addr + OBJ_VIS, 0); sv->vis_hidden = 1; }      /* el anfitrión dibuja manos propias */
+            if (cfg->own_hands) { wr_s16(ram, pi[k]->addr + OBJ_VIS, 0); sv->vis_hidden = 1; G.st.hidden_pieces++; }      /* el anfitrión dibuja manos propias */
             Xf scr; xf_comp(&scr, &eye, &nw[k]);
             xf_write(ram, pi[k]->addr + OBJ_WORLD, &nw[k]);
             xf_write(ram, pi[k]->addr + OBJ_SCREEN, &scr);
@@ -1057,6 +1076,57 @@ int vrbody_apply(uint8_t *ram) {
     G.st.arms_driven += (uint32_t)driven;
     if (driven && G.hook) G.hook(ram);
     return driven;
+}
+
+/* Cuerpo por delante al atacar (cfg.near_hide_m / near_hide_vtx_m): tras la IK de los brazos, oculta (+0x4C = 0) las piezas del jugador que quedan delante del ojo y pegadas a él. Piernas y pies (10-15)
+ * nunca; tampoco los brazos movidos por la IK este frame (se dibujan a propósito); ni las ya ocultas. Centro = media de los vértices (el origen de la pieza si no tiene). vrbody_restore las devuelve. */
+#define PART_LEG_FIRST 10
+#define PART_LEG_LAST 15
+static void hide_near(uint8_t *ram) {
+    const VrBodyConfig *cfg = &G.cfg;
+    if (!G.nh_ok || !ram || !cfg->enabled || !(cfg->near_hide_m > 0.0f || cfg->near_hide_vtx_m > 0.0f)) return;
+    const VrBodyView *view = &G.nh_view;
+    uint32_t ob = rd_u32(ram, BA_PLAYER_BODY);
+    if (!ptr_ok(ob, 8)) return;
+    uint32_t pset = rd_u32(ram, ob);
+    if (!ptr_ok(pset, OBJS_FIRST + OBJ_SIZE)) return;
+    int nm = rd_s16(ram, pset + OBJS_NPARTS);
+    if (nm < cfg->min_parts || nm > MAX_PARTS || !ptr_ok(pset, OBJS_FIRST + OBJ_SIZE * (uint32_t)nm)) return;
+    if (rd_s16(ram, pset + OBJS_VIS) == 0) return;
+    float gy = isfinite(view->gaze_yaw_deg) ? view->gaze_yaw_deg * DEG : 0.0f, gx = sinf(gy), gz = cosf(gy);
+    float upm = view->units_per_m, near_u = cfg->near_hide_m * upm, vtx_u = cfg->near_hide_vtx_m * upm;
+    for (int i = 0; i < nm && G.nh_n < 64; i++) {
+        if (i >= PART_LEG_FIRST && i <= PART_LEG_LAST) continue;
+        int driven_arm = 0;
+        for (int s = 0; s < 2; s++) if (G.dbg[s].driven) for (int k = 0; k < 3; k++) driven_arm |= cfg->part_arm[s][k] == i;
+        if (driven_arm) continue;
+        uint32_t pa = pset + OBJS_FIRST + OBJ_SIZE * (uint32_t)i, mdl = rd_u32(ram, pa + OBJ_MODEL);
+        int16_t vis = rd_s16(ram, pa + OBJ_VIS);
+        if (vis == 0 || !ptr_ok(mdl, 0x40)) continue;
+        Xf w; xf_read(ram, pa + OBJ_WORLD, &w);
+        int32_t nv = rd_i32(ram, mdl + MDL_NV_OFF);
+        uint32_t voff = rd_u32(ram, mdl + MDL_VOFF);
+        float c[3] = {0, 0, 0}, dmin2 = INFINITY;      /* centro (media) y distancia mínima al ojo, en el mundo (unidades del motor) */
+        int np = 0;
+        if (nv > 0 && nv <= 256 && ptr_ok(voff, (uint32_t)nv * 8u)) {
+            for (int32_t k = 0; k < nv; k++) {
+                float lv[3] = {(float)rd_s16(ram, voff + 8u * (uint32_t)k), (float)rd_s16(ram, voff + 8u * (uint32_t)k + 2), (float)rd_s16(ram, voff + 8u * (uint32_t)k + 4)}, p[3];
+                m_mulv(p, w.R, lv); v_add(p, p, w.t);
+                for (int a = 0; a < 3; a++) c[a] += p[a];
+                float d[3]; v_sub(d, p, view->eye); dmin2 = fminf(dmin2, d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                np++;
+            }
+        } else { v_cp(c, w.t); np = 1; }
+        for (int a = 0; a < 3; a++) c[a] /= (float)np;
+        float dc[3]; v_sub(dc, c, view->eye);
+        int front = dc[0] * gx + dc[2] * gz > 0.0f;
+        int hide = (cfg->near_hide_m > 0.0f && front && dc[0] * dc[0] + dc[1] * dc[1] + dc[2] * dc[2] < near_u * near_u) ||
+                   (cfg->near_hide_vtx_m > 0.0f && np > 0 && nv > 0 && dmin2 < vtx_u * vtx_u);
+        if (!hide) continue;
+        G.nh[G.nh_n].addr = pa; G.nh[G.nh_n].model = mdl; G.nh[G.nh_n].vis_old = vis; G.nh_n++;
+        wr_s16(ram, pa + OBJ_VIS, 0);
+        G.pending = 1; G.st.near_hidden++;
+    }
 }
 
 int vrbody_ram_dirty(void) { return G.pending || G.fs[0].used || G.fs[1].used; }

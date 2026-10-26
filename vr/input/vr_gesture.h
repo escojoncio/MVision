@@ -128,6 +128,7 @@ typedef struct {
     int swinging;            /* 1: algún puño cerrado se mueve a velocidad de golpe (un golpe en marcha): la animación del combo del motor espera la próxima petición */
 } vrg_out_t;
 
+#define VRG_HOLD_LOST_MAX 3
 typedef struct {
     vrg_cfg_t cfg;
     /* interno */
@@ -137,6 +138,7 @@ typedef struct {
     int near_prev[2];
     int menu_hold, chest_prev[2], chest_live[2];   /* chest_live: intento en curso (gatillo apretado dentro de la zona) */
     int chest_lock[2];       /* tras abrir la ventana no hay otra apertura hasta soltar el gatillo (con seguimiento): perder y recuperar el seguimiento con el gatillo apretado no es una pulsación */
+    int hold_lost[2];        /* VBlanks seguidos sin seguimiento de la mano con la ventana del pecho abierta (vrg_step_pad tolera VRG_HOLD_LOST_MAX antes de soltarla) */
     int trig_dn[2];          /* gatillo de cada mano apretado (histéresis trig_on/trig_off) */
     float chest_cool[2], chest_t[2];
     int peek_on;
@@ -169,6 +171,19 @@ void vrg_cfg_defaults(vrg_cfg_t *c);
 void vrg_init(vrg_t *g);
 void vrg_reset(vrg_t *g);                     /* al cambiar de zona / cargar / perder el control */
 void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out);
+
+/* Mando que ve el juego en un VBlank (lo que vrbodyg hace alrededor de vrg_update). Entradas que no dependen de la capa: manos y gatillo FÍSICOS, también con el jugador sin el control. */
+typedef struct {
+    int ctl;                 /* capa de JUEGO VR (jugador al mando); 0 = capa de MENÚ (códec, radio, pausa, ventana de armas/objetos): mando original */
+    int menu_open;           /* el juego tiene abierta una ventana (selector de armas/objetos) */
+    uint16_t pad;            /* mando del usuario con R2 -> cuadrado ya convertido (capa de juego) */
+    uint16_t pad_in;         /* mando del usuario tal cual (capa de menú) */
+    int r2_fire;             /* el cuadrado de este VBlank viene del gatillo, no del botón físico */
+    int tracked[2]; float trig[2];   /* mano física rastreada y gatillo analógico */
+} vrg_pad_t;
+/* vrg_update + mando final. La ventana abierta con el gesto del pecho se sostiene con el GATILLO de la mano (histéresis trig_off), NO con el mando entrante ni con la capa:
+ * L2 (la otra mano) / R2 (la dominante) va pulsado de forma continua en todos los VBlanks mientras el gatillo siga apretado (cambie la capa o no) y se suelta al soltarlo. */
+uint16_t vrg_step_pad(vrg_t *g, const vrg_in_t *in, vrg_out_t *out, const vrg_pad_t *p);
 
 #ifdef __cplusplus
 }

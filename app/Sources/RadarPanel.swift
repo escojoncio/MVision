@@ -77,6 +77,12 @@ final class RadarPanel {
     private(set) var present = false
     private(set) var quadValid = false
     private(set) var glow: Float = 0
+    /// Opacidad 0..1 del panel: solo se ve cuando la muñeca mira a la cara (vrradar_visibility: aparece < 45 grados, desaparece > 55, fundido 0,15 s). El marco (wristFrame) no depende de esto.
+    private(set) var visibility: Float = 0
+    private var lastPoseTime = 0.0
+    /// Sesgo de profundidad hacia el ojo del quad (Z invertida: + = hacia la cámara), en unidades de r (ULP de profundidad float32): ~3e5 ≈ 1 cm a 0,3-0.6 m. Evita que quede dentro del guante
+    /// sin ignorar las oclusiones de otros objetos (más cerca de ~1 cm del panel sí lo tapan).
+    static let depthBiasToEye: Float = 3.0e5
 
     // MARK: privado
     private let device: MTLDevice
@@ -274,9 +280,10 @@ final class RadarPanel {
 
     // MARK: anclaje
     /// Calcula el quad en la muñeca. Prioridad (vrradar_pick_arm): `forearm` (codo, muñeca y dorso del antebrazo tras la IK, espacio VR, metros: es el brazo que se
-    /// dibuja, el panel queda a lift_m de su eje) si es válido; si no, `leftGrip` (pose del mando izquierdo). `headForward` unitario.
+    /// dibuja) si es válido; si no, `leftGrip` (pose del mando izquierdo). `forearmMesh`: vértices xyz del antebrazo del guante vivo (mv_vrgame_forearm_mesh); con ellos el panel queda a radio real + skin_m del eje
+    /// en la dirección de su normal (vrradar_wrist_quad_mesh); sin ellos o con el mando, a lift_m. `headForward` unitario.
     func updatePose(forearm: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>)?, leftGrip: simd_float4x4?,
-                    headPosition: SIMD3<Float>, headForward: SIMD3<Float>) {
+                    forearmMesh: [Float] = [], headPosition: SIMD3<Float>, headForward: SIMD3<Float>) {
         var arm = VrRadarArm()
         var gripArr: [Float] = []
         if let g = leftGrip {
@@ -295,8 +302,19 @@ final class RadarPanel {
         var q = VrRadarQuad()
         let aspect = rect.w > 0 && rect.z > 0 ? rect.z / rect.w : 71.0 / 54.0
         let eye: [Float] = [headPosition.x, headPosition.y, headPosition.z]
-        quadValid = ok && vrradar_wrist_quad_eye(&arm, &wrist, aspect, eye, &q) != 0      // la cara del panel gira alrededor del antebrazo hacia la cabeza
+        let useMesh = pick == 1 && forearmMesh.count >= 3
+        quadValid = ok && forearmMesh.withUnsafeBufferPointer { mp in
+            vrradar_wrist_quad_mesh(&arm, &wrist, aspect, eye, useMesh ? mp.baseAddress : nil, useMesh ? UInt32(forearmMesh.count / 3) : 0, &q)
+        } != 0      // la cara del panel gira alrededor del antebrazo hacia la cabeza
         let now = ProcessInfo.processInfo.systemUptime
+        let dt = lastPoseTime > 0 ? Float(min(max(now - lastPoseTime, 0), 0.1)) : 0
+        lastPoseTime = now
+        if quadValid {
+            let nrm: [Float] = [q.normal.0, q.normal.1, q.normal.2], ctr: [Float] = [q.center.0, q.center.1, q.center.2]
+            visibility = vrradar_visibility(nrm, ctr, eye, visibility, dt)
+        } else {
+            visibility = vrradar_visibility(nil, nil, nil, visibility, dt)      // sin pose: se funde a 0
+        }
         if now - lastRadarLog >= 1.0 {      // una vez por segundo: el hueso invisible (centro del panel) y su normal; la oclusion la decide la GPU (sin consulta de visibilidad: n/d)
             lastRadarLog = now
             func f3(_ v: Float) -> String { String(format: "%.3f", v) }
@@ -309,7 +327,7 @@ final class RadarPanel {
                 let t = min(max(simd_dot(c - w, ab) / max(simd_dot(ab, ab), 1e-9), 0), 1)
                 segD = f3(simd_length(c - (w + ab * t)))
             }
-            Storage.log("[radar] fuente=\(source) distCentroSegmentoCodoMuneca=\(segD) hueso=\(pos) normal=\(nrm) panel=\(quadValid ? "valido" : "invalido") presente=\(present) visible/ocluido=n/d flipDorsal=\(flipDorsal)")
+            Storage.log("[radar] fuente=\(source) distCentroSegmentoCodoMuneca=\(segD) hueso=\(pos) normal=\(nrm) panel=\(quadValid ? "valido" : "invalido") visibilidad=\(f3(visibility)) malla=\(useMesh ? forearmMesh.count / 3 : 0) presente=\(present) visible/ocluido=n/d flipDorsal=\(flipDorsal)")
         }
         guard quadValid else { glow = 0; return }
         let fwd: [Float] = [headForward.x, headForward.y, headForward.z]
@@ -317,7 +335,7 @@ final class RadarPanel {
         quadU.center = SIMD4<Float>(q.center.0, q.center.1, q.center.2, q.half_w)
         quadU.right = SIMD4<Float>(q.right.0, q.right.1, q.right.2, q.half_h)
         quadU.up = SIMD4<Float>(q.up.0, q.up.1, q.up.2, q.bezel)
-        quadU.params = SIMD4<Float>(1 + glow, q.bezel_back, 0, 0)
+        quadU.params = SIMD4<Float>(1 + glow, q.bezel_back, 0, visibility)
         quadU.bezelColor = SIMD4<Float>(bezelColor.x, bezelColor.y, bezelColor.z, 1)
     }
 
@@ -345,6 +363,11 @@ final class RadarPanel {
             d.rasterSampleCount = k.samples
             if k.layered { d.maxVertexAmplificationCount = viewCount }
             d.colorAttachments[0].pixelFormat = k.color
+            let qa = d.colorAttachments[0]!      // el shader devuelve color premultiplicado por la opacidad del fundido
+            qa.isBlendingEnabled = true
+            qa.rgbBlendOperation = .add; qa.alphaBlendOperation = .add
+            qa.sourceRGBBlendFactor = .one; qa.sourceAlphaBlendFactor = .one
+            qa.destinationRGBBlendFactor = .oneMinusSourceAlpha; qa.destinationAlphaBlendFactor = .oneMinusSourceAlpha
             d.depthAttachmentPixelFormat = k.depth
             if k.depth == .depth32Float_stencil8 { d.stencilAttachmentPixelFormat = k.depth }
             let p = try device.makeRenderPipelineState(descriptor: d)
@@ -373,7 +396,7 @@ final class RadarPanel {
     /// juego: es un objeto del brazo; el brillo extra (`glow`) solo sube la luminosidad de la pantalla cuando se mira.
     func encodeQuad(_ enc: MTLRenderCommandEncoder, uniforms: VrSceneUniforms, layered: Bool, color: MTLPixelFormat,
                     depth: MTLPixelFormat, samples: Int) {
-        guard enabled, present, quadValid, textureReady, let tex = texture,
+        guard enabled, present, quadValid, visibility > 0.001, textureReady, let tex = texture,
               let p = quadPipeline(QKey(layered: layered, color: color, depth: depth, samples: samples)) else { return }
         if sampler == nil { sampler = makeSampler() }
         guard let smp = sampler else { return }
@@ -381,7 +404,7 @@ final class RadarPanel {
         enc.setRenderPipelineState(p)
         enc.setDepthStencilState(depthState)
         enc.setCullMode(.none)
-        enc.setDepthBias(0, slopeScale: 0, clamp: 0)
+        enc.setDepthBias(Self.depthBiasToEye, slopeScale: 0, clamp: 0)
         enc.setVertexBytes(&u, length: MemoryLayout<VrSceneUniforms>.stride, index: Int(VR_BUF_UNI))
         enc.setFragmentTexture(tex, index: 0)
         enc.setFragmentSamplerState(smp, index: 0)
@@ -394,5 +417,6 @@ final class RadarPanel {
         enc.setVertexBytes(&q, length: MemoryLayout<RadarQuadU>.stride, index: 3)
         enc.setFragmentBytes(&q, length: MemoryLayout<RadarQuadU>.stride, index: 3)
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        enc.setDepthBias(0, slopeScale: 0, clamp: 0)
     }
 }

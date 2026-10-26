@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "vr_gesture.h"
+#include "vr_input.h"
 
 static int checks, fails;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; printf("FALLO %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
@@ -507,6 +508,115 @@ static void t_chest_phys(void) {
 }
 
 
+/* ---- ventana del pecho sostenida por el GATILLO (vrg_step_pad): L2/R2 continuo mientras el gatillo siga apretado, cambie la capa o no ---- */
+static uint16_t hold_step(vrg_t *g, const vrg_in_t *in, vrg_out_t *o, int ctl, uint16_t pad_in) {
+    vrg_pad_t p; memset(&p, 0, sizeof p);
+    p.ctl = ctl; p.menu_open = !ctl; p.pad = p.pad_in = pad_in;
+    for (int s = 0; s < 2; s++) { p.tracked[s] = in->tracked[s]; p.trig[s] = in->trig[s]; }
+    vrg_in_t iv = *in;
+    if (!ctl) { iv.active = 0; memset(iv.tracked, 0, sizeof iv.tracked); memset(iv.trig, 0, sizeof iv.trig); }   /* fuera de la capa de juego vrbodyg no rellena manos ni gatillo */
+    memcpy(iv.head_u, iv.head, sizeof iv.head_u);
+    for (int s = 0; s < 2; s++) memcpy(iv.hand_u[s], iv.hand[s], sizeof iv.hand_u[s]);
+    return vrg_step_pad(g, &iv, o, &p);
+}
+static int open_hold(vrg_t *g, vrg_in_t *in, int s, vrg_out_t *o) {   /* mano en la zona, gatillo apretado en la capa de juego hasta abrir; 1 si abrió */
+    float sd = s == 0 ? -1.0f : 1.0f;
+    put_hf(in, s, sd * 0.16f, -0.26f, -0.02f, 0.85f);
+    for (int i = 0; i < 12; i++) hold_step(g, in, o, 1, 0);
+    in->trig[s] = 1.0f;
+    for (int i = 0; i < 30; i++) { hold_step(g, in, o, 1, 0); if (o->pecho[s].valid && o->pecho[s].opened) return 1; }
+    return 0;
+}
+static void t_menu_hold(void) {
+    vrg_out_t o;
+    for (int s = 0; s < 2; s++) {
+        uint16_t btn = s == 0 ? VRG_L2 : VRG_R2, other = s == 0 ? VRG_R2 : VRG_L2;
+        /* (a) patrón del registro real: 3 VBlanks de juego, luego control/menú de 2 en 2; el mando entrante (capa de menú con antirrebote) no lleva el botón los primeros 9 VBlanks. 3 s de gatillo */
+        vrg_t g; vrg_init(&g); vrg_in_t in = phys_base();
+        CHECK(open_hold(&g, &in, s, &o));
+        int edges = 0, prev = 1, all = 1, oth = 0;   /* prev = 1: el VBlank de la apertura ya llevaba el botón */
+        for (int i = 0; i < 150; i++) {
+            uint16_t r = hold_step(&g, &in, &o, i < 2 ? 1 : ((i / 2) & 1) ^ 1, i < 9 ? 0 : btn);
+            int on = (r & btn) != 0; if (on && !prev) edges++; if (!on) all = 0; prev = on; oth |= (r & other) != 0;
+        }
+        CHECK(all);                                   /* el bit está a 1 en TODOS los VBlanks */
+        CHECK(edges == 0);                            /* sin flancos nuevos tras abrir (el flanco de subida fue el de la apertura) */
+        CHECK(!oth);
+        /* (b) lo mismo con un patrón pseudoaleatorio de capa y de mando entrante */
+        vrg_init(&g); in = phys_base(); CHECK(open_hold(&g, &in, s, &o));
+        unsigned r = 777u; all = 1;
+        for (int i = 0; i < 150; i++) {
+            r = r * 1664525u + 1013904223u;
+            uint16_t rr = hold_step(&g, &in, &o, (r >> 20) & 1, (r >> 21) & 1 ? btn : 0);
+            if (!(rr & btn)) all = 0;
+        }
+        CHECK(all);
+        /* (c) histéresis: a 0,45 (entre trig_off y trig_on) sigue en las dos capas; a 0,2 se suelta y no vuelve sin nueva apertura */
+        in.trig[s] = 0.45f;
+        for (int i = 0; i < 20; i++) CHECK(hold_step(&g, &in, &o, (i / 2) & 1, 0) & btn);
+        in.trig[s] = 0.2f;
+        CHECK(!(hold_step(&g, &in, &o, 0, 0) & btn) && !(g.menu_hold & (1 << s)));
+        in.trig[s] = 1.0f;
+        for (int i = 0; i < 20; i++) CHECK(!(hold_step(&g, &in, &o, (i / 2) & 1, 0) & btn));   /* gatillo apretado de nuevo sin pasar por el flanco de apertura: nada */
+        /* (d) soltar el gatillo estando en la capa de menú también suelta; perder el seguimiento también */
+        vrg_init(&g); in = phys_base(); CHECK(open_hold(&g, &in, s, &o));
+        hold_step(&g, &in, &o, 0, 0); in.trig[s] = 0.0f;
+        CHECK(!(hold_step(&g, &in, &o, 0, 0) & btn));
+        /* perder el seguimiento: se toleran 3 VBlanks seguidos con el botón (en ambas capas); el cuarto suelta. Recuperarlo antes reinicia la cuenta */
+        for (int lay = 0; lay < 2; lay++) {
+            vrg_init(&g); in = phys_base(); CHECK(open_hold(&g, &in, s, &o));
+            hold_step(&g, &in, &o, lay, 0); in.tracked[s] = 0;
+            for (int i = 0; i < 3; i++) CHECK(hold_step(&g, &in, &o, lay, 0) & btn);
+            CHECK(!(hold_step(&g, &in, &o, lay, 0) & btn) && !(g.menu_hold & (1 << s)));
+            vrg_init(&g); in = phys_base(); CHECK(open_hold(&g, &in, s, &o));
+            in.tracked[s] = 0;
+            for (int i = 0; i < 2; i++) CHECK(hold_step(&g, &in, &o, lay, 0) & btn);
+            in.tracked[s] = 1;
+            CHECK(hold_step(&g, &in, &o, lay, 0) & btn);
+            in.tracked[s] = 0;
+            for (int i = 0; i < 3; i++) CHECK(hold_step(&g, &in, &o, lay, 0) & btn);
+            CHECK(!(hold_step(&g, &in, &o, lay, 0) & btn));
+        }
+        vrg_init(&g); in = phys_base(); CHECK(open_hold(&g, &in, s, &o));
+        hold_step(&g, &in, &o, 0, 0); in.tracked[s] = 1; in.trig[s] = 0.0f;
+        CHECK(!(hold_step(&g, &in, &o, 0, 0) & btn));
+        /* (e) ventana abierta y el juego sale del menú (menu_open = 0 en la capa de menú: pausa, códec): se olvida */
+        vrg_init(&g); in = phys_base(); CHECK(open_hold(&g, &in, s, &o));
+        { vrg_pad_t p; memset(&p, 0, sizeof p); vrg_in_t iv = in; iv.active = 0; memset(iv.tracked, 0, sizeof iv.tracked); p.tracked[s] = 1; p.trig[s] = 1.0f;
+          CHECK(!(vrg_step_pad(&g, &iv, &o, &p) & btn) && g.menu_hold == 0); }
+    }
+}
+/* Bucle cerrado con vr_input real (antirrebote de menú) y un juego que abre el selector con el botón y lo cierra al soltarlo con 2 VBlanks de retardo: 3 s de gatillo = UNA apertura y el selector queda abierto */
+static void t_menu_loop(void) {
+    vr_input_t vi; vr_input_init(&vi);
+    vr_input_frame_t f; memset(&f, 0, sizeof f);
+    f.dt = 0.02f; f.game_posture = -1; f.hand[0].quat[3] = f.hand[1].quat[3] = 1; f.head_quat[3] = 1;
+    vrg_t g; vrg_init(&g); vrg_in_t in = phys_base(); vrg_out_t o; vr_pad_t vo;
+    put_hf(&in, 0, -0.16f, -0.26f, -0.02f, 0.85f);
+    int menu = 0, hist[3] = {0, 0, 0}, opens = 0, pulses = 0, l2prev = 0, seen_open = 0, l2_after = 0, l2_total = 0;
+    for (int t = 0; t < 200; t++) {
+        in.trig[0] = f.hand[0].trigger = t < 12 ? 0.0f : 1.0f;
+        f.menu = menu != 0; vr_input_update(&vi, &f, &vo);
+        uint16_t pin = vo.buttons, pad = pin;
+        if (!menu) pad = (uint16_t)(pad & ~VRG_R2);
+        uint16_t r = hold_step(&g, &in, &o, !menu, pin);
+        (void)pad;
+        int l2 = (r & VRG_L2) != 0;
+        if (l2 && !l2prev) pulses++;
+        l2prev = l2;
+        if (menu) seen_open = 1;
+        if (seen_open) { l2_total++; l2_after += l2; }
+        hist[2] = hist[1]; hist[1] = hist[0]; hist[0] = l2;
+        int nm = hist[2];                       /* el juego ve el botón con 2 VBlanks de retardo y sigue su nivel */
+        if (nm && !menu) opens++;
+        menu = nm;
+    }
+    printf("t_menu_loop: aperturas del selector=%d pulsos L2=%d selector_abierto_al_final=%d\n", opens, pulses, menu);
+    CHECK(opens == 1);
+    CHECK(pulses == 1);
+    CHECK(menu == 1 && l2_after == l2_total);
+}
+
 /* ---- NUEVO: golpes seguidos con la MISMA mano sin parar (boxeo): cada vaivén hacia delante con el puño cerrado es un golpe ---- */
 static void t_repeat(void) {
     vrg_t g; vrg_init(&g); vrg_in_t in = with_enemy(); vrg_out_t o; int cnt = 0;
@@ -523,7 +633,7 @@ static void t_repeat(void) {
 
 int main(void) {
     t_repeat();
-    t_punch(); t_contact(); t_rules(); t_throw(); t_walk(); t_grab(); t_chest(); t_chest_phys(); t_trigmenu(); t_knock(); t_peek(); t_robust();
+    t_punch(); t_contact(); t_rules(); t_throw(); t_walk(); t_grab(); t_chest(); t_chest_phys(); t_menu_hold(); t_menu_loop(); t_trigmenu(); t_knock(); t_peek(); t_robust();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails != 0;
 }

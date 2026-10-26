@@ -79,6 +79,7 @@ final class DumpCapture: @unchecked Sendable {
     }
 
     /// Refresca la carpeta raíz desde el hilo principal (como mucho cada 2 s); el hilo de render nunca lee `FolderAccess`.
+    private var autoDirPath = ""          // solo hilo principal (refreshRoot)
     private func refreshRoot(_ now: Double) {
         if now - rootRefreshAt < 2.0 && rootURL != nil { return }
         rootRefreshAt = now
@@ -86,6 +87,12 @@ final class DumpCapture: @unchecked Sendable {
             let base = FolderAccess.shared.root ?? Storage.documents
             let dumps = base.appendingPathComponent("Dumps", isDirectory: true)
             lock.lock(); rootURL = dumps; lock.unlock()
+            // Autovolcados del anfitrión ([autodump], vrdump.h): misma carpeta Dumps; se crea una vez por ruta.
+            if autoDirPath != dumps.path {
+                autoDirPath = dumps.path
+                try? FileManager.default.createDirectory(at: dumps, withIntermediateDirectories: true)
+                mv_vrhost_set_autodump_dir(dumps.path)
+            }
         }
     }
 

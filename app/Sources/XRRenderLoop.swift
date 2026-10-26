@@ -319,7 +319,7 @@ final class XRRenderLoop {
     }
 
     private var lastRadarLiveLog = 0.0       // systemUptime del último registro [radar] del antebrazo vivo
-    /// Coloca el radar (y con él el HUD de muñeca) sobre el ANTEBRAZO izquierdo dibujado (IK: mv_vrgame_forearm), a along_m de la muñeca y lift_m (0,065 m: sobre el radio máximo del antebrazo del guante) sobre su eje. Usa el mismo antebrazo que dibuja el guante (mv_vrgame_forearm_live, 90 Hz).
+    /// Coloca el radar (y con él el HUD de muñeca) sobre el ANTEBRAZO izquierdo dibujado (IK: mv_vrgame_forearm), a along_m de la muñeca y el radio real de la malla del guante (+ skin_m) sobre su eje; lift_m (0,065 m) solo sin malla. Usa el mismo antebrazo que dibuja el guante (mv_vrgame_forearm_live, 90 Hz).
     /// El eje +Z del agarre del mando va inclinado ~35 grados respecto al antebrazo (el panel flotaba): el mando (vrradar_arm_from_controller) solo es reserva
     /// si la IK no da antebrazo válido (vrradar_pick_arm).
     private func updateRadarPose(head: simd_float4x4) {
@@ -346,7 +346,10 @@ final class XRRenderLoop {
             Storage.log("[radar] antebrazo=\(live ? "guante vivo" : (forearm != nil ? "IK 25 Hz" : "mando")) desvio_mm=\(live ? String(format: "%.1f", devMM) : "n/d") edad_IK_ms=\(live ? String(format: "%.1f", ageMS) : "n/d")")
         }
         let fwd = simd_normalize(-SIMD3<Float>(head.columns.2.x, head.columns.2.y, head.columns.2.z))
-        radar.updatePose(forearm: forearm, leftGrip: grip,
+        // Malla del antebrazo del guante vivo: el panel se coloca a su radio real en la dirección de su normal (solo con la IK viva: misma pose que el guante dibujado).
+        var mesh = [Float](repeating: 0, count: 3 * 128)
+        let nMesh = live ? Int(mv_vrgame_forearm_mesh(0, &mesh, 128)) : 0
+        radar.updatePose(forearm: forearm, leftGrip: grip, forearmMesh: Array(mesh[0..<(3 * nMesh)]),
                          headPosition: SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z), headForward: fwd)
     }
 

@@ -22,6 +22,9 @@
  *     Los que no traen BEHIND y tienen vz < near_units se descartan (drop_near), como antes.
  *   - AMBIG junto a SAT/BEHIND: se descarta (drop_ambig) salvo cuadrilátero coherente o con un único AMBIG reconstruible por paralelogramo (recon_ambig). AMBIG solo: se acepta.
  *   - DERIVED: se acepta (opts.drop_derived=1 los descarta).
+ * Descartes de la GPU: la GPU de PS1 no dibuja un triángulo cuya extensión en pantalla (SXY del paquete, con el offset de dibujo) supera 1023 en X o 511 en Y, y el juego confía en ello (p. ej. una cuña de pared
+ * que en el original queda negra). vr_scene_build aplica la regla exacta por triángulo (un quad son (0,1,2) y (1,2,3), cada uno por su cuenta) a todo polígono, 2D o 3D, y a las líneas (|dx| > 1023 o |dy| > 511);
+ * esos triángulos no se emiten (VrStats.n_hw_cull, VR_FATE_HWCULL si no queda ninguno). Un RECT no puede pasarse (w <= 1023, h <= 511).
  * Un polígono con solo ALGUNOS vértices vvalid se descarta (opts.partial_to_2d lo manda a 2D, pero entonces aparecerá
  * como trozo de mundo en el HUD).
  *
@@ -135,6 +138,7 @@ enum {
     VR_F_FLIPPED = 0x0800, /* se permutaron dos vértices para dejar el frente (cara vista por la cámara del juego) antihorario */
     VR_F_2D = 0x1000,      /* primitiva 2D (pantalla original) */
     VR_F_LINE = 0x2000,    /* era una línea (cuadrilátero de 1 px) */
+    VR_F_BILLBOARD = 0x0400, /* triángulo de un cartel de cara a la cámara (cuadrilátero semitransparente con 2 esquinas de la GTE y 2 derivadas): el shader lo gira hacia el ojo con VrState.bb (ver "Carteles") */
     VR_F_RECT = 0x4000,    /* era un rect/sprite */
     VR_F_FILTER = 0x8000   /* primitiva de filtro de pantalla (clase 3) */
 };
@@ -178,6 +182,7 @@ static inline int vr_batch_skipped(const struct VrBatchTag *b, uint32_t skip) { 
 typedef struct {
     uint8_t twmx, twmy, twox, twoy; /* ventana de textura E2 (unidades de 8 px); 0 = sin ventana */
     int16_t cx1, cy1, cx2, cy2;     /* recorte vigente (inclusivo) */
+    float bb[12];                   /* solo con VR_F_BILLBOARD (si no, ceros): centro C(3), ejes unitarios de la cámara del juego en el mundo de salida: derecha R(3), abajo D(3), delante N(3) */
 } VrState;
 
 /* Causas de descarte de la red de seguridad (VrStats.incoh[]). */
@@ -224,6 +229,10 @@ typedef struct {
     uint32_t n_quad_noncoh;   /* ... de ellos, los que NO cumplen quad_coherent (4.º vértice fuera del plano de los otros tres) */
     uint32_t n_coplanar;      /* pares (anterior, posterior) de triángulos opacos coplanares y solapados corregidos (opts.coplanar_m) */
     uint32_t n_coplanar_skip; /* omisiones: triángulos sin revisar al agotar VR_COPLANAR_BUDGET + pares coplanares por encima de VR_COPLANAR_PAIRS; 0 = revisados todos */
+    uint32_t n_hw_cull;       /* triángulos (y líneas) que la GPU de PS1 no dibuja por su extensión en pantalla (> 1023 en X o > 511 en Y, ver "Descartes de la GPU") y que no se emiten */
+    uint32_t n_rect_hp;       /* RECT/sprites cuya palabra XY trae vista de la GTE (v[0].vvalid), con opts.rect3d o sin ella */
+    uint32_t n_rect3d;        /* ... de ellos, emitidos como cartel 3D (opts.rect3d; 2 triángulos en n_tris3d) */
+    uint32_t n_billboard;     /* cuadriláteros marcados VR_F_BILLBOARD (opts.billboard) */
 } VrStats;
 
 #define VR_FILTER_ROWS 512
@@ -376,9 +385,29 @@ typedef struct {
      *   triángulo 3D (no hay vista sobre la que aplicar un post-proceso por ojo; se reensambla la lista con veil_as_2d=1). 0 (def.) = como antes. */
     int keep_late_clear;
     int veil_as_2d;
+    /* rect3d 1: un RECT/sprite (GPU_OP_RECT) cuya palabra XY la copió el juego de un SXY de la GTE (la captura lo etiqueta por dirección, v[0].vvalid; ver runtime/gpu.c cap_rect) y que no es un filtro de
+     * pantalla sale como cartel 3D (2 triángulos, kind 0/1 según SEMI, VR_F_RECT sin VR_F_2D) en vez de al plano 2D: cuadrilátero en el plano perpendicular al eje de la cámara del juego (z de vista constante,
+     * como las esquinas derivadas de los resplandores) a la profundidad del vértice, con la esquina superior izquierda en la posición de vista y w x h píxeles escalados por profundidad/H (mismo mapeo de uv, volteo,
+     * color, mezcla y estado que el 2D; desplazamiento de proyección corregido como en los polígonos). Sin vista fiable (vvalid=0, banderas, no reproduce su XY con el modelo de la GTE) sigue al 2D. Mismas reglas
+     * de plano cercano / pieza pegada al ojo / coherencia / aristas que un polígono 3D. 0 (def.) = siempre 2D. VrStats.n_rect_hp / n_rect3d. */
+    int rect3d;
+    /* billboard 1: un POLY cuadrilátero 3D semitransparente con exactamente 2 esquinas de la GTE limpias (vflags 0) y 2 DERIVED (cartel sin GTE: luces del techo, fogonazos, esferas; ver "Carteles") se marca
+     * VR_F_BILLBOARD y lleva en su VrState el centro y los ejes de la cámara del juego, para que el shader lo oriente al ojo. Si las esquinas reales no son fiables (saturadas, ambiguas, no reproducen
+     * su SXY) o sus profundidades difieren más de un 10 %, no se marca (comportamiento anterior). 0 (def.) = nunca. VrStats.n_billboard. */
+    int billboard;
 } VrSceneOpts;
 
 VrSceneOpts vr_scene_opts_default(void);
+
+/* Carteles (VR_F_BILLBOARD). Los resplandores de la PS1 son rectángulos de pantalla: aquí salen como cuadriláteros en el plano perpendicular al eje de la cámara del juego, y al girar la cabeza se ven de canto
+ * (elipses). El vertex shader (vr_vs_scene, render/metal/vr_scene.metal) y dumpview los reorientan por ojo con estas dos funciones (misma matemática en MSL):
+ *   vr_eye_from_viewproj: posición del ojo en el mundo a partir de P*V (columna-mayor m[col*4+fila]); el origen del espacio de vista es la intersección de los planos clip.x = 0, clip.y = 0 y clip.w = 0 (filas 0, 1 y 3).
+ *     Devuelve 0 si la matriz es singular.
+ *   vr_billboard_corner: p (esquina original) -> out. Se descompone p - C en la base (R, D, N) de la cámara del juego y se recompone con la misma base girada por la rotación mínima que lleva N al rayo ojo->centro f:
+ *     out = C + a R' + b D' + n f. Conserva los semiejes en metros y la distancia del centro al ojo (por tanto el tamaño angular y la profundidad), el orden/handedness y el UV (no se toca). Con el ojo sobre el eje
+ *     (f == N) devuelve p. Sin ojo útil (ojo sobre el centro o rayo opuesto a N) devuelve p. */
+int vr_eye_from_viewproj(const double m[16], double eye[3]);
+void vr_billboard_corner(const float bb[12], const float eye[3], const float p[3], float out[3]);
 
 /* Ventana de la proyección del motor sobre la imagen mostrada (area[2] x area[3]) en tangentes de vista: columna 0 .. area_w a -cx_col/H .. (area_w-cx_col)/H, fila 0 .. area_h
  * a -cy_row/H .. (area_h-cy_row)/H. La pantalla 3D de las cinemáticas usa exactamente esta ventana para que el 3D registre pixel a pixel con el panel 2D (que cubre area). ok = 0 si
@@ -401,6 +430,7 @@ enum {
     VR_FATE_DERIVED = 10,  /* descartado: DERIVED con opts.drop_derived */
     VR_FATE_RECON = 11,    /* emitido tras reconstruir un vértice sin posición o un AMBIG (recon_partial / recon_ambig) */
     VR_FATE_INCOH = 12,    /* descartado por la red de seguridad de coherencia de vértices (opts.coherence) */
+    VR_FATE_HWCULL = 13,   /* descartado: la GPU de PS1 no dibuja ninguno de sus triángulos (extensión > 1023x511) */
     VR_FATE_COUNT
 };
 void vr_scene_set_fate(uint8_t *buf, uint32_t cap);   /* NULL para desactivar */

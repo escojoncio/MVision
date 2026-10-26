@@ -229,7 +229,7 @@ static VrBodyView g_view;
 static int g_view_ok;
 static int view_fn(VrBodyView *v) { if (!g_view_ok) return 0; *v = g_view; return 1; }
 /* Configuración de las pruebas anteriores al torso que sigue la mirada: el torso original no se toca (el nuevo comportamiento tiene sus propias pruebas). */
-static void legacy_cfg(VrBodyConfig *c) { vrbody_config_default(c); c->torso_follow = 0; }
+static void legacy_cfg(VrBodyConfig *c) { vrbody_config_default(c); c->torso_follow = 0; c->near_hide_m = c->near_hide_vtx_m = 0; }
 
 static void w16(uint32_t a, int16_t v) { memcpy(RAM + (a & 0x1FFFFF), &v, 2); }
 static void w32(uint32_t a, int32_t v) { memcpy(RAM + (a & 0x1FFFFF), &v, 4); }
@@ -776,6 +776,7 @@ static void test_two_sided(void) {
         for (int i = 0; i < 16; i++) CHECK(r32(PMODELS + 0x3C * (uint32_t)i) == ((i & 1) ? 0x1 : 0x10001), "modelo %d no restaurado: %x", i, r32(PMODELS + 0x3C * (uint32_t)i));
         CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "doble cara: restore no devuelve la RAM");
     }
+    { VrBodyStats st; vrbody_stats(&st); CHECK(st.two_sided > 0, "stats: modelos de doble cara no contados"); }
     /* sin manos no se toca nada */
     memset(g_hands, 0, sizeof g_hands); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
     memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM); CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "doble cara sin manos: RAM tocada");
@@ -807,6 +808,7 @@ static void test_own_hands(void) {
             for (int k = 0; k < 6; k++) CHECK(r16(part_addr(ARMS[k]) + 0x4C) == 2, "restore devuelve la visibilidad (pieza %d, own=%d)", ARMS[k], own);
             CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "own_hands: restore no devuelve la RAM");
         }
+        { VrBodyStats st; vrbody_stats(&st); CHECK(own ? st.hidden_pieces > 0 : st.hidden_pieces == 0, "stats: piezas ocultas=%u con own_hands=%d", st.hidden_pieces, own); }
     }
 }
 
@@ -1132,6 +1134,50 @@ static void test_fist_glue(void) {
       w32(PMODELS + 0x3C * 4 + 0x38, (int32_t)FM_BASE[1]); }
 }
 
+/* Cuerpo por delante al atacar: las piezas (salvo piernas/pies 10-15) con el centro delante del ojo (mirada horizontal) y a < near_hide_m, o con algún vértice a < near_hide_vtx_m, se ocultan
+ * (+0x4C = 0) durante el fotograma y restore las devuelve; las piernas nunca; contador near_hidden. */
+static void test_near_hide(void) {
+    static const uint32_t VERTS = 0x80100000u;
+    for (int sc = 0; sc < 7; sc++) {
+        VrBodyConfig cfg; legacy_cfg(&cfg); cfg.hand_pitch_deg = 0; cfg.near_hide_m = 0.30f; cfg.near_hide_vtx_m = 0.12f;
+        build_body(500 + sc);
+        float R[9], t[3];
+        int ref = sc == 3 ? 12 : sc == 4 || sc == 5 ? 5 : 1;       /* pieza junto a la que se pone el ojo */
+        load_xf(part_addr(ref), R, t);
+        float yaw = sc == 6 ? 90.0f : 0.0f, gx = sinf(yaw * 3.14159265f / 180.0f), gz = cosf(yaw * 3.14159265f / 180.0f);   /* mirada horizontal: 0 = +Z, + hacia +X */
+        float back = sc == 1 ? 400.0f : sc == 2 ? -200.0f : 200.0f;    /* mm de ojo detrás de la pieza (negativo: delante de ella) */
+        g_view.gaze_yaw_deg = yaw;
+        g_view.eye[0] = t[0] - gx * back; g_view.eye[1] = t[1]; g_view.eye[2] = t[2] - gz * back;
+        if (sc == 4 || sc == 5) {      /* cuello con dos vértices: A en su origen y B a 4 m (el centro queda lejos del ojo); el ojo a 100 mm (sc 4) o 150 mm (sc 5) de A */
+            uint32_t mdl = PMODELS + 0x3C * 5u;
+            w32(mdl + 0x34, 2); w32(mdl + 0x38, (int32_t)VERTS);
+            w16(VERTS + 0, 0); w16(VERTS + 2, 0); w16(VERTS + 4, 0); w16(VERTS + 6, 0);
+            w16(VERTS + 8, 4000); w16(VERTS + 10, 0); w16(VERTS + 12, 0); w16(VERTS + 14, 0);
+            g_view.eye[0] = t[0] + (sc == 4 ? 100.0f : 150.0f); g_view.eye[1] = t[1]; g_view.eye[2] = t[2];
+        }
+        memcpy(RAM0, RAM, sizeof RAM);
+        vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+        memset(g_hands, 0, sizeof g_hands);
+        vrbody_apply(RAM);
+        int hid[16], nh = 0;
+        for (int i = 0; i < 16; i++) { hid[i] = r16(part_addr(i) + 0x4C) == 0; nh += hid[i]; }
+        for (int i = 10; i < 16; i++) CHECK(!hid[i], "escenario %d: la pierna/pie %d no debe ocultarse", sc, i);
+        if (sc == 0 || sc == 6) CHECK(hid[1], "escenario %d: torso a 0,20 m delante del ojo: oculto", sc);
+        if (sc == 1) CHECK(!hid[1], "escenario 1: torso a 0,40 m: no se oculta");
+        if (sc == 2) CHECK(!hid[1], "escenario 2: torso detrás del ojo: no se oculta");
+        if (sc == 4) CHECK(hid[5], "escenario 4: vértice a 0,10 m oculta el cuello");
+        if (sc == 5) CHECK(!hid[5], "escenario 5: vértice a 0,15 m no oculta el cuello (centro lejos)");
+        VrBodyStats st; vrbody_stats(&st);
+        CHECK(st.near_hidden == (uint32_t)nh, "escenario %d: near_hidden=%u ocultas=%d", sc, st.near_hidden, nh);
+        CHECK(!!vrbody_ram_dirty() == (nh > 0), "escenario %d: ram_dirty=%d con %d ocultas", sc, vrbody_ram_dirty(), nh);
+        vrbody_restore(RAM);
+        CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "escenario %d: restore no devuelve la RAM", sc);
+        cfg.near_hide_m = 0; cfg.near_hide_vtx_m = 0; vrbody_init(&cfg); vrbody_set_view_fn(view_fn);   /* desactivado: nada */
+        vrbody_apply(RAM); vrbody_restore(RAM);
+        CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "escenario %d: near_hide = 0 no debe tocar nada", sc);
+    }
+}
+
 int main(void) {
     test_math();
     test_solver();
@@ -1143,6 +1189,7 @@ int main(void) {
     test_visibility();
     test_two_sided(); test_own_hands(); test_own_hands_both(); test_arm_live(); test_torso_follow();
     test_fist_glue();
+    test_near_hide();
     test_mirror();
     test_fuzz();
     VrBodyStats st; vrbody_stats(&st);

@@ -129,6 +129,9 @@ typedef struct VrBodyConfig {
     int torso_follow;            /* 1 (defecto): el torso (y el cuello) se gira en guiñada hacia la mirada real, sin inclinación, para que los hombros no hereden la pelvis del reposo (pie adelantado). Cadera y piernas no se tocan */
     float torso_yaw_tau_s;       /* constante del filtro de la guiñada del torso; defecto 0.25 */
     float torso_deadzone_deg;    /* desvío mirada-torso a partir del cual el torso empieza a seguir (histéresis: sigue hasta alcanzarla); defecto 15 */
+    float near_hide_m;           /* 0,30 (defecto; 0 = desactivado): se ocultan (visibilidad +0x4C = 0, restaurable) las piezas del jugador, salvo piernas y pies (10-15) y los brazos que la IK mueve, cuyo centro en el
+                                  * mundo queda DELANTE del ojo (proyección sobre la mirada horizontal > 0) y a menos de esta distancia (m): el cuerpo que se inclina al atacar no tapa la vista */
+    float near_hide_vtx_m;       /* 0,12 (defecto; 0 = desactivado): ... o con algún vértice a menos de esta distancia (m) del ojo, esté donde esté el centro */
     int force_arm_visible;       /* 1 (defecto): si el motor dejó a 0 la visibilidad de una pieza del brazo movida por la IK, se fuerza durante la transformación (brazos siempre dibujados) */
     float armed_grip;            /* agarre mínimo de la mano dominante con arma (vrbody_set_armed); defecto 0.85 */
     /* codo */
@@ -222,6 +225,10 @@ typedef struct VrBodyStats {
     uint32_t jab_applies;        /* brazos movidos con un golpe sintético en curso */
     uint32_t fist_applies, fist_skipped, fist_pre;   /* mallas de mano deformadas en puño / mallas no reconocidas (se dejan rígidas) */
     uint32_t torso_applies;      /* frames con el torso girado hacia la mirada */
+    uint32_t hidden_pieces;      /* piezas ocultas por own_hands (acumulado) */
+    uint32_t near_hidden;        /* piezas ocultas por estar delante y pegadas al ojo (near_hide_m / near_hide_vtx_m; acumulado) */
+    uint32_t two_sided;          /* modelos pasados a doble cara (acumulado) */
+    float torso_yaw, torso_gaze; /* guiñada del torso y de la mirada (grados) en el último frame con torso aplicado */
     uint32_t stretched, too_close, shoulder_limit, wrist_limit, bad_solve, stale_dropped, vis_forced;
 } VrBodyStats;
 void vrbody_stats(VrBodyStats *s);

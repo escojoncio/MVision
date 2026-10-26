@@ -497,6 +497,18 @@ static void cap_rect(int x, int y, int w, int h, int r, int gg, int b, int tex, 
     o->v[0].u = (uint8_t)u0; o->v[0].v = (uint8_t)v0_;
     o->clx = (uint16_t)t->cx; o->cly = (uint16_t)t->cy;
     o->rw = (int16_t)w; o->rh = (int16_t)h;
+    if (cap.hpres && cap_va[0]) {   /* XY copiado de un SXY de la GTE (solo por dirección): vista del vértice en v[0] (esquina superior izquierda) y la proyección vigente */
+        GpuHpInfo hi;
+        if (gte_hp_resolve_addr(cap_va[0], cap_vw[0], &hi)) {
+            GpuVtx *v = &o->v[0];
+            v->vvalid = 1; v->vflags = hi.flags;
+            v->vx = hi.vx; v->vy = hi.vy; v->vz = hi.vz; v->fz = hi.fz;
+            v->fx = hi.fx + (float)g.ox; v->fy = hi.fy + (float)g.oy;
+            v->fvalid = !(hi.flags & (GPU_VF_SAT | GPU_VF_BEHIND));
+            if (hi.h != 0.0f) { o->proj_h = hi.h; o->proj_ox = hi.ofx; o->proj_oy = hi.ofy; }
+        }
+    }
+    memset(cap_va, 0, sizeof cap_va);
     if (tex) {
         Vtx q = {x, y, r, gg, b, u0, v0_};
         cap_fb_probe(o, &q, 1, 0, raw, semi, t, 1, w, h);
@@ -877,7 +889,10 @@ static void exec_cmd(const uint32_t *w) {
         gpu_stats.line++;
         do_line(a, b, gour, semi);
         if (op & 8) { st = ST_POLYLINE; pl_last = b; pl_col = gour ? w[2] : w[0]; pl_op = op; pl_wait_col = gour; }
-    } else if (op >= 0x60 && op < 0x80) cmd_rect(w);
+    } else if (op >= 0x60 && op < 0x80) {
+        if (cap.on) { cap_va[0] = fifo_a[1]; cap_vw[0] = w[1]; }   /* palabra XY del RECT: dirección de la que la GPU la leyó (cap_rect) */
+        cmd_rect(w);
+    }
     else if (op >= 0x80 && op < 0xA0) cmd_copy(w);
     else if (op >= 0xA0 && op < 0xC0) xfer_setup(w, 0);
     else if (op >= 0xC0 && op < 0xE0) xfer_setup(w, 1);

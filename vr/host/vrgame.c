@@ -719,6 +719,7 @@ int vrgame_hand_raw(int side, float p[3], float *grip, float *trig, double *t_s)
 }
 /* arma VR mostrada o maniobra de recarga en curso: el juego desequipa el arma un instante al recargar, y entonces no hay manos libres */
 int vrgame_weapon_engaged(void) { return G.active || G.cur >= 0 || G.ro.busy; }
+int vrgame_glove_pub(void) { return glv_pub; }
 void vrgame_haptic(int side, float s) {
     if (side < 0 || side > 1 || !isfinite(s) || s <= 0) return;
     pthread_mutex_lock(&HM);
@@ -1143,6 +1144,31 @@ static int glove_emit(uint64_t now, VrHandsMesh *mesh, int room, VrHandsTex *tex
         tex->id = 0x80000000u | g->id; tex->w = g->aw; tex->h = g->ah; tex->rgba = g->atlas;
         glv_read = glv_pub;
     }
+    return n;
+}
+
+/* Vértices (xyz, m, espacio recentrado) de la malla del antebrazo del guante con la pose VIVA (la misma IK que mv_vrgame_forearm_live): el radar de muñeca se coloca según su radio real.
+ * Copia como mucho max_verts; devuelve cuántos (0 = sin guante vivo). La pose se arma como en glove_emit, con la mano abierta (el puño solo deforma la mano). */
+int32_t mv_vrgame_forearm_mesh(int32_t side, float *xyz, int32_t max_verts) {
+    if (!xyz || max_verts <= 0 || side < 0 || side > 1) return 0;
+    VrBodyArmLive a; GripPose gn; VrBodyArmPose ap;
+    VrGloveOut o;
+    memset(&o, 0, sizeof o);
+    int32_t n = 0;
+    pthread_mutex_lock(&HM);
+    const VrGlove *g = glv_on && glv_pub >= 0 ? glv[glv_pub] : NULL;
+    if (g && g->valid && live_arm_locked(side, mono_ns(), &a, &gn, &ap, NULL, NULL)) {
+        VrGlovePose pz;
+        memset(&pz, 0, sizeof pz);
+        memcpy(pz.org[0], ap.shoulder, sizeof pz.org[0]); memcpy(pz.org[1], ap.elbow, sizeof pz.org[1]); memcpy(pz.org[2], ap.wrist, sizeof pz.org[2]);
+        memcpy(pz.R[0], ap.R_upper, sizeof pz.R[0]); memcpy(pz.R[1], ap.R_fore, sizeof pz.R[1]); memcpy(pz.R[2], ap.R_hand, sizeof pz.R[2]);
+        pz.upm = a.upm;
+        if (vrglove_pose(g, side, &pz, &o) == 0) {
+            n = (int32_t)o.nv[1] < max_verts ? (int32_t)o.nv[1] : max_verts;
+            for (int32_t i = 0; i < n; i++) memcpy(xyz + 3 * i, o.v[1][i].pos, 3 * sizeof(float));
+        }
+    }
+    pthread_mutex_unlock(&HM);
     return n;
 }
 

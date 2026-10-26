@@ -489,9 +489,13 @@ static void ns_frame_check(void) {
                 cur[i] = d ? d->grip : 0.0f; w[i] = d ? d->w : 0.0f; drv[i] = d ? d->driven : 0;
                 est[i] = !drv[i] ? "sin_IK" : cur[i] * w[i] >= 0.9f ? "puno" : cur[i] * w[i] >= minc ? "cerrando" : "abierta";
             }
-            fprintf(stderr, "[manos] grip_crudo I=%.2f D=%.2f pose_valida I=%d D=%d | aplicado I=%.2f D=%.2f peso I=%.2f D=%.2f | estado I=%s D=%s | puno_malla: deformadas=+%u omitidas=+%u (fist=%d minimo=%.2f) | IK: aplicaciones=+%u brazos=+%u\n",
+            fprintf(stderr, "[manos] grip_crudo I=%.2f D=%.2f pose_valida I=%d D=%d | aplicado I=%.2f D=%.2f peso I=%.2f D=%.2f | estado I=%s D=%s | puno_malla: deformadas=+%u omitidas=+%u (fist=%d minimo=%.2f) | IK: aplicaciones=+%u brazos=+%u | own_hands=%d glv_pub=%d piezas_ocultas=+%u\n",
                     raw[0], raw[1], (int)ok[0], (int)ok[1], cur[0], cur[1], w[0], w[1], est[0], est[1],
-                    b.fist_applies - b0.fist_applies, b.fist_skipped - b0.fist_skipped, bc ? bc->fist_enabled : -1, minc, b.applies - b0.applies, b.arms_driven - b0.arms_driven);
+                    b.fist_applies - b0.fist_applies, b.fist_skipped - b0.fist_skipped, bc ? bc->fist_enabled : -1, minc, b.applies - b0.applies, b.arms_driven - b0.arms_driven,
+                    bc ? bc->own_hands : -1, vrgame_glove_pub(), b.hidden_pieces - b0.hidden_pieces);
+            fprintf(stderr, "[cuerpo] torso_follow=%d aplicado=+%u (guinada torso=%.1f mirada=%.1f dif=%.1f grados) | doble_cara: activa=%d modelos=+%u | piezas_cerca_ocultas=+%u\n",
+                    bc ? bc->torso_follow : -1, b.torso_applies - b0.torso_applies, b.torso_yaw, b.torso_gaze, b.torso_gaze - b.torso_yaw,
+                    (int)(b.two_sided - b0.two_sided > 0), b.two_sided - b0.two_sided, b.near_hidden - b0.near_hidden);
             b0 = b;
         }
     }
@@ -515,6 +519,7 @@ enum { DS_IDLE = 0, DS_REQ, DS_CAP, DS_WRITE };
 static _Atomic int dump_state;   /* escrito bajo DMX; la compuerta de la captura lo lee sin bloquear */
 /* Capturas pendientes del pedido en curso (bajo DMX; DN_*: vrdump.h). */
 static int dump_need;
+static char dump_label[48];   /* etiqueta del pedido en curso (point=<etiqueta> en el meta; vacía = stage/frame): autovolcado */
 static int dump_stage_mode(void) {
     static int env = -1;
     if (env < 0) { const char *e = getenv("MV_DUMP_AT"); env = e && !strcmp(e, "stage"); }
@@ -732,7 +737,7 @@ static int list_uploads_cover_display(const GpuDrawList *l) {
 /* Registro «[gpu3d]» (hilo de emulación, una línea por segundo como mucho): qué hizo el ensamblador con las primitivas de las listas de ese segundo. Es el único diagnóstico del visor. */
 #define GPU3D_NEAR_EYE_M 0.10f   /* modo gpu: ningún triángulo 3D pequeño con TODOS sus vértices a menos de esta distancia (m) del ojo del motor (VrSceneOpts.eye_near_m) */
 static struct { uint32_t lists, prims, p3d, tris3d, p2d, rect, rect_semi_tex, near_drop, near_clip, behind_drop, nohp, post, ambig, incoh, recon, huge, nan;
-              uint32_t groups_max, ref_n, ref_total, quad3d, quad_noncoh, tri_cause[5], cause_tris, coplanar, coplanar_skip;  int cam_head; uint64_t t_log; } g3;
+              uint32_t groups_max, ref_n, ref_total, quad3d, quad_noncoh, tri_cause[5], cause_tris, coplanar, coplanar_skip, hw_cull, rect_hp, rect3d, billboard;  int cam_head; uint64_t t_log; } g3;
 static void gpu3d_note(const VrScene *sc, const VrCamRecord *r) {
     const VrStats *st = &sc->stats;
     g3.lists++;
@@ -750,6 +755,7 @@ static void gpu3d_note(const VrScene *sc, const VrCamRecord *r) {
     g3.ref_n += st->n_ref_group; g3.ref_total += st->n_ref_total;
     g3.quad3d += st->n_quad3d; g3.quad_noncoh += st->n_quad_noncoh;
     g3.coplanar += st->n_coplanar; g3.coplanar_skip += st->n_coplanar_skip;
+    g3.hw_cull += st->n_hw_cull; g3.rect_hp += st->n_rect_hp; g3.rect3d += st->n_rect3d; g3.billboard += st->n_billboard;
     for (uint32_t i = 0; sc->b && sc->tri_cause && i < sc->nb; i++) {   /* causas de duda de los triángulos 3D (VR_TC_*) */
         if (sc->b[i].kind > 1) continue;
         for (uint32_t j = 0; j < sc->b[i].count; j += 3) {
@@ -761,6 +767,100 @@ static void gpu3d_note(const VrScene *sc, const VrCamRecord *r) {
     for (uint32_t i = 0; sc->b && i < sc->nb; i++) g3.post += sc->b[i].kind == 3;   /* lotes de filtro de pantalla (clase 3: el post-proceso por ojo del renderer los sustituye) */
     g3.cam_head = r && r->active;
 }
+/* ------------------------------------------------------------------------------------------------ autovolcado
+ * Tras construir cada lista (hilo de emulación): si la lista es anómala (VrStats: n_hw_cull, drop_incoh, quads no coherentes, triángulos con arista > 10 m) o la vista del mundo está tapada (triángulos pegados
+ * al ojo que cubren > 60 % de la ventana, o un TILE negro opaco a pantalla completa tras el 3D) se pide un volcado simple con point=auto_<motivo> (decisión pura: vrdump.h autodump_decide; máx. 8 por sesión, 2 por motivo,
+ * >= 5 s entre dos intentos). Carpeta: mv_vrhost_set_autodump_dir (sin ella no se hace nada). */
+static pthread_mutex_t DMX;   /* definición con valor inicial más abajo */
+static int dump_request_l(const char *dir, const char *dir2, const char *label);
+static char autodump_dir[480];
+static AutoDumpState ad_st = {0, -1.0, {0}};
+void mv_vrhost_set_autodump_dir(const char *dir) {
+    pthread_mutex_lock(&DMX);
+    snprintf(autodump_dir, sizeof autodump_dir, "%s", dir ? dir : "");
+    pthread_mutex_unlock(&DMX);
+}
+/* Fracción (suma de áreas proyectadas sin descontar solapes, tope 1) de la ventana del motor tapada por triángulos opacos con sus tres vértices a < 0,15 m del ojo del motor. */
+static float autodump_near_cover(const VrScene *sc) {
+    VrScreenWindow w = vr_scene_screen_window(&sc->filter);
+    if (!w.ok || !sc->b || !sc->v) return 0.0f;
+    float ax[3][3], l2[3], inv[3];   /* inv = 1 / norma de cada eje, fuera del bucle de triángulos */
+    for (int c = 0; c < 3; c++) {
+        for (int r = 0; r < 3; r++) ax[c][r] = sc->game_view[c * 4 + r];
+        l2[c] = ax[c][0]*ax[c][0] + ax[c][1]*ax[c][1] + ax[c][2]*ax[c][2];
+        if (!(l2[c] > 1e-12f)) return 0.0f;
+        inv[c] = 1.0f / sqrtf(l2[c]);
+    }
+    float warea = (w.left + w.right) * (w.up + w.down), tot = 0.0f;
+    for (uint32_t i = 0; i < sc->nb; i++) {
+        if (sc->b[i].kind != 0) continue;
+        for (uint32_t j = 0; j + 2 < sc->b[i].count; j += 3) {
+            float q[3][2]; int ok = 1;
+            for (int k = 0; k < 3 && ok; k++) {
+                const float *p = sc->v[sc->b[i].first + j + k].pos;
+                float d[3] = {p[0] - sc->eye_vr[0], p[1] - sc->eye_vr[1], p[2] - sc->eye_vr[2]};
+                float vx = (d[0]*ax[0][0] + d[1]*ax[0][1] + d[2]*ax[0][2]) * inv[0], vy = (d[0]*ax[1][0] + d[1]*ax[1][1] + d[2]*ax[1][2]) * inv[1], vz = (d[0]*ax[2][0] + d[1]*ax[2][1] + d[2]*ax[2][2]) * inv[2];
+                if (!(vz > 0.01f) || sqrtf(vx*vx + vy*vy + vz*vz) >= 0.15f) ok = 0;
+                else {
+                    q[k][0] = fminf(fmaxf(vx / vz, -w.left), w.right); q[k][1] = fminf(fmaxf(vy / vz, -w.up), w.down);   /* la pantalla del motor: x a la derecha, y hacia abajo */
+                }
+            }
+            if (!ok) continue;
+            tot += 0.5f * fabsf((q[1][0] - q[0][0]) * (q[2][1] - q[0][1]) - (q[2][0] - q[0][0]) * (q[1][1] - q[0][1]));
+        }
+    }
+    float f = tot / warea;
+    return f > 1.0f ? 1.0f : f;
+}
+/* TILE negro opaco que cubre >= 90 % del área mostrada y viene DESPUÉS de algún polígono 3D (no el borrado de inicio de lista). */
+static int autodump_black_tile(const GpuDrawList *l) {
+    int seen3d = 0;
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *op = &l->ops[i];
+        if (op->type == GPU_OP_POLY && op->v[0].vvalid) seen3d = 1;
+        else if (seen3d && op->type == GPU_OP_RECT && !(op->flags & (GPU_F_TEXTURED | GPU_F_SEMI)) && !op->v[0].r && !op->v[0].g && !op->v[0].b &&
+                 l->disp.w > 0 && l->disp.h > 0 && op->rw >= 0.9f * l->disp.w && op->rh >= 0.9f * l->disp.h) return 1;
+    }
+    return 0;
+}
+static void autodump_note(const VrScene *sc, const GpuDrawList *l) {
+    pthread_mutex_lock(&DMX);
+    int has_dir = autodump_dir[0] != 0;
+    pthread_mutex_unlock(&DMX);
+    if (ad_st.n >= AD_MAX_N || !has_dir) return;
+    if (!sc->has_3d && !sc->stats.n_hw_cull) return;
+    AutoDumpIn in; memset(&in, 0, sizeof in);
+    in.world = view.kind == VRV_K_WORLD;
+    in.n_hw_cull = sc->stats.n_hw_cull; in.drop_incoh = sc->stats.drop_incoh; in.quad_noncoh = sc->stats.n_quad_noncoh;
+    for (uint32_t i = 0; sc->b && sc->v && i < sc->nb; i++) {   /* triángulos 3D con alguna arista > 10 m (espacio de salida, metros) */
+        if (sc->b[i].kind > 1) continue;
+        for (uint32_t j = 0; j + 2 < sc->b[i].count; j += 3) {
+            const float *a = sc->v[sc->b[i].first + j].pos, *b = sc->v[sc->b[i].first + j + 1].pos, *c = sc->v[sc->b[i].first + j + 2].pos;
+            const float *e[3][2] = {{a, b}, {b, c}, {c, a}};
+            for (int k = 0; k < 3; k++) {
+                float dx = e[k][0][0] - e[k][1][0], dy = e[k][0][1] - e[k][1][1], dz = e[k][0][2] - e[k][1][2];
+                if (dx*dx + dy*dy + dz*dz > 100.0f) { in.long_edge++; break; }
+            }
+        }
+    }
+    if (in.world) { in.near_cover = autodump_near_cover(sc); in.black_cover = autodump_black_tile(l); }
+    double t = now_s();
+    int why = autodump_decide(&ad_st, &in, t);
+    if (why == AD_NONE) return;
+    uint32_t val = why == AD_NEAR_COVER ? (uint32_t)(in.near_cover * 100.0f + 0.5f) : why == AD_BLACK_COVER ? 1u : why == AD_HWCULL ? in.n_hw_cull : why == AD_INCOH ? in.drop_incoh : why == AD_QUAD ? in.quad_noncoh : in.long_edge;
+    char dir[560], label[48];
+    pthread_mutex_lock(&DMX);
+    snprintf(dir, sizeof dir, "%s", autodump_dir);
+    pthread_mutex_unlock(&DMX);
+    snprintf(label, sizeof label, "auto_%s", autodump_name(why));
+    size_t n = strlen(dir);
+    snprintf(dir + n, sizeof dir - n, "/auto%02d_%s", ad_st.n + 1, autodump_name(why));
+    int rc = dump_request_l(dir, NULL, label);
+    fprintf(stderr, "[autodump] motivo=%s n=%u sesion=%d/%d carpeta=%s resultado=%s\n", autodump_name(why), val, ad_st.n + (rc == 0), AD_MAX_N, dir, rc == 0 ? "pedido" : "no pedido (ocupado)");
+    ad_st.last_s = t;   /* también un intento fallido espera AD_GAP_S */
+    if (rc == 0) { ad_st.n++; ad_st.by[why]++; }
+}
+
 static void gpu3d_log(void) {
     uint64_t t = mono_ns();
     if (t - g3.t_log < 1000000000ull) return;
@@ -770,8 +870,8 @@ static void gpu3d_log(void) {
     static GteHpStats hs_prev;   /* vértices de primitivas resueltos por dirección de memoria (hps.h) / por valor de SXY, del último segundo */
     GteHpStats hs;
     gte_hp_stats(&hs);
-    fprintf(stderr, "[gpu3d] fotograma=%u listas=%u prims=%u 3D_con_hp=%u (triangulos=%u) plano2D=%u cerca_descartados=%u cerca_recortados=%u detras_descartados=%u 3D_sin_hp(respaldo)=%u post=%u drop_ambig=%u drop_partial=%u drop_incoh=%u reconstruidos=%u drop_huge=%u drop_nan=%u n_rect=%u n_rect_semi_tex=%u | render=%s hp=%d vista=%s camara=%s hp_por_direccion=%u hp_por_valor=%u\n",
-            (unsigned)hle_frame_count(), g3.lists, g3.prims, g3.p3d, g3.tris3d, g3.p2d, g3.near_drop, g3.near_clip, g3.behind_drop, g3.nohp, g3.post, g3.ambig, g3.nohp, g3.incoh, g3.recon, g3.huge, g3.nan, g3.rect, g3.rect_semi_tex,
+    fprintf(stderr, "[gpu3d] fotograma=%u listas=%u prims=%u 3D_con_hp=%u (triangulos=%u) plano2D=%u cerca_descartados=%u cerca_recortados=%u detras_descartados=%u 3D_sin_hp(respaldo)=%u post=%u drop_ambig=%u drop_partial=%u drop_incoh=%u reconstruidos=%u drop_huge=%u drop_nan=%u n_rect=%u n_rect_semi_tex=%u n_hw_cull=%u n_rect_hp=%u n_rect3d=%u n_billboard=%u | render=%s hp=%d vista=%s camara=%s hp_por_direccion=%u hp_por_valor=%u\n",
+            (unsigned)hle_frame_count(), g3.lists, g3.prims, g3.p3d, g3.tris3d, g3.p2d, g3.near_drop, g3.near_clip, g3.behind_drop, g3.nohp, g3.post, g3.ambig, g3.nohp, g3.incoh, g3.recon, g3.huge, g3.nan, g3.rect, g3.rect_semi_tex, g3.hw_cull, g3.rect_hp, g3.rect3d, g3.billboard,
             native_mode() ? "nativo" : "gpu", gte_hp_enabled(), vrview_cine_type(view.kind), g3.cam_head ? "head" : "game", hs.res_addr - hs_prev.res_addr, hs.res_val - hs_prev.res_val);
     hs_prev = hs;
     {   /* [geom]: geometría 3D sospechosa de la lista de la GPU (una línea por segundo) */
@@ -796,7 +896,7 @@ static void build_one(const GpuDrawList *l, int si) {
     int32_t save_pos[3];
     int16_t save_axes[3][3];
     VrSceneOpts o = sopts;
-    if (!native_mode()) { o.eye_near_m = GPU3D_NEAR_EYE_M; o.line3d_px = 1.0f; o.coplanar_m = 0.005f; }   /* modo gpu: nada pegado al ojo, recorte contra el plano cercano; líneas del mundo en 3D; z-fight de coplanares solo aquí (ver vr_scene.h) */
+    if (!native_mode()) { o.eye_near_m = GPU3D_NEAR_EYE_M; o.line3d_px = 1.0f; o.coplanar_m = 0.005f; o.rect3d = 1; o.billboard = 1; }   /* modo gpu: nada pegado al ojo, recorte contra el plano cercano; líneas del mundo en 3D; z-fight de coplanares, sprites con vista de la GTE como carteles 3D y resplandores orientados al ojo solo aquí (ver vr_scene.h) */
     if (!native_mode() && view.kind == VRV_K_ENGINE) { o.keep_late_clear = 1; o.veil_as_2d = 1; }   /* pantalla 3D del motor (gpu): el 2D se compone dentro del estéreo; el relleno opaco tras el 3D (créditos) y los velos se pintan como 2D */
     int cine_cut = 0;
     {   /* Cinemática del motor (ni mundo ni vídeo/2D puros): la cámara es la del guion, nunca la de la cabeza. Planos y origen fijo por plano. */
@@ -857,7 +957,7 @@ static void build_one(const GpuDrawList *l, int si) {
         rc = vr_scene_build(hl, &bs, &o2, &sc);
     }
     double ms = (double)(mono_ns() - t0) * 1e-6;
-    if (rc == 0) gpu3d_note(&sc, r);
+    if (rc == 0) { gpu3d_note(&sc, r); autodump_note(&sc, l); }
     if (rc == 0 && scene_tap) scene_tap(hl, &bs, &sc, l->host_frame);
 
     if (rc == 0 && list_tap) list_tap(l, hl, &sc, &o, &bs);
@@ -1207,7 +1307,7 @@ static int dump_buffers_ready(void) { return dump_buffers_ready_slot(0); }
 
 /* Pedido simple (la primera captura que llegue) o pareja (dir2 != NULL: `dir` = punto de enganche, `dir2` = final del fotograma, ambos del mismo fotograma de juego).
  * La pareja necesita el enganche de la captura nativa: sin él se degrada a un solo volcado en dir2. */
-static int dump_request(const char *dir, const char *dir2) {
+static int dump_request_l(const char *dir, const char *dir2, const char *label) {
     if (!dir || !*dir || strlen(dir) >= sizeof dump_dir) return -1;
     if (dir2 && (!*dir2 || strlen(dir2) >= sizeof dump_dir2)) return -1;
     int pair = dir2 != NULL && ns_hook_installed();
@@ -1224,6 +1324,7 @@ static int dump_request(const char *dir, const char *dir2) {
         if (dir2 && !pair) snprintf(dump_dir, sizeof dump_dir, "%s", dir2);
         else snprintf(dump_dir, sizeof dump_dir, "%s", dir);
         if (pair) snprintf(dump_dir2, sizeof dump_dir2, "%s", dir2);
+        snprintf(dump_label, sizeof dump_label, "%s", label ? label : "");
         dump_need = dump_need_init(native_mode(), pair);   /* en gpu no hay punto de enganche: la pareja se reduce al final de fotograma, con la lista */
         dump_acc = 0;
         dump_wait = 0;
@@ -1232,6 +1333,7 @@ static int dump_request(const char *dir, const char *dir2) {
     pthread_mutex_unlock(&DMX);
     return rc;
 }
+static int dump_request(const char *dir, const char *dir2) { return dump_request_l(dir, dir2, NULL); }
 int mv_vrhost_request_dump(const char *dir) { return dump_request(dir, NULL); }
 int mv_vrhost_request_dump_pair(const char *dir_stage, const char *dir_frame) { return dir_stage && dir_frame ? dump_request(dir_stage, dir_frame) : -1; }
 int mv_vrhost_dump_result(void) {
@@ -1287,7 +1389,7 @@ static void dump_capture(Cpu *c, uint32_t f, const GpuDrawList *l) {
         } else list_trunc = 1;
     }
     int n = 0;
-    MP("dump_index=%u\ngame_frame=%u\nvblank=%u\npoint=%s\n", ++dump_count, f, (unsigned)hle_frame_count(), dump_point ? "stage" : "frame");
+    MP("dump_index=%u\ngame_frame=%u\nvblank=%u\npoint=%s\n", ++dump_count, f, (unsigned)hle_frame_count(), dump_label[0] ? dump_label : dump_point ? "stage" : "frame");
     if (DB.has_list) MP("list_index=%u\n", l->index);
     if (list_trunc) MP("list_omitted=1\n");
     MP("area_id=%d\ngame=%d\nin_control=%d\nposture=%d\nview_mode=%d\n", bs.area_id, bs.has_player, bs.in_control, bs.stance, view.kind);

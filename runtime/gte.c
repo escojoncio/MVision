@@ -568,6 +568,16 @@ int gte_hp_resolve_a(int n, const int *sx, const int *sy, const uint32_t *addr, 
 }
 int gte_hp_resolve(int n, const int *sx, const int *sy, GpuHpInfo *out, uint8_t *ok) { return gte_hp_resolve_a(n, sx, sy, NULL, NULL, out, ok); }
 
+/* Vértice de una sola palabra por DIRECCIÓN, sin asociación por valor (sprites/RECT: un XY de HUD con el mismo valor que algún SXY de la GTE no debe asociarse). 1 si la palabra `word` guardada en `addr`
+ * la copió el juego de un SXY de la GTE y la etiqueta sigue vigente. */
+int gte_hp_resolve_addr(uint32_t addr, uint32_t word, GpuHpInfo *out) {
+    if (!addr || !hps_on) return 0;
+    uint32_t tag = hps_get(addr);
+    if (!gte_hp_tag_ok(tag, word)) return 0;
+    *out = hp_pool[(tag - 1) & (HP_POOL - 1)].i;
+    return 1;
+}
+
 /* Registro de un vértice RTPS/RTPT tras empujar SXY (sx,sy ya saturados). */
 static void hp_vertex(int v, int sf, int sx, int sy, int sat) {
     if (!hp_on) return;

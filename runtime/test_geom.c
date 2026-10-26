@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include "cpu.h"
 #include "gpu.h"
+#include "hps.h"
 
 const FuncEntry rt_func_table[] = {{0, 0}};
 const unsigned rt_func_count = 0;
@@ -420,6 +421,43 @@ static void t_sprite(void) {
     gpu_capture_hiprec(0); gpu_capture_enable(0);
 }
 
+/* RECT/sprite cuya palabra XY el juego copió de un SXY de la GTE: la captura lo enlaza SOLO por dirección de memoria (hps.h); un RECT con el mismo valor sin etiqueta (HUD) no se asocia por valor. */
+static void t_rect_hp(void) {
+    gte_reset(); gpu_reset(); gte_hp_enable(0);
+    gpu_capture_enable(1); gpu_capture_hiprec(1);
+    setup_cam(0, 0, 3000, 400, 160, 120);
+    uint32_t a = rtps_sxy(300, -150, 0);                 /* SXY2 de un punto del mundo; hps_on lo etiqueta al guardarlo */
+    uint32_t tag = gte_hp_sxy_tag(15, a);
+    CHECK(tag != 0, "la GTE no dio etiqueta al SXY");
+    /* lista de 3 paquetes en RAM: (1) RECT variable con el XY etiquetado; (2) el mismo valor SIN etiqueta; (3) RECT 8x8 con XY etiquetado y tamaño fijo */
+    uint32_t base = 0x00100000u, w[3][4] = {{0x60808080u, a, (8u << 16) | 16u, 0}, {0x60808080u, a, (8u << 16) | 16u, 0}, {0x78808080u, a, 0, 0}};
+    int nw[3] = {3, 3, 2};
+    uint32_t at = base;
+    for (int k = 0; k < 3; k++) {
+        uint32_t hdr = ((uint32_t)nw[k] << 24) | (k == 2 ? 0x00FFFFFFu : ((at + 4 + 4 * nw[k]) & 0x1FFFFC));
+        memcpy(&emu_ram[at], &hdr, 4);
+        for (int i = 0; i < nw[k]; i++) memcpy(&emu_ram[at + 4 + 4 * i], &w[k][i], 4);
+        if (k != 1) hps_set(at + 8, tag);                  /* palabra XY (índice 1 del paquete) */
+        at += 4 + 4 * (uint32_t)nw[k];
+    }
+    gpu_gp0(0xE5000000u | (320 & 0x7FF) | (5 << 11));    /* offset de dibujo (320,5) */
+    gpu_draw_list(base);
+    gpu_gp1(0x05000000u | 0); gpu_gp1(0x05000000u | 100);
+    const GpuDrawList *l = gpu_capture_frame();
+    CHECK(l != NULL && l->nops >= 3, "sin lista de rects");
+    if (l && l->nops >= 3) {
+        const GpuOp *r[3] = {&l->ops[l->nops - 3], &l->ops[l->nops - 2], &l->ops[l->nops - 1]};
+        int sx, sy; sxy_split(a, &sx, &sy);
+        CHECK(r[0]->type == GPU_OP_RECT && r[0]->v[0].vvalid && r[0]->v[0].vflags == 0, "rect etiquetado sin vista");
+        CHECK(fabsf(r[0]->v[0].vx - 300) < 1e-3f && fabsf(r[0]->v[0].vy + 150) < 1e-3f && fabsf(r[0]->v[0].vz - 3000) < 1e-3f, "vista del rect (%f %f %f)", r[0]->v[0].vx, r[0]->v[0].vy, r[0]->v[0].vz);
+        CHECK(r[0]->v[0].x == sx + 320 && r[0]->v[0].y == sy + 5 && r[0]->rw == 16 && r[0]->rh == 8, "x,y del rect (offset de dibujo sumado) %d,%d", r[0]->v[0].x, r[0]->v[0].y);
+        CHECK(r[0]->proj_h == 400.0f && r[0]->proj_ox == 160.0f && r[0]->proj_oy == 120.0f, "proyeccion del rect");
+        CHECK(!r[1]->v[0].vvalid && r[1]->proj_h == 0.0f, "mismo valor sin etiqueta: no se asocia por valor");
+        CHECK(r[2]->type == GPU_OP_RECT && r[2]->v[0].vvalid && r[2]->rw == 16 && r[2]->rh == 16, "rect de tamano fijo etiquetado");
+    }
+    gpu_capture_hiprec(0); gpu_capture_enable(0);
+}
+
 int main(void) {
     t_exact_unchanged();
     t_formula();
@@ -431,6 +469,7 @@ int main(void) {
     t_capture_sat();
     t_proj_trusted();
     t_sprite();
+    t_rect_hp();
     if (fails) { printf("test_geom: %d FALLOS\n", fails); return 1; }
     printf("test_geom: todas las pruebas OK\n");
     return 0;

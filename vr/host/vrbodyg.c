@@ -108,9 +108,11 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
             in.n_en++;
         }
     }
-    const int mh_keep = G.menu_hold;                 /* vrg_update lo borra al perder el control, pero con la ventana abierta debe sobrevivir */
-    vrg_update(&G, &in, &out);
-    if (!ctl) G.menu_hold = (core && bs->menu_open) ? mh_keep : 0;
+    vrg_pad_t pp;                                    /* manos y gatillo físicos también fuera de la capa de juego: sostienen la ventana abierta con el gesto del pecho */
+    memset(&pp, 0, sizeof pp);
+    pp.ctl = ctl; pp.menu_open = core && bs->menu_open; pp.pad = pad; pp.pad_in = pad_in; pp.r2_fire = r2_fire;
+    for (int s = 0; s < 2; s++) { float p3[3], tg = 0.0f; pp.tracked[s] = vrgame_hand_raw(s, p3, NULL, &tg, NULL); pp.trig[s] = tg; }
+    const uint16_t res = vrg_step_pad(&G, &in, &out, &pp);
     pub_menu_hand();
     {   /* registro [gest] (va al log del visor): cada intento con su motivo, y cada evento */
         static const char *evn[] = {"", "golpe", "agarre", "apreton", "soltar", "pared", "asomar", "pared2", "dano", "impacto", "ventana", "lanzamiento"};
@@ -161,21 +163,6 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
     }
     if (out.event > 0 && out.event < 16) n_events[out.event]++;
     if (out.haptic[0] > 0 || out.haptic[1] > 0) { vrgame_haptic(0, out.haptic[0]); vrgame_haptic(1, out.haptic[1]); }
-    if (!ctl) {
-        /* Capa de MENÚ: ningún gesto toca el mando. Única excepción: la ventana de armas/objetos abierta con el gesto del pecho se mantiene mientras
-         * se mantenga el gatillo de esa mano (R2/L2 del mando, que ya llega tal cual a la ventana). */
-        uint16_t r = pad_in;
-        if (core && bs->menu_open) {
-            for (int s = 0; s < 2; s++) {
-                if (!((G.menu_hold >> s) & 1)) continue;
-                uint16_t wb = s == domside ? VRG_R2 : VRG_L2;
-                if (!(pad_in & wb)) G.menu_hold &= ~(1 << s);
-            }
-            pub_menu_hand();
-        }
-        return r;
-    }
-    uint16_t res = (uint16_t)((pad & ~out.mask) | out.press);
-    if (r2_fire && (out.mask & VRG_R2)) res = (uint16_t)(res & ~VRG_SQUARE);   /* gatillo dentro de la zona de menú: no dispara */
+    /* Capa de MENÚ (!ctl): ningún gesto toca el mando salvo la ventana de armas/objetos abierta con el gesto del pecho, que vrg_step_pad mantiene con el gatillo de esa mano. */
     return res;
 }

@@ -112,7 +112,8 @@ typedef struct {
     float width_m;       /* ancho de la pantalla (def. 0,07) */
     float height_m;      /* alto; <= 0: proporcional a la ventana del radar (def. 0 -> 71:54) */
     float along_m;       /* del centro de la muñeca (origen del agarre) al centro del quad, hacia el codo (def. 0,13: antebrazo justo antes de la mano) */
-    float lift_m;        /* del eje del antebrazo al plano de la pantalla, a lo largo de la normal del panel (def. 0,065: radio máximo del antebrazo del guante, 55 mm, + holgura) */
+    float lift_m;        /* del eje del antebrazo al plano de la pantalla, a lo largo de la normal del panel, SIN malla del guante (def. 0,065: radio máximo del antebrazo del guante, 55 mm, + holgura) */
+    float skin_m;        /* con malla (vrradar_wrist_quad_mesh): holgura sobre el radio real de la malla en la dirección de la normal (def. 0,008) */
     float bezel_m;       /* ancho del marco oscuro (def. 0,004) */
     float bezel_back_m;  /* el marco queda tanto por detrás del plano de la pantalla (def. 0,002) */
     int   rot90;         /* giro extra de la imagen en pasos de 90° (def. 0) */
@@ -134,10 +135,21 @@ int vrradar_wrist_quad(const VrRadarArm *arm, const VrRadarWristCfg *cfg, float 
 /* Igual, pero con la cara del panel girada alrededor del eje del antebrazo hacia `eye` (cabeza, mismo espacio; la normal queda perpendicular al antebrazo y apunta a la cabeza).
  * eye NULL, no finito o casi sobre el eje (< 2 cm): normal = dorso, como vrradar_wrist_quad. */
 int vrradar_wrist_quad_eye(const VrRadarArm *arm, const VrRadarWristCfg *cfg, float aspect, const float eye[3], VrRadarQuad *out);
+/* Igual, pero la elevación del panel sobre el eje no es lift_m fijo: es el radio REAL de la malla del antebrazo del guante en la dirección de la normal + cfg.skin_m. Radio = máxima distancia al eje
+ * (la recta muñeca-codo de `arm`), medida a lo largo de la normal, de los `nverts` vértices `verts` (xyz consecutivos, m, mismo espacio que `arm`): el panel queda siempre fuera del casco convexo
+ * de la malla. verts NULL, nverts 0 o radio no válido (no finito o <= 1 cm): lift_m, como vrradar_wrist_quad_eye. */
+int vrradar_wrist_quad_mesh(const VrRadarArm *arm, const VrRadarWristCfg *cfg, float aspect, const float eye[3], const float *verts, uint32_t nverts, VrRadarQuad *out);
 /* Sin IK: pose de agarre del mando izquierdo (columna-mayor, espacio VR) -> antebrazo aproximado (antebrazo 0,27 m, hacia atrás). */
 int vrradar_arm_from_controller(const float grip[16], VrRadarArm *out);
 /* Elige el antebrazo del anclaje: la IK (el brazo que se dibuja; el panel queda a lift_m de su eje) si es válida (finita, hueso no nulo); si no, el agarre del mando
  * (puede ser NULL). Devuelve 1 = IK, 2 = mando, 0 = ninguna (out intacto o sin definir). */
 int vrradar_pick_arm(const float grip[16], const VrRadarArm *ik, VrRadarArm *out);
+/* Visibilidad del panel (0..1): solo se ve cuando la muñeca mira a la cara. Ángulo entre la normal del panel y la dirección panel -> ojo: < VRRADAR_VIS_ON_DEG aparece, > VRRADAR_VIS_OFF_DEG
+ * desaparece; entre ambos conserva el estado (prev > 0 = visible o apareciendo). Fundido lineal de VRRADAR_VIS_FADE_S s: devuelve prev movido hacia 0/1 como mucho dt / FADE. Entradas no válidas
+ * (NULL, no finitas, vectores nulos) = fuera de la zona. Pura: el llamador guarda prev. */
+#define VRRADAR_VIS_ON_DEG 45.0f
+#define VRRADAR_VIS_OFF_DEG 55.0f
+#define VRRADAR_VIS_FADE_S 0.15f
+float vrradar_visibility(const float normal[3], const float center[3], const float eye[3], float prev, float dt);
 /* Brillo extra 0..gaze_boost según el ángulo entre la mirada (eye, forward unitario) y el quad; 0 si el quad da la espalda. */
 float vrradar_gaze(const VrRadarQuad *q, const float eye[3], const float forward[3], const VrRadarWristCfg *cfg);

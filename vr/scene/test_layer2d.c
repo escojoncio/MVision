@@ -22,6 +22,7 @@ void gte_hp_enable(int on) { (void)on; }
 void gte_hp_frame(void) {}
 int gte_hp_lookup(int sx, int sy, GpuHpInfo *o) { (void)sx; (void)sy; (void)o; return 0; }
 int gte_hp_resolve_a(int n, const int *sx, const int *sy, const uint32_t *a, const uint32_t *w, GpuHpInfo *o, uint8_t *ok) { (void)n; (void)sx; (void)sy; (void)a; (void)w; (void)o; (void)ok; return 0; }
+int gte_hp_resolve_addr(uint32_t addr, uint32_t word, GpuHpInfo *o) { (void)addr; (void)word; (void)o; return 0; }
 void hle_invoke(Cpu *c, uint32_t fn, uint32_t arg) { (void)c; (void)fn; (void)arg; }
 int rt_orig(Cpu *c, const char *name) { (void)c; (void)name; return 0; }
 uint8_t mem_r8(Cpu *c, uint32_t a) { (void)c; return emu_ram[a & 0x1FFFFF]; }
