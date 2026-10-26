@@ -807,10 +807,10 @@ final class RGRenderer {
         let auxWanted = drawWorld && drawBody && auxRequest != nil && haveScene
         let want = eyesWanted || stereoWanted || auxWanted
         n.headVR = SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z)
-        // Cámara del juego: cinemática del motor (view_kind ENGINE) o escena válida pero no apta para primera persona (sin TOVR_OK/PLAYER_OK: vehículos, ascensores, zonas especiales,
-        // jugador sin enlazar tras un cambio de zona), en CUALQUIER modo de cinemática (pantalla 3D, diorama, dentro de la escena). Nunca negro por eso.
+        // Cámara del juego: SOLO en la cinemática del motor (view_kind ENGINE) en cualquier modo de cinemática (pantalla 3D, diorama, dentro de la escena). En el mundo (cámara VR activa) nunca, aunque la
+        // escena no sea apta para primera persona (sceneUnfit): ahí se dibuja el mundo VR normal.
         n.screenMode = screenMode
-        n.cinemaGameView = ((engineView || n.sceneUnfit) && Self.viewOK(gameView)) ? gameView : nil
+        n.cinemaGameView = (engineView && Self.viewOK(gameView)) ? gameView : nil
         var sortView = sceneV.first ?? matrix_identity_float4x4
         var eyeList: [SIMD3<Float>] = eyesWanted ? sceneV.prefix(min(2, nTargets)).map(eyeOf) : []
         if stereoWanted {
@@ -949,7 +949,7 @@ final class RGRenderer {
         let p = gameView.columns.3, f = gameView.columns.2
         let yaw = atan2(f.x, f.z) * 180 / Float.pi
         let fov = camH > 8 ? 2 * atan(160 / camH) * 180 / Float.pi : 0
-        return "seqNativo=\(cur) seqEstereo=\(stereoSeq) estereoDibujado=\(stereoRendered) stereoImage=\(stereoImage == nil ? "nil" : "ok") engineView=\(engineView) cinemaGameView=\(cgv) drawWorld=\(drawWorld) drawEyes=\(drawEyes) camara=(\(String(format: "%.2f %.2f %.2f", p.x, p.y, p.z))) rumbo=\(Int(yaw.rounded()))gr fov=\(Int(fov.rounded()))gr"
+        return "seqNativo=\(cur) seqEstereo=\(stereoSeq) estereoDibujado=\(stereoRendered) stereoImage=\(stereoImage == nil ? "nil" : "ok") engineView=\(engineView) cinemaGameView=\(cgv) drawWorld=\(drawWorld) drawEyes=\(drawEyes) pasada=[\(stereoPassDiag)] camara=(\(String(format: "%.2f %.2f %.2f", p.x, p.y, p.z))) rumbo=\(Int(yaw.rounded()))gr fov=\(Int(fov.rounded()))gr"
     }
     /// Los valores de `stereoImage` ya son lineales (destino de coma flotante).
     var stereoStoredLinear: Bool { colorFormat == .rgba16Float }
@@ -1028,14 +1028,6 @@ final class RGRenderer {
     var engineView = false
     /// La escena nativa se muestra en una pantalla (pantalla 3D o cine): único caso con descarte de reversos (ver NativeRenderer.screenMode).
     var screenMode = false
-    /// La escena nativa actual pide la pantalla 3D porque es válida pero no apta para primera persona (con histéresis): XRPresenter la muestra en estéreo hasta que vuelva a ser apta.
-    var sceneNeedsGameCam: Bool {
-#if !MV_BENCH || MV_BENCH_NATIVE
-        return gpuMode ? false : (native?.sceneUnfit ?? false)
-#else
-        return false
-#endif
-    }
     private static func viewOK(_ m: simd_float4x4) -> Bool {
         guard XRMath.isFinite(m) else { return false }
         let det = simd_determinant(m)
@@ -1089,6 +1081,7 @@ final class RGRenderer {
                            views: [], projections: [], isAux: true, last: true, cams: cams) { rendered += 1 }
         }
         guard rendered == 2 else { return }
+        stereoPassDiag = "\(auxPassDiag) tris/ojo=\(n.statTrisEye) dibujos=\(n.statDraws)"
         stereoSeq = n.sceneSeq
         stereoFade = fade
 #endif
@@ -1265,6 +1258,9 @@ final class RGRenderer {
         var eyeIndex: Int
     }
     private var nativeEncodeFails = 0
+    private var auxPassDiag = ""
+    /// Diagnóstico [cine3d]: pase de la pantalla 3D (cull, clear/compare de profundidad, viewport) y triángulos/dibujos enviados por ojo.
+    private(set) var stereoPassDiag = "sin pase"
 
     /// El mundo de los ojos: un pase por ojo (o uno con amplificación a 2 vistas), SOLO con el render nativo.
     private func encodeScenePasses(_ cb: MTLCommandBuffer, range: Range<Int>? = nil, first: Bool = true, last: Bool = true,
@@ -1603,6 +1599,9 @@ final class RGRenderer {
         }
         enc.setCullMode(.none)
         let vp0 = MTLViewport(originX: 0, originY: 0, width: Double(color.width), height: Double(color.height), znear: 0, zfar: 1)
+        if isAux {   // diagnóstico [cine3d]: cómo se abrió el pase de la pantalla 3D / segunda vista (el compare de profundidad es el de NativeRenderer.dsOpaque)
+            auxPassDiag = "cull=none color=\(ca.loadAction == .clear ? "clear" : "load") prof=\(da.loadAction == .clear ? "clear" : "load")(\(da.clearDepth)) compare=greaterEqual(Z invertida) viewport=\(Int(vp0.width))x\(Int(vp0.height)) muestras=\(samples)"
+        }
         if amplify > 0 {
             var vps = viewportOverride ?? [MTLViewport](repeating: vp0, count: amplify)
             while vps.count < amplify { vps.append(vps.last ?? vp0) }

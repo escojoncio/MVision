@@ -279,7 +279,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
     stereoBlock: do {
         let caso = "\(cfg.name)/pantalla3d"
         setDefaults(curve: 0.0, sharp: 1)
-        UserDefaults.standard.set("stereo", forKey: "xr.view.cutscene3")
+        UserDefaults.standard.set("stereo", forKey: "xr.view.cutscene3"); UserDefaults.standard.set(true, forKey: "xr.view.cutscene3.migrated")   // la migración de "stereo" a "screen" es de una sola vez (XRViewConfig.load)
         guard let tg = makeTargets(layered: cfg.layered) else { check(caso, "texturas", false, "no se pudieron crear"); break stereoBlock }
         guard let enc = XRFrameEncoder(device: device, colorFormat: colorFormat, depthFormat: depthFormat, layered: cfg.layered, sampleCount: cfg.msaa) else {
             check(caso, "codificador", false, "XRFrameEncoder no se pudo crear"); break stereoBlock

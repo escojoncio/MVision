@@ -1051,6 +1051,55 @@ static void menu_decoy_cases(void) {
     for (int k = 0; k < 4; k++) CHECK(uv[k] == win[k], "menu decoy: asentado el rect queda congelado (uv[%d]=%.4f antes %.4f)", k, (double)uv[k], (double)win[k]);
     vl2d_free(L); free_list(g1); free_list(g3); free_list(g4); free_list(g9); free_list(l1);
 }
+/* con el rect asentado, la capa del selector solo lleva la ventana nueva: lo que ya estaba antes de abrir el menú (créditos, texto, vida) no se pinta, ni siquiera dentro del rect */
+static int layer_alpha_outside(VrLayer2D *L, const float uv[4], int margin, int *inside) {
+    int w = 0, h = 0, out = 0;
+    const uint8_t *px = vl2d_rgba(L, &w, &h);
+    if (inside) *inside = 0;
+    if (!px) return -1;
+    int x0 = (int)(uv[0] * (float)w) - margin, y0 = (int)(uv[1] * (float)h) - margin, x1 = (int)(uv[2] * (float)w) + margin, y1 = (int)(uv[3] * (float)h) + margin;
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+        if (px[(y * w + x) * 4 + 3] == 0) continue;
+        if (x >= x0 && x < x1 && y >= y0 && y < y1) { if (inside) (*inside)++; } else out++;
+    }
+    return out;
+}
+static void menu_only_window_cases(void) {
+    uint8_t opd1[64], opd4[64]; int n1 = 0, n4 = 0;
+    GpuDrawList *l1 = panel_scene(0, opd1, &n1);
+    if (!l1) { CHECK(0, "menu solo ventana: lista"); return; }
+    VrScene s1; memset(&s1, 0, sizeof s1); s1.op_dest = opd1; s1.n_op_dest = (uint32_t)n1;
+    const int b4[1][4] = {{200, 120, 80, 60}};
+    const uint16_t f1[1] = {0};
+    GpuDrawList *g4 = with_rects(l1, 1, b4, f1, opd4, &n4);
+    VrScene sg4; memset(&sg4, 0, sizeof sg4); sg4.op_dest = opd4; sg4.n_op_dest = (uint32_t)n4;
+    VrLayer2D *L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    float uv[4] = {0, 0, 0, 0};
+    int inside = 0;
+    CHECK(vl2d_run(L, l1, &s1, VL_PANEL) == 1 && layer_alpha_outside(L, (float[4]){0, 0, 0, 0}, 0, &inside) > 0, "menu solo ventana: sin menú la capa lleva el HUD / texto base");
+    vl2d_set_menu(L, 1);
+    for (int i = 0; i < 12; i++) vl2d_run(L, g4, &sg4, VL_PANEL);
+    CHECK(vl2d_menu_settled(L) == 1 && vl2d_menu_rect(L, uv) == 1, "menu solo ventana: rect asentado");
+    int out = layer_alpha_outside(L, uv, 2, &inside);
+    CHECK(out == 0, "menu solo ventana: %d píxeles opacos fuera del rect (créditos / HUD previos al menú en la capa del selector)", out);
+    CHECK(inside > 0, "menu solo ventana: la ventana sí se pinta (%d píxeles)", inside);
+    /* borde: una primitiva NUEVA que corta el rect asentado se pinta (el panel ya recorta por UV); una nueva lejos del rect no */
+    {
+        uint8_t opd5[64]; int n5 = 0;
+        const int b5[3][4] = {{200, 120, 80, 60}, {270, 150, 40, 20}, {20, 200, 30, 10}};
+        const uint16_t f3[3] = {0, 0, 0};
+        GpuDrawList *g5 = with_rects(l1, 3, b5, f3, opd5, &n5);
+        VrScene sg5; memset(&sg5, 0, sizeof sg5); sg5.op_dest = opd5; sg5.n_op_dest = (uint32_t)n5;
+        CHECK(vl2d_run(L, g5, &sg5, VL_PANEL) == 1, "menu solo ventana: lista de borde");
+        int w = 0, h = 0;
+        const uint8_t *px = vl2d_rgba(L, &w, &h);
+        int ex = 275 - l1->disp.x, ey = 155 - l1->disp.y, fx = 25 - l1->disp.x, fy = 205 - l1->disp.y;
+        CHECK(px && ex >= 0 && ex < w && ey >= 0 && ey < h && px[(ey * w + ex) * 4 + 3] != 0, "menu solo ventana: la primitiva nueva que corta el rect se pinta");
+        CHECK(px && fx >= 0 && fx < w && fy >= 0 && fy < h && px[(fy * w + fx) * 4 + 3] == 0, "menu solo ventana: la primitiva nueva lejos del rect no se pinta");
+        free_list(g5);
+    }
+    vl2d_free(L); free_list(g4); free_list(l1);
+}
 /* ventana del selector que se abre con animación (crece lista a lista): el rect solo crece (nunca se encoge ni oscila) mientras no está asentado, se publica cuando lo está (vl2d_menu_settled,
  * 8 listas consecutivas sin crecer; tope 60) y desde entonces queda FIJO aunque aparezcan primitivas pegadas a él o la ventana se encoja; una caja opaca grande en la franja de créditos/vida (v < 0,35) nunca es la ventana */
 static void menu_settle_cases(void) {
@@ -1471,6 +1520,7 @@ int main(void) {
     menu_pick_cases();
     menu_flip_cases();
     menu_decoy_cases();
+    menu_only_window_cases();
     menu_settle_cases();
     menu_changing_cases();
 

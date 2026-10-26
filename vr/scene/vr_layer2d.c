@@ -46,6 +46,7 @@ struct VrLayer2D {
 #define MENU_CALM_LISTS 8   /* listas consecutivas sin crecer el rect tras las cuales se asienta (se congela hasta cerrar el selector) */
 #define MENU_GROW_MAX 60    /* máximo de listas de crecimiento por apertura: pasado esto se asienta aunque siga cambiando */
 #define MENU_GROW_EPS 0.5f  /* px nativos: variación del rect que cuenta como crecimiento */
+#define MENU_KEEP_PX 2.0f   /* px nativos: holgura del rect asentado para decidir si una primitiva nueva lo corta y se pinta en la capa del selector (el rect lleva ya el margen del 1 % del visor) */
 #define MENU_BAND_V 0.35f   /* franja superior de la capa (vida/oxígeno y créditos de partida: hudRegions 0-1 del visor): sus primitivas nunca son la ventana del selector */
 
 static void menu_forget(VrLayer2D *L) { L->menu_have = 0; L->menu_n = 0; L->menu_calm = 0; L->menu_set = 0; }
@@ -1086,9 +1087,21 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
                 if (!(o->flags & GPU_F_TEXTURED)) break;
                 c.fixed = 1;
             }
+            int menu_skip = 0;   /* ventana asentada: la capa omite lo que ya había antes de abrir el menú y lo nuevo que no toca el rect (créditos, vida, texto) */
             if (!full) {
                 uint64_t mk = op_key(o, L->ox, L->oy);
                 key_push(&L->mcur, &L->mcur_n, &L->mcur_cap, mk);
+                if (mhave) {
+                    int na, nb, ne, nf;
+                    op_box(o, 1, &na, &nb, &ne, &nf);
+                    na -= L->ox; ne -= L->ox; nb -= L->oy; nf -= L->oy;
+                    if (na < 0) na = 0;
+                    if (nb < 0) nb = 0;
+                    if (ne > w) ne = w;
+                    if (nf > h) nf = h;
+                    /* solo se omite lo que ya estaba en la base o lo que no toca el rect; una primitiva nueva que lo corte se pinta (el panel ya recorta por UV) */
+                    menu_skip = key_in(L->mbase, L->mbase_n, mk) || ne <= na || nf <= nb || (float)ne <= mx0 - MENU_KEEP_PX || (float)na >= mx1 + MENU_KEEP_PX || (float)nf <= my0 - MENU_KEEP_PX || (float)nb >= my1 + MENU_KEEP_PX;
+                }
                 if ((L->menu_on || L->mbase_n) && !key_in(L->mbase, L->mbase_n, mk)) {   /* nueva respecto al base: con menú, candidata a ventana; sin menú, la celda «ya cambiaba» */
                     int na, nb, ne, nf;
                     op_box(o, 1, &na, &nb, &ne, &nf);
@@ -1121,6 +1134,7 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
                 if (e > ux1) ux1 = e;
                 if (f > uy1) uy1 = f;
             }
+            if (menu_skip) break;
             raster_prim(&c, o);
             break;
         }

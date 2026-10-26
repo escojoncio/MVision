@@ -87,6 +87,11 @@ struct XRViewConfig {
         let s2 = UserDefaults.standard.integer(forKey: "xr.view.smooth2d2")   // clave nueva: el defecto pasó de «nítido» a «original» (el texto no se deforma)
         c.smooth2D = UserDefaults.standard.object(forKey: "xr.view.smooth2d2") == nil ? 0 : min(max(s2, 0), 2)
         // Clave nueva (cutscene3): el defecto pasó de «pantalla 3D estéreo» (cutscene2 = stereo) a «pantalla de cine 3D». Solo ese valor antiguo migra al nuevo defecto; el resto de elecciones guardadas se conserva.
+        // Un «stereo» guardado en cutscene3 (el defecto antiguo) migra A LA VEZ a la pantalla de cine 3D (.screen): una sola vez (clave de marca), para que «Pantalla 3D (estéreo)» elegida después sobreviva al reinicio.
+        if !UserDefaults.standard.bool(forKey: "xr.view.cutscene3.migrated") {
+            if UserDefaults.standard.string(forKey: "xr.view.cutscene3") == "stereo" { UserDefaults.standard.set(Cutscene.screen.rawValue, forKey: "xr.view.cutscene3") }
+            UserDefaults.standard.set(true, forKey: "xr.view.cutscene3.migrated")
+        }
         if let v = UserDefaults.standard.string(forKey: "xr.view.cutscene3"), let m = Cutscene(rawValue: v) { c.cutscene = m }
         else if let v = UserDefaults.standard.string(forKey: "xr.view.cutscene2"), v != "stereo", let m = Cutscene(rawValue: v) { c.cutscene = m }
         else { c.cutscene = .screen }
@@ -743,7 +748,7 @@ final class XRPresenter {
 
     /// `hud`: panel 2D (textura del renderer, ya la vista sRGB si el destino es lineal). `eyePx`/`p00`: ancho en píxeles de un ojo y P[0][0].
     func compose(gs: MvVrGameState, head: simd_float4x4, dt: Float, hud: MTLTexture?, eyePx: Float, p00: Float,
-                 gameView: simd_float4x4, linear: Bool, wrist: Wrist? = nil, ipd: Float = 0.063, shot: UInt32 = 0, gameCamScene: Bool = false, stereo2DInside: Bool = false, hudMenuUV: SIMD4<Float>? = nil, hudLogical: SIMD2<Float>? = nil) -> Result {
+                 gameView: simd_float4x4, linear: Bool, wrist: Wrist? = nil, ipd: Float = 0.063, shot: UInt32 = 0, stereo2DInside: Bool = false, hudMenuUV: SIMD4<Float>? = nil, hudLogical: SIMD2<Float>? = nil) -> Result {
         // 1) qué toca mostrar. view_kind 2 (vr_view.h, VRV_K_ENGINE) = cinemática del motor con 3D y cámara del guion; los vídeos pregrabados (3), los menús, el códec/radio,
         //    las cargas, la pausa y las ventanas de armas/objetos (0) siguen en la pantalla de cine.
         var target: Display = gs.view_mode == 1 ? .world : .cinema
@@ -755,9 +760,6 @@ final class XRPresenter {
             case .cinema: break
             }
         }
-        // Escena válida pero no apta para primera persona (vehículos, ascensores, zonas especiales, jugador sin enlazar): se pinta con la cámara del juego en la pantalla 3D, nunca en negro,
-        // y se vuelve al mundo en cuanto la escena es apta otra vez (RGRenderer.sceneNeedsGameCam, con histéresis).
-        if target == .world && gameCamScene && Self.gameViewOK(gameView) { target = .stereo }
         // Transición con control pero sin cámara VR todavía (fin de radio / de escena, VRV_R_PENDING = 12): la vista queda congelada y se oscurece; nunca se enseña el fotograma
         // plano del motor (cenital, baja resolución) como paso intermedio. El destino es el mundo.
         let pending = gs.view_reason == 12
@@ -901,8 +903,8 @@ final class XRPresenter {
         //     por delante de la geometría. Sustituye a los paneles sueltos del HUD mientras dura (la capa 2D ya los trae).
         //     Si la abrió una mano (gesto del pecho: L2 izquierda, R2 derecha) el panel va sobre esa mano, de cara a la cabeza, y la sigue mientras dura; sin mano o sin pose válida, delante de la cabeza.
         if !overlay2D { overlayHand = -1 } else if overlayHand < 0 { overlayHand = Int(mv_vrgame_menu_hand()) }
-        //     Selector (view_reason 10) sin rect ASENTADO todavía (el rect crece por unión hasta llevar 8 listas sin crecer): el panel de la mano no muestra nada (nunca la capa entera) y el HUD normal
-        //     (región 0: vida/oxígeno) sigue visible; RenderRG conserva el último rect válido mientras dure el selector.
+        //     Selector (view_reason 10) sin rect ASENTADO todavía (el rect crece por unión hasta llevar 8 listas sin crecer): el panel de la mano no muestra nada (nunca la capa entera) y tampoco
+        //     se dibuja el HUD (paso 6); RenderRG conserva el último rect válido mientras dure el selector.
         let menuPending = overlay2D && gs.view_reason == 10 && hudMenuUV == nil
         if overlay2D, let h = hud, !menuPending {
             var onHand: simd_float4x4?
@@ -915,7 +917,7 @@ final class XRPresenter {
                 }
             }
             var it = XRDrawItem(kind: .panel, texture: h)
-            // Con rect de la ventana (hudMenuUV) solo ella va en el panel de la mano: el resto de la capa (créditos que el juego dibuja durante la partida) se queda en los paneles del HUD (6).
+            // Con rect de la ventana (hudMenuUV) solo ella va en el panel de la mano (la capa del selector ya no lleva créditos ni HUD, vr_layer2d.c) y los paneles del HUD (6) no se dibujan mientras dura.
             let mr = hudMenuUV ?? SIMD4<Float>(0, 0, 1, 1)
             // Aspecto REAL de la capa (alto/ancho en píxeles: 320x256 = 0,8; 384x256 = 0,667; la textura del HUD lleva el tamaño lógico por la escala, que no cambia la proporción).
             let la = Float(h.height) / Float(max(h.width, 1))
@@ -927,7 +929,7 @@ final class XRPresenter {
             } else {
                 it.model = cfg.follow2D ? XRFollow.model(follow, distance: XRMenuPanelLayout.distance, drop: XRMenuPanelLayout.drop)
                                         : XRMenuPanelLayout.model(position: hp, yaw: hudYaw)
-                it.size = XRMenuPanelLayout.frontSize(uv: hudMenuUV, aspect: la)       // sin rect: la capa entera
+                it.size = hudMenuUV != nil ? psize : XRMenuPanelLayout.frontSize(uv: nil, aspect: la)       // con rect: el mismo tamaño fijo de la ventana; sin rect: la capa entera
                 it.distance = XRMenuPanelLayout.distance
             }
             it.uvrect = mr
@@ -937,8 +939,8 @@ final class XRPresenter {
             r.items.append(it)
         }
 
-        // 6) paneles del HUD (mundo y diorama; en el cine el HUD ya va dentro de la imagen)
-        if shown != .cinema && shown != .stereo && cfg.hudPanels && (!overlay2D || hudMenuUV != nil || menuPending), let h = hud {
+        // 6) paneles del HUD (mundo y diorama; en el cine el HUD ya va dentro de la imagen). Con una ventana 2D abierta (selector, pausa) no se dibuja ninguno (vida, créditos, textos de partida): solo el panel de 5b.
+        if shown != .cinema && shown != .stereo && cfg.hudPanels && !overlay2D, let h = hud {
             let frame = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw)
             let sc = cfg.hudScale
             var wm: (n: SIMD3<Float>, ok: Bool)?
@@ -953,9 +955,6 @@ final class XRPresenter {
                 }
             }
             for (i, rg) in Self.hudRegions.enumerated() {
-                // Con la ventana del menú en la mano, las zonas del HUD que cruzan su rect no se dibujan (ya va en el panel de la mano); las demás siguen (vida, créditos...).
-                if menuPending && i != 0 { continue }      // rect sin asentar: solo vida/oxígeno (la ventana aún se abre y sus trozos no deben salir en los paneles del HUD)
-                if overlay2D, let m = hudMenuUV, m.x < rg.u1 && m.z > rg.u0 && m.y < rg.v1 && m.w > rg.v0 { continue }
                 var it = XRDrawItem(kind: .panel, texture: h)
                 it.pixelMode = XR2DFilter.current.panelMode
                 if shown == .world && Self.hudIsFramed[i] {

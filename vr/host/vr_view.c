@@ -26,9 +26,9 @@ int vrview_kind_of(const VrViewIn *in) {
     if (r == VRV_R_WORLD || r == VRV_R_SELECTOR || r == VRV_R_PAUSE_WORLD) return VRV_K_WORLD;
     /* FMV: con el decodificador de vídeo activo el fotograma sale de la VRAM (no hay escena que dibujar): gana al 3D que el motor deje detrás. */
     if (in->mdec && r != VRV_R_PAUSED) return VRV_K_VIDEO;
-    /* Escena 3D del motor: sin control del jugador y con 3D; con o sin jugador en escena (las introducciones no lo tienen). Radio, pausa, detenido y ventana de
+    /* Escena 3D del motor (bandera de escena/demo/muerte del motor, no «el jugador perdió el control») con 3D; con o sin jugador en escena (las introducciones no lo tienen). Radio, pausa, detenido y ventana de
      * armas/objetos son 2D del juego aunque el motor dibuje 3D detrás. Siempre pantalla estereoscópica del render nativo (sin respaldo plano). */
-    if (in->scene3d && (r == VRV_R_NO_GAME || r == VRV_R_CINEMATIC || r == VRV_R_LOST_CONTROL || r == VRV_R_DEAD))
+    if (in->scene3d && (r == VRV_R_NO_GAME || r == VRV_R_CINEMATIC || r == VRV_R_DEAD))
         return VRV_K_ENGINE;
     if (in->video && r != VRV_R_PAUSED) return VRV_K_VIDEO;
     return VRV_K_UI;

@@ -45,6 +45,8 @@ final class XRFrameEncoder {
     static let fillDepthMeters: Float = 50
     private var probe: XRPixelProbe?
     private var probeT: CFTimeInterval = 0
+    private var stereoProbe: XRStereoProbe?
+    private var stereoProbeT: CFTimeInterval = 0
 
     init?(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat, layered: Bool, sampleCount: Int) {
         guard let fp = XRFinalPass(device: device, colorFormat: colorFormat, depthFormat: depthFormat, layered: layered) else { return nil }
@@ -55,6 +57,7 @@ final class XRFrameEncoder {
         axes = XRDebugAxes(device: device)
         targets = XRTargets(device: device)
         probe = XRPixelProbe(device: device)
+        stereoProbe = XRStereoProbe(device: device)
         self.layered = layered
         self.sampleCount = sampleCount
     }
@@ -178,7 +181,7 @@ final class XRFrameEncoder {
         presenter.hqFull = renderer.hqFull
         var pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, eyePx: Float(w), p00: projs[0].columns.0.x,
                                      gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame(), ipd: ipd, shot: renderer.sceneShot,
-                                     gameCamScene: renderer.sceneNeedsGameCam, stereo2DInside: renderer.stereo2DInside, hudMenuUV: renderer.hudMenuUV, hudLogical: renderer.hudLogical)
+                                     stereo2DInside: renderer.stereo2DInside, hudMenuUV: renderer.hudMenuUV, hudLogical: renderer.hudLogical)
         presenter.encodeUpscale(cb)
         if dg.noLayers {
             // Sin capas finales: ni velo (transición, fundido de corte), ni viñeta, ni pantalla de cine / pantalla 3D; solo el mundo, el HUD 2D y los textos (menú).
@@ -257,6 +260,11 @@ final class XRFrameEncoder {
                 pres.items[i].outLinear = renderer.linearOutput
             }
         }
+        // Diagnóstico de la pantalla 3D: rejilla 16x16 de su textura (ojo 0), 1 vez cada 2 s, sin bloquear (blit a un búfer compartido; ver XRStereoProbe).
+        if pres.stereo != nil, let img = renderer.stereoImage, let sp = stereoProbe {
+            let nowS = CACurrentMediaTime()
+            if nowS - stereoProbeT >= 2 { stereoProbeT = nowS; sp.encode(commandBuffer: cb, texture: img) }
+        }
         // [cine3d] (1/s, solo mientras la vista es una cinemática del motor o se muestra la pantalla 3D): por qué se ve (o no) la pantalla en vez del mundo VR.
         if gs.view_kind == 2 || presenter.shown == .stereo {
             let nowC = CACurrentMediaTime()
@@ -264,7 +272,7 @@ final class XRFrameEncoder {
                 cine3dT = nowC
                 let s3 = pres.items.first(where: { $0.kind == .screen3d })
                 let t3 = s3 == nil ? "sin-item" : (s3!.texture.map { "\($0.width)x\($0.height)x\($0.arrayLength)" } ?? "nil")
-                log("[cine3d] clase=\(gs.view_kind) motivo=\(gs.view_reason) cutscene=\(presenter.cfg.cutscene.rawValue) mostrando=\(presenter.shown) velo=\(String(format: "%.2f", presenter.veil)) veloPend=\(String(format: "%.2f", presenter.pendVeil)) pantalla3d=\(t3) " + renderer.cine3dDiag())
+                log("[cine3d] clase=\(gs.view_kind) motivo=\(gs.view_reason) cutscene=\(presenter.cfg.cutscene.rawValue) mostrando=\(presenter.shown) velo=\(String(format: "%.2f", presenter.veil)) veloPend=\(String(format: "%.2f", presenter.pendVeil)) pantalla3d=\(t3) " + renderer.cine3dDiag() + " | pantalla3d-pixeles: " + (stereoProbe?.last ?? "n/d"))
             }
         }
         finalPass.encode(commandBuffer: cb, colorTextures: colorTex, depthTextures: depthTex,
@@ -445,7 +453,7 @@ final class XRPixelProbe {
 
     private func set(_ t: String) { lock.lock(); text = t; busy = false; lock.unlock() }
 
-    private static func half(_ h: UInt16) -> Float {
+    static func half(_ h: UInt16) -> Float {
         let sign: Float = (h & 0x8000) != 0 ? -1 : 1
         let e = Int((h >> 10) & 0x1F), m = Float(h & 0x3FF)
         if e == 0 { return sign * m * powf(2, -24) }
@@ -539,6 +547,76 @@ final class XRPixelProbe {
                 } else if e == 0 { out.append("prof=n/d") }
             }
             self.set(out.joined(separator: " | ") + " | negro-puro(0,0,0)=\(black)/\(total)")
+        }
+    }
+}
+
+/// Lectura SIN BLOQUEO de la textura de la pantalla 3D (diagnóstico [cine3d]): rejilla de 16x16 muestras de la capa del ojo 0 (un blit de 1x1 por muestra a un búfer compartido, en el command buffer del
+/// fotograma); la luminancia media, la máxima y el % de muestras no negras se calculan en el manejador de finalización, sin esperar en el hilo de render.
+final class XRStereoProbe {
+    private static let n = 16
+    private static let slot = 8                  // bytes por muestra en el búfer (cabe rgba16Float)
+    private let buf: MTLBuffer
+    private let lock = NSLock()
+    private var text = "sin muestra aun"
+    private var busy = false
+    private var busyT: CFTimeInterval = 0       // si el command buffer no llega a enviarse el manejador no corre: pasados 4 s se libera `busy`
+
+    init?(device: MTLDevice) {
+        guard let b = device.makeBuffer(length: Self.n * Self.n * Self.slot, options: .storageModeShared) else { return nil }
+        b.label = "mv.xr.probe3d"
+        buf = b
+    }
+
+    var last: String { lock.lock(); defer { lock.unlock() }; return text }
+    private func set(_ t: String, busy b: Bool = false) { lock.lock(); text = t; busy = b; busyT = CACurrentMediaTime(); lock.unlock() }
+
+    func encode(commandBuffer cb: MTLCommandBuffer, texture t: MTLTexture) {
+        lock.lock(); let skip = busy && CACurrentMediaTime() - busyT < 4; lock.unlock()
+        if skip { return }
+        let bpp: Int
+        switch t.pixelFormat {
+        case .bgra8Unorm, .bgra8Unorm_srgb, .rgba8Unorm, .rgba8Unorm_srgb: bpp = 4
+        case .rgba16Float: bpp = 8
+        default: set("formato \(t.pixelFormat.rawValue) sin decodificar"); return
+        }
+        guard t.sampleCount == 1, !t.isFramebufferOnly, t.width > 0, t.height > 0, let blit = cb.makeBlitCommandEncoder() else { return }
+        blit.label = "mv.xr.probe3d"
+        let n = Self.n
+        for j in 0..<n {
+            for i in 0..<n {
+                let x = min(Int((Float(i) + 0.5) / Float(n) * Float(t.width)), t.width - 1), y = min(Int((Float(j) + 0.5) / Float(n) * Float(t.height)), t.height - 1)
+                blit.copy(from: t, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: x, y: y, z: 0), sourceSize: MTLSize(width: 1, height: 1, depth: 1),
+                          to: buf, destinationOffset: (j * n + i) * Self.slot, destinationBytesPerRow: bpp, destinationBytesPerImage: bpp)
+            }
+        }
+        blit.endEncoding()
+        set(last, busy: true)
+        let fmt = t.pixelFormat
+        cb.addCompletedHandler { [weak self] _ in
+            guard let self = self else { return }
+            let base = self.buf.contents()
+            var sum: Float = 0, mx: Float = 0, lit = 0, valid = 0
+            for k in 0..<(n * n) {
+                let p = base + k * Self.slot
+                let r: Float, g: Float, b: Float
+                switch fmt {
+                case .bgra8Unorm, .bgra8Unorm_srgb:
+                    let q = p.assumingMemoryBound(to: UInt8.self); r = Float(q[2]); g = Float(q[1]); b = Float(q[0])
+                case .rgba8Unorm, .rgba8Unorm_srgb:
+                    let q = p.assumingMemoryBound(to: UInt8.self); r = Float(q[0]); g = Float(q[1]); b = Float(q[2])
+                default:
+                    let q = p.assumingMemoryBound(to: UInt16.self)
+                    let hr = XRPixelProbe.half(q[0]), hg = XRPixelProbe.half(q[1]), hb = XRPixelProbe.half(q[2])
+                    if !(hr.isFinite && hg.isFinite && hb.isFinite) { continue }     // NaN / Inf: no cuentan
+                    r = min(max(hr, 0), 1) * 255; g = min(max(hg, 0), 1) * 255; b = min(max(hb, 0), 1) * 255
+                }
+                valid += 1
+                let l = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                sum += l; mx = max(mx, l)
+                if r > 0 || g > 0 || b > 0 { lit += 1 }
+            }
+            self.set("ojo0 rejilla \(n)x\(n): " + String(format: "luminancia media=%.1f max=%.1f (0-255) no_negro=%.0f%%", sum / Float(max(valid, 1)), mx, 100 * Float(lit) / Float(max(valid, 1))) + " validas=\(valid)/\(n * n)")
         }
     }
 }

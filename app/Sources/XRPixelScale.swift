@@ -1,20 +1,25 @@
 import Foundation
 import Metal
 
-/// Filtro de la capa 2D (códec, créditos, menús, HUD, cine). MV_2D_FILTER: `xbr` (defecto) = xBR-lv2 x3 en la GPU (XRShaders.metal, xr_xbr3) sobre la imagen nativa y muestreo «sharp-bilinear» al tamaño del panel;
-/// `nearest` = sin xBR, escala entera nítida (vecino más próximo). La CPU rasteriza siempre a escala 1 (vl2a_options_native).
+/// Filtro de la capa 2D (códec, créditos, menús, HUD, cine). MV_2D_FILTER: `sharp` (defecto) = sin xBR: la imagen nativa se muestrea en el shader con «sharp-bilinear» (cada texel plano y solo se mezcla con el vecino
+/// en una banda de un píxel de pantalla alrededor de su borde: equivale a ampliar con vecino más próximo a escala entera y luego bilineal, sin la pasada de ampliación); `xbr` = xBR-lv2 x3 en la GPU (XRShaders.metal, xr_xbr3)
+/// sobre la imagen nativa y el mismo muestreo al tamaño del panel; `nearest` = vecino más próximo puro. La CPU rasteriza siempre a escala 1 (vl2a_options_native).
 enum XR2DFilter {
-    case xbr, nearest
+    case xbr, sharp, nearest
 
     static let current: XR2DFilter = {
-        if let e = getenv("MV_2D_FILTER"), String(cString: e).lowercased() == "nearest" { return .nearest }
-        return .xbr
+        guard let e = getenv("MV_2D_FILTER") else { return .sharp }
+        switch String(cString: e).lowercased() {
+        case "nearest": return .nearest
+        case "xbr": return .xbr
+        default: return .sharp
+        }
     }()
 
     /// Factor de ampliación de xr_xbr3.
     static let factor = 3
-    /// Muestreo del panel en el shader (XRQuadU.cfg.w): 1 sharp-bilinear (sobre la imagen xBR), 2 vecino más próximo.
-    var panelMode: UInt32 { self == .xbr ? 1 : 2 }
+    /// Muestreo del panel en el shader (XRQuadU.cfg.w): 1 sharp-bilinear (sobre la imagen nativa o la xBR), 2 vecino más próximo.
+    var panelMode: UInt32 { self == .nearest ? 2 : 1 }
 }
 
 /// Pasada de cómputo xBR-lv2 x3: imagen RGBA8 nativa -> textura RGBA8 de 3x3 por píxel (la misma codificación de canales y de color que la entrada).

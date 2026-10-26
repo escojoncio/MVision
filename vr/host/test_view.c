@@ -31,6 +31,8 @@ int main(void) {
     i.scene3d = 0; CHECK(vrview_kind_of(&i) == VRV_K_UI, "muerte sin 3D = cine plano");
     i = world(); i.dead = 1; i.cinematic = 1; CHECK(vrview_reason(&i) == VRV_R_CINEMATIC, "cinemática gana a muerte");
 
+    i = world(); i.in_control = 0; i.scene3d = 1; CHECK(vrview_kind_of(&i) != VRV_K_ENGINE, "sin control sin escena real del motor (estado no jugable) con 3D: nunca pantalla 3D");
+
     VrView v;
     vrview_reset(&v);
     CHECK(v.mode == VRV_CINEMA, "arranca en cine");
@@ -79,7 +81,7 @@ int main(void) {
         vrview_reset(&w);
         VrViewIn e;
         memset(&e, 0, sizeof e);
-        e.game = 1; e.scene3d = 1;       /* con partida: el extractor es de fiar sin medidas (cinemática real) */
+        e.game = 1; e.scene3d = 1; e.cinematic = 1;       /* con partida: el extractor es de fiar sin medidas (cinemática real, bandera de escena del motor) */
         for (int n = 0; n < 2; n++) vrview_step(&w, &e);
         CHECK(w.kind == VRV_K_UI, "entrar en cinemática exige %d fotogramas", w.to_engine);
         vrview_step(&w, &e);

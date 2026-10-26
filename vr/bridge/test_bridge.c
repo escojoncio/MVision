@@ -196,6 +196,10 @@ static void test_modes(void) {
     bridge_read(ram, &s);
     CHECK(!s.cinematic);
     build_game();
+    p32(BA_GAME_STATUS, 0x004A0000u); p32(BA_PLAYER_STATUS, BRIDGE_PS_MOVE | BRIDGE_PS_BOX);   /* conducto / bajo un objeto: radar+vida+menú apagados sin bandera de escena = sigue el mundo */
+    bridge_read(ram, &s);
+    CHECK(!s.cinematic && s.in_control);
+    build_game();
     p32(BA_GAME_STATUS, 0x004A0000u); p32(BA_PLAYER_STATUS, BRIDGE_PS_SQUAT | BRIDGE_PS_NOT_PLAYABLE);
     bridge_read(ram, &s);
     CHECK(s.cinematic);

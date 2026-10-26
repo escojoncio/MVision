@@ -143,16 +143,15 @@ enum XRMenuPanelLayout {
 
     static func isOverlay(reason: Int32) -> Bool { reason == 10 || reason == 11 }
 
-    static let handWidth: Float = 0.30      // m (panel sobre la mano con la capa entera, sin rect); alto = aspecto real de la capa
-    static let handLayerWidth: Float = 0.88 // m por ANCHO de capa en el panel de la mano con rect: densidad fija (la ventana de armas, 0,34 del ancho, mide 0,30 m); no depende de la escala de raster
+    static let handWidth: Float = 0.30      // m: ancho FIJO del panel sobre la mano (con rect: la ventana; sin rect: la capa entera); alto = aspecto real
     static let handMaxSide: Float = 0.45    // m: lado máximo del panel de la mano
 
-    /// Tamaño (m) del panel de la mano: un recorte `uv` (u0, v0, u1, v1) de la capa con aspecto real `aspect` (alto/ancho en píxeles). Densidad de píxel FIJA (sin rect: la capa entera a `handWidth`)
-    /// y píxeles cuadrados (el alto lleva el aspecto de la capa, no 3/4). Solo depende del rect y del aspecto, nunca de la resolución del raster.
+    /// Tamaño (m) del panel de la mano: un recorte `uv` (u0, v0, u1, v1) de la capa con aspecto real `aspect` (alto/ancho en píxeles). Ancho FIJO `handWidth` (la ventana mide lo mismo sea cual sea su rect)
+    /// y píxeles cuadrados (el alto lleva el aspecto del recorte, no 3/4). Solo depende del rect y del aspecto, nunca de la resolución del raster.
     static func handSize(uv: SIMD4<Float>?, aspect: Float) -> SIMD2<Float> {
         let a = aspect.isFinite && aspect > 0.3 && aspect < 1.2 ? aspect : 0.75
         guard let r = uv, r.x.isFinite, r.y.isFinite, r.z.isFinite, r.w.isFinite else { return SIMD2<Float>(handWidth, handWidth * a) }
-        var s = SIMD2<Float>(handLayerWidth * max(r.z - r.x, 0.01), handLayerWidth * max(r.w - r.y, 0.01) * a)
+        var s = SIMD2<Float>(handWidth, handWidth * max(r.w - r.y, 0.01) * a / max(r.z - r.x, 0.01))
         let m = max(s.x, s.y)
         if m > handMaxSide { s *= handMaxSide / m }
         return s

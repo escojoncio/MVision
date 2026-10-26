@@ -101,8 +101,8 @@ int main(void) {
     /* 5) cinemáticas con el render nativo, en estéreo, en la textura de la pantalla 3D */
     CHECK(strstr(nr, "ns_cinema_to_vr") != NULL && strstr(nr, "cinemaGameView") != NULL, "NativeRenderer coloca la escena desde la cámara del juego (ns_cinema)");
     CHECK(count_range(rg, "private func encodeStereo", "private func encodeAux", "cams: cams") >= 1, "encodeStereo dibuja con el render nativo (cams)");
-    CHECK(strstr(rg, "n.cinemaGameView = ((engineView || n.sceneUnfit)") != NULL, "cámara del juego en cinemáticas del motor Y en escenas no aptas para primera persona");
-    CHECK(strstr(xp, "gameCamScene") != NULL && strstr(xp, "target = .stereo") != NULL, "XRPresent pide la pantalla 3D con una escena válida no apta (nunca negro)");
+    CHECK(strstr(rg, "n.cinemaGameView = (engineView && Self.viewOK(gameView))") != NULL && count(rg, "n.sceneUnfit") == 0, "cámara del juego solo en cinemáticas del motor (el mundo con cámara VR no la usa aunque la escena no sea apta)");
+    CHECK(count(xp, "gameCamScene") == 0 && count(xp, "target = .stereo") == 1, "XRPresent: la pantalla 3D solo por cinemática del motor (view_kind 2), nunca por una escena no apta en el mundo");
     CHECK(strstr(rg, "n.camH") != NULL && strstr(rg, "160 / n.camH") != NULL, "la pantalla 3D nativa usa la H real de la escena (tangentes 160/H, 120/H) y OFX/OFY");
     CHECK(strstr(rg, "if !gpuMode, let n = native, n.camH > 8 {") != NULL, "la pantalla 3D del modo gpu usa las tangentes de la petición");
     CHECK(count(sh, "ns_vs_overlay(") == 1, "ningún vertex llama a otro vertex (helper ns_overlay_vertex)");
@@ -163,9 +163,9 @@ int main(void) {
         int o75 = count_range(xp, "if overlay2D, let h = hud, !menuPending {", "if shown != .cinema && shown != .stereo && cfg.hudPanels", "0.75");
         CHECK(o75 == 0 && strstr(xp, "XRMenuPanelLayout.handSize(uv: hudMenuUV, aspect: la)") != NULL, "ventana 2D del selector: tamaño fijo por densidad y aspecto real de la capa, sin 0,75 (%d)", o75);
     }
-    {   /* selector sin rect asentado: el panel de la mano no muestra nada y el HUD de vida/oxígeno (región 0) sigue; antebrazo de reserva con el dorso real */
-        CHECK(strstr(xp, "let menuPending = overlay2D && gs.view_reason == 10 && hudMenuUV == nil") != NULL && strstr(xp, "(!overlay2D || hudMenuUV != nil || menuPending)") != NULL && strstr(xp, "if menuPending && i != 0 { continue }") != NULL,
-              "selector sin rect asentado: la mano no dibuja y el HUD de vida/oxigeno sigue visible");
+    {   /* selector sin rect asentado: el panel de la mano no muestra nada y no hay paneles de HUD mientras dura la ventana; antebrazo de reserva con el dorso real */
+        CHECK(strstr(xp, "let menuPending = overlay2D && gs.view_reason == 10 && hudMenuUV == nil") != NULL && strstr(xp, "cfg.hudPanels && !overlay2D, let h = hud {") != NULL && strstr(xp, "if menuPending && i != 0 { continue }") == NULL,
+              "selector sin rect asentado: la mano no dibuja la capa entera y con una ventana 2D abierta no se dibuja ningún panel del HUD");
         char *vg = slurp("vr/host/vrgame.c", 1);
         CHECK(vg && count(vg, "vrradar_dorsal_from_grip(") == 2 && count(vg, "bc->hand_rot_offset[i]") == 1 && count(vg, "bc ? bc->hand_rot_offset[side]") == 1, "antebrazo: la ruta viva y la de reserva usan el mismo dorso real (vrradar_dorsal_from_grip + hand_rot_offset)");
         free(vg);
