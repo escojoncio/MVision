@@ -561,6 +561,9 @@ void vl2d_compose5(const VrLayerPx *p, const uint8_t bg[3], uint8_t out[3]) {
     }
 }
 
+static float srgb_to_lin(float c) { return c <= 0.04045f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f); }
+static float lin_to_srgb(float c) { return c <= 0.0031308f ? c * 12.92f : 1.055f * powf(c, 1.0f / 2.4f) - 0.055f; }
+
 void vl2d_encode(const VrLayerPx *p, int hq, uint8_t rgba[4]) {
     int cmax = hq ? 255 : 31;
     if (p->t == 0 && !p->d[0] && !p->d[1] && !p->d[2]) {   /* opaco: la salida de vídeo de la GPU original */
@@ -570,19 +573,36 @@ void vl2d_encode(const VrLayerPx *p, int hq, uint8_t rgba[4]) {
         return;
     }
     float cov = 1.0f - (float)p->t / 256.0f;                 /* parte de la imagen que tapa lo dibujado */
-    float dm = (float)(p->d[0] + p->d[1] + p->d[2]) / (3.0f * 4.0f * (float)cmax);   /* oscurecimiento medio por la resta pendiente */
+    /* Resta pendiente d (cuartos de nivel) junto a una suma c (créditos: B-F y luego B+F, que en el hardware da max(B,F)): el estado no guarda el orden. Si la suma
+     * cubre la resta (d <= 4c) la pareja se codifica como aditivo puro de c (conserva su brillo sobre el mundo oscuro; antes la resta oscurecía C y alfa a la mitad:
+     * C = c*keep, alfa = 1-keep, ~0,25 + 0,52*B en vez de 0,48 + 0,52*B). Si la resta es mayor, resta neta (c se absorbe en d). */
+    unsigned de[3]; float cc[3];
+    for (int k = 0; k < 3; k++) {
+        unsigned d4c = (unsigned)p->c[k] * 4u;
+        if (p->d[k] <= d4c) { de[k] = 0; cc[k] = (float)p->c[k]; }
+        else { de[k] = p->d[k] - d4c; cc[k] = 0.0f; }
+    }
+    float dm = (float)(de[0] + de[1] + de[2]) / (3.0f * 4.0f * (float)cmax);   /* oscurecimiento medio por la resta pendiente */
     if (dm > 1.0f) dm = 1.0f;
     float keep = 1.0f - dm;
     float C[3];
-    for (int k = 0; k < 3; k++) C[k] = (hq ? (float)p->c[k] : (float)ex8(p->c[k])) / 255.0f * keep;
+    for (int k = 0; k < 3; k++) C[k] = (hq ? cc[k] : (float)ex8((int)cc[k])) / 255.0f * keep;
     float a = 1.0f - (1.0f - cov) * keep;                    /* alfa premultiplicado equivalente */
     float mx = C[0] > C[1] ? C[0] : C[1];
     if (C[2] > mx) mx = C[2];
-    if (a < mx) a = mx;                                      /* aditivo puro (alfa 0): alfa = canal máximo */
+    float add[3] = {0, 0, 0};                                /* != 0: el color se reparte como aditivo en luz lineal (ver abajo) */
+    int additive = a < mx;
+    if (additive) {
+        /* Aditivo (alfa 0 en el hardware): el panel mezcla con un destino sRGB/lineal (el visor decodifica la capa a lineal, mezcla y codifica), así que «C + (1-a)*B» tiene que
+         * cumplirse en LUZ LINEAL: alfa = canal máximo de lineal(C), color = lineal(C)/alfa (en gamma al guardar). Con alfa = max(C) en gamma, el color 0,48 sobre negro salía 0,72. */
+        float lm = 0.0f;
+        for (int k = 0; k < 3; k++) { add[k] = srgb_to_lin(C[k]); if (add[k] > lm) lm = add[k]; }
+        if (a < lm) a = lm;
+    }
     if (a <= 0.0f) { rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0; return; }
     if (a > 1.0f) a = 1.0f;
     for (int k = 0; k < 3; k++) {
-        float v = C[k] / a;
+        float v = additive ? lin_to_srgb(add[k] / a) : C[k] / a;
         rgba[k] = (uint8_t)(v <= 0.0f ? 0 : v >= 1.0f ? 255 : (int)(v * 255.0f + 0.5f));
     }
     rgba[3] = (uint8_t)(a * 255.0f + 0.5f);

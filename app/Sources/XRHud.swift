@@ -1,6 +1,18 @@
 import Metal
 import simd
 
+/// Troceo del 2D del juego: interruptor global, APAGADO por defecto (la única fuente es vr/scene/vr_layer2d_async.c, vl2a_split; MV_L2D_SPLIT=1 en el entorno lo enciende al instalar el host). Apagado, TODO el 2D del
+/// juego (HUD, radar del juego, menús de objetos/armas, pausa, textos, créditos) es UNA capa completa y se muestra en UN panel plano (XRFramedLayout, capa entera). Encendido vuelven, sin cambios, las rutas antiguas:
+/// paneles de regiones del HUD (hudRegions) y de muñeca, panel de la ventana del menú en la mano (rect [menu2d], handSize), recorte de la capa del selector y radar aparte (RadarPanel, vr/radar). El banco de render
+/// (MV_BENCH) no enlaza el host; vive aquí y no en XRMath.swift porque el banco del renderer nativo (bench/build_native.sh) compila XRMath.swift sin el host: allí es una variable que el banco fija.
+enum XRLayer2D {
+#if MV_BENCH
+    static var split = false
+#else
+    static var split: Bool { mv_vrhost_l2d_split() != 0 }
+#endif
+}
+
 /// Un elemento que dibuja el pase final dentro del espacio de la escena (todo en metros, espacio recentrado).
 struct XRDrawItem {
     enum Kind { case screen, screen3d, panel, menu, veil, vignette }

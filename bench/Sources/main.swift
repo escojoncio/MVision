@@ -13,6 +13,7 @@ guard CommandLine.arguments.count >= 3 else { print("uso: bench <default.metalli
 MVLib.path = CommandLine.arguments[1]
 let outDir = CommandLine.arguments[2]
 try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+XRLayer2D.split = true   // el banco ejercita las rutas con troceo del 2D (paneles de regiones del HUD, ventana del menú en la mano, radar de muñeca); el panel único (troceo apagado, el defecto de la app) se comprueba con las funciones puras de XRFramedLayout (caso "panel2d-completo")
 
 var failures = 0
 var firstConfig = false
@@ -828,6 +829,13 @@ func runMenuLayout() {
         let c1 = XRFramedLayout.center(uv: r1, layerPx: SIMD2<Float>(320, 256))
         let ang: (Float) -> Float = { atan2f($0, XRFramedLayout.distance) * 180 / .pi }
         check("credito-region1", "no tapa el centro de la vista: borde derecho a > 6 grados a la izquierda y borde inferior a > 4 grados arriba; la capa entera mide menos de 50 grados", ang(c1.x + f320.x / 2) < -6 && ang(c1.y - f320.y / 2) > 4 && 2 * ang(XRFramedLayout.layerWidth / 2) < 50, "\(c1)")
+        // Panel único del 2D sin trocear (XRPresenter paso 6b): la capa ENTERA con la geometría de XRFramedLayout: centrada en el encuadre, píxel cuadrado (ancho = layerWidth por 320 px lógicos) y aspecto lógico.
+        let fu = XRFramedLayout.fullUV
+        let fs240 = XRFramedLayout.size(uv: fu, layerPx: SIMD2<Float>(320, 240)), fs256 = XRFramedLayout.size(uv: fu, layerPx: SIMD2<Float>(320, 256)), fs384 = XRFramedLayout.size(uv: fu, layerPx: SIMD2<Float>(384, 256))
+        check("panel2d-completo", "recorte = capa entera (0,0,1,1) y centrado en el encuadre", fu == SIMD4<Float>(0, 0, 1, 1) && XRFramedLayout.center(uv: fu, layerPx: SIMD2<Float>(320, 240)) == SIMD2<Float>(0, 0), "")
+        check("panel2d-completo", "320 px lógicos miden layerWidth (1,30 m) y el aspecto es el lógico (0,75 / 0,8 / 0,667), píxel cuadrado",
+              abs(fs240.x - XRFramedLayout.layerWidth) < 1e-5 && abs(fs240.y / fs240.x - 0.75) < 1e-5 && abs(fs256.y / fs256.x - 0.8) < 1e-5 && abs(fs384.y / fs384.x - 2.0 / 3.0) < 1e-5 && abs(fs384.x / 384 - XRFramedLayout.pitch) < 1e-6, "\(fs240) \(fs256) \(fs384)")
+        check("panel2d-completo", "la capa entera mide menos de 50 grados de ancho a la distancia del panel", 2 * ang(fs240.x / 2) < 50, "")
         check("credito-region1", "tamaño lógico no plausible -> reserva 320x240", XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(.nan, 0)) == XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(320, 240)), "")
     }
 }

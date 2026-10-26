@@ -54,6 +54,8 @@ static int extract(const uint8_t *ram, const uint8_t *scratch, NsScene *s, void 
 }
 static int cb_calls;
 static void stage_cb(Cpu *c) { (void)c; cb_calls++; }
+static int pre_calls;
+static void pre_cb(uint8_t *ram) { (void)ram; pre_calls++; }
 
 int main(void) {
     Cpu c;
@@ -62,6 +64,7 @@ int main(void) {
     ns_hook_init(b); ns_hook_reset();
     ns_hook_set_extractor(extract, NULL, NULL);
     ns_hook_set_stage_cb(stage_cb);
+    ns_hook_set_precapture_cb(pre_cb);
 
     /* forma incorrecta: sin prólogo de pila */
     put_stage(0);
@@ -88,6 +91,31 @@ int main(void) {
     NsView v;
     CHECK(ns_bridge_acquire(b, ns_now_ns(), &v) && v.cur->game_frame == 5 && (v.cur->valid & NS_SV_GAME), "escena publicada con contador de fotogramas");
 
+    /* Respaldo en el bucle de 7 etapas (fin de la ordenación de canales): captura solo si la envoltura de la etapa «pantalla» no capturó en ese fotograma */
+    {
+        NsHookStats s0, s1;
+        ns_hook_stats(&s0);
+        int e0 = ex_calls, cb0 = cb_calls, pr0 = pre_calls;
+        ns_hook_backup_begin(); run(&c, NS_MAIN_CHANNEL); ns_hook_backup_capture();   /* la envoltura capturó: el respaldo no repite */
+        CHECK(ex_calls == e0 + 1 && cb_calls == cb0 + 1 && pre_calls == pr0 + 1, "envoltura + respaldo: una sola captura (ex=%d)", ex_calls - e0);
+        ns_hook_backup_begin(); ns_hook_backup_capture();                 /* sin etapa «pantalla» en medio (entrada 0 de la tabla en una copia de overlay): el respaldo captura */
+        CHECK(ex_calls == e0 + 2 && pre_calls == pr0 + 2, "sin envoltura: el respaldo captura (ex=%d)", ex_calls - e0);
+        CHECK(cb_calls == cb0 + 1, "el respaldo NO llama al callback de etapa (volcado del punto de enganche: GTE de otra etapa)");
+        ns_hook_backup_begin(); run(&c, 0x800B2990u); ns_hook_backup_capture();   /* otro canal no marca: el respaldo captura */
+        CHECK(ex_calls == e0 + 3, "otro canal no cuenta como captura de la envoltura");
+        ns_hook_backup_begin(); run(&c, NS_MAIN_CHANNEL); ns_hook_backup_capture(); ns_hook_backup_capture();   /* la marca se consume: el segundo respaldo del mismo fotograma sí captura */
+        CHECK(ex_calls == e0 + 5, "la marca se consume (ex=%d)", ex_calls - e0);
+        run(&c, NS_MAIN_CHANNEL);                                         /* fotograma con envoltura y sin respaldo (marca huérfana)... */
+        ns_hook_backup_begin(); ns_hook_backup_capture();                 /* ...no roba el respaldo del siguiente: begin la borra */
+        CHECK(ex_calls == e0 + 7, "una marca huérfana no roba el respaldo del fotograma siguiente (ex=%d)", ex_calls - e0);
+        ns_hook_stats(&s1);
+        CHECK(s1.cap_wrap - s0.cap_wrap == 3 && s1.cap_backup - s0.cap_backup == 4 && s1.captures - s0.captures == 7, "capturas por canal: envoltura %u respaldo %u", s1.cap_wrap - s0.cap_wrap, s1.cap_backup - s0.cap_backup);
+        CHECK(ns_hook_stage_entry() == NS_STAGE_ADDR, "entrada 0 de la tabla");
+        mem_w32(NULL, NS_STAGE_TABLE, 0x8008240Cu);
+        CHECK(ns_hook_stage_entry() == 0x8008240Cu, "entrada 0 apunta a una copia en overlay");
+        mem_w32(NULL, NS_STAGE_TABLE, NS_STAGE_ADDR);
+    }
+
     /* se carga otra overlay encima: el parche queda inerte y corre el código real sin capturar */
     put_stage(0x27BDFFF0u);
     rt_code_invalidate(NS_STAGE_ADDR, 28);
@@ -99,6 +127,8 @@ int main(void) {
     before = ex_calls;
     run(&c, NS_MAIN_CHANNEL);
     CHECK(ex_calls == before + 1, "captura con la overlay nueva");
+    ns_hook_backup_capture();                                 /* fin del fotograma: consume la marca de la envoltura */
+    CHECK(ex_calls == before + 1, "el respaldo no repite la captura de la overlay nueva");
     /* overlay sin la forma esperada: queda sin instalar y se reintenta */
     put_stage(0);
     rt_code_invalidate(NS_STAGE_ADDR, 28);
@@ -111,6 +141,8 @@ int main(void) {
     before = ex_calls;
     run(&c, NS_MAIN_CHANNEL);
     CHECK(ex_calls == before && c.r[V0] == 1234, "tras desinstalar no se captura");
+    ns_hook_backup_capture();
+    CHECK(ex_calls == before + 1, "sin enganche instalado el respaldo sigue capturando");
     ns_bridge_destroy(b);
     printf(fails ? "ns_hook_rt: %d fallos\n" : "ns_hook_rt: todas las pruebas OK\n", fails);
     return fails != 0;

@@ -140,6 +140,10 @@ int mv_vrhost_hud2d_layer(int *mode, int *view);
 int mv_vrhost_hud2d_menu_rect(float uv[4]);
 /* ¿Vale una capa (mode, layer_view) para la vista vigente cur_view? Con overlay (ventana 2D del menú sobre el mundo) solo VL_PANEL; siempre la misma clase de vista (view_kind). */
 int mv_vrhost_hud2d_accept(int mode, int layer_view, int cur_view, int overlay);
+/* Troceo del 2D (defecto 0 = APAGADO; MV_L2D_SPLIT=1 en el entorno lo enciende al instalar): con 0 todo el 2D del juego (HUD, radar del juego, menús, pausa, créditos, textos) va en UNA sola capa completa y
+ * en un solo panel; el radar no se separa del HUD (no hay escena de radar: mv_host_radar devuelve 0), no hay rect de menú (mv_vrhost_hud2d_menu_rect devuelve 0) ni créditos filtrados por región. Cualquier hilo. */
+void mv_vrhost_set_l2d_split(int on);
+int mv_vrhost_l2d_split(void);
 
 typedef struct {
     uint32_t built;          /* escenas ensambladas */

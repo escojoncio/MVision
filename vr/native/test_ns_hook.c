@@ -55,8 +55,10 @@ static int extract(const uint8_t *ram, const uint8_t *scratch, NsScene *s, void 
     return 0;
 }
 static int ctx_calls; static uint32_t ctx_key; static int ctx_hide; static uint32_t ctx_refresh = NS_PARTS_ARMS;
+static void (*ctx_mut)(void);   /* cambia la RAM después de extraer y antes de enlazar (el enlace compara con la RAM) */
 static void ctx(NsScene *s, NsCtxOut *o, void *u) {
     (void)u; ctx_calls++;
+    if (ctx_mut) ctx_mut();
     s->valid |= NS_SV_TOVR_OK; s->area_id = 3;
     o->player_key = ctx_key; o->hide_head = ctx_hide; o->refresh_parts = ctx_refresh;
 }
@@ -182,6 +184,8 @@ static void t_finalize(void) {
     ns_bridge_destroy(b);
 }
 
+static void mut_all(void) { for (int k = 0; k < 16; k++) put_part(k, 100, 1); }
+static void mut_head(void) { w16(OBJ + 0x48 + 0x5C * 6 + 2, 1); }
 static void t_decide(void) {
     /* escena publicada con los bits que pida cada caso; devuelve la decisión del consumidor */
     setup_ram();
@@ -228,22 +232,53 @@ static void t_decide(void) {
     }
     ex_valid = good;
 
-    /* A3: jugador sin enlazar (sin clave, o clave que no está en la escena) -> no apta */
+    /* A3: aptitud = TOVR_OK y (PLAYER_OK o jugador presente en la escena). Sin jugador en la escena (sin clave, o clave que no está: cambio de zona) no es apta */
+    {
+        const uint32_t base = NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK | NS_SV_TOVR_OK;
+        CHECK(!ns_scene_native_ok(base) && ns_scene_native_ok(base | NS_SV_PLAYER_OK) && ns_scene_native_ok(base | NS_SV_PLAYER_PRESENT) && ns_scene_native_ok(base | NS_SV_PLAYER_PRESENT | NS_SV_PLAYER_OK), "aptitud: jugador enlazado o presente");
+        CHECK(!ns_scene_native_ok((base & ~NS_SV_TOVR_OK) | NS_SV_PLAYER_PRESENT) && !ns_scene_native_ok(base | NS_SV_PLAYER_PRESENT | NS_SV_STORE_FULL), "aptitud: sin TOVR_OK o con STORE_FULL no");
+    }
     ctx_key = 0;
     ns_capture(RAM, NULL); ns_hook_post_ik(RAM); ns_hook_tick(RAM);
     now = ns_now_ns(); ns_bridge_acquire(b, now, &v); in = din(now);
-    CHECK(!(v.cur->valid & NS_SV_PLAYER_OK) && !ns_native_decide(&v, &in, &d) && d.skip == 0, "jugador sin clave");
+    CHECK(!(v.cur->valid & (NS_SV_PLAYER_OK | NS_SV_PLAYER_PRESENT)) && !ns_native_decide(&v, &in, &d) && d.skip == 0, "jugador sin clave: no apta (se retiene)");
     ctx_key = 0x80199990u;
     ns_capture(RAM, NULL); ns_hook_post_ik(RAM); ns_hook_tick(RAM);
     ns_bridge_acquire(b, now, &v);
-    CHECK(!(v.cur->valid & NS_SV_PLAYER_OK) && !ns_native_decide(&v, &in, &d), "jugador fuera de la escena");
+    CHECK(!(v.cur->valid & (NS_SV_PLAYER_OK | NS_SV_PLAYER_PRESENT)) && !ns_native_decide(&v, &in, &d), "jugador fuera de la escena (cambio de zona): no apta");
     ctx_key = OBJ;
+    /* gateo: el jugador está en la escena (el motor lo marca oculto) pero no se puede enlazar (matrices distintas de la RAM) o su cabeza no se puede ocultar: presente, apta y NINGUNA pieza suya se dibuja */
+    {
+        ctx_refresh = 0;
+        setup_ram(); ctx_mut = mut_all;                                           /* escena extraída con las partes originales y la RAM cambia antes del enlace: nada enlaza */
+        ns_capture(RAM, NULL);
+        ns_hook_tick(RAM);
+        now = ns_now_ns(); ns_bridge_acquire(b, now, &v); in = din(now);
+        int hid = 0; for (int k = 0; k < 17; k++) hid += (v.cur->piece[1 + k].flags & NS_PF_HIDDEN) != 0;
+        CHECK((v.cur->valid & NS_SV_PLAYER_PRESENT) && !(v.cur->valid & NS_SV_PLAYER_OK) && hid == 17 && !(v.cur->piece[0].flags & NS_PF_HIDDEN) && !(v.cur->piece[18].flags & NS_PF_HIDDEN) && ns_native_decide(&v, &in, &d) && d.native,
+              "enlace fallido con el jugador presente: apta y sin piezas del jugador (ocultas %d)", hid);
+        setup_ram(); ctx_mut = mut_head;                                          /* solo la cabeza (parte 6) no coincide: el resto enlaza pero la cabeza no se puede ocultar */
+        ns_capture(RAM, NULL); ns_hook_tick(RAM);
+        ns_bridge_acquire(b, ns_now_ns(), &v);
+        hid = 0; for (int k = 0; k < 17; k++) hid += (v.cur->piece[1 + k].flags & NS_PF_HIDDEN) != 0;
+        CHECK((v.cur->valid & NS_SV_PLAYER_PRESENT) && hid == 17, "cabeza sin enlazar: el jugador entero oculto (ocultas %d)", hid);
+        setup_ram(); ctx_mut = NULL; ns_capture(RAM, NULL); ns_hook_tick(RAM);   /* control: enlazado, solo la cabeza oculta */
+        ns_bridge_acquire(b, ns_now_ns(), &v);
+        hid = 0; for (int k = 0; k < 17; k++) hid += (v.cur->piece[1 + k].flags & NS_PF_HIDDEN) != 0;
+        CHECK((v.cur->valid & NS_SV_PLAYER_OK) && hid == 1, "enlazado: solo la cabeza oculta (ocultas %d)", hid);
+        ctx_hide = 0; setup_ram(); ctx_mut = mut_head;
+        ns_capture(RAM, NULL); ns_hook_tick(RAM); ctx_mut = NULL;
+        ns_bridge_acquire(b, ns_now_ns(), &v);
+        hid = 0; for (int k = 0; k < 17; k++) hid += (v.cur->piece[1 + k].flags & NS_PF_HIDDEN) != 0;
+        CHECK(hid == 0, "sin primera persona (no se pide ocultar la cabeza) no se oculta nada (ocultas %d)", hid);
+        ctx_hide = 1; ctx_refresh = NS_PARTS_ARMS;
+    }
     /* falta la IK: se espera (refresh_parts) y nunca llega post_ik */
     ns_hook_stats(&st); uint32_t miss0 = st.ik_missed;
     ns_capture(RAM, NULL); ns_hook_tick(RAM);      /* sin ns_hook_post_ik */
     now = ns_now_ns(); ns_bridge_acquire(b, now, &v); in = din(now);
     ns_hook_stats(&st);
-    CHECK(st.ik_missed == miss0 + 1 && !(v.cur->valid & NS_SV_PLAYER_OK) && !ns_native_decide(&v, &in, &d) && d.skip == 0, "sin IK: no apta");
+    CHECK(st.ik_missed == miss0 + 1 && !(v.cur->valid & NS_SV_PLAYER_OK) && (v.cur->valid & NS_SV_PLAYER_PRESENT) && ns_native_decide(&v, &in, &d) && d.native, "sin IK: sin PLAYER_OK (sin manos), jugador presente: mundo nativo");
     /* capa de brazos inactiva (mandos sin seguimiento: vrbody_apply corre y no maneja ningún brazo): la ausencia de IK no es un fallo, la escena es apta con los brazos del juego */
     ns_hook_set_ik_idle(idle_yes, NULL);
     ns_hook_stats(&st); uint32_t miss1 = st.ik_missed, idle1 = st.ik_idle;

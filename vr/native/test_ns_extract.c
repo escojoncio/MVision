@@ -26,6 +26,7 @@ static void wmat(uint32_t a, int s, int32_t tx, int32_t ty, int32_t tz) {   /* r
     for (int i = 0; i < 9; i++) w16(a + 2u * (uint32_t)i, (i % 4 == 0) ? (uint32_t)s : 0u);
     w32(a + 0x14, (uint32_t)tx); w32(a + 0x18, (uint32_t)ty); w32(a + 0x1C, (uint32_t)tz);
 }
+#define OF_HIDDEN_TEST 0x80u
 #define CHAN 0x800B2B7Cu
 #define QUEUE 0x800B2110u
 #define LIGHTG 0x8009E55Cu
@@ -536,6 +537,27 @@ int main(void) {
         rc = ns_extract_ex(&s2, st, ram, NS_RAM_SIZE, NULL, 0, &xo, &es);
         CHECK(s2.n_piece == 2 && s2.n_dropped_inst == 1 && (s2.truncated & NS_TR_PIECE));
         ns_scene_free(&s2);
+    }
+
+    /* objeto del jugador con la bandera de oculto del motor (primera persona forzada: flags 0x3ad frente a 0x32d): con su clave en las opciones se extrae; sin ella (o otro objeto oculto) se descarta */
+    {
+        fresh();
+        w32(O1 + 0x28, 0x32Du | OF_HIDDEN_TEST);
+        NsExtractOpts po; memset(&po, 0, sizeof po); po.no_extra_scan = 1;
+        q2(O0, O1);
+        rc = ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &po, &es);
+        CHECK(rc == 0 && es.drop_hidden_flag == 1 && !find_inst(&sc, O1) && sc.n_inst == 1);
+        po.player_key = O1;
+        rc = ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &po, &es);
+        CHECK(rc == 0 && es.drop_hidden_flag == 0 && find_inst(&sc, O1) && sc.n_inst == 2 && invariants(&sc, st));
+        po.player_key = O1 | 0xA0000000u;      /* alias no cacheado de la misma dirección */
+        rc = ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &po, &es);
+        CHECK(es.drop_hidden_flag == 0 && find_inst(&sc, O1));
+        po.player_key = O1;
+        w32(O1 + 0x28, 0x32Du | OF_HIDDEN_TEST);
+        q2(O0, O2);                              /* otro objeto oculto que no es el jugador sigue descartado */
+        rc = ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &po, &es);
+        CHECK(rc == 0 && es.drop_hidden_flag == 1 && !find_inst(&sc, O2));
     }
 
     /* fuzz: la escena válida corrompida al azar; ningún acceso inválido (ASan/UBSan) e invariantes siempre */

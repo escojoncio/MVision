@@ -144,7 +144,7 @@ final class RadarPanel {
     /// copia sus vértices a memoria propia (los punteros del host solo valen hasta la siguiente `mv_host_scene`).
     func ingest(device: MTLDevice) {
         var rs = VrRadarScene()
-        guard mv_host_radar(&rs) != 0, rs.present != 0, let v = rs.v, let b = rs.b, rs.nv > 0, rs.nb > 0 else {
+        guard XRLayer2D.split, mv_host_radar(&rs) != 0, rs.present != 0, let v = rs.v, let b = rs.b, rs.nv > 0, rs.nb > 0 else {
             present = false
             dirty = false
             return
@@ -236,7 +236,7 @@ final class RadarPanel {
     /// Dibuja el radar en su textura (si llegó una escena nueva). `vram`: la VRAM de RGRenderer en su estado final de la lista.
     func renderTexture(_ cb: MTLCommandBuffer, vram: MTLTexture) {
         defer { advanced = false }
-        guard enabled, present, dirty, let tex = texture, let buf = slots[cur].buf else { return }
+        guard enabled, XRLayer2D.split, present, dirty, let tex = texture, let buf = slots[cur].buf else { return }
         dirty = false
         let pd = MTLRenderPassDescriptor()
         pd.colorAttachments[0].texture = tex
@@ -284,6 +284,8 @@ final class RadarPanel {
     /// en la dirección de su normal (vrradar_wrist_quad_mesh); sin ellos o con el mando, a lift_m. `headForward` unitario.
     func updatePose(forearm: (elbow: SIMD3<Float>, wrist: SIMD3<Float>, dorsal: SIMD3<Float>)?, leftGrip: simd_float4x4?,
                     forearmMesh: [Float] = [], headPosition: SIMD3<Float>, headForward: SIMD3<Float>) {
+        // Sin troceo del 2D (XRLayer2D.split apagado) el radar del juego va en la capa 2D completa: este quad no existe (ni pose, ni marco de muñeca, ni registro).
+        guard XRLayer2D.split else { quadValid = false; glow = 0; visibility = 0; return }
         var arm = VrRadarArm()
         var gripArr: [Float] = []
         if let g = leftGrip {
@@ -341,7 +343,7 @@ final class RadarPanel {
 
     /// Marco del quad del radar (espacio VR/recentrado) tras el último `updatePose`; nil sin pose válida. Lo usa el HUD de muñeca (XRPresent).
     var wristFrame: (center: SIMD3<Float>, right: SIMD3<Float>, up: SIMD3<Float>, halfW: Float, halfH: Float)? {
-        guard quadValid else { return nil }
+        guard XRLayer2D.split, quadValid else { return nil }
         return (SIMD3<Float>(quadU.center.x, quadU.center.y, quadU.center.z), SIMD3<Float>(quadU.right.x, quadU.right.y, quadU.right.z),
                 SIMD3<Float>(quadU.up.x, quadU.up.y, quadU.up.z), quadU.center.w, quadU.right.w)
     }
@@ -396,7 +398,7 @@ final class RadarPanel {
     /// juego: es un objeto del brazo; el brillo extra (`glow`) solo sube la luminosidad de la pantalla cuando se mira.
     func encodeQuad(_ enc: MTLRenderCommandEncoder, uniforms: VrSceneUniforms, layered: Bool, color: MTLPixelFormat,
                     depth: MTLPixelFormat, samples: Int) {
-        guard enabled, present, quadValid, visibility > 0.001, textureReady, let tex = texture,
+        guard enabled, XRLayer2D.split, present, quadValid, visibility > 0.001, textureReady, let tex = texture,
               let p = quadPipeline(QKey(layered: layered, color: color, depth: depth, samples: samples)) else { return }
         if sampler == nil { sampler = makeSampler() }
         guard let smp = sampler else { return }

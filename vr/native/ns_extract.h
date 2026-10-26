@@ -6,7 +6,7 @@
  *
  * Reglas de la extracción
  *   - SIN culling: no se mira la cámara, ni la distancia, ni el estado de visibilidad del último fotograma. Sólo se descartan (con contador): objetos ocultos
- *     por el juego (flag 0x80), objetos de un grupo de mapa no activo, punteros nulos/fuera de RAM, objetos repetidos en la cola y mallas inconsistentes.
+ *     por el juego (flag 0x80; salvo el del jugador, NsExtractOpts.player_key), objetos de un grupo de mapa no activo, punteros nulos/fuera de RAM, objetos repetidos en la cola y mallas inconsistentes.
  *   - Orden y capacidades: el escenario (NS_IF_STATIC) se emite PRIMERO y nunca se descarta por capacidad; después las instancias dinámicas por orden de la
  *     cola; lo que no cabe se descarta por el final y se contabiliza (NS_TR_*, n_dropped_*, NS_SV_MAP_INCOMPLETE si ni el escenario cupo). Las tablas de la escena
  *     NO crecen: las reserva quien llama (mínimos NS_MIN_*).
@@ -77,6 +77,7 @@ typedef struct {
     int detect_shadows;            /* 1: además, heurística propia (objeto de una pieza con una cara plana translúcida iluminada) */
     uint32_t max_pieces;           /* tope global de piezas por llamada (0 = la capacidad de la escena) */
     int no_extra_scan;             /* 1: no buscar objetos dinámicos fuera de la cola del canal principal (comparaciones A/B) */
+    uint32_t player_key;           /* dirección del objeto del jugador (ns_player_key) o 0: el motor le pone la bandera de oculto en primera persona forzada y aun así se extrae (la capa VR oculta su cabeza) */
 } NsExtractOpts;
 
 /* ---- almacén de mallas (implementa el protocolo de ns_types.h «Entrega»: dos épocas vivas, ack del consumidor) ---- */

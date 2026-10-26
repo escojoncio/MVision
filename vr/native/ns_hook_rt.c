@@ -31,6 +31,19 @@ static void stage_wrap(Cpu *c) {
     if (stage_cb) stage_cb(c);
 }
 
+/* Respaldo (ver ns_hook.h): lo llama hle_vrbody_sort (vr/camera): begin antes del bucle de 7 etapas y capture tras él, antes de vrbody_restore. El extractor no lee el contador de visibilidad
+ * (+0x4C: lo tocan hide_head, own_hands y hide_near) ni la matriz de pantalla; las matrices de mundo de los brazos/cuerpo con la pose IK ya están en la RAM y son las mismas que ns_hook_post_ik copia
+ * a la escena de la envoltura, y la malla de la mano (puño) queda igual (fist_apply no se repite). Por eso se copia la IK con ns_hook_post_ik. NO se llama a stage_cb: el volcado del punto de
+ * enganche lee los registros de la GTE de la CPU, que aquí son los del final de las 7 etapas y no los de la etapa «pantalla». */
+void ns_hook_backup_begin(void) { ns_capture_backup_begin(); }
+void ns_hook_backup_capture(void) {
+    if (!ns_capture_backup_due()) return;
+    if (pre_cb) pre_cb(emu_ram);
+    ns_capture_backup(emu_ram, emu_scratch);
+    ns_hook_post_ik(emu_ram);
+}
+uint32_t ns_hook_stage_entry(void) { return rd(NS_STAGE_TABLE); }
+
 int ns_hook_install(void) {
     if (atomic_load(&installed)) return NS_HOOK_OK;
     uint32_t w = rd(NS_STAGE_ADDR);

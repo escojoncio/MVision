@@ -882,7 +882,7 @@ int ns_extract_ex(NsScene *sc, NsMeshStore *st, const uint8_t *ram, size_t ram_s
             Cand cd;
             cd.o = o; cd.flag = rd32(r, o + 0x28); cd.gid = rd16(r, o + 0x2C); cd.nm = rs16(r, o + 0x2E); cd.def = rd32(r, o + 0x24);
             cd.is_static = (cd.flag & OF_PRECOLORED) && !(cd.flag & OF_LIT);
-            if (cd.flag & OF_HIDDEN) { S->drop_hidden_flag++; continue; }
+            if ((cd.flag & OF_HIDDEN) && !(opt && opt->player_key && norm_addr(opt->player_key) == on)) { S->drop_hidden_flag++; continue; }   /* el jugador oculto por el motor sí se extrae */
             if (cd.gid != 0 && !(cd.gid & gmask)) { S->drop_group++; continue; }
             if (cd.nm <= 0 || cd.nm > MAX_PIECES || !ok_rng(r, o + 0x48u, 0x5Cu * (uint32_t)cd.nm)) { S->drop_badobj++; continue; }
             int is_shadow = 0;

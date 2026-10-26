@@ -286,7 +286,7 @@ void ns_coh_take_stats(NsCohState *st, NsCohStats *out) {
 }
 
 /* ------------------------------------------------------------------------------------------------ decisión nativo/GPU */
-int ns_scene_native_ok(uint32_t valid) { return (valid & NS_NATIVE_NEED) == NS_NATIVE_NEED && !(valid & NS_NATIVE_BAD); }
+int ns_scene_native_ok(uint32_t valid) { return (valid & NS_NATIVE_NEED) == NS_NATIVE_NEED && (valid & NS_NATIVE_PLAYER_ANY) && !(valid & NS_NATIVE_BAD); }
 
 int ns_native_decide(const NsView *v, const NsDecideIn *in, NsDecision *out) {
     NsDecision d = {0, 0, NS_WHY_OK};

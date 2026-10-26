@@ -446,7 +446,7 @@ int main(int argc, char **argv) {
                 fst.requests, fst.subst, fst.passed, fst.skipped, fst.expired, fst.presses, rst.sequences, rst.ok, rst.fails);
         if (vr_hands) {
             CHECK(bst.arms_driven > 0 && vrbody_pending() == 0, "la IK no movió brazos o quedó sin restaurar");
-            CHECK(n_radar > 0, "ninguna escena trajo radar");
+            CHECK(n_radar > 0 || !mv_vrhost_l2d_split(), "ninguna escena trajo radar");   /* el radar separado solo existe con el troceo del 2D (MV_L2D_SPLIT=1; defecto apagado: el radar va en la capa 2D completa) */
         }
     }
 

@@ -595,9 +595,9 @@ final class RGRenderer {
             hudTexture = hudHQRing[hudHQIdx]; hudTextureSRGB = hudHQRingSRGB[hudHQIdx]
         }
         hudHQ = true; hudHQMode = lMode; hudHQView = lView
-        if lMode == 0 && mv_vrhost_hud2d_menu_rect(&menuUVBuf) != 0 {
+        if XRLayer2D.split && lMode == 0 && mv_vrhost_hud2d_menu_rect(&menuUVBuf) != 0 {   // rect de la ventana del menú: solo con el troceo del 2D (apagado por defecto: la capa va entera)
             hudMenuUV = SIMD4<Float>(max(0, menuUVBuf[0] - 0.01), max(0, menuUVBuf[1] - 0.01), min(1, menuUVBuf[2] + 0.01), min(1, menuUVBuf[3] + 0.01))
-        } else if lMode == 0 && (lView & 255) == 10 && hudMenuUV != nil {
+        } else if XRLayer2D.split && lMode == 0 && (lView & 255) == 10 && hudMenuUV != nil {
             // selector (VRV_R_SELECTOR = 10) sin rect en esta capa: se conserva el último válido (nil solo al salir del selector)
         } else { hudMenuUV = nil }
 #endif

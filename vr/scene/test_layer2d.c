@@ -3,6 +3,7 @@
  * reproduce con vl2d a escala 1: sobre fondo negro la capa debe ser IGUAL bit a bit a la VRAM del oráculo; sobre otros fondos, igual en lo opaco y con
  * tolerancia mínima en lo semitransparente. A escala 4: geometría exacta (un rect cubre exactamente su huella), suavizado de píxel art sin colores nuevos, etc.
  * Compilar: make -C vr/scene test-layer2d  (enlaza gpu.c con stubs mínimos, como runtime/test_gpu.c). */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -725,6 +726,13 @@ static void semi_mask_cases(void) {
         for (int y = 30; y < 38 && rg; y++) for (int x = 20; x < 60; x++) {
             const uint8_t *q = &rg[((size_t)(y * 4) * w + x * 4) * 4];
             int pv[3] = {q[0] * q[3] / 255, q[1] * q[3] / 255, q[2] * q[3] / 255};   /* sobre negro: color * alfa */
+            if (m == 1 || m == 3) {   /* aditivo (alfa 0 en el hardware): la capa se reparte en luz lineal (destino sRGB del visor: decodifica, mezcla, codifica) */
+                for (int k = 0; k < 3; k++) {
+                    double cl = q[k] / 255.0, lin = (cl <= 0.04045 ? cl / 12.92 : pow((cl + 0.055) / 1.055, 2.4)) * (q[3] / 255.0);
+                    double g = lin <= 0.0031308 ? lin * 12.92 : 1.055 * pow(lin, 1.0 / 2.4) - 0.055;
+                    pv[k] = (int)(g * 255.0 + 0.5);
+                }
+            }
             if (pv[0] | pv[1] | pv[2]) nz++;
             for (int k = 0; k < 3; k++) { int v5 = (gpu_vram[y][x] >> (5 * k)) & 31, e = (v5 << 3) | (v5 >> 2); if (abs(pv[k] - e) > 3) { bad++; break; } }
         }
@@ -1266,6 +1274,8 @@ static void menu_rect_cases(void) {
     CHECK(vl2d_run(L, l3, &s3, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 0, "menu: área > 60 %% no es rect");
     vl2d_free(L);
     /* asíncrono: el rect solo se calcula con la vista selector (VRV_R_SELECTOR = 10) y viaja con la capa publicada */
+    CHECK(vl2a_split() == 0, "menu async: el troceo del 2D está apagado por defecto");
+    vl2a_set_split(1);   /* con el troceo ENCENDIDO se conserva el comportamiento anterior (rect del menú) */
     {
         VrL2Async *A = vl2a_new(); vl2a_options(A, 1, VL_SMOOTH_ORIGINAL);
         const uint8_t *px = NULL; int w = 0, h = 0, full = -1; uint32_t seq = 0;
@@ -1284,6 +1294,32 @@ static void menu_rect_cases(void) {
         }
         CHECK(vl2a_acquire_menu_rect(A, uv) == 0, "menu async: sin capa adquirida no hay rect");
         vl2a_free(A);
+    }
+    vl2a_set_split(0);
+    /* SIN troceo (defecto): con la vista selector la capa es la COMPLETA (HUD, créditos, texto y ventana), idéntica byte a byte a la de vl2d_run sin menú; nunca hay rect de menú */
+    {
+        VrL2Async *A = vl2a_new(); vl2a_options(A, 1, VL_SMOOTH_ORIGINAL);
+        VrLayer2D *R = vl2d_new(); vl2d_set_options(R, 1, VL_SMOOTH_ORIGINAL);
+        const uint8_t *px = NULL; int w = 0, h = 0, full = -1; uint32_t seq = 0;
+        vl2a_set_view(A, (1 << 8) | 0);   /* primero la lista base sin menú (HUD / créditos de partida), como el juego, y después el selector */
+        CHECK(vl2a_submit(A, l1, opd1, VL_PANEL, 1) == 1, "sin troceo: encolada 1"); vl2a_flush(A);
+        vl2d_run(R, l1, &s1, VL_PANEL);
+        vl2a_acquire(A, &px, &w, &h, &full, &seq); vl2a_release(A);
+        vl2a_set_view(A, (1 << 8) | 10);
+        int ok = 1, rects = 0, inside = 0;
+        for (int k = 1; k <= 24; k++) {   /* más listas que las 9 de arriba (asentado) y que MENU_CALM_LISTS: con el troceo apagado nunca llega a haber rect */
+            CHECK(vl2a_submit(A, l2, opd2, VL_PANEL, 0) == 1, "sin troceo: encolada 2.%d", k); vl2a_flush(A);
+            vl2d_run(R, l2, &s2, VL_PANEL);
+            int rw = 0, rh = 0; const uint8_t *rp = vl2d_rgba(R, &rw, &rh);
+            int r = vl2a_acquire(A, &px, &w, &h, &full, &seq) >= 0;
+            if (vl2a_acquire_menu_rect(A, uv)) rects++;
+            if (!(r && px && rp && w == rw && h == rh && !memcmp(px, rp, (size_t)w * h * 4))) ok = 0;
+            vl2a_release(A);
+        }
+        CHECK(ok, "sin troceo: la capa del selector es la completa (igual a la de vl2d_run sin menú, todas las listas)");
+        CHECK(rects == 0, "sin troceo: el rect del menú nunca existe (%d listas con rect)", rects);
+        CHECK(layer_alpha_outside(R, ex, 2, &inside) > 0 && inside > 0, "sin troceo: la capa lleva el HUD / texto base (fuera de la ventana) Y la ventana (%d dentro)", inside);
+        vl2d_free(R); vl2a_free(A);
     }
     free_list(l1); free_list(l2); free_list(l3);
 }
@@ -1789,6 +1825,27 @@ int main(void) {
         vl2a_flush(A);
         printf("  asincrono: rafaga sin ritmo, encolar max %.3f ms\n", sm2);
         vl2a_free(A);
+    }
+
+    /* vl2d_encode: aditivo / pareja resta+suma (créditos, B-F y luego B+F = max(B,F)) sobre fondo transparente conservan su brillo; opaco y resta sola no cambian */
+    {
+        VrLayerPx q;
+        uint8_t o[4];
+        memset(&q, 0, sizeof q); q.t = 256; q.c[0] = q.c[1] = q.c[2] = 15; q.d[0] = q.d[1] = q.d[2] = 60;   /* gris 15/31, resta pendiente igual */
+        vl2d_encode(&q, 0, o);
+        double a = o[3] / 255.0, cl = o[0] / 255.0, lin = (cl <= 0.04045 ? cl / 12.92 : pow((cl + 0.055) / 1.055, 2.4)) * a;
+        int ov = (int)((lin <= 0.0031308 ? lin * 12.92 : 1.055 * pow(lin, 1.0 / 2.4) - 0.055) * 255.0 + 0.5);   /* sobre negro, mezcla en luz lineal */
+        CHECK(abs(ov - ((15 << 3) | (15 >> 2))) <= 3, "pareja resta+suma sobre negro: %d (esperado %d)", ov, (15 << 3) | (15 >> 2));
+        CHECK(o[3] > 0 && o[3] < 128, "pareja resta+suma: alfa %d (aditivo: poco alfa, color blanco)", o[3]);
+        memset(&q, 0, sizeof q); q.t = 256; q.d[0] = q.d[1] = q.d[2] = 60;   /* resta sola: oscurece, sin color */
+        vl2d_encode(&q, 0, o);
+        CHECK(o[0] == 0 && o[1] == 0 && o[2] == 0 && abs(o[3] - 123) <= 1, "resta sola: %d,%d,%d alfa %d (esperado negro, alfa 123)", o[0], o[1], o[2], o[3]);
+        memset(&q, 0, sizeof q); q.t = 256; q.c[0] = q.c[1] = q.c[2] = 5; q.d[0] = q.d[1] = q.d[2] = 60;   /* resta mayor que la suma: resta neta (60-20 = 40) */
+        vl2d_encode(&q, 0, o);
+        CHECK(o[0] == 0 && o[1] == 0 && o[2] == 0 && abs(o[3] - 82) <= 1, "resta mayor que suma: %d,%d,%d alfa %d (esperado negro, alfa 82)", o[0], o[1], o[2], o[3]);
+        memset(&q, 0, sizeof q); q.c[0] = 31; q.c[1] = 16; q.c[2] = 0;   /* opaco: sin cambios */
+        vl2d_encode(&q, 0, o);
+        CHECK(o[0] == 255 && o[1] == ((16 << 3) | (16 >> 2)) && o[2] == 0 && o[3] == 255, "opaco: %d,%d,%d,%d", o[0], o[1], o[2], o[3]);
     }
 
     vl2d_free(L);

@@ -257,7 +257,8 @@ enum {
     NS_SV_FX = 16u,      /* existe la NsFxScene con secuencia fx_seq */
     NS_SV_STORE_FULL = 32u,/* el almacén de mallas llegó a su tope sin reconocimiento del consumidor: faltan instancias nuevas */
     NS_SV_TOVR_OK = 64u,   /* to_vr es válido (cámara VR activa, primera persona); lo fija el enganche (ns_hook), nunca el extractor. Sin él no se dibuja en el mundo del usuario */
-    NS_SV_PLAYER_OK = 128u /* jugador enlazado, cabeza propia oculta e IK de los brazos copiada; lo fija el enganche. Sin él la escena no es apta (se pinta por GPU) */
+    NS_SV_PLAYER_OK = 128u, /* jugador enlazado, cabeza propia oculta e IK de los brazos copiada; lo fija el enganche. Gobierna el cuerpo, las manos y la IK propios */
+    NS_SV_PLAYER_PRESENT = 256u /* la instancia del jugador está en la escena (aunque el motor la marque oculta o no se haya podido enlazar); lo fija el enganche. Con PLAYER_OK, condición de aptitud: sin jugador en escena (cambio de zona) no se dibuja nativo */
 };
 enum { NS_TR_INST = 1u, NS_TR_PIECE = 2u, NS_TR_LIGHT = 4u, NS_TR_EFFECT = 8u };
 

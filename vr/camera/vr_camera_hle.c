@@ -75,9 +75,14 @@ void hle_vrcam_trans(Cpu *c) {
 
 /* Las 7 etapas del dibujado de un frame (pantalla, recorte, transformación, iluminación, primitivas, subdivisión,
  * orden): al terminar, las piezas de los brazos vuelven a las matrices que calculó el juego, para que su lógica
- * (efectos del arma, objetos en la mano, enemigos) no vea nunca la pose IK. */
+ * (efectos del arma, objetos en la mano, enemigos) no vea nunca la pose IK. Antes de devolverlas, respaldo de la captura de la escena nativa: si la envoltura de la etapa
+ * «pantalla» no capturó en este fotograma (la entrada 0 de la tabla apunta a una copia en una overlay: introducciones), se captura aquí (ns_hook_rt.c). */
+__attribute__((weak)) void ns_hook_backup_begin(void) {}      /* herramientas sin render nativo */
+__attribute__((weak)) void ns_hook_backup_capture(void) {}
 void hle_vrbody_sort(Cpu *c) {
+    ns_hook_backup_begin();
     rt_orig(c, "vrbody_sort");
+    ns_hook_backup_capture();
     vrbody_restore(emu_ram);
 }
 

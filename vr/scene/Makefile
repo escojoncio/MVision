@@ -3,7 +3,7 @@
 #   make -C vr/scene test-san    lo mismo con ASan/UBSan (gcc)
 #   make -C vr/scene test-split  prueba de vr_split (partir triángulos largos, recuento de cruces del plano cercano)
 #   make -C vr/scene test-layer2d  capa 2D fiel (vr_layer2d.c) contra el oráculo gpu.c, escala 1 bit a bit y escala 4
-#   make -C vr/scene l2d-dump ARGS="<volcado> [--max-pct P]"  capa 2D de un volcado vs su frame.png (dif media y % de píxeles distintos)
+#   make -C vr/scene l2d-dump ARGS="<volcado> [<otro> ...] [--max-pct P] [--png DIR]"  capa 2D de un volcado vs su frame.png (dif media y % de píxeles distintos); --png escribe la capa 2D COMPLETA del panel (sin trocear) sobre gris a cuadros
 #   make -C vr/scene dumpview ARGS="<volcado> [-o lamina.png] [--ipd m] [--conv m] [--filter] [--rects N]"   banco de render sin conexión: lo que dibuja el visor en modo gpu (pantalla 3D) de un volcado NSD1, lámina PNG y métricas vs frame.png
 #   make -C vr/scene dumpview ARGS="--batch <carpeta> [--sheets]"   banco en lote: una línea por volcado de la carpeta (recursivo): motivo, % dif ipd 0 vs frame.png y top 3 tipos de primitiva responsables; sin láminas salvo --sheets
 #   make -C vr/scene dump        compila scene_dump enlazando el runtime (necesita `make gen` y, opcional, `gen_ov`)
@@ -51,8 +51,8 @@ test-layer2d: $(B)/test_layer2d
 	$(B)/test_layer2d
 
 # Capa 2D de un volcado (list.bin + vram.bin) frente a su frame.png: dif media y % de píxeles distintos a escala 1. Uso: make -C vr/scene l2d-dump ARGS="<carpeta del volcado> [--max-pct P]"
-$(B)/l2d_dump: l2d_dump.c vr_layer2d.c vr_layer2d.h vr_scene.c vr_scene.h $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dump.h | $(B)
-	$(CC) $(CFLAGS) $(INC) -I../native l2d_dump.c vr_layer2d.c vr_scene.c $(RT)/gpu.c ../native/ns_dump.c -lm -lpthread -o $@
+$(B)/l2d_dump: l2d_dump.c vr_layer2d.c vr_layer2d.h vr_scene.c vr_scene.h $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c ../native/ns_dump.h ../camera/vr_usermap.h ../host/vr_view.h | $(B)
+	$(CC) $(CFLAGS) $(INC) -I../native -I../camera -I../host l2d_dump.c vr_layer2d.c vr_scene.c $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c -lm -lpthread -o $@
 l2d-dump: $(B)/l2d_dump
 	$(B)/l2d_dump $(ARGS)
 

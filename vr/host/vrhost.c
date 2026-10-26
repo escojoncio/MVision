@@ -422,7 +422,7 @@ static int ns_ik_idle(void *u) {
 /* Vigilancia por fotograma (hilo de emulación, tras el sincronismo): (M4) con la capa de cuerpo activa cada captura debe llevar la pose IK de los brazos
  * (ik_refresh crece a la par que captures); (B4) reintento de la instalación y reinstalación si otra overlay pisó la etapa. Se registra como mucho una vez por segundo. */
 static void ns_frame_check(void) {
-    static uint32_t cap0, ik0, miss0, idle0, pub0, nfr;
+    static uint32_t cap0, ik0, miss0, idle0, pub0, nfr, capw0, capb0;
     static uint64_t last_log_ns;
     NsHookStats st;
     ns_hook_stats(&st);
@@ -465,6 +465,10 @@ static void ns_frame_check(void) {
                     dcap, st.published - pub0, dmiss, g.last_queue, g.last_inst, g.last_static, g.last_pieces, g.last_hidden_pieces, g.last_drop_group, g.last_drop_hidden, g.last_drop_other,
                     g.mesh_new - g0.mesh_new, g.memo_stale - g0.memo_stale, g.zone_changes - g0.zone_changes, g.epoch_opened - g0.epoch_opened, g.store_full - g0.store_full);
         g0 = g; pub0 = st.published;
+        if (st.captures || capw0 || capb0)   /* de dónde sale cada captura: envoltura de la etapa «pantalla» o respaldo del fin del bucle de etapas; la entrada 0 de la tabla delata una copia en overlay (estándar 0x8001d324) */
+            fprintf(stderr, "[captura] canales por s: envoltura=%u respaldo=%u | entrada0_etapas=0x%08x (estandar 0x%08x%s)\n", st.cap_wrap - capw0, st.cap_backup - capb0, ns_hook_stage_entry(), (unsigned)NS_STAGE_ADDR,
+                    ns_hook_stage_entry() == NS_STAGE_ADDR ? "" : ", DISTINTA");
+        capw0 = st.cap_wrap; capb0 = st.cap_backup;
         if (body_ok) {
             VrBodyStats b;
             vrbody_stats(&b);
@@ -932,7 +936,7 @@ static void build_one(const GpuDrawList *l, int si) {
     VrRadarScene rscene;
     memset(&rscene, 0, sizeof rscene);
     const GpuDrawList *hl = l;
-    if (vrradar_split(l, &rsplit) == 0 && rsplit.present) {
+    if (vl2a_split() && vrradar_split(l, &rsplit) == 0 && rsplit.present) {   /* sin troceo (defecto, vl2a_set_split) el radar del juego se queda en la capa 2D completa: no hay escena de radar ni quad en el brazo */
         hl = rsplit.hud;
         if (vrradar_build(&rsplit, &rscene) < 0) memset(&rscene, 0, sizeof rscene);
     }
@@ -1075,6 +1079,7 @@ static void publish_state(void) {
         vin.menu_open = core && bs.menu_open; vin.stopped = core && bs.stopped;
         vin.dead = (uint8_t)(core && (((bs.valid & BRIDGE_OK_LIFE) && bs.life_max > 0 && bs.life <= 0) || (bs.player_status & BRIDGE_PS_GAME_OVER) || (bs.game_status & BRIDGE_GS_GAME_OVER)));
         vin.scene3d = (uint8_t)last_scene3d; vin.video = (uint8_t)last_video;
+        vin.native_ok = (uint8_t)(ns_hook_native_ready(ns_now_ns(), 250000000ull) != 0);   /* escena nativa apta y de menos de 250 ms (misma antigüedad que ns_native_decide) */
         {   /* FMV: el decodificador de vídeo entregó píxeles en los últimos 12 VBlank (~0,24 s; un FMV da un fotograma cada 3-4) */
             uint32_t vb = (uint32_t)hle_frame_count(), tot = mdec_out_words_total();
             if (tot - mdec_seen_total >= 64u) mdec_last_vb = vb ? vb : 1u;
@@ -1163,6 +1168,8 @@ void mv_vrhost_hud2d_release(void) { if (l2a) vl2a_release(l2a); }
 int mv_vrhost_hud2d_menu_rect(float uv[4]) { return l2a ? vl2a_acquire_menu_rect(l2a, uv) : 0; }
 int mv_vrhost_hud2d_layer(int *mode, int *view) { return l2a ? vl2a_acquire_info(l2a, mode, view) : 0; }
 int mv_vrhost_hud2d_accept(int mode, int layer_view, int cur_view, int overlay) { return vl2a_layer_accept(mode, layer_view, cur_view, overlay); }
+void mv_vrhost_set_l2d_split(int on) { vl2a_set_split(on); }
+int mv_vrhost_l2d_split(void) { return vl2a_split(); }
 void mv_vrhost_set_headcol(int enable, float radius_m) {
     pthread_mutex_lock(&HCMX);
     VrHcCfg c = *vrhc_config();
@@ -1639,6 +1646,7 @@ void mv_vrhost_set_ai(int perception, int cameras, int activity) {
 void mv_vrhost_install(void) {
     { const char *e = getenv("MV_HUD2D"); if (e && e[0] == '0') atomic_store(&l2d_enabled, 0); }
     { const char *e = getenv("MV_HUD2D_SCALE"); if (e) { int v = atoi(e); if (v >= 1 && v <= 6) l2d_target = v; } }
+    { const char *e = getenv("MV_L2D_SPLIT"); vl2a_set_split(e && e[0] == '1'); }   /* troceo del 2D (paneles de regiones del HUD, ventana del menú en la mano, radar aparte): apagado salvo MV_L2D_SPLIT=1 */
     if (!atomic_load(&ns_br)) {
         ns_bridge_get();
         const char *e = getenv("MV_RENDER");

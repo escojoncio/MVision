@@ -34,7 +34,7 @@ enum {
     VRV_R_STOPPED,         /* juego detenido: película, pantalla de resultado, ... */
     VRV_R_PAUSED,          /* pausa */
     VRV_R_MENU,            /* ventana de armas / objetos del juego (el motor dibuja con su cámara mientras está abierta) */
-    VRV_R_LOST_CONTROL,    /* sin control sin otra causa conocida (fin de partida, transiciones) */
+    VRV_R_LOST_CONTROL,    /* sin control sin otra causa conocida (fin de partida, transiciones) y sin mundo nativo apto con cámara VR (con él es VRV_R_WORLD: ascensor, gateo) */
     VRV_R_NO_CAM,          /* con control pero la cámara VR no está (aún) activa o no existe */
     VRV_R_DEAD,            /* el jugador ha muerto (vida a cero / fin de partida): el motor enseña su escena de muerte con su propia cámara */
     VRV_R_SELECTOR,        /* ventana de armas/objetos con la cámara VR activa: MUNDO en primera persona + ventana como panel flotante */
@@ -52,6 +52,7 @@ typedef struct {
     uint8_t dead;          /* vida a cero (o fin de partida) con partida en curso: la cámara del motor muestra la muerte en tercera persona */
     uint8_t video;         /* la última lista es un fotograma de vídeo pregrabado (subidas a VRAM que cubren la zona mostrada, sin 3D) */
     uint8_t mdec;          /* decodificador de vídeo (MDEC) activo en los últimos fotogramas: hay un FMV reproduciéndose (más fiable que `video`; gana al 3D) */
+    uint8_t native_ok;     /* la última escena nativa publicada es apta y reciente (ns_hook_native_ready): el mundo se puede dibujar con el render nativo (no basta el puente: la escena debe existir y valer) */
 } VrViewIn;
 
 /* Qué es lo que se ve (con histéresis propia, ver VrView.kind):

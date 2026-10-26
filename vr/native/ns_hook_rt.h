@@ -16,6 +16,12 @@ void ns_hook_set_stage_cb(NsStageCb cb);
 typedef void (*NsPreCb)(uint8_t *ram);
 void ns_hook_set_precapture_cb(NsPreCb cb);
 
+/* Respaldo de la captura (hle_vrbody_sort): ns_hook_backup_begin() antes del bucle de las 7 etapas y ns_hook_backup_capture() al final, antes de vrbody_restore. Captura solo si la envoltura de la
+ * etapa «pantalla» no capturó en ese bucle (la entrada 0 de la tabla puede apuntar a una copia en una overlay). Precaptura + captura + copia de la IK; sin stage_cb (volcado del punto de enganche). */
+void ns_hook_backup_begin(void);
+void ns_hook_backup_capture(void);
+uint32_t ns_hook_stage_entry(void);   /* valor actual de la entrada 0 de la tabla de etapas (diagnóstico) */
+
 /* Valida la forma de la etapa (prólogo de pila y entrada de la tabla) y la sustituye por la envoltura. Devuelve NS_HOOK_*. Idempotente. */
 int ns_hook_install(void);
 void ns_hook_uninstall(void);

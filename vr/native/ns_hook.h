@@ -43,6 +43,7 @@ typedef struct {
     uint32_t last_valid;     /* NsScene.valid de la última publicada */
     uint64_t last_pub_ns;
     uint32_t ik_idle;        /* de las esperadas sin pose IK, las que la capa VR dejó INACTIVA (sin pose de mano válida: ningún brazo manejado): aptas, con los brazos de la animación del juego */
+    uint32_t cap_wrap, cap_backup;   /* de las capturas: las de la envoltura de la etapa «pantalla» / las del respaldo del fin del bucle de etapas */
 } NsHookStats;
 
 void ns_hook_init(NsBridge *b);                         /* NULL desengancha */
@@ -72,10 +73,17 @@ void ns_hook_set_finalize(NsFinalizeFn fn, void *user);
 void ns_hook_set_frame(uint32_t vblank_count);          /* para NsScene.vblank (si el extractor lo dejó a 0) */
 
 void ns_capture(const uint8_t *ram, const uint8_t *scratch);
+/* Respaldo: la entrada 0 de la tabla de etapas puede apuntar a una copia de la etapa «pantalla» en una overlay (introducciones, recubrimientos) que la envoltura no cubre. Alrededor del bucle de
+ * las 7 etapas: ns_capture_backup_begin() ANTES (borra la marca, para que un fotograma con envoltura no robe el respaldo del siguiente) y, al final, antes de devolver las matrices de la IK,
+ * if (ns_capture_backup_due()) { ...; ns_capture_backup(ram, scratch); }. due = 1 si ns_capture no corrió desde el begin (la marca se consume siempre). Misma captura que ns_capture, contada
+ * aparte (NsHookStats.cap_backup). */
+void ns_capture_backup_begin(void);
+int ns_capture_backup_due(void);
+void ns_capture_backup(const uint8_t *ram, const uint8_t *scratch);
 void ns_hook_post_ik(const uint8_t *ram);
 void ns_hook_tick(const uint8_t *ram);
 
-/* 1 si la última escena publicada es apta (ns_scene_native_ok: partida, listas completas, mapa, to_vr, jugador/IK; sin MAP_INCOMPLETE ni STORE_FULL) y tiene menos de max_age_ns.
+/* 1 si la última escena publicada es apta (ns_scene_native_ok: partida, listas completas, mapa, to_vr; sin MAP_INCOMPLETE ni STORE_FULL; jugador presente en la escena o enlazado) y tiene menos de max_age_ns.
  * Solo informativo (estadísticas, registro): la decisión de dibujar nativo la toma el consumidor con ns_native_decide. Se puede llamar desde cualquier hilo. */
 int ns_hook_native_ready(uint64_t now_ns, uint64_t max_age_ns);
 void ns_hook_stats(NsHookStats *s);

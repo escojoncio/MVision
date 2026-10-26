@@ -31,7 +31,21 @@ int main(void) {
     i.scene3d = 0; CHECK(vrview_kind_of(&i) == VRV_K_UI, "muerte sin 3D = cine plano");
     i = world(); i.dead = 1; i.cinematic = 1; CHECK(vrview_reason(&i) == VRV_R_CINEMATIC, "cinemática gana a muerte");
 
-    i = world(); i.in_control = 0; i.scene3d = 1; CHECK(vrview_kind_of(&i) != VRV_K_ENGINE, "sin control sin escena real del motor (estado no jugable) con 3D: nunca pantalla 3D");
+    /* sin control (ascensor, transiciones, gateo mal leído): depende de la cámara VR y de que haya escena nativa APTA (no basta el puente) */
+    i = world(); i.in_control = 0; i.scene3d = 1; i.native_ok = 1;
+    CHECK(vrview_reason(&i) == VRV_R_WORLD && vrview_kind_of(&i) == VRV_K_WORLD, "ascensor: cámara VR activa y mundo nativo apto = mundo");
+    i.cam_active = 0; CHECK(vrview_reason(&i) == VRV_R_LOST_CONTROL && vrview_kind_of(&i) == VRV_K_ENGINE, "sin control, sin cámara VR y con escena nativa apta y 3D = pantalla 3D");
+    i.scene3d = 0; CHECK(vrview_kind_of(&i) == VRV_K_UI, "sin 3D = 2D");
+    i = world(); i.in_control = 0; i.scene3d = 1; i.native_ok = 0;
+    CHECK(vrview_reason(&i) == VRV_R_LOST_CONTROL && vrview_kind_of(&i) == VRV_K_UI, "carga con 3D basura (escena nativa no apta), con cámara VR: 2D, nunca pantalla 3D");
+    i.cam_active = 0; CHECK(vrview_kind_of(&i) == VRV_K_UI, "carga con 3D basura sin cámara VR: 2D");
+    i = world(); i.in_control = 1; i.scene3d = 1; i.native_ok = 1;
+    CHECK(vrview_reason(&i) == VRV_R_WORLD && vrview_kind_of(&i) == VRV_K_WORLD, "gateo (control conservado): mundo");
+    i = world(); i.dead = 1; i.in_control = 0; i.cam_active = 0; i.scene3d = 1; i.native_ok = 0;
+    CHECK(vrview_reason(&i) == VRV_R_DEAD && vrview_kind_of(&i) == VRV_K_ENGINE, "muerte sin cámara VR: pantalla 3D con 3D aunque no haya escena nativa apta");
+    i = world(); i.in_control = 0; i.menu_open = 1; i.scene3d = 1; i.native_ok = 1; CHECK(vrview_kind_of(&i) == VRV_K_WORLD, "ventana de armas con cámara VR sigue en el mundo");
+    i.cam_active = 0; CHECK(vrview_kind_of(&i) == VRV_K_UI, "ventana de armas sin cámara VR con 3D detrás = 2D");
+    i = world(); i.in_control = 0; i.comms = 1; i.scene3d = 1; i.native_ok = 1; CHECK(vrview_reason(&i) == VRV_R_COMMS && vrview_kind_of(&i) == VRV_K_UI, "radio gana al mundo nativo");
 
     VrView v;
     vrview_reset(&v);

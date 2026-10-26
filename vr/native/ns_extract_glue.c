@@ -28,13 +28,14 @@ static int glue_extract(const uint8_t *ram, const uint8_t *scratch, NsScene *out
     int have_fx = 0;
     NsExtractOpts eo;
     memset(&eo, 0, sizeof eo);
+    eo.player_key = ns_player_key(ram);
     if (!g_fx) g_fx = ns_fx_scene_create(0);
     if (g_fx) {
         NsFxOpts fo = ns_fx_opts_default();
         have_fx = ns_fx_extract(ram, &fo, g_fx) == 0;
         if (have_fx) { eo.shadow_objs = g_fx->shadow_objs; eo.n_shadow = g_fx->n_shadow_objs; }
     }
-    int rc = ns_extract_ex(out, (NsMeshStore *)user, ram, NS_RAM_SIZE, scratch, scratch ? 1024u : 0u, have_fx ? &eo : NULL, &st);
+    int rc = ns_extract_ex(out, (NsMeshStore *)user, ram, NS_RAM_SIZE, scratch, scratch ? 1024u : 0u, &eo, &st);
     if (rc == 0 && have_fx && out->effects) {
         int trunc = 0;
         out->n_effect = ns_fx_export(g_fx, 1, out->effects, out->cap_effect, &trunc);

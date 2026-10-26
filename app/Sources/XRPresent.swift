@@ -15,7 +15,8 @@ import UIKit
 //        perspectiva, solo hacia dónde de la pantalla se mira. Los cortes de plano los hace el juego (sin fundido). Subtítulos/créditos/bandas van en el panel 2D encima.
 //      * Dentro de la escena (opción): la cabeza en la cámara del plano, anclada al empezar el plano (fundido de 0,15 s en cada corte).
 //      * Diorama (opción): la escena 3D en miniatura delante del usuario.
-//  - HUD del juego en primera persona: recortes del panel 2D como paneles pequeños que siguen a la cabeza con retardo.
+//  - 2D del juego en primera persona (HUD, radar del juego, menús L2/R2, pausa, textos): la capa 2D COMPLETA en UN solo panel plano delante de la cabeza (paso 6b). El troceo antiguo (paneles de regiones del HUD, ventana
+//    del menú en la mano, radar aparte) queda desactivado tras XRLayer2D.split (apagado por defecto).
 //  - Menú de opciones VR: se abre manteniendo el botón de menú izquierdo (o Select del mando) y se maneja con el mando.
 // Todo en el hilo de render. Sin llamadas al compositor: solo compone `XRDrawItem` para XRFinalPass.
 
@@ -899,14 +900,16 @@ final class XRPresenter {
             r.dioramaModel = anchor * XRMath.translation(SIMD3<Float>(0, anchorY - 0.1, -1.3)) * f * gameView.inverse
         }
 
+        // Troceo del 2D (XRLayer2D.split, APAGADO por defecto): apagado, 5b y 6 no dibujan nada y todo el 2D (HUD, radar del juego, menús, pausa, textos, créditos) va en el panel único de 6b.
+        let split = XRLayer2D.split
         // 5b) ventana 2D del juego sobre el mundo (selector de armas/objetos, pausa): el mundo sigue en primera persona y la capa 2D completa va en un panel flotante delante,
         //     por delante de la geometría. Sustituye a los paneles sueltos del HUD mientras dura (la capa 2D ya los trae).
         //     Si la abrió una mano (gesto del pecho: L2 izquierda, R2 derecha) el panel va sobre esa mano, de cara a la cabeza, y la sigue mientras dura; sin mano o sin pose válida, delante de la cabeza.
         if !overlay2D { overlayHand = -1 } else if overlayHand < 0 { overlayHand = Int(mv_vrgame_menu_hand()) }
         //     Selector (view_reason 10) sin rect ASENTADO todavía (el rect crece por unión hasta llevar 8 listas sin crecer): el panel de la mano no muestra nada (nunca la capa entera) y tampoco
         //     se dibuja el HUD (paso 6); RenderRG conserva el último rect válido mientras dure el selector.
-        let menuPending = overlay2D && gs.view_reason == 10 && hudMenuUV == nil
-        if overlay2D, let h = hud, !menuPending {
+        let menuPending = split && overlay2D && gs.view_reason == 10 && hudMenuUV == nil
+        if split && overlay2D, let h = hud, !menuPending {
             var onHand: simd_float4x4?
             if overlayHand >= 0 {
                 var g = [Float](repeating: 0, count: 16)
@@ -940,7 +943,7 @@ final class XRPresenter {
         }
 
         // 6) paneles del HUD (mundo y diorama; en el cine el HUD ya va dentro de la imagen). Con una ventana 2D abierta (selector, pausa) no se dibuja ninguno (vida, créditos, textos de partida): solo el panel de 5b.
-        if shown != .cinema && shown != .stereo && cfg.hudPanels && !overlay2D, let h = hud {
+        if split && shown != .cinema && shown != .stereo && cfg.hudPanels && !overlay2D, let h = hud {
             let frame = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw)
             let sc = cfg.hudScale
             var wm: (n: SIMD3<Float>, ok: Bool)?
@@ -990,6 +993,25 @@ final class XRPresenter {
                 it.onTop = true
                 r.items.append(it)
             }
+        }
+
+        // 6b) UN solo panel con la capa 2D COMPLETA del juego (mundo y diorama; en el cine el 2D ya va dentro de la imagen): HUD, radar del juego, menús de objetos/armas (L2/R2), pausa, textos y créditos tal como los dibuja
+        //     el original, con transparencia donde el juego no dibuja 2D. Geometría de pantalla completa XRFramedLayout (píxel cuadrado, aspecto LÓGICO de la capa: 320x240 = 0,75; 320x256 = 0,8) delante de la cabeza con
+        //     el mismo seguimiento perezoso del rumbo (hudYaw); sin prueba de profundidad (onTop). El muestreo es el de XR2DFilter.current (sharp-bilinear por defecto). «Paneles del HUD: No» oculta el panel en partida, no
+        //     las ventanas 2D (selector, pausa), que son menús.
+        if !split && shown != .cinema && shown != .stereo && (cfg.hudPanels || overlay2D), let h = hud {
+            let uv = XRFramedLayout.fullUV
+            let lp = hudLogical ?? SIMD2<Float>(Float(h.width), Float(h.height))
+            let c = XRFramedLayout.center(uv: uv, layerPx: lp)
+            var it = XRDrawItem(kind: .panel, texture: h)
+            it.model = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw) * XRMath.translation(SIMD3<Float>(c.x, c.y, -XRFramedLayout.distance))
+            it.uvrect = uv
+            it.size = XRFramedLayout.size(uv: uv, layerPx: lp)
+            it.distance = XRFramedLayout.distance
+            it.opacity = 1
+            it.onTop = true
+            it.pixelMode = XR2DFilter.current.panelMode
+            r.items.append(it)
         }
 
         // 7) velo de transición y menú

@@ -59,6 +59,10 @@ struct VrL2Async {
     VrL2Info info;
 };
 
+static _Atomic int g_split;   /* ver vl2a_set_split: 0 = capa 2D completa, sin trocear (defecto) */
+void vl2a_set_split(int on) { atomic_store(&g_split, on != 0); }
+int vl2a_split(void) { return atomic_load(&g_split); }
+
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec * 1e-6; }
 
 static int grow(void **p, size_t *cap, size_t need, size_t esz) {
@@ -92,7 +96,8 @@ static void *worker(void *arg) {
         if (draw && j->has_opd) { sc.op_dest = j->opd; sc.n_op_dest = j->l.nops; }
         double t0 = now_ms();
         if (skip) A->n_skip++;   /* (contador leído bajo el mutex en vl2a_report; incremento sin él: solo informativo) */
-        vl2d_set_menu(A->L, (j->view & 255) == VRV_R_SELECTOR);   /* ventana de armas/objetos sobre el mundo: rect de lo nuevo respecto a la lista previa sin menú */
+        const int menu_win = atomic_load(&g_split) && (j->view & 255) == VRV_R_SELECTOR;   /* solo con el troceo activo (vl2a_set_split): sin él la capa lleva TODO el 2D, también la ventana del selector */
+        vl2d_set_menu(A->L, menu_win);   /* ventana de armas/objetos sobre el mundo: rect de lo nuevo respecto a la lista previa sin menú */
         int have = skip ? 0 : vl2d_run(A->L, &j->l, draw && j->has_opd ? &sc : NULL, j->full);
         double ms = now_ms() - t0;
         VrL2Info inf; vl2d_info(A->L, &inf);
@@ -104,7 +109,7 @@ static void *worker(void *arg) {
             memcpy(o->px, px, (size_t)w * h * 4);
             o->w = w; o->h = h; o->full = j->full == VL_FULL; o->mode = j->full; o->view = j->view; ok = 1;
             o->menu_ok = vl2d_menu_rect(A->L, o->menu_uv) && vl2d_menu_settled(A->L);   /* solo el rect asentado (la ventana se abre con animación): el panel de la mano no cambia de tamaño durante la apertura */
-            if (draw && (j->view & 255) == VRV_R_SELECTOR) {   /* registro al cambiar el estado del rect */
+            if (draw && menu_win) {   /* registro al cambiar el estado del rect */
                 int key = o->menu_ok ? 1 + (int)(o->menu_uv[0] * 100) + 101 * (int)(o->menu_uv[1] * 100) + 10201 * (int)(o->menu_uv[2] * 100) + 1030301 * (int)(o->menu_uv[3] * 100) : 0;
                 if (key != A->mlog) {
                     A->mlog = key;

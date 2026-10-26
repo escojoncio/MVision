@@ -199,6 +199,8 @@ enum XRFramedLayout {
     static let layerWidth: Float = 1.30     // m por 320 px lógicos
     static let refWidthPx: Float = 320
     static let pitch: Float = layerWidth / refWidthPx   // m por píxel lógico (horizontal y vertical)
+    /// Recorte (u0, v0, u1, v1) de la capa ENTERA: el panel único del 2D sin trocear (XRLayer2D.split == false) usa `size`/`center` con él.
+    static let fullUV = SIMD4<Float>(0, 0, 1, 1)
 
     /// Tamaño lógico válido de la capa; 320x240 si no es plausible.
     static func layer(_ p: SIMD2<Float>) -> SIMD2<Float> {

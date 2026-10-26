@@ -120,8 +120,10 @@ typedef struct {
     uint32_t skip;          /* NS_SKIP_*: batches marcados que NO se dibujan (0 si !native) */
     int why;                /* NS_WHY_*: motivo de native == 0 */
 } NsDecision;
-/* Bits mínimos de NsScene.valid para dibujar nativo, y los que lo impiden. */
-#define NS_NATIVE_NEED (NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK | NS_SV_TOVR_OK | NS_SV_PLAYER_OK)
+/* Bits mínimos de NsScene.valid para dibujar nativo, y los que lo impiden. Además de NS_NATIVE_NEED hace falta NS_NATIVE_PLAYER_ANY: PLAYER_OK (jugador enlazado, cuerpo/manos/IK) o PLAYER_PRESENT
+ * (jugador en la escena aunque el motor lo oculte o no se enlazara: se dibuja el mundo sin cuerpo/manos/IK propios). Sin ninguno (cambio de zona, jugador ausente) no es apta. */
+#define NS_NATIVE_NEED (NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK | NS_SV_TOVR_OK)
+#define NS_NATIVE_PLAYER_ANY (NS_SV_PLAYER_OK | NS_SV_PLAYER_PRESENT)
 #define NS_NATIVE_BAD  (NS_SV_MAP_INCOMPLETE | NS_SV_STORE_FULL)
 int ns_scene_native_ok(uint32_t valid);
 int ns_native_decide(const NsView *v, const NsDecideIn *in, NsDecision *out);
