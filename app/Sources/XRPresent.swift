@@ -660,9 +660,10 @@ final class XRPresenter {
     // MARK: composición
 
     private static let hudRegions: [(u0: Float, v0: Float, u1: Float, v1: Float, x: Float, y: Float)] = [
-        (0.00, 0.00, 0.35, 0.35, -0.52, 0.30),    // arriba izquierda: vida y oxígeno
+        (0.00, 0.00, 0.35, 0.17, -0.52, 0.354),   // arriba izquierda: vida y oxígeno (acaba en v 0,17: los créditos de partida empiezan en y 45 de 256 = v 0,176). y 0,354: el borde superior queda donde estaba (centro original 0,30 con v 0..0,35)
+        (0.00, 0.17, 0.35, 0.35, -0.52, 0.249),   // izquierda bajo la vida: créditos y textos (framed); y 0,249 = la posición que tenía esa franja de la región original (0,30 en v 0,175; 0,6 de y por unidad de v)
         (0.35, 0.00, 0.65, 0.35, 0.00, 0.38),     // arriba centro: alertas
-        (0.65, 0.00, 1.00, 0.35, 0.52, 0.30),     // arriba derecha (el radar va en el antebrazo)
+        (0.65, 0.00, 1.00, 0.35, 0.52, 0.30),     // arriba derecha (el radar va en el antebrazo; su marco mide u 0,73-0,95, v 0,06-0,27)
         (0.00, 0.35, 1.00, 0.62, 0.00, 0.00),     // centro: cualquier otra cosa (casi siempre vacío)
         (0.00, 0.62, 0.25, 1.00, -0.50, -0.34),   // abajo izquierda: objeto equipado
         (0.25, 0.62, 0.75, 1.00, 0.00, -0.44),    // abajo centro: subtítulos
@@ -676,13 +677,13 @@ final class XRPresenter {
         var halfW: Float, halfH: Float
     }
 
-    /// Qué es HUD y qué no (vista mundo): las regiones de arriba son los recortes donde el juego dibuja su HUD (vida/oxígeno, alertas, radar, objeto, subtítulos, arma/munición): van a paneles
-    /// pequeños (o al antebrazo). La región del centro («cualquier otra cosa»: texto y créditos que salen durante la partida) NO es HUD: va en un plano fijo a la cabeza con el mismo
-    /// tamaño angular que la ventana de la lista en el cine (cfg.width a cfg.distance), alineado con el encuadre del juego, y no a un panel de HUD fuera de sitio.
-    private static let hudIsFramed = [false, false, false, true, false, false, false]
+    /// Qué es HUD y qué no (vista mundo): las regiones de vida/oxígeno, alertas, radar, objeto, subtítulos y arma/munición son HUD: van a paneles pequeños (o al antebrazo). Lo demás 2D de partida
+    /// (franja de créditos y texto bajo la vida, «cualquier otra cosa») NO es HUD: va en un plano fijo a la cabeza con el mismo tamaño angular que la ventana de la lista en el cine (cfg.width a cfg.distance),
+    /// alineado con el encuadre del juego; nunca en la mano ni en la muñeca.
+    private static let hudIsFramed = [false, true, false, false, true, false, false, false]
 
     /// Recorte del panel 2D -> ranura de la muñeca (-1: flota delante de la vista). La vida/oxígeno, el objeto y el arma/munición van al brazo.
-    private static let wristSlot = [0, -1, -1, -1, 1, -1, 2]
+    private static let wristSlot = [0, -1, -1, -1, -1, 1, -1, 2]
 
     private static func wristModel(_ w: Wrist) -> (n: SIMD3<Float>, ok: Bool) {
         let n = simd_cross(w.right, w.up)
@@ -852,7 +853,8 @@ final class XRPresenter {
         //     por delante de la geometría. Sustituye a los paneles sueltos del HUD mientras dura (la capa 2D ya los trae).
         //     Si la abrió una mano (gesto del pecho: L2 izquierda, R2 derecha) el panel va sobre esa mano, de cara a la cabeza, y la sigue mientras dura; sin mano o sin pose válida, delante de la cabeza.
         if !overlay2D { overlayHand = -1 } else if overlayHand < 0 { overlayHand = Int(mv_vrgame_menu_hand()) }
-        if overlay2D, let h = hud {
+        //     Selector (view_reason 10) sin rect de la ventana todavía: no se dibuja nada (nunca la capa entera en la mano); RenderRG conserva el último rect válido mientras dure el selector.
+        if overlay2D, let h = hud, !(gs.view_reason == 10 && hudMenuUV == nil) {
             var onHand: simd_float4x4?
             if overlayHand >= 0 {
                 var g = [Float](repeating: 0, count: 16)

@@ -40,7 +40,7 @@
  *   vrradar_arm_from_controller() deduce VrRadarArm de la pose del agarre del mando izquierdo (convención OpenXR: -Z hacia los
  *   dedos, +Y hacia el dorso con la mano plana).
  *   HUESO INVISIBLE del panel con el mando: punto del antebrazo a along_m (0,13 m) del origen del agarre hacia el codo (+Z del agarre), desplazado lift_m
- *   (0,065 m: radio máximo del antebrazo del guante del personaje 55 mm + holgura) a lo largo de la normal del panel (vrradar_wrist_quad_eye: hacia la cabeza, girando alrededor del eje del antebrazo; sin ojo, +Y del agarre = dorso, convención de vr/body y vrgame.h). Sigue la pose REAL del mando 1:1,
+ *   (0,065 m: radio máximo del antebrazo del guante del personaje 55 mm + holgura) a lo largo de la normal del panel (vrradar_wrist_quad: fijo al dorso, normal dorsal ortogonalizada al eje del antebrazo, sin girar hacia la cabeza como un reloj; con el mando +Y del agarre = dorso, convención de vr/body y vrgame.h). Sigue la pose REAL del mando 1:1,
  *   rígido y sin suavizado; la oclusión por el brazo del personaje la da la prueba de profundidad (RadarPanel). Si en un dispositivo +Y resultara ser el lado
  *   de la palma, RadarPanel.flipDorsal invierte la normal.
  *   El quad queda sobre el dorso, a `along_m` de la muñeca hacia el codo, con el eje "derecha" de la imagen hacia la mano (como la
@@ -130,21 +130,18 @@ typedef struct {
 } VrRadarQuad;
 
 VrRadarWristCfg vrradar_wrist_cfg_default(void);
-/* aspect = w/h de la ventana del radar (71/54) para height_m <= 0. Devuelve 1 si la pose es válida (finitos, hueso no nulo). */
+/* aspect = w/h de la ventana del radar (71/54) para height_m <= 0. Devuelve 1 si la pose es válida (finitos, hueso no nulo). La normal del panel es `dorsal` ortogonalizada al eje del antebrazo (no gira hacia el ojo). */
 int vrradar_wrist_quad(const VrRadarArm *arm, const VrRadarWristCfg *cfg, float aspect, VrRadarQuad *out);
-/* Igual, pero con la cara del panel girada alrededor del eje del antebrazo hacia `eye` (cabeza, mismo espacio; la normal queda perpendicular al antebrazo y apunta a la cabeza).
- * eye NULL, no finito o casi sobre el eje (< 2 cm): normal = dorso, como vrradar_wrist_quad. */
-int vrradar_wrist_quad_eye(const VrRadarArm *arm, const VrRadarWristCfg *cfg, float aspect, const float eye[3], VrRadarQuad *out);
 /* Igual, pero la elevación del panel sobre el eje no es lift_m fijo: es el radio REAL de la malla del antebrazo del guante en la dirección de la normal + cfg.skin_m. Radio = máxima distancia al eje
  * (la recta muñeca-codo de `arm`), medida a lo largo de la normal, de los `nverts` vértices `verts` (xyz consecutivos, m, mismo espacio que `arm`): el panel queda siempre fuera del casco convexo
- * de la malla. verts NULL, nverts 0 o radio no válido (no finito o <= 1 cm): lift_m, como vrradar_wrist_quad_eye. */
-int vrradar_wrist_quad_mesh(const VrRadarArm *arm, const VrRadarWristCfg *cfg, float aspect, const float eye[3], const float *verts, uint32_t nverts, VrRadarQuad *out);
+ * de la malla. verts NULL, nverts 0 o radio no válido (no finito o <= 1 cm): lift_m, como vrradar_wrist_quad. */
+int vrradar_wrist_quad_mesh(const VrRadarArm *arm, const VrRadarWristCfg *cfg, float aspect, const float *verts, uint32_t nverts, VrRadarQuad *out);
 /* Sin IK: pose de agarre del mando izquierdo (columna-mayor, espacio VR) -> antebrazo aproximado (antebrazo 0,27 m, hacia atrás). */
 int vrradar_arm_from_controller(const float grip[16], VrRadarArm *out);
 /* Elige el antebrazo del anclaje: la IK (el brazo que se dibuja; el panel queda a lift_m de su eje) si es válida (finita, hueso no nulo); si no, el agarre del mando
  * (puede ser NULL). Devuelve 1 = IK, 2 = mando, 0 = ninguna (out intacto o sin definir). */
 int vrradar_pick_arm(const float grip[16], const VrRadarArm *ik, VrRadarArm *out);
-/* Visibilidad del panel (0..1): solo se ve cuando la muñeca mira a la cara. Ángulo entre la normal del panel y la dirección panel -> ojo: < VRRADAR_VIS_ON_DEG aparece, > VRRADAR_VIS_OFF_DEG
+/* Visibilidad del panel (0..1): solo se ve cuando la muñeca mira a la cara. Ángulo entre la normal del panel (dorsal, fija: no depende del ojo) y la dirección panel -> ojo: < VRRADAR_VIS_ON_DEG aparece, > VRRADAR_VIS_OFF_DEG
  * desaparece; entre ambos conserva el estado (prev > 0 = visible o apareciendo). Fundido lineal de VRRADAR_VIS_FADE_S s: devuelve prev movido hacia 0/1 como mucho dt / FADE. Entradas no válidas
  * (NULL, no finitas, vectores nulos) = fuera de la zona. Pura: el llamador guarda prev. */
 #define VRRADAR_VIS_ON_DEG 45.0f

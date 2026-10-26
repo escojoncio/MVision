@@ -371,11 +371,7 @@ VrRadarWristCfg vrradar_wrist_cfg_default(void) {
 }
 
 int vrradar_wrist_quad(const VrRadarArm *arm, const VrRadarWristCfg *cfg_, float aspect, VrRadarQuad *q) {
-    return vrradar_wrist_quad_eye(arm, cfg_, aspect, NULL, q);
-}
-
-int vrradar_wrist_quad_eye(const VrRadarArm *arm, const VrRadarWristCfg *cfg_, float aspect, const float eye[3], VrRadarQuad *q) {
-    return vrradar_wrist_quad_mesh(arm, cfg_, aspect, eye, NULL, 0, q);
+    return vrradar_wrist_quad_mesh(arm, cfg_, aspect, NULL, 0, q);
 }
 
 /* Radio de la malla en la dirección n (unitaria, perpendicular al eje): máx. de dot(v - wrist, n) sobre los vértices; 0 si no hay o alguno no es finito. */
@@ -391,7 +387,7 @@ static float mesh_radius(const float wrist[3], const float n[3], const float *ve
     return r;
 }
 
-int vrradar_wrist_quad_mesh(const VrRadarArm *arm, const VrRadarWristCfg *cfg_, float aspect, const float eye[3], const float *verts, uint32_t nverts, VrRadarQuad *q) {
+int vrradar_wrist_quad_mesh(const VrRadarArm *arm, const VrRadarWristCfg *cfg_, float aspect, const float *verts, uint32_t nverts, VrRadarQuad *q) {
     if (!q) return 0;
     memset(q, 0, sizeof *q);
     if (!arm) return 0;
@@ -401,15 +397,7 @@ int vrradar_wrist_quad_mesh(const VrRadarArm *arm, const VrRadarWristCfg *cfg_, 
     if (!norm3(a)) return 0;
     float d = dot3(arm->dorsal, a);
     float n[3] = {arm->dorsal[0] - a[0] * d, arm->dorsal[1] - a[1] * d, arm->dorsal[2] - a[2] * d};
-    int n_ok = norm3(n);
-    if (eye && finite3(eye)) {      /* cara hacia los ojos: giro alrededor del eje del antebrazo (componente de ojo - punto del eje perpendicular a él) */
-        float p[3] = {arm->wrist[0] + a[0] * cfg.along_m, arm->wrist[1] + a[1] * cfg.along_m, arm->wrist[2] + a[2] * cfg.along_m};
-        float e[3] = {eye[0] - p[0], eye[1] - p[1], eye[2] - p[2]};
-        float ed = dot3(e, a);
-        float en[3] = {e[0] - a[0] * ed, e[1] - a[1] * ed, e[2] - a[2] * ed};
-        if (dot3(en, en) > 0.02f * 0.02f && norm3(en)) { memcpy(n, en, sizeof n); n_ok = 1; }   /* ojo casi sobre el eje: se queda el dorso */
-    }
-    if (!n_ok) return 0;
+    if (!norm3(n)) return 0;      /* el panel queda fijo al dorso (normal dorsal ortogonalizada al eje), sin girar hacia el ojo: como un reloj */
     float r[3] = {-a[0], -a[1], -a[2]}, u[3];
     cross3(u, n, r);
     for (int k = 0; k < (cfg.rot90 & 3); k++) {          /* (r,u) -> (u,-r) */

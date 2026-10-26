@@ -11,14 +11,22 @@
 #define NJOB 16
 #define L2A_STALE 12   /* listas sin capa nueva antes de dejar de mostrarla (~0,5 s a 25 listas/s). Mejor un HUD algo viejo que volver al shader antiguo, que rompía los textos */
 #define SLOW_MS 12.0
-#define RECOVER 60
+#define RECOVER 15
+#define AVG_N 8
 
-/* Escala adaptativa: baja si el trabajo pasa de SLOW_MS; sube tras RECOVER trabajos seguidos en que la escala siguiente cabría (medido en visor: 3,5 ms a escala 1 y 8,3 ms a escala 3, el coste crece ~lineal con la escala). */
-int vl2a_scale_step(int cur, int target, double ms, int *fast) {
-    if (ms > SLOW_MS && cur > 1) { *fast = 0; return cur - 1; }
-    if (cur < target && ms * (double)(cur + 1) / (double)cur < SLOW_MS * 0.8) {
-        if (++*fast >= RECOVER) { *fast = 0; return cur + 1; }
-    } else *fast = 0;
+/* Escala adaptativa: baja si la media móvil de los últimos AVG_N trabajos pasa de SLOW_MS; sube tras RECOVER trabajos seguidos en que la escala siguiente cabría con esa media (medido en visor: 3,5 ms a escala 1 y
+ * 8,3 ms a escala 3, el coste crece ~lineal con la escala). La media evita que un pico aislado (vista radio/códec, marco 384x256) baje la escala o reinicie la recuperación. */
+int vl2a_scale_step(int cur, int target, double ms, Vl2aScale *st) {
+    st->ms[st->i] = ms;
+    st->i = (st->i + 1) % AVG_N;
+    if (st->n < AVG_N) st->n++;
+    double sum = 0;
+    for (int k = 0; k < st->n; k++) sum += st->ms[k];
+    double avg = sum / st->n;
+    if (st->n == AVG_N && avg > SLOW_MS && cur > 1) { memset(st, 0, sizeof *st); return cur - 1; }
+    if (cur < target && avg * (double)(cur + 1) / (double)cur < SLOW_MS * 0.8) {
+        if (++st->fast >= RECOVER) { memset(st, 0, sizeof *st); return cur + 1; }
+    } else st->fast = 0;
     return cur;
 }
 
@@ -42,7 +50,7 @@ struct VrL2Async {
     int quit;
     VrLayer2D *L;
     _Atomic int target, smooth, view_tag;
-    int cur, fast;
+    int cur; Vl2aScale scst;
     int mlog;                                    /* último estado registrado del rect del menú (solo el trabajador) */
     Out out[3]; int pub, held, have_pub;        /* índice publicado / en uso por el consumidor (-1) */
     uint32_t sub_seq, pub_sub_seq, acq_seq;     /* envíos / envío al que corresponde lo publicado / último adquirido */
@@ -111,7 +119,7 @@ static void *worker(void *arg) {
         if (draw) {
             if (inf.verify && inf.v_ms > 0 && inf.v_ms < ms) ms -= inf.v_ms;   /* la verificación (pantalla 3D del motor) no cuenta para la escala adaptativa: el panel se ve igual de nítido */
             A->work_ms = ms;
-            A->cur = vl2a_scale_step(A->cur, atomic_load(&A->target), ms, &A->fast);
+            A->cur = vl2a_scale_step(A->cur, atomic_load(&A->target), ms, &A->scst);
             if (ok) A->n_pub++;
             if (ok) { o->seq = j->lseq; A->pub = wi; A->have_pub = 1; A->pub_sub_seq = j->lseq; }
             else A->have_pub = 0;           /* lista sin capa (o fallo): el renderer usa el shader */
@@ -153,7 +161,7 @@ void vl2a_options(VrL2Async *A, int scale, int smooth) {
     if (scale < 1) scale = 1;
     if (scale > 6) scale = 6;
     int old = atomic_exchange(&A->target, scale);
-    if (old != scale) { pthread_mutex_lock(&A->mx); A->cur = scale; A->fast = 0; pthread_mutex_unlock(&A->mx); }
+    if (old != scale) { pthread_mutex_lock(&A->mx); A->cur = scale; memset(&A->scst, 0, sizeof A->scst); pthread_mutex_unlock(&A->mx); }
     atomic_store(&A->smooth, smooth < 0 ? 0 : smooth > 2 ? 2 : smooth);
 }
 

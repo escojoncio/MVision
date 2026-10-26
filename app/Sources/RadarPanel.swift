@@ -67,8 +67,8 @@ final class RadarPanel {
     var wrist: VrRadarWristCfg = vrradar_wrist_cfg_default()
     /// Resolución de la textura respecto al radar del original (71x54 px): 4 = 284x216.
     let scale = 4
-    /// Dorso de respaldo = +Y del agarre (convención de vr/body y vrgame.h, "-Z dedos, +Y dorso"). Solo se usa si la cabeza está casi sobre el eje del antebrazo (< 2 cm): normalmente
-    /// la normal del panel apunta a la cabeza (vrradar_wrist_quad_eye) y esto no interviene. true invierte ese dorso de respaldo.
+    /// Dorso con el mando = +Y del agarre (convención de vr/body y vrgame.h, "-Z dedos, +Y dorso"). Con la IK el dorso lo da el antebrazo. El panel queda fijo al dorso (vrradar_wrist_quad_mesh,
+    /// no gira hacia la cabeza). true invierte el dorso del mando.
     var flipDorsal = false
 
     // MARK: estado público
@@ -304,8 +304,8 @@ final class RadarPanel {
         let eye: [Float] = [headPosition.x, headPosition.y, headPosition.z]
         let useMesh = pick == 1 && forearmMesh.count >= 3
         quadValid = ok && forearmMesh.withUnsafeBufferPointer { mp in
-            vrradar_wrist_quad_mesh(&arm, &wrist, aspect, eye, useMesh ? mp.baseAddress : nil, useMesh ? UInt32(forearmMesh.count / 3) : 0, &q)
-        } != 0      // la cara del panel gira alrededor del antebrazo hacia la cabeza
+            vrradar_wrist_quad_mesh(&arm, &wrist, aspect, useMesh ? mp.baseAddress : nil, useMesh ? UInt32(forearmMesh.count / 3) : 0, &q)
+        } != 0      // el panel queda fijo al dorso del antebrazo (normal dorsal); la visibilidad mide el angulo dorso-ojo
         let now = ProcessInfo.processInfo.systemUptime
         let dt = lastPoseTime > 0 ? Float(min(max(now - lastPoseTime, 0), 0.1)) : 0
         lastPoseTime = now

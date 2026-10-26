@@ -11,6 +11,7 @@
 #define VW 1024
 #define VH 512
 
+typedef struct { float x0, y0, x1, y1; int par, cnt, op, tot, chg; } MNew;   /* op: marco/fondo opaco (sin textura ni SEMI); par/cnt: unión-búsqueda y nº de primitivas del componente; tot/chg: celdas de 8 px que cubre (suma sobre sus primitivas) y cuántas ya cambiaban sin menú */
 struct VrLayer2D {
     uint16_t vram[VH][VW];   /* espejo: solo eventos de VRAM (subidas, copias, rellenos) */
     int have_vram;
@@ -32,9 +33,12 @@ struct VrLayer2D {
     uint8_t *w5; size_t w5_cap;                               /* el mundo del panel (todo salvo las primitivas 2D del panel) en la zona mostrada: aw x h x 3, 5 bits por canal */
     uint8_t *vmap; size_t vmap_cap;                           /* mapa por píxel de la verificación (tocado / mundo distinto fuera / distinto) */
     int menu_on, menu_ok; float menu_uv[4];                   /* menú sobre la mano: activo / hay rect en la última lista / rect UV */
+    uint8_t mchg[(VH / 8) * (VW / 8)];                        /* celdas de 8 px (px nativos de la capa) con primitivas nuevas en las últimas MCHG_LISTS listas SIN menú: radar, créditos que se desplazan, barras animadas (lista restante, 0 = no cambia) */
+    int menu_n;                                               /* listas dibujadas con el menú activo desde que se abrió (las primeras MENU_PICK_LISTS reeligen la ventana; después el rect se congela) */
     int menu_have; float menu_px[4];                          /* rect conservado mientras el menú siga activo (px nativos x0,y0,x1,y1): solo crece con primitivas nuevas pegadas a él */
     uint64_t *mbase; size_t mbase_n, mbase_cap;               /* claves (ordenadas) de las primitivas del panel de la última lista sin menú */
     uint64_t *mcur; size_t mcur_n, mcur_cap;                  /* claves de la lista en curso */
+    MNew *mnp; size_t mnp_n, mnp_cap;                         /* primitivas nuevas de la lista en curso (sin rect conservado): cajas en px nativos, para elegir la ventana del selector */
     int fb_hold;                                              /* listas que faltan de respaldo exacto tras una verificación fallida (anti-parpadeo) */
 };
 
@@ -43,15 +47,15 @@ VrLayer2D *vl2d_new(void) {
     if (L) { L->scale = 4; L->smooth = VL_SMOOTH_ORIGINAL; L->R = 1; L->PW = 1; L->PH = 1; L->LW = 1; L->LH = 1; }
     return L;
 }
-void vl2d_free(VrLayer2D *L) { if (!L) return; free(L->mbase); free(L->mcur); free(L->vsnap); free(L->w5); free(L->vmap); free(L->natm); free(L->px); free(L->rgba); free(L->nat); free(L); }
-void vl2d_reset(VrLayer2D *L) { if (!L) return; L->have_vram = 0; L->valid = 0; L->menu_have = 0; }
+void vl2d_free(VrLayer2D *L) { if (!L) return; free(L->mbase); free(L->mcur); free(L->mnp); free(L->vsnap); free(L->w5); free(L->vmap); free(L->natm); free(L->px); free(L->rgba); free(L->nat); free(L); }
+void vl2d_reset(VrLayer2D *L) { if (!L) return; L->have_vram = 0; L->valid = 0; L->menu_have = 0; L->menu_n = 0; memset(L->mchg, 0, sizeof L->mchg); }
 void vl2d_set_options(VrLayer2D *L, int scale, int smooth) {
     if (!L) return;
     L->scale = scale < 1 ? 1 : scale > 6 ? 6 : scale;
     L->smooth = smooth < 0 ? 0 : smooth > 2 ? 2 : smooth;
 }
 
-void vl2d_set_menu(VrLayer2D *L, int on) { if (!L) return; L->menu_on = on != 0; if (!on) L->menu_have = 0; }   /* al salir del selector se olvida el rect */
+void vl2d_set_menu(VrLayer2D *L, int on) { if (!L) return; L->menu_on = on != 0; if (!on) { L->menu_have = 0; L->menu_n = 0; } }   /* al salir del selector se olvida el rect */
 int vl2d_menu_rect(const VrLayer2D *L, float uv[4]) {
     if (!L || !L->valid || !L->menu_ok) return 0;
     if (uv) memcpy(uv, L->menu_uv, sizeof L->menu_uv);
@@ -59,12 +63,13 @@ int vl2d_menu_rect(const VrLayer2D *L, float uv[4]) {
 }
 
 /* clave de una primitiva del panel (FNV-1a de 64 bits) para el menú sobre la mano */
-static uint64_t op_key(const GpuOp *o) {
+/* ox, oy: origen de la zona mostrada en VRAM: las coordenadas del paquete llevan el del búfer en que dibuja el juego (doble búfer, x = 0 / 320), la clave no */
+static uint64_t op_key(const GpuOp *o, int ox, int oy) {
     uint64_t h = 1469598103934665603ull;
     uint32_t f[16]; int n = 0;
-    f[n++] = o->type; f[n++] = o->flags; f[n++] = (uint16_t)o->v[0].x; f[n++] = (uint16_t)o->v[0].y;
+    f[n++] = o->type; f[n++] = o->flags; f[n++] = (uint16_t)(o->v[0].x - ox); f[n++] = (uint16_t)(o->v[0].y - oy);
     if (o->type == GPU_OP_RECT) { f[n++] = (uint16_t)o->rx; f[n++] = (uint16_t)o->ry; f[n++] = (uint16_t)o->rw; f[n++] = (uint16_t)o->rh; }
-    else { int nv = o->type == GPU_OP_LINE ? 2 : (o->nv == 4 ? 4 : 3); for (int i = 1; i < nv; i++) { f[n++] = (uint16_t)o->v[i].x; f[n++] = (uint16_t)o->v[i].y; } }
+    else { int nv = o->type == GPU_OP_LINE ? 2 : (o->nv == 4 ? 4 : 3); for (int i = 1; i < nv; i++) { f[n++] = (uint16_t)(o->v[i].x - ox); f[n++] = (uint16_t)(o->v[i].y - oy); } }
     f[n++] = o->tx; f[n++] = o->ty; f[n++] = o->clx; f[n++] = o->cly; f[n++] = o->v[0].u; f[n++] = o->v[0].v;
     for (int i = 0; i < n; i++) for (int b = 0; b < 4; b++) { h ^= (f[i] >> (8 * b)) & 255u; h *= 1099511628211ull; }
     return h;
@@ -901,6 +906,49 @@ static int verify_panel(VrLayer2D *L, const GpuDisplay *d, const uint16_t *vend,
     return whole;
 }
 
+#define MENU_PICK_LISTS 8   /* listas del selector en que se reelige la ventana (una barra animada de la primera lista no deja el rect clavado); después se congela */
+#define MCHG_LISTS 16       /* listas sin menú que una celda sigue contando como «ya cambiaba» */
+static void mchg_mark(VrLayer2D *L, int x0, int y0, int x1, int y1) {
+    for (int cy = y0 / 8; cy <= (y1 - 1) / 8; cy++)
+        for (int cx = x0 / 8; cx <= (x1 - 1) / 8; cx++) L->mchg[cy * (VW / 8) + cx] = MCHG_LISTS;
+}
+static int mn_find(MNew *p, int i) { while (p[i].par != i) { p[i].par = p[p[i].par].par; i = p[i].par; } return i; }
+/* Ventana del selector entre las primitivas nuevas (sin rect congelado): componentes conexos (hueco < 8 px entre cajas) y gana el de mayor área que tenga marco o fondo opaco (sin textura ni
+ * GPU_F_SEMI); si ninguno lo tiene, el de mayor área de todos (la mano nunca recibe la capa entera). Devuelve el nº de primitivas del componente y su caja en *x0.. (0 y caja intacta si no hay nuevas). */
+static int menu_pick(const VrLayer2D *L, MNew *p, size_t n, float *x0, float *y0, float *x1, float *y1) {
+    for (size_t i = 0; i < n; i++)
+        for (size_t j = i + 1; j < n; j++)
+            if (p[i].x0 < p[j].x1 + 8.0f && p[i].x1 > p[j].x0 - 8.0f && p[i].y0 < p[j].y1 + 8.0f && p[i].y1 > p[j].y0 - 8.0f) {
+                int a = mn_find(p, (int)i), b = mn_find(p, (int)j);
+                if (a != b) p[b].par = a;
+            }
+    for (size_t i = 0; i < n; i++) {   /* celdas de 8 px que cubre cada primitiva (antes de fundir las cajas) y cuántas ya cambiaban antes de abrir el menú */
+        int r = mn_find(p, (int)i);
+        for (int cy = (int)p[i].y0 / 8; cy <= ((int)p[i].y1 - 1) / 8; cy++)
+            for (int cx = (int)p[i].x0 / 8; cx <= ((int)p[i].x1 - 1) / 8; cx++) { p[r].tot++; if (L->mchg[cy * (VW / 8) + cx]) p[r].chg++; }
+    }
+    for (size_t i = 0; i < n; i++) {   /* los datos del componente se acumulan en su raíz (las raíces no se leen como hojas: solo se escriben las raíces) */
+        int r = mn_find(p, (int)i);
+        if (r == (int)i) continue;
+        MNew *m = &p[r];
+        if (p[i].x0 < m->x0) m->x0 = p[i].x0;
+        if (p[i].y0 < m->y0) m->y0 = p[i].y0;
+        if (p[i].x1 > m->x1) m->x1 = p[i].x1;
+        if (p[i].y1 > m->y1) m->y1 = p[i].y1;
+        m->cnt += p[i].cnt; m->op |= p[i].op;
+    }
+    int best = -1; float ba = 0;
+    for (int pass = 0; pass < 2 && best < 0; pass++)   /* pasada 0: sin los componentes que ya cambiaban (más de la mitad de sus celdas: radar, créditos que se desplazan); pasada 1 (respaldo): todos */
+        for (size_t i = 0; i < n; i++) {
+            if (p[i].par != (int)i || (pass == 0 && p[i].chg * 2 > p[i].tot)) continue;
+            float a = (p[i].x1 - p[i].x0) * (p[i].y1 - p[i].y0);
+            if (best < 0 || (p[i].op && !p[best].op) || (p[i].op == p[best].op && a > ba)) { best = (int)i; ba = a; }
+        }
+    if (best < 0) return 0;
+    *x0 = p[best].x0; *y0 = p[best].y0; *x1 = p[best].x1; *y1 = p[best].y1;
+    return p[best].cnt;
+}
+
 int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     if (!L || !l) return 0;
     L->valid = 0; L->menu_ok = 0;
@@ -952,11 +1000,12 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     if (verify) v_ms = l2_now_ms() - v_t0;
     if (draw) {
         int key = (R << 8) | (S << 4) | L->smooth;
-        if (L->cur_scale != key || L->w != w || L->h != h || L->ox != oxe || L->oy != l->disp.y || L->pad != pad || L->aw != aw) {
+        int zone = L->cur_scale != key || L->w != w || L->h != h || L->pad != pad || L->aw != aw;   /* otra zona mostrada (tamaño/escala); el cambio de búfer (ox, oy) no invalida el rect del menú: va relativo a ella */
+        if (zone || L->ox != oxe || L->oy != l->disp.y) {
             L->w = w; L->h = h; L->ox = oxe; L->oy = l->disp.y; L->pad = pad; L->aw = aw; L->LW = w * S; L->LH = h * S;
             L->R = R; L->PW = w * R; L->PH = h * R;
             L->cur_scale = key;
-            L->menu_have = 0;                                       /* el rect conservado es de otra zona mostrada */
+            if (zone) { L->menu_have = 0; L->menu_n = 0; memset(L->mchg, 0, sizeof L->mchg); }   /* el rect conservado y las celdas que cambiaban son de otra zona mostrada */
             L->dx0 = L->dy0 = 0; L->dx1 = L->PW; L->dy1 = L->PH;   /* reinicialización completa */
         }
         blank(L, L->dx0, L->dy0, L->dx1, L->dy1);
@@ -968,9 +1017,10 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
         }
     }
     memset(&L->info, 0, sizeof L->info);
-    L->mcur_n = 0;
+    L->mcur_n = 0; L->mnp_n = 0;
+    if (draw && !full && !L->menu_on) for (size_t i = 0; i < sizeof L->mchg; i++) if (L->mchg[i]) L->mchg[i]--;   /* lista sin menú: envejece las celdas que cambiaban */
     float mx0 = 1e9f, my0 = 1e9f, mx1 = -1e9f, my1 = -1e9f; int mnew = 0;   /* caja (px nativos) y cuenta de las primitivas del panel nuevas respecto al base */
-    const int mhave = L->menu_on && L->menu_have;                            /* hay rect conservado: parte de él y solo crece con primitivas que lo toquen o estén a < 8 px */
+    const int mhave = L->menu_on && L->menu_have && L->menu_n >= MENU_PICK_LISTS;                 /* congelado (tras las primeras listas): parte de él y solo crece con primitivas que lo toquen o estén a < 8 px; antes se reelige en cada lista */
     if (mhave) { mx0 = L->menu_px[0]; my0 = L->menu_px[1]; mx1 = L->menu_px[2]; my1 = L->menu_px[3]; }
     L->info.fw = w; L->info.h = h; L->info.aw = aw; L->info.pad = pad; L->info.scale = S; L->info.raster = R; L->info.smooth = L->smooth; L->info.full = full;
     L->info.used_start = l->vram_start != NULL; L->info.used_end = l->vram_end != NULL;
@@ -1023,9 +1073,9 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
                 c.fixed = 1;
             }
             if (!full) {
-                uint64_t mk = op_key(o);
+                uint64_t mk = op_key(o, L->ox, L->oy);
                 key_push(&L->mcur, &L->mcur_n, &L->mcur_cap, mk);
-                if (L->menu_on && !key_in(L->mbase, L->mbase_n, mk)) {
+                if ((L->menu_on || L->mbase_n) && !key_in(L->mbase, L->mbase_n, mk)) {   /* nueva respecto al base: con menú, candidata a ventana; sin menú, la celda «ya cambiaba» */
                     int na, nb, ne, nf;
                     op_box(o, 1, &na, &nb, &ne, &nf);
                     na -= L->ox; ne -= L->ox; nb -= L->oy; nf -= L->oy;
@@ -1033,7 +1083,20 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
                     if (nb < 0) nb = 0;
                     if (ne > w) ne = w;
                     if (nf > h) nf = h;
-                    if (ne > na && nf > nb && (!mhave || ((float)na < mx1 + 8.0f && (float)ne > mx0 - 8.0f && (float)nb < my1 + 8.0f && (float)nf > my0 - 8.0f))) {
+                    if (!L->menu_on) { if (ne > na && nf > nb) mchg_mark(L, na, nb, ne, nf); }
+                    else if (ne > na && nf > nb && !mhave) {   /* sin rect conservado: se guardan todas y la ventana se elige al final (componentes conexos) */
+                        if (L->mnp_n == L->mnp_cap) {
+                            size_t cn = L->mnp_cap ? L->mnp_cap * 2 : 128;
+                            MNew *q = (MNew *)realloc(L->mnp, cn * sizeof *q);
+                            if (q) { L->mnp = q; L->mnp_cap = cn; }
+                        }
+                        if (L->mnp_n < L->mnp_cap) {
+                            MNew *m = &L->mnp[L->mnp_n];
+                            m->x0 = (float)na; m->y0 = (float)nb; m->x1 = (float)ne; m->y1 = (float)nf;
+                            m->par = (int)L->mnp_n; m->cnt = 1; m->tot = m->chg = 0; m->op = !(o->flags & (GPU_F_TEXTURED | GPU_F_SEMI));
+                            L->mnp_n++;
+                        }
+                    } else if (ne > na && nf > nb && ((float)na < mx1 + 8.0f && (float)ne > mx0 - 8.0f && (float)nb < my1 + 8.0f && (float)nf > my0 - 8.0f)) {
                         mnew++;
                         if ((float)na < mx0) mx0 = (float)na;
                         if ((float)nb < my0) my0 = (float)nb;
@@ -1057,13 +1120,14 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     }
     if (!draw) return 0;
     if (!full) {
+        if (L->menu_on && !mhave) mnew = menu_pick(L, L->mnp, L->mnp_n, &mx0, &my0, &mx1, &my1);
         if (!L->menu_on) {   /* lista sin menú: renueva el base */
             qsort(L->mcur, L->mcur_n, sizeof *L->mcur, key_cmp);
             uint64_t *t = L->mbase; size_t tc = L->mbase_cap;
             L->mbase = L->mcur; L->mbase_n = L->mcur_n; L->mbase_cap = L->mcur_cap;
             L->mcur = t; L->mcur_n = 0; L->mcur_cap = tc;
-        } else if (L->mbase_n && (mnew > 0 || mhave) && w > 0 && h > 0) {
-            if ((double)(mx1 - mx0) * (double)(my1 - my0) <= 0.6 * (double)w * (double)h) { L->menu_have = 1; L->menu_px[0] = mx0; L->menu_px[1] = my0; L->menu_px[2] = mx1; L->menu_px[3] = my1; }
+        } else if (L->mbase_n && (mnew > 0 || L->menu_have) && w > 0 && h > 0) {
+            if ((mnew > 0 || mhave) && (double)(mx1 - mx0) * (double)(my1 - my0) <= 0.6 * (double)w * (double)h) { L->menu_have = 1; L->menu_px[0] = mx0; L->menu_px[1] = my0; L->menu_px[2] = mx1; L->menu_px[3] = my1; }
             if (L->menu_have) {   /* sin primitivas nuevas en esta lista (o con un crecimiento excesivo) se conserva el último rect válido */
                 L->menu_ok = 1;
                 L->menu_uv[0] = L->menu_px[0] / (float)w; L->menu_uv[1] = L->menu_px[1] / (float)h; L->menu_uv[2] = L->menu_px[2] / (float)w; L->menu_uv[3] = L->menu_px[3] / (float)h;
@@ -1100,6 +1164,7 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
         }
         L->dx0 = ux0; L->dy0 = uy0; L->dx1 = ux1; L->dy1 = uy1;
     }
+    if (!full && L->menu_on && L->menu_n < MENU_PICK_LISTS) L->menu_n++;
     L->valid = 1;
     return 1;
 }

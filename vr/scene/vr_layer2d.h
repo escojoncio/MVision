@@ -62,8 +62,11 @@ void vl2d_set_options(VrLayer2D *L, int scale, int smooth);
  * `l` debe ser la lista con la que se ensambló sc. Devuelve 1 si hay capa nueva (vl2d_rgba / vl2d_px válidos hasta la siguiente llamada), 0 si no. */
 int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full);
 
-/* Menú sobre la mano (solo panel): con `on` != 0 vl2d_run guarda la caja de las primitivas del panel que NO estaban en la última lista dibujada con `on` == 0 (créditos y HUD que el juego
- * dibuja durante la partida no cuentan; clave por primitiva: tipo, banderas, vértices o rect, página de textura, CLUT y u,v). Con `on` == 0 cada lista dibujada renueva esa lista base.
+/* Menú sobre la mano (solo panel): con `on` != 0 vl2d_run busca la ventana entre las primitivas del panel que NO estaban en la última lista dibujada con `on` == 0 (créditos y HUD que el juego
+ * dibuja durante la partida no cuentan; clave por primitiva: tipo, banderas, vértices RELATIVOS a la zona mostrada (el doble búfer del juego alterna x = 0 / 320) o rect, página de textura, CLUT y u,v).
+ * Sin rect conservado, las nuevas se agrupan en componentes conexos (hueco < 8 px entre cajas) y la ventana es el de mayor área que tenga marco o fondo opaco (alguna primitiva sin textura ni
+ * GPU_F_SEMI); si ninguno lo tiene, el de mayor área de todos; el resto (créditos, texto) se ignora. Durante las 8 primeras listas con el menú activo se reelige en cada lista (una barra animada
+ * de la primera no deja el rect clavado); después el rect se congela. Con `on` == 0 cada lista dibujada renueva esa lista base.
  * vl2d_menu_rect (tras vl2d_run con capa): rect UV [u0, v0, u1, v1] (0..1, de la capa mostrada) de la ventana nueva; 0 si no hay base, nunca hubo primitivas nuevas o su área pasa del 60 % del marco.
  * Histéresis: mientras el menú siga activo el último rect válido se conserva (una lista sin primitivas nuevas no lo borra) y solo crece con primitivas nuevas que lo toquen o estén a < 8 px;
  * vl2d_set_menu(0) lo olvida. */

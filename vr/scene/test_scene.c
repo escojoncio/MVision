@@ -1006,6 +1006,60 @@ static void test_recon_diag_ambig(void) {
     vr_scene_release();
 }
 
+/* Cartel de efectos con DOS esquinas limpias (vvalid, sin banderas) en diagonal y las otras dos dudosas (AMBIG/SAT, basura) o sin vista: las otras dos se derivan de las limpias (DERIVED)
+ * en vez de descartar el polígono (parcial / AMBIG), y billboard_quad las acepta. Con 3 o 4 limpias no cambia nada. */
+static GpuOp *glow_quad(const uint8_t fl[4], const uint8_t vv[4]) {
+    GpuOp *q = add(GPU_OP_POLY);
+    q->nv = 4; q->flags = GPU_F_SEMI; q->abr = 1; q->tp = 1;
+    q->proj_h = 150.0f; q->proj_ox = 160.0f; q->proj_oy = 128.0f;
+    const float X[4][3] = {{-500, -500, 555}, {7000, -3000, 9000}, {-4000, 6000, 20}, {500, 500, 555}};
+    for (int k = 0; k < 4; k++) { setv3(&q->v[k], X[k][0], X[k][1], X[k][2]); q->v[k].vflags = fl[k]; q->v[k].vvalid = vv[k]; }
+    return q;
+}
+static void glow_sxy(GpuOp *q) {   /* SXY coherente con el modelo de la GTE (solo para las esquinas con posiciones sensatas) */
+    for (int k = 0; k < 4; k++) { q->v[k].x = (int16_t)lrintf(q->proj_ox + q->proj_h * q->v[k].vx / q->v[k].vz); q->v[k].y = (int16_t)lrintf(q->proj_oy + q->proj_h * q->v[k].vy / q->v[k].vz); }
+}
+static void test_diag_dirty(void) {
+    const uint8_t on4[4] = {1, 1, 1, 1}, A_S = GPU_VF_AMBIG | GPU_VF_SAT;
+    uint8_t fate[1];
+    VrScene s; VrSceneOpts o = vr_scene_opts_default();
+    o.billboard = 1;
+    vr_scene_set_fate(fate, sizeof fate);
+    /* a) v0 y v3 limpias, v1 y v2 con vista AMBIG+SAT basura: antes se descartaban (AMBIG); ahora cartel derivado */
+    { const uint8_t f[4] = {0, A_S, A_S, 0}; reset(); glow_quad(f, on4); }
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && fate[0] == VR_FATE_3D && s.stats.n_recon == 1 && s.stats.n_tris3d == 2 && s.stats.n_billboard == 1 && s.stats.drop_ambig == 0,
+          "diag v0,v3 limpias + 2 AMBIG: fate %u recon %u tris %u bb %u ambig %u", fate[0], s.stats.n_recon, s.stats.n_tris3d, s.stats.n_billboard, s.stats.drop_ambig);
+    /* b) v0 y v3 limpias, v1 sin vista y v2 con vista dudosa: antes parcial; ahora cartel derivado */
+    { const uint8_t f[4] = {0, 0, GPU_VF_SAT, 0}, v[4] = {1, 0, 1, 1}; reset(); glow_quad(f, v); }
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && fate[0] == VR_FATE_3D && s.stats.drop_partial == 0 && s.stats.n_tris3d == 2 && s.stats.n_billboard == 1,
+          "diag v0,v3 limpias + 1 sin vista + 1 SAT: fate %u partial %u tris %u bb %u", fate[0], s.stats.drop_partial, s.stats.n_tris3d, s.stats.n_billboard);
+    /* c) la otra diagonal (v1,v2) */
+    { const uint8_t f[4] = {A_S, 0, 0, GPU_VF_BEHIND}; reset(); GpuOp *q = glow_quad(f, on4);
+      setv3(&q->v[1], 500, -500, 555); setv3(&q->v[2], -500, 500, 555); q->v[0].vflags = A_S; q->v[3].vflags = GPU_VF_BEHIND; }
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && fate[0] == VR_FATE_3D && s.stats.n_recon == 1 && s.stats.n_billboard == 1, "diag v1,v2 limpias: fate %u recon %u bb %u", fate[0], s.stats.n_recon, s.stats.n_billboard);
+    /* d) 3 limpias + 1 dudosa (SAT): sin relleno */
+    { const uint8_t f[4] = {0, 0, GPU_VF_SAT, 0}; reset(); GpuOp *q = glow_quad(f, on4); setv3(&q->v[1], 500, -500, 555); setv3(&q->v[2], -500, 500, 555); q->v[2].vflags = GPU_VF_SAT; setv3(&q->v[3], 500, 500, 555); glow_sxy(q); }
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_recon == 0 && s.stats.n_billboard == 0 && s.stats.n_tris3d == 2, "3 limpias: sin relleno (recon %u bb %u tris %u)", s.stats.n_recon, s.stats.n_billboard, s.stats.n_tris3d);
+    /* e) 4 limpias: sin relleno */
+    { const uint8_t f[4] = {0, 0, 0, 0}; reset(); GpuOp *q = glow_quad(f, on4); setv3(&q->v[1], 500, -500, 555); setv3(&q->v[2], -500, 500, 555); glow_sxy(q); }
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_recon == 0 && s.stats.n_tris3d == 2, "4 limpias: sin relleno (recon %u tris %u)", s.stats.n_recon, s.stats.n_tris3d);
+    /* f) 2 limpias NO en diagonal (v0,v1): no se rellena; el parcial/AMBIG se descarta como antes */
+    { const uint8_t f[4] = {0, 0, A_S, A_S}; reset(); glow_quad(f, on4); }
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_recon == 0 && fate[0] == VR_FATE_AMBIG, "2 limpias en arista: sin relleno (recon %u fate %u)", s.stats.n_recon, fate[0]);
+    /* h) quad OPACO (sin SEMI) con 2 limpias en diagonal y las otras dos dudosas: la regla es solo de carteles de efectos (SEMI); el opaco sigue como antes (AMBIG descartado, sin relleno) */
+    { const uint8_t f[4] = {0, A_S, A_S, 0}; reset(); GpuOp *q = glow_quad(f, on4); q->flags = 0; }
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_recon == 0 && fate[0] == VR_FATE_AMBIG, "opaco, diag limpias + 2 AMBIG: sin relleno (recon %u fate %u)", s.stats.n_recon, fate[0]);
+    { const uint8_t f[4] = {0, 0, GPU_VF_SAT, 0}, v[4] = {1, 0, 1, 1}; reset(); GpuOp *q = glow_quad(f, v); q->flags = 0; }
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.stats.n_recon == 0 && s.stats.drop_partial == 1 && fate[0] == VR_FATE_PARTIAL, "opaco, diag limpias + 1 sin vista + 1 SAT: parcial como antes (recon %u partial %u fate %u)", s.stats.n_recon, s.stats.drop_partial, fate[0]);
+    /* g) 2 limpias en diagonal y las otras dos YA exactamente DERIVED (rellenadas antes): no se rellena de nuevo ni cuenta como RECON */
+    { const uint8_t f[4] = {0, GPU_VF_DERIVED, GPU_VF_DERIVED, 0}; reset(); GpuOp *q = glow_quad(f, on4); setv3(&q->v[1], 500, -500, 555); setv3(&q->v[2], -500, 500, 555); glow_sxy(q); }
+    o.drop_derived = 0;
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && fate[0] == VR_FATE_3D && s.stats.n_recon == 0 && s.stats.n_tris3d == 2,
+          "diag limpias + 2 ya DERIVED: sin relleno (recon %u fate %u tris %u)", s.stats.n_recon, fate[0], s.stats.n_tris3d);
+    vr_scene_set_fate(NULL, 0);
+    vr_scene_release();
+}
+
 /* AMBIG junto a SAT/BEHIND en un cuadrilátero no coherente: si UN solo vértice es AMBIG y los otros tres son fiables (sin banderas, o solo SAT con una coordenada
  * sin saturar que reproduce la GTE), el paralelogramo v_a + v_b - v_opuesto lo reconstruye (si reproduce su SXY saturado); si no, se descarta. */
 static GpuOp *ambig_quad(const float P[4][3], const uint8_t fl[4], const int sxy[4][2]) {
@@ -1298,7 +1352,7 @@ static void test_gpu_eye_near(void) {
               "a caballo del plano: recortado (tris %u clip %u near %u behind %u)", s.stats.n_tris3d, s.stats.n_clipped, s.stats.n_near_eye, s.stats.drop_behind);
         for (uint32_t i = 0; i < s.nv; i++) {
             float zv = (s.eye_vr[2] - s.v[i].pos[2]) / s.scale;
-            CHECK(zv >= o.near_units - 0.05f, "vértice recortado a z=%f < plano cercano", zv);
+            CHECK(zv > 0.0f, "vértice recortado a z=%f <= 0", zv);
         }
         /* entero detrás: descartado (cuenta como detrás) */
         reset();
@@ -1317,6 +1371,25 @@ static void test_gpu_eye_near(void) {
         const float N[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, -300}, {0, 0, 0}};
         polyN(3, N, z4, 0);
         CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 2 && s.stats.n_clipped == 1, "vértice detrás sin bandera: recortado");
+    }
+    /* b2) con eye_near_m el plano cercano NO es el de la cámara del juego (near_units): lo recorta el renderer con el de la cabeza. Solo se recorta contra z <= 0 (épsilon) */
+    {
+        reset();
+        const float A[4][3] = {{0, 0, 10}, {2000, 0, 10}, {0, 2000, 10}, {0, 0, 0}};   /* entero entre el ojo y near_units (24) */
+        polyN(3, A, z4, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.drop_behind == 0 && s.stats.n_clipped == 0,
+              "z=10 < near_units: emitido sin recortar (tris %u behind %u clip %u)", s.stats.n_tris3d, s.stats.drop_behind, s.stats.n_clipped);
+        reset();
+        const float M[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, 10}, {0, 0, 0}};   /* un vértice entre el ojo y near_units */
+        polyN(3, M, z4, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 1 && s.stats.n_clipped == 0, "un vértice a z=10: sin recorte (tris %u clip %u)", s.stats.n_tris3d, s.stats.n_clipped);
+        reset();
+        const float K[4][3] = {{0, 0, 2000}, {1000, 0, 2000}, {0, 1000, -300}, {0, 0, 0}};   /* un vértice detrás del ojo: recorte al plano del ojo, no a near_units */
+        polyN(3, K, z4, 0);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_tris3d == 2 && s.stats.n_clipped == 1, "vértice detrás: recortado (tris %u clip %u)", s.stats.n_tris3d, s.stats.n_clipped);
+        float zmin = 1e9f;
+        for (uint32_t i = 0; i < s.nv; i++) { float zv = (s.eye_vr[2] - s.v[i].pos[2]) / s.scale; if (zv < zmin) zmin = zv; }
+        CHECK(zmin > 0.0f && zmin < 1.0f, "el recorte queda pegado al plano del ojo: zmin=%f", zmin);
     }
     /* c) una primitiva 2D (rect de HUD / texto) va al panel: batch kind 2, op_dest = 2, posición en píxeles de pantalla, nunca como 3D (aunque haya 3D pegado al ojo en la lista) */
     {
@@ -1504,6 +1577,11 @@ static void test_line3d(void) {
     line3(10, 5, 200, 30, -6, 200, 360, 160, 120);   /* a 0,2 m del ojo, extremos muy próximos entre sí */
     on = o; on.eye_near_m = 0.25f;
     CHECK(vr_scene_build(&dl, &bs, &on, &s) == 0 && s.stats.n_line3d == 0 && s.stats.n_near_eye == 1, "línea pegada al ojo: descartada (near %u)", s.stats.n_near_eye);
+    /* h) con eye_near_m el plano cercano no es near_units: la línea de 1800 a 3600 con near_units 2700 sale entera */
+    reset(); dl.disp.w = 320; dl.disp.h = 240;
+    line3(100, 50, 1800, 300, -60, 3600, 360, 160, 120);
+    on = o; on.near_units = 2700.0f; on.eye_near_m = 0.25f;
+    CHECK(vr_scene_build(&dl, &bs, &on, &s) == 0 && s.stats.n_line3d == 1 && s.stats.n_clipped == 0 && s.stats.drop_behind == 0, "línea con eye_near_m: sin recorte contra near_units (clip %u)", s.stats.n_clipped);
     vr_scene_release();
 }
 
@@ -1740,6 +1818,26 @@ static void test_hw_cull(void) {
               "3D %dx%d: n_hw_cull %u tris3d %u fate %u (descarte esperado %d)", ext[c][0], ext[c][1], s.stats.n_hw_cull, s.stats.n_tris3d, fate[0], cull);
         CHECK(s.stats.n_poly == 1, "el polígono descartado por la GPU cuenta como recibido (n_poly %u)", s.stats.n_poly);
     }
+    /* a2) con ventana mostrada conocida (dl.disp): solo se descarta si el bbox del triángulo la toca; fuera de ella se emite (en VR se ve más allá del encuadre) */
+    static const int wx[6][2] = {{-1200, -1}, {-1200, 50}, {-1200, 0}, {319, 1500}, {320, 1500}, {-500, 600}};   /* x mín, x máx del triángulo (ventana x 0..319) */
+    for (int c = 0; c < 6; c++) {
+        reset();
+        dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 240;
+        GpuOp *p = polyN(3, P, z4, 0);
+        set_xy(p, 0, wx[c][0], 100); set_xy(p, 1, wx[c][1], 100); set_xy(p, 2, wx[c][0], 200);
+        int cull = wx[c][1] >= 0 && wx[c][0] < 320;
+        memset(fate, 0, sizeof fate);
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_hw_cull == (cull ? 1u : 0u) && s.stats.n_tris3d == (cull ? 0u : 1u) && fate[0] == (cull ? VR_FATE_HWCULL : VR_FATE_3D),
+              "3D x %d..%d con ventana 0..319: n_hw_cull %u tris3d %u (descarte esperado %d)", wx[c][0], wx[c][1], s.stats.n_hw_cull, s.stats.n_tris3d, cull);
+    }
+    reset();   /* en Y: ventana 0..239; el triángulo mide 600 en Y (>511) */
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 240;
+    { GpuOp *p = polyN(3, P, z4, 0); set_xy(p, 0, 10, 239); set_xy(p, 1, 60, 239); set_xy(p, 2, 10, 839); }
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_hw_cull == 1 && s.stats.n_tris3d == 0, "3D que toca la última fila de la ventana (y 239) en Y: descartado (hw_cull %u)", s.stats.n_hw_cull);
+    reset();
+    dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 240;
+    { GpuOp *p = polyN(3, P, z4, 0); set_xy(p, 0, 10, 240); set_xy(p, 1, 60, 240); set_xy(p, 2, 10, 840); }
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_hw_cull == 0 && s.stats.n_tris3d == 1, "3D que empieza justo debajo de la ventana en Y: se emite (hw_cull %u)", s.stats.n_hw_cull);
     /* b) quad 3D: solo el triángulo (1,2,3) pasa de 1023 -> se emite el (0,1,2) y se cuenta 1; y a la inversa */
     for (int w = 0; w < 2; w++) {
         reset();
@@ -1855,11 +1953,14 @@ static void test_rect3d(void) {
         view_to_vr(&s, cv, want);
         CHECK(find_corner(&s, want, 10.0f, 20.0f), "esquina con el OFX corregido");
     }
-    /* g) detrás del plano cercano del motor con eye_near_m: descartado y contado (no vuelve al 2D) */
+    /* g) detrás del plano cercano del motor con engine_near_clip: descartado y contado (no vuelve al 2D) */
     reset(); dl.disp.w = 320; dl.disp.h = 240;
     rect_hp(16, 8, 10.0f, 5.0f, 250.0f, H, 160, 120, GPU_F_TEXTURED);   /* z = 250 < near_units (300); H >= 2z no satura la división de la GTE */
-    o.eye_near_m = 0.10f; o.near_units = 300.0f;
+    o.engine_near_clip = 1; o.near_units = 300.0f;
     CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_rect3d == 0 && s.nv == 0 && s.stats.drop_behind == 1 && s.op_dest[0] == 0, "cartel detrás del plano cercano: descartado (behind %u nv %u)", s.stats.drop_behind, s.nv);
+    /* g2) con eye_near_m el plano cercano no es near_units: el cartel a z=250 se emite */
+    o.engine_near_clip = 0; o.eye_near_m = 0.10f;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.stats.n_rect3d == 1 && s.stats.drop_behind == 0, "cartel entre el ojo y near_units con eye_near_m: emitido (rect3d %u behind %u)", s.stats.n_rect3d, s.stats.drop_behind);
     vr_scene_release();
 }
 
@@ -2015,6 +2116,7 @@ static void test_billboard(void) {
 
 int main(void) {
     test_billboard();
+    test_diag_dirty();
     test_hw_cull();
     test_rect3d();
     test_screen_window();

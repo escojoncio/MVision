@@ -513,35 +513,23 @@ static void t_anchor(void) {
     grip[5] = NAN;
     CHECK(!vrradar_arm_from_controller(grip, &ca), "mando NaN");
 
-    /* panel de cara a los ojos: giro alrededor del eje del antebrazo aunque el +Y del agarre apunte hacia abajo (caso real: normal (-0,17 -0,93 0,30)) */
+    /* panel fijo al dorso del antebrazo (no gira hacia los ojos): normal = dorsal ortogonalizada al eje, aunque apunte hacia abajo (caso real: normal (-0,17 -0,93 0,30)) */
     {
         VrRadarArm ea = {{0.10f, 0.89f, -0.16f + 0.27f}, {0.10f, 0.89f, -0.16f}, {-0.17f, -0.93f, 0.30f}};   /* codo = muñeca + 0,27 m hacia +Z */
-        float eye[3] = {0.0f, 1.60f, 0.10f}, ax[3] = {0, 0, 1};
-        VrRadarQuad eq, dq;
+        float ax[3] = {0, 0, 1};
+        VrRadarQuad dq;
         VrRadarWristCfg ec = vrradar_wrist_cfg_default();
-        CHECK(vrradar_wrist_quad(&ea, &ec, 71.0f / 54.0f, &dq) && dotv(dq.normal, (float[3]){0, 1, 0}) < 0, "sin ojo: la normal del dorso apunta hacia abajo (caso base)");
-        CHECK(vrradar_wrist_quad_eye(&ea, &ec, 71.0f / 54.0f, eye, &eq) && eq.valid, "quad con ojo válido");
-        float d[3] = {eq.center[0] - ea.wrist[0], eq.center[1] - ea.wrist[1], eq.center[2] - ea.wrist[2]};
-        float toe[3] = {eye[0] - eq.center[0], eye[1] - eq.center[1], eye[2] - eq.center[2]};
-        float tl = lenv(toe); toe[0] /= tl; toe[1] /= tl; toe[2] /= tl;
-        CHECK(NEAR(lenv(eq.normal), 1, 1e-5) && NEAR(dotv(eq.normal, ax), 0, 1e-5), "ojo: normal unitaria y perpendicular al antebrazo");
-        CHECK(dotv(eq.normal, toe) > 0.95f, "ojo: la normal apunta a la cabeza (%.3f)", dotv(eq.normal, toe));
-        CHECK(NEAR(dotv(d, ax), ec.along_m, 1e-5) && NEAR(dotv(d, eq.normal), ec.lift_m, 1e-5), "ojo: %.3f m a lo largo, %.3f m sobre el antebrazo", dotv(d, ax), dotv(d, eq.normal));
-        CHECK(NEAR(ec.along_m, 0.13, 1e-6) && NEAR(ec.lift_m, 0.065, 1e-6), "ojo: valores por defecto 0,13 / 0,065");
-        float cr2[3]; crossv(cr2, eq.right, eq.up);
-        CHECK(NEAR(dotv(cr2, eq.normal), 1, 1e-5) && NEAR(dotv(eq.right, ax), -1, 1e-5), "ojo: ejes de mano derecha, derecha = hacia la mano");
-        CHECK(dotv(eq.normal, (float[3]){0, 1, 0}) > 0, "ojo: la cara mira hacia arriba (cabeza encima)");
-        /* ojo en el eje del antebrazo (singular) o NULL: vuelve al dorso */
-        float eax[3] = {0.10f, 0.89f, 2.0f};
+        CHECK(vrradar_wrist_quad(&ea, &ec, 71.0f / 54.0f, &dq) && dq.valid, "dorso: quad válido");
+        float d[3] = {dq.center[0] - ea.wrist[0], dq.center[1] - ea.wrist[1], dq.center[2] - ea.wrist[2]};
+        float dn[3] = {-0.17f, -0.93f, 0.0f}, dl = lenv(dn); dn[0] /= dl; dn[1] /= dl;
+        CHECK(NEAR(lenv(dq.normal), 1, 1e-5) && NEAR(dotv(dq.normal, ax), 0, 1e-5), "dorso: normal unitaria y perpendicular al antebrazo");
+        CHECK(NEAR(dotv(dq.normal, dn), 1, 1e-5) && dotv(dq.normal, (float[3]){0, 1, 0}) < 0, "dorso: la normal es el dorso ortogonalizado (apunta hacia abajo aquí)");
+        CHECK(NEAR(dotv(d, ax), ec.along_m, 1e-5) && NEAR(dotv(d, dq.normal), ec.lift_m, 1e-5), "dorso: %.3f m a lo largo, %.3f m sobre el antebrazo", dotv(d, ax), dotv(d, dq.normal));
+        CHECK(NEAR(ec.along_m, 0.13, 1e-6) && NEAR(ec.lift_m, 0.065, 1e-6), "dorso: valores por defecto 0,13 / 0,065");
+        float cr2[3]; crossv(cr2, dq.right, dq.up);
+        CHECK(NEAR(dotv(cr2, dq.normal), 1, 1e-5) && NEAR(dotv(dq.right, ax), -1, 1e-5), "dorso: ejes de mano derecha, derecha = hacia la mano");
         VrRadarQuad sq;
-        CHECK(vrradar_wrist_quad_eye(&ea, &ec, 1.3f, eax, &sq) && NEAR(dotv(sq.normal, dq.normal), 1, 1e-5), "ojo sobre el eje: dorso");
-        CHECK(vrradar_wrist_quad_eye(&ea, &ec, 1.3f, NULL, &sq) && NEAR(dotv(sq.normal, dq.normal), 1, 1e-5), "ojo NULL: dorso");
-        float enan[3] = {NAN, 1.6f, 0};
-        CHECK(vrradar_wrist_quad_eye(&ea, &ec, 1.3f, enan, &sq) && NEAR(dotv(sq.normal, dq.normal), 1, 1e-5), "ojo NaN: dorso");
-        /* la normal sigue a la cabeza al moverla alrededor del antebrazo */
-        float eye2[3] = {0.8f, 0.89f, 0.0f};
-        CHECK(vrradar_wrist_quad_eye(&ea, &ec, 1.3f, eye2, &sq) && sq.normal[0] > 0.95f, "ojo a un lado: la normal gira hacia él");
-        CHECK(!vrradar_wrist_quad_eye(NULL, &ec, 1.3f, eye, &sq) && !vrradar_wrist_quad_eye(&ea, &ec, 1.3f, eye, NULL), "ojo: NULL");
+        CHECK(!vrradar_wrist_quad(NULL, &ec, 1.3f, &sq) && !vrradar_wrist_quad(&ea, &ec, 1.3f, NULL), "dorso: NULL");
     }
 
     /* mirada */
@@ -685,18 +673,17 @@ static float seg_dist3(const float p[3], const float a[3], const float b[3]) {
 /* El panel va sobre el antebrazo dibujado (IK), no sobre el eje del agarre (inclinado ~35 grados respecto al antebrazo); el mando solo es reserva */
 static void t_pick_arm(void) {
     VrRadarWristCfg cfg = vrradar_wrist_cfg_default();
-    const float eye[3] = {0.10f, 1.60f, -0.20f};
     VrRadarArm ik = {{0.10f, 1.00f, -0.30f + 0.27f}, {0.10f, 1.00f, -0.30f}, {0.0f, 1.0f, 0.0f}};   /* antebrazo horizontal, codo a +Z */
     for (int sg = -1; sg <= 1; sg += 2) {
         float th = sg * 0.6108652f, c = cosf(th), s = sinf(th);       /* Rx(+-35 grados): el eje +Z del agarre se separa del antebrazo */
         float grip[16] = {1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, ik.wrist[0], ik.wrist[1], ik.wrist[2], 1};
         VrRadarArm pa, ca; VrRadarQuad pq, cq;
-        CHECK(vrradar_pick_arm(grip, &ik, &pa) == 1 && vrradar_wrist_quad_eye(&pa, &cfg, 71.0f / 54.0f, eye, &pq), "pick: IK válida primero (sg=%d)", sg);
+        CHECK(vrradar_pick_arm(grip, &ik, &pa) == 1 && vrradar_wrist_quad(&pa, &cfg, 71.0f / 54.0f, &pq), "pick: IK válida primero (sg=%d)", sg);
         float dp = seg_dist3(pq.center, ik.wrist, ik.elbow);
         CHECK(dp <= cfg.lift_m + 0.01f, "pick: centro a %.4f m del segmento codo-muñeca (max %.3f)", dp, cfg.lift_m + 0.01f);
         CHECK(NEAR(pq.center[0], ik.wrist[0], 1e-4) && NEAR(dotv((float[3]){pq.center[0] - ik.wrist[0], pq.center[1] - ik.wrist[1], pq.center[2] - ik.wrist[2]}, (float[3]){0, 0, 1}), cfg.along_m, 1e-4), "pick: along_m 0,13 desde la muñeca IK");
         if (sg < 0) {     /* ruta del mando sola: el panel sale del antebrazo (flota) */
-            CHECK(vrradar_arm_from_controller(grip, &ca) && vrradar_wrist_quad_eye(&ca, &cfg, 71.0f / 54.0f, eye, &cq), "pick: quad del mando");
+            CHECK(vrradar_arm_from_controller(grip, &ca) && vrradar_wrist_quad(&ca, &cfg, 71.0f / 54.0f, &cq), "pick: quad del mando");
             float dc = seg_dist3(cq.center, ik.wrist, ik.elbow);
             CHECK(dc > cfg.lift_m + 0.01f, "pick: la ruta del mando flota a %.4f m (debe superar %.3f)", dc, cfg.lift_m + 0.01f);
         }
@@ -754,6 +741,21 @@ static void t_visibility(void) {
     CHECK(vrradar_visibility(n, c, e, 0.0f, NAN) == 0.0f && vrradar_visibility(n, c, e, 0.0f, -1.0f) == 0.0f, "dt no válido: sin cambio");
 }
 
+/* El panel queda fijo al dorso del antebrazo (no gira hacia el ojo) y la visibilidad mide el ángulo dorso-ojo: de espaldas a la cabeza no se ve nunca */
+static void t_dorsal_visibility(void) {
+    VrRadarWristCfg cfg = vrradar_wrist_cfg_default();
+    VrRadarArm arm = {{0.0f, 1.0f, -0.6f}, {0.0f, 1.0f, -0.3f}, {0.0f, 1.0f, 0.0f}};   /* antebrazo horizontal hacia -Z (codo atrás), dorso arriba */
+    const float eyes[4][3] = {{0.0f, 1.6f, -0.3f}, {0.0f, 0.4f, -0.45f}, {0.0f, 1.0f, 0.5f}, {0.5f, 1.0f, -0.45f}};   /* encima, DEBAJO, delante a la altura del brazo, al lado */
+    const float want[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    for (int i = 0; i < 4; i++) {
+        VrRadarQuad q;
+        CHECK(vrradar_wrist_quad_mesh(&arm, &cfg, 71.0f / 54.0f, NULL, 0, &q) && q.valid, "dorso %d: quad válido", i);
+        CHECK(NEAR(q.normal[0], 0, 1e-5) && NEAR(q.normal[1], 1, 1e-5) && NEAR(q.normal[2], 0, 1e-5), "dorso %d: la normal es el dorso (%.3f %.3f %.3f), no gira al ojo", i, q.normal[0], q.normal[1], q.normal[2]);
+        float v = vrradar_visibility(q.normal, q.center, eyes[i], 1.0f, 1.0f);
+        CHECK(v == want[i], "dorso %d: visibilidad %.2f esperada %.2f", i, v, want[i]);
+    }
+}
+
 /* ------------------------------------------------------------------------------------------------ el panel no atraviesa el antebrazo */
 static void sub3(float o[3], const float a[3], const float b[3]) { for (int i = 0; i < 3; i++) o[i] = a[i] - b[i]; }
 /* distancia de p al triángulo abc (punto más próximo, Ericson) */
@@ -805,10 +807,11 @@ static void t_mesh_clearance(void) {
         }
         float lo = 1e9f, hi = 0; int ok = 1;
         for (int d = 0; d < 360; d += 5) {
-            float th = (float)d * 3.14159265f / 180.0f, nn[3], p[3], eye[3];
-            for (int i = 0; i < 3; i++) { nn[i] = e1[i] * cosf(th) + e2[i] * sinf(th); p[i] = arm.wrist[i] + a[i] * cfg.along_m; eye[i] = p[i] + nn[i] * 0.7f; }
+            float th = (float)d * 3.14159265f / 180.0f, nn[3];
+            VrRadarArm ad = arm;      /* el dorso gira 0..360 alrededor del eje: el panel sigue al dorso */
+            for (int i = 0; i < 3; i++) { nn[i] = e1[i] * cosf(th) + e2[i] * sinf(th); ad.dorsal[i] = nn[i]; }
             VrRadarQuad q;
-            ok &= vrradar_wrist_quad_mesh(&arm, &cfg, 71.0f / 54.0f, eye, V, 4 * 64, &q) && q.valid && dotv(q.normal, nn) > 0.9999f;
+            ok &= vrradar_wrist_quad_mesh(&ad, &cfg, 71.0f / 54.0f, V, 4 * 64, &q) && q.valid && dotv(q.normal, nn) > 0.9999f;
             float dc = dist_axis(q.center, arm.wrist, a);
             if (d % 90 == 0) CHECK(NEAR(dc, (d % 180 == 0 ? rx : ry) + cfg.skin_m, 1e-5), "forma %d ángulo %d: centro a %.5f del eje, esperado radio + holgura %.5f", shape, d, dc, (d % 180 == 0 ? rx : ry) + cfg.skin_m);
             /* fuera de la superficie lisa: elipse x²/rx² + y²/ry² > 1 en el plano perpendicular */
@@ -822,12 +825,12 @@ static void t_mesh_clearance(void) {
         if (shape == 1) CHECK(hi - lo > 0.015f, "elipse: la elevación cambia con el ángulo (%.4f..%.4f)", lo, hi);
         else CHECK(hi - lo < 1e-3f, "cilindro: elevación constante (%.4f..%.4f)", lo, hi);
     }
-    /* sin malla: lift_m fijo, como vrradar_wrist_quad_eye */
-    { float eye[3] = {0.1f, 1.9f, -0.3f}; VrRadarQuad q0, q1;
-      CHECK(vrradar_wrist_quad_eye(&arm, &cfg, 1.3f, eye, &q0) && vrradar_wrist_quad_mesh(&arm, &cfg, 1.3f, eye, NULL, 0, &q1) && NEAR(dist_axis(q1.center, arm.wrist, a), dist_axis(q0.center, arm.wrist, a), 1e-6) && NEAR(dist_axis(q0.center, arm.wrist, a), cfg.lift_m, 1e-5), "sin malla: lift_m");
-      float junk[3] = {NAN, 0, 0}; CHECK(vrradar_wrist_quad_mesh(&arm, &cfg, 1.3f, eye, junk, 1, &q1) && NEAR(dist_axis(q1.center, arm.wrist, a), cfg.lift_m, 1e-5), "malla no finita: lift_m");
-      float tiny[3] = {arm.wrist[0], arm.wrist[1], arm.wrist[2]}; CHECK(vrradar_wrist_quad_mesh(&arm, &cfg, 1.3f, eye, tiny, 1, &q1) && NEAR(dist_axis(q1.center, arm.wrist, a), cfg.lift_m, 1e-5), "radio < 1 cm: lift_m");
-      CHECK(!vrradar_wrist_quad_mesh(NULL, &cfg, 1.3f, eye, NULL, 0, &q1) && !vrradar_wrist_quad_mesh(&arm, &cfg, 1.3f, eye, NULL, 0, NULL), "NULL"); }
+    /* sin malla: lift_m fijo, como vrradar_wrist_quad */
+    { VrRadarQuad q0, q1;
+      CHECK(vrradar_wrist_quad(&arm, &cfg, 1.3f, &q0) && vrradar_wrist_quad_mesh(&arm, &cfg, 1.3f, NULL, 0, &q1) && NEAR(dist_axis(q1.center, arm.wrist, a), dist_axis(q0.center, arm.wrist, a), 1e-6) && NEAR(dist_axis(q0.center, arm.wrist, a), cfg.lift_m, 1e-5), "sin malla: lift_m");
+      float junk[3] = {NAN, 0, 0}; CHECK(vrradar_wrist_quad_mesh(&arm, &cfg, 1.3f, junk, 1, &q1) && NEAR(dist_axis(q1.center, arm.wrist, a), cfg.lift_m, 1e-5), "malla no finita: lift_m");
+      float tiny[3] = {arm.wrist[0], arm.wrist[1], arm.wrist[2]}; CHECK(vrradar_wrist_quad_mesh(&arm, &cfg, 1.3f, tiny, 1, &q1) && NEAR(dist_axis(q1.center, arm.wrist, a), cfg.lift_m, 1e-5), "radio < 1 cm: lift_m");
+      CHECK(!vrradar_wrist_quad_mesh(NULL, &cfg, 1.3f, NULL, 0, &q1) && !vrradar_wrist_quad_mesh(&arm, &cfg, 1.3f, NULL, 0, NULL), "NULL"); }
     /* (b) malla real del antebrazo del guante (volcado d0001 de mv2, como test_glove): el panel nunca la atraviesa */
     static uint8_t RAM[0x200000]; static uint16_t VRAM[1024 * 512];
     glob_t gl; memset(&gl, 0, sizeof gl);
@@ -865,10 +868,10 @@ static void t_mesh_clearance(void) {
         for (uint32_t j = 0; j < o->nv[1]; j++) memcpy(&V[j * 3], o->v[1][j].pos, 3 * sizeof(float));
         float dmin = 1e9f, rmin = 1e9f, rmax = 0;
         for (int d = 0; d < 360; d += 3) {
-            float th = (float)d * 3.14159265f / 180.0f, nn[3], pp[3], eye[3];
-            for (int i = 0; i < 3; i++) { nn[i] = b1[i] * cosf(th) + b2[i] * sinf(th); pp[i] = ra.wrist[i] + aa[i] * cfg.along_m; eye[i] = pp[i] + nn[i] * 0.7f; }
+            float th = (float)d * 3.14159265f / 180.0f;
+            for (int i = 0; i < 3; i++) ra.dorsal[i] = b1[i] * cosf(th) + b2[i] * sinf(th);   /* el dorso gira 0..360 alrededor del eje */
             VrRadarQuad q;
-            CHECK(vrradar_wrist_quad_mesh(&ra, &cfg, 71.0f / 54.0f, eye, V, o->nv[1], &q) && q.valid, "lado %d ángulo %d: quad", s, d);
+            CHECK(vrradar_wrist_quad_mesh(&ra, &cfg, 71.0f / 54.0f, V, o->nv[1], &q) && q.valid, "lado %d ángulo %d: quad", s, d);
             float pts[5][3]; memcpy(pts[0], q.center, sizeof pts[0]); for (int k = 0; k < 4; k++) memcpy(pts[k + 1], q.corners[k], sizeof pts[0]);
             for (int k = 0; k < 5; k++) for (uint32_t t = 0; t + 2 < P->nidx_out; t += 3) {
                 float dd = dist_pt_tri(pts[k], o->v[1][P->idx[t]].pos, o->v[1][P->idx[t + 1]].pos, o->v[1][P->idx[t + 2]].pos);
@@ -895,6 +898,7 @@ int main(int argc, char **argv) {
     t_anchor();
     t_pick_arm();
     t_visibility();
+    t_dorsal_visibility();
     t_mesh_clearance();
     fprintf(stderr, "test_radar: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

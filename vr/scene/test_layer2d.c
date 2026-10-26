@@ -806,41 +806,60 @@ static int opaque_vs_hw(VrLayer2D *L, const GpuDisplay *d, int *n_opaque) {
     return bad;
 }
 
-/* Escala adaptativa (vl2a_scale_step): tras un pico se recupera aunque el coste no baje de 3 ms, y solo si la escala siguiente cabría (coste * (c+1)/c < 0,8 * 12 ms; medido en visor: 3,5 ms a escala 1 y 8,3 ms a escala 3, crecimiento ~lineal). */
+/* Escala adaptativa (vl2a_scale_step): baja solo si la media móvil de los últimos 8 trabajos supera 12 ms; sube tras 15 trabajos con la media bajo el umbral (coste * (c+1)/c < 0,8 * 12 ms; medido en visor:
+ * 3,5 ms a escala 1 y 8,3 ms a escala 3, crecimiento ~lineal) sin reiniciar la cuenta por un pico aislado. */
 static void scale_step_cases(void) {
-    int cur = 2, fast = 0;
-    for (int i = 0; i < 300; i++) cur = vl2a_scale_step(cur, 4, 3.5, &fast);
+    int cur = 2; Vl2aScale st; memset(&st, 0, sizeof st);
+    for (int i = 0; i < 300; i++) cur = vl2a_scale_step(cur, 4, 3.5, &st);
     CHECK(cur >= 3, "escala: ms=3,5 constante desde 2, tras 300 pasos cur=%d (>= 3)", cur);
-    cur = 1; fast = 0;
-    for (int i = 0; i < 300; i++) cur = vl2a_scale_step(cur, 4, 3.5, &fast);
+    cur = 1; memset(&st, 0, sizeof st);
+    for (int i = 0; i < 300; i++) cur = vl2a_scale_step(cur, 4, 3.5, &st);
     CHECK(cur >= 2, "escala: ms=3,5 constante desde 1, tras 300 pasos cur=%d (>= 2)", cur);
-    cur = 3; fast = 0;
-    for (int i = 0; i < 300; i++) cur = vl2a_scale_step(cur, 4, 8.3, &fast);
+    cur = 3; memset(&st, 0, sizeof st);
+    for (int i = 0; i < 300; i++) cur = vl2a_scale_step(cur, 4, 8.3, &st);
     CHECK(cur == 3, "escala: ms=8,3 en escala 3 (a 4 costaria 11 ms > 9,6) no sube: cur=%d", cur);
-    cur = 1; fast = 0;
-    for (int i = 0; i < 59; i++) cur = vl2a_scale_step(cur, 4, 2.0, &fast);
-    CHECK(cur == 1, "escala: no sube antes de 60 trabajos seguidos: cur=%d", cur);
-    cur = vl2a_scale_step(cur, 4, 2.0, &fast);
-    CHECK(cur == 2, "escala: sube al 60 trabajo: cur=%d", cur);
-    cur = 3; fast = 59;
-    cur = vl2a_scale_step(cur, 4, 13.0, &fast);
-    CHECK(cur == 2 && fast == 0, "escala: ms > 12 baja y reinicia: cur=%d fast=%d", cur, fast);
-    cur = 1; fast = 5;
-    cur = vl2a_scale_step(cur, 4, 13.0, &fast);
-    CHECK(cur == 1 && fast == 0, "escala: no baja de 1: cur=%d", cur);
-    cur = 2; fast = 50;
-    cur = vl2a_scale_step(cur, 4, 8.0, &fast);   /* 8 * 2,25 = 18 > 9,6: no cabe */
-    CHECK(cur == 2 && fast == 0, "escala: no cabe -> reinicia el contador: cur=%d fast=%d", cur, fast);
-    cur = 4; fast = 30;
-    cur = vl2a_scale_step(cur, 4, 1.0, &fast);
-    CHECK(cur == 4 && fast == 0, "escala: en el objetivo no sube: cur=%d fast=%d", cur, fast);
+    cur = 1; memset(&st, 0, sizeof st);
+    for (int i = 0; i < 14; i++) cur = vl2a_scale_step(cur, 4, 2.0, &st);
+    CHECK(cur == 1, "escala: no sube antes de 15 trabajos seguidos: cur=%d", cur);
+    cur = vl2a_scale_step(cur, 4, 2.0, &st);
+    CHECK(cur == 2, "escala: sube al 15 trabajo: cur=%d", cur);
+    /* baja solo con la media de 8 trabajos por encima de 12 ms */
+    cur = 3; memset(&st, 0, sizeof st);
+    for (int i = 0; i < 7; i++) cur = vl2a_scale_step(cur, 4, 13.0, &st);
+    CHECK(cur == 3, "escala: 7 trabajos lentos no bastan: cur=%d", cur);
+    cur = vl2a_scale_step(cur, 4, 13.0, &st);
+    CHECK(cur == 2 && st.fast == 0, "escala: media de 8 > 12 ms baja y reinicia: cur=%d fast=%d", cur, st.fast);
+    for (int i = 0; i < 7; i++) cur = vl2a_scale_step(cur, 4, 13.0, &st);
+    CHECK(cur == 2, "escala: tras bajar la media empieza de cero (no baja otra vez de golpe): cur=%d", cur);
+    cur = vl2a_scale_step(cur, 4, 13.0, &st);
+    CHECK(cur == 1, "escala: sigue lento: baja otra vez con 8 trabajos nuevos: cur=%d", cur);
+    cur = 1; memset(&st, 0, sizeof st);
+    for (int i = 0; i < 20; i++) cur = vl2a_scale_step(cur, 4, 13.0, &st);
+    CHECK(cur == 1 && st.fast == 0, "escala: no baja de 1: cur=%d fast=%d", cur, st.fast);
+    cur = 2; memset(&st, 0, sizeof st);
+    for (int i = 0; i < 50; i++) cur = vl2a_scale_step(cur, 4, 8.0, &st);   /* 8 * 1,5 = 12 > 9,6: no cabe */
+    CHECK(cur == 2 && st.fast == 0, "escala: no cabe -> no sube y el contador queda en 0: cur=%d fast=%d", cur, st.fast);
+    cur = 4; memset(&st, 0, sizeof st);
+    for (int i = 0; i < 30; i++) cur = vl2a_scale_step(cur, 4, 1.0, &st);
+    CHECK(cur == 4 && st.fast == 0, "escala: en el objetivo no sube: cur=%d fast=%d", cur, st.fast);
+    /* vista radio/códec (marco 384x256): 3 ms por trabajo con un pico de 14 ms cada 20 trabajos. Un pico aislado no baja la escala ni reinicia la cuenta de recuperación */
+    cur = 2; memset(&st, 0, sizeof st);
+    int min_cur = cur;
+    for (int i = 0; i < 400; i++) { cur = vl2a_scale_step(cur, 4, (i % 20 == 10) ? 14.0 : 3.0, &st); if (cur < min_cur) min_cur = cur; }
+    CHECK(min_cur == 2, "escala: un pico aislado (14 ms) entre trabajos de 3 ms no baja la escala (mínima %d)", min_cur);
+    CHECK(cur == 4, "escala: con picos aislados se recupera hasta el objetivo (cur=%d)", cur);
+    /* desde escala 1 (tras una caída real) con los mismos picos también se recupera */
+    cur = 1; memset(&st, 0, sizeof st);
+    for (int i = 0; i < 200; i++) cur = vl2a_scale_step(cur, 4, (i % 20 == 10) ? 14.0 : 3.0, &st);
+    CHECK(cur >= 3, "escala: recuperación desde 1 con picos aislados (cur=%d)", cur);
 }
 
 /* ---- menú sobre la mano: rect = caja de las primitivas 2D NUEVAS respecto a la lista previa sin menú (los créditos que ya se dibujaban no cuentan) ---- */
 static GpuDrawList *with_window(const GpuDrawList *base, int x, int y, int w, int h, uint8_t *opd, int *nopd) {
     GpuDrawList *d = dup_list(base);
     d->ops = (GpuOp *)realloc(d->ops, (base->nops + 3) * sizeof(GpuOp));
-    GpuOp a = d->ops[base->nops - 1];             /* rectángulo monocromo semitransparente del texto/fundido: se reutiliza como ventana */
+    GpuOp a = d->ops[base->nops - 1];             /* rectángulo monocromo del texto/fundido: se reutiliza como ventana (opaca: marco/fondo, sin SEMI) */
+    a.flags &= (uint16_t)~GPU_F_SEMI;
     a.v[0].x = (int16_t)x; a.v[0].y = (int16_t)y; a.rw = (int16_t)w; a.rh = (int16_t)h;
     GpuOp b = a; b.v[0].x = (int16_t)(x + 10); b.v[0].y = (int16_t)(y + 10); b.rw = (int16_t)(w / 2); b.rh = (int16_t)(h / 2);   /* dentro de la primera */
     d->ops[base->nops] = a; d->ops[base->nops + 1] = b;
@@ -848,6 +867,193 @@ static GpuDrawList *with_window(const GpuDrawList *base, int x, int y, int w, in
     for (uint32_t i = 0; i < d->nops; i++) opd[i] = i < 2 ? 0 : 2;
     *nopd = (int)d->nops;
     return d;
+}
+/* desplaza una lista dx columnas de VRAM (doble búfer del juego: la zona mostrada alterna entre x = 0 y x = 320) */
+static GpuDrawList *shift_list(const GpuDrawList *base, int dx) {
+    GpuDrawList *d = dup_list(base);
+    for (uint32_t i = 0; i < d->nops; i++) {
+        GpuOp *o = &d->ops[i];
+        if (o->type != GPU_OP_POLY && o->type != GPU_OP_RECT && o->type != GPU_OP_LINE) continue;
+        for (int k = 0; k < 4; k++) o->v[k].x = (int16_t)(o->v[k].x + dx);
+        o->cx1 = (int16_t)(o->cx1 + dx); o->cx2 = (int16_t)(o->cx2 + dx);
+    }
+    d->disp.x += dx;
+    return d;
+}
+/* l + `n` rectángulos añadidos al final (op_dest 2): cada uno copia el último de l con la caja y las banderas dadas */
+static GpuDrawList *with_rects(const GpuDrawList *base, int n, const int box[][4], const uint16_t *flags, uint8_t *opd, int *nopd) {
+    GpuDrawList *d = dup_list(base);
+    d->ops = (GpuOp *)realloc(d->ops, (base->nops + (uint32_t)n) * sizeof(GpuOp));
+    for (int k = 0; k < n; k++) {
+        GpuOp a = d->ops[base->nops - 1];
+        a.v[0].x = (int16_t)box[k][0]; a.v[0].y = (int16_t)box[k][1]; a.rw = (int16_t)box[k][2]; a.rh = (int16_t)box[k][3]; a.flags = flags[k];
+        d->ops[base->nops + (uint32_t)k] = a;
+    }
+    d->nops = base->nops + (uint32_t)n;
+    for (uint32_t i = 0; i < d->nops; i++) opd[i] = i < 2 ? 0 : 2;
+    *nopd = (int)d->nops;
+    return d;
+}
+static void menu_pick_cases(void) {
+    uint8_t opd1[64], opd2[64], opd3[64], opd4[64]; int n1 = 0, n2 = 0, n3 = 0, n4 = 0;
+    GpuDrawList *l1 = panel_scene(0, opd1, &n1);
+    if (!l1) { CHECK(0, "menu pick: lista"); return; }
+    const uint16_t FO = GPU_F_TEXTURED, FT = GPU_F_TEXTURED | GPU_F_SEMI, FW = 0;   /* texto opaco / créditos (texturados semitransparentes) / ventana (marco o fondo sin textura ni SEMI) */
+    VrScene s1, s2; memset(&s1, 0, sizeof s1); memset(&s2, 0, sizeof s2);
+    s1.op_dest = opd1; s1.n_op_dest = (uint32_t)n1;
+    /* a) créditos de mayor área que la ventana, en la misma lista y sin rect previo: el rect es solo la ventana (200,120)-(280,180) */
+    const int bx[4][4] = {{21, 45, 108, 57}, {200, 120, 80, 60}, {210, 130, 40, 30}, {21, 102, 60, 12}};
+    const uint16_t fl[4] = {FT, FW, FW, FT};
+    GpuDrawList *l2 = with_rects(l1, 4, bx, fl, opd2, &n2);
+    s2.op_dest = opd2; s2.n_op_dest = (uint32_t)n2;
+    VrLayer2D *L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    float uv[4] = {0, 0, 0, 0};
+    vl2d_run(L, l1, &s1, VL_PANEL); vl2d_set_menu(L, 1);
+    CHECK(vl2d_run(L, l2, &s2, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu pick: ventana + créditos -> rect");
+    VrL2Info in; vl2d_info(L, &in);
+    float ex[4] = {(float)(199 - l1->disp.x) / (float)in.fw, (float)(119 - l1->disp.y) / (float)in.h, (float)(281 - l1->disp.x) / (float)in.fw, (float)(181 - l1->disp.y) / (float)in.h};
+    for (int k = 0; k < 4; k++) CHECK(uv[k] > ex[k] - 0.002f && uv[k] < ex[k] + 0.002f, "menu pick: uv[%d]=%.4f esperado %.4f (solo la ventana, sin créditos)", k, (double)uv[k], (double)ex[k]);
+    CHECK(in.menu_new == 2, "menu pick: prims de la ventana elegida=%d", in.menu_new);
+    /* el rect queda fijo: unos créditos nuevos lejos no lo amplían */
+    const int bx2[4][4] = {{21, 45, 108, 57}, {200, 120, 80, 60}, {210, 130, 40, 30}, {21, 160, 60, 12}};
+    GpuDrawList *l3 = with_rects(l1, 4, bx2, fl, opd3, &n3);
+    VrScene s3; memset(&s3, 0, sizeof s3); s3.op_dest = opd3; s3.n_op_dest = (uint32_t)n3;
+    float uv1[4]; memcpy(uv1, uv, sizeof uv1);
+    CHECK(vl2d_run(L, l3, &s3, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu pick: con rect previo");
+    for (int k = 0; k < 4; k++) CHECK(uv[k] == uv1[k], "menu pick: el rect fijo cambió (uv[%d])", k);
+    vl2d_free(L);
+    /* b) solo hay primitivas nuevas sin marco/fondo opaco (texto y créditos): no hay rect */
+    const int bx3[2][4] = {{21, 45, 108, 57}, {21, 102, 60, 12}};
+    const uint16_t fl3[2] = {FT, FO};
+    GpuDrawList *l4 = with_rects(l1, 2, bx3, fl3, opd4, &n4);
+    VrScene s4; memset(&s4, 0, sizeof s4); s4.op_dest = opd4; s4.n_op_dest = (uint32_t)n4;
+    L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    vl2d_run(L, l1, &s1, VL_PANEL); vl2d_set_menu(L, 1);
+    /* respaldo: si ningún componente tiene marco/fondo opaco se elige el de mayor área (la mano nunca recibe la capa entera): aquí el texto de 108x57 en (21,45) */
+    CHECK(vl2d_run(L, l4, &s4, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1 && uv[0] < 0.1f && uv[2] > 128.0f / (float)in.fw && uv[2] < 132.0f / (float)in.fw && uv[3] < 0.5f,
+          "menu pick: sin marco/fondo opaco se elige el componente de mayor área (u %.4f..%.4f v1 %.4f)", (double)uv[0], (double)uv[2], (double)uv[3]);
+    vl2d_free(L);
+    /* c) hueco < 8 px une las primitivas en un solo componente; mayor lo separa (la caja de cada primitiva ya lleva 1 px de margen por lado) */
+    for (int sep = 0; sep < 2; sep++) {
+        const int bx5[3][4] = {{200, 120, 60, 40}, {265, 120, 30, 40}, {sep ? 312 : 300, 150, 10, 8}};   /* 1 y 2 a 5 px: un componente; la 3 a 5 px (une) o a 17 px (aparte) */
+        const uint16_t fl5[3] = {FW, FW, FT};
+        uint8_t opd5[64]; int n5 = 0;
+        GpuDrawList *l5 = with_rects(l1, 3, bx5, fl5, opd5, &n5);
+        VrScene s5; memset(&s5, 0, sizeof s5); s5.op_dest = opd5; s5.n_op_dest = (uint32_t)n5;
+        L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+        vl2d_run(L, l1, &s1, VL_PANEL); vl2d_set_menu(L, 1);
+        float u1 = sep ? 296.0f : 311.0f;
+        CHECK(vl2d_run(L, l5, &s5, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1 && uv[2] > (u1 - 2.0f) / (float)in.fw && uv[2] < (u1 + 2.0f) / (float)in.fw, "menu pick: hueco %s: u1=%.4f (esperado %.4f)", sep ? "grande, aparte" : "pequeño, une", (double)uv[2], (double)(u1 / (float)in.fw));
+        vl2d_free(L); free_list(l5);
+    }
+    free_list(l2); free_list(l3); free_list(l4); free_list(l1);
+}
+/* zonas que ya cambiaban ANTES de abrir el menú (radar con sus puntos, créditos que se desplazan) no son la ventana: varias listas sin menú con un "radar" que cambia arriba a la derecha,
+ * luego el menú con la ventana nueva abajo (menor que el radar): el rect es la ventana aunque el radar siga cambiando */
+static void menu_changing_cases(void) {
+    uint8_t opd1[64]; int n1 = 0;
+    GpuDrawList *l1 = panel_scene(0, opd1, &n1);
+    if (!l1) { CHECK(0, "menu changing: lista"); return; }
+    VrScene s1; memset(&s1, 0, sizeof s1); s1.op_dest = opd1; s1.n_op_dest = (uint32_t)n1;
+    const uint16_t f2[2] = {0, 0};
+    VrLayer2D *L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    float uv[4] = {0, 0, 0, 0};
+    vl2d_run(L, l1, &s1, VL_PANEL);
+    for (int k = 0; k < 6; k++) {   /* sin menú: el radar cambia de lista en lista */
+        uint8_t opd[64]; int n = 0;
+        const int rb[1][4] = {{250 + k, 10, 50, 40}};
+        GpuDrawList *r = with_rects(l1, 1, rb, f2, opd, &n);
+        VrScene sr; memset(&sr, 0, sizeof sr); sr.op_dest = opd; sr.n_op_dest = (uint32_t)n;
+        CHECK(vl2d_run(L, r, &sr, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 0, "menu changing: lista %d sin menú, sin rect", k);
+        free_list(r);
+    }
+    vl2d_set_menu(L, 1);
+    uint8_t opdm[64]; int nm = 0;
+    const int mb[2][4] = {{256, 10, 50, 40}, {60, 150, 40, 30}};   /* el radar sigue cambiando (y es mayor) + la ventana nueva */
+    GpuDrawList *m = with_rects(l1, 2, mb, f2, opdm, &nm);
+    VrScene sm; memset(&sm, 0, sizeof sm); sm.op_dest = opdm; sm.n_op_dest = (uint32_t)nm;
+    CHECK(vl2d_run(L, m, &sm, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu changing: con menú hay rect");
+    VrL2Info in; vl2d_info(L, &in);
+    float ex[4] = {(float)(59 - l1->disp.x) / (float)in.fw, (float)(149 - l1->disp.y) / (float)in.h, (float)(101 - l1->disp.x) / (float)in.fw, (float)(181 - l1->disp.y) / (float)in.h};
+    for (int k = 0; k < 4; k++) CHECK(uv[k] > ex[k] - 0.002f && uv[k] < ex[k] + 0.002f, "menu changing: uv[%d]=%.4f esperado %.4f (la ventana, no el radar)", k, (double)uv[k], (double)ex[k]);
+    vl2d_free(L);
+    /* si TODO lo nuevo ya cambiaba antes, respaldo: el de mayor área (nunca la capa entera) */
+    L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    vl2d_run(L, l1, &s1, VL_PANEL);
+    for (int k = 0; k < 6; k++) {
+        uint8_t opd[64]; int n = 0;
+        const int rb[1][4] = {{250 + k, 10, 50, 40}};
+        GpuDrawList *r = with_rects(l1, 1, rb, f2, opd, &n);
+        VrScene sr; memset(&sr, 0, sizeof sr); sr.op_dest = opd; sr.n_op_dest = (uint32_t)n;
+        vl2d_run(L, r, &sr, VL_PANEL);
+        free_list(r);
+    }
+    vl2d_set_menu(L, 1);
+    const int mb2[1][4] = {{256, 10, 50, 40}};
+    uint8_t opd2[64]; int n2 = 0;
+    GpuDrawList *m2 = with_rects(l1, 1, mb2, f2, opd2, &n2);
+    VrScene s2; memset(&s2, 0, sizeof s2); s2.op_dest = opd2; s2.n_op_dest = (uint32_t)n2;
+    CHECK(vl2d_run(L, m2, &s2, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1 && uv[0] > 0.7f, "menu changing: si todo ya cambiaba, respaldo al mayor (u0 %.3f)", (double)uv[0]);
+    vl2d_free(L); free_list(m); free_list(m2); free_list(l1);
+}
+/* señuelo: una barra animada (vida/munición) en las primeras listas del selector no deja el rect clavado: durante las 8 primeras listas se reelige el componente de mayor área
+ * (prefiriendo los opacos) y después se congela */
+static void menu_decoy_cases(void) {
+    uint8_t opd1[64], opd2[64], opd3[64], opd4[64]; int n1 = 0, n2 = 0, n3 = 0, n4 = 0;
+    GpuDrawList *l1 = panel_scene(0, opd1, &n1);
+    if (!l1) { CHECK(0, "menu decoy: lista"); return; }
+    VrScene s1; memset(&s1, 0, sizeof s1); s1.op_dest = opd1; s1.n_op_dest = (uint32_t)n1;
+    const uint16_t FW = 0;
+    const int b1[1][4] = {{270, 10, 20, 6}}, b3[2][4] = {{200, 120, 80, 60}, {276, 10, 20, 6}}, b4[1][4] = {{200, 120, 80, 60}}, b9[2][4] = {{200, 120, 80, 60}, {20, 200, 150, 40}};
+    const uint16_t f2[2] = {FW, FW};
+    GpuDrawList *g1 = with_rects(l1, 1, b1, f2, opd2, &n2);                 /* lista 1: solo la barra */
+    VrScene sg1; memset(&sg1, 0, sizeof sg1); sg1.op_dest = opd2; sg1.n_op_dest = (uint32_t)n2;
+    GpuDrawList *g3 = with_rects(l1, 2, b3, f2, opd3, &n3);                 /* lista 3: la ventana y la barra movida */
+    VrScene sg3; memset(&sg3, 0, sizeof sg3); sg3.op_dest = opd3; sg3.n_op_dest = (uint32_t)n3;
+    GpuDrawList *g4 = with_rects(l1, 1, b4, f2, opd4, &n4);                 /* listas siguientes: solo la ventana */
+    VrScene sg4; memset(&sg4, 0, sizeof sg4); sg4.op_dest = opd4; sg4.n_op_dest = (uint32_t)n4;
+    uint8_t opd9[64]; int n9 = 0;
+    GpuDrawList *g9 = with_rects(l1, 2, b9, f2, opd9, &n9);                 /* una zona opaca mayor y lejana, ya con el rect congelado */
+    VrScene sg9; memset(&sg9, 0, sizeof sg9); sg9.op_dest = opd9; sg9.n_op_dest = (uint32_t)n9;
+    VrLayer2D *L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    float uv[4], bar[4]; VrL2Info in;
+    vl2d_run(L, l1, &s1, VL_PANEL); vl2d_set_menu(L, 1);
+    CHECK(vl2d_run(L, g1, &sg1, VL_PANEL) == 1 && vl2d_menu_rect(L, bar) == 1 && bar[0] > 0.8f, "menu decoy: lista 1: rect = la barra (u0 %.3f)", (double)bar[0]);
+    CHECK(vl2d_run(L, g1, &sg1, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu decoy: lista 2");
+    CHECK(vl2d_run(L, g3, &sg3, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu decoy: lista 3 con la ventana");
+    vl2d_info(L, &in);
+    float ex[4] = {(float)(199 - l1->disp.x) / (float)in.fw, (float)(119 - l1->disp.y) / (float)in.h, (float)(281 - l1->disp.x) / (float)in.fw, (float)(181 - l1->disp.y) / (float)in.h};
+    for (int k = 0; k < 4; k++) CHECK(uv[k] > ex[k] - 0.002f && uv[k] < ex[k] + 0.002f, "menu decoy: uv[%d]=%.4f esperado %.4f (la ventana, no la barra)", k, (double)uv[k], (double)ex[k]);
+    float win[4]; memcpy(win, uv, sizeof win);
+    for (int i = 4; i <= 8; i++) CHECK(vl2d_run(L, g4, &sg4, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1 && uv[0] == win[0] && uv[2] == win[2], "menu decoy: lista %d", i);
+    CHECK(vl2d_run(L, g9, &sg9, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu decoy: lista 9");
+    for (int k = 0; k < 4; k++) CHECK(uv[k] == win[k], "menu decoy: tras 8 listas el rect queda congelado (uv[%d]=%.4f antes %.4f)", k, (double)uv[k], (double)win[k]);
+    vl2d_free(L); free_list(g1); free_list(g3); free_list(g4); free_list(g9); free_list(l1);
+}
+/* doble búfer del juego: la zona mostrada alterna entre x = 0 y x = 320 cada fotograma. La clave de las primitivas es relativa a la zona mostrada y el rect conservado sobrevive al cambio
+ * (si no, la mitad de los fotogramas todo el HUD cuenta como nuevo y el rect alterna entre la ventana y una caja mayor: el menú sale doble) */
+static void menu_flip_cases(void) {
+    uint8_t opd1[64], opd2[64]; int n1 = 0, n2 = 0;
+    GpuDrawList *l1 = panel_scene(0, opd1, &n1);
+    if (!l1) { CHECK(0, "menu flip: lista"); return; }
+    GpuDrawList *l2 = with_window(l1, 200, 120, 80, 60, opd2, &n2);
+    GpuDrawList *f1 = shift_list(l1, 320), *f2 = shift_list(l2, 320);
+    VrScene s1, s2; memset(&s1, 0, sizeof s1); memset(&s2, 0, sizeof s2);
+    s1.op_dest = opd1; s1.n_op_dest = (uint32_t)n1; s2.op_dest = opd2; s2.n_op_dest = (uint32_t)n2;
+    VrLayer2D *L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    float uv[4], uvA[4]; VrL2Info in;
+    vl2d_run(L, l1, &s1, VL_PANEL); vl2d_set_menu(L, 1);
+    CHECK(vl2d_run(L, l2, &s2, VL_PANEL) == 1 && vl2d_menu_rect(L, uvA) == 1, "menu flip: ventana en el búfer 0 -> rect");
+    CHECK(vl2d_run(L, f2, &s2, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu flip: ventana en el búfer 1 -> rect");
+    vl2d_info(L, &in);
+    for (int k = 0; k < 4; k++) CHECK(uv[k] == uvA[k], "menu flip: el rect cambió con el búfer (uv[%d]=%.4f antes %.4f)", k, (double)uv[k], (double)uvA[k]);
+    CHECK(in.menu_new == 2, "menu flip: solo las 2 prims de la ventana son nuevas en el otro búfer (%d)", in.menu_new);
+    CHECK(vl2d_run(L, f1, &s1, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1, "menu flip: fotograma del otro búfer sin prims nuevas conserva el rect");
+    for (int k = 0; k < 4; k++) CHECK(uv[k] == uvA[k], "menu flip: rect conservado distinto (uv[%d])", k);
+    for (int i = 0; i < 6; i++) {   /* alternando búferes: el rect no cambia nunca */
+        CHECK(vl2d_run(L, i & 1 ? l2 : f2, &s2, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 1 && uv[0] == uvA[0] && uv[1] == uvA[1] && uv[2] == uvA[2] && uv[3] == uvA[3], "menu flip: alternando búferes, rect estable (paso %d)", i);
+    }
+    vl2d_free(L); free_list(l1); free_list(l2); free_list(f1); free_list(f2);
 }
 static void menu_rect_cases(void) {
     uint8_t opd1[64], opd2[64]; int n1 = 0, n2 = 0;
@@ -882,10 +1088,10 @@ static void menu_rect_cases(void) {
     CHECK(vl2d_run(L, l1, &s1, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 0, "menu: al salir del selector se olvida el rect");
     vl2d_set_menu(L, 1);
     CHECK(vl2d_run(L, l1, &s1, VL_PANEL) == 1 && vl2d_menu_rect(L, uv) == 0, "menu: reabrir sin prims nuevas no resucita el rect");
-    {   /* sin rect previo, la ventana lejana SÍ cuenta (prueba de que está dentro de la zona mostrada y de que lo anterior es la histéresis) */
+    {   /* sin rect previo: componentes conexos, gana el de mayor área con marco/fondo opaco (la ventana lejana pequeña no se une; lo anterior es la histéresis) */
         VrLayer2D *L2 = vl2d_new(); vl2d_set_options(L2, 1, VL_SMOOTH_ORIGINAL);
         vl2d_run(L2, l1, &s1, VL_PANEL); vl2d_set_menu(L2, 1);
-        CHECK(vl2d_run(L2, l4, &s4, VL_PANEL) == 1 && vl2d_menu_rect(L2, uv) == 1 && uv[0] < uv1[0] - 0.01f, "menu: sin rect previo la ventana lejana cuenta (u0=%.4f)", (double)uv[0]);
+        CHECK(vl2d_run(L2, l4, &s4, VL_PANEL) == 1 && vl2d_menu_rect(L2, uv) == 1 && uv[0] == uv1[0] && uv[1] == uv1[1], "menu: sin rect previo se elige la ventana mayor, la lejana pequeña no se une (u0=%.4f)", (double)uv[0]);
         vl2d_free(L2);
     }
     vl2d_set_menu(L, 0); vl2d_run(L, l1, &s1, VL_PANEL); vl2d_set_menu(L, 1);   /* baseline otra vez para lo que sigue */
@@ -1151,6 +1357,10 @@ int main(void) {
     panel_verified();
     scale_step_cases();
     menu_rect_cases();
+    menu_pick_cases();
+    menu_flip_cases();
+    menu_decoy_cases();
+    menu_changing_cases();
 
     /* ---- fondo negro, escala 1: IGUAL bit a bit a la GPU original ---- */
     build_list(0x0000);

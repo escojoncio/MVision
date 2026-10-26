@@ -20,6 +20,7 @@
  *   - BEHIND (vz<=0) en algún vértice: el polígono se recorta (Sutherland-Hodgman, por triángulo del par (0,1,2),(1,2,3)) contra el plano
  *     z = opts.near_units en espacio de vista, interpolando posición de vista, UV y color; cada triángulo da 0, 1 o 2 triángulos (un quad hasta 4).
  *     Los que no traen BEHIND y tienen vz < near_units se descartan (drop_near), como antes.
+ *     Con opts.eye_near_m > 0 (modo gpu) near_units se ignora: vr_scene_build lo fija a un épsilon de 1e-3 (solo z <= 0 no se proyecta); el plano cercano real es el de la cabeza y lo recorta el renderer.
  *   - AMBIG junto a SAT/BEHIND: se descarta (drop_ambig) salvo cuadrilátero coherente o con un único AMBIG reconstruible por paralelogramo (recon_ambig). AMBIG solo: se acepta.
  *   - DERIVED: se acepta (opts.drop_derived=1 los descarta).
  * Descartes de la GPU: la GPU de PS1 no dibuja un triángulo cuya extensión en pantalla (SXY del paquete, con el offset de dibujo) supera 1023 en X o 511 en Y, y el juego confía en ello (p. ej. una cuña de pared
@@ -306,7 +307,7 @@ typedef struct {
 
 typedef struct {
     float scale;              /* m por unidad del juego (def. 0.001) */
-    float near_units;         /* descarta si algún vz < near_units (def. 24) */
+    float near_units;         /* descarta si algún vz < near_units (def. 24); con eye_near_m > 0 se ignora (épsilon 1e-3) */
     float max_edge_m;         /* descarta si alguna arista 3D supera esto en m (def. 120) */
     float min_area_m2;        /* descarta triángulos 3D de área menor (def. 1e-9) */
     int partial_to_2d;        /* 0 descartar polígonos parcialmente 3D (def.), 1 mandarlos a 2D */
@@ -363,8 +364,8 @@ typedef struct {
     /* --- modo gpu (el 3D de la lista de la GPU con vértices de vista de la GTE; al final: 0 = comportamiento anterior) ---
      * eye_near_m > 0: (1) se descarta todo triángulo 3D pequeño (arista máx < 0,5 m) con TODOS sus vértices a menos de eye_near_m metros del ojo del motor (distancia euclídea en el espacio de vista, en metros del espacio de
      * salida: opts.scale, y opts.user_k si user_map_on); VrStats.n_near_eye. Es lo que pega al ojo (efectos, partes del propio cuerpo) y nunca debe verse proyectado sobre la cara.
-     * (2) el recorte contra el plano z = near_units se hace SIEMPRE (como engine_near_clip = 1 con clip forzado): un triángulo parcialmente delante se recorta (n_clipped), uno entero
-     * detrás se descarta (drop_behind), y un triángulo que lleva GPU_VF_BEHIND en algún vértice pero no tiene ninguno realmente detrás del plano (dato incoherente) se descarta también (drop_behind). */
+     * (2) el recorte se hace SIEMPRE (como engine_near_clip = 1 con clip forzado) pero contra z = 1e-3 (épsilon), NO contra opts.near_units (con eye_near_m > 0 vr_scene_build lo sustituye; el plano cercano de la
+     * cámara del juego no es el de la cabeza): un triángulo parcialmente delante se recorta (n_clipped), uno entero detrás del ojo se descarta (drop_behind), y un triángulo que lleva GPU_VF_BEHIND en algún vértice pero no tiene ninguno realmente detrás del plano (dato incoherente) se descarta también (drop_behind). */
     float eye_near_m;
     /* line3d_px > 0: una línea (GPU_OP_LINE) con los DOS extremos de vista fiables (vvalid, sin banderas salvo SAT, y que reproducen su SXY con el modelo de la GTE a coh_px) y proj_h > 0 sale
      * como cuadrilátero 3D (2 triángulos, kind 0/1 según SEMI, sin textura) en vez de al plano 2D: grosor line3d_px píxeles originales a la profundidad de cada extremo, alargado medio

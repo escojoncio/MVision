@@ -470,8 +470,8 @@ static int line_3d(VrScene *out, const VrSceneOpts *o, const GpuOp *op, uint32_t
 }
 
 /* La GPU de PS1 no dibuja un triángulo cuya extensión en pantalla (SXY del paquete con el offset de dibujo: lo que rasteriza gpu.c) supera 1023 en X o 511 en Y, ni una línea con |dx| > 1023 o |dy| > 511.
- * Bit q de la máscara = triángulo q ((0,1,2), (1,2,3)) descartado; una línea usa el bit 0; un RECT no puede pasarse (w <= 1023, h <= 511). */
-static unsigned hw_cull_mask(const GpuOp *op) {
+ * Aquí solo se aplica si el bbox toca la ventana mostrada d (ver abajo). Bit q de la máscara = triángulo q ((0,1,2), (1,2,3)) descartado; una línea usa el bit 0; un RECT no puede pasarse (w <= 1023, h <= 511). */
+static unsigned hw_cull_mask(const GpuOp *op, const GpuDisplay *d) {
     static const int idx[2][3] = {{0, 1, 2}, {1, 2, 3}};
     int ntri = op->type == GPU_OP_POLY ? (op->nv == 4 ? 2 : 1) : op->type == GPU_OP_LINE ? 1 : 0;
     unsigned m = 0;
@@ -484,7 +484,10 @@ static unsigned hw_cull_mask(const GpuOp *op) {
             if (g->y < y0) y0 = g->y;
             if (g->y > y1) y1 = g->y;
         }
-        if (x1 - x0 > 1023 || y1 - y0 > 511) m |= 1u << q;
+        if (!(x1 - x0 > 1023 || y1 - y0 > 511)) continue;
+        /* solo si su bbox toca la ventana mostrada: fuera de ella la GPU tampoco lo vería, pero en VR se ve más allá del encuadre. Sin ventana conocida (w o h <= 0): siempre */
+        if (d->w > 0 && d->h > 0 && (x1 < d->x || x0 >= d->x + d->w || y1 < d->y || y0 >= d->y + d->h)) continue;
+        m |= 1u << q;
     }
     return m;
 }
@@ -890,6 +893,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     if (!dl || !out) return -1;
     VrSceneOpts o = op_in ? *op_in : vr_scene_opts_default();
     if (!(o.scale > 0)) o.scale = 0.001f;
+    if (o.eye_near_m > 0) o.near_units = 1e-3f;   /* modo gpu: el plano cercano es el de la cabeza (lo recorta el renderer), no el de la cámara del juego; aquí solo un épsilon (z <= 0 no se proyecta) */
     memset(out, 0, sizeof *out);
     out->src = dl;
     out->scale = o.scale;
@@ -1001,7 +1005,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     for (uint32_t i = 0; i < n; i++) {
         const GpuOp *op = &dl->ops[i];
         if (op->type != GPU_OP_POLY && op->type != GPU_OP_RECT && op->type != GPU_OP_LINE) continue;
-        unsigned hwm = hw_cull_mask(op);   /* triángulos que la GPU de PS1 no dibuja (extensión > 1023x511): no se emiten, sean 3D o 2D */
+        unsigned hwm = hw_cull_mask(op, &dl->disp);   /* triángulos que la GPU de PS1 no dibuja (extensión > 1023x511): no se emiten, sean 3D o 2D */
         if (hwm) {
             int hwt = op->type == GPU_OP_POLY ? (op->nv == 4 ? 2 : 1) : 1;
             for (int q = 0; q < hwt; q++) out->stats.n_hw_cull += (hwm >> q) & 1u;
@@ -1056,7 +1060,12 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             /* esquinas diagonales (resplandores/destellos: cartel de cara a la cámara a z constante): las otras dos esquinas salen de las dos dadas.
              * Orden del cuadrilátero de la GPU: v0 arriba-izq, v1 arriba-der, v2 abajo-izq, v3 abajo-der. */
             int m = (op->v[0].vvalid ? 1 : 0) | (op->v[1].vvalid ? 2 : 0) | (op->v[2].vvalid ? 4 : 0) | (op->v[3].vvalid ? 8 : 0);
-            if (m == 9 || m == 6) {
+            int mc = 0;   /* esquinas limpias (vvalid y sin banderas): en carteles de efectos (SEMI), si son exactamente 2 en diagonal, las otras dos se derivan de ellas aunque traigan posición dudosa (AMBIG/basura); los quads opacos no */
+            for (int k = 0; k < 4; k++) if (op->v[k].vvalid && op->v[k].vflags == 0) mc |= 1 << k;
+            if ((op->flags & GPU_F_SEMI) && (mc == 9 || mc == 6)) m = mc;
+            int k1o = m == 9 ? 1 : 0, k2o = m == 9 ? 2 : 3;   /* las otras dos: si ya son exactamente DERIVED (ya rellenadas), no se vuelve a rellenar ni a contar como RECON */
+            int ya_der = (m == 9 || m == 6) && op->v[k1o].vvalid && op->v[k2o].vvalid && op->v[k1o].vflags == GPU_VF_DERIVED && op->v[k2o].vflags == GPU_VF_DERIVED;
+            if ((m == 9 || m == 6) && !ya_der) {
                 int p0 = m == 9 ? 0 : 1, p1 = m == 9 ? 3 : 2;
                 const GpuVtx *a = &op->v[p0], *b = &op->v[p1];
                 float zz = a->vz;
@@ -1065,7 +1074,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                     rc = *op;
                     int k1 = m == 9 ? 1 : 0, k2 = m == 9 ? 2 : 3;   /* vértices a rellenar */
                     GpuVtx *g1 = &rc.v[k1], *g2 = &rc.v[k2];
-                    g1->vvalid = g2->vvalid = 1; g1->vflags = g2->vflags = 0;
+                    g1->vvalid = g2->vvalid = 1; g1->vflags = g2->vflags = GPU_VF_DERIVED;
                     g1->vz = g2->vz = zz;
                     if (m == 9) { g1->vx = b->vx; g1->vy = a->vy; g2->vx = a->vx; g2->vy = b->vy; }   /* v1 = (x3,y0), v2 = (x0,y3) */
                     else        { g1->vx = a->vx; g1->vy = b->vy; g2->vx = b->vx; g2->vy = a->vy; }   /* v0 = (x2,y1), v3 = (x1,y2) */

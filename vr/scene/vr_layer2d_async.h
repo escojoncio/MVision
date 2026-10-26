@@ -39,8 +39,11 @@ int vl2a_layer_accept(int mode, int layer_view, int cur_view, int overlay);
 void vl2a_stats(VrL2Async *A, int *scale, double *work_ms, double *submit_ms_max, uint32_t *lag);
 /* Línea de log «[capa2d] ...» con los contadores desde la llamada anterior (los pone a cero). Devuelve la longitud escrita. */
 int vl2a_report(VrL2Async *A, char *buf, int n);
-/* Paso de la escala adaptativa (función pura): devuelve la escala siguiente para un trabajo de `ms`; *fast = trabajos seguidos que permitirían subir. */
-int vl2a_scale_step(int cur, int target, double ms, int *fast);
+/* Estado de la escala adaptativa: últimos 8 tiempos de trabajo (media móvil) y trabajos seguidos con la media bajo el umbral de subida. A cero = estado inicial. */
+typedef struct { double ms[8]; int n, i, fast; } Vl2aScale;
+/* Paso de la escala adaptativa: devuelve la escala siguiente para un trabajo de `ms`. Baja (cur - 1) solo si la media de los últimos 8 trabajos supera 12 ms; sube (cur + 1, hasta target) tras 15 trabajos
+ * seguidos en que la media permitiría la escala siguiente; un pico aislado apenas mueve la media y no reinicia la cuenta. Al cambiar de escala se vacía la media. */
+int vl2a_scale_step(int cur, int target, double ms, Vl2aScale *st);
 /* Pruebas: espera a que la cola quede vacía. */
 void vl2a_flush(VrL2Async *A);
 
