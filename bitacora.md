@@ -4,6 +4,12 @@ Runtime nativo para Apple Vision Pro: el juego (recompilación estática del EXE
 Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP_REPO`, `DECOMP_COMMIT`, `SDK_REPO`); zonas por número. Histórico completo de secciones 1-103: `git log -p bitacora.md` (antes de la compactación del 2026-10-25).
 
 ## Last done
+- 2026-10-26 `0078864` (IPA run 40257786653, artifact MVision-ipa 12623168195; CI verde):
+  - `vr_scene.c`: `hw_cull_mask(op,&dl->disp)` solo descarta si el bbox toca la ventana mostrada (disp w/h≤0 → descarta siempre); `eye_near_m>0` → `near_units=1e-3` (plano cercano real en el renderer); quads SEMI con 2 esquinas limpias en diagonal → otras 2 DERIVED (salta si ya lo son). Volcados en partida: n_hw_cull ~55→2-10, partial→0, dif ipd0 idéntica (6.92/8.03/4.28/7.47).
+  - Radar: `vrradar_wrist_quad_mesh` sin `eye` (normal = dorsal ortogonalizada, fija); `vrradar_wrist_quad_eye` eliminada; visibilidad = ángulo dorsal-ojo (antes circular, siempre 1).
+  - Menú `vr_layer2d.c`: `op_key` relativo a ox/oy (doble búfer disp.x 0/320 rompía la histéresis → menú doble); `menu_pick` por componentes conexos (hueco <8 px), opacos primero, mayor área, reelección 8 listas y congelado; máscara `mchg` (celdas 8 px que cambiaban en las 16 listas previas sin menú) descarta radar/créditos; respaldo = mayor componente; nunca capa entera.
+  - `XRPresent.swift`: selector sin rect → la mano no dibuja nada; hudRegions 8 entradas: región 0 recortada a v<0.17, región 1 nueva (créditos, v 0.17-0.35) framed.
+  - `vr_layer2d_async.c`: `vl2a_scale_step(cur,target,ms,Vl2aScale*)` media móvil de 8, baja si media>12 ms, sube tras 15 (antes caía a 1 en la radio y no subía).
 - 2026-10-26 `3c4b18e` (IPA run 40252313684, artifact MVision-ipa 12621257805; CI verde):
   - `vr_scene.c`: descarte hardware PS1 por triángulo (extensión >1023 X o >511 Y, `n_hw_cull`, fate HWCULL); brillos (quad semi con 2 esquinas DERIVED) como billboard al ojo (`VR_F_BILLBOARD`, esquinas por ojo en `vr_vs_scene`/`_amp`, estados fuera del hash); RECT con XY del GTE como cartel 3D (`rect3d`; `runtime/gpu.c` cap_rect + `gte_hp_resolve_addr`, solo intérprete).
   - L2/R2: `vrg_step_pad` mantiene el botón mientras el gatillo físico esté pulsado (histéresis, tolera 3 VB sin seguimiento); antes oscilaba (79 aperturas en 5 gestos).
@@ -18,10 +24,10 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
   - Radar: `mv_vrgame_forearm_live` (mismo antebrazo que el guante, 90 Hz), `lift_m` 0,065 (radio antebrazo 47-55 mm).
   - Menú: `vr_layer2d.c` `vl2d_set_menu`/`vl2d_menu_rect` (bbox de prims nuevas frente a baseline, histéresis, solo crece con prims a <8 px), `hudMenuUV` en RenderRG/XRPresent: la mano muestra solo la ventana del selector; `[menu2d]`.
   - Golpes: `vr_gesture.c` rearme 0,4 s tras golpe; `vr_melee.c` reintento si el enemigo en reacción está ≤700 mm y es el más cercano; `[gest]` ang_enemigo y latencia.
-- 2026-10-25 `069da3f`: 2D de cine dentro del estéreo, mezcla en gamma, efectos a pantalla completa, coplanares, menús L2/R2 en marco físico con una apertura por pulsación. Visor: cinemáticas y sus letras OK; créditos en la mano, cuerpo hueco, radar atravesando, golpes fallidos (→ `ab5544e`).
 
 ## Current state
-**Pendiente de probar en visor (`3c4b18e`):** todo lo de `3c4b18e`. Visor con `ab5544e`: guante original y cuerpo completo OK; radar atravesaba y siempre visible; cuerpo por delante al golpear; L2 oscilaba (→ `3c4b18e`).
+**Pendiente de probar en visor (`0078864`):** todo lo de `0078864`. Visor con `3c4b18e`: 3D peor con agujeros (hw_cull fuera de ventana), radar siempre visible, efectos mal, créditos en panel L2/R2, menú L2 doble, códec a baja resolución.
+**Unverified (`0078864`):** dorsal del radar = +Y del marco de AGARRE (~45° respecto al dorso visual, sin `hand_rot_offset`); sin volcado con selector L2/R2 abierto ni con vida/objeto/arma (rects HUD no medidos); efectos ripple/bubble/particle como RECT (n_rect3d=0 en todo el log) siguen en el panel 2D; `test-layer2d` asíncrono inestable bajo carga.
 **Flujo de verificación:** volcados del visor (manual o `[autodump]`) → `dumpview --batch` → arreglar por tipo de primitiva; no builds para probar.
 **Medido con volcados de 069da3f (geomstat en scratchpad, no en repo):** el mundo se reconstruye fiel (99,8 % hp, 0 huecos, z-fight ≤0,09 %); la "geometría rota" era el cuerpo del jugador de una cara a 25 Hz.
 **Unverified:** convención/signo de `gaze_yaw_deg` frente a la guiñada del torso con datos reales; anillo dinámico de RenderWeapon asume ≤3 frames en vuelo y 2 encode/frame; textos de créditos que cambian durante el selector; forma de la mano derecha original quizá pose de arma intencionada; lado con IK movida y guante caducado (>250 ms) puede quedar oculto.
