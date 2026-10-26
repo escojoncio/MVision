@@ -4,6 +4,14 @@ Runtime nativo para Apple Vision Pro: el juego (recompilación estática del EXE
 Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP_REPO`, `DECOMP_COMMIT`, `SDK_REPO`); zonas por número. Histórico completo de secciones 1-103: `git log -p bitacora.md` (antes de la compactación del 2026-10-25).
 
 ## Last done
+- 2026-10-26 `3c4b18e` (IPA run 40252313684, artifact MVision-ipa 12621257805; CI verde):
+  - `vr_scene.c`: descarte hardware PS1 por triángulo (extensión >1023 X o >511 Y, `n_hw_cull`, fate HWCULL); brillos (quad semi con 2 esquinas DERIVED) como billboard al ojo (`VR_F_BILLBOARD`, esquinas por ojo en `vr_vs_scene`/`_amp`, estados fuera del hash); RECT con XY del GTE como cartel 3D (`rect3d`; `runtime/gpu.c` cap_rect + `gte_hp_resolve_addr`, solo intérprete).
+  - L2/R2: `vrg_step_pad` mantiene el botón mientras el gatillo físico esté pulsado (histéresis, tolera 3 VB sin seguimiento); antes oscilaba (79 aperturas en 5 gestos).
+  - Vista mundo: 2D no-HUD (créditos, textos) en plano fijo a cabeza con el ancho del cine (`XRPresent.swift` `hudIsFramed`); HUD sigue en paneles.
+  - Radar: `vrradar_visibility` (aparece <45°, desaparece >55°, fundido 0,15 s); `vrradar_wrist_quad_mesh` (elevación = radio real del antebrazo del guante + 8 mm, `mv_vrgame_forearm_mesh`); sesgo de profundidad 3e5 (depth32Float, Z invertida).
+  - Cuerpo: `hide_near` oculta piezas (no piernas 10-15, no brazos IK) con centro delante del ojo <0,30 m o vértice <0,12 m.
+  - Autovolcado por anomalía (`vrdump.h` `autodump_decide`: máx 8/sesión, 2/motivo, 5 s; carpetas auto01..08; `[autodump]`). Logs `[manos]` own_hands/glv_pub/piezas_ocultas y `[cuerpo]`.
+  - Banco: `vr/scene/tools/dumpview.c` (`make -C vr/scene dumpview ARGS=...`; replica el render gpu de la app; `--batch <dir>` tabla por volcado, `--sheets`). Medido: d0002 30,2 % → 11,3 % de diferencia con frame.png tras el descarte hardware.
 - 2026-10-25 `ab5544e` (IPA run 40243003012, artifact MVision-ipa 12618215766; CI verde):
   - Cuerpo: `vr_body.c` bit 0x400 (doble cara) en los 16 modelos del jugador (pset 0x8016D518, modelos 0x8013E818+0x58*i), restaurado byte a byte; `torso_follow` (torso a la mirada `gaze_yaw_deg`, tau 0,25 s, zona muerta 15°, cuello fijo; quita el giro de la pose de reposo con pie adelantado); `own_hands` oculta solo brazo/antebrazo/mano (2,3,4 / 7,8,9) de los lados movidos por la IK.
   - Guante original del juego a 90 Hz: `vr/hands/vr_glove.{c,h}` (malla+atlas desde RAM/VRAM, mano derecha = espejo de la izquierda (la derecha del juego trae el pulgar mal), rgba 255), `vr_fist.c` (head_deg[0] 100, pulgar ≤35°, puño 69 % de largo); `vrgame.c` `glove_update` (3 huecos, reconstrucción ≤ cada 15 VB, falla → brazos del juego), `mv_host_hands` + `vrbody_arm_resolve` (IK con agarre vivo); `RenderWeapon.swift` mallas dinámicas en anillo de MTLBuffer.
@@ -13,10 +21,11 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 - 2026-10-25 `069da3f`: 2D de cine dentro del estéreo, mezcla en gamma, efectos a pantalla completa, coplanares, menús L2/R2 en marco físico con una apertura por pulsación. Visor: cinemáticas y sus letras OK; créditos en la mano, cuerpo hueco, radar atravesando, golpes fallidos (→ `ab5544e`).
 
 ## Current state
-**Pendiente de probar en visor (`ab5544e`):** todo lo de "Last done" de `ab5544e`.
+**Pendiente de probar en visor (`3c4b18e`):** todo lo de `3c4b18e`. Visor con `ab5544e`: guante original y cuerpo completo OK; radar atravesaba y siempre visible; cuerpo por delante al golpear; L2 oscilaba (→ `3c4b18e`).
+**Flujo de verificación:** volcados del visor (manual o `[autodump]`) → `dumpview --batch` → arreglar por tipo de primitiva; no builds para probar.
 **Medido con volcados de 069da3f (geomstat en scratchpad, no en repo):** el mundo se reconstruye fiel (99,8 % hp, 0 huecos, z-fight ≤0,09 %); la "geometría rota" era el cuerpo del jugador de una cara a 25 Hz.
 **Unverified:** convención/signo de `gaze_yaw_deg` frente a la guiñada del torso con datos reales; anillo dinámico de RenderWeapon asume ≤3 frames en vuelo y 2 encode/frame; textos de créditos que cambian durante el selector; forma de la mano derecha original quizá pose de arma intencionada; lado con IK movida y guante caducado (>250 ms) puede quedar oculto.
-**Qué mirar en el log:** `[radar] desvio_mm/edad_IK_ms`, `[menu2d]`, `[gest] ang_enemigo/latencia`, `[guante]`.
+**Qué mirar en el log:** `[autodump]`, `[gpu3d] n_hw_cull/n_billboard/n_rect3d`, `[radar] visibilidad/malla`, `[cuerpo] piezas_cerca_ocultas`, `[vista] motivo=selector` (1 apertura por gesto).
 **Pendiente:** RECT/sprites en 3D; PGXP por dirección en memcpy BIOS; scanlines en cinemáticas; `test_geom` 2 fallos previos, `test_gpu`/`vrhost_run` no enlazan.
 **Límites conocidos:** semitransparentes no ocluyen el radar; precalentado de pipelines gpu no portado.
 
