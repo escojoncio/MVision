@@ -84,4 +84,5 @@ typedef struct {
     vector_float4 misc;     /* x = nº de recubrimientos (de los de covers[]) que se dibujan ANTES de las líneas de exploración (el resto, después); yzw = color que se suma donde la máscara de visión cierra del todo */
     vector_float4 frame;    /* máscara de visión: x,y = ancho y alto de la imagen mostrada del motor (px originales), z = 1 si hay máscara (texture(1)), w sin uso */
     vector_float4 wave;     /* solo vr_fs_wave (render nativo bajo el agua; usa eye[] y cfg.x): x = amplitud (px del ojo a NS_WAVE_REF_W = 1888 de ancho), y = rad por fila del motor, z = fase (rad), w = H del motor (px de la pantalla de 320x240) */
+    vector_float4 vfx;      /* solo vr_fs_wave: efectos del juego por procedencia (vr/scene/vr_prov.h): x = intensidad de la viñeta (0 = sin viñeta), y = radio de la zona limpia (alto del ojo / 2 = 1), z = fracción del alto cubierta por las bandas de cinemática (0 = sin bandas), w sin uso */
 } VrPostUniforms;

@@ -149,7 +149,13 @@ static BridgeState bs;                   /* último puente leído */
 /* Capa 2D fiel y en alta resolución (vr_layer2d.h) en un HILO TRABAJADOR (vr_layer2d_async.h): el hilo de emulación solo copia la lista a una cola (memcpy) y el render recoge
  * la última capa publicada con mv_vrhost_hud2d_acquire; nadie espera. MV_HUD2D=0 la apaga (el renderer vuelve al shader). MV_HUD2D_SCALE=1..6 fija la escala objetivo (defecto 4);
  * la escala baja sola si el trabajador tarda (mide su propio coste) y sube al recuperarse. */
-static VrL2Async *l2a;
+static VrL2Async *l2as[VPC_L_N];   /* una capa 2D por clase de procedencia (vr_prov.h): 0 HUD, 1 ventana del selector / pausa, 2 pantalla completa. Solo la vista mundo reparte; en las demás todo va a la 0 */
+static VrProvLearn prov_learn;     /* WINDOW aprendido por id de procedencia (toda la sesión; hilo de emulación) */
+static VrFxHold fx_hold;           /* efectos de pantalla (viñeta, bandas, mira) con retención; se publican en MvVrGameState.fx */
+static uint8_t *l2_opd[VPC_L_N]; static size_t l2_opd_cap;   /* op_dest por capa */
+static uint8_t l2_busy[VPC_L_N];   /* la capa auxiliar tiene contenido publicado (su última lista no estaba vacía) */
+static uint32_t pc_cls[VPC_N], pc_lists;   /* primitivas del panel por clase desde el último registro [prov2d] */
+static uint64_t pc_log_ns;
 static _Atomic int l2d_enabled = 1;
 static _Atomic int l2d_smooth = VL_SMOOTH_ORIGINAL;   /* original = rasterizado exacto de la GPU y replicado a escala entera: el texto sale idéntico y nítido */
 static int l2d_target = 4;
@@ -943,6 +949,11 @@ static void build_one(const GpuDrawList *l, int si) {
     VrSceneOpts o = sopts;
     if (!native_mode()) { o.eye_near_m = GPU3D_NEAR_EYE_M; o.line3d_px = 1.0f; o.coplanar_m = 0.005f; o.rect3d = 1; o.billboard = 1; }   /* modo gpu: nada pegado al ojo, recorte contra el plano cercano; líneas del mundo en 3D; z-fight de coplanares, sprites con vista de la GTE como carteles 3D y resplandores orientados al ojo solo aquí (ver vr_scene.h) */
     if (vrhost_drop_world2d(native_mode(), view.kind, view.reason)) o.drop_world2d = 1;   /* el nativo dibuja el mundo y las cinemáticas del motor: los polígonos sin vista dentro del pase 3D no son HUD y no van al panel 2D (vr_scene.h); no en UI/vídeo ni con la ventana del selector o la pausa encima (sus menús son 2D) */
+    if (rt_prov_on) {   /* procedencia: aprende la ventana del selector / pausa y clasifica las primitivas del panel (vr_prov.h); sin ella todo es UNKNOWN = HUD */
+        int pst = view.kind != VRV_K_WORLD ? VPC_ST_OTHER : view.reason == VRV_R_WORLD ? VPC_ST_CLOSED : view.reason == VRV_R_SELECTOR || view.reason == VRV_R_PAUSE_WORLD ? VPC_ST_OPEN : VPC_ST_OTHER;
+        vpc_learn_note(&prov_learn, l, pst);
+        o.op_class = vpc_op_class_cb; o.op_class_ctx = &prov_learn;
+    }
     if (!native_mode() && view.kind == VRV_K_ENGINE) { o.keep_late_clear = 1; o.veil_as_2d = 1; }   /* pantalla 3D del motor (gpu): el 2D se compone dentro del estéreo; el relleno opaco tras el 3D (créditos) y los velos se pintan como 2D */
     int cine_cut = 0;
     {   /* Cinemática del motor (ni mundo ni vídeo/2D puros): la cámara es la del guion, nunca la de la cabeza. Planos y origen fijo por plano. */
@@ -1034,19 +1045,55 @@ static void build_one(const GpuDrawList *l, int si) {
     memcpy(bs.eye_pos, save_pos, sizeof save_pos);
     memcpy(bs.eye_axes, save_axes, sizeof save_axes);
 
+    {   /* efectos por procedencia (viñeta, bandas, prismáticos): solo en la vista mundo; en las demás el 2D ya lo lleva todo */
+        VrFx fxn;
+        vpc_fx_extract(&prov_learn, l, r ? r->screen : 0, &fxn);
+        if (view.kind != VRV_K_WORLD) { memset(&fxn, 0, sizeof fxn); fxn.scope_zoom = 1.0f; }
+        vpc_fx_hold(&fx_hold, &fxn);
+    }
     /* Capa 2D fiel: se encola (copia) para el hilo trabajador. Con escena fallida solo se aplican los eventos de VRAM (la VRAM espejo debe verlos todos). En vista de cine (UI / vídeo)
-     * la capa es el fotograma ENTERO; en las demás, solo las primitivas que vr_scene mandó al panel. */
+     * la capa es el fotograma ENTERO; en las demás, solo las primitivas que vr_scene mandó al panel. Vista mundo (VL_PANEL): el panel se reparte por clase de procedencia en 3 capas
+     * (HUD / ventana / pantalla completa; FX_* y SCOPE_FRAME no van al 2D); las capas 1 y 2 solo se encolan si tienen primitivas o las tenían (para publicar el vacío). */
     if (atomic_load(&l2d_enabled)) {
-        if (!l2a) l2a = vl2a_new();
-        if (l2a) {
-            vl2a_options_native(l2a);   /* raster 1 fijo (sin x4 ni escala adaptativa): el escalado y el filtro xBR los hace la GPU del renderer (XRShaders.metal xr_xbr3); l2d_target / l2d_smooth / MV_HUD2D_SCALE quedan sin efecto */
-            /* pantalla de cine (UI / vídeo): fotograma entero, verificado contra la imagen del emulador. Pantalla 3D del motor (cinemáticas, créditos o texto sobre una escena): el panel 2D va
-             * ENCIMA de la escena nativa, así que se verifica también (reproduce el mundo sin el panel, compone y compara con el emulador; donde no coincide usa la imagen exacta del emulador). */
+        if (!l2as[0]) l2as[0] = vl2a_new();
+        if (l2as[0]) {
+            vl2a_options_native(l2as[0]);   /* raster 1 fijo (sin x4 ni escala adaptativa): el escalado y el filtro xBR los hace la GPU del renderer (XRShaders.metal xr_xbr3); l2d_target / l2d_smooth / MV_HUD2D_SCALE quedan sin efecto */
             int l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO ? VL_FULL : view.kind == VRV_K_ENGINE ? VL_PANEL_VERIFIED : VL_PANEL;
-            vl2a_set_view(l2a, (view.kind << 8) | (view.reason & 255));   /* etiqueta de vista del trabajo: el overlay del menú descarta las capas retrasadas de otra vista (créditos) */
-            vl2a_submit(l2a, hl, rc == 0 && sc.op_dest && sc.n_op_dest >= hl->nops ? sc.op_dest : NULL, l2_full, 0);
+            int vtag = (view.kind << 8) | (view.reason & 255);
+            const uint8_t *od = rc == 0 && sc.op_dest && sc.n_op_dest >= hl->nops ? sc.op_dest : NULL;
+            uint32_t lc[VPC_L_N] = {0, 0, 0};
+            int routed = od && l2_full == VL_PANEL && sc.op_cls;
+            if (od && hl->nops > l2_opd_cap) {
+                size_t nc = (size_t)hl->nops + 256;
+                uint8_t *q[VPC_L_N]; int okm = 1;
+                for (int k = 0; k < VPC_L_N; k++) { q[k] = (uint8_t *)realloc(l2_opd[k], nc); if (!q[k]) okm = 0; else l2_opd[k] = q[k]; }
+                if (okm) l2_opd_cap = nc; else routed = 0;
+            }
+            if (routed && hl->nops <= l2_opd_cap) {
+                vpc_split_dest(od, sc.op_cls, hl->nops, l2_opd, lc);
+                { uint32_t t[VPC_N]; vpc_tally(od, sc.op_cls, hl->nops, t); for (int k = 0; k < VPC_N; k++) pc_cls[k] += t[k]; pc_lists++; }
+            } else routed = 0;
+            vl2a_set_view(l2as[0], vtag);
+            vl2a_submit(l2as[0], hl, routed ? l2_opd[VPC_L_HUD] : od, l2_full, 0);
+            for (int k = 1; k < VPC_L_N; k++) {
+                int has = routed ? lc[k] > 0 : 0;
+                if (!(has || l2_busy[k] || !hl->vram_start)) continue;   /* sin primitivas ahora ni antes: nada que publicar (cada lista trae su VRAM de partida: la capa no se desincroniza) */
+                if (!l2as[k]) l2as[k] = vl2a_new();
+                if (!l2as[k] || hl->nops > l2_opd_cap) continue;
+                vl2a_options_native(l2as[k]);
+                vl2a_set_view(l2as[k], vtag);
+                if (!routed) memset(l2_opd[k], 0, hl->nops);   /* otras vistas / escena fallida: capa vacía (se publica una vez y no vuelve a encolarse) */
+                if (vl2a_submit(l2as[k], hl, rc == 0 && od ? l2_opd[k] : NULL, VL_PANEL, 0)) l2_busy[k] = (uint8_t)has;
+            }
             { static uint64_t l2_log_ns; uint64_t nn = mono_ns();   /* una línea por segundo */
-              if (nn - l2_log_ns >= 1000000000ull) { char lb[1024]; l2_log_ns = nn; if (vl2a_report(l2a, lb, sizeof lb) > 0) fprintf(stderr, "%s\n", lb); } }
+              if (nn - l2_log_ns >= 1000000000ull) { char lb[1024]; l2_log_ns = nn; if (vl2a_report(l2as[0], lb, sizeof lb) > 0) fprintf(stderr, "%s\n", lb); } }
+            if (rt_prov_on && mono_ns() - pc_log_ns >= 1000000000ull) {   /* [prov2d]: clases del panel en el último segundo; UNKNOWN va al HUD */
+                pc_log_ns = mono_ns();
+                if (pc_lists) fprintf(stderr, "[prov2d] vista=%s listas=%u HUD_WORLD=%u WINDOW=%u FULL=%u FX_VIGNETTE=%u FX_LETTERBOX=%u SCOPE_FRAME=%u SCOPE_TEXT=%u UNKNOWN=%u | ventanas_aprendidas=%u descartadas=%u | fx: vineta=%.2f radio=%.2f bandas=%.2f mira=%d zoom=%.2f\n",
+                    vrprov_view_name(vrprov_view(view.kind, view.reason)), pc_lists, pc_cls[VPC_HUD_WORLD], pc_cls[VPC_WINDOW], pc_cls[VPC_FULL], pc_cls[VPC_FX_VIGNETTE], pc_cls[VPC_FX_LETTERBOX], pc_cls[VPC_SCOPE_FRAME], pc_cls[VPC_SCOPE_TEXT], pc_cls[VPC_UNKNOWN],
+                    prov_learn.n_learned, prov_learn.n_demoted, (double)fx_hold.fx.vignette, (double)fx_hold.fx.vign_radius, (double)fx_hold.fx.letterbox, (int)fx_hold.fx.scope_on, (double)fx_hold.fx.scope_zoom);
+                memset(pc_cls, 0, sizeof pc_cls); pc_lists = 0;
+            }
         }
     }
     sm_sample(&slot[si].smp, &sc, r);   /* (r = registro de cámara de la lista; antes de fill_slot: sc.v/b son memoria interna de vr_scene) */
@@ -1180,6 +1227,7 @@ static void publish_state(void) {
         g.item = core ? bs.item : -1;
         g.alert_mode = core ? bs.alert_mode : 0;
         g.render_req = atomic_load(&render_req); g.native_avail = mv_vrhost_native_available();
+        g.fx = fx_hold.fx;
         g.ammo = -1; g.ammo_max = -1;
         if (core && bs.weapon >= 0 && bs.weapon < BRIDGE_N_WEAPONS) { g.ammo = bs.weapon_ammo[bs.weapon]; g.ammo_max = bs.weapon_max[bs.weapon]; }
     }
@@ -1238,11 +1286,13 @@ int mv_vrhost_head_limit(const float head[16], float dt, float corr[3], float *f
 /* Capa 2D fiel (vr_layer2d.h): suavizado de las texturas 2D (0 original, 1 nítido, 2 suave). Cualquier hilo. */
 void mv_vrhost_set_hud2d_smooth(int mode) { atomic_store(&l2d_smooth, mode < 0 ? 0 : mode > 2 ? 2 : mode); }
 int mv_vrhost_hud2d_smooth(void) { return atomic_load(&l2d_smooth); }
-void mv_vrhost_hud2d_stats(int *scale, double *ms) { double sm; uint32_t lag; if (l2a) vl2a_stats(l2a, scale, ms, &sm, &lag); else { if (scale) *scale = 0; if (ms) *ms = 0; } }
-int mv_vrhost_hud2d_acquire(const uint8_t **px, int *w, int *h, int *full, uint32_t *seq) { return l2a ? vl2a_acquire(l2a, px, w, h, full, seq) : -1; }
-void mv_vrhost_hud2d_release(void) { if (l2a) vl2a_release(l2a); }
-int mv_vrhost_hud2d_menu_rect(float uv[4]) { return l2a ? vl2a_acquire_menu_rect(l2a, uv) : 0; }
-int mv_vrhost_hud2d_layer(int *mode, int *view) { return l2a ? vl2a_acquire_info(l2a, mode, view) : 0; }
+void mv_vrhost_hud2d_stats(int *scale, double *ms) { double sm; uint32_t lag; if (l2as[0]) vl2a_stats(l2as[0], scale, ms, &sm, &lag); else { if (scale) *scale = 0; if (ms) *ms = 0; } }
+int mv_vrhost_hud2d_acquire_l(int layer, const uint8_t **px, int *w, int *h, int *full, uint32_t *seq) { return layer >= 0 && layer < VPC_L_N && l2as[layer] ? vl2a_acquire(l2as[layer], px, w, h, full, seq) : -1; }
+void mv_vrhost_hud2d_release_l(int layer) { if (layer >= 0 && layer < VPC_L_N && l2as[layer]) vl2a_release(l2as[layer]); }
+int mv_vrhost_hud2d_layer_l(int layer, int *mode, int *view) { return layer >= 0 && layer < VPC_L_N && l2as[layer] ? vl2a_acquire_info(l2as[layer], mode, view) : 0; }
+int mv_vrhost_hud2d_acquire(const uint8_t **px, int *w, int *h, int *full, uint32_t *seq) { return mv_vrhost_hud2d_acquire_l(0, px, w, h, full, seq); }
+void mv_vrhost_hud2d_release(void) { mv_vrhost_hud2d_release_l(0); }
+int mv_vrhost_hud2d_layer(int *mode, int *view) { return mv_vrhost_hud2d_layer_l(0, mode, view); }
 int mv_vrhost_hud2d_accept(int mode, int layer_view, int cur_view, int overlay) { return vl2a_layer_accept(mode, layer_view, cur_view, overlay); }
 void mv_vrhost_set_l2d_split(int on) { vl2a_set_split(on); }
 int mv_vrhost_l2d_split(void) { return vl2a_split(); }

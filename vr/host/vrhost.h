@@ -14,6 +14,7 @@
  * (hle_bind_fixed; no hay firmas de la librería para ellas). Si el EXE no coincide con la edición esperada no hay cámara VR.
  * IA de enemigos y cámaras (vr/ai): se instala con las HLE si el EXE es la edición esperada (ver mv_vrhost_set_ai). */
 #include <stdint.h>
+#include "vr_prov.h"
 #include "vr_radar.h"
 #include "vr_scene.h"
 #include "vr_smooth.h"
@@ -94,6 +95,8 @@ typedef struct {
     /* --- render nativo --- */
     int32_t render_req;      /* modo pedido: 0 = gpu (defecto), 1 = nativo */
     int32_t native_avail;    /* 1 si el modo nativo se puede usar (extractor registrado, enganche instalado y renderer Metal listo) */
+    /* --- efectos de pantalla por procedencia (vr_prov.h; solo en la vista mundo, 0 si no) --- */
+    VrFx fx;                 /* viñeta, bandas de cinemática y prismáticos (scope.c) sacados del 2D: los dibuja el visor de forma nativa */
 } MvVrGameState;
 void mv_vrhost_game_state(MvVrGameState *out);
 
@@ -136,12 +139,14 @@ int mv_vrhost_hud2d_acquire(const uint8_t **px, int *w, int *h, int *full, uint3
 void mv_vrhost_hud2d_release(void);
 /* Modo (VL_PANEL=0 / VL_FULL=1 / VL_PANEL_VERIFIED=2) y etiqueta de vista ((view_kind << 8) | view_reason) de la capa adquirida; solo entre acquire (>= 0) y release. 1 si hay capa. Hilo de render. */
 int mv_vrhost_hud2d_layer(int *mode, int *view);
-/* Entre mv_vrhost_hud2d_acquire (>= 0) y mv_vrhost_hud2d_release: rect UV [u0, v0, u1, v1] de la ventana de menú (selector sobre el mundo) dentro de la capa adquirida; 0 si no hay (usar la capa entera). Hilo de render. */
-int mv_vrhost_hud2d_menu_rect(float uv[4]);
+/* Capas 2D por clase de procedencia (vr_prov.h): 0 = HUD (la de mv_vrhost_hud2d_acquire), 1 = ventana del selector / pausa, 2 = pantalla completa (créditos). Mismo contrato que la capa 0 (-1 = no hay capa: no se dibuja ese panel).
+ * Solo la vista mundo reparte por clases; en las demás todo el 2D va en la capa 0. */
+int mv_vrhost_hud2d_acquire_l(int layer, const uint8_t **px, int *w, int *h, int *full, uint32_t *seq);
+void mv_vrhost_hud2d_release_l(int layer);
+int mv_vrhost_hud2d_layer_l(int layer, int *mode, int *view);
 /* ¿Vale una capa (mode, layer_view) para la vista vigente cur_view? Con overlay (ventana 2D del menú sobre el mundo) solo VL_PANEL; siempre la misma clase de vista (view_kind). */
 int mv_vrhost_hud2d_accept(int mode, int layer_view, int cur_view, int overlay);
-/* Troceo del 2D (defecto 0 = APAGADO; MV_L2D_SPLIT=1 en el entorno lo enciende al instalar): con 0 todo el 2D del juego (HUD, radar del juego, menús, pausa, créditos, textos) va en UNA sola capa completa y
- * en un solo panel; el radar no se separa del HUD (no hay escena de radar: mv_host_radar devuelve 0), no hay rect de menú (mv_vrhost_hud2d_menu_rect devuelve 0) ni créditos filtrados por región. Cualquier hilo. */
+/* Troceo del 2D (defecto 0 = APAGADO; MV_L2D_SPLIT=1 en el entorno lo enciende al instalar): con 0 el radar no se separa del HUD (no hay escena de radar: mv_host_radar devuelve 0). Cualquier hilo. */
 void mv_vrhost_set_l2d_split(int on);
 int mv_vrhost_l2d_split(void);
 

@@ -366,15 +366,30 @@ inline float vr_wave_dx(float yc, uint eye, constant VrPostUniforms &u, float wi
     return u.wave.x * (width / 1888.0) * sin(u.wave.y * row + u.wave.z);
 }
 
+/* Viñeta y bandas de cinemática del juego (u.vfx; clasificadas por procedencia): la viñeta oscurece desde el radio limpio (u.vfx.y, en alturas de medio ojo desde el centro óptico) hasta 0,75 más allá; las bandas
+ * negras cubren la fracción u.vfx.z del alto repartida arriba y abajo. */
+inline float4 vr_vfx(float4 px, float2 pos, uint eye, constant VrPostUniforms &u, float2 size) {
+    float3 c = px.rgb;
+    if (u.vfx.x > 0.0) {
+        float2 d = (pos - float2(u.eye[eye].z, u.eye[eye].x)) / (0.5 * size.y);
+        c *= 1.0 - clamp(u.vfx.x, 0.0, 1.0) * smoothstep(u.vfx.y, u.vfx.y + 0.75, length(d));
+    }
+    if (u.vfx.z > 0.0) {
+        float v = pos.y / size.y;
+        if (v < 0.5 * u.vfx.z || v > 1.0 - 0.5 * u.vfx.z) c = float3(0.0);
+    }
+    return float4(c, px.a);
+}
+
 fragment float4 vr_fs_wave(VrPostOut in [[stage_in]], texture2d<float> src [[texture(0)]], constant VrPostUniforms &u [[buffer(0)]]) {
     constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
     float2 uv = float2((in.pos.x + vr_wave_dx(in.pos.y, 0u, u, float(src.get_width()))) / float(src.get_width()), in.pos.y / float(src.get_height()));
-    return src.sample(smp, uv);
+    return vr_vfx(src.sample(smp, uv), in.pos.xy, 0u, u, float2(src.get_width(), src.get_height()));
 }
 
 fragment float4 vr_fs_wave_layered(VrPostOutL in [[stage_in]], texture2d_array<float> src [[texture(0)]], constant VrPostUniforms &u [[buffer(0)]]) {
     constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
     uint eye = min(in.layer, 1u);
     float2 uv = float2((in.pos.x + vr_wave_dx(in.pos.y, eye, u, float(src.get_width()))) / float(src.get_width()), in.pos.y / float(src.get_height()));
-    return src.sample(smp, uv, in.layer);
+    return vr_vfx(src.sample(smp, uv, in.layer), in.pos.xy, eye, u, float2(src.get_width(), src.get_height()));
 }

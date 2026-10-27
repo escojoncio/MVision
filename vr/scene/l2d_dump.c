@@ -5,7 +5,7 @@
  *   NO tiene capa reproducible (la capa sale de las primitivas de la lista de dibujo): se avisa y se salta, no se aproxima.
  * La escena se ensambla como vrhost.c build_one en el modo nativo (opciones por defecto + screen_filter + drop_world2d, puente y registro de cámara del meta.txt, correspondencia mundo -> usuario, reensamblado sin filtro si no se conserva):
  *   op_dest == 2 = lo que va al panel. Aproximaciones: cine_cand y last_scene3d se deducen del meta (rec_active == 0 con registro) y de las primitivas 3D de ESTA lista. El modo de la capa sale de view_mode del meta
- *   (= VrView.kind de vr_view.h: 0 UI, 1 mundo, 2 cinemática del motor, 3 vídeo), igual que vrhost.c: UI / vídeo -> VL_FULL (fotograma entero opaco), cinemática -> VL_PANEL_VERIFIED, mundo -> VL_PANEL (con vl2d_set_menu(0): sin troceo).
+ *   (= VrView.kind de vr_view.h: 0 UI, 1 mundo, 2 cinemática del motor, 3 vídeo), igual que vrhost.c: UI / vídeo -> VL_FULL (fotograma entero opaco), cinemática -> VL_PANEL_VERIFIED, mundo -> VL_PANEL.
  *   La VRAM del volcado es la del FINAL de la lista y se usa también como vram_start/vram_end (el visor usa la real de cada momento): para los modos con 2D semitransparente, realimentación (fbk) o texturas dibujadas dentro de la zona mostrada, y
  *   sobre todo para VL_PANEL_VERIFIED (que repite el mundo y lo compara con vram_end), la capa puede no ser idéntica a la del visor.
  * Mide, con vl2d a escala 1 (modo original, como la app):
@@ -159,7 +159,6 @@ static int layer_of(const GpuDrawList *l, const VrScene *sc, int mode, uint8_t *
     if (mode == VL_PANEL_VERIFIED) lv.vram_end = l->vram_start;   /* la VRAM del volcado es la del final de la lista */
     VrLayer2D *L = vl2d_new();
     vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);   /* lo que fija vl2a_options_native en el visor */
-    vl2d_set_menu(L, 0);                           /* sin troceo (vl2a_set_split(0)): nunca ventana de menú */
     int ok = vl2d_run(L, &lv, sc, mode);
     if (ok) {
         const uint8_t *rg = vl2d_rgba(L, w, h);
