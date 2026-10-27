@@ -495,6 +495,17 @@ int vrbody_calib_offset(const float grip_q[4], float roll_signed_deg, float out_
     vrbody_mat_to_quat(O, out_q);
     return 1;
 }
+/* Corrección fija agarre -> mano (la de la mano que empuña un arma): la calibrada o el cabeceo fijo seguido del alabeo; no depende del apuntado ni de ningún estado por fotograma. */
+int vrbody_hand_offset(int side, float q[4]) {
+    if (side < 0 || side > 1 || !q) return 0;
+    int cal_ok; float cq[4];
+    cal_lock(); cal_ok = G.cal[side].ok; memcpy(cq, G.cal[side].q, sizeof cq); cal_unlock();
+    if (cal_ok) { memcpy(q, cq, sizeof cq); q_normalize(q); return 1; }
+    float qp[4], qr[4] = {G.cfg.hand_rot_offset[side][0], G.cfg.hand_rot_offset[side][1], G.cfg.hand_rot_offset[side][2], G.cfg.hand_rot_offset[side][3]};
+    pitch_quat(G.cfg.hand_pitch_deg, qp); q_normalize(qr);
+    q_mul(q, qp, qr);
+    return 0;
+}
 int vrbody_calibrate_hands(void) {
     int n = 0;
     for (int s = 0; s < 2; s++) {
@@ -1044,7 +1055,7 @@ static int apply_main(uint8_t *ram) {
             if (cal_snap[s].ok) { memcpy(qo, cal_snap[s].q, sizeof qo); q_normalize(qo); }
             else {
                 float pd = cfg->hand_pitch_deg;
-                if (cfg->hand_pitch_auto) {
+                if (cfg->hand_pitch_auto && !(G.armed && s == cfg->dominant)) {      /* la mano que empuña un arma usa el cabeceo FIJO: el arma cuelga de ella con ese mismo desvío (vrbody_hand_offset) */
                     /* cabeceo automático: suavizado (constante 0,15 s) y, si el apuntado falta un instante, se mantiene el último valor válido hasta 10 fotogramas */
                     float pa_ = 0;
                     if (h->aim_ok && vrbody_pitch_from_aim(h->q, h->aq, &pa_)) {

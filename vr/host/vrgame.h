@@ -143,7 +143,10 @@ unsigned vrbodyg_event_count(int ev);                                  /* VRG_EV
 uint16_t vrbodyg_pad(uint16_t pad, const struct BridgeState *bs, int right_handed);
 int32_t mv_vrgame_menu_hand(void);                                     /* mano física (0 izq, 1 der) que mantiene abierta la ventana de armas/objetos del gesto del pecho; -1 ninguna */
 int vrgame_hand_raw(int side, float p[3], float *grip, float *trig, double *t_s);   /* pose del agarre (espacio usuario, m), grip (puño), gatillo y marca de tiempo (s, monótono; 0 con guion de pruebas); 1 si hay seguimiento */
+/* Modelo VR (id16 en el stage residente) del arma de id de juego dado; 0 = sin modelo VR (se queda el arma del juego). */
+uint16_t vrgame_weapon_model(int game_id);
 void vrgame_test_install(int game_id, void *def, void *state, void *rig);   /* pruebas: arma ya construida (WeaponDef, WeaponState, VrHandsRig) en la ranura de su id */
+void vrgame_test_set_native(int game_id, int on);                          /* pruebas: marca la ranura como «dibujada por el juego» (textura incompleta) */
 int vrgame_hand_pose_in(int side, int *item_pose, float *trigger, float *thumb);   /* pose de la mano nueva (vr_hand_pose.h: HP_*), gatillo y pulgar de la mano física side; 1 si hay seguimiento (si no, HP_RELAX y ceros) */
 int vrgame_glove_pub(void);                                              /* hueco publicado de los guantes (-1 = ninguno) */
 int vrgame_weapon_engaged(void);                                       /* arma VR mostrada o recarga en curso */

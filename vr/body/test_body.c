@@ -784,6 +784,59 @@ static void hand_axes_run(float roll_deg, int mode) {
     CHECK(tested >= 20, "pocas manos comprobadas: %d", tested);
     vrbody_clear_calibration();
 }
+
+/* Mano que empuña un arma: su corrección agarre -> mano es la FIJA (calibración o cabeceo fijo + alabeo), igual a vrbody_hand_offset, y NO sigue el apuntado del mando (cabeceo automático).
+ * El arma cuelga de esa misma corrección (vr/host/vrgame.c), así que si la mano armada siguiera el apuntado, la mano y el arma se separarían. Mismo montaje que hand_axes_run (modo 1). */
+static void armed_hand_run(int armed, int aim_on, float tilt_deg, float fl_out[2][3]) {
+    VrBodyConfig cfg; legacy_cfg(&cfg);
+    build_body(200);
+    vrbody_init(&cfg); vrbody_set_view_fn(view_fn); vrbody_set_armed(armed); vrbody_set_dominant(1);
+    float th = (g_view.theta_deg + 180) * 3.14159265f / 180, cs = cosf(th), sn = sinf(th);
+    float T[9] = {cs, 0, sn, 0, 1, 0, -sn, 0, cs};
+    for (int f = 0; f < 40; f++) {
+        for (int s = 0; s < 2; s++) {
+            float Rt1[9], tt1[3], sh[3], Rs_[9]; load_xf(part_addr(1), Rt1, tt1); load_xf(part_addr(s ? 2 : 7), Rs_, sh);
+            float want[3]; for (int k = 0; k < 3; k++) want[k] = sh[k] + Rt1[3 * k + 2] * 330.0f - Rt1[3 * k + 1] * 120.0f;
+            float dw[3] = {want[0] - g_view.eye[0], want[1] - g_view.eye[1], want[2] - g_view.eye[2]};
+            float Tt[9] = {T[0], T[3], T[6], T[1], T[4], T[7], T[2], T[5], T[8]}, pu[3]; mv(pu, Tt, dw);
+            set_hand(s, pu[0] / 1000 + g_view.p_ref[0], pu[1] / 1000 + g_view.p_ref[1], pu[2] / 1000 + g_view.p_ref[2], 0.0f);
+            float a2 = 35.0f * 3.14159265f / 180 * 0.5f, b2 = tilt_deg * 3.14159265f / 180 * 0.5f;
+            float qg[4] = {sinf(a2), 0, 0, cosf(a2)}, qa[4] = {sinf(b2), 0, 0, cosf(b2)};      /* agarre = Rx(35); apuntado = Rx(tilt): cabeceo automático = tilt - 35 */
+            memcpy(g_hands[s].rot, qg, sizeof qg);
+            g_hands[s].aim_valid = aim_on; if (aim_on) memcpy(g_hands[s].aim_rot, qa, sizeof qa);
+        }
+        memcpy(RAM, RAM0, sizeof RAM);
+        int n = vrbody_apply(RAM);
+        if (f == 39 && n == 2) for (int s = 0; s < 2; s++) {
+            float R[9], t[3]; load_xf(part_addr(s ? 4 : 9), R, t);
+            fl_out[s][0] = -R[1]; fl_out[s][1] = -R[4]; fl_out[s][2] = -R[7];      /* dedos = -Y local de la pieza mano */
+        }
+        vrbody_restore(RAM);
+    }
+    vrbody_set_armed(0);
+}
+static void test_armed_hand_fixed_offset(void) {
+    float a[2][3] = {{0}}, b[2][3] = {{0}}, c[2][3] = {{0}};
+    armed_hand_run(1, 1, 5.0f, a);        /* armado, apuntado inclinado */
+    armed_hand_run(1, 0, 0.0f, b);        /* armado, sin apuntado (cabeceo fijo) */
+    armed_hand_run(0, 1, 5.0f, c);        /* desarmado, apuntado inclinado (cabeceo automático) */
+    CHECK(dotv(a[1], b[1]) > 0.9999f, "mano armada (derecha): ignora el apuntado, mismo cabeceo que sin apuntado: %g", dotv(a[1], b[1]));
+    CHECK(dotv(a[1], c[1]) < 0.9990f, "la derecha desarmada sí sigue el apuntado (control): %g", dotv(a[1], c[1]));
+    CHECK(dotv(a[0], c[0]) > 0.9999f, "la mano NO dominante conserva el cabeceo automático aunque la otra empuñe: %g", dotv(a[0], c[0]));
+    /* vrbody_hand_offset = lo que vrbody_apply aplica a la mano armada: giro de cabeceo fijo y alabeo (o la calibración) */
+    VrBodyConfig cfg; legacy_cfg(&cfg); vrbody_init(&cfg);
+    float q[4], qp[4], qr[4], e[4], ang = cfg.hand_pitch_deg * 3.14159265f / 180 * 0.5f;
+    qp[0] = sinf(ang); qp[1] = qp[2] = 0; qp[3] = cosf(ang);
+    memcpy(qr, cfg.hand_rot_offset[1], sizeof qr);
+    e[0] = qp[3] * qr[0] + qp[0] * qr[3] + qp[1] * qr[2] - qp[2] * qr[1]; e[1] = qp[3] * qr[1] - qp[0] * qr[2] + qp[1] * qr[3] + qp[2] * qr[0];
+    e[2] = qp[3] * qr[2] + qp[0] * qr[1] - qp[1] * qr[0] + qp[2] * qr[3]; e[3] = qp[3] * qr[3] - qp[0] * qr[0] - qp[1] * qr[1] - qp[2] * qr[2];
+    CHECK(vrbody_hand_offset(1, q) == 0 && fabsf(fabsf(q[0] * e[0] + q[1] * e[1] + q[2] * e[2] + q[3] * e[3]) - 1.0f) < 1e-5f, "vrbody_hand_offset = cabeceo fijo * alabeo");
+    float cal[4] = {0, 0.3826834f, 0, 0.9238795f};
+    vrbody_set_calibration(1, cal);
+    CHECK(vrbody_hand_offset(1, q) == 1 && fabsf(q[1] - 0.3826834f) < 1e-5f, "con calibración devuelve la calibrada");
+    CHECK(!vrbody_hand_offset(2, q) && !vrbody_hand_offset(1, NULL), "lado o destino inválidos");
+    vrbody_clear_calibration();
+}
 static void test_hand_axes(void) {
     hand_axes_run(0.0f, 0);      /* sin giro: marco de vr_pose.h tal cual */
     hand_axes_run(90.0f, 0);
@@ -1537,7 +1590,7 @@ int main(void) {
     test_stretch_continuous(); test_stretch_bone(); test_resolve_stretch(); test_shoulder_blend(); test_twist_continuity(); test_wrist_continuity();
     test_continuity();
     test_glue();
-    test_hand_axes(); test_hand_pitch_api(); test_default_roll(); test_jab_and_grab();
+    test_hand_axes(); test_armed_hand_fixed_offset(); test_hand_pitch_api(); test_default_roll(); test_jab_and_grab();
     test_visibility();
     test_two_sided(); test_own_hands(); test_own_hands_both(); test_arm_live(); test_torso_follow(); test_pelvis_walk(); test_dt_measured(); test_pelvis_gap();
     test_fist_glue();

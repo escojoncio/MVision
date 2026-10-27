@@ -40,6 +40,11 @@ typedef struct {
     uint8_t *atlas;       /* RGBA8, atlas_w * atlas_h (NULL si el modelo no tiene texturas) */
     uint32_t atlas_w, atlas_h;
     uint32_t ntex;        /* texturas empaquetadas */
+    /* Cobertura de texturas (diagnóstico: un arma sin textura sale BLANCA, color de vértice 255): texturas distintas que referencian las caras (sin contar el id 0 = sin textura), las que no se
+     * encontraron o no se pudieron decodificar en el stage ni en el residente (esas caras toman el texel 0,0 del atlas), las de 8 bits SIN paleta al final del fichero (se decodifican como rampa de
+     * grises: sin el CLUT original salen casi blancas) y el id de la primera ausente. */
+    uint32_t ntex_ref, ntex_missing, ntex_nopal;
+    uint16_t first_missing;
     WLoadPart *parts; uint32_t nparts;   /* 1 pieza si split_parts == 0 */
     WVec3 bmin, bmax;
 } WLoaded;

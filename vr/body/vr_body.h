@@ -174,7 +174,7 @@ const VrBodyConfig *vrbody_config(void);
 
 void vrbody_set_grip(int side, float v);     /* side 0 izquierda / 1 derecha; v 0 (abierta) .. 1 (cerrada) */
 void vrbody_set_dominant(int side);          /* 0 izquierda / 1 derecha */
-void vrbody_set_armed(int on);               /* la mano dominante empuña un arma (informativo: la pose de la mano la decide vr_hand_pose según el objeto, ya no se fuerza un puño) */
+void vrbody_set_armed(int on);               /* la mano dominante empuña un arma: su corrección agarre -> mano es la FIJA (vrbody_hand_offset, sin cabeceo automático por el apuntado); la pose de los dedos la decide vr_hand_pose según el objeto */
 void vrbody_set_enabled(int on);
 /* El anfitrión suprime el puño deformado de la malla del motor (las manos nuevas de ns_hand ya hacen el puño). Va aparte de cfg.fist_enabled (ajuste del usuario, no se modifica). */
 void vrbody_set_fist_suppressed(int on);
@@ -210,6 +210,9 @@ void vrbody_clear_calibration(void);
 /* Persistencia: obtener (devuelve 1 si hay calibración) / restaurar la corrección de un lado (0 izq, 1 der). */
 int vrbody_get_calibration(int side, float q[4]);
 void vrbody_set_calibration(int side, const float q[4]);   /* rechaza datos no finitos o con la norma fuera de 0,5..2 */
+/* Corrección fija agarre -> mano de un lado (cuaternión x,y,z,w): la calibrada si la hay (devuelve 1) o cabeceo fijo hand_pitch_deg seguido del alabeo hand_rot_offset (devuelve 0). Con la mano armada es la misma
+ * que usa vrbody_apply para dibujar la mano; el arma cuelga del agarre del mando con ella (mano = agarre * este desvío). */
+int vrbody_hand_offset(int side, float q[4]);
 /* Pura (sin estado): corrección agarre -> mano que deja los dedos horizontales y el dorso a roll_signed_deg (izq +, der -) del cenit. 1 = bien; 0 = dedos casi verticales. */
 int vrbody_calib_offset(const float grip_q[4], float roll_signed_deg, float out_q[4]);
 

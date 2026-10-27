@@ -100,10 +100,11 @@ static int stage_entries(const uint8_t *d, size_t len, const char *name, EntList
 }
 
 /* ---------- imagen ---------- */
-typedef struct { int w, h; uint8_t *rgba; } Img;
+typedef struct { int w, h; uint8_t *rgba; int nopal; } Img;      /* nopal: 8 bits sin paleta (rampa de grises) */
 
 static int img_decode(const uint8_t *b, size_t n, int key_black, Img *im) {
     if (n < 128 || b[0] != 10) return -1;
+    im->nopal = 0;
     int enc = b[2], bpp = b[3];
     int w = (int)rd16(b + 8) - (int)rd16(b + 4) + 1, h = (int)rd16(b + 10) - (int)rd16(b + 6) + 1;
     int planes = b[65], bpl = (int)rd16(b + 66);
@@ -124,7 +125,7 @@ static int img_decode(const uint8_t *b, size_t n, int key_black, Img *im) {
     if (bpp == 8 && planes == 1) {
         np = 256;
         if (n >= 769 && b[n - 769] == 12) memcpy(pal, b + n - 768, 768);
-        else for (int i = 0; i < 256; i++) pal[i][0] = pal[i][1] = pal[i][2] = (uint8_t)i;
+        else { for (int i = 0; i < 256; i++) pal[i][0] = pal[i][1] = pal[i][2] = (uint8_t)i; im->nopal = 1; }
     } else memcpy(pal, b + 16, 48);
     im->w = w; im->h = h;
     im->rgba = (uint8_t *)malloc((size_t)w * h * 4);
@@ -237,6 +238,7 @@ int wload_model_buf(const uint8_t *dir, size_t dir_len, const char *stage,
     if (nobj <= 0 || nobj > 512 || 0x20 + (size_t)nobj * 0x58 > kn) return -2;
     int rc = 0;
     TexSlot slots[64]; int nslot = 0;
+    uint16_t lost[64]; int nlost = 0;      /* ids de textura referenciados que no se pudieron cargar (no se reintentan por cara) */
     EntList ls = {0}, li = {0}; EntList *lists[2] = {NULL, NULL};
     if (stage_entries(dir, dir_len, stage, &ls) == 0) lists[0] = &ls;
     if (o.resident && strcmp(stage, o.resident) && stage_entries(dir, dir_len, o.resident, &li) == 0) lists[1] = &li;
@@ -288,11 +290,16 @@ int wload_model_buf(const uint8_t *dir, size_t dir_len, const char *stage,
             /* textura -> hueco en el atlas */
             int ts = -1;
             for (int s = 0; s < nslot; s++) if (slots[s].id == tid) { ts = s; break; }
-            if (ts < 0 && nslot < 64) {
+            int is_lost = 0;
+            for (int s = 0; s < nlost; s++) if (lost[s] == tid) is_lost = 1;
+            if (ts < 0 && !is_lost && nslot < 64) {
                 const uint8_t *pp; uint32_t pn;
                 if (find_tex(lists, tid, &pp, &pn) == 0 && img_decode(pp, pn, o.key_black, &slots[nslot].im) == 0) {
                     slots[nslot].id = tid; ts = nslot++;
                     if (o.upscale >= 2 && upscale(&slots[ts].im, o.upscale >= 4 ? 4 : 2)) { rc = -3; free(par); free(cn); free(ptri); goto done; }
+                } else if (tid && nlost < 64) {
+                    if (!out->ntex_missing) out->first_missing = tid;
+                    lost[nlost++] = tid; out->ntex_missing++;
                 }
             }
             static const int T[2][3] = {{0, 1, 2}, {0, 2, 3}};
@@ -356,6 +363,8 @@ int wload_model_buf(const uint8_t *dir, size_t dir_len, const char *stage,
         }
         out->atlas_w = aw; out->atlas_h = ah; out->ntex = (uint32_t)nslot;
     }
+    out->ntex_ref = (uint32_t)nslot + out->ntex_missing;
+    for (int s = 0; s < nslot; s++) if (slots[s].im.nopal) out->ntex_nopal++;
     /* normales suavizadas por ángulo (sobre posiciones soldadas) */
     if (o.smooth_deg > 0.f && nt) {
         float cosl = cosf(o.smooth_deg * 3.14159265f / 180.f);
