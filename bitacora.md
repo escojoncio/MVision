@@ -4,22 +4,23 @@ Runtime nativo para Apple Vision Pro: el juego (recompilación estática del EXE
 Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP_REPO`, `DECOMP_COMMIT`, `SDK_REPO`); zonas por número. Histórico: `git log -p bitacora.md`.
 
 ## Last done
-- 2026-10-26 `5ada745` (IPA run 40390169755, artifact MVision-ipa 12683510334; CI verde tras re-ejecutar render-test, fallo intermitente exit 2 sin log accesible):
-  - Gateo: `ns_extract.c` extrae el jugador aunque tenga OF_HIDDEN (`NsExtractOpts.player_key`, `ns_extract_glue.c`); `NS_SV_PLAYER_PRESENT` (256, `ns_types.h`); `ns_scene_native_ok` = TOVR y (PLAYER_OK|PLAYER_PRESENT) sin MAP_INCOMPLETE/STORE_FULL (`ns_bridge.c/.h`); sin enlace o sin cabeza → todas sus piezas NS_PF_HIDDEN (`ns_hook.c`).
-  - Cine en overlay: `ns_hook_backup_begin/ns_hook_backup_capture` (`ns_hook.c`, `ns_hook_rt.c`) desde `hle_vrbody_sort` (`vr_camera_hle.c`, stubs débiles) tras `rt_orig`; sin `stage_cb`; diag `[captura] canales por s: envoltura/respaldo | entrada0_etapas` (`vrhost.c`).
-  - Vista (`vr_view.c/.h`, `VrViewIn.native_ok` desde `ns_hook_native_ready`): sin control + cámara VR + apta → WORLD; sin cámara + apta → ENGINE; si no → UI.
-  - 2D opción 1: `vl2a_set_split` (defecto 0, `MV_L2D_SPLIT=1`), `XRLayer2D.split` (`XRHud.swift`); paso 6b de `XRPresent.swift` = capa completa en un panel (`XRFramedLayout`, 1,6 m, sharp); paso 5b/6, `RadarPanel`, `hudMenuUV`, `vrradar_split` inertes sin split.
-  - `vl2d_encode` (`vr_layer2d.c`): resta+suma → aditivo; aditivo en luz lineal (créditos con brillo correcto).
-  - Banco: `make -f vr/native/extract.mk test-dumps DUMPS=<dir>`, `make -C vr/scene l2d-dump ARGS="<volcados> --png DIR"` (+`L2D_ZONA`).
-- 2026-10-26 `cac83e1`: bridge `read_mode` cinematic solo DEMO/PAD*; diag `[cine3d]` píxeles/pasada; migración única cutscene3; filtro 2D sharp por defecto.
+- 2026-10-27 `bef1f45` (IPA run 40425733598, artifact MVision-ipa 12699617122; CI verde):
+  - Cine: `Cutscene.stereo` por defecto (IPD real); migración única screen→stereo (`xr.view.cutscene3.toStereo`, `XRPresent.swift`).
+  - 2D: panel 6b siempre en mundo sin split (ignora hudPanels); selector/pausa a 0,9 m centrados en la mirada al abrir (`overlayAim`, `XRFramedLayout.overlayModel`, `XRMath.swift`); opciones de troceo ocultas (`mainItems`). `vr_scene` `drop_world2d`/`VR_FATE_WORLD2D` (POLY sin vista antes del último POLY 3D fuera del panel) solo en vista mundo sin selector/pausa (`vrhost.c` build_one).
+  - Rígidos (0x40, OF_ONE_MATRIX): `ns_extract.c` usa la matriz raíz (en overlay 0x80081200 las piezas guardan traslación relativa al ojo). `ns_cover` mide factor Y (66/64) con `ns_extract_screen_ys`.
+  - Captura: parche dinámico de la entrada 0 de 0x8009E534 (`ns_hook_rt.c` dyn_wrap, hash, reinstalación en `ns_hook_poll` c/32 frames) + respaldo; `[captura] canales por s: envoltura/dinamico/respaldo`.
+  - Agua: `NSG_OV_BARS` apagado (`bars_gain`=0, `ns_screen.c`; era la viñeta circular); `NSG_CULL_SEMI` con la cabeza bajo el agua (`NativeRenderer.swift`, `NativeShaders.metal`, `ns_gpu_cull_applies`); onda reintenta sin desplazar si el texel es transparente.
+  - Caja: máscara `NSG_OV_FRAME` (textura R8 160x128, `ns_screen_frame_build`) solo con IN_BOX (`vrhost_box_mask`); textura 1x1 de respaldo; diag `[caja] entra|mascara|sale`.
+- 2026-10-27 `5ada745`: gateo (PLAYER_PRESENT), captura de respaldo, 2D en un panel (detalle: `git log -p bitacora.md`).
 
 ## Current state
-**Pendiente de probar en visor (`5ada745`):** todo lo anterior.
-**Banco (volcados 26-oct):** d0001 (gateo) apta con jugador; auto01/02 (intro, entrada0=0x8008240c) respaldo da 9 inst; capa 2D d0002 = menú completo; composición lineal vs frame.png dif 3/255.
-**Si el 2D en panel único no convence al usuario:** opción 2 = 2D nativo desde RAM (inventario, radar, vida).
-**CI:** render-test falló una vez en dispatch (exit 2) y pasó al re-ejecutar; logs de CI 403.
-**Unverified:** destino del panel lineal (aditivo asume lineal); estado RAM tras 7 etapas en el respaldo (efectos/colores, OFX/OFY); aspecto de Snake al gatear; cartel del ascensor parpadeante (origen 2D o 3D sin ver); mallas de brazo estiradas; reparto de giro antebrazo/mano; deslizamiento lateral de pies al girar pelvis; imagen 3D 0,75 vs panel 2D 0,8 en PAL; signo ±45° dorso radar; `sync_epoca`.
-**Qué mirar en el log:** `[captura] canales por s` (respaldo>0 en intro), `[cine3d] pantalla3d-pixeles/pasada`, `[vista] cambio` al gatear/ascensor/muerte, `[manos] ... estirados/factor_estirado`, `[capa2d]`, `[radar] visibilidad`, `[vista] cambio`.
+**Pendiente de probar en visor (`bef1f45`):** todo lo anterior.
+**Banco (volcados 26/27-oct):** cobertura intro auto01 37→91 %, auto03 9→49 %, d0004 73→96 %; auto02 sigue 20 % (lista de un fotograma anterior: cámara ~3,5°/300 mm distinta; rec_M caducado en cine, unverified). Agua d0005/auto04 idénticas byte a byte.
+**Usuario (log 27-oct, 5ada745):** gateo OK; menús OK pero lejos; créditos/vida/radar no visibles (hudPanels=false persistido → arreglado); cine plano (mono → arreglado); agua con círculo (BARS → arreglado).
+**Pendiente:** radar junto al agujero mientras se usa la caja (pedido para más tarde). Superficie de agua 80165558 `otra_textura(semi)` (UV/CLUT animado sin evidencia). Si el 2D en panel único no convence: opción 2 = 2D nativo desde RAM.
+**CI:** render-test intermitente (exit 2) visto una vez; logs de CI 403.
+**Unverified:** caja (sin volcado: cámara VR activa, OF_HIDDEN; ver `[caja]`); NSG_CULL_SEMI quita semitransparentes de una cara vistos por detrás bajo el agua; selector/pausa con drop_world2d excluido; destino del panel lineal (aditivo asume lineal); estado RAM tras 7 etapas en el respaldo (efectos/colores, OFX/OFY); aspecto de Snake al gatear; cartel del ascensor parpadeante (origen 2D o 3D sin ver); mallas de brazo estiradas; reparto de giro antebrazo/mano; deslizamiento lateral de pies al girar pelvis; imagen 3D 0,75 vs panel 2D 0,8 en PAL; signo ±45° dorso radar; `sync_epoca`.
+**Qué mirar en el log:** `[caja]`, `xr-diag items` (hudPanels, hud!=nil), `[captura] canales por s` (dinamico>0 en intro), `[cine3d] pantalla3d-pixeles/pasada`, `[vista] cambio` al gatear/ascensor/muerte, `[manos] ... estirados/factor_estirado`, `[capa2d]`, `[radar] visibilidad`, `[vista] cambio`.
 **Pendiente:** efectos del 3D sin concretar (volcados auto02/auto03 "quads no coherentes"); mono dibuja dos pases idénticos; `test_geom` 2 fallos previos; `test_gpu`/`vrhost_run` no enlazan.
 **Código muerto (no borrado):** `l2d_target`, `l2d_smooth`, `MV_HUD2D_SCALE`, `vl2a_scale_step`, menú "Suavizado 2D" (`smooth2D`), raster hq/EPX de `vr_layer2d.c`; `wrist_swing_deg`/`hand_twist_deg` (SIN USO); camino `gpuMode` en `RenderRG.swift`; `vr/native/ns_fill*`, `ns_cover*`; rutas RECT/DERIVED/billboard de `vr/scene/vr_scene.c`.
 
@@ -33,6 +34,7 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 - Cuerpo: mano siempre en la pose del mando; huesos se estiran (no se separa la muñeca); torso VRIK, piernas del juego.
 - Vista: cinemática solo por banderas reales del motor; la cámara 1ª persona del juego (gateo, conductos) es gameplay en VR.
 - Aptitud del mundo nativo: no depende del enlace del jugador (PLAYER_PRESENT basta); captura independiente de la entrada 0 de la tabla de etapas.
+- Rígidos (OF_ONE_MATRIX): matriz raíz, nunca la de pieza.
 - Ninguna build sin banco offline sobre volcados del visor revisado.
 - Sin emular sesiones en la nube; verificación con volcados del visor + banco offline. Una build por bloque.
 
@@ -45,7 +47,7 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 ## Comandos
 - Runtime: `cd runtime && make gen GEN=… EXE=../gamedata/main.exe NAMES=../gamedata/names_eu.json && make GEN=… OUT=… CC=clang && make test test_sys`.
 - Pruebas VR: `make -C vr/host test`, `make -C vr/scene test test-layer2d test-split`, `make -C vr/input test`, `make -C vr/body test`, `make -C vr/hands test`, `make -C vr/radar test`, `make -f vr/native/extract.mk test test-fill`, `make -f vr/native/fx.mk test`.
-- Banco: `make -C vr/scene dumpview ARGS=...` (`--batch <dir>`, `--sheets`).
+- Banco: `make -C vr/scene dumpview ARGS=...`; `make -C vr/scene l2d-dump ARGS="<volcados sin / final> --png DIR"` (`L2D_SIN_W2D=1`); `make -f vr/native/extract.mk test-dumps DUMPS=<dir>`; nscover/nscine (`NSCINE_AGUA`).
 - Swift/Metal: solo CI. IPA: `gh workflow run visionos.yml --ref main -f solo_render=false`. Logs de CI con 403: `gh api repos/<repo>/check-runs/<id>/annotations`.
 - Datos locales (nunca al repo): `gamedata/`.
 
