@@ -1,4 +1,5 @@
 /* Prueba del escritor y el cargador de volcados y del contrato con datos sintéticos (sin datos del juego). Las comprobaciones NO dependen de NDEBUG. */
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,10 +31,13 @@ int main(void) {
     uint16_t *vram = calloc(1, NS_DUMP_VRAM_BYTES);
     uint32_t gte[64]; for (int i = 0; i < 64; i++) gte[i] = 0x1000u + i;
     ram[0x1234] = 0xAB; ram[0x20000] = 0xCD; ram[0x1FFFFC] = 7;
-    GpuOp op; memset(&op, 0, sizeof op); op.type = GPU_OP_POLY; op.nv = 3; op.seq = 42;
+    GpuOp op; memset(&op, 0, sizeof op); op.type = GPU_OP_POLY; op.nv = 3; op.seq = 42; op.prov = 2; op.prov2 = 1; op.pkt_addr = 0x80130100u;
+    ProvEntry pe[3]; memset(pe, 0, sizeof pe);
+    pe[1].id = 1; pe[1].fn = 0x80012345u; strcpy(pe[1].name, "scope.c");
+    pe[2].id = 2; pe[2].fn = 0x80023456u; pe[2].actor_node = 0x80110000u; strcpy(pe[2].name, "telop.c");
     uint16_t px[4] = { 1, 2, 3, 4 };
     GpuDrawList l; memset(&l, 0, sizeof l);
-    l.ops = &op; l.nops = 1; l.data = px; l.ndata = 4; l.index = 5; l.host_frame = 10;
+    l.ops = &op; l.nops = 1; l.data = px; l.ndata = 4; l.index = 5; l.host_frame = 10; l.prov = pe; l.nprov = 3;
     uint8_t rgba[8 * 4 * 4]; for (size_t i = 0; i < sizeof rgba; i++) rgba[i] = (uint8_t)i;
     NsDumpSrc s = { ram, NULL, vram, gte, &l, rgba, 8, 4, "game_frame=10\nhead=1,0,0,0 0,1,0,0\ncam_h=320\n" };
     CHECK(ns_dump_write(sub, &s) == 0);
@@ -47,6 +51,42 @@ int main(void) {
     CHECK(ns_r32(d, 0x801FFFFCu) == 7);
     CHECK(d->gte[63] == 0x1000u + 63);
     CHECK(d->list.nops == 1 && d->list.ops[0].seq == 42 && d->list.data[3] == 4 && d->list.index == 5);
+    /* NSL2: procedencia en las primitivas y prov.bin */
+    CHECK(d->list.ops[0].prov == 2 && d->list.ops[0].prov2 == 1 && d->list.ops[0].pkt_addr == 0x80130100u);
+    CHECK(d->list.prov && d->list.nprov == 3 && d->list.prov[2].fn == 0x80023456u && d->list.prov[2].actor_node == 0x80110000u && !strcmp(d->list.prov[2].name, "telop.c") && !strcmp(d->list.prov[1].name, "scope.c"));
+    {   /* list.bin NSL1 (anterior: GpuOp sin procedencia, sizeof = offsetof(GpuOp, prov)): se carga con prov = prov2 = pkt_addr = 0 */
+        char old1[300]; snprintf(old1, sizeof old1, "%s/old1", dir);
+        CHECK(ns_dump_write(old1, &s) == 0);
+        char lp[400]; snprintf(lp, sizeof lp, "%s/list.bin", old1);
+        FILE *lf = fopen(lp, "rb"); CHECK(lf != NULL);
+        NsDump *d1 = NULL;
+        if (lf) {
+            uint8_t buf[4096]; size_t nb = fread(buf, 1, sizeof buf, lf); fclose(lf);
+            CHECK(nb > 0 && !memcmp(buf, "NSL2", 4));
+            size_t hdr = 7 * 4 + 4 + sizeof(GpuDisplay), osz = offsetof(GpuOp, prov);
+            uint8_t out[4096]; memcpy(out, buf, hdr); memcpy(out, "NSL1", 4);
+            uint32_t sz1 = (uint32_t)osz; memcpy(out + 4, &sz1, 4);
+            memcpy(out + hdr, buf + hdr, osz);                                    /* la única primitiva, sin los 8 bytes de procedencia */
+            memcpy(out + hdr + osz, buf + hdr + sizeof(GpuOp), 4 * 2);            /* data[4] */
+            FILE *wf = fopen(lp, "wb"); CHECK(wf != NULL);
+            if (wf) { fwrite(out, 1, hdr + osz + 8, wf); fclose(wf); }
+            d1 = ns_dump_open(old1);
+            CHECK(d1 && d1->has_list && d1->list.nops == 1 && d1->list.ops[0].seq == 42 && d1->list.ops[0].type == GPU_OP_POLY && d1->list.data[3] == 4 && d1->list.index == 5);
+            if (d1 && d1->has_list) CHECK(d1->list.ops[0].prov == 0 && d1->list.ops[0].prov2 == 0 && d1->list.ops[0].pkt_addr == 0);
+            ns_dump_close(d1);
+            CHECK(osz + 8 == sizeof(GpuOp));
+        }
+        /* sin prov.bin (dump sin procedencia): la lista carga y no hay tabla */
+        char np[300]; snprintf(np, sizeof np, "%s/noprov", dir);
+        GpuDrawList l0 = l; l0.prov = NULL; l0.nprov = 0;
+        NsDumpSrc s0 = s; s0.list = &l0;
+        CHECK(ns_dump_write(np, &s0) == 0);
+        char pp[400]; snprintf(pp, sizeof pp, "%s/prov.bin", np); CHECK(!exists(pp));
+        NsDump *d0 = ns_dump_open(np); CHECK(d0 && d0->has_list && d0->list.prov == NULL && d0->list.nprov == 0); ns_dump_close(d0);
+        /* prov.bin corrupto (tamaño): se ignora sin romper la carga */
+        snprintf(pp, sizeof pp, "%s/prov.bin", old1); trunc_to(old1, "prov.bin", 20);
+        d1 = ns_dump_open(old1); CHECK(d1 && d1->has_list && d1->list.prov == NULL && d1->list.nprov == 0); ns_dump_close(d1);
+    }
     char b[64];
     CHECK(ns_dump_meta(d, "game_frame", b, sizeof b) && !strcmp(b, "10"));
     CHECK(ns_dump_meta_num(d, "cam_h", 0) == 320.0);

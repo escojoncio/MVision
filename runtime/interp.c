@@ -27,6 +27,7 @@
 #include "cpu.h"
 #include "hlebind.h"
 #include "hps.h"
+#include "prov.h"
 #include "rtpatch.h"
 #include "sys.h"
 
@@ -451,21 +452,22 @@ static inline uint32_t rd8(Cpu *c, uint32_t a) {
     return mem_r8(c, a);
 }
 static inline void ram_hit(uint32_t idx) { if (__builtin_expect(rt_codemap[idx >> GRAN], 0)) rt_code_hit(idx); }
+#define PROV_TAG(i) do { if (__builtin_expect(rt_prov_on, 0)) rt_prov_mem[(i) >> 2] = rt_prov_cur; } while (0)   /* procedencia (prov.h) */
 static inline void wr32(Cpu *c, uint32_t a, uint32_t v) {
     uint32_t p = a & 0x1FFFFFFFu;
-    if (__builtin_expect(p < 0x800000u, 1)) { uint32_t i = p & 0x1FFFFF; memcpy(&emu_ram[i], &v, 4); ram_hit(i); return; }
+    if (__builtin_expect(p < 0x800000u, 1)) { uint32_t i = p & 0x1FFFFF; memcpy(&emu_ram[i], &v, 4); ram_hit(i); PROV_TAG(i); return; }
     if (p - EMU_SCRATCH < 0x400u) { memcpy(&emu_scratch[p - EMU_SCRATCH], &v, 4); return; }
     mem_w32(c, a, v);
 }
 static inline void wr16(Cpu *c, uint32_t a, uint16_t v) {
     uint32_t p = a & 0x1FFFFFFFu;
-    if (__builtin_expect(p < 0x800000u, 1)) { uint32_t i = p & 0x1FFFFF; memcpy(&emu_ram[i], &v, 2); ram_hit(i); return; }
+    if (__builtin_expect(p < 0x800000u, 1)) { uint32_t i = p & 0x1FFFFF; memcpy(&emu_ram[i], &v, 2); ram_hit(i); PROV_TAG(i); return; }
     if (p - EMU_SCRATCH < 0x400u) { memcpy(&emu_scratch[p - EMU_SCRATCH], &v, 2); return; }
     mem_w16(c, a, v);
 }
 static inline void wr8(Cpu *c, uint32_t a, uint8_t v) {
     uint32_t p = a & 0x1FFFFFFFu;
-    if (__builtin_expect(p < 0x800000u, 1)) { uint32_t i = p & 0x1FFFFF; emu_ram[i] = v; ram_hit(i); return; }
+    if (__builtin_expect(p < 0x800000u, 1)) { uint32_t i = p & 0x1FFFFF; emu_ram[i] = v; ram_hit(i); PROV_TAG(i); return; }
     if (p - EMU_SCRATCH < 0x400u) { emu_scratch[p - EMU_SCRATCH] = v; return; }
     mem_w8(c, a, v);
 }
@@ -681,6 +683,7 @@ do_j:
     goto tail_common;
 do_jr:
     tg = jt;
+    if (__builtin_expect(rt_prov_on, 0)) rt_prov_pop(r[29], tg);   /* cierra la llamada indirecta anotada que vuelve aquí (prov.h) */
     if (!ip->sa) { pc = tg; goto dispatch; }       /* jr ra: retorno, sin sondeo ni búsqueda nativa */
     RT_POLL(c);
     goto tail_common;
@@ -690,6 +693,18 @@ do_jal:
 do_jalr:
     tg = jt;
     if (ip->d) r[ip->d] = b->end;
+    if (__builtin_expect(rt_prov_on, 0)) {   /* procedencia (prov.h): ámbito de la función llamada */
+#ifndef MV_NOGEN
+        FuncPtr pf = is_bios_vec(tg) ? NULL : rt_lookup(tg);
+        if (pf) {
+#ifdef INTERP_TRACE
+            rt_trace_enter(c, tg);
+#endif
+            uint16_t old = rt_prov_enter(tg, r[4]); cont = b->end; pf(c); rt_prov_leave(old); pc = cont; goto dispatch;
+        }
+#endif
+        if (!is_bios_vec(tg) && !hle_bind_is(tg) && !rt_patch_is(tg)) rt_prov_push(tg, r[4], b->end, r[29]);   /* llamada plana: se cierra en el jr que vuelve a b->end */
+    }
     goto call_common;
 
 call_common:

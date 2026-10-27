@@ -162,6 +162,13 @@ static struct {
 } cap;
 
 static int cap_vs;   /* gpu_capture_vram_start: fuera de `cap` (gpu_capture_enable(0) lo pone a cero) */
+/* Procedencia (prov.h), también fuera de `cap`: lo engancha gpu_capture_set_prov. cap_pk_* = paquete de la OT que se está ejecutando (gpu_draw_list). */
+static const uint16_t *cap_pm;
+static const ProvEntry *cap_ptab;
+static const unsigned *cap_pn;
+static uint16_t cap_pk_prov, cap_pk_prov2;
+static uint32_t cap_pk_addr;
+void gpu_capture_set_prov(const uint16_t *mem, const ProvEntry *tab, const unsigned *n) { cap_pm = mem; cap_ptab = tab; cap_pn = n; }
 
 static void cap_list_reset(GpuDrawList *l) {
     l->nops = l->ndata = 0;
@@ -169,6 +176,7 @@ static void cap_list_reset(GpuDrawList *l) {
     free(l->vram_end); l->vram_end = NULL;
     free(l->vram_init); l->vram_init = NULL;
     free(l->vram_after); l->vram_after = NULL;
+    free(l->prov); l->prov = NULL; l->nprov = 0;
 }
 
 static void cap_begin(void) {
@@ -203,6 +211,7 @@ static GpuOp *cap_new(int type) {
     o->dox = (int16_t)g.ox; o->doy = (int16_t)g.oy;
     o->cx1 = (int16_t)g.cx1; o->cy1 = (int16_t)g.cy1; o->cx2 = (int16_t)g.cx2; o->cy2 = (int16_t)g.cy2;
     o->flags = (uint16_t)((g.mask_set ? GPU_F_MASK_SET : 0) | (g.mask_chk ? GPU_F_MASK_CHK : 0));
+    o->prov = cap_pk_prov; o->prov2 = cap_pk_prov2; o->pkt_addr = cap_pk_addr;
     cap.disp_open = 0;
     return o;
 }
@@ -222,6 +231,11 @@ static void cap_close(int reason) {
         cap_begin();
         cap.disp_open = 0; cap.vb_noflip = 0; cap.pending_close = 0;
         return;
+    }
+    if (cap_ptab && cap_pn && *cap_pn) {   /* tabla de procedencia vigente al cerrar (los ids no se reutilizan: valen para todas las primitivas de la lista) */
+        uint32_t np = *cap_pn + 1;
+        c->prov = malloc(np * sizeof *c->prov);
+        if (c->prov) { memcpy(c->prov, cap_ptab, np * sizeof *c->prov); c->nprov = np; }
     }
     c->index = cap.nframes++;
     c->host_frame = hle_frame_count();
@@ -1067,10 +1081,16 @@ void gpu_draw_list(uint32_t addr) {
     for (unsigned guard = 0; guard < 0x100000; guard++) {
         uint32_t h = ram32(addr);
         unsigned n = h >> 24;
+        if (cap.on) {   /* procedencia: quién escribió la palabra-etiqueta del paquete (lo encadenó) y su primera palabra de datos */
+            cap_pk_addr = 0x80000000u | addr;
+            cap_pk_prov = cap_pm ? cap_pm[addr >> 2] : 0;
+            cap_pk_prov2 = cap_pm && n ? cap_pm[((addr + 4) & 0x1FFFFC) >> 2] : 0;
+        }
         for (unsigned i = 0; i < n; i++) gp0_word(ram32(addr + 4 + 4 * i), (addr + 4 + 4 * i) & 0x1FFFFC);
-        if (h & 0x800000) return; /* terminador 0xFFFFFF (bit 23) */
+        if (h & 0x800000) { cap_pk_addr = 0; cap_pk_prov = cap_pk_prov2 = 0; return; } /* terminador 0xFFFFFF (bit 23) */
         addr = h & 0x1FFFFC;
     }
+    cap_pk_addr = 0; cap_pk_prov = cap_pk_prov2 = 0;
     fprintf(stderr, "[gpu] lista enlazada sin fin (¿bucle?)\n");
 }
 

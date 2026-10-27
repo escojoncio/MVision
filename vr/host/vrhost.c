@@ -2,6 +2,7 @@
  * solo la cola de escenas, el BridgeState publicado y la marca de "hay consumidor" se comparten con otros hilos. */
 #include "vrhost.h"
 #include "vrdump.h"
+#include "vrprov.h"
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -12,6 +13,7 @@
 #include "bridge.h"
 #include "cpu.h"
 #include "gpu.h"
+#include "prov.h"
 #include "hlebind.h"
 #ifdef MV_NOGEN
 #include "rtpatch.h"
@@ -865,6 +867,43 @@ static void autodump_note(const VrScene *sc, const GpuDrawList *l) {
     if (rc == 0) { ad_st.n++; ad_st.by[why]++; }
 }
 
+/* ------------------------------------------------------------------------------------------------ procedencia (runtime/prov.h, vrprov.h)
+ * Con la captura y la capa 2D encendidas (capture_set / frame_hook_body) el runtime anota quién escribió cada palabra de RAM y la captura etiqueta cada primitiva con el id de su ámbito
+ * (GpuOp.prov). Aquí: registro [prov] una vez por segundo (hilo de emulación) y volcado automático la primera vez que aparece un actor de interés o la vista pasa a selector/pausa/códec. */
+static VrProvAcc prov_acc;
+static VrProvTrig prov_trig;
+static uint64_t prov_log_ns;
+static void prov_log(void) {
+    uint64_t t = mono_ns();
+    if (t - prov_log_ns < 1000000000ull) return;
+    prov_log_ns = t;
+    char b[4096];
+    int n = vrprov_report(&prov_acc, vrprov_view(view.kind, view.reason), b, sizeof b);
+    if (n > 0) fprintf(stderr, "%s ids=%u tabla_llena=%lu pila_llena=%lu\n", b, rt_prov_n, rt_prov_full, rt_prov_ovf);
+}
+static void prov_autodump(void) {
+    if (!rt_prov_on) return;
+    pthread_mutex_lock(&DMX);
+    int has_dir = autodump_dir[0] != 0;
+    pthread_mutex_unlock(&DMX);
+    if (!has_dir) return;
+    unsigned present = 0;
+    if (bs.valid & BRIDGE_OK_ACTORS)
+        for (int i = 0; i < bs.n_actors; i++) { int k = vrprov_actor_idx(bs.actors[i].name); if (k >= 0) present |= 1u << k; }
+    int code = vrprov_pick(&prov_trig, present, vrprov_view(view.kind, view.reason));
+    if (code < 0) return;
+    char dir[560], label[48];
+    pthread_mutex_lock(&DMX);
+    snprintf(dir, sizeof dir, "%s", autodump_dir);
+    pthread_mutex_unlock(&DMX);
+    snprintf(label, sizeof label, "auto_prov_%s", vrprov_code_name(code));
+    size_t n = strlen(dir);
+    snprintf(dir + n, sizeof dir - n, "/prov_%s", vrprov_code_name(code));
+    if (dump_request_l(dir, NULL, label) != 0) return;   /* ocupado: se reintenta en el siguiente fotograma */
+    vrprov_done(&prov_trig, code);
+    fprintf(stderr, "[prov] autodump motivo=%s carpeta=%s pedido\n", vrprov_code_name(code), dir);
+}
+
 static void gpu3d_log(void) {
     uint64_t t = mono_ns();
     if (t - g3.t_log < 1000000000ull) return;
@@ -1063,6 +1102,7 @@ static void build_one(const GpuDrawList *l, int si) {
 static void capture_set(int on) {
     if (on == cap_on) return;
     if (on) {
+        gpu_capture_set_prov(rt_prov_mem, rt_prov_tab, &rt_prov_n);   /* GpuOp.prov / GpuDrawList.prov (se rellenan con rt_prov_set encendido, ver frame_hook_body) */
         gpu_capture_hiprec(1);
         gpu_capture_vram_start(atomic_load(&l2d_enabled));   /* la capa 2D parte de la VRAM REAL de cada lista, no de un espejo por eventos */
         gpu_capture_enable(1);          /* la primera lista trae vram_init */
@@ -1272,6 +1312,7 @@ typedef struct {
     uint32_t gte[64];
     GpuDisplay disp;
     GpuDrawList list;
+    ProvEntry prov[PROV_MAX];                     /* copia de la tabla de procedencia de la lista (list.prov apunta aquí) */
     int has_list;
 } DumpBuf;
 static DumpBuf DBS[2];                        /* dos juegos de búferes: la pareja se copia entera en el mismo fotograma mientras el trabajador escribe */
@@ -1413,6 +1454,8 @@ static void dump_capture(Cpu *c, uint32_t f, const GpuDrawList *l) {
             memcpy(DB.lops, l->ops, (size_t)l->nops * sizeof(GpuOp));
             memcpy(DB.ldata, l->data, (size_t)l->ndata * 2);
             DB.list = *l; DB.list.ops = DB.lops; DB.list.data = DB.ldata; DB.list.cap_ops = l->nops; DB.list.cap_data = l->ndata;
+            DB.list.prov = NULL; DB.list.nprov = 0;
+            if (l->prov && l->nprov > 1 && l->nprov <= PROV_MAX) { memcpy(DB.prov, l->prov, (size_t)l->nprov * sizeof(ProvEntry)); DB.list.prov = DB.prov; DB.list.nprov = l->nprov; }
             DB.has_list = 1;
         } else list_trunc = 1;
     }
@@ -1492,8 +1535,11 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
     uint64_t lp = atomic_load(&last_poll_ns), now = mono_ns();
     int want = lp && now - lp < 1500000000ull;
     capture_set(want);
+    rt_prov_set(cap_on && atomic_load(&l2d_enabled));   /* procedencia: solo con la capa 2D (es quien la usa) */
+    prov_autodump();
     if (cap_on && !gte_hp_enabled()) gpu_capture_hiprec(1);   /* el 3D de la lista necesita los vértices de vista de la GTE en alta precisión (también en el modo gpu tras cualquier apagado externo) */
     gpu3d_log();
+    prov_log();
     if (!cap_on) return;   /* sin consumidor de escenas no hay lista: frame_hook vuelca sin ella */
     gpu_capture_vblank();
     for (;;) {
@@ -1507,6 +1553,7 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
             pthread_mutex_lock(&MX); sstate[si] = S_FREE; pthread_mutex_unlock(&MX);
             break;
         }
+        if (rt_prov_on) vrprov_acc(&prov_acc, l);
         build_one(l, si);
         {
             int h3 = 0; const VrCamRecord *cr = (bs.valid & BRIDGE_OK_EYE) ? list_record(l, &h3) : NULL;

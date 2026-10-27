@@ -13,8 +13,11 @@
  *   vram.bin     1 048 576 B   VRAM 1024x512 de 16 bits (fila-mayor) en ese mismo instante: texturas, paletas y el fotograma mostrado.
  *   gte.bin      256 B         registros del coprocesador de geometría: 32 palabras de datos + 32 de control (en ese orden).
  *   list.bin     variable      la ÚLTIMA lista de dibujo de la GPU construida (puede faltar si no había ninguna) (primitivas capturadas con posición de vista): cabecera + GpuOp[] + píxeles de subidas:
- *                              char magic[4]="NSL1"; u32 sizeof(GpuOp); u32 nops; u32 ndata; u32 index; u32 host_frame; u32 reason; u32 sizeof(GpuDisplay);
+ *                              char magic[4]="NSL2"; u32 sizeof(GpuOp); u32 nops; u32 ndata; u32 index; u32 host_frame; u32 reason; u32 sizeof(GpuDisplay);
  *                              GpuDisplay disp; GpuOp ops[nops]; u16 data[ndata]. Layout de la compilación del productor (se comprueba el tamaño). Puede faltar (entonces meta lleva list_omitted=1 si era demasiado grande).
+ *                              NSL1 (anterior) = igual con GpuOp sin los campos de procedencia (sizeof = offsetof(GpuOp, prov)); el cargador lee NSL1 y NSL2 (NSL1: prov = prov2 = pkt_addr = 0).
+ *   prov.bin     variable      (solo con la procedencia encendida y ámbitos registrados) tabla de procedencia de la lista: char magic[4]="NSP1"; u32 sizeof(ProvEntry); u32 n; ProvEntry e[n]
+ *                              (índice = id = GpuOp.prov/prov2; e[0] vacío; ProvEntry = u16 id, u32 fn, u32 actor_node, char name[20]; ver runtime/prov.h). Se carga en NsDump.list.prov/nprov.
  *   frame.png    PNG RGBA     el fotograma REAL mostrado (lo que muestra la salida de vídeo); referencia para comparar.
  *   meta.txt     texto        líneas `clave=valor`: format=NSD1, parts_failed=N, y la cabecera de contexto (fotograma, zona, jugador, banderas del puente, cámara del
  *                             motor, pose de la cabeza del usuario y registros de cámara VR) — ver ns_dump_meta().

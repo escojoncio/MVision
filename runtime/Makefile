@@ -31,6 +31,15 @@ $(OUT)/test_interp: $(RT) test_interp.c $(wildcard *.h)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_interp.c $(LDLIBS)
 
+$(OUT)/test_prov: $(RT) test_prov.c $(wildcard *.h)
+	@mkdir -p $(OUT)
+	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_prov.c $(LDLIBS)
+
+# Idem sin código generado (MV_NOGEN: todo en el intérprete plano, como el ejecutable de la app).
+$(OUT)/test_prov_nogen: $(RT) nogen.c test_prov.c $(wildcard *.h)
+	@mkdir -p $(OUT)
+	$(CC) -I. -DMV_NOGEN $(CFLAGS) -o $@ $(RT) nogen.c test_prov.c $(LDLIBS)
+
 $(OUT)/test_rtpatch: $(RT) test_rtpatch.c $(wildcard *.h)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) -I. $(CFLAGS) -o $@ $(RT) test_rtpatch.c $(LDLIBS)
@@ -74,10 +83,12 @@ $(OUT)/headless_interp: $(RT) headless.c nogen.c $(wildcard *.h)
 .PHONY: test test_sys headless_interp
 headless_interp: $(OUT)/headless_interp
 
-test: $(OUT)/test_runtime $(OUT)/test_interp $(OUT)/test_hlebind $(OUT)/test_rtpatch $(OUT)/test_cdimg $(OUT)/test_av $(OUT)/test_audio
+test: $(OUT)/test_runtime $(OUT)/test_interp $(OUT)/test_hlebind $(OUT)/test_prov $(OUT)/test_prov_nogen $(OUT)/test_rtpatch $(OUT)/test_cdimg $(OUT)/test_av $(OUT)/test_audio
 	$(OUT)/test_runtime
 	$(OUT)/test_interp
 	$(OUT)/test_hlebind
+	$(OUT)/test_prov
+	$(OUT)/test_prov_nogen
 	$(OUT)/test_rtpatch
 	$(OUT)/test_cdimg
 	$(OUT)/test_av

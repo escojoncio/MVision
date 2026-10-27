@@ -6,6 +6,7 @@
 #include <string.h>
 #include "cpu.h"
 #include "fiber.h"
+#include "prov.h"
 #include "sys.h"
 
 #if defined(__APPLE__)
@@ -132,6 +133,7 @@ uint32_t fiber_open(Cpu *c, uint32_t pc, uint32_t sp, uint32_t gp) {
         t->sr = 0x401;   /* SR inicial: IEc e IM2 activos (el 0x400 que escribe el juego en el TCB no se usa, ver bitácora) */
         t->regs.r[29] = t->regs.r[30] = sp;
         t->regs.r[28] = gp;
+        rt_prov_thread_init(i);
         if (!t->stack) t->stack = malloc(HOST_STACK);
         if (!t->stack) rt_fatal(c, "sin memoria para pila de hilo");
         t->host_sp = initial_sp(t->stack);
@@ -166,6 +168,7 @@ static void switch_to(Cpu *c, int i, int set_ret) {
     rt_sr_set(th[i].sr);
     g_cpu = c;
     cur = i;
+    rt_prov_switch((unsigned)from, (unsigned)i);   /* ámbito y pila sombra de la procedencia por hilo */
     th[i].started = 1;
     mem_w32(c, pcb, tcb_addr(i));
     fiber_swap(&th[from].host_sp, th[i].host_sp);

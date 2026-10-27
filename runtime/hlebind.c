@@ -35,6 +35,7 @@
 #include <string.h>
 #include "cpu.h"
 #include "hlebind.h"
+#include "prov.h"
 #include "rtpatch.h"
 #include "disc_img.h"
 #include "sys.h"
@@ -208,6 +209,7 @@ static void flat_longjmp(Cpu *c) {
     uint32_t buf = c->r[4], val = c->r[5];
     for (int k = 0; k < 12; k++) c->r[regs[k]] = mem_r32(c, buf + (uint32_t)offs[k]);
     c->r[2] = val;
+    if (rt_prov_on) rt_prov_unwind(c->r[29]);   /* llamadas indirectas anotadas (prov.h) que el salto abandona */
 }
 
 static void bound_clear(void) {

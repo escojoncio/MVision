@@ -78,11 +78,22 @@ static int write_list(const char *dir, const GpuDrawList *l) {
     snprintf(path, sizeof path, "%s/list.bin", dir);
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
-    uint32_t h[7] = { 0x314C534Eu /* "NSL1" */, (uint32_t)sizeof(GpuOp), l->nops, l->ndata, l->index, l->host_frame, (uint32_t)l->reason };
+    uint32_t h[7] = { 0x324C534Eu /* "NSL2" */, (uint32_t)sizeof(GpuOp), l->nops, l->ndata, l->index, l->host_frame, (uint32_t)l->reason };
     uint32_t szd = (uint32_t)sizeof(GpuDisplay);
     int ok = fwrite(h, sizeof h, 1, f) == 1 && fwrite(&szd, 4, 1, f) == 1 && fwrite(&l->disp, sizeof l->disp, 1, f) == 1;
     if (ok && l->nops) ok = fwrite(l->ops, sizeof(GpuOp), l->nops, f) == l->nops;
     if (ok && l->ndata) ok = fwrite(l->data, 2, l->ndata, f) == l->ndata;
+    return (fclose(f) == 0 && ok) ? 0 : -1;
+}
+
+/* prov.bin: tabla de procedencia de la lista (ver ns_dump.h): char magic[4]="NSP1"; u32 sizeof(ProvEntry); u32 n; ProvEntry e[n] (índice = id; e[0] = sin procedencia). */
+static int write_prov(const char *dir, const GpuDrawList *l) {
+    char path[640];
+    snprintf(path, sizeof path, "%s/prov.bin", dir);
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    uint32_t h[3] = { 0x3150534Eu /* "NSP1" */, (uint32_t)sizeof(ProvEntry), l->nprov };
+    int ok = fwrite(h, sizeof h, 1, f) == 1 && fwrite(l->prov, sizeof(ProvEntry), l->nprov, f) == l->nprov;
     return (fclose(f) == 0 && ok) ? 0 : -1;
 }
 
@@ -97,6 +108,7 @@ int ns_dump_write(const char *dir, const NsDumpSrc *s) {
     if (s->vram && put_file(tmp, "vram.bin", s->vram, NS_DUMP_VRAM_BYTES) != 0) failed++;
     if (s->gte && put_file(tmp, "gte.bin", s->gte, 64 * 4) != 0) failed++;
     if (s->list && write_list(tmp, s->list) != 0) failed++;
+    if (s->list && s->list->prov && s->list->nprov > 1 && s->list->nprov <= PROV_MAX && write_prov(tmp, s->list) != 0) failed++;
     if (s->rgba && s->fw > 0 && s->fh > 0) {
         char p[640]; snprintf(p, sizeof p, "%s/frame.png", tmp);
         if (ns_png_write_rgba(p, s->rgba, s->fw, s->fh) != 0) failed++;

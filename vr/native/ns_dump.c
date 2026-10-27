@@ -1,5 +1,6 @@
 /* ns_dump: cargador de volcados (ver ns_dump.h). SOLO escritorio (herramientas y pruebas). */
 #include "ns_dump.h"
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,15 +48,18 @@ NsDump *ns_dump_open(const char *dir) {
         uint32_t h[7]; memcpy(h, lb, sizeof h);
         uint32_t szd; memcpy(&szd, lb + sizeof h, 4);
         size_t off = sizeof h + 4;
-        if (h[0] == 0x314C534Eu && h[1] == sizeof(GpuOp) && szd == sizeof(GpuDisplay) && h[2] <= (SLURP_MAX / sizeof(GpuOp)) && h[3] <= (SLURP_MAX / 2) &&
-            n == off + sizeof(GpuDisplay) + (size_t)h[2] * sizeof(GpuOp) + (size_t)h[3] * 2) {
+        /* NSL1: GpuOp sin los campos de procedencia (offsetof(GpuOp, prov) bytes); NSL2: GpuOp completo. Los de NSL1 se cargan con prov = prov2 = pkt_addr = 0. */
+        size_t osz = h[0] == 0x324C534Eu ? sizeof(GpuOp) : h[0] == 0x314C534Eu ? offsetof(GpuOp, prov) : 0;
+        if (osz && h[1] == osz && szd == sizeof(GpuDisplay) && h[2] <= (SLURP_MAX / osz) && h[3] <= (SLURP_MAX / 2) &&
+            n == off + sizeof(GpuDisplay) + (size_t)h[2] * osz + (size_t)h[3] * 2) {
             GpuDrawList *l = &d->list;
             l->nops = h[2]; l->ndata = h[3]; l->index = h[4]; l->host_frame = h[5]; l->reason = (int)h[6];
             memcpy(&l->disp, lb + off, sizeof l->disp); off += sizeof l->disp;
-            l->ops = (GpuOp *)malloc((size_t)(l->nops ? l->nops : 1) * sizeof(GpuOp));
+            l->ops = (GpuOp *)calloc((size_t)(l->nops ? l->nops : 1), sizeof(GpuOp));
             l->data = (uint16_t *)malloc((size_t)(l->ndata ? l->ndata : 1) * 2);
             if (l->ops && l->data) {
-                memcpy(l->ops, lb + off, (size_t)l->nops * sizeof(GpuOp)); off += (size_t)l->nops * sizeof(GpuOp);
+                for (uint32_t i = 0; i < l->nops; i++) memcpy(&l->ops[i], lb + off + (size_t)i * osz, osz);
+                off += (size_t)l->nops * osz;
                 memcpy(l->data, lb + off, (size_t)l->ndata * 2);
                 l->cap_ops = l->nops; l->cap_data = l->ndata;
                 d->has_list = 1;
@@ -63,12 +67,21 @@ NsDump *ns_dump_open(const char *dir) {
         }
     }
     free(lb);
+    uint8_t *pb = slurp(dir, "prov.bin", &n);   /* tabla de procedencia de la lista (puede faltar) */
+    if (pb && d->has_list && n >= 12) {
+        uint32_t ph[3]; memcpy(ph, pb, sizeof ph);
+        if (ph[0] == 0x3150534Eu && ph[1] == sizeof(ProvEntry) && ph[2] > 0 && ph[2] <= PROV_MAX && n == sizeof ph + (size_t)ph[2] * sizeof(ProvEntry)) {
+            d->list.prov = (ProvEntry *)malloc((size_t)ph[2] * sizeof(ProvEntry));
+            if (d->list.prov) { memcpy(d->list.prov, pb + sizeof ph, (size_t)ph[2] * sizeof(ProvEntry)); d->list.nprov = ph[2]; }
+        }
+    }
+    free(pb);
     return d;
 }
 
 void ns_dump_close(NsDump *d) {
     if (!d) return;
-    free(d->ram); free(d->vram); free(d->meta); free(d->list.ops); free(d->list.data);
+    free(d->ram); free(d->vram); free(d->meta); free(d->list.ops); free(d->list.data); free(d->list.prov);
     free(d);
 }
 

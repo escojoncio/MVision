@@ -3,6 +3,7 @@
 #include <string.h>
 #include "cpu.h"
 #include "hps.h"
+#include "prov.h"
 
 uint8_t emu_ram[EMU_RAM_SIZE];
 uint8_t emu_scratch[0x400];
@@ -58,6 +59,7 @@ uint32_t mem_r32(Cpu *c, uint32_t a) { READ(uint32_t, 4) }
     if (h) {                                                            \
         memcpy(h, &v, sizeof v);                                        \
         if (hps_on) hps_set(a, 0);   /* escritura sin etiqueta de vértice (HLE, accesos parciales, código recompilado) */ \
+        if (__builtin_expect(rt_prov_on, 0) && phys(a) < 0x800000u) rt_prov_mem[(phys(a) & 0x1FFFFCu) >> 2] = rt_prov_cur;   /* procedencia (prov.h) */ \
         if (phys(a) < 0x800000u) { uint32_t i_ = phys(a) & (EMU_RAM_SIZE - 1); if (rt_codemap[i_ >> 8]) rt_code_hit(i_); } \
         return;                                                         \
     }                                                                   \

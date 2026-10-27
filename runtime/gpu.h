@@ -2,6 +2,7 @@
 /* GPU original: rasterizador software de referencia (oráculo del renderer Metal/VR). */
 #include <stddef.h>
 #include <stdint.h>
+#include "prov.h"
 
 #define GPU_VRAM_W 1024
 #define GPU_VRAM_H 512
@@ -128,6 +129,10 @@ typedef struct {
     uint16_t fbt;            /* con fbk: texel único muestreado (RGB555 + bit15 = semitransparente) tras CLUT, con la VRAM del oráculo justo antes de dibujar; 0 = transparente (no pinta nada) */
     float proj_h, proj_ox, proj_oy; /* POLY/LINE con algún vértice vvalid: H de la GTE y OFX/OFY en píxeles (0 si no). Con
                                      * ellos y vx,vy,vz se re-proyecta por ojo: x = proj_ox + proj_h*(vx -/+ e)/vz. */
+    /* Procedencia (prov.h; solo con gpu_capture_set_prov y rt_prov_on; si no, 0). SIEMPRE al final: el formato NSL1 de list.bin es este struct hasta aquí (offsetof(GpuOp, prov)). */
+    uint16_t prov;           /* id (GpuDrawList.prov[id]) de quien escribió la palabra-etiqueta del paquete de la OT que contenía la primitiva = quien la encadenó; 0 = desconocido / no vino de una lista */
+    uint16_t prov2;          /* idem de la primera palabra de datos del paquete (quien rellenó el comando) */
+    uint32_t pkt_addr;       /* dirección (0x80000000 | RAM) de la palabra-etiqueta de ese paquete; 0 = no vino de una lista enlazada */
 } GpuOp;
 
 /* Realimentación: polígonos/sprites texturizados cuya textura (o CLUT) cae en el área de dibujo o de visualización (el frame buffer que
@@ -152,6 +157,7 @@ typedef struct {
     uint16_t *vram_start;    /* NULL salvo gpu_capture_vram_start(1): VRAM REAL [512][1024] al INICIO de CADA lista (los eventos de la lista se aplican encima) */
     uint16_t *vram_end;      /* NULL salvo gpu_capture_vram_start(1): VRAM REAL al CERRAR la lista (incluye lo dibujado a VRAM durante ella: render a textura) */
     uint16_t *vram_after;    /* solo gpu_capture_enable(2): VRAM del oráculo al CERRAR (para verificar) */
+    ProvEntry *prov; uint32_t nprov;   /* copia de la tabla de procedencia al cerrar (índice = id, nprov = mayor id + 1); NULL sin gpu_capture_set_prov / sin ámbitos */
 } GpuDrawList;
 
 /* 0 apaga y libera; 1 captura; 2 captura + copia de VRAM del oráculo al cerrar cada frame (verificación). */
@@ -161,6 +167,9 @@ const GpuDrawList *gpu_capture_frame(void);
 /* Con 1, cada lista trae vram_start (copia de 1 MB de la VRAM real al abrirla): consumidores que no pueden fiarse de reconstruir la VRAM solo con los eventos de la lista
  * (capa 2D: fuentes y CLUT subidas por DMA, copias o dibujos a VRAM). Vale para las listas que se abran a partir de la llamada. */
 void gpu_capture_vram_start(int on);
+/* Procedencia (prov.h): mem = rt_prov_mem (por palabra de RAM), tab = rt_prov_tab, n = &rt_prov_n. Con ellos la captura rellena GpuOp.prov/prov2/pkt_addr al recorrer listas
+ * enlazadas y cada lista cerrada trae GpuDrawList.prov. mem NULL desengancha. gpu.c no depende de prov.c (los enlazados aislados no lo llaman). */
+void gpu_capture_set_prov(const uint16_t *mem, const ProvEntry *tab, const unsigned *n);
 /* VBlank del host (cierre de reserva para juegos sin doble búfer). */
 void gpu_capture_vblank(void);
 /* Listas perdidas por cola llena (la siguiente entregada trae vram_init). */

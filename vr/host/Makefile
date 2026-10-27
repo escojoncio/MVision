@@ -67,6 +67,10 @@ $(OUT)/test_dump_pick: test_dump_pick.c vrdump.h
 	@mkdir -p $(OUT)
 	$(CC) -I. $(CFLAGS) -o $@ test_dump_pick.c
 
+$(OUT)/test_vrprov: test_vrprov.c vrprov.h vr_view.h $(RT)/prov.h $(RT)/gpu.h
+	@mkdir -p $(OUT)
+	$(CC) -I. -I$(RT) $(CFLAGS) -o $@ test_vrprov.c
+
 # Disparo VR de punta a punta sobre vrgame_pad con RAM y puente sintéticos (sin runtime ni datos del juego; anfitrión sustituido en el propio test).
 VGSRC := vrgame.c vrbodyg.c ../bridge/bridge.c ../bridge/bridge_addrs.c ../input/vr_gesture.c ../input/vr_melee.c ../body/vr_body.c ../body/vr_fist.c ../body/vr_hand_mesh.c ../body/vr_body_cam.c ../body/vr_pose.c \
   ../radar/vr_radar.c ../hands/vr_hands.c ../hands/vr_glove.c ../hands/vr_grip.c ../hands/vr_hand_pose.c $(filter-out ../weapons/test_%.c,$(wildcard ../weapons/*.c)) \
@@ -75,12 +79,13 @@ $(OUT)/test_vrgame_fire: test_vrgame_fire.c $(VGSRC) vrgame.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) $(CFLAGS) -Wno-unused-parameter -o $@ test_vrgame_fire.c $(VGSRC) -lm -lpthread
 
-test: $(OUT)/test_view $(OUT)/test_cine $(OUT)/test_smooth $(OUT)/test_dump_pick $(OUT)/test_vrgame_fire
+test: $(OUT)/test_view $(OUT)/test_cine $(OUT)/test_smooth $(OUT)/test_dump_pick $(OUT)/test_vrprov $(OUT)/test_vrgame_fire
 	$(OUT)/test_vrgame_fire
 	$(OUT)/test_view
 	$(OUT)/test_cine
 	$(OUT)/test_smooth
 	$(OUT)/test_dump_pick
+	$(OUT)/test_vrprov
 
 .PHONY: check run test
 

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "cpu.h"
+#include "prov.h"
 
 #define MAX_TABLES 8
 static struct { const FuncEntry *t; unsigned n; } tables[MAX_TABLES];
@@ -194,17 +195,28 @@ static int is_bios_vec(uint32_t t) {
 /* Intérprete (interp.c): ejecuta desde t hasta volver a ra de entrada. */
 void interp_call(Cpu *c, uint32_t t);
 
-void rt_call(Cpu *c, uint32_t t) {
+static void call_raw(Cpu *c, uint32_t t) {
     if (is_bios_vec(t)) { bios_hle(c, t & 0xFF); return; }
     FuncPtr f = rt_lookup(t);
     if (f) f(c);
     else interp_call(c, t);
 }
 
+/* Llamada indirecta: con la procedencia encendida (prov.h) abre un ámbito para la función destino y lo restaura al volver. */
+void rt_call(Cpu *c, uint32_t t) {
+    if (__builtin_expect(rt_prov_on, 0) && !is_bios_vec(t)) {
+        uint16_t old = rt_prov_enter(t, c->r[4]);
+        call_raw(c, t);
+        rt_prov_leave(old);
+        return;
+    }
+    call_raw(c, t);
+}
+
 /* Salto en cola: misma semántica que una llamada, la función destino retorna por ra al llamante C. */
 void rt_jump(Cpu *c, uint32_t t) { rt_call(c, t); }
 
-void rt_fallthrough(Cpu *c, uint32_t t) { rt_call(c, t); }
+void rt_fallthrough(Cpu *c, uint32_t t) { call_raw(c, t); }   /* caída a la función siguiente: no es una llamada, sin ámbito propio */
 
 /* ---- setjmp/longjmp del juego ----
  * En cada llamada a setjmp el código generado hace un setjmp del host en el marco C del llamante,
@@ -213,7 +225,7 @@ void rt_fallthrough(Cpu *c, uint32_t t) { rt_call(c, t); }
  * host (fiber.c), así que solo se permite saltar dentro del mismo hilo. */
 #include "fiber.h"
 #define SJ_MAX 32
-static struct { uint32_t fiber, buf; int valid; jmp_buf env; } sj[SJ_MAX];
+static struct { uint32_t fiber, buf; int valid; uint16_t prov; jmp_buf env; } sj[SJ_MAX];   /* prov: ámbito de la procedencia al hacer setjmp */
 static int sj_armed; /* lo pone rt_sj_slot justo antes de la llamada directa a setjmp */
 
 static int sj_find(uint32_t fb, uint32_t buf) {
@@ -226,7 +238,7 @@ jmp_buf *rt_sj_slot(Cpu *c, uint32_t buf) {
     int i = sj_find(fb, buf);
     if (i < 0) for (i = 0; i < SJ_MAX && sj[i].valid; i++) {}
     if (i == SJ_MAX) rt_fatal(c, "demasiados setjmp activos");
-    sj[i].fiber = fb; sj[i].buf = buf; sj[i].valid = 1;
+    sj[i].fiber = fb; sj[i].buf = buf; sj[i].valid = 1; sj[i].prov = rt_prov_cur;
     sj_armed = 1;
     return &sj[i].env;
 }
@@ -248,6 +260,7 @@ _Noreturn void rt_sj_longjmp(Cpu *c, uint32_t buf, uint32_t val) {
     static const int offs[] = {0, 44, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40};
     for (int k = 0; k < 12; k++) c->r[regs[k]] = mem_r32(c, buf + offs[k]);
     c->r[2] = val;
+    if (rt_prov_on) { rt_prov_unwind(c->r[29]); rt_prov_cur = sj[i].prov; }   /* los marcos C saltados no restauran su ámbito */
     longjmp(sj[i].env, 1);
 }
 
