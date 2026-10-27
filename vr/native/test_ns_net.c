@@ -14,7 +14,7 @@
 #include "ns_adapt.h"
 #include "ns_extract.h"
 #include "ns_bridge.h"
-#include "vr_hand_mesh.h"
+#include "vr_hand_skin.h"
 
 static int checks, fails;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("FALLO %s:%d: %s ", __FILE__, __LINE__, #c); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -212,45 +212,45 @@ static void test_garbage_vertex(void) {
     }
 }
 
-/* 6. mano articulada propia en todas sus poses */
+/* 6. mano propia con skin (vr_hand_skin) en todas sus poses: ninguna pieza ni triángulo es rechazado por la red de seguridad */
 static void test_hand(void) {
+    static float pos[VRHA_NV][3];
     for (int side = -1; side <= 1; side += 2) {
-        VrHand h; VrHandDims d; vrhand_dims_default(&d);
-        CHECK(vrhand_build(&h, &d, side) == 0 || 1, "build");
         long tris = 0, bad = 0; float worst = 0;
         for (int gi = 0; gi <= 10; gi++) {
-            float xf[VRHAND_BONES][12];
-            vrhand_pose(&h, (float)gi / 10.0f, xf);
-            for (int k = 0; k < VRHAND_BONES; k++) {
-                const VrHandBoneMesh *b = &h.mesh[k];
-                NsVert v[VRHAND_MAX_V]; NsNorm n[VRHAND_MAX_V]; NsFace f[VRHAND_MAX_F];
-                memset(v, 0, sizeof v); memset(n, 0, sizeof n); memset(f, 0, sizeof f);
-                for (int i = 0; i < b->n_verts; i++) { v[i].x = b->v[i][0]; v[i].y = b->v[i][1]; v[i].z = b->v[i][2]; v[i].weld = 0xFF; n[i].x = b->n[i][0]; n[i].y = b->n[i][1]; n[i].z = b->n[i][2]; }
-                for (int i = 0; i < b->n_faces; i++) for (int q = 0; q < 4; q++) { f[i].v[q] = b->f[i][q]; f[i].n[q] = b->f[i][q]; }
+            float xf[VRHS_J][12], c[5];
+            for (int i = 0; i < 5; i++) c[i] = (float)gi / 10.0f;
+            vrhs_pose(c, 0.0f, side, xf);
+            vrhs_skin(xf, side, pos, NULL);
+            for (int k = 0; k < VRHA_NP; k++) {
+                const VrHaPiece *pc = &vrha_piece[k];
+                static NsVert v[256]; static NsFace f[VRHA_NT]; NsNorm n[1] = {{0, 0, 4096, 0}};
+                memset(f, 0, sizeof f);
+                for (int i = 0; i < pc->nv; i++) { const float *p = pos[pc->v0 + i]; v[i].x = (int16_t)lrintf(p[0]); v[i].y = (int16_t)lrintf(p[1]); v[i].z = (int16_t)lrintf(p[2]); v[i].weld = 0xFF; v[i].pad = 0; }
+                for (int t = 0; t < pc->nt; t++) { const uint8_t *tr = vrha_tri[pc->t0 + t]; f[t].v[0] = tr[0]; f[t].v[1] = tr[2]; f[t].v[2] = tr[1]; f[t].v[3] = tr[1]; f[t].flags = NS_FF_TRI; }
                 NsMesh m; memset(&m, 0, sizeof m);
-                m.n_verts = b->n_verts; m.n_norms = b->n_verts; m.n_faces = b->n_faces; m.verts = v; m.norms = n; m.faces = f;
+                m.n_verts = pc->nv; m.n_norms = 1; m.n_faces = pc->nt; m.verts = v; m.norms = n; m.faces = f;
                 uint32_t nt = ns_gpu_tri_count(&m);
-                NsGpuVert pv[VRHAND_MAX_V]; NsGpuCorner pc[3 * 2 * VRHAND_MAX_F];
-                ns_gpu_pack(&m, NULL, pv, pc, 0, NULL, NULL);
-                /* matriz de la manopla (brazo en otra parte del mundo, 1 unidad = 1 mm) por la pose del hueso */
+                static NsGpuVert pv[256]; static NsGpuCorner pcn[3 * VRHA_NT];
+                ns_gpu_pack(&m, NULL, pv, pcn, 0, NULL, NULL);
+                /* matriz de la manopla (brazo en otra parte del mundo, 1 unidad = 1 mm) */
                 NsGpuPiece P; memset(&P, 0, sizeof P);
-                float gl[12] = {0.8f, 0.0f, 0.6f, 12345.0f, 0.0f, 1.0f, 0.0f, -2000.0f, -0.6f, 0.0f, 0.8f, 777.0f};
-                for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) P.w[4 * i + j] = gl[4 * i] * xf[k][j] + gl[4 * i + 1] * xf[k][4 + j] + gl[4 * i + 2] * xf[k][8 + j];
-                    P.w[4 * i + 3] = gl[4 * i] * xf[k][3] + gl[4 * i + 1] * xf[k][7] + gl[4 * i + 2] * xf[k][11] + gl[4 * i + 3]; }
+                const float gl[12] = {0.8f, 0.0f, 0.6f, 12345.0f, 0.0f, 1.0f, 0.0f, -2000.0f, -0.6f, 0.0f, 0.8f, 777.0f};
+                memcpy(P.w, gl, sizeof gl);
                 P.flags = NSG_PF_DRAW | NSG_PF_NET; P.parent = -1; P.rest_r = ns_gpu_mesh_radius(&m);
                 NsGpuNetTris acc; memset(&acc, 0, sizeof acc);
-                uint32_t nb = ns_gpu_net_tris(pv, pc, nt, &P, 0, 0.001f, &acc);
+                uint32_t nb = ns_gpu_net_tris(pv, pcn, nt, &P, 0, 0.001f, &acc);
                 tris += nt; bad += nb; if (acc.worst_far_m > worst) worst = acc.worst_far_m;
                 NsGpuNetPiece np;
-                CHECK(ns_gpu_net_piece(pv, &P, 0, m.n_verts, 0.001f, &np) == 0, "hueso %d agarre %d: causas %u escala %.3f", k, gi, np.causes, np.max_scale);
-                if (gi == 5 && k == 3) {   /* la matriz de la manopla corrupta: la pieza no se dibuja */
+                CHECK(ns_gpu_net_piece(pv, &P, 0, m.n_verts, 0.001f, &np) == 0, "pieza %d cierre %d: causas %u escala %.3f", k, gi, np.causes, np.max_scale);
+                if (gi == 5 && k == 1) {   /* la matriz de la manopla corrupta: la pieza no se dibuja */
                     P.w[0] *= 5.0f; P.w[4] *= 5.0f; P.w[8] *= 5.0f;
                     CHECK((ns_gpu_net_piece(pv, &P, 0, m.n_verts, 0.001f, &np) & NSG_NET_MAT) != 0, "manopla corrupta no detectada (escala %.2f)", np.max_scale);
                 }
             }
         }
         CHECK(bad == 0, "mano %s: %ld de %ld triángulos colapsados", side > 0 ? "derecha" : "izquierda", bad, tris);
-        printf("  mano %s: %ld triángulos en 11 poses x 16 huesos, 0 colapsados esperados (%ld), peor lejanía al origen del hueso %.3f m\n", side > 0 ? "derecha" : "izquierda", tris, bad, worst);
+        printf("  mano %s: %ld triángulos en 11 poses x %d piezas, 0 colapsados esperados (%ld), peor lejanía al origen %.3f m\n", side > 0 ? "derecha" : "izquierda", tris, VRHA_NP, bad, worst);
     }
 }
 

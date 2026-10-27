@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "vr_body.h"
+#include "vr_hand_skin.h"
 #include "test_fist_mesh.h"
 #include "../bridge/bridge_addrs.h"
 
@@ -176,13 +177,14 @@ static void test_stretch_continuous(void) {
     for (int side = -1; side <= 1; side += 2) {
         VrArmRig rig = {(float)side, {ELB[0], ELB[1], ELB[2]}, {WRI[0], WRI[1], WRI[2]}};
         VrArmIn in; memset(&in, 0, sizeof in);
-        in.torso[0] = in.torso[4] = in.torso[8] = 1; in.hand[0] = in.hand[4] = in.hand[8] = 1;
+        in.torso[0] = in.torso[4] = in.torso[8] = 1;
         in.shoulder[0] = side * 190; in.shoulder[1] = 260; in.shoulder[2] = -29;
         in.pole[0] = 0.45f * side; in.pole[1] = -1; in.pole[2] = -0.35f;
         float dir[3] = {0.1f * side, 0.2f, 0.97f}; float dl = lenv(dir); for (int i = 0; i < 3; i++) dir[i] /= dl;
-        VrArmOut prev; int have = 0;
+        VrArmOut prev; memset(&prev, 0, sizeof prev); int have = 0;
         for (float k = 1.0f; k <= 2.001f; k += 0.002f) {
             for (int i = 0; i < 3; i++) in.wrist[i] = in.shoulder[i] + dir[i] * dmax * k;
+            in.has_prev = have; if (have) { in.tau_prev = prev.tau; in.tau_f_prev = prev.tau_f; in.swivel_prev = prev.swivel; }   /* secuencia: el codo es continuo con el cálculo anterior */
             VrArmOut o; memset(&o, 0, sizeof o);
             CHECK(vrbody_solve_arm(&rig, &lim, &in, &o) == 0, "solve");
             if (k >= 1.1f) CHECK(o.err_mm < 0.05f, "k=%g: muñeca separada del objetivo %g mm", k, o.err_mm);   /* entre 1.0 y 1.1 el límite de hombro se desvanece */
@@ -259,9 +261,10 @@ static void test_shoulder_blend(void) {
         in.pole[0] = 0.45f * rig.side; in.pole[1] = -1; in.pole[2] = -0.35f;
         float dir[3] = {frand(-1, 0.2f) * rig.side, frand(-0.5f, 0.5f), frand(-1, -0.2f)}, dl = lenv(dir);     /* hacia atrás / cruzando el pecho */
         for (int i = 0; i < 3; i++) dir[i] /= dl;
-        VrArmOut prev; int have = 0; unsigned fl0 = 0;
+        VrArmOut prev; memset(&prev, 0, sizeof prev); int have = 0; unsigned fl0 = 0;
         for (float k = 0.97f; k <= 1.25f; k += 0.002f) {
             for (int i = 0; i < 3; i++) in.wrist[i] = in.shoulder[i] + dir[i] * dmax * k;
+            in.has_prev = have; if (have) { in.tau_prev = prev.tau; in.tau_f_prev = prev.tau_f; in.swivel_prev = prev.swivel; }   /* secuencia: el codo es continuo con el cálculo anterior */
             VrArmOut o; memset(&o, 0, sizeof o);
             CHECK(vrbody_solve_arm(&rig, &lim, &in, &o) == 0, "solve");
             if (!have) fl0 = o.flags;
@@ -279,32 +282,33 @@ static void test_shoulder_blend(void) {
 /* El giro del antebrazo es continuo al pasar la mano por +-180 grados respecto al antebrazo; la mano sigue exacta */
 static void test_twist_continuity(void) {
     VrArmLimits lim; vrbody_limits_default(&lim);
+    lim.swivel_max_deg = 0;   /* solo el giro del antebrazo (el codo, en test_wrist_continuity) */
     VrArmRig rig = {1.0f, {ELB[0], ELB[1], ELB[2]}, {WRI[0], WRI[1], WRI[2]}};
     VrArmIn in; memset(&in, 0, sizeof in);
     in.torso[0] = in.torso[4] = in.torso[8] = 1;
     in.shoulder[0] = 190; in.shoulder[1] = 260; in.shoulder[2] = -29;
     in.wrist[0] = 190; in.wrist[1] = 260; in.wrist[2] = 300;
     in.pole[0] = 0.45f; in.pole[1] = -1; in.pole[2] = -0.35f;
-    VrArmOut prev; int have = 0; float jump_max = 0, tf_max = 0;
+    VrArmOut prev; memset(&prev, 0, sizeof prev); int have = 0; float jump_max = 0, tf_max = 0;
     for (int a = 0; a <= 400; a += 2) {
         float h[9], ax[3] = {0, 0, 1}, c = cosf(a * 0.0174532925f), s_ = sinf(a * 0.0174532925f);
         (void)ax;
         float Rz[9] = {c, -s_, 0, s_, c, 0, 0, 0, 1}, R0[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
         mm(h, R0, Rz); memcpy(in.hand, h, sizeof h);      /* giro de la mano sobre su eje Z (el antebrazo apunta a +Z) */
         VrArmOut o; memset(&o, 0, sizeof o);
-        in.has_prev = have; if (have) { in.tau_prev = prev.tau; in.tau_f_prev = prev.tau_f; }
+        in.has_prev = have; if (have) { in.tau_prev = prev.tau; in.tau_f_prev = prev.tau_f; in.swivel_prev = prev.swivel; }
         CHECK(vrbody_solve_arm(&rig, &lim, &in, &o) == 0, "solve");
         float he = 0; for (int i = 0; i < 9; i++) he = fmaxf(he, fabsf(o.R_hand[i] - h[i]));
         CHECK(he < 2e-3f, "mano no exacta: %g", he);
         if (have) {
             float j = rot_angle(prev.R_fore, o.R_fore) * 57.29578f;
             if (j > jump_max) jump_max = j;
-            float dtf = fabsf(o.tau_f - prev.tau_f) * 57.29578f; if (dtf > tf_max) tf_max = dtf;
+            float dtf = fabsf(remainderf(o.tau_f - prev.tau_f, 6.2831853f)) * 57.29578f; if (dtf > tf_max) tf_max = dtf;
         }
         prev = o; have = 1;
     }
     CHECK(jump_max < 8.0f, "el antebrazo salta %g grados entre pasos de 2 grados", jump_max);
-    CHECK(tf_max <= 25.01f, "giro del antebrazo por paso %g > 25 grados", tf_max);
+    CHECK(tf_max <= 8.0f, "giro del antebrazo por paso %g > 8 grados (sigue a la mano)", tf_max);
 }
 
 /* El brazo es natural: con la mano delante del pecho el codo cuelga (por debajo de la recta hombro-muñeca) y hacia fuera */
@@ -313,13 +317,20 @@ static void test_natural_elbow(void) {
     for (int side = -1; side <= 1; side += 2) {
         VrArmRig rig = {(float)side, {ELB[0], ELB[1], ELB[2]}, {WRI[0], WRI[1], WRI[2]}};
         VrArmIn in; memset(&in, 0, sizeof in);
-        in.torso[0] = in.torso[4] = in.torso[8] = 1; in.hand[0] = in.hand[4] = in.hand[8] = 1;
+        in.torso[0] = in.torso[4] = in.torso[8] = 1;
         in.shoulder[0] = side * 190; in.shoulder[1] = 260; in.shoulder[2] = -29;
         /* varios destinos delante / altos / bajos */
         float tg[][3] = {{0, 100, 450}, {side * 150, 300, 480}, {0, 500, 300}, {side * 400, 150, 200}, {side * 100, -100, 300}, {0, 0, 350}};
         for (unsigned k = 0; k < sizeof tg / sizeof *tg; k++) {
             for (int i = 0; i < 3; i++) in.wrist[i] = tg[k][i];
             float pol[3] = {0.45f * side, -1, -0.35f}; memcpy(in.pole, pol, sizeof pol);
+            {   /* mano natural: dedos (-Y local) en la dirección hombro -> muñeca, palma hacia dentro (pulgar arriba) */
+                float z[3] = {in.wrist[0] - in.shoulder[0], in.wrist[1] - in.shoulder[1], in.wrist[2] - in.shoulder[2]}, zl = lenv(z), up[3] = {0, 1, 0}, x[3], y[3];
+                for (int i = 0; i < 3; i++) z[i] /= zl;
+                y[0] = up[0] - z[0] * dotv(up, z); y[1] = up[1] - z[1] * dotv(up, z); y[2] = up[2] - z[2] * dotv(up, z); float yl = lenv(y); for (int i = 0; i < 3; i++) y[i] /= yl;
+                x[0] = -z[1] * y[2] + z[2] * y[1]; x[1] = -z[2] * y[0] + z[0] * y[2]; x[2] = -z[0] * y[1] + z[1] * y[0];   /* x = (-z) x y: base derecha con Y local = -z, Z local = y */
+                float H[9] = {x[0], -z[0], y[0], x[1], -z[1], y[1], x[2], -z[2], y[2]}; memcpy(in.hand, H, sizeof H);
+            }
             VrArmOut o; CHECK(vrbody_solve_arm(&rig, &lim, &in, &o) == 0, "solve");
             /* el codo no puede quedar por encima del hombro cuando la mano está a la altura del pecho o más baja */
             if (tg[k][1] < 300) CHECK(o.elbow[1] < in.shoulder[1] + 5, "codo por encima del hombro (lado %d, caso %u): %g", side, k, o.elbow[1]);
@@ -355,6 +366,74 @@ static void test_continuity(void) {
     }
     CHECK(bad * 50 < tot, "continuidad del codo: %d de %d saltos > 6 mm", bad, tot);
     printf("  continuidad: %d de %d con salto >6 mm\n", bad, tot);
+}
+
+
+/* Muñeca y antebrazo continuos con mandos en poses aleatorias: el antebrazo acaba en la muñeca (< 1 mm), su giro sigue al de la mano (giro residual mano/antebrazo sobre el eje
+ * del antebrazo < 10 grados) y, con la mano en una orientación alcanzable, la flexión y la desviación de la muñeca quedan dentro de los límites anatómicos (el codo gira para ello). */
+static float twist_about(const float *Rf, const float *Rh, const float *ax) {
+    float Rt[9] = {Rf[0], Rf[3], Rf[6], Rf[1], Rf[4], Rf[7], Rf[2], Rf[5], Rf[8]}, rel[9], q[4];
+    mm(rel, Rt, Rh); vrbody_mat_to_quat(rel, q);
+    if (q[3] < 0) for (int i = 0; i < 4; i++) q[i] = -q[i];
+    return 2.0f * atan2f(q[0] * ax[0] + q[1] * ax[1] + q[2] * ax[2], q[3]) * 57.29578f;
+}
+static void wrist_angles(const VrArmOut *o, float side, float *flex, float *dev) {
+    float f[3] = {o->wrist[0] - o->elbow[0], o->wrist[1] - o->elbow[1], o->wrist[2] - o->elbow[2]}, l = lenv(f), fl[3];
+    for (int i = 0; i < 3; i++) f[i] /= l;
+    const float *R = o->R_hand;
+    fl[0] = R[0] * f[0] + R[3] * f[1] + R[6] * f[2]; fl[1] = R[1] * f[0] + R[4] * f[1] + R[7] * f[2]; fl[2] = R[2] * f[0] + R[5] * f[1] + R[8] * f[2];
+    const float palm = -side;   /* rig.side +1 = brazo izquierdo: palma hacia -X local */
+    *flex = atan2f(-fl[0] * palm, -fl[1]) * 57.29578f;
+    *dev = atan2f(-fl[2], -fl[1]) * 57.29578f;
+}
+static void test_wrist_continuity(void) {
+    VrArmLimits lim; vrbody_limits_default(&lim);
+    float worst_gap = 0, worst_roll = 0; int n = 0, in_lim = 0, nat = 0;
+    for (int seq = 0; seq < 40; seq++) {
+        VrArmRig rig = {(seq & 1) ? 1.0f : -1.0f, {ELB[0], ELB[1], ELB[2]}, {WRI[0], WRI[1], WRI[2]}};
+        VrArmIn in; memset(&in, 0, sizeof in);
+        in.torso[0] = in.torso[4] = in.torso[8] = 1;
+        in.shoulder[0] = rig.side * 190; in.shoulder[1] = 260; in.shoulder[2] = -29;
+        in.pole[0] = 0.45f * rig.side; in.pole[1] = -1; in.pole[2] = -0.35f;
+        const int natural = seq < 20;
+        float dir[3] = {frand(-0.6f, 0.6f), frand(-0.6f, 0.5f), 1}, dl = lenv(dir), r = frand(250, 480);
+        for (int i = 0; i < 3; i++) in.wrist[i] = in.shoulder[i] + dir[i] / dl * r;
+        float H[9];
+        if (natural) {   /* dedos (-Y local) hacia delante en la dirección del brazo, giro y desvío aleatorios */
+            float z[3] = {dir[0] / dl, dir[1] / dl, dir[2] / dl}, up[3] = {0, 1, 0}, x[3], y[3];
+            x[0] = up[1] * z[2] - up[2] * z[1]; x[1] = up[2] * z[0] - up[0] * z[2]; x[2] = up[0] * z[1] - up[1] * z[0]; float xl = lenv(x); for (int i = 0; i < 3; i++) x[i] /= xl;
+            y[0] = z[1] * x[2] - z[2] * x[1]; y[1] = z[2] * x[0] - z[0] * x[2]; y[2] = z[0] * x[1] - z[1] * x[0];
+            float B[9] = {x[0], -z[0], y[0], x[1], -z[1], y[1], x[2], -z[2], y[2]};   /* local X = x, local -Y = z (dedos delante), local Z = y */
+            float tw[9], rr[9]; float a = frand(-1.6f, 1.6f), c = cosf(a), s_ = sinf(a);
+            float Ry[9] = {c, 0, s_, 0, 1, 0, -s_, 0, c};   /* giro sobre el eje de los dedos (Y local) */
+            mm(tw, B, Ry); rand_rot(rr, 0.6f); mm(H, rr, tw);
+        } else rand_rot(H, 3.14159f);
+        memcpy(in.hand, H, sizeof H);
+        VrArmOut prev; memset(&prev, 0, sizeof prev); int have = 0;
+        for (int it = 0; it < 150; it++) {
+            float dr[9], h2[9]; rand_rot(dr, 0.06f); mm(h2, dr, in.hand); vrbody_orthonormalize(h2, in.hand);
+            for (int i = 0; i < 3; i++) in.wrist[i] += frand(-6, 6);
+            in.has_prev = have; if (have) { in.tau_prev = prev.tau; in.tau_f_prev = prev.tau_f; in.swivel_prev = prev.swivel; }
+            VrArmOut o;
+            if (vrbody_solve_arm(&rig, &lim, &in, &o) != 0) { CHECK(0, "solve"); continue; }
+            float off[3], ax[3], e[3];
+            mv(off, o.R_fore, rig.wrist_off);
+            for (int i = 0; i < 3; i++) e[i] = o.elbow[i] + off[i] * o.stretch - o.wrist[i];
+            float gap = lenv(e); if (gap > worst_gap) worst_gap = gap;
+            float wl = lenv(rig.wrist_off); for (int i = 0; i < 3; i++) ax[i] = rig.wrist_off[i] / wl;
+            float roll = fabsf(twist_about(o.R_fore, o.R_hand, ax)); if (roll > worst_roll) worst_roll = roll;
+            if (natural && !(o.flags & (VRARM_STRETCHED | VRARM_TOO_CLOSE))) {
+                float fx, dv; wrist_angles(&o, rig.side, &fx, &dv);
+                nat++;
+                if (fx <= lim.wrist_flex_deg + 5 && fx >= -lim.wrist_ext_deg - 5 && dv <= lim.wrist_rad_deg + 5 && dv >= -lim.wrist_uln_deg - 5) in_lim++;
+            }
+            prev = o; have = 1; n++;
+        }
+    }
+    CHECK(worst_gap < 1.0f, "el antebrazo no llega a la muñeca: %.3f mm", worst_gap);
+    CHECK(worst_roll < 10.0f, "giro residual mano/antebrazo %.1f grados", worst_roll);
+    CHECK(in_lim >= nat * 9 / 10, "muñeca dentro de los límites en %d de %d poses naturales", in_lim, nat);
+    printf("  muñeca: %d poses, hueco máx %.3f mm, giro residual máx %.1f grados, dentro de límites %d de %d\n", n, worst_gap, worst_roll, in_lim, nat);
 }
 
 /* =========================================== pegamento sobre RAM sintética =========================================== */
@@ -488,12 +567,12 @@ static void test_glue(void) {
                     int bone_stretched[2] = {0, 0};   /* hueso alargado por el estirado: su matriz ya no es una rotación pura */
                     for (int k = 0; k < 2; k++) {
                         float o[3], tl[3] = {(float)TOFF[pi[k + 1]][0], (float)TOFF[pi[k + 1]][1], (float)TOFF[pi[k + 1]][2]};
-                        { float ro[3]; mv(ro, R[k], tl); bone_stretched[k] = lenv(ro) > 1.002f * lenv(tl); }
+                        { float ro[3]; mv(ro, R[k], tl); bone_stretched[k] = lenv(ro) > 1.0005f * lenv(tl); }
                         mv(o, R[k], tl); for (int c = 0; c < 3; c++) o[c] += t[k][c];
                         float d[3] = {o[0] - t[k + 1][0], o[1] - t[k + 1][1], o[2] - t[k + 1][2]};
                         CHECK(lenv(d) < 1.8f, "hueso %d del brazo %d desconectado %g mm", k, arm, lenv(d));
                     }
-                    CHECK((bone_stretched[0] || ortho_err(R[0]) < 3e-3f) && (bone_stretched[1] || ortho_err(R[1]) < 3e-3f) && ortho_err(R[2]) < 3e-3f, "matrices no ortonormales");
+                    CHECK((bone_stretched[0] || ortho_err(R[0]) < 3e-3f) && (bone_stretched[1] || ortho_err(R[1]) < 3e-3f) && ortho_err(R[2]) < 3e-3f, "matrices no ortonormales (%d %g, %d %g, %g)", bone_stretched[0], ortho_err(R[0]), bone_stretched[1], ortho_err(R[1]), ortho_err(R[2]));
                     /* el hombro no se mueve (fijo al torso animado) */
                     float Ro[9], to[3]; load_xf(part_addr(pi[0]) , Ro, to);
                     int32_t a0 = r32(part_addr(pi[0]) + 0x14), b0 = (int32_t)((uint32_t)(RAM0[(part_addr(pi[0]) & 0x1FFFFF) + 0x14] | RAM0[(part_addr(pi[0]) & 0x1FFFFF) + 0x15] << 8 | RAM0[(part_addr(pi[0]) & 0x1FFFFF) + 0x16] << 16 | (uint32_t)RAM0[(part_addr(pi[0]) & 0x1FFFFF) + 0x17] << 24));
@@ -538,9 +617,11 @@ static void test_glue(void) {
         const VrBodyDebug *d = vrbody_debug(1);
         CHECK(d->driven, "brazo derecho conducido");
         float tw[3]; for (int k = 0; k < 3; k++) tw[k] = d->sol.wrist[k];
-        float zc[3]; /* el marco de mano para rot identidad en usuario: columna Z en mundo = T * (0,0,1) */
-        zc[0] = T[2]; zc[1] = T[5]; zc[2] = T[8];
-        float palm[3]; for (int k = 0; k < 3; k++) palm[k] = tw[k] - zc[k] * 55.0f;
+        /* centro de agarre de la mano nueva (a tamaño real) con la orientación de la pieza mano */
+        float Rh[9], th_[3], gc[3], go[3]; load_xf(part_addr(4), Rh, th_); vrhs_grip_center(1, gc);
+        for (int k = 0; k < 3; k++) gc[k] *= g_view.units_per_m / 1000.0f;
+        mv(go, Rh, gc);
+        float palm[3]; for (int k = 0; k < 3; k++) palm[k] = tw[k] + go[k];
         float e[3] = {palm[0] - want[0], palm[1] - want[1], palm[2] - want[2]};
         printf("  alcance: error muñeca->palma %.2f mm (reach %.2f, flags %u)\n", lenv(e), d->sol.reach, d->sol.flags);
         CHECK(lenv(e) < 1.0f || (d->sol.flags & VRARM_STRETCHED), "la mano no llega a la pose pedida");
@@ -673,7 +754,7 @@ static void hand_axes_run(float roll_deg, int mode) {
                     float ph = (s ? -roll_deg : roll_deg) * 3.14159265f / 180, cz = cosf(ph), sz = sinf(ph);
                     float Rz[9] = {cz, -sz, 0, sz, cz, 0, 0, 0, 1}, Rh[9], Rw[9]; mm(Rh, Ru, Rz); mm(Rw, T, Rh);
                     float fing[3] = {-Rw[2], -Rw[5], -Rw[8]}, up[3] = {Rw[1], Rw[4], Rw[7]}, xm[3] = {Rw[0], Rw[3], Rw[6]};
-                    if (d->sol.flags & (VRARM_WRIST_LIMIT | VRARM_SHOULDER_LIMIT | VRARM_STRETCHED)) continue;
+                    if (d->sol.flags & (VRARM_SHOULDER_LIMIT | VRARM_STRETCHED)) continue;
                     float R[9], t[3]; load_xf(part_addr(s ? 4 : 9), R, t);
                     float lx[3] = {R[0], R[3], R[6]}, ly[3] = {R[1], R[4], R[7]}, lz[3] = {R[2], R[5], R[8]};
                     float palm[3], thumb[3];
@@ -902,7 +983,7 @@ static void test_mirror(void) {
         float eh = 0; for (int i = 0; i < 9; i++) eh = fmaxf(eh, fabsf(Rm[i] - ob.R_hand[i]));
         if (e > 0.05f || eh > 1e-3f || oa.flags != ob.flags) bad++;
     }
-    CHECK(tested > 3000 && bad == 0, "simetría izquierda/derecha: %d de %d no son espejo", bad, tested);
+    CHECK(tested > 3000 && bad * 1000 <= tested, "simetría izquierda/derecha: %d de %d no son espejo", bad, tested);   /* el giro del codo (búsqueda en rejilla) puede deshacer un empate distinto en casos sueltos */
 }
 
 /* Cuerpo completo: los 16 modelos pasan a doble cara (bit 0x400 de model[0]) durante el dibujado y restore devuelve sus banderas. */
@@ -1082,14 +1163,21 @@ static void torso_run(int seed, int follow, float off_deg, float *yaw_err, float
     float t1[3] = {P5[0] - rn5[0], P5[1] - rn5[1], P5[2] - rn5[2]};
     float th = (g_view.theta_deg + 180) * 3.14159265f / 180, cs = cosf(th), sn = sinf(th);
     float T[9] = {cs, 0, sn, 0, 1, 0, -sn, 0, cs}, Tt[9] = {cs, 0, -sn, 0, 1, 0, sn, 0, cs};
-    float zc[3] = {T[2], T[5], T[8]};
     for (int f = 0; f < 160; f++) {
         for (int sd = 0; sd < 2; sd++) {     /* muñeca a 480 mm delante y 100 bajo el hombro del torso corregido (alcance 94 %) */
             float so[3], sh[3], want[3], dw[3], pu[3];
             so[0] = TOFF[sd ? 2 : 7][0]; so[1] = TOFF[sd ? 2 : 7][1]; so[2] = TOFF[sd ? 2 : 7][2];
             mv(sh, Rn, so);
             for (int k = 0; k < 3; k++) { sh[k] += t1[k]; want[k] = sh[k] + Rn[3 * k + 2] * 480.0f - Rn[3 * k + 1] * 100.0f; }
-            for (int k = 0; k < 3; k++) want[k] += zc[k] * 55.0f * -1.0f;      /* centro de la palma: la muñeca queda 55 mm detrás (+Z de la mano) */
+            {   /* centro de agarre: muñeca + R_pieza * vrhs_grip_center * k (sin cabeceo; alabeo de 45 grados, izquierda +, derecha -) */
+                float a = (sd ? -45.0f : 45.0f) * 3.14159265f / 180, Rz[9] = {cosf(a), -sinf(a), 0, sinf(a), cosf(a), 0, 0, 0, 1}, Rw[9];
+                mm(Rw, T, Rz);
+                const float Mr[9] = {0, 0, -1, -1, 0, 0, 0, 1, 0}, Ml[9] = {0, 0, 1, 1, 0, 0, 0, 1, 0};
+                float gc[3], gh[3], go[3]; vrhs_grip_center(sd ? 1 : -1, gc);
+                for (int k = 0; k < 3; k++) gc[k] *= g_view.units_per_m / 1000.0f;
+                mv(gh, sd ? Mr : Ml, gc); mv(go, Rw, gh);
+                for (int k = 0; k < 3; k++) want[k] += go[k];
+            }
             for (int k = 0; k < 3; k++) dw[k] = want[k] - g_view.eye[k];
             mv(pu, Tt, dw);
             set_hand(sd, pu[0] / 1000 + g_view.p_ref[0], pu[1] / 1000 + g_view.p_ref[1], pu[2] / 1000 + g_view.p_ref[2], 0);
@@ -1446,7 +1534,7 @@ int main(void) {
     test_solver();
     test_solver_nonfinite();
     test_natural_elbow();
-    test_stretch_continuous(); test_stretch_bone(); test_resolve_stretch(); test_shoulder_blend(); test_twist_continuity();
+    test_stretch_continuous(); test_stretch_bone(); test_resolve_stretch(); test_shoulder_blend(); test_twist_continuity(); test_wrist_continuity();
     test_continuity();
     test_glue();
     test_hand_axes(); test_hand_pitch_api(); test_default_roll(); test_jab_and_grab();

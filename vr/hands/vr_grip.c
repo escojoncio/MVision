@@ -1,27 +1,31 @@
 /* vr_grip: ver vr_grip.h. */
 #include "vr_grip.h"
 
-/* Zócalos (hand-frame -> marco de empuñadura, m). Ver vr_grip.h; calculados con la mano por defecto:
- *   MAIN_YAW: R = Ry(-19,00 grados) * [[-1,0,0],[0,0,1],[0,1,0]] (apretón de manos), t = -R * centro de agarre.
- *   MAIN:     lo mismo sin guiñada (granada, colocables).
- *   SUPPORT:  palma hacia arriba bajo el guardamanos, pulgar hacia la boca, t = -R * centro de agarre. */
-#define MAIN_YAW  {{0.03251f, -0.02140f, 0.07428f}, {-0.09945f, 0.58429f, 0.80421f, 0.04428f}}
-#define MAIN      {{0.02416f, 0.00000f, 0.06656f}, {0.00000f, 0.70711f, 0.70711f, 0.00000f}}
-#define SUPPORT   {{0.06656f, -0.02416f, 0.00000f}, {0.70711f, 0.70711f, 0.00000f, 0.00000f}}
+/* Zócalos (marco de la mano -> marco de empuñadura, m; mano de vr_hand_skin a tamaño real). Ver vr_grip.h. Base: H = [x, a, x * a] con a = eje del mango en la mano (vrhs_handle_axis,
+ * cruza la palma en diagonal) y x = normal de la palma; t = -R * centro de agarre (vrhs_grip_center).
+ *   MAIN_YAW: apretón de manos (a -> +Y, palma -> -X) girado -16 grados de cabeceo (sobre X) y -13 de guiñada (sobre Y): la yema del índice con el gatillo suelto (HP_GRIP_PISTOL) cae en TRIG, el
+ *             gatillo de la pistola primitiva de test_grip.c (63 mm por delante y 32 por encima del centro del mango).
+ *   MAIN:     apretón de manos sin giro (colocables).
+ *   SPHERE:   como MAIN con el centro del objeto 12 mm por delante de la palma (granada de ~32 mm de radio en el hueco de la mano, HP_GRIP_SPHERE).
+ *   SUPPORT:  palma hacia arriba bajo el guardamanos, eje del mango a lo largo del cañón (hacia la boca), dedos hacia -X. */
+#define MAIN_YAW  {{0.03192f, -0.01609f, 0.07586f}, {-0.10496f, 0.61170f, 0.78295f, 0.04241f}}
+#define MAIN      {{0.04651f, -0.03637f, 0.05955f}, {0.00000f, 0.50000f, 0.86603f, 0.00000f}}
+#define SPHERE    {{0.05851f, -0.03637f, 0.05955f}, {0.00000f, 0.50000f, 0.86603f, 0.00000f}}
+#define SUPPORT   {{0.05955f, -0.04651f, 0.03637f}, {0.68301f, 0.68301f, 0.18301f, 0.18301f}}
 #define NONE_POSE {{0, 0, 0}, {0, 0, 0, 1}}
-#define TRIG      {0.00000f, 0.03240f, -0.06200f}
+#define TRIG      {0.00017f, 0.03195f, -0.06314f}
 
 /* ids de game_weapon_id (tabla del puente): 0 pistola, 1 fusil, 2 granada, 3 guiado, 4 antiaéreo, 5 mina, 6 adhesivo con mando, 7 y 8 variantes de granada, 9 francotirador. */
 static const VrGripEntry TABLE[] = {
     {0, HP_GRIP_PISTOL,  HP_GRIP_SUPPORT, 1, MAIN_YAW, TRIG,         SUPPORT},
     {1, HP_GRIP_RIFLE,   HP_GRIP_SUPPORT, 1, MAIN_YAW, TRIG,         SUPPORT},
-    {2, HP_GRIP_SPHERE,  -1,              0, MAIN,     {0, 0, 0},    NONE_POSE},
+    {2, HP_GRIP_SPHERE,  -1,              0, SPHERE,     {0, 0, 0},    NONE_POSE},
     {3, HP_GRIP_RIFLE,   HP_GRIP_SUPPORT, 1, MAIN_YAW, TRIG,         SUPPORT},
     {4, HP_GRIP_RIFLE,   HP_GRIP_SUPPORT, 1, MAIN_YAW, TRIG,         SUPPORT},
     {5, HP_GRIP_PLACED,  -1,              0, MAIN,     {0, 0, 0},    NONE_POSE},
     {6, HP_GRIP_PLACED,  -1,              0, MAIN,     {0, 0, 0},    NONE_POSE},
-    {7, HP_GRIP_SPHERE,  -1,              0, MAIN,     {0, 0, 0},    NONE_POSE},
-    {8, HP_GRIP_SPHERE,  -1,              0, MAIN,     {0, 0, 0},    NONE_POSE},
+    {7, HP_GRIP_SPHERE,  -1,              0, SPHERE,     {0, 0, 0},    NONE_POSE},
+    {8, HP_GRIP_SPHERE,  -1,              0, SPHERE,     {0, 0, 0},    NONE_POSE},
     {9, HP_GRIP_RIFLE,   HP_GRIP_SUPPORT, 1, MAIN_YAW, TRIG,         SUPPORT},
 };
 #define N_TABLE ((int)(sizeof TABLE / sizeof TABLE[0]))

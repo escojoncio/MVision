@@ -164,7 +164,8 @@ void vrbody_stretch_bone(float R[9], const float off[3], float s) {
 }
 void vrbody_limits_default(VrArmLimits *l) {
     l->elbow_min_deg = 32; l->reach_margin = 0.999f; l->shoulder_back = -0.80f; l->shoulder_cross = -0.85f;
-    l->wrist_swing_deg = 70; l->forearm_share = 0.6f; l->forearm_twist_deg = 85; l->hand_twist_deg = 70;
+    l->wrist_swing_deg = 70; l->forearm_share = 1.0f; l->forearm_twist_deg = 180; l->hand_twist_deg = 70;
+    l->wrist_flex_deg = 80; l->wrist_ext_deg = 70; l->wrist_rad_deg = 20; l->wrist_uln_deg = 30; l->swivel_max_deg = 90;
 }
 
 /* Marco de un hueso: R * offset_local = largo * w (w unitario), con el eje x local llevado (lo más cerca posible) a `hint`.
@@ -183,7 +184,7 @@ static void bone_frame(float *R, const float *off_local, const float *w, const f
     for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) R[3 * i + j] = w[i] * l0[j] + w1[i] * l1[j] + w2[i] * l2[j];
 }
 
-int vrbody_solve_arm(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn *in, VrArmOut *out) {
+static int solve_core(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn *in, VrArmOut *out, float swivel_deg) {
     if (!rig || !lim || !in || !out) return -1;
     if (!isfinite(lim->elbow_min_deg) || !isfinite(lim->reach_margin) || !isfinite(lim->shoulder_back) || !isfinite(lim->shoulder_cross) ||
         !isfinite(lim->wrist_swing_deg) || !isfinite(lim->forearm_share) || !isfinite(lim->forearm_twist_deg) || !isfinite(lim->hand_twist_deg))
@@ -218,6 +219,7 @@ int vrbody_solve_arm(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn 
 
     /* vector polar: perpendicular al brazo; si es paralelo, alternativas del marco del torso */
     float pw[3]; v_norm(pw, in->pole, down);
+    if (swivel_deg != 0.0f) { float Rs[9]; m_axis_angle(Rs, vh, swivel_deg * DEG); float t0[3]; m_mulv(t0, Rs, pw); v_cp(pw, t0); }   /* codo girado alrededor de la recta hombro-muñeca */
     float pp[3], t[3];
     v_madd(t, pw, vh, -v_dot(pw, vh));
     if (v_norm(pp, t, NULL) < 0.05f) {
@@ -308,24 +310,67 @@ int vrbody_solve_arm(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn 
         tau = ref + (tau - ref) - TWO_PI * roundf((tau - ref) / TWO_PI);
     }
     const float tf_lim = lim->forearm_twist_deg * DEG;
-    float tf_want = clampf(clampf(lim->forearm_share, 0.0f, 1.0f) * tau, -tf_lim, tf_lim);
-    float tau_f = tf_want;
-    if (fabsf(clampf(lim->forearm_share, 0.0f, 1.0f) * tau) > tf_lim + 1e-6f) flags |= VRARM_WRIST_LIMIT;
-    if (in->has_prev && isfinite(in->tau_f_prev)) {   /* velocidad máxima del antebrazo: 25 grados por cálculo */
-        const float step = 25.0f * DEG;
-        tau_f = in->tau_f_prev + clampf(tf_want - in->tau_f_prev, -step, step);
-        if (tau_f != tf_want) flags |= VRARM_WRIST_LIMIT;
-    }
+    float tf_want = clampf(lim->forearm_share, 0.0f, 1.0f) * tau;
+    if (tf_lim >= 3.14159f) tf_want -= 6.28318531f * roundf(tf_want / 6.28318531f);   /* sin tope: el antebrazo lleva el giro de la mano (una vuelta entera es la misma pieza) */
+    else tf_want = clampf(tf_want, -tf_lim, tf_lim);
+    float tau_f = tf_want;                            /* el antebrazo gira con la mano en el mismo cálculo (sin velocidad máxima: si no, la mano gira sola sobre el antebrazo) */
+    if (tf_lim < 3.14159f && fabsf(clampf(lim->forearm_share, 0.0f, 1.0f) * tau) > tf_lim + 1e-6f) flags |= VRARM_WRIST_LIMIT;
     if (fabsf(tau_f) > 1e-6f) { float Rt[9]; m_axis_angle(Rt, f, tau_f); m_mulm(R_fa, Rt, R_fa); }
     memcpy(out->R_hand, hand_t, sizeof hand_t);
     memcpy(out->R_upper, R_up, sizeof R_up);
     memcpy(out->R_fore, R_fa, sizeof R_fa);
     v_cp(out->elbow, E); v_cp(out->wrist, W2);
     out->reach = d / (L1 + L2);
-    out->stretch = sk; out->tau = tau; out->tau_f = tau_f;
+    out->stretch = sk; out->tau = tau; out->tau_f = tau_f; out->swivel = swivel_deg;
     float dw[3]; v_sub(dw, W2, in->wrist);
     out->err_mm = v_len(dw);
     out->flags = flags;
+    return 0;
+}
+
+/* Exceso (grados) de la muñeca sobre sus límites: flexión/extensión y desviación del antebrazo visto desde la mano (dedos -Y local, palma +X en la mano derecha, pulgar +Z). */
+static float wrist_excess(const VrArmRig *rig, const VrArmLimits *lim, const VrArmOut *o) {
+    float f[3]; v_sub(f, o->wrist, o->elbow);
+    if (v_norm(f, f, NULL) < 1e-6f) return 0.0f;
+    float Rt[9], fl[3]; m_transpose(Rt, o->R_hand); m_mulv(fl, Rt, f);
+    const float palm = rig->side >= 0 ? -1.0f : 1.0f;   /* side +1 = brazo izquierdo: palma hacia -X local */
+    const float fx = atan2f(-fl[0] * palm, -fl[1]) / DEG, dv = atan2f(-fl[2], -fl[1]) / DEG;
+    return fmaxf(0.0f, fx - lim->wrist_flex_deg) + fmaxf(0.0f, -lim->wrist_ext_deg - fx) + fmaxf(0.0f, dv - lim->wrist_rad_deg) + fmaxf(0.0f, -lim->wrist_uln_deg - dv);
+}
+static float swivel_cost(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn *in, const VrArmOut *o, float sw) {
+    const float ex = wrist_excess(rig, lim, o), tw = fmaxf(0.0f, fabsf(o->tau_f) / DEG - 100.0f);
+    float c = ex * ex + 0.5f * tw * tw + 0.02f * sw * sw + 10.0f * o->err_mm * o->err_mm;   /* la muñeca en el objetivo manda (límites del hombro y del codo) */
+    if (in->has_prev && isfinite(in->swivel_prev)) c += 0.2f * (sw - in->swivel_prev) * (sw - in->swivel_prev);   /* continuidad: el codo no salta entre cálculos */
+    return c;
+}
+
+#define SWIVEL_STEP 5.0f
+/* El codo gira alrededor de la recta hombro-muñeca (swivel, como el brazo real) lo justo para que la muñeca quede dentro de sus límites y el antebrazo no pase de +-100 grados de giro:
+ * búsqueda gruesa (10 grados) y fina (1 grado) del mínimo de swivel_cost. La mano conserva siempre la orientación pedida. */
+int vrbody_solve_arm(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn *in, VrArmOut *out) {
+    if (!rig || !lim || !in || !out) return -1;
+    const float mx = isfinite(lim->swivel_max_deg) ? clampf(lim->swivel_max_deg, 0.0f, 150.0f) : 0.0f;
+    if (!isfinite(lim->wrist_flex_deg) || !isfinite(lim->wrist_ext_deg) || !isfinite(lim->wrist_rad_deg) || !isfinite(lim->wrist_uln_deg)) return -1;
+    VrArmOut best, o;
+    if (solve_core(rig, lim, in, &best, 0.0f) != 0) return -1;
+    float bc = swivel_cost(rig, lim, in, &best, 0.0f), bs = 0.0f;
+    if (mx > 0.0f) {
+        const int prev = in->has_prev && isfinite(in->swivel_prev);
+        const float c0 = prev ? clampf(in->swivel_prev, -mx, mx) : 0.0f;
+        const float lo0 = prev ? fmaxf(-mx, c0 - SWIVEL_STEP) : -mx, hi0 = prev ? fminf(mx, c0 + SWIVEL_STEP) : mx;   /* el codo gira como mucho SWIVEL_STEP por cálculo */
+        if (prev) { bs = c0; if (solve_core(rig, lim, in, &best, c0) != 0) return -1; bc = swivel_cost(rig, lim, in, &best, c0); }
+        for (int pass = 0; pass < 2; pass++) {
+            const float step = pass ? 1.0f : (prev ? 3.0f : 10.0f), lo = pass ? fmaxf(lo0, bs - 9.0f) : lo0, hi = pass ? fminf(hi0, bs + 9.0f) : hi0;
+            for (float sw = lo; sw <= hi + 1e-3f; sw += step) {
+                const float s2 = sw;
+                if (fabsf(s2) > mx + 1e-3f || solve_core(rig, lim, in, &o, s2) != 0) continue;
+                const float c = swivel_cost(rig, lim, in, &o, s2);
+                if (c < bc) { bc = c; bs = s2; best = o; }
+            }
+        }
+    }
+    if (wrist_excess(rig, lim, &best) > 0.5f) best.flags |= VRARM_WRIST_LIMIT;
+    *out = best;
     return 0;
 }
 
@@ -334,7 +379,7 @@ typedef struct {
     int init;              /* filtro inicializado (con una pose válida) */
     int was_valid;
     float pos[3], q[4];    /* pose filtrada (espacio del usuario) */
-    int tau_ok; float tau, tau_f;   /* giro de la mano respecto al antebrazo del último cálculo (continuidad del antebrazo) */
+    int tau_ok; float tau, tau_f, swivel;   /* giro de la mano respecto al antebrazo y del codo del último cálculo (continuidad) */
     float aq[4]; int aim_ok; /* apuntado filtrado (si el mando lo entrega) */
     float pitch_s; int pitch_init, pitch_miss;   /* cabeceo automático suavizado, y fotogramas seguidos sin valor válido */
     float w;               /* peso de fundido 0..1 */
@@ -1019,7 +1064,15 @@ static int apply_main(uint8_t *ram) {
         vrbody_quat_to_mat(Rq, Ru);
         float Rw[9]; m_mulm(Rw, T, Ru);                                    /* ejes del marco de mano en el mundo */
         float zc[3]; m_col(zc, Rw, 2);
-        float wrist_t[3]; v_madd(wrist_t, Pw, zc, cfg->grip_to_wrist_mm);  /* la muñeca queda hacia atrás de la palma (+Z de la mano) */
+        /* muñeca = agarre - (centro de agarre de la mano nueva, a tamaño real) girado con la mano: la palma rodea el mango del mando y la mano gira alrededor del mango, no de la muñeca */
+        float gch[3];
+        {
+            float gc[3], Mh[9];
+            vrhs_grip_center(s == 1 ? 1 : -1, gc);
+            v_scale(gc, gc, view.units_per_m / 1000.0f);
+            hand_map(rig.side, Mh); m_mulv(gch, Mh, gc);                  /* en el marco de mano de vr_pose.h */
+        }
+        float wrist_t[3]; { float o_[3]; m_mulv(o_, Rw, gch); v_sub(wrist_t, Pw, o_); }
 
         /* agarre de un enemigo: la mano se pega al cuello (transición suave) y vuelve al mando al soltar */
         {
@@ -1050,7 +1103,7 @@ static int apply_main(uint8_t *ram) {
                 float A[9]; m_setcol(A, 0, x_); m_setcol(A, 1, y_); m_setcol(A, 2, z_);
                 float ph = (s == 0 ? 1.0f : -1.0f) * cfg->grab_roll_deg * DEG, cz = cosf(ph), sz = sinf(ph);
                 float Rz[9] = {cz, -sz, 0, sz, cz, 0, 0, 0, 1}, Ra[9]; m_mulm(Ra, A, Rz);
-                float wr_a[3]; v_madd(wr_a, C, z_, cfg->grip_to_wrist_mm);
+                float wr_a[3]; { float o_[3]; m_mulv(o_, Ra, gch); v_sub(wr_a, C, o_); }
                 for (int i = 0; i < 3; i++) wrist_t[i] += (wr_a[i] - wrist_t[i]) * ae;
                 float qa_[4], qb_[4], qm_[4]; vrbody_mat_to_quat(Rw, qa_); vrbody_mat_to_quat(Ra, qb_); q_slerp(qm_, qa_, qb_, ae); vrbody_quat_to_mat(qm_, Rw);
                 G.st.grab_applies++;
@@ -1087,10 +1140,10 @@ static int apply_main(uint8_t *ram) {
             if (v_norm(pn, pe_, NULL) > 5.0f) for (int i = 0; i < 3; i++) pole[i] = pn[i] * (1 - we_w) + pole_nat[i] * we_w;
         }
         VrArmIn in; v_cp(in.shoulder, Sh); memcpy(in.torso, Tq, sizeof Tq); v_cp(in.wrist, wt); memcpy(in.hand, Rtb, sizeof Rtb); v_cp(in.pole, pole);
-        in.has_prev = h->tau_ok; in.tau_prev = h->tau; in.tau_f_prev = h->tau_f;
+        in.has_prev = h->tau_ok; in.tau_prev = h->tau; in.tau_f_prev = h->tau_f; in.swivel_prev = h->swivel;
         VrArmOut sol;
         if (vrbody_solve_arm(&rig, &cfg->limits, &in, &sol) != 0) { G.st.bad_solve++; h->tau_ok = 0; continue; }
-        h->tau_ok = 1; h->tau = sol.tau; h->tau_f = sol.tau_f;
+        h->tau_ok = 1; h->tau = sol.tau; h->tau_f = sol.tau_f; h->swivel = sol.swivel;
         if (sol.flags & VRARM_STRETCHED) G.st.stretched++;
         if (sol.flags & VRARM_TOO_CLOSE) G.st.too_close++;
         if (sol.flags & VRARM_SHOULDER_LIMIT) G.st.shoulder_limit++;
@@ -1141,7 +1194,7 @@ static int apply_main(uint8_t *ram) {
                 float c[3]; m_col(c, Re, j);
                 f[4 * j] = c[0]; f[4 * j + 1] = c[1]; f[4 * j + 2] = c[2]; f[4 * j + 3] = 0;
             }
-            for (int j = 0; j < 3; j++) f[12 + j] = wu[j] - ez[j] * (cfg->grip_to_wrist_mm / view.units_per_m);
+            { float gc[3], o_[3]; vrhs_grip_center(s == 1 ? 1 : -1, gc); m_mulv(o_, Rpu, gc); for (int j = 0; j < 3; j++) f[12 + j] = wu[j] + o_[j] * 0.001f; (void)ez; }   /* centro de agarre (m reales) */
             f[15] = 1;
             G.dbg_frame_ok[s] = all_finite(f, 16);
         }
@@ -1151,7 +1204,7 @@ static int apply_main(uint8_t *ram) {
             memset(L, 0, sizeof *L);
             L->rig = rig; L->lim = cfg->limits; L->upm = view.units_per_m;
             /* la ruta viva (vrbody_arm_resolve) parte del giro del antebrazo del ÚLTIMO apply (tau_prev, tau_f_prev): su antebrazo cambia como mucho 25 grados respecto a él */
-            L->has_prev = in.has_prev; L->tau_prev = in.tau_prev; L->tau_f_prev = in.tau_f_prev;
+            L->has_prev = in.has_prev; L->tau_prev = in.tau_prev; L->tau_f_prev = in.tau_f_prev; L->swivel_prev = in.swivel_prev;
             float v[3];
             v_sub(v, Sh, view.eye); m_mulv(v, tr, v); v_scale(v, v, 1.0f / view.units_per_m); v_add(L->shoulder, v, view.p_ref);
             v_sub(v, wt, view.eye); m_mulv(v, tr, v); v_scale(v, v, 1.0f / view.units_per_m); v_add(L->wrist, v, view.p_ref);
@@ -1270,7 +1323,7 @@ int vrbody_arm_resolve(const VrBodyArmLive *a, const float live_p[3], const floa
     memcpy(in.torso, a->torso, sizeof in.torso);
     m_mulm(in.hand, Rd, a->hand);
     v_cp(in.pole, a->pole);
-    in.has_prev = a->has_prev; in.tau_prev = a->tau_prev; in.tau_f_prev = a->tau_f_prev;
+    in.has_prev = a->has_prev; in.tau_prev = a->tau_prev; in.tau_f_prev = a->tau_f_prev; in.swivel_prev = a->swivel_prev;
     VrArmOut sol;
     if (vrbody_solve_arm(&a->rig, &a->lim, &in, &sol) != 0) return -1;
     float inv = 1.0f / a->upm;

@@ -17,7 +17,7 @@
 #include "vr_fire.h"
 #include "vr_glove.h"
 #include "vr_grip.h"
-#include "vr_hand_mesh.h"
+#include "vr_hand_skin.h"
 #include "vr_hand_pose.h"
 #include "vr_hands.h"
 #include "vr_pose.h"
@@ -203,16 +203,12 @@ static GripPose hand_from_arm(const float R[9], const float wrist[3]) {
     m3_to_q(R, g.q); memcpy(g.p, wrist, sizeof g.p); g.valid = finite_n(g.p, 3) && finite_n(g.q, 4);
     return g;
 }
-/* Marco de la MANO nueva (el de la pieza mano del personaje y de vr_hand_mesh: dedos -Y, palma +X en la derecha, pulgar +Z; origen en la muñeca; m, espacio recentrado) con el que el arma
+/* Marco de la MANO nueva (el de la pieza mano del personaje y de vr_hand_skin: dedos -Y, palma +X en la derecha, pulgar +Z; origen en la muñeca; m, espacio recentrado) con el que el arma
  * cuelga de la mano: el de la IK repetida con el agarre vivo (el mismo del guante); sin IK (sin cuerpo o sin brazo movido) el agarre girado por hand_rot_offset y el mapa de la pieza mano.
  * *upm = unidades del motor por metro (1000 si no se sabe). HM tomado. */
-static GripPose hand_frame_locked(int side, uint64_t now, float *upm) {
+static GripPose hand_frame_locked(int side, uint64_t now) {
     VrBodyArmLive a; GripPose gn; VrBodyArmPose ap;
-    if (upm) *upm = 1000.0f;
-    if (live_arm_locked(side, now, &a, &gn, &ap, NULL, NULL)) {
-        if (upm && a.upm > 1.0f) *upm = a.upm;
-        return hand_from_arm(ap.R_hand, ap.wrist);
-    }
+    if (live_arm_locked(side, now, &a, &gn, &ap, NULL, NULL)) return hand_from_arm(ap.R_hand, ap.wrist);
     GripPose g = grip_locked(&hand_in[side], now), o;
     memset(&o, 0, sizeof o);
     if (!g.valid) return o;
@@ -225,16 +221,10 @@ static GripPose hand_frame_locked(int side, uint64_t now, float *upm) {
     static const float MR[9] = {0, 0, -1, -1, 0, 0, 0, 1, 0}, ML[9] = {0, 0, 1, 1, 0, 0, 0, 1, 0};
     const float *M = side == 1 ? MR : ML;
     for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) Rf[3 * r + c] = Rg[r] * M[c] + Rg[4 + r] * M[3 + c] + Rg[8 + r] * M[6 + c];
-    float zc[3] = {Rg[8], Rg[9], Rg[10]}, org[3];
-    const float gtw = bc ? bc->grip_to_wrist_mm : 0.0f;
-    for (int i = 0; i < 3; i++) org[i] = g.p[i] + zc[i] * gtw / 1000.0f;
+    float c[3], org[3];                                          /* muñeca = agarre - R_mano * centro de agarre (la mano se dibuja a tamaño real: mm -> m) */
+    vrhs_grip_center(side == 1 ? 1 : -1, c);
+    for (int i = 0; i < 3; i++) org[i] = g.p[i] - (Rf[3 * i] * c[0] + Rf[3 * i + 1] * c[1] + Rf[3 * i + 2] * c[2]) * VRHS_UNIT_M;
     return hand_from_arm(Rf, org);
-}
-/* Escala de la mano dibujada respecto a los zócalos de vr_grip (m por unidad del marco de la mano = vrhand_unit_m de la mano por defecto): la malla se dibuja a 1/upm m por unidad. */
-static float hand_socket_scale(float upm) {
-    static float um;
-    if (!(um > 0.0f)) { static VrHand h; um = vrhand_build(&h, NULL, 1) == 0 ? vrhand_unit_m(&h) : 0.0f; }
-    return um > 0.0f && upm > 1.0f ? 1.0f / (um * upm) : 1.0f;
 }
 
 /* Manos para la IK de los brazos (hilo de emulación, etapa de dibujado). */
@@ -310,7 +300,7 @@ int32_t mv_vrgame_debug_frame(int32_t kind, int32_t side, float m[16]) {
     pthread_mutex_lock(&HM);
     GripPose g;
     if (kind == 0) g = grip_locked(&hand_in[side], now);
-    else { g = hand_frame_locked(opt_right ? 1 : 0, now, NULL); if (!pub_status.active) g.valid = 0; }
+    else { g = hand_frame_locked(opt_right ? 1 : 0, now); if (!pub_status.active) g.valid = 0; }
     pthread_mutex_unlock(&HM);
     if (!g.valid) return 0;
     m16_from_pq(g.p, g.q, m);
@@ -908,10 +898,9 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     int right, rmode;
     pthread_mutex_lock(&HM);
     right = opt_right; rmode = opt_reload;
-    float hand_upm = 1000.0f;
     memset(wp, 0, sizeof wp);
     for (int i = 0; i < 2; i++) { hs[i] = hand_in[i]; gp[i] = grip_locked(&hand_in[i], now); }
-    if (gp[right ? 1 : 0].valid) wp[right ? 1 : 0] = hand_frame_locked(right ? 1 : 0, now, &hand_upm);   /* marco de la MANO del arma (IK viva), no el agarre del mando */
+    if (gp[right ? 1 : 0].valid) wp[right ? 1 : 0] = hand_frame_locked(right ? 1 : 0, now);   /* marco de la MANO del arma (IK viva), no el agarre del mando */
     pthread_mutex_unlock(&HM);
 
     /* cuerpo: agarre de cada mano y mano dominante (la IK de los brazos lee las poses por vrpose_get_hands) */
@@ -1045,9 +1034,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     const VrGripEntry *ge = vrgrip_find(gid);
     {
         WPose sock = ge ? ge->grip : wpose_identity();
-        if (!w) sock = vrgrip_mirror(sock);                                   /* mando izquierdo: zócalo reflejado */
-        float k = hand_socket_scale(hand_upm);
-        sock.p.x *= k; sock.p.y *= k; sock.p.z *= k;
+        if (!w) sock = vrgrip_mirror(sock);                                   /* mando izquierdo: zócalo reflejado (la mano se dibuja a tamaño real: el zócalo va en m reales) */
         vrhands_set_socket(sl->rig, sock);
     }
     in.hand[0] = vrhands_weapon_hand(sl->rig, &hp);
@@ -1339,7 +1326,7 @@ static GripPose scene_hand_locked(int side, uint64_t now) {
         VrBodyArmPose ap;
         if (vrbody_arm_resolve(&a, a.grip_p, a.grip_q, &ap) == 0) { GripPose g = hand_from_arm(ap.R_hand, ap.wrist); if (g.valid) return g; }
     }
-    return hand_frame_locked(side, now, NULL);
+    return hand_frame_locked(side, now);
 }
 /* [agarre] (1 Hz): desvío (mm) entre la muñeca viva (IK con el agarre del mando de ahora, mv_vrgame_forearm_live) y la mano a la que va pegada el arma dibujada (la de la escena), y cuánto movió
  * la compensación respecto a la mano con la que se simuló (sim -> escena). Con ambas manos del mismo instante el desvío sería 0: lo que se ve es la latencia de la escena nativa. */
@@ -1364,7 +1351,7 @@ int mv_host_hands(VrHandsFrame *out) {
         int w = opt_right ? 1 : 0;
         GripPose hn = scene_hand_locked(w, now), hs = pub_sim_hand;
         if (hn.valid && hs.valid) {
-            GripPose lv = hand_frame_locked(w, now, NULL);
+            GripPose lv = hand_frame_locked(w, now);
             if (lv.valid) agarre_diag(now, w, &lv, &hn, &hs);
             float qc[4], qd[4], pd[3], rp[3];
             q_conj(hs.q, qc);

@@ -51,16 +51,19 @@ typedef struct VrArmLimits {
     float shoulder_back;     /* componente "hacia delante" mínima del brazo superior (marco del torso, unitario); defecto -0.80 */
     float shoulder_cross;    /* componente "hacia fuera" mínima (negativa = cruza el pecho); defecto -0.85 */
     float wrist_swing_deg;   /* SIN USO (la mano lleva siempre la orientación del mando); se conserva por compatibilidad */
-    float forearm_share;     /* parte del giro (pronación) que asume el antebrazo, 0..1; defecto 0.6 */
-    float forearm_twist_deg; /* giro máximo del antebrazo sobre su eje; defecto 85 */
+    float forearm_share;     /* parte del giro (pronación) que asume el antebrazo, 0..1; defecto 1 (el antebrazo gira con la mano: brazo y mano continuos) */
+    float forearm_twist_deg; /* giro máximo del antebrazo sobre su eje; defecto 180 (sin tope efectivo: el exceso sobre +-100 grados lo absorbe el giro del codo, swivel) */
     float hand_twist_deg;    /* SIN USO (la mano absorbe todo el giro sobrante); se conserva por compatibilidad */
+    float wrist_flex_deg, wrist_ext_deg;   /* flexión (palma) y extensión (dorso) máximas de la muñeca; defecto 80 / 70 */
+    float wrist_rad_deg, wrist_uln_deg;    /* desviación radial (pulgar) y cubital máximas; defecto 20 / 30 */
+    float swivel_max_deg;    /* giro máximo del codo alrededor de la recta hombro-muñeca respecto al codo polar para respetar esos límites; defecto 90 (0 = codo polar fijo) */
 } VrArmLimits;
 
 enum {
     VRARM_STRETCHED = 1,       /* objetivo fuera de alcance: brazo extendido, mano en el punto alcanzable más cercano */
     VRARM_TOO_CLOSE = 2,       /* objetivo más cerca que la flexión máxima del codo */
     VRARM_SHOULDER_LIMIT = 4,  /* se aplicó el límite del hombro */
-    VRARM_WRIST_LIMIT = 8,     /* el reparto del giro del antebrazo (apariencia) quedó recortado por forearm_twist_deg o por su velocidad máxima; la mano nunca se limita */
+    VRARM_WRIST_LIMIT = 8,     /* la muñeca quedó fuera de sus límites aun girando el codo, o el giro del antebrazo quedó recortado por forearm_twist_deg; la mano nunca se limita */
     VRARM_POLE_FALLBACK = 16   /* el vector polar era paralelo al brazo: se usó una alternativa */
 };
 
@@ -70,8 +73,9 @@ typedef struct VrArmIn {
     float wrist[3];          /* objetivo de la muñeca (mm, mundo) */
     float hand[9];           /* orientación objetivo de la pieza mano (columnas = ejes locales de la mano, en mundo) */
     float pole[3];           /* hacia dónde apunta el codo (mundo; se proyecta perpendicular al brazo) */
-    int has_prev;            /* 1: tau_prev/tau_f_prev son los del cálculo anterior de este brazo (giro del antebrazo continuo, sin saltos de +-180 grados) */
+    int has_prev;            /* 1: tau_prev/tau_f_prev/swivel_prev son los del cálculo anterior de este brazo (giro del antebrazo y codo continuos, sin saltos) */
     float tau_prev, tau_f_prev;   /* VrArmOut.tau y .tau_f del cálculo anterior (rad) */
+    float swivel_prev;       /* VrArmOut.swivel del cálculo anterior (grados) */
 } VrArmIn;
 
 typedef struct VrArmOut {
@@ -79,7 +83,8 @@ typedef struct VrArmOut {
     float R_upper[9], R_fore[9], R_hand[9]; /* orientación de las piezas brazo, antebrazo y mano */
     float reach;                         /* distancia pedida hombro->muñeca / (L1 + L2) */
     float err_mm;                        /* distancia entre el objetivo de muñeca y la muñeca resultante */
-    float tau, tau_f;                    /* giro (rad) mano respecto al antebrazo, desenvuelto de forma continua, y la parte que asume el antebrazo (con su límite y su velocidad máxima) */
+    float tau, tau_f;                    /* giro (rad) mano respecto al antebrazo, desenvuelto de forma continua, y la parte que asume el antebrazo (con su límite) */
+    float swivel;                        /* giro del codo (grados) alrededor de la recta hombro-muñeca respecto al codo polar, elegido para la muñeca y el giro del antebrazo */
     float stretch;                       /* escala de ambos huesos a lo largo de su eje (>= 1): objetivo más lejos que el alcance => brazo estirado, muñeca en el objetivo */
     unsigned flags;                      /* VRARM_* */
 } VrArmOut;
@@ -119,7 +124,7 @@ typedef struct VrBodyConfig {
     int part_neck;               /* 5: hijo del torso; su origen (cuello) queda fijo al enderezar el torso (torso_follow) */
     int min_parts;               /* 16: modelos con menos piezas se ignoran */
     /* mano */
-    float grip_to_wrist_mm;      /* de la pose (centro de palma) a la muñeca del modelo, a lo largo del dedo; defecto 55 */
+    float grip_to_wrist_mm;      /* SIN USO: la muñeca sale del centro de agarre de la mano nueva (vrhs_grip_center, a tamaño real: mm * units_per_m / 1000); se conserva por compatibilidad */
     float hand_rot_offset[2][4]; /* cuaternión x,y,z,w aplicado a la pose de cada mano (marco del mando -> marco de mano de vr_pose.h). Defecto: giro de hand_roll_deg sobre el eje de los dedos
                                   * (izquierda +, derecha -): el marco de AGARRE de los mandos del visor es el del dispositivo (Y arriba, -Z delante, X lateral; medido: inclinado 35 grados y NO está
                                   * reflejado entre mandos), mientras que el de vr_pose.h es el de la mano plana con la palma abajo (+Y = dorso). Con identidad la mano sale plana "sobre las piernas". */
@@ -272,7 +277,7 @@ typedef struct VrBodyArmLive {
     float grip;                  /* agarre efectivo del apply (ya multiplicado por el fundido) */
     float grip_floor;            /* mínimo del agarre mientras golpea (1) */
     float fade;                  /* peso de fundido 0..1 (suavizado) */
-    int has_prev; float tau_prev, tau_f_prev;   /* giro del antebrazo del apply (ver VrArmIn) */
+    int has_prev; float tau_prev, tau_f_prev, swivel_prev;   /* giro del antebrazo y del codo del apply (ver VrArmIn) */
 } VrBodyArmLive;
 int vrbody_arm_live(int side, VrBodyArmLive *out);
 /* Brazo resuelto (espacio del usuario, m): origen de las piezas brazo, antebrazo y mano y sus orientaciones (columnas = ejes locales de la pieza). */

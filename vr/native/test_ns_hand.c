@@ -1,4 +1,4 @@
-/* Pruebas de ns_hand (manos propias en la escena nativa) con una escena y una manopla SINTÉTICAS (cajas, sin datos del juego). */
+/* Pruebas de ns_hand (manos propias con skin en la escena nativa) con una escena, una manopla y un antebrazo SINTÉTICOS (cajas, sin datos del juego). */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,7 +7,7 @@
 #include "ns_extract.h"
 #include "ns_solid.h"
 #include "ns_gpu.h"
-#include "vr_hand_mesh.h"
+#include "vr_hand_skin.h"
 #include "vr_hand_pose.h"
 
 static int checks, fails;
@@ -58,7 +58,7 @@ static void make_glove(Glove *g, int side, int textured, uint64_t salt) {
     m->id = ns_mesh_content_hash(m) ^ salt;   /* distintos ids para distintas manoplas */
 }
 
-typedef struct { NsScene sc; NsMeshStore *st; NsPlayerMap map; Glove gr, gl; NsMesh dummy; NsVert dv[4]; NsFace df[1]; NsNorm dn[1]; } World;
+typedef struct { NsScene sc; NsMeshStore *st; NsPlayerMap map; Glove gr, gl; NsMesh dummy; NsVert dv[4]; NsFace df[1]; NsNorm dn[1]; NsMesh fore; NsVert fv[8]; NsFace ff[4]; NsNorm fn[1]; } World;
 
 static void xf_ident_t(NsXf *x, float tx, float ty, float tz, float yaw) {
     memset(x, 0, sizeof *x);
@@ -79,6 +79,17 @@ static int world_init(World *w, uint32_t cap_inst, uint32_t cap_piece, int textu
     w->dummy.n_verts = 4; w->dummy.n_norms = 1; w->dummy.n_faces = 1; w->dummy.verts = w->dv; w->dummy.norms = w->dn; w->dummy.faces = w->df;
     w->dummy.id = ns_mesh_content_hash(&w->dummy);
     ns_store_put(w->st, &w->dummy);
+    /* antebrazo: anillo del codo soldado (y = 0) y anillo de la muñeca (y = -230) de 50 mm de radio, como el del juego */
+    for (int i = 0; i < 8; i++) {
+        float a = 1.5707963f * (float)(i & 3);
+        w->fv[i].x = (int16_t)lrintf(50.0f * cosf(a)); w->fv[i].z = (int16_t)lrintf(50.0f * sinf(a)); w->fv[i].y = (int16_t)(i < 4 ? 0 : -230); w->fv[i].weld = (uint8_t)(i < 4 ? i : 0xFF);
+    }
+    w->fn[0] = (NsNorm){0, 0, 4096, 0};
+    memset(w->ff, 0, sizeof w->ff);
+    for (int k = 0; k < 4; k++) { w->ff[k].v[0] = (uint8_t)k; w->ff[k].v[1] = (uint8_t)((k + 1) & 3); w->ff[k].v[2] = (uint8_t)(4 + ((k + 1) & 3)); w->ff[k].v[3] = (uint8_t)(4 + k); }
+    w->fore.n_verts = 8; w->fore.n_norms = 1; w->fore.n_faces = 4; w->fore.verts = w->fv; w->fore.norms = w->fn; w->fore.faces = w->ff; w->fore.flags = NS_MF_WELDED;
+    w->fore.id = ns_mesh_content_hash(&w->fore);
+    ns_store_put(w->st, &w->fore);
     NsScene *s = &w->sc;
     s->lights[0].amb[0] = 40; s->n_light = 1;
     s->n_inst = 2;
@@ -88,7 +99,7 @@ static int world_init(World *w, uint32_t cap_inst, uint32_t cap_piece, int textu
     s->inst[1].zone_mask = 0x0005; s->inst[1].layer = 0; s->inst[1].light = 0; s->inst[1].vis_state = 3;
     for (int k = 0; k < 16; k++) {
         NsPiece *p = &s->piece[1 + k];
-        p->mesh_id = k == NS_PART_HAND_R ? w->gr.m.id : k == NS_PART_HAND_L ? w->gl.m.id : w->dummy.id;
+        p->mesh_id = k == NS_PART_HAND_R ? w->gr.m.id : k == NS_PART_HAND_L ? w->gl.m.id : (k == NS_PART_FORE_R || k == NS_PART_FORE_L) ? w->fore.id : w->dummy.id;
         p->parent = -1;
         xf_ident_t(&p->world, 100.0f * k, 1000.0f + k, -50.0f * k, 0.1f * k);
     }
@@ -135,9 +146,11 @@ static void test_apply(void) {
     in.enabled = 1; in.grip[0] = 1.0f; in.grip[1] = 0.0f; in.driven[0] = 1; in.driven[1] = 1; in.item_pose[0] = in.item_pose[1] = HP_RELAX;
     NsPiece before[17]; memcpy(before, s->piece, sizeof before);
     NsXf rw = s->piece[1 + NS_PART_HAND_R].world, lw = s->piece[1 + NS_PART_HAND_L].world;
+    in.units_per_m = 900.0f;
     int n = ns_hand_apply(s, w.st, &w.map, &in);
+    const uint32_t NP = NS_HAND_PIECES;
     CHECK(n == 2, "se ponen las 2 manos (%d)", n);
-    CHECK(s->n_inst == 4 && s->n_piece == 17 + 32, "instancias=%u piezas=%u", s->n_inst, s->n_piece);
+    CHECK(s->n_inst == 4 && s->n_piece == 17 + 2 * NP, "instancias=%u piezas=%u", s->n_inst, s->n_piece);
     CHECK(s->piece[1 + NS_PART_HAND_R].flags & NS_PF_HIDDEN && s->piece[1 + NS_PART_HAND_L].flags & NS_PF_HIDDEN, "las manoplas quedan ocultas");
     int others = 0;
     for (int k = 0; k < 16; k++) if (k != NS_PART_HAND_R && k != NS_PART_HAND_L && (s->piece[1 + k].flags & NS_PF_HIDDEN)) others++;
@@ -147,75 +160,81 @@ static void test_apply(void) {
     for (uint32_t i = 0; i < s->n_inst; i++) { if (s->inst[i].key == NS_HAND_KEY_R) ir = &s->inst[i]; if (s->inst[i].key == NS_HAND_KEY_L) il = &s->inst[i]; }
     CHECK(ir && il && ir != il, "instancias de las manos");
     if (ir && il) {
-        CHECK(ir->n_pieces == 16 && il->n_pieces == 16 && il->first_piece == 17 && ir->first_piece == 33, "reparto de piezas");
+        CHECK(ir->n_pieces == NP && il->n_pieces == NP && il->first_piece == 17 && ir->first_piece == 17 + NP, "reparto de piezas");
         CHECK(ir->light == 0 && ir->zone_mask == 5 && ir->vis_state == 3 && ir->layer == 0, "luz/zona/estado copiados del jugador");
         CHECK((ir->flags & (NS_IF_LIT | NS_IF_OWN_AMBIENT)) == (NS_IF_LIT | NS_IF_OWN_AMBIENT) && !(ir->flags & (NS_IF_RIGID | NS_IF_STATIC)), "flags: se hereda la luz y no RIGID/STATIC (%u)", ir->flags);
-        /* cada hueso: malla en el almacén, matriz = mundo de la manopla x pose */
-        VrHand hr, hl;
-        VrHandDims dr, dl;
-        vrhand_dims_from_verts(&w.gr.v[0].x, 8, 4, 1, &dr); vrhand_dims_from_verts(&w.gl.v[0].x, 8, 4, -1, &dl);
-        vrhand_build(&hr, &dr, 1); vrhand_build(&hl, &dl, -1);
-        float xr[16][12], xl[16][12];
-        { VrHandPoseIn pr = {HP_RELAX, 0.0f, 0.0f, 0.0f, 0.0f}, pl = {HP_RELAX, 1.0f, 0.0f, 0.0f, 0.0f}; vrhandpose_blend(&hr, &pr, xr); vrhandpose_blend(&hl, &pl, xl); }
-        double maxe = 0;
-        int ntri = 0;
-        for (int k = 0; k < 16; k++) {
-            const NsPiece *pr = &s->piece[ir->first_piece + (uint32_t)k], *pl = &s->piece[il->first_piece + (uint32_t)k];
-            const NsMesh *mr = ns_store_get(w.st, pr->mesh_id), *ml = ns_store_get(w.st, pl->mesh_id);
-            CHECK(mr && ml, "hueso %d: malla en el almacén", k);
+        /* vértices = skin de la pose (derecha agarre 0, izquierda agarre 1, sin objeto) * 0,9 (escala), matrices = la de la manopla */
+        static float pr[VRHA_NV][3], pl[VRHA_NV][3];
+        float xr[VRHS_J][12], xl[VRHS_J][12];
+        {   /* misma cuantización que ns_hand (cierres a 1/32) */
+            VrHandPoseIn a0 = {HP_RELAX, 0.0f, 0.0f, 0.0f, 0.0f}, a1 = {HP_RELAX, 1.0f, 0.0f, 0.0f, 0.0f};
+            VrHandCurls c0, c1; vrhandpose_curls(&a0, &c0); vrhandpose_curls(&a1, &c1);
+            for (int i = 0; i < 5; i++) { c0.curl[i] = roundf(c0.curl[i] * 32.0f) / 32.0f; c1.curl[i] = roundf(c1.curl[i] * 32.0f) / 32.0f; }
+            vrhs_pose(c0.curl, roundf(c0.thumb_spread * 32.0f) / 32.0f, 1, xr); vrhs_pose(c1.curl, roundf(c1.thumb_spread * 32.0f) / 32.0f, -1, xl);
+        }
+        vrhs_skin(xr, 1, pr, NULL); vrhs_skin(xl, -1, pl, NULL);
+        const float KQ = roundf(0.9f * 256.0f) / 256.0f;   /* escala cuantizada como en ns_hand */
+        float verr = 0; int ntri = 0, okc = 1, wind = 0, wind_n = 0;
+        for (uint32_t k = 0; k < NP; k++) {
+            const NsPiece *qr = &s->piece[ir->first_piece + k], *ql = &s->piece[il->first_piece + k];
+            const NsMesh *mr = ns_store_get(w.st, qr->mesh_id), *ml = ns_store_get(w.st, ql->mesh_id);
+            CHECK(mr && ml, "pieza %u: malla en el almacén", k);
             if (!mr || !ml) continue;
-            CHECK(ns_mesh_content_hash(mr) == mr->id && ns_mesh_content_hash(ml) == ml->id, "hueso %d: id = hash del contenido", k);
-            CHECK(mr->flags & NS_MF_TWOSIDED && mr->model_flags == 0x1234, "hueso %d: banderas de la manopla", k);
-            CHECK(pr->parent == hr.bone[k].parent && pl->parent == hl.bone[k].parent && pr->baked_ver == 0 && !(pr->flags & NS_PF_HIDDEN), "hueso %d: pieza (padre %d, esperado %d)", k, pr->parent, hr.bone[k].parent);
-            /* soldaduras: el anillo proximal (6 vértices) apunta a vértices del hueso padre; la palma no se suelda a nada */
-            int nw = 0, wok = 1;
-            for (unsigned i = 0; i < mr->n_verts; i++) if (mr->verts[i].weld != 0xFF) {
-                nw++;
-                const NsMesh *pm = pr->parent >= 0 ? ns_store_get(w.st, s->piece[ir->first_piece + (uint32_t)pr->parent].mesh_id) : NULL;
-                if (!pm || mr->verts[i].weld >= pm->n_verts) wok = 0;
+            CHECK(ns_mesh_content_hash(mr) == mr->id && ns_mesh_content_hash(ml) == ml->id, "pieza %u: id = hash del contenido", k);
+            CHECK(mr->flags & NS_MF_TWOSIDED && mr->model_flags == 0x1234 && !(mr->flags & NS_MF_WELDED), "pieza %u: banderas de la manopla", k);
+            CHECK(qr->parent == -1 && ql->parent == -1 && qr->baked_ver == 0 && !(qr->flags & NS_PF_HIDDEN), "pieza %u", k);
+            CHECK(mat_err(&qr->world, &rw) < 1e-6 && mat_err(&ql->world, &lw) < 1e-6, "pieza %u: matriz de la manopla", k);
+            CHECK(mr->n_verts == vrha_piece[k].nv && mr->n_verts <= 256 && mr->n_faces == vrha_piece[k].nt, "pieza %u: %u vértices %u caras", k, mr->n_verts, mr->n_faces);
+            for (uint32_t i = 0; i < mr->n_verts; i++) {
+                const float *e = pr[vrha_piece[k].v0 + i], *f = pl[vrha_piece[k].v0 + i];
+                verr = fmaxf(verr, fmaxf(fabsf(mr->verts[i].x - e[0] * KQ), fmaxf(fabsf(mr->verts[i].y - e[1] * KQ), fabsf(mr->verts[i].z - e[2] * KQ))));
+                verr = fmaxf(verr, fmaxf(fabsf(ml->verts[i].x - f[0] * KQ), fmaxf(fabsf(ml->verts[i].y - f[1] * KQ), fabsf(ml->verts[i].z - f[2] * KQ))));
             }
-            CHECK(k == 0 ? (nw == 0 && !(mr->flags & NS_MF_WELDED)) : (nw == 6 && (mr->flags & NS_MF_WELDED) && wok), "hueso %d: %d vértices soldados (flag %u, índices válidos %d)", k, nw, mr->flags & NS_MF_WELDED, wok);
-            NsXf e;
-            for (int i = 0; i < 3; i++) {
-                for (int j = 0; j < 3; j++) e.m[4 * i + j] = rw.m[4 * i] * xr[k][j] + rw.m[4 * i + 1] * xr[k][4 + j] + rw.m[4 * i + 2] * xr[k][8 + j];
-                e.m[4 * i + 3] = rw.m[4 * i] * xr[k][3] + rw.m[4 * i + 1] * xr[k][7] + rw.m[4 * i + 2] * xr[k][11] + rw.m[4 * i + 3];
+            for (uint32_t f = 0; f < 2u * mr->n_faces; f++) {
+                const NsMesh *mm_ = f < mr->n_faces ? mr : ml;
+                const NsFace *F = &mm_->faces[f % mr->n_faces];
+                if (!(F->flags & NS_FF_TRI) || F->v[2] != F->v[3]) okc = 0;
+                for (int q = 0; q < 4; q++) if (F->v[q] >= mr->n_verts || F->n[q] != F->v[q]) okc = 0;
+                /* convención del motor (las dos manos): cross(B-A, D-A) hacia el INTERIOR, como la normal almacenada */
+                const NsVert *A = &mm_->verts[F->v[0]], *B = &mm_->verts[F->v[1]], *D = &mm_->verts[F->v[3]];
+                float e1[3] = {B->x - A->x, B->y - A->y, B->z - A->z}, e2[3] = {D->x - A->x, D->y - A->y, D->z - A->z};
+                float c[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]};
+                const NsNorm *nn = &mm_->norms[F->n[0]];
+                float d = c[0] * nn->x + c[1] * nn->y + c[2] * nn->z;
+                if (fabsf(d) > 1e-3f) { wind_n++; wind += d > 0; }
             }
-            double er = mat_err(&pr->world, &e);
-            NsXf e2;
-            for (int i = 0; i < 3; i++) {
-                for (int j = 0; j < 3; j++) e2.m[4 * i + j] = lw.m[4 * i] * xl[k][j] + lw.m[4 * i + 1] * xl[k][4 + j] + lw.m[4 * i + 2] * xl[k][8 + j];
-                e2.m[4 * i + 3] = lw.m[4 * i] * xl[k][3] + lw.m[4 * i + 1] * xl[k][7] + lw.m[4 * i + 2] * xl[k][11] + lw.m[4 * i + 3];
-            }
-            double el = mat_err(&pl->world, &e2);
-            if (er > maxe) maxe = er;
-            if (el > maxe) maxe = el;
             ntri += (int)ns_gpu_tri_count(mr);
-            /* empaquetado para la GPU: caben, índices dentro de rango */
-            NsGpuVert gv[VRHAND_MAX_V]; NsGpuCorner gc[3 * 2 * VRHAND_MAX_F];
+            NsGpuVert gv[256]; static NsGpuCorner gc[3 * VRHA_NT];
             ns_gpu_pack(mr, NULL, gv, gc, 0, NULL, NULL);
-            int okc = 1;
             for (uint32_t c = 0; c < 3 * ns_gpu_tri_count(mr); c++) if (gc[c].v >= mr->n_verts) okc = 0;
-            CHECK(okc, "hueso %d: esquinas fuera de rango", k);
         }
-        CHECK(maxe < 1e-3, "matrices de los huesos: error %.6f", maxe);
-        CHECK(ntri >= 300 && ntri <= 700, "triángulos por mano: %d", ntri);
-        /* la mano izquierda (agarre 1) y la derecha (agarre 0) no son la misma pose: el dedo corazón cambia de sitio */
-        CHECK(mat_err(&s->piece[ir->first_piece + 5].world, &s->piece[il->first_piece + 5].world) > 1.0, "poses distintas");
-        /* las caras de la palma llevan textura de la cara de palma de la manopla, dentro de su rectángulo */
-        const NsMesh *pm = ns_store_get(w.st, s->piece[ir->first_piece].mesh_id);
-        int tex_ok = 0, flat = 0;
-        for (uint32_t f = 0; f < pm->n_faces; f++) {
-            if (pm->faces[f].texid) { tex_ok++; if (pm->faces[f].tpage != 0x19 && pm->faces[f].tpage != 0x1A && pm->faces[f].tpage != 0x1B && pm->faces[f].tpage != 0x1C) tex_ok = -1000; }
-            else flat++;
+        CHECK(verr <= 0.51f, "vértices = skin de la pose * escala (error %.2f)", verr);
+        CHECK(okc, "caras triangulares con índices válidos");
+        CHECK(wind_n > 0 && wind * 100 >= wind_n * 95, "sentido de las caras (dos manos): %d de %d con la normal interior", wind, wind_n);
+        CHECK(ntri == VRHA_NT, "triángulos por mano: %d", ntri);
+        /* las caras llevan texturas de la manopla, dentro del rectángulo de su cara de referencia */
+        int tex_ok = 0, flat = 0, in_rect = 1;
+        for (uint32_t k = 0; k < NP; k++) {
+            const NsMesh *pm = ns_store_get(w.st, s->piece[ir->first_piece + k].mesh_id);
+            for (uint32_t f = 0; pm && f < pm->n_faces; f++) {
+                int id = pm->faces[f].texid;
+                if (id) tex_ok++; else flat++;
+                uint8_t lo = id == 1 ? 8 : id == 2 ? 72 : id == 3 ? 136 : 200, hi = (uint8_t)(lo + 48);
+                for (int q = 0; q < 4; q++) if (pm->faces[f].u[q] < lo || pm->faces[f].u[q] > hi || pm->faces[f].t[q] < 8 || pm->faces[f].t[q] > 56) in_rect = 0;
+            }
         }
-        CHECK(tex_ok > 0 && flat == 0, "la palma lleva texturas (%d planas %d)", tex_ok, flat);
-        int in_rect = 1;
-        for (uint32_t f = 0; f < pm->n_faces; f++) {
-            int id = pm->faces[f].texid;
-            uint8_t lo = id == 1 ? 8 : id == 2 ? 72 : id == 3 ? 136 : 200, hi = (uint8_t)(lo + 48);
-            for (int q = 0; q < 4; q++) if (pm->faces[f].u[q] < lo || pm->faces[f].u[q] > hi || pm->faces[f].t[q] < 8 || pm->faces[f].t[q] > 56) in_rect = 0;
+        CHECK(tex_ok > 0 && flat == 0 && in_rect, "texturas de la manopla (%d, planas %d, en el rectángulo %d)", tex_ok, flat, in_rect);
+        /* antebrazo adelgazado: malla sustituida, soldados intactos, anillo de la muñeca más cerca del eje */
+        const NsPiece *fr = &s->piece[1 + NS_PART_FORE_R];
+        const NsMesh *fm = ns_store_get(w.st, fr->mesh_id);
+        CHECK(fr->mesh_id != w.fore.id && fm && fm->n_verts == 8, "antebrazo sustituido");
+        if (fm) {
+            int weld_same = 1; float r = 0;
+            for (int i = 0; i < 4; i++) if (memcmp(&fm->verts[i], &w.fv[i], sizeof w.fv[i])) weld_same = 0;
+            for (int i = 4; i < 8; i++) r += sqrtf((float)fm->verts[i].x * fm->verts[i].x + (float)fm->verts[i].z * fm->verts[i].z) / 4.0f;
+            float sl = ns_hand_fore_slim(&w.fore, 0.9f);
+            CHECK(weld_same && sl >= 0.6f && sl < 0.95f && r < 50.0f * sl + 3.0f && r > 50.0f * sl - 6.0f, "antebrazo: soldados %d, factor %.2f, radio de la muñeca %.1f", weld_same, sl, r);
         }
-        CHECK(in_rect, "UV dentro del rectángulo de la cara de referencia");
     }
     /* determinista: otra escena igual da los mismos ids y matrices */
     World w2;
@@ -246,7 +265,7 @@ static void test_apply(void) {
     size_t nt = ns_solid_collect(s, w.st, &so, tris, NULL, 4096, &ss);
     CHECK(ss.inst_skipped == 2, "ns_solid omite las 2 instancias de las manos (%u)", ss.inst_skipped);
     uint32_t ni = s->n_inst, np = s->n_piece;
-    s->n_inst -= 2; s->n_piece -= 32;
+    s->n_inst -= 2; s->n_piece -= 2 * NS_HAND_PIECES;
     size_t nt0 = ns_solid_collect(s, w.st, &so, tris, NULL, 4096, &ss);
     s->n_inst = ni; s->n_piece = np;
     CHECK(nt == nt0 && nt > 0, "la geometría sólida no cambia con las manos (%zu vs %zu)", nt, nt0);
@@ -272,9 +291,9 @@ static void test_guards(void) {
     ns_hand_stats(&st);
     CHECK(st.no_room == 2, "no_room=%u", st.no_room);
     world_free(&w);
-    world_init(&w, 8, 17 + 16, 1); ns_hand_reset();   /* cabe UNA mano (16 piezas) y la otra no */
+    world_init(&w, 8, 17 + NS_HAND_PIECES, 1); ns_hand_reset();   /* cabe UNA mano y la otra no */
     int n = ns_hand_apply(&w.sc, w.st, &w.map, &in);
-    CHECK(n == 1 && w.sc.n_piece == 33 && w.sc.n_inst == 3, "cabe una mano (%d)", n);
+    CHECK(n == 1 && w.sc.n_piece == 17 + NS_HAND_PIECES && w.sc.n_inst == 3, "cabe una mano (%d)", n);
     int hidden = ((w.sc.piece[1 + NS_PART_HAND_R].flags & NS_PF_HIDDEN) != 0) + ((w.sc.piece[1 + NS_PART_HAND_L].flags & NS_PF_HIDDEN) != 0);
     CHECK(hidden == 1, "solo se oculta la manopla de la mano que se pudo poner (%d)", hidden);
     world_free(&w);
@@ -305,8 +324,8 @@ static void test_guards(void) {
     w.sc.piece[1 + NS_PART_HAND_R].flags = NS_PF_HIDDEN;
     ns_hand_apply(&w.sc, w.st, &w.map, &in);
     int hid = 0;
-    for (uint32_t i = 0; i < w.sc.n_inst; i++) if (w.sc.inst[i].key == NS_HAND_KEY_R) for (int k = 0; k < 16; k++) hid += (w.sc.piece[w.sc.inst[i].first_piece + (uint32_t)k].flags & NS_PF_HIDDEN) != 0;
-    CHECK(hid == 16, "manopla oculta por el juego = mano nueva oculta (%d)", hid);
+    for (uint32_t i = 0; i < w.sc.n_inst; i++) if (w.sc.inst[i].key == NS_HAND_KEY_R) for (int k = 0; k < NS_HAND_PIECES; k++) hid += (w.sc.piece[w.sc.inst[i].first_piece + (uint32_t)k].flags & NS_PF_HIDDEN) != 0;
+    CHECK(hid == NS_HAND_PIECES, "manopla oculta por el juego = mano nueva oculta (%d)", hid);
     world_free(&w);
 }
 
@@ -391,86 +410,56 @@ static void test_store_put(void) {
     ns_store_destroy(st);
 }
 
-/* Pose mezclada (vr_hand_pose): objeto en la mano, gatillo que cierra el índice solo si la pose lleva gatillo, pulgar; la mano que la IK no llevó ignora todo. */
-static void hand_world(const NsScene *sc, int key, int bone, NsXf *out) {
-    for (uint32_t i = 0; i < sc->n_inst; i++) if (sc->inst[i].key == (uint32_t)key) { *out = sc->piece[sc->inst[i].first_piece + (uint32_t)bone].world; return; }
-    memset(out, 0, sizeof *out);
-}
-static void apply_pose(NsXf *bones, int pose, float grip, float trig, float thumb, int driven) {
+/* Pose mezclada (vr_hand_pose): objeto en la mano, gatillo que cierra el índice solo si la pose lleva gatillo, pulgar; la mano que la IK no llevó ignora todo. Se compara la malla de la pieza que
+ * contiene cada dedo (pieza 0 = palma; las piezas se agrupan por dedo). */
+typedef struct { uint64_t id[VRHA_NP]; } Ids;
+static void apply_pose(Ids *o, int pose, float grip, float trig, float thumb, int driven) {
     World w;
     world_init(&w, 8, 64, 1); ns_hand_reset();
     NsHandIn in; memset(&in, 0, sizeof in);
     in.enabled = 1; in.driven[0] = in.driven[1] = driven; in.item_pose[0] = in.item_pose[1] = pose;
     in.grip[0] = in.grip[1] = grip; in.trigger[0] = in.trigger[1] = trig; in.thumb[0] = in.thumb[1] = thumb;
     ns_hand_apply(&w.sc, w.st, &w.map, &in);
-    for (int k = 0; k < NS_HAND_BONES; k++) hand_world(&w.sc, NS_HAND_KEY_R, k, &bones[k]);
+    memset(o, 0, sizeof *o);
+    for (uint32_t i = 0; i < w.sc.n_inst; i++) if (w.sc.inst[i].key == NS_HAND_KEY_R) for (int k = 0; k < VRHA_NP; k++) o->id[k] = w.sc.piece[w.sc.inst[i].first_piece + (uint32_t)k].mesh_id;
     world_free(&w);
 }
+static int n_diff(const Ids *a, const Ids *b) { int n = 0; for (int k = 0; k < VRHA_NP; k++) n += a->id[k] != b->id[k]; return n; }
 static void test_pose_blend(void) {
-    NsXf a[NS_HAND_BONES], b[NS_HAND_BONES], c[NS_HAND_BONES], d[NS_HAND_BONES];
-    apply_pose(a, HP_GRIP_PISTOL, 1.0f, 0.0f, 0.0f, 1);
-    apply_pose(b, HP_GRIP_PISTOL, 1.0f, 1.0f, 0.0f, 1);
-    CHECK(mat_err(&a[1], &b[1]) > 0.1 && mat_err(&a[2], &b[2]) > 1.0 && mat_err(&a[3], &b[3]) > 1.0, "pistola: el índice se cierra con el gatillo (%.2f %.2f %.2f)", mat_err(&a[1], &b[1]), mat_err(&a[2], &b[2]), mat_err(&a[3], &b[3]));
-    CHECK(mat_err(&a[4], &b[4]) < 1e-6 && mat_err(&a[7], &b[7]) < 1e-6 && mat_err(&a[13], &b[13]) < 1e-6, "pistola: corazón, anular y pulgar no siguen el gatillo");
-    apply_pose(c, HP_RELAX, 1.0f, 0.0f, 0.0f, 1);
-    apply_pose(d, HP_RELAX, 1.0f, 1.0f, 0.0f, 1);
-    double e = 0;
-    for (int k = 0; k < NS_HAND_BONES; k++) e += mat_err(&c[k], &d[k]);
-    CHECK(e < 1e-6, "sin objeto el gatillo no mueve la mano (%.6f)", e);
-    /* la pose del objeto manda: con el mismo agarre, pistola y puño sin objeto son manos distintas */
-    double f = 0;
-    for (int k = 0; k < NS_HAND_BONES; k++) f += mat_err(&a[k], &c[k]);
-    CHECK(f > 1.0, "pistola y puño sin objeto difieren (%.2f)", f);
-    /* con el arma en la mano sin apretar el agarre, la mano la rodea igual (agarre 1); el gatillo sigue moviendo el índice */
-    NsXf h0[NS_HAND_BONES], h1[NS_HAND_BONES];
-    apply_pose(h0, HP_GRIP_PISTOL, 0.0f, 0.0f, 0.0f, 1);
-    double wrap = 0, wrap_r = 0;
-    for (int k = 0; k < NS_HAND_BONES; k++) wrap += mat_err(&h0[k], &a[k]);
-    CHECK(wrap < 1e-6, "pistola en la mano sin botón de agarre = con agarre a fondo (%.6f)", wrap);
-    apply_pose(h1, HP_RELAX, 0.0f, 0.0f, 0.0f, 1);
-    for (int k = 0; k < NS_HAND_BONES; k++) wrap_r += mat_err(&h1[k], &h0[k]);
-    CHECK(wrap_r > 1.0, "sin objeto y sin agarre la mano sigue relajada, no empuña (%.2f)", wrap_r);
-    apply_pose(h1, HP_GRIP_PISTOL, 0.0f, 1.0f, 0.0f, 1);
-    CHECK(mat_err(&h0[2], &h1[2]) > 1.0, "sin botón de agarre el gatillo aún cierra el índice (%.2f)", mat_err(&h0[2], &h1[2]));
-    /* el pulgar levantado por el botón */
-    NsXf t0[NS_HAND_BONES], t1[NS_HAND_BONES];
-    apply_pose(t0, HP_GRIP_PISTOL, 1.0f, 0.0f, 0.0f, 1);
-    apply_pose(t1, HP_GRIP_PISTOL, 1.0f, 0.0f, 1.0f, 1);
-    CHECK(mat_err(&t0[15], &t1[15]) > 1.0 && mat_err(&t0[1], &t1[1]) < 1e-6, "botón del pulgar: solo se mueve el pulgar");
-    /* igual que vrhandpose_blend (mano derecha de la manopla sintética) */
-    World w;
-    world_init(&w, 8, 64, 1);
-    VrHand h; VrHandDims dd;
-    vrhand_dims_from_verts(&w.gr.v[0].x, 8, 4, 1, &dd); vrhand_build(&h, &dd, 1);
-    float xf[VRHAND_BONES][12];
-    VrHandPoseIn pi = {HP_GRIP_PISTOL, 1.0f, 0.6f, 0.0f, 0.0f};    /* ns_hand fuerza agarre 1 con objeto en la mano (aunque se pida 0.8) */
-    vrhandpose_blend(&h, &pi, xf);
-    NsXf glove = w.sc.piece[1 + NS_PART_HAND_R].world, o[NS_HAND_BONES];
-    World w2;
-    world_init(&w2, 8, 64, 1); ns_hand_reset();
+    Ids a, b, c, d, h0, h1, t0, t1, u, r0;
+    apply_pose(&a, HP_GRIP_PISTOL, 1.0f, 0.0f, 0.0f, 1);
+    apply_pose(&b, HP_GRIP_PISTOL, 1.0f, 1.0f, 0.0f, 1);
+    CHECK(n_diff(&a, &b) >= 1 && n_diff(&a, &b) < VRHA_NP, "pistola: el gatillo cambia solo las piezas del índice (%d)", n_diff(&a, &b));
+    apply_pose(&c, HP_RELAX, 1.0f, 0.0f, 0.0f, 1);
+    apply_pose(&d, HP_RELAX, 1.0f, 1.0f, 0.0f, 1);
+    CHECK(n_diff(&c, &d) == 0, "sin objeto el gatillo no mueve la mano");
+    CHECK(n_diff(&a, &c) > 0, "pistola y puño sin objeto difieren");
+    apply_pose(&h0, HP_GRIP_PISTOL, 0.0f, 0.0f, 0.0f, 1);
+    CHECK(n_diff(&h0, &a) == 0, "pistola en la mano sin botón de agarre = con agarre a fondo");
+    apply_pose(&h1, HP_RELAX, 0.0f, 0.0f, 0.0f, 1);
+    CHECK(n_diff(&h1, &h0) > 0, "sin objeto y sin agarre la mano sigue relajada, no empuña");
+    apply_pose(&h1, HP_GRIP_PISTOL, 0.0f, 1.0f, 0.0f, 1);
+    CHECK(n_diff(&h0, &h1) > 0, "sin botón de agarre el gatillo aún cierra el índice");
+    apply_pose(&t0, HP_GRIP_PISTOL, 1.0f, 0.0f, 0.0f, 1);
+    apply_pose(&t1, HP_GRIP_PISTOL, 1.0f, 0.0f, 1.0f, 1);
+    CHECK(n_diff(&t0, &t1) >= 1, "botón del pulgar: cambia la mano (%d)", n_diff(&t0, &t1));
+    apply_pose(&u, HP_GRIP_PISTOL, 1.0f, 1.0f, 1.0f, 0);
+    apply_pose(&r0, HP_RELAX, 0.0f, 0.0f, 0.0f, 1);
+    CHECK(n_diff(&u, &r0) == 0, "sin brazo manejado: mano relajada");
+    /* caché: la misma pose no crea mallas nuevas; un gatillo que varía poco (mismo paso de cuantización) tampoco */
+    World w; world_init(&w, 8, 128, 1); ns_hand_reset();
     NsHandIn in; memset(&in, 0, sizeof in);
-    in.enabled = 1; in.driven[0] = in.driven[1] = 1; in.item_pose[0] = in.item_pose[1] = HP_GRIP_PISTOL; in.grip[0] = in.grip[1] = 0.8f; in.trigger[0] = in.trigger[1] = 0.6f;
-    ns_hand_apply(&w2.sc, w2.st, &w2.map, &in);
-    double me = 0;
-    for (int k = 0; k < NS_HAND_BONES; k++) {
-        hand_world(&w2.sc, NS_HAND_KEY_R, k, &o[k]);
-        NsXf x;
-        for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 3; j++) x.m[4 * i + j] = glove.m[4 * i] * xf[k][j] + glove.m[4 * i + 1] * xf[k][4 + j] + glove.m[4 * i + 2] * xf[k][8 + j];
-            x.m[4 * i + 3] = glove.m[4 * i] * xf[k][3] + glove.m[4 * i + 1] * xf[k][7] + glove.m[4 * i + 2] * xf[k][11] + glove.m[4 * i + 3];
-        }
-        double er = mat_err(&o[k], &x);
-        if (er > me) me = er;
+    in.enabled = 1; in.driven[0] = in.driven[1] = 1; in.item_pose[0] = in.item_pose[1] = HP_GRIP_PISTOL; in.grip[0] = in.grip[1] = 1;
+    NsHandStats st;
+    for (int f = 0; f < 20; f++) {
+        w.sc.n_inst = 2; w.sc.n_piece = 17; w.sc.piece[1 + NS_PART_HAND_R].flags = 0; w.sc.piece[1 + NS_PART_HAND_L].flags = 0;
+        w.sc.piece[1 + NS_PART_FORE_R].mesh_id = w.fore.id; w.sc.piece[1 + NS_PART_FORE_L].mesh_id = w.fore.id;
+        in.trigger[0] = in.trigger[1] = 0.2f + 0.0005f * (float)f;
+        ns_hand_apply(&w.sc, w.st, &w.map, &in);
     }
-    CHECK(me < 1e-3, "coincide con vrhandpose_blend (error %.6f)", me);
-    world_free(&w); world_free(&w2);
-    /* mano que la IK no llevó: relajada y sin gatillo aunque llegue una pose de pistola */
-    NsXf u[NS_HAND_BONES], r0[NS_HAND_BONES];
-    apply_pose(u, HP_GRIP_PISTOL, 1.0f, 1.0f, 1.0f, 0);
-    apply_pose(r0, HP_RELAX, 0.0f, 0.0f, 0.0f, 1);
-    double g = 0;
-    for (int k = 0; k < NS_HAND_BONES; k++) g += mat_err(&u[k], &r0[k]);
-    CHECK(g < 1e-6, "sin brazo manejado: mano relajada (%.6f)", g);
+    ns_hand_stats(&st);
+    CHECK(st.skinned == 2 && st.slimmed == 40, "caché de poses: %u poses calculadas, %u antebrazos", st.skinned, st.slimmed);
+    world_free(&w);
 }
 
 int main(void) {

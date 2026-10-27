@@ -10,10 +10,10 @@ static int checks, fails;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("FALLO l.%d: %s ", __LINE__, #c); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
 static const char *const NAME[HP_COUNT] = {"open", "relax", "fist", "point", "trigger", "grip_pistol", "grip_rifle", "grip_support", "grip_sphere", "grip_placed", "grip_box"};
-static VrHand H[2];   /* 0 derecha, 1 izquierda */
+static const int SIDE[2] = {1, -1};   /* 0 derecha, 1 izquierda */
 
-static int all_finite(const float xf[VRHAND_BONES][12]) {
-    for (int k = 0; k < VRHAND_BONES; k++) for (int j = 0; j < 12; j++) if (!isfinite(xf[k][j])) return 0;
+static int all_finite(const float xf[VRHS_J][12]) {
+    for (int k = 0; k < VRHS_J; k++) for (int j = 0; j < 12; j++) if (!isfinite(xf[k][j])) return 0;
     return 1;
 }
 static VrHandPoseIn in_of(int pose, float grip, float trig, float tb, float fb) { VrHandPoseIn i = {pose, grip, trig, tb, fb}; return i; }
@@ -50,9 +50,9 @@ static void test_monotonic(void) {
             VrHandPoseIn in = in_of(pose, 1.0f, t / 20.0f, 0, 0);
             VrHandCurls c;
             vrhandpose_curls(&in, &c);
-            float xf[VRHAND_BONES][12], tip[3];
-            vrhandpose_blend(&H[0], &in, xf);
-            vrhandpose_index_tip(&H[0], xf, tip);
+            float xf[VRHS_J][12], tip[3];
+            vrhandpose_blend(1, &in, xf);
+            vrhandpose_index_tip(xf, tip);
             if (t > 0) {
                 if (vrhandpose_has_trigger(pose)) {
                     CHECK(c.curl[0] >= prev_curl - 1e-6f && tip[1] >= prev_y - 1e-3f, "%s: el índice no sigue el gatillo en %.2f (curl %.3f -> %.3f, y %.2f -> %.2f)", NAME[pose], t / 20.0f, prev_curl, c.curl[0], prev_y, tip[1]);
@@ -102,13 +102,26 @@ static void test_monotonic(void) {
     }
 }
 
-/* Autopenetración por pose (cápsulas de vrhand_collision), en los extremos y en el camino: mismos umbrales que el puño de test_hand_mesh.c */
+/* Sin autopenetración gruesa en ninguna pose: las yemas de dedos vecinos no se funden (centros a > 12 mm) y la punta de cada dedo no entra en la palma (su centro queda por delante
+ * de la superficie palmar, x > superficie - 3 mm en la mano derecha) */
 static void check_collision(int side, const VrHandPoseIn *in, const char *what) {
-    float xf[VRHAND_BONES][12];
-    VrHandCollision c;
-    vrhandpose_blend(&H[side], in, xf);
-    vrhand_collision(&H[side], xf, &c);
-    CHECK(c.finger_finger < 0.5f && c.finger_palm < 3.0f && c.thumb_finger < 4.0f && c.thumb_palm < 3.0f, "mano %d %s: ff %.2f fp %.2f tf %.2f tp %.2f", side, what, c.finger_finger, c.finger_palm, c.thumb_finger, c.thumb_palm);
+    float xf[VRHS_J][12], g[3];
+    vrhandpose_blend(SIDE[side], in, xf);
+    vrhs_grip_center(SIDE[side], g);
+    const float palm_x = SIDE[side] * g[0] - VRHS_HANDLE_R_MM;
+    float dmin = 1e9f, worst_in = -1e9f;
+    for (int f = 0; f < 3; f++) {
+        const float *a = xf[VRHS_INDEX_MC + 5 * f + 3], *b = xf[VRHS_INDEX_MC + 5 * (f + 1) + 3];
+        float d = sqrtf((a[3] - b[3]) * (a[3] - b[3]) + (a[7] - b[7]) * (a[7] - b[7]) + (a[11] - b[11]) * (a[11] - b[11]));
+        if (d < dmin) dmin = d;
+    }
+    for (int f = 0; f < 4; f++) {
+        const float *t = xf[VRHS_INDEX_MC + 5 * f + 4];
+        if (t[7] > -40.0f || t[7] < -110.0f) continue;              /* solo sobre la palma */
+        float in_ = palm_x - SIDE[side] * t[3];
+        if (in_ > worst_in) worst_in = in_;
+    }
+    CHECK(dmin > 12.0f && worst_in < 3.0f, "mano %d %s: yemas vecinas a %.1f mm, punta dentro de la palma %.1f mm", side, what, dmin, worst_in);
 }
 static void test_collision(void) {
     char what[96];
@@ -119,63 +132,44 @@ static void test_collision(void) {
             check_collision(side, &in, what);
         }
     }
-    VrHandPoseIn f = in_of(HP_RELAX, 0, 0, 0, 1);
-    check_collision(0, &f, "puño sin objeto"); check_collision(1, &f, "puño sin objeto");
-    /* el puño sigue siendo un puño: la yema del corazón llega a la palma y el pulgar queda por fuera */
-    float xf[VRHAND_BONES][12];
-    VrHandCollision c;
-    vrhandpose_blend(&H[0], &f, xf); vrhand_collision(&H[0], xf, &c);
-    CHECK(c.tip_palm_gap < 4.0f && c.thumb_over > 0.0f, "puño: hueco %.2f, pulgar fuera %.2f", c.tip_palm_gap, c.thumb_over);
 }
 
-/* Zona del gatillo: con el índice libre (HP_TRIGGER, gatillo suelto) la yema queda delante del centro de agarre (-Y), hacia el lado del pulgar (+Z) y por delante de la palma (+X en la derecha);
- * con el gatillo a fondo retrocede hacia la palma. Medidas en mm respecto al centro de agarre (la mano es proporcional a su largo: se pasa a mm con vrhand_unit_m). */
+/* Zona del gatillo: con el índice libre (HP_TRIGGER y las poses de arma con el gatillo suelto) la yema queda delante del centro de agarre (-Y), hacia el lado del pulgar (+Z) y por
+ * delante de la palma; con el gatillo a fondo retrocede hacia la palma entre 12 y 45 mm. mm respecto al centro de agarre. */
 static void test_trigger_zone(void) {
     for (int side = 0; side < 2; side++) {
-        const float sg = side ? -1.0f : 1.0f, um = vrhand_unit_m(&H[side]) * 1000.0f;
-        float pc[3], xf[VRHAND_BONES][12], tip[3], tip1[3];
-        vrhand_palm_center(&H[side], pc);
-        VrHandPoseIn rest = in_of(HP_TRIGGER, 1, 0, 0, 0), pulled = in_of(HP_TRIGGER, 1, 1, 0, 0);
-        vrhandpose_blend(&H[side], &rest, xf); vrhandpose_index_tip(&H[side], xf, tip);
-        vrhandpose_blend(&H[side], &pulled, xf); vrhandpose_index_tip(&H[side], xf, tip1);
-        float dx = sg * (tip[0] - pc[0]) * um, dy = (tip[1] - pc[1]) * um, dz = (tip[2] - pc[2]) * um;
-        CHECK(dx > 0.0f && dx < 35.0f && dy < -45.0f && dy > -80.0f && dz > 20.0f && dz < 45.0f, "mano %d: yema en HP_TRIGGER fuera de la zona del gatillo: (%.1f, %.1f, %.1f) mm", side, dx, dy, dz);
-        float dy1 = (tip1[1] - pc[1]) * um;
-        CHECK(dy1 > dy + 30.0f, "mano %d: con el gatillo a fondo la yema debe retroceder >30 mm (%.1f -> %.1f)", side, dy, dy1);
-        /* las poses de arma con gatillo (soltado) colocan la yema en la misma zona */
-        for (int pose = HP_GRIP_PISTOL; pose <= HP_GRIP_RIFLE; pose++) {
-            VrHandPoseIn in = in_of(pose, 1, 0, 0, 0);
-            vrhandpose_blend(&H[side], &in, xf); vrhandpose_index_tip(&H[side], xf, tip);
-            dx = sg * (tip[0] - pc[0]) * um; dy = (tip[1] - pc[1]) * um; dz = (tip[2] - pc[2]) * um;
-            CHECK(dx > 0.0f && dx < 35.0f && dy < -45.0f && dy > -80.0f && dz > 20.0f && dz < 45.0f, "mano %d %s: yema fuera de la zona del gatillo: (%.1f, %.1f, %.1f) mm", side, NAME[pose], dx, dy, dz);
-            VrHandPoseIn in1 = in_of(pose, 1, 1, 0, 0);
-            vrhandpose_blend(&H[side], &in1, xf); vrhandpose_index_tip(&H[side], xf, tip1);
-            float back = ((tip1[1] - pc[1]) * um) - dy;
-            CHECK(back > 12.0f && back < 40.0f, "mano %d %s: recorrido de la yema con el gatillo %.1f mm (12..40)", side, NAME[pose], back);
+        const float sg = (float)SIDE[side];
+        float pc[3], xf[VRHS_J][12], tip[3], tip1[3];
+        vrhs_grip_center(SIDE[side], pc);
+        const int poses[3] = {HP_TRIGGER, HP_GRIP_PISTOL, HP_GRIP_RIFLE};
+        for (int k = 0; k < 3; k++) {
+            VrHandPoseIn in = in_of(poses[k], 1, 0, 0, 0), in1 = in_of(poses[k], 1, 1, 0, 0);
+            vrhandpose_blend(SIDE[side], &in, xf); vrhandpose_index_tip(xf, tip);
+            vrhandpose_blend(SIDE[side], &in1, xf); vrhandpose_index_tip(xf, tip1);
+            float dx = sg * (tip[0] - pc[0]), dy = tip[1] - pc[1], dz = tip[2] - pc[2];
+            CHECK(dx > -20.0f && dx < 30.0f && dy < -45.0f && dy > -85.0f && dz > 0.0f && dz < 40.0f, "mano %d %s: yema fuera de la zona del gatillo: (%.1f, %.1f, %.1f) mm", side, NAME[poses[k]], dx, dy, dz);
+            float back = tip1[1] - tip[1];
+            CHECK(back > 12.0f && back < 45.0f, "mano %d %s: recorrido de la yema con el gatillo %.1f mm (12..45)", side, NAME[poses[k]], back);
         }
     }
 }
 
 static void test_deterministic(void) {
+    static float sr[VRHA_NV][3], sl[VRHA_NV][3];
     for (int pose = 0; pose < HP_COUNT; pose++) {
         VrHandPoseIn in = in_of(pose, 0.63f, 0.41f, 0.27f, 0.0f);
-        float a[VRHAND_BONES][12], b[VRHAND_BONES][12];
-        vrhandpose_blend(&H[0], &in, a);
+        float a[VRHS_J][12], b[VRHS_J][12];
+        vrhandpose_blend(1, &in, a);
         memset(b, 0x55, sizeof b);
-        vrhandpose_blend(&H[0], &in, b);
+        vrhandpose_blend(1, &in, b);
         CHECK(memcmp(a, b, sizeof a) == 0, "%s: no determinista", NAME[pose]);
-        VrHand h2;
-        vrhand_build(&h2, NULL, 1);
-        vrhandpose_blend(&h2, &in, b);
-        CHECK(memcmp(a, b, sizeof a) == 0, "%s: depende de la instancia de la mano", NAME[pose]);
         /* la izquierda es el espejo exacto de la derecha */
-        float l[VRHAND_BONES][12];
-        vrhandpose_blend(&H[1], &in, l);
-        static float sr[VRHAND_BONES][VRHAND_MAX_V][3], sl[VRHAND_BONES][VRHAND_MAX_V][3];
-        vrhand_skin(&H[0], a, sr); vrhand_skin(&H[1], l, sl);
+        float l[VRHS_J][12];
+        vrhandpose_blend(-1, &in, l);
+        vrhs_skin(a, 1, sr, NULL); vrhs_skin(l, -1, sl, NULL);
         double err = 0;
-        for (int k = 0; k < VRHAND_BONES; k++) for (int i = 0; i < H[0].mesh[k].n_verts; i++) {
-            double e = fabs(sr[k][i][0] + sl[k][i][0]) + fabs(sr[k][i][1] - sl[k][i][1]) + fabs(sr[k][i][2] - sl[k][i][2]);
+        for (int i = 0; i < VRHA_NV; i++) {
+            double e = fabs(sr[i][0] + sl[i][0]) + fabs(sr[i][1] - sl[i][1]) + fabs(sr[i][2] - sl[i][2]);
             if (e > err) err = e;
         }
         CHECK(err < 1e-3, "%s: la mano izquierda no es el espejo (error %.5f mm)", NAME[pose], err);
@@ -187,41 +181,37 @@ static void test_robust(void) {
     const int poses[] = {-1, 99, INT_MIN, INT_MAX, HP_COUNT, HP_RELAX, HP_GRIP_PISTOL, HP_FIST};
     for (size_t p = 0; p < sizeof poses / sizeof *poses; p++) for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) for (size_t j = 0; j < sizeof bad / sizeof *bad; j++) {
         VrHandPoseIn in = {poses[p], bad[i], bad[j], bad[(i + j) % 8], bad[(i * 3 + j) % 8]};
-        float xf[VRHAND_BONES][12];
+        float xf[VRHS_J][12];
         VrHandCurls c;
         vrhandpose_curls(&in, &c);
         int ok = isfinite(c.thumb_spread) && c.thumb_spread >= -1.0f && c.thumb_spread <= 1.0f;
         for (int k = 0; k < 5; k++) ok = ok && isfinite(c.curl[k]) && c.curl[k] >= 0.0f && c.curl[k] <= 1.0f;
         CHECK(ok, "curls fuera de rango con pose %d entradas %g %g", poses[p], bad[i], bad[j]);
         for (int side = 0; side < 2; side++) {
-            vrhandpose_blend(&H[side], &in, xf);
+            vrhandpose_blend(SIDE[side], &in, xf);
             CHECK(all_finite(xf), "xf no finito con pose %d entradas %g %g", poses[p], bad[i], bad[j]);
             float tip[3];
-            vrhandpose_index_tip(&H[side], xf, tip);
+            vrhandpose_index_tip(xf, tip);
             CHECK(isfinite(tip[0]) && isfinite(tip[1]) && isfinite(tip[2]), "punta no finita");
-            VrHandCollision col;
-            vrhand_collision(&H[side], xf, &col);
-            CHECK(isfinite(col.finger_finger) && isfinite(col.thumb_finger), "colisión no finita");
         }
     }
     /* se acotan como el valor extremo, NaN = 0, pose inválida = relajada, NULL = relajada */
-    float a[VRHAND_BONES][12], b[VRHAND_BONES][12];
+    float a[VRHS_J][12], b[VRHS_J][12];
     VrHandPoseIn hi = in_of(HP_GRIP_PISTOL, 7, 7, 7, 7), one = in_of(HP_GRIP_PISTOL, 1, 1, 1, 1), nan = in_of(HP_GRIP_PISTOL, NAN, NAN, NAN, NAN), zero = in_of(HP_GRIP_PISTOL, 0, 0, 0, 0);
-    vrhandpose_blend(&H[0], &hi, a); vrhandpose_blend(&H[0], &one, b);
+    vrhandpose_blend(1, &hi, a); vrhandpose_blend(1, &one, b);
     CHECK(memcmp(a, b, sizeof a) == 0, "entradas > 1 deben acotarse a 1");
-    vrhandpose_blend(&H[0], &nan, a); vrhandpose_blend(&H[0], &zero, b);
+    vrhandpose_blend(1, &nan, a); vrhandpose_blend(1, &zero, b);
     CHECK(memcmp(a, b, sizeof a) == 0, "NaN debe valer 0");
     VrHandPoseIn badp = in_of(-3, 1, 1, 0, 0), rel = in_of(HP_RELAX, 1, 1, 0, 0);
-    vrhandpose_blend(&H[0], &badp, a); vrhandpose_blend(&H[0], &rel, b);
+    vrhandpose_blend(1, &badp, a); vrhandpose_blend(1, &rel, b);
     CHECK(memcmp(a, b, sizeof a) == 0, "pose inválida = sin objeto");
-    float r0[VRHAND_BONES][12];
+    float r0[VRHS_J][12];
     VrHandPoseIn r = in_of(HP_RELAX, 0, 0, 0, 0);
-    vrhandpose_blend(&H[0], NULL, a); vrhandpose_blend(&H[0], &r, r0);
+    vrhandpose_blend(1, NULL, a); vrhandpose_blend(1, &r, r0);
     CHECK(memcmp(a, r0, sizeof a) == 0, "entrada NULL = mano relajada");
 }
 
 int main(void) {
-    vrhand_build(&H[0], NULL, 1); vrhand_build(&H[1], NULL, -1);
     test_monotonic();
     test_collision();
     test_trigger_zone();

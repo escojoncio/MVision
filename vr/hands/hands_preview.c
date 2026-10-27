@@ -16,6 +16,8 @@
 #ifdef VRH_PREVIEW_BUILD
 #include "vr_hands.h"
 #include "vr_grip.h"
+#include "vr_glove.h"
+#include "vr_body.h"
 #include "wprev.h"
 #include "../weapons/wcut.h"
 #include <math.h>
@@ -376,9 +378,138 @@ static void hold_sheets(const char *dir) {
     }
 }
 
+/* ---- brazo completo: la IK de vr_body (muñeca = agarre - R_mano * centro de agarre, antebrazo con el giro de la mano, codo girado por los límites de la muñeca) con la mano nueva y el
+ * brazo/antebrazo del juego (MV_DUMP = volcado con ram.bin/vram.bin: modelos y texturas reales, antebrazo adelgazado como ns_hand; sin volcado, mangas primitivas) ---- */
+static uint8_t *pv_ram; static uint16_t *pv_vram;
+static VrGlove *dump_glove(void) {
+    const char *d = getenv("MV_DUMP");
+    if (!d) return NULL;
+    char p[512]; size_t n = 0;
+    snprintf(p, sizeof p, "%s/ram.bin", d); pv_ram = slurp(p, &n); if (!pv_ram || n != 0x200000) return NULL;
+    snprintf(p, sizeof p, "%s/vram.bin", d); pv_vram = (uint16_t *)slurp(p, &n); if (!pv_vram || n != 1024 * 512 * 2) return NULL;
+    #define R32(a) ((uint32_t)pv_ram[(a) & 0x1FFFFF] | (uint32_t)pv_ram[((a) + 1) & 0x1FFFFF] << 8 | (uint32_t)pv_ram[((a) + 2) & 0x1FFFFF] << 16 | (uint32_t)pv_ram[((a) + 3) & 0x1FFFFF] << 24)
+    uint32_t ps = R32(R32(0x800ACBB0u)); static const int PI_[2][3] = {{7, 8, 9}, {2, 3, 4}}; uint32_t md[2][3];
+    for (int s = 0; s < 2; s++) for (int k = 0; k < 3; k++) md[s][k] = R32(ps + 0x48 + 0x5C * (uint32_t)PI_[s][k] + 0x40);
+    #undef R32
+    VrGlove *g = vrglove_create();
+    if (vrglove_build(g, pv_ram, pv_vram, md, 0) != 1) { vrglove_destroy(g); return NULL; }
+    /* antebrazo adelgazado (misma regla que ns_hand_fore_slim): vértices no soldados hacia el eje, radio de la muñeca ~1,15 x el del puño del guante */
+    for (int s = 0; s < 2; s++) {
+        VrGlovePiece *P = &g->p[s][1];
+        float c[3] = {0, 0, 0}; int n0 = 0;
+        for (int i = 0; i < P->nv; i++) if (P->weld[i] == 0xFF) { for (int a = 0; a < 3; a++) c[a] += P->v[4 * i + a]; n0++; }
+        float l = sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]); if (!n0 || l < 1) continue;
+        for (int a = 0; a < 3; a++) c[a] /= l;
+        float tmax = -1e9f, rs = 0, cr = 0; int nr = 0, nc = 0;
+        for (int i = 0; i < P->nv; i++) if (P->weld[i] == 0xFF) { float t = c[0] * P->v[4 * i] + c[1] * P->v[4 * i + 1] + c[2] * P->v[4 * i + 2]; if (t > tmax) tmax = t; }
+        for (int i = 0; i < P->nv; i++) { if (P->weld[i] != 0xFF) continue; float v[3] = {P->v[4 * i], P->v[4 * i + 1], P->v[4 * i + 2]}, t = c[0] * v[0] + c[1] * v[1] + c[2] * v[2]; if (t < 0.75f * tmax) continue;
+            float r[3] = {v[0] - t * c[0], v[1] - t * c[1], v[2] - t * c[2]}; rs += sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]); nr++; }
+        for (int i = 0; i < VRHA_NV; i++) if (vrha_pos[i][1] > 10.0f) { cr += sqrtf(vrha_pos[i][0] * vrha_pos[i][0] + vrha_pos[i][2] * vrha_pos[i][2]); nc++; }
+        float sl = fminf(1.0f, fmaxf(0.6f, 1.15f * (cr / (float)nc) * (float)nr / rs));
+        printf("  antebrazo %s del volcado: radio de la muñeca %.1f mm -> factor %.2f\n", s ? "derecho" : "izquierdo", rs / (float)nr, sl);
+        for (int i = 0; i < P->nv; i++) if (P->weld[i] == 0xFF) {
+            float v[3] = {P->v[4 * i], P->v[4 * i + 1], P->v[4 * i + 2]}, t = c[0] * v[0] + c[1] * v[1] + c[2] * v[2];
+            for (int a = 0; a < 3; a++) P->v[4 * i + a] = (int16_t)lrintf(t * c[a] + sl * (v[a] - t * c[a]));
+        }
+    }
+    return g;
+}
+static void m9_mul(float *o, const float *a, const float *b) { float r[9]; for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) r[3 * i + j] = a[3 * i] * b[j] + a[3 * i + 1] * b[3 + j] + a[3 * i + 2] * b[6 + j]; memcpy(o, r, sizeof r); }
+static void rot9(float *o, char ax, float deg) { float c = cosf(deg * 0.0174533f), s = sinf(deg * 0.0174533f); float x[9] = {1, 0, 0, 0, c, -s, 0, s, c}, y[9] = {c, 0, s, 0, 1, 0, -s, 0, c}, z[9] = {c, -s, 0, s, c, 0, 0, 0, 1}; memcpy(o, ax == 'x' ? x : ax == 'y' ? y : z, sizeof x); }
+
+static void arm_sheets(const char *dir) {
+    VrGlove *g = dump_glove();
+    printf("  brazo: %s\n", g ? "modelos del volcado (MV_DUMP)" : "mangas primitivas (sin MV_DUMP)");
+    static VrGloveOut go;
+    const int W = 560, H = 480;
+    /* escenas (mano derecha): agarre del mando en el mundo (mm; personaje mirando a +Z, su izquierda +X, hombro derecho en (-190, 1400, 0)) */
+    struct { const char *name; float p[3]; float yaw, pitch, roll; int pose; } SC[4] = {
+        {"pistola_delante", {-120, 1250, 420}, 0, 0, 0, HP_GRIP_PISTOL},
+        {"pistola_palma_abajo", {-120, 1250, 420}, 0, 0, -90, HP_GRIP_PISTOL},
+        {"pistola_muneca_doblada", {-120, 1250, 420}, 0, -55, 0, HP_GRIP_PISTOL},
+        {"granada_alta", {-180, 1450, 380}, 20, 30, -40, HP_GRIP_SPHERE},
+    };
+    VrArmRig rig = {-1.0f, {0, -260, -50}, {0, -249, 47}};
+    VrArmLimits lim; vrbody_limits_default(&lim);
+    for (int sc = 0; sc < 4; sc++) {
+        /* orientación de la pieza mano: apretón de manos (palma a +X, dedos a +Z, pulgar arriba) girada */
+        float R0[9] = {1, 0, 0, 0, 0, 1, 0, -1, 0}, A[9], B[9], C[9], R[9];
+        rot9(A, 'y', SC[sc].yaw); rot9(B, 'x', -SC[sc].pitch); rot9(C, 'z', SC[sc].roll);
+        m9_mul(R, A, B); m9_mul(R, R, C); m9_mul(R, R, R0);
+        float gc[3], wr[3]; vrhs_grip_center(1, gc);
+        for (int i = 0; i < 3; i++) wr[i] = SC[sc].p[i] - (R[3 * i] * gc[0] + R[3 * i + 1] * gc[1] + R[3 * i + 2] * gc[2]);
+        VrArmIn in; memset(&in, 0, sizeof in);
+        in.shoulder[0] = -190; in.shoulder[1] = 1400; in.shoulder[2] = 0;
+        in.torso[0] = in.torso[4] = in.torso[8] = 1;
+        memcpy(in.wrist, wr, sizeof wr); memcpy(in.hand, R, sizeof R);
+        in.pole[0] = -0.45f; in.pole[1] = -1; in.pole[2] = -0.35f;
+        VrArmOut o; memset(&o, 0, sizeof o);
+        for (int it = 0; it < 40; it++) { vrbody_solve_arm(&rig, &lim, &in, &o); in.has_prev = 1; in.tau_prev = o.tau; in.tau_f_prev = o.tau_f; in.swivel_prev = o.swivel; }   /* el codo converge (5 grados por cálculo) */
+        float Rf[9]; memcpy(Rf, o.R_fore, sizeof Rf); vrbody_stretch_bone(Rf, rig.wrist_off, o.stretch);
+        float Ru[9]; memcpy(Ru, o.R_upper, sizeof Ru); vrbody_stretch_bone(Ru, rig.elbow_off, o.stretch);
+        float gap[3]; for (int i = 0; i < 3; i++) gap[i] = o.elbow[i] + (Rf[3 * i] * rig.wrist_off[0] + Rf[3 * i + 1] * rig.wrist_off[1] + Rf[3 * i + 2] * rig.wrist_off[2]) - o.wrist[i];
+        printf("  %s: codo girado %.0f grados, giro del antebrazo %.0f grados, antebrazo-muñeca %.2f mm, flags %u\n", SC[sc].name, o.swivel, o.tau_f * 57.3f, sqrtf(gap[0] * gap[0] + gap[1] * gap[1] + gap[2] * gap[2]), o.flags);
+        /* mano */
+        VrHandPoseIn hin = {SC[sc].pose, 1.0f, 0.0f, 0.0f, 0.0f};
+        float xf[VRHS_J][12];
+        vrhandpose_blend(1, &hin, xf);
+        float Hm[12]; for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) Hm[4 * i + j] = o.R_hand[3 * i + j] * 0.001f; Hm[4 * i + 3] = o.wrist[i] * 0.001f; }
+        int nv = hand_mesh(1, xf, Hm, hp_v[0]);
+        VrHandsMesh m[6]; int nm = 0;
+        mesh_of(&m[nm++], 1, hp_v[0], nv, hp_i, nv);
+        pr_nv = pr_ni = 0;
+        VrHandsTex tex; int ntex = 0;
+        if (g) {
+            VrGlovePose gp; memset(&gp, 0, sizeof gp);
+            for (int i = 0; i < 3; i++) { gp.org[0][i] = in.shoulder[i] * 0.001f; gp.org[1][i] = o.elbow[i] * 0.001f; gp.org[2][i] = o.wrist[i] * 0.001f; }
+            memcpy(gp.R[0], Ru, sizeof Ru); memcpy(gp.R[1], Rf, sizeof Rf); memcpy(gp.R[2], o.R_hand, sizeof Rf);
+            gp.upm = 1000.0f;
+            if (vrglove_pose(g, 1, &gp, &go) == 0) {
+                static uint16_t gi[2][2 * VRGLOVE_MAXOUT];
+                for (int k = 0; k < 2; k++) {
+                    for (uint32_t i = 0; i < g->p[1][k].nidx_out; i++) gi[k][i] = g->p[1][k].idx[i];
+                    mesh_of(&m[nm], 10 + (uint32_t)k, go.v[k], (int)go.nv[k], gi[k], (int)g->p[1][k].nidx_out); m[nm].tex_id = 7; nm++;
+                }
+                tex.id = 7; tex.w = g->aw; tex.h = g->ah; tex.rgba = g->atlas; ntex = 1;
+            }
+        } else {
+            static const uint8_t sl[3] = {38, 42, 52};
+            float s0[3], e0[3], w0[3];
+            for (int i = 0; i < 3; i++) { s0[i] = in.shoulder[i] * 0.001f; e0[i] = o.elbow[i] * 0.001f; w0[i] = o.wrist[i] * 0.001f; }
+            prim_tube(s0, e0, 0.045f, 0.038f, sl); prim_tube(e0, w0, 0.036f, 0.027f, sl);
+        }
+        if (SC[sc].pose == HP_GRIP_PISTOL || SC[sc].pose == HP_GRIP_SPHERE) {   /* objeto en la mano por el zócalo de vr_grip */
+            const VrGripEntry *e = vrgrip_find(SC[sc].pose == HP_GRIP_PISTOL ? 0 : 2);
+            WPose handle = {{0, -0.050f, 0.0175f}, {0, 0, 0, 1}};
+            if (SC[sc].pose == HP_GRIP_SPHERE) handle.p = wv(0, 0, 0);
+            float qh[4]; vrbody_mat_to_quat(o.R_hand, qh);
+            WPose Hw = {{o.wrist[0] * 0.001f, o.wrist[1] * 0.001f, o.wrist[2] * 0.001f}, {qh[0], qh[1], qh[2], qh[3]}};
+            WPose Mw = wpose_mul(Hw, wpose_inv(vrgrip_weapon_from_hand(handle, e->grip, 1)));   /* modelo -> mundo */
+            float M[12]; wpose_m12(Mw, M);
+            if (SC[sc].pose == HP_GRIP_PISTOL) pistol_proxy(M);
+            else { const float c0[3] = {M[3], M[7], M[11]}; const uint8_t col[3] = {40, 52, 36}; prim_sphere(c0, 0.032f, col); }
+        }
+        if (pr_ni) mesh_of(&m[nm++], 2, pr_v, pr_nv, pr_i, pr_ni);
+        WImage sheet = wimg_new(3 * W, H);
+        const V3 hc = v3(o.wrist[0] * 0.001f, o.wrist[1] * 0.001f, o.wrist[2] * 0.001f), el = v3(o.elbow[0] * 0.001f, o.elbow[1] * 0.001f, o.elbow[2] * 0.001f);
+        const V3 mid = v3(0.5f * (hc.x + el.x), 0.5f * (hc.y + el.y), 0.5f * (hc.z + el.z));
+        Cam c1 = look(v3(-0.02f, 1.62f, 0.06f), v3(hc.x, hc.y, hc.z + 0.05f), v3(0, 1, 0), 60);                 /* primera persona */
+        Cam c2 = look(v3(mid.x - 0.55f, mid.y + 0.10f, mid.z + 0.05f), mid, v3(0, 1, 0), 42);                    /* desde la derecha */
+        Cam c3 = look(v3(mid.x + 0.05f, mid.y + 0.55f, mid.z - 0.10f), mid, v3(0, 0, 1), 42);                     /* desde arriba */
+        render_cell(&sheet, m, nm, &c1, W, H, 0, 0, ntex ? &tex : NULL, ntex);
+        render_cell(&sheet, m, nm, &c2, W, H, 1, 0, ntex ? &tex : NULL, ntex);
+        render_cell(&sheet, m, nm, &c3, W, H, 2, 0, ntex ? &tex : NULL, ntex);
+        char name[96]; snprintf(name, sizeof name, "arm_%d_%s", sc, SC[sc].name);
+        sheet_save(&sheet, dir, name);
+    }
+    if (g) vrglove_destroy(g);
+    free(pv_ram); free(pv_vram);
+}
+
 static void poses_main(const char *dir) {
     poses_sheets(dir);
     hold_sheets(dir);
+    arm_sheets(dir);
 }
 
 int main(int argc, char **argv) {

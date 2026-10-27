@@ -55,10 +55,10 @@ test-solid-san:
 	$(MAKE) -f vr/native/extract.mk test-solid B=vr/native/build-extract-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 .PHONY: nssolid test-solid test-solid-san
 
-# Manos articuladas propias (ns_hand + vr/body/vr_hand_mesh): escena y manopla sintéticas.
+# Manos propias con skin (ns_hand + vr/body/vr_hand_skin): escena, manopla y antebrazo sintéticos.
 #   make -f vr/native/extract.mk test-hand
-HANDSRC := vr/native/ns_hand.c vr/native/ns_player.c vr/native/ns_solid.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_gpu.c vr/body/vr_hand_mesh.c vr/hands/vr_hand_pose.c
-$(B)/test_ns_hand: vr/native/test_ns_hand.c $(HANDSRC) vr/native/ns_hand.h vr/body/vr_hand_mesh.h vr/hands/vr_hand_pose.h $(HDR) | $(B)
+HANDSRC := vr/native/ns_hand.c vr/native/ns_player.c vr/native/ns_solid.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_gpu.c vr/body/vr_hand_skin.c vr/body/vr_hand_asset.c vr/hands/vr_hand_pose.c
+$(B)/test_ns_hand: vr/native/test_ns_hand.c $(HANDSRC) vr/native/ns_hand.h vr/body/vr_hand_skin.h vr/body/vr_hand_asset.h vr/hands/vr_hand_pose.h $(HDR) | $(B)
 	$(CC) $(CFLAGS) -Iruntime -Ivr/native -Ivr/body -Ivr/hands vr/native/test_ns_hand.c $(HANDSRC) -lm -lpthread -o $@
 test-hand: $(B)/test_ns_hand
 	$(B)/test_ns_hand
@@ -68,7 +68,7 @@ test-hand-san:
 
 # Red de seguridad de vértices (ns_gpu_net_*, réplica de NativeShaders.metal), soldaduras encadenadas, manos propias e interpolación: pruebas sintéticas.
 #   make -f vr/native/extract.mk test-net
-NETSRC := vr/native/ns_gpu.c vr/native/ns_adapt.c vr/native/ns_extract.c vr/native/ns_light.c vr/native/ns_bridge.c vr/body/vr_hand_mesh.c
+NETSRC := vr/native/ns_gpu.c vr/native/ns_adapt.c vr/native/ns_extract.c vr/native/ns_light.c vr/native/ns_bridge.c vr/body/vr_hand_skin.c vr/body/vr_hand_asset.c
 $(B)/test_ns_net: vr/native/test_ns_net.c $(NETSRC) vr/native/ns_gpu.h vr/native/ns_gpu_types.h $(HDR) | $(B)
 	$(CC) $(CFLAGS) -Ivr/native -Ivr/body vr/native/test_ns_net.c $(NETSRC) -lm -lpthread -o $@
 test-net: $(B)/test_ns_net

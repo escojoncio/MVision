@@ -29,12 +29,6 @@ static void xf_mul(float *o, const float *a, const float *b) {   /* o = a * b (3
     }
     memcpy(o, r, sizeof r);
 }
-static void xf_inv(float *o, const float *a) {   /* inversa de una transformación rígida */
-    float r[12];
-    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) r[4 * i + j] = a[4 * j + i];
-    for (int i = 0; i < 3; i++) r[4 * i + 3] = -(r[4 * i] * a[3] + r[4 * i + 1] * a[7] + r[4 * i + 2] * a[11]);
-    memcpy(o, r, sizeof r);
-}
 static void rot_axis(float *o, const float ax[3], float ang) {   /* 3x4 sin traslación */
     float c = cosf(ang), s = sinf(ang), t = 1.0f - c, x = ax[0], y = ax[1], z = ax[2];
     float r[12] = {t * x * x + c, t * x * y - s * z, t * x * z + s * y, 0, t * x * y + s * z, t * y * y + c, t * y * z - s * x, 0, t * x * z - s * y, t * y * z + s * x, t * z * z + c, 0};

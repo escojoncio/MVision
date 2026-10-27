@@ -7,7 +7,7 @@
 CC ?= gcc
 CFLAGS ?= -O2 -g -Wall -Wextra -std=gnu11
 OUT ?= ../../build-body
-SRC := vr_body.c vr_pose.c vr_fist.c vr_hand_mesh.c
+SRC := vr_body.c vr_pose.c vr_fist.c vr_hand_skin.c vr_hand_asset.c
 
 all: test
 $(OUT)/test_body: test_body.c $(SRC) vr_body.h vr_pose.h
@@ -16,23 +16,23 @@ $(OUT)/test_body: test_body.c $(SRC) vr_body.h vr_pose.h
 $(OUT)/test_fist: test_fist.c vr_fist.c vr_fist.h test_fist_mesh.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -I. test_fist.c vr_fist.c -o $@ -lm
-$(OUT)/test_hand_mesh: test_hand_mesh.c vr_hand_mesh.c vr_hand_mesh.h test_fist_mesh.h
+$(OUT)/test_hand_skin: test_hand_skin.c vr_hand_skin.c vr_hand_skin.h vr_hand_asset.c vr_hand_asset.h
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -I. test_hand_mesh.c vr_hand_mesh.c -o $@ -lm
-test: $(OUT)/test_body $(OUT)/test_fist $(OUT)/test_hand_mesh
+	$(CC) $(CFLAGS) -I. test_hand_skin.c vr_hand_skin.c vr_hand_asset.c -o $@ -lm
+test: $(OUT)/test_body $(OUT)/test_fist $(OUT)/test_hand_skin
 	$(OUT)/test_body
 	$(OUT)/test_fist
-	$(OUT)/test_hand_mesh
-test-san: test_body.c $(SRC) vr_body.h vr_pose.h vr_fist.h test_fist.c test_fist_mesh.h test_hand_mesh.c vr_hand_mesh.c vr_hand_mesh.h
+	$(OUT)/test_hand_skin
+test-san: test_body.c $(SRC) vr_body.h vr_pose.h vr_fist.h test_fist.c test_fist_mesh.h test_hand_skin.c vr_hand_skin.h vr_hand_asset.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -I. test_fist.c vr_fist.c -o $(OUT)/test_fist_san -lm
 	$(OUT)/test_fist_san
-	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -I. test_hand_mesh.c vr_hand_mesh.c -o $(OUT)/test_hand_mesh_san -lm
-	$(OUT)/test_hand_mesh_san
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -I. test_hand_skin.c vr_hand_skin.c vr_hand_asset.c -o $(OUT)/test_hand_skin_san -lm
+	$(OUT)/test_hand_skin_san
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -I. test_body.c $(SRC) -o $(OUT)/test_body_san -lm
 	$(OUT)/test_body_san
 clean:
-	rm -f $(OUT)/test_body $(OUT)/test_body_san $(OUT)/test_fist $(OUT)/test_fist_san $(OUT)/test_hand_mesh $(OUT)/test_hand_mesh_san
+	rm -f $(OUT)/test_body $(OUT)/test_body_san $(OUT)/test_fist $(OUT)/test_fist_san $(OUT)/test_hand_skin $(OUT)/test_hand_skin_san
 .PHONY: all test test-san clean
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -81,7 +81,7 @@ $(RTP)/stamp: $(RTDEPS) $(CAM)/runtime_seq.patch
 	touch $@
 $(RTSRC): $(RTP)/stamp
 OVOBJ := $(wildcard $(GENOV)/*.o)
-BODYSRC := bodytest.c vr_body.c vr_fist.c vr_pose.c vr_body_cam.c $(CAM)/vr_camera_hle.c $(CAM)/vr_camera.c $(BR)/bridge.c $(BR)/bridge_addrs.c $(RD)/ref_raster.c
+BODYSRC := bodytest.c vr_body.c vr_fist.c vr_pose.c vr_hand_skin.c vr_hand_asset.c vr_body_cam.c $(CAM)/vr_camera_hle.c $(CAM)/vr_camera.c $(BR)/bridge.c $(BR)/bridge_addrs.c $(RD)/ref_raster.c
 $(OUT)/bodytest: $(BODYSRC) vr_body.h vr_pose.h $(RTSRC) $(GENO) $(OVOBJ)
 	@mkdir -p $(OUT)
 	$(CLANG) -I. -I$(CAM) -I$(BR) -I$(RTP) -I$(RD) -I$(OUT)/gen -O2 -g -Wall -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \

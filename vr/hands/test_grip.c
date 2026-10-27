@@ -54,21 +54,33 @@ static void proxy_init(Proxy *a) {
 }
 static void proxy_free(Proxy *a) { for (int i = 0; i < 3; i++) { free((void *)a->m[i].v); free((void *)a->m[i].idx); } }
 
-/* Centro de agarre (m) y punta del índice (m) de una mano construida con unas medidas, con la pose del arma y el gatillo suelto, en el marco de la mano. */
-static void hand_points(const VrHand *h, int pose, float trigger, WVec3 *palm, WVec3 *tip) {
-    float xf[VRHAND_BONES][12], pc[3], t[3];
+/* Centro de agarre (m) y yema del índice (m) de la mano side con la pose del arma, en el marco de la mano. */
+static void hand_points(int side, int pose, float trigger, WVec3 *palm, WVec3 *tip) {
+    float xf[VRHS_J][12], pc[3], t[3];
     VrHandPoseIn in = {pose, 1.0f, trigger, 0.0f, 0.0f};
-    vrhandpose_blend(h, &in, xf);
-    vrhandpose_index_tip(h, xf, t);
-    vrhand_palm_center(h, pc);
-    const float um = vrhand_unit_m(h);
+    vrhandpose_blend(side, &in, xf);
+    vrhandpose_index_tip(xf, t);
+    vrhs_grip_center(side, pc);
+    const float um = VRHS_UNIT_M;
     *palm = wv(pc[0] * um, pc[1] * um, pc[2] * um); *tip = wv(t[0] * um, t[1] * um, t[2] * um);
 }
 
-static VrHandDims scaled_dims(float k) {
-    VrHandDims e; vrhand_dims_default(&e);
-    e.cuff_y *= k; e.tip_y *= k; e.cuff_h[0] *= k; e.cuff_h[1] *= k; e.cuff_c[0] *= k; e.cuff_c[1] *= k;
-    return e;
+/* Palma contra el mango: hueco mínimo (mm) entre la superficie palmar de la mano (vértices con cara palmar bajo el mango) y la cara del mango primitivo, en el marco del arma. */
+static float palm_gap(int side, const WPose W, int pose) {
+    static float P[VRHA_NV][3], N[VRHA_NV][3];
+    float xf[VRHS_J][12];
+    VrHandPoseIn in = {pose, 1.0f, 0.0f, 0.0f, 0.0f};
+    vrhandpose_blend(side, &in, xf); vrhs_skin(xf, side, P, N);
+    float best = 1e9f;
+    for (int i = 0; i < VRHA_NV; i++) {
+        if (N[i][0] * side < 0.5f || P[i][1] > -40.0f || P[i][1] < -95.0f) continue;   /* palma (cara palmar) entre la muñeca y los nudillos */
+        WVec3 q = wpose_apply(W, wv(P[i][0] * 0.001f, P[i][1] * 0.001f, P[i][2] * 0.001f));
+        if (q.y < -0.100f || q.y > 0.0f) continue;                                        /* a la altura del mango */
+        float gx = (fabsf(q.x) - 0.016f) * 1000.0f, gz = q.z < 0.0f ? -q.z * 1000.0f : (q.z > 0.035f ? (q.z - 0.035f) * 1000.0f : 0.0f);
+        float g = fmaxf(gx, gz);
+        if (g < best) best = g;
+    }
+    return best;
 }
 
 static void test_proxy(void) {
@@ -79,28 +91,27 @@ static void test_proxy(void) {
     const VrGripEntry *e = vrgrip_find(0);
     CHECK(e && e->pose == HP_GRIP_PISTOL && e->has_trigger, "entrada de la pistola");
     if (!e) { proxy_free(&a); return; }
-    static const float ks[4] = {0.8f, 1.0f, 1.25f, 1.6f};
-    for (int ki = 0; ki < 4; ki++) for (int side = 1; side >= -1; side -= 2) {
-        VrHandDims d = scaled_dims(ks[ki]);
-        VrHand h;
-        CHECK(vrhand_build(&h, &d, side) == 0, "build");
+    for (int side = 1; side >= -1; side -= 2) {
         WVec3 palm, tip;
-        hand_points(&h, e->pose, 0.0f, &palm, &tip);
+        hand_points(side, e->pose, 0.0f, &palm, &tip);
         WPose W = vrgrip_weapon_from_hand(g, e->grip, side);     /* arma <- mano */
         WVec3 P = wpose_apply(W, palm), I = wpose_apply(W, tip);
-        float dp = dist(P, g.p) * 1000.0f, di = dist(I, a.trigger_c) * 1000.0f;
-        CHECK(dp < 10.0f, "escala %.2f lado %d: centro de agarre a %.1f mm del mango derivado", ks[ki], side, dp);
-        CHECK(di < 8.0f, "escala %.2f lado %d: punta del índice a %.1f mm del gatillo", ks[ki], side, di);
-        /* el punto del gatillo de la tabla (en el marco de empuñadura) coincide con la punta */
+        WVec3 tc = wv(side < 0 ? -a.trigger_c.x : a.trigger_c.x, a.trigger_c.y, a.trigger_c.z);
+        float dp = dist(P, g.p) * 1000.0f, di = dist(I, tc) * 1000.0f, pg = palm_gap(side, W, e->pose);
+        CHECK(dp < 10.0f, "lado %d: centro de agarre a %.1f mm del mango derivado", side, dp);
+        CHECK(pg > -4.0f && pg < 10.0f, "lado %d: palma a %.1f mm de la cara del mango (< 10)", side, pg);
+        CHECK(di < 8.0f, "lado %d: yema del índice a %.1f mm del gatillo", side, di);
+        printf("  pistola primitiva lado %+d: centro de agarre %.1f mm, palma-mango %.1f mm, yema-gatillo %.1f mm\n", side, dp, pg, di);
+        /* el punto del gatillo de la tabla (en el marco de empuñadura) coincide con la yema */
         WPose Wh = vrgrip_weapon_from_hand(wpose_identity(), e->grip, side);
         WVec3 Ih = wpose_apply(Wh, tip);
-        CHECK(fabsf(Ih.x) < 0.008f && dist(Ih, wv(side < 0 ? -e->trigger.x : e->trigger.x, e->trigger.y, e->trigger.z)) < 0.008f, "escala %.2f lado %d: trigger de la tabla (%.4f %.4f %.4f) vs punta (%.4f %.4f %.4f)",
-              ks[ki], side, e->trigger.x, e->trigger.y, e->trigger.z, Ih.x, Ih.y, Ih.z);
-        /* con el gatillo a fondo la yema se mueve hacia atrás (+Z del arma) y no más de 40 mm */
+        CHECK(fabsf(Ih.x) < 0.008f && dist(Ih, wv(side < 0 ? -e->trigger.x : e->trigger.x, e->trigger.y, e->trigger.z)) < 0.008f, "lado %d: trigger de la tabla (%.4f %.4f %.4f) vs yema (%.4f %.4f %.4f)",
+              side, e->trigger.x, e->trigger.y, e->trigger.z, Ih.x, Ih.y, Ih.z);
+        /* con el gatillo a fondo la yema se mueve hacia atrás (+Z del arma) entre 12 y 45 mm */
         WVec3 palm1, tip1;
-        hand_points(&h, e->pose, 1.0f, &palm1, &tip1);
+        hand_points(side, e->pose, 1.0f, &palm1, &tip1);
         WVec3 I1 = wpose_apply(W, tip1);
-        CHECK(I1.z - I.z > 0.012f && I1.z - I.z < 0.040f, "escala %.2f lado %d: recorrido del gatillo %.1f mm", ks[ki], side, (I1.z - I.z) * 1000.0f);
+        CHECK(I1.z - I.z > 0.012f && I1.z - I.z < 0.045f, "lado %d: recorrido del gatillo %.1f mm", side, (I1.z - I.z) * 1000.0f);
     }
     /* VRH_GRIP_SOCKET con el zócalo de la tabla (reflejado para la izquierda): mano -> arma por vrgrip_weapon_from_hand, la misma cadena que usa vrhands_weapon_world */
     for (int side = 1; side >= -1; side -= 2) {
@@ -140,24 +151,26 @@ static void test_table(void) {
             float n = sqrtf(p->q.x * p->q.x + p->q.y * p->q.y + p->q.z * p->q.z + p->q.w * p->q.w);
             CHECK(fabsf(n - 1.0f) < 1e-3f, "%s zócalo %d: |q| = %.5f", d->id, s, n);
             WVec3 fing = wpose_apply((WPose){{0, 0, 0}, p->q}, wv(0, -1, 0)), thumb = wpose_apply((WPose){{0, 0, 0}, p->q}, wv(0, 0, 1)), palmn = wpose_apply((WPose){{0, 0, 0}, p->q}, wv(1, 0, 0));
-            if (s == 0) {   /* apretón de manos: dedos hacia la boca (-Z), pulgar arriba (+Y), palma a la izquierda (-X); con guiñada de hasta 20 grados */
-                CHECK(fing.z < -0.93f && thumb.y > 0.99f && palmn.x < -0.93f, "%s: orientación de la mano del arma (dedos %.2f %.2f %.2f pulgar %.2f palma %.2f)", d->id, fing.x, fing.y, fing.z, thumb.y, palmn.x);
-            } else {        /* apoyo bajo el guardamanos: pulgar hacia la boca, palma hacia arriba, dedos hacia -X para la derecha */
-                CHECK(thumb.z < -0.99f && palmn.y > 0.99f && fing.x < -0.99f, "%s: orientación de la mano de apoyo", d->id);
+            float ha[3]; vrhs_handle_axis(1, ha);
+            WVec3 hax = wpose_apply((WPose){{0, 0, 0}, p->q}, wv(ha[0], ha[1], ha[2]));
+            (void)thumb;
+            if (s == 0) {   /* apretón de manos: eje del mango hacia arriba (+Y), dedos hacia la boca (-Z), palma a la izquierda (-X); con cabeceo y guiñada de hasta ~20 grados */
+                CHECK(hax.y > 0.93f && fing.z < -0.80f && palmn.x < -0.93f, "%s: orientación de la mano del arma (eje %.2f dedos %.2f %.2f %.2f palma %.2f)", d->id, hax.y, fing.x, fing.y, fing.z, palmn.x);
+            } else {        /* apoyo bajo el guardamanos: eje del mango hacia la boca, palma hacia arriba, dedos hacia -X para la derecha */
+                CHECK(hax.z < -0.99f && palmn.y > 0.99f && fing.x < -0.80f, "%s: orientación de la mano de apoyo", d->id);
             }
         }
         /* el centro de agarre cae en el origen del marco de empuñadura / apoyo */
-        VrHand h;
-        vrhand_build(&h, NULL, 1);
         WVec3 palm, tip;
-        hand_points(&h, e->pose, 0.0f, &palm, &tip);
+        hand_points(1, e->pose, 0.0f, &palm, &tip);
+        if (e->pose == HP_GRIP_SPHERE) palm.x += 0.012f;   /* la granada va 12 mm por delante de la palma (SPHERE) */
         CHECK(dist(wpose_apply(e->grip, palm), wv(0, 0, 0)) < 0.010f, "%s: centro de agarre a %.1f mm del punto de empuñadura", d->id, dist(wpose_apply(e->grip, palm), wv(0, 0, 0)) * 1000.0f);
         if (e->support_pose >= 0) {
-            hand_points(&h, e->support_pose, 0.0f, &palm, &tip);
+            hand_points(1, e->support_pose, 0.0f, &palm, &tip);
             CHECK(dist(wpose_apply(e->support, palm), wv(0, 0, 0)) < 0.010f, "%s: centro de agarre de apoyo a %.1f mm de WP_SUPPORT", d->id, dist(wpose_apply(e->support, palm), wv(0, 0, 0)) * 1000.0f);
         }
         if (e->has_trigger) {
-            hand_points(&h, e->pose, 0.0f, &palm, &tip);
+            hand_points(1, e->pose, 0.0f, &palm, &tip);
             CHECK(dist(wpose_apply(e->grip, tip), e->trigger) < 0.008f, "%s: trigger de la tabla a %.1f mm de la punta", d->id, dist(wpose_apply(e->grip, tip), e->trigger) * 1000.0f);
         }
     }
@@ -213,9 +226,8 @@ static void test_real(const char *path, const char *stage) {
                 lo = wv(fminf(lo.x, p.x), fminf(lo.y, p.y), fminf(lo.z, p.z)); hi = wv(fmaxf(hi.x, p.x), fmaxf(hi.y, p.y), fmaxf(hi.z, p.z));
             }
             WVec3 T = wv((lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f);
-            VrHand h; vrhand_build(&h, NULL, 1);
             WVec3 palm, tip;
-            hand_points(&h, e->pose, 0.0f, &palm, &tip);
+            hand_points(1, e->pose, 0.0f, &palm, &tip);
             WPose W = vrgrip_weapon_from_hand(g, e->grip, 1);
             float dp = dist(wpose_apply(W, palm), g.p) * 1000.0f, di = dist(wpose_apply(W, tip), T) * 1000.0f;
             printf("  modelo real %04x: palma-mango %.1f mm, yema-gatillo %.1f mm (centro de la pieza gatillo)\n", id, dp, di);

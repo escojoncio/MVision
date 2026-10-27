@@ -46,7 +46,7 @@ cp ../vr/native/ns_screen.[ch] ../vr/native/ns_present.[ch] ../vr/native/ns_cine
 cp ../vr/native/ns_fx.[ch] ../vr/native/ns_fxcmp.[ch] ../vr/native/ns_fx_export.[ch] .stage/vr/native/   # efectos del renderer nativo (extractor, clasificación de la lista, exportación al contrato)
 cp ../vr/native/ns_adapt.[ch] ../vr/native/ns_light.[ch] ../vr/native/ns_cpuref.h ../vr/native/ns_cover.[ch] ../vr/native/ns_cover_glue.c ../vr/native/ns_solid.[ch] .stage/vr/native/
 cp ../vr/native/ns_fill.[ch] ../vr/native/ns_fill_run.c ../vr/native/ns_fill_glue.[ch] .stage/vr/native/   # relleno por la verdad del motor (ver ns_fill.h)
-cp ../vr/native/ns_hand.[ch] .stage/vr/native/   # manos articuladas propias en la escena nativa (usa vr/body/vr_hand_mesh.[ch], que ya entra con vr/body)
+cp ../vr/native/ns_hand.[ch] .stage/vr/native/   # manos articuladas propias en la escena nativa (usa vr/body/vr_hand_skin.[ch] y vr_hand_asset.[ch], que ya entran con vr/body)
 
 cp ../render/metal/vr_*.metal ../render/metal/vr_types.h ../render/metal/vr_blend.h .stage/metal/
 cp ../vr/native/ns_gpu_types.h .stage/metal/   # lo incluye app/Sources/Native/NativeShaders.metal
