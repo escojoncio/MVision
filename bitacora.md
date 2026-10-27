@@ -4,35 +4,33 @@ Runtime nativo para Apple Vision Pro: el juego (recompilación estática del EXE
 Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP_REPO`, `DECOMP_COMMIT`, `SDK_REPO`); zonas por número. Histórico: `git log -p bitacora.md`.
 
 ## Last done
-- 2026-10-27 `27069dd` (IPA run 40567512416):
-  - Cine: `vrhost_drop_world2d` (vr_view.h; vrhost.c:902) también en kind ENGINE; `XRPresent.swift` `nativeOnly`: en cinemática del motor nunca el item `.screen` VRAM (salvo opción `.cinema`); negro si nativo no listo. Banco: d0005 panel 83,7→28,6 % opaco. Nativo de cine fiel (cobertura "pose" baja = cámara de lista ~1° vieja, no bug).
-  - Agua: onda quitada de `ns_fs`; post-proceso por ojo `vr_fs_wave(_layered)` (render/metal/vr_scene.metal), `RenderRG.swift` planWave/encodePost(wave:), `VrPostUniforms.wave`, `NativeRenderer.waveParams`; `ns_screen_wave_dx/row/rgb8`, `wave_space`=1 fila; test_ns_wave.c. Radar/arma de escena también ondulan.
-  - Selector: revertida omisión por rect/base de 9555775; créditos = par de RECT texturados semi idénticos abr2+abr1 → ocultos solo en vista selector (`vl2d_hide_credits`, `credit_op`, vr_layer2d.c; worker vr_layer2d_async.c).
-  - Conductos: `vr/camera/vr_hzd.{c,h}` (incluido en vr_camera.c bajo `VRHZD_STANDALONE`) limita el ojo con paredes HZD del juego (CONTROL 0x800ACB84+0x2C→map+8→wrapper→header; máscara 0x800ACB38); d0007 ojo -8996→-9198. Diag `[ojo-hzd]`.
-  - Armas/manos: `ns_wphide` oculta piezas del arma del juego (PW_WEAPON_ACTOR objs) en nativo; supresor por `WGF_SUPP` (`VRGAME_SUPPRESSOR_ITEM`=-1 TODO → nunca visible); `vr_hand_mesh.c` mano nueva soldada 552 tris; `vr_hand_pose`, `vr_grip` (sockets en m, `vrgrip_mirror`), `VRH_GRIP_SOCKET`; ns_hand blend (grip=1 con HP_GRIP_*); disparo >0,5/rearme <0,3; arranque cargador corregido; sin gestos chaleco; recarga auto; granada agarre→READY→soltar (40 u/tick por m/s, `VRFIRE_GAME_G`=16), caída suave si se pierde; C4/mina por gatillo, detonar = círculo del juego. Diag `[arma]`, `[agarre]`, `[granada]` (12 líneas/3 s).
-- 2026-10-27 `9555775`: bandas agua, vida (≤1 vértice → 2D), IA x1 + radar range_scale, diag `[radio-src]` (detalle: `git log -p bitacora.md`).
+- 2026-10-28 `fa3dc61` (IPA run 40603913439):
+  - Procedencia: `runtime/prov.{c,h}` (ámbito en `rt_call`/JALR de interp.c con pila sombra por hilo, fiber.c, longjmp; sombra u16 de escrituras en mem.c/interp wr*); `GpuOp.prov/prov2/pkt_addr`, `GpuDrawList.prov`; volcados NSL2 + `prov.bin`; diag `[prov]` y autovolcados `prov_<motivo>` (scope/cinema/telop/motse/selector/pausa/códec).
+  - Clasificación `vr/scene/vr_prov.{c,h}`, `vr_prov_rules.c`: cinema.c→FX_LETTERBOX, motse.c→FX_VIGNETTE, telop/famaslit→FULL, scope/sight→SCOPE_FRAME/TEXT, menuman→HUD_WORLD, WINDOW aprendida (ids callados ≥30 listas en mundo y activos con selector); UNKNOWN→HUD. 3 capas (HUD fijo 6b, WINDOW a 0,9 m 6c, FULL plano 6d); borradas heurísticas credit_op/MENU_BAND_V/menu_skip/drop por rect.
+  - FX nativos: `VrPostUniforms.vfx` (viñeta, letterbox) en `vr_fs_wave(_layered)`; prismáticos = MvVrSpecialView SCOPE sintético (disco 0,34 m a 0,45 m, FOV/zoom, zoom=screen/160 clamp 2..8).
+  - Manos: WebXR generic-hand MIT (`tools/hand/glb2c.py`, `vr/body/vr_hand_asset.c`, `vr_hand_skin.c`), skinning CPU, escala al antebrazo del juego (×1,27), costura: pieza 0 = 4 vértices fin de antebrazo + transición 6 anillos soldada (`ns_hand.c`), `fore_twist` reparte el giro en el antebrazo (normales giradas), `test_watertight` (hombro→dedos). `vr_body.c`: antebrazo 100 % del giro, muñeca = agarre − R·centro, límites de muñeca, swivel de codo. Borrado `vr_hand_mesh.*`. Herramienta `nshands` (render real sobre volcado).
+  - Armas: `hand_frame_from_grip` pura del mando (sin IK); arma = agarre·offset·socket⁻¹; cabeceo fijo armado; granadas con textura incompleta → modelo nativo del juego (`Slot.native`); diag `[vrgame] arma VR N texturas`.
+- 2026-10-27 `27069dd`: cine solo nativo, agua post-proceso, HZD conductos, primeras manos/armas (detalle: `git log -p bitacora.md`).
 
 ## Current state
-**Pendiente de probar en visor (`27069dd`):** todo lo anterior.
-**Usuario (log 27-oct 17:34, 9555775):** agua ondulando texturas; granada sin gesto + pieza flotante; conductos atravesables; pistola con supresor sin tenerlo, desmontable, fantasma detrás, sin disparo; helipuerto con PS1 baja resolución + cuadros; créditos en L2/R2 y menús cortados; efectos 4:3 (usuario: mantener pantalla cine 4:3 pero solo nativo); HUD desaparece con menús; manos no encajan (usuario: manos nuevas con poses).
-**Necesita volcados del visor:** SOCOM sin/con supresor (índice de item supresor); granada en vuelo 2 VBlanks (confirmar actor kind 5 visible en nativo).
-**Sin causa demostrada:** códec brillante (`[radio-src]` hqFull=true, ok); estela al girar (probar fluidez off); glitches de render en conductos (posible ojo fuera, ya corregido).
-**Unverified:** créditos par abr2+abr1 sin falsos positivos en selector real; franja vertical HZD (Y arriba); escala socket `1/(vrhand_unit_m·upm)`; geometría gatillo de pistola primitiva; IA `range_mult`=2.4 + `head_see`.
-**Volcados:** zip14 d0002 = selector; auto05-08 = agua; zip15 d0002-d0005 = helipuerto cine; d0006/d0007 = gateo conducto.
-**Pendiente:** radar junto al agujero con caja (más tarde). Fuego ON_TRIGGER ~0,4 s latencia (ON_RAISE bloquea andar).
-**CI:** render-test intermitente (exit 2) visto una vez; logs de CI 403.
-**Qué mirar en el log:** `[arma]`, `[agarre] delta_mm`, `[granada]`, `[ojo-hzd]`, `[radio-src]`, `[vista] engine-por-sin-partida`, `[cine3d]`, `[capa2d]`.
-**Pendiente técnico:** mono dibuja dos pases idénticos; `test_geom` 2 fallos previos; `test_gpu`/`vrhost_run` no enlazan (faltan ns_fx* en SRC_VR).
-**Código muerto (no borrado):** `l2d_target`, `l2d_smooth`, `MV_HUD2D_SCALE`, `vl2a_scale_step`, `smooth2D`, raster hq/EPX de `vr_layer2d.c`; `wrist_swing_deg`/`hand_twist_deg`; `gpuMode` en `RenderRG.swift`; `vr/native/ns_fill*`, `ns_cover*`; RECT/DERIVED/billboard de `vr_scene.c`; `WL_INHAND`/`WL_DETONATE`/`G.dets`/`det_t`/`PAD_DETONATE` (vrgame.c, w_throw.h); `vrbody_set_armed`/`G.armed` (vr_body.c).
+**Pendiente de probar en visor (`fa3dc61`):** todo lo anterior. Usuario: queda 1 build más tras esta.
+**Usuario (27-oct, 27069dd):** manos horribles (giro propio, dedos palo, pulgar) → rehechas; 2D roto 40 builds (L2/R2 secuestra HUD) → procedencia; efectos viñeta/cine en 4:3 → nativos; pistola apunta raro → mando directo; granadas no reales (blancas; chaff no es blanca); prismáticos 2D sin zoom → vista nativa.
+**Unverified (necesita log):** reglas de procedencia por nombre de actor (`[prov]`), aprendizaje WINDOW, zoom real de prismáticos (hook "ZOOM LEVEL" no hecho), escala de viñeta, coste de prov en intérprete, índice de item supresor, granada en vuelo visible, aturdidora id 7 sin modelo.
+**Riesgos conocidos:** tabla prov 1024 ids sin liberar (`tabla_llena`); pila sombra con frames huérfanos (`rt_prov_ovf`); arista del fin del antebrazo (sección cuadrada) visible.
+**Volcados:** zip16 d0002 viñeta+vida+ración; d0003 cine+créditos; d0004/5 prismáticos; zip14 d0002 selector.
+**Qué mirar en el log:** `[prov]`, `[arma]`, `[agarre] delta_mm`, `[granada]`, `[vrgame] arma VR N texturas`, `[ojo-hzd]`, autovolcados `prov_*`.
+**Pendiente técnico:** `vrhost_run`/bench no enlazan (ns_fx*, vr_prov*); `test_geom` 2 fallos previos.
+**Código muerto (no borrado):** `hudMenuUV` (XRPresent/RenderRG), `opt_aim`/`mv_vrgame_set_weapon_aim`, `grip_to_wrist_mm`/`wrist_swing_deg`/`hand_twist_deg`, `WL_INHAND`/`WL_DETONATE`/`G.dets`, `vrbody_set_armed`, `l2d_target`/`smooth2D`, `gpuMode`, `ns_fill*`/`ns_cover*`.
 
 ## Decisions
 - Mundo = renderer nativo desde la RAM del juego (objetos + mapa completos, sin culling de cámara); nunca reconstrucción desde la lista GPU ni respaldo plano.
-- Lista GPU solo para 2D: HUD, menús, códec, créditos, radar 2D.
-- Cuerpo: cuerpo del juego completo (doble cara) + mano VR propia (vr_hand_mesh) con poses por objeto; arma del juego oculta en nativo.
-- 2D: capa completa del juego en un único panel plano (opción 1); troceo (menú en mano, regiones HUD, radar aparte) desactivado tras `vl2a_split`.
+- Lista GPU solo para 2D, clasificada por PROCEDENCIA (actor/rutina emisora), nunca por forma/posición/mezcla.
+- Cuerpo: cuerpo del juego completo + mano esquelética WebXR (MIT) soldada al antebrazo del juego en una malla continua; arma del juego oculta en nativo.
+- 2D: 3 capas por clase de procedencia: HUD fijo, ventana L2/R2 (única que se mueve), FULL plano; efectos de pantalla del juego → post-proceso nativo.
 - 2D: escalado solo en GPU (sharp-bilinear por defecto; xBR opcional), nunca re-raster CPU adaptativo.
 - Cinemáticas del motor: pantalla de cine 4:3 con cámara del juego, SOLO render nativo (nunca VRAM PS1); estéreo inmersivo opción.
-- Armas: sin gestos de chaleco/cinturón; arma en mano al equiparla en el menú; accesorios por estado del juego.
+- Armas: pose del arma = mando (nunca IK);
+  sin gestos de chaleco/cinturón; arma en mano al equiparla en el menú; accesorios por estado del juego.
 - Efectos de pantalla (agua) = post-proceso por ojo, nunca por textura.
 - Cuerpo: mano siempre en la pose del mando; huesos se estiran (no se separa la muñeca); torso VRIK, piernas del juego.
 - Vista: cinemática solo por banderas reales del motor; la cámara 1ª persona del juego (gateo, conductos) es gameplay en VR.
