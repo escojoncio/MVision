@@ -26,7 +26,15 @@ final class RGRenderer {
     private(set) var hudTextureSRGB: MTLTexture?
     /// Rect UV (u0, v0, u1, v1; margen del 1 %) de la ventana de menú dentro de hudTexture: las primitivas 2D nuevas respecto al HUD de antes de abrir el menú. nil = usar la capa entera (créditos incluidos).
     private(set) var hudMenuUV: SIMD4<Float>?
-    private var menuUVBuf = [Float](repeating: 0, count: 4)   // destino reutilizado de mv_vrhost_hud2d_menu_rect
+    /// Capas 2D auxiliares por clase de procedencia (vr/scene/vr_prov.h): 1 = ventana del selector / pausa, 2 = pantalla completa (créditos); el índice 0 no se usa (el HUD es hudTexture). nil = sin capa: ese panel no se dibuja.
+    private(set) var auxTexture: [MTLTexture?] = [nil, nil, nil]
+    private(set) var auxTextureSRGB: [MTLTexture?] = [nil, nil, nil]
+    private var auxRing: [[MTLTexture]] = [[], [], []]
+    private var auxRingSRGB: [[MTLTexture]] = [[], [], []]
+    private var auxIdx = [0, 0, 0], auxW = [0, 0, 0], auxH = [0, 0, 0]
+    private var auxSeq: [UInt32] = [0, 0, 0]
+    /// Efectos de pantalla del juego por procedencia (MvVrGameState.fx; los fija XRFrameEncoder): x = viñeta (intensidad 0..1), y = radio de la zona limpia (alto de medio ojo = 1), z = fracción del alto cubierta por las bandas de cinemática, w sin uso.
+    var gameFx = SIMD4<Float>(0, 0, 0, 0)
     /// Suavizado bilineal de texels (respeta transparencia). Por defecto nearest.
     var textureFilter = false
     /// true si el destino es sRGB/lineal (se deduce del formato; ajustable antes del primer encode).
@@ -602,14 +610,46 @@ final class RGRenderer {
             hudTexture = hudHQRing[hudHQIdx]; hudTextureSRGB = hudHQRingSRGB[hudHQIdx]
         }
         hudHQ = true; hudHQMode = lMode; hudHQView = lView
-        if XRLayer2D.split && lMode == 0 && mv_vrhost_hud2d_menu_rect(&menuUVBuf) != 0 {   // rect de la ventana del menú: solo con el troceo del 2D (apagado por defecto: la capa va entera)
-            hudMenuUV = SIMD4<Float>(max(0, menuUVBuf[0] - 0.01), max(0, menuUVBuf[1] - 0.01), min(1, menuUVBuf[2] + 0.01), min(1, menuUVBuf[3] + 0.01))
-        } else if XRLayer2D.split && lMode == 0 && (lView & 255) == 10 && hudMenuUV != nil {
-            // selector (VRV_R_SELECTOR = 10) sin rect en esta capa: se conserva el último válido (nil solo al salir del selector)
-        } else { hudMenuUV = nil }
+        hudMenuUV = nil      // sin rect de la ventana del selector: la ventana es una capa propia (takeAuxLayer, clase WINDOW)
 #endif
     }
 
+
+    /// Capa 2D auxiliar k (1 = ventana del selector / pausa, 2 = pantalla completa) del trabajador de su clase (mv_vrhost_hud2d_acquire_l): misma aceptación por vista que takeLayer2D; sin capa o rechazada = nil (el panel no se dibuja).
+    private func takeAuxLayer(_ k: Int) {
+#if MV_BENCH
+        return
+#else
+        var px: UnsafePointer<UInt8>?
+        var w: Int32 = 0, h: Int32 = 0, full: Int32 = 0, seq: UInt32 = 0
+        let r = mv_vrhost_hud2d_acquire_l(Int32(k), &px, &w, &h, &full, &seq)
+        defer { if r >= 0 { mv_vrhost_hud2d_release_l(Int32(k)) } }
+        var lMode: Int32 = 0, lView: Int32 = 0
+        guard r >= 0, let p = px, w > 0, h > 0, full == 0, mv_vrhost_hud2d_layer_l(Int32(k), &lMode, &lView) != 0,
+              mv_vrhost_hud2d_accept(lMode, lView, layerView, layerOverlay ? 1 : 0) != 0 else {
+            auxTexture[k] = nil; auxTextureSRGB[k] = nil
+            return
+        }
+        let W = Int(w), H = Int(h)
+        if auxRing[k].isEmpty || auxW[k] != W || auxH[k] != H {
+            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: W, height: H, mipmapped: false)
+            td.usage = [.shaderRead, .pixelFormatView]
+            td.storageMode = .shared
+            var a: [MTLTexture] = [], b: [MTLTexture] = []
+            for i in 0..<3 {
+                guard let t = device.makeTexture(descriptor: td), let v = t.makeTextureView(pixelFormat: .rgba8Unorm_srgb) else { auxTexture[k] = nil; auxTextureSRGB[k] = nil; return }
+                t.label = "2D capa \(k) \(i)"; a.append(t); b.append(v)
+            }
+            auxRing[k] = a; auxRingSRGB[k] = b; auxW[k] = W; auxH[k] = H; auxSeq[k] = 0; auxTexture[k] = nil
+        }
+        if r == 1 || auxTexture[k] == nil || auxSeq[k] != seq {
+            auxIdx[k] = (auxIdx[k] + 1) % auxRing[k].count
+            auxRing[k][auxIdx[k]].replace(region: MTLRegionMake2D(0, 0, W, H), mipmapLevel: 0, withBytes: p, bytesPerRow: W * 4)
+            auxSeq[k] = seq
+        }
+        auxTexture[k] = auxRing[k][auxIdx[k]]; auxTextureSRGB[k] = auxRingSRGB[k][auxIdx[k]]
+#endif
+    }
 
     /// Máscara de visión de la caja para el render nativo (recubrimiento de ojo NSG_OV_FRAME): solo con el jugador en la caja (VrFilter.frame_in_box) y la máscara que calcula vrhost (frame, 160x128). Se copia aquí
     /// (el puntero solo vale durante la llamada) y la consume encodeScene. nil = sin máscara. En el modo gpu la aplica el post-proceso (planPost).
@@ -760,6 +800,7 @@ final class RGRenderer {
             groups.append((0, batches.count, Int.max))
         }
         takeLayer2D(commandBuffer)
+        takeAuxLayer(1); takeAuxLayer(2)
         let doHud = (gotNew || !hudDone) && drawWorld && !hudHQ
         // Render nativo: se prepara SIEMPRE (reconoce épocas del almacén aunque no se dibuje: menús) y lo que no se pueda dibujar se REPITE (último válido) o se funde a negro.
         // Modo gpu: no hay nada nativo que preparar; la pantalla 3D se considera sana (el 3D sale de la lista) salvo que encodeStereo falle.
@@ -1394,7 +1435,9 @@ final class RGRenderer {
     /// escribe luego el drawable desplazando cada fila en horizontal, ver vr_fs_wave). `fxTex` se reserva una vez y se recrea solo si cambia el destino. La profundidad no se toca. nil = sin onda (el mundo va directo al drawable).
     private func planWave(colorTargets: [MTLTexture], resolveTargets: [MTLTexture], layered: Bool) -> (plan: PostPlan, wave: SIMD4<Float>)? {
 #if !MV_BENCH || MV_BENCH_NATIVE
-        guard !gpuMode, nativeDraw, screenFilterEnabled, drawWorld, drawEyes, viewportOverride == nil, rasterizationRateMap == nil, let n = native, let wave = n.waveParams else { return nil }
+        guard !gpuMode, nativeDraw, screenFilterEnabled, drawWorld, drawEyes, viewportOverride == nil, rasterizationRateMap == nil, let n = native else { return nil }
+        let wave = n.waveParams ?? SIMD4<Float>(0, 0, 0, 0)      // sin onda: el pase solo aplica la viñeta / las bandas del juego (gameFx)
+        guard wave.x != 0 || gameFx.x > 0.01 || gameFx.z > 0.01 else { return nil }
         let msaa = (colorTargets.first?.sampleCount ?? 1) > 1
         let dst = msaa ? resolveTargets : colorTargets
         guard let first = dst.first, postPipeline(format: first.pixelFormat, layered: layered, wave: true) != nil,
@@ -1435,6 +1478,7 @@ final class RGRenderer {
             u.frame = SIMD4<Float>(0, 0, 0, 0)
         }
         if let w = wave { u.wave = w }
+        u.vfx = warpOnly ? SIMD4<Float>(0, 0, 0, 0) : gameFx
         guard !frameTex.isEmpty else { return }
         let frameTexture = frameTex[min(max(fx.frameIdx, 0), frameTex.count - 1)]
         let dvCopy = fx.dv

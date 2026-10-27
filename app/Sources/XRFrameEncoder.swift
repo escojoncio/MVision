@@ -174,12 +174,23 @@ final class XRFrameEncoder {
         // Vista especial del arma (mira óptica, visor antiaéreo, pantalla del misil): la publica vr/host por VBlank.
         var sv = MvVrSpecialView()
         var special = mv_vrgame_special_view(&sv) != 0
+        // Prismáticos (scope.c / sight.c con el juego en vista de mundo): disco con visión estrecha fijo ante la cara, por la misma vía que la mira óptica (aux + lente).
+        if !special && gs.view_kind == 1 && gs.fx.scope_on != 0 {
+            sv = Self.binocularView(head: recentered, zoom: gs.fx.scope_zoom)
+            special = true
+        }
         if special && sv.hide_hud != 0 { hud = nil }          // el panel plano del HUD sobra mientras se mira por la mira / el visor
         // Presentación: mundo en primera persona, pantalla de cine o diorama, paneles del HUD, velo de transición y menú.
         var ipd = simd_length(XRMath.position(eyes[0].transform) - XRMath.position(eyes[1].transform))
         if !(ipd > 0.05 && ipd < 0.08) { ipd = 0.063 }
         presenter.hqFull = renderer.hqFull
-        var pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, eyePx: Float(w), p00: projs[0].columns.0.x,
+        // Capas 2D por procedencia: ventana del selector / pausa (1) y pantalla completa (2), de la vista vigente; el HUD sigue siendo `hud`.
+        var hudWindow: MTLTexture? = renderer.linearOutput ? renderer.auxTextureSRGB[1] : renderer.auxTexture[1]
+        if hudWindow != nil && hudWindow!.textureType != .type2D { hudWindow = nil }
+        var hudFull: MTLTexture? = renderer.linearOutput ? renderer.auxTextureSRGB[2] : renderer.auxTexture[2]
+        if hudFull != nil && hudFull!.textureType != .type2D { hudFull = nil }
+        renderer.gameFx = gs.view_kind == 1 ? SIMD4<Float>(gs.fx.vignette, gs.fx.vign_radius, gs.fx.letterbox, 0) : SIMD4<Float>(0, 0, 0, 0)
+        var pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, hudWindow: hudWindow, hudFull: hudFull, eyePx: Float(w), p00: projs[0].columns.0.x,
                                      gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame(), ipd: ipd, shot: renderer.sceneShot,
                                      stereo2DInside: renderer.stereo2DInside, hudMenuUV: renderer.hudMenuUV, hudLogical: renderer.hudLogical)
         presenter.encodeUpscale(cb)
@@ -357,6 +368,28 @@ final class XRFrameEncoder {
     }
 
     /// Segunda vista de la escena pedida por el arma (cámara del visor / del misil): matrices en el espacio recentrado. nil si no hace falta renderizarla.
+    /// Prismáticos del juego como vista especial: lente redonda (disco de 0,34 m a 0,45 m) fija a la cabeza que muestra la escena desde la cabeza con el campo estrechado por el aumento (mínimo 2).
+    private static func binocularView(head: simd_float4x4, zoom: Float) -> MvVrSpecialView {
+        var sv = MvVrSpecialView()
+        let q = simd_quatf(head).normalized
+        let z = min(max(zoom.isFinite ? zoom : 2, 2), 8)
+        let dist: Float = 0.45, diam: Float = 0.34
+        let p = head * simd_float4(0, 0, -dist, 1)
+        sv.kind = Int32(MV_VIEW_SCOPE)
+        sv.blend = 1
+        sv.cam_valid = 1
+        sv.cam_pos = (head.columns.3.x, head.columns.3.y, head.columns.3.z)
+        sv.cam_rot = (q.imag.x, q.imag.y, q.imag.z, q.real)
+        sv.cam_fov_y = 2 * atan((diam * 0.5 / dist) / z)
+        sv.tex_w = 384; sv.tex_h = 384
+        sv.surf_pos = (p.x, p.y, p.z)
+        sv.surf_rot = (q.imag.x, q.imag.y, q.imag.z, q.real)
+        sv.surf_w = diam; sv.surf_h = diam
+        sv.round = 1
+        sv.zoom = z
+        return sv
+    }
+
     private func auxView(_ sv: MvVrSpecialView, _ pl: (near: Float, far: Float, valid: Bool)) -> RGRenderer.AuxView? {
         let wantsAux = sv.kind == Int32(MV_VIEW_SCOPE) || (sv.kind == Int32(MV_VIEW_MISSILE) && sv.ended == 0)
         guard wantsAux, sv.cam_valid != 0, sv.tex_w >= 16, sv.tex_h >= 16, sv.tex_w <= 2048, sv.tex_h <= 2048 else { return nil }
