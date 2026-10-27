@@ -112,7 +112,7 @@ int main(int argc, char **argv) {
     struct { const char *name; float p[3]; float yaw, pitch, roll; int pose; } SC[3] = {
         {"pistola", {0.16f, 1.25f, -0.42f}, 0, 0, 90, HP_GRIP_PISTOL},
         {"pistola_girada", {0.12f, 1.22f, -0.40f}, -25, -20, 30, HP_GRIP_PISTOL},
-        {"relajada", {0.22f, 1.10f, -0.30f}, 10, -30, 20, HP_RELAX},
+        {"palma_arriba", {0.18f, 1.15f, -0.35f}, 0, 10, 180, HP_RELAX},
     };
     for (int sc_i = 0; sc_i < 3; sc_i++) {
         memcpy(RAM, RAM0, sizeof RAM);
@@ -149,7 +149,7 @@ int main(int argc, char **argv) {
             (void)nf;
         }
         NsHandIn hin; memset(&hin, 0, sizeof hin);
-        hin.enabled = 1; hin.driven[0] = hin.driven[1] = 1; hin.grip[1] = 1.0f; hin.item_pose[1] = SC[sc_i].pose; hin.item_pose[0] = HP_RELAX;
+        hin.enabled = 1; hin.driven[0] = hin.driven[1] = 1; hin.grip[1] = SC[sc_i].pose == HP_RELAX ? 0.0f : 1.0f; hin.item_pose[1] = SC[sc_i].pose; hin.item_pose[0] = HP_RELAX;
         ns_hand_reset();
         int nh = ns_hand_apply(&S, st, &map, &hin);
         NsHandStats hs; ns_hand_stats(&hs);

@@ -6,6 +6,8 @@
 #include "vr_hand_skin.h"
 #include "vr_hand_pose.h"
 
+_Static_assert(NS_HAND_PIECES == VRHA_NP + 1, "NS_HAND_PIECES = anillo + piezas de la mano");
+
 #define NS_HAND_QC 32.0f            /* pasos de cuantización de los cierres y de la separación del pulgar */
 #define NS_HAND_RIM 24              /* sectores del borde del puño soldados al anillo del antebrazo */
 #define NS_HAND_TAPER 30.0f         /* el puño se deforma hacia el antebrazo desde esta distancia bajo la muñeca (unidades del motor) */

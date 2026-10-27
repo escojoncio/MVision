@@ -18,7 +18,6 @@
 #include <stdint.h>
 #include "ns_types.h"
 #include "ns_player.h"
-#include "vr_hand_asset.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,7 +25,7 @@ extern "C" {
 
 #define NS_HAND_KEY_R 0x4D480001u        /* NsInstance.key de las manos propias: no es una dirección de RAM del motor (0x80......), no choca con ninguna instancia */
 #define NS_HAND_KEY_L 0x4D480002u
-#define NS_HAND_PIECES (VRHA_NP + 1)    /* piezas por mano como mucho: anillo de la costura + VRHA_NP */
+#define NS_HAND_PIECES 5                /* piezas por mano como mucho: anillo de la costura + VRHA_NP (= 4; comprobado en ns_hand.c). Sin incluir vr_hand_asset.h: ns_adapt y ns_solid incluyen este fichero solo con vr/native */
 #define NS_PART_HAND_R 4                 /* partes del modelo del jugador (ns_player) */
 #define NS_PART_HAND_L 9
 #define NS_PART_FORE_R 3
