@@ -1,19 +1,18 @@
 #pragma once
 /* ns_hand: manos propias en la escena nativa (primera persona).
  *
- * La mano del personaje del motor es UNA malla rígida (manopla). Aquí se oculta y, en su lugar, se añaden a la escena dos instancias propias (una por mano) con la mano de
- * vr_hand_skin (mano genérica de WebXR Input Profiles, skin lineal sobre el esqueleto OpenXR de 25 articulaciones, ~1400 triángulos a tamaño real): la pose de los dedos se aplica en la
- * CPU y la malla resultante se reparte en VRHA_NP piezas de <= 256 vértices (NsFace usa índices de 8 bits), todas con la matriz de la pieza mano del motor (ya con la IK de la capa VR,
- * mismo espacio que el resto de la escena). Las mallas se guardan por pose CUANTIZADA (cierres a pasos de 1/32, escala a pasos de 1/256): mientras los dedos no cambian no se crea
- * ninguna malla nueva, aunque la mano se mueva (solo cambia la matriz). Iluminación, ambiente, niebla y zona: los de la instancia del jugador.
+ * La mano del personaje del motor es UNA malla rígida (manopla). Aquí se oculta y, en su lugar, se añade a la escena una instancia propia por mano con la mano de vr_hand_skin (mano
+ * genérica de WebXR Input Profiles con skin lineal sobre el esqueleto OpenXR de 25 articulaciones, ~1400 triángulos, a la escala del brazo del juego): la pose de los dedos se aplica
+ * en la CPU y la malla se reparte en VRHA_NP piezas de <= 256 vértices (NsFace usa índices de 8 bits), con la matriz de la pieza mano del motor (ya con la IK de la capa VR).
+ * Las mallas se guardan por pose CUANTIZADA (cierres a pasos de 1/32): mientras los dedos no cambian no se crea ninguna malla nueva aunque la mano se mueva.
  *
- * Tamaño real: la mano mide ~190 mm de la muñeca a la yema del corazón; en unidades del motor se dibuja a mm * units_per_m / 1000 (NsHandIn.units_per_m, la escala calibrada).
- * Antebrazo: el del motor (pieza NS_PART_FORE_*) es mucho más grueso que el puño del guante; mientras la mano nueva está puesta se sustituye su malla por una copia ADELGAZADA
- * (vértices no soldados escalados hacia su eje hasta un radio ~15 % mayor que el del puño del guante, factor 0,6..1); el extremo del codo va soldado al brazo y no cambia.
+ * COSTURA con el antebrazo del motor: la pieza 0 de la instancia es un anillo propio (malla en el marco del antebrazo, con su matriz, una cara degenerada que no se ve) con puntos del
+ * contorno del anillo final del antebrazo; el borde del puño de la mano se SUELDA a esos puntos (NsVert.weld, NsPiece.parent = 0) y el resto del puño se deforma hacia el contorno:
+ * sin hueco, cuello ni escalón, y el borde sigue al antebrazo (también su giro). Se recalcula solo si cambia la malla del antebrazo o la muñeca en su marco. Sin antebrazo: sin costura.
  *
- * Texturas: sin datos propios. Cada triángulo toma tpage/clut/texid y un trozo del rectángulo UV de una cara de la manopla del motor según su rol (palma/yemas, dorso, costados,
- * puntas; clasificadas por orientación en la manopla); la posición del vértice en reposo, normalizada, elige el punto del rectángulo. Si no hay ninguna cara con textura utilizable,
- * la mano sale plana (sombreada por la luz del jugador). Si algo falla (sin manopla enlazada, sin malla, escena sin sitio, almacén lleno) NO se oculta la manopla.
+ * ESTILO PS1 como el brazo: la cara palmar desde la muñeca hasta la base de los dedos lleva la textura de la palma de la manopla del juego (tpage/clut/UV de su cara, proyectada en plano);
+ * dedos, pulgar, dorso y costados van de un solo color (el texel central de la textura de los dedos de la manopla) con sombreado de la luz del jugador. Sin texturas utilizables, plana.
+ * Iluminación, ambiente, niebla y zona: los de la instancia del jugador. Si algo falla (sin manopla enlazada, sin malla, escena sin sitio, almacén lleno) NO se oculta la manopla.
  *
  * Todo en el hilo de emulación (se llama desde el cierre de ns_hook_tick). */
 #include <stdint.h>
@@ -27,7 +26,7 @@ extern "C" {
 
 #define NS_HAND_KEY_R 0x4D480001u        /* NsInstance.key de las manos propias: no es una dirección de RAM del motor (0x80......), no choca con ninguna instancia */
 #define NS_HAND_KEY_L 0x4D480002u
-#define NS_HAND_PIECES VRHA_NP          /* piezas por mano */
+#define NS_HAND_PIECES (VRHA_NP + 1)    /* piezas por mano como mucho: anillo de la costura + VRHA_NP */
 #define NS_PART_HAND_R 4                 /* partes del modelo del jugador (ns_player) */
 #define NS_PART_HAND_L 9
 #define NS_PART_FORE_R 3
@@ -41,7 +40,6 @@ typedef struct {
     int item_pose[2];            /* HP_* de vr_hand_pose.h: pose del objeto en la mano (HP_RELAX = sin objeto; ojo: el cero de un NsHandIn a cero es HP_OPEN) */
     float trigger[2];            /* gatillo analógico 0..1: solo cierra el índice si la pose lleva gatillo (vrhandpose_has_trigger) */
     float thumb[2];              /* pulgar sobre un botón de cara 0..1 */
-    float units_per_m;           /* unidades del motor por metro real (escala calibrada de la cámara VR); <= 0 = 1000 */
 } NsHandIn;
 
 typedef struct {
@@ -55,7 +53,7 @@ typedef struct {
     uint32_t flat;               /* manos construidas sin ninguna textura utilizable */
     uint32_t last_applied;       /* bit 0 izquierda, bit 1 derecha, en la última llamada */
     uint32_t skinned;            /* poses nuevas calculadas (mallas creadas); las repetidas reutilizan las anteriores */
-    uint32_t slimmed;            /* antebrazos adelgazados */
+    uint32_t seams;              /* costuras con el antebrazo (re)calculadas */
 } NsHandStats;
 
 /* Añade las manos nuevas a la escena `sc` y oculta las manopla del motor. Devuelve cuántas manos se pusieron (0..2). map: jugador enlazado (ns_player_bind). */
@@ -72,8 +70,7 @@ typedef struct {
 enum { NS_HT_PALM = 0, NS_HT_BACK = 1, NS_HT_FINGER = 2, NS_HT_JOINT = 3 };
 /* tex[4] por rol; devuelve cuántos roles encontró con cara propia (el resto se rellena con el más parecido o queda plano). side +1 derecha / -1 izquierda. */
 int ns_hand_classify(const NsMesh *glove, int side, NsHandTex tex[4]);
-/* Factor de adelgazamiento del antebrazo (0,6..1) para una malla de antebrazo y la escala de la mano (k = units_per_m / 1000); 1 = no hace falta. Visible para las pruebas. */
-float ns_hand_fore_slim(const NsMesh *fore, float k);
+
 
 #ifdef __cplusplus
 }

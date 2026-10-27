@@ -2,14 +2,14 @@
  *
  * Cada entrada da: la pose de la mano del arma y de la mano de apoyo (HP_*), el zócalo (socket) arma <- mano, el punto del gatillo y el zócalo de la mano de apoyo.
  *
- * MARCOS. Marco de la mano = el de vr_hand_skin (dedos -Y, palma +X en la mano DERECHA, pulgar +Z), aquí en METROS reales (mm * VRHS_UNIT_M: la mano se dibuja a tamaño real). Marco del arma =
+ * MARCOS. Marco de la mano = el de vr_hand_skin (dedos -Y, palma +X en la mano DERECHA, pulgar +Z), aquí en METROS con 1 unidad de la mano = 1 mm (unidades * VRHS_UNIT_M; la mano va a la escala del brazo del juego). Marco del arma =
  * el del modelo (-Z = boca, +Y arriba, +X derecha). Los zócalos son de la mano derecha canónica; para la izquierda vrgrip_mirror() (espejo en X, como la propia malla).
  *   grip     WPose que lleva puntos de la mano (m) al marco de EMPUÑADURA: ejes del arma, origen en el punto de empuñadura (el que devuelve vrhands_grip: def->points[WP_GRIP] o el derivado
  *            del modelo). El centro de agarre de la mano (vrhs_grip_center) cae en ese origen. Arma en mundo por la mano: W = mano_mundo * inv(grip) (en el modelo: vrhands_grip * grip).
  *   trigger  punta del índice con el gatillo suelto (HP_GRIP_PISTOL / HP_GRIP_RIFLE con trigger 0), en el marco de empuñadura (m). Con el gatillo a fondo la yema retrocede ~25 mm.
  *   support  igual que grip, para la mano de apoyo, respecto al punto WP_SUPPORT del arma (la palma agarra un cilindro cuyo eje es el del cañón).
  * La mano gira con respecto al arma como en un apretón de manos (eje del mango vrhs_handle_axis hacia arriba, dedos hacia delante, palma a la izquierda); en las armas con gatillo además
- * -16 grados de cabeceo y -13 de guiñada para que la yema del índice caiga sobre el gatillo. Sin geometría real del arma (no hay datos del juego aquí): el gatillo está a ~63 mm por delante y
+ * -17 grados de cabeceo y -35 de guiñada para que la yema del índice caiga sobre el gatillo. Sin geometría real del arma (no hay datos del juego aquí): el gatillo está a ~63 mm por delante y
  * ~32 mm por encima de la empuñadura; test_grip.c los comprueba con piezas primitivas y, si hay datos, con el modelo real. */
 #pragma once
 #include "vr_hand_pose.h"

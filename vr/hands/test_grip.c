@@ -154,8 +154,8 @@ static void test_table(void) {
             float ha[3]; vrhs_handle_axis(1, ha);
             WVec3 hax = wpose_apply((WPose){{0, 0, 0}, p->q}, wv(ha[0], ha[1], ha[2]));
             (void)thumb;
-            if (s == 0) {   /* apretón de manos: eje del mango hacia arriba (+Y), dedos hacia la boca (-Z), palma a la izquierda (-X); con cabeceo y guiñada de hasta ~20 grados */
-                CHECK(hax.y > 0.93f && fing.z < -0.80f && palmn.x < -0.93f, "%s: orientación de la mano del arma (eje %.2f dedos %.2f %.2f %.2f palma %.2f)", d->id, hax.y, fing.x, fing.y, fing.z, palmn.x);
+            if (s == 0) {   /* apretón de manos: eje del mango hacia arriba (+Y), dedos hacia la boca (-Z), palma a la izquierda (-X); con cabeceo y guiñada de hasta ~38 grados (mano a la escala del brazo del juego sobre un arma de tamaño real) */
+                CHECK(hax.y > 0.93f && fing.z < -0.78f && palmn.x < -0.78f, "%s: orientación de la mano del arma (eje %.2f dedos %.2f %.2f %.2f palma %.2f)", d->id, hax.y, fing.x, fing.y, fing.z, palmn.x);
             } else {        /* apoyo bajo el guardamanos: eje del mango hacia la boca, palma hacia arriba, dedos hacia -X para la derecha */
                 CHECK(hax.z < -0.99f && palmn.y > 0.99f && fing.x < -0.80f, "%s: orientación de la mano de apoyo", d->id);
             }
@@ -163,7 +163,7 @@ static void test_table(void) {
         /* el centro de agarre cae en el origen del marco de empuñadura / apoyo */
         WVec3 palm, tip;
         hand_points(1, e->pose, 0.0f, &palm, &tip);
-        if (e->pose == HP_GRIP_SPHERE) palm.x += 0.012f;   /* la granada va 12 mm por delante de la palma (SPHERE) */
+        if (e->pose == HP_GRIP_SPHERE) palm.x += 0.015f;   /* la granada va 15 unidades por delante de la palma (SPHERE) */
         CHECK(dist(wpose_apply(e->grip, palm), wv(0, 0, 0)) < 0.010f, "%s: centro de agarre a %.1f mm del punto de empuñadura", d->id, dist(wpose_apply(e->grip, palm), wv(0, 0, 0)) * 1000.0f);
         if (e->support_pose >= 0) {
             hand_points(1, e->support_pose, 0.0f, &palm, &tip);

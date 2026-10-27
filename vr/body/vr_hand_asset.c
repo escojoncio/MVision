@@ -3539,3 +3539,5 @@ const char *const vrha_name[VRHA_NJ] = {
     "ring-finger-metacarpal", "ring-finger-phalanx-proximal", "ring-finger-phalanx-intermediate", "ring-finger-phalanx-distal", "ring-finger-tip",
     "pinky-finger-metacarpal", "pinky-finger-phalanx-proximal", "pinky-finger-phalanx-intermediate", "pinky-finger-phalanx-distal", "pinky-finger-tip",
 };
+const uint16_t vrha_cuff[VRHA_NCUFF] = {
+};

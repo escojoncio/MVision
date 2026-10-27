@@ -2,9 +2,11 @@
  *
  * Sustituye a la mano procedural de huesos rígidos: la malla es una sola superficie continua (sin dedos de palo al cerrar) que se deforma en la CPU (skin lineal, <= 4 huesos por vértice).
  *
- * Marco de la mano = el de la pieza mano del jugador (mm; origen en la articulación de la muñeca; dedos -Y; pulgar +Z; palma +X en la mano DERECHA y -X en la izquierda). La izquierda es
- * el ESPEJO EXACTO en X de la derecha (posiciones y normales con x -> -x; quien dibuja invierte el orden de los triángulos; las poses se conjugan con el espejo).
- * Tamaño real: muñeca a yema del corazón ~190 mm, 1 unidad = 1 mm (VRHS_UNIT_M).
+ * Marco de la mano = el de la pieza mano del jugador (unidades del motor; origen en la muñeca del modelo; dedos -Y; pulgar +Z; palma +X en la mano DERECHA y -X en la izquierda). La
+ * izquierda es el ESPEJO EXACTO en X de la derecha (posiciones y normales con x -> -x; quien dibuja invierte el orden de los triángulos; las poses se conjugan con el espejo).
+ * Tamaño: a la escala del BRAZO DEL JUEGO. El asset (mano real de ~190 mm) se escala por VRHS_FIT_K y se desplaza VRHS_FIT_O para que el ancho de su puño (pulgar-meñique) y su centro
+ * coincidan con el anillo final del antebrazo del modelo del jugador (medido en el volcado: x -20..35, z -49..18 a 22 unidades sobre la muñeca); las proporciones no cambian.
+ * Todas las salidas (vrhs_pose, vrhs_skin, centro de agarre, yema, nudillos) van ya ajustadas. VRHS_UNIT_M = metros por unidad con units_per_m = 1000.
  *
  * Pose: cierre por dedo (curl[0..3] índice, corazón, anular, meñique; curl[4] pulgar; 0 = reposo del asset, 1 = puño) y separación del pulgar (-1 pegado .. +1 abierto). Cada
  * articulación gira alrededor de los ejes de su marco de REPOSO (convención OpenXR: -Z hacia la punta, +Y dorso, X = eje de flexión); el ángulo es lineal con el cierre. Sin estado. */
@@ -16,7 +18,9 @@ extern "C" {
 #endif
 
 #define VRHS_J VRHA_NJ
-#define VRHS_UNIT_M 0.001f       /* metros por unidad del marco de la mano */
+#define VRHS_UNIT_M 0.001f       /* metros por unidad del marco de la mano (units_per_m = 1000) */
+#define VRHS_FIT_K 1.27f         /* escala asset -> brazo del juego: ancho del puño del asset 52,6 mm -> 67 unidades del anillo final del antebrazo */
+extern const float VRHS_FIT_O[3];   /* desplazamiento asset -> pieza mano: centra el puño en el anillo del antebrazo (8,3; 0; -14,2) */
 #define VRHS_HANDLE_R_MM 17.0f   /* radio del mango de referencia del centro de agarre (mando, pistola) */
 #define VRHS_HANDLE_TILT_DEG 30.0f   /* el mango cruza la palma en diagonal (agarre de fuerza): del meñique hacia la base del índice, inclinado hacia los dedos */
 

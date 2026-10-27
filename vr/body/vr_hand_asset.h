@@ -42,6 +42,7 @@ extern "C" {
 #define VRHA_NV 804
 #define VRHA_NT 1400
 #define VRHA_NP 4
+#define VRHA_NCUFF 0
 enum { VRHA_ROLE_PALM = 0, VRHA_ROLE_BACK = 1, VRHA_ROLE_SIDE = 2, VRHA_ROLE_TIP = 3 };   /* = NS_HT_PALM, NS_HT_BACK, NS_HT_FINGER, NS_HT_JOINT (ns_hand.h) */
 
 typedef struct { uint16_t v0, nv, t0, nt; } VrHaPiece;
@@ -57,6 +58,7 @@ extern const float vrha_bind[VRHA_NJ][12];     /* articulación -> marco de la m
 extern const float vrha_ibm[VRHA_NJ][12];      /* inversa de vrha_bind */
 extern const int8_t vrha_parent[VRHA_NJ];
 extern const char *const vrha_name[VRHA_NJ];
+extern const uint16_t vrha_cuff[VRHA_NCUFF];   /* vértices del borde abierto (anillo del puño en la muñeca), con sus duplicados en otras piezas */
 
 #ifdef __cplusplus
 }

@@ -24,6 +24,7 @@ typedef struct {
     int no_shade;            /* no calcular luz dinámica (neutro 128) */
     const float *cull_eye;   /* NULL = sin descarte de reversos (panoramas). Si no, posición del ojo del juego en el mundo: se descartan las caras no doble cara que el motor
                               * no dibujaría (regla del anverso del contrato: dot(A - ojo, (B-A)x(D-A)) > 0). Sólo para comparar con el fotograma real. */
+    int keep_hands;          /* 1: también las manos propias (ns_hand; por defecto se omiten como el cuerpo propio). Herramientas de vista previa */
     struct NsAdaptSrc **src_out;   /* herramientas: si no es NULL recibe (malloc) un NsAdaptSrc por triángulo de salida, en el mismo orden */
 } NsAdaptOpts;
 

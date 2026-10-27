@@ -584,13 +584,11 @@ int vrbody_hand_state(int side, float *grip, float R[9], float t[3]) {
 }
 
 /* Punto de golpe de la mano nueva (vr_hand_skin): los NUDILLOS con el puño cerrado, un desplazamiento CONSTANTE en el marco de la mano, sin interpolar con el
- * agarre (el golpe no cambia de sitio al abrir o cerrar la mano). La mano se dibuja a tamaño real: mm * units_per_m / 1000 en unidades del motor. Mundo del motor. 0 si el brazo no se manejó en el último apply. */
+ * agarre (el golpe no cambia de sitio al abrir o cerrar la mano). La mano va en unidades del motor (escala del brazo del juego). Mundo del motor. 0 si el brazo no se manejó en el último apply. */
 int vrbody_fist_point(int side, float out[3]) {
     if (side < 0 || side > 1 || !out || !G.pf[side].ok) return 0;
     float off[3];
     vrhs_fist_point(side == 1 ? 1 : -1, off);
-    const float k = G.view_upm > 1.0f ? G.view_upm / 1000.0f : 1.0f;
-    for (int i = 0; i < 3; i++) off[i] *= k;
     const float *R = G.pf[side].R, *t = G.pf[side].t, *p = off;
     for (int i = 0; i < 3; i++) out[i] = R[3 * i] * p[0] + R[3 * i + 1] * p[1] + R[3 * i + 2] * p[2] + t[i];
     return all_finite(out, 3);
@@ -1075,12 +1073,11 @@ static int apply_main(uint8_t *ram) {
         vrbody_quat_to_mat(Rq, Ru);
         float Rw[9]; m_mulm(Rw, T, Ru);                                    /* ejes del marco de mano en el mundo */
         float zc[3]; m_col(zc, Rw, 2);
-        /* muñeca = agarre - (centro de agarre de la mano nueva, a tamaño real) girado con la mano: la palma rodea el mango del mando y la mano gira alrededor del mango, no de la muñeca */
+        /* muñeca = agarre - (centro de agarre de la mano nueva, en unidades del motor: la mano va a la escala del brazo del juego) girado con la mano: la palma rodea el mango del mando y la mano gira alrededor del mango, no de la muñeca */
         float gch[3];
         {
             float gc[3], Mh[9];
             vrhs_grip_center(s == 1 ? 1 : -1, gc);
-            v_scale(gc, gc, view.units_per_m / 1000.0f);
             hand_map(rig.side, Mh); m_mulv(gch, Mh, gc);                  /* en el marco de mano de vr_pose.h */
         }
         float wrist_t[3]; { float o_[3]; m_mulv(o_, Rw, gch); v_sub(wrist_t, Pw, o_); }
@@ -1205,7 +1202,7 @@ static int apply_main(uint8_t *ram) {
                 float c[3]; m_col(c, Re, j);
                 f[4 * j] = c[0]; f[4 * j + 1] = c[1]; f[4 * j + 2] = c[2]; f[4 * j + 3] = 0;
             }
-            { float gc[3], o_[3]; vrhs_grip_center(s == 1 ? 1 : -1, gc); m_mulv(o_, Rpu, gc); for (int j = 0; j < 3; j++) f[12 + j] = wu[j] + o_[j] * 0.001f; (void)ez; }   /* centro de agarre (m reales) */
+            { float gc[3], o_[3]; vrhs_grip_center(s == 1 ? 1 : -1, gc); m_mulv(o_, Rpu, gc); for (int j = 0; j < 3; j++) f[12 + j] = wu[j] + o_[j] / view.units_per_m; (void)ez; }   /* centro de agarre (unidades del motor -> m) */
             f[15] = 1;
             G.dbg_frame_ok[s] = all_finite(f, 16);
         }

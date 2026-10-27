@@ -619,7 +619,6 @@ static void test_glue(void) {
         float tw[3]; for (int k = 0; k < 3; k++) tw[k] = d->sol.wrist[k];
         /* centro de agarre de la mano nueva (a tamaño real) con la orientación de la pieza mano */
         float Rh[9], th_[3], gc[3], go[3]; load_xf(part_addr(4), Rh, th_); vrhs_grip_center(1, gc);
-        for (int k = 0; k < 3; k++) gc[k] *= g_view.units_per_m / 1000.0f;
         mv(go, Rh, gc);
         float palm[3]; for (int k = 0; k < 3; k++) palm[k] = tw[k] + go[k];
         float e[3] = {palm[0] - want[0], palm[1] - want[1], palm[2] - want[2]};
@@ -1227,8 +1226,7 @@ static void torso_run(int seed, int follow, float off_deg, float *yaw_err, float
                 mm(Rw, T, Rz);
                 const float Mr[9] = {0, 0, -1, -1, 0, 0, 0, 1, 0}, Ml[9] = {0, 0, 1, 1, 0, 0, 0, 1, 0};
                 float gc[3], gh[3], go[3]; vrhs_grip_center(sd ? 1 : -1, gc);
-                for (int k = 0; k < 3; k++) gc[k] *= g_view.units_per_m / 1000.0f;
-                mv(gh, sd ? Mr : Ml, gc); mv(go, Rw, gh);
+                        mv(gh, sd ? Mr : Ml, gc); mv(go, Rw, gh);
                 for (int k = 0; k < 3; k++) want[k] += go[k];
             }
             for (int k = 0; k < 3; k++) dw[k] = want[k] - g_view.eye[k];

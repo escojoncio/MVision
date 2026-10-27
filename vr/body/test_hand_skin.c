@@ -47,17 +47,19 @@ static void test_asset(void) {
 }
 
 static void test_bind_identity(void) {
+    /* en reposo las matrices de skin son el ajuste al brazo del juego (VRHS_FIT_K * I, VRHS_FIT_O) en todos los huesos: la mano no se deforma */
     float xf[VRHS_J][12], sk[VRHS_J][12];
     const float zero[5] = {0, 0, 0, 0, 0};
     vrhs_pose(zero, 0.0f, 1, xf);
     vrhs_skin_mats(xf, 1, sk);
     float e = 0;
-    for (int j = 0; j < VRHS_J; j++) for (int i = 0; i < 12; i++) e = fmaxf(e, fabsf(sk[j][i] - ((i == 0 || i == 5 || i == 10) ? 1.0f : 0.0f) * 1.0f - ((i % 4 == 3) ? 0.0f : 0.0f)));
-    CHECK(e < 2e-3f, "reposo: matrices de skin = identidad (%g)", e);
+    for (int j = 0; j < VRHS_J; j++) for (int r = 0; r < 3; r++) for (int c = 0; c < 4; c++)
+        e = fmaxf(e, fabsf(sk[j][4 * r + c] - (c == 3 ? VRHS_FIT_O[r] : (c == r ? VRHS_FIT_K : 0.0f))));
+    CHECK(e < 3e-3f, "reposo: matrices de skin = ajuste al brazo del juego (%g)", e);
     vrhs_skin(xf, 1, P, N);
     float pe = 0, ne = 0;
-    for (int i = 0; i < VRHA_NV; i++) for (int a = 0; a < 3; a++) { pe = fmaxf(pe, fabsf(P[i][a] - vrha_pos[i][a])); ne = fmaxf(ne, fabsf(N[i][a] - vrha_nrm[i][a])); }
-    CHECK(pe < 0.05f && ne < 1e-3f, "reposo: vértices %.4f mm, normales %.5f", pe, ne);
+    for (int i = 0; i < VRHA_NV; i++) for (int a = 0; a < 3; a++) { pe = fmaxf(pe, fabsf(P[i][a] - (VRHS_FIT_K * vrha_pos[i][a] + VRHS_FIT_O[a]))); ne = fmaxf(ne, fabsf(N[i][a] - vrha_nrm[i][a])); }
+    CHECK(pe < 0.05f && ne < 1e-3f, "reposo: vértices %.4f, normales %.5f", pe, ne);
 }
 
 static float tip_palm(const float c[5], int f) {   /* dedos: distancia de la punta a la muñeca; pulgar: de su punta a la base del meñique (oposición) */

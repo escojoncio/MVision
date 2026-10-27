@@ -5,6 +5,7 @@
 #include <string.h>
 
 #define DEG 0.017453292519943295f
+const float VRHS_FIT_O[3] = {8.3f, 0.0f, -14.2f};
 
 /* Ángulos con el cierre al máximo (grados), por dedo (índice, corazón, anular, meñique): metacarpo (ahuecar la palma), MCP, PIP y DIP. Flexión = giro sobre -X local. */
 static const float FINGER_DEG[4][4] = {
@@ -47,7 +48,7 @@ void vrhs_pose(const float curl[5], float thumb_spread, int side, float xf[VRHS_
     for (int j = 0; j < VRHS_J; j++) {
         float loc[12], r[12], r2[12];
         const int p = vrha_parent[j];
-        if (p < 0) memcpy(loc, vrha_bind[j], sizeof loc);
+        if (p < 0) { memcpy(loc, vrha_bind[j], sizeof loc); for (int a = 0; a < 3; a++) { for (int b = 0; b < 4; b++) loc[4 * a + b] *= VRHS_FIT_K; loc[4 * a + 3] += VRHS_FIT_O[a]; } }   /* raíz: ajuste a la escala del brazo del juego */
         else xf_mul(loc, vrha_ibm[p], vrha_bind[j]);                 /* local de reposo respecto al padre */
         memset(r, 0, sizeof r); r[0] = r[5] = r[10] = 1;
         if (j >= VRHS_INDEX_MC) {
@@ -121,7 +122,7 @@ void vrhs_grip_center(int side, float out[3]) {
         if (vrha_nrm[i][0] < 0.3f || v[2] < z0 - 40.0f || v[2] > z0 + 20.0f) continue;
         if (fabsf(v[1] - (y0 - (v[2] - z0) * tn)) < 8.0f && v[0] > xs) xs = v[0];
     }
-    out[0] = (side < 0 ? -1.0f : 1.0f) * (xs + VRHS_HANDLE_R_MM); out[1] = y0; out[2] = z0;
+    out[0] = (side < 0 ? -1.0f : 1.0f) * (VRHS_FIT_K * xs + VRHS_FIT_O[0] + VRHS_HANDLE_R_MM); out[1] = VRHS_FIT_K * y0 + VRHS_FIT_O[1]; out[2] = VRHS_FIT_K * z0 + VRHS_FIT_O[2];
 }
 
 void vrhs_index_pad(const float xf[VRHS_J][12], float out[3]) {

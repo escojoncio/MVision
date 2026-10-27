@@ -373,7 +373,6 @@ static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *m
     if (!in.enabled) return;
     for (int s = 0; s < 2; s++) { float g = 0; in.driven[s] = vrbody_hand_state(s, &g, NULL, NULL); in.grip[s] = in.driven[s] ? g : 0.0f; }
     for (int s = 0; s < 2; s++) vrgame_hand_pose_in(s, &in.item_pose[s], &in.trigger[s], &in.thumb[s]);   /* objeto en la mano (arma por vr_grip), gatillo y pulgar */
-    { const VrCamRecord *r = vrcam_last_record(); in.units_per_m = r && r->active ? (float)r->units_per_m : 0.0f; }   /* la mano a tamaño real con la escala calibrada */
     ns_hand_apply(sc, st, map, &in);
 }
 /* Antes de cada captura: con las manos nuevas Y el render nativo en uso, la malla de la manopla del motor NO se deforma en puño (la mano nueva hace el puño y su forma

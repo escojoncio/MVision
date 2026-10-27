@@ -116,3 +116,13 @@ $(B)/test_ns_dumps: vr/native/test_ns_dumps.c $(DUMPSRC) $(HDR) vr/native/ns_hoo
 test-dumps: $(B)/test_ns_dumps
 	$(B)/test_ns_dumps $(DUMPS)
 .PHONY: test-dumps
+
+# Vista previa de las manos nuevas con la tubería real sobre un volcado (IK de vr_body, extractor, ns_hand, ns_adapt con VRAM, ns_cpuref). Herramienta de escritorio.
+#   make -f vr/native/extract.mk nshands && vr/native/build-extract/nshands <dir_volcado> <dir_salida>
+NSHSRC := vr/native/tools/nshands.c $(SRC) vr/native/ns_player.c vr/native/ns_hand.c vr/native/ns_wphide.c vr/body/vr_hand_skin.c vr/body/vr_hand_asset.c vr/hands/vr_hand_pose.c vr/hands/vr_grip.c \
+  vr/body/vr_body.c vr/body/vr_pose.c vr/body/vr_fist.c
+$(B)/nshands: $(NSHSRC) $(HDR) vr/native/ns_hand.h | $(B)
+	$(MAKE) -C vr/weapons lib
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native -Ivr/body -Ivr/hands -Ivr/weapons $(NSHSRC) vr/weapons/build/libweapons.a -lm -lpthread -o $@
+nshands: $(B)/nshands
+.PHONY: nshands

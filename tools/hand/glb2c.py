@@ -326,12 +326,20 @@ def main():
             out_r.append(role[ti])
         out_p.append((v0, len(out_v) - v0, t0, len(out_t) - t0))
     assert all(p[1] <= 256 for p in out_p)
+    # borde abierto de la malla (anillo del puño en la muñeca): aristas con un solo triángulo; se exportan todos los duplicados por pieza
+    ecount = {}
+    for t in T2.tolist():
+        for a_, b_ in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
+            k_ = (min(a_, b_), max(a_, b_))
+            ecount[k_] = ecount.get(k_, 0) + 1
+    bverts = set(v for e_, n_ in ecount.items() if n_ == 1 for v in e_)
+    cuff = [i for i, v in enumerate(out_v) if v in bverts]
     length = P2[:, 1].max() - P2[:, 1].min()
     tip_len = -P2[:, 1].min()
-    write(a[1], out_v, out_t, out_r, out_p, P2, N2, J4, W4, Gh, n0, len(P), length, tip_len)
+    write(a[1], out_v, out_t, out_r, out_p, P2, N2, J4, W4, Gh, n0, len(P), length, tip_len, cuff)
 
 
-def write(outdir, out_v, out_t, out_r, out_p, P, N, J4, W4, Gh, n0, nraw, length, tip_len):
+def write(outdir, out_v, out_t, out_r, out_p, P, N, J4, W4, Gh, n0, nraw, length, tip_len, cuff):
     nv, nt, npc = len(out_v), len(out_t), len(out_p)
     lic = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ASSET_LICENSE.md")).read().strip()
     hdr = f"""/* vr_hand_asset: GENERADO por tools/hand/glb2c.py a partir de la mano genérica de WebXR Input Profiles (profiles/generic-hand/right.glb). NO EDITAR A MANO.
@@ -356,6 +364,7 @@ extern "C" {{
 #define VRHA_NV {nv}
 #define VRHA_NT {nt}
 #define VRHA_NP {npc}
+#define VRHA_NCUFF {len(cuff)}
 enum {{ VRHA_ROLE_PALM = 0, VRHA_ROLE_BACK = 1, VRHA_ROLE_SIDE = 2, VRHA_ROLE_TIP = 3 }};   /* = NS_HT_PALM, NS_HT_BACK, NS_HT_FINGER, NS_HT_JOINT (ns_hand.h) */
 
 typedef struct {{ uint16_t v0, nv, t0, nt; }} VrHaPiece;
@@ -371,6 +380,7 @@ extern const float vrha_bind[VRHA_NJ][12];     /* articulación -> marco de la m
 extern const float vrha_ibm[VRHA_NJ][12];      /* inversa de vrha_bind */
 extern const int8_t vrha_parent[VRHA_NJ];
 extern const char *const vrha_name[VRHA_NJ];
+extern const uint16_t vrha_cuff[VRHA_NCUFF];   /* vértices del borde abierto (anillo del puño en la muñeca), con sus duplicados en otras piezas */
 
 #ifdef __cplusplus
 }}
@@ -416,6 +426,10 @@ extern const char *const vrha_name[VRHA_NJ];
     c.append("const char *const vrha_name[VRHA_NJ] = {")
     for i in range(0, 25, 5):
         c.append("    " + " ".join('"%s",' % n for n in NAMES[i:i + 5]))
+    c.append("};")
+    c.append("const uint16_t vrha_cuff[VRHA_NCUFF] = {")
+    for i in range(0, len(cuff), 16):
+        c.append("    " + " ".join("%d," % v for v in cuff[i:i + 16]))
     c.append("};")
     open(os.path.join(outdir, "vr_hand_asset.h"), "w").write(h)
     open(os.path.join(outdir, "vr_hand_asset.c"), "w").write("\n".join(c) + "\n")
