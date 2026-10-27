@@ -41,6 +41,9 @@ typedef struct {
     NsFace lf[NS_HAND_LT];
     NsMesh loft;
     NsVert fv[256];              /* antebrazo con el giro repartido (copia de la malla del motor) */
+    float fang[256];             /* giro aplicado a cada vértice (rad) */
+    NsNorm fn[256];              /* una normal por esquina de cara, girada con su vértice */
+    NsFace ff[64];
     NsMesh fmesh;
     int32_t ftw;                 /* giro (grados) con que se hizo; INT32_MIN = ninguno */
     uint64_t fsrc;
@@ -318,6 +321,7 @@ static int build_seam(HandCache *c, int side, const NsMesh *fm, const int32_t d[
     }
     c->nf = nf;
     c->seam_fore = fm->id; memcpy(c->seam_d, d, sizeof c->seam_d);
+    c->fmesh.id = 0;                            /* la copia girada del antebrazo depende de d: se rehace */
     c->seam = 1;
     return 1;
 }
@@ -336,20 +340,22 @@ static void mat_of(const float q[4], float m[9]) {
 }
 /* Malla de la transición en el marco de la mano para la posición relativa actual antebrazo -> mano: el anillo s (1 = antebrazo, 0 = mano) lleva la parte s del movimiento del antebrazo
  * respecto a la mano (giro interpolado por cuaternión: el giro y la flexión se reparten a lo largo de la transición, sin estrangularse; escala del estirado interpolada). */
-static void loft_mesh(HandCache *c, const NsXf *F, const NsXf *H, const NsMesh *g) {
+static int loft_mesh(HandCache *c, const NsXf *F, const NsXf *H, const NsMesh *g) {
     const float *f = F->m, *h = H->m;
     float A[9], b[3], Q[9], S[9], q[4], Ad[3];
     for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) A[3 * i + j] = h[i] * f[j] + h[4 + i] * f[4 + j] + h[8 + i] * f[8 + j];   /* R_H^T R_F */
     for (int i = 0; i < 3; i++) b[i] = h[i] * (f[3] - h[3]) + h[4 + i] * (f[7] - h[7]) + h[8 + i] * (f[11] - h[11]);
     {   /* parte de giro de A (Gram-Schmidt por columnas) */
         float c0[3] = {A[0], A[3], A[6]}, c1[3] = {A[1], A[4], A[7]}, c2[3];
-        float l0 = sqrtf(c0[0] * c0[0] + c0[1] * c0[1] + c0[2] * c0[2]); for (int a = 0; a < 3; a++) c0[a] /= l0;
+        float l0 = sqrtf(c0[0] * c0[0] + c0[1] * c0[1] + c0[2] * c0[2]); if (!(l0 > 1e-6f)) return 0; for (int a = 0; a < 3; a++) c0[a] /= l0;
         float dp = c0[0] * c1[0] + c0[1] * c1[1] + c0[2] * c1[2]; for (int a = 0; a < 3; a++) c1[a] -= dp * c0[a];
-        float l1 = sqrtf(c1[0] * c1[0] + c1[1] * c1[1] + c1[2] * c1[2]); for (int a = 0; a < 3; a++) c1[a] /= l1;
+        float l1 = sqrtf(c1[0] * c1[0] + c1[1] * c1[1] + c1[2] * c1[2]); if (!(l1 > 1e-6f)) return 0; for (int a = 0; a < 3; a++) c1[a] /= l1;
         c2[0] = c0[1] * c1[2] - c0[2] * c1[1]; c2[1] = c0[2] * c1[0] - c0[0] * c1[2]; c2[2] = c0[0] * c1[1] - c0[1] * c1[0];
         for (int a = 0; a < 3; a++) { Q[3 * a] = c0[a]; Q[3 * a + 1] = c1[a]; Q[3 * a + 2] = c2[a]; }
     }
     for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) S[3 * i + j] = Q[i] * A[j] + Q[3 + i] * A[3 + j] + Q[6 + i] * A[6 + j];   /* Q^T A */
+    for (int i = 0; i < 9; i++) if (!isfinite(S[i]) || !isfinite(A[i])) return 0;
+    for (int i = 0; i < 3; i++) if (!isfinite(b[i])) return 0;
     quat_of(Q, q);
     if (q[3] < 0) for (int a = 0; a < 4; a++) q[a] = -q[a];
     const float dd[3] = {(float)c->seam_d[0], (float)c->seam_d[1], (float)c->seam_d[2]};
@@ -401,6 +407,7 @@ static void loft_mesh(HandCache *c, const NsXf *F, const NsXf *H, const NsMesh *
     for (int a = 0; a < 3; a++) { m->bbox[a] = mn[a]; m->bbox[3 + a] = mx[a]; }
     m->verts = c->lv; m->norms = c->ln; m->faces = c->lf;
     m->id = ns_mesh_content_hash(m);
+    return 1;
 }
 
 
@@ -428,12 +435,15 @@ static int fore_twist(HandCache *c, const NsMesh *fm, const NsXf *U, const NsXf 
     float tend = 1e9f;   /* extremo de la muñeca: el lazo del anillo */
     for (int i = 0; i < c->nf; i++) { const float t = l[0] * c->rv[i].x + l[1] * c->rv[i].y + l[2] * c->rv[i].z; if (t < tend) tend = t; }
     if (!(tend > 1.0f)) return 0;
+    if (fm->n_faces > 64 || !fm->norms || !fm->n_norms) return 0;
     for (unsigned i = 0; i < fm->n_verts; i++) {
         NsVert v = fm->verts[i];
+        c->fang[i] = 0.0f;
         if (v.weld == 0xFF) {
             const float p[3] = {v.x, v.y, v.z}, t = l[0] * p[0] + l[1] * p[1] + l[2] * p[2], sp = t / tend;
             if (sp < 1.0f) {
                 const float ang = -(1.0f - (sp < 0.0f ? 0.0f : sp)) * (float)tw * 0.0174532925f, cs = cosf(ang), sn = sinf(ang);
+                c->fang[i] = ang;
                 const float kx = l[1] * p[2] - l[2] * p[1], ky = l[2] * p[0] - l[0] * p[2], kz = l[0] * p[1] - l[1] * p[0];   /* l x p */
                 const float r[3] = {p[0] * cs + kx * sn + l[0] * t * (1 - cs), p[1] * cs + ky * sn + l[1] * t * (1 - cs), p[2] * cs + kz * sn + l[2] * t * (1 - cs)};
                 v.x = (int16_t)lrintf(r[0]); v.y = (int16_t)lrintf(r[1]); v.z = (int16_t)lrintf(r[2]);
@@ -441,8 +451,20 @@ static int fore_twist(HandCache *c, const NsMesh *fm, const NsXf *U, const NsXf 
         }
         c->fv[i] = v;
     }
+    /* normales: una por esquina de cara (la original de esa esquina) girada como su vértice */
+    for (unsigned f = 0; f < fm->n_faces; f++) {
+        c->ff[f] = fm->faces[f];
+        for (int k = 0; k < 4; k++) {
+            const unsigned vi = fm->faces[f].v[k] < fm->n_verts ? fm->faces[f].v[k] : 0, ni = fm->faces[f].n[k] < fm->n_norms ? fm->faces[f].n[k] : 0;
+            const float n[3] = {fm->norms[ni].x, fm->norms[ni].y, fm->norms[ni].z}, ang = c->fang[vi], cs = cosf(ang), sn = sinf(ang), t = l[0] * n[0] + l[1] * n[1] + l[2] * n[2];
+            const float kx = l[1] * n[2] - l[2] * n[1], ky = l[2] * n[0] - l[0] * n[2], kz = l[0] * n[1] - l[1] * n[0];
+            NsNorm *o = &c->fn[4 * f + (unsigned)k];
+            o->x = (int16_t)lrintf(n[0] * cs + kx * sn + l[0] * t * (1 - cs)); o->y = (int16_t)lrintf(n[1] * cs + ky * sn + l[1] * t * (1 - cs)); o->z = (int16_t)lrintf(n[2] * cs + kz * sn + l[2] * t * (1 - cs)); o->pad = 0;
+            c->ff[f].n[k] = (uint8_t)(4 * f + (unsigned)k);
+        }
+    }
     c->fmesh = *fm;
-    c->fmesh.verts = c->fv;
+    c->fmesh.verts = c->fv; c->fmesh.norms = c->fn; c->fmesh.faces = c->ff; c->fmesh.n_norms = (uint16_t)(4 * fm->n_faces);
     int16_t mn[3] = {32767, 32767, 32767}, mx[3] = {-32768, -32768, -32768};
     for (unsigned i = 0; i < fm->n_verts; i++) { const int16_t qv[3] = {c->fv[i].x, c->fv[i].y, c->fv[i].z}; for (int a = 0; a < 3; a++) { if (qv[a] < mn[a]) mn[a] = qv[a]; if (qv[a] > mx[a]) mx[a] = qv[a]; } }
     for (int a = 0; a < 3; a++) { c->fmesh.bbox[a] = mn[a]; c->fmesh.bbox[3 + a] = mx[a]; }
@@ -547,10 +569,10 @@ static int one_hand(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const 
     for (int i = 0; i < 5; i++) pk[i] = quant(cu.curl[i], NS_HAND_QC);
     pk[5] = quant(cu.thumb_spread, NS_HAND_QC);
     if (!c->have_pose || memcmp(pk, c->key, sizeof pk) != 0) pose_meshes(c, side, pk, g);
-    if (c->seam) {
-        loft_mesh(c, &fp->world, &gp->world, g);
-        if (ns_store_put(st, &c->ring) < 0 || ns_store_put(st, &c->loft) < 0) { S.st.put_fail++; return 0; }
-        /* antebrazo con el giro repartido (si el brazo está en la escena) */
+    if (c->seam && !loft_mesh(c, &fp->world, &gp->world, g)) c->seam = 0;   /* matrices degeneradas: sin anillo ni transición este fotograma (se rehace después) */
+    for (int p = 0; p < VRHA_NP; p++) if (ns_store_put(st, &c->mesh[p]) < 0) { S.st.put_fail++; return 0; }
+    if (c->seam && (ns_store_put(st, &c->ring) < 0 || ns_store_put(st, &c->loft) < 0)) { S.st.put_fail++; return 0; }
+    if (c->seam) {   /* antebrazo con el giro repartido (si el brazo está en la escena); se sustituye solo cuando todo lo demás ya está en el almacén */
         const int upart = h ? NS_PART_UPPER_R : NS_PART_UPPER_L;
         if (map->part[upart].n > 0 && map->part[upart].idx[0] < sc->n_piece && fore_twist(c, fm, &sc->piece[map->part[upart].idx[0]].world, &fp->world) && ns_store_put(st, &c->fmesh) >= 0) {
             const uint64_t src = fm->id;
@@ -561,7 +583,6 @@ static int one_hand(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const 
             S.st.fore_twisted++;
         }
     }
-    for (int p = 0; p < VRHA_NP; p++) if (ns_store_put(st, &c->mesh[p]) < 0) { S.st.put_fail++; return 0; }
     const NsInstance *pin = &sc->inst[map->inst];
     NsInstance *ni = &sc->inst[sc->n_inst];
     const int base = c->seam ? 2 : 0;                                    /* pieza 0 = anillo del antebrazo, 1 = transición (con costura) */
@@ -572,10 +593,10 @@ static int one_hand(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const 
     if (base) {
         NsPiece *q = &sc->piece[sc->n_piece];
         memset(q, 0, sizeof *q);
-        q->mesh_id = c->ring.id; q->world = fp->world; q->parent = -1; q->flags = gp->flags & NS_PF_HIDDEN;
+        q->mesh_id = c->ring.id; q->world = fp->world; q->parent = -1; q->flags = (gp->flags | fp->flags) & NS_PF_HIDDEN;   /* oculta si la mano o el antebrazo lo están */
         q = &sc->piece[sc->n_piece + 1];
         memset(q, 0, sizeof *q);
-        q->mesh_id = c->loft.id; q->world = gp->world; q->parent = 0; q->flags = gp->flags & NS_PF_HIDDEN;
+        q->mesh_id = c->loft.id; q->world = gp->world; q->parent = 0; q->flags = (gp->flags | fp->flags) & NS_PF_HIDDEN;
     }
     for (int p = 0; p < VRHA_NP; p++) {
         NsPiece *q = &sc->piece[sc->n_piece + (uint32_t)(base + p)];

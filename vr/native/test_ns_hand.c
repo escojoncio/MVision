@@ -633,6 +633,34 @@ static void test_watertight(void) {
     printf("  brazo+antebrazo+mano: %d poses, aristas abiertas fuera del hombro en %d, no variedad en %d (peor %d abiertas), giro concentrado en una franja en %d\n", poses, bad_open, bad_nm, worst_open, bad_twist);
 }
 
+
+/* Revisión: el anillo y la transición se ocultan si el antebrazo está oculto; la copia girada del antebrazo lleva una normal por esquina, unitaria y girada con su vértice. */
+static void test_seam_details(void) {
+    World w; world_init(&w, 8, 64, 1); ns_hand_reset();
+    NsXf *U = &w.sc.piece[1 + NS_PART_UPPER_R].world, *F = &w.sc.piece[1 + NS_PART_FORE_R].world, *H = &w.sc.piece[1 + NS_PART_HAND_R].world;
+    /* brazo identidad; antebrazo en el codo girado 90 grados sobre su eje (y local) */
+    memset(U, 0, sizeof *U); U->m[0] = U->m[5] = U->m[10] = 1;
+    memset(F, 0, sizeof *F); F->m[2] = 1; F->m[5] = 1; F->m[8] = -1; F->m[7] = -260; F->m[11] = -50;
+    *H = *F; for (int i = 0; i < 3; i++) H->m[4 * i + 3] = F->m[4 * i + 3] + F->m[4 * i + 1] * -249.0f + F->m[4 * i + 2] * 47.0f;
+    w.sc.piece[1 + NS_PART_FORE_R].flags = NS_PF_HIDDEN;
+    NsHandIn in; memset(&in, 0, sizeof in); in.enabled = 1; in.driven[1] = 1; in.item_pose[1] = HP_RELAX;
+    CHECK(ns_hand_apply(&w.sc, w.st, &w.map, &in) >= 1, "mano puesta");
+    const NsInstance *ir = NULL;
+    for (uint32_t i = 0; i < w.sc.n_inst; i++) if (w.sc.inst[i].key == NS_HAND_KEY_R) ir = &w.sc.inst[i];
+    CHECK(ir && ir->n_pieces == NS_HAND_PIECES && (w.sc.piece[ir->first_piece].flags & NS_PF_HIDDEN) && (w.sc.piece[ir->first_piece + 1].flags & NS_PF_HIDDEN) &&
+          !(w.sc.piece[ir->first_piece + 2].flags & NS_PF_HIDDEN), "antebrazo oculto: anillo y transición ocultos, la mano no");
+    const NsMesh *fm = ns_store_get(w.st, w.sc.piece[1 + NS_PART_FORE_R].mesh_id);
+    int nok = fm && fm->id != w.fore.id && fm->n_norms == 4u * fm->n_faces, rotated = 0;
+    for (uint32_t f = 0; nok && f < fm->n_faces; f++) for (int k = 0; k < 4; k++) {
+        const NsNorm *n = &fm->norms[fm->faces[f].n[k]];
+        const float l = sqrtf((float)n->x * n->x + (float)n->y * n->y + (float)n->z * n->z) / 4096.0f;
+        if (fm->faces[f].n[k] != 4 * f + (uint32_t)k || fabsf(l - 1.0f) > 0.01f) nok = 0;
+        if (n->x != 0 || n->y != 0 || n->z != 4096) rotated = 1;
+    }
+    CHECK(nok && rotated, "antebrazo girado: una normal unitaria por esquina, giradas con su vértice (ok %d, giradas %d)", nok, rotated);
+    world_free(&w);
+}
+
 int main(void) {
     test_store_put();
     test_classify();
@@ -641,6 +669,7 @@ int main(void) {
     test_flat_and_epoch();
     test_pose_blend();
     test_watertight();
+    test_seam_details();
     printf("%s ns_hand: %d comprobaciones, %d fallos\n", fails ? "FALLO" : "OK", checks, fails);
     return fails ? 1 : 0;
 }
