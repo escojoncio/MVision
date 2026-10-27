@@ -180,9 +180,9 @@ static void test_apply(void) {
         vrhs_skin(xr, 1, pr, NULL); vrhs_skin(xl, -1, pl, NULL);
         float verr = 0; int ntri = 0, okc = 1, wind = 0, wind_n = 0;
         for (uint32_t k = 0; k < NP; k++) {
-            if (k == 0) continue;   /* anillo: se comprueba aparte */
+            if (k < 2) continue;   /* anillo y transición: se comprueban aparte */
             const NsPiece *qr = &s->piece[ir->first_piece + k], *ql = &s->piece[il->first_piece + k];
-            const uint32_t hk = k - 1;
+            const uint32_t hk = k - 2;
             const NsMesh *mr = ns_store_get(w.st, qr->mesh_id), *ml = ns_store_get(w.st, ql->mesh_id);
             CHECK(mr && ml, "pieza %u: malla en el almacén", k);
             if (!mr || !ml) continue;
@@ -210,7 +210,7 @@ static void test_apply(void) {
                 float d = c[0] * nn->x + c[1] * nn->y + c[2] * nn->z;
                 if (fabsf(d) > 1e-3f) { wind_n++; wind += d > 0; }
             }
-            ntri += (int)ns_gpu_tri_count(mr);
+            if (k >= 2) ntri += (int)ns_gpu_tri_count(mr);
             NsGpuVert gv[256]; static NsGpuCorner gc[3 * VRHA_NT];
             ns_gpu_pack(mr, NULL, gv, gc, 0, NULL, NULL);
             for (uint32_t c = 0; c < 3 * ns_gpu_tri_count(mr); c++) if (gc[c].v >= mr->n_verts) okc = 0;
@@ -219,12 +219,14 @@ static void test_apply(void) {
         CHECK(okc, "caras triangulares con índices válidos");
         CHECK(wind_n > 0 && wind * 100 >= wind_n * 95, "sentido de las caras (dos manos): %d de %d con la normal interior", wind, wind_n);
         CHECK(ntri == VRHA_NT, "triángulos por mano: %d", ntri);
-        /* costura: anillo en el marco del antebrazo, los vértices soldados de la mano caen (en reposo) donde el anillo los pone */
+        /* unión: anillo = los 4 vértices del extremo del antebrazo (copia exacta, matriz del antebrazo); la transición se suelda a ellos (en reposo caen donde el anillo los pone) */
         const NsPiece *rp = &s->piece[ir->first_piece];
         const NsMesh *rm = ns_store_get(w.st, rp->mesh_id);
-        CHECK(rm && rm->n_verts >= 8 && mat_err(&rp->world, &s->piece[1 + NS_PART_FORE_R].world) < 1e-6, "anillo de la costura (%u puntos) con la matriz del antebrazo", rm ? rm->n_verts : 0);
+        int same = rm && rm->n_verts == 4;
+        for (uint32_t i = 0; same && i < 4; i++) { int found = 0; for (int j = 4; j < 8; j++) found |= rm->verts[i].x == w.fv[j].x && rm->verts[i].y == w.fv[j].y && rm->verts[i].z == w.fv[j].z; same &= found; }
+        CHECK(same && mat_err(&rp->world, &s->piece[1 + NS_PART_FORE_R].world) < 1e-6, "anillo = vértices del extremo del antebrazo (%u) con su matriz", rm ? rm->n_verts : 0);
         float wgap = 0; int nwv = 0;
-        for (uint32_t k = 1; rm && k < NP; k++) {
+        for (uint32_t k = 1; rm && k < 2; k++) {
             const NsPiece *qr = &s->piece[ir->first_piece + k];
             const NsMesh *mr = ns_store_get(w.st, qr->mesh_id);
             for (uint32_t i = 0; mr && i < mr->n_verts; i++) {
@@ -237,7 +239,7 @@ static void test_apply(void) {
                 wgap = fmaxf(wgap, sqrtf((pa[0] - pb[0]) * (pa[0] - pb[0]) + (pa[1] - pb[1]) * (pa[1] - pb[1]) + (pa[2] - pb[2]) * (pa[2] - pb[2])));
             }
         }
-        CHECK(nwv >= 8 && wgap < 2.0f, "borde del puño soldado: %d vértices, hueco en reposo %.2f", nwv, wgap);
+        CHECK(rm && nwv == (int)rm->n_verts && wgap < 1.0f, "transición soldada al antebrazo: %d vértices, hueco en reposo %.2f", nwv, wgap);
         /* las caras llevan texturas de la manopla, dentro del rectángulo de su cara de referencia */
         int tex_ok = 0, flat = 0, in_rect = 1;
         for (uint32_t k = 1; k < NP; k++) {
@@ -487,6 +489,102 @@ static void test_pose_blend(void) {
     world_free(&w);
 }
 
+
+/* Antebrazo + transición + mano: UNA superficie cerrada. En >= 300 poses aleatorias de la muñeca dentro de sus límites (giro +-100 grados sobre el eje del antebrazo, flexión 80 /
+ * extensión 70, desviación radial 20 / cubital 30) se juntan los triángulos del antebrazo del motor y de la instancia de la mano (soldaduras resueltas con la matriz del padre, como
+ * la GPU) y se cuentan las aristas: las únicas abiertas son las del extremo del codo del antebrazo (4) y ninguna arista la comparten más de dos triángulos. */
+typedef struct { float p[3]; int piece; } WV;
+static void rot_axis_m(float *R, const float a[3], float deg) {
+    float c = cosf(deg * 0.0174533f), s_ = sinf(deg * 0.0174533f), t = 1 - c, x = a[0], y = a[1], z = a[2];
+    float r[9] = {t * x * x + c, t * x * y - s_ * z, t * x * z + s_ * y, t * x * y + s_ * z, t * y * y + c, t * y * z - s_ * x, t * x * z - s_ * y, t * y * z + s_ * x, t * z * z + c};
+    memcpy(R, r, sizeof r);
+}
+static void m3mul(float *o, const float *a, const float *b) { float r[9]; for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) r[3 * i + j] = a[3 * i] * b[j] + a[3 * i + 1] * b[3 + j] + a[3 * i + 2] * b[6 + j]; memcpy(o, r, sizeof r); }
+static int collect(const NsScene *sc, const NsMeshStore *st, uint32_t inst, int only_piece, WV *v, int *nv, int (*tri)[3], int *nt, int cap_v, int cap_t) {
+    const NsInstance *in = &sc->inst[inst];
+    for (uint32_t k = 0; k < in->n_pieces; k++) {
+        if (only_piece >= 0 && (int)k != only_piece) continue;
+        const NsPiece *p = &sc->piece[in->first_piece + k];
+        const NsMesh *m = ns_store_get(st, p->mesh_id);
+        if (!m || (p->flags & NS_PF_HIDDEN)) continue;
+        int base = *nv;
+        if (base + (int)m->n_verts > cap_v) return 0;
+        for (uint32_t i = 0; i < m->n_verts; i++) {
+            const NsVert *q = &m->verts[i];
+            float a[3] = {q->x, q->y, q->z};
+            const NsXf *w = &p->world;
+            if (q->weld != 0xFF && p->parent >= 0 && (m->flags & NS_MF_WELDED)) {
+                const NsPiece *pp = &sc->piece[in->first_piece + (uint32_t)p->parent];
+                const NsMesh *pm = ns_store_get(st, pp->mesh_id);
+                if (pm && q->weld < pm->n_verts) { a[0] = pm->verts[q->weld].x; a[1] = pm->verts[q->weld].y; a[2] = pm->verts[q->weld].z; w = &pp->world; }
+            }
+            ns_xf_apply(w, a, v[*nv].p); v[*nv].piece = (int)(in->first_piece + k);
+            /* anillos intermedios de la transición (pieza 1 de la mano: 4 del antebrazo + 3 anillos intermedios + borde): vértices propios, nunca compartidos */
+            if (ns_key_is_hand(in->key) && k == 1 && i >= 4 && i < 4 + 3 * VRHA_NCUFF) v[*nv].piece = -1 - (int)i;
+            (*nv)++;
+        }
+        for (uint32_t f = 0; f < m->n_faces; f++) {
+            const NsFace *F = &m->faces[f];
+            const int quad = !(F->flags & NS_FF_TRI);
+            const int tt[2][3] = {{F->v[0], F->v[1], F->v[3]}, {F->v[1], F->v[2], F->v[3]}};
+            for (int h = 0; h < (quad ? 2 : 1); h++) {
+                if (*nt >= cap_t) return 0;
+                const int *t3 = quad ? tt[h] : (int[3]){F->v[0], F->v[1], F->v[2]};
+                for (int c = 0; c < 3; c++) tri[*nt][c] = base + t3[c];
+                (*nt)++;
+            }
+        }
+    }
+    return 1;
+}
+static int cmp_u64(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
+static void test_watertight(void) {
+    static WV v[4096]; static int tri[8192][3], id[4096]; static uint64_t e[3 * 8192];
+    uint32_t seed = 12345; int bad_open = 0, bad_nm = 0, poses = 0, worst_open = 0;
+    const float l[3] = {0.0f, -249.0f / 253.4f, 47.0f / 253.4f};
+    for (int it = 0; it < 320; it++) {
+        World w; world_init(&w, 8, 64, 1); ns_hand_reset();
+        #define RNDF(a, b) ((a) + ((b) - (a)) * (float)((seed = seed * 1664525u + 1013904223u) >> 8) / 16777216.0f)
+        float Ra[9], Rb[9], Rc[9], R[9], Rf[9], ax[3] = {RNDF(-1, 1), RNDF(-1, 1), RNDF(-1, 1)}, al = sqrtf(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+        for (int i = 0; i < 3; i++) ax[i] /= al;
+        rot_axis_m(Rf, ax, RNDF(-180, 180));                                       /* antebrazo en cualquier orientación */
+        const float zx[3] = {0, 0, 1}, xx[3] = {1, 0, 0};
+        rot_axis_m(Ra, l, RNDF(-100, 100)); rot_axis_m(Rb, zx, RNDF(-70, 80)); rot_axis_m(Rc, xx, RNDF(-30, 20));
+        m3mul(R, Ra, Rb); m3mul(R, R, Rc);                                         /* mano respecto al antebrazo: giro, flexión, desviación */
+        NsXf *F = &w.sc.piece[1 + NS_PART_FORE_R].world, *H = &w.sc.piece[1 + NS_PART_HAND_R].world;
+        float RH[9]; m3mul(RH, Rf, R);
+        for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) { F->m[4 * i + j] = Rf[3 * i + j]; H->m[4 * i + j] = RH[3 * i + j]; } F->m[4 * i + 3] = RNDF(-3000, 3000); }
+        for (int i = 0; i < 3; i++) H->m[4 * i + 3] = F->m[4 * i + 3] + Rf[3 * i + 1] * -249.0f + Rf[3 * i + 2] * 47.0f;
+        #undef RNDF
+        NsHandIn in; memset(&in, 0, sizeof in);
+        in.enabled = 1; in.driven[1] = 1; in.item_pose[1] = (it & 1) ? HP_GRIP_PISTOL : HP_RELAX; in.grip[1] = (float)(it % 5) / 4.0f;
+        if (ns_hand_apply(&w.sc, w.st, &w.map, &in) < 1) { bad_open++; world_free(&w); continue; }
+        int nv = 0, nt = 0, ok = 1;
+        ok &= collect(&w.sc, w.st, 1, NS_PART_FORE_R, v, &nv, tri, &nt, 4096, 8192);
+        for (uint32_t i = 2; i < w.sc.n_inst; i++) if (w.sc.inst[i].key == NS_HAND_KEY_R) ok &= collect(&w.sc, w.st, i, -1, v, &nv, tri, &nt, 4096, 8192);
+        CHECK(ok, "capacidad de la prueba");
+        /* vértices que coinciden (misma posición, de mallas distintas: soldados o compartidos entre piezas; dentro de una malla cada vértice es distinto) */
+        for (int i = 0; i < nv; i++) { id[i] = i; for (int j = 0; j < i; j++) { if (v[j].piece == v[i].piece || v[i].piece < 0 || v[j].piece < 0) continue; float d0 = v[i].p[0] - v[j].p[0], d1 = v[i].p[1] - v[j].p[1], d2 = v[i].p[2] - v[j].p[2]; if (d0 * d0 + d1 * d1 + d2 * d2 < 1e-6f) { id[i] = id[j]; break; } } }
+        int ne = 0;
+        for (int t = 0; t < nt; t++) {
+            int a = id[tri[t][0]], b = id[tri[t][1]], c = id[tri[t][2]];
+            if (a == b || b == c || a == c) continue;   /* degenerado (anillo de soldadura) */
+            const int ed[3][2] = {{a, b}, {b, c}, {c, a}};
+            for (int k = 0; k < 3; k++) { uint32_t x = (uint32_t)(ed[k][0] < ed[k][1] ? ed[k][0] : ed[k][1]), y = (uint32_t)(ed[k][0] < ed[k][1] ? ed[k][1] : ed[k][0]); e[ne++] = (uint64_t)x << 32 | y; }
+        }
+        qsort(e, (size_t)ne, sizeof e[0], cmp_u64);
+        int open = 0, nm = 0;
+        for (int i = 0; i < ne;) { int j = i; while (j < ne && e[j] == e[i]) j++; if (j - i == 1) open++; else if (j - i > 2) { nm++; if (getenv("NSH_DBG")) { int a = (int)(e[i] >> 32), b = (int)(e[i] & 0xFFFFFFFFu); printf("  pose %d arista %d-%d x%d: (%.2f %.2f %.2f) (%.2f %.2f %.2f)\n", it, a, b, j - i, v[a].p[0], v[a].p[1], v[a].p[2], v[b].p[0], v[b].p[1], v[b].p[2]); } } i = j; }
+        if (open != 4) bad_open++;
+        if (nm) bad_nm++;
+        if (open > worst_open) worst_open = open;
+        poses++;
+        world_free(&w);
+    }
+    CHECK(poses >= 300 && bad_open == 0 && bad_nm == 0, "antebrazo+mano cerrados: %d de %d poses con aristas abiertas (peor %d; se esperan 4, el extremo del codo), %d con aristas de >2 triángulos", bad_open, poses, worst_open, bad_nm);
+    printf("  costura: %d poses de muñeca, aristas abiertas fuera del codo en %d, no variedad en %d (peor %d abiertas)\n", poses, bad_open, bad_nm, worst_open);
+}
+
 int main(void) {
     test_store_put();
     test_classify();
@@ -494,6 +592,7 @@ int main(void) {
     test_guards();
     test_flat_and_epoch();
     test_pose_blend();
+    test_watertight();
     printf("%s ns_hand: %d comprobaciones, %d fallos\n", fails ? "FALLO" : "OK", checks, fails);
     return fails ? 1 : 0;
 }

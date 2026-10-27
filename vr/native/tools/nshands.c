@@ -109,12 +109,15 @@ int main(int argc, char **argv) {
     memset(&V, 0, sizeof V);
     V.active = 1; V.eye[0] = th[0]; V.eye[1] = th[1] + 60.0f; V.eye[2] = th[2];
     V.p_ref[1] = 1.6f; V.theta_deg = a - 180.0f; V.units_per_m = 1000.0f; V.gaze_yaw_deg = atan2f(fz[0], fz[2]) * 57.29578f;
-    struct { const char *name; float p[3]; float yaw, pitch, roll; int pose; } SC[3] = {
+    struct { const char *name; float p[3]; float yaw, pitch, roll; int pose; } SC[6] = {
+        {"neutra", {0.16f, 1.22f, -0.40f}, 0, 0, 90, HP_RELAX},
+        {"giro_mas90", {0.16f, 1.22f, -0.40f}, 0, 0, 180, HP_RELAX},
+        {"giro_menos90", {0.16f, 1.22f, -0.40f}, 0, 0, 0, HP_RELAX},
+        {"flexion", {0.16f, 1.22f, -0.40f}, 0, -60, 90, HP_RELAX},
+        {"extension", {0.16f, 1.22f, -0.40f}, 0, 50, 90, HP_RELAX},
         {"pistola", {0.16f, 1.25f, -0.42f}, 0, 0, 90, HP_GRIP_PISTOL},
-        {"pistola_girada", {0.12f, 1.22f, -0.40f}, -25, -20, 30, HP_GRIP_PISTOL},
-        {"palma_arriba", {0.18f, 1.15f, -0.35f}, 0, 10, 180, HP_RELAX},
     };
-    for (int sc_i = 0; sc_i < 3; sc_i++) {
+    for (int sc_i = 0; sc_i < 6; sc_i++) {
         memcpy(RAM, RAM0, sizeof RAM);
         VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.torso_follow = 0; cfg.near_hide_m = 0; cfg.near_hide_vtx_m = 0;
         vrbody_init(&cfg); vrbody_set_view_fn(view_fn); vrbody_set_fist_suppressed(1); vrbody_set_armed(SC[sc_i].pose == HP_GRIP_PISTOL);

@@ -1083,7 +1083,7 @@ static void build_one(const GpuDrawList *l, int si) {
                 vl2a_options_native(l2as[k]);
                 vl2a_set_view(l2as[k], vtag);
                 if (!routed) memset(l2_opd[k], 0, hl->nops);   /* otras vistas / escena fallida: capa vacía (se publica una vez y no vuelve a encolarse) */
-                if (vl2a_submit(l2as[k], hl, rc == 0 && od ? l2_opd[k] : NULL, VL_PANEL, 0)) l2_busy[k] = (uint8_t)has;
+                if (vl2a_submit(l2as[k], hl, l2_opd[k], VL_PANEL, 0)) l2_busy[k] = (uint8_t)has;   /* sin reparto: op_dest a cero (capa vaciada), no NULL (NULL = solo eventos: la capa no se borraría) */
             }
             { static uint64_t l2_log_ns; uint64_t nn = mono_ns();   /* una línea por segundo */
               if (nn - l2_log_ns >= 1000000000ull) { char lb[1024]; l2_log_ns = nn; if (vl2a_report(l2as[0], lb, sizeof lb) > 0) fprintf(stderr, "%s\n", lb); } }

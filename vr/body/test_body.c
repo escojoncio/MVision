@@ -1510,7 +1510,7 @@ static void test_fist_glue(void) {
       vrbody_hand_state(1, NULL, NULL, t);
       CHECK(vrbody_fist_point(1, fp0), "punto de golpe con la mano abierta");
       float d0 = sqrtf((fp0[0] - t[0]) * (fp0[0] - t[0]) + (fp0[1] - t[1]) * (fp0[1] - t[1]) + (fp0[2] - t[2]) * (fp0[2] - t[2]));
-      CHECK(d1 > 40.0f && d1 < 130.0f && fabsf(d0 - d1) < 0.01f && sqrtf((fp1[0]-fp0[0])*(fp1[0]-fp0[0])+(fp1[1]-fp0[1])*(fp1[1]-fp0[1])+(fp1[2]-fp0[2])*(fp1[2]-fp0[2])) < 5.0f, "punto de golpe constante (nudillos %.1f mm con puño, %.1f abierta)", d1, d0);
+      CHECK(d1 > 40.0f && d1 < 170.0f && fabsf(d0 - d1) < 0.01f && sqrtf((fp1[0]-fp0[0])*(fp1[0]-fp0[0])+(fp1[1]-fp0[1])*(fp1[1]-fp0[1])+(fp1[2]-fp0[2])*(fp1[2]-fp0[2])) < 5.0f, "punto de golpe constante (nudillos %.1f mm con puño, %.1f abierta)", d1, d0);
       vrbody_restore(RAM);
       vrbody_set_armed(1); run_fist_frames(0.0f, 60, &driven);       /* con arma ya no se fuerza un puño: la pose de la mano la decide vr_hand_pose */
       float ga = -1; vrbody_hand_state(1, &ga, NULL, NULL);

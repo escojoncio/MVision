@@ -4,7 +4,8 @@
  * Esqueleto OpenXR de 25 articulaciones (vrha_name; padres en vrha_parent). Ejes locales de cada articulación (convención OpenXR): -Z hacia la punta, +Y dorso, X = Y x Z
  * (eje de flexión). Malla con skin lineal: <= 4 huesos por vértice (vrha_joint, vrha_weight, suma 1), triángulos en sentido antihorario visto desde fuera (normales hacia
  * fuera; convención glTF, al revés que el motor), repartidos en piezas de <= 256 vértices (vrha_piece; índices locales a la pieza, vértices compartidos duplicados).
- * Original: 1360 vértices, 2314 triángulos (soldado); aquí 804 vértices (con duplicados entre piezas), 1400 triángulos, 4 piezas. Largo 212.0 mm (muñeca a yema del corazón 189.7 mm).
+ * Cortada en la muñeca (y = -4.0 mm): sin el puño del asset; el borde abierto (vrha_cuff) lo cierra la transición al antebrazo del juego que genera ns_hand.
+ * Original: 1360 vértices, 2234 triángulos (soldado); aquí 790 vértices (con duplicados entre piezas), 1399 triángulos, 4 piezas. Largo 185.7 mm (muñeca a yema del corazón 189.7 mm).
  *
  * Asset: profiles/generic-hand (right.glb) del paquete @webxr-input-profiles/assets 1.0.19 (repositorio immersive-web/webxr-input-profiles, commit f4992299, packages/assets).
  * Licencia del paquete (packages/assets/LICENSE.md):
@@ -39,10 +40,10 @@ extern "C" {
 #endif
 
 #define VRHA_NJ 25
-#define VRHA_NV 804
-#define VRHA_NT 1400
+#define VRHA_NV 790
+#define VRHA_NT 1399
 #define VRHA_NP 4
-#define VRHA_NCUFF 0
+#define VRHA_NCUFF 19
 enum { VRHA_ROLE_PALM = 0, VRHA_ROLE_BACK = 1, VRHA_ROLE_SIDE = 2, VRHA_ROLE_TIP = 3 };   /* = NS_HT_PALM, NS_HT_BACK, NS_HT_FINGER, NS_HT_JOINT (ns_hand.h) */
 
 typedef struct { uint16_t v0, nv, t0, nt; } VrHaPiece;
@@ -58,7 +59,7 @@ extern const float vrha_bind[VRHA_NJ][12];     /* articulación -> marco de la m
 extern const float vrha_ibm[VRHA_NJ][12];      /* inversa de vrha_bind */
 extern const int8_t vrha_parent[VRHA_NJ];
 extern const char *const vrha_name[VRHA_NJ];
-extern const uint16_t vrha_cuff[VRHA_NCUFF];   /* vértices del borde abierto (anillo del puño en la muñeca), con sus duplicados en otras piezas */
+extern const uint16_t vrha_cuff[VRHA_NCUFF];   /* borde del corte de la muñeca (y = YCUT del generador), lazo ordenado: un vértice por punto (los duplicados en otras piezas tienen la misma posición) */
 
 #ifdef __cplusplus
 }

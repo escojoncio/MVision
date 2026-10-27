@@ -6,9 +6,11 @@
  * en la CPU y la malla se reparte en VRHA_NP piezas de <= 256 vértices (NsFace usa índices de 8 bits), con la matriz de la pieza mano del motor (ya con la IK de la capa VR).
  * Las mallas se guardan por pose CUANTIZADA (cierres a pasos de 1/32): mientras los dedos no cambian no se crea ninguna malla nueva aunque la mano se mueva.
  *
- * COSTURA con el antebrazo del motor: la pieza 0 de la instancia es un anillo propio (malla en el marco del antebrazo, con su matriz, una cara degenerada que no se ve) con puntos del
- * contorno del anillo final del antebrazo; el borde del puño de la mano se SUELDA a esos puntos (NsVert.weld, NsPiece.parent = 0) y el resto del puño se deforma hacia el contorno:
- * sin hueco, cuello ni escalón, y el borde sigue al antebrazo (también su giro). Se recalcula solo si cambia la malla del antebrazo o la muñeca en su marco. Sin antebrazo: sin costura.
+ * UNIÓN con el antebrazo del motor: el asset se corta en la muñeca (vrha_cuff = su borde) y ns_hand genera la transición. Pieza 0 = anillo: los vértices del lazo abierto del extremo
+ * del antebrazo copiados tal cual, con la matriz del antebrazo (una cara degenerada, no se ve). Pieza 1 = transición, en el marco de la mano: su primer anillo se SUELDA a esos
+ * vértices (posiciones idénticas a las del antebrazo), el último son los vértices del borde de la muñeca de la mano (mismas coordenadas, mismo marco) y los intermedios llevan una
+ * parte creciente del movimiento del antebrazo respecto a la mano (giro interpolado: giro y flexión repartidos, sin estrangulamiento). Antebrazo + transición + mano = una superficie
+ * cerrada. La transición se recalcula en cada fotograma (depende de la postura de la muñeca; ~100 vértices); la topología solo si cambia la malla del antebrazo. Sin antebrazo: sin unión.
  *
  * ESTILO PS1 como el brazo: la cara palmar desde la muñeca hasta la base de los dedos lleva la textura de la palma de la manopla del juego (tpage/clut/UV de su cara, proyectada en plano);
  * dedos, pulgar, dorso y costados van de un solo color (el texel central de la textura de los dedos de la manopla) con sombreado de la luz del jugador. Sin texturas utilizables, plana.
@@ -25,7 +27,7 @@ extern "C" {
 
 #define NS_HAND_KEY_R 0x4D480001u        /* NsInstance.key de las manos propias: no es una dirección de RAM del motor (0x80......), no choca con ninguna instancia */
 #define NS_HAND_KEY_L 0x4D480002u
-#define NS_HAND_PIECES 5                /* piezas por mano como mucho: anillo de la costura + VRHA_NP (= 4; comprobado en ns_hand.c). Sin incluir vr_hand_asset.h: ns_adapt y ns_solid incluyen este fichero solo con vr/native */
+#define NS_HAND_PIECES 6                /* piezas por mano como mucho: anillo + transición + VRHA_NP (= 4; comprobado en ns_hand.c). Sin incluir vr_hand_asset.h: ns_adapt y ns_solid incluyen este fichero solo con vr/native */
 #define NS_PART_HAND_R 4                 /* partes del modelo del jugador (ns_player) */
 #define NS_PART_HAND_L 9
 #define NS_PART_FORE_R 3

@@ -190,9 +190,9 @@ final class XRFrameEncoder {
         var hudFull: MTLTexture? = renderer.linearOutput ? renderer.auxTextureSRGB[2] : renderer.auxTexture[2]
         if hudFull != nil && hudFull!.textureType != .type2D { hudFull = nil }
         renderer.gameFx = gs.view_kind == 1 ? SIMD4<Float>(gs.fx.vignette, gs.fx.vign_radius, gs.fx.letterbox, 0) : SIMD4<Float>(0, 0, 0, 0)
-        var pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, hudWindow: hudWindow, hudFull: hudFull, eyePx: Float(w), p00: projs[0].columns.0.x,
+        var pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, eyePx: Float(w), p00: projs[0].columns.0.x,
                                      gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame(), ipd: ipd, shot: renderer.sceneShot,
-                                     stereo2DInside: renderer.stereo2DInside, hudMenuUV: renderer.hudMenuUV, hudLogical: renderer.hudLogical)
+                                     stereo2DInside: renderer.stereo2DInside, hudMenuUV: renderer.hudMenuUV, hudLogical: renderer.hudLogical, hudWindow: hudWindow, hudFull: hudFull)
         presenter.encodeUpscale(cb)
         if dg.noLayers {
             // Sin capas finales: ni velo (transición, fundido de corte), ni viñeta, ni pantalla de cine / pantalla 3D; solo el mundo, el HUD 2D y los textos (menú).

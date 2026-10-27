@@ -30,6 +30,7 @@ PARENT = [-1, 0, 1, 2, 3, 0, 5, 6, 7, 8, 0, 10, 11, 12, 13, 0, 15, 16, 17, 18, 0
 CT = {5126: np.float32, 5121: np.uint8, 5123: np.uint16, 5125: np.uint32}
 NC = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
 ROLE_PALM, ROLE_BACK, ROLE_SIDE, ROLE_TIP = 0, 1, 2, 3     # = NS_HT_PALM, NS_HT_BACK, NS_HT_FINGER, NS_HT_JOINT de ns_hand.h
+YCUT = -4.0      # corte de la muñeca (mm, marco de la mano): se quita el puño del asset; la transición al antebrazo del juego la genera ns_hand
 
 
 def load_glb(path):
@@ -196,6 +197,68 @@ def decimate(P, T, Wfull, target, wpen):
     return np.array(keep), np.array(T2, int)
 
 
+
+# ------------------------------------------------------------------------------------------------------------- corte en la muñeca
+def clip_below(P, N, W, T, yc):
+    """Se queda con la parte de la malla por debajo del plano y = yc (hacia los dedos): quita el puño del asset más allá de la muñeca. Los triángulos que cruzan se recortan
+    con vértices nuevos exactamente en el plano (posición, normal y pesos interpolados), conservando el sentido. Devuelve P, N, W, T nuevos."""
+    P, N, W = [p_ for p_ in P], [n_ for n_ in N], [w_ for w_ in W]
+    cache = {}
+
+    def cut(a, b):
+        k_ = (min(a, b), max(a, b))
+        if k_ not in cache:
+            t = (yc - P[a][1]) / (P[b][1] - P[a][1])
+            P.append(P[a] + t * (P[b] - P[a]))
+            n_ = N[a] + t * (N[b] - N[a])
+            N.append(n_ / np.linalg.norm(n_))
+            w_ = W[a] + t * (W[b] - W[a])
+            W.append(w_ / w_.sum())
+            cache[k_] = len(P) - 1
+        return cache[k_]
+    out = []
+    for t in T.tolist():
+        inside = [P[v][1] <= yc for v in t]
+        if all(inside):
+            out.append(t)
+            continue
+        if not any(inside):
+            continue
+        poly = []
+        for i in range(3):
+            a, b = t[i], t[(i + 1) % 3]
+            if inside[i]:
+                poly.append(a)
+            if inside[i] != inside[(i + 1) % 3]:
+                poly.append(cut(a, b))
+        for i in range(1, len(poly) - 1):
+            out.append([poly[0], poly[i], poly[i + 1]])
+    return np.array(P), np.array(N), np.array(W), np.array(out, int)
+
+
+def boundary_loops(T):
+    """Bordes abiertos de la malla como lazos ordenados (siguiendo el sentido de los triángulos)."""
+    cnt, nxt = {}, {}
+    for t in T.tolist():
+        for a_, b_ in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
+            k_ = (min(a_, b_), max(a_, b_))
+            cnt[k_] = cnt.get(k_, 0) + 1
+    for t in T.tolist():
+        for a_, b_ in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
+            if cnt[(min(a_, b_), max(a_, b_))] == 1:
+                nxt[b_] = a_                     # el borde se recorre al revés que el triángulo
+    loops, seen = [], set()
+    for v0 in nxt:
+        if v0 in seen:
+            continue
+        loop, v = [], v0
+        while v not in seen:
+            seen.add(v)
+            loop.append(v)
+            v = nxt[v]
+        loops.append(loop)
+    return loops
+
 # ------------------------------------------------------------------------------------------------------------- reparto en piezas de <= 256 vértices
 def split_pieces(T, dom, P, maxv=256):
     group = np.array([0 if j == 0 else (1 if j <= 4 else 2 + (j - 5) // 5) for j in range(25)])
@@ -281,6 +344,9 @@ def main():
     P1, W1 = P[uniq], Wfull[uniq]
     T1 = np.array([[um[weld[v]] for v in t] for t in T])
     T1 = T1[[len(set(t)) == 3 for t in T1.tolist()]]
+    P1, Nw, W1, T1 = clip_below(P1, Nw, W1, T1, YCUT)
+    if len(boundary_loops(T1)) != 1:
+        raise SystemExit("el corte de la muñeca no deja un único borde")
     n0 = len(T1)
     keep, T2 = decimate(P1, T1, W1, target, wpen=4.0)
     P2, N2, W2 = P1[keep], Nw[keep], W1[keep]
@@ -326,14 +392,14 @@ def main():
             out_r.append(role[ti])
         out_p.append((v0, len(out_v) - v0, t0, len(out_t) - t0))
     assert all(p[1] <= 256 for p in out_p)
-    # borde abierto de la malla (anillo del puño en la muñeca): aristas con un solo triángulo; se exportan todos los duplicados por pieza
-    ecount = {}
-    for t in T2.tolist():
-        for a_, b_ in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
-            k_ = (min(a_, b_), max(a_, b_))
-            ecount[k_] = ecount.get(k_, 0) + 1
-    bverts = set(v for e_, n_ in ecount.items() if n_ == 1 for v in e_)
-    cuff = [i for i, v in enumerate(out_v) if v in bverts]
+    # borde del corte de la muñeca, en orden: un vértice (cualquiera de sus duplicados por pieza) por punto del lazo
+    loops = boundary_loops(T2)
+    if len(loops) != 1:
+        raise SystemExit("tras el diezmado el borde de la muñeca no es un único lazo")
+    first = {}
+    for i, v in enumerate(out_v):
+        first.setdefault(v, i)
+    cuff = [first[v] for v in loops[0]]
     length = P2[:, 1].max() - P2[:, 1].min()
     tip_len = -P2[:, 1].min()
     write(a[1], out_v, out_t, out_r, out_p, P2, N2, J4, W4, Gh, n0, len(P), length, tip_len, cuff)
@@ -348,6 +414,7 @@ def write(outdir, out_v, out_t, out_r, out_p, P, N, J4, W4, Gh, n0, nraw, length
  * Esqueleto OpenXR de 25 articulaciones (vrha_name; padres en vrha_parent). Ejes locales de cada articulación (convención OpenXR): -Z hacia la punta, +Y dorso, X = Y x Z
  * (eje de flexión). Malla con skin lineal: <= 4 huesos por vértice (vrha_joint, vrha_weight, suma 1), triángulos en sentido antihorario visto desde fuera (normales hacia
  * fuera; convención glTF, al revés que el motor), repartidos en piezas de <= 256 vértices (vrha_piece; índices locales a la pieza, vértices compartidos duplicados).
+ * Cortada en la muñeca (y = {YCUT} mm): sin el puño del asset; el borde abierto (vrha_cuff) lo cierra la transición al antebrazo del juego que genera ns_hand.
  * Original: {nraw} vértices, {n0} triángulos (soldado); aquí {nv} vértices (con duplicados entre piezas), {nt} triángulos, {npc} piezas. Largo {length:.1f} mm (muñeca a yema del corazón {tip_len:.1f} mm).
  *
 {chr(10).join(' * ' + l if l else ' *' for l in lic.splitlines())}
@@ -380,7 +447,7 @@ extern const float vrha_bind[VRHA_NJ][12];     /* articulación -> marco de la m
 extern const float vrha_ibm[VRHA_NJ][12];      /* inversa de vrha_bind */
 extern const int8_t vrha_parent[VRHA_NJ];
 extern const char *const vrha_name[VRHA_NJ];
-extern const uint16_t vrha_cuff[VRHA_NCUFF];   /* vértices del borde abierto (anillo del puño en la muñeca), con sus duplicados en otras piezas */
+extern const uint16_t vrha_cuff[VRHA_NCUFF];   /* borde del corte de la muñeca (y = YCUT del generador), lazo ordenado: un vértice por punto (los duplicados en otras piezas tienen la misma posición) */
 
 #ifdef __cplusplus
 }}
