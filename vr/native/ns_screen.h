@@ -18,7 +18,7 @@ extern "C" {
 typedef struct {
     float wave_gain;        /* multiplica la amplitud de la ondulación (filas del motor -> texels) */
     float wave_space;       /* unidades del motor por paso del periodo (longitud de onda = wave_period * wave_space) */
-    float bars_gain;        /* 0..1 opacidad de las barras bajo el agua */
+    float bars_gain;        /* 0..1 opacidad de las barras bajo el agua; defecto 0 = sin barras (la viñeta circular dejaba un círculo claro con el resto casi negro y translúcido) */
     float bars_soft;        /* semianchura del borde suave de las barras, en px del motor */
     float scan_gain;        /* intensidad de las líneas de exploración de los modos de visión */
     float scan_period;      /* filas del motor por línea */
@@ -44,6 +44,14 @@ int ns_screen_build(const NsScreenFx *fx, const float to_vr[12], const float hea
 /* Inversa de una 3x4 afín (fila-mayor). 0 si es singular. */
 int ns_screen_invert34(const float m[12], float out[12]);
 void ns_screen_xform34(const float m[12], const float p[3], float out[3]);
+
+/* Máscara de visión de la caja como recubrimiento de ojo (misma máscara 160x128 que calcula vrhost; solo se pide con el jugador en la caja). area_w/area_h = imagen mostrada del motor (píxeles),
+ * cx_col/cy_row = centro óptico en ella, H = distancia de pantalla del motor, rgb = color del interior cerrado (0..1). Rellena 2 recubrimientos (resta de la máscara y relleno del interior); devuelve 2 o 0 si los datos no valen. */
+int ns_screen_frame_build(float area_w, float area_h, float cx_col, float cy_row, float H, const float rgb[3], NsGpuOverlay out[2]);
+/* Referencia de CPU del sombreador: resta (0..1) de la máscara en el punto de tangentes (tx, ty) (ty hacia arriba) con muestreo bilineal; 1 fuera de la imagen original. */
+float ns_screen_frame_sub(const uint8_t *frame, int fw, int fh, const NsGpuOverlay *ov, float tx, float ty);
+/* Aplica el recubrimiento FRAME ov (p[1] = 0 resta, 1 relleno) con la resta `sub` al color b (0..1). */
+void ns_screen_frame_ref(const NsGpuOverlay *ov, float sub, const float b[3], float out[3]);
 
 /* ---- referencias de CPU (lo mismo que ns_fs / ns_fs_overlay) ---- */
 /* Aplica un recubrimiento al color de fondo b (0..1) en el punto de tangentes (tx, ty); H = distancia de pantalla del motor. Devuelve el color (sin recortar a 0..1 salvo al final). */

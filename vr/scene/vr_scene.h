@@ -28,6 +28,9 @@
  * esos triángulos no se emiten (VrStats.n_hw_cull, VR_FATE_HWCULL si no queda ninguno). Un RECT no puede pasarse (w <= 1023, h <= 511).
  * Un polígono con solo ALGUNOS vértices vvalid se descarta (opts.partial_to_2d lo manda a 2D, pero entonces aparecerá
  * como trozo de mundo en el HUD).
+ * Con opts.drop_world2d (opt-in: el anfitrión con render nativo), un polígono SIN ningún vértice vvalid que cae antes del último polígono con vista de la lista (el juego dibuja el HUD después del
+ * mundo) es 3D que la captura no resolvió: no se emite a la clase 2 (VR_FATE_WORLD2D; op_dest 0), así no deja cajas sueltas en la capa 2D / el panel HUD (el nativo ya dibuja el mundo). Rects, líneas, filtros
+ * de pantalla (clase 3) y los polígonos posteriores al último 3D (HUD, texto, menús) no cambian.
  *
  * Reconstrucción de parciales (opts.recon_partial): un quad con exactamente 3 vértices de vista limpios (vflags==0) y el 4.º sin posición,
  * pero con coordenadas de pantalla sin saturar (|x-dox-proj_ox| < 1000 px), recupera ese vértice: rayo (px/H, py/H, 1) cortado con el plano de
@@ -265,6 +268,7 @@ typedef struct {
                                  * (arriba-izquierda primero; la imagen mostrada area[2]x area[3] se divide en frame_w x frame_h celdas). Fuera de la imagen: 255. Misma vida que v/b */
     int frame_w, frame_h;
     float frame_rgb[3];         /* color (gamma, 0..1) que se suma donde la máscara cierra del todo (resta ~255): negro (0,0,0) salvo con la caja equipada (interior de cartón oscuro) */
+    int frame_in_box;           /* lo fija el anfitrión (no vr_scene_build): el jugador está en la caja (BRIDGE_PS_BOX); el renderer nativo solo aplica la máscara de visión (frame) con él */
 } VrFilter;
 
 typedef struct {
@@ -396,6 +400,8 @@ typedef struct {
      * VR_F_BILLBOARD y lleva en su VrState el centro y los ejes de la cámara del juego, para que el shader lo oriente al ojo. Si las esquinas reales no son fiables (saturadas, ambiguas, no reproducen
      * su SXY) o sus profundidades difieren más de un 10 %, no se marca (comportamiento anterior). 0 (def.) = nunca. VrStats.n_billboard. */
     int billboard;
+    /* drop_world2d 1: ver «Qué es 3D» (arriba). 0 (def.) = esos polígonos van a la clase 2 como antes. */
+    int drop_world2d;
 } VrSceneOpts;
 
 VrSceneOpts vr_scene_opts_default(void);
@@ -432,6 +438,7 @@ enum {
     VR_FATE_RECON = 11,    /* emitido tras reconstruir un vértice sin posición o un AMBIG (recon_partial / recon_ambig) */
     VR_FATE_INCOH = 12,    /* descartado por la red de seguridad de coherencia de vértices (opts.coherence) */
     VR_FATE_HWCULL = 13,   /* descartado: la GPU de PS1 no dibuja ninguno de sus triángulos (extensión > 1023x511) */
+    VR_FATE_WORLD2D = 14,  /* descartado: polígono sin posición de vista dentro del pase del mundo (antes del último polígono con vista de la lista): 3D sin resolver, no HUD */
     VR_FATE_COUNT
 };
 void vr_scene_set_fate(uint8_t *buf, uint32_t cap);   /* NULL para desactivar */

@@ -21,15 +21,24 @@ int ns_hook_last_rc(void) { return last_rc; }
 static uint32_t rd(uint32_t a) { uint32_t v; memcpy(&v, emu_ram + (a & 0x1FFFFFu), 4); return v; }
 
 /* Envoltura: el código original calcula las matrices de mundo de todos los objetos del canal; después se captura. a0 se lee antes (la original puede
- * reutilizar registros). Otros canales pasan sin tocar. */
-static void stage_wrap(Cpu *c) {
+ * reutilizar registros). Otros canales pasan sin tocar. `addr` = dirección de la rutina original (la estándar o la copia en overlay). */
+static void wrap_common(Cpu *c, uint32_t addr, int dyn) {
     uint32_t chan = c->r[4];
-    rt_call_orig(c, NS_STAGE_ADDR);
+    rt_call_orig(c, addr);
     if (chan != NS_MAIN_CHANNEL) return;
     if (pre_cb) pre_cb(emu_ram);
-    ns_capture(emu_ram, emu_scratch);
+    if (dyn) ns_capture_dyn(emu_ram, emu_scratch); else ns_capture(emu_ram, emu_scratch);
     if (stage_cb) stage_cb(c);
 }
+static void stage_wrap(Cpu *c) { wrap_common(c, NS_STAGE_ADDR, 0); }
+
+/* Envoltura dinámica: la entrada 0 de la tabla de etapas apunta a otra rutina (la copia de la overlay de la introducción, 0x8008240c). Solo hay una a la vez: su dirección va en dyn_addr. */
+static uint32_t dyn_addr;
+static uint64_t dyn_hash;
+static _Atomic int dyn_on;
+static _Atomic unsigned dyn_stale_n;
+static void dyn_remove(void);
+static void dyn_wrap(Cpu *c) { wrap_common(c, dyn_addr, 1); }
 
 /* Respaldo (ver ns_hook.h): lo llama hle_vrbody_sort (vr/camera): begin antes del bucle de 7 etapas y capture tras él, antes de vrbody_restore. El extractor no lee el contador de visibilidad
  * (+0x4C: lo tocan hide_head, own_hands y hide_near) ni la matriz de pantalla; las matrices de mundo de los brazos/cuerpo con la pose IK ya están en la RAM y son las mismas que ns_hook_post_ik copia
@@ -58,10 +67,38 @@ int ns_hook_install(void) {
 }
 
 void ns_hook_uninstall(void) {
+    dyn_remove();
     if (!atomic_load(&installed)) return;
     rt_unpatch(NS_STAGE_ADDR);
     atomic_store(&installed, 0);
 }
+
+static void dyn_remove(void) {
+    if (!atomic_load(&dyn_on)) return;
+    rt_unpatch(dyn_addr);
+    atomic_store(&dyn_on, 0);
+    dyn_addr = 0; dyn_hash = 0;
+}
+/* Parche dinámico de la rutina a la que apunte la entrada 0 de la tabla cuando NO es la estándar: la retira si la entrada cambia, el parche caduca o el código de la overlay cambia (hash); la instala
+ * (con su propio salto al original, rt_call_orig(dyn_addr)) si la entrada apunta a código con prólogo de pila. El respaldo (hle_vrbody_sort) sigue de red. */
+static void dyn_poll(void) {
+    uint32_t e = rd(NS_STAGE_TABLE);
+    if (atomic_load(&dyn_on) && (e != dyn_addr || rt_patch_stale(dyn_addr) || rt_code_hash(dyn_addr, 12) != dyn_hash)) {
+        dyn_remove();
+        atomic_fetch_add(&dyn_stale_n, 1);
+    }
+    if (atomic_load(&dyn_on) || e == 0 || e == NS_STAGE_ADDR || (e & 3u) || (e >> 24) != 0x80u) return;
+    uint32_t w = rd(e);
+    if ((w >> 16) != 0x27BDu || !(w & 0x8000u)) return;        /* addiu sp, sp, -N */
+    RtPatchGuard g = {12, rt_code_hash(e, 12)};
+    dyn_addr = e;
+    if (rt_patch_fn(e, dyn_wrap, &g) != RT_PATCH_OK) { dyn_addr = 0; return; }
+    dyn_hash = g.hash;
+    atomic_store(&dyn_on, 1);
+}
+int ns_hook_dyn_installed(void) { return atomic_load(&dyn_on); }
+uint32_t ns_hook_dyn_addr(void) { return atomic_load(&dyn_on) ? dyn_addr : 0; }
+unsigned ns_hook_dyn_stale_count(void) { return atomic_load(&dyn_stale_n); }
 
 /* Reintento y detección de parche caducado: otra overlay encima de la etapa deja el parche inerte (rt_patch_stale); se retira y, si el código nuevo
  * tiene la forma esperada, se vuelve a instalar con su hash. Si la instalación falló (p. ej. la etapa aún no estaba cargada), se reintenta. */
@@ -72,5 +109,6 @@ int ns_hook_poll(void) {
         atomic_fetch_add(&stale_n, 1);
     }
     if (!atomic_load(&installed)) ns_hook_install();
+    dyn_poll();
     return atomic_load(&installed);
 }

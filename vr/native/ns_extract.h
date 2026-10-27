@@ -109,6 +109,8 @@ void ns_scene_free(NsScene *sc);
  * capacidades, `seq` y `slot_gen`). Devuelve 0 si la escena se leyó, -1 si el canal principal no es legible (escena vacía, valid = 0). stats/opt pueden ser NULL. */
 int ns_extract_ex(NsScene *sc, NsMeshStore *st, const uint8_t *ram, size_t ram_size, const uint8_t *scratch, size_t scratch_size, const NsExtractOpts *opt, NsExtractStats *stats);
 int ns_extract(NsScene *sc, NsMeshStore *st, const uint8_t *ram, size_t ram_size, const uint8_t *scratch, size_t scratch_size, NsExtractStats *stats);
+/* Factor vertical con el que el motor compuso las matrices de pantalla (posiciones de vista de la lista de la GPU): ~66/64 con la cámara del juego, 1 con la de la capa VR; 0 = no medible de la RAM. */
+float ns_extract_screen_ys(const uint8_t *ram, size_t ram_size);
 
 #ifdef __cplusplus
 }

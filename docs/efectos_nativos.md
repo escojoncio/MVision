@@ -111,6 +111,7 @@ El factor vertical se midió reproyectando paquetes reales de polígonos de mund
 - Pruebas: `make -f vr/native/fx.mk test test-san` (`test_ns_fx`, `test_ns_gpu_fx`, `test_ns_screen`, `test_ns_present`, `test_no_gpu3d`). `test_no_gpu3d` lee los fuentes Swift/Metal/C y falla si reaparece un camino de dibujo 3D por la lista de la GPU o el modo «gpu».
 
 - **Escena válida no apta para primera persona** (vehículos, ascensores, zonas especiales): se coloca con la cámara del juego y se enseña en la pantalla 3D; vuelve al mundo al ser apta (histéresis). La ventana de la pantalla 3D usa la H real y OFX/OFY de la escena (`ns_cinema_window`).
+- **Bajo el agua**: sin barras (BARS desactivado por defecto: dejaba un círculo claro con el resto casi negro y translúcido); con la cabeza sumergida el sombreador descarta por detrás las caras de una cara de mallas semitransparentes (NSG_CULL_SEMI: la superficie del agua vista desde abajo, que el motor no dibuja); la onda no abre agujeros (si el texel desplazado es transparente se usa el original). **Caja**: NSG_OV_FRAME (máscara 160x128 de vrhost, solo con BRIDGE_PS_BOX, anclada a la cabeza).
 - **Recubrimientos**: RING y BARS son viñetas circulares; SCAN está anclado al mundo (elevación del rayo). Ninguno gira con la cabeza.
 
 ## Comodidad VR de los efectos cerca de la cabeza (ns_gpu_fx_build_ex) — ELIMINADA: `comfort` y `oncam_drop` ya no existen (solo queda el descarte a < 15 cm de la cabeza, `drop_inside_m`); el texto siguiente es histórico

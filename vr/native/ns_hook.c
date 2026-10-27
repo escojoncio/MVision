@@ -19,7 +19,7 @@ static struct {
     int wrap_mark;   /* ns_capture (envoltura de la etapa «pantalla») corrió desde el último ns_capture_backup_due */
     NsIkIdleFn idle; void *idle_user;
     struct {
-        _Atomic uint32_t captures, published, replaced, extract_fail, ik_refresh, player_bound, ik_expected, ik_missed, skipped_gate, last_valid, ik_idle, cap_wrap, cap_backup;
+        _Atomic uint32_t captures, published, replaced, extract_fail, ik_refresh, player_bound, ik_expected, ik_missed, skipped_gate, last_valid, ik_idle, cap_wrap, cap_backup, cap_dyn;
         _Atomic uint64_t last_pub_ns;
     } st;
 } H;
@@ -28,7 +28,7 @@ static void clear_stats(void) {
     atomic_store(&H.st.captures, 0); atomic_store(&H.st.published, 0); atomic_store(&H.st.replaced, 0); atomic_store(&H.st.extract_fail, 0);
     atomic_store(&H.st.ik_refresh, 0); atomic_store(&H.st.player_bound, 0); atomic_store(&H.st.ik_expected, 0); atomic_store(&H.st.ik_missed, 0);
     atomic_store(&H.st.ik_idle, 0); atomic_store(&H.st.skipped_gate, 0); atomic_store(&H.st.last_valid, 0); atomic_store(&H.st.last_pub_ns, 0);
-    atomic_store(&H.st.cap_wrap, 0); atomic_store(&H.st.cap_backup, 0);
+    atomic_store(&H.st.cap_wrap, 0); atomic_store(&H.st.cap_backup, 0); atomic_store(&H.st.cap_dyn, 0);
 }
 static void inc(_Atomic uint32_t *c) { atomic_fetch_add_explicit(c, 1, memory_order_relaxed); }
 
@@ -60,10 +60,10 @@ void ns_hook_stats(NsHookStats *s) {
     s->ik_expected = atomic_load(&H.st.ik_expected); s->ik_missed = atomic_load(&H.st.ik_missed); s->skipped_gate = atomic_load(&H.st.skipped_gate);
     s->last_valid = atomic_load(&H.st.last_valid); s->last_pub_ns = atomic_load(&H.st.last_pub_ns);
     s->ik_idle = atomic_load(&H.st.ik_idle);
-    s->cap_wrap = atomic_load(&H.st.cap_wrap); s->cap_backup = atomic_load(&H.st.cap_backup);
+    s->cap_wrap = atomic_load(&H.st.cap_wrap); s->cap_backup = atomic_load(&H.st.cap_backup); s->cap_dyn = atomic_load(&H.st.cap_dyn);
 }
 
-static void capture(const uint8_t *ram, const uint8_t *scratch, int backup) {
+static void capture(const uint8_t *ram, const uint8_t *scratch, int kind) {   /* kind: 0 envoltura estándar, 1 respaldo, 2 envoltura dinámica (etapa en overlay) */
     if (!H.br || !ram) return;
     if (H.gate && !H.gate(H.gate_user)) {      /* modo gpu / renderer no listo: ni se captura ni se extrae */
         inc(&H.st.skipped_gate);
@@ -77,7 +77,7 @@ static void capture(const uint8_t *ram, const uint8_t *scratch, int backup) {
     if (!s) return;
     H.pending = 0;
     inc(&H.st.captures);
-    inc(backup ? &H.st.cap_backup : &H.st.cap_wrap);
+    inc(kind == 1 ? &H.st.cap_backup : kind == 2 ? &H.st.cap_dyn : &H.st.cap_wrap);
     NsExtractFn ex = atomic_load(&H.ex);
     if (ex) {
         if (ex(ram, scratch, s, H.ex_user) < 0) { inc(&H.st.extract_fail); return; }
@@ -122,6 +122,10 @@ static void capture(const uint8_t *ram, const uint8_t *scratch, int backup) {
 void ns_capture(const uint8_t *ram, const uint8_t *scratch) {
     H.wrap_mark = 1;
     capture(ram, scratch, 0);
+}
+void ns_capture_dyn(const uint8_t *ram, const uint8_t *scratch) {
+    H.wrap_mark = 1;
+    capture(ram, scratch, 2);
 }
 void ns_capture_backup_begin(void) { H.wrap_mark = 0; }
 int ns_capture_backup_due(void) { int due = !H.wrap_mark; H.wrap_mark = 0; return due; }

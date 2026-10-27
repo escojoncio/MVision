@@ -306,6 +306,7 @@ int ns_cover_core(const NsRTri *tris, const NsAdaptSrc *src, size_t n, const NsC
             (void)bsame;
             int cause;
             int owner = -1;
+            const NTri *pose_nat = NULL;   /* solo diagnóstico: nativo con la misma textura/UV de una POSE */
             if (on_same == 3) {
                 cause = NC_SUBDIV; owner = own_same;
                 for (int k = 0; k < 3; k++) if (ow[k] >= 0) C.used[ow[k]] = 1;
@@ -329,7 +330,7 @@ int ns_cover_core(const NsRTri *tris, const NsAdaptSrc *src, size_t n, const NsC
                         }
                     }
                 }
-                if (uj >= 0) { cause = NC_POSE; owner = uj; C.used[uj] = 1; }
+                if (uj >= 0) { cause = NC_POSE; owner = uj; C.used[uj] = 1; pose_nat = &C.nt[uj]; }
                 else if (on_same > 0) { cause = NC_PARTIAL; owner = own_same; }
                 else if (on_any > 0) { cause = NC_OTHERTEX; owner = own_any; }
                 else {
@@ -341,6 +342,7 @@ int ns_cover_core(const NsRTri *tris, const NsAdaptSrc *src, size_t n, const NsC
             }
             out->cause[cause][semi]++;
             if (cfg.dbg) fprintf((FILE *)cfg.dbg, "LISTA op=%u h=%d causa=%s semi=%d z=%.0f page=%04x clut=%04x dueno=%08x pieza=%u cara=%u esquinas=(%.0f,%.0f,%.0f)(%.0f,%.0f,%.0f)(%.0f,%.0f,%.0f)\n", oi, h, ns_cover_cause_name[cause], semi, zavg, op_page(o), op_clut(o), owner >= 0 ? src[owner].key : 0u, owner >= 0 ? src[owner].piece_rel : 0u, owner >= 0 ? src[owner].face : 0u, q[0][0], q[0][1], q[0][2], q[1][0], q[1][1], q[1][2], q[2][0], q[2][1], q[2][2]);
+            if (cfg.dbg && pose_nat) fprintf((FILE *)cfg.dbg, "  POSE_NATIVO centro=(%.0f,%.0f,%.0f) vertices=(%.0f,%.0f,%.0f)(%.0f,%.0f,%.0f)(%.0f,%.0f,%.0f)\n", pose_nat->c[0], pose_nat->c[1], pose_nat->c[2], pose_nat->p[0][0], pose_nat->p[0][1], pose_nat->p[0][2], pose_nat->p[1][0], pose_nat->p[1][1], pose_nat->p[1][2], pose_nat->p[2][0], pose_nat->p[2][1], pose_nat->p[2][2]);
             if (cause != NC_SUBDIV) {
                 NsCoverGroup g; memset(&g, 0, sizeof g);
                 g.cause = (uint8_t)cause; g.semi = (uint8_t)semi; g.tpage = op_page(o); g.clut = op_clut(o); g.zmin = zavg;
@@ -461,6 +463,13 @@ static int cover_run_once(NsCover *c, const uint8_t *ram, const uint8_t *scratch
     const float *R = (cfg && cfg->list_eye && cfg->list_M) ? cfg->list_M : c->sc.cam.rot, *E = (cfg && cfg->list_eye && cfg->list_M) ? cfg->list_eye : c->sc.cam.eye;   /* vista -> mundo; mundo -> vista = R^T (p - eye) */
     for (int r = 0; r < 3; r++) for (int k = 0; k < 3; k++) cam.A[3 * r + k] = R[3 * k + r];
     for (int r = 0; r < 3; r++) cam.t[r] = -(cam.A[3 * r] * E[0] + cam.A[3 * r + 1] * E[1] + cam.A[3 * r + 2] * E[2]);
+    /* La lista lleva las posiciones de vista que dio la GTE con las matrices de pantalla del motor: con la cámara del propio juego (cinemáticas, introducción) su fila Y va multiplicada por 66/64 (sobreescaneo) y
+     * con la de la capa VR no. Sin ese factor todo nativo con |y| grande queda ~3 % fuera de su pareja (medido en d0004: 72,9 % sin factor, 96,3 % con él). */
+    float ys = cfg ? cfg->ys : 0.0f;
+    if (!(ys > 0.0f)) ys = ns_extract_screen_ys(ram, NS_RAM_SIZE);
+    if (!(ys > 0.0f)) ys = 1.0f;
+    for (int k = 0; k < 3; k++) cam.A[3 + k] *= ys;
+    cam.t[1] *= ys;
     cam.fog_far = c->sc.fog.active ? c->sc.fog.start + c->sc.fog.len : 0.0f;
     /* Efectos: lo que el motor genera aparte de las mallas (ondas de agua, carteles, destellos...) se extrae de la misma RAM; las operaciones de la lista que
      * casan con un elemento (exacto o tolerante, ver ns_fx_classify_near) se cuentan como cubiertas por él y no entran en la comparación con las mallas. */
@@ -499,6 +508,7 @@ static int cover_run_once(NsCover *c, const uint8_t *ram, const uint8_t *scratch
         else f_other += t;
     }
     int rc = ns_cover_core(tr, src, n, &cam, rest ? rest : ops, rest ? nrest : nops, cfg, out);
+    if (rc == 0) out->ys = ys;
     if (rc == 0 && f_tris) {
         out->list_ops = nops;
         out->list_tris += f_tris;
@@ -521,13 +531,13 @@ size_t ns_cover_format(const NsCoverResult *r, uint32_t frame, char *buf, size_t
 #define APP(...) do { if (o < cap) { int w_ = snprintf(buf + o, cap - o, __VA_ARGS__); if (w_ > 0) o += (size_t)w_ < cap - o ? (size_t)w_ : cap - o - 1; } } while (0)
     uint32_t no_cov[NC_N];
     for (int c = 0; c < NC_N; c++) no_cov[c] = r->cause[c][0] + r->cause[c][1];
-    APP("[cobertura] fr=%u lista: tris3D=%u (poligonos=%u sin_vista=%u degenerados=%u) cubierto=%.1f%% (opacos %.1f%%, exacto %.1f%%) | cubierto_por: exacto=%u otra_diagonal=%u subdividido=%u efectos=%u (agua=%u sprites=%u otros=%u) | SIN_CUBRIR: pose=%u otra_textura=%u parcial=%u ausente=%u sprite=%u (semi: pose=%u otra_tex=%u parcial=%u ausente=%u sprite=%u) | textura_distinta(pagina/clut/uv)=%u/%u/%u | nativo: tris=%u sin_pareja=%u (detras=%u plano_cercano=%u fuera=%u reverso=%u lejos=%u objeto_no_visible=%u hardware_descarta_grande=%u de_mas=%u) | posicion(match): error_medio=%.2fpx desplazados_>2px=%u | color(match): comparados=%u distintos=%u error_medio=%.1f | %.1f ms\n",
+    APP("[cobertura] fr=%u lista: tris3D=%u (poligonos=%u sin_vista=%u degenerados=%u) cubierto=%.1f%% (opacos %.1f%%, exacto %.1f%%) | cubierto_por: exacto=%u otra_diagonal=%u subdividido=%u efectos=%u (agua=%u sprites=%u otros=%u) | SIN_CUBRIR: pose=%u otra_textura=%u parcial=%u ausente=%u sprite=%u (semi: pose=%u otra_tex=%u parcial=%u ausente=%u sprite=%u) | textura_distinta(pagina/clut/uv)=%u/%u/%u | nativo: tris=%u sin_pareja=%u (detras=%u plano_cercano=%u fuera=%u reverso=%u lejos=%u objeto_no_visible=%u hardware_descarta_grande=%u de_mas=%u) | posicion(match): error_medio=%.2fpx desplazados_>2px=%u | color(match): comparados=%u distintos=%u error_medio=%.1f | vista_y=%.4f | %.1f ms\n",
         frame, r->list_tris, r->list_polys3d, r->list_no_view, r->list_degenerate, r->cover_pct, r->cover_opaque_pct, r->exact_pct,
         no_cov[NC_MATCH], no_cov[NC_SPLIT], no_cov[NC_SUBDIV], r->fx_tris, r->fx_water, r->fx_sprite, r->fx_other,
         no_cov[NC_POSE], no_cov[NC_OTHERTEX], no_cov[NC_PARTIAL], no_cov[NC_ABSENT], no_cov[NC_BILLBOARD],
         r->cause[NC_POSE][1], r->cause[NC_OTHERTEX][1], r->cause[NC_PARTIAL][1], r->cause[NC_ABSENT][1], r->cause[NC_BILLBOARD][1],
         r->tex_page, r->tex_clut, r->tex_uv, r->nat_tris, r->nat_tris - r->nat_used,
-        r->rev[NR_BEHIND], r->rev[NR_NEAR], r->rev[NR_OFF], r->rev[NR_BACK], r->rev[NR_FAR], r->rev[NR_HIDDEN], r->rev[NR_BIG], r->rev[NR_EXTRA], r->shift_mean_px, r->shift_bad, r->col_n, r->col_bad, r->col_mean, r->ms);
+        r->rev[NR_BEHIND], r->rev[NR_NEAR], r->rev[NR_OFF], r->rev[NR_BACK], r->rev[NR_FAR], r->rev[NR_HIDDEN], r->rev[NR_BIG], r->rev[NR_EXTRA], r->shift_mean_px, r->shift_bad, r->col_n, r->col_bad, r->col_mean, r->ys, r->ms);
     {   /* por CLASE: mallas opacas, mallas semitransparentes, efectos (ns_fx: agua / carteles y sprites / resto) y jugador (pose: brazos con IK, la lista manda) */
         uint32_t mo = 0, ms = 0, to = 0, ts = 0;
         for (int c = 0; c < NC_N; c++) { to += r->cause[c][0]; ts += r->cause[c][1]; }

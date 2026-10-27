@@ -32,3 +32,9 @@ int ns_hook_installed(void);
 int ns_hook_poll(void);
 unsigned ns_hook_stale_count(void);   /* veces que se retiró un parche caducado */
 int ns_hook_last_rc(void);            /* último NS_HOOK_* de ns_hook_install (para registrar solo los cambios) */
+
+/* Envoltura DINÁMICA: cuando la entrada 0 de la tabla de etapas apunta a otra rutina (copia en overlay, p. ej. 0x8008240c en la introducción), ns_hook_poll la parchea con rt_patch_fn (guarda por hash)
+ * y captura dentro, igual que la envoltura estándar (cuenta en NsHookStats.cap_dyn y llama a stage_cb). Se retira si la entrada cambia o el código de la overlay cambia; el respaldo queda de red. */
+int ns_hook_dyn_installed(void);
+uint32_t ns_hook_dyn_addr(void);      /* dirección parcheada o 0 */
+unsigned ns_hook_dyn_stale_count(void);

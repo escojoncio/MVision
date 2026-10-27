@@ -85,11 +85,11 @@ void ns_cine_score(const uint8_t *a, const uint8_t *b, int w, int h, NsCineScore
 }
 
 #include "ns_gpu.h"
-size_t ns_cine_cull_back(NsRTri *tris, struct NsAdaptSrc *src, size_t n, const float eye[3]) {
+size_t ns_cine_cull_back_mode(NsRTri *tris, struct NsAdaptSrc *src, size_t n, const float eye[3], int mode) {
     size_t o = 0;
     for (size_t i = 0; i < n; i++) {
         const NsAdaptSrc *s = &src[i];
-        if (!(s->mflags & NS_MF_TWOSIDED)) {
+        if (ns_gpu_cull_applies(mode, (!(s->mflags & NS_MF_TWOSIDED) ? NSG_CF_ONESIDED : 0u) | ((s->mflags & NS_MF_BLEND) ? NSG_CF_SEMI : 0u))) {
             const float *a = tris[i].v[0].p, *b = tris[i].v[1].p, *c = tris[i].v[2].p;
             if (s->half == 1 ? ns_gpu_tri_back(a, c, b, eye) : ns_gpu_tri_back(a, b, c, eye)) continue;
         }
@@ -97,3 +97,4 @@ size_t ns_cine_cull_back(NsRTri *tris, struct NsAdaptSrc *src, size_t n, const f
     }
     return o;
 }
+size_t ns_cine_cull_back(NsRTri *tris, struct NsAdaptSrc *src, size_t n, const float eye[3]) { return ns_cine_cull_back_mode(tris, src, n, eye, NSG_CULL_ALL); }

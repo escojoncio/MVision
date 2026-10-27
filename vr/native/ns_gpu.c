@@ -886,6 +886,10 @@ size_t ns_gpu_semi_merge(const float *mesh_depth, const uint8_t *mesh_abr, size_
     return n;
 }
 
+int ns_gpu_cull_applies(int mode, uint32_t cf) {
+    if (!(cf & NSG_CF_ONESIDED)) return 0;
+    return mode == NSG_CULL_ALL || (mode == NSG_CULL_SEMI && (cf & NSG_CF_SEMI) != 0u);
+}
 int ns_gpu_tri_back(const float p0[3], const float p1[3], const float p2[3], const float eye[3]) {
     float e1[3], e2[3], r[3];
     for (int a = 0; a < 3; a++) { e1[a] = p1[a] - p0[a]; e2[a] = p2[a] - p0[a]; r[a] = p0[a] - eye[a]; }

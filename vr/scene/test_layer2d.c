@@ -182,6 +182,46 @@ static GpuDrawList *dup_list(const GpuDrawList *l) {
 }
 static void free_list(GpuDrawList *d) { if (!d) return; free(d->ops); free(d->data); free(d->vram_init); free(d->vram_start); free(d->vram_end); free(d); }
 
+/* 3D sin resolver dentro del pase del mundo (opts.drop_world2d, vr_scene.h): un cuadrilátero sin posición de vista dibujado ANTES de un polígono con vista (el HUD va después del mundo) no es HUD y no debe
+ * dejar una caja suelta en la capa del panel; el rect de HUD posterior y la capa sin la opción (comportamiento anterior) no cambian. */
+static void world2d_cases(void) {
+    gpu_capture_enable(0);
+    gpu_reset();
+    gpu_gp1(0x08000001); gpu_gp1(0x03000000); gpu_gp1(0x05000000 | 256u << 10);
+    env(0, 0, 1023, 511, 0, 0, 0);
+    gpu_gp0(0x02000000); gpu_gp0(xy(0, 0)); gpu_gp0(xy(320, 240));
+    gpu_capture_vram_start(1);
+    gpu_capture_enable(1);
+    env(0, 0, 319, 239, 10, 0, 0);
+    gpu_gp0(0x28C0C0C0); gpu_gp0(xy(100, 80)); gpu_gp0(xy(140, 80)); gpu_gp0(xy(100, 120)); gpu_gp0(xy(140, 120));   /* op 0: caja sin vista (3D no resuelto) */
+    gpu_gp0(0x20406080); gpu_gp0(xy(200, 50)); gpu_gp0(xy(230, 50)); gpu_gp0(xy(200, 90));                           /* op 1: triángulo del mundo (se le da vista abajo) */
+    gpu_gp0(0x60FF2040); gpu_gp0(xy(10, 10)); gpu_gp0(xy(16, 16));                                                    /* op 2: rect de HUD, después del último 3D */
+    gpu_gp1(0x05000000);
+    const GpuDrawList *l = gpu_capture_frame();
+    GpuDrawList *c = l ? dup_list(l) : NULL;
+    gpu_capture_vram_start(0);
+    CHECK(c && c->nops >= 3 && c->ops[0].type == GPU_OP_POLY && c->ops[1].type == GPU_OP_POLY && c->ops[2].type == GPU_OP_RECT, "world2d: lista de prueba (%u ops)", c ? c->nops : 0);
+    if (!c || c->nops < 3) { free_list(c); return; }
+    for (int k = 0; k < 3; k++) { GpuVtx *v = &c->ops[1].v[k]; v->fvalid = v->vvalid = 1; v->vx = (float)(k * 300); v->vy = (float)(k * 200); v->vz = v->fz = 2000.0f; }
+    c->ops[1].proj_h = 160.0f;
+    for (int on = 0; on < 2; on++) {
+        VrSceneOpts o = vr_scene_opts_default();
+        o.drop_clear = 0; o.drop_world2d = on;
+        VrScene sc;
+        CHECK(vr_scene_build(c, NULL, &o, &sc) == 0, "world2d: vr_scene_build");
+        CHECK(sc.op_dest[0] == (on ? 0 : 2) && sc.op_dest[2] == 2, "world2d (opcion %d): caja op_dest %u (esperado %d), rect de HUD op_dest %u (esperado 2)", on, sc.op_dest[0], on ? 0 : 2, sc.op_dest[2]);
+        VrLayer2D *L = vl2d_new();
+        vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+        CHECK(vl2d_run(L, c, &sc, 0) == 1, "world2d: vl2d_run");
+        int w = 0, h = 0;
+        const VrLayerPx *px = vl2d_px(L, &w, &h);
+        const VrLayerPx *box = px ? &px[100 * w + 120] : NULL, *hud = px ? &px[15 * w + 15] : NULL;
+        CHECK(box && hud && (box->t != 256) == !on && hud->t != 256, "world2d (opcion %d): la caja %s en la capa y el rect de HUD %s", on, box && box->t != 256 ? "esta" : "no esta", hud && hud->t != 256 ? "esta" : "no esta");
+        vl2d_free(L);
+    }
+    free_list(c);
+}
+
 static void offlist_text(void) {
     /* fuente 4 bpp: 16 glifos de 8x8 en (640,0), índices 0..3 (0 = transparente); CLUT en (0,500) con 4 colores (uno con bit 15) */
     uint16_t font[64 * 8];   /* 64 halfwords de ancho (256 texels) x 8 filas */
@@ -1550,6 +1590,7 @@ int main(void) {
     semi_mask_cases();
     offscreen_compose();
     offlist_text();
+    world2d_cases();
     panel_verified();
     scale_step_cases();
     menu_rect_cases();

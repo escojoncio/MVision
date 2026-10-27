@@ -25,6 +25,8 @@ int ns_cine_app_chain(const NsCamera *cam, const float gv[16], int eye, float ip
 /* Descarte por detrás de la app (ns_gpu_tri_back) sobre triángulos del adaptador SIN cull_eye (src_out): quita los de modelos de una sola cara (NS_MF_TWOSIDED ausente en NsAdaptSrc.mflags)
  * vistos por detrás desde `eye`. El 2.º triángulo de un cuadrilátero del adaptador es (B,D,C); el de la GPU, (B,C,D): se invierte. Compacta tris y src en sitio y devuelve el nuevo número. */
 size_t ns_cine_cull_back(NsRTri *tris, struct NsAdaptSrc *src, size_t n, const float eye[3]);
+/* Igual con la política del sombreador (NSG_CULL_ALL = la de arriba; NSG_CULL_SEMI = solo mallas semitransparentes: la superficie del agua vista desde abajo con la cabeza sumergida). */
+size_t ns_cine_cull_back_mode(NsRTri *tris, struct NsAdaptSrc *src, size_t n, const float eye[3], int mode);
 
 typedef struct { double block_corr; double com_a[2], com_b[2]; double com_dist; } NsCineScore;
 /* Compara dos RGB8 w x h: correlación media por bloques de 16x16 de la luminancia (1 = igual, ~0 = no relacionadas, <0 = invertidas) y centro de masas de la luminancia (0..1)

@@ -410,6 +410,20 @@ static void t_world_size(void) {
     P.drop_inside_m = 0;
 }
 
+/* Descarte por detrás con la cabeza bajo el agua: la superficie (malla de una cara semitransparente) vista desde abajo no se dibuja; el resto de las caras de una cara y las de doble cara, sí */
+static void t_cull_policy(void) {
+    const uint32_t one = NSG_CF_ONESIDED, semi1 = NSG_CF_ONESIDED | NSG_CF_SEMI, semi2 = NSG_CF_SEMI, tex = NSG_CF_TEX | NSG_CF_ONESIDED;
+    CHECK(!ns_gpu_cull_applies(NSG_CULL_NONE, semi1) && !ns_gpu_cull_applies(NSG_CULL_NONE, one), "sin modo: ninguna cara se descarta");
+    CHECK(ns_gpu_cull_applies(NSG_CULL_ALL, one) && ns_gpu_cull_applies(NSG_CULL_ALL, semi1) && ns_gpu_cull_applies(NSG_CULL_ALL, tex), "cinemáticas: toda cara de una cara");
+    CHECK(!ns_gpu_cull_applies(NSG_CULL_ALL, semi2), "doble cara nunca");
+    CHECK(ns_gpu_cull_applies(NSG_CULL_SEMI, semi1), "bajo el agua: superficie semitransparente de una cara");
+    CHECK(!ns_gpu_cull_applies(NSG_CULL_SEMI, one) && !ns_gpu_cull_applies(NSG_CULL_SEMI, tex) && !ns_gpu_cull_applies(NSG_CULL_SEMI, semi2), "bajo el agua: opacas y de doble cara intactas");
+    /* superficie horizontal y = -1500 (Y arriba), anverso hacia arriba: desde abajo es reverso, desde arriba anverso (regla ns_gpu_tri_back) */
+    const float a[3] = { 0, -1500, 0 }, b[3] = { 1000, -1500, 0 }, c[3] = { 0, -1500, 1000 }, below[3] = { 300, -2283, 300 }, above[3] = { 300, -700, 300 };
+    int s_below = ns_gpu_tri_back(a, b, c, below), s_above = ns_gpu_tri_back(a, b, c, above);
+    CHECK(s_below != s_above, "el mismo triángulo es anverso por un lado y reverso por el otro");
+}
+
 int main(void) {
     setup();
     t_poly();
@@ -423,6 +437,7 @@ int main(void) {
     t_export_roundtrip();
     setup(); t_near();
     setup(); t_world_size();
+    t_cull_policy();
     printf("%s: %d comprobaciones, %d fallos\n", g_fail ? "FALLA" : "OK", g_checks, g_fail);
     return g_fail != 0;
 }

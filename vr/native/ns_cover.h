@@ -40,6 +40,7 @@ typedef struct {
     int screen_w, screen_h;    /* pantalla de referencia (def. 320x256) */
     void *dbg;                 /* FILE* opcional (herramientas): una línea por triángulo sin pareja y por nativo de más */
     const float *list_eye, *list_M;   /* cámara con la que se emitió la lista (ojo en el mundo y vista->mundo fila-mayor); NULL = la de la RAM */
+    float ys;                  /* factor vertical de la vista de la lista (66/64 con la cámara del propio juego, 1 con la de la capa VR); 0 = medirlo de la RAM (ns_extract_screen_ys) */
     uint32_t max_detail;       /* máximo de triángulos sin pareja que se clasifican a fondo (def. 4096: con menos, lo no clasificado contaba como AUSENTE y la cobertura salía subestimada); el resto cuenta como ABSENT sin dueño */
 } NsCoverCfg;
 void ns_cover_cfg_default(NsCoverCfg *c);
@@ -75,6 +76,7 @@ typedef struct {
     NsCoverGroup color[3];                             /* peores grupos de MATCH con color distinto (cause = NC_N + 1) */
     NsFxCmpResult fxc;                                 /* medida de los efectos nativos frente a la lista (ns_fxcmp.h); fxc_ok = 1 si se midió */
     int fxc_ok;
+    float ys;                                          /* factor vertical de la vista de la lista que se usó (NsCoverCfg.ys o medido de la RAM; 1 si no se pudo medir) */
     double ms;
 } NsCoverResult;
 

@@ -6,7 +6,7 @@ NsScreenCfg ns_screen_cfg_default(void) {
     NsScreenCfg c;
     memset(&c, 0, sizeof c);
     c.wave_gain = 1.0f; c.wave_space = 8.0f;
-    c.bars_gain = 0.85f; c.bars_soft = 4.0f;
+    c.bars_gain = 0.0f; c.bars_soft = 4.0f;
     c.scan_gain = 0.12f; c.scan_period = 2.0f; c.scan_cover = 0.5f;
     c.mode_amount = 0.30f;
     c.mode_a_rgb[0] = 0.20f; c.mode_a_rgb[1] = 1.00f; c.mode_a_rgb[2] = 0.30f;   /* visión A: verde */
@@ -110,6 +110,42 @@ int ns_screen_build(const NsScreenFx *fx, const float to_vr[12], const float hea
         if (o) o->rgb[0] = o->rgb[1] = o->rgb[2] = 1;
     }
     return (int)out->n_overlays;
+}
+
+/* ---- máscara de visión de la caja (NSG_OV_FRAME) ---- */
+int ns_screen_frame_build(float area_w, float area_h, float cx_col, float cy_row, float H, const float rgb[3], NsGpuOverlay out[2]) {
+    if (!(area_w > 0.0f) || !(area_h > 0.0f) || !(H > 1.0f) || !out) return 0;
+    for (int i = 0; i < 2; i++) {
+        memset(&out[i], 0, sizeof out[i]);
+        out[i].kind = NSG_OV_FRAME; out[i].abr = i == 0 ? 2u : 1u; out[i].amount = 1.0f;
+        out[i].rgb2[0] = area_w; out[i].rgb2[1] = area_h; out[i].rgb2[2] = cy_row;
+        out[i].p[0] = cx_col; out[i].p[1] = (float)i; out[i].p[3] = H;
+    }
+    out[0].rgb[0] = out[0].rgb[1] = out[0].rgb[2] = 1.0f;
+    for (int k = 0; k < 3; k++) out[1].rgb[k] = rgb ? clamp01(rgb[k]) : 0.0f;
+    return 2;
+}
+static float sstep(float e0, float e1, float x);
+float ns_screen_frame_sub(const uint8_t *frame, int fw, int fh, const NsGpuOverlay *ov, float tx, float ty) {
+    if (!frame || fw < 2 || fh < 2 || ov->rgb2[0] <= 0.0f || ov->rgb2[1] <= 0.0f) return 0.0f;
+    const float H = ov->p[3] > 0 ? ov->p[3] : 320.0f;
+    const float col = ov->p[0] + tx * H, row = ov->rgb2[2] - ty * H;     /* ty hacia arriba; las filas de la imagen crecen hacia abajo */
+    const float u = col / ov->rgb2[0], v = row / ov->rgb2[1];
+    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) return 1.0f;       /* fuera de la imagen original: cerrado */
+    float fx = u * (float)fw - 0.5f, fy = v * (float)fh - 0.5f;
+    if (fx < 0) fx = 0; if (fy < 0) fy = 0;
+    if (fx > (float)(fw - 1)) fx = (float)(fw - 1);
+    if (fy > (float)(fh - 1)) fy = (float)(fh - 1);
+    int x0 = (int)fx, y0 = (int)fy, x1 = x0 + 1 < fw ? x0 + 1 : x0, y1 = y0 + 1 < fh ? y0 + 1 : y0;
+    float ax = fx - (float)x0, ay = fy - (float)y0;
+    float a = (float)frame[y0 * fw + x0] * (1 - ax) + (float)frame[y0 * fw + x1] * ax, b = (float)frame[y1 * fw + x0] * (1 - ax) + (float)frame[y1 * fw + x1] * ax;
+    return clamp01((a * (1 - ay) + b * ay) / 255.0f);
+}
+void ns_screen_frame_ref(const NsGpuOverlay *ov, float sub, const float b[3], float out[3]) {
+    for (int k = 0; k < 3; k++) {
+        float r = ov->p[1] < 0.5f ? b[k] - sub : b[k] + ov->rgb[k] * sstep(0.85f, 1.0f, sub);
+        out[k] = clamp01(r);
+    }
 }
 
 /* ---- referencias ---- */

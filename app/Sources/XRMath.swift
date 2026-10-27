@@ -202,6 +202,17 @@ enum XRFramedLayout {
     /// Recorte (u0, v0, u1, v1) de la capa ENTERA: el panel único del 2D sin trocear (XRLayer2D.split == false) usa `size`/`center` con él.
     static let fullUV = SIMD4<Float>(0, 0, 1, 1)
 
+    /// Ventana 2D del juego abierta (selector de armas/objetos, pausa): el panel único se acerca a `overlayDistance` y se agranda un 15 % en ángulo (`overlayScale` sobre el tamaño a `distance`), para leerse
+    /// sin buscarlo lejos; píxel cuadrado y aspecto de la capa intactos.
+    static let overlayDistance: Float = 0.9
+    static let overlayScale: Float = overlayDistance / distance * 1.15
+    static let overlayMaxPitch: Float = 1.2     // rad: tope del cabeceo guardado (mirando casi vertical el panel no se vuelca)
+    /// Modelo del panel (centro del quad, +Z hacia el usuario) a `overlayDistance` m de la cabeza `position`, en la dirección de mirada (`yaw`, `pitch` + arriba) fijada al abrirse.
+    static func overlayModel(position p: SIMD3<Float>, yaw: Float, pitch: Float) -> simd_float4x4 {
+        let pt = pitch.isFinite ? min(max(pitch, -overlayMaxPitch), overlayMaxPitch) : 0
+        return XRMath.translation(p) * XRMath.rotationY(yaw) * XRMath.rotationX(pt) * XRMath.translation(SIMD3<Float>(0, 0, -overlayDistance))
+    }
+
     /// Tamaño lógico válido de la capa; 320x240 si no es plausible.
     static func layer(_ p: SIMD2<Float>) -> SIMD2<Float> {
         p.x.isFinite && p.y.isFinite && p.x >= 64 && p.x <= 1024 && p.y >= 64 && p.y <= 1024 ? p : SIMD2<Float>(320, 240)

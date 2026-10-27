@@ -278,6 +278,52 @@ static void test_run_and_glue(void) {
     free(ram);
 }
 
+/* Factor vertical de la vista de la lista (cámara del propio juego: matrices de pantalla con la fila Y x 66/64): la RAM sintética lleva un objeto con un cuadrilátero en |y| grande; ns_cover_run lo mide de las
+ * matrices de pantalla de la pieza (+0x20) y la lista (con vy = ys * y nativo) debe quedar cubierta; con ys = 1 forzado no. */
+static void ram_w16(uint8_t *ram, uint32_t a, uint32_t v) { ram[a & 0x1FFFFF] = (uint8_t)v; ram[(a & 0x1FFFFF) + 1] = (uint8_t)(v >> 8); }
+static void ram_w32(uint8_t *ram, uint32_t a, uint32_t v) { ram_w16(ram, a, v & 0xFFFF); ram_w16(ram, a + 2, v >> 16); }
+static void ram_mat(uint8_t *ram, uint32_t a, float ys) { for (int i = 0; i < 9; i++) ram_w16(ram, a + 2u * (uint32_t)i, (i % 4 == 0) ? (i == 4 ? (uint32_t)(4096.0f * ys) : 4096u) : 0u); }
+static void test_screen_ys(void) {
+    for (int mode = 0; mode < 2; mode++) {   /* 0: cámara del juego (66/64); 1: capa VR (sin factor) */
+        const float ys = mode ? 1.0f : 66.0f / 64.0f;
+        uint8_t *ram = (uint8_t *)calloc(1, 0x200000);
+        const uint32_t CH = 0x800B2B7Cu, Q = 0x800B2110u, O = 0x80130000u, DEF = 0x80131000u, M = DEF + 0x20, V = 0x80132000u, VI = 0x80132100u, NI = 0x80132200u, UV = 0x80132300u, TXI = 0x80132400u, NRM = 0x80132500u;
+        uint32_t te = 0x800B30E0u + 12u * (0x1234u % 512u);
+        ram_w16(ram, te, 0x1234); ram_w16(ram, te + 4, 0x0105); ram_w16(ram, te + 6, 0x7800);
+        ram[(te + 8) & 0x1FFFFF] = 16; ram[(te + 9) & 0x1FFFFF] = 32; ram[(te + 10) & 0x1FFFFF] = 31; ram[(te + 11) & 0x1FFFFF] = 15;
+        ram_mat(ram, CH + 0x10, 1.0f); ram_mat(ram, CH + 0x30, 1.0f); ram_w16(ram, CH + 0x50, 160);
+        ram_w16(ram, CH + 0x56, 1); ram_w32(ram, CH + 0x58, Q); ram_w32(ram, Q, O);
+        ram_w32(ram, 0x800ACAF8u, 1);
+        ram_mat(ram, O, 1.0f); ram_w32(ram, O + 0x24, DEF); ram_w32(ram, O + 0x28, 0x1); ram_w16(ram, O + 0x2C, 1); ram_w16(ram, O + 0x2E, 1);
+        ram_w32(ram, DEF, 1); ram_w32(ram, DEF + 4, 1);
+        uint32_t P0 = O + 0x48;
+        ram_mat(ram, P0, 1.0f); ram_mat(ram, P0 + 0x20, ys); ram_w32(ram, P0 + 0x40, M);
+        const int16_t vx[4][3] = {{-500, 2800, 4000}, {500, 2800, 4000}, {500, 3800, 4000}, {-500, 3800, 4000}};   /* A,B,C,D */
+        ram_w32(ram, M, 0x2); ram_w32(ram, M + 4, 1); ram_w32(ram, M + 0x2C, 0xFFFFFFFFu); ram_w32(ram, M + 0x30, 0xFFFFFFFFu); ram_w32(ram, M + 0x34, 4);
+        ram_w32(ram, M + 0x38, V); ram_w32(ram, M + 0x3C, VI); ram_w32(ram, M + 0x40, 1); ram_w32(ram, M + 0x44, NRM); ram_w32(ram, M + 0x48, NI); ram_w32(ram, M + 0x4C, UV); ram_w32(ram, M + 0x50, TXI);
+        for (int i = 0; i < 4; i++) for (int k = 0; k < 3; k++) ram_w16(ram, V + 8u * (uint32_t)i + 2u * (uint32_t)k, (uint32_t)(uint16_t)vx[i][k]);
+        for (int k = 0; k < 4; k++) ram[(VI + (uint32_t)k) & 0x1FFFFF] = (uint8_t)k;
+        const uint8_t uvb[8] = {0, 0, 255, 0, 255, 255, 0, 255};
+        for (int k = 0; k < 8; k++) ram[(UV + (uint32_t)k) & 0x1FFFFF] = uvb[k];
+        ram_w16(ram, TXI, 0x1234);
+        /* lista: el mismo cuadrilátero en orden de hardware A,B,D,C con vy = ys * y */
+        float v[4][3], uv[4][2] = {{16, 32}, {47, 32}, {16, 47}, {47, 47}};
+        const int hw[4] = {0, 1, 3, 2};
+        for (int k = 0; k < 4; k++) { v[k][0] = vx[hw[k]][0]; v[k][1] = ys * vx[hw[k]][1]; v[k][2] = vx[hw[k]][2]; }
+        GpuOp op = list_quad(v, uv, 0, 1, 128, TX, CLX);
+        NsCover *c = ns_cover_create();
+        NsCoverResult r; NsCoverCfg cfg;
+        ns_cover_cfg_default(&cfg);
+        CHECK(ns_cover_run(c, ram, NULL, &op, 1, &cfg, &r) == 0, "run");
+        CHECK(r.list_tris == 2 && cz(&r, NC_MATCH) == 2 && fabsf(r.ys - ys) < 1e-3f, "auto ys=%.4f modo %d: match=%u de %u", r.ys, mode, cz(&r, NC_MATCH), r.list_tris);
+        if (mode == 0) {
+            cfg.ys = 1.0f;
+            CHECK(ns_cover_run(c, ram, NULL, &op, 1, &cfg, &r) == 0 && r.ys == 1.0f && cz(&r, NC_MATCH) == 0, "ys=1 forzado con lista a 66/64: match=%u", cz(&r, NC_MATCH));
+        }
+        ns_cover_destroy(c); free(ram);
+    }
+}
+
 int main(void) {
     test_match();
     test_split_diag();
@@ -288,6 +334,7 @@ int main(void) {
     test_camera_and_format();
     test_many();
     test_run_and_glue();
+    test_screen_ys();
     if (fails) { printf("%d FALLOS\n", fails); return 1; }
     printf("OK: todas las pruebas de ns_cover pasan\n");
     return 0;

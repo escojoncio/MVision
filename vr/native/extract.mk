@@ -76,7 +76,7 @@ test-net-san:
 
 # Pantalla 3D de las cinemáticas reproducida fuera de la app (ns_cinema_ref + herramienta nscine sobre volcados; ver tools/nscine.c).
 #   make -f vr/native/extract.mk nscine       compila vr/native/build-extract/nscine
-CINSRC := vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_cpuref.c vr/native/ns_cinema.c vr/native/ns_cinema_ref.c vr/native/ns_gpu.c
+CINSRC := vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_cpuref.c vr/native/ns_cinema.c vr/native/ns_cinema_ref.c vr/native/ns_gpu.c vr/native/ns_fx.c vr/native/ns_fxcmp.c vr/native/ns_fx_export.c vr/native/ns_screen.c
 $(B)/nscine: vr/native/tools/nscine.c vr/native/ns_dump.c $(CINSRC) vr/native/ns_cinema_ref.h vr/native/ns_cinema.h $(HDR) | $(B)
 	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/tools/nscine.c vr/native/ns_dump.c $(CINSRC) -lm -lpthread -o $@
 nscine: $(B)/nscine

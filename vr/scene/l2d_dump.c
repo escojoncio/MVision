@@ -3,7 +3,7 @@
  * --png DIR: escribe, por volcado, la capa 2D que llega al panel del visor (UNA sola capa completa, sin trocear: la misma que vl2a/vrhost con el troceo apagado) como PNG sobre un fondo gris a cuadros (lo transparente se ve
  *   a cuadros): <volcado>_capa2d.png (1x, exacta) y <volcado>_hoja.png (x2: frame.png original | capa del panel | en vista de cine, además la capa completa opaca). Un volcado sin list.bin (los de «stage»: solo RAM/VRAM/GTE)
  *   NO tiene capa reproducible (la capa sale de las primitivas de la lista de dibujo): se avisa y se salta, no se aproxima.
- * La escena se ensambla como vrhost.c build_one en el modo nativo (opciones por defecto + screen_filter, puente y registro de cámara del meta.txt, correspondencia mundo -> usuario, reensamblado sin filtro si no se conserva):
+ * La escena se ensambla como vrhost.c build_one en el modo nativo (opciones por defecto + screen_filter + drop_world2d, puente y registro de cámara del meta.txt, correspondencia mundo -> usuario, reensamblado sin filtro si no se conserva):
  *   op_dest == 2 = lo que va al panel. Aproximaciones: cine_cand y last_scene3d se deducen del meta (rec_active == 0 con registro) y de las primitivas 3D de ESTA lista. El modo de la capa sale de view_mode del meta
  *   (= VrView.kind de vr_view.h: 0 UI, 1 mundo, 2 cinemática del motor, 3 vídeo), igual que vrhost.c: UI / vídeo -> VL_FULL (fotograma entero opaco), cinemática -> VL_PANEL_VERIFIED, mundo -> VL_PANEL (con vl2d_set_menu(0): sin troceo).
  *   La VRAM del volcado es la del FINAL de la lista y se usa también como vram_start/vram_end (el visor usa la real de cada momento): para los modos con 2D semitransparente, realimentación (fbk) o texturas dibujadas dentro de la zona mostrada, y
@@ -100,6 +100,7 @@ static uint8_t *png_read_stored(const char *path, int *w, int *h) {
 static int build_scene(const NsDump *d, const GpuDrawList *l, VrScene *sc) {
     VrSceneOpts o = vr_scene_opts_default();
     o.screen_filter = 1;   /* on_start */
+    o.drop_world2d = getenv("L2D_SIN_W2D") == NULL && (int)ns_dump_meta_num(d, "view_mode", 1) == 1;    /* build_one: solo vista mundo (el meta no trae el motivo: selector/pausa no se distinguen); L2D_SIN_W2D=1 la apaga (comparar con/sin) */
     BridgeState bs; memset(&bs, 0, sizeof bs);
     VrCamRecord rec; memset(&rec, 0, sizeof rec);
     float M[9], eye[3], pref[3] = {0, 0, 0};

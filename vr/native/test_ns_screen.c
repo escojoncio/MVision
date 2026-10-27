@@ -50,7 +50,10 @@ static void test_water(void) {
     CHECK(ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, o.water_wave, ew_out, &du, &dv, c2) == 0 && c2[0] == 1 && du == 0 && dv == 0, "fragmento fuera: intacto");
     /* cabeza dentro: todo teñido, barras presentes */
     n = ns_screen_build(&fx, TOVR, head_in, 0.016f, NULL, NULL, &o, inv);
-    CHECK(n == 1 && o.ov[0].kind == NSG_OV_BARS && o.water_tint[3] == 1, "dentro: barras y bandera de cabeza (n=%d)", n);
+    CHECK(n == 0 && o.water_tint[3] == 1, "dentro: SIN barras (sin círculo) y bandera de cabeza (n=%d)", n);
+    { NsScreenCfg cb = ns_screen_cfg_default(); cb.bars_gain = 0.85f;
+      n = ns_screen_build(&fx, TOVR, head_in, 0.016f, &cb, NULL, &o, inv);
+      CHECK(n == 1 && o.ov[0].kind == NSG_OV_BARS, "barras solo si se piden con bars_gain > 0 (n=%d)", n); }
     float c3[3] = { 1, 1, 1 };
     CHECK(ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, o.water_wave, ew_out, &du, &dv, c3) == 1 && near(c3[0], 0.5f, 1e-5f), "cabeza dentro tiñe incluso lo de fuera del volumen");
     /* INVARIANCIA con la cabeza: la onda sólo depende de la posición en el mundo y de la fase */
@@ -78,6 +81,34 @@ static void test_water(void) {
     fx.flags = 0;
     ns_screen_build(&fx, TOVR, head_in, 0.016f, NULL, NULL, &o, inv);
     CHECK(o.water_min[3] == 0, "sin bandera no hay agua");
+}
+
+static void test_frame(void) {
+    /* máscara de la caja: 160x128 celdas, abertura de 20x16 celdas en el centro; la imagen mostrada es 320x256 con centro óptico en (160,128) y H = 160 */
+    uint8_t fr[160 * 128]; memset(fr, 255, sizeof fr);
+    for (int y = 56; y < 72; y++) for (int x = 70; x < 90; x++) fr[y * 160 + x] = 0;
+    NsGpuOverlay ov[2]; const float rgb[3] = { 0.1f, 0.05f, 0.0f };
+    CHECK(ns_screen_frame_build(320, 256, 160, 128, 160, rgb, ov) == 2 && ov[0].kind == NSG_OV_FRAME && ov[0].abr == 2 && ov[1].abr == 1 && ov[1].p[1] == 1.0f, "dos recubrimientos FRAME: resta y relleno");
+    CHECK(ns_screen_frame_build(0, 256, 160, 128, 160, rgb, ov) == 0 && ns_screen_frame_build(320, 256, 160, 128, 0, rgb, ov) == 0, "datos invalidos: ninguno");
+    ns_screen_frame_build(320, 256, 160, 128, 160, rgb, ov);
+    float b[3] = { 0.8f, 0.8f, 0.8f }, o[3];
+    float s0 = ns_screen_frame_sub(fr, 160, 128, &ov[0], 0.0f, 0.0f);
+    CHECK(near(s0, 0.0f, 1e-5f), "centro de la vista: abierto (%f)", s0);
+    ns_screen_frame_ref(&ov[0], s0, b, o);
+    CHECK(near(o[0], 0.8f, 1e-5f), "centro intacto");
+    float s1 = ns_screen_frame_sub(fr, 160, 128, &ov[0], 0.6f, 0.0f);
+    CHECK(near(s1, 1.0f, 1e-5f), "fuera de la abertura: cerrado (%f)", s1);
+    float s2 = ns_screen_frame_sub(fr, 160, 128, &ov[0], 0.0f, 2.0f);
+    CHECK(near(s2, 1.0f, 1e-5f), "fuera de la imagen original: cerrado (%f)", s2);
+    ns_screen_frame_ref(&ov[0], s1, b, o);
+    float o2[3]; ns_screen_frame_ref(&ov[1], s1, o, o2);
+    CHECK(near(o[0], 0.0f, 1e-5f) && near(o2[0], 0.1f, 1e-5f) && near(o2[1], 0.05f, 1e-5f), "cerrado: negro + color del interior (%f %f)", o2[0], o2[1]);
+    ns_screen_frame_ref(&ov[1], s0, b, o2);
+    CHECK(near(o2[0], 0.8f, 1e-5f), "abierto: el relleno no suma");
+    /* anclada a la cabeza: tangente simetrica = misma resta a izquierda y derecha, y no depende de nada mas */
+    CHECK(near(ns_screen_frame_sub(fr, 160, 128, &ov[0], -0.05f, 0.0f), ns_screen_frame_sub(fr, 160, 128, &ov[0], 0.05f, 0.0f), 1e-5f), "simetrica");
+    /* el eje vertical: la abertura esta alrededor de la fila 128 (celdas 56..71); ty positivo = arriba = filas menores */
+    CHECK(near(ns_screen_frame_sub(fr, 160, 128, &ov[0], 0.0f, 0.2f), 1.0f, 1e-5f) && near(ns_screen_frame_sub(fr, 160, 128, &ov[0], 0.0f, 0.04f), 0.0f, 1e-5f), "ty hacia arriba");
 }
 
 static void test_bars(void) {
@@ -191,7 +222,7 @@ static void test_modes(void) {
 }
 
 int main(void) {
-    test_invert(); test_none(); test_water(); test_bars(); test_ring(); test_fade_flash(); test_modes();
+    test_invert(); test_none(); test_water(); test_frame(); test_bars(); test_ring(); test_fade_flash(); test_modes();
     printf("%s: %d comprobaciones, %d fallos\n", g_fail ? "FALLO" : "OK", g_ok + g_fail, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -999,6 +999,15 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     GROW(g_opd, g_opd_cap, (size_t)n + 1);
     memset(g_opd, 0, (size_t)n + 1);
 
+    /* Última primitiva POLY con algún vértice con posición de vista (GTE): hasta ahí llega el pase del mundo (el juego dibuja el HUD DESPUÉS). Un polígono sin posición de vista dentro de ese pase
+     * es 3D que la captura no resolvió (cajas, props lejanos): lo dibuja el render nativo, no es HUD, y con opts.drop_world2d no se emite al panel 2D (VR_FATE_WORLD2D). */
+    long last3d = -1;
+    for (uint32_t i = 0; o.drop_world2d && i < n; i++) {
+        const GpuOp *w = &dl->ops[i];
+        if (w->type != GPU_OP_POLY) continue;
+        for (int k = 0; k < (w->nv == 4 ? 4 : 3); k++) if (w->v[k].vvalid) { last3d = (long)i; break; }
+    }
+
     size_t nt = 0;
     out->stats.n_ops = n;
     if (g_fate) memset(g_fate, 0, n < g_fate_cap ? n : g_fate_cap);
@@ -1250,6 +1259,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 fcls = filter_class(&o, dl, op, 0, bx0, by0, bx1, by1, bu0, bv0, bu1, bv1);
             }
             if (fcls) filter_note(out, op, fcls, 0, &tint_w);
+            if (!fcls && (long)i < last3d) { fate_set(i, VR_FATE_WORLD2D); continue; }   /* 3D sin resolver dentro del pase del mundo: no es HUD */
             for (int q = 0; q < ntri; q++) {
                 if ((hwm >> q) & 1u) continue;
                 Tri *t = &g_tri[nt++];

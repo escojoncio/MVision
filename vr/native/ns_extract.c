@@ -1,5 +1,6 @@
 /* ns_extract: extractor de la escena nativa (ver ns_extract.h, ns_types.h y docs/escena_nativa.md). */
 #include "ns_extract.h"
+#include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,7 +30,9 @@
 #define OF_PRECOLORED  0x002u
 #define OF_TRANSLUCENT 0x004u
 #define OF_LIT         0x008u
-#define OF_ONE_MATRIX  0x040u
+#define OF_ONE_MATRIX  0x040u   /* ONE_MATRIX_WORLD: las rutinas de pantalla del motor (0x8001C614 en juego, 0x80081200 en la etapa de la overlay de la introducción) transforman TODAS las piezas con la matriz de la raíz
+                                  * (obj+0x00, ya con padre_mat copiada). En juego copian esa misma matriz a cada pieza (+0x00); en la overlay escriben ahí la raíz con la traslación RELATIVA AL OJO (raíz - ojo,
+                                  * medido: pieza t = -ojo.t con raíz en el origen). Por eso el mundo de un objeto rígido es la raíz, no la matriz de la pieza. */
 #define OF_HIDDEN      0x080u
 #define OF_OWN_AMBIENT 0x100u
 #define OF_ALT_PALETTE 0x200u
@@ -668,7 +671,7 @@ static int emit_object(Ctx *c, const Cand *cd, uint32_t piece_cap) {
         if (sc->n_piece >= piece_cap) { dropped = 1; break; }
         NsPiece *pc = &sc->piece[sc->n_piece];
         memset(pc, 0, sizeof *pc);
-        read_matrix(r, p, &pc->world);
+        read_matrix(r, (flag & OF_ONE_MATRIX) ? o : p, &pc->world);   /* M_RIGIDO: la matriz de la raíz (docs §3.3; la pieza guarda un residuo, ver OF_ONE_MATRIX) */
         int rr = resolve_piece(c, rd32(r, p + 0x40), cd->def, rd32(r, p + 0x44), flag, nm, rs16(r, p + 0x50), 1, cd->is_static, pc);
         if (rr == RES_FULL) full = 1;
         if (rr != RES_OK) { pc->flags |= NS_PF_HIDDEN; S->n_hidden_pieces++; }
@@ -682,7 +685,7 @@ static int emit_object(Ctx *c, const Cand *cd, uint32_t piece_cap) {
         uint32_t p = o + 0x48u + 0x5Cu * (uint32_t)k;
         uint32_t e = rd32(r, p + 0x48);
         if (!e) continue;
-        NsXf w; read_matrix(r, p, &w);
+        NsXf w; read_matrix(r, (flag & OF_ONE_MATRIX) ? o : p, &w);
         const uint32_t base = norm_addr(o) + 0x48u;
         uint32_t seen[MAX_EXT_DEPTH + 1];
         for (int depth = 0; e && depth < MAX_EXT_DEPTH; depth++) {
@@ -807,6 +810,55 @@ static int scan_extra_objects(Ram *r, uint32_t gmask, const uint32_t *seen, uint
     }
     S->extra_objs += added;
     return (int)added;
+}
+
+/* Factor vertical (66/64 con la cámara del propio juego, 1 con la de la capa VR) con el que el motor compuso las matrices de PANTALLA (pieza +0x20) que alimentan la GTE, y por tanto las posiciones de vista de la
+ * lista de la GPU. Se mide en la RAM: para las primeras piezas de los objetos de la cola, razón entre la norma de la fila Y de la matriz de pantalla y la de (ojo_inv * mundo), con la misma matriz de mundo que
+ * usa el extractor. Solo vale la muestra si las filas X y Z coinciden con las de ojo_inv * mundo (si no, esa pieza no se compuso así). Mediana; 0 = sin muestras válidas (desconocido). */
+float ns_extract_screen_ys(const uint8_t *ram, size_t ram_size) {
+    if (!ram) return 0.0f;
+    Ram r; memset(&r, 0, sizeof r);
+    r.b = ram; r.size = ram_size > NS_RAM_SIZE ? NS_RAM_SIZE : (uint32_t)ram_size;
+    if (!ok_rng(&r, A_CHAN, 0x60)) return 0.0f;
+    float E[9];
+    for (int i = 0; i < 9; i++) E[i] = (float)rs16(&r, A_CHAN + 0x10u + 2u * (uint32_t)i) * (1.0f / 4096.0f);
+    int n = rs16(&r, A_CHAN + 0x56);
+    uint32_t q = rd32(&r, A_CHAN + 0x58);
+    if (n <= 0) return 0.0f;
+    if (n > MAX_QUEUE) n = MAX_QUEUE;
+    if (!ok_rng(&r, q, 4u * (uint32_t)n)) return 0.0f;
+    float v[64]; int nv = 0;
+    for (int i = 0; i < n && nv < 64; i++) {
+        uint32_t o = rd32(&r, q + 4u * (uint32_t)i);
+        if (!o || !ok_rng(&r, o, 0x48)) continue;
+        uint32_t flag = rd32(&r, o + 0x28);
+        int nm = rs16(&r, o + 0x2E);
+        if (nm <= 0 || nm > MAX_PIECES || !ok_rng(&r, o + 0x48u, 0x5Cu * (uint32_t)nm)) continue;
+        for (int k = 0; k < nm && k < 4 && nv < 64; k++) {
+            uint32_t p = o + 0x48u + 0x5Cu * (uint32_t)k;
+            NsXf w, pw;
+            read_matrix(&r, (flag & OF_ONE_MATRIX) ? o : p, &w);
+            read_matrix(&r, p + 0x20u, &pw);
+            float c[3][3], pr[3][3];
+            for (int a = 0; a < 3; a++) for (int b = 0; b < 3; b++) {
+                c[a][b] = E[3 * a] * w.m[b] + E[3 * a + 1] * w.m[4 + b] + E[3 * a + 2] * w.m[8 + b];
+                pr[a][b] = pw.m[4 * a + b];
+            }
+            float nc[3], np[3];
+            for (int a = 0; a < 3; a++) {
+                nc[a] = sqrtf(c[a][0] * c[a][0] + c[a][1] * c[a][1] + c[a][2] * c[a][2]);
+                np[a] = sqrtf(pr[a][0] * pr[a][0] + pr[a][1] * pr[a][1] + pr[a][2] * pr[a][2]);
+            }
+            if (nc[1] < 0.25f || np[1] < 0.25f || nc[0] < 0.25f || nc[2] < 0.25f) continue;
+            if (fabsf(np[0] / nc[0] - 1.0f) > 0.01f || fabsf(np[2] / nc[2] - 1.0f) > 0.01f) continue;
+            float ys = np[1] / nc[1];
+            if (ys < 0.9f || ys > 1.2f) continue;
+            v[nv++] = ys;
+        }
+    }
+    if (!nv) return 0.0f;
+    for (int i = 1; i < nv; i++) { float x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j--; } v[j + 1] = x; }
+    return v[nv / 2];
 }
 
 int ns_extract_ex(NsScene *sc, NsMeshStore *st, const uint8_t *ram, size_t ram_size, const uint8_t *scratch, size_t scratch_size, const NsExtractOpts *opt, NsExtractStats *stats) {

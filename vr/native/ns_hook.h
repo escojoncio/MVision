@@ -43,7 +43,7 @@ typedef struct {
     uint32_t last_valid;     /* NsScene.valid de la última publicada */
     uint64_t last_pub_ns;
     uint32_t ik_idle;        /* de las esperadas sin pose IK, las que la capa VR dejó INACTIVA (sin pose de mano válida: ningún brazo manejado): aptas, con los brazos de la animación del juego */
-    uint32_t cap_wrap, cap_backup;   /* de las capturas: las de la envoltura de la etapa «pantalla» / las del respaldo del fin del bucle de etapas */
+    uint32_t cap_wrap, cap_backup, cap_dyn;   /* de las capturas: las de la envoltura de la etapa «pantalla» / las del respaldo del fin del bucle de etapas / las de la envoltura dinámica de la rutina de la entrada 0 de la tabla cuando es una copia en overlay */
 } NsHookStats;
 
 void ns_hook_init(NsBridge *b);                         /* NULL desengancha */
@@ -73,6 +73,7 @@ void ns_hook_set_finalize(NsFinalizeFn fn, void *user);
 void ns_hook_set_frame(uint32_t vblank_count);          /* para NsScene.vblank (si el extractor lo dejó a 0) */
 
 void ns_capture(const uint8_t *ram, const uint8_t *scratch);
+void ns_capture_dyn(const uint8_t *ram, const uint8_t *scratch);   /* igual que ns_capture (cuenta como envoltura para el respaldo), contada aparte en NsHookStats.cap_dyn */
 /* Respaldo: la entrada 0 de la tabla de etapas puede apuntar a una copia de la etapa «pantalla» en una overlay (introducciones, recubrimientos) que la envoltura no cubre. Alrededor del bucle de
  * las 7 etapas: ns_capture_backup_begin() ANTES (borra la marca, para que un fotograma con envoltura no robe el respaldo del siguiente) y, al final, antes de devolver las matrices de la IK,
  * if (ns_capture_backup_due()) { ...; ns_capture_backup(ram, scratch); }. due = 1 si ns_capture no corrió desde el begin (la marca se consume siempre). Misma captura que ns_capture, contada

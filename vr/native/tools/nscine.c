@@ -7,6 +7,10 @@
 #include "../ns_cpuref.h"
 #include "../ns_dump.h"
 #include "../ns_extract.h"
+#include "../ns_fx.h"
+#include "../ns_fx_export.h"
+#include "../ns_gpu_types.h"
+#include "../ns_screen.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +50,7 @@ int main(int argc, char **argv) {
         printf("max|A(+0x10) - rot^T(+0x30)| = %.4f\n", mx);
     }
     int w = 640, h = 480;
+    const char *aguadir = getenv("NSCINE_AGUA");   /* directorio de salida: PNG antes/despues del agua (ver mas abajo) */
     uint8_t *rgb = malloc((size_t)w * h * 3);
     char p[1024];
     NsRBuf b; ns_buf_alloc(&b, w, h);
@@ -68,6 +73,33 @@ int main(int argc, char **argv) {
             printf("directa vs fotograma real: corr_bloques=%.3f com_real=(%.3f,%.3f) com_directa=(%.3f,%.3f) d_com=%.3f\n", s.block_corr, s.com_a[0], s.com_a[1], s.com_b[0], s.com_b[1], s.com_dist);
             free(fr); free(f);
         }
+    }
+    if (aguadir) {   /* agua: vista de ojo ancha (H=130, ~100 grados) con lo que hace el visor bajo el agua. antes = superficie de una cara semitransparente sin descarte + viñeta circular de barras; despues = descarte
+                      * NSG_CULL_SEMI y sin barras. El tinte (multiplicativo, ns_screen_water_ref) es el mismo en ambos; la onda no se emula. */
+        NsFxScene *fxs = ns_fx_scene_create(0); NsFxOpts fo = ns_fx_opts_default(); NsScreenFx sfx; memset(&sfx, 0, sizeof sfx);
+        if (ns_fx_extract(d->ram, &fo, fxs) == 0) ns_fx_export_screen(fxs, &sfx);
+        printf("agua: flags=0x%x tinte=(%.2f,%.2f,%.2f) caja_y=(%.0f..%.0f) ojo_y=%.0f\n", sfx.flags, sfx.water_tint[0], sfx.water_tint[1], sfx.water_tint[2], sfx.water_min[1], sfx.water_max[1], eyep[1]);
+        for (int pass = 0; pass < 2; pass++) {
+            NsRTri *tt = malloc(nall * sizeof *tt); NsAdaptSrc *ss = malloc(nall * sizeof *ss); memcpy(tt, tris, nall * sizeof *tt); memcpy(ss, src, nall * sizeof *ss);
+            size_t nn = nall;
+            if (pass == 1 && (sfx.flags & NS_SFX_WATER)) nn = ns_cine_cull_back_mode(tt, ss, nall, eyep, NSG_CULL_SEMI);
+            float A[9], t3[3]; ns_cine_engine_view(&sc.cam, A, t3);
+            NsRCam c; ns_cam_game(&c, A, t3, sc.cam.h, 160, 120, 320, 240, w, h); c.fx *= 130.0f / sc.cam.h; c.fy *= 130.0f / sc.cam.h; c.znear = 1;
+            NsRScene s3 = { tt, nn, d->vram };
+            ns_buf_clear(&b, 0, 0, 0); ns_render_view(&s3, &c, 0, &b, NULL); ns_buf_to_rgb8(&b, rgb, 0, 0);
+            NsGpuOverlay bars; memset(&bars, 0, sizeof bars);
+            bars.kind = NSG_OV_BARS; bars.abr = 2; bars.amount = 0.85f; bars.rgb[0] = bars.rgb[1] = bars.rgb[2] = 1; bars.p[0] = (float)6; bars.p[1] = 4.0f; bars.p[3] = sc.cam.h;
+            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+                uint8_t *px = &rgb[((size_t)y * w + x) * 3]; float col[3], o2[3];
+                for (int k = 0; k < 3; k++) col[k] = px[k] / 255.0f * ((sfx.flags & NS_SFX_WATER) ? sfx.water_tint[k] : 1.0f);
+                if (pass == 0 && (sfx.flags & NS_SFX_WATER)) { ns_screen_overlay_ref(&bars, ((float)x + 0.5f - c.cx) / c.fx, -((float)y + 0.5f - c.cy) / c.fy, 0.0f, col, o2); memcpy(col, o2, sizeof col); }
+                for (int k = 0; k < 3; k++) px[k] = (uint8_t)(col[k] * 255.0f + 0.5f);
+            }
+            snprintf(p, sizeof p, "%s/agua_%s.png", aguadir, pass ? "despues" : "antes"); ns_write_png(p, w, h, rgb);
+            printf("agua %s: triangulos=%zu\n", pass ? "despues" : "antes", nn);
+            free(tt); free(ss);
+        }
+        ns_fx_scene_destroy(fxs);
     }
     for (int k = 0; k < NS_CINE_NGV; k++) {
         if (gvk >= 0 && k != gvk) continue;

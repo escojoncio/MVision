@@ -191,11 +191,30 @@ int main(void) {
             /* visor: ruta de 5b (mano), 6 (regiones del HUD y muñeca) y radar apagadas; 6b = un solo panel con la capa entera */
             CHECK(strstr(xp, "let split = XRLayer2D.split") != NULL && strstr(xp, "if split && overlay2D, let h = hud, !menuPending {") != NULL && strstr(xp, "if split && shown != .cinema && shown != .stereo && cfg.hudPanels && !overlay2D, let h = hud {") != NULL,
                   "XRPresent: panel de la mano (5b) y paneles de regiones/muñeca (6) solo con el troceo");
-            int n6b = count_range(xp, "if !split && shown != .cinema && shown != .stereo && (cfg.hudPanels || overlay2D), let h = hud {", "if pending { pendVeil = min(1", "r.items.append(");
-            CHECK(n6b == 1 && count_range(xp, "if !split && shown != .cinema && shown != .stereo && (cfg.hudPanels || overlay2D), let h = hud {", "if pending { pendVeil = min(1", "XRFramedLayout.fullUV") == 1
-                  && count_range(xp, "if !split && shown != .cinema && shown != .stereo && (cfg.hudPanels || overlay2D), let h = hud {", "if pending { pendVeil = min(1", "uvrect = uv") == 1 && count_range(xp, "if !split && shown != .cinema && shown != .stereo && (cfg.hudPanels || overlay2D), let h = hud {", "if pending { pendVeil = min(1", "XR2DFilter.current.panelMode") == 1,
+            int n6b = count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if pending { pendVeil = min(1", "r.items.append(");
+            CHECK(n6b == 1 && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if pending { pendVeil = min(1", "XRFramedLayout.fullUV") == 1
+                  && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if pending { pendVeil = min(1", "uvrect = uv") == 1 && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if pending { pendVeil = min(1", "XR2DFilter.current.panelMode") == 1,
                   "XRPresent 6b: UN solo panel con la capa entera (uv 0,0,1,1), geometría XRFramedLayout y muestreo XR2DFilter (%d elementos)", n6b);
             CHECK(strstr(xm, "static let fullUV = SIMD4<Float>(0, 0, 1, 1)") != NULL, "XRFramedLayout.fullUV: capa entera");
+            /* la capa 2D del mundo no arrastra 3D: en el modo nativo el host activa drop_world2d (polígonos sin vista dentro del pase del mundo no van al panel; vr_scene.h) */
+            CHECK(strstr(vh, "if (native_mode() && view.kind == VRV_K_WORLD && view.reason != VRV_R_SELECTOR && view.reason != VRV_R_PAUSE_WORLD) o.drop_world2d = 1;") != NULL, "vrhost: modo nativo en vista mundo sin selector ni pausa -> opts.drop_world2d (la capa 2D no lleva 3D sin resolver)");
+            /* 6b sin trocear: «Paneles del HUD» (hudPanels) NO lo oculta (vida, radar y créditos se ven siempre); con ventana 2D abierta (selector/pausa) va a 0,9 m centrado en la mirada fijada al abrirse */
+            CHECK(count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if pending { pendVeil = min(1", "cfg.hudPanels") == 0, "XRPresent 6b: sin trocear el panel único no depende de cfg.hudPanels");
+            CHECK(strstr(xp, "if !overlay2D { overlayAim = nil } else if overlayAim == nil { overlayAim = (hy, XRFollow.pitch(of: head)) }") != NULL
+                  && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if pending { pendVeil = min(1", "XRFramedLayout.overlayModel(position: hp, yaw: aim.yaw, pitch: aim.pitch)") == 1
+                  && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if pending { pendVeil = min(1", "XRFramedLayout.overlayScale") == 1
+                  && strstr(xm, "static let overlayDistance: Float = 0.9") != NULL && strstr(xm, "static func overlayModel(position p: SIMD3<Float>, yaw: Float, pitch: Float) -> simd_float4x4 {") != NULL,
+                  "XRPresent 6b: con ventana 2D abierta el panel va a 0,9 m, centrado en el rumbo y cabeceo de la cabeza al abrirse (fijos mientras dure)");
+            CHECK(strstr(xp, "hudPanels=\\(cfg.hudPanels) hud!=nil=\\(hudSeen)") != NULL && strstr(xp, "hudSeen = hud != nil") != NULL, "xr-diag items: hudPanels y hud!=nil");
+            /* menú VR: sin troceo se ocultan las opciones que solo afectan al troceo (HUD, tamaño, muñeca) y `sel` indexa la lista visible */
+            CHECK(strstr(xp, "private var mainItems: [XRMenuItem] {") != NULL && strstr(xp, "let splitOnly: [XRMenuItem] = [.hud, .hudScale, .wristHud, .wristScale, .wristSide]") != NULL && strstr(xp, "XRMenuItem.allCases.filter { !splitOnly.contains($0) }") != NULL
+                  && strstr(xp, "return mainItems.map { it -> (String, String) in") != NULL && strstr(xp, "let it = main[sel]") != NULL && strstr(xp, "XRMenuItem(rawValue: sel)") == NULL,
+                  "menú VR: opciones del troceo ocultas sin XRLayer2D.split (filas, selección y activación sobre mainItems)");
+            /* cinemáticas del motor: pantalla de cine 3D ESTÉREO (IPD real) por defecto; «screen» (mono) solo como opción; un «screen» guardado migra una vez a «stereo» */
+            CHECK(strstr(xp, "var cutscene: Cutscene = .stereo") != NULL && strstr(xp, "else { c.cutscene = .stereo }") != NULL && strstr(xp, "else { c.cutscene = .screen }") == NULL, "XRViewConfig: el defecto de las cinemáticas del motor es .stereo");
+            CHECK(strstr(xp, "if !UserDefaults.standard.bool(forKey: \"xr.view.cutscene3.toStereo\") {") != NULL && strstr(xp, "string(forKey: \"xr.view.cutscene3\") == \"screen\" { UserDefaults.standard.set(Cutscene.stereo.rawValue, forKey: \"xr.view.cutscene3\") }") != NULL
+                  && strstr(xp, "xr.view.cutscene3.migrated") == NULL, "XRViewConfig: migración única «screen» -> «stereo» con su marca (sin la antigua stereo -> screen)");
+            CHECK(strstr(xp, "let mono = cfg.cutscene == .screen") != NULL && strstr(xp, "ipd: mono ? 0 : ipd") != NULL, "XRPresent 4b: el IPD 0 (mono) solo con la opción .screen");
             CHECK(count(rp, "XRLayer2D.split") == 5 && strstr(rp, "guard XRLayer2D.split else { quadValid = false; glow = 0; visibility = 0; return }") != NULL, "RadarPanel: ingest, renderTexture, updatePose, wristFrame y encodeQuad apagados sin troceo (%d)", count(rp, "XRLayer2D.split"));
             CHECK(strstr(rg, "if XRLayer2D.split && lMode == 0 && mv_vrhost_hud2d_menu_rect(&menuUVBuf) != 0 {") != NULL && strstr(rg, "} else if XRLayer2D.split && lMode == 0 && (lView & 255) == 10 && hudMenuUV != nil {") != NULL,
                   "RenderRG: sin troceo no hay rect de la ventana del menú (hudMenuUV siempre nil)");

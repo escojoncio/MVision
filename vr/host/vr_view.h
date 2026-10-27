@@ -117,6 +117,9 @@ static inline int vrhost_keep_filter(int native, int cine_cand, int scene3d, int
     return (n_scan > 0 || frame_on || world) && !(cine_cand && scene3d);
 }
 
+/* ¿Se aplica la máscara de visión (marco con la abertura de la caja) como recubrimiento de ojo del render nativo? Solo en nativo, con el jugador en la caja (BRIDGE_PS_BOX) y una máscara en la lista (frame_on). Función pura; vrhost.c. */
+static inline int vrhost_box_mask(int native, int in_box, int frame_on) { return native && in_box && frame_on; }
+
 /* ¿El 2D (lotes kind 2) de la lista actual va DENTRO de las texturas de la pantalla 3D en vez de en el panel aparte (hp2 de XRPresent)? (función pura; RenderRG.stereo2DInside)
  * Solo en modo gpu, si hay una imagen 3D sobre la que componer (la lista trae 3D o hay una base 3D guardada) y el estéreo compuso de verdad esa lista (composed_in_stereo = 0 si
  * falló la textura o la cámara y se cayó al cine plano): si no, el 2D se ve por el panel como antes. */

@@ -236,6 +236,62 @@ final class NativeRenderer {
     private var screenState = NsScreenState()
     private var screenOut = NsGpuScreen()
     private var overlays: [NsGpuOverlay] = []
+    // Máscara de visión de la caja (NSG_OV_FRAME): resta por celda 160x128 anclada a la cabeza; solo activa con el jugador en la caja (la pone RenderRG antes de dibujar).
+    private var boxOverlays: [NsGpuOverlay] = []
+    private var boxTex: [MTLTexture] = []
+    private var boxTexCur = 0, boxTexNext = 0
+    private var boxSum: UInt64 = 0
+    private var dummyTex: MTLTexture?      // R8 1x1 a 0: la textura 0 de ns_fs_overlay nunca queda sin enlazar (solo la lee NSG_OV_FRAME)
+    /// Activa la máscara de la caja: `frame` = w*h bytes (resta 0..255), `area` = imagen mostrada del motor (px), centro óptico (cxCol, cyRow), H del motor y color del interior cerrado. false = no se pudo (sin máscara).
+    @discardableResult
+    func setBoxMask(frame: [UInt8], w: Int, h: Int, area: (Float, Float), cxCol: Float, cyRow: Float, projH: Float, rgb: (Float, Float, Float)) -> Bool {
+        boxOverlays.removeAll(keepingCapacity: true)
+        guard w == 160, h == 128, frame.count >= w * h, ensureBoxTex() else { return false }
+        var sum: UInt64 = 1469598103934665603      // FNV-1a: se sube a una textura nueva del anillo solo si cambió
+        for b in frame[0..<(w * h)] { sum = (sum ^ UInt64(b)) &* 1099511628211 }
+        if sum != boxSum {
+            let idx = boxTexNext % boxTex.count
+            frame.withUnsafeBytes { boxTex[idx].replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: w) }
+            boxTexNext = (idx + 1) % boxTex.count
+            boxTexCur = idx
+            boxSum = sum
+        }
+        var rgbv: [Float] = [rgb.0, rgb.1, rgb.2]
+        var out = [NsGpuOverlay](repeating: NsGpuOverlay(), count: 2)
+        let n = rgbv.withUnsafeMutableBufferPointer { rp in out.withUnsafeMutableBufferPointer { op in ns_screen_frame_build(area.0, area.1, cxCol, cyRow, projH, rp.baseAddress, op.baseAddress) } }
+        guard n == 2 else { return false }
+        boxOverlays = out
+        return true
+    }
+    /// Sin máscara de la caja (el jugador no está en ella).
+    func clearBoxMask() { boxOverlays.removeAll(keepingCapacity: true) }
+    var boxMaskActive: Bool { !boxOverlays.isEmpty }
+    private func ensureDummyTex() -> MTLTexture? {
+        if let d = dummyTex { return d }
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: 1, height: 1, mipmapped: false)
+        d.usage = .shaderRead
+        d.storageMode = .shared
+        guard let tx = device.makeTexture(descriptor: d) else { return nil }
+        tx.label = "native.mascara respaldo"
+        var z: UInt8 = 0
+        tx.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &z, bytesPerRow: 1)
+        dummyTex = tx
+        return tx
+    }
+    private func ensureBoxTex() -> Bool {
+        if !boxTex.isEmpty { return true }
+        var out: [MTLTexture] = []
+        for _ in 0..<4 {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: 160, height: 128, mipmapped: false)
+            d.usage = .shaderRead
+            d.storageMode = .shared
+            guard let tx = device.makeTexture(descriptor: d) else { return false }
+            tx.label = "native.mascara caja"
+            out.append(tx)
+        }
+        boxTex = out
+        return true
+    }
     private var fromVR12: [Float] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
     private var lastScreenNs: UInt64 = 0
     /// H REAL y centro de proyección (OFX/OFY, píxeles de la pantalla de 320x240 del motor) de la cámara de la escena preparada: los radios y filas de los efectos de pantalla y la
@@ -1296,7 +1352,11 @@ final class NativeRenderer {
         let fv = fromVR12
         u.fromvr = (SIMD4<Float>(fv[0], fv[1], fv[2], fv[3]), SIMD4<Float>(fv[4], fv[5], fv[6], fv[7]), SIMD4<Float>(fv[8], fv[9], fv[10], fv[11]))
         u.misc = SIMD4<Float>(layered ? 0 : Float(max(0, min(1, eyeIndex))), 0, 0, 0)
-        u.cull_eye = cullBack ? SIMD4<Float>(camEye.x, camEye.y, camEye.z, 1) : SIMD4<Float>(0, 0, 0, 0)
+        // Descarte de reversos: cinemáticas = todas las caras de una cara (NSG_CULL_ALL); con la cabeza bajo el agua solo las semitransparentes (NSG_CULL_SEMI: la superficie del agua vista desde abajo
+        // no se dibuja, como en el motor); si no, doble cara.
+        let underwater = screenOut.water_tint.3 > 0.5 && screenOut.water_min.3 > 0.5
+        u.cull_eye = cullBack ? SIMD4<Float>(camEye.x, camEye.y, camEye.z, Float(NSG_CULL_ALL))
+                   : underwater ? SIMD4<Float>(camEye.x, camEye.y, camEye.z, Float(NSG_CULL_SEMI)) : SIMD4<Float>(0, 0, 0, 0)
         enc.setCullMode(.none)
         enc.setFragmentTexture(vram, index: 0)
         enc.setVertexBuffer(vertPool.buffer, offset: 0, index: Int(NSG_BUF_VERTS))
@@ -1393,7 +1453,10 @@ final class NativeRenderer {
     /// Recubrimientos de pantalla del ojo (NsGpuScreen.ov, en orden de dibujo): un triángulo a pantalla completa por recubrimiento, sin profundidad. Las tangentes del ojo salen de su
     /// proyección (t = (ndc + P[2].xy) / (P[0][0], P[1][1])), así que no dependen de la resolución del ojo ni giran con nada que no sea la cabeza.
     private func drawOverlays(_ enc: MTLRenderCommandEncoder, viewProj: [simd_float4x4], projections: [simd_float4x4], layered: Bool, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat, samples: Int, linear: Bool) {
-        guard !overlays.isEmpty, !projections.isEmpty else { return }
+        let list = boxOverlays.isEmpty ? overlays : overlays + boxOverlays
+        guard !list.isEmpty, !projections.isEmpty else { return }
+        // la textura de la máscara de la caja solo se exige si hay recubrimientos de caja; sin ella se omite únicamente la máscara (fundidos, tinte de agua, etc. siguen)
+        let haveBoxTex = boxOverlays.isEmpty ? !boxTex.isEmpty : ensureBoxTex()
         let tag = "\(layered)/\(colorFormat.rawValue)/\(depthFormat.rawValue)/\(samples)/\(linear)"
         guard ovTagsOK.contains(tag) else { return }
         func eyeP(_ i: Int) -> (Float, Float, Float, Float) {
@@ -1412,7 +1475,9 @@ final class NativeRenderer {
         enc.setCullMode(.none)       // sin descarte de caras en ningun pase del mundo (doble cara, como el motor)
         enc.setDepthStencilState(dsOverlay)
         enc.setDepthBias(0, slopeScale: 0, clamp: 0)
-        for ov in overlays {
+        enc.setFragmentTexture(haveBoxTex ? boxTex[boxTexCur] : ensureDummyTex(), index: 0)       // la declara ns_fs_overlay; solo la lee NSG_OV_FRAME (sin máscara: respaldo 1x1 a 0)
+        for ov in list {
+            if ov.kind == UInt32(NSG_OV_FRAME) && !haveBoxTex { continue }
             guard let p = overlayPipeline(OKey(layered: layered, abr: ov.abr & 3, color: colorFormat, depth: depthFormat, samples: samples, linear: linear)) else { continue }
             enc.setRenderPipelineState(p)
             var ou = NsGpuOverlayU()

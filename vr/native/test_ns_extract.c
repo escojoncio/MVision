@@ -624,6 +624,39 @@ int main(void) {
         for (uint32_t i = 0; i < sc.n_inst; i++) for (uint32_t j = 0; j < i; j++) if (sc.inst[i].key == sc.inst[j].key) dup++;
         CHECK(dup == 0);
     }
+    /* objetos de UNA matriz (M_RIGIDO, 0x40): la rutina de pantalla del motor transforma TODAS las piezas con la matriz de la RAIZ (obj+0x00); lo que quede en la matriz propia de cada pieza (+0x00) es
+     * un residuo: en la etapa de la overlay de la introducción son sus traslaciones relativas al ojo (raíz - ojo), aquí unas cualquiera. Los articulados (sin 0x40) sí usan la de cada pieza. */
+    {
+        fresh();
+        uint32_t rg = object(0x57, 1, 1, DEF0, LIGHTG);                 /* escenario rígido, una pieza + extensión */
+        wmat(rg, 4096, 100, 200, 300);
+        w32(piece(rg, 0) + 0x40, DEF0 + 0x20); wmat(piece(rg, 0), 4096, -5, -6, -7);
+        w32(piece(rg, 0) + 0x48, piece(rg, 1)); w32(piece(rg, 1) + 0x40, DEF0 + 0x20 + 0x58); wmat(piece(rg, 1), 4096, -8, -9, -10);
+        uint32_t dr = object(0x6D, 1, 1, DEF0, LIGHTG);                 /* dinámico rígido e iluminado */
+        wmat(dr, 4096, 1000, 2000, 3000);
+        w32(piece(dr, 0) + 0x40, DEF0 + 0x20); wmat(piece(dr, 0), 4096, 11, 12, 13);
+        uint32_t ar = object(0x0D, 1, 1, DEF0, LIGHTG);                 /* articulado: la pieza manda */
+        wmat(ar, 4096, 7, 8, 9);
+        w32(piece(ar, 0) + 0x40, DEF0 + 0x20); wmat(piece(ar, 0), 4096, 21, 22, 23);
+        uint32_t v3[3] = {rg, dr, ar};
+        queue_set(3, v3);
+        CHECK(ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es) == 0);
+        const NsInstance *a = find_inst(&sc, rg), *b = find_inst(&sc, dr), *c = find_inst(&sc, ar);
+        CHECK(a && a->n_pieces == 2 && b && b->n_pieces == 1 && c && c->n_pieces == 1);
+        if (a && a->n_pieces == 2) for (uint32_t k = 0; k < 2; k++) {
+            const NsXf *w = &sc.piece[a->first_piece + k].world;
+            CHECK(w->m[3] == 100.0f && w->m[7] == 200.0f && w->m[11] == 300.0f);   /* pieza y extensión: la raíz */
+        }
+        if (b && b->n_pieces == 1) { const NsXf *w = &sc.piece[b->first_piece].world; CHECK(w->m[3] == 1000.0f && w->m[7] == 2000.0f && w->m[11] == 3000.0f); }
+        if (c && c->n_pieces == 1) { const NsXf *w = &sc.piece[c->first_piece].world; CHECK(w->m[3] == 21.0f && w->m[7] == 22.0f && w->m[11] == 23.0f); }
+        /* factor vertical de la vista medido de la RAM (ns_extract_screen_ys): matrices de pantalla (pieza +0x20) = ojo_inv * mundo con la fila Y x 66/64 */
+        CHECK(ns_extract_screen_ys(ram, NS_RAM_SIZE) == 0.0f);          /* sin matrices de pantalla coherentes: desconocido */
+        wmat(CHAN + 0x10, 4096, 0, 0, 0);                               /* ojo_inv: identidad */
+        wmat(piece(ar, 0) + 0x20, 4096, 21, 22, 23); w16(piece(ar, 0) + 0x20 + 2u * 4u, 4096u * 66u / 64u); w32(piece(ar, 0) + 0x20 + 0x18, (uint32_t)(22 * 66 / 64));
+        CHECK(fabsf(ns_extract_screen_ys(ram, NS_RAM_SIZE) - 66.0f / 64.0f) < 1e-3f);
+        wmat(piece(ar, 0) + 0x20, 4096, 21, 22, 23);
+        CHECK(fabsf(ns_extract_screen_ys(ram, NS_RAM_SIZE) - 1.0f) < 1e-3f);
+    }
     /* RAM totalmente aleatoria con el canal apuntando a la cola */
     for (int it = 0; it < 50; it++) {
         unsigned seed = 777u + (unsigned)it;

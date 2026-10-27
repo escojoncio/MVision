@@ -44,6 +44,7 @@ static void run(Cpu *c, uint32_t a0) {
     interp_call(c, NS_STAGE_ADDR);
 }
 
+static uint32_t rd_mark8(void) { uint32_t v; memcpy(&v, emu_ram + ((MARK + 8) & 0x1FFFFFu), 4); return v; }
 static int ex_calls; static uint32_t ex_mark;
 static int extract(const uint8_t *ram, const uint8_t *scratch, NsScene *s, void *u) {
     (void)scratch; (void)u;
@@ -143,6 +144,51 @@ int main(void) {
     CHECK(ex_calls == before && c.r[V0] == 1234, "tras desinstalar no se captura");
     ns_hook_backup_capture();
     CHECK(ex_calls == before + 1, "sin enganche instalado el respaldo sigue capturando");
+    /* envoltura DINÁMICA: la entrada 0 de la tabla apunta a una copia en overlay (0x8008240c): se parchea con su propio salto al original y captura dentro */
+    {
+        const uint32_t OV = 0x8008240Cu;
+        NsHookStats s0, s1;
+        ns_hook_install();
+        pc_asm = OV; emit(0x27BDFFF8u); emit(LUI(T0, 0x8010)); emit(ADDIU(T1, 0, 0x77)); emit(SW(T1, T0, 8)); emit(ADDIU(V0, 0, 4321)); emit(JR_RA); emit(ADDIU(SP, SP, 8));
+        rt_code_invalidate(OV, 28);
+        mem_w32(NULL, NS_STAGE_TABLE, OV);
+        CHECK(!ns_hook_dyn_installed(), "dinámica: sin poll aún no hay parche");
+        ns_hook_poll();
+        CHECK(ns_hook_dyn_installed() && ns_hook_dyn_addr() == OV && rt_patched(OV), "dinámica instalada en la entrada 0");
+        ns_hook_stats(&s0);
+        int e0 = ex_calls, cb0 = cb_calls;
+        memset(&c, 0, sizeof c); c.r[SP] = 0x801FFF00u; c.r[RA] = 0xDEAD0000u; c.r[A0] = NS_MAIN_CHANNEL;
+        mem_w32(NULL, MARK + 8, 0);
+        interp_call(&c, OV);
+        CHECK(ex_calls == e0 + 1, "dinámica: captura");
+        CHECK(rd_mark8() == 0x77 && c.r[V0] == 4321 && c.r[SP] == 0x801FFF00u && c.r[RA] == 0xDEAD0000u, "dinámica: el original corre y se comporta igual (marca=%x v0=%u)", rd_mark8(), c.r[V0]);
+        CHECK(cb_calls == cb0 + 1, "dinámica: callback de etapa");
+        ns_hook_stats(&s1);
+        CHECK(s1.cap_dyn - s0.cap_dyn == 1 && s1.cap_wrap == s0.cap_wrap, "dinámica: contada aparte (dyn +%u wrap +%u)", s1.cap_dyn - s0.cap_dyn, s1.cap_wrap - s0.cap_wrap);
+        ns_hook_backup_begin(); memset(&c, 0, sizeof c); c.r[SP] = 0x801FFF00u; c.r[RA] = 0xDEAD0000u; c.r[A0] = NS_MAIN_CHANNEL; interp_call(&c, OV); ns_hook_backup_capture();
+        CHECK(ex_calls == e0 + 2, "dinámica: el respaldo no repite (ex=%d)", ex_calls - e0);
+        memset(&c, 0, sizeof c); c.r[SP] = 0x801FFF00u; c.r[RA] = 0xDEAD0000u; c.r[A0] = 0x800B2990u; interp_call(&c, OV);
+        CHECK(ex_calls == e0 + 2 && c.r[V0] == 4321, "dinámica: otros canales no se capturan");
+        /* la overlay se descarga/cambia: el parche caduca por hash; con otra forma válida se reinstala con el hash nuevo */
+        pc_asm = OV; emit(0x27BDFFF0u);
+        rt_code_invalidate(OV, 28);
+        memset(&c, 0, sizeof c); c.r[SP] = 0x801FFF00u; c.r[RA] = 0xDEAD0000u; c.r[A0] = NS_MAIN_CHANNEL; interp_call(&c, OV);
+        CHECK(ex_calls == e0 + 2 && rt_patch_stale(OV), "dinámica: guarda por hash");
+        unsigned st0 = ns_hook_dyn_stale_count();
+        ns_hook_poll();
+        CHECK(ns_hook_dyn_installed() && !rt_patch_stale(OV) && ns_hook_dyn_stale_count() == st0 + 1, "dinámica: reinstalada tras caducar");
+        /* la entrada vuelve a la estándar: se retira; apuntando a código sin prólogo: no se instala */
+        mem_w32(NULL, NS_STAGE_TABLE, NS_STAGE_ADDR);
+        ns_hook_poll();
+        CHECK(!ns_hook_dyn_installed() && !rt_patched(OV) && ns_hook_dyn_addr() == 0, "dinámica: retirada al volver la entrada estándar");
+        pc_asm = OV; emit(0);
+        rt_code_invalidate(OV, 28);
+        mem_w32(NULL, NS_STAGE_TABLE, OV);
+        ns_hook_poll();
+        CHECK(!ns_hook_dyn_installed() && !rt_patched(OV), "dinámica: sin prólogo de pila no se instala");
+        mem_w32(NULL, NS_STAGE_TABLE, NS_STAGE_ADDR);
+        ns_hook_uninstall();
+    }
     ns_bridge_destroy(b);
     printf(fails ? "ns_hook_rt: %d fallos\n" : "ns_hook_rt: todas las pruebas OK\n", fails);
     return fails != 0;

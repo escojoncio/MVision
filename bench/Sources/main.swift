@@ -280,7 +280,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
     stereoBlock: do {
         let caso = "\(cfg.name)/pantalla3d"
         setDefaults(curve: 0.0, sharp: 1)
-        UserDefaults.standard.set("stereo", forKey: "xr.view.cutscene3"); UserDefaults.standard.set(true, forKey: "xr.view.cutscene3.migrated")   // la migración de "stereo" a "screen" es de una sola vez (XRViewConfig.load)
+        UserDefaults.standard.set("stereo", forKey: "xr.view.cutscene3"); UserDefaults.standard.set(true, forKey: "xr.view.cutscene3.toStereo")   // la migración de "screen" a "stereo" es de una sola vez (XRViewConfig.load)
         guard let tg = makeTargets(layered: cfg.layered) else { check(caso, "texturas", false, "no se pudieron crear"); break stereoBlock }
         guard let enc = XRFrameEncoder(device: device, colorFormat: colorFormat, depthFormat: depthFormat, layered: cfg.layered, sampleCount: cfg.msaa) else {
             check(caso, "codificador", false, "XRFrameEncoder no se pudo crear"); break stereoBlock
@@ -837,6 +837,14 @@ func runMenuLayout() {
               abs(fs240.x - XRFramedLayout.layerWidth) < 1e-5 && abs(fs240.y / fs240.x - 0.75) < 1e-5 && abs(fs256.y / fs256.x - 0.8) < 1e-5 && abs(fs384.y / fs384.x - 2.0 / 3.0) < 1e-5 && abs(fs384.x / 384 - XRFramedLayout.pitch) < 1e-6, "\(fs240) \(fs256) \(fs384)")
         check("panel2d-completo", "la capa entera mide menos de 50 grados de ancho a la distancia del panel", 2 * ang(fs240.x / 2) < 50, "")
         check("credito-region1", "tamaño lógico no plausible -> reserva 320x240", XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(.nan, 0)) == XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(320, 240)), "")
+        // Ventana 2D abierta (selector, pausa): el panel único va a 0,9 m en la dirección de mirada fijada al abrirse (rumbo + cabeceo), cara al usuario, y mide entre 1x y 1,3x el ángulo del panel de partida.
+        let om = XRFramedLayout.overlayModel(position: SIMD3<Float>(1, 1.6, -2), yaw: 0.6, pitch: 0.3)
+        let od = XRMath.position(om) - SIMD3<Float>(1, 1.6, -2)
+        let gaze = SIMD3<Float>(-sinf(0.6) * cosf(0.3), sinf(0.3), -cosf(0.6) * cosf(0.3))
+        let on = SIMD3<Float>(om.columns.2.x, om.columns.2.y, om.columns.2.z)
+        check("panel2d-ventana", "a 0,9 m, en la dirección de la mirada y con la cara (+Z) hacia la cabeza", abs(simd_length(od) - 0.9) < 1e-4 && simd_dot(simd_normalize(od), gaze) > 0.9999 && simd_dot(on, -gaze) > 0.9999, "\(od)")
+        let angW = 2 * atan2f(fs240.x * XRFramedLayout.overlayScale / 2, XRFramedLayout.overlayDistance), angN = 2 * atan2f(fs240.x / 2, XRFramedLayout.distance)
+        check("panel2d-ventana", "tamaño angular entre 1x y 1,3x el del panel de partida", angW >= angN && angW <= 1.3 * angN, "\(angW) \(angN)")
     }
 }
 

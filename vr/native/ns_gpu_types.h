@@ -108,6 +108,11 @@ typedef struct {
     ns_u32 eyes;
 } NsGpuFxVert;                                                                                      /* 44 B */
 
+/* Valores de NsGpuUniforms.cull_eye.w (ver ns_gpu_cull_applies). */
+#define NSG_CULL_NONE 0
+#define NSG_CULL_ALL  1
+#define NSG_CULL_SEMI 2
+
 #ifdef NS_GPU_HAVE_SIMD
 typedef struct {
     matrix_float4x4 view_proj[2];   /* clip = P * V por ojo (índice = amplification_id; sin amplificación se usa [0]) */
@@ -121,14 +126,16 @@ typedef struct {
     vector_float4 water_wave;       /* x = amplitud (texels), y = frecuencia espacial (rad por unidad del motor), z = fase (rad) */
     vector_float4 fromvr[3];        /* mundo VR -> mundo del motor, filas de la 3x4 (xyz, traslación en w) */
     vector_float4 misc;             /* x = índice de ojo del pase cuando NO hay amplificación (0/1: máscara de caras de los efectos) */
-    vector_float4 cull_eye;         /* xyz = ojo de la cámara del JUEGO en el mundo del motor; w = 1: descartar las caras NSG_CF_ONESIDED vistas por detrás (cinemáticas: la cámara queda fuera de las salas y el motor no dibuja los techos desde arriba); 0 = doble cara (primera persona) */
+    vector_float4 cull_eye;         /* xyz = ojo de la cámara del JUEGO en el mundo del motor; w = NSG_CULL_ALL: descartar las caras NSG_CF_ONESIDED vistas por detrás (cinemáticas: la cámara queda fuera de las salas y el motor no dibuja los techos desde arriba); NSG_CULL_SEMI: solo las de mallas semitransparentes (cabeza bajo el agua: el motor no dibuja la superficie del agua vista desde abajo); 0 = doble cara (primera persona) */
 } NsGpuUniforms;
 #endif
 
 /* ---- Recubrimientos de pantalla del ojo (ns_screen): fundido, destello, modos de visión, anillo, líneas de exploración y barras. Una pasada de pantalla completa cada uno. ---- */
 #define NSG_MAX_OVERLAYS 8
 #define NSG_BUF_OVERLAY 0    /* ns_fs_overlay: NsGpuOverlayU en setFragmentBytes(index 0) */
-enum { NSG_OV_NONE = 0, NSG_OV_COVER = 1, NSG_OV_RING = 2, NSG_OV_SCAN = 3, NSG_OV_BARS = 4 };
+enum { NSG_OV_NONE = 0, NSG_OV_COVER = 1, NSG_OV_RING = 2, NSG_OV_SCAN = 3, NSG_OV_BARS = 4, NSG_OV_FRAME = 5 };
+/* NSG_OV_FRAME: máscara de visión de la caja (resta por celda de una textura R8 de 160x128 anclada a la cabeza). p[0] = columna del centro óptico en la imagen del motor, p[1] = 0 resta / 1 relleno del interior cerrado (rgb),
+ * p[3] = H del motor; rgb2 = {ancho, alto, fila del centro} de la imagen mostrada en píxeles del motor. */
 typedef struct {
     ns_u32 kind;         /* NSG_OV_* */
     ns_u32 abr;          /* modo de mezcla original 0 (B+F)/2, 1 B+F, 2 B-F, 3 B+F/4 */

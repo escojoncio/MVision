@@ -98,7 +98,9 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
     /* cara de una sola cara vista por detrás desde la cámara del juego (cinemáticas): el motor no la dibuja (techos vistos desde arriba, reversos de las salas). Los tres vértices deciden igual:
      * sentido del triángulo (A,B,D) / (B,C,D) como el del perímetro, dot(p0 - ojo, (p1-p0)x(p2-p0)) > 0 = anverso. Réplica en C: ns_gpu_tri_back (ns_gpu.c). */
     bool back = false;
-    if ((cf & NSG_CF_ONESIDED) != 0u && U.cull_eye.w > 0.5) {
+    /* U.cull_eye.w = NSG_CULL_ALL (cinemáticas) o NSG_CULL_SEMI (cabeza bajo el agua: solo mallas semitransparentes, p. ej. la superficie del agua vista desde abajo). Réplica: ns_gpu_cull_applies */
+    const uint cull = uint(U.cull_eye.w + 0.5);
+    if ((cf & NSG_CF_ONESIDED) != 0u && (cull == uint(NSG_CULL_ALL) || (cull == uint(NSG_CULL_SEMI) && (cf & NSG_CF_SEMI) != 0u))) {
         uint f0 = corner_index - corner_index % 3u;
         float3 q0 = ns_world_pos(verts[corners[f0].v], P, verts, pieces);
         float3 q1 = ns_world_pos(verts[corners[f0 + 1u].v], P, verts, pieces);
@@ -276,6 +278,8 @@ fragment float4 ns_fs(NsVOut in [[stage_in]], texture2d<ushort, access::read> vr
         rgb = col / 255.0;
     } else if ((flags & NSG_CF_TEX) != 0u) {
         uint tn = ns_texel(vram, in.tpage, clut, int(floor(in.uv.x + 1.0e-4 + wd.x)), int(floor(in.uv.y + 1.0e-4 + wd.y)));
+        /* la onda desplaza el texel: si cae en uno transparente (borde de la textura) se usa el sin desplazar, para no abrir agujeros en las caras */
+        if (tn == 0u && (wd.x != 0.0 || wd.y != 0.0)) tn = ns_texel(vram, in.tpage, clut, int(floor(in.uv.x + 1.0e-4)), int(floor(in.uv.y + 1.0e-4)));
         if (tn == 0u) discard_fragment();
         bool b15 = (tn & 0x8000u) != 0u;
         if (kNsPass == 0u) { if (semi && b15) discard_fragment(); }
@@ -322,7 +326,15 @@ static float ns_sstep(float e0, float e1, float x)
     float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
 }
-fragment float4 ns_fs_overlay(NsOvOut in [[stage_in]], constant NsGpuOverlayU &U [[buffer(NSG_BUF_OVERLAY)]])
+static float ns_frame_sub(texture2d<float> frm, NsGpuOverlay ov, float2 t)
+{
+    const float H = ov.p[3] > 0.0 ? ov.p[3] : 320.0;
+    const float2 uv = float2((ov.p[0] + t.x * H) / max(ov.rgb2[0], 1.0), (ov.rgb2[2] - t.y * H) / max(ov.rgb2[1], 1.0));
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+    constexpr sampler fsm(coord::normalized, address::clamp_to_edge, filter::linear);
+    return clamp(frm.sample(fsm, uv, level(0)).r, 0.0, 1.0);
+}
+fragment float4 ns_fs_overlay(NsOvOut in [[stage_in]], constant NsGpuOverlayU &U [[buffer(NSG_BUF_OVERLAY)]], texture2d<float> frm [[texture(0)]])
 {
     const float4 ep = in.eye == 0u ? float4(U.eye0[0], U.eye0[1], U.eye0[2], U.eye0[3]) : float4(U.eye1[0], U.eye1[1], U.eye1[2], U.eye1[3]);   /* P00, P11, P02, P12 */
     const float3 upv = in.eye == 0u ? float3(U.up0[0], U.up0[1], U.up0[2]) : float3(U.up1[0], U.up1[1], U.up1[2]);   /* eje Y del mundo VR en el espacio de vista del ojo */
@@ -343,6 +355,11 @@ fragment float4 ns_fs_overlay(NsOvOut in [[stage_in]], constant NsGpuOverlayU &U
         float yd = clamp(dot(upv, normalize(float3(t.x, t.y, -1.0))), -1.0, 1.0);
         float ph = asin(yd) * H / per + U.ov.p[1];
         a *= (ph - floor(ph)) < U.ov.p[2] ? 1.0 : 0.0;
+    } else if (U.ov.kind == NSG_OV_FRAME) {
+        /* máscara de visión de la caja (ns_screen_frame_sub): resta por celda de la imagen original (columna = p0 + tx*H, fila = centro - ty*H), anclada a la cabeza; fuera de la imagen = cerrado */
+        const float sub = ns_frame_sub(frm, U.ov, t);
+        if (U.ov.p[1] < 0.5) a = sub;                                   /* pasada 0: resta (abr 2) */
+        else F = F * ns_sstep(0.85, 1.0, sub);                          /* pasada 1: relleno del interior cerrado (abr 1), a = 1 */
     } else if (U.ov.kind == NSG_OV_BARS) {
         /* las barras de bajo el agua pasan a viñeta circular (no giran con la cabeza) */
         float lim = 120.0 - U.ov.p[0];

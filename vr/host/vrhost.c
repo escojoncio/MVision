@@ -422,18 +422,20 @@ static int ns_ik_idle(void *u) {
 /* Vigilancia por fotograma (hilo de emulación, tras el sincronismo): (M4) con la capa de cuerpo activa cada captura debe llevar la pose IK de los brazos
  * (ik_refresh crece a la par que captures); (B4) reintento de la instalación y reinstalación si otra overlay pisó la etapa. Se registra como mucho una vez por segundo. */
 static void ns_frame_check(void) {
-    static uint32_t cap0, ik0, miss0, idle0, pub0, nfr, capw0, capb0;
+    static uint32_t cap0, ik0, miss0, idle0, pub0, nfr, capw0, capb0, capd0;
     static uint64_t last_log_ns;
     NsHookStats st;
     ns_hook_stats(&st);
 #ifdef MV_NOGEN
     if (vr_ok && (++nfr & 31u) == 0) {
-        unsigned stale0 = ns_hook_stale_count();
+        unsigned stale0 = ns_hook_stale_count(), dstale0 = ns_hook_dyn_stale_count();
+        uint32_t dyn0 = ns_hook_dyn_addr();
         int was = ns_hook_installed(), rc0 = ns_hook_last_rc();
         ns_hook_poll();
         if (ns_hook_stale_count() != stale0) fprintf(stderr, "[vrhost] etapa de pantalla cambiada (otra overlay): enganche del render nativo %s\n", ns_hook_installed() ? "reinstalado" : "retirado");
         else if (!was && ns_hook_installed()) fprintf(stderr, "[vrhost] enganche del render nativo instalado en un reintento\n");
         else if (!was && ns_hook_last_rc() != rc0) fprintf(stderr, "[vrhost] enganche del render nativo sin instalar (%d)\n", ns_hook_last_rc());
+        if (ns_hook_dyn_addr() != dyn0 || ns_hook_dyn_stale_count() != dstale0) fprintf(stderr, "[vrhost] enganche dinamico de la entrada 0 de etapas: 0x%08x -> 0x%08x\n", (unsigned)dyn0, (unsigned)ns_hook_dyn_addr());
     }
 #endif
     uint64_t t = mono_ns();
@@ -465,10 +467,10 @@ static void ns_frame_check(void) {
                     dcap, st.published - pub0, dmiss, g.last_queue, g.last_inst, g.last_static, g.last_pieces, g.last_hidden_pieces, g.last_drop_group, g.last_drop_hidden, g.last_drop_other,
                     g.mesh_new - g0.mesh_new, g.memo_stale - g0.memo_stale, g.zone_changes - g0.zone_changes, g.epoch_opened - g0.epoch_opened, g.store_full - g0.store_full);
         g0 = g; pub0 = st.published;
-        if (st.captures || capw0 || capb0)   /* de dónde sale cada captura: envoltura de la etapa «pantalla» o respaldo del fin del bucle de etapas; la entrada 0 de la tabla delata una copia en overlay (estándar 0x8001d324) */
-            fprintf(stderr, "[captura] canales por s: envoltura=%u respaldo=%u | entrada0_etapas=0x%08x (estandar 0x%08x%s)\n", st.cap_wrap - capw0, st.cap_backup - capb0, ns_hook_stage_entry(), (unsigned)NS_STAGE_ADDR,
+        if (st.captures || capw0 || capb0 || capd0)   /* de dónde sale cada captura: envoltura de la etapa «pantalla» o respaldo del fin del bucle de etapas; la entrada 0 de la tabla delata una copia en overlay (estándar 0x8001d324) */
+            fprintf(stderr, "[captura] canales por s: envoltura=%u dinamico=%u respaldo=%u | dinamico_en=0x%08x | entrada0_etapas=0x%08x (estandar 0x%08x%s)\n", st.cap_wrap - capw0, st.cap_dyn - capd0, st.cap_backup - capb0, (unsigned)ns_hook_dyn_addr(), ns_hook_stage_entry(), (unsigned)NS_STAGE_ADDR,
                     ns_hook_stage_entry() == NS_STAGE_ADDR ? "" : ", DISTINTA");
-        capw0 = st.cap_wrap; capb0 = st.cap_backup;
+        capw0 = st.cap_wrap; capb0 = st.cap_backup; capd0 = st.cap_dyn;
         if (body_ok) {
             VrBodyStats b;
             vrbody_stats(&b);
@@ -885,6 +887,8 @@ static void gpu3d_log(void) {
     g3.cam_head = ch; g3.t_log = t;
 }
 
+/* Caja (BRIDGE_PS_BOX): la máscara de visión de la última lista (vrhost_build) y el estado anterior, para el registro [caja] al entrar/salir. */
+static int box_mask_on, box_mask_rect[4], box_prev, box_prev_mask;
 static void build_one(const GpuDrawList *l, int si) {
     /* Los polígonos de una lista se transformaron con la cámara construida un frame del motor ANTES de que el VBlank lea la
      * RAM: la matriz de vista del puente puede ser ya la siguiente. El registro de cámara de la lista (vrcam) trae la correcta. */
@@ -895,6 +899,7 @@ static void build_one(const GpuDrawList *l, int si) {
     int16_t save_axes[3][3];
     VrSceneOpts o = sopts;
     if (!native_mode()) { o.eye_near_m = GPU3D_NEAR_EYE_M; o.line3d_px = 1.0f; o.coplanar_m = 0.005f; o.rect3d = 1; o.billboard = 1; }   /* modo gpu: nada pegado al ojo, recorte contra el plano cercano; líneas del mundo en 3D; z-fight de coplanares, sprites con vista de la GTE como carteles 3D y resplandores orientados al ojo solo aquí (ver vr_scene.h) */
+    if (native_mode() && view.kind == VRV_K_WORLD && view.reason != VRV_R_SELECTOR && view.reason != VRV_R_PAUSE_WORLD) o.drop_world2d = 1;   /* el nativo dibuja el mundo: los polígonos sin vista dentro del pase del mundo no son HUD y no van al panel 2D (vr_scene.h); no en cine/UI/vídeo ni con la ventana del selector o la pausa encima (sus menús son 2D) */
     if (!native_mode() && view.kind == VRV_K_ENGINE) { o.keep_late_clear = 1; o.veil_as_2d = 1; }   /* pantalla 3D del motor (gpu): el 2D se compone dentro del estéreo; el relleno opaco tras el 3D (créditos) y los velos se pintan como 2D */
     int cine_cut = 0;
     {   /* Cinemática del motor (ni mundo ni vídeo/2D puros): la cámara es la del guion, nunca la de la cabeza. Planos y origen fijo por plano. */
@@ -953,6 +958,17 @@ static void build_one(const GpuDrawList *l, int si) {
         VrSceneOpts o2 = o;
         o2.screen_filter = 0;
         rc = vr_scene_build(hl, &bs, &o2, &sc);
+    }
+    sc.filter.frame_in_box = vrhost_box_mask(native_mode(), bs.in_box, sc.filter.frame_on);   /* la máscara de visión (frame) solo se aplica en el nativo con el jugador en la caja */
+    {   /* diagnóstico de la caja: ¿hay máscara de visión y qué abertura (celdas con resta < 128: bounding box)? */
+        box_mask_on = rc == 0 && sc.filter.frame_on && sc.filter.frame && sc.filter.frame_w == VR_FRAME_W && sc.filter.frame_h == VR_FRAME_H;
+        box_mask_rect[0] = box_mask_rect[1] = 1 << 20; box_mask_rect[2] = box_mask_rect[3] = -1;
+        if (box_mask_on) for (int y = 0; y < VR_FRAME_H; y++) for (int x = 0; x < VR_FRAME_W; x++) if (sc.filter.frame[y * VR_FRAME_W + x] < 128) {
+            if (x < box_mask_rect[0]) box_mask_rect[0] = x;
+            if (y < box_mask_rect[1]) box_mask_rect[1] = y;
+            if (x > box_mask_rect[2]) box_mask_rect[2] = x;
+            if (y > box_mask_rect[3]) box_mask_rect[3] = y;
+        }
     }
     double ms = (double)(mono_ns() - t0) * 1e-6;
     if (rc == 0) { gpu3d_note(&sc, r); autodump_note(&sc, l); }
@@ -1057,6 +1073,19 @@ static void capture_set(int on) {
     cap_on = on;
 }
 
+/* Una línea al entrar/salir de la caja o al cambiar la máscara dentro de ella: banderas del jugador, cámara 1.ª persona del motor, bandera de oculto del objeto del jugador (OF_HIDDEN, 0x80 en +0x28) y máscara. */
+static void box_diag(int mode, int reason, int native_ok) {
+    int in = bs.in_box ? 1 : 0;
+    if (in == box_prev && !(in && box_mask_on != box_prev_mask)) return;
+    uint32_t key = ns_player_key(emu_ram), fl = 0;
+    if (key >= 0x80000000u && key < 0x80200000u) memcpy(&fl, emu_ram + (key & (EMU_RAM_SIZE - 1u)) + 0x28u, 4);
+    fprintf(stderr, "[caja] %s status=%08x cam1p=%d camtipo=%d primera_persona=%d jugador=%08x oculto_OF_HIDDEN=%d vista=%s motivo=%s nativo_apto=%d mascara=%s abertura_celdas=(%d,%d)-(%d,%d) de %dx%d\n",
+            in ? (box_prev ? "mascara" : "entra") : "sale", (unsigned)bs.player_status, (int)bs.cam_first_person, (int)bs.cam_type, (int)bs.first_person, (unsigned)key, (fl & 0x80u) != 0,
+            mode == VRV_WORLD ? "mundo" : "cine", vrview_reason_name(reason), native_ok, box_mask_on ? "si" : "no",
+            box_mask_rect[0], box_mask_rect[1], box_mask_rect[2], box_mask_rect[3], VR_FRAME_W, VR_FRAME_H);
+    box_prev = in; box_prev_mask = box_mask_on;
+}
+
 static void publish_state(void) {
     MvVrGameState g;
     memset(&g, 0, sizeof g);
@@ -1087,6 +1116,7 @@ static void publish_state(void) {
             vin.mdec = mdec_last_vb != 0 && vb - mdec_last_vb <= 12u;
         }
         g.view_mode = vrview_step(&view, &vin);
+        box_diag(view.mode, view.reason, vin.native_ok);
         if (view.changed) {     /* cada cambio de modo / clase / motivo de la vista queda en el registro con su causa (banderas del puente incluidas) */
             char vb[512];
             vrview_describe(&view, &vin, vb, sizeof vb);

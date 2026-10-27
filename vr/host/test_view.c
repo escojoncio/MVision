@@ -47,6 +47,11 @@ int main(void) {
     i.cam_active = 0; CHECK(vrview_kind_of(&i) == VRV_K_UI, "ventana de armas sin cámara VR con 3D detrás = 2D");
     i = world(); i.in_control = 0; i.comms = 1; i.scene3d = 1; i.native_ok = 1; CHECK(vrview_reason(&i) == VRV_R_COMMS && vrview_kind_of(&i) == VRV_K_UI, "radio gana al mundo nativo");
 
+    /* caja (BRIDGE_PS_BOX): misma lógica que el gateo; la vista no depende de la postura: con cámara VR y mundo nativo apto es mundo, con o sin control */
+    i = world(); i.in_control = 1; i.scene3d = 1; i.native_ok = 1; CHECK(vrview_reason(&i) == VRV_R_WORLD && vrview_kind_of(&i) == VRV_K_WORLD, "caja con control: mundo");
+    i.in_control = 0; CHECK(vrview_reason(&i) == VRV_R_WORLD && vrview_kind_of(&i) == VRV_K_WORLD, "caja sin control (transicion al entrar/salir): mundo continuo");
+    CHECK(vrhost_box_mask(1, 1, 1) == 1 && vrhost_box_mask(1, 0, 1) == 0 && vrhost_box_mask(1, 1, 0) == 0 && vrhost_box_mask(0, 1, 1) == 0, "mascara de la caja: solo nativo + en la caja + con mascara");
+
     VrView v;
     vrview_reset(&v);
     CHECK(v.mode == VRV_CINEMA, "arranca en cine");

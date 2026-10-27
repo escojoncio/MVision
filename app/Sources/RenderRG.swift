@@ -604,10 +604,24 @@ final class RGRenderer {
     }
 
 
+    /// Máscara de visión de la caja para el render nativo (recubrimiento de ojo NSG_OV_FRAME): solo con el jugador en la caja (VrFilter.frame_in_box) y la máscara que calcula vrhost (frame, 160x128). Se copia aquí
+    /// (el puntero solo vale durante la llamada) y la consume encodeScene. nil = sin máscara. En el modo gpu la aplica el post-proceso (planPost).
+    private struct BoxMaskIn { var frame: [UInt8]; var area: (Float, Float); var cxCol: Float, cyRow: Float, projH: Float; var rgb: (Float, Float, Float) }
+    private var boxMaskIn: BoxMaskIn?
+    private func storeBoxMask(_ f: VrFilter) {
+        boxMaskIn = nil
+        guard !gpuMode, f.frame_in_box != 0, f.frame_on != 0, let fp = f.frame, f.frame_w == Int32(VR_FRAME_W), f.frame_h == Int32(VR_FRAME_H), f.area.2 > 0, f.area.3 > 0 else { return }
+        func fin(_ v: Float, _ lo: Float, _ hi: Float, _ d: Float) -> Float { v.isFinite ? min(max(v, lo), hi) : d }
+        boxMaskIn = BoxMaskIn(frame: Array(UnsafeBufferPointer(start: fp, count: Int(VR_FRAME_W) * Int(VR_FRAME_H))), area: (Float(f.area.2), Float(f.area.3)),
+                              cxCol: fin(f.cx_col, 0, 4096, 160), cyRow: fin(f.cy_row, 0, 4096, 128), projH: f.proj_h.isFinite && f.proj_h > 1 ? f.proj_h : 160,
+                              rgb: (fin(f.frame_rgb.0, 0, 0.5, 0), fin(f.frame_rgb.1, 0, 0.5, 0), fin(f.frame_rgb.2, 0, 0.5, 0)))
+    }
+
     /// Guarda la escena de la lista de la GPU: vértices y estados para el panel 2D (HUD), los lotes con su `ev_end` (orden de los eventos de VRAM), la cámara del juego y los datos de
     /// cinemática. Los lotes de 3D (kind 0/1) NO se dibujan: el mundo sale del render nativo.
     private func storeScene(_ sc: VrScene, _ newSlot: inout Bool) {
         storeFilter(sc.filter)
+        storeBoxMask(sc.filter)
         var scFilter = sc.filter
         let win = vr_scene_screen_window(&scFilter)
         stereoWindow = win.ok != 0 ? SIMD4<Float>(win.left, win.right, win.up, win.down) : nil   // la de ESTA lista (la misma que pareja con hudRect y los lotes); una lista sin proyección no hereda la de otra
@@ -1621,6 +1635,7 @@ final class RGRenderer {
         // El mundo: render nativo con las mismas vistas y proyecciones por ojo y la profundidad inversa del sistema (no se escribe depthRange). Si falla, el pase queda limpio y el
         // fotograma siguiente se repite (ns_present: último válido) o se funde a negro; se cuenta para el registro.
         if let cm = cams, let n = native {
+            if let b = boxMaskIn { n.setBoxMask(frame: b.frame, w: Int(VR_FRAME_W), h: Int(VR_FRAME_H), area: b.area, cxCol: b.cxCol, cyRow: b.cyRow, projH: b.projH, rgb: b.rgb) } else { n.clearBoxMask() }
             let ok = n.encode(encoder: enc, vram: vram, viewProj: cm.viewProj, projections: cm.projections, eyes: cm.eyes, eyeIndex: cm.eyeIndex, layered: amplify > 0,
                               colorFormat: color.pixelFormat, depthFormat: depth.pixelFormat, samples: samples, linear: linearOutput)
             if !ok { nativeEncodeFails += 1; nativeDrawnLast = false }

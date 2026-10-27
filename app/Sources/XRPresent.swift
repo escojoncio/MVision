@@ -28,7 +28,7 @@ struct XRViewConfig {
     var sharp = 1                   // 0 suave, 1 nítida (bilineal de píxel fijo), 2 píxel (vecino más próximo)
     var smooth2D = 0                // suavizado de la capa 2D (HUD, menús, créditos, pantalla de cine): 0 original, 1 nítido (píxel art), 2 suave
     var integerScale = false        // ajusta el ancho para que cada texel ocupe un número entero de píxeles del visor
-    var cutscene: Cutscene = .screen // cinemáticas del motor: pantalla de cine con el mundo nativo desde la cámara del juego (defecto), pantalla 3D estéreo, pantalla de cine plana, diorama o dentro de la escena
+    var cutscene: Cutscene = .stereo // cinemáticas del motor: pantalla de cine 3D estéreo con profundidad real (defecto), la misma en mono (sin profundidad), pantalla de cine plana, diorama o dentro de la escena
     var dioramaScale: Float = 0.15  // metros por metro del motor (0,15: una sala de 8 m cabe en ~1,2 m)
     var hudPanels = true
     var hudScale: Float = 0.8
@@ -87,15 +87,15 @@ struct XRViewConfig {
         c.integerScale = b("xr.view.integer", false)
         let s2 = UserDefaults.standard.integer(forKey: "xr.view.smooth2d2")   // clave nueva: el defecto pasó de «nítido» a «original» (el texto no se deforma)
         c.smooth2D = UserDefaults.standard.object(forKey: "xr.view.smooth2d2") == nil ? 0 : min(max(s2, 0), 2)
-        // Clave nueva (cutscene3): el defecto pasó de «pantalla 3D estéreo» (cutscene2 = stereo) a «pantalla de cine 3D». Solo ese valor antiguo migra al nuevo defecto; el resto de elecciones guardadas se conserva.
-        // Un «stereo» guardado en cutscene3 (el defecto antiguo) migra A LA VEZ a la pantalla de cine 3D (.screen): una sola vez (clave de marca), para que «Pantalla 3D (estéreo)» elegida después sobreviva al reinicio.
-        if !UserDefaults.standard.bool(forKey: "xr.view.cutscene3.migrated") {
-            if UserDefaults.standard.string(forKey: "xr.view.cutscene3") == "stereo" { UserDefaults.standard.set(Cutscene.screen.rawValue, forKey: "xr.view.cutscene3") }
-            UserDefaults.standard.set(true, forKey: "xr.view.cutscene3.migrated")
+        // El defecto es la pantalla de cine 3D estéreo (IPD real, profundidad). Un «screen» (mono, sin profundidad) guardado por el defecto anterior migra a «stereo» UNA sola vez (clave de marca);
+        // elegido después en el menú, «Pantalla de cine 3D (mono)» sobrevive al reinicio.
+        if !UserDefaults.standard.bool(forKey: "xr.view.cutscene3.toStereo") {
+            if UserDefaults.standard.string(forKey: "xr.view.cutscene3") == "screen" { UserDefaults.standard.set(Cutscene.stereo.rawValue, forKey: "xr.view.cutscene3") }
+            UserDefaults.standard.set(true, forKey: "xr.view.cutscene3.toStereo")
         }
         if let v = UserDefaults.standard.string(forKey: "xr.view.cutscene3"), let m = Cutscene(rawValue: v) { c.cutscene = m }
         else if let v = UserDefaults.standard.string(forKey: "xr.view.cutscene2"), v != "stereo", let m = Cutscene(rawValue: v) { c.cutscene = m }
-        else { c.cutscene = .screen }
+        else { c.cutscene = .stereo }
         c.dioramaScale = f("xr.view.dioramaScale", 0.15, 0.03, 0.5)
         c.hudPanels = b("xr.view.hud", true)
         c.hudScale = f("xr.view.hudScale", 0.8, 0.3, 2.0)
@@ -319,6 +319,8 @@ final class XRPresenter {
     private var menuSnap = false
     private var followSnap = true
     private var prevOverlay2D = false
+    private var overlayAim: (yaw: Float, pitch: Float)?    // mirada (rumbo y cabeceo de la cabeza) al abrirse la ventana 2D del juego: el panel 6b queda centrado ahí mientras dure
+    private var hudSeen = false                            // el último compose recibió textura de la capa 2D (diagnóstico)
     private var overlayHand = -1               // mano física (0 izq, 1 der) que abrió la ventana 2D del juego mientras dura; -1 = sin mano (pausa, sin pose)
     // Dentro de la escena: cámara del plano (vista del motor -> mundo VR al empezar el plano) y plano visto
     private var shotView = matrix_identity_float4x4
@@ -461,10 +463,15 @@ final class XRPresenter {
         return list[(best + dir + list.count) % list.count]
     }
 
-    private var rowCount: Int { page == 0 ? XRMenuItem.allCases.count : (page == 1 ? XRDiagItem.allCases.count : XRAIItem.allCases.count) }
+    /// Filas del menú principal. Sin troceo del 2D (XRLayer2D.split, el defecto) los paneles del HUD, su tamaño y los de la muñeca no hacen nada (el 2D es un solo panel): se ocultan. `sel` indexa esta lista.
+    private var mainItems: [XRMenuItem] {
+        let splitOnly: [XRMenuItem] = [.hud, .hudScale, .wristHud, .wristScale, .wristSide]
+        return XRLayer2D.split ? XRMenuItem.allCases : XRMenuItem.allCases.filter { !splitOnly.contains($0) }
+    }
+    private var rowCount: Int { page == 0 ? mainItems.count : (page == 1 ? XRDiagItem.allCases.count : XRAIItem.allCases.count) }
 
     private func leaveSub() {
-        sel = page == 2 ? XRMenuItem.aiMenu.rawValue : XRMenuItem.diagnostics.rawValue
+        sel = mainItems.firstIndex(of: page == 2 ? .aiMenu : .diagnostics) ?? 0
         page = 0
         menuDirty = true
     }
@@ -513,7 +520,9 @@ final class XRPresenter {
     private func activate(dir: Int) {
         if page == 1 { activateDiag(dir: dir); return }
         if page == 2 { activateAI(dir: dir); return }
-        guard let it = XRMenuItem(rawValue: sel) else { return }
+        let main = mainItems
+        guard sel >= 0, sel < main.count else { return }
+        let it = main[sel]
         switch it {
         case .resume: closeMenu()
         case .recenter: onRecenter?(); closeMenu()
@@ -592,7 +601,7 @@ final class XRPresenter {
         let curveName = ["Plana", "Suave", "Media", "Fuerte"]
         var ci = 0
         for (i, x) in XRViewConfig.curves.enumerated() where abs(x - cfg.curve) < abs(XRViewConfig.curves[ci] - cfg.curve) { ci = i }
-        return XRMenuItem.allCases.map { it -> (String, String) in
+        return mainItems.map { it -> (String, String) in
             switch it {
             case .resume: return ("Volver al juego", "")
             case .recenter: return ("Recentrar la vista", "")
@@ -609,7 +618,7 @@ final class XRPresenter {
             case .integerScale: return ("Escalado entero", yn(cfg.integerScale))
             case .smooth2D: return ("Suavizado 2D", ["Original", "Nítido", "Suave"][min(max(cfg.smooth2D, 0), 2)])
             case .cutscene:
-                let n: [XRViewConfig.Cutscene: String] = [.screen: "Pantalla de cine 3D", .stereo: "Pantalla 3D (estéreo)", .cinema: "Pantalla de cine", .diorama: "Diorama", .scene: "Dentro de la escena"]
+                let n: [XRViewConfig.Cutscene: String] = [.screen: "Pantalla de cine 3D (mono)", .stereo: "Pantalla de cine 3D (estéreo)", .cinema: "Pantalla de cine", .diorama: "Diorama", .scene: "Dentro de la escena"]
                 return ("Cinemáticas del motor", n[cfg.cutscene] ?? "")
             case .hud: return ("Paneles del HUD", yn(cfg.hudPanels))
             case .hudScale: return ("Tamaño de los paneles", "\(Int((cfg.hudScale * 100).rounded())) %")
@@ -794,6 +803,8 @@ final class XRPresenter {
         if !(menuOpen && menuHold > 0) { XRFollow.step(&menuFollow, head: head, dt: d, snap: snapNow || menuSnap); menuSnap = false }
         followSnap = false
         prevOverlay2D = overlay2D
+        hudSeen = hud != nil
+        if !overlay2D { overlayAim = nil } else if overlayAim == nil { overlayAim = (hy, XRFollow.pitch(of: head)) }
         if needAnchor && shown != .world {
             anchorY = max(0.8, hp.y - (shown == .scene ? 0 : 0.05))
             anchor = XRMath.translation(SIMD3<Float>(hp.x, 0, hp.z)) * XRMath.rotationY(hy)
@@ -848,8 +859,8 @@ final class XRPresenter {
         // 4b) pantalla 3D: dos cámaras del juego (separadas un IPD, frustos desplazados) dibujadas por RGRenderer en texturas; cada ojo ve la suya en la pantalla anclada al mundo.
         //     La cabeza no interviene en las cámaras: solo cambia hacia dónde de la pantalla se mira.
         if shown == .stereo, Self.gameViewOK(gameView) {
-            // Pantalla de cine 3D (defecto): el mismo mundo nativo desde la cámara del juego, una sola imagen (IPD 0: ambos ojos ven la misma textura) en la geometría y el tamaño de la pantalla de cine.
-            // Pantalla 3D estéreo (opción): dos cámaras separadas un IPD.
+            // Pantalla de cine 3D estéreo (defecto): dos cámaras del juego separadas un IPD real (profundidad).
+            // Pantalla de cine 3D mono (opción .screen): una sola imagen (IPD 0: ambos ojos ven la misma textura) en la geometría y el tamaño de la pantalla de cine, sin profundidad.
             let mono = cfg.cutscene == .screen
             let leg = XRCinemaLayout.legible(reason: Int32(gs.view_reason), kind: gs.view_kind)
             let W = mono ? XRCinemaLayout.width(base: cfg.width, legible: leg) : cfg.width, D = cfg.distance
@@ -997,17 +1008,24 @@ final class XRPresenter {
 
         // 6b) UN solo panel con la capa 2D COMPLETA del juego (mundo y diorama; en el cine el 2D ya va dentro de la imagen): HUD, radar del juego, menús de objetos/armas (L2/R2), pausa, textos y créditos tal como los dibuja
         //     el original, con transparencia donde el juego no dibuja 2D. Geometría de pantalla completa XRFramedLayout (píxel cuadrado, aspecto LÓGICO de la capa: 320x240 = 0,75; 320x256 = 0,8) delante de la cabeza con
-        //     el mismo seguimiento perezoso del rumbo (hudYaw); sin prueba de profundidad (onTop). El muestreo es el de XR2DFilter.current (sharp-bilinear por defecto). «Paneles del HUD: No» oculta el panel en partida, no
-        //     las ventanas 2D (selector, pausa), que son menús.
-        if !split && shown != .cinema && shown != .stereo && (cfg.hudPanels || overlay2D), let h = hud {
+        //     el mismo seguimiento perezoso del rumbo (hudYaw); sin prueba de profundidad (onTop). El muestreo es el de XR2DFilter.current (sharp-bilinear por defecto). «Paneles del HUD» (cfg.hudPanels) solo
+        //     afecta al troceo (paso 6): sin trocear, el panel único se dibuja siempre (vida, radar, créditos). Con una ventana 2D abierta (selector, pausa) el panel se acerca (XRFramedLayout.overlayDistance) y se centra
+        //     en la mirada de la cabeza al abrirse (overlayAim, fija mientras dure); la posición sigue a la cabeza.
+        if !split && shown != .cinema && shown != .stereo, let h = hud {
             let uv = XRFramedLayout.fullUV
             let lp = hudLogical ?? SIMD2<Float>(Float(h.width), Float(h.height))
             let c = XRFramedLayout.center(uv: uv, layerPx: lp)
             var it = XRDrawItem(kind: .panel, texture: h)
-            it.model = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw) * XRMath.translation(SIMD3<Float>(c.x, c.y, -XRFramedLayout.distance))
+            if overlay2D, let aim = overlayAim {
+                it.model = XRFramedLayout.overlayModel(position: hp, yaw: aim.yaw, pitch: aim.pitch)
+                it.size = XRFramedLayout.size(uv: uv, layerPx: lp) * XRFramedLayout.overlayScale
+                it.distance = XRFramedLayout.overlayDistance
+            } else {
+                it.model = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw) * XRMath.translation(SIMD3<Float>(c.x, c.y, -XRFramedLayout.distance))
+                it.size = XRFramedLayout.size(uv: uv, layerPx: lp)
+                it.distance = XRFramedLayout.distance
+            }
             it.uvrect = uv
-            it.size = XRFramedLayout.size(uv: uv, layerPx: lp)
-            it.distance = XRFramedLayout.distance
             it.opacity = 1
             it.onTop = true
             it.pixelMode = XR2DFilter.current.panelMode
@@ -1052,7 +1070,7 @@ final class XRPresenter {
         var d = "mostrando=\(shown) " + String(format: "velo=%.2f ancla=(%.2f %.2f %.2f) rumbo=%.0fgrados alturaAncla=%.2f", veil, a.x, a.y, a.z,
                                                XRMath.yaw(of: anchor) * 180 / .pi, anchorY)
         d += " pantallas2D=" + (cfg.follow2D ? "siguen" : "fijas")
-        d += " items: pantalla=\(n[.screen] ?? 0) pantalla3d=\(n[.screen3d] ?? 0) panel=\(n[.panel] ?? 0) menu=\(n[.menu] ?? 0) velo=\(n[.veil] ?? 0)"
+        d += " items: pantalla=\(n[.screen] ?? 0) pantalla3d=\(n[.screen3d] ?? 0) panel=\(n[.panel] ?? 0) menu=\(n[.menu] ?? 0) velo=\(n[.veil] ?? 0) hudPanels=\(cfg.hudPanels) hud!=nil=\(hudSeen)"
         if let c = cinema {
             d += " cine: fotograma=\(c.haveFrame) \(c.w)x\(c.h) tex=\(c.texture(srgb: true).map { "\($0.width)x\($0.height)/fmt\($0.pixelFormat.rawValue)" } ?? "nil")"
         } else {
