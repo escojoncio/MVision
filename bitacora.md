@@ -4,17 +4,20 @@ Runtime nativo para Apple Vision Pro: el juego (recompilación estática del EXE
 Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP_REPO`, `DECOMP_COMMIT`, `SDK_REPO`); zonas por número. Histórico: `git log -p bitacora.md`.
 
 ## Last done
-- 2026-10-27 `ca859e9` (IPA run 40425733598, artifact MVision-ipa 12699617122; CI verde):
-  - Cine: `Cutscene.stereo` por defecto (IPD real); migración única screen→stereo (`xr.view.cutscene3.toStereo`, `XRPresent.swift`).
-  - 2D: panel 6b siempre en mundo sin split (ignora hudPanels); selector/pausa a 0,9 m centrados en la mirada al abrir (`overlayAim`, `XRFramedLayout.overlayModel`, `XRMath.swift`); opciones de troceo ocultas (`mainItems`). `vr_scene` `drop_world2d`/`VR_FATE_WORLD2D` (POLY sin vista antes del último POLY 3D fuera del panel) solo en vista mundo sin selector/pausa (`vrhost.c` build_one).
-  - Rígidos (0x40, OF_ONE_MATRIX): `ns_extract.c` usa la matriz raíz (en overlay 0x80081200 las piezas guardan traslación relativa al ojo). `ns_cover` mide factor Y (66/64) con `ns_extract_screen_ys`.
-  - Captura: parche dinámico de la entrada 0 de 0x8009E534 (`ns_hook_rt.c` dyn_wrap, hash, reinstalación en `ns_hook_poll` c/32 frames) + respaldo; `[captura] canales por s: envoltura/dinamico/respaldo`.
-  - Agua: `NSG_OV_BARS` apagado (`bars_gain`=0, `ns_screen.c`; era la viñeta circular); `NSG_CULL_SEMI` con la cabeza bajo el agua (`NativeRenderer.swift`, `NativeShaders.metal`, `ns_gpu_cull_applies`); onda reintenta sin desplazar si el texel es transparente.
-  - Caja: máscara `NSG_OV_FRAME` (textura R8 160x128, `ns_screen_frame_build`) solo con IN_BOX (`vrhost_box_mask`); textura 1x1 de respaldo; diag `[caja] entra|mascara|sale`.
+- 2026-10-27 `9555775` (IPA run 40494388447):
+  - `vr_scene.c`: con drop_world2d descarta RECT opaco sin textura ≥90 % disp.w y ≤10 % disp.h (bandas agua 320x6 MASK_SET, auto05-08); last3d solo cuenta polys con ≥nv-1 vértices con vista; poly con ≤1 vértice válido tras last3d → 2D (relleno barra de vida, coincidencia SXY con GTE). Tests `test_world_view_hud`, `test_world_view_partial_band`.
+  - Selector: `vr_layer2d_async.c` menu_win = vista selector (sin depender de g_split); `vr_layer2d.c` con menú+base omite lo previo y lo fuera del rect (créditos fuera). Asserts "sin troceo" invertidos (test_layer2d, test_no_gpu3d.c).
+  - Agua: `ns_fs` (NativeShaders.metal) desplaza en píxeles del ojo vía dfdx(uv), tope ±1 texel, sin vertical; `wave_gain`=3 (`ns_screen.c`). Ref CPU `ns_ref_wave` + `test_ns_wave.c`. Era basura verde ondulada (desplazamiento ±4 texel cruzaba texturas).
+  - IA: alcance x1 por defecto (`vrai.c`, `vr_perception.c`, `vr_perception_rt.c`, Swift `aiRange`=0) + migración única `xr.ai.range.toX1`. Radar: `VrRadarPerc.range_scale`, `ext_cone` escala con él (`t_range_scale`).
+  - Diag: `[radio-src]` (XRFrameEncoder, modo=0 motivo=3: hqActive/hqFull/xbrActive/layerView/takeLayer2D), `[vista] engine-por-sin-partida` (vrhost.c).
+- 2026-10-27 `ca859e9`: cine estéreo por defecto, 2D panel único sin split, rígidos matriz raíz, captura dinámica entrada 0, caja NSG_OV_FRAME (detalle: `git log -p bitacora.md`).
 - 2026-10-27 `18f0cc7`: gateo (PLAYER_PRESENT), captura de respaldo, 2D en un panel (detalle: `git log -p bitacora.md`).
 
 ## Current state
-**Pendiente de probar en visor (`ca859e9`):** todo lo anterior.
+**Pendiente de probar en visor (`9555775`):** todo lo anterior.
+**Usuario (log 27-oct 11:15, ca859e9):** cine 3D OK (ascensor, intro). Fallaban: agua (basura verde + barras), L2/R2 con créditos, códec brillante, estela al girar lento, radar sin conos VR, IA ve demasiado lejos, efectos en caja 4:3, vida parpadeando.
+**Sin causa demostrada:** códec brillante (capa C opaca y exacta; cadena sRGB sin doble conversión → mirar `[radio-src]`); caja 4:3 (hueco: `vr_view.c:32` NO_GAME → ENGINE → mirar `[vista] engine-por-sin-partida`); estela (pose/ancla coherentes, ~100 Hz; probar fluidez off; `err-pred-max` 738-1063 mm y `reinicios` +25/s en radio sin explicar). Sospecha IA: preset VR `range_mult`=2.4 (zona de sospecha) y `head_see`, sin tocar.
+**Volcados:** d0002 = selector abierto; auto05-08 = bajo el agua.
 **Banco (volcados 26/27-oct):** cobertura intro auto01 37→91 %, auto03 9→49 %, d0004 73→96 %; auto02 sigue 20 % (lista de un fotograma anterior: cámara ~3,5°/300 mm distinta; rec_M caducado en cine, unverified). Agua d0005/auto04 idénticas byte a byte.
 **Usuario (log 27-oct, 18f0cc7):** gateo OK; menús OK pero lejos; créditos/vida/radar no visibles (hudPanels=false persistido → arreglado); cine plano (mono → arreglado); agua con círculo (BARS → arreglado).
 **Pendiente:** radar junto al agujero mientras se usa la caja (pedido para más tarde). Superficie de agua 80165558 `otra_textura(semi)` (UV/CLUT animado sin evidencia). Si el 2D en panel único no convence: opción 2 = 2D nativo desde RAM.
