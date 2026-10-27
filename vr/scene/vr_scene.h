@@ -302,6 +302,7 @@ typedef struct {
     /* --- destino de cada primitiva y capa 2D fiel (vr_layer2d.h) --- */
     const uint8_t *op_dest;   /* por op de src->ops (n_op_dest = src->nops): 2 = salió al panel 2D (batches kind 2), 3 = filtro de pantalla (kind 3), 0 = no emitida (3D, descartada, evento). Memoria de vr_scene (reutilizada en la siguiente llamada) */
     uint32_t n_op_dest;
+    const uint8_t *op_cls;    /* con VrSceneOpts.op_class: clase de procedencia (vr_prov.h, VPC_*) de cada op con op_dest == 2 (n_op_dest entradas; el resto 0 = HUD_WORLD). NULL sin gancho. Misma vida que op_dest */
     /* Lo rellena el host (vrhost.c) con vl2d_run: RGBA8 NO premultiplicado de la zona mostrada ampliada (hud2d_w x hud2d_h, filas de arriba abajo). NULL = no hay: el renderer
      * dibuja los batches kind 2 como antes. hud2d_full = 1: es el fotograma ENTERO (todas las primitivas sobre el área mostrada, opaco: pantalla de cine), no solo la capa 2D. */
     const uint8_t *hud2d;
@@ -402,6 +403,9 @@ typedef struct {
     int billboard;
     /* drop_world2d 1: ver «Qué es 3D» (arriba). 0 (def.) = esos polígonos van a la clase 2 como antes. */
     int drop_world2d;
+    /* op_class: gancho (opt-in; NULL = sin clasificación) que da la clase de procedencia de la primitiva i de dl (vr_prov.h: vpc_op_class_cb). vr_scene la guarda en VrScene.op_cls para las que salen al panel 2D; no la usa para decidir nada. */
+    uint8_t (*op_class)(const GpuDrawList *dl, uint32_t i, void *ctx);
+    void *op_class_ctx;
 } VrSceneOpts;
 
 VrSceneOpts vr_scene_opts_default(void);

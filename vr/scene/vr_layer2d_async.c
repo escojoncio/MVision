@@ -41,7 +41,7 @@ typedef struct {
     uint32_t lseq;                 /* nº de envío */
 } Job;
 
-typedef struct { uint8_t *px; size_t cap; int w, h, full, mode, view; uint32_t seq; int menu_ok; float menu_uv[4]; } Out;   /* mode: VL_* con que se dibujó; view: etiqueta de vista del trabajo */
+typedef struct { uint8_t *px; size_t cap; int w, h, full, mode, view; uint32_t seq; } Out;   /* mode: VL_* con que se dibujó; view: etiqueta de vista del trabajo */
 
 struct VrL2Async {
     pthread_t th; int started;
@@ -51,7 +51,6 @@ struct VrL2Async {
     VrLayer2D *L;
     _Atomic int target, smooth, view_tag;
     int cur; Vl2aScale scst;
-    int mlog;                                    /* último estado registrado del rect del menú (solo el trabajador) */
     Out out[3]; int pub, held, have_pub;        /* índice publicado / en uso por el consumidor (-1) */
     uint32_t sub_seq, pub_sub_seq, acq_seq;     /* envíos / envío al que corresponde lo publicado / último adquirido */
     double work_ms, submit_max;
@@ -96,9 +95,6 @@ static void *worker(void *arg) {
         if (draw && j->has_opd) { sc.op_dest = j->opd; sc.n_op_dest = j->l.nops; }
         double t0 = now_ms();
         if (skip) A->n_skip++;   /* (contador leído bajo el mutex en vl2a_report; incremento sin él: solo informativo) */
-        const int menu_win = atomic_load(&g_split) && (j->view & 255) == VRV_R_SELECTOR;   /* solo con el troceo activo (vl2a_set_split): sin él la capa lleva TODO el 2D, también la ventana del selector */
-        vl2d_hide_credits(A->L, (j->view & 255) == VRV_R_SELECTOR);   /* selector abierto: los créditos de la intro no van en el panel de la ventana (con o sin troceo) */
-        vl2d_set_menu(A->L, menu_win);   /* ventana de armas/objetos sobre el mundo: rect de lo nuevo respecto a la lista previa sin menú */
         int have = skip ? 0 : vl2d_run(A->L, &j->l, draw && j->has_opd ? &sc : NULL, j->full);
         double ms = now_ms() - t0;
         VrL2Info inf; vl2d_info(A->L, &inf);
@@ -109,15 +105,6 @@ static void *worker(void *arg) {
         if (px && w > 0 && h > 0 && grow((void **)&o->px, &o->cap, (size_t)w * h * 4, 1)) {
             memcpy(o->px, px, (size_t)w * h * 4);
             o->w = w; o->h = h; o->full = j->full == VL_FULL; o->mode = j->full; o->view = j->view; ok = 1;
-            o->menu_ok = vl2d_menu_rect(A->L, o->menu_uv) && vl2d_menu_settled(A->L);   /* solo el rect asentado (la ventana se abre con animación): el panel de la mano no cambia de tamaño durante la apertura */
-            if (draw && menu_win) {   /* registro al cambiar el estado del rect */
-                int key = o->menu_ok ? 1 + (int)(o->menu_uv[0] * 100) + 101 * (int)(o->menu_uv[1] * 100) + 10201 * (int)(o->menu_uv[2] * 100) + 1030301 * (int)(o->menu_uv[3] * 100) : 0;
-                if (key != A->mlog) {
-                    A->mlog = key;
-                    if (o->menu_ok) fprintf(stderr, "[menu2d] rect=(%.3f,%.3f,%.3f,%.3f) prims_nuevas=%d base=%d\n", (double)o->menu_uv[0], (double)o->menu_uv[1], (double)o->menu_uv[2], (double)o->menu_uv[3], inf.menu_new, inf.menu_base);
-                    else fprintf(stderr, "[menu2d] sin rect asentado (el visor no dibuja la ventana todavía) prims_nuevas=%d base=%d\n", inf.menu_new, inf.menu_base);
-                }
-            } else if (draw) A->mlog = 0;   /* (VL_PANEL_VERIFIED sigue siendo un panel) */
         }
 
         pthread_mutex_lock(&A->mx);
@@ -239,15 +226,6 @@ int vl2a_acquire_info(VrL2Async *A, int *mode, int *view) {
     pthread_mutex_lock(&A->mx);
     int ok = A->held >= 0;
     if (ok) { if (mode) *mode = A->out[A->held].mode; if (view) *view = A->out[A->held].view; }
-    pthread_mutex_unlock(&A->mx);
-    return ok;
-}
-
-int vl2a_acquire_menu_rect(VrL2Async *A, float uv[4]) {
-    if (!A) return 0;
-    pthread_mutex_lock(&A->mx);
-    int ok = A->held >= 0 && A->out[A->held].menu_ok;
-    if (ok && uv) memcpy(uv, A->out[A->held].menu_uv, 4 * sizeof(float));
     pthread_mutex_unlock(&A->mx);
     return ok;
 }

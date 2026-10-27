@@ -62,22 +62,6 @@ void vl2d_set_options(VrLayer2D *L, int scale, int smooth);
  * `l` debe ser la lista con la que se ensambló sc. Devuelve 1 si hay capa nueva (vl2d_rgba / vl2d_px válidos hasta la siguiente llamada), 0 si no. */
 int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full);
 
-/* Menú sobre la mano (solo panel): con `on` != 0 vl2d_run busca la ventana entre las primitivas del panel que NO estaban en la última lista dibujada con `on` == 0 (créditos y HUD que el juego
- * dibuja durante la partida no cuentan; clave por primitiva: tipo, banderas, vértices RELATIVOS a la zona mostrada (el doble búfer del juego alterna x = 0 / 320) o rect, página de textura, CLUT y u,v).
- * Sin rect conservado, las nuevas se agrupan en componentes conexos (hueco < 8 px entre cajas) y la ventana es el de mayor área que tenga marco o fondo opaco (alguna primitiva sin textura ni
- * GPU_F_SEMI); si ninguno lo tiene, el de mayor área de todos; el resto (créditos, texto) se ignora. Mientras no está asentado se reelige en cada lista (una barra animada
- * de la primera no deja el rect clavado) y crece por unión; al asentarse el rect se congela. Con `on` == 0 cada lista dibujada renueva esa lista base.
- * vl2d_menu_rect (tras vl2d_run con capa): rect UV [u0, v0, u1, v1] (0..1, de la capa mostrada) de la ventana nueva; 0 si no hay base, nunca hubo primitivas nuevas o su área pasa del 60 % del marco.
- * Histéresis: mientras el menú siga activo el último rect válido se conserva (una lista sin primitivas nuevas no lo borra) y, mientras no está asentado solo crece con la elección de cada lista si toca (< 8 px) el rect anterior; asentado queda fijo;
- * vl2d_set_menu(0) lo olvida. */
-void vl2d_set_menu(VrLayer2D *L, int on);
-/* vl2d_hide_credits: con 1 la capa no pinta el texto de los créditos de la intro (líneas de DOS rectángulos texturados semitransparentes idénticos seguidos, abr 2 y abr 1, firma que no usan la vida, el radar ni los menús); el selector de armas/objetos lo activa para que los créditos no vayan en el panel de la ventana. */
-void vl2d_hide_credits(VrLayer2D *L, int on);
-int vl2d_menu_rect(const VrLayer2D *L, float uv[4]);
-/* vl2d_menu_settled: 1 cuando el rect lleva 8 listas consecutivas SIN crecer (máximo 60 listas de crecimiento por apertura): ya no cambia hasta cerrar el selector (la ventana se abre con animación; antes crece por unión).
- * Los consumidores del visor solo usan el rect asentado. Las primitivas de la franja superior (v < 0,35: vida/oxígeno y créditos) nunca entran en el rect. */
-int vl2d_menu_settled(const VrLayer2D *L);
-
 /* Capa RGBA8 no premultiplicada de la última llamada con capa; w x h = (zona mostrada) * escala. NULL si no hay. */
 const uint8_t *vl2d_rgba(const VrLayer2D *L, int *w, int *h);
 /* Estado interno por píxel (pruebas): mismas dimensiones. NULL si no hay capa. */
@@ -99,7 +83,6 @@ typedef struct {
     int v_lost2d;          /* primitivas 2D texturadas sobre la pantalla que no fueron al panel ni al filtro (informativo: se pierden si el nativo no las dibuja) */
     int v_patched;         /* píxeles sustituidos (los malos; con respaldo, los tocados por el panel dilatados 1 px): opacos con el color del emulador o recuperados por resta */
     int v_sub, v_transp;   /* de ellos: recuperados por resta (emulador - mundo reproducido) / dejados transparentes por no ser fiable el mundo reproducido */
-    int menu_new, menu_base;   /* ventana de menú sobre la mano: primitivas del panel NUEVAS respecto a la lista previa sin menú / primitivas de esa lista base (vl2d_set_menu) */
     double v_ms;           /* coste de la verificación (mundo reproducido + comparación), ms: el trabajador asíncrono lo descuenta de su medida de carga (la escala adaptativa no debe bajar por verificar) */
     int v_mean_milli;      /* diferencia media por canal (niveles de 8 bits x 1000) de los píxeles malos */
 } VrL2Info;

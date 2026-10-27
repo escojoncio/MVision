@@ -63,6 +63,7 @@ static uint32_t *g_next; static size_t g_next_cap;
 static uint8_t *g_fate; static uint32_t g_fate_cap;
 static uint32_t *g_tsrc_int; static size_t g_tsrc_int_cap;   /* op de origen de cada triángulo de salida (VrScene.tri_src) */
 static uint8_t *g_opd; static size_t g_opd_cap;   /* destino por op (VrScene.op_dest) */
+static uint8_t *g_opc; static size_t g_opc_cap;   /* clase de procedencia por op (VrScene.op_cls) */
 typedef struct { float x; uint32_t i; } CoKey;   /* z-fight de coplanares (más abajo) */
 static float *g_cpbox; static size_t g_cpbox_cap;   /* caja de cada triángulo: min xyz, max xyz */
 static CoKey *g_cpkey; static size_t g_cpkey_cap;
@@ -81,6 +82,7 @@ static void fate_set(uint32_t i, uint8_t f) {
 void vr_scene_release(void) {
     free(g_tsrc_int); g_tsrc_int = NULL; g_tsrc_int_cap = 0;
     free(g_opd); g_opd = NULL; g_opd_cap = 0;
+    free(g_opc); g_opc = NULL; g_opc_cap = 0;
     free(g_tri); free(g_vtx); free(g_tcause); free(g_bat); free(g_st); free(g_hash); free(g_next);
     g_tri = NULL; g_vtx = NULL; g_tcause = NULL; g_tcause_cap = 0; g_bat = NULL; g_st = NULL; g_hash = NULL; g_next = NULL;
     g_tri_cap = g_vtx_cap = g_bat_cap = g_st_cap = g_st_n = g_hash_cap = g_hash_n = g_next_cap = 0;
@@ -998,6 +1000,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     GROW(g_tri, g_tri_cap, (size_t)n * 2 + 2);
     GROW(g_opd, g_opd_cap, (size_t)n + 1);
     memset(g_opd, 0, (size_t)n + 1);
+    if (o.op_class) { GROW(g_opc, g_opc_cap, (size_t)n + 1); memset(g_opc, 0, (size_t)n + 1); }
 
     /* Última primitiva POLY con algún vértice con posición de vista (GTE): hasta ahí llega el pase del mundo (el juego dibuja el HUD DESPUÉS). Un polígono sin posición de vista dentro de ese pase
      * es 3D que la captura no resolvió (cajas, props lejanos): lo dibuja el render nativo, no es HUD, y con opts.drop_world2d no se emite al panel 2D (VR_FATE_WORLD2D). */
@@ -1405,12 +1408,14 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
 
                 if (nv / 3 < g_tsrc_cap) g_tsrc[nv / 3] = t->src_op;
                 if ((kind == 2 || kind == 3) && t->src_op < g_opd_cap) g_opd[t->src_op] = (uint8_t)kind;
+                if (kind == 2 && o.op_class && t->src_op < g_opc_cap && t->src_op < n) g_opc[t->src_op] = o.op_class(dl, t->src_op, o.op_class_ctx);
                 nv += 3; cur->count += 3;
             }
         }
         s = e;
     }
     out->op_dest = g_opd; out->n_op_dest = n;
+    out->op_cls = o.op_class ? g_opc : NULL;
     out->v = g_vtx; out->nv = (uint32_t)nv; out->tri_cause = g_tcause; out->tri_src = g_tsrc_int;
     out->b = g_bat; out->nb = (uint32_t)nb;
     out->states = g_st; out->nstates = (uint32_t)g_st_n;
