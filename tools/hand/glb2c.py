@@ -30,7 +30,7 @@ PARENT = [-1, 0, 1, 2, 3, 0, 5, 6, 7, 8, 0, 10, 11, 12, 13, 0, 15, 16, 17, 18, 0
 CT = {5126: np.float32, 5121: np.uint8, 5123: np.uint16, 5125: np.uint32}
 NC = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
 ROLE_PALM, ROLE_BACK, ROLE_SIDE, ROLE_TIP = 0, 1, 2, 3     # = NS_HT_PALM, NS_HT_BACK, NS_HT_FINGER, NS_HT_JOINT de ns_hand.h
-YCUT = -4.0      # corte de la muñeca (mm, marco de la mano): se quita el puño del asset; la transición al antebrazo del juego la genera ns_hand
+YCUT = -14.0     # corte de la muñeca (mm, marco de la mano): se quita el puño del asset; la transición al antebrazo del juego la genera ns_hand
 
 
 def load_glb(path):

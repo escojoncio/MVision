@@ -11,6 +11,7 @@
  * vértices (posiciones idénticas a las del antebrazo), el último son los vértices del borde de la muñeca de la mano (mismas coordenadas, mismo marco) y los intermedios llevan una
  * parte creciente del movimiento del antebrazo respecto a la mano (giro interpolado: giro y flexión repartidos, sin estrangulamiento). Antebrazo + transición + mano = una superficie
  * cerrada. La transición se recalcula en cada fotograma (depende de la postura de la muñeca; ~100 vértices); la topología solo si cambia la malla del antebrazo. Sin antebrazo: sin unión.
+ * El antebrazo del motor se sustituye por una copia con el giro REPARTIDO a lo largo (0 en el codo, soldado al brazo; todo en la muñeca): sin retorcer la franja del codo.
  *
  * ESTILO PS1 como el brazo: la cara palmar desde la muñeca hasta la base de los dedos lleva la textura de la palma de la manopla del juego (tpage/clut/UV de su cara, proyectada en plano);
  * dedos, pulgar, dorso y costados van de un solo color (el texel central de la textura de los dedos de la manopla) con sombreado de la luz del jugador. Sin texturas utilizables, plana.
@@ -32,6 +33,8 @@ extern "C" {
 #define NS_PART_HAND_L 9
 #define NS_PART_FORE_R 3
 #define NS_PART_FORE_L 8
+#define NS_PART_UPPER_R 2
+#define NS_PART_UPPER_L 7
 static inline int ns_key_is_hand(uint32_t k) { return k == NS_HAND_KEY_R || k == NS_HAND_KEY_L; }   /* ns_solid y ns_adapt las omiten como al cuerpo propio */
 
 typedef struct {
@@ -55,6 +58,7 @@ typedef struct {
     uint32_t last_applied;       /* bit 0 izquierda, bit 1 derecha, en la última llamada */
     uint32_t skinned;            /* poses nuevas calculadas (mallas creadas); las repetidas reutilizan las anteriores */
     uint32_t seams;              /* costuras con el antebrazo (re)calculadas */
+    uint32_t fore_twisted;       /* antebrazos sustituidos por la copia con el giro repartido */
 } NsHandStats;
 
 /* Añade las manos nuevas a la escena `sc` y oculta las manopla del motor. Devuelve cuántas manos se pusieron (0..2). map: jugador enlazado (ns_player_bind). */

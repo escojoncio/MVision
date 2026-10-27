@@ -58,7 +58,7 @@ static void make_glove(Glove *g, int side, int textured, uint64_t salt) {
     m->id = ns_mesh_content_hash(m) ^ salt;   /* distintos ids para distintas manoplas */
 }
 
-typedef struct { NsScene sc; NsMeshStore *st; NsPlayerMap map; Glove gr, gl; NsMesh dummy; NsVert dv[4]; NsFace df[1]; NsNorm dn[1]; NsMesh fore; NsVert fv[8]; NsFace ff[4]; NsNorm fn[1]; } World;
+typedef struct { NsScene sc; NsMeshStore *st; NsPlayerMap map; Glove gr, gl; NsMesh dummy; NsVert dv[4]; NsFace df[1]; NsNorm dn[1]; NsMesh fore; NsVert fv[12]; NsFace ff[8]; NsNorm fn[1]; NsMesh upper; NsVert uv[8]; NsFace uf[4]; } World;
 
 static void xf_ident_t(NsXf *x, float tx, float ty, float tz, float yaw) {
     memset(x, 0, sizeof *x);
@@ -79,17 +79,31 @@ static int world_init(World *w, uint32_t cap_inst, uint32_t cap_piece, int textu
     w->dummy.n_verts = 4; w->dummy.n_norms = 1; w->dummy.n_faces = 1; w->dummy.verts = w->dv; w->dummy.norms = w->dn; w->dummy.faces = w->df;
     w->dummy.id = ns_mesh_content_hash(&w->dummy);
     ns_store_put(w->st, &w->dummy);
-    /* antebrazo: anillo del codo soldado (y = 0) y anillo de la muñeca (y = -230) de 50 mm de radio, como el del juego */
-    for (int i = 0; i < 8; i++) {
+    /* antebrazo: anillo del codo soldado al brazo (0..3, y = 0), de la muñeca (4..7, y = -230) e intermedio (8..11, y = -80), 50 mm de radio, como el del juego */
+    for (int i = 0; i < 12; i++) {
         float a = 1.5707963f * (float)(i & 3);
-        w->fv[i].x = (int16_t)lrintf(50.0f * cosf(a)); w->fv[i].z = (int16_t)lrintf(50.0f * sinf(a)); w->fv[i].y = (int16_t)(i < 4 ? 0 : -230); w->fv[i].weld = (uint8_t)(i < 4 ? i : 0xFF);
+        const float y = i < 4 ? 0.0f : i < 8 ? -230.0f : -80.0f;   /* anillos centrados en el eje codo -> muñeca (0, -249, 47) */
+        w->fv[i].x = (int16_t)lrintf(50.0f * cosf(a)); w->fv[i].z = (int16_t)lrintf(50.0f * sinf(a) - y * 47.0f / 249.0f); w->fv[i].y = (int16_t)y; w->fv[i].weld = (uint8_t)(i < 4 ? i : 0xFF);
     }
     w->fn[0] = (NsNorm){0, 0, 4096, 0};
     memset(w->ff, 0, sizeof w->ff);
-    for (int k = 0; k < 4; k++) { w->ff[k].v[0] = (uint8_t)k; w->ff[k].v[1] = (uint8_t)((k + 1) & 3); w->ff[k].v[2] = (uint8_t)(4 + ((k + 1) & 3)); w->ff[k].v[3] = (uint8_t)(4 + k); }
-    w->fore.n_verts = 8; w->fore.n_norms = 1; w->fore.n_faces = 4; w->fore.verts = w->fv; w->fore.norms = w->fn; w->fore.faces = w->ff; w->fore.flags = NS_MF_WELDED;
+    for (int k = 0; k < 4; k++) {
+        w->ff[k].v[0] = (uint8_t)k; w->ff[k].v[1] = (uint8_t)((k + 1) & 3); w->ff[k].v[2] = (uint8_t)(8 + ((k + 1) & 3)); w->ff[k].v[3] = (uint8_t)(8 + k);
+        w->ff[4 + k].v[0] = (uint8_t)(8 + k); w->ff[4 + k].v[1] = (uint8_t)(8 + ((k + 1) & 3)); w->ff[4 + k].v[2] = (uint8_t)(4 + ((k + 1) & 3)); w->ff[4 + k].v[3] = (uint8_t)(4 + k);
+    }
+    w->fore.n_verts = 12; w->fore.n_norms = 1; w->fore.n_faces = 8; w->fore.verts = w->fv; w->fore.norms = w->fn; w->fore.faces = w->ff; w->fore.flags = NS_MF_WELDED;
     w->fore.id = ns_mesh_content_hash(&w->fore);
     ns_store_put(w->st, &w->fore);
+    /* brazo: anillo del codo (0..3) donde se sueldan los del antebrazo (codo en (0, -260, -50) de su marco) y anillo del hombro (4..7, abierto) */
+    for (int i = 0; i < 8; i++) {
+        float a = 1.5707963f * (float)(i & 3), r = i < 4 ? 50.0f : 60.0f;
+        w->uv[i].x = (int16_t)lrintf(r * cosf(a)); w->uv[i].z = (int16_t)lrintf(r * sinf(a) + (i < 4 ? -50.0f : 0.0f)); w->uv[i].y = (int16_t)(i < 4 ? -260 : 0); w->uv[i].weld = 0xFF;
+    }
+    memset(w->uf, 0, sizeof w->uf);
+    for (int k = 0; k < 4; k++) { w->uf[k].v[0] = (uint8_t)(4 + k); w->uf[k].v[1] = (uint8_t)(4 + ((k + 1) & 3)); w->uf[k].v[2] = (uint8_t)((k + 1) & 3); w->uf[k].v[3] = (uint8_t)k; }
+    w->upper.n_verts = 8; w->upper.n_norms = 1; w->upper.n_faces = 4; w->upper.verts = w->uv; w->upper.norms = w->fn; w->upper.faces = w->uf;
+    w->upper.id = ns_mesh_content_hash(&w->upper);
+    ns_store_put(w->st, &w->upper);
     NsScene *s = &w->sc;
     s->lights[0].amb[0] = 40; s->n_light = 1;
     s->n_inst = 2;
@@ -99,8 +113,9 @@ static int world_init(World *w, uint32_t cap_inst, uint32_t cap_piece, int textu
     s->inst[1].zone_mask = 0x0005; s->inst[1].layer = 0; s->inst[1].light = 0; s->inst[1].vis_state = 3;
     for (int k = 0; k < 16; k++) {
         NsPiece *p = &s->piece[1 + k];
-        p->mesh_id = k == NS_PART_HAND_R ? w->gr.m.id : k == NS_PART_HAND_L ? w->gl.m.id : (k == NS_PART_FORE_R || k == NS_PART_FORE_L) ? w->fore.id : w->dummy.id;
-        p->parent = -1;
+        p->mesh_id = k == NS_PART_HAND_R ? w->gr.m.id : k == NS_PART_HAND_L ? w->gl.m.id : (k == NS_PART_FORE_R || k == NS_PART_FORE_L) ? w->fore.id :
+                     (k == NS_PART_UPPER_R || k == NS_PART_UPPER_L) ? w->upper.id : w->dummy.id;
+        p->parent = (int16_t)(k == NS_PART_FORE_R ? NS_PART_UPPER_R : k == NS_PART_FORE_L ? NS_PART_UPPER_L : -1);   /* el antebrazo se suelda al brazo */
         xf_ident_t(&p->world, 100.0f * k, 1000.0f + k, -50.0f * k, 0.1f * k);
     }
     for (int sd = 0; sd < 2; sd++) {   /* la mano cuelga del antebrazo como en el modelo: muñeca en (0, -249, 47) de su marco, mismos ejes */
@@ -380,14 +395,14 @@ static void test_flat_and_epoch(void) {
     CHECK(m1 && m1->epoch == 1, "época 1");
     CHECK(ns_store_new_epoch(w.st) == 1 && ns_store_epoch(w.st) == 2, "época nueva");
     /* nueva escena (la manopla y el muñeco también deben reponerse como haría el extractor) */
-    ns_store_put(w.st, &w.gr.m); ns_store_put(w.st, &w.gl.m); ns_store_put(w.st, &w.fore);
+    ns_store_put(w.st, &w.gr.m); ns_store_put(w.st, &w.gl.m); ns_store_put(w.st, &w.fore); ns_store_put(w.st, &w.upper);
     w.sc.n_inst = 2; w.sc.n_piece = 17;
     w.sc.piece[1 + NS_PART_HAND_R].flags = 0; w.sc.piece[1 + NS_PART_HAND_L].flags = 0;
     CHECK(ns_hand_apply(&w.sc, w.st, &w.map, &in) == 2, "tras la época nueva");
     const NsMesh *m2 = ns_store_get(w.st, id0);
     CHECK(m2 && m2->epoch == 2, "la malla de la mano se reofrece en la época nueva (época %u)", m2 ? m2->epoch : 0);
     ns_store_ack(w.st, 2);
-    ns_store_put(w.st, &w.gr.m); ns_store_put(w.st, &w.fore);
+    ns_store_put(w.st, &w.gr.m); ns_store_put(w.st, &w.fore); ns_store_put(w.st, &w.upper);
     ns_store_put(w.st, &w.dummy);
     CHECK(ns_store_get(w.st, id0) != NULL, "tras el ack sigue disponible");
     ns_hand_stats(&st);
@@ -481,6 +496,7 @@ static void test_pose_blend(void) {
     NsHandStats st;
     for (int f = 0; f < 20; f++) {
         w.sc.n_inst = 2; w.sc.n_piece = 17; w.sc.piece[1 + NS_PART_HAND_R].flags = 0; w.sc.piece[1 + NS_PART_HAND_L].flags = 0;
+        w.sc.piece[1 + NS_PART_FORE_R].mesh_id = w.fore.id; w.sc.piece[1 + NS_PART_FORE_L].mesh_id = w.fore.id;   /* el extractor repone cada fotograma la malla del motor */
         in.trigger[0] = in.trigger[1] = 0.2f + 0.0005f * (float)f;
         ns_hand_apply(&w.sc, w.st, &w.map, &in);
     }
@@ -490,9 +506,10 @@ static void test_pose_blend(void) {
 }
 
 
-/* Antebrazo + transición + mano: UNA superficie cerrada. En >= 300 poses aleatorias de la muñeca dentro de sus límites (giro +-100 grados sobre el eje del antebrazo, flexión 80 /
- * extensión 70, desviación radial 20 / cubital 30) se juntan los triángulos del antebrazo del motor y de la instancia de la mano (soldaduras resueltas con la matriz del padre, como
- * la GPU) y se cuentan las aristas: las únicas abiertas son las del extremo del codo del antebrazo (4) y ninguna arista la comparten más de dos triángulos. */
+/* Brazo + antebrazo + transición + mano: UNA superficie cerrada. En >= 300 poses aleatorias (codo doblado 0..140 grados y antebrazo girado +-180 sobre su eje, como lo deja la IK; muñeca
+ * dentro de sus límites: giro +-100 grados, flexión 80 / extensión 70, desviación radial 20 / cubital 30) se juntan los triángulos del brazo, del antebrazo y de la instancia de la mano
+ * (soldaduras resueltas con la matriz del padre, como la GPU) y se cuentan las aristas: las únicas abiertas son las del hombro (4), ninguna la comparten más de dos triángulos y el giro no
+ * estrecha el antebrazo (área >= 75 % de la de reposo). */
 typedef struct { float p[3]; int piece; } WV;
 static void rot_axis_m(float *R, const float a[3], float deg) {
     float c = cosf(deg * 0.0174533f), s_ = sinf(deg * 0.0174533f), t = 1 - c, x = a[0], y = a[1], z = a[2];
@@ -520,7 +537,7 @@ static int collect(const NsScene *sc, const NsMeshStore *st, uint32_t inst, int 
             }
             ns_xf_apply(w, a, v[*nv].p); v[*nv].piece = (int)(in->first_piece + k);
             /* anillos intermedios de la transición (pieza 1 de la mano: 4 del antebrazo + 3 anillos intermedios + borde): vértices propios, nunca compartidos */
-            if (ns_key_is_hand(in->key) && k == 1 && i >= 4 && i < 4 + 3 * VRHA_NCUFF) v[*nv].piece = -1 - (int)i;
+            if (ns_key_is_hand(in->key) && k == 1 && i >= 4 && i + VRHA_NCUFF < m->n_verts) v[*nv].piece = -1 - (int)i;
             (*nv)++;
         }
         for (uint32_t f = 0; f < m->n_faces; f++) {
@@ -540,27 +557,57 @@ static int collect(const NsScene *sc, const NsMeshStore *st, uint32_t inst, int 
 static int cmp_u64(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
 static void test_watertight(void) {
     static WV v[4096]; static int tri[8192][3], id[4096]; static uint64_t e[3 * 8192];
-    uint32_t seed = 12345; int bad_open = 0, bad_nm = 0, poses = 0, worst_open = 0;
+    uint32_t seed = 12345; int bad_open = 0, bad_nm = 0, poses = 0, worst_open = 0, bad_twist = 0;
     const float l[3] = {0.0f, -249.0f / 253.4f, 47.0f / 253.4f};
     for (int it = 0; it < 320; it++) {
         World w; world_init(&w, 8, 64, 1); ns_hand_reset();
         #define RNDF(a, b) ((a) + ((b) - (a)) * (float)((seed = seed * 1664525u + 1013904223u) >> 8) / 16777216.0f)
         float Ra[9], Rb[9], Rc[9], R[9], Rf[9], ax[3] = {RNDF(-1, 1), RNDF(-1, 1), RNDF(-1, 1)}, al = sqrtf(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
         for (int i = 0; i < 3; i++) ax[i] /= al;
-        rot_axis_m(Rf, ax, RNDF(-180, 180));                                       /* antebrazo en cualquier orientación */
-        const float zx[3] = {0, 0, 1}, xx[3] = {1, 0, 0};
+        float Ru[9], Rd[9], Re[9];
+        rot_axis_m(Ru, ax, RNDF(-180, 180));                                       /* brazo en cualquier orientación */
+        const float zx[3] = {0, 0, 1}, xx[3] = {1, 0, 0}, yl[3] = {0, 1, 0};
+        rot_axis_m(Rd, xx, RNDF(-140, 0)); rot_axis_m(Re, yl, RNDF(-180, 180)); m3mul(Rf, Ru, Rd); m3mul(Rf, Rf, Re);   /* antebrazo: codo doblado y girado sobre su eje (la IK lo gira con la mano) */
         rot_axis_m(Ra, l, RNDF(-100, 100)); rot_axis_m(Rb, zx, RNDF(-70, 80)); rot_axis_m(Rc, xx, RNDF(-30, 20));
         m3mul(R, Ra, Rb); m3mul(R, R, Rc);                                         /* mano respecto al antebrazo: giro, flexión, desviación */
-        NsXf *F = &w.sc.piece[1 + NS_PART_FORE_R].world, *H = &w.sc.piece[1 + NS_PART_HAND_R].world;
+        NsXf *U = &w.sc.piece[1 + NS_PART_UPPER_R].world, *F = &w.sc.piece[1 + NS_PART_FORE_R].world, *H = &w.sc.piece[1 + NS_PART_HAND_R].world;
         float RH[9]; m3mul(RH, Rf, R);
-        for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) { F->m[4 * i + j] = Rf[3 * i + j]; H->m[4 * i + j] = RH[3 * i + j]; } F->m[4 * i + 3] = RNDF(-3000, 3000); }
+        for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) { U->m[4 * i + j] = Ru[3 * i + j]; F->m[4 * i + j] = Rf[3 * i + j]; H->m[4 * i + j] = RH[3 * i + j]; } U->m[4 * i + 3] = RNDF(-3000, 3000); }
+        for (int i = 0; i < 3; i++) F->m[4 * i + 3] = U->m[4 * i + 3] + Ru[3 * i + 1] * -260.0f + Ru[3 * i + 2] * -50.0f;
         for (int i = 0; i < 3; i++) H->m[4 * i + 3] = F->m[4 * i + 3] + Rf[3 * i + 1] * -249.0f + Rf[3 * i + 2] * 47.0f;
         #undef RNDF
         NsHandIn in; memset(&in, 0, sizeof in);
         in.enabled = 1; in.driven[1] = 1; in.item_pose[1] = (it & 1) ? HP_GRIP_PISTOL : HP_RELAX; in.grip[1] = (float)(it % 5) / 4.0f;
         if (ns_hand_apply(&w.sc, w.st, &w.map, &in) < 1) { bad_open++; world_free(&w); continue; }
         int nv = 0, nt = 0, ok = 1;
+        ok &= collect(&w.sc, w.st, 1, NS_PART_UPPER_R, v, &nv, tri, &nt, 4096, 8192);
+        const int fv0 = nv;
         ok &= collect(&w.sc, w.st, 1, NS_PART_FORE_R, v, &nv, tri, &nt, 4096, 8192);
+        {   /* el giro del antebrazo respecto al brazo se reparte entre sus dos franjas (codo -> anillo intermedio -> muñeca): ninguna lleva más del 70 % (sin repartir, la del codo lo lleva todo) */
+            const float ll = sqrtf(249.0f * 249.0f + 47.0f * 47.0f), L[3] = {0, -249.0f / ll, 47.0f / ll};
+            float loc[12][3];
+            for (int i = 0; i < 12; i++) {   /* vértices del antebrazo (soldados resueltos) de vuelta a su marco */
+                const float *wp = v[fv0 + i].p; float dv[3] = {wp[0] - F->m[3], wp[1] - F->m[7], wp[2] - F->m[11]};
+                for (int a = 0; a < 3; a++) loc[i][a] = F->m[a] * dv[0] + F->m[4 + a] * dv[1] + F->m[8 + a] * dv[2];
+            }
+            /* giro del antebrazo respecto al brazo sobre su eje (separado de la flexión del codo) */
+            float Rr[9], q[4], Rt[9] = {Ru[0], Ru[3], Ru[6], Ru[1], Ru[4], Ru[7], Ru[2], Ru[5], Ru[8]};
+            m3mul(Rr, Rt, Rf);
+            { const float tr = Rr[0] + Rr[4] + Rr[8]; q[3] = 0.5f * sqrtf(fmaxf(0.0f, 1.0f + tr)); const float k4 = q[3] > 1e-4f ? 0.25f / q[3] : 0.0f; q[0] = (Rr[7] - Rr[5]) * k4; q[1] = (Rr[2] - Rr[6]) * k4; q[2] = (Rr[3] - Rr[1]) * k4; }
+            const float tau = 2.0f * atan2f(q[0] * L[0] + q[1] * L[1] + q[2] * L[2], q[3]) * 57.29578f;
+            float worst = 0;
+            for (int k = 0; k < 4 && q[3] > 0.05f; k++) {   /* franja intermedio -> muñeca, en el marco del antebrazo; la del codo lleva el resto */
+                const float *p0 = loc[8 + k], *p1 = loc[4 + k];
+                const float t0 = p0[0] * L[0] + p0[1] * L[1] + p0[2] * L[2], t1 = p1[0] * L[0] + p1[1] * L[1] + p1[2] * L[2];
+                const float u[3] = {p0[0] - t0 * L[0], p0[1] - t0 * L[1], p0[2] - t0 * L[2]}, qq[3] = {p1[0] - t1 * L[0], p1[1] - t1 * L[1], p1[2] - t1 * L[2]};
+                const float cr[3] = {u[1] * qq[2] - u[2] * qq[1], u[2] * qq[0] - u[0] * qq[2], u[0] * qq[1] - u[1] * qq[0]};
+                const float b2 = atan2f(cr[0] * L[0] + cr[1] * L[1] + cr[2] * L[2], u[0] * qq[0] + u[1] * qq[1] + u[2] * qq[2]) * 57.29578f;
+                /* la franja del codo lleva tau - b2 (sin repartir: b2 = 0, todo el giro en la franja del codo) */
+                const float wb = fmaxf(fabsf(tau - b2), fabsf(b2));
+                if (wb > 0.7f * fabsf(tau) + 3.0f && wb > worst) worst = wb;
+            }
+            if (worst > 0) bad_twist++;
+        }
         for (uint32_t i = 2; i < w.sc.n_inst; i++) if (w.sc.inst[i].key == NS_HAND_KEY_R) ok &= collect(&w.sc, w.st, i, -1, v, &nv, tri, &nt, 4096, 8192);
         CHECK(ok, "capacidad de la prueba");
         /* vértices que coinciden (misma posición, de mallas distintas: soldados o compartidos entre piezas; dentro de una malla cada vértice es distinto) */
@@ -581,8 +628,9 @@ static void test_watertight(void) {
         poses++;
         world_free(&w);
     }
-    CHECK(poses >= 300 && bad_open == 0 && bad_nm == 0, "antebrazo+mano cerrados: %d de %d poses con aristas abiertas (peor %d; se esperan 4, el extremo del codo), %d con aristas de >2 triángulos", bad_open, poses, worst_open, bad_nm);
-    printf("  costura: %d poses de muñeca, aristas abiertas fuera del codo en %d, no variedad en %d (peor %d abiertas)\n", poses, bad_open, bad_nm, worst_open);
+    CHECK(poses >= 300 && bad_open == 0 && bad_nm == 0, "brazo+antebrazo+mano cerrados: %d de %d poses con aristas abiertas (peor %d; se esperan 4, el hombro), %d con aristas de >2 triángulos", bad_open, poses, worst_open, bad_nm);
+    CHECK(bad_twist == 0, "giro del antebrazo concentrado en una franja (> 70 %%) en %d de %d poses", bad_twist, poses);
+    printf("  brazo+antebrazo+mano: %d poses, aristas abiertas fuera del hombro en %d, no variedad en %d (peor %d abiertas), giro concentrado en una franja en %d\n", poses, bad_open, bad_nm, worst_open, bad_twist);
 }
 
 int main(void) {

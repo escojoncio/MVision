@@ -2,7 +2,7 @@
  * nativo (ns_extract), jugador (ns_player_bind), manos propias (ns_hand_apply), adaptador (ns_adapt, con texturas de la VRAM y la luz del jugador) y rasterizador de referencia
  * (ns_cpuref). Añade una pistola primitiva (la de test_grip.c) colgada de la mano por el zócalo de vr_grip. Herramienta de escritorio: NO entra en la app.
  *   nshands <dir_volcado> <dir_salida>
- * Escribe hands_<escena>.png: tres vistas (primera persona, lateral, de cerca sobre la costura de la muñeca). */
+ * Escribe hands_<escena>.png: cuatro vistas (primera persona, lateral, de cerca sobre la unión de la muñeca, codo desde abajo). Imprime las aristas abiertas de brazo+antebrazo+mano. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -151,6 +151,14 @@ int main(int argc, char **argv) {
             }
             (void)nf;
         }
+        if (getenv("NSHANDS_ARM")) for (int pt = 2; pt <= 4; pt++) {   /* diagnóstico: piezas del brazo derecho (padre, banderas, soldaduras) */
+            const NsPiece *pp = &S.piece[map.part[pt].idx[0]];
+            const NsMesh *m = ns_store_get(st, pp->mesh_id);
+            int nw = 0; for (unsigned i = 0; m && i < m->n_verts; i++) nw += m->verts[i].weld != 0xFF;
+            printf("  parte %d: pieza %u padre %d flags %04x malla %u v %u caras, MF %x, soldados %d\n", pt, map.part[pt].idx[0], pp->parent, pp->flags, m ? m->n_verts : 0, m ? m->n_faces : 0, m ? m->flags : 0, nw);
+            for (unsigned i = 0; m && i < m->n_verts; i++) printf("    v%u (%d %d %d) w%u\n", i, m->verts[i].x, m->verts[i].y, m->verts[i].z, m->verts[i].weld);
+            for (unsigned f = 0; m && f < m->n_faces; f++) printf("    f%u %u %u %u %u fl%u\n", f, m->faces[f].v[0], m->faces[f].v[1], m->faces[f].v[2], m->faces[f].v[3], m->faces[f].flags);
+        }
         NsHandIn hin; memset(&hin, 0, sizeof hin);
         hin.enabled = 1; hin.driven[0] = hin.driven[1] = 1; hin.grip[1] = SC[sc_i].pose == HP_RELAX ? 0.0f : 1.0f; hin.item_pose[1] = SC[sc_i].pose; hin.item_pose[0] = HP_RELAX;
         ns_hand_reset();
@@ -171,7 +179,25 @@ int main(int argc, char **argv) {
         size_t nt0 = ns_adapt_scene(&S, st, &ao, &tris, &ast), nt = 0;
         for (size_t i = 0; i < nt0; i++)   /* solo el jugador y las manos (sin el escenario) */
             if (src && (src[i].key == map.key || ns_key_is_hand(src[i].key))) tris[nt++] = tris[i];
-        { size_t nhand = 0; for (size_t i = 0; i < nt; i++) nhand += 0; (void)nhand; }
+        {   /* cierre del brazo derecho (brazo + antebrazo + mano): aristas abiertas tras resolver las soldaduras (vértices iguales en posición) */
+            static float P[60000][3]; static int T[20000][3]; int np = 0, ntr = 0;
+            for (size_t i = 0; src && i < nt0 && ntr < 20000; i++) {
+                const int pr = (int)src[i].piece;
+                if (!(pr == (int)map.part[2].idx[0] || pr == (int)map.part[3].idx[0] || src[i].key == NS_HAND_KEY_R)) continue;
+                for (int k = 0; k < 3; k++) { int f = -1; for (int j = 0; j < np; j++) if (fabsf(P[j][0] - tris[i].v[k].p[0]) < 0.01f && fabsf(P[j][1] - tris[i].v[k].p[1]) < 0.01f && fabsf(P[j][2] - tris[i].v[k].p[2]) < 0.01f) { f = j; break; }
+                    if (f < 0) { f = np++; memcpy(P[f], tris[i].v[k].p, 12); } T[ntr][k] = f; }
+                ntr++;
+            }
+            int open = 0;
+            for (int a = 0; a < ntr; a++) for (int k = 0; k < 3; k++) {
+                int x = T[a][k], y = T[a][(k + 1) % 3], n = 0;
+                if (x == y) continue;
+                for (int b = 0; b < ntr; b++) for (int q = 0; q < 3; q++) { int u = T[b][q], w2 = T[b][(q + 1) % 3]; if ((u == x && w2 == y) || (u == y && w2 == x)) n++; }
+                if (n == 1) { open++; if (getenv("NSHANDS_ARM")) printf("    abierta (%.0f %.0f %.0f)-(%.0f %.0f %.0f)\n", P[x][0], P[x][1], P[x][2], P[y][0], P[y][1], P[y][2]); }
+            }
+            const VrBodyDebug *dg = vrbody_debug(1);
+            printf("  brazo+antebrazo+mano: %d triángulos, %d aristas abiertas; giro del antebrazo %.0f grados, codo %.0f\n", ntr, open, dg->sol.tau_f * 57.3f, dg->sol.swivel);
+        }
         if (src) { size_t c1 = 0; for (size_t i = 0; i < nt0; i++) c1 += ns_key_is_hand(src[i].key); printf("  triángulos: %zu (manos %zu), piezas %zu/%zu, sin malla %zu, ocultas %zu, degenerados %zu, soldados %zu\n", nt0, c1, ast.pieces_drawn, ast.pieces_in, ast.drop_no_mesh, ast.drop_hidden_piece, ast.drop_degenerate, ast.welded_verts); }
         free(src);
         NXT = 0;
@@ -191,24 +217,28 @@ int main(int argc, char **argv) {
         float wr[3] = {W[3], W[7], W[11]}, fing[3] = {-W[1], -W[5], -W[9]}, palm[3] = {W[0], W[4], W[8]}, thumb[3] = {W[2], W[6], W[10]};
         float gc[3], hc[3]; vrhs_grip_center(1, gc);
         for (int i = 0; i < 3; i++) hc[i] = W[4 * i] * gc[0] + W[4 * i + 1] * gc[1] + W[4 * i + 2] * gc[2] + W[4 * i + 3];
-        float eyes[3][3], tgs[3][3], fovs[3] = {60, 50, 40};
+        float eyes[4][3], tgs[4][3], fovs[4] = {60, 50, 40, 55};
         for (int i = 0; i < 3; i++) {
             eyes[0][i] = V.eye[i]; tgs[0][i] = hc[i];
             eyes[1][i] = hc[i] - palm[i] * 420.0f + thumb[i] * 150.0f; tgs[1][i] = 0.5f * (hc[i] + wr[i]) - fing[i] * 60.0f;
             eyes[2][i] = wr[i] - palm[i] * 140.0f - fing[i] * 40.0f + thumb[i] * 140.0f; tgs[2][i] = wr[i] + fing[i] * 10.0f;
         }
+        {   /* codo desde abajo y de lado */
+            const NsXf *ew = &S.piece[map.part[3].idx[0]].world;
+            for (int i = 0; i < 3; i++) { tgs[3][i] = ew->m[4 * i + 3]; eyes[3][i] = ew->m[4 * i + 3] + (i == 1 ? -420.0f : 0.0f) + (i == 0 ? 250.0f : 0.0f); }
+        }
         const int Wd = 640, Hd = 520;
-        uint8_t *sheet = calloc((size_t)3 * Wd * Hd * 3, 1);
-        for (int v = 0; v < 3; v++) {
+        uint8_t *sheet = calloc((size_t)4 * Wd * Hd * 3, 1);
+        for (int v = 0; v < 4; v++) {
             NsRCam cam; cam_look(&cam, eyes[v], tgs[v], fovs[v], Wd, Hd); cam.znear = 20.0f;
             NsRBuf b; ns_buf_alloc(&b, Wd, Hd); ns_buf_clear(&b, 5, 6, 8);
             NsRStats rst; ns_render_view(&rs, &cam, NS_O_FLOAT, &b, &rst);
             uint8_t *rgb = malloc((size_t)Wd * Hd * 3); ns_buf_to_rgb8(&b, rgb, 0, 0);
-            for (int y = 0; y < Hd; y++) memcpy(sheet + ((size_t)y * 3 * Wd + (size_t)v * Wd) * 3, rgb + (size_t)y * Wd * 3, (size_t)Wd * 3);
+            for (int y = 0; y < Hd; y++) memcpy(sheet + ((size_t)y * 4 * Wd + (size_t)v * Wd) * 3, rgb + (size_t)y * Wd * 3, (size_t)Wd * 3);
             free(rgb); ns_buf_free(&b);
         }
         char path[512]; snprintf(path, sizeof path, "%s/hands_%s.png", argv[2], SC[sc_i].name);
-        if (ns_write_png(path, 3 * Wd, Hd, sheet)) printf("no se pudo escribir %s\n", path); else printf("  %s\n", path);
+        if (ns_write_png(path, 4 * Wd, Hd, sheet)) printf("no se pudo escribir %s\n", path); else printf("  %s\n", path);
         free(sheet); free(all); free(tris); ns_scene_free(&S); ns_store_destroy(st);
     }
     return 0;
