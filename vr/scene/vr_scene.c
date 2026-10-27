@@ -1005,7 +1005,9 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
     for (uint32_t i = 0; o.drop_world2d && i < n; i++) {
         const GpuOp *w = &dl->ops[i];
         if (w->type != GPU_OP_POLY) continue;
-        for (int k = 0; k < (w->nv == 4 ? 4 : 3); k++) if (w->v[k].vvalid) { last3d = (long)i; break; }
+        int nvk = w->nv == 4 ? 4 : 3, nok = 0;
+        for (int k = 0; k < nvk; k++) nok += w->v[k].vvalid ? 1 : 0;
+        if (nok >= nvk - 1) last3d = (long)i;   /* 3D (o reconstruible): todos los vértices con vista salvo uno; un vértice suelto con vista es una coincidencia de SXY (hp_por_valor) en un polígono de HUD */
     }
 
     size_t nt = 0;
@@ -1242,7 +1244,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 }
                 continue;
             }
-            if (nval && !o.partial_to_2d) { out->stats.drop_partial++; fate_set(i, VR_FATE_PARTIAL); continue; }
+            if (nval && !o.partial_to_2d && !(o.drop_world2d && (long)i > last3d && nval <= 1)) { out->stats.drop_partial++; fate_set(i, VR_FATE_PARTIAL); continue; }
             out->stats.n_poly2d++;
             fate_set(i, VR_FATE_2D);
             if (o.drop_2d_all) continue;
@@ -1293,9 +1295,11 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             if (fb && !op->fbt) { out->stats.n_fb_clear++; continue; }
             int fcls = fb ? 0 : filter_class(&o, dl, op, 1, g->x, g->y, g->x + op->rw, g->y + op->rh, g->u, g->v, g->u, g->v);
             if (fcls) filter_note(out, op, fcls, 1, &tint_w);
-            else if (!semi && !(op->flags & GPU_F_TEXTURED) && (double)op->rw * op->rh >= 0.9 * (double)dl->disp.w * dl->disp.h) {
+            else if (!semi && !(op->flags & GPU_F_TEXTURED) && ((double)op->rw * op->rh >= 0.9 * (double)dl->disp.w * dl->disp.h ||
+                                                              (o.drop_world2d && dl->disp.w > 0 && (double)op->rw >= 0.9 * (double)dl->disp.w && (double)op->rh <= 0.1 * (double)dl->disp.h))) {
                 /* borrado/máscara a pantalla completa: en el panel HUD (alfa premultiplicado, cleared a transparente) lo dejaría OPACO e
-                 * ocultaría el mundo. Se cuenta y, con opts.drop_clear (def. 1), no se emite. */
+                 * ocultaría el mundo. Se cuenta y, con opts.drop_clear (def. 1), no se emite. En vista de mundo (drop_world2d) también las bandas opacas de ancho de pantalla
+                 * (máscara del agua, letterbox): el nativo dibuja el mundo y las bandas taparían el campo de visión. */
                 if (!(o.keep_late_clear && out->stats.n_tris3d > 0)) {   /* keep_late_clear: tras un 3D es el relleno de los créditos y se emite */
                     out->stats.n_clear++;
                     if (o.drop_clear) continue;

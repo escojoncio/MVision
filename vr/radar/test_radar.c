@@ -329,6 +329,28 @@ static void t_periph_near(void) {
     CHECK(nfill[3] == nfill[0] - 8, "sin periferia: 2 triángulos menos por lado y cono (%u vs %u)", nfill[3], nfill[0]);
 }
 
+/* range_scale (menú de alcance): la IA ve hasta L x range_scale x range_mult, y el radar dibuja eso (área de relleno = (s^2 m^2 - 1) x área del cono). */
+static void t_range_scale(void) {
+    build_list(1);
+    VrRadarSplit s;
+    CHECK(vrradar_split(&L, &s) == 0 && s.present, "split range_scale");
+    VrRadarPerc p1 = {1, 2.4f, 0.6f, 0.5f, 1.0f}, p0 = {1, 2.4f, 0.6f, 0.5f, 0.0f}, p15 = {1, 2.4f, 0.6f, 0.5f, 1.5f};
+    VrRadarPerc *pp[3] = {&p1, &p0, &p15};
+    double area[3] = {0, 0, 0};
+    for (int k = 0; k < 3; k++) {
+        VrRadarScene r;
+        vrradar_set_perception(pp[k]);
+        CHECK(vrradar_build(&s, &r) == 0 && r.n_cones_ext == 2, "build range_scale %d", k);
+        for (uint32_t i = 0; i < r.nb; i++) {
+            if (r.b[i].blend != 1 || r.b[i].count != r.n_ext_tris * 3) continue;
+            for (uint32_t t = 0; t + 2 < r.b[i].count; t += 3) { double ar = tri_area(&r.v[r.b[i].first + t]); if (ar > 0.51) area[k] += ar; }
+        }
+    }
+    CHECK(NEAR(area[1] / area[0], 1.0, 1e-6), "range_scale 0 == 1: %.2f vs %.2f", area[1], area[0]);
+    double want = (1.5 * 1.5 * 2.4 * 2.4 - 1.0) / (2.4 * 2.4 - 1.0);
+    CHECK(NEAR(area[2] / area[0], want, 1e-3), "corona con range_scale 1,5: razón de áreas %.3f (esperada %.3f)", area[2] / area[0], want);
+}
+
 /* La numeración de seq de la captura vuelve a 0 al reencenderla: los rangos viejos no deben marcar primitivas nuevas. */
 static void t_seq_restart(void) {
     vrradar_reset();
@@ -925,6 +947,7 @@ int main(int argc, char **argv) {
     t_state_mode();
     t_corona_placement();
     t_periph_near();
+    t_range_scale();
     t_seq_restart();
     t_ot_marks();
     t_anchor();

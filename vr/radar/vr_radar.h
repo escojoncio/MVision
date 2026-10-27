@@ -74,6 +74,7 @@ typedef struct {
     float range_mult;    /* alcance máximo / alcance original (VrpConfig.range_mult) */
     float periph_frac;   /* fracción del semiángulo desde la que es periferia (VrpConfig.periph_frac; >= 1: sin periferia) */
     float periph_near;   /* la periferia solo rige para d > periph_near * L (VrpConfig.periph_near); entre L y periph_near*L todo es núcleo (>= range_mult: sin periferia) */
+    float range_scale;   /* factor del menú «IA: alcance de visión» (VrpConfig.range_scale): el alcance real de la IA es el del cono del juego x range_scale; 0 = 1 */
 } VrRadarPerc;
 /* Recibe la configuración de percepción activa (copiarla cada vez que cambie el preset; barato). Ver vr_radar_vrp.h. */
 void vrradar_set_perception(const VrRadarPerc *p);

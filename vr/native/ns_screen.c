@@ -5,7 +5,7 @@
 NsScreenCfg ns_screen_cfg_default(void) {
     NsScreenCfg c;
     memset(&c, 0, sizeof c);
-    c.wave_gain = 1.0f; c.wave_space = 8.0f;
+    c.wave_gain = 3.0f; c.wave_space = 8.0f;
     c.bars_gain = 0.0f; c.bars_soft = 4.0f;
     c.scan_gain = 0.12f; c.scan_period = 2.0f; c.scan_cover = 0.5f;
     c.mode_amount = 0.30f;
@@ -195,8 +195,8 @@ int ns_screen_water_ref(const float wmin[4], const float wmax[4], const float wt
     int in = ew[0] >= wmin[0] && ew[0] <= wmax[0] && ew[1] >= wmin[1] && ew[1] <= wmax[1] && ew[2] >= wmin[2] && ew[2] <= wmax[2];
     if (!in && wtint[3] < 0.5f) return 0;
     for (int k = 0; k < 3; k++) col[k] *= wtint[k];
-    /* onda horizontal que depende de la altura (como las filas de la pantalla del motor) y vertical suave que depende de la posición horizontal */
+    /* onda horizontal que depende de la altura (como las filas de la pantalla del motor): du = píxeles del ojo que se corre el muestreo (el sombreador lo lleva a uv con la derivada del píxel, máx. 1 texel); sin componente vertical */
     *du = wwave[0] * sinf(wwave[1] * ew[1] + wwave[2]);
-    *dv = 0.5f * wwave[0] * sinf(wwave[1] * (ew[0] + ew[2]) + wwave[2]);
+    *dv = 0.0f;
     return 1;
 }

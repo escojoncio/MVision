@@ -1111,7 +1111,7 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
             if (!full) {
                 uint64_t mk = op_key(o, L->ox, L->oy);
                 key_push(&L->mcur, &L->mcur_n, &L->mcur_cap, mk);
-                if (mhave) {
+                if (L->menu_on && L->mbase_n) {   /* selector abierto con base: la capa lleva solo la ventana (créditos y HUD del mundo no) */
                     int na, nb, ne, nf;
                     op_box(o, 1, &na, &nb, &ne, &nf);
                     na -= L->ox; ne -= L->ox; nb -= L->oy; nf -= L->oy;
@@ -1119,8 +1119,9 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
                     if (nb < 0) nb = 0;
                     if (ne > w) ne = w;
                     if (nf > h) nf = h;
-                    /* solo se omite lo que ya estaba en la base o lo que no toca el rect; una primitiva nueva que lo corte se pinta (el panel ya recorta por UV) */
-                    menu_skip = key_in(L->mbase, L->mbase_n, mk) || ne <= na || nf <= nb || (float)ne <= mx0 - MENU_KEEP_PX || (float)na >= mx1 + MENU_KEEP_PX || (float)nf <= my0 - MENU_KEEP_PX || (float)nb >= my1 + MENU_KEEP_PX;
+                    /* solo se omite lo que ya estaba en la base o lo que no toca el rect (el conservado, aunque aún no esté asentado); una primitiva nueva que lo corte se pinta (el panel ya recorta por UV) */
+                    menu_skip = key_in(L->mbase, L->mbase_n, mk) || ne <= na || nf <= nb ||
+                                (L->menu_have && ((float)ne <= L->menu_px[0] - MENU_KEEP_PX || (float)na >= L->menu_px[2] + MENU_KEEP_PX || (float)nf <= L->menu_px[1] - MENU_KEEP_PX || (float)nb >= L->menu_px[3] + MENU_KEEP_PX));
                 }
                 if ((L->menu_on || L->mbase_n) && !key_in(L->mbase, L->mbase_n, mk)) {   /* nueva respecto al base: con menú, candidata a ventana; sin menú, la celda «ya cambiaba» */
                     int na, nb, ne, nf;

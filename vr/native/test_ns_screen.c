@@ -45,7 +45,7 @@ static void test_water(void) {
     float col[3] = { 1, 1, 1 }, du, dv, ew_in[3] = { 10, 100, 10 }, ew_out[3] = { 10, 900, 10 };
     CHECK(ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, o.water_wave, ew_in, &du, &dv, col) == 1, "fragmento en el volumen afectado");
     CHECK(near(col[0], 0.5f, 1e-5f) && near(col[1], 0.8f, 1e-5f) && near(col[2], 1.0f, 1e-5f), "tinte %f %f %f", col[0], col[1], col[2]);
-    float amp = 3.0f; CHECK(fabsf(du) <= amp + 1e-4f && fabsf(dv) <= amp * 0.5f + 1e-4f, "onda acotada %f %f", du, dv);
+    float amp = 3.0f * ns_screen_cfg_default().wave_gain; CHECK(fabsf(du) <= amp + 1e-4f && dv == 0.0f, "onda acotada y horizontal %f %f", du, dv);
     float c2[3] = { 1, 1, 1 };
     CHECK(ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, o.water_wave, ew_out, &du, &dv, c2) == 0 && c2[0] == 1 && du == 0 && dv == 0, "fragmento fuera: intacto");
     /* cabeza dentro: todo teñido, barras presentes */

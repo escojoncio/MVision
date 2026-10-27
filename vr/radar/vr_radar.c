@@ -231,6 +231,7 @@ static int ext_cone(const GpuOp *o, int kind, const VrRadarPerc *p) {
     const uint8_t *col = CONES[kind - 1].m;
     float A[2] = {o->v[0].x, o->v[0].y}, O[2] = {o->v[1].x, o->v[1].y}, F[2] = {o->v[2].x, o->v[2].y}, B[2] = {o->v[3].x, o->v[3].y};
     float m = p->range_mult;
+    float rs = p->range_scale > 1.0f ? p->range_scale : 1.0f;   /* alcance real de la IA = el del cono del juego x rs (el original ya cubre hasta 1) */
     if (fabsf(A[0]) > 4000 || fabsf(A[1]) > 4000 || fabsf(F[0]) > 4000 || fabsf(F[1]) > 4000 || fabsf(B[0]) > 4000 || fabsf(B[1]) > 4000) return 1;
     float pf = p->periph_frac;
     int has_p = pf < 1.0f;
@@ -244,6 +245,7 @@ static int ext_cone(const GpuOp *o, int kind, const VrRadarPerc *p) {
         if (p->periph_near >= m) { has_p = 0; pf = 1.0f; }
         else n = p->periph_near;
     }
+    m *= rs; n *= rs;      /* la sospecha y la periferia se miden sobre el alcance ya escalado; entre 1 y rs*n todo es núcleo */
     /* lado 1: F -> A ; lado 2: F -> B */
     const float *S[2] = {A, B};
     for (int s = 0; s < 2; s++) {
@@ -289,7 +291,7 @@ int vrradar_build(const VrRadarSplit *s, VrRadarScene *out) {
     int first_cone = -1;
     uint32_t ncone = 0, next = 0;
     int textured = 0;
-    int enable = perc.enabled && perc.range_mult > 1.0f;
+    int enable = perc.enabled && perc.range_mult * (perc.range_scale > 1.0f ? perc.range_scale : 1.0f) > 1.0f;
     for (uint32_t i = 0; i < rl->nops; i++) {
         const GpuOp *op = &rl->ops[i];
         if ((op->type == GPU_OP_RECT || op->type == GPU_OP_POLY) && (op->flags & GPU_F_TEXTURED)) textured = 1;

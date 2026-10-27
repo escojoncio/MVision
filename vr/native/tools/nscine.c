@@ -86,7 +86,15 @@ int main(int argc, char **argv) {
             float A[9], t3[3]; ns_cine_engine_view(&sc.cam, A, t3);
             NsRCam c; ns_cam_game(&c, A, t3, sc.cam.h, 160, 120, 320, 240, w, h); c.fx *= 130.0f / sc.cam.h; c.fy *= 130.0f / sc.cam.h; c.znear = 1;
             NsRScene s3 = { tt, nn, d->vram };
+            NsRWave rw; NsGpuScreen so; const float id34[12] = {1,0,0,0, 0,1,0,0, 0,0,1,0};   /* onda del sombreador (ns_fs): solo en "despues" (lo que dibuja la app) */
+            if (pass == 1 && (sfx.flags & NS_SFX_WATER)) {
+                ns_screen_build(&sfx, id34, eyep, 0.0f, NULL, NULL, &so, NULL);
+                for (int k = 0; k < 3; k++) { rw.min[k] = so.water_min[k]; rw.max[k] = so.water_max[k]; }
+                rw.amp = so.water_wave[0] * (float)w / 1888.0f;   /* amplitud en píxeles del ojo (1888 de ancho en el visor) */ rw.freq = so.water_wave[1]; rw.phase = so.water_wave[2]; rw.all = so.water_tint[3] > 0.5f;
+                ns_ref_wave = &rw;
+            }
             ns_buf_clear(&b, 0, 0, 0); ns_render_view(&s3, &c, 0, &b, NULL); ns_buf_to_rgb8(&b, rgb, 0, 0);
+            ns_ref_wave = NULL;
             NsGpuOverlay bars; memset(&bars, 0, sizeof bars);
             bars.kind = NSG_OV_BARS; bars.abr = 2; bars.amount = 0.85f; bars.rgb[0] = bars.rgb[1] = bars.rgb[2] = 1; bars.p[0] = (float)6; bars.p[1] = 4.0f; bars.p[3] = sc.cam.h;
             for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {

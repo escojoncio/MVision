@@ -259,7 +259,8 @@ fragment float4 ns_fs(NsVOut in [[stage_in]], texture2d<ushort, access::read> vr
     uint clut = in.clutf & 0xFFFFu;
     bool semi = (flags & NSG_CF_SEMI) != 0u;
     float3 col = clamp(in.col, 0.0, 255.0);
-    /* agua (ns_screen_water_ref): en el volumen, o en todo si la cabeza está dentro. Tinte multiplicativo y onda de texels que dependen solo de la posición del mundo. */
+    const float2 duvdx = dfdx(in.uv);   /* derivada en flujo uniforme (antes de ramas y descartes) */
+    /* agua (ns_screen_water_ref): en el volumen, o en todo si la cabeza está dentro. Tinte multiplicativo y onda que dependen solo de la posición del mundo. */
     bool wet = false;
     float2 wd = float2(0.0);
     float3 wtint = float3(1.0);
@@ -268,8 +269,8 @@ fragment float4 ns_fs(NsVOut in [[stage_in]], texture2d<ushort, access::read> vr
         wet = inside || U.water_tint.w > 0.5;
         if (wet) {
             wtint = U.water_tint.xyz;
-            wd = float2(U.water_wave.x * sin(U.water_wave.y * in.ew.y + U.water_wave.z),
-                        0.5 * U.water_wave.x * sin(U.water_wave.y * (in.ew.x + in.ew.z) + U.water_wave.z));
+            /* onda horizontal de la imagen: el muestreo se corre water_wave.x * sin(...) píxeles del ojo (uv del píxel vecino), como mucho 1 texel: nunca cruza a texturas vecinas */
+            wd = clamp(duvdx * (U.water_wave.x * sin(U.water_wave.y * in.ew.y + U.water_wave.z)), -1.0, 1.0);
         }
     }
     float3 rgb;

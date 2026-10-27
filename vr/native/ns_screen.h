@@ -16,7 +16,7 @@ extern "C" {
 #endif
 
 typedef struct {
-    float wave_gain;        /* multiplica la amplitud de la ondulación (filas del motor -> texels) */
+    float wave_gain;        /* píxeles del ojo de desplazamiento horizontal por fila del motor de amplitud de la ondulación */
     float wave_space;       /* unidades del motor por paso del periodo (longitud de onda = wave_period * wave_space) */
     float bars_gain;        /* 0..1 opacidad de las barras bajo el agua; defecto 0 = sin barras (la viñeta circular dejaba un círculo claro con el resto casi negro y translúcido) */
     float bars_soft;        /* semianchura del borde suave de las barras, en px del motor */
@@ -58,7 +58,7 @@ void ns_screen_frame_ref(const NsGpuOverlay *ov, float sub, const float b[3], fl
 /* ydir: componente vertical (mundo VR, Y arriba) del rayo unitario del píxel; solo lo usa SCAN (las líneas están ancladas al mundo, no giran con la cabeza). RING y BARS son
  * viñetas circulares (invariantes al giro de la cabeza sobre su eje), el resto de recubrimientos son uniformes. */
 void ns_screen_overlay_ref(const NsGpuOverlay *ov, float tx, float ty, float ydir, const float b[3], float out[3]);
-/* Agua en el mundo: ew = posición del fragmento en el mundo del motor; uv += desplazamiento; col *= tinte. Devuelve 1 si el fragmento está afectado. */
+/* Agua en el mundo: ew = posición del fragmento en el mundo del motor; du = píxeles del ojo que se corre el muestreo en horizontal (dv = 0); col *= tinte. Devuelve 1 si el fragmento está afectado. */
 int ns_screen_water_ref(const float wmin[4], const float wmax[4], const float wtint[4], const float wwave[4], const float ew[3], float *du, float *dv, float col[3]);
 
 #ifdef __cplusplus

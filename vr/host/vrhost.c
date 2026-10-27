@@ -1126,6 +1126,8 @@ static void publish_state(void) {
             char cb[640];
             vrview_cine_describe(&view, &vin, cb, sizeof cb);
             fprintf(stderr, "%s | vb=%u\n", cb, (unsigned)hle_frame_count());
+            if (view.kind == VRV_K_ENGINE && view.reason == VRV_R_NO_GAME)   /* 3D clasificado como cinemática solo porque no hay partida (no por banderas de cinemática): puede ser la caja 4:3 de un título/carga con 3D */
+                fprintf(stderr, "[vista] engine-por-sin-partida escena=%d ps=%08x gs=%08x vb=%u\n", (int)vin.scene3d, (unsigned)bs.player_status, (unsigned)bs.game_status, (unsigned)hle_frame_count());
         }
         g.view_kind = view.kind;
         g.cine_shot = cine.shot; g.cine_cuts = cine.cuts; g.cine_cover = last_cover;

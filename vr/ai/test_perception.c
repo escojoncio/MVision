@@ -32,6 +32,7 @@ static void t_config(void) {
     CHECK(!o.enabled && v.enabled && x.enabled, "presets enabled");
     CHECK(v.range_mult > 1.0f && x.range_mult > v.range_mult, "exigente alcanza más lejos");
     CHECK(x.t_alert < v.t_alert && x.t_suspect < v.t_suspect && x.decay < v.decay, "exigente más rápido");
+    CHECK(v.range_scale == 1.0f && x.range_scale == 1.0f, "alcance de visión por defecto = el del juego (x1): %.2f %.2f", v.range_scale, x.range_scale);
 }
 
 static void t_rate(void) {

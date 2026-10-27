@@ -96,7 +96,7 @@ static void *worker(void *arg) {
         if (draw && j->has_opd) { sc.op_dest = j->opd; sc.n_op_dest = j->l.nops; }
         double t0 = now_ms();
         if (skip) A->n_skip++;   /* (contador leído bajo el mutex en vl2a_report; incremento sin él: solo informativo) */
-        const int menu_win = atomic_load(&g_split) && (j->view & 255) == VRV_R_SELECTOR;   /* solo con el troceo activo (vl2a_set_split): sin él la capa lleva TODO el 2D, también la ventana del selector */
+        const int menu_win = (j->view & 255) == VRV_R_SELECTOR;   /* selector de armas/objetos: la capa lleva solo la ventana (vl2d_set_menu omite lo que ya estaba antes de abrirlo y lo que no toca la ventana: créditos, HUD del mundo); el rect solo lo usa el visor con el troceo (vl2a_set_split) */
         vl2d_set_menu(A->L, menu_win);   /* ventana de armas/objetos sobre el mundo: rect de lo nuevo respecto a la lista previa sin menú */
         int have = skip ? 0 : vl2d_run(A->L, &j->l, draw && j->has_opd ? &sc : NULL, j->full);
         double ms = now_ms() - t0;

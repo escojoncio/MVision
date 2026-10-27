@@ -171,6 +171,12 @@ final class RGRenderer {
     // Capa 2D fiel (vr/scene/vr_layer2d): la rasteriza la CPU con la aritmética de la GPU original y llega ya como RGBA8; sustituye al pase HUD del shader mientras exista.
     /// Fotograma completo (pantalla de cine / vídeo ampliado) a alta resolución; nil si la última escena no lo trae. Lo consume XRPresenter.hqFull.
     private(set) var hqFull: (bytes: [UInt8], w: Int, h: Int, seq: UInt32)?
+    /// Resultado de la última lectura de la capa 2D fiel (takeLayer2D): "ok" o "descartada(motivo)". Solo para el diagnóstico [radio-src].
+    private(set) var layerNote = "ok"
+    /// Línea [radio-src] (la pide XRFrameEncoder 1 vez por segundo mientras la vista es la radio): si la pantalla de cine usa la capa 2D fiel o el fotograma del emulador.
+    func radioSrcLine(hqActive: Bool, xbrActive: Bool) -> String {
+        "[radio-src] hqActive=\(hqActive) hqFull=\(hqFull != nil) xbrActive=\(xbrActive) layerView=\(layerView) takeLayer2D=\(layerNote)"
+    }
     private var hudLegacy: MTLTexture?, hudLegacySRGB: MTLTexture?
     private var hudHQRing: [MTLTexture] = [], hudHQRingSRGB: [MTLTexture] = []
     private var hudHQIdx = 0, hudHQW = 0, hudHQH = 0, hudHQSeq: UInt32 = 0
@@ -552,6 +558,7 @@ final class RGRenderer {
         var lMode: Int32 = 0, lView: Int32 = 0
         // La capa nueva (retrasada: el trabajador va por detrás de la vista) se rechaza si es de otra vista o, en el menú, no es VL_PANEL: se conserva la anterior válida (arriba) o el HUD de siempre.
         let accepted = usable && mv_vrhost_hud2d_layer(&lMode, &lView) != 0 && mv_vrhost_hud2d_accept(lMode, lView, layerView, ov) != 0
+        layerNote = accepted ? "ok" : usable ? "descartada(vista/modo lMode=\(lMode) lView=\(lView) vigente=\(layerView) ov=\(ov))" : "descartada(sin-capa r=\(r))"
         if !accepted {
             if hudHQ && !usable { hudHQ = false; hudDone = false; hudTexture = hudLegacy; hudTextureSRGB = hudLegacySRGB; hudMenuUV = nil }
             hqFull = nil

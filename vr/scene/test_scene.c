@@ -2114,6 +2114,61 @@ static void test_billboard(void) {
     vr_scene_release();
 }
 
+/* Vista de mundo (drop_world2d): (A5) un cuadrilátero de HUD (relleno de la barra de vida) con un vértice con vista por coincidencia de SXY (hp_por_valor) no debe perderse ni arrastrar al HUD anterior;
+ * (A1) las bandas negras opacas de ancho de pantalla (máscara del agua) no van al panel (el nativo dibuja el mundo), el HUD pequeño sí; sin drop_world2d (cinemática) las bandas se conservan. */
+static void test_world_view_hud(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    float a[3] = {0, 0, 2000}, b[3] = {1000, 0, 2000}, c[3] = {0, 1000, 2000};
+    for (int on = 0; on < 2; on++) {
+        reset(); dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+        poly3(a, b, c, 0);                                                   /* op0: 3D completo */
+        for (int q = 0; q < 2; q++) {                                        /* op1: relleno limpio; op2: relleno con 1 vértice con vista (falso positivo) */
+            GpuOp *h = add(GPU_OP_POLY); h->nv = 4; h->flags = GPU_F_GOURAUD;
+            for (int i = 0; i < 4; i++) { h->v[i].x = (int16_t)(16 + (i & 1 ? 32 : 0)); h->v[i].y = (int16_t)(17 + q * 20 + (i & 2 ? 5 : 0)); }
+            if (q) setv3(&h->v[1], 10, 20, 3000);
+        }
+        rect2d(0, 0, 320, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0);                     /* op3: banda negra opaca superior */
+        rect2d(0, 250, 320, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0);                   /* op4: banda inferior */
+        rect2d(16, 28, 32, 5, 0, 0, 0, 0, 0, 0, 0, 24, 24);                  /* op5: fondo de la barra (rect pequeño) */
+        VrSceneOpts o = vr_scene_opts_default();
+        o.origin_mode = 1; o.drop_clear = 1; o.drop_world2d = on;
+        VrScene s;
+        CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.op_dest, "world_view_hud: build (%d)", on);
+        if (on) {
+            CHECK(s.op_dest[1] == 2 && s.op_dest[2] == 2 && s.stats.drop_partial == 0, "A5: relleno limpio %u y con vértice falso %u en el panel (esperado 2 y 2), parciales %u", s.op_dest[1], s.op_dest[2], s.stats.drop_partial);
+            CHECK(s.op_dest[3] == 0 && s.op_dest[4] == 0 && s.op_dest[5] == 2, "A1: bandas %u %u (esperado 0 0), fondo de barra %u (esperado 2)", s.op_dest[3], s.op_dest[4], s.op_dest[5]);
+        } else
+            CHECK(s.op_dest[3] == 2 && s.op_dest[4] == 2, "cinemática (sin drop_world2d): las bandas siguen en el panel (%u %u)", s.op_dest[3], s.op_dest[4]);
+    }
+    vr_scene_release();
+}
+
+/* Vista de mundo: un parcial con >=2 vértices válidos tras el último 3D se descarta (no va al panel 2D); solo <=1 (coincidencia de SXY) va al HUD.
+ * La banda opaca de ancho de pantalla solo se descarta si además es baja (<=10% del alto): un rect 300x40 se queda en el panel. */
+static void test_world_view_partial_band(void) {
+    const float R[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    const int32_t e[3] = {0, 3000, 500};
+    BridgeState bs; set_eye(&bs, R, e);
+    float a[3] = {0, 0, 2000}, b[3] = {1000, 0, 2000}, c[3] = {0, 1000, 2000};
+    reset(); dl.disp.x = 0; dl.disp.y = 0; dl.disp.w = 320; dl.disp.h = 256;
+    poly3(a, b, c, 0);                                                       /* op0: 3D completo */
+    GpuOp *h = add(GPU_OP_POLY); h->nv = 4; h->flags = GPU_F_GOURAUD;        /* op1: 2 de 4 vértices válidos */
+    for (int i = 0; i < 4; i++) { h->v[i].x = (int16_t)(16 + (i & 1 ? 32 : 0)); h->v[i].y = (int16_t)(17 + (i & 2 ? 5 : 0)); }
+    setv3(&h->v[0], 10, 20, 3000); setv3(&h->v[1], 20, 20, 3000);
+    rect2d(10, 100, 300, 40, 0, 0, 0, 0, 0, 0, 0, 0, 0);                     /* op2: 300x40 opaco */
+    rect2d(0, 250, 320, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0);                       /* op3: 320x6 opaco */
+    VrSceneOpts o = vr_scene_opts_default();
+    o.origin_mode = 1; o.drop_clear = 1; o.drop_world2d = 1;
+    VrScene s;
+    CHECK(vr_scene_build(&dl, &bs, &o, &s) == 0 && s.op_dest, "partial_band: build");
+    CHECK(s.op_dest[1] != 2 && s.stats.drop_partial == 1, "parcial con 2 válidos no va al 2D (dest %u, parciales %u)", s.op_dest[1], s.stats.drop_partial);
+    CHECK(s.op_dest[2] == 2, "rect 300x40 opaco se queda en el panel (%u)", s.op_dest[2]);
+    CHECK(s.op_dest[3] == 0, "rect 320x6 sigue descartado (%u)", s.op_dest[3]);
+    vr_scene_release();
+}
+
 int main(void) {
     test_billboard();
     test_diag_dirty();
@@ -2152,6 +2207,8 @@ int main(void) {
     test_cine_letterbox();
     test_geom_stats();
     test_coplanar();
+    test_world_view_hud();
+    test_world_view_partial_band();
     if (fails) { fprintf(stderr, "%d fallos\n", fails); return 1; }
     printf("test_scene: OK\n");
     return 0;

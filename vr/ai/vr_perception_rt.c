@@ -14,7 +14,7 @@ static uint32_t patched[2];
 static RtPatchGuard hguard[2];     /* hash del bloque de cada función al localizarla: si otra carga lo pisa el parche queda inerte */
 static int inited;
 static int use_gather = 1;
-static float range_scale_user = 1.5f;
+static float range_scale_user = 1.0f;
 
 static void co(void *u, uint32_t addr, uint32_t a0) {
     (void)u;

@@ -11,5 +11,6 @@ static inline void vrradar_set_vrp(const VrpConfig *c) {
     p.range_mult = c ? c->range_mult : 1.0f;
     p.periph_frac = c ? c->periph_frac : 1.0f;
     p.periph_near = c ? c->periph_near : 0.5f;
+    p.range_scale = c && c->range_scale > 0.0f ? c->range_scale : 1.0f;
     vrradar_set_perception(&p);
 }

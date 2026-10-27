@@ -37,7 +37,7 @@ struct XRViewConfig {
     var wristHandSide = false       // false: los paneles se apilan hacia el codo (encima del radar); true: hacia la mano
     var hideRealHands = true        // pide al sistema ocultar tus manos y brazos reales mientras dura el espacio inmersivo (se ven los del personaje)
     var debugAxes = false           // dibuja los ejes de los mandos (dispositivo, agarre, apuntado) y de las manos del personaje
-    var aiRange = 1                 // IA de enemigos: alcance de visión, índice de aiRanges (0 = x1, 1 = x1,5, 2 = x2)
+    var aiRange = 0                 // IA de enemigos: alcance de visión, índice de aiRanges (0 = x1, 1 = x1,5, 2 = x2)
     var aiHead = true               // IA de enemigos: ven también la cabeza VR (no solo el ojo del personaje)
     var newHands = true             // manos del personaje en primera persona: nuevas (articuladas, con puño propio) u originales del motor
     var follow2D = true             // pantallas 2D (cine, pantalla 3D, ventanas del juego, menú VR): siguen la cabeza en cada fotograma (true) o quedan fijas en el mundo (false)
@@ -107,8 +107,13 @@ struct XRViewConfig {
         c.smoothMotion = b("xr.view.smoothMotion", true)
         c.follow2D = b("xr.view.follow2d", true)
         c.newHands = b("xr.hands.new", true)
+        // El defecto pasó de x1,5 a x1 (alcance original del juego): lo guardado por el defecto anterior migra a x1 UNA sola vez (clave de marca); elegido después en el menú, sobrevive al reinicio.
+        if !UserDefaults.standard.bool(forKey: "xr.ai.range.toX1") {
+            UserDefaults.standard.set(0, forKey: "xr.ai.range")
+            UserDefaults.standard.set(true, forKey: "xr.ai.range.toX1")
+        }
         let ar = UserDefaults.standard.integer(forKey: "xr.ai.range")
-        c.aiRange = UserDefaults.standard.object(forKey: "xr.ai.range") == nil ? 1 : min(max(ar, 0), aiRanges.count - 1)
+        c.aiRange = UserDefaults.standard.object(forKey: "xr.ai.range") == nil ? 0 : min(max(ar, 0), aiRanges.count - 1)
         c.aiHead = b("xr.ai.head", true)
         return c
     }
@@ -1061,6 +1066,9 @@ final class XRPresenter {
 
     /// Codifica los trabajos de la GPU de la presentación (xBR de la imagen de cine); antes del pase final.
     func encodeUpscale(_ cb: MTLCommandBuffer) { cinema?.encodeUpscale(cb) }
+
+    /// Estado de la pantalla de cine para el diagnóstico [radio-src]: capa 2D fiel en uso y xBR aplicado.
+    var cineSrc: (hq: Bool, xbr: Bool) { (cinema?.hqActive ?? false, cinema?.xbrActive ?? false) }
 
     /// Resumen para el registro (1 vez por segundo): qué presentación está activa, dónde está anclada la pantalla y qué se dibuja.
     func diagnostics(items: [XRDrawItem]) -> String {

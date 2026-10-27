@@ -14,7 +14,7 @@ void vrp_config_preset(VrpConfig *c, VrpPreset p) {
     memset(c, 0, sizeof *c);
     c->range_mult = 1.0f; c->rate_pow = 1.0f; c->periph_frac = 1.0f; c->periph_near = 0.5f; c->periph_move_rate = 1.0f;
     c->move_mult = c->crouch_mult = c->prone_mult = 1.0f; c->t_suspect = 1.0f; c->t_alert = 3.0f; c->decay = 1.0f;
-    c->q_cooldown = 4.0f; c->dt_max = 0.5f; c->range_scale = 1.5f; c->head_dz = 80.0f; c->head_max = 1500.0f;
+    c->q_cooldown = 4.0f; c->dt_max = 0.5f; c->range_scale = 1.0f; c->head_dz = 80.0f; c->head_max = 1500.0f;
     switch (p) {
     case VRP_VR:   /* recomendado: se ve ~2,4 veces más lejos, de forma gradual */
         c->enabled = 1; c->range_mult = 2.4f; c->rate_pow = 1.0f; c->t_suspect = 0.7f; c->t_alert = 3.0f; c->decay = 0.7f;

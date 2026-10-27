@@ -78,5 +78,9 @@ typedef struct { double mae; double frac_over; int thr; long npix; } NsRDiff;   
 /* Compara dos RGB8 del mismo tamaño; si diff != NULL escribe una imagen de diferencia (3*w*h). */
 void ns_diff_rgb8(const uint8_t *a, const uint8_t *b, int w, int h, int thr, uint8_t *diff, NsRDiff *out);
 
+/* Onda del agua del sombreador (ns_fs) para validar offline: si no es NULL, cada texel texturizado cuya posición de mundo caiga en [min,max] (o siempre si all) se muestrea el texel del píxel vecino a amp*sin(freq*y+fase) píxeles en horizontal (amp en píxeles del ojo), limitado a 1 texel. */
+typedef struct { float min[3], max[3], amp, freq, phase; int all; } NsRWave;
+extern const NsRWave *ns_ref_wave;
+
 /* Muestreo suelto de la VRAM como el hardware (para pruebas): devuelve la palabra de 16 bits del texel (u,v) (antes de modular). */
 uint16_t ns_sample_texel(const uint16_t *vram, uint16_t tpage, uint16_t clut, uint32_t tw, int u, int v);

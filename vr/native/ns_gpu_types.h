@@ -123,7 +123,7 @@ typedef struct {
     vector_float4 tint;             /* xyz = factor de color por canal aplicado al color de vértice (1,1,1 = sin teñir; fundido a negro del último fotograma válido) */
     /* agua (ns_screen): el tinte y la ondulación viven en el MUNDO. w de water_min = 1 si hay volumen de agua; w de water_tint = 1 si la cabeza está dentro (se tiñe todo) */
     vector_float4 water_min, water_max, water_tint;
-    vector_float4 water_wave;       /* x = amplitud (texels), y = frecuencia espacial (rad por unidad del motor), z = fase (rad) */
+    vector_float4 water_wave;       /* x = amplitud (píxeles del ojo; el sombreador la lleva a uv con dfdx, máx. 1 texel), y = frecuencia espacial (rad por unidad del motor), z = fase (rad) */
     vector_float4 fromvr[3];        /* mundo VR -> mundo del motor, filas de la 3x4 (xyz, traslación en w) */
     vector_float4 misc;             /* x = índice de ojo del pase cuando NO hay amplificación (0/1: máscara de caras de los efectos) */
     vector_float4 cull_eye;         /* xyz = ojo de la cámara del JUEGO en el mundo del motor; w = NSG_CULL_ALL: descartar las caras NSG_CF_ONESIDED vistas por detrás (cinemáticas: la cámara queda fuera de las salas y el motor no dibuja los techos desde arriba); NSG_CULL_SEMI: solo las de mallas semitransparentes (cabeza bajo el agua: el motor no dibuja la superficie del agua vista desde abajo); 0 = doble cara (primera persona) */

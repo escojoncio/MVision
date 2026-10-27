@@ -318,6 +318,7 @@ final class XRFrameEncoder {
                         simd_length(SIMD3<Float>(corr.shift_m.0, corr.shift_m.1, corr.shift_m.2)) * 1000, ss.max_err_m * 1000, comfortVignette)
             lastDiag = d
             log(d)
+            if gs.view_mode == 0 && gs.view_reason == 3 { let cs = presenter.cineSrc; log(renderer.radioSrcLine(hqActive: cs.hq, xbrActive: cs.xbr)) }   // radio (códec): ¿capa 2D fiel o fotograma del emulador?
             if let nd = renderer.nativeDiagLine() { log(nd) }
             if let nl = renderer.nativeNetLine() { log(nl) }
             // Línea de diagnóstico del hueco: interruptores, triángulos largos / que cruzan el plano cercano en cada ruta, mapa de tasa, viewport y color final muestreado.

@@ -182,8 +182,8 @@ int main(void) {
             CHECK(strstr(xh, "static var split: Bool { mv_vrhost_l2d_split() != 0 }") != NULL && strstr(xh, "enum XRLayer2D {") != NULL && count(xm, "XRLayer2D") == 0 && count(xm, "mv_vrhost") == 0,
                   "XRLayer2D.split (XRHud.swift) lee el interruptor del host; XRMath.swift (lo compila también bench/build_native.sh sin el host) no depende de él");
             /* C: ventana del menú (rect), filtro de créditos por región y radar aparte */
-            CHECK(strstr(la, "const int menu_win = atomic_load(&g_split) && (j->view & 255) == VRV_R_SELECTOR;") != NULL && strstr(la, "vl2d_set_menu(A->L, menu_win);") != NULL && count(la, "VRV_R_SELECTOR") == 1,
-                  "vl2a: sin troceo el trabajador nunca activa la ventana del selector (sin rect de menú ni créditos/vida omitidos de la capa)");
+            CHECK(strstr(la, "const int menu_win = (j->view & 255) == VRV_R_SELECTOR;") != NULL && strstr(la, "vl2d_set_menu(A->L, menu_win);") != NULL && count(la, "VRV_R_SELECTOR") == 1,
+                  "vl2a: con el selector abierto el trabajador activa la ventana (la capa lleva solo la ventana: créditos y HUD del mundo omitidos), con o sin troceo");
             CHECK(strstr(vh, "if (vl2a_split() && vrradar_split(l, &rsplit) == 0 && rsplit.present) {") != NULL && count(vh, "vrradar_split(") == 1, "vrhost: sin troceo el radar no se separa del HUD (la escena y el quad de muñeca no existen)");
             CHECK(strstr(vh, "view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO ? VL_FULL : view.kind == VRV_K_ENGINE ? VL_PANEL_VERIFIED : VL_PANEL") != NULL, "códec, créditos, vídeo (VL_FULL) y cinemáticas (VL_PANEL_VERIFIED) siguen igual: capa completa");
         }

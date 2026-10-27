@@ -23,7 +23,7 @@
 #define SE_SEND 0x80089e40u            /* envío de la orden de sonido (a0 = orden, a1 = 0) */
 #define STAGE_CODE 0x800AC568u
 
-static _Atomic int opt_perc = VRP_VR, opt_cam = 1, opt_act = 1, opt_motion, opt_range100 = 150, opt_head = 1;
+static _Atomic int opt_perc = VRP_VR, opt_cam = 1, opt_act = 1, opt_motion, opt_range100 = 100, opt_head = 1;
 static _Atomic int dirty = 1;
 static void (*listener)(const VrpConfig *);
 static int inited, installed;
