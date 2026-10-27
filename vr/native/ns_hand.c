@@ -4,6 +4,7 @@
 #include <string.h>
 #include "ns_extract.h"
 #include "vr_hand_mesh.h"
+#include "vr_hand_pose.h"
 
 typedef struct {
     int valid;
@@ -97,8 +98,9 @@ static int build(HandCache *c, int side, const NsMesh *g) {
         NsMesh *m = &c->mesh[k];
         memset(m, 0, sizeof *m);
         int16_t mn[3] = {32767, 32767, 32767}, mx[3] = {-32768, -32768, -32768};
+        int nweld = 0;
         for (int i = 0; i < b->n_verts; i++) {
-            c->v[k][i].x = b->v[i][0]; c->v[k][i].y = b->v[i][1]; c->v[k][i].z = b->v[i][2]; c->v[k][i].weld = 0xFF; c->v[k][i].pad = 0;
+            c->v[k][i].x = b->v[i][0]; c->v[k][i].y = b->v[i][1]; c->v[k][i].z = b->v[i][2]; c->v[k][i].weld = b->weld[i]; c->v[k][i].pad = 0; if (b->weld[i] != VRHAND_NO_WELD) nweld++;
             c->n[k][i].x = b->n[i][0]; c->n[k][i].y = b->n[i][1]; c->n[k][i].z = b->n[i][2]; c->n[k][i].pad = 0;
             for (int a = 0; a < 3; a++) { if (b->v[i][a] < mn[a]) mn[a] = b->v[i][a]; if (b->v[i][a] > mx[a]) mx[a] = b->v[i][a]; }
         }
@@ -113,6 +115,7 @@ static int build(HandCache *c, int side, const NsMesh *g) {
             if (tx->ok) { f->tpage = tx->tpage; f->clut = tx->clut; f->texid = tx->texid; }
         }
         m->flags = g->flags & (NS_MF_BLEND | NS_MF_UNLIT | NS_MF_TWOSIDED);
+        if (nweld) m->flags |= NS_MF_WELDED;                              /* anillo proximal soldado al distal del hueso padre (NsPiece.parent) */
         m->model_flags = g->model_flags;
         m->depth_bias = g->depth_bias;
         if (m->depth_bias > 0) m->flags |= NS_MF_BIAS_UP;
@@ -155,7 +158,12 @@ static int one_hand(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const 
     }
     for (int k = 0; k < NS_HAND_BONES; k++) if (ns_store_put(st, &c->mesh[k]) < 0) { S.st.put_fail++; return 0; }
     float xf[NS_HAND_BONES][12];
-    vrhand_pose(&c->hand, in->driven[h] ? in->grip[h] : 0.0f, xf);
+    VrHandPoseIn hpi;                                                    /* mano que la IK no llevó: relajada, sin objeto ni gatillo */
+    memset(&hpi, 0, sizeof hpi);
+    hpi.item_pose = HP_RELAX;
+    if (in->driven[h]) { hpi.item_pose = in->item_pose[h]; hpi.grip = in->grip[h]; hpi.trigger = in->trigger[h]; hpi.thumb_btn = in->thumb[h]; }
+    if (hpi.item_pose >= HP_GRIP_PISTOL && hpi.item_pose <= HP_GRIP_BOX) hpi.grip = 1.0f;    /* con un objeto en la mano (HP_GRIP_*) la mano siempre lo rodea, con o sin botón de agarre; el gatillo sigue moviendo el índice */
+    vrhandpose_blend(&c->hand, &hpi, xf);
     const NsInstance *pin = &sc->inst[map->inst];
     NsInstance *ni = &sc->inst[sc->n_inst];
     memset(ni, 0, sizeof *ni);
@@ -167,7 +175,7 @@ static int one_hand(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const 
         memset(p, 0, sizeof *p);
         p->mesh_id = c->mesh[k].id;
         xf_mul(&p->world, &gp->world, xf[k]);
-        p->parent = -1;
+        p->parent = (int16_t)c->hand.bone[k].parent;                   /* los vértices soldados toman la posición del hueso padre (índice dentro de la instancia) */
         p->flags = gp->flags & NS_PF_HIDDEN;
     }
     sc->n_inst++; sc->n_piece += NS_HAND_BONES;

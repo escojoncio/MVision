@@ -315,6 +315,13 @@ int main(void) {
         CHECK(vrhost_keep_filter(1, 1, 0, 1, 1, 0, 0, 0) == 1, "nativo + cinemática sin 3D sustancial: sigue la regla del mundo");
         CHECK(vrhost_keep_filter(1, 0, 0, 0, 0, 0, 0, 0) == 0, "nativo en menu = al panel");
     }
+    {   /* vrhost_drop_world2d: ¿los polígonos 3D sin vista (el nativo los dibuja) se quitan de la capa 2D? (native, kind, reason) */
+        CHECK(vrhost_drop_world2d(1, VRV_K_WORLD, VRV_R_WORLD) == 1, "nativo + mundo = quita el 3D sin resolver");
+        CHECK(vrhost_drop_world2d(1, VRV_K_WORLD, VRV_R_SELECTOR) == 0 && vrhost_drop_world2d(1, VRV_K_WORLD, VRV_R_PAUSE_WORLD) == 0, "nativo + mundo con ventana 2D (selector / pausa) = sus menus son 2D");
+        CHECK(vrhost_drop_world2d(1, VRV_K_ENGINE, VRV_R_CINEMATIC) == 1 && vrhost_drop_world2d(1, VRV_K_ENGINE, VRV_R_NO_GAME) == 1, "nativo + cinematica del motor (con o sin partida) = la capa 2D solo lleva 2D (el 3D lo dibuja el nativo)");
+        CHECK(vrhost_drop_world2d(1, VRV_K_UI, VRV_R_NO_GAME) == 0 && vrhost_drop_world2d(1, VRV_K_VIDEO, VRV_R_NO_GAME) == 0, "nativo + menu / video = todo es 2D");
+        CHECK(vrhost_drop_world2d(0, VRV_K_WORLD, VRV_R_WORLD) == 0 && vrhost_drop_world2d(0, VRV_K_ENGINE, VRV_R_CINEMATIC) == 0, "modo gpu: no");
+    }
     {   /* vrhost_stereo2d_inside: ¿el 2D de la lista va dentro de las texturas de la pantalla 3D (y no en el panel aparte)? */
         /* (gpu, lista con 3D o base guardada, compuesto dentro del estéreo) */
         CHECK(vrhost_stereo2d_inside(1, 1, 1) == 1, "gpu + 3D/base + compuesto = dentro");

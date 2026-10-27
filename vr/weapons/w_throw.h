@@ -40,11 +40,6 @@ enum { W5_S_DRAW = WS_DRAW, W5_S_PIN = WS_PIN, W5_S_LEVER = WS_LEVER, W5_S_THROW
        W5_S_PLACE = WS_PLACE, W5_S_CAP = WS_CAP, W5_S_BTN = WS_BTN, W5_S_LEGS = WS_LEGS, W5_S_EMPTY = WS_EMPTY };
 
 /* ---------- Utilidades comunes (w_throw.c) ---------- */
-/* Punto del pecho (donde está el chaleco) y orientación solo-guiñada del cuerpo, a partir de la cabeza. */
-void w5_body_frame(const WInput *in, WVec3 *chest, WQuat *yaw_only);
-/* Gesto de sacar del chaleco: devuelve 1 en el flanco de subida del agarre de la mano 0 dentro del
- * radio del pecho (MANUAL 0,18 m; SIMPLIFIED 0,35 m; AUTOMATIC en cualquier sitio). */
-int  w5_draw_gesture(const WInput *in, WReloadMode rm, float grip_prev);
 /* Entrega un evento al juego (gancho o fire). Devuelve 1 si fue aceptado. */
 int  w5_emit(const WGameBridge *g, WLaunch ev);
 /* Oculta el arma (en el chaleco): desplaza el modelo fuera de vista vía recoil_offset. */
@@ -63,49 +58,25 @@ void wvh_push(WVHist *h, float dt, WPose p);
 int  wvh_estimate(const WVHist *h, float win, float lag, WVec3 *lin, WVec3 *ang);
 
 /* ---------- Arrojadizas ---------- */
-enum { WT_PH_VEST, WT_PH_HELD, WT_PH_PULL, WT_PH_ARMED, WT_PH_COOK, WT_PH_GONE };
+/* HELD: en la mano abierta. READY: mano cerrada sobre el objeto (el anfitrión mantiene el botón de ataque del juego, ver vr_fire: es el «preparar» del propio
+ * juego); abrirla lanza. */
+enum { WT_PH_VEST, WT_PH_HELD, WT_PH_READY, WT_PH_GONE };
 typedef struct {
     WeaponState base;
     WVHist hist;
     int kind;                 /* 0 variante base, 1 y 2 variantes (espoletas distintas) */
-    int ring_grabbed;         /* mano 1 agarra la anilla */
-    int ring_detached;        /* anilla fuera, en la mano 1 */
-    int lever_off;
-    float fuse, cooked;
-    float ring_pull;          /* 0..1 */
-    float grip_prev;
-    float lever_v;            /* animación de la palanca */
-    WPose ring_grab_off;      /* mano1 -> punto de anilla al agarrar */
-    int launched;
-    int held_mesh[4];         /* índice en mesh_names de cada WHeld: [0] = pasador+anilla ("pin") */
-    int trig_ready;           /* el gatillo volvió a reposo tras sacar el pasador (permite cocinar) */
+    int primed;               /* la mano ya estuvo abierta con el objeto: cerrarla lo prepara (sacarlo con el puño cerrado no lo prepara) */
     float retry;              /* s hasta reintentar un lanzamiento que el juego rechazó */
 } WThrowState;
 extern const WeaponDef w_throw_frag, w_throw_b, w_throw_c;
-/* Pose mundo del pasador+anilla (unido a la espoleta, en tirón, o separado en la mano 1). 1 si visible.
- * El motor lo dibuja ya como objeto suelto en s->held[0] (mesh "pin"); esta función es auxiliar. */
-int  w_throw_ring_pose(const WThrowState *s, const WInput *in, WPose *out);
-/* Los canales: CUSTOM0 = tirón de la anilla (0..1; >=1 = separada), CUSTOM1 = palanca (0 cerrada, 1 abierta). */
 
 /* ---------- Colocables ---------- */
-#define WPL_MAX 8
 enum { WPL_PH_VEST, WPL_PH_HELD, WPL_PH_PLACED_OUT };
 typedef struct {
     WeaponState base;
-    int kind;                 /* 0 carga adhesiva con detonador, 1 mina */
-    int n_placed;
-    WPose placed[WPL_MAX];
-    float cap_open, btn, deploy;
-    int cap_target;
-    float cap_t;
-    uint32_t btn_prev[2];
-    int det_fired;
-    int held_mesh[4];         /* WHeld del detonador, índice en mesh_names: [0] cuerpo, [1] botón, [2] tapa, [3] antena */
-    float grip_prev;
-    int trig_ready;           /* el gatillo pasó por reposo tras sacar el objeto: puede colocar */
+    int kind;                 /* 0 carga adhesiva, 1 mina */
+    float deploy;             /* mina: patas desplegadas 0..1 */
+    int trig_ready;           /* el gatillo pasó por reposo tras sacar el objeto: puede prepararse */
+    int armed;                /* gatillo apretado a fondo: al soltarlo se coloca */
 } WPlacedState;
 extern const WeaponDef w_placed_a, w_placed_b;
-/* Detonador en la mano 1 (solo placed_a con cargas colocadas). 1 si visible. */
-int  w_placed_remote_pose(const WPlacedState *s, const WInput *in, WPose *out);
-/* El juego avisa de que una carga colocada ya no existe (destruida/explotada). */
-void w_placed_forget(WPlacedState *s, int index);

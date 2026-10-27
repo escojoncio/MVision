@@ -121,9 +121,8 @@ typedef struct {
     vector_float4 fog_fwd;          /* xyz = adelante de la cámara del juego (mundo del motor); w = -dot(adelante, ojo): z_vista = dot(xyz, p) + w */
     vector_float4 fog_par;          /* x = inicio, y = longitud (unidades del motor), z = 1 si hay niebla, w = metros VR por unidad de `raise` */
     vector_float4 tint;             /* xyz = factor de color por canal aplicado al color de vértice (1,1,1 = sin teñir; fundido a negro del último fotograma válido) */
-    /* agua (ns_screen): el tinte y la ondulación viven en el MUNDO. w de water_min = 1 si hay volumen de agua; w de water_tint = 1 si la cabeza está dentro (se tiñe todo) */
+    /* agua (ns_screen): el tinte vive en el MUNDO (la ondulación es un post-proceso de pantalla, ver NsGpuScreen.water_wave). w de water_min = 1 si hay volumen de agua; w de water_tint = 1 si la cabeza está dentro (se tiñe todo) */
     vector_float4 water_min, water_max, water_tint;
-    vector_float4 water_wave;       /* x = amplitud (píxeles del ojo; el sombreador la lleva a uv con dfdx, máx. 1 texel), y = frecuencia espacial (rad por unidad del motor), z = fase (rad) */
     vector_float4 fromvr[3];        /* mundo VR -> mundo del motor, filas de la 3x4 (xyz, traslación en w) */
     vector_float4 misc;             /* x = índice de ojo del pase cuando NO hay amplificación (0/1: máscara de caras de los efectos) */
     vector_float4 cull_eye;         /* xyz = ojo de la cámara del JUEGO en el mundo del motor; w = NSG_CULL_ALL: descartar las caras NSG_CF_ONESIDED vistas por detrás (cinemáticas: la cámara queda fuera de las salas y el motor no dibuja los techos desde arriba); NSG_CULL_SEMI: solo las de mallas semitransparentes (cabeza bajo el agua: el motor no dibuja la superficie del agua vista desde abajo); 0 = doble cara (primera persona) */
@@ -148,7 +147,8 @@ typedef struct {
 /* up0/up1: eje Y del mundo VR expresado en el espacio de vista del ojo (columna 1 de la matriz de vista; w sin uso): SCAN ancla sus líneas a la elevación del rayo en el mundo. */
 typedef struct { NsGpuOverlay ov; float eye0[4], eye1[4]; float up0[4], up1[4]; } NsGpuOverlayU;     /* 116 B */
 typedef struct {
-    float water_min[4], water_max[4], water_tint[4], water_wave[4];   /* ver NsGpuUniforms */
+    float water_min[4], water_max[4], water_tint[4];                 /* ver NsGpuUniforms */
+    float water_wave[4];                                              /* onda de pantalla (post-proceso del ojo, solo con la cabeza dentro; todo 0 = sin onda): x = amplitud (px del ojo a 1888 de ancho), y = rad por fila del motor, z = fase (rad) */
     ns_u32 n_overlays, pad0, pad1, pad2;
     NsGpuOverlay ov[NSG_MAX_OVERLAYS];                                 /* en orden de dibujo */
 } NsGpuScreen;

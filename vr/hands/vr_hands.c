@@ -34,6 +34,7 @@ void vrhands_default_config(VrHandsConfig *c) {
     c->scale = 1.0f;
     c->grip_mode = VRH_GRIP_AUTO;
     c->grip_manual = wpose_identity();
+    c->socket = wpose_identity();
     c->grip_pitch_deg = 0.0f;
     c->cull_dist = 4.0f;
     /* luz fija de arriba, algo hacia delante y a la izquierda (sombra suave hacia abajo-derecha): estilo de juego de original */
@@ -165,7 +166,7 @@ WPose vrhands_grip(const VrHandsRig *r, const WeaponState *s) {
     if (!r || !s) return def;
     WPose d;
     switch (r->cfg.grip_mode) {
-    case VRH_GRIP_DEF: return def;
+    case VRH_GRIP_DEF: case VRH_GRIP_SOCKET: return def;
     case VRH_GRIP_MANUAL: return r->cfg.grip_manual;
     case VRH_GRIP_DERIVED: return derive_grip(s, r->cfg.scale, &d) == 0 ? d : def;
     default: break;
@@ -174,9 +175,23 @@ WPose vrhands_grip(const VrHandsRig *r, const WeaponState *s) {
     return derive_grip(s, r->cfg.scale, &d) == 0 ? d : def;
 }
 
-WPose vrhands_weapon_world(const VrHandsRig *r, const WeaponState *s, const VrHandsPose *hand) {
+int vrhands_set_socket(VrHandsRig *r, WPose socket) {
+    float n2 = socket.q.x * socket.q.x + socket.q.y * socket.q.y + socket.q.z * socket.q.z + socket.q.w * socket.q.w;
+    if (!r || !pose_ok(&socket) || !(n2 > 0.81f && n2 < 1.21f)) return -1;       /* norma 0,9 .. 1,1 */
+    socket.q = wquat_normalize(socket.q);
+    r->cfg.socket = socket;
+    return 0;
+}
+
+WPose vrhands_weapon_hand(const VrHandsRig *r, const VrHandsPose *hand) {
     WPose h = vrhands_pose_to_w(hand);
     h.q = wquat_normalize(h.q);
+    if (r && r->cfg.grip_mode == VRH_GRIP_SOCKET) h = wpose_mul(h, wpose_inv(r->cfg.socket));
+    return h;
+}
+
+WPose vrhands_weapon_world(const VrHandsRig *r, const WeaponState *s, const VrHandsPose *hand) {
+    WPose h = vrhands_weapon_hand(r, hand);
     float pitch = r ? r->cfg.grip_pitch_deg * 0.017453292519943295f : 0.0f;
     if (pitch != 0.0f) h.q = wquat_mul(h.q, wquat_axis_angle(wv(1, 0, 0), pitch));
     WPose rec = s ? s->recoil_offset : wpose_identity();

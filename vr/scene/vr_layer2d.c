@@ -33,6 +33,7 @@ struct VrLayer2D {
     uint16_t *vsnap;                                          /* copia de la VRAM espejo al empezar la lista (verificación del panel: la pasada del mundo la modifica y se restaura) */
     uint8_t *w5; size_t w5_cap;                               /* el mundo del panel (todo salvo las primitivas 2D del panel) en la zona mostrada: aw x h x 3, 5 bits por canal */
     uint8_t *vmap; size_t vmap_cap;                           /* mapa por píxel de la verificación (tocado / mundo distinto fuera / distinto) */
+    int hide_credits;                                         /* selector abierto: la capa no pinta los pares de rectángulos de los créditos (vl2d_hide_credits) */
     int menu_on, menu_ok; float menu_uv[4];                   /* menú sobre la mano: activo / hay rect en la última lista / rect UV */
     uint8_t mchg[(VH / 8) * (VW / 8)];                        /* celdas de 8 px (px nativos de la capa) con primitivas nuevas en las últimas MCHG_LISTS listas SIN menú: radar, créditos que se desplazan, barras animadas (lista restante, 0 = no cambia) */
     int menu_n, menu_calm, menu_set;                          /* listas de crecimiento con el menú activo desde que se abrió / listas consecutivas SIN crecer el rect / rect asentado (congelado hasta cerrar) */
@@ -65,6 +66,18 @@ void vl2d_set_options(VrLayer2D *L, int scale, int smooth) {
 }
 
 void vl2d_set_menu(VrLayer2D *L, int on) { if (!L) return; L->menu_on = on != 0; if (!on) menu_forget(L); }   /* al salir del selector se olvida el rect */
+void vl2d_hide_credits(VrLayer2D *L, int on) { if (L) L->hide_credits = on != 0; }
+/* Línea de créditos de la intro: rect texturado semitransparente con abr 2 seguido de otro idéntico (caja, uv, página, CLUT, banderas) con abr 1, o ese segundo. Vida, radar y menús no lo dibujan así. */
+static int credit_same(const GpuOp *a, const GpuOp *b) {
+    return a->type == GPU_OP_RECT && b->type == GPU_OP_RECT && a->flags == b->flags && a->v[0].x == b->v[0].x && a->v[0].y == b->v[0].y && a->v[0].u == b->v[0].u && a->v[0].v == b->v[0].v &&
+           a->rw == b->rw && a->rh == b->rh && a->tp == b->tp && a->tx == b->tx && a->ty == b->ty && a->clx == b->clx && a->cly == b->cly;
+}
+static int credit_op(const GpuDrawList *l, uint32_t i) {
+    const GpuOp *o = &l->ops[i];
+    if (o->type != GPU_OP_RECT || (o->flags & (GPU_F_TEXTURED | GPU_F_SEMI)) != (GPU_F_TEXTURED | GPU_F_SEMI)) return 0;
+    if (o->abr == 2) return i + 1 < l->nops && l->ops[i + 1].abr == 1 && credit_same(o, &l->ops[i + 1]);
+    return o->abr == 1 && i > 0 && l->ops[i - 1].abr == 2 && credit_same(o, &l->ops[i - 1]);
+}
 int vl2d_menu_rect(const VrLayer2D *L, float uv[4]) {
     if (!L || !L->valid || !L->menu_ok) return 0;
     if (uv) memcpy(uv, L->menu_uv, sizeof L->menu_uv);
@@ -1111,7 +1124,7 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
             if (!full) {
                 uint64_t mk = op_key(o, L->ox, L->oy);
                 key_push(&L->mcur, &L->mcur_n, &L->mcur_cap, mk);
-                if (L->menu_on && L->mbase_n) {   /* selector abierto con base: la capa lleva solo la ventana (créditos y HUD del mundo no) */
+                if (mhave) {
                     int na, nb, ne, nf;
                     op_box(o, 1, &na, &nb, &ne, &nf);
                     na -= L->ox; ne -= L->ox; nb -= L->oy; nf -= L->oy;
@@ -1119,9 +1132,8 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
                     if (nb < 0) nb = 0;
                     if (ne > w) ne = w;
                     if (nf > h) nf = h;
-                    /* solo se omite lo que ya estaba en la base o lo que no toca el rect (el conservado, aunque aún no esté asentado); una primitiva nueva que lo corte se pinta (el panel ya recorta por UV) */
-                    menu_skip = key_in(L->mbase, L->mbase_n, mk) || ne <= na || nf <= nb ||
-                                (L->menu_have && ((float)ne <= L->menu_px[0] - MENU_KEEP_PX || (float)na >= L->menu_px[2] + MENU_KEEP_PX || (float)nf <= L->menu_px[1] - MENU_KEEP_PX || (float)nb >= L->menu_px[3] + MENU_KEEP_PX));
+                    /* solo se omite lo que ya estaba en la base o lo que no toca el rect; una primitiva nueva que lo corte se pinta (el panel ya recorta por UV) */
+                    menu_skip = key_in(L->mbase, L->mbase_n, mk) || ne <= na || nf <= nb || (float)ne <= mx0 - MENU_KEEP_PX || (float)na >= mx1 + MENU_KEEP_PX || (float)nf <= my0 - MENU_KEEP_PX || (float)nb >= my1 + MENU_KEEP_PX;
                 }
                 if ((L->menu_on || L->mbase_n) && !key_in(L->mbase, L->mbase_n, mk)) {   /* nueva respecto al base: con menú, candidata a ventana; sin menú, la celda «ya cambiaba» */
                     int na, nb, ne, nf;
@@ -1155,7 +1167,7 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
                 if (e > ux1) ux1 = e;
                 if (f > uy1) uy1 = f;
             }
-            if (menu_skip) break;
+            if (menu_skip || (L->hide_credits && credit_op(l, i))) break;
             raster_prim(&c, o);
             break;
         }

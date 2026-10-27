@@ -18,9 +18,9 @@ FRAMES ?= 7000
 # Capas de vr/ que enlaza el host: puente, cámara, entrada, escena, cuerpo (IK), radar, manos/armas, disparo y recarga.
 SRC_VR := ../bridge/bridge.c ../bridge/bridge_addrs.c ../camera/vr_camera.c ../camera/vr_heading.c ../camera/vr_headcol.c ../camera/vr_camera_hle.c ../input/vr_input.c ../input/vr_gesture.c ../input/vr_melee.c ../scene/vr_scene.c ../scene/vr_layer2d.c ../scene/vr_layer2d_async.c \
   ../body/vr_body.c ../body/vr_fist.c ../body/vr_hand_mesh.c ../body/vr_body_cam.c ../body/vr_pose.c ../radar/vr_radar.c ../radar/vr_radar_hle.c \
-  ../hands/vr_hands.c ../hands/vr_glove.c $(filter-out ../weapons/test_%.c,$(wildcard ../weapons/*.c)) \
+  ../hands/vr_hands.c ../hands/vr_glove.c ../hands/vr_grip.c ../hands/vr_hand_pose.c $(filter-out ../weapons/test_%.c,$(wildcard ../weapons/*.c)) \
   ../gameplay/vr_fire.c ../gameplay/vr_fire_hle.c ../gameplay/vr_aa.c ../gameplay/vr_missile.c ../gameplay/vr_scope.c ../gameplay/vr_reload.c \
-  ../ai/vrai.c ../ai/vr_ai_scan.c ../ai/vr_perception.c ../ai/vr_perception_rt.c ../ai/vr_cameras.c ../ai/vr_activity.c ../ai/vr_activity_rt.c vrgame.c vrbodyg.c vr_melee_rt.c vr_view.c vr_cine.c vr_smooth.c vrhost.c ../native/ns_dumpw.c ../native/ns_bridge.c ../native/ns_player.c ../native/ns_hook.c ../native/ns_hook_rt.c
+  ../ai/vrai.c ../ai/vr_ai_scan.c ../ai/vr_perception.c ../ai/vr_perception_rt.c ../ai/vr_cameras.c ../ai/vr_activity.c ../ai/vr_activity_rt.c vrgame.c vrbodyg.c vr_melee_rt.c vr_view.c vr_cine.c vr_smooth.c vrhost.c ../native/ns_dumpw.c ../native/ns_bridge.c ../native/ns_player.c ../native/ns_wphide.c ../native/ns_hook.c ../native/ns_hook_rt.c
 SRC_RT := $(filter-out $(RT)/headless.c $(RT)/test_%.c $(RT)/wip_%.c,$(wildcard $(RT)/*.c))
 INC := -I. -I$(RT) -I../bridge -I../camera -I../input -I../scene -I../body -I../radar -I../hands -I../weapons -I../gameplay -I../ai -I../native
 
@@ -67,7 +67,16 @@ $(OUT)/test_dump_pick: test_dump_pick.c vrdump.h
 	@mkdir -p $(OUT)
 	$(CC) -I. $(CFLAGS) -o $@ test_dump_pick.c
 
-test: $(OUT)/test_view $(OUT)/test_cine $(OUT)/test_smooth $(OUT)/test_dump_pick
+# Disparo VR de punta a punta sobre vrgame_pad con RAM y puente sintéticos (sin runtime ni datos del juego; anfitrión sustituido en el propio test).
+VGSRC := vrgame.c vrbodyg.c ../bridge/bridge.c ../bridge/bridge_addrs.c ../input/vr_gesture.c ../input/vr_melee.c ../body/vr_body.c ../body/vr_fist.c ../body/vr_hand_mesh.c ../body/vr_body_cam.c ../body/vr_pose.c \
+  ../radar/vr_radar.c ../hands/vr_hands.c ../hands/vr_glove.c ../hands/vr_grip.c ../hands/vr_hand_pose.c $(filter-out ../weapons/test_%.c,$(wildcard ../weapons/*.c)) \
+  ../gameplay/vr_fire.c ../gameplay/vr_aa.c ../gameplay/vr_missile.c ../gameplay/vr_scope.c ../gameplay/vr_reload.c
+$(OUT)/test_vrgame_fire: test_vrgame_fire.c $(VGSRC) vrgame.h
+	@mkdir -p $(OUT)
+	$(CC) $(INC) $(CFLAGS) -Wno-unused-parameter -o $@ test_vrgame_fire.c $(VGSRC) -lm -lpthread
+
+test: $(OUT)/test_view $(OUT)/test_cine $(OUT)/test_smooth $(OUT)/test_dump_pick $(OUT)/test_vrgame_fire
+	$(OUT)/test_vrgame_fire
 	$(OUT)/test_view
 	$(OUT)/test_cine
 	$(OUT)/test_smooth

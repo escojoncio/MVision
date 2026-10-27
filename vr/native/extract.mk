@@ -11,11 +11,14 @@ $(B):
 	mkdir -p $(B)
 $(B)/test_ns_extract: vr/native/test_ns_extract.c $(SRC) $(HDR) | $(B)
 	$(CC) $(CFLAGS) -Ivr/native vr/native/test_ns_extract.c $(SRC) -lm -lpthread -o $@
+$(B)/test_ns_wphide: vr/native/test_ns_wphide.c vr/native/ns_wphide.c vr/native/ns_wphide.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Ivr/native vr/native/test_ns_wphide.c vr/native/ns_wphide.c -o $@
 $(B)/nshito1: vr/native/tools/nshito1.c vr/native/ns_dump.c vr/native/ns_dump.h $(SRC) $(HDR) | $(B)
 	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/tools/nshito1.c vr/native/ns_dump.c $(SRC) -lm -lpthread -o $@
 nshito1: $(B)/nshito1
-test: $(B)/test_ns_extract
+test: $(B)/test_ns_extract $(B)/test_ns_wphide
 	$(B)/test_ns_extract
+	$(B)/test_ns_wphide
 test-san:
 	$(MAKE) -f vr/native/extract.mk test B=vr/native/build-extract-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 clean:
@@ -54,9 +57,9 @@ test-solid-san:
 
 # Manos articuladas propias (ns_hand + vr/body/vr_hand_mesh): escena y manopla sintéticas.
 #   make -f vr/native/extract.mk test-hand
-HANDSRC := vr/native/ns_hand.c vr/native/ns_player.c vr/native/ns_solid.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_gpu.c vr/body/vr_hand_mesh.c
-$(B)/test_ns_hand: vr/native/test_ns_hand.c $(HANDSRC) vr/native/ns_hand.h vr/body/vr_hand_mesh.h $(HDR) | $(B)
-	$(CC) $(CFLAGS) -Iruntime -Ivr/native -Ivr/body vr/native/test_ns_hand.c $(HANDSRC) -lm -lpthread -o $@
+HANDSRC := vr/native/ns_hand.c vr/native/ns_player.c vr/native/ns_solid.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_gpu.c vr/body/vr_hand_mesh.c vr/hands/vr_hand_pose.c
+$(B)/test_ns_hand: vr/native/test_ns_hand.c $(HANDSRC) vr/native/ns_hand.h vr/body/vr_hand_mesh.h vr/hands/vr_hand_pose.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native -Ivr/body -Ivr/hands vr/native/test_ns_hand.c $(HANDSRC) -lm -lpthread -o $@
 test-hand: $(B)/test_ns_hand
 	$(B)/test_ns_hand
 test-hand-san:

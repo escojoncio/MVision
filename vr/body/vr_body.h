@@ -145,7 +145,6 @@ typedef struct VrBodyConfig {
                                   * mundo queda DELANTE del ojo (proyección sobre la mirada horizontal > 0) y a menos de esta distancia (m): el cuerpo que se inclina al atacar no tapa la vista */
     float near_hide_vtx_m;       /* 0,12 (defecto; 0 = desactivado): ... o con algún vértice a menos de esta distancia (m) del ojo, esté donde esté el centro */
     int force_arm_visible;       /* 1 (defecto): si el motor dejó a 0 la visibilidad de una pieza del brazo movida por la IK, se fuerza durante la transformación (brazos siempre dibujados) */
-    float armed_grip;            /* agarre mínimo de la mano dominante con arma (vrbody_set_armed); defecto 0.85 */
     /* codo */
     float pole[3];               /* dirección del codo en el marco del torso para el brazo izquierdo: x = hacia fuera, y = arriba, z = delante; el derecho se refleja en x. Defecto (0.45,-1,-0.35) */
     VrArmLimits limits;
@@ -170,7 +169,7 @@ const VrBodyConfig *vrbody_config(void);
 
 void vrbody_set_grip(int side, float v);     /* side 0 izquierda / 1 derecha; v 0 (abierta) .. 1 (cerrada) */
 void vrbody_set_dominant(int side);          /* 0 izquierda / 1 derecha */
-void vrbody_set_armed(int on);               /* la mano dominante empuña un arma: pose cerrada como mínimo armed_grip */
+void vrbody_set_armed(int on);               /* la mano dominante empuña un arma (informativo: la pose de la mano la decide vr_hand_pose según el objeto, ya no se fuerza un puño) */
 void vrbody_set_enabled(int on);
 /* El anfitrión suprime el puño deformado de la malla del motor (las manos nuevas de ns_hand ya hacen el puño). Va aparte de cfg.fist_enabled (ajuste del usuario, no se modifica). */
 void vrbody_set_fist_suppressed(int on);
@@ -271,7 +270,7 @@ typedef struct VrBodyArmLive {
     float hand[9];               /* orientación objetivo de la pieza mano */
     float grip_p[3], grip_q[4];  /* agarre (filtrado) del que sale el objetivo */
     float grip;                  /* agarre efectivo del apply (ya multiplicado por el fundido) */
-    float grip_floor;            /* mínimo del agarre mientras empuña un arma (armed_grip) o golpea (1) */
+    float grip_floor;            /* mínimo del agarre mientras golpea (1) */
     float fade;                  /* peso de fundido 0..1 (suavizado) */
     int has_prev; float tau_prev, tau_f_prev;   /* giro del antebrazo del apply (ver VrArmIn) */
 } VrBodyArmLive;

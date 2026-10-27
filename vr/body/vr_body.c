@@ -487,7 +487,7 @@ void vrbody_config_default(VrBodyConfig *c) {
     c->hand_roll_deg = 45.0f;
     for (int s = 0; s < 2; s++) roll_offset(c->hand_roll_deg, s, c->hand_rot_offset[s]);
     c->hand_pitch_deg = -35.0f; c->hand_pitch_auto = 1;
-    c->curl_deg = 0.0f; c->armed_grip = 0.85f;
+    c->curl_deg = 0.0f;
     c->fist_enabled = 1; c->fist_min_grip = 0.03f; vrfist_params_default(&c->fist);
     c->pole[0] = 0.45f; c->pole[1] = -1.0f; c->pole[2] = -0.35f;
     vrbody_limits_default(&c->limits);
@@ -1064,10 +1064,8 @@ static int apply_main(uint8_t *ram) {
         }
 
         /* agarre */
-        int is_dom = (s == (cfg->dominant ? 1 : 0));
         float gset = h->grip_set;
         if (jabbing) gset = 1.0f;
-        if (G.armed && is_dom && gset < cfg->armed_grip) gset = cfg->armed_grip;
         h->grip_cur += (gset - h->grip_cur) * (1 - expf(-dt / 0.06f));
         float M[9]; hand_map(rig.side, M);
         float curl[9]; { const float zax[3] = {0, 0, 1}; m_axis_angle(curl, zax, -rig.side * cfg->curl_deg * DEG * h->grip_cur); }
@@ -1165,7 +1163,7 @@ static int apply_main(uint8_t *ram) {
             v_sub(v, wt, view.eye); m_mulv(v, tr, v); v_scale(v, v, 1.0f / view.units_per_m); v_add(L->wrist, v, view.p_ref);
             m_mulm(L->torso, tr, Tq); m_mulv(L->pole, tr, pole); m_mulm(L->hand, tr, Rtb);
             v_cp(L->grip_p, h->pos); memcpy(L->grip_q, h->q, sizeof L->grip_q); q_normalize(L->grip_q);
-            L->grip = h->grip_cur * we_w; L->grip_floor = jabbing ? 1.0f : ((G.armed && is_dom) ? cfg->armed_grip : 0.0f); L->fade = we_w;
+            L->grip = h->grip_cur * we_w; L->grip_floor = jabbing ? 1.0f : 0.0f; L->fade = we_w;
             G.live[s].ok = all_finite(L->shoulder, 3) && all_finite(L->torso, 9) && all_finite(L->pole, 3) && all_finite(L->wrist, 3) && all_finite(L->hand, 9) &&
                            all_finite(L->grip_p, 3) && all_finite(L->grip_q, 4) && isfinite(L->grip) && isfinite(L->grip_floor);
         }

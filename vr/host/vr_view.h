@@ -117,6 +117,12 @@ static inline int vrhost_keep_filter(int native, int cine_cand, int scene3d, int
     return (n_scan > 0 || frame_on || world) && !(cine_cand && scene3d);
 }
 
+/* ¿Se quitan de la capa 2D los polígonos 3D sin vista (opts.drop_world2d de vr_scene.h)? Solo con render nativo, que dibuja el 3D: el mundo (salvo con la ventana 2D del selector o la pausa encima, cuyos menús
+ * son 2D) y la cinemática del motor (pantalla 3D: encima solo va 2D de verdad, nunca trozos de la imagen de PS1). Menús y vídeo son 2D enteros. Función pura; vrhost.c. */
+static inline int vrhost_drop_world2d(int native, int kind, int reason) {
+    return native && ((kind == VRV_K_WORLD && reason != VRV_R_SELECTOR && reason != VRV_R_PAUSE_WORLD) || kind == VRV_K_ENGINE);
+}
+
 /* ¿Se aplica la máscara de visión (marco con la abertura de la caja) como recubrimiento de ojo del render nativo? Solo en nativo, con el jugador en la caja (BRIDGE_PS_BOX) y una máscara en la lista (frame_on). Función pura; vrhost.c. */
 static inline int vrhost_box_mask(int native, int in_box, int frame_on) { return native && in_box && frame_on; }
 

@@ -33,7 +33,7 @@ void mv_vrgame_set_hand(int32_t side, const MvVrHand *h);
 void mv_vrgame_clear_hands(void);   /* sin mandos rastreados (mando normal, sin Sense, fuera del espacio inmersivo) */
 /* right_handed: mano del arma (1 derecha); reload_mode: 0 manual, 1 simplificada, 2 automática (WReloadMode). */
 void mv_vrgame_set_options(int32_t right_handed, int32_t reload_mode);
-/* Si 1 (defecto) y el mando entrega apuntado, el arma toma la orientación del apuntado y la posición del agarre. 0: todo del agarre. */
+/* Sin efecto: el arma cuelga de la mano nueva por el zócalo de vr_grip (VRH_GRIP_SOCKET), ya no toma el apuntado del mando. */
 void mv_vrgame_set_weapon_aim(int32_t on);
 /* Marco del agarre respecto al de la pose publicada en MvVrHand.pos/rot: p (m, en ese marco) y cuaternión x,y,z,w. Defecto identidad: la app publica ya
  * la ubicación "agarre" del accesorio (centro de la palma, -Z hacia los dedos, +Y al dorso); si el visor solo da la pose del dispositivo, aquí va el desplazamiento medido. */
@@ -143,6 +143,8 @@ unsigned vrbodyg_event_count(int ev);                                  /* VRG_EV
 uint16_t vrbodyg_pad(uint16_t pad, const struct BridgeState *bs, int right_handed);
 int32_t mv_vrgame_menu_hand(void);                                     /* mano física (0 izq, 1 der) que mantiene abierta la ventana de armas/objetos del gesto del pecho; -1 ninguna */
 int vrgame_hand_raw(int side, float p[3], float *grip, float *trig, double *t_s);   /* pose del agarre (espacio usuario, m), grip (puño), gatillo y marca de tiempo (s, monótono; 0 con guion de pruebas); 1 si hay seguimiento */
+void vrgame_test_install(int game_id, void *def, void *state, void *rig);   /* pruebas: arma ya construida (WeaponDef, WeaponState, VrHandsRig) en la ranura de su id */
+int vrgame_hand_pose_in(int side, int *item_pose, float *trigger, float *thumb);   /* pose de la mano nueva (vr_hand_pose.h: HP_*), gatillo y pulgar de la mano física side; 1 si hay seguimiento (si no, HP_RELAX y ceros) */
 int vrgame_glove_pub(void);                                              /* hueco publicado de los guantes (-1 = ninguno) */
 int vrgame_weapon_engaged(void);                                       /* arma VR mostrada o recarga en curso */
 void vrgame_haptic(int side, float strength);                          /* pulso háptico (0..1) a la mano física */

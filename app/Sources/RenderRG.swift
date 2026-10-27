@@ -767,8 +767,10 @@ final class RGRenderer {
         else { prepareNative(commandBuffer: commandBuffer, colorTargets: colorTargets, depthTargets: depthTargets, sceneV: sceneV, projections: projections, head: head, layered: layered) }
         // Filtro de pantalla (modo gpu): la escena se resuelve en texturas intermedias y un pase por ojo escribe el drawable (ver planPost). Nativo: nunca (plan = nil).
         let plan = gpuMode ? planPost(colorTargets: colorTargets, resolveTargets: resolveTargets, layered: layered) : nil
-        let sceneColor = plan?.sceneColor ?? colorTargets
-        let sceneResolve = plan?.sceneResolve ?? resolveTargets
+        // Nativo bajo el agua: onda de pantalla como post-proceso por ojo (la escena nativa va a una textura intermedia y se copia al drawable desplazada por filas; ver planWave)
+        let wavePlan = gpuMode ? nil : planWave(colorTargets: colorTargets, resolveTargets: resolveTargets, layered: layered)
+        let sceneColor = plan?.sceneColor ?? wavePlan?.plan.sceneColor ?? colorTargets
+        let sceneResolve = plan?.sceneResolve ?? wavePlan?.plan.sceneResolve ?? resolveTargets
         var nextCmd = 0
         for (gi, g) in groups.enumerated() {
             let firstG = gi == 0, lastG = gi == groups.count - 1
@@ -787,11 +789,12 @@ final class RGRenderer {
                 encodeScenePasses(commandBuffer, range: g.0..<g.1, first: firstG, last: lastG, colorTargets: sceneColor, depthTargets: depthTargets,
                                   resolveTargets: sceneResolve, views: sceneV, projections: projections, head: head, layered: layered)
             } else if lastG {
-                encodeScenePasses(commandBuffer, colorTargets: colorTargets, depthTargets: depthTargets, resolveTargets: resolveTargets,
+                encodeScenePasses(commandBuffer, colorTargets: sceneColor, depthTargets: depthTargets, resolveTargets: sceneResolve,
                                   views: sceneV, projections: projections, head: head, layered: layered)
             }
         }
         if let p = plan { encodePost(commandBuffer, p, projections: projections, layered: layered) }
+        if let w = wavePlan { encodePost(commandBuffer, w.plan, projections: projections, layered: layered, wave: w.wave) }
         // eventos restantes de la lista (tras el último lote) para dejar la VRAM en sincronía con el oráculo
         if nextCmd < listCmds.count { encodeVram(commandBuffer, listCmds[nextCmd...].map { $0.cmd }, fs) }
         radar?.renderTexture(commandBuffer, vram: vram)      // VRAM ya en su estado final de la lista
@@ -1316,8 +1319,8 @@ final class RGRenderer {
     }
 
     // MARK: filtro de pantalla (post-proceso)
-    private func postPipeline(format: MTLPixelFormat, layered: Bool) -> MTLRenderPipelineState? {
-        let key = "\(format.rawValue)-\(layered)-\(linearOutput)"
+    private func postPipeline(format: MTLPixelFormat, layered: Bool, wave: Bool = false) -> MTLRenderPipelineState? {
+        let key = "\(format.rawValue)-\(layered)-\(linearOutput)" + (wave ? "-onda" : "")
         if let p = postPipes[key] { return p }
         if failed.contains(key) { return nil }      // ya falló: no reintentar (compilar un pipeline por fotograma)
         guard let lib = library else { failed.insert(key); return nil }
@@ -1325,7 +1328,13 @@ final class RGRenderer {
             let fc = MTLFunctionConstantValues()
             var lin = linearOutput
             fc.setConstantValue(&lin, type: .bool, index: Int(VR_FC_LINEAR_OUT))
-            let fs = try lib.makeFunction(name: layered ? "vr_fs_post_layered" : "vr_fs_post", constantValues: fc)
+            let fs: MTLFunction
+            if wave {   // onda de pantalla del render nativo (vr_fs_wave): copia desplazada por fila, sin constantes de función
+                guard let wf = lib.makeFunction(name: layered ? "vr_fs_wave_layered" : "vr_fs_wave") else { failed.insert(key); return nil }
+                fs = wf
+            } else {
+                fs = try lib.makeFunction(name: layered ? "vr_fs_post_layered" : "vr_fs_post", constantValues: fc)
+            }
             guard let vs = lib.makeFunction(name: layered ? "vr_vs_post_layered" : "vr_vs_post") else { failed.insert(key); return nil }
             let d = MTLRenderPipelineDescriptor()
             d.label = "VR post filtro de pantalla"
@@ -1381,11 +1390,28 @@ final class RGRenderer {
         return PostPlan(sceneColor: tex, sceneResolve: [], fxTex: tex, dst: dst)
     }
 
+    /// Plan de la onda de pantalla bajo el agua del render NATIVO (cabeza dentro del agua): misma maquinaria que planPost (con MSAA la escena se resuelve en `fxTex`, sin MSAA se dibuja directa en él; un pase por ojo
+    /// escribe luego el drawable desplazando cada fila en horizontal, ver vr_fs_wave). `fxTex` se reserva una vez y se recrea solo si cambia el destino. La profundidad no se toca. nil = sin onda (el mundo va directo al drawable).
+    private func planWave(colorTargets: [MTLTexture], resolveTargets: [MTLTexture], layered: Bool) -> (plan: PostPlan, wave: SIMD4<Float>)? {
+#if !MV_BENCH || MV_BENCH_NATIVE
+        guard !gpuMode, nativeDraw, screenFilterEnabled, drawWorld, drawEyes, viewportOverride == nil, rasterizationRateMap == nil, let n = native, let wave = n.waveParams else { return nil }
+        let msaa = (colorTargets.first?.sampleCount ?? 1) > 1
+        let dst = msaa ? resolveTargets : colorTargets
+        guard let first = dst.first, postPipeline(format: first.pixelFormat, layered: layered, wave: true) != nil,
+              ensureFrameTextures(), let tex = filterTextures(like: dst) else { return nil }
+        if msaa { return (PostPlan(sceneColor: colorTargets, sceneResolve: tex, fxTex: tex, dst: dst), wave) }
+        return (PostPlan(sceneColor: tex, sceneResolve: [], fxTex: tex, dst: dst), wave)
+#else
+        return nil
+#endif
+    }
+
     /// Pase de post-proceso por ojo: lee la escena resuelta (fxTex) y escribe el drawable con la onda por fila, el tinte y el recubrimiento.
     /// Parámetros por ojo a partir de la proyección: fila del punto principal = H/2*(1+P[2][1]) y focal vertical = H/2*P[1][1] (px).
     /// `warpOnly`: pantalla 3D de las cinemáticas (2 ojos sueltos): solo la onda por fila; sin tinte, recubrimientos, líneas ni máscara (los pone la pantalla al presentar).
-    private func encodePost(_ cb: MTLCommandBuffer, _ plan: PostPlan, projections: [simd_float4x4], layered: Bool, warpOnly: Bool = false) {
-        guard let first = plan.dst.first, let pso = postPipeline(format: first.pixelFormat, layered: layered) else { return }
+    /// `wave`: onda de pantalla del render nativo bajo el agua (vr_fs_wave: amplitud, rad por fila del motor, fase, H del motor); nil = el filtro de pantalla de siempre.
+    private func encodePost(_ cb: MTLCommandBuffer, _ plan: PostPlan, projections: [simd_float4x4], layered: Bool, warpOnly: Bool = false, wave: SIMD4<Float>? = nil) {
+        guard let first = plan.dst.first, let pso = postPipeline(format: first.pixelFormat, layered: layered, wave: wave != nil) else { return }
         // por ojo: x = fila del punto principal, y = focal vertical, z = columna del punto principal, w = focal horizontal (todo en píxeles de la textura)
         func eyeParams(_ i: Int, _ width: Int, _ height: Int) -> SIMD4<Float> {
             let h = Float(height), w = Float(width)
@@ -1408,6 +1434,7 @@ final class RGRenderer {
             u.scan = SIMD4<Float>(0, 0, 0, -1)
             u.frame = SIMD4<Float>(0, 0, 0, 0)
         }
+        if let w = wave { u.wave = w }
         guard !frameTex.isEmpty else { return }
         let frameTexture = frameTex[min(max(fx.frameIdx, 0), frameTex.count - 1)]
         let dvCopy = fx.dv

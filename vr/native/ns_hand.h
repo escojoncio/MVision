@@ -2,7 +2,7 @@
 /* ns_hand: manos articuladas propias en la escena nativa (primera persona).
  *
  * La mano del personaje del motor es UNA malla rígida (manopla). Aquí se oculta y, en su lugar, se añaden a la escena dos instancias propias (una por mano) con las mallas
- * de vr_hand_mesh: 16 huesos rígidos = 16 NsPiece por mano. Cada pieza lleva la matriz de la pieza mano del motor (ya con la IK de la capa VR, mismo espacio que el resto
+ * de vr_hand_mesh: 16 huesos rígidos = 16 NsPiece por mano, con el anillo proximal de cada hueso soldado (NsVert.weld, NsPiece.parent = hueso padre) al distal del padre: sin huecos en las articulaciones. Cada pieza lleva la matriz de la pieza mano del motor (ya con la IK de la capa VR, mismo espacio que el resto
  * de la escena y por tanto bajo la misma to_vr) compuesta con la pose del hueso para el agarre. Iluminación, ambiente, niebla y zona: los de la instancia del jugador.
  *
  * Texturas: sin datos propios. Cada cara de la mano nueva toma tpage/clut/texid y un trozo del rectángulo UV de una cara de la manopla del motor (se clasifican por
@@ -29,6 +29,9 @@ typedef struct {
     int enabled;                 /* 0: no tocar la escena (manos originales) */
     float grip[2];               /* agarre efectivo 0..1, índice 0 = izquierda, 1 = derecha (como vrbody_set_grip) */
     int driven[2];               /* la capa VR llevó ese brazo en este fotograma (si no, mano relajada en la pose de la animación del juego) */
+    int item_pose[2];            /* HP_* de vr_hand_pose.h: pose del objeto en la mano (HP_RELAX = sin objeto; ojo: el cero de un NsHandIn a cero es HP_OPEN) */
+    float trigger[2];            /* gatillo analógico 0..1: solo cierra el índice si la pose lleva gatillo (vrhandpose_has_trigger) */
+    float thumb[2];              /* pulgar sobre un botón de cara 0..1 */
 } NsHandIn;
 
 typedef struct {

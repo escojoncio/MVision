@@ -100,7 +100,7 @@ static uint8_t *png_read_stored(const char *path, int *w, int *h) {
 static int build_scene(const NsDump *d, const GpuDrawList *l, VrScene *sc) {
     VrSceneOpts o = vr_scene_opts_default();
     o.screen_filter = 1;   /* on_start */
-    o.drop_world2d = getenv("L2D_SIN_W2D") == NULL && (int)ns_dump_meta_num(d, "view_mode", 1) == 1;    /* build_one: solo vista mundo (el meta no trae el motivo: selector/pausa no se distinguen); L2D_SIN_W2D=1 la apaga (comparar con/sin) */
+    o.drop_world2d = getenv("L2D_SIN_W2D") == NULL && ((int)ns_dump_meta_num(d, "view_mode", 1) == VRV_K_WORLD || (int)ns_dump_meta_num(d, "view_mode", 1) == VRV_K_ENGINE);    /* build_one: vista mundo y cinemática del motor (el meta no trae el motivo: selector/pausa no se distinguen); L2D_SIN_W2D=1 la apaga (comparar con/sin) */
     BridgeState bs; memset(&bs, 0, sizeof bs);
     VrCamRecord rec; memset(&rec, 0, sizeof rec);
     float M[9], eye[3], pref[3] = {0, 0, 0};

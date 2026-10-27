@@ -58,8 +58,10 @@ typedef struct {
     uint32_t buttons[2];        /* bits WB_* */
     int support_held;           /* la mano 1 sujeta WP_SUPPORT */
     float dt;
+    uint32_t game_flags;        /* bits WGF_*: estado del juego que el arma muestra pero no decide (la capa de integración los rellena; 0 = ninguno) */
 } WInput;
 enum { WB_A = 1, WB_B = 2, WB_STICK = 4, WB_MAG_RELEASE = 8 };
+enum { WGF_SUPP = 1 };      /* el juego tiene el supresor puesto en la pistola: se dibuja y su punta es la boca */
 
 /* Modos de recarga (opciones de la app). */
 typedef enum { WR_MANUAL, WR_SIMPLIFIED, WR_AUTOMATIC } WReloadMode;

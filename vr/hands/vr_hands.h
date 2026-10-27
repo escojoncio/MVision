@@ -43,7 +43,9 @@ typedef enum {
     VRH_GRIP_AUTO = 0,        /* ver arriba */
     VRH_GRIP_DEF,             /* siempre def->points[WP_GRIP] (coherente con la lógica del arma) */
     VRH_GRIP_DERIVED,         /* siempre derivado del modelo (cae a def si no se puede) */
-    VRH_GRIP_MANUAL           /* grip_manual */
+    VRH_GRIP_MANUAL,          /* grip_manual */
+    VRH_GRIP_SOCKET           /* la pose que se da es la de la MANO (marco de la mano nueva, m) y el arma cuelga de ella por el zócalo de vr_grip.h: W = mano * inv(socket) * recoil * inv(def->points[WP_GRIP]),
+                               * la misma matriz que mueve la mano; el agarre del modelo es siempre el de def (el de la lógica del arma). Ver vrhands_set_socket y vrhands_weapon_hand */
 } VrHandsGripMode;
 
 typedef struct {
@@ -51,6 +53,7 @@ typedef struct {
     VrHandsGripMode grip_mode;
     WPose grip_manual;
     float grip_pitch_deg;     /* giro extra del arma sobre el eje X de la mano (+ = boca arriba) */
+    WPose socket;             /* VRH_GRIP_SOCKET: marco de la mano (m) -> marco de empuñadura (ejes del arma, origen en def->points[WP_GRIP]); defecto identidad */
     float cull_dist;          /* m: piezas a más de esto del arma se omiten (cargador "apartado" 50 m, etc.) */
     float light_dir[3];       /* hacia la luz, en mundo */
     float ambient, diffuse;
@@ -68,6 +71,11 @@ void vrhands_destroy(VrHandsRig *r);
 int  vrhands_bind(VrHandsRig *r, const WeaponState *s, const uint8_t *atlas, uint32_t w, uint32_t h);
 void vrhands_unbind(VrHandsRig *r, const WeaponState *s);
 
+/* VRH_GRIP_SOCKET: zócalo mano -> empuñadura (un VrGripEntry.grip, reflejado para la mano izquierda). Cuaternión no unitario o no finito: se ignora (-1); 0 = bien. */
+int  vrhands_set_socket(VrHandsRig *r, WPose socket);
+/* Pose que se le da a la lógica del arma como mano 0 (WInput.hand[0]) a partir de la pose de la mano: en VRH_GRIP_SOCKET mano * inv(socket) (el marco de empuñadura en mundo, el que
+ * usa wcore_weapon_world con def->points[WP_GRIP]); en los demás modos, la propia pose. Así lógica y dibujo cuelgan del mismo punto. */
+WPose vrhands_weapon_hand(const VrHandsRig *r, const VrHandsPose *hand);
 /* Agarre derivado del modelo (ver arriba) en el espacio del modelo. 0 = bien; -1 faltan piezas o geometría. */
 int  vrhands_derive_grip(const WeaponState *s, WPose *out);
 /* Agarre efectivo según el modo. */

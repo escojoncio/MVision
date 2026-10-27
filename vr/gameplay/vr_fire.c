@@ -1,5 +1,6 @@
 /* vr_fire: ver vr_fire.h. Núcleo sin dependencias del runtime (se prueba con RAM sintética). */
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include "vr_fire.h"
 #include "vr_camera.h"          /* solo VrCamRecord (vrfire_map_from_cam) */
@@ -25,6 +26,16 @@
 #define WA_LIGHT_PRIM   0x10Cu       /* pistola: primitiva del punto */
 #define PRIM_TYPE       0x24u        /* primitiva: tipo (bits) */
 #define PRIM_INVISIBLE  0x100
+/* actor de la granada (0x8006af98 lo crea; paso 0x8006a8f0): objeto en +0x20 (posición s16[3] en su inicio; +0x28 banderas, +0x2C grupo, +0x2E nº de piezas), mecha (ticks) en +0x100, velocidad por tick s16[3] en +0x108 */
+#define GA_SIZE 0x124u
+#define GA_OBJ 0x20u
+#define GA_FUSE 0x100u
+#define GA_VEL 0x108u
+#define OBJ_FLAG 0x28u
+#define OBJ_GID 0x2Cu
+#define OBJ_HIDDEN_FLAG 0x80u       /* OF_HIDDEN del extractor nativo (ns_extract.c) */
+#define CHAN_MAIN 0x800B2B7Cu       /* canal principal: nº de objetos en +0x56 (s16), cola en +0x58 */
+#define A_GROUP 0x800ACAF8u         /* grupo activo (máscara) */
 
 
 /* Puntero del invitado válido: KSEG0 dentro de los 2 MB de RAM (no los espejos por encima de 0x80200000) y n bytes caben. */
@@ -129,6 +140,7 @@ static struct {
     int infl[NQ], ninfl;                 /* liberaciones que aún no han producido proyectil (edad) */
     int infl_life;                       /* vida de esas liberaciones (INFL_LIFE; más si hay una petición de vida larga en curso) */
     int phase, tphase;
+    int last_raise;                      /* el último VBlank activo trataba el arma como «mantener levantada» (granada, visor): si se pierde el seguimiento con el botón mantenido, lo que suelte el juego es un desarmado */
     int disarm_t;                        /* VBlanks restantes en que un proyectil sin petición se suprime */
     int auto_tail;                       /* VBlanks tras soltar el gatillo en que aún salen balas del juego con la pose viva */
     WPose live; VrFireMap live_map; int live_ok, auto_live;
@@ -136,14 +148,16 @@ static struct {
     VrFireStats st;
     int flash_age;                       /* VBlanks desde la última bala sustituida (el resplandor solo la acompaña si es reciente) */
     float tpos[3], tvel[3]; VrFireMap tmap; int tok, tok_age;
-    float tvel_m[3], ttick_s, tupm;      /* velocidad de la mano (m/s, ejes del motor), tick del motor y unidades por metro: extrapolación hasta la creación */
+    float ttick_s;                       /* tick del motor (s) con el que se pasó la velocidad: tope de la extrapolación hasta la creación */
 } S;
 
 #define INFL_LIFE 14
 #define AUTO_TAIL 6
 #define DISARM_WINDOW 60
 #define FLASH_LIFE 3             /* el resplandor se pide en el mismo tick que la bala; pasado esto es de otro (p. ej. un enemigo) */
-#define VRFIRE_THROW_G 9.81f      /* gravedad (m/s^2) de la mano real durante el retardo del lanzamiento */
+/* Gravedad de la granada del juego: el paso del actor (0x8006a8f0) resta 16 a la velocidad vertical (unidades/tick) en cada tick con el objeto en el aire.
+ * Con 1000 unidades/m y 0,04 s/tick son 10,0 m/s^2 (la real, 9,81: coherente). Se usa también para la parte del vuelo anterior a la creación del actor. */
+#define VRFIRE_GAME_G 16.0f
 #define THROW_LIFE 90            /* datos de lanzamiento no consumidos caducan (la granada sale ~16 VBlanks tras soltar) */
 
 void vrfire_cfg_default(VrFireCfg *c) {
@@ -167,8 +181,12 @@ void vrfire_set_probe(VrFireProbe f) { g_probe = f; }
 /* Último actor de misil creado (kind 1) y cuántos van: lo usa vrgame para seguir el misil guiado (el puntero se recicla: ver vr_missile.h). */
 static uint32_t g_last_missile, g_missile_serial;
 uint32_t vrfire_last_missile(uint32_t *serial) { if (serial) *serial = g_missile_serial; return g_last_missile; }
+static struct { int on; uint32_t actor; float t, next; int lines; } GT;     /* seguimiento diagnóstico de la granada lanzada (vrfire_grenade_track) */
+#define GT_PERIOD_S 0.25f
+#define GT_SPAN_S 3.0f
 void vrfire_probe(int kind, int decision, uint32_t result, const VrFireMat *m) {
     if (kind == 1 && result) { g_last_missile = result; g_missile_serial++; }
+    if (kind == 3 && ptr_ok(result, GA_SIZE)) { GT.on = 1; GT.actor = result; GT.t = 0; GT.next = GT_PERIOD_S; }
     if (g_probe) g_probe(kind, decision, result, m);
 }
 const VrFireMat *vrfire_last_subst(void) { return &S.last; }
@@ -185,10 +203,11 @@ void vrfire_frame(const VrFireGame *g, const VrFireIn *in, VrFireOut *out) {
     if (S.flash_age < 1000000) S.flash_age++;
     if (S.tok && ++S.tok_age > THROW_LIFE) S.tok = 0;
     if (!in || !g || !g->ok || !in->active || !in->map || !in->map->valid) {
+        if (S.live_ok && S.phase == P_HOLD && S.nq == 0 && S.last_raise) S.disarm_t = DISARM_WINDOW;   /* seguimiento perdido/arma fuera con el botón mantenido: el juego soltará sin petición */
         S.live_ok = 0; reset_machine();
         return;
     }
-    S.live = in->muzzle; S.live_map = *in->map; S.live_ok = 1;
+    S.live = in->muzzle; S.live_map = *in->map; S.live_ok = 1; S.last_raise = in->raise;
     for (int i = 0; i < S.nq;) {
         if (++S.q[i].age > (S.q[i].life > S.cfg.req_window ? S.q[i].life : S.cfg.req_window)) { memmove(&S.q[i], &S.q[i + 1], sizeof(Req) * (size_t)(S.nq - i - 1)); S.nq--; S.st.expired++; }
         else i++;
@@ -278,34 +297,75 @@ int vrfire_take_flash(int style, VrFireMat *m) {
     return 1;
 }
 
-int vrfire_set_throw(const float pos_user[3], const float vel_user_mps[3], float tick_s) {
-    if (!S.live_ok || !S.live_map.valid || !pos_user || !vel_user_mps || !(tick_s > 0)) return 0;
+static int set_throw(const float pos_user[3], const float vel_user_mps[3], float tick_s) {
+    if (!S.live_map.valid || !pos_user || !vel_user_mps || !(tick_s > 0)) return 0;
     float w[3], v[3];
     vrfire_pos_to_world(&S.live_map, pos_user, w);
     vrfire_dir_to_world(&S.live_map, vel_user_mps, v);
-    for (int i = 0; i < 3; i++) { S.tpos[i] = w[i]; S.tvel[i] = v[i] * S.live_map.units_per_m * tick_s; S.tvel_m[i] = v[i]; }
-    S.ttick_s = tick_s; S.tupm = S.live_map.units_per_m;
+    for (int i = 0; i < 3; i++) { S.tpos[i] = w[i]; S.tvel[i] = v[i] * S.live_map.units_per_m * tick_s; }
+    S.ttick_s = tick_s;
     S.tok = finite3(S.tpos) && finite3(S.tvel); S.tok_age = 0;
     return S.tok;
 }
+int vrfire_set_throw(const float pos_user[3], const float vel_user_mps[3], float tick_s) {
+    if (!S.live_ok) return 0;
+    return set_throw(pos_user, vel_user_mps, tick_s);
+}
 int vrfire_take_throw(int16_t pos[3], int16_t vel[3]) {
     if (S.nq > 0) { pop_req(); pop_infl(); }      /* el lanzamiento atiende a la petición pendiente (como cualquier proyectil) */
+    else if (!S.tok && S.disarm_t > 0 && S.cfg.suppress_disarm && S.last_raise) {
+        /* Granada preparada (botón mantenido) y soltada sin lanzar (arma fuera, seguimiento perdido): el juego la crearía con su velocidad por defecto a los pies.
+         * Se cambia por una caída suave desde la última pose de la boca (velocidad 0, como la cocinada hasta el final en la mano). */
+        const float z[3] = {0, 0, 0}, p[3] = {S.live.p.x, S.live.p.y, S.live.p.z};
+        set_throw(p, z, 0.04f);
+        S.disarm_t = 0;
+    }
     if (!S.tok) { S.st.passed++; return 0; }
     S.st.subst++;
-    /* El juego crea la granada unos 16 VBlanks después de soltar (animación de lanzar): se adelanta la posición y se descuenta la gravedad
-     * de ese retardo para que continúe la trayectoria que llevaba la mano (VRFIRE_THROW_G m/s^2 sobre el eje Y del motor). */
-    float dt_s = (float)S.tok_age * (S.ttick_s * 0.5f);
-    if (dt_s > 0.6f) dt_s = 0.6f;
+    /* El juego crea la granada unos 16 VBlanks después de soltar (animación de lanzar): se adelanta la posición y se descuenta la gravedad del juego
+     * de ese retardo (n ticks de 2 VBlanks) para que continúe la trayectoria que llevaba la mano (VRFIRE_GAME_G sobre el eje Y del motor). */
+    float n = (float)S.tok_age * 0.5f, nmax = 0.6f / S.ttick_s;
+    if (n > nmax) n = nmax;
     for (int i = 0; i < 3; i++) {
         float p = S.tpos[i], v = S.tvel[i];
-        if (dt_s > 0 && S.tupm > 0) {
-            p += S.tvel_m[i] * S.tupm * dt_s;
-            if (i == 1) { p -= 0.5f * VRFIRE_THROW_G * S.tupm * dt_s * dt_s; v -= VRFIRE_THROW_G * S.tupm * dt_s * S.ttick_s; }
-        }
+        p += v * n;
+        if (i == 1) { p -= 0.5f * VRFIRE_GAME_G * n * n; v -= VRFIRE_GAME_G * n; }
         pos[i] = (int16_t)(p > 32767 ? 32767 : p < -32768 ? -32768 : lrintf(p));
         vel[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : lrintf(v));
     }
     S.tok = 0;
+    return 1;
+}
+
+/* Diagnóstico de la granada ([granada], una línea por lanzamiento del juego): argumentos originales (posición y velocidad del motor) frente a los sustituidos,
+ * y si la correspondencia usuario -> motor era válida. subst = 0: se llamó al original sin cambios (pos/vel sustituidos se ignoran). */
+void vrfire_log_grenade(const int16_t o_pos[3], const int16_t o_vel[3], int subst, const int16_t pos[3], const int16_t vel[3]) {
+    fprintf(stderr, "[granada] sustituida=%d mapa_valido=%d agarre_vivo=%d peticiones=%d | original pos=(%d,%d,%d) vel=(%d,%d,%d) | ",
+            subst != 0, S.live_map.valid != 0, S.live_ok != 0, S.nq, o_pos[0], o_pos[1], o_pos[2], o_vel[0], o_vel[1], o_vel[2]);
+    if (subst) fprintf(stderr, "sustituida pos=(%d,%d,%d) vel=(%d,%d,%d)\n", pos[0], pos[1], pos[2], vel[0], vel[1], vel[2]);
+    else fprintf(stderr, "sin sustituir\n");
+}
+
+/* Una línea [granada] cada GT_PERIOD_S durante GT_SPAN_S tras crearse el actor de la granada: posición, velocidad y mecha del actor, y lo que decide si la escena nativa lo extrae
+ * (bandera de oculto del objeto, grupo activo, presencia en la cola del canal principal). dt_s = tiempo real desde la llamada anterior. Devuelve 1 si escribió una línea. */
+int vrfire_grenade_track(const uint8_t *ram, float dt_s) {
+    if (!GT.on || !ram) return 0;
+    if (!(dt_s > 0) || dt_s > 1.0f) dt_s = 0.02f;
+    GT.t += dt_s;
+    if (GT.t < GT.next) return 0;
+    GT.next += GT_PERIOD_S;
+    uint32_t a = GT.actor, obj = a + GA_OBJ;
+    uint32_t flag = rd_u32(ram, obj + OBJ_FLAG), group = rd_u32(ram, A_GROUP);
+    uint16_t gid = (uint16_t)rd_s16(ram, obj + OBJ_GID);
+    int inq = 0, qn = rd_s16(ram, CHAN_MAIN + 0x56);
+    uint32_t q = rd_u32(ram, CHAN_MAIN + 0x58);
+    if (qn > 256) qn = 256;
+    if (qn > 0 && ptr_ok(q, 4u * (uint32_t)qn)) for (int i = 0; i < qn && !inq; i++) inq = rd_u32(ram, q + 4u * (uint32_t)i) == obj;
+    fprintf(stderr, "[granada] t=%.2f actor=%08x pos=(%d,%d,%d) vel=(%d,%d,%d) mecha=%d | objeto bandera=%03x oculto=%d grupo_ok=%d en_cola=%d\n", GT.t, a,
+            rd_s16(ram, obj), rd_s16(ram, obj + 2), rd_s16(ram, obj + 4), rd_s16(ram, a + GA_VEL), rd_s16(ram, a + GA_VEL + 2), rd_s16(ram, a + GA_VEL + 4),
+            rd_s32(ram, a + GA_FUSE), flag & 0xFFFu, (flag & OBJ_HIDDEN_FLAG) != 0, gid == 0 || (gid & group) != 0, inq);
+    GT.lines++;
+    if (GT.t >= GT_SPAN_S) GT.on = 0;
     return 1;
 }
 

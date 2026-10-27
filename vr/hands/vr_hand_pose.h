@@ -1,0 +1,53 @@
+/* vr_hand_pose: poses de la mano nueva (vr/body/vr_hand_mesh) a partir de la entrada analógica de un mando (gatillo, agarre, botones; sin seguimiento de dedos).
+ *
+ * Cada pose es una tabla de cierres por dedo (índice, corazón, anular, meñique, pulgar; 0 abierto .. 1 puño) y una separación del pulgar; el cierre de un dedo se reparte
+ * entre MCP/PIP/DIP con los ángulos de VrHandPoseCfg (vrhand_pose_curls_ex). Mezcla (vrhandpose_blend):
+ *   base    = lerp(HP_RELAX -> pose del objeto, agarre)
+ *   índice  = lerp(base -> índice tirado de la pose, gatillo), solo si la pose tiene gatillo (HP_TRIGGER, HP_GRIP_PISTOL, HP_GRIP_RIFLE)
+ *   pulgar  = lerp(base -> pulgar levantado y abierto, botón del pulgar)
+ *   sin objeto (item_pose = HP_RELAX): la pose destino es HP_FIST y el botón de puño (fist_btn) la fuerza: agarre efectivo = max(agarre, fist_btn).
+ *   Con objeto (HP_GRIP_*, HP_OPEN, HP_POINT, HP_FIST, HP_TRIGGER) fist_btn se ignora.
+ * Todas las entradas se acotan a 0..1 (NaN/inf -> 0); una pose fuera de rango cuenta como HP_RELAX. Determinista y sin estado.
+ * La yema del índice en HP_TRIGGER y HP_GRIP_* (gatillo suelto) cae en la zona de gatillo (ver test_hand_pose.c); vr_grip.c coloca el arma contando con ello. */
+#pragma once
+#include "vr_hand_mesh.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+enum {
+    HP_OPEN = 0, HP_RELAX, HP_FIST, HP_POINT,
+    HP_TRIGGER,           /* puño con el índice libre sobre el gatillo (sin objeto en la mano) */
+    HP_GRIP_PISTOL,       /* empuñadura de pistola, índice en el gatillo */
+    HP_GRIP_RIFLE,        /* empuñadura de pistola de un arma larga, índice en el gatillo, pulgar rodeándola */
+    HP_GRIP_SUPPORT,      /* mano de apoyo bajo el guardamanos o delante de la empuñadura */
+    HP_GRIP_SPHERE,       /* granada */
+    HP_GRIP_PLACED,       /* mina / C4 / detonador */
+    HP_GRIP_BOX,          /* caja (cargador, objeto genérico) */
+    HP_COUNT
+};
+
+typedef struct {
+    int item_pose;        /* HP_*; HP_RELAX = sin objeto */
+    float grip;           /* agarre analógico 0..1 */
+    float trigger;        /* gatillo analógico 0..1 */
+    float thumb_btn;      /* pulgar sobre un botón de cara 0..1 (levanta el pulgar) */
+    float fist_btn;       /* botón de puño 0..1 (solo sin objeto) */
+} VrHandPoseIn;
+
+/* Cierres resultantes antes de aplicar el esqueleto. */
+typedef struct {
+    float curl[5];        /* índice, corazón, anular, meñique, pulgar: 0..1 */
+    float thumb_spread;   /* -1 .. 1 (vrhand_pose_curls_ex) */
+} VrHandCurls;
+
+int vrhandpose_has_trigger(int pose);                                  /* 1 si el objeto de esta pose tiene gatillo (el índice sigue la entrada de gatillo) */
+void vrhandpose_curls(const VrHandPoseIn *in, VrHandCurls *out);       /* la mezcla sin esqueleto; in NULL = mano relajada */
+void vrhandpose_blend(const VrHand *h, const VrHandPoseIn *in, float xf[VRHAND_BONES][12]);
+/* Punta del dedo índice (extremo de la cúpula de la yema, en el eje del hueso 3) en el marco de la mano. */
+void vrhandpose_index_tip(const VrHand *h, const float xf[VRHAND_BONES][12], float out[3]);
+
+#ifdef __cplusplus
+}
+#endif

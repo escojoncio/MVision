@@ -300,12 +300,61 @@ static void t_fuzz(void) {
     vrhands_destroy(r); syn_free(&a);
 }
 
+/* VRH_GRIP_SOCKET: la pose dada es la de la MANO y el arma cuelga de ella por el zócalo: W * grip * socket = mano (la boca sale de W * points[WP_MUZZLE]); lo que ve la lógica del arma
+ * (vrhands_weapon_hand + wcore_weapon_world) es la misma matriz que dibuja vrhands_build. */
+static float pose_err(WPose a, WPose b) {
+    float e = wv_len(wv_sub(a.p, b.p)), d = fabsf(a.q.x * b.q.x + a.q.y * b.q.y + a.q.z * b.q.z + a.q.w * b.q.w);
+    return e + (1.0f - (d > 1.0f ? 1.0f : d));
+}
+static void t_socket(void) {
+    Syn a; syn_init(&a, 1);
+    a.def.points[WP_GRIP] = (WPose){wv(0.003f, -0.05f, 0.02f), wquat_axis_angle(wv(1, 0, 0), 0.3f)};
+    a.def.points[WP_MUZZLE] = (WPose){wv(0, 0.02f, -0.2f), wquat_identity()};
+    WPose sock = {wv(0.001f, 0.0f, 0.07f), wquat_normalize((WQuat){-0.11671f, 0.69741f, 0.69741f, 0.11671f})};
+    for (int mode = 0; mode < 2; mode++) {
+        VrHandsConfig c; vrhands_default_config(&c);
+        c.grip_mode = mode ? VRH_GRIP_SOCKET : VRH_GRIP_DEF;
+        VrHandsRig *r = vrhands_create(&c);
+        CHECK(vrhands_set_socket(r, sock) == 0, "zócalo válido");
+        WQuat bad = {0, 0, 0, 0}; WPose pb = {wv(0, 0, 0), bad};
+        CHECK(vrhands_set_socket(r, pb) == -1 && vrhands_set_socket(NULL, sock) == -1, "zócalo inválido: se ignora");
+        vrhands_bind(r, a.st, NULL, 0, 0);
+        VrHandsPose h = hp(0.3f, 1.2f, -0.4f, 0.1f, 0.5f, -0.2f, 0.8f);
+        WPose H = vrhands_pose_to_w(&h); H.q = wquat_normalize(H.q);
+        WPose W = vrhands_weapon_world(r, a.st, &h);
+        WPose chain = wpose_mul(wpose_mul(W, a.def.points[WP_GRIP]), sock);   /* arma -> empuñadura -> mano */
+        if (mode) {
+            CHECK(pose_err(chain, H) < 1e-4f, "SOCKET: W * grip * socket = mano (error %.6f)", pose_err(chain, H));
+            WPose mz = wpose_mul(W, a.def.points[WP_MUZZLE]);
+            WPose hand_in_w = wpose_mul(H, wpose_inv(sock));                    /* marco de empuñadura en mundo */
+            WPose mz2 = wpose_mul(wpose_mul(hand_in_w, wpose_inv(a.def.points[WP_GRIP])), a.def.points[WP_MUZZLE]);
+            CHECK(pose_err(mz, mz2) < 1e-4f, "SOCKET: boca = W * points[WP_MUZZLE] (error %.6f)", pose_err(mz, mz2));
+            WInput in; memset(&in, 0, sizeof in);
+            in.hand[0] = vrhands_weapon_hand(r, &h);
+            CHECK(pose_err(wcore_weapon_world(a.st, &in), W) < 1e-4f, "la lógica del arma y el dibujo cuelgan de la misma matriz");
+            VrHandsFrame f;
+            CHECK(vrhands_build(r, a.st, &h, &f) > 0, "build");
+            const VrHandsMesh *fm = find_mesh(&f, 0, 0, a.m[0].v);
+            WVec3 o = fm ? xf(fm->model, wv(0, 0, 0)) : wv(1e9f, 0, 0);
+            CHECK(fm && wv_len(wv_sub(o, W.p)) < 1e-4f, "la malla del armazón sale en W");
+            WPose g = vrhands_grip(r, a.st);
+            CHECK(pose_err(g, a.def.points[WP_GRIP]) < 1e-6f, "SOCKET usa el agarre de def");
+        } else {
+            CHECK(pose_err(vrhands_weapon_hand(r, &h), H) < 1e-6f, "sin SOCKET la pose pasa tal cual");
+            CHECK(pose_err(chain, H) > 1e-3f, "sin SOCKET el zócalo no interviene");
+        }
+        vrhands_destroy(r);
+    }
+    syn_free(&a);
+}
+
 int main(void) {
     t_grip_and_transforms();
     t_modes_scale_pitch();
     t_ids_ring_mailbox();
     t_busy_scale_limits();
     t_invalid();
+    t_socket();
     t_fuzz();
     if (fails) { printf("test_hands: %d FALLOS\n", fails); return 1; }
     printf("test_hands: OK\n");

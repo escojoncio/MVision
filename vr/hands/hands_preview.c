@@ -6,11 +6,16 @@
  *   <id>_eye.png       vista desde el ojo (cabeza a 1,6 m) con el arma en la mano derecha
  *   <id>_side.png      vista cercana lateral
  *   <id>_free.png      con un cargador en la mano libre y una vaina en el aire
- *   <id>_eyeR.png      ojo derecho (separación interpupilar 63 mm): paralaje estéreo */
+ *   <id>_eyeR.png      ojo derecho (separación interpupilar 63 mm): paralaje estéreo
+ *
+ *   hands_preview --poses <dir_salida>      (no necesita datos del juego)
+ * Escribe un PNG por pose de vr_hand_pose (pose_NN_<nombre>.png; las poses con gatillo, además pose_NN_<nombre>_pulled.png con el gatillo a fondo): mano derecha (fila de arriba) e
+ * izquierda (abajo) con las soldaduras aplicadas, vistas de la palma, del dorso y de perfil (lado del pulgar). */
 /* Solo con -DVRH_PREVIEW_BUILD (lo pone el Makefile): fuera de él el fichero queda vacío, así app/stage.sh puede copiar los .c de vr/hands
  * al target de la app sin arrastrar un main(). */
 #ifdef VRH_PREVIEW_BUILD
 #include "vr_hands.h"
+#include "vr_hand_pose.h"
 #include "wprev.h"
 #include "../weapons/wcut.h"
 #include <math.h>
@@ -193,7 +198,81 @@ static void save(const char *dir, const char *id, const char *tag, const VrHands
     wimg_free(&im);
 }
 
+
+/* ---- modo --poses: la mano nueva en cada pose de vr_hand_pose ---- */
+static const char *const POSE_NAME[HP_COUNT] = {"open", "relax", "fist", "point", "trigger", "grip_pistol", "grip_rifle", "grip_support", "grip_sphere", "grip_placed", "grip_box"};
+static VrHandsVertex hp_v[2][6 * 320]; static uint16_t hp_i[6 * 320];
+
+/* Mallas de la mano en el marco de la mano (metros, centrada en c) con las soldaduras aplicadas; color por rol (guante gris oscuro, uña y yema algo más claras). */
+static int hand_mesh(const VrHand *h, const float xf[VRHAND_BONES][12], VrHandsVertex *out, uint16_t *idx, const float c[3], float um) {
+    static float sk[VRHAND_BONES][VRHAND_MAX_V][3];
+    vrhand_skin(h, xf, sk);
+    static const uint8_t col[VRHAND_ROLES][3] = {{46, 48, 52}, {60, 62, 68}, {54, 56, 62}, {84, 88, 96}};
+    int nv = 0;
+    for (int k = 0; k < VRHAND_BONES; k++) {
+        const VrHandBoneMesh *m = &h->mesh[k];
+        const float *R = xf[k];
+        for (int f = 0; f < m->n_faces; f++) {
+            static const int tri[6] = {0, 1, 3, 1, 2, 3};
+            for (int q = 0; q < 6 && nv + 6 <= 6 * 320; q++) {
+                int vi = m->f[f][tri[q]];
+                VrHandsVertex *o = &out[nv];
+                for (int a = 0; a < 3; a++) o->pos[a] = (sk[k][vi][a] - c[a]) * um;
+                float n[3] = {m->n[vi][0] / 4096.0f, m->n[vi][1] / 4096.0f, m->n[vi][2] / 4096.0f};
+                for (int a = 0; a < 3; a++) o->nrm[a] = -(R[4 * a] * n[0] + R[4 * a + 1] * n[1] + R[4 * a + 2] * n[2]);
+                o->uv[0] = o->uv[1] = 0;
+                const uint8_t *cc = col[m->role[f] < VRHAND_ROLES ? m->role[f] : 0];
+                o->rgba[0] = cc[0]; o->rgba[1] = cc[1]; o->rgba[2] = cc[2]; o->rgba[3] = 255;
+                idx[nv] = (uint16_t)nv; nv++;
+            }
+        }
+    }
+    return nv;
+}
+
+static void poses_main(const char *dir) {
+    VrHand hs[2];
+    vrhand_build(&hs[0], NULL, 1); vrhand_build(&hs[1], NULL, -1);
+    const float um = vrhand_unit_m(&hs[0]);
+    const int W = 420, H = 520;
+    printf("mano: %d triángulos, %.3f mm por unidad\n", vrhand_tri_count(&hs[0]), um * 1000.0f);
+    for (int pose = 0; pose < HP_COUNT; pose++) for (int pulled = 0; pulled <= 1; pulled++) {
+        if (pulled && !vrhandpose_has_trigger(pose)) continue;
+        VrHandPoseIn in = {pose, pose == HP_RELAX ? 0.0f : 1.0f, pulled ? 1.0f : 0.0f, 0, 0};
+        WImage sheet = wimg_new(3 * W, 2 * H);
+        for (int side = 0; side < 2; side++) {
+            float xf[VRHAND_BONES][12];
+            vrhandpose_blend(&hs[side], &in, xf);
+            float c[3] = {0, 0, 0}, lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
+            static float sk[VRHAND_BONES][VRHAND_MAX_V][3];
+            vrhand_skin(&hs[side], xf, sk);
+            for (int k = 0; k < VRHAND_BONES; k++) for (int i = 0; i < hs[side].mesh[k].n_verts; i++) for (int a = 0; a < 3; a++) { if (sk[k][i][a] < lo[a]) lo[a] = sk[k][i][a]; if (sk[k][i][a] > hi[a]) hi[a] = sk[k][i][a]; }
+            for (int a = 0; a < 3; a++) c[a] = 0.5f * (lo[a] + hi[a]);
+            int nv = hand_mesh(&hs[side], xf, hp_v[0], hp_i, c, um);
+            VrHandsMesh m; memset(&m, 0, sizeof m);
+            m.mesh_id = 1; m.verts = hp_v[0]; m.nverts = (uint32_t)nv; m.idx = hp_i; m.nidx = (uint32_t)nv;
+            m.model[0] = m.model[5] = m.model[10] = m.model[15] = 1.0f;
+            /* vistas: ojo en +X (palma de la derecha), en -X (dorso) y en +Z (perfil del pulgar); arriba = -Y (los dedos hacia arriba). El espejo de la izquierda muestra la palma en -X. */
+            const float sgn = side == 0 ? 1.0f : -1.0f;
+            const V3 eyes[3] = {v3(sgn * 0.46f, 0, 0), v3(-sgn * 0.46f, 0, 0), v3(0, 0, 0.46f)};
+            for (int vw = 0; vw < 3; vw++) {
+                Cam cam = look(eyes[vw], v3(0, 0, 0), v3(0, -1, 0), 30);
+                V3 l = norm(v3(-cam.f.x * 0.8f - cam.r.x * 0.35f + cam.u.x * 0.45f, -cam.f.y * 0.8f - cam.r.y * 0.35f + cam.u.y * 0.45f, -cam.f.z * 0.8f - cam.r.z * 0.35f + cam.u.z * 0.45f));
+                VrHandsFrame fr; memset(&fr, 0, sizeof fr);
+                fr.nmeshes = 1; fr.meshes = &m; fr.light_dir[0] = l.x; fr.light_dir[1] = l.y; fr.light_dir[2] = l.z; fr.ambient = 0.55f; fr.diffuse = 0.9f;
+                WImage im; render_view(&fr, &cam, W, H, 2, &im);
+                wimg_blit(&sheet, &im, vw * W, side * H);
+                wimg_free(&im);
+            }
+        }
+        char path[512]; snprintf(path, sizeof path, "%s/pose_%02d_%s%s.png", dir, pose, POSE_NAME[pose], pulled ? "_pulled" : "");
+        if (wimg_write_png(&sheet, path)) printf("no se pudo escribir %s\n", path); else printf("  %s\n", path);
+        wimg_free(&sheet);
+    }
+}
+
 int main(int argc, char **argv) {
+    if (argc >= 3 && !strcmp(argv[1], "--poses")) { poses_main(argv[2]); return 0; }
     if (argc < 4) { fprintf(stderr, "uso: hands_preview <archivo_stages> <stage> <dir_salida>\n"); return 1; }
     size_t n = 0; uint8_t *d = slurp(argv[1], &n);
     if (!d) { fprintf(stderr, "no se puede leer %s (datos locales del usuario)\n", argv[1]); return 1; }

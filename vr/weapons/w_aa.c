@@ -256,7 +256,7 @@ static void aa_update(WeaponState *s, const WInput *in, WReloadMode rm, const WG
 
     /* disparo: flanco del gatillo con tubo cargado */
     int armed_phase = (s->phase == AA_P_READY);
-    if (in->trigger[0] > 0.85f) {
+    if (in->trigger[0] > 0.5f) {
         if (!a->trig_armed) {
             a->trig_armed = 1;
             if (armed_phase && s->mag_rounds > 0) {   /* también durante el enfriado: sale sin bloqueo */
@@ -271,7 +271,7 @@ static void aa_update(WeaponState *s, const WInput *in, WReloadMode rm, const WG
                 snd(g, WS_DRY); hap(g, 0, 0.2f, 0.04f);   /* sin tubo útil */
             }
         }
-    } else if (in->trigger[0] < 0.5f) {
+    } else if (in->trigger[0] < 0.3f) {
         a->trig_armed = 0;
     }
 

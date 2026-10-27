@@ -840,7 +840,9 @@ final class XRPresenter {
         cutVeil = max(0, cutVeil - d / 0.15)
 
         // 4) pantalla de cine (también como respaldo del diorama sin geometría)
-        if shown == .cinema, let c = cinema, let tex = c.texture(srgb: linear) {
+        // Cinemática del motor: la pantalla de cine plana (imagen de la VRAM, baja resolución) no se dibuja nunca (ni en el fundido de entrada, con la pantalla aún en .cinema, ni sin cámara del juego): solo el render nativo; si no está listo, negro.
+        let nativeOnly = gs.view_kind == 2 && cfg.cutscene != .cinema
+        if shown == .cinema, !nativeOnly, let c = cinema, let tex = c.texture(srgb: linear) {
             let leg = XRCinemaLayout.legible(reason: Int32(gs.view_reason), kind: gs.view_kind)
             var W = XRCinemaLayout.width(base: cfg.width, legible: leg)
             let D = cfg.distance

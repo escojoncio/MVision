@@ -33,8 +33,8 @@ $(B)/test_ns_present: vr/native/test_ns_present.c $(PRSRC) vr/native/ns_present.
 	$(CC) $(CF) vr/native/test_ns_present.c $(PRSRC) -lm -o $@
 $(B)/test_ns_present_san: vr/native/test_ns_present.c $(PRSRC) vr/native/ns_present.h vr/native/ns_cinema.h vr/native/ns_types.h | $(B)
 	$(CC) $(CF) -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined vr/native/test_ns_present.c $(PRSRC) -lm -o $@
-$(B)/test_ns_wave: vr/native/test_ns_wave.c vr/native/ns_cpuref.c vr/native/ns_cpuref.h | $(B)
-	$(CC) $(CF) vr/native/test_ns_wave.c vr/native/ns_cpuref.c -lm -lpthread -o $@
+$(B)/test_ns_wave: vr/native/test_ns_wave.c $(SCRSRC) vr/native/ns_screen.h vr/native/ns_gpu_types.h $(HDR) | $(B)
+	$(CC) $(CF) vr/native/test_ns_wave.c $(SCRSRC) -lm -o $@
 $(B)/test_no_gpu3d: vr/native/test_no_gpu3d.c app/Sources/RenderRG.swift app/Sources/Native/NativeRenderer.swift app/Sources/Native/NativeShaders.metal vr/host/vrhost.c | $(B)
 	$(CC) $(CF) vr/native/test_no_gpu3d.c -o $@
 $(B)/ns_fx_dump: vr/native/ns_fx_dump.c $(SRC) $(HDR) | $(B)

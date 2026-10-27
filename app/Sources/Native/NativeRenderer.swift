@@ -263,6 +263,13 @@ final class NativeRenderer {
         boxOverlays = out
         return true
     }
+    /// Onda de pantalla bajo el agua para el post-proceso por ojo de RGRenderer (planWave / vr_fs_wave): (amplitud en px del ojo a 1888 de ancho, rad por fila del motor, fase en rad, H del motor), o nil si no hay onda
+    /// (cabeza fuera del agua o efectos de pantalla apagados: ns_screen_build deja water_wave a 0); se calcula en beginFrame.
+    var waveParams: SIMD4<Float>? {
+        let w = screenOut.water_wave
+        guard screenEffectsEnabled, w.0 != 0, w.0.isFinite, w.1.isFinite, w.2.isFinite, camH > 8 else { return nil }
+        return SIMD4<Float>(w.0, w.1, w.2, camH)
+    }
     /// Sin máscara de la caja (el jugador no está en ella).
     func clearBoxMask() { boxOverlays.removeAll(keepingCapacity: true) }
     var boxMaskActive: Bool { !boxOverlays.isEmpty }
@@ -1344,11 +1351,10 @@ final class NativeRenderer {
         u.fog_par = fogPar
         // fundido a negro de la presentación (repetir el último válido durante demasiado tiempo): multiplica el color de todo lo del mundo
         u.tint = SIMD4<Float>(tint.x * presentFade, tint.y * presentFade, tint.z * presentFade, 0)
-        // agua: tinte y onda viven en el mundo (el sombreador de fragmentos los aplica por posición del mundo del motor)
+        // agua: el tinte vive en el mundo (el sombreador de fragmentos lo aplica por posición del mundo del motor); la onda es un post-proceso de pantalla (waveParams, lo codifica RGRenderer)
         u.water_min = SIMD4<Float>(screenOut.water_min.0, screenOut.water_min.1, screenOut.water_min.2, screenOut.water_min.3)
         u.water_max = SIMD4<Float>(screenOut.water_max.0, screenOut.water_max.1, screenOut.water_max.2, screenOut.water_max.3)
         u.water_tint = SIMD4<Float>(screenOut.water_tint.0, screenOut.water_tint.1, screenOut.water_tint.2, screenOut.water_tint.3)
-        u.water_wave = SIMD4<Float>(screenOut.water_wave.0, screenOut.water_wave.1, screenOut.water_wave.2, screenOut.water_wave.3)
         let fv = fromVR12
         u.fromvr = (SIMD4<Float>(fv[0], fv[1], fv[2], fv[3]), SIMD4<Float>(fv[4], fv[5], fv[6], fv[7]), SIMD4<Float>(fv[8], fv[9], fv[10], fv[11]))
         u.misc = SIMD4<Float>(layered ? 0 : Float(max(0, min(1, eyeIndex))), 0, 0, 0)

@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
         }
     }
     if (aguadir) {   /* agua: vista de ojo ancha (H=130, ~100 grados) con lo que hace el visor bajo el agua. antes = superficie de una cara semitransparente sin descarte + viñeta circular de barras; despues = descarte
-                      * NSG_CULL_SEMI y sin barras. El tinte (multiplicativo, ns_screen_water_ref) es el mismo en ambos; la onda no se emula. */
+                      * NSG_CULL_SEMI y sin barras. El tinte (multiplicativo, ns_screen_water_ref) es el mismo en ambos; la onda de pantalla (ns_screen_wave_rgb8) solo en "despues". */
         NsFxScene *fxs = ns_fx_scene_create(0); NsFxOpts fo = ns_fx_opts_default(); NsScreenFx sfx; memset(&sfx, 0, sizeof sfx);
         if (ns_fx_extract(d->ram, &fo, fxs) == 0) ns_fx_export_screen(fxs, &sfx);
         printf("agua: flags=0x%x tinte=(%.2f,%.2f,%.2f) caja_y=(%.0f..%.0f) ojo_y=%.0f\n", sfx.flags, sfx.water_tint[0], sfx.water_tint[1], sfx.water_tint[2], sfx.water_min[1], sfx.water_max[1], eyep[1]);
@@ -86,15 +86,14 @@ int main(int argc, char **argv) {
             float A[9], t3[3]; ns_cine_engine_view(&sc.cam, A, t3);
             NsRCam c; ns_cam_game(&c, A, t3, sc.cam.h, 160, 120, 320, 240, w, h); c.fx *= 130.0f / sc.cam.h; c.fy *= 130.0f / sc.cam.h; c.znear = 1;
             NsRScene s3 = { tt, nn, d->vram };
-            NsRWave rw; NsGpuScreen so; const float id34[12] = {1,0,0,0, 0,1,0,0, 0,0,1,0};   /* onda del sombreador (ns_fs): solo en "despues" (lo que dibuja la app) */
-            if (pass == 1 && (sfx.flags & NS_SFX_WATER)) {
-                ns_screen_build(&sfx, id34, eyep, 0.0f, NULL, NULL, &so, NULL);
-                for (int k = 0; k < 3; k++) { rw.min[k] = so.water_min[k]; rw.max[k] = so.water_max[k]; }
-                rw.amp = so.water_wave[0] * (float)w / 1888.0f;   /* amplitud en píxeles del ojo (1888 de ancho en el visor) */ rw.freq = so.water_wave[1]; rw.phase = so.water_wave[2]; rw.all = so.water_tint[3] > 0.5f;
-                ns_ref_wave = &rw;
-            }
+            NsGpuScreen so; const float id34[12] = {1,0,0,0, 0,1,0,0, 0,0,1,0};   /* onda de pantalla (post-proceso del visor): solo en "despues" (lo que dibuja la app) */
+            memset(&so, 0, sizeof so);
+            if (pass == 1 && (sfx.flags & NS_SFX_WATER)) ns_screen_build(&sfx, id34, eyep, 0.0f, NULL, NULL, &so, NULL);
             ns_buf_clear(&b, 0, 0, 0); ns_render_view(&s3, &c, 0, &b, NULL); ns_buf_to_rgb8(&b, rgb, 0, 0);
-            ns_ref_wave = NULL;
+            if (so.water_wave[0] != 0.0f) {
+                uint8_t *wv = malloc((size_t)w * h * 3);
+                if (wv) { ns_screen_wave_rgb8(so.water_wave, rgb, wv, w, h, c.cy, c.fy, sc.cam.h); memcpy(rgb, wv, (size_t)w * h * 3); free(wv); }
+            }
             NsGpuOverlay bars; memset(&bars, 0, sizeof bars);
             bars.kind = NSG_OV_BARS; bars.abr = 2; bars.amount = 0.85f; bars.rgb[0] = bars.rgb[1] = bars.rgb[2] = 1; bars.p[0] = (float)6; bars.p[1] = 4.0f; bars.p[3] = sc.cam.h;
             for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {

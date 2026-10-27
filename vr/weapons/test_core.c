@@ -10,7 +10,8 @@ static int fails = 0, evs[64], nev = 0, fires = 0, reserve = 40, dry = 0;
 
 static int b_res(int id) { (void)id; return reserve; }
 static void b_take(int id, int n) { (void)id; reserve -= n; }
-static void b_fire(int id, WPose m) { (void)id; (void)m; fires++; }
+static WPose last_mz;
+static void b_fire(int id, WPose m) { (void)id; last_mz = m; fires++; }
 static void b_hap(int h, float s, float t) { (void)h; (void)s; (void)t; }
 static void b_snd(int id, int e) { (void)id; if (nev < 64) evs[nev++] = e; if (e == WS_DRY) dry++; }
 static WGameBridge BR = {.ammo_reserve = b_res, .ammo_take = b_take, .fire = b_fire, .haptic = b_hap, .sound = b_snd};
@@ -251,6 +252,55 @@ static void test_auto_stage(const WeaponDef *d) {
     free(s);
 }
 
+extern const float w_pist_bare_muzzle_z;
+
+/* Supresor: lo decide el juego (WInput.game_flags & WGF_SUPP). Sin la bandera la pieza va apartada (canal CUSTOM0 = 1), nunca hay un objeto suelto y la boca es
+ * la del cañón; con ella la pieza está puesta (CUSTOM0 = 0) y la boca es la punta del supresor. El mando de la mano libre no lo desmonta. */
+static void test_pist_supp(const WeaponDef *d) {
+    for (int flag = 0; flag <= 1; flag++) {
+        WeaponState *s; WInput in; setup(&s, d, &in);
+        in.game_flags = flag ? WGF_SUPP : 0;
+        settle(d, s, &in, WR_MANUAL);
+        CHECK(s->channel[WCH_CUSTOM0] == (flag ? 0.0f : 1.0f), "bandera %d: canal del supresor %f", flag, s->channel[WCH_CUSTOM0]);
+        /* la mano libre sobre el supresor agarrando no lo suelta */
+        WPose W = wcore_weapon_world(s, &in);
+        in.hand[1].p = wpose_apply(W, d->parts[7].rest.p);
+        in.grip[1] = 0; run(d, s, &in, WR_MANUAL, 0.1f);
+        in.grip[1] = 1; run(d, s, &in, WR_MANUAL, 0.3f);
+        in.hand[1].p = wv(0.4f, 1.0f, -0.1f); run(d, s, &in, WR_MANUAL, 0.3f);
+        for (int i = 0; i < W_MAX_HELD; i++) CHECK(!(s->held[i].active && s->held[i].mesh == 3), "bandera %d: supresor suelto en held[%d]", flag, i);
+        CHECK(s->channel[WCH_CUSTOM0] == (flag ? 0.0f : 1.0f), "bandera %d: canal tras agarrar %f", flag, s->channel[WCH_CUSTOM0]);
+        /* la boca del disparo */
+        in.grip[1] = 0; run(d, s, &in, WR_MANUAL, 0.2f);
+        W = wcore_weapon_world(s, &in);
+        in.trigger[0] = 1; d->update(s, &in, WR_MANUAL, &BR);
+        CHECK(fires == 1, "bandera %d: disparos %d", flag, fires);
+        WVec3 loc = wpose_apply(wpose_inv(W), last_mz.p);
+        float zexp = flag ? d->points[WP_MUZZLE].p.z : w_pist_bare_muzzle_z;
+        CHECK(fabsf(loc.z - zexp) < 1e-4f && fabsf(loc.y - d->points[WP_MUZZLE].p.y) < 1e-4f, "bandera %d: boca z=%f y=%f (esperada z=%f)", flag, loc.z, loc.y, zexp);
+        CHECK(flag ? zexp < w_pist_bare_muzzle_z - 0.1f : 1, "la punta del supresor sobresale de la boca");
+        free(s);
+    }
+}
+
+/* Gatillo analógico: con más de 0,5 dispara; con 0,45 no; se rearma al bajar de 0,3. */
+static void test_pist_threshold(const WeaponDef *d) {
+    WeaponState *s; WInput in; setup(&s, d, &in);
+    settle(d, s, &in, WR_MANUAL);
+    int f0 = fires;
+    in.trigger[0] = 0.45f; run(d, s, &in, WR_MANUAL, 0.1f);
+    CHECK(fires == f0, "0,45 no dispara");
+    in.trigger[0] = 0.6f; d->update(s, &in, WR_MANUAL, &BR);
+    CHECK(fires == f0 + 1, "0,6 dispara (%d)", fires - f0);
+    in.trigger[0] = 0.4f; run(d, s, &in, WR_MANUAL, 0.5f);
+    in.trigger[0] = 0.6f; run(d, s, &in, WR_MANUAL, 0.1f);
+    CHECK(fires == f0 + 1, "sin soltar por debajo de 0,3 no se rearma");
+    in.trigger[0] = 0.2f; run(d, s, &in, WR_MANUAL, 0.1f);
+    in.trigger[0] = 0.6f; run(d, s, &in, WR_MANUAL, 0.1f);
+    CHECK(fires == f0 + 2, "rearmada al soltar (%d)", fires - f0);
+    free(s);
+}
+
 int main(void) {
     test_math();
     const WeaponDef *d = find("pist");
@@ -259,6 +309,8 @@ int main(void) {
         test_recoil(d);
         test_zero_state(d);
         test_pist(d, WR_MANUAL);
+        test_pist_supp(d);
+        test_pist_threshold(d);
         test_manual_rack(d);
         test_equip_trigger(d);
         test_dt(d);

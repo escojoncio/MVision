@@ -71,6 +71,8 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full);
  * Histéresis: mientras el menú siga activo el último rect válido se conserva (una lista sin primitivas nuevas no lo borra) y, mientras no está asentado solo crece con la elección de cada lista si toca (< 8 px) el rect anterior; asentado queda fijo;
  * vl2d_set_menu(0) lo olvida. */
 void vl2d_set_menu(VrLayer2D *L, int on);
+/* vl2d_hide_credits: con 1 la capa no pinta el texto de los créditos de la intro (líneas de DOS rectángulos texturados semitransparentes idénticos seguidos, abr 2 y abr 1, firma que no usan la vida, el radar ni los menús); el selector de armas/objetos lo activa para que los créditos no vayan en el panel de la ventana. */
+void vl2d_hide_credits(VrLayer2D *L, int on);
 int vl2d_menu_rect(const VrLayer2D *L, float uv[4]);
 /* vl2d_menu_settled: 1 cuando el rect lleva 8 listas consecutivas SIN crecer (máximo 60 listas de crecimiento por apertura): ya no cambia hasta cerrar el selector (la ventana se abre con animación; antes crece por unión).
  * Los consumidores del visor solo usan el rect asentado. Las primitivas de la franja superior (v < 0,35: vida/oxígeno y créditos) nunca entran en el rect. */

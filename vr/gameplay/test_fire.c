@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "vr_fire.h"
 #include "vr_camera.h"
 #include "bridge_addrs.h"
@@ -125,13 +126,14 @@ typedef struct {
     int bullets;                          /* proyectiles creados */
     int kind;                             /* tipo de proyectil que crea */
     VrFireMat last; int last_res;
+    int16_t gpos[3], gvel[3];             /* kind 3: argumentos con los que el juego creó la granada */
     int pass_n, skip_n, subst_n;
     int first_vb;
 } FGame;
 static void fg_init(FGame *g, int mag, int hold) { memset(g, 0, sizeof *g); g->mag = mag; g->weapon_hold = hold; }
 static void fg_projectile(FGame *g) {
     VrFireMat m; memset(&m, 0, sizeof m);
-    int r = vrfire_take_projectile(g->kind, &m);
+    int r = g->kind == 3 ? (vrfire_take_throw(g->gpos, g->gvel) ? VRFIRE_SUBST : VRFIRE_PASS) : vrfire_take_projectile(g->kind, &m);
     g->last_res = r; g->last = m;
     if (r == VRFIRE_SUBST) g->subst_n++; else if (r == VRFIRE_SKIP) g->skip_n++; else g->pass_n++;
     if (r != VRFIRE_SKIP) { g->bullets++; if (!g->first_vb) g->first_vb = g->vb; }
@@ -325,15 +327,16 @@ static void t_throw(void) {
     in.fire = 1; vstep(&g, &in, NULL); in.fire = 0;
     int16_t pos[3], vel[3];
     CHECK(vrfire_take_throw(pos, vel) == 1, "datos de lanzamiento");
-    /* 1 VBlank de retardo (0,02 s): la posición avanza v*dt y la gravedad (9,81 m/s2 sobre Y del motor) la curva; la velocidad pierde g*dt */
+    /* 1 VBlank de retardo (medio tick): la posición avanza v*n y la gravedad del juego (16 unidades/tick^2 sobre Y del motor) la curva; la velocidad pierde 16*n */
     CHECK(pos[0] == -320 && pos[1] >= 237 && pos[1] <= 239 && pos[2] == 500, "posición del motor con 1 VBlank de retardo (%d %d %d)", pos[0], pos[1], pos[2]);
     CHECK(vel[0] == -40 && vel[1] >= 71 && vel[1] <= 73 && vel[2] == 200, "velocidad por tick (%d %d %d)", vel[0], vel[1], vel[2]);
     /* 16 VBlanks de retardo (la granada sale tras la animación): 0,32 s de trayectoria */
     CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "segundo lanzamiento");
     settle(&g, in, 16, NULL);
     CHECK(vrfire_take_throw(pos, vel) == 1, "datos con 16 VBlanks");
-    CHECK(pos[0] == -620 && pos[2] == 2000 && pos[1] >= 200 + 640 - 502 - 3 && pos[1] <= 200 + 640 - 502 + 3, "posición adelantada 0,32 s con gravedad (%d %d %d)", pos[0], pos[1], pos[2]);
-    CHECK(vel[1] >= 80 - 126 - 2 && vel[1] <= 80 - 126 + 2, "velocidad vertical menos g*dt (%d)", vel[1]);
+    /* 16 VBlanks = 8 ticks: la gravedad del juego (16 unidades/tick^2, medida en el paso del actor de la granada) da 0,5*16*64 = 512 y 16*8 = 128 */
+    CHECK(pos[0] == -620 && pos[2] == 2000 && pos[1] >= 200 + 640 - 512 - 2 && pos[1] <= 200 + 640 - 512 + 2, "posición adelantada 8 ticks con la gravedad del juego (%d %d %d)", pos[0], pos[1], pos[2]);
+    CHECK(vel[1] >= 80 - 128 - 2 && vel[1] <= 80 - 128 + 2, "velocidad vertical menos 16 por tick (%d)", vel[1]);
     CHECK(vrfire_take_throw(pos, vel) == 0, "se consume una vez");
     CHECK(!vrfire_set_throw(NULL, v, 0.04f) && !vrfire_set_throw(p, NULL, 0.04f) && !vrfire_set_throw(p, v, 0) && !vrfire_set_throw(p, v, NAN), "argumentos inválidos");
     CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "de nuevo");
@@ -345,6 +348,142 @@ static void t_throw(void) {
     in.fire = 1; vstep(&g, &in, NULL); in.fire = 0;
     CHECK(vrfire_take_throw(pos, vel) == 0, "sin datos: el juego lanza con los suyos"); 
     VrFireStats st; vrfire_stats(&st); CHECK(st.passed >= 1, "contado como pasado");
+}
+/* Granada preparada (botón mantenido) que se suelta sin lanzar (arma fuera / seguimiento perdido): el juego no la lanza con su velocidad por defecto, cae suave desde la boca. */
+static void t_grenade_cancel(void) {
+    for (int cas = 0; cas < 2; cas++) {
+        init_trigger();
+        VrFireMap map = mkmap(0, 0, 0, 0); VrFireIn in = mkin(&map);
+        FGame g; fg_init(&g, 5, 0); g.kind = 3;
+        in.raise = 1; in.ready = 1;
+        settle(&g, in, 40, NULL);
+        CHECK(g.armed && g.bullets == 0, "granada lista: botón mantenido, sin lanzar (armado %d, %d)", g.armed, g.bullets);
+        if (cas == 0) { in.ready = 0; settle(&g, in, 60, NULL); }               /* deja de estar lista (arma cambiada) con seguimiento */
+        else { in.active = 0; settle(&g, in, 60, NULL); }                       /* seguimiento perdido */
+        CHECK(g.bullets == 1 && g.subst_n == 1 && g.pass_n == 0, "caso %d: la suelta se sustituye, no sale con la velocidad del juego (%d/%d)", cas, g.subst_n, g.pass_n);
+        CHECK(g.gvel[0] == 0 && g.gvel[1] == 0 && g.gvel[2] == 0, "caso %d: sin velocidad (%d %d %d)", cas, g.gvel[0], g.gvel[1], g.gvel[2]);
+        CHECK(g.gpos[0] == -100 && g.gpos[1] == -300 && g.gpos[2] == 300, "caso %d: cae desde la mano (%d %d %d)", cas, g.gpos[0], g.gpos[1], g.gpos[2]);
+    }
+}
+/* ---- granada: conversión velocidad de la mano -> unidades/tick del motor, contra la física del propio actor del juego ----
+ * Medido en el código del juego (0x8006a8f0, paso del actor; 0x8006af98 lo crea con (pos*, vel*, ...)): cada tick pos += vel y, en el aire, vel.y -= 16 (unidades/tick^2).
+ * Su lanzamiento por defecto sale con (0, 128, 150) unidades/tick en el marco del jugador (arriba, delante) = 3,2 y 3,75 m/s a 1000 unidades/m y 0,04 s/tick. */
+static double sim_game(const int16_t p0[3], const int16_t v0[3], double floor_y, double *lx, double *lz) {
+    double p[3] = {p0[0], p0[1], p0[2]}, v[3] = {v0[0], v0[1], v0[2]};
+    for (int t = 0; t < 2000; t++) { for (int i = 0; i < 3; i++) p[i] += v[i]; v[1] -= 16.0; if (p[1] <= floor_y) break; }
+    if (lx) *lx = p[0];
+    if (lz) *lz = p[2];
+    return sqrt((p[0] - p0[0]) * (p[0] - p0[0]) + (p[2] - p0[2]) * (p[2] - p0[2]));
+}
+static void t_throw_game(void) {
+    init_trigger();
+    VrFireMap map = mkmap(0, 0, 0, 0); VrFireIn in = mkin(&map);
+    FGame g; fg_init(&g, 5, 0);
+    vstep(&g, &in, NULL);
+    const double FLOOR = -1600;                                  /* ojo del usuario a 1,6 m del suelo; la mano (y usuario 1,2) a 1,2 m */
+    float p[3] = {0.1f, 1.2f, -0.2f}; int16_t pos[3], vel[3];
+    /* lanzamiento por defecto del juego reproducido con la mano: 3,2 m/s arriba y 3,75 m/s hacia delante (-Z del usuario) = (0, 128, 150) por tick */
+    float vd[3] = {0.0f, 3.2f, -3.75f};
+    CHECK(vrfire_set_throw(p, vd, 0.04f) && vrfire_take_throw(pos, vel), "lanzamiento");
+    CHECK(vel[0] == 0 && vel[1] == 128 && vel[2] == 150, "m/s -> unidades/tick: 40 por m/s (%d %d %d)", vel[0], vel[1], vel[2]);
+    CHECK(pos[0] == 0 && pos[1] == -400 && pos[2] == 0, "posición de la mano en el motor (%d %d %d)", pos[0], pos[1], pos[2]);
+    const int16_t refv[3] = {0, 128, 150};
+    double r0 = sim_game(pos, refv, FLOOR, NULL, NULL), r1 = sim_game(pos, vel, FLOOR, NULL, NULL);
+    CHECK(r0 > 2500 && r0 < 4500, "alcance del lanzamiento por defecto del juego %.0f unidades (~3,4 m)", r0);
+    CHECK(fabs(r1 - r0) < 1.0, "el lanzamiento por defecto reproducido con la mano cae igual (%.0f / %.0f)", r1, r0);
+    /* lanzamiento medio de una mano real: 5 m/s a 45 grados -> alcance del orden del por defecto (v^2 manda: x1,5 como mucho) */
+    float vm[3] = {0.0f, 3.54f, -3.54f};
+    CHECK(vrfire_set_throw(p, vm, 0.04f) && vrfire_take_throw(pos, vel), "lanzamiento medio");
+    double rm = sim_game(pos, vel, FLOOR, NULL, NULL);
+    CHECK(rm > 0.8 * r0 && rm < 1.5 * r0, "alcance de un lanzamiento medio %.0f frente al del juego %.0f", rm, r0);
+    /* barrido sintético: módulo = 40 unidades/tick por m/s, dirección conservada (rotación del mapa), la vertical sigue siendo +Y del motor */
+    srand(7);
+    for (int k = 0; k < 200; k++) {
+        VrFireMap mp = mkmap(rand() % 2000 - 1000, rand() % 2000 - 1000, rand() % 2000 - 1000, (float)(rand() % 360 - 180));
+        vstep(&g, &(VrFireIn){ .active = 1, .map = &mp, .muzzle = in.muzzle, .fire_pose = in.fire_pose }, NULL);
+        float v[3] = {(float)(rand() % 2000 - 1000) / 100.0f, (float)(rand() % 2000 - 1000) / 100.0f, (float)(rand() % 2000 - 1000) / 100.0f};
+        if (!(vrfire_set_throw(p, v, 0.04f) && vrfire_take_throw(pos, vel))) { CHECK(0, "lanzamiento %d", k); continue; }
+        double ml = sqrt((double)v[0] * v[0] + (double)v[1] * v[1] + (double)v[2] * v[2]) * 40.0, ol = sqrt((double)vel[0] * vel[0] + (double)vel[1] * vel[1] + (double)vel[2] * vel[2]);
+        CHECK(fabs(ol - ml) <= 1.0, "módulo %.1f frente a %.1f", ol, ml);
+        CHECK(abs(vel[1] - (int)lrintf(v[1] * 40.0f)) <= 1, "la vertical del usuario es la Y del motor (%d frente a %.1f)", vel[1], v[1] * 40.0f);
+    }
+    /* retardo hasta la creación: la trayectoria extrapolada y la continuada con la física del juego aterrizan en el mismo punto (tolerancia: discretización por tick) */
+    init_trigger(); fg_init(&g, 5, 0); in = mkin(&map); vstep(&g, &in, NULL);
+    float vt[3] = {1.0f, 2.0f, -4.0f};
+    int16_t p0[3], v0[3];
+    CHECK(vrfire_set_throw(p, vt, 0.04f) && vrfire_take_throw(p0, v0), "sin retardo");
+    CHECK(vrfire_set_throw(p, vt, 0.04f), "otra vez");
+    settle(&g, in, 12, NULL);
+    CHECK(vrfire_take_throw(pos, vel), "con 12 VBlanks de retardo");
+    double lx0, lz0, lx1, lz1;
+    sim_game(p0, v0, FLOOR, &lx0, &lz0); sim_game(pos, vel, FLOOR, &lx1, &lz1);
+    CHECK(fabs(lx0 - lx1) < 150 && fabs(lz0 - lz1) < 150, "aterriza en el mismo sitio (%.0f,%.0f) / (%.0f,%.0f)", lx0, lz0, lx1, lz1);
+}
+/* Gesto de la granada: mano cerrada = botón del juego mantenido (el juego queda "apuntando"); abrirla lanza con la velocidad de la mano al soltar el botón. */
+static void t_grenade_gesture(void) {
+    init_trigger();
+    VrFireMap map = mkmap(0, 0, 0, 0); FGame g; fg_init(&g, 3, 0); g.kind = 3;
+    VrFireIn in = mkin(&map); in.raise = 1; in.ready = 1;
+    settle(&g, in, 60, NULL);
+    CHECK(g.sq_seen == 1 && g.armed && g.bullets == 0, "mano cerrada: botón mantenido, el juego listo y sin lanzar");
+    float p[3] = {0.1f, 1.2f, -0.2f}, v[3] = {0.0f, 3.2f, -3.75f};
+    CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "velocidad de la mano");
+    in.ready = 0; in.fire = 1; int v0 = g.vb; vstep(&g, &in, NULL); in.fire = 0; settle(&g, in, 30, NULL);
+    CHECK(g.bullets == 1 && g.subst_n == 1 && g.pass_n == 0 && g.skip_n == 0, "un lanzamiento sustituido (%d/%d/%d)", g.subst_n, g.pass_n, g.skip_n);
+    CHECK(g.vb - v0 <= 31, "la creación sale al soltar el botón (sin otra espera de apuntado)");
+    CHECK(g.gvel[1] >= 128 - 16 * 5 && g.gvel[1] <= 128 && g.gvel[2] >= 148 && g.gvel[2] <= 150, "velocidad del motor (%d,%d,%d)", g.gvel[0], g.gvel[1], g.gvel[2]);
+    VrFireStats st; vrfire_stats(&st); CHECK(st.presses == 1 && st.releases == 1, "una pulsación y un soltar (%u/%u)", st.presses, st.releases);
+    int late = 0; for (int i = 0; i < 80; i++) late += vstep(&g, &in, NULL);
+    CHECK(late == 0 && g.bullets == 1, "después, botón libre y sin lanzamientos sobrantes");
+}
+/* Seguimiento diagnóstico del actor de la granada: una línea cada 0,25 s durante 3 s. */
+static uint8_t gram[0x200000];
+static void gw16(uint32_t a, int v) { int16_t x = (int16_t)v; memcpy(gram + (a & 0x1FFFFF), &x, 2); }
+static void gw32(uint32_t a, uint32_t v) { memcpy(gram + (a & 0x1FFFFF), &v, 4); }
+static int gtrack(float dt, int n, int *lines_out, char *buf, size_t bufn) {
+    fflush(stderr);
+    FILE *f = tmpfile(); int sv = dup(2); dup2(fileno(f), 2);
+    int lines = 0;
+    for (int i = 0; i < n; i++) lines += vrfire_grenade_track(gram, dt);
+    fflush(stderr); dup2(sv, 2); close(sv);
+    rewind(f); size_t got = fread(buf, 1, bufn - 1, f); buf[got] = 0; fclose(f);
+    *lines_out = lines;
+    return (int)got;
+}
+static void t_grenade_track(void) {
+    const uint32_t A = 0x80150000u, OBJ = A + 0x20, Q = 0x80160000u;
+    memset(gram, 0, sizeof gram);
+    gw16(OBJ, 100); gw16(OBJ + 2, 200); gw16(OBJ + 4, 300); gw32(OBJ + 0x28, 0x1b); gw16(OBJ + 0x2C, 1); gw32(A + 0x100, 168);
+    gw16(A + 0x108, 0); gw16(A + 0x10A, 128); gw16(A + 0x10C, 150);
+    gw32(0x800ACAF8u, 1); gw16(0x800B2B7Cu + 0x56, 2); gw32(0x800B2B7Cu + 0x58, Q); gw32(Q, 0x80170000u); gw32(Q + 4, OBJ);
+    static char buf[16384]; int lines;
+    VrFireMat m; memset(&m, 0, sizeof m);
+    vrfire_init(NULL);
+    gtrack(0.02f, 10, &lines, buf, sizeof buf);
+    CHECK(lines == 0, "sin granada creada no escribe");
+    vrfire_probe(3, 1, 0, &m);
+    gtrack(0.02f, 10, &lines, buf, sizeof buf);
+    CHECK(lines == 0, "creación fallida (actor 0): no sigue nada");
+    vrfire_probe(3, 1, A, &m);
+    gtrack(0.02f, 200, &lines, buf, sizeof buf);
+    CHECK(lines == 12, "una línea cada 0,25 s durante 3 s = 12 (%d)", lines);
+    CHECK(strstr(buf, "[granada] t=0.26 actor=80150000 pos=(100,200,300) vel=(0,128,150) mecha=168 | objeto bandera=01b oculto=0 grupo_ok=1 en_cola=1") != NULL, "contenido de la primera línea: %.200s", buf);
+    CHECK(strstr(buf, "t=3.0") != NULL, "la última línea es la de 3 s");
+    gtrack(0.02f, 50, &lines, buf, sizeof buf);
+    CHECK(lines == 0, "pasados 3 s deja de escribir");
+    /* lo que impediría dibujarla se ve en la línea: oculta por el juego, fuera de grupo, fuera de la cola */
+    gw32(OBJ + 0x28, 0x9b); gw32(0x800ACAF8u, 2); gw32(Q + 4, 0);
+    vrfire_probe(3, 1, A, &m);
+    gtrack(0.25f, 1, &lines, buf, sizeof buf);
+    CHECK(lines == 1 && strstr(buf, "oculto=1 grupo_ok=0 en_cola=0") != NULL, "diagnostica oculta / grupo / cola: %.200s", buf);
+    vrfire_probe(3, 1, A, &m);       /* un lanzamiento nuevo reinicia el seguimiento */
+    gtrack(0.25f, 1, &lines, buf, sizeof buf);
+    CHECK(lines == 1 && strstr(buf, "t=0.25") != NULL, "otro lanzamiento reinicia la cuenta");
+    CHECK(vrfire_grenade_track(NULL, 0.02f) == 0, "RAM nula");
+    gtrack(0.25f, 20, &lines, buf, sizeof buf);          /* termina el seguimiento en curso */
+    vrfire_probe(3, 1, 0x80200000u, &m);   /* actor fuera de RAM */
+    gtrack(0.25f, 8, &lines, buf, sizeof buf);
+    CHECK(lines == 0, "actor fuera de RAM: no sigue nada");
 }
 /* Petición de vida larga (mina: el juego la crea ~70 VBlanks después, al terminar de agacharse): sustituye en vez de caducar, y la liberación en curso
  * no provoca una segunda pulsación mientras espera. Con la vida por defecto (60) la petición caduca y el proyectil pasa. */
@@ -425,6 +564,8 @@ static void t_hide(void) {
     build_ram(2, 0); w32(WACT + 0x20, 0x80200000u + 0x120000u); CHECK(vrfire_hide_weapon(ram) == 0, "espejo de la RAM por encima de 2 MB rechazado");
     build_ram(2, 0); w32(BA_PLAYER_CTRL, 0x80200000u + PW_BASE + 0x20 - 0x80000000u); CHECK(vrfire_hide_weapon(ram) == 0, "control en el espejo rechazado");
     build_ram(2, 0); w32(PW_BASE + 0x904, 0x801FFF80u); CHECK(vrfire_hide_weapon(ram) == 0, "actor demasiado cerca del final (lectura de la pistola no cabe)");
+    build_ram(2, 0); w32(PW_BASE + 0x904, 0x80140000u); w16(0x80140000u + 0x20u, 100); w16(0x80140000u + 0x22u, 200); w16(0x80140000u + 0x24u, 300);
+    CHECK(vrfire_hide_weapon(ram) == 0, "actor del arma reciclado como granada (+0x20 = posición del proyectil): no se toca");
     CHECK(!vrfire_hide_enabled(), "desactivado por defecto"); vrfire_set_hide(1); CHECK(vrfire_hide_enabled(), "activado"); vrfire_set_hide(0);
 }
 static void t_read_game(void) {
@@ -494,7 +635,7 @@ static void t_inverse(void) {
 }
 
 int main(void) {
-    t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
+    t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
     printf("test_fire: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

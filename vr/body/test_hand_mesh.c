@@ -1,4 +1,4 @@
-/* Pruebas de vr_hand_mesh (mano articulada propia): topología, orientación, espejo, volumen, colisión del puño y medidas. Sin datos del juego. */
+/* Pruebas de vr_hand_mesh (mano articulada propia): topología, orientación, soldaduras, proporciones, espejo, volumen, colisión del puño y medidas. Sin datos del juego. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,7 +29,7 @@ static double tri_area2(const int16_t *a, const int16_t *b, const int16_t *c) {
 
 static void test_counts_and_topology(const VrHand *h, const char *name) {
     int tris = vrhand_tri_count(h);
-    CHECK(tris >= 300 && tris <= 600, "%s: triángulos %d fuera de 300..600", name, tris);
+    CHECK(tris >= 300 && tris <= 700, "%s: triángulos %d fuera de 300..700", name, tris);
     for (int k = 0; k < VRHAND_BONES; k++) {
         const VrHandBoneMesh *m = &h->mesh[k];
         CHECK(m->n_verts >= 8 && m->n_verts <= VRHAND_MAX_V && m->n_faces >= 8 && m->n_faces <= VRHAND_MAX_F, "%s hueso %d: nv=%d nf=%d", name, k, m->n_verts, m->n_faces);
@@ -56,22 +56,44 @@ static void test_counts_and_topology(const VrHand *h, const char *name) {
                 CHECK(dir[i][j] == dir[j][i], "%s hueso %d: arista %d-%d abierta o con sentido inconsistente (%d/%d)", name, k, i, j, dir[i][j], dir[j][i]);
             }
         }
-        /* orientación: cross(B-A, D-A) hacia el interior (respecto al centroide) y la normal por vértice también */
-        double c[3] = {0, 0, 0};
-        for (int i = 0; i < m->n_verts; i++) for (int a = 0; a < 3; a++) c[a] += m->v[i][a];
-        for (int a = 0; a < 3; a++) c[a] /= m->n_verts;
-        for (int f = 0; f < m->n_faces; f++) {
-            double n[3]; face_cross(m, f, n);
-            double fc[3] = {0, 0, 0};
-            for (int q = 0; q < 4; q++) for (int a = 0; a < 3; a++) fc[a] += 0.25 * m->v[m->f[f][q]][a];
-            double o[3] = {fc[0] - c[0], fc[1] - c[1], fc[2] - c[2]};
-            CHECK(dot3(n, o) < 0.0, "%s hueso %d cara %d: normal geométrica hacia fuera", name, k, f);
+        /* orientación: cada componente conexa (caparazón) es cerrada con cross(B-A, D-A) hacia el INTERIOR: su volumen con signo (triángulos A,B,D y B,C,D desde el origen) es
+         * negativo; y la normal por vértice (unitaria) va en el mismo lado que las normales de las caras que lo usan. */
+        int comp[VRHAND_MAX_V];
+        for (int i = 0; i < m->n_verts; i++) comp[i] = i;
+        for (int f = 0; f < m->n_faces; f++) for (int c = 1; c < 4; c++) {
+            int a = m->f[f][0], b = m->f[f][c];
+            while (comp[a] != a) a = comp[a];
+            while (comp[b] != b) b = comp[b];
+            if (a != b) comp[b] = a;
+        }
+        for (int i = 0; i < m->n_verts; i++) { int r = i; while (comp[r] != r) r = comp[r]; comp[i] = r; }
+        for (int root = 0; root < m->n_verts; root++) {
+            if (comp[root] != root) continue;
+            double vol = 0;
+            int nf = 0;
+            for (int f = 0; f < m->n_faces; f++) {
+                if (comp[m->f[f][0]] != root) continue;
+                nf++;
+                const uint8_t *q = m->f[f];
+                int tri[2][3] = {{q[0], q[1], q[3]}, {q[1], q[2], q[3]}};
+                for (int t = 0; t < 2; t++) {
+                    double P[3][3], cr[3];
+                    for (int c = 0; c < 3; c++) for (int a = 0; a < 3; a++) P[c][a] = m->v[tri[t][c]][a];
+                    cross3(P[1], P[2], cr);
+                    vol += dot3(P[0], cr) / 6.0;
+                }
+            }
+            CHECK(vol < -500.0, "%s hueso %d: caparazón de %d caras con volumen firmado %.0f (debe ser negativo: normales hacia el interior)", name, k, nf, vol);
         }
         for (int i = 0; i < m->n_verts; i++) {
             double n[3] = {m->n[i][0], m->n[i][1], m->n[i][2]}, len = sqrt(dot3(n, n));
             CHECK(fabs(len - 4096.0) < 0.01 * 4096.0 + 2.0, "%s hueso %d vértice %d: |normal| = %.1f", name, k, i, len);
-            double o[3] = {m->v[i][0] - c[0], m->v[i][1] - c[1], m->v[i][2] - c[2]};
-            CHECK(dot3(n, o) <= 0.0, "%s hueso %d vértice %d: normal por vértice hacia fuera", name, k, i);
+            for (int f = 0; f < m->n_faces; f++) {
+                const uint8_t *q = m->f[f];
+                if (q[0] != i && q[1] != i && q[2] != i && q[3] != i) continue;
+                double fn[3]; face_cross(m, f, fn);
+                CHECK(dot3(n, fn) > 0.0, "%s hueso %d vértice %d: normal por vértice contraria a la de la cara %d", name, k, i, f);
+            }
         }
     }
 }
@@ -128,8 +150,113 @@ static void test_volume_constant(void) {
         }
         CHECK(maxd < 1e-3, "hueso %d deformado: %.5f mm", k, maxd);
     }
-    /* el grosor (diámetro mínimo plano a plano de la sección) de cada falange: igual abierta y cerrada y razonable (>= 11 mm en dedos, >= 14 en el pulgar) */
-    for (int k = 1; k < VRHAND_BONES; k++) CHECK(R.bone[k].radius >= 5.5f, "hueso %d demasiado fino: radio %.1f", k, R.bone[k].radius);
+    /* el grosor de cada falange es razonable (radio >= 4,5: ~11 mm de diámetro en la yema del meñique) */
+    for (int k = 1; k < VRHAND_BONES; k++) CHECK(R.bone[k].radius >= 4.5f, "hueso %d demasiado fino: radio %.1f", k, R.bone[k].radius);
+}
+
+/* transformación de reposo (hueso -> marco de la mano) con los datos del esqueleto */
+static void rest_xf(const VrHand *h, int k, double x[12]) {
+    double loc[12], par[12], r[12];
+    const VrHandBone *b = &h->bone[k];
+    for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) loc[4 * i + j] = b->rest[3 * i + j]; loc[4 * i + 3] = b->pivot[i]; }
+    if (b->parent < 0) { memcpy(x, loc, sizeof loc); return; }
+    rest_xf(h, b->parent, par);
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) r[4 * i + j] = par[4 * i] * loc[j] + par[4 * i + 1] * loc[4 + j] + par[4 * i + 2] * loc[8 + j];
+        r[4 * i + 3] = par[4 * i] * loc[3] + par[4 * i + 1] * loc[7] + par[4 * i + 2] * loc[11] + par[4 * i + 3];
+    }
+    memcpy(x, r, sizeof r);
+}
+
+/* soldaduras: el anillo proximal (vértices 0..5) de cada hueso salvo la palma se suelda a un anillo del padre que en reposo coincide con él; con la pose, tras soldar, no hay huecos */
+static void test_welds(const VrHand *h, const char *name) {
+    for (int k = 0; k < VRHAND_BONES; k++) {
+        const VrHandBoneMesh *m = &h->mesh[k];
+        int nw = 0;
+        for (int i = 0; i < m->n_verts; i++) if (m->weld[i] != VRHAND_NO_WELD) nw++;
+        if (k == 0) { CHECK(nw == 0, "%s palma: %d vértices soldados", name, nw); continue; }
+        CHECK(nw == 6, "%s hueso %d: %d vértices soldados (esperados 6)", name, k, nw);
+        const VrHandBoneMesh *pm = &h->mesh[h->bone[k].parent];
+        double xk[12], xp[12], worst = 0;
+        rest_xf(h, k, xk); rest_xf(h, h->bone[k].parent, xp);
+        if (h->mirror) {   /* el esqueleto es el de la mano derecha: la izquierda es su conjugado con el espejo en X */
+            double *xs[2] = {xk, xp};
+            for (int q = 0; q < 2; q++) { xs[q][1] = -xs[q][1]; xs[q][2] = -xs[q][2]; xs[q][4] = -xs[q][4]; xs[q][8] = -xs[q][8]; xs[q][3] = -xs[q][3]; }
+        }
+        for (int i = 0; i < 6; i++) {
+            CHECK(m->weld[i] != VRHAND_NO_WELD && m->weld[i] < pm->n_verts, "%s hueso %d vértice %d: soldadura %d fuera del padre (%d vértices)", name, k, i, m->weld[i], pm->n_verts);
+            if (m->weld[i] >= pm->n_verts) continue;
+            double a[3] = {m->v[i][0], m->v[i][1], m->v[i][2]}, b[3] = {pm->v[m->weld[i]][0], pm->v[m->weld[i]][1], pm->v[m->weld[i]][2]}, pa[3], pb[3];
+            apply((float[12]){(float)xk[0], (float)xk[1], (float)xk[2], (float)xk[3], (float)xk[4], (float)xk[5], (float)xk[6], (float)xk[7], (float)xk[8], (float)xk[9], (float)xk[10], (float)xk[11]}, a, pa);
+            apply((float[12]){(float)xp[0], (float)xp[1], (float)xp[2], (float)xp[3], (float)xp[4], (float)xp[5], (float)xp[6], (float)xp[7], (float)xp[8], (float)xp[9], (float)xp[10], (float)xp[11]}, b, pb);
+            double d = sqrt((pa[0] - pb[0]) * (pa[0] - pb[0]) + (pa[1] - pb[1]) * (pa[1] - pb[1]) + (pa[2] - pb[2]) * (pa[2] - pb[2]));
+            if (d > worst) worst = d;
+        }
+        CHECK(worst < 1.6, "%s hueso %d: el anillo soldado no coincide con el del padre en reposo (%.2f mm)", name, k, worst);
+    }
+    /* en todas las poses, con las soldaduras aplicadas el anillo proximal de cada hueso ES el del padre (sin hueco); sin soldar habría un hueco visible al flexionar */
+    float xf[VRHAND_BONES][12];
+    static float sk[VRHAND_BONES][VRHAND_MAX_V][3];
+    double max_gap_unwelded = 0;
+    for (int g = 0; g <= 10; g++) {
+        vrhand_pose(h, g / 10.0f, xf);
+        vrhand_skin(h, xf, sk);
+        for (int k = 1; k < VRHAND_BONES; k++) {
+            const VrHandBoneMesh *m = &h->mesh[k];
+            int par = h->bone[k].parent;
+            for (int i = 0; i < 6; i++) {
+                const float *w = sk[k][i], *p = sk[par][m->weld[i]];
+                CHECK(fabsf(w[0] - p[0]) + fabsf(w[1] - p[1]) + fabsf(w[2] - p[2]) < 1e-3f, "%s grip %d hueso %d vértice %d: hueco tras soldar", name, g, k, i);
+                double a[3] = {m->v[i][0], m->v[i][1], m->v[i][2]}, o[3];
+                apply(xf[k], a, o);
+                double d = sqrt((o[0] - p[0]) * (o[0] - p[0]) + (o[1] - p[1]) * (o[1] - p[1]) + (o[2] - p[2]) * (o[2] - p[2]));
+                if (d > max_gap_unwelded) max_gap_unwelded = d;
+            }
+            for (int i = 6; i < m->n_verts; i++) {   /* el resto de vértices no se mueve con la soldadura: es el rígido del hueso */
+                double a[3] = {m->v[i][0], m->v[i][1], m->v[i][2]}, o[3];
+                apply(xf[k], a, o);
+                CHECK(fabs(o[0] - sk[k][i][0]) + fabs(o[1] - sk[k][i][1]) + fabs(o[2] - sk[k][i][2]) < 1e-3, "%s hueso %d vértice %d: movido por la soldadura", name, k, i);
+            }
+        }
+    }
+    CHECK(max_gap_unwelded > 4.0, "%s: sin soldar el hueco máximo sería solo %.2f mm (la prueba no distingue)", name, max_gap_unwelded);
+}
+
+/* proporciones de una mano adulta (19 cm de largo, palma de ~8,5 cm de ancho), puño de guante con labio, uña y yema por roles */
+static void test_proportions(const VrHand *h) {
+    const double L = h->dims.cuff_y - h->dims.tip_y;
+    double sep = (h->bone[1].pivot[2] - h->bone[10].pivot[2]) / 3.0;   /* separación entre dedos: 4 separaciones = ancho de la palma */
+    CHECK(fabs(4.0 * sep / L - 0.447) < 0.02, "4 separaciones de dedo = %.3f del largo (esperado 0,447)", 4.0 * sep / L);
+    double len[4];
+    for (int i = 0; i < 4; i++) len[i] = h->bone[1 + 3 * i].len + h->bone[2 + 3 * i].len + h->bone[3 + 3 * i].len;
+    CHECK(len[1] / L > 0.40 && len[1] / L < 0.48, "largo del corazón %.3f del largo de la mano", len[1] / L);
+    CHECK(len[0] < len[1] && len[2] < len[1] && len[2] > len[0] * 0.95 && len[3] < 0.85 * len[1] && len[3] > 0.65 * len[1], "proporciones de los dedos %.1f %.1f %.1f %.1f", len[0], len[1], len[2], len[3]);
+    for (int i = 0; i < 4; i++) {   /* falanges: proximal > media > distal; cada una con su rol de uña (dorsal de la yema) y de yema (palma) */
+        const VrHandBone *b = &h->bone[1 + 3 * i];
+        CHECK(b[0].len > b[1].len && b[1].len > b[2].len * 0.95, "dedo %d: falanges %.1f %.1f %.1f", i, b[0].len, b[1].len, b[2].len);
+        const VrHandBoneMesh *m = &h->mesh[3 + 3 * i];
+        int nail = 0, pad = 0;
+        for (int f = 0; f < m->n_faces; f++) { if (m->role[f] == VRHAND_ROLE_JOINT) nail++; if (m->role[f] == VRHAND_ROLE_PALM) pad++; }
+        CHECK(nail >= 3 && pad >= 1, "dedo %d: yema sin uña/pulpejo (%d, %d)", i, nail, pad);
+    }
+    {   /* anchura medida en la malla: vértices de la palma a la altura de los nudillos (pared y collares; nudillos en arco) */
+        double zmin = 1e9, zmax = -1e9, yk = h->bone[1].pivot[1];
+        const VrHandBoneMesh *m = &h->mesh[0];
+        for (int i = 0; i < m->n_verts; i++) if (m->v[i][1] > yk - 1.0 && m->v[i][1] < yk + 0.05 * L) { if (m->v[i][2] < zmin) zmin = m->v[i][2]; if (m->v[i][2] > zmax) zmax = m->v[i][2]; }
+        CHECK((zmax - zmin) / L > 0.40 && (zmax - zmin) / L < 0.47, "anchura de la palma en los nudillos %.3f del largo (adulto: 8,5/19 = 0,447)", (zmax - zmin) / L);
+    }
+    {   /* puño del guante: labio (anillo más ancho que la muñeca justo debajo del plano de la manga) y volumen de la palma */
+        const VrHandBoneMesh *m = &h->mesh[0];
+        double wrist = 1e9, rim = 0;
+        for (int i = 0; i < m->n_verts; i++) {
+            if (m->v[i][1] > h->dims.cuff_y - 2.0 && m->v[i][1] < h->dims.cuff_y) { double z = fabs(m->v[i][2] - h->dims.cuff_c[1]); if (z > rim) rim = z; }
+            if (m->v[i][1] < h->dims.cuff_y - 0.05 * L && m->v[i][1] > h->dims.cuff_y - 0.1 * L) { double z = fabs(m->v[i][2] - h->dims.cuff_c[1]); if (z < wrist) wrist = z; }
+        }
+        CHECK(rim > 0 && wrist < 1e8 && rim > 1.1 * wrist, "labio del puño %.1f no sobresale de la muñeca %.1f", rim, wrist);
+        double xmin = 1e9, xmax = -1e9;
+        for (int i = 0; i < m->n_verts; i++) if (m->v[i][1] < h->dims.cuff_y - 0.3 * L && m->v[i][1] > h->bone[1].pivot[1]) { if (m->v[i][0] < xmin) xmin = m->v[i][0]; if (m->v[i][0] > xmax) xmax = m->v[i][0]; }
+        CHECK((xmax - xmin) / L > 0.12, "palma sin volumen: grosor %.1f (%.3f del largo)", xmax - xmin, (xmax - xmin) / L);
+    }
 }
 
 static void test_mirror(void) {
@@ -139,6 +266,7 @@ static void test_mirror(void) {
         CHECK(a->n_verts == b->n_verts && a->n_faces == b->n_faces, "hueso %d: tamaños distintos", k);
         for (int i = 0; i < a->n_verts; i++) {
             CHECK(b->v[i][0] == -a->v[i][0] && b->v[i][1] == a->v[i][1] && b->v[i][2] == a->v[i][2], "hueso %d vértice %d: espejo inexacto", k, i);
+            CHECK(a->weld[i] == b->weld[i], "hueso %d vértice %d: la soldadura no se conserva en el espejo", k, i);
             CHECK(b->n[i][0] == -a->n[i][0] && b->n[i][1] == a->n[i][1] && b->n[i][2] == a->n[i][2], "hueso %d normal %d: espejo inexacto", k, i);
         }
         for (int f = 0; f < a->n_faces; f++) {
@@ -283,7 +411,7 @@ static void test_dims(void) {
         VrHand hh;
         CHECK(vrhand_build(&hh, &e, s & 1 ? -1 : 1) == 0, "build escala %.1f", k);
         int t = vrhand_tri_count(&hh);
-        CHECK(t >= 300 && t <= 600, "escala %.1f: triángulos %d", k, t);
+        CHECK(t >= 300 && t <= 700, "escala %.1f: triángulos %d", k, t);
         if (k >= 0.7f && k <= 1.5f) {
             float x2[VRHAND_BONES][12]; VrHandCollision cc;
             vrhand_pose(&hh, 1.0f, x2); vrhand_collision(&hh, x2, &cc);
@@ -325,6 +453,10 @@ int main(void) {
     printf("mano: %d triángulos, %d+%d vértices máx por hueso\n", vrhand_tri_count(&R), VRHAND_MAX_V, VRHAND_MAX_F);
     test_counts_and_topology(&R, "derecha");
     test_counts_and_topology(&Lh, "izquierda");
+    test_welds(&R, "derecha");
+    test_welds(&Lh, "izquierda");
+    test_proportions(&R);
+    test_proportions(&Lh);
     test_volume_constant();
     test_mirror();
     test_fist();

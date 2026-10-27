@@ -22,6 +22,8 @@
  *    es matriz.t + R*(0,400,0) = 400 unidades DETRÁS de t, así que para que el trazo parta de la boca se pasa
  *    t = boca + 400*delante. El resplandor del disparo parte de t + 130*delante (pistola) / t (fusil).
  *  - La granada se crea con (posición, velocidad por tick, mecha, tipo, modelo); se sustituyen posición y velocidad.
+ *    Medido en el código del juego: su actor suma la velocidad a la posición cada tick y resta 16 unidades/tick a la vertical (VRFIRE_GAME_G); el lanzamiento por
+ *    defecto sale con (0, 128, 150) unidades/tick en el marco del jugador (197 unidades/tick = 4,9 m/s, a 40 grados).
  *
  * Unidades/ejes. Espacio del usuario (tracking): metros, Y arriba, delante = -Z local de la pose. Mundo del motor:
  * ~1 unidad = 1 mm, Y arriba, guiñada 0 = +Z, 1024 = +X. Correspondencia (la de la cámara VR, vr_camera):
@@ -133,6 +135,11 @@ int vrfire_take_flash(int style, VrFireMat *m);
 /* Lanzamiento de granada: posición y velocidad del motor (unidades; v por tick) para la última pose de lanzamiento. */
 int vrfire_set_throw(const float pos_user[3], const float vel_user_mps[3], float tick_s);
 int vrfire_take_throw(int16_t pos[3], int16_t vel[3]);
+/* Diagnóstico por stderr de un lanzamiento: original frente a sustituido y validez del mapa (ver vr_fire.c). */
+void vrfire_log_grenade(const int16_t o_pos[3], const int16_t o_vel[3], int subst, const int16_t pos[3], const int16_t vel[3]);
+/* Seguimiento diagnóstico del actor de la granada creada (lo arma vrfire_probe(3, ..., actor)): una línea [granada] cada 0,25 s durante 3 s con su posición, velocidad,
+ * mecha y lo que decide si la escena nativa lo dibuja (oculto, grupo, cola). Una vez por VBlank, con la RAM del juego y el tiempo real transcurrido. 1 = escribió una línea. */
+int vrfire_grenade_track(const uint8_t *ram, float dt_s);
 
 typedef struct VrFireStats {
     uint32_t requests, expired;          /* peticiones de disparo recibidas / caducadas sin proyectil */

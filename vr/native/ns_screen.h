@@ -3,8 +3,10 @@
 /* ns_screen: efectos de pantalla completa del renderer nativo (agua, anillo/máscara, fundidos, destello, modos de visión).
  *
  * Reglas de comodidad en VR:
- *  - El TINTE y la ONDULACIÓN del agua viven en el MUNDO: el sombreador de fragmentos los aplica a todo fragmento cuya posición en el mundo del motor esté dentro
+ *  - El TINTE del agua vive en el MUNDO: el sombreador de fragmentos lo aplica a todo fragmento cuya posición en el mundo del motor esté dentro
  *    del volumen (o a todos si la cabeza está dentro). Girar la cabeza no gira nada: sólo cambia qué fragmentos se ven.
+ *  - La ONDULACIÓN del agua es una distorsión de la IMAGEN FINAL del ojo (post-proceso por ojo tras la escena nativa, antes de los paneles 2D): desplazamiento
+ *    horizontal por fila de pantalla, como el PS1; solo con la cabeza dentro del agua. No toca las texturas ni la profundidad.
  *  - Los RECUBRIMIENTOS (fundido, destello, modos, anillo, líneas, barras) se calculan en tangentes del ojo (t = (ndc + P2x)/P00), así que su geometría no depende
  *    de la resolución del ojo y siguen a la cabeza como en la pantalla del motor (px = t * H).
  * Este módulo es C puro: construye los uniformes que consume Metal y trae las funciones de referencia con las que las pruebas sintéticas
@@ -16,8 +18,8 @@ extern "C" {
 #endif
 
 typedef struct {
-    float wave_gain;        /* píxeles del ojo de desplazamiento horizontal por fila del motor de amplitud de la ondulación */
-    float wave_space;       /* unidades del motor por paso del periodo (longitud de onda = wave_period * wave_space) */
+    float wave_gain;        /* píxeles del ojo (con el ojo a NS_WAVE_REF_W de ancho) de desplazamiento horizontal por fila del motor de amplitud de la ondulación */
+    float wave_space;       /* filas del motor por paso del periodo (longitud de onda en pantalla = wave_period * wave_space filas del motor) */
     float bars_gain;        /* 0..1 opacidad de las barras bajo el agua; defecto 0 = sin barras (la viñeta circular dejaba un círculo claro con el resto casi negro y translúcido) */
     float bars_soft;        /* semianchura del borde suave de las barras, en px del motor */
     float scan_gain;        /* intensidad de las líneas de exploración de los modos de visión */
@@ -37,7 +39,8 @@ typedef struct { float flash, fade; int init; } NsScreenState;
 void ns_screen_state_reset(NsScreenState *s);
 
 /* Construye los recubrimientos y los parámetros de agua. head_vr: posición de la cabeza en el mundo VR (m). Devuelve cuántos recubrimientos hay.
- * out->water_*: [3] = 1 en water_min si hay volumen; water_tint[3] = 1 si la cabeza está dentro. fromvr: inversa de to_vr (3x4 fila-mayor). */
+ * out->water_*: [3] = 1 en water_min si hay volumen; water_tint[3] = 1 si la cabeza está dentro. fromvr: inversa de to_vr (3x4 fila-mayor).
+ * out->water_wave (solo con la cabeza dentro; si no, todo 0 = sin onda): x = amplitud (px del ojo a NS_WAVE_REF_W de ancho), y = frecuencia (rad por fila del motor), z = fase (rad), w sin uso. */
 int ns_screen_build(const NsScreenFx *fx, const float to_vr[12], const float head_vr[3], float dt, const NsScreenCfg *cfg, NsScreenState *st,
                     NsGpuScreen *out, float fromvr[12]);
 
@@ -58,8 +61,17 @@ void ns_screen_frame_ref(const NsGpuOverlay *ov, float sub, const float b[3], fl
 /* ydir: componente vertical (mundo VR, Y arriba) del rayo unitario del píxel; solo lo usa SCAN (las líneas están ancladas al mundo, no giran con la cabeza). RING y BARS son
  * viñetas circulares (invariantes al giro de la cabeza sobre su eje), el resto de recubrimientos son uniformes. */
 void ns_screen_overlay_ref(const NsGpuOverlay *ov, float tx, float ty, float ydir, const float b[3], float out[3]);
-/* Agua en el mundo: ew = posición del fragmento en el mundo del motor; du = píxeles del ojo que se corre el muestreo en horizontal (dv = 0); col *= tinte. Devuelve 1 si el fragmento está afectado. */
-int ns_screen_water_ref(const float wmin[4], const float wmax[4], const float wtint[4], const float wwave[4], const float ew[3], float *du, float *dv, float col[3]);
+/* Tinte del agua en el mundo: ew = posición del fragmento en el mundo del motor; col *= tinte. Devuelve 1 si el fragmento está afectado. */
+int ns_screen_water_ref(const float wmin[4], const float wmax[4], const float wtint[4], const float ew[3], float col[3]);
+
+/* ---- onda de pantalla bajo el agua (post-proceso del ojo; mismo cálculo que vr_fs_wave de vr_scene.metal) ---- */
+#define NS_WAVE_REF_W 1888.0f   /* ancho del ojo (px) al que están dadas las amplitudes de water_wave[0] */
+/* Desplazamiento horizontal (px del ojo, el muestreo se corre `dx` a la derecha) de la fila del motor `row` para un ojo de eye_w px de ancho: wwave[0] * eye_w / NS_WAVE_REF_W * sin(wwave[1] * row + wwave[2]). */
+float ns_screen_wave_dx(const float wwave[4], float row, float eye_w);
+/* Fila del motor (desde el centro óptico, positiva hacia abajo) de la fila de pantalla y_px (centro de píxel = y + 0,5): (y_px - cy_px) / fy_px * H, con cy_px = fila del punto principal y fy_px = focal vertical (px). */
+float ns_screen_wave_row(float y_px, float cy_px, float fy_px, float H);
+/* Referencia de CPU del post-proceso: src/dst RGB8 de w*h (filas de arriba abajo, distintos); cada fila se muestrea desplazada dx en horizontal con interpolación lineal y borde repetido. */
+void ns_screen_wave_rgb8(const float wwave[4], const uint8_t *src, uint8_t *dst, int w, int h, float cy_px, float fy_px, float H);
 
 #ifdef __cplusplus
 }

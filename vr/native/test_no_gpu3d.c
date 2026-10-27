@@ -86,7 +86,15 @@ int main(void) {
     CHECK(strstr(rg, "post=\\(statPost)") != NULL, "el registro de la escena cuenta los pases de post-proceso");
     { char *ms = slurp("render/metal/vr_scene.metal", 1);
       CHECK(ms && strstr(ms, "fragment float4 vr_fs_post(") != NULL && strstr(ms, "fragment float4 vr_fs_post_layered(") != NULL, "sombreadores del post-proceso en vr_scene.metal");
+      CHECK(ms && strstr(ms, "fragment float4 vr_fs_wave(") != NULL && strstr(ms, "fragment float4 vr_fs_wave_layered(") != NULL, "sombreadores de la onda de pantalla (con y sin capas) en vr_scene.metal");
       free(ms); }
+    /* 2c) onda del agua del render nativo: post-proceso de PANTALLA por ojo (no por textura): ns_fs no desplaza uv, NativeRenderer solo da los parámetros y RenderRG codifica el pase tras la escena (antes de los paneles 2D) */
+    CHECK(count(sh, "water_wave") == 0 && count(sh, "dfdx") == 0, "ns_fs: sin onda por textura (ni water_wave ni dfdx)");
+    CHECK(count(nr, "u.water_wave") == 0 && strstr(nr, "var waveParams: SIMD4<Float>?") != NULL, "NativeRenderer: la onda no va en los uniformes del mundo; waveParams la ofrece al post-proceso");
+    CHECK(strstr(rg, "let wavePlan = gpuMode ? nil : planWave(colorTargets: colorTargets, resolveTargets: resolveTargets, layered: layered)") != NULL
+          && strstr(rg, "if let w = wavePlan { encodePost(commandBuffer, w.plan, projections: projections, layered: layered, wave: w.wave) }") != NULL
+          && count_range(rg, "private func planWave(", "private func encodePost(", "viewportOverride == nil, rasterizationRateMap == nil") == 1
+          && count_range(rg, "private func planWave(", "private func encodePost(", "n.waveParams") == 1, "RenderRG: plan y pase de la onda de pantalla solo en el modo nativo, sin viewport propio ni mapa de tasas");
 
     /* 3) presentación: repetir el último válido o negro; nunca GPU */
     CHECK(strstr(rg, "n.present(ready:") != NULL, "prepareNative usa ns_present (repetir último válido / negro)");
@@ -154,8 +162,11 @@ int main(void) {
     { char *yml = slurp("app/project.yml", 0); CHECK(yml && count(yml, "MTL_FAST_MATH") == 0 && count(yml, "MTL_PRESERVE_INVARIANCE") == 0, "sin ajustes globales de Metal (fast-math / invariancia)"); free(yml); }
     CHECK(strstr(rg, "if stereoRequest == nil { stereoRendered = false;") != NULL, "la imagen de la pantalla 3D no sobrevive a la escena (caché)");
     {   /* en cine plano (clases 0, 3 y 4) la imagen sale de la VRAM, sin capa 2D duplicada encima ni mundo: el bloque de la pantalla de cine solo añade UN elemento */
-        int items = count_range(xp, "if shown == .cinema, let c = cinema, let tex = c.texture(srgb: linear) {", "if shown == .stereo, Self.gameViewOK(gameView) {", "r.items.append(");
+        int items = count_range(xp, "if shown == .cinema, !nativeOnly, let c = cinema, let tex = c.texture(srgb: linear) {", "if shown == .stereo, Self.gameViewOK(gameView) {", "r.items.append(");
         CHECK(items == 1, "la pantalla de cine añade un único elemento (la imagen de la VRAM) (%d)", items);
+        /* cinemática del motor (view_kind 2): la pantalla de cine NUNCA enseña la imagen de PS1 (ni en el fundido de entrada, con la pantalla aún en .cinema, ni si falta la cámara del juego): solo el render nativo; si no está listo, negro.
+         * Solo la opción explícita «Pantalla de cine» (cutscene == .cinema, imagen plana) la conserva. */
+        CHECK(strstr(xp, "let nativeOnly = gs.view_kind == 2 && cfg.cutscene != .cinema") != NULL, "XRPresent: en cinemática del motor la pantalla de cine plana (imagen de la VRAM) no se dibuja salvo la opción «Pantalla de cine»");
     }
     {   /* tamaño de las ventanas 2D en el visor: no depende de la escala de raster de la capa (c.width = lógico x escala) y el aspecto es el real de la capa (no 3/4 fijo) */
         CHECK(count(xp, "Float(c.width) / ppm") == 0 && strstr(xp, "XRCinemaLayout.snappedWidth(W, logicalWidth: c.w, pixelsPerMeter: ppm)") != NULL, "pantalla de cine: escalado entero sobre el ancho LÓGICO (c.w), no el de la textura");
@@ -182,8 +193,10 @@ int main(void) {
             CHECK(strstr(xh, "static var split: Bool { mv_vrhost_l2d_split() != 0 }") != NULL && strstr(xh, "enum XRLayer2D {") != NULL && count(xm, "XRLayer2D") == 0 && count(xm, "mv_vrhost") == 0,
                   "XRLayer2D.split (XRHud.swift) lee el interruptor del host; XRMath.swift (lo compila también bench/build_native.sh sin el host) no depende de él");
             /* C: ventana del menú (rect), filtro de créditos por región y radar aparte */
-            CHECK(strstr(la, "const int menu_win = (j->view & 255) == VRV_R_SELECTOR;") != NULL && strstr(la, "vl2d_set_menu(A->L, menu_win);") != NULL && count(la, "VRV_R_SELECTOR") == 1,
-                  "vl2a: con el selector abierto el trabajador activa la ventana (la capa lleva solo la ventana: créditos y HUD del mundo omitidos), con o sin troceo");
+            CHECK(strstr(la, "const int menu_win = atomic_load(&g_split) && (j->view & 255) == VRV_R_SELECTOR;") != NULL && strstr(la, "vl2d_set_menu(A->L, menu_win);") != NULL && count(la, "VRV_R_SELECTOR") == 2,
+                  "vl2a: sin troceo el trabajador nunca activa la ventana del selector (sin rect de menú ni vida/HUD omitidos de la capa)");
+            CHECK(strstr(la, "vl2d_hide_credits(A->L, (j->view & 255) == VRV_R_SELECTOR);") != NULL && count(la, "vl2d_hide_credits(") == 1,
+                  "vl2a: con la vista selector (con o sin troceo) la capa no pinta los créditos de la intro; vida, radar y ventana siguen (vl2d_hide_credits)");
             CHECK(strstr(vh, "if (vl2a_split() && vrradar_split(l, &rsplit) == 0 && rsplit.present) {") != NULL && count(vh, "vrradar_split(") == 1, "vrhost: sin troceo el radar no se separa del HUD (la escena y el quad de muñeca no existen)");
             CHECK(strstr(vh, "view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO ? VL_FULL : view.kind == VRV_K_ENGINE ? VL_PANEL_VERIFIED : VL_PANEL") != NULL, "códec, créditos, vídeo (VL_FULL) y cinemáticas (VL_PANEL_VERIFIED) siguen igual: capa completa");
         }
@@ -196,8 +209,8 @@ int main(void) {
                   && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if pending { pendVeil = min(1", "uvrect = uv") == 1 && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if pending { pendVeil = min(1", "XR2DFilter.current.panelMode") == 1,
                   "XRPresent 6b: UN solo panel con la capa entera (uv 0,0,1,1), geometría XRFramedLayout y muestreo XR2DFilter (%d elementos)", n6b);
             CHECK(strstr(xm, "static let fullUV = SIMD4<Float>(0, 0, 1, 1)") != NULL, "XRFramedLayout.fullUV: capa entera");
-            /* la capa 2D del mundo no arrastra 3D: en el modo nativo el host activa drop_world2d (polígonos sin vista dentro del pase del mundo no van al panel; vr_scene.h) */
-            CHECK(strstr(vh, "if (native_mode() && view.kind == VRV_K_WORLD && view.reason != VRV_R_SELECTOR && view.reason != VRV_R_PAUSE_WORLD) o.drop_world2d = 1;") != NULL, "vrhost: modo nativo en vista mundo sin selector ni pausa -> opts.drop_world2d (la capa 2D no lleva 3D sin resolver)");
+            /* la capa 2D del mundo y de las cinemáticas del motor no arrastra 3D: en el modo nativo el host activa drop_world2d (polígonos sin vista dentro del pase 3D no van al panel; vr_scene.h; regla en vrhost_drop_world2d, probada en vr/host/test_view.c) */
+            CHECK(strstr(vh, "if (vrhost_drop_world2d(native_mode(), view.kind, view.reason)) o.drop_world2d = 1;") != NULL, "vrhost: modo nativo en vista mundo (sin selector ni pausa) o cinemática del motor -> opts.drop_world2d (la capa 2D no lleva 3D sin resolver)");
             /* 6b sin trocear: «Paneles del HUD» (hudPanels) NO lo oculta (vida, radar y créditos se ven siempre); con ventana 2D abierta (selector/pausa) va a 0,9 m centrado en la mirada fijada al abrirse */
             CHECK(count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if pending { pendVeil = min(1", "cfg.hudPanels") == 0, "XRPresent 6b: sin trocear el panel único no depende de cfg.hudPanels");
             CHECK(strstr(xp, "if !overlay2D { overlayAim = nil } else if overlayAim == nil { overlayAim = (hy, XRFollow.pitch(of: head)) }") != NULL

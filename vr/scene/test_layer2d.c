@@ -982,26 +982,6 @@ static void menu_pick_cases(void) {
     float ex[4] = {(float)(199 - l1->disp.x) / (float)in.fw, (float)(119 - l1->disp.y) / (float)in.h, (float)(281 - l1->disp.x) / (float)in.fw, (float)(181 - l1->disp.y) / (float)in.h};
     for (int k = 0; k < 4; k++) CHECK(uv[k] > ex[k] - 0.002f && uv[k] < ex[k] + 0.002f, "menu pick: uv[%d]=%.4f esperado %.4f (solo la ventana, sin créditos)", k, (double)uv[k], (double)ex[k]);
     CHECK(in.menu_new == 2, "menu pick: prims de la ventana elegida=%d", in.menu_new);
-    {   /* A3: con el selector abierto la capa lleva SOLO la ventana: elegido el rect (1.ª lista), los créditos nuevos (semitransparentes, que no lo tocan) no se pintan en la 2.ª; la ventana sí */
-        uint8_t opd5[64]; int n5 = 0;
-        const uint16_t fl5[4] = {GPU_F_SEMI, FW, FW, GPU_F_SEMI};   /* créditos pintables (semitransparentes sin textura) y ventana */
-        GpuDrawList *l5 = with_rects(l1, 4, bx, fl5, opd5, &n5);
-        VrScene s5; memset(&s5, 0, sizeof s5); s5.op_dest = opd5; s5.n_op_dest = (uint32_t)n5;
-        VrLayer2D *L5 = vl2d_new(); vl2d_set_options(L5, 1, VL_SMOOTH_ORIGINAL);
-        vl2d_run(L5, l1, &s1, VL_PANEL); vl2d_set_menu(L5, 1);
-        long cred1 = 0, cred = 0, win = 0;
-        for (int run = 0; run < 2; run++) {
-            CHECK(vl2d_run(L5, l5, &s5, VL_PANEL) == 1, "A3 menu: lista %d", run);
-            int pw = 0, ph = 0;
-            const VrLayerPx *pp = vl2d_px(L5, &pw, &ph);
-            cred = win = 0;
-            for (int y = 45; y < 102 && pp; y++) for (int x = 21; x < 129; x++) { const VrLayerPx *q = &pp[(size_t)(y - l1->disp.y) * pw + (size_t)(x - l1->disp.x)]; if (q->t != 256) cred++; }
-            for (int y = 120; y < 180 && pp; y++) for (int x = 200; x < 280; x++) { const VrLayerPx *q = &pp[(size_t)(y - l1->disp.y) * pw + (size_t)(x - l1->disp.x)]; if (q->t != 256) win++; }
-            if (!run) cred1 = cred;
-        }
-        CHECK(cred1 > 0 && cred == 0 && win > 0, "A3 menu: créditos 1.ª lista %ld (informativo, > 0), 2.ª %ld (esperado 0), ventana %ld (esperado > 0)", cred1, cred, win);
-        vl2d_free(L5); free_list(l5);
-    }
     /* el rect queda fijo: unos créditos nuevos lejos no lo amplían */
     const int bx2[4][4] = {{21, 45, 108, 57}, {200, 120, 80, 60}, {210, 130, 40, 30}, {21, 160, 60, 12}};
     GpuDrawList *l3 = with_rects(l1, 4, bx2, fl, opd3, &n3);
@@ -1356,18 +1336,18 @@ static void menu_rect_cases(void) {
         vl2a_free(A);
     }
     vl2a_set_split(0);
-    /* SIN troceo (defecto): con la vista selector la capa lleva SOLO la ventana (sin HUD ni créditos de la partida), idéntica byte a byte a la de vl2d_run con el menú activo */
+    /* SIN troceo (defecto): con la vista selector la capa es la COMPLETA (HUD, créditos, texto y ventana), idéntica byte a byte a la de vl2d_run sin menú; nunca hay rect de menú */
     {
         VrL2Async *A = vl2a_new(); vl2a_options(A, 1, VL_SMOOTH_ORIGINAL);
         VrLayer2D *R = vl2d_new(); vl2d_set_options(R, 1, VL_SMOOTH_ORIGINAL);
         const uint8_t *px = NULL; int w = 0, h = 0, full = -1; uint32_t seq = 0;
         vl2a_set_view(A, (1 << 8) | 0);   /* primero la lista base sin menú (HUD / créditos de partida), como el juego, y después el selector */
         CHECK(vl2a_submit(A, l1, opd1, VL_PANEL, 1) == 1, "sin troceo: encolada 1"); vl2a_flush(A);
-        vl2d_run(R, l1, &s1, VL_PANEL); vl2d_set_menu(R, 1);
+        vl2d_run(R, l1, &s1, VL_PANEL);
         vl2a_acquire(A, &px, &w, &h, &full, &seq); vl2a_release(A);
         vl2a_set_view(A, (1 << 8) | 10);
         int ok = 1, rects = 0, inside = 0;
-        for (int k = 1; k <= 24; k++) {   /* más listas que las 9 de arriba (asentado) y que MENU_CALM_LISTS */
+        for (int k = 1; k <= 24; k++) {   /* más listas que las 9 de arriba (asentado) y que MENU_CALM_LISTS: con el troceo apagado nunca llega a haber rect */
             CHECK(vl2a_submit(A, l2, opd2, VL_PANEL, 0) == 1, "sin troceo: encolada 2.%d", k); vl2a_flush(A);
             vl2d_run(R, l2, &s2, VL_PANEL);
             int rw = 0, rh = 0; const uint8_t *rp = vl2d_rgba(R, &rw, &rh);
@@ -1376,11 +1356,86 @@ static void menu_rect_cases(void) {
             if (!(r && px && rp && w == rw && h == rh && !memcmp(px, rp, (size_t)w * h * 4))) ok = 0;
             vl2a_release(A);
         }
-        CHECK(ok, "sin troceo: la capa del selector es la del menú activo (igual a la de vl2d_run con menú, todas las listas)");
-        CHECK(layer_alpha_outside(R, ex, 2, &inside) == 0 && inside > 0, "sin troceo: la capa lleva solo la ventana, sin el HUD / texto base de fuera (%d dentro, %d listas con rect)", inside, rects);
+        CHECK(ok, "sin troceo: la capa del selector es la completa (igual a la de vl2d_run sin menú, todas las listas)");
+        CHECK(rects == 0, "sin troceo: el rect del menú nunca existe (%d listas con rect)", rects);
+        CHECK(layer_alpha_outside(R, ex, 2, &inside) > 0 && inside > 0, "sin troceo: la capa lleva el HUD / texto base (fuera de la ventana) Y la ventana (%d dentro)", inside);
         vl2d_free(R); vl2a_free(A);
     }
     free_list(l1); free_list(l2); free_list(l3);
+}
+
+/* ---- texto de créditos fuera del panel con el selector abierto ----
+ * Firma de los créditos de la intro en los volcados (28 volcados: 17 pares en 12 con créditos, 0 en el resto): el juego dibuja cada línea como DOS rectángulos texturados semitransparentes idénticos
+ * (misma caja, uv, página y CLUT), el primero con abr 2 (B-F) y el siguiente con abr 1 (B+F). La vida, el radar y los menús (ventana de armas/objetos) nunca lo hacen: un solo rect (radar, abr 2)
+ * o texto sin SEMI. vl2d_hide_credits(1) no pinta esos pares; el resto de la capa queda igual. */
+static long drawn_in(const VrLayer2D *L, const GpuDrawList *l, int x0, int y0, int x1, int y1) {
+    int pw = 0, ph = 0;
+    const VrLayerPx *pp = vl2d_px(L, &pw, &ph);
+    long n = 0;
+    for (int y = y0; y < y1 && pp; y++) for (int x = x0; x < x1; x++) if (pp[(size_t)(y - l->disp.y) * pw + (size_t)(x - l->disp.x)].t != 256) n++;
+    return n;
+}
+static void credits_off_cases(void) {
+    uint8_t opd1[64], opd[64]; int n1 = 0, n = 0;
+    GpuDrawList *l1 = panel_scene(0, opd1, &n1);
+    if (!l1) { CHECK(0, "créditos: lista"); return; }
+    uint32_t gi = 0;
+    while (gi < l1->nops && !(l1->ops[gi].type == GPU_OP_RECT && (l1->ops[gi].flags & GPU_F_TEXTURED))) gi++;
+    CHECK(gi < l1->nops, "créditos: glifo de plantilla");
+    if (gi >= l1->nops) { free_list(l1); return; }
+    /* ops añadidos (todos del panel): 0-1 par de créditos (150,160); 2 glifo opaco sin SEMI (170,160); 3 rect semitransparente suelto abr 2 como el radar (190,160);
+     * 4-5 abr 2 y abr 1 con CAJA distinta (210,160)/(230,160): no es un par */
+    const int px_[6] = {150, 150, 170, 190, 210, 230};
+    const int ab[6] = {2, 1, 0, 2, 2, 1};
+    GpuDrawList *d = dup_list(l1);
+    d->ops = (GpuOp *)realloc(d->ops, (l1->nops + 6) * sizeof(GpuOp));
+    for (int k = 0; k < 6; k++) {
+        GpuOp a = l1->ops[gi];
+        a.v[0].x = (int16_t)px_[k]; a.v[0].y = 160;
+        if (k != 2) a.flags |= GPU_F_SEMI;
+        a.abr = (uint8_t)ab[k];
+        d->ops[l1->nops + (uint32_t)k] = a;
+    }
+    d->nops = l1->nops + 6;
+    for (uint32_t i = 0; i < d->nops; i++) opd[i] = i < 2 ? 0 : 2;
+    n = (int)d->nops;
+    VrScene s1, s; memset(&s1, 0, sizeof s1); memset(&s, 0, sizeof s);
+    s1.op_dest = opd1; s1.n_op_dest = (uint32_t)n1; s.op_dest = opd; s.n_op_dest = (uint32_t)n;
+    const int Y0 = 160, Y1 = 168;
+    VrLayer2D *L = vl2d_new(); vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    long c_on[5], c_off[5], c_back[5];
+    const int X0[5] = {150, 170, 190, 210, 230};
+    CHECK(vl2d_run(L, d, &s, VL_PANEL) == 1, "créditos: lista sin ocultar");
+    for (int k = 0; k < 5; k++) c_on[k] = drawn_in(L, d, X0[k], Y0, X0[k] + 8, Y1);
+    vl2d_hide_credits(L, 1);
+    CHECK(vl2d_run(L, d, &s, VL_PANEL) == 1, "créditos: lista con ocultar");
+    for (int k = 0; k < 5; k++) c_off[k] = drawn_in(L, d, X0[k], Y0, X0[k] + 8, Y1);
+    vl2d_hide_credits(L, 0);
+    CHECK(vl2d_run(L, d, &s, VL_PANEL) == 1, "créditos: lista otra vez sin ocultar");
+    for (int k = 0; k < 5; k++) c_back[k] = drawn_in(L, d, X0[k], Y0, X0[k] + 8, Y1);
+    CHECK(c_on[0] > 10 && c_on[1] > 10 && c_on[2] > 10 && c_on[3] > 10 && c_on[4] > 10, "créditos: todo se pinta sin ocultar (%ld %ld %ld %ld %ld)", c_on[0], c_on[1], c_on[2], c_on[3], c_on[4]);
+    CHECK(c_off[0] == 0, "créditos: el par abr 2 + abr 1 no se pinta con el selector (%ld px)", c_off[0]);
+    CHECK(c_off[1] == c_on[1] && c_off[2] == c_on[2] && c_off[3] == c_on[3] && c_off[4] == c_on[4], "créditos: texto sin SEMI, rect suelto (radar) y abr 2/abr 1 de cajas distintas se conservan (%ld/%ld %ld/%ld %ld/%ld %ld/%ld)", c_off[1], c_on[1], c_off[2], c_on[2], c_off[3], c_on[3], c_off[4], c_on[4]);
+    CHECK(c_back[0] == c_on[0] && c_back[1] == c_on[1], "créditos: al cerrar el selector vuelven (%ld de %ld)", c_back[0], c_on[0]);
+    vl2d_free(L);
+    /* asíncrono: la etiqueta de vista selector (10) oculta los créditos (con o sin troceo: defecto sin él); cualquier otra vista los pinta */
+    CHECK(vl2a_split() == 0, "créditos async: troceo apagado por defecto");
+    VrL2Async *A = vl2a_new(); vl2a_options(A, 1, VL_SMOOTH_ORIGINAL);
+    VrLayer2D *R = vl2d_new(); vl2d_set_options(R, 1, VL_SMOOTH_ORIGINAL);
+    for (int pass = 0; pass < 3; pass++) {   /* mundo, selector, mundo */
+        const uint8_t *px = NULL; int w = 0, h = 0, full = -1; uint32_t seq = 0;
+        vl2a_set_view(A, (1 << 8) | (pass == 1 ? 10 : 0));
+        vl2d_hide_credits(R, pass == 1);
+        CHECK(vl2a_submit(A, d, opd, VL_PANEL, pass == 0) == 1, "créditos async: encolada %d", pass); vl2a_flush(A);
+        CHECK(vl2d_run(R, d, &s, VL_PANEL) == 1, "créditos async: referencia %d", pass);
+        int rw = 0, rh = 0; const uint8_t *rp = vl2d_rgba(R, &rw, &rh);
+        CHECK(vl2a_acquire(A, &px, &w, &h, &full, &seq) >= 0 && px && rp && w == rw && h == rh && !memcmp(px, rp, (size_t)w * h * 4), "créditos async %d (%s): capa igual a la de vl2d_run con hide_credits=%d", pass, pass == 1 ? "selector" : "mundo", pass == 1);
+        long cr = drawn_in(R, d, 150, Y0, 158, Y1);
+        CHECK(pass == 1 ? cr == 0 : cr > 10, "créditos async %d: píxeles de los créditos %ld", pass, cr);
+        vl2a_release(A);
+    }
+    vl2d_free(R); vl2a_free(A);
+    free_list(d); free_list(l1);
 }
 
 static void panel_verified(void) {
@@ -1619,6 +1674,7 @@ int main(void) {
     menu_only_window_cases();
     menu_settle_cases();
     menu_changing_cases();
+    credits_off_cases();
 
     /* ---- fondo negro, escala 1: IGUAL bit a bit a la GPU original ---- */
     build_list(0x0000);

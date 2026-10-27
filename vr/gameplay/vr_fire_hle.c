@@ -88,10 +88,15 @@ void hle_vrfire_flash_a(Cpu *c) { flash(c, "vrfire_flash_a", 0); }
 void hle_vrfire_flash_b(Cpu *c) { flash(c, "vrfire_flash_b", 1); }
 
 void hle_vrfire_grenade(Cpu *c) {
-    int16_t p[3], v[3];
+    int16_t p[3] = {0, 0, 0}, v[3] = {0, 0, 0};
     VrFireMat m = {{0}, {0}};
     int thrown = 0;
     uint32_t a0 = A0, a1 = A1;
+    int16_t op[3], ov[3];     /* argumentos originales del juego (para el diagnóstico) */
+    for (int i = 0; i < 3; i++) {
+        memcpy(&op[i], emu_ram + ((a0 + 2u * (uint32_t)i) & RAM_MASK), 2);
+        memcpy(&ov[i], emu_ram + ((a1 + 2u * (uint32_t)i) & RAM_MASK), 2);
+    }
     if (zone() && vrfire_take_throw(p, v)) {
         for (int i = 0; i < 3; i++) {
             *(int16_t *)(emu_ram + ((zbuf + Z_POS + 2u * (uint32_t)i) & RAM_MASK)) = p[i];
@@ -101,6 +106,7 @@ void hle_vrfire_grenade(Cpu *c) {
         thrown = 1;
         for (int i = 0; i < 3; i++) { m.t[i] = p[i]; m.m[i] = v[i]; }
     }
+    vrfire_log_grenade(op, ov, thrown, p, v);
     rt_orig(c, "vrfire_grenade");
     vrfire_probe(3, thrown, V0, &m);
     A0 = a0; A1 = a1;

@@ -54,8 +54,6 @@ void ns_buf_clear(NsRBuf *b, float r5, float g5, float b5) {
     for (size_t i = 0; i < n; i++) { b->c[i * 3] = r5; b->c[i * 3 + 1] = g5; b->c[i * 3 + 2] = b5; b->iz[i] = 0; }
 }
 
-const NsRWave *ns_ref_wave;
-
 /* ---------------- muestreo de VRAM ---------------- */
 uint16_t ns_sample_texel(const uint16_t *vram, uint16_t tpage, uint16_t clut, uint32_t tw, int u, int v) {
     int tx = (int)(tpage & 15u) * 64, ty = (int)((tpage >> 4) & 1u) * 256;
@@ -181,23 +179,7 @@ static int raster_tri(Ctx *cx, const NsRTri *t, const CV *v, int pass) {
             float f[3]; int kind;
             if (tex) {
                 float u = (float)(b0 * v[0].u + b1 * v[1].u + b2 * v[2].u), vv = (float)(b0 * v[0].v + b1 * v[1].v + b2 * v[2].v);
-                float wu = 0.0f, wv = 0.0f;
-                if (ns_ref_wave) {   /* onda del agua del sombreador (ns_fs): el muestreo se corre `amp*sin` píxeles en horizontal (uv del píxel vecino), como mucho 1 texel */
-                    const float ex = (float)(b0 * v[0].x + b1 * v[1].x + b2 * v[2].x) - cam->t[0], ey = (float)(b0 * v[0].y + b1 * v[1].y + b2 * v[2].y) - cam->t[1], ez = (float)(b0 * v[0].z + b1 * v[1].z + b2 * v[2].z) - cam->t[2];
-                    const float ew[3] = { cam->A[0] * ex + cam->A[3] * ey + cam->A[6] * ez, cam->A[1] * ex + cam->A[4] * ey + cam->A[7] * ez, cam->A[2] * ex + cam->A[5] * ey + cam->A[8] * ez };
-                    const NsRWave *w = ns_ref_wave;
-                    if (w->all || (ew[0] >= w->min[0] && ew[0] <= w->max[0] && ew[1] >= w->min[1] && ew[1] <= w->max[1] && ew[2] >= w->min[2] && ew[2] <= w->max[2])) {
-                        const double nw0 = ea[0] * (px + 1.0) + eb[0] * py + ec[0], nw1 = ea[1] * (px + 1.0) + eb[1] * py + ec[1], nw2 = ea[2] * (px + 1.0) + eb[2] * py + ec[2];
-                        const double niz = nw0 * iz[0] + nw1 * iz[1] + nw2 * iz[2];   /* píxel de la derecha (dFdx), extrapolado fuera de la cara */
-                        if (niz > 0) {
-                            const float s = w->amp * sinf(w->freq * ew[1] + w->phase);
-                            const float du = (float)((nw0 * iz[0] * v[0].u + nw1 * iz[1] * v[1].u + nw2 * iz[2] * v[2].u) / niz) - u, dv = (float)((nw0 * iz[0] * v[0].v + nw1 * iz[1] * v[1].v + nw2 * iz[2] * v[2].v) / niz) - vv;
-                            wu = fmaxf(-1.0f, fminf(1.0f, du * s)); wv = fmaxf(-1.0f, fminf(1.0f, dv * s));
-                        }
-                    }
-                }
-                uint16_t tn = ns_sample_texel(vram, t->tpage, t->clut, t->tw, (int)floorf(u + 1e-4f + wu), (int)floorf(vv + 1e-4f + wv));
-                if (tn == 0 && (wu != 0.0f || wv != 0.0f)) tn = ns_sample_texel(vram, t->tpage, t->clut, t->tw, (int)floorf(u + 1e-4f), (int)floorf(vv + 1e-4f));
+                uint16_t tn = ns_sample_texel(vram, t->tpage, t->clut, t->tw, (int)floorf(u + 1e-4f), (int)floorf(vv + 1e-4f));
                 if (tn == 0) continue;
                 for (int k = 0; k < 3; k++) {
                     float c5 = (float)((tn >> (5 * k)) & 31u);

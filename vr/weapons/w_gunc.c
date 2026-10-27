@@ -279,7 +279,7 @@ void gun_update(GunState *g, const GunCfg *c, const WInput *in, WReloadMode rm,
         float lim = c->interval < dt ? c->interval : dt;
         if (g->cd < -lim) g->cd = -lim;
     }
-    int pressed = in->trigger[0] > 0.6f;
+    int pressed = in->trigger[0] > 0.5f;
     if (in->trigger[0] < 0.3f) { g->latch = 0; g->dry_latch = 0; g->equip_latch = 0; }
     if (!pressed && g->cd < 0) g->cd = 0;
     if (g->equip_latch) pressed = 0;

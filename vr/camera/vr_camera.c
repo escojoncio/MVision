@@ -71,8 +71,12 @@
  *  I8 H del motor 160 (en vez de 320): argumento de I1               validar: menos vértices saturados/desbordados
  */
 #include "vr_camera.h"
+#include "vr_hzd.h"
+#define VRHZD_STANDALONE
+#include "vr_hzd.c"   /* unidad única: vr_hzd.c solo emite código con VRHZD_STANDALONE (aquí, o -DVRHZD_STANDALONE en test_hzd), para no duplicar símbolos cuando stage/project.yml compilan todos los .c */
 #include "vr_calib.h"
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -185,8 +189,17 @@ static int head_finite(const float m[16]) {
 
 static int16_t sat16(float v) { return (int16_t)(v > 32767.0f ? 32767 : (v < -32768.0f ? -32768 : lrintf(v))); }
 
+/* Diagnóstico [ojo-hzd]: una línea por cambio (empieza o deja de moverse el ojo, o la distancia cambia 2 cm respecto a la última línea). */
+static void hzd_log(float moved_u, float upm) {
+    static float last;
+    int on = moved_u > 0.0f, was_on = last > 0.0f;
+    if (on == was_on && fabsf(moved_u - last) < 0.02f * upm) return;
+    last = moved_u;
+    fprintf(stderr, "[ojo-hzd] ojo %s: movido %.1f uds (%.3f m) por las paredes de colision del juego\n", on ? "empujado" : "libre", moved_u, upm > 0.0f ? moved_u / upm : 0.0f);
+}
+
 /* ============================================ lectura del estado del juego ============================================ */
-typedef struct { int ok; int32_t eye_x, eye_y, eye_z; float body_yaw; int prone; int joint; int32_t jx, jy, jz; } Body;
+typedef struct { int ok; int32_t eye_x, eye_y, eye_z; float body_yaw; int prone; int joint; int32_t jx, jy, jz; int32_t bx, bz; } Body;
 
 static Body read_body(const uint8_t *ram) {
     Body b = {0};
@@ -215,7 +228,7 @@ static Body read_body(const uint8_t *ram) {
     }
     /* AUTO: los ojos siguen SIEMPRE la articulación de la cabeza del modelo (andando, agachado, tumbado y en las transiciones el modelo se inclina/adelanta
      * y el centro del cuerpo queda detrás: la cabeza del usuario se veía por detrás del cuerpo). BODY: solo el centro. */
-    b.jx = jx; b.jy = jy; b.jz = jz;
+    b.jx = jx; b.jy = jy; b.jz = jz; b.bx = mx; b.bz = mz;
     int use_joint_xz = b.joint && (S.cfg.eye_xz == VRCAM_EYE_JOINT || S.cfg.eye_xz == VRCAM_EYE_AUTO);
     b.eye_x = use_joint_xz ? jx : mx; b.eye_y = jy; b.eye_z = use_joint_xz ? jz : mz;
     b.ok = have_ctl;
@@ -350,6 +363,10 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
     /* ojo: articulación de la cabeza (+ desplazamiento arriba/delante según la mirada horizontal) */
     float yr = view * (PI_F / 180.0f);
     float ex = (float)b.eye_x + sinf(yr) * S.cfg.eye_fwd, ey = (float)b.eye_y + S.cfg.eye_up, ez = (float)b.eye_z + cosf(yr) * S.cfg.eye_fwd;
+    /* El juego solo colisiona el centro del cuerpo: la cabeza (ojo) puede quedar al otro lado de una pared (gateo en conductos de 1 m). Se devuelve al lado libre (vr_hzd.h). */
+    { float upm = S.cfg.units_per_m * (S.cfg.calibrate && S.calib.scale > 0 ? S.calib.scale : 1.0f), ex0 = ex, ez0 = ez;
+      int nc = vrhzd_clamp_eye(ram, b.bx, b.bz, &ex, &ez, ey, 0.18f * upm);
+      hzd_log(nc > 0 ? hypotf(ex - ex0, ez - ez0) : 0.0f, upm); }
     p->from[0] = sat16(ex); p->from[1] = sat16(ey); p->from[2] = sat16(ez);
 
     /* objetivo: ojo + dirección * track, con track acotado para que el objetivo quepa en s16 (la dirección sale de

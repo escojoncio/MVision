@@ -116,6 +116,12 @@ test-heading-san: test_heading.c vr_heading.c vr_heading.h vr_calib.h vr_camera.
 $(OUT)/test_headcol: test_headcol.c vr_headcol.c vr_headcol.h vr_camera.h $(SC)/vr_scene.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -I. -I$(BR) -I$(SC) -I$(RT) test_headcol.c vr_headcol.c -o $@ -lm
+# Pared de colisión del juego (hzd): el ojo no sale del conducto. Con VRHZD_DUMPS=<carpeta de volcados> comprueba también los volcados reales.
+$(OUT)/test_hzd: test_hzd.c vr_hzd.c vr_hzd.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -DVRHZD_STANDALONE -I. test_hzd.c vr_hzd.c -o $@ -lm
+test-hzd: $(OUT)/test_hzd
+	$(OUT)/test_hzd
 test-headcol: $(OUT)/test_headcol
 	$(OUT)/test_headcol
 test-headcol-san: test_headcol.c vr_headcol.c vr_headcol.h

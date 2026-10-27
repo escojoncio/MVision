@@ -3,7 +3,7 @@
  * Sustituye a la "manopla" del motor en primera persona: en vez de deformar una malla rígida de 22 caras (vr_fist), la mano es un esqueleto de 16 huesos RÍGIDOS,
  * cada uno con su malla cerrada, y el puño es solo una pose (ángulos de las articulaciones): el grosor de los dedos no cambia nunca.
  *
- *   hueso 0        palma (raíz, con volumen: puño de la manga, centro y nudillos)
+ *   hueso 0        palma (raíz, con volumen): labio del puño del guante, muñeca, centro, nudillos y un collar hexagonal por dedo y para el pulgar
  *   huesos 1..12   índice, corazón, anular, meñique: falange proximal, media y distal (3 cada uno)
  *   huesos 13..15  pulgar: metacarpo y dos falanges
  *
@@ -15,7 +15,11 @@
  * hueso local -> marco de la mano). Las mallas llevan la convención del motor: caras A,B,C,D en perímetro con cross(B-A, D-A) hacia el INTERIOR y normales
  * interiores por vértice (4096 = 1), triángulos (A,B,D) y (B,C,D).
  *
- * Tamaño: la malla se ajusta a la manopla original (VrHandDims: puño de la manga y largo medidos en la malla de la manopla). Número de triángulos: ~590.
+ * Soldaduras (estilo PS1, NsVert.weld): el anillo proximal de cada hueso (6 vértices) se suelda al anillo distal del padre (falange anterior) o, en la primera falange y
+ * el metacarpo, al anillo frontal del collar de la palma: en el renderer el vértice soldado toma la posición transformada del vértice del padre y las articulaciones no
+ * dejan huecos al flexionar. En reposo coinciden (mismos anillos). Cada malla sigue siendo cerrada y rígida por separado (vrhand_pose no deforma nada).
+ *
+ * Tamaño: la malla se ajusta a la manopla original (VrHandDims: puño de la manga y largo medidos en la malla de la manopla). Número de triángulos: ~540 (tope 700).
  * Textura: cada cara lleva un rol (palma, dorso, dedo, articulación) y parámetros (su, sv) 0..255 por esquina; quien dibuja los proyecta a la región de la textura de la
  * manopla (ns_hand). */
 #pragma once
@@ -26,8 +30,10 @@ extern "C" {
 #endif
 
 #define VRHAND_BONES 16
-#define VRHAND_MAX_V 32          /* vértices por hueso */
-#define VRHAND_MAX_F 24          /* caras por hueso */
+#define VRHAND_MAX_V 112         /* vértices por hueso (la palma lleva 5 collares de articulación) */
+#define VRHAND_MAX_F 96          /* caras por hueso */
+#define VRHAND_NO_WELD 0xFF
+#define VRHAND_REF_LEN_M 0.19f   /* largo de referencia de la mano (muñeca a yema del corazón, VrHandDims cuff_y - tip_y) en metros */
 
 enum { VRHAND_PALM = 0, VRHAND_INDEX = 1, VRHAND_MIDDLE = 4, VRHAND_RING = 7, VRHAND_LITTLE = 10, VRHAND_THUMB = 13 };   /* primer hueso de cada grupo */
 enum { VRHAND_ROLE_PALM = 0, VRHAND_ROLE_BACK = 1, VRHAND_ROLE_FINGER = 2, VRHAND_ROLE_JOINT = 3, VRHAND_ROLES = 4 };
@@ -64,6 +70,7 @@ typedef struct {
     uint8_t f[VRHAND_MAX_F][4];      /* A,B,C,D (perímetro) */
     uint8_t role[VRHAND_MAX_F];      /* VRHAND_ROLE_* */
     uint8_t su[VRHAND_MAX_F][4], sv[VRHAND_MAX_F][4];   /* parámetros de textura 0..255 por esquina */
+    uint8_t weld[VRHAND_MAX_V];      /* VRHAND_NO_WELD, o el índice de vértice de la malla del hueso PADRE cuya posición transformada sustituye a ésta (NsVert.weld) */
 } VrHandBoneMesh;
 
 typedef struct {
@@ -86,12 +93,19 @@ int vrhand_build(VrHand *h, const VrHandDims *dims, int side);
 void vrhand_pose(const VrHand *h, float grip, float xf[VRHAND_BONES][12]);
 /* Con un cierre por dedo (curl[0..3] = índice..meñique, curl[4] = pulgar, cada uno 0..1). */
 void vrhand_pose_curls(const VrHand *h, const float curl[5], float xf[VRHAND_BONES][12]);
+/* Igual, con la separación del pulgar: spread -1 (aducido, pegado a la palma) .. +1 (abierto hacia fuera; unos 25 grados de abducción extra). 0 = vrhand_pose_curls. */
+void vrhand_pose_curls_ex(const VrHand *h, const float curl[5], float thumb_spread, float xf[VRHAND_BONES][12]);
+/* Posición de cada vértice de cada hueso en el marco de la mano, con las soldaduras aplicadas (lo que dibuja el renderer). */
+void vrhand_skin(const VrHand *h, const float xf[VRHAND_BONES][12], float out[VRHAND_BONES][VRHAND_MAX_V][3]);
+/* Metros por unidad del marco de la mano, suponiendo que muñeca a yema del corazón (cuff_y - tip_y) = VRHAND_REF_LEN_M. */
+float vrhand_unit_m(const VrHand *h);
 
 /* Triángulos totales de la mano (suma de las mallas: 1 por cara triangular, 2 por cuadrilátero). */
 int vrhand_tri_count(const VrHand *h);
 /* Punto de golpe en el marco de la mano: centro de los vértices de los dedos más avanzados hacia -Y (las yemas con la mano abierta, los nudillos con el puño). */
 void vrhand_fist_point(const VrHand *h, const float xf[VRHAND_BONES][12], float out[3]);
-/* Centro de la palma (marco de la mano): el punto de agarre del mando. */
+/* Centro de agarre (marco de la mano): el punto de agarre del mando = centro del hueco de un puño cerrado sobre un mango de ~34 mm: delante de la superficie de la palma (+X derecha, -X izquierda),
+ * a 0,50 del largo de la mano desde la manga hacia los nudillos y a la altura Z del centro de los cuatro dedos. */
 void vrhand_palm_center(const VrHand *h, float out[3]);
 
 /* Colisión de la pose (cápsulas de los huesos entre sí y contra la palma): la mayor penetración en mm. */

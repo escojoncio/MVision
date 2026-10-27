@@ -356,3 +356,25 @@ fragment float4 vr_fs_post_layered(VrPostOutL in [[stage_in]], texture2d_array<f
     float2 uv = float2(in.pos.x / float(src.get_width()), ys / float(src.get_height()));
     return vr_post_finish(src.sample(smp, uv, in.layer), u, vr_post_scan(in.pos.y, eye, u), vr_post_frame(in.pos.xy, eye, u, frm));
 }
+
+/* ---------------- onda de pantalla del agua (render nativo, cabeza bajo el agua) ----------------
+ * Post-proceso por ojo sobre la imagen final: cada fila de pantalla se muestrea desplazada en horizontal dx = amp * (ancho/1888) * sin(freq * fila + fase), con la fila del motor
+ * medida desde el centro óptico (ns_screen_wave_row / ns_screen_wave_dx de ns_screen.c). Solo copia y desplaza (sin tinte: el tinte del agua lo aplica ns_fs); no toca la profundidad. */
+inline float vr_wave_dx(float yc, uint eye, constant VrPostUniforms &u, float width) {
+    if (u.eye[eye].y <= 1.0 || u.wave.w <= 0.0) return 0.0;
+    float row = (yc - u.eye[eye].x) / u.eye[eye].y * u.wave.w;
+    return u.wave.x * (width / 1888.0) * sin(u.wave.y * row + u.wave.z);
+}
+
+fragment float4 vr_fs_wave(VrPostOut in [[stage_in]], texture2d<float> src [[texture(0)]], constant VrPostUniforms &u [[buffer(0)]]) {
+    constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
+    float2 uv = float2((in.pos.x + vr_wave_dx(in.pos.y, 0u, u, float(src.get_width()))) / float(src.get_width()), in.pos.y / float(src.get_height()));
+    return src.sample(smp, uv);
+}
+
+fragment float4 vr_fs_wave_layered(VrPostOutL in [[stage_in]], texture2d_array<float> src [[texture(0)]], constant VrPostUniforms &u [[buffer(0)]]) {
+    constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
+    uint eye = min(in.layer, 1u);
+    float2 uv = float2((in.pos.x + vr_wave_dx(in.pos.y, eye, u, float(src.get_width()))) / float(src.get_width()), in.pos.y / float(src.get_height()));
+    return src.sample(smp, uv, in.layer);
+}

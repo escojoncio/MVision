@@ -23,7 +23,7 @@ struct NsVOut {
     float3 col;              /* byte de color por vértice (128 = neutro), interpolado */
     uint tpage [[flat]];
     uint clutf [[flat]];     /* clut | flags << 16 */
-    float3 ew;               /* posición en el mundo del motor (el agua vive en el mundo: tinte y onda dependen de ella, no de la cabeza) */
+    float3 ew;               /* posición en el mundo del motor (el tinte del agua vive en el mundo: depende de ella, no de la cabeza) */
 };
 
 static float3 ns_mul34(const device float *m, float3 p)
@@ -259,28 +259,20 @@ fragment float4 ns_fs(NsVOut in [[stage_in]], texture2d<ushort, access::read> vr
     uint clut = in.clutf & 0xFFFFu;
     bool semi = (flags & NSG_CF_SEMI) != 0u;
     float3 col = clamp(in.col, 0.0, 255.0);
-    const float2 duvdx = dfdx(in.uv);   /* derivada en flujo uniforme (antes de ramas y descartes) */
-    /* agua (ns_screen_water_ref): en el volumen, o en todo si la cabeza está dentro. Tinte multiplicativo y onda que dependen solo de la posición del mundo. */
+    /* agua (ns_screen_water_ref): tinte multiplicativo en el volumen, o en todo si la cabeza está dentro; depende solo de la posición del mundo. La ondulación NO va aquí: es un post-proceso de pantalla (vr_fs_wave). */
     bool wet = false;
-    float2 wd = float2(0.0);
     float3 wtint = float3(1.0);
     if (U.water_min.w > 0.5) {
         bool inside = all(in.ew >= U.water_min.xyz) && all(in.ew <= U.water_max.xyz);
         wet = inside || U.water_tint.w > 0.5;
-        if (wet) {
-            wtint = U.water_tint.xyz;
-            /* onda horizontal de la imagen: el muestreo se corre water_wave.x * sin(...) píxeles del ojo (uv del píxel vecino), como mucho 1 texel: nunca cruza a texturas vecinas */
-            wd = clamp(duvdx * (U.water_wave.x * sin(U.water_wave.y * in.ew.y + U.water_wave.z)), -1.0, 1.0);
-        }
+        if (wet) wtint = U.water_tint.xyz;
     }
     float3 rgb;
     if (kNsFlat) {
         /* malla opaca sin textura: ni lectura de VRAM ni descarte */
         rgb = col / 255.0;
     } else if ((flags & NSG_CF_TEX) != 0u) {
-        uint tn = ns_texel(vram, in.tpage, clut, int(floor(in.uv.x + 1.0e-4 + wd.x)), int(floor(in.uv.y + 1.0e-4 + wd.y)));
-        /* la onda desplaza el texel: si cae en uno transparente (borde de la textura) se usa el sin desplazar, para no abrir agujeros en las caras */
-        if (tn == 0u && (wd.x != 0.0 || wd.y != 0.0)) tn = ns_texel(vram, in.tpage, clut, int(floor(in.uv.x + 1.0e-4)), int(floor(in.uv.y + 1.0e-4)));
+        uint tn = ns_texel(vram, in.tpage, clut, int(floor(in.uv.x + 1.0e-4)), int(floor(in.uv.y + 1.0e-4)));
         if (tn == 0u) discard_fragment();
         bool b15 = (tn & 0x8000u) != 0u;
         if (kNsPass == 0u) { if (semi && b15) discard_fragment(); }

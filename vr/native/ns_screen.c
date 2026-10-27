@@ -5,7 +5,7 @@
 NsScreenCfg ns_screen_cfg_default(void) {
     NsScreenCfg c;
     memset(&c, 0, sizeof c);
-    c.wave_gain = 3.0f; c.wave_space = 8.0f;
+    c.wave_gain = 3.0f; c.wave_space = 1.0f;
     c.bars_gain = 0.0f; c.bars_soft = 4.0f;
     c.scan_gain = 0.12f; c.scan_period = 2.0f; c.scan_cover = 0.5f;
     c.mode_amount = 0.30f;
@@ -67,10 +67,12 @@ int ns_screen_build(const NsScreenFx *fx, const float to_vr[12], const float hea
                      he[2] >= fx->water_min[2] && he[2] <= fx->water_max[2];
         for (int k = 0; k < 3; k++) { out->water_min[k] = fx->water_min[k]; out->water_max[k] = fx->water_max[k]; out->water_tint[k] = fx->water_tint[k]; }
         out->water_min[3] = 1.0f; out->water_tint[3] = inside ? 1.0f : 0.0f;
-        int per = fx->water_wave_period > 0 ? fx->water_wave_period : 16;
-        out->water_wave[0] = (float)fx->water_wave_rows * cfg.wave_gain;
-        out->water_wave[1] = 6.2831853f / ((float)per * cfg.wave_space);
-        out->water_wave[2] = 6.2831853f * (float)(fx->water_phase % (unsigned)per) / (float)per;
+        if (inside) {   /* la onda es de pantalla: solo con la cabeza dentro del agua */
+            int per = fx->water_wave_period > 0 ? fx->water_wave_period : 16;
+            out->water_wave[0] = (float)fx->water_wave_rows * cfg.wave_gain;
+            out->water_wave[1] = 6.2831853f / ((float)per * cfg.wave_space);
+            out->water_wave[2] = 6.2831853f * (float)(fx->water_phase % (unsigned)per) / (float)per;
+        }
         if (inside && fx->water_bar_rows > 0 && cfg.bars_gain > 0) {
             NsGpuOverlay *o = add_ov(out, NSG_OV_BARS, 2, cfg.bars_gain);
             if (o) { o->rgb[0] = o->rgb[1] = o->rgb[2] = 1; o->p[0] = (float)fx->water_bar_rows; o->p[1] = cfg.bars_soft; o->p[3] = H; }
@@ -189,14 +191,34 @@ void ns_screen_overlay_ref(const NsGpuOverlay *ov, float tx, float ty, float ydi
     }
 }
 
-int ns_screen_water_ref(const float wmin[4], const float wmax[4], const float wtint[4], const float wwave[4], const float ew[3], float *du, float *dv, float col[3]) {
-    *du = 0; *dv = 0;
+int ns_screen_water_ref(const float wmin[4], const float wmax[4], const float wtint[4], const float ew[3], float col[3]) {
     if (wmin[3] < 0.5f) return 0;
     int in = ew[0] >= wmin[0] && ew[0] <= wmax[0] && ew[1] >= wmin[1] && ew[1] <= wmax[1] && ew[2] >= wmin[2] && ew[2] <= wmax[2];
     if (!in && wtint[3] < 0.5f) return 0;
     for (int k = 0; k < 3; k++) col[k] *= wtint[k];
-    /* onda horizontal que depende de la altura (como las filas de la pantalla del motor): du = píxeles del ojo que se corre el muestreo (el sombreador lo lleva a uv con la derivada del píxel, máx. 1 texel); sin componente vertical */
-    *du = wwave[0] * sinf(wwave[1] * ew[1] + wwave[2]);
-    *dv = 0.0f;
     return 1;
+}
+
+/* ---- onda de pantalla bajo el agua ---- */
+float ns_screen_wave_dx(const float wwave[4], float row, float eye_w) {
+    return wwave[0] * (eye_w / NS_WAVE_REF_W) * sinf(wwave[1] * row + wwave[2]);
+}
+float ns_screen_wave_row(float y_px, float cy_px, float fy_px, float H) {
+    return fy_px > 1.0f ? (y_px - cy_px) / fy_px * H : 0.0f;
+}
+void ns_screen_wave_rgb8(const float wwave[4], const uint8_t *src, uint8_t *dst, int w, int h, float cy_px, float fy_px, float H) {
+    for (int y = 0; y < h; y++) {
+        const float dx = ns_screen_wave_dx(wwave, ns_screen_wave_row((float)y + 0.5f, cy_px, fy_px, H), (float)w);
+        for (int x = 0; x < w; x++) {
+            float fx = (float)x + dx;                                    /* índice de texel (centro de píxel x + 0,5 -> centro de texel x) */
+            if (fx < 0.0f) fx = 0.0f;
+            if (fx > (float)(w - 1)) fx = (float)(w - 1);
+            int x0 = (int)fx, x1 = x0 + 1 < w ? x0 + 1 : x0;
+            float a = fx - (float)x0;
+            for (int k = 0; k < 3; k++) {
+                float v = (float)src[((size_t)y * w + x0) * 3 + k] * (1.0f - a) + (float)src[((size_t)y * w + x1) * 3 + k] * a;
+                dst[((size_t)y * w + x) * 3 + k] = (uint8_t)(v + 0.5f);
+            }
+        }
+    }
 }

@@ -16,6 +16,9 @@
 #include "vr_aa.h"
 #include "vr_fire.h"
 #include "vr_glove.h"
+#include "vr_grip.h"
+#include "vr_hand_mesh.h"
+#include "vr_hand_pose.h"
 #include "vr_hands.h"
 #include "vr_pose.h"
 #include "vr_radar.h"
@@ -104,8 +107,8 @@ typedef struct { int valid; float p[3], q[4]; } GripPose;
 
 static pthread_mutex_t HM = PTHREAD_MUTEX_INITIALIZER;   /* manos, opciones, hápticos, estado, publicación del arma */
 static HandSlot hand_in[2];
-static int opt_right = 1, opt_reload = WR_MANUAL;
-static int opt_aim = 1;            /* 1: el arma toma la ORIENTACIÓN del apuntado del mando (donde apuntas es donde dispara) y la POSICIÓN del agarre */
+static int opt_right = 1, opt_reload = WR_AUTOMATIC;   /* recarga por defecto automática: sin cinturón ni cargadores a mano */
+static int opt_aim = 1;            /* sin efecto: el arma cuelga de la mano por el zócalo de vr_grip (la boca apunta como la mano), ya no toma el apuntado del mando */
 static float goff_p[3] = {0, 0, 0}, goff_q[4] = {0, 0, 0, 1};
 static float hap_out[2];
 static MvVrGameStatus pub_status;
@@ -185,12 +188,53 @@ static GripPose grip_locked(const HandSlot *s, uint64_t now) {
     return g;
 }
 
-/* Pose del arma en la mano: posición del agarre (el mango va en la palma) y orientación del apuntado del mando si lo hay (el cañón sale por donde
- * apunta el mando; el marco del agarre queda para la mano del personaje). Con HM tomado. */
-static GripPose weapon_locked(const HandSlot *s, uint64_t now) {
-    GripPose g = grip_locked(s, now);
-    if (g.valid && opt_aim && s->aim_valid) memcpy(g.q, s->aim_rot, sizeof g.q);
+/* IK de la mano repetida con el agarre vivo (definida más abajo; HM tomado). */
+static int live_arm_locked(int side, uint64_t now, VrBodyArmLive *a, GripPose *gn, VrBodyArmPose *ap, float *dev_mm, float *age_ms);
+
+static void m3_to_q(const float R[9], float q[4]) {      /* R fila-mayor con los ejes en las columnas */
+    float m[16] = {0};
+    for (int c = 0; c < 3; c++) for (int r = 0; r < 3; r++) m[4 * c + r] = R[3 * r + c];
+    m[15] = 1;
+    q_from_m16(m, q);
+}
+static GripPose hand_from_arm(const float R[9], const float wrist[3]) {
+    GripPose g;
+    memset(&g, 0, sizeof g);
+    m3_to_q(R, g.q); memcpy(g.p, wrist, sizeof g.p); g.valid = finite_n(g.p, 3) && finite_n(g.q, 4);
     return g;
+}
+/* Marco de la MANO nueva (el de la pieza mano del personaje y de vr_hand_mesh: dedos -Y, palma +X en la derecha, pulgar +Z; origen en la muñeca; m, espacio recentrado) con el que el arma
+ * cuelga de la mano: el de la IK repetida con el agarre vivo (el mismo del guante); sin IK (sin cuerpo o sin brazo movido) el agarre girado por hand_rot_offset y el mapa de la pieza mano.
+ * *upm = unidades del motor por metro (1000 si no se sabe). HM tomado. */
+static GripPose hand_frame_locked(int side, uint64_t now, float *upm) {
+    VrBodyArmLive a; GripPose gn; VrBodyArmPose ap;
+    if (upm) *upm = 1000.0f;
+    if (live_arm_locked(side, now, &a, &gn, &ap, NULL, NULL)) {
+        if (upm && a.upm > 1.0f) *upm = a.upm;
+        return hand_from_arm(ap.R_hand, ap.wrist);
+    }
+    GripPose g = grip_locked(&hand_in[side], now), o;
+    memset(&o, 0, sizeof o);
+    if (!g.valid) return o;
+    const VrBodyConfig *bc = vrbody_config();
+    float qr[4] = {0, 0, 0, 1}, q[4], Rg[16], Rf[9];
+    if (bc) { memcpy(qr, bc->hand_rot_offset[side], sizeof qr); q_norm(qr); }
+    q_mul(g.q, qr, q); q_norm(q);
+    m16_from_pq(g.p, q, Rg);
+    /* hand_map (vr_body.c): columnas = imágenes de los ejes locales de la pieza mano en el marco de mano (dedos -Z, dorso +Y) */
+    static const float MR[9] = {0, 0, -1, -1, 0, 0, 0, 1, 0}, ML[9] = {0, 0, 1, 1, 0, 0, 0, 1, 0};
+    const float *M = side == 1 ? MR : ML;
+    for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) Rf[3 * r + c] = Rg[r] * M[c] + Rg[4 + r] * M[3 + c] + Rg[8 + r] * M[6 + c];
+    float zc[3] = {Rg[8], Rg[9], Rg[10]}, org[3];
+    const float gtw = bc ? bc->grip_to_wrist_mm : 0.0f;
+    for (int i = 0; i < 3; i++) org[i] = g.p[i] + zc[i] * gtw / 1000.0f;
+    return hand_from_arm(Rf, org);
+}
+/* Escala de la mano dibujada respecto a los zócalos de vr_grip (m por unidad del marco de la mano = vrhand_unit_m de la mano por defecto): la malla se dibuja a 1/upm m por unidad. */
+static float hand_socket_scale(float upm) {
+    static float um;
+    if (!(um > 0.0f)) { static VrHand h; um = vrhand_build(&h, NULL, 1) == 0 ? vrhand_unit_m(&h) : 0.0f; }
+    return um > 0.0f && upm > 1.0f ? 1.0f / (um * upm) : 1.0f;
 }
 
 /* Manos para la IK de los brazos (hilo de emulación, etapa de dibujado). */
@@ -266,7 +310,7 @@ int32_t mv_vrgame_debug_frame(int32_t kind, int32_t side, float m[16]) {
     pthread_mutex_lock(&HM);
     GripPose g;
     if (kind == 0) g = grip_locked(&hand_in[side], now);
-    else { g = weapon_locked(&hand_in[opt_right ? 1 : 0], now); if (!pub_status.active) g.valid = 0; }
+    else { g = hand_frame_locked(opt_right ? 1 : 0, now, NULL); if (!pub_status.active) g.valid = 0; }
     pthread_mutex_unlock(&HM);
     if (!g.valid) return 0;
     m16_from_pq(g.p, g.q, m);
@@ -368,7 +412,7 @@ static void *load_thread(void *arg) {
     if (vrhands_derive_grip(st, &g) == 0) def->points[WP_GRIP] = g;
     VrHandsConfig hc;
     vrhands_default_config(&hc);
-    hc.grip_mode = VRH_GRIP_DEF;
+    hc.grip_mode = VRH_GRIP_SOCKET;     /* el arma cuelga de la mano por el zócalo de vr_grip (se fija cada VBlank); el agarre del modelo es el de def */
     VrHandsRig *rig = vrhands_create(&hc);
     if (!rig || vrhands_bind(rig, st, cs.atlas, cs.atlas_w, cs.atlas_h)) {
         if (rig) vrhands_destroy(rig);
@@ -437,6 +481,7 @@ static struct {
     int boot_done;              /* la primera toma de munición del arma (arranque) no cuenta como cargador de la cintura */
     int mag_weapon;             /* el arma activa lleva cargador en el juego (contabilidad virtual de cargadores) */
     int ammo_game;              /* munición total del arma activa en el juego (para los lanzamientos) */
+    int game_mag;               /* cargador del juego (el cargador VR arranca con él) */
     VrFireMap map;              /* correspondencia usuario -> motor del VBlank (para el gancho de colocación) */
     WPose head;                 /* cabeza del VBlank (usuario) */
     float floor_u;              /* altura del suelo del juego en espacio de usuario (m) */
@@ -473,7 +518,11 @@ void vrgame_reset(void) {
 }
 void vrgame_set_enabled(int body_ok, int fire_ok) { G.body_ok = body_ok; G.fire_ok = fire_ok; }
 
-static int cb_ammo_reserve(int id) { return vrreload_ammo_reserve(id); }
+static int cb_ammo_reserve(int id) {
+    /* El cargador VR refleja al del juego: al arrancar el arma se llena con el cargador del juego (que no cuenta en la reserva), también con reserva 0 o menor que el cargador. */
+    if (!G.boot_done && G.mag_weapon) return G.game_mag > 0 ? G.game_mag : 0;
+    return vrreload_ammo_reserve(id);
+}
 static void cb_ammo_take(int id, int n) {
     /* Solo las armas de cargador llevan libro virtual (cargadores cogidos de la cintura). Las demás (misil, granadas, minas)
      * gastan la munición el propio juego al crear el proyectil: descontarla aquí la contaría dos veces. */
@@ -772,8 +821,68 @@ static void glove_update(const uint8_t *ram) {
     last_rc = rc;
 }
 
+/* Pose de cada mano nueva (vr_hand_pose): la del objeto que sostiene (tabla de vr_grip por arma; la mano de apoyo solo si ya agarra el arma) o sin objeto (HP_RELAX: el agarre cierra el puño), con el
+ * gatillo y el pulgar sobre los botones del mando. Se publica una vez por VBlank y lo lee la escena nativa (ns_hands_finalize). */
+static struct { int valid, item; float trigger, thumb; } pub_hp[2];
+static void publish_hand_pose(const HandSlot hs[2], const GripPose gp[2], int right, const VrGripEntry *ge, int support) {
+    pthread_mutex_lock(&HM);
+    for (int i = 0; i < 2; i++) {
+        pub_hp[i].valid = gp[i].valid;
+        pub_hp[i].item = HP_RELAX;
+        if (ge) { if (i == (right ? 1 : 0)) pub_hp[i].item = ge->pose; else if (support && ge->support_pose >= 0) pub_hp[i].item = ge->support_pose; }
+        pub_hp[i].trigger = gp[i].valid ? fminf(fmaxf(hs[i].trigger, 0.0f), 1.0f) : 0.0f;
+        pub_hp[i].thumb = gp[i].valid && (hs[i].low || hs[i].up || hs[i].stick) ? 1.0f : 0.0f;
+    }
+    pthread_mutex_unlock(&HM);
+}
+int vrgame_hand_pose_in(int side, int *item_pose, float *trigger, float *thumb) {
+    *item_pose = HP_RELAX; *trigger = 0; *thumb = 0;
+    if (side < 0 || side > 1) return 0;
+    pthread_mutex_lock(&HM);
+    int ok = pub_hp[side].valid;
+    if (ok) { *item_pose = pub_hp[side].item; *trigger = pub_hp[side].trigger; *thumb = pub_hp[side].thumb; }
+    pthread_mutex_unlock(&HM);
+    return ok;
+}
+
+/* Pruebas: instala un arma ya construida en la ranura de su id (sin cargar modelos del disco). */
+void vrgame_test_install(int game_id, void *def, void *state, void *rig) {
+    int si = slot_of(game_id);
+    if (si < 0) return;
+    SL[si].def = (WeaponDef *)def; SL[si].st = (WeaponState *)state; SL[si].rig = (VrHandsRig *)rig;
+    atomic_store(&SL[si].state, LD_READY);
+}
+
 static uint32_t drv_vbl;
 void vrgame_set_driver(VrGameDriver f) { drv_fn = f; drv_vbl = 0; }
+
+/* Supresor de la pistola: lo decide el juego, no el VR (el arma lo muestra con WGF_SUPP, ver weapon.h). Regla PROVISIONAL hasta conocer el campo de la RAM:
+ * visible solo si el juego da el objeto «supresor» como poseído (item_count >= 0) Y equipado (item). TODO(supresor): índice 0..23 del objeto en BRIDGE_V_ITEM_COUNT,
+ * aún sin identificar; mientras valga -1 el supresor NO se ve nunca. */
+#define VRGAME_SUPPRESSOR_ITEM (-1)
+static int game_has_suppressor(const BridgeState *bs) {
+    if (!bs || VRGAME_SUPPRESSOR_ITEM < 0 || VRGAME_SUPPRESSOR_ITEM >= BRIDGE_N_ITEMS) return 0;
+    return bs->item_count[VRGAME_SUPPRESSOR_ITEM] >= 0 && bs->item == VRGAME_SUPPRESSOR_ITEM;
+}
+
+/* Diagnóstico [arma] (una línea por segundo): por qué el arma VR se ve o no, y su estado. Los campos que aún no se conocen valen -1. */
+extern int w_pist_trig_armed(const WeaponState *ws);   /* vr/weapons/w_pist.c */
+typedef struct {
+    int eq_slot, load, mode, cam, core, gpw;
+    int rstate, fire_allowed, engaged, supp;
+    float trig_raw, trig;
+    int trig_armed, chambered, mag_in;
+    int gweapon, gitem, gammo;
+    float d_grip, d_supp;
+} ArmaDiag;
+static void arma_diag(uint64_t now, const ArmaDiag *a) {
+    static uint64_t next_ns;
+    if (now < next_ns) return;
+    next_ns = now + 1000000000ull;
+    fprintf(stderr, "[arma] slot=%d carga=%d modo=%d fire_ok=%d cam=%d nucleo=%d mano_arma_valida=%d | recarga=%d disparo_permitido=%d gatillo=%.2f (crudo %.2f) armado=%d recamara=%d cargador=%d | fo.engaged=%d disparos=%u supresor=%d | juego: arma=%d objeto=%d municion=%d | dist empuñadura_arma-agarre_mando=%.3fm mano_libre-soporte=%.3fm\n",
+            a->eq_slot, a->load, a->mode, G.fire_ok, a->cam, a->core, a->gpw, a->rstate, a->fire_allowed, a->trig, a->trig_raw, a->trig_armed, a->chambered, a->mag_in,
+            a->engaged, G.shots, a->supp, a->gweapon, a->gitem, a->gammo, a->d_grip, a->d_supp);
+}
 
 uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     init_once();
@@ -785,6 +894,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     G.last_ns = now;
     if (!(dt > 0.001f)) dt = 0.001f;
     if (dt > 0.1f) dt = 0.1f;
+    vrfire_grenade_track(ram, dt);       /* diagnóstico [granada]: sigue al actor de la granada lanzada 3 s */
 
     int cam = vrcam_active();
     int core = bs && (bs->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs->has_player;
@@ -794,11 +904,14 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
 
     /* manos (una sola toma coherente) */
     HandSlot hs[2];
-    GripPose gp[2], wp[2];       /* gp: agarre (mano del personaje, gestos); wp: pose del arma si esa mano la empuña */
+    GripPose gp[2], wp[2];       /* gp: agarre (mano del personaje, gestos); wp: marco de la mano nueva de la mano que empuña el arma (vr_grip la cuelga de él) */
     int right, rmode;
     pthread_mutex_lock(&HM);
     right = opt_right; rmode = opt_reload;
-    for (int i = 0; i < 2; i++) { hs[i] = hand_in[i]; gp[i] = grip_locked(&hand_in[i], now); wp[i] = weapon_locked(&hand_in[i], now); }
+    float hand_upm = 1000.0f;
+    memset(wp, 0, sizeof wp);
+    for (int i = 0; i < 2; i++) { hs[i] = hand_in[i]; gp[i] = grip_locked(&hand_in[i], now); }
+    if (gp[right ? 1 : 0].valid) wp[right ? 1 : 0] = hand_frame_locked(right ? 1 : 0, now, &hand_upm);   /* marco de la MANO del arma (IK viva), no el agarre del mando */
     pthread_mutex_unlock(&HM);
 
     /* cuerpo: agarre de cada mano y mano dominante (la IK de los brazos lee las poses por vrpose_get_hands) */
@@ -825,6 +938,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     const int gid = slot >= 0 ? WPN_TAB[slot].game_id : -1;
     G.mag_weapon = core && bs->magazine_max > 0 && (gid == 0 || gid == 1 || gid == 9);
     G.ammo_game = core && bs->weapon >= 0 && bs->weapon < BRIDGE_N_WEAPONS ? bs->weapon_ammo[bs->weapon] : 0;
+    G.game_mag = core ? bs->magazine : 0;
 
     /* la recarga corre siempre (si no hay arma VR de cargador vuelve a reposo y suelta su contabilidad) */
     VrReloadGame rg;
@@ -872,6 +986,12 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         VrFireOut fo;
         vrfire_frame(&fg, &fi, &fo);
         G.ro = ro;
+        if (core && bs->weapon >= 0) {
+            ArmaDiag ad = {eq_slot, eq_slot >= 0 ? atomic_load(&SL[eq_slot].state) : -1, 0, cam, core, gp[w].valid, ro.state, ro.fire_allowed, fo.engaged, game_has_suppressor(bs),
+                           hs[w].trigger, -1.0f, -1, -1, -1, bs->weapon, bs->item, G.ammo_game, -1.0f, -1.0f};
+            arma_diag(now, &ad);
+        }
+        publish_hand_pose(hs, gp, right, NULL, 0);
         uint16_t out = pad;
         if (ro.busy) out = (uint16_t)(out & ~ro.pad_mask);
         out |= ro.pad_force;     /* una maniobra a medias termina aunque el arma ya no esté equipada */
@@ -918,7 +1038,19 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     WInput in;
     memset(&in, 0, sizeof in);
     in.head = G.head;
-    in.hand[0] = wpose_of(&wp[w]);
+    VrHandsPose hp;                    /* mano del arma (marco de la mano nueva); con VRH_GRIP_SOCKET el arma y su lógica cuelgan de ella por el zócalo */
+    memset(&hp, 0, sizeof hp);
+    hp.valid = 1;
+    memcpy(hp.pos, wp[w].p, sizeof hp.pos); memcpy(hp.rot, wp[w].q, sizeof hp.rot);
+    const VrGripEntry *ge = vrgrip_find(gid);
+    {
+        WPose sock = ge ? ge->grip : wpose_identity();
+        if (!w) sock = vrgrip_mirror(sock);                                   /* mando izquierdo: zócalo reflejado */
+        float k = hand_socket_scale(hand_upm);
+        sock.p.x *= k; sock.p.y *= k; sock.p.z *= k;
+        vrhands_set_socket(sl->rig, sock);
+    }
+    in.hand[0] = vrhands_weapon_hand(sl->rig, &hp);
     if (gp[o].valid) in.hand[1] = wpose_of(&gp[o]);
     else { in.hand[1].p.x = 0; in.hand[1].p.y = -10; in.hand[1].p.z = 0; in.hand[1].q.w = 1; }   /* sin mano libre: lejos de todo punto de interacción */
     in.trigger[0] = hs[w].trigger;
@@ -930,6 +1062,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     /* el gatillo solo actúa cuando el disparo puede salir (recarga del juego en curso, cargador del juego vacío...: sin disparos sin proyectil) */
     if (G.mag_weapon && !(ro.state == VRR_READY && ro.fire_allowed)) in.trigger[0] = 0;
     in.support_held = gp[o].valid && in.grip[1] > 0.5f && wcore_hand_dist(st, &in, 1, WP_SUPPORT) < 0.07f;
+    in.game_flags = game_has_suppressor(bs) ? WGF_SUPP : 0u;
 
     G.fire_edge = 0;
     if (gid == 4) {      /* lanzador antiaéreo: el arma refleja el buscador del propio juego (para háptico y estado visible) */
@@ -953,14 +1086,12 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         G.steady += ((tq > 0 ? 1.0f : 0.0f) - G.steady) * 0.02f;
         sniper_set_steady(st, G.steady);
     }
+    int booting = !G.boot_done;
     def->update(st, &in, (WReloadMode)rmode, &G.br);
     G.boot_done = 1;      /* la primera actualización es la del arranque del arma */
+    if (booting && G.mag_weapon) G.prev_mag_in = st->mag_inserted;   /* el cargador que trae al arrancar no es un gesto de recarga: sin este ajuste el VBlank siguiente veía "cargador insertado" y, con el cargador del juego a medias, lanzaba la maniobra de recarga nada más equipar */
 
     /* publicación de las mallas */
-    VrHandsPose hp;
-    memset(&hp, 0, sizeof hp);
-    hp.valid = 1;
-    memcpy(hp.pos, wp[w].p, sizeof hp.pos); memcpy(hp.rot, wp[w].q, sizeof hp.rot);
     VrHandsFrame vf;
     int nb = vrhands_build(sl->rig, st, &hp, &vf);   /* fuera del cerrojo: el hilo de render no espera a la construcción de las mallas */
     pthread_mutex_lock(&HM);
@@ -992,6 +1123,11 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
             vraa_set_scope(aim, &map, &sight);
             fi.ready = aim;
             fi.raise = 1;
+        } else if (gid == 2 || gid == 7 || gid == 8) {
+            /* Granada: mano cerrada sobre ella = el botón de ataque del juego mantenido (es el «preparar»/sacar el pasador del propio juego); abrirla lanza (fire con la
+             * velocidad de la mano, ver launch_hook) y el juego la crea al soltar el botón. */
+            fi.raise = 1;
+            fi.ready = st->phase == WT_PH_READY;
         }
         special_view(gid, st, def, &W, &in);
     }
@@ -1011,9 +1147,6 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     if (bs->in_control) {
         out = (uint16_t)(out & ~(PAD_SQUARE | PAD_R1));
         if (in.support_held) out = (uint16_t)(out & ~PAD_L1);
-        /* Adhesivo: en el juego el círculo detona las cargas colocadas. En VR solo detona el mando remoto (tapa abierta + botón): el círculo físico
-         * (en el Sense, el gatillo izquierdo) no debe saltarse la tapa de seguridad. */
-        if (gid == 6 && ((const WPlacedState *)st)->n_placed > 0) out = (uint16_t)(out & ~PAD_CIRCLE);   /* sin cargas que el VR conozca (p. ej. tras cambiar de arma) el círculo sigue siendo el del juego */
     }
     if (ro.busy) out = (uint16_t)(out & ~ro.pad_mask);
     out |= ro.pad_force;
@@ -1022,6 +1155,13 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         out |= vrmis_pad(vrcam_pad_origin());
     }   /* guiado: la cruceta del juego (vr_missile.h) */
     if (fo.engaged && fo.square) out |= PAD_SQUARE;
+    publish_hand_pose(hs, gp, right, ge, in.support_held);
+    if (bs->weapon >= 0) {
+        ArmaDiag ad = {eq_slot, eq_slot >= 0 ? atomic_load(&SL[eq_slot].state) : -1, 1, cam, core, gp[w].valid, ro.state, ro.fire_allowed, fo.engaged, (in.game_flags & WGF_SUPP) != 0,
+                       hs[w].trigger, in.trigger[0], gid == 0 ? w_pist_trig_armed(st) : -1, st->chambered, st->mag_inserted, bs->weapon, bs->item, G.ammo_game,
+                       sqrtf((gp[w].p[0] - in.hand[0].p.x) * (gp[w].p[0] - in.hand[0].p.x) + (gp[w].p[1] - in.hand[0].p.y) * (gp[w].p[1] - in.hand[0].p.y) + (gp[w].p[2] - in.hand[0].p.z) * (gp[w].p[2] - in.hand[0].p.z)), gp[o].valid ? wcore_hand_dist(st, &in, 1, WP_SUPPORT) : -1.0f};
+        arma_diag(now, &ad);
+    }
     if (G.det_t > 0) { G.det_t--; if (bs->in_control) out |= PAD_DETONATE; }
     G.ro = ro;
 
@@ -1191,6 +1331,27 @@ void mv_host_hands_done(void) {
     pthread_mutex_unlock(&HM);
 }
 
+/* Marco de la mano tal como la dibuja la escena nativa (a la cadencia del motor): la IK del último apply reproducida con SU agarre, sin el movimiento del mando desde entonces. HM tomado.
+ * Sin IK cae al marco vivo. El arma que dibuja el renderer se pega a esta mano (mismo instante), no al mando de ahora. */
+static GripPose scene_hand_locked(int side, uint64_t now) {
+    if (pub_live_ok[side] && now - pub_live_ns[side] <= GLOVE_MAX_AGE_NS) {
+        VrBodyArmLive a = pub_live[side];
+        VrBodyArmPose ap;
+        if (vrbody_arm_resolve(&a, a.grip_p, a.grip_q, &ap) == 0) { GripPose g = hand_from_arm(ap.R_hand, ap.wrist); if (g.valid) return g; }
+    }
+    return hand_frame_locked(side, now, NULL);
+}
+/* [agarre] (1 Hz): desvío (mm) entre la muñeca viva (IK con el agarre del mando de ahora, mv_vrgame_forearm_live) y la mano a la que va pegada el arma dibujada (la de la escena), y cuánto movió
+ * la compensación respecto a la mano con la que se simuló (sim -> escena). Con ambas manos del mismo instante el desvío sería 0: lo que se ve es la latencia de la escena nativa. */
+static void agarre_diag(uint64_t now, int side, const GripPose *live, const GripPose *scene, const GripPose *sim) {
+    static uint64_t next_ns;
+    if (now < next_ns) return;
+    next_ns = now + 1000000000ull;
+    float dl = 0, ds = 0;
+    for (int i = 0; i < 3; i++) { dl += (live->p[i] - scene->p[i]) * (live->p[i] - scene->p[i]); ds += (sim->p[i] - scene->p[i]) * (sim->p[i] - scene->p[i]); }
+    fprintf(stderr, "[agarre] lado=%d delta_mm=%.1f (muneca viva - mano del arma dibujada) comp_sim_escena_mm=%.1f\n", side, 1000.0f * sqrtf(dl), 1000.0f * sqrtf(ds));
+}
+
 int mv_host_hands(VrHandsFrame *out) {
     static VrHandsMesh buf[VRH_MAX_MESHES];
     static VrHandsTex tbuf[VRH_MAX_BOUND + 1];
@@ -1201,8 +1362,10 @@ int mv_host_hands(VrHandsFrame *out) {
     rc = vrhands_fetch(out);
     if (rc && pub_sim_valid && out->meshes && out->nmeshes > 0 && out->nmeshes <= VRH_MAX_MESHES) {
         int w = opt_right ? 1 : 0;
-        GripPose hn = weapon_locked(&hand_in[w], now), hs = pub_sim_hand;
+        GripPose hn = scene_hand_locked(w, now), hs = pub_sim_hand;
         if (hn.valid && hs.valid) {
+            GripPose lv = hand_frame_locked(w, now, NULL);
+            if (lv.valid) agarre_diag(now, w, &lv, &hn, &hs);
             float qc[4], qd[4], pd[3], rp[3];
             q_conj(hs.q, qc);
             q_mul(hn.q, qc, qd);            /* Rd = Rn * Rs^-1 */

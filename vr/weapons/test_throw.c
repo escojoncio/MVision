@@ -1,5 +1,6 @@
 /* Pruebas de arrojadizas y colocables (headless): estimación de velocidad de lanzamiento con trayectoria
- * sintética, temporizador/cocinado, anilla, modos de ayuda, colocación, detonador y sanidad de mallas.
+ * sintética, lanzamiento por gesto (cerrar la mano = listo, abrirla = lanzar con la velocidad de la mano; sin anilla ni pasador sueltos), soltar suave,
+ * colocación al soltar el gatillo (sin tapa ni botón virtuales) y sanidad de mallas.
  * Compilar: gcc -std=gnu11 -I. test_throw.c w_throw.c w_placed.c wcore.c -lm */
 #include "w_throw.h"
 #include "wcore.h"
@@ -12,7 +13,7 @@ static int fails = 0, checks = 0;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("FALLO %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
 /* ---------------- puente simulado ---------------- */
-typedef struct { int ammo; int taken, fires, sounds_dry, sounds_empty, sounds_pin, sounds_lever; WLaunch ev[16]; int nev; int accept; } Mock;
+typedef struct { int ammo; int taken, fires, sounds_dry, sounds_empty, sounds_pin, sounds_lever, sounds_throw; WLaunch ev[16]; int nev; int accept; } Mock;
 static Mock M;
 static int b_reserve(int id) { (void)id; return M.ammo; }
 static void b_take(int id, int n) { (void)id; M.taken += n; M.ammo -= n; }
@@ -24,6 +25,7 @@ static void b_sound(int id, int e) {
     if (e == W5_S_EMPTY) M.sounds_empty++;
     if (e == W5_S_PIN) M.sounds_pin++;
     if (e == W5_S_LEVER) M.sounds_lever++;
+    if (e == W5_S_THROW) M.sounds_throw++;
 }
 static int hook(void *u, const WLaunch *e) { (void)u; if (M.nev < 16) M.ev[M.nev++] = *e; return M.accept; }
 static WGameBridge G = { b_reserve, b_take, b_fire, b_haptic, b_sound, NULL, NULL, NULL, NULL };
@@ -41,8 +43,8 @@ static Rig rig_new(const WeaponDef *d, WReloadMode rm) {
     return r;
 }
 static void step(Rig *r, int n) { for (int i = 0; i < n; i++) { r->s->def->update(r->s, &r->in, r->rm, &G); r->t += r->in.dt; } }
-static void to_chest(Rig *r, float dist) { WVec3 c; w5_body_frame(&r->in, &c, NULL); r->in.hand[0].p = wv_add(c, wv(dist, 0, 0)); }
-static void draw(Rig *r) { to_chest(r, 0.05f); r->in.grip[0] = 0; step(r, 2); r->in.grip[0] = 1; step(r, 2); }
+/* El objeto equipado aparece en la mano sin gesto (sin chaleco): basta actualizar con la mano principal cerrada. */
+static void draw(Rig *r) { r->in.grip[0] = 1; step(r, 4); }
 
 /* ---------------- trayectoria sintética de lanzamiento ---------------- */
 static uint32_t rs = 12345;
@@ -100,60 +102,42 @@ static void test_estimator(void) {
 }
 
 /* ---------------- interaccion de arrojadiza ---------------- */
-static void pull_ring(Rig *r) {
-    WPose rp = wcore_point_world(r->s, &r->in, WP_CHARGE);
-    r->in.hand[1].p = rp.p; r->in.grip[1] = 0; step(r, 1);
-    r->in.grip[1] = 1; step(r, 2);
-    for (int i = 0; i < 40 && r->s->phase != WT_PH_ARMED; i++) { r->in.hand[1].p.z += 0.003f; step(r, 1); }
+static int any_held(const Rig *r) { for (int i = 0; i < W_MAX_HELD; i++) if (r->s->held[i].active) return 1; return 0; }
+/* abrir la mano con el objeto y cerrarla: lo deja listo */
+static void ready_it(Rig *r) {
+    r->in.grip[0] = 0; step(r, 2);
+    r->in.grip[0] = 1; step(r, 2);
 }
 
+/* la mano sigue la trayectoria con el puño cerrado y se abre al final (la suelta se detecta 2 fotogramas después) */
 static void do_throw(Rig *r, float t_det, WVec3 *tv, WVec3 *tw) {
     float dt = r->in.dt; int n = (int)(t_det / dt);
+    r->in.grip[0] = 1;
     for (int i = 0; i <= n; i++) { r->in.hand[0] = traj(i * dt); step(r, 1); }
-    *tv = traj_v((n + 2) * dt - 0.025f); *tw = traj_w((n + 2) * dt - 0.025f);   // la suelta se detecta 2 frames despues
+    *tv = traj_v((n + 2) * dt - 0.025f); *tw = traj_w((n + 2) * dt - 0.025f);
     r->in.grip[0] = 0.6f; r->in.hand[0] = traj((n + 1) * dt); step(r, 1);   /* los dedos se abren */
     r->in.grip[0] = 0.1f; r->in.hand[0] = traj((n + 2) * dt); step(r, 1);
 }
 
 static void test_throw_flow(void) {
-    printf("-- arrojadiza: flujo completo (manual) --\n");
+    printf("-- arrojadiza: flujo por gesto --\n");
     mock_reset(3);
     Rig r = rig_new(&w_throw_frag, WR_MANUAL);
-    WThrowState *t = (WThrowState *)r.s;
-    CHECK(r.s->phase == WT_PH_VEST, "empieza en el chaleco");
-    to_chest(&r, 0.30f); r.in.grip[0] = 0; step(&r, 2); r.in.grip[0] = 1; step(&r, 2);
-    CHECK(r.s->phase == WT_PH_VEST, "agarre lejos del pecho (30 cm) no saca en manual");
-    r.in.grip[0] = 0; step(&r, 2);
+    CHECK(r.s->phase == WT_PH_VEST, "empieza sin objeto");
     draw(&r);
-    CHECK(r.s->phase == WT_PH_HELD, "sacada del chaleco");
-    r.in.hand[0].p = wv(0.25f, 1.1f, -0.35f); step(&r, 1);
-    /* soltar con pasador puesto: vuelve al chaleco sin consumir */
-    r.in.grip[0] = 0.0f; step(&r, 1);
-    CHECK(r.s->phase == WT_PH_VEST && M.taken == 0 && M.nev == 0, "soltar con pasador: vuelve sin gastar");
-    r.in.grip[0] = 0; step(&r, 2); draw(&r);
-    r.in.hand[0].p = wv(0.25f, 1.1f, -0.35f); step(&r, 1);
-    /* tirar de la anilla */
-    WPose rp = wcore_point_world(r.s, &r.in, WP_CHARGE);
-    r.in.hand[1].p = wv_add(rp.p, wv(0, 0, 0.0f)); r.in.grip[1] = 1; step(&r, 1);
-    CHECK(t->ring_grabbed, "anilla agarrada");
-    for (int i = 0; i < 6; i++) { r.in.hand[1].p.z += 0.004f; step(&r, 1); }
-    CHECK(r.s->phase == WT_PH_PULL && t->ring_pull > 0.3f && t->ring_pull < 1.0f, "tiron parcial: %.2f", t->ring_pull);
-    CHECK(r.s->channel[WCH_CUSTOM0] > 0.3f, "canal de anilla sigue el tiron");
-    r.in.grip[1] = 0; step(&r, 10);
-    CHECK(t->ring_pull < 0.05f && r.s->phase == WT_PH_HELD, "soltar la anilla antes de tiempo: el pasador vuelve");
-    pull_ring(&r);
-    CHECK(r.s->phase == WT_PH_ARMED, "pasador fuera");
-    CHECK(r.s->held[0].active, "anilla visible en la mano 1");
-    float d = wv_len(wv_sub(r.s->held[0].world.p, r.in.hand[1].p));
-    CHECK(d < 0.08f, "anilla pegada a la mano 1 (%.3f)", d);
-    CHECK(M.sounds_pin == 1, "sonido de pasador");
-    CHECK(r.s->channel[WCH_CUSTOM1] < 0.01f, "palanca aun cerrada");
-    r.in.hand[1].p.x -= 0.3f; step(&r, 3);
-    float d2 = wv_len(wv_sub(r.s->held[0].world.p, r.in.hand[1].p));
-    CHECK(fabsf(d2 - d) < 1e-3f, "la anilla acompana a la mano 1");
-    r.in.grip[1] = 0; step(&r, 2);
-    CHECK(!r.s->held[0].active, "anilla soltada desaparece");
-    /* lanzamiento */
+    CHECK(r.s->phase == WT_PH_HELD, "aparece en la mano al equiparla, sin gesto del chaleco");
+    CHECK(r.s->phase != WT_PH_READY && !any_held(&r), "con el puño cerrado al sacarla no queda lista; sin piezas sueltas");
+    r.in.hand[0].p = wv(0.25f, 1.1f, -0.35f); step(&r, 3);
+    r.in.grip[0] = 0.0f; step(&r, 3);
+    CHECK(r.s->phase == WT_PH_HELD && M.nev == 0 && M.taken == 0, "soltar sin haberla preparado: sigue en la mano, sin gastar");
+    r.in.grip[0] = 0.5f; step(&r, 2);
+    CHECK(r.s->phase == WT_PH_HELD, "grip intermedio (histeresis): no se prepara");
+    r.in.grip[0] = 1.0f; step(&r, 2);
+    CHECK(r.s->phase == WT_PH_READY, "mano cerrada tras haberla abierto: lista (el anfitrion pulsa el boton del juego)");
+    CHECK(M.sounds_pin == 1 && !any_held(&r), "sonido de pasador y ninguna pieza suelta flotando");
+    r.in.grip[0] = 0.5f; step(&r, 5);
+    CHECK(r.s->phase == WT_PH_READY && M.nev == 0, "grip intermedio: no lanza");
+    /* lanzamiento por velocidad */
     WVec3 tv, tw;
     do_throw(&r, 0.16f, &tv, &tw);
     CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW, "evento de lanzamiento (%d)", M.nev);
@@ -166,177 +150,49 @@ static void test_throw_flow(void) {
         CHECK(fabsf(e->fuse_left - 3.0f) < 0.01f, "espoleta %.2f", e->fuse_left);
         CHECK(e->cooked == 0, "sin cocinar");
         CHECK(wv_len(e->lin_vel) <= 22.01f, "tope de velocidad");
+        CHECK(wv_len(e->lin_vel) > 1.0f, "lanzamiento rapido (%.2f m/s)", wv_len(e->lin_vel));
     }
     CHECK(M.taken == 1 && M.ammo == 2, "municion descontada una vez");
-    CHECK(M.sounds_lever == 1, "sonido de palanca");
-    step(&r, 10); CHECK(r.s->channel[WCH_CUSTOM1] > 0.8f, "la palanca salto (%.2f)", r.s->channel[WCH_CUSTOM1]);
+    CHECK(M.sounds_throw == 1, "sonido de lanzamiento");
+    CHECK(r.s->phase == WT_PH_GONE && r.s->recoil_offset.p.y < -50.0f && !any_held(&r), "la malla VR se oculta al lanzar (se ve la granada del juego)");
     step(&r, 60);
-    CHECK(r.s->phase == WT_PH_VEST, "listo para sacar otra");
+    CHECK(r.s->phase == WT_PH_HELD, "la siguiente aparece en la mano");
     free(r.s);
 }
 
-static void test_cook(void) {
-    printf("-- cocinado y espoleta --\n");
+static void test_gentle(void) {
+    printf("-- soltar suave y rechazos --\n");
     mock_reset(3);
-    Rig r = rig_new(&w_throw_b, WR_MANUAL);
-    draw(&r); r.in.hand[0].p = wv(0.25f, 1.1f, -0.35f); step(&r, 1); pull_ring(&r);
-    r.in.grip[1] = 0; step(&r, 1);
-    CHECK(r.s->phase == WT_PH_ARMED, "armada");
-    r.in.trigger[0] = 0; step(&r, 3); r.in.trigger[0] = 1.0f; step(&r, 1);
-    CHECK(r.s->phase == WT_PH_COOK, "cocinando");
-    step(&r, (int)(1.2f * 90));
-    WVec3 tv, tw; r.in.trigger[0] = 0;
-    do_throw(&r, 0.16f, &tv, &tw);
-    CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW, "lanzamiento tras cocinar");
-    if (M.nev) {
-        printf("  cocinada %.2f s, espoleta restante %.2f s (total 2.50)\n", M.ev[0].cooked, M.ev[0].fuse_left);
-        CHECK(fabsf(M.ev[0].fuse_left + M.ev[0].cooked - 2.5f) < 0.2f, "fuse+cooked = total");
-        CHECK(M.ev[0].cooked > 1.2f && M.ev[0].fuse_left < 1.3f, "tiempos de cocinado");
-    }
-    free(r.s);
-    /* explota en la mano */
-    mock_reset(2);
-    r = rig_new(&w_throw_c, WR_MANUAL);
-    draw(&r); r.in.hand[0].p = wv(0.25f, 1.1f, -0.35f); step(&r, 1); pull_ring(&r);
-    r.in.grip[1] = 0; step(&r, 1);
-    r.in.trigger[0] = 0; step(&r, 2); r.in.trigger[0] = 1; step(&r, 1);
-    step(&r, (int)(2.0f * 90));
-    CHECK(M.nev == 1 && M.ev[0].kind == WL_INHAND, "explota en la mano (%d eventos)", M.nev);
-    CHECK(M.taken == 1, "municion gastada al explotar");
-    free(r.s);
-}
-
-static void test_assist_modes(void) {
-    printf("-- modos simplificado / automatico --\n");
-    mock_reset(3);
-    Rig r = rig_new(&w_throw_frag, WR_SIMPLIFIED);
-    to_chest(&r, 0.30f); r.in.grip[0] = 0; step(&r, 2); r.in.grip[0] = 1; step(&r, 2);
-    CHECK(r.s->phase == WT_PH_HELD, "simplificado: radio de pecho ampliado");
-    r.in.hand[0].p = wv(0.25f, 1.1f, -0.35f); step(&r, 1);
-    WPose rp = wcore_point_world(r.s, &r.in, WP_CHARGE);
-    r.in.hand[1].p = wv_add(rp.p, wv(0.09f, 0, 0)); r.in.grip[1] = 1; step(&r, 1);
-    for (int i = 0; i < 10 && r.s->phase != WT_PH_ARMED; i++) { r.in.hand[1].p.z += 0.004f; step(&r, 1); }
-    CHECK(r.s->phase == WT_PH_ARMED, "simplificado: agarre de anilla a 9 cm y tiron corto");
+    Rig r = rig_new(&w_throw_frag, WR_MANUAL);
+    draw(&r); ready_it(&r);
+    CHECK(r.s->phase == WT_PH_READY, "lista");
+    r.in.hand[0].p = wv(0.25f, 1.1f, -0.35f); step(&r, 10);
+    r.in.grip[0] = 0.0f; step(&r, 1);
+    CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW && wv_len(M.ev[0].lin_vel) < 1.0f, "mano quieta: soltar suave (v=%.3f)", M.nev ? wv_len(M.ev[0].lin_vel) : -1.0f);
+    CHECK(M.sounds_throw == 0 && M.taken == 1 && r.s->phase == WT_PH_GONE, "sin sonido de lanzamiento, gasta una y desaparece de la mano");
     free(r.s);
 
-    mock_reset(3);
-    r = rig_new(&w_throw_frag, WR_AUTOMATIC);
-    r.in.hand[0].p = wv(0.5f, 0.2f, 0.3f); r.in.grip[0] = 0; step(&r, 2); r.in.grip[0] = 1; step(&r, 2);
-    CHECK(r.s->phase == WT_PH_HELD, "automatico: se saca en cualquier sitio");
-    r.in.trigger[0] = 1; step(&r, 30);
-    CHECK(r.s->phase == WT_PH_ARMED && M.sounds_pin == 1, "automatico: la anilla se tira sola");
-    CHECK(!r.s->held[0].active, "automatico: sin anilla en mano");
-    free(r.s);
-
+    /* sin reserva no aparece; con la reserva gastada fuera al lanzar no se descuenta de mas */
     mock_reset(0);
     r = rig_new(&w_throw_frag, WR_MANUAL);
     draw(&r);
-    CHECK(r.s->phase == WT_PH_VEST && M.sounds_empty == 1, "sin granadas: no se saca");
+    CHECK(r.s->phase == WT_PH_VEST, "sin granadas: no aparece");
     free(r.s);
-}
-
-/* ---------------- colocables ---------------- */
-static void test_carga(void) {
-    printf("-- carga adhesiva y detonador --\n");
-    mock_reset(4);
-    Rig r = rig_new(&w_placed_a, WR_MANUAL);
-    WPlacedState *p = (WPlacedState *)r.s;
-    CHECK(!r.s->held[0].active, "sin cargas: sin detonador");
-    draw(&r);
-    CHECK(r.s->phase == WPL_PH_HELD, "carga en mano");
-    r.in.hand[0].p = wv(0.1f, 1.2f, -0.5f); r.in.hand[0].q = wquat_axis_angle(wv(0, 1, 0), 0.7f);
-    r.in.trigger[0] = 1.0f; M.accept = 0; step(&r, 2);
-    CHECK(M.taken == 0 && r.s->phase == WPL_PH_HELD && p->n_placed == 0, "juego rechaza (sin superficie): no se gasta");
-    M.accept = 1; step(&r, 1);
-    CHECK(M.nev >= 1 && M.ev[M.nev - 1].kind == WL_PLACE_C, "colocada");
-    WLaunch e = M.ev[M.nev - 1];
-    WVec3 want = wpose_apply(r.in.hand[0], wv(0, 0, -0.0225f));
-    CHECK(wv_len(wv_sub(e.pose.p, want)) < 1e-4f, "pose de la cara adhesiva");
-    CHECK(M.taken == 1 && p->n_placed == 1, "municion y contador");
-    CHECK(r.s->held[0].active && wv_len(wv_sub(r.s->held[0].world.p, r.in.hand[1].p)) < 1e-4f, "detonador en mano 1");
-    r.in.trigger[0] = 0; step(&r, 60);
-    CHECK(r.s->phase == WPL_PH_VEST, "listo para otra");
-    draw(&r); r.in.trigger[0] = 1; step(&r, 2);
-    CHECK(p->n_placed == 2, "segunda carga");
-    r.in.trigger[0] = 0; step(&r, 40);
-    int nev0 = M.nev;
-    r.in.trigger[1] = 1; step(&r, 10);
-    CHECK(M.nev == nev0 && p->n_placed == 2, "tapa cerrada: el boton no detona");
-    r.in.trigger[1] = 0; step(&r, 10);
-    r.in.buttons[1] = WB_A; step(&r, 1); r.in.buttons[1] = 0; step(&r, 30);
-    CHECK(r.s->channel[WCH_LID] > 0.95f, "tapa levantada (%.2f)", r.s->channel[WCH_LID]);
-    r.in.trigger[1] = 1; step(&r, 10);
-    int det = 0; for (int i = 0; i < M.nev; i++) det += M.ev[i].kind == WL_DETONATE;
-    CHECK(det == 2 && p->n_placed == 0, "detonan las dos cargas (%d)", det);
-    CHECK(!r.s->held[0].active, "sin cargas: detonador desaparece");
-    free(r.s);
-}
-
-static void test_mina(void) {
-    printf("-- mina direccional --\n");
-    mock_reset(2);
-    Rig r = rig_new(&w_placed_b, WR_MANUAL);
-    draw(&r);
-    CHECK(r.s->channel[WCH_CUSTOM0] < 0.5f, "patas plegadas al sacarla");
-    r.in.hand[0].q = wquat_axis_angle(wv(0, 1, 0), -1.1f); r.in.trigger[0] = 1; step(&r, 3);
-    CHECK(M.nev == 0, "no se coloca con las patas a medio desplegar");
-    step(&r, 40);
-    CHECK(r.s->channel[WCH_CUSTOM0] > 0.95f, "patas desplegadas");
-    CHECK(M.nev == 1 && M.ev[0].kind == WL_PLACE_MINE, "colocada");
-    if (M.nev) {
-        WQuat a = M.ev[0].pose.q, b = r.in.hand[0].q;
-        float dot = fabsf(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
-        CHECK(dot > 0.9999f, "orientacion igual a la de la mano");
-        WVec3 f = wquat_rotate(a, wv(0, 0, -1));
-        CHECK(fabsf(f.x - (-sinf(-1.1f))) < 1e-3f, "frente de la mina = -Z local girado");
-    }
-    CHECK(M.taken == 1, "municion");
-    free(r.s);
-}
-
-/* ---------------- robustez: dt, rechazos del juego, reservas ---------------- */
-static void arm_it(Rig *r) {      /* saca, tira de la anilla y deja la arrojadiza armada con la mano 1 libre */
-    draw(r); r->in.hand[0].p = wv(0.25f, 1.1f, -0.35f); step(r, 1); pull_ring(r);
-    r->in.grip[1] = 0; step(r, 1);
-}
-
-static void test_robust(void) {
-    printf("-- robustez --\n");
-    /* palanca con dt grande: el resorte no diverge y el canal queda acotado */
-    mock_reset(3);
-    Rig r = rig_new(&w_throw_frag, WR_MANUAL);
-    arm_it(&r);
-    CHECK(r.s->phase == WT_PH_ARMED, "armada");
-    r.in.trigger[0] = 0; step(&r, 3); r.in.trigger[0] = 1; step(&r, 1);
-    CHECK(r.s->phase == WT_PH_COOK, "cocinando");
-    r.in.dt = 0.2f;
-    for (int i = 0; i < 8; i++) {
-        step(&r, 1);
-        float c = r.s->channel[WCH_CUSTOM1];
-        CHECK(isfinite(c) && c >= 0 && c <= 1.5f, "canal de palanca fuera de rango con dt=0,2: %f", c);
-    }
-    free(r.s);
-    /* dt inválido: no avanza nada y no rompe */
-    mock_reset(3);
+    mock_reset(1);
     r = rig_new(&w_throw_frag, WR_MANUAL);
-    const float dts[] = {0.0f, -1.0f, NAN, INFINITY, 9.0f};
-    for (unsigned k = 0; k < sizeof dts / sizeof *dts; k++) { r.in.dt = dts[k]; step(&r, 5); }
-    CHECK(isfinite(r.s->channel[WCH_CUSTOM1]) && isfinite(r.s->recoil_offset.p.y), "estado finito");
-    free(r.s);
-    mock_reset(3);
-    Rig rp = rig_new(&w_placed_a, WR_MANUAL);
-    rp.in.dt = 0.2f; draw(&rp); rp.in.hand[0].p = wv(0.1f, 1.2f, -0.5f); rp.in.trigger[0] = 0; step(&rp, 5);
-    rp.in.dt = NAN; step(&rp, 3); rp.in.dt = 0; step(&rp, 3);
-    CHECK(isfinite(rp.s->channel[WCH_CUSTOM1]) && isfinite(rp.s->channel[WCH_LID]), "placed: estado finito");
-    free(rp.s);
-
-    /* el juego rechaza el lanzamiento: no se gasta munición ni pasa a GONE; luego sí acepta */
-    mock_reset(3); M.accept = 0;
-    r = rig_new(&w_throw_frag, WR_MANUAL);
-    arm_it(&r);
+    draw(&r); ready_it(&r);
+    M.ammo = 0;
     WVec3 tv, tw;
     do_throw(&r, 0.16f, &tv, &tw);
-    CHECK(M.nev >= 1 && M.taken == 0 && r.s->phase == WT_PH_COOK, "rechazo: munición %d fase %d", M.taken, r.s->phase);
+    CHECK(M.nev == 1 && M.taken == 0 && M.ammo == 0, "no descuenta con reserva 0 (%d)", M.taken);
+    free(r.s);
+
+    /* el juego rechaza el lanzamiento: no se gasta municion ni pasa a GONE; sigue lista, reintenta con espera y luego sale */
+    mock_reset(3); M.accept = 0;
+    r = rig_new(&w_throw_frag, WR_MANUAL);
+    draw(&r); ready_it(&r);
+    do_throw(&r, 0.16f, &tv, &tw);
+    CHECK(M.nev >= 1 && M.taken == 0 && r.s->phase == WT_PH_READY, "rechazo: municion %d fase %d", M.taken, r.s->phase);
     int n_rej = M.nev;
     step(&r, 90);
     CHECK(M.nev > n_rej && M.nev < n_rej + 12 && M.taken == 0, "reintenta con espera, sin saturar (%d eventos)", M.nev - n_rej);
@@ -348,14 +204,14 @@ static void test_robust(void) {
     /* velocidad angular y lineal acotadas aunque la mano gire como loca */
     mock_reset(3);
     r = rig_new(&w_throw_frag, WR_MANUAL);
-    arm_it(&r);
+    draw(&r); ready_it(&r);
     for (int i = 0; i < 12; i++) {
         r.in.hand[0].p = wv(0.25f + 0.3f * i, 1.2f, -0.35f);
         r.in.hand[0].q = wquat_axis_angle(wv(1, 0.3f, 0), 1.2f * i);       /* >100 rad/s */
         step(&r, 1);
     }
     r.in.grip[0] = 0.0f; step(&r, 1);
-    CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW, "lanzó");
+    CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW, "lanzo");
     if (M.nev) {
         CHECK(wv_len(M.ev[0].ang_vel) <= 45.01f, "ang_vel acotada: %f", wv_len(M.ev[0].ang_vel));
         CHECK(wv_len(M.ev[0].lin_vel) <= 22.01f, "lin_vel acotada: %f", wv_len(M.ev[0].lin_vel));
@@ -363,40 +219,107 @@ static void test_robust(void) {
     }
     free(r.s);
 
-    /* reserva nunca negativa: el puente devuelve -5 y no se descuenta de más */
+    /* variantes: la espoleta de cada una sale en el evento */
+    const WeaponDef *vs[3] = { &w_throw_frag, &w_throw_b, &w_throw_c };
+    const float fz[3] = { 3.0f, 2.5f, 1.8f };
+    for (int k = 0; k < 3; k++) {
+        mock_reset(2);
+        r = rig_new(vs[k], WR_MANUAL);
+        draw(&r); ready_it(&r); step(&r, 3); r.in.grip[0] = 0; step(&r, 1);
+        CHECK(M.nev == 1 && fabsf(M.ev[0].fuse_left - fz[k]) < 0.01f && M.ev[0].weapon_id == vs[k]->game_weapon_id, "variante %d: espoleta y id", k);
+        free(r.s);
+    }
+}
+
+/* ---------------- colocables ---------------- */
+static void test_carga(void) {
+    printf("-- carga adhesiva: se coloca al soltar el gatillo --\n");
+    mock_reset(4);
+    Rig r = rig_new(&w_placed_a, WR_MANUAL);
+    CHECK(!any_held(&r), "sin piezas sueltas");
+    draw(&r);
+    CHECK(r.s->phase == WPL_PH_HELD, "carga en mano");
+    r.in.hand[0].p = wv(0.1f, 1.2f, -0.5f); r.in.hand[0].q = wquat_axis_angle(wv(0, 1, 0), 0.7f);
+    r.in.trigger[0] = 1.0f; step(&r, 5);
+    CHECK(M.nev == 0 && !any_held(&r), "apretar el gatillo no coloca (se coloca al soltarlo)");
+    r.in.trigger[0] = 0; M.accept = 0; step(&r, 2);
+    CHECK(M.nev == 1 && M.taken == 0 && r.s->phase == WPL_PH_HELD, "juego rechaza (sin superficie al alcance): no se gasta y sigue en la mano");
+    r.in.trigger[0] = 0; step(&r, 3);
+    CHECK(M.nev == 1, "sin nuevo gatillo no reintenta");
+    M.accept = 1; r.in.trigger[0] = 1; step(&r, 3); r.in.trigger[0] = 0; step(&r, 2);
+    CHECK(M.nev == 2 && M.ev[1].kind == WL_PLACE_C, "colocada al soltar");
+    WLaunch e = M.ev[1];
+    WVec3 want = wpose_apply(r.in.hand[0], wv(0, 0, -0.0225f));
+    CHECK(wv_len(wv_sub(e.pose.p, want)) < 1e-4f, "pose de la cara adhesiva");
+    CHECK(M.taken == 1 && r.s->phase == WPL_PH_PLACED_OUT && !any_held(&r), "municion; sin mando remoto en la otra mano");
+    step(&r, 60);
+    CHECK(r.s->phase == WPL_PH_HELD, "la siguiente aparece en la mano");
+    /* la otra mano: tapa/boton virtuales ya no existen; nada detona ni emite */
+    int nev0 = M.nev;
+    r.in.buttons[1] = WB_A; r.in.trigger[1] = 1; step(&r, 20); r.in.buttons[1] = 0; r.in.trigger[1] = 0; step(&r, 20);
+    int det = 0; for (int i = 0; i < M.nev; i++) det += M.ev[i].kind == WL_DETONATE;
+    CHECK(M.nev == nev0 && det == 0 && !any_held(&r), "A/B/gatillo de la otra mano no hacen nada (el detonador es el boton del juego)");
+    free(r.s);
+
+    /* sacar con el gatillo apretado no prepara */
+    mock_reset(4);
+    r = rig_new(&w_placed_a, WR_MANUAL);
+    r.in.trigger[0] = 1; draw(&r); step(&r, 5);
+    r.in.trigger[0] = 0; step(&r, 3);
+    CHECK(M.nev == 0, "gatillo apretado al sacar: al soltar no coloca");
+    r.in.trigger[0] = 1; step(&r, 3); r.in.trigger[0] = 0; step(&r, 3);
+    CHECK(M.nev == 1 && M.taken == 1, "tras pasar por reposo si coloca");
+    free(r.s);
+}
+
+static void test_mina(void) {
+    printf("-- mina direccional --\n");
+    mock_reset(2);
+    Rig r = rig_new(&w_placed_b, WR_MANUAL);
+    draw(&r);
+    CHECK(r.s->channel[WCH_CUSTOM0] < 0.5f, "patas plegadas al sacarla");
+    r.in.hand[0].q = wquat_axis_angle(wv(0, 1, 0), -1.1f); r.in.trigger[0] = 1; step(&r, 3);
+    r.in.trigger[0] = 0; step(&r, 1);
+    CHECK(M.nev == 0, "no se prepara con las patas a medio desplegar");
+    step(&r, 40);
+    CHECK(r.s->channel[WCH_CUSTOM0] > 0.95f, "patas desplegadas");
+    r.in.trigger[0] = 1; step(&r, 3);
+    CHECK(M.nev == 0, "apretar no coloca");
+    r.in.trigger[0] = 0; step(&r, 2);
+    CHECK(M.nev == 1 && M.ev[0].kind == WL_PLACE_MINE, "colocada al soltar");
+    if (M.nev) {
+        WQuat a = M.ev[0].pose.q, b = r.in.hand[0].q;
+        float dot = fabsf(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
+        CHECK(dot > 0.9999f, "orientacion igual a la de la mano");
+        WVec3 f = wquat_rotate(a, wv(0, 0, -1));
+        CHECK(fabsf(f.x - (-sinf(-1.1f))) < 1e-3f, "frente de la mina = -Z local girado");
+    }
+    CHECK(M.taken == 1 && !any_held(&r), "municion");
+    free(r.s);
+}
+
+/* ---------------- robustez: dt ---------------- */
+static void test_robust(void) {
+    printf("-- robustez --\n");
+    /* dt invalido: no avanza nada y no rompe */
+    mock_reset(3);
+    Rig r = rig_new(&w_throw_frag, WR_MANUAL);
+    const float dts[] = {0.0f, -1.0f, NAN, INFINITY, 9.0f};
+    for (unsigned k = 0; k < sizeof dts / sizeof *dts; k++) { r.in.dt = dts[k]; step(&r, 5); }
+    CHECK(isfinite(r.s->channel[WCH_CUSTOM1]) && isfinite(r.s->recoil_offset.p.y), "estado finito");
+    free(r.s);
+    mock_reset(3);
+    Rig rp = rig_new(&w_placed_a, WR_MANUAL);
+    rp.in.dt = 0.2f; draw(&rp); rp.in.hand[0].p = wv(0.1f, 1.2f, -0.5f); rp.in.trigger[0] = 0; step(&rp, 5);
+    rp.in.dt = NAN; step(&rp, 3); rp.in.dt = 0; step(&rp, 3);
+    CHECK(isfinite(rp.s->channel[WCH_CUSTOM1]) && isfinite(rp.s->recoil_offset.p.y), "placed: estado finito");
+    free(rp.s);
+    /* reserva nunca negativa: el puente devuelve -5 */
     mock_reset(-5);
     r = rig_new(&w_throw_frag, WR_MANUAL);
     draw(&r);
     CHECK(r.s->phase == WT_PH_VEST && r.s->mag_rounds == 0 && M.taken == 0, "reserva negativa tratada como 0");
     free(r.s);
-    /* se gasta la reserva fuera con la granada armada: al lanzar no se descuenta (no baja de 0) */
-    mock_reset(1);
-    r = rig_new(&w_throw_frag, WR_MANUAL);
-    arm_it(&r);
-    M.ammo = 0;
-    do_throw(&r, 0.16f, &tv, &tw);
-    CHECK(M.taken == 0 && M.ammo == 0, "no descuenta con reserva 0 (%d)", M.taken);
-    free(r.s);
-
-    /* carga adhesiva: sacar con el gatillo apretado no coloca; el rechazo del juego conserva las cargas */
-    mock_reset(4);
-    Rig rc = rig_new(&w_placed_a, WR_MANUAL);
-    WPlacedState *p = (WPlacedState *)rc.s;
-    rc.in.trigger[0] = 1; draw(&rc); step(&rc, 5);
-    CHECK(M.nev == 0 && p->n_placed == 0, "gatillo apretado al sacar no coloca");
-    rc.in.trigger[0] = 0; step(&rc, 3); rc.in.trigger[0] = 1; step(&rc, 3);
-    CHECK(p->n_placed == 1, "tras soltar el gatillo coloca");
-    rc.in.trigger[0] = 0; step(&rc, 60); draw(&rc); rc.in.trigger[0] = 0; step(&rc, 3); rc.in.trigger[0] = 1; step(&rc, 3);
-    CHECK(p->n_placed == 2, "segunda carga");
-    rc.in.trigger[0] = 0; step(&rc, 40);
-    rc.in.buttons[1] = WB_A; step(&rc, 1); rc.in.buttons[1] = 0; step(&rc, 30);
-    M.accept = 0; rc.in.trigger[1] = 1; step(&rc, 10);
-    CHECK(p->n_placed == 2, "el juego rechaza la detonación: las cargas se conservan (%d)", p->n_placed);
-    M.accept = 1; rc.in.trigger[1] = 0; step(&rc, 40);
-    rc.in.buttons[1] = WB_A; step(&rc, 1); rc.in.buttons[1] = 0; step(&rc, 30);
-    rc.in.trigger[1] = 1; step(&rc, 10);
-    CHECK(p->n_placed == 0, "al aceptar detonan (%d)", p->n_placed);
-    free(rc.s);
 }
 
 static void test_ids(void) {
@@ -447,8 +370,7 @@ static void test_defs(void) {
 int main(void) {
     test_estimator();
     test_throw_flow();
-    test_cook();
-    test_assist_modes();
+    test_gentle();
     test_carga();
     test_mina();
     test_defs();

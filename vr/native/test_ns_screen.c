@@ -42,12 +42,12 @@ static void test_water(void) {
     NsGpuScreen o; float inv[12];
     int n = ns_screen_build(&fx, TOVR, head_out, 0.016f, NULL, NULL, &o, inv);
     CHECK(n == 0 && o.water_min[3] == 1 && o.water_tint[3] == 0, "fuera: volumen sí, cabeza no, sin barras (n=%d)", n);
-    float col[3] = { 1, 1, 1 }, du, dv, ew_in[3] = { 10, 100, 10 }, ew_out[3] = { 10, 900, 10 };
-    CHECK(ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, o.water_wave, ew_in, &du, &dv, col) == 1, "fragmento en el volumen afectado");
+    CHECK(o.water_wave[0] == 0 && o.water_wave[1] == 0 && o.water_wave[2] == 0, "cabeza fuera: sin onda de pantalla");
+    float col[3] = { 1, 1, 1 }, ew_in[3] = { 10, 100, 10 }, ew_out[3] = { 10, 900, 10 };
+    CHECK(ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, ew_in, col) == 1, "fragmento en el volumen afectado");
     CHECK(near(col[0], 0.5f, 1e-5f) && near(col[1], 0.8f, 1e-5f) && near(col[2], 1.0f, 1e-5f), "tinte %f %f %f", col[0], col[1], col[2]);
-    float amp = 3.0f * ns_screen_cfg_default().wave_gain; CHECK(fabsf(du) <= amp + 1e-4f && dv == 0.0f, "onda acotada y horizontal %f %f", du, dv);
     float c2[3] = { 1, 1, 1 };
-    CHECK(ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, o.water_wave, ew_out, &du, &dv, c2) == 0 && c2[0] == 1 && du == 0 && dv == 0, "fragmento fuera: intacto");
+    CHECK(ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, ew_out, c2) == 0 && c2[0] == 1, "fragmento fuera: intacto");
     /* cabeza dentro: todo teñido, barras presentes */
     n = ns_screen_build(&fx, TOVR, head_in, 0.016f, NULL, NULL, &o, inv);
     CHECK(n == 0 && o.water_tint[3] == 1, "dentro: SIN barras (sin círculo) y bandera de cabeza (n=%d)", n);
@@ -55,28 +55,26 @@ static void test_water(void) {
       n = ns_screen_build(&fx, TOVR, head_in, 0.016f, &cb, NULL, &o, inv);
       CHECK(n == 1 && o.ov[0].kind == NSG_OV_BARS, "barras solo si se piden con bars_gain > 0 (n=%d)", n); }
     float c3[3] = { 1, 1, 1 };
-    CHECK(ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, o.water_wave, ew_out, &du, &dv, c3) == 1 && near(c3[0], 0.5f, 1e-5f), "cabeza dentro tiñe incluso lo de fuera del volumen");
-    /* INVARIANCIA con la cabeza: la onda sólo depende de la posición en el mundo y de la fase */
-    float du2, dv2, c4[3] = { 1, 1, 1 };
+    CHECK(ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, ew_out, c3) == 1 && near(c3[0], 0.5f, 1e-5f), "cabeza dentro tiñe incluso lo de fuera del volumen");
+    /* onda de pantalla: solo con la cabeza dentro; amplitud = filas * ganancia, frecuencia en rad por fila del motor (periodo 16 pasos de 1 fila), fase del contador */
+    ns_screen_build(&fx, TOVR, head_in, 0.016f, NULL, NULL, &o, inv);
+    CHECK(near(o.water_wave[0], 3.0f * ns_screen_cfg_default().wave_gain, 1e-5f) && near(o.water_wave[1], 6.2831853f / (16.0f * ns_screen_cfg_default().wave_space), 1e-6f), "onda: amplitud y frecuencia %f %f", o.water_wave[0], o.water_wave[1]);
+    float ph1 = o.water_wave[2];
+    float d1 = ns_screen_wave_dx(o.water_wave, 7.0f, NS_WAVE_REF_W);
+    CHECK(fabsf(d1) <= o.water_wave[0] + 1e-4f, "onda acotada por la amplitud %f", d1);
+    /* INVARIANCIA con la cabeza: la onda es de pantalla, no depende de dónde esté la cabeza dentro del agua */
     float head_in2[3]; float in2[3] = { 300, 100, -200 }; ns_screen_xform34(TOVR, in2, head_in2);
     ns_screen_build(&fx, TOVR, head_in2, 0.016f, NULL, NULL, &o, inv);
-    ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, o.water_wave, ew_in, &du2, &dv2, c4);
-    float c5[3] = { 1, 1, 1 }, du1, dv1;
-    ns_screen_build(&fx, TOVR, head_in, 0.016f, NULL, NULL, &o, inv);
-    ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, o.water_wave, ew_in, &du1, &dv1, c5);
-    CHECK(du1 == du2 && dv1 == dv2, "la onda del mundo no depende de dónde esté la cabeza");
+    CHECK(ns_screen_wave_dx(o.water_wave, 7.0f, NS_WAVE_REF_W) == d1, "la onda de pantalla no depende de dónde esté la cabeza");
     /* la fase mueve la onda */
     fx.water_phase = 9;
     ns_screen_build(&fx, TOVR, head_in, 0.016f, NULL, NULL, &o, inv);
-    float c6[3] = { 1, 1, 1 }, du3, dv3;
-    ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, o.water_wave, ew_in, &du3, &dv3, c6);
-    CHECK(du3 != du1, "la fase cambia la onda");
+    float d3 = ns_screen_wave_dx(o.water_wave, 7.0f, NS_WAVE_REF_W);
+    CHECK(o.water_wave[2] != ph1 && d3 != d1, "la fase cambia la onda");
     /* el periodo se repite */
     fx.water_phase = 5 + 16;
     ns_screen_build(&fx, TOVR, head_in, 0.016f, NULL, NULL, &o, inv);
-    float c7[3] = { 1, 1, 1 }, du4, dv4;
-    ns_screen_water_ref(o.water_min, o.water_max, o.water_tint, o.water_wave, ew_in, &du4, &dv4, c7);
-    CHECK(near(du4, du1, 1e-4f) && near(dv4, dv1, 1e-4f), "periodo");
+    CHECK(near(ns_screen_wave_dx(o.water_wave, 7.0f, NS_WAVE_REF_W), d1, 1e-4f), "periodo");
     /* sin bandera de agua no hay nada */
     fx.flags = 0;
     ns_screen_build(&fx, TOVR, head_in, 0.016f, NULL, NULL, &o, inv);

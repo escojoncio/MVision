@@ -186,7 +186,7 @@ static void g_update(WeaponState *s, const WInput *in, WReloadMode rm, const WGa
     if (gs->eye_near) { if (de > GD_EYE_OUT) gs->eye_near = 0; } else if (de < GD_EYE_IN) gs->eye_near = 1;
 
     float trig = in->trigger[0], grip1 = in->grip[1];
-    int trig_edge = trig >= 0.8f && gs->prev_trig < 0.8f;
+    int trig_edge = trig > 0.5f && gs->prev_trig <= 0.5f;
     int grip_edge = grip1 >= 0.7f && gs->prev_grip1 < 0.7f;
     int btn_b_edge = (in->buttons[0] & WB_B) && !(gs->prev_btn0 & WB_B);
     s->channel[WCH_TRIGGER] = trig;

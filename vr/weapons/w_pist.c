@@ -1,12 +1,14 @@
 /* Pistola semiautomática con supresor ("pist"). Lógica de mano, corredera, cargador y recarga manual.
  *
  * Convenciones (ver también wcore.c):
- *  - Mano 0 = mano del arma. Mano 1 = mano libre (cargador nuevo, tirar de la corredera, supresor).
+ *  - Mano 0 = mano del arma. Mano 1 = mano libre (cargador nuevo, tirar de la corredera).
  *  - Canales usados: WCH_SLIDE (m, hacia atrás +Z), WCH_TRIGGER (0..1), WCH_HAMMER (0..1 amartillado),
  *    WCH_MAG (m a lo largo del eje del cargador hacia abajo; 50 = oculto), WCH_ROUND (1 = recámara vacía,
- *    la pieza se aparta 100 m), WCH_CUSTOM0 (1 = supresor desmontado, pieza apartada).
+ *    la pieza se aparta 100 m), WCH_CUSTOM0 (1 = sin supresor, pieza apartada).
+ *  - Supresor: no se monta ni se desmonta en el VR. Lo decide el juego: WInput.game_flags & WGF_SUPP (visible y con
+ *    la punta como boca) o no (pieza apartada, boca del cañón). Nunca es un objeto suelto.
  *  - Objetos sueltos (WeaponState.held): 0 = cargador (en mano / guiado / cayendo), 1 = vaina expulsada,
- *    2 = supresor suelto, 3 = cartucho expulsado al montar la corredera.
+ *    2 = cartucho expulsado al montar la corredera.
  *  - Contador del juego: en la primera actualización se descuentan min(capacidad + 1, reserva) (cargador
  *    completo + bala en la recámara), igual que en w_gunc; al encajar un cargador nuevo, n = min(capacidad,
  *    reserva); al soltar un cargador o expulsar un cartucho vivo vuelven con ammo_take(-n) (se asume
@@ -53,7 +55,7 @@ static const char *const pist_mesh_names[] = {"frame", "slide", "barrel", "supp"
 extern const WeaponDef w_pist;
 #define PIST_ID 0
 enum { P_FRAME, P_BARREL, P_SLIDE, P_TRIGGER, P_HAMMER, P_MAG, P_ROUND, P_SUPP, P_COUNT };
-enum { H_MAG, H_CASE, H_SUPP, H_ROUND };
+enum { H_MAG, H_CASE, H_ROUND };
 enum { FM_NONE, FM_HAND, FM_GUIDE, FM_ANIM, FM_FALL, FM_REST };
 enum { PH_NORMAL, PH_CYCLING, PH_LOCKED, PH_CHARGING, PH_NOMAG };
 
@@ -80,7 +82,6 @@ typedef struct {
     WPose rel;                /* FM_HAND: pose relativa a la mano 1. FM_ANIM: pose de origen en espacio arma */
     WVec3 v, w;               /* FM_FALL: velocidad lineal y angular (mundo) */
     float t, dur;             /* FM_ANIM: progreso; vida restante en FM_REST (<0 = permanente) */
-    int armed;                /* supresor: ya se alejó del asiento (permite autoencaje) */
 } Free;
 
 typedef struct {
@@ -93,7 +94,6 @@ typedef struct {
     int booted;               /* primera actualización hecha (carga inicial descontada del contador) */
     uint32_t pbtn[2]; float pgrip[2];
     int charging, racked; float charge_ref_z, charge_slide0;
-    int supp_on;
     Free fr[W_MAX_HELD];
     float mag_slide;
     int auto_stage; float auto_t;
@@ -219,14 +219,16 @@ static void release_slide(PistState *s) {   /* soltar: vuelve hacia delante y al
 }
 
 /* ---------------- actualización ---------------- */
+int w_pist_trig_armed(const WeaponState *ws) { return ((const PistState *)ws)->trig_armed; }   /* diagnóstico (vrgame): solo para el estado de la pistola */
+
 static void pist_init(WeaponState *ws) {
     wcore_state_reset(ws, &w_pist);          /* estado entero a cero, binding conservado */
     PistState *s = (PistState *)ws;
     /* sin cargador hasta la primera actualización: ahí se descuentan sus balas del contador del juego */
-    s->hammer_cocked = 1; s->hammer = 1; s->trig_armed = 0; s->supp_on = 1; s->seed = 0xC0FFEEu;
+    s->hammer_cocked = 1; s->hammer = 1; s->trig_armed = 0; s->seed = 0xC0FFEEu;
     set_mag_hidden(s, 1);
     ws->held[H_MAG].mesh = PIST_MESH_MAG; ws->held[H_CASE].mesh = PIST_MESH_CASE;
-    ws->held[H_SUPP].mesh = PIST_MESH_SUPP; ws->held[H_ROUND].mesh = PIST_MESH_ROUND;
+    ws->held[H_ROUND].mesh = PIST_MESH_ROUND;
 }
 
 static void pist_update(WeaponState *ws, const WInput *in, WReloadMode rm, const WGameBridge *g) {
@@ -251,20 +253,21 @@ static void pist_update(WeaponState *ws, const WInput *in, WReloadMode rm, const
     int g1_press = (s->pgrip[1] < 0.5f && g1 >= 0.7f);
     WVec3 h1w = in->hand[1].p, h1l = wpose_apply(Wi, h1w);
     int free_busy = 0;
+    int supp = (in->game_flags & WGF_SUPP) != 0;   /* supresor puesto según el juego (la capa de integración lo rellena) */
 
     /* ---- gatillo / disparo ---- */
-    if (tr < 0.3f) s->trig_armed = 1;
-    if (tr > 0.7f && s->trig_armed) {
+    if (tr < 0.3f) s->trig_armed = 1;       /* se rearma al soltar por debajo de 0,3 */
+    if (tr > 0.5f && s->trig_armed) {
         s->trig_armed = 0;
         if (!s->cyc && !s->locked && !s->charging && s->slide < 0.002f) {
             if (s->b.chambered && s->hammer_cocked) {
                 WPose mz = wpose_mul(W, ws->def->points[WP_MUZZLE]);
-                if (!s->supp_on) { WPose loc = ws->def->points[WP_MUZZLE]; loc.p.z = PIST_MUZZLE_Z; mz = wpose_mul(W, loc); }
+                if (!supp) { WPose loc = ws->def->points[WP_MUZZLE]; loc.p.z = PIST_MUZZLE_Z; mz = wpose_mul(W, loc); }
                 s->b.chambered = 0; s->hammer_cocked = 0; s->shots++;
                 if (g && g->fire) g->fire(PIST_ID, mz);
                 snd(g, WS_FIRE);
                 wcore_kick(ws, in, s->seed ^ (uint32_t)(s->shots * 2654435761u));
-                hap(g, 0, s->supp_on ? 0.7f : 1.0f, 0.06f);
+                hap(g, 0, supp ? 0.7f : 1.0f, 0.06f);
                 if (in->support_held) hap(g, 1, 0.45f, 0.05f);
                 start_fire_cycle(s);
             } else {
@@ -301,8 +304,7 @@ static void pist_update(WeaponState *ws, const WInput *in, WReloadMode rm, const
     {
         WPose cp = ws->def->points[WP_CHARGE];
         float dc = wv_len(wv_sub(h1l, cp.p));
-        if (!s->charging && g1_press && dc < 0.07f && !in->support_held && s->fr[H_MAG].mode != FM_HAND
-            && s->fr[H_SUPP].mode != FM_HAND && !s->cyc) {
+        if (!s->charging && g1_press && dc < 0.07f && !in->support_held && s->fr[H_MAG].mode != FM_HAND && !s->cyc) {
             s->charging = 1; s->racked = 0;
             s->charge_ref_z = h1l.z; s->charge_slide0 = s->slide;
             s->locked = 0;
@@ -438,31 +440,6 @@ static void pist_update(WeaponState *ws, const WInput *in, WReloadMode rm, const
         }
     }
 
-    /* ---- supresor: desmontar/montar con la mano libre ---- */
-    {
-        Free *fs = &s->fr[H_SUPP];
-        WPose sp = wpose_mul(W, k_parts[P_SUPP].rest);
-        if (fs->mode == FM_HAND) {
-            free_busy = 1;
-            WPose hw = wpose_mul(in->hand[1], fs->rel);
-            hd->held[H_SUPP].world = hw;
-            float dseat = wv_len(wv_sub(hw.p, sp.p));
-            if (dseat > 0.08f) fs->armed = 1;
-            float cosang = wv_dot(wquat_rotate(hw.q, wv(0, 0, 1)), wquat_rotate(W.q, wv(0, 0, 1)));
-            int near_ok = dseat < 0.02f && fabsf(cosang) > 0.9f;
-            if (fs->armed && near_ok) { s->supp_on = 1; kill_free(s, H_SUPP); hap(g, 1, 0.4f, 0.04f); hap(g, 0, 0.3f, 0.03f); }
-            else if (g1 < 0.3f) drop_free(s, H_SUPP, hw, wv(0, 0, 0), wv(0, 0, 0), -1.0f);
-        } else if (g1_press && !in->support_held && !free_busy && !s->charging) {
-            if (s->supp_on && wv_len(wv_sub(h1w, sp.p)) < 0.07f) {
-                s->supp_on = 0; fs->mode = FM_HAND; fs->armed = 0; fs->rel = wpose_mul(wpose_inv(in->hand[1]), sp);
-                hd->held[H_SUPP].mesh = PIST_MESH_SUPP; hd->held[H_SUPP].active = 1; hd->held[H_SUPP].world = sp;
-                hap(g, 1, 0.3f, 0.04f);
-            } else if (!s->supp_on && fs->mode == FM_REST && wv_len(wv_sub(h1w, hd->held[H_SUPP].world.p)) < 0.15f) {
-                fs->mode = FM_HAND; fs->armed = 1; fs->rel = wpose_mul(wpose_inv(in->hand[1]), hd->held[H_SUPP].world);
-            }
-        }
-    }
-
     /* ---- física de los objetos sueltos ---- */
     for (int i = 0; i < W_MAX_HELD; i++) step_free(s, i, dt, floor_y, in, W);
 
@@ -479,7 +456,7 @@ static void pist_update(WeaponState *ws, const WInput *in, WReloadMode rm, const
     ws->channel[WCH_HAMMER] = s->hammer;
     ws->channel[WCH_MAG] = s->mag_slide;
     ws->channel[WCH_ROUND] = ws->chambered ? 0.0f : 1.0f;
-    ws->channel[WCH_CUSTOM0] = s->supp_on ? 0.0f : 1.0f;
+    ws->channel[WCH_CUSTOM0] = supp ? 0.0f : 1.0f;
     ws->phase = s->cyc ? PH_CYCLING : s->charging ? PH_CHARGING : s->locked ? PH_LOCKED : !ws->mag_inserted ? PH_NOMAG : PH_NORMAL;
     ws->t = s->cyc ? s->cyc_t : 0;
 

@@ -43,6 +43,7 @@
 #include "ns_hook_rt.h"
 #include "ns_hand.h"
 #include "ns_player.h"
+#include "ns_wphide.h"
 #include "ns_solid.h"
 #include "bridge_addrs.h"
 
@@ -269,6 +270,7 @@ int mv_vrhost_hands_active(void) { return hands_active(); }
 static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, void *u);
 static void hands_precapture(uint8_t *ram);
 _Static_assert(NS_PLAYER_BODY_PTR == BA_PLAYER_BODY, "ns_player y el puente deben coincidir en el puntero del jugador");
+_Static_assert(NS_WPHIDE_PLAYER_CTRL == BA_PLAYER_CTRL, "ns_wphide y el puente deben coincidir en el puntero de control del jugador");
 static void dump_at_stage(Cpu *c);
 static int ns_gate(void *u);
 static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u);
@@ -356,11 +358,13 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
 /* Manos nuevas: cierre de la escena (hilo de emulación, ns_hook_tick, escena apta con el jugador enlazado). Agarre y brazos manejados de la IK del último vrbody_apply. */
 static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, void *u) {
     (void)u;
+    ns_wphide_apply(sc, emu_ram, vrfire_hide_enabled());   /* el arma del juego en la mano de Snake (la lista de la GPU la oculta con +0x4C = 0, el extractor nativo no lo lee) */
     NsHandIn in;
     memset(&in, 0, sizeof in);
     in.enabled = hands_active();
     if (!in.enabled) return;
     for (int s = 0; s < 2; s++) { float g = 0; in.driven[s] = vrbody_hand_state(s, &g, NULL, NULL); in.grip[s] = in.driven[s] ? g : 0.0f; }
+    for (int s = 0; s < 2; s++) vrgame_hand_pose_in(s, &in.item_pose[s], &in.trigger[s], &in.thumb[s]);   /* objeto en la mano (arma por vr_grip), gatillo y pulgar */
     ns_hand_apply(sc, st, map, &in);
 }
 /* Antes de cada captura: con las manos nuevas Y el render nativo en uso, la malla de la manopla del motor NO se deforma en puño (la mano nueva hace el puño y su forma
@@ -899,7 +903,7 @@ static void build_one(const GpuDrawList *l, int si) {
     int16_t save_axes[3][3];
     VrSceneOpts o = sopts;
     if (!native_mode()) { o.eye_near_m = GPU3D_NEAR_EYE_M; o.line3d_px = 1.0f; o.coplanar_m = 0.005f; o.rect3d = 1; o.billboard = 1; }   /* modo gpu: nada pegado al ojo, recorte contra el plano cercano; líneas del mundo en 3D; z-fight de coplanares, sprites con vista de la GTE como carteles 3D y resplandores orientados al ojo solo aquí (ver vr_scene.h) */
-    if (native_mode() && view.kind == VRV_K_WORLD && view.reason != VRV_R_SELECTOR && view.reason != VRV_R_PAUSE_WORLD) o.drop_world2d = 1;   /* el nativo dibuja el mundo: los polígonos sin vista dentro del pase del mundo no son HUD y no van al panel 2D (vr_scene.h); no en cine/UI/vídeo ni con la ventana del selector o la pausa encima (sus menús son 2D) */
+    if (vrhost_drop_world2d(native_mode(), view.kind, view.reason)) o.drop_world2d = 1;   /* el nativo dibuja el mundo y las cinemáticas del motor: los polígonos sin vista dentro del pase 3D no son HUD y no van al panel 2D (vr_scene.h); no en UI/vídeo ni con la ventana del selector o la pausa encima (sus menús son 2D) */
     if (!native_mode() && view.kind == VRV_K_ENGINE) { o.keep_late_clear = 1; o.veil_as_2d = 1; }   /* pantalla 3D del motor (gpu): el 2D se compone dentro del estéreo; el relleno opaco tras el 3D (créditos) y los velos se pintan como 2D */
     int cine_cut = 0;
     {   /* Cinemática del motor (ni mundo ni vídeo/2D puros): la cámara es la del guion, nunca la de la cabeza. Planos y origen fijo por plano. */

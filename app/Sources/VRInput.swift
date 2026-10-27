@@ -11,7 +11,7 @@ struct VRInputSettings: Equatable {
     var vignette: Float = 0.6         // 0..1
     var locomotionFromHand = false    // false: relativa a la cabeza
     var rightHanded = true            // mano dominante
-    var weaponReload = 0              // recarga del arma VR: 0 manual, 1 simplificada, 2 automática
+    var weaponReload = 2              // recarga del arma VR: 0 manual, 1 simplificada, 2 automática (defecto)
     var allowProne = false
     var physicalPosture = 0           // postura por altura de la cabeza: 0 desactivada (defecto; el botón del juego manda), 1 solo para bajar, 2 completa
     var headHeight: Float = 0         // altura de pie calibrada en metros; 0 = autocalibrar

@@ -83,10 +83,10 @@ int vrhand_dims_from_verts(const int16_t *xyz, int nv, int stride_i16, int side,
 void vrhand_pose_cfg_default(VrHandPoseCfg *p) {
     memset(p, 0, sizeof *p);
     p->open_deg[0] = 6.0f; p->open_deg[1] = 12.0f; p->open_deg[2] = 6.0f;
-    static const float cl[4][3] = {{72, 82, 60}, {72, 84, 60}, {72, 84, 60}, {72, 84, 58}};
+    static const float cl[4][3] = {{76, 88, 62}, {76, 88, 62}, {76, 88, 62}, {76, 88, 60}};
     memcpy(p->closed_deg, cl, sizeof cl);
     static const float to[4] = {0, 0, 12, 8};
-    static const float tc[4] = {48, 16, 3, 5};
+    static const float tc[4] = {50, -4, 3, 5};
     memcpy(p->thumb_open, to, sizeof to);
     memcpy(p->thumb_closed, tc, sizeof tc);
     p->thumb_start = 0.35f;
@@ -95,50 +95,14 @@ void vrhand_pose_cfg_default(VrHandPoseCfg *p) {
 typedef struct { float y, cx, cz, hx, hz; } PalmRing;
 typedef struct {
     float Lh, sc, yk;
-    PalmRing ring[3];                   /* puño, centro, nudillos */
-    float fx, fz[4], fr[4], flen[4][3], fr0[4][3], fr1[4][3];
-    float tp[3], tlen[3], tr0[3], tr1[3], tdir[3];
+    PalmRing rim[2];                    /* dentro de la manga y labio del puño del guante */
+    PalmRing ring[3];                   /* muñeca, centro, nudillos (también para la colisión) */
+    PalmRing thenar;                    /* solo malla: abultamiento de la base del pulgar */
+    float fx, fy[4], fz[4], fr[4], rj[4][4], flen[4][3];   /* fy: pivote MCP de cada dedo (nudillos en arco); rj: radio de los anillos MCP, PIP, DIP y base de la yema */
+    float tp[3], tlen[3], tj[4], tdir[3], tx[3], ty[3], tz[3];   /* pulgar: pivote, largos, radios de anillo, dirección y ejes locales del metacarpo (columnas de rest) */
 } Lay;
 
-static void layout(const VrHandDims *dm, Lay *L) {
-    VrHandDims d = *dm;
-    float Lh = clampf(d.cuff_y - d.tip_y, 60.0f, 300.0f);
-    L->Lh = Lh; L->sc = Lh / 147.0f;
-    float sc = L->sc;
-    float chx = clampf(d.cuff_h[0], 10.0f, 60.0f), chz = clampf(d.cuff_h[1], 10.0f, 70.0f);
-    L->yk = d.cuff_y - 0.565f * Lh;
-    float kx = clampf(d.cuff_c[0] - 13.5f * sc, -10.0f * sc, 0.0f);
-    L->ring[0] = (PalmRing){d.cuff_y + 6.0f * sc, d.cuff_c[0], d.cuff_c[1], 0.95f * chx, 0.95f * chz};
-    L->ring[2] = (PalmRing){L->yk + 1.5f * sc, kx, 0.0f, 0.47f * chx, 1.25f * chz};
-    float y1 = d.cuff_y - 0.30f * Lh;
-    float t = (L->ring[0].y - y1) / (L->ring[0].y - L->ring[2].y);
-    L->ring[1] = (PalmRing){y1, L->ring[0].cx + (L->ring[2].cx - L->ring[0].cx) * t, L->ring[0].cz + (L->ring[2].cz - L->ring[0].cz) * t, 0.72f * chx, 0.87f * chz};
-    /* dedos */
-    float W = 2.0f * L->ring[2].hz, dsp = W / 4.0f;
-    L->fx = L->ring[2].cx + 1.5f * sc;
-    static const float rf[4] = {1.0f, 1.0f, 0.98f, 0.86f}, lf[4] = {0.94f, 1.0f, 0.95f, 0.80f}, seg[3] = {0.47f, 0.29f, 0.24f};
-    static const float tapr0[3] = {1.0f, 0.85f, 0.73f}, tapr1[3] = {0.97f, 0.83f, 0.70f};
-    for (int i = 0; i < 4; i++) {
-        L->fz[i] = L->ring[2].cz + dsp * (1.5f - (float)i);
-        L->fr[i] = 0.5f * dsp * 0.99f * rf[i];
-        float ext = (L->yk - d.tip_y) * lf[i];
-        float tube = ext - 0.643f * L->fr[i] * tapr1[2];
-        for (int j = 0; j < 3; j++) { L->flen[i][j] = tube * seg[j]; L->fr0[i][j] = L->fr[i] * tapr0[j]; L->fr1[i][j] = L->fr[i] * tapr1[j]; }
-    }
-    /* pulgar */
-    float yc = d.cuff_y - 0.27f * Lh;
-    float tt = (L->ring[0].y - yc) / (L->ring[0].y - L->ring[2].y);
-    float cx = L->ring[0].cx + (L->ring[2].cx - L->ring[0].cx) * tt, cz = L->ring[0].cz + (L->ring[2].cz - L->ring[0].cz) * tt;
-    float hx = L->ring[0].hx + (L->ring[2].hx - L->ring[0].hx) * tt, hz = L->ring[0].hz + (L->ring[2].hz - L->ring[0].hz) * tt;
-    if (tt > 0.45f) { hx = L->ring[1].hx; hz = L->ring[1].hz; }
-    L->tp[0] = cx + 0.40f * hx; L->tp[1] = yc; L->tp[2] = cz + 1.0f * hz;
-    float tlen[3] = {0.18f * Lh, 0.155f * Lh, 0.12f * Lh};
-    static const float tr0[3] = {12.5f, 10.1f, 8.6f}, tr1[3] = {11.5f, 9.8f, 8.2f};
-    for (int j = 0; j < 3; j++) { L->tlen[j] = tlen[j] - (j == 2 ? 0.643f * tr1[2] * sc : 0.0f); L->tr0[j] = tr0[j] * sc; L->tr1[j] = tr1[j] * sc; }
-    L->tdir[0] = 0.05f; L->tdir[1] = -0.78f; L->tdir[2] = 0.62f; v3_norm(L->tdir);
-}
-
-/* Sección de la palma a la altura y (interpolación lineal entre los tres anillos, acotada). */
+/* Sección de la palma a la altura y (interpolación lineal entre los tres anillos muñeca-centro-nudillos, acotada). */
 static void palm_section(const Lay *L, float y, float *cx, float *cz, float *hx, float *hz) {
     const PalmRing *a, *b;
     if (y >= L->ring[1].y) { a = &L->ring[0]; b = &L->ring[1]; } else { a = &L->ring[1]; b = &L->ring[2]; }
@@ -147,13 +111,80 @@ static void palm_section(const Lay *L, float y, float *cx, float *cz, float *hx,
     *cx = a->cx + (b->cx - a->cx) * t; *cz = a->cz + (b->cz - a->cz) * t; *hx = a->hx + (b->hx - a->hx) * t; *hz = a->hz + (b->hz - a->hz) * t;
 }
 
+/* Proporciones de una mano adulta (largo 1,0 = muñeca a yema del corazón, ~19 cm; ancho de la palma 0,447 = ~8,5 cm). La manga (puño) sale de la manopla del motor. */
+static void layout(const VrHandDims *dm, Lay *L) {
+    VrHandDims d = *dm;
+    float Lh = clampf(d.cuff_y - d.tip_y, 60.0f, 300.0f);
+    L->Lh = Lh; L->sc = Lh / 147.0f;
+    float sc = L->sc;
+    float chx = clampf(d.cuff_h[0], 10.0f, 60.0f), chz = clampf(d.cuff_h[1], 10.0f, 70.0f);
+    L->yk = d.cuff_y - 0.53f * Lh;
+    float kx = clampf(d.cuff_c[0] - 13.5f * sc, -10.0f * sc, 0.0f);
+    static const float dyk[4] = {0.008f, 0.0f, 0.014f, 0.034f};      /* nudillos en arco: el corazón el más adelantado */
+    const float W = 0.447f * Lh, gap = 0.012f * Lh;                  /* ancho de la palma = 4 dedos + 3 huecos */
+    L->rim[0] = (PalmRing){d.cuff_y + 6.0f * sc, d.cuff_c[0], d.cuff_c[1], 0.95f * chx, 0.95f * chz};
+    L->rim[1] = (PalmRing){d.cuff_y - 1.0f * sc, d.cuff_c[0], d.cuff_c[1], 1.03f * chx, 1.03f * chz};
+    L->ring[0] = (PalmRing){d.cuff_y - 8.0f * sc, d.cuff_c[0], 0.4f * d.cuff_c[1], fminf(0.60f * chx, 0.105f * Lh), 0.145f * Lh};
+    L->ring[2] = (PalmRing){L->yk + dyk[3] * Lh + 1.5f * sc, kx, 0.0f, 0.078f * Lh, 0.5f * W};
+    float y1 = d.cuff_y - 0.38f * Lh;
+    float t = (L->ring[0].y - y1) / (L->ring[0].y - L->ring[2].y);
+    L->ring[1] = (PalmRing){y1, L->ring[0].cx + (L->ring[2].cx - L->ring[0].cx) * t, L->ring[0].cz + (L->ring[2].cz - L->ring[0].cz) * t, 0.088f * Lh, 0.200f * Lh};
+    float y2 = d.cuff_y - 0.21f * Lh;
+    t = (L->ring[0].y - y2) / (L->ring[0].y - L->ring[2].y);
+    L->thenar = (PalmRing){y2, L->ring[0].cx + (L->ring[2].cx - L->ring[0].cx) * t + 0.012f * Lh, L->ring[0].cz + (L->ring[2].cz - L->ring[0].cz) * t + 0.03f * Lh, 0.108f * Lh, 0.175f * Lh};
+    /* dedos: llenan el ancho de los nudillos con huecos pequeños; largo total (MCP a yema) y proporción de las tres falanges */
+    L->fx = L->ring[2].cx + 1.5f * sc;
+    static const float rf[4] = {1.0f, 1.0f, 0.97f, 0.90f}, ext[4] = {0.415f, 0.47f, 0.435f, 0.376f}, seg[3] = {0.47f, 0.29f, 0.24f};
+    static const float rjf[4] = {1.0f, 0.92f, 0.83f, 0.74f};
+    const float a = (W - 3.0f * gap) / (2.0f * (rf[0] + rf[1] + rf[2] + rf[3]));
+    float zc = L->ring[2].cz + 0.5f * W;
+    for (int i = 0; i < 4; i++) {
+        L->fr[i] = a * rf[i];
+        L->fz[i] = zc - L->fr[i];
+        zc -= 2.0f * L->fr[i] + gap;
+        L->fy[i] = L->yk + dyk[i] * Lh;
+        for (int j = 0; j < 4; j++) L->rj[i][j] = L->fr[i] * rjf[j];
+        float tube = ext[i] * Lh - 0.643f * L->rj[i][3];
+        for (int j = 0; j < 3; j++) L->flen[i][j] = tube * seg[j];
+    }
+    /* pulgar: nace del abultamiento de la base (metacarpo dentro de la palma, cerca de la muñeca), a unos 45 grados hacia fuera */
+    float yc = d.cuff_y - 0.19f * Lh;
+    L->tp[0] = L->thenar.cx + 0.35f * L->thenar.hx; L->tp[1] = yc; L->tp[2] = L->thenar.cz + 0.55f * L->thenar.hz;
+    float tlen[3] = {0.19f, 0.16f, 0.125f};
+    static const float tjf[4] = {1.30f, 1.17f, 1.04f, 0.92f};
+    for (int j = 0; j < 4; j++) L->tj[j] = L->fr[1] * tjf[j];
+    for (int j = 0; j < 3; j++) L->tlen[j] = tlen[j] * Lh - (j == 2 ? 0.643f * L->tj[3] : 0.0f);
+    L->tdir[0] = 0.12f; L->tdir[1] = -0.70f; L->tdir[2] = 0.70f; v3_norm(L->tdir);
+    /* ejes locales del metacarpo: ty = -tdir (su -Y local es la dirección del hueso); tx (la cara de la yema, +X local) mira entre la palma y el índice (+X y -Z), ortogonalizado; tz = tx x ty */
+    for (int i = 0; i < 3; i++) L->ty[i] = -L->tdir[i];
+    L->tx[0] = 0.55f; L->tx[1] = 0.0f; L->tx[2] = -0.835f;
+    float dp = v3_dot(L->tx, L->ty);
+    for (int i = 0; i < 3; i++) L->tx[i] -= dp * L->ty[i];
+    v3_norm(L->tx);
+    v3_cross(L->tz, L->tx, L->ty);
+}
+
 /* ------------------------------------------------------------------------------------------------ constructor de mallas */
 typedef struct {
     int nv, nf;
     float v[VRHAND_MAX_V][3];
-    uint8_t f[VRHAND_MAX_F][4], role[VRHAND_MAX_F], su[VRHAND_MAX_F][4], sv[VRHAND_MAX_F][4];
+    uint8_t f[VRHAND_MAX_F][4], role[VRHAND_MAX_F], su[VRHAND_MAX_F][4], sv[VRHAND_MAX_F][4], weld[VRHAND_MAX_V];
+    float ref[VRHAND_MAX_F][3];         /* punto interior cercano a la cara (eje del tubo): fija qué lado es el exterior */
 } Tmp;
 
+static void tmp_init(Tmp *t) { memset(t, 0, sizeof *t); memset(t->weld, VRHAND_NO_WELD, sizeof t->weld); }
+
+/* Anillo de n vértices en el plano (ex, ez) alrededor de c (ex, ez unitarios), radio r. */
+static int add_ring3(Tmp *t, int n, const float *c, const float *ex, const float *ez, float r, float phase_deg) {
+    int base = t->nv;
+    for (int k = 0; k < n && t->nv < VRHAND_MAX_V; k++) {
+        float ph = (phase_deg + 360.0f * (float)k / (float)n) * DEG, cs = r * cosf(ph), sn = r * sinf(ph);
+        for (int a = 0; a < 3; a++) t->v[t->nv][a] = c[a] + cs * ex[a] + sn * ez[a];
+        t->nv++;
+    }
+    return base;
+}
+/* Anillo elíptico en un plano y = const (semiejes a en X, b en Z). */
 static int add_ring(Tmp *t, int n, float y, float cx, float cz, float a, float b, float phase_deg) {
     int base = t->nv;
     for (int k = 0; k < n && t->nv < VRHAND_MAX_V; k++) {
@@ -163,15 +194,17 @@ static int add_ring(Tmp *t, int n, float y, float cx, float cz, float a, float b
     }
     return base;
 }
-static void add_face(Tmp *t, int a, int b, int c, int d, int role, const uint8_t su[4], const uint8_t sv[4]) {
+static void add_face(Tmp *t, int a, int b, int c, int d, int role, const uint8_t su[4], const uint8_t sv[4], const float *ref) {
     if (t->nf >= VRHAND_MAX_F) return;
     t->f[t->nf][0] = (uint8_t)a; t->f[t->nf][1] = (uint8_t)b; t->f[t->nf][2] = (uint8_t)c; t->f[t->nf][3] = (uint8_t)d;
     t->role[t->nf] = (uint8_t)role;
     memcpy(t->su[t->nf], su, 4); memcpy(t->sv[t->nf], sv, 4);
+    memcpy(t->ref[t->nf], ref, 3 * sizeof(float));
     t->nf++;
 }
-/* Banda entre dos anillos de n vértices (a hacia b). roles[k]: rol de la cara k (NULL = role); patch = 1: cada cara cubre toda la región (palma/dorso), si no el parámetro avanza alrededor. */
-static void add_band(Tmp *t, int n, int ra, int rb, int role, const uint8_t *roles, float sv0, float sv1) {
+/* Banda entre dos anillos de n vértices (a hacia b; ca, cb = centros de los anillos). roles[k]: rol de la cara k (NULL = role); las caras de palma/dorso cubren toda la región, si no el parámetro avanza alrededor. */
+static void add_band(Tmp *t, int n, int ra, int rb, int role, const uint8_t *roles, float sv0, float sv1, const float *ca, const float *cb) {
+    float ref[3] = {0.5f * (ca[0] + cb[0]), 0.5f * (ca[1] + cb[1]), 0.5f * (ca[2] + cb[2])};
     for (int k = 0; k < n; k++) {
         int k1 = (k + 1) % n;
         int r = roles ? roles[k] : role;
@@ -181,31 +214,33 @@ static void add_band(Tmp *t, int n, int ra, int rb, int role, const uint8_t *rol
         if (r == VRHAND_ROLE_PALM || r == VRHAND_ROLE_BACK) { su[0] = 0; su[1] = 255; su[2] = 255; su[3] = 0; }
         else { su[0] = s0; su[1] = s1; su[2] = s1; su[3] = s0; }
         sv[0] = v0; sv[1] = v0; sv[2] = v1; sv[3] = v1;
-        add_face(t, ra + k, ra + k1, rb + k1, rb + k, r, su, sv);
+        add_face(t, ra + k, ra + k1, rb + k1, rb + k, r, su, sv, ref);
     }
 }
-/* Tapa plana de un anillo de n vértices (n par: n/2 - 1 cuadriláteros en abanico por pares). */
-static void add_cap(Tmp *t, int n, int r0, int role, float sv) {
+/* Tapa plana de un anillo de n vértices (6: 2 cuadriláteros; 8: 3). other = centro del anillo del otro extremo (queda del lado interior). */
+static void add_cap(Tmp *t, int n, int r0, int role, float sv, const float *other) {
     uint8_t su[4] = {0, 255, 255, 0}, svv[4];
     uint8_t v = (uint8_t)(255.0f * sv);
     svv[0] = svv[1] = svv[2] = svv[3] = v;
     if (n == 6) {
-        add_face(t, r0 + 0, r0 + 1, r0 + 2, r0 + 3, role, su, svv);
-        add_face(t, r0 + 3, r0 + 4, r0 + 5, r0 + 0, role, su, svv);
+        add_face(t, r0 + 0, r0 + 1, r0 + 2, r0 + 3, role, su, svv, other);
+        add_face(t, r0 + 3, r0 + 4, r0 + 5, r0 + 0, role, su, svv, other);
     } else {   /* 8 */
-        add_face(t, r0 + 0, r0 + 1, r0 + 2, r0 + 3, role, su, svv);
-        add_face(t, r0 + 3, r0 + 4, r0 + 5, r0 + 6, role, su, svv);
-        add_face(t, r0 + 6, r0 + 7, r0 + 0, r0 + 3, role, su, svv);
+        add_face(t, r0 + 0, r0 + 1, r0 + 2, r0 + 3, role, su, svv, other);
+        add_face(t, r0 + 3, r0 + 4, r0 + 5, r0 + 6, role, su, svv, other);
+        add_face(t, r0 + 6, r0 + 7, r0 + 0, r0 + 3, role, su, svv, other);
     }
 }
 
-/* Orienta cada cara con cross(B-A, D-A) hacia el interior (frente al centro de la malla) y la deja como VrHandBoneMesh con normales suaves. */
+/* Deja la malla en int16: cada cara con cross(B-A, D-A) hacia el interior (frente a su punto de referencia) y normales suaves por vértice. */
 static void finish_mesh(const Tmp *t, VrHandBoneMesh *m) {
     memset(m, 0, sizeof *m);
+    memset(m->weld, VRHAND_NO_WELD, sizeof m->weld);
     m->n_verts = (uint8_t)t->nv; m->n_faces = (uint8_t)t->nf;
     float c[3] = {0, 0, 0};
     for (int i = 0; i < t->nv; i++) {
         for (int k = 0; k < 3; k++) { m->v[i][k] = (int16_t)lroundf(t->v[i][k]); c[k] += (float)m->v[i][k]; }
+        m->weld[i] = t->weld[i];
     }
     for (int k = 0; k < 3; k++) c[k] /= (float)(t->nv > 0 ? t->nv : 1);
     for (int fi = 0; fi < t->nf; fi++) {
@@ -216,7 +251,7 @@ static void finish_mesh(const Tmp *t, VrHandBoneMesh *m) {
         float n[3]; v3_cross(n, e1, e2);
         float fc[3] = {0, 0, 0};
         for (int k = 0; k < 4; k++) for (int j = 0; j < 3; j++) fc[j] += 0.25f * (float)m->v[f[k]][j];
-        float o[3] = {fc[0] - c[0], fc[1] - c[1], fc[2] - c[2]};
+        float o[3] = {fc[0] - t->ref[fi][0], fc[1] - t->ref[fi][1], fc[2] - t->ref[fi][2]};
         if (v3_dot(n, o) > 0.0f) {   /* apunta hacia fuera: invertir el sentido (A,D,C,B) */
             uint8_t g[4] = {f[0], f[3], f[2], f[1]}, gu[4] = {su[0], su[3], su[2], su[1]}, gv[4] = {sv[0], sv[3], sv[2], sv[1]};
             memcpy(f, g, 4); memcpy(su, gu, 4); memcpy(sv, gv, 4);
@@ -244,34 +279,64 @@ static void finish_mesh(const Tmp *t, VrHandBoneMesh *m) {
     }
 }
 
-/* Falange: tubo hexagonal del pivote proximal (y = 0, radio r0) al distal (y = -len, radio r1) con cúpula distal (anillo a 40 grados + tapa) y, si prox_dome, cúpula
- * proximal (nudillo); si no, tapa plana proximal (queda dentro de la cúpula del hueso anterior). */
-static void build_segment(VrHandBoneMesh *m, float len, float r0, float r1, int prox_dome) {
-    Tmp t; memset(&t, 0, sizeof t);
+/* Falange: tubo hexagonal de su articulación proximal (y = 0, radio r0) a la distal (y = -len, radio r1), con tapas planas en ambos extremos (la malla es cerrada).
+ * El anillo proximal (vértices 0..5) se suelda al anillo de vértices weld_base..weld_base+5 del hueso padre (anillo distal de la falange anterior = 6, o collar de la palma).
+ * Si tip: la punta lleva una cúpula (anillo a 40 grados + tapa) con la uña (cara dorsal, rol JOINT) y la yema (cara de la palma, rol PALM). */
+static void build_phalanx(VrHandBoneMesh *m, float len, float r0, float r1, int tip, int weld_base) {
+    Tmp t; tmp_init(&t);
     static const uint8_t tube_roles[6] = {VRHAND_ROLE_FINGER, VRHAND_ROLE_FINGER, VRHAND_ROLE_BACK, VRHAND_ROLE_FINGER, VRHAND_ROLE_FINGER, VRHAND_ROLE_PALM};
-    int rp = -1;
-    if (prox_dome) rp = add_ring(&t, 6, 0.643f * r0, 0, 0, 0.766f * r0, 0.766f * r0, 30.0f);
+    static const uint8_t tip_roles[6] = {VRHAND_ROLE_FINGER, VRHAND_ROLE_FINGER, VRHAND_ROLE_JOINT, VRHAND_ROLE_FINGER, VRHAND_ROLE_FINGER, VRHAND_ROLE_PALM};
+    const float c0[3] = {0, 0, 0}, c1[3] = {0, -len, 0};
     int a0 = add_ring(&t, 6, 0.0f, 0, 0, r0, r0, 30.0f);
     int a1 = add_ring(&t, 6, -len, 0, 0, r1, r1, 30.0f);
-    int a2 = add_ring(&t, 6, -len - 0.643f * r1, 0, 0, 0.766f * r1, 0.766f * r1, 30.0f);
-    add_band(&t, 6, a0, a1, 0, tube_roles, 0.0f, 1.0f);
-    add_band(&t, 6, a1, a2, VRHAND_ROLE_JOINT, NULL, 1.0f, 1.0f);
-    add_cap(&t, 6, a2, VRHAND_ROLE_JOINT, 1.0f);
-    if (prox_dome) { add_band(&t, 6, rp, a0, VRHAND_ROLE_JOINT, NULL, 0.0f, 0.0f); add_cap(&t, 6, rp, VRHAND_ROLE_JOINT, 0.0f); }
-    else add_cap(&t, 6, a0, VRHAND_ROLE_JOINT, 0.0f);
+    if (weld_base >= 0) for (int k = 0; k < 6; k++) t.weld[a0 + k] = (uint8_t)(weld_base + k);
+    add_band(&t, 6, a0, a1, 0, tube_roles, 0.0f, 1.0f, c0, c1);
+    add_cap(&t, 6, a0, VRHAND_ROLE_JOINT, 0.0f, c1);
+    if (tip) {
+        const float c2[3] = {0, -len - 0.643f * r1, 0};
+        int a2 = add_ring(&t, 6, c2[1], 0, 0, 0.766f * r1, 0.766f * r1, 30.0f);
+        add_band(&t, 6, a1, a2, 0, tip_roles, 1.0f, 1.0f, c1, c2);
+        add_cap(&t, 6, a2, VRHAND_ROLE_JOINT, 1.0f, c1);
+    } else add_cap(&t, 6, a1, VRHAND_ROLE_JOINT, 1.0f, c0);
     finish_mesh(&t, m);
 }
 
-static void build_palm(const Lay *L, VrHandBoneMesh *m) {
-    Tmp t; memset(&t, 0, sizeof t);
+/* Palma: bandas octogonales (dentro de la manga, labio del guante, muñeca, centro, nudillos) y, para cada dedo y el pulgar, un collar hexagonal corto cuyo anillo
+ * frontal es el objetivo de la soldadura del hueso hijo (collar_front[i] = primer vértice de ese anillo; 0..3 dedos, 4 pulgar). */
+static void build_palm(const Lay *L, VrHandBoneMesh *m, int collar_front[5]) {
+    Tmp t; tmp_init(&t);
     static const uint8_t roles[8] = {VRHAND_ROLE_PALM, VRHAND_ROLE_BACK, VRHAND_ROLE_BACK, VRHAND_ROLE_BACK, VRHAND_ROLE_BACK, VRHAND_ROLE_BACK, VRHAND_ROLE_PALM, VRHAND_ROLE_PALM};
+    static const uint8_t tube_roles[6] = {VRHAND_ROLE_FINGER, VRHAND_ROLE_FINGER, VRHAND_ROLE_BACK, VRHAND_ROLE_FINGER, VRHAND_ROLE_FINGER, VRHAND_ROLE_PALM};
     const float k = 1.0f / cosf(22.5f * DEG);
-    int r[3];
-    for (int i = 0; i < 3; i++) r[i] = add_ring(&t, 8, L->ring[i].y, L->ring[i].cx, L->ring[i].cz, L->ring[i].hx * k, L->ring[i].hz * k, 22.5f);
-    add_band(&t, 8, r[0], r[1], 0, roles, 0.0f, 0.5f);
-    add_band(&t, 8, r[1], r[2], 0, roles, 0.5f, 1.0f);
-    add_cap(&t, 8, r[0], VRHAND_ROLE_JOINT, 0.0f);
-    add_cap(&t, 8, r[2], VRHAND_ROLE_JOINT, 1.0f);
+    const PalmRing *pr[6] = {&L->rim[0], &L->rim[1], &L->ring[0], &L->thenar, &L->ring[1], &L->ring[2]};
+    int r[6];
+    float c[6][3];
+    for (int i = 0; i < 6; i++) {
+        r[i] = add_ring(&t, 8, pr[i]->y, pr[i]->cx, pr[i]->cz, pr[i]->hx * k, pr[i]->hz * k, 22.5f);
+        c[i][0] = pr[i]->cx; c[i][1] = pr[i]->y; c[i][2] = pr[i]->cz;
+    }
+    static const float svs[6] = {0.0f, 0.1f, 0.2f, 0.4f, 0.65f, 1.0f};
+    for (int i = 0; i < 5; i++) add_band(&t, 8, r[i], r[i + 1], 0, roles, svs[i], svs[i + 1], c[i], c[i + 1]);
+    add_cap(&t, 8, r[0], VRHAND_ROLE_JOINT, 0.0f, c[1]);
+    add_cap(&t, 8, r[5], VRHAND_ROLE_JOINT, 1.0f, c[4]);
+    const float ex[3] = {1, 0, 0}, ez[3] = {0, 0, 1};
+    for (int i = 0; i < 4; i++) {   /* collares de los dedos: delante en el pivote del MCP, detrás dentro de la palma */
+        const float cf[3] = {L->fx, L->fy[i], L->fz[i]}, cb[3] = {L->fx, L->fy[i] + 1.6f * L->fr[i], L->fz[i]};
+        int rb = add_ring3(&t, 6, cb, ex, ez, L->rj[i][0], 30.0f), rf = add_ring3(&t, 6, cf, ex, ez, L->rj[i][0], 30.0f);
+        add_band(&t, 6, rb, rf, 0, tube_roles, 0.0f, 1.0f, cb, cf);
+        add_cap(&t, 6, rb, VRHAND_ROLE_JOINT, 0.0f, cf);
+        add_cap(&t, 6, rf, VRHAND_ROLE_JOINT, 1.0f, cb);
+        collar_front[i] = rf;
+    }
+    {   /* collar del pulgar: en los ejes locales del metacarpo (el anillo es perpendicular a su dirección) */
+        float cb[3], cf[3];
+        for (int a = 0; a < 3; a++) { cf[a] = L->tp[a]; cb[a] = L->tp[a] + 0.8f * L->tj[0] * L->ty[a]; }
+        int rb = add_ring3(&t, 6, cb, L->tx, L->tz, L->tj[0], 30.0f), rf = add_ring3(&t, 6, cf, L->tx, L->tz, L->tj[0], 30.0f);
+        add_band(&t, 6, rb, rf, 0, tube_roles, 0.0f, 1.0f, cb, cf);
+        add_cap(&t, 6, rb, VRHAND_ROLE_JOINT, 0.0f, cf);
+        add_cap(&t, 6, rf, VRHAND_ROLE_JOINT, 1.0f, cb);
+        collar_front[4] = rf;
+    }
     finish_mesh(&t, m);
 }
 
@@ -286,40 +351,35 @@ int vrhand_build(VrHand *h, const VrHandDims *dims, int side) {
     Lay L; layout(&d, &L);
     float I[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     for (int k = 0; k < VRHAND_BONES; k++) { h->bone[k].parent = -1; memcpy(h->bone[k].rest, I, sizeof I); }
-    build_palm(&L, &h->mesh[0]);
+    int cf[5];
+    build_palm(&L, &h->mesh[0], cf);
     h->bone[0].parent = -1; h->bone[0].len = L.Lh; h->bone[0].radius = L.ring[1].hx;
     for (int i = 0; i < 4; i++) {
         for (int j = 0; j < 3; j++) {
             int k = 1 + 3 * i + j;
             VrHandBone *b = &h->bone[k];
             b->parent = j == 0 ? 0 : k - 1;
-            if (j == 0) { b->pivot[0] = L.fx; b->pivot[1] = L.yk; b->pivot[2] = L.fz[i]; }
+            if (j == 0) { b->pivot[0] = L.fx; b->pivot[1] = L.fy[i]; b->pivot[2] = L.fz[i]; }
             else { b->pivot[0] = 0; b->pivot[1] = -h->bone[k - 1].len; b->pivot[2] = 0; }
-            b->len = L.flen[i][j]; b->radius = L.fr1[i][j];
-            build_segment(&h->mesh[k], b->len, L.fr0[i][j], L.fr1[i][j], j == 0);
+            b->len = L.flen[i][j]; b->radius = L.rj[i][j + 1];
+            build_phalanx(&h->mesh[k], b->len, L.rj[i][j], L.rj[i][j + 1], j == 2, j == 0 ? cf[i] : 6);
         }
     }
     /* pulgar: el hueso 13 mira (en reposo) a lo largo de tdir; su eje local -Y es esa dirección */
     {
-        float ey[3] = {-L.tdir[0], -L.tdir[1], -L.tdir[2]};
-        float ex[3] = {1, 0, 0};
-        float dp = v3_dot(ex, ey);
-        for (int j = 0; j < 3; j++) ex[j] -= dp * ey[j];
-        v3_norm(ex);
-        float ez[3]; v3_cross(ez, ex, ey);
         VrHandBone *b = &h->bone[13];
         b->parent = 0; memcpy(b->pivot, L.tp, sizeof L.tp);
-        for (int i = 0; i < 3; i++) { b->rest[3 * i] = ex[i]; b->rest[3 * i + 1] = ey[i]; b->rest[3 * i + 2] = ez[i]; }
-        b->len = L.tlen[0]; b->radius = L.tr1[0];
-        build_segment(&h->mesh[13], b->len, L.tr0[0], L.tr1[0], 1);
+        for (int i = 0; i < 3; i++) { b->rest[3 * i] = L.tx[i]; b->rest[3 * i + 1] = L.ty[i]; b->rest[3 * i + 2] = L.tz[i]; }
+        b->len = L.tlen[0]; b->radius = L.tj[1];
+        build_phalanx(&h->mesh[13], b->len, L.tj[0], L.tj[1], 0, cf[4]);
         for (int j = 1; j < 3; j++) {
             VrHandBone *c = &h->bone[13 + j];
             c->parent = 12 + j; c->pivot[0] = 0; c->pivot[1] = -h->bone[12 + j].len; c->pivot[2] = 0;
-            c->len = L.tlen[j]; c->radius = L.tr1[j];
-            build_segment(&h->mesh[13 + j], c->len, L.tr0[j], L.tr1[j], 0);
+            c->len = L.tlen[j]; c->radius = L.tj[j + 1];
+            build_phalanx(&h->mesh[13 + j], c->len, L.tj[j], L.tj[j + 1], j == 2, 6);
         }
     }
-    if (side < 0) {   /* espejo exacto en X: vértices, normales y orden de las caras (A,D,C,B) */
+    if (side < 0) {   /* espejo exacto en X: vértices, normales y orden de las caras (A,D,C,B); las soldaduras (índices) no cambian */
         h->mirror = 1;
         for (int k = 0; k < VRHAND_BONES; k++) {
             VrHandBoneMesh *m = &h->mesh[k];
@@ -336,7 +396,7 @@ int vrhand_build(VrHand *h, const VrHandDims *dims, int side) {
 }
 
 /* ------------------------------------------------------------------------------------------------ pose */
-static void pose_canonical(const VrHand *h, const float curl[5], const float thumb_t, float xf[VRHAND_BONES][12]) {
+static void pose_canonical(const VrHand *h, const float curl[5], const float thumb_t, float spread, float xf[VRHAND_BONES][12]) {
     const VrHandPoseCfg *pc = &h->pose;
     xf_ident(xf[0]);
     const float zax[3] = {0, 0, 1}, xax[3] = {1, 0, 0};
@@ -357,6 +417,7 @@ static void pose_canonical(const VrHand *h, const float curl[5], const float thu
         float tt = clampf(thumb_t, 0.0f, 1.0f);
         float a[4];
         for (int q = 0; q < 4; q++) a[q] = (pc->thumb_open[q] + (pc->thumb_closed[q] - pc->thumb_open[q]) * tt) * DEG;
+        a[1] -= spread * 25.0f * DEG;                                   /* aducción negativa = abducción: el pulgar se abre hacia fuera */
         float d13[3] = {-b13->rest[1], -b13->rest[4], -b13->rest[7]};   /* -(eje local Y) en el marco de la mano = dirección del hueso */
         float ah[3]; v3_cross(ah, d13, xax); v3_norm(ah);               /* eje de flexión hacia la palma (+X) */
         float Rf[9], Ra[9], J[9], Rr[9], loc[12];
@@ -385,12 +446,13 @@ static void mirror_xf(float *x) {
     x[3] = -x[3];                   /* traslación x */
 }
 
-void vrhand_pose_curls(const VrHand *h, const float curl[5], float xf[VRHAND_BONES][12]) {
+void vrhand_pose_curls_ex(const VrHand *h, const float curl[5], float thumb_spread, float xf[VRHAND_BONES][12]) {
     float c[5];
     for (int i = 0; i < 5; i++) c[i] = (curl && isfin(curl[i])) ? clampf(curl[i], 0.0f, 1.0f) : 0.0f;
-    pose_canonical(h, c, c[4], xf);
+    pose_canonical(h, c, c[4], isfin(thumb_spread) ? clampf(thumb_spread, -1.0f, 1.0f) : 0.0f, xf);
     if (h->mirror) for (int k = 0; k < VRHAND_BONES; k++) mirror_xf(xf[k]);
 }
+void vrhand_pose_curls(const VrHand *h, const float curl[5], float xf[VRHAND_BONES][12]) { vrhand_pose_curls_ex(h, curl, 0.0f, xf); }
 
 void vrhand_pose(const VrHand *h, float grip, float xf[VRHAND_BONES][12]) {
     float g = isfin(grip) ? clampf(grip, 0.0f, 1.0f) : 0.0f;
@@ -427,11 +489,29 @@ void vrhand_fist_point(const VrHand *h, const float xf[VRHAND_BONES][12], float 
     out[0] = s[0] / (float)n; out[1] = s[1] / (float)n; out[2] = s[2] / (float)n;
 }
 
+void vrhand_skin(const VrHand *h, const float xf[VRHAND_BONES][12], float out[VRHAND_BONES][VRHAND_MAX_V][3]) {
+    for (int k = 0; k < VRHAND_BONES; k++) {
+        const VrHandBoneMesh *m = &h->mesh[k];
+        for (int i = 0; i < m->n_verts; i++) {
+            int par = h->bone[k].parent;
+            if (m->weld[i] != VRHAND_NO_WELD && par >= 0 && par < k && m->weld[i] < h->mesh[par].n_verts) {
+                memcpy(out[k][i], out[par][m->weld[i]], 3 * sizeof(float));
+            } else {
+                float p[3] = {(float)m->v[i][0], (float)m->v[i][1], (float)m->v[i][2]};
+                xf_apply(xf[k], p, out[k][i]);
+            }
+        }
+    }
+}
+
+float vrhand_unit_m(const VrHand *h) { return VRHAND_REF_LEN_M / clampf(h->dims.cuff_y - h->dims.tip_y, 60.0f, 300.0f); }
+
 void vrhand_palm_center(const VrHand *h, float out[3]) {
     Lay L; layout(&h->dims, &L);
-    float cx, cz, hx, hz, y = -0.374f * L.Lh;
+    float cx, cz, hx, hz, y = h->dims.cuff_y - 0.50f * L.Lh;
     palm_section(&L, y, &cx, &cz, &hx, &hz);
-    out[0] = h->mirror ? -cx : cx; out[1] = y; out[2] = cz;
+    float x = cx + hx + 0.09f * L.Lh;     /* superficie de la palma + radio de un mango de ~34 mm: el centro del puño cerrado */
+    out[0] = h->mirror ? -x : x; out[1] = y; out[2] = L.ring[2].cz;   /* z: centro de los cuatro dedos */
 }
 
 /* ------------------------------------------------------------------------------------------------ colisión (cápsulas) */

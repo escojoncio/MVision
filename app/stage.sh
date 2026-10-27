@@ -38,7 +38,7 @@ done
 mkdir -p .stage/vr/native
 cp ../vr/native/ns_types.h ../vr/native/ns_dump.h ../vr/native/ns_dumpw.c .stage/vr/native/
 # puente productor/consumidor, jugador y enganche de la captura (integración del renderer nativo)
-cp ../vr/native/ns_bridge.[ch] ../vr/native/ns_player.[ch] ../vr/native/ns_hook.[ch] ../vr/native/ns_hook_rt.[ch] .stage/vr/native/
+cp ../vr/native/ns_bridge.[ch] ../vr/native/ns_player.[ch] ../vr/native/ns_wphide.[ch] ../vr/native/ns_hook.[ch] ../vr/native/ns_hook_rt.[ch] .stage/vr/native/
 # renderer Metal nativo: empaquetado para la GPU y extractor real con su almacén de mallas (ns_store_*: sin definiciones débiles) y su registro en el enganche
 # (sin test_*, sin tools/, sin ns_cpuref.c: validador de escritorio; ns_adapt/ns_light/ns_cover/ns_cover_glue = comprobación de cobertura en tiempo real, ver ns_cover.h; ns_solid = geometría sólida 360 grados para la colisión de la cabeza)
 cp ../vr/native/ns_gpu.[ch] ../vr/native/ns_gpu_types.h ../vr/native/ns_extract.[ch] ../vr/native/ns_extract_glue.c .stage/vr/native/
