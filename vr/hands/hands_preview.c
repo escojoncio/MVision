@@ -15,7 +15,7 @@
  * al target de la app sin arrastrar un main(). */
 #ifdef VRH_PREVIEW_BUILD
 #include "vr_hands.h"
-#include "vr_hand_pose.h"
+#include "vr_grip.h"
 #include "wprev.h"
 #include "../weapons/wcut.h"
 #include <math.h>
@@ -199,76 +199,186 @@ static void save(const char *dir, const char *id, const char *tag, const VrHands
 }
 
 
-/* ---- modo --poses: la mano nueva en cada pose de vr_hand_pose ---- */
+/* ---- modo --poses: la mano nueva (vr_hand_skin) en cada pose de vr_hand_pose, sosteniendo objetos y con el antebrazo de la IK ---- */
 static const char *const POSE_NAME[HP_COUNT] = {"open", "relax", "fist", "point", "trigger", "grip_pistol", "grip_rifle", "grip_support", "grip_sphere", "grip_placed", "grip_box"};
-static VrHandsVertex hp_v[2][6 * 320]; static uint16_t hp_i[6 * 320];
+static VrHandsVertex hp_v[2][3 * VRHA_NT]; static uint16_t hp_i[3 * VRHA_NT];
+static float hp_pos[VRHA_NV][3], hp_nrm[VRHA_NV][3];
 
-/* Mallas de la mano en el marco de la mano (metros, centrada en c) con las soldaduras aplicadas; color por rol (guante gris oscuro, uña y yema algo más claras). */
-static int hand_mesh(const VrHand *h, const float xf[VRHAND_BONES][12], VrHandsVertex *out, uint16_t *idx, const float c[3], float um) {
-    static float sk[VRHAND_BONES][VRHAND_MAX_V][3];
-    vrhand_skin(h, xf, sk);
-    static const uint8_t col[VRHAND_ROLES][3] = {{46, 48, 52}, {60, 62, 68}, {54, 56, 62}, {84, 88, 96}};
+/* Malla de la mano (un vértice por esquina) con la transformación H (3x4, marco de la mano en mm -> mundo en m). Color por rol: guante del traje (azul marino grisáceo), palma, yemas
+ * y puntas algo más oscuras. */
+static int hand_mesh(int side, const float xf[VRHS_J][12], const float H[12], VrHandsVertex *out) {
+    vrhs_skin(xf, side, hp_pos, hp_nrm);
+    static const float col[4][3] = {{0.15f, 0.16f, 0.20f}, {0.21f, 0.23f, 0.29f}, {0.18f, 0.19f, 0.24f}, {0.13f, 0.14f, 0.17f}};
     int nv = 0;
-    for (int k = 0; k < VRHAND_BONES; k++) {
-        const VrHandBoneMesh *m = &h->mesh[k];
-        const float *R = xf[k];
-        for (int f = 0; f < m->n_faces; f++) {
-            static const int tri[6] = {0, 1, 3, 1, 2, 3};
-            for (int q = 0; q < 6 && nv + 6 <= 6 * 320; q++) {
-                int vi = m->f[f][tri[q]];
-                VrHandsVertex *o = &out[nv];
-                for (int a = 0; a < 3; a++) o->pos[a] = (sk[k][vi][a] - c[a]) * um;
-                float n[3] = {m->n[vi][0] / 4096.0f, m->n[vi][1] / 4096.0f, m->n[vi][2] / 4096.0f};
-                for (int a = 0; a < 3; a++) o->nrm[a] = -(R[4 * a] * n[0] + R[4 * a + 1] * n[1] + R[4 * a + 2] * n[2]);
-                o->uv[0] = o->uv[1] = 0;
-                const uint8_t *cc = col[m->role[f] < VRHAND_ROLES ? m->role[f] : 0];
-                o->rgba[0] = cc[0]; o->rgba[1] = cc[1]; o->rgba[2] = cc[2]; o->rgba[3] = 255;
-                idx[nv] = (uint16_t)nv; nv++;
+    for (int p = 0; p < VRHA_NP; p++) {
+        const VrHaPiece *pc = &vrha_piece[p];
+        for (int t = pc->t0; t < pc->t0 + pc->nt; t++) for (int k = 0; k < 3; k++) {
+            const int vi = pc->v0 + vrha_tri[t][k];
+            VrHandsVertex *o = &out[nv++];
+            for (int a = 0; a < 3; a++) {
+                o->pos[a] = H[4 * a] * hp_pos[vi][0] + H[4 * a + 1] * hp_pos[vi][1] + H[4 * a + 2] * hp_pos[vi][2] + H[4 * a + 3];
+                float n = H[4 * a] * hp_nrm[vi][0] + H[4 * a + 1] * hp_nrm[vi][1] + H[4 * a + 2] * hp_nrm[vi][2];
+                o->nrm[a] = n;
             }
+            float l = sqrtf(o->nrm[0] * o->nrm[0] + o->nrm[1] * o->nrm[1] + o->nrm[2] * o->nrm[2]);
+            for (int a = 0; a < 3; a++) o->nrm[a] /= l > 1e-9f ? l : 1.0f;
+            o->uv[0] = o->uv[1] = 0;
+            const float *cc = col[vrha_role[t] & 3];
+            for (int a = 0; a < 3; a++) o->rgba[a] = (uint8_t)(cc[a] * 128.0f + 0.5f);
+            o->rgba[3] = 255;
         }
     }
+    for (int i = 0; i < nv; i++) hp_i[i] = (uint16_t)i;
     return nv;
 }
+static void mesh_of(VrHandsMesh *m, uint32_t id, const VrHandsVertex *v, int nv, const uint16_t *idx, int ni) {
+    memset(m, 0, sizeof *m);
+    m->mesh_id = id; m->verts = v; m->nverts = (uint32_t)nv; m->idx = idx; m->nidx = (uint32_t)ni;
+    m->model[0] = m->model[5] = m->model[10] = m->model[15] = 1.0f;
+}
+static void frame_of(VrHandsFrame *fr, const VrHandsMesh *m, int n, const Cam *cam, const VrHandsTex *tex, int ntex) {
+    memset(fr, 0, sizeof *fr);
+    V3 l = norm(v3(-cam->f.x * 0.8f - cam->r.x * 0.35f + cam->u.x * 0.45f, -cam->f.y * 0.8f - cam->r.y * 0.35f + cam->u.y * 0.45f, -cam->f.z * 0.8f - cam->r.z * 0.35f + cam->u.z * 0.45f));
+    fr->nmeshes = n; fr->meshes = m; fr->light_dir[0] = l.x; fr->light_dir[1] = l.y; fr->light_dir[2] = l.z; fr->ambient = 0.55f; fr->diffuse = 0.9f;
+    fr->tex = tex; fr->ntex = ntex;
+}
+static void sheet_save(WImage *sheet, const char *dir, const char *name) {
+    char path[512]; snprintf(path, sizeof path, "%s/%s.png", dir, name);
+    if (wimg_write_png(sheet, path)) printf("no se pudo escribir %s\n", path); else printf("  %s\n", path);
+    wimg_free(sheet);
+}
 
-static void poses_main(const char *dir) {
-    VrHand hs[2];
-    vrhand_build(&hs[0], NULL, 1); vrhand_build(&hs[1], NULL, -1);
-    const float um = vrhand_unit_m(&hs[0]);
+/* primitivas (m) con color de vértice */
+static VrHandsVertex pr_v[8192]; static uint16_t pr_i[16384]; static int pr_nv, pr_ni;
+static void prim_box(const float lo[3], const float hi[3], const float M[12], const uint8_t c[3]) {
+    static const int F[6][4] = {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 4, 6, 2}, {1, 3, 7, 5}};
+    static const float NF[6][3] = {{0, 0, -1}, {0, 0, 1}, {0, -1, 0}, {0, 1, 0}, {-1, 0, 0}, {1, 0, 0}};
+    for (int f = 0; f < 6; f++) {
+        int b = pr_nv;
+        for (int k = 0; k < 4; k++) {
+            int i = F[f][k];
+            float p[3] = {(i & 1) ? hi[0] : lo[0], (i & 2) ? hi[1] : lo[1], (i & 4) ? hi[2] : lo[2]};
+            VrHandsVertex *o = &pr_v[pr_nv++];
+            for (int a = 0; a < 3; a++) { o->pos[a] = M[4 * a] * p[0] + M[4 * a + 1] * p[1] + M[4 * a + 2] * p[2] + M[4 * a + 3]; o->nrm[a] = M[4 * a] * NF[f][0] + M[4 * a + 1] * NF[f][1] + M[4 * a + 2] * NF[f][2]; }
+            o->rgba[0] = c[0]; o->rgba[1] = c[1]; o->rgba[2] = c[2]; o->rgba[3] = 255;
+        }
+        const int q[6] = {0, 1, 2, 0, 2, 3};
+        for (int k = 0; k < 6; k++) pr_i[pr_ni++] = (uint16_t)(b + q[k]);
+    }
+}
+static void prim_sphere(const float c[3], float r, const uint8_t col[3]) {
+    const int NU = 24, NVV = 14;
+    int b = pr_nv;
+    for (int j = 0; j <= NVV; j++) for (int i = 0; i <= NU; i++) {
+        float th = 3.14159265f * j / NVV, ph = 6.2831853f * i / NU;
+        float n[3] = {sinf(th) * cosf(ph), cosf(th), sinf(th) * sinf(ph)};
+        VrHandsVertex *o = &pr_v[pr_nv++];
+        for (int a = 0; a < 3; a++) { o->pos[a] = c[a] + r * n[a]; o->nrm[a] = n[a]; }
+        o->rgba[0] = col[0]; o->rgba[1] = col[1]; o->rgba[2] = col[2]; o->rgba[3] = 255;
+    }
+    for (int j = 0; j < NVV; j++) for (int i = 0; i < NU; i++) {
+        int a0 = b + j * (NU + 1) + i, a1 = a0 + 1, b0 = a0 + NU + 1, b1 = b0 + 1;
+        const int q[6] = {a0, b0, a1, a1, b0, b1};
+        for (int k = 0; k < 6; k++) pr_i[pr_ni++] = (uint16_t)q[k];
+    }
+}
+/* cilindro (manga) de p0 a p1 con radios r0, r1 */
+static void prim_tube(const float p0[3], const float p1[3], float r0, float r1, const uint8_t col[3]) {
+    float ax[3] = {p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]}, l = sqrtf(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+    for (int a = 0; a < 3; a++) ax[a] /= l;
+    float t[3] = {fabsf(ax[1]) < 0.9f ? 0.0f : 1.0f, fabsf(ax[1]) < 0.9f ? 1.0f : 0.0f, 0}, u[3], w[3];
+    u[0] = ax[1] * t[2] - ax[2] * t[1]; u[1] = ax[2] * t[0] - ax[0] * t[2]; u[2] = ax[0] * t[1] - ax[1] * t[0];
+    float ul = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]); for (int a = 0; a < 3; a++) u[a] /= ul;
+    w[0] = ax[1] * u[2] - ax[2] * u[1]; w[1] = ax[2] * u[0] - ax[0] * u[2]; w[2] = ax[0] * u[1] - ax[1] * u[0];
+    const int NU = 16; int b = pr_nv;
+    for (int e = 0; e < 2; e++) for (int i = 0; i <= NU; i++) {
+        float ph = 6.2831853f * i / NU, r = e ? r1 : r0; const float *p = e ? p1 : p0;
+        VrHandsVertex *o = &pr_v[pr_nv++];
+        for (int a = 0; a < 3; a++) { o->nrm[a] = cosf(ph) * u[a] + sinf(ph) * w[a]; o->pos[a] = p[a] + r * o->nrm[a]; }
+        o->rgba[0] = col[0]; o->rgba[1] = col[1]; o->rgba[2] = col[2]; o->rgba[3] = 255;
+    }
+    for (int i = 0; i < NU; i++) { const int q[6] = {b + i, b + NU + 1 + i, b + i + 1, b + i + 1, b + NU + 1 + i, b + NU + 2 + i}; for (int k = 0; k < 6; k++) pr_i[pr_ni++] = (uint16_t)q[k]; }
+}
+
+static void render_cell(WImage *sheet, const VrHandsMesh *m, int n, const Cam *cam, int W, int H, int cx, int cy, const VrHandsTex *tex, int ntex) {
+    VrHandsFrame fr; frame_of(&fr, m, n, cam, tex, ntex);
+    WImage im; render_view(&fr, cam, W, H, 2, &im);
+    wimg_blit(sheet, &im, cx * W, cy * H);
+    wimg_free(&im);
+}
+
+static void poses_sheets(const char *dir) {
     const int W = 420, H = 520;
-    printf("mano: %d triángulos, %.3f mm por unidad\n", vrhand_tri_count(&hs[0]), um * 1000.0f);
+    const float Hm[12] = {0.001f, 0, 0, 0, 0, 0.001f, 0, 0, 0, 0, 0.001f, 0};
     for (int pose = 0; pose < HP_COUNT; pose++) for (int pulled = 0; pulled <= 1; pulled++) {
         if (pulled && !vrhandpose_has_trigger(pose)) continue;
         VrHandPoseIn in = {pose, pose == HP_RELAX ? 0.0f : 1.0f, pulled ? 1.0f : 0.0f, 0, 0};
         WImage sheet = wimg_new(3 * W, 2 * H);
         for (int side = 0; side < 2; side++) {
-            float xf[VRHAND_BONES][12];
-            vrhandpose_blend(&hs[side], &in, xf);
-            float c[3] = {0, 0, 0}, lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
-            static float sk[VRHAND_BONES][VRHAND_MAX_V][3];
-            vrhand_skin(&hs[side], xf, sk);
-            for (int k = 0; k < VRHAND_BONES; k++) for (int i = 0; i < hs[side].mesh[k].n_verts; i++) for (int a = 0; a < 3; a++) { if (sk[k][i][a] < lo[a]) lo[a] = sk[k][i][a]; if (sk[k][i][a] > hi[a]) hi[a] = sk[k][i][a]; }
-            for (int a = 0; a < 3; a++) c[a] = 0.5f * (lo[a] + hi[a]);
-            int nv = hand_mesh(&hs[side], xf, hp_v[0], hp_i, c, um);
-            VrHandsMesh m; memset(&m, 0, sizeof m);
-            m.mesh_id = 1; m.verts = hp_v[0]; m.nverts = (uint32_t)nv; m.idx = hp_i; m.nidx = (uint32_t)nv;
-            m.model[0] = m.model[5] = m.model[10] = m.model[15] = 1.0f;
-            /* vistas: ojo en +X (palma de la derecha), en -X (dorso) y en +Z (perfil del pulgar); arriba = -Y (los dedos hacia arriba). El espejo de la izquierda muestra la palma en -X. */
-            const float sgn = side == 0 ? 1.0f : -1.0f;
-            const V3 eyes[3] = {v3(sgn * 0.46f, 0, 0), v3(-sgn * 0.46f, 0, 0), v3(0, 0, 0.46f)};
+            const int sd = side == 0 ? 1 : -1;
+            float xf[VRHS_J][12];
+            vrhandpose_blend(sd, &in, xf);
+            float Hc[12]; memcpy(Hc, Hm, sizeof Hc); Hc[7] = 0.095f;    /* centrado: la mano mide ~0,19 m hacia -Y */
+            int nv = hand_mesh(sd, xf, Hc, hp_v[0]);
+            VrHandsMesh m; mesh_of(&m, 1, hp_v[0], nv, hp_i, nv);
+            const V3 eyes[3] = {v3(sd * 0.50f, 0, 0), v3(-sd * 0.50f, 0, 0), v3(0, 0, 0.50f)};   /* palma, dorso, perfil del pulgar */
+            for (int vw = 0; vw < 3; vw++) { Cam cam = look(eyes[vw], v3(0, 0, 0), v3(0, -1, 0), 30); render_cell(&sheet, &m, 1, &cam, W, H, vw, side, NULL, 0); }
+        }
+        char name[96]; snprintf(name, sizeof name, "pose_%02d_%s%s", pose, POSE_NAME[pose], pulled ? "_pulled" : "");
+        sheet_save(&sheet, dir, name);
+    }
+}
+
+/* pistola primitiva de test_grip.c (mm, marco del modelo: -Z boca, +Y arriba): mango x +-16, y -100..0, z 0..35; armazón; corredera; gatillo con centro (0, -18, -45.5) */
+static void pistol_proxy(const float M[12]) {
+    static const uint8_t cg[3] = {52, 52, 56}, cs[3] = {66, 66, 72}, ct[3] = {120, 50, 40};
+    const float g0[3] = {-0.016f, -0.100f, 0}, g1[3] = {0.016f, 0, 0.035f}, f0[3] = {-0.010f, -0.030f, -0.120f}, f1[3] = {0.010f, 0, 0};
+    const float s0[3] = {-0.010f, 0, -0.190f}, s1[3] = {0.010f, 0.032f, 0.010f}, t0[3] = {-0.003f, -0.026f, -0.049f}, t1[3] = {0.003f, -0.010f, -0.042f};
+    prim_box(g0, g1, M, cg); prim_box(f0, f1, M, cg); prim_box(s0, s1, M, cs); prim_box(t0, t1, M, ct);
+}
+static void wpose_m12(WPose p, float M[12]) {
+    WQuat q = wquat_normalize(p.q); float x = q.x, y = q.y, z = q.z, w = q.w;
+    float r[12] = {1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y), p.p.x, 2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x), p.p.y,
+                   2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y), p.p.z};
+    memcpy(M, r, sizeof r);
+}
+static void m12_scale(float *M, float s) { for (int a = 0; a < 3; a++) for (int j = 0; j < 3; j++) M[4 * a + j] *= s; }
+
+/* Mano derecha empuñando la pistola primitiva por el zócalo de vr_grip (gatillo suelto y a fondo) y la granada (esfera) con el zócalo de la granada; en el marco del arma. */
+static void hold_sheets(const char *dir) {
+    const int W = 520, H = 440;
+    for (int which = 0; which < 2; which++) {
+        const VrGripEntry *e = vrgrip_find(which ? 2 : 0);
+        if (!e) continue;
+        WPose handle = {{0, -0.050f, 0.0175f}, {0, 0, 0, 1}};
+        if (which) handle.p = wv(0, 0, 0);
+        WImage sheet = wimg_new(3 * W, 2 * H);
+        for (int pulled = 0; pulled < 2; pulled++) {
+            if (which && pulled) continue;
+            VrHandPoseIn in = {e->pose, 1.0f, pulled ? 1.0f : 0.0f, 0, 0};
+            float xf[VRHS_J][12];
+            vrhandpose_blend(1, &in, xf);
+            float Hm[12]; wpose_m12(vrgrip_weapon_from_hand(handle, e->grip, 1), Hm); m12_scale(Hm, VRHS_UNIT_M);   /* mano (mm) -> arma (m) */
+            int nv = hand_mesh(1, xf, Hm, hp_v[0]);
+            pr_nv = pr_ni = 0;
+            float I[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+            if (!which) pistol_proxy(I);
+            else { const float c[3] = {0, 0, 0}; const uint8_t col[3] = {80, 100, 70}; prim_sphere(c, 0.032f, col); }
+            VrHandsMesh m[2]; mesh_of(&m[0], 1, hp_v[0], nv, hp_i, nv); mesh_of(&m[1], 2, pr_v, pr_nv, pr_i, pr_ni);
+            const V3 ctr = which ? v3(0, 0, 0) : v3(0, -0.045f, -0.020f);
+            const V3 eyes[3] = {v3(0.45f, 0.06f, 0.06f), v3(-0.45f, 0.10f, 0.03f), v3(0.08f, 0.40f, 0.28f)};   /* dorso (+X), palma/dedos (-X), arriba-atrás */
             for (int vw = 0; vw < 3; vw++) {
-                Cam cam = look(eyes[vw], v3(0, 0, 0), v3(0, -1, 0), 30);
-                V3 l = norm(v3(-cam.f.x * 0.8f - cam.r.x * 0.35f + cam.u.x * 0.45f, -cam.f.y * 0.8f - cam.r.y * 0.35f + cam.u.y * 0.45f, -cam.f.z * 0.8f - cam.r.z * 0.35f + cam.u.z * 0.45f));
-                VrHandsFrame fr; memset(&fr, 0, sizeof fr);
-                fr.nmeshes = 1; fr.meshes = &m; fr.light_dir[0] = l.x; fr.light_dir[1] = l.y; fr.light_dir[2] = l.z; fr.ambient = 0.55f; fr.diffuse = 0.9f;
-                WImage im; render_view(&fr, &cam, W, H, 2, &im);
-                wimg_blit(&sheet, &im, vw * W, side * H);
-                wimg_free(&im);
+                Cam cam = look(v3(ctr.x + eyes[vw].x, ctr.y + eyes[vw].y, ctr.z + eyes[vw].z), ctr, v3(0, 1, 0), 32);
+                render_cell(&sheet, m, 2, &cam, W, H, vw, pulled, NULL, 0);
             }
         }
-        char path[512]; snprintf(path, sizeof path, "%s/pose_%02d_%s%s.png", dir, pose, POSE_NAME[pose], pulled ? "_pulled" : "");
-        if (wimg_write_png(&sheet, path)) printf("no se pudo escribir %s\n", path); else printf("  %s\n", path);
-        wimg_free(&sheet);
+        sheet_save(&sheet, dir, which ? "hold_sphere" : "hold_pistol");
     }
+}
+
+static void poses_main(const char *dir) {
+    poses_sheets(dir);
+    hold_sheets(dir);
 }
 
 int main(int argc, char **argv) {

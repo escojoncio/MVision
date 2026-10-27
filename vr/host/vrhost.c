@@ -267,7 +267,7 @@ __attribute__((weak)) void ns_cover_glue_submit_cam(const uint8_t *ram, const ui
 __attribute__((weak)) size_t ns_cover_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
 /* Decodificador de vídeo (runtime/mdec.c): palabras entregadas desde el arranque. En las pruebas de escritorio sin MDEC vale siempre 0 (no hay FMV). */
 __attribute__((weak)) uint32_t mdec_out_words_total(void) { return 0; }
-/* Manos nuevas (ns_hand.c, solo en la app; vr/body/vr_hand_mesh.c): definición débil vacía para las pruebas de escritorio, donde la manopla del motor se queda como está. */
+/* Manos nuevas (ns_hand.c, solo en la app; vr/body/vr_hand_skin.c): definición débil vacía para las pruebas de escritorio, donde la manopla del motor se queda como está. */
 __attribute__((weak)) int ns_hand_apply(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const NsHandIn *in) { (void)sc; (void)st; (void)map; (void)in; return 0; }
 static _Atomic int hands_new = 1;        /* menú VR «Manos: nuevas / originales» (defecto nuevas) */
 void mv_vrhost_set_hands_new(int on) { atomic_store(&hands_new, on ? 1 : 0); }
@@ -373,6 +373,7 @@ static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *m
     if (!in.enabled) return;
     for (int s = 0; s < 2; s++) { float g = 0; in.driven[s] = vrbody_hand_state(s, &g, NULL, NULL); in.grip[s] = in.driven[s] ? g : 0.0f; }
     for (int s = 0; s < 2; s++) vrgame_hand_pose_in(s, &in.item_pose[s], &in.trigger[s], &in.thumb[s]);   /* objeto en la mano (arma por vr_grip), gatillo y pulgar */
+    { const VrCamRecord *r = vrcam_last_record(); in.units_per_m = r && r->active ? (float)r->units_per_m : 0.0f; }   /* la mano a tamaño real con la escala calibrada */
     ns_hand_apply(sc, st, map, &in);
 }
 /* Antes de cada captura: con las manos nuevas Y el render nativo en uso, la malla de la manopla del motor NO se deforma en puño (la mano nueva hace el puño y su forma

@@ -10,7 +10,7 @@ static const PoseDef TABLE[HP_COUNT] = {
     [HP_FIST]         = {{1.00f, 1.00f, 1.00f, 1.00f, 1.00f},  0.00f, -1.0f},
     [HP_POINT]        = {{0.00f, 1.00f, 1.00f, 1.00f, 0.75f},  0.00f, -1.0f},
     [HP_TRIGGER]      = {{0.22f, 1.00f, 1.00f, 1.00f, 0.60f},  0.00f, 0.85f},
-    [HP_GRIP_PISTOL]  = {{0.22f, 0.70f, 0.60f, 0.50f, 0.70f}, -0.30f, 0.42f},
+    [HP_GRIP_PISTOL]  = {{0.30f, 0.60f, 0.55f, 0.50f, 0.60f}, -0.20f, 0.60f},
     [HP_GRIP_RIFLE]   = {{0.22f, 0.70f, 0.60f, 0.50f, 0.75f}, -0.30f, 0.42f},
     [HP_GRIP_SUPPORT] = {{0.62f, 0.68f, 0.72f, 0.72f, 0.22f},  0.30f, -1.0f},
     [HP_GRIP_SPHERE]  = {{0.50f, 0.52f, 0.55f, 0.60f, 0.40f},  0.20f, -1.0f},
@@ -37,14 +37,10 @@ void vrhandpose_curls(const VrHandPoseIn *in, VrHandCurls *out) {
     out->thumb_spread = lerpf(out->thumb_spread, 0.6f, tb);
 }
 
-void vrhandpose_blend(const VrHand *h, const VrHandPoseIn *in, float xf[VRHAND_BONES][12]) {
+void vrhandpose_blend(int side, const VrHandPoseIn *in, float xf[VRHS_J][12]) {
     VrHandCurls c;
     vrhandpose_curls(in, &c);
-    vrhand_pose_curls_ex(h, c.curl, c.thumb_spread, xf);
+    vrhs_pose(c.curl, c.thumb_spread, side, xf);
 }
 
-void vrhandpose_index_tip(const VrHand *h, const float xf[VRHAND_BONES][12], float out[3]) {
-    const float *x = xf[3];
-    const float ly = -h->bone[3].len - 0.643f * h->bone[3].radius;     /* punta de la cúpula de la yema: (0, -len - 0.643 r, 0) en el marco de la falange distal */
-    out[0] = x[1] * ly + x[3]; out[1] = x[5] * ly + x[7]; out[2] = x[9] * ly + x[11];
-}
+void vrhandpose_index_tip(const float xf[VRHS_J][12], float out[3]) { vrhs_index_pad(xf, out); }

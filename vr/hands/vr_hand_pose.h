@@ -1,7 +1,7 @@
-/* vr_hand_pose: poses de la mano nueva (vr/body/vr_hand_mesh) a partir de la entrada analógica de un mando (gatillo, agarre, botones; sin seguimiento de dedos).
+/* vr_hand_pose: poses de la mano nueva (vr/body/vr_hand_skin) a partir de la entrada analógica de un mando (gatillo, agarre, botones; sin seguimiento de dedos).
  *
  * Cada pose es una tabla de cierres por dedo (índice, corazón, anular, meñique, pulgar; 0 abierto .. 1 puño) y una separación del pulgar; el cierre de un dedo se reparte
- * entre MCP/PIP/DIP con los ángulos de VrHandPoseCfg (vrhand_pose_curls_ex). Mezcla (vrhandpose_blend):
+ * entre sus articulaciones con los ángulos de vr_hand_skin (vrhs_pose). Mezcla (vrhandpose_blend):
  *   base    = lerp(HP_RELAX -> pose del objeto, agarre)
  *   índice  = lerp(base -> índice tirado de la pose, gatillo), solo si la pose tiene gatillo (HP_TRIGGER, HP_GRIP_PISTOL, HP_GRIP_RIFLE)
  *   pulgar  = lerp(base -> pulgar levantado y abierto, botón del pulgar)
@@ -10,7 +10,7 @@
  * Todas las entradas se acotan a 0..1 (NaN/inf -> 0); una pose fuera de rango cuenta como HP_RELAX. Determinista y sin estado.
  * La yema del índice en HP_TRIGGER y HP_GRIP_* (gatillo suelto) cae en la zona de gatillo (ver test_hand_pose.c); vr_grip.c coloca el arma contando con ello. */
 #pragma once
-#include "vr_hand_mesh.h"
+#include "vr_hand_skin.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,14 +39,15 @@ typedef struct {
 /* Cierres resultantes antes de aplicar el esqueleto. */
 typedef struct {
     float curl[5];        /* índice, corazón, anular, meñique, pulgar: 0..1 */
-    float thumb_spread;   /* -1 .. 1 (vrhand_pose_curls_ex) */
+    float thumb_spread;   /* -1 .. 1 (vrhs_pose) */
 } VrHandCurls;
 
 int vrhandpose_has_trigger(int pose);                                  /* 1 si el objeto de esta pose tiene gatillo (el índice sigue la entrada de gatillo) */
 void vrhandpose_curls(const VrHandPoseIn *in, VrHandCurls *out);       /* la mezcla sin esqueleto; in NULL = mano relajada */
-void vrhandpose_blend(const VrHand *h, const VrHandPoseIn *in, float xf[VRHAND_BONES][12]);
-/* Punta del dedo índice (extremo de la cúpula de la yema, en el eje del hueso 3) en el marco de la mano. */
-void vrhandpose_index_tip(const VrHand *h, const float xf[VRHAND_BONES][12], float out[3]);
+/* Pose de las articulaciones (vrhs_pose) de la mano side (+1 derecha, -1 izquierda). */
+void vrhandpose_blend(int side, const VrHandPoseIn *in, float xf[VRHS_J][12]);
+/* Yema del índice (vrhs_index_pad) en el marco de la mano (mm). */
+void vrhandpose_index_tip(const float xf[VRHS_J][12], float out[3]);
 
 #ifdef __cplusplus
 }

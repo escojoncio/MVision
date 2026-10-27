@@ -17,7 +17,7 @@
 #include <string.h>
 #include "vr_body.h"
 #include "vr_fist.h"
-#include "vr_hand_mesh.h"
+#include "vr_hand_skin.h"
 #include "../bridge/bridge_addrs.h"
 
 #define PI_F 3.14159265358979f
@@ -527,21 +527,15 @@ int vrbody_hand_state(int side, float *grip, float R[9], float t[3]) {
     return 1;
 }
 
-/* Punto de golpe de la mano nueva (vr_hand_mesh): los NUDILLOS con la pose de puño (agarre 1) y un desplazamiento CONSTANTE en el marco de la mano, sin interpolar con el
- * agarre (el golpe no cambia de sitio al abrir o cerrar la mano). Mano de dimensiones por defecto. Mundo del motor, mm. 0 si el brazo no se manejó en el último apply. */
+/* Punto de golpe de la mano nueva (vr_hand_skin): los NUDILLOS con el puño cerrado, un desplazamiento CONSTANTE en el marco de la mano, sin interpolar con el
+ * agarre (el golpe no cambia de sitio al abrir o cerrar la mano). La mano se dibuja a tamaño real: mm * units_per_m / 1000 en unidades del motor. Mundo del motor. 0 si el brazo no se manejó en el último apply. */
 int vrbody_fist_point(int side, float out[3]) {
-    static float off[2][3];
-    static int built[2];
     if (side < 0 || side > 1 || !out || !G.pf[side].ok) return 0;
-    if (!built[side]) {
-        VrHand hand;
-        if (vrhand_build(&hand, NULL, side == 1 ? 1 : -1) != 0) return 0;
-        float xf[VRHAND_BONES][12];
-        vrhand_pose(&hand, 1.0f, xf);
-        vrhand_fist_point(&hand, xf, off[side]);
-        built[side] = 1;
-    }
-    const float *R = G.pf[side].R, *t = G.pf[side].t, *p = off[side];
+    float off[3];
+    vrhs_fist_point(side == 1 ? 1 : -1, off);
+    const float k = G.view_upm > 1.0f ? G.view_upm / 1000.0f : 1.0f;
+    for (int i = 0; i < 3; i++) off[i] *= k;
+    const float *R = G.pf[side].R, *t = G.pf[side].t, *p = off;
     for (int i = 0; i < 3; i++) out[i] = R[3 * i] * p[0] + R[3 * i + 1] * p[1] + R[3 * i + 2] * p[2] + t[i];
     return all_finite(out, 3);
 }

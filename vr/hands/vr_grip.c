@@ -5,7 +5,7 @@
  *   MAIN_YAW: R = Ry(-19,00 grados) * [[-1,0,0],[0,0,1],[0,1,0]] (apretón de manos), t = -R * centro de agarre.
  *   MAIN:     lo mismo sin guiñada (granada, colocables).
  *   SUPPORT:  palma hacia arriba bajo el guardamanos, pulgar hacia la boca, t = -R * centro de agarre. */
-#define MAIN_YAW  {{0.00118f, 0.00000f, 0.07081f}, {-0.11671f, 0.69741f, 0.69741f, 0.11671f}}
+#define MAIN_YAW  {{0.03251f, -0.02140f, 0.07428f}, {-0.09945f, 0.58429f, 0.80421f, 0.04428f}}
 #define MAIN      {{0.02416f, 0.00000f, 0.06656f}, {0.00000f, 0.70711f, 0.70711f, 0.00000f}}
 #define SUPPORT   {{0.06656f, -0.02416f, 0.00000f}, {0.70711f, 0.70711f, 0.00000f, 0.00000f}}
 #define NONE_POSE {{0, 0, 0}, {0, 0, 0, 1}}

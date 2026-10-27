@@ -27,14 +27,15 @@ $(B)/vr_hands.o: vr_hands.c vr_hands.h vr_hands_frame.h | $(B)
 	$(CC) $(CFLAGS) $(INC) -c $< -o $@
 $(B)/test_hands: test_hands.c $(B)/vr_hands.o $(WB)/libweapons.a
 	$(CC) $(CFLAGS) $(INC) test_hands.c $(B)/vr_hands.o $(WB)/libweapons.a -lm -lpthread -o $@
-$(B)/hands_preview: hands_preview.c $(B)/vr_hands.o $(WB)/libweapons.a ../../tools/wmodel/wprev.c vr_hand_pose.c vr_hand_pose.h ../body/vr_hand_mesh.c ../body/vr_hand_mesh.h
-	$(CC) $(CFLAGS) -Wno-misleading-indentation -DVRH_PREVIEW_BUILD $(INC) -I../body -I../../tools/wmodel hands_preview.c ../../tools/wmodel/wprev.c vr_hand_pose.c ../body/vr_hand_mesh.c $(B)/vr_hands.o $(WB)/libweapons.a -lm -lpthread -o $@
+PREVSRC := hands_preview.c ../../tools/wmodel/wprev.c vr_hand_pose.c vr_grip.c vr_glove.c ../body/vr_hand_skin.c ../body/vr_hand_asset.c ../body/vr_body.c ../body/vr_pose.c ../body/vr_fist.c
+$(B)/hands_preview: $(PREVSRC) vr_hand_pose.h vr_grip.h ../body/vr_hand_skin.h ../body/vr_hand_asset.h ../body/vr_body.h $(B)/vr_hands.o $(WB)/libweapons.a
+	$(CC) $(CFLAGS) -Wno-misleading-indentation -DVRH_PREVIEW_BUILD $(INC) -I../body -I../../tools/wmodel $(PREVSRC) $(B)/vr_hands.o $(WB)/libweapons.a -lm -lpthread -o $@
 
 $(B)/test_glove: test_glove.c vr_glove.c vr_glove.h vr_hands_frame.h ../body/vr_fist.c ../body/vr_fist.h | $(B)
 	$(CC) $(CFLAGS) -I. -I../body test_glove.c vr_glove.c ../body/vr_fist.c -lm -o $@
 
-HANDSRC := ../body/vr_hand_mesh.c vr_hand_pose.c
-HANDHDR := ../body/vr_hand_mesh.h vr_hand_pose.h
+HANDSRC := ../body/vr_hand_skin.c ../body/vr_hand_asset.c vr_hand_pose.c
+HANDHDR := ../body/vr_hand_skin.h ../body/vr_hand_asset.h vr_hand_pose.h
 $(B)/test_hand_pose: test_hand_pose.c $(HANDSRC) $(HANDHDR) | $(B)
 	$(CC) $(CFLAGS) -I. -I../body test_hand_pose.c $(HANDSRC) -lm -o $@
 $(B)/test_grip: test_grip.c vr_grip.c vr_grip.h $(HANDSRC) $(HANDHDR) $(B)/vr_hands.o $(WB)/libweapons.a
