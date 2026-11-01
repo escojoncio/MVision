@@ -15,6 +15,7 @@
 #include "vr_hands.h"
 #include "vr_grip.h"
 #include "vrgame.h"
+#include "w_laser.h"
 #include "w_throw.h"
 #include "wcore.h"
 
@@ -357,6 +358,13 @@ static void grenade_models(void) {
     CHECK(vrgame_weapon_model(7) == 0, "id 7 sin modelo identificado: se queda la del juego (nunca la de otra granada)");
     CHECK(vrgame_weapon_model(2) != vrgame_weapon_model(8) && vrgame_weapon_model(2) != vrgame_weapon_model(0), "los modelos de granada difieren entre sí y de la pistola");
     CHECK(vrgame_weapon_model(0) == 0x36f6 && vrgame_weapon_model(5) == 0x17a1 && vrgame_weapon_model(99) == 0 && vrgame_weapon_model(-1) == 0, "pistola, mina y ids fuera de tabla");
+    /* política de modelo: el modelo de granada que usa el juego por tipo no está identificado en los datos (los de WPN_TAB son «dudosa», y el de la 8 salía blanco
+     * mientras el juego lanzaba otro): toda granada (2, 7, 8) se dibuja con su modelo real del juego; las demás armas, con el VR */
+    for (int g = 2; g <= 8; g++) {
+        int gren = g == 2 || g == 7 || g == 8;
+        CHECK(vrgame_weapon_uses_game_model(g) == gren, "id %d: modelo %s", g, gren ? "real del juego (nunca el VR dudoso/blanco)" : "VR");
+    }
+    CHECK(!vrgame_weapon_uses_game_model(0) && !vrgame_weapon_uses_game_model(9) && !vrgame_weapon_uses_game_model(-1), "pistola, francotirador y fuera de tabla: sin cambio");
     /* dibujo: con el modelo VR completo el arma del juego se oculta y las mallas VR se publican; con textura incompleta se dibuja la del juego (nativa) y NO se oculta */
     world(2, 0, 3);
     fresh_weapon(2);
@@ -371,6 +379,233 @@ static void grenade_models(void) {
     CHECK(mv_host_hands(&f) == 0, "con textura incompleta no se publica malla VR (sería blanca)");
     mv_host_hands_done();
     vrgame_test_set_native(2, 0);
+}
+
+/* ---- láser de la pistola y puntería: el rayo dibujado, la boca del arma y la bala sustituida comparten eje y origen ---- */
+static void hand_trig(const float p[3], const float q[4], float trig) {
+    MvVrHand h;
+    memset(&h, 0, sizeof h);
+    h.valid = 1; memcpy(h.pos, p, sizeof h.pos); memcpy(h.rot, q, sizeof h.rot); h.grip = 1.0f; h.trigger = trig;
+    mv_vrgame_set_hand(1, &h);
+}
+static void lvbl(const float p[3], const float q[4], float trig, int n) { for (int i = 0; i < n; i++) { usleep(8000); hand_trig(p, q, trig); vrgame_pad(0, &bs, ram); } }
+/* Mallas láser del frame del renderer (mv_host_hands): cuántas hay y, de la primera, origen (centro del anillo en la boca) y eje (hacia el anillo lejano) en el espacio VR; len = su longitud. */
+static int drawn_laser(float org[3], float ax[3], float *len) {
+    VrHandsFrame f;
+    int found = 0;
+    if (mv_host_hands(&f)) for (int i = 0; i < f.nmeshes; i++) {
+        const VrHandsMesh *m = &f.meshes[i];
+        if (m->mesh_id != WLASER_MESH_ID) continue;
+        if (!found++) {
+            float c0[3] = {0, 0, 0}, c1[3] = {0, 0, 0};
+            for (int v = 0; v < 4; v++) for (int k = 0; k < 3; k++) { c0[k] += m->verts[v].pos[k] / 4; c1[k] += m->verts[4 + v].pos[k] / 4; }
+            float l = sqrtf((c1[0] - c0[0]) * (c1[0] - c0[0]) + (c1[1] - c0[1]) * (c1[1] - c0[1]) + (c1[2] - c0[2]) * (c1[2] - c0[2]));
+            for (int k = 0; k < 3; k++) { org[k] = c0[k]; ax[k] = (c1[k] - c0[k]) / l; }
+            *len = l;
+            CHECK((m->flags & VRH_MF_DYNAMIC) && m->tex_id == 0 && m->nverts == WLASER_NV && m->nidx == WLASER_NI, "malla láser dinámica, sin textura, topología fija");
+        }
+    }
+    mv_host_hands_done();
+    return found;
+}
+static void laser_aims_with_bullet(void) {
+    printf("-- láser de la pistola: rayo, boca y bala comparten eje --\n");
+    srand(777);
+    VrCamRecord saved = rec;
+    rec.theta_play_deg = 37.0f; rec.eye[0] = 1234; rec.eye[2] = -4321; rec.p_ref[0] = 0.1f; rec.p_ref[2] = -0.2f;      /* correspondencia usuario -> motor no trivial */
+    VrFireMap map; vrfire_map_from_cam(&map, &rec);
+    float worst_bul = 0, worst_las = 0, worst_org = 0, worst_live = 0;
+    int shots = 0;
+    for (int variant = 0; variant < 2; variant++) for (int k = 0; k < 12; k++) {
+        float q[4], R[9], want[3], p[3] = {0.1f + 0.3f * t_rnd(), 1.0f + 0.4f * t_rnd(), -0.2f - 0.4f * t_rnd()};
+        do { t_rand_quat(q); expected_weapon_rot(1, q, R); want[0] = -R[2]; want[1] = -R[5]; want[2] = -R[8]; } while (want[1] < -0.3f);     /* arma levantada */
+        world(0, 12, 60);
+        if (variant) fresh_pistol_meshes(); else fresh_pistol();
+        mv_vrgame_set_options(1, 2);
+        lvbl(p, q, 0.0f, 6);
+        float org[3], ax[3], len = 0;
+        CHECK(drawn_laser(org, ax, &len) == 1, "v%d pose %d: un láser con la pistola levantada", variant, k);
+        CHECK(fabsf(len - WLASER_MAX_M) < 1e-3f, "longitud %.3f m", len);
+        float e0 = t_ang(ax, want);
+        if (e0 > worst_las) worst_las = e0;
+        if (variant) {      /* a la cadencia del renderer el rayo sigue al arma: el mando se movió tras la simulación */
+            float p2[3] = {p[0] + 0.02f, p[1] - 0.01f, p[2]}, q2[4], dq[4] = {0.03f * (t_rnd() - 0.5f), 0.03f * (t_rnd() - 0.5f), 0.03f * (t_rnd() - 0.5f), 1}, R2[9];
+            t_qnorm(dq); t_qmul(dq, q, q2);
+            hand_trig(p2, q2, 0.0f);
+            if (drawn_laser(org, ax, &len) == 1) { expected_weapon_rot(1, q2, R2); float w2[3] = {-R2[2], -R2[5], -R2[8]}; float e = t_ang(ax, w2); if (e > worst_live) worst_live = e; }
+            hand_trig(p, q, 0.0f);
+        }
+        MvVrGameStatus st0, st;
+        { VrFireMat dm; for (int n = 0; n < 8 && vrfire_take_projectile(0, &dm) == VRFIRE_SUBST; n++) {} }     /* peticiones de pruebas anteriores */
+        mv_vrgame_status(&st0);
+        for (int i = 0; i < 12; i++) { lvbl(p, q, 0.7f, 1); mv_vrgame_status(&st); if (st.shots > st0.shots) break; }
+        if (st.shots == st0.shots) { CHECK(0, "v%d pose %d: la pistola no disparó", variant, k); continue; }
+        shots++;
+        float lorg[3], lax[3], llen;
+        CHECK(drawn_laser(lorg, lax, &llen) == 1, "v%d pose %d: láser en el VBlank del disparo", variant, k);
+        VrFireMat m;
+        CHECK(vrfire_take_projectile(0, &m) == VRFIRE_SUBST, "v%d pose %d: bala sustituida", variant, k);
+        float fw[3], dw[3], bw[3], bu[3];
+        vrfire_mat_forward(&m, fw);
+        vrfire_dir_from_world(&map, fw, dw);                                  /* eje de la bala en el espacio del usuario */
+        { float n = sqrtf(dw[0] * dw[0] + dw[1] * dw[1] + dw[2] * dw[2]); for (int i = 0; i < 3; i++) dw[i] /= n; }     /* la matriz del motor está en 1.12: delante sale con norma 0,9998; t_ang pide unitarios */
+        float eb = t_ang(dw, lax), eb2 = t_ang(dw, want);
+        if (eb > worst_bul) worst_bul = eb;
+        if (eb2 > worst_bul) worst_bul = eb2;
+        for (int i = 0; i < 3; i++) bw[i] = (float)m.t[i] - 400.0f * fw[i];   /* boca = t - 400 * delante */
+        vrfire_pos_from_world(&map, bw, bu);
+        float d = sqrtf((bu[0] - lorg[0]) * (bu[0] - lorg[0]) + (bu[1] - lorg[1]) * (bu[1] - lorg[1]) + (bu[2] - lorg[2]) * (bu[2] - lorg[2]));
+        if (d > worst_org) worst_org = d;
+    }
+    printf("   %d disparos: bala vs rayo/boca %.4f grados, rayo vs boca %.4f, rayo vivo vs boca %.4f, origen bala vs rayo %.4f m\n", shots, worst_bul, worst_las, worst_live, worst_org);
+    CHECK(shots == 24, "24 disparos medidos (%d)", shots);
+    CHECK(worst_bul < 0.1f, "la bala sale por el eje del rayo y de la boca: %.4f grados (< 0,1)", worst_bul);
+    CHECK(worst_las < 0.5f, "el rayo sigue el eje de la boca: %.4f grados (< 0,5)", worst_las);
+    CHECK(worst_live < 0.5f, "el rayo sigue al mando a la cadencia del renderer: %.4f grados (< 0,5)", worst_live);
+    CHECK(worst_org < 0.003f, "el rayo parte de donde sale la bala: %.4f m (< 3 mm)", worst_org);
+
+    /* cuándo NO se ve */
+    float org[3], ax[3], len, q[4], R[9], p[3] = {0.2f, 1.2f, -0.3f};
+    do { t_rand_quat(q); expected_weapon_rot(1, q, R); } while (-R[5] < -0.3f);
+    world(0, 12, 60); fresh_pistol_meshes(); mv_vrgame_set_options(1, 2);
+    lvbl(p, q, 0.0f, 6);
+    CHECK(drawn_laser(org, ax, &len) == 1, "levantada: láser");
+    bs.in_control = 0; lvbl(p, q, 0.0f, 3);
+    CHECK(drawn_laser(org, ax, &len) == 0, "pausa/menú/cinemática (sin control del jugador): sin láser");
+    bs.in_control = 1; lvbl(p, q, 0.0f, 3);
+    CHECK(drawn_laser(org, ax, &len) == 1, "con el control otra vez: láser");
+    float qd[4];
+    do { t_rand_quat(qd); expected_weapon_rot(1, qd, R); } while (-R[5] > -0.8f);                      /* boca casi al suelo */
+    lvbl(p, qd, 0.0f, 3);
+    CHECK(drawn_laser(org, ax, &len) == 0, "boca hacia el suelo (arma no levantada): sin láser");
+    lvbl(p, q, 0.0f, 3);
+    CHECK(drawn_laser(org, ax, &len) == 1, "otra vez levantada: láser");
+    world(-1, 0, 0); lvbl(p, q, 0.0f, 3);
+    CHECK(drawn_laser(org, ax, &len) == 0, "sin arma equipada: sin láser");
+    world(2, 0, 3); fresh_weapon(2);
+    for (int i = 0; i < 6; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    CHECK(drawn_laser(org, ax, &len) == 0, "granada en la mano: sin láser (solo la pistola lo lleva)");
+    world(0, 12, 60); fresh_pistol_meshes(); mv_vrgame_set_options(1, 2);
+    lvbl(p, q, 0.0f, 6);
+    CHECK(drawn_laser(org, ax, &len) == 1, "pistola otra vez: láser");
+    vrgame_reset();
+    CHECK(drawn_laser(org, ax, &len) == 0, "tras reiniciar el motor no queda láser publicado");
+    rec = saved;
+}
+
+/* ---- boca = apuntado del mando (aim): el eje del arma, el láser y la bala siguen el eje de apuntado; la empuñadura sigue en el agarre ---- */
+static void hand_aim(const float p[3], const float q[4], const float aq[4], float trig) {
+    MvVrHand h;
+    memset(&h, 0, sizeof h);
+    h.valid = 1; memcpy(h.pos, p, sizeof h.pos); memcpy(h.rot, q, sizeof h.rot); h.grip = 1.0f; h.trigger = trig;
+    if (aq) { h.aim_valid = 1; memcpy(h.aim_pos, p, sizeof h.aim_pos); memcpy(h.aim_rot, aq, sizeof h.aim_rot); }
+    mv_vrgame_set_hand(1, &h);
+}
+static void avbl(const float p[3], const float q[4], const float aq[4], float trig, int n) { for (int i = 0; i < n; i++) { usleep(8000); hand_aim(p, q, aq, trig); vrgame_pad(0, &bs, ram); } }
+static void rot_z(const float q[4], float o[3]) { float R[9]; t_qmat(q, R); o[0] = -R[2]; o[1] = -R[5]; o[2] = -R[8]; }
+static void aim_pose(void) {
+    printf("-- boca = apuntado del mando --\n");
+    srand(2024);
+    VrCamRecord saved = rec;
+    rec.theta_play_deg = 37.0f; rec.eye[0] = 1234; rec.eye[2] = -4321; rec.p_ref[0] = 0.1f; rec.p_ref[2] = -0.2f;
+    VrFireMap map; vrfire_map_from_cam(&map, &rec);
+    float worst_w = 0, worst_l = 0, worst_b = 0, worst_g = 0, worst_nofix = 0, worst_back = 0;
+    int shots = 0;
+    for (int k = 0; k < 12; k++) {
+        float q[4], R[9], want[3], p[3] = {0.1f + 0.3f * t_rnd(), 1.0f + 0.4f * t_rnd(), -0.2f - 0.4f * t_rnd()};
+        do { t_rand_quat(q); expected_weapon_rot(1, q, R); want[0] = -R[2]; want[1] = -R[5]; want[2] = -R[8]; } while (want[1] < -0.2f);
+        /* apuntado del mando: el del agarre girado -35 grados sobre su eje X (medido en vr_body.h: el apuntado queda 35 grados por debajo del -Z del agarre) más un giro lateral aleatorio */
+        float a = -(35.0f + 20.0f * (t_rnd() - 0.5f)) * 0.017453292f * 0.5f, rel[4] = {sinf(a), 0, 0, cosf(a)}, aq[4], aim[3];
+        t_qmul(q, rel, aq); t_qnorm(aq);
+        rot_z(aq, aim);
+        world(0, 12, 60);
+        fresh_pistol_meshes();
+        mv_vrgame_set_options(1, 2);
+        avbl(p, q, NULL, 0.0f, 4);                                   /* sin apuntado: el desvío de siempre */
+        float dir[3], org[3];
+        if (drawn_weapon(dir, org)) { float e = t_ang(dir, want); if (e > worst_back) worst_back = e; worst_nofix = fmaxf(worst_nofix, t_ang(dir, aim)); }
+        avbl(p, q, aq, 0.0f, 8);                                     /* con apuntado: se corrige */
+        if (!drawn_weapon(dir, org)) { CHECK(0, "pose %d: arma dibujada", k); continue; }
+        float ew = t_ang(dir, aim);
+        if (ew > worst_w) worst_w = ew;
+        float dg = sqrtf((org[0] - p[0]) * (org[0] - p[0]) + (org[1] - p[1]) * (org[1] - p[1]) + (org[2] - p[2]) * (org[2] - p[2]));
+        if (dg > worst_g) worst_g = dg;
+        float lorg[3], lax[3], ll;
+        CHECK(drawn_laser(lorg, lax, &ll) == 1, "pose %d: láser", k);
+        float el = t_ang(lax, aim);
+        if (el > worst_l) worst_l = el;
+        MvVrGameStatus st0, st;
+        { VrFireMat dm; for (int n = 0; n < 8 && vrfire_take_projectile(0, &dm) == VRFIRE_SUBST; n++) {} }
+        mv_vrgame_status(&st0);
+        for (int i = 0; i < 12; i++) { avbl(p, q, aq, 0.7f, 1); mv_vrgame_status(&st); if (st.shots > st0.shots) break; }
+        VrFireMat m;
+        if (st.shots > st0.shots && vrfire_take_projectile(0, &m) == VRFIRE_SUBST) {
+            float fw[3], dw[3];
+            vrfire_mat_forward(&m, fw); vrfire_dir_from_world(&map, fw, dw);
+            float n = sqrtf(dw[0] * dw[0] + dw[1] * dw[1] + dw[2] * dw[2]); for (int i = 0; i < 3; i++) dw[i] /= n;
+            float eb = t_ang(dw, aim); if (eb > worst_b) worst_b = eb;
+            shots++;
+        }
+        avbl(p, q, NULL, 0.0f, 80);                                  /* se pierde el apuntado (y el retroceso del disparo se asienta, ~0,3 s): vuelve el desvío de siempre */
+        if (drawn_weapon(dir, org)) { float e = t_ang(dir, want); if (e > worst_back) worst_back = e; }
+    }
+    printf("   sin corregir la boca queda a %.1f grados del apuntado; corregida: arma %.3f, láser %.3f, bala %.3f grados, empuñadura %.5f m, %d disparos; sin apuntado vuelve a %.3f grados del desvío fijo\n", worst_nofix, worst_w, worst_l, worst_b, worst_g, shots, worst_back);
+    CHECK(worst_nofix > 10.0f, "sin apuntado la boca difiere del apuntado (prueba con sentido): %.1f grados", worst_nofix);
+    CHECK(worst_w < 0.5f, "el arma dibujada apunta como el mando: %.3f grados (< 0,5)", worst_w);
+    CHECK(worst_l < 0.5f, "el láser sigue el apuntado del mando: %.3f grados (< 0,5)", worst_l);
+    CHECK(shots == 12 && worst_b < 0.15f, "la bala sale por el apuntado del mando: %.3f grados, %d disparos (< 0,15)", worst_b, shots);
+    CHECK(worst_g < 0.003f, "la empuñadura sigue en el agarre del mando: %.4f m", worst_g);
+    CHECK(worst_back < 0.5f, "sin apuntado válido vuelve el desvío fijo: %.3f grados", worst_back);
+    rec = saved;
+}
+
+/* ---- la corrección de puntería: solo armas con boca real, y sin saltos si el apuntado falta un instante ---- */
+static float q_angle_deg(const float a[4], const float b[4]) { float d = fabsf(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]); return 2.0f * acosf(fminf(1.0f, d)) * 57.29578f; }
+static void aim_guard(void) {
+    printf("-- corrección de puntería: armas sin boca y apuntado intermitente --\n");
+    srand(99);
+    float q[4], p[3] = {0.2f, 1.2f, -0.3f}, aq[4], rel[4] = {sinf(-0.30543f), 0, 0, cosf(-0.30543f)};      /* apuntado = agarre girado -35 grados sobre X */
+    t_rand_quat(q); t_qmul(q, rel, aq); t_qnorm(aq);
+    float base[4], off[4];
+    /* granada (2) y adhesivo (6): con apuntado válido la mano no gira (el desvío total sigue siendo el de siempre) */
+    int gids[2] = {2, 6};
+    for (int i = 0; i < 2; i++) {
+        world(gids[i], i == 0 ? 0 : 1, 3);
+        fresh_weapon(gids[i]);
+        avbl(p, q, NULL, 0.0f, 3);
+        vrbody_hand_offset(1, base);
+        avbl(p, q, aq, 0.0f, 12);
+        vrbody_hand_offset(1, off);
+        MvVrGameStatus st; mv_vrgame_status(&st);
+        CHECK(st.active && st.weapon == gids[i], "arma %d en la mano", gids[i]);
+        CHECK(q_angle_deg(base, off) < 0.01f, "arma %d (sin boca real) con apuntado válido: la mano no se gira (%.3f grados)", gids[i], q_angle_deg(base, off));
+    }
+    /* pistola: converge, mantiene 0,25 s sin apuntado y luego lo retira sin saltos */
+    world(0, 12, 60); fresh_pistol_meshes(); mv_vrgame_set_options(1, 2);
+    avbl(p, q, NULL, 0.0f, 4);
+    vrbody_hand_offset(1, base);
+    avbl(p, q, aq, 0.0f, 10);
+    vrbody_hand_offset(1, off);
+    float conv = q_angle_deg(base, off);
+    CHECK(conv > 10.0f, "pistola con apuntado: la mano se gira para alinear la boca (%.1f grados)", conv);
+    float prev[4]; memcpy(prev, off, sizeof prev);
+    avbl(p, q, NULL, 0.0f, 3);                                    /* un parpadeo del apuntado (~25 ms) */
+    vrbody_hand_offset(1, off);
+    CHECK(q_angle_deg(prev, off) < 0.01f, "apuntado perdido 3 fotogramas: la corrección se mantiene (%.3f grados de salto)", q_angle_deg(prev, off));
+    avbl(p, q, aq, 0.0f, 3);                                      /* vuelve */
+    vrbody_hand_offset(1, off);
+    CHECK(q_angle_deg(prev, off) < 0.1f, "y al volver sigue igual (%.3f grados)", q_angle_deg(prev, off));
+    float worst_step = 0;
+    memcpy(prev, off, sizeof prev);
+    for (int i = 0; i < 150; i++) {                              /* apuntado perdido de verdad (~1,2 s): retirada suave */
+        avbl(p, q, NULL, 0.0f, 1);
+        vrbody_hand_offset(1, off);
+        float st = q_angle_deg(prev, off); if (st > worst_step) worst_step = st;
+        memcpy(prev, off, sizeof prev);
+    }
+    CHECK(q_angle_deg(base, off) < 0.5f, "pasado el tiempo sin apuntado la corrección se retira del todo (%.3f grados)", q_angle_deg(base, off));
+    CHECK(worst_step < conv * 0.6f, "la retirada no es un salto: el mayor paso por fotograma es %.1f grados de %.1f", worst_step, conv);
+    printf("   corrección %.1f grados; mayor paso al retirarla %.1f grados por VBlank\n", conv, worst_step);
 }
 
 int main(void) {
@@ -409,6 +644,9 @@ int main(void) {
     grenade_gesture();
     weapon_follows_controller();
     grenade_models();
+    laser_aims_with_bullet();
+    aim_pose();
+    aim_guard();
 
     printf("%s vrgame_fire: %d comprobaciones, %d fallos\n", fails ? "FALLO" : "OK", checks, fails);
     return fails ? 1 : 0;

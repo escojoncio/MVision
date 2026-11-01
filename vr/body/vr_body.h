@@ -109,6 +109,7 @@ typedef struct VrBodyView {
     float theta_deg;         /* giro espacio de usuario -> mundo del motor: T = R_y(theta + 180 grados) */
     float units_per_m;       /* 1000 */
     float gaze_yaw_deg;      /* guiñada de la mirada REAL del usuario en el mundo del motor (misma escala que el rumbo del cuerpo: 0 = +Z, + hacia +X); la usa torso_follow */
+    float shift[3];          /* desplazamiento (mundo del motor) con que la cámara apartó el ojo del modelo (paredes, gateo): todo el cuerpo del jugador se dibuja desplazado igual para no quedar por delante del ojo; 0 = sin empuje */
 } VrBodyView;
 typedef int (*VrBodyViewFn)(VrBodyView *out);    /* devuelve 1 y rellena `out` si hay vista; 0 si no */
 void vrbody_set_view_fn(VrBodyViewFn fn);
@@ -213,6 +214,9 @@ void vrbody_set_calibration(int side, const float q[4]);   /* rechaza datos no f
 /* Corrección fija agarre -> mano de un lado (cuaternión x,y,z,w): la calibrada si la hay (devuelve 1) o cabeceo fijo hand_pitch_deg seguido del alabeo hand_rot_offset (devuelve 0). Con la mano armada es la misma
  * que usa vrbody_apply para dibujar la mano; el arma cuelga del agarre del mando con ella (mano = agarre * este desvío). */
 int vrbody_hand_offset(int side, float q[4]);
+/* Giro extra agarre -> mano de un lado (cuaternión x,y,z,w), aplicado ANTES del desvío fijo/calibrado en vrbody_hand_offset y al dibujar esa mano (offset total = q * desvío): lo calcula vrgame para que la boca del arma apunte donde el mando
+ * (VrHandPose.aim). NULL, no finito o norma fuera de 0,5..2: se desactiva (identidad). No sobrevive a vrbody_init. */
+void vrbody_set_aim_fix(int side, const float q[4]);
 /* Pura (sin estado): corrección agarre -> mano que deja los dedos horizontales y el dorso a roll_signed_deg (izq +, der -) del cenit. 1 = bien; 0 = dedos casi verticales. */
 int vrbody_calib_offset(const float grip_q[4], float roll_signed_deg, float out_q[4]);
 

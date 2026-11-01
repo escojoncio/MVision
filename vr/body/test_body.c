@@ -1292,6 +1292,66 @@ static void test_torso_follow(void) {
 }
 
 
+/* Gateo bajo geometría baja: la cámara aparta el ojo del modelo (VrBodyView.shift); todo el cuerpo del jugador se dibuja desplazado igual, para que no quede
+ * por delante del ojo. Sin empuje (shift 0 / no finito) no cambia nada. restore devuelve la RAM. */
+static void place_hands_at(float yaw_deg, float spread_deg);
+static void test_eye_shift(void) {
+    const float S[3] = {-120.0f, 0.0f, 200.0f};
+    /* sin manos: solo el desplazamiento (world += S, screen += R_ojo * S, rotaciones intactas) */
+    { VrBodyConfig cfg; legacy_cfg(&cfg); build_body(900); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+      float Re[9], dS[3]; for (int i = 0; i < 9; i++) Re[i] = r16(BA_VIEW_CHANNEL + BCH_CAM_INV + 2 * i) / 4096.0f;
+      mv(dS, Re, S);
+      float R0[16][9], t0[16][3], Rs0[16][9], ts0[16][3];
+      for (int i = 0; i < 16; i++) { load_xf(part_addr(i), R0[i], t0[i]); load_xf(part_addr(i) + 0x20, Rs0[i], ts0[i]); }
+      for (int k = 0; k < 3; k++) g_view.shift[k] = S[k];
+      vrbody_apply(RAM);
+      int bad = 0; float worst = 0;
+      for (int i = 0; i < 16; i++) {
+          float R1[9], t1[9], Rs1[9], ts1[3];
+          load_xf(part_addr(i), R1, t1); load_xf(part_addr(i) + 0x20, Rs1, ts1);
+          for (int j = 0; j < 9; j++) if (R1[j] != R0[i][j] || Rs1[j] != Rs0[i][j]) bad++;
+          for (int j = 0; j < 3; j++) { worst = fmaxf(worst, fabsf(t1[j] - (t0[i][j] + S[j]))); worst = fmaxf(worst, fabsf(ts1[j] - (ts0[i][j] + dS[j]))); }
+      }
+      CHECK(bad == 0, "shift: las rotaciones no deben cambiar (%d)", bad);
+      CHECK(worst <= 1.0f, "shift: las 16 piezas deben moverse S en world y R_ojo*S en screen (error %g)", worst);
+      vrbody_restore(RAM);
+      CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "shift: restore devuelve la RAM"); }
+    /* shift no finito o cero: la RAM no cambia */
+    { VrBodyConfig cfg; legacy_cfg(&cfg); build_body(901); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+      g_view.shift[0] = NAN; g_view.shift[2] = 50.0f; vrbody_apply(RAM);
+      CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "shift no finito: no se toca nada");
+      vrbody_restore(RAM);
+      memset(g_view.shift, 0, sizeof g_view.shift); vrbody_apply(RAM);
+      CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "shift 0 sin manos: no se toca nada"); vrbody_restore(RAM); }
+    /* con manos y torso_follow: pelvis, cuello y piernas siguen el desplazamiento, y que crezca de frame en frame (entrada al conducto) no se confunde con marcha: la pelvis no gira */
+    { VrBodyConfig cfg; vrbody_config_default(&cfg); cfg.hand_pitch_deg = 0; cfg.near_hide_m = cfg.near_hide_vtx_m = 0;
+      build_body(902); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+      const float yaw0 = yaw_of(0), ya = yaw0 * 0.0174532925f, Sf[3] = {cosf(ya) * 230.0f, 0.0f, -sinf(ya) * 230.0f};   /* lateral a la mirada */
+      g_view.gaze_yaw_deg = yaw0; place_hands_at(yaw0, 15.0f);
+      float R_[9], t0[3], t5[3], t10[3];
+      load_xf(part_addr(0), R_, t0); load_xf(part_addr(5), R_, t5); load_xf(part_addr(10), R_, t10);
+      for (int f = 0; f < 12; f++) {
+          float k = (float)(f + 1) / 12.0f;
+          for (int j = 0; j < 3; j++) g_view.shift[j] = Sf[j] * k;
+          memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM);
+          if (f == 11) {
+              float tq[3], d;
+              load_xf(part_addr(0), R_, tq);
+              d = fmaxf(fabsf(tq[0] - (t0[0] + Sf[0])), fmaxf(fabsf(tq[1] - t0[1]), fabsf(tq[2] - (t0[2] + Sf[2]))));
+              CHECK(d <= 1.0f, "shift+follow: pelvis desplazada S (error %g)", d);
+              load_xf(part_addr(5), R_, tq);
+              d = fmaxf(fabsf(tq[0] - (t5[0] + Sf[0])), fmaxf(fabsf(tq[1] - t5[1]), fabsf(tq[2] - (t5[2] + Sf[2]))));
+              CHECK(d <= 1.0f, "shift+follow: cuello desplazado S (error %g)", d);
+              load_xf(part_addr(10), R_, tq);
+              d = fmaxf(fabsf(tq[0] - (t10[0] + Sf[0])), fmaxf(fabsf(tq[1] - t10[1]), fabsf(tq[2] - (t10[2] + Sf[2]))));
+              CHECK(d <= 2.0f, "shift+follow: pierna desplazada S (error %g)", d);
+              CHECK(fabsf(wrap180t(yaw_of(0) - yaw0)) <= 1.0f, "shift creciente: la pelvis no debe girar por el desplazamiento (%g grados)", wrap180t(yaw_of(0) - yaw0));
+          }
+          vrbody_restore(RAM);
+          CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "shift+follow: restore devuelve la RAM (frame %d)", f);
+      } }
+}
+
 /* Marcha y manos: la cadera del juego avanza en una dirección => la pelvis se alinea con ella (de espaldas, con la contraria) sin salir de la zona muerta de la mirada;
  * las manos delante de la mirada tuercen un poco el pecho */
 static void place_hands_at(float yaw_deg, float spread_deg) {     /* ambas manos a 450 mm del ojo en el rumbo yaw +- spread */
@@ -1590,7 +1650,7 @@ int main(void) {
     test_glue();
     test_hand_axes(); test_armed_hand_fixed_offset(); test_hand_pitch_api(); test_default_roll(); test_jab_and_grab();
     test_visibility();
-    test_two_sided(); test_own_hands(); test_own_hands_both(); test_arm_live(); test_torso_follow(); test_pelvis_walk(); test_dt_measured(); test_pelvis_gap();
+    test_two_sided(); test_own_hands(); test_own_hands_both(); test_arm_live(); test_torso_follow(); test_eye_shift(); test_pelvis_walk(); test_dt_measured(); test_pelvis_gap();
     test_fist_glue();
     test_near_hide();
     test_mirror();

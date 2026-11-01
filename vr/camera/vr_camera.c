@@ -366,7 +366,8 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
     /* El juego solo colisiona el centro del cuerpo: la cabeza (ojo) puede quedar al otro lado de una pared (gateo en conductos de 1 m). Se devuelve al lado libre (vr_hzd.h). */
     { float upm = S.cfg.units_per_m * (S.cfg.calibrate && S.calib.scale > 0 ? S.calib.scale : 1.0f), ex0 = ex, ez0 = ez;
       int nc = vrhzd_clamp_eye(ram, b.bx, b.bz, &ex, &ez, ey, 0.18f * upm);
-      hzd_log(nc > 0 ? hypotf(ex - ex0, ez - ez0) : 0.0f, upm); }
+      hzd_log(nc > 0 ? hypotf(ex - ex0, ez - ez0) : 0.0f, upm);
+      p->eye_shift[0] = ex - ex0; p->eye_shift[1] = 0.0f; p->eye_shift[2] = ez - ez0; }   /* el cuerpo del jugador se desplaza igual (vr_body): si no, queda por delante del ojo */
     p->from[0] = sat16(ex); p->from[1] = sat16(ey); p->from[2] = sat16(ez);
 
     /* objetivo: ojo + dirección * track, con track acotado para que el objetivo quepa en s16 (la dirección sale de
@@ -415,6 +416,7 @@ void vrcam_commit(const uint8_t *ram, const VrCamPlan *p) {
         r->yaw_deg = p->yaw_deg; r->pitch_deg = p->pitch_deg; r->theta_play_deg = p->theta_play_deg;
         memcpy(r->p_ref, p->p_ref, sizeof r->p_ref);
         memcpy(r->head, p->head, sizeof r->head);
+        memcpy(r->eye_shift, p->eye_shift, sizeof r->eye_shift);
     }
 }
 

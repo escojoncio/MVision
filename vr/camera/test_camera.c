@@ -507,6 +507,33 @@ static void test_scan_overlay(void) {
     #undef W32
 }
 
+/* Gateo bajo geometría baja: vrhzd_clamp_eye aparta el ojo del modelo; el desplazamiento llega al plan y al registro para que el cuerpo lo siga. */
+static void test_eye_shift(void) {
+    VrCamConfig c; vrcam_config_default(&c); c.head = head; vrcam_init(&c); build_world(1024);
+    BridgeState s = ok_state(); VrCamPlan p;
+    for (int i = 0; i < c.on_frames; i++) vrcam_frame(ram, &s);
+    G_ok = 1; G_yaw = 0; G_elev = 0;
+    w32(PART6 + 0x1C, (uint32_t)-330);                       /* cabeza a z=-330; centro del cuerpo en z=-500 */
+    uint32_t map = 0x800b8ab8, wr = 0x8015cde4, hdr = 0x80149268, grp = 0x80149284, walls = 0x8014929c, flags = 0x801492c0;
+    w32(CTL + 0x2C, map); w32(map + 8, wr); w32(wr, hdr); w32(0x800ACB38, 1);
+    w16(hdr + 10, 1); w32(hdr + 16, grp); w16(grp + 2, 1); w32(grp + 8, walls); w32(grp + 20, flags);
+    int16_t wl[8] = {0, -300, 0, 3000, 3000, -300, 0, 3000};  /* pared z=-300: el cuerpo (z=-500) queda en el lado de z menor */
+    for (int k = 0; k < 8; k++) w16(walls + 2 * k, wl[k]);
+    CHECK(vrcam_plan(ram, 320, &p) == 1);
+    NEAR(p.eye_shift[0], 0, 1.0); NEAR(p.eye_shift[1], 0, 1e-6); NEAR(p.eye_shift[2], -150, 1.5);   /* ojo a 30 de la pared -> holgura 180 */
+    NEAR(p.from[2], -330 - 150, 2.0);
+    vrcam_commit(ram, &p);
+    const VrCamRecord *r = vrcam_last_record();
+    CHECK(r && r->active);
+    if (r) { NEAR(r->eye_shift[0], p.eye_shift[0], 1e-6); NEAR(r->eye_shift[2], p.eye_shift[2], 1e-6); }
+    w32(0x800ACB38, 0);                                       /* sin pared activa: sin empuje, sin desplazamiento */
+    CHECK(vrcam_plan(ram, 320, &p) == 1);
+    NEAR(p.eye_shift[0], 0, 1e-6); NEAR(p.eye_shift[2], 0, 1e-6); NEAR(p.from[2], -330, 2.0);
+    vrcam_commit(ram, &p);
+    r = vrcam_last_record();
+    CHECK(r && r->eye_shift[0] == 0 && r->eye_shift[2] == 0);
+}
+
 int main(void) {
     test_angles();
     test_patch();
@@ -520,6 +547,7 @@ int main(void) {
     test_userspace();
     test_predict();
     test_robust();
+    test_eye_shift();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

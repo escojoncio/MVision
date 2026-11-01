@@ -428,6 +428,7 @@ static struct {
     int view_ok;
     float view_eye[3], view_pref[3], view_T[9], view_upm;
     struct { int ok; float q[4]; } cal[2];   /* calibración de manos (sobrevive a vrbody_init) */
+    struct { int on; float q[4]; } aimfix[2]; /* giro extra agarre -> mano de la mano que empuña el arma, para que su boca coincida con el apuntado del mando (vrbody_set_aim_fix); bajo cal_lock */
     float fore_q[2][4];                /* orientación del marco de agarre (espacio del usuario, sin hand_rot_offset) del último apply */
     float dbg_frame[2][16];            /* marco efectivo de la mano tras la IK (espacio del usuario, m; ver vrbody_debug_hand_frame) */
     int dbg_frame_ok[2];
@@ -436,6 +437,8 @@ static struct {
     int pending;
     int pend_n;
     Saved sv[16];                /* 6 piezas de los brazos + torso y cuello + pelvis y piernas (torso_follow; como mucho 7) */
+    Saved shsv[16];              /* las piezas del jugador antes del desplazamiento del ojo (VrBodyView.shift); se devuelven DESPUÉS de sv (sus copias ya vienen desplazadas) */
+    int sh_n;
     struct { uint32_t addr, model; int16_t vis_old; } nh[64];   /* piezas ocultas por cercanía al ojo (hide_near), hasta vrbody_restore */
     int nh_n;
     int nh_ok; VrBodyView nh_view;   /* vista válida del último apply (hide_near la usa tras él) */
@@ -499,12 +502,23 @@ int vrbody_calib_offset(const float grip_q[4], float roll_signed_deg, float out_
 int vrbody_hand_offset(int side, float q[4]) {
     if (side < 0 || side > 1 || !q) return 0;
     int cal_ok; float cq[4];
-    cal_lock(); cal_ok = G.cal[side].ok; memcpy(cq, G.cal[side].q, sizeof cq); cal_unlock();
-    if (cal_ok) { memcpy(q, cq, sizeof cq); q_normalize(q); return 1; }
-    float qp[4], qr[4] = {G.cfg.hand_rot_offset[side][0], G.cfg.hand_rot_offset[side][1], G.cfg.hand_rot_offset[side][2], G.cfg.hand_rot_offset[side][3]};
-    pitch_quat(G.cfg.hand_pitch_deg, qp); q_normalize(qr);
-    q_mul(q, qp, qr);
-    return 0;
+    int fix_on; float fq[4];
+    cal_lock(); cal_ok = G.cal[side].ok; memcpy(cq, G.cal[side].q, sizeof cq); fix_on = G.aimfix[side].on; memcpy(fq, G.aimfix[side].q, sizeof fq); cal_unlock();
+    if (cal_ok) { memcpy(q, cq, sizeof cq); q_normalize(q); }
+    else {
+        float qp[4], qr[4] = {G.cfg.hand_rot_offset[side][0], G.cfg.hand_rot_offset[side][1], G.cfg.hand_rot_offset[side][2], G.cfg.hand_rot_offset[side][3]};
+        pitch_quat(G.cfg.hand_pitch_deg, qp); q_normalize(qr);
+        q_mul(q, qp, qr);
+    }
+    if (fix_on) { float t[4]; memcpy(t, q, sizeof t); q_mul(q, fq, t); }
+    return cal_ok;
+}
+void vrbody_set_aim_fix(int side, const float q[4]) {
+    if (side < 0 || side > 1) return;
+    float t[4];
+    int ok = q && all_finite(q, 4);
+    if (ok) { memcpy(t, q, sizeof t); float n2 = t[0] * t[0] + t[1] * t[1] + t[2] * t[2] + t[3] * t[3]; ok = n2 >= 0.25f && n2 <= 4.0f; if (ok) q_normalize(t); }
+    cal_lock(); G.aimfix[side].on = ok; if (ok) memcpy(G.aimfix[side].q, t, sizeof t); cal_unlock();
 }
 int vrbody_calibrate_hands(void) {
     int n = 0;
@@ -681,14 +695,9 @@ static int read_part(const uint8_t *ram, uint32_t pset, int idx, PartInfo *p) {
     return 1;
 }
 
-void vrbody_restore(uint8_t *ram) {
-    if (!G.pending && !G.fs[0].used && !G.fs[1].used) return;
-    G.pending = 0;
-    if (!ram) return;
-    /* No depende del puntero actual del jugador: si el objeto cambió (otra zona, muerte) pero la pieza guardada sigue
-     * siendo la misma (mismo model*), se devuelve igualmente; así la lógica nunca ve la pose IK. */
-    for (int i = 0; i < G.pend_n; i++) {
-        Saved *s = &G.sv[i];
+static void restore_saved(uint8_t *ram, Saved *sv, int n) {
+    for (int i = 0; i < n; i++) {
+        Saved *s = &sv[i];
         if (!s->used) continue;
         /* la pieza debe seguir siendo la misma (mismo model*): si el objeto se destruyó/rehízo no se escribe */
         if (ptr_ok(s->addr, OBJ_SIZE) && rd_u32(ram, s->addr + OBJ_MODEL) == s->model) {
@@ -697,7 +706,16 @@ void vrbody_restore(uint8_t *ram) {
         } else G.st.stale_dropped++;
         s->used = 0;
     }
-    G.pend_n = 0;
+}
+
+void vrbody_restore(uint8_t *ram) {
+    if (!G.pending && !G.fs[0].used && !G.fs[1].used) return;
+    G.pending = 0;
+    if (!ram) return;
+    /* No depende del puntero actual del jugador: si el objeto cambió (otra zona, muerte) pero la pieza guardada sigue
+     * siendo la misma (mismo model*), se devuelve igualmente; así la lógica nunca ve la pose IK. */
+    restore_saved(ram, G.sv, G.pend_n); G.pend_n = 0;
+    restore_saved(ram, G.shsv, G.sh_n); G.sh_n = 0;     /* al final: lo que mande es el original, no la copia ya desplazada */
     for (int i = 0; i < G.nh_n; i++) {
         if (ptr_ok(G.nh[i].addr, OBJ_SIZE) && rd_u32(ram, G.nh[i].addr + OBJ_MODEL) == G.nh[i].model) wr_s16(ram, G.nh[i].addr + OBJ_VIS, G.nh[i].vis_old);
         else G.st.stale_dropped++;
@@ -787,6 +805,7 @@ static int apply_main(uint8_t *ram) {
     G.st.applies++;
     if (G.pending) { G.st.stale_dropped++; vrbody_restore(ram); }      /* un apply anterior sin restore: primero devolver sus originales */
     G.live[0].ok = G.live[1].ok = 0;
+    G.sh_n = 0;      /* vrbody_restore(NULL) sale antes de devolverlas: sin esto un apply posterior escribiría más allá de shsv[16] */
     if (!ram) return 0;
     const VrBodyConfig *cfg = &G.cfg;
     if (!cfg->enabled) { G.st.skip_disabled++; return 0; }
@@ -835,6 +854,25 @@ static int apply_main(uint8_t *ram) {
         }
     }
 
+    /* ---- ojo apartado de las paredes (gateo bajo objetos, conductos): la cámara limita el ojo pero el juego solo colisiona el centro del cuerpo, que quedaría por delante del ojo. Todo el cuerpo del jugador
+     * se dibuja desplazado igual (world.t += shift, screen.t += R_ojo * shift); lo que sigue lee ya el cuerpo desplazado. restore devuelve las piezas ---- */
+    float shf[3] = {0.0f, 0.0f, 0.0f};
+    if (all_finite(view.shift, 3) && (view.shift[0] != 0.0f || view.shift[1] != 0.0f || view.shift[2] != 0.0f)) {
+        float es[3]; v_cp(shf, view.shift); m_mulv(es, eye.R, shf);
+        for (int i = 0; i < 16 && i < nm; i++) {
+            PartInfo pi; if (!read_part(ram, pset, i, &pi)) continue;
+            Saved *sv = &G.shsv[G.sh_n++];
+            sv->used = 1; sv->addr = pi.addr; sv->model = pi.model; sv->vis_old = 0; sv->vis_forced = 0; sv->vis_hidden = 0;
+            memcpy(sv->raw, ram + (pi.addr & RAM_MASK), sizeof sv->raw);
+            for (int k = 0; k < 3; k++) {
+                wr_i32(ram, pi.addr + OBJ_WORLD + 0x14 + 4 * (uint32_t)k, to_i32((float)rd_i32(ram, pi.addr + OBJ_WORLD + 0x14 + 4 * (uint32_t)k) + shf[k]));
+                wr_i32(ram, pi.addr + OBJ_SCREEN + 0x14 + 4 * (uint32_t)k, to_i32((float)rd_i32(ram, pi.addr + OBJ_SCREEN + 0x14 + 4 * (uint32_t)k) + es[k]));
+            }
+        }
+        G.pending = 1;
+        v_add(torso_w.t, torso_w.t, shf); v_add(torso_s.t, torso_s.t, es);
+    }
+
     if (G.grab.active && ++G.grab_age > 3) G.grab.active = 0;      /* ya no se refresca: soltado */
     /* ---- manos ---- */
     VrHandPose hp[2]; memset(hp, 0, sizeof hp);
@@ -874,7 +912,7 @@ static int apply_main(uint8_t *ram) {
     const float T[9] = {cs, 0, sn, 0, 1, 0, -sn, 0, cs};
     G.view_ok = 1; v_cp(G.view_eye, view.eye); v_cp(G.view_pref, view.p_ref); memcpy(G.view_T, T, sizeof T); G.view_upm = view.units_per_m;
 
-    typeof(G.cal) cal_snap; cal_lock(); memcpy(cal_snap, G.cal, sizeof cal_snap); cal_unlock();
+    typeof(G.cal) cal_snap; typeof(G.aimfix) fix_snap; cal_lock(); memcpy(cal_snap, G.cal, sizeof cal_snap); memcpy(fix_snap, G.aimfix, sizeof fix_snap); cal_unlock();
     int driven = 0, ns = 0;
 
     /* ---- cuerpo completo: todos los modelos del jugador a doble cara (bit 0x400 de model[0]) mientras se dibuja ---- */
@@ -930,7 +968,7 @@ static int apply_main(uint8_t *ram) {
             /* marcha: velocidad horizontal de la cadera del juego; la pelvis se alinea con la dirección de marcha (de espaldas, con la contraria) */
             if (pel_ok) {
                 if (G.pel_have) {
-                    float dx = w0.t[0] - G.pel_prev[0], dz2 = w0.t[2] - G.pel_prev[2];
+                    float dx = w0.t[0] - shf[0] - G.pel_prev[0], dz2 = w0.t[2] - shf[2] - G.pel_prev[2];   /* sin el desplazamiento del ojo: no es marcha */
                     float spd = sqrtf(dx * dx + dz2 * dz2) / view.units_per_m / dt;
                     if (spd > cfg->torso_walk_mps && spd < 10.0f) {
                         float hd = atan2f(dx, dz2) / DEG;
@@ -940,7 +978,7 @@ static int apply_main(uint8_t *ram) {
                         G.tf_yaw = wrap180f(G.tf_yaw + a_f * wrap180f(hd - G.tf_yaw));
                     }
                 }
-                v_cp(G.pel_prev, w0.t); G.pel_have = 1;
+                v_sub(G.pel_prev, w0.t, shf); G.pel_have = 1;
             } else G.pel_have = 0;   /* pelvis fuera de rango: al volver no hay desplazamiento previo (sin falso «andando») */
             /* zona muerta: la pelvis solo se arrastra cuando la mirada se aleja de ella más que la zona */
             {
@@ -1067,6 +1105,7 @@ static int apply_main(uint8_t *ram) {
                 qr[0] = cfg->hand_rot_offset[s][0]; qr[1] = cfg->hand_rot_offset[s][1]; qr[2] = cfg->hand_rot_offset[s][2]; qr[3] = cfg->hand_rot_offset[s][3]; q_normalize(qr);
                 q_mul(qo, qp, qr);
             }
+            if (fix_snap[s].on) { float t[4]; memcpy(t, qo, sizeof t); q_mul(qo, fix_snap[s].q, t); }     /* boca del arma = apuntado del mando (mismo giro que vrbody_hand_offset) */
             q_mul(Rq, h->q, qo);
         }
         memcpy(G.fore_q[s], h->q, sizeof h->q);     /* marco del AGARRE (sin hand_rot_offset). Su +Y NO es el dorso real (45 grados desviado con el roll por defecto): los consumidores del radar (vrgame: ruta viva y de reserva) calculan el dorso con vrradar_dorsal_from_grip(agarre, hand_rot_offset) */

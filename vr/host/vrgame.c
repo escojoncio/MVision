@@ -26,6 +26,7 @@
 #include "vr_reload.h"
 #include "w_aa.h"
 #include "w_guided.h"
+#include "w_laser.h"
 #include "w_rifle.h"
 #include "w_sniper.h"
 #include "w_throw.h"
@@ -52,6 +53,9 @@ uint16_t vrgame_weapon_model(int game_id) {
     return 0;
 }
 static int is_grenade(int game_id) { return game_id == 2 || game_id == 7 || game_id == 8; }
+/* Granadas: los datos no dan el modelo que usa el juego por tipo (los de WPN_TAB son «dudosa» en wcut_tables.c; el de la 8 salía blanco mientras el juego lanzaba otro), así que se dibuja el modelo real del
+ * propio juego (escena nativa, sin ocultarlo) y la lógica VR (gesto, trayectoria) sigue; el lanzado es siempre el actor del juego. Así la mano y el lanzado son el mismo modelo, uno solo. */
+int vrgame_weapon_uses_game_model(int game_id) { return is_grenade(game_id); }
 
 static uint64_t mono_ns(void) {
     struct timespec t;
@@ -136,6 +140,29 @@ static uint32_t pub_live_applies;
 #define GLOVE_MAX_AGE_NS 250000000ull      /* IK más vieja que esto: sin guante (el motor dejó de aplicar el cuerpo: cinemática, menú) */
 static GripPose pub_sim_hand;      /* mano del arma con la que se simuló el último frame publicado (compensación de latencia) */
 static int pub_sim_valid;
+static float aimfix_q[2][4] = {{0, 0, 0, 1}, {0, 0, 0, 1}};      /* giro extra agarre -> mano que lleva vr_body (vrbody_set_aim_fix) para que la boca apunte como el mando; solo hilo de emulación */
+static float aimfix_miss[2];                   /* segundos sin apuntado válido con una corrección en curso */
+#define AIMFIX_HOLD_S 0.25f                    /* tras perder el apuntado se mantiene la última corrección este tiempo ... */
+#define AIMFIX_DECAY_S 0.08f                   /* ... y luego se retira con esta constante de tiempo (nlerp a la identidad) */
+static void aimfix_clear_side(int i) { aimfix_q[i][0] = aimfix_q[i][1] = aimfix_q[i][2] = 0; aimfix_q[i][3] = 1; aimfix_miss[i] = 0; vrbody_set_aim_fix(i, NULL); }
+static void aimfix_clear(void) { aimfix_clear_side(0); aimfix_clear_side(1); }
+/* Armas cuyo -Z de WP_MUZZLE es una boca real (la corrección de puntería solo vale para ellas): pistola y fusil. Granadas y armas puestas llevan una pose de boca identidad sin eje de disparo; misil guiado, antiaéreo y
+ * francotirador quedan fuera porque su mira/visor (WP_EYE) depende de la orientación del arma y no está comprobado que sobreviva a girar la mano hasta ~40 grados. */
+static int aimfix_weapon(int gid) { return gid == 0 || gid == 1; }
+/* Sin apuntado válido este fotograma: mantiene la corrección AIMFIX_HOLD_S y después la retira suavemente (sin salto de decenas de grados). */
+static void aimfix_lost(int i, float dt) {
+    if (aimfix_q[i][0] == 0 && aimfix_q[i][1] == 0 && aimfix_q[i][2] == 0) { aimfix_miss[i] = 0; return; }
+    aimfix_miss[i] += dt;
+    if (aimfix_miss[i] <= AIMFIX_HOLD_S) return;
+    float t = 1.0f - expf(-dt / AIMFIX_DECAY_S), sg = aimfix_q[i][3] < 0 ? -1.0f : 1.0f, q[4];
+    for (int k = 0; k < 4; k++) q[k] = (1.0f - t) * sg * aimfix_q[i][k] + (k == 3 ? t : 0.0f);
+    q_norm(q);
+    float v2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2];
+    if (v2 < 3e-6f) { aimfix_clear_side(i); return; }       /* < 0,2 grados: fuera */
+    memcpy(aimfix_q[i], q, sizeof q);
+    vrbody_set_aim_fix(i, q);
+}
+static struct { int on; float p[3], q[4]; } pub_laser;      /* láser de la pistola: pose de la boca (espacio VR) del último VBlank; on = 0: no se dibuja (w_laser.h) */
 
 #define HAND_MAX_AGE_NS 300000000ull    /* mano sin actualizar más de 0,3 s = sin seguimiento */
 
@@ -359,7 +386,7 @@ typedef struct {
     WeaponDef *def;
     WeaponState *st;
     VrHandsRig *rig;
-    int native;                  /* granada cuyo modelo no cargó con todas sus texturas y paleta (saldría blanca/plana): la lógica VR sigue, pero se dibuja y NO se oculta el modelo del juego (escena nativa, con su propio CLUT) */
+    int native;                  /* granada (vrgame_weapon_uses_game_model): la lógica VR sigue, pero se dibuja y NO se oculta el modelo del juego (escena nativa, con su propio CLUT); nunca el modelo VR (dudoso/blanco) */
 } Slot;
 static Slot SL[NSLOT];
 static struct {
@@ -393,7 +420,7 @@ static void *load_thread(void *arg) {
     fprintf(stderr, "[vrgame] arma VR %d texturas: atlas %ux%u, %u de %u cargadas, %u sin encontrar (primera %04x), %u de 8 bits sin paleta\n", WPN_TAB[si].game_id, m.atlas_w, m.atlas_h, m.ntex, m.ntex_ref,
             m.ntex_missing, m.first_missing, m.ntex_nopal);
     const int tex_bad = !m.atlas || m.ntex_missing || m.ntex_nopal;
-    if (tex_bad && is_grenade(WPN_TAB[si].game_id)) fprintf(stderr, "[vrgame] arma VR %d: texturas incompletas: se dibuja el modelo del propio juego (escena nativa)\n", WPN_TAB[si].game_id);
+    if (vrgame_weapon_uses_game_model(WPN_TAB[si].game_id)) fprintf(stderr, "[vrgame] arma VR %d: se dibuja el modelo del propio juego (escena nativa)%s\n", WPN_TAB[si].game_id, tex_bad ? " (texturas VR incompletas)" : "");
     const WCutModel *cm = wcut_find(model);
     if (!cm || !cm->weapon) { wload_free(&m); fprintf(stderr, "[vrgame] arma VR %d: sin tabla de corte\n", WPN_TAB[si].game_id); goto fail; }
     rc = wcut_run(&m, cm, &cs);
@@ -424,7 +451,7 @@ static void *load_thread(void *arg) {
         goto fail2;
     }
     sl->cs = cs; sl->def = def; sl->st = st; sl->rig = rig;
-    sl->native = tex_bad && is_grenade(WPN_TAB[si].game_id);
+    sl->native = vrgame_weapon_uses_game_model(WPN_TAB[si].game_id);
     atomic_store_explicit(&sl->state, LD_READY, memory_order_release);
     fprintf(stderr, "[vrgame] arma VR %d lista (%d piezas)\n", WPN_TAB[si].game_id, cs.nmeshes);
     return NULL;
@@ -506,6 +533,7 @@ static void publish_off(void) {
     vrhands_post_clear();
     pthread_mutex_lock(&HM);
     pub_sim_valid = 0;
+    pub_laser.on = 0;
     memset(&pub_special, 0, sizeof pub_special);
     pthread_mutex_unlock(&HM);
 }
@@ -514,6 +542,7 @@ void vrgame_reset(void) {
     vrbodyg_reset();
     G.inited = 0; G.active = 0; G.cur = -1; G.prev_mag_in = 0; G.prev_state = VRR_OFF; G.fire_edge = 0;
     G.boot_done = 0; G.last_ns = 0; G.det_t = 0;
+    aimfix_clear();
     memset(&G.ro, 0, sizeof G.ro);
     G.ro.sync_rounds = G.ro.sync_chambered = -1;
     publish_off();      /* un arma publicada antes de reiniciar el motor no debe quedarse dibujada */
@@ -874,6 +903,7 @@ static int game_has_suppressor(const BridgeState *bs) {
 
 /* Diagnóstico [arma] (una línea por segundo): por qué el arma VR se ve o no, y su estado. Los campos que aún no se conocen valen -1. */
 extern int w_pist_trig_armed(const WeaponState *ws);   /* vr/weapons/w_pist.c */
+extern const float w_pist_bare_muzzle_z;               /* vr/weapons/w_pist.c: boca del cañón sin supresor (la de w_pist al disparar) */
 typedef struct {
     int eq_slot, load, mode, cam, core, gpw;
     int rstate, fire_allowed, engaged, supp;
@@ -984,6 +1014,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         G.cur = -1;
         G.det_t = 0;             /* una pulsación de detonación a medias no sobrevive a desequipar el arma */
         vrbody_set_armed(0);
+        aimfix_clear();
         vrfire_set_hide(0);
         VrFireGame fg;
         vrfire_read_game(ram, bs, &fg);
@@ -1017,7 +1048,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     G.active = 1;
     G.cur = slot;
     vrbody_set_armed(1);
-    vrfire_set_hide(sl->native ? 0 : 1);      /* con textura incompleta el arma que se ve es la del juego: no se oculta (la granada lanzada tampoco se oculta nunca: es otro actor) */
+    vrfire_set_hide(sl->native ? 0 : 1);      /* las granadas (sl->native, vrgame_weapon_uses_game_model) se dibujan siempre con el modelo del juego y no se oculta; el resto lleva modelo VR y se oculta el del juego (la granada lanzada tampoco se oculta nunca: es otro actor) */
 
     /* tope/sincronía del cargador VR con el del juego (vr_reload.h): solo con cargador dentro y fuera de la espera de recarga */
     if (G.mag_weapon) {
@@ -1055,6 +1086,36 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         vrhands_set_socket(sl->rig, sock);
     }
     in.hand[0] = vrhands_weapon_hand(sl->rig, &hp);
+    /* Boca = apuntado del mando: el eje del cañón (sin retroceso) se lleva al eje de apuntado (-Z de aim_rot) con el giro más corto, aplicado como giro extra agarre -> mano (vrbody_set_aim_fix) a la mano que
+     * empuña (y que dibuja vr_body) y al arma que cuelga de ella: la empuñadura sigue en el agarre del mando. La relación agarre/apuntado del mando es fija, así que converge en un fotograma y se queda;
+     * sin apuntado válido se mantiene la última corrección 0,25 s y se retira suavemente; solo en pistola y fusil (aimfix_weapon). */
+    {
+        int fixed_ok = 0;
+        if (!aimfix_weapon(gid)) { aimfix_clear_side(w); fixed_ok = 2; }      /* arma sin boca real: nunca se gira */
+        else if (hs[w].aim_valid && gp[w].valid) {
+            WPose gr = vrhands_grip(sl->rig, st);
+            WQuat bq = wquat_mul(wquat_mul(in.hand[0].q, wquat_inv(wquat_normalize(gr.q))), def->points[WP_MUZZLE].q);
+            WVec3 bwv = wquat_rotate(wquat_normalize(bq), wv(0, 0, -1));
+            float bw[3] = {bwv.x, bwv.y, bwv.z}, aw[3], z[3] = {0, 0, -1}, ax[3], axg[4], qc[4];
+            q_rot(hs[w].aim_rot, z, aw);
+            ax[0] = bw[1] * aw[2] - bw[2] * aw[1]; ax[1] = bw[2] * aw[0] - bw[0] * aw[2]; ax[2] = bw[0] * aw[1] - bw[1] * aw[0];
+            float sn = sqrtf(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]), cs = bw[0] * aw[0] + bw[1] * aw[1] + bw[2] * aw[2];
+            float ang = atan2f(sn, cs);
+            if (finite_n(bw, 3) && finite_n(aw, 3) && ang < 1.5f) {
+                fixed_ok = 1;
+                if (ang > 0.0005f) {      /* eje de giro en el marco del agarre: Dg = conj(q_agarre) Dw q_agarre; nuevo = Dg * actual */
+                    q_conj(gp[w].q, qc);
+                    q_rot(qc, ax, axg);
+                    float h = 0.5f * ang, k = sinf(h) / sn, dg[4] = {axg[0] * k, axg[1] * k, axg[2] * k, cosf(h)}, nf[4];
+                    q_mul(dg, aimfix_q[w], nf); q_norm(nf);
+                    memcpy(aimfix_q[w], nf, sizeof nf);
+                    vrbody_set_aim_fix(w, aimfix_q[w]);
+                }
+            }
+        }
+        if (fixed_ok == 1) aimfix_miss[w] = 0;
+        else if (fixed_ok == 0) aimfix_lost(w, dt);
+    }
     if (gp[o].valid) in.hand[1] = wpose_of(&gp[o]);
     else { in.hand[1].p.x = 0; in.hand[1].p.y = -10; in.hand[1].p.z = 0; in.hand[1].q.w = 1; }   /* sin mano libre: lejos de todo punto de interacción */
     in.trigger[0] = hs[w].trigger;
@@ -1134,6 +1195,15 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
             fi.ready = st->phase == WT_PH_READY;
         }
         special_view(gid, st, def, &W, &in);
+        /* láser de la pistola (w_laser.h): desde la boca (la del disparo: sin supresor, la del cañón) a lo largo de su eje, el mismo con el que vr_fire orienta la bala; solo con el jugador al mando y el arma levantada */
+        WPose lz = def->points[WP_MUZZLE];
+        if (gid == 0 && !(in.game_flags & WGF_SUPP)) lz.p.z = w_pist_bare_muzzle_z;
+        lz = wpose_mul(W, lz);
+        int lz_on = gid == 0 && bs->in_control && wlaser_raised(&lz);
+        pthread_mutex_lock(&HM);
+        pub_laser.on = lz_on;
+        if (lz_on) { pub_laser.p[0] = lz.p.x; pub_laser.p[1] = lz.p.y; pub_laser.p[2] = lz.p.z; pub_laser.q[0] = lz.q.x; pub_laser.q[1] = lz.q.y; pub_laser.q[2] = lz.q.z; pub_laser.q[3] = lz.q.w; }
+        pthread_mutex_unlock(&HM);
     }
     fi.fire = G.fire_edge && ro.fire_allowed;
     fi.fire_pose = G.fire_pose;
@@ -1362,7 +1432,10 @@ static void agarre_diag(uint64_t now, int side, const GripPose *wh, const GripPo
 int mv_host_hands(VrHandsFrame *out) {
     static VrHandsMesh buf[VRH_MAX_MESHES];
     static VrHandsTex tbuf[VRH_MAX_BOUND + 1];
-    int rc, copied = 0;
+    static WLaserMesh lzbuf[3];       /* láser: el renderer lee el frame anterior mientras se arma el siguiente (mismo anillo de 3 que vr_hands) */
+    static unsigned lzi;
+    int rc, copied = 0, have_d = 0;
+    float dq[4] = {0, 0, 0, 1}, dp[3] = {0, 0, 0};      /* movimiento rígido de la mano desde la simulación (D), para el láser */
     uint64_t now = mono_ns();
     pthread_mutex_lock(&HM);
     glv_read = -1;
@@ -1383,6 +1456,7 @@ int mv_host_hands(VrHandsFrame *out) {
             if (dmove < 0.35f && ang < 1.2f) {
                 float D[16];
                 m16_from_pq(pd, qd, D);
+                memcpy(dq, qd, sizeof dq); memcpy(dp, pd, sizeof dp); have_d = 1;
                 for (int k = 0; k < out->nmeshes; k++) {
                     buf[k] = out->meshes[k];
                     if (buf[k].flags & VRH_MF_HELD) continue;
@@ -1416,6 +1490,33 @@ int mv_host_hands(VrHandsFrame *out) {
         tbuf[nt] = gtex;
         out->tex = tbuf; out->ntex = nt + 1;
         rc = 1;
+    }
+    /* láser de la pistola: una malla dinámica más al final de la lista (el renderer admite 8 dinámicas por frame: 6 del guante + 1). Con la misma compensación de latencia que el arma. */
+    if (pub_laser.on && (!rc || (out->meshes && out->nmeshes > 0 && out->nmeshes < VRH_MAX_MESHES))) {
+        float lp[3], lq[4];
+        memcpy(lp, pub_laser.p, sizeof lp); memcpy(lq, pub_laser.q, sizeof lq);
+        if (have_d) {
+            float rp[3], nq[4];
+            q_rot(dq, lp, rp);
+            for (int i = 0; i < 3; i++) lp[i] = rp[i] + dp[i];
+            q_mul(dq, lq, nq); q_norm(nq);
+            memcpy(lq, nq, sizeof lq);
+        }
+        WPose lz = {{lp[0], lp[1], lp[2]}, {lq[0], lq[1], lq[2], lq[3]}};
+        WLaserMesh *lm = &lzbuf[lzi % 3];
+        if (wlaser_build(&lz, WLASER_MAX_M, lm)) {
+            lzi++;
+            int n0 = rc ? out->nmeshes : 0;
+            if (!rc) {                       /* sin arma publicada ni guante: iluminación por defecto de vr/hands */
+                VrHandsConfig hc;
+                vrhands_default_config(&hc);
+                memset(out, 0, sizeof *out);
+                memcpy(out->light_dir, hc.light_dir, sizeof out->light_dir); out->ambient = hc.ambient; out->diffuse = hc.diffuse;
+            } else if (out->meshes != buf) memcpy(buf, out->meshes, (size_t)n0 * sizeof buf[0]);
+            wlaser_mesh(lm, &buf[n0]);
+            out->meshes = buf; out->nmeshes = n0 + 1;
+            rc = 1;
+        }
     }
     pthread_mutex_unlock(&HM);
     return rc;

@@ -95,6 +95,9 @@ int main(void) {
           && strstr(rg, "if let w = wavePlan { encodePost(commandBuffer, w.plan, projections: projections, layered: layered, wave: w.wave) }") != NULL
           && count_range(rg, "private func planWave(", "private func encodePost(", "viewportOverride == nil, rasterizationRateMap == nil") == 1
           && count_range(rg, "private func planWave(", "private func encodePost(", "n.waveParams") == 1, "RenderRG: plan y pase de la onda de pantalla solo en el modo nativo, sin viewport propio ni mapa de tasas");
+    CHECK(count_range(rg, "private func encodeStereo(", "private func encodeStereoGPU(", "n.waveParams") == 1
+          && count_range(rg, "private func encodeStereo(", "private func encodeStereoGPU(", "warpOnly: true, wave:") == 1,
+          "encodeStereo nativo: onda de agua de la cinemática (waveParams + encodePost wave)");
 
     /* 3) presentación: repetir el último válido o negro; nunca GPU */
     CHECK(strstr(rg, "n.present(ready:") != NULL, "prepareNative usa ns_present (repetir último válido / negro)");

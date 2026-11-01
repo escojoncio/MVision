@@ -129,6 +129,7 @@ typedef struct VrCamRecord {
     double turn_total_deg;   /* giro del stick acumulado (suma de vrcam_turn, + izquierda) en el momento de construir la cámara */
     uint32_t epoch;          /* recentrados hechos hasta esta cámara (cambia el sistema de referencia del espacio del usuario) */
     uint32_t vbl;            /* VBlanks vistos por vrcam_frame hasta construir esta cámara (reloj de juego sin fluctuación: 1 VBlank = 20 ms) */
+    float eye_shift[3];      /* desplazamiento del ojo por las paredes del juego (vr_hzd: ojo limitado - ojo libre, unidades del motor; 0 sin empuje). El cuerpo del jugador se desplaza lo mismo (vr_body) */
 } VrCamRecord;
 const VrCamRecord *vrcam_last_record(void);
 uint32_t vrcam_draw_count(void);                         /* envíos de frame al GPU vistos */
@@ -151,6 +152,7 @@ typedef struct VrCamPlan {
     float yaw_deg, pitch_deg, theta_play_deg;
     float head[16];
     float p_ref[3];
+    float eye_shift[3];      /* ojo dado al motor - ojo del modelo, por vrhzd_clamp_eye (0 sin empuje) */
 } VrCamPlan;
 /* Antes de construir la cámara principal. Devuelve 1 y rellena `p` si la cámara VR manda ahora; 0 si no (usar los
  * argumentos originales). Fija el estado "activo" del frame (vrcam_active). `zoom` = distancia de pantalla que pide

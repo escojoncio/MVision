@@ -1131,21 +1131,28 @@ final class RGRenderer {
         guard let n = native else { return }
         let fade = n.lastPresent.fade
         if !(gotNew || stereoDirty || !stereoRendered || n.sceneSeq != stereoSeq || fade != stereoFade) { return }
+        // Onda de agua de la cinemática (cabeza del motor dentro del agua): la escena de cada ojo va a una textura intermedia y un pase por ojo la copia a la pantalla 3D desplazando las filas (vr_fs_wave, solo onda).
+        let wave = screenFilterEnabled ? n.waveParams : nil
+        let pre: [MTLTexture]? = (wave != nil && ensureFrameTextures() && postPipeline(format: colorFormat, layered: false, wave: true) != nil) ? stereoPreTextures() : nil
+        var projs: [simd_float4x4] = []
         var rendered = 0
         for e in 0..<2 {
             guard let cam = stereoCamera(e, r) else { return }
             var u = VrSceneUniforms()
             let proj = XRMath.projection(tangents: cam.tangents, near: 0.05, far: 800)
+            projs.append(proj)
             let m = proj * cam.view
             u.view_proj = (m, m)
             u.head = SIMD4<Float>(0, 0, 0, 1)
             let t = cam.view.inverse.columns.3
-            let color = stereoMSAAColor ?? stereoSlices[e]
+            let target = pre?[e] ?? stereoSlices[e]
+            let color = stereoMSAAColor ?? target
             let cams = NativeCams(viewProj: [m], projections: [proj], eyes: [SIMD3<Float>(t.x, t.y, t.z)], eyeIndex: e)
-            if encodeScene(cb, color: color, depth: d, resolve: stereoMSAAColor != nil ? stereoSlices[e] : nil, uniforms: u, amplify: 0, viewIndex: 0,
+            if encodeScene(cb, color: color, depth: d, resolve: stereoMSAAColor != nil ? target : nil, uniforms: u, amplify: 0, viewIndex: 0,
                            views: [], projections: [], isAux: true, last: true, cams: cams) { rendered += 1 }
         }
         guard rendered == 2 else { return }
+        if let p = pre, let w = wave { encodePost(cb, PostPlan(sceneColor: p, sceneResolve: [], fxTex: p, dst: stereoSlices), projections: projs, layered: false, warpOnly: true, wave: w) }
         stereoPassDiag = "\(auxPassDiag) tris/ojo=\(n.statTrisEye) dibujos=\(n.statDraws)"
         stereoSeq = n.sceneSeq
         stereoFade = fade
