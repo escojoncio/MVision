@@ -283,6 +283,42 @@ static void t_full(void) {
     rt_prov_set(0);
 }
 
+/* el id es por clave (nombre del actor + rutina), no por instancia: miles de instancias de pocos tipos no llenan la tabla */
+static void t_instances(void) {
+    rt_prov_reset(); rt_prov_set(1); reset();
+    for (int k = 0; k < 16; k++) { char s[16]; snprintf(s, sizeof s, "tipo%d.c", k % 4); put_str(0x80170000u + 0x20u * (uint32_t)k, s); }
+    uint16_t first[4] = {0, 0, 0, 0};
+    for (unsigned i = 0; i < 5200; i++) {
+        unsigned k = i % 4;
+        uint32_t fn = 0x80021400u + 0x10u * k, node = 0x80140000u + 0x20u * i;
+        put_actor(node, fn, 0x80170000u + 0x20u * (i % 16));   /* cada instancia con su nodo y su puntero al nombre */
+        uint16_t old = rt_prov_enter(fn, node); uint16_t id = rt_prov_cur; rt_prov_leave(old);
+        if (i < 4) first[i] = id;
+        else EQ(id, first[k]);                                   /* misma clave: mismo id */
+    }
+    EQ(rt_prov_full, 0); EQ(rt_prov_n, 4);
+    for (int i = 0; i < 4; i++) {
+        char s[16]; snprintf(s, sizeof s, "tipo%d.c", i);
+        OK(first[i] != 0); EQ(rt_prov_tab[first[i]].fn, 0x80021400u + 0x10u * (uint32_t)i); OK(!strcmp(rt_prov_tab[first[i]].name, s));
+        OK(rt_prov_tab[first[i]].actor_node != 0);
+        for (int j = 0; j < i; j++) OK(first[i] != first[j]);
+    }
+    /* mismo nodo reutilizado con otro nombre (memoria reciclada): otra clave */
+    put_str(0x80171000u, "otro.c"); put_actor(0x80140000u, 0x80021400u, 0x80171000u);
+    uint16_t old = rt_prov_enter(0x80021400u, 0x80140000u); OK(rt_prov_cur != 0 && rt_prov_cur != first[0]); rt_prov_leave(old);
+    EQ(rt_prov_n, 5);
+    /* más de PROV_MAX-1 claves realmente distintas: id 0 y contado */
+    rt_prov_reset(); reset();
+    for (unsigned i = 0; i < 1100; i++) {
+        char s[16]; snprintf(s, sizeof s, "n%u", i);
+        uint32_t node = 0x80140000u + 0x20u * i, nm = 0x80180000u + 0x20u * i;
+        put_str(nm, s); put_actor(node, 0x80021500u, nm);
+        uint16_t o = rt_prov_enter(0x80021500u, node); if (i >= PROV_MAX - 1) EQ(rt_prov_cur, 0); rt_prov_leave(o);
+    }
+    EQ(rt_prov_n, PROV_MAX - 1); EQ(rt_prov_full, 1100 - (PROV_MAX - 1));
+    rt_prov_set(0);
+}
+
 /* gpu_draw_list: el paquete encadenado dentro de rt_call(act) lleva su procedencia y su dirección */
 static void t_gpu(void) {
     rt_prov_reset(); rt_prov_set(1); reset(); gpu_reset();
@@ -392,6 +428,7 @@ int main(int argc, char **argv) {
     t_stack();
     t_actors();
     t_full();
+    t_instances();
     t_gpu();
     if (fails) { printf("prov: %d FALLOS\n", fails); return 1; }
     printf("prov: todas las pruebas OK\n");

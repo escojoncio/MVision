@@ -40,17 +40,23 @@ static void read_name(uint32_t node, char out[20]) {
     out[n] = 0;
 }
 
+/* Un id por CLAVE (rutina, ¿es actor?, nombre del actor), no por instancia: las instancias de un mismo tipo de actor comparten id y la tabla
+ * queda acotada por el número de tipos. actor_node guarda el primer nodo visto (informativo). */
 static uint16_t intern(uint32_t fn, uint32_t node) {
-    unsigned h = ((fn >> 2) * 2654435761u ^ (node >> 2) * 40503u) & (HB - 1);
+    char name[20];
+    if (node) read_name(node, name); else name[0] = 0;
+    uint32_t hn = 2166136261u;
+    for (const char *p = name; *p; p++) hn = (hn ^ (uint8_t)*p) * 16777619u;
+    unsigned h = ((fn >> 2) * 2654435761u ^ hn ^ (node ? 0x9E3779B9u : 0)) & (HB - 1);
     while (htab[h]) {
         const ProvEntry *e = &rt_prov_tab[htab[h]];
-        if (e->fn == fn && e->actor_node == node) return e->id;
+        if (e->fn == fn && (e->actor_node != 0) == (node != 0) && !strcmp(e->name, name)) return e->id;
         h = (h + 1) & (HB - 1);
     }
     if (rt_prov_n >= PROV_MAX - 1) { rt_prov_full++; return 0; }
     ProvEntry *e = &rt_prov_tab[++rt_prov_n];
     e->id = (uint16_t)rt_prov_n; e->fn = fn; e->actor_node = node;
-    if (node) read_name(node, e->name);
+    memcpy(e->name, name, sizeof name);
     htab[h] = e->id;
     return e->id;
 }

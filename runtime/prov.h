@@ -1,7 +1,7 @@
 #pragma once
 /* Procedencia (provenance) de las primitivas de la GPU: qué rutina del juego escribió cada palabra de RAM.
- *  - Cada llamada indirecta (jalr / rt_jump / rt_call) abre un ÁMBITO: rt_prov_cur = id interno de (función destino, nodo de actor).
- *    El nodo es a0 si parece un nodo de actor (RAM, con su +8 = la función llamada); su nombre de depuración es la cadena de +20.
+ *  - Cada llamada indirecta (jalr / rt_jump / rt_call) abre un ÁMBITO: rt_prov_cur = id interno de (función destino, nombre del actor): las instancias del mismo tipo comparten id.
+ *    El nodo (ProvEntry.actor_node = el primero visto con esa clave) es a0 si parece un nodo de actor (RAM, con su +8 = la función llamada); su nombre de depuración es la cadena de +20.
  *  - Toda escritura del juego a RAM (mem_w8/16/32 y las rutas rápidas del intérprete) anota el ámbito vigente en rt_prov_mem (por palabra).
  *    Las escrituras del HLE en C (memcpy, DMA) no pasan por ahí y quedan con 0 (sin procedencia).
  *  - gpu_draw_list lee rt_prov_mem de la palabra-etiqueta de cada paquete de la OT (quién lo encadenó) y la guarda en GpuOp.prov.
