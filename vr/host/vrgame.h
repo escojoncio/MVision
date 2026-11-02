@@ -147,6 +147,8 @@ int vrgame_hand_raw(int side, float p[3], float *grip, float *trig, double *t_s)
 uint16_t vrgame_weapon_model(int game_id);
 int vrgame_weapon_uses_game_model(int game_id);   /* 1 = el arma se dibuja con el modelo real del juego (granadas 2, 7, 8: escena nativa, sin ocultar); su lógica VR sigue */
 void vrgame_test_install(int game_id, void *def, void *state, void *rig);   /* pruebas: arma ya construida (WeaponDef, WeaponState, VrHandsRig) en la ranura de su id */
+void vrgame_test_clock(uint64_t ns);                                 /* pruebas: reloj inyectado que arranca en ns (0 = vuelve al reloj real); solo avanza con vrgame_test_advance */
+void vrgame_test_advance(uint64_t ns);                                 /* pruebas: avanza el reloj inyectado */
 void vrgame_test_set_native(int game_id, int on);                          /* pruebas: marca la ranura como «dibujada por el juego» (textura incompleta) */
 int vrgame_hand_pose_in(int side, int *item_pose, float *trigger, float *thumb);   /* pose de la mano nueva (vr_hand_pose.h: HP_*), gatillo y pulgar de la mano física side; 1 si hay seguimiento (si no, HP_RELAX y ceros) */
 int vrgame_glove_pub(void);                                              /* hueco publicado de los guantes (-1 = ninguno) */

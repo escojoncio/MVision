@@ -59,7 +59,7 @@ static void set_hand(float trig, float grip) {
     mv_vrgame_set_hand(1, &h);
 }
 static void vbl(float trig, int n) {
-    for (int i = 0; i < n; i++) { usleep(8000); set_hand(trig, 1.0f);   /* el arma avanza con el reloj real: ~8 ms por VBlank de prueba */ uint16_t o = vrgame_pad(0, &bs, ram); if (o & PAD_SQUARE) sq_seen++; }
+    for (int i = 0; i < n; i++) { vrgame_test_advance(8000000ull); set_hand(trig, 1.0f);   /* reloj inyectado: 8 ms por VBlank de prueba, sin depender de la carga de la máquina */ uint16_t o = vrgame_pad(0, &bs, ram); if (o & PAD_SQUARE) sq_seen++; }
 }
 static void world(int weapon, int mag, int total) {
     memset(&bs, 0, sizeof bs);
@@ -148,7 +148,7 @@ static uint16_t gvbl(float x, float grip, float trig, uint16_t pad) {
     memset(&h, 0, sizeof h);
     h.valid = 1; h.pos[0] = x; h.pos[1] = 1.2f; h.pos[2] = -0.3f; h.rot[3] = 1.0f; h.trigger = trig; h.grip = grip;
     mv_vrgame_set_hand(1, &h);
-    usleep(8000);
+    vrgame_test_advance(8000000ull);
     uint16_t o = vrgame_pad(pad, &bs, ram);
     if (o & PAD_SQUARE) sq_seen++;
     return o;
@@ -326,7 +326,7 @@ static void weapon_follows_controller(void) {
             float p[3] = {t_rnd() * 2 - 1, 0.8f + t_rnd(), -t_rnd()}, q[4], R[9], dir[3], org[3];
             t_rand_quat(q);
             hand_at(side, p, q);
-            usleep(2000);
+            vrgame_test_advance(2000000ull);
             vrgame_pad(0, &bs, ram);
             if (!drawn_weapon(dir, org)) continue;
             shown++;
@@ -370,7 +370,7 @@ static void weapon_follows_controller(void) {
             float qs[4]; memcpy(qs, q, sizeof qs);
             if (k % 7 == 3) for (int i = 0; i < 4; i++) qs[i] = -qs[i];        /* mismo giro, otro signo */
             hand_at(side, p, qs);
-            usleep(2000);
+            vrgame_test_advance(2000000ull);
             vrgame_pad(0, &bs, ram);
             float dir[3], org[3];
             if (!drawn_weapon(dir, org)) continue;
@@ -420,7 +420,7 @@ static void hand_trig(const float p[3], const float q[4], float trig) {
     h.valid = 1; memcpy(h.pos, p, sizeof h.pos); memcpy(h.rot, q, sizeof h.rot); h.grip = 1.0f; h.trigger = trig;
     mv_vrgame_set_hand(1, &h);
 }
-static void lvbl(const float p[3], const float q[4], float trig, int n) { for (int i = 0; i < n; i++) { usleep(8000); hand_trig(p, q, trig); vrgame_pad(0, &bs, ram); } }
+static void lvbl(const float p[3], const float q[4], float trig, int n) { for (int i = 0; i < n; i++) { vrgame_test_advance(8000000ull); hand_trig(p, q, trig); vrgame_pad(0, &bs, ram); } }
 /* Mallas láser del frame del renderer (mv_host_hands): cuántas hay y, de la primera, origen (centro del anillo en la boca) y eje (hacia el anillo lejano) en el espacio VR; len = su longitud. */
 static int drawn_laser(float org[3], float ax[3], float *len) {
     VrHandsFrame f;
@@ -597,7 +597,7 @@ static void hand_aim(const float p[3], const float q[4], const float aq[4], floa
     if (aq) { h.aim_valid = 1; memcpy(h.aim_pos, p, sizeof h.aim_pos); memcpy(h.aim_rot, aq, sizeof h.aim_rot); }
     mv_vrgame_set_hand(1, &h);
 }
-static void avbl(const float p[3], const float q[4], const float aq[4], float trig, int n) { for (int i = 0; i < n; i++) { usleep(8000); hand_aim(p, q, aq, trig); vrgame_pad(0, &bs, ram); } }
+static void avbl(const float p[3], const float q[4], const float aq[4], float trig, int n) { for (int i = 0; i < n; i++) { vrgame_test_advance(8000000ull); hand_aim(p, q, aq, trig); vrgame_pad(0, &bs, ram); } }
 static void rot_z(const float q[4], float o[3]) { float R[9]; t_qmat(q, R); o[0] = -R[2]; o[1] = -R[5]; o[2] = -R[8]; }
 static void aim_pose(void) {
     printf("-- boca = apuntado del mando --\n");
@@ -705,6 +705,7 @@ static void aim_guard(void) {
 }
 
 int main(void) {
+    vrgame_test_clock(1000000000ull);                               /* tiempo simulado: los dt de vrgame_pad y la antigüedad de las manos no dependen del reloj real */
     VrBodyConfig bc;
     vrbody_config_default(&bc);
     vrbody_init(&bc);

@@ -59,7 +59,11 @@ static int is_grenade(int game_id) { return game_id == 2 || game_id == 7 || game
  * propio juego (escena nativa, sin ocultarlo) y la lógica VR (gesto, trayectoria) sigue; el lanzado es siempre el actor del juego. Así la mano y el lanzado son el mismo modelo, uno solo. */
 int vrgame_weapon_uses_game_model(int game_id) { return is_grenade(game_id); }
 
+/* Reloj inyectable para las pruebas (vrgame_test_clock): por defecto, el monótono real. Con la inyección, el tiempo solo avanza con vrgame_test_advance (sin depender de la carga de la máquina). */
+static _Atomic int clk_fake;
+static _Atomic uint64_t clk_fake_ns;
 static uint64_t mono_ns(void) {
+    if (atomic_load_explicit(&clk_fake, memory_order_acquire)) return atomic_load_explicit(&clk_fake_ns, memory_order_relaxed);
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
@@ -893,6 +897,9 @@ void vrgame_test_install(int game_id, void *def, void *state, void *rig) {
     SL[si].def = (WeaponDef *)def; SL[si].st = (WeaponState *)state; SL[si].rig = (VrHandsRig *)rig;
     atomic_store(&SL[si].state, LD_READY);
 }
+
+void vrgame_test_clock(uint64_t ns) { atomic_store(&clk_fake_ns, ns); atomic_store_explicit(&clk_fake, ns != 0, memory_order_release); }
+void vrgame_test_advance(uint64_t ns) { atomic_fetch_add(&clk_fake_ns, ns); }
 
 void vrgame_test_set_native(int game_id, int on) { int si = slot_of(game_id); if (si >= 0) SL[si].native = on != 0; }
 
