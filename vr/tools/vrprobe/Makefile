@@ -14,7 +14,7 @@ EXE ?= ../../../gamedata/main.exe
 DISC ?= ../../../gamedata/disc
 SIGS_REF ?= ../../../gamedata/sigs_ref.json
 SIGS ?= $(BUILD)/sigs_hle.json
-SRC_VR := $(VR)/bridge/bridge.c $(VR)/bridge/bridge_addrs.c $(VR)/camera/vr_camera.c $(VR)/camera/vr_heading.c $(VR)/camera/vr_headcol.c $(VR)/camera/vr_camera_hle.c $(VR)/input/vr_input.c $(VR)/input/vr_gesture.c $(VR)/input/vr_melee.c $(VR)/scene/vr_scene.c $(VR)/scene/vr_layer2d.c $(VR)/scene/vr_layer2d_async.c $(VR)/scene/vr_prov.c $(VR)/scene/vr_prov_rules.c \
+SRC_VR := $(VR)/bridge/bridge.c $(VR)/bridge/bridge_addrs.c $(VR)/camera/vr_camera.c $(VR)/camera/vr_heading.c $(VR)/camera/vr_headcol.c $(VR)/camera/vr_hzd_ray.c $(VR)/camera/vr_camera_hle.c $(VR)/input/vr_input.c $(VR)/input/vr_gesture.c $(VR)/input/vr_melee.c $(VR)/scene/vr_scene.c $(VR)/scene/vr_layer2d.c $(VR)/scene/vr_layer2d_async.c $(VR)/scene/vr_prov.c $(VR)/scene/vr_prov_rules.c \
   $(VR)/body/vr_body.c $(VR)/body/vr_fist.c $(VR)/body/vr_hand_skin.c $(VR)/body/vr_hand_asset.c $(VR)/body/vr_body_cam.c $(VR)/body/vr_pose.c $(VR)/radar/vr_radar.c $(VR)/radar/vr_radar_hle.c \
   $(VR)/hands/vr_hands.c $(VR)/hands/vr_glove.c $(VR)/hands/vr_grip.c $(VR)/hands/vr_hand_pose.c $(filter-out $(VR)/weapons/test_%.c,$(wildcard $(VR)/weapons/*.c)) \
   $(VR)/gameplay/vr_fire.c $(VR)/gameplay/vr_fire_hle.c $(VR)/gameplay/vr_aa.c $(VR)/gameplay/vr_missile.c $(VR)/gameplay/vr_scope.c $(VR)/gameplay/vr_reload.c \

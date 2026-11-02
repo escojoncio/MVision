@@ -17,6 +17,12 @@ int wlaser_raised(const WPose *muzzle) {
     return f.y >= WLASER_MIN_FWD_Y;
 }
 
+float wlaser_length(float hit_m) {
+    if (!isfinite(hit_m) || hit_m < 0.0f) return WLASER_MAX_M;
+    float l = hit_m - WLASER_SURF_GAP_M;
+    return l < 0.0f ? 0.0f : (l > WLASER_MAX_M ? WLASER_MAX_M : l);
+}
+
 static void put(VrHandsVertex *v, WVec3 p, WVec3 n) {
     v->pos[0] = p.x; v->pos[1] = p.y; v->pos[2] = p.z;
     v->nrm[0] = n.x; v->nrm[1] = n.y; v->nrm[2] = n.z;

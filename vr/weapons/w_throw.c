@@ -1,8 +1,10 @@
 /* Arrojadizas en mano: tres variantes (throw_frag, throw_b, throw_c) con espoletas distintas.
- * Interacción: el objeto equipado aparece en la mano (sin gesto). Cerrar la mano (agarre) = "listo" (el anfitrión mantiene el botón de ataque del
- * juego, que es el que saca el pasador); abrirla = lanzamiento físico con la velocidad lineal/angular de la mano estimada con el historial de poses
- * (wvh_estimate). Por debajo de V_THROW_MIN (m/s) es un soltar suave (la velocidad medida, sin sonido de lanzamiento). Sin anilla, pasador ni palanca
- * propios: el pasador y la palanca son piezas del modelo, pegadas a él.
+ * Interacción: el objeto equipado aparece en la mano (sin gesto). Apretar el GATILLO = "preparada" (el anfitrión mantiene el botón de ataque del
+ * juego, que es el que saca el pasador; mientras se mantiene no sale nada); soltarlo = lanzamiento físico con la velocidad lineal/angular de la mano
+ * estimada con el historial de poses (wvh_estimate) en la ventana V_WIN que acaba cuando el gatillo EMPIEZA a soltarse (no cuando acaba de abrirse: la
+ * mano ya frena). La velocidad de salida es la de la mano (ganancia 1, sin valor fijo); solo el tope físico V_MAX la limita. Soltar sin haber
+ * preparado no hace nada; el agarre no interviene. Por debajo de V_THROW_MIN (m/s) es un soltar suave (la velocidad medida, sin sonido de
+ * lanzamiento). Sin anilla, pasador ni palanca propios: el pasador y la palanca son piezas del modelo, pegadas a él.
  * Si el juego rechaza el evento (w5_emit devuelve 0) no se gasta nada: la arrojadiza sigue lista y se reintenta cada RETRY_T s. */
 #include "w_throw.h"
 #include "wcore.h"
@@ -11,15 +13,16 @@
 
 
 /* ---------------------------------------------------------------- parámetros ajustables */
-#define GRIP_ON           0.70f   /* umbrales de agarre con histéresis */
-#define GRIP_OFF          0.25f
+#define TRIG_ON           0.70f   /* umbrales del gatillo con histéresis: por encima se prepara; por debajo de TRIG_ON empieza a soltarse; por debajo de TRIG_OFF se lanza */
+#define TRIG_OFF          0.40f
 #define V_THROW_MIN       1.0f    /* velocidad de la mano (m/s) por debajo de la cual el soltar es un dejar caer suave */
 #define V_MAX             22.0f   /* tope de velocidad de lanzamiento (m/s) */
 #define W_MAX             45.0f   /* tope de velocidad angular entregada (rad/s) */
 #define DT_MAX            0.1f    /* un cuadro largo no cuenta más que esto */
 #define RETRY_T           0.15f   /* espera antes de reintentar un evento rechazado */
-#define V_WIN             0.070f  /* ventana de estimación (s) */
-#define V_LAG             0.025f  /* latencia del agarre: se ignoran los últimos ms antes de detectar la suelta */
+#define V_WIN             0.100f  /* ventana de estimación (s) */
+#define V_LAG_MIN         0.010f  /* la ventana acaba al menos este tiempo antes del último muestreo (el borde de la parábola es ruidoso) */
+#define V_LAG_MAX         0.120f  /* ... y como mucho este tiempo antes (un soltar muy lento no mide una velocidad de hace medio segundo) */
 #define RESPAWN_T         0.40f   /* tiempo hasta volver a poder sacar otra */
 
 /* Datos ajustables por tipo: s de espoleta (provisionales; el juego pone la suya al crear la granada). */
@@ -167,6 +170,7 @@ static void throw_init_k(WeaponState *s, const WeaponDef *d, int kind) {
     s->phase = WT_PH_VEST;
     w5_hide(s, 1);
     wvh_reset(&t->hist);
+    t->rel_t = -1.0f;
 }
 
 static void snd(const WGameBridge *g, int id, int ev) { if (g && g->sound) g->sound(id, ev); }
@@ -183,7 +187,8 @@ static int throw_it(WThrowState *t, const WInput *in, const WGameBridge *g) {
     ev.fuse_left = KINDS[t->kind].fuse;
     ev.kind = WL_THROW;
     WVec3 vh, wh;
-    wvh_estimate(&t->hist, V_WIN, V_LAG, &vh, &wh);
+    float lag = t->rel_t >= 0 ? t->hist.clock - t->rel_t : 0.0f;       /* el instante que vale es el de empezar a soltar el gatillo, no el de detectarlo abierto */
+    wvh_estimate(&t->hist, V_WIN, wcore_clampf(lag, V_LAG_MIN, V_LAG_MAX), &vh, &wh);
     float wl = wv_len(wh);
     if (!(wl <= W_MAX)) wh = wl > 0 && wl == wl ? wv_scale(wh, W_MAX / wl) : wv(0, 0, 0);   /* tope (y NaN -> 0) */
     WVec3 r = wv_sub(ev.pose.p, in->hand[0].p);          /* de la mano al centro del objeto */
@@ -217,7 +222,7 @@ static void throw_update(WeaponState *s, const WInput *in, WReloadMode rm, const
     int id = d->game_weapon_id;
     s->t += dt;
     if (t->retry > 0) t->retry -= dt;
-    wvh_push(&t->hist, dt, in->hand[0]);
+    wvh_push(&t->hist, in->hand_dt > 0 ? in->hand_dt : dt, in->hand[0]);     /* el historial va en tiempo de pose: la velocidad no se ensucia con el desfase entre muestreo y llegada */
     int reserve = g && g->ammo_reserve ? g->ammo_reserve(id) : 1;
     if (reserve < 0) reserve = 0;
     s->mag_rounds = reserve;
@@ -233,15 +238,17 @@ static void throw_update(WeaponState *s, const WInput *in, WReloadMode rm, const
     case WT_PH_GONE:
         if (s->t > RESPAWN_T) { s->phase = WT_PH_VEST; s->t = 0; }
         break;
-    case WT_PH_HELD:      /* en la mano abierta; cerrarla (tras haberla abierto con el objeto) lo deja listo: el anfitrión pulsa el botón del juego */
-        if (in->grip[0] < GRIP_OFF) t->primed = 1;
-        else if (in->grip[0] > GRIP_ON && t->primed) {
-            s->phase = WT_PH_READY; s->t = 0;
+    case WT_PH_HELD:      /* en la mano, sin preparar; apretar el gatillo (tras haberlo soltado con el objeto en la mano) lo deja preparado: el anfitrión pulsa el botón del juego */
+        if (in->trigger[0] < TRIG_OFF) t->primed = 1;
+        else if (in->trigger[0] > TRIG_ON && t->primed) {
+            s->phase = WT_PH_READY; s->t = 0; t->rel_t = -1.0f;
             snd(g, id, W5_S_PIN); hap(g, 0, 0.4f, 0.04f);
         }
         break;
-    case WT_PH_READY:     /* abrir la mano lanza; un rechazo del juego lo deja listo y se reintenta */
-        if (in->grip[0] < GRIP_OFF && t->retry <= 0) throw_it(t, in, g);
+    case WT_PH_READY:     /* soltar el gatillo lanza; un rechazo del juego lo deja preparado y se reintenta */
+        if (in->trigger[0] >= TRIG_ON) t->rel_t = -1.0f;
+        else if (t->rel_t < 0) t->rel_t = t->hist.clock;               /* el gatillo empieza a soltarse */
+        if (in->trigger[0] < TRIG_OFF && t->retry <= 0) throw_it(t, in, g);
         break;
     }
 }

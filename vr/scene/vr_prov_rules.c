@@ -21,6 +21,9 @@ static const uint32_t F_HUD[] = {
     0x8003dc5cu, 0x8003c360u, 0x80043774u, 0x8003dbb0u, 0x8003fbc0u, 0x800407a0u, 0x800438e0u, 0x8004a8c4u, 0x8003c444u,   /* pares de 0x8009f460-0x8009f4a0 */
     0x80043790u, 0x8003dc3cu, 0x8003fc48u, 0x800407f0u, 0x80043a60u, 0};
 
+/* Rutinas que solo ENCADENAN paquetes que escribieron otros (no dibujan): etapa de ordenación del canal principal (tabla de etapas 0x8009E534, docs/escena_nativa.md §10) y la ordenación de canales que la llama. */
+static const uint32_t F_CHAIN[] = {0x8001da18u, 0x80018304u, 0};
+
 static int has_name(const ProvEntry *e, const char *const *names) {
     if (!e->name[0]) return 0;
     for (; *names; names++) if (strstr(e->name, *names)) return 1;
@@ -31,6 +34,8 @@ static int has_fn(const ProvEntry *e, const uint32_t *fns) {
     for (; *fns; fns++) if (e->fn == *fns) return 1;
     return 0;
 }
+
+int vpc_is_chain(const ProvEntry *e) { return e && has_fn(e, F_CHAIN); }
 
 int vpc_rule(const ProvEntry *e, const GpuOp *o) {
     if (!e) return VPC_UNKNOWN;

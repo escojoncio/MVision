@@ -163,6 +163,10 @@ void vrcam_commit(const uint8_t *ram, const VrCamPlan *p);
 /* Oculta la cabeza del modelo del jugador (partes marcadas como no visibles para las etapas siguientes del frame).
  * Devuelve el nº de partes ocultadas. Escribe en la RAM del juego. */
 int vrcam_hide_head(uint8_t *ram);
+/* 1 si hay un visor (prismáticos / mira: actores scope.c o sight.c) en las listas de actores del juego. Solo lee la RAM. */
+int vrcam_viewer_active(const uint8_t *ram);
+/* 1 si ahora hay que ocultar la cabeza: cfg.hide_head y (cámara VR activa o visor activo, aunque la cámara VR no lo esté). */
+int vrcam_hide_head_now(const uint8_t *ram);
 /* Anota un envío de frame al GPU que emitió las primitivas capturadas con seq en [seq_begin, seq_end) y le asocia el
  * registro de cámara vigente (el último construido, desplazado `draw_lag` construcciones; ver VrCamConfig). */
 void vrcam_note_draw(uint32_t seq_begin, uint32_t seq_end);

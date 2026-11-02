@@ -18,9 +18,12 @@ int vpc_layer_of(int cls) {
 }
 
 static int is_prim(const GpuOp *o) { return o->type == GPU_OP_POLY || o->type == GPU_OP_RECT || o->type == GPU_OP_LINE; }
-/* id de procedencia de la primitiva: quien encadenó el paquete (prov) o, si no consta, quien rellenó el comando (prov2) */
-static unsigned op_id(const GpuOp *o) { return o->prov ? o->prov : o->prov2; }
 static int id_ok(const GpuDrawList *l, unsigned id) { return l && l->prov && id > 0 && id < l->nprov && id < PROV_MAX; }
+/* id de procedencia de la primitiva: quien encadenó el paquete (prov) o, si no consta, quien rellenó el comando (prov2). Si lo encadenó una rutina de ordenación, que no dibuja, quien lo escribió (prov2; 0 si no consta o también es de ordenación) */
+static unsigned op_id(const GpuDrawList *l, const GpuOp *o) {
+    if (id_ok(l, o->prov) && vpc_is_chain(&l->prov[o->prov])) return id_ok(l, o->prov2) && !vpc_is_chain(&l->prov[o->prov2]) ? o->prov2 : 0;
+    return o->prov ? o->prov : o->prov2;
+}
 
 /* ------------------------------------------------------------------------------------------------ aprendizaje */
 void vpc_learn_reset(VrProvLearn *S) { if (S) memset(S, 0, sizeof *S); }
@@ -33,7 +36,7 @@ void vpc_learn_note(VrProvLearn *S, const GpuDrawList *l, int state) {
     for (uint32_t i = 0; i < l->nops; i++) {
         const GpuOp *o = &l->ops[i];
         if (!is_prim(o)) continue;
-        unsigned id = op_id(o);
+        unsigned id = op_id(l, o);
         if (!id_ok(l, id) || S->seen[id] == S->tick) continue;
         S->seen[id] = S->tick;   /* una vez por lista y id */
         if (state == VPC_ST_CLOSED) {
@@ -50,7 +53,7 @@ void vpc_learn_note(VrProvLearn *S, const GpuDrawList *l, int state) {
 /* ------------------------------------------------------------------------------------------------ clase de una primitiva */
 int vpc_class_op(const VrProvLearn *S, const GpuDrawList *l, const GpuOp *o) {
     if (!l || !o) return VPC_UNKNOWN;
-    unsigned id = op_id(o);
+    unsigned id = op_id(l, o);
     if (!id_ok(l, id)) return VPC_UNKNOWN;
     int c = vpc_rule(&l->prov[id], o);
     if ((c == VPC_HUD_WORLD || c == VPC_UNKNOWN) && S && S->win[id] == 1) return VPC_WINDOW;
@@ -110,7 +113,7 @@ void vpc_fx_extract(const VrProvLearn *S, const GpuDrawList *l, int rec_screen, 
     memset(rows, 0, sizeof rows);
     for (uint32_t i = 0; i < l->nops; i++) {
         const GpuOp *o = &l->ops[i];
-        if (!is_prim(o) || !id_ok(l, op_id(o))) continue;
+        if (!is_prim(o) || !id_ok(l, op_id(l, o))) continue;
         int c = vpc_class_op(S, l, o);
         if (c == VPC_FX_LETTERBOX) {
             int y0, y1;

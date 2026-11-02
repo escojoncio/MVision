@@ -151,6 +151,7 @@ void vrgame_test_set_native(int game_id, int on);                          /* pr
 int vrgame_hand_pose_in(int side, int *item_pose, float *trigger, float *thumb);   /* pose de la mano nueva (vr_hand_pose.h: HP_*), gatillo y pulgar de la mano física side; 1 si hay seguimiento (si no, HP_RELAX y ceros) */
 int vrgame_glove_pub(void);                                              /* hueco publicado de los guantes (-1 = ninguno) */
 int vrgame_weapon_engaged(void);                                       /* arma VR mostrada o recarga en curso */
+int vrgame_throw_hold(void);                                           /* arrojadiza VR (2, 7, 8) en la mano del arma, sin preparar o preparada */
 void vrgame_haptic(int side, float strength);                          /* pulso háptico (0..1) a la mano física */
 void vrgame_frame_end(void);                   /* una vez por VBlank, tras el puente: publica el antebrazo y el estado */
 

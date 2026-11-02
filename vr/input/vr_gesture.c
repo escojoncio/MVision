@@ -463,6 +463,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
     /* ventana del pecho: el GATILLO de la mano apretado (flanco) abre un intento; fuera de la zona se rechaza ya; dentro, debe mantenerse chest_hold_s */
     for (int s = 0; s < 2; s++) {
         if (!tedge[s] || ((g->menu_hold >> s) & 1) || g->chest_lock[s]) continue;
+        if (in->throw_hold && s == (c->right_handed ? 1 : 0)) continue;     /* arrojadiza en la mano del arma: el gatillo es suyo (preparar/lanzar), no abre la ventana de armas */
         if (chest[s]) { g->chest_live[s] = 1; g->chest_t[s] = 0; }
         else { out->pecho[s].valid = 1; out->pecho[s].dist = chest_d[s]; out->pecho[s].reason = "lejos"; }
     }
@@ -473,6 +474,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
         else if (!trg[s]) why = "soltado";
         else if (!chest[s]) why = "salio_zona";
         else if (grabbing || grab_start || g->gp_t[s] > 0) why = "agarre";
+        else if (in->throw_hold && s == (c->right_handed ? 1 : 0)) why = "arrojadiza";     /* se preparó con el intento en curso */
         if (!why) {
             g->chest_t[s] += dt;
             if (g->chest_t[s] + 1e-3f < c->chest_hold_s) continue;

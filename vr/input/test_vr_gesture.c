@@ -268,6 +268,26 @@ static int hold_trig(vrg_t *g, vrg_in_t *in, int s, int after, vrg_out_t *o) {
     for (int i = 0; i <= after; i++) { upd(g, in, o); opened |= o->menu_open[s] && (o->press & (VRG_L2 | VRG_R2)); }
     return opened;
 }
+/* arrojadiza VR en la mano del arma (HELD/READY): su gatillo la prepara/lanza y NO abre la ventana de armas del pecho; la otra mano sigue abriendo la de objetos, y sin arrojadiza se abre como siempre */
+static void t_chest_throw(void) {
+    vrg_out_t o; vrg_t g; vrg_init(&g); vrg_in_t in = base();
+    float c0[3], c1[3]; chest_center(&in, 0, c0); chest_center(&in, 1, c1);
+    memcpy(in.hand[1], c1, sizeof c1); settle(&g, &in, 12);
+    in.throw_hold = 1;
+    CHECK(!hold_trig(&g, &in, 1, 30, &o) && o.menu_open[1] == 0 && !(o.press & VRG_R2));          /* 0,6 s con el gatillo en el pecho */
+    in.trig[1] = 0; settle(&g, &in, 3);
+    memcpy(in.hand[0], c0, sizeof c0); settle(&g, &in, 12);
+    CHECK(hold_trig(&g, &in, 0, 15, &o) && (o.press & VRG_L2) && !(o.press & VRG_R2));            /* la mano libre abre objetos */
+    in.trig[0] = 0; settle(&g, &in, 3);
+    in.throw_hold = 0; settle(&g, &in, 12);
+    CHECK(hold_trig(&g, &in, 1, 15, &o) && (o.press & VRG_R2) && o.pecho[1].opened);              /* sin arrojadiza: abre */
+    in.trig[1] = 0; settle(&g, &in, 3);
+    in.trig[1] = 1; int op = 0;                                                                   /* se prepara con el intento ya en curso: se cancela */
+    for (int i = 0; i < 10; i++) upd(&g, &in, &o);
+    in.throw_hold = 1;
+    for (int i = 0; i < 30; i++) { upd(&g, &in, &o); op |= o.menu_open[1] || (o.press & VRG_R2); }
+    CHECK(!op);
+}
 static void t_chest(void) {
     for (int mode = 0; mode < 4; mode++) {            /* 0 de pie, 1 sentado, 2 girado 90 grados, 3 girado y sentado */
         vrg_out_t o; vrg_t g; vrg_init(&g); vrg_in_t in = base();
@@ -633,7 +653,7 @@ static void t_repeat(void) {
 
 int main(void) {
     t_repeat();
-    t_punch(); t_contact(); t_rules(); t_throw(); t_walk(); t_grab(); t_chest(); t_chest_phys(); t_menu_hold(); t_menu_loop(); t_trigmenu(); t_knock(); t_peek(); t_robust();
+    t_punch(); t_contact(); t_rules(); t_throw(); t_walk(); t_grab(); t_chest(); t_chest_throw(); t_chest_phys(); t_menu_hold(); t_menu_loop(); t_trigmenu(); t_knock(); t_peek(); t_robust();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails != 0;
 }

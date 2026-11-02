@@ -127,6 +127,7 @@ int mv_host_bridge(struct BridgeState *out);
  * que hay que SUMAR a la posición de la cabeza para dibujar el mundo (la esfera de la cabeza no atraviesa paredes; nunca se mueve al personaje del juego);
  * fade = 0..1 de negro progresivo si la cabeza empuja más allá del límite. Sin escena VR activa devuelve 0 y corr = 0. */
 float mv_vrhost_wall_distance(const float p_mm[3], float max_mm);   /* mm hasta la superficie estática más cercana (golpe en la pared); -1 ninguna */
+float mv_vrhost_ray_distance(const float o_mm[3], const float d[3], float max_mm);   /* mm hasta el primer impacto del rayo (mundo del motor) con la geometría sólida guardada (vrhc_raycast_world); -1 ninguno. Hilo de emulación */
 int mv_vrhost_head_limit(const float head[16], float dt, float corr[3], float *fade);
 /* Activa/desactiva el límite (defecto: activo; MV_HEADCOL=0 en el entorno lo apaga al arrancar) y fija el radio de la esfera en metros (0 = no cambiar). */
 void mv_vrhost_set_headcol(int enable, float radius_m);

@@ -83,6 +83,25 @@ static void t_limits(void) {
     CHECK(fabsf(sa - 2 * WLASER_DOT_MIN) < 1e-6f && sb > sa && fabsf(sb - 2 * WLASER_DOT_ANG * 15.0f) < 1e-5f, "punto %.4f m cerca y %.4f m a 15 m", sa, sb);
 }
 
+static void t_length(void) {
+    CHECK(wlaser_length(-1.0f) == WLASER_MAX_M && wlaser_length(NAN) == WLASER_MAX_M && wlaser_length(INFINITY) == WLASER_MAX_M, "sin impacto / no válida: 15 m");
+    CHECK(wlaser_length(WLASER_MAX_M + 5.0f) == WLASER_MAX_M && wlaser_length(WLASER_MAX_M + WLASER_SURF_GAP_M) == WLASER_MAX_M, "impacto más allá del alcance: 15 m");
+    CHECK(fabsf(wlaser_length(3.0f) - (3.0f - WLASER_SURF_GAP_M)) < 1e-6f, "impacto a 3 m: el rayo acaba 5 mm antes (%.4f)", wlaser_length(3.0f));
+    CHECK(wlaser_length(0.0f) == 0.0f && wlaser_length(WLASER_SURF_GAP_M * 0.5f) == 0.0f, "impacto pegado a la boca: longitud 0 (no se dibuja)");
+    float prev = -1.0f; int mono = 1;
+    for (int i = 0; i <= 400; i++) { float l = wlaser_length(0.05f * (float)i); if (l < prev || l > WLASER_MAX_M) mono = 0; prev = l; }
+    CHECK(mono, "monótona y acotada por 15 m");
+    /* la punta del octaedro (extremo del rayo) queda delante de la superficie, no sobre ella */
+    WPose mz = {{0, 1.2f, 0}, {0, 0, 0, 1}};
+    WLaserMesh m;
+    float surf = 2.0f;                                                            /* pared en z = -2 (delante = -Z) */
+    CHECK(wlaser_build(&mz, wlaser_length(surf), &m) == 1, "rayo hasta una pared a 2 m");
+    float zmin = 1e9f;                                                            /* punto más lejano de todo lo dibujado, en -Z */
+    for (int i = 0; i < WLASER_NV; i++) if (m.v[i].pos[2] < zmin) zmin = m.v[i].pos[2];
+    CHECK(-zmin <= surf - WLASER_SURF_GAP_M + 1e-5f && -zmin > surf - 0.02f, "todo el rayo y el punto quedan delante de la pared por >= 5 mm: llega a %.4f m", -zmin);
+    CHECK(wlaser_build(&mz, wlaser_length(0.03f), &m) == 0, "pared a 3 cm de la boca: nada que dibujar");
+}
+
 static void t_mesh(void) {
     WPose mz = {{0, 1.2f, -0.3f}, {0, 0, 0, 1}};
     WLaserMesh m;
@@ -119,6 +138,7 @@ static void t_raised(void) {
 int main(void) {
     printf("-- w_laser: geometría --\n"); t_geometry();
     printf("-- w_laser: límites y entradas degeneradas --\n"); t_limits();
+    printf("-- w_laser: longitud hasta el impacto --\n"); t_length();
     printf("-- w_laser: malla del frame --\n"); t_mesh();
     printf("-- w_laser: levantada --\n"); t_raised();
     printf(fails ? "FALLO w_laser: %d de %d\n" : "OK w_laser: %d comprobaciones, 0 fallos\n", fails ? fails : checks, checks);

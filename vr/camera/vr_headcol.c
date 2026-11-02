@@ -288,6 +288,48 @@ float vrhc_nearest_world(const float p[3], float max_units) {
     return found ? best : -1.0f;
 }
 
+/* Rayo o + t*d contra un triángulo (Möller-Trumbore, doble cara, tolerancia en el borde para no colarse por la costura de dos triángulos). t del impacto o -1. */
+static inline float ray_tri(const float o[3], const float d[3], const float v[3][3]) {
+    const float E = 1e-4f;
+    float e1[3], e2[3], p[3], tv[3], q[3];
+    sub3(v[1], v[0], e1); sub3(v[2], v[0], e2);
+    p[0] = d[1] * e2[2] - d[2] * e2[1]; p[1] = d[2] * e2[0] - d[0] * e2[2]; p[2] = d[0] * e2[1] - d[1] * e2[0];
+    float det = dot3(e1, p);
+    if (fabsf(det) < 1e-6f) return -1.0f;                   /* paralelo al plano del triángulo */
+    float inv = 1.0f / det;
+    sub3(o, v[0], tv);
+    float u = dot3(tv, p) * inv;
+    if (u < -E || u > 1.0f + E) return -1.0f;
+    q[0] = tv[1] * e1[2] - tv[2] * e1[1]; q[1] = tv[2] * e1[0] - tv[0] * e1[2]; q[2] = tv[0] * e1[1] - tv[1] * e1[0];
+    float w = dot3(d, q) * inv;
+    if (w < -E || u + w > 1.0f + E) return -1.0f;
+    return dot3(e2, q) * inv;
+}
+
+float vrhc_raycast_world(const float o[3], const float d[3], float max_units) {
+    if (!o || !d || !(max_units > 0.0f) || !isfinite(max_units)) return -1.0f;
+    for (int i = 0; i < 3; i++) if (!isfinite(o[i]) || !isfinite(d[i])) return -1.0f;
+    float dl = sqrtf(dot3(d, d));
+    if (!(dl > 1e-6f)) return -1.0f;
+    const float u[3] = {d[0] / dl, d[1] / dl, d[2] / dl};
+    float best = max_units;
+    int found = 0;
+    if (H.n_nat > 0 && H.nat_age < 1.0f) {                  /* escena nativa fresca (360 grados, sin fantasmas): la única fuente, como en la expulsión de la cabeza */
+        for (int i = 0; i < H.n_nat; i++) {
+            float t = ray_tri(o, u, (const float (*)[3])g_nat[i]);
+            if (t > 0.0f && t < best) { best = t; found = 1; }
+        }
+    } else if (H.tris) {                                    /* sin ella (modo gpu, escena no apta): lo visto en la lista de la GPU, guardado en el mundo fijo */
+        for (int i = 0; i < HC_SLOTS; i++) {
+            const HcTri *tr = &H.tris[i];
+            if (!alive(tr)) continue;
+            float t = ray_tri(o, u, (const float (*)[3])tr->v);
+            if (t > 0.0f && t < best) { best = t; found = 1; }
+        }
+    }
+    return found ? best : -1.0f;
+}
+
 static float smooth01(float x) { x = x < 0 ? 0 : (x > 1 ? 1 : x); return x * x * (3 - 2 * x); }
 
 int vrhc_query(const VrHcMap *m, const float head[3], float dt, VrHcOut *out) {

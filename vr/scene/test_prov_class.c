@@ -14,7 +14,7 @@ static GpuDrawList dl;
 static ProvEntry tab[64];
 
 /* ids de la tabla sintética */
-enum { I_CINEMA = 1, I_MOTSE, I_TELOP, I_FAMA, I_SCOPE, I_SIGHT, I_MENUMAN, I_CB, I_OTHER, I_EFFECT, I_SCOPE_FN, I_CINEMA_FN, I_WIN, I_X, I_LAST };
+enum { I_CINEMA = 1, I_MOTSE, I_TELOP, I_FAMA, I_SCOPE, I_SIGHT, I_MENUMAN, I_CB, I_OTHER, I_EFFECT, I_SCOPE_FN, I_CINEMA_FN, I_WIN, I_X, I_SORT, I_SORT2, I_LAST };
 
 static void set_e(int id, const char *name, uint32_t fn) {
     tab[id].id = (uint16_t)id; tab[id].fn = fn; tab[id].actor_node = name && name[0] ? 0x800be4e0u : 0;
@@ -33,6 +33,8 @@ static void reset(void) {
     set_e(I_CINEMA_FN, "", 0x800e1050u);
     set_e(I_WIN, "", 0x8003c360u);          /* callback de la ventana del selector (de la tabla) */
     set_e(I_X, "", 0x80099999u);
+    set_e(I_SORT, "", 0x8001da18u);         /* etapa de ordenación del canal principal: encadena paquetes que escribieron otros */
+    set_e(I_SORT2, "", 0x80018304u);        /* ordenación de canales (llama a las etapas) */
     dl.prov = tab; dl.nprov = I_LAST;
 }
 static GpuOp *add(int type, int prov) { GpuOp *o = &ops[dl.nops++]; o->type = (uint8_t)type; o->prov = (uint16_t)prov; return o; }
@@ -127,6 +129,55 @@ static void test_window_learning(void) {
     vpc_learn_note(NULL, &dl, VPC_ST_OPEN); vpc_learn_note(&S, NULL, VPC_ST_OPEN);
     { GpuDrawList nol = dl; nol.prov = NULL; nol.nprov = 0; vpc_learn_note(&S, &nol, VPC_ST_OPEN); vpc_learn_note(&S, &nol, VPC_ST_CLOSED); }
     CHECK(1, "ok");
+}
+
+/* Paquete encadenado por una rutina de ordenación (prov = ordenación): la procedencia es la de quien lo escribió (prov2); sin escritor conocido, UNKNOWN; con ámbito normal no cambia. */
+static void test_chain(void) {
+    reset();
+    CHECK(vpc_is_chain(&tab[I_SORT]) && vpc_is_chain(&tab[I_SORT2]) && !vpc_is_chain(&tab[I_MENUMAN]) && !vpc_is_chain(&tab[I_OTHER]) && !vpc_is_chain(NULL), "vpc_is_chain: solo las rutinas de ordenación");
+    GpuOp *a = rect(I_SORT, 0, 0, 320, 32, 0); a->prov2 = I_CINEMA;
+    CHECK(cls_of(NULL, a) == VPC_FX_LETTERBOX, "encadenado por la ordenación, escritor cinema.c: FX_LETTERBOX (%s)", vpc_class_name(cls_of(NULL, a)));
+    GpuOp *b = rect(I_SORT2, 0, 0, 8, 8, 0); b->prov2 = I_MENUMAN;
+    CHECK(cls_of(NULL, b) == VPC_HUD_WORLD, "encadenado por 0x80018304, escritor menuman.c: HUD_WORLD (%s)", vpc_class_name(cls_of(NULL, b)));
+    GpuOp *c = rect(I_SORT, 0, 0, 8, 8, GPU_F_TEXTURED); c->prov2 = I_SCOPE;
+    CHECK(cls_of(NULL, c) == VPC_SCOPE_TEXT, "escritor scope.c texturado: SCOPE_TEXT (%s)", vpc_class_name(cls_of(NULL, c)));
+    GpuOp *d = rect(I_SORT, 0, 0, 8, 8, 0);
+    CHECK(cls_of(NULL, d) == VPC_UNKNOWN, "ordenación sin escritor conocido: UNKNOWN");
+    GpuOp *e = rect(I_SORT, 0, 0, 8, 8, 0); e->prov2 = I_SORT2;
+    CHECK(cls_of(NULL, e) == VPC_UNKNOWN, "escritor que también es una rutina de ordenación: UNKNOWN");
+    GpuOp *f = rect(I_SORT, 0, 0, 8, 8, 0); f->prov2 = I_OTHER;
+    CHECK(cls_of(NULL, f) == VPC_UNKNOWN, "escritor de otra función: UNKNOWN");
+    GpuOp *g = rect(I_MENUMAN, 0, 0, 8, 8, 0); g->prov2 = I_CINEMA;
+    CHECK(cls_of(NULL, g) == VPC_HUD_WORLD, "ámbito normal: manda quien encadenó, prov2 no cambia nada (%s)", vpc_class_name(cls_of(NULL, g)));
+    GpuOp *h = rect(0, 0, 0, 8, 8, 0); h->prov2 = I_CINEMA;
+    CHECK(cls_of(NULL, h) == VPC_FX_LETTERBOX, "prov == 0 sigue usando prov2");
+    GpuOp *k = rect(I_SORT, 0, 0, 8, 8, 0); k->prov2 = (uint16_t)(I_LAST + 5);
+    CHECK(cls_of(NULL, k) == VPC_UNKNOWN, "escritor fuera de la tabla: UNKNOWN");
+
+    /* aprendizaje de la ventana por escritor: el id de la ordenación no se aprende; el escritor que solo emite con la ventana abierta sí */
+    reset();
+    VrProvLearn S; vpc_learn_reset(&S);
+    for (int i = 0; i < 40; i++) {
+        dl.nops = 0; memset(ops, 0, sizeof ops);
+        rect(I_SORT, 0, 100, 3, 3, 0)->prov2 = I_MENUMAN;
+        rect(I_SORT, 4, 100, 3, 3, 0);   /* sin escritor */
+        vpc_learn_note(&S, &dl, VPC_ST_CLOSED);
+    }
+    dl.nops = 0; memset(ops, 0, sizeof ops);
+    rect(I_SORT, 0, 100, 3, 3, 0)->prov2 = I_MENUMAN;
+    rect(I_SORT, 4, 100, 3, 3, 0)->prov2 = I_WIN;
+    rect(I_SORT, 8, 100, 3, 3, 0);
+    vpc_learn_note(&S, &dl, VPC_ST_OPEN);
+    CHECK(cls_of(&S, &ops[0]) == VPC_HUD_WORLD, "escritor que emite siempre: HUD_WORLD (%s)", vpc_class_name(cls_of(&S, &ops[0])));
+    CHECK(cls_of(&S, &ops[1]) == VPC_WINDOW, "escritor que solo emite con la ventana abierta: WINDOW, aunque lo encadene la ordenación (%s)", vpc_class_name(cls_of(&S, &ops[1])));
+    CHECK(cls_of(&S, &ops[2]) == VPC_UNKNOWN, "sin escritor no se aprende como ventana (%s)", vpc_class_name(cls_of(&S, &ops[2])));
+
+    /* efectos: bandas de cinemática encadenadas por la ordenación */
+    VrFx fx;
+    reset();
+    rect(I_SORT, 0, 0, 320, 32, 0)->prov2 = I_CINEMA; rect(I_SORT, 0, 208, 320, 32, 0)->prov2 = I_CINEMA;
+    vpc_fx_extract(NULL, &dl, 0, &fx);
+    CHECK(fabsf(fx.letterbox - 64.0f / 240.0f) < 1e-4f, "bandas de cinema.c encadenadas por la ordenación: letterbox %.4f", (double)fx.letterbox);
 }
 
 static void test_unknown_and_split(void) {
@@ -291,6 +342,7 @@ static void test_fx(void) {
 int main(void) {
     test_rules();
     test_window_learning();
+    test_chain();
     test_unknown_and_split();
     test_scene_hook();
     test_fx();

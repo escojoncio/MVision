@@ -43,8 +43,10 @@ $(OUT)/syn/patched.exe: $(OUT)/syn/orig.exe patch_exe.py
 	python3 patch_exe.py $< $@ --h 160 --hfov 179 --vfov 179 --no-divide --no-cull
 $(OUT)/syn/patched_wide.exe: $(OUT)/syn/orig.exe patch_exe.py
 	python3 patch_exe.py $< $@ --h 160 --hfov 179 --vfov 179 --no-divide --no-cull --wide-points
-test: $(OUT)/test_camera $(OUT)/syn/patched.exe $(OUT)/syn/patched_wide.exe $(OUT)/test_native_coh
+test: $(OUT)/test_camera $(OUT)/syn/patched.exe $(OUT)/syn/patched_wide.exe $(OUT)/test_native_coh $(OUT)/test_hzd $(OUT)/test_headcol
 	$(OUT)/test_native_coh
+	$(OUT)/test_hzd
+	$(OUT)/test_headcol
 	VRCAM_EXE=$(OUT)/syn/orig.exe VRCAM_EXE_PATCHED=$(OUT)/syn/patched.exe VRCAM_EXE_PATCHED_WIDE=$(OUT)/syn/patched_wide.exe $(OUT)/test_camera
 	@if [ -f "$(EXE)" ]; then python3 patch_exe.py $(EXE) $(OUT)/syn/real_patched.exe --h 160 --hfov 179 --vfov 179 --no-divide --no-cull && \
 	  VRCAM_EXE=$(EXE) VRCAM_EXE_PATCHED=$(OUT)/syn/real_patched.exe $(OUT)/test_camera; fi
@@ -117,9 +119,9 @@ $(OUT)/test_headcol: test_headcol.c vr_headcol.c vr_headcol.h vr_camera.h $(SC)/
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -I. -I$(BR) -I$(SC) -I$(RT) test_headcol.c vr_headcol.c -o $@ -lm
 # Pared de colisión del juego (hzd): el ojo no sale del conducto. Con VRHZD_DUMPS=<carpeta de volcados> comprueba también los volcados reales.
-$(OUT)/test_hzd: test_hzd.c vr_hzd.c vr_hzd.h
+$(OUT)/test_hzd: test_hzd.c vr_hzd.c vr_hzd_ray.c vr_hzd.h
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -DVRHZD_STANDALONE -I. test_hzd.c vr_hzd.c -o $@ -lm
+	$(CC) $(CFLAGS) -DVRHZD_STANDALONE -I. test_hzd.c vr_hzd.c vr_hzd_ray.c -o $@ -lm
 test-hzd: $(OUT)/test_hzd
 	$(OUT)/test_hzd
 test-headcol: $(OUT)/test_headcol

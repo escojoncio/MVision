@@ -59,7 +59,7 @@ void hle_vrcam_padorg(Cpu *c) {
  * brazos del modelo en la pose IK de las manos (vr/body; solo modifica las matrices de 6 piezas, se restauran en
  * hle_vrbody_sort al terminar el dibujado). */
 void hle_vrcam_trans(Cpu *c) {
-    if (vrcam_active() && vrcam_config()->hide_head) vrcam_hide_head(emu_ram);
+    if (vrcam_hide_head_now(emu_ram)) vrcam_hide_head(emu_ram);
     {   /* vrbody_apply corre una vez por frame DIBUJADO, no por VBlank: dt = VBlanks emulados desde el apply anterior (al menos uno) / vblank_hz */
         static uint32_t prev_vb; static int prev_ok;
         const VrCamRecord *r = vrcam_last_record();

@@ -452,6 +452,28 @@ int vrcam_hide_head(uint8_t *ram) {
     return 1;
 }
 
+/* Visor (prismáticos / mira): los actores scope.c (rutina 0x80063D54) y sight.c (0x800726BC) están en alguna de las 9 listas de actores (nodo+8 = rutina; medido en el volcado de prismáticos,
+ * ausentes en los de juego normal y cinemáticas). Solo lee la RAM del juego. Con el visor la cámara VR puede no estar activa (in_control = 0) y la cabeza del juego queda justo en el ojo. */
+#define VC_ACTOR_LISTS 0x800ADDA8u
+#define VC_FN_SCOPE    0x80063D54u
+#define VC_FN_SIGHT    0x800726BCu
+int vrcam_viewer_active(const uint8_t *ram) {
+    if (!ram) return 0;
+    for (uint32_t lv = 0; lv < 9; lv++) {
+        uint32_t base = VC_ACTOR_LISTS + 68u * lv, endn = base + 32u, cur = rd_u32(ram, base + 4);
+        for (int st = 0; cur != endn && ptr_ok(cur, 24) && st < 1024; st++) {
+            uint32_t fn = rd_u32(ram, cur + 8);
+            if (fn == VC_FN_SCOPE || fn == VC_FN_SIGHT) return 1;
+            cur = rd_u32(ram, cur + 4);
+        }
+    }
+    return 0;
+}
+
+int vrcam_hide_head_now(const uint8_t *ram) {
+    return S.cfg.hide_head && (S.latched || vrcam_viewer_active(ram));
+}
+
 /* =================================================== re-proyección =================================================== */
 static int inv3(const float a[9], float o[9]) {
     float c00 = a[4] * a[8] - a[5] * a[7], c01 = a[5] * a[6] - a[3] * a[8], c02 = a[3] * a[7] - a[4] * a[6];

@@ -90,6 +90,53 @@ static void test_hide_head(void) {
     CHECK(vrcam_hide_head(ram) == 0);
 }
 
+/* Visor activo (prismáticos / mira: actores scope.c 0x80063D54 o sight.c 0x800726BC en las listas de actores): la cabeza se oculta aunque la cámara VR no esté activa (in_control = 0). */
+static void actor_list(int lv, const uint32_t *nodes, const uint32_t *fns, int n) {
+    uint32_t base = BA_ACTOR_LISTS + 68u * (uint32_t)lv, endn = base + 32u;
+    w32(base + 4, n ? nodes[0] : endn);
+    for (int i = 0; i < n; i++) { w32(nodes[i] + 4, i + 1 < n ? nodes[i + 1] : endn); w32(nodes[i] + 8, fns[i]); }
+}
+static void test_viewer(void) {
+    VrCamConfig c; vrcam_config_default(&c); c.head = head;
+    vrcam_init(&c); build_world(0);            /* sin plan: vrcam_active() == 0 */
+    CHECK(!vrcam_active() && !vrcam_viewer_active(ram) && !vrcam_hide_head_now(ram));
+    uint32_t nodes[2] = {0x80170000u, 0x80170100u}, f_other[2] = {0x80050000u, 0x80060000u}, f_scope[2] = {0x80050000u, 0x80063D54u}, f_sight[2] = {0x800726BCu, 0x80050000u};
+    actor_list(7, nodes, f_other, 2);
+    CHECK(!vrcam_viewer_active(ram) && !vrcam_hide_head_now(ram));
+    actor_list(7, nodes, f_scope, 2);
+    CHECK(vrcam_viewer_active(ram) && vrcam_hide_head_now(ram));
+    actor_list(7, nodes, f_sight, 2);
+    CHECK(vrcam_viewer_active(ram) && vrcam_hide_head_now(ram));
+    actor_list(7, nodes, f_scope, 0);          /* lista vacía */
+    CHECK(!vrcam_viewer_active(ram));
+    actor_list(7, nodes, f_scope, 2); w32(nodes[0] + 4, nodes[0]);   /* nodo que se apunta a sí mismo: acotado, sin colgarse */
+    CHECK(!vrcam_viewer_active(ram));
+    actor_list(7, nodes, f_scope, 2);
+    VrCamConfig c2 = c; c2.hide_head = 0; vrcam_init(&c2);
+    CHECK(vrcam_viewer_active(ram) && !vrcam_hide_head_now(ram));     /* hide_head = 0 manda */
+    vrcam_init(&c);
+    CHECK(!vrcam_viewer_active(NULL));
+    /* RAM real de volcados (si existen; VRCAM_DUMPS = carpeta): d0006 = prismáticos con in_control = 0 */
+    const char *root = getenv("VRCAM_DUMPS"); if (!root) root = "/home/claude/work/adj/Dumps";
+    static const struct { const char *dir; int want; } D[] = {
+        {"d0006_20261031-213831_stage", 1}, {"d0006_20261031-213831_frame", 1}, {"d0001_20261031-213254_stage", 0}, {"d0002_20261031-213553_stage", 0}, {"d0003_20261031-213615_stage", 0},
+        {"d0004_20261031-213738_stage", 0}, {"d0005_20261031-213826_stage", 0}, {"d0007_20261031-214006_stage", 0}};
+    static uint8_t real[BRIDGE_RAM_SIZE];
+    int loaded = 0;
+    for (unsigned i = 0; i < sizeof D / sizeof D[0]; i++) {
+        char path[512]; snprintf(path, sizeof path, "%s/%s/ram.bin", root, D[i].dir);
+        FILE *f = fopen(path, "rb"); if (!f) continue;
+        size_t n = fread(real, 1, sizeof real, f); fclose(f);
+        if (n != sizeof real) continue;
+        loaded++;
+        vrcam_init(&c);                        /* sin plan: cámara VR inactiva (como in_control = 0) */
+        CHECK(!vrcam_active());
+        CHECK(vrcam_viewer_active(real) == D[i].want);
+        CHECK(vrcam_hide_head_now(real) == D[i].want);
+    }
+    if (!loaded) printf("(volcados reales no encontrados en %s: solo prueba sintética)\n", root);
+}
+
 static void test_activation(void) {
     VrCamConfig c; vrcam_config_default(&c); c.head = head;
     vrcam_init(&c); build_world(1024);
@@ -539,6 +586,7 @@ int main(void) {
     test_patch();
     test_scan_overlay();
     test_hide_head();
+    test_viewer();
     test_activation();
     test_engine_h();
     test_delta();

@@ -38,6 +38,8 @@ uint8_t *disc_load_stage_archive(const char *p, int d, size_t *n) { (void)p; (vo
 int mv_vr_get_head(float m[16], double *t) { static const float h[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1.6f, 0, 1}; memcpy(m, h, sizeof h); if (t) *t = 0; return 1; }
 int mv_vrhost_hands_active(void) { return 0; }
 float mv_vrhost_wall_distance(const float p[3], float mx) { (void)p; (void)mx; return -1; }
+static float ray_stub_mm = -1;      /* geometría sólida de vr_headcol sustituida: impacto a esta distancia (mm del motor), -1 ninguno */
+float mv_vrhost_ray_distance(const float o[3], const float d[3], float mx) { (void)o; (void)d; return ray_stub_mm >= 0 && ray_stub_mm <= mx ? ray_stub_mm : -1; }
 int vr_scene_build(void) { return 0; }
 void vr_scene_opts_default(void) {}
 int vrmelee_rt_installed(void) { return 0; }
@@ -151,8 +153,19 @@ static uint16_t gvbl(float x, float grip, float trig, uint16_t pad) {
     if (o & PAD_SQUARE) sq_seen++;
     return o;
 }
+/* lanzamiento completo con el gatillo: la mano avanza `step` m por VBlank con el gatillo apretado y lo suelta (1 -> 0,6 -> 0,1); devuelve la velocidad horizontal por tick que llega al motor (0 si no hubo datos) */
+static int throw_with_trigger(float step, int16_t vel[3]) {
+    float x = 0.2f;
+    for (int i = 0; i < 10; i++) gvbl(x, 0.0f, 1.0f, 0);
+    for (int i = 0; i < 10; i++) { x += step; gvbl(x, 0.0f, 1.0f, 0); }
+    x += step; gvbl(x, 0.0f, 0.6f, 0);
+    x += step; gvbl(x, 0.0f, 0.1f, 0);
+    for (int i = 0; i < 4; i++) gvbl(x, 0.0f, 0.0f, 0);
+    int16_t pos[3];
+    return vrfire_take_throw(pos, vel) ? (int)lroundf(sqrtf((float)vel[0] * (float)vel[0] + (float)vel[2] * (float)vel[2])) : -1;
+}
 static void grenade_gesture(void) {
-    printf("-- granada: mano cerrada = listo, abrirla = lanzar --\n");
+    printf("-- granada: gatillo apretado = preparada, soltarlo = lanzar --\n");
     world(2, 0, 3);
     fresh_weapon(2);
     for (int i = 0; i < 6; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
@@ -160,30 +173,49 @@ static void grenade_gesture(void) {
     CHECK(st.active && st.weapon == 2, "granada VR mostrada en la mano");
     CHECK(sq_seen == 0 && st.throws == 0, "mano abierta: ni botón del juego ni lanzamiento");
     for (int i = 0; i < 10; i++) gvbl(0.2f, 1.0f, 0.0f, 0);
-    CHECK(inst_state->phase == WT_PH_READY, "mano cerrada: lista (fase %d)", inst_state->phase);
-    CHECK(sq_seen > 5, "el botón de ataque del juego se mantiene mientras está lista (%d VBlanks)", sq_seen);
-    for (int i = 0; i < 10; i++) gvbl(0.2f + 0.045f * (float)i, 1.0f, 0.0f, 0);     /* el brazo avanza ~5 m/s */
-    gvbl(0.2f + 0.045f * 10, 0.6f, 0.0f, 0); gvbl(0.2f + 0.045f * 11, 0.1f, 0.0f, 0);
+    for (int i = 0; i < 4; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    mv_vrgame_status(&st);
+    CHECK(inst_state->phase == WT_PH_HELD && sq_seen == 0 && st.throws == 0, "el agarre (cerrar y abrir la mano) no prepara ni lanza (fase %d, cuadrado %d)", inst_state->phase, sq_seen);
+    for (int i = 0; i < 10; i++) gvbl(0.2f, 0.0f, 1.0f, 0);
+    CHECK(inst_state->phase == WT_PH_READY, "gatillo apretado: preparada (fase %d)", inst_state->phase);
+    CHECK(sq_seen > 5, "el botón de ataque del juego se mantiene mientras está preparada (%d VBlanks)", sq_seen);
+    for (int i = 0; i < 10; i++) gvbl(0.2f + 0.045f * (float)i, 0.0f, 1.0f, 0);     /* el brazo avanza ~5 m/s con el gatillo apretado */
+    mv_vrgame_status(&st);
+    CHECK(st.throws == 0 && inst_state->phase == WT_PH_READY, "mientras se mantiene el gatillo no se lanza nada (%u lanzamientos)", st.throws);
+    gvbl(0.2f + 0.045f * 10, 0.0f, 0.6f, 0); gvbl(0.2f + 0.045f * 11, 0.0f, 0.1f, 0);
     for (int i = 0; i < 4; i++) gvbl(0.2f + 0.045f * 11, 0.0f, 0.0f, 0);
     mv_vrgame_status(&st);
-    CHECK(st.throws == 1 && st.rejects == 0, "abrir la mano: un lanzamiento aceptado (%u, rechazos %u)", st.throws, st.rejects);
+    CHECK(st.throws == 1 && st.rejects == 0, "soltar el gatillo: un lanzamiento aceptado (%u, rechazos %u)", st.throws, st.rejects);
     int16_t pos[3], vel[3];
     CHECK(vrfire_take_throw(pos, vel) == 1, "datos de lanzamiento listos para el juego");
     printf("   velocidad por tick %d %d %d (posición %d %d %d)\n", vel[0], vel[1], vel[2], pos[0], pos[1], pos[2]);
     CHECK(abs(vel[0]) + abs(vel[1]) + abs(vel[2]) > 40, "la velocidad de la mano llega al motor");
     for (int i = 0; i < 40; i++) gvbl(0.7f, 0.0f, 0.0f, 0);
-    CHECK(inst_state->phase != WT_PH_READY, "tras lanzar, la mano ya no está lista (fase %d)", inst_state->phase);
+    CHECK(inst_state->phase != WT_PH_READY, "tras lanzar, la mano ya no está preparada (fase %d)", inst_state->phase);
+
+    printf("-- granada: flojo llega cerca, fuerte lejos (velocidad proporcional a la del mando, de punta a punta) --\n");
+    int16_t v_soft[3], v_mid[3], v_hard[3];
+    for (int i = 0; i < 60; i++) gvbl(0.2f, 0.0f, 0.0f, 0);                       /* sale la siguiente */
+    int h_soft = throw_with_trigger(0.0045f, v_soft);
+    for (int i = 0; i < 60; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    int h_mid = throw_with_trigger(0.020f, v_mid);
+    for (int i = 0; i < 60; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    int h_hard = throw_with_trigger(0.080f, v_hard);
+    printf("   velocidad horizontal por tick: suave %d, media %d, fuerte %d\n", h_soft, h_mid, h_hard);
+    CHECK(h_soft >= 0 && h_mid >= 0 && h_hard >= 0, "tres lanzamientos con datos");
+    CHECK(h_soft < h_mid && h_mid < h_hard, "más rápido el mando, más velocidad en el motor");
+    CHECK(h_hard > 4 * h_soft + 40 && h_hard > 150, "fuerte (~10 m/s) sale mucho más rápido que flojo (~0,6 m/s): %d frente a %d", h_hard, h_soft);
 
     printf("-- granada lista y arma fuera: no se lanza con la velocidad del juego --\n");
     world(2, 0, 3);
     fresh_weapon(2);
     for (int i = 0; i < 6; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
-    for (int i = 0; i < 10; i++) gvbl(0.2f, 1.0f, 0.0f, 0);
-    CHECK(inst_state->phase == WT_PH_READY && sq_seen > 0, "granada lista con el botón del juego mantenido (fase %d)", inst_state->phase);
+    for (int i = 0; i < 10; i++) gvbl(0.2f, 0.0f, 1.0f, 0);
+    CHECK(inst_state->phase == WT_PH_READY && sq_seen > 0, "granada preparada con el botón del juego mantenido (fase %d)", inst_state->phase);
     int16_t cpos[3], cvel[3];
     vrfire_take_throw(cpos, cvel);                                   /* vacía lo que dejó el lanzamiento anterior */
-    world(-1, 0, 0);                                                 /* el arma se desequipa con la mano aún cerrada */
-    for (int i = 0; i < 6; i++) gvbl(0.2f, 1.0f, 0.0f, 0);
+    world(-1, 0, 0);                                                 /* el arma se desequipa con el gatillo aún apretado */
+    for (int i = 0; i < 6; i++) gvbl(0.2f, 0.0f, 1.0f, 0);
     CHECK(vrfire_take_throw(cpos, cvel) == 1 && cvel[0] == 0 && cvel[1] == 0 && cvel[2] == 0,
           "la suelta que haría el juego se sustituye por una caída suave (vel %d %d %d)", cvel[0], cvel[1], cvel[2]);
 
@@ -493,6 +525,70 @@ static void laser_aims_with_bullet(void) {
     rec = saved;
 }
 
+
+/* ---- el láser se acorta en el primer impacto con el escenario: paredes HZD del juego (RAM) y geometría sólida de vr_headcol (sustituida) ---- */
+static void w32r(uint32_t a, uint32_t v) { memcpy(ram + (a & 0x1FFFFF), &v, 4); }
+static void w16r(uint32_t a, int16_t v) { memcpy(ram + (a & 0x1FFFFF), &v, 2); }
+/* una pared HZD vertical de 6 m de ancho y 4 m de alto, perpendicular a la proyección horizontal de la dirección d (mundo del motor), que corta al rayo o + t*d en t = dist (unidades) */
+static void hzd_wall(const float o[3], const float d[3], float dist) {
+    uint32_t ctl = 0x801F0000, map = 0x801F0100, wr = 0x801F0200, hdr = 0x801F0300, grp = 0x801F0340, walls = 0x801F0400, flags = 0x801F0500;
+    memset(ram + (0x801F0000 & 0x1FFFFF), 0, 0x1000);
+    w32r(0x800ACB84, ctl); w32r(ctl + 0x2C, map); w32r(map + 8, wr); w32r(wr, hdr); w32r(0x800ACB38, 1);
+    w16r(hdr + 10, 1); w32r(hdr + 16, grp);
+    w16r(grp + 2, 1); w32r(grp + 8, walls); w32r(grp + 20, flags);
+    float hl = sqrtf(d[0] * d[0] + d[2] * d[2]), hx = d[0] / hl, hz = d[2] / hl;
+    float cx = o[0] + d[0] * dist, cy = o[1] + d[1] * dist, cz = o[2] + d[2] * dist;
+    int16_t w[8] = {(int16_t)lroundf(cx - hz * 3000.0f), (int16_t)lroundf(cz + hx * 3000.0f), (int16_t)lroundf(cy - 2000.0f), 4000,
+                    (int16_t)lroundf(cx + hz * 3000.0f), (int16_t)lroundf(cz - hx * 3000.0f), (int16_t)lroundf(cy - 2000.0f), 4000};
+    for (int k = 0; k < 8; k++) w16r(walls + 2 * k, w[k]);
+}
+static void laser_stops_at_walls(void) {
+    printf("-- láser: se acorta en el primer impacto con el escenario --\n");
+    srand(4242);
+    VrCamRecord saved = rec;
+    rec.theta_play_deg = 37.0f; rec.eye[0] = 0; rec.eye[1] = 1500; rec.eye[2] = 0; rec.p_ref[0] = 0.1f; rec.p_ref[2] = -0.2f;
+    VrFireMap map; vrfire_map_from_cam(&map, &rec);
+    float q[4], R[9], p[3] = {0.2f, 1.2f, -0.3f};
+    do { t_rand_quat(q); expected_weapon_rot(1, q, R); } while (-R[5] < -0.2f || -R[5] > 0.3f);       /* casi horizontal, la pared de 4 m de alto la corta seguro */
+    world(0, 12, 60); fresh_pistol_meshes(); mv_vrgame_set_options(1, 2);
+    memset(ram + (0x801F0000 & 0x1FFFFF), 0, 0x1000); w32r(0x800ACB84, 0); ray_stub_mm = -1;
+    lvbl(p, q, 0.0f, 6);
+    float org[3], ax[3], len = 0, ow[3], dw[3];
+    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "sin datos de colisión: 15 m (%.3f)", len);
+    vrfire_pos_to_world(&map, org, ow); vrfire_dir_to_world(&map, ax, dw);
+    const float dists_m[] = {0.5f, 1.0f, 2.5f, 4.0f, 9.0f, 14.0f};
+    float prev = 0; int mono = 1;
+    for (unsigned i = 0; i < sizeof dists_m / sizeof *dists_m; i++) {
+        hzd_wall(ow, dw, dists_m[i] * map.units_per_m);
+        lvbl(p, q, 0.0f, 2);
+        float l = 0;
+        CHECK(drawn_laser(org, ax, &l) == 1, "pared a %.1f m: láser dibujado", dists_m[i]);
+        CHECK(fabsf(l - (dists_m[i] - WLASER_SURF_GAP_M)) < 0.01f, "pared HZD a %.1f m: el rayo mide %.3f m (esperado %.3f)", dists_m[i], l, dists_m[i] - WLASER_SURF_GAP_M);
+        if (l <= prev) mono = 0;
+        prev = l;
+    }
+    CHECK(mono, "paredes cada vez más lejos: longitud estrictamente creciente");
+    hzd_wall(ow, dw, 20.0f * map.units_per_m); lvbl(p, q, 0.0f, 2);
+    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "pared a 20 m (fuera de alcance): 15 m (%.3f)", len);
+    float back[3] = {-dw[0], -dw[1], -dw[2]};
+    hzd_wall(ow, back, 3.0f * map.units_per_m); lvbl(p, q, 0.0f, 2);
+    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "pared a la espalda: no corta (%.3f)", len);
+    /* geometría sólida (suelo, techo, puertas) más cerca que la pared HZD: gana la menor */
+    hzd_wall(ow, dw, 6.0f * map.units_per_m);
+    ray_stub_mm = 1.5f * map.units_per_m; lvbl(p, q, 0.0f, 2);
+    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - (1.5f - WLASER_SURF_GAP_M)) < 0.01f, "sólido a 1,5 m y pared a 6 m: %.3f m", len);
+    ray_stub_mm = -1; lvbl(p, q, 0.0f, 2);
+    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - (6.0f - WLASER_SURF_GAP_M)) < 0.01f, "sin sólido: vuelve a la pared HZD a 6 m: %.3f m", len);
+    ray_stub_mm = 3.0f * map.units_per_m; w32r(0x800ACB84, 0); lvbl(p, q, 0.0f, 2);
+    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - (3.0f - WLASER_SURF_GAP_M)) < 0.01f, "solo sólido a 3 m (sin HZD): %.3f m", len);
+    ray_stub_mm = 0.02f * map.units_per_m; lvbl(p, q, 0.0f, 2);
+    CHECK(drawn_laser(org, ax, &len) == 0, "superficie a 2 cm de la boca: nada que dibujar");
+    ray_stub_mm = -1; lvbl(p, q, 0.0f, 2);
+    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "espacio abierto otra vez: 15 m (%.3f)", len);
+    vrgame_reset();
+    rec = saved;
+}
+
 /* ---- boca = apuntado del mando (aim): el eje del arma, el láser y la bala siguen el eje de apuntado; la empuñadura sigue en el agarre ---- */
 static void hand_aim(const float p[3], const float q[4], const float aq[4], float trig) {
     MvVrHand h;
@@ -647,6 +743,7 @@ int main(void) {
     laser_aims_with_bullet();
     aim_pose();
     aim_guard();
+    laser_stops_at_walls();       /* al final: consume números aleatorios y las pruebas anteriores dependen de la secuencia */
 
     printf("%s vrgame_fire: %d comprobaciones, %d fallos\n", fails ? "FALLO" : "OK", checks, fails);
     return fails ? 1 : 0;

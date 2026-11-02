@@ -3,7 +3,8 @@
  *
  * Aspecto sin shader propio: el vértice es rgba = (255, 0, 0): el shader del arma modula textura blanca * rgba/128 * (ambiente + difuso * lambert) y satura a 1, así que sale rojo puro (1, 0, 0)
  * con cualquier luz (ambiente 0,78 * 255/128 > 1). No es aditivo y el renderer lo oculta tras el escenario por la profundidad (mismo pase que el mundo).
- * Longitud fija (WLASER_MAX_M): no hay raycast contra el escenario del juego, así que el punto del extremo queda a esa distancia, no sobre la superficie que se apunta.
+ * Longitud: WLASER_MAX_M, o hasta el primer impacto con el escenario del juego (vrgame.c lo calcula cada VBlank con vrhzd_raycast + vrhc_raycast_world y lo pasa por wlaser_length): el punto del
+ * extremo queda sobre la superficie apuntada, WLASER_SURF_GAP_M por delante de ella, y el rayo se acorta como el del mod de 1997. Sin dato de impacto, 15 m.
  * El eje es el de la boca (-Z local de la pose), el mismo con el que vr_fire (vrfire_make_matrix) orienta la bala: lo que apunta el rayo es lo que dispara el arma. */
 #pragma once
 #include <stdint.h>
@@ -15,6 +16,7 @@ extern "C" {
 #endif
 
 #define WLASER_MAX_M 15.0f           /* longitud del rayo (m) */
+#define WLASER_SURF_GAP_M 0.005f     /* el extremo del rayo queda tanto antes de la superficie (evita z-fighting del punto con ella) */
 #define WLASER_MIN_M 0.05f           /* por debajo de esto no se dibuja */
 #define WLASER_HALF_W 0.00125f       /* medio lado del prisma (m): 2,5 mm de grosor */
 #define WLASER_DOT_MIN 0.004f        /* medio tamaño mínimo del punto (m) */
@@ -28,6 +30,8 @@ typedef struct { VrHandsVertex v[WLASER_NV]; uint16_t idx[WLASER_NI]; } WLaserMe
 
 /* 1 si el eje de la boca (-Z local) no apunta por debajo de WLASER_MIN_FWD_Y (el arma está levantada y no colgando); pose no finita o sin cuaternión: 0. */
 int wlaser_raised(const WPose *muzzle);
+/* Longitud del rayo (m) para un impacto a `hit_m` de la boca: hit_m - WLASER_SURF_GAP_M recortado a [0, WLASER_MAX_M]; hit_m negativo o no finito (= sin impacto / sin dato): WLASER_MAX_M. */
+float wlaser_length(float hit_m);
 /* Rellena `out` con el rayo de `length_m` (recortado a WLASER_MAX_M) desde la posición de la boca a lo largo de su eje. La topología es siempre la misma (WLASER_NV/WLASER_NI).
  * 0 = pose no finita, cuaternión nulo o longitud menor que WLASER_MIN_M / no finita (out sin tocar). */
 int wlaser_build(const WPose *muzzle, float length_m, WLaserMesh *out);

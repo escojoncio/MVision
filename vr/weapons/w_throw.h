@@ -58,14 +58,15 @@ void wvh_push(WVHist *h, float dt, WPose p);
 int  wvh_estimate(const WVHist *h, float win, float lag, WVec3 *lin, WVec3 *ang);
 
 /* ---------- Arrojadizas ---------- */
-/* HELD: en la mano abierta. READY: mano cerrada sobre el objeto (el anfitrión mantiene el botón de ataque del juego, ver vr_fire: es el «preparar» del propio
- * juego); abrirla lanza. */
+/* HELD: en la mano, sin preparar. READY: gatillo apretado (el anfitrión mantiene el botón de ataque del juego, ver vr_fire: es el «preparar» del propio
+ * juego); soltarlo lanza. */
 enum { WT_PH_VEST, WT_PH_HELD, WT_PH_READY, WT_PH_GONE };
 typedef struct {
     WeaponState base;
     WVHist hist;
     int kind;                 /* 0 variante base, 1 y 2 variantes (espoletas distintas) */
-    int primed;               /* la mano ya estuvo abierta con el objeto: cerrarla lo prepara (sacarlo con el puño cerrado no lo prepara) */
+    int primed;               /* el gatillo ya estuvo suelto con el objeto en la mano: apretarlo lo prepara (sacarlo con el gatillo apretado no lo prepara) */
+    float rel_t;              /* READY: reloj del historial en que el gatillo empezó a soltarse (-1: apretado) */
     float retry;              /* s hasta reintentar un lanzamiento que el juego rechazó */
 } WThrowState;
 extern const WeaponDef w_throw_frag, w_throw_b, w_throw_c;

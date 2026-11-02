@@ -54,6 +54,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
     in.active = core && bs->in_control && vrcam_active() && map.valid && mv_vr_get_head(hm, NULL);
     in.weapon = -1;
     in.weapon_busy = vrgame_weapon_engaged();
+    in.throw_hold = vrgame_throw_hold();
     in.stick_dom = (pad & VRG_R3) != 0; in.stick_off = (pad & VRG_L3) != 0;
     in.dt = 0.02f;                                   /* el gancho corre una vez por VBlank (50 Hz virtuales) */
     int domside = right_handed ? 1 : 0;

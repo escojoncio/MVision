@@ -419,6 +419,37 @@ static void t_throw_game(void) {
     sim_game(p0, v0, FLOOR, &lx0, &lz0); sim_game(pos, vel, FLOOR, &lx1, &lz1);
     CHECK(fabs(lx0 - lx1) < 150 && fabs(lz0 - lz1) < 150, "aterriza en el mismo sitio (%.0f,%.0f) / (%.0f,%.0f)", lx0, lz0, lx1, lz1);
 }
+/* Velocidad de la mano -> alcance de la granada en el motor, con el retardo real de 16 VBlanks hasta la creación: a más velocidad, más lejos (estrictamente); la mano quieta o casi quieta cae cerca; la fuerte llega lejos.
+ * Nada en la cadena iguala los lanzamientos ni los recorta a cero. */
+static void t_throw_prop(void) {
+    init_trigger();
+    VrFireMap map = mkmap(0, 0, 0, 0); VrFireIn in = mkin(&map);
+    FGame g; fg_init(&g, 5, 0);
+    vstep(&g, &in, NULL);
+    const double FLOOR = -1600;
+    float p[3] = {0.1f, 1.2f, -0.2f};
+    int16_t pos[3], vel[3], pos0[3], vel0[3];
+    const float sp[] = {0.0f, 0.3f, 0.6f, 1.0f, 2.0f, 4.0f, 6.0f, 9.0f, 13.0f, 18.0f, 22.0f};
+    double prev = -1, r_of[11]; int mono = 1;
+    for (unsigned k = 0; k < sizeof sp / sizeof *sp; k++) {
+        float v[3] = {0.0f, sp[k] * 0.70710678f, -sp[k] * 0.70710678f};
+        CHECK(vrfire_set_throw(p, v, 0.04f) && vrfire_take_throw(pos0, vel0), "v=%.1f: lanzamiento sin retardo", sp[k]);
+        CHECK(vrfire_set_throw(p, v, 0.04f), "v=%.1f: lanzamiento", sp[k]);
+        settle(&g, in, 16, NULL);
+        CHECK(vrfire_take_throw(pos, vel), "v=%.1f: datos tras 16 VBlanks", sp[k]);
+        double lx, lz; sim_game(pos, vel, FLOOR, &lx, &lz);
+        double r = sqrt((lx - pos0[0]) * (lx - pos0[0]) + (lz - pos0[2]) * (lz - pos0[2]));      /* desde la mano */
+        r_of[k] = r;
+        if (!(r > prev)) mono = 0;
+        prev = r;
+        double hv = sqrt((double)vel[0] * vel[0] + (double)vel[2] * vel[2]);
+        CHECK(fabs(hv - sp[k] * 0.70710678 * 40.0) <= 1.0, "v=%.1f: velocidad horizontal por tick %.1f (esperada %.1f)", sp[k], hv, sp[k] * 0.70710678 * 40.0);
+    }
+    CHECK(mono, "a más velocidad de la mano, más alcance (estrictamente): %.0f %.0f %.0f %.0f ... %.0f", r_of[0], r_of[1], r_of[2], r_of[3], r_of[10]);
+    CHECK(r_of[0] < 10.0, "mano quieta: cae a la mano (%.0f unidades)", r_of[0]);
+    CHECK(r_of[3] < 1500.0, "suave (1 m/s): cerca (%.0f unidades)", r_of[3]);
+    CHECK(r_of[7] > 8000.0 && r_of[8] > 1.5 * r_of[7], "fuerte (9 m/s): lejos (%.0f) y 13 m/s más lejos aún (%.0f)", r_of[7], r_of[8]);
+}
 /* Gesto de la granada: mano cerrada = botón del juego mantenido (el juego queda "apuntando"); abrirla lanza con la velocidad de la mano al soltar el botón. */
 static void t_grenade_gesture(void) {
     init_trigger();
@@ -635,7 +666,7 @@ static void t_inverse(void) {
 }
 
 int main(void) {
-    t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
+    t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
     printf("test_fire: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

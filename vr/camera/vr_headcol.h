@@ -89,6 +89,11 @@ int vrhc_query(const VrHcMap *m, const float head[3], float dt, VrHcOut *out);
 /* Distancia (unidades del motor) de un punto del mundo fijo del motor a la superficie estática más cercana a menos de max_units; -1 si no hay. */
 float vrhc_nearest_world(const float p[3], float max_units);
 
+/* Primer impacto del rayo o + t*d (mundo fijo del motor, unidades del motor; d se normaliza) con la geometría sólida guardada, t en (0, max_units]. Fuente: la escena nativa si está
+ * fresca (suelo, techo, paredes, puertas y objetos sólidos en 360 grados, solo lo cercano al ancla: ver keep_m); si no, la lista de la GPU. -1 = sin impacto / entradas no finitas.
+ * Solo lectura del almacén (el que llama sostiene el candado del host). Sirve al láser de la pistola (vr/weapons/w_laser.h). */
+float vrhc_raycast_world(const float o[3], const float d[3], float max_units);
+
 /* Triángulos vivos (diagnóstico / pruebas). */
 int vrhc_count(void);
 

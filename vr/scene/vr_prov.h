@@ -12,7 +12,8 @@
  *    SCOPE_TEXT    scope.c / sight.c texturado: textos de la mira; van al HUD
  *    UNKNOWN       sin procedencia o de otro actor/función: va al HUD (como antes) y se cuenta
  *  Capas 2D (VPC_L_*): HUD (HUD_WORLD, SCOPE_TEXT, UNKNOWN), WINDOW, FULL; las clases FX_* y SCOPE_FRAME no tienen capa (-1).
- *  Sin procedencia (volcados NSL1, rt_prov apagado) todo es UNKNOWN y por tanto HUD: el comportamiento de antes. */
+ *  Sin procedencia (volcados NSL1, rt_prov apagado) todo es UNKNOWN y por tanto HUD: el comportamiento de antes.
+ *  Id efectivo de una primitiva: el de quien encadenó el paquete (GpuOp.prov) salvo que sea una rutina de ordenación (vpc_is_chain): entonces el de quien rellenó el comando (GpuOp.prov2), o 0 (UNKNOWN) si no consta o es otra rutina de ordenación. */
 #include <stdint.h>
 #include "gpu.h"
 
@@ -37,6 +38,8 @@ typedef struct {
 /* ---- reglas (vr_prov_rules.c) ---- */
 /* Clase base de una primitiva por su entrada de procedencia (sin aprendizaje): FX_*, FULL, SCOPE_*, HUD_WORLD (menuman) o UNKNOWN. e == NULL -> UNKNOWN. */
 int vpc_rule(const ProvEntry *e, const GpuOp *o);
+/* ¿Es la entrada una rutina de ordenación/encadenado (0x8001da18, 0x80018304)? Encadena paquetes que escribieron otros actores: su id no dice quién dibuja. e == NULL -> 0. */
+int vpc_is_chain(const ProvEntry *e);
 
 /* ---- aprendizaje de la clase WINDOW ----
  * Un id de procedencia (rutina de componente del HUD o desconocida) es WINDOW si no emitió ninguna primitiva durante al menos VPC_QUIET_LISTS listas de mundo con la ventana cerrada

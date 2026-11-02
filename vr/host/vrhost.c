@@ -1253,6 +1253,14 @@ float mv_vrhost_wall_distance(const float p_mm[3], float max_mm) {
     return d;
 }
 
+float mv_vrhost_ray_distance(const float o_mm[3], const float d[3], float max_mm) {
+    if (!hc_on) return -1.0f;
+    pthread_mutex_lock(&HCMX);
+    float t = vrhc_raycast_world(o_mm, d, max_mm);
+    pthread_mutex_unlock(&HCMX);
+    return t;
+}
+
 static float ai_corr[3];      /* último recorte de la cabeza contra el escenario (m, espacio del usuario; protegido por MX) */
 static uint64_t ai_corr_t;
 /* Desplazamiento de la cabeza VR respecto del ojo del personaje, para la IA (vr/ai): la cabeza dibujada (física + recorte) en el mundo del motor. */

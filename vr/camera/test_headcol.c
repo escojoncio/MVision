@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "vr_headcol.h"
 
 static int fails, checks;
@@ -373,8 +374,71 @@ static void test_perf(void) {
     free(t);
 }
 
+/* vrhc_raycast_world: primer impacto de un rayo con la geometría sólida guardada (láser de la pistola). Mundo del motor, unidades del motor. */
+static float rcw(float ox, float oy, float oz, float dx, float dy, float dz, float mx) {
+    float o[3] = {ox, oy, oz}, d[3] = {dx, dy, dz};
+    return vrhc_raycast_world(o, d, mx);
+}
+static void test_raycast(void) {
+    vrhc_init(NULL);
+    CHECK(rcw(0, 0, 0, 1, 0, 0, 15000) < 0, "almacén vacío: sin impacto");
+    /* escena nativa: pared x=2000 (z -1000..1000, y 0..3000), suelo y=0 (x,z -5000..5000) y techo y=2500 (x,z -5000..5000) */
+    float tris[5 * 9] = {2000, 0, -1000, 2000, 3000, -1000, 2000, 3000, 1000,   2000, 0, -1000, 2000, 3000, 1000, 2000, 0, 1000,
+                         -5000, 0, -5000, 5000, 0, -5000, 5000, 0, 5000};
+    vrhc_feed_world(tris, 3, 0);
+    float t = rcw(0, 1000, 0, 1, 0, 0, 15000);
+    CHECK(fabsf(t - 2000.0f) < 0.5f, "pared: t=%.2f", t);
+    t = rcw(0, 1000, 0, 0, -1, 0, 15000);
+    CHECK(fabsf(t - 1000.0f) < 0.5f, "suelo hacia abajo: t=%.2f", t);
+    t = rcw(0, 1000, 0, 0, -3, 0, 15000);
+    CHECK(fabsf(t - 1000.0f) < 0.5f, "dirección no unitaria: misma distancia (t=%.2f)", t);
+    t = rcw(0, 1000, 0, 0.6f, -0.8f, 0, 15000);
+    CHECK(fabsf(t - 1250.0f) < 0.5f, "oblicuo hacia el suelo: 1000/0,8 (t=%.2f)", t);
+    CHECK(rcw(0, 1000, 0, 0, 1, 0, 15000) < 0, "hacia arriba sin techo: sin impacto");
+    CHECK(rcw(0, 1000, 3000, 1, 0, 0, 15000) < 0, "fuera de la pared (z=3000): pasa");
+    CHECK(rcw(0, 1000, 0, -1, 0, 0, 15000) < 0, "de espaldas a la pared: sin impacto");
+    CHECK(rcw(0, 1000, 0, 1, 0, 0, 1999) < 0 && rcw(0, 1000, 0, 1, 0, 0, 2001) > 0, "tope de alcance");
+    CHECK(rcw(0, 1000, 0, 0, 0, 1, 15000) < 0, "sin geometría en esa dirección: sin impacto");
+    CHECK(rcw(0, 1000, -1000.0f + 2000.0f / 3.0f, 1, 0, 0, 15000) > 0, "justo en la costura diagonal de los dos triángulos de la pared: no se cuela");
+    t = rcw(0, 1000, 0, 1, 0, 0, 15000);
+    float prev = 1e9f; int mono = 1;
+    for (int k = 0; k < 10; k++) { float a = 100.0f * (float)k, tt = rcw(a, 1000, 0, 1, 0, 0, 15000); if (!(tt > 0 && fabsf(tt - (2000.0f - a)) < 0.5f && tt < prev)) mono = 0; prev = tt; }
+    CHECK(mono, "acercar el origen a la pared: distancia positiva, decreciente y exacta");
+    float nan3[3] = {NAN, 0, 0}, o3[3] = {0, 1000, 0}, d3[3] = {1, 0, 0}, z3[3] = {0, 0, 0};
+    CHECK(vrhc_raycast_world(nan3, d3, 15000) < 0 && vrhc_raycast_world(o3, nan3, 15000) < 0 && vrhc_raycast_world(o3, z3, 15000) < 0 && vrhc_raycast_world(NULL, d3, 15000) < 0 &&
+          vrhc_raycast_world(o3, NULL, 15000) < 0 && vrhc_raycast_world(o3, d3, 0) < 0 && vrhc_raycast_world(o3, d3, NAN) < 0, "entradas inválidas");
+    /* con escena nativa fresca solo vale ella (la lista de la GPU puede traer fantasmas de objetos que se movieron); sin ella, vale la de la GPU */
+    float eye0[3] = {0, 0, 0}, pref0[3] = {0, 0, 0};
+    VrHcMap m = mk_map(-180.0f, eye0, pref0);          /* theta+180 = 0: mundo = 1000 * usuario */
+    float gw[18] = {1, 0, -1, 1, 3, -1, 1, 3, 1,   1, 0, -1, 1, 3, 1, 1, 0, 1};      /* pared x=1 m en el espacio del usuario => x=1000 en el mundo */
+    vrhc_feed_tris(&m, gw, 2, NULL, 0);
+    t = rcw(0, 1000, 0, 1, 0, 0, 15000);
+    CHECK(fabsf(t - 2000.0f) < 0.5f, "nativa fresca: la pared fantasma de la GPU a 1000 no cuenta (t=%.2f)", t);
+    vrhc_feed_world(NULL, 0, 0);                       /* sin escena nativa */
+    t = rcw(0, 1000, 0, 1, 0, 0, 15000);
+    CHECK(fabsf(t - 1000.0f) < 0.5f, "sin nativa: vale la lista de la GPU (t=%.2f)", t);
+    /* nativa vencida (1 s de consultas sin alimentar): tampoco cuenta */
+    vrhc_feed_world(tris, 3, 0);
+    VrHcOut o; vrhc_query(&m, (const float[3]){0, 1.6f, 0}, 0.5f, &o); vrhc_query(&m, (const float[3]){0, 1.6f, 0}, 0.6f, &o);
+    t = rcw(0, 1000, 0, 1, 0, 0, 15000);
+    CHECK(fabsf(t - 1000.0f) < 0.5f, "nativa vencida: vale la lista de la GPU (t=%.2f)", t);
+    /* coste: 20 000 triángulos (2/3 del tope de la lista nativa) por consulta */
+    static float big[20000 * 9];
+    for (int i = 0; i < 20000; i++) {
+        float x = (float)(i % 200) * 100.0f - 10000.0f, z = (float)(i / 200) * 100.0f - 5000.0f, *p = big + 9 * i;
+        float v[9] = {x, 0, z, x + 90, 0, z, x, 0, z + 90}; memcpy(p, v, sizeof v);
+    }
+    vrhc_feed_world(big, 20000, 0);
+    struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+    float acc = 0; for (int i = 0; i < 200; i++) acc += rcw(0.1f * (float)i, 1000, 0, 0.5f, -0.8f, 0.3f, 15000);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms = ((double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6) / 200.0;
+    printf("   raycast con 20000 triángulos: %.3f ms por consulta (acc %.0f)\n", ms, acc);
+    CHECK(ms < 0.2, "coste por consulta %.3f ms (< 0,2)", ms);
+}
+
 int main(void) {
-    test_basics(); test_wall(); test_overlap_start(); test_rotated_map(); test_body_and_ttl(); test_scene_feed(); test_penetration_fade(); test_six_directions(); test_native_360(); test_fade_and_release(); test_min_face_distance(); test_perf();
+    test_basics(); test_wall(); test_overlap_start(); test_rotated_map(); test_body_and_ttl(); test_scene_feed(); test_penetration_fade(); test_six_directions(); test_native_360(); test_fade_and_release(); test_min_face_distance(); test_perf(); test_raycast();
     printf("test_headcol: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

@@ -78,10 +78,115 @@ static void test_dumps(const char *root) {
     closedir(d);
 }
 
+
+/* ---- vrhzd_raycast: primer impacto de un rayo con las paredes de colisión del juego ---- */
+static float rc(float ox, float oy, float oz, float dx, float dy, float dz, float mx, unsigned skip) {
+    float o[3] = {ox, oy, oz}, d[3] = {dx, dy, dz};
+    return vrhzd_raycast(ram, o, d, mx, skip);
+}
+static void test_ray_synth(void) {
+    build();                                          /* paredes z=-9000 y z=-10000, x 1500..12500, y 7000..9000 */
+    float t = rc(5000, 7500, -9500, 0, 0, 1, 15000, 0);
+    CHECK(fabsf(t - 500.0f) < 0.5f, "hacia +z: pared a 500 (t=%.2f)", t);
+    t = rc(5000, 7500, -9500, 0, 0, -1, 15000, 0);
+    CHECK(fabsf(t - 500.0f) < 0.5f, "hacia -z: pared a 500 (t=%.2f)", t);
+    t = rc(5000, 7500, -9500, 0, 0, 3, 15000, 0);
+    CHECK(fabsf(t - 500.0f) < 0.5f, "dirección no unitaria: misma distancia (t=%.2f)", t);
+    t = rc(5000, 7500, -9500, 0.70710678f, 0, 0.70710678f, 15000, 0);
+    CHECK(fabsf(t - 707.1f) < 1.0f, "diagonal: 500*sqrt2 (t=%.2f)", t);
+    t = rc(5000, 7500, -9500, 0.6f, 0.0f, 0.8f, 15000, 0);
+    CHECK(fabsf(t - 625.0f) < 0.5f, "oblicuo 3-4-5: 500/0,8 (t=%.2f)", t);
+    CHECK(rc(5000, 7500, -9500, 1, 0, 0, 15000, 0) < 0, "paralelo a las paredes (a lo largo del conducto): sin impacto");
+    CHECK(rc(5000, 7500, -9500, 0, 1, 0, 15000, 0) < 0, "vertical: sin impacto con paredes verticales");
+    CHECK(rc(5000, 9500, -9500, 0, 0, 1, 15000, 0) < 0, "por encima del borde superior de la pared: pasa");
+    CHECK(rc(5000, 6500, -9500, 0, 0, 1, 15000, 0) < 0, "por debajo del borde inferior: pasa");
+    CHECK(rc(5000, 6500, -9500, 0, 2, 1, 15000, 0) > 0, "subiendo: entra en la franja vertical y choca");
+    CHECK(rc(13000, 7500, -9500, 0, 0, 1, 15000, 0) < 0, "más allá del extremo de la pared (x>12500): pasa");
+    CHECK(rc(5000, 7500, -9500, 0, 0, 1, 400, 0) < 0, "tope de alcance menor que la pared: sin impacto");
+    CHECK(rc(5000, 7500, -9500, 0, 0, 1, 501, 0) > 0, "tope justo por encima: impacto");
+    /* monotonía: avanzar el origen hacia la pared acorta la distancia exactamente lo avanzado */
+    float prev = 1e9f; int mono = 1;
+    for (int k = 0; k < 10; k++) {
+        float a = 40.0f * (float)k, tt = rc(5000, 7500, -9500 + a, 0, 0, 1, 15000, 0);
+        if (!(tt > 0 && fabsf(tt - (500.0f - a)) < 0.5f && tt < prev)) mono = 0;
+        prev = tt;
+    }
+    CHECK(mono, "acercar el origen a la pared: distancia positiva, estrictamente decreciente y exacta");
+    /* máscara de banderas: la pared con bit en la máscara se ignora (como la función de línea de visión del juego) */
+    uint32_t flags = 0x801492c0;
+    ram[(flags + 0) & 0x1FFFFF] = 4;                  /* pared 0 (z=-9000) con el bit 4 */
+    CHECK(rc(5000, 7500, -9500, 0, 0, 1, 15000, 0) > 0, "sin máscara cuenta toda pared");
+    CHECK(rc(5000, 7500, -9500, 0, 0, 1, 15000, 4) < 0, "máscara 4: la pared marcada con 4 se ignora");
+    CHECK(rc(5000, 7500, -9500, 0, 0, -1, 15000, 4) > 0, "máscara 4: la otra pared sigue valiendo");
+    ram[(flags + 0) & 0x1FFFFF] = 0;
+    uint32_t mask = 0; memcpy(&mask, ram + (0x800ACB38u & 0x1FFFFF), 4);
+    w32(0x800ACB38, 0);
+    CHECK(rc(5000, 7500, -9500, 0, 0, 1, 15000, 0) < 0, "grupo inactivo (máscara de grupos 0): sin paredes");
+    w32(0x800ACB38, mask);
+    /* entradas inválidas */
+    float o[3] = {5000, 7500, -9500}, d[3] = {0, 0, 1}, nan3[3] = {NAN, 0, 1}, z3[3] = {0, 0, 0};
+    CHECK(vrhzd_raycast(NULL, o, d, 15000, 0) < 0, "sin RAM");
+    CHECK(vrhzd_raycast(ram, NULL, d, 15000, 0) < 0 && vrhzd_raycast(ram, o, NULL, 15000, 0) < 0, "sin origen o dirección");
+    CHECK(vrhzd_raycast(ram, o, nan3, 15000, 0) < 0 && vrhzd_raycast(ram, nan3, d, 15000, 0) < 0, "no finitos");
+    CHECK(vrhzd_raycast(ram, o, z3, 15000, 0) < 0, "dirección nula");
+    CHECK(vrhzd_raycast(ram, o, d, 0, 0) < 0 && vrhzd_raycast(ram, o, d, NAN, 0) < 0, "alcance nulo o no finito");
+    w32(0x800ACB84, 0);
+    CHECK(rc(5000, 7500, -9500, 0, 0, 1, 15000, 0) < 0, "sin datos HZD: sin impacto (el llamante deja los 15 m)");
+    /* espacio abierto: una pared lejana fuera del alcance */
+    build();
+    CHECK(rc(5000, 7500, -9500, 1, 0, 0, 15000, 0) < 0 && rc(5000, 7500, -9500, 0, 0, 1, 100, 0) < 0, "espacio abierto: sin impacto");
+}
+
+static int meta_f(const char *dir, const char *key, float *v) {
+    char p[1024], line[256]; snprintf(p, sizeof p, "%s/meta.txt", dir);
+    FILE *f = fopen(p, "r"); if (!f) return 0;
+    size_t kl = strlen(key); int ok = 0;
+    while (fgets(line, sizeof line, f)) if (!strncmp(line, key, kl) && line[kl] == '=') { *v = (float)atof(line + kl + 1); ok = 1; break; }
+    fclose(f); return ok;
+}
+/* Volcados reales (RAM del juego): rayos horizontales en 72 direcciones desde el ojo. Los datos del volcado no son de confianza: solo se leen. */
+static void test_ray_dumps(const char *root) {
+    DIR *d = opendir(root);
+    if (!d) return;
+    struct dirent *e;
+    int dumps = 0, closed = 0;
+    while ((e = readdir(d))) {
+        if (!strstr(e->d_name, "_frame") && strncmp(e->d_name, "auto", 4) && strncmp(e->d_name, "prov_", 5)) continue;
+        char dir[1024], p[1100]; snprintf(dir, sizeof dir, "%s/%s", root, e->d_name);
+        snprintf(p, sizeof p, "%s/ram.bin", dir);
+        FILE *f = fopen(p, "rb"); if (!f) continue;
+        size_t got = fread(ram, 1, sizeof ram, f); fclose(f);
+        float game = 0, ex, ey, ez;
+        if (got != sizeof ram || !meta_f(dir, "game", &game) || game < 1 || !meta_f(dir, "eye_x", &ex) || !meta_f(dir, "eye_y", &ey) || !meta_f(dir, "eye_z", &ez)) continue;
+        dumps++;
+        int hits = 0, bad = 0, nonmono = 0, subset = 0; float tmin = 1e9f;
+        for (int k = 0; k < 72; k++) {
+            float a = (float)k * 6.2831853f / 72.0f, dx = sinf(a), dz = cosf(a);
+            float t = rc(ex, ey, ez, dx, 0, dz, 15000, 4), t0 = rc(ex, ey, ez, dx, 0, dz, 15000, 0);
+            if (t >= 0) {
+                hits++;
+                if (!(t > 0 && t <= 15000)) bad++;
+                if (t < tmin) tmin = t;
+                float adv = 0.5f * t, t2 = rc(ex + dx * adv, ey, ez + dz * adv, dx, 0, dz, 15000, 4);   /* mover el origen hacia la pared */
+                if (!(t2 > 0 && fabsf(t2 - (t - adv)) < 2.0f)) nonmono++;
+            }
+            if (t >= 0 && (t0 < 0 || t < t0 - 0.01f)) subset++;                                           /* ignorar paredes nunca acerca el impacto ni lo crea de la nada */
+        }
+        printf("  %s eye=(%.0f,%.0f,%.0f): %d/72 rayos chocan (mínimo %.0f uds)\n", e->d_name, ex, ey, ez, hits, hits ? tmin : 0.0f);
+        CHECK(bad == 0, "%s: distancias en (0, 15000]", e->d_name);
+        CHECK(nonmono == 0, "%s: acercar el origen a la pared acorta exactamente lo avanzado (%d fallos)", e->d_name, nonmono);
+        CHECK(subset == 0, "%s: la máscara solo puede alejar el impacto (%d fallos)", e->d_name, subset);
+        if (hits > 0 && hits < 72) closed++;
+    }
+    closedir(d);
+    if (dumps) CHECK(closed > 0, "algún volcado tiene recinto cerrado a 15 m (rayos que chocan) y a la vez huecos (%d volcados)", dumps);
+}
+
 int main(void) {
     test_synth();
     const char *dd = getenv("VRHZD_DUMPS");
-    if (dd && *dd) test_dumps(dd);
+    test_ray_synth();
+    if (dd && *dd) { test_dumps(dd); test_ray_dumps(dd); }
     printf(fails ? "test_hzd: %d fallos de %d\n" : "test_hzd: %d comprobaciones OK\n", fails ? fails : checks, checks);
     return fails != 0;
 }

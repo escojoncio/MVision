@@ -15,6 +15,14 @@ extern "C" {
  * Devuelve cuántas correcciones aplicó (0 = ojo libre o sin datos válidos: no cambia nada). */
 int vrhzd_clamp_eye(const uint8_t *ram, int32_t bx, int32_t bz, float *ex, float *ez, float ey, float r);
 
+/* Lectura de rayos contra las mismas paredes (láser de la pistola, vr/weapons/w_laser.h). Vive en vr_hzd_ray.c (unidad propia, sin vr_camera.c: la usa vr/host). */
+#define VRHZD_SKIP_SIGHT 4u      /* máscara de paredes ignoradas con la que el juego hace su prueba de línea de visión (enemigos y cámaras; callers de 0x80028D14) */
+/* Primer impacto del rayo o + t*d (mundo del motor, unidades del motor; d se normaliza) con las paredes activas de colisión del juego cuya franja vertical contenga el punto de
+ * impacto, t en (0, max_units]. Se ignoran las paredes con (bandera & skip) != 0: es la misma comparación de la función de línea de visión del juego, que recibe esa máscara en la pila
+ * (a3 & 4 activa las paredes, a3 & 8 los objetos; los objetos no se leen aquí). Devuelve t en unidades del motor, o -1 si no hay impacto en el alcance / sin datos HZD / entradas no
+ * finitas. Solo lee la RAM. */
+float vrhzd_raycast(const uint8_t *ram, const float o[3], const float d[3], float max_units, unsigned skip);
+
 #ifdef __cplusplus
 }
 #endif

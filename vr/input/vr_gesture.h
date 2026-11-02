@@ -85,6 +85,7 @@ typedef struct {
     float wall_dist[2];      /* distancia de la mano a la superficie más cercana de la geometría estática (m) */
     int tracked[2];          /* 0 = izquierda física, 1 = derecha física */
     double hand_time[2];     /* instante (s, reloj monótono) de la pose de cada mano; <= 0: sin marca (se usa dt por llamada). Repetir la marca = misma muestra */
+    int throw_hold;          /* arrojadiza VR (granada, aturdidora, chaff) en la mano del arma, sin preparar o preparada: su gatillo la prepara/lanza y NO abre la ventana de armas del pecho */
     int weapon_busy;         /* arma VR mostrada o maniobra de recarga en curso (el juego desequipa el arma un instante al recargar) */
     float hand[2][3], grip[2];   /* mano en el mundo (cercanía a enemigos); grip = agarre (puño), NO decide el agarre del enemigo */
     float trig[2];           /* gatillo analógico por mano física */

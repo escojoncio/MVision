@@ -20,7 +20,9 @@
 #include "vr_hand_skin.h"
 #include "vr_hand_pose.h"
 #include "vr_hands.h"
+#include "vr_hzd.h"
 #include "vr_pose.h"
+#include "vrhost.h"
 #include "vr_radar.h"
 #include "vr_missile.h"
 #include "vr_reload.h"
@@ -162,7 +164,7 @@ static void aimfix_lost(int i, float dt) {
     memcpy(aimfix_q[i], q, sizeof q);
     vrbody_set_aim_fix(i, q);
 }
-static struct { int on; float p[3], q[4]; } pub_laser;      /* láser de la pistola: pose de la boca (espacio VR) del último VBlank; on = 0: no se dibuja (w_laser.h) */
+static struct { int on; float p[3], q[4], hit_m; } pub_laser;      /* láser de la pistola: pose de la boca (espacio VR) del último VBlank y distancia (m) al primer impacto con el escenario (-1 = sin impacto: 15 m); on = 0: no se dibuja (w_laser.h) */
 
 #define HAND_MAX_AGE_NS 300000000ull    /* mano sin actualizar más de 0,3 s = sin seguimiento */
 
@@ -504,6 +506,8 @@ static struct {
     int body_ok, fire_ok;
     int inited;
     uint64_t last_ns;
+    int throw_hold;             /* arrojadiza VR (2, 7, 8) mostrada en HELD o READY al final del VBlank anterior (vrgame_throw_hold) */
+    uint64_t hand_ns;           /* instante (t_ns) de la pose de la mano del arma vista en el VBlank anterior (marca de tiempo de la pose para la velocidad de lanzamiento) */
     int cur;                    /* ranura del arma VR mostrada en el VBlank anterior (-1 ninguna) */
     int active;                 /* modo arma VR del VBlank anterior */
     int prev_mag_in;            /* mag_inserted del paso anterior (flanco "cargador insertado") */
@@ -541,7 +545,7 @@ static void publish_off(void) {
 void vrgame_reset(void) {
     vrbodyg_reset();
     G.inited = 0; G.active = 0; G.cur = -1; G.prev_mag_in = 0; G.prev_state = VRR_OFF; G.fire_edge = 0;
-    G.boot_done = 0; G.last_ns = 0; G.det_t = 0;
+    G.boot_done = 0; G.last_ns = 0; G.hand_ns = 0; G.det_t = 0; G.throw_hold = 0;
     aimfix_clear();
     memset(&G.ro, 0, sizeof G.ro);
     G.ro.sync_rounds = G.ro.sync_chambered = -1;
@@ -725,6 +729,7 @@ static int launch_hook(void *user, const WLaunch *ev) {
         float v[3] = {ev->lin_vel.x, ev->lin_vel.y, ev->lin_vel.z};
         if (ev->kind == WL_INHAND) v[0] = v[1] = v[2] = 0;     /* cocinada hasta el final en la mano: cae a los pies (mecha del juego) */
         float p[3] = {ev->pose.p.x, ev->pose.p.y, ev->pose.p.z};
+        fprintf(stderr, "[lanzar] arma=%d velocidad_mano=%.2f m/s (%.2f %.2f %.2f) angular=%.1f rad/s\n", ev->weapon_id, sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]), v[0], v[1], v[2], wv_len(ev->ang_vel));
         if (!vrfire_set_throw(p, v, THROW_TICK_S)) { G.rejects++; return 0; }
         G.fire_edge = 1; G.fire_pose = ev->pose; G.shots++; G.throws++;
         return 1; }
@@ -803,6 +808,8 @@ int vrgame_hand_raw(int side, float p[3], float *grip, float *trig, double *t_s)
 }
 /* arma VR mostrada o maniobra de recarga en curso: el juego desequipa el arma un instante al recargar, y entonces no hay manos libres */
 int vrgame_weapon_engaged(void) { return G.active || G.cur >= 0 || G.ro.busy; }
+/* arrojadiza VR en la mano del arma, sin preparar o preparada: su gatillo es suyo y no abre la ventana de armas del pecho (vr_gesture throw_hold) */
+int vrgame_throw_hold(void) { return G.throw_hold; }
 int vrgame_glove_pub(void) { return glv_pub; }
 void vrgame_haptic(int side, float s) {
     if (side < 0 || side > 1 || !isfinite(s) || s <= 0) return;
@@ -1013,6 +1020,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         G.active = 0;
         G.cur = -1;
         G.det_t = 0;             /* una pulsación de detonación a medias no sobrevive a desequipar el arma */
+        G.hand_ns = 0; G.throw_hold = 0;
         vrbody_set_armed(0);
         aimfix_clear();
         vrfire_set_hide(0);
@@ -1124,6 +1132,11 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     in.buttons[0] = (hs[w].low ? WB_A : 0u) | (hs[w].up ? WB_B : 0u) | (hs[w].stick ? WB_STICK : 0u);
     if (gp[o].valid) in.buttons[1] = (hs[o].low ? WB_A : 0u) | (hs[o].up ? WB_B : 0u) | (hs[o].stick ? WB_STICK : 0u);
     in.dt = dt;
+    {   /* tiempo entre poses: la mano llega a ritmo del visor (~90 Hz, t_ns = instante de llegada) y el VBlank (50 Hz, con fluctuación) toma la última; la velocidad de lanzamiento se mide en tiempo de pose, no de VBlank */
+        uint64_t tn = hs[w].t_ns;
+        in.hand_dt = G.hand_ns == 0 || tn < G.hand_ns ? 0.0f : tn == G.hand_ns ? 1e-4f : (float)((double)(tn - G.hand_ns) * 1e-9);   /* misma pose que el VBlank anterior: muestra repetida (0,1 ms) */
+        G.hand_ns = tn;
+    }
     /* el gatillo solo actúa cuando el disparo puede salir (recarga del juego en curso, cargador del juego vacío...: sin disparos sin proyectil) */
     if (G.mag_weapon && !(ro.state == VRR_READY && ro.fire_allowed)) in.trigger[0] = 0;
     in.support_held = gp[o].valid && in.grip[1] > 0.5f && wcore_hand_dist(st, &in, 1, WP_SUPPORT) < 0.07f;
@@ -1154,6 +1167,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     int booting = !G.boot_done;
     def->update(st, &in, (WReloadMode)rmode, &G.br);
     G.boot_done = 1;      /* la primera actualización es la del arranque del arma */
+    G.throw_hold = is_grenade(gid) && (st->phase == WT_PH_HELD || st->phase == WT_PH_READY);
     if (booting && G.mag_weapon) G.prev_mag_in = st->mag_inserted;   /* el cargador que trae al arrancar no es un gesto de recarga: sin este ajuste el VBlank siguiente veía "cargador insertado" y, con el cargador del juego a medias, lanzaba la maniobra de recarga nada más equipar */
 
     /* publicación de las mallas */
@@ -1189,7 +1203,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
             fi.ready = aim;
             fi.raise = 1;
         } else if (gid == 2 || gid == 7 || gid == 8) {
-            /* Granada: mano cerrada sobre ella = el botón de ataque del juego mantenido (es el «preparar»/sacar el pasador del propio juego); abrirla lanza (fire con la
+            /* Granada: gatillo apretado = el botón de ataque del juego mantenido (es el «preparar»/sacar el pasador del propio juego); soltarlo lanza (fire con la
              * velocidad de la mano, ver launch_hook) y el juego la crea al soltar el botón. */
             fi.raise = 1;
             fi.ready = st->phase == WT_PH_READY;
@@ -1200,8 +1214,21 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         if (gid == 0 && !(in.game_flags & WGF_SUPP)) lz.p.z = w_pist_bare_muzzle_z;
         lz = wpose_mul(W, lz);
         int lz_on = gid == 0 && bs->in_control && wlaser_raised(&lz);
+        float lz_hit_m = -1.0f;
+        if (lz_on && map.valid) {
+            /* El rayo acaba en el primer impacto con el escenario del juego: el menor de (a) las paredes HZD del propio juego (alcance completo, misma máscara que su línea de visión) y
+             * (b) la geometría sólida nativa de vr_headcol (suelo, techo, puertas, objetos; solo lo cercano a la cabeza). Enemigos y objetos que se mueven no cortan el rayo. */
+            WVec3 fw = wquat_rotate(wquat_normalize(lz.q), wv(0, 0, -1));
+            float pu[3] = {lz.p.x, lz.p.y, lz.p.z}, du[3] = {fw.x, fw.y, fw.z}, ow[3], dw[3];
+            vrfire_pos_to_world(&map, pu, ow); vrfire_dir_to_world(&map, du, dw);
+            float reach = WLASER_MAX_M * map.units_per_m, t = vrhzd_raycast(ram, ow, dw, reach, VRHZD_SKIP_SIGHT);
+            float t2 = mv_vrhost_ray_distance(ow, dw, t >= 0.0f ? t : reach);
+            if (t2 >= 0.0f) t = t2;
+            if (t >= 0.0f) lz_hit_m = t / map.units_per_m;
+        }
         pthread_mutex_lock(&HM);
         pub_laser.on = lz_on;
+        pub_laser.hit_m = lz_hit_m;
         if (lz_on) { pub_laser.p[0] = lz.p.x; pub_laser.p[1] = lz.p.y; pub_laser.p[2] = lz.p.z; pub_laser.q[0] = lz.q.x; pub_laser.q[1] = lz.q.y; pub_laser.q[2] = lz.q.z; pub_laser.q[3] = lz.q.w; }
         pthread_mutex_unlock(&HM);
     }
@@ -1504,7 +1531,7 @@ int mv_host_hands(VrHandsFrame *out) {
         }
         WPose lz = {{lp[0], lp[1], lp[2]}, {lq[0], lq[1], lq[2], lq[3]}};
         WLaserMesh *lm = &lzbuf[lzi % 3];
-        if (wlaser_build(&lz, WLASER_MAX_M, lm)) {
+        if (wlaser_build(&lz, wlaser_length(pub_laser.hit_m), lm)) {
             lzi++;
             int n0 = rc ? out->nmeshes : 0;
             if (!rc) {                       /* sin arma publicada ni guante: iluminación por defecto de vr/hands */

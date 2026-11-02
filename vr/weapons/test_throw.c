@@ -1,5 +1,5 @@
 /* Pruebas de arrojadizas y colocables (headless): estimación de velocidad de lanzamiento con trayectoria
- * sintética, lanzamiento por gesto (cerrar la mano = listo, abrirla = lanzar con la velocidad de la mano; sin anilla ni pasador sueltos), soltar suave,
+ * sintética, lanzamiento con el gatillo (apretar = preparada, soltar = lanzar con la velocidad de la mano; el agarre no interviene; sin anilla ni pasador sueltos), soltar suave,
  * colocación al soltar el gatillo (sin tapa ni botón virtuales) y sanidad de mallas.
  * Compilar: gcc -std=gnu11 -I. test_throw.c w_throw.c w_placed.c wcore.c -lm */
 #include "w_throw.h"
@@ -103,40 +103,47 @@ static void test_estimator(void) {
 
 /* ---------------- interaccion de arrojadiza ---------------- */
 static int any_held(const Rig *r) { for (int i = 0; i < W_MAX_HELD; i++) if (r->s->held[i].active) return 1; return 0; }
-/* abrir la mano con el objeto y cerrarla: lo deja listo */
+/* gatillo suelto y apretado con el objeto en la mano: lo deja preparado (el agarre se queda cerrado todo el rato: no interviene) */
 static void ready_it(Rig *r) {
-    r->in.grip[0] = 0; step(r, 2);
-    r->in.grip[0] = 1; step(r, 2);
+    r->in.trigger[0] = 0; step(r, 2);
+    r->in.trigger[0] = 1; step(r, 2);
 }
 
-/* la mano sigue la trayectoria con el puño cerrado y se abre al final (la suelta se detecta 2 fotogramas después) */
+/* la mano sigue la trayectoria con el gatillo apretado y lo suelta al final: empieza a soltarse en el fotograma n+1 (0,6) y se detecta en el n+2 (0,1);
+ * la velocidad que vale es la de la mano cuando el gatillo empezó a soltarse (n+1), no la de cuando se detecta la suelta */
+#define REL_LAG 0.010f      /* margen mínimo antes del instante de soltar con el que se mide (w_throw.c, V_LAG_MIN) */
 static void do_throw(Rig *r, float t_det, WVec3 *tv, WVec3 *tw) {
     float dt = r->in.dt; int n = (int)(t_det / dt);
-    r->in.grip[0] = 1;
+    r->in.trigger[0] = 1;
     for (int i = 0; i <= n; i++) { r->in.hand[0] = traj(i * dt); step(r, 1); }
-    *tv = traj_v((n + 2) * dt - 0.025f); *tw = traj_w((n + 2) * dt - 0.025f);
-    r->in.grip[0] = 0.6f; r->in.hand[0] = traj((n + 1) * dt); step(r, 1);   /* los dedos se abren */
-    r->in.grip[0] = 0.1f; r->in.hand[0] = traj((n + 2) * dt); step(r, 1);
+    *tv = traj_v((n + 1) * dt - REL_LAG); *tw = traj_w((n + 1) * dt - REL_LAG);
+    r->in.trigger[0] = 0.6f; r->in.hand[0] = traj((n + 1) * dt); step(r, 1);   /* el dedo empieza a soltar */
+    r->in.trigger[0] = 0.1f; r->in.hand[0] = traj((n + 2) * dt); step(r, 1);
 }
 
 static void test_throw_flow(void) {
-    printf("-- arrojadiza: flujo por gesto --\n");
+    printf("-- arrojadiza: flujo con el gatillo --\n");
     mock_reset(3);
     Rig r = rig_new(&w_throw_frag, WR_MANUAL);
     CHECK(r.s->phase == WT_PH_VEST, "empieza sin objeto");
-    draw(&r);
+    r.in.trigger[0] = 1; draw(&r);
     CHECK(r.s->phase == WT_PH_HELD, "aparece en la mano al equiparla, sin gesto del chaleco");
-    CHECK(r.s->phase != WT_PH_READY && !any_held(&r), "con el puño cerrado al sacarla no queda lista; sin piezas sueltas");
-    r.in.hand[0].p = wv(0.25f, 1.1f, -0.35f); step(&r, 3);
-    r.in.grip[0] = 0.0f; step(&r, 3);
-    CHECK(r.s->phase == WT_PH_HELD && M.nev == 0 && M.taken == 0, "soltar sin haberla preparado: sigue en la mano, sin gastar");
-    r.in.grip[0] = 0.5f; step(&r, 2);
-    CHECK(r.s->phase == WT_PH_HELD, "grip intermedio (histeresis): no se prepara");
-    r.in.grip[0] = 1.0f; step(&r, 2);
-    CHECK(r.s->phase == WT_PH_READY, "mano cerrada tras haberla abierto: lista (el anfitrion pulsa el boton del juego)");
+    r.in.hand[0].p = wv(0.25f, 1.1f, -0.35f); step(&r, 30);
+    CHECK(r.s->phase == WT_PH_HELD && !any_held(&r), "con el gatillo apretado al sacarla no queda preparada; sin piezas sueltas");
+    r.in.trigger[0] = 0.0f; step(&r, 3);
+    CHECK(r.s->phase == WT_PH_HELD && M.nev == 0 && M.taken == 0, "soltar sin haberla preparado: sigue en la mano, sin lanzar ni gastar");
+    r.in.trigger[0] = 0.5f; step(&r, 2);
+    CHECK(r.s->phase == WT_PH_HELD, "gatillo a medias (histeresis): no se prepara");
+    r.in.trigger[0] = 1.0f; step(&r, 2);
+    CHECK(r.s->phase == WT_PH_READY, "gatillo apretado tras haberlo soltado: preparada (el anfitrion pulsa el boton del juego)");
     CHECK(M.sounds_pin == 1 && !any_held(&r), "sonido de pasador y ninguna pieza suelta flotando");
-    r.in.grip[0] = 0.5f; step(&r, 5);
-    CHECK(r.s->phase == WT_PH_READY && M.nev == 0, "grip intermedio: no lanza");
+    CHECK(M.nev == 0 && M.taken == 0, "preparar no lanza ni gasta");
+    r.in.trigger[0] = 0.5f; step(&r, 5);
+    CHECK(r.s->phase == WT_PH_READY && M.nev == 0, "gatillo a medias: sigue preparada, no lanza");
+    /* mantener el gatillo mientras la mano se mueve rapido: nada sale */
+    r.in.trigger[0] = 1.0f;
+    for (int i = 0; i < 90; i++) { r.in.hand[0].p = wv(0.25f + 0.05f * (float)i, 1.1f, -0.35f); step(&r, 1); }
+    CHECK(r.s->phase == WT_PH_READY && M.nev == 0 && M.taken == 0, "gatillo mantenido (1 s, mano a 4.5 m/s): no se lanza nada");
     /* lanzamiento por velocidad */
     WVec3 tv, tw;
     do_throw(&r, 0.16f, &tv, &tw);
@@ -158,6 +165,17 @@ static void test_throw_flow(void) {
     step(&r, 60);
     CHECK(r.s->phase == WT_PH_HELD, "la siguiente aparece en la mano");
     free(r.s);
+
+    /* el agarre no prepara ni lanza: con el gatillo en reposo, cerrar y abrir la mano no hace nada */
+    mock_reset(3);
+    r = rig_new(&w_throw_frag, WR_MANUAL);
+    draw(&r);
+    r.in.grip[0] = 0; step(&r, 3);
+    r.in.grip[0] = 1; step(&r, 30);
+    CHECK(r.s->phase == WT_PH_HELD, "agarre cerrado: no queda preparada (fase %d)", r.s->phase);
+    r.in.grip[0] = 0; step(&r, 5);
+    CHECK(r.s->phase == WT_PH_HELD && M.nev == 0 && M.taken == 0, "abrir la mano sin gatillo: no lanza");
+    free(r.s);
 }
 
 static void test_gentle(void) {
@@ -167,7 +185,7 @@ static void test_gentle(void) {
     draw(&r); ready_it(&r);
     CHECK(r.s->phase == WT_PH_READY, "lista");
     r.in.hand[0].p = wv(0.25f, 1.1f, -0.35f); step(&r, 10);
-    r.in.grip[0] = 0.0f; step(&r, 1);
+    r.in.trigger[0] = 0.0f; step(&r, 1);
     CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW && wv_len(M.ev[0].lin_vel) < 1.0f, "mano quieta: soltar suave (v=%.3f)", M.nev ? wv_len(M.ev[0].lin_vel) : -1.0f);
     CHECK(M.sounds_throw == 0 && M.taken == 1 && r.s->phase == WT_PH_GONE, "sin sonido de lanzamiento, gasta una y desaparece de la mano");
     free(r.s);
@@ -210,7 +228,7 @@ static void test_gentle(void) {
         r.in.hand[0].q = wquat_axis_angle(wv(1, 0.3f, 0), 1.2f * i);       /* >100 rad/s */
         step(&r, 1);
     }
-    r.in.grip[0] = 0.0f; step(&r, 1);
+    r.in.trigger[0] = 0.0f; step(&r, 1);
     CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW, "lanzo");
     if (M.nev) {
         CHECK(wv_len(M.ev[0].ang_vel) <= 45.01f, "ang_vel acotada: %f", wv_len(M.ev[0].ang_vel));
@@ -225,10 +243,115 @@ static void test_gentle(void) {
     for (int k = 0; k < 3; k++) {
         mock_reset(2);
         r = rig_new(vs[k], WR_MANUAL);
-        draw(&r); ready_it(&r); step(&r, 3); r.in.grip[0] = 0; step(&r, 1);
+        draw(&r); ready_it(&r); step(&r, 3); r.in.trigger[0] = 0; step(&r, 1);
         CHECK(M.nev == 1 && fabsf(M.ev[0].fuse_left - fz[k]) < 0.01f && M.ev[0].weapon_id == vs[k]->game_weapon_id, "variante %d: espoleta y id", k);
         free(r.s);
     }
+}
+
+/* ---------------- velocidad de salida proporcional a la del mando ---------------- */
+/* Reloj de VBlank (~50 Hz) con fluctuacion y con rafagas (varios VBlanks casi juntos); la mano llega con la pose del ultimo muestreo de 90 Hz (hasta 11 ms de antiguedad),
+ * con su marca de tiempo propia (WInput.hand_dt: tiempo entre poses, no entre VBlanks).
+ * Sin reloj real: dt inyectado. El gatillo se aprieta en reposo, la mano se mueve con velocidad v(t) y el gatillo se suelta a 1 -> 0,6 -> 0,1 (tres VBlanks). */
+typedef struct { uint32_t rs; int jitter; int stale; } Clk;
+static float clk_rnd(Clk *c) { c->rs = c->rs * 1664525u + 1013904223u; return ((c->rs >> 8) & 0xFFFF) / 65535.0f; }
+static float clk_dt(Clk *c) {
+    if (!c->jitter) return 0.02f;
+    float u = clk_rnd(c);
+    if (u < 0.2f) return 0.001f + 0.002f * clk_rnd(c);          /* rafaga: el VBlank siguiente casi inmediato */
+    return 0.014f + 0.026f * clk_rnd(c);                        /* 14..40 ms */
+}
+/* v(t): velocidad de la mano en m/s a lo largo de dir; acel = 0: constante v0; si no, v0 + acel * t. Devuelve 1 si hubo lanzamiento y escribe su velocidad y la real (en t del soltar) */
+static int throw_run(float v0, float acel, WVec3 dir, uint32_t seed, int jitter, int stale, WVec3 *got, float *true_speed, const WeaponDef *def) {
+    mock_reset(3);
+    Rig r = rig_new(def, WR_MANUAL);
+    Clk c = { seed, jitter, stale };
+    const WVec3 p0 = wv(0.25f, 1.0f, -0.3f);
+    r.in.hand[0].p = p0;
+    r.in.trigger[0] = 0;                                                                          /* aparece y queda en reposo */
+    for (int i = 0; i < 10; i++) { r.in.dt = clk_dt(&c); r.s->def->update(r.s, &r.in, r.rm, &G); }
+    r.in.trigger[0] = 1;                                                                          /* preparada, mano quieta */
+    for (int i = 0; i < 4; i++) { r.in.dt = clk_dt(&c); r.s->def->update(r.s, &r.in, r.rm, &G); }
+    float t = 0, tm = 0, tm_prev = 0;
+    while (t < 0.4f) {                                                                            /* la mano se mueve 0,4 s con el gatillo apretado */
+        float dt = clk_dt(&c); t += dt;
+        tm = stale ? floorf(t / 0.0111f) * 0.0111f : t;                                           /* ultimo muestreo de 90 Hz */
+        r.in.dt = dt; r.in.hand[0].p = wv_add(p0, wv_scale(dir, v0 * tm + 0.5f * acel * tm * tm));
+        r.in.hand_dt = stale ? (tm > tm_prev ? tm - tm_prev : 1e-4f) : 0.0f;                      /* tiempo entre las poses (no entre VBlanks), como da el anfitrion */
+        tm_prev = tm;
+        r.s->def->update(r.s, &r.in, r.rm, &G);
+    }
+    int nev0 = M.nev;
+    static const float rel[3] = { 0.6f, 0.1f, 0.0f };                                             /* el gatillo se suelta */
+    for (int k = 0; k < 3 && M.nev == nev0; k++) {
+        float dt = clk_dt(&c); t += dt;
+        tm = stale ? floorf(t / 0.0111f) * 0.0111f : t;
+        if (k == 0) *true_speed = v0 + acel * (tm - REL_LAG);                                     /* velocidad de la mano al empezar a soltar */
+        r.in.trigger[0] = rel[k]; r.in.dt = dt;
+        r.in.hand[0].p = wv_add(p0, wv_scale(dir, v0 * tm + 0.5f * acel * tm * tm));
+        r.in.hand_dt = stale ? (tm > tm_prev ? tm - tm_prev : 1e-4f) : 0.0f;
+        tm_prev = tm;
+        r.s->def->update(r.s, &r.in, r.rm, &G);
+    }
+    int ok = M.nev == nev0 + 1 && M.ev[M.nev - 1].kind == WL_THROW;
+    if (ok) *got = M.ev[M.nev - 1].lin_vel;
+    free(r.s);
+    return ok;
+}
+static float ballistic_range(WVec3 v) {          /* alcance horizontal (m) desde la altura de la mano hasta el suelo, g = 9,81, mano a 1 m */
+    float vh = sqrtf(v.x * v.x + v.z * v.z), a = 0.5f * 9.81f, b = -v.y, c = -1.0f;      /* y(t) = 1 + vy t - a t^2 = 0  ->  a t^2 - vy t - 1 = 0 */
+    float disc = b * b - 4 * a * c, t = (-b + sqrtf(disc)) / (2 * a);
+    return vh * t;
+}
+
+static void test_proportional(void) {
+    printf("-- velocidad de salida proporcional a la del mando --\n");
+    const WVec3 dir = wv(0, 0.70710678f, -0.70710678f);          /* hacia delante y arriba, 45 grados */
+    const float speeds[] = { 0.4f, 1.0f, 2.0f, 4.0f, 6.0f, 9.0f, 13.0f, 18.0f };
+    const int ns = (int)(sizeof speeds / sizeof *speeds);
+    for (int mode = 0; mode < 3; mode++) {           /* 0: 50 Hz exactos; 1: con fluctuacion y rafagas; 2: ademas pose de 90 Hz con antiguedad */
+        float prev_speed = 0, prev_range = 0; int mono = 1;
+        for (int i = 0; i < ns; i++) {
+            WVec3 got = wv(0, 0, 0); float ts;
+            int ok = throw_run(speeds[i], 0, dir, 777u + (uint32_t)i, mode >= 1, mode >= 2, &got, &ts, &w_throw_frag);
+            CHECK(ok, "modo %d v=%.1f: lanza al soltar el gatillo", mode, speeds[i]);
+            if (!ok) continue;
+            float sp = wv_len(got), ratio = sp / speeds[i], rng = ballistic_range(got);
+            CHECK(ratio > 0.88f && ratio < 1.12f, "modo %d: velocidad de salida %.2f m/s para una mano a %.2f (x%.2f)", mode, sp, speeds[i], ratio);
+            if (!(sp > prev_speed) || !(rng > prev_range)) mono = 0;
+            prev_speed = sp; prev_range = rng;
+            if (i == 0) CHECK(rng < 0.35f, "modo %d: mano casi quieta (0,4 m/s): cae cerca (%.2f m)", mode, rng);
+            if (i == 1) CHECK(rng < 0.9f, "modo %d: suave (1 m/s): cerca (%.2f m)", mode, rng);
+            if (i == ns - 3) CHECK(rng > 8.0f, "modo %d: fuerte (9 m/s): lejos (%.2f m)", mode, rng);
+            if (i == ns - 1) CHECK(sp <= 22.01f, "modo %d: tope fisico (%.2f)", mode, sp);
+        }
+        CHECK(mono, "modo %d: a mas velocidad del mando, mas velocidad y mas alcance (estrictamente)", mode);
+    }
+    /* mismas velocidades con las otras dos arrojadizas (aturdidora, chaff) */
+    const WeaponDef *vs[2] = { &w_throw_b, &w_throw_c };
+    for (int k = 0; k < 2; k++) {
+        WVec3 lo, hi; float ts;
+        CHECK(throw_run(2.0f, 0, dir, 5, 1, 1, &lo, &ts, vs[k]) && throw_run(8.0f, 0, dir, 5, 1, 1, &hi, &ts, vs[k]), "variante %d lanza", k);
+        CHECK(wv_len(hi) > 3.0f * wv_len(lo), "variante %d: 8 m/s sale mucho mas rapido que 2 (%.2f / %.2f)", k, wv_len(hi), wv_len(lo));
+    }
+    /* mano acelerando (un lanzamiento real): la salida sigue a la velocidad al soltar y no se queda en 0 */
+    float worst = 9, worst_lo = 9, worst_hi = 0;
+    for (int trial = 0; trial < 300; trial++) {
+        Clk c = { 1000u + (uint32_t)trial, 1, 1 };
+        float v0 = 0.5f + 3.0f * clk_rnd(&c), acel = 8.0f + 20.0f * clk_rnd(&c);       /* hasta ~12 m/s a los 0,4 s */
+        WVec3 d = wv_norm(wv(clk_rnd(&c) - 0.5f, 0.2f + 0.8f * clk_rnd(&c), -0.2f - clk_rnd(&c)));
+        WVec3 got = wv(0, 0, 0); float ts;
+        int ok = throw_run(v0, acel, d, 31u * (uint32_t)trial + 3u, 1, 1, &got, &ts, &w_throw_frag);
+        CHECK(ok, "prueba %d: lanza", trial);
+        if (!ok) continue;
+        float ratio = wv_len(got) / ts;               /* ts: velocidad de la mano en el fotograma en que el gatillo empezo a soltarse */
+        if (ratio < worst_lo) worst_lo = ratio;
+        if (ratio > worst_hi) worst_hi = ratio;
+        if (wv_len(got) < worst) worst = wv_len(got);
+    }
+    printf("  mano acelerando, 300 pruebas con fluctuacion: salida/mano entre x%.2f y x%.2f (salida minima %.2f m/s)\n", worst_lo, worst_hi, worst);
+    CHECK(worst_lo > 0.75f && worst_hi < 1.2f, "salida entre x0,75 y x1,2 de la velocidad de la mano (x%.2f..x%.2f)", worst_lo, worst_hi);
+    CHECK(worst > 1.5f, "con la mano en movimiento nunca sale con velocidad ~0 (min %.2f m/s)", worst);
 }
 
 /* ---------------- colocables ---------------- */
@@ -371,6 +494,7 @@ int main(void) {
     test_estimator();
     test_throw_flow();
     test_gentle();
+    test_proportional();
     test_carga();
     test_mina();
     test_defs();
