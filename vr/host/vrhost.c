@@ -420,7 +420,11 @@ static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *m
         float Ra[9], ta[3], Rd[9], td[3], hp[3];
         if (vrbody_hand_anim(1, Ra, ta) && vrbody_hand_state(held_side, NULL, Rd, td) && ns_wphide_carry(sc, emu_ram, Ra, ta, Rd, td, held_side == 0) > 0) {
             held_key = ns_wphide_key(emu_ram);
-            if (ns_wphide_pos(sc, emu_ram, hp)) vrfire_set_throw_origin(hp);     /* donde se ve el objeto en la mano: ahí nace la granada lanzada */
+            if (ns_wphide_pos(sc, emu_ram, hp)) {     /* donde se ve el objeto en la mano: ahí nace la granada lanzada, salvo que haya una pared de colisión entre el cuerpo y la mano o esté a más de 1,5 m (vr_fire.h) */
+                const float bp[3] = {(float)bs.player_pos.x, hp[1], (float)bs.player_pos.z}, bd[3] = {hp[0] - bp[0], 0.0f, hp[2] - bp[2]}, bl = hypotf(bd[0], bd[2]);
+                vrfire_set_throw_body(bp, bl > 1.0f && vrhzd_raycast(emu_ram, bp, bd, bl, 0u) > 0.0f);
+                vrfire_set_throw_origin(hp);
+            }
         }
     }
     VblHand hc[2];       /* marco de cada mano del mando con el que se simuló esta escena: el cuerpo vivo mueve la mano propia y la granada desde él hasta el mando de ahora (vbl_piece) */

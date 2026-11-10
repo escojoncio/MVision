@@ -150,6 +150,7 @@ static struct {
     float tpos[3], tvel[3]; VrFireMap tmap; int tok, tok_age;
     float ttick_s;                       /* tick del motor (s) con el que se pasó la velocidad: tope de la extrapolación hasta la creación */
     float org[3]; int org_ok, org_age;   /* posición (motor) del objeto de la mano en la última escena nativa y VBlanks desde entonces (vrfire_set_throw_origin) */
+    float body[3]; int body_ok, body_wall;   /* cuerpo del jugador y si hay pared entre él y la mano, para validar el próximo origen (vrfire_set_throw_body) */
     int born_hand, born_age;             /* diagnóstico: el último actor nació en la mano (1) o con la trayectoria adelantada (0) y tras cuántos VBlanks desde soltar */
     uint32_t fl_obj; int fl_wait, fl_hide;   /* granada lanzada: objeto del actor; VBlanks que aún se espera verlo en la escena; VBlanks que aún se oculta el modelo de la mano */
 } S;
@@ -161,6 +162,7 @@ static struct {
 /* Gravedad de la granada del juego: el paso del actor (0x8006a8f0) resta 16 a la velocidad vertical (unidades/tick) en cada tick con el objeto en el aire.
  * Con 1000 unidades/m y 0,04 s/tick son 10,0 m/s^2 (la real, 9,81: coherente). Se usa también para la parte del vuelo anterior a la creación del actor. */
 #define VRFIRE_GAME_G 16.0f
+#define ORG_REACH_M 1.5f         /* el origen en la mano no vale si dista más de esto del cuerpo (horizontal) */
 #define ORG_LIFE 6               /* el origen en la mano vale si la última escena es de hace como mucho esto (las escenas llegan a 25 por s: una cada 2 VBlanks) */
 #define FLIER_WAIT 75            /* VBlanks que se espera a ver el volador en la escena antes de dejar la mano como está */
 #define HIDE_VBL 15              /* VBlanks (0,3 s) que se oculta el modelo de la mano desde que el volador está en la escena */
@@ -320,8 +322,19 @@ int vrfire_set_throw(const float pos_user[3], const float vel_user_mps[3], float
     if (!S.live_ok) return 0;
     return set_throw(pos_user, vel_user_mps, tick_s);
 }
+void vrfire_set_throw_body(const float body[3], int wall_between) {
+    S.body_ok = body && finite3(body);
+    if (!S.body_ok) return;
+    for (int i = 0; i < 3; i++) S.body[i] = body[i];
+    S.body_wall = wall_between != 0;
+}
 void vrfire_set_throw_origin(const float p[3]) {
     if (!p || !finite3(p)) return;
+    if (S.body_ok) {      /* el origen no vale (pared entre el cuerpo y la mano, o demasiado lejos): se descarta también el anterior y vale la trayectoria adelantada */
+        float reach = ORG_REACH_M * (S.live_map.valid ? S.live_map.units_per_m : 1000.0f), dx = p[0] - S.body[0], dz = p[2] - S.body[2];
+        S.body_ok = 0;
+        if (S.body_wall || dx * dx + dz * dz > reach * reach) { S.org_ok = 0; return; }
+    }
     for (int i = 0; i < 3; i++) S.org[i] = p[i];
     S.org_ok = 1; S.org_age = 0;
 }

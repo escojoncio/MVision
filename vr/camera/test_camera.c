@@ -722,8 +722,8 @@ static void test_wall_third(void) {
     /* sale de la pared: primera persona otra vez en <= 0,3 s y la cabeza vuelve a ocultarse */
     for (int k = 0; k < 12; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
     int back1 = -1;
-    for (int k = 1; k <= 12; k++) { anchor_tick(&s, 1000, 1029, 10, 468, 20, 0, &p); if (back1 < 0 && fabsf(p.from[0] - x0) < 2.0f) back1 = k; }
-    CHECK(back1 > 0 && back1 * 0.04f <= 0.3f + 1e-4f);
+    for (int k = 1; k <= 20; k++) { anchor_tick(&s, 1000, 1029, 10, 468, 20, 0, &p); if (back1 < 0 && fabsf(p.from[0] - x0) < 2.0f) back1 = k; }
+    CHECK(back1 > 0 && back1 * 0.04f <= 0.2f + 0.3f + 1e-4f);     /* 0,2 s de antirrebote de PS_WALL + transición */
     r = vrcam_last_record(); CHECK(r && !r->third); NEAR(p.from[1], y0, 2.0);
     CHECK(vrcam_hide_head_now(ram) == 1);
     /* Con la pared HZD a la que se pega el personaje (x = 900, lado libre x > 900, el cuerpo a 100 de ella) el ojo va SIEMPRE por el lado libre (a lo largo de la normal, alejándose de la pared), mire
@@ -785,6 +785,55 @@ static void test_wall_third(void) {
       NEAR(p.from[0], x0, 1.5); r = vrcam_last_record(); CHECK(r && !r->third); }
 }
 
+/* Antirrebote de la pared: PS_WALL que parpadea (un tick sí y otro no, o 2 sí / 1 no) no hace oscilar la cámara ni cambiar la cabeza oculta/visible; y una normal que cambia a la opuesta
+ * gira el desplazamiento con velocidad limitada (sin brinco de 2*wall_back en un tick). */
+static void wall_world(void) {
+    uint32_t map = 0x800b8ab8, wr = 0x8015cde4, hdr = 0x80149268, grp = 0x80149284, walls = 0x8014929c, flags = 0x801492c0;
+    w32(CTL + 0x2C, map); w32(map + 8, wr); w32(wr, hdr); w32(0x800ACB38, 1);
+    w16(hdr + 10, 1); w32(hdr + 16, grp); w16(grp + 2, 1); w32(grp + 8, walls); w32(grp + 20, flags);
+    int16_t wl[8] = {900, -3000, 0, 3000, 900, 2000, 0, 3000};
+    for (int k = 0; k < 8; k++) w16(walls + 2 * k, wl[k]);
+}
+static void flicker_run(int on, int off, int from_rest, const char *name) {
+    VrCamConfig c; BridgeState s; VrCamPlan p;
+    anchor_start(&c, &s); wall_world();
+    for (int k = 0; k < 25; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, 0, &p);
+    if (!from_rest) for (int k = 0; k < 15; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+    const VrCamRecord *r = vrcam_last_record();
+    float pc = r ? r->cam_off[0] : 0, pmag = fabsf(pc), osc = 0; int pt = r ? r->third : 0, changes = 0, drops = 0;
+    for (int k = 0; k < 60; k++) {
+        anchor_tick(&s, 1000, 1029, 10, 468, 20, (k % (on + off)) < on ? BRIDGE_PS_WALL : 0, &p);
+        r = vrcam_last_record(); if (!r) { CHECK(0); break; }
+        if (!from_rest) osc = fmaxf(osc, fabsf(r->cam_off[0] - pc));
+        if (fabsf(r->cam_off[0]) < pmag - 1.0f) drops++;
+        pc = r->cam_off[0]; pmag = fabsf(pc); if (r->third != pt) changes++; pt = r->third;
+    }
+    printf("pared parpadeando %s (%d on / %d off, %s): oscilacion maxima %.1f uds, retrocesos %d, cambios de third %d\n", name, on, off, from_rest ? "desde primera persona" : "desde tercera", osc, drops, changes);
+    CHECK(osc <= 5.0f); CHECK(drops == 0); CHECK(changes <= (from_rest ? 1 : 0));
+    CHECK(pt == 1);
+}
+static void test_wall_debounce(void) {
+    for (int rest = 0; rest < 2; rest++) { flicker_run(1, 1, rest, "alterno"); flicker_run(2, 1, rest, "2 on 1 off"); }
+    /* normal que pasa a la opuesta: pasillo entre x = 900 (la más cercana, normal +X) y x = 1500; la de 900 desaparece y queda la de 1500 (normal -X): el desplazamiento gira, no salta */
+    VrCamConfig c; BridgeState s; VrCamPlan p;
+    anchor_start(&c, &s); wall_world();
+    { int16_t wb[8] = {1500, -3000, 0, 3000, 1500, 2000, 0, 3000}; for (int k = 0; k < 8; k++) w16(0x8014929c + 16 + 2 * k, wb[k]); w16(0x80149284 + 2, 2); }
+    for (int k = 0; k < 20; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+    const VrCamRecord *r = vrcam_last_record();
+    CHECK(r && r->cam_off[0] > 100.0f);
+    int16_t w2[8] = {-3000, -3000, 0, 3000, -3000, 2000, 0, 3000};
+    for (int k = 0; k < 8; k++) w16(0x8014929c + 2 * k, w2[k]);
+    float px = r ? r->cam_off[0] : 0, pz = r ? r->cam_off[2] : 0, mx = 0;
+    for (int k = 0; k < 40; k++) {
+        anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+        r = vrcam_last_record(); if (!r) { CHECK(0); break; }
+        mx = fmaxf(mx, hypotf(r->cam_off[0] - px, r->cam_off[2] - pz)); px = r->cam_off[0]; pz = r->cam_off[2];
+    }
+    printf("pared: cambio a la normal opuesta, salto maximo del desplazamiento por tick %.0f uds\n", mx);
+    CHECK(mx <= 450.0f);
+    CHECK(px < -c.wall_back_m * c.units_per_m + 10.0f);     /* termina del otro lado */
+}
+
 /* Tumbado en un conducto (RAM real de los volcados d0008 / d0009; VRCAM_DUMPS24 = carpeta): con el ojo en la raíz de locomoción el cuerpo se dibuja desplazado hasta que la
  * articulación de la cabeza queda en VrCamRecord.head_at. Ni la cabeza ni el cuello, el torso, la cadera o las piernas quedan por delante del ojo, y la cabeza sigue oculta. */
 static void test_prone_dumps(void) {
@@ -843,6 +892,7 @@ int main(void) {
     test_postures();
     test_eye_shift();
     test_wall_third();
+    test_wall_debounce();
     test_prone_dumps();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

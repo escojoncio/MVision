@@ -351,6 +351,47 @@ static void t_throw(void) {
     CHECK(vrfire_take_throw(pos, vel) == 0, "sin datos: el juego lanza con los suyos"); 
     VrFireStats st; vrfire_stats(&st); CHECK(st.passed >= 1, "contado como pasado");
 }
+/* El origen de la mano se valida con el cuerpo (vrfire_set_throw_body, antes de vrfire_set_throw_origin): si hay una pared de colisión entre ambos o dista más de 1,5 m, el actor nace con la trayectoria adelantada. */
+static void t_throw_origin_body(void) {
+    init_trigger();
+    VrFireMap map = mkmap(0, 0, 0, 0); VrFireIn in = mkin(&map);
+    FGame g; fg_init(&g, 5, 0);
+    vstep(&g, &in, NULL);
+    float p[3] = {0.4f, 1.8f, -0.6f}, v[3] = {1.0f, 2.0f, -5.0f}, org[3] = {1234.4f, 2345.6f, -3456.0f};
+    float near_body[3] = {1000.0f, 0.0f, -3000.0f}, far_body[3] = {-500.0f, 0.0f, -3456.0f};     /* a 512 y a 1734 uds en horizontal */
+    int16_t pos[3], vel[3];
+    CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "lanzamiento admitido");
+    settle(&g, in, 16, NULL);
+    vrfire_set_throw_body(near_body, 0); vrfire_set_throw_origin(org);
+    settle(&g, in, 2, NULL);
+    CHECK(vrfire_take_throw(pos, vel) == 1 && pos[0] == 1234, "cuerpo cerca y sin pared: nace en la mano (%d)", pos[0]);
+    CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "otro lanzamiento");
+    settle(&g, in, 16, NULL);
+    vrfire_set_throw_body(near_body, 1); vrfire_set_throw_origin(org);
+    settle(&g, in, 2, NULL);
+    CHECK(vrfire_take_throw(pos, vel) == 1 && pos[0] != 1234 && pos[2] != -3456, "pared entre cuerpo y mano: trayectoria adelantada (%d %d)", pos[0], pos[2]);
+    CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "lanzamiento con la mano lejos");
+    settle(&g, in, 16, NULL);
+    vrfire_set_throw_body(far_body, 0); vrfire_set_throw_origin(org);
+    settle(&g, in, 2, NULL);
+    CHECK(vrfire_take_throw(pos, vel) == 1 && pos[0] != 1234 && pos[2] != -3456, "mano a mas de 1,5 m del cuerpo: trayectoria adelantada (%d %d)", pos[0], pos[2]);
+    /* un origen bueno anterior se descarta si el siguiente no vale */
+    CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "lanzamiento tras origen bueno");
+    settle(&g, in, 16, NULL);
+    vrfire_set_throw_origin(org);
+    vrfire_set_throw_body(near_body, 1); vrfire_set_throw_origin(org);
+    settle(&g, in, 1, NULL);
+    CHECK(vrfire_take_throw(pos, vel) == 1 && pos[0] != 1234, "origen malo: no queda el bueno anterior (%d)", pos[0]);
+    /* el cuerpo vale solo para el origen siguiente; NaN/NULL se ignoran */
+    CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "lanzamiento sin cuerpo");
+    settle(&g, in, 16, NULL);
+    float nan3[3] = {NAN, 0, 0};
+    vrfire_set_throw_body(near_body, 1); vrfire_set_throw_body(nan3, 1); vrfire_set_throw_body(NULL, 1);
+    vrfire_set_throw_origin(org);
+    settle(&g, in, 2, NULL);
+    CHECK(vrfire_take_throw(pos, vel) == 1 && pos[0] == 1234, "cuerpo NaN/NULL: sin validar, nace en la mano (%d)", pos[0]);
+}
+
 /* Granada en la mano: el actor nace donde está el objeto de la mano en la última escena (sin adelantar la trayectoria) con la velocidad del gesto, y el modelo de la mano se oculta
  * desde la escena en que el volador está en ella (una sola vez, ventana corta). */
 static void t_throw_origin(void) {
@@ -1112,7 +1153,7 @@ static void t_hit_real(void) {
 
 int main(void) {
     t_hit_zones(); t_hit_motivo(); t_hit_camera(); t_hit_floors(); t_hit_enemy(); t_hit_aim(); t_hit_fist(); t_hit_real();
-    t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_throw_origin(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
+    t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_throw_origin(); t_throw_origin_body(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
     printf("test_fire: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

@@ -130,7 +130,7 @@ typedef struct {
     float ey;                             /* altura filtrada de la cabeza (mundo, sin eye_up) */
     float nh[4];                          /* altura de la articulación de la cabeza sobre la raíz aprendida con el jugador quieto, por postura (de pie, agachado, tumbado, en la caja) */
     float sh[2], shv[2];                  /* empuje de las paredes (x, z) filtrado y su velocidad */
-    float tp, to[2]; int third_vis;       /* tercera persona en la pared: avance de la transición (0..1), desplazamiento horizontal aplicado a la cámara y cabeza visible (histéresis) */
+    float tp, to[2], wall_hold; int third_vis;       /* tercera persona en la pared: avance de la transición (0..1), desplazamiento horizontal aplicado a la cámara y cabeza visible (histéresis) */
     float wn[2]; int wn_have, wn_look;    /* dirección (unitaria, mundo) del desplazamiento en la pared: normal HZD filtrada hacia el lado libre; wn_look = reserva: atrás según la mirada (sin normal) */
 } Vc;
 static Vc S;
@@ -318,7 +318,7 @@ int vrcam_pad_origin(void) {
 int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
     S.st.builds++;
     S.latched = 0;
-    if (!S.want || !S.cfg.head || !p) { if (!S.want) { S.tp = 0.0f; S.to[0] = S.to[1] = 0.0f; S.third_vis = 0; S.wn_have = 0; } return 0; }
+    if (!S.want || !S.cfg.head || !p) { if (!S.want) { S.tp = 0.0f; S.wall_hold = 0.0f; S.to[0] = S.to[1] = 0.0f; S.third_vis = 0; S.wn_have = 0; } return 0; }
     float h[16]; double t = 0;
     if (!S.cfg.head(h, &t) || !head_finite(h)) { S.st.head_misses++; return 0; }
     Body b = read_body(ram);
@@ -414,7 +414,9 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
      * (ex, ey, ez) sigue siendo la referencia de manos, cuerpo y gestos (VrCamRecord.cam_off). */
     float tox = 0.0f, toy = 0.0f, toz = 0.0f;
     {   float upm = S.cfg.units_per_m * (S.cfg.calibrate && S.calib.scale > 0 ? S.calib.scale : 1.0f);
-        int w3 = S.cfg.wall_back_m > 0.0f && b.wall && !b.fp;
+        /* PS_WALL parpadea (un tick sí y otro no): el estado de pared se mantiene 0,2 s tras caer (la primera persona del juego, b.fp, sí lo corta al instante). */
+        S.wall_hold = b.wall ? 0.2f : (snap ? 0.0f : (S.wall_hold > dt ? S.wall_hold - dt : 0.0f));
+        int w3 = S.cfg.wall_back_m > 0.0f && (b.wall || S.wall_hold > 0.0f) && !b.fp;
         if (snap) S.tp = w3 ? 1.0f : 0.0f;
         else { S.tp += (w3 ? dt : -dt) / S.cfg.wall_s; S.tp = S.tp < 0.0f ? 0.0f : (S.tp > 1.0f ? 1.0f : S.tp); }
         float k = S.tp * S.tp * (3.0f - 2.0f * S.tp);
@@ -425,10 +427,12 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
             float nrm[2], bp[3] = {(float)b.bx, ey, (float)b.bz}, dn[2] = {-sinf(yr), -cosf(yr)};
             int have_n = w3 && vrhzd_wall_near(ram, bp, 0.8f * upm, nrm) >= 0.0f;
             if (have_n) {
-                if (!S.wn_have || nrm[0] * S.wn[0] + nrm[1] * S.wn[1] < -0.9f) { S.wn[0] = nrm[0]; S.wn[1] = nrm[1]; }
-                else {
-                    float a = 1.0f - expf(-dt / 0.15f), vx = S.wn[0] + (nrm[0] - S.wn[0]) * a, vz = S.wn[1] + (nrm[1] - S.wn[1]) * a, vl = hypotf(vx, vz);
-                    if (vl > 1e-3f) { S.wn[0] = vx / vl; S.wn[1] = vz / vl; } else { S.wn[0] = nrm[0]; S.wn[1] = nrm[1]; }
+                if (!S.wn_have) { S.wn[0] = nrm[0]; S.wn[1] = nrm[1]; }
+                else {   /* giro filtrado del ángulo (también con la normal opuesta), con velocidad limitada (360 grados/s y 20 grados por tick): sin brinco del desplazamiento */
+                    float ang = atan2f(S.wn[0] * nrm[1] - S.wn[1] * nrm[0], S.wn[0] * nrm[0] + S.wn[1] * nrm[1]) * (1.0f - expf(-dt / 0.15f)), lim = 2.0f * PI_F * dt < 0.35f ? 2.0f * PI_F * dt : 0.35f;
+                    ang = ang > lim ? lim : (ang < -lim ? -lim : ang);
+                    float c = cosf(ang), sn = sinf(ang), vx = S.wn[0] * c - S.wn[1] * sn, vz = S.wn[0] * sn + S.wn[1] * c, vl = hypotf(vx, vz);
+                    S.wn[0] = vx / vl; S.wn[1] = vz / vl;
                 }
                 S.wn_have = 1; S.wn_look = 0;
             } else if (!S.wn_have || S.wn_look) { S.wn[0] = dn[0]; S.wn[1] = dn[1]; S.wn_have = 1; S.wn_look = 1; }

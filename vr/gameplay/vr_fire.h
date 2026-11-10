@@ -138,6 +138,9 @@ int vrfire_take_throw(int16_t pos[3], int16_t vel[3]);
 /* Granada en la mano: el anfitrión da en cada escena nativa la posición (unidades del motor) del objeto del juego que lleva la mano VR (ns_wphide_pos tras el carry). Si hay una de las últimas
  * VBlanks, el actor de la granada lanzada nace ahí (sin adelantar la trayectoria: se ve salir de la mano) con la velocidad del gesto; si no, la trayectoria adelantada de siempre. NULL / no finito: se ignora. */
 void vrfire_set_throw_origin(const float p_engine[3]);
+/* Validación del siguiente vrfire_set_throw_origin (se consume con él): body = posición (motor) del cuerpo del jugador; wall_between = hay una pared de colisión entre el cuerpo y el origen (lo calcula el anfitrión con el
+ * rayo HZD). Con pared, o con el origen a más de 1,5 m del cuerpo en horizontal, el origen se descarta (y el anterior también): el actor nace con la trayectoria adelantada. NULL / no finito: sin validar. */
+void vrfire_set_throw_body(const float body_engine[3], int wall_between);
 /* Ocultar el modelo de la mano cuando el volador existe: tras crearse el actor se espera a verlo en la escena nativa. vrfire_flier_key() = clave de instancia (NsInstance.key) del objeto del actor
  * mientras se espera (0 si no); el anfitrión llama a vrfire_flier_seen() en la escena que ya lo contiene; desde entonces vrfire_held_hidden() = 1 durante una ventana corta (el modelo de la mano
  * de esa escena y las siguientes se oculta, no se lleva a la mano), sin hueco (se oculta justo cuando el volador está) ni duplicado. */

@@ -25,7 +25,7 @@ RECOMP := ../../tools/recomp/recomp.py
 
 all: $(OUT)/test_camera
 SC := ../scene
-$(OUT)/test_camera: test_camera.c vr_camera.c vr_camera.h vr_usermap.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(BR)/bridge.c $(BR)/bridge_addrs.c
+$(OUT)/test_camera: test_camera.c vr_camera.c vr_camera.h vr_usermap.h vr_hzd.c vr_hzd.h vr_hzd_wall.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(BR)/bridge.c $(BR)/bridge_addrs.c
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -I. -I$(BR) -I$(SC) -I$(RT) test_camera.c vr_camera.c $(SC)/vr_scene.c $(BR)/bridge.c $(BR)/bridge_addrs.c -o $@ -lm
 # Prueba sintética: el render nativo cae en el mismo sitio que la lista de la GPU (mismo mapa mundo -> usuario) y la red de coherencia lo comprueba.
@@ -50,7 +50,7 @@ test: $(OUT)/test_camera $(OUT)/syn/patched.exe $(OUT)/syn/patched_wide.exe $(OU
 	VRCAM_EXE=$(OUT)/syn/orig.exe VRCAM_EXE_PATCHED=$(OUT)/syn/patched.exe VRCAM_EXE_PATCHED_WIDE=$(OUT)/syn/patched_wide.exe $(OUT)/test_camera
 	@if [ -f "$(EXE)" ]; then python3 patch_exe.py $(EXE) $(OUT)/syn/real_patched.exe --h 160 --hfov 179 --vfov 179 --no-divide --no-cull && \
 	  VRCAM_EXE=$(EXE) VRCAM_EXE_PATCHED=$(OUT)/syn/real_patched.exe $(OUT)/test_camera; fi
-test-san: test_camera.c vr_camera.c vr_camera.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(BR)/bridge.c $(BR)/bridge_addrs.c $(OUT)/syn/patched.exe $(OUT)/syn/patched_wide.exe
+test-san: test_camera.c vr_camera.c vr_camera.h vr_hzd.c vr_hzd.h vr_hzd_wall.h $(SC)/vr_scene.c $(SC)/vr_scene.h $(BR)/bridge.c $(BR)/bridge_addrs.c $(OUT)/syn/patched.exe $(OUT)/syn/patched_wide.exe
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -I. -I$(BR) -I$(SC) -I$(RT) test_camera.c vr_camera.c $(SC)/vr_scene.c $(BR)/bridge.c $(BR)/bridge_addrs.c -o $(OUT)/test_camera_san -lm
 	VRCAM_EXE=$(OUT)/syn/orig.exe VRCAM_EXE_PATCHED=$(OUT)/syn/patched.exe VRCAM_EXE_PATCHED_WIDE=$(OUT)/syn/patched_wide.exe $(OUT)/test_camera_san
@@ -119,7 +119,7 @@ $(OUT)/test_headcol: test_headcol.c vr_headcol.c vr_headcol.h vr_camera.h $(SC)/
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -I. -I$(BR) -I$(SC) -I$(RT) test_headcol.c vr_headcol.c -o $@ -lm
 # Pared de colisión del juego (hzd): el ojo no sale del conducto. Con VRHZD_DUMPS=<carpeta de volcados> comprueba también los volcados reales.
-$(OUT)/test_hzd: test_hzd.c vr_hzd.c vr_hzd_ray.c vr_hzd.h
+$(OUT)/test_hzd: test_hzd.c vr_hzd.c vr_hzd_ray.c vr_hzd.h vr_hzd_wall.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -DVRHZD_STANDALONE -I. test_hzd.c vr_hzd.c vr_hzd_ray.c -o $@ -lm
 test-hzd: $(OUT)/test_hzd
