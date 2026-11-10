@@ -388,12 +388,13 @@ static void t_chest(void) {
 
 /* superficie sólida a 0,5 m de los nudillos: el puño se acerca a `v` m/s hasta tocarla (0,03 m) y vuelve. `still` = 1: la mano no se mueve respecto a la cabeza (es el personaje el que anda hacia la pared) */
 static int touch_still;
+static float touch_end = 0.03f;      /* distancia a la que se queda el puño al acercarse */
 static int touches(vrg_t *g, vrg_in_t in, int n, float v, float gap_s, int side, const char **last_why, int *haptics) {
     vrg_out_t o; int k = 0; float d = 0.5f; const float z0 = in.hand[side][2];
     in.wall_valid[0] = in.wall_valid[1] = 1; in.wall_dist[0] = in.wall_dist[1] = 0.5f; settle(g, &in, 12);
 #define TSTEP() do { in.wall_dist[side] = d; if (!touch_still) in.hand[side][2] = z0 + (0.5f - d); upd(g, &in, &o); k += o.knock_side == side; } while (0)
     for (int t = 0; t < n; t++) {
-        while (d > 0.03f) { d -= v * 0.02f; if (d < 0.03f) d = 0.03f; TSTEP(); if (o.knock_why && last_why) *last_why = o.knock_why; if (o.haptic[side] > 0.3f && haptics) (*haptics)++; }
+        while (d > touch_end) { d -= v * 0.02f; if (d < touch_end) d = touch_end; TSTEP(); if (o.knock_why && last_why) *last_why = o.knock_why; if (o.haptic[side] > 0.3f && haptics) (*haptics)++; }
         for (int i = 0; i < (int)(gap_s / 0.02f); i++) { d += 0.02f * 1.5f; if (d > 0.5f) d = 0.5f; TSTEP(); }
         d = 0.5f; TSTEP();
     }
@@ -425,6 +426,16 @@ static void t_knock(void) {
     for (int st = 1; st <= 2; st++) { vrg_init(&g); vrg_in_t pw = in; pw.stance = st; pw.on_wall = 1; hap = 0; CHECK(touches(&g, pw, 2, 1.0f, 0.3f, 1, &why, &hap) == 0 && !strcmp(why, "postura") && hap == 0); }   /* pegado a la pared agachado o tumbado: tampoco (el motor lo rechaza; sin háptica sin golpe) */
     vrg_init(&g); vrg_in_t bx = in; bx.in_box = 1; CHECK(touches(&g, bx, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "manos_ocupadas"));   /* en la caja */
     vrg_init(&g); vrg_in_t th = in; th.throw_hold = 1; CHECK(touches(&g, th, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "manos_ocupadas"));   /* granada en la mano */
+    /* pegado a la pared (estado de pared del juego) el gesto es más tolerante: se mide con la mano virtual junto a Snake y el toque llega a 0,12 m y 0,2 m/s; fuera de ese estado, no */
+    touch_end = 0.10f;
+    vrg_init(&g); { int k0 = touches(&g, in, 2, 1.0f, 0.3f, 1, NULL, NULL); CHECK(k0 == 0); }                       /* de pie: parar a 0,10 m no es tocar */
+    vrg_init(&g); { vrg_in_t w2 = in; w2.on_wall = 1; CHECK(touches(&g, w2, 2, 1.0f, 0.3f, 1, NULL, NULL) == 2); }   /* pegado a la pared: sí */
+    touch_end = 0.03f;
+    vrg_init(&g); CHECK(touches(&g, in, 2, 0.3f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "lento"));                /* de pie: 0,3 m/s es lento */
+    vrg_init(&g); { vrg_in_t w3 = in; w3.on_wall = 1; CHECK(touches(&g, w3, 2, 0.3f, 0.3f, 1, NULL, NULL) == 2); }   /* pegado a la pared: vale */
+    vrg_init(&g); { vrg_in_t w4 = in; w4.on_wall = 1; CHECK(touches(&g, w4, 2, 0.1f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "lento")); }   /* pero no cualquier cosa */
+    vrg_init(&g); { vrg_in_t w5 = in; w5.on_wall = 1; touch_still = 1; CHECK(touches(&g, w5, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "mano_quieta")); touch_still = 0; }
+    vrg_init(&g); { vrg_in_t w6 = in; w6.on_wall = 1; w6.fist_btn[1] = 0; CHECK(touches(&g, w6, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "sin_puno")); }   /* mano abierta: no */
     /* balanceo del brazo (puño cerrado, 1,5 m/s, vaivén de 0,3 m) sin superficie al alcance: ningún toque */
     { vrg_init(&g); vrg_in_t sw = in; int k = 0; sw.wall_valid[0] = sw.wall_valid[1] = 0; settle(&g, &sw, 12);
       for (int i = 0; i < 200; i++) { sw.hand[1][2] = 0.1f + 0.3f * (float)fabs(((i % 20) - 10) / 10.0); upd(&g, &sw, &o); k += o.knock_side >= 0; }

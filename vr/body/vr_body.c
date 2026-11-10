@@ -1293,6 +1293,7 @@ static void hide_near(uint8_t *ram) {
     const VrBodyConfig *cfg = &G.cfg;
     if (!G.nh_ok || !ram || !cfg->enabled || !(cfg->near_hide_m > 0.0f || cfg->near_hide_vtx_m > 0.0f)) return;
     const VrBodyView *view = &G.nh_view;
+    if (view->third) return;
     uint32_t ob = rd_u32(ram, BA_PLAYER_BODY);
     if (!ptr_ok(ob, 8)) return;
     uint32_t pset = rd_u32(ram, ob);

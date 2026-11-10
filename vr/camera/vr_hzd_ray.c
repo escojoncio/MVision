@@ -57,3 +57,7 @@ float vrhzd_raycast(const uint8_t *ram, const float o[3], const float d[3], floa
     }
     return found ? best : -1.0f;
 }
+
+#include "vr_hzd_wall.h"
+
+float vrhzd_wall_dist(const uint8_t *ram, const float p[3], float max_units) { return wall_core(ram, p, max_units, NULL); }

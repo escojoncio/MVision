@@ -137,6 +137,43 @@ static void test_ray_synth(void) {
     CHECK(rc(5000, 7500, -9500, 1, 0, 0, 15000, 0) < 0 && rc(5000, 7500, -9500, 0, 0, 1, 100, 0) < 0, "espacio abierto: sin impacto");
 }
 
+/* ---- vrhzd_wall_dist: distancia de un punto a la pared de colisión más cercana (golpe en la pared estando pegado a ella) ---- */
+static float wd(float x, float y, float z, float mx) { float p[3] = {x, y, z}; return vrhzd_wall_dist(ram, p, mx); }
+static void test_wall_dist(void) {
+    build();                                          /* paredes z=-9000 y z=-10000, x 1500..12500, y 7000..9000 */
+    CHECK(fabsf(wd(5000, 7500, -9500, 600) - 500.0f) < 0.5f, "a mitad del conducto: 500 de cada pared (d=%.2f)", wd(5000, 7500, -9500, 600));
+    CHECK(wd(5000, 7500, -9500, 400) < 0, "fuera del alcance: -1");
+    CHECK(fabsf(wd(5000, 7500, -9100, 600) - 100.0f) < 0.5f, "a 100 de la pared z=-9000");
+    CHECK(fabsf(wd(5000, 7500, -8900, 600) - 100.0f) < 0.5f, "al otro lado de la pared: misma distancia (sin signo)");
+    CHECK(fabsf(wd(13000, 7500, -9100, 800) - sqrtf(500.0f * 500.0f + 100.0f * 100.0f)) < 0.5f, "más allá del extremo: distancia al extremo");
+    CHECK(wd(5000, 9500, -9100, 600) < 0 && wd(5000, 6500, -9100, 600) < 0, "fuera de la franja vertical: no cuenta");
+    CHECK(wd(5000, 7500, -9500, NAN) < 0 && wd(5000, 7500, -9500, 0) < 0, "alcance inválido");
+    float nan3[3] = {NAN, 7500, -9500};
+    CHECK(vrhzd_wall_dist(ram, nan3, 600) < 0 && vrhzd_wall_dist(ram, NULL, 600) < 0 && vrhzd_wall_dist(NULL, nan3, 600) < 0, "entradas inválidas");
+    uint32_t mask = 0; memcpy(&mask, ram + (0x800ACB38u & 0x1FFFFF), 4);
+    w32(0x800ACB38, 0);
+    CHECK(wd(5000, 7500, -9100, 600) < 0, "grupo inactivo: sin paredes");
+    w32(0x800ACB38, mask);
+    w32(0x800ACB84, 0);
+    CHECK(wd(5000, 7500, -9100, 600) < 0, "sin datos HZD: -1");
+}
+
+static void test_wall_near(void) {
+    build();                                          /* paredes z=-9000 y z=-10000, x 1500..12500, y 7000..9000 */
+    float n[2] = {7, 7}, p1[3] = {5000, 7500, -9100}, p2[3] = {5000, 7500, -9900}, p3[3] = {13000, 7500, -9100}, p4[3] = {5000, 7500, -9000}, p5[3] = {5000, 9500, -9100};
+    float d = vrhzd_wall_near(ram, p1, 600, n);
+    CHECK(fabsf(d - 100.0f) < 0.5f && fabsf(n[0]) < 1e-5f && fabsf(n[1] + 1.0f) < 1e-5f, "lado libre de z=-9000 hacia -z: d=%.2f n=(%.2f,%.2f)", d, n[0], n[1]);
+    d = vrhzd_wall_near(ram, p2, 600, n);
+    CHECK(fabsf(d - 100.0f) < 0.5f && fabsf(n[0]) < 1e-5f && fabsf(n[1] - 1.0f) < 1e-5f, "pared z=-10000: normal hacia +z");
+    d = vrhzd_wall_near(ram, p3, 800, n);
+    CHECK(fabsf(d - sqrtf(500.0f * 500.0f + 100.0f * 100.0f)) < 0.5f && fabsf(n[1] + 1.0f) < 1e-5f, "más allá del extremo: misma normal de la pared");
+    n[0] = n[1] = 7;
+    CHECK(vrhzd_wall_near(ram, p1, 50, n) < 0 && n[0] == 7 && n[1] == 7, "fuera del alcance: -1 y n sin tocar");
+    CHECK(vrhzd_wall_near(ram, p4, 600, n) < 0 || fabsf(n[1] - 1.0f) < 1e-5f, "sobre una pared: no es la del lado libre");
+    CHECK(vrhzd_wall_near(ram, p5, 600, n) < 0, "fuera de la franja vertical");
+    CHECK(vrhzd_wall_near(ram, p1, 600, NULL) < 0 && vrhzd_wall_near(NULL, p1, 600, n) < 0, "sin n o sin RAM");
+}
+
 static int meta_f(const char *dir, const char *key, float *v) {
     char p[1024], line[256]; snprintf(p, sizeof p, "%s/meta.txt", dir);
     FILE *f = fopen(p, "r"); if (!f) return 0;
@@ -186,6 +223,8 @@ int main(void) {
     test_synth();
     const char *dd = getenv("VRHZD_DUMPS");
     test_ray_synth();
+    test_wall_dist();
+    test_wall_near();
     if (dd && *dd) { test_dumps(dd); test_ray_dumps(dd); }
     printf(fails ? "test_hzd: %d fallos de %d\n" : "test_hzd: %d comprobaciones OK\n", fails ? fails : checks, checks);
     return fails != 0;

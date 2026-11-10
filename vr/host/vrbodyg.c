@@ -13,6 +13,7 @@
 #include "vr_body.h"
 #include "vr_fire.h"
 #include "vr_gesture.h"
+#include "vr_hzd.h"
 #include "vr_hit.h"
 #include "vrgame.h"
 #include "vrhost.h"
@@ -65,6 +66,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, cons
     static VrHitTarget ht[VRHIT_MAX_T];          /* enemigos golpeables con sus cápsulas por pieza (vr_hit) */
     static float fist_prev[2][3]; static int fist_prev_ok[2];
     int hn = 0;
+    char wsrc[2] = {'-', '-'};                  /* fuente de la distancia a la pared por mano: c = geometría de la escena (vrhc), h = paredes de colisión del juego (HZD) */
     if (in.active) {
         int all = vrhit_scan(ram, 1, 0x01, 1, ht, VRHIT_MAX_T);
         for (int i = 0; i < all; i++) if (!ht[i].ncap) {             /* blanco sin piezas fiables: el cilindro de siempre como su única cápsula (criterio por blanco, no global) */
@@ -111,6 +113,11 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, cons
                     float up[3] = {mf.fist[s][0], mf.fist[s][1] + 60.0f, mf.fist[s][2]}, dn[3] = {mf.fist[s][0], mf.fist[s][1] - 60.0f, mf.fist[s][2]};
                     float du = mv_vrhost_wall_distance(up, 400.0f), dd = mv_vrhost_wall_distance(dn, 400.0f);
                     if (du >= 0.0f && dd >= 0.0f) in.wall_ny[s] = fabsf(du - dd) / 120.0f;
+                }
+                wsrc[s] = 'c';
+                if (bs->on_wall) {      /* pegado a la pared: la pared a la que se pega el personaje es una pared de colisión del juego (HZD), siempre vertical; se mide aunque la geometría de la escena (vrhc) no dé nada o no la vea vertical */
+                    float dz = vrhzd_wall_dist(ram, mf.fist[s], 400.0f);
+                    if (dz >= 0.0f && (dmm < 0.0f || dz < dmm)) { in.wall_valid[s] = 1; in.wall_dist[s] = dz * 0.001f; in.wall_ny[s] = 0.0f; wsrc[s] = 'h'; }
                 }
             }
         }
@@ -165,7 +172,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, cons
             if (out.pecho[s].valid) fprintf(stderr, "[pecho] vb=%u mano=%d zona=%s (%.2f m a su lado, %.2f m bajo la cabeza, %.2f m delante) hf=(lat %.3f, alt %.3f, delante %.3f) m upm=%.0f yaw_personaje=%.1f yaw_cabeza=%.1f grados dist=%.3f m (max %.2f) mantenido=%.2f s (min %.2f) resultado=%s motivo=%s rearme=%s\n", vb, s, s == 0 ? "izquierda" : "derecha", G.cfg.chest_side, G.cfg.chest_down, G.cfg.chest_fwd, out.pecho[s].hf[0], out.pecho[s].hf[1], out.pecho[s].hf[2], map.units_per_m, in.yaw * (180.0f / 3.14159265f), atan2f(in.head_fwd[0], in.head_fwd[1]) * (180.0f / 3.14159265f), out.pecho[s].dist, G.cfg.chest_radius, out.pecho[s].hold, G.cfg.chest_hold_s, rs, out.pecho[s].reason, out.pecho[s].rearm ? "bloqueado_hasta_soltar_gatillo" : "armado");
         }
         if (out.grab_why) fprintf(stderr, "[gest] vb=%u agarre %s mano=%d distancia=%.2f m (cuello/espalda, limite 0,30)\n", vb, out.grab_why, out.grab_side_try, out.grab_dist);
-        if (out.knock_why) { int ks = out.knock_try_side >= 0 ? out.knock_try_side : 0; fprintf(stderr, "[toque] vb=%u motivo=%s mano=%d v=%.2f m/s distancia=%.3f m puno=%d ny=%.2f postura=%d en_pared=%d\n", vb, out.knock_why, out.knock_try_side, out.knock_speed, out.knock_dist, in.fist_btn[ks], in.wall_ny[ks], in.stance, in.on_wall); }
+        if (out.knock_why) { int ks = out.knock_try_side >= 0 ? out.knock_try_side : 0; fprintf(stderr, "[toque] vb=%u motivo=%s mano=%d v=%.2f m/s distancia=%.3f m puno=%d ny=%.2f postura=%d en_pared=%d fuente=%c\n", vb, out.knock_why, out.knock_try_side, out.knock_speed, out.knock_dist, in.fist_btn[ks], in.wall_ny[ks], in.stance, in.on_wall, wsrc[ks]); }
         if (out.event > 0 && out.event < 12) fprintf(stderr, "[gest] vb=%u evento=%s armas_libres=%d\n", vb, evn[out.event], in.weapon < 0);
     }
     /* decisiones del cuerpo -> motor (ganchos de vr/input/vr_melee): ninguna pasa por botones */

@@ -40,6 +40,7 @@ typedef struct {
     float punch_speed;       /* m/s de la mano para contar como golpe (1,3: la media de 4 muestras recorta el pico real de 2-4 m/s) */
     float knock_speed;       /* velocidad mínima al tocar la superficie (0,4 m/s): la de acercamiento a ella Y la de la mano respecto a la cabeza (andar hacia una pared con la mano quieta no cuenta) */
     float knock_touch;       /* distancia mano-superficie que cuenta como tocar (0,08 m) */
+    float knock_touch_wall, knock_speed_wall;   /* lo mismo estando pegado a la pared (on_wall): la mano virtual va junto a Snake y el toque se hace a ojo (0,12 m, 0,2 m/s) */
     float knock_ny_max;      /* solo superficies aproximadamente verticales: |componente vertical de la normal| máxima (0,5 = hasta 30 grados de inclinación); el suelo y las tapas no cuentan */
     float knock_cooldown_s;  /* entre toques (0,25 s) */
     float knock_enemy_m;     /* con un enemigo a menos de esto de la mano no es pared sino golpe (1,0 m) */

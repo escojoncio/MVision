@@ -23,6 +23,14 @@ int vrhzd_clamp_eye(const uint8_t *ram, int32_t bx, int32_t bz, float *ex, float
  * finitas. Solo lee la RAM. */
 float vrhzd_raycast(const uint8_t *ram, const float o[3], const float d[3], float max_units, unsigned skip);
 
+/* Distancia (unidades del motor, sin signo) del punto p a la pared de colisión activa más cercana cuya franja vertical contenga p.y (distancia horizontal al segmento o a su extremo), hasta max_units;
+ * -1 si no hay pared en el alcance / sin datos HZD / entradas no finitas. Cuenta todas las paredes (sin máscara de banderas): es la pared a la que se pega el personaje. Solo lee la RAM. */
+float vrhzd_wall_dist(const uint8_t *ram, const float p[3], float max_units);
+
+/* Como vrhzd_wall_dist pero para el punto p como cuerpo: la pared más cercana con lado libre (se ignoran las paredes sobre las que está p) y su normal horizontal unitaria n = (x, z) apuntando
+ * hacia el lado de p (alejándose de la pared). -1 (n sin tocar) si no hay ninguna en el alcance. */
+float vrhzd_wall_near(const uint8_t *ram, const float p[3], float max_units, float n[2]);
+
 #ifdef __cplusplus
 }
 #endif

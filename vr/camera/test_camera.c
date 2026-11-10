@@ -671,6 +671,120 @@ static void test_eye_shift(void) {
     NEAR(p.eye_shift[0], 0, 1.0); NEAR(p.from[0], 1000 + c.eye_fwd, 1.5);
 }
 
+/* Cámara en tercera persona pegado a la pared (PS_WALL sin primera persona del juego): el ojo de la cámara se traslada por el lado libre de la pared (normal HZD; sin ella, atrás según la mirada) y arriba, sin girarla, con transición
+ * suave de wall_s, con las paredes de colisión del juego, y vuelve a la primera persona al salir. Lo que depende del usuario (manos, cuerpo) sigue anclado al ojo de primera persona: cam_off. */
+static void test_wall_third(void) {
+    VrCamConfig c; BridgeState s; VrCamPlan p;
+    anchor_start(&c, &s);
+    const float back = c.wall_back_m * c.units_per_m, up = c.wall_up_m * c.units_per_m;
+    CHECK(back > 800.0f && back < 2000.0f && up > 100.0f && up < 600.0f && c.wall_s > 0.0f && c.wall_s <= 0.3f);
+    for (int k = 0; k < 25; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, 0, &p);
+    const float x0 = p.from[0], y0 = p.from[1], z0 = p.from[2];
+    const VrCamRecord *r = vrcam_last_record();
+    CHECK(r && r->active && !r->third && r->cam_off[0] == 0 && r->cam_off[1] == 0 && r->cam_off[2] == 0);
+    CHECK(vrcam_hide_head_now(ram) == 1);
+    float hat0[3]; if (r) memcpy(hat0, r->head_at, sizeof hat0);
+    /* entra en la pared: llega en <= 0,3 s, arranca suave y sin saltos */
+    float prev = x0, step = 0, first = 0; int t_full = -1;
+    for (int k = 1; k <= 12; k++) {
+        anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+        float d = fabsf(p.from[0] - prev); step = fmaxf(step, d); if (k == 1) first = d; prev = p.from[0];
+        CHECK(p.from[0] <= x0 + 0.5f);
+        if (t_full < 0 && fabsf(p.from[0] - (x0 - back)) < 2.0f) t_full = k;
+    }
+    printf("pared: tercera persona llega en %d fotogramas de 0,04 s, paso maximo %.0f uds, primer paso %.0f uds\n", t_full, step, first);
+    CHECK(t_full >= 3 && t_full * 0.04f <= 0.3f + 1e-4f);
+    CHECK(step <= 300.0f && first < 100.0f);
+    NEAR(p.from[0], x0 - back, 2.0); NEAR(p.from[1], y0 + up, 2.0); NEAR(p.from[2], z0, 2.0);        /* mirada +X: el ojo va atrás (-X) y arriba */
+    NEAR(p.yaw_deg, 90.0, 0.01);                                                                          /* la mirada no gira */
+    r = vrcam_last_record();
+    CHECK(r && r->third);
+    if (r) {
+        NEAR(r->cam_off[0], -back, 2.0); NEAR(r->cam_off[1], up, 2.0); NEAR(r->cam_off[2], 0, 2.0);
+        for (int q = 0; q < 3; q++) NEAR(r->head_at[q], hat0[q], 1.5);                                  /* el cuerpo sigue bajo el ojo de primera persona */
+    }
+    CHECK(vrcam_hide_head_now(ram) == 0);                                                                 /* en tercera persona la cabeza se dibuja */
+    /* SIN normal de pared (sin datos HZD): reserva = atrás según la mirada; girar la cabeza gira el desplazamiento, el cabeceo no lo cambia */
+    G_yaw = 90;
+    for (int k = 0; k < 12; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+    r = vrcam_last_record();
+    if (r) { NEAR(r->cam_off[0], 0, 12.0); NEAR(r->cam_off[2], back, 12.0); }
+    G_yaw = 0; G_elev = 60;
+    for (int k = 0; k < 12; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+    r = vrcam_last_record();
+    if (r) { NEAR(r->cam_off[0], -back, 12.0); NEAR(r->cam_off[1], up, 2.0); }
+    G_elev = 0;
+    /* primera persona del juego (asomarse) estando en la pared: vuelve a primera persona */
+    for (int k = 0; k < 12; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL | BRIDGE_PS_WATCH_PEEK, &p);
+    r = vrcam_last_record();
+    CHECK(r && !r->third); if (r) { NEAR(r->cam_off[0], 0, 1.0); NEAR(r->cam_off[1], 0, 1.0); }
+    NEAR(p.from[0], x0, 1.5);
+    /* sale de la pared: primera persona otra vez en <= 0,3 s y la cabeza vuelve a ocultarse */
+    for (int k = 0; k < 12; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+    int back1 = -1;
+    for (int k = 1; k <= 12; k++) { anchor_tick(&s, 1000, 1029, 10, 468, 20, 0, &p); if (back1 < 0 && fabsf(p.from[0] - x0) < 2.0f) back1 = k; }
+    CHECK(back1 > 0 && back1 * 0.04f <= 0.3f + 1e-4f);
+    r = vrcam_last_record(); CHECK(r && !r->third); NEAR(p.from[1], y0, 2.0);
+    CHECK(vrcam_hide_head_now(ram) == 1);
+    /* Con la pared HZD a la que se pega el personaje (x = 900, lado libre x > 900, el cuerpo a 100 de ella) el ojo va SIEMPRE por el lado libre (a lo largo de la normal, alejándose de la pared), mire
+     * donde mire el usuario, y el desplazamiento queda fijo en el mundo: girar la cabeza no lo orbita. Aquí la mirada es +X (hacia el lado libre): sin normal el ojo iría a -X. */
+    uint32_t map = 0x800b8ab8, wr = 0x8015cde4, hdr = 0x80149268, grp = 0x80149284, walls = 0x8014929c, flags = 0x801492c0;
+    w32(CTL + 0x2C, map); w32(map + 8, wr); w32(wr, hdr); w32(0x800ACB38, 1);
+    w16(hdr + 10, 1); w32(hdr + 16, grp); w16(grp + 2, 1); w32(grp + 8, walls); w32(grp + 20, flags);
+    int16_t wl[16] = {900, -3000, 0, 3000, 900, 2000, 0, 3000, 5000, -3000, 0, 3000, 5000, 2000, 0, 3000};
+    for (int k = 0; k < 8; k++) w16(walls + 2 * k, wl[k]);
+    for (int k = 0; k < 12; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+    NEAR(p.from[0], x0 + back, 2.0); NEAR(p.from[1], y0 + up, 2.0); NEAR(p.from[2], z0, 2.0);
+    r = vrcam_last_record(); CHECK(r && r->third); if (r) { NEAR(r->cam_off[0], back, 2.0); NEAR(r->cam_off[2], 0, 2.0); }
+    G_yaw = 90; G_elev = 30;                                  /* mira atrás, a la pared, y arriba: el desplazamiento de la cámara no cambia (el ojo de primera persona sí gira eye_fwd con la cabeza) */
+    for (int k = 0; k < 12; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+    r = vrcam_last_record(); CHECK(r && r->third); if (r) { NEAR(r->cam_off[0], back, 2.0); NEAR(r->cam_off[1], up, 2.0); NEAR(r->cam_off[2], 0, 2.0); }
+    float dev = 0;
+    for (int k = 0; k < 40; k++) {                            /* barrido de la cabeza (guiñada y cabeceo) */
+        G_yaw = 180.0f * sinf((float)k * 0.3f); G_elev = 40.0f * sinf((float)k * 0.2f);
+        anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+        r = vrcam_last_record();
+        if (r) dev = fmaxf(dev, fmaxf(fabsf(r->cam_off[0] - back), fmaxf(fabsf(r->cam_off[1] - up), fabsf(r->cam_off[2]))));
+    }
+    printf("pared: desplazamiento de la camara con la cabeza girando +-180 grados: desvio maximo %.2f uds\n", dev);
+    CHECK(dev <= 1.5f);
+    G_yaw = 0; G_elev = 0;
+    for (int k = 0; k < 12; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+    /* otra pared enfrente (x = 5000) y el ojo no la atraviesa */
+    for (int k = 0; k < 8; k++) w16(walls + 16 + 2 * k, wl[8 + k]);
+    w16(grp + 2, 2);
+    for (int k = 0; k < 12; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+    NEAR(p.from[0], x0 + back, 2.0);                          /* 2270 < 5000 - 180: aún cabe */
+    wl[8] = wl[12] = 2000; for (int k = 0; k < 8; k++) w16(walls + 16 + 2 * k, wl[8 + k]);       /* ahora enfrente a 1000: el ojo se queda a 180 de ella */
+    for (int k = 0; k < 12; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+    NEAR(p.from[0], 2000 - 0.18f * c.units_per_m, 2.0);
+    r = vrcam_last_record(); CHECK(r && r->third); if (r) NEAR(r->cam_off[0], p.from[0] - x0, 2.0);
+    /* la pared de enfrente se va: el ojo se retira como mucho a 8 m/s (sin brinco) hasta el desplazamiento completo */
+    w16(grp + 2, 1); prev = p.from[0]; step = 0;
+    for (int k = 0; k < 12; k++) { anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p); step = fmaxf(step, fabsf(p.from[0] - prev)); prev = p.from[0]; }
+    CHECK(step <= 8.0f * c.units_per_m * 0.04f + 1.0f);
+    NEAR(p.from[0], x0 + back, 2.0);
+    /* la normal cambia de +X a +Z (otra pared): el giro del desplazamiento es filtrado, sin saltos */
+    { int16_t w2[8] = {-3000, -600, 0, 3000, 4000, -600, 0, 3000};   /* pared z = -600: el cuerpo (z=-500) a 100, lado libre +z */
+      for (int k = 0; k < 8; k++) w16(walls + 2 * k, w2[k]);
+      float px = p.from[0], pz = p.from[2], mx = 0;
+      for (int k = 0; k < 30; k++) { anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p); mx = fmaxf(mx, hypotf(p.from[0] - px, p.from[2] - pz)); px = p.from[0]; pz = p.from[2]; }
+      CHECK(mx <= 450.0f);
+      NEAR(p.from[0], 1000 + c.eye_fwd, 3.0); NEAR(p.from[2], -500 + back, 3.0); }
+    /* pared pegada al personaje y otra casi encima (x = 1100): casi sin sitio, el ojo queda junto a la cabeza y la cabeza sigue oculta */
+    for (int k = 0; k < 8; k++) w16(walls + 2 * k, wl[k]);
+    w16(grp + 2, 2); wl[8] = wl[12] = 1100; for (int k = 0; k < 8; k++) w16(walls + 16 + 2 * k, wl[8 + k]);
+    for (int k = 0; k < 12; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+    CHECK(p.from[0] <= 1000.5f);
+    r = vrcam_last_record(); CHECK(r && !r->third); CHECK(vrcam_hide_head_now(ram) == 1);
+    /* desactivable: wall_back_m = 0 deja la primera persona */
+    { VrCamConfig c2; vrcam_config_default(&c2); c2.head = head; c2.wall_back_m = 0; vrcam_init(&c2); build_world(1024); s = ok_state();
+      for (int i = 0; i < c2.on_frames; i++) vrcam_frame(ram, &s);
+      G_ok = 1; G_yaw = 0; G_elev = 0;
+      for (int k = 0; k < 20; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, BRIDGE_PS_WALL, &p);
+      NEAR(p.from[0], x0, 1.5); r = vrcam_last_record(); CHECK(r && !r->third); }
+}
+
 /* Tumbado en un conducto (RAM real de los volcados d0008 / d0009; VRCAM_DUMPS24 = carpeta): con el ojo en la raíz de locomoción el cuerpo se dibuja desplazado hasta que la
  * articulación de la cabeza queda en VrCamRecord.head_at. Ni la cabeza ni el cuello, el torso, la cadera o las piernas quedan por delante del ojo, y la cabeza sigue oculta. */
 static void test_prone_dumps(void) {
@@ -728,6 +842,7 @@ int main(void) {
     test_anchor();
     test_postures();
     test_eye_shift();
+    test_wall_third();
     test_prone_dumps();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

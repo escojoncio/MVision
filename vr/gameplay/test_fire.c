@@ -111,6 +111,8 @@ static void t_matrix(void) {
     r.active = 1; r.eye[0] = 5; r.eye[1] = 6; r.eye[2] = 7; r.theta_play_deg = 33; r.p_ref[1] = 1.5f; r.units_per_m = 1000;
     vrfire_map_from_cam(&fm, &r); CHECK(fm.valid && fm.eye[2] == 7 && fm.theta_play_deg == 33 && fm.p_ref[1] == 1.5f, "mapa desde el registro");
     vrfire_map_from_cam(&fm, NULL); CHECK(!fm.valid, "registro NULL");
+    r.cam_off[0] = -1200; r.cam_off[1] = 300; r.cam_off[2] = 0.4f;       /* tercera persona en la pared: manos y disparo se anclan al ojo de primera persona (ojo - cam_off) */
+    vrfire_map_from_cam(&fm, &r); CHECK(fm.valid && fm.eye[0] == 5 + 1200 && fm.eye[1] == 6 - 300 && fm.eye[2] == 7, "mapa en tercera persona: ojo de primera persona");
 }
 
 /* ---------------------------------------------------------------- juego falso para la lógica de pulsación */

@@ -9,7 +9,7 @@ void vrg_cfg_defaults(vrg_cfg_t *c) {
     memset(c, 0, sizeof *c);
     c->enable = 1; c->fist_required = 1; c->fist_haptic = 0.12f; c->item_hold_s = 0.35f; c->punch_dir_cos = 0.35f; c->trig_on = 0.6f; c->trig_off = 0.3f; c->punch = c->grab = c->knock = c->peek = 1;
     c->right_handed = 1;
-    c->punch_speed = 0.5f; c->knock_speed = 0.4f; c->knock_touch = 0.08f; c->knock_ny_max = 0.5f; c->knock_cooldown_s = 0.25f; c->knock_enemy_m = 1.0f; c->reach_min = 0.20f; c->melee_range = 3.0f; c->front_cos = 0.5f;
+    c->punch_speed = 0.5f; c->knock_speed = 0.4f; c->knock_touch = 0.08f; c->knock_touch_wall = 0.12f; c->knock_speed_wall = 0.2f; c->knock_ny_max = 0.5f; c->knock_cooldown_s = 0.25f; c->knock_enemy_m = 1.0f; c->reach_min = 0.20f; c->melee_range = 3.0f; c->front_cos = 0.5f;
     c->grab_range = 1.3f; c->neck_radius = 0.36f; c->neck_height = 0.45f; c->back_dist = 0.25f; c->grab_after_punch_s = 0.2f;
     c->chest_side = 0.16f; c->chest_down = 0.26f; c->chest_fwd = -0.02f; c->chest_radius = 0.15f; c->chest_exit = 0.20f; c->chest_hold_s = 0.30f;
     c->grip_on = 0.65f; c->grip_off = 0.35f; c->peek_on = 0.12f; c->peek_off = 0.06f; c->cooldown_s = 0.12f;
@@ -184,8 +184,9 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                 if (r > ap) ap = r;
             }
             float d = in->wall_dist[s];
-            int touch = d <= c->knock_touch && dprev > c->knock_touch;
-            if (ap >= c->knock_speed && d < 0.35f && d > c->knock_touch) g->kn_toward[s] = 1;
+            const float k_touch = in->on_wall ? c->knock_touch_wall : c->knock_touch, k_speed = in->on_wall ? c->knock_speed_wall : c->knock_speed;   /* pegado a la pared: umbrales tolerantes */
+            int touch = d <= k_touch && dprev > k_touch;
+            if (ap >= k_speed && d < 0.35f && d > k_touch) g->kn_toward[s] = 1;
             const char *why = NULL;
             if (touch) {
                 int enemy_near = 0;
@@ -201,8 +202,8 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                 else if (!in->fist_btn[s]) why = "sin_puno";
                 else if (enemy_near) why = "enemigo";
                 else if (g->settle > 0) why = "calma";
-                else if (ap < c->knock_speed) why = "lento";
-                else if (spd[s] < c->knock_speed) why = "mano_quieta";
+                else if (ap < k_speed) why = "lento";
+                else if (spd[s] < k_speed) why = "mano_quieta";
                 else if (g->knock_cool[s] > 0 || g->cool_knock > 0) why = "enfriamiento";
                 else why = "ok";
                 if (!strcmp(why, "ok") && out->knock_side < 0) {
@@ -215,7 +216,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                 /* se acercó rápido pero se detuvo sin llegar a la pared */
                 g->kn_toward[s] = 0;
                 if (in->on_wall && c->knock) { out->knock_why = "lejos_de_la_pared"; out->knock_speed = ap; out->knock_dist = d; out->knock_try_side = s; }
-            } else if (d <= 0.25f && d > c->knock_touch && g->knock_log[s] <= 0 && c->knock) {
+            } else if (d <= 0.25f && d > k_touch && g->knock_log[s] <= 0 && c->knock) {
                 /* cerca de una superficie sin cruzar el umbral de contacto: no es un rechazo con motivo, pero queda en el registro (4 por segundo como máximo) */
                 g->knock_log[s] = 0.25f;
                 out->knock_why = "cerca"; out->knock_speed = ap; out->knock_dist = d; out->knock_try_side = s;

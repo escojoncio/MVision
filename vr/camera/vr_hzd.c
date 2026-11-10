@@ -9,6 +9,9 @@ static int okp(uint32_t p, uint32_t len) { return p >= 0x80000000u && p < 0x8000
 static uint32_t u32(const uint8_t *r, uint32_t a) { uint32_t v; memcpy(&v, r + (a & 0x1FFFFFu & ~3u), 4); return v; }
 static int16_t s16(const uint8_t *r, uint32_t a) { int16_t v; memcpy(&v, r + (a & 0x1FFFFFu & ~1u), 2); return v; }
 
+#include "vr_hzd_wall.h"
+float vrhzd_wall_near(const uint8_t *ram, const float p[3], float max_units, float n[2]) { return n ? wall_core(ram, p, max_units, n) : -1.0f; }
+
 int vrhzd_clamp_eye(const uint8_t *ram, int32_t bx, int32_t bz, float *ex, float *ez, float ey, float r) {
     if (!ram || !ex || !ez || !(r > 0.0f) || !isfinite(*ex) || !isfinite(*ez) || !isfinite(ey)) return 0;
     uint32_t ctl = u32(ram, 0x800ACB84u);

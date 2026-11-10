@@ -1641,7 +1641,7 @@ static void test_fist_glue(void) {
  * (+0x4C = 0) durante el fotograma y restore las devuelve; las piernas nunca; contador near_hidden. */
 static void test_near_hide(void) {
     static const uint32_t VERTS = 0x80100000u;
-    for (int sc = 0; sc < 7; sc++) {
+    for (int sc = 0; sc < 8; sc++) {
         VrBodyConfig cfg; legacy_cfg(&cfg); cfg.hand_pitch_deg = 0; cfg.near_hide_m = 0.30f; cfg.near_hide_vtx_m = 0.12f;
         build_body(500 + sc);
         float R[9], t[3];
@@ -1649,7 +1649,7 @@ static void test_near_hide(void) {
         load_xf(part_addr(ref), R, t);
         float yaw = sc == 6 ? 90.0f : 0.0f, gx = sinf(yaw * 3.14159265f / 180.0f), gz = cosf(yaw * 3.14159265f / 180.0f);   /* mirada horizontal: 0 = +Z, + hacia +X */
         float back = sc == 1 ? 400.0f : sc == 2 ? -200.0f : 200.0f;    /* mm de ojo detrás de la pieza (negativo: delante de ella) */
-        g_view.gaze_yaw_deg = yaw;
+        g_view.gaze_yaw_deg = yaw; g_view.third = sc == 7;      /* escenario 7 = como el 0 pero con la cámara en tercera persona: el cuerpo no se oculta */
         g_view.eye[0] = t[0] - gx * back; g_view.eye[1] = t[1]; g_view.eye[2] = t[2] - gz * back;
         if (sc == 4 || sc == 5) {      /* cuello con dos vértices: A en su origen y B a 4 m (el centro queda lejos del ojo); el ojo a 100 mm (sc 4) o 150 mm (sc 5) de A */
             uint32_t mdl = PMODELS + 0x3C * 5u;
@@ -1666,6 +1666,7 @@ static void test_near_hide(void) {
         for (int i = 0; i < 16; i++) { hid[i] = r16(part_addr(i) + 0x4C) == 0; nh += hid[i]; }
         for (int i = 10; i < 16; i++) CHECK(!hid[i], "escenario %d: la pierna/pie %d no debe ocultarse", sc, i);
         if (sc == 0 || sc == 6) CHECK(hid[1], "escenario %d: torso a 0,20 m delante del ojo: oculto", sc);
+        if (sc == 7) CHECK(nh == 0, "escenario 7: tercera persona: ninguna pieza se oculta por cercanía al ojo de primera persona (%d)", nh);
         if (sc == 1) CHECK(!hid[1], "escenario 1: torso a 0,40 m: no se oculta");
         if (sc == 2) CHECK(!hid[1], "escenario 2: torso detrás del ojo: no se oculta");
         if (sc == 4) CHECK(hid[5], "escenario 4: vértice a 0,10 m oculta el cuello");

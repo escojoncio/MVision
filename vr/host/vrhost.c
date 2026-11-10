@@ -395,7 +395,7 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
     if (nsmp.valid && view.kind != VRV_K_ENGINE) ns_smp_pend = nsmp;   /* el suavizador corrige la escena que se dibuja: la nativa lleva el último registro, la lista el anterior */
     { VrBodyStats b; vrbody_stats(&b); ik_ap0 = b.applies; ik_dr0 = b.arms_driven; }
     o->player_key = ns_player_key(emu_ram);
-    o->hide_head = 1;                                       /* primera persona: la cabeza propia no se dibuja (misma regla que vrcam_hide_head) */
+    o->hide_head = !r->third;                               /* primera persona: la cabeza propia no se dibuja (misma regla que vrcam_hide_head); en la tercera persona de la pared, sí */
     o->refresh_parts = body_ok ? NS_PARTS_BODY : 0;   /* brazos + pelvis, piernas, torso y cuello: torso_follow las reescribe tras la captura */
 }
 /* Manos nuevas: cierre de la escena (hilo de emulación, ns_hook_tick, escena apta con el jugador enlazado). Agarre y brazos manejados de la IK del último vrbody_apply. */

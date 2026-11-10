@@ -112,7 +112,7 @@ void vrfire_map_from_cam(VrFireMap *m, const struct VrCamRecord *r) {
     memset(m, 0, sizeof *m);
     if (!r || !r->active || !(r->units_per_m > 0)) return;
     m->valid = 1;
-    for (int i = 0; i < 3; i++) { m->eye[i] = r->eye[i]; m->p_ref[i] = r->p_ref[i]; }
+    for (int i = 0; i < 3; i++) { m->eye[i] = r->eye[i] - round_clamp(r->cam_off[i]); m->p_ref[i] = r->p_ref[i]; }   /* ojo de primera persona: en la tercera persona de la pared la cámara va desplazada (cam_off) pero manos y disparo siguen en la cabeza del personaje */
     m->theta_play_deg = r->theta_play_deg; m->units_per_m = r->units_per_m;
 }
 
