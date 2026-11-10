@@ -45,6 +45,11 @@ void ns_gpu_rebase_corners(NsGpuCorner *c, uint32_t n, uint32_t base);
 typedef struct { uint32_t tris, big, cross, big_cross; float max_edge; } NsGpuScan;
 void ns_gpu_scan(const NsGpuVert *verts, const NsGpuCorner *corners, uint32_t ntri, const float m[16], float near, float big_edge, NsGpuScan *acc);
 
+/* Metros VR por unidad de `raise` (= fog_par.w del renderer: 0,05 / units_per_m, units_per_m <= 1 -> 1000). */
+float ns_gpu_raise_m(const NsScene *sc);
+/* Adelanto mínimo (m, línea de visión) de las piezas de instancias dinámicas respecto del escenario estático; cubre el máximo medido (0,32 m) de pies bajo el suelo. */
+#define NS_GPU_DYN_RAISE_M 0.35f
+
 /* Pieza de la escena (solo se llama con la malla presente: mesh_flags = NsMesh.flags, depth_bias = NsMesh.depth_bias). parent_global: índice global (en NsScene.piece) del
  * padre o -1 (la malla del padre debe estar presente; parent_nverts = su nº de vértices). vert_base: base de la malla en el pool de vértices. */
 void ns_gpu_make_piece(const NsScene *sc, const NsInstance *inst, const NsPiece *p, uint32_t mesh_flags, int depth_bias, uint32_t vert_base,

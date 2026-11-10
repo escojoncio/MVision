@@ -295,6 +295,11 @@ float ns_gpu_fog_f(const NsFog *fog, float z) {
     return ns_clampf((z - fog->start) / fog->len, 0.0f, 1.0f);
 }
 
+float ns_gpu_raise_m(const NsScene *sc) {
+    float upm = sc->units_per_m > 1.0f ? sc->units_per_m : 1000.0f;
+    return 0.05f / upm;
+}
+
 void ns_gpu_make_piece(const NsScene *sc, const NsInstance *inst, const NsPiece *p, uint32_t mesh_flags, int depth_bias, uint32_t vert_base,
                        int parent_global, uint32_t parent_nverts, NsGpuPiece *o) {
     memset(o, 0, sizeof *o);
@@ -304,6 +309,14 @@ void ns_gpu_make_piece(const NsScene *sc, const NsInstance *inst, const NsPiece 
     o->vert_base = vert_base;
     o->flags = NSG_PF_DRAW;
     o->raise = (float)depth_bias;
+    if (!(inst->flags & NS_IF_STATIC) && o->raise >= 0.0f) {
+        /* Objetos dinámicos (personajes): el PSX los pinta por OT (painter) y el z-buffer los oculta bajo el suelo estático (pies medidos 0,12-0,32 m por debajo). Se adelantan
+         * NS_GPU_DYN_RAISE_M a lo largo de la línea de visión (el shader lo limita a 0,9 de la distancia al ojo). max y no suma: un sesgo propio mayor (decals) se conserva y el tope no se
+         * acumula; un sesgo negativo (alejar) no se toca. Efecto conocido: un actor tras una pared a menos de ese margen puede asomar. Global: todos los juegos y escenas. */
+        float rm = ns_gpu_raise_m(sc);
+        float kb = NS_GPU_DYN_RAISE_M / rm;
+        if (o->raise < kb) o->raise = kb;
+    }
     if (parent_global >= 0) { o->parent = parent_global; o->parent_nverts = parent_nverts; }
     if (!(inst->flags & NS_IF_STATIC)) o->flags |= NSG_PF_NET;   /* objetos dinámicos: red de seguridad de vértices (el escenario es fijo y trae triángulos legítimamente enormes: agua, cielo) */
 

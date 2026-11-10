@@ -5,7 +5,8 @@
  *  4. matriz corrupta (escala, NaN, traslación enorme): causa MAT;
  *  5. vértice basura en el almacén de GPU: los triángulos que lo usan se colapsan (y solo ésos); el escenario (NS_IF_STATIC: agua, cielo) nunca se toca;
  *  6. mallas de la mano articulada propia en todas sus poses: 0 colapsos; con la matriz de la manopla corrupta: MAT;
- *  7. interpolación de matrices (ns_xf_lerp): sin escalas ni traslaciones fuera del rango de los extremos. */
+ *  7. interpolación de matrices (ns_xf_lerp): sin escalas ni traslaciones fuera del rango de los extremos;
+ *  8. sesgo `raise` de las piezas dinámicas (mínimo K, max y no suma; negativo y escenario intactos). */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -289,6 +290,29 @@ static void test_lerp(void) {
     printf("  interpolación: %ld pares aleatorios (rotaciones de hasta 180 grados, escalas 0,05..1), 0 fuera de rango esperados (%ld), norma máx. de columna %.3f\n", n, bad, worst);
 }
 
+/* 8. sesgo de orden de las piezas dinámicas: los pies (0,12-0,32 m bajo el suelo estático) deben pasar el z-buffer; el escenario y los sesgos negativos no cambian */
+static void test_dyn_raise(void) {
+    W w; build(&w, 0, 0.0f);
+    const float raise_m = 0.05f / 1000.0f, k_units = 0.35f / raise_m;   /* NS_GPU_DYN_RAISE_M = 0,35 m en unidades de `raise` */
+    NsGpuPiece o;
+    NsInstance *in = &w.sc.inst[0];
+    in->flags = 0;
+    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 0, 0, -1, 0, &o);
+    CHECK(o.raise >= k_units * 0.999f, "dinámica sin sesgo: raise=%f (>= %f)", o.raise, k_units);
+    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 1000, 0, -1, 0, &o);
+    CHECK(o.raise >= k_units * 0.999f, "dinámica con decal pequeño: max, raise=%f", o.raise);
+    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 20000, 0, -1, 0, &o);
+    CHECK(o.raise == 20000.0f, "dinámica con sesgo mayor que K: se conserva (max, no suma), raise=%f", o.raise);
+    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, -500, 0, -1, 0, &o);
+    CHECK(o.raise == -500.0f, "sesgo negativo (alejar) no se toca, raise=%f", o.raise);
+    in->flags = NS_IF_STATIC;
+    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 0, 0, -1, 0, &o);
+    CHECK(o.raise == 0.0f, "estática sin sesgo: raise=%f", o.raise);
+    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 1000, 0, -1, 0, &o);
+    CHECK(o.raise == 1000.0f, "estática conserva su sesgo: raise=%f", o.raise);
+    destroy(&w);
+}
+
 int main(void) {
     printf("test_ns_net: red de seguridad de vértices\n");
     test_chain();
@@ -298,6 +322,7 @@ int main(void) {
     test_garbage_vertex();
     test_hand();
     test_lerp();
+    test_dyn_raise();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }
