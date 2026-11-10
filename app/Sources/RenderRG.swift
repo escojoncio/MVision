@@ -735,6 +735,8 @@ final class RGRenderer {
 
     /// Fluidez: vistas del pase de la escena, calculadas tras tomar las escenas nuevas (ver XRFrameEncoder). nil = las recibidas.
     var viewsHook: (() -> [simd_float4x4])?
+    /// Vistas sin la corrección de fluidez, solo durante encode(): las usan el arma y las vistas especiales (van pegadas al mando, no al mundo). nil = las del pase.
+    private var bodyViews: [simd_float4x4]?
 
     // MARK: encode
     func encode(commandBuffer: MTLCommandBuffer, colorTargets: [MTLTexture], depthTargets: [MTLTexture],
@@ -786,6 +788,7 @@ final class RGRenderer {
         }
         encodeVram(commandBuffer, preCmds.map { $0.cmd }, fs)
         let sceneV = viewsHook?() ?? views
+        bodyViews = views; defer { bodyViews = nil }   // el arma y sus vistas especiales van en el espacio del usuario SIN la corrección de fluidez (la mano propia la compensa: vr_bodylive.h)
         if let v0 = sceneV.first { diagView0 = v0 }
 
         // 2) grupos de lotes con el mismo ev_end: antes de cada grupo se aplican los eventos pendientes de VRAM (el orden de los eventos respecto a los lotes de 2D se conserva).
@@ -1698,9 +1701,10 @@ final class RGRenderer {
             if last && drawBody {
                 radar?.encodeQuad(enc, uniforms: uniforms, layered: amplify > 0, color: color.pixelFormat, depth: depth.pixelFormat, samples: samples)
                 weapon?.sampleCount = samples      // las muestras del pase pueden cambiar en vivo (diagnóstico MSAA 1x)
-                weapon?.encode(encoder: enc, views: views, projections: projections, layered: amplify > 0, viewIndex: viewIndex)
+                let bv = bodyViews ?? views
+                weapon?.encode(encoder: enc, views: bv, projections: projections, layered: amplify > 0, viewIndex: viewIndex)
                 if let sv = special {
-                    weapon?.encodeSpecial(encoder: enc, view: sv, aux: auxImage, auxLinear: auxStoredLinear, hud: hudTexture, views: views,
+                    weapon?.encodeSpecial(encoder: enc, view: sv, aux: auxImage, auxLinear: auxStoredLinear, hud: hudTexture, views: bv,
                                           projections: projections, layered: amplify > 0, viewIndex: viewIndex)
                 }
             }

@@ -410,7 +410,39 @@ static void grenade_models(void) {
     VrHandsFrame f;
     CHECK(mv_host_hands(&f) == 0, "con textura incompleta no se publica malla VR (sería blanca)");
     mv_host_hands_done();
+    /* la granada del juego cuelga de la mano que empuña el arma: el anfitrión la lleva a esa mano (ns_wphide_carry); el modelo VR y sin arma no */
+    mv_vrgame_set_options(1, 2);        /* diestro (pruebas anteriores dejaron el mando izquierdo) */
+    for (int i = 0; i < 3; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    CHECK(vrgame_native_hand() == 1, "granada nativa en la mano derecha: lado %d", vrgame_native_hand());
     vrgame_test_set_native(2, 0);
+    for (int i = 0; i < 3; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    CHECK(vrgame_native_hand() == -1, "arma con modelo VR: ninguna mano con objeto del juego (%d)", vrgame_native_hand());
+    vrgame_test_set_native(2, 1);
+    for (int i = 0; i < 3; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    CHECK(vrgame_native_hand() == 1, "granada nativa otra vez en la mano derecha");
+    world(-1, 0, 0);
+    for (int i = 0; i < 3; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    CHECK(vrgame_native_hand() == -1, "sin arma equipada: sin objeto en la mano (%d)", vrgame_native_hand());
+    vrgame_test_set_native(2, 0);
+}
+
+/* ---- marco de la mano del mando: el de la mano propia en la escena y el del arma son el mismo, y se mueven igual ---- */
+static void hand_frames(void) {
+    printf("-- marco de la mano: ahora y simulado --\n");
+    float p0[3], q0[4], p1[3], q1[4], ps[3], qs[4];
+    mv_vrgame_clear_hands(); mv_vrgame_set_options(1, 2);
+    world(0, 12, 48);
+    fresh_pistol();
+    gvbl(0.2f, 0.0f, 0.0f, 0);
+    CHECK(vrgame_hand_frame_now(1, p0, q0) && vrgame_hand_frame_now(0, ps, qs) == 0 && !vrgame_hand_frame_now(2, ps, qs) && !vrgame_hand_frame_now(1, NULL, qs), "ahora: solo la mano con seguimiento");
+    CHECK(!vrgame_hand_frame_sim(1, ps, qs) && !vrgame_hand_frame_sim(0, ps, qs) && !vrgame_hand_frame_sim(-1, ps, qs), "simulado: sin IK del cuerpo no hay marco");
+    gvbl(0.5f, 0.0f, 0.0f, 0);          /* el mando se mueve 0,3 m en X sin girar: el marco de la mano, igual */
+    CHECK(vrgame_hand_frame_now(1, p1, q1), "ahora (2)");
+    float dq = 0; for (int i = 0; i < 4; i++) dq = fmaxf(dq, fabsf(q1[i] - q0[i]));
+    CHECK(fabsf(p1[0] - p0[0] - 0.3f) < 1e-4f && fabsf(p1[1] - p0[1]) < 1e-4f && fabsf(p1[2] - p0[2]) < 1e-4f && dq < 1e-5f, "el marco sigue al mando rígidamente: (%.4f, %.4f, %.4f)", p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]);
+    CHECK(fabsf(sqrtf(q1[0] * q1[0] + q1[1] * q1[1] + q1[2] * q1[2] + q1[3] * q1[3]) - 1.0f) < 1e-4f, "cuaternión unitario");
+    vrgame_test_advance(400000000ull);  /* más de 0,3 s sin mando: sin seguimiento */
+    CHECK(!vrgame_hand_frame_now(1, p1, q1), "mano sin actualizar más de 0,3 s: sin marco");
 }
 
 /* ---- láser de la pistola y puntería: el rayo dibujado, la boca del arma y la bala sustituida comparten eje y origen ---- */
@@ -741,6 +773,7 @@ int main(void) {
     grenade_gesture();
     weapon_follows_controller();
     grenade_models();
+    hand_frames();
     laser_aims_with_bullet();
     aim_pose();
     aim_guard();

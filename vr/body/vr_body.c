@@ -447,7 +447,7 @@ static struct {
     int pel_have; float pel_prev[3];       /* posición de la cadera del juego en el apply anterior (velocidad de marcha) */
     FistSave fs[2];
     struct { int ok; VrBodyArmLive a; } live[2];      /* estado del último apply para repetir la IK con la mano viva (vrbody_arm_live) */
-    struct { int ok; uint32_t model; float side, grip; float R[9], t[3]; } pf[2];     /* mano y agarre del último apply, para vrbody_prefist; R,t = marco de mundo de la pieza mano tras la IK */
+    struct { int ok; uint32_t model; float side, grip; float R[9], t[3], Ra[9], ta[3]; } pf[2];     /* mano y agarre del último apply, para vrbody_prefist; R,t = marco de mundo de la pieza mano tras la IK; Ra,ta = el de la animación del juego antes de la IK (vrbody_hand_anim) */
 } G;
 
 /* Giro de agarre -> mano alrededor del eje de los dedos (z local de la mano): izquierda +deg, derecha -deg (ver VrBodyConfig.hand_roll_deg). */
@@ -594,6 +594,13 @@ int vrbody_hand_state(int side, float *grip, float R[9], float t[3]) {
     if (grip) *grip = G.pf[side].grip;
     if (R) memcpy(R, G.pf[side].R, sizeof G.pf[side].R);
     if (t) memcpy(t, G.pf[side].t, sizeof G.pf[side].t);
+    return 1;
+}
+
+int vrbody_hand_anim(int side, float R[9], float t[3]) {
+    if (side < 0 || side > 1 || !G.pf[side].ok) return 0;
+    if (R) memcpy(R, G.pf[side].Ra, sizeof G.pf[side].Ra);
+    if (t) memcpy(t, G.pf[side].ta, sizeof G.pf[side].ta);
     return 1;
 }
 
@@ -1268,6 +1275,7 @@ static int apply_main(uint8_t *ram) {
         }
         G.pf[s].ok = 1; G.pf[s].model = pw.model; G.pf[s].side = -rig.side; G.pf[s].grip = h->grip_cur * we_w;
         memcpy(G.pf[s].R, nw[2].R, sizeof G.pf[s].R); memcpy(G.pf[s].t, nw[2].t, sizeof G.pf[s].t);
+        memcpy(G.pf[s].Ra, wr_w, sizeof G.pf[s].Ra); for (int i = 0; i < 3; i++) G.pf[s].ta[i] = ww.t[i] - shf[i];      /* sin el desplazamiento del ojo (shf): el objeto que cuelga de la mano (otro actor) no lo lleva */
         if (fist_on() && h->grip_cur * we_w >= cfg->fist_min_grip) fist_apply(ram, s, pw.model, -rig.side, h->grip_cur * we_w);
         dbg->driven = 1; dbg->w = h->w; dbg->grip = h->grip_cur; v_cp(dbg->target_wrist, wt); memcpy(dbg->target_hand, Rtb, sizeof Rtb); dbg->sol = sol;
         driven++;

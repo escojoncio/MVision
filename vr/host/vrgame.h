@@ -151,6 +151,11 @@ void vrgame_test_clock(uint64_t ns);                                 /* pruebas:
 void vrgame_test_advance(uint64_t ns);                                 /* pruebas: avanza el reloj inyectado */
 void vrgame_test_set_native(int game_id, int on);                          /* pruebas: marca la ranura como «dibujada por el juego» (textura incompleta) */
 int vrgame_hand_pose_in(int side, int *item_pose, float *trigger, float *thumb);   /* pose de la mano nueva (vr_hand_pose.h: HP_*), gatillo y pulgar de la mano física side; 1 si hay seguimiento (si no, HP_RELAX y ceros) */
+/* Marco de la mano del mando en el espacio del usuario (m, cuaternión x,y,z,w; el del arma: agarre * desvío fijo) del lado `side` (0 izquierda / 1 derecha): _sim con el agarre filtrado con el que se simuló la última IK de ese brazo
+ * (hilo de emulación; 0 si el brazo no se manejó), _now con el del mando de ahora (cualquier hilo; 0 sin seguimiento). Su movimiento rígido _sim -> _now es el que se aplica a la mano propia, igual que al arma. */
+int vrgame_hand_frame_sim(int side, float p[3], float q[4]);
+int vrgame_hand_frame_now(int side, float p[3], float q[4]);
+int vrgame_native_hand(void);   /* lado (0/1) de la mano que sujeta el arma equipada que se dibuja con el modelo del juego (granada), -1 si no hay (hilo de emulación) */
 int vrgame_glove_pub(void);                                              /* hueco publicado de los guantes (-1 = ninguno) */
 int vrgame_weapon_engaged(void);                                       /* arma VR mostrada o recarga en curso */
 int vrgame_throw_hold(void);                                           /* arrojadiza VR (2, 7, 8) en la mano del arma, sin preparar o preparada */

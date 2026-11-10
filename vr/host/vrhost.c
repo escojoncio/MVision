@@ -195,6 +195,7 @@ static VblRing body_ring;                /* con SMX: poses del jugador de las ú
 static VblPose body_pend;                /* hilo de emulación: pose de la escena capturada y aún sin publicar */
 static int ns_cap_pend;                  /* hilo de emulación: hay una escena con cámara VR capturada y aún sin publicar */
 static _Atomic uint32_t body_key;        /* clave de instancia del jugador de la última escena con pose */
+static _Atomic uint32_t body_held;       /* clave de instancia del objeto del juego que cuelga de la mano en la última escena con pose (la granada), 0 = ninguno */
 static double turn_base;                 /* mv_vr_turn_total() - vrcam_turn_total() al reiniciar la cámara (vrcam_init pone el total a 0) */
 
 static double now_s(void) { return clock_fn ? clock_fn() : (double)mono_ns() * 1e-9; }
@@ -235,9 +236,14 @@ int32_t mv_vrhost_body_piece(const void *scene, uint32_t inst, uint32_t k, void 
     const NsScene *sc = (const NsScene *)scene;
     if (!sc || !out_xf || inst >= sc->n_inst) return 0;
     uint32_t key = sc->inst[inst].key;
-    if (key != atomic_load(&body_key) && !ns_key_is_hand(key)) return 0;
+    const uint32_t held = atomic_load(&body_held);
+    const int own_hand = ns_key_is_hand(key) || (held && key == held);
+    if (key != atomic_load(&body_key) && !own_hand) return 0;
+    VblHand now[2];    /* mano propia y objeto en la mano: el marco del mando de AHORA, como el arma (vbl_piece mueve la pieza de la escena a él) */
+    for (int s = 0; s < 2; s++) { memset(&now[s], 0, sizeof now[s]); if (own_hand) now[s].ok = vrgame_hand_frame_now(s, now[s].p, now[s].q); }
     pthread_mutex_lock(&SMX);
-    int ok = sm_last.active && ns_polls() - sm_last_poll <= 1u && vbl_piece(&body_ring, sc, inst, k, sm_last.alpha, sm_last.m, (NsXf *)out_xf);
+    const int smooth = sm_last.active && ns_polls() - sm_last_poll <= 1u;   /* sin corrección este fotograma: m NULL (el cuerpo no interpolado no se toca; lo que sigue al mando se dibuja igual) */
+    int ok = vbl_piece(&body_ring, sc, inst, k, sm_last.alpha, smooth ? sm_last.m : NULL, now, (NsXf *)out_xf);
     pthread_mutex_unlock(&SMX);
     return ok;
 }
@@ -403,9 +409,18 @@ static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *m
         for (int s = 0; s < 2; s++) vrgame_hand_pose_in(s, &in.item_pose[s], &in.trigger[s], &in.thumb[s]);   /* objeto en la mano (arma por vr_grip), gatillo y pulgar */
         ns_hand_apply(sc, st, map, &in);
     }
+    /* Granada (arma que se dibuja con el modelo del juego): el juego la cuelga de la mano de su ANIMACIÓN (la derecha); se lleva a la mano que la IK dejó en el mando del arma, con la relación mano-arma del juego. */
+    uint32_t held_key = 0;
+    const int held_side = vrgame_native_hand();
+    if (held_side >= 0) {
+        float Ra[9], ta[3], Rd[9], td[3];
+        if (vrbody_hand_anim(1, Ra, ta) && vrbody_hand_state(held_side, NULL, Rd, td) && ns_wphide_carry(sc, emu_ram, Ra, ta, Rd, td, held_side == 0) > 0) held_key = ns_wphide_key(emu_ram);
+    }
+    VblHand hc[2];       /* marco de cada mano del mando con el que se simuló esta escena: el cuerpo vivo mueve la mano propia y la granada desde él hasta el mando de ahora (vbl_piece) */
+    for (int s = 0; s < 2; s++) { memset(&hc[s], 0, sizeof hc[s]); hc[s].ok = vrgame_hand_frame_sim(s, hc[s].p, hc[s].q); }
     uint32_t live = 0;   /* brazos que la IK lleva con el mando (vr_body: lado 0 = izquierdo, piezas 7-9; 1 = derecho, 2-4): van en su última pose, como el arma */
     for (int s = 0; s < 2; s++) { float g = 0; if (vrbody_hand_state(s, &g, NULL, NULL)) live |= s ? (1u << 2) | (1u << 3) | (1u << 4) : (1u << 7) | (1u << 8) | (1u << 9); }
-    if (vbl_capture(&body_pend, sc, map, live)) atomic_store(&body_key, map->key);   /* pose del cuerpo (ya con la IK) y de las manos propias para el renderer (mv_vrhost_body_piece) */
+    if (vbl_capture(&body_pend, sc, map, live, held_key, held_side, hc)) { atomic_store(&body_key, map->key); atomic_store(&body_held, held_key); }   /* pose del cuerpo (ya con la IK) y de las manos propias para el renderer (mv_vrhost_body_piece) */
 }
 /* Justo ANTES de publicar la escena (observador de ns_hook_tick, tras el cierre): su muestra entra en el suavizador y su pose del cuerpo en el anillo, las dos bajo SMX. No al
  * capturarla (el renderer seguiría dibujando la escena anterior varios ms con el movimiento de la nueva) ni después de publicarla (el renderer podría tomar la escena nueva sin

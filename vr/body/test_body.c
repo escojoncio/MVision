@@ -1356,8 +1356,8 @@ static void test_eye_shift(void) {
       build_body(902); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
       const float yaw0 = yaw_of(0), ya = yaw0 * 0.0174532925f, Sf[3] = {cosf(ya) * 230.0f, 0.0f, -sinf(ya) * 230.0f};   /* lateral a la mirada */
       g_view.gaze_yaw_deg = yaw0; place_hands_at(yaw0, 15.0f);
-      float R_[9], t0[3], t5[3], t10[3];
-      load_xf(part_addr(0), R_, t0); load_xf(part_addr(5), R_, t5); load_xf(part_addr(10), R_, t10);
+      float R_[9], t0[3], t4[3], t5[3], t10[3];
+      load_xf(part_addr(0), R_, t0); load_xf(part_addr(4), R_, t4); load_xf(part_addr(5), R_, t5); load_xf(part_addr(10), R_, t10);
       for (int f = 0; f < 12; f++) {
           float k = (float)(f + 1) / 12.0f;
           for (int j = 0; j < 3; j++) g_view.shift[j] = Sf[j] * k;
@@ -1374,6 +1374,10 @@ static void test_eye_shift(void) {
               d = fmaxf(fabsf(tq[0] - (t10[0] + Sf[0])), fmaxf(fabsf(tq[1] - t10[1]), fabsf(tq[2] - (t10[2] + Sf[2]))));
               CHECK(d <= 2.0f, "shift+follow: pierna desplazada S (error %g)", d);
               CHECK(fabsf(wrap180t(yaw_of(0) - yaw0)) <= 1.0f, "shift creciente: la pelvis no debe girar por el desplazamiento (%g grados)", wrap180t(yaw_of(0) - yaw0));
+              float Ra[9], ta[3];   /* la mano de la animación para colgar lo que lleva el juego (otro actor, sin el desplazamiento del ojo): la de la RAM original */
+              CHECK(vrbody_hand_anim(1, Ra, ta), "shift: mano derecha manejada");
+              d = fmaxf(fabsf(ta[0] - t4[0]), fmaxf(fabsf(ta[1] - t4[1]), fabsf(ta[2] - t4[2])));
+              CHECK(d <= 1.0f, "shift: vrbody_hand_anim sin el desplazamiento del ojo (error %g)", d);
           }
           vrbody_restore(RAM);
           CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "shift+follow: restore devuelve la RAM (frame %d)", f);
@@ -1594,6 +1598,15 @@ static void test_fist_glue(void) {
       CHECK(vrbody_fist_point(1, fp1), "punto de golpe con puño");
       float d1 = sqrtf((fp1[0] - t[0]) * (fp1[0] - t[0]) + (fp1[1] - t[1]) * (fp1[1] - t[1]) + (fp1[2] - t[2]) * (fp1[2] - t[2]));
       vrbody_restore(RAM);
+      {   /* marco de la mano en la animación del juego (lo que usa el arma que cuelga de la mano): el de la RAM original, no el de la IK */
+          float Ra[9], ta[3], Ro[9], to[3], dt_ = 0, dr = 0, di = 0;
+          load_xf(part_addr(4), Ro, to);
+          CHECK(vrbody_hand_anim(1, Ra, ta) && vrbody_hand_anim(0, NULL, NULL) && !vrbody_hand_anim(2, Ra, ta) && !vrbody_hand_anim(-1, Ra, ta), "vrbody_hand_anim: lados");
+          for (int i = 0; i < 3; i++) { dt_ = fmaxf(dt_, fabsf(ta[i] - to[i])); di = fmaxf(di, fabsf(ta[i] - t[i])); }
+          for (int i = 0; i < 9; i++) dr = fmaxf(dr, fabsf(Ra[i] - Ro[i]));
+          CHECK(dt_ < 0.01f && dr < 0.01f, "vrbody_hand_anim: coincide con la animación de la RAM original (t %.3f, R %.4f)", dt_, dr);
+          CHECK(di > 1.0f, "vrbody_hand_anim: distinto del marco tras la IK (%.1f mm)", di);
+      }
       run_fist_frames(0.0f, 60, &driven);
       vrbody_hand_state(1, NULL, NULL, t);
       CHECK(vrbody_fist_point(1, fp0), "punto de golpe con la mano abierta");

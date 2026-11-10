@@ -184,6 +184,9 @@ void vrbody_set_fist_suppressed(int on);
 /* Estado de la mano en el último apply (hilo de emulación): agarre efectivo 0..1 y marco de mundo de la pieza mano tras la IK (R fila-mayor 3x3, t en mm del motor). 0 si ese
  * brazo no se manejó. side 0 izquierda / 1 derecha. R y t pueden ser NULL. */
 int vrbody_hand_state(int side, float *grip, float R[9], float t[3]);
+/* Marco de mundo (R fila-mayor 3x3 ortonormal, t en mm del motor) de la pieza mano en la ANIMACIÓN del juego, antes de la IK del último apply (lo que el juego usó para colgar lo que lleva en la mano, p. ej. la
+ * granada). 0 si ese brazo no se manejó. side 0 izquierda / 1 derecha. R y t pueden ser NULL. */
+int vrbody_hand_anim(int side, float R[9], float t[3]);
 /* Punto de golpe (nudillos del puño de la mano articulada, constante en el marco de la mano) en el mundo del motor, mm; 0 si el brazo no se manejó en el último apply. */
 int vrbody_fist_point(int side, float out[3]);
 

@@ -55,6 +55,7 @@ uint16_t vrgame_weapon_model(int game_id) {
     for (int i = 0; i < NSLOT; i++) if (WPN_TAB[i].game_id == game_id) return WPN_TAB[i].model;
     return 0;
 }
+static _Atomic int native_hand = -1;     /* lado de la mano que sujeta el arma que se dibuja con el modelo del juego (vrgame_weapon_uses_game_model) mientras está equipada; -1 = ninguna */
 static int is_grenade(int game_id) { return game_id == 2 || game_id == 7 || game_id == 8; }
 /* Granadas: los datos no dan el modelo que usa el juego por tipo (los de WPN_TAB son «dudosa» en wcut_tables.c; el de la 8 salía blanco mientras el juego lanzaba otro), así que se dibuja el modelo real del
  * propio juego (escena nativa, sin ocultarlo) y la lógica VR (gesto, trayectoria) sigue; el lanzado es siempre el actor del juego. Así la mano y el lanzado son el mismo modelo, uno solo. */
@@ -891,6 +892,30 @@ int vrgame_hand_pose_in(int side, int *item_pose, float *trigger, float *thumb) 
     return ok;
 }
 
+/* Marco de la mano del mando (el de hand_frame_from_grip, espacio del usuario, m) con el que se simuló la última IK de ese brazo: el agarre FILTRADO que usó vr_body. Hilo de emulación. */
+int vrgame_hand_frame_sim(int side, float p[3], float q[4]) {
+    VrBodyArmLive a;
+    if (!p || !q || (side != 0 && side != 1) || !vrbody_arm_live(side, &a)) return 0;
+    GripPose g;
+    memset(&g, 0, sizeof g);
+    memcpy(g.p, a.grip_p, sizeof g.p); memcpy(g.q, a.grip_q, sizeof g.q); g.valid = finite_n(g.p, 3) && finite_n(g.q, 4);
+    GripPose h = hand_frame_from_grip(side, &g);
+    if (!h.valid) return 0;
+    memcpy(p, h.p, sizeof h.p); memcpy(q, h.q, sizeof h.q);
+    return 1;
+}
+/* El mismo marco con el agarre del mando de AHORA (el que cuelga el arma). Cualquier hilo. */
+int vrgame_hand_frame_now(int side, float p[3], float q[4]) {
+    if (!p || !q || (side != 0 && side != 1)) return 0;
+    pthread_mutex_lock(&HM);
+    GripPose h = hand_frame_locked(side, mono_ns());
+    pthread_mutex_unlock(&HM);
+    if (!h.valid) return 0;
+    memcpy(p, h.p, sizeof h.p); memcpy(q, h.q, sizeof h.q);
+    return 1;
+}
+int vrgame_native_hand(void) { return atomic_load_explicit(&native_hand, memory_order_relaxed); }
+
 /* Pruebas: instala un arma ya construida en la ranura de su id (sin cargar modelos del disco). */
 void vrgame_test_install(int game_id, void *def, void *state, void *rig) {
     int si = slot_of(game_id);
@@ -1029,6 +1054,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         G.cur = -1;
         G.det_t = 0;             /* una pulsación de detonación a medias no sobrevive a desequipar el arma */
         G.hand_ns = 0; G.throw_hold = 0;
+        atomic_store_explicit(&native_hand, -1, memory_order_relaxed);
         vrbody_set_armed(0);
         aimfix_clear();
         vrfire_set_hide(0);
@@ -1063,6 +1089,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     const WeaponDef *def = sl->def;
     G.active = 1;
     G.cur = slot;
+    atomic_store_explicit(&native_hand, sl->native ? w : -1, memory_order_relaxed);
     vrbody_set_armed(1);
     vrfire_set_hide(sl->native ? 0 : 1);      /* las granadas (sl->native, vrgame_weapon_uses_game_model) se dibujan siempre con el modelo del juego y no se oculta; el resto lleva modelo VR y se oculta el del juego (la granada lanzada tampoco se oculta nunca: es otro actor) */
 
