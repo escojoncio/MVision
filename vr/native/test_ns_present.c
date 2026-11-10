@@ -272,8 +272,65 @@ static void test_stereo(void) {
 #undef PIECE
 }
 
+/* ---- suavizado temporal de las profundidades de la ventana estéreo (ns_cinema_depth_filter) ---- */
+static void test_depth_filter(void) {
+    NsScene sc; memset(&sc, 0, sizeof sc);
+    NsInstance in[1]; NsPiece pc[2]; memset(in, 0, sizeof in); memset(pc, 0, sizeof pc);
+    sc.inst = in; sc.piece = pc; sc.cap_inst = 1; sc.cap_piece = 2; sc.n_inst = 1; sc.n_piece = 2;
+    sc.cam.rot[0] = sc.cam.rot[4] = sc.cam.rot[8] = 1; sc.cam.h = 320; sc.cam.overscan_y = NS_OVERSCAN_Y;
+    in[0].n_pieces = 1;
+#define PIECE(i, x, y, z) do { pc[i].world.m[3] = sc.cam.eye[0] + (x); pc[i].world.m[7] = sc.cam.eye[1] + (y); pc[i].world.m[11] = sc.cam.eye[2] + (z); } while (0)
+#define STEP() (sc.t_ns += 33 * MS, sc.seq++, ns_cinema_depth_filter(&f, &sc, &zn, &zs))
+    NsCinemaDepthFilter f; memset(&f, 0, sizeof f);
+    float zn = -1, zs = -1;
+    sc.t_ns = 1000 * MS;
+    PIECE(0, 0, 0, 2000);
+    CHECK(ns_cinema_depth_filter(&f, &sc, &zn, &zs) == 1 && fabsf(zs - 2.0f) < 1e-3f && fabsf(zn - 1.75f) < 1e-3f, "primera escena: sin filtrar (%g %g)", zs, zn);
+    /* el sujeto pasa de golpe a 4 m sin corte de plano: la convergencia va hacia allí poco a poco (tau 0,3 s) y nunca se pasa */
+    PIECE(0, 0, 0, 4000);
+    CHECK(STEP() == 1 && zs > 2.02f && zs < 2.3f && zn > 1.76f && zn < 2.1f, "un fotograma después apenas se ha movido: %g %g", zs, zn);
+    float prev = zs; int mono = 1;
+    for (int i = 0; i < 8; i++) { STEP(); if (!(zs > prev && zs < 4.0f)) mono = 0; prev = zs; }
+    CHECK(mono && zs > 2.6f && zs < 3.7f, "a los 0,3 s va por el camino, monótona: %g", zs);
+    for (int i = 0; i < 60; i++) STEP();
+    CHECK(fabsf(zs - 4.0f) < 0.02f && fabsf(zn - 3.75f) < 0.02f, "a los 2 s ha llegado: %g %g", zs, zn);
+    /* la misma escena otra vez (mismo instante): nada cambia */
+    float zs0 = zs, zn0 = zn;
+    CHECK(ns_cinema_depth_filter(&f, &sc, &zn, &zs) == 1 && zs == zs0 && zn == zn0, "escena repetida: igual");
+    /* el último sujeto sale de la ventana: se conserva lo último válido (antes: convergencia de golpe a 3 m) */
+    PIECE(0, 50000, 0, 4000);
+    CHECK(STEP() == 1 && zs == zs0 && zn == zn0, "sin sujeto a la vista: se mantiene (%g %g)", zs, zn);
+    for (int i = 0; i < 30; i++) STEP();
+    CHECK(zs == zs0 && zn == zn0, "y se sigue manteniendo");
+    /* entra una pieza cercana (0,6 m): lo cercano baja poco a poco (antes: b cambiaba de golpe) */
+    in[0].n_pieces = 2; PIECE(0, 0, 0, 4000); PIECE(1, 250, 0, 600);
+    CHECK(STEP() == 1 && zn > 1.5f && zn < zn0, "pieza cercana recién entrada: %g", zn);
+    for (int i = 0; i < 90; i++) STEP();
+    CHECK(fabsf(zn - 0.35f) < 0.01f, "a los 3 s lo cercano ha llegado: %g", zn);
+    /* corte de plano por salto de la cámara: valores nuevos de inmediato */
+    in[0].n_pieces = 1; sc.cam.eye[0] += 6000; PIECE(0, 0, 0, 1000);
+    CHECK(STEP() == 1 && fabsf(zs - 1.0f) < 1e-3f && fabsf(zn - 0.75f) < 1e-3f, "corte por posición: sin filtrar (%g %g)", zs, zn);
+    /* travelling (40 unidades por escena) no es corte */
+    sc.cam.eye[2] += 40; PIECE(0, 0, 0, 3000);
+    CHECK(STEP() == 1 && zs > 1.0f && zs < 1.2f, "travelling: filtrado (%g)", zs);
+    /* corte por giro (90 grados: la pieza queda fuera): sin sujeto en el plano nuevo = desconocido, no lo del plano anterior */
+    sc.cam.rot[0] = 0; sc.cam.rot[2] = 1; sc.cam.rot[6] = -1; sc.cam.rot[8] = 0;
+    CHECK(STEP() == 0 && zs == 0.0f && zn == 0.0f, "corte por giro sin sujeto: desconocido (%g %g)", zs, zn);
+    /* el reloj retrocede (otra partida): como un corte */
+    sc.cam.rot[0] = 1; sc.cam.rot[2] = 0; sc.cam.rot[6] = 0; sc.cam.rot[8] = 1;
+    STEP(); PIECE(0, 0, 0, 5000); sc.t_ns = 10 * MS;
+    CHECK(ns_cinema_depth_filter(&f, &sc, &zn, &zs) == 1 && fabsf(zs - 5.0f) < 1e-3f, "reloj hacia atrás: sin filtrar (%g)", zs);
+    /* cámara inválida o sin escena: se olvida todo */
+    sc.cam.h = 0;
+    CHECK(STEP() == 0 && zs == 0.0f && zn == 0.0f && ns_cinema_depth_filter(&f, NULL, &zn, &zs) == 0 && ns_cinema_depth_filter(NULL, &sc, &zn, &zs) == 0, "cámara inválida");
+    sc.cam.h = 320; PIECE(0, 0, 0, 2500);
+    CHECK(STEP() == 1 && fabsf(zs - 2.5f) < 1e-3f, "tras lo inválido empieza de nuevo: %g", zs);
+#undef PIECE
+#undef STEP
+}
+
 int main(void) {
-    test_present(); test_exhaustive(); test_cinema(); test_stereo();
+    test_present(); test_exhaustive(); test_cinema(); test_stereo(); test_depth_filter();
     printf("%s: %d comprobaciones, %d fallos\n", g_fail ? "FALLO" : "OK", g_ok + g_fail, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -781,6 +781,46 @@ static void test_back_texture(void) {
         CHECK(plain, "lado %d: sin textura de dorso, dorso de un solo color", side);
         world_free(&w1);
     }
+    /* eje ancho: con el dorso como el de las manoplas reales (lado del pulgar, z alto, en u bajo; nudillos en t alto; cada manopla con su orden de vértices) el mismo punto
+     * anatómico toma el mismo texel en las dos manos (la izquierda es el espejo: no sale volteada a lo ancho) y el lado del pulgar cae en u bajo */
+    {
+        World w2;
+        CHECK(world_init(&w2, 8, 64, 1), "mundo");
+        Glove gr, gl;
+        make_glove(&gr, 1, 1, 0); make_glove(&gl, -1, 1, 0);
+        for (int sd = 0; sd < 2; sd++) {
+            Glove *g = sd ? &gl : &gr;
+            for (int k = 0; k < 4; k++) {
+                const NsVert *v = &g->v[g->f[1].v[k]];
+                g->f[1].u[k] = (uint8_t)(v->z > 0 ? (v->y > -50 ? 242 : 240) : (v->y > -50 ? 250 : 251)); g->f[1].t[k] = (uint8_t)(v->y > -50 ? 116 : 124);
+            }
+            g->m.id = ns_mesh_content_hash(&g->m) ^ (0x6100u + (uint64_t)sd);
+        }
+        CHECK(apply_gloves(&w2, &gr, &gl) == 2 && hand_faces(&w2, NS_HAND_KEY_R, fr) && hand_faces(&w2, NS_HAND_KEY_L, fl), "manos");
+        static int ur[VRHA_NV], ul[VRHA_NV], tr_[VRHA_NV], tl_[VRHA_NV];
+        for (int i = 0; i < VRHA_NV; i++) ur[i] = ul[i] = tr_[i] = tl_[i] = -1;
+        float zlo = 1e9f, zhi = -1e9f;
+        for (int p = 0; p < VRHA_NP; p++) for (int t = vrha_piece[p].t0; t < vrha_piece[p].t0 + vrha_piece[p].nt; t++) {
+            if (tri_zone(p, t) != 1) continue;
+            for (int q = 0; q < 3; q++) {
+                const int vr = vrha_piece[p].v0 + fr[t].v[q], vl = vrha_piece[p].v0 + fl[t].v[q];
+                ur[vr] = fr[t].u[q]; tr_[vr] = fr[t].t[q]; ul[vl] = fl[t].u[q]; tl_[vl] = fl[t].t[q];
+                if (vrha_pos[vr][2] < zlo) zlo = vrha_pos[vr][2];
+                if (vrha_pos[vr][2] > zhi) zhi = vrha_pos[vr][2];
+            }
+        }
+        int nv = 0, diff = 0, side_bad = 0;
+        for (int i = 0; i < VRHA_NV; i++) {
+            if (ur[i] < 0) continue;
+            nv++;
+            if (ur[i] != ul[i] || tr_[i] != tl_[i]) diff++;
+            const float sz = (vrha_pos[i][2] - zlo) / (zhi - zlo);
+            if ((sz > 0.75f && ur[i] > 244) || (sz < 0.25f && ur[i] < 247)) side_bad++;
+        }
+        CHECK(nv > 50 && diff == 0, "dorso: mismo texel en las dos manos para el mismo vértice (%d vértices, %d distintos)", nv, diff);
+        CHECK(side_bad == 0, "dorso: el lado del pulgar (z alto) en u bajo, el del meñique en u alto (%d mal)", side_bad);
+        world_free(&w2);
+    }
 }
 
 int main(void) {

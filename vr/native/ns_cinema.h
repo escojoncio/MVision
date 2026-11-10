@@ -45,6 +45,22 @@ int ns_cinema_stereo(float ipd, float z_near, float z_subj, float tan_x, float t
  * z_near = la menor menos 0,25 m (radio de la pieza), nunca menos de 0,1. 0 (y ambas a 0) si la cámara no es válida o no hay ninguna pieza así. */
 int ns_cinema_depth(const NsScene *sc, float *z_near, float *z_subj);
 
+/* ns_cinema_depth con suavizado temporal, una llamada por escena (el estado `f` a cero al empezar). Dentro de un plano las dos profundidades se filtran en 1/z (lineal en paralaje)
+ * con constante de tiempo NS_CINEMA_TAU_S y el reloj de la escena (NsScene.t_ns; la misma escena repetida no avanza), y si deja de haber piezas a la vista se conserva lo último
+ * válido: ni la convergencia ni la separación (ns_cinema_stereo) saltan cuando el sujeto sale de la ventana o entra una pieza cercana. En un corte de plano (primera escena, la cámara
+ * salta más de NS_CINEMA_CUT_DIST unidades o gira más de NS_CINEMA_CUT_DEG grados entre escenas, como vr_cine, o el reloj retrocede) valen sin filtrar las del plano nuevo (0 si no hay).
+ * Escena o cámara no válidas: olvida el estado. Devuelve 1 si las profundidades se conocen (> 0). */
+#define NS_CINEMA_TAU_S 0.3f
+#define NS_CINEMA_CUT_DIST 2500.0f
+#define NS_CINEMA_CUT_DEG 28.0f
+typedef struct {
+    int have;                   /* hay escena anterior */
+    uint64_t t_ns;              /* su reloj */
+    float eye[3], fwd[3];       /* su cámara (posición y eje Z) */
+    float inv_near, inv_subj;   /* 1/m filtradas; 0 = desconocidas */
+} NsCinemaDepthFilter;
+int ns_cinema_depth_filter(NsCinemaDepthFilter *f, const NsScene *sc, float *z_near, float *z_subj);
+
 /* Proyección de Z invertida (réplica de XRMath.projection) a partir de las tangentes. */
 void ns_cinema_projection(const float tangents[4], float znear, float zfar, float out[16]);
 

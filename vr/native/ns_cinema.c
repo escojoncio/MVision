@@ -116,6 +116,38 @@ int ns_cinema_depth(const NsScene *sc, float *z_near, float *z_subj) {
     return 1;
 }
 
+int ns_cinema_depth_filter(NsCinemaDepthFilter *f, const NsScene *sc, float *z_near, float *z_subj) {
+    if (z_near) *z_near = 0.0f;
+    if (z_subj) *z_subj = 0.0f;
+    if (!f) return 0;
+    float tx, ty;
+    if (!sc || !fin(sc->cam.rot, 9) || !fin(sc->cam.eye, 3) || !ns_cinema_window(&sc->cam, &tx, &ty, NULL)) { memset(f, 0, sizeof *f); return 0; }
+    const NsCamera *c = &sc->cam;
+    const float fwd[3] = { c->rot[2], c->rot[5], c->rot[8] };
+    int cut = !f->have || sc->t_ns < f->t_ns;
+    if (!cut) {
+        const float d[3] = { c->eye[0] - f->eye[0], c->eye[1] - f->eye[1], c->eye[2] - f->eye[2] };
+        const float jump = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        const float l = sqrtf((fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]) * (f->fwd[0] * f->fwd[0] + f->fwd[1] * f->fwd[1] + f->fwd[2] * f->fwd[2]));
+        const float cs = (fwd[0] * f->fwd[0] + fwd[1] * f->fwd[1] + fwd[2] * f->fwd[2]) / l;
+        if (!(jump <= NS_CINEMA_CUT_DIST) || !(cs >= cosf(NS_CINEMA_CUT_DEG * 0.0174533f))) cut = 1;   /* NaN => corte */
+    }
+    float zn, zs;
+    const int raw = ns_cinema_depth(sc, &zn, &zs);
+    if (cut || (raw && !(f->inv_subj > 0.0f))) {
+        f->inv_near = raw ? 1.0f / zn : 0.0f; f->inv_subj = raw ? 1.0f / zs : 0.0f;
+    } else if (raw) {
+        const float a = 1.0f - expf(-(float)((double)(sc->t_ns - f->t_ns) * 1e-9) / NS_CINEMA_TAU_S);
+        f->inv_near += a * (1.0f / zn - f->inv_near); f->inv_subj += a * (1.0f / zs - f->inv_subj);
+    }
+    f->have = 1; f->t_ns = sc->t_ns;
+    memcpy(f->eye, c->eye, sizeof f->eye); memcpy(f->fwd, fwd, sizeof f->fwd);
+    if (!(f->inv_subj > 0.0f)) return 0;
+    if (z_near) *z_near = 1.0f / f->inv_near;
+    if (z_subj) *z_subj = 1.0f / f->inv_subj;
+    return 1;
+}
+
 void ns_cinema_projection(const float t[4], float n, float f, float out[16]) {
     const float l = t[0], r = t[1], u = t[2], d = t[3];
     const float sx = 2 / (l + r), sy = 2 / (u + d), cx = (r - l) / (l + r), cy = (u - d) / (u + d);
