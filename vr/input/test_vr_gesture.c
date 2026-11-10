@@ -229,10 +229,22 @@ static void t_grab(void) {
     /* la espalda también vale: 0,1 m de (0,1.2,1.05) */
     vrg_init(&g); in = grab_setup(); in.hand[0][0] = 0.0f; in.hand[0][1] = 1.2f; in.hand[0][2] = 1.0f; settle(&g, &in, 12);
     in.fist_btn[0] = 1; pgrab(&g, &in, &o); CHECK(o.grab_start == 1 && o.grab_side == 0);
-    /* REGLA DURA: con el puño ya cerrado (botón mantenido de antes) NUNCA se agarra, ni aunque la mano llegue al cuello */
+    /* con el puño ya cerrado (botón mantenido de antes) una mano que llega RÁPIDO al cuello es un puño: no agarra */
     vrg_init(&g); in = grab_setup(); in.fist_btn[1] = 1; in.hand[1][0] = 0.6f; in.hand[1][1] = 1.2f; in.hand[1][2] = 0.5f; settle(&g, &in, 30);
     int st = 0; const char *why = NULL;
     for (int i = 1; i <= 20; i++) { float t = i / 20.0f; in.hand[1][0] = 0.6f * (1 - t) + 0.05f * t; in.hand[1][1] = 1.2f * (1 - t) + 1.45f * t; in.hand[1][2] = 0.5f * (1 - t) + 1.3f * t; upd(&g, &in, &o); st += o.grab_start; if (o.grab_why) why = o.grab_why; }
+    CHECK(st == 0 && why && !strcmp(why, "puno_cerrado"));
+    /* puño ya cerrado pero la mano llega DESPACIO al cuello por la espalda del enemigo (el enemigo mira a +Z, el jugador está detrás): agarra como si se pulsara */
+    vrg_init(&g); in = grab_setup(); in.fist_btn[1] = 1; in.hand[1][0] = 0.6f; in.hand[1][1] = 1.2f; in.hand[1][2] = 0.5f; settle(&g, &in, 30);
+    st = 0; why = NULL; int pend = 0;
+    for (int i = 1; i <= 100; i++) { float t = i / 100.0f; in.hand[1][0] = 0.6f * (1 - t) + 0.05f * t; in.hand[1][1] = 1.2f * (1 - t) + 1.45f * t; in.hand[1][2] = 0.5f * (1 - t) + 1.3f * t; upd(&g, &in, &o); st += o.grab_start; if (o.grab_why) why = o.grab_why; pend += o.grab_why && !strcmp(o.grab_why, "pendiente"); }
+    for (int i = 0; i < 22 && !st; i++) { upd(&g, &in, &o); st += o.grab_start; }
+    CHECK(st == 1 && pend == 1 && o.grab_side == 1 && o.grab_en == 0);
+    /* el mismo gesto lento de frente (el enemigo mira al jugador): no es un agarre por la espalda, puño cerrado */
+    vrg_init(&g); in = grab_setup(); in.en[0].yaw = 3.14159f; in.fist_btn[1] = 1; in.hand[1][0] = 0.6f; in.hand[1][1] = 1.2f; in.hand[1][2] = 0.5f; settle(&g, &in, 30);
+    st = 0; why = NULL;
+    for (int i = 1; i <= 100; i++) { float t = i / 100.0f; in.hand[1][0] = 0.6f * (1 - t) + 0.05f * t; in.hand[1][1] = 1.2f * (1 - t) + 1.45f * t; in.hand[1][2] = 0.5f * (1 - t) + 1.3f * t; upd(&g, &in, &o); st += o.grab_start; if (o.grab_why) why = o.grab_why; }
+    for (int i = 0; i < 22; i++) { upd(&g, &in, &o); st += o.grab_start; }
     CHECK(st == 0 && why && !strcmp(why, "puno_cerrado"));
     /* botón ya mantenido al recuperar el control (reinicio): no es una pulsación */
     vrg_init(&g); in = grab_setup(); in.hand[1][0] = 0.1f; in.hand[1][1] = 1.45f; in.hand[1][2] = 1.15f; in.fist_btn[1] = 1;
@@ -426,6 +438,10 @@ static void t_knock(void) {
     for (int i = 0; i < 8; i++) { d -= 0.02f; in.wall_dist[1] = d; upd(&g, &in, &o); }
     for (int i = 0; i < 6; i++) { in.wall_dist[1] = d; upd(&g, &in, &o); if (o.knock_why) why = o.knock_why; }
     (void)why;
+    /* el puño llega a 0,15 m de la pared y se queda (nunca cruza 0,08 m): no hay toque y el registro lo dice (como máximo 4 por segundo) */
+    { vrg_init(&g); vrg_in_t cn = base(); cn.fist_btn[1] = 1; cn.wall_valid[1] = 1; cn.wall_dist[1] = 0.6f; settle(&g, &cn, 12);
+      int nl = 0, k = 0; for (int i = 0; i < 30; i++) { cn.wall_dist[1] = 0.15f; upd(&g, &cn, &o); nl += o.knock_why && !strcmp(o.knock_why, "cerca") && o.knock_try_side == 1; k += o.knock_side >= 0; }
+      CHECK(nl >= 1 && nl <= 3 && k == 0); }
 }
 /* contacto del puño con las cápsulas por pieza (lo aporta el anfitrión con vr_hit): sustituye al cilindro y da el háptico por zona */
 static void t_caps(void) {

@@ -166,6 +166,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
     {
         for (int s = 0; s < 2; s++) {
             if (g->knock_cool[s] > 0) g->knock_cool[s] -= dt;
+            if (g->knock_log[s] > 0) g->knock_log[s] -= dt;
             if (!tr[s] || !in->wall_valid[s] || !fin(in->wall_dist[s])) { g->kn_n[s] = 0; g->kn_toward[s] = 0; continue; }
             double t = (fin(in->hand_time[s]) && in->hand_time[s] > 0) ? in->hand_time[s] : g->clock_s;
             int n = g->kn_n[s];
@@ -214,6 +215,10 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                 /* se acercó rápido pero se detuvo sin llegar a la pared */
                 g->kn_toward[s] = 0;
                 if (in->on_wall && c->knock) { out->knock_why = "lejos_de_la_pared"; out->knock_speed = ap; out->knock_dist = d; out->knock_try_side = s; }
+            } else if (d <= 0.25f && d > c->knock_touch && g->knock_log[s] <= 0 && c->knock) {
+                /* cerca de una superficie sin cruzar el umbral de contacto: no es un rechazo con motivo, pero queda en el registro (4 por segundo como máximo) */
+                g->knock_log[s] = 0.25f;
+                out->knock_why = "cerca"; out->knock_speed = ap; out->knock_dist = d; out->knock_try_side = s;
             } else if (d > 0.5f) g->kn_toward[s] = 0;
         }
         if (g->cool_knock > 0) g->cool_knock -= dt;
@@ -348,7 +353,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
         }
     }
 
-    /* ---------------- agarre: PULSAR R1/L1 (flanco) con la mano abierta junto al cuello/espalda de un enemigo; con el puño ya cerrado NUNCA ---------------- */
+    /* ---------------- agarre: PULSAR R1/L1 (flanco) con la mano abierta junto al cuello/espalda de un enemigo; con el puño ya cerrado solo entrando despacio por la espalda ---------------- */
     int dom = c->right_handed ? 1 : 0;
     (void)dom;
     float hd[2] = {-1, -1};     /* distancia de cada mano al cuello/espalda del enemigo más cercano */
@@ -460,8 +465,14 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                 /* ya agarrando: cada pulsación nueva aprieta (y remata tras el décimo apretón) */
                 out->squeeze = 1; out->grab_hold = 1; out->event = VRG_EV_SQUEEZE; out->haptic[s] = 0.5f;
                 if (g->grab_side < 0 && in->holding) g->grab_side = s;
-            } else if (fst[s] && !edge[s] && near_now && !g->near_prev[s] && ne >= 0 && !grabbing) {
-                out->grab_why = "puno_cerrado"; out->grab_dist = hd[s]; out->grab_side_try = s;   /* regla dura: botón ya mantenido = nunca agarra */
+            } else if (fst[s] && !edge[s] && near_now && !g->near_prev[s] && ne >= 0 && !grabbing && g->gp_t[s] <= 0 && !started) {
+                /* botón ya mantenido: una mano que llega RÁPIDA es un puño; despacio y por la espalda del enemigo (el jugador detrás de él) es el agarre, como al pulsar */
+                const float *ep = in->en[ne].p;
+                int behind = (in->body[0] - ep[0]) * sinf(in->en[ne].yaw) + (in->body[2] - ep[2]) * cosf(in->en[ne].yaw) < 0.0f;
+                out->grab_why = "puno_cerrado"; out->grab_dist = hd[s]; out->grab_side_try = s;
+                if (behind && nd <= c->grab_range && spd[s] < c->grab_slow_speed && free_hands && !in->on_wall && in->stance < 2 && g->since_punch >= c->grab_after_punch_s && g->settle <= 0) {
+                    g->gp_t[s] = c->grab_delay_s; g->gp_en[s] = ne; g->gp_only[s] = 0; out->grab_why = "pendiente";
+                }
             }
             g->near_prev[s] = near_now;
         }

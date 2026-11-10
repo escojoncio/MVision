@@ -6,7 +6,7 @@
  *    El grip analógico solo da la pose de los dedos.
  *  - GOLPE = puño cerrado (botón mantenido) + golpe físico rápido hacia delante (velocidad relativa a la cabeza) -> punch_side.
  *  - AGARRE = PULSAR R1/L1 (flanco) con la mano abierta a <= 0,30 m del cuello o la espalda de un enemigo -> grab_start.
- *    Con el puño ya cerrado (botón mantenido de antes) NUNCA se agarra. Mantener el botón mantiene el agarre (grab_hold);
+ *    Con el puño ya cerrado (botón mantenido de antes) solo se agarra si la mano entra DESPACIO en la zona por la espalda del enemigo; rápida es un puño. Mantener el botón mantiene el agarre (grab_hold);
  *    cada pulsación nueva o un golpe con el puño estando agarrado = squeeze (apretar y rematar).
  *  - El cuadrado físico y los demás botones pasan al juego como en el original (respaldo de golpe).
  *  - Pared: golpear con el PUÑO cerrado una superficie sólida aproximadamente vertical = toque de nudillos del motor (sonido + ruido que oyen los guardias) -> knock_side;
@@ -149,6 +149,7 @@ typedef struct {
     float chest_cool[2], chest_t[2];
     int peek_on;
     float knock_cool[2], cool_knock; double kn_t[2][3]; float kn_d[2][3]; int kn_n[2], kn_toward[2];
+    float knock_log[2];      /* s hasta el próximo registro de "cerca de la pared sin toque" por mano */
     int grab_side;           /* -1 ninguno; mano que sujeta */
     int fist;                /* bits: mano física con el puño cerrado (histéresis del agarre) */
     int grab_en;

@@ -1352,9 +1352,12 @@ float mv_vrhost_ray_distance(const float o_mm[3], const float d[3], float max_mm
 }
 
 /* Geometría y cámaras para la resolución de impactos de las balas (vr/gameplay/vr_hit.h). Hilo de emulación. */
-static float hit_wall(const uint8_t *ram, const float o[3], const float d[3], float max) {     /* la misma geometría que corta el láser del arma (vrgame.c) */
-    float t = vrhzd_raycast(ram, o, d, max, VRHZD_SKIP_SIGHT), t2 = mv_vrhost_ray_distance(o, d, t >= 0.0f ? t : max);
-    return t2 >= 0.0f ? t2 : t;
+static float hit_wall(const uint8_t *ram, const float o[3], const float d[3], float max) {     /* paredes de colisión del juego (HZD): la geometría de render de la escena (cristales con huecos de textura, rejillas) NO bloquea balas */
+    return vrhzd_raycast(ram, o, d, max, VRHZD_SKIP_SIGHT);
+}
+static float hit_solid(const uint8_t *ram, const float o[3], const float d[3], float max) {      /* solo para el registro [impacto] (escena=): lo que cortaría la geometría de render */
+    (void)ram;
+    return mv_vrhost_ray_distance(o, d, max);
 }
 static int hit_camera(uint8_t *ram, const float o[3], const float d[3], float max, float *t, uint32_t *target) {
     (void)ram;
@@ -1863,7 +1866,7 @@ static void on_bound(void) {
     vrgame_set_enabled(body_ok, fire_ok);
     if (vrai_on_bound() < 0) fprintf(stderr, "[vrhost] IA de enemigos no instalada\n");
     if (vrmelee_rt_install() < 0) fprintf(stderr, "[vrhost] acciones de cuerpo (golpe/agarre/toque) no instaladas\n");
-    { VrHitWorld hw = {0.0f, hit_wall, hit_camera, hit_camera_hit}; vrhit_set_world(&hw); }
+    { VrHitWorld hw = {0.0f, hit_wall, hit_camera, hit_camera_hit, hit_solid}; vrhit_set_world(&hw); }
 }
 
 static void on_start(void) {

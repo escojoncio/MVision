@@ -62,12 +62,15 @@ float vrhit_floor_ray(const uint8_t *ram, const float o[3], const float d[3], fl
 /* Geometría y cámaras que aporta el anfitrión (vr/host). Sin registrar (o con NULL) vrhit_bullet y vrhit_aim no hacen nada. */
 typedef struct VrHitWorld {
     float units_per_m;                   /* solo para el registro (0 = 1000) */
-    /* primer impacto del rayo con la geometría sólida (paredes de colisión + escena): distancia en (0, max] o -1. NULL = ninguna (los suelos de colisión se prueban siempre) */
+    /* primer impacto del rayo con las paredes de colisión del juego (HZD): distancia en (0, max] o -1. NULL = ninguna (los suelos de colisión se prueban siempre) */
     float (*wall)(const uint8_t *ram, const float o[3], const float d[3], float max);
     /* rayo contra las cámaras de vigilancia vivas: 1 si da en alguna, con la distancia y la dirección de su blanco. NULL = ninguna */
     int (*camera)(uint8_t *ram, const float o[3], const float d[3], float max, float *t, uint32_t *target);
     /* impacto de una bala del jugador en una cámara (blanco que devolvió `camera`) que el juego no va a dañar por sí mismo (clase sin el bit de daño, o fuera de su prueba): el anfitrión le cuenta el impacto. NULL = nada */
     void (*camera_hit)(uint8_t *ram, uint32_t target, const int16_t pt[3]);
+    /* primer impacto del rayo con la geometría de RENDER de la escena (cristales con huecos de textura, rejillas, marcos): NO bloquea balas (no es colisión del juego: el trazado del propio juego ya
+     * recoge puertas y demás colisión dinámica), solo se cita en el registro [impacto] como `escena=` cuando habría cortado antes. Distancia en (0, max] o -1. NULL = ninguna */
+    float (*solid)(const uint8_t *ram, const float o[3], const float d[3], float max);
 } VrHitWorld;
 void vrhit_set_world(const VrHitWorld *w);
 

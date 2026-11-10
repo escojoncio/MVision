@@ -723,7 +723,9 @@ static float hw_wall = -1.0f; static int hw_cam_on, hw_cam_hits; static float hw
 static float hw_wallf(const uint8_t *r, const float o[3], const float d[3], float max) { (void)r; (void)o; (void)d; return hw_wall >= 0 && hw_wall <= max ? hw_wall : -1.0f; }
 static int hw_camf(uint8_t *r, const float o[3], const float d[3], float max, float *t, uint32_t *tg) { (void)r; (void)o; (void)d; if (!hw_cam_on || hw_cam_t > max) return 0; *t = hw_cam_t; *tg = hw_cam_tg; return 1; }
 static void hw_camhit(uint8_t *r, uint32_t tg, const int16_t pt[3]) { (void)r; (void)pt; hw_cam_hits++; hw_cam_last = tg; }
-static void h_reg(void) { VrHitWorld w = {1000.0f, hw_wallf, hw_camf, hw_camhit}; vrhit_set_world(&w); hw_wall = -1.0f; hw_cam_on = 0; hw_cam_hits = 0; }
+static float hw_solid = -1.0f;
+static float hw_solidf(const uint8_t *r, const float o[3], const float d[3], float max) { (void)r; (void)o; (void)d; return hw_solid >= 0 && hw_solid <= max ? hw_solid : -1.0f; }
+static void h_reg(void) { VrHitWorld w = {1000.0f, hw_wallf, hw_camf, hw_camhit, hw_solidf}; vrhit_set_world(&w); hw_wall = -1.0f; hw_solid = -1.0f; hw_cam_on = 0; hw_cam_hits = 0; }
 /* bala como la deja el creador del juego: origen, velocidad 5000 por tick, alcance, final del trazado (pared del juego a gwall, o el alcance) y su blanco de daño 64 */
 static void h_bullet(int side, const float o[3], const float to[3], int range, int gwall) {
     double d[3] = {to[0] - o[0], to[1] - o[1], to[2] - o[2]}, l = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
@@ -831,6 +833,33 @@ static void t_hit_zones(void) {
       h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh);
       fflush(stderr); dup2(sv, 2); close(sv); static char lb[1024]; rewind(f); size_t got = fread(lb, 1, sizeof lb - 1, f); lb[got] = 0; fclose(f);
       CHECK(strstr(lb, "[impacto] blanco=0 zona=cabeza dist=4.92 m vida=128") != NULL && strstr(lb, "vida=128") != NULL, "línea [impacto]: %.200s", lb); }
+}
+/* la geometría de render de la escena (cristales con huecos de textura, rejillas, marcos) NO es colisión de balas: no bloquea; el registro [impacto] dice qué bloqueó (motivo) y qué habría bloqueado la escena */
+static char *h_shoot_log(int side, float ox, float oy, float oz, float tx, float ty, float tz, int range, int gwall, VrHitShot *sh, int *res) {
+    static char lb[2048];
+    fflush(stderr); FILE *f = tmpfile(); int sv = dup(2); dup2(fileno(f), 2);
+    *res = h_shoot(side, ox, oy, oz, tx, ty, tz, range, gwall, sh);
+    fflush(stderr); dup2(sv, 2); close(sv); rewind(f); size_t got = fread(lb, 1, sizeof lb - 1, f); lb[got] = 0; fclose(f);
+    return lb;
+}
+static void t_hit_motivo(void) {
+    VrHitShot sh; int r; char *lg;
+    h_world(); h_reg(); h_soldier(0, 0, 0, 1000, 5000, 128); hw_solid = 2000.0f;
+    lg = h_shoot_log(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh, &r);
+    CHECK(r == 0 && h_vital(0) <= 0 && sh.zone == VRHIT_Z_HEAD, "sólido de la escena entre medias: la bala llega (zona %d vida %d)", sh.zone, h_vital(0));
+    CHECK(strstr(lg, "escena=2.00 m") != NULL && strstr(lg, "accion=sellada") != NULL, "el registro cita el sólido de la escena que no bloqueó: %.300s", lg);
+    h_world(); h_reg(); h_soldier(0, 0, 0, 1000, 5000, 128); hw_wall = 2000.0f;
+    lg = h_shoot_log(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh, &r);
+    CHECK(r == -1 && sh.zone == VRHIT_Z_WALL && strstr(lg, "motivo=pared_hzd") != NULL, "pared HZD: motivo pared_hzd: %.300s", lg);
+    h_world(); h_reg(); h_soldier(0, 0, 0, 1000, 5000, 128);
+    lg = h_shoot_log(1, 0, 1300, 0, 0, 1457, 5000, 10000, 2000, &sh, &r);
+    CHECK(r == -1 && sh.zone == VRHIT_Z_WALL && strstr(lg, "motivo=juego") != NULL, "trazado del juego: motivo juego: %.300s", lg);
+    h_world(); h_reg(); h_soldier(0, 0, 0, -3000, 9000, 128); h_floor(-2000, 500, 2000, 12000, 0);
+    lg = h_shoot_log(1, 0, 1300, 0, 0, -3000.0f + 457, 9000, 10000, -1, &sh, &r);
+    CHECK(r == -1 && sh.zone == VRHIT_Z_WALL && strstr(lg, "motivo=suelo_hzd") != NULL, "suelo HZD: motivo suelo_hzd: %.300s", lg);
+    h_world(); h_reg(); h_soldier(0, 0, 0, 1000, 5000, 128);
+    lg = h_shoot_log(1, 400, 1300, 0, 400, 1457, 5000, 10000, -1, &sh, &r);
+    CHECK(sh.zone == VRHIT_Z_MISS && strstr(lg, "motivo=ninguno") != NULL && strstr(lg, "o=(400,1300,0)") != NULL && strstr(lg, "mas_cercano=blanco 0") != NULL, "fallo: origen, dirección y blanco más cercano: %.300s", lg);
 }
 static void t_hit_camera(void) {
     VrHitShot sh;
@@ -1025,7 +1054,7 @@ static void t_hit_real(void) {
 }
 
 int main(void) {
-    t_hit_zones(); t_hit_camera(); t_hit_floors(); t_hit_enemy(); t_hit_aim(); t_hit_fist(); t_hit_real();
+    t_hit_zones(); t_hit_motivo(); t_hit_camera(); t_hit_floors(); t_hit_enemy(); t_hit_aim(); t_hit_fist(); t_hit_real();
     t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
     printf("test_fire: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

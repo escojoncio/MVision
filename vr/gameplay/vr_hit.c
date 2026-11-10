@@ -294,12 +294,14 @@ typedef struct {
     int crossed;             /* el rayo cruza la caja de algún blanco dentro del alcance */
     int cam;                 /* el blanco alcanzado es una cámara de vigilancia */
     uint32_t cam_ext;        /* blanco de una cámara que el juego no prueba (fuera de g_t) alcanzada antes que todo lo demás; 0 = no */
+    int src;                 /* qué cortó la línea de tiro (wall < alcance): 1 trazado del juego, 2 pared HZD, 3 suelo HZD */
+    float solid;             /* distancia al primer sólido de render de la escena (solo registro; no bloquea), -1 ninguno */
 } Res;
 
 /* Un único criterio de línea de tiro: el blanco más cercano que toca el rayo antes que la geometría sólida y dentro del alcance. */
 static void resolve(uint8_t *ram, const VrHitTarget *t, int n, const float o[3], const float d[3], float R, float game_wall, Res *r) {
     memset(r, 0, sizeof *r);
-    r->idx = -1; r->wall = R;
+    r->idx = -1; r->wall = R; r->solid = -1.0f;
     float best = R;
     for (int i = 0; i < n; i++) {
         float tb = box_ray(&t[i], o, d);
@@ -308,12 +310,13 @@ static void resolve(uint8_t *ram, const VrHitTarget *t, int n, const float o[3],
         if (tc >= 0.0f && tc < best) { best = tc; r->idx = i; r->zone = z; }
     }
     /* la geometría solo importa hasta el blanco más cercano (o hasta el alcance si no hay ninguno) */
-    if (game_wall >= 0.0f && game_wall < best) r->wall = game_wall;
+    int src = 0;
+    if (game_wall >= 0.0f && game_wall < best) { r->wall = game_wall; src = 1; }
     float w = W.wall ? W.wall(ram, o, d, best) : -1.0f;
-    if (w >= 0.0f && w < r->wall) r->wall = w;
+    if (w >= 0.0f && w < r->wall) { r->wall = w; src = 2; }
     w = vrhit_floor_ray(ram, o, d, best);
-    if (w >= 0.0f && w < r->wall) r->wall = w;
-    if (r->wall < best) { best = r->wall; r->idx = -1; r->zone = VRHIT_Z_NONE; }
+    if (w >= 0.0f && w < r->wall) { r->wall = w; src = 3; }
+    if (r->wall < best) { best = r->wall; r->idx = -1; r->zone = VRHIT_Z_NONE; r->src = src; }
     float tcam = 0; uint32_t tg = 0;
     if (W.camera && W.camera(ram, o, d, R, &tcam, &tg)) {
         int in = -1;
@@ -322,6 +325,7 @@ static void resolve(uint8_t *ram, const VrHitTarget *t, int n, const float o[3],
         else if (tcam >= 0.0f && tcam < best) { best = tcam; r->idx = -1; r->cam_ext = tg; r->zone = VRHIT_Z_BOX; r->cam = 1; }
     }
     r->dist = best;
+    if (W.solid) r->solid = W.solid(ram, o, d, best);
     for (int i = 0; i < 3; i++) r->pt[i] = o[i] + d[i] * best;
 }
 
@@ -351,7 +355,7 @@ static int take_aim(uint8_t *ram, const float o[3], const float d[3], const VrHi
         for (int i = 0; i < n; i++) {
             if (t[i].addr != a->addr) continue;
             memset(r, 0, sizeof *r);
-            r->idx = i; r->zone = a->zone; r->wall = R; r->crossed = 1;
+            r->idx = i; r->zone = a->zone; r->wall = R; r->crossed = 1; r->solid = -1.0f;
             float dv[3];
             for (int j = 0; j < 3; j++) { r->pt[j] = t[i].c[j] + a->rel[j]; dv[j] = r->pt[j] - o[j]; }
             r->dist = sqrtf(dot3(dv, dv));
@@ -359,8 +363,10 @@ static int take_aim(uint8_t *ram, const float o[3], const float d[3], const VrHi
             float dn[3];
             if (unit3(dv, dn)) {
                 float w = W.wall ? W.wall(ram, o, dn, r->dist) : -1.0f, f = vrhit_floor_ray(ram, o, dn, r->dist);
-                if (f >= 0.0f && (w < 0.0f || f < w)) w = f;
-                if (w >= 0.0f && w < r->dist - 50.0f) { r->idx = -1; r->zone = VRHIT_Z_NONE; r->wall = r->dist = w; }      /* tras una esquina: pared */
+                int src = 2;
+                if (f >= 0.0f && (w < 0.0f || f < w)) { w = f; src = 3; }
+                if (W.solid) r->solid = W.solid(ram, o, dn, r->dist);
+                if (w >= 0.0f && w < r->dist - 50.0f) { r->idx = -1; r->zone = VRHIT_Z_NONE; r->wall = r->dist = w; r->src = src; }      /* tras una esquina: pared */
             }
             return 1;
         }
@@ -450,8 +456,21 @@ int vrhit_bullet(uint8_t *ram, uint32_t actor, VrHitShot *out) {
     {
         float upm = W.units_per_m > 0.0f ? W.units_per_m : 1000.0f;
         const char *zn = r.cam ? "camara" : vrhit_zone_name(s.zone);
-        fprintf(stderr, "[impacto] blanco=%d zona=%s dist=%.2f m vida=%d | bando=%s dano=%d accion=%s\n", s.target, zn, s.dist / upm, s.vital, "jugador", s.damage,
-                s.action == VRHIT_ACT_SEAL ? "sellada" : s.action == VRHIT_ACT_VOID ? "anulada" : "intacta");
+        char ex[320]; int ne = 0;
+        ex[0] = 0;
+        if (s.zone == VRHIT_Z_WALL) ne += snprintf(ex + ne, sizeof ex - (size_t)ne, " motivo=%s", r.src == 1 ? "juego" : r.src == 2 ? "pared_hzd" : r.src == 3 ? "suelo_hzd" : "otro");
+        if (s.zone == VRHIT_Z_MISS) {
+            int bi = -1; float bp = 0, bt = 0;      /* blanco más cercano al rayo (distancia perpendicular y recorrido hasta su punto más próximo) */
+            for (int i = 0; i < n; i++) {
+                float v[3] = {g_t[i].c[0] - o[0], g_t[i].c[1] - o[1], g_t[i].c[2] - o[2]}, tp = dot3(v, d), pp = dot3(v, v) - tp * tp;
+                if (tp > 0.0f && (bi < 0 || pp < bp)) { bi = i; bp = pp; bt = tp; }
+            }
+            ne += snprintf(ex + ne, sizeof ex - (size_t)ne, " motivo=ninguno o=(%.0f,%.0f,%.0f) d=(%.3f,%.3f,%.3f)", o[0], o[1], o[2], d[0], d[1], d[2]);
+            if (bi >= 0) ne += snprintf(ex + ne, sizeof ex - (size_t)ne, " mas_cercano=blanco %d a %.2f m de recorrido, %.2f m del rayo", g_t[bi].index, bt / upm, sqrtf(bp > 0.0f ? bp : 0.0f) / upm);
+        }
+        if (r.solid >= 0.0f && r.solid < s.dist - 1.0f) snprintf(ex + ne, sizeof ex - (size_t)ne, " escena=%.2f m(no bloquea)", r.solid / upm);
+        fprintf(stderr, "[impacto] blanco=%d zona=%s dist=%.2f m vida=%d | bando=%s dano=%d accion=%s%s\n", s.target, zn, s.dist / upm, s.vital, "jugador", s.damage,
+                s.action == VRHIT_ACT_SEAL ? "sellada" : s.action == VRHIT_ACT_VOID ? "anulada" : "intacta", ex);
     }
     if (out) *out = s;
     return 1;
