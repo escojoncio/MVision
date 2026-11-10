@@ -24,10 +24,10 @@ typedef struct VrSmSample {
     int valid;           /* 1: escena de mundo en espacio de usuario con cámara VR (la corrección tiene sentido); 0: cualquier otra (menú, cine, vídeo) */
     double t_wall;       /* instante (reloj monótono, s) en que el hilo de emulación ensambló la escena */
     double game_s;       /* tiempo de juego de esa escena (VBlank * 0,02 s): monótono y sin fluctuación */
-    float B[3];          /* posición del cuerpo (unidades del juego): origen de la escena menos el adelanto del ojo */
+    float B[3];          /* posición del ojo del motor (unidades del juego): origen de la escena (x, z) y su altura */
     float R[9];          /* VrScene.user_R (fila-mayor) */
     float K;             /* user_k * scale = metros por unidad del juego de esa escena */
-    float c[3];          /* centro del giro: user_p_ref - (0, user_eye_h, 0) */
+    float c[3];          /* centro del giro: user_p_ref (donde cae B) */
     double turn_deg;     /* giro total del stick (grados, + izquierda) que ya traía la cámara de la escena, en la escala de vrsm_eval(turn_req) */
     uint32_t epoch;      /* cambia con cada recentrado / recarga del ejecutable: sin continuidad entre épocas distintas */
 } VrSmSample;

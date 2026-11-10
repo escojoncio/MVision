@@ -125,7 +125,11 @@ typedef struct {
     uint32_t vb;                          /* VBlanks vistos (vrcam_frame) */
     int hp_ok; float hp_yaw, hp_el; uint32_t hp_vb;
     float w_yaw, w_el;
-    int32_t pj[3]; int pj_ok;             /* articulación de la cabeza en la construcción anterior (adelanto del ojo) */
+    /* ancla del ojo en la raíz de locomoción (vrcam_plan) */
+    int32_t pb[3]; int pb_ok; uint32_t pb_vb;   /* posición de control del jugador y VBlank de la construcción anterior */
+    float ey;                             /* altura filtrada de la cabeza (mundo, sin eye_up) */
+    float nh[3];                          /* altura de la articulación de la cabeza sobre la raíz aprendida con el jugador quieto, por postura (de pie, agachado, tumbado) */
+    float sh[2], shv[2];                  /* empuje de las paredes (x, z) filtrado y su velocidad */
 } Vc;
 static Vc S;
 
@@ -136,7 +140,7 @@ void vrcam_config_default(VrCamConfig *c) {
     c->loco = VRCAM_LOCO_HEAD; c->eye_xz = VRCAM_EYE_AUTO;
     c->hide_head = 1; c->override_pad = 1;
     c->on_frames = 8; c->engine_h = 160; c->draw_lag = 0; c->pitch_limit_deg = 80.0f;
-    c->joint_lead = 1.0f; c->predict_s = 0.10f; c->predict_max_deg = 35.0f; c->vblank_hz = 50.0f;
+    c->predict_s = 0.10f; c->predict_max_deg = 35.0f; c->vblank_hz = 50.0f;
 }
 void vrcam_init(const VrCamConfig *c) {
     memset(&S, 0, sizeof S);
@@ -147,6 +151,7 @@ void vrcam_init(const VrCamConfig *c) {
     if (!(S.cfg.predict_s >= 0.0f && S.cfg.predict_s <= 0.5f)) S.cfg.predict_s = 0.0f;          /* NaN o fuera de rango: sin predicción */
     if (!(S.cfg.predict_max_deg >= 0.0f && S.cfg.predict_max_deg <= 90.0f)) S.cfg.predict_max_deg = 35.0f;
     if (!(S.cfg.vblank_hz >= 10.0f && S.cfg.vblank_hz <= 240.0f)) S.cfg.vblank_hz = 50.0f;
+    S.nh[0] = S.nh[1] = 394.0f; S.nh[2] = 0.0f;   /* medido en volcados: de pie +394, tumbado -1; se corrige solo con el jugador quieto */
 }
 const VrCamConfig *vrcam_config(void) { return &S.cfg; }
 
@@ -199,18 +204,20 @@ static void hzd_log(float moved_u, float upm) {
 }
 
 /* ============================================ lectura del estado del juego ============================================ */
-typedef struct { int ok; int32_t eye_x, eye_y, eye_z; float body_yaw; int prone; int joint; int32_t jx, jy, jz; int32_t bx, bz; } Body;
+typedef struct { int ok; int32_t eye_x, eye_z; float body_yaw; int post, move; int joint; int32_t jx, jy, jz; int32_t bx, by, bz, floor; } Body;
 
 static Body read_body(const uint8_t *ram) {
     Body b = {0};
     uint32_t ob = rd_u32(ram, VC_PLAYER_BODY), ctl = rd_u32(ram, BA_PLAYER_CTRL);
     uint32_t status = rd_u32(ram, BA_PLAYER_STATUS);
-    b.prone = (status & BRIDGE_PS_GROUND) != 0;
+    b.post = (status & BRIDGE_PS_GROUND) ? 2 : (status & BRIDGE_PS_SQUAT) ? 1 : 0;
+    b.move = (status & BRIDGE_PS_MOVE) != 0;
     int have_ctl = ptr_ok(ctl, BC_SIZE);
     int16_t mx = 0, my = 0, mz = 0;
     if (have_ctl) {
         mx = rd_s16(ram, ctl + BC_MOV); my = rd_s16(ram, ctl + BC_MOV + 2); mz = rd_s16(ram, ctl + BC_MOV + 4);
         b.body_yaw = (float)((uint16_t)rd_s16(ram, ctl + BC_ROT + 2) & 4095u) * (360.0f / 4096.0f);
+        b.floor = my - rd_s16(ram, ctl + BC_HEIGHT);
     } else {
         mx = rd_s16(ram, BA_PLAYER_POS); my = rd_s16(ram, BA_PLAYER_POS + 2); mz = rd_s16(ram, BA_PLAYER_POS + 4);
     }
@@ -226,11 +233,11 @@ static Body read_body(const uint8_t *ram) {
             }
         }
     }
-    /* AUTO: los ojos siguen SIEMPRE la articulación de la cabeza del modelo (andando, agachado, tumbado y en las transiciones el modelo se inclina/adelanta
-     * y el centro del cuerpo queda detrás: la cabeza del usuario se veía por detrás del cuerpo). BODY: solo el centro. */
-    b.jx = jx; b.jy = jy; b.jz = jz; b.bx = mx; b.bz = mz;
-    int use_joint_xz = b.joint && (S.cfg.eye_xz == VRCAM_EYE_JOINT || S.cfg.eye_xz == VRCAM_EYE_AUTO);
-    b.eye_x = use_joint_xz ? jx : mx; b.eye_y = jy; b.eye_z = use_joint_xz ? jz : mz;
+    /* AUTO / BODY: x,z de la posición de control (la raíz de locomoción: continua, sin animación, y la que el juego colisiona; es también la de su 1.ª persona). El cuerpo se dibuja
+     * con la articulación de la cabeza bajo el ojo (VrCamRecord.head_at -> vr_body). JOINT: x,z de la articulación (con el balanceo del paso; solo pruebas). */
+    b.jx = jx; b.jy = jy; b.jz = jz; b.bx = mx; b.by = my; b.bz = mz;
+    int use_joint_xz = b.joint && S.cfg.eye_xz == VRCAM_EYE_JOINT;
+    b.eye_x = use_joint_xz ? jx : mx; b.eye_z = use_joint_xz ? jz : mz;
     b.ok = have_ctl;
     return b;
 }
@@ -279,7 +286,7 @@ void vrcam_frame(const uint8_t *ram, const BridgeState *st) {
     int want = S.ok_count >= S.cfg.on_frames;
     if (want && !S.want) { S.have_ref = 0; S.st.activations++; }
     if (!want && S.want) { S.st.deactivations++; S.have_ref = 0; }
-    if (!want) S.pj_ok = 0;
+    if (!want) S.pb_ok = 0;
     S.want = want;
     if (S.zoom_capped > 0) S.zoom_capped--;
 }
@@ -308,21 +315,24 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
     Body b = read_body(ram);
     if (!b.ok) return 0;
 
-    /* La cámara se construye ANTES de que el juego anime el modelo en ese mismo fotograma: la articulación leída es la del fotograma anterior y el ojo iba un
-     * fotograma por detrás del personaje (medido: = la velocidad de marcha, ~10 cm/fotograma andando). Se adelanta un fotograma con la velocidad medida entre las
-     * dos últimas construcciones (sin extrapolar saltos: cambios de zona, teletransportes). */
-    if (b.joint) {
-        if (S.pj_ok && S.cfg.joint_lead > 0.0f) {
-            int32_t d[3] = {b.jx - S.pj[0], b.jy - S.pj[1], b.jz - S.pj[2]};
-            int small = abs(d[0]) <= 400 && abs(d[1]) <= 400 && abs(d[2]) <= 400;
-            if (small) {
-                if (b.eye_x == b.jx) b.eye_x += (int32_t)lrintf((float)d[0] * S.cfg.joint_lead);
-                if (b.eye_z == b.jz) b.eye_z += (int32_t)lrintf((float)d[2] * S.cfg.joint_lead);
-                b.eye_y += (int32_t)lrintf((float)d[1] * S.cfg.joint_lead);
-            }
-        }
-        S.pj[0] = b.jx; S.pj[1] = b.jy; S.pj[2] = b.jz; S.pj_ok = 1;
-    } else S.pj_ok = 0;
+    /* Altura de la cabeza sin el balanceo del paso. Quieto (la raíz no se mueve y el juego no anda): sigue a la articulación de la cabeza (posturas y sus transiciones) y aprende
+     * su altura sobre la raíz en esa postura. Andando: raíz + altura aprendida de la postura (nunca la articulación: su animación sube y baja a cada paso), y en las cuestas sube
+     * y baja con la raíz sin retardo. Todo con transición de 0,15 s; un salto de la raíz (cambio de zona, teletransporte) reinicia. */
+    float dt = (float)(S.pb_ok && S.vb > S.pb_vb ? S.vb - S.pb_vb : 1u) / S.cfg.vblank_hz;
+    if (dt > 0.2f) dt = 0.2f;
+    int32_t dr[3] = {b.bx - S.pb[0], b.by - S.pb[1], b.bz - S.pb[2]};
+    int snap = !S.pb_ok || abs(dr[0]) > 400 || abs(dr[1]) > 1500 || abs(dr[2]) > 400;
+    float ey_prev = S.ey;
+    if (snap) { S.ey = (float)b.jy; if (b.joint) S.nh[b.post] = (float)(b.jy - b.by); }
+    else {
+        float target = (float)b.jy;
+        if (dr[0] || dr[2] || b.move) {
+            if (abs(dr[1]) <= 200) S.ey += (float)dr[1];
+            target = (float)b.by + S.nh[b.post];
+        } else if (b.joint) S.nh[b.post] += (1.0f - expf(-dt / 0.16f)) * ((float)(b.jy - b.by) - S.nh[b.post]);
+        S.ey += (1.0f - expf(-dt / 0.15f)) * (target - S.ey);
+    }
+    S.pb[0] = b.bx; S.pb[1] = b.by; S.pb[2] = b.bz; S.pb_ok = 1; S.pb_vb = S.vb;
 
     float a_yaw, elev;
     vrcam_head_angles(h, &a_yaw, &elev);
@@ -360,14 +370,34 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
     if (pitch > S.cfg.pitch_limit_deg) pitch = S.cfg.pitch_limit_deg;
     if (pitch < -S.cfg.pitch_limit_deg) pitch = -S.cfg.pitch_limit_deg;
 
-    /* ojo: articulación de la cabeza (+ desplazamiento arriba/delante según la mirada horizontal) */
+    /* ojo: raíz de locomoción a la altura filtrada de la cabeza (+ desplazamiento arriba/delante según la mirada horizontal) */
     float yr = view * (PI_F / 180.0f);
-    float ex = (float)b.eye_x + sinf(yr) * S.cfg.eye_fwd, ey = (float)b.eye_y + S.cfg.eye_up, ez = (float)b.eye_z + cosf(yr) * S.cfg.eye_fwd;
-    /* El juego solo colisiona el centro del cuerpo: la cabeza (ojo) puede quedar al otro lado de una pared (gateo en conductos de 1 m). Se devuelve al lado libre (vr_hzd.h). */
-    { float upm = S.cfg.units_per_m * (S.cfg.calibrate && S.calib.scale > 0 ? S.calib.scale : 1.0f), ex0 = ex, ez0 = ez;
-      int nc = vrhzd_clamp_eye(ram, b.bx, b.bz, &ex, &ez, ey, 0.18f * upm);
-      hzd_log(nc > 0 ? hypotf(ex - ex0, ez - ez0) : 0.0f, upm);
-      p->eye_shift[0] = ex - ex0; p->eye_shift[1] = 0.0f; p->eye_shift[2] = ez - ez0; }   /* el cuerpo del jugador se desplaza igual (vr_body): si no, queda por delante del ojo */
+    float ex = (float)b.eye_x + sinf(yr) * S.cfg.eye_fwd, ey = S.ey + S.cfg.eye_up, ez = (float)b.eye_z + cosf(yr) * S.cfg.eye_fwd;
+    /* El juego solo colisiona el centro del cuerpo: el ojo (eye_fwd por delante) puede quedar al otro lado de una pared. Se devuelve al lado libre (vr_hzd.h), pero el empuje pedido
+     * cambia a saltos (paredes que entran y salen, esquinas): el aplicado lo sigue con un filtro crítico-amortiguado (0,12 s, 1,5 m/s como mucho) y con histéresis (ya empujado, la
+     * holgura pedida es un 15 % mayor: no oscila en el borde). */
+    { float upm = S.cfg.units_per_m * (S.cfg.calibrate && S.calib.scale > 0 ? S.calib.scale : 1.0f), cx = ex, cz = ez;
+      int on = hypotf(S.sh[0], S.sh[1]) > 1.0f && !snap;
+      int nc = vrhzd_clamp_eye(ram, b.bx, b.bz, &cx, &cz, ey, (on ? 0.207f : 0.18f) * upm);
+      float tg[2] = {nc > 0 ? cx - ex : 0.0f, nc > 0 ? cz - ez : 0.0f}, sh_prev[2] = {S.sh[0], S.sh[1]};
+      if (snap) { S.sh[0] = tg[0]; S.sh[1] = tg[1]; S.shv[0] = S.shv[1] = 0.0f; }
+      else {
+          const float st = 0.12f, om = 2.0f / st, x = om * dt, e = 1.0f / (1.0f + x + 0.48f * x * x + 0.235f * x * x * x), vmax = 1.5f * upm * st;
+          for (int i = 0; i < 2; i++) {
+              float ch = S.sh[i] - tg[i];
+              ch = ch > vmax ? vmax : (ch < -vmax ? -vmax : ch);
+              float tmp = (S.shv[i] + om * ch) * dt;
+              S.shv[i] = (S.shv[i] - om * tmp) * e;
+              S.sh[i] = (S.sh[i] - ch) + (ch + tmp) * e;
+              if ((tg[i] - sh_prev[i]) * (S.sh[i] - tg[i]) > 0.0f) { S.sh[i] = tg[i]; S.shv[i] = 0.0f; }   /* sin pasarse del pedido */
+          }
+      }
+      ex += S.sh[0]; ez += S.sh[1];
+      hzd_log(hypotf(S.sh[0], S.sh[1]), upm);
+      float js = hypotf(S.sh[0] - sh_prev[0], S.sh[1] - sh_prev[1]);
+      if (!snap && (fabsf(S.ey - ey_prev) > 30.0f || js > 50.0f))
+          fprintf(stderr, "[ojo] y=%.0f dy=%.0f suelo=%d shift=%.0f (salto %.0f) uds\n", ey, S.ey - ey_prev, b.floor, hypotf(S.sh[0], S.sh[1]), js);
+      p->eye_shift[0] = S.sh[0]; p->eye_shift[1] = 0.0f; p->eye_shift[2] = S.sh[1]; }
     p->from[0] = sat16(ex); p->from[1] = sat16(ey); p->from[2] = sat16(ez);
 
     /* objetivo: ojo + dirección * track, con track acotado para que el objetivo quepa en s16 (la dirección sale de
@@ -417,6 +447,8 @@ void vrcam_commit(const uint8_t *ram, const VrCamPlan *p) {
         memcpy(r->p_ref, p->p_ref, sizeof r->p_ref);
         memcpy(r->head, p->head, sizeof r->head);
         memcpy(r->eye_shift, p->eye_shift, sizeof r->eye_shift);
+        float yr = p->yaw_deg * (PI_F / 180.0f);
+        r->head_at[0] = (float)p->from[0] - sinf(yr) * S.cfg.eye_fwd; r->head_at[1] = (float)p->from[1] - S.cfg.eye_up; r->head_at[2] = (float)p->from[2] - cosf(yr) * S.cfg.eye_fwd;
     }
 }
 

@@ -228,28 +228,25 @@ static void test_walk(void) {
 }
 
 static void test_eye(void) {
-    /* AUTO: ojo en la articulación de la cabeza del modelo (no en el centro del cuerpo) y adelantado un fotograma con su velocidad */
+    /* AUTO: x,z del ojo en la posición de control (raíz de locomoción), no en la articulación de la cabeza del modelo, y sin adelanto */
     setup(2048, 0);
     VrCamPlan p;
     G_yaw = 0;
-    vrcam_plan(ram, 320, &p);                                 /* 1.ª construcción: sin velocidad conocida */
-    float y = 2048 * 360.0f / 4096.0f * 3.14159265f / 180.0f, fx = sinf(y) * vrcam_config()->eye_fwd, fz = cosf(y) * vrcam_config()->eye_fwd;
-    (void)fx; (void)fz;
-    CHECK(abs(p.from[0] - 1010) <= 71 && abs(p.from[0] - 1000) > 3);   /* x de la articulación (1010 +- eye_fwd), no del centro (1000) */
+    vrcam_plan(ram, 320, &p);
+    CHECK(abs(p.from[0] - 1000) <= 71);                       /* x del control (1000 +- eye_fwd) */
     NEAR(p.from[1], 1497 + vrcam_config()->eye_up, 1.0);
     int x0 = p.from[0];
-    w32(PART6 + 0x14, 1060);                                  /* el modelo avanzó 50 unidades */
-    vrcam_plan(ram, 320, &p);
-    NEAR(p.from[0] - x0, 100, 1.0);                           /* 50 reales + 50 de adelanto */
-    w32(PART6 + 0x14, 5000);                                  /* salto grande: no se extrapola */
-    vrcam_plan(ram, 320, &p);
-    NEAR(p.from[0] - x0, 5000 - 1010, 1.0);
-    /* sin adelanto */
-    VrCamConfig c = *vrcam_config(); c.joint_lead = 0; vrcam_init(&c);
+    w32(PART6 + 0x14, 1060);                                  /* la animación movió la articulación 50 unidades: el ojo no se mueve */
+    vrcam_frame(ram, &st); vrcam_plan(ram, 320, &p);
+    NEAR(p.from[0] - x0, 0, 1.0);
+    w16(CTL + BC_MOV, 1050);                                  /* el control avanzó 50 unidades: el ojo también, sin adelanto */
+    vrcam_frame(ram, &st); vrcam_plan(ram, 320, &p);
+    NEAR(p.from[0] - x0, 50, 1.0);
+    /* JOINT: x,z de la articulación */
+    VrCamConfig c = *vrcam_config(); c.eye_xz = VRCAM_EYE_JOINT; vrcam_init(&c);
     for (int i = 0; i < 10; i++) vrcam_frame(ram, &st);
-    w32(PART6 + 0x14, 1010); vrcam_plan(ram, 320, &p); int a = p.from[0];
-    w32(PART6 + 0x14, 1060); vrcam_plan(ram, 320, &p);
-    NEAR(p.from[0] - a, 50, 1.0);
+    vrcam_plan(ram, 320, &p);
+    NEAR(p.from[0] - x0, 60, 1.0);
 }
 
 int main(void) {

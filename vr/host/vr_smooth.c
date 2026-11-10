@@ -177,10 +177,13 @@ void vrsm_make_sample(VrSmSample *out, const float origin[3], const float R[9], 
     if (!(K > 0.0f) || !isfinite(K)) return;
     out->valid = 1;
     out->game_s = game_s;
+    /* B = el ojo (el origen está bajo él, a eye_h): el mismo mapa que con c = p_ref - R (0, eye_h, 0) y B = origen, pero así la altura del ojo (posturas, cuestas) también se
+     * reparte por fotograma de render en vez de saltar con cada escena. El giro es sobre la vertical: c solo cuenta en x, z. */
     for (int i = 0; i < 3; i++) out->B[i] = origin[i];
+    out->B[1] += eye_h / K;
     memcpy(out->R, R, sizeof out->R);
     out->K = K;
-    for (int i = 0; i < 3; i++) out->c[i] = p_ref[i] - R[3 * i + 1] * eye_h;
+    for (int i = 0; i < 3; i++) out->c[i] = p_ref[i];
     out->turn_deg = turn_deg;
     out->epoch = epoch;
 }

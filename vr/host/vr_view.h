@@ -125,6 +125,11 @@ static inline int vrhost_drop_world2d(int native, int kind, int reason) {
 
 /* ¿Se aplica la máscara de visión (marco con la abertura de la caja) como recubrimiento de ojo del render nativo? Solo en nativo, con el jugador en la caja (BRIDGE_PS_BOX) y una máscara en la lista (frame_on). Función pura; vrhost.c. */
 static inline int vrhost_box_mask(int native, int in_box, int frame_on) { return native && in_box && frame_on; }
+/* Anillo de pantalla de gas_efct.c dentro de un conducto: el guion de la zona (s01a, s02a: sin gas) lo enciende al ENTRAR en la zona del conducto y lo apaga al salir (mensajes ON/OFF
+ * al actor 0xB455, junto con el cambio de sonido ambiente), con el jugador en la 1.ª persona de gateo del juego (estado INTRUDE): borde negro -> gris 64 en resta = el oscurecimiento de
+ * bordes de esa cámara 2D. Con la cámara VR sería una viñeta a pantalla completa pegada a la cabeza: no se dibuja. Fuera de INTRUDE, o con otro modo de mezcla (un anillo de gas de
+ * verdad), se queda. `intrude` = BRIDGE_PS_INTRUDE del estado del jugador; `abr` = modo de mezcla del anillo (2 = resta). */
+static inline int vrhost_duct_ring(int vr_active, int intrude, int abr) { return vr_active && intrude && abr == 2; }
 
 /* ¿El 2D (lotes kind 2) de la lista actual va DENTRO de las texturas de la pantalla 3D en vez de en el panel aparte (hp2 de XRPresent)? (función pura; RenderRG.stereo2DInside)
  * Solo en modo gpu, si hay una imagen 3D sobre la que componer (la lista trae 3D o hay una base 3D guardada) y el estéreo compuso de verdad esa lista (composed_in_stereo = 0 si

@@ -857,8 +857,13 @@ static int apply_main(uint8_t *ram) {
     /* ---- ojo apartado de las paredes (gateo bajo objetos, conductos): la cámara limita el ojo pero el juego solo colisiona el centro del cuerpo, que quedaría por delante del ojo. Todo el cuerpo del jugador
      * se dibuja desplazado igual (world.t += shift, screen.t += R_ojo * shift); lo que sigue lee ya el cuerpo desplazado. restore devuelve las piezas ---- */
     float shf[3] = {0.0f, 0.0f, 0.0f};
-    if (all_finite(view.shift, 3) && (view.shift[0] != 0.0f || view.shift[1] != 0.0f || view.shift[2] != 0.0f)) {
-        float es[3]; v_cp(shf, view.shift); m_mulv(es, eye.R, shf);
+    if (view.anchor) {
+        PartInfo ph;
+        if (all_finite(view.head_at, 3) && nm > 6 && read_part(ram, pset, 6, &ph))
+            for (int k = 0; k < 3; k++) shf[k] = view.head_at[k] - (float)rd_i32(ram, ph.addr + OBJ_WORLD + 0x14 + 4 * (uint32_t)k);
+    } else if (all_finite(view.shift, 3)) v_cp(shf, view.shift);
+    if (shf[0] != 0.0f || shf[1] != 0.0f || shf[2] != 0.0f) {
+        float es[3]; m_mulv(es, eye.R, shf);
         for (int i = 0; i < 16 && i < nm; i++) {
             PartInfo pi; if (!read_part(ram, pset, i, &pi)) continue;
             Saved *sv = &G.shsv[G.sh_n++];

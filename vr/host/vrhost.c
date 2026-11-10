@@ -331,6 +331,7 @@ static int ns_world_to_vr(const VrCamRecord *r, float to_vr[12], VrSmSample *smp
 }
 /* Último empujón de una muestra de la escena nativa al suavizador (ns del reloj mono): mientras llegue, las escenas de la GPU marcadas para el nativo no empujan la suya. */
 static _Atomic uint64_t ns_smp_push_ns;
+static VrSmSample ns_smp_pend;           /* muestra de la escena nativa capturada y aún sin publicar (hilo de emulación): se empuja al publicarla (frame_hook_body) */
 #define NS_SMP_FRESH_NS 100000000ull
 
 /* Contexto de la captura (hilo de emulación, en la etapa «pantalla»): zona, cámara VR y mapa mundo -> usuario, y qué hacer con el jugador. */
@@ -351,13 +352,7 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
     sc->cam.h = (float)r->screen; sc->cam.overscan_y = 1.0f; sc->cam.vr_active = 1;   /* con la cámara VR el motor no aplica el sobreescaneo (contrato v2) */
     VrSmSample nsmp;
     if (ns_world_to_vr(r, sc->to_vr, &nsmp)) sc->valid |= NS_SV_TOVR_OK;
-    if (nsmp.valid && view.kind != VRV_K_ENGINE) {   /* el suavizador corrige la escena que se dibuja: la nativa lleva el último registro, la lista el anterior */
-        pthread_mutex_lock(&SMX);
-        sm_ensure();
-        vrsm_push(&SM, &nsmp, now_s());
-        pthread_mutex_unlock(&SMX);
-        atomic_store(&ns_smp_push_ns, mono_ns() | 1);
-    }
+    if (nsmp.valid && view.kind != VRV_K_ENGINE) ns_smp_pend = nsmp;   /* el suavizador corrige la escena que se dibuja: la nativa lleva el último registro, la lista el anterior */
     { VrBodyStats b; vrbody_stats(&b); ik_ap0 = b.applies; ik_dr0 = b.arms_driven; }
     o->player_key = ns_player_key(emu_ram);
     o->hide_head = 1;                                       /* primera persona: la cabeza propia no se dibuja (misma regla que vrcam_hide_head) */
@@ -367,6 +362,7 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
 static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, void *u) {
     (void)u;
     ns_wphide_apply(sc, emu_ram, vrfire_hide_enabled());   /* el arma del juego en la mano de Snake (la lista de la GPU la oculta con +0x4C = 0, el extractor nativo no lo lee) */
+    if ((sc->screen.flags & NS_SFX_GAS) && vrhost_duct_ring(sc->cam.vr_active, (bs.player_status & BRIDGE_PS_INTRUDE) != 0, sc->screen.gas_abr)) sc->screen.flags &= ~NS_SFX_GAS;   /* oscurecimiento de la 1.ª persona de gateo del juego: sin viñeta en VR (vr_view.h) */
     NsHandIn in;
     memset(&in, 0, sizeof in);
     in.enabled = hands_active();
@@ -1567,6 +1563,14 @@ static void dump_at_stage(Cpu *c) {
 static void frame_hook_body(Cpu *c, uint32_t f) {
     ns_hook_set_frame((uint32_t)hle_frame_count());
     ns_hook_tick(emu_ram);                        /* publica la escena nativa capturada en este fotograma de juego */
+    if (ns_smp_pend.valid) {   /* su muestra entra en el suavizador AHORA, no al capturarla: entre la captura y la publicación el renderer aún dibuja la escena anterior y la corregiría con el movimiento de la nueva (un salto de un paso de escena) */
+        pthread_mutex_lock(&SMX);
+        sm_ensure();
+        vrsm_push(&SM, &ns_smp_pend, now_s());
+        pthread_mutex_unlock(&SMX);
+        atomic_store(&ns_smp_push_ns, mono_ns() | 1);
+        ns_smp_pend.valid = 0;
+    }
     ns_frame_check();
 #ifdef MV_NOGEN
     if (vr_ok) ovp_frame();

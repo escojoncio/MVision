@@ -253,6 +253,52 @@ int main(void) {
         CHECK(d < 1e-4, "álgebra: distancia %.6g m", d);
         printf("%-34s distancia a la escena real %.3g m\n", "algebra exacta (2 escenas -> 3a)", d);
     }
+    /* 12) la altura del ojo cambia entre escenas (postura: 1,60 -> 0,90 m en 0,3 s, 93 mm por escena): el mundo debe subir repartido por fotograma de render, no en un escalón por escena */
+    {
+        VrSmooth s; vrsm_init(&s, NULL);
+        float R[9]; rot_form(0, R);
+        const float org[3] = {0, 0, 0}, pref[3] = {0, 1.2f, 0};
+        double prev = 0, step = 0; int have = 0, k = 0; float eh = 1.6f;
+        for (int f = 0; f < 135; f++) {
+            double t = f / 90.0;
+            while (k * 0.04 <= t) {
+                eh = k < 10 ? 1.6f : (k < 18 ? 1.6f - 0.0875f * (float)(k - 9) : 0.9f);
+                VrSmSample sm; vrsm_make_sample(&sm, org, R, 0.001f, pref, eh, k * 0.04, 0.0, 1, k * 0.04);
+                vrsm_push(&s, &sm, t); k++;
+            }
+            VrSmCorr c; vrsm_eval(&s, t, 0.0, &c);
+            double y = c.m[13] + (pref[1] - eh);                    /* altura mostrada del suelo del juego (W.y = 0) */
+            if (have) step = fmax(step, fabs(y - prev));
+            prev = y; have = 1;
+        }
+        printf("%-34s paso vertical maximo por fotograma de render %.1f mm (87,5 mm por escena)\n", "cambio de altura del ojo", step * 1000.0);
+        CHECK(step * 1000.0 < 45.0, "altura del ojo: escalón de %.1f mm en un fotograma de render", step * 1000.0);
+    }
+    /* 13) andar a 2,5 m/s (100 mm por escena) y parar en seco. SIN RESOLVER: la parada solo se conoce al llegar su escena, cuando ya se ha extrapolado un periodo entero (+ lead_s):
+     * el sobreimpulso es v * (periodo + lead) = 130 mm y se disipa con blend_s. Aquí solo se acota (no crece más ni deja escalones); quitarlo exige mostrar una escena por detrás. */
+    {
+        VrSmooth s; vrsm_init(&s, NULL);
+        float R[9]; rot_form(0, R);
+        const float pref[3] = {0, 1.2f, 0};
+        double over = 0, step = 0, prev = 0; int have = 0, k = 0; float bx = 0;
+        for (int f = 0; f < 180; f++) {
+            double t = f / 90.0;
+            while (k * 0.04 <= t) {
+                bx = k < 25 ? 100.0f * (float)k : 2400.0f;
+                float org[3] = {bx, 0, 0};
+                VrSmSample sm; vrsm_make_sample(&sm, org, R, 0.001f, pref, 1.6f, k * 0.04, 0.0, 1, k * 0.04);
+                vrsm_push(&s, &sm, t); k++;
+            }
+            VrSmCorr c; vrsm_eval(&s, t, 0.0, &c);
+            double d = bx + c.shift_m[0] * 1000.0;                   /* posición mostrada del cuerpo (unidades) */
+            if (d - 2400.0 > over) over = d - 2400.0;
+            if (have) step = fmax(step, fabs(d - prev));
+            prev = d; have = 1;
+        }
+        printf("%-34s sobreimpulso %.1f mm, paso maximo por fotograma de render %.1f mm (27,8 nominal)\n", "parada en seco a 2,5 m/s", over, step);
+        CHECK(over < 135.0, "parada: sobreimpulso de %.1f mm", over);
+        CHECK(step < 50.0, "parada: escalón de %.1f mm en un fotograma de render", step);
+    }
     printf(fails ? "FALLOS: %d\n" : "OK: vr_smooth\n", fails);
     return fails ? 1 : 0;
 }

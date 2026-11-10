@@ -1292,6 +1292,34 @@ static void test_torso_follow(void) {
 }
 
 
+/* Cuerpo anclado a la cabeza del usuario (VrBodyView.anchor / head_at): la articulación de la cabeza del modelo sube, baja y se ladea a cada paso (animación de andar); el cuerpo
+ * entero se dibuja desplazado para que esa articulación quede SIEMPRE en head_at (bajo el ojo): el torso no hereda el balanceo. restore devuelve la RAM. */
+static void test_head_anchor(void) {
+    VrBodyConfig cfg; legacy_cfg(&cfg); build_body(902); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+    float R6[9], t6[3]; load_xf(part_addr(6), R6, t6);
+    const float at[3] = {t6[0] + 35.0f, t6[1] - 20.0f, t6[2] - 410.0f};
+    float worst = 0, rigid = 0, bob_seen = 0;
+    for (int k = 0; k < 12; k++) {
+        float bob[3] = {30.0f * sinf(0.5f * k + 1.0f), 40.0f * sinf(0.5f * k), 30.0f * sinf(0.5f * k + 2.0f)}, t0[16][3], R[9];
+        for (int i = 1; i < 10; i++) { float t[3]; load_xf(part_addr(i), R, t); for (int j = 0; j < 3; j++) t[j] += bob[j]; store_xf(part_addr(i), R, t); }   /* torso, brazos, cuello y cabeza con el balanceo */
+        memcpy(RAM0, RAM, sizeof RAM);
+        for (int i = 0; i < 16; i++) load_xf(part_addr(i), R, t0[i]);
+        g_view.anchor = 1; for (int j = 0; j < 3; j++) g_view.head_at[j] = at[j];
+        vrbody_apply(RAM);
+        float t1[3]; load_xf(part_addr(6), R, t1);
+        for (int j = 0; j < 3; j++) { worst = fmaxf(worst, fabsf(t1[j] - at[j])); bob_seen = fmaxf(bob_seen, fabsf(t0[6][j] - t6[j])); }
+        for (int i = 0; i < 16; i++) { float t[3]; load_xf(part_addr(i), R, t); for (int j = 0; j < 3; j++) rigid = fmaxf(rigid, fabsf((t[j] - t0[i][j]) - (at[j] - t0[6][j]))); }
+        vrbody_restore(RAM);
+        CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "ancla: restore devuelve la RAM");
+        for (int i = 1; i < 10; i++) { float t[3]; load_xf(part_addr(i), R, t); for (int j = 0; j < 3; j++) t[j] -= bob[j]; store_xf(part_addr(i), R, t); }
+    }
+    printf("cuerpo anclado: balanceo de la cabeza del modelo %.0f uds -> desvio de la cabeza dibujada respecto al ojo %.2f uds (cuerpo rigido: %.2f)\n", bob_seen, worst, rigid);
+    CHECK(bob_seen > 25.0f, "ancla: la prueba debe traer balanceo (%g)", bob_seen);
+    CHECK(worst <= 1.0f, "ancla: la cabeza del modelo debe quedar en head_at (error %g)", worst);
+    CHECK(rigid <= 1.0f, "ancla: las 16 piezas se desplazan lo mismo (error %g)", rigid);
+    g_view.anchor = 0; memset(g_view.head_at, 0, sizeof g_view.head_at);
+}
+
 /* Gateo bajo geometría baja: la cámara aparta el ojo del modelo (VrBodyView.shift); todo el cuerpo del jugador se dibuja desplazado igual, para que no quede
  * por delante del ojo. Sin empuje (shift 0 / no finito) no cambia nada. restore devuelve la RAM. */
 static void place_hands_at(float yaw_deg, float spread_deg);
@@ -1650,7 +1678,7 @@ int main(void) {
     test_glue();
     test_hand_axes(); test_armed_hand_fixed_offset(); test_hand_pitch_api(); test_default_roll(); test_jab_and_grab();
     test_visibility();
-    test_two_sided(); test_own_hands(); test_own_hands_both(); test_arm_live(); test_torso_follow(); test_eye_shift(); test_pelvis_walk(); test_dt_measured(); test_pelvis_gap();
+    test_two_sided(); test_own_hands(); test_own_hands_both(); test_arm_live(); test_torso_follow(); test_eye_shift(); test_head_anchor(); test_pelvis_walk(); test_dt_measured(); test_pelvis_gap();
     test_fist_glue();
     test_near_hide();
     test_mirror();

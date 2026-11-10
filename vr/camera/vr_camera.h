@@ -40,9 +40,9 @@ typedef int (*VrCamHeadFn)(float m[16], double *t);
 
 enum { VRCAM_LOCO_HEAD = 0,   /* mando relativo a la mirada (por defecto): delante = hacia donde se mira */
        VRCAM_LOCO_BODY = 1 }; /* mirada = giro del cuerpo + giro relativo de la cabeza; mando relativo al cuerpo */
-enum { VRCAM_EYE_AUTO = 0,    /* x,y,z de la articulación de la cabeza del modelo en todas las posturas (sin modelo: centro del cuerpo) */
-       VRCAM_EYE_BODY = 1,    /* x,z siempre del centro del cuerpo */
-       VRCAM_EYE_JOINT = 2 }; /* x,y,z de la articulación de la cabeza (sigue balanceo y animaciones) */
+enum { VRCAM_EYE_AUTO = 0,    /* x,z de la posición de control del jugador (raíz de locomoción, sin animación); altura de la cabeza filtrada por postura (vr_camera.c) */
+       VRCAM_EYE_BODY = 1,    /* igual que AUTO */
+       VRCAM_EYE_JOINT = 2 }; /* x,z de la articulación de la cabeza (sigue el balanceo del paso; solo pruebas) */
 
 /* Fotogramas (VBlank) que la cámara VR sigue activa tras abrirse la radio (= to_comms de vr_view). */
 #define VRCAM_COMMS_GRACE 12
@@ -62,7 +62,6 @@ typedef struct VrCamConfig {
                               * Debe coincidir con --h de patch_exe.py (la caja de recorte se calcula con ella). */
     int keep_overscan;       /* 1: no anular el ajuste vertical de matrices de pantalla (solo para pruebas A/B; defecto 0) */
     int draw_lag;            /* construcciones de cámara entre la que dibuja un envío y la última hecha (0 = la última) */
-    float joint_lead;        /* fotogramas que se adelanta el ojo con la velocidad de la articulación de la cabeza (def. 1: la cámara se construye antes de animar el modelo; 0 = sin adelanto) */
     float pitch_limit_deg;   /* tope de la elevación que se le da al motor (el resto lo absorbe vrcam_delta); defecto 80 */
     /* --- §49: predicción de la mirada (al final: no rompe el layout) --- */
     float predict_s;         /* segundos de adelanto con que se extrapola la mirada (guiñada y cabeceo) al construir la cámara del motor: lo que se dibuja llega al visor
@@ -129,7 +128,8 @@ typedef struct VrCamRecord {
     double turn_total_deg;   /* giro del stick acumulado (suma de vrcam_turn, + izquierda) en el momento de construir la cámara */
     uint32_t epoch;          /* recentrados hechos hasta esta cámara (cambia el sistema de referencia del espacio del usuario) */
     uint32_t vbl;            /* VBlanks vistos por vrcam_frame hasta construir esta cámara (reloj de juego sin fluctuación: 1 VBlank = 20 ms) */
-    float eye_shift[3];      /* desplazamiento del ojo por las paredes del juego (vr_hzd: ojo limitado - ojo libre, unidades del motor; 0 sin empuje). El cuerpo del jugador se desplaza lo mismo (vr_body) */
+    float eye_shift[3];      /* desplazamiento del ojo por las paredes del juego (vr_hzd, filtrado: ojo dado al motor - ojo libre, unidades del motor; 0 sin empuje) */
+    float head_at[3];        /* dónde debe quedar la articulación de la cabeza del modelo (mundo): bajo el ojo dado al motor. vr_body dibuja el cuerpo entero desplazado hasta ahí */
 } VrCamRecord;
 const VrCamRecord *vrcam_last_record(void);
 uint32_t vrcam_draw_count(void);                         /* envíos de frame al GPU vistos */
@@ -152,7 +152,7 @@ typedef struct VrCamPlan {
     float yaw_deg, pitch_deg, theta_play_deg;
     float head[16];
     float p_ref[3];
-    float eye_shift[3];      /* ojo dado al motor - ojo del modelo, por vrhzd_clamp_eye (0 sin empuje) */
+    float eye_shift[3];      /* empuje del ojo por las paredes del juego (vrhzd_clamp_eye, filtrado; 0 sin empuje) */
 } VrCamPlan;
 /* Antes de construir la cámara principal. Devuelve 1 y rellena `p` si la cámara VR manda ahora; 0 si no (usar los
  * argumentos originales). Fija el estado "activo" del frame (vrcam_active). `zoom` = distancia de pantalla que pide

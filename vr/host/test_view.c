@@ -50,6 +50,7 @@ int main(void) {
     /* caja (BRIDGE_PS_BOX): misma lógica que el gateo; la vista no depende de la postura: con cámara VR y mundo nativo apto es mundo, con o sin control */
     i = world(); i.in_control = 1; i.scene3d = 1; i.native_ok = 1; CHECK(vrview_reason(&i) == VRV_R_WORLD && vrview_kind_of(&i) == VRV_K_WORLD, "caja con control: mundo");
     i.in_control = 0; CHECK(vrview_reason(&i) == VRV_R_WORLD && vrview_kind_of(&i) == VRV_K_WORLD, "caja sin control (transicion al entrar/salir): mundo continuo");
+    CHECK(vrhost_duct_ring(1, 1, 2) == 1 && vrhost_duct_ring(1, 0, 2) == 0 && vrhost_duct_ring(0, 1, 2) == 0 && vrhost_duct_ring(1, 1, 1) == 0, "anillo del conducto: solo con camara VR + 1a persona de gateo (INTRUDE) + anillo de resta");
     CHECK(vrhost_box_mask(1, 1, 1) == 1 && vrhost_box_mask(1, 0, 1) == 0 && vrhost_box_mask(1, 1, 0) == 0 && vrhost_box_mask(0, 1, 1) == 0, "mascara de la caja: solo nativo + en la caja + con mascara");
 
     VrView v;

@@ -554,31 +554,97 @@ static void test_scan_overlay(void) {
     #undef W32
 }
 
-/* Gateo bajo geometría baja: vrhzd_clamp_eye aparta el ojo del modelo; el desplazamiento llega al plan y al registro para que el cuerpo lo siga. */
-static void test_eye_shift(void) {
-    VrCamConfig c; vrcam_config_default(&c); c.head = head; vrcam_init(&c); build_world(1024);
-    BridgeState s = ok_state(); VrCamPlan p;
-    for (int i = 0; i < c.on_frames; i++) vrcam_frame(ram, &s);
+/* Amplitud (unidades) de la componente de frecuencia f de x[0..n) muestreada cada dt, tras quitar la recta de mínimos cuadrados. */
+static double tone_amp(const double *x, int n, double dt, double f) {
+    double sx = 0, sk = 0, skk = 0, sxk = 0;
+    for (int k = 0; k < n; k++) { sx += x[k]; sk += k; skk += (double)k * k; sxk += x[k] * k; }
+    double b = (n * sxk - sk * sx) / (n * skk - sk * sk), a = (sx - b * sk) / n, c = 0, s = 0;
+    for (int k = 0; k < n; k++) { double r = x[k] - a - b * k, w = 6.283185307179586 * f * k * dt; c += r * cos(w); s += r * sin(w); }
+    return 2.0 * sqrt(c * c + s * s) / n;
+}
+static void anchor_start(VrCamConfig *c, BridgeState *s) {
+    vrcam_config_default(c); c->head = head; vrcam_init(c); build_world(1024);
+    *s = ok_state();
+    for (int i = 0; i < c->on_frames; i++) vrcam_frame(ram, s);
     G_ok = 1; G_yaw = 0; G_elev = 0;
-    w32(PART6 + 0x1C, (uint32_t)-330);                       /* cabeza a z=-330; centro del cuerpo en z=-500 */
+}
+/* Una construcción de cámara por fotograma de juego (25 por segundo = 2 VBlanks): raíz de control en (x, y, -500), articulación de la cabeza en raíz + (jx, jy, jz). */
+static void anchor_tick(const BridgeState *s, int x, int y, int jx, int jy, int jz, int moving, VrCamPlan *p) {
+    w16(CTL + BC_MOV, (int16_t)x); w16(CTL + BC_MOV + 2, (int16_t)y);
+    w32(BA_PLAYER_STATUS, moving ? BRIDGE_PS_MOVE : 0);
+    w32(PART6 + 0x14, (uint32_t)(x + jx)); w32(PART6 + 0x18, (uint32_t)(y + jy)); w32(PART6 + 0x1C, (uint32_t)(-500 + jz));
+    vrcam_frame(ram, s); vrcam_frame(ram, s);
+    CHECK(vrcam_plan(ram, 320, p) == 1);
+    vrcam_commit(ram, p);
+}
+/* Ancla del ojo = raíz de locomoción: con la articulación de la cabeza oscilando a 2 Hz (+-40 uds en altura, +-30 de lado y de avance: el balanceo del paso) y el control
+ * avanzando en línea recta, el ojo dado al motor avanza en línea recta (componente a 2 Hz < 2 uds = 2 mm). En una cuesta la altura del ojo sube lo mismo que la raíz, sin escalón
+ * al empezarla ni al pararse. */
+static void test_anchor(void) {
+    VrCamConfig c; BridgeState s; VrCamPlan p;
+    anchor_start(&c, &s);
+    for (int k = 0; k < 25; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, 0, &p);          /* 1 s quieto */
+    NEAR(p.from[1], 1029 + 468 + c.eye_up, 1.5);
+    enum { N = 100 };
+    static double ex[N], ey[N], ez[N];
+    for (int k = 0; k < N; k++) {
+        double ph = 6.283185307179586 * 2.0 * k * 0.04;
+        anchor_tick(&s, 1000 + 100 * (k + 1), 1029, 10 + (int)lrint(30 * sin(ph + 1.0)), 468 + (int)lrint(40 * sin(ph)), 20 + (int)lrint(30 * sin(ph + 2.0)), 1, &p);
+        ex[k] = p.from[0]; ey[k] = p.from[1]; ez[k] = p.from[2];
+    }
+    double ax = tone_amp(ex + 25, N - 25, 0.04, 2.0), ay = tone_amp(ey + 25, N - 25, 0.04, 2.0), az = tone_amp(ez + 25, N - 25, 0.04, 2.0);
+    printf("ancla del ojo, balanceo de 2 Hz de la articulacion (+-40 alto, +-30 lado/avance): componente a 2 Hz en el ojo x=%.2f y=%.2f z=%.2f uds\n", ax, ay, az);
+    CHECK(ax < 2.0); CHECK(ay < 2.0); CHECK(az < 2.0);
+    NEAR(ex[N - 1] - ex[N - 2], 100, 1.5);                                                   /* el ojo avanza con el control, sin retardo */
+    /* cuesta: 40 uds por fotograma hacia arriba mientras avanza, y parada */
+    anchor_start(&c, &s);
+    for (int k = 0; k < 25; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, 0, &p);
+    int y0 = p.from[1], prev = y0; double worst = 0, worst_stop = 0;
+    for (int k = 0; k < 40; k++) {
+        anchor_tick(&s, 1000 + 100 * (k + 1), 1029 + 40 * (k + 1), 10, 468 + (k & 1 ? 25 : -25), 20, 1, &p);
+        worst = fmax(worst, fabs((double)(p.from[1] - prev) - 40.0)); prev = p.from[1];
+    }
+    for (int k = 0; k < 25; k++) {
+        anchor_tick(&s, 5000, 1029 + 1600, 10, 468, 20, 0, &p);
+        worst_stop = fmax(worst_stop, fabs((double)(p.from[1] - prev))); prev = p.from[1];
+    }
+    printf("cuesta de 40 uds/fotograma: desvio maximo del paso vertical del ojo %.1f uds; paso maximo al pararse %.1f uds\n", worst, worst_stop);
+    CHECK(worst <= 3.0); CHECK(worst_stop <= 10.0);
+    NEAR(p.from[1], y0 + 1600, 3.0);
+}
+
+/* Paredes de colisión del juego (conductos): el empuje del ojo llega al plan y al registro, y es CONTINUO: una pared que aparece o desaparece de golpe delante del ojo
+ * (el ojo va eye_fwd por delante de la raíz que el juego colisiona) lo mueve como mucho 35 uds por fotograma de juego (< 1 m/s), sin saltos. */
+static void test_eye_shift(void) {
+    VrCamConfig c; BridgeState s; VrCamPlan p;
+    anchor_start(&c, &s);
     uint32_t map = 0x800b8ab8, wr = 0x8015cde4, hdr = 0x80149268, grp = 0x80149284, walls = 0x8014929c, flags = 0x801492c0;
-    w32(CTL + 0x2C, map); w32(map + 8, wr); w32(wr, hdr); w32(0x800ACB38, 1);
+    w32(CTL + 0x2C, map); w32(map + 8, wr); w32(wr, hdr); w32(0x800ACB38, 0);
     w16(hdr + 10, 1); w32(hdr + 16, grp); w16(grp + 2, 1); w32(grp + 8, walls); w32(grp + 20, flags);
-    int16_t wl[8] = {0, -300, 0, 3000, 3000, -300, 0, 3000};  /* pared z=-300: el cuerpo (z=-500) queda en el lado de z menor */
+    int16_t wl[8] = {1100, -3000, 0, 3000, 1100, 2000, 0, 3000};  /* pared x=1100 delante (mirada +X): la raíz (x=1000) a 100, el ojo libre a 30 -> holgura pedida 100 (la de la raíz): empuje -70 */
     for (int k = 0; k < 8; k++) w16(walls + 2 * k, wl[k]);
-    CHECK(vrcam_plan(ram, 320, &p) == 1);
-    NEAR(p.eye_shift[0], 0, 1.0); NEAR(p.eye_shift[1], 0, 1e-6); NEAR(p.eye_shift[2], -150, 1.5);   /* ojo a 30 de la pared -> holgura 180 */
-    NEAR(p.from[2], -330 - 150, 2.0);
-    vrcam_commit(ram, &p);
+    for (int k = 0; k < 10; k++) anchor_tick(&s, 1000, 1029, 10, 468, 20, 0, &p);
+    NEAR(p.eye_shift[0], 0, 1e-6); NEAR(p.eye_shift[2], 0, 1e-6); NEAR(p.from[0], 1000 + c.eye_fwd, 1.0);
+    double prev = 0, step = 0, peak = 0;
+    w32(0x800ACB38, 1);                                       /* la pared aparece de golpe */
+    for (int k = 0; k < 30; k++) {
+        anchor_tick(&s, 1000, 1029, 10, 468, 20, 0, &p);
+        step = fmax(step, fabs(p.eye_shift[0] - prev)); peak = fmin(peak, p.eye_shift[0]); prev = p.eye_shift[0];
+        NEAR(p.eye_shift[1], 0, 1e-6); NEAR(p.eye_shift[2], 0, 0.5);
+        NEAR(p.from[0], 1000 + c.eye_fwd + p.eye_shift[0], 1.0);
+    }
+    NEAR(p.eye_shift[0], -70, 2.0); CHECK(peak > -75.0);     /* llega a la holgura pedida sin pasarse */
     const VrCamRecord *r = vrcam_last_record();
     CHECK(r && r->active);
     if (r) { NEAR(r->eye_shift[0], p.eye_shift[0], 1e-6); NEAR(r->eye_shift[2], p.eye_shift[2], 1e-6); }
-    w32(0x800ACB38, 0);                                       /* sin pared activa: sin empuje, sin desplazamiento */
-    CHECK(vrcam_plan(ram, 320, &p) == 1);
-    NEAR(p.eye_shift[0], 0, 1e-6); NEAR(p.eye_shift[2], 0, 1e-6); NEAR(p.from[2], -330, 2.0);
-    vrcam_commit(ram, &p);
-    r = vrcam_last_record();
-    CHECK(r && r->eye_shift[0] == 0 && r->eye_shift[2] == 0);
+    w32(0x800ACB38, 0);                                       /* y desaparece */
+    for (int k = 0; k < 30; k++) {
+        anchor_tick(&s, 1000, 1029, 10, 468, 20, 0, &p);
+        step = fmax(step, fabs(p.eye_shift[0] - prev)); prev = p.eye_shift[0];
+    }
+    printf("pared delante del ojo que aparece y desaparece (empuje de 70 uds): paso maximo del empuje por fotograma de juego %.1f uds\n", step);
+    CHECK(step <= 35.0);
+    NEAR(p.eye_shift[0], 0, 1.0); NEAR(p.from[0], 1000 + c.eye_fwd, 1.5);
 }
 
 int main(void) {
@@ -595,6 +661,7 @@ int main(void) {
     test_userspace();
     test_predict();
     test_robust();
+    test_anchor();
     test_eye_shift();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
