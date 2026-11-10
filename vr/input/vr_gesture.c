@@ -195,7 +195,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                 }
                 if (!c->knock) why = "desactivado";
                 else if (!free_hands || in->throw_hold) why = "manos_ocupadas";
-                else if (in->stance != 0 && !in->on_wall) why = "postura";              /* agachado, tumbado o gateando las manos cruzan el suelo y los objetos sin querer */
+                else if (in->stance != 0) why = "postura";                              /* agachado, tumbado o gateando las manos cruzan el suelo y los objetos sin querer; también pegado a la pared: vrm_action_input rechaza SQUAT/GROUND/BOX tras gastar enfriamiento y háptica */
                 else if (!(in->wall_ny[s] <= c->knock_ny_max)) why = "no_vertical";     /* suelo, techo, tapa de una caja */
                 else if (!in->fist_btn[s]) why = "sin_puno";
                 else if (enemy_near) why = "enemigo";

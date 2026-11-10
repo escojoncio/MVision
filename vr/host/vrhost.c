@@ -753,6 +753,16 @@ static const VrCamRecord *list_record(const GpuDrawList *l, int *has3d) {
  * el render nativo. El render solo oculta (por triángulo) lo que confirma haber dibujado; el resto sigue por GPU. Se usa la RAM del final del fotograma: puede traer los
  * paquetes del fotograma siguiente, de ahí la casación tolerante (ns_fx_classify_near) con la cámara de la lista. NULL si no hay nada que asignar. */
 static NsFxScene *hx_fx;
+static int hx_cov;   /* hx_fx frente a la RAM de la lista en curso: 0 sin extraer, 1 extraída, -1 fallida (se pone a 0 al empezar cada lista en build_one) */
+/* Una sola extracción por lista (ns_fx_extract no es idempotente: g_shadow_tex y g_szl); la comparten prov_covered y fx_classify_list. */
+static int hx_extract(void) {
+    if (!hx_cov) {
+        if (!hx_fx) hx_fx = ns_fx_scene_create(0);
+        NsFxOpts fo = ns_fx_opts_default();
+        hx_cov = hx_fx && ns_fx_extract(emu_ram, &fo, hx_fx) == 0 ? 1 : -1;
+    }
+    return hx_cov > 0;
+}
 static uint8_t *hx_cls; static int32_t *hx_item; static uint64_t *hx_key; static size_t hx_cap;
 static const uint64_t *fx_classify_list(const GpuDrawList *hl, const VrCamRecord *r) {
     size_t n = hl ? hl->nops : 0;
@@ -765,10 +775,7 @@ static const uint64_t *fx_classify_list(const GpuDrawList *hl, const VrCamRecord
         uint64_t *c = (uint64_t *)realloc(hx_key, nc * sizeof *c); if (!c) return NULL; hx_key = c;
         hx_cap = nc;
     }
-    if (!hx_fx) hx_fx = ns_fx_scene_create(0);
-    if (!hx_fx) return NULL;
-    NsFxOpts fo = ns_fx_opts_default();
-    if (ns_fx_extract(emu_ram, &fo, hx_fx) != 0) return NULL;
+    if (!hx_extract()) return NULL;
     memset(hx_cls, 0, n);
     for (size_t i = 0; i < n; i++) hx_item[i] = -1;
     if (ns_fx_classify(emu_ram, hx_fx, hl, hx_cls, NULL, hx_item, NULL) != 0) return NULL;
@@ -789,7 +796,6 @@ static const uint64_t *fx_classify_list(const GpuDrawList *hl, const VrCamRecord
  * nativa publicada apta y reciente (vrhost_native_sfx; aptitud como NativeRenderer.ingest: cinemática del motor = partida + listas + mapa; si no, ns_scene_native_ok): con una escena no apta
  * o sin escenas nuevas el renderer repite la última válida, con los efectos de AQUELLA. Anillo / fundido: además esa escena trae el efecto. Paquete: además esa escena trae efectos
  * (NS_SV_FX) y el paquete tiene un elemento exportable en la escena de efectos de la RAM actual (ns_fx_covers_packet; una extracción por lista, perezosa). */
-static int hx_cov;   /* hx_fx frente a la RAM de la lista en curso: 0 sin extraer, 1 extraída, -1 fallida */
 static int prov_covered(void *ctx, int what, uint32_t pkt_addr) {
     (void)ctx;
     const uint32_t cine_need = NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK;
@@ -799,12 +805,7 @@ static int prov_covered(void *ctx, int what, uint32_t pkt_addr) {
     if (what == VPC_COV_GAS) return vrhost_native_sfx(ready, fit, nat_sfx, age, NS_SFX_GAS);
     if (what == VPC_COV_FADE) return vrhost_native_sfx(ready, fit, nat_sfx, age, NS_SFX_FADE);
     if (what != VPC_COV_PACKET || !vrhost_native_sfx(ready, fit, nat_valid, age, NS_SV_FX)) return 0;
-    if (!hx_cov) {
-        if (!hx_fx) hx_fx = ns_fx_scene_create(0);
-        NsFxOpts fo = ns_fx_opts_default();
-        hx_cov = hx_fx && ns_fx_extract(emu_ram, &fo, hx_fx) == 0 ? 1 : -1;
-    }
-    return hx_cov > 0 && ns_fx_covers_packet(emu_ram, hx_fx, pkt_addr);
+    return hx_extract() && ns_fx_covers_packet(emu_ram, hx_fx, pkt_addr);
 }
 
 /* Subidas de la lista (CPU -> VRAM) que cubren el área mostrada: mide un fotograma de vídeo descomprimido tanto si llega de una vez como en tiras de 16 px (decodificador
@@ -1011,6 +1012,7 @@ static void gpu3d_log(void) {
 /* Caja (BRIDGE_PS_BOX): la máscara de visión de la última lista (vrhost_build) y el estado anterior, para el registro [caja] al entrar/salir. */
 static int box_mask_on, box_mask_rect[4], box_prev, box_prev_mask;
 static void build_one(const GpuDrawList *l, int si) {
+    hx_cov = 0;   /* la lista nueva aún no tiene extracción de efectos (hx_extract) */
     /* Los polígonos de una lista se transformaron con la cámara construida un frame del motor ANTES de que el VBlank lea la
      * RAM: la matriz de vista del puente puede ser ya la siguiente. El registro de cámara de la lista (vrcam) trae la correcta. */
     int has3d = 0;
@@ -1025,7 +1027,7 @@ static void build_one(const GpuDrawList *l, int si) {
         int pst = view.kind != VRV_K_WORLD ? VPC_ST_OTHER : view.reason == VRV_R_WORLD ? VPC_ST_CLOSED : view.reason == VRV_R_SELECTOR || view.reason == VRV_R_PAUSE_WORLD ? VPC_ST_OPEN : VPC_ST_OTHER;
         vpc_learn_note(&prov_learn, l, pst);
         o.op_class = vpc_op_class_cb; o.op_class_ctx = &prov_learn;
-        prov_learn.covered = prov_covered; hx_cov = 0;   /* WORLD / FX_SCREEN solo con garantía de que el nativo lo dibuja en esta lista */
+        prov_learn.covered = prov_covered;   /* WORLD / FX_SCREEN solo con garantía de que el nativo lo dibuja en esta lista */
     }
     if (!native_mode() && view.kind == VRV_K_ENGINE) { o.keep_late_clear = 1; o.veil_as_2d = 1; }   /* pantalla 3D del motor (gpu): el 2D se compone dentro del estéreo; el relleno opaco tras el 3D (créditos) y los velos se pintan como 2D */
     int cine_cut = 0;

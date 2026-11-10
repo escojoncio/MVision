@@ -410,7 +410,7 @@ static void t_knock(void) {
     vrg_init(&g); fl.wall_ny[1] = 0.3f; CHECK(touches(&g, fl, 2, 1.0f, 0.3f, 1, NULL, NULL) == 2);                     /* pared algo inclinada */
     /* solo de pie o pegado a la pared: agachado, tumbado o gateando las manos cruzan superficies sin querer */
     for (int st = 1; st <= 2; st++) { vrg_init(&g); vrg_in_t ps = in; ps.stance = st; CHECK(touches(&g, ps, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "postura")); }
-    vrg_init(&g); vrg_in_t pw = in; pw.stance = 1; pw.on_wall = 1; CHECK(touches(&g, pw, 2, 1.0f, 0.3f, 1, NULL, NULL) == 2);   /* pegado a la pared agachado: sí */
+    for (int st = 1; st <= 2; st++) { vrg_init(&g); vrg_in_t pw = in; pw.stance = st; pw.on_wall = 1; hap = 0; CHECK(touches(&g, pw, 2, 1.0f, 0.3f, 1, &why, &hap) == 0 && !strcmp(why, "postura") && hap == 0); }   /* pegado a la pared agachado o tumbado: tampoco (el motor lo rechaza; sin háptica sin golpe) */
     vrg_init(&g); vrg_in_t bx = in; bx.in_box = 1; CHECK(touches(&g, bx, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "manos_ocupadas"));   /* en la caja */
     vrg_init(&g); vrg_in_t th = in; th.throw_hold = 1; CHECK(touches(&g, th, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "manos_ocupadas"));   /* granada en la mano */
     /* balanceo del brazo (puño cerrado, 1,5 m/s, vaivén de 0,3 m) sin superficie al alcance: ningún toque */
