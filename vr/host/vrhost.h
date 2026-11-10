@@ -165,10 +165,14 @@ typedef struct {
 void mv_vrhost_stats(MvVrHostStats *s);
 
 /* Fluidez de la locomoción (vr_smooth.h; ver bitácora). El juego publica escenas a 25-50 por segundo y el visor dibuja a 90-100 Hz: por cada fotograma de render
- * esta llamada da una corrección RÍGIDA del mundo de la escena vigente (giro del stick pedido y aún no visto en la escena + traslación del personaje extrapolada con
+ * esta llamada da una corrección RÍGIDA del mundo de la escena vigente (giro del stick pedido y aún no visto en la escena + traslación del personaje interpolada con
  * sus marcas de tiempo de juego), en el espacio del usuario: P' = m * P. Se aplica SOLO a la geometría del mundo (vistas del pase de escena); el arma, las manos, el
  * radar y el HUD no se tocan. `active` = 0 -> identidad. Thread-safe; llamar una vez por fotograma de render (hilo de render), también si no llegó escena nueva. */
 void mv_vrhost_smooth(VrSmCorr *out);
+/* Cuerpo del jugador a la cadencia del renderer: al armar la tabla de piezas de la escena nativa `sc` (después de mv_vrhost_smooth de ese fotograma), matriz de mundo de la pieza
+ * `k` de la instancia `inst` que deja al jugador y a sus manos propias fijos respecto a la cabeza e interpolados entre escenas. `sc` = const NsScene *, `out_xf` = NsXf * (ns_types.h; punteros sin tipo
+ * para no arrastrar ese contrato a quien solo incluye esta cabecera). Devuelve 1 si escribió out_xf; 0 = usar la matriz de la escena. Thread-safe. */
+int32_t mv_vrhost_body_piece(const void *sc, uint32_t inst, uint32_t k, void *out_xf);
 void mv_vrhost_set_smooth(int on);                    /* 1 (defecto; MV_SMOOTH=0 al arrancar lo apaga) / 0: siempre identidad */
 void mv_vrhost_smooth_stats(VrSmoothStats *s);
 /* Solo pruebas headless: reloj monótono (s) con el que se marcan las escenas y se evalúa la corrección (NULL = CLOCK_MONOTONIC). */

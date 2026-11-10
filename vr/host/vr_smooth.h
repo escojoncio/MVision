@@ -10,9 +10,10 @@
  * escena (en grados, + izquierda). Entonces  P = Q (P_i - c) + c - Q R_i K (O(t) - O_i),  Q = R(delta): giro de `delta` sobre la vertical que pasa por p_ref
  * más una traslación. Se aplica SOLO a la geometría del mundo (el arma, el radar y las manos van en el espacio del usuario y no se tocan).
  *  - Giro: delta = lead * (giro total pedido ahora - giro total que traía la cámara de la escena): inmediato, por fotograma, sin retardo de tubería.
- *  - Traslación: la posición del cuerpo B (el origen O menos el adelanto del ojo, que depende de la mirada prevista) se extrapola con la velocidad medida entre las
- *    dos últimas escenas (en tiempo de juego, sin la fluctuación del reloj de la emulación) hasta el instante de presentación; el error de predicción al llegar una
- *    escena nueva se disipa con una exponencial (sin saltos y sin retardo en régimen). Cortes (teletransporte, cambio de época, hueco largo) reinician.
+ *  - Traslación: la posición del ojo del motor B se muestra INTERPOLADA entre las dos últimas escenas, una escena por detrás más el margen -lead_s (el tramo se recorre en el tiempo de juego que
+ *    tardó, sin la fluctuación del reloj de la emulación): nunca se pasa de una posición real del juego (sin sobreimpulso al parar ni error al cambiar de dirección), a cambio de
+ *    un periodo de escena de retardo SOLO en la locomoción (el giro y la cabeza del usuario no se retrasan). El desajuste al llegar una escena antes o después de lo previsto
+ *    se disipa con una exponencial (sin saltos). Cortes (teletransporte, cambio de época, hueco largo) reinician.
  * Reloj: `t` es cualquier reloj monótono en segundos (el mismo para las marcas de las escenas y para vrsm_eval). */
 #include <stdint.h>
 
@@ -34,10 +35,9 @@ typedef struct VrSmSample {
 
 typedef struct VrSmoothCfg {
     int enabled;         /* 0: corrección siempre identidad (comportamiento anterior) */
-    float lead_s;        /* adelanto del instante de presentación respecto a `t` de vrsm_eval (defecto 0,012: un fotograma de render) */
+    float lead_s;        /* adelanto (s) del reloj con que se recorre el camino entre escenas; negativo = margen por detrás (defecto -0,015: una escena que llega hasta 15 ms tarde no detiene el avance). Nunca se extrapola */
     float blend_s;       /* constante de tiempo con la que se disipa el error de predicción al llegar una escena (defecto 0,045) */
     float turn_lead;     /* 0..1: fracción del giro pendiente que se aplica ya (defecto 1: inmediato) */
-    float vel_new;       /* peso de la velocidad nueva en la suavizada (defecto 0,6) */
     float pll_gain;      /* ganancia de fase del reloj de escenas (defecto 0,15) */
     float cut_units;     /* salto del cuerpo entre dos escenas (unidades del juego, x-z) que se toma por corte, no por movimiento (defecto 2500) */
     float max_gap_s;     /* hueco sin escenas tras el cual se reinicia (defecto 0,5) */
@@ -60,7 +60,8 @@ typedef struct VrSmooth {
     VrSmSample cur;
     double ts;               /* instante suavizado (reloj de los `t`) de la escena vigente */
     double rho, period;
-    float vel[3];            /* unidades del juego por segundo de juego */
+    float dB[3], dBp[3];     /* camino de la escena anterior a la vigente y de la ante-anterior a la anterior (unidades del juego) */
+    double dur, durp;        /* segundos reales en que se recorre cada uno (los que tardó el juego); 0 = no hay */
     float err[3];            /* error de predicción pendiente de disipar (unidades) */
     double t_err;            /* instante de presentación en que nació err */
     int have_prev_game;
@@ -74,6 +75,7 @@ typedef struct VrSmCorr {
     float m[16];             /* corrección 4x4 columna-mayor: P' = m * P (espacio del usuario) */
     float delta_deg;         /* giro aplicado (+ izquierda) */
     float shift_m[3];        /* desplazamiento del cuerpo respecto a la escena (m, espacio del usuario) */
+    float alpha;             /* punto del camino que se está mostrando: 0..1 de la escena anterior (0) a la vigente (1); -1..0 de la ante-anterior (-1) a la anterior (0). Lo usa el cuerpo del jugador (mv_vrhost_body_piece) */
 } VrSmCorr;
 
 /* Muestra de una escena a partir de su mapa mundo -> usuario (UNICA definición: la usan la lista de la GPU y la escena nativa, cada una con SU registro de cámara; el suavizador

@@ -779,7 +779,9 @@ final class NativeRenderer {
                 if pk >= 0 && pk < cnt, let pm = meshOf[first + pk] { parentGlobal = Int32(first + pk); parentNV = UInt32(pm.nverts) }
                 var pc = piecePtr.pointee
                 var xf = NsXf()
-                if ip.enabled != 0 && ns_interp_piece(&ip, UInt32(ii), UInt32(k), &xf) != 0 { pc.world = xf }
+                // cuerpo del jugador y manos propias: fijos respecto a la cabeza e interpolados entre escenas (vr_bodylive.h); 0 = la matriz de la escena
+                if mv_vrhost_body_piece(sc, UInt32(ii), UInt32(k), &xf) != 0 { pc.world = xf }
+                else if ip.enabled != 0 && ns_interp_piece(&ip, UInt32(ii), UInt32(k), &xf) != 0 { pc.world = xf }
                 withUnsafePointer(to: &pc) { pcp in
                     ns_gpu_make_piece(sc, instPtr, pcp, gm.flags, Int32(gm.depthBias), UInt32(gm.vertStart), parentGlobal, parentNV, &table[gi])
                 }

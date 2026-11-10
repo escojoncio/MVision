@@ -647,6 +647,46 @@ static void test_eye_shift(void) {
     NEAR(p.eye_shift[0], 0, 1.0); NEAR(p.from[0], 1000 + c.eye_fwd, 1.5);
 }
 
+/* Tumbado en un conducto (RAM real de los volcados d0008 / d0009; VRCAM_DUMPS24 = carpeta): con el ojo en la raíz de locomoción el cuerpo se dibuja desplazado hasta que la
+ * articulación de la cabeza queda en VrCamRecord.head_at. Ni la cabeza ni el cuello, el torso, la cadera o las piernas quedan por delante del ojo, y la cabeza sigue oculta. */
+static void test_prone_dumps(void) {
+    const char *root = getenv("VRCAM_DUMPS24"); if (!root) root = "/home/claude/work/adj24/Dumps";
+    static const char *D[] = {"d0008_20261103-001918_frame", "d0009_20261103-002117_frame"};
+    static uint8_t real[BRIDGE_RAM_SIZE];
+    int loaded = 0;
+    for (unsigned i = 0; i < sizeof D / sizeof D[0]; i++) {
+        char path[512]; snprintf(path, sizeof path, "%s/%s/ram.bin", root, D[i]);
+        FILE *f = fopen(path, "rb"); if (!f) continue;
+        size_t n = fread(real, 1, sizeof real, f); fclose(f);
+        if (n != sizeof real) continue;
+        loaded++;
+        VrCamConfig c; vrcam_config_default(&c); c.head = head; vrcam_init(&c);
+        BridgeState s = ok_state(); VrCamPlan p;
+        for (int k = 0; k < c.on_frames; k++) vrcam_frame(real, &s);
+        G_ok = 1; G_yaw = 0; G_elev = 0;
+        CHECK(vrcam_plan(real, 320, &p) == 1);
+        vrcam_commit(real, &p);
+        const VrCamRecord *r = vrcam_last_record();
+        float j[16][3];
+        CHECK(r && r->active && vrcam_model_joints(real, j, 16) == 16);
+        if (!r) continue;
+        float yr = p.yaw_deg * 3.14159265f / 180.0f, fw[3] = {sinf(yr), 0, cosf(yr)}, body = -1e9f, arms = -1e9f, head6 = 0;
+        for (int k = 0; k < 16; k++) {
+            float a = 0;
+            for (int q = 0; q < 3; q++) a += (j[k][q] + (r->head_at[q] - j[6][q]) - (float)p.from[q]) * fw[q];
+            int arm = (k >= 2 && k <= 4) || (k >= 7 && k <= 9);
+            if (k == 6) head6 = a;
+            if (arm) arms = fmaxf(arms, a); else body = fmaxf(body, a);
+        }
+        printf("tumbado (%s): empuje de pared %.0f uds; delante del ojo: cabeza %.0f, pieza del cuerpo mas adelantada %.0f, brazos (los lleva la IK) %.0f uds (negativo = detras)\n",
+               D[i], hypotf(p.eye_shift[0], p.eye_shift[2]), head6, body, arms);
+        NEAR(head6, -c.eye_fwd, 2.0);                           /* la cabeza del modelo, eye_fwd por detrás del ojo */
+        CHECK(body <= -c.eye_fwd + 2.0f);                       /* nada del cuerpo por delante de la cabeza */
+        CHECK(vrcam_hide_head_now(real) == 1);
+    }
+    if (!loaded) printf("(volcados de gateo no encontrados en %s: sin prueba de tumbado)\n", root);
+}
+
 int main(void) {
     test_angles();
     test_patch();
@@ -663,6 +703,7 @@ int main(void) {
     test_robust();
     test_anchor();
     test_eye_shift();
+    test_prone_dumps();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

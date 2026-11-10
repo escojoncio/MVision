@@ -10,10 +10,9 @@ static int fin3(const float *v) { return isfinite(v[0]) && isfinite(v[1]) && isf
 
 void vrsm_cfg_default(VrSmoothCfg *c) {
     c->enabled = 1;
-    c->lead_s = 0.012f;
+    c->lead_s = -0.015f;
     c->blend_s = 0.045f;
     c->turn_lead = 1.0f;
-    c->vel_new = 0.6f;
     c->pll_gain = 0.15f;
     c->cut_units = 2500.0f;
     c->max_gap_s = 0.5f;
@@ -22,7 +21,8 @@ void vrsm_cfg_default(VrSmoothCfg *c) {
 
 void vrsm_reset(VrSmooth *s) {
     s->have = 0;
-    memset(s->vel, 0, sizeof s->vel);
+    memset(s->dB, 0, sizeof s->dB); memset(s->dBp, 0, sizeof s->dBp);
+    s->dur = s->durp = 0.0;
     memset(s->err, 0, sizeof s->err);
     s->t_err = 0.0;
     s->have_prev_game = 0;
@@ -38,23 +38,21 @@ void vrsm_init(VrSmooth *s, const VrSmoothCfg *c) {
     s->st.period_s = 0.04;
 }
 
-/* Horizonte efectivo de extrapolación: lineal hasta ~1,25 periodos de escena y después tiende suavemente a un tope (si el juego deja de publicar no se sigue
- * corriendo indefinidamente ni se frena en seco). */
-static double soft_horizon(const VrSmooth *s, double h) {
-    if (h <= 0.0) return 0.0;
-    double a = 1.25 * s->period + 0.01;
-    double hmax = clampd(2.5 * s->period + 0.02, 0.06, 0.2);
-    if (a > hmax - 0.01) a = hmax - 0.01;
-    if (h <= a) return h;
-    double w = hmax - a;
-    return a + w * (1.0 - exp(-(h - a) / w));
+/* Punto del camino que se muestra en el instante `te`: 0..1 = de la escena anterior (0) a la vigente (1); -1..0 = todavía en el tramo anterior (de la ante-anterior a la anterior).
+ * La locomoción se muestra INTERPOLADA entre escenas reales, una por detrás más el margen -lead_s (lo que tardó el juego en recorrer un tramo es lo que se tarda en mostrarlo).
+ * Nunca pasa de la vigente: al parar no hay sobreimpulso. El margen hace que una escena que llega tarde (reloj de la emulación, fotograma de render) no detenga el avance. */
+static double interp_a(const VrSmooth *s, double te) {
+    if (!(s->dur > 0.0)) return 1.0;
+    double x = te - s->ts;
+    if (x >= 0.0) return x < s->dur ? x / s->dur : 1.0;
+    if (!(s->durp > 0.0)) return 0.0;
+    return x > -s->durp ? x / s->durp : -1.0;
 }
 
 /* Desplazamiento del cuerpo (unidades del juego) respecto a la posición de la escena en el instante `te`, sin el error pendiente. */
 static void shift_pred(const VrSmooth *s, double te, float out[3]) {
-    double hg = soft_horizon(s, te - s->ts);
-    double k = s->rho * hg;
-    for (int i = 0; i < 3; i++) out[i] = (float)(s->vel[i] * k);
+    double a = interp_a(s, te);
+    for (int i = 0; i < 3; i++) out[i] = (float)(a >= 0.0 ? s->dB[i] * (a - 1.0) : s->dBp[i] * a - s->dB[i]);
 }
 
 static double mag_m(const VrSmooth *s, const float v[3]) {
@@ -80,7 +78,8 @@ void vrsm_push(VrSmooth *s, const VrSmSample *sm, double t_now) {
         if (s->have) s->st.resets++;
         s->cur = *sm;
         s->ts = sm->t_wall < t_now ? sm->t_wall : t_now;
-        memset(s->vel, 0, sizeof s->vel);
+        memset(s->dB, 0, sizeof s->dB); memset(s->dBp, 0, sizeof s->dBp);
+        s->dur = s->durp = 0.0;
         memset(s->err, 0, sizeof s->err);
         s->t_err = te;
         s->have = 1;
@@ -95,13 +94,8 @@ void vrsm_push(VrSmooth *s, const VrSmSample *sm, double t_now) {
 
     double dg = sm->game_s - s->cur.game_s;
     if (dg > 0.004) {
-        double dtw = sm->t_wall - s->cur.t_wall;
-        double wn = clampd(s->cfg.vel_new, 0.0, 1.0);
-        for (int i = 0; i < 3; i++) {
-            double vn = ((double)sm->B[i] - s->cur.B[i]) / dg;
-            s->vel[i] = (float)(wn * vn + (1.0 - wn) * s->vel[i]);
-        }
-        (void)dtw;
+        for (int i = 0; i < 3; i++) { s->dBp[i] = s->dB[i]; s->dB[i] = sm->B[i] - s->cur.B[i]; }
+        s->durp = s->dur;
         if (!s->rho_anchor) { s->rho_g0 = sm->game_s; s->rho_w0 = sm->t_wall; s->rho_anchor = 1; }
         else if (sm->t_wall - s->rho_w0 >= 1.0) {   /* ventana de 1 s: la fluctuación de cada reloj de ensamblado pesa <1 % */
             s->rho += 0.5 * (clampd((sm->game_s - s->rho_g0) / (sm->t_wall - s->rho_w0), 0.25, 2.0) - s->rho);
@@ -110,8 +104,10 @@ void vrsm_push(VrSmooth *s, const VrSmSample *sm, double t_now) {
         s->period += 0.2 * (clampd(dg / s->rho, 0.005, 0.5) - s->period);
         double tpred = s->ts + dg / s->rho;
         s->ts = tpred + clampd(s->cfg.pll_gain, 0.0, 1.0) * (sm->t_wall - tpred);
+        s->dur = clampd(dg / s->rho, 0.005, 0.5);
     } else {
         s->ts = sm->t_wall < t_now ? sm->t_wall : t_now;
+        memset(s->dB, 0, sizeof s->dB); memset(s->dBp, 0, sizeof s->dBp);
     }
     if (s->ts > t_now) s->ts = t_now;
     s->cur = *sm;
@@ -161,6 +157,7 @@ void vrsm_eval(VrSmooth *s, double t_now, double turn_req_deg, VrSmCorr *out) {
     for (int i = 0; i < 16; i++) if (!isfinite(out->m[i])) { memset(out, 0, sizeof *out); out->m[0] = out->m[5] = out->m[10] = out->m[15] = 1.0f; return; }
     out->active = 1;
     out->delta_deg = (float)delta;
+    out->alpha = (float)interp_a(s, te);
     for (int i = 0; i < 3; i++) out->shift_m[i] = (float)ks[i];
     double sm = sqrt(ks[0] * ks[0] + ks[1] * ks[1] + ks[2] * ks[2]);
     s->st.active_evals++;

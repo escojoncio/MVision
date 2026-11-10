@@ -102,9 +102,10 @@ static Res run(const Sim *m, VrSmooth *sm) {
         else { memset(&corr, 0, sizeof corr); corr.m[0] = corr.m[5] = corr.m[10] = corr.m[15] = 1; }
         double disp[3];
         apply(&corr, P_i, disp);
-        /* ideal: el mismo punto con el cuerpo y el giro al instante t + lead (modelo continuo) */
+        /* ideal: el giro pedido AHORA (sin retardo) y el cuerpo donde estaba una escena antes (t + lead - periodo): la locomoción se muestra interpolada entre las dos últimas
+         * escenas, una por detrás, para no pasarse nunca de una posición real del juego */
         double te = t + sm->cfg.lead_s;
-        double bxi = body_x(m, te);
+        double bxi = body_x(m, te - dt_scene);
         float Oi[3] = {(float)bxi, 0, 0}, Ri[9];
         rot_form((float)(180.0 + 90.0 + req_turn(m, t)), Ri);
         double ideal[3];
@@ -228,7 +229,8 @@ int main(void) {
         VrSmCorr c; vrsm_eval(&s, 0.05, 0.0, &c);
         CHECK(!c.active, "escena no válida: identidad");
     }
-    /* 11) álgebra exacta: dos escenas con movimiento lineal y giro; la corrección extrapolada a la tercera coincide con ella (sin fluctuación) */
+    /* 11) álgebra exacta: dos escenas con movimiento lineal; a mitad del periodo siguiente la corrección deja la segunda escena donde estaría una escena con el cuerpo a medio camino
+     * entre las dos y el giro pedido (20 grados) ya aplicado (sin fluctuación) */
     {
         VrSmooth s; vrsm_init(&s, NULL);
         s.cfg.lead_s = 0.0f; s.cfg.blend_s = 1e-3f;
@@ -238,20 +240,20 @@ int main(void) {
         a.t_wall = 0.0; a.game_s = 0.0; a.B[0] = 100; a.B[2] = -50; a.turn_deg = 0;
         b.t_wall = 0.04; b.game_s = 0.04; b.B[0] = 130; b.B[2] = -10; b.turn_deg = 0;
         vrsm_push(&s, &a, 0.0);
-        s.cfg.vel_new = 1.0f;
         vrsm_push(&s, &b, 0.04);
-        /* a las 0,08 s: velocidad constante (30,40)/0,04 -> B = (160, 30) y 20 grados de giro pedidos */
-        cc = b; cc.t_wall = 0.08; cc.game_s = 0.08; cc.B[0] = 160; cc.B[2] = 30; cc.turn_deg = 20; rot_form(250 + 20, cc.R);
+        /* a las 0,06 s: mitad del camino de a a b -> B = (115, -30), y 20 grados de giro pedidos */
+        cc = b; cc.B[0] = 115; cc.B[2] = -30; rot_form(250 + 20, cc.R);
         double W[3] = {500, 100, 900}, Pi[3], P3[3], Pc[3];
         float Ob[3] = {b.B[0], b.B[1], b.B[2]}, O3[3] = {cc.B[0], cc.B[1], cc.B[2]};
         project(b.R, b.K, b.c, Ob, W, Pi);
         project(cc.R, cc.K, cc.c, O3, W, P3);
         VrSmCorr corr;
-        vrsm_eval(&s, 0.08, 20.0, &corr);
+        vrsm_eval(&s, 0.06, 20.0, &corr);
         apply(&corr, Pi, Pc);
         double d = sqrt((Pc[0] - P3[0]) * (Pc[0] - P3[0]) + (Pc[1] - P3[1]) * (Pc[1] - P3[1]) + (Pc[2] - P3[2]) * (Pc[2] - P3[2]));
         CHECK(d < 1e-4, "álgebra: distancia %.6g m", d);
-        printf("%-34s distancia a la escena real %.3g m\n", "algebra exacta (2 escenas -> 3a)", d);
+        CHECK(fabsf(corr.alpha - 0.5f) < 1e-4f, "alpha a mitad de periodo: %.4f", corr.alpha);
+        printf("%-34s distancia a la escena intermedia %.3g m\n", "algebra exacta (2 escenas, mitad)", d);
     }
     /* 12) la altura del ojo cambia entre escenas (postura: 1,60 -> 0,90 m en 0,3 s, 93 mm por escena): el mundo debe subir repartido por fotograma de render, no en un escalón por escena */
     {
@@ -272,10 +274,9 @@ int main(void) {
             prev = y; have = 1;
         }
         printf("%-34s paso vertical maximo por fotograma de render %.1f mm (87,5 mm por escena)\n", "cambio de altura del ojo", step * 1000.0);
-        CHECK(step * 1000.0 < 45.0, "altura del ojo: escalón de %.1f mm en un fotograma de render", step * 1000.0);
+        CHECK(step * 1000.0 < 30.0, "altura del ojo: escalón de %.1f mm en un fotograma de render", step * 1000.0);
     }
-    /* 13) andar a 2,5 m/s (100 mm por escena) y parar en seco. SIN RESOLVER: la parada solo se conoce al llegar su escena, cuando ya se ha extrapolado un periodo entero (+ lead_s):
-     * el sobreimpulso es v * (periodo + lead) = 130 mm y se disipa con blend_s. Aquí solo se acota (no crece más ni deja escalones); quitarlo exige mostrar una escena por detrás. */
+    /* 13) andar a 2,5 m/s (100 mm por escena) y parar en seco: la posición mostrada nunca pasa de la última posición real del juego (sobreimpulso 0) y avanza repartida por fotograma */
     {
         VrSmooth s; vrsm_init(&s, NULL);
         float R[9]; rot_form(0, R);
@@ -296,8 +297,8 @@ int main(void) {
             prev = d; have = 1;
         }
         printf("%-34s sobreimpulso %.1f mm, paso maximo por fotograma de render %.1f mm (27,8 nominal)\n", "parada en seco a 2,5 m/s", over, step);
-        CHECK(over < 135.0, "parada: sobreimpulso de %.1f mm", over);
-        CHECK(step < 50.0, "parada: escalón de %.1f mm en un fotograma de render", step);
+        CHECK(over < 0.5, "parada: sobreimpulso de %.1f mm", over);
+        CHECK(step < 32.0, "parada: escalón de %.1f mm en un fotograma de render", step);
     }
     printf(fails ? "FALLOS: %d\n" : "OK: vr_smooth\n", fails);
     return fails ? 1 : 0;

@@ -1,5 +1,5 @@
 /* smooth_replay: repite la medida de smoothrun sobre una traza (--trace) SIN emular el juego, para ajustar vr_smooth con datos reales.
- *   smooth_replay <traza> [--from VBL] [--to VBL] [--lead s] [--blend s] [--velnew w] [--pll g] [--nosmooth] [--dump]
+ *   smooth_replay <traza> [--from VBL] [--to VBL] [--lead s] [--blend s] [--pll g] [--nosmooth] [--dump]
  * La traza trae por escena de mundo (S) el origen, la correspondencia al espacio del usuario y la marca de tiempo de juego, y por VBlank (P) la posicion del cuerpo del puente.
  * Los ticks de render son de 10 ms exactos, a +5 ms del ensamblado. Imprime el paso de un punto fijo del mundo por tick, sin y con correccion. */
 #include <math.h>
@@ -26,7 +26,7 @@ static double mean(const Acc *a) { return a->n ? a->s1 / a->n : 0; }
 static double sdev(const Acc *a) { double m = mean(a); return a->n > 1 ? sqrt(fmax(0, a->s2 / a->n - m * m)) : 0; }
 
 int main(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "uso: %s <traza> [--from V] [--to V] [--lead s] [--blend s] [--velnew w] [--pll g] [--nosmooth] [--dump]\n", argv[0]); return 1; }
+    if (argc < 2) { fprintf(stderr, "uso: %s <traza> [--from V] [--to V] [--lead s] [--blend s] [--pll g] [--nosmooth] [--dump]\n", argv[0]); return 1; }
     uint32_t from = 0, to = 0xFFFFFFFFu; int dump = 0;
     VrSmoothCfg cfg; vrsm_cfg_default(&cfg);
     for (int i = 2; i < argc; i++) {
@@ -34,7 +34,6 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--to") && i + 1 < argc) to = (uint32_t)strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--lead") && i + 1 < argc) cfg.lead_s = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--blend") && i + 1 < argc) cfg.blend_s = (float)atof(argv[++i]);
-        else if (!strcmp(argv[i], "--velnew") && i + 1 < argc) cfg.vel_new = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--pll") && i + 1 < argc) cfg.pll_gain = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--nosmooth")) cfg.enabled = 0;
         else if (!strcmp(argv[i], "--dump")) dump = 1;
@@ -91,7 +90,7 @@ int main(int argc, char **argv) {
     double t_end = sc[last].t + 0.04;   /* hasta que llegaria la siguiente escena */
     for (double t = sc[first].t + 0.005; t < t_end; t += 0.01) {
         while (next < nsc && sc[next].t + 0.005 <= t + 1e-9) {
-            if (sc[next].vbl >= from && sc[next].vbl <= to) { vrsm_push(&sm, &sc[next].s, t); curs = &sc[next].s; if (getenv("SR_DBG")) printf("push t %.3f vbl %u ts-t %.1f ms vel(%.0f,%.0f) per %.1f ms rho %.3f err(%.1f,%.1f) u\n", t, sc[next].vbl, (sm.ts - t) * 1000, sm.vel[0], sm.vel[2], sm.period * 1000, sm.rho, sm.err[0], sm.err[2]); }
+            if (sc[next].vbl >= from && sc[next].vbl <= to) { vrsm_push(&sm, &sc[next].s, t); curs = &sc[next].s; if (getenv("SR_DBG")) printf("push t %.3f vbl %u ts-t %.1f ms tramo(%.0f,%.0f) per %.1f ms rho %.3f err(%.1f,%.1f) u\n", t, sc[next].vbl, (sm.ts - t) * 1000, sm.dB[0], sm.dB[2], sm.period * 1000, sm.rho, sm.err[0], sm.err[2]); }
             next++;
         }
         if (!curs) continue;

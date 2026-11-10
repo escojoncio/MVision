@@ -21,6 +21,7 @@
 #include "host.h"
 #include "host_hooks.h"
 #include "vr_body.h"
+#include "vr_bodylive.h"
 #include "vr_camera.h"
 #include "vr_heading.h"
 #include "vr_headcol.h"
@@ -185,6 +186,11 @@ static VrSmooth SM;
 static int sm_init;
 static double (*clock_fn)(void);
 static uint32_t exe_gen;                 /* cargas del ejecutable (cambia la época de las muestras) */
+static VrSmCorr sm_last; static uint64_t sm_last_ns;   /* con SMX: última corrección evaluada (la del fotograma de render en curso) y cuándo */
+static VblRing body_ring;                /* con SMX: poses del jugador de las últimas escenas publicadas (vr_bodylive.h) */
+static VblPose body_pend;                /* hilo de emulación: pose de la escena capturada y aún sin publicar */
+static int ns_cap_pend;                  /* hilo de emulación: hay una escena con cámara VR capturada y aún sin publicar */
+static _Atomic uint32_t body_key;        /* clave de instancia del jugador de la última escena con pose */
 static double turn_base;                 /* mv_vr_turn_total() - vrcam_turn_total() al reiniciar la cámara (vrcam_init pone el total a 0) */
 
 static double now_s(void) { return clock_fn ? clock_fn() : (double)mono_ns() * 1e-9; }
@@ -213,7 +219,22 @@ void mv_vrhost_smooth(VrSmCorr *out) {
     pthread_mutex_lock(&SMX);
     sm_ensure();
     vrsm_eval(&SM, now_s(), mv_vr_turn_total(), out);
+    sm_last = *out; sm_last_ns = mono_ns();
     pthread_mutex_unlock(&SMX);
+}
+
+/* Cuerpo del jugador a la cadencia del renderer (vr_bodylive.h; hilo de render, al armar la tabla de piezas de la escena nativa `sc`, DESPUÉS de mv_vrhost_smooth de ese mismo
+ * fotograma): matriz de mundo (NsXf, 3x4) de la pieza k de la instancia inst que deja al jugador y a sus manos propias fijos respecto a la cabeza e interpolados entre escenas.
+ * 0 = dejar la matriz de la escena (no es del jugador, sin dos poses, o la fluidez no se evaluó en este fotograma: desactivada, cinemática, diorama). */
+int32_t mv_vrhost_body_piece(const void *scene, uint32_t inst, uint32_t k, void *out_xf) {
+    const NsScene *sc = (const NsScene *)scene;
+    if (!sc || !out_xf || inst >= sc->n_inst) return 0;
+    uint32_t key = sc->inst[inst].key;
+    if (key != atomic_load(&body_key) && !ns_key_is_hand(key)) return 0;
+    pthread_mutex_lock(&SMX);
+    int ok = sm_last.active && mono_ns() - sm_last_ns < 8000000ull && vbl_piece(&body_ring, sc, inst, k, sm_last.alpha, sm_last.m, (NsXf *)out_xf);
+    pthread_mutex_unlock(&SMX);
+    return ok;
 }
 
 void mv_vrhost_smooth_stats(VrSmoothStats *s) {
@@ -352,6 +373,7 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
     sc->cam.h = (float)r->screen; sc->cam.overscan_y = 1.0f; sc->cam.vr_active = 1;   /* con la cámara VR el motor no aplica el sobreescaneo (contrato v2) */
     VrSmSample nsmp;
     if (ns_world_to_vr(r, sc->to_vr, &nsmp)) sc->valid |= NS_SV_TOVR_OK;
+    ns_cap_pend = 1; body_pend.n = 0;
     if (nsmp.valid && view.kind != VRV_K_ENGINE) ns_smp_pend = nsmp;   /* el suavizador corrige la escena que se dibuja: la nativa lleva el último registro, la lista el anterior */
     { VrBodyStats b; vrbody_stats(&b); ik_ap0 = b.applies; ik_dr0 = b.arms_driven; }
     o->player_key = ns_player_key(emu_ram);
@@ -366,10 +388,12 @@ static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *m
     NsHandIn in;
     memset(&in, 0, sizeof in);
     in.enabled = hands_active();
-    if (!in.enabled) return;
-    for (int s = 0; s < 2; s++) { float g = 0; in.driven[s] = vrbody_hand_state(s, &g, NULL, NULL); in.grip[s] = in.driven[s] ? g : 0.0f; }
-    for (int s = 0; s < 2; s++) vrgame_hand_pose_in(s, &in.item_pose[s], &in.trigger[s], &in.thumb[s]);   /* objeto en la mano (arma por vr_grip), gatillo y pulgar */
-    ns_hand_apply(sc, st, map, &in);
+    if (in.enabled) {
+        for (int s = 0; s < 2; s++) { float g = 0; in.driven[s] = vrbody_hand_state(s, &g, NULL, NULL); in.grip[s] = in.driven[s] ? g : 0.0f; }
+        for (int s = 0; s < 2; s++) vrgame_hand_pose_in(s, &in.item_pose[s], &in.trigger[s], &in.thumb[s]);   /* objeto en la mano (arma por vr_grip), gatillo y pulgar */
+        ns_hand_apply(sc, st, map, &in);
+    }
+    if (vbl_capture(&body_pend, sc, map->key)) atomic_store(&body_key, map->key);   /* pose del cuerpo (ya con la IK) y de las manos propias para el renderer (mv_vrhost_body_piece) */
 }
 /* Antes de cada captura: con las manos nuevas Y el render nativo en uso, la malla de la manopla del motor NO se deforma en puño (la mano nueva hace el puño y su forma
  * de reposo debe ser estable); con la lista de la GPU (o manos originales) sigue el puño deformado de siempre. */
@@ -1563,13 +1587,13 @@ static void dump_at_stage(Cpu *c) {
 static void frame_hook_body(Cpu *c, uint32_t f) {
     ns_hook_set_frame((uint32_t)hle_frame_count());
     ns_hook_tick(emu_ram);                        /* publica la escena nativa capturada en este fotograma de juego */
-    if (ns_smp_pend.valid) {   /* su muestra entra en el suavizador AHORA, no al capturarla: entre la captura y la publicación el renderer aún dibuja la escena anterior y la corregiría con el movimiento de la nueva (un salto de un paso de escena) */
+    if (ns_cap_pend) {   /* su muestra entra en el suavizador AHORA, no al capturarla (entre la captura y la publicación el renderer aún dibuja la escena anterior), junto con la pose del cuerpo de esa escena */
         pthread_mutex_lock(&SMX);
-        sm_ensure();
-        vrsm_push(&SM, &ns_smp_pend, now_s());
+        if (ns_smp_pend.valid) { sm_ensure(); vrsm_push(&SM, &ns_smp_pend, now_s()); }
+        vbl_push(&body_ring, &body_pend);
         pthread_mutex_unlock(&SMX);
-        atomic_store(&ns_smp_push_ns, mono_ns() | 1);
-        ns_smp_pend.valid = 0;
+        if (ns_smp_pend.valid) atomic_store(&ns_smp_push_ns, mono_ns() | 1);
+        ns_smp_pend.valid = 0; body_pend.n = 0; ns_cap_pend = 0;
     }
     ns_frame_check();
 #ifdef MV_NOGEN
