@@ -405,7 +405,8 @@ final class WeaponRenderer {
         var overlay: MTLTexture?
         switch sv.kind {
         case Int32(MV_VIEW_SCOPE):
-            guard sv.blend > 0.02, sv.cam_valid != 0, let a = aux, let o = scopeOverlay() else { return }
+            // round == 1: mira óptica (abertura + retícula de vr_scope.h). round == 0: prismáticos del juego, su capa del HUD (rejilla, retícula, textos, tinte, radar) hace de superpuesto sobre la vista aumentada.
+            guard sv.blend > 0.02, sv.cam_valid != 0, let a = aux, let o = (sv.round != 0 ? scopeOverlay() : hud) else { return }
             image = a; overlay = o
             d.p0 = simd_float4(0, min(max(sv.blend, 0), 1), 0, 0)
         case Int32(MV_VIEW_AA_SIGHT):

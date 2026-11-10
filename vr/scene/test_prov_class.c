@@ -95,6 +95,7 @@ static void test_rules(void) {
     CHECK(vpc_class_op(NULL, NULL, &ops[0]) == VPC_UNKNOWN, "sin lista: UNKNOWN");
     CHECK(vpc_layer_of(VPC_HUD_WORLD) == VPC_L_HUD && vpc_layer_of(VPC_SCOPE_TEXT) == VPC_L_HUD && vpc_layer_of(VPC_UNKNOWN) == VPC_L_HUD, "HUD_WORLD, SCOPE_TEXT y UNKNOWN van a la capa HUD");
     CHECK(vpc_layer_of(VPC_WINDOW) == VPC_L_WINDOW && vpc_layer_of(VPC_FULL) == VPC_L_FULL, "WINDOW y FULL tienen su capa");
+    CHECK(vpc_layer_of(VPC_SCOPE_BINO) == VPC_L_HUD && !strcmp(vpc_class_name(VPC_SCOPE_BINO), "SCOPE_BINO"), "SCOPE_BINO (marco de los prismáticos) va a la capa HUD");
     CHECK(vpc_layer_of(VPC_FX_VIGNETTE) == -1 && vpc_layer_of(VPC_FX_LETTERBOX) == -1 && vpc_layer_of(VPC_SCOPE_FRAME) == -1 && vpc_layer_of(99) == -1, "FX_* y SCOPE_FRAME no van al 2D");
 }
 
@@ -151,7 +152,7 @@ static void test_window_learning(void) {
     vpc_learn_reset(&S);
     for (int k = 0; k < 40; k++) { list_of(closed, 2); vpc_learn_note(&S, &dl, VPC_ST_CLOSED); }
     { const int fx[] = {I_MENUMAN, I_CINEMA, I_SCOPE, I_TELOP, I_MOTSE, I_OTHER}; list_of(fx, 6); vpc_learn_note(&S, &dl, VPC_ST_OPEN);
-      CHECK(cls_of(&S, &ops[1]) == VPC_FX_LETTERBOX && cls_of(&S, &ops[2]) == VPC_SCOPE_FRAME && cls_of(&S, &ops[3]) == VPC_FULL && cls_of(&S, &ops[4]) == VPC_FX_VIGNETTE, "FX / FULL / SCOPE no se aprenden como ventana");
+      CHECK(cls_of(&S, &ops[1]) == VPC_FX_LETTERBOX && cls_of(&S, &ops[2]) == VPC_SCOPE_BINO && cls_of(&S, &ops[3]) == VPC_FULL && cls_of(&S, &ops[4]) == VPC_FX_VIGNETTE, "FX / FULL / SCOPE no se aprenden como ventana (la lista trae scope.c: marco de los prismáticos)");
       CHECK(cls_of(&S, &ops[5]) == VPC_WINDOW, "un id desconocido que solo emite con la ventana abierta también se aprende"); }
     /* NULL y listas sin tabla: sin fallos */
     vpc_learn_note(NULL, &dl, VPC_ST_OPEN); vpc_learn_note(&S, NULL, VPC_ST_OPEN);
@@ -242,6 +243,74 @@ static void test_chain(void) {
         VrFx fc; vpc_fx_extract(&C, &dl, 0, &fc);
         CHECK(g_cov_calls == 0, "vpc_fx_extract con cobertura fijada no invoca el gancho (%d llamadas)", g_cov_calls);
         CHECK(fabsf(fc.letterbox - fx.letterbox) < 1e-6f && fc.vignette == fx.vignette && fc.scope_on == fx.scope_on, "mismo resultado con y sin gancho");
+    }
+}
+
+/* Prismáticos (scope.c en la lista: el objeto SCOPE) frente a la mira de otras armas (sight.c sin scope.c): el marco del juego de los prismáticos (rejilla, retícula, bandas, tinte) va a la capa HUD, que el visor
+ * pinta sobre la vista aumentada; sin scope.c el marco sigue sin capa (la mira de esa arma la dibuja el visor) */
+static void test_binocular(void) {
+    reset();
+    GpuOp *g = rect(I_SCOPE, 0, 0, 30, 30, 0);                     /* 0: scope.c sin textura (rejilla) */
+    GpuOp *t = rect(I_SCOPE, 10, 10, 6, 5, GPU_F_TEXTURED);        /* 1: scope.c texturado (texto) */
+    GpuOp *s = rect(I_SIGHT, 100, 100, 8, 8, 0);                   /* 2: sight.c sin textura (retícula, tinte) */
+    GpuOp *m = rect(I_MENUMAN, 0, 200, 20, 8, 0);                  /* 3: HUD */
+    VrProvLearn S; vpc_learn_reset(&S);
+    CHECK(S.bino == 0 && cls_of(&S, g) == VPC_SCOPE_FRAME, "sin anotar la lista no hay prismáticos (%s)", vpc_class_name(cls_of(&S, g)));
+    { uint32_t t0 = S.tick; vpc_learn_note(&S, &dl, VPC_ST_OTHER); CHECK(S.tick == t0 && S.bino == 1, "la lista con scope.c se marca aunque la vista no sea la del mundo (bino %d)", S.bino); }
+    CHECK(cls_of(&S, g) == VPC_SCOPE_BINO && cls_of(&S, s) == VPC_SCOPE_BINO, "prismáticos: scope.c y sight.c sin textura = SCOPE_BINO (%s %s)", vpc_class_name(cls_of(&S, g)), vpc_class_name(cls_of(&S, s)));
+    CHECK(cls_of(&S, t) == VPC_SCOPE_TEXT && cls_of(&S, m) == VPC_HUD_WORLD, "los textos siguen SCOPE_TEXT y el HUD, HUD_WORLD");
+    CHECK(cls_of(NULL, g) == VPC_SCOPE_FRAME, "sin estado de aprendizaje: la regla base (SCOPE_FRAME)");
+    {   /* vpc_fx_extract: binocular solo con la lista anotada */
+        VrFx fx;
+        vpc_fx_extract(&S, &dl, 327, &fx);
+        CHECK(fx.scope_on == 1 && fx.binocular == 1 && fabsf(fx.scope_zoom - 327.0f / 160.0f) < 1e-4f, "prismáticos: scope_on, binocular y aumento 327/160 (%d %d %.3f)", fx.scope_on, fx.binocular, (double)fx.scope_zoom);
+        vpc_fx_extract(NULL, &dl, 327, &fx);
+        CHECK(fx.scope_on == 1 && fx.binocular == 0, "sin estado: mira sin prismáticos");
+    }
+    {   /* scope.c reconocido solo por la dirección de su rutina */
+        reset();
+        GpuOp *a = rect(I_SCOPE_FN, 0, 0, 30, 30, 0);
+        vpc_learn_reset(&S); vpc_learn_note(&S, &dl, VPC_ST_CLOSED);
+        CHECK(S.bino == 1 && cls_of(&S, a) == VPC_SCOPE_BINO, "scope.c por dirección: prismáticos");
+    }
+    {   /* sight.c sin scope.c (PSG-1, lanzador antiaéreo, Nikita): no son prismáticos, el marco sigue sin capa */
+        reset();
+        GpuOp *a = rect(I_SIGHT, 0, 0, 30, 30, 0), *b = rect(I_SIGHT, 10, 10, 6, 5, GPU_F_TEXTURED);
+        vpc_learn_reset(&S); vpc_learn_note(&S, &dl, VPC_ST_OPEN);
+        CHECK(S.bino == 0 && cls_of(&S, a) == VPC_SCOPE_FRAME && vpc_layer_of(cls_of(&S, a)) == -1 && cls_of(&S, b) == VPC_SCOPE_TEXT, "sight.c sin scope.c: SCOPE_FRAME sin capa, texto SCOPE_TEXT (%s %s)", vpc_class_name(cls_of(&S, a)), vpc_class_name(cls_of(&S, b)));
+        VrFx fx; vpc_fx_extract(&S, &dl, 3000, &fx);
+        CHECK(fx.scope_on == 1 && fx.binocular == 0, "sight.c sin scope.c: mira de arma, no prismáticos");
+        /* la lista siguiente trae scope.c y luego otra sin él: la marca no se arrastra */
+        reset(); rect(I_SCOPE, 0, 0, 30, 30, 0); vpc_learn_note(&S, &dl, VPC_ST_CLOSED); CHECK(S.bino == 1, "lista con prismáticos");
+        reset(); rect(I_MENUMAN, 0, 0, 30, 30, 0); vpc_learn_note(&S, &dl, VPC_ST_CLOSED); CHECK(S.bino == 0, "lista siguiente sin scope.c: sin prismáticos");
+        reset(); dl.prov = NULL; dl.nprov = 0; rect(0, 0, 0, 30, 30, 0); vpc_learn_note(&S, &dl, VPC_ST_CLOSED); CHECK(S.bino == 0, "sin tabla de procedencia: sin prismáticos");
+    }
+    {   /* el escritor encadenado por la ordenación también cuenta */
+        reset();
+        rect(I_SORT, 0, 0, 30, 30, 0)->prov2 = I_SCOPE;
+        vpc_learn_reset(&S); vpc_learn_note(&S, &dl, VPC_ST_CLOSED);
+        CHECK(S.bino == 1 && cls_of(&S, &ops[0]) == VPC_SCOPE_BINO, "scope.c encadenado por la ordenación: prismáticos");
+    }
+    {   /* vr_scene: el tinte a pantalla completa de los prismáticos (poligono semitransparente de sight.c) no es un recubrimiento del filtro: se queda en el panel con su clase. Con un triángulo 3D delante
+         * (el mundo): sin él vr_scene convierte igualmente el recubrimiento en 2D (veil_as_2d) y la prueba no distinguiría nada */
+        reset();
+        GpuOp *w = add(GPU_OP_POLY, I_OTHER);
+        w->nv = 3; w->flags = GPU_F_TEXTURED; w->tp = 1;
+        { const float X[3][3] = {{0, 0, 2000}, {100, 0, 2000}, {0, 100, 2000}}; for (int i = 0; i < 3; i++) { GpuVtx *v = &w->v[i]; v->fvalid = v->vvalid = 1; v->vx = X[i][0]; v->vy = X[i][1]; v->vz = v->fz = X[i][2]; } }
+        GpuOp *p = add(GPU_OP_POLY, I_SIGHT);
+        p->nv = 4; p->flags = (uint16_t)(GPU_F_SEMI | GPU_F_QUAD); p->abr = 0; p->cx1 = 0; p->cy1 = 0; p->cx2 = 319; p->cy2 = 239;
+        { const int x[4] = {0, 320, 0, 320}, y[4] = {0, 0, 240, 240}; for (int i = 0; i < 4; i++) { p->v[i].x = (int16_t)x[i]; p->v[i].y = (int16_t)y[i]; p->v[i].r = 35; p->v[i].g = 48; p->v[i].b = 58; } }
+        rect(I_SCOPE, 10, 10, 8, 8, 0);
+        VrProvLearn B; vpc_learn_reset(&B); vpc_learn_note(&B, &dl, VPC_ST_CLOSED);
+        VrSceneOpts o = vr_scene_opts_default();
+        o.screen_filter = 1; o.drop_world2d = 1; o.op_class = vpc_op_class_cb; o.op_class_ctx = &B;
+        VrScene sc;
+        CHECK(vr_scene_build(&dl, NULL, &o, &sc) == 0 && sc.op_dest && sc.op_cls && sc.n_op_dest == 3 && sc.stats.n_tris3d == 1, "escena con prismáticos, un triángulo 3D y screen_filter (tris3d %u)", sc.stats.n_tris3d);
+        if (sc.op_dest && sc.op_cls && sc.n_op_dest == 3) CHECK(sc.op_dest[1] == 2 && sc.op_cls[1] == VPC_SCOPE_BINO && sc.op_dest[2] == 2 && sc.op_cls[2] == VPC_SCOPE_BINO && !(sc.filter.active && sc.filter.n_covers),
+                                           "tinte de los prismáticos: al panel (SCOPE_BINO), no al filtro (dest %u/%u clases %u/%u covers %d)", sc.op_dest[1], sc.op_dest[2], sc.op_cls[1], sc.op_cls[2], sc.filter.n_covers);
+        vpc_learn_reset(&B);   /* sin prismáticos (lista sin anotar): sigue siendo un recubrimiento del filtro, como antes */
+        CHECK(vr_scene_build(&dl, NULL, &o, &sc) == 0 && sc.op_dest && sc.op_dest[1] != 2 && sc.filter.active && sc.filter.n_covers == 1, "sin prismáticos: el polígono a pantalla completa sigue siendo un recubrimiento (dest %u covers %d)", sc.op_dest ? sc.op_dest[1] : 99, sc.filter.n_covers);
+        vr_scene_release();
     }
 }
 
@@ -467,14 +536,14 @@ static void test_fx(void) {
 
     /* ---- retención ---- */
     VrFxHold H; memset(&H, 0, sizeof H); H.fx.scope_zoom = 1.0f;
-    VrFx on; memset(&on, 0, sizeof on); on.letterbox = 0.25f; on.vignette = 0.4f; on.vign_radius = 0.5f; on.scope_on = 1; on.scope_zoom = 3.0f;
+    VrFx on; memset(&on, 0, sizeof on); on.letterbox = 0.25f; on.vignette = 0.4f; on.vign_radius = 0.5f; on.scope_on = 1; on.binocular = 1; on.scope_zoom = 3.0f;
     VrFx off; memset(&off, 0, sizeof off); off.scope_zoom = 1.0f;
     vpc_fx_hold(&H, &on);
-    CHECK(H.fx.letterbox == 0.25f && H.fx.vignette == 0.4f && H.fx.scope_on == 1 && H.fx.scope_zoom == 3.0f, "hold: el efecto entra");
+    CHECK(H.fx.letterbox == 0.25f && H.fx.vignette == 0.4f && H.fx.scope_on == 1 && H.fx.binocular == 1 && H.fx.scope_zoom == 3.0f, "hold: el efecto entra");
     for (int k = 0; k < VPC_FX_HOLD; k++) vpc_fx_hold(&H, &off);
     CHECK(H.fx.letterbox == 0.25f && H.fx.vignette == 0.4f && H.fx.scope_on == 1 && H.fx.scope_zoom == 3.0f, "hold: se mantiene %d listas", VPC_FX_HOLD);
     vpc_fx_hold(&H, &off);
-    CHECK(H.fx.letterbox == 0 && H.fx.vignette == 0 && H.fx.vign_radius == 0 && H.fx.scope_on == 0 && H.fx.scope_zoom == 1.0f, "hold: se apaga tras %d listas sin aparecer", VPC_FX_HOLD);
+    CHECK(H.fx.letterbox == 0 && H.fx.vignette == 0 && H.fx.vign_radius == 0 && H.fx.scope_on == 0 && H.fx.binocular == 0 && H.fx.scope_zoom == 1.0f, "hold: se apaga tras %d listas sin aparecer", VPC_FX_HOLD);
     vpc_fx_hold(&H, &on); vpc_fx_hold(&H, &off); vpc_fx_hold(&H, &on);
     CHECK(H.age_v == 0 && H.age_l == 0 && H.age_s == 0, "hold: reaparecer reinicia la cuenta");
 }
@@ -483,6 +552,7 @@ int main(void) {
     test_rules();
     test_window_learning();
     test_chain();
+    test_binocular();
     test_unknown_and_split();
     test_scene_hook();
     test_scene_world();

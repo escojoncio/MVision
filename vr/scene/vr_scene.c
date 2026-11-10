@@ -895,6 +895,9 @@ static int coplanar_lift(VrScene *out, const VrSceneOpts *o, size_t nt) {
 /* ¿Primitiva del MUNDO por procedencia (clase VPC_WORLD del gancho op_class: la encadenó la ordenación del canal 3D y su paquete tiene cobertura nativa garantizada)? Con drop_world2d no va al panel 2D: el nativo la dibuja como efecto 3D. */
 static int op_is_world(const VrSceneOpts *o, const GpuDrawList *dl, uint32_t i) { return o->drop_world2d && o->op_class && o->op_class(dl, i, o->op_class_ctx) == VPC_WORLD; }
 
+/* ¿Marco de los prismáticos por procedencia (clase VPC_SCOPE_BINO)? Es 2D del juego (tinte a pantalla completa, bandas): va al panel con su clase, nunca como recubrimiento del filtro de pantalla. */
+static int op_is_bino(const VrSceneOpts *o, const GpuDrawList *dl, uint32_t i) { return o->op_class && o->op_class(dl, i, o->op_class_ctx) == VPC_SCOPE_BINO; }
+
 int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOpts *op_in, VrScene *out) {
     if (!dl || !out) return -1;
     VrSceneOpts o = op_in ? *op_in : vr_scene_opts_default();
@@ -1265,7 +1268,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                     bx0 = g->x < bx0 ? g->x : bx0; bx1 = g->x > bx1 ? g->x : bx1; by0 = g->y < by0 ? g->y : by0; by1 = g->y > by1 ? g->y : by1;
                     bu0 = g->u < bu0 ? g->u : bu0; bu1 = g->u > bu1 ? g->u : bu1; bv0 = g->v < bv0 ? g->v : bv0; bv1 = g->v > bv1 ? g->v : bv1;
                 }
-                fcls = filter_class(&o, dl, op, 0, bx0, by0, bx1, by1, bu0, bv0, bu1, bv1);
+                fcls = op_is_bino(&o, dl, i) ? 0 : filter_class(&o, dl, op, 0, bx0, by0, bx1, by1, bu0, bv0, bu1, bv1);
             }
             if (fcls) filter_note(out, op, fcls, 0, &tint_w);
             if (!fcls && ((long)i < last3d || op_is_world(&o, dl, i))) { fate_set(i, VR_FATE_WORLD2D); continue; }   /* 3D sin resolver dentro del pase del mundo, o del canal 3D por procedencia: no es HUD */
@@ -1300,7 +1303,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             const GpuVtx *g = &op->v[0];
             int fb = op->fbk != 0;
             if (fb && !op->fbt) { out->stats.n_fb_clear++; continue; }
-            int fcls = fb ? 0 : filter_class(&o, dl, op, 1, g->x, g->y, g->x + op->rw, g->y + op->rh, g->u, g->v, g->u, g->v);
+            int fcls = fb || op_is_bino(&o, dl, i) ? 0 : filter_class(&o, dl, op, 1, g->x, g->y, g->x + op->rw, g->y + op->rh, g->u, g->v, g->u, g->v);
             if (fcls) filter_note(out, op, fcls, 1, &tint_w);
             else if (op_is_world(&o, dl, i)) { fate_set(i, VR_FATE_WORLD2D); continue; }   /* sprite del canal 3D (nieve, partículas): efecto del mundo, no HUD */
             else if (!semi && !(op->flags & GPU_F_TEXTURED) && ((double)op->rw * op->rh >= 0.9 * (double)dl->disp.w * dl->disp.h ||

@@ -79,7 +79,8 @@ void mv_vrgame_status(MvVrGameStatus *out);
  *  - MV_VIEW_SCOPE: mira óptica del francotirador. La app renderiza la escena una segunda vez desde `cam_*` (campo vertical cam_fov_y, textura
  *    cuadrada tex_w x tex_h) y la muestra en un disco (la lente) en `surf_*` con la abertura y retícula de vr_scope.h por encima. `blend` = apertura del
  *    iris (0 = ojo lejos: no hace falta renderizar). La cabeza NO se acerca (el aumento solo está en la lente): suppress_frame pide no aplicar la
- *    máscara de visión del juego y hide_hud ocultar el panel plano del HUD mientras se mira.
+ *    máscara de visión del juego y hide_hud ocultar el panel plano del HUD mientras se mira. Con round = 0 (solo lo pone el visor para los prismáticos del juego; el arma VR siempre round = 1) la lente es un
+ *    rectángulo y, en lugar de la abertura y la retícula, lleva encima la capa del HUD del juego (marco de scope.c / sight.c, radar), con hide_hud = 1.
  *  - MV_VIEW_AA_SIGHT: visor del lanzador antiaéreo. El HUD del propio juego (mira + marco de fijación, en la textura del HUD) se dibuja en un
  *    rectángulo anclado delante del visor (`surf_*`, ya a la distancia y tamaño angular del juego); `uv` = subrectángulo (x, y, w, h) de la textura del HUD
  *    que cubre el rectángulo (el centro óptico del juego es el centro del rectángulo). hide_hud = 1.
@@ -95,7 +96,7 @@ typedef struct {
     float cam_pos[3], cam_rot[4], cam_fov_y;
     int32_t tex_w, tex_h;
     float surf_pos[3], surf_rot[4], surf_w, surf_h;
-    int32_t round;              /* la superficie es un disco de diámetro surf_w */
+    int32_t round;              /* la superficie es un disco de diámetro surf_w (SCOPE con round = 0: rectángulo con la capa del HUD encima, ver arriba) */
     float uv[4];                /* AA: subrectángulo de la textura del HUD */
     int32_t hide_hud, suppress_frame;
     int32_t locked, converged;  /* AA: blanco fijado / marco cerrado */

@@ -4,13 +4,13 @@
 #include "vr_prov.h"
 
 const char *vpc_class_name(int cls) {
-    static const char *const nm[VPC_N] = {"HUD_WORLD", "WINDOW", "FULL", "FX_VIGNETTE", "FX_LETTERBOX", "SCOPE_FRAME", "SCOPE_TEXT", "UNKNOWN", "FX_SCREEN", "WORLD"};
+    static const char *const nm[VPC_N] = {"HUD_WORLD", "WINDOW", "FULL", "FX_VIGNETTE", "FX_LETTERBOX", "SCOPE_FRAME", "SCOPE_TEXT", "UNKNOWN", "FX_SCREEN", "WORLD", "SCOPE_BINO"};
     return cls >= 0 && cls < VPC_N ? nm[cls] : "?";
 }
 
 int vpc_layer_of(int cls) {
     switch (cls) {
-    case VPC_HUD_WORLD: case VPC_SCOPE_TEXT: case VPC_UNKNOWN: case VPC_WORLD: return VPC_L_HUD;
+    case VPC_HUD_WORLD: case VPC_SCOPE_TEXT: case VPC_SCOPE_BINO: case VPC_UNKNOWN: case VPC_WORLD: return VPC_L_HUD;
     case VPC_WINDOW: return VPC_L_WINDOW;
     case VPC_FULL: return VPC_L_FULL;
     default: return -1;
@@ -28,8 +28,22 @@ unsigned vpc_op_id(const GpuDrawList *l, const GpuOp *o) {
 /* ------------------------------------------------------------------------------------------------ aprendizaje */
 void vpc_learn_reset(VrProvLearn *S) { if (S) memset(S, 0, sizeof *S); }
 
+/* ¿Trae la lista primitivas de scope.c (prismáticos)? */
+static int list_binocular(const GpuDrawList *l) {
+    if (!l->prov) return 0;
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *o = &l->ops[i];
+        if (!is_prim(o)) continue;
+        unsigned id = vpc_op_id(l, o);
+        if (id_ok(l, id) && vpc_is_binocular(&l->prov[id])) return 1;
+    }
+    return 0;
+}
+
 void vpc_learn_note(VrProvLearn *S, const GpuDrawList *l, int state) {
-    if (!S || !l || state == VPC_ST_OTHER) return;
+    if (!S || !l) return;
+    S->bino = list_binocular(l);
+    if (state == VPC_ST_OTHER) return;
     S->tick++;
     if (state == VPC_ST_CLOSED) S->nclosed++;
     if (!l->prov) return;
@@ -57,6 +71,7 @@ int vpc_class_op(const VrProvLearn *S, const GpuDrawList *l, const GpuOp *o) {
     int c = id_ok(l, id) ? vpc_rule(&l->prov[id], o) : VPC_UNKNOWN;
     int cov = S && S->covered;   /* sin garantía de cobertura nativa nada sale del 2D por WORLD / FX_SCREEN */
     if (c == VPC_FX_SCREEN && !(cov && S->covered(S->covered_ctx, vpc_screen_kind(&l->prov[id]), 0))) c = VPC_UNKNOWN;   /* el nativo no pinta ahora ese efecto de pantalla: sigue en el HUD */
+    if (c == VPC_SCOPE_FRAME && S && S->bino) return VPC_SCOPE_BINO;   /* marco del juego de los prismáticos: a la capa HUD (el visor la pinta sobre la vista aumentada) */
     if (id_ok(l, id) && (c == VPC_HUD_WORLD || c == VPC_UNKNOWN) && S && S->win[id] == 1) return VPC_WINDOW;
     if (c == VPC_UNKNOWN && cov && o->pkt_addr && id_ok(l, o->prov) && vpc_is_chain(&l->prov[o->prov]) && S->covered(S->covered_ctx, VPC_COV_PACKET, o->pkt_addr))
         return VPC_WORLD;   /* del canal 3D, sin escritor con regla y con un elemento que el nativo dibuja: efecto del mundo */
@@ -142,7 +157,7 @@ void vpc_fx_extract(const VrProvLearn *S, const GpuDrawList *l, int rec_screen, 
                 if (y > maxy) maxy = y;
                 if (col > cmax) cmax = col;
             }
-        } else if (c == VPC_SCOPE_FRAME || c == VPC_SCOPE_TEXT) {
+        } else if (c == VPC_SCOPE_FRAME || c == VPC_SCOPE_TEXT || c == VPC_SCOPE_BINO) {
             scope = 1;
         }
     }
@@ -160,6 +175,7 @@ void vpc_fx_extract(const VrProvLearn *S, const GpuDrawList *l, int rec_screen, 
     }
     if (scope) {
         fx->scope_on = 1;
+        fx->binocular = S && S->bino ? 1 : 0;
         if (rec_screen > 160) { float z = (float)rec_screen / 160.0f; fx->scope_zoom = z > FX_ZOOM_MAX ? FX_ZOOM_MAX : z; }
     }
 }
@@ -172,8 +188,8 @@ void vpc_fx_hold(VrFxHold *H, const VrFx *now) {
     if (now->letterbox > 0.0f) { H->fx.letterbox = now->letterbox; H->age_l = 0; }
     else if (H->age_l < VPC_FX_HOLD) H->age_l++;
     else H->fx.letterbox = 0.0f;
-    if (now->scope_on) { H->fx.scope_on = 1; H->fx.scope_zoom = now->scope_zoom; H->age_s = 0; }
+    if (now->scope_on) { H->fx.scope_on = 1; H->fx.binocular = now->binocular; H->fx.scope_zoom = now->scope_zoom; H->age_s = 0; }
     else if (H->age_s < VPC_FX_HOLD) H->age_s++;
     else H->fx.scope_on = 0;
-    if (!H->fx.scope_on) H->fx.scope_zoom = 1.0f;
+    if (!H->fx.scope_on) { H->fx.scope_zoom = 1.0f; H->fx.binocular = 0; }
 }

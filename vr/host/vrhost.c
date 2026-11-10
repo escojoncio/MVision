@@ -1037,7 +1037,7 @@ static void build_one(const GpuDrawList *l, int si) {
     int16_t save_axes[3][3];
     VrSceneOpts o = sopts;
     if (!native_mode()) { o.eye_near_m = GPU3D_NEAR_EYE_M; o.line3d_px = 1.0f; o.coplanar_m = 0.005f; o.rect3d = 1; o.billboard = 1; }   /* modo gpu: nada pegado al ojo, recorte contra el plano cercano; líneas del mundo en 3D; z-fight de coplanares, sprites con vista de la GTE como carteles 3D y resplandores orientados al ojo solo aquí (ver vr_scene.h) */
-    if (vrhost_drop_world2d(native_mode(), view.kind, view.reason)) o.drop_world2d = 1;   /* el nativo dibuja el mundo y las cinemáticas del motor: los polígonos sin vista dentro del pase 3D no son HUD y no van al panel 2D (vr_scene.h); no en UI/vídeo ni con la ventana del selector o la pausa encima (sus menús son 2D) */
+    if (vrhost_drop_world2d(native_mode(), view.kind, view.reason)) o.drop_world2d = 1;   /* el nativo dibuja el mundo y las cinemáticas del motor: los polígonos sin vista dentro del pase 3D no son HUD y no van al panel 2D (vr_scene.h); no en UI/vídeo ni con la pausa encima; con la ventana del selector sí: sus elementos son rects 2D y el cielo sin vista no debe verse como un cuadrado en el HUD */
     if (rt_prov_on) {   /* procedencia: aprende la ventana del selector / pausa y clasifica las primitivas del panel (vr_prov.h); sin ella todo es UNKNOWN = HUD */
         int pst = view.kind != VRV_K_WORLD ? VPC_ST_OTHER : view.reason == VRV_R_WORLD ? VPC_ST_CLOSED : view.reason == VRV_R_SELECTOR || view.reason == VRV_R_PAUSE_WORLD ? VPC_ST_OPEN : VPC_ST_OTHER;
         vpc_learn_note(&prov_learn, l, pst);
@@ -1179,9 +1179,9 @@ static void build_one(const GpuDrawList *l, int si) {
               if (nn - l2_log_ns >= 1000000000ull) { char lb[1024]; l2_log_ns = nn; if (vl2a_report(l2as[0], lb, sizeof lb) > 0) fprintf(stderr, "%s\n", lb); } }
             if (rt_prov_on && mono_ns() - pc_log_ns >= 1000000000ull) {   /* [prov2d]: clases del panel en el último segundo; UNKNOWN va al HUD */
                 pc_log_ns = mono_ns();
-                if (pc_lists) fprintf(stderr, "[prov2d] vista=%s listas=%u HUD_WORLD=%u WINDOW=%u FULL=%u FX_VIGNETTE=%u FX_LETTERBOX=%u SCOPE_FRAME=%u SCOPE_TEXT=%u UNKNOWN=%u FX_SCREEN=%u WORLD=%u | ventanas_aprendidas=%u descartadas=%u | fx: vineta=%.2f radio=%.2f bandas=%.2f mira=%d zoom=%.2f\n",
-                    vrprov_view_name(vrprov_view(view.kind, view.reason)), pc_lists, pc_cls[VPC_HUD_WORLD], pc_cls[VPC_WINDOW], pc_cls[VPC_FULL], pc_cls[VPC_FX_VIGNETTE], pc_cls[VPC_FX_LETTERBOX], pc_cls[VPC_SCOPE_FRAME], pc_cls[VPC_SCOPE_TEXT], pc_cls[VPC_UNKNOWN], pc_cls[VPC_FX_SCREEN], pc_cls[VPC_WORLD],
-                    prov_learn.n_learned, prov_learn.n_demoted, (double)fx_hold.fx.vignette, (double)fx_hold.fx.vign_radius, (double)fx_hold.fx.letterbox, (int)fx_hold.fx.scope_on, (double)fx_hold.fx.scope_zoom);
+                if (pc_lists) fprintf(stderr, "[prov2d] vista=%s listas=%u HUD_WORLD=%u WINDOW=%u FULL=%u FX_VIGNETTE=%u FX_LETTERBOX=%u SCOPE_FRAME=%u SCOPE_TEXT=%u UNKNOWN=%u FX_SCREEN=%u WORLD=%u SCOPE_BINO=%u | ventanas_aprendidas=%u descartadas=%u | fx: vineta=%.2f radio=%.2f bandas=%.2f mira=%d prismaticos=%d zoom=%.2f\n",
+                    vrprov_view_name(vrprov_view(view.kind, view.reason)), pc_lists, pc_cls[VPC_HUD_WORLD], pc_cls[VPC_WINDOW], pc_cls[VPC_FULL], pc_cls[VPC_FX_VIGNETTE], pc_cls[VPC_FX_LETTERBOX], pc_cls[VPC_SCOPE_FRAME], pc_cls[VPC_SCOPE_TEXT], pc_cls[VPC_UNKNOWN], pc_cls[VPC_FX_SCREEN], pc_cls[VPC_WORLD], pc_cls[VPC_SCOPE_BINO],
+                    prov_learn.n_learned, prov_learn.n_demoted, (double)fx_hold.fx.vignette, (double)fx_hold.fx.vign_radius, (double)fx_hold.fx.letterbox, (int)fx_hold.fx.scope_on, (int)fx_hold.fx.binocular, (double)fx_hold.fx.scope_zoom);
                 memset(pc_cls, 0, sizeof pc_cls); pc_lists = 0;
             }
         }

@@ -2,7 +2,9 @@
  *  - menuman.c (nodo 0x800be4e0, rutina 0x800394f8): gestor del HUD. Llama por jalr a los componentes de una tabla (0x800404e4, 0x8003f918, 0x8003d90c, 0x8003c238, 0x800431d4 y los pares de
  *    0x8009f460-0x8009f4a0); sus primitivas viven en MENUBUF (0x800ba4e0 / 0x800bc4e0). Esos componentes no son actores (su a0 no es un nodo con +8 = su rutina): llegan sin nombre y se
  *    reconocen por la dirección. El nombre de actor gana a la dirección cuando existen los dos.
- *  - cinema.c (rutina 0x800e1050): bandas de cinemática. motse.c: viñeta. telop.c y famaslit.c: créditos. scope.c (0x80063d54) y sight.c (0x800726bc): prismáticos / mira.
+ *  - cinema.c (rutina 0x800e1050): bandas de cinemática. motse.c: viñeta. telop.c y famaslit.c: créditos. scope.c (0x80063d54) y sight.c (0x800726bc): prismáticos / mira. Medido (volcados d0003, auto05, auto06 de
+ *    los prismáticos): scope.c (objeto SCOPE) dibuja la rejilla, el cuadro de gráfica y los textos ZOOM LEVEL / ANGLE; sight.c, a la vez, el tinte a pantalla completa (semitransparente, abr 0), las bandas negras, la
+ *    retícula central y los textos FLY / cifras. Una lista con scope.c son prismáticos (vpc_is_binocular); sight.c sin scope.c es la mira de otras armas (PSG-1, lanzador, Nikita): sin volcados propios, no se toca.
  *  - gas_efct.c (rutina 0x800de1f0 en su overlay: anillo del gas, 16 polígonos semitransparentes) y fadeio.c (0x800e15e8: fundido): efectos de pantalla que el renderer nativo hace de la RAM
  *    (ns_fx / ns_screen). Solo por nombre de actor: sus rutinas viven en overlays y la dirección sola no los identifica. Esta es la regla BASE: vpc_class_op solo los deja en FX_SCREEN
  *    mientras el anfitrión garantiza que el nativo pinta ese efecto (VrProvLearn.covered); si no, UNKNOWN.
@@ -16,12 +18,14 @@ static const char *const N_LETTERBOX[] = {"cinema.c", NULL};
 static const char *const N_VIGNETTE[] = {"motse.c", NULL};
 static const char *const N_FULL[] = {"telop.c", "famaslit.c", NULL};
 static const char *const N_SCOPE[] = {"scope.c", "sight.c", NULL};
+static const char *const N_BINO[] = {"scope.c", NULL};
 static const char *const N_HUD[] = {"menuman.c", NULL};
 static const char *const N_GAS[] = {"gas_efct.c", NULL};
 static const char *const N_FADE[] = {"fadeio.c", NULL};
 
 static const uint32_t F_LETTERBOX[] = {0x800e1050u, 0};
 static const uint32_t F_SCOPE[] = {0x80063d54u, 0x800726bcu, 0};
+static const uint32_t F_BINO[] = {0x80063d54u, 0};
 static const uint32_t F_HUD[] = {
     0x800394f8u,                                                       /* menuman.c */
     0x800404e4u, 0x8003f918u, 0x8003d90cu, 0x8003c238u, 0x800431d4u,   /* componentes de la tabla */
@@ -42,6 +46,7 @@ static int has_fn(const ProvEntry *e, const uint32_t *fns) {
     return 0;
 }
 
+int vpc_is_binocular(const ProvEntry *e) { return e && (has_name(e, N_BINO) || has_fn(e, F_BINO)); }
 int vpc_is_chain(const ProvEntry *e) { return e && has_fn(e, F_CHAIN); }
 int vpc_screen_kind(const ProvEntry *e) { return !e ? -1 : has_name(e, N_GAS) ? VPC_COV_GAS : has_name(e, N_FADE) ? VPC_COV_FADE : -1; }
 

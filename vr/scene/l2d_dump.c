@@ -119,6 +119,7 @@ static int build_scene(const NsDump *d, const GpuDrawList *l, VrScene *sc) {
     NsFxOpts fo = ns_fx_opts_default();
     g_cov.ram = d->ram; g_cov.ok = d->ram && g_cov.fx && ns_fx_extract(d->ram, &fo, g_cov.fx) == 0;
     learn.covered = dump_covered;
+    vpc_learn_note(&learn, l, VPC_ST_OTHER);   /* build_one anota cada lista (vrhost.c): fija bino (prismáticos); sin ventana aprendida (estado OTHER) */
     o.op_class = vpc_op_class_cb; o.op_class_ctx = &learn;
     o.drop_world2d = getenv("L2D_SIN_W2D") == NULL && ((int)ns_dump_meta_num(d, "view_mode", 1) == VRV_K_WORLD || (int)ns_dump_meta_num(d, "view_mode", 1) == VRV_K_ENGINE);    /* build_one: vista mundo y cinemática del motor (el meta no trae el motivo: selector/pausa no se distinguen); L2D_SIN_W2D=1 la apaga (comparar con/sin) */
     BridgeState bs; memset(&bs, 0, sizeof bs);
