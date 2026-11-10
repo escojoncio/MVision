@@ -707,10 +707,17 @@ static int apply_gloves(World *w, Glove *gr, Glove *gl) {
     return ns_hand_apply(&w->sc, w->st, &w->map, &in);
 }
 /* ---- textura propia del guante: bloque de VRAM (paleta, parche del dorso) y caras del dorso, la palma y los dedos ---- */
-static int glove_texel(const uint16_t *vram, int tx, int ty) {   /* suma de componentes de 5 bits del texel (tx, ty) de la textura, a través de su CLUT */
+static uint16_t glove_color(const uint16_t *vram, int tx, int ty) {   /* color RGB555 del texel (tx, ty) de la textura, a través de su CLUT */
     const uint16_t w = vram[(NS_GLOVE_VY + ty) * 1024 + NS_GLOVE_VX + tx / 4];
-    const uint16_t c = vram[NS_GLOVE_VY * 1024 + NS_GLOVE_VX + 16 + ((w >> (4 * (tx & 3))) & 15)];
+    return vram[NS_GLOVE_VY * 1024 + NS_GLOVE_VX + 16 + ((w >> (4 * (tx & 3))) & 15)];
+}
+static int glove_texel(const uint16_t *vram, int tx, int ty) {   /* suma de componentes de 5 bits del texel (tx, ty) de la textura */
+    const uint16_t c = glove_color(vram, tx, ty);
     return (c & 31) + ((c >> 5) & 31) + ((c >> 10) & 31);
+}
+static int glove_plate(const uint16_t *vram, int tx, int ty) {   /* el texel (tx, ty) es de la placa: gris neutro R = G = B claro (R >= 7 de 31) */
+    const uint16_t c = glove_color(vram, tx, ty);
+    return (c & 31) == ((c >> 5) & 31) && (c & 31) == ((c >> 10) & 31) && (c & 31) >= 7;
 }
 static void test_glove_texture(void) {
     static uint16_t vram[1024 * 512];
@@ -730,25 +737,45 @@ static void test_glove_texture(void) {
     for (int ty = 0; ty < 32; ty++) for (int tx = 0; tx < 64; tx++) used[(b0[ty * NS_GLOVE_VW + tx / 4] >> (4 * (tx & 3))) & 15] = 1;
     for (int i = 0; i < 16; i++) nused += used[i];
     CHECK(nused >= 8 && nused <= 12, "índices usados: %d", nused);
-    /* parche del dorso (zona de 48x32 texels): los texels claros (suma de 5 bits >= 35, sin el borde oscuro) forman un rectángulo casi lleno (esquinas redondeadas) y GRANDE: >= 65 % del ancho
+    /* parche del dorso (zona de 48x32 texels): los texels de la placa (gris neutro R = G = B con R >= 7: relleno 0x294a, brillo 0x318c y sombra 0x1ce7; sin el borde oscuro) forman un rectángulo casi lleno (esquinas redondeadas) y GRANDE: >= 65 % del ancho
      * (31 de 48), >= 40 % del largo (13 de 32), >= 25 % de la zona del dorso, y más claro que el guante; el parche pequeño de antes (~16x9) no pasa */
     int n = 0, x0 = 99, x1 = -1, y0 = 99, y1 = -1;
-    for (int ty = 0; ty < 32; ty++) for (int tx = 0; tx < 48; tx++) if (glove_texel(vram, tx, ty) >= 35) { n++; if (tx < x0) x0 = tx; if (tx > x1) x1 = tx; if (ty < y0) y0 = ty; if (ty > y1) y1 = ty; }
+    for (int ty = 0; ty < 32; ty++) for (int tx = 0; tx < 48; tx++) if (glove_plate(vram, tx, ty)) { n++; if (tx < x0) x0 = tx; if (tx > x1) x1 = tx; if (ty < y0) y0 = ty; if (ty > y1) y1 = ty; }
     const int area = (x1 - x0 + 1) * (y1 - y0 + 1);
     CHECK(n > 0 && x1 - x0 + 1 >= 31 && x1 - x0 + 1 <= 40 && y1 - y0 + 1 >= 13 && y1 - y0 + 1 <= 20 && n * 4 >= 48 * 32 && n * 100 >= area * 85 && n < area, "parche gris: %d texels en %dx%d", n, x1 - x0 + 1, y1 - y0 + 1);
-    /* nada claro fuera de la placa: todo texel de la textura (dorso, tela, puño) fuera de la placa (caja de sus texels claros + 2 texels de borde) tiene una luminancia mínima (suma de 5 bits <= 15 de 93) */
+    /* colores REALES: la CLUT 0x38b1 del guante original (16 colores RGB555 de los volcados d0001..d0008); toda la paleta del bloque y todo texel son colores de esa CLUT, la tela dominante es 0x1484 y la
+     * placa usa los grises reales 0x294a (relleno), 0x318c (brillo) y 0x1ce7 (sombra) */
+    static const uint16_t REAL[16] = {0x0821, 0x0842, 0x0c42, 0x0c63, 0x1063, 0x1084, 0x1484, 0x14a5, 0x18a5, 0x1cc6, 0x1ce7, 0x20e7, 0x2508, 0x2929, 0x294a, 0x318c};
+    int notreal = 0, tela[16] = {0}, ntela = 0, best = 0;
+    for (int i = 0; i < 12; i++) { int ok = 0; for (int k = 0; k < 16; k++) ok |= b0[16 + i] == REAL[k]; notreal += !ok; }
+    for (int ty = 0; ty < 32; ty++) for (int tx = 0; tx < 64; tx++) { const uint16_t c = glove_color(vram, tx, ty); int ok = 0; for (int k = 0; k < 16; k++) ok |= c == REAL[k]; notreal += !ok; }
+    CHECK(notreal == 0, "colores que no son de la CLUT real del guante: %d", notreal);
+    CHECK(b0[16 + 0] == 0x1484 && b0[16 + 1] == 0x18a5 && b0[16 + 2] == 0x0c42 && b0[16 + 3] == 0x20e7 && b0[16 + 4] == 0x1cc6 && b0[16 + 5] == 0x294a && b0[16 + 6] == 0x318c && b0[16 + 7] == 0x1ce7 &&
+          b0[16 + 8] == 0x1ce7 && b0[16 + 9] == 0x1063 && b0[16 + 10] == 0x2508 && b0[16 + 11] == 0x0821, "paleta = colores reales de la CLUT 0x38b1 (tela, trama, sombra, motas, nudillo, placa, brillo, sombra de placa, borde, manga, banda, costura)");
+    /* nada claro fuera de la placa: todo texel fuera de la placa (caja de sus texels claros + 2 texels de borde) es tela real: suma de 5 bits <= 25 (0x2508, la banda del puño; la placa va de 30 a 36) */
     int maxout = 0, nlight = 0;
     for (int ty = 0; ty < 32; ty++) for (int tx = 0; tx < 64; tx++) {
         if (tx >= x0 - 2 && tx <= x1 + 2 && ty >= y0 - 2 && ty <= y1 + 2) continue;
         const int v = glove_texel(vram, tx, ty);
         if (v > maxout) maxout = v;
-        nlight += v > 15;
+        nlight += v > 25;
+        const uint16_t c = glove_color(vram, tx, ty);
+        for (int k = 0; k < 16; k++) if (c == REAL[k]) tela[k]++;
     }
-    CHECK(nlight == 0, "texels claros fuera de la placa: %d (máximo %d, límite 15)", nlight, maxout);
-    int tinted = 0;
-    for (int i = 0; i < 16; i++) { const uint16_t c = b0[16 + i]; tinted += (c & 31) != ((c >> 5) & 31) || (c & 31) != ((c >> 10) & 31); }
-    CHECK(tinted == 0, "paleta sin tinte: %d colores con R, G, B distintos", tinted);
-    CHECK(glove_texel(vram, (x0 + x1) / 2, (y0 + y1) / 2) >= 2 * glove_texel(vram, 0, 0), "parche más claro que el guante");
+    for (int k = 0; k < 16; k++) { ntela += tela[k]; if (tela[k] > tela[best]) best = k; }
+    CHECK(nlight == 0, "texels claros fuera de la placa: %d (máximo %d, límite 25)", nlight, maxout);
+    CHECK(REAL[best] == 0x1484 && tela[best] * 2 > ntela, "la tela dominante es 0x1484 (azul marino casi negro): %d de %d texels, dominante 0x%04x", tela[best], ntela, REAL[best]);
+    /* tinte: la tela (fuera de la placa) tiene B >= G >= R y la placa (texels claros y su borde, grises reales con R = G = B y R >= 7) es gris neutro */
+    int tinted = 0, plate_bad = 0;
+    for (int ty = 0; ty < 32; ty++) for (int tx = 0; tx < 64; tx++) {
+        const uint16_t c = glove_color(vram, tx, ty);
+        const int r = c & 31, g = (c >> 5) & 31, bl = (c >> 10) & 31;
+        if (tx < 48 && glove_plate(vram, tx, ty)) plate_bad += !(bl == r && g == r);
+        else if (!(tx >= x0 - 2 && tx <= x1 + 2 && ty >= y0 - 2 && ty <= y1 + 2)) tinted += !(bl >= g && g >= r);
+    }
+    for (int i = 0; i < 16; i++) { const uint16_t c = b0[16 + i]; const int r = c & 31, g = (c >> 5) & 31, bl = (c >> 10) & 31; if (i == 5 || i == 6 || i == 7) plate_bad += !(bl == r && g == r && r >= 7); else tinted += !(bl >= g && g >= r); }
+    CHECK(tinted == 0 && plate_bad == 0, "tinte: %d texels/colores del guante sin B >= G >= R, %d de la placa no neutros", tinted, plate_bad);
+    CHECK(glove_color(vram, (x0 + x1) / 2, (y0 + y1) / 2) == 0x294a, "centro de la placa = gris real 0x294a");
     /* caras: dorso por posición de vértice (mismo texel en las dos manos; pinky u bajo, pulgar u alto), el resto en la zona de tela */
     World w;
     CHECK(world_init(&w, 8, 64, 1), "mundo");

@@ -124,8 +124,8 @@ int ns_hand_classify(const NsMesh *g, int side, NsHandTex tex[4]) {
 #define GT_MMX 85.4f
 #define GT_MMY 93.8f
 enum { P_BASE, P_WEAVE, P_DEEP, P_SHEEN, P_PLATE, P_FILL, P_HI, P_SHADE, P_EDGE, P_SLEEVE, P_BAND, P_SEAM, P_N };
-static const uint8_t GT_PAL[P_N][3] = {   /* grises neutros (R = G = B, sin tinte), RGB555 exacto (componentes de 5 bits x 8). Todo el guante casi negro; SOLO la placa del dorso (FILL, HI, SHADE, EDGE) es clara */
-    {18, 18, 18}, {24, 24, 24}, {10, 10, 10}, {32, 32, 32}, {28, 28, 28}, {128, 128, 128}, {152, 152, 152}, {104, 104, 104}, {64, 64, 64}, {20, 20, 20}, {24, 24, 24}, {8, 8, 8}};
+static const uint8_t GT_PAL[P_N][3] = {   /* colores REALES de la CLUT 0x38b1 de la textura del guante original (texid 56829, tpage 0x000c; volcados d0001..d0008 idénticos), RGB555 exacto x 8. Tela: dominante 0x1484 (32,32,40) y sus vecinos de la CLUT (0x0c42 oscuro, 0x18a5 claro...); placa: gris real 0x294a, brillo 0x318c y sombra 0x1ce7 (R = G = B) */
+    {32, 32, 40}, {40, 40, 48}, {16, 16, 24}, {56, 56, 64}, {48, 48, 56}, {80, 80, 80}, {96, 96, 96}, {56, 56, 56}, {56, 56, 56}, {24, 24, 32}, {64, 64, 72}, {8, 8, 16}};
 static unsigned gt_hash(int x, int y) { unsigned h = (unsigned)x * 73856093u ^ (unsigned)y * 19349663u; h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15; return h; }
 static int gt_cloth(int tx, int ty) {   /* sarga fina con motas */
     const unsigned h = gt_hash(tx, ty) & 31u;
