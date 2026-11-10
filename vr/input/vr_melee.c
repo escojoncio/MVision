@@ -221,7 +221,8 @@ void vrm_pre_hit(Vrm *v, const VrmEng *e, uint32_t work) {
             En en[MAXEN]; int n = scan(e, 0, en); const float zero[3] = {0, 0, 0};
             if (n && nearest(v->fist[v->combo_side], en, n, zero) <= VRM_COMBO_NEAR) s = v->combo_side;
         }
-        if (s >= 0) { memcpy(o, v->ct_pt[s], sizeof o); if (v->stage == 1) { v->combo_ct = 1; v->combo_side = s; } }
+        if (v->stage == 1) v->combo_ct = s >= 0;   /* etapa 1: el combo vale por contacto solo si este golpe lo tuvo (sin arrastrar el anterior) */
+        if (s >= 0) { memcpy(o, v->ct_pt[s], sizeof o); if (v->stage == 1) v->combo_side = s; }
         else { o[0] = 0; o[1] = 30000.0f; o[2] = 0; say(v, "[gest] golpe etapa %d: el puño VR no tocó a ningún enemigo; no se registra", v->stage); }
         v->ctx_hit = 1; v->ctx_ok = 1; v->ctx_target = work + VRM_W_TARGET; memcpy(v->ctx_origin, o, sizeof o);
         return;

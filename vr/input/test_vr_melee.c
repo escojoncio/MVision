@@ -294,7 +294,8 @@ int main(void) {
       for (int i = 0; i < VRM_HIST + 6; i++) vrm_frame(&V, &ENG, &n);
       CK(vrm_action_input(&V, &ENG, W) == 0);                                                    /* el estado de golpe terminó (sin petición) */
       n.punch_side = 0; vrm_frame(&V, &ENG, &n); n.punch_side = -1; vrm_action_input(&V, &ENG, W);
-      uint32_t vec = 0x80100000u; vrm_pre_hit(&V, &ENG, W); CK(V.stage == 1 && vrm_move_target(&V, &ENG, W + VRM_W_TARGET, vec) == 1 && g16(vec + 2) == 30000); vrm_post_hit(&V, &ENG, W, 0); }
+      V.combo_ct = 1;                                                                            /* resto de un combo anterior: la etapa 1 sin contacto lo borra */
+      uint32_t vec = 0x80100000u; vrm_pre_hit(&V, &ENG, W); CK(V.stage == 1 && vrm_move_target(&V, &ENG, W + VRM_W_TARGET, vec) == 1 && g16(vec + 2) == 30000 && V.combo_ct == 0); vrm_post_hit(&V, &ENG, W, 0); }
 
     printf("test_vr_melee: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

@@ -19,7 +19,7 @@ SRC_VR := $(VR)/bridge/bridge.c $(VR)/bridge/bridge_addrs.c $(VR)/camera/vr_came
   $(VR)/hands/vr_hands.c $(VR)/hands/vr_glove.c $(VR)/hands/vr_grip.c $(VR)/hands/vr_hand_pose.c $(filter-out $(VR)/weapons/test_%.c,$(wildcard $(VR)/weapons/*.c)) \
   $(VR)/gameplay/vr_fire.c $(VR)/gameplay/vr_fire_hle.c $(VR)/gameplay/vr_hit.c $(VR)/gameplay/vr_aa.c $(VR)/gameplay/vr_missile.c $(VR)/gameplay/vr_scope.c $(VR)/gameplay/vr_reload.c \
   $(VR)/ai/vrai.c $(VR)/ai/vr_ai_scan.c $(VR)/ai/vr_perception.c $(VR)/ai/vr_perception_rt.c $(VR)/ai/vr_cameras.c $(VR)/ai/vr_activity.c $(VR)/ai/vr_activity_rt.c \
-  $(VR)/host/vrgame.c $(VR)/host/vrbodyg.c $(VR)/host/vr_melee_rt.c $(VR)/host/vr_view.c $(VR)/host/vr_cine.c $(VR)/host/vr_smooth.c $(VR)/host/vrhost.c $(VR)/native/ns_dumpw.c $(VR)/native/ns_bridge.c $(VR)/native/ns_player.c $(VR)/native/ns_wphide.c $(VR)/native/ns_hook.c $(VR)/native/ns_hook_rt.c
+  $(VR)/host/vrgame.c $(VR)/host/vrbodyg.c $(VR)/host/vr_melee_rt.c $(VR)/host/vr_view.c $(VR)/host/vr_cine.c $(VR)/host/vr_smooth.c $(VR)/host/vrhost.c $(VR)/native/ns_dumpw.c $(VR)/native/ns_bridge.c $(VR)/native/ns_player.c $(VR)/native/ns_wphide.c $(VR)/native/ns_hook.c $(VR)/native/ns_hook_rt.c $(VR)/native/ns_fx.c
 SRC_RT := $(filter-out $(RT)/headless.c $(RT)/test_%.c $(RT)/wip_%.c,$(wildcard $(RT)/*.c))
 INC := -I. -I$(RT) -I$(VR)/bridge -I$(VR)/camera -I$(VR)/input -I$(VR)/scene -I$(VR)/body -I$(VR)/radar -I$(VR)/hands -I$(VR)/weapons -I$(VR)/gameplay -I$(VR)/ai -I$(VR)/host -I$(VR)/native
 

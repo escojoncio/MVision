@@ -394,7 +394,7 @@ static int enemy_bullet(uint8_t *ram, uint32_t actor, unsigned side, const float
     for (int k = 0; k < 3; k++) if (fabsf(d[k]) > 1e-6f) { float e = ((d[k] > 0.0f ? 32767.0f : -32768.0f) - o[k]) / d[k]; if (e < L) L = e; }
     if (!(L > limit)) return 1;
     ws32(ram, actor + B_RANGE, (int32_t)L); ws32(ram, actor + B_LIMIT, (int32_t)L);
-    for (int k = 0; k < 3; k++) ws16(ram, actor + B_END + 2u * (uint32_t)k, (int16_t)lrintf(o[k] + d[k] * L));
+    for (int k = 0; k < 3; k++) { long q = lrintf(o[k] + d[k] * L); ws16(ram, actor + B_END + 2u * (uint32_t)k, (int16_t)(q > 32767 ? 32767 : q < -32768 ? -32768 : q)); }
     s->target = g_t[bi].index; s->vital = g_t[bi].vital; s->zone = VRHIT_Z_BOX; s->action = VRHIT_ACT_RANGE;
     return 1;
 }

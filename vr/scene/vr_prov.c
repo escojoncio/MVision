@@ -114,10 +114,13 @@ void vpc_fx_extract(const VrProvLearn *S, const GpuDrawList *l, int rec_screen, 
     float cmax = 0.0f, minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f;
     float vx[256], vy[256];
     memset(rows, 0, sizeof rows);
+    /* Los efectos (bandas / viñeta / mira) no dependen de la cobertura nativa (solo FX_SCREEN y WORLD, que aquí no se usan): sin gancho se evita ns_fx_covers_packet por primitiva. */
+    VrProvLearn nocov;
+    if (S) { nocov = *S; nocov.covered = NULL; nocov.covered_ctx = NULL; }
     for (uint32_t i = 0; i < l->nops; i++) {
         const GpuOp *o = &l->ops[i];
         if (!is_prim(o) || !id_ok(l, vpc_op_id(l, o))) continue;
-        int c = vpc_class_op(S, l, o);
+        int c = vpc_class_op(S ? &nocov : NULL, l, o);
         if (c == VPC_FX_LETTERBOX) {
             int y0, y1;
             if (!prim_rows(o, &y0, &y1)) continue;

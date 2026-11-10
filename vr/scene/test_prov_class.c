@@ -231,6 +231,18 @@ static void test_chain(void) {
     rect(I_SORT, 0, 0, 320, 32, 0)->prov2 = I_CINEMA; rect(I_SORT, 0, 208, 320, 32, 0)->prov2 = I_CINEMA;
     vpc_fx_extract(NULL, &dl, 0, &fx);
     CHECK(fabsf(fx.letterbox - 64.0f / 240.0f) < 1e-4f, "bandas de cinema.c encadenadas por la ordenación: letterbox %.4f", (double)fx.letterbox);
+
+    /* con el gancho de cobertura fijado, vpc_fx_extract no lo invoca (coste por primitiva) y da el mismo resultado */
+    {
+        VrProvLearn C; learn_cov(&C);
+        { GpuOp *q = rect(I_SORT, 4, 100, 3, 3, 0); q->prov2 = I_OTHER; q->pkt_addr = PK_COV; }   /* UNKNOWN encadenada con escritor sin regla y paquete: vpc_class_op sí preguntaría */
+        g_cov_calls = 0;
+        CHECK(cls_of(&C, &ops[2]) == VPC_WORLD && g_cov_calls > 0, "vpc_class_op con cobertura sí consulta el gancho (WORLD)");
+        g_cov_calls = 0;
+        VrFx fc; vpc_fx_extract(&C, &dl, 0, &fc);
+        CHECK(g_cov_calls == 0, "vpc_fx_extract con cobertura fijada no invoca el gancho (%d llamadas)", g_cov_calls);
+        CHECK(fabsf(fc.letterbox - fx.letterbox) < 1e-6f && fc.vignette == fx.vignette && fc.scope_on == fx.scope_on, "mismo resultado con y sin gancho");
+    }
 }
 
 static void test_unknown_and_split(void) {
