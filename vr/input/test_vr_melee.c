@@ -265,6 +265,37 @@ int main(void) {
         vrm_post_hit(&V, &ENG, W, 0);
     }
 
+    /* toque: nunca agachado, tumbado/gateando ni en la caja (banderas de estado del jugador 0x20, 0x40, 0x1000) */
+    for (int k = 0; k < 3; k++) {
+        fresh(); RAM[VRM_KNOCK_SND & 0x1FFFFF] = 55; p32(VRM_G_PSTATUS, k == 0 ? 0x20u : k == 1 ? 0x40u : 0x1000u);
+        VrmFrame f = fr(); f.knock_side = 0; vrm_frame(&V, &ENG, &f);
+        CK(vrm_action_input(&V, &ENG, W) == 0); CK(ncalls == 0 && V.n_knock == 0); CK(logged("toque en la pared rechazado: postura"));
+    }
+    /* combo de 3 golpes con cápsulas: el primero con contacto real; el segundo llega cuando el contacto ya caducó (más de VRM_HIST VBlanks) pero el puño sigue junto al enemigo:
+     * se registra en el mismo punto; el tercero es la patada del motor. Con el puño lejos en el segundo, ese no se registra */
+    for (int far = 0; far < 2; far++) {
+        fresh(); enemy(0, 1000, 0, 0);
+        VrmFrame f = fr(); f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 950; f.contact_valid = 1; f.contact[0] = 1; f.contact_pt[0][0] = 802; f.contact_pt[0][1] = 300; f.contact_pt[0][2] = -50;
+        f.punch_side = 0; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+        uint32_t vec = 0x80100000u;
+        vrm_pre_hit(&V, &ENG, W); CK(V.stage == 1 && vrm_move_target(&V, &ENG, W + VRM_W_TARGET, vec) == 1 && g16(vec) == 802); p16(VRM_TARGETS + 6, 4); vrm_post_hit(&V, &ENG, W, 0); p16(VRM_TARGETS + 6, 0);
+        VrmFrame n = fr(); n.contact_valid = 1; n.fist_ok[0] = n.fist_closed[0] = 1; n.fist[0][0] = far ? 2500.0f : 700.0f;      /* 700: a 100 mm de la caja (800..1200), sin tocar ninguna pieza */
+        for (int i = 0; i < VRM_HIST + 6; i++) vrm_frame(&V, &ENG, &n);
+        vrm_pre_hit(&V, &ENG, W); CK(V.stage == 2 && V.ctx_hit && vrm_move_target(&V, &ENG, W + VRM_W_TARGET, vec) == 1);
+        if (far) { CK(g16(vec + 2) == 30000); } else { CK(g16(vec) == 802 && g16(vec + 2) == 300 && g16(vec + 4) == -50); }
+        vrm_post_hit(&V, &ENG, W, 0);
+        vrm_pre_hit(&V, &ENG, W); CK(V.stage == 3 && !V.ctx_hit); vrm_post_hit(&V, &ENG, W, 0);      /* patada: la caja del propio motor */
+    }
+    /* un golpe nuevo no hereda el contacto del combo anterior */
+    { fresh(); enemy(0, 1000, 0, 0);
+      VrmFrame f = fr(); f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 950; f.contact_valid = 1; f.contact[0] = 1; f.contact_pt[0][0] = 802; f.punch_side = 0;
+      vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W); vrm_pre_hit(&V, &ENG, W); vrm_post_hit(&V, &ENG, W, 0);
+      VrmFrame n = fr(); n.contact_valid = 1; n.fist_ok[0] = n.fist_closed[0] = 1; n.fist[0][0] = 700;
+      for (int i = 0; i < VRM_HIST + 6; i++) vrm_frame(&V, &ENG, &n);
+      CK(vrm_action_input(&V, &ENG, W) == 0);                                                    /* el estado de golpe terminó (sin petición) */
+      n.punch_side = 0; vrm_frame(&V, &ENG, &n); n.punch_side = -1; vrm_action_input(&V, &ENG, W);
+      uint32_t vec = 0x80100000u; vrm_pre_hit(&V, &ENG, W); CK(V.stage == 1 && vrm_move_target(&V, &ENG, W + VRM_W_TARGET, vec) == 1 && g16(vec + 2) == 30000); vrm_post_hit(&V, &ENG, W, 0); }
+
     printf("test_vr_melee: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

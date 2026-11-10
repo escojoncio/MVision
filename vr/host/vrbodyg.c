@@ -66,9 +66,13 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, cons
     static float fist_prev[2][3]; static int fist_prev_ok[2];
     int hn = 0;
     if (in.active) {
-        int all = vrhit_scan(ram, 1, 0x01, 1, ht, VRHIT_MAX_T), caps = 0;
-        for (int i = 0; i < all; i++) if (ht[i].ncap) caps++;
-        in.cap_valid = mf.contact_valid = all > 0 && caps == all;     /* si algún enemigo no tiene piezas fiables se usa el cilindro de siempre */
+        int all = vrhit_scan(ram, 1, 0x01, 1, ht, VRHIT_MAX_T);
+        for (int i = 0; i < all; i++) if (!ht[i].ncap) {             /* blanco sin piezas fiables: el cilindro de siempre como su única cápsula (criterio por blanco, no global) */
+            VrHitCap *q = &ht[i].cap[0]; float k = map.units_per_m;
+            for (int a = 0; a < 3; a++) q->a[a] = q->b[a] = ht[i].c[a];
+            q->a[1] -= G.cfg.body_low * k; q->b[1] += G.cfg.body_high * k; q->r = G.cfg.body_radius * k; q->zone = VRHIT_Z_BODY; ht[i].ncap = 1;
+        }
+        in.cap_valid = mf.contact_valid = all > 0;
         for (int i = 0; i < all && in.cap_valid; i++) if (ht[i].vital > 0) ht[hn++] = ht[i];
     }
     if (!in.active) fist_prev_ok[0] = fist_prev_ok[1] = 0;
@@ -102,6 +106,12 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, cons
                 memcpy(fist_prev[s], mf.fist[s], sizeof fist_prev[s]); fist_prev_ok[s] = 1;
                 float dmm = mv_vrhost_wall_distance(mf.fist[s], 400.0f);     /* superficie sólida más cercana a los nudillos (geometría estática de la escena, la de la colisión de la cabeza) */
                 in.wall_valid[s] = dmm >= 0.0f; in.wall_dist[s] = dmm >= 0.0f ? dmm * 0.001f : 1.0f;
+                in.wall_ny[s] = 1.0f;
+                if (dmm >= 0.0f && dmm < 200.0f) {      /* ¿superficie vertical? la distancia a una pared no cambia al subir o bajar el punto; la distancia al suelo cambia lo mismo que se sube */
+                    float up[3] = {mf.fist[s][0], mf.fist[s][1] + 60.0f, mf.fist[s][2]}, dn[3] = {mf.fist[s][0], mf.fist[s][1] - 60.0f, mf.fist[s][2]};
+                    float du = mv_vrhost_wall_distance(up, 400.0f), dd = mv_vrhost_wall_distance(dn, 400.0f);
+                    if (du >= 0.0f && dd >= 0.0f) in.wall_ny[s] = fabsf(du - dd) / 120.0f;
+                }
             }
         }
         in.weapon = bs->weapon; in.stance = bs->stance; in.on_wall = bs->on_wall; in.in_box = bs->in_box; in.in_water = bs->in_water;

@@ -102,6 +102,7 @@ typedef struct {
 #define VRM_T_COMBO2 13
 #define VRM_RETRY_FRAMES 24     /* margen (VBlanks, ~0,4 s) para repetir un golpe que cayó sobre un enemigo en reacción */
 #define VRM_THROW_FRAMES 14     /* fotogramas que el motor arrastra al enemigo sujetado en la dirección del tirón antes de soltarlo */
+#define VRM_COMBO_NEAR 250.0f   /* mm del puño a la caja de un enemigo para que la 2.ª etapa de un combo iniciado con contacto se registre sin contacto nuevo */
 #define VRM_HOLD_MAX 12         /* fotogramas máximos que la animación espera en cada instante de decisión si el brazo sigue en movimiento */
 typedef struct Vrm {
     int enable;
@@ -115,6 +116,7 @@ typedef struct Vrm {
     int fist_ok[2], fist_closed[2];
     float fist[2][3];
     float hist[2][VRM_HIST][3]; unsigned char hist_cl[2][VRM_HIST]; int hist_n[2], hist_i[2];
+    int combo_ct, combo_side;                     /* el primer golpe del combo en curso se registró con contacto real de esa mano: las etapas siguientes valen mientras el puño siga junto al enemigo */
     int ct_valid, ct_ttl[2]; float ct_pt[2][3];   /* contacto real del puño con un enemigo: VBlanks que sigue valiendo (VRM_HIST) y su punto dentro de la caja del blanco */
     /* contexto de los ganchos */
     int ctx_hit, ctx_grab, ctx_ok; uint32_t ctx_target; float ctx_origin[3], ctx_fist[3];

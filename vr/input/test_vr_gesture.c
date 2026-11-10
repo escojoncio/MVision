@@ -404,6 +404,15 @@ static void t_knock(void) {
     CHECK(touches(&g, en, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "enemigo"));
     vrg_init(&g); vrg_in_t aw = in; aw.weapon = 0; CHECK(touches(&g, aw, 2, 1.0f, 0.3f, 1, NULL, NULL) == 0);
     vrg_init(&g); vrg_in_t nv = in; vrg_out_t o; nv.wall_valid[0] = nv.wall_valid[1] = 0; settle(&g, &nv, 12); nv.wall_dist[1] = 0.02f; upd(&g, &nv, &o); CHECK(o.knock_side < 0);   /* sin consulta de pared */
+    /* solo superficies aproximadamente verticales: el suelo o la tapa de una caja (normal vertical) no cuentan */
+    vrg_init(&g); vrg_in_t fl = in; fl.wall_ny[1] = 1.0f; CHECK(touches(&g, fl, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "no_vertical"));
+    vrg_init(&g); fl.wall_ny[1] = 0.7f; CHECK(touches(&g, fl, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "no_vertical"));
+    vrg_init(&g); fl.wall_ny[1] = 0.3f; CHECK(touches(&g, fl, 2, 1.0f, 0.3f, 1, NULL, NULL) == 2);                     /* pared algo inclinada */
+    /* solo de pie o pegado a la pared: agachado, tumbado o gateando las manos cruzan superficies sin querer */
+    for (int st = 1; st <= 2; st++) { vrg_init(&g); vrg_in_t ps = in; ps.stance = st; CHECK(touches(&g, ps, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "postura")); }
+    vrg_init(&g); vrg_in_t pw = in; pw.stance = 1; pw.on_wall = 1; CHECK(touches(&g, pw, 2, 1.0f, 0.3f, 1, NULL, NULL) == 2);   /* pegado a la pared agachado: sí */
+    vrg_init(&g); vrg_in_t bx = in; bx.in_box = 1; CHECK(touches(&g, bx, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "manos_ocupadas"));   /* en la caja */
+    vrg_init(&g); vrg_in_t th = in; th.throw_hold = 1; CHECK(touches(&g, th, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "manos_ocupadas"));   /* granada en la mano */
     /* balanceo del brazo (puño cerrado, 1,5 m/s, vaivén de 0,3 m) sin superficie al alcance: ningún toque */
     { vrg_init(&g); vrg_in_t sw = in; int k = 0; sw.wall_valid[0] = sw.wall_valid[1] = 0; settle(&g, &sw, 12);
       for (int i = 0; i < 200; i++) { sw.hand[1][2] = 0.1f + 0.3f * (float)fabs(((i % 20) - 10) / 10.0); upd(&g, &sw, &o); k += o.knock_side >= 0; }

@@ -9,8 +9,8 @@
  *    Con el puño ya cerrado (botón mantenido de antes) NUNCA se agarra. Mantener el botón mantiene el agarre (grab_hold);
  *    cada pulsación nueva o un golpe con el puño estando agarrado = squeeze (apretar y rematar).
  *  - El cuadrado físico y los demás botones pasan al juego como en el original (respaldo de golpe).
- *  - Pared: golpear con el PUÑO cerrado una superficie sólida (pared, suelo, caja) = toque de nudillos del motor (sonido + ruido que oyen los guardias) -> knock_side;
- *    no hace falta estar pegado a la pared. Asomarse = triángulo (opcional).
+ *  - Pared: golpear con el PUÑO cerrado una superficie sólida aproximadamente vertical = toque de nudillos del motor (sonido + ruido que oyen los guardias) -> knock_side;
+ *    de pie (no hace falta estar pegado a la pared) o pegado a ella; nunca agachado, tumbado, en la caja ni con un arma o una arrojadiza en la mano. Asomarse = triángulo (opcional).
  *  - Hápticos: golpe, agarre, apretón, pared, daño recibido.
  * Espacio de entrada: MUNDO del motor en metros (x, y arriba, z), rumbo del jugador yaw en radianes con delante = (sin yaw, cos yaw).
  * Una llamada por VBlank (dt ~ 0,02). */
@@ -40,6 +40,7 @@ typedef struct {
     float punch_speed;       /* m/s de la mano para contar como golpe (1,3: la media de 4 muestras recorta el pico real de 2-4 m/s) */
     float knock_speed;       /* velocidad mínima al tocar la superficie (0,4 m/s): la de acercamiento a ella Y la de la mano respecto a la cabeza (andar hacia una pared con la mano quieta no cuenta) */
     float knock_touch;       /* distancia mano-superficie que cuenta como tocar (0,08 m) */
+    float knock_ny_max;      /* solo superficies aproximadamente verticales: |componente vertical de la normal| máxima (0,5 = hasta 30 grados de inclinación); el suelo y las tapas no cuentan */
     float knock_cooldown_s;  /* entre toques (0,25 s) */
     float knock_enemy_m;     /* con un enemigo a menos de esto de la mano no es pared sino golpe (1,0 m) */
     float reach_min;         /* alcance horizontal mínimo de la mano respecto a la cabeza en el golpe (0,30 m) */
@@ -84,6 +85,7 @@ typedef struct {
     float head[3];           /* cabeza del usuario en el mundo */
     int wall_valid[2];       /* hay consulta de pared para la mano (geometría estática de la escena) */
     float wall_dist[2];      /* distancia de la mano a la superficie más cercana de la geometría estática (m) */
+    float wall_ny[2];        /* |componente vertical de la normal| de esa superficie junto a la mano (0 = pared vertical, 1 = suelo/techo) */
     int tracked[2];          /* 0 = izquierda física, 1 = derecha física */
     double hand_time[2];     /* instante (s, reloj monótono) de la pose de cada mano; <= 0: sin marca (se usa dt por llamada). Repetir la marca = misma muestra */
     int throw_hold;          /* arrojadiza VR (granada, aturdidora, chaff) en la mano del arma, sin preparar o preparada: su gatillo la prepara/lanza y NO abre la ventana de armas del pecho */
@@ -117,7 +119,7 @@ typedef struct {
     int grab_hold;           /* 1: el botón del puño sigue pulsado durante el agarre (mantiene el agarre del motor) */
     int menu_open[2];        /* ventana abierta por la mano física (0 objetos/L2, 1 armas/R2) mientras se mantiene el gatillo; vrg_out.press ya lleva L2/R2 */
     int knock_side;          /* -1 nada; 0/1: llamar con los nudillos (acción del motor) con esa mano */
-    const char *knock_why;   /* motivo del último intento de toque de este VBlank ("ok", "lento", "mano_quieta", "sin_puno", "enfriamiento", "enemigo", "lejos_de_la_pared"...) */
+    const char *knock_why;   /* motivo del último intento de toque de este VBlank ("ok", "lento", "mano_quieta", "sin_puno", "postura", "no_vertical", "enfriamiento", "enemigo", "lejos_de_la_pared"...) */
     float knock_speed, knock_dist; int knock_try_side;
     int squeeze;             /* 1: apretar/rematar (nueva pulsación o golpe estando agarrado) */
     const char *grab_why;    /* motivo del último intento de agarre de este VBlank (NULL: ninguno): "ok", "mano_lejos", "cuerpo_lejos", "puno_cerrado", "tras_golpe"... */

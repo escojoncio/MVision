@@ -9,7 +9,7 @@ void vrg_cfg_defaults(vrg_cfg_t *c) {
     memset(c, 0, sizeof *c);
     c->enable = 1; c->fist_required = 1; c->fist_haptic = 0.12f; c->item_hold_s = 0.35f; c->punch_dir_cos = 0.35f; c->trig_on = 0.6f; c->trig_off = 0.3f; c->punch = c->grab = c->knock = c->peek = 1;
     c->right_handed = 1;
-    c->punch_speed = 0.5f; c->knock_speed = 0.4f; c->knock_touch = 0.08f; c->knock_cooldown_s = 0.25f; c->knock_enemy_m = 1.0f; c->reach_min = 0.20f; c->melee_range = 3.0f; c->front_cos = 0.5f;
+    c->punch_speed = 0.5f; c->knock_speed = 0.4f; c->knock_touch = 0.08f; c->knock_ny_max = 0.5f; c->knock_cooldown_s = 0.25f; c->knock_enemy_m = 1.0f; c->reach_min = 0.20f; c->melee_range = 3.0f; c->front_cos = 0.5f;
     c->grab_range = 1.3f; c->neck_radius = 0.36f; c->neck_height = 0.45f; c->back_dist = 0.25f; c->grab_after_punch_s = 0.2f;
     c->chest_side = 0.16f; c->chest_down = 0.26f; c->chest_fwd = -0.02f; c->chest_radius = 0.15f; c->chest_exit = 0.20f; c->chest_hold_s = 0.30f;
     c->grip_on = 0.65f; c->grip_off = 0.35f; c->peek_on = 0.12f; c->peek_off = 0.06f; c->cooldown_s = 0.12f;
@@ -194,7 +194,9 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                     if (sqrtf(dx * dx + dy * dy + dz * dz) < c->knock_enemy_m) enemy_near = 1;
                 }
                 if (!c->knock) why = "desactivado";
-                else if (!free_hands) why = "manos_ocupadas";
+                else if (!free_hands || in->throw_hold) why = "manos_ocupadas";
+                else if (in->stance != 0 && !in->on_wall) why = "postura";              /* agachado, tumbado o gateando las manos cruzan el suelo y los objetos sin querer */
+                else if (!(in->wall_ny[s] <= c->knock_ny_max)) why = "no_vertical";     /* suelo, techo, tapa de una caja */
                 else if (!in->fist_btn[s]) why = "sin_puno";
                 else if (enemy_near) why = "enemigo";
                 else if (g->settle > 0) why = "calma";

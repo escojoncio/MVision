@@ -10,11 +10,14 @@
  *  - Cápsulas por pieza: de las matrices local->mundo de las piezas del objeto articulado del enemigo (objeto emparejado con el blanco por la posición de su raíz) y de la
  *    caja local de cada modelo. Zonas: cabeza = la pieza hoja más alta en la pose de reposo (suma de las traslaciones de articulación; NO es un índice fijo), cuerpo = sus
  *    antepasadas (cuello, torso, pelvis), extremidad = el resto. Los blancos sin objeto articulado (cámaras, objetos) se quedan con su caja.
- *  - Bala (vrhit_bullet, tras crear el actor): un único criterio de línea de tiro para las balas del jugador y las de los enemigos: rayo desde el origen de la bala contra
+ *  - Bala del jugador (vrhit_bullet, tras crear el actor): rayo desde el origen de la bala contra
  *    las cápsulas (o cajas) y contra la geometría real (paredes y suelos de colisión del juego, sólidos de la escena y lo que encontró el trazado del propio juego: puertas). Si da en un blanco antes que en la geometría y dentro
  *    del alcance (>= VRHIT_RANGE_MIN), la bala se recoloca DENTRO de la caja de ese blanco: el juego lo sella en su siguiente tick con sus propias rutinas (daño, reacción,
  *    sonido). Si el rayo cruza cajas sin dar en nada (o hay geometría antes), la bala se lleva a su punto final: no sella ninguna caja. Si no cruza ninguna, no se toca.
- *    Daño de las balas del jugador: cabeza = la vida del blanco (muere de un tiro); cuerpo y extremidad = el del juego (64: 2-3 tiros).
+ *    Daño: cabeza de un soldado normal (dañable, bando enemigo, caja 300x1000x300, vida <= 3 balas) = su vida (muere de un tiro); todo lo demás (cuerpo, extremidad, jefes y
+ *    otros humanoides) = el del juego (64: 2-3 tiros en el soldado).
+ *  - Bala de un enemigo: no se recoloca ni se anula. Solo se amplía su recorrido hasta VRHIT_RANGE_MIN cuando su rayo cruza la caja del jugador más allá del alcance del
+ *    juego, su trazado no dio en nada y la geometría del anfitrión está despejada hasta la caja; sella o no el tick del propio juego.
  *  - Puños (vrhit_sweep): esfera del puño barrida contra las cápsulas. */
 #pragma once
 #include <stdint.h>
@@ -63,14 +66,15 @@ typedef struct VrHitWorld {
     float (*wall)(const uint8_t *ram, const float o[3], const float d[3], float max);
     /* rayo contra las cámaras de vigilancia vivas: 1 si da en alguna, con la distancia y la dirección de su blanco. NULL = ninguna */
     int (*camera)(uint8_t *ram, const float o[3], const float d[3], float max, float *t, uint32_t *target);
-    /* impacto de bala en un blanco que el juego no va a dañar por sí mismo (clase sin el bit de daño): si es una cámara, el anfitrión le cuenta el impacto. NULL = nada */
+    /* impacto de una bala del jugador en una cámara (blanco que devolvió `camera`) que el juego no va a dañar por sí mismo (clase sin el bit de daño, o fuera de su prueba): el anfitrión le cuenta el impacto. NULL = nada */
     void (*camera_hit)(uint8_t *ram, uint32_t target, const int16_t pt[3]);
 } VrHitWorld;
 void vrhit_set_world(const VrHitWorld *w);
 
 enum { VRHIT_ACT_NONE = 0,     /* la bala no se tocó (no cruza ninguna caja) */
        VRHIT_ACT_SEAL = 1,     /* recolocada dentro de la caja del blanco: el juego lo sella */
-       VRHIT_ACT_VOID = 2 };   /* llevada a su punto final: no sella nada */
+       VRHIT_ACT_VOID = 2,     /* llevada a su punto final: no sella nada */
+       VRHIT_ACT_RANGE = 3 };  /* bala enemiga: solo se amplió su alcance; sella o no el tick del juego */
 typedef struct VrHitShot {
     int side;                  /* bando de la bala (1 = jugador) */
     int target;                /* índice del blanco en la tabla del juego (-1 ninguno) */
@@ -80,8 +84,8 @@ typedef struct VrHitShot {
     int vital;                 /* vida del blanco antes del impacto (-1 sin blanco) */
     float dist;                /* unidades del motor hasta el impacto (blanco o pared); el alcance si no hay nada */
 } VrHitShot;
-/* Resuelve una bala recién creada (actor devuelto por el creador del juego, 0x800779a8). Escribe una línea [impacto] por bala del jugador (y por bala enemiga que cruce la
- * caja del jugador). Devuelve 1 si la resolvió (out relleno), 0 si no hay mundo registrado o el actor no es válido. */
+/* Resuelve una bala recién creada (actor devuelto por el creador del juego, 0x800779a8). Escribe una línea [impacto] por bala del jugador (y, como observación, por bala
+ * enemiga cuyo rayo cruce la caja del jugador). Devuelve 1 si la resolvió (out relleno), 0 si no hay mundo registrado o el actor no es válido. */
 int vrhit_bullet(uint8_t *ram, uint32_t actor, VrHitShot *out);
 /* Instante del gatillo (el juego crea la bala ~0,4 s después): anota a qué blanco y zona apunta el rayo boca -> delante en ese instante. La bala que salga con ese mismo
  * rayo impacta en ese blanco aunque se haya movido entretanto. */

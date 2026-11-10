@@ -776,7 +776,12 @@ static int h_shoot(int side, float ox, float oy, float oz, float tx, float ty, f
     memset(sh, 0, sizeof *sh);
     h_bullet(side, o, to, range, gwall);
     vrhit_bullet(ram, HB, sh);
-    return h_tick();
+    for (int k = 0; k < 8; k++) {            /* ticks del juego hasta que sella algo o agota su recorrido */
+        int r = h_tick();
+        if (r >= 0) return r;
+        if ((int)r32(HB + 0x13C) > (int)r32(HB + 0x138)) break;
+    }
+    return -1;
 }
 static int h_vital(int i) { return hs16(HT + 72u * (uint32_t)i + 38); }
 
@@ -789,6 +794,15 @@ static void t_hit_zones(void) {
     /* cabeza: letal de un tiro */
     CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == 0 && h_vital(0) <= 0, "tiro a la cabeza: sellado y letal (vida %d)", h_vital(0));
     CHECK(sh.zone == VRHIT_Z_HEAD && sh.damage == 128 && sh.vital == 128 && sh.target == 0 && sh.action == VRHIT_ACT_SEAL, "zona cabeza, daño = vida (zona %d daño %d)", sh.zone, sh.damage);
+    /* la cabeza solo es letal en un soldado normal (dañable, bando enemigo, caja 300x1000x300, vida <= 3 balas): jefes y demás humanoides reciben el daño del juego */
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 1000);
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == 0 && h_vital(0) == 936 && sh.zone == VRHIT_Z_HEAD && sh.damage == 64, "vida alta (jefe): cabeza sin daño letal (vida %d daño %d)", h_vital(0), sh.damage);
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128); w16(HT + 16, 400); w16(HT + 20, 400);
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == 0 && h_vital(0) == 64 && sh.zone == VRHIT_Z_HEAD, "caja distinta de la del soldado: cabeza sin daño letal (vida %d)", h_vital(0));
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128); w16(HT + 2, 4);
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == 0 && h_vital(0) == 64, "bando que no es el enemigo: cabeza sin daño letal (vida %d)", h_vital(0));
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 192);
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == 0 && h_vital(0) <= 0 && sh.damage == 192, "soldado de vida 192: cabeza letal");
     /* cuerpo: 64 (dos tiros con vida 128) */
     h_world(); h_soldier(0, 0, 0, 1000, 5000, 128);
     CHECK(h_shoot(1, 0, 1300, 0, 0, 1190, 5000, 10000, -1, &sh) == 0 && h_vital(0) == 64 && sh.zone == VRHIT_Z_BODY && sh.damage == 64, "tiro al cuerpo: 64 (vida %d zona %d)", h_vital(0), sh.zone);
@@ -833,7 +847,17 @@ static void t_hit_camera(void) {
     /* blanco de cámara sin el bit de daño: el juego la sella sin dañarla -> impacto directo (uno por tiro) */
     h_world(); h_target(2, 0x10, 2, 3000, 3000, 6000, 300, 300, 300, 0, 0);
     for (int k = 0; k < 2; k++) h_shoot(1, 0, 1300, 0, 3000, 3000, 6000, 10000, -1, &sh);
+    CHECK(hw_cam_hits == 0, "blanco no dañable que el anfitrión no reconoce como cámara: sin impacto directo (%d)", hw_cam_hits);
+    hw_cam_on = 1; hw_cam_t = 6400.0f; hw_cam_tg = b;
+    for (int k = 0; k < 2; k++) h_shoot(1, 0, 1300, 0, 3000, 3000, 6000, 10000, -1, &sh);
     CHECK(hw_cam_hits == 2 && hw_cam_last == b, "cámara no dañable por el juego: 2 impactos directos (%d)", hw_cam_hits);
+    /* una bala enemiga nunca cuenta impactos en una cámara */
+    hw_cam_hits = 0; w16(b + 2, 1); h_shoot(2, 0, 1300, 0, 3000, 3000, 6000, 10000, -1, &sh); w16(b + 2, 2);
+    CHECK(hw_cam_hits == 0, "bala enemiga: sin impacto directo de cámara (%d)", hw_cam_hits);
+    /* cámara articulada (con piezas): es cámara por su blanco, no por tener solo caja */
+    h_world(); h_reg(); h_soldier(0, 0, 0, 1000, 5000, 0); w16(HT, 0x10); hw_cam_on = 1; hw_cam_t = 4700.0f; hw_cam_tg = HT;
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == 0 && hw_cam_hits == 1 && hw_cam_last == HT, "cámara articulada no dañable: impacto directo (%d)", hw_cam_hits);
+    hw_cam_on = 0;
     /* cámara que el juego no sella (sin bit 0x10): la da el rayo de cámaras del anfitrión */
     h_world(); h_reg(); h_target(2, 0x04, 2, 3000, 3000, 6000, 300, 300, 300, 0, 0); hw_cam_on = 1; hw_cam_t = 6500.0f; hw_cam_tg = b;
     CHECK(h_shoot(1, 0, 1300, 0, 3000, 3000, 6000, 10000, -1, &sh) == -1 && hw_cam_hits == 1 && sh.zone == VRHIT_Z_BOX, "cámara fuera de la prueba del juego: impacto directo (%d)", hw_cam_hits);
@@ -862,28 +886,39 @@ static void t_hit_floors(void) {
     CHECK(fabsf(vrhit_floor_ray(ram, o, d, 5000.0f) - 1300.0f) < 1.0f, "rayo vertical contra el suelo");
     CHECK(vrhit_floor_ray(ram, o, d, 1000.0f) < 0 && vrhit_floor_ray(NULL, o, d, 5000.0f) < 0, "suelo fuera de alcance / RAM nula");
 }
-/* balas enemigas contra la caja del jugador: misma regla */
+/* balas enemigas: lo único que se toca es su alcance (hasta VRHIT_RANGE_MIN) cuando su línea al jugador está despejada; quién sella es el tick del juego, nunca se recolocan */
 static void t_hit_enemy(void) {
-    VrHitShot sh;
+    VrHitShot sh; int16_t p0[3];
     for (int up = 0; up < 2; up++) {
         float ey = up ? 4500.0f : -3500.0f; int fy = up ? 2500 : -1500;
-        /* 11,7 m con línea despejada: el juego la acababa a 10000 */
+        /* 11,7 m con línea despejada: el juego la acababa a 10000; ahora llega y la sella el juego en su tercer tick */
         h_world(); h_reg(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256);
-        CHECK(h_shoot(2, 0, ey, 11000, 0, 500, 0, 10000, -1, &sh) == 6 && h_vital(6) == 192 && sh.side == 2 && sh.action == VRHIT_ACT_SEAL, "bala enemiga desde %s, despejada: impacta al jugador (vida %d)", up ? "arriba" : "abajo", h_vital(6));
-        /* el trazado del juego (colisión del mapa del tirador, puertas) la corta a 3000: no impacta */
+        CHECK(h_shoot(2, 0, ey, 11000, 0, 500, 0, 10000, -1, &sh) == 6 && h_vital(6) == 192 && sh.side == 2 && sh.action == VRHIT_ACT_RANGE, "bala enemiga desde %s a 11,7 m, despejada: alcanza al jugador (vida %d acción %d)", up ? "arriba" : "abajo", h_vital(6), sh.action);
+        CHECK((int)r32(HB + 0x158) == 16000 && (int)r32(HB + 0x13C) == 15000, "alcance ampliado a 16000 y sellada por el tick del juego en vuelo (recorrido %d)", (int)r32(HB + 0x13C));
+        /* nunca se recoloca: la posición inicial de la bala no cambia */
         h_world(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256);
-        CHECK(h_shoot(2, 0, ey, 8000, 0, 500, 0, 10000, 3000, &sh) == -1 && h_vital(6) == 256 && sh.zone == VRHIT_Z_WALL, "bala enemiga cortada por la colisión del juego: no impacta (vida %d)", h_vital(6));
-        /* suelo sólido entre medias: no impacta */
+        { float o[3] = {0, ey, 11000}, to[3] = {0, 500, 0}; h_bullet(2, o, to, 10000, -1); memcpy(p0, ram + ((HB + 0x110) & 0x1FFFFF), 6); vrhit_bullet(ram, HB, &sh);
+          CHECK(!memcmp(p0, ram + ((HB + 0x110) & 0x1FFFFF), 6), "la bala enemiga no se recoloca"); }
+        /* dentro del alcance del juego no se toca nada: decide su trazado */
+        h_world(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256);
+        CHECK(h_shoot(2, 0, ey, 8000, 0, 500, 0, 10000, -1, &sh) == 6 && sh.action == VRHIT_ACT_NONE && (int)r32(HB + 0x158) == 10000, "bala enemiga dentro del alcance del juego: intacta");
+        h_world(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256);
+        CHECK(h_shoot(2, 0, ey, 8000, 0, 500, 0, 10000, 3000, &sh) == -1 && h_vital(6) == 256 && sh.action == VRHIT_ACT_NONE, "bala enemiga cortada por el trazado del juego: no impacta y no se toca");
+        /* el trazado del juego ya dio en su colisión: no se amplía */
+        h_world(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256);
+        CHECK(h_shoot(2, 0, ey, 11000, 0, 500, 0, 10000, 6000, &sh) == -1 && h_vital(6) == 256 && sh.action == VRHIT_ACT_NONE && sh.zone == VRHIT_Z_WALL, "bala enemiga lejana cortada por el juego: no se amplía");
+        /* suelo o pared del anfitrión antes del jugador: no se amplía (la geometría del anfitrión solo resta) */
         h_world(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256); h_floor(-2000, 1000, 2000, 12000, fy);
-        CHECK(h_shoot(2, 0, ey, 8000, 0, 500, 0, 10000, -1, &sh) == -1 && h_vital(6) == 256 && sh.zone == VRHIT_Z_WALL, "bala enemiga con suelo entre medias: no impacta (vida %d zona %d)", h_vital(6), sh.zone);
-        /* pared sólida entre medias */
+        CHECK(h_shoot(2, 0, ey, 11000, 0, 500, 0, 10000, -1, &sh) == -1 && h_vital(6) == 256 && sh.zone == VRHIT_Z_WALL && sh.action == VRHIT_ACT_NONE, "bala enemiga lejana con suelo entre medias: no se amplía (vida %d zona %d)", h_vital(6), sh.zone);
         h_world(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256); hw_wall = 1500.0f;
-        CHECK(h_shoot(2, 0, ey, 8000, 0, 500, 0, 10000, -1, &sh) == -1 && h_vital(6) == 256, "bala enemiga con pared entre medias: no impacta");
+        CHECK(h_shoot(2, 0, ey, 11000, 0, 500, 0, 10000, -1, &sh) == -1 && h_vital(6) == 256 && sh.action == VRHIT_ACT_NONE, "bala enemiga lejana con pared entre medias: no se amplía");
         hw_wall = -1.0f;
     }
-    /* la puntería de la IA no se toca: una bala que no cruza la caja del jugador sigue sin tocarse */
+    /* la puntería de la IA no se toca: una bala que no cruza la caja del jugador sigue intacta, tampoco las de más de 16000 */
     h_world(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256);
-    CHECK(h_shoot(2, 0, 1000, 8000, 3000, 1000, 0, 10000, -1, &sh) == -1 && sh.action == VRHIT_ACT_NONE && h_vital(6) == 256, "bala enemiga desviada: intacta");
+    CHECK(h_shoot(2, 0, 1000, 8000, 3000, 1000, 0, 10000, -1, &sh) == -1 && sh.action == VRHIT_ACT_NONE && h_vital(6) == 256 && (int)r32(HB + 0x158) == 10000, "bala enemiga desviada: intacta");
+    h_world(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256);
+    CHECK(h_shoot(2, 0, 500, 17000, 0, 500, 0, 10000, -1, &sh) == -1 && sh.action == VRHIT_ACT_NONE && (int)r32(HB + 0x158) == 10000, "bala enemiga a 17 m: intacta");
     /* y las balas enemigas no sellan a otros enemigos ni usan sus cápsulas */
     h_world(); h_soldier(0, 0, 0, 1000, 5000, 128);
     CHECK(h_shoot(2, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == -1 && h_vital(0) == 128, "bala enemiga contra enemigo: nada");
@@ -905,6 +940,14 @@ static void t_hit_aim(void) {
     h_world(); h_soldier(0, 0, 0, 1000, 5000, 128); vrhit_aim(ram, o, d);
     h_world(); h_soldier(0, 0, 700, 1000, 5200, 128);
     CHECK(h_shoot(1, 300, 1300, 0, 300, 1457, 5000, 10000, -1, &sh) == -1, "otro rayo no usa la puntería anotada");
+    /* el blanco se movió tras una esquina (pared o suelo en la línea boca -> blanco de AHORA): pared */
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128); vrhit_aim(ram, o, d);
+    h_world(); h_soldier(0, 0, 700, 1000, 5200, 128); hw_wall = 3000.0f;
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == -1 && h_vital(0) == 128 && sh.zone == VRHIT_Z_WALL, "puntería anotada, blanco ahora tras una pared: pared (zona %d vida %d)", sh.zone, h_vital(0));
+    hw_wall = -1.0f;
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128); vrhit_aim(ram, o, d);
+    h_world(); h_soldier(0, 0, 0, -3000, 9000, 128); h_floor(-2000, 500, 2000, 12000, 0);
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == -1 && h_vital(0) == 128 && sh.zone == VRHIT_Z_WALL, "puntería anotada, blanco ahora bajo un suelo: pared (zona %d)", sh.zone);
     h_world(); h_soldier(0, 0, 0, 1000, 5000, 128); vrhit_aim(ram, o, d);
     h_world(); h_soldier(0, 0, 700, 1000, 5200, 128);
     CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, 2500, &sh) == -1 && h_vital(0) == 128, "puntería anotada pero el trazado del juego corta el rayo antes (puerta): no impacta");

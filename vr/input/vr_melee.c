@@ -138,9 +138,13 @@ int vrm_action_input(Vrm *v, const VrmEng *e, uint32_t work) {
     if (!v->enable || !okr(work, 2700)) return 0;
     if (v->p_knock) {         /* toque con el puño en una superficie sin estar pegado a la pared: el sonido y el ruido que lanza el estado de nudillos del motor, sin su animación */
         uint32_t snd = r8(e, VRM_KNOCK_SND);
-        e->call(e->user, VRM_FN_KNOCK_SE, snd ? snd : 55u, 1);
-        v->p_knock = 0; v->n_knock++;
-        say(v, "[gest] toque en la pared disparado mano=%d (sonido y ruido del motor, sin estado de nudillos)", v->p_knock_side);
+        v->p_knock = 0;
+        if (r32(e, VRM_G_PSTATUS) & (0x20u | 0x40u | 0x1000u)) say(v, "[gest] toque en la pared rechazado: postura (agachado, tumbado o en la caja)");
+        else {
+            e->call(e->user, VRM_FN_KNOCK_SE, snd ? snd : 55u, 1);
+            v->n_knock++;
+            say(v, "[gest] toque en la pared disparado mano=%d (sonido y ruido del motor, sin estado de nudillos)", v->p_knock_side);
+        }
     }
     if (v->p_grab) {
         w32(e, work + VRM_W_F910, 0);
@@ -159,7 +163,7 @@ int vrm_action_input(Vrm *v, const VrmEng *e, uint32_t work) {
         }
         e->call(e->user, VRM_FN_START, work, VRM_FN_PUNCH);
         w32(e, work + VRM_W_FLAGS, r32(e, work + VRM_W_FLAGS) | 4u);
-        v->p_punch = 0; v->in_punch = 1; v->stage = 0; v->n_punch++; v->combo_q = 0; v->hold_n = 0;
+        v->p_punch = 0; v->in_punch = 1; v->stage = 0; v->combo_ct = 0; v->n_punch++; v->combo_q = 0; v->hold_n = 0;
         say(v, "[gest] golpe disparado mano=%d (estado de golpe del motor)", v->p_punch_side);
         return 1;
     }
@@ -213,7 +217,11 @@ void vrm_pre_hit(Vrm *v, const VrmEng *e, uint32_t work) {
     if (v->stage >= 3) return;                /* patada: la caja del propio motor delante del cuerpo */
     if (v->ct_valid) {                        /* con cápsulas por pieza: el golpe se centra en el contacto real (dentro de la caja del blanco); sin contacto reciente no se registra */
         int ps = v->p_punch_side, s = ps >= 0 && ps < 2 && v->ct_ttl[ps] > 0 ? ps : (v->ct_ttl[0] > 0 ? 0 : (v->ct_ttl[1] > 0 ? 1 : -1));
-        if (s >= 0) memcpy(o, v->ct_pt[s], sizeof o);
+        if (s < 0 && v->stage >= 2 && v->combo_ct && v->fist_ok[v->combo_side]) {      /* combo iniciado con contacto real: la etapa siguiente vale si el puño sigue junto al enemigo */
+            En en[MAXEN]; int n = scan(e, 0, en); const float zero[3] = {0, 0, 0};
+            if (n && nearest(v->fist[v->combo_side], en, n, zero) <= VRM_COMBO_NEAR) s = v->combo_side;
+        }
+        if (s >= 0) { memcpy(o, v->ct_pt[s], sizeof o); if (v->stage == 1) { v->combo_ct = 1; v->combo_side = s; } }
         else { o[0] = 0; o[1] = 30000.0f; o[2] = 0; say(v, "[gest] golpe etapa %d: el puño VR no tocó a ningún enemigo; no se registra", v->stage); }
         v->ctx_hit = 1; v->ctx_ok = 1; v->ctx_target = work + VRM_W_TARGET; memcpy(v->ctx_origin, o, sizeof o);
         return;

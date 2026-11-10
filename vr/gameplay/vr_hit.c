@@ -300,18 +300,20 @@ typedef struct {
 static void resolve(uint8_t *ram, const VrHitTarget *t, int n, const float o[3], const float d[3], float R, float game_wall, Res *r) {
     memset(r, 0, sizeof *r);
     r->idx = -1; r->wall = R;
-    if (game_wall >= 0.0f && game_wall < r->wall) r->wall = game_wall;
-    float w = W.wall ? W.wall(ram, o, d, R) : -1.0f;
-    if (w >= 0.0f && w < r->wall) r->wall = w;
-    w = vrhit_floor_ray(ram, o, d, R);
-    if (w >= 0.0f && w < r->wall) r->wall = w;
-    float best = r->wall;
+    float best = R;
     for (int i = 0; i < n; i++) {
         float tb = box_ray(&t[i], o, d);
         if (tb >= 0.0f && tb <= R) r->crossed = 1;
         int z = VRHIT_Z_NONE; float tc = target_ray(&t[i], o, d, &z);
         if (tc >= 0.0f && tc < best) { best = tc; r->idx = i; r->zone = z; }
     }
+    /* la geometría solo importa hasta el blanco más cercano (o hasta el alcance si no hay ninguno) */
+    if (game_wall >= 0.0f && game_wall < best) r->wall = game_wall;
+    float w = W.wall ? W.wall(ram, o, d, best) : -1.0f;
+    if (w >= 0.0f && w < r->wall) r->wall = w;
+    w = vrhit_floor_ray(ram, o, d, best);
+    if (w >= 0.0f && w < r->wall) r->wall = w;
+    if (r->wall < best) { best = r->wall; r->idx = -1; r->zone = VRHIT_Z_NONE; }
     float tcam = 0; uint32_t tg = 0;
     if (W.camera && W.camera(ram, o, d, R, &tcam, &tg)) {
         int in = -1;
@@ -340,7 +342,7 @@ void vrhit_aim(const uint8_t *ram, const float o[3], const float d[3]) {
 }
 
 /* Puntería anotada para este mismo rayo (misma boca y dirección que en el gatillo): se consume; vale si su blanco sigue en la tabla. */
-static int take_aim(const float o[3], const float d[3], const VrHitTarget *t, int n, float R, float game_wall, Res *r) {
+static int take_aim(uint8_t *ram, const float o[3], const float d[3], const VrHitTarget *t, int n, float R, float game_wall, Res *r) {
     for (int k = 0; k < N_AIM; k++) {
         Aim *a = &g_aim[k];
         if (!a->on || fabsf(a->o[0] - o[0]) > 16.0f || fabsf(a->o[1] - o[1]) > 16.0f || fabsf(a->o[2] - o[2]) > 16.0f || dot3(a->d, d) < 0.9995f) continue;
@@ -353,6 +355,13 @@ static int take_aim(const float o[3], const float d[3], const VrHitTarget *t, in
             float dv[3];
             for (int j = 0; j < 3; j++) { r->pt[j] = t[i].c[j] + a->rel[j]; dv[j] = r->pt[j] - o[j]; }
             r->dist = sqrtf(dot3(dv, dv));
+            /* el blanco se ha movido: la línea boca -> blanco de AHORA se revalida con la misma geometría (paredes y sólidos del anfitrión, suelos de colisión) */
+            float dn[3];
+            if (unit3(dv, dn)) {
+                float w = W.wall ? W.wall(ram, o, dn, r->dist) : -1.0f, f = vrhit_floor_ray(ram, o, dn, r->dist);
+                if (f >= 0.0f && (w < 0.0f || f < w)) w = f;
+                if (w >= 0.0f && w < r->dist - 50.0f) { r->idx = -1; r->zone = VRHIT_Z_NONE; r->wall = r->dist = w; }      /* tras una esquina: pared */
+            }
             return 1;
         }
         return 0;
@@ -366,6 +375,30 @@ static void void_bullet(uint8_t *ram, uint32_t actor) {
     ws32(ram, actor + B_LIMIT, 0);
 }
 
+/* Bala de un enemigo: ni se recoloca ni se anula ni se marca impacto. Si su rayo cruza la caja de un blanco de otro bando (el jugador) más allá de donde el juego la acaba,
+ * su trazado no dio en nada y la geometría del anfitrión (que aquí solo resta) está despejada hasta esa caja, se amplía su recorrido hasta VRHIT_RANGE_MIN: quien sella es
+ * el tick del juego. Devuelve 1 si cruza alguna caja (hay algo que anotar). */
+static int enemy_bullet(uint8_t *ram, uint32_t actor, unsigned side, const float o[3], const float d[3], VrHitShot *s) {
+    int n = vrhit_scan(ram, side, 0x10, 0, g_t, VRHIT_MAX_T), bi = -1;
+    float tb = 0;
+    for (int i = 0; i < n; i++) { float t = box_ray(&g_t[i], o, d); if (t >= 0.0f && t <= VRHIT_RANGE_MIN && (bi < 0 || t < tb)) { bi = i; tb = t; } }
+    if (bi < 0) return 0;                          /* lo normal en una ráfaga: sin más coste que este recorrido de la tabla */
+    float limit = (float)rs32(ram, actor + B_LIMIT);
+    s->dist = tb;
+    if (tb <= limit) { s->target = g_t[bi].index; s->vital = g_t[bi].vital; s->zone = VRHIT_Z_BOX; return 1; }      /* a su alcance: decide el juego */
+    if (rs32(ram, actor + B_WALLHIT) == 1) { s->zone = VRHIT_Z_WALL; s->dist = limit; return 1; }                 /* su trazado dio en la colisión del juego */
+    float w = W.wall ? W.wall(ram, o, d, tb) : -1.0f, f = vrhit_floor_ray(ram, o, d, tb);
+    if (f >= 0.0f && (w < 0.0f || f < w)) w = f;
+    if (w >= 0.0f) { s->zone = VRHIT_Z_WALL; s->dist = w; return 1; }
+    float L = VRHIT_RANGE_MIN;                     /* recorrido nuevo, sin salir de las coordenadas s16 del motor */
+    for (int k = 0; k < 3; k++) if (fabsf(d[k]) > 1e-6f) { float e = ((d[k] > 0.0f ? 32767.0f : -32768.0f) - o[k]) / d[k]; if (e < L) L = e; }
+    if (!(L > limit)) return 1;
+    ws32(ram, actor + B_RANGE, (int32_t)L); ws32(ram, actor + B_LIMIT, (int32_t)L);
+    for (int k = 0; k < 3; k++) ws16(ram, actor + B_END + 2u * (uint32_t)k, (int16_t)lrintf(o[k] + d[k] * L));
+    s->target = g_t[bi].index; s->vital = g_t[bi].vital; s->zone = VRHIT_Z_BOX; s->action = VRHIT_ACT_RANGE;
+    return 1;
+}
+
 int vrhit_bullet(uint8_t *ram, uint32_t actor, VrHitShot *out) {
     if (!w_set || !ram || !ptr_ok(actor, B_SIZE)) return 0;
     float o[3], v[3], d[3];
@@ -375,12 +408,20 @@ int vrhit_bullet(uint8_t *ram, uint32_t actor, VrHitShot *out) {
     int player = side == PLAYER_SIDE;
     float R = (float)rs32(ram, actor + B_RANGE);
     if (!(R >= VRHIT_RANGE_MIN)) R = VRHIT_RANGE_MIN;
-    int n = vrhit_scan(ram, side, 0x10, player, g_t, VRHIT_MAX_T);     /* las cápsulas solo para las balas del jugador: la IA apunta a la caja del jugador */
+    VrHitShot s = {(int)side, -1, VRHIT_Z_MISS, VRHIT_ACT_NONE, rs32(ram, actor + B_DAMAGE), -1, 0.0f};
+    if (!player) {
+        if (enemy_bullet(ram, actor, side, o, d, &s))
+            fprintf(stderr, "[impacto] blanco=%d zona=%s dist=%.2f m vida=%d | bando=enemigo dano=%d accion=%s\n", s.target, s.target >= 0 ? "jugador" : vrhit_zone_name(s.zone),
+                    s.dist / (W.units_per_m > 0.0f ? W.units_per_m : 1000.0f), s.vital, s.damage, s.action == VRHIT_ACT_RANGE ? "alcance" : "intacta");
+        if (out) *out = s;
+        return 1;
+    }
+    int n = vrhit_scan(ram, side, 0x10, 1, g_t, VRHIT_MAX_T);
     /* geometría sólida = la del anfitrión + los suelos de colisión + lo que ya encontró el trazado del propio juego (colisión del mapa del tirador, puertas y demás colisión dinámica) */
     float gw = rs32(ram, actor + B_WALLHIT) == 1 ? (float)rs32(ram, actor + B_LIMIT) : -1.0f;
     Res r;
-    if (!(player && take_aim(o, d, g_t, n, R, gw, &r))) resolve(ram, g_t, n, o, d, R, gw, &r);
-    VrHitShot s = {(int)side, -1, VRHIT_Z_MISS, VRHIT_ACT_NONE, rs32(ram, actor + B_DAMAGE), -1, r.dist};
+    if (!take_aim(ram, o, d, g_t, n, R, gw, &r)) resolve(ram, g_t, n, o, d, R, gw, &r);
+    s.dist = r.dist;
     int16_t P[3];
     if (r.idx >= 0) {
         const VrHitTarget *t = &g_t[r.idx];
@@ -389,11 +430,13 @@ int vrhit_bullet(uint8_t *ram, uint32_t actor, VrHitShot *out) {
         for (int i = 0; i < 3; i++) { P[i] = (int16_t)lrintf(p[i]); if (P[i] != rs16(ram, actor + B_END + 2u * (uint32_t)i)) same = 0; }
         if (same) P[1] = (int16_t)(P[1] + ((float)P[1] < t->c[1] ? 1 : -1));       /* origen = final sería un segmento nulo */
         for (int i = 0; i < 3; i++) ws16(ram, actor + B_POS + 2u * (uint32_t)i, P[i]);
-        if (player && r.zone == VRHIT_Z_HEAD && t->vital > s.damage) {
+        /* letal solo en el soldado normal: dañable, bando enemigo, su caja (300,1000,300) y vida de 2-3 balas; jefes y demás humanoides reciben el daño del juego */
+        int soldier = (t->cls & 4) && t->side == 2 && t->h[0] == 300.0f && t->h[1] == 1000.0f && t->h[2] == 300.0f && t->vital <= 3 * s.damage;
+        if (r.zone == VRHIT_Z_HEAD && soldier && t->vital > s.damage) {
             s.damage = t->vital;
             ws32(ram, actor + B_DAMAGE, s.damage); ws16(ram, actor + B_TARGET + 38u, (int16_t)s.damage);
         }
-        if (r.zone == VRHIT_Z_BOX && !(t->cls & 4) && W.camera_hit) W.camera_hit(ram, t->addr, P);
+        if (r.cam && !(t->cls & 4) && W.camera_hit) W.camera_hit(ram, t->addr, P);      /* cámara (la reconoce el anfitrión por su blanco) que el juego no va a dañar */
         s.target = t->index; s.vital = t->vital; s.zone = r.zone; s.action = VRHIT_ACT_SEAL;
     } else if (r.cam_ext) {
         for (int i = 0; i < 3; i++) P[i] = (int16_t)lrintf(fmaxf(-32768.0f, fminf(32767.0f, r.pt[i])));
@@ -404,10 +447,10 @@ int vrhit_bullet(uint8_t *ram, uint32_t actor, VrHitShot *out) {
         s.zone = r.wall < R ? VRHIT_Z_WALL : VRHIT_Z_MISS; s.dist = r.wall;
         if (r.crossed) { void_bullet(ram, actor); s.action = VRHIT_ACT_VOID; }
     }
-    if (player || r.idx >= 0 || r.crossed) {
+    {
         float upm = W.units_per_m > 0.0f ? W.units_per_m : 1000.0f;
-        const char *zn = r.cam ? "camara" : (!player && s.target >= 0) ? "jugador" : vrhit_zone_name(s.zone);
-        fprintf(stderr, "[impacto] blanco=%d zona=%s dist=%.2f m vida=%d | bando=%s dano=%d accion=%s\n", s.target, zn, s.dist / upm, s.vital, player ? "jugador" : "enemigo", s.damage,
+        const char *zn = r.cam ? "camara" : vrhit_zone_name(s.zone);
+        fprintf(stderr, "[impacto] blanco=%d zona=%s dist=%.2f m vida=%d | bando=%s dano=%d accion=%s\n", s.target, zn, s.dist / upm, s.vital, "jugador", s.damage,
                 s.action == VRHIT_ACT_SEAL ? "sellada" : s.action == VRHIT_ACT_VOID ? "anulada" : "intacta");
     }
     if (out) *out = s;
