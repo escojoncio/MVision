@@ -425,13 +425,22 @@ final class WeaponRenderer {
         default:
             return
         }
-        d.p1.x = sv.round != 0 ? 1 : 0
-        d.p1.w = sv.surf_w / sv.surf_h
+        // Prismáticos del juego: AA_SIGHT con round = 2. surf_w/h = rectángulo del HUD (la pantalla 4:3 del original); el quad real es una pantalla de `bigSide` metros que pinta el HUD en vivo dentro del rectángulo y negro fuera.
+        let binoMask = sv.kind == Int32(MV_VIEW_AA_SIGHT) && sv.round == 2
+        d.p1.x = sv.round != 0 && !binoMask ? 1 : 0
+        d.p1.w = binoMask ? 1 : sv.surf_w / sv.surf_h
         d.p2.x = auxLinear && sv.kind != Int32(MV_VIEW_AA_SIGHT) ? 1 : 0
+        var quadW = sv.surf_w, quadH = sv.surf_h
+        if binoMask {
+            let bigSide: Float = 48          // a 1 m de la cabeza cubre +-87,6 grados
+            d.p2.y = 0.5 * bigSide / sv.surf_w
+            d.p2.z = 0.5 * bigSide / sv.surf_h
+            quadW = bigSide; quadH = bigSide
+        }
         let q = simd_quatf(ix: sv.surf_rot.0, iy: sv.surf_rot.1, iz: sv.surf_rot.2, r: sv.surf_rot.3).normalized
         var m = simd_float4x4(q)
-        m.columns.0 *= sv.surf_w
-        m.columns.1 *= sv.surf_h
+        m.columns.0 *= quadW
+        m.columns.1 *= quadH
         m.columns.3 = simd_float4(sv.surf_pos.0, sv.surf_pos.1, sv.surf_pos.2, 1)
         d.model = m
 

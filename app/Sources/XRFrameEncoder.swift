@@ -382,7 +382,7 @@ final class XRFrameEncoder {
     private static func binocularZoom(_ zoom: Float) -> Float { min(max(zoom.isFinite ? zoom : 2, 2), 8) }
 
     /// Marco de los prismáticos del juego (scope.c en la lista): rectángulo con la proporción `aspect` de la capa del HUD, fijo a la cabeza a 1 m y de 58 grados de alto, que dibuja la capa del HUD del juego
-    /// (MV_VIEW_AA_SIGHT: textura entera, sin premultiplicar) por encima del mundo ampliado. Es geometría real, así que se ve a profundidad correcta en estéreo; sin prueba de profundidad (nada lo tapa).
+    /// en vivo (MV_VIEW_AA_SIGHT: textura entera, sin premultiplicar) por encima del mundo ampliado; el exterior del rectángulo se tapa con negro (borde de la pantalla del original). Es geometría real, así que se ve a profundidad correcta en estéreo; sin prueba de profundidad (nada lo tapa).
     private static func binocularFrame(head: simd_float4x4, aspect: Float) -> MvVrSpecialView {
         var sv = MvVrSpecialView()
         let q = simd_quatf(head).normalized
@@ -397,6 +397,7 @@ final class XRFrameEncoder {
         sv.surf_w = h * asp; sv.surf_h = h
         sv.uv = (0, 0, 1, 1)
         sv.hide_hud = 1
+        sv.round = 2                 // marca "prismáticos": encodeSpecial tapa con negro todo lo que queda fuera del rectángulo del HUD
         return sv
     }
 

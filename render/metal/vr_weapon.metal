@@ -109,7 +109,7 @@ struct VrSpcDraw {
     float4 uv;                  /* x, y, ancho, alto del subrectángulo de la textura 0 (HUD); el resto de modos usan (0, 0, 1, 1) */
     float4 p0;                  /* x = modo, y = opacidad, z = ruido, w = tiempo (s, módulo 64) */
     float4 p1;                  /* x = disco, y = fijado, z = terminado, w = proporción ancho/alto */
-    float4 p2;                  /* x = la imagen de la textura 0 ya es lineal (se lleva a gamma antes de mezclar) */
+    float4 p2;                  /* x = la imagen de la textura 0 ya es lineal (se lleva a gamma antes de mezclar); y, z = prismáticos (modo HUD con y > 0), ver el fragmento */
 };
 struct VrSpcOut {
     float4 pos [[position]];
@@ -154,6 +154,14 @@ fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buff
         if (d.p2.x > 0.5) rgb = float3(vr_spc_enc1(rgb.x), vr_spc_enc1(rgb.y), vr_spc_enc1(rgb.z));
         float4 o = ovl.sample(sLin, q);
         rgb = mix(rgb, o.xyz, o.w);
+    } else if (mode < 1.5 && d.p2.y > 0.0) {                             /* prismáticos: la capa HUD del juego en vivo, tal cual, en un rectángulo; fuera de él, negro opaco */
+        /* El quad es muy grande (cubre todo el campo). hq = posición en el rectángulo del HUD (0..1; p2.y, p2.z = medio lado del quad / ancho y alto del rectángulo). */
+        float2 hq = float2(r.x * d.p2.y, r.y * d.p2.z) + 0.5;
+        if (hq.x < 0.0 || hq.y < 0.0 || hq.x > 1.0 || hq.y > 1.0) return float4(0.0, 0.0, 0.0, 1.0);
+        float4 h = img.sample(sLin, float2(d.uv.x, d.uv.y) + hq * float2(d.uv.z, d.uv.w));
+        float3 hc = float3(h.x, h.y, h.z);
+        if (kWpnLinear) hc = float3(vr_wpn_lin1(hc.x), vr_wpn_lin1(hc.y), vr_wpn_lin1(hc.z));
+        return float4(hc, clamp(h.w * a, 0.0, 1.0));
     } else if (mode < 1.5) {                                             /* visor antiaéreo: el HUD del juego, sin premultiplicar */
         float2 u = float2(d.uv.x, d.uv.y) + q * float2(d.uv.z, d.uv.w);
         if (u.x < 0.0 || u.y < 0.0 || u.x > 1.0 || u.y > 1.0) discard_fragment();
