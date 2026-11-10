@@ -414,9 +414,14 @@ static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *m
     /* Granada (arma que se dibuja con el modelo del juego): el juego la cuelga de la mano de su ANIMACIÓN (la derecha); se lleva a la mano que la IK dejó en el mando del arma, con la relación mano-arma del juego. */
     uint32_t held_key = 0;
     const int held_side = vrgame_native_hand();
-    if (held_side >= 0) {
-        float Ra[9], ta[3], Rd[9], td[3];
-        if (vrbody_hand_anim(1, Ra, ta) && vrbody_hand_state(held_side, NULL, Rd, td) && ns_wphide_carry(sc, emu_ram, Ra, ta, Rd, td, held_side == 0) > 0) held_key = ns_wphide_key(emu_ram);
+    { const uint32_t fk = vrfire_flier_key(); if (fk && ns_wphide_has(sc, fk)) vrfire_flier_seen(); }   /* granada lanzada: el actor ya está en esta escena -> el modelo de la mano se oculta desde ESTA escena (sin hueco ni duplicado) */
+    if (vrfire_held_hidden()) ns_wphide_apply(sc, emu_ram, 1);
+    else if (held_side >= 0) {
+        float Ra[9], ta[3], Rd[9], td[3], hp[3];
+        if (vrbody_hand_anim(1, Ra, ta) && vrbody_hand_state(held_side, NULL, Rd, td) && ns_wphide_carry(sc, emu_ram, Ra, ta, Rd, td, held_side == 0) > 0) {
+            held_key = ns_wphide_key(emu_ram);
+            if (ns_wphide_pos(sc, emu_ram, hp)) vrfire_set_throw_origin(hp);     /* donde se ve el objeto en la mano: ahí nace la granada lanzada */
+        }
     }
     VblHand hc[2];       /* marco de cada mano del mando con el que se simuló esta escena: el cuerpo vivo mueve la mano propia y la granada desde él hasta el mando de ahora (vbl_piece) */
     for (int s = 0; s < 2; s++) { memset(&hc[s], 0, sizeof hc[s]); hc[s].ok = vrgame_hand_frame_sim(s, hc[s].p, hc[s].q); }

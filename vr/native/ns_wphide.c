@@ -72,3 +72,27 @@ int ns_wphide_carry(NsScene *sc, const uint8_t *ram, const float Ra[9], const fl
     }
     return n;
 }
+
+int ns_wphide_has(const NsScene *sc, uint32_t key) {
+    if (!sc || !key || !sc->inst || !sc->piece) return 0;
+    for (uint32_t i = 0; i < sc->n_inst; i++) {
+        const NsInstance *in = &sc->inst[i];
+        if (in->key == key && in->n_pieces > 0 && (uint64_t)in->first_piece + in->n_pieces <= sc->n_piece) return 1;
+    }
+    return 0;
+}
+
+int ns_wphide_pos(const NsScene *sc, const uint8_t *ram, float p[3]) {
+    if (!sc || !ram || !p) return 0;
+    const uint32_t key = ns_wphide_key(ram);
+    if (!ns_wphide_has(sc, key)) return 0;
+    for (uint32_t i = 0; i < sc->n_inst; i++) {
+        const NsInstance *in = &sc->inst[i];
+        if (in->key != key || in->n_pieces == 0 || (uint64_t)in->first_piece + in->n_pieces > sc->n_piece) continue;
+        const NsXf *w = &sc->piece[in->first_piece].world;
+        if (!isfinite(w->m[3]) || !isfinite(w->m[7]) || !isfinite(w->m[11])) return 0;
+        p[0] = w->m[3]; p[1] = w->m[7]; p[2] = w->m[11];
+        return 1;
+    }
+    return 0;
+}

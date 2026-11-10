@@ -135,6 +135,15 @@ int vrfire_take_flash(int style, VrFireMat *m);
 /* Lanzamiento de granada: posición y velocidad del motor (unidades; v por tick) para la última pose de lanzamiento. */
 int vrfire_set_throw(const float pos_user[3], const float vel_user_mps[3], float tick_s);
 int vrfire_take_throw(int16_t pos[3], int16_t vel[3]);
+/* Granada en la mano: el anfitrión da en cada escena nativa la posición (unidades del motor) del objeto del juego que lleva la mano VR (ns_wphide_pos tras el carry). Si hay una de las últimas
+ * VBlanks, el actor de la granada lanzada nace ahí (sin adelantar la trayectoria: se ve salir de la mano) con la velocidad del gesto; si no, la trayectoria adelantada de siempre. NULL / no finito: se ignora. */
+void vrfire_set_throw_origin(const float p_engine[3]);
+/* Ocultar el modelo de la mano cuando el volador existe: tras crearse el actor se espera a verlo en la escena nativa. vrfire_flier_key() = clave de instancia (NsInstance.key) del objeto del actor
+ * mientras se espera (0 si no); el anfitrión llama a vrfire_flier_seen() en la escena que ya lo contiene; desde entonces vrfire_held_hidden() = 1 durante una ventana corta (el modelo de la mano
+ * de esa escena y las siguientes se oculta, no se lleva a la mano), sin hueco (se oculta justo cuando el volador está) ni duplicado. */
+uint32_t vrfire_flier_key(void);
+void vrfire_flier_seen(void);
+int vrfire_held_hidden(void);
 /* Diagnóstico por stderr de un lanzamiento: original frente a sustituido y validez del mapa (ver vr_fire.c). */
 void vrfire_log_grenade(const int16_t o_pos[3], const int16_t o_vel[3], int subst, const int16_t pos[3], const int16_t vel[3]);
 /* Seguimiento diagnóstico del actor de la granada creada (lo arma vrfire_probe(3, ..., actor)): una línea [granada] cada 0,25 s durante 3 s con su posición, velocidad,

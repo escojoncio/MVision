@@ -351,6 +351,61 @@ static void t_throw(void) {
     CHECK(vrfire_take_throw(pos, vel) == 0, "sin datos: el juego lanza con los suyos"); 
     VrFireStats st; vrfire_stats(&st); CHECK(st.passed >= 1, "contado como pasado");
 }
+/* Granada en la mano: el actor nace donde está el objeto de la mano en la última escena (sin adelantar la trayectoria) con la velocidad del gesto, y el modelo de la mano se oculta
+ * desde la escena en que el volador está en ella (una sola vez, ventana corta). */
+static void t_throw_origin(void) {
+    init_trigger();
+    VrFireMap map = mkmap(0, 0, 0, 0); VrFireIn in = mkin(&map);
+    FGame g; fg_init(&g, 5, 0);
+    vstep(&g, &in, NULL);
+    float p[3] = {0.4f, 1.8f, -0.6f}, v[3] = {1.0f, 2.0f, -5.0f}, org[3] = {1234.4f, 2345.6f, -3456.0f};
+    int16_t pos[3], vel[3];
+    CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "lanzamiento admitido");
+    settle(&g, in, 16, NULL);
+    vrfire_set_throw_origin(org);          /* la última escena antes de crearse el actor */
+    settle(&g, in, 2, NULL);
+    CHECK(vrfire_take_throw(pos, vel) == 1, "datos de lanzamiento con origen");
+    CHECK(pos[0] == 1234 && pos[1] == 2346 && pos[2] == -3456, "nace en el objeto de la mano, sin adelantar (%d %d %d)", pos[0], pos[1], pos[2]);
+    CHECK(vel[0] == -40 && vel[1] == 80 && vel[2] == 200, "velocidad del gesto sin descontar gravedad (%d %d %d)", vel[0], vel[1], vel[2]);
+    /* el origen se consume con el lanzamiento: el siguiente, sin origen nuevo, usa la trayectoria adelantada */
+    CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "otro lanzamiento");
+    settle(&g, in, 16, NULL);
+    CHECK(vrfire_take_throw(pos, vel) == 1 && pos[0] == -620 && pos[2] == 2000, "sin origen nuevo: trayectoria adelantada (%d %d %d)", pos[0], pos[2], pos[1]);
+    /* origen viejo (sin escenas desde hace mucho): no vale */
+    CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "lanzamiento con origen viejo");
+    vrfire_set_throw_origin(org);
+    settle(&g, in, 20, NULL);
+    CHECK(vrfire_take_throw(pos, vel) == 1 && pos[0] != 1234, "origen caducado: no se usa (%d)", pos[0]);
+    float nan3[3] = {NAN, 0, 0};
+    CHECK(vrfire_set_throw(p, v, 0.04f) == 1, "lanzamiento con origen no finito");
+    vrfire_set_throw_origin(nan3); vrfire_set_throw_origin(NULL);
+    CHECK(vrfire_take_throw(pos, vel) == 1 && pos[0] != 1234 && pos[0] != -32768, "origen NaN/NULL: se ignora");
+    /* ocultar el modelo de la mano */
+    const uint32_t A = 0x80150000u, KEY = 0x80000000u | ((A + 0x20) & 0x1FFFFFFFu);
+    VrFireMat m; memset(&m, 0, sizeof m);
+    vrfire_init(NULL); init_trigger();
+    CHECK(vrfire_flier_key() == 0 && !vrfire_held_hidden(), "sin granada lanzada: nada que ocultar");
+    vrfire_flier_seen();
+    CHECK(!vrfire_held_hidden(), "ver un volador que no existe no oculta");
+    vrfire_probe(3, 1, A, &m);
+    CHECK(vrfire_flier_key() == KEY && !vrfire_held_hidden(), "actor creado: se espera verlo en la escena; la mano sigue visible (clave %08x)", vrfire_flier_key());
+    for (int i = 0; i < 10; i++) vstep(&g, &in, NULL);
+    CHECK(vrfire_flier_key() == KEY && !vrfire_held_hidden(), "mientras no esté en la escena no se oculta la mano (sin hueco)");
+    vrfire_flier_seen();
+    CHECK(vrfire_held_hidden() && vrfire_flier_key() == 0, "volador en la escena: la mano se oculta ya, y se deja de buscarlo");
+    vrfire_flier_seen();
+    int n = 0; while (vrfire_held_hidden() && n < 200) { vstep(&g, &in, NULL); n++; }
+    CHECK(n >= 5 && n <= 30, "la mano vuelve a mostrarse pasada una ventana corta (%d VBlanks)", n);
+    vrfire_flier_seen();
+    CHECK(!vrfire_held_hidden(), "después no se vuelve a ocultar");
+    vrfire_probe(3, 1, A, &m);       /* si el volador nunca llega a la escena, se deja de esperar */
+    for (int i = 0; i < 200; i++) vstep(&g, &in, NULL);
+    CHECK(vrfire_flier_key() == 0, "volador que no aparece: se deja de esperar");
+    vrfire_flier_seen();
+    CHECK(!vrfire_held_hidden(), "ya no oculta");
+    vrfire_probe(3, 1, 0x80200000u, &m);   /* actor fuera de RAM */
+    CHECK(vrfire_flier_key() == 0, "actor no válido: sin clave");
+}
 /* Granada preparada (botón mantenido) que se suelta sin lanzar (arma fuera / seguimiento perdido): el juego no la lanza con su velocidad por defecto, cae suave desde la boca. */
 static void t_grenade_cancel(void) {
     for (int cas = 0; cas < 2; cas++) {
@@ -1057,7 +1112,7 @@ static void t_hit_real(void) {
 
 int main(void) {
     t_hit_zones(); t_hit_motivo(); t_hit_camera(); t_hit_floors(); t_hit_enemy(); t_hit_aim(); t_hit_fist(); t_hit_real();
-    t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
+    t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_throw_origin(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
     printf("test_fire: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

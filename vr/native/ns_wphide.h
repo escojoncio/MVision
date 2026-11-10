@@ -28,6 +28,13 @@ int ns_wphide_apply(NsScene *sc, const uint8_t *ram, int on);
  * es la derecha con X invertida). R fila-mayor 3x3 ortonormal; t en unidades del motor. Devuelve las piezas movidas (0 si no hay arma en la escena, argumentos o punteros no válidos: no toca nada). */
 int ns_wphide_carry(NsScene *sc, const uint8_t *ram, const float Ra[9], const float ta[3], const float Rd[9], const float td[3], int mirror);
 
+/* Traslación (unidades del motor) de la primera pieza de la instancia del arma equipada, tal como queda en la escena (tras ns_wphide_carry): dónde ve el jugador el objeto de la mano.
+ * 1 = ok; 0 = sin arma en la escena, argumentos o punteros no válidos, o traslación no finita (p no se toca). */
+int ns_wphide_pos(const NsScene *sc, const uint8_t *ram, float p[3]);
+
+/* 1 si la escena contiene una instancia con esa clave (NsInstance.key) y sus piezas caben en la lista; 0 si no (clave 0 incluida). */
+int ns_wphide_has(const NsScene *sc, uint32_t key);
+
 #ifdef __cplusplus
 }
 #endif

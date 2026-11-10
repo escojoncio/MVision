@@ -43,14 +43,14 @@
 
 /* Modelos de las armas VR en el archivo de stages del usuario (stage residente y id16 del modelo; tablas de corte en vr/weapons/wcut_tables.c).
  * game_id = índice de arma del puente (0 pistola, 1 fusil, 2 granada a, 3 misil guiado, 5 mina, 6 adhesivo, 8 granada c, 9 francotirador).
- * Sin entrada: granada b (7, sin modelo identificado): siguen con el arma del propio juego. */
+ * Granada b (7): modelo 0 = sin modelo VR identificado; la ranura solo lleva la lógica (gesto, mano, trayectoria) y el modelo que se ve es el del propio juego, como en 2 y 8. */
 #define WPN_STAGE "init"
 typedef struct { int game_id; uint16_t model; } WpnModel;
 static const WpnModel WPN_TAB[] = {
-    {0, 0x36f6}, {1, 0x4725}, {9, 0x2d3b}, {3, 0x15a9}, {4, 0x57f8}, {2, 0x3b88}, {8, 0x761a}, {6, 0xf83d}, {5, 0x17a1},
+    {0, 0x36f6}, {1, 0x4725}, {9, 0x2d3b}, {3, 0x15a9}, {4, 0x57f8}, {2, 0x3b88}, {8, 0x761a}, {6, 0xf83d}, {5, 0x17a1}, {7, 0},
 };
 #define NSLOT ((int)(sizeof WPN_TAB / sizeof WPN_TAB[0]))
-/* Modelo VR del arma de id de juego dado (id16 del modelo en WPN_STAGE); 0 = sin modelo VR: se queda el arma del propio juego (granada 7, aturdidora/humo sin modelo identificado). */
+/* Modelo VR del arma de id de juego dado (id16 del modelo en WPN_STAGE); 0 = sin modelo VR: se queda el arma del propio juego (granada 7, aturdidora/humo sin modelo identificado; la 7 tiene ranura solo de lógica). */
 uint16_t vrgame_weapon_model(int game_id) {
     for (int i = 0; i < NSLOT; i++) if (WPN_TAB[i].game_id == game_id) return WPN_TAB[i].model;
     return 0;
@@ -405,11 +405,37 @@ static struct {
     int loading;                 /* ranura en carga (-1 ninguna) */
 } LD = {.loading = -1};
 
+/* Ranura solo de lógica (modelo 0, granada 7): sin mallas ni disco; el arma registrada con el id y un aparejo de manos sin mallas. 1 = lista. */
+static int load_logic_only(Slot *sl, int game_id) {
+    const WeaponDef *base = NULL;
+    for (int i = 0; i < w_registry_count; i++) if (w_registry[i] && w_registry[i]->game_weapon_id == game_id) base = w_registry[i];
+    if (!base) return 0;
+    WeaponDef *def = (WeaponDef *)malloc(sizeof *def);
+    WeaponState *st = (WeaponState *)calloc(1, base->state_size);
+    if (!def || !st) { free(def); free(st); return 0; }
+    *def = *base;
+    st->def = def; def->init(st); st->def = def;
+    VrHandsConfig hc;
+    vrhands_default_config(&hc);
+    hc.grip_mode = VRH_GRIP_SOCKET;
+    VrHandsRig *rig = vrhands_create(&hc);
+    if (!rig) { free(def); free(st); return 0; }      /* sin mallas no hay nada que enlazar: la mano y el mundo del arma no lo necesitan */
+    sl->def = def; sl->st = st; sl->rig = rig;
+    return 1;
+}
+
 static void *load_thread(void *arg) {
     int si = (int)(intptr_t)arg;
     Slot *sl = &SL[si];
     const uint16_t model = WPN_TAB[si].model;
     int rc = -1;
+    if (!model) {
+        if (!load_logic_only(sl, WPN_TAB[si].game_id)) { atomic_store_explicit(&sl->state, LD_FAILED, memory_order_release); return NULL; }
+        sl->native = vrgame_weapon_uses_game_model(WPN_TAB[si].game_id);
+        atomic_store_explicit(&sl->state, LD_READY, memory_order_release);
+        fprintf(stderr, "[vrgame] arma VR %d lista (solo lógica; se dibuja el modelo del propio juego)\n", WPN_TAB[si].game_id);
+        return NULL;
+    }
     size_t len = 0;
     WLoaded m;
     memset(&m, 0, sizeof m);
@@ -922,6 +948,15 @@ void vrgame_test_install(int game_id, void *def, void *state, void *rig) {
     if (si < 0) return;
     SL[si].def = (WeaponDef *)def; SL[si].st = (WeaponState *)state; SL[si].rig = (VrHandsRig *)rig;
     atomic_store(&SL[si].state, LD_READY);
+}
+
+/* Pruebas: la carga de la ranura solo de lógica (granada 7) tal como la hace el hilo de carga, sin disco. 1 = lista. */
+int vrgame_test_load_logic(int game_id) {
+    int si = slot_of(game_id);
+    if (si < 0 || WPN_TAB[si].model || !load_logic_only(&SL[si], game_id)) return 0;
+    SL[si].native = vrgame_weapon_uses_game_model(game_id);
+    atomic_store(&SL[si].state, LD_READY);
+    return 1;
 }
 
 void vrgame_test_clock(uint64_t ns) { atomic_store(&clk_fake_ns, ns); atomic_store_explicit(&clk_fake, ns != 0, memory_order_release); }

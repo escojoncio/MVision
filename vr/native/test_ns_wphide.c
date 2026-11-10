@@ -140,6 +140,26 @@ int main(void) {
         CHECK(ns_wphide_carry(&sc, ram, I3, ta, I3, td, 0) == 0 && memcmp(before, piece, sizeof piece) == 0, "carry: sin arma equipada");
     }
 
+    /* ns_wphide_pos / ns_wphide_has: dónde está el arma del juego (tras el carry) y si una instancia concreta (la granada lanzada) está en la escena */
+    {
+        build_ram(2); build_scene(wkey);
+        piece[3].world.m[3] = 11; piece[3].world.m[7] = 22; piece[3].world.m[11] = 33; piece[4].world.m[3] = 99;
+        float p[3] = {0, 0, 0};
+        CHECK(ns_wphide_pos(&sc, ram, p) == 1 && p[0] == 11 && p[1] == 22 && p[2] == 33, "pos: traslación de la primera pieza del arma: (%g, %g, %g)", p[0], p[1], p[2]);
+        CHECK(ns_wphide_pos(NULL, ram, p) == 0 && ns_wphide_pos(&sc, NULL, p) == 0 && ns_wphide_pos(&sc, ram, NULL) == 0, "pos: argumentos nulos");
+        piece[3].world.m[7] = NAN;
+        CHECK(ns_wphide_pos(&sc, ram, p) == 0, "pos: traslación no finita");
+        build_ram(2); build_scene(0x80000000u | 0x00140000u);
+        CHECK(ns_wphide_pos(&sc, ram, p) == 0, "pos: arma que no está en la escena");
+        build_ram(2); build_scene(wkey); sc.n_piece = 4;
+        CHECK(ns_wphide_pos(&sc, ram, p) == 0, "pos: instancia fuera de rango");
+        build_ram(2); build_scene(wkey);
+        CHECK(ns_wphide_has(&sc, wkey) == 1 && ns_wphide_has(&sc, 0x80000000u | 0x00150000u) == 1 && ns_wphide_has(&sc, 0x80000000u | 0x00170000u) == 0, "has: instancias presentes y ausentes");
+        CHECK(ns_wphide_has(&sc, 0) == 0 && ns_wphide_has(NULL, wkey) == 0, "has: clave 0 y escena nula");
+        sc.n_piece = 4;
+        CHECK(ns_wphide_has(&sc, wkey) == 0, "has: instancia fuera de la lista de piezas");
+    }
+
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

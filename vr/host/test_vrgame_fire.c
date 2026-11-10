@@ -424,6 +424,25 @@ static void grenade_models(void) {
     for (int i = 0; i < 3; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
     CHECK(vrgame_native_hand() == -1, "sin arma equipada: sin objeto en la mano (%d)", vrgame_native_hand());
     vrgame_test_set_native(2, 0);
+    /* granada 7 (aturdidora): sin modelo VR pero con ranura de lógica: gesto, mano y trayectoria como 2 y 8, dibujada con el modelo del juego */
+    CHECK(vrgame_test_load_logic(7) == 1 && vrgame_test_load_logic(2) == 0 && vrgame_test_load_logic(99) == 0, "ranura solo de lógica: la 7 sí; la 2 (con modelo) y un id fuera de tabla no");
+    world(7, 0, 3);
+    vrgame_reset();
+    vrgame_set_enabled(0, 1);
+    mv_vrgame_set_options(1, 2);
+    sq_seen = 0;
+    for (int i = 0; i < 6; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    MvVrGameStatus s7; mv_vrgame_status(&s7);
+    CHECK(s7.active && s7.weapon == 7, "granada 7 con la lógica VR activa");
+    CHECK(vrgame_native_hand() == 1 && vrfire_hide_enabled() == 0, "granada 7: modelo del juego en la mano derecha y sin ocultarlo (mano %d)", vrgame_native_hand());
+    for (int i = 0; i < 10; i++) gvbl(0.2f, 0.0f, 1.0f, 0);
+    for (int i = 0; i < 10; i++) gvbl(0.2f + 0.045f * (float)i, 0.0f, 1.0f, 0);
+    gvbl(0.2f + 0.045f * 10, 0.0f, 0.6f, 0); gvbl(0.2f + 0.045f * 11, 0.0f, 0.1f, 0);
+    for (int i = 0; i < 4; i++) gvbl(0.2f + 0.045f * 11, 0.0f, 0.0f, 0);
+    mv_vrgame_status(&s7);
+    CHECK(s7.throws >= 1 && s7.rejects == 0, "granada 7: soltar el gatillo lanza con el gesto (%u lanzamientos, %u rechazos)", s7.throws, s7.rejects);
+    world(-1, 0, 0);
+    for (int i = 0; i < 3; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
 }
 
 /* ---- marco de la mano del mando: el de la mano propia en la escena y el del arma son el mismo, y se mueven igual ---- */
