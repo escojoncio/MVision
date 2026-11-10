@@ -100,6 +100,17 @@ int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "uso: nshands <dir_volcado> <dir_salida>\n"); return 1; }
     if (!load(argv[1], "ram.bin", RAM0, sizeof RAM0) || !load(argv[1], "vram.bin", VRAM, sizeof VRAM)) { fprintf(stderr, "volcado ilegible\n"); return 1; }
     load(argv[1], "scratch.bin", SCR, sizeof SCR);
+    ns_hand_glove_blit(VRAM);   /* textura propia del guante (la app la escribe en la VRAM del renderer con un evento sintético; ver vrhost.c) */
+    if (getenv("NSHANDS_GLOVE")) {   /* textura sola, ampliada x8 sin suavizado, en el PNG indicado */
+        enum { Z = 8, TW = 64, TH = 32 };
+        static uint8_t img[TH * Z * TW * Z * 3];
+        for (int y = 0; y < TH * Z; y++) for (int x = 0; x < TW * Z; x++) {
+            const uint16_t c = ns_sample_texel(VRAM, NS_GLOVE_TPAGE, NS_GLOVE_CLUT, 0, NS_GLOVE_U0 + x / Z, y / Z);
+            uint8_t *o = &img[((size_t)y * TW * Z + (size_t)x) * 3];
+            o[0] = (uint8_t)((c & 31) * 255 / 31); o[1] = (uint8_t)(((c >> 5) & 31) * 255 / 31); o[2] = (uint8_t)(((c >> 10) & 31) * 255 / 31);
+        }
+        if (ns_write_png(getenv("NSHANDS_GLOVE"), TW * Z, TH * Z, img)) printf("no se pudo escribir la textura\n");
+    }
     memcpy(RAM, RAM0, sizeof RAM);
     float Rt[9], tt[3], Rh[9], th[3];
     piece_xf(1, Rt, tt); piece_xf(6, Rh, th);
@@ -173,7 +184,7 @@ int main(int argc, char **argv) {
             float gw[3]; for (int i = 0; i < 3; i++) gw[i] = W[4 * i] * gc[0] + W[4 * i + 1] * gc[1] + W[4 * i + 2] * gc[2] + W[4 * i + 3];
             printf("  muñeca IK (%.0f %.0f %.0f) objetivo (%.0f %.0f %.0f) err %.1f; pieza mano t (%.0f %.0f %.0f); centro de agarre (%.0f %.0f %.0f); ojo (%.0f %.0f %.0f)\n", d->sol.wrist[0], d->sol.wrist[1], d->sol.wrist[2],
                    d->target_wrist[0], d->target_wrist[1], d->target_wrist[2], d->sol.err_mm, W[3], W[7], W[11], gw[0], gw[1], gw[2], V.eye[0], V.eye[1], V.eye[2]); }
-        NsAdaptOpts ao; memset(&ao, 0, sizeof ao); ao.vram = VRAM; ao.keep_hands = 1;
+        NsAdaptOpts ao; memset(&ao, 0, sizeof ao); ao.vram = VRAM; ao.keep_hands = 1; ao.no_shade = getenv("NSHANDS_FLAT") != NULL;   /* NSHANDS_FLAT: sin luz (colores de la textura tal cual) */
         NsAdaptSrc *src = NULL; ao.src_out = &src;
         NsAdaptStats ast; NsRTri *tris = NULL;
         size_t nt0 = ns_adapt_scene(&S, st, &ao, &tris, &ast), nt = 0;

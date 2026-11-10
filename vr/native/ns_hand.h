@@ -13,10 +13,12 @@
  * cerrada. La transición se recalcula en cada fotograma (depende de la postura de la muñeca; ~100 vértices); la topología solo si cambia la malla del antebrazo. Sin antebrazo: sin unión.
  * El antebrazo del motor se sustituye por una copia con el giro REPARTIDO a lo largo (0 en el codo, soldado al brazo; todo en la muñeca): sin retorcer la franja del codo.
  *
- * ESTILO PS1 como el brazo: la cara palmar desde la muñeca hasta la base de los dedos lleva la textura de la palma de la manopla del juego (tpage/clut/UV de su cara, proyectada en plano)
- * y la cara dorsal, también hasta la base de los dedos, la del dorso de la manopla (con su recuadro gris), cada texel en la posición que tiene en la manopla;
- * dedos, pulgar y costados van de un solo color (el texel central de la textura de los dedos de la manopla) con sombreado de la luz del jugador. Sin texturas utilizables, plana.
- * Iluminación, ambiente, niebla y zona: los de la instancia del jugador. Si algo falla (sin manopla enlazada, sin malla, escena sin sitio, almacén lleno) NO se oculta la manopla.
+ * ESTILO PS1 como el brazo, con una textura PROPIA del guante (64x32 texels de 4 bits, 12 colores, dibujada a 8x y reducida sin suavizado; ver ns_hand_glove_block): el dorso desde la muñeca
+ * hasta la base de los dedos lleva la zona del dorso (parche gris rectangular, placas de nudillos), la unión con el antebrazo la zona del puño y el resto (palma, dedos, pulgar, costados) la
+ * zona de tela, cada cara con su proyección plana local. La textura vive en una zona de la VRAM que el juego no usa (NS_GLOVE_V*): el consumidor de la VRAM debe escribirla (ns_hand_glove_block /
+ * ns_hand_glove_blit). Sin texturas utilizables en la manopla del juego, plana (como antes).
+ * Iluminación y ambiente: los del jugador reducidos a su luminancia (luz propia neutra añadida a la escena, ambiente propio): sin el tinte de la escena el guante sale gris carbón; si no cabe otra luz se usa la del
+ * jugador tal cual. Niebla y zona: las de la instancia del jugador. Si algo falla (sin manopla enlazada, sin malla, escena sin sitio, almacén lleno) NO se oculta la manopla.
  *
  * Todo en el hilo de emulación (se llama desde el cierre de ns_hook_tick). */
 #include <stdint.h>
@@ -66,6 +68,20 @@ typedef struct {
 int ns_hand_apply(NsScene *sc, NsMeshStore *store, const NsPlayerMap *map, const NsHandIn *in);
 void ns_hand_reset(void);                 /* olvida las mallas construidas (cambio de ejecutable) y los contadores */
 void ns_hand_stats(NsHandStats *out);
+
+/* Textura propia del guante. Zona de la VRAM (halfwords) sin uso en los volcados del juego: x 992..1023, y 0..31; los texels (4 bits) en x 992..1007 (tpage 0x000F = x 960, u 128..191) y la CLUT
+ * (16 entradas) en x 1008..1023, fila 0 (clut 0x003F). Zonas en texels: dorso u 128..175 (48 de ancho) t 0..31; tela u 176..191 t 0..15; puño u 176..191 t 16..31 (una fila por anillo). */
+#define NS_GLOVE_VX 992
+#define NS_GLOVE_VY 0
+#define NS_GLOVE_VW 32
+#define NS_GLOVE_VH 32
+#define NS_GLOVE_TPAGE 0x000Fu
+#define NS_GLOVE_CLUT 0x003Fu
+#define NS_GLOVE_U0 128                  /* u del primer texel de la textura ((992 - 960) * 4) */
+#define NS_GLOVE_TEXID 0xFFF1u
+/* El bloque NS_GLOVE_VW x NS_GLOVE_VH de halfwords (por filas) que va a (NS_GLOVE_VX, NS_GLOVE_VY): se genera una vez, siempre igual. */
+const uint16_t *ns_hand_glove_block(void);
+void ns_hand_glove_blit(uint16_t *vram);   /* lo escribe en una VRAM de 1024x512 */
 
 /* Clasificación de texturas de la manopla (visible para las pruebas). */
 typedef struct {

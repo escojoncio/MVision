@@ -22,7 +22,6 @@ typedef struct {
     uint32_t last_build;         /* fotograma (S.st.frames) de la última construcción */
     uint32_t next_try;           /* no volver a intentar construir antes de este fotograma (tras un fallo) */
     NsFace f[VRHA_NT];           /* caras (índices locales a su pieza, UV de la manopla): no cambian con la pose */
-    NsHandTex plain;             /* texel del color del guante (caras sin la textura de la palma) */
     /* transición con el antebrazo del motor (ver ns_hand.h): anillo = los vértices del extremo del antebrazo (copia exacta, en su marco); malla de la transición en el marco de la mano */
     int seam;
     uint64_t seam_fore;          /* malla del antebrazo y muñeca (en su marco, enteros) con que se calculó */
@@ -114,31 +113,97 @@ int ns_hand_classify(const NsMesh *g, int side, NsHandTex tex[4]) {
     return found;
 }
 
-/* Interpolación bilineal en el cuadrilátero A,B,C,D de texels con (s,t) 0..255 (A->B por s, A->D por t); con un recorte del 4 % para no leer vecinos. */
-static void map_uv(const NsHandTex *tx, uint8_t su, uint8_t sv, uint8_t *u, uint8_t *t) {
-    float s = 0.04f + 0.92f * (float)su / 255.0f, v = 0.04f + 0.92f * (float)sv / 255.0f;
-    float w[4] = {(1 - s) * (1 - v), s * (1 - v), s * v, (1 - s) * v};
-    float uu = 0, tt = 0;
-    for (int k = 0; k < 4; k++) { uu += w[k] * tx->u[k]; tt += w[k] * tx->t[k]; }
-    *u = (uint8_t)ns_clampf(floorf(uu + 0.5f), 0.0f, 255.0f); *t = (uint8_t)ns_clampf(floorf(tt + 0.5f), 0.0f, 255.0f);
+/* ---------------------------------------------------------------------------------------------------------------- textura propia del guante */
+/* 64x32 texels de 4 bits (ver ns_hand.h): se evalúa una función de dibujo a 8x8 muestras por texel, se promedia el color y se pasa al color más cercano de la paleta (12 colores), sin
+ * suavizado entre texels. Zonas: dorso t 0..31 u 0..47 (u = ancho de la mano de meñique a pulgar, t = largo de los nudillos a la muñeca; cajas del dorso del asset: 85,4 x 93,8 mm),
+ * tela u 48..63 t 0..15, puño u 48..63 t 16..31 (una fila por anillo de la transición con el antebrazo). */
+#define GT_W 64
+#define GT_H 32
+#define GT_DW 48
+#define GT_SS 8
+#define GT_MMX 85.4f
+#define GT_MMY 93.8f
+enum { P_BASE, P_WEAVE, P_DEEP, P_SHEEN, P_PLATE, P_FILL, P_HI, P_SHADE, P_EDGE, P_SLEEVE, P_BAND, P_SEAM, P_N };
+static const uint8_t GT_PAL[P_N][3] = {   /* grises neutros (R = G = B, sin tinte), RGB555 exacto (componentes de 5 bits x 8). Todo el guante casi negro; SOLO la placa del dorso (FILL, HI, SHADE, EDGE) es clara */
+    {18, 18, 18}, {24, 24, 24}, {10, 10, 10}, {32, 32, 32}, {28, 28, 28}, {128, 128, 128}, {152, 152, 152}, {104, 104, 104}, {64, 64, 64}, {20, 20, 20}, {24, 24, 24}, {8, 8, 8}};
+static unsigned gt_hash(int x, int y) { unsigned h = (unsigned)x * 73856093u ^ (unsigned)y * 19349663u; h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15; return h; }
+static int gt_cloth(int tx, int ty) {   /* sarga fina con motas */
+    const unsigned h = gt_hash(tx, ty) & 31u;
+    return h == 0 ? P_SHEEN : h == 1 ? P_DEEP : ((tx + ty) & 3) == 0 ? P_WEAVE : P_BASE;
+}
+static int gt_sample(float x, float y) {   /* índice de paleta en el punto (x, y) de la textura, en texels */
+    const int tx = (int)x, ty = (int)y;
+    if (x >= (float)GT_DW) {
+        if (y < 16.0f) return gt_cloth(tx, ty);
+        const int r = ty - 16;
+        return r < 5 ? P_SLEEVE : r < 7 ? P_SEAM : r < 13 ? P_BAND : r == 13 ? P_SEAM : P_BASE;
+    }
+    const float X = x / (float)(GT_DW - 1) * GT_MMX, Y = y / (float)(GT_H - 1) * GT_MMY;   /* mm desde el borde del meñique y desde el borde de los nudillos */
+    static const float K[4][2] = {{0.79f, 0.21f}, {0.54f, 0.17f}, {0.31f, 0.25f}, {0.11f, 0.36f}};   /* nudillos (índice, corazón, anular, meñique): (ancho, largo) 0..1 */
+    for (int k = 0; k < 4; k++) {
+        const float cx = K[k][0] * GT_MMX, cy = K[k][1] * GT_MMY, dx = (X - cx) / 8.5f, dy = (Y - cy) / 6.5f, hx = (X - cx + 1.5f) / 4.5f, hy = (Y - cy + 1.5f) / 3.2f;
+        if (dx * dx + dy * dy < 1.0f) return hx * hx + hy * hy < 1.0f ? P_PLATE : P_SHEEN;
+    }
+    /* parche de gris claro: rectángulo de esquinas redondeadas con borde fino más oscuro */
+    const float px = X - 0.5f * GT_MMX, py = Y - 0.67f * GT_MMY, hx = 30.0f, hy = 21.0f, rr = 6.0f;   /* ~70 % del ancho y ~45 % del largo del dorso, entre los nudillos y la muñeca */
+    const float qx = fabsf(px) - (hx - rr), qy = fabsf(py) - (hy - rr);
+    const float d = hypotf(qx > 0 ? qx : 0, qy > 0 ? qy : 0) + fminf(fmaxf(qx, qy), 0.0f) - rr;
+    if (d < 0.0f) return d > -2.2f ? P_EDGE : py < -(hy - 6.0f) ? P_HI : py > hy - 6.0f ? P_SHADE : P_FILL;
+    return gt_cloth(tx, ty);
+}
+static uint16_t GT_BLK[NS_GLOVE_VH][NS_GLOVE_VW];
+static int GT_OK;
+const uint16_t *ns_hand_glove_block(void) {
+    if (!GT_OK) {
+        static uint8_t idx[GT_H][GT_W];
+        for (int ty = 0; ty < GT_H; ty++) for (int tx = 0; tx < GT_W; tx++) {
+            float sum[3] = {0, 0, 0};
+            for (int j = 0; j < GT_SS; j++) for (int i = 0; i < GT_SS; i++) {
+                const uint8_t *c = GT_PAL[gt_sample((float)tx + ((float)i + 0.5f) / GT_SS, (float)ty + ((float)j + 0.5f) / GT_SS)];
+                for (int a = 0; a < 3; a++) sum[a] += c[a];
+            }
+            int best = 0; float bd = 1e30f;
+            for (int p = 0; p < P_N; p++) {
+                float dd = 0;
+                for (int a = 0; a < 3; a++) { const float e = sum[a] / (GT_SS * GT_SS) - GT_PAL[p][a]; dd += e * e; }
+                if (dd < bd) { bd = dd; best = p; }
+            }
+            idx[ty][tx] = (uint8_t)best;
+        }
+        memset(GT_BLK, 0, sizeof GT_BLK);
+        for (int ty = 0; ty < GT_H; ty++) for (int w = 0; w < GT_W / 4; w++)
+            GT_BLK[ty][w] = (uint16_t)(idx[ty][4 * w] | idx[ty][4 * w + 1] << 4 | idx[ty][4 * w + 2] << 8 | idx[ty][4 * w + 3] << 12);
+        for (int i = 0; i < 16; i++) { const uint8_t *c = GT_PAL[i < P_N ? i : P_BASE]; GT_BLK[0][16 + i] = (uint16_t)((c[0] >> 3) | (c[1] >> 3) << 5 | (c[2] >> 3) << 10); }
+        GT_OK = 1;
+    }
+    return &GT_BLK[0][0];
+}
+void ns_hand_glove_blit(uint16_t *vram) {
+    const uint16_t *b = ns_hand_glove_block();
+    for (int y = 0; y < NS_GLOVE_VH; y++) memcpy(&vram[(NS_GLOVE_VY + y) * 1024 + NS_GLOVE_VX], &b[y * NS_GLOVE_VW], NS_GLOVE_VW * sizeof *b);
 }
 
-/* Como map_uv, pero con las esquinas de la cara emparejadas por su POSICIÓN en la manopla (no por su orden): (s,v) 0..1 = ancho (z) y largo (y) de la mano de menor a mayor. Así el
- * texel de cada punto es el que la manopla tiene ahí (el recuadro gris del dorso queda junto a los nudillos en las dos manos). Con una cara que no tenga una esquina en cada
- * cuadrante (triángulo, degenerada) vale el texel central. */
-static void map_uv_pos(const NsHandTex *tx, float s, float v, uint8_t *u, uint8_t *t) {
-    float cy = 0, cz = 0, uu = 0, tt = 0;
-    int seen = 0;
-    for (int k = 0; k < 4; k++) { cy += 0.25f * tx->y[k]; cz += 0.25f * tx->z[k]; }
-    s = 0.04f + 0.92f * s; v = 0.04f + 0.92f * v;
-    for (int k = 0; k < 4; k++) {
-        const int hz = tx->z[k] > cz, hy = tx->y[k] > cy;
-        const float w = (hz ? s : 1 - s) * (hy ? v : 1 - v);
-        seen |= 1 << (2 * hz + hy);
-        uu += w * tx->u[k]; tt += w * tx->t[k];
+/* UV de una cara triangular (posiciones del asset en mm) en la zona de tela: proyección plana local sobre el plano de la cara, centrada en el centro de la zona y a 0,5 texel/mm como mucho
+ * (menos si la cara es grande: siempre dentro de la zona de 16x16). Cara degenerada: el texel central. */
+static void cloth_uv(const float p[3][3], uint8_t u[3], uint8_t t[3]) {
+    float c[3], e1[3], e2[3], n[3], xa[3], ya[3], a[3], b[3], m = 0.0f;
+    for (int i = 0; i < 3; i++) { c[i] = (p[0][i] + p[1][i] + p[2][i]) / 3.0f; e1[i] = p[1][i] - p[0][i]; e2[i] = p[2][i] - p[0][i]; }
+    n[0] = e1[1] * e2[2] - e1[2] * e2[1]; n[1] = e1[2] * e2[0] - e1[0] * e2[2]; n[2] = e1[0] * e2[1] - e1[1] * e2[0];
+    const float ln = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]), l1 = sqrtf(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
+    for (int k = 0; k < 3; k++) { u[k] = NS_GLOVE_U0 + GT_DW + 8; t[k] = 8; }
+    if (!(ln > 1e-6f) || !(l1 > 1e-6f)) return;
+    for (int i = 0; i < 3; i++) xa[i] = e1[i] / l1;
+    ya[0] = (n[1] * xa[2] - n[2] * xa[1]) / ln; ya[1] = (n[2] * xa[0] - n[0] * xa[2]) / ln; ya[2] = (n[0] * xa[1] - n[1] * xa[0]) / ln;
+    for (int k = 0; k < 3; k++) {
+        a[k] = b[k] = 0.0f;
+        for (int i = 0; i < 3; i++) { a[k] += (p[k][i] - c[i]) * xa[i]; b[k] += (p[k][i] - c[i]) * ya[i]; }
+        m = fmaxf(m, hypotf(a[k], b[k]));
     }
-    if (seen != 15) { map_uv(tx, 128, 128, u, t); return; }
-    *u = (uint8_t)ns_clampf(floorf(uu + 0.5f), 0.0f, 255.0f); *t = (uint8_t)ns_clampf(floorf(tt + 0.5f), 0.0f, 255.0f);
+    const float sc = fminf(0.5f, 7.0f / m);
+    for (int k = 0; k < 3; k++) {
+        u[k] = (uint8_t)(NS_GLOVE_U0 + GT_DW + (int)floorf(8.0f + sc * a[k] + 0.5f));
+        t[k] = (uint8_t)(int)floorf(8.0f + sc * b[k] + 0.5f);
+    }
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- construcción */
@@ -150,21 +215,13 @@ static int dominant_joint(int pv0, const uint8_t *tr) {
     return d;
 }
 /* Caras de la mano. Orden de los vértices: de antihorario hacia fuera (asset) a la convención del motor (cross(B-A, D-A) interior); la izquierda es un espejo y ya invierte el sentido.
- * Estilo PS1 como el brazo: la cara PALMAR desde la muñeca hasta la base de los dedos (muñeca y metacarpos) lleva la textura de la palma de la manopla del juego, proyectada en plano
- * (ancho de la palma -> u, largo -> v) y la cara DORSAL de esa misma zona la del dorso de la manopla (su recuadro gris incluido; map_uv_pos), si la manopla tiene cara dorsal con textura
- * propia; el resto (dedos, pulgar, costados) es de un solo color: las cuatro esquinas en el texel central de la textura de los dedos de la manopla (si no, la del dorso)
- * (el color del guante), sombreado por la luz. */
+ * Estilo PS1 como el brazo, con la textura propia del guante (ns_hand_glove_block): la cara DORSAL desde la muñeca hasta la base de los dedos (muñeca y metacarpos) lleva la zona del dorso
+ * (parche gris incluido), proyectada en plano por la POSICIÓN de cada vértice (ancho de la mano z -> u, largo y -> t: el mismo vértice toma el mismo texel en las dos manos); el resto (palma,
+ * dedos, pulgar, costados) la zona de tela, con la proyección plana local de cada cara (cloth_uv), sombreado por la luz. Si la manopla del juego no tiene ninguna textura utilizable, plana. */
 static int build(HandCache *c, int side, const NsMesh *g) {
     NsHandTex tex[4];
     c->textured = ns_hand_classify(g, side, tex) > 0;
-    const NsHandTex *plain = tex[NS_HT_FINGER].ok ? &tex[NS_HT_FINGER] : tex[NS_HT_BACK].ok ? &tex[NS_HT_BACK] : &tex[NS_HT_PALM];   /* los dedos de la manopla: el color del guante */
-    float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};    /* caja de la palma (vértices de las caras texturizadas) */
-    for (int p = 0; p < VRHA_NP; p++) for (int t = vrha_piece[p].t0; t < vrha_piece[p].t0 + vrha_piece[p].nt; t++) {
-        const int dj = dominant_joint(vrha_piece[p].v0, vrha_tri[t]);
-        if (vrha_role[t] != VRHA_ROLE_PALM || !(dj == 0 || (dj >= VRHS_INDEX_MC && (dj - VRHS_INDEX_MC) % 5 == 0))) continue;
-        for (int k = 0; k < 3; k++) for (int a = 0; a < 3; a++) { const float v = vrha_pos[vrha_piece[p].v0 + vrha_tri[t][k]][a]; if (v < lo[a]) lo[a] = v; if (v > hi[a]) hi[a] = v; }
-    }
-    float blo[3] = {1e9f, 1e9f, 1e9f}, bhi[3] = {-1e9f, -1e9f, -1e9f};  /* caja del dorso (vértices de las caras dorsales texturizadas) */
+    float blo[3] = {1e9f, 1e9f, 1e9f}, bhi[3] = {-1e9f, -1e9f, -1e9f};  /* caja del dorso (vértices de las caras dorsales) */
     for (int p = 0; p < VRHA_NP; p++) for (int t = vrha_piece[p].t0; t < vrha_piece[p].t0 + vrha_piece[p].nt; t++) {
         const int dj = dominant_joint(vrha_piece[p].v0, vrha_tri[t]);
         if (vrha_role[t] != VRHA_ROLE_BACK || !(dj == 0 || (dj >= VRHS_INDEX_MC && (dj - VRHS_INDEX_MC) % 5 == 0))) continue;
@@ -178,23 +235,25 @@ static int build(HandCache *c, int side, const NsMesh *g) {
             const uint8_t *tr = vrha_tri[t];
             const uint8_t o[4] = {tr[0], side > 0 ? tr[2] : tr[1], side > 0 ? tr[1] : tr[2], side > 0 ? tr[1] : tr[2]};
             const int dj = dominant_joint(pc->v0, tr);
-            const int front = vrha_role[t] == VRHA_ROLE_PALM && (dj == 0 || (dj >= VRHS_INDEX_MC && (dj - VRHS_INDEX_MC) % 5 == 0));
-            const int back = tex[NS_HT_BACK].ok == 1 && vrha_role[t] == VRHA_ROLE_BACK && (dj == 0 || (dj >= VRHS_INDEX_MC && (dj - VRHS_INDEX_MC) % 5 == 0));
-            const NsHandTex *tx = front ? &tex[NS_HT_PALM] : back ? &tex[NS_HT_BACK] : plain;
+            const int back = vrha_role[t] == VRHA_ROLE_BACK && (dj == 0 || (dj >= VRHS_INDEX_MC && (dj - VRHS_INDEX_MC) % 5 == 0));
+            uint8_t cu[3], ct[3];
+            if (c->textured && !back) {
+                float pp[3][3];
+                for (int k = 0; k < 3; k++) memcpy(pp[k], vrha_pos[pc->v0 + o[k]], sizeof pp[k]);
+                cloth_uv(pp, cu, ct);
+            }
             for (int q = 0; q < 4; q++) {
                 f->v[q] = o[q]; f->n[q] = o[q];
-                if (!tx->ok) continue;
+                if (!c->textured) continue;
+                if (!back) { f->u[q] = cu[q < 3 ? q : 2]; f->t[q] = ct[q < 3 ? q : 2]; continue; }
                 const float *v = vrha_pos[pc->v0 + o[q]];
-                if (back) { map_uv_pos(tx, (v[2] - blo[2]) / (bhi[2] - blo[2]), (v[1] - blo[1]) / (bhi[1] - blo[1]), &f->u[q], &f->t[q]); continue; }
-                if (!front) { map_uv(tx, 128, 128, &f->u[q], &f->t[q]); continue; }
-                const float su = (v[2] - lo[2]) / (hi[2] - lo[2]), sv = (v[1] - lo[1]) / (hi[1] - lo[1]);
-                map_uv(tx, (uint8_t)ns_clampf(su * 255.0f + 0.5f, 0.0f, 255.0f), (uint8_t)ns_clampf(sv * 255.0f + 0.5f, 0.0f, 255.0f), &f->u[q], &f->t[q]);
+                f->u[q] = (uint8_t)(NS_GLOVE_U0 + (int)ns_clampf(floorf((v[2] - blo[2]) / (bhi[2] - blo[2]) * (float)(GT_DW - 1) + 0.5f), 0.0f, (float)(GT_DW - 1)));
+                f->t[q] = (uint8_t)(int)ns_clampf(floorf((v[1] - blo[1]) / (bhi[1] - blo[1]) * (float)(GT_H - 1) + 0.5f), 0.0f, (float)(GT_H - 1));
             }
             f->flags = NS_FF_TRI;
-            if (tx->ok) { f->tpage = tx->tpage; f->clut = tx->clut; f->texid = tx->texid; }
+            if (c->textured) { f->tpage = NS_GLOVE_TPAGE; f->clut = NS_GLOVE_CLUT; f->texid = NS_GLOVE_TEXID; }
         }
     }
-    c->plain = *plain;
     c->glove_id = g->id;
     c->have_pose = 0;
     c->seam = 0;
@@ -345,7 +404,10 @@ static int build_seam(HandCache *c, int side, const NsMesh *fm, const int32_t d[
         memset(F, 0, sizeof *F);
         F->v[0] = F->n[0] = c->lt[t][0]; F->v[1] = F->n[1] = c->lt[t][1]; F->v[2] = F->n[2] = c->lt[t][2]; F->v[3] = F->n[3] = c->lt[t][2];
         F->flags = NS_FF_TRI;
-        if (c->plain.ok) { for (int q = 0; q < 4; q++) map_uv(&c->plain, 128, 128, &F->u[q], &F->t[q]); F->tpage = c->plain.tpage; F->clut = c->plain.clut; F->texid = c->plain.texid; }
+        if (c->textured) {   /* zona del puño: una fila por anillo (0 = extremo del antebrazo .. NS_HAND_LR - 1 = borde de la muñeca de la mano) */
+            for (int q = 0; q < 4; q++) { const int vi = c->lt[t][q < 3 ? q : 2]; F->u[q] = NS_GLOVE_U0 + GT_DW + 8; F->t[q] = (uint8_t)(16 + 3 * (vi < nf ? 0 : 1 + (vi - nf) / VRHA_NCUFF)); }
+            F->tpage = NS_GLOVE_TPAGE; F->clut = NS_GLOVE_CLUT; F->texid = NS_GLOVE_TEXID;
+        }
     }
     c->nf = nf;
     c->seam_fore = fm->id; memcpy(c->seam_d, d, sizeof c->seam_d);
@@ -556,6 +618,22 @@ static int wrist_in_fore(const NsXf *f, const NsXf *h, int32_t d[3]) {
     return 1;
 }
 
+/* Luz neutra de la mano: la del jugador (o la global) con los colores de las luces y el ambiente reducidos a su luminancia (sin tinte), para que el guante se vea gris carbón en cualquier escena.
+ * Se añade a la escena como luz propia con ambiente propio. Devuelve su índice, o -1 si no hay sitio (se queda la luz del jugador). */
+static int neutral_light(NsScene *sc, const NsInstance *pin) {
+    if (sc->n_light >= sc->cap_light || !sc->lights) return -1;
+    NsLight L = (pin->light >= 0 && (uint32_t)pin->light < sc->n_light) ? sc->lights[pin->light] : sc->global_light;
+    const int16_t *src = (pin->flags & NS_IF_OWN_AMBIENT) ? L.amb : sc->global_light.amb;
+    const int32_t a = (77 * src[0] + 150 * src[1] + 29 * src[2] + 128) >> 8;
+    for (int l = 0; l < 3; l++) {
+        const int32_t y = (77 * L.col[0][l] + 150 * L.col[1][l] + 29 * L.col[2][l] + 128) >> 8;
+        for (int c = 0; c < 3; c++) L.col[c][l] = (int16_t)y;
+    }
+    for (int c = 0; c < 3; c++) L.amb[c] = (int16_t)a;
+    sc->lights[sc->n_light] = L;
+    return (int)sc->n_light++;
+}
+
 static int one_hand(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const NsHandIn *in, int h /* 0 izq, 1 der */) {
     const int part = h ? NS_PART_HAND_R : NS_PART_HAND_L, side = h ? 1 : -1;
     const uint32_t key = h ? NS_HAND_KEY_R : NS_HAND_KEY_L;
@@ -618,6 +696,7 @@ static int one_hand(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const 
     ni->key = key; ni->first_piece = sc->n_piece; ni->n_pieces = (uint16_t)(VRHA_NP + base);
     ni->flags = (uint16_t)(pin->flags & (NS_IF_LIT | NS_IF_OWN_AMBIENT | NS_IF_BLEND | NS_IF_THERMAL_OK));
     ni->zone_mask = pin->zone_mask; ni->layer = pin->layer; ni->light = pin->light; ni->vis_state = pin->vis_state;
+    if (pin->flags & NS_IF_LIT) { const int nl = neutral_light(sc, pin); if (nl >= 0) { ni->light = (int16_t)nl; ni->flags |= NS_IF_OWN_AMBIENT; } }
     if (base) {
         NsPiece *q = &sc->piece[sc->n_piece];
         memset(q, 0, sizeof *q);

@@ -301,6 +301,8 @@ __attribute__((weak)) size_t ns_cover_glue_poll(char *buf, size_t cap) { (void)b
 __attribute__((weak)) uint32_t mdec_out_words_total(void) { return 0; }
 /* Manos nuevas (ns_hand.c, solo en la app; vr/body/vr_hand_skin.c): definición débil vacía para las pruebas de escritorio, donde la manopla del motor se queda como está. */
 __attribute__((weak)) int ns_hand_apply(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const NsHandIn *in) { (void)sc; (void)st; (void)map; (void)in; return 0; }
+/* Textura propia del guante (ns_hand.c): bloque de VRAM que el renderer debe tener; sin ns_hand.c (pruebas de escritorio) no hay bloque. */
+__attribute__((weak)) const uint16_t *ns_hand_glove_block(void) { return NULL; }
 static _Atomic int hands_new = 1;        /* menú VR «Manos: nuevas / originales» (defecto nuevas) */
 void mv_vrhost_set_hands_new(int on) { atomic_store(&hands_new, on ? 1 : 0); }
 int mv_vrhost_hands_new(void) { return atomic_load(&hands_new); }
@@ -677,7 +679,9 @@ static int fill_slot(Slot *s, const GpuDrawList *l, const VrScene *sc) {
 
     size_t nops = l->nops;
     if (!grow((void **)&pre, &pre_cap, nops + 1, sizeof *pre)) return -1;
-    uint32_t nev = 0;
+    const uint16_t *glove = ns_hand_glove_block();   /* subida sintética de la textura del guante: el evento 0 de cada lista (antes de cualquier lote, para que el pase nativo ya la tenga) */
+    const uint32_t ngl = NS_GLOVE_VW * NS_GLOVE_VH;
+    uint32_t nev = glove ? 1u : 0u;
     for (size_t i = 0; i < nops; i++) {
         pre[i] = nev;
         int t = l->ops[i].type;
@@ -686,6 +690,11 @@ static int fill_slot(Slot *s, const GpuDrawList *l, const VrScene *sc) {
     pre[nops] = nev;
     if (!grow((void **)&s->ops, &s->ops_cap, nev, sizeof *s->ops)) return -1;
     uint32_t k = 0;
+    if (glove) {
+        GpuOp *g = &s->ops[k++];
+        memset(g, 0, sizeof *g);
+        g->type = GPU_OP_UPLOAD; g->rx = NS_GLOVE_VX; g->ry = NS_GLOVE_VY; g->rw = NS_GLOVE_VW; g->rh = NS_GLOVE_VH; g->data_off = l->ndata; g->data_n = ngl;
+    }
     for (size_t i = 0; i < nops; i++) {
         int t = l->ops[i].type;
         if (t == GPU_OP_UPLOAD || t == GPU_OP_VCOPY || t == GPU_OP_FILL) s->ops[k++] = l->ops[i];
@@ -695,8 +704,10 @@ static int fill_slot(Slot *s, const GpuDrawList *l, const VrScene *sc) {
         b->ev_end = pre[b->ev_end < nops ? b->ev_end : nops];
         b->src_op = pre[b->src_op < nops ? b->src_op : nops];
     }
-    if (!grow((void **)&s->data, &s->data_cap, l->ndata, sizeof *s->data)) return -1;
+    const uint32_t ndata = l->ndata + (glove ? ngl : 0u);
+    if (!grow((void **)&s->data, &s->data_cap, ndata, sizeof *s->data)) return -1;
     if (l->ndata) memcpy(s->data, l->data, (size_t)l->ndata * sizeof *s->data);
+    if (glove) memcpy(s->data + l->ndata, glove, (size_t)ngl * sizeof *s->data);
     s->has_vram = 0;
     if (l->vram_init) {
         size_t n = (size_t)GPU_VRAM_W * GPU_VRAM_H;
@@ -713,8 +724,8 @@ static int fill_slot(Slot *s, const GpuDrawList *l, const VrScene *sc) {
     s->list.disp = l->disp;
     s->list.ops = nev ? s->ops : NULL;
     s->list.nops = nev;
-    s->list.data = l->ndata ? s->data : NULL;
-    s->list.ndata = l->ndata;
+    s->list.data = ndata ? s->data : NULL;
+    s->list.ndata = ndata;
     s->list.vram_init = s->has_vram ? s->vram : NULL;
 
     s->sc = *sc;
