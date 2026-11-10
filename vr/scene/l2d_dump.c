@@ -4,7 +4,8 @@
  *   a cuadros): <volcado>_capa2d.png (1x, exacta) y <volcado>_hoja.png (x2: frame.png original | capa del panel | en vista de cine, además la capa completa opaca). Un volcado sin list.bin (los de «stage»: solo RAM/VRAM/GTE)
  *   NO tiene capa reproducible (la capa sale de las primitivas de la lista de dibujo): se avisa y se salta, no se aproxima.
  * La escena se ensambla como vrhost.c build_one en el modo nativo (opciones por defecto + screen_filter + drop_world2d, puente y registro de cámara del meta.txt, correspondencia mundo -> usuario, reensamblado sin filtro si no se conserva):
- *   op_dest == 2 = lo que va al panel. Aproximaciones: cine_cand y last_scene3d se deducen del meta (rec_active == 0 con registro) y de las primitivas 3D de ESTA lista. El modo de la capa sale de view_mode del meta
+ *   op_dest == 2 = lo que va al panel. Con procedencia en el volcado (prov.bin) se clasifica como el visor (vr_prov.h, sin aprendizaje de la ventana): las primitivas de clase WORLD no salen de vr_scene (con drop_world2d) y, en la
+ *   vista mundo, las clases sin capa 2D (FX_*, SCOPE_FRAME) se quitan del panel, igual que el reparto por capas de vrhost.c (aquí HUD + ventana + pantalla completa van juntas en una sola capa). Aproximaciones: cine_cand y last_scene3d se deducen del meta (rec_active == 0 con registro) y de las primitivas 3D de ESTA lista. El modo de la capa sale de view_mode del meta
  *   (= VrView.kind de vr_view.h: 0 UI, 1 mundo, 2 cinemática del motor, 3 vídeo), igual que vrhost.c: UI / vídeo -> VL_FULL (fotograma entero opaco), cinemática -> VL_PANEL_VERIFIED, mundo -> VL_PANEL.
  *   La VRAM del volcado es la del FINAL de la lista y se usa también como vram_start/vram_end (el visor usa la real de cada momento): para los modos con 2D semitransparente, realimentación (fbk) o texturas dibujadas dentro de la zona mostrada, y
  *   sobre todo para VL_PANEL_VERIFIED (que repite el mundo y lo compara con vram_end), la capa puede no ser idéntica a la del visor.
@@ -22,6 +23,7 @@
 #include "hle.h"
 #include "vr_scene.h"
 #include "vr_layer2d.h"
+#include "vr_prov.h"
 #include "ns_dump.h"
 #include "vr_camera.h"
 #include "vr_usermap.h"
@@ -100,6 +102,7 @@ static uint8_t *png_read_stored(const char *path, int *w, int *h) {
 static int build_scene(const NsDump *d, const GpuDrawList *l, VrScene *sc) {
     VrSceneOpts o = vr_scene_opts_default();
     o.screen_filter = 1;   /* on_start */
+    o.op_class = vpc_op_class_cb;   /* build_one con la procedencia encendida (sin aprendizaje de la ventana: ctx NULL) */
     o.drop_world2d = getenv("L2D_SIN_W2D") == NULL && ((int)ns_dump_meta_num(d, "view_mode", 1) == VRV_K_WORLD || (int)ns_dump_meta_num(d, "view_mode", 1) == VRV_K_ENGINE);    /* build_one: vista mundo y cinemática del motor (el meta no trae el motivo: selector/pausa no se distinguen); L2D_SIN_W2D=1 la apaga (comparar con/sin) */
     BridgeState bs; memset(&bs, 0, sizeof bs);
     VrCamRecord rec; memset(&rec, 0, sizeof rec);
@@ -130,6 +133,15 @@ static int build_scene(const NsDump *d, const GpuDrawList *l, VrScene *sc) {
         if (!vrhost_keep_filter(1, cine_cand, scene3d, sc->has_3d, sc->world_valid, sc->filter.n_scan, sc->filter.frame_on, sc->filter.n_strips)) {
             VrSceneOpts o2 = o; o2.screen_filter = 0;
             rc = vr_scene_build(l, &bs, &o2, sc);
+        }
+    }
+    if (rc == 0 && sc->op_dest && sc->op_cls && (int)ns_dump_meta_num(d, "view_mode", 1) == VRV_K_WORLD) {   /* vista mundo: reparto del panel por clase (vrhost.c, vpc_split_dest); las clases sin capa no llegan al panel */
+        static uint8_t *od;
+        uint8_t *q = (uint8_t *)realloc(od, (size_t)sc->n_op_dest + 1);
+        if (q) {
+            od = q;
+            for (uint32_t i = 0; i < sc->n_op_dest; i++) od[i] = sc->op_dest[i] == 2 && vpc_layer_of(sc->op_cls[i]) < 0 ? 0 : sc->op_dest[i];
+            sc->op_dest = od;
         }
     }
     return rc;

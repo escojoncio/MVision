@@ -1089,8 +1089,8 @@ static void build_one(const GpuDrawList *l, int si) {
               if (nn - l2_log_ns >= 1000000000ull) { char lb[1024]; l2_log_ns = nn; if (vl2a_report(l2as[0], lb, sizeof lb) > 0) fprintf(stderr, "%s\n", lb); } }
             if (rt_prov_on && mono_ns() - pc_log_ns >= 1000000000ull) {   /* [prov2d]: clases del panel en el último segundo; UNKNOWN va al HUD */
                 pc_log_ns = mono_ns();
-                if (pc_lists) fprintf(stderr, "[prov2d] vista=%s listas=%u HUD_WORLD=%u WINDOW=%u FULL=%u FX_VIGNETTE=%u FX_LETTERBOX=%u SCOPE_FRAME=%u SCOPE_TEXT=%u UNKNOWN=%u | ventanas_aprendidas=%u descartadas=%u | fx: vineta=%.2f radio=%.2f bandas=%.2f mira=%d zoom=%.2f\n",
-                    vrprov_view_name(vrprov_view(view.kind, view.reason)), pc_lists, pc_cls[VPC_HUD_WORLD], pc_cls[VPC_WINDOW], pc_cls[VPC_FULL], pc_cls[VPC_FX_VIGNETTE], pc_cls[VPC_FX_LETTERBOX], pc_cls[VPC_SCOPE_FRAME], pc_cls[VPC_SCOPE_TEXT], pc_cls[VPC_UNKNOWN],
+                if (pc_lists) fprintf(stderr, "[prov2d] vista=%s listas=%u HUD_WORLD=%u WINDOW=%u FULL=%u FX_VIGNETTE=%u FX_LETTERBOX=%u SCOPE_FRAME=%u SCOPE_TEXT=%u UNKNOWN=%u FX_SCREEN=%u WORLD=%u | ventanas_aprendidas=%u descartadas=%u | fx: vineta=%.2f radio=%.2f bandas=%.2f mira=%d zoom=%.2f\n",
+                    vrprov_view_name(vrprov_view(view.kind, view.reason)), pc_lists, pc_cls[VPC_HUD_WORLD], pc_cls[VPC_WINDOW], pc_cls[VPC_FULL], pc_cls[VPC_FX_VIGNETTE], pc_cls[VPC_FX_LETTERBOX], pc_cls[VPC_SCOPE_FRAME], pc_cls[VPC_SCOPE_TEXT], pc_cls[VPC_UNKNOWN], pc_cls[VPC_FX_SCREEN], pc_cls[VPC_WORLD],
                     prov_learn.n_learned, prov_learn.n_demoted, (double)fx_hold.fx.vignette, (double)fx_hold.fx.vign_radius, (double)fx_hold.fx.letterbox, (int)fx_hold.fx.scope_on, (double)fx_hold.fx.scope_zoom);
                 memset(pc_cls, 0, sizeof pc_cls); pc_lists = 0;
             }

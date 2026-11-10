@@ -67,9 +67,9 @@ $(OUT)/test_dump_pick: test_dump_pick.c vrdump.h
 	@mkdir -p $(OUT)
 	$(CC) -I. $(CFLAGS) -o $@ test_dump_pick.c
 
-$(OUT)/test_vrprov: test_vrprov.c vrprov.h vr_view.h $(RT)/prov.h $(RT)/gpu.h
+$(OUT)/test_vrprov: test_vrprov.c vrprov.h vr_view.h ../scene/vr_prov.c ../scene/vr_prov_rules.c ../scene/vr_prov.h $(RT)/prov.h $(RT)/gpu.h
 	@mkdir -p $(OUT)
-	$(CC) -I. -I$(RT) $(CFLAGS) -o $@ test_vrprov.c
+	$(CC) -I. -I$(RT) -I../scene $(CFLAGS) -o $@ test_vrprov.c ../scene/vr_prov.c ../scene/vr_prov_rules.c -lm
 
 # Disparo VR de punta a punta sobre vrgame_pad con RAM y puente sintéticos (sin runtime ni datos del juego; anfitrión sustituido en el propio test).
 VGSRC := vrgame.c vrbodyg.c ../camera/vr_hzd_ray.c ../bridge/bridge.c ../bridge/bridge_addrs.c ../input/vr_gesture.c ../input/vr_melee.c ../body/vr_body.c ../body/vr_fist.c ../body/vr_hand_skin.c ../body/vr_hand_asset.c ../body/vr_body_cam.c ../body/vr_pose.c \

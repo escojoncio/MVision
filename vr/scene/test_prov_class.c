@@ -14,7 +14,7 @@ static GpuDrawList dl;
 static ProvEntry tab[64];
 
 /* ids de la tabla sintética */
-enum { I_CINEMA = 1, I_MOTSE, I_TELOP, I_FAMA, I_SCOPE, I_SIGHT, I_MENUMAN, I_CB, I_OTHER, I_EFFECT, I_SCOPE_FN, I_CINEMA_FN, I_WIN, I_X, I_SORT, I_SORT2, I_LAST };
+enum { I_CINEMA = 1, I_MOTSE, I_TELOP, I_FAMA, I_SCOPE, I_SIGHT, I_MENUMAN, I_CB, I_OTHER, I_EFFECT, I_SCOPE_FN, I_CINEMA_FN, I_WIN, I_X, I_SORT, I_SORT2, I_GAS, I_FADE, I_LAST };
 
 static void set_e(int id, const char *name, uint32_t fn) {
     tab[id].id = (uint16_t)id; tab[id].fn = fn; tab[id].actor_node = name && name[0] ? 0x800be4e0u : 0;
@@ -35,6 +35,8 @@ static void reset(void) {
     set_e(I_X, "", 0x80099999u);
     set_e(I_SORT, "", 0x8001da18u);         /* etapa de ordenación del canal principal: encadena paquetes que escribieron otros */
     set_e(I_SORT2, "", 0x80018304u);        /* ordenación de canales (llama a las etapas) */
+    set_e(I_GAS, "gas_efct.c", 0x800de1f0u);   /* anillo del gas: efecto de pantalla con paquetes propios */
+    set_e(I_FADE, "fadeio.c", 0x800e15e8u);    /* fundido */
     dl.prov = tab; dl.nprov = I_LAST;
 }
 static GpuOp *add(int type, int prov) { GpuOp *o = &ops[dl.nops++]; o->type = (uint8_t)type; o->prov = (uint16_t)prov; return o; }
@@ -48,9 +50,9 @@ static int cls_of(const VrProvLearn *S, const GpuOp *o) { return vpc_class_op(S,
 
 static void test_rules(void) {
     reset();
-    int ids[] = {I_CINEMA, I_MOTSE, I_TELOP, I_FAMA, I_SCOPE, I_SIGHT, I_MENUMAN, I_CB, I_OTHER, I_EFFECT, I_SCOPE_FN, I_CINEMA_FN};
-    int unt[] = {VPC_FX_LETTERBOX, VPC_FX_VIGNETTE, VPC_FULL, VPC_FULL, VPC_SCOPE_FRAME, VPC_SCOPE_FRAME, VPC_HUD_WORLD, VPC_HUD_WORLD, VPC_UNKNOWN, VPC_UNKNOWN, VPC_SCOPE_FRAME, VPC_FX_LETTERBOX};
-    int tex[] = {VPC_FX_LETTERBOX, VPC_FX_VIGNETTE, VPC_FULL, VPC_FULL, VPC_SCOPE_TEXT, VPC_SCOPE_TEXT, VPC_HUD_WORLD, VPC_HUD_WORLD, VPC_UNKNOWN, VPC_UNKNOWN, VPC_SCOPE_TEXT, VPC_FX_LETTERBOX};
+    int ids[] = {I_CINEMA, I_MOTSE, I_TELOP, I_FAMA, I_SCOPE, I_SIGHT, I_MENUMAN, I_CB, I_OTHER, I_EFFECT, I_SCOPE_FN, I_CINEMA_FN, I_GAS, I_FADE};
+    int unt[] = {VPC_FX_LETTERBOX, VPC_FX_VIGNETTE, VPC_FULL, VPC_FULL, VPC_SCOPE_FRAME, VPC_SCOPE_FRAME, VPC_HUD_WORLD, VPC_HUD_WORLD, VPC_UNKNOWN, VPC_UNKNOWN, VPC_SCOPE_FRAME, VPC_FX_LETTERBOX, VPC_FX_SCREEN, VPC_FX_SCREEN};
+    int tex[] = {VPC_FX_LETTERBOX, VPC_FX_VIGNETTE, VPC_FULL, VPC_FULL, VPC_SCOPE_TEXT, VPC_SCOPE_TEXT, VPC_HUD_WORLD, VPC_HUD_WORLD, VPC_UNKNOWN, VPC_UNKNOWN, VPC_SCOPE_TEXT, VPC_FX_LETTERBOX, VPC_FX_SCREEN, VPC_FX_SCREEN};
     for (size_t k = 0; k < sizeof ids / sizeof *ids; k++) {
         GpuOp *a = rect(ids[k], 0, 0, 8, 8, 0), *b = rect(ids[k], 0, 0, 8, 8, GPU_F_TEXTURED);
         CHECK(cls_of(NULL, a) == unt[k], "regla id %d sin textura: %s (esperado %s)", ids[k], vpc_class_name(cls_of(NULL, a)), vpc_class_name(unt[k]));
@@ -131,7 +133,7 @@ static void test_window_learning(void) {
     CHECK(1, "ok");
 }
 
-/* Paquete encadenado por una rutina de ordenación (prov = ordenación): la procedencia es la de quien lo escribió (prov2); sin escritor conocido, UNKNOWN; con ámbito normal no cambia. */
+/* Paquete encadenado por una rutina de ordenación (prov = ordenación): la procedencia es la de quien lo escribió (prov2); sin escritor con regla es del MUNDO (WORLD); con ámbito normal no cambia. */
 static void test_chain(void) {
     reset();
     CHECK(vpc_is_chain(&tab[I_SORT]) && vpc_is_chain(&tab[I_SORT2]) && !vpc_is_chain(&tab[I_MENUMAN]) && !vpc_is_chain(&tab[I_OTHER]) && !vpc_is_chain(NULL), "vpc_is_chain: solo las rutinas de ordenación");
@@ -142,17 +144,25 @@ static void test_chain(void) {
     GpuOp *c = rect(I_SORT, 0, 0, 8, 8, GPU_F_TEXTURED); c->prov2 = I_SCOPE;
     CHECK(cls_of(NULL, c) == VPC_SCOPE_TEXT, "escritor scope.c texturado: SCOPE_TEXT (%s)", vpc_class_name(cls_of(NULL, c)));
     GpuOp *d = rect(I_SORT, 0, 0, 8, 8, 0);
-    CHECK(cls_of(NULL, d) == VPC_UNKNOWN, "ordenación sin escritor conocido: UNKNOWN");
+    CHECK(cls_of(NULL, d) == VPC_WORLD, "ordenación sin escritor conocido: WORLD (%s)", vpc_class_name(cls_of(NULL, d)));
     GpuOp *e = rect(I_SORT, 0, 0, 8, 8, 0); e->prov2 = I_SORT2;
-    CHECK(cls_of(NULL, e) == VPC_UNKNOWN, "escritor que también es una rutina de ordenación: UNKNOWN");
+    CHECK(cls_of(NULL, e) == VPC_WORLD, "escritor que también es una rutina de ordenación: WORLD (%s)", vpc_class_name(cls_of(NULL, e)));
     GpuOp *f = rect(I_SORT, 0, 0, 8, 8, 0); f->prov2 = I_OTHER;
-    CHECK(cls_of(NULL, f) == VPC_UNKNOWN, "escritor de otra función: UNKNOWN");
+    CHECK(cls_of(NULL, f) == VPC_WORLD, "escritor de otra función (sin regla): WORLD (%s)", vpc_class_name(cls_of(NULL, f)));
     GpuOp *g = rect(I_MENUMAN, 0, 0, 8, 8, 0); g->prov2 = I_CINEMA;
     CHECK(cls_of(NULL, g) == VPC_HUD_WORLD, "ámbito normal: manda quien encadenó, prov2 no cambia nada (%s)", vpc_class_name(cls_of(NULL, g)));
     GpuOp *h = rect(0, 0, 0, 8, 8, 0); h->prov2 = I_CINEMA;
     CHECK(cls_of(NULL, h) == VPC_FX_LETTERBOX, "prov == 0 sigue usando prov2");
     GpuOp *k = rect(I_SORT, 0, 0, 8, 8, 0); k->prov2 = (uint16_t)(I_LAST + 5);
-    CHECK(cls_of(NULL, k) == VPC_UNKNOWN, "escritor fuera de la tabla: UNKNOWN");
+    CHECK(cls_of(NULL, k) == VPC_WORLD, "escritor fuera de la tabla: WORLD (%s)", vpc_class_name(cls_of(NULL, k)));
+    GpuOp *m = rect(I_SORT, 0, 0, 8, 8, 0); m->prov2 = I_EFFECT;
+    CHECK(cls_of(NULL, m) == VPC_WORLD, "escritor actor de efectos sin regla (o2_damge.c): WORLD (%s)", vpc_class_name(cls_of(NULL, m)));
+    GpuOp *n = rect(I_SORT, 0, 0, 320, 240, GPU_F_SEMI); n->prov2 = I_FADE;
+    CHECK(cls_of(NULL, n) == VPC_FX_SCREEN, "escritor fadeio.c: FX_SCREEN aunque lo encadene la ordenación (%s)", vpc_class_name(cls_of(NULL, n)));
+    CHECK(vpc_layer_of(VPC_FX_SCREEN) == -1, "FX_SCREEN no tiene capa 2D");
+    CHECK(vpc_layer_of(VPC_WORLD) == VPC_L_HUD, "WORLD que vr_scene no descartó (sin drop_world2d: selector / pausa): al HUD, como antes");
+    CHECK(!strcmp(vpc_class_name(VPC_WORLD), "WORLD") && !strcmp(vpc_class_name(VPC_FX_SCREEN), "FX_SCREEN"), "nombres de las clases nuevas");
+    { GpuDrawList nol = dl; nol.prov = NULL; nol.nprov = 0; CHECK(vpc_class_op(NULL, &nol, d) == VPC_UNKNOWN, "sin tabla de procedencia: UNKNOWN (HUD), como antes"); }
 
     /* aprendizaje de la ventana por escritor: el id de la ordenación no se aprende; el escritor que solo emite con la ventana abierta sí */
     reset();
@@ -170,7 +180,7 @@ static void test_chain(void) {
     vpc_learn_note(&S, &dl, VPC_ST_OPEN);
     CHECK(cls_of(&S, &ops[0]) == VPC_HUD_WORLD, "escritor que emite siempre: HUD_WORLD (%s)", vpc_class_name(cls_of(&S, &ops[0])));
     CHECK(cls_of(&S, &ops[1]) == VPC_WINDOW, "escritor que solo emite con la ventana abierta: WINDOW, aunque lo encadene la ordenación (%s)", vpc_class_name(cls_of(&S, &ops[1])));
-    CHECK(cls_of(&S, &ops[2]) == VPC_UNKNOWN, "sin escritor no se aprende como ventana (%s)", vpc_class_name(cls_of(&S, &ops[2])));
+    CHECK(cls_of(&S, &ops[2]) == VPC_WORLD, "sin escritor no se aprende como ventana (%s)", vpc_class_name(cls_of(&S, &ops[2])));
 
     /* efectos: bandas de cinemática encadenadas por la ordenación */
     VrFx fx;
@@ -208,6 +218,12 @@ static void test_unknown_and_split(void) {
     CHECK(lc[VPC_L_HUD] == 2 && lc[VPC_L_WINDOW] == 0 && lc[VPC_L_FULL] == 1, "op_dest 0 y 3 no se reparten (%u %u %u)", lc[0], lc[1], lc[2]);
     vpc_split_dest(NULL, c2, 8, out, lc);
     CHECK(lc[0] == 0 && lc[1] == 0 && lc[2] == 0, "sin op_dest: nada");
+    uint8_t c4[8] = {VPC_FX_SCREEN, VPC_WORLD, VPC_HUD_WORLD, VPC_FX_SCREEN, VPC_WORLD, VPC_UNKNOWN, VPC_WINDOW, VPC_FULL};
+    vpc_split_dest(d2, c4, 8, out, lc);
+    CHECK(lc[VPC_L_HUD] == 4 && lc[VPC_L_WINDOW] == 1 && lc[VPC_L_FULL] == 1 && b0[0] == 0 && b0[3] == 0 && b1[0] == 0 && b1[3] == 0 && b2[0] == 0 && b2[3] == 0 && b0[1] == 2 && b0[4] == 2,
+          "FX_SCREEN (gas, fundido) no va a ninguna capa del panel; WORLD que llega al reparto, al HUD (%u %u %u)", lc[0], lc[1], lc[2]);
+    vpc_tally(d2, c4, 8, cnt);
+    CHECK(cnt[VPC_FX_SCREEN] == 2 && cnt[VPC_WORLD] == 2 && cnt[VPC_HUD_WORLD] == 1 && cnt[VPC_UNKNOWN] == 1, "recuento por clase con las clases nuevas");
 }
 
 /* vr_scene_build rellena op_cls con el gancho de VrSceneOpts */
@@ -232,6 +248,64 @@ static void test_scene_hook(void) {
         vpc_split_dest(s.op_dest, s.op_cls, s.n_op_dest, out, lc);
         CHECK(lc[VPC_L_HUD] == 2 && lc[VPC_L_FULL] == 1 && lc[VPC_L_WINDOW] == 0, "reparto de la escena: %u %u %u", lc[0], lc[1], lc[2]);
     }
+    vr_scene_release();
+}
+
+/* Primitivas del MUNDO por procedencia (clase WORLD: las encadenó la ordenación del canal 3D y su escritor no tiene regla): con drop_world2d (el nativo dibuja el mundo y sus efectos) no van al
+ * panel 2D (VR_FATE_WORLD2D), sean RECT (nieve), LINE (chaff) o POLY posteriores al último 3D. El HUD, los créditos, las bandas y la ventana no cambian, tampoco si los encadena la ordenación. */
+static void test_scene_world(void) {
+    reset();
+    rect(I_SORT, 100, 60, 4, 4, 0);                                   /* 0: copo de nieve (sprite del canal 3D, sin escritor conocido) */
+    { GpuOp *o = add(GPU_OP_LINE, I_SORT); o->v[0].x = 20; o->v[0].y = 30; o->v[1].x = 60; o->v[1].y = 44; o->v[0].r = o->v[1].r = 200; o->cx2 = 319; o->cy2 = 255; o->prov2 = I_EFFECT; }   /* 1: línea de un efecto */
+    { GpuOp *o = add(GPU_OP_POLY, I_SORT2); o->nv = 3; o->v[0].x = 10; o->v[0].y = 10; o->v[1].x = 30; o->v[1].y = 10; o->v[2].x = 10; o->v[2].y = 30; o->cx2 = 319; o->cy2 = 255; }      /* 2: polígono sin vista, encadenado */
+    rect(I_MENUMAN, 10, 200, 20, 8, 0);                               /* 3: HUD */
+    rect(I_SORT, 40, 200, 20, 8, 0)->prov2 = I_MENUMAN;               /* 4: HUD encadenado por la ordenación */
+    rect(I_SORT, 40, 100, 100, 12, GPU_F_TEXTURED)->prov2 = I_TELOP;  /* 5: créditos encadenados por la ordenación */
+    rect(I_SORT, 0, 0, 320, 30, GPU_F_SEMI)->prov2 = I_CINEMA;        /* 6: banda de cinemática encadenada */
+    rect(0, 50, 50, 8, 8, 0);                                         /* 7: sin procedencia */
+    rect(I_GAS, 60, 60, 40, 40, GPU_F_SEMI);                          /* 8: gas_efct.c */
+    rect(I_OTHER, 70, 150, 8, 8, 0);                                  /* 9: otra función, no encadenada */
+    static uint8_t fate[16];
+    vr_scene_set_fate(fate, sizeof fate);
+    VrSceneOpts o = vr_scene_opts_default();
+    o.drop_clear = 0; o.drop_world2d = 1; o.op_class = vpc_op_class_cb; o.op_class_ctx = NULL;
+    VrScene s;
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.op_dest && s.op_cls && s.n_op_dest == 10, "escena con drop_world2d y gancho");
+    if (s.op_dest && s.op_cls) {
+        CHECK(s.op_dest[0] == 0 && fate[0] == VR_FATE_WORLD2D, "RECT encadenado por la ordenación: mundo, no panel (dest %u fate %u)", s.op_dest[0], fate[0]);
+        CHECK(s.op_dest[1] == 0 && fate[1] == VR_FATE_WORLD2D, "LINE encadenada por la ordenación: mundo, no panel (dest %u fate %u)", s.op_dest[1], fate[1]);
+        CHECK(s.op_dest[2] == 0 && fate[2] == VR_FATE_WORLD2D, "POLY sin vista encadenado (0x80018304), fuera del pase del mundo: mundo, no panel (dest %u fate %u)", s.op_dest[2], fate[2]);
+        CHECK(s.op_dest[3] == 2 && s.op_cls[3] == VPC_HUD_WORLD && s.op_dest[4] == 2 && s.op_cls[4] == VPC_HUD_WORLD, "menuman.c (directo y encadenado): HUD, sin cambios (%u %u)", s.op_dest[3], s.op_dest[4]);
+        CHECK(s.op_dest[5] == 2 && s.op_cls[5] == VPC_FULL, "telop.c encadenado: FULL, sin cambios (%u)", s.op_dest[5]);
+        CHECK(s.op_dest[6] == 2 && s.op_cls[6] == VPC_FX_LETTERBOX, "cinema.c encadenado: FX_LETTERBOX, sin cambios (%u)", s.op_dest[6]);
+        CHECK(s.op_dest[7] == 2 && s.op_cls[7] == VPC_UNKNOWN && s.op_dest[9] == 2 && s.op_cls[9] == VPC_UNKNOWN, "sin procedencia / otra función no encadenada: UNKNOWN al HUD, sin cambios (%u %u)", s.op_dest[7], s.op_dest[9]);
+        CHECK(s.op_dest[8] == 2 && s.op_cls[8] == VPC_FX_SCREEN, "gas_efct.c: sale de vr_scene con la clase FX_SCREEN (%u %u)", s.op_dest[8], s.op_cls[8]);
+        uint8_t b0[10], b1[10], b2[10]; uint8_t *out[VPC_L_N] = {b0, b1, b2}; uint32_t lc[VPC_L_N];
+        vpc_split_dest(s.op_dest, s.op_cls, s.n_op_dest, out, lc);
+        CHECK(lc[VPC_L_HUD] == 4 && lc[VPC_L_FULL] == 1 && lc[VPC_L_WINDOW] == 0 && b0[8] == 0 && b1[8] == 0 && b2[8] == 0 && b0[0] == 0 && b0[1] == 0 && b0[2] == 0,
+              "panel: HUD 4 (menuman x2, sin procedencia, otra función), créditos 1; ni el gas (sin capa) ni los efectos del mundo (no salen de vr_scene) (%u %u %u)", lc[0], lc[1], lc[2]);
+    }
+    /* ventana aprendida cuyo escritor encadena la ordenación: sigue siendo WINDOW y va al panel */
+    {
+        VrProvLearn S; vpc_learn_reset(&S); S.win[I_WIN] = 1;
+        GpuOp keep = ops[0]; ops[0].prov2 = I_WIN;
+        o.op_class_ctx = &S;
+        CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.op_dest && s.op_cls && s.op_dest[0] == 2 && s.op_cls[0] == VPC_WINDOW, "ventana aprendida encadenada por la ordenación: WINDOW al panel, sin cambios");
+        ops[0] = keep; o.op_class_ctx = NULL;
+    }
+    /* sin drop_world2d (menús, vídeo, ventana del selector / pausa): todo va al panel como antes (clase WORLD: capa HUD) */
+    o.drop_world2d = 0;
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.op_dest && s.op_cls && s.op_dest[0] == 2 && s.op_dest[1] == 2 && s.op_dest[2] == 2 && s.op_cls[0] == VPC_WORLD && s.op_cls[1] == VPC_WORLD && s.op_cls[2] == VPC_WORLD,
+          "sin drop_world2d: vr_scene no descarta nada; clase WORLD");
+    if (s.op_dest && s.op_cls) {
+        uint8_t b0[10], b1[10], b2[10]; uint8_t *out[VPC_L_N] = {b0, b1, b2}; uint32_t lc[VPC_L_N];
+        vpc_split_dest(s.op_dest, s.op_cls, s.n_op_dest, out, lc);
+        CHECK(lc[VPC_L_HUD] == 7 && b0[0] == 2 && b0[1] == 2 && b0[2] == 2 && b0[8] == 0, "sin drop_world2d: las primitivas del canal 3D siguen en la capa HUD, como antes; el gas no (%u)", lc[0]);
+    }
+    /* sin gancho de procedencia: como antes */
+    o.drop_world2d = 1; o.op_class = NULL;
+    CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.op_dest && s.op_dest[0] == 2 && s.op_dest[1] == 2 && s.op_dest[2] == 2, "sin gancho: RECT / LINE / POLY posterior al 3D van al panel, como antes");
+    vr_scene_set_fate(NULL, 0);
     vr_scene_release();
 }
 
@@ -345,6 +419,7 @@ int main(void) {
     test_chain();
     test_unknown_and_split();
     test_scene_hook();
+    test_scene_world();
     test_fx();
     if (fails) { fprintf(stderr, "test_prov_class: %d fallos de %d\n", fails, checks); return 1; }
     printf("test_prov_class: OK (%d comprobaciones)\n", checks);

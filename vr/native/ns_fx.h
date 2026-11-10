@@ -32,7 +32,7 @@
 /* Direcciones de la RAM del motor (ver docs/efectos_nativos.md §1). */
 #define NSFX_A_CHANL        0x800B2B7Cu  /* canal 3D principal (cola de objetos y primitivas, matrices de cámara) */
 #define NSFX_A_CLOCK        0x800BCAB0u  /* contador de fotogramas: bit 0 = búfer de paquetes que se está generando */
-#define NSFX_A_MAP          0x800BCAF8u  /* máscara de mapa actual (grupos visibles) */
+#define NSFX_A_MAP          0x800ACAF8u  /* máscara de mapa actual (grupos visibles) */
 #define NSFX_A_STATUS       0x800AC570u  /* banderas globales de estado (bits 0..3: ver NsFxScreen) */
 #define NSFX_A_ACTOR_LISTS  0x800ADDA8u  /* 9 listas de actores x 68 B */
 

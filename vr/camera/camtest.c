@@ -824,7 +824,7 @@ static int eng_rd16(uint32_t a) { int16_t v; memcpy(&v, emu_ram + (a & 0x1FFFFF)
 static void eng_inventory(int t) {
     const uint32_t chn = 0x800B2B7Cu;
     int nobj = eng_rd16(chn + 0x56); uint32_t q = eng_rd32(chn + 0x58); uint32_t buf = eng_rd32(0x800BCAB0u) & 1;
-    uint32_t cur = eng_rd32(0x800BCAF8u);
+    uint32_t cur = eng_rd32(0x800ACAF8u);
     int bym[4] = {0}, hid = 0, mapoff = 0; long packs = 0, emit = 0, packs_m0 = 0, emit_vis = 0;
     if (nobj < 0 || nobj > 2000 || q < 0x80000000u) return;
     for (int i = 0; i < nobj; i++) {

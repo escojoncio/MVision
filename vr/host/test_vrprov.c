@@ -38,6 +38,23 @@ int main(void) {
     CHECK(strstr(b, "-|00000000: ops=2 box=") , "sin id: %s", b);
     CHECK(strstr(b, "scope.c") < strstr(b, "?|8002"), "orden por ops");
     CHECK(vrprov_report(&A, VP_V_WORLD, b, sizeof b) == 0, "vacío tras el informe");
+    /* id efectivo: lo que encadena la ordenación del canal 3D (0x8001da18) se agrupa por quien escribió el paquete (prov2), no por la ordenación; sin escritor, sin id */
+    {
+        GpuOp co[6]; memset(co, 0, sizeof co);
+        ProvEntry ct[4]; memset(ct, 0, sizeof ct);
+        ct[1].id = 1; ct[1].fn = 0x8001da18u;
+        ct[2].id = 2; ct[2].fn = 0x800c5000u; strcpy(ct[2].name, "chaff.c");
+        ct[3].id = 3; ct[3].fn = 0x800394f8u; strcpy(ct[3].name, "menuman.c");
+        for (int i = 0; i < 6; i++) { co[i].type = GPU_OP_RECT; co[i].prov = 1; co[i].v[0].x = (int16_t)(10 * i); co[i].rw = 2; co[i].rh = 2; }
+        co[0].prov2 = co[1].prov2 = co[2].prov2 = 2;   /* efecto encadenado por la ordenación */
+        co[3].prov = 3; co[3].prov2 = 2;               /* ámbito normal: manda quien encadenó */
+        GpuDrawList cl; memset(&cl, 0, sizeof cl); cl.ops = co; cl.nops = 6; cl.prov = ct; cl.nprov = 4;
+        vrprov_acc(&A, &cl);
+        char cb[1024]; int cn = vrprov_report(&A, VP_V_WORLD, cb, sizeof cb);
+        CHECK(cn > 0 && strstr(cb, "chaff.c|800c5000: ops=3 "), "encadenado por la ordenación: se agrupa por el escritor: %s", cb);
+        CHECK(strstr(cb, "menuman.c|800394f8: ops=1 "), "ámbito normal: por quien encadenó: %s", cb);
+        CHECK(strstr(cb, "-|00000000: ops=2 ") && !strstr(cb, "8001da18"), "ordenación sin escritor: sin id; la ordenación no aparece: %s", cb);
+    }
     /* top 16 */
     {
         static GpuOp many[40]; static ProvEntry tb[40]; memset(many, 0, sizeof many); memset(tb, 0, sizeof tb);

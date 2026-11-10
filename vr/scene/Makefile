@@ -24,7 +24,7 @@ DISC ?= ../../gamedata/disc
 INC := -I. -I$(RT) -I$(BR)
 
 all: $(B)/libvrscene.a
-$(B)/%.o: %.c vr_scene.h | $(B)
+$(B)/%.o: %.c vr_scene.h vr_prov.h | $(B)
 	$(CC) $(CFLAGS) $(INC) -c $< -o $@
 $(B):
 	mkdir -p $(B)
@@ -48,19 +48,19 @@ $(B)/test_split: test_split.c vr_split.c vr_split.h vr_scene.h | $(B)
 test-split: $(B)/test_split
 	$(B)/test_split
 
-$(B)/test_layer2d: test_layer2d.c vr_layer2d.c vr_layer2d.h vr_layer2d_async.c vr_layer2d_async.h vr_scene.c vr_scene.h $(RT)/gpu.c | $(B)
+$(B)/test_layer2d: test_layer2d.c vr_layer2d.c vr_layer2d.h vr_layer2d_async.c vr_layer2d_async.h vr_scene.c vr_scene.h vr_prov.h $(RT)/gpu.c | $(B)
 	$(CC) $(CFLAGS) $(INC) test_layer2d.c vr_layer2d.c vr_layer2d_async.c vr_scene.c $(RT)/gpu.c -lm -lpthread -o $@
 test-layer2d: $(B)/test_layer2d
 	$(B)/test_layer2d
 
 # Capa 2D de un volcado (list.bin + vram.bin) frente a su frame.png: dif media y % de píxeles distintos a escala 1. Uso: make -C vr/scene l2d-dump ARGS="<carpeta del volcado> [--max-pct P]"
-$(B)/l2d_dump: l2d_dump.c vr_layer2d.c vr_layer2d.h vr_scene.c vr_scene.h $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c ../native/ns_dump.h ../camera/vr_usermap.h ../host/vr_view.h | $(B)
-	$(CC) $(CFLAGS) $(INC) -I../native -I../camera -I../host l2d_dump.c vr_layer2d.c vr_scene.c $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c -lm -lpthread -o $@
+$(B)/l2d_dump: l2d_dump.c vr_layer2d.c vr_layer2d.h vr_scene.c vr_scene.h vr_prov.c vr_prov_rules.c vr_prov.h $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c ../native/ns_dump.h ../camera/vr_usermap.h ../host/vr_view.h | $(B)
+	$(CC) $(CFLAGS) $(INC) -I../native -I../camera -I../host l2d_dump.c vr_layer2d.c vr_scene.c vr_prov.c vr_prov_rules.c $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c -lm -lpthread -o $@
 l2d-dump: $(B)/l2d_dump
 	$(B)/l2d_dump $(ARGS)
 
 # dumpview: render del visor (modo gpu, pantalla 3D) de un volcado, sin runtime. Mismas fuentes que l2d_dump (vr_scene.c + ns_dump) y el escritor PNG de ns_dumpw.c.
-$(B)/dumpview: tools/dumpview.c vr_scene.c vr_scene.h ../native/ns_dump.c ../native/ns_dumpw.c ../native/ns_dump.h $(RN)/metal/vr_blend.h ../camera/vr_usermap.h ../host/vr_view.h | $(B)
+$(B)/dumpview: tools/dumpview.c vr_scene.c vr_scene.h vr_prov.h ../native/ns_dump.c ../native/ns_dumpw.c ../native/ns_dump.h $(RN)/metal/vr_blend.h ../camera/vr_usermap.h ../host/vr_view.h | $(B)
 	$(CC) $(CFLAGS) $(INC) -I../native -I../camera -I../host -I$(RN)/metal tools/dumpview.c vr_scene.c ../native/ns_dump.c ../native/ns_dumpw.c -lm -o $@
 dumpview: $(B)/dumpview
 	$(B)/dumpview $(ARGS)

@@ -3,6 +3,8 @@
  *    0x8009f460-0x8009f4a0); sus primitivas viven en MENUBUF (0x800ba4e0 / 0x800bc4e0). Esos componentes no son actores (su a0 no es un nodo con +8 = su rutina): llegan sin nombre y se
  *    reconocen por la dirección. El nombre de actor gana a la dirección cuando existen los dos.
  *  - cinema.c (rutina 0x800e1050): bandas de cinemática. motse.c: viñeta. telop.c y famaslit.c: créditos. scope.c (0x80063d54) y sight.c (0x800726bc): prismáticos / mira.
+ *  - gas_efct.c (rutina 0x800de1f0 en su overlay: anillo del gas, 16 polígonos semitransparentes) y fadeio.c (0x800e15e8: fundido): efectos de pantalla que el renderer nativo hace de la RAM
+ *    (ns_fx / ns_screen). Solo por nombre de actor: sus rutinas viven en overlays y la dirección sola no los identifica.
  *  - Otros actores (o2_damge.c, breath.c: efectos; cualquier otro) y lo que no tiene procedencia: UNKNOWN (van al HUD, como antes, y se cuentan). */
 #include <string.h>
 #include "vr_prov.h"
@@ -12,6 +14,7 @@ static const char *const N_VIGNETTE[] = {"motse.c", NULL};
 static const char *const N_FULL[] = {"telop.c", "famaslit.c", NULL};
 static const char *const N_SCOPE[] = {"scope.c", "sight.c", NULL};
 static const char *const N_HUD[] = {"menuman.c", NULL};
+static const char *const N_SCREEN[] = {"gas_efct.c", "fadeio.c", NULL};
 
 static const uint32_t F_LETTERBOX[] = {0x800e1050u, 0};
 static const uint32_t F_SCOPE[] = {0x80063d54u, 0x800726bcu, 0};
@@ -44,5 +47,6 @@ int vpc_rule(const ProvEntry *e, const GpuOp *o) {
     if (has_name(e, N_FULL)) return VPC_FULL;
     if (has_name(e, N_SCOPE) || has_fn(e, F_SCOPE)) return o && (o->flags & GPU_F_TEXTURED) ? VPC_SCOPE_TEXT : VPC_SCOPE_FRAME;
     if (has_name(e, N_HUD) || has_fn(e, F_HUD)) return VPC_HUD_WORLD;
+    if (has_name(e, N_SCREEN)) return VPC_FX_SCREEN;
     return VPC_UNKNOWN;
 }

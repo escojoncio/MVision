@@ -29,8 +29,9 @@
  * Un polígono con solo ALGUNOS vértices vvalid se descarta (opts.partial_to_2d lo manda a 2D, pero entonces aparecerá
  * como trozo de mundo en el HUD).
  * Con opts.drop_world2d (opt-in: el anfitrión con render nativo), un polígono SIN ningún vértice vvalid que cae antes del último polígono con vista de la lista (el juego dibuja el HUD después del
- * mundo) es 3D que la captura no resolvió: no se emite a la clase 2 (VR_FATE_WORLD2D; op_dest 0), así no deja cajas sueltas en la capa 2D / el panel HUD (el nativo ya dibuja el mundo). Rects, líneas, filtros
- * de pantalla (clase 3) y los polígonos posteriores al último 3D (HUD, texto, menús) no cambian.
+ * mundo) es 3D que la captura no resolvió: no se emite a la clase 2 (VR_FATE_WORLD2D; op_dest 0), así no deja cajas sueltas en la capa 2D / el panel HUD (el nativo ya dibuja el mundo). Lo mismo, con el
+ * gancho opts.op_class, toda primitiva (polígono, rect o línea, esté donde esté en la lista) de clase VPC_WORLD (vr_prov.h: la encadenó la ordenación del canal 3D; nieve, chaff, partículas): el nativo la
+ * dibuja como efecto 3D. El resto de rects y líneas, los filtros de pantalla (clase 3) y los polígonos posteriores al último 3D (HUD, texto, menús) no cambian.
  *
  * Reconstrucción de parciales (opts.recon_partial): un quad con exactamente 3 vértices de vista limpios (vflags==0) y el 4.º sin posición,
  * pero con coordenadas de pantalla sin saturar (|x-dox-proj_ox| < 1000 px), recupera ese vértice: rayo (px/H, py/H, 1) cortado con el plano de
@@ -403,7 +404,7 @@ typedef struct {
     int billboard;
     /* drop_world2d 1: ver «Qué es 3D» (arriba). 0 (def.) = esos polígonos van a la clase 2 como antes. */
     int drop_world2d;
-    /* op_class: gancho (opt-in; NULL = sin clasificación) que da la clase de procedencia de la primitiva i de dl (vr_prov.h: vpc_op_class_cb). vr_scene la guarda en VrScene.op_cls para las que salen al panel 2D; no la usa para decidir nada. */
+    /* op_class: gancho (opt-in; NULL = sin clasificación) que da la clase de procedencia de la primitiva i de dl (vr_prov.h: vpc_op_class_cb). vr_scene la guarda en VrScene.op_cls para las que salen al panel 2D; solo la usa para decidir con drop_world2d: las de clase VPC_WORLD no salen al panel (VR_FATE_WORLD2D). */
     uint8_t (*op_class)(const GpuDrawList *dl, uint32_t i, void *ctx);
     void *op_class_ctx;
 } VrSceneOpts;
@@ -442,7 +443,7 @@ enum {
     VR_FATE_RECON = 11,    /* emitido tras reconstruir un vértice sin posición o un AMBIG (recon_partial / recon_ambig) */
     VR_FATE_INCOH = 12,    /* descartado por la red de seguridad de coherencia de vértices (opts.coherence) */
     VR_FATE_HWCULL = 13,   /* descartado: la GPU de PS1 no dibuja ninguno de sus triángulos (extensión > 1023x511) */
-    VR_FATE_WORLD2D = 14,  /* descartado: polígono sin posición de vista dentro del pase del mundo (antes del último polígono con vista de la lista): 3D sin resolver, no HUD */
+    VR_FATE_WORLD2D = 14,  /* descartado: polígono sin posición de vista dentro del pase del mundo (antes del último polígono con vista de la lista): 3D sin resolver, no HUD; o primitiva de clase VPC_WORLD (canal 3D por procedencia) */
     VR_FATE_COUNT
 };
 void vr_scene_set_fate(uint8_t *buf, uint32_t cap);   /* NULL para desactivar */

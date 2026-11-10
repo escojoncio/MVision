@@ -237,6 +237,26 @@ static void test_filters_and_oneside(void) {
     ns_fx_scene_destroy(s);
 }
 
+/* Máscara de grupos visibles: se lee de la dirección real del motor (0x800ACAF8, la de ns_extract / vr_fire / vr_activity). Una primitiva con grupo del mapa actual se extrae; la de otro mapa no. */
+static void test_map_group(void) {
+    reset();
+    w32(NSFX_A_MAP, 0); w32(0x800ACAF8u, 0x4);
+    int t0[3] = {0, 0, 0};
+    TPrim a = mkprim(18, 0, 1, 4096, t0, 0x4);
+    int P[4][3] = {{500, 800, 2000}, {1500, 800, 2000}, {500, 100, 2600}, {1500, 100, 2600}};
+    for (int v = 0; v < 4; v++) put_pos(&a, v, P[v][0], P[v][1], P[v][2]);
+    for (int b = 0; b < 2; b++) {
+        uint32_t pk = a.pk[b]; w16(pk, 1234); w8(pk + 7, 0x2E);
+        for (int v = 0; v < 4; v++) { double w[3] = {P[v][0], P[v][1], P[v][2]}, sx, sy, z; ref_proj(w, &sx, &sy, &z); pk_xy(pk, 18, v, (int)lround(sx), (int)lround(sy)); }
+    }
+    TPrim mp = mkprim(14, 0, 1, 4096, t0, 0x2); (void)mp;
+    queue_commit(0);
+    int r; NsFxScene *s = run(0, &r);
+    CHECK(r == 0 && s->cur_map == 0x4, "mapa actual leído de 0x800ACAF8: 0x%X", s->cur_map);
+    CHECK(s->stats.n_wrong_map == 1 && s->n_items == 1 && s->items[0].prim == a.addr, "grupo del mapa actual extraído, el de otro mapa no: otro_mapa=%u elementos=%u", s->stats.n_wrong_map, s->n_items);
+    ns_fx_scene_destroy(s);
+}
+
 static void test_lines_and_oncamera(void) {
     reset();
     int t0[3] = {0, 0, 0};
@@ -1036,6 +1056,7 @@ int main(void) {
     RAM = (uint8_t *)calloc(NSFX_RAM_SIZE, 1);
     test_polygon_and_billboard();
     test_filters_and_oneside();
+    test_map_group();
     test_lines_and_oncamera();
     test_actors_and_screen();
     test_classify();

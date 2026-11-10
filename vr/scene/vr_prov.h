@@ -11,9 +11,13 @@
  *    SCOPE_FRAME   scope.c / sight.c sin textura: marco de los prismáticos. No va al 2D: vista nativa de zoom (VrFx.scope_on / scope_zoom)
  *    SCOPE_TEXT    scope.c / sight.c texturado: textos de la mira; van al HUD
  *    UNKNOWN       sin procedencia o de otro actor/función: va al HUD (como antes) y se cuenta
- *  Capas 2D (VPC_L_*): HUD (HUD_WORLD, SCOPE_TEXT, UNKNOWN), WINDOW, FULL; las clases FX_* y SCOPE_FRAME no tienen capa (-1).
+ *    FX_SCREEN     gas_efct.c (anillo del gas) y fadeio.c (fundido): efectos de pantalla con paquetes propios. No van al 2D: el renderer nativo los hace de la RAM (ns_fx: NsFxGas / NsFxFade)
+ *    WORLD         encadenada por la ordenación del canal 3D (vpc_is_chain) y con un escritor sin regla (o sin escritor): es del MUNDO (nieve, chaff, humo...; también el fondo de cielo). Con
+ *                  VrSceneOpts.drop_world2d vr_scene no la emite al panel (VR_FATE_WORLD2D): el renderer nativo dibuja esos efectos en 3D (ns_fx). Sin drop_world2d (ventana del selector /
+ *                  pausa) sale al panel y va al HUD, como antes
+ *  Capas 2D (VPC_L_*): HUD (HUD_WORLD, SCOPE_TEXT, UNKNOWN, WORLD), WINDOW, FULL; las clases FX_* y SCOPE_FRAME no tienen capa (-1).
  *  Sin procedencia (volcados NSL1, rt_prov apagado) todo es UNKNOWN y por tanto HUD: el comportamiento de antes.
- *  Id efectivo de una primitiva: el de quien encadenó el paquete (GpuOp.prov) salvo que sea una rutina de ordenación (vpc_is_chain): entonces el de quien rellenó el comando (GpuOp.prov2), o 0 (UNKNOWN) si no consta o es otra rutina de ordenación. */
+ *  Id efectivo de una primitiva: el de quien encadenó el paquete (GpuOp.prov) salvo que sea una rutina de ordenación (vpc_is_chain): entonces el de quien rellenó el comando (GpuOp.prov2), o 0 si no consta o es otra rutina de ordenación. */
 #include <stdint.h>
 #include "gpu.h"
 
@@ -21,7 +25,7 @@
 extern "C" {
 #endif
 
-enum { VPC_HUD_WORLD = 0, VPC_WINDOW, VPC_FULL, VPC_FX_VIGNETTE, VPC_FX_LETTERBOX, VPC_SCOPE_FRAME, VPC_SCOPE_TEXT, VPC_UNKNOWN, VPC_N };   /* HUD_WORLD = 0: memset a cero = todo HUD */
+enum { VPC_HUD_WORLD = 0, VPC_WINDOW, VPC_FULL, VPC_FX_VIGNETTE, VPC_FX_LETTERBOX, VPC_SCOPE_FRAME, VPC_SCOPE_TEXT, VPC_UNKNOWN, VPC_FX_SCREEN, VPC_WORLD, VPC_N };   /* HUD_WORLD = 0: memset a cero = todo HUD */
 enum { VPC_L_HUD = 0, VPC_L_WINDOW, VPC_L_FULL, VPC_L_N };
 const char *vpc_class_name(int cls);
 int vpc_layer_of(int cls);   /* VPC_L_* o -1 (no va al 2D) */
@@ -36,7 +40,7 @@ typedef struct {
 } VrFx;
 
 /* ---- reglas (vr_prov_rules.c) ---- */
-/* Clase base de una primitiva por su entrada de procedencia (sin aprendizaje): FX_*, FULL, SCOPE_*, HUD_WORLD (menuman) o UNKNOWN. e == NULL -> UNKNOWN. */
+/* Clase base de una primitiva por su entrada de procedencia (sin aprendizaje ni encadenado): FX_*, FULL, SCOPE_*, HUD_WORLD (menuman) o UNKNOWN. e == NULL -> UNKNOWN. */
 int vpc_rule(const ProvEntry *e, const GpuOp *o);
 /* ¿Es la entrada una rutina de ordenación/encadenado (0x8001da18, 0x80018304)? Encadena paquetes que escribieron otros actores: su id no dice quién dibuja. e == NULL -> 0. */
 int vpc_is_chain(const ProvEntry *e);
@@ -60,7 +64,9 @@ void vpc_learn_reset(VrProvLearn *S);
 /* Anota la lista `l` ANTES de ensamblarla (así sus ids ya están clasificados). state: VPC_ST_*. */
 void vpc_learn_note(VrProvLearn *S, const GpuDrawList *l, int state);
 
-/* Clase de la primitiva o (de la lista l): reglas + aprendizaje (S puede ser NULL). */
+/* Id efectivo de la primitiva o (ver arriba); 0 = no consta. No comprueba que esté dentro de la tabla. */
+unsigned vpc_op_id(const GpuDrawList *l, const GpuOp *o);
+/* Clase de la primitiva o (de la lista l): reglas + aprendizaje (S puede ser NULL) + WORLD si la encadenó la ordenación del canal 3D y su escritor no tiene regla ni es una ventana aprendida. */
 int vpc_class_op(const VrProvLearn *S, const GpuDrawList *l, const GpuOp *o);
 /* Gancho para VrSceneOpts.op_class (ctx = VrProvLearn *, puede ser NULL). */
 uint8_t vpc_op_class_cb(const GpuDrawList *l, uint32_t i, void *ctx);

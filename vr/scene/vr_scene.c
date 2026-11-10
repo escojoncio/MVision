@@ -18,6 +18,7 @@
  *    Los pies resultantes caen a +-50 mm del suelo real; el host puede afinarlo con el suelo que vea (pendiente).
  * ========================================================================================================== */
 #include "vr_scene.h"
+#include "vr_prov.h"   /* solo la constante VPC_WORLD (la clase la da el gancho opts.op_class) */
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -891,6 +892,9 @@ static int coplanar_lift(VrScene *out, const VrSceneOpts *o, size_t nt) {
     return 0;
 }
 
+/* ¿Primitiva del MUNDO por procedencia (clase VPC_WORLD del gancho op_class: la encadenó la ordenación del canal 3D)? Con drop_world2d no va al panel 2D: el nativo la dibuja como efecto 3D. */
+static int op_is_world(const VrSceneOpts *o, const GpuDrawList *dl, uint32_t i) { return o->drop_world2d && o->op_class && o->op_class(dl, i, o->op_class_ctx) == VPC_WORLD; }
+
 int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOpts *op_in, VrScene *out) {
     if (!dl || !out) return -1;
     VrSceneOpts o = op_in ? *op_in : vr_scene_opts_default();
@@ -1264,7 +1268,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
                 fcls = filter_class(&o, dl, op, 0, bx0, by0, bx1, by1, bu0, bv0, bu1, bv1);
             }
             if (fcls) filter_note(out, op, fcls, 0, &tint_w);
-            if (!fcls && (long)i < last3d) { fate_set(i, VR_FATE_WORLD2D); continue; }   /* 3D sin resolver dentro del pase del mundo: no es HUD */
+            if (!fcls && ((long)i < last3d || op_is_world(&o, dl, i))) { fate_set(i, VR_FATE_WORLD2D); continue; }   /* 3D sin resolver dentro del pase del mundo, o del canal 3D por procedencia: no es HUD */
             for (int q = 0; q < ntri; q++) {
                 if ((hwm >> q) & 1u) continue;
                 Tri *t = &g_tri[nt++];
@@ -1298,6 +1302,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             if (fb && !op->fbt) { out->stats.n_fb_clear++; continue; }
             int fcls = fb ? 0 : filter_class(&o, dl, op, 1, g->x, g->y, g->x + op->rw, g->y + op->rh, g->u, g->v, g->u, g->v);
             if (fcls) filter_note(out, op, fcls, 1, &tint_w);
+            else if (op_is_world(&o, dl, i)) { fate_set(i, VR_FATE_WORLD2D); continue; }   /* sprite del canal 3D (nieve, partículas): efecto del mundo, no HUD */
             else if (!semi && !(op->flags & GPU_F_TEXTURED) && ((double)op->rw * op->rh >= 0.9 * (double)dl->disp.w * dl->disp.h ||
                                                               (o.drop_world2d && dl->disp.w > 0 && (double)op->rw >= 0.9 * (double)dl->disp.w && (double)op->rh <= 0.1 * (double)dl->disp.h))) {
                 /* borrado/máscara a pantalla completa: en el panel HUD (alfa premultiplicado, cleared a transparente) lo dejaría OPACO e
@@ -1336,6 +1341,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             if (line_3d(out, &o, op, i, g_next[i], f, sid, gour, semi, &wref, &A, &nt)) continue;   /* línea del mundo: cuadrilátero 3D (opts.line3d_px) */
             fate_set(i, VR_FATE_2D);
             if (o.drop_2d_all) continue;
+            if (op_is_world(&o, dl, i)) { fate_set(i, VR_FATE_WORLD2D); continue; }   /* línea del canal 3D (chaff, trazas): efecto del mundo, no HUD */
             const GpuVtx *a = &op->v[0], *b = &op->v[1];
             float dx = (float)(b->x - a->x), dy = (float)(b->y - a->y), l = sqrtf(dx*dx + dy*dy);
             float cx[4], cy[4];

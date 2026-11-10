@@ -1,6 +1,6 @@
 #pragma once
 /* Procedencia de las primitivas de la GPU en vrhost.c (funciones puras, probadas en test_vrprov.c; runtime/prov.h).
- *  - vrprov_acc / vrprov_report: por cada id de procedencia, cuántas primitivas (GpuOp.prov) dejó en las listas del último segundo, su caja, los modos de
+ *  - vrprov_acc / vrprov_report: por cada id de procedencia efectivo (vr_prov.h vpc_op_id: quien encadenó la primitiva o, si la encadenó la ordenación del canal 3D, quien la escribió), cuántas primitivas dejó en las listas del último segundo, su caja, los modos de
  *    semitransparencia (abr) que usó y la vista vigente; el registro [prov] saca las 16 con más primitivas.
  *  - vrprov_pick: volcado automático la primera vez que aparece cada actor de interés (scope.c, cinema.c, telop.c, motse.c en la lista de actores del juego)
  *    y la primera vez que la vista pasa a selector, pausa o códec (uno por motivo y sesión). */
@@ -10,6 +10,7 @@
 #include <string.h>
 #include "gpu.h"
 #include "prov.h"
+#include "vr_prov.h"
 #include "vr_view.h"
 
 enum { VP_V_WORLD, VP_V_SELECTOR, VP_V_PAUSE, VP_V_CODEC, VP_V_CINE, VP_V_OTHER, VP_V_N };
@@ -42,7 +43,8 @@ static inline void vrprov_acc(VrProvAcc *A, const GpuDrawList *l) {
     A->lists++;
     for (uint32_t i = 0; i < l->nops; i++) {
         const GpuOp *o = &l->ops[i];
-        unsigned id = o->prov < PROV_MAX ? o->prov : 0;
+        unsigned id = vpc_op_id(l, o);
+        if (id >= PROV_MAX) id = 0;
         VrProvAcc1 *a = &A->a[id];
         if (id && l->prov && id < l->nprov && !a->e.id) a->e = l->prov[id];
         if (o->type == GPU_OP_POLY || o->type == GPU_OP_LINE) {
