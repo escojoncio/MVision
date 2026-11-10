@@ -43,6 +43,8 @@
 #define PIST_EJECT_Z -0.010f
 #define PIST_CHARGE_Z 0.020f
 #define PIST_EYE_Z 0.055f
+#define PIST_SUP_Y 0.030f   /* punto de agarre de la mano de apoyo: bajo el cañón (eje y 0,063), a medio camino entre el guardamonte (z -0,08) y la boca (z -0,22); estimado del diseño, no medido en el modelo */
+#define PIST_SUP_Z -0.150f
 const float w_pist_slide_travel = PIST_SLIDE_TRAVEL;   /* recorrido de la corredera: lo usa wcut_tables.c (SLIDE_TRAVEL_MM) y lo comprueba test_wcut */
 const float w_pist_supp_seat_z = PIST_SUPP_Z;
 const float w_pist_bare_muzzle_z = PIST_MUZZLE_Z;   /* sin supresor (lo comprueba test_wcut contra la boca del cañón) */
@@ -470,7 +472,7 @@ const WeaponDef w_pist = {
     .parts = k_parts, .nparts = P_COUNT,
     .points = {
         [WP_GRIP]    = {{0, 0, 0}, {0, 0, 0, 1}},
-        [WP_SUPPORT] = {{-0.03f, -0.035f, -0.025f}, {0, 0, 0, 1}},
+        [WP_SUPPORT] = {{0, PIST_SUP_Y, PIST_SUP_Z}, {0, 0, 0, 1}},   /* mano libre: parte delantera/inferior de la pistola (antes junto a la empuñadura, donde la otra mano no cabe) */
         [WP_MUZZLE]  = {{0, PIST_BY, PIST_SUPP_TIP_Z}, {0, 0, 0, 1}},
         [WP_EYE]     = {{0, 0.0875f, PIST_EYE_Z}, {0, 0, 0, 1}},
         [WP_MAGWELL] = {{0, PIST_WELL_Y, PIST_WELL_Z}, {PIST_MAG_QX, 0, 0, PIST_MAG_QW}},

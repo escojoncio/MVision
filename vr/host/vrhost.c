@@ -373,6 +373,8 @@ static _Atomic uint64_t ns_smp_push_ns;
 static VrSmSample ns_smp_pend;           /* muestra de la escena nativa capturada y aún sin publicar (hilo de emulación): se empuja al publicarla (ns_pub_flush) */
 #define NS_SMP_FRESH_NS 100000000ull
 
+/* Prismáticos del juego (scope.c en la lista de la GPU, VrFx.binocular): el XRFrameEncoder amplía el mundo nativo entero, también las piezas del cuerpo; las manos, los antebrazos y el arma no se dibujan. Hilo de emulación (fx_hold se escribe en build_one). */
+static int bino_view(void) { return fx_hold.fx.scope_on && fx_hold.fx.binocular; }
 /* Contexto de la captura (hilo de emulación, en la etapa «pantalla»): zona, cámara VR y mapa mundo -> usuario, y qué hacer con el jugador. */
 static Cpu *ns_cpu_last;   /* CPU del último enganche de fotograma (hilo de emulación, el mismo que llama a ns_ctx): para leer los registros de cálculo OFX/OFY */
 static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
@@ -396,16 +398,18 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
     { VrBodyStats b; vrbody_stats(&b); ik_ap0 = b.applies; ik_dr0 = b.arms_driven; }
     o->player_key = ns_player_key(emu_ram);
     o->hide_head = !r->third;                               /* primera persona: la cabeza propia no se dibuja (misma regla que vrcam_hide_head); en la tercera persona de la pared, sí */
+    o->hide_parts = (!r->third && (bs.stance == 2 || (bs.player_status & BRIDGE_PS_GROUND)) ? NS_PARTS_CHEST : 0) | (bino_view() ? NS_PARTS_ARMS : 0);   /* gateo en primera persona (conductos): torso, cuello y hombros no rodean el ojo; antebrazos y manos sí se ven; prismáticos: brazos, antebrazos y manos fuera */
     o->refresh_parts = body_ok ? NS_PARTS_BODY : 0;   /* brazos + pelvis, piernas, torso y cuello: torso_follow las reescribe tras la captura */
 }
 /* Manos nuevas: cierre de la escena (hilo de emulación, ns_hook_tick, escena apta con el jugador enlazado). Agarre y brazos manejados de la IK del último vrbody_apply. */
 static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, void *u) {
     (void)u;
-    ns_wphide_apply(sc, emu_ram, vrfire_hide_enabled());   /* el arma del juego en la mano de Snake (la lista de la GPU la oculta con +0x4C = 0, el extractor nativo no lo lee) */
+    const int bino = bino_view();
+    ns_wphide_apply(sc, emu_ram, vrfire_hide_enabled() || bino);   /* el arma del juego en la mano de Snake (la lista de la GPU la oculta con +0x4C = 0, el extractor nativo no lo lee) */
     if ((sc->screen.flags & NS_SFX_GAS) && vrhost_duct_ring(sc->cam.vr_active, (bs.player_status & BRIDGE_PS_INTRUDE) != 0, sc->screen.gas_abr)) sc->screen.flags &= ~NS_SFX_GAS;   /* oscurecimiento de la 1.ª persona de gateo del juego: sin viñeta en VR (vr_view.h) */
     NsHandIn in;
     memset(&in, 0, sizeof in);
-    in.enabled = hands_active();
+    in.enabled = hands_active() && !bino;   /* con prismáticos no se añaden las manos nuevas (las piezas del brazo ya van ocultas desde la captura) */
     if (in.enabled) {
         for (int s = 0; s < 2; s++) { float g = 0; in.driven[s] = vrbody_hand_state(s, &g, NULL, NULL); in.grip[s] = in.driven[s] ? g : 0.0f; }
         for (int s = 0; s < 2; s++) vrgame_hand_pose_in(s, &in.item_pose[s], &in.trigger[s], &in.thumb[s]);   /* objeto en la mano (arma por vr_grip), gatillo y pulgar */
@@ -413,7 +417,7 @@ static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *m
     }
     /* Granada (arma que se dibuja con el modelo del juego): el juego la cuelga de la mano de su ANIMACIÓN (la derecha); se lleva a la mano que la IK dejó en el mando del arma, con la relación mano-arma del juego. */
     uint32_t held_key = 0;
-    const int held_side = vrgame_native_hand();
+    const int held_side = bino ? -1 : vrgame_native_hand();
     { const uint32_t fk = vrfire_flier_key(); if (fk && ns_wphide_has(sc, fk)) vrfire_flier_seen(); }   /* granada lanzada: el actor ya está en esta escena -> el modelo de la mano se oculta desde ESTA escena (sin hueco ni duplicado) */
     if (vrfire_held_hidden()) ns_wphide_apply(sc, emu_ram, 1);
     else if (held_side >= 0) {
@@ -1902,6 +1906,7 @@ static void on_start(void) {
  * del VBlank anterior. */
 static uint16_t pad_hook(uint16_t buttons) {
     vrgame_set_gloves(body_ok && !native_mode(), &gpu_vram[0][0]);   /* manos propias (vr_glove) solo con la lista de la GPU: el render nativo trae sus manos */
+    vrgame_set_view_hide(bino_view());
     return vrgame_pad(buttons, &bs, emu_ram);
 }
 

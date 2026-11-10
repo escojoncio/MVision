@@ -54,13 +54,13 @@ static int extract(const uint8_t *ram, const uint8_t *scratch, NsScene *s, void 
     s->to_vr[0] = 0;
     return 0;
 }
-static int ctx_calls; static uint32_t ctx_key; static int ctx_hide; static uint32_t ctx_refresh = NS_PARTS_ARMS;
+static int ctx_calls; static uint32_t ctx_key; static int ctx_hide; static uint32_t ctx_refresh = NS_PARTS_ARMS; static uint32_t ctx_parts;
 static void (*ctx_mut)(void);   /* cambia la RAM después de extraer y antes de enlazar (el enlace compara con la RAM) */
 static void ctx(NsScene *s, NsCtxOut *o, void *u) {
     (void)u; ctx_calls++;
     if (ctx_mut) ctx_mut();
     s->valid |= NS_SV_TOVR_OK; s->area_id = 3;
-    o->player_key = ctx_key; o->hide_head = ctx_hide; o->refresh_parts = ctx_refresh;
+    o->player_key = ctx_key; o->hide_head = ctx_hide; o->refresh_parts = ctx_refresh; o->hide_parts = ctx_parts;
 }
 
 static void t_player(void) {
@@ -140,6 +140,22 @@ static void t_hook(void) {
     ctx_key = 0; ns_capture(RAM, NULL); ns_hook_tick(RAM);
     ns_bridge_acquire(b, ns_now_ns(), &v);
     CHECK(!(v.cur->piece[1 + 6 + 1].flags & NS_PF_HIDDEN), "sin jugador no se oculta nada");
+    /* tumbado en primera persona: además de la cabeza se ocultan torso, cuello y brazos (hombros); antebrazos, manos, pelvis y piernas se quedan */
+    ctx_key = OBJ; ctx_parts = NS_PARTS_CHEST;
+    ns_capture(RAM, NULL); ns_hook_tick(RAM);
+    ns_bridge_acquire(b, ns_now_ns(), &v);
+    #define PIECE_OF(k) (1 + (k) + ((k) > 4 ? 1 : 0))
+    int ok_hid = 1, ok_vis = 1;
+    static const int hid[] = {1, 2, 5, 6, 7}, vis[] = {0, 3, 4, 8, 9, 10, 11, 12, 13, 14, 15};
+    for (unsigned i = 0; i < sizeof hid / sizeof *hid; i++) ok_hid &= (v.cur->piece[PIECE_OF(hid[i])].flags & NS_PF_HIDDEN) != 0;
+    for (unsigned i = 0; i < sizeof vis / sizeof *vis; i++) ok_vis &= !(v.cur->piece[PIECE_OF(vis[i])].flags & NS_PF_HIDDEN);
+    CHECK(ok_hid, "tumbado: cabeza, cuello, torso y brazos ocultos");
+    CHECK(ok_vis, "tumbado: antebrazos, manos, pelvis y piernas siguen a la vista");
+    ctx_parts = 0;
+    ns_capture(RAM, NULL); ns_hook_tick(RAM);
+    ns_bridge_acquire(b, ns_now_ns(), &v);
+    CHECK(!(v.cur->piece[PIECE_OF(1)].flags & NS_PF_HIDDEN) && !(v.cur->piece[PIECE_OF(2)].flags & NS_PF_HIDDEN), "de pie: torso y brazos a la vista");
+    #undef PIECE_OF
     ns_hook_init(NULL); ns_capture(RAM, NULL);   /* sin puente: no hace nada */
     ns_bridge_destroy(b);
 }

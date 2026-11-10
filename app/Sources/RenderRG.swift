@@ -927,6 +927,16 @@ final class RGRenderer {
     var special: MvVrSpecialView?
     /// No aplicar la máscara de visión del juego (la abertura de la mira la dibuja la lente).
     var suppressFrame = false
+    /// Aumento del mundo nativo en AMBOS ojos (prismáticos): las tangentes de cada ojo se dividen por él, con el mismo eje óptico, planos y paralaje real. 1 = sin aumento. Solo afecta al mundo que dibuja
+    /// el render nativo; el arma, el radar y las vistas especiales siguen con la proyección del sistema (las piezas del cuerpo que dibuja el render nativo, manos incluidas, sí se amplían con el mundo).
+    var worldZoom: Float = 1
+    /// Proyección de Z invertida con las tangentes divididas por `z` (P00 y P11 por `z`; el desplazamiento del centro óptico P20/P21 no cambia: la línea de visión sigue siendo la del ojo).
+    private static func zoomed(_ p: simd_float4x4, _ z: Float) -> simd_float4x4 {
+        var m = p
+        m.columns.0.x *= z
+        m.columns.1.y *= z
+        return m
+    }
     private var auxColor: MTLTexture?
     private var auxDepth: MTLTexture?
     private var auxRaw: MTLTexture?        // vista de auxColor sin decodificación sRGB: el shader del arma convierte a lineal una sola vez
@@ -1355,13 +1365,15 @@ final class RGRenderer {
         let gr: Range<Int>? = (gpuMode && drawWorld && drawEyes) ? (range ?? 0..<batches.count) : nil
         func eyePos(_ v: simd_float4x4) -> SIMD3<Float> { let t = v.inverse.columns.3; return SIMD3<Float>(t.x, t.y, t.z) }
         let draw = nativeDraw && drawEyes
+        // Proyecciones del mundo nativo (con aumento en los prismáticos); `u.view_proj` (radar) y las del arma / vistas especiales siguen con las del sistema.
+        let wp = worldZoom > 1.001 && worldZoom.isFinite ? projections.map { Self.zoomed($0, worldZoom) } : projections
         if layered {
             guard let c = colorTargets.first, let d = depthTargets.first, n >= 1 else { return }
             let cnt = min(n, viewCount)
             var u = VrSceneUniforms()
             u.view_proj = (projections[0] * views[0], projections[min(1, cnt - 1)] * views[min(1, cnt - 1)])
             u.head = head.columns.3
-            let cams = draw ? NativeCams(viewProj: (0..<cnt).map { projections[$0] * views[$0] }, projections: Array(projections.prefix(cnt)),
+            let cams = draw ? NativeCams(viewProj: (0..<cnt).map { wp[$0] * views[$0] }, projections: Array(wp.prefix(cnt)),
                                          eyes: (0..<cnt).map { eyePos(views[$0]) }, eyeIndex: 0) : nil
             _ = encodeScene(cb, color: c, depth: d, resolve: resolveTargets.first, uniforms: u, amplify: cnt, views: views, projections: projections,
                             isAux: false, last: last, cams: cams, first: first, gpuRange: gr)
@@ -1371,7 +1383,7 @@ final class RGRenderer {
                 let m = projections[i] * views[i]
                 u.view_proj = (m, m)
                 u.head = head.columns.3
-                let cams = draw ? NativeCams(viewProj: [m], projections: [projections[i]], eyes: [eyePos(views[i])], eyeIndex: i) : nil
+                let cams = draw ? NativeCams(viewProj: [wp[i] * views[i]], projections: [wp[i]], eyes: [eyePos(views[i])], eyeIndex: i) : nil
                 _ = encodeScene(cb, color: colorTargets[i], depth: depthTargets[i], resolve: i < resolveTargets.count ? resolveTargets[i] : nil, uniforms: u,
                                 amplify: 0, viewIndex: i, views: views, projections: projections, isAux: false, last: last, cams: cams, first: first, gpuRange: gr)
             }

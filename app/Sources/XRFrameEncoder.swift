@@ -174,12 +174,18 @@ final class XRFrameEncoder {
         // Vista especial del arma (mira óptica, visor antiaéreo, pantalla del misil): la publica vr/host por VBlank.
         var sv = MvVrSpecialView()
         var special = mv_vrgame_special_view(&sv) != 0
-        // Prismáticos (scope.c / sight.c con el juego en vista de mundo), por la misma vía que la mira óptica (aux + lente). Con scope.c en la lista (gs.fx.binocular): rectángulo con la proporción de la
-        // capa del HUD, ante la cara, con la vista aumentada debajo y el marco del propio juego (rejilla, retícula, textos, tinte verdoso, radar) encima; sin la abertura ni la retícula del francotirador.
-        // Sin scope.c (sight.c solo): disco con visión estrecha, como antes.
+        // Prismáticos (scope.c / sight.c con el juego en vista de mundo). Con scope.c en la lista (gs.fx.binocular): el mundo nativo se ve en ESTÉREO con el aumento en los dos ojos (RGRenderer.worldZoom, sin segunda
+        // vista ni lente) y el marco del propio juego (rejilla, retícula, textos, tinte verdoso, radar: capa del HUD) va en un rectángulo fijo a la cabeza ante los ojos, con el mismo camino que el visor antiaéreo
+        // (MV_VIEW_AA_SIGHT, sin panel plano del HUD). Sin scope.c (sight.c solo): disco con visión estrecha, como antes.
+        var worldZoom: Float = 1
         if !special && gs.view_kind == 1 && gs.fx.scope_on != 0 {
-            let hl = renderer.hudLogical
-            sv = Self.binocularView(head: recentered, zoom: gs.fx.scope_zoom, framed: gs.fx.binocular != 0, aspect: hl.y > 0 ? hl.x / hl.y : 4.0 / 3.0)
+            if gs.fx.binocular != 0 {
+                let hl = renderer.hudLogical
+                worldZoom = Self.binocularZoom(gs.fx.scope_zoom)
+                sv = Self.binocularFrame(head: recentered, aspect: hl.y > 0 ? hl.x / hl.y : 4.0 / 3.0)
+            } else {
+                sv = Self.binocularView(head: recentered, zoom: gs.fx.scope_zoom)
+            }
             special = true
         }
         if special && sv.hide_hud != 0 { hud = nil }          // el panel plano del HUD sobra mientras se mira por la mira / el visor
@@ -227,6 +233,7 @@ final class XRFrameEncoder {
         } else { renderer.viewsHook = nil }
         if pres.dioramaModel != nil || !pres.drawWorld || pres.stereo != nil { special = false }
         renderer.special = special ? sv : nil
+        renderer.worldZoom = special ? worldZoom : 1
         renderer.suppressFrame = special && sv.kind == Int32(MV_VIEW_SCOPE) && sv.suppress_frame != 0
         renderer.auxRequest = special ? auxView(sv, planesUsed) : nil
 
@@ -371,16 +378,35 @@ final class XRFrameEncoder {
     }
 
     /// Segunda vista de la escena pedida por el arma (cámara del visor / del misil): matrices en el espacio recentrado. nil si no hace falta renderizarla.
-    /// Prismáticos del juego como vista especial: lente fija a la cabeza (a 0,45 m) que muestra la escena desde la cabeza con el campo estrechado por el aumento (mínimo 2).
-    /// `framed` (scope.c en la lista): rectángulo de 0,5 m de alto con la proporción `aspect` de la capa del HUD, sin disco (round = 0: RenderWeapon.encodeSpecial pone la capa del HUD del juego
-    /// encima de la vista aumentada en lugar de la abertura y la retícula de la mira) y sin el panel plano del HUD (ya va dentro de la lente). Si no: disco de 0,34 m con la mira, como la óptica.
-    private static func binocularView(head: simd_float4x4, zoom: Float, framed: Bool, aspect: Float) -> MvVrSpecialView {
+    /// Aumento de los prismáticos: el del juego (H de la pantalla / 160) acotado a 2...8.
+    private static func binocularZoom(_ zoom: Float) -> Float { min(max(zoom.isFinite ? zoom : 2, 2), 8) }
+
+    /// Marco de los prismáticos del juego (scope.c en la lista): rectángulo con la proporción `aspect` de la capa del HUD, fijo a la cabeza a 1 m y de 58 grados de alto, que dibuja la capa del HUD del juego
+    /// (MV_VIEW_AA_SIGHT: textura entera, sin premultiplicar) por encima del mundo ampliado. Es geometría real, así que se ve a profundidad correcta en estéreo; sin prueba de profundidad (nada lo tapa).
+    private static func binocularFrame(head: simd_float4x4, aspect: Float) -> MvVrSpecialView {
         var sv = MvVrSpecialView()
         let q = simd_quatf(head).normalized
-        let z = min(max(zoom.isFinite ? zoom : 2, 2), 8)
+        let dist: Float = 1
+        let h: Float = 2 * dist * tan(Float(58) * Float.pi / 360)
+        let asp: Float = aspect.isFinite && aspect > 0.5 && aspect < 3 ? aspect : 4.0 / 3.0
+        let p = head * simd_float4(0, 0, -dist, 1)
+        sv.kind = Int32(MV_VIEW_AA_SIGHT)
+        sv.blend = 1
+        sv.surf_pos = (p.x, p.y, p.z)
+        sv.surf_rot = (q.imag.x, q.imag.y, q.imag.z, q.real)
+        sv.surf_w = h * asp; sv.surf_h = h
+        sv.uv = (0, 0, 1, 1)
+        sv.hide_hud = 1
+        return sv
+    }
+
+    /// Mira de visor sin prismáticos (sight.c sin scope.c): lente de disco fija a la cabeza (a 0,45 m, 0,34 m de diámetro) que muestra la escena desde la cabeza con el campo estrechado por el aumento (mínimo 2).
+    private static func binocularView(head: simd_float4x4, zoom: Float) -> MvVrSpecialView {
+        var sv = MvVrSpecialView()
+        let q = simd_quatf(head).normalized
+        let z = binocularZoom(zoom)
         let dist: Float = 0.45
-        let asp: Float = framed && aspect.isFinite && aspect > 0.5 && aspect < 3 ? aspect : 1
-        let h: Float = framed ? 0.5 : 0.34
+        let h: Float = 0.34
         let p = head * simd_float4(0, 0, -dist, 1)
         sv.kind = Int32(MV_VIEW_SCOPE)
         sv.blend = 1
@@ -388,13 +414,13 @@ final class XRFrameEncoder {
         sv.cam_pos = (head.columns.3.x, head.columns.3.y, head.columns.3.z)
         sv.cam_rot = (q.imag.x, q.imag.y, q.imag.z, q.real)
         sv.cam_fov_y = 2 * atan((h * 0.5 / dist) / z)
-        sv.tex_w = framed ? Int32((480 * asp).rounded()) : 384
-        sv.tex_h = framed ? 480 : 384
+        sv.tex_w = 384
+        sv.tex_h = 384
         sv.surf_pos = (p.x, p.y, p.z)
         sv.surf_rot = (q.imag.x, q.imag.y, q.imag.z, q.real)
-        sv.surf_w = h * asp; sv.surf_h = h
-        sv.round = framed ? 0 : 1
-        sv.hide_hud = framed ? 1 : 0
+        sv.surf_w = h; sv.surf_h = h
+        sv.round = 1
+        sv.hide_hud = 0
         sv.zoom = z
         return sv
     }

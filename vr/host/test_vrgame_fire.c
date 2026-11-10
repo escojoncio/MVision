@@ -13,6 +13,7 @@
 #include "vr_body.h"
 #include "vr_fire.h"
 #include "vr_hands.h"
+#include "vr_pose.h"
 #include "vr_grip.h"
 #include "vrgame.h"
 #include "w_laser.h"
@@ -382,6 +383,70 @@ static void weapon_follows_controller(void) {
     }
 }
 
+/* ---- conductos (tumbado, stance 2): el arma no se ve ni en la mano ni en el juego; el disparo no se toca ---- */
+static void duct_hides_weapon(void) {
+    printf("-- conducto (tumbado): sin arma VR, sin la del juego a la vista y sin copia del juego en la mano --\n");
+    float dir[3], org[3], p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1};
+    world(0, 12, 36);
+    fresh_pistol_meshes();
+    mv_vrgame_set_options(1, 2);
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(drawn_weapon(dir, org) == 1 && vrfire_hide_enabled() == 1, "de pie: arma VR dibujada y la del juego oculta");
+    bs.stance = 2;
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    MvVrGameStatus st; mv_vrgame_status(&st);
+    CHECK(drawn_weapon(dir, org) == 0, "tumbado: el modelo VR del arma no se dibuja");
+    CHECK(vrfire_hide_enabled() == 1 && vrgame_native_hand() == -1, "tumbado: el arma del juego sigue oculta (%d) y sin copia en la mano (%d)", vrfire_hide_enabled(), vrgame_native_hand());
+    CHECK(st.active && st.weapon == 0, "tumbado: la lógica del arma (disparo) sigue activa");
+    bs.stance = 0;
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(drawn_weapon(dir, org) == 1, "de pie otra vez: el arma VR vuelve a dibujarse");
+    /* granada (modelo del juego en la mano): tumbado se oculta y no se lleva a la mano */
+    world(2, 0, 3);
+    fresh_weapon(2);
+    vrgame_test_set_native(2, 1);
+    for (int i = 0; i < 6; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    CHECK(vrgame_native_hand() == 1 && vrfire_hide_enabled() == 0, "granada nativa de pie: copia en la mano derecha y sin ocultar (%d)", vrgame_native_hand());
+    bs.stance = 2;
+    for (int i = 0; i < 6; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    CHECK(vrgame_native_hand() == -1 && vrfire_hide_enabled() == 1, "granada nativa tumbado: sin copia en la mano (%d) y la del juego oculta (%d)", vrgame_native_hand(), vrfire_hide_enabled());
+    vrgame_test_set_native(2, 0);
+    world(-1, 0, 0);
+    for (int i = 0; i < 3; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+}
+
+/* ---- prismáticos del juego (scope.c, aumento en el mundo nativo): sin arma VR ni copia del juego en la mano; el disparo no se toca ---- */
+static void binocular_hides_weapon(void) {
+    printf("-- prismaticos: sin arma VR, sin la del juego a la vista y sin copia del juego en la mano --\n");
+    float dir[3], org[3], p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1};
+    world(0, 12, 36);
+    fresh_pistol_meshes();
+    mv_vrgame_set_options(1, 2);
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(drawn_weapon(dir, org) == 1 && vrfire_hide_enabled() == 1, "sin prismaticos: arma VR dibujada");
+    vrgame_set_view_hide(1);
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    MvVrGameStatus st; mv_vrgame_status(&st);
+    CHECK(drawn_weapon(dir, org) == 0, "prismaticos: el modelo VR del arma no se dibuja");
+    CHECK(vrfire_hide_enabled() == 1 && vrgame_native_hand() == -1, "prismaticos: el arma del juego sigue oculta (%d) y sin copia en la mano (%d)", vrfire_hide_enabled(), vrgame_native_hand());
+    CHECK(st.active && st.weapon == 0, "prismaticos: la logica del arma sigue activa");
+    vrgame_set_view_hide(0);
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(drawn_weapon(dir, org) == 1, "sin prismaticos otra vez: el arma VR vuelve a dibujarse");
+    world(2, 0, 3);
+    fresh_weapon(2);
+    vrgame_test_set_native(2, 1);
+    for (int i = 0; i < 6; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    CHECK(vrgame_native_hand() == 1 && vrfire_hide_enabled() == 0, "granada nativa sin prismaticos: copia en la mano (%d)", vrgame_native_hand());
+    vrgame_set_view_hide(1);
+    for (int i = 0; i < 6; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    CHECK(vrgame_native_hand() == -1 && vrfire_hide_enabled() == 1, "granada nativa con prismaticos: sin copia en la mano (%d) y la del juego oculta (%d)", vrgame_native_hand(), vrfire_hide_enabled());
+    vrgame_set_view_hide(0);
+    vrgame_test_set_native(2, 0);
+    world(-1, 0, 0);
+    for (int i = 0; i < 3; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+}
+
 /* ---- granadas: modelo por id de juego y dibujo VR / nativo ---- */
 static void grenade_models(void) {
     printf("-- granadas (ids 2, 7, 8): un modelo VR por id, la sin modelo con el arma del juego --\n");
@@ -706,6 +771,102 @@ static void aim_pose(void) {
     rec = saved;
 }
 
+/* ---- pistola a dos manos: la mano libre agarra la parte delantera/inferior (WP_SUPPORT) con el agarre analógico; la boca pasa a la línea mano principal -> mano de apoyo ---- */
+static void hand_full(int side, const float p[3], const float q[4], const float aq[4], float trig, float grip) {
+    MvVrHand h;
+    memset(&h, 0, sizeof h);
+    h.valid = 1; memcpy(h.pos, p, sizeof h.pos); memcpy(h.rot, q, sizeof h.rot); h.grip = grip; h.trigger = trig;
+    if (aq) { h.aim_valid = 1; memcpy(h.aim_pos, p, sizeof h.aim_pos); memcpy(h.aim_rot, aq, sizeof h.aim_rot); }
+    mv_vrgame_set_hand(side, &h);
+}
+static void tvbl(int main_side, const float p[3], const float q[4], const float aq[4], const float lp[3], float lgrip, int n) {
+    for (int i = 0; i < n; i++) { vrgame_test_advance(8000000ull); hand_full(main_side, p, q, aq, 0.0f, 1.0f); hand_full(1 - main_side, lp, q, NULL, 0.0f, lgrip); vrgame_pad(0, &bs, ram); }
+}
+/* matriz del arma dibujada (raíz, columna-mayor) -> rotación y posición mundo del punto `pt` del arma */
+static int drawn_point(WPoint pt, float R[9], float out[3]) {
+    VrHandsFrame f;
+    int rc = mv_host_hands(&f);
+    if (!rc || f.nmeshes < 1) { mv_host_hands_done(); return 0; }
+    const float *m = f.meshes[0].model;
+    for (int c = 0; c < 3; c++) for (int r = 0; r < 3; r++) R[3 * r + c] = m[4 * c + r];
+    const WVec3 v = syn_def->points[pt].p;
+    for (int i = 0; i < 3; i++) out[i] = m[12 + i] + m[i] * v.x + m[4 + i] * v.y + m[8 + i] * v.z;
+    mv_host_hands_done();
+    return 1;
+}
+static int hp_item(int side) { int it; float tr, th; vrgame_hand_pose_in(side, &it, &tr, &th); return it; }
+static void two_hand_pistol(void) {
+    printf("-- pistola a dos manos: agarre de la parte delantera/inferior, enganche de la mano de apoyo y apuntado por la línea de las manos --\n");
+    for (int ms = 1; ms >= 0; ms--) {
+        const int os = 1 - ms;
+        float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1}, far_[3] = {-0.5f, 1.0f, -0.3f}, a = -20.0f * 0.017453292f * 0.5f, aq[4] = {sinf(a), 0, 0, cosf(a)}, aim[3];
+        rot_z(aq, aim);
+        world(0, 12, 60);
+        fresh_pistol_meshes();
+        mv_vrgame_set_options(ms, 2);
+        tvbl(ms, p, q, aq, far_, 1.0f, 15);
+        float R[9], S[3], org[3], dir[3];
+        CHECK(drawn_point(WP_SUPPORT, R, S) == 1 && drawn_weapon(dir, org) == 1, "lado %d: arma dibujada", ms);
+        CHECK(t_ang(dir, aim) < 0.5f && hp_item(os) != HP_GRIP_SUPPORT, "lado %d: mano libre lejos: una sola mano, boca = apuntado del mando (%.3f gr), pose %d", ms, t_ang(dir, aim), hp_item(os));
+        /* el punto de apoyo de la pistola está por delante de la empuñadura y por debajo del cañón (alcanzable con el otro mando) */
+        const WVec3 sp = syn_def->points[WP_SUPPORT].p;
+        CHECK(sp.z < -0.10f && sp.y < 0.063f && fabsf(sp.x) < 0.01f, "punto de apoyo delante y debajo del cañón: %.3f %.3f %.3f", sp.x, sp.y, sp.z);
+        float lp[3] = {S[0], S[1] + 0.14f, S[2]};
+        tvbl(ms, p, q, aq, lp, 1.0f, 15);
+        CHECK(hp_item(os) != HP_GRIP_SUPPORT, "lado %d: a 0,14 m del punto no engancha", ms);
+        lp[1] = S[1] + 0.10f;
+        tvbl(ms, p, q, aq, lp, 0.3f, 15);
+        CHECK(hp_item(os) != HP_GRIP_SUPPORT, "lado %d: a 0,10 m sin apretar el agarre no engancha", ms);
+        tvbl(ms, p, q, aq, lp, 1.0f, 15);
+        CHECK(hp_item(os) == HP_GRIP_SUPPORT, "lado %d: a 0,10 m y agarre apretado: mano de apoyo enganchada (pose %d)", ms, hp_item(os));
+        tvbl(ms, p, q, aq, lp, 0.4f, 10);
+        CHECK(hp_item(os) == HP_GRIP_SUPPORT, "lado %d: sujeta con el agarre algo aflojado (0,4)", ms);
+        /* la línea mano principal -> mano de apoyo gobierna la boca: se gira la mano de apoyo 15 grados en horizontal alrededor de la principal */
+        CHECK(drawn_point(WP_SUPPORT, R, S) == 1 && drawn_weapon(dir, org) == 1, "lado %d: arma dibujada con apoyo", ms);
+        float dir0[3] = {dir[0], dir[1], dir[2]};
+        const float c15 = cosf(15.0f * 0.017453292f), s15 = sinf(15.0f * 0.017453292f);
+        float v0[3] = {S[0] - p[0], S[1] - p[1], S[2] - p[2]};
+        float lp2[3] = {p[0] + c15 * v0[0] + s15 * v0[2], p[1] + v0[1], p[2] - s15 * v0[0] + c15 * v0[2]};
+        tvbl(ms, p, q, aq, lp2, 1.0f, 60);
+        CHECK(drawn_point(WP_SUPPORT, R, S) == 1 && drawn_weapon(dir, org) == 1 && hp_item(os) == HP_GRIP_SUPPORT, "lado %d: sigue enganchada tras girar la mano de apoyo", ms);
+        float vw[3], d[3] = {lp2[0] - p[0], lp2[1] - p[1], lp2[2] - p[2]}, vr[3] = {sp.x - syn_def->points[WP_GRIP].p.x, sp.y - syn_def->points[WP_GRIP].p.y, sp.z - syn_def->points[WP_GRIP].p.z};
+        for (int i = 0; i < 3; i++) vw[i] = R[3 * i] * vr[0] + R[3 * i + 1] * vr[1] + R[3 * i + 2] * vr[2];
+        { float lv = sqrtf(vw[0] * vw[0] + vw[1] * vw[1] + vw[2] * vw[2]), ld = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]); for (int i = 0; i < 3; i++) { vw[i] /= lv; d[i] /= ld; } }   /* t_ang espera vectores unitarios */
+        float e_line = t_ang(vw, d), turned = t_ang(dir, dir0);
+        CHECK(e_line < 1.0f, "lado %d: el vector empuñadura->apoyo del arma sigue la línea de las manos: %.3f grados (< 1)", ms, e_line);
+        CHECK(turned > 8.0f && t_ang(dir, aim) > 8.0f, "lado %d: la boca giró %.1f grados respecto a una mano (el apuntado del mando queda a %.1f)", ms, turned, t_ang(dir, aim));
+        CHECK(sqrtf((S[0] - org[0]) * (S[0] - org[0]) + (S[1] - org[1]) * (S[1] - org[1]) + (S[2] - org[2]) * (S[2] - org[2])) > 0.10f, "lado %d: el punto de apoyo queda lejos de la empuñadura", ms);
+        /* la mano de apoyo se dibuja enganchada al punto del arma */
+        VrHandPose hands[2];
+        CHECK(vrpose_get_hands(hands) == 2 && hands[os].valid && hands[ms].valid, "lado %d: poses de manos para la IK", ms);
+        float ds = sqrtf((hands[os].pos[0] - S[0]) * (hands[os].pos[0] - S[0]) + (hands[os].pos[1] - S[1]) * (hands[os].pos[1] - S[1]) + (hands[os].pos[2] - S[2]) * (hands[os].pos[2] - S[2]));
+        float dm = sqrtf((hands[ms].pos[0] - p[0]) * (hands[ms].pos[0] - p[0]) + (hands[ms].pos[1] - p[1]) * (hands[ms].pos[1] - p[1]) + (hands[ms].pos[2] - p[2]) * (hands[ms].pos[2] - p[2]));
+        CHECK(ds < 0.01f && dm < 1e-4f, "lado %d: la mano de apoyo de la IK está en el punto del arma (%.4f m) y la principal no se mueve (%.5f)", ms, ds, dm);
+        /* la bala sale por la boca (misma pose que el arma) */
+        { VrFireMat dm_; for (int n = 0; n < 8 && vrfire_take_projectile(0, &dm_) == VRFIRE_SUBST; n++) {} }
+        MvVrGameStatus st0, st;
+        mv_vrgame_status(&st0);
+        for (int i = 0; i < 12; i++) { vrgame_test_advance(8000000ull); hand_full(ms, p, q, aq, 0.7f, 1.0f); hand_full(os, lp2, q, NULL, 0.0f, 1.0f); vrgame_pad(0, &bs, ram); mv_vrgame_status(&st); if (st.shots > st0.shots) break; }
+        VrFireMat fm;
+        if (st.shots > st0.shots && vrfire_take_projectile(0, &fm) == VRFIRE_SUBST) {
+            VrFireMap map; vrfire_map_from_cam(&map, &rec);
+            float fw[3], dw[3];
+            vrfire_mat_forward(&fm, fw); vrfire_dir_from_world(&map, fw, dw);
+            CHECK(t_ang(dw, dir) < 3.0f, "lado %d: la bala sale por la boca de dos manos (%.2f grados de la boca dibujada; el retroceso la mueve)", ms, t_ang(dw, dir));
+        } else CHECK(0, "lado %d: disparo a dos manos", ms);
+        /* soltar: agarre < 0,3 vuelve a una mano */
+        tvbl(ms, p, q, aq, lp2, 0.1f, 60);
+        CHECK(hp_item(os) != HP_GRIP_SUPPORT && drawn_weapon(dir, org) == 1 && t_ang(dir, aim) < 0.5f, "lado %d: al soltar vuelve a una mano, boca = apuntado del mando (%.3f gr)", ms, t_ang(dir, aim));
+        CHECK(vrpose_get_hands(hands) == 2 && fabsf(hands[os].pos[0] - lp2[0]) < 1e-4f && fabsf(hands[os].pos[1] - lp2[1]) < 1e-4f && fabsf(hands[os].pos[2] - lp2[2]) < 1e-4f, "lado %d: al soltar la mano de la IK vuelve al mando", ms);
+        /* alejar la mano también suelta (más de 0,16 m) */
+        tvbl(ms, p, q, aq, lp2, 1.0f, 15);
+        CHECK(hp_item(os) == HP_GRIP_SUPPORT, "lado %d: se vuelve a enganchar", ms);
+        tvbl(ms, p, q, aq, far_, 1.0f, 15);
+        CHECK(hp_item(os) != HP_GRIP_SUPPORT, "lado %d: con la mano lejos se suelta", ms);
+    }
+    mv_vrgame_set_options(1, 2);
+}
+
 /* ---- la corrección de puntería: solo armas con boca real, y sin saltos si el apuntado falta un instante ---- */
 static float q_angle_deg(const float a[4], const float b[4]) { float d = fabsf(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]); return 2.0f * acosf(fminf(1.0f, d)) * 57.29578f; }
 static void aim_guard(void) {
@@ -792,10 +953,13 @@ int main(void) {
     grenade_gesture();
     weapon_follows_controller();
     grenade_models();
+    duct_hides_weapon();
+    binocular_hides_weapon();
     hand_frames();
     laser_aims_with_bullet();
     aim_pose();
     aim_guard();
+    two_hand_pistol();
     laser_stops_at_walls();       /* al final: consume números aleatorios y las pruebas anteriores dependen de la secuencia */
 
     printf("%s vrgame_fire: %d comprobaciones, %d fallos\n", fails ? "FALLO" : "OK", checks, fails);

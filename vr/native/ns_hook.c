@@ -99,6 +99,7 @@ static void capture(const uint8_t *ram, const uint8_t *scratch, int kind) {   /*
         inc(&H.st.player_bound);
         head_ok = 1;
         if (o.hide_head) head_ok = ns_player_hide_part(&H.map, s, NS_PART_HEAD) > 0;
+        for (int k = 0; k < NS_PLAYER_PARTS; k++) if (o.hide_parts & (1u << k)) ns_player_hide_part(&H.map, s, k);
         H.refresh_parts = o.refresh_parts;
         int arms_ok = 1;
         if (o.refresh_parts) {   /* debe haber al menos una pieza de brazo enlazada para que la IK tenga efecto */

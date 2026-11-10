@@ -79,8 +79,8 @@ void mv_vrgame_status(MvVrGameStatus *out);
  *  - MV_VIEW_SCOPE: mira óptica del francotirador. La app renderiza la escena una segunda vez desde `cam_*` (campo vertical cam_fov_y, textura
  *    cuadrada tex_w x tex_h) y la muestra en un disco (la lente) en `surf_*` con la abertura y retícula de vr_scope.h por encima. `blend` = apertura del
  *    iris (0 = ojo lejos: no hace falta renderizar). La cabeza NO se acerca (el aumento solo está en la lente): suppress_frame pide no aplicar la
- *    máscara de visión del juego y hide_hud ocultar el panel plano del HUD mientras se mira. Con round = 0 (solo lo pone el visor para los prismáticos del juego; el arma VR siempre round = 1) la lente es un
- *    rectángulo y, en lugar de la abertura y la retícula, lleva encima la capa del HUD del juego (marco de scope.c / sight.c, radar), con hide_hud = 1.
+ *    máscara de visión del juego y hide_hud ocultar el panel plano del HUD mientras se mira. (Los prismáticos del juego, scope.c, no usan esta vista: el visor amplía el mundo en los dos ojos y pone su marco del HUD
+ *    como MV_VIEW_AA_SIGHT; solo sight.c sin scope.c, sin prismáticos, usa un disco SCOPE.)
  *  - MV_VIEW_AA_SIGHT: visor del lanzador antiaéreo. El HUD del propio juego (mira + marco de fijación, en la textura del HUD) se dibuja en un
  *    rectángulo anclado delante del visor (`surf_*`, ya a la distancia y tamaño angular del juego); `uv` = subrectángulo (x, y, w, h) de la textura del HUD
  *    que cubre el rectángulo (el centro óptico del juego es el centro del rectángulo). hide_hud = 1.
@@ -96,7 +96,7 @@ typedef struct {
     float cam_pos[3], cam_rot[4], cam_fov_y;
     int32_t tex_w, tex_h;
     float surf_pos[3], surf_rot[4], surf_w, surf_h;
-    int32_t round;              /* la superficie es un disco de diámetro surf_w (SCOPE con round = 0: rectángulo con la capa del HUD encima, ver arriba) */
+    int32_t round;              /* la superficie es un disco de diámetro surf_w (SCOPE; el arma VR siempre round = 1) */
     float uv[4];                /* AA: subrectángulo de la textura del HUD */
     int32_t hide_hud, suppress_frame;
     int32_t locked, converged;  /* AA: blanco fijado / marco cerrado */
@@ -158,6 +158,7 @@ int vrgame_hand_pose_in(int side, int *item_pose, float *trigger, float *thumb);
 int vrgame_hand_frame_sim(int side, float p[3], float q[4]);
 int vrgame_hand_frame_now(int side, float p[3], float q[4]);
 int vrgame_native_hand(void);   /* lado (0/1) de la mano que sujeta el arma equipada que se dibuja con el modelo del juego (granada), -1 si no hay (hilo de emulación) */
+void vrgame_set_view_hide(int on);   /* 1 = prismáticos del juego activos (scope.c con aumento en el mundo): el arma no se dibuja ni se lleva a la mano; el disparo no se toca (hilo de emulación, antes de vrgame_pad) */
 int vrgame_glove_pub(void);                                              /* hueco publicado de los guantes (-1 = ninguno) */
 int vrgame_weapon_engaged(void);                                       /* arma VR mostrada o recarga en curso */
 int vrgame_throw_hold(void);                                           /* arrojadiza VR (2, 7, 8) en la mano del arma, sin preparar o preparada */
