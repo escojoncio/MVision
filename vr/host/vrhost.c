@@ -189,7 +189,8 @@ static VrSmooth SM;
 static int sm_init;
 static double (*clock_fn)(void);
 static uint32_t exe_gen;                 /* cargas del ejecutable (cambia la época de las muestras) */
-static VrSmCorr sm_last; static uint64_t sm_last_ns;   /* con SMX: última corrección evaluada (la del fotograma de render en curso) y cuándo */
+static VrSmCorr sm_last; static uint32_t sm_last_poll;   /* con SMX: última corrección evaluada y cuántas veces había tomado escena el renderer (ns_polls) al evaluarla */
+static uint32_t ns_polls(void);          /* llamadas del renderer a ns_bridge_acquire (una por fotograma de render, después de mv_vrhost_smooth) */
 static VblRing body_ring;                /* con SMX: poses del jugador de las últimas escenas publicadas (vr_bodylive.h) */
 static VblPose body_pend;                /* hilo de emulación: pose de la escena capturada y aún sin publicar */
 static int ns_cap_pend;                  /* hilo de emulación: hay una escena con cámara VR capturada y aún sin publicar */
@@ -222,20 +223,21 @@ void mv_vrhost_smooth(VrSmCorr *out) {
     pthread_mutex_lock(&SMX);
     sm_ensure();
     vrsm_eval(&SM, now_s(), mv_vr_turn_total(), out);
-    sm_last = *out; sm_last_ns = mono_ns();
+    sm_last = *out; sm_last_poll = ns_polls();
     pthread_mutex_unlock(&SMX);
 }
 
 /* Cuerpo del jugador a la cadencia del renderer (vr_bodylive.h; hilo de render, al armar la tabla de piezas de la escena nativa `sc`, DESPUÉS de mv_vrhost_smooth de ese mismo
  * fotograma): matriz de mundo (NsXf, 3x4) de la pieza k de la instancia inst que deja al jugador y a sus manos propias fijos respecto a la cabeza e interpolados entre escenas.
- * 0 = dejar la matriz de la escena (no es del jugador, sin dos poses, o la fluidez no se evaluó en este fotograma: desactivada, cinemática, diorama). */
+ * 0 = dejar la matriz de la escena (no es del jugador, sin dos poses, o la fluidez no se evaluó en este fotograma: desactivada, cinemática, diorama). «Este fotograma» = el renderer
+ * ha tomado escena del puente como mucho una vez desde la evaluación (0 = fotograma con la escena retenida a la espera de la VRAM, que no vuelve a tomarla). */
 int32_t mv_vrhost_body_piece(const void *scene, uint32_t inst, uint32_t k, void *out_xf) {
     const NsScene *sc = (const NsScene *)scene;
     if (!sc || !out_xf || inst >= sc->n_inst) return 0;
     uint32_t key = sc->inst[inst].key;
     if (key != atomic_load(&body_key) && !ns_key_is_hand(key)) return 0;
     pthread_mutex_lock(&SMX);
-    int ok = sm_last.active && mono_ns() - sm_last_ns < 8000000ull && vbl_piece(&body_ring, sc, inst, k, sm_last.alpha, sm_last.m, (NsXf *)out_xf);
+    int ok = sm_last.active && ns_polls() - sm_last_poll <= 1u && vbl_piece(&body_ring, sc, inst, k, sm_last.alpha, sm_last.m, (NsXf *)out_xf);
     pthread_mutex_unlock(&SMX);
     return ok;
 }
@@ -339,6 +341,11 @@ static NsBridge *ns_bridge_get(void) {
     return b;
 }
 struct NsBridge *mv_vrhost_native_bridge(void) { return ns_bridge_get(); }
+static uint32_t ns_polls(void) {
+    NsBridgeStats st = {0};
+    ns_bridge_stats(atomic_load(&ns_br), &st);
+    return st.polls;
+}
 
 /* Mundo del motor -> espacio recentrado del usuario (3x4 fila-mayor, metros): la MISMA regla que vr_scene con user_map_on (la reflexión de Z se cancela):
  *   P = R * (k * S * (W - origen)) - R * (0, eye_h, 0) + p_ref.
@@ -355,7 +362,7 @@ static int ns_world_to_vr(const VrCamRecord *r, float to_vr[12], VrSmSample *smp
 }
 /* Último empujón de una muestra de la escena nativa al suavizador (ns del reloj mono): mientras llegue, las escenas de la GPU marcadas para el nativo no empujan la suya. */
 static _Atomic uint64_t ns_smp_push_ns;
-static VrSmSample ns_smp_pend;           /* muestra de la escena nativa capturada y aún sin publicar (hilo de emulación): se empuja al publicarla (frame_hook_body) */
+static VrSmSample ns_smp_pend;           /* muestra de la escena nativa capturada y aún sin publicar (hilo de emulación): se empuja al publicarla (ns_pub_flush) */
 #define NS_SMP_FRESH_NS 100000000ull
 
 /* Contexto de la captura (hilo de emulación, en la etapa «pantalla»): zona, cámara VR y mapa mundo -> usuario, y qué hacer con el jugador. */
@@ -396,7 +403,21 @@ static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *m
         for (int s = 0; s < 2; s++) vrgame_hand_pose_in(s, &in.item_pose[s], &in.trigger[s], &in.thumb[s]);   /* objeto en la mano (arma por vr_grip), gatillo y pulgar */
         ns_hand_apply(sc, st, map, &in);
     }
-    if (vbl_capture(&body_pend, sc, map->key)) atomic_store(&body_key, map->key);   /* pose del cuerpo (ya con la IK) y de las manos propias para el renderer (mv_vrhost_body_piece) */
+    uint32_t live = 0;   /* brazos que la IK lleva con el mando (vr_body: lado 0 = izquierdo, piezas 7-9; 1 = derecho, 2-4): van en su última pose, como el arma */
+    for (int s = 0; s < 2; s++) { float g = 0; if (vrbody_hand_state(s, &g, NULL, NULL)) live |= s ? (1u << 2) | (1u << 3) | (1u << 4) : (1u << 7) | (1u << 8) | (1u << 9); }
+    if (vbl_capture(&body_pend, sc, map, live)) atomic_store(&body_key, map->key);   /* pose del cuerpo (ya con la IK) y de las manos propias para el renderer (mv_vrhost_body_piece) */
+}
+/* Justo ANTES de publicar la escena (observador de ns_hook_tick, tras el cierre): su muestra entra en el suavizador y su pose del cuerpo en el anillo, las dos bajo SMX. No al
+ * capturarla (el renderer seguiría dibujando la escena anterior varios ms con el movimiento de la nueva) ni después de publicarla (el renderer podría tomar la escena nueva sin
+ * su pose: mv_vrhost_body_piece no la reconocería; al revés sí: reconoce la escena anterior). */
+static void ns_pub_flush(void) {
+    if (!ns_cap_pend) return;
+    pthread_mutex_lock(&SMX);
+    if (ns_smp_pend.valid) { sm_ensure(); vrsm_push(&SM, &ns_smp_pend, now_s()); }
+    vbl_push(&body_ring, &body_pend);
+    pthread_mutex_unlock(&SMX);
+    if (ns_smp_pend.valid) atomic_store(&ns_smp_push_ns, mono_ns() | 1);
+    ns_smp_pend.valid = 0; body_pend.n = 0; ns_cap_pend = 0;
 }
 /* Antes de cada captura: con las manos nuevas Y el render nativo en uso, la malla de la manopla del motor NO se deforma en puño (la mano nueva hace el puño y su forma
  * de reposo debe ser estable); con la lista de la GPU (o manos originales) sigue el puño deformado de siempre. */
@@ -417,6 +438,7 @@ static struct { _Atomic uint32_t scenes, no_mesh, overflow, retried; _Atomic uin
 static VrHcOut hc_last;                  /* última consulta (bajo HCMX), solo para el registro */
 static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u) {
     (void)u;
+    ns_pub_flush();
     if (!hc_on || !s || !st || !(s->valid & NS_SV_TOVR_OK) || !(s->valid & NS_SV_GAME)) return;   /* cinemática / sin cámara VR: no hay ancla */
     NsSolidOpts o; memset(&o, 0, sizeof o);
     float jt[16][3];
@@ -1608,14 +1630,6 @@ static void dump_at_stage(Cpu *c) {
 static void frame_hook_body(Cpu *c, uint32_t f) {
     ns_hook_set_frame((uint32_t)hle_frame_count());
     ns_hook_tick(emu_ram);                        /* publica la escena nativa capturada en este fotograma de juego */
-    if (ns_cap_pend) {   /* su muestra entra en el suavizador AHORA, no al capturarla (entre la captura y la publicación el renderer aún dibuja la escena anterior), junto con la pose del cuerpo de esa escena */
-        pthread_mutex_lock(&SMX);
-        if (ns_smp_pend.valid) { sm_ensure(); vrsm_push(&SM, &ns_smp_pend, now_s()); }
-        vbl_push(&body_ring, &body_pend);
-        pthread_mutex_unlock(&SMX);
-        if (ns_smp_pend.valid) atomic_store(&ns_smp_push_ns, mono_ns() | 1);
-        ns_smp_pend.valid = 0; body_pend.n = 0; ns_cap_pend = 0;
-    }
     ns_frame_check();
 #ifdef MV_NOGEN
     if (vr_ok) ovp_frame();

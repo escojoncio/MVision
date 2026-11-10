@@ -22,6 +22,7 @@ static void rel(int j, int k, float r[3], float *ang) {
     float ph = 6.2831853f * 2.0f * (float)k * 0.04f + (float)j;
     r[0] = 30.0f * (float)(j % 4) - 40.0f; r[1] = -100.0f * (float)j; r[2] = -60.0f; *ang = 0.2f * (float)j;
     if (j >= 10) { r[0] += 250.0f * sinf(ph); r[1] += 60.0f * cosf(ph); *ang += 0.6f * sinf(ph); }
+    if (j >= 2 && j <= 4) r[0] += 200.0f * sinf(0.7f * (float)k + (float)j);   /* brazo derecho: lo lleva la IK del mando, se mueve con la mano del usuario */
 }
 static void xf_set(NsXf *x, float ang, const float t[3]) {
     float c = cosf(ang), s = sinf(ang);
@@ -57,6 +58,11 @@ static void shown(const NsScene *sc, const NsXf *w, const float m[16], double o[
 
 int main(void) {
     static VblRing ring; static VblPose pose;
+    NsPlayerMap map; memset(&map, 0, sizeof map);
+    map.bound = 1; map.key = PKEY;
+    for (int q = 0; q < NP; q++) { map.part[q].n = 1; map.part[q].idx[0] = (uint32_t)q; }
+    const uint32_t live = (1u << 2) | (1u << 3) | (1u << 4);
+    double hand = 0;
     VrSmooth sm; vrsm_init(&sm, NULL);
     const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     const NsScene *cur = NULL, *old = NULL;
@@ -71,7 +77,7 @@ int main(void) {
             float org[3] = {100.0f * (float)k, 0, 0};
             VrSmSample s; vrsm_make_sample(&s, org, R, K, PREF, 1.5f, k * 0.04, 0.0, 1, k * 0.04);
             vrsm_push(&sm, &s, t);
-            CHECK(vbl_capture(&pose, cur, PKEY) == NP + NH, "captura: piezas del jugador y de la mano");
+            CHECK(vbl_capture(&pose, cur, &map, live) == NP + NH, "captura: piezas del jugador y de la mano");
             vbl_push(&ring, &pose);
             if (k == 0) CHECK(vbl_piece(&ring, cur, 0, 1, 0.5f, (const float[16]){1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}, &x) == 0, "una sola pose: no se toca la pieza");
             k++;
@@ -91,17 +97,23 @@ int main(void) {
             NsXf y; CHECK(vbl_piece(&ring, old, ii, kk, c.alpha, c.m, &y) == 1, "pieza %d con la escena anterior", j);
             shown(old, &y, c.m, p2);
             for (int i = 0; i < 3; i++) alt = fmax(alt, fabs(p2[i] - p1[i]));
-            if (j < 10 || j >= NP) {   /* torso, brazos, cabeza y mano: fijos respecto al ojo -> deben quedar fijos respecto a la cabeza (p_ref) */
-                float r[3], a; rel(j < NP ? j : 3, 0, r, &a); if (j >= NP) r[1] -= 40.0f * (float)(j - NP + 1);
+            int lv = (j >= 2 && j <= 4) || j >= NP;   /* brazo de la IK y mano propia: siguen al mando */
+            if (lv) {   /* en la ÚLTIMA pose (la del mando más reciente), no una escena por detrás: el arma va en tiempo real */
+                float r[3], a; rel(j < NP ? j : 3, k - 1, r, &a); if (j >= NP) r[1] -= 40.0f * (float)(j - NP + 1);
+                for (int i = 0; i < 3; i++) hand = fmax(hand, fabs(p1[i] - (PREF[i] + K * r[i])));
+            } else if (j < 10) {   /* torso, brazo izquierdo y cabeza: fijos respecto al ojo -> deben quedar fijos respecto a la cabeza (p_ref) */
+                float r[3], a; rel(j, 0, r, &a);
                 for (int i = 0; i < 3; i++) { saw0 = fmax(saw0, fabs(p0[i] - (PREF[i] + K * r[i]))); saw1 = fmax(saw1, fabs(p1[i] - (PREF[i] + K * r[i]))); }
             }
-            if (have) for (int i = 0; i < 3; i++) { step0 = fmax(step0, fabs(p0[i] - prev0[j][i])); step1 = fmax(step1, fabs(p1[i] - prev1[j][i])); }
+            if (have && !lv) for (int i = 0; i < 3; i++) { step0 = fmax(step0, fabs(p0[i] - prev0[j][i])); step1 = fmax(step1, fabs(p1[i] - prev1[j][i])); }
             memcpy(prev0[j], p0, sizeof p0); memcpy(prev1[j], p1, sizeof p1);
         }
         have = 1;
     }
     printf("cuerpo a 90 Hz (andar a 2,5 m/s): torso respecto a la cabeza, diente de sierra %.1f -> %.2f mm; paso maximo por fotograma de render de las 16 piezas + mano %.1f -> %.1f mm; con la escena anterior %.3f mm\n",
            saw0 * 1000.0, saw1 * 1000.0, step0 * 1000.0, step1 * 1000.0, alt * 1000.0);
+    printf("brazo de la IK y mano propia (se mueven hasta 140 mm por escena): desvio respecto a la ultima pose %.2f mm\n", hand * 1000.0);
+    CHECK(hand * 1000.0 < 0.5, "brazo de la IK / mano propia: %.1f mm por detras de la ultima pose", hand * 1000.0);
     CHECK(used > 3000, "cobertura (%d)", used);
     CHECK(saw0 * 1000.0 > 90.0, "la referencia sin corregir debe traer el diente de sierra (%.1f mm)", saw0 * 1000.0);
     CHECK(saw1 * 1000.0 < 0.5, "torso: diente de sierra de %.2f mm respecto a la cabeza", saw1 * 1000.0);

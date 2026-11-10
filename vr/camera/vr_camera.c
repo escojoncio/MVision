@@ -128,7 +128,7 @@ typedef struct {
     /* ancla del ojo en la raíz de locomoción (vrcam_plan) */
     int32_t pb[3]; int pb_ok; uint32_t pb_vb;   /* posición de control del jugador y VBlank de la construcción anterior */
     float ey;                             /* altura filtrada de la cabeza (mundo, sin eye_up) */
-    float nh[3];                          /* altura de la articulación de la cabeza sobre la raíz aprendida con el jugador quieto, por postura (de pie, agachado, tumbado) */
+    float nh[4];                          /* altura de la articulación de la cabeza sobre la raíz aprendida con el jugador quieto, por postura (de pie, agachado, tumbado, en la caja) */
     float sh[2], shv[2];                  /* empuje de las paredes (x, z) filtrado y su velocidad */
 } Vc;
 static Vc S;
@@ -151,7 +151,7 @@ void vrcam_init(const VrCamConfig *c) {
     if (!(S.cfg.predict_s >= 0.0f && S.cfg.predict_s <= 0.5f)) S.cfg.predict_s = 0.0f;          /* NaN o fuera de rango: sin predicción */
     if (!(S.cfg.predict_max_deg >= 0.0f && S.cfg.predict_max_deg <= 90.0f)) S.cfg.predict_max_deg = 35.0f;
     if (!(S.cfg.vblank_hz >= 10.0f && S.cfg.vblank_hz <= 240.0f)) S.cfg.vblank_hz = 50.0f;
-    S.nh[0] = S.nh[1] = 394.0f; S.nh[2] = 0.0f;   /* medido en volcados: de pie +394, tumbado -1; se corrige solo con el jugador quieto */
+    S.nh[0] = S.nh[1] = S.nh[3] = 394.0f; S.nh[2] = 0.0f;   /* medido en volcados: de pie +394, tumbado -1; se corrige solo con el jugador quieto */
 }
 const VrCamConfig *vrcam_config(void) { return &S.cfg; }
 
@@ -204,14 +204,15 @@ static void hzd_log(float moved_u, float upm) {
 }
 
 /* ============================================ lectura del estado del juego ============================================ */
-typedef struct { int ok; int32_t eye_x, eye_z; float body_yaw; int post, move; int joint; int32_t jx, jy, jz; int32_t bx, by, bz, floor; } Body;
+typedef struct { int ok; int32_t eye_x, eye_z; float body_yaw; int post, move, follow; int joint; int32_t jx, jy, jz; int32_t bx, by, bz, floor; } Body;
 
 static Body read_body(const uint8_t *ram) {
     Body b = {0};
     uint32_t ob = rd_u32(ram, VC_PLAYER_BODY), ctl = rd_u32(ram, BA_PLAYER_CTRL);
     uint32_t status = rd_u32(ram, BA_PLAYER_STATUS);
-    b.post = (status & BRIDGE_PS_GROUND) ? 2 : (status & BRIDGE_PS_SQUAT) ? 1 : 0;
+    b.post = (status & BRIDGE_PS_BOX) ? 3 : (status & BRIDGE_PS_GROUND) ? 2 : (status & BRIDGE_PS_SQUAT) ? 1 : 0;
     b.move = (status & BRIDGE_PS_MOVE) != 0;
+    b.follow = (status & (BRIDGE_PS_DOWNED | BRIDGE_PS_DAMAGED)) != 0;   /* derribado / recibiendo un golpe: no es una postura, la cabeza va donde la lleve la animación */
     int have_ctl = ptr_ok(ctl, BC_SIZE);
     int16_t mx = 0, my = 0, mz = 0;
     if (have_ctl) {
@@ -317,19 +318,20 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
 
     /* Altura de la cabeza sin el balanceo del paso. Quieto (la raíz no se mueve y el juego no anda): sigue a la articulación de la cabeza (posturas y sus transiciones) y aprende
      * su altura sobre la raíz en esa postura. Andando: raíz + altura aprendida de la postura (nunca la articulación: su animación sube y baja a cada paso), y en las cuestas sube
-     * y baja con la raíz sin retardo. Todo con transición de 0,15 s; un salto de la raíz (cambio de zona, teletransporte) reinicia. */
+     * y baja con la raíz sin retardo. Derribado o golpeado: sigue a la articulación aunque la raíz se mueva, sin aprender. Todo con transición de 0,15 s; un salto de la raíz
+     * (cambio de zona, teletransporte) reinicia el filtro, no lo aprendido (el modelo puede estar en cualquier pose). */
     float dt = (float)(S.pb_ok && S.vb > S.pb_vb ? S.vb - S.pb_vb : 1u) / S.cfg.vblank_hz;
     if (dt > 0.2f) dt = 0.2f;
     int32_t dr[3] = {b.bx - S.pb[0], b.by - S.pb[1], b.bz - S.pb[2]};
     int snap = !S.pb_ok || abs(dr[0]) > 400 || abs(dr[1]) > 1500 || abs(dr[2]) > 400;
     float ey_prev = S.ey;
-    if (snap) { S.ey = (float)b.jy; if (b.joint) S.nh[b.post] = (float)(b.jy - b.by); }
+    if (snap) S.ey = (float)b.jy;
     else {
         float target = (float)b.jy;
-        if (dr[0] || dr[2] || b.move) {
+        if ((dr[0] || dr[2] || b.move) && !b.follow) {
             if (abs(dr[1]) <= 200) S.ey += (float)dr[1];
             target = (float)b.by + S.nh[b.post];
-        } else if (b.joint) S.nh[b.post] += (1.0f - expf(-dt / 0.16f)) * ((float)(b.jy - b.by) - S.nh[b.post]);
+        } else if (b.joint && !b.follow) S.nh[b.post] += (1.0f - expf(-dt / 0.16f)) * ((float)(b.jy - b.by) - S.nh[b.post]);
         S.ey += (1.0f - expf(-dt / 0.15f)) * (target - S.ey);
     }
     S.pb[0] = b.bx; S.pb[1] = b.by; S.pb[2] = b.bz; S.pb_ok = 1; S.pb_vb = S.vb;
@@ -373,12 +375,11 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
     /* ojo: raíz de locomoción a la altura filtrada de la cabeza (+ desplazamiento arriba/delante según la mirada horizontal) */
     float yr = view * (PI_F / 180.0f);
     float ex = (float)b.eye_x + sinf(yr) * S.cfg.eye_fwd, ey = S.ey + S.cfg.eye_up, ez = (float)b.eye_z + cosf(yr) * S.cfg.eye_fwd;
-    /* El juego solo colisiona el centro del cuerpo: el ojo (eye_fwd por delante) puede quedar al otro lado de una pared. Se devuelve al lado libre (vr_hzd.h), pero el empuje pedido
-     * cambia a saltos (paredes que entran y salen, esquinas): el aplicado lo sigue con un filtro crítico-amortiguado (0,12 s, 1,5 m/s como mucho) y con histéresis (ya empujado, la
-     * holgura pedida es un 15 % mayor: no oscila en el borde). */
-    { float upm = S.cfg.units_per_m * (S.cfg.calibrate && S.calib.scale > 0 ? S.calib.scale : 1.0f), cx = ex, cz = ez;
-      int on = hypotf(S.sh[0], S.sh[1]) > 1.0f && !snap;
-      int nc = vrhzd_clamp_eye(ram, b.bx, b.bz, &cx, &cz, ey, (on ? 0.207f : 0.18f) * upm);
+    /* El juego solo colisiona el centro del cuerpo: el ojo (eye_fwd por delante) puede quedar al otro lado de una pared. Se devuelve al lado libre (vr_hzd.h). El empuje pedido
+     * cambia a saltos (paredes que entran y salen, esquinas). Hacia DENTRO (hace falta más empuje) se aplica al instante lo justo para la holgura: el ojo nunca queda dentro de una
+     * pared. La RETIRADA (sobra empuje) va con un filtro crítico-amortiguado (0,12 s, 1,5 m/s como mucho, sin pasarse): sin brinco, y sin oscilar en el borde. */
+    { float upm = S.cfg.units_per_m * (S.cfg.calibrate && S.calib.scale > 0 ? S.calib.scale : 1.0f), r = 0.18f * upm, cx = ex, cz = ez;
+      int nc = vrhzd_clamp_eye(ram, b.bx, b.bz, &cx, &cz, ey, r);
       float tg[2] = {nc > 0 ? cx - ex : 0.0f, nc > 0 ? cz - ez : 0.0f}, sh_prev[2] = {S.sh[0], S.sh[1]};
       if (snap) { S.sh[0] = tg[0]; S.sh[1] = tg[1]; S.shv[0] = S.shv[1] = 0.0f; }
       else {
@@ -391,6 +392,8 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
               S.sh[i] = (S.sh[i] - ch) + (ch + tmp) * e;
               if ((tg[i] - sh_prev[i]) * (S.sh[i] - tg[i]) > 0.0f) { S.sh[i] = tg[i]; S.shv[i] = 0.0f; }   /* sin pasarse del pedido */
           }
+          cx = ex + S.sh[0]; cz = ez + S.sh[1];
+          if (vrhzd_clamp_eye(ram, b.bx, b.bz, &cx, &cz, ey, r) > 0) { S.sh[0] = cx - ex; S.sh[1] = cz - ez; S.shv[0] = S.shv[1] = 0.0f; }   /* el filtrado aún deja el ojo sin holgura: lo que falte, ya */
       }
       ex += S.sh[0]; ez += S.sh[1];
       hzd_log(hypotf(S.sh[0], S.sh[1]), upm);

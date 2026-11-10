@@ -10,3 +10,6 @@ uint32_t ns_fill_glue_fetch(NsEffect *cap, uint32_t max) { (void)cap; (void)max;
 size_t ns_fill_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
 void ns_fill_glue_reset(void) {}
 int ns_fill_glue_scenery_stale(void) { return 0; }
+
+/* Cuerpo del jugador a la cadencia del renderer (vr/host/vrhost.c, que los bancos no enlazan): sin anfitrión, la matriz de la escena tal cual. */
+int32_t mv_vrhost_body_piece(const void *sc, uint32_t inst, uint32_t k, void *out_xf) { (void)sc; (void)inst; (void)k; (void)out_xf; return 0; }
