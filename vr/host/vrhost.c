@@ -436,9 +436,14 @@ __attribute__((weak)) size_t ns_solid_collect(const NsScene *sc, const NsMeshSto
 static float hc_nat_buf[HC_NAT_MAX * 9];
 static struct { _Atomic uint32_t scenes, no_mesh, overflow, retried; _Atomic uint32_t last_tris; } hcn;
 static VrHcOut hc_last;                  /* última consulta (bajo HCMX), solo para el registro */
+/* Última escena nativa publicada (la que verá el renderer): bits de validez, efectos de pantalla que trae (NsScreenFx.flags; 0 sin NS_SV_FX; sin el anillo si su intensidad es 0) y sincronismo
+ * en que se publicó. Hilo de emulación (ns_solid_tap); lo consulta prov_covered en el mismo hilo: garantía de cobertura nativa de vr_prov.h. */
+static uint32_t nat_valid, nat_sfx, nat_vb; static int nat_have;
 static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u) {
     (void)u;
     ns_pub_flush();
+    nat_have = s != NULL; nat_valid = s ? s->valid : 0; nat_vb = (uint32_t)hle_frame_count();
+    nat_sfx = s && (s->valid & NS_SV_FX) ? (s->screen.gas_intensity > 0 ? s->screen.flags : s->screen.flags & ~(uint32_t)NS_SFX_GAS) : 0;
     if (!hc_on || !s || !st || !(s->valid & NS_SV_TOVR_OK) || !(s->valid & NS_SV_GAME)) return;   /* cinemática / sin cámara VR: no hay ancla */
     NsSolidOpts o; memset(&o, 0, sizeof o);
     float jt[16][3];
@@ -780,6 +785,28 @@ static const uint64_t *fx_classify_list(const GpuDrawList *hl, const VrCamRecord
     return hx_key;
 }
 
+/* Garantía de cobertura nativa para la clasificación por procedencia (VrProvLearn.covered; hilo de emulación, dentro de build_one). Todo exige el renderer nativo preparado y la última escena
+ * nativa publicada apta y reciente (vrhost_native_sfx; aptitud como NativeRenderer.ingest: cinemática del motor = partida + listas + mapa; si no, ns_scene_native_ok): con una escena no apta
+ * o sin escenas nuevas el renderer repite la última válida, con los efectos de AQUELLA. Anillo / fundido: además esa escena trae el efecto. Paquete: además esa escena trae efectos
+ * (NS_SV_FX) y el paquete tiene un elemento exportable en la escena de efectos de la RAM actual (ns_fx_covers_packet; una extracción por lista, perezosa). */
+static int hx_cov;   /* hx_fx frente a la RAM de la lista en curso: 0 sin extraer, 1 extraída, -1 fallida */
+static int prov_covered(void *ctx, int what, uint32_t pkt_addr) {
+    (void)ctx;
+    const uint32_t cine_need = NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK;
+    int ready = native_mode() && atomic_load(&renderer_ready) && nat_have;
+    int fit = view.kind == VRV_K_ENGINE ? (nat_valid & cine_need) == cine_need && !(nat_valid & NS_NATIVE_BAD) : ns_scene_native_ok(nat_valid);
+    uint32_t age = (uint32_t)hle_frame_count() - nat_vb;
+    if (what == VPC_COV_GAS) return vrhost_native_sfx(ready, fit, nat_sfx, age, NS_SFX_GAS);
+    if (what == VPC_COV_FADE) return vrhost_native_sfx(ready, fit, nat_sfx, age, NS_SFX_FADE);
+    if (what != VPC_COV_PACKET || !vrhost_native_sfx(ready, fit, nat_valid, age, NS_SV_FX)) return 0;
+    if (!hx_cov) {
+        if (!hx_fx) hx_fx = ns_fx_scene_create(0);
+        NsFxOpts fo = ns_fx_opts_default();
+        hx_cov = hx_fx && ns_fx_extract(emu_ram, &fo, hx_fx) == 0 ? 1 : -1;
+    }
+    return hx_cov > 0 && ns_fx_covers_packet(emu_ram, hx_fx, pkt_addr);
+}
+
 /* Subidas de la lista (CPU -> VRAM) que cubren el área mostrada: mide un fotograma de vídeo descomprimido tanto si llega de una vez como en tiras de 16 px (decodificador
  * del juego). Sin solapes entre subidas del mismo fotograma, que es lo normal (vr_view.h). */
 static int list_uploads_cover_display(const GpuDrawList *l) {
@@ -998,6 +1025,7 @@ static void build_one(const GpuDrawList *l, int si) {
         int pst = view.kind != VRV_K_WORLD ? VPC_ST_OTHER : view.reason == VRV_R_WORLD ? VPC_ST_CLOSED : view.reason == VRV_R_SELECTOR || view.reason == VRV_R_PAUSE_WORLD ? VPC_ST_OPEN : VPC_ST_OTHER;
         vpc_learn_note(&prov_learn, l, pst);
         o.op_class = vpc_op_class_cb; o.op_class_ctx = &prov_learn;
+        prov_learn.covered = prov_covered; hx_cov = 0;   /* WORLD / FX_SCREEN solo con garantía de que el nativo lo dibuja en esta lista */
     }
     if (!native_mode() && view.kind == VRV_K_ENGINE) { o.keep_late_clear = 1; o.veil_as_2d = 1; }   /* pantalla 3D del motor (gpu): el 2D se compone dentro del estéreo; el relleno opaco tras el 3D (créditos) y los velos se pintan como 2D */
     int cine_cut = 0;

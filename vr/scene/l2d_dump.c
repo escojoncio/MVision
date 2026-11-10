@@ -4,8 +4,9 @@
  *   a cuadros): <volcado>_capa2d.png (1x, exacta) y <volcado>_hoja.png (x2: frame.png original | capa del panel | en vista de cine, además la capa completa opaca). Un volcado sin list.bin (los de «stage»: solo RAM/VRAM/GTE)
  *   NO tiene capa reproducible (la capa sale de las primitivas de la lista de dibujo): se avisa y se salta, no se aproxima.
  * La escena se ensambla como vrhost.c build_one en el modo nativo (opciones por defecto + screen_filter + drop_world2d, puente y registro de cámara del meta.txt, correspondencia mundo -> usuario, reensamblado sin filtro si no se conserva):
- *   op_dest == 2 = lo que va al panel. Con procedencia en el volcado (prov.bin) se clasifica como el visor (vr_prov.h, sin aprendizaje de la ventana): las primitivas de clase WORLD no salen de vr_scene (con drop_world2d) y, en la
- *   vista mundo, las clases sin capa 2D (FX_*, SCOPE_FRAME) se quitan del panel, igual que el reparto por capas de vrhost.c (aquí HUD + ventana + pantalla completa van juntas en una sola capa). Aproximaciones: cine_cand y last_scene3d se deducen del meta (rec_active == 0 con registro) y de las primitivas 3D de ESTA lista. El modo de la capa sale de view_mode del meta
+ *   op_dest == 2 = lo que va al panel. Con procedencia en el volcado (prov.bin) se clasifica como el visor (vr_prov.h, sin aprendizaje de la ventana). La garantía de cobertura nativa sale de la RAM del volcado
+ *   (ns_fx: elemento exportable del paquete, anillo / fundido activos) dando por hecho un renderer nativo listo con escena apta (lo que el visor comprueba con vrhost_native_sfx); sin ram.bin nada es WORLD ni
+ *   FX_SCREEN. Las primitivas de clase WORLD no salen de vr_scene (con drop_world2d) y, en la vista mundo, las clases sin capa 2D (FX_*, SCOPE_FRAME) se quitan del panel, igual que el reparto por capas de vrhost.c (aquí HUD + ventana + pantalla completa van juntas en una sola capa). Aproximaciones: cine_cand y last_scene3d se deducen del meta (rec_active == 0 con registro) y de las primitivas 3D de ESTA lista. El modo de la capa sale de view_mode del meta
  *   (= VrView.kind de vr_view.h: 0 UI, 1 mundo, 2 cinemática del motor, 3 vídeo), igual que vrhost.c: UI / vídeo -> VL_FULL (fotograma entero opaco), cinemática -> VL_PANEL_VERIFIED, mundo -> VL_PANEL.
  *   La VRAM del volcado es la del FINAL de la lista y se usa también como vram_start/vram_end (el visor usa la real de cada momento): para los modos con 2D semitransparente, realimentación (fbk) o texturas dibujadas dentro de la zona mostrada, y
  *   sobre todo para VL_PANEL_VERIFIED (que repite el mundo y lo compara con vram_end), la capa puede no ser idéntica a la del visor.
@@ -25,6 +26,7 @@
 #include "vr_layer2d.h"
 #include "vr_prov.h"
 #include "ns_dump.h"
+#include "ns_fx.h"
 #include "vr_camera.h"
 #include "vr_usermap.h"
 #include "vr_view.h"
@@ -98,11 +100,26 @@ static uint8_t *png_read_stored(const char *path, int *w, int *h) {
     return out;
 }
 
+/* Garantía de cobertura nativa (VrProvLearn.covered) con la RAM del volcado: como prov_covered de vrhost.c, con el renderer nativo listo y la escena apta. */
+static struct { const uint8_t *ram; NsFxScene *fx; int ok; } g_cov;
+static int dump_covered(void *ctx, int what, uint32_t pkt_addr) {
+    (void)ctx;
+    if (!g_cov.ok) return 0;
+    if (what == VPC_COV_GAS) return g_cov.fx->screen.gas.active && g_cov.fx->screen.gas.intensity > 0;
+    if (what == VPC_COV_FADE) return g_cov.fx->screen.fade.active;
+    return what == VPC_COV_PACKET && ns_fx_covers_packet(g_cov.ram, g_cov.fx, pkt_addr);
+}
+
 /* Ensamblado de la escena como vrhost.c build_one en modo nativo (ver la cabecera). 0 = bien. */
 static int build_scene(const NsDump *d, const GpuDrawList *l, VrScene *sc) {
     VrSceneOpts o = vr_scene_opts_default();
     o.screen_filter = 1;   /* on_start */
-    o.op_class = vpc_op_class_cb;   /* build_one con la procedencia encendida (sin aprendizaje de la ventana: ctx NULL) */
+    static VrProvLearn learn;   /* build_one con la procedencia encendida (sin aprendizaje de la ventana) */
+    if (!g_cov.fx) g_cov.fx = ns_fx_scene_create(0);
+    NsFxOpts fo = ns_fx_opts_default();
+    g_cov.ram = d->ram; g_cov.ok = d->ram && g_cov.fx && ns_fx_extract(d->ram, &fo, g_cov.fx) == 0;
+    learn.covered = dump_covered;
+    o.op_class = vpc_op_class_cb; o.op_class_ctx = &learn;
     o.drop_world2d = getenv("L2D_SIN_W2D") == NULL && ((int)ns_dump_meta_num(d, "view_mode", 1) == VRV_K_WORLD || (int)ns_dump_meta_num(d, "view_mode", 1) == VRV_K_ENGINE);    /* build_one: vista mundo y cinemática del motor (el meta no trae el motivo: selector/pausa no se distinguen); L2D_SIN_W2D=1 la apaga (comparar con/sin) */
     BridgeState bs; memset(&bs, 0, sizeof bs);
     VrCamRecord rec; memset(&rec, 0, sizeof rec);

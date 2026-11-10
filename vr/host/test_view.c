@@ -316,6 +316,14 @@ int main(void) {
         CHECK(vrhost_keep_filter(1, 1, 0, 1, 1, 0, 0, 0) == 1, "nativo + cinemática sin 3D sustancial: sigue la regla del mundo");
         CHECK(vrhost_keep_filter(1, 0, 0, 0, 0, 0, 0, 0) == 0, "nativo en menu = al panel");
     }
+    {   /* vrhost_native_sfx: ¿pinta el render nativo el efecto de pantalla (bit NS_SFX_*) de la última escena publicada? (renderer listo, escena apta, banderas, edad en sincronismos, bit) */
+        const uint32_t GAS = 2u, FADE = 4u;
+        CHECK(vrhost_native_sfx(1, 1, FADE, 0, FADE) == 1 && vrhost_native_sfx(1, 1, GAS | FADE, VRHOST_SFX_MAX_AGE, GAS) == 1, "renderer listo + escena apta y reciente con el efecto = lo pinta el nativo");
+        CHECK(vrhost_native_sfx(1, 1, GAS, 0, FADE) == 0 && vrhost_native_sfx(1, 1, 0, 0, FADE) == 0, "la escena no trae ese efecto (o no trae efectos): sigue en el panel");
+        CHECK(vrhost_native_sfx(1, 0, FADE, 0, FADE) == 0, "escena no apta: el renderer repite la ultima valida con SUS efectos: el fundido de ahora sigue en el panel");
+        CHECK(vrhost_native_sfx(1, 1, FADE, VRHOST_SFX_MAX_AGE + 1, FADE) == 0, "sin escenas nuevas (el renderer repite la ultima valida): sigue en el panel");
+        CHECK(vrhost_native_sfx(0, 1, FADE, 0, FADE) == 0, "renderer nativo sin preparar: sigue en el panel");
+    }
     {   /* vrhost_drop_world2d: ¿los polígonos 3D sin vista (el nativo los dibuja) se quitan de la capa 2D? (native, kind, reason) */
         CHECK(vrhost_drop_world2d(1, VRV_K_WORLD, VRV_R_WORLD) == 1, "nativo + mundo = quita el 3D sin resolver");
         CHECK(vrhost_drop_world2d(1, VRV_K_WORLD, VRV_R_SELECTOR) == 0 && vrhost_drop_world2d(1, VRV_K_WORLD, VRV_R_PAUSE_WORLD) == 0, "nativo + mundo con ventana 2D (selector / pausa) = sus menus son 2D");

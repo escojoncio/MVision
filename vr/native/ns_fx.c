@@ -889,6 +889,27 @@ int ns_fx_extract(const uint8_t *ram, const NsFxOpts *opt_in, NsFxScene *out) {
     return 0;
 }
 
+int ns_fx_covers_packet(const uint8_t *ram, const NsFxScene *sc, uint32_t pkt_addr) {
+    if (!ram || !sc || !ptr_ok(pkt_addr)) return 0;
+    const uint8_t *m = ram; uint32_t ch = NSFX_A_CHANL, a = pkt_addr & RAMMASK;
+    int qs = rds16(m, ch + 0x52), pi = rds16(m, ch + 0x54); uint32_t q = rdu32(m, ch + 0x58);
+    if (!ptr_ok(q) || pi < 0 || qs < pi || qs > 1024) return 0;
+    for (int qi = pi; qi < qs; qi++) {
+        uint32_t p = rdu32(m, q + 4u * (uint32_t)qi); if (!ptr_ok(p) || !in_ram(p, 0x54)) continue;
+        int n = rds16(m, p + 0x2A), psz = rds16(m, p + 0x30);
+        if (n <= 0 || n > 8192 || psz < 8 || psz > 64) continue;
+        for (uint32_t b = 0; b < 2; b++) {
+            uint32_t pk = rdu32(m, p + 0x40 + 4u * b), o = pk & RAMMASK;
+            if (!ptr_ok(pk) || !in_ram(pk, (uint32_t)n * (uint32_t)psz) || a < o || a >= o + (uint32_t)n * (uint32_t)psz) continue;
+            if ((a - o) % (uint32_t)psz) return 0;
+            int32_t k = pm_find(sc, p, (a - o) / (uint32_t)psz);   /* solo las primitivas que do_prim extrajo tienen elemento */
+            if (k < 0 || (uint32_t)k >= sc->n_items) return 0;
+            return !((sc->items[k].flags & NSFX_F_TEXTURED) && (sc->items[k].flags & NSFX_F_TPAGE_UNKNOWN));   /* ns_fx_export no saca el sprite sin página de textura */
+        }
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------------------------------------------ correspondencia mundo -> VR */
 NsFxXform ns_fx_xform_default(void) {
     NsFxXform x; memset(&x, 0, sizeof x);

@@ -246,6 +246,13 @@ void ns_fx_scene_destroy(NsFxScene *s);
 /* Extrae la escena de efectos de una RAM de 2 MB. Devuelve 0; -1 si faltan argumentos; -2 si la cámara/cola no es coherente (escena vacía, cam.valid = 0). */
 int ns_fx_extract(const uint8_t *ram, const NsFxOpts *opt, NsFxScene *out);
 
+/* GARANTÍA de cobertura nativa de un paquete del motor. `pkt_addr` = dirección de la palabra-etiqueta del paquete (GpuOp.pkt_addr), en cualquiera de los dos búferes de paquetes de su
+ * primitiva; `sc` = escena extraída de ESTA `ram`. Devuelve 1 solo si el paquete es de una primitiva de la cola del canal 3D y `sc` tiene un elemento de ese paquete que se exporta al
+ * renderer (ns_fx_export). 0 en todo lo demás: paquetes que no son de la cola (HUD, efectos de pantalla con paquetes propios), primitivas que ns_fx no extrae (solo ordenación, invisibles,
+ * de otro mapa, incoherentes, ya retiradas) y sprites texturizados sin página de textura conocida. Un elemento que el motor ya no emite en esta RAM (NSFX_F_ENGINE_CULLED, tenga tamaño o no)
+ * cuenta: la lista de la GPU es de un fotograma anterior y el motor ya dejó de dibujarlo. */
+int ns_fx_covers_packet(const uint8_t *ram, const NsFxScene *sc, uint32_t pkt_addr);
+
 /* ---- correspondencia mundo del motor -> VR (misma que vr_scene) ---- */
 typedef struct {
     float scale;              /* metros por unidad (def. 0,001) */

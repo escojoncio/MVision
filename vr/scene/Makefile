@@ -54,8 +54,8 @@ test-layer2d: $(B)/test_layer2d
 	$(B)/test_layer2d
 
 # Capa 2D de un volcado (list.bin + vram.bin) frente a su frame.png: dif media y % de píxeles distintos a escala 1. Uso: make -C vr/scene l2d-dump ARGS="<carpeta del volcado> [--max-pct P]"
-$(B)/l2d_dump: l2d_dump.c vr_layer2d.c vr_layer2d.h vr_scene.c vr_scene.h vr_prov.c vr_prov_rules.c vr_prov.h $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c ../native/ns_dump.h ../camera/vr_usermap.h ../host/vr_view.h | $(B)
-	$(CC) $(CFLAGS) $(INC) -I../native -I../camera -I../host l2d_dump.c vr_layer2d.c vr_scene.c vr_prov.c vr_prov_rules.c $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c -lm -lpthread -o $@
+$(B)/l2d_dump: l2d_dump.c vr_layer2d.c vr_layer2d.h vr_scene.c vr_scene.h vr_prov.c vr_prov_rules.c vr_prov.h $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c ../native/ns_dump.h ../native/ns_fx.c ../native/ns_fx.h ../camera/vr_usermap.h ../host/vr_view.h | $(B)
+	$(CC) $(CFLAGS) $(INC) -I../native -I../camera -I../host l2d_dump.c vr_layer2d.c vr_scene.c vr_prov.c vr_prov_rules.c $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c ../native/ns_fx.c -lm -lpthread -o $@
 l2d-dump: $(B)/l2d_dump
 	$(B)/l2d_dump $(ARGS)
 

@@ -257,6 +257,59 @@ static void test_map_group(void) {
     ns_fx_scene_destroy(s);
 }
 
+/* ns_fx_covers_packet: garantía de cobertura nativa de un paquete del motor (GpuOp.pkt_addr). Solo los paquetes de una primitiva de la cola con un elemento que se exporta al renderer. */
+static void test_covers_packet(void) {
+    reset();
+    ns_fx_learn_reset();
+    int t0[3] = {0, 0, 0};
+    TPrim a = mkprim(18, 0, 2, 4096, t0, 0x1);   /* dos cuadriláteros de mundo, grupo del mapa actual */
+    int P[4][3] = {{500, 800, 2000}, {1500, 800, 2000}, {500, 100, 2600}, {1500, 100, 2600}};
+    for (int j = 0; j < 2; j++) {
+        for (int v = 0; v < 4; v++) put_pos(&a, j * 4 + v, P[v][0] + 300 * j, P[v][1], P[v][2]);
+        for (int b = 0; b < 2; b++) {
+            uint32_t pk = a.pk[b] + 40u * (uint32_t)j; w16(pk, 1234); w8(pk + 7, 0x2C);
+            for (int v = 0; v < 4; v++) { double w[3] = {P[v][0] + 300 * j, P[v][1], P[v][2]}, sx, sy, z; ref_proj(w, &sx, &sy, &z); pk_xy(pk, 18, v, (int)lround(sx), (int)lround(sy)); }
+        }
+    }
+    TPrim sp = mkprim(6, 0x400, 1, 4096, t0, 0);   /* sprite texturizado: su paquete no trae la página de textura */
+    put_pos(&sp, 0, 900, 300, 1200); put_rect(&sp, 8, 8, 16, 16);
+    {
+        double w[3] = {900, 300, 1200}, sx, sy, z; ref_proj(w, &sx, &sy, &z);
+        for (int b = 0; b < 2; b++) { uint32_t pk = sp.pk[b]; w16(pk, 5); w8(pk + 7, 0x66); w16(pk + 8, (int)lround(sx) - 8); w16(pk + 10, (int)lround(sy) - 8); w8(pk + 12, 16); w8(pk + 13, 32); w16(pk + 14, 0x1234); w16(pk + 16, 16); w16(pk + 18, 16); }
+    }
+    TPrim so = mkprim(18, 0x800, 1, 4096, t0, 0);    /* solo ordenación (fondo de cielo, HUD): ns_fx no la extrae */
+    TPrim inv = mkprim(18, 0x100, 1, 4096, t0, 0);   /* invisible */
+    TPrim mp = mkprim(18, 0, 1, 4096, t0, 0x2);      /* de otro mapa */
+    for (int b = 0; b < 2; b++) { w16(so.pk[b], 7); w16(inv.pk[b], 7); w16(mp.pk[b], 7); }
+    queue_commit(0);
+    int r; NsFxScene *s = run(0, &r);
+    CHECK(r == 0 && s->n_items == 3, "escena: 2 cuadriláteros + 1 sprite (%u)", s->n_items);
+    CHECK(ns_fx_covers_packet(RAM, s, a.pk[0]) == 1 && ns_fx_covers_packet(RAM, s, a.pk[0] + 40) == 1, "paquetes 0 y 1 de la primitiva extraída (búfer 0): cubiertos");
+    CHECK(ns_fx_covers_packet(RAM, s, a.pk[1]) == 1 && ns_fx_covers_packet(RAM, s, a.pk[1] + 40) == 1, "los mismos en el otro búfer de paquetes: cubiertos");
+    CHECK(ns_fx_covers_packet(RAM, s, a.pk[0] + 4) == 0 && ns_fx_covers_packet(RAM, s, a.pk[0] + 44) == 0, "dirección que no es el inicio de un paquete: no");
+    CHECK(ns_fx_covers_packet(RAM, s, so.pk[0]) == 0 && ns_fx_covers_packet(RAM, s, so.pk[1]) == 0, "primitiva de solo ordenación: no");
+    CHECK(ns_fx_covers_packet(RAM, s, inv.pk[0]) == 0 && ns_fx_covers_packet(RAM, s, mp.pk[0]) == 0, "invisible / de otro mapa: no");
+    CHECK(ns_fx_covers_packet(RAM, s, 0x80180000u) == 0 && ns_fx_covers_packet(RAM, s, 0) == 0 && ns_fx_covers_packet(RAM, s, a.addr) == 0, "dirección fuera de los paquetes de la cola: no");
+    CHECK(ns_fx_covers_packet(NULL, s, a.pk[0]) == 0 && ns_fx_covers_packet(RAM, NULL, a.pk[0]) == 0, "sin RAM o sin escena: no");
+    CHECK((s->items[2].flags & NSFX_F_TPAGE_UNKNOWN) && ns_fx_covers_packet(RAM, s, sp.pk[0]) == 0, "sprite texturizado sin página de textura conocida (no se exporta): no");
+    {   /* con la página aprendida de la GPU el sprite se exporta: cubierto */
+        GpuOp op; memset(&op, 0, sizeof op);
+        op.type = GPU_OP_RECT; op.flags = GPU_F_TEXTURED | GPU_F_SEMI; op.rw = 16; op.rh = 16; op.tx = 704; op.ty = 256; op.tp = 1; op.abr = 2; op.clx = 16 * 3; op.cly = 500;
+        GpuDrawList dl; memset(&dl, 0, sizeof dl); dl.ops = &op; dl.nops = 1; dl.disp.w = 320; dl.disp.h = 240;
+        int32_t item[1] = {2};
+        CHECK(ns_fx_learn(s, &dl, item) == 1, "aprende la página del sprite");
+        ns_fx_scene_destroy(s);
+        s = run(0, &r);
+        CHECK(r == 0 && s->n_items == 3 && !(s->items[2].flags & NSFX_F_TPAGE_UNKNOWN) && ns_fx_covers_packet(RAM, s, sp.pk[0]) == 1 && ns_fx_covers_packet(RAM, s, sp.pk[1]) == 1, "sprite con la página aprendida: cubierto");
+    }
+    {   /* una primitiva retirada de la cola (la lista es de un fotograma anterior): sus paquetes dejan de estar cubiertos */
+        NQ = 1; queue_commit(0);   /* solo queda `a` en la cola; la escena `s` es la de antes */
+        CHECK(ns_fx_covers_packet(RAM, s, a.pk[0]) == 1 && ns_fx_covers_packet(RAM, s, sp.pk[0]) == 0, "primitiva que ya no está en la cola: no");
+    }
+    ns_fx_scene_destroy(s);
+    ns_fx_learn_reset();
+}
+
 static void test_lines_and_oncamera(void) {
     reset();
     int t0[3] = {0, 0, 0};
@@ -1057,6 +1110,7 @@ int main(void) {
     test_polygon_and_billboard();
     test_filters_and_oneside();
     test_map_group();
+    test_covers_packet();
     test_lines_and_oncamera();
     test_actors_and_screen();
     test_classify();

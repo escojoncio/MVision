@@ -892,7 +892,7 @@ static int coplanar_lift(VrScene *out, const VrSceneOpts *o, size_t nt) {
     return 0;
 }
 
-/* ¿Primitiva del MUNDO por procedencia (clase VPC_WORLD del gancho op_class: la encadenó la ordenación del canal 3D)? Con drop_world2d no va al panel 2D: el nativo la dibuja como efecto 3D. */
+/* ¿Primitiva del MUNDO por procedencia (clase VPC_WORLD del gancho op_class: la encadenó la ordenación del canal 3D y su paquete tiene cobertura nativa garantizada)? Con drop_world2d no va al panel 2D: el nativo la dibuja como efecto 3D. */
 static int op_is_world(const VrSceneOpts *o, const GpuDrawList *dl, uint32_t i) { return o->drop_world2d && o->op_class && o->op_class(dl, i, o->op_class_ctx) == VPC_WORLD; }
 
 int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOpts *op_in, VrScene *out) {

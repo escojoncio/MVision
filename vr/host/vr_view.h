@@ -123,6 +123,15 @@ static inline int vrhost_drop_world2d(int native, int kind, int reason) {
     return native && ((kind == VRV_K_WORLD && reason != VRV_R_SELECTOR && reason != VRV_R_PAUSE_WORLD) || kind == VRV_K_ENGINE);
 }
 
+/* ¿Pinta el render nativo AHORA el efecto de pantalla `bit` (NS_SFX_FADE, NS_SFX_GAS) que el juego dibuja con paquetes propios (fadeio.c, gas_efct.c)? Solo entonces esas primitivas salen del
+ * panel 2D (vr_prov.h, clase FX_SCREEN). Exige: renderer nativo preparado; última escena nativa publicada APTA (ns_scene_native_ok: con una no apta el renderer repite la última válida con los
+ * efectos de pantalla de AQUELLA, no los de ahora) y con efectos (NS_SV_FX) que traen ese bit (`sfx` = sus NsScreenFx.flags, 0 sin NS_SV_FX); y reciente (`age_vb` sincronismos desde que se
+ * publicó: sin escenas nuevas el renderer también repite). Si falta algo, el efecto sigue en el panel: un fundido a negro no se pierde. Función pura; vrhost.c. */
+#define VRHOST_SFX_MAX_AGE 8u
+static inline int vrhost_native_sfx(int renderer_ready, int scene_fit, uint32_t sfx, uint32_t age_vb, uint32_t bit) {
+    return renderer_ready && scene_fit && age_vb <= VRHOST_SFX_MAX_AGE && (sfx & bit) != 0;
+}
+
 /* ¿Se aplica la máscara de visión (marco con la abertura de la caja) como recubrimiento de ojo del render nativo? Solo en nativo, con el jugador en la caja (BRIDGE_PS_BOX) y una máscara en la lista (frame_on). Función pura; vrhost.c. */
 static inline int vrhost_box_mask(int native, int in_box, int frame_on) { return native && in_box && frame_on; }
 /* Anillo de pantalla de gas_efct.c dentro de un conducto: el guion de la zona (s01a, s02a: sin gas) lo enciende al ENTRAR en la zona del conducto y lo apaga al salir (mensajes ON/OFF

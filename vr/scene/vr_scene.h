@@ -30,8 +30,8 @@
  * como trozo de mundo en el HUD).
  * Con opts.drop_world2d (opt-in: el anfitrión con render nativo), un polígono SIN ningún vértice vvalid que cae antes del último polígono con vista de la lista (el juego dibuja el HUD después del
  * mundo) es 3D que la captura no resolvió: no se emite a la clase 2 (VR_FATE_WORLD2D; op_dest 0), así no deja cajas sueltas en la capa 2D / el panel HUD (el nativo ya dibuja el mundo). Lo mismo, con el
- * gancho opts.op_class, toda primitiva (polígono, rect o línea, esté donde esté en la lista) de clase VPC_WORLD (vr_prov.h: la encadenó la ordenación del canal 3D; nieve, chaff, partículas): el nativo la
- * dibuja como efecto 3D. El resto de rects y líneas, los filtros de pantalla (clase 3) y los polígonos posteriores al último 3D (HUD, texto, menús) no cambian.
+ * gancho opts.op_class, toda primitiva (polígono, rect o línea, esté donde esté en la lista) de clase VPC_WORLD (vr_prov.h: la encadenó la ordenación del canal 3D y el anfitrión garantiza que su paquete tiene un
+ * elemento que el nativo dibuja; nieve, chaff, partículas): el nativo la dibuja como efecto 3D. El resto de rects y líneas, los filtros de pantalla (clase 3) y los polígonos posteriores al último 3D (HUD, texto, menús) no cambian.
  *
  * Reconstrucción de parciales (opts.recon_partial): un quad con exactamente 3 vértices de vista limpios (vflags==0) y el 4.º sin posición,
  * pero con coordenadas de pantalla sin saturar (|x-dox-proj_ox| < 1000 px), recupera ese vértice: rayo (px/H, py/H, 1) cortado con el plano de

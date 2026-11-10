@@ -11,10 +11,11 @@
  *    SCOPE_FRAME   scope.c / sight.c sin textura: marco de los prismáticos. No va al 2D: vista nativa de zoom (VrFx.scope_on / scope_zoom)
  *    SCOPE_TEXT    scope.c / sight.c texturado: textos de la mira; van al HUD
  *    UNKNOWN       sin procedencia o de otro actor/función: va al HUD (como antes) y se cuenta
- *    FX_SCREEN     gas_efct.c (anillo del gas) y fadeio.c (fundido): efectos de pantalla con paquetes propios. No van al 2D: el renderer nativo los hace de la RAM (ns_fx: NsFxGas / NsFxFade)
- *    WORLD         encadenada por la ordenación del canal 3D (vpc_is_chain) y con un escritor sin regla (o sin escritor): es del MUNDO (nieve, chaff, humo...; también el fondo de cielo). Con
- *                  VrSceneOpts.drop_world2d vr_scene no la emite al panel (VR_FATE_WORLD2D): el renderer nativo dibuja esos efectos en 3D (ns_fx). Sin drop_world2d (ventana del selector /
- *                  pausa) sale al panel y va al HUD, como antes
+ *    FX_SCREEN     gas_efct.c (anillo del gas) y fadeio.c (fundido): efectos de pantalla con paquetes propios que el renderer nativo hace de la RAM (ns_fx: NsFxGas / NsFxFade). No van al 2D,
+ *                  pero SOLO mientras el anfitrión garantice que el nativo pinta ese efecto ahora (VrProvLearn.covered); si no, son UNKNOWN y siguen en el HUD (un fundido no se pierde)
+ *    WORLD         encadenada por la ordenación del canal 3D (vpc_is_chain), con un escritor sin regla (o sin escritor) y con GARANTÍA de cobertura nativa de su paquete (VrProvLearn.covered: el
+ *                  paquete tiene un elemento que el renderer nativo dibuja; nieve, chaff, humo...). Con VrSceneOpts.drop_world2d vr_scene no la emite al panel (VR_FATE_WORLD2D). Sin
+ *                  drop_world2d (ventana del selector / pausa) sale al panel y va al HUD, como antes. Sin esa garantía (primitivas de pantalla de actores sin regla, fondo de cielo) es UNKNOWN
  *  Capas 2D (VPC_L_*): HUD (HUD_WORLD, SCOPE_TEXT, UNKNOWN, WORLD), WINDOW, FULL; las clases FX_* y SCOPE_FRAME no tienen capa (-1).
  *  Sin procedencia (volcados NSL1, rt_prov apagado) todo es UNKNOWN y por tanto HUD: el comportamiento de antes.
  *  Id efectivo de una primitiva: el de quien encadenó el paquete (GpuOp.prov) salvo que sea una rutina de ordenación (vpc_is_chain): entonces el de quien rellenó el comando (GpuOp.prov2), o 0 si no consta o es otra rutina de ordenación. */
@@ -42,6 +43,8 @@ typedef struct {
 /* ---- reglas (vr_prov_rules.c) ---- */
 /* Clase base de una primitiva por su entrada de procedencia (sin aprendizaje ni encadenado): FX_*, FULL, SCOPE_*, HUD_WORLD (menuman) o UNKNOWN. e == NULL -> UNKNOWN. */
 int vpc_rule(const ProvEntry *e, const GpuOp *o);
+/* Efecto de pantalla de la entrada: VPC_COV_GAS (gas_efct.c), VPC_COV_FADE (fadeio.c) o -1 (no es de la clase FX_SCREEN; e == NULL -> -1). */
+int vpc_screen_kind(const ProvEntry *e);
 /* ¿Es la entrada una rutina de ordenación/encadenado (0x8001da18, 0x80018304)? Encadena paquetes que escribieron otros actores: su id no dice quién dibuja. e == NULL -> 0. */
 int vpc_is_chain(const ProvEntry *e);
 
@@ -51,6 +54,7 @@ int vpc_is_chain(const ProvEntry *e);
  * con animación no cuenta) se descarta para siempre (era HUD): así un componente raro del HUD no desaparece del HUD. Las clases FX / FULL / SCOPE nunca se aprenden como ventana. */
 #define VPC_QUIET_LISTS 30
 #define VPC_LEAK_LISTS 20
+enum { VPC_COV_PACKET = 0, VPC_COV_GAS, VPC_COV_FADE };   /* qué se pregunta a VrProvLearn.covered */
 enum { VPC_ST_OTHER = 0, VPC_ST_CLOSED, VPC_ST_OPEN };   /* estado de la vista de la lista: mundo con ventana cerrada / abierta / otra vista (no se aprende) */
 typedef struct {
     uint8_t win[PROV_MAX];             /* 0 sin decidir, 1 WINDOW, 2 descartado */
@@ -59,6 +63,10 @@ typedef struct {
     uint32_t seen[PROV_MAX];           /* marca de la lista en que se contó el id (una vez por lista) */
     uint32_t tick, nclosed;            /* listas anotadas / listas anotadas con la ventana cerrada */
     uint32_t n_learned, n_demoted;     /* ids aprendidos / descartados (registro) */
+    /* Garantía de cobertura nativa (la fija el anfitrión; vpc_learn_reset la borra; NULL = sin garantía: nada es WORLD ni FX_SCREEN). what = VPC_COV_PACKET: ¿el paquete del motor en pkt_addr
+     * (GpuOp.pkt_addr) tiene un elemento que el renderer nativo dibuja (ns_fx_covers_packet)? VPC_COV_GAS / VPC_COV_FADE: ¿pinta el nativo ahora el anillo / el fundido? (pkt_addr sin uso) */
+    int (*covered)(void *ctx, int what, uint32_t pkt_addr);
+    void *covered_ctx;
 } VrProvLearn;
 void vpc_learn_reset(VrProvLearn *S);
 /* Anota la lista `l` ANTES de ensamblarla (así sus ids ya están clasificados). state: VPC_ST_*. */
@@ -66,7 +74,8 @@ void vpc_learn_note(VrProvLearn *S, const GpuDrawList *l, int state);
 
 /* Id efectivo de la primitiva o (ver arriba); 0 = no consta. No comprueba que esté dentro de la tabla. */
 unsigned vpc_op_id(const GpuDrawList *l, const GpuOp *o);
-/* Clase de la primitiva o (de la lista l): reglas + aprendizaje (S puede ser NULL) + WORLD si la encadenó la ordenación del canal 3D y su escritor no tiene regla ni es una ventana aprendida. */
+/* Clase de la primitiva o (de la lista l): reglas + aprendizaje (S puede ser NULL) + garantía de cobertura nativa (S->covered): sin ella FX_SCREEN es UNKNOWN; con ella, WORLD si la encadenó la
+ * ordenación del canal 3D, su escritor no tiene regla ni es una ventana aprendida y su paquete está cubierto. */
 int vpc_class_op(const VrProvLearn *S, const GpuDrawList *l, const GpuOp *o);
 /* Gancho para VrSceneOpts.op_class (ctx = VrProvLearn *, puede ser NULL). */
 uint8_t vpc_op_class_cb(const GpuDrawList *l, uint32_t i, void *ctx);

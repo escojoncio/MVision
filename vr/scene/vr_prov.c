@@ -55,8 +55,11 @@ int vpc_class_op(const VrProvLearn *S, const GpuDrawList *l, const GpuOp *o) {
     if (!l || !o) return VPC_UNKNOWN;
     unsigned id = vpc_op_id(l, o);
     int c = id_ok(l, id) ? vpc_rule(&l->prov[id], o) : VPC_UNKNOWN;
+    int cov = S && S->covered;   /* sin garantía de cobertura nativa nada sale del 2D por WORLD / FX_SCREEN */
+    if (c == VPC_FX_SCREEN && !(cov && S->covered(S->covered_ctx, vpc_screen_kind(&l->prov[id]), 0))) c = VPC_UNKNOWN;   /* el nativo no pinta ahora ese efecto de pantalla: sigue en el HUD */
     if (id_ok(l, id) && (c == VPC_HUD_WORLD || c == VPC_UNKNOWN) && S && S->win[id] == 1) return VPC_WINDOW;
-    if (c == VPC_UNKNOWN && id_ok(l, o->prov) && vpc_is_chain(&l->prov[o->prov])) return VPC_WORLD;   /* del canal 3D y sin escritor con regla: efecto del mundo */
+    if (c == VPC_UNKNOWN && cov && o->pkt_addr && id_ok(l, o->prov) && vpc_is_chain(&l->prov[o->prov]) && S->covered(S->covered_ctx, VPC_COV_PACKET, o->pkt_addr))
+        return VPC_WORLD;   /* del canal 3D, sin escritor con regla y con un elemento que el nativo dibuja: efecto del mundo */
     return c;
 }
 
