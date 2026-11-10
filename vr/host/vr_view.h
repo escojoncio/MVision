@@ -140,6 +140,14 @@ static inline int vrhost_box_mask(int native, int in_box, int frame_on) { return
  * bordes de esa cámara 2D. Con la cámara VR sería una viñeta a pantalla completa pegada a la cabeza: no se dibuja. Fuera de INTRUDE, o con otro modo de mezcla (un anillo de gas de
  * verdad), se queda. `intrude` = BRIDGE_PS_INTRUDE del estado del jugador; `abr` = modo de mezcla del anillo (2 = resta). */
 static inline int vrhost_duct_ring(int vr_active, int intrude, int abr) { return vr_active && intrude && abr == 2; }
+/* Banderas de efectos de pantalla (NS_SFX_*) de la última escena publicada tal como las ve prov_covered. `has_fx` = escena con NS_SV_FX; `gas_intensity` = intensidad del anillo (0 = sin anillo); `duct_cut` = el cierre
+ * de la escena recortó el anillo del conducto (vrhost_duct_ring): el nativo ya no lo pinta PERO tampoco debe verse el de gas_efct.c en el panel 2D (marco 4:3), así que cuenta como cubierto (NS_SFX_GAS). */
+static inline uint32_t vrhost_scene_sfx(int has_fx, uint32_t flags, float gas_intensity, int duct_cut) {
+    const uint32_t gas = 2u;   /* NS_SFX_GAS (ns_types.h; este archivo no lo incluye) */
+    if (!has_fx) return 0;
+    if (gas_intensity <= 0.0f) return flags & ~gas;
+    return duct_cut ? flags | gas : flags;
+}
 
 /* ¿El 2D (lotes kind 2) de la lista actual va DENTRO de las texturas de la pantalla 3D en vez de en el panel aparte (hp2 de XRPresent)? (función pura; RenderRG.stereo2DInside)
  * Solo en modo gpu, si hay una imagen 3D sobre la que componer (la lista trae 3D o hay una base 3D guardada) y el estéreo compuso de verdad esa lista (composed_in_stereo = 0 si

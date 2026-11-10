@@ -402,11 +402,12 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
     o->refresh_parts = body_ok ? NS_PARTS_BODY : 0;   /* brazos + pelvis, piernas, torso y cuello: torso_follow las reescribe tras la captura */
 }
 /* Manos nuevas: cierre de la escena (hilo de emulación, ns_hook_tick, escena apta con el jugador enlazado). Agarre y brazos manejados de la IK del último vrbody_apply. */
+static int nat_duct_cut;   /* ns_hands_finalize recortó el anillo del conducto de la escena en curso; lo consume ns_solid_tap (mismo hilo, justo después) para nat_sfx */
 static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, void *u) {
     (void)u;
     const int bino = bino_view();
     ns_wphide_apply(sc, emu_ram, vrfire_hide_enabled() || bino);   /* el arma del juego en la mano de Snake (la lista de la GPU la oculta con +0x4C = 0, el extractor nativo no lo lee) */
-    if ((sc->screen.flags & NS_SFX_GAS) && vrhost_duct_ring(sc->cam.vr_active, (bs.player_status & BRIDGE_PS_INTRUDE) != 0, sc->screen.gas_abr)) sc->screen.flags &= ~NS_SFX_GAS;   /* oscurecimiento de la 1.ª persona de gateo del juego: sin viñeta en VR (vr_view.h) */
+    if ((sc->screen.flags & NS_SFX_GAS) && vrhost_duct_ring(sc->cam.vr_active, (bs.player_status & BRIDGE_PS_INTRUDE) != 0, sc->screen.gas_abr)) { sc->screen.flags &= ~NS_SFX_GAS; nat_duct_cut = 1; }   /* oscurecimiento de la 1.ª persona de gateo del juego: sin viñeta en VR (vr_view.h) */
     NsHandIn in;
     memset(&in, 0, sizeof in);
     in.enabled = hands_active() && !bino;   /* con prismáticos no se añaden las manos nuevas (las piezas del brazo ya van ocultas desde la captura) */
@@ -473,7 +474,8 @@ static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u) {
     (void)u;
     ns_pub_flush();
     nat_have = s != NULL; nat_valid = s ? s->valid : 0; nat_vb = (uint32_t)hle_frame_count();
-    nat_sfx = s && (s->valid & NS_SV_FX) ? (s->screen.gas_intensity > 0 ? s->screen.flags : s->screen.flags & ~(uint32_t)NS_SFX_GAS) : 0;
+    nat_sfx = s ? vrhost_scene_sfx((s->valid & NS_SV_FX) != 0, s->screen.flags, s->screen.gas_intensity, nat_duct_cut) : 0;   /* anillo del conducto recortado = cubierto: gas_efct.c sale del panel (vr_view.h) */
+    nat_duct_cut = 0;
     if (!hc_on || !s || !st || !(s->valid & NS_SV_TOVR_OK) || !(s->valid & NS_SV_GAME)) return;   /* cinemática / sin cámara VR: no hay ancla */
     NsSolidOpts o; memset(&o, 0, sizeof o);
     float jt[16][3];

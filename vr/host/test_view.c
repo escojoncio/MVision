@@ -324,6 +324,14 @@ int main(void) {
         CHECK(vrhost_native_sfx(1, 1, FADE, VRHOST_SFX_MAX_AGE + 1, FADE) == 0, "sin escenas nuevas (el renderer repite la ultima valida): sigue en el panel");
         CHECK(vrhost_native_sfx(0, 1, FADE, 0, FADE) == 0, "renderer nativo sin preparar: sigue en el panel");
     }
+    {   /* vrhost_scene_sfx: banderas de efectos que prov_covered ve de la escena publicada; anillo del conducto recortado (duct_cut) = cubierto por el nativo (sus paquetes de gas_efct.c salen del panel) */
+        const uint32_t GAS = 2u, FADE = 4u;
+        CHECK(vrhost_scene_sfx(1, FADE, 0.5f, 1) == (FADE | GAS), "anillo del conducto recortado: el nativo lo 'cubre' (GAS) y respeta el resto");
+        CHECK(vrhost_scene_sfx(1, FADE, 0.5f, 0) == FADE, "sin recorte (otra situacion): GAS no se inventa");
+        CHECK(vrhost_scene_sfx(1, GAS | FADE, 0.5f, 0) == (GAS | FADE) && vrhost_scene_sfx(1, GAS, 0.0f, 0) == 0, "gas de verdad: tal cual; intensidad 0 = sin anillo");
+        CHECK(vrhost_scene_sfx(1, 0, 0.0f, 1) == 0, "recorte sin intensidad de anillo: no cubre");
+        CHECK(vrhost_scene_sfx(0, GAS | FADE, 0.5f, 1) == 0, "escena sin efectos (NS_SV_FX): 0");
+    }
     {   /* vrhost_drop_world2d: ¿los polígonos 3D sin vista (el nativo los dibuja) se quitan de la capa 2D? (native, kind, reason) */
         CHECK(vrhost_drop_world2d(1, VRV_K_WORLD, VRV_R_WORLD) == 1, "nativo + mundo = quita el 3D sin resolver");
         CHECK(vrhost_drop_world2d(1, VRV_K_WORLD, VRV_R_SELECTOR) == 1, "nativo + selector de armas/objetos = quita el 3D sin resolver (cielo, estrellas): la ventana son rects 2D y el cielo sin vista no es un cuadrado en el HUD");
