@@ -21,9 +21,9 @@ SCRIPT ?= gp_script.txt
 FRAMES ?= 12000
 
 all: $(OUT)/test_fire $(OUT)/test_reload $(OUT)/test_aa $(OUT)/test_scope $(OUT)/test_missile
-$(OUT)/test_fire: test_fire.c vr_fire.c vr_fire.h
+$(OUT)/test_fire: test_fire.c vr_fire.c vr_fire.h vr_hit.c vr_hit.h
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) $(INC) test_fire.c vr_fire.c -o $@ -lm
+	$(CC) $(CFLAGS) $(INC) test_fire.c vr_fire.c vr_hit.c -o $@ -lm
 $(OUT)/test_reload: test_reload.c vr_reload.c vr_reload.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) $(INC) test_reload.c vr_reload.c -o $@ -lm
@@ -42,9 +42,9 @@ test: $(OUT)/test_fire $(OUT)/test_reload $(OUT)/test_aa $(OUT)/test_scope $(OUT
 	$(OUT)/test_aa
 	$(OUT)/test_scope
 	$(OUT)/test_missile
-test-san: test_fire.c vr_fire.c vr_fire.h test_reload.c vr_reload.c vr_reload.h test_aa_game.c vr_aa.c vr_aa.h test_scope.c vr_scope.c test_missile.c vr_missile.c
+test-san: test_fire.c vr_fire.c vr_fire.h vr_hit.c vr_hit.h test_reload.c vr_reload.c vr_reload.h test_aa_game.c vr_aa.c vr_aa.h test_scope.c vr_scope.c test_missile.c vr_missile.c
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined $(INC) test_fire.c vr_fire.c -o $(OUT)/test_fire_san -lm
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined $(INC) test_fire.c vr_fire.c vr_hit.c -o $(OUT)/test_fire_san -lm
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined $(INC) test_reload.c vr_reload.c -o $(OUT)/test_reload_san -lm
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined $(INC) test_aa_game.c vr_aa.c vr_fire.c -o $(OUT)/test_aa_san -lm
 	$(OUT)/test_fire_san
@@ -64,13 +64,13 @@ $(RTP)/stamp: $(RTDEPS) hle_vrfire.txt hle_vrfire_weak.c
 	cp hle_vrfire_weak.c $(RTP)/
 	python3 ../../tools/recomp/hletab.py $(RTP)/hle*.txt ../camera/hle_vrcam.txt hle_vrfire.txt > $(RTP)/hle_table.c
 	touch $@
-$(OUT)/gptest: $(RTP)/stamp gptest.c gptest_hooks.c gptest_hooks.h vr_fire.c vr_fire_hle.c vr_aa.c vr_reload.c $(BR)/bridge.c $(BR)/bridge_addrs.c
+$(OUT)/gptest: $(RTP)/stamp gptest.c gptest_hooks.c gptest_hooks.h vr_fire.c vr_fire_hle.c vr_hit.c vr_aa.c vr_reload.c $(BR)/bridge.c $(BR)/bridge_addrs.c
 	$(CLANG) $(INC) -I$(RTP) -DMV_NOGEN -O2 -g -Wall -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls -o $@ \
-	  $(filter-out $(RTP)/headless.c $(RTP)/test_%.c $(RTP)/wip_%.c $(RTP)/nogen.c,$(wildcard $(RTP)/*.c)) gptest.c gptest_hooks.c vr_fire.c vr_fire_hle.c vr_aa.c vr_reload.c $(BR)/bridge.c $(BR)/bridge_addrs.c $(RTP)/nogen.c -lm
+	  $(filter-out $(RTP)/headless.c $(RTP)/test_%.c $(RTP)/wip_%.c $(RTP)/nogen.c,$(wildcard $(RTP)/*.c)) gptest.c gptest_hooks.c vr_fire.c vr_fire_hle.c vr_hit.c vr_aa.c vr_reload.c $(BR)/bridge.c $(BR)/bridge_addrs.c $(RTP)/nogen.c -lm
 # aatest: lo mismo con los ganchos del apuntado del lanzador antiaéreo (gptest_aa_hooks.c) en lugar de los de disparo/recarga
-$(OUT)/aatest: $(RTP)/stamp gptest.c gptest_aa_hooks.c gptest_hooks.h vr_fire.c vr_fire_hle.c vr_aa.c $(BR)/bridge.c $(BR)/bridge_addrs.c
+$(OUT)/aatest: $(RTP)/stamp gptest.c gptest_aa_hooks.c gptest_hooks.h vr_fire.c vr_fire_hle.c vr_hit.c vr_aa.c $(BR)/bridge.c $(BR)/bridge_addrs.c
 	$(CLANG) $(INC) -I$(RTP) -DMV_NOGEN -O2 -g -Wall -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls -o $@ \
-	  $(filter-out $(RTP)/headless.c $(RTP)/test_%.c $(RTP)/wip_%.c $(RTP)/nogen.c,$(wildcard $(RTP)/*.c)) gptest.c gptest_aa_hooks.c vr_fire.c vr_fire_hle.c vr_aa.c $(BR)/bridge.c $(BR)/bridge_addrs.c $(RTP)/nogen.c -lm
+	  $(filter-out $(RTP)/headless.c $(RTP)/test_%.c $(RTP)/wip_%.c $(RTP)/nogen.c,$(wildcard $(RTP)/*.c)) gptest.c gptest_aa_hooks.c vr_fire.c vr_fire_hle.c vr_hit.c vr_aa.c $(BR)/bridge.c $(BR)/bridge_addrs.c $(RTP)/nogen.c -lm
 gptest:
 	@$(MAKE) --no-print-directory $(RTP)/stamp
 	@$(MAKE) --no-print-directory $(OUT)/gptest

@@ -374,36 +374,68 @@ static void t_chest(void) {
     int pc = 0; for (int i = 1; i <= 6; i++) { in.hand[1][2] += 0.1f; upd(&g, &in, &o); pc += o.punch_side >= 0; } CHECK(pc == 0);
 }
 
-/* pared a 0,5 m de la mano: la mano se acerca a `v` m/s hasta tocarla (0,03 m) y vuelve */
+/* superficie sólida a 0,5 m de los nudillos: el puño se acerca a `v` m/s hasta tocarla (0,03 m) y vuelve. `still` = 1: la mano no se mueve respecto a la cabeza (es el personaje el que anda hacia la pared) */
+static int touch_still;
 static int touches(vrg_t *g, vrg_in_t in, int n, float v, float gap_s, int side, const char **last_why, int *haptics) {
-    vrg_out_t o; int k = 0; float d = 0.5f;
+    vrg_out_t o; int k = 0; float d = 0.5f; const float z0 = in.hand[side][2];
     in.wall_valid[0] = in.wall_valid[1] = 1; in.wall_dist[0] = in.wall_dist[1] = 0.5f; settle(g, &in, 12);
+#define TSTEP() do { in.wall_dist[side] = d; if (!touch_still) in.hand[side][2] = z0 + (0.5f - d); upd(g, &in, &o); k += o.knock_side == side; } while (0)
     for (int t = 0; t < n; t++) {
-        while (d > 0.03f) { d -= v * 0.02f; if (d < 0.03f) d = 0.03f; in.wall_dist[side] = d; upd(g, &in, &o); k += o.knock_side == side; if (o.knock_why && last_why) *last_why = o.knock_why; if (o.haptic[side] > 0.3f && haptics) (*haptics)++; }
-        for (int i = 0; i < (int)(gap_s / 0.02f); i++) { d += 0.02f * 1.5f; if (d > 0.5f) d = 0.5f; in.wall_dist[side] = d; upd(g, &in, &o); k += o.knock_side == side; }
-        d = 0.5f; in.wall_dist[side] = d; upd(g, &in, &o);
+        while (d > 0.03f) { d -= v * 0.02f; if (d < 0.03f) d = 0.03f; TSTEP(); if (o.knock_why && last_why) *last_why = o.knock_why; if (o.haptic[side] > 0.3f && haptics) (*haptics)++; }
+        for (int i = 0; i < (int)(gap_s / 0.02f); i++) { d += 0.02f * 1.5f; if (d > 0.5f) d = 0.5f; TSTEP(); }
+        d = 0.5f; TSTEP();
     }
+#undef TSTEP
     return k;
 }
 static void t_knock(void) {
-    vrg_t g; vrg_init(&g); vrg_in_t in = base(); in.on_wall = 1; int hap = 0; const char *why = NULL;
-    CHECK(touches(&g, in, 3, 1.0f, 0.3f, 1, &why, &hap) == 3);            /* tres toques seguidos = tres golpes */
+    vrg_t g; vrg_init(&g); vrg_in_t in = base(); in.fist_btn[1] = 1; int hap = 0; const char *why = NULL;      /* SIN estar pegado a la pared (on_wall = 0): el toque no depende de ese estado del juego */
+    CHECK(touches(&g, in, 3, 1.0f, 0.3f, 1, &why, &hap) == 3);            /* tres golpes de puño seguidos en la pared = tres toques */
     CHECK(hap == 3);                                                       /* un pulso háptico por toque */
+    vrg_init(&g); CHECK(touches(&g, in, 1, 1.0f, 0.3f, 1, &why, NULL) == 1);   /* un gesto = un toque */
     vrg_init(&g); CHECK(touches(&g, in, 3, 0.2f, 0.3f, 1, &why, NULL) == 0);   /* toque lento */
     CHECK(why && !strcmp(why, "lento"));
-    vrg_init(&g); in.fist_btn[1] = 1; CHECK(touches(&g, in, 2, 1.0f, 0.3f, 1, NULL, NULL) == 2);   /* con el puño también */
-    vrg_init(&g); in.fist_btn[1] = 0; CHECK(touches(&g, in, 2, 1.0f, 0.3f, 0, NULL, NULL) == 2);   /* la otra mano */
+    vrg_init(&g); vrg_in_t ow = in; ow.on_wall = 1; CHECK(touches(&g, ow, 2, 1.0f, 0.3f, 1, NULL, NULL) == 2);   /* pegado a la pared también */
+    vrg_init(&g); vrg_in_t lh = in; lh.fist_btn[1] = 0; lh.fist_btn[0] = 1; CHECK(touches(&g, lh, 2, 1.0f, 0.3f, 0, NULL, NULL) == 2);   /* la otra mano */
     vrg_init(&g); CHECK(touches(&g, in, 2, 5.0f, 0.06f, 1, &why, NULL) == 1);                      /* demasiado seguidos: enfriamiento (0,25 s) */
-    vrg_init(&g); vrg_in_t nw = in; nw.on_wall = 0; CHECK(touches(&g, nw, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "no_pegado"));
+    vrg_init(&g); vrg_in_t op = in; op.fist_btn[1] = 0; CHECK(touches(&g, op, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "sin_puno"));   /* mano abierta (balancear el brazo, rozar la pared): no */
+    touch_still = 1; vrg_init(&g); CHECK(touches(&g, in, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "mano_quieta")); touch_still = 0;   /* andar hacia la pared con el puño quieto */
     vrg_init(&g); vrg_in_t en = in; en.n_en = 1; en.en[0].p[0] = 0.2f; en.en[0].p[1] = 1.2f; en.en[0].p[2] = 0.6f;     /* enemigo junto a la mano: es golpe, no pared */
     CHECK(touches(&g, en, 2, 1.0f, 0.3f, 1, &why, NULL) == 0 && !strcmp(why, "enemigo"));
     vrg_init(&g); vrg_in_t aw = in; aw.weapon = 0; CHECK(touches(&g, aw, 2, 1.0f, 0.3f, 1, NULL, NULL) == 0);
     vrg_init(&g); vrg_in_t nv = in; vrg_out_t o; nv.wall_valid[0] = nv.wall_valid[1] = 0; settle(&g, &nv, 12); nv.wall_dist[1] = 0.02f; upd(&g, &nv, &o); CHECK(o.knock_side < 0);   /* sin consulta de pared */
+    /* balanceo del brazo (puño cerrado, 1,5 m/s, vaivén de 0,3 m) sin superficie al alcance: ningún toque */
+    { vrg_init(&g); vrg_in_t sw = in; int k = 0; sw.wall_valid[0] = sw.wall_valid[1] = 0; settle(&g, &sw, 12);
+      for (int i = 0; i < 200; i++) { sw.hand[1][2] = 0.1f + 0.3f * (float)fabs(((i % 20) - 10) / 10.0); upd(&g, &sw, &o); k += o.knock_side >= 0; }
+      CHECK(k == 0); }
+    /* balanceo junto a una pared sin llegar a tocarla (se queda a 0,15 m): ningún toque */
+    { vrg_init(&g); vrg_in_t sw = in; int k = 0; sw.wall_valid[1] = 1; sw.wall_dist[1] = 0.45f; settle(&g, &sw, 12);
+      for (int i = 0; i < 200; i++) { float u = (float)fabs(((i % 20) - 10) / 10.0); sw.hand[1][2] = 0.1f + 0.3f * u; sw.wall_dist[1] = 0.45f - 0.3f * u; upd(&g, &sw, &o); k += o.knock_side >= 0; }
+      CHECK(k == 0); }
     /* acercarse rápido y parar a 0,2 m: lejos de la pared */
     vrg_init(&g); in.wall_valid[1] = 1; settle(&g, &in, 12); float d = 0.6f; why = NULL;
     for (int i = 0; i < 8; i++) { d -= 0.02f; in.wall_dist[1] = d; upd(&g, &in, &o); }
     for (int i = 0; i < 6; i++) { in.wall_dist[1] = d; upd(&g, &in, &o); if (o.knock_why) why = o.knock_why; }
     (void)why;
+}
+/* contacto del puño con las cápsulas por pieza (lo aporta el anfitrión con vr_hit): sustituye al cilindro y da el háptico por zona */
+static void t_caps(void) {
+    for (int zone = 0; zone <= 3; zone += (zone ? 2 : 1)) {       /* 0 sin contacto, 1 cabeza, 3 extremidad */
+        vrg_t g; vrg_init(&g); vrg_in_t in = base(); vrg_out_t o; int contact = 0, punch = 0; float hap = 0;
+        in.fist_btn[1] = 1; in.cap_valid = 1; in.n_en = 1; in.en[0].vital = 100;
+        in.en[0].p[0] = 0.2f; in.en[0].p[1] = 1.0f; in.en[0].p[2] = zone ? 2.5f : 0.5f;     /* sin contacto: el cilindro antiguo SÍ lo tocaría (enemigo en el camino del puño) */
+        settle(&g, &in, 12);
+        for (int i = 1; i <= 16; i++) {
+            if (i <= 6) in.hand[1][2] = 0.1f + 0.1f * (float)i;      /* 5 m/s hacia delante */
+            in.cap_zone[1] = zone;
+            upd(&g, &in, &o);
+            if (o.gest.valid && o.gest.contact) contact = 1;
+            if (o.punch_side == 1) punch++;
+            if (o.haptic[1] > hap) hap = o.haptic[1];
+        }
+        if (!zone) { CHECK(!contact); }
+        else { CHECK(contact && punch >= 1); CHECK(fabsf(hap - (zone == 1 ? 1.0f : 0.75f)) < 1e-4f); }
+    }
 }
 static void t_peek(void) {
     vrg_t g; vrg_init(&g); vrg_in_t in = base(); vrg_out_t o; in.on_wall = 1;
@@ -653,7 +685,7 @@ static void t_repeat(void) {
 
 int main(void) {
     t_repeat();
-    t_punch(); t_contact(); t_rules(); t_throw(); t_walk(); t_grab(); t_chest(); t_chest_throw(); t_chest_phys(); t_menu_hold(); t_menu_loop(); t_trigmenu(); t_knock(); t_peek(); t_robust();
+    t_punch(); t_contact(); t_rules(); t_throw(); t_walk(); t_grab(); t_chest(); t_chest_throw(); t_chest_phys(); t_menu_hold(); t_menu_loop(); t_trigmenu(); t_knock(); t_caps(); t_peek(); t_robust();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails != 0;
 }

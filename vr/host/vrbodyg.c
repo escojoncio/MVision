@@ -13,6 +13,7 @@
 #include "vr_body.h"
 #include "vr_fire.h"
 #include "vr_gesture.h"
+#include "vr_hit.h"
 #include "vrgame.h"
 #include "vrhost.h"
 #include "vr_melee_rt.h"
@@ -33,7 +34,7 @@ int32_t mv_vrgame_menu_hand(void) { return atomic_load(&g_menu_hand); }
 
 static int act_holds(int a) { return a == 7 || a == 38 || a == 124; }
 
-uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
+uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, const uint8_t *ram) {
     if (!inited) { vrg_init(&G); inited = 1; }
     G.cfg.enable = en_all; G.cfg.punch = !!(en_mask & 1); G.cfg.grab = !!(en_mask & 2); G.cfg.knock = !!(en_mask & 4); G.cfg.peek = !!(en_mask & 8);
     G.cfg.right_handed = right_handed;
@@ -61,6 +62,16 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
     in.fist_btn[domside] = (pad & VRG_R1) != 0; in.fist_btn[1 - domside] = (pad & VRG_L1) != 0;   /* R1/L1 = botones del puño */
     VrmFrame mf; memset(&mf, 0, sizeof mf); mf.punch_side = mf.knock_side = -1;
     vrg_out_t out;
+    static VrHitTarget ht[VRHIT_MAX_T];          /* enemigos golpeables con sus cápsulas por pieza (vr_hit) */
+    static float fist_prev[2][3]; static int fist_prev_ok[2];
+    int hn = 0;
+    if (in.active) {
+        int all = vrhit_scan(ram, 1, 0x01, 1, ht, VRHIT_MAX_T), caps = 0;
+        for (int i = 0; i < all; i++) if (ht[i].ncap) caps++;
+        in.cap_valid = mf.contact_valid = all > 0 && caps == all;     /* si algún enemigo no tiene piezas fiables se usa el cilindro de siempre */
+        for (int i = 0; i < all && in.cap_valid; i++) if (ht[i].vital > 0) ht[hn++] = ht[i];
+    }
+    if (!in.active) fist_prev_ok[0] = fist_prev_ok[1] = 0;
     if (in.active) {
         float w[3];
         vrfire_pos_to_world(&map, &hm[12], w);
@@ -72,13 +83,24 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed) {
             float p[3], gr, tg;
             in.tracked[s] = vrgame_hand_raw(s, p, &gr, &tg, &in.hand_time[s]);
             if (in.tracked[s]) for (int i = 0; i < 3; i++) { in.hrel[s][i] = p[i] - hm[12 + i]; in.hand_u[s][i] = p[i]; }
+            if (!in.tracked[s]) fist_prev_ok[s] = 0;
             if (in.tracked[s]) {
                 vrfire_pos_to_world(&map, p, w);
                 for (int i = 0; i < 3; i++) { in.hand[s][i] = w[i] * 0.001f; mf.fist[s][i] = w[i]; }
                 in.grip[s] = gr; in.trig[s] = tg;
                 mf.fist_ok[s] = 1; mf.fist_closed[s] = in.fist_btn[s];
                 { float fp[3]; if (mv_vrhost_hands_active() && vrbody_fist_point(s, fp)) for (int i = 0; i < 3; i++) mf.fist[s][i] = fp[i]; }   /* el golpe sale de los nudillos de la mano nueva, no del mando */
-                float dmm = mv_vrhost_wall_distance(w, 400.0f);     /* geometría estática de la escena (la de la colisión de la cabeza) */
+                if (in.cap_valid) {      /* esfera del puño (0,12 m) barrida desde el VBlank anterior contra las cápsulas; un salto de pose no es un barrido */
+                    const float *b = mf.fist[s], *a = fist_prev_ok[s] && fabsf(fist_prev[s][0] - b[0]) + fabsf(fist_prev[s][1] - b[1]) + fabsf(fist_prev[s][2] - b[2]) < 600.0f ? fist_prev[s] : b;
+                    float pt[3], hw[3] = {in.head[0] * 1000.0f, in.head[1] * 1000.0f, in.head[2] * 1000.0f}; int z = 0, hi = vrhit_sweep(ht, hn, a, b, G.cfg.fist_radius * map.units_per_m, &z, pt);
+                    if (hi >= 0) {
+                        float dv[3] = {pt[0] - hw[0], pt[1] - hw[1], pt[2] - hw[2]}, dl = sqrtf(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]);
+                        float tw = dl > 300.0f ? mv_vrhost_ray_distance(hw, dv, dl) : -1.0f;      /* pared entre la cabeza y el contacto: no se golpea a través de ella */
+                        if (!(tw >= 0.0f && tw < dl - 150.0f)) { in.cap_zone[s] = z; mf.contact[s] = 1; vrhit_clamp_box(&ht[hi], pt, mf.contact_pt[s]); }
+                    }
+                }
+                memcpy(fist_prev[s], mf.fist[s], sizeof fist_prev[s]); fist_prev_ok[s] = 1;
+                float dmm = mv_vrhost_wall_distance(mf.fist[s], 400.0f);     /* superficie sólida más cercana a los nudillos (geometría estática de la escena, la de la colisión de la cabeza) */
                 in.wall_valid[s] = dmm >= 0.0f; in.wall_dist[s] = dmm >= 0.0f ? dmm * 0.001f : 1.0f;
             }
         }

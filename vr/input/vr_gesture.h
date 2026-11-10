@@ -9,7 +9,8 @@
  *    Con el puño ya cerrado (botón mantenido de antes) NUNCA se agarra. Mantener el botón mantiene el agarre (grab_hold);
  *    cada pulsación nueva o un golpe con el puño estando agarrado = squeeze (apretar y rematar).
  *  - El cuadrado físico y los demás botones pasan al juego como en el original (respaldo de golpe).
- *  - Pared: golpear la pared = círculo (golpe rápido de la mano estando pegado); asomarse = triángulo (opcional).
+ *  - Pared: golpear con el PUÑO cerrado una superficie sólida (pared, suelo, caja) = toque de nudillos del motor (sonido + ruido que oyen los guardias) -> knock_side;
+ *    no hace falta estar pegado a la pared. Asomarse = triángulo (opcional).
  *  - Hápticos: golpe, agarre, apretón, pared, daño recibido.
  * Espacio de entrada: MUNDO del motor en metros (x, y arriba, z), rumbo del jugador yaw en radianes con delante = (sin yaw, cos yaw).
  * Una llamada por VBlank (dt ~ 0,02). */
@@ -37,7 +38,7 @@ typedef struct {
     int punch, grab, knock, peek;   /* conmutadores por gesto (1 activo) */
     int right_handed;        /* el agarre de la mano dominante es R1 (derecho) o L1 */
     float punch_speed;       /* m/s de la mano para contar como golpe (1,3: la media de 4 muestras recorta el pico real de 2-4 m/s) */
-    float knock_speed;       /* velocidad de acercamiento mínima de la mano a la pared al tocarla (0,4 m/s) */
+    float knock_speed;       /* velocidad mínima al tocar la superficie (0,4 m/s): la de acercamiento a ella Y la de la mano respecto a la cabeza (andar hacia una pared con la mano quieta no cuenta) */
     float knock_touch;       /* distancia mano-superficie que cuenta como tocar (0,08 m) */
     float knock_cooldown_s;  /* entre toques (0,25 s) */
     float knock_enemy_m;     /* con un enemigo a menos de esto de la mano no es pared sino golpe (1,0 m) */
@@ -91,6 +92,8 @@ typedef struct {
     float trig[2];           /* gatillo analógico por mano física */
     int stick_dom, stick_off; /* clic del stick de la mano dominante / de la otra (R3 / L3 del mando del juego) */
     int fist_btn[2];         /* botón del puño pulsado por mano física (R1 de la dominante / L1 de la otra, ya mapeados): ESTO decide puño y agarre; el grip analógico solo es la pose */
+    int cap_valid;           /* el anfitrión aporta el contacto del puño con las cápsulas por pieza de los enemigos (vr/gameplay/vr_hit): sustituye al cilindro body_radius */
+    int cap_zone[2];         /* con cap_valid: zona que toca el puño de cada mano en este VBlank (0 ninguna, 1 cabeza, 2 cuerpo, 3 extremidad) */
     int n_en;
     struct { float p[3]; float yaw; int down; int vital; int blocked; } en[VRG_MAX_EN];   /* blocked: hay geometría estática entre la cabeza y el enemigo (no se puede golpear a través de una pared) */
 } vrg_in_t;
@@ -114,7 +117,7 @@ typedef struct {
     int grab_hold;           /* 1: el botón del puño sigue pulsado durante el agarre (mantiene el agarre del motor) */
     int menu_open[2];        /* ventana abierta por la mano física (0 objetos/L2, 1 armas/R2) mientras se mantiene el gatillo; vrg_out.press ya lleva L2/R2 */
     int knock_side;          /* -1 nada; 0/1: llamar con los nudillos (acción del motor) con esa mano */
-    const char *knock_why;   /* motivo del último intento de toque de este VBlank ("ok", "lento", "enfriamiento", "enemigo", "no_pegado", "lejos_de_la_pared"...) */
+    const char *knock_why;   /* motivo del último intento de toque de este VBlank ("ok", "lento", "mano_quieta", "sin_puno", "enfriamiento", "enemigo", "lejos_de_la_pared"...) */
     float knock_speed, knock_dist; int knock_try_side;
     int squeeze;             /* 1: apretar/rematar (nueva pulsación o golpe estando agarrado) */
     const char *grab_why;    /* motivo del último intento de agarre de este VBlank (NULL: ninguno): "ok", "mano_lejos", "cuerpo_lejos", "puno_cerrado", "tras_golpe"... */

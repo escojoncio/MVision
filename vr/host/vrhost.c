@@ -28,6 +28,9 @@
 #include "vr_usermap.h"
 #include "vr_cine.h"
 #include "vr_fire.h"
+#include "vr_hit.h"
+#include "vr_hzd.h"
+#include "vr_cameras.h"
 #include "vr_radar.h"
 #include "vr_radar_vrp.h"
 #include "vr_scene.h"
@@ -1281,6 +1284,24 @@ float mv_vrhost_ray_distance(const float o_mm[3], const float d[3], float max_mm
     return t;
 }
 
+/* Geometría y cámaras para la resolución de impactos de las balas (vr/gameplay/vr_hit.h). Hilo de emulación. */
+static float hit_wall(const uint8_t *ram, const float o[3], const float d[3], float max) {     /* la misma geometría que corta el láser del arma (vrgame.c) */
+    float t = vrhzd_raycast(ram, o, d, max, VRHZD_SKIP_SIGHT), t2 = mv_vrhost_ray_distance(o, d, t >= 0.0f ? t : max);
+    return t2 >= 0.0f ? t2 : t;
+}
+static int hit_camera(uint8_t *ram, const float o[3], const float d[3], float max, float *t, uint32_t *target) {
+    (void)ram;
+    const VrcTable *tb = vrc_table();
+    int i = tb ? vrc_raycast(tb, o, d, max, t, NULL) : -1;
+    if (i < 0) return 0;
+    *target = tb->cam[i].target;
+    return 1;
+}
+static void hit_camera_hit(uint8_t *ram, uint32_t target, const int16_t pt[3]) {               /* el juego no la daña por sí mismo: un impacto de bala de la política VR (2 la rompen) */
+    const VrcTable *tb = vrc_table();
+    for (int i = 0; tb && i < tb->n; i++) if (tb->cam[i].target == target) { vr_cameras_hit(ram, tb->cam[i].actor, pt, 64); return; }
+}
+
 static float ai_corr[3];      /* último recorte de la cabeza contra el escenario (m, espacio del usuario; protegido por MX) */
 static uint64_t ai_corr_t;
 /* Desplazamiento de la cabeza VR respecto del ojo del personaje, para la IA (vr/ai): la cabeza dibujada (física + recorte) en el mundo del motor. */
@@ -1783,6 +1804,7 @@ static void on_bound(void) {
     vrgame_set_enabled(body_ok, fire_ok);
     if (vrai_on_bound() < 0) fprintf(stderr, "[vrhost] IA de enemigos no instalada\n");
     if (vrmelee_rt_install() < 0) fprintf(stderr, "[vrhost] acciones de cuerpo (golpe/agarre/toque) no instaladas\n");
+    { VrHitWorld hw = {0.0f, hit_wall, hit_camera, hit_camera_hit}; vrhit_set_world(&hw); }
 }
 
 static void on_start(void) {

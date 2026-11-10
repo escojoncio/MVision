@@ -1,0 +1,415 @@
+/* vr_hit: ver vr_hit.h. Solo lee/escribe la RAM del juego (edición europea); sin dependencias del runtime. No es reentrante (hilo del emulador). */
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+#include "vr_hit.h"
+
+#define RAM_MASK 0x1FFFFFu
+/* ---- direcciones/offsets del juego (medidos en el desensamblado y en volcados de RAM) ---- */
+#define T_TABLE      0x800B7660u     /* 64 blancos de 72 B: +0 clase (0x10 = lo sellan las balas, 4 = dañable), +2 bando, +4 mapa, +6 banderas, +8 centro s16[3], +16 semiejes s16[3], +0x26 vida */
+#define T_N          64
+#define T_SIZE       72u
+#define A_ACTIVE_MAP 0x800ACB9Cu     /* máscara de mapas activos: el juego solo sella/daña blancos de un mapa activo (0x8002dc20) */
+#define CHAN_MAIN    0x800B2B7Cu     /* canal principal: +0x56 nº de objetos (s16), +0x58 cola de punteros */
+#define OBJ_T        20u             /* objeto: traslación de la raíz (s32[3]) */
+#define OBJ_NMODELS  0x2Eu
+#define OBJ_PIECES   0x48u           /* piezas de 0x5C B: +0 matriz local->mundo, +0x40 modelo */
+#define PIECE_SIZE   0x5Cu
+#define MODEL_BOX    0x08u           /* modelo: caja local s32[6], +0x20 traslación de la articulación s32[3], +0x2C padre */
+#define MODEL_JT     0x20u
+#define MODEL_PARENT 0x2Cu
+#define A_PLAYER_CTRL 0x800ACB84u    /* control del jugador: +0x2C mapa -> +8 envoltura -> +0 cabecera de colisión (+10 nº de grupos, +16 grupos de 24 B: +4 nº de suelos, +12 suelos de 48 B) */
+#define A_HZD_MASK   0x800ACB38u     /* grupos de colisión activos */
+/* actor de la bala (0x800779a8 lo crea; 0x800771ac es su tick) */
+#define B_SIZE   0x170u
+#define B_TARGET 0x44u               /* su blanco de daño (72 B; el daño en +38) */
+#define B_POS    0x110u              /* posición s16[3]: origen del segmento del próximo tick */
+#define B_END    0x118u              /* final del trazado s16[3] (pared del juego o alcance) */
+#define B_VEL    0x120u              /* avance por tick s16[3] */
+#define B_LIMIT  0x138u              /* distancia a la que acaba */
+#define B_WALLHIT 0x140u             /* 1 = su trazado dio en la colisión del juego (pared, suelo, puerta u otra colisión dinámica) a la distancia B_LIMIT */
+#define B_SIDE   0x148u
+#define B_DAMAGE 0x154u
+#define B_RANGE  0x158u
+#define PLAYER_SIDE 1u
+
+static int ptr_ok(uint32_t a, uint32_t n) { return a >= 0x80010000u && a < 0x80200000u && n <= 0x200000u && (a & RAM_MASK) + n <= RAM_MASK + 1u; }
+static uint32_t ru32(const uint8_t *r, uint32_t a) { uint32_t v; memcpy(&v, r + (a & RAM_MASK), 4); return v; }
+static int32_t rs32(const uint8_t *r, uint32_t a) { int32_t v; memcpy(&v, r + (a & RAM_MASK), 4); return v; }
+static int16_t rs16(const uint8_t *r, uint32_t a) { int16_t v; memcpy(&v, r + (a & RAM_MASK), 2); return v; }
+static uint16_t ru16(const uint8_t *r, uint32_t a) { return (uint16_t)rs16(r, a); }
+static void ws16(uint8_t *r, uint32_t a, int16_t v) { memcpy(r + (a & RAM_MASK), &v, 2); }
+static void ws32(uint8_t *r, uint32_t a, int32_t v) { memcpy(r + (a & RAM_MASK), &v, 4); }
+static float dot3(const float a[3], const float b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+static int unit3(const float d[3], float o[3]) {
+    float l = sqrtf(dot3(d, d));
+    if (!(l > 1e-6f) || !isfinite(l)) return 0;
+    for (int i = 0; i < 3; i++) o[i] = d[i] / l;
+    return 1;
+}
+
+const char *vrhit_zone_name(int z) {
+    static const char *nm[] = {"ninguna", "cabeza", "cuerpo", "extremidad", "caja", "pared", "fallo"};
+    return z >= 0 && z <= VRHIT_Z_MISS ? nm[z] : nm[0];
+}
+
+/* ================================================== cápsulas ================================================== */
+static void no_caps(VrHitTarget *t) { t->object = 0; t->ncap = 0; t->head = -1; }
+static void build_caps(const uint8_t *ram, VrHitTarget *t) {
+    uint32_t o = t->object;
+    int n = rs16(ram, o + OBJ_NMODELS), par[VRHIT_MAX_CAP], leaf[VRHIT_MAX_CAP];
+    float jy[VRHIT_MAX_CAP];
+    if (n > VRHIT_MAX_CAP) n = VRHIT_MAX_CAP;
+    if (!ptr_ok(o, OBJ_PIECES + PIECE_SIZE * (uint32_t)n)) { no_caps(t); return; }
+    for (int k = 0; k < n; k++) {
+        uint32_t p = o + OBJ_PIECES + PIECE_SIZE * (uint32_t)k, m = ru32(ram, p + 0x40);
+        if (!ptr_ok(m, 0x58)) { no_caps(t); return; }
+        float lo[3], hi[3], hl[3], c[3];
+        for (int i = 0; i < 3; i++) {
+            lo[i] = (float)rs32(ram, m + MODEL_BOX + 4u * (uint32_t)i); hi[i] = (float)rs32(ram, m + MODEL_BOX + 12u + 4u * (uint32_t)i);
+            hl[i] = (hi[i] - lo[i]) * 0.5f; c[i] = (hi[i] + lo[i]) * 0.5f;
+            if (!(hl[i] >= 0.0f && hl[i] < 2000.0f)) { no_caps(t); return; }
+        }
+        /* cápsula de la caja local: eje = lado más largo, radio = el mayor de los otros dos semiejes */
+        int ax = hl[0] >= hl[1] ? (hl[0] >= hl[2] ? 0 : 2) : (hl[1] >= hl[2] ? 1 : 2);
+        float r = ax == 0 ? fmaxf(hl[1], hl[2]) : ax == 1 ? fmaxf(hl[0], hl[2]) : fmaxf(hl[0], hl[1]);
+        float seg = hl[ax] > r ? hl[ax] - r : 0.0f, la[3] = {c[0], c[1], c[2]}, lb[3] = {c[0], c[1], c[2]};
+        la[ax] -= seg; lb[ax] += seg;
+        VrHitCap *q = &t->cap[k];
+        for (int i = 0; i < 3; i++) {
+            float m0 = rs16(ram, p + 6u * (uint32_t)i), m1 = rs16(ram, p + 6u * (uint32_t)i + 2u), m2 = rs16(ram, p + 6u * (uint32_t)i + 4u), tt = (float)rs32(ram, p + 20u + 4u * (uint32_t)i);
+            q->a[i] = tt + (m0 * la[0] + m1 * la[1] + m2 * la[2]) / 4096.0f;
+            q->b[i] = tt + (m0 * lb[0] + m1 * lb[1] + m2 * lb[2]) / 4096.0f;
+            if (!(fabsf(q->a[i] - t->c[i]) < 4000.0f && fabsf(q->b[i] - t->c[i]) < 4000.0f)) { no_caps(t); return; }      /* matrices de pieza sin calcular o de otro sitio */
+        }
+        q->r = r < 20.0f ? 20.0f : r; q->zone = VRHIT_Z_LIMB;
+        par[k] = rs32(ram, m + MODEL_PARENT); if (par[k] < -1 || par[k] >= n || par[k] == k) par[k] = -1;
+        jy[k] = (float)rs32(ram, m + MODEL_JT + 4u);
+        leaf[k] = 1;
+    }
+    for (int k = 0; k < n; k++) if (par[k] >= 0) leaf[par[k]] = 0;
+    /* cabeza: la pieza hoja más alta en la pose de reposo (altura = suma de las traslaciones de articulación hasta la raíz) */
+    int head = -1; float best = 0;
+    for (int k = 0; k < n; k++) {
+        if (!leaf[k]) continue;
+        float y = 0; int j = k;
+        for (int g = 0; j >= 0 && g < n; g++) { y += jy[j]; j = par[j]; }
+        if (head < 0 || y > best) { head = k; best = y; }
+    }
+    t->head = head; t->ncap = n;
+    if (head < 0) return;
+    t->cap[head].zone = VRHIT_Z_HEAD;
+    int j = par[head];
+    for (int g = 0; j >= 0 && g < n; g++) { t->cap[j].zone = VRHIT_Z_BODY; j = par[j]; }
+}
+
+/* Empareja cada blanco con el objeto articulado (>= 2 piezas) cuya raíz cae en su caja; un objeto es del blanco (de cualquier bando) cuyo centro le queda más cerca. */
+static void pair_objects(const uint8_t *ram, VrHitTarget *t, int n) {
+    int qn = rs16(ram, CHAN_MAIN + 0x56);
+    uint32_t q = ru32(ram, CHAN_MAIN + 0x58);
+    float best[VRHIT_MAX_T];
+    if (qn > 256) qn = 256;
+    if (qn <= 0 || !ptr_ok(q, 4u * (uint32_t)qn)) return;
+    for (int i = 0; i < n; i++) best[i] = 1e30f;
+    for (int k = 0; k < qn; k++) {
+        uint32_t o = ru32(ram, q + 4u * (uint32_t)k);
+        if (!ptr_ok(o, OBJ_PIECES) || rs16(ram, o + OBJ_NMODELS) < 2) continue;
+        float r[3], od = 1e30f; int own = -1;
+        for (int i = 0; i < 3; i++) r[i] = (float)rs32(ram, o + OBJ_T + 4u * (uint32_t)i);
+        for (int i = 0; i < T_N; i++) {
+            uint32_t b = T_TABLE + T_SIZE * (uint32_t)i;
+            if (!ru16(ram, b)) continue;
+            float d2 = 0; int in = 1;
+            for (int a = 0; a < 3; a++) { float d = r[a] - (float)rs16(ram, b + 8u + 2u * (uint32_t)a); if (fabsf(d) > (float)rs16(ram, b + 16u + 2u * (uint32_t)a)) in = 0; d2 += d * d; }
+            if (in && d2 < od) { od = d2; own = i; }
+        }
+        for (int i = 0; i < n; i++) if (t[i].index == own && od < best[i]) { best[i] = od; t[i].object = o; }
+    }
+    for (int i = 0; i < n; i++) if (t[i].object) build_caps(ram, &t[i]);
+}
+
+int vrhit_scan(const uint8_t *ram, unsigned skip_side, unsigned need_cls, int caps, VrHitTarget *out, int max) {
+    if (!ram || !out || max <= 0) return 0;
+    uint32_t amap = ru32(ram, A_ACTIVE_MAP);
+    int n = 0;
+    if (max > VRHIT_MAX_T) max = VRHIT_MAX_T;
+    for (int i = 0; i < T_N && n < max; i++) {
+        uint32_t b = T_TABLE + T_SIZE * (uint32_t)i;
+        uint16_t cls = ru16(ram, b), side = ru16(ram, b + 2);
+        if (!(cls & need_cls) || side == skip_side || !(ru16(ram, b + 4) & amap)) continue;
+        VrHitTarget *t = &out[n++];
+        t->addr = b; t->index = i; t->cls = cls; t->side = side; t->vital = rs16(ram, b + 0x26);
+        for (int a = 0; a < 3; a++) { t->c[a] = rs16(ram, b + 8u + 2u * (uint32_t)a); t->h[a] = rs16(ram, b + 16u + 2u * (uint32_t)a); }
+        no_caps(t);
+    }
+    if (caps && n) pair_objects(ram, out, n);
+    return n;
+}
+
+/* ================================================== rayos ================================================== */
+static float sphere_ray(const float oc[3], const float d[3], float r) {
+    float b = dot3(d, oc), c = dot3(oc, oc) - r * r, h = b * b - c;
+    if (c <= 0.0f) return 0.0f;                    /* el origen ya está dentro */
+    if (h < 0.0f) return -1.0f;
+    float t = -b - sqrtf(h);
+    return t >= 0.0f ? t : -1.0f;
+}
+/* Rayo o + t*d (d unitario) contra la cápsula a-b de radio r: t >= 0 del primer contacto (0 si el origen está dentro) o -1. */
+static float cap_ray(const float o[3], const float d[3], const float a[3], const float b[3], float r) {
+    float ba[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, oa[3] = {o[0] - a[0], o[1] - a[1], o[2] - a[2]}, ob[3] = {o[0] - b[0], o[1] - b[1], o[2] - b[2]};
+    float baba = dot3(ba, ba), bard = dot3(ba, d), baoa = dot3(ba, oa), rdoa = dot3(d, oa), oaoa = dot3(oa, oa);
+    float best = -1.0f, t;
+    if (baba > 1e-3f) {
+        float A = baba - bard * bard, B = baba * rdoa - baoa * bard, C = baba * oaoa - baoa * baoa - r * r * baba;
+        float y0 = baoa;                           /* proyección del origen sobre el eje */
+        if (C <= 0.0f && y0 >= 0.0f && y0 <= baba) return 0.0f;      /* origen dentro del cilindro */
+        if (A > 1e-6f * baba) {
+            float h = B * B - A * C;
+            if (h >= 0.0f) {
+                t = (-B - sqrtf(h)) / A;
+                float y = baoa + t * bard;
+                if (t >= 0.0f && y >= 0.0f && y <= baba) best = t;
+            }
+        }
+    }
+    t = sphere_ray(oa, d, r); if (t >= 0.0f && (best < 0.0f || t < best)) best = t;
+    t = sphere_ray(ob, d, r); if (t >= 0.0f && (best < 0.0f || t < best)) best = t;
+    return best;
+}
+/* Rayo contra la caja del blanco: distancia de entrada (0 si el origen está dentro) o -1. */
+static float box_ray(const VrHitTarget *t, const float o[3], const float d[3]) {
+    float t0 = 0.0f, t1 = 1e30f;
+    for (int k = 0; k < 3; k++) {
+        float lo = t->c[k] - t->h[k], hi = t->c[k] + t->h[k];
+        if (fabsf(d[k]) < 1e-9f) { if (o[k] < lo || o[k] > hi) return -1.0f; continue; }
+        float a = (lo - o[k]) / d[k], b = (hi - o[k]) / d[k];
+        if (a > b) { float x = a; a = b; b = x; }
+        if (a > t0) t0 = a;
+        if (b < t1) t1 = b;
+        if (t0 > t1) return -1.0f;
+    }
+    return t0;
+}
+/* Volumen de impacto de un blanco: sus cápsulas o, sin ellas, su caja. */
+static float target_ray(const VrHitTarget *t, const float o[3], const float d[3], int *zone) {
+    if (!t->ncap) { *zone = VRHIT_Z_BOX; return box_ray(t, o, d); }
+    float best = -1.0f;
+    for (int k = 0; k < t->ncap; k++) {
+        float tc = cap_ray(o, d, t->cap[k].a, t->cap[k].b, t->cap[k].r);
+        if (tc >= 0.0f && (best < 0.0f || tc < best)) { best = tc; *zone = t->cap[k].zone; }
+    }
+    return best;
+}
+
+int vrhit_ray(const VrHitTarget *t, int n, const float o[3], const float d[3], float max, float *dist, int *zone) {
+    float dn[3], best = max; int bi = -1;
+    if (!t || !o || !d || !unit3(d, dn)) return -1;
+    for (int i = 0; i < n; i++) {
+        int z = VRHIT_Z_NONE; float tc = target_ray(&t[i], o, dn, &z);
+        if (tc >= 0.0f && tc <= best) { best = tc; bi = i; if (zone) *zone = z; }
+    }
+    if (bi >= 0 && dist) *dist = best;
+    return bi;
+}
+
+int vrhit_sweep(const VrHitTarget *t, int n, const float a[3], const float b[3], float r, int *zone, float pt[3]) {
+    if (!t || !a || !b) return -1;
+    float d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, dn[3] = {0, 0, 1}, len = sqrtf(dot3(d, d)), best = 0; int bi = -1;
+    if (!isfinite(len)) return -1;
+    if (len > 1e-3f) for (int i = 0; i < 3; i++) dn[i] = d[i] / len; else len = 0.0f;
+    for (int i = 0; i < n; i++)
+        for (int k = 0; k < t[i].ncap; k++) {
+            float tc = cap_ray(a, dn, t[i].cap[k].a, t[i].cap[k].b, t[i].cap[k].r + r);
+            if (tc >= 0.0f && tc <= len && (bi < 0 || tc < best)) { best = tc; bi = i; if (zone) *zone = t[i].cap[k].zone; }
+        }
+    if (bi >= 0 && pt) for (int i = 0; i < 3; i++) pt[i] = a[i] + dn[i] * best;
+    return bi;
+}
+
+void vrhit_clamp_box(const VrHitTarget *t, const float p[3], float out[3]) {
+    for (int k = 0; k < 3; k++) {
+        float h = t->h[k] > 2.0f ? t->h[k] - 2.0f : 0.0f, lo = t->c[k] - h, hi = t->c[k] + h;
+        out[k] = p[k] < lo ? lo : p[k] > hi ? hi : p[k];
+    }
+}
+
+/* Suelos de colisión: los mismos cuadriláteros que prueba el trazado de la bala del juego (0x80028d14 con la bandera 1; 0x800287c8 por suelo). */
+float vrhit_floor_ray(const uint8_t *ram, const float o[3], const float d[3], float max) {
+    float dn[3];
+    if (!ram || !o || !d || !(max > 0.0f) || !isfinite(max) || !unit3(d, dn) || !isfinite(o[0]) || !isfinite(o[1]) || !isfinite(o[2])) return -1.0f;
+    uint32_t ctl = ru32(ram, A_PLAYER_CTRL);
+    if (!ptr_ok(ctl, 0x30)) return -1.0f;
+    uint32_t map = ru32(ram, ctl + 0x2C);
+    if (!ptr_ok(map, 12)) return -1.0f;
+    uint32_t wr = ru32(ram, map + 8);
+    if (!ptr_ok(wr, 4)) return -1.0f;
+    uint32_t hdr = ru32(ram, wr);
+    if (!ptr_ok(hdr, 20)) return -1.0f;
+    int ng = rs16(ram, hdr + 10);
+    uint32_t gp = ru32(ram, hdr + 16), mask = ru32(ram, A_HZD_MASK);
+    if (ng <= 0 || ng > 32 || !ptr_ok(gp, 24u * (uint32_t)ng)) return -1.0f;
+    float best = max; int found = 0;
+    for (int g = 0; g < ng; g++) {
+        if (!((mask >> g) & 1u)) continue;
+        uint32_t b = gp + 24u * (uint32_t)g, fp = ru32(ram, b + 12);
+        int nf = rs16(ram, b + 4);
+        if (nf <= 0 || nf > 4096 || !ptr_ok(fp, 48u * (uint32_t)nf)) continue;
+        for (int i = 0; i < nf; i++) {
+            float p[4][3];
+            for (int k = 0; k < 4; k++) {
+                uint32_t a = fp + 48u * (uint32_t)i + 16u + 8u * (uint32_t)k;
+                p[k][0] = rs16(ram, a); p[k][2] = rs16(ram, a + 2); p[k][1] = rs16(ram, a + 4);
+            }
+            for (int tri = 0; tri < 2; tri++) {                    /* (p1,p2,p3) y (p1,p3,p4) */
+                const float *v0 = p[0], *v1 = p[1 + tri], *v2 = p[2 + tri];
+                float e1[3] = {v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]}, e2[3] = {v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]};
+                float pv[3] = {dn[1] * e2[2] - dn[2] * e2[1], dn[2] * e2[0] - dn[0] * e2[2], dn[0] * e2[1] - dn[1] * e2[0]}, det = dot3(e1, pv);
+                if (fabsf(det) < 1e-3f) continue;
+                float tv[3] = {o[0] - v0[0], o[1] - v0[1], o[2] - v0[2]}, u = dot3(tv, pv) / det;
+                if (u < 0.0f || u > 1.0f) continue;
+                float qv[3] = {tv[1] * e1[2] - tv[2] * e1[1], tv[2] * e1[0] - tv[0] * e1[2], tv[0] * e1[1] - tv[1] * e1[0]}, v = dot3(dn, qv) / det;
+                if (v < 0.0f || u + v > 1.0f) continue;
+                float t = dot3(e2, qv) / det;
+                if (t > 1.0f && t <= best) { best = t; found = 1; }
+            }
+        }
+    }
+    return found ? best : -1.0f;
+}
+
+/* ================================================== balas ================================================== */
+static VrHitWorld W;
+static int w_set;
+void vrhit_set_world(const VrHitWorld *w) { if (w) { W = *w; w_set = 1; } else { memset(&W, 0, sizeof W); w_set = 0; } }
+
+typedef struct { int on, age; float o[3], d[3], rel[3], dist; uint32_t addr; int zone; } Aim;
+#define N_AIM 4
+static Aim g_aim[N_AIM];
+static VrHitTarget g_t[VRHIT_MAX_T];
+
+typedef struct {
+    int idx, zone;           /* blanco alcanzado (índice en g_t; -1 ninguno) y zona */
+    float dist, pt[3];       /* distancia y punto del impacto en el blanco */
+    float wall;              /* distancia a la geometría (el alcance si no hay) */
+    int crossed;             /* el rayo cruza la caja de algún blanco dentro del alcance */
+    int cam;                 /* el blanco alcanzado es una cámara de vigilancia */
+    uint32_t cam_ext;        /* blanco de una cámara que el juego no prueba (fuera de g_t) alcanzada antes que todo lo demás; 0 = no */
+} Res;
+
+/* Un único criterio de línea de tiro: el blanco más cercano que toca el rayo antes que la geometría sólida y dentro del alcance. */
+static void resolve(uint8_t *ram, const VrHitTarget *t, int n, const float o[3], const float d[3], float R, float game_wall, Res *r) {
+    memset(r, 0, sizeof *r);
+    r->idx = -1; r->wall = R;
+    if (game_wall >= 0.0f && game_wall < r->wall) r->wall = game_wall;
+    float w = W.wall ? W.wall(ram, o, d, R) : -1.0f;
+    if (w >= 0.0f && w < r->wall) r->wall = w;
+    w = vrhit_floor_ray(ram, o, d, R);
+    if (w >= 0.0f && w < r->wall) r->wall = w;
+    float best = r->wall;
+    for (int i = 0; i < n; i++) {
+        float tb = box_ray(&t[i], o, d);
+        if (tb >= 0.0f && tb <= R) r->crossed = 1;
+        int z = VRHIT_Z_NONE; float tc = target_ray(&t[i], o, d, &z);
+        if (tc >= 0.0f && tc < best) { best = tc; r->idx = i; r->zone = z; }
+    }
+    float tcam = 0; uint32_t tg = 0;
+    if (W.camera && W.camera(ram, o, d, R, &tcam, &tg)) {
+        int in = -1;
+        for (int i = 0; i < n; i++) if (t[i].addr == tg) in = i;
+        if (in >= 0) { if (in == r->idx) r->cam = 1; }
+        else if (tcam >= 0.0f && tcam < best) { best = tcam; r->idx = -1; r->cam_ext = tg; r->zone = VRHIT_Z_BOX; r->cam = 1; }
+    }
+    r->dist = best;
+    for (int i = 0; i < 3; i++) r->pt[i] = o[i] + d[i] * best;
+}
+
+void vrhit_frame(void) {
+    for (int i = 0; i < N_AIM; i++) if (g_aim[i].on && ++g_aim[i].age > VRHIT_AIM_LIFE) g_aim[i].on = 0;
+}
+
+void vrhit_aim(const uint8_t *ram, const float o[3], const float d[3]) {
+    float dn[3]; Res r;
+    if (!w_set || !ram || !o || !d || !unit3(d, dn)) return;
+    int n = vrhit_scan(ram, PLAYER_SIDE, 0x10, 1, g_t, VRHIT_MAX_T);
+    resolve((uint8_t *)ram, g_t, n, o, dn, VRHIT_RANGE_MIN, -1.0f, &r);
+    if (r.idx < 0) return;
+    Aim *a = &g_aim[0];
+    for (int i = 0; i < N_AIM; i++) { if (!g_aim[i].on) { a = &g_aim[i]; break; } if (g_aim[i].age > a->age) a = &g_aim[i]; }
+    a->on = 1; a->age = 0; a->addr = g_t[r.idx].addr; a->zone = r.zone; a->dist = r.dist;
+    for (int i = 0; i < 3; i++) { a->o[i] = o[i]; a->d[i] = dn[i]; a->rel[i] = r.pt[i] - g_t[r.idx].c[i]; }
+}
+
+/* Puntería anotada para este mismo rayo (misma boca y dirección que en el gatillo): se consume; vale si su blanco sigue en la tabla. */
+static int take_aim(const float o[3], const float d[3], const VrHitTarget *t, int n, float R, float game_wall, Res *r) {
+    for (int k = 0; k < N_AIM; k++) {
+        Aim *a = &g_aim[k];
+        if (!a->on || fabsf(a->o[0] - o[0]) > 16.0f || fabsf(a->o[1] - o[1]) > 16.0f || fabsf(a->o[2] - o[2]) > 16.0f || dot3(a->d, d) < 0.9995f) continue;
+        a->on = 0;
+        if (game_wall >= 0.0f && game_wall < a->dist - 100.0f) return 0;      /* el trazado del juego corta ese rayo antes del blanco (una puerta cerrada, p. ej.) */
+        for (int i = 0; i < n; i++) {
+            if (t[i].addr != a->addr) continue;
+            memset(r, 0, sizeof *r);
+            r->idx = i; r->zone = a->zone; r->wall = R; r->crossed = 1;
+            float dv[3];
+            for (int j = 0; j < 3; j++) { r->pt[j] = t[i].c[j] + a->rel[j]; dv[j] = r->pt[j] - o[j]; }
+            r->dist = sqrtf(dot3(dv, dv));
+            return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+/* La bala acaba en su punto final sin recorrer nada: el segmento de su próximo tick es nulo y no sella ninguna caja (si el juego trazó una pared, salta ahí su chispa). */
+static void void_bullet(uint8_t *ram, uint32_t actor) {
+    memcpy(ram + ((actor + B_POS) & RAM_MASK), ram + ((actor + B_END) & RAM_MASK), 6);
+    ws32(ram, actor + B_LIMIT, 0);
+}
+
+int vrhit_bullet(uint8_t *ram, uint32_t actor, VrHitShot *out) {
+    if (!w_set || !ram || !ptr_ok(actor, B_SIZE)) return 0;
+    float o[3], v[3], d[3];
+    for (int i = 0; i < 3; i++) { o[i] = rs16(ram, actor + B_POS + 2u * (uint32_t)i); v[i] = rs16(ram, actor + B_VEL + 2u * (uint32_t)i); }
+    if (!(dot3(v, v) > 1.0f) || !unit3(v, d)) return 0;
+    unsigned side = ru32(ram, actor + B_SIDE) & 0xFFFFu;
+    int player = side == PLAYER_SIDE;
+    float R = (float)rs32(ram, actor + B_RANGE);
+    if (!(R >= VRHIT_RANGE_MIN)) R = VRHIT_RANGE_MIN;
+    int n = vrhit_scan(ram, side, 0x10, player, g_t, VRHIT_MAX_T);     /* las cápsulas solo para las balas del jugador: la IA apunta a la caja del jugador */
+    /* geometría sólida = la del anfitrión + los suelos de colisión + lo que ya encontró el trazado del propio juego (colisión del mapa del tirador, puertas y demás colisión dinámica) */
+    float gw = rs32(ram, actor + B_WALLHIT) == 1 ? (float)rs32(ram, actor + B_LIMIT) : -1.0f;
+    Res r;
+    if (!(player && take_aim(o, d, g_t, n, R, gw, &r))) resolve(ram, g_t, n, o, d, R, gw, &r);
+    VrHitShot s = {(int)side, -1, VRHIT_Z_MISS, VRHIT_ACT_NONE, rs32(ram, actor + B_DAMAGE), -1, r.dist};
+    int16_t P[3];
+    if (r.idx >= 0) {
+        const VrHitTarget *t = &g_t[r.idx];
+        float p[3]; int same = 1;
+        vrhit_clamp_box(t, r.pt, p);
+        for (int i = 0; i < 3; i++) { P[i] = (int16_t)lrintf(p[i]); if (P[i] != rs16(ram, actor + B_END + 2u * (uint32_t)i)) same = 0; }
+        if (same) P[1] = (int16_t)(P[1] + ((float)P[1] < t->c[1] ? 1 : -1));       /* origen = final sería un segmento nulo */
+        for (int i = 0; i < 3; i++) ws16(ram, actor + B_POS + 2u * (uint32_t)i, P[i]);
+        if (player && r.zone == VRHIT_Z_HEAD && t->vital > s.damage) {
+            s.damage = t->vital;
+            ws32(ram, actor + B_DAMAGE, s.damage); ws16(ram, actor + B_TARGET + 38u, (int16_t)s.damage);
+        }
+        if (r.zone == VRHIT_Z_BOX && !(t->cls & 4) && W.camera_hit) W.camera_hit(ram, t->addr, P);
+        s.target = t->index; s.vital = t->vital; s.zone = r.zone; s.action = VRHIT_ACT_SEAL;
+    } else if (r.cam_ext) {
+        for (int i = 0; i < 3; i++) P[i] = (int16_t)lrintf(fmaxf(-32768.0f, fminf(32767.0f, r.pt[i])));
+        if (W.camera_hit) W.camera_hit(ram, r.cam_ext, P);
+        void_bullet(ram, actor);
+        s.zone = VRHIT_Z_BOX; s.action = VRHIT_ACT_VOID;
+    } else {
+        s.zone = r.wall < R ? VRHIT_Z_WALL : VRHIT_Z_MISS; s.dist = r.wall;
+        if (r.crossed) { void_bullet(ram, actor); s.action = VRHIT_ACT_VOID; }
+    }
+    if (player || r.idx >= 0 || r.crossed) {
+        float upm = W.units_per_m > 0.0f ? W.units_per_m : 1000.0f;
+        const char *zn = r.cam ? "camara" : (!player && s.target >= 0) ? "jugador" : vrhit_zone_name(s.zone);
+        fprintf(stderr, "[impacto] blanco=%d zona=%s dist=%.2f m vida=%d | bando=%s dano=%d accion=%s\n", s.target, zn, s.dist / upm, s.vital, player ? "jugador" : "enemigo", s.damage,
+                s.action == VRHIT_ACT_SEAL ? "sellada" : s.action == VRHIT_ACT_VOID ? "anulada" : "intacta");
+    }
+    if (out) *out = s;
+    return 1;
+}

@@ -9,6 +9,7 @@
  *               el estado de presa (0x80059D44). Sin petición: el original (el botón sigue funcionando).
  *   0x80051538  llamar a la pared: con petición de toque, entra directamente en el estado de nudillos (bandera 0x100 + rutina 0x800551C0),
  *               que es lo que hace el original con el botón junto a una pared (solo en los estados pegado a la pared, tiempo >= 8).
+ *               Fuera de esos estados la petición de toque la atiende 0x800513D8: lanza el sonido y el ruido del toque (0x80061294), sin la animación.
  *   0x80059D44  estado de presa (tiempo 0 = búsqueda de presa en una caja). 0x80051108 es la búsqueda; llama a 0x8002DF1C (mover
  *               el blanco del jugador): ahí se sustituye el centro de la caja por la mano VR.
  *   0x80050FD4  comprobación de impacto del golpe (origen + alcance); también termina en 0x8002DF1C: centro = puño VR.
@@ -32,6 +33,9 @@ extern "C" {
 #define VRM_FN_ACTION_IN  0x800513D8u
 #define VRM_FN_KNOCK_CK   0x80051538u   /* comprobación de «llamar a la pared» en los estados pegado a la pared (actor, tiempo) */
 #define VRM_ST_KNOCK      0x800551C0u   /* estado de llamar con los nudillos */
+#define VRM_FN_KNOCK_SE   0x80061294u   /* lo que lanza ese estado al dar en la pared: (sonido, espera en fotogramas) crea el actor que al acabar la espera reproduce el sonido en la posición del
+                                         * jugador y registra el ruido que oyen los guardias (potencia 100, tipo 16, en la posición del jugador) */
+#define VRM_KNOCK_SND     0x800B8860u   /* tabla de sonidos por material (3 B por material): el byte 0 es el del toque en el material 0 (55) */
 #define VRM_FN_START      0x8004F618u   /* arrancar estado: (actor, rutina) */
 #define VRM_FN_PUNCH      0x80059CD0u   /* estado de golpe */
 #define VRM_FN_GRAB       0x80059D44u   /* estado de presa */
@@ -88,6 +92,9 @@ typedef struct {
     int fist_ok[2];           /* puño con seguimiento */
     int fist_closed[2];       /* botón del puño pulsado */
     float fist[2][3];         /* puño VR en el mundo del motor (mm) */
+    int contact_valid;        /* el anfitrión prueba el puño contra las cápsulas por pieza de los enemigos (vr/gameplay/vr_hit): un golpe solo se registra si hubo contacto real */
+    int contact[2];           /* con contact_valid: el puño de esa mano toca a un enemigo en este VBlank */
+    float contact_pt[2][3];   /* punto de contacto llevado dentro de la caja del blanco tocado (mm): ahí se centra la comprobación de impacto del motor */
 } VrmFrame;
 
 #define VRM_HIST 24             /* ~0,4 s de muestras del puño: el estado de golpe del motor comprueba el impacto varios fotogramas después del gesto */
@@ -108,6 +115,7 @@ typedef struct Vrm {
     int fist_ok[2], fist_closed[2];
     float fist[2][3];
     float hist[2][VRM_HIST][3]; unsigned char hist_cl[2][VRM_HIST]; int hist_n[2], hist_i[2];
+    int ct_valid, ct_ttl[2]; float ct_pt[2][3];   /* contacto real del puño con un enemigo: VBlanks que sigue valiendo (VRM_HIST) y su punto dentro de la caja del blanco */
     /* contexto de los ganchos */
     int ctx_hit, ctx_grab, ctx_ok; uint32_t ctx_target; float ctx_origin[3], ctx_fist[3];
     int stage;                /* etapa del golpe en curso (1..3) */

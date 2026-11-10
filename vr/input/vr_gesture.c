@@ -160,7 +160,8 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
     /* ---------------- pared: golpear y asomarse ---------------- */
     int circle = 0, triangle = 0;
 
-    /* ---------------- llamar con los nudillos: la mano (abierta o en puño) TOCA la pared moviéndose hacia ella ---------------- */
+    /* ---------------- llamar con los nudillos: el PUÑO cerrado golpea una superficie sólida (no hace falta estar pegado a la pared). Cuenta si la distancia a la superficie se cierra
+     * deprisa Y la mano se mueve respecto a la cabeza (andar hacia la pared con la mano quieta o balancear el brazo abierto no es un toque); con un enemigo junto a la mano es un golpe ---------------- */
     out->knock_side = -1;
     {
         for (int s = 0; s < 2; s++) {
@@ -193,11 +194,12 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                     if (sqrtf(dx * dx + dy * dy + dz * dz) < c->knock_enemy_m) enemy_near = 1;
                 }
                 if (!c->knock) why = "desactivado";
-                else if (!in->on_wall) why = "no_pegado";
                 else if (!free_hands) why = "manos_ocupadas";
+                else if (!in->fist_btn[s]) why = "sin_puno";
                 else if (enemy_near) why = "enemigo";
                 else if (g->settle > 0) why = "calma";
                 else if (ap < c->knock_speed) why = "lento";
+                else if (spd[s] < c->knock_speed) why = "mano_quieta";
                 else if (g->knock_cool[s] > 0 || g->cool_knock > 0) why = "enfriamiento";
                 else why = "ok";
                 if (!strcmp(why, "ok") && out->knock_side < 0) {
@@ -238,14 +240,16 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
     if (g->impact_t > 0) {
         g->impact_t -= dt;
         int s = g->impact_side, contact = 0;
-        if (tr[s])
+        if (in->cap_valid) contact = tr[s] && in->cap_zone[s] > 0;       /* contacto real con una pieza del enemigo */
+        else if (tr[s])
             for (int i = 0; i < in->n_en && i < VRG_MAX_EN && !contact; i++) {
                 if (in->en[i].down || !fin3(in->en[i].p)) continue;
                 float dx = in->hand[s][0] - in->en[i].p[0], dy = in->hand[s][1] - (in->en[i].p[1] + 0.3f), dz = in->hand[s][2] - in->en[i].p[2];
                 if (sqrtf(dx * dx + dy * dy + dz * dz) <= 0.55f) contact = 1;
             }
         if (contact || vit_drop) {
-            out->haptic[s] = 0.95f; g->impact_t = 0; if (!out->event) out->event = VRG_EV_IMPACT;
+            out->haptic[s] = in->cap_valid && contact ? (in->cap_zone[s] == 1 ? 1.0f : in->cap_zone[s] == 2 ? 0.95f : 0.75f) : 0.95f;   /* por zona: cabeza, cuerpo, extremidad */
+            g->impact_t = 0; if (!out->event) out->event = VRG_EV_IMPACT;
         }
     }
 
@@ -272,7 +276,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
     if (c->punch) {
         int busy = !(free_hands && !in->on_wall) ? 1 : 0;
         for (int s = 0; s < 2; s++) {
-            if (!tr[s]) continue;
+            if (!tr[s] || out->knock_side == s) continue;       /* el puño que acaba de dar en la pared no es un golpe a un enemigo */
             float sp_min = c->contact_speed > 0 && c->contact_speed < c->punch_speed ? c->contact_speed : c->punch_speed;
             int near_swing = spd[s] >= (g->swing[s] ? 0.4f : 0.6f) * sp_min;
             g->swing[s] = near_swing;
@@ -285,7 +289,10 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
              * suficiente en cualquier dirección razonable (ganchos, directos, cortos), salvo recogiéndose hacia la cabeza. No exige alcance, ángulo ni distancia al enemigo. */
             int contact = 0;
             if (g->contact_t[s] > 0) g->contact_t[s] -= dt;
-            if (!grabbing && !g->disarm[s] && c->contact_speed > 0 && spd[s] >= c->contact_speed && rcos > -0.25f) {
+            if (in->cap_valid) {
+                /* cápsulas por pieza (vr_hit): el anfitrión ya barrió la esfera del puño contra las piezas de cada enemigo */
+                if (!grabbing && !g->disarm[s] && c->contact_speed > 0 && spd[s] >= c->contact_speed && rcos > -0.25f && in->cap_zone[s] > 0) { contact = 1; g->contact_t[s] = c->contact_latch_s; }
+            } else if (!grabbing && !g->disarm[s] && c->contact_speed > 0 && spd[s] >= c->contact_speed && rcos > -0.25f) {
                 /* barrido continuo: el segmento que recorre el puño entre dos VBlanks (a 4 m/s y con un fotograma perdido son 0,3 m) contra la cápsula, en pasos de <= 5 cm */
                 float rr = c->body_radius + c->fist_radius + c->contact_tol;
                 const float *a = g->prev_hand_ok[s] ? g->prev_hand[s] : in->hand[s], *b = in->hand[s];

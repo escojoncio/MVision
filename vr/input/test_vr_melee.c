@@ -237,6 +237,34 @@ int main(void) {
         } else printf("captura real: no disponible, omitida\n");
         if (fp) fclose(fp);
     }
+    /* toque sin estar pegado a la pared: la decisión de acción lanza el sonido y el ruido del toque del motor, una sola vez, y los botones siguen su curso */
+    fresh(); RAM[VRM_KNOCK_SND & 0x1FFFFF] = 55; { VrmFrame f = fr(); f.knock_side = 1; vrm_frame(&V, &ENG, &f);
+        CK(vrm_action_input(&V, &ENG, W) == 0); CK(ncalls == 1 && calls[0][0] == VRM_FN_KNOCK_SE && calls[0][1] == 55 && calls[0][2] == 1); CK(V.n_knock == 1); CK(logged("sin estado de nudillos"));
+        CK(vrm_action_input(&V, &ENG, W) == 0); CK(ncalls == 1);                    /* un toque, una llamada */
+        VrmFrame n = fr(); for (int i = 0; i < 10; i++) vrm_frame(&V, &ENG, &n);
+        CK(!logged("toque en la pared rechazado")); }
+    /* golpe a un enemigo: sin petición de toque no hay sonido de toque */
+    fresh(); enemy(0, 400, 0, 0); { VrmFrame f = fr(); f.punch_side = 0; f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 400; vrm_frame(&V, &ENG, &f); vrm_action_input(&V, &ENG, W);
+        for (int i = 0; i < ncalls; i++) CK(calls[i][0] != VRM_FN_KNOCK_SE);
+        CK(V.n_knock == 0 && V.n_punch == 1); }
+    /* cápsulas por pieza: con contacto real el golpe se centra en el punto de contacto (dentro de la caja del blanco) aunque el puño ya haya pasado de largo; sin contacto,
+     * aunque el puño esté dentro de la caja, no se registra; un contacto viejo (más de VRM_HIST VBlanks) no vale */
+    for (int cas = 0; cas < 3; cas++) {
+        fresh(); enemy(0, 1000, 0, 0);
+        VrmFrame f = fr(); f.fist_ok[0] = f.fist_closed[0] = 1; f.fist[0][0] = 950; f.contact_valid = 1;
+        if (cas) { f.contact[0] = 1; f.contact_pt[0][0] = 802; f.contact_pt[0][1] = 300; f.contact_pt[0][2] = -50; }
+        vrm_frame(&V, &ENG, &f);
+        VrmFrame n = fr(); n.contact_valid = 1; n.fist_ok[0] = n.fist_closed[0] = 1; n.fist[0][0] = 950;
+        for (int i = 0; i < (cas == 2 ? VRM_HIST + 2 : 3); i++) vrm_frame(&V, &ENG, &n);
+        n.punch_side = 0; vrm_frame(&V, &ENG, &n); n.punch_side = -1; vrm_action_input(&V, &ENG, W);
+        n.fist[0][0] = 2500; for (int i = 0; i < 4; i++) vrm_frame(&V, &ENG, &n);
+        vrm_pre_hit(&V, &ENG, W); CK(V.ctx_hit);
+        uint32_t vec = 0x80100000u; CK(vrm_move_target(&V, &ENG, W + VRM_W_TARGET, vec) == 1);
+        if (cas == 1) { CK(g16(vec) == 802 && g16(vec + 2) == 300 && g16(vec + 4) == -50); CK(!logged("no tocó a ningún enemigo")); }
+        else { CK(g16(vec + 2) == 30000); CK(logged("no tocó a ningún enemigo")); }
+        vrm_post_hit(&V, &ENG, W, 0);
+    }
+
     printf("test_vr_melee: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

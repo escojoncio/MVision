@@ -22,6 +22,7 @@
 #include "sys.h"
 #include "vr_fire.h"
 #include "vr_aa.h"
+#include "vr_hit.h"
 
 #define RAM_MASK 0x1FFFFFu
 #define A0 c->r[4]
@@ -50,12 +51,17 @@ static void with_matrix(Cpu *c, const char *orig, int kind) {
     uint32_t a0 = A0;
     if (r == VRFIRE_SUBST) { vrfire_store_mat(emu_ram, zbuf + Z_BULLET, &m); A0 = zbuf + Z_BULLET; }
     rt_orig(c, orig);
+    if (kind == 0 && r == VRFIRE_SUBST) vrhit_bullet(emu_ram, V0, NULL);     /* bala apuntada con el arma VR: cápsulas, zonas y línea de tiro (vr_hit.h) */
     vrfire_probe(kind, r, V0, &m);
     A0 = a0;     /* a0 es de quien llama (convenio o32: el llamado puede cambiarlo; se restaura por si el llamador lo reutiliza) */
 }
 
 void hle_vrfire_bullet(Cpu *c) {
-    if ((A1 & 0xFFu) != PLAYER_SIDE) { rt_orig(c, "vrfire_bullet"); return; }
+    if ((A1 & 0xFFu) != PLAYER_SIDE) {       /* bala de un enemigo: misma regla de línea de tiro contra la caja del jugador; ni su puntería ni su decisión de disparar se tocan */
+        rt_orig(c, "vrfire_bullet");
+        vrhit_bullet(emu_ram, V0, NULL);
+        return;
+    }
     with_matrix(c, "vrfire_bullet", 0);
 }
 void hle_vrfire_rmissile(Cpu *c) {

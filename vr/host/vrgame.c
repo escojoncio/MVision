@@ -15,6 +15,7 @@
 #include "vr_camera.h"
 #include "vr_aa.h"
 #include "vr_fire.h"
+#include "vr_hit.h"
 #include "vr_glove.h"
 #include "vr_grip.h"
 #include "vr_hand_skin.h"
@@ -939,7 +940,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     init_once();
     vraa_tick();
     if (drv_fn) pad = drv_fn(drv_vbl++, pad, bs);
-    pad = vrbodyg_pad(pad, bs, opt_right);     /* gestos de cuerpo (golpe, agarre, pared): añaden/retiran botones del mando del usuario */
+    pad = vrbodyg_pad(pad, bs, opt_right, ram);     /* gestos de cuerpo (golpe, agarre, pared): añaden/retiran botones del mando del usuario */
     uint64_t now = mono_ns();
     float dt = G.last_ns ? (float)((double)(now - G.last_ns) * 1e-9) : 0.02f;
     G.last_ns = now;
@@ -1241,6 +1242,11 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     }
     fi.fire = G.fire_edge && ro.fire_allowed;
     fi.fire_pose = G.fire_pose;
+    vrhit_frame();
+    if (fi.fire && map.valid) {      /* instante del gatillo: se anota a qué enemigo y zona apunta la boca ahora (el juego crea la bala ~0,4 s después y el enemigo se habrá movido) */
+        VrFireMat am;
+        if (vrfire_make_matrix(&map, &G.fire_pose, 0.0f, &am)) { float ao[3] = {(float)am.t[0], (float)am.t[1], (float)am.t[2]}, ad[3]; vrfire_mat_forward(&am, ad); vrhit_aim(ram, ao, ad); }
+    }
     fi.fire_life = gid == 5 ? 180 : 0;      /* mina: el juego la crea ~70 VBlanks después (se agacha a colocarla); la petición no debe caducar antes */
     /* Fusil en automático: el juego dispara mientras el botón está mantenido; la pose de cada bala es la boca en vivo. */
     fi.trigger_held = gid == 1 && !rifle_is_semi(st) && in.trigger[0] > 0.5f && ro.fire_allowed && st->chambered > 0;

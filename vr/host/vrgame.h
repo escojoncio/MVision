@@ -140,7 +140,7 @@ void mv_vrgame_set_hand_calibration(int32_t side, const float q[4]);   /* restau
 uint32_t mv_vrgame_calibration_serial(void);                           /* cambia cada vez que se calibra o se borra (para persistir) */
 void vrbodyg_reset(void);
 unsigned vrbodyg_event_count(int ev);                                  /* VRG_EV_* acumulados (pruebas) */
-uint16_t vrbodyg_pad(uint16_t pad, const struct BridgeState *bs, int right_handed);
+uint16_t vrbodyg_pad(uint16_t pad, const struct BridgeState *bs, int right_handed, const uint8_t *ram);
 int32_t mv_vrgame_menu_hand(void);                                     /* mano física (0 izq, 1 der) que mantiene abierta la ventana de armas/objetos del gesto del pecho; -1 ninguna */
 int vrgame_hand_raw(int side, float p[3], float *grip, float *trig, double *t_s);   /* pose del agarre (espacio usuario, m), grip (puño), gatillo y marca de tiempo (s, monótono; 0 con guion de pruebas); 1 si hay seguimiento */
 /* Modelo VR (id16 en el stage residente) del arma de id de juego dado; 0 = sin modelo VR (se queda el arma del juego). */

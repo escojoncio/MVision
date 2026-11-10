@@ -665,7 +665,324 @@ static void t_inverse(void) {
     vrfire_probe(1, 0, 0, &m); vrfire_last_missile(&ser); CHECK(ser == ser0 + 1, "inv");                 /* creación fallida (0) no cuenta */
 }
 
+/* ---------------------------------------------------------------- vr_hit: cápsulas por pieza, zonas, línea de tiro (balas del jugador y de los enemigos) y puños
+ * Mundo sintético con las estructuras del juego (tabla de blancos, cola de objetos, piezas y modelos, suelos de colisión) y un "juego falso" que reproduce el tick de la bala
+ * medido en el desensamblado (0x800771ac -> 0x8002ebd8/0x8002e7f8 -> 0x8002e208): segmento contra UNA caja por blanco con bit 0x10 y bando distinto, daño a los blancos con
+ * bit 4 que solapan la caja de 100 de la bala (modo 1: vida -= daño; modo 0: vida = 0), bandera de daño y tipo de impacto. */
+#include "vr_hit.h"
+#define HT 0x800B7660u
+#define HQ 0x80160000u
+#define HB 0x80150000u
+#define HFL 0x80102400u
+static int hs16(uint32_t a) { return r16(a); }
+static void h_target(int i, int cls, int side, int cx, int cy, int cz, int hx, int hy, int hz, int mode, int vital) {
+    uint32_t b = HT + 72u * (uint32_t)i;
+    w16(b, cls); w16(b + 2, side); w16(b + 4, 1); w16(b + 6, 0); w16(b + 8, cx); w16(b + 10, cy); w16(b + 12, cz); w16(b + 16, hx); w16(b + 18, hy); w16(b + 20, hz);
+    w16(b + 36, mode); w16(b + 38, vital); w16(b + 0x3e, -1);
+}
+static void h_mat(uint32_t a, int x, int y, int z) { for (int i = 0; i < 9; i++) w16(a + 2u * (uint32_t)i, i % 4 == 0 ? 4096 : 0); w32(a + 20, (uint32_t)x); w32(a + 24, (uint32_t)y); w32(a + 28, (uint32_t)z); }
+/* soldado sintético de 7 piezas: la cabeza es la 3 (no la 6) y la 6 es una mano levantada por encima de la cabeza; el brazo (4) cuelga a x+400, fuera de la caja de +-300 */
+static const int SP[7] = {-1, 0, 1, 2, 1, 0, 4};
+static const int SJ[7][3] = {{0, 0, 0}, {0, 0, 0}, {0, 329, 0}, {0, 74, 0}, {400, 265, 0}, {-90, -230, 0}, {0, -270, 0}};
+static const int SBX[7][6] = {{-160, -250, -150, 160, 9, 85}, {-180, 9, -170, 180, 374, 75}, {-60, -15, -40, 50, 74, 79}, {-74, -60, -79, 74, 169, 80},
+                              {-54, -250, -70, 35, 44, 50}, {-79, -705, -120, 85, 45, 79}, {-44, -104, -40, 31, 17, 50}};
+static void h_soldier(int ti, int slot, int cx, int cy, int cz, int vital) {
+    uint32_t D = 0x80130000u + 0x1000u * (uint32_t)slot, O = 0x80140000u + 0x1000u * (uint32_t)slot;
+    h_target(ti, 0xDF, 2, cx, cy, cz, 300, 1000, 300, 1, vital);
+    w32(D, 7); w32(D + 4, 7);
+    h_mat(O, cx, cy, cz); w32(O + 0x24, D); w32(O + 0x28, 0x32d); w16(O + 0x2C, 1); w16(O + 0x2E, 7);
+    for (int k = 0; k < 7; k++) {
+        uint32_t M = D + 0x20u + 0x58u * (uint32_t)k, P = O + 0x48u + 0x5Cu * (uint32_t)k;
+        for (int i = 0; i < 6; i++) w32(M + 8u + 4u * (uint32_t)i, (uint32_t)SBX[k][i]);
+        for (int i = 0; i < 3; i++) w32(M + 0x20u + 4u * (uint32_t)i, (uint32_t)SJ[k][i]);
+        w32(M + 0x2C, (uint32_t)SP[k]);
+        int p[3] = {cx, cy, cz};
+        for (int j = k; j >= 0; j = SP[j]) for (int i = 0; i < 3; i++) p[i] += SJ[j][i];
+        if (k == 6) { p[0] = cx + 400; p[1] = cy + 900; p[2] = cz; }
+        h_mat(P, p[0], p[1], p[2]); w32(P + 0x40, M);
+    }
+    int n = r16(0x800B2B7Cu + 0x56);
+    w32(HQ + 4u * (uint32_t)n, O); w16(0x800B2B7Cu + 0x56, n + 1);
+}
+static int h_nfloor;
+static void h_world(void) {
+    memset(ram, 0, sizeof ram);
+    w32(0x800ACB9Cu, 1); w32(0x800B2B7Cu + 0x58, HQ);
+    w32(0x800ACB84u, 0x80101000u); w32(0x80101000u + 0x2C, 0x80102000u); w32(0x80102000u + 8, 0x80102100u); w32(0x80102100u, 0x80102200u);
+    w16(0x80102200u + 10, 1); w32(0x80102200u + 16, 0x80102300u); w32(0x80102300u + 12, HFL); w32(0x800ACB38u, 1);
+    h_nfloor = 0;
+}
+/* suelo de colisión horizontal (cuadrilátero de 48 B: caja de 2 puntos + 4 esquinas x,z,y,h) */
+static void h_floor(int x0, int z0, int x1, int z1, int y) {
+    uint32_t f = HFL + 48u * (uint32_t)h_nfloor;
+    const int q[6][2] = {{x0, z0}, {x1, z1}, {x0, z0}, {x1, z0}, {x1, z1}, {x0, z1}};
+    for (int k = 0; k < 6; k++) { w16(f + 8u * (uint32_t)k, q[k][0]); w16(f + 8u * (uint32_t)k + 2, q[k][1]); w16(f + 8u * (uint32_t)k + 4, y); }
+    w16(0x80102300u + 4, ++h_nfloor);
+}
+static float hw_wall = -1.0f; static int hw_cam_on, hw_cam_hits; static float hw_cam_t; static uint32_t hw_cam_tg, hw_cam_last;
+static float hw_wallf(const uint8_t *r, const float o[3], const float d[3], float max) { (void)r; (void)o; (void)d; return hw_wall >= 0 && hw_wall <= max ? hw_wall : -1.0f; }
+static int hw_camf(uint8_t *r, const float o[3], const float d[3], float max, float *t, uint32_t *tg) { (void)r; (void)o; (void)d; if (!hw_cam_on || hw_cam_t > max) return 0; *t = hw_cam_t; *tg = hw_cam_tg; return 1; }
+static void hw_camhit(uint8_t *r, uint32_t tg, const int16_t pt[3]) { (void)r; (void)pt; hw_cam_hits++; hw_cam_last = tg; }
+static void h_reg(void) { VrHitWorld w = {1000.0f, hw_wallf, hw_camf, hw_camhit}; vrhit_set_world(&w); hw_wall = -1.0f; hw_cam_on = 0; hw_cam_hits = 0; }
+/* bala como la deja el creador del juego: origen, velocidad 5000 por tick, alcance, final del trazado (pared del juego a gwall, o el alcance) y su blanco de daño 64 */
+static void h_bullet(int side, const float o[3], const float to[3], int range, int gwall) {
+    double d[3] = {to[0] - o[0], to[1] - o[1], to[2] - o[2]}, l = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    int lim = gwall >= 0 ? gwall : range;
+    memset(ram + (HB & 0x1FFFFF), 0, 0x170);
+    for (int i = 0; i < 3; i++) {
+        double e = o[i] + d[i] / l * lim;
+        w16(HB + 0x110 + 2u * (uint32_t)i, (int)lrint(o[i])); w16(HB + 0x120 + 2u * (uint32_t)i, (int)lrint(d[i] / l * 5000.0));
+        w16(HB + 0x118 + 2u * (uint32_t)i, (int)(e > 32767 ? 32767 : e < -32768 ? -32768 : lrint(e)));
+    }
+    w32(HB + 0x138, (uint32_t)lim); w32(HB + 0x140, gwall >= 0); w32(HB + 0x148, (uint32_t)side); w32(HB + 0x154, 64); w32(HB + 0x158, (uint32_t)range); w32(HB + 0x15C, 5000);
+    w16(HB + 0x44, 4); w16(HB + 0x44 + 2, side); w16(HB + 0x44 + 4, 1); w16(HB + 0x44 + 16, 100); w16(HB + 0x44 + 18, 100); w16(HB + 0x44 + 20, 100); w16(HB + 0x44 + 38, 64); w16(HB + 0x44 + 62, 1);
+}
+static int g_axis(const int f[3], const int t[3], const int c[3], const int h[3], int ax, int b1, int b2, int out[3]) {
+    int t1 = t[ax] - f[ax]; if (!t1) return 0;
+    int t0;
+    if (c[ax] < f[ax]) { t0 = c[ax] + h[ax]; if (f[ax] < t0) t0 = f[ax]; } else { t0 = c[ax] - h[ax]; if (t0 < f[ax]) t0 = f[ax]; }
+    int t5 = t0 - f[ax];
+    int p1 = f[b1] + (t[b1] - f[b1]) * t5 / t1; if (p1 < c[b1] - h[b1] || p1 > c[b1] + h[b1]) return 0;
+    int p2 = f[b2] + (t[b2] - f[b2]) * t5 / t1; if (p2 < c[b2] - h[b2] || p2 > c[b2] + h[b2]) return 0;
+    out[ax] = t0; out[b1] = p1; out[b2] = p2; return 1;
+}
+/* un tick de la bala del juego. Devuelve el índice del blanco sellado (-1 ninguno) */
+static int h_tick(void) {
+    int f[3], t[3], side = (int)r32(HB + 0x148), trav = (int)r32(HB + 0x13C) + (int)r32(HB + 0x15C), best = -1;
+    w32(HB + 0x13C, (uint32_t)trav);
+    for (int i = 0; i < 3; i++) { f[i] = hs16(HB + 0x110 + 2u * (uint32_t)i); t[i] = (int)r32(HB + 0x138) < trav ? hs16(HB + 0x118 + 2u * (uint32_t)i) : f[i] + hs16(HB + 0x120 + 2u * (uint32_t)i); }
+    for (int i = 0; i < 16; i++) {
+        uint32_t b = HT + 72u * (uint32_t)i; int c[3], h[3], o[3], ov = 1;
+        if (hs16(b + 2) == side || !(hs16(b) & 0x10) || !(hs16(b + 4) & (int)r32(0x800ACB9Cu))) continue;
+        for (int k = 0; k < 3; k++) { c[k] = hs16(b + 8 + 2u * (uint32_t)k); h[k] = hs16(b + 16 + 2u * (uint32_t)k); if (abs((f[k] + t[k]) / 2 - c[k]) > abs(f[k] - t[k]) / 2 + h[k]) ov = 0; }
+        if (!ov) continue;
+        if (g_axis(f, t, c, h, 0, 1, 2, o) || g_axis(f, t, c, h, 1, 2, 0, o) || g_axis(f, t, c, h, 2, 0, 1, o)) { memcpy(t, o, sizeof t); best = i; }
+    }
+    if (best < 0) { for (int i = 0; i < 3; i++) w16(HB + 0x110 + 2u * (uint32_t)i, t[i]); return -1; }
+    int dmg = hs16(HB + 0x44 + 38);
+    for (int i = 0; i < 16; i++) {
+        uint32_t b = HT + 72u * (uint32_t)i; int ov = 1;
+        if (!(hs16(b) & 4) || (hs16(b + 2) & side)) continue;
+        for (int k = 0; k < 3; k++) if (abs(t[k] - hs16(b + 8 + 2u * (uint32_t)k)) > 100 + hs16(b + 16 + 2u * (uint32_t)k)) ov = 0;
+        if (!ov) continue;
+        w16(b + 6, hs16(b + 6) | 4); w16(b + 0x3e, hs16(HB + 0x44 + 62));
+        int m = hs16(b + 36) & 3; if (m == 1) w16(b + 38, hs16(b + 38) - dmg); else if (m == 0) w16(b + 38, 0);
+        dmg = 0;
+    }
+    return best;
+}
+static int h_shoot(int side, float ox, float oy, float oz, float tx, float ty, float tz, int range, int gwall, VrHitShot *sh) {
+    float o[3] = {ox, oy, oz}, to[3] = {tx, ty, tz};
+    memset(sh, 0, sizeof *sh);
+    h_bullet(side, o, to, range, gwall);
+    vrhit_bullet(ram, HB, sh);
+    return h_tick();
+}
+static int h_vital(int i) { return hs16(HT + 72u * (uint32_t)i + 38); }
+
+static void t_hit_zones(void) {
+    VrHitShot sh; VrHitTarget T[VRHIT_MAX_T];
+    h_world(); h_reg(); h_soldier(0, 0, 0, 1000, 5000, 128);
+    int n = vrhit_scan(ram, 1, 0x10, 1, T, VRHIT_MAX_T);
+    CHECK(n == 1 && T[0].ncap == 7 && T[0].head == 3, "soldado sintético: 7 cápsulas y cabeza = pieza hoja más alta en reposo (n=%d ncap=%d cabeza=%d)", n, n ? T[0].ncap : -1, n ? T[0].head : -1);
+    CHECK(n == 1 && T[0].cap[3].zone == VRHIT_Z_HEAD && T[0].cap[2].zone == VRHIT_Z_BODY && T[0].cap[1].zone == VRHIT_Z_BODY && T[0].cap[0].zone == VRHIT_Z_BODY && T[0].cap[4].zone == VRHIT_Z_LIMB && T[0].cap[5].zone == VRHIT_Z_LIMB && T[0].cap[6].zone == VRHIT_Z_LIMB, "zonas por pieza");
+    /* cabeza: letal de un tiro */
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == 0 && h_vital(0) <= 0, "tiro a la cabeza: sellado y letal (vida %d)", h_vital(0));
+    CHECK(sh.zone == VRHIT_Z_HEAD && sh.damage == 128 && sh.vital == 128 && sh.target == 0 && sh.action == VRHIT_ACT_SEAL, "zona cabeza, daño = vida (zona %d daño %d)", sh.zone, sh.damage);
+    /* cuerpo: 64 (dos tiros con vida 128) */
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128);
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1190, 5000, 10000, -1, &sh) == 0 && h_vital(0) == 64 && sh.zone == VRHIT_Z_BODY && sh.damage == 64, "tiro al cuerpo: 64 (vida %d zona %d)", h_vital(0), sh.zone);
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1190, 5000, 10000, -1, &sh) == 0 && h_vital(0) == 0, "segundo tiro al cuerpo: muere (vida %d)", h_vital(0));
+    /* extremidad FUERA de la caja del juego (brazo a x+390; la caja llega a +300): el juego fallaba */
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128);
+    CHECK(h_shoot(1, 390, 1162, 0, 390, 1162, 5000, 10000, -1, &sh) == 0 && h_vital(0) == 64 && sh.zone == VRHIT_Z_LIMB, "brazo fuera de la caja: impacta (sellado, vida %d zona %d)", h_vital(0), sh.zone);
+    /* dentro de la caja pero sin tocar ninguna pieza (por encima del hombro): fallo real, el juego no sella */
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128);
+    CHECK(h_shoot(1, 250, 1900, 0, 250, 1900, 5000, 10000, -1, &sh) == -1 && h_vital(0) == 128, "rayo por la caja fuera de las cápsulas: no sella (vida %d)", h_vital(0));
+    CHECK(sh.zone == VRHIT_Z_MISS && sh.action == VRHIT_ACT_VOID && sh.target == -1, "zona fallo (zona %d acción %d)", sh.zone, sh.action);
+    /* pared delante */
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128); hw_wall = 2000.0f;
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, 2000, &sh) == -1 && h_vital(0) == 128 && sh.zone == VRHIT_Z_WALL && fabsf(sh.dist - 2000.0f) < 1.0f, "pared delante: pared (zona %d dist %.0f vida %d)", sh.zone, sh.dist, h_vital(0));
+    hw_wall = -1.0f;
+    /* alcance: 13 m (el juego acababa a 10000) y más allá del alcance */
+    h_world(); h_soldier(0, 0, 8000, 1000, 13000, 128);
+    CHECK(h_shoot(1, 8000, 1300, 0, 8000, 1457, 13000, 10000, -1, &sh) == 0 && h_vital(0) <= 0 && sh.zone == VRHIT_Z_HEAD, "enemigo a 13000 unidades: impacta (vida %d)", h_vital(0));
+    h_world(); h_soldier(0, 0, 8000, 1000, 15500, 128);
+    CHECK(h_shoot(1, 8000, 1300, 0, 8000, 1190, 15500, 10000, -1, &sh) == 0 && h_vital(0) == 64, "enemigo a 15500 unidades (15 m del láser): impacta (vida %d)", h_vital(0));
+    h_world(); h_soldier(0, 0, 8000, 1000, 17500, 128);
+    CHECK(h_shoot(1, 8000, 1300, 0, 8000, 1190, 17500, 10000, -1, &sh) == -1 && h_vital(0) == 128 && sh.zone == VRHIT_Z_MISS && sh.action == VRHIT_ACT_NONE, "fuera de alcance: fallo y la bala no se toca");
+    /* registro */
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128);
+    { fflush(stderr); FILE *f = tmpfile(); int sv = dup(2); dup2(fileno(f), 2);
+      h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh);
+      fflush(stderr); dup2(sv, 2); close(sv); static char lb[1024]; rewind(f); size_t got = fread(lb, 1, sizeof lb - 1, f); lb[got] = 0; fclose(f);
+      CHECK(strstr(lb, "[impacto] blanco=0 zona=cabeza dist=4.92 m vida=128") != NULL && strstr(lb, "vida=128") != NULL, "línea [impacto]: %.200s", lb); }
+}
+static void t_hit_camera(void) {
+    VrHitShot sh;
+    h_world(); h_reg(); h_target(2, 0x14, 2, 3000, 3000, 6000, 300, 300, 300, 0, 0);
+    uint32_t b = HT + 72u * 2u; int hits = 0;
+    for (int k = 0; k < 2; k++) {
+        CHECK(h_shoot(1, 0, 1300, 0, 3000, 3000, 6000, 10000, -1, &sh) == 2 && sh.zone == VRHIT_Z_BOX && sh.action == VRHIT_ACT_SEAL, "cámara: la bala la sella (tiro %d)", k + 1);
+        if ((hs16(b + 6) & 4) && hs16(b + 0x3e) == 1) { hits++; w16(b + 6, 0); }      /* lo que recoge vr_cameras cada fotograma */
+    }
+    CHECK(hits == 2 && hw_cam_hits == 0, "cámara: 2 tiros = 2 impactos del juego (%d), sin impacto directo duplicado (%d)", hits, hw_cam_hits);
+    /* cámara a 14 m: el juego no llegaba */
+    h_world(); h_target(2, 0x14, 2, 0, 3000, 14000, 300, 300, 300, 0, 0);
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 3000, 14000, 10000, -1, &sh) == 2 && (hs16(b + 6) & 4), "cámara a 14000 unidades: sellada");
+    /* blanco de cámara sin el bit de daño: el juego la sella sin dañarla -> impacto directo (uno por tiro) */
+    h_world(); h_target(2, 0x10, 2, 3000, 3000, 6000, 300, 300, 300, 0, 0);
+    for (int k = 0; k < 2; k++) h_shoot(1, 0, 1300, 0, 3000, 3000, 6000, 10000, -1, &sh);
+    CHECK(hw_cam_hits == 2 && hw_cam_last == b, "cámara no dañable por el juego: 2 impactos directos (%d)", hw_cam_hits);
+    /* cámara que el juego no sella (sin bit 0x10): la da el rayo de cámaras del anfitrión */
+    h_world(); h_reg(); h_target(2, 0x04, 2, 3000, 3000, 6000, 300, 300, 300, 0, 0); hw_cam_on = 1; hw_cam_t = 6500.0f; hw_cam_tg = b;
+    CHECK(h_shoot(1, 0, 1300, 0, 3000, 3000, 6000, 10000, -1, &sh) == -1 && hw_cam_hits == 1 && sh.zone == VRHIT_Z_BOX, "cámara fuera de la prueba del juego: impacto directo (%d)", hw_cam_hits);
+    hw_cam_on = 0;
+}
+/* otra planta: 4 m más abajo / más arriba. Línea despejada -> impacto con su zona; suelo de colisión entre medias -> pared */
+static void t_hit_floors(void) {
+    VrHitShot sh;
+    for (int up = 0; up < 2; up++) {
+        int cy = up ? 5000 : -3000, fy = up ? 3000 : 0;
+        h_world(); h_reg(); h_soldier(0, 0, 0, cy, 9000, 128);
+        CHECK(h_shoot(1, 0, 1300, 0, 0, (float)cy + 457, 9000, 10000, -1, &sh) == 0 && h_vital(0) <= 0 && sh.zone == VRHIT_Z_HEAD, "planta %s, línea despejada: cabeza (zona %d vida %d)", up ? "superior" : "inferior", sh.zone, h_vital(0));
+        /* el trazado del propio juego dio en su colisión (suelo, puerta cerrada...) antes del blanco: pared */
+        h_world(); h_soldier(0, 0, 0, cy, 9000, 128);
+        CHECK(h_shoot(1, 0, 1300, 0, 0, (float)cy + 457, 9000, 10000, 4000, &sh) == -1 && h_vital(0) == 128 && sh.zone == VRHIT_Z_WALL, "planta %s, cortada por la colisión del juego: pared (zona %d)", up ? "superior" : "inferior", sh.zone);
+        h_world(); h_soldier(0, 0, 0, cy, 9000, 128);
+        CHECK(h_shoot(1, 0, 1300, 0, 0, (float)cy + 190, 9000, 10000, -1, &sh) == 0 && h_vital(0) == 64 && sh.zone == VRHIT_Z_BODY, "planta %s: cuerpo (zona %d)", up ? "superior" : "inferior", sh.zone);
+        h_world(); h_soldier(0, 0, 0, cy, 9000, 128); h_floor(-2000, 500, 2000, 12000, fy);
+        CHECK(h_shoot(1, 0, 1300, 0, 0, (float)cy + 457, 9000, 10000, -1, &sh) == -1 && h_vital(0) == 128 && sh.zone == VRHIT_Z_WALL, "planta %s con suelo sólido entre medias: pared (zona %d vida %d)", up ? "superior" : "inferior", sh.zone, h_vital(0));
+        /* el suelo no llega hasta la línea de tiro (hueco): despejada */
+        h_world(); h_soldier(0, 0, 0, cy, 9000, 128); h_floor(1000, 500, 4000, 12000, fy);
+        CHECK(h_shoot(1, 0, 1300, 0, 0, (float)cy + 457, 9000, 10000, -1, &sh) == 0 && sh.zone == VRHIT_Z_HEAD, "planta %s con el suelo a un lado: impacta", up ? "superior" : "inferior");
+    }
+    float o[3] = {0, 1300, 0}, d[3] = {0, -1, 0};
+    h_world(); h_floor(-500, -500, 500, 500, 0);
+    CHECK(fabsf(vrhit_floor_ray(ram, o, d, 5000.0f) - 1300.0f) < 1.0f, "rayo vertical contra el suelo");
+    CHECK(vrhit_floor_ray(ram, o, d, 1000.0f) < 0 && vrhit_floor_ray(NULL, o, d, 5000.0f) < 0, "suelo fuera de alcance / RAM nula");
+}
+/* balas enemigas contra la caja del jugador: misma regla */
+static void t_hit_enemy(void) {
+    VrHitShot sh;
+    for (int up = 0; up < 2; up++) {
+        float ey = up ? 4500.0f : -3500.0f; int fy = up ? 2500 : -1500;
+        /* 11,7 m con línea despejada: el juego la acababa a 10000 */
+        h_world(); h_reg(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256);
+        CHECK(h_shoot(2, 0, ey, 11000, 0, 500, 0, 10000, -1, &sh) == 6 && h_vital(6) == 192 && sh.side == 2 && sh.action == VRHIT_ACT_SEAL, "bala enemiga desde %s, despejada: impacta al jugador (vida %d)", up ? "arriba" : "abajo", h_vital(6));
+        /* el trazado del juego (colisión del mapa del tirador, puertas) la corta a 3000: no impacta */
+        h_world(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256);
+        CHECK(h_shoot(2, 0, ey, 8000, 0, 500, 0, 10000, 3000, &sh) == -1 && h_vital(6) == 256 && sh.zone == VRHIT_Z_WALL, "bala enemiga cortada por la colisión del juego: no impacta (vida %d)", h_vital(6));
+        /* suelo sólido entre medias: no impacta */
+        h_world(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256); h_floor(-2000, 1000, 2000, 12000, fy);
+        CHECK(h_shoot(2, 0, ey, 8000, 0, 500, 0, 10000, -1, &sh) == -1 && h_vital(6) == 256 && sh.zone == VRHIT_Z_WALL, "bala enemiga con suelo entre medias: no impacta (vida %d zona %d)", h_vital(6), sh.zone);
+        /* pared sólida entre medias */
+        h_world(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256); hw_wall = 1500.0f;
+        CHECK(h_shoot(2, 0, ey, 8000, 0, 500, 0, 10000, -1, &sh) == -1 && h_vital(6) == 256, "bala enemiga con pared entre medias: no impacta");
+        hw_wall = -1.0f;
+    }
+    /* la puntería de la IA no se toca: una bala que no cruza la caja del jugador sigue sin tocarse */
+    h_world(); h_target(6, 0x9F, 1, 0, 500, 0, 300, 500, 300, 1, 256);
+    CHECK(h_shoot(2, 0, 1000, 8000, 3000, 1000, 0, 10000, -1, &sh) == -1 && sh.action == VRHIT_ACT_NONE && h_vital(6) == 256, "bala enemiga desviada: intacta");
+    /* y las balas enemigas no sellan a otros enemigos ni usan sus cápsulas */
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128);
+    CHECK(h_shoot(2, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == -1 && h_vital(0) == 128, "bala enemiga contra enemigo: nada");
+}
+/* puntería anotada en el gatillo: el blanco se mueve durante el retardo del juego y la bala impacta en él */
+static void t_hit_aim(void) {
+    VrHitShot sh; float o[3] = {0, 1300, 0}, d[3] = {0, 157, 5000};
+    h_world(); h_reg(); h_soldier(0, 0, 0, 1000, 5000, 128);
+    vrhit_aim(ram, o, d);
+    for (int i = 0; i < 20; i++) vrhit_frame();
+    h_world(); h_soldier(0, 0, 700, 1000, 5200, 128);                 /* 0,7 m a un lado al crearse la bala */
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == 0 && h_vital(0) <= 0 && sh.zone == VRHIT_Z_HEAD, "blanco movido tras el gatillo: cabeza (zona %d vida %d)", sh.zone, h_vital(0));
+    h_world(); h_soldier(0, 0, 700, 1000, 5200, 128);
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == -1 && h_vital(0) == 128, "la puntería se consume con su bala");
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128); vrhit_aim(ram, o, d);
+    for (int i = 0; i < VRHIT_AIM_LIFE + 5; i++) vrhit_frame();
+    h_world(); h_soldier(0, 0, 700, 1000, 5200, 128);
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, -1, &sh) == -1, "puntería caducada: no vale");
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128); vrhit_aim(ram, o, d);
+    h_world(); h_soldier(0, 0, 700, 1000, 5200, 128);
+    CHECK(h_shoot(1, 300, 1300, 0, 300, 1457, 5000, 10000, -1, &sh) == -1, "otro rayo no usa la puntería anotada");
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128); vrhit_aim(ram, o, d);
+    h_world(); h_soldier(0, 0, 700, 1000, 5200, 128);
+    CHECK(h_shoot(1, 0, 1300, 0, 0, 1457, 5000, 10000, 2500, &sh) == -1 && h_vital(0) == 128, "puntería anotada pero el trazado del juego corta el rayo antes (puerta): no impacta");
+}
+/* puños: esfera de 0,12 m barrida contra las cápsulas */
+static void t_hit_fist(void) {
+    VrHitTarget T[VRHIT_MAX_T]; int z = 0; float pt[3], q[3];
+    h_world(); h_soldier(0, 0, 0, 1000, 5000, 128);
+    int n = vrhit_scan(ram, 1, 0x01, 1, T, VRHIT_MAX_T);
+    float a[3] = {0, 1457, 4500}, b[3] = {0, 1457, 4950};
+    CHECK(vrhit_sweep(T, n, a, b, 126.0f, &z, pt) == 0 && z == VRHIT_Z_HEAD && pt[2] > 4780 && pt[2] < 4800, "puño a la cabeza: contacto en la superficie (zona %d z %.0f)", z, pt[2]);
+    float a2[3] = {0, 1190, 4500}, b2[3] = {0, 1190, 4900};
+    CHECK(vrhit_sweep(T, n, a2, b2, 126.0f, &z, pt) == 0 && z == VRHIT_Z_BODY, "puño al cuerpo (zona %d)", z);
+    float a3[3] = {100, 1800, 4500}, b3[3] = {100, 1800, 5500};
+    CHECK(vrhit_sweep(T, n, a3, b3, 126.0f, &z, pt) == -1, "puño por el aire dentro de la caja: sin contacto");
+    float a4[3] = {0, 1457, 4500}, b4[3] = {0, 1457, 4600};
+    CHECK(vrhit_sweep(T, n, a4, b4, 126.0f, &z, pt) == -1, "puño que no llega: sin contacto");
+    float far[3] = {900, 1162, 4990};
+    vrhit_clamp_box(&T[0], far, q);
+    CHECK(q[0] <= 298.0f && q[0] >= 290.0f && q[1] == 1162.0f && q[2] == 4990.0f, "contacto fuera de la caja proyectado dentro (%.0f %.0f %.0f)", q[0], q[1], q[2]);
+    CHECK(vrhit_sweep(T, 0, a, b, 126.0f, &z, pt) == -1 && vrhit_scan(NULL, 1, 1, 1, T, VRHIT_MAX_T) == 0, "sin blancos / RAM nula");
+}
+/* RAM real (volcados locales, nunca en el repositorio; MV_DUMPS=<carpeta>, por defecto la de trabajo; sin ellos se omite): cada soldado tiene sus 16 cápsulas, la cabeza
+ * sale la pieza 6 por la regla (no por índice fijo) y los rayos hacia cada pieza dan la zona de esa pieza */
+static void t_hit_real(void) {
+    static const char *nm[] = {"d0008_20261103-001918_stage", "d0009_20261103-002117_stage"};
+    const char *dir = getenv("MV_DUMPS"); if (!dir) dir = "/home/claude/work/adj24/Dumps";
+    for (int k = 0; k < 2; k++) {
+        char p[512]; snprintf(p, sizeof p, "%s/%s/ram.bin", dir, nm[k]);
+        FILE *f = fopen(p, "rb");
+        if (!f) { printf("t_hit_real: sin %s (omitido)\n", p); continue; }
+        size_t got = fread(ram, 1, sizeof ram, f); fclose(f);
+        CHECK(got == sizeof ram, "volcado completo");
+        VrHitTarget T[VRHIT_MAX_T]; int n = vrhit_scan(ram, 1, 0x10, 1, T, VRHIT_MAX_T), sold = 0, cams = 0, rays = 0;
+        for (int i = 0; i < n; i++) {
+            if (T[i].cls == 0x14) { cams++; CHECK(T[i].ncap == 0, "la cámara no tiene cápsulas"); continue; }
+            if (T[i].cls != 0xDF) continue;
+            sold++;
+            CHECK(T[i].ncap == 16 && T[i].head == 6, "%s soldado %d: 16 cápsulas, cabeza = pieza %d", nm[k], T[i].index, T[i].head);
+            int nz[8] = {0};
+            for (int c = 0; c < T[i].ncap; c++) {
+                const VrHitCap *q = &T[i].cap[c]; nz[q->zone]++;
+                float mid[3] = {(q->a[0] + q->b[0]) / 2, (q->a[1] + q->b[1]) / 2, (q->a[2] + q->b[2]) / 2};
+                CHECK(q->r >= 30.0f && q->r <= 200.0f && fabsf(mid[0] - T[i].c[0]) < 1300.0f && fabsf(mid[1] - T[i].c[1]) < 1300.0f, "cápsula %d razonable (r %.0f)", c, q->r);
+                /* 6 rayos desde 3 m hacia el centro de la cápsula: todos dan en ESTE soldado no más lejos que la pieza (ni antes que el cuerpo entero, 1,9 m de alto), y alguno da la zona de la pieza */
+                int same = 0;
+                for (int dd = 0; dd < 6; dd++) {
+                    float dir3[3] = {dd == 0 ? 1.0f : dd == 1 ? -1.0f : 0.0f, dd == 4 ? 1.0f : dd == 5 ? -1.0f : 0.0f, dd == 2 ? 1.0f : dd == 3 ? -1.0f : 0.0f};
+                    float o[3] = {mid[0] - 3000 * dir3[0], mid[1] - 3000 * dir3[1], mid[2] - 3000 * dir3[2]}, dist = 0; int z = 0;
+                    int hit = vrhit_ray(&T[i], 1, o, dir3, 6000.0f, &dist, &z); rays++;
+                    CHECK(hit == 0 && dist <= 3000.0f + 1.0f && dist > 3000.0f - 1900.0f, "rayo %d a la pieza %d: impacta (%d, %.0f)", dd, c, hit, dist);
+                    if (z == q->zone) same++;
+                }
+                CHECK(same >= 1, "pieza %d: algún rayo da su zona (%s)", c, vrhit_zone_name(q->zone));
+            }
+            CHECK(nz[VRHIT_Z_HEAD] == 1 && nz[VRHIT_Z_BODY] == 3 && nz[VRHIT_Z_LIMB] == 12, "zonas: 1 cabeza, 3 cuerpo, 12 extremidad (%d %d %d)", nz[VRHIT_Z_HEAD], nz[VRHIT_Z_BODY], nz[VRHIT_Z_LIMB]);
+            /* desde arriba y por los 4 lados a la altura de la cabeza: cabeza */
+            const VrHitCap *hc = &T[i].cap[T[i].head];
+            float hm[3] = {(hc->a[0] + hc->b[0]) / 2, (hc->a[1] + hc->b[1]) / 2, (hc->a[2] + hc->b[2]) / 2};
+            static const float dirs[5][3] = {{0, -1, 0}, {1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}};
+            for (int dd = 0; dd < 5; dd++) {
+                float o[3] = {hm[0] - 2000 * dirs[dd][0], hm[1] - 2000 * dirs[dd][1], hm[2] - 2000 * dirs[dd][2]}, dist; int z = 0;
+                CHECK(vrhit_ray(&T[i], 1, o, dirs[dd], 4000.0f, &dist, &z) == 0 && z == VRHIT_Z_HEAD, "rayo %d a la cabeza: zona %s", dd, vrhit_zone_name(z));
+            }
+            /* la cabeza es la cápsula cuyo centro queda más alto entre cabeza y cuerpo, y por encima de la raíz */
+            CHECK(hm[1] > T[i].c[1] + 300.0f, "cabeza por encima de la raíz (%.0f / %.0f)", hm[1], T[i].c[1]);
+            /* a la altura de las espinillas, fuera de la caja del juego por abajo (la caja empieza en raíz-1000): extremidad */
+            const VrHitCap *sc = &T[i].cap[11];
+            float sm[3] = {(sc->a[0] + sc->b[0]) / 2, (sc->a[1] + sc->b[1]) / 2, (sc->a[2] + sc->b[2]) / 2}, o[3] = {sm[0], sm[1], sm[2] - 2500}, dz[3] = {0, 0, 1}, dist; int z = 0;
+            CHECK(vrhit_ray(&T[i], 1, o, dz, 5000.0f, &dist, &z) == 0 && z == VRHIT_Z_LIMB, "espinilla: extremidad (%s)", vrhit_zone_name(z));
+        }
+        CHECK(sold == 2 && cams == 1, "%s: 2 soldados y 1 cámara en el mapa activo (%d, %d)", nm[k], sold, cams);
+        printf("t_hit_real: %s soldados=%d camaras=%d rayos=%d\n", nm[k], sold, cams, rays);
+    }
+}
+
 int main(void) {
+    t_hit_zones(); t_hit_camera(); t_hit_floors(); t_hit_enemy(); t_hit_aim(); t_hit_fist(); t_hit_real();
     t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
     printf("test_fire: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
