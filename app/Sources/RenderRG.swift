@@ -961,11 +961,11 @@ final class RGRenderer {
     /// desfase y un fotograma erróneo en cada corte de plano). No dependen de la cabeza.
     struct StereoRequest: Equatable {
         var ipd: Float
-        var convergence: Float
         var tanX: Float
         var tanY: Float
         var width: Int
         var height: Int
+        var distance: Float = 2.5   // distancia del usuario a la pantalla (m): límite de divergencia de ns_cinema_stereo
     }
     var stereoRequest: StereoRequest? {
         didSet {
@@ -1008,13 +1008,17 @@ final class RGRenderer {
     /// imagen dibujada en las texturas (si divergen o no suben, la pantalla está congelada), cámara del juego usada (posición en el mundo VR y rumbo) y campo de visión horizontal de la ventana del motor.
     func cine3dDiag() -> String {
         var cur: UInt32 = 0, camH: Float = 0, cgv = false
+        var st = NsCinemaStereo()
 #if !MV_BENCH || MV_BENCH_NATIVE
-        if let n = native { cur = n.sceneSeq; camH = n.camH; cgv = n.cinemaGameView != nil }
+        if let n = native {
+            cur = n.sceneSeq; camH = n.camH; cgv = n.cinemaGameView != nil
+            if let r = stereoRequest, camH > 8 { _ = ns_cinema_stereo(r.ipd, n.cineNear, n.cineSubject, 160 / camH, r.tanX, r.distance, &st) }
+        }
 #endif
         let p = gameView.columns.3, f = gameView.columns.2
         let yaw = atan2(f.x, f.z) * 180 / Float.pi
         let fov = camH > 8 ? 2 * atan(160 / camH) * 180 / Float.pi : 0
-        return "seqNativo=\(cur) seqEstereo=\(stereoSeq) estereoDibujado=\(stereoRendered) stereoImage=\(stereoImage == nil ? "nil" : "ok") engineView=\(engineView) cinemaGameView=\(cgv) drawWorld=\(drawWorld) drawEyes=\(drawEyes) pasada=[\(stereoPassDiag)] camara=(\(String(format: "%.2f %.2f %.2f", p.x, p.y, p.z))) rumbo=\(Int(yaw.rounded()))gr fov=\(Int(fov.rounded()))gr"
+        return "seqNativo=\(cur) seqEstereo=\(stereoSeq) estereoDibujado=\(stereoRendered) stereoImage=\(stereoImage == nil ? "nil" : "ok") engineView=\(engineView) cinemaGameView=\(cgv) drawWorld=\(drawWorld) drawEyes=\(drawEyes) pasada=[\(stereoPassDiag)] camara=(\(String(format: "%.2f %.2f %.2f", p.x, p.y, p.z))) rumbo=\(Int(yaw.rounded()))gr fov=\(Int(fov.rounded()))gr b=\(String(format: "%.1f", st.b * 1000))mm C=\(String(format: "%.2f", st.conv))m paralaje=\(String(format: "%+.2f/%+.2f", st.par_max, st.par_min))gr"
     }
     /// Los valores de `stereoImage` ya son lineales (destino de coma flotante).
     var stereoStoredLinear: Bool { colorFormat == .rgba16Float }
@@ -1103,11 +1107,13 @@ final class RGRenderer {
     private func stereoCamera(_ e: Int, _ r: StereoRequest) -> (view: simd_float4x4, tangents: SIMD4<Float>)? {
         var tx = r.tanX, ty = r.tanY
         var sh = SIMD4<Float>(0, 0, 0, 0)
+        var zn: Float = 0, zs: Float = 0
 #if !MV_BENCH || MV_BENCH_NATIVE
         if !gpuMode, let n = native, n.camH > 8 {
             tx = 160 / n.camH; ty = 120 / n.camH
             let dx = (n.camOfx - 160) / n.camH, dy = (n.camOfy - 120) / n.camH
             sh = SIMD4<Float>(dx, -dx, dy, -dy)
+            zn = n.cineNear; zs = n.cineSubject
         }
 #endif
         if gpuMode, let w = stereoWindow {
@@ -1116,7 +1122,10 @@ final class RGRenderer {
             let dx = 0.5 * (w.x - w.y), dy = 0.5 * (w.z - w.w)
             sh = SIMD4<Float>(dx, -dx, dy, -dy)
         }
-        guard let cam = XRStereo.eye(gameView: gameView, eye: e, ipd: r.ipd, conv: r.convergence, tanX: tx, tanY: ty) else { return nil }
+        // Ventana estéreo: convergencia en el sujeto de la escena y separación acotada por el paralaje (ns_cinema_stereo), no IPD real + convergencia fija.
+        var st = NsCinemaStereo()
+        guard ns_cinema_stereo(r.ipd, zn, zs, tx, r.tanX, r.distance, &st) != 0,
+              let cam = XRStereo.eye(gameView: gameView, eye: e, ipd: st.b, conv: st.conv, tanX: tx, tanY: ty) else { return nil }
         let t = cam.tangents + sh
         guard t.x > 0.01, t.y > 0.01, t.z > 0.01, t.w > 0.01 else { return nil }
         return (cam.view, t)

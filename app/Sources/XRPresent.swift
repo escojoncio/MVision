@@ -874,7 +874,7 @@ final class XRPresenter {
             let cv = mono ? XRCinemaLayout.curve(base: cfg.curve, legible: leg) : cfg.curve
             let tanX = max(0.2, W / (2 * D)), tanY = tanX * 0.75      // campo de visión = ángulo que la pantalla ocupa desde el usuario (escala real)
             do {
-                r.stereo = RGRenderer.StereoRequest(ipd: mono ? 0 : ipd, convergence: XRStereo.convergence, tanX: tanX, tanY: tanY, width: Self.stereoW, height: Self.stereoH)
+                r.stereo = RGRenderer.StereoRequest(ipd: mono ? 0 : ipd, tanX: tanX, tanY: tanY, width: Self.stereoW, height: Self.stereoH, distance: D)
                 let model = screenModel(D)
                 var it = XRDrawItem(kind: .screen3d, texture: nil)
                 it.model = model

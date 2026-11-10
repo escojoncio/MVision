@@ -11,6 +11,11 @@
 #include "vr_hand_pose.h"
 
 static int checks, fails;
+/* contenido de las caras de la palma y del resto (dedos, pulgar, costados) de las manos de las manoplas sintéticas, registrado ANTES de texturizar el dorso (ver test_back_texture) */
+#define PALM_HASH_R 0xe43147418a7c7e61ull
+#define PALM_HASH_L 0x28f6e3fc35fa4aa3ull
+#define REST_HASH_R 0x70446d0fdf6f804aull
+#define REST_HASH_L 0x9df08746a1093e02ull
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("FALLO %s:%d: %s ", __FILE__, __LINE__, #c); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
 /* ---- manopla sintética: caja x in [-30,30], y in [-125,20], z in [-35,35]; palma a +X*side; cada cara con su texid y su rectángulo ---- */
@@ -267,17 +272,18 @@ static void test_apply(void) {
             }
         }
         CHECK(tex_ok > 0 && flat == 0 && in_rect, "texturas de la manopla (%d, planas %d, en el rectángulo %d)", tex_ok, flat, in_rect);
-        /* estilo: la palma (muñeca y metacarpos) con la textura de la palma de la manopla (texid 1) proyectada; el resto de un solo texel (el de los dedos, texid 4) */
-        int palm_f = 0, plain_f = 0, plain_bad = 0;
+        /* estilo: la palma (muñeca y metacarpos) con la textura de la palma de la manopla (texid 1) proyectada y el dorso con la del dorso (texid 2; ver test_back_texture); el resto de un solo texel (el de los dedos, texid 4) */
+        int palm_f = 0, back_f = 0, plain_f = 0, plain_bad = 0;
         for (uint32_t k = 1; k < NP; k++) {
             const NsMesh *pm = ns_store_get(w.st, s->piece[ir->first_piece + k].mesh_id);
             for (uint32_t f = 0; pm && f < pm->n_faces; f++) {
                 const NsFace *F = &pm->faces[f];
                 if (F->texid == 1) palm_f++;
+                else if (F->texid == 2) back_f++;
                 else { plain_f++; if (F->texid != 4 || F->u[0] != F->u[1] || F->u[1] != F->u[2] || F->t[0] != F->t[1] || F->t[1] != F->t[2]) plain_bad++; }
             }
         }
-        CHECK(palm_f > 50 && plain_f > palm_f && plain_bad == 0, "palma texturizada %d caras, resto de un color %d (mal %d)", palm_f, plain_f, plain_bad);
+        CHECK(palm_f > 50 && back_f > 50 && plain_f > palm_f + back_f && plain_bad == 0, "palma texturizada %d caras, dorso %d, resto de un color %d (mal %d)", palm_f, back_f, plain_f, plain_bad);
     }
     /* determinista: otra escena igual da los mismos ids y matrices */
     World w2;
@@ -661,6 +667,122 @@ static void test_seam_details(void) {
     world_free(&w);
 }
 
+/* ---- textura del dorso: la cara dorsal desde la muñeca hasta la base de los dedos lleva la textura del dorso de la manopla (con su recuadro gris), como la palma; el resto no cambia ---- */
+static int hand_faces(World *w, uint32_t key, NsFace out[VRHA_NT]) {   /* caras de la mano en el orden de vrha_tri; 0 si falta algo */
+    const NsInstance *hi = NULL;
+    for (uint32_t i = 0; i < w->sc.n_inst; i++) if (w->sc.inst[i].key == key) hi = &w->sc.inst[i];
+    if (!hi || hi->n_pieces != NS_HAND_PIECES) return 0;
+    for (int p = 0; p < VRHA_NP; p++) {
+        const NsMesh *m = ns_store_get(w->st, w->sc.piece[hi->first_piece + 2 + (uint32_t)p].mesh_id);
+        if (!m || m->n_faces != vrha_piece[p].nt) return 0;
+        memcpy(&out[vrha_piece[p].t0], m->faces, vrha_piece[p].nt * sizeof(NsFace));
+    }
+    return 1;
+}
+static int tri_zone(int p, int t) {   /* 0 = palma (muñeca y metacarpos), 1 = dorso (muñeca y metacarpos), 2 = resto (dedos, pulgar, costados) */
+    float wj[VRHA_NJ] = {0};
+    for (int k = 0; k < 3; k++) for (int q = 0; q < 4; q++) wj[vrha_joint[vrha_piece[p].v0 + vrha_tri[t][k]][q]] += vrha_weight[vrha_piece[p].v0 + vrha_tri[t][k]][q];
+    int d = 0;
+    for (int j = 1; j < VRHA_NJ; j++) if (wj[j] > wj[d]) d = j;
+    if (!(d == 0 || (d >= VRHS_INDEX_MC && (d - VRHS_INDEX_MC) % 5 == 0))) return 2;
+    return vrha_role[t] == VRHA_ROLE_PALM ? 0 : vrha_role[t] == VRHA_ROLE_BACK ? 1 : 2;
+}
+static uint64_t zone_hash(const NsFace *f, int zone) {   /* contenido de las caras de una zona */
+    uint64_t h = NS_HASH64_INIT;
+    for (int p = 0; p < VRHA_NP; p++) for (int t = vrha_piece[p].t0; t < vrha_piece[p].t0 + vrha_piece[p].nt; t++) {
+        if (tri_zone(p, t) != zone) continue;
+        h = ns_hash64(h, f[t].v, 4); h = ns_hash64(h, f[t].n, 4); h = ns_hash64(h, f[t].u, 4); h = ns_hash64(h, f[t].t, 4);
+        h = ns_hash64(h, &f[t].tpage, 2); h = ns_hash64(h, &f[t].clut, 2); h = ns_hash64(h, &f[t].texid, 2); h = ns_hash64(h, &f[t].flags, 1);
+    }
+    return h;
+}
+static int apply_gloves(World *w, Glove *gr, Glove *gl) {
+    ns_hand_reset();
+    ns_store_put(w->st, &gr->m); ns_store_put(w->st, &gl->m);
+    w->sc.n_inst = 2; w->sc.n_piece = 17;
+    w->sc.piece[1 + NS_PART_HAND_R].flags = 0; w->sc.piece[1 + NS_PART_HAND_L].flags = 0;
+    w->sc.piece[1 + NS_PART_HAND_R].mesh_id = gr->m.id; w->sc.piece[1 + NS_PART_HAND_L].mesh_id = gl->m.id;
+    NsHandIn in; memset(&in, 0, sizeof in);
+    in.enabled = 1; in.driven[0] = in.driven[1] = 1; in.item_pose[0] = in.item_pose[1] = HP_RELAX;
+    return ns_hand_apply(&w->sc, w->st, &w->map, &in);
+}
+/* manopla con las cuatro esquinas del dorso (cara 1) en texels distintos; `rot` gira el orden de sus vértices (misma geometría, mismo sentido, mismos texels por vértice) */
+static void back_glove(Glove *g, int side, int rot, uint64_t salt) {
+    make_glove(g, side, 1, 0);
+    static const uint8_t bu[4] = {72, 120, 110, 80}, bt[4] = {8, 12, 56, 50};
+    NsFace f = g->f[1];
+    for (int k = 0; k < 4; k++) { f.u[k] = bu[k]; f.t[k] = bt[k]; }
+    for (int k = 0; k < 4; k++) { const int s = (k + rot) & 3; g->f[1].v[k] = f.v[s]; g->f[1].n[k] = f.n[s]; g->f[1].u[k] = f.u[s]; g->f[1].t[k] = f.t[s]; }
+    g->m.id = ns_mesh_content_hash(&g->m) ^ salt;
+}
+static void test_back_texture(void) {
+    static NsFace fr[VRHA_NT], fl[VRHA_NT], f2[VRHA_NT];
+    /* manoplas de siempre: palma, dedos, pulgar y costados idénticos a los de antes de texturizar el dorso (contenido registrado con la versión anterior) */
+    World w;
+    CHECK(world_init(&w, 8, 64, 1), "mundo");
+    CHECK(apply_gloves(&w, &w.gr, &w.gl) == 2 && hand_faces(&w, NS_HAND_KEY_R, fr) && hand_faces(&w, NS_HAND_KEY_L, fl), "manos");
+    CHECK(zone_hash(fr, 0) == PALM_HASH_R && zone_hash(fl, 0) == PALM_HASH_L, "palma sin cambios: %llx %llx", (unsigned long long)zone_hash(fr, 0), (unsigned long long)zone_hash(fl, 0));
+    CHECK(zone_hash(fr, 2) == REST_HASH_R && zone_hash(fl, 2) == REST_HASH_L, "dedos, pulgar y costados sin cambios: %llx %llx", (unsigned long long)zone_hash(fr, 2), (unsigned long long)zone_hash(fl, 2));
+    world_free(&w);
+    for (int side = 1; side >= -1; side -= 2) {
+        World w1;
+        CHECK(world_init(&w1, 8, 64, 1), "mundo");
+        Glove gr, gl;
+        back_glove(&gr, 1, 0, 0x3100); back_glove(&gl, -1, 0, 0x3200);
+        NsFace *f = side > 0 ? fr : fl;
+        const Glove *g = side > 0 ? &gr : &gl;
+        CHECK(apply_gloves(&w1, &gr, &gl) == 2 && hand_faces(&w1, side > 0 ? NS_HAND_KEY_R : NS_HAND_KEY_L, f), "manos con dorso");
+        /* caja del dorso (reposo del asset: y hacia la muñeca, z hacia el pulgar; el espejo de la izquierda no las cambia) */
+        float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
+        int nback = 0;
+        for (int p = 0; p < VRHA_NP; p++) for (int t = vrha_piece[p].t0; t < vrha_piece[p].t0 + vrha_piece[p].nt; t++) {
+            if (tri_zone(p, t) != 1) continue;
+            nback++;
+            for (int k = 0; k < 3; k++) for (int a = 0; a < 2; a++) { const float v = vrha_pos[vrha_piece[p].v0 + vrha_tri[t][k]][1 + a]; if (v < lo[a]) lo[a] = v; if (v > hi[a]) hi[a] = v; }
+        }
+        CHECK(nback > 50, "lado %d: triángulos del dorso %d", side, nback);
+        /* esquinas de la cara dorsal de la manopla por su posición: [z alto][y alto] */
+        const NsFace *gb = &g->f[1];
+        float cu[2][2], ct[2][2];
+        for (int k = 0; k < 4; k++) { const NsVert *v = &g->v[gb->v[k]]; cu[v->z > 0][v->y > -50] = gb->u[k]; ct[v->z > 0][v->y > -50] = gb->t[k]; }
+        int bad = 0, in_rect = 1, varied = 0;
+        float worst = 0;
+        for (int p = 0; p < VRHA_NP; p++) for (int t = vrha_piece[p].t0; t < vrha_piece[p].t0 + vrha_piece[p].nt; t++) {
+            if (tri_zone(p, t) != 1) continue;
+            const NsFace *F = &f[t];
+            if (F->texid != 2 || F->tpage != 0x001A || F->clut != 0x7C20) { bad++; continue; }
+            if (F->u[0] != F->u[1] || F->u[1] != F->u[2] || F->t[0] != F->t[1] || F->t[1] != F->t[2]) varied++;
+            for (int q = 0; q < 4; q++) {
+                if (F->u[q] < 72 || F->u[q] > 120 || F->t[q] < 8 || F->t[q] > 56) in_rect = 0;
+                const float *v = vrha_pos[vrha_piece[p].v0 + F->v[q]];
+                const float sv = 0.04f + 0.92f * (v[1] - lo[0]) / (hi[0] - lo[0]), sz = 0.04f + 0.92f * (v[2] - lo[1]) / (hi[1] - lo[1]);
+                const float eu = (1 - sz) * ((1 - sv) * cu[0][0] + sv * cu[0][1]) + sz * ((1 - sv) * cu[1][0] + sv * cu[1][1]);
+                const float et = (1 - sz) * ((1 - sv) * ct[0][0] + sv * ct[0][1]) + sz * ((1 - sv) * ct[1][0] + sv * ct[1][1]);
+                worst = fmaxf(worst, fmaxf(fabsf(eu - F->u[q]), fabsf(et - F->t[q])));
+            }
+        }
+        CHECK(bad == 0 && in_rect && varied > nback / 2, "lado %d: dorso con la textura del dorso de la manopla dentro de su rectángulo (mal %d, en rectángulo %d, proyectadas %d de %d)", side, bad, in_rect, varied, nback);
+        CHECK(worst <= 1.01f, "lado %d: cada vértice del dorso toma el texel que la manopla tiene en su posición (peor %.2f texels)", side, worst);
+        /* el orden de los vértices de la cara de la manopla no influye */
+        for (int rot = 1; rot < 4; rot++) {
+            Glove g2r, g2l;
+            back_glove(&g2r, 1, rot, 0x4100u + (uint64_t)rot); back_glove(&g2l, -1, rot, 0x4200u + (uint64_t)rot);
+            int same = apply_gloves(&w1, &g2r, &g2l) == 2 && hand_faces(&w1, side > 0 ? NS_HAND_KEY_R : NS_HAND_KEY_L, f2);
+            for (int t = 0; same && t < VRHA_NT; t++) same = !memcmp(f[t].u, f2[t].u, 4) && !memcmp(f[t].t, f2[t].t, 4) && f[t].texid == f2[t].texid;
+            CHECK(same, "lado %d: mismo resultado con la cara dorsal girada %d", side, rot);
+        }
+        /* sin cara dorsal con textura propia: el dorso sigue de un solo color (no se le presta la palma) */
+        Glove gp, gq;
+        make_glove(&gp, 1, 1, 0); gp.f[1].texid = 0; gp.m.id = ns_mesh_content_hash(&gp.m) ^ 0x5100;
+        make_glove(&gq, -1, 1, 0); gq.f[1].texid = 0; gq.m.id = ns_mesh_content_hash(&gq.m) ^ 0x5200;
+        int plain = apply_gloves(&w1, &gp, &gq) == 2 && hand_faces(&w1, side > 0 ? NS_HAND_KEY_R : NS_HAND_KEY_L, f2);
+        for (int p = 0; plain && p < VRHA_NP; p++) for (int t = vrha_piece[p].t0; t < vrha_piece[p].t0 + vrha_piece[p].nt; t++)
+            if (tri_zone(p, t) == 1 && (f2[t].texid != 4 || f2[t].u[0] != f2[t].u[1] || f2[t].u[1] != f2[t].u[2] || f2[t].t[0] != f2[t].t[1] || f2[t].t[1] != f2[t].t[2])) plain = 0;
+        CHECK(plain, "lado %d: sin textura de dorso, dorso de un solo color", side);
+        world_free(&w1);
+    }
+}
+
 int main(void) {
     test_store_put();
     test_classify();
@@ -670,6 +792,7 @@ int main(void) {
     test_pose_blend();
     test_watertight();
     test_seam_details();
+    test_back_texture();
     printf("%s ns_hand: %d comprobaciones, %d fallos\n", fails ? "FALLO" : "OK", checks, fails);
     return fails ? 1 : 0;
 }

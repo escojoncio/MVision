@@ -304,6 +304,8 @@ final class NativeRenderer {
     /// H REAL y centro de proyección (OFX/OFY, píxeles de la pantalla de 320x240 del motor) de la cámara de la escena preparada: los radios y filas de los efectos de pantalla y la
     /// ventana de la pantalla 3D de las cinemáticas salen de ellos (no de constantes). OFX/OFY desconocidos (0) = el centro.
     private(set) var camH: Float = 320, camOfx: Float = 160, camOfy: Float = 120
+    /// Profundidades (m desde la cámara del juego) de lo que enseña la escena preparada (ns_cinema_depth; 0 = desconocidas): convergencia y separación de la pantalla 3D (ns_cinema_stereo).
+    private(set) var cineNear: Float = 0, cineSubject: Float = 0
     /// La última escena del puente es VÁLIDA (partida, listas y escenario completos) pero NO apta para primera persona (sin TOVR_OK: vehículos, ascensores, zonas
     /// especiales). El jugador sin enlazar (sin PLAYER_OK) NO la hace no apta: se dibuja el mundo sin cuerpo, manos ni IK propios. Con histéresis (4 fotogramas para entrar, 3 aptos para salir): entonces se pinta con la cámara del juego.
     private(set) var sceneUnfit = false
@@ -694,6 +696,9 @@ final class NativeRenderer {
             if c.h.isFinite && c.h > 8 && c.h < 4096 { camH = c.h }
             camOfx = (c.ofx.isFinite && c.ofx > 0 && c.ofx < 320) ? c.ofx : 160
             camOfy = (c.ofy.isFinite && c.ofy > 0 && c.ofy < 240) ? c.ofy : 120
+            var zn: Float = 0, zs: Float = 0
+            _ = ns_cinema_depth(sc, &zn, &zs)
+            cineNear = zn; cineSubject = zs
         }
         // Aptitud. Primera persona: la del contrato (ns_scene_native_ok; sin PLAYER_OK se dibuja el mundo sin cuerpo/manos/IK, no se retiene la escena). Cinemática: no hay cámara VR ni jugador, basta con escenario y listas completas.
         let cinemaNeed = UInt32(truncatingIfNeeded: NS_SV_GAME) | UInt32(truncatingIfNeeded: NS_SV_LISTS_OK) | UInt32(truncatingIfNeeded: NS_SV_MAP_OK)

@@ -22,6 +22,29 @@ int ns_cinema_eye(const float gv[16], int eye, float ipd, float conv, float tan_
  * desplazamiento del centro `shift` = {dx, -dx, dy, -dy} (tangentes) que se SUMA a las tangentes de ns_cinema_eye. 0 si H no es válida. */
 int ns_cinema_window(const NsCamera *cam, float *tan_x, float *tan_y, float shift[4]);
 
+/* Ventana estéreo de la pantalla 3D. La pantalla es un recuadro fijo (el MISMO para los dos ojos) de semiángulo horizontal atan(tan_screen) visto por el usuario a `dist` m; dentro,
+ * cada ojo ve la escena con cámaras paralelas separadas `b` y ventana desplazada (ns_cinema_eye) que convergen a `conv` m. Un punto a z m de la cámara del juego se ve con un paralaje
+ * angular (radianes, ángulo pequeño) de  M * b * (1/conv - 1/z),  M = tan_screen / tan_x (ampliación de la pantalla respecto al campo del motor): 0 en el sujeto, + detrás, - delante.
+ * Con b = IPD real y conv fija el paralaje no tenía cota (primeros planos: varios grados cruzados; teleobjetivos: divergencia). Aquí conv = z_subj (el sujeto queda en el plano de la
+ * pantalla; desconocido = NS_CINEMA_CONV_DEFAULT) y b = lo mayor que cumple: b <= ipd (nunca más separación que la real), paralaje en el infinito <= min(NS_CINEMA_PAR_POS, ipd/dist)
+ * (ipd/dist: desplazamiento en la pantalla <= IPD real, los ojos no divergen) y paralaje en z_near >= -NS_CINEMA_PAR_NEG (solo si 0 < z_near < conv).
+ * ipd = separación real de los ojos del usuario (m; 0 = mono: b = 0). tan_x = 160/H del motor. z_near, z_subj (m): ns_cinema_depth; <= 0 = desconocido. 0 si los datos no son válidos. */
+#define NS_CINEMA_CONV_DEFAULT 3.0f
+#define NS_CINEMA_PAR_POS 0.0174533f   /* 1 grado */
+#define NS_CINEMA_PAR_NEG 0.0218166f   /* 1,25 grados */
+typedef struct {
+    float b;        /* separación de las cámaras (m; 1 unidad del motor = 1 mm) */
+    float conv;     /* distancia de convergencia (m) */
+    float par_max;  /* paralaje angular en el infinito (grados, +) */
+    float par_min;  /* paralaje angular en z_near (grados, -; 0 si z_near no se conoce o no queda por delante del sujeto) */
+} NsCinemaStereo;
+int ns_cinema_stereo(float ipd, float z_near, float z_subj, float tan_x, float tan_screen, float dist, NsCinemaStereo *out);
+
+/* Profundidades (m desde la cámara del juego, 1 unidad = 1 mm) de lo que la escena enseña: orígenes de las piezas visibles de las instancias NO de escenario (personajes, objetos)
+ * que caen dentro de la ventana del motor. z_subj = media armónica ponderada (peso 1 en el centro de la ventana, 0 en sus bordes: continua mientras las piezas se mueven);
+ * z_near = la menor menos 0,25 m (radio de la pieza), nunca menos de 0,1. 0 (y ambas a 0) si la cámara no es válida o no hay ninguna pieza así. */
+int ns_cinema_depth(const NsScene *sc, float *z_near, float *z_subj);
+
 /* Proyección de Z invertida (réplica de XRMath.projection) a partir de las tangentes. */
 void ns_cinema_projection(const float tangents[4], float znear, float zfar, float out[16]);
 

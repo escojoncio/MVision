@@ -13,8 +13,9 @@
  * cerrada. La transición se recalcula en cada fotograma (depende de la postura de la muñeca; ~100 vértices); la topología solo si cambia la malla del antebrazo. Sin antebrazo: sin unión.
  * El antebrazo del motor se sustituye por una copia con el giro REPARTIDO a lo largo (0 en el codo, soldado al brazo; todo en la muñeca): sin retorcer la franja del codo.
  *
- * ESTILO PS1 como el brazo: la cara palmar desde la muñeca hasta la base de los dedos lleva la textura de la palma de la manopla del juego (tpage/clut/UV de su cara, proyectada en plano);
- * dedos, pulgar, dorso y costados van de un solo color (el texel central de la textura de los dedos de la manopla) con sombreado de la luz del jugador. Sin texturas utilizables, plana.
+ * ESTILO PS1 como el brazo: la cara palmar desde la muñeca hasta la base de los dedos lleva la textura de la palma de la manopla del juego (tpage/clut/UV de su cara, proyectada en plano)
+ * y la cara dorsal, también hasta la base de los dedos, la del dorso de la manopla (con su recuadro gris), cada texel en la posición que tiene en la manopla;
+ * dedos, pulgar y costados van de un solo color (el texel central de la textura de los dedos de la manopla) con sombreado de la luz del jugador. Sin texturas utilizables, plana.
  * Iluminación, ambiente, niebla y zona: los de la instancia del jugador. Si algo falla (sin manopla enlazada, sin malla, escena sin sitio, almacén lleno) NO se oculta la manopla.
  *
  * Todo en el hilo de emulación (se llama desde el cierre de ns_hook_tick). */
@@ -71,6 +72,7 @@ typedef struct {
     int ok;                              /* hay cara de referencia */
     uint16_t tpage, clut, texid;
     uint8_t u[4], t[4];                  /* rectángulo A,B,C,D en texels */
+    int16_t y[4], z[4];                  /* posición de A,B,C,D en el marco de la manopla (largo y ancho de la mano) */
 } NsHandTex;
 enum { NS_HT_PALM = 0, NS_HT_BACK = 1, NS_HT_FINGER = 2, NS_HT_JOINT = 3 };
 /* tex[4] por rol; devuelve cuántos roles encontró con cara propia (el resto se rellena con el más parecido o queda plano). side +1 derecha / -1 izquierda. */

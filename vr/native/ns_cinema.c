@@ -67,6 +67,55 @@ int ns_cinema_window(const NsCamera *cam, float *tan_x, float *tan_y, float shif
     return 1;
 }
 
+int ns_cinema_stereo(float ipd, float z_near, float z_subj, float tan_x, float tan_screen, float dist, NsCinemaStereo *out) {
+    if (!out || !(ipd >= 0.0f) || !isfinite(ipd) || !(tan_x > 0.0f) || !isfinite(tan_x) || !(tan_screen > 0.0f) || !isfinite(tan_screen) || !(dist > 0.0f) || !isfinite(dist)) return 0;
+    const float conv = (z_subj > 0.0f && isfinite(z_subj)) ? (z_subj < 0.3f ? 0.3f : z_subj) : NS_CINEMA_CONV_DEFAULT;
+    const float M = tan_screen / tan_x;
+    const float pos = ipd / dist < NS_CINEMA_PAR_POS ? ipd / dist : NS_CINEMA_PAR_POS;
+    const float kn = (z_near > 0.0f && z_near < conv) ? 1.0f / z_near - 1.0f / conv : 0.0f;   /* paralaje cruzado por metro de separación y unidad de M */
+    float b = pos * conv / M;
+    if (kn > 0.0f && b > NS_CINEMA_PAR_NEG / (M * kn)) b = NS_CINEMA_PAR_NEG / (M * kn);
+    if (b > ipd) b = ipd;
+    out->b = b; out->conv = conv;
+    out->par_max = M * b / conv * 57.29578f;
+    out->par_min = -M * b * kn * 57.29578f;
+    return isfinite(b) && isfinite(out->par_max) && isfinite(out->par_min);
+}
+
+int ns_cinema_depth(const NsScene *sc, float *z_near, float *z_subj) {
+    if (z_near) *z_near = 0.0f;
+    if (z_subj) *z_subj = 0.0f;
+    float tx, ty, sh[4];
+    if (!sc || !sc->inst || !sc->piece || !fin(sc->cam.rot, 9) || !fin(sc->cam.eye, 3) || !ns_cinema_window(&sc->cam, &tx, &ty, sh)) return 0;
+    const NsCamera *c = &sc->cam;
+    const double ys = (c->overscan_y > 0.5f && c->overscan_y < 2.0f) ? c->overscan_y : (double)NS_OVERSCAN_Y;
+    const uint32_t ni = sc->n_inst < sc->cap_inst ? sc->n_inst : sc->cap_inst, np = sc->n_piece < sc->cap_piece ? sc->n_piece : sc->cap_piece;
+    double sw = 0, swz = 0, zmin = 0;
+    for (uint32_t i = 0; i < ni; i++) {
+        const NsInstance *ins = &sc->inst[i];
+        if ((ins->flags & (NS_IF_STATIC | NS_IF_SHADOW)) || ins->first_piece + (uint32_t)ins->n_pieces > np) continue;
+        for (uint32_t k = 0; k < ins->n_pieces; k++) {
+            const NsPiece *p = &sc->piece[ins->first_piece + k];
+            if (p->flags & NS_PF_HIDDEN) continue;
+            const double d[3] = { p->world.m[3] - c->eye[0], p->world.m[7] - c->eye[1], p->world.m[11] - c->eye[2] };
+            const double z = 0.001 * (c->rot[2] * d[0] + c->rot[5] * d[1] + c->rot[8] * d[2]);          /* vista = R^T (p - eye): columnas de R */
+            if (!(z > 0.1)) continue;
+            const double x = 0.001 * (c->rot[0] * d[0] + c->rot[3] * d[1] + c->rot[6] * d[2]) / z;      /* tangentes respecto al eje (x derecha, y abajo) */
+            const double y = 0.001 * ys * (c->rot[1] * d[0] + c->rot[4] * d[1] + c->rot[7] * d[2]) / z;
+            /* fracción 0 (centro de la ventana) .. 1 (borde): la ventana va de -(tx + sh[0]) a tx + sh[1] y de -(ty + sh[2]) a ty + sh[3] */
+            const double ax = fabs(x + sh[0]) / tx, ay = fabs(y + sh[2]) / ty;
+            if (!(ax < 1.0 && ay < 1.0)) continue;
+            const double w = (1.0 - ax) * (1.0 - ay);
+            sw += w; swz += w / z;
+            if (zmin == 0 || z < zmin) zmin = z;
+        }
+    }
+    if (!(sw > 0) || !(swz > 0)) return 0;
+    if (z_subj) *z_subj = (float)(sw / swz);
+    if (z_near) *z_near = (float)(zmin - 0.25 > 0.1 ? zmin - 0.25 : 0.1);
+    return 1;
+}
+
 void ns_cinema_projection(const float t[4], float n, float f, float out[16]) {
     const float l = t[0], r = t[1], u = t[2], d = t[3];
     const float sx = 2 / (l + r), sy = 2 / (u + d), cx = (r - l) / (l + r), cy = (u - d) / (u + d);

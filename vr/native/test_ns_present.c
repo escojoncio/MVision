@@ -185,8 +185,95 @@ static void test_cinema(void) {
     }
 }
 
+/* ---- ventana estéreo de la pantalla 3D: separación y convergencia según la escena, con el paralaje acotado ---- */
+static float ndc_x(const float gv[16], int eye, float b, float conv, float tx, float ty, float zm) {   /* punto en el eje de la cámara a zm metros */
+    float view[16], tan4[4], P[16], e[4], c[4];
+    const float w[3] = { gv[12], gv[13], gv[14] - zm };
+    ns_cinema_eye(gv, eye, b, conv, tx, ty, view, tan4);
+    ns_cinema_projection(tan4, 0.05f, 800.0f, P);
+    mat_vec(view, w, e);
+    for (int r = 0; r < 4; r++) c[r] = P[r] * e[0] + P[4 + r] * e[1] + P[8 + r] * e[2] + P[12 + r] * e[3];
+    return c[0] / c[3];
+}
+
+static void test_stereo(void) {
+    float gv[16] = {0};
+    gv[0] = 0.001f; gv[5] = -0.001f; gv[10] = -0.001f; gv[15] = 1; gv[12] = 0.5f; gv[13] = 1.7f; gv[14] = -0.2f;   /* cámara del juego mirando a -Z VR */
+    const float ipd = 0.063f, RAD = 57.29578f;
+    const float hs[3] = { 320.0f, 1500.0f, 180.0f };                       /* normal (53 grados), teleobjetivo (12), angular (83) */
+    const float dz[5][2] = { { 0.6f, 1.0f }, { 1.2f, 2.0f }, { 4.0f, 10.0f }, { 0.0f, 0.0f }, { 0.2f, 3.0f } };   /* (cercano, sujeto) m; 0 = desconocido */
+    const float scr[3][2] = { { 3.0f, 2.5f }, { 3.0f, 8.0f }, { 8.0f, 2.0f } };   /* pantalla: ancho, distancia (m) */
+    for (int s = 0; s < 3; s++) for (int h = 0; h < 3; h++) for (int k = 0; k < 5; k++) {
+        const float W = scr[s][0], D = scr[s][1], ts = W / (2 * D), tx = 160.0f / hs[h], ty = 120.0f / hs[h];
+        const float lim_pos = fminf(1.0f / RAD, ipd / D), lim_neg = 1.25f / RAD;
+        NsCinemaStereo st;
+        CHECK(ns_cinema_stereo(ipd, dz[k][0], dz[k][1], tx, ts, D, &st) == 1, "estéreo válido");
+        CHECK(st.b > 0.0f && st.b <= ipd + 1e-7f, "separación en (0, IPD real]: %g", st.b);
+        CHECK(dz[k][1] > 0 ? fabsf(st.conv - dz[k][1]) < 1e-5f : fabsf(st.conv - 3.0f) < 1e-5f, "convergencia en el sujeto: %g", st.conv);
+        /* plano de convergencia: el mismo píxel en ambos ojos */
+        float d0 = ndc_x(gv, 1, st.b, st.conv, tx, ty, st.conv) - ndc_x(gv, 0, st.b, st.conv, tx, ty, st.conv);
+        CHECK(fabsf(d0) * 640.0f < 0.02f, "sujeto sin paralaje: %g px", d0 * 640.0f);
+        /* infinito: paralaje positivo dentro del límite y sin divergencia (desplazamiento en la pantalla <= IPD real) */
+        float di = ndc_x(gv, 1, st.b, st.conv, tx, ty, 700.0f) - ndc_x(gv, 0, st.b, st.conv, tx, ty, 700.0f);
+        CHECK(di > 0 && di * ts <= lim_pos * 1.01f, "infinito: %g grados (límite %g) W=%g D=%g H=%g caso %d", di * ts * RAD, lim_pos * RAD, W, D, hs[h], k);
+        CHECK(di * 0.5f * W <= ipd * 1.01f, "sin divergencia: %g m en pantalla", di * 0.5f * W);
+        CHECK(fabsf(st.par_max - di * ts * RAD) < 0.02f, "par_max = paralaje medido: %g / %g", st.par_max, di * ts * RAD);
+        /* lo más cercano: paralaje negativo dentro del límite */
+        if (dz[k][0] > 0) {
+            float dn = ndc_x(gv, 1, st.b, st.conv, tx, ty, dz[k][0]) - ndc_x(gv, 0, st.b, st.conv, tx, ty, dz[k][0]);
+            CHECK(dn < 0 && dn * ts >= -lim_neg * 1.01f, "cercano: %g grados (límite -%g)", dn * ts * RAD, lim_neg * RAD);
+            CHECK(fabsf(st.par_min - dn * ts * RAD) < 0.02f, "par_min = paralaje medido: %g / %g", st.par_min, dn * ts * RAD);
+        } else CHECK(st.par_min == 0.0f, "sin cercano conocido: par_min 0");
+        /* simetría izquierda/derecha y marco idéntico (la misma ventana de 2*tx de ancho en ambos ojos: la misma textura sobre el mismo recuadro) */
+        float vl[16], vr[16], tl[4], tr[4];
+        ns_cinema_eye(gv, 0, st.b, st.conv, tx, ty, vl, tl); ns_cinema_eye(gv, 1, st.b, st.conv, tx, ty, vr, tr);
+        CHECK(tl[0] == tr[1] && tl[1] == tr[0] && tl[2] == tr[2] && tl[3] == tr[3], "frustos simétricos");
+        CHECK(fabsf(tl[0] + tl[1] - 2 * tx) < 1e-6f && fabsf(tr[0] + tr[1] - 2 * tx) < 1e-6f, "marco idéntico");
+        CHECK(fabsf((vl[12] - vr[12]) - st.b) < 1e-6f, "cámaras separadas b: %g / %g", vl[12] - vr[12], st.b);
+        float xl = ndc_x(gv, 0, st.b, st.conv, tx, ty, 700.0f), xr = ndc_x(gv, 1, st.b, st.conv, tx, ty, 700.0f);
+        CHECK(fabsf(xl + xr) < 1e-5f, "disparidad repartida por igual entre los ojos");
+    }
+    /* los parámetros anteriores (b = IPD, C = 3 m fijos) incumplían los límites: primer plano a 0,8 m con H = 320 y teleobjetivo (H = 1500) en el infinito, pantalla 3 m a 2,5 m */
+    {
+        float dn = ndc_x(gv, 1, ipd, 3.0f, 0.5f, 0.375f, 0.8f) - ndc_x(gv, 0, ipd, 3.0f, 0.5f, 0.375f, 0.8f);
+        float di = ndc_x(gv, 1, ipd, 3.0f, 160.0f / 1500.0f, 120.0f / 1500.0f, 700.0f) - ndc_x(gv, 0, ipd, 3.0f, 160.0f / 1500.0f, 120.0f / 1500.0f, 700.0f);
+        CHECK(dn * 0.6f * RAD < -3.0f && di * 1.5f > 4.0f * ipd, "referencia del fallo: %g grados cruzados, %g m de divergencia", dn * 0.6f * RAD, di * 1.5f);
+    }
+    NsCinemaStereo st;
+    CHECK(ns_cinema_stereo(0.0f, 1.0f, 2.0f, 0.5f, 0.6f, 2.5f, &st) == 1 && st.b == 0.0f && st.par_max == 0.0f && st.par_min == 0.0f, "mono: separación 0");
+    CHECK(ns_cinema_stereo(ipd, 3.0f, 2.0f, 0.5f, 0.6f, 2.5f, &st) == 1 && st.par_min == 0.0f, "cercano por detrás del sujeto: no cuenta");
+    CHECK(ns_cinema_stereo(ipd, 0.0f, 0.05f, 0.5f, 0.6f, 2.5f, &st) == 1 && st.conv >= 0.3f, "convergencia mínima");
+    CHECK(ns_cinema_stereo(-1.0f, 1, 2, 0.5f, 0.6f, 2.5f, &st) == 0 && ns_cinema_stereo(NAN, 1, 2, 0.5f, 0.6f, 2.5f, &st) == 0 && ns_cinema_stereo(ipd, 1, 2, 0.0f, 0.6f, 2.5f, &st) == 0
+          && ns_cinema_stereo(ipd, 1, 2, 0.5f, 0.0f, 2.5f, &st) == 0 && ns_cinema_stereo(ipd, 1, 2, 0.5f, 0.6f, 0.0f, &st) == 0 && ns_cinema_stereo(ipd, 1, 2, 0.5f, 0.6f, 2.5f, NULL) == 0, "datos inválidos rechazados");
+
+    /* profundidades de la escena: piezas dinámicas visibles dentro de la ventana, desde la cámara del juego */
+    NsScene sc; memset(&sc, 0, sizeof sc);
+    NsInstance in[2]; NsPiece pc[8]; memset(in, 0, sizeof in); memset(pc, 0, sizeof pc);
+    sc.inst = in; sc.piece = pc; sc.cap_inst = 2; sc.cap_piece = 8;
+    sc.cam.rot[0] = sc.cam.rot[4] = sc.cam.rot[8] = 1; sc.cam.h = 320; sc.cam.overscan_y = NS_OVERSCAN_Y;
+    sc.cam.eye[0] = 1000; sc.cam.eye[1] = -500; sc.cam.eye[2] = 2000;
+#define PIECE(i, x, y, z) do { pc[i].world.m[3] = sc.cam.eye[0] + (x); pc[i].world.m[7] = sc.cam.eye[1] + (y); pc[i].world.m[11] = sc.cam.eye[2] + (z); } while (0)
+    in[0].first_piece = 0; in[0].n_pieces = 1; in[0].flags = NS_IF_STATIC; PIECE(0, 0, 0, 500);   /* escenario: no cuenta */
+    in[1].first_piece = 1; in[1].n_pieces = 6;
+    PIECE(1, 0, 0, 2000); PIECE(2, 0, 0, 4000);
+    PIECE(3, 0, 0, 300); pc[3].flags = NS_PF_HIDDEN;      /* oculta */
+    PIECE(4, 5000, 0, 2000);                             /* fuera de la ventana */
+    PIECE(5, 0, 0, -1000);                               /* detrás */
+    PIECE(6, 0, 3000, 2000);                             /* fuera por abajo */
+    sc.n_inst = 2; sc.n_piece = 7;
+    float zn = -1, zs = -1;
+    CHECK(ns_cinema_depth(&sc, &zn, &zs) == 1 && fabsf(zs - 8.0f / 3.0f) < 1e-3f && fabsf(zn - 1.75f) < 1e-3f, "sujeto = media armónica, cercano = mínimo - 0,25 m: %g %g", zs, zn);
+    PIECE(2, 900, 0, 6000);                               /* hacia el borde (x/z = 0,15 de 0,5) pesa menos que lo centrado */
+    CHECK(ns_cinema_depth(&sc, &zn, &zs) == 1 && zs > 2.0f && zs < 3.0f * 0.95f, "el centro pesa más: %g", zs);
+    in[1].n_pieces = 9;                                   /* instancia fuera de la tabla: se ignora */
+    CHECK(ns_cinema_depth(&sc, &zn, &zs) == 0 && zn == 0.0f && zs == 0.0f, "sin piezas dinámicas a la vista: 0");
+    in[1].n_pieces = 6; sc.cam.h = 0;
+    CHECK(ns_cinema_depth(&sc, &zn, &zs) == 0 && ns_cinema_depth(NULL, &zn, &zs) == 0, "cámara inválida");
+#undef PIECE
+}
+
 int main(void) {
-    test_present(); test_exhaustive(); test_cinema();
+    test_present(); test_exhaustive(); test_cinema(); test_stereo();
     printf("%s: %d comprobaciones, %d fallos\n", g_fail ? "FALLO" : "OK", g_ok + g_fail, g_fail);
     return g_fail ? 1 : 0;
 }

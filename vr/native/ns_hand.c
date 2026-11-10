@@ -100,6 +100,7 @@ int ns_hand_classify(const NsMesh *g, int side, NsHandTex tex[4]) {
             NsHandTex *t = &tex[role];
             t->ok = 1; t->tpage = f->tpage; t->clut = f->clut; t->texid = f->texid;
             memcpy(t->u, f->u, 4); memcpy(t->t, f->t, 4);
+            for (int k = 0; k < 4; k++) { const NsVert *v = &g->verts[f->v[k] < g->n_verts ? f->v[k] : 0]; t->y[k] = v->y; t->z[k] = v->z; }
         }
     }
     int found = 0;
@@ -122,6 +123,24 @@ static void map_uv(const NsHandTex *tx, uint8_t su, uint8_t sv, uint8_t *u, uint
     *u = (uint8_t)ns_clampf(floorf(uu + 0.5f), 0.0f, 255.0f); *t = (uint8_t)ns_clampf(floorf(tt + 0.5f), 0.0f, 255.0f);
 }
 
+/* Como map_uv, pero con las esquinas de la cara emparejadas por su POSICIÓN en la manopla (no por su orden): (s,v) 0..1 = ancho (z) y largo (y) de la mano de menor a mayor. Así el
+ * texel de cada punto es el que la manopla tiene ahí (el recuadro gris del dorso queda junto a los nudillos en las dos manos). Con una cara que no tenga una esquina en cada
+ * cuadrante (triángulo, degenerada) vale el texel central. */
+static void map_uv_pos(const NsHandTex *tx, float s, float v, uint8_t *u, uint8_t *t) {
+    float cy = 0, cz = 0, uu = 0, tt = 0;
+    int seen = 0;
+    for (int k = 0; k < 4; k++) { cy += 0.25f * tx->y[k]; cz += 0.25f * tx->z[k]; }
+    s = 0.04f + 0.92f * s; v = 0.04f + 0.92f * v;
+    for (int k = 0; k < 4; k++) {
+        const int hz = tx->z[k] > cz, hy = tx->y[k] > cy;
+        const float w = (hz ? s : 1 - s) * (hy ? v : 1 - v);
+        seen |= 1 << (2 * hz + hy);
+        uu += w * tx->u[k]; tt += w * tx->t[k];
+    }
+    if (seen != 15) { map_uv(tx, 128, 128, u, t); return; }
+    *u = (uint8_t)ns_clampf(floorf(uu + 0.5f), 0.0f, 255.0f); *t = (uint8_t)ns_clampf(floorf(tt + 0.5f), 0.0f, 255.0f);
+}
+
 /* ---------------------------------------------------------------------------------------------------------------- construcción */
 static int dominant_joint(int pv0, const uint8_t *tr) {
     float w[VRHA_NJ] = {0};
@@ -132,7 +151,8 @@ static int dominant_joint(int pv0, const uint8_t *tr) {
 }
 /* Caras de la mano. Orden de los vértices: de antihorario hacia fuera (asset) a la convención del motor (cross(B-A, D-A) interior); la izquierda es un espejo y ya invierte el sentido.
  * Estilo PS1 como el brazo: la cara PALMAR desde la muñeca hasta la base de los dedos (muñeca y metacarpos) lleva la textura de la palma de la manopla del juego, proyectada en plano
- * (ancho de la palma -> u, largo -> v); el resto (dedos, pulgar, dorso, costados) es de un solo color: las cuatro esquinas en el texel central de la textura de los dedos de la manopla (si no, la del dorso)
+ * (ancho de la palma -> u, largo -> v) y la cara DORSAL de esa misma zona la del dorso de la manopla (su recuadro gris incluido; map_uv_pos), si la manopla tiene cara dorsal con textura
+ * propia; el resto (dedos, pulgar, costados) es de un solo color: las cuatro esquinas en el texel central de la textura de los dedos de la manopla (si no, la del dorso)
  * (el color del guante), sombreado por la luz. */
 static int build(HandCache *c, int side, const NsMesh *g) {
     NsHandTex tex[4];
@@ -144,6 +164,12 @@ static int build(HandCache *c, int side, const NsMesh *g) {
         if (vrha_role[t] != VRHA_ROLE_PALM || !(dj == 0 || (dj >= VRHS_INDEX_MC && (dj - VRHS_INDEX_MC) % 5 == 0))) continue;
         for (int k = 0; k < 3; k++) for (int a = 0; a < 3; a++) { const float v = vrha_pos[vrha_piece[p].v0 + vrha_tri[t][k]][a]; if (v < lo[a]) lo[a] = v; if (v > hi[a]) hi[a] = v; }
     }
+    float blo[3] = {1e9f, 1e9f, 1e9f}, bhi[3] = {-1e9f, -1e9f, -1e9f};  /* caja del dorso (vértices de las caras dorsales texturizadas) */
+    for (int p = 0; p < VRHA_NP; p++) for (int t = vrha_piece[p].t0; t < vrha_piece[p].t0 + vrha_piece[p].nt; t++) {
+        const int dj = dominant_joint(vrha_piece[p].v0, vrha_tri[t]);
+        if (vrha_role[t] != VRHA_ROLE_BACK || !(dj == 0 || (dj >= VRHS_INDEX_MC && (dj - VRHS_INDEX_MC) % 5 == 0))) continue;
+        for (int k = 0; k < 3; k++) for (int a = 0; a < 3; a++) { const float v = vrha_pos[vrha_piece[p].v0 + vrha_tri[t][k]][a]; if (v < blo[a]) blo[a] = v; if (v > bhi[a]) bhi[a] = v; }
+    }
     for (int p = 0; p < VRHA_NP; p++) {
         const VrHaPiece *pc = &vrha_piece[p];
         for (int t = pc->t0; t < pc->t0 + pc->nt; t++) {
@@ -153,12 +179,14 @@ static int build(HandCache *c, int side, const NsMesh *g) {
             const uint8_t o[4] = {tr[0], side > 0 ? tr[2] : tr[1], side > 0 ? tr[1] : tr[2], side > 0 ? tr[1] : tr[2]};
             const int dj = dominant_joint(pc->v0, tr);
             const int front = vrha_role[t] == VRHA_ROLE_PALM && (dj == 0 || (dj >= VRHS_INDEX_MC && (dj - VRHS_INDEX_MC) % 5 == 0));
-            const NsHandTex *tx = front ? &tex[NS_HT_PALM] : plain;
+            const int back = tex[NS_HT_BACK].ok == 1 && vrha_role[t] == VRHA_ROLE_BACK && (dj == 0 || (dj >= VRHS_INDEX_MC && (dj - VRHS_INDEX_MC) % 5 == 0));
+            const NsHandTex *tx = front ? &tex[NS_HT_PALM] : back ? &tex[NS_HT_BACK] : plain;
             for (int q = 0; q < 4; q++) {
                 f->v[q] = o[q]; f->n[q] = o[q];
                 if (!tx->ok) continue;
-                if (!front) { map_uv(tx, 128, 128, &f->u[q], &f->t[q]); continue; }
                 const float *v = vrha_pos[pc->v0 + o[q]];
+                if (back) { map_uv_pos(tx, (v[2] - blo[2]) / (bhi[2] - blo[2]), (v[1] - blo[1]) / (bhi[1] - blo[1]), &f->u[q], &f->t[q]); continue; }
+                if (!front) { map_uv(tx, 128, 128, &f->u[q], &f->t[q]); continue; }
                 const float su = (v[2] - lo[2]) / (hi[2] - lo[2]), sv = (v[1] - lo[1]) / (hi[1] - lo[1]);
                 map_uv(tx, (uint8_t)ns_clampf(su * 255.0f + 0.5f, 0.0f, 255.0f), (uint8_t)ns_clampf(sv * 255.0f + 0.5f, 0.0f, 255.0f), &f->u[q], &f->t[q]);
             }
