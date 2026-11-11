@@ -308,6 +308,7 @@ final class NativeRenderer {
     /// H REAL y centro de proyección (OFX/OFY, píxeles de la pantalla de 320x240 del motor) de la cámara de la escena preparada: los radios y filas de los efectos de pantalla y la
     /// ventana de la pantalla 3D de las cinemáticas salen de ellos (no de constantes). OFX/OFY desconocidos (0) = el centro.
     private(set) var camH: Float = 320, camOfx: Float = 160, camOfy: Float = 120
+    private var camYs: Float = 1                             // factor vertical de la proyección del motor con su cámara (NsCamera.overscan_y) de la escena preparada
     /// Profundidades (m desde la cámara del juego) de lo que enseña la escena preparada, solo en cinemáticas y suavizadas en el tiempo (ns_cinema_depth_filter; 0 = desconocidas): convergencia y separación de la pantalla 3D (ns_cinema_stereo).
     private(set) var cineNear: Float = 0, cineSubject: Float = 0
     private var cineFilter = NsCinemaDepthFilter()
@@ -701,6 +702,7 @@ final class NativeRenderer {
             if c.h.isFinite && c.h > 8 && c.h < 4096 { camH = c.h }
             camOfx = (c.ofx.isFinite && c.ofx > 0 && c.ofx < 320) ? c.ofx : 160
             camOfy = (c.ofy.isFinite && c.ofy > 0 && c.ofy < 240) ? c.ofy : 120
+            camYs = (c.overscan_y.isFinite && c.overscan_y > 0.5 && c.overscan_y < 2) ? c.overscan_y : 1
             var zn: Float = 0, zs: Float = 0
             if cinema { _ = ns_cinema_depth_filter(&cineFilter, sc, &zn, &zs) } else { cineFilter = NsCinemaDepthFilter() }
             cineNear = zn; cineSubject = zs
@@ -738,6 +740,9 @@ final class NativeRenderer {
             guard first + cnt <= nPiece else { continue }
             for k in 0..<cnt {
                 let pp = sc.pointee.piece + (first + k)
+                // Pieza sin malla (modelo nulo o sin caras: el extractor la deja con mesh_id = 0 y oculta): no hay nada que subir ni que esperar. Contarla como ausente retenía la escena
+                // anterior 25 escenas (~1 s) cada vez que aparecía una (salir de un conducto a la sala, objetos de un fotograma).
+                if ns_gpu_piece_has_mesh(pp) == 0 { continue }
                 newMeshOf[first + k] = acquireMesh(id: pp.pointee.mesh_id, ver: pp.pointee.baked_ver, store: store, seq: seq)
             }
         }
@@ -1385,6 +1390,9 @@ final class NativeRenderer {
         let underwater = screenOut.water_tint.3 > 0.5 && screenOut.water_min.3 > 0.5
         u.cull_eye = cullBack ? SIMD4<Float>(camEye.x, camEye.y, camEye.z, Float(NSG_CULL_ALL))
                    : underwater ? SIMD4<Float>(camEye.x, camEye.y, camEye.z, Float(NSG_CULL_SEMI)) : SIMD4<Float>(0, 0, 0, 0)
+        // Ejes X (derecha) e Y (abajo) de la cámara del juego en el mundo del motor (columnas 0 y 1 de camRot9) y píxeles de su pantalla por unidad de tangente: tamaño máximo del hardware (ns_vertex, solo con misc.y > 0).
+        u.cam_x = SIMD4<Float>(camRot9[0], camRot9[3], camRot9[6], camH)
+        u.cam_y = SIMD4<Float>(camRot9[1], camRot9[4], camRot9[7], camH * camYs)
         enc.setCullMode(.none)
         enc.setFragmentTexture(vram, index: 0)
         enc.setVertexBuffer(vertPool.buffer, offset: 0, index: Int(NSG_BUF_VERTS))

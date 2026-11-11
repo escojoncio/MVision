@@ -898,6 +898,19 @@ int ns_gpu_cull_applies(int mode, uint32_t cf) {
     if (!(cf & NSG_CF_ONESIDED)) return 0;
     return mode == NSG_CULL_ALL || (mode == NSG_CULL_SEMI && (cf & NSG_CF_SEMI) != 0u);
 }
+float ns_gpu_back_z(int mode, uint32_t cf, int back) {
+    if (!back || !(cf & NSG_CF_ONESIDED) || ns_gpu_cull_applies(mode, cf)) return 1.0f;
+    return NSG_BACK_Z;
+}
+int ns_gpu_tri_oversize(const float v[3][3], float hx, float hy) {
+    float mn[2] = {NSG_HW_SXY_MAX, NSG_HW_SXY_MAX}, mx[2] = {NSG_HW_SXY_MIN, NSG_HW_SXY_MIN};
+    for (int k = 0; k < 3; k++) {
+        if (!(v[k][2] > 0.0f)) return 0;
+        const float s[2] = {ns_clampf(hx * v[k][0] / v[k][2], NSG_HW_SXY_MIN, NSG_HW_SXY_MAX), ns_clampf(hy * v[k][1] / v[k][2], NSG_HW_SXY_MIN, NSG_HW_SXY_MAX)};
+        for (int a = 0; a < 2; a++) { if (s[a] < mn[a]) mn[a] = s[a]; if (s[a] > mx[a]) mx[a] = s[a]; }
+    }
+    return mx[0] - mn[0] > NSG_HW_MAX_W || mx[1] - mn[1] > NSG_HW_MAX_H;
+}
 int ns_gpu_tri_back(const float p0[3], const float p1[3], const float p2[3], const float eye[3]) {
     float e1[3], e2[3], r[3];
     for (int a = 0; a < 3; a++) { e1[a] = p1[a] - p0[a]; e2[a] = p2[a] - p0[a]; r[a] = p0[a] - eye[a]; }

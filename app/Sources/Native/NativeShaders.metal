@@ -1,7 +1,7 @@
 /* Shaders del renderer nativo (NativeRenderer.swift). Dibujan la escena leída de la RAM del motor: mallas locales + matriz de mundo por pieza + color por
  * vértice (precalculado o calculado con la luz de la pieza) + niebla, con la misma semántica de texturas/mezcla que el rasterizador de referencia
  * (vr/native/ns_cpuref.c): VRAM 1024x512 de 16 bits (R16Uint), texturas de 4/8/15 bpp con CLUT, texel 0 transparente, modulación texel*color/128 en 5 bits,
- * el bit 15 del texel decide si un texel de una cara semitransparente se mezcla. Sin descarte de caras (doble cara) ni recorte en CPU.
+ * el bit 15 del texel decide si un texel de una cara semitransparente se mezcla. Sin descarte de caras en el mundo en primera persona (doble cara; los reversos pierden los empates) ni recorte en CPU.
  *
  * Dos rutas de vértices con la misma lógica (ns_vertex): por pieza (opacos: una llamada de dibujo por pieza, índice de pieza en un búfer de 4 bytes) y por lista
  * ordenada (semitransparentes: NsGpuOrder[] de atrás adelante, ya ordenada en CPU). Layout de los búferes: vr/native/ns_gpu_types.h.
@@ -105,15 +105,35 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
      * tanque, una pared o un personaje pegados a la cámara del guion no existen en su imagen; aquí tapaban media pantalla. U.misc.y = ese umbral en unidades del motor (0 = sin descarte:
      * el mundo en primera persona, donde lo cercano sí se ve). Los tres vértices deciden igual. Réplica en C: NsRCam.zreject (ns_cpuref.c). */
     const bool near_reject = U.misc.y > 0.0;
-    if (one_sided || near_reject) {
+    /* Reverso de una cara de una sola cara que NO se descarta (mundo en primera persona: doble cara): se dibuja, pero pierde el empate de profundidad con el anverso que comparte su plano
+     * (paredes de dos hojas espalda con espalda: sin esto parpadean entre sus dos texturas). Se decide con el ojo de ESTA vista. Réplica en C: ns_gpu_back_z (ns_gpu.c). */
+    const bool back_keep = (cf & NSG_CF_ONESIDED) != 0u && !one_sided;
+    bool behind = false;
+    if (one_sided || near_reject || back_keep) {
         uint f0 = corner_index - corner_index % 3u;
         float3 q0 = ns_world_pos(verts[corners[f0].v], P, verts, pieces);
         float3 q1 = ns_world_pos(verts[corners[f0 + 1u].v], P, verts, pieces);
         float3 q2 = ns_world_pos(verts[corners[f0 + 2u].v], P, verts, pieces);
         if (one_sided) back = dot(q0 - U.cull_eye.xyz, cross(q1 - q0, q2 - q0)) <= 0.0;
         if (near_reject) {
-            float zmin = min(min(dot(U.fog_fwd.xyz, q0), dot(U.fog_fwd.xyz, q1)), dot(U.fog_fwd.xyz, q2)) + U.fog_fwd.w;
-            if (zmin <= U.misc.y) back = true;
+            float3 zv = float3(dot(U.fog_fwd.xyz, q0), dot(U.fog_fwd.xyz, q1), dot(U.fog_fwd.xyz, q2)) + U.fog_fwd.w;
+            if (min(min(zv.x, zv.y), zv.z) <= U.misc.y) back = true;
+            else {
+                /* Tamaño máximo del hardware: la GPU original no dibuja el triángulo de más de 1023 x 511 px de la pantalla del motor (coordenadas saturadas a -1024..1023), así que una rejilla o un
+                 * suelo pegados a la cámara del guion no existen en su imagen; aquí tapaban la pantalla. Aquí zv > misc.y > 0. Réplica en C: ns_gpu_tri_oversize (ns_gpu.c). */
+                float3 r0 = q0 - U.cull_eye.xyz, r1 = q1 - U.cull_eye.xyz, r2 = q2 - U.cull_eye.xyz;
+                float3 sx = clamp(U.cam_x.w * float3(dot(U.cam_x.xyz, r0), dot(U.cam_x.xyz, r1), dot(U.cam_x.xyz, r2)) / zv, NSG_HW_SXY_MIN, NSG_HW_SXY_MAX);
+                float3 sy = clamp(U.cam_y.w * float3(dot(U.cam_y.xyz, r0), dot(U.cam_y.xyz, r1), dot(U.cam_y.xyz, r2)) / zv, NSG_HW_SXY_MIN, NSG_HW_SXY_MAX);
+                if (max(max(sx.x, sx.y), sx.z) - min(min(sx.x, sx.y), sx.z) > NSG_HW_MAX_W || max(max(sy.x, sy.y), sy.z) - min(min(sy.x, sy.y), sy.z) > NSG_HW_MAX_H) back = true;
+            }
+        }
+        if (back_keep) {
+            /* mismo criterio que arriba, en el mundo VR y con el ojo de la vista (to_vr es una semejanza: el signo de su determinante dice si conserva el sentido) */
+            float3 v0 = float3(dot(U.tovr[0].xyz, q0) + U.tovr[0].w, dot(U.tovr[1].xyz, q0) + U.tovr[1].w, dot(U.tovr[2].xyz, q0) + U.tovr[2].w);
+            float3 v1 = float3(dot(U.tovr[0].xyz, q1) + U.tovr[0].w, dot(U.tovr[1].xyz, q1) + U.tovr[1].w, dot(U.tovr[2].xyz, q1) + U.tovr[2].w);
+            float3 v2 = float3(dot(U.tovr[0].xyz, q2) + U.tovr[0].w, dot(U.tovr[1].xyz, q2) + U.tovr[1].w, dot(U.tovr[2].xyz, q2) + U.tovr[2].w);
+            float sense = dot(U.tovr[0].xyz, cross(U.tovr[1].xyz, U.tovr[2].xyz)) < 0.0 ? -1.0 : 1.0;
+            behind = sense * dot(v0 - U.eye[amp].xyz, cross(v1 - v0, v2 - v0)) <= 0.0;
         }
     }
 
@@ -156,6 +176,7 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
 
     NsVOut o;
     o.pos = U.view_proj[amp] * float4(pv, 1.0);
+    if (behind) o.pos.z *= NSG_BACK_Z;   /* Z invertida: un poco más lejos, sin cambiar la posición en pantalla ni el recorte */
     if (net || back) o.pos = float4(0.0, 0.0, 2.0, 1.0);   /* triángulo colapsado: los tres vértices en el mismo punto fuera del volumen de recorte */
     o.uv = float2(float(c.u), float(c.t));
     o.col = col;

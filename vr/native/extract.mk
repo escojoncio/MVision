@@ -100,6 +100,14 @@ test-cine: $(B)/test_ns_cine
 	$(B)/test_ns_cine
 .PHONY: test-cine
 
+# Réplica de escritorio de la presentación del renderer nativo sobre volcados (cabeza VR o cámara del motor; ver tools/nsvr.c).
+#   make -f vr/native/extract.mk nsvr         compila vr/native/build-extract/nsvr
+VRSRC := vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_cpuref.c vr/native/ns_gpu.c vr/native/ns_sink.c vr/native/ns_player.c vr/native/ns_fx.c vr/native/ns_fxcmp.c vr/native/ns_fx_export.c
+$(B)/nsvr: vr/native/tools/nsvr.c vr/native/ns_dump.c $(VRSRC) vr/native/ns_gpu.h vr/native/ns_gpu_types.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/tools/nsvr.c vr/native/ns_dump.c $(VRSRC) -lm -lpthread -o $@
+nsvr: $(B)/nsvr
+.PHONY: nsvr
+
 # Relleno por la verdad del motor (ns_fill): pruebas sintéticas y herramienta de volcados.
 #   make -f vr/native/extract.mk test-fill     pruebas sintéticas de ns_fill
 #   make -f vr/native/extract.mk nsfill        compila vr/native/build-extract/nsfill (ver tools/nsfill.c)

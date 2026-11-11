@@ -63,8 +63,21 @@ typedef uint8_t ns_u8;
 #define NSG_NET_EDGE_RATIO 2.0f
 #define NSG_NET_SLACK_M    1.0f
 #define NSG_NET_WELD_GAP_M 1.0f   /* una soldadura cuyo vértice del padre cae a más de esto de la posición propia del vértice => NSG_PF_NOWELD */
-#define NSG_NET_MAT_SCALE  1.5f   /* una columna de la matriz de pieza con norma mayor => matriz corrupta (a medio actualizar): la pieza no se dibuja */
+#define NSG_NET_MAT_SCALE  2.75f  /* una columna de la matriz de pieza con norma mayor => matriz corrupta (a medio actualizar): la pieza no se dibuja. Por encima del estirado máximo de los brazos de la IK
+                                   * (2,5 en vr_body.c, por la escala ~1,003 de las matrices del motor): con 1,5 un brazo estirado más de la mitad dejaba de dibujarse */
 #define NSG_INTENSITY_MAX 7.99975586f   /* = NS_INTENSITY_MAX (0x7FFF/4096) de ns_types.h */
+
+/* Reversos de las caras de una sola cara cuando NO se descartan (mundo en primera persona: doble cara). Muchas paredes son dos hojas de una cara en el MISMO plano, espalda con espalda (una por
+ * sala o por grupo de mapa); el motor solo dibuja la que mira a la cámara. Con doble cara y búfer de profundidad las dos empatan y la pared parpadea entre sus dos texturas (o se queda negra).
+ * El reverso se dibuja igual (tapa donde no hay anverso) pero con la profundidad de recorte multiplicada por NSG_BACK_Z (Z invertida: un 0,05 % más lejos), así que pierde siempre el empate.
+ * Réplica en C: ns_gpu_back_z (ns_gpu.c). */
+#define NSG_BACK_Z (1.0f - 1.0f / 2048.0f)
+/* Tamaño máximo de un triángulo en la pantalla del motor: la GPU original no dibuja el que mide más de 1023 px de ancho o 511 de alto (coordenadas de la GTE saturadas a -1024..1023). Con la
+ * cámara del juego (pantalla 3D) una rejilla o un suelo pegados a la cámara no existen en su imagen. Réplica en C: ns_gpu_tri_oversize (ns_gpu.c). */
+#define NSG_HW_MAX_W 1023.0f
+#define NSG_HW_MAX_H 511.0f
+#define NSG_HW_SXY_MIN (-1024.0f)
+#define NSG_HW_SXY_MAX 1023.0f
 
 /* Vértice local (unidades del motor). weld: NSG_NO_WELD o índice de vértice del modelo PADRE (NsPiece.parent) cuya posición transformada lo sustituye. */
 typedef struct { float p[3]; ns_u32 weld; } NsGpuVert;                                              /* 16 B */
@@ -128,6 +141,7 @@ typedef struct {
     vector_float4 fromvr[3];        /* mundo VR -> mundo del motor, filas de la 3x4 (xyz, traslación en w) */
     vector_float4 misc;             /* x = índice de ojo del pase cuando NO hay amplificación (0/1: máscara de caras de los efectos); y = descarte cercano del motor: z de vista de la cámara del juego (unidades del motor) por debajo de la cual un triángulo con algún vértice ahí no se dibuja (0 = sin descarte) */
     vector_float4 cull_eye;         /* xyz = ojo de la cámara del JUEGO en el mundo del motor; w = NSG_CULL_ALL: descartar las caras NSG_CF_ONESIDED vistas por detrás (cinemáticas: la cámara queda fuera de las salas y el motor no dibuja los techos desde arriba); NSG_CULL_SEMI: solo las de mallas semitransparentes (cabeza bajo el agua: el motor no dibuja la superficie del agua vista desde abajo); 0 = doble cara (primera persona) */
+    vector_float4 cam_x, cam_y;     /* cámara del JUEGO en el mundo del motor: xyz = eje X (derecha) / Y (abajo) de la vista; w = píxeles de la pantalla del motor por unidad de tangente (H; H por el factor vertical). Solo se usan con misc.y > 0 (tamaño máximo del hardware, NSG_HW_MAX_*) */
 } NsGpuUniforms;
 #endif
 

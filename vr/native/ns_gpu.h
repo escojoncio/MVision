@@ -65,6 +65,14 @@ int ns_gpu_tri_back(const float p0[3], const float p1[3], const float p2[3], con
 /* Política de descarte por detrás del sombreador (NsGpuUniforms.cull_eye.w = mode, NSG_CULL_*): 1 si una cara con esas banderas (NSG_CF_*) se descarta cuando se ve por detrás. */
 int ns_gpu_cull_applies(int mode, uint32_t cface_flags);
 void ns_gpu_vert_world(const NsGpuVert *pool, const NsGpuPiece *tbl, uint32_t gi, uint32_t vabs, float out[3]);
+/* Réplica en C del trato de los reversos que NO se descartan (ns_vertex): factor por el que se multiplica la profundidad de recorte (Z invertida) de un triángulo. `back` = se ve por detrás desde
+ * el ojo de la vista. NSG_BACK_Z para el reverso de una cara de una sola cara que el modo `mode` (NSG_CULL_*) no descarta: se dibuja, pero pierde el empate con el anverso que comparte su plano; 1 en
+ * los demás casos (anversos, mallas de doble cara, y reversos que el modo descarta). */
+float ns_gpu_back_z(int mode, uint32_t cface_flags, int back);
+/* Réplica en C del tamaño máximo del hardware (ns_vertex, solo con la cámara del juego): 1 si el triángulo, proyectado en la pantalla del motor, mide más de NSG_HW_MAX_W px de ancho o
+ * NSG_HW_MAX_H de alto y por tanto la GPU original no lo dibuja. v = vértices en la vista del motor (x derecha, y abajo, z delante; unidades del motor), hx/hy = píxeles por unidad de tangente
+ * (H y H por el factor vertical). Las coordenadas saturan a NSG_HW_SXY_MIN..MAX antes de medir, como las de la GTE. Un vértice con z <= 0 no tiene proyección: devuelve 0 (lo decide el descarte cercano). */
+int ns_gpu_tri_oversize(const float v[3][3], float hx, float hy);
 /* Comprobación de PIEZA (una vez por fotograma, tras rellenar la tabla): matriz corrupta (NSG_NET_MAT: no dibujar la pieza) y soldaduras cuyo vértice del padre se aleja más de NSG_NET_WELD_GAP_M de
  * la posición propia (NSG_NET_WELD: poner NSG_PF_NOWELD). nverts = nº de vértices de la malla de la pieza; mpu = metros VR por unidad del motor. Devuelve las causas. */
 uint32_t ns_gpu_net_piece(const NsGpuVert *pool, const NsGpuPiece *tbl, uint32_t gi, uint32_t nverts, float mpu, NsGpuNetPiece *out);
@@ -184,6 +192,16 @@ size_t ns_gpu_semi_merge(const float *mesh_depth, const uint8_t *mesh_abr, size_
 static inline uint64_t ns_gpu_fx_key(const NsEffect *e) { return ((uint64_t)e->src_key << 32) | ((uint64_t)e->idx << 8) | (uint64_t)e->sub; }
 
 /* Accesores para Swift (los arrays fijos de C llegan como tuplas) */
+/* 1 si la pieza lleva malla (el renderer la sube; si no está en el almacén es una malla ausente); 0 si el extractor no le encontró caras: no se dibuja ni se espera. */
+static inline int ns_gpu_piece_has_mesh(const NsPiece *p) { return p->mesh_id != 0; }
+/* Mallas AUSENTES de una escena: piezas que llevan malla y cuyo id no está en el almacén (lo que el renderer cuenta para retener la escena). Una pieza sin malla (modelo nulo o sin caras: el
+ * extractor la deja con mesh_id = 0 y NS_PF_HIDDEN) no es una ausencia: no hay nada que esperar. En línea para no atar ns_gpu.c al almacén. */
+static inline uint32_t ns_gpu_scene_misses(const NsScene *sc, const NsMeshStore *st) {
+    uint32_t n = 0;
+    const uint32_t np = sc->n_piece < sc->cap_piece ? sc->n_piece : sc->cap_piece;
+    for (uint32_t i = 0; i < np; i++) if (ns_gpu_piece_has_mesh(&sc->piece[i]) && !ns_store_get(st, sc->piece[i].mesh_id)) n++;
+    return n;
+}
 static inline const float *ns_scene_to_vr(const NsScene *s) { return s->to_vr; }
 static inline const float *ns_scene_cam_rot(const NsScene *s) { return s->cam.rot; }
 static inline const float *ns_scene_cam_eye(const NsScene *s) { return s->cam.eye; }

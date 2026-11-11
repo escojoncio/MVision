@@ -6,7 +6,11 @@
  *  5. vértice basura en el almacén de GPU: los triángulos que lo usan se colapsan (y solo ésos); el escenario (NS_IF_STATIC: agua, cielo) nunca se toca;
  *  6. mallas de la mano articulada propia en todas sus poses: 0 colapsos; con la matriz de la manopla corrupta: MAT;
  *  7. interpolación de matrices (ns_xf_lerp): sin escalas ni traslaciones fuera del rango de los extremos;
- *  8. sesgo `raise` de las piezas dinámicas (mínimo K, max y no suma; negativo y escenario intactos). */
+ *  8. sesgo `raise` de las piezas dinámicas (mínimo K, max y no suma; negativo y escenario intactos);
+ *  9. brazo estirado por la IK (hasta 2,5 veces): no es una matriz corrupta;
+ * 10. reversos de las caras de una sola cara en el mundo en primera persona: se dibujan pero pierden el empate con el anverso que comparte su plano (dos hojas espalda con espalda);
+ * 11. tamaño máximo del hardware con la cámara del juego: el triángulo de más de 1023 x 511 px de la pantalla del motor no se dibuja;
+ * 12. una pieza sin malla (modelo nulo o sin caras: mesh_id = 0) no es una «malla ausente»: no retiene la escena. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -325,6 +329,76 @@ static void test_raise_and_ir(void) {
     destroy(&w);
 }
 
+/* 9. la IK alarga los huesos del brazo hasta 2,5 veces (vr_body.c) sobre matrices del motor de escala ~1,003: la pieza se dibuja */
+static void test_ik_stretch(void) {
+    W w; build(&w, 0, 0.0f);
+    NsGpuNetPiece np;
+    for (float s = 1.0f; s <= 2.5001f; s += 0.25f) {
+        w.tb[0].w[0] = s * 1.0034f;                       /* hueso alargado a lo largo de su eje */
+        CHECK((ns_gpu_net_piece(w.pool, w.tb, 0, 8, 0.001f, &np) & NSG_NET_MAT) == 0, "brazo estirado x%.2f tratado como matriz corrupta (escala %.2f)", s, np.max_scale);
+    }
+    w.tb[0].w[0] = 3.0f;
+    CHECK((ns_gpu_net_piece(w.pool, w.tb, 0, 8, 0.001f, &np) & NSG_NET_MAT) != 0, "escala 3 no detectada");
+    ns_store_destroy(w.st); destroy(&w);
+}
+
+/* 10. reversos: dos hojas de una cara en el mismo plano, espalda con espalda, teseladas distinto (una pared vista por un lado y por el otro). Sin descarte de reversos (primera persona) el
+ * anverso debe ganar SIEMPRE la prueba de profundidad (Z invertida, compare >=), se dibuje antes o después y con el error de redondeo que sea. */
+static void test_back_faces(void) {
+    const uint32_t one = NSG_CF_ONESIDED | NSG_CF_TEX, two = NSG_CF_TEX;
+    CHECK(ns_gpu_back_z(NSG_CULL_NONE, one, 1) < 1.0f, "reverso de una cara sin descarte: debe alejarse (%f)", ns_gpu_back_z(NSG_CULL_NONE, one, 1));
+    CHECK(ns_gpu_back_z(NSG_CULL_NONE, one, 0) == 1.0f, "anverso: sin tocar");
+    CHECK(ns_gpu_back_z(NSG_CULL_NONE, two, 1) == 1.0f, "malla de doble cara: sin tocar");
+    CHECK(ns_gpu_back_z(NSG_CULL_ALL, one, 1) == 1.0f, "con descarte de reversos (pantalla 3D) no se dibuja: nada que alejar");
+    CHECK(ns_gpu_back_z(NSG_CULL_SEMI, one, 1) < 1.0f, "bajo el agua los reversos opacos se siguen dibujando: se alejan");
+    CHECK(ns_gpu_back_z(NSG_CULL_SEMI, one | NSG_CF_SEMI, 1) == 1.0f, "bajo el agua los semitransparentes de una cara se descartan");
+    /* pared en x = 0: la hoja A mira a +X (la ve el ojo), la hoja B a -X; el ojo en +X. Profundidad de recorte z/w con Z invertida y lejano infinito: cerca / distancia */
+    const float eye[3] = {1500, 1600, 300};
+    const float a0[3] = {0, 0, 0}, a1[3] = {0, 0, 4000}, a2[3] = {0, 3000, 0};          /* sentido tal que A es anverso desde +X */
+    const int a_back = ns_gpu_tri_back(a0, a1, a2, eye), b_back = ns_gpu_tri_back(a0, a2, a1, eye);
+    CHECK(a_back != b_back, "las dos hojas no pueden mirar al mismo lado");
+    long ties = 0, lost = 0, n = 0;
+    for (int i = 0; i < 20000; i++) {
+        const float d = rr(0.12f, 60.0f);                 /* distancia de vista (m) del mismo punto de la pared por las dos hojas */
+        const float noise = 1.0f + rr(-2e-5f, 2e-5f);     /* redondeo distinto de las dos teselaciones */
+        const float za = (0.1f / d) * ns_gpu_back_z(NSG_CULL_NONE, one, a_back), zb = (0.1f / (d * noise)) * ns_gpu_back_z(NSG_CULL_NONE, one, b_back);
+        const float front = a_back ? zb : za, back = a_back ? za : zb;
+        n++; ties += front == back; lost += !(front > back);
+    }
+    CHECK(lost == 0, "el anverso pierde o empata la profundidad en %ld de %ld muestras (empates %ld)", lost, n, ties);
+}
+
+/* 11. tamaño máximo del hardware (vista del motor: x derecha, y abajo, z delante; h = píxeles por unidad de tangente) */
+static void test_oversize(void) {
+    const float H = 161.0f, HY = 161.0f * 66.0f / 64.0f;
+    /* rejilla de un conducto a 13 cm de la cámara (medido en un volcado): 945 px de alto en la pantalla del motor */
+    const float grate[3][3] = {{402, -85, 111}, {105, 329, 97}, {1, -388, 160}};
+    CHECK(ns_gpu_tri_oversize(grate, H, HY) == 1, "triángulo de 945 px de alto: el hardware no lo dibuja");
+    const float wall[3][3] = {{-2000, -1500, 4000}, {2000, -1500, 4000}, {-2000, 1500, 4000}};      /* 161 x 124 px */
+    CHECK(ns_gpu_tri_oversize(wall, H, HY) == 0, "pared lejana descartada");
+    const float wide[3][3] = {{-700, 0, 200}, {700, 0, 200}, {0, 100, 200}};                         /* 1127 px de ancho, 83 de alto */
+    CHECK(ns_gpu_tri_oversize(wide, H, HY) == 1, "más de 1023 px de ancho: no se dibuja");
+    const float tall[3][3] = {{0, -330, 200}, {10, 330, 200}, {100, 0, 200}};                        /* 548 px de alto */
+    CHECK(ns_gpu_tri_oversize(tall, H, HY) == 1, "más de 511 px de alto: no se dibuja");
+    const float fits[3][3] = {{-600, -300, 200}, {600, -300, 200}, {0, 300, 200}};                    /* 966 x 498 px */
+    CHECK(ns_gpu_tri_oversize(fits, H, HY) == 0, "966 x 498 px cabe");
+    /* las coordenadas saturan a -1024..1023 antes de medir: un vértice a 5000 px cuenta como 1023 */
+    const float sat[3][3] = {{100, 0, 200}, {6300, 0, 200}, {100, 100, 200}};                         /* x: 80 y 5071 -> 1023: 943 px de ancho */
+    CHECK(ns_gpu_tri_oversize(sat, H, HY) == 0, "ancho medido tras saturar");
+}
+
+/* 12. piezas sin malla */
+static void test_empty_piece(void) {
+    W w; build(&w, 0, 0.0f);
+    CHECK(ns_gpu_scene_misses(&w.sc, w.st) == 0, "escena completa con mallas ausentes");
+    w.sc.piece[2].mesh_id = 0; w.sc.piece[2].flags |= NS_PF_HIDDEN;       /* como la deja el extractor con un modelo nulo o sin caras */
+    CHECK(ns_gpu_piece_has_mesh(&w.sc.piece[2]) == 0 && ns_gpu_piece_has_mesh(&w.sc.piece[1]) == 1, "pieza sin malla mal reconocida");
+    CHECK(ns_gpu_scene_misses(&w.sc, w.st) == 0, "una pieza sin malla cuenta como malla ausente (retendría la escena)");
+    w.sc.piece[1].mesh_id ^= 0x5555u;                                     /* malla que el almacén no tiene: ausente de verdad */
+    CHECK(ns_gpu_scene_misses(&w.sc, w.st) == 1, "malla ausente de verdad no contada");
+    ns_store_destroy(w.st); destroy(&w);
+}
+
 int main(void) {
     printf("test_ns_net: red de seguridad de vértices\n");
     test_chain();
@@ -335,6 +409,10 @@ int main(void) {
     test_hand();
     test_lerp();
     test_raise_and_ir();
+    test_ik_stretch();
+    test_back_faces();
+    test_oversize();
+    test_empty_piece();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }
