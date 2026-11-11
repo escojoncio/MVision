@@ -286,6 +286,8 @@ int vrfire_take_projectile(int kind, VrFireMat *m) {
         if (!vrfire_make_matrix(&r.map, &r.pose, shift, m)) { pop_req(); pop_infl(); S.st.passed++; return VRFIRE_PASS; }
         pop_req(); pop_infl();
         S.last = *m; S.st.subst++; if (kind == 0) S.flash_age = 0;
+        S.st.lat_last = (uint32_t)r.age; if (S.st.lat_last > S.st.lat_max) S.st.lat_max = S.st.lat_last;
+        if (kind == 0) fprintf(stderr, "[disparo] latencia gatillo->bala=%d VBlanks (~%d ms a 50 Hz) pendientes=%d\n", r.age, r.age * 20, S.nq);
         return VRFIRE_SUBST;
     }
     if ((S.auto_live || S.auto_tail > 0) && S.live_ok && vrfire_make_matrix(&S.live_map, &S.live, shift, m)) { S.last = *m; S.st.subst++; if (kind == 0) S.flash_age = 0; return VRFIRE_SUBST; }

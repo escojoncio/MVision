@@ -1383,8 +1383,8 @@ final class NativeRenderer {
         u.water_tint = SIMD4<Float>(screenOut.water_tint.0, screenOut.water_tint.1, screenOut.water_tint.2, screenOut.water_tint.3)
         let fv = fromVR12
         u.fromvr = (SIMD4<Float>(fv[0], fv[1], fv[2], fv[3]), SIMD4<Float>(fv[4], fv[5], fv[6], fv[7]), SIMD4<Float>(fv[8], fv[9], fv[10], fv[11]))
-        // misc.y: umbral del descarte cercano del motor (H/2 + 4 unidades) en los modos de pantalla con la cámara del juego; 0 en el mundo en primera persona (ver ns_vertex).
-        u.misc = SIMD4<Float>(layered ? 0 : Float(max(0, min(1, eyeIndex))), cullBack ? 0.5 * camH + 4 : 0, 0, 0)
+        // misc.y: plano z = H/2 de la GTE (el vértice más cerca se proyecta ahí; solo se descarta el triángulo sin vértices delante) en los modos de pantalla con la cámara del juego; 0 en el mundo en primera persona (ver ns_vertex).
+        u.misc = SIMD4<Float>(layered ? 0 : Float(max(0, min(1, eyeIndex))), cullBack ? 0.5 * camH : 0, 0, 0)
         // Descarte de reversos: cinemáticas = todas las caras de una cara (NSG_CULL_ALL); con la cabeza bajo el agua solo las semitransparentes (NSG_CULL_SEMI: la superficie del agua vista desde abajo
         // no se dibuja, como en el motor); si no, doble cara.
         let underwater = screenOut.water_tint.3 > 0.5 && screenOut.water_min.3 > 0.5

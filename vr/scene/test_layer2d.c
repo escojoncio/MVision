@@ -492,6 +492,49 @@ static void edge_case(const char *name, uint32_t mode, int x1, int x2, int y1, i
 }
 
 
+/* Panel (cinemática del motor: 2D encima de la pantalla 3D) con el rango horizontal del juego EU, 0x270..0xC66 = 2550 ciclos = 318,75 px de 320 (aw = 319): un rect negro a todo el ancho (las bandas de
+ * cinema.c) debe cubrir TAMBIÉN la última columna; antes el panel la dejaba transparente y por ese borde se colaba la geometría de la pantalla 3D. Un rango claramente menor (códec: 318 de 384) sigue
+ * recortado. */
+static void panel_range_case(const char *name, uint32_t mode, int x1, int x2, int nominal_w, int want_aw) {
+    gpu_capture_enable(0);
+    gpu_reset();
+    gpu_gp1(0x03000000);
+    gpu_gp1(0x08000000 | mode);
+    gpu_gp1(0x06000000 | (uint32_t)x1 | (uint32_t)x2 << 12);
+    gpu_gp1(0x07000000 | 0x13u | (0x13u + 256) << 10);
+    gpu_gp1(0x05000000 | 256u << 10);
+    env(0, 0, 1023, 511, 0, 0, 0);
+    gpu_gp0(0x02000000 | 0x00ff8040u); gpu_gp0(xy(0, 0)); gpu_gp0(xy(512, 256));   /* fondo de color (el «mundo» bajo el panel) */
+    gpu_capture_vram_start(1);
+    gpu_capture_enable(1);
+    env(0, 0, 1023, 511, 10, 0, 0);
+    gpu_gp0(0x60000000); gpu_gp0(xy(0, 210)); gpu_gp0(xy(nominal_w, 46));   /* banda inferior negra de ancho nominal, como cinema.c */
+    gpu_gp1(0x05000000);
+    const GpuDrawList *l = gpu_capture_frame();
+    gpu_capture_vram_start(0);
+    CHECK(l != NULL, "%s: lista", name);
+    if (!l) return;
+    VrScene sc;
+    GpuDrawList *c = run_list(l, &sc);
+    CHECK(c != NULL, "%s: escena", name);
+    if (!c) return;
+    CHECK(c->disp.aw == want_aw, "%s: aw del rango = %d (esperado %d)", name, c->disp.aw, want_aw);
+    VrLayer2D *L = vl2d_new();
+    vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    CHECK(vl2d_run(L, c, &sc, 0) == 1, "%s: vl2d_run panel", name);
+    int w = 0, h = 0;
+    const uint8_t *rg = vl2d_rgba(L, &w, &h);
+    CHECK(rg && w == nominal_w, "%s: capa de %d columnas (nominal %d)", name, w, nominal_w);
+    if (rg && w == nominal_w) {
+        const uint8_t *last = &rg[((size_t)230 * w + (w - 1)) * 4], *prev = &rg[((size_t)230 * w + (c->disp.aw - 1)) * 4];
+        const int slack = w - c->disp.aw <= 2;   /* el rango se queda corto un redondeo: la última columna también se dibuja; con un rango claramente menor, no */
+        CHECK(prev[3] == 255 && prev[0] == 0 && prev[1] == 0 && prev[2] == 0, "%s: la última columna del rango de la banda es negra opaca", name);
+        CHECK(slack ? (last[3] == 255 && last[0] == 0 && last[1] == 0 && last[2] == 0) : last[3] == 0, "%s: última columna de la banda %s (alfa %d)", name, slack ? "cubierta" : "fuera de rango", last[3]);
+    }
+    vl2d_free(L);
+    free_list(c);
+}
+
 /* modo de 24 bits (vídeo) con rango no estándar: el fondo de la pantalla completa debe ser el marco de la GPU (8 bits por canal, márgenes negros) */
 static void codec24_case(void) {
     gpu_capture_enable(0);
@@ -1144,6 +1187,9 @@ int main(void) {
     edge_case("codec: 384 entrelazado 480 lineas", 0x40 | 0x24, 0x230, 0xCB0, 0x13, 0x13 + 240);
     edge_case("codec: 640 entrelazado 480 lineas", 0x03 | 0x24, 0x280, 0xC80, 0x13, 0x13 + 240);
     codec24_case();
+    panel_range_case("panel 320, rango EU 2550 ciclos", 1, 0x270, 0xC66, 320, 319);
+    panel_range_case("panel 320, rango exacto", 1, 0x270, 0xC70, 320, 320);
+    panel_range_case("panel 384, rango 318 (códec)", 0x40, 0x230, 0x230 + 318 * 7, 384, 318);
     edge_case("320 con rango reducido a 288", 1, 0x270 + 16 * 8, 0x270 + 304 * 8, 0x13, 0x13 + 240);
     semi_mask_cases();
     offscreen_compose();

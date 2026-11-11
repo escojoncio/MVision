@@ -396,6 +396,19 @@ int main(void) {
     rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
     CHECK(rc == 0 && sc.n_inst == 1 && es.null_model == 1 && (sc.piece[0].flags & NS_PF_HIDDEN) && sc.piece[0].mesh_id == 0 && es.n_hidden_pieces == 1);
 
+    /* regresión (volcado de escena en sepia, mapa con cadenas de 10 y 8 extensiones): una pieza puede enlazar una cadena larga de extensiones; antes se cortaba a 4 y faltaban 6 modelos del escenario */
+    {
+        fresh();
+        uint32_t def12 = alloc(0x20 + 0x58 * 12); w32(def12, 1); w32(def12 + 4, 12);
+        uint32_t o12 = alloc(0x48 + 0x5C * 12);
+        wmat(o12, 4096, 0, 0, 0); w32(o12 + 0x24, def12); w32(o12 + 0x28, 0x57); w16(o12 + 0x2C, 1); w16(o12 + 0x2E, 1); w32(o12 + 0x34, LIGHTG);
+        w32(piece(o12, 0) + 0x40, DEF0 + 0x20); wmat(piece(o12, 0), 4096, 0, 0, 0);
+        for (int k = 0; k < 10; k++) { w32(piece(o12, k) + 0x48, piece(o12, k + 1)); w32(piece(o12, k + 1) + 0x40, DEF0 + 0x20); }
+        q1(o12);
+        rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
+        CHECK(rc == 0 && es.n_ext_pieces == 10 && es.ext_bad == 0 && sc.n_piece == 11);
+    }
+
     /* color precalculado versionado: mismo contenido = misma versión; contenido nuevo = versión nueva con el mismo mesh_id */
     fresh();
     q1(O0);

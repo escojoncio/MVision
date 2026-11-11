@@ -45,7 +45,7 @@ int main(void) {
     const uint32_t first = n;
     for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) { mk[n] = 1; ops[n++] = cell(px - 12 + 6 * i, py - 12 + 6 * j, 6, (uint16_t)((10 + i) | ((12 + j) << 5) | (20 << 10))); }
     VrMosaic m;
-    int r = vrmosaic_build(ops, n, mk, NULL, EYE, M, &m);
+    int r = vrmosaic_build(ops, n, mk, NULL, EYE, M, NULL, 0, &m);
     CHECK(r == 16 && m.n == 16, "16 celdas (%d)", r);
     CHECK(fabsf(m.depth - 2000.0f) < 1.0f, "profundidad de lo tapado: la del personaje, no la pared ni el objeto de al lado (%.1f)", m.depth);
     /* el centro del parche cae sobre el rayo del píxel central, a 0,97 de la profundidad */
@@ -63,12 +63,12 @@ int main(void) {
     CHECK(m.rgb[5][0] == ((11 << 3) | (11 >> 2)) && m.rgb[5][1] == ((13 << 3) | (13 >> 2)), "color de la celda 5: %u %u", m.rgb[5][0], m.rgb[5][1]);
     /* color de vértice a media luz: la mitad */
     ops[first].v[0].r = ops[first].v[0].g = ops[first].v[0].b = 64;
-    vrmosaic_build(ops, n, mk, NULL, EYE, M, &m);
+    vrmosaic_build(ops, n, mk, NULL, EYE, M, NULL, 0, &m);
     CHECK(m.rgb[0][0] == ((5 << 3) | (5 >> 2)), "modulación por el color del vértice: %u", m.rgb[0][0]);
     ops[first].v[0].r = ops[first].v[0].g = ops[first].v[0].b = 128;
     /* superficie inclinada bajo el mosaico: la profundidad sale interpolada en el píxel (1/z lineal) */
     ops[1] = quad3d(-300, -400, 300, 400, 1500, 3000);
-    vrmosaic_build(ops, n, mk, NULL, EYE, M, &m);
+    vrmosaic_build(ops, n, mk, NULL, EYE, M, NULL, 0, &m);
     {   float u = (50.0f / m.depth * HX + 0.0f);   /* comprobación de coherencia: el punto a esa profundidad en el rayo del píxel debe estar sobre el plano inclinado z = 2250 + 2,5 x */
         float xv = u * m.depth / HX;
         CHECK(fabsf(m.depth - (2250.0f + 2.5f * xv)) < 40.0f && m.depth > 2000.0f && m.depth < 2700.0f, "superficie inclinada: profundidad %.1f en x de vista %.1f", m.depth, xv); }
@@ -76,11 +76,11 @@ int main(void) {
     /* sin nada 3D bajo el mosaico (solo geometría lejos del centro): sin parche */
     GpuOp keep = ops[1], keep0 = ops[0];
     ops[1] = quad3d(900, 600, 1200, 900, 2000, 2000); ops[0] = quad3d(-3000, 1500, -2000, 2000, 6000, 6000);
-    CHECK(vrmosaic_build(ops, n, mk, NULL, EYE, M, &m) == 0 && m.n == 0, "sin superficie debajo: sin parche");
+    CHECK(vrmosaic_build(ops, n, mk, NULL, EYE, M, NULL, 0, &m) == 0 && m.n == 0, "sin superficie debajo: sin parche");
     ops[1] = keep; ops[0] = keep0;
     /* celdas sin texel resuelto (o transparente) no se emiten; sin celdas, nada */
     for (uint32_t i = first; i < n; i++) ops[i].fbk = 0;
-    CHECK(vrmosaic_build(ops, n, mk, NULL, EYE, M, &m) == 0, "sin realimentación resuelta: sin parche");
+    CHECK(vrmosaic_build(ops, n, mk, NULL, EYE, M, NULL, 0, &m) == 0, "sin realimentación resuelta: sin parche");
     /* como en los volcados reales: la captura no resuelve el texel (la celda se pisa su propia textura); el color sale de la VRAM de cierre de la lista, en el centro de cada celda */
     {
         uint16_t *vram = calloc(1024 * 512, sizeof *vram);
@@ -89,30 +89,72 @@ int main(void) {
             const int cxp = (ops[i].v[0].x + ops[i].v[3].x) / 2, cyp = (ops[i].v[0].y + ops[i].v[3].y) / 2, k = (int)(i - first);
             vram[cyp * 1024 + cxp] = (uint16_t)((1 + k) | ((31 - k) << 5) | (7 << 10) | 0x8000u);
         }
-        CHECK(vrmosaic_build(ops, n, mk, vram, EYE, M, &m) == 16 && fabsf(m.depth - 2000.0f) < 1.0f, "celdas sin resolver + VRAM de cierre: 16 celdas (%d)", m.n);
+        CHECK(vrmosaic_build(ops, n, mk, vram, EYE, M, NULL, 0, &m) == 16 && fabsf(m.depth - 2000.0f) < 1.0f, "celdas sin resolver + VRAM de cierre: 16 celdas (%d)", m.n);
         CHECK(m.rgb[0][0] == ((1 << 3) | (1 >> 2)) && m.rgb[0][1] == ((31 << 3) | (31 >> 2)) && m.rgb[0][2] == ((7 << 3) | (7 >> 2)), "color de la celda 0 leído de la VRAM: %u %u %u", m.rgb[0][0], m.rgb[0][1], m.rgb[0][2]);
         CHECK(m.rgb[15][0] == ((16 << 3) | (16 >> 2)) && m.rgb[15][1] == ((16 << 3) | (16 >> 2)), "color de la celda 15 leído de la VRAM: %u %u", m.rgb[15][0], m.rgb[15][1]);
         ops[first].flags = 0;
-        CHECK(vrmosaic_build(ops, n, mk, vram, EYE, M, &m) == 15, "una primitiva sin textura del actor no es celda (%d)", m.n);
+        CHECK(vrmosaic_build(ops, n, mk, vram, EYE, M, NULL, 0, &m) == 15, "una primitiva sin textura del actor no es celda (%d)", m.n);
         ops[first].flags = GPU_F_TEXTURED;
         /* una celda resuelta por la captura como transparente sigue siendo celda (no estropea el parche) pero no se emite */
         const uint16_t keep_fbt = ops[first].fbt;
         ops[first].fbk = 1; ops[first].fbt = 0;
-        CHECK(vrmosaic_is_cell(&ops[first], vram) && vrmosaic_cell_empty(&ops[first]) && vrmosaic_build(ops, n, mk, vram, EYE, M, &m) == 15, "celda transparente: celda válida, sin emitir (%d)", m.n);
+        CHECK(vrmosaic_is_cell(&ops[first], vram) && vrmosaic_cell_empty(&ops[first]) && vrmosaic_build(ops, n, mk, vram, EYE, M, NULL, 0, &m) == 15, "celda transparente: celda válida, sin emitir (%d)", m.n);
         ops[first].fbk = 0; ops[first].fbt = keep_fbt;
         free(vram);
     }
     for (uint32_t i = first; i < n; i++) ops[i].fbk = 1;
     memset(mk, 0, sizeof mk);
-    CHECK(vrmosaic_build(ops, n, mk, NULL, EYE, M, &m) == 0, "lista sin mosaico");
-    CHECK(vrmosaic_build(NULL, 0, mk, NULL, EYE, M, &m) == 0 && vrmosaic_build(ops, n, NULL, NULL, EYE, M, &m) == 0, "entradas nulas");
+    CHECK(vrmosaic_build(ops, n, mk, NULL, EYE, M, NULL, 0, &m) == 0, "lista sin mosaico");
+    CHECK(vrmosaic_build(NULL, 0, mk, NULL, EYE, M, NULL, 0, &m) == 0 && vrmosaic_build(ops, n, NULL, NULL, EYE, M, NULL, 0, &m) == 0, "entradas nulas");
     /* vértices saturados / detrás de la cámara no entran en la medida ni en la profundidad */
     for (uint32_t i = first; i < n; i++) mk[i] = 1;
     GpuOp bad = quad3d(-300, -400, 300, 400, 500, 500);
     for (int k = 0; k < 4; k++) bad.v[k].vflags = GPU_VF_SAT;
     ops[n++] = bad;
-    vrmosaic_build(ops, n, mk, NULL, EYE, M, &m);
+    vrmosaic_build(ops, n, mk, NULL, EYE, M, NULL, 0, &m);
     CHECK(m.n == 16 && fabsf(m.depth - 2000.0f) < 1.0f, "un polígono con vértices saturados no cuenta (%.1f)", m.depth);
+    /* una columna tapa el centro (d0013): el personaje, a 5000, queda detrás de una pared a 1300 que cubre la mitad izquierda del mosaico. Sin objetivo conocido cada celda se pega a lo que la tapa
+     * (pared a la izquierda, personaje a la derecha); con objetivo (punto dinámico en el rayo del centro, a 5000) NINGUNA celda va a la profundidad de la pared: todas sobre el personaje, y el test
+     * de profundidad del nativo las oculta tras ella. Nunca un plano a media sala. */
+    {
+        GpuOp o2[N]; uint8_t k2[N]; uint32_t n2 = 0; memset(k2, 0, sizeof k2);
+        o2[n2++] = quad3d(-3000, -2000, 3000, 2000, 6500, 6500);
+        o2[n2++] = quad3d(-1500, -800, 1500, 800, 5000, 5000);   /* personaje */
+        const int cx2 = (int)lrintf(CX + HX * 50.0f / 5000.0f), cy2 = (int)lrintf(CY + HY * 100.0f / 5000.0f);   /* el mosaico, 4x4 de 6 px, sobre el punto de vista (50, 100, 5000) */
+        o2[n2++] = quad3d(-3000, -2000, 12.0f, 2000, 1300, 1300);   /* pared cercana: cubre x de vista < 12 a 1300, o sea hasta el píxel central: la mitad izquierda de la rejilla */
+        for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) { k2[n2] = 1; o2[n2++] = cell(cx2 - 12 + 6 * i, cy2 - 12 + 6 * j, 6, (uint16_t)(10 | (12 << 5) | (20 << 10))); }
+        VrMosaic m2;
+        CHECK(vrmosaic_build(o2, n2, k2, NULL, EYE, M, NULL, 0, &m2) == 16, "d0013 sin objetivo: 16 celdas");
+        int near_wall = 0, near_char = 0;
+        for (int c = 0; c < 16; c++) { float zc = 0; for (int a = 0; a < 3; a++) { float d = m2.p[c][0][a] - EYE[a]; zc += d * d; } zc = sqrtf(zc);   /* distancia al ojo: aproxima la profundidad (rayos casi axiales) */
+                                       near_wall += zc < 2000.0f; near_char += zc > 4000.0f; }
+        CHECK(near_wall >= 6 && near_char >= 6, "sin objetivo: cada celda sobre lo que la tapa (pared %d, personaje %d)", near_wall, near_char);
+        /* punto dinámico del personaje: en el rayo del centro, a 5000 de profundidad (mundo = ojo + M * vista) */
+        float pt[1][3];
+        { const float v[3] = {50.0f, 100.0f, 5000.0f};   /* vista (50, 100, 5000): se proyecta en el píxel central de la rejilla */
+          for (int a = 0; a < 3; a++) pt[0][a] = EYE[a] + M[3 * a] * v[0] + M[3 * a + 1] * v[1] + M[3 * a + 2] * v[2]; }
+        CHECK(vrmosaic_build(o2, n2, k2, NULL, EYE, M, (const float (*)[3])pt, 1, &m2) == 16, "d0013 con objetivo: 16 celdas");
+        int wall = 0;
+        for (int c = 0; c < 16; c++) { float zc = 0; for (int a = 0; a < 3; a++) { float d = m2.p[c][0][a] - EYE[a]; zc += d * d; } wall += sqrtf(zc) < 4000.0f; }
+        CHECK(wall == 0 && fabsf(m2.depth - 5000.0f) < 5.0f, "con objetivo: ninguna celda sobre la pared (%d), profundidad %.1f", wall, m2.depth);
+        /* objetivo lejos del rayo (otro personaje a un lado, a 2000 uds): no cuenta, se usa lo de más cerca bajo cada celda */
+        float far_pt[1][3];
+        { const float v[3] = {2500.0f, 100.0f, 5000.0f}; for (int a = 0; a < 3; a++) far_pt[0][a] = EYE[a] + M[3 * a] * v[0] + M[3 * a + 1] * v[1] + M[3 * a + 2] * v[2]; }
+        vrmosaic_build(o2, n2, k2, NULL, EYE, M, (const float (*)[3])far_pt, 1, &m2);
+        wall = 0;
+        for (int c = 0; c < 16; c++) { float zc = 0; for (int a = 0; a < 3; a++) { float d = m2.p[c][0][a] - EYE[a]; zc += d * d; } wall += sqrtf(zc) < 2000.0f; }
+        CHECK(m2.n == 16 && wall >= 6, "objetivo fuera del rayo: se ignora (%d celdas sobre la pared)", wall);
+        /* un semitransparente (agua, cristal) por delante no tapa: las celdas van al personaje */
+        o2[2].flags |= GPU_F_SEMI;
+        vrmosaic_build(o2, n2, k2, NULL, EYE, M, NULL, 0, &m2);
+        wall = 0;
+        for (int c = 0; c < 16; c++) { float zc = 0; for (int a = 0; a < 3; a++) { float d = m2.p[c][0][a] - EYE[a]; zc += d * d; } wall += sqrtf(zc) < 4000.0f; }
+        CHECK(m2.n == 16 && wall == 0, "un semitransparente no tapa (%d celdas delante)", wall);
+        /* con objetivo pero sin ninguna superficie opaca bajo las celdas por detrás del tapante: van a la profundidad del objetivo */
+        o2[2].flags &= ~GPU_F_SEMI; o2[1] = quad3d(900, 600, 1200, 900, 5000, 5000); o2[0] = quad3d(900, 600, 1200, 900, 6500, 6500);
+        vrmosaic_build(o2, n2, k2, NULL, EYE, M, (const float (*)[3])pt, 1, &m2);
+        CHECK(m2.n == 16 && fabsf(m2.depth - 5000.0f) < 5.0f, "solo hay lo que tapa: celdas a la profundidad del objetivo (%.1f)", m2.depth);
+    }
     printf("test_mosaic: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

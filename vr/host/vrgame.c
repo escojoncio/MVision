@@ -620,6 +620,13 @@ void vrgame_reset(void) {
 }
 void vrgame_set_enabled(int body_ok, int fire_ok) { G.body_ok = body_ok; G.fire_ok = fire_ok; }
 
+/* Balas que tiene el arma VR (cargador montado + recámara). */
+static int weapon_held(const WeaponState *st) { return (st->mag_inserted ? st->mag_rounds : 0) + (st->chambered ? 1 : 0); }
+/* Reinicia el arma VR para que arranque de nuevo desde el cargador del juego (como al volver a mostrarla: sin cargador si el juego no tiene balas) y suelta lo que tuviera de la recarga en curso. */
+static void weapon_resync(Slot *sl) {
+    sl->def->init(sl->st); sl->st->def = sl->def;
+    G.boot_done = 0; G.prev_mag_in = 0; G.unready_t = 0;
+}
 static int cb_ammo_reserve(int id) {
     /* El cargador VR refleja al del juego: al arrancar el arma se llena con el cargador del juego (que no cuenta en la reserva), también con reserva 0 o menor que el cargador. */
     if (!G.boot_done && G.mag_weapon) return G.game_mag > 0 ? G.game_mag : 0;
@@ -1020,14 +1027,15 @@ typedef struct {
     int trig_armed, chambered, mag_in;
     int gweapon, gitem, gammo;
     float d_grip, d_supp;
+    int gmag, reserve, rmode, vr_rounds;       /* cargador del juego, reserva de la recarga VR, modo de recarga (0 manual, 1 simplificada, 2 automática) y balas del arma VR (cargador + recámara; -1 sin arma VR) */
 } ArmaDiag;
 static void arma_diag(uint64_t now, const ArmaDiag *a) {
     static uint64_t next_ns;
     if (now < next_ns) return;
     next_ns = now + 1000000000ull;
-    fprintf(stderr, "[arma] slot=%d carga=%d modo=%d fire_ok=%d cam=%d nucleo=%d mano_arma_valida=%d | recarga=%d disparo_permitido=%d gatillo=%.2f (crudo %.2f) armado=%d recamara=%d cargador=%d | fo.engaged=%d disparos=%u supresor=%d | juego: arma=%d objeto=%d municion=%d | dist empuñadura_arma-agarre_mando=%.3fm mano_libre-soporte=%.3fm\n",
+    fprintf(stderr, "[arma] slot=%d carga=%d modo=%d fire_ok=%d cam=%d nucleo=%d mano_arma_valida=%d | recarga=%d disparo_permitido=%d gatillo=%.2f (crudo %.2f) armado=%d recamara=%d cargador=%d | fo.engaged=%d disparos=%u supresor=%d | juego: arma=%d objeto=%d municion=%d cargador_juego=%d reserva=%d modo_recarga=%d balas_vr=%d | dist empuñadura_arma-agarre_mando=%.3fm mano_libre-soporte=%.3fm\n",
             a->eq_slot, a->load, a->mode, G.fire_ok, a->cam, a->core, a->gpw, a->rstate, a->fire_allowed, a->trig, a->trig_raw, a->trig_armed, a->chambered, a->mag_in,
-            a->engaged, G.shots, a->supp, a->gweapon, a->gitem, a->gammo, a->d_grip, a->d_supp);
+            a->engaged, G.shots, a->supp, a->gweapon, a->gitem, a->gammo, a->gmag, a->reserve, a->rmode, a->vr_rounds, a->d_grip, a->d_supp);
 }
 
 uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
@@ -1098,6 +1106,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         if (!G.active || slot != G.cur) G.prev_mag_in = mi;      /* arma recién mostrada: su cargador inicial no es un gesto de recarga */
         ri.mag_in_edge = mi && !G.prev_mag_in;
         ri.ready = mi && sl->st->chambered;
+        ri.no_mag = weapon_held(sl->st) == 0;        /* sin balas en el arma VR (cargador montado vacío incluido): ver VrReloadIn.no_mag */
         G.prev_mag_in = mi;
     } else {
         G.prev_mag_in = 0;
@@ -1136,7 +1145,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         G.ro = ro;
         if (core && bs->weapon >= 0) {
             ArmaDiag ad = {eq_slot, eq_slot >= 0 ? atomic_load(&SL[eq_slot].state) : -1, 0, cam, core, gp[w].valid, ro.state, ro.fire_allowed, fo.engaged, game_has_suppressor(bs),
-                           hs[w].trigger, -1.0f, -1, -1, -1, bs->weapon, bs->item, G.ammo_game, -1.0f, -1.0f};
+                           hs[w].trigger, -1.0f, -1, -1, -1, bs->weapon, bs->item, G.ammo_game, -1.0f, -1.0f, bs->magazine, vrreload_ammo_reserve(bs->weapon), rmode, -1};
             arma_diag(now, &ad);
         }
         publish_hand_pose(hs, gp, right, NULL, 0);
@@ -1166,7 +1175,8 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
 
     /* tope/sincronía del cargador VR con el del juego (vr_reload.h): solo con cargador dentro y fuera de la espera de recarga */
     if (G.mag_weapon) {
-        if (ro.state == VRR_EMPTY && G.prev_state != VRR_EMPTY) { st->chambered = 0; st->mag_rounds = 0; }   /* el juego vació: el VR también */
+        if (ro.state == VRR_EMPTY && G.prev_state != VRR_EMPTY && weapon_held(st) > 0) weapon_resync(sl);   /* el juego vació y el VR aún tiene balas: se reinicia desde el juego (sin cargador); si ya estaba vacío por disparar se queda como está (cargador vacío y corredera retenida) */
+        if (G.ammo_game >= 0 && weapon_held(st) > G.ammo_game) weapon_resync(sl);   /* el arma VR no puede tener más balas que el total del juego (carga de zona sin munición, munición perdida): se reinicia desde el juego */
         if (ro.state == VRR_READY && st->mag_inserted) {
             if (ro.sync_rounds >= 0) { if (ro.sync_force || st->mag_rounds > ro.sync_rounds) st->mag_rounds = ro.sync_rounds; }
             if (ro.sync_chambered >= 0) { if (ro.sync_force || st->chambered > ro.sync_chambered) st->chambered = ro.sync_chambered; }
@@ -1363,14 +1373,16 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         int lz_on = gid == 0 && !duct && bs->in_control && wlaser_raised(&lz);
         float lz_hit_m = -1.0f;
         if (lz_on && map.valid) {
-            /* El rayo acaba en el primer impacto con el escenario del juego: el menor de (a) las paredes HZD del propio juego (alcance completo, misma máscara que su línea de visión) y
-             * (b) la geometría sólida nativa de vr_headcol (suelo, techo, puertas, objetos; solo lo cercano a la cabeza). Enemigos y objetos que se mueven no cortan el rayo. */
+            /* El rayo acaba en el primer impacto con el escenario del juego: el menor de (a) las paredes HZD del propio juego (alcance completo, misma máscara que su línea de visión),
+             * (b) la geometría sólida nativa de vr_headcol (suelo, techo, puertas, objetos; solo lo cercano a la cabeza) y (c) el primer enemigo (vrhit_probe, volúmenes de la bala). */
             WVec3 fw = wquat_rotate(wquat_normalize(lz.q), wv(0, 0, -1));
             float pu[3] = {lz.p.x, lz.p.y, lz.p.z}, du[3] = {fw.x, fw.y, fw.z}, ow[3], dw[3];
             vrfire_pos_to_world(&map, pu, ow); vrfire_dir_to_world(&map, du, dw);
             float reach = WLASER_MAX_M * map.units_per_m, t = vrhzd_raycast(ram, ow, dw, reach, VRHZD_SKIP_SIGHT);
             float t2 = mv_vrhost_ray_distance(ow, dw, t >= 0.0f ? t : reach);
             if (t2 >= 0.0f) t = t2;
+            float te = vrhit_probe(ram, ow, dw, t >= 0.0f ? t : reach);      /* enemigos y cámaras del juego: los mismos volúmenes con los que impacta la bala */
+            if (te >= 0.0f) t = te;
             if (t >= 0.0f) lz_hit_m = t / map.units_per_m;
         }
         pthread_mutex_lock(&HM);
@@ -1412,7 +1424,8 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     if (bs->weapon >= 0) {
         ArmaDiag ad = {eq_slot, eq_slot >= 0 ? atomic_load(&SL[eq_slot].state) : -1, 1, cam, core, gp[w].valid, ro.state, ro.fire_allowed, fo.engaged, (in.game_flags & WGF_SUPP) != 0,
                        hs[w].trigger, in.trigger[0], gid == 0 ? w_pist_trig_armed(st) : -1, st->chambered, st->mag_inserted, bs->weapon, bs->item, G.ammo_game,
-                       sqrtf((gp[w].p[0] - in.hand[0].p.x) * (gp[w].p[0] - in.hand[0].p.x) + (gp[w].p[1] - in.hand[0].p.y) * (gp[w].p[1] - in.hand[0].p.y) + (gp[w].p[2] - in.hand[0].p.z) * (gp[w].p[2] - in.hand[0].p.z)), gp[o].valid ? wcore_hand_dist(st, &in, 1, WP_SUPPORT) : -1.0f};
+                       sqrtf((gp[w].p[0] - in.hand[0].p.x) * (gp[w].p[0] - in.hand[0].p.x) + (gp[w].p[1] - in.hand[0].p.y) * (gp[w].p[1] - in.hand[0].p.y) + (gp[w].p[2] - in.hand[0].p.z) * (gp[w].p[2] - in.hand[0].p.z)), gp[o].valid ? wcore_hand_dist(st, &in, 1, WP_SUPPORT) : -1.0f,
+                       bs->magazine, vrreload_ammo_reserve(bs->weapon), rmode, weapon_held(st)};
         arma_diag(now, &ad);
     }
     if (G.det_t > 0) { G.det_t--; if (bs->in_control) out |= PAD_DETONATE; }

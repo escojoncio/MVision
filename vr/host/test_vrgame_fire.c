@@ -14,6 +14,7 @@
 #include "vr_fire.h"
 #include "vr_hands.h"
 #include "vr_pose.h"
+#include "vr_reload.h"
 #include "vr_grip.h"
 #include "vrgame.h"
 #include "w_laser.h"
@@ -52,6 +53,7 @@ static BridgeState bs;
 static WeaponState *pist_st;
 static const WeaponDef *pist_def;
 static int sq_seen;
+static int r1_edges;               /* flancos de R1 que el anfitrión pulsó al juego (maniobra de recarga) */
 
 static void set_hand(float trig, float grip) {
     MvVrHand h;
@@ -60,7 +62,7 @@ static void set_hand(float trig, float grip) {
     mv_vrgame_set_hand(1, &h);
 }
 static void vbl(float trig, int n) {
-    for (int i = 0; i < n; i++) { vrgame_test_advance(8000000ull); set_hand(trig, 1.0f);   /* reloj inyectado: 8 ms por VBlank de prueba, sin depender de la carga de la máquina */ uint16_t o = vrgame_pad(0, &bs, ram); if (o & PAD_SQUARE) sq_seen++; }
+    for (int i = 0; i < n; i++) { vrgame_test_advance(8000000ull); set_hand(trig, 1.0f);   /* reloj inyectado: 8 ms por VBlank de prueba, sin depender de la carga de la máquina */ uint16_t o = vrgame_pad(0, &bs, ram); if (o & PAD_SQUARE) sq_seen++; { static int r1_prev; int r1 = (o >> 11) & 1; if (r1 && !r1_prev) r1_edges++; r1_prev = r1; } }
 }
 static void world(int weapon, int mag, int total) {
     memset(&bs, 0, sizeof bs);
@@ -701,6 +703,26 @@ static void laser_stops_at_walls(void) {
     CHECK(drawn_laser(org, ax, &len) == 0, "superficie a 2 cm de la boca: nada que dibujar");
     ray_stub_mm = -1; lvbl(p, q, 0.0f, 2);
     CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "espacio abierto otra vez: 15 m (%.3f)", len);
+    /* un enemigo en el rayo lo corta como corta la bala (vr_hit): sin esto el punto caía en la pared de detrás del enemigo */
+    {
+        const uint32_t tb = 0x800B7660u + 72u * 5u;
+        w32r(0x800ACB9C, 1);
+        for (int pass = 0; pass < 3; pass++) {
+            float dist_m = pass == 2 ? 6.0f : 4.0f;
+            if (pass == 1) hzd_wall(ow, dw, 9.0f * map.units_per_m);
+            if (pass == 2) hzd_wall(ow, dw, 2.0f * map.units_per_m);
+            w16r(tb, 0xDF); w16r(tb + 2, 2); w16r(tb + 4, 1);
+            for (int k = 0; k < 3; k++) { w16r(tb + 8 + 2 * k, (int)lroundf(ow[k] + dw[k] * dist_m * map.units_per_m)); w16r(tb + 16 + 2 * k, 600); }
+            lvbl(p, q, 0.0f, 2);
+            float l = 0;
+            CHECK(drawn_laser(org, ax, &l) == 1, "enemigo a %.0f m (pared %s): láser dibujado", dist_m, pass == 0 ? "ninguna" : pass == 1 ? "a 9 m" : "a 2 m");
+            if (pass < 2) CHECK(l < dist_m - 0.05f && l > dist_m - 1.1f, "enemigo a %.0f m: el rayo acaba en su volumen, no detrás (%.3f m)", dist_m, l);
+            else CHECK(fabsf(l - (2.0f - WLASER_SURF_GAP_M)) < 0.01f, "pared a 2 m delante del enemigo a 6 m: manda la pared (%.3f m)", l);
+        }
+        memset(ram + (tb & 0x1FFFFF), 0, 72);
+        hzd_wall(ow, dw, 20.0f * map.units_per_m); lvbl(p, q, 0.0f, 2);
+        CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "sin el enemigo: 15 m otra vez (%.3f)", len);
+    }
     vrgame_reset();
     rec = saved;
 }
@@ -797,6 +819,7 @@ static int drawn_point(WPoint pt, float R[9], float out[3]) {
 static int hp_item(int side) { int it; float tr, th; vrgame_hand_pose_in(side, &it, &tr, &th); return it; }
 /* Recarga automática: con balas en el cargador del juego el arma VR no puede quedarse muerta. Se reproduce el fallo del visor: la cuenta VR se adelanta a la del juego (disparos VR que el
  * juego no hizo) y la pistola queda con la corredera abierta y sin bala mientras el juego tiene 5 en el cargador y ninguna en reserva (la recarga automática del arma exige reserva > 0). */
+static int vr_held(void) { return (pist_st->mag_inserted ? pist_st->mag_rounds : 0) + pist_st->chambered; }
 static void auto_reload_never_dead(void) {
     printf("-- recarga automática: arma VR vacía con balas en el cargador del juego --\n");
     world(0, 5, 5);
@@ -812,7 +835,9 @@ static void auto_reload_never_dead(void) {
     mv_vrgame_status(&st);
     CHECK(st.shots == s0 && !pist_st->chambered, "antes del plazo sigue vacía (el gatillo no dispara): disparos %u recámara %d", st.shots - s0, pist_st->chambered);
     vbl(0.0f, 260);                                   /* > 2 s en total (8 ms por VBlank de prueba) */
-    CHECK(pist_st->mag_inserted && pist_st->chambered && pist_st->mag_rounds == 4, "pasado el plazo: lista con la cuenta del juego (cargador %d, recámara %d, balas %d)", pist_st->mag_inserted, pist_st->chambered, pist_st->mag_rounds);
+    /* con la munición del juego como reserva (arma VR sin balas) la recarga automática del arma arranca antes del plazo (y en esta prueba, con la corredera cerrada y el estado forzado a mano, pierde una bala al
+     * montar); si no, el plazo la deja lista con la cuenta del juego (4 + 1): en los dos casos queda lista con 4 o 5 balas */
+    CHECK(pist_st->mag_inserted && pist_st->chambered && vr_held() >= 4 && vr_held() <= 5, "pasado el plazo: lista (cargador %d, recámara %d, balas %d)", pist_st->mag_inserted, pist_st->chambered, pist_st->mag_rounds);
     vbl(0.0f, 5); vbl(0.9f, 12); vbl(0.0f, 5);
     mv_vrgame_status(&st);
     CHECK(st.shots == s0 + 1, "y vuelve a disparar (disparos %u)", st.shots - s0);
@@ -830,6 +855,81 @@ static void auto_reload_never_dead(void) {
     pist_st->mag_rounds = 0; pist_st->chambered = 0;
     vbl(0.0f, 300);
     CHECK(!pist_st->chambered, "recarga manual: sin puesta a punto automática");
+    mv_vrgame_set_options(1, 2);
+}
+
+
+/* Munición del juego tras un disparo: el cargador y el total bajan una bala por disparo del juego (cuadrado pulsado con el arma lista). */
+static void game_shots_follow(uint32_t *seen) {
+    MvVrGameStatus st; mv_vrgame_status(&st);
+    while (*seen < st.shots) { (*seen)++; if (bs.magazine > 0) bs.magazine--; if (bs.weapon_ammo[0] > 0) bs.weapon_ammo[0]--; }
+}
+static void vbl_game(float trig, int n, uint32_t *seen) {
+    for (int i = 0; i < n; i++) {
+        vbl(trig, 1); game_shots_follow(seen);
+        if (r1_edges >= 2) { r1_edges = 0; bs.magazine = bs.weapon_ammo[0] < 12 ? bs.weapon_ammo[0] : 12; }   /* R1 doble = desequipar y equipar: el juego carga su cargador (medido, ver vr_reload.h) */
+    }
+}
+/* Munición del juego tras agotar las balas y tras cargas de zona (log del visor, 2026-11-11: recoger 12 balas con el arma vacía dejaba el cargador VR vacío para siempre; tras un cambio de zona
+ * sin balas la pistola salía cargada). El juego sube el total al recoger (y a veces carga su cargador); el arma VR debe quedar lista (automática) o con reserva para el gesto (resto de modos) y
+ * nunca llevar más balas que el total del juego. */
+static uint32_t shots_now(void) { MvVrGameStatus st; mv_vrgame_status(&st); return st.shots; }
+static void drain_pistol(uint32_t *seen) {      /* dispara hasta que el juego se queda sin balas (la cuenta VR puede ir una por delante: la recarga automática la iguala después) */
+    for (int k = 0; k < 60 && bs.weapon_ammo[0] > 0; k++) { vbl_game(0.9f, 12, seen); vbl_game(0.0f, 14, seen); }
+}
+static void ammo_pickup_after_empty(void) {
+    printf("-- munición: gastar todo, recoger 12 y recargar --\n");
+    for (int variant = 0; variant < 2; variant++) {        /* el juego carga solo su cargador al recoger (1) o lo deja a 0 (0) */
+        for (int mode = 0; mode <= 2; mode++) {
+            vrreload_init(NULL);
+            world(0, 12, 12);
+            fresh_pistol();
+            mv_vrgame_set_options(1, mode);
+            vbl(0.0f, 20);
+            uint32_t seen = shots_now();
+            if (mode == 2) { drain_pistol(&seen); vbl_game(0.0f, 300, &seen); }
+            else { pist_st->mag_rounds = 0; pist_st->chambered = 0; bs.magazine = 0; bs.weapon_ammo[0] = 0; vbl(0.0f, 300); }
+            CHECK(bs.weapon_ammo[0] == 0 && vr_held() == 0, "modo %d: sin balas, arma VR vacía (%d)", mode, vr_held());
+            bs.weapon_ammo[0] = 12; bs.magazine = variant ? 12 : 0;      /* recoge 12 balas */
+            vbl_game(0.0f, 400, &seen);
+            int res = vrreload_ammo_reserve(0);
+            printf("   modo %d variante %d: juego mag=%d total=%d | VR insertado=%d balas=%d recamara=%d reserva=%d\n", mode, variant, bs.magazine, bs.weapon_ammo[0], pist_st->mag_inserted, pist_st->mag_rounds, pist_st->chambered, res);
+            if (mode == 2) {
+                CHECK(pist_st->mag_inserted && pist_st->chambered && vr_held() <= 12 && vr_held() > 0, "automática: tras recoger 12 el arma VR queda lista (balas %d)", vr_held());
+            } else {
+                CHECK(res == 12 || (pist_st->mag_inserted && pist_st->chambered), "modo %d: con 12 recogidas hay reserva para el gesto (reserva %d) o ya está lista", mode, res);
+            }
+        }
+    }
+    /* automática: una vez lista dispara de nuevo */
+    {
+        world(0, 12, 12); fresh_pistol(); mv_vrgame_set_options(1, 2); vbl(0.0f, 20);
+        uint32_t seen = shots_now(); drain_pistol(&seen); vbl_game(0.0f, 300, &seen);
+        bs.weapon_ammo[0] = 12; bs.magazine = 0;
+        vbl_game(0.0f, 1200, &seen);
+        MvVrGameStatus st; mv_vrgame_status(&st); uint32_t s0 = st.shots;
+        vbl_game(0.9f, 12, &seen); vbl_game(0.0f, 10, &seen);
+        mv_vrgame_status(&st);
+        CHECK(st.shots == s0 + 1, "tras recoger 12 y recargar solo, vuelve a disparar (disparos %u, juego mag=%d total=%d, VR balas %d)", st.shots - s0, bs.magazine, bs.weapon_ammo[0], vr_held());
+    }
+    /* cambio de zona: el arma VR cargada, el juego pasa a una zona sin balas (con el tamaño de cargador a 0 durante la carga): no puede quedar «cargada» */
+    for (int mode = 0; mode <= 2; mode++) {
+        world(0, 10, 10); fresh_pistol(); mv_vrgame_set_options(1, mode); vbl(0.0f, 20);
+        CHECK(pist_st->mag_inserted && pist_st->chambered, "zona: arranca cargada (modo %d)", mode);
+        uint32_t seen = shots_now();
+        world(0, 0, 0); bs.magazine_max = 0;                          /* carga: el motor sin arma ni cargador */
+        vbl_game(0.0f, 60, &seen);
+        world(0, 0, 0);                                               /* zona nueva sin balas */
+        vbl_game(0.0f, 60, &seen);
+        MvVrGameStatus st; mv_vrgame_status(&st); uint32_t s0 = st.shots;
+        vbl_game(0.9f, 12, &seen); vbl_game(0.0f, 10, &seen);
+        mv_vrgame_status(&st);
+        CHECK(vr_held() == 0 && !pist_st->chambered && !pist_st->mag_inserted && st.shots == s0, "zona sin balas: el arma VR sale sin cargador (no «cargada»: cargador montado con la corredera cerrada) y no dispara (modo %d, balas %d, cargador %d, disparos %u)", mode, vr_held(), pist_st->mag_inserted, st.shots - s0);
+    }
+    /* el arma VR no puede llevar más balas que el total del juego (munición perdida sin pasar por disparos) */
+    world(0, 12, 12); fresh_pistol(); mv_vrgame_set_options(1, 2); vbl(0.0f, 20);
+    bs.magazine = 3; bs.weapon_ammo[0] = 3; vbl(0.0f, 20);
+    CHECK(vr_held() <= 3, "el total del juego baja a 3: el arma VR no pasa de 3 balas (%d)", vr_held());
     mv_vrgame_set_options(1, 2);
 }
 
@@ -999,6 +1099,7 @@ int main(void) {
     aim_guard();
     two_hand_pistol();
     auto_reload_never_dead();
+    ammo_pickup_after_empty();
     laser_stops_at_walls();       /* al final: consume números aleatorios y las pruebas anteriores dependen de la secuencia */
 
     printf("%s vrgame_fire: %d comprobaciones, %d fallos\n", fails ? "FALLO" : "OK", checks, fails);

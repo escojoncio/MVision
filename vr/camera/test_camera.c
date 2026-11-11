@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include "vr_camera.h"
 #include "vr_usermap.h"
 #include "vr_scene.h"
@@ -895,6 +896,33 @@ static void test_prone_dumps(void) {
     if (!loaded) printf("(volcados de gateo no encontrados en %s: sin prueba de tumbado)\n", root);
 }
 
+/* Cámara de evento sobre los volcados REALES del visor (build 0d4635f; /tmp/a30/Dumps o VRCAM_DUMPS30): solo el panel del ascensor (d0024: control, banderas de cámara 0x2, retrollamada 0x800C4E9C,
+ * estado 0x20000000) la activa; conductos (d0020-d0023), gateo, pared (d0028), la llegada sin control (d0025), cine y fin de partida no. */
+static void test_event_dumps(void) {
+    const char *root = getenv("VRCAM_DUMPS30"); if (!root) root = "/tmp/a30/Dumps";
+    static uint8_t real[BRIDGE_RAM_SIZE];
+    static const struct { int n, want; } W[] = {{19, 0}, {20, 0}, {21, 0}, {22, 0}, {23, 0}, {24, 1}, {25, 0}, {26, 0}, {27, 0}, {28, 0}};
+    int loaded = 0;
+    for (unsigned i = 0; i < sizeof W / sizeof W[0]; i++) {
+        char pre[16], path[600]; snprintf(pre, sizeof pre, "d%04d_", W[i].n);
+        DIR *d = opendir(root); if (!d) break;
+        struct dirent *e; path[0] = 0;
+        while ((e = readdir(d)))
+            if (!strncmp(e->d_name, pre, 6) && strstr(e->d_name, "_stage") && !strstr(e->d_name, ".tmp")) { snprintf(path, sizeof path, "%s/%s/ram.bin", root, e->d_name); break; }
+        closedir(d);
+        FILE *f = path[0] ? fopen(path, "rb") : NULL; if (!f) continue;
+        size_t n = fread(real, 1, sizeof real, f); fclose(f);
+        if (n != sizeof real) continue;
+        loaded++;
+        VrCamConfig c; vrcam_config_default(&c); c.head = head; vrcam_init(&c);
+        BridgeState s; int ev = 0;
+        for (int k = 0; k < 60; k++) { bridge_read(real, &s); vrcam_frame(real, &s); vrcam_frame(real, &s); ev = vrcam_event_view(); }
+        printf("camara de evento (d%04d): in_control=%d cam_ctl=%d vista del juego=%d (esperado %d)\n", W[i].n, s.in_control, s.cam_ctl, ev, W[i].want);
+        CHECK(ev == W[i].want);
+    }
+    if (!loaded) printf("(volcados del ascensor no encontrados en %s: sin prueba con datos reales)\n", root);
+}
+
 int main(void) {
     test_angles();
     test_patch();
@@ -916,6 +944,7 @@ int main(void) {
     test_event_view();
     test_prone_anchor();
     test_prone_dumps();
+    test_event_dumps();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

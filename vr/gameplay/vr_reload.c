@@ -5,6 +5,7 @@
 #define PAD_R2 (1u << 9)
 #define PAD_R1 (1u << 11)
 #define ABORT_NOT_OK 40            /* VBlanks sin control del jugador que abortan una maniobra */
+#define NO_MAG_VBL 12              /* VBlanks seguidos con el arma VR sin balas antes de contar toda la munición del juego como reserva (el último disparo VR lo consume el juego 1-2 fotogramas después: sin balas en la reserva todavía) */
 
 static struct {
     VrReloadCfg cfg;
@@ -19,6 +20,7 @@ static struct {
     int wait_t;                    /* EMPTY: espera de la recarga propia del juego tras el gesto */
     int adopt;                     /* forzar el cargador VR al del juego en este VBlank */
     int virt_taken;                /* balas cogidas de la reserva y aún no cargadas */
+    int no_mag;                    /* VBlanks seguidos con el arma VR sin balas dentro (VrReloadIn.no_mag), saturado */
     int g_total, g_mag, g_weapon;  /* última lectura (para el libro virtual) */
     int last_w;                    /* último arma válida vista (cambiar de arma anula el libro virtual) */
     int total_vbl;                 /* VBlanks de la maniobra completa (latencia) */
@@ -86,7 +88,10 @@ void vrreload_frame(const VrReloadGame *g, const VrReloadIn *in, VrReloadOut *ou
     out->sync_rounds = -1; out->sync_chambered = -1;
     out->state = R.state;
     if (!g || !in) return;
-    R.g_total = g->total; R.g_mag = g->mag; R.g_weapon = g->weapon;
+    R.g_total = g->total; R.g_mag = g->mag; R.g_weapon = g->weapon; R.no_mag = in->no_mag ? (R.no_mag < 1000 ? R.no_mag + 1 : R.no_mag) : 0;
+    /* El libro virtual solo tiene sentido con balas de la reserva dentro del arma VR sin que el juego las haya movido aún: sin balas en el arma VR (se reinició, se expulsó el cargador) no hay nada
+     * «cogido», y sin munición en el juego tampoco; un resto huérfano dejaba la reserva en 0 aunque se recogieran balas y la pistola no se podía recargar. */
+    if (R.no_mag >= NO_MAG_VBL || g->total <= 0) R.virt_taken = 0;
     if (g->weapon >= 0) { if (R.last_w >= 0 && g->weapon != R.last_w) R.virt_taken = 0; R.last_w = g->weapon; }   /* cargadores cogidos de otra arma no cuentan */
     out->show_mag = g->mag > 0 ? g->mag : 0;
     out->show_reserve = g->total - g->mag - R.virt_taken; if (out->show_reserve < 0) out->show_reserve = 0;
@@ -172,6 +177,7 @@ tail:
 
 int vrreload_ammo_reserve(int weapon_id) {
     if (weapon_id != R.g_weapon) return 0;
+    if (R.no_mag >= NO_MAG_VBL) return R.g_total > 0 ? R.g_total : 0;     /* arma VR sin balas: el cargador del juego no está «dentro» del arma, todo es reserva */
     int v = R.g_total - R.g_mag - R.virt_taken;
     return v > 0 ? v : 0;
 }

@@ -213,15 +213,20 @@ static int prep_tri(const Ctx *cx, const NsRTri *t, CV *poly, float *zavg) {
     const NsRCam *c = cx->cam;
     CV in[12], tmp[12];
     int n = 3, allin = 1;
-    float dist[3][5]; int anyout[5] = {0}, allout[5] = {1, 1, 1, 1, 1};
+    float dist[3][5];
+    if (c->zreject > 0) {   /* proyección de la GTE: sin ningún vértice delante no hay polígono; los demás con z < zreject se proyectan en el plano z = zreject */
+        float zm = -1e30f;
+        for (int k = 0; k < 3; k++) { const float *p = t->v[k].p; const float z = c->A[6] * p[0] + c->A[7] * p[1] + c->A[8] * p[2] + c->t[2]; if (z > zm) zm = z; }
+        if (!(zm > 0.0f)) return 0;
+    } int anyout[5] = {0}, allout[5] = {1, 1, 1, 1, 1};
     for (int k = 0; k < 3; k++) {
         const float *p = t->v[k].p;
         CV *o = &in[k];
         o->x = c->A[0] * p[0] + c->A[1] * p[1] + c->A[2] * p[2] + c->t[0];
         o->y = c->A[3] * p[0] + c->A[4] * p[1] + c->A[5] * p[2] + c->t[1];
         o->z = c->A[6] * p[0] + c->A[7] * p[1] + c->A[8] * p[2] + c->t[2];
+        if (c->zreject > 0 && o->z < c->zreject) o->z = c->zreject;
         o->u = t->v[k].u; o->v = t->v[k].v; o->r = t->v[k].r; o->g = t->v[k].g; o->b = t->v[k].b;
-        if (c->zreject > 0 && o->z <= c->zreject) return 0;
         for (int pl = 0; pl < 5; pl++) {
             const float *P = cx->planes[pl];
             dist[k][pl] = P[0] * o->x + P[1] * o->y + P[2] * o->z - P[3];

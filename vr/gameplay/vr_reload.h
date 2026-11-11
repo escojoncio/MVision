@@ -24,7 +24,9 @@
  *
  * Contabilidad: ammo_take(id, n) del arma VR (cargador cogido de la cintura = n balas fuera de la reserva) es un libro
  * VIRTUAL (no escribe en el juego): reserva mostrada = total del juego - cargador del juego - lo cogido. Al completar la
- * recarga del juego el libro se pone a 0 (el juego ya movió las balas).
+ * recarga del juego el libro se pone a 0 (el juego ya movió las balas). Con el arma VR sin balas durante unos VBlanks
+ * (VrReloadIn.no_mag: cargador expulsado, vacío o arma reiniciada) el cargador del juego no está dentro del arma: la
+ * reserva es todo el total del juego y el libro vuelve a 0, igual que al agotarse la munición del juego.
  *
  * No es reentrante; se llama desde el hilo del emulador (gancho de frame).
  */
@@ -66,6 +68,7 @@ typedef struct VrReloadIn {
     int weapon_id;           /* game_weapon_id del arma VR mostrada (-1 ninguna) */
     int mag_in_edge;         /* flanco: cargador insertado (WeaponState.mag_inserted 0 -> 1) */
     int ready;               /* el arma VR está lista para disparar (cargador dentro y bala en la recámara) */
+    int no_mag;              /* el arma VR no tiene ninguna bala (ni en el cargador ni en la recámara; 0 = con balas o desconocido): pasados unos VBlanks nada del cargador del juego está dentro del arma y toda la munición del juego es reserva */
 } VrReloadIn;
 
 typedef struct VrReloadOut {

@@ -52,6 +52,8 @@ struct ContentView: View {
         }
         // visionOS entrega los botones del mando por GameController solo a la app que lo declara en una vista con foco.
         .modifier(GameControllerEventsModifier())
+        // Digital Crown (recentrado del sistema): evento oficial de SwiftUI, la ventana sigue viva (invisible) con el espacio inmersivo abierto.
+        .modifier(WorldRecenterModifier())
         .focusable()
         .focusEffectDisabled()
         .focused($controllerFocus)
@@ -146,6 +148,19 @@ struct FolderPromptView: View {
             }
         }
         .padding(40)
+    }
+}
+
+/// Recentrado del sistema (pulsación larga de la Digital Crown): `onWorldRecenter` (SwiftUI, visionOS 26) llama a la acción cuando la app ya se ha recolocado y vuelve a aparecer. Se traduce en una petición
+/// de recentrado del bucle XR (origen de usuario, pantallas 3D y 2D fijas, rumbo del cuerpo y de la cámara del motor sobre la cabeza actual, en el siguiente fotograma). Sin visionOS 26 queda el detector
+/// por salto de la pose del dispositivo (XRRecenterDetector) y el gesto / botón del menú. Fuente `corona` en el registro.
+struct WorldRecenterModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(visionOS 26.0, *) {
+            content.onWorldRecenter { XRControl.shared.requestRecenter(source: "corona") }
+        } else {
+            content
+        }
     }
 }
 

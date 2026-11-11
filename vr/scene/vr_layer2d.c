@@ -10,6 +10,7 @@
 #include <time.h>
 #define VW 1024
 #define VH 512
+#define VL_PANEL_SLACK 2   /* píxeles que el rango horizontal del juego puede quedarse cortos del ancho nominal sin que el panel los deje sin dibujar (ver vl2d_run) */
 
 struct VrLayer2D {
     uint16_t vram[VH][VW];   /* espejo: solo eventos de VRAM (subidas, copias, rellenos) */
@@ -919,7 +920,11 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     }
     if (w > VW) w = VW;
     if (h > VH) h = VH;
-    if (!full) { aw = l->disp.aw > 0 && l->disp.aw < w ? l->disp.aw : w; }   /* panel: rectángulo nominal, pero lo que el rango deja fuera (basura de VRAM) no se dibuja */
+    if (!full) {   /* panel: rectángulo nominal, pero lo que el rango deja fuera (basura de VRAM) no se dibuja; salvo el redondeo del rango del juego (VL_PANEL_SLACK px): el EU pone 0x270..0xC66 = 2550 ciclos = 318,75 px
+                    * de 320, aw = 319, y la última columna del panel quedaba transparente: las bandas negras de las cinemáticas no cubrían el borde derecho de la pantalla 3D y se colaba la geometría */
+        aw = l->disp.aw > 0 && l->disp.aw < w ? l->disp.aw : w;
+        if (w - aw <= VL_PANEL_SLACK) aw = w;
+    }
     if (full && !l->disp.enabled) aw = 0;   /* pantalla apagada: negro, como el fotograma normal */
     int ux0 = 0, uy0 = 0, ux1 = 0, uy1 = 0;   /* sucio de esta lista */
     /* Modo original: el rasterizado es el EXACTO de la GPU original (escala 1: 5 bits, tramado, mismo muestreo de texels) y la salida lo replica S x S (vecino más próximo

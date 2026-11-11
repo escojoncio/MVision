@@ -205,6 +205,7 @@ static void t_single(void) {
     VrFireMat m; WPose pz = in.muzzle; vrfire_make_matrix(&map, &pz, 400, &m);
     CHECK(mat_eq(&m, &g.last), "matriz = pose de la petición (+400)");
     CHECK(g.first_vb > 15 && g.first_vb < 50, "primer disparo a los %d VBlanks de la petición (levantar ~17 + 3)", g.first_vb - 6);
+    CHECK(st.lat_last >= 18 && st.lat_last <= 26 && abs((int)st.lat_last - (g.first_vb - 6)) <= 1 && st.lat_max == st.lat_last, "latencia petición -> proyectil medida por la capa = %u VBlanks (modelo: %d)", st.lat_last, g.first_vb - 6);
 }
 static void t_snapshot(void) {
     init_trigger();
@@ -1097,6 +1098,22 @@ static void t_hit_fist(void) {
 }
 /* RAM real (volcados locales, nunca en el repositorio; MV_DUMPS=<carpeta>, por defecto la de trabajo; sin ellos se omite): cada soldado tiene sus 16 cápsulas, la cabeza
  * sale la pieza 6 por la regla (no por índice fijo) y los rayos hacia cada pieza dan la zona de esa pieza */
+/* Láser: el primer enemigo en el rayo corta la longitud (la bala impacta en él; el punto del extremo no puede quedar en la pared de detrás). */
+static void t_hit_probe(void) {
+    float o[3] = {0, 1300, 0}, d[3] = {0, 0, 1}, dd[3] = {1, 0, 0};
+    h_world(); h_reg(); h_soldier(0, 0, 0, 1000, 5000, 128);
+    float t = vrhit_probe(ram, o, d, 15780.0f);
+    CHECK(t > 3500.0f && t < 5000.0f, "láser: el soldado a 5000 corta el rayo antes de su centro (%.0f)", t);
+    CHECK(vrhit_probe(ram, o, dd, 15780.0f) < 0.0f, "láser: rayo que pasa de largo: sin impacto");
+    CHECK(vrhit_probe(ram, o, d, 3000.0f) < 0.0f, "láser: el soldado fuera del alcance dado: sin impacto");
+    float back[3] = {0, 0, -1};
+    CHECK(vrhit_probe(ram, o, back, 15780.0f) < 0.0f, "láser: soldado a la espalda: sin impacto");
+    h_soldier(1, 1, 0, 1000, 9000, 128);
+    t = vrhit_probe(ram, o, d, 15780.0f);
+    CHECK(t > 3500.0f && t < 5000.0f, "láser: dos soldados en fila: el más cercano (%.0f)", t);
+    CHECK(vrhit_probe(NULL, o, d, 15780.0f) < 0.0f && vrhit_probe(ram, o, NULL, 15780.0f) < 0.0f, "láser: RAM / dirección nulas");
+}
+
 static void t_hit_real(void) {
     static const char *nm[] = {"d0008_20261103-001918_stage", "d0009_20261103-002117_stage"};
     const char *dir = getenv("MV_DUMPS"); if (!dir) dir = "/home/claude/work/adj24/Dumps";
@@ -1150,7 +1167,7 @@ static void t_hit_real(void) {
 }
 
 int main(void) {
-    t_hit_zones(); t_hit_motivo(); t_hit_camera(); t_hit_floors(); t_hit_enemy(); t_hit_aim(); t_hit_fist(); t_hit_real();
+    t_hit_zones(); t_hit_motivo(); t_hit_camera(); t_hit_floors(); t_hit_enemy(); t_hit_aim(); t_hit_fist(); t_hit_probe(); t_hit_real();
     t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_throw_origin(); t_throw_origin_body(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
     printf("test_fire: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

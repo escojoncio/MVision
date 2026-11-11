@@ -268,7 +268,8 @@ static void test_perf(void) {
     ns_buf_free(&pano); free(t);
 }
 
-/* Descarte cercano del motor con su cámara (NsRCam.zreject; réplica del de ns_vertex con U.misc.y): el triángulo con ALGÚN vértice a z <= zreject no se dibuja entero; 0 = sin descarte. */
+/* Proyección de la GTE con la cámara del motor (NsRCam.zreject = H/2; réplica del ajuste de ns_vertex con U.misc.y): la división satura en 2,0 cuando z <= H/2, así que el vértice más cerca se proyecta
+ * como si estuviera en el plano z = zreject (x, y intactas) y el triángulo se dibuja igualmente; solo se descarta el que no tiene ningún vértice delante (z > 0). 0 = sin ajuste. */
 static int covered(const NsRBuf *b) { int n = 0; for (int i = 0; i < b->w * b->h; i++) n += b->iz[i] > 0; return n; }
 static void test_near_reject(void) {
     NsRBuf b = newbuf(64, 64); NsRCam c = cam0(64, 64);
@@ -278,19 +279,21 @@ static void test_near_reject(void) {
     t[1].v[0] = V(-20, 20, 30, 0, 0, 128, 128, 128); t[1].v[1] = V(20, -200, 300, 0, 0, 128, 128, 128); t[1].v[2] = V(-20, -200, 300, 0, 0, 128, 128, 128);
     render(t, 2, &c, &b, 0);
     const int full = covered(&b);
-    CHECK(full > 100);                                    /* sin descarte se dibuja entera */
+    CHECK(full > 100);                                    /* sin ajuste se dibuja entera */
     c.zreject = 100; ns_buf_clear(&b, 0, 0, 0); render(t, 2, &c, &b, 0);
-    CHECK(covered(&b) == 0);                              /* los dos triángulos tienen un vértice a z = 30 <= 100: ninguno se dibuja (ni la parte lejana) */
+    CHECK(covered(&b) > 0);                               /* vértices a z = 30 < 100: se dibuja igualmente (antes se descartaba el triángulo entero) */
+    NsRTri k[2]; memcpy(k, t, sizeof t);                  /* equivalente explícito: los vértices cercanos movidos al plano z = 100 */
+    for (int i = 0; i < 2; i++) for (int j = 0; j < 3; j++) if (k[i].v[j].p[2] < 100) k[i].v[j].p[2] = 100;
+    NsRBuf ref = newbuf(64, 64); NsRCam c0 = cam0(64, 64); render(k, 2, &c0, &ref, 0);
+    CHECK(covered(&b) == covered(&ref) && covered(&ref) > 0);
     c.zreject = 29.5f; ns_buf_clear(&b, 0, 0, 0); render(t, 2, &c, &b, 0);
-    CHECK(covered(&b) == full);                           /* todos los vértices por encima del umbral: igual que sin descarte */
-    c.zreject = 30; ns_buf_clear(&b, 0, 0, 0); render(t, 2, &c, &b, 0);
-    CHECK(covered(&b) == 0);                              /* z == umbral también se descarta (<=) */
-    /* un triángulo entero más allá del umbral no se toca aunque otro de la escena se descarte */
-    NsRTri u[4]; memcpy(u, t, sizeof t); quad(u + 2, -10, -10, 10, 10, 150, 0, 0, 0, 0, 128, 0, 0, 0, 0);
-    c.zreject = 100; ns_buf_clear(&b, 0, 0, 0); render(u, 4, &c, &b, 0);
-    NsRBuf far = newbuf(64, 64); NsRCam c0 = cam0(64, 64); render(u + 2, 2, &c0, &far, 0);
-    CHECK(covered(&b) == covered(&far) && covered(&far) > 0);
-    ns_buf_free(&b); ns_buf_free(&far);
+    CHECK(covered(&b) == full);                           /* todos los vértices por encima del plano: igual que sin ajuste */
+    /* ningún vértice delante de la cámara (z <= 0): el motor lo descarta */
+    NsRTri z[2]; memcpy(z, t, sizeof t);
+    for (int i = 0; i < 2; i++) for (int j = 0; j < 3; j++) z[i].v[j].p[2] = -10;
+    c.zreject = 100; ns_buf_clear(&b, 0, 0, 0); render(z, 2, &c, &b, 0);
+    CHECK(covered(&b) == 0);
+    ns_buf_free(&b); ns_buf_free(&ref);
 }
 
 int main(void) {

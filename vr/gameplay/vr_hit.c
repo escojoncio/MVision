@@ -329,6 +329,17 @@ static void resolve(uint8_t *ram, const VrHitTarget *t, int n, const float o[3],
     for (int i = 0; i < 3; i++) r->pt[i] = o[i] + d[i] * best;
 }
 
+float vrhit_probe(const uint8_t *ram, const float o[3], const float d[3], float max) {
+    float dn[3], best = -1.0f;
+    if (!ram || !o || !d || !(max > 0.0f) || !unit3(d, dn)) return -1.0f;
+    int n = vrhit_scan(ram, PLAYER_SIDE, 0x10, 1, g_t, VRHIT_MAX_T);
+    for (int i = 0; i < n; i++) {
+        int z = VRHIT_Z_NONE; float tc = target_ray(&g_t[i], o, dn, &z);
+        if (tc >= 0.0f && tc <= max && (best < 0.0f || tc < best)) best = tc;
+    }
+    return best;
+}
+
 void vrhit_frame(void) {
     for (int i = 0; i < N_AIM; i++) if (g_aim[i].on && ++g_aim[i].age > VRHIT_AIM_LIFE) g_aim[i].on = 0;
 }

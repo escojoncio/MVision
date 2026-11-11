@@ -387,6 +387,33 @@ static void test_oversize(void) {
     CHECK(ns_gpu_tri_oversize(sat, H, HY) == 0, "ancho medido tras saturar");
 }
 
+/* 11b. la GTE de la cámara del juego satura la división en 2,0 cuando z <= H/2: el motor proyecta ese vértice como si estuviera en el plano z = H/2 (x e y de la vista intactas) y dibuja el polígono
+ * igualmente (medido en volcados de cinemáticas: polígonos de la lista con vértices a z = 79, 28, -625 de H = 320). Solo no dibuja el que no tiene ningún vértice delante de la cámara. */
+static void test_gte_clamp(void) {
+    const float H = 320.0f, HY = 320.0f * 66.0f / 64.0f, zc = 0.5f * H;
+    float out[3][3];
+    /* un vértice a z = 79 (< 160): se mueve al plano z = 160 conservando x e y; los otros dos, intactos */
+    const float one[3][3] = {{-298, -187, 246}, {348, 152, 1187}, {-300, 100, 79}};
+    CHECK(ns_gpu_gte_tri(one, zc, H, HY, out) == NSG_GTE_DRAW, "un vértice cercano: se dibuja (antes se descartaba el triángulo entero)");
+    CHECK(out[2][0] == -300 && out[2][1] == 100 && out[2][2] == zc, "vértice a z=79 -> (x, y, H/2): %f %f %f", out[2][0], out[2][1], out[2][2]);
+    CHECK(out[0][2] == 246 && out[1][2] == 1187 && out[0][0] == -298 && out[1][1] == 152, "los vértices delante de H/2 no se tocan");
+    /* un vértice detrás de la cámara (z < 0) con otros delante: también se proyecta con z = H/2 */
+    const float beh[3][3] = {{100, 50, 800}, {-200, 40, 900}, {300, -30, -625}};
+    CHECK(ns_gpu_gte_tri(beh, zc, H, HY, out) == NSG_GTE_DRAW && out[2][2] == zc && out[2][0] == 300, "vértice detrás de la cámara: z = H/2");
+    /* ningún vértice delante (z <= 0 los tres): el motor lo descarta (código de pantalla común) */
+    const float none[3][3] = {{100, 50, -10}, {-200, 40, 0}, {300, -30, -625}};
+    CHECK(ns_gpu_gte_tri(none, zc, H, HY, out) == NSG_GTE_BEHIND, "los tres vértices detrás: no se dibuja");
+    /* z entre 0 y H/2 los tres: se dibujan todos en el plano H/2 (la proyección es la de ese plano) */
+    const float near3[3][3] = {{10, 10, 100}, {-10, 10, 50}, {0, -10, 5}};
+    CHECK(ns_gpu_gte_tri(near3, zc, H, HY, out) == NSG_GTE_DRAW && out[0][2] == zc && out[1][2] == zc && out[2][2] == zc, "tres vértices entre 0 y H/2: se proyectan en H/2");
+    /* el tamaño máximo del hardware se mide DESPUÉS del ajuste: x = 2000 a z = 10 cae en 2000 * 320 / 160 = 4000 px (satura a 1023); con otro vértice en x = -2000: 2047 px de ancho -> no se dibuja */
+    const float big[3][3] = {{2000, 0, 10}, {-2000, 0, 10}, {0, 10, 400}};
+    CHECK(ns_gpu_gte_tri(big, zc, H, HY, out) == NSG_GTE_OVERSIZE, "más de 1023 px de ancho tras el ajuste: lo descarta el hardware");
+    /* sin ajuste (todos delante): igual que ns_gpu_tri_oversize */
+    const float ok3[3][3] = {{-600, -300, 400}, {600, -300, 400}, {0, 300, 400}};
+    CHECK(ns_gpu_gte_tri(ok3, zc, H, HY, out) == NSG_GTE_DRAW && out[0][2] == 400, "triángulo normal: se dibuja intacto");
+}
+
 /* 12. piezas sin malla */
 static void test_empty_piece(void) {
     W w; build(&w, 0, 0.0f);
@@ -412,6 +439,7 @@ int main(void) {
     test_ik_stretch();
     test_back_faces();
     test_oversize();
+    test_gte_clamp();
     test_empty_piece();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

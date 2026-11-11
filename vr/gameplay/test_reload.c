@@ -76,7 +76,7 @@ static VrReloadOut step(Game *g, VrReloadIn in, PulseLog *pl) {
     return o;
 }
 static PulseLog newlog(void) { PulseLog p; memset(&p, 0, sizeof p); p.w_press_min = p.w_gap_min = 1000; return p; }
-static VrReloadIn in0(void) { VrReloadIn i = {0, 0, 1}; return i; }
+static VrReloadIn in0(void) { VrReloadIn i = {0, 0, 1, 0}; return i; }
 static void run(Game *g, int n, VrReloadIn in, VrReloadOut *last, PulseLog *pl) { for (int i = 0; i < n; i++) { VrReloadOut o = step(g, in, pl); if (last) *last = o; } }
 
 static void cfg_method(VrReloadMethod m, int taps) { VrReloadCfg c; vrreload_cfg_default(&c); c.method = m; c.taps = taps; vrreload_init(&c); }
@@ -243,6 +243,44 @@ static void t_ledger(void) {
     CHECK(o.show_reserve == 60 - 13 && b.ammo_reserve(0) == 47, "tras recargar el libro se pone a 0 y la reserva sale del juego (%d)", o.show_reserve);
     b.ammo_take(2, 5); CHECK(b.ammo_reserve(0) == 47, "otra arma no cuenta");
 }
+/* Reserva tras agotar las balas (log del visor: recoger 12 balas con el arma vacía dejaba la reserva en 0 y el cargador VR vacío para siempre). Si el arma VR no tiene cargador montado ni bala en la
+ * recámara, nada del cargador del juego está «dentro» del arma: toda la munición del juego es reserva (aunque el juego ya haya cargado su cargador al recogerla) y lo «cogido» no cuenta.
+ * Al agotarse la munición del juego el libro virtual vuelve a cero. */
+static void t_ledger_pickup(void) {
+    cfg_method(VRR_VIA_R1_DOUBLE, 2);
+    WGameBridge b; memset(&b, 0, sizeof b); vrreload_bridge_fill(&b);
+    VrReloadOut o; PulseLog pl = newlog();
+    VrReloadIn wm0 = in0(), nm = in0(); nm.ready = 0; nm.no_mag = 1;
+    Game g = newgame(1, 1);
+    run(&g, 5, wm0, &o, &pl);
+    run(&g, 2, nm, &o, &pl);                                    /* el último disparo VR aún sin descontar en el juego (1-2 fotogramas): no sube la reserva */
+    CHECK(b.ammo_reserve(0) == 0, "último disparo sin descontar: la reserva sigue en 0 (%d)", b.ammo_reserve(0));
+    g.mag = 0; g.total = 0;
+    run(&g, 10, nm, &o, &pl);
+    CHECK(o.state == VRR_EMPTY && b.ammo_reserve(0) == 0, "sin balas: EMPTY y reserva 0 (%d)", b.ammo_reserve(0));
+    g.total = 12; g.mag = 12;                                   /* recoge 12 balas y el juego carga su cargador */
+    run(&g, 20, nm, &o, &pl);
+    CHECK(b.ammo_reserve(0) == 12, "recogidas con el arma VR sin balas: las 12 son reserva (%d)", b.ammo_reserve(0));
+    g.mag = 0;                                                  /* el cargador del juego aún vacío */
+    run(&g, 5, nm, &o, &pl);
+    CHECK(b.ammo_reserve(0) == 12, "con el cargador del juego a 0 también (%d)", b.ammo_reserve(0));
+    VrReloadIn wm = in0(); wm.ready = 0;                        /* con cargador montado: la cuenta de siempre (total - cargador del juego - cogido) */
+    g.mag = 5; g.total = 20;
+    run(&g, 5, wm, &o, &pl);
+    CHECK(b.ammo_reserve(0) == 15, "con cargador montado: total - cargador (%d)", b.ammo_reserve(0));
+    /* lo cogido de la cintura y el arma VR se queda sin cargador (se expulsa sin soltarlo en el libro, se pierde al reiniciar el arma): no queda «cogido» huérfano */
+    b.ammo_take(0, 12);
+    CHECK(b.ammo_reserve(0) == 3, "cogido (%d)", b.ammo_reserve(0));
+    run(&g, 20, nm, &o, &pl);
+    CHECK(b.ammo_reserve(0) == 20, "sin balas en el arma VR el libro se pone a 0 y la reserva es todo (%d)", b.ammo_reserve(0));
+    run(&g, 3, wm, &o, &pl);
+    CHECK(b.ammo_reserve(0) == 15, "y al montar uno vuelve la cuenta normal sin restos (%d)", b.ammo_reserve(0));
+    /* agotar: lo cogido no sobrevive a quedarse el juego sin balas */
+    b.ammo_take(0, 12);
+    g.mag = 0; g.total = 0; run(&g, 3, wm, &o, &pl);
+    g.total = 12; g.mag = 0; run(&g, 3, wm, &o, &pl);
+    CHECK(b.ammo_reserve(0) == 12, "tras agotar y recoger 12 la reserva es 12, no 0 (%d)", b.ammo_reserve(0));
+}
 static void t_ledger_switch(void) {
     cfg_method(VRR_VIA_R1_DOUBLE, 2);
     Game g = newgame(5, 60); VrReloadOut o; PulseLog pl = newlog();
@@ -273,7 +311,7 @@ static void t_fuzz(void) {
             VrReloadGame g; memset(&g, 0, sizeof g);
             g.ok = rand() % 8 != 0; g.weapon = (rand() % 12) - 2; g.mag = (rand() % 5 == 0) ? (rand() % 100000) - 50000 : rand() % 14;
             g.mag_max = (rand() % 5 == 0) ? (rand() % 100000) - 50000 : rand() % 14; g.total = (rand() % 5 == 0) ? (rand() % 100000) - 50000 : rand() % 200; g.menu = rand() & 1;
-            VrReloadIn in = {(rand() % 12) - 2, rand() % 5 == 0, rand() & 1};
+            VrReloadIn in = {(rand() % 12) - 2, rand() % 5 == 0, rand() & 1, 0};
             VrReloadOut o; vrreload_frame(rand() % 500 ? &g : NULL, rand() % 500 ? &in : NULL, &o);
             CHECK((o.pad_force & ~(R1 | R2)) == 0, "pad_force fuera de R1/R2");
             CHECK(o.state >= VRR_OFF && o.state <= VRR_VERIFY, "estado válido");
@@ -294,7 +332,7 @@ static void t_fuzz(void) {
 
 int main(void) {
     t_tactical(); t_adopt(); t_empty_latch(); t_empty_no_reserve(); t_empty_needs_gesture(); t_empty_forced(); t_nothing_to_do(); t_lost_tap(); t_never();
-    t_r2(); t_ledger(); t_ledger_switch(); t_modes_weapon(); t_fuzz();
+    t_r2(); t_ledger(); t_ledger_pickup(); t_ledger_switch(); t_modes_weapon(); t_fuzz();
     printf("test_reload: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

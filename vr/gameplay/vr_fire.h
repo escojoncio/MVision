@@ -158,6 +158,7 @@ typedef struct VrFireStats {
     uint32_t subst, passed, skipped;     /* proyectiles sustituidos / dejados / suprimidos */
     uint32_t presses, releases;          /* pulsaciones y soltados del botón */
     uint32_t arm_timeouts;
+    uint32_t lat_last, lat_max;          /* VBlanks entre la petición de disparo (gatillo) y el proyectil sustituido: el último y el máximo (la espera es sobre todo el levantar del arma del juego) */
 } VrFireStats;
 void vrfire_stats(VrFireStats *s);
 /* Sonda de pruebas: los sustitutos la llaman tras ejecutar el original (result = valor devuelto, normalmente el puntero

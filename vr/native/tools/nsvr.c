@@ -47,6 +47,7 @@ static float g_tovr[12], g_mpu, g_raise_m;
 static int g_old_back;   /* --old-back: como la build 0d4635f (los reversos empatan con los anversos) */
 static int g_cull_all, g_no_hw; static float g_zreject, g_cam_fwd[4], g_cam_x[4], g_cam_y[4];   /* pantalla 3D (cámara del motor): descarte de reversos y descarte cercano del motor (cullBack de NativeRenderer) */
 static float g_det_sign = 1.0f, g_hpx, g_hpy;
+static int g_old_reject, g_nocull; static uint32_t g_skipflag; static int32_t *g_opmap; static int g_opcur;   /* diagnóstico --miss: operación de la lista que escribió cada píxel de L */
 
 static void buf_alloc(Buf *b, int n) {
     b->w = b->h = n;
@@ -140,7 +141,7 @@ static void raster(Buf *b, const CV t[3], const NsGpuCorner *c0, int pass, int g
         b->cov[o] = 1;
         if (pass == PASS_OPAQUE) {
             if (b->pid[o] >= 0 && b->iz[o] > b->iz2[o] && tri_apart(tri, b->tid[o])) { b->iz2[o] = b->iz[o]; b->pid2[o] = b->pid[o]; }
-            b->iz[o] = iz; b->pid[o] = gi; b->tid[o] = tri; b->bk[o] = (uint8_t)back;
+            b->iz[o] = iz; b->pid[o] = gi; b->tid[o] = tri; b->bk[o] = (uint8_t)back; if (g_opmap) g_opmap[o] = g_opcur;
             b->du[o] = k0 * t[0].du + k1 * t[1].du + k2 * t[2].du;
             memcpy(dst, rgb, sizeof rgb);
         } else {
@@ -193,9 +194,16 @@ static void draw_tri(Buf *b, const NsScene *sc, int gi, uint32_t tri, int pass, 
         if (bz != 1.0f) for (int k = 0; k < 3; k++) { v[k].x /= bz; v[k].y /= bz; v[k].d /= bz; }
     }
     if (ts) { ts->tris++; ts->back += (uint32_t)back; }
-    if (g_zreject > 0.0f && zmin <= g_zreject) { if (ts) ts->near_rej++; return; }   /* descarte cercano del motor (U.misc.y) */
-    if (g_zreject > 0.0f && !g_no_hw && ns_gpu_tri_oversize((const float (*)[3])ev, g_hpx, g_hpy)) { if (ts) ts->hw_big++; return; }   /* el hardware no dibuja un triángulo mayor de 1023 x 511 px */
-    if (g_cull_all && back) return;                                                   /* NSG_CULL_ALL */
+    if (g_zreject > 0.0f && g_old_reject) {
+        if (zmin <= g_zreject + 4.0f) { if (ts) ts->near_rej++; return; }   /* descarte cercano anterior (sustituido por el ajuste de la GTE): solo para comparar */
+    } else if (g_zreject > 0.0f) {   /* proyección de la GTE (ns_gpu_gte_tri): el vértice con z < H/2 se proyecta en el plano H/2; solo se descarta el triángulo sin vértices delante, o el de más de 1023 x 511 px */
+        float ec[3][3];
+        const int r = ns_gpu_gte_tri((const float (*)[3])ev, g_zreject, g_hpx, g_hpy, ec);
+        if (r == NSG_GTE_BEHIND) { if (ts) ts->near_rej++; return; }
+        if (r == NSG_GTE_OVERSIZE && !g_no_hw) { if (ts) ts->hw_big++; return; }
+        for (int k = 0; k < 3; k++) if (ec[k][2] != ev[k][2]) { v[k].d = ec[k][2] / 1000.0f; ev[k][2] = ec[k][2]; }
+    }
+    if (g_cull_all && back && !g_nocull) return;                                      /* NSG_CULL_ALL */
     CV poly[4];
     const int n = clip_near(v, b->znear, poly);
     if (ts) { if (n == 0) ts->clipped_out++; else if (v[0].d < b->znear || v[1].d < b->znear || v[2].d < b->znear) ts->crossing++; }
@@ -207,7 +215,7 @@ static int semi_cmp(const void *a, const void *b) { const float x = ((const Semi
 
 int main(int argc, char **argv) {
     const char *dumpd = NULL, *dir = ".", *name = "vr", *pose = "head", *listd = NULL;
-    int size = 640, all_groups = 0, skip[32], nskip = 0, probe[8][2], nprobe = 0; float tanh = 1.2f, znear = 0.1f, sep = 20.0f, look_yaw = 0, look_pitch = 0, gain = 3.0f;
+    int size = 640, all_groups = 0, miss_top = 0, skip[32], nskip = 0, probe[8][2], nprobe = 0; float tanh = 1.2f, znear = 0.1f, sep = 20.0f, look_yaw = 0, look_pitch = 0, gain = 3.0f;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
 #define NEXT() (i + 1 < argc ? argv[++i] : (fprintf(stderr, "falta valor para %s\n", a), exit(2), (char *)0))
@@ -225,6 +233,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--all-groups")) all_groups = 1;
         else if (!strcmp(a, "--skip")) { for (const char *q = NEXT(); *q && nskip < 32;) { char *e; skip[nskip++] = (int)strtol(q, &e, 0); if (e == q) return 2; q = *e == ',' ? e + 1 : e; } }
         else if (!strcmp(a, "--probe")) { if (nprobe < 8 && sscanf(NEXT(), "%d,%d", &probe[nprobe][0], &probe[nprobe][1]) == 2) nprobe++; }
+        else if (!strcmp(a, "--old-reject")) g_old_reject = 1;   /* comparación: descarte cercano anterior (z <= H/2 + 4) en lugar del ajuste de la GTE */
+        else if (!strcmp(a, "--nocull")) g_nocull = 1;
+        else if (!strcmp(a, "--skipflag")) g_skipflag = (uint32_t)strtoul(NEXT(), NULL, 0);   /* diagnóstico: no dibuja las mallas con alguno de estos bits de model_flags */
+        else if (!strcmp(a, "--miss")) miss_top = atoi(NEXT());
         else if (!strcmp(a, "--old-back")) g_old_back = 1;
         else if (!strcmp(a, "--old-hw")) g_no_hw = 1;
         else { fprintf(stderr, "opción desconocida: %s (véase la cabecera de nsvr.c)\n", a); return 2; }
@@ -287,7 +299,7 @@ int main(int argc, char **argv) {
         for (int r = 0; r < 3; r++) { const float *a = &B.R[3 * r]; R2[3 * r] = cy * a[0] + sy * a[2]; R2[3 * r + 1] = a[1]; R2[3 * r + 2] = -sy * a[0] + cy * a[2]; }
         for (int k = 0; k < 3; k++) { const float up = R2[3 + k], bk = R2[6 + k]; B.R[k] = R2[k]; B.R[3 + k] = cp * up + sp * bk; B.R[6 + k] = -sp * up + cp * bk; }
     }
-    if (!vr) { g_cull_all = 1; g_zreject = 0.5f * sc.cam.h + 4.0f; }
+    if (!vr) { g_cull_all = 1; g_zreject = 0.5f * sc.cam.h; }
     for (int j = 0; j < 3; j++) { g_cam_x[j] = sc.cam.rot[3 * j]; g_cam_y[j] = sc.cam.rot[3 * j + 1]; g_cam_fwd[j] = sc.cam.rot[3 * j + 2]; }
     g_cam_x[3] = -(g_cam_x[0] * sc.cam.eye[0] + g_cam_x[1] * sc.cam.eye[1] + g_cam_x[2] * sc.cam.eye[2]);
     g_cam_y[3] = -(g_cam_y[0] * sc.cam.eye[0] + g_cam_y[1] * sc.cam.eye[1] + g_cam_y[2] * sc.cam.eye[2]);
@@ -338,6 +350,7 @@ int main(int argc, char **argv) {
             g_tbl[gi].rest_r = ns_gpu_mesh_radius(gm[gi].m);
             if (p->flags & NS_PF_HIDDEN) { g_tbl[gi].flags &= ~NSG_PF_DRAW; n_hidden++; continue; }
             if (!in_group) { g_tbl[gi].flags &= ~NSG_PF_DRAW; n_group++; continue; }
+            if (g_skipflag && (gm[gi].m->model_flags & g_skipflag)) { g_tbl[gi].flags &= ~NSG_PF_DRAW; continue; }
             { int sk = 0; for (int q = 0; q < nskip; q++) sk |= skip[q] == (int)gi; if (sk) { g_tbl[gi].flags &= ~NSG_PF_DRAW; continue; } }   /* diagnóstico: --skip */
             n_draw++;
             if (is_static[gi]) n_static++;
@@ -352,6 +365,21 @@ int main(int argc, char **argv) {
         uint32_t empty = 0;
         for (uint32_t i = 0; i < np; i++) empty += !ns_gpu_piece_has_mesh(&sc.piece[i]);
         printf("mallas ausentes segun la app: %u (>0 retiene la escena anterior 25 escenas) | piezas sin malla (modelo nulo o sin caras): %u (la build 0d4635f las contaba como ausentes)\n", ns_gpu_scene_misses(&sc, st), empty);
+    }
+    printf("extractor: cola=%u (recortada=%u) descartes: nulo=%u ptr=%u dup=%u oculto=%u grupo=%u objeto=%u modelo=%u | ext=%u ext_rotas=%u | caras: leidas=%u v_malo=%u n_malo=%u degeneradas=%u | soldadura_mala=%u almacen_lleno=%u memo_llena=%u lecturas_fuera=%u\n",
+           es.queue_n, es.q_clamped, es.drop_null, es.drop_badptr, es.drop_dup, es.drop_hidden_flag, es.drop_group, es.drop_badobj, es.drop_bad_model, es.n_ext_pieces, es.ext_bad, es.faces_seen, es.faces_bad_vindex, es.faces_bad_nindex, es.faces_degenerate, es.weld_bad, es.store_full, es.memo_full, es.oob_reads);
+    {   /* red de seguridad de vértices (solo piezas dinámicas): triángulos que el sombreador colapsaría y piezas con causa de matriz/soldadura; sirve para buscar falsos positivos */
+        uint32_t nex = 0, npn = 0, ntn = 0, nfar = 0, nedge = 0, ncause[4] = {0, 0, 0, 0};
+        for (uint32_t gi = 0; gi < np; gi++) {
+            if (!(g_tbl[gi].flags & NSG_PF_DRAW) || !(g_tbl[gi].flags & NSG_PF_NET) || !gm[gi].ntri) continue;
+            nex++;
+            NsGpuNetPiece pc; NsGpuNetTris acc; memset(&acc, 0, sizeof acc);
+            ns_gpu_net_piece(g_verts, g_tbl, gi, gm[gi].m->n_verts, g_mpu, &pc);
+            const uint32_t n = ns_gpu_net_tris(g_verts, g_corners + 3u * gm[gi].tbase, gm[gi].ntri, g_tbl, gi, g_mpu, &acc);
+            for (int q = 0; q < 4; q++) ncause[q] += (pc.causes >> q) & 1u;
+            if (n) { npn++; ntn += n; nfar += acc.bad_far; nedge += acc.bad_edge; }
+        }
+        printf("red de seguridad (dinamicas, %u piezas examinadas): %u piezas con triangulos colapsados, %u tris (lejos=%u arista=%u) | piezas con causa matriz=%u soldadura=%u lejos=%u arista=%u\n", nex, npn, ntn, nfar, nedge, ncause[0], ncause[1], ncause[2], ncause[3]);
     }
     if (vr) {
         float hw[3];   /* cabeza en el mundo del motor */
@@ -388,28 +416,6 @@ int main(int argc, char **argv) {
         free(sl);
     }
 
-    /* ---- pantalla 3D: cuadriláteros de los que el descarte cercano POR TRIÁNGULO deja una mitad (el motor descarta el polígono entero) ---- */
-    if (g_zreject > 0.0f) {
-        uint32_t halves = 0, quads = 0;
-        for (uint32_t gi = 0; gi < np; gi++) {
-            if (!(g_tbl[gi].flags & NSG_PF_DRAW)) continue;
-            uint32_t t = gm[gi].tbase;
-            for (uint32_t f = 0; f < gm[gi].m->n_faces; f++) {
-                const int nt = (gm[gi].m->faces[f].flags & NS_FF_TRI) ? 1 : 2;
-                if (nt == 2) {
-                    int rej[2];
-                    for (int h = 0; h < 2; h++) {
-                        float zm = 1e30f;
-                        for (int k = 0; k < 3; k++) { float wp[3]; ns_gpu_vert_world(g_verts, g_tbl, gi, g_corners[3u * (t + (uint32_t)h) + (uint32_t)k].v, wp); zm = fminf(zm, g_cam_fwd[0] * wp[0] + g_cam_fwd[1] * wp[1] + g_cam_fwd[2] * wp[2] + g_cam_fwd[3]); }
-                        rej[h] = zm <= g_zreject;
-                    }
-                    quads++; halves += rej[0] != rej[1];
-                }
-                t += (uint32_t)nt;
-            }
-        }
-        printf("pantalla 3D: cuadrilateros=%u con UNA mitad descartada por el cercano (medio cuadrilatero a la vista)=%u\n", quads, halves);
-    }
     /* ---- pantalla 3D frente a la lista de la GPU (lo que el motor dibujó de verdad): cobertura de la ventana de la pantalla del motor ---- */
     if (listd && !vr) {
         NsDump *ld = ns_dump_open(listd);
@@ -419,6 +425,8 @@ int main(int argc, char **argv) {
             const float ys = sc.cam.overscan_y > 0.5f ? sc.cam.overscan_y : 1.0f, H = sc.cam.h > 8.0f ? sc.cam.h : 320.0f;
             static NsGpuCorner lc;   /* esquina ficticia: textura de la operación */
             uint32_t n3d = 0, nbig = 0;
+            int32_t *opmap = miss_top ? malloc((size_t)size * size * sizeof(int32_t)) : NULL;
+            if (opmap) { for (size_t q = 0; q < (size_t)size * size; q++) opmap[q] = -1; g_opmap = opmap; }
             const uint16_t *save = g_vram;
             if (ld->vram) g_vram = ld->vram;
             for (uint32_t i = 0; i < ld->list.nops; i++) {
@@ -427,7 +435,7 @@ int main(int argc, char **argv) {
                 int ok = 1;
                 for (int k = 0; k < op->nv; k++) ok &= op->v[k].vvalid && op->v[k].vz > 0.0f;
                 if (!ok) continue;
-                n3d++;
+                n3d++; g_opcur = (int)i;
                 memset(&lc, 0, sizeof lc);
                 if (op->flags & GPU_F_TEXTURED) { lc.flags = NSG_CF_TEX; lc.tpage = (uint16_t)((op->tx / 64) | ((op->ty / 256) << 4) | (op->tp << 7)); lc.clut = (uint16_t)((op->clx / 16) | (op->cly << 6)); }
                 for (int h = 0; h + 2 < op->nv; h++) {
@@ -445,8 +453,9 @@ int main(int argc, char **argv) {
                     for (int j = 1; j + 1 < n; j++) { const CV tt[3] = {poly[0], poly[j], poly[j + 1]}; raster(&L, tt, &lc, PASS_OPAQUE, 0, 0, 0); }
                 }
             }
-            g_vram = save;
+            g_vram = save; g_opmap = NULL;
             size_t win = 0, both = 0, extra = 0, miss = 0, front = 0, behind = 0;
+            uint32_t *opmiss = calloc(ld->list.nops ? ld->list.nops : 1, sizeof(uint32_t));
             const float f = 0.5f * (float)size / B.tanh;
             for (int y = 0; y < size; y++) for (int x = 0; x < size; x++) {
                 const float tx = ((float)x + 0.5f - 0.5f * (float)size) / f, ty = ((float)y + 0.5f - 0.5f * (float)size) / f;
@@ -456,10 +465,37 @@ int main(int argc, char **argv) {
                 if (B.cov[o] && L.cov[o]) {
                     both++;
                     if (B.iz[o] > 1.3f * L.iz[o]) front++; else if (B.iz[o] < L.iz[o] / 1.3f) behind++;   /* otra superficie: el nativo tapa lo que el motor enseña / enseña lo que el motor tapa */
-                } else if (B.cov[o]) extra++; else if (L.cov[o]) miss++;
+                } else if (B.cov[o]) extra++; else if (L.cov[o]) { miss++; if (opmap && opmap[o] >= 0) opmiss[opmap[o]]++; }
             }
             printf("pantalla 3D frente a la lista (ventana del motor, %zu px): poligonos3D=%u (tris que el hardware descarta por tamano=%u) | coinciden=%.1f%% (de ellos NATIVO_TAPA=%.1f%% nativo_mas_lejos=%.1f%%) NATIVO_DE_MAS=%.1f%% FALTA_EN_NATIVO=%.1f%% vacio=%.1f%%\n", win, n3d, nbig,
                    win ? 100.0 * (double)both / (double)win : 0.0, win ? 100.0 * (double)front / (double)win : 0.0, win ? 100.0 * (double)behind / (double)win : 0.0, win ? 100.0 * (double)extra / (double)win : 0.0, win ? 100.0 * (double)miss / (double)win : 0.0, win ? 100.0 * (double)(win - both - extra - miss) / (double)win : 0.0);
+            if (opmap) {   /* diagnóstico --miss: mapa de cobertura (rojo = solo la lista, verde = solo el nativo, gris = ambos, azul oscuro = fuera de la ventana) */
+                uint8_t *mp = calloc((size_t)size * size, 3);
+                for (int y = 0; y < size; y++) for (int x = 0; x < size; x++) {
+                    const float tx = ((float)x + 0.5f - 0.5f * (float)size) / f, ty = ((float)y + 0.5f - 0.5f * (float)size) / f;
+                    const size_t o = (size_t)y * size + x;
+                    uint8_t *q = &mp[3 * o];
+                    if (fabsf(tx) * H > 160.0f || fabsf(ty) * ys * H > 120.0f) { q[2] = 60; continue; }
+                    if (B.cov[o] && L.cov[o]) q[0] = q[1] = q[2] = 120; else if (B.cov[o]) q[1] = 220; else if (L.cov[o]) q[0] = 255;
+                }
+                char mpath[1024]; snprintf(mpath, sizeof mpath, "%s/%s_vr_miss.png", dir, name); ns_write_png(mpath, size, size, mp); free(mp);
+            }
+            if (opmap) {   /* diagnóstico --miss: operaciones de la lista con más píxeles sin cubrir */
+                for (int rank = 0; rank < miss_top; rank++) {
+                    uint32_t bi = 0, bn = 0;
+                    for (uint32_t i = 0; i < ld->list.nops; i++) if (opmiss[i] > bn) { bn = opmiss[i]; bi = i; }
+                    if (!bn) break;
+                    const GpuOp *op = &ld->list.ops[bi];
+                    float zmn = 1e30f, zmx = -1e30f;
+                    for (int k = 0; k < op->nv; k++) { zmn = fminf(zmn, op->v[k].vz); zmx = fmaxf(zmx, op->v[k].vz); }
+                    printf("  miss op %u: %u px nv=%d tex=%d semi=%d vz=[%.0f..%.0f] tp=%u,%u", bi, bn, op->nv, (op->flags & GPU_F_TEXTURED) != 0, (op->flags & GPU_F_SEMI) != 0, zmn, zmx, op->tx, op->ty);
+                    for (int k = 0; k < op->nv; k++) printf(" (%d,%d z%.0f)", op->v[k].x, op->v[k].y, op->v[k].vz);
+                    printf("\n");
+                    opmiss[bi] = 0;
+                }
+                free(opmap);
+            }
+            free(opmiss);
             buf_free(&L);
         }
         if (ld) ns_dump_close(ld);
@@ -499,7 +535,7 @@ int main(int argc, char **argv) {
             if (k < nfp) fpairs[k].n++;
         }
     }
-    if (g_cull_all) printf("pantalla 3D (camara del motor): descarte de reversos activo, descarte cercano z<=%.0f: %u tris, descarte del hardware por tamano (>1023x511 px): %u tris\n", g_zreject, ts.near_rej, ts.hw_big);
+    if (g_cull_all) printf("pantalla 3D (camara del motor): descarte de reversos activo, ajuste GTE a z=%.0f (descartados sin vertice delante): %u tris, descarte del hardware por tamano (>1023x511 px): %u tris\n", g_zreject, ts.near_rej, ts.hw_big);
     printf("triangulos: %u | plano cercano %.2f m: recortados_enteros=%u lo_cruzan=%u | reversos de una cara: %u tris, visibles en %.2f%% px (con descarte de reversos serian huecos)\n", ts.tris, znear, ts.clipped_out,
            ts.crossing, ts.back, 100.0 * (double)backpx / (double)npx);
     printf("pixeles: cubiertos=%.1f%% | sesgo: cambian=%.2f%% (coplanares<=%.0fu=%.2f%%, A_TRAVES=%.2f%%) | coplanares_sin_sesgo=%.2f%% | huecos_solo_app=%.2f%%\n",

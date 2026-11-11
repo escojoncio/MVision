@@ -362,6 +362,7 @@ static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u);
 static void ns_frame_check(void);
 static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u);
 static void mosaic_to_scene(NsScene *sc);
+static void mosaic_note_scene(const NsScene *sc);
 static void feedback_to_scene(NsScene *sc);
 static NsCamera ns_cam_last; static int ns_cam_have;   /* cámara de la última escena nativa capturada (ns_ctx): la escena se captura justo antes de ensamblar su lista, así que es la cámara de esa lista */
 static void ns_cam_note(const NsCamera *c) {   /* solo una cámara utilizable: H válida, rotación leída (no a cero) y ojo finito */
@@ -438,6 +439,7 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
         if (ox > 0.0f && ox < 320.0f && oy > 0.0f && oy < 240.0f) { sc->cam.ofx = ox; sc->cam.ofy = oy; }
     }
     ns_cam_note(&sc->cam);   /* la cámara con la que el motor dibuja la lista que se ensambla a continuación (la del guion en las cinemáticas) */
+    mosaic_note_scene(sc);
     mosaic_to_scene(sc);   /* también en las cinemáticas (cámara del juego) */
     feedback_to_scene(sc);
     const VrCamRecord *r = vrcam_last_record();
@@ -914,6 +916,25 @@ static const uint64_t *fx_classify_list(const GpuDrawList *hl, const VrCamRecord
 /* Mosaico de censura de la lista en curso como parche del mundo (vr_mosaic.h). build_one lo calcula al empezar cada lista (antes de clasificar sus primitivas); ns_ctx lo añade como efectos a
  * las escenas nativas mientras dure. Hilo de emulación. */
 static VrMosaic mosaic_cur;
+/* Orígenes de las piezas de los objetos que no son el escenario (mundo del motor) de la última escena capturada: de ellos sale la profundidad del objetivo del mosaico (vrmosaic_target_z), para
+ * que lo que lo tape (columna, pared) no reciba las celdas. Se anotan en ns_ctx, justo antes de ensamblar la lista a la que corresponden. Hilo de emulación. */
+#define MOSAIC_PTS 1024
+static float mosaic_pts[MOSAIC_PTS][3]; static int mosaic_npts;
+static void mosaic_note_scene(const NsScene *sc) {
+    mosaic_npts = 0;
+    if (!sc->inst || !sc->piece) return;
+    for (uint32_t i = 0; i < sc->n_inst; i++) {
+        const NsInstance *in = &sc->inst[i];
+        if (in->flags & NS_IF_STATIC) continue;
+        for (uint32_t k = 0; k < in->n_pieces && mosaic_npts < MOSAIC_PTS; k++) {
+            const NsPiece *p = &sc->piece[in->first_piece + k];
+            if (in->first_piece + k >= sc->n_piece) break;
+            if (p->flags & NS_PF_HIDDEN) continue;
+            mosaic_pts[mosaic_npts][0] = p->world.m[3]; mosaic_pts[mosaic_npts][1] = p->world.m[7]; mosaic_pts[mosaic_npts][2] = p->world.m[11];
+            mosaic_npts++;
+        }
+    }
+}
 static void mosaic_from_list(const GpuDrawList *l) {
     mosaic_cur.n = 0;
     if (!l || !l->prov || !ns_cam_have || !native_mode() || l->nops == 0) return;
@@ -939,7 +960,7 @@ static void mosaic_from_list(const GpuDrawList *l) {
     const float ys = (c->overscan_y > 0.5f && c->overscan_y < 2.0f) ? c->overscan_y : NS_OVERSCAN_Y;
     float M[9];
     for (int k = 0; k < 9; k++) M[k] = (k % 3 == 1) ? c->rot[k] / ys : c->rot[k];
-    if (!odd && cells) vrmosaic_build(l->ops, l->nops, mk, l->vram_end, c->eye, M, &mosaic_cur);
+    if (!odd && cells) vrmosaic_build(l->ops, l->nops, mk, l->vram_end, c->eye, M, (const float (*)[3])mosaic_pts, mosaic_npts, &mosaic_cur);
     free(mk);
     static int said = -1;
     if (said != (mosaic_cur.n > 0)) { said = mosaic_cur.n > 0; fprintf(stderr, "[mosaico] %s: %d celdas (de %d, raras %d, vram %d) a %.0f uds de la camara\n", said ? "parche del mundo" : "sin parche (celdas al panel 2D)", mosaic_cur.n, cells, odd, l->vram_end != NULL, (double)mosaic_cur.depth); }
@@ -1961,7 +1982,7 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     vrcine_config_default(&cine.cfg);
     vrcine_reset(&cine);
     last_scene3d = last_video = last_cover = last_list3d = 0;
-    undraw_since = 0; mosaic_cur.n = 0; nat_mosaic = 0; memset(&fb_cur, 0, sizeof fb_cur); nat_fb = 0; ns_cam_have = 0;
+    undraw_since = 0; mosaic_cur.n = 0; mosaic_npts = 0; nat_mosaic = 0; memset(&fb_cur, 0, sizeof fb_cur); nat_fb = 0; ns_cam_have = 0;
     nat_fresh = 0; memset(&load_m, 0, sizeof load_m); mv_host_set_load_boost(0);
     ns_hook_reset();
 #ifdef MV_NOGEN

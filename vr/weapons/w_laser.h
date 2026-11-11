@@ -3,7 +3,7 @@
  *
  * Aspecto sin shader propio: el vértice es rgba = (255, 0, 0): el shader del arma modula textura blanca * rgba/128 * (ambiente + difuso * lambert) y satura a 1, así que sale rojo puro (1, 0, 0)
  * con cualquier luz (ambiente 0,78 * 255/128 > 1). No es aditivo y el renderer lo oculta tras el escenario por la profundidad (mismo pase que el mundo).
- * Longitud: WLASER_MAX_M, o hasta el primer impacto con el escenario del juego (vrgame.c lo calcula cada VBlank con vrhzd_raycast + vrhc_raycast_world y lo pasa por wlaser_length): el punto del
+ * Longitud: WLASER_MAX_M, o hasta el primer impacto con el escenario del juego (vrgame.c lo calcula cada VBlank con vrhzd_raycast + vrhc_raycast_world + vrhit_probe (primer enemigo) y lo pasa por wlaser_length): el punto del
  * extremo queda sobre la superficie apuntada, WLASER_SURF_GAP_M por delante de ella, y el rayo se acorta como el del mod de 1997. Sin dato de impacto, 15 m.
  * El eje es el de la boca (-Z local de la pose), el mismo con el que vr_fire (vrfire_make_matrix) orienta la bala: lo que apunta el rayo es lo que dispara el arma. */
 #pragma once

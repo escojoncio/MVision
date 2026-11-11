@@ -702,6 +702,74 @@ int main(void) {
         CHECK(vrview_step(NULL, &l) == VRV_CINEMA, "NULL");
         vrview_step(&vb, NULL); CHECK(!vb.black, "entradas NULL: sin negro");
     }
+    /* ---- clase «el motor lleva la cámara y el jugador no»: toda ella a la pantalla 3D, y la primera persona del jugador (conductos, gateo, libre) no ---- */
+    {
+        /* (1) Barrido de todas las combinaciones de hechos del motor. Con la cámara del motor propia (escena, cámara de evento con control, pared con control) y sin ventana 2D encima, el motivo es el
+         * de esa vista y la clase la pantalla 3D si hay 3D del motor: nunca MUNDO, aunque la cámara VR siga encendida. Sin ningún hecho del motor y con control, siempre MUNDO (la cámara de
+         * 1.ª persona del juego en conductos y gateo no se distingue: es gameplay). */
+        int bad_engine = 0, bad_world = 0, n_engine = 0, n_world = 0;
+        for (unsigned m = 0; m < 1u << 12; m++) {
+            VrViewIn s; memset(&s, 0, sizeof s);
+            s.game = 1; s.in_control = m & 1; s.cam_active = (m >> 1) & 1; s.native_ok = (m >> 2) & 1; s.cinematic = (m >> 3) & 1; s.event = (m >> 4) & 1; s.wall = (m >> 5) & 1;
+            s.comms = (m >> 6) & 1; s.paused = (m >> 7) & 1; s.menu_open = (m >> 8) & 1; s.stopped = (m >> 9) & 1; s.dead = (m >> 10) & 1; s.scene3d = (m >> 11) & 1;
+            const int overlay = s.comms || s.paused || s.menu_open || s.stopped || s.dead;
+            const int engine_cam = s.cinematic || (s.in_control && (s.event || s.wall));
+            if (s.event && !s.in_control) continue;      /* el anfitrión nunca la publica sin control (vrhost.c: vin.event = event_view && g.in_control) */
+            if (s.wall && !s.in_control) continue;
+            const int r = vrview_reason(&s), k = vrview_kind_of(&s);
+            if (engine_cam && !overlay) {
+                n_engine++;
+                const int okr = r == VRV_R_CINEMATIC || (!s.cinematic && (r == VRV_R_WALL || r == VRV_R_EVENT));
+                if (!okr || k == VRV_K_WORLD || (s.scene3d && k != VRV_K_ENGINE)) { if (!bad_engine) fprintf(stderr, "máscara 0x%x: motivo %d clase %d\n", m, r, k); bad_engine++; }
+            } else if (!engine_cam && !overlay && s.in_control && s.cam_active) {
+                n_world++;
+                if (r != VRV_R_WORLD || k != VRV_K_WORLD) { if (!bad_world) fprintf(stderr, "máscara 0x%x: motivo %d clase %d\n", m, r, k); bad_world++; }
+            }
+        }
+        CHECK(n_engine >= 64 && n_world >= 4, "el barrido cubre casos (%d motor, %d mundo)", n_engine, n_world);
+        CHECK(!bad_engine, "cámara del motor propia sin ventana 2D: %d de %d combinaciones no van a la pantalla 3D", bad_engine, n_engine);
+        CHECK(!bad_world, "primera persona con control y sin hechos del motor: %d de %d combinaciones no se quedan en el mundo", bad_world, n_world);
+
+        /* (2) Las escenas del motor del registro del visor (build 0d4635f, 15 en total: {vb de inicio, VBlanks con la cámara VR aún encendida, duración}). Se juegan con las banderas medidas: sin
+         * control, escena, y las primeras listas con la cámara VR (3D sin cámara del motor reconocida) y después con la del motor. Entre ellas, las del jugador tumbado en un conducto cuya
+         * cámara es la de 1.ª persona del juego (vb 13954, 19951, 34745). Todas llegan a la pantalla 3D en 12 VBlanks como mucho y no vuelven al mundo mientras dura la escena. */
+        static const struct { int vb0, linger, len; } SC[] = {
+            {7375, 9, 384}, {12434, 9, 82}, {13954, 9, 60}, {19951, 9, 60}, {20219, 0, 267}, {28532, 9, 88}, {28672, 9, 88}, {30520, 0, 64},
+            {30784, 9, 222}, {32540, 9, 180}, {32730, 0, 127}, {34745, 9, 70}, {42653, 9, 40}, {44692, 0, 29}, {45123, 9, 400}};
+        int late = 0, back = 0, world_end = 0;
+        for (unsigned q = 0; q < sizeof SC / sizeof SC[0]; q++) {
+            VrView v; vrview_reset(&v);
+            VrViewIn g = world(); g.native_ok = 1; g.list3d = 1; g.fresh = 255;
+            for (int k = 0; k < 20; k++) vrview_step(&v, &g);
+            VrViewIn sc = g; sc.in_control = 0; sc.cinematic = 1;
+            int reached = -1;
+            for (int k = 0; k < SC[q].len; k++) {
+                if (k < SC[q].linger) { sc.cam_active = 1; sc.scene3d = 0; }
+                else { sc.cam_active = 0; sc.scene3d = 1; }
+                vrview_step(&v, &sc);
+                if (v.mode == VRV_CINEMA && v.kind == VRV_K_ENGINE && reached < 0) reached = k;
+                if (reached >= 0 && (v.mode != VRV_CINEMA || v.kind != VRV_K_ENGINE)) back++;
+            }
+            if (reached < 0 || reached > 12) { late++; fprintf(stderr, "escena de vb %d: pantalla 3D en %d VBlanks\n", SC[q].vb0, reached); }
+            /* el motor devuelve el control: transición con la vista retenida y de vuelta a la primera persona */
+            VrViewIn fin = g; fin.cam_active = 0; fin.scene3d = 1;
+            for (int k = 0; k < 8; k++) vrview_step(&v, &fin);
+            fin.cam_active = 1; fin.scene3d = 0;
+            for (int k = 0; k < 6; k++) vrview_step(&v, &fin);
+            world_end += v.mode == VRV_WORLD && v.kind == VRV_K_WORLD;
+        }
+        CHECK(!late, "%d escenas del registro no llegan a la pantalla 3D en 12 VBlanks", late);
+        CHECK(!back, "%d fotogramas de escena vuelven al mundo o a la plana con la escena en curso", back);
+        CHECK(world_end == (int)(sizeof SC / sizeof SC[0]), "al acabar la escena, primera persona (%d de %d)", world_end, (int)(sizeof SC / sizeof SC[0]));
+
+        /* (3) Gameplay con la cámara de 1.ª persona del juego (conductos d0020-d0023, gateo): con control y sin hechos del motor se queda en el mundo 1500 VBlanks seguidos, también con la lista
+         * del motor 3D y la cámara VR encendida o con un parpadeo de un fotograma sin ella. */
+        VrView vg; vrview_reset(&vg);
+        VrViewIn d = world(); d.native_ok = 1; d.list3d = 1; d.fresh = 255; d.scene3d = 1;
+        int left = 0;
+        for (int k = 0; k < 1500; k++) { d.cam_active = k % 400 != 399; vrview_step(&vg, &d); if (k > 10 && (vg.mode != VRV_WORLD || vg.kind != VRV_K_WORLD)) left++; }
+        CHECK(!left, "conducto / gateo con control: %d fotogramas fuera del mundo", left);
+    }
     /* ---- emulación sin límite de ritmo durante la carga (vrhost_load_boost): solo en la cuenta atrás de la petición de carga del motor, con la vista ya en negro y sin vídeo ---- */
     {
         const int32_t load = 0x7FFEFF7D;   /* contador del motor medido en plena carga */

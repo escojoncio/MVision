@@ -911,6 +911,14 @@ int ns_gpu_tri_oversize(const float v[3][3], float hx, float hy) {
     }
     return mx[0] - mn[0] > NSG_HW_MAX_W || mx[1] - mn[1] > NSG_HW_MAX_H;
 }
+int ns_gpu_gte_tri(const float v[3][3], float zc, float hx, float hy, float out[3][3]) {
+    if (!(v[0][2] > 0.0f) && !(v[1][2] > 0.0f) && !(v[2][2] > 0.0f)) return NSG_GTE_BEHIND;
+    for (int k = 0; k < 3; k++) {
+        out[k][0] = v[k][0]; out[k][1] = v[k][1];
+        out[k][2] = v[k][2] < zc ? zc : v[k][2];
+    }
+    return ns_gpu_tri_oversize(out, hx, hy) ? NSG_GTE_OVERSIZE : NSG_GTE_DRAW;
+}
 int ns_gpu_tri_back(const float p0[3], const float p1[3], const float p2[3], const float eye[3]) {
     float e1[3], e2[3], r[3];
     for (int a = 0; a < 3; a++) { e1[a] = p1[a] - p0[a]; e2[a] = p2[a] - p0[a]; r[a] = p0[a] - eye[a]; }

@@ -73,6 +73,10 @@ float ns_gpu_back_z(int mode, uint32_t cface_flags, int back);
  * NSG_HW_MAX_H de alto y por tanto la GPU original no lo dibuja. v = vértices en la vista del motor (x derecha, y abajo, z delante; unidades del motor), hx/hy = píxeles por unidad de tangente
  * (H y H por el factor vertical). Las coordenadas saturan a NSG_HW_SXY_MIN..MAX antes de medir, como las de la GTE. Un vértice con z <= 0 no tiene proyección: devuelve 0 (lo decide el descarte cercano). */
 int ns_gpu_tri_oversize(const float v[3][3], float hx, float hy);
+/* Réplica en C de la proyección de la GTE para un triángulo en la vista del motor (cámara del juego): la división H/SZ satura en 2,0 cuando z <= zc (= H/2), así que un vértice con z < zc se proyecta
+ * como si estuviera en el plano z = zc (x e y de la vista intactas) y el polígono se dibuja igualmente. out = vértices tras ese ajuste. NSG_GTE_BEHIND si ningún z > 0; NSG_GTE_OVERSIZE si, ya
+ * ajustado, supera el tamaño máximo del hardware (ns_gpu_tri_oversize); si no, NSG_GTE_DRAW. hx/hy como en ns_gpu_tri_oversize. */
+int ns_gpu_gte_tri(const float v[3][3], float zc, float hx, float hy, float out[3][3]);
 /* Comprobación de PIEZA (una vez por fotograma, tras rellenar la tabla): matriz corrupta (NSG_NET_MAT: no dibujar la pieza) y soldaduras cuyo vértice del padre se aleja más de NSG_NET_WELD_GAP_M de
  * la posición propia (NSG_NET_WELD: poner NSG_PF_NOWELD). nverts = nº de vértices de la malla de la pieza; mpu = metros VR por unidad del motor. Devuelve las causas. */
 uint32_t ns_gpu_net_piece(const NsGpuVert *pool, const NsGpuPiece *tbl, uint32_t gi, uint32_t nverts, float mpu, NsGpuNetPiece *out);

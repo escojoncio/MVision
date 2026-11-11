@@ -101,27 +101,39 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
     /* U.cull_eye.w = NSG_CULL_ALL (cinemáticas) o NSG_CULL_SEMI (cabeza bajo el agua: solo mallas semitransparentes, p. ej. la superficie del agua vista desde abajo). Réplica: ns_gpu_cull_applies */
     const uint cull = uint(U.cull_eye.w + 0.5);
     const bool one_sided = (cf & NSG_CF_ONESIDED) != 0u && (cull == uint(NSG_CULL_ALL) || (cull == uint(NSG_CULL_SEMI) && (cf & NSG_CF_SEMI) != 0u));
-    /* Cámara del juego (cinemáticas, vista de pared): el motor no dibuja un polígono con algún vértice sin división fiable (z de vista <= H/2: la proyección desborda), así que un casco de
-     * tanque, una pared o un personaje pegados a la cámara del guion no existen en su imagen; aquí tapaban media pantalla. U.misc.y = ese umbral en unidades del motor (0 = sin descarte:
-     * el mundo en primera persona, donde lo cercano sí se ve). Los tres vértices deciden igual. Réplica en C: NsRCam.zreject (ns_cpuref.c). */
+    /* Cámara del juego (cinemáticas, vista de pared): la GTE satura la división H/SZ en 2,0 cuando z de vista <= H/2, así que el motor proyecta ese vértice como si estuviera en el plano z = H/2
+     * (x e y de la vista intactas) y dibuja el polígono igualmente (medido en volcados: cámara a pocas unidades de una pared). Solo no hay polígono si ningún vértice está delante (z <= 0).
+     * U.misc.y = H/2 en unidades del motor (0 = sin ajuste: el mundo en primera persona, donde lo cercano se ve tal cual). El reverso y el tamaño máximo se miden con los vértices ya
+     * ajustados. Los tres vértices deciden igual. Réplica en C: ns_gpu_gte_tri (ns_gpu.c) y NsRCam.zreject (ns_cpuref.c). */
     const bool near_reject = U.misc.y > 0.0;
     /* Reverso de una cara de una sola cara que NO se descarta (mundo en primera persona: doble cara): se dibuja, pero pierde el empate de profundidad con el anverso que comparte su plano
      * (paredes de dos hojas espalda con espalda: sin esto parpadean entre sus dos texturas). Se decide con el ojo de ESTA vista. Réplica en C: ns_gpu_back_z (ns_gpu.c). */
     const bool back_keep = (cf & NSG_CF_ONESIDED) != 0u && !one_sided;
     bool behind = false;
+    float3 wpos = wp;   /* posición que se proyecta: la del vértice, o su ajuste al plano z = H/2 (near_reject) */
     if (one_sided || near_reject || back_keep) {
         uint f0 = corner_index - corner_index % 3u;
         float3 q0 = ns_world_pos(verts[corners[f0].v], P, verts, pieces);
         float3 q1 = ns_world_pos(verts[corners[f0 + 1u].v], P, verts, pieces);
         float3 q2 = ns_world_pos(verts[corners[f0 + 2u].v], P, verts, pieces);
-        if (one_sided) back = dot(q0 - U.cull_eye.xyz, cross(q1 - q0, q2 - q0)) <= 0.0;
+        float3 g0 = q0, g1 = q1, g2 = q2;   /* vértices tras el ajuste de la GTE */
+        float3 zv = float3(0.0);
         if (near_reject) {
-            float3 zv = float3(dot(U.fog_fwd.xyz, q0), dot(U.fog_fwd.xyz, q1), dot(U.fog_fwd.xyz, q2)) + U.fog_fwd.w;
-            if (min(min(zv.x, zv.y), zv.z) <= U.misc.y) back = true;
+            zv = float3(dot(U.fog_fwd.xyz, q0), dot(U.fog_fwd.xyz, q1), dot(U.fog_fwd.xyz, q2)) + U.fog_fwd.w;
+            if (max(max(zv.x, zv.y), zv.z) <= 0.0) back = true;   // ningún vértice delante de la cámara
             else {
+                const float3 zc = max(zv, float3(U.misc.y));
+                g0 = q0 + U.fog_fwd.xyz * (zc.x - zv.x); g1 = q1 + U.fog_fwd.xyz * (zc.y - zv.y); g2 = q2 + U.fog_fwd.xyz * (zc.z - zv.z);
+                wpos = corner_index % 3u == 0u ? g0 : (corner_index % 3u == 1u ? g1 : g2);
+                zv = zc;
+            }
+        }
+        if (one_sided && !back) back = dot(g0 - U.cull_eye.xyz, cross(g1 - g0, g2 - g0)) <= 0.0;
+        if (near_reject) {
+            if (!back) {
                 /* Tamaño máximo del hardware: la GPU original no dibuja el triángulo de más de 1023 x 511 px de la pantalla del motor (coordenadas saturadas a -1024..1023), así que una rejilla o un
-                 * suelo pegados a la cámara del guion no existen en su imagen; aquí tapaban la pantalla. Aquí zv > misc.y > 0. Réplica en C: ns_gpu_tri_oversize (ns_gpu.c). */
-                float3 r0 = q0 - U.cull_eye.xyz, r1 = q1 - U.cull_eye.xyz, r2 = q2 - U.cull_eye.xyz;
+                 * suelo pegados a la cámara del guion no existen en su imagen; aquí tapaban la pantalla. Aquí zv ya es max(z, H/2) > 0. Réplica en C: ns_gpu_tri_oversize (ns_gpu.c). */
+                float3 r0 = g0 - U.cull_eye.xyz, r1 = g1 - U.cull_eye.xyz, r2 = g2 - U.cull_eye.xyz;
                 float3 sx = clamp(U.cam_x.w * float3(dot(U.cam_x.xyz, r0), dot(U.cam_x.xyz, r1), dot(U.cam_x.xyz, r2)) / zv, NSG_HW_SXY_MIN, NSG_HW_SXY_MAX);
                 float3 sy = clamp(U.cam_y.w * float3(dot(U.cam_y.xyz, r0), dot(U.cam_y.xyz, r1), dot(U.cam_y.xyz, r2)) / zv, NSG_HW_SXY_MIN, NSG_HW_SXY_MAX);
                 if (max(max(sx.x, sx.y), sx.z) - min(min(sx.x, sx.y), sx.z) > NSG_HW_MAX_W || max(max(sy.x, sy.y), sy.z) - min(min(sy.x, sy.y), sy.z) > NSG_HW_MAX_H) back = true;
@@ -163,9 +175,9 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
     col = clamp(floor(col * U.tint.xyz), 0.0, 255.0);   /* depuración «solo nativo»: tinte; (1,1,1) = identidad */
 
     /* mundo del motor -> mundo VR (m) */
-    float3 pv = float3(dot(U.tovr[0].xyz, wp) + U.tovr[0].w,
-                       dot(U.tovr[1].xyz, wp) + U.tovr[1].w,
-                       dot(U.tovr[2].xyz, wp) + U.tovr[2].w);
+    float3 pv = float3(dot(U.tovr[0].xyz, wpos) + U.tovr[0].w,
+                       dot(U.tovr[1].xyz, wpos) + U.tovr[1].w,
+                       dot(U.tovr[2].xyz, wpos) + U.tovr[2].w);
     /* sesgo de orden del motor (decals): se acerca el vértice al ojo a lo largo de la línea de visión (no cambia su posición en pantalla) */
     if (P.raise != 0.0) {
         float3 d = U.eye[amp].xyz - pv;

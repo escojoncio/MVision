@@ -93,6 +93,9 @@ int vrhit_bullet(uint8_t *ram, uint32_t actor, VrHitShot *out);
 /* Instante del gatillo (el juego crea la bala ~0,4 s después): anota a qué blanco y zona apunta el rayo boca -> delante en ese instante. La bala que salga con ese mismo
  * rayo impacta en ese blanco aunque se haya movido entretanto. */
 void vrhit_aim(const uint8_t *ram, const float o[3], const float d[3]);
+/* Distancia (unidades del motor) hasta el primer enemigo (cápsulas, o caja sin ellas) que toca el rayo o + t*d en [0, max]; -1 ninguno. No mira paredes (las corta quien llama) ni anota nada: es
+ * lo que usa el láser de la pistola para acabar donde impactaría la bala (vrhit_bullet usa los mismos volúmenes). */
+float vrhit_probe(const uint8_t *ram, const float o[3], const float d[3], float max);
 /* Una vez por VBlank: caduca las punterías anotadas. */
 void vrhit_frame(void);
 

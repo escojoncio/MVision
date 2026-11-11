@@ -78,6 +78,10 @@ typedef uint8_t ns_u8;
 #define NSG_HW_MAX_H 511.0f
 #define NSG_HW_SXY_MIN (-1024.0f)
 #define NSG_HW_SXY_MAX 1023.0f
+/* Resultado de ns_gpu_gte_tri */
+#define NSG_GTE_DRAW 0     /* se dibuja (con los vértices ya ajustados al plano z = H/2 si estaban más cerca) */
+#define NSG_GTE_BEHIND 1   /* ningún vértice delante de la cámara (z > 0): el motor lo descarta */
+#define NSG_GTE_OVERSIZE 2 /* mide más de NSG_HW_MAX_W x NSG_HW_MAX_H px tras el ajuste: el hardware no lo dibuja */
 
 /* Vértice local (unidades del motor). weld: NSG_NO_WELD o índice de vértice del modelo PADRE (NsPiece.parent) cuya posición transformada lo sustituye. */
 typedef struct { float p[3]; ns_u32 weld; } NsGpuVert;                                              /* 16 B */
@@ -139,7 +143,7 @@ typedef struct {
     /* agua (ns_screen): el tinte vive en el MUNDO (la ondulación es un post-proceso de pantalla, ver NsGpuScreen.water_wave). w de water_min = 1 si hay volumen de agua; w de water_tint = 1 si la cabeza está dentro (se tiñe todo) */
     vector_float4 water_min, water_max, water_tint;
     vector_float4 fromvr[3];        /* mundo VR -> mundo del motor, filas de la 3x4 (xyz, traslación en w) */
-    vector_float4 misc;             /* x = índice de ojo del pase cuando NO hay amplificación (0/1: máscara de caras de los efectos); y = descarte cercano del motor: z de vista de la cámara del juego (unidades del motor) por debajo de la cual un triángulo con algún vértice ahí no se dibuja (0 = sin descarte) */
+    vector_float4 misc;             /* x = índice de ojo del pase cuando NO hay amplificación (0/1: máscara de caras de los efectos); y = plano z = H/2 de la GTE con la cámara del juego (unidades del motor): el vértice con z de vista por debajo se proyecta en ese plano y solo se descarta el triángulo sin vértices delante (0 = sin ajuste; réplica ns_gpu_gte_tri) */
     vector_float4 cull_eye;         /* xyz = ojo de la cámara del JUEGO en el mundo del motor; w = NSG_CULL_ALL: descartar las caras NSG_CF_ONESIDED vistas por detrás (cinemáticas: la cámara queda fuera de las salas y el motor no dibuja los techos desde arriba); NSG_CULL_SEMI: solo las de mallas semitransparentes (cabeza bajo el agua: el motor no dibuja la superficie del agua vista desde abajo); 0 = doble cara (primera persona) */
     vector_float4 cam_x, cam_y;     /* cámara del JUEGO en el mundo del motor: xyz = eje X (derecha) / Y (abajo) de la vista; w = píxeles de la pantalla del motor por unidad de tangente (H; H por el factor vertical). Solo se usan con misc.y > 0 (tamaño máximo del hardware, NSG_HW_MAX_*) */
 } NsGpuUniforms;
