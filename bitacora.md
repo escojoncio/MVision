@@ -5,7 +5,7 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 
 
 ## Last done
-- 2026-11-11 (5ª tanda, tras Archivo_28: log + 18 volcados; sin verificar en visor; Swift/Metal sin compilar en local; 2 rondas de revisión adversarial):
+- 2026-11-11 (5ª tanda, tras Archivo_28: log + 18 volcados; commit c296526; sin verificar en visor; 2 rondas de revisión adversarial; CI `visionos.yml` de c296526 en verde: Swift/Metal compilan, IPA generada):
   - Cuerpo propio oculto / brazos flotando: causa = adelanto global de 0,35 m a todos los dinámicos (`NS_GPU_DYN_RAISE_M`, 4ª tanda): los vértices a <0,45 m del ojo cruzaban el plano cercano y los dinámicos salían por delante de paredes. Quitado. Pies bajo el suelo ahora por pieza: `ns_sink.{c,h}` (bits 8-15 de `NsPiece.flags`, pasos de 8 uds; solo cuerpos articulados no rígidos ≥8 piezas hundidos ≤450 uds y ≤|sesgo| bajo suelo estático con `depth_bias`<0; enganche en `ns_extract_glue.c`, aplicado en `ns_gpu_make_piece`). Medido 0,03-0,15 ms por captura.
   - Conductos: quitado `NS_PARTS_CHEST`; el cuerpo tumbado se ancla 250 uds detrás del ojo según el rumbo del cuerpo (`cfg.prone_back`, `vr_camera.c`).
   - Pared: eliminada la 3ª persona propia y su fontanería (`third`, `cam_off`, `wall_back_m`...). `vrcam_wall_view()` (PS_WALL visto en 10 VBlanks; entra con 25 seguidos y contacto en ese VBlank; sale 6 después o sin control) apaga la cámara VR; `VRV_R_WALL` = pantalla 3D del motor con su cámara y mando original (`g.menu`); el toque es el botón de golpe.
@@ -19,7 +19,7 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 
 ## Current state
 **Funciona (tests):** todas las baterías de `Comandos` a 0 fallos. `test-dumps` sobre Archivo_28: 6 fallos ya presentes en el commit anterior (d0007 y prov_motse son volcados en plena carga, sin escena).
-**Pendiente de probar en visor:** todo lo de 2026-11-11 y 2026-11-10.
+**Pendiente de probar en visor (build de c296526):** todo lo de 2026-11-11 y 2026-11-10.
 **Sin causa encontrada:** d0010 (recuerdo en sepia, área 19291: 217 caras con otra textura y 287 ausentes en el mapa 0x8013f704); d0011 (superficie clara de más, piezas 54/57/64 del mapa 0x80162d0c); distorsión al morir (d0018, cobertura 100 %); agarre inferior de la pistola sin ajustar.
 **Unverified (5ª tanda):**
 - Vista de pared: rumbo del mando congelado al pegarse; 0,5 s para entrar; se presenta como las cinemáticas (opción `cutscene`).
