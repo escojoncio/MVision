@@ -75,6 +75,10 @@ void mv_host_pause(void);
 void mv_host_resume(void);
 /* Sin limitador de ritmo (avance rápido). */
 void mv_host_set_turbo(int on);
+/* Carga acelerada: mientras está a 1 la emulación corre sin limitador de ritmo y el audio que produce no se oye (spu_out_discard). El tiempo virtual no cambia (mismos VBlanks, mismo
+ * ritmo de disco por VBlank, mismos temporizadores del juego): solo dura menos en el reloj de pared. Lo llama el hilo de emulación desde su gancho de VBlank (vr/host/vrhost.c, solo
+ * en las cargas del motor con la vista en negro); independiente de mv_host_set_turbo. */
+void mv_host_set_load_boost(int on);
 
 /* Pose de la cabeza (originFromDevice, ya recentrada) que publica el host VR cada frame de render.
  * m = 16 floats en columnas; t = segundos. Thread-safe. Lectura: mv_vr_get_head (host_vr.c). */

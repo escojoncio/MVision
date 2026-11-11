@@ -312,7 +312,7 @@ final class XRFrameEncoder {
         let now = CACurrentMediaTime()
         if now - diagT >= 1 {      // 1/s siempre mientras dure la depuración (antes pasaba a 1 cada 10 s tras 30 s)
             diagT = now
-            var d = "xr-diag: modo=\(gs.view_mode) motivo=\(gs.view_reason) clase=\(gs.view_kind) plano=\(gs.cine_shot) cortes=\(gs.cine_cuts) cubiertas=\(gs.cine_cover) cinem=\(gs.cinematic) estereo=\(renderer.stereoRendered) | " + presenter.diagnostics(items: pres.items)
+            var d = "xr-diag: modo=\(gs.view_mode) motivo=\(gs.view_reason) clase=\(gs.view_kind) negro=\(gs.view_black) plano=\(gs.cine_shot) cortes=\(gs.cine_cuts) cubiertas=\(gs.cine_cover) cinem=\(gs.cinematic) estereo=\(renderer.stereoRendered) | " + presenter.diagnostics(items: pres.items)
             d += " | escena: " + renderer.diagnostics()
             let c = colorTex[0], z = depthTex[0]
             d += " | color: tipo=\(c.textureType.rawValue) fmt=\(c.pixelFormat.rawValue) \(c.width)x\(c.height)x\(c.arrayLength) n=\(colorTex.count) | prof: fmt=\(z.pixelFormat.rawValue) n=\(depthTex.count)"

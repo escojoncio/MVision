@@ -57,6 +57,7 @@ static _Atomic uint64_t fb_read_ns;           /* última lectura del vídeo (par
 static _Atomic uint64_t pad_req = ((uint64_t)0x80 << 16) | ((uint64_t)0x80 << 24) | ((uint64_t)0x80 << 32) | ((uint64_t)0x80 << 40);
 static _Atomic uint16_t rumble_pack;
 static _Atomic int turbo;
+static _Atomic int load_boost;                /* mv_host_set_load_boost */
 static _Atomic uint32_t frames;
 
 static char exe_path[1024];
@@ -152,7 +153,7 @@ static int audio_live(uint64_t now) {
 static void pace(void) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    if (atomic_load(&turbo)) { have_deadline = 0; return; }
+    if (atomic_load(&turbo) || atomic_load(&load_boost)) { have_deadline = 0; return; }
     uint64_t t0 = mono_ns();
     if (audio_live(t0)) {
         have_deadline = 0;   /* al volver al reloj de pared no se intentan recuperar los VBlanks de la espera */
@@ -544,3 +545,7 @@ void mv_host_resume(void) {
 }
 
 void mv_host_set_turbo(int on) { atomic_store(&turbo, on != 0); }
+void mv_host_set_load_boost(int on) {
+    on = on != 0;
+    if (atomic_exchange(&load_boost, on) != on) spu_out_discard(on);
+}

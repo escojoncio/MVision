@@ -372,7 +372,7 @@ final class NativeRenderer {
     /// como mucho `syncWaitMax` fotogramas; mientras espera se repite la última escena válida (con su VRAM). `vramList`/`vramKnown`: índice de la última lista aplicada (lo fija RGRenderer antes de beginFrame).
     var vramList: UInt32 = 0
     var vramKnown = false
-    static let syncWaitMax = 6
+    static let syncWaitMax = 20                       // la lista de la escena se cierra al mostrarse su fotograma (un fotograma de juego, 40-60 ms, después de capturarla) y llega 1-2 VBlanks más tarde: con 6 el plazo se agotaba en cada cambio de zona
     private var syncHeld = false                      // la escena `view` está retenida: no se vuelve a tomar del puente (sus punteros valen hasta la siguiente toma)
     private var syncWait = 0                          // fotogramas que lleva esperando la VRAM de la época nueva
     private var syncHeldFrames = 0                    // total de fotogramas retenidos (registro `sync_epoca=N`)

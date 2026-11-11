@@ -411,6 +411,8 @@ static _Atomic uint64_t st_prod, st_drop;          /* productor */
 static _Atomic uint64_t st_cons, st_sil;           /* consumidor */
 static _Atomic uint32_t st_under;
 static _Atomic uint32_t st_min = 0xFFFFFFFFu, st_max;
+static _Atomic int out_discard;                    /* spu_out_discard: lo renderizado no entra en el anillo */
+void spu_out_discard(int on) { atomic_store_explicit(&out_discard, on != 0, memory_order_relaxed); }
 
 /* Depuración (solo por variable de entorno): MV_SPU_WAV=fichero graba la mezcla; MV_SPU_TRACE=1 imprime por VBlank las
  * voces activas, KON/KOFF recientes, ENDX, volúmenes y estado del reverb. */
@@ -453,10 +455,12 @@ void spu_clock(int frames) {
     uint32_t wr = atomic_load_explicit(&out_wr, memory_order_relaxed);
     uint32_t rd = atomic_load_explicit(&out_rd, memory_order_acquire);
     uint64_t dropped = 0;
+    const int discard = atomic_load_explicit(&out_discard, memory_order_relaxed);
     for (int i = 0; i < frames; i++) {
         render_one(tmp);
         wav_put(tmp, 1);
         if (dbg_trace && ++dbg_frames >= 882) { dbg_frames = 0; dbg_vblank(); }
+        if (discard) continue;
         if (wr - rd >= OUT_RING) {   /* lleno: se relee rd por si el consumidor avanzó */
             rd = atomic_load_explicit(&out_rd, memory_order_acquire);
             if (wr - rd >= OUT_RING) { dropped++; continue; }

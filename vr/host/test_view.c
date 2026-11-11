@@ -472,5 +472,160 @@ int main(void) {
         for (int k = 0; k < 6; k++) vrview_step(&vs, &pz);
         CHECK(vs.kind == VRV_K_UI, "pausa sin cámara VR: 2D");
     }
+    /* ---- fundido a negro (VrView.black): desde que el motor desmonta / carga con una vista nativa hasta que hay una escena nueva completa; secuencias medidas en el visor (build 0d4635f) ---- */
+#define RUN(vv, inp, n, cond, ...) for (int k_ = 0; k_ < (n); k_++) { vrview_step(&(vv), &(inp)); flat |= (vv).mode == VRV_CINEMA && (vv).kind != VRV_K_ENGINE && !(vv).black; CHECK(cond, __VA_ARGS__); }
+    {
+        int flat = 0;   /* se vio la pantalla plana sin negro entre dos vistas nativas */
+        VrView vb; vrview_reset(&vb);
+        VrViewIn w = world(); w.native_ok = 1; w.list3d = 1; w.fresh = 255;
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        CHECK(vb.mode == VRV_WORLD && !vb.black, "mundo: sin negro");
+        /* cambio de zona desde el mundo (vb 10868-11084): 196 sin dibujo, 9 «sin partida», 9 sin dibujo con control y sin cámara VR, y el mundo */
+        VrViewIn l; memset(&l, 0, sizeof l); l.cam_active = 1; l.frozen = 1; l.list3d = 1;
+        vrview_step(&vb, &l);
+        CHECK(vb.black && (vb.changed & VRV_CH_BLACK) && vb.reason == VRV_R_FROZEN, "el negro empieza en el primer fotograma sin dibujo");
+        RUN(vb, l, 195, vb.black && vb.mode == VRV_WORLD && vb.kind == VRV_K_WORLD, "carga: negro con la vista retenida (k=%d)", k_);
+        CHECK(vb.black_run == 196, "fotogramas en negro: %d", vb.black_run);
+        VrViewIn n; memset(&n, 0, sizeof n); n.cam_active = 1;
+        RUN(vb, n, 9, vb.black, "zona cargada, sin partida todavía: sigue en negro (k=%d)", k_);
+        VrViewIn p = world(); p.cam_active = 0; p.frozen = 1;
+        RUN(vb, p, 9, vb.black, "segundo tramo sin dibujo, ya con la pantalla plana vigente: sigue en negro (k=%d)", k_);
+        VrViewIn z = world(); z.native_ok = 1;
+        RUN(vb, z, 2, vb.black, "mundo sin escenas nuevas: negro (k=%d)", k_);
+        z.fresh = 1; RUN(vb, z, 2, vb.black, "una sola escena nueva: negro (k=%d)", k_);
+        z.fresh = 2; RUN(vb, z, 1, vb.black, "dos escenas pero el motor lleva menos de black_settle fotogramas dibujando: negro (k=%d)", k_);
+        z.native_ok = 0; RUN(vb, z, 4, vb.black, "escenas nuevas no aptas para la primera persona (el nativo repetiría la zona anterior): negro (k=%d)", k_);
+        z.native_ok = 1; vrview_step(&vb, &z);
+        CHECK(!vb.black && (vb.changed & VRV_CH_BLACK) && vb.reason == VRV_R_WORLD, "escena nueva completa: se levanta el negro (negro %d motivo %d)", vb.black, vb.reason);
+        CHECK(!flat, "cambio de zona: la pantalla plana nunca se vio sin negro");
+
+        /* ascensor (vb 30282-30594): mundo sin control con cámara VR; 183 sin dibujo; 2 «sin partida»; 53 sin dibujo con partida; escena sin 3D aún; escena 3D */
+        vrview_reset(&vb); flat = 0;
+        VrViewIn e = world(); e.in_control = 0; e.native_ok = 1; e.list3d = 1; e.fresh = 255;
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &e);
+        CHECK(vb.mode == VRV_WORLD && vb.reason == VRV_R_WORLD && !vb.black, "ascensor: mundo");
+        RUN(vb, l, 183, vb.black, "ascensor: negro en la carga (k=%d)", k_);
+        n.list3d = 0; RUN(vb, n, 2, vb.black, "ascensor: hueco sin partida en negro (k=%d)", k_);
+        VrViewIn e2 = world(); e2.cam_active = 0; e2.frozen = 1;
+        RUN(vb, e2, 53, vb.black, "ascensor: segundo tramo sin dibujo en negro (k=%d)", k_);
+        VrViewIn c = world(); c.in_control = 0; c.cam_active = 0; c.cinematic = 1;
+        RUN(vb, c, 5, vb.black, "ascensor: escena aún sin 3D, menos de black_2d fotogramas: negro (k=%d)", k_);
+        c.scene3d = c.list3d = 1; c.fresh = 3;      /* la lista con la cámara del motor llega con las escenas nuevas ya publicadas: el negro espera a que la pantalla 3D sea la vigente */
+        RUN(vb, c, 3, vb.black, "ascensor: escenas nuevas pero la pantalla 3D aún no es la vigente: negro (k=%d)", k_);
+        vrview_step(&vb, &c);
+        CHECK(!vb.black && vb.mode == VRV_CINEMA && vb.kind == VRV_K_ENGINE, "ascensor: la escena de llegada levanta el negro en la pantalla 3D (negro %d clase %d)", vb.black, vb.kind);
+        CHECK(!flat, "ascensor: la pantalla plana nunca se vio sin negro");
+
+        /* cadena de escenas (vb 14014-14049): pantalla 3D; 8 sin dibujo; 2 dibujando con las banderas de la lista vieja y una escena del desmontaje; 25 sin dibujo; escena nueva */
+        vrview_reset(&vb); flat = 0;
+        VrViewIn s; memset(&s, 0, sizeof s); s.scene3d = s.list3d = 1; s.fresh = 255;      /* escena del motor sin jugador */
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &s);
+        CHECK(vb.mode == VRV_CINEMA && vb.kind == VRV_K_ENGINE && !vb.black, "escena del motor en la pantalla 3D");
+        VrViewIn sf = s; sf.frozen = 1; sf.fresh = 0;
+        RUN(vb, sf, 8, vb.black && vb.kind == VRV_K_ENGINE, "entre escenas: negro con la pantalla 3D retenida (k=%d)", k_);
+        VrViewIn sg = s; sg.fresh = 2;
+        RUN(vb, sg, 2, vb.black, "hueco de 2 fotogramas en el desmontaje: no levanta el negro aunque haya escenas (k=%d)", k_);
+        RUN(vb, sf, 25, vb.black, "entre escenas: negro (k=%d)", k_);
+        sg.fresh = 0; RUN(vb, sg, 8, vb.black, "escena nueva aún sin capturar: negro (k=%d)", k_);
+        sg.fresh = 2; vrview_step(&vb, &sg);
+        CHECK(!vb.black && vb.kind == VRV_K_ENGINE && vb.mode == VRV_CINEMA, "escena siguiente: se levanta el negro");
+        CHECK(!flat, "cadena de escenas: la pantalla plana nunca se vio sin negro");
+
+        /* fin de cinemática -> juego sin carga (vb 20226-20496): sin negro de carga (la espera de la cámara VR ya oscurece en la app) */
+        vrview_reset(&vb);
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        VrViewIn ci = world(); ci.in_control = 0; ci.cam_active = 0; ci.cinematic = 1; ci.scene3d = ci.list3d = 1; ci.fresh = 255;
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &ci);
+        CHECK(vb.mode == VRV_CINEMA && vb.kind == VRV_K_ENGINE && !vb.black, "cinemática en la pantalla 3D");
+        VrViewIn pe = world(); pe.cam_active = 0; pe.scene3d = pe.list3d = 1; pe.fresh = 255;
+        RUN(vb, pe, 8, !vb.black && vb.reason == VRV_R_PENDING, "fin de escena: transición sin negro de carga (k=%d)", k_);
+        VrViewIn w2 = world(); w2.native_ok = 1; w2.scene3d = w2.list3d = 1; w2.fresh = 255;
+        RUN(vb, w2, 6, !vb.black, "vuelta al mundo: sin negro de carga (k=%d)", k_);
+        CHECK(vb.mode == VRV_WORLD && vb.kind == VRV_K_WORLD, "fin de escena: mundo");
+
+        /* muerte -> continuar (vb 7375-8070): escena de muerte, fin de partida 2D, carga desde 2D, espera de la cámara y mundo: nunca negro de carga (no hay vista nativa que tapar) */
+        vrview_reset(&vb);
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        VrViewIn d = world(); d.in_control = 0; d.cam_active = 0; d.cinematic = 1; d.dead = 1; d.scene3d = d.list3d = 1; d.fresh = 255;
+        RUN(vb, d, 20, !vb.black, "muerte: sin negro (k=%d)", k_);
+        VrViewIn go = d; go.stopped = 1; go.scene3d = go.list3d = 0;
+        RUN(vb, go, 20, !vb.black, "fin de partida: sin negro (k=%d)", k_);
+        CHECK(vb.kind == VRV_K_UI, "fin de partida: 2D");
+        VrViewIn gl; memset(&gl, 0, sizeof gl); gl.frozen = 1;
+        RUN(vb, gl, 14, !vb.black && vb.kind == VRV_K_UI, "continuar: carga desde 2D, sin negro (k=%d)", k_);
+        VrViewIn gp = world(); gp.cam_active = 0; gp.frozen = 1;
+        RUN(vb, gp, 9, !vb.black, "continuar: espera de la cámara (k=%d)", k_);
+        RUN(vb, w, 4, !vb.black, "continuar: mundo (k=%d)", k_);
+        CHECK(vb.mode == VRV_WORLD && vb.kind == VRV_K_WORLD, "continuar: mundo");
+
+        /* la pausa, el selector y la radio no funden, aunque el motor no dibuje; una radio durante el negro lo levanta */
+        vrview_reset(&vb);
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        VrViewIn pw = w; pw.paused = 1; RUN(vb, pw, 30, !vb.black, "pausa sobre el mundo: sin negro (k=%d)", k_);
+        pw.frozen = 1; RUN(vb, pw, 30, !vb.black, "pausa con el motor sin dibujar: sin negro (k=%d)", k_);
+        VrViewIn se = w; se.in_control = 0; se.menu_open = 1; se.frozen = 1; RUN(vb, se, 30, !vb.black, "selector: sin negro (k=%d)", k_);
+        VrViewIn ra = world(); ra.in_control = 0; ra.cam_active = 0; ra.comms = 1; ra.stopped = 1; ra.frozen = 1; RUN(vb, ra, 30, !vb.black, "radio: sin negro (k=%d)", k_);
+        vrview_reset(&vb);
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        RUN(vb, l, 20, vb.black, "carga (k=%d)", k_);
+        { int stale = 0;
+          for (int k = 0; k < 20; k++) { vrview_step(&vb, &ra); stale |= !vb.black && vb.kind != VRV_K_UI; }
+          CHECK(!vb.black && vb.kind == VRV_K_UI && vb.mode == VRV_CINEMA && !stale, "radio durante el negro: se levanta cuando el códec ya es la pantalla vigente, nunca sobre la vista retenida"); }
+        /* un vídeo durante el negro lo levanta */
+        vrview_reset(&vb);
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        RUN(vb, l, 20, vb.black, "carga (k=%d)", k_);
+        { VrViewIn mv = l; mv.mdec = 1; int stale = 0;
+          for (int k = 0; k < 8; k++) { vrview_step(&vb, &mv); stale |= !vb.black && vb.kind != VRV_K_VIDEO; }
+          CHECK(!vb.black && vb.kind == VRV_K_VIDEO && !stale, "vídeo durante el negro: se levanta con la pantalla de vídeo ya vigente"); }
+
+        /* carga hacia una pantalla 2D (título): el negro se levanta tras black_2d fotogramas dibujando sin 3D; con 3D de PS1 sin cámara del motor aguanta hasta hold_max */
+        vrview_reset(&vb);
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        RUN(vb, l, 50, vb.black, "carga (k=%d)", k_);
+        VrViewIn t2; memset(&t2, 0, sizeof t2);
+        RUN(vb, t2, vb.black_2d - 1, vb.black, "destino 2D: aún negro (k=%d)", k_);
+        vrview_step(&vb, &t2); CHECK(!vb.black && vb.kind == VRV_K_UI && vb.mode == VRV_CINEMA, "destino 2D estable: se levanta el negro");
+        vrview_reset(&vb);
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        RUN(vb, l, 50, vb.black, "carga (k=%d)", k_);
+        t2.list3d = 1;
+        flat = 0;
+        RUN(vb, t2, vb.hold_max, vb.black, "zona cargada con 3D de PS1 sin cámara del motor: negro, nunca la pantalla plana (k=%d)", k_);
+        { int stale = 0;
+          for (int k = 0; k < 6; k++) { vrview_step(&vb, &t2); stale |= !vb.black && vb.kind != VRV_K_UI; }
+          CHECK(!vb.black && vb.kind == VRV_K_UI && !stale, "acotado por hold_max; el negro se levanta con la pantalla 2D ya vigente, no sobre la vista retenida"); }
+        CHECK(!flat, "3D de PS1 sin cámara del motor: en negro mientras dura la retención");
+
+        /* topes: destino nativo sin escenas nuevas (black_nat_max) y motor que no vuelve a dibujar (black_max) */
+        vrview_reset(&vb);
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        RUN(vb, l, 50, vb.black, "carga (k=%d)", k_);
+        z.fresh = 0;
+        RUN(vb, z, vb.black_nat_max - 1, vb.black, "mundo sin escenas nuevas: negro (k=%d)", k_);
+        vrview_step(&vb, &z); CHECK(!vb.black, "mundo sin escenas nuevas: acotado por black_nat_max");
+        vrview_reset(&vb); vb.frozen_max = 20; vb.black_max = 40;
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        RUN(vb, l, 39, vb.black, "motor sin dibujar: negro (k=%d)", k_);
+        vrview_step(&vb, &l); CHECK(!vb.black, "motor que no vuelve a dibujar: acotado por black_max");
+        RUN(vb, l, 100, !vb.black, "pasado el tope no vuelve al negro hasta que el motor dibuje (k=%d)", k_);
+
+        char buf[640];
+        vrview_reset(&vb); for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        vrview_step(&vb, &l); vrview_describe(&vb, &l, buf, sizeof buf);
+        CHECK(strstr(buf, "negro=1") && strstr(buf, " negro "), "registro del negro: %s", buf);
+        CHECK(vrview_step(NULL, &l) == VRV_CINEMA, "NULL");
+        vrview_step(&vb, NULL); CHECK(!vb.black, "entradas NULL: sin negro");
+    }
+    /* ---- emulación sin límite de ritmo durante la carga (vrhost_load_boost): solo en la cuenta atrás de la petición de carga del motor, con la vista ya en negro y sin vídeo ---- */
+    {
+        const int32_t load = 0x7FFEFF7D;   /* contador del motor medido en plena carga */
+        CHECK(vrhost_load_boost(1, VRHOST_BOOST_DELAY, load, 0) == 1, "carga en negro: sin límite de ritmo");
+        CHECK(vrhost_load_boost(1, VRHOST_BOOST_DELAY - 1, load, 0) == 0, "antes de que el fundido termine: ritmo normal");
+        CHECK(vrhost_load_boost(0, 500, load, 0) == 0, "sin negro (carga desde un menú): ritmo normal");
+        CHECK(vrhost_load_boost(1, 500, 4, 0) == 0 && vrhost_load_boost(1, 500, 0, 0) == 0 && vrhost_load_boost(1, 500, -1, 0) == 0, "contador pequeño (el guion oculta unos fotogramas) o a cero: ritmo normal");
+        CHECK(vrhost_load_boost(1, 500, load, 1) == 0, "con vídeo: ritmo normal");
+        CHECK(vrhost_load_boost(1, VRHOST_BOOST_MAX, load, 0) == 0, "tope de duración");
+    }
     return fails ? 1 : 0;
 }

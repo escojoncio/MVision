@@ -342,6 +342,25 @@ static void t_spu_ring(void) {
     EQ(s1.produced - s0.produced, 20480);
 }
 
+/* Emulación sin límite de ritmo (cargas): lo renderizado no entra en el anillo (ni cuenta como sobreejecución) pero la SPU sigue avanzando; al volver, entra de nuevo. */
+static void t_spu_discard(void) {
+    int16_t o[512 * 2];
+    SpuAudioStats s0, s1;
+    for (int k = 0; k < 8; k++) spu_pull(o, 512);   /* hace sitio en el anillo (t_spu_ring lo dejó lleno) */
+    uint32_t l0 = spu_ring_level();
+    EQ(l0 < 8192, 1);
+    spu_audio_stats(&s0, 0);
+    spu_out_discard(1);
+    spu_clock(1024);
+    spu_audio_stats(&s1, 0);
+    EQ(spu_ring_level(), l0);
+    EQ(s1.dropped, s0.dropped);
+    EQ(s1.produced - s0.produced, 1024);
+    spu_out_discard(0);
+    spu_clock(256);
+    EQ(spu_ring_level(), l0 + 256);
+}
+
 int main(void) {
     Cpu c = {0};
     c.r[29] = 0x801FFF00;
@@ -354,6 +373,7 @@ int main(void) {
     t_timer_modes(&c);
     t_spu_clock(&c);
     t_spu_ring();
+    t_spu_discard();
     t_irq_sin_manejador(&c);
     t_cambio_hilo_en_excepcion(&c);
     printf(fails ? "test_sys: %d FALLOS\n" : "test_sys: OK\n", fails);

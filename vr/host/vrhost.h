@@ -97,6 +97,8 @@ typedef struct {
     int32_t native_avail;    /* 1 si el modo nativo se puede usar (extractor registrado, enganche instalado y renderer Metal listo) */
     /* --- efectos de pantalla por procedencia (vr_prov.h; solo en la vista mundo, 0 si no) --- */
     VrFx fx;                 /* viñeta, bandas de cinemática y prismáticos (scope.c) sacados del 2D: los dibuja el visor de forma nativa */
+    /* --- fundido a negro (vr_view.h, VrView.black; al final: no mueve nada de lo anterior) --- */
+    int32_t view_black;      /* 1 = la vista debe estar en negro (el motor desmonta / carga o aún no hay una escena nueva completa): la app funde con su velo y no lo baja hasta que vuelve a 0 */
 } MvVrGameState;
 void mv_vrhost_game_state(MvVrGameState *out);
 

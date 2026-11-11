@@ -178,9 +178,13 @@ static int vr_ok;                        /* EXE de la edición esperada: parche 
  * VrView.frozen_max): pasado el tope se da por no fiable y la captura y la vista vuelven a lo normal hasta que el contador pase por 0. Hilo de emulación. */
 #define UNDRAW_MAX_VB 3000u
 static uint32_t undraw_since;            /* VBlank en que el contador dejó de ser 0 (0 = el motor dibuja) */
-static int engine_undraw(void) {
+static int32_t undraw_count(void) {
     int32_t v = 0;
     if (vr_ok) memcpy(&v, emu_ram + (BA_UNDRAW_COUNT & 0x1FFFFFu), 4);
+    return v;
+}
+static int engine_undraw(void) {
+    int32_t v = undraw_count();
     if (v <= 0) { undraw_since = 0; return 0; }
     uint32_t vb = (uint32_t)hle_frame_count();
     if (!undraw_since) undraw_since = vb ? vb : 1u;
@@ -198,6 +202,28 @@ static uint64_t mono_ns(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+/* Carga del motor (su contador de fotogramas sin dibujo en la cuenta atrás de la petición de carga): con la vista en negro la emulación corre sin límite de ritmo (vr_view.h
+ * vrhost_load_boost, runtime mv_host_set_load_boost; MV_LOAD_BOOST=0 lo apaga) y cada carga deja en el registro cuánto duró en VBlanks y en reloj de pared. Hilo de emulación. */
+static struct { int on, fast; uint32_t vb0, fast_vb; uint64_t ns0, fast_ns, last_ns; } load_m;
+static void load_step(int black, int black_run, int mdec) {
+    static int env = -1;
+    if (env < 0) { const char *e = getenv("MV_LOAD_BOOST"); env = !(e && e[0] == '0'); }
+    const int32_t uc = undraw_count();
+    const int loading = uc >= VRHOST_LOAD_UNDRAW;
+    const uint64_t now = mono_ns();
+    const uint32_t vb = (uint32_t)hle_frame_count();
+    if (load_m.fast) { load_m.fast_vb++; load_m.fast_ns += now - load_m.last_ns; }   /* el VBlank que acaba de pasar corrió sin límite */
+    load_m.last_ns = now;
+    if (loading && !load_m.on) { load_m.on = 1; load_m.vb0 = vb; load_m.ns0 = now; load_m.fast_vb = 0; load_m.fast_ns = 0; }
+    else if (!loading && load_m.on) {
+        load_m.on = 0;
+        fprintf(stderr, "[carga] vb=%u-%u: %u VBlanks en %.2f s de reloj (a ritmo real: %.2f s) | sin limite de ritmo: %u VBlanks en %.2f s | negro=%d\n", (unsigned)load_m.vb0, (unsigned)vb,
+                (unsigned)(vb - load_m.vb0), (double)(now - load_m.ns0) / 1e9, (double)(vb - load_m.vb0) / 50.0, (unsigned)load_m.fast_vb, (double)load_m.fast_ns / 1e9, black);
+    }
+    load_m.fast = env && vrhost_load_boost(black, black_run, uc, mdec);
+    mv_host_set_load_boost(load_m.fast);
 }
 
 /* ------------------------------------------------------------------------------------------------ fluidez (vr_smooth.h) */
@@ -506,10 +532,12 @@ static uint32_t nat_valid, nat_sfx, nat_vb; static int nat_have;
 #define MOSAIC_KEY 0x4D4F5341u           /* NsEffect.src_key de las celdas del parche */
 static int nat_mosaic;                   /* celdas del parche en la última escena nativa PUBLICADA (ns_solid_tap; 0 = ninguna: las celdas de la lista siguen en el panel 2D) */
 static int nat_fb;                       /* NsScreenFx.fb_mode de la última escena nativa PUBLICADA (0 = sin efecto de realimentación: sus sprites siguen en el panel 2D) */
+static uint8_t nat_fresh;                /* escenas nativas dibujables (aptitud de cinemática de NativeRenderer.ingest: partida, listas enteras y escenario, sin NS_NATIVE_BAD) publicadas desde que el motor volvió a dibujar (VrViewIn.fresh; publish_state lo pone a 0 mientras no dibuja) */
 static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u) {
     (void)u;
     ns_pub_flush();
     nat_have = s != NULL; nat_valid = s ? s->valid : 0; nat_vb = (uint32_t)hle_frame_count();
+    if (s && (s->valid & (NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK)) == (NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK) && !(s->valid & NS_NATIVE_BAD) && nat_fresh < 255) nat_fresh++;
     nat_sfx = s ? vrhost_scene_sfx((s->valid & NS_SV_FX) != 0, s->screen.flags, s->screen.gas_intensity, nat_duct_cut) : 0;   /* anillo del conducto recortado = cubierto: gas_efct.c sale del panel (vr_view.h) */
     nat_duct_cut = 0;
     nat_mosaic = 0;
@@ -1451,6 +1479,8 @@ static void publish_state(void) {
         vin.scene3d = (uint8_t)last_scene3d; vin.video = (uint8_t)last_video;
         vin.native_ok = (uint8_t)(ns_hook_native_ready(ns_now_ns(), 250000000ull) != 0);   /* escena nativa apta y de menos de 250 ms (misma antigüedad que ns_native_decide) */
         vin.wall = (uint8_t)(wall_view && g.in_control); vin.frozen = (uint8_t)engine_undraw(); vin.list3d = (uint8_t)last_list3d;
+        if (vin.frozen) nat_fresh = 0;      /* las escenas de antes del desmontaje no son de la zona nueva */
+        vin.fresh = nat_fresh;
         {   /* FMV: el decodificador de vídeo entregó píxeles en los últimos 12 VBlank (~0,24 s; un FMV da un fotograma cada 3-4) */
             uint32_t vb = (uint32_t)hle_frame_count(), tot = mdec_out_words_total();
             if (tot - mdec_seen_total >= 64u) mdec_last_vb = vb ? vb : 1u;
@@ -1458,6 +1488,8 @@ static void publish_state(void) {
             vin.mdec = mdec_last_vb != 0 && vb - mdec_last_vb <= 12u;
         }
         g.view_mode = vrview_step(&view, &vin);
+        g.view_black = view.black;
+        load_step(view.black, view.black_run, vin.mdec);
         box_diag(view.mode, view.reason, vin.native_ok);
         if (view.changed) {     /* cada cambio de modo / clase / motivo de la vista queda en el registro con su causa (banderas del puente incluidas) */
             char vb[512];
@@ -1929,6 +1961,7 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     vrcine_reset(&cine);
     last_scene3d = last_video = last_cover = last_list3d = 0;
     undraw_since = 0; mosaic_cur.n = 0; nat_mosaic = 0; memset(&fb_cur, 0, sizeof fb_cur); nat_fb = 0; ns_cam_have = 0;
+    nat_fresh = 0; memset(&load_m, 0, sizeof load_m); mv_host_set_load_boost(0);
     ns_hook_reset();
 #ifdef MV_NOGEN
     ns_hook_uninstall();

@@ -41,6 +41,9 @@ void spu_pull_reset(void);
 /* Anillo de salida (SPSC sin candados). spu_pull se llama SOLO desde un hilo (el de audio) y nunca bloquea: siempre
  * rellena `frames`; devuelve los frames reales. Tras una infraejecución sale con un fundido corto a silencio y no
  * reanuda hasta tener ~2 VBlanks en el anillo (entra con fundido): no se repite ni se solapa audio. */
+/* 1 = lo que renderice spu_clock no entra en el anillo (ni cuenta como sobreejecución): la SPU avanza igual (envolventes, IRQ, WAV) pero no se oye. Para correr la emulación sin límite
+ * de ritmo (host.c mv_host_set_load_boost): el consumidor se queda sin datos, calla con su extensión y reanuda con fundido cruzado. Cualquier hilo. */
+void spu_out_discard(int on);
 uint32_t spu_ring_level(void);   /* frames pendientes en el anillo (cualquier hilo) */
 uint32_t spu_ring_reads(void);   /* contador monótono de frames consumidos (para detectar consumidor parado) */
 typedef struct {

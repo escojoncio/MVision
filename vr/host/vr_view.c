@@ -20,6 +20,39 @@ void vrview_reset(VrView *v) {
     v->pend_max = 150;             /* 3 s esperando la cámara VR tras una radio o una escena */
     v->frozen_max = 3000;          /* 60 s de motor sin dibujar (una carga larga) antes de volver a la clasificación normal */
     v->hold_max = 100;             /* 2 s de render 3D sin cámara del motor reconocida antes de enseñar la pantalla plana */
+    v->black_fresh = 2;            /* con la segunda escena publicada, la lista de la GPU de la primera (sus texturas) ya está cerrada */
+    v->black_settle = 6;           /* 120 ms del motor dibujando (medido: huecos de 2 fotogramas en mitad del desmontaje) */
+    v->black_2d = 25;              /* 0,5 s de pantalla 2D estable (medido: 9 fotogramas «sin partida» entre la carga y el mundo) */
+    v->black_nat_max = 75;         /* 1,5 s esperando escenas nuevas con el destino ya nativo */
+    v->black_max = v->frozen_max + 250;
+}
+
+/* Fundido a negro (política en vr_view.h). `r` = motivo de este fotograma ya con las retenciones; `window2d` = el juego pide una ventana 2D suya. Va antes de la histéresis: modo y clase
+ * son los vigentes hasta el fotograma anterior, es decir, lo que la app tiene en pantalla. El negro solo se levanta con la vista vigente ya en su destino: si se levantara antes, la app
+ * bajaría el velo sobre la vista retenida (vieja) o sobre la pantalla plana durante los fotogramas de histéresis. */
+static void black_step(VrView *v, const VrViewIn *in, int r, int window2d) {
+    if (!v->black) {
+        if (r != VRV_R_FROZEN) return;
+        v->black = 1; v->black_run = 0; v->black_draw = 0; v->black_nat = 0;
+    }
+    int out = 0;
+    if (!in || ++v->black_run >= v->black_max) out = 1;
+    else if (in->frozen && !window2d && !in->mdec) { v->black_draw = 0; v->black_nat = 0; }   /* el motor desmonta / carga */
+    else {
+        const int vig_world = v->mode == VRV_WORLD && v->kind == VRV_K_WORLD, vig_engine = v->mode == VRV_CINEMA && v->kind == VRV_K_ENGINE;
+        const int k = vrview_kind_of(in);
+        v->black_draw++;
+        if (r == VRV_R_PENDING || r == VRV_R_HOLD) v->black_nat = 0;      /* vista retenida a la espera de la cámara: sigue el negro (acotadas por pend_max / hold_max) */
+        else if (k == VRV_K_WORLD || k == VRV_K_ENGINE)                    /* destino nativo: hace falta la escena nueva (en el mundo, además apta para la primera persona: si no, el
+                                                                            * render nativo repetiría la última válida, que es la de la zona anterior), con esa vista ya vigente */
+            out = (in->fresh >= v->black_fresh && v->black_draw >= v->black_settle && (k == VRV_K_WORLD ? vig_world && in->native_ok : vig_engine)) || ++v->black_nat >= v->black_nat_max;
+        else {                                                             /* destino 2D / vídeo: cuando la vista vigente ya no es la nativa retenida */
+            const int wait = (window2d || in->mdec || k == VRV_K_VIDEO) ? 0 : in->list3d ? v->hold_max : v->black_2d;
+            v->black_nat = 0;
+            out = v->black_draw >= wait && !vig_world && !vig_engine;
+        }
+    }
+    if (out) { v->black = 0; v->black_run = 0; }
 }
 
 int vrview_kind_of(const VrViewIn *in) {
@@ -102,10 +135,13 @@ int vrview_step(VrView *v, const VrViewIn *in) {
         else if (!base) v->hold_run = 0;       /* el tope solo se rearma cuando la situación termina; una lista suelta sin 3D no lo rearma */
     }
     int old_mode = v->mode, old_kind = v->kind, old_reason = v->reason;
+    const int old_black = v->black;
+    black_step(v, in, r, window2d);
+    const unsigned ch_black = v->black != old_black ? VRV_CH_BLACK : 0;
     v->prev_reason = old_reason;
     v->reason = r;
     if (r == VRV_R_PENDING || r == VRV_R_FROZEN || r == VRV_R_HOLD) {
-        v->want = v->mode; v->run = 0; v->want_kind = v->kind; v->kind_run = 0; v->changed = r != old_reason ? VRV_CH_REASON : 0;
+        v->want = v->mode; v->run = 0; v->want_kind = v->kind; v->kind_run = 0; v->changed = (r != old_reason ? VRV_CH_REASON : 0) | ch_black;
         return v->mode;
     }
     v->want = (r == VRV_R_WORLD || r == VRV_R_SELECTOR || r == VRV_R_PAUSE_WORLD) ? VRV_WORLD : VRV_CINEMA;
@@ -131,7 +167,7 @@ int vrview_step(VrView *v, const VrViewIn *in) {
         if (need < 1) need = 1;
         if (++v->kind_run >= need) { v->kind = k; v->kind_run = 0; v->kind_switches++; }
     }
-    v->changed = (v->mode != old_mode ? VRV_CH_MODE : 0) | (v->kind != old_kind ? VRV_CH_KIND : 0) | (r != old_reason ? VRV_CH_REASON : 0);
+    v->changed = (v->mode != old_mode ? VRV_CH_MODE : 0) | (v->kind != old_kind ? VRV_CH_KIND : 0) | (r != old_reason ? VRV_CH_REASON : 0) | ch_black;
     return v->mode;
 }
 
@@ -162,10 +198,11 @@ int vrview_describe(const VrView *v, const VrViewIn *in, char *buf, int n) {
     VrViewIn z;
     if (!in) { memset(&z, 0, sizeof z); in = &z; }
     int r = snprintf(buf, (size_t)n,
-        "[vista] cambio:%s%s%s modo=%s clase=%s motivo=%s (antes: %s) | puente: partida=%d control=%d camVR=%d escena=%d radio=%d pausa=%d menu=%d detenido=%d muerte=%d 3D=%d video=%d nativo=%d pared=%d sin_dibujo=%d lista3D=%d",
-        (v->changed & VRV_CH_MODE) ? " modo" : "", (v->changed & VRV_CH_KIND) ? " clase" : "", (v->changed & VRV_CH_REASON) ? " motivo" : "",
+        "[vista] cambio:%s%s%s%s modo=%s clase=%s motivo=%s (antes: %s) | puente: partida=%d control=%d camVR=%d escena=%d radio=%d pausa=%d menu=%d detenido=%d muerte=%d 3D=%d video=%d nativo=%d pared=%d sin_dibujo=%d lista3D=%d negro=%d nuevas=%d",
+        (v->changed & VRV_CH_MODE) ? " modo" : "", (v->changed & VRV_CH_KIND) ? " clase" : "", (v->changed & VRV_CH_REASON) ? " motivo" : "", (v->changed & VRV_CH_BLACK) ? " negro" : "",
         v->mode == VRV_WORLD ? "mundo" : "cine", vrview_kind_name(v->kind), vrview_reason_name(v->reason), vrview_reason_name(v->prev_reason),
-        in->game, in->in_control, in->cam_active, in->cinematic, in->comms, in->paused, in->menu_open, in->stopped, in->dead, in->scene3d, in->video, in->native_ok, in->wall, in->frozen, in->list3d);
+        in->game, in->in_control, in->cam_active, in->cinematic, in->comms, in->paused, in->menu_open, in->stopped, in->dead, in->scene3d, in->video, in->native_ok, in->wall, in->frozen, in->list3d,
+        v->black, in->fresh);
     if (r < 0) { buf[0] = 0; return 0; }
     return r >= n ? n - 1 : r;
 }

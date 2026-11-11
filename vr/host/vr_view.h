@@ -22,6 +22,13 @@
  *     lista del juego trae 3D (`list3d`: arranque de una escena o de la vista de pared, cuyas primeras listas aún salen con la cámara VR; zona recién cargada sin jugador) la vista entera
  *     se retiene (VRV_R_HOLD) como mucho hold_max fotogramas. En los dos casos se retienen MODO y clase: con modo cine la app solo deja la pantalla plana si la clase es la pantalla 3D.
  *     La radio, la pausa, las ventanas, el juego detenido y la muerte sí son 2D aunque haya 3D detrás.
+ *   - Fundido a negro (`VrView.black`, lo aplica la app con su velo): mientras dura VRV_R_FROZEN la escena nativa retenida NO se puede enseñar (el juego reescribe por debajo la VRAM de la que
+ *     el render nativo lee texturas y paletas: se veía deformarse durante los 0,5-4,8 s de cada carga). El negro empieza en el primer fotograma sin dibujo del motor viniendo de una vista
+ *     nativa y dura hasta que hay destino: (a) vista nativa (mundo, con escena apta `native_ok`, o pantalla 3D) con `fresh` >= black_fresh escenas nuevas y el motor dibujando black_settle fotogramas seguidos
+ *     (un hueco de 2 fotogramas en mitad del desmontaje no lo levanta); (b) la radio, el juego detenido o un vídeo: enseguida; (c) otra pantalla 2D estable black_2d fotogramas (hold_max
+ *     si su lista trae 3D de PS1). En los tres casos solo cuando la vista VIGENTE (modo y clase con histéresis) ya es ese destino: levantarlo antes enseñaría, mientras la app baja el velo,
+ *     la vista retenida o la pantalla plana. Topes: black_nat_max esperando escenas, black_max en total. No cambia modo, clase ni motivo. La radio, la pausa y el selector nunca lo
+ *     provocan; desde una pantalla 2D (fin de partida -> continuar, título) tampoco: no hay vista nativa que tapar.
  *   - Pegado a la pared (`wall`) con control: CINE con la pantalla 3D del motor (su cámara de pared, que enseña lo que la primera persona no puede) y el mando original.
  *   - Se incluye el motivo (VRV_R_*) para el registro y para que la interfaz distinga "el mundo se está pidiendo" de "cine por cinemática". */
 #include <stdint.h>
@@ -48,7 +55,7 @@ enum {
     VRV_R_PENDING,         /* transición: el jugador ya tiene el control (fin de radio / de escena) pero la cámara VR aún no está: vista congelada, la app muestra negro, NUNCA cine plano */
     VRV_R_WALL,            /* pegado a la pared con control: la cámara VR se apaga a propósito (vrcam_wall_view) y se ve el juego con SU cámara de pared en la pantalla 3D, con el mando original */
     VRV_R_FROZEN,          /* el motor no está dibujando (carga / cambio de zona: su contador de fotogramas sin dibujo > 0): en pantalla queda su último fotograma; viniendo de una vista nativa, la
-                            * vista (modo y clase) se congela con la última escena nativa, nunca se enseña ese fotograma de la VRAM en la pantalla plana */
+                            * vista (modo y clase) se congela con la última escena nativa, nunca se enseña ese fotograma de la VRAM en la pantalla plana; la app la tapa en negro (VrView.black) */
     VRV_R_HOLD             /* la lista trae 3D de PS1 sin cámara del motor reconocida y se venía de una vista nativa: vista (modo y clase) retenida un tiempo acotado en vez de la pantalla plana */
 };
 
@@ -66,6 +73,7 @@ typedef struct {
     uint8_t wall;          /* pegado a la pared con la vista del juego pedida (vrcam_wall_view) */
     uint8_t frozen;        /* el motor no dibuja (contador de fotogramas sin dibujo del motor > 0): lo que hay en la pantalla del juego es un fotograma viejo */
     uint8_t list3d;        /* la última lista capturada trae geometría 3D sustancial, con la cámara que sea (scene3d exige la del motor): la pantalla del juego es un render 3D de PS1 */
+    uint8_t fresh;         /* escenas nativas dibujables (partida, escenario y listas enteras) publicadas desde que el motor volvió a dibujar; satura en 255. Solo lo mira el fundido a negro */
 } VrViewIn;
 
 /* Qué es lo que se ve (con histéresis propia, ver VrView.kind):
@@ -100,11 +108,21 @@ typedef struct {
     int frozen_run;
     int hold_max;          /* fotogramas máximos seguidos de VRV_R_HOLD (pasado, clasificación normal: pantalla plana) */
     int hold_run;
+    /* --- fundido a negro (ver la política) --- */
+    int black;             /* 1 = la app debe tener la vista en negro (funde rápido al subir y al bajar) */
+    int black_run;         /* fotogramas seguidos en negro */
+    int black_draw;        /* de ellos, los últimos seguidos con el motor dibujando */
+    int black_nat;         /* de ellos, los últimos seguidos con destino nativo (esperando escenas nuevas) */
+    int black_fresh;       /* escenas nuevas completas exigidas para levantar el negro hacia una vista nativa */
+    int black_settle;      /* fotogramas seguidos con el motor dibujando exigidos para lo mismo */
+    int black_2d;          /* fotogramas con el motor dibujando una pantalla 2D (que no es ventana del juego ni vídeo) antes de levantar el negro */
+    int black_nat_max;     /* fotogramas máximos con destino nativo sin escenas nuevas */
+    int black_max;         /* tope total de fotogramas en negro */
 } VrView;
 
-enum { VRV_CH_MODE = 1, VRV_CH_KIND = 2, VRV_CH_REASON = 4 };
+enum { VRV_CH_MODE = 1, VRV_CH_KIND = 2, VRV_CH_REASON = 4, VRV_CH_BLACK = 8 };
 
-/* Línea de registro para un fotograma con cambios (view.changed != 0): "modo=a->b clase=... motivo=... | banderas". Devuelve la longitud escrita. */
+/* Línea de registro para un fotograma con cambios (view.changed != 0): "cambio: [modo] [clase] [motivo] [negro] modo=... clase=... motivo=... | banderas ... negro=0|1 nuevas=N". Devuelve la longitud escrita. */
 int vrview_describe(const VrView *v, const VrViewIn *in, char *buf, int n);
 
 void vrview_reset(VrView *v);
@@ -132,6 +150,17 @@ static inline int vrhost_keep_filter(int native, int cine_cand, int scene3d, int
     int world = has_3d && world_valid;
     if (!native) return n_strips > 0 || world || (cine_cand && scene3d);
     return (n_scan > 0 || frame_on || world) && !(cine_cand && scene3d);
+}
+
+/* ¿Corre la emulación sin límite de ritmo (y con el audio descartado: runtime/host.h mv_host_set_load_boost)? Solo en una carga del motor: su contador de fotogramas sin dibujo (`undraw`,
+ * BA_UNDRAW_COUNT) está en la cuenta atrás de la petición de carga (parte de 0x7FFF0000; un guion que oculta unos fotogramas pone valores pequeños y no cuenta), la vista lleva en negro
+ * VRHOST_BOOST_DELAY fotogramas (el fundido de la app, 0,15 s, ha terminado: nada de lo acelerado se ve) y no hay vídeo. Acotado a VRHOST_BOOST_MAX fotogramas en negro. El tiempo virtual
+ * del juego no cambia (mismos VBlanks, mismo ritmo de disco por VBlank): solo dura menos en el reloj de pared. Función pura; vrhost.c. */
+#define VRHOST_LOAD_UNDRAW 0x01000000
+#define VRHOST_BOOST_DELAY 10
+#define VRHOST_BOOST_MAX 3000
+static inline int vrhost_load_boost(int black, int black_run, int32_t undraw, int mdec) {
+    return black && black_run >= VRHOST_BOOST_DELAY && black_run < VRHOST_BOOST_MAX && undraw >= VRHOST_LOAD_UNDRAW && !mdec;
 }
 
 /* ¿Se quitan de la capa 2D los polígonos 3D sin vista (opts.drop_world2d de vr_scene.h)? Solo con render nativo, que dibuja el 3D: el mundo (también con la ventana del selector encima: son rects 2D y el cielo / las

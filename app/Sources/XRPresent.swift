@@ -331,7 +331,7 @@ final class XRPresenter {
     private var shotView = matrix_identity_float4x4
     private var shotSeen: UInt32 = 0
     private var cutVeil: Float = 0
-    private(set) var pendVeil: Float = 0       // velo mientras la vista espera a la cámara VR (VRV_R_PENDING)
+    private(set) var pendVeil: Float = 0       // velo mientras la vista espera a la cámara VR (VRV_R_PENDING) o el anfitrión pide negro (carga: MvVrGameState.view_black)
 
     // Menú
     private(set) var menuOpen = false
@@ -778,6 +778,11 @@ final class XRPresenter {
         // Transición con control pero sin cámara VR todavía (fin de radio / de escena, VRV_R_PENDING = 12): la vista queda congelada y se oscurece; nunca se enseña el fotograma
         // plano del motor (cenital, baja resolución) como paso intermedio. El destino es el mundo.
         let pending = gs.view_reason == 12
+        // Fundido a negro de carga (vr_view.h, VrView.black): el motor desmonta / carga la zona con una vista nativa en pantalla, o aún no hay una escena nueva completa. La escena nativa
+        // retenida no se puede enseñar (el juego reescribe la VRAM de la que salen sus texturas): negro en 0,15 s y hasta que el anfitrión lo levante.
+        let blackout = gs.view_black != 0
+        // El mundo ya se pide (motivo 0) pero la histéresis del anfitrión aún no ha cambiado de modo (3 VBlanks): el velo no baja en ese hueco sobre la pantalla que se va.
+        let worldDue = gs.view_mode != 1 && gs.view_reason == 0
         if (target != .world || shown != .world) && !pending { cinema?.update(); cinema?.setHighRes(hqFull); cinema?.prepareUpscale(video: gs.view_kind == 3) }
         // Dentro de la escena: la cámara del plano se fija al empezar el plano; en cada corte nuevo anclaje y fundido rápido (0,15 s).
         if shown != .scene { shotView = gameView; shotSeen = shot }
@@ -790,7 +795,7 @@ final class XRPresenter {
         let d = min(max(dt, 0.001), 0.1)
         if target != shown {
             veil += d / 0.22
-            if veil >= 1 { veil = 1; shown = target; needAnchor = true }
+            if veil >= 1 || pendVeil >= 1 { veil = 1; shown = target; needAnchor = true }      // ya en negro por la espera o la carga: el cambio de pantalla no espera a otro fundido
         } else {
             veil = max(0, veil - d / 0.28)
         }
@@ -1060,7 +1065,8 @@ final class XRPresenter {
         }
 
         // 7) velo de transición y menú
-        if pending { pendVeil = min(1, pendVeil + d / 0.15) } else { pendVeil = max(0, pendVeil - d / 0.28) }
+        // El velo de espera / de carga no baja mientras la pantalla mostrada no sea la pedida: bajarlo a la vez que sube el de la transición dejaba ver la vista vieja a media luz.
+        if pending || blackout || worldDue { pendVeil = min(1, pendVeil + d / 0.15) } else if target == shown { pendVeil = max(0, pendVeil - d / 0.28) }
         let veilNow = max(veil, cutVeil, collisionFade, pendVeil)
         if veilNow > 0.001 {
             var v = XRDrawItem(kind: .veil, texture: nil)
@@ -1102,6 +1108,7 @@ final class XRPresenter {
         let a = anchor.columns.3
         var d = "mostrando=\(shown) " + String(format: "velo=%.2f ancla=(%.2f %.2f %.2f) rumbo=%.0fgrados alturaAncla=%.2f", veil, a.x, a.y, a.z,
                                                XRMath.yaw(of: anchor) * 180 / .pi, anchorY)
+        d += String(format: " veloNegro=%.2f", pendVeil)
         d += " pantallas2D=" + (cfg.follow2D ? "siguen" : "fijas")
         d += " items: pantalla=\(n[.screen] ?? 0) pantalla3d=\(n[.screen3d] ?? 0) panel=\(n[.panel] ?? 0) menu=\(n[.menu] ?? 0) velo=\(n[.veil] ?? 0) hudPanels=\(cfg.hudPanels) hud!=nil=\(hudSeen)"
         if let c = cinema {
