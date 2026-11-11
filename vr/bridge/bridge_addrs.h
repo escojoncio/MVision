@@ -93,11 +93,15 @@ enum {
 #define BCAM_POS    0x00 /* VEC16 posición */
 #define BCAM_TARGET 0x08 /* VEC16 objetivo */
 #define BCAM_ROT    0x10 /* VEC16 rotación */
-#define BCAM_FLAG   0x18 /* u32 */
+#define BCAM_FLAG   0x18 /* u32 banderas (BRIDGE_CAMF_*) */
 #define BCAM_TRACK  0x1C /* s32 distancia de seguimiento */
 #define BCAM_ZOOM   0x20 /* s16 zoom (320 = normal) */
 #define BCAM_FIRST  0x22 /* s16 1 = primera persona */
 #define BCAM_TYPE   0x28 /* s16 modo */
+#define BCAM_EVENT_FN 0x78 /* u32 retrollamada de la cámara de evento (ranura 1 de las 4 de +0x74): la instala un actor de la zona y el motor la llama cada fotograma, con BRIDGE_CAMF_EVENT puesta, para que coloque la cámara del juego */
+/* Banderas de la cámara del juego (BCAM_FLAG). Con la de evento, la cámara la lleva la retrollamada BCAM_EVENT_FN (panel del ascensor: evpanel.c; también command.c, que a la vez retira el mando con
+ * BRIDGE_GS_PADRELEASE: escena). Medido en volcados: 0x2 + retrollamada solo ante el panel del ascensor; 0 en juego normal, conductos y gateo; 0x10 pegado a la pared. */
+#define BRIDGE_CAMF_EVENT 0x2u
 
 /* Canal 3D del motor: offsets desde BA_VIEW_CHANNEL */
 #define BCH_CAM_INV 0x10 /* MAT16 mundo->vista (la que usa la GTE) */
@@ -138,7 +142,8 @@ enum {
     BRIDGE_PS_KNOCK = 0x20000,    /* golpeando la pared */
     BRIDGE_PS_MOVE_WATCH = 0x40000,
     BRIDGE_PS_IN_WATER = 0x1000000,
-    BRIDGE_PS_HIDDEN = 0x2000000
+    BRIDGE_PS_HIDDEN = 0x2000000,
+    BRIDGE_PS_PAD_OFF = 0x20000000 /* el actor del jugador no atiende al mando: lo lee otro actor (panel del ascensor) o el guion de una escena */
 };
 
 /* Tabla documentada (bridge_addrs.c) */

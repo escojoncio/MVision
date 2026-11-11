@@ -1233,7 +1233,7 @@ static void build_one(const GpuDrawList *l, int si) {
     int cine_cut = 0;
     {   /* Cinemática del motor (ni mundo ni vídeo/2D puros): la cámara es la del guion, nunca la de la cabeza. Planos y origen fijo por plano. */
         int rs = view.reason;
-        int cine_reason = rs == VRV_R_NO_GAME || rs == VRV_R_CINEMATIC || rs == VRV_R_LOST_CONTROL || rs == VRV_R_DEAD || rs == VRV_R_WALL
+        int cine_reason = rs == VRV_R_NO_GAME || rs == VRV_R_CINEMATIC || rs == VRV_R_LOST_CONTROL || rs == VRV_R_DEAD || rs == VRV_R_WALL || rs == VRV_R_EVENT
                           || ((rs == VRV_R_FROZEN || rs == VRV_R_HOLD) && view.kind == VRV_K_ENGINE);   /* pantalla 3D retenida: el seguimiento de planos no se reinicia */
         if (!cine_reason || (r && r->active)) vrcine_camera(&cine, 0, bs.eye_pos, (const float[9]){0});
         else if (r) cine_cut = vrcine_camera(&cine, 1, r->eye, r->M);
@@ -1461,7 +1461,8 @@ static void publish_state(void) {
     g.game = core;
     g.in_control = core && bs.in_control && !(((bs.valid & BRIDGE_OK_LIFE) && bs.life_max > 0 && bs.life <= 0));
     const int wall_view = core && bs.in_control && vrcam_wall_view();   /* pegado a la pared: vista del juego con su cámara y el mando original (vr_camera.h) */
-    g.menu = !(core && bs.in_control) || wall_view;   /* capa de mando original (stick = cruceta, un botón por botón): menús, escenas y la vista de pared */
+    const int event_view = core && bs.in_control && vrcam_event_view();   /* cámara de evento del juego con el mando retirado (panel del ascensor): lo mismo */
+    g.menu = !(core && bs.in_control) || wall_view || event_view;   /* capa de mando original (stick = cruceta, un botón por botón): menús, escenas, la vista de pared y la de evento */
     g.posture = core && bs.stance >= 0 && bs.stance <= 2 ? bs.stance : -1;
     g.cam_active = vrcam_active();
     g.first_person = bs.first_person;
@@ -1478,7 +1479,7 @@ static void publish_state(void) {
         vin.dead = (uint8_t)(core && (((bs.valid & BRIDGE_OK_LIFE) && bs.life_max > 0 && bs.life <= 0) || (bs.player_status & BRIDGE_PS_GAME_OVER) || (bs.game_status & BRIDGE_GS_GAME_OVER)));
         vin.scene3d = (uint8_t)last_scene3d; vin.video = (uint8_t)last_video;
         vin.native_ok = (uint8_t)(ns_hook_native_ready(ns_now_ns(), 250000000ull) != 0);   /* escena nativa apta y de menos de 250 ms (misma antigüedad que ns_native_decide) */
-        vin.wall = (uint8_t)(wall_view && g.in_control); vin.frozen = (uint8_t)engine_undraw(); vin.list3d = (uint8_t)last_list3d;
+        vin.wall = (uint8_t)(wall_view && g.in_control); vin.event = (uint8_t)(event_view && g.in_control); vin.frozen = (uint8_t)engine_undraw(); vin.list3d = (uint8_t)last_list3d;
         if (vin.frozen) nat_fresh = 0;      /* las escenas de antes del desmontaje no son de la zona nueva */
         vin.fresh = nat_fresh;
         {   /* FMV: el decodificador de vídeo entregó píxeles en los últimos 12 VBlank (~0,24 s; un FMV da un fotograma cada 3-4) */

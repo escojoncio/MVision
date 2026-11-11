@@ -83,7 +83,12 @@ const BridgeAddr bridge_addr_table[] = {
     {"camara_juego", BA_CAMERA, 0x80, T3, "estructura",
      "La función que fija los límites de la cámara escribe en 0x800B89AC (+68) y 0x800B899C (+52) -> base 0x800B8968. "
      "El halfword +0x22 (primera persona) coincide con el usado por el puente de la carcasa interior (0x800B898A). "
-     "En ejecución: posición/objetivo coherentes con la vista, zoom 320."},
+     "En ejecución: posición/objetivo coherentes con la vista, zoom 320. "
+     "Cámara de evento: la función 0x8003098C guarda una retrollamada por ranura en +0x74 (4 ranuras) y el despacho de la cámara "
+     "(0x8002FD78), con el bit 0x2 de las banderas (+0x18), llama a la de la ranura 1 (+0x78) para que coloque la cámara. Solo la "
+     "instalan actores de zona: el panel del ascensor (al entrar el jugador en su zona pone banderas = 2, retira el mando al jugador "
+     "con el bit 0x20000000 de su estado y lo oculta; al salir lo deshace) y command.c (que a la vez pone el bit 0x10000000 del estado global: escena). "
+     "En volcados: 0x2 + retrollamada solo ante el panel; 0 en juego normal, conductos y gateo; 0x10 pegado a la pared."},
     {"canal_3d", BA_VIEW_CHANNEL, 0x1E0, T3, "estructura",
      "La función que proyecta un punto con la cámara carga la matriz desde 0x800B2B8C (= canal + 0x10, mundo->vista). "
      "La matriz vista->mundo está 0x20 detrás. En ejecución: columnas de módulo ~4096 y traslación = posición de la "

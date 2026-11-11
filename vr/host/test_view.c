@@ -472,6 +472,91 @@ int main(void) {
         for (int k = 0; k < 6; k++) vrview_step(&vs, &pz);
         CHECK(vs.kind == VRV_K_UI, "pausa sin cámara VR: 2D");
     }
+    /* ---- cámara de evento del juego con el mando retirado (panel del ascensor): cine con la pantalla 3D del motor, como la pared; secuencia medida en el visor (build 0d4635f, vb 28900-30594) ---- */
+    {
+        VrViewIn ev = world(); ev.cam_active = 0; ev.event = 1;
+        CHECK(vrview_reason(&ev) == VRV_R_EVENT, "cámara de evento con control y cámara VR apagada a propósito");
+        CHECK(vrview_kind_of(&ev) == VRV_K_UI, "evento sin lista del motor todavía: la función pura da 2D (el paso la retiene)");
+        ev.scene3d = 1; CHECK(vrview_kind_of(&ev) == VRV_K_ENGINE, "evento con 3D del motor: pantalla 3D");
+        ev.cam_active = 1; CHECK(vrview_reason(&ev) == VRV_R_EVENT, "evento con la cámara VR aún activa (se apaga en la siguiente construcción): ya es la vista del juego");
+        ev.in_control = 0; CHECK(vrview_reason(&ev) == VRV_R_LOST_CONTROL, "sin control no es la vista de evento");
+        ev = world(); ev.cam_active = 0; ev.event = 1; ev.comms = 1; CHECK(vrview_reason(&ev) == VRV_R_COMMS, "la radio gana al evento");
+        ev = world(); ev.in_control = 0; ev.cam_active = 0; ev.event = 1; ev.cinematic = 1; CHECK(vrview_reason(&ev) == VRV_R_CINEMATIC, "la escena (llegada del ascensor) gana al evento");
+        ev = world(); ev.in_control = 0; ev.event = 1; ev.menu_open = 1; CHECK(vrview_reason(&ev) == VRV_R_SELECTOR, "la ventana de armas/objetos gana al evento");
+        CHECK(strcmp(vrview_reason_name(VRV_R_EVENT), "?") != 0, "el motivo tiene nombre");
+
+        int flat = 0, pend = 0, changes = 0;   /* pantalla plana sin negro; «esperando cámara VR»; cambios de modo o clase */
+#define EV(vv, inp, n) for (int k_ = 0; k_ < (n); k_++) { vrview_step(&(vv), &(inp)); flat |= (vv).mode == VRV_CINEMA && (vv).kind != VRV_K_ENGINE && !(vv).black; pend |= (vv).reason == VRV_R_PENDING; changes += ((vv).changed & (VRV_CH_MODE | VRV_CH_KIND)) != 0; }
+        VrView ve; vrview_reset(&ve);
+        VrViewIn a = world(); a.native_ok = 1; a.list3d = 1; a.fresh = 255;
+        for (int k = 0; k < 10; k++) vrview_step(&ve, &a);
+        CHECK(ve.mode == VRV_WORLD && ve.kind == VRV_K_WORLD, "mundo antes del panel");
+        /* el jugador entra en la zona del panel: el motor pone su cámara de evento; la cámara VR se apaga y las primeras listas aún salen con ella (scene3d = 0, list3d = 1): vista retenida */
+        a.cam_active = 0; a.event = 1;
+        EV(ve, a, 6);
+        CHECK(ve.reason == VRV_R_HOLD && ve.mode == VRV_WORLD && ve.kind == VRV_K_WORLD && !flat && !pend, "panel sin lista del motor: mundo retenido, ni pantalla plana ni transición (motivo %d)", ve.reason);
+        a.scene3d = 1;
+        EV(ve, a, 4);
+        CHECK(ve.mode == VRV_CINEMA && ve.kind == VRV_K_ENGINE && ve.reason == VRV_R_EVENT && !flat && !pend, "panel: pantalla 3D con la cámara del juego (modo %d clase %d motivo %d)", ve.mode, ve.kind, ve.reason);
+        /* 25 s eligiendo planta (vb 28900-30145) y puerta + viaje (hasta 30282): la vista no cambia; una lista suelta sin 3D reconocido no la mueve */
+        changes = 0;
+        EV(ve, a, 600);
+        a.scene3d = 0; EV(ve, a, 2); a.scene3d = 1;
+        EV(ve, a, 780);
+        CHECK(ve.mode == VRV_CINEMA && ve.kind == VRV_K_ENGINE && ve.reason == VRV_R_EVENT && !changes && !flat && !pend && !ve.black, "panel y viaje: la vista se mantiene (cambios %d)", changes);
+        /* carga de la planta elegida (183 sin dibujo; 2 «sin partida»; 53 sin dibujo con partida, los 2 primeros con control y la cámara de evento de la llegada): negro con la pantalla 3D retenida */
+        VrViewIn l; memset(&l, 0, sizeof l); l.frozen = 1; l.list3d = 1;
+        vrview_step(&ve, &l);
+        CHECK(ve.black && ve.reason == VRV_R_FROZEN, "viaje: el negro empieza con la carga");
+        EV(ve, l, 182);
+        VrViewIn n; memset(&n, 0, sizeof n);
+        EV(ve, n, 2);
+        VrViewIn e2 = world(); e2.cam_active = 0; e2.frozen = 1; e2.event = 1;
+        EV(ve, e2, 2);
+        e2.in_control = 0; e2.event = 0; e2.cinematic = 1;
+        EV(ve, e2, 51);
+        CHECK(ve.black && !flat && !pend, "carga: en negro de principio a fin");
+        /* llegada: escena del motor (cámara de evento de la cabina con el mando del guion), 5 fotogramas sin 3D y después con 3D y escenas nuevas; al recuperar el control, la cámara VR */
+        VrViewIn c = world(); c.in_control = 0; c.cam_active = 0; c.cinematic = 1;
+        EV(ve, c, 5);
+        CHECK(ve.black, "llegada sin 3D todavía: negro");
+        c.scene3d = c.list3d = 1; c.fresh = 3;
+        EV(ve, c, 57);
+        CHECK(!ve.black && ve.mode == VRV_CINEMA && ve.kind == VRV_K_ENGINE && ve.reason == VRV_R_CINEMATIC && !flat, "llegada: escena en la pantalla 3D, sin negro");
+        VrViewIn z = world(); z.cam_active = 0; z.scene3d = z.list3d = 1; z.fresh = 255;
+        pend = 0; EV(ve, z, 8);
+        CHECK(pend && ve.mode == VRV_CINEMA && ve.kind == VRV_K_ENGINE, "fin de la llegada: transición con la vista retenida");
+        z.cam_active = 1; z.native_ok = 1; z.scene3d = 0;
+        EV(ve, z, 4);
+        CHECK(ve.mode == VRV_WORLD && ve.kind == VRV_K_WORLD && ve.reason == VRV_R_WORLD && !flat, "fin de la llegada: primera persona");
+
+        /* salir del panel sin viajar (equis): el motor quita su cámara; transición con la vista retenida y vuelta al mundo sin pasar por la pantalla plana */
+        vrview_reset(&ve); flat = pend = 0;
+        a = world(); a.native_ok = 1; a.list3d = 1; a.fresh = 255;
+        for (int k = 0; k < 10; k++) vrview_step(&ve, &a);
+        a.cam_active = 0; a.event = 1; EV(ve, a, 6); a.scene3d = 1; EV(ve, a, 50);
+        CHECK(ve.mode == VRV_CINEMA && ve.kind == VRV_K_ENGINE && ve.reason == VRV_R_EVENT && !pend, "panel otra vez");
+        a.event = 0;
+        EV(ve, a, 8);
+        CHECK(ve.reason == VRV_R_PENDING && ve.mode == VRV_CINEMA && ve.kind == VRV_K_ENGINE && !flat, "al salir del panel: transición con la vista retenida");
+        a.cam_active = 1; a.scene3d = 0;
+        EV(ve, a, 4);
+        CHECK(ve.mode == VRV_WORLD && ve.kind == VRV_K_WORLD && !flat, "vuelta al mundo sin pasar por 2D");
+        /* pausa ante el panel: la cámara VR sigue apagada (vrcam_event_view se mantiene con cam_ctl); pausa en la pantalla plana y de vuelta a la pantalla 3D, sin primera persona ni transición */
+        a = world(); a.cam_active = 0; a.event = 1; a.scene3d = a.list3d = 1; a.fresh = 255;
+        EV(ve, a, 20);
+        CHECK(ve.mode == VRV_CINEMA && ve.kind == VRV_K_ENGINE && ve.reason == VRV_R_EVENT, "panel antes de la pausa");
+        VrViewIn pz = a; pz.in_control = 0; pz.event = 0; pz.paused = 1;
+        pend = 0; int saw_world = 0;
+        for (int k = 0; k < 30; k++) { vrview_step(&ve, &pz); saw_world |= ve.mode == VRV_WORLD || ve.kind == VRV_K_WORLD; pend |= ve.reason == VRV_R_PENDING; }
+        CHECK(ve.reason == VRV_R_PAUSED && ve.mode == VRV_CINEMA && ve.kind == VRV_K_UI && !saw_world && !pend, "pausa ante el panel: pantalla plana");
+        for (int k = 0; k < 6; k++) { vrview_step(&ve, &a); saw_world |= ve.mode == VRV_WORLD || ve.kind == VRV_K_WORLD; pend |= ve.reason == VRV_R_PENDING; }
+        CHECK(ve.reason == VRV_R_EVENT && ve.mode == VRV_CINEMA && ve.kind == VRV_K_ENGINE && !saw_world && !pend, "fin de la pausa: otra vez la pantalla 3D del panel");
+        char buf[640];
+        vrview_describe(&ve, &a, buf, sizeof buf);
+        CHECK(strstr(buf, "evento=1"), "registro de la cámara de evento: %s", buf);
+#undef EV
+    }
     /* ---- fundido a negro (VrView.black): desde que el motor desmonta / carga con una vista nativa hasta que hay una escena nueva completa; secuencias medidas en el visor (build 0d4635f) ---- */
 #define RUN(vv, inp, n, cond, ...) for (int k_ = 0; k_ < (n); k_++) { vrview_step(&(vv), &(inp)); flat |= (vv).mode == VRV_CINEMA && (vv).kind != VRV_K_ENGINE && !(vv).black; CHECK(cond, __VA_ARGS__); }
     {

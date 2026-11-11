@@ -734,6 +734,63 @@ static void test_wall_view(void) {
       CHECK(vrcam_wall_view() == 0); }
 }
 
+/* Una construcción de cámara por fotograma de juego con la cámara del juego dada (sus banderas y la retrollamada de la cámara de evento) y el estado del jugador. */
+static int event_tick(const BridgeState *s, uint32_t cam_flags, uint32_t cam_fn, uint32_t status, VrCamPlan *p) {
+    w32(BA_CAMERA + BCAM_FLAG, cam_flags); w32(BA_CAMERA + BCAM_EVENT_FN, cam_fn);
+    return wall_tick(s, status, p);
+}
+/* Cámara de evento del juego con el mando retirado al jugador (panel del ascensor; medido en volcados: banderas de la cámara 0x2, retrollamada 0x800C4E9C, estado 0x20000000, con control):
+ * la cámara VR se apaga (vrcam_event_view) y la vista es la del juego con su mando, mientras dure (también con una pausa o una ventana encima). Conductos y gateo (estado 0x4042 / 0x4052,
+ * banderas de cámara 0), la cámara de pared (0x10), el mando retirado sin cámara de evento, la cámara de evento sin el mando retirado, un parpadeo y la falta de control (llegada del
+ * ascensor: escena) no la activan. */
+static void test_event_view(void) {
+    enum { PANEL_FN = 0x800C4E9C, PANEL_PS = 0x20000000, DUCT_PS = 0x4042, CRAWL_PS = 0x4052 };
+    VrCamConfig c; BridgeState s; VrCamPlan p;
+    anchor_start(&c, &s);
+    for (int k = 0; k < 10; k++) CHECK(event_tick(&s, 0, 0, 0, &p) == 1);
+    CHECK(vrcam_active() && !vrcam_event_view());
+    for (int k = 0; k < 30; k++) { CHECK(event_tick(&s, 0, 0, (k & 1) ? CRAWL_PS : DUCT_PS, &p) == 1); CHECK(!vrcam_event_view()); }                /* conductos y gateo: primera persona VR */
+    for (int k = 0; k < 30; k++) { CHECK(event_tick(&s, (k & 1) ? 0x10 : 0x20, 0, BRIDGE_PS_WALL, &p) == !vrcam_wall_view()); CHECK(!vrcam_event_view()); }   /* otras banderas de cámara medidas (0x10 pegado a la pared, 0x20) */
+    for (int k = 0; k < 20; k++) event_tick(&s, 0, 0, 0, &p);
+    CHECK(vrcam_active() && !vrcam_wall_view());
+    for (int k = 0; k < 30; k++) { CHECK(event_tick(&s, 0, 0, PANEL_PS, &p) == 1); CHECK(!vrcam_event_view()); }                                    /* mando retirado sin cámara de evento */
+    for (int k = 0; k < 30; k++) { CHECK(event_tick(&s, BRIDGE_CAMF_EVENT, PANEL_FN, 0, &p) == 1); CHECK(!vrcam_event_view()); }                   /* cámara de evento con el jugador al mando */
+    for (int k = 0; k < 30; k++) { CHECK(event_tick(&s, BRIDGE_CAMF_EVENT, 0, PANEL_PS, &p) == 1); CHECK(!vrcam_event_view()); }                    /* bandera sin retrollamada instalada */
+    CHECK(event_tick(&s, BRIDGE_CAMF_EVENT, PANEL_FN, PANEL_PS, &p) == 1 && !vrcam_event_view());                                                    /* un fotograma suelto (2 VBlanks < VRCAM_EVENT_ON) */
+    for (int k = 0; k < 10; k++) { CHECK(event_tick(&s, 0, 0, 0, &p) == 1); CHECK(!vrcam_event_view()); }
+    /* el panel: entra una sola vez y se queda los 25 s que el usuario estuvo ante él (vb 28900-30145) y el viaje (hasta 30282) */
+    int t_on = -1, flips = 0, prev = 0;
+    for (int k = 0; k < 690; k++) {
+        int vr = event_tick(&s, BRIDGE_CAMF_EVENT, PANEL_FN, PANEL_PS, &p), e = vrcam_event_view();
+        if (e != prev) { flips++; prev = e; if (e && t_on < 0) t_on = k; }
+        CHECK(vr == !e);                                   /* con la vista del juego la cámara VR no se usa (y viceversa) */
+    }
+    printf("camara de evento: vista del juego tras %d fotogramas (%.2f s), cambios %d\n", t_on, (t_on + 1) * 0.04f, flips);
+    CHECK(t_on >= 0 && (t_on + 1) * 2 <= VRCAM_EVENT_ON + 2 && flips == 1 && vrcam_event_view() == 1 && !vrcam_active() && !vrcam_wall_view());
+    const VrCamRecord *r = vrcam_last_record();
+    CHECK(r && !r->active);
+    /* se sale del panel (el motor quita su cámara; el mando sigue retirado unos fotogramas más): sale tras VRCAM_EVENT_OFF VBlanks y la cámara VR vuelve tras on_frames */
+    int t_off = -1, t_cam = -1;
+    for (int k = 0; k < 30; k++) {
+        int vr = event_tick(&s, 0, 0, k < 8 ? PANEL_PS : 0, &p);
+        if (t_off < 0 && !vrcam_event_view()) t_off = k;
+        if (t_cam < 0 && vr) t_cam = k;
+    }
+    printf("camara de evento: vuelve a primera persona %d fotogramas despues de quitarla el motor, camara VR a los %d\n", t_off, t_cam);
+    CHECK(t_off >= 0 && (t_off + 1) * 2 >= VRCAM_EVENT_OFF && (t_off + 1) * 2 <= VRCAM_EVENT_OFF + 2);
+    CHECK(t_cam > t_off && t_cam <= t_off + c.on_frames / 2 + 1 && vrcam_active());
+    /* pausa o ventana de armas/objetos ante el panel (sin control pero cam_ctl): la vista del juego se mantiene y la cámara VR no vuelve */
+    for (int k = 0; k < 10; k++) event_tick(&s, BRIDGE_CAMF_EVENT, PANEL_FN, PANEL_PS, &p);
+    CHECK(vrcam_event_view() == 1);
+    s.in_control = 0;
+    for (int k = 0; k < 30; k++) { CHECK(event_tick(&s, BRIDGE_CAMF_EVENT, PANEL_FN, PANEL_PS, &p) == 0); CHECK(vrcam_event_view() == 1); }
+    s.in_control = 1;
+    /* sin control en plena vista (carga de la planta elegida, escena de llegada): se deja al instante; y sin control no se entra (llegada: cámara de evento con el mando del guion) */
+    s.in_control = 0; s.cam_ctl = 0; event_tick(&s, BRIDGE_CAMF_EVENT, PANEL_FN, PANEL_PS, &p);
+    CHECK(vrcam_event_view() == 0);
+    for (int k = 0; k < 30; k++) { CHECK(event_tick(&s, BRIDGE_CAMF_EVENT, 0x800C4CF4, PANEL_PS, &p) == 0); CHECK(!vrcam_event_view()); }
+}
+
 /* Ancla del cuerpo tumbado (gateo, conductos): la articulación de la cabeza queda prone_back por DETRÁS del ojo según el rumbo del CUERPO (los ojos del modelo tumbado van por delante del
  * cuello), no eye_fwd según la mirada; al mirar a los lados el cuerpo no gira alrededor del ojo; la transición no da saltos; el ojo no se mueve; prone_back = 0 deja el ancla de siempre. */
 static void test_prone_anchor(void) {
@@ -856,6 +913,7 @@ int main(void) {
     test_postures();
     test_eye_shift();
     test_wall_view();
+    test_event_view();
     test_prone_anchor();
     test_prone_dumps();
     printf("%d comprobaciones, %d fallos\n", checks, fails);

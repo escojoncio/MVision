@@ -169,6 +169,14 @@ void vrcam_commit(const uint8_t *ram, const VrCamPlan *p);
 #define VRCAM_WALL_ON 25
 #define VRCAM_WALL_OFF 6
 int vrcam_wall_view(void);
+/* Cámara de evento del juego con el mando retirado al jugador (un actor de la zona coloca la cámara del juego con su retrollamada y lee él el mando: el panel del ascensor): la cámara VR está
+ * apagada a propósito y la vista es la del juego con su cámara y su mando (vr_view: VRV_R_EVENT), como en la de pared pero sin tocar el origen angular del mando. Hecho del motor leído por
+ * vrcam_frame: BRIDGE_CAMF_EVENT en las banderas de la cámara + retrollamada BCAM_EVENT_FN instalada + BRIDGE_PS_PAD_OFF, con control o con una pausa / ventana de armas encima (cam_ctl; en una
+ * escena la cámara ya es la del juego). Entra con VRCAM_EVENT_ON VBlanks seguidos y sale VRCAM_EVENT_OFF después de dejar de cumplirse, o al perder el control por una escena, la radio o una
+ * carga. La 1.ª persona del juego (conductos, gateo, voluntaria) no usa esa cámara. */
+#define VRCAM_EVENT_ON 4
+#define VRCAM_EVENT_OFF 6
+int vrcam_event_view(void);
 /* Oculta la cabeza del modelo del jugador (partes marcadas como no visibles para las etapas siguientes del frame).
  * Devuelve el nº de partes ocultadas. Escribe en la RAM del juego. */
 int vrcam_hide_head(uint8_t *ram);

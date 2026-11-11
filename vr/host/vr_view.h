@@ -30,6 +30,8 @@
  *     la vista retenida o la pantalla plana. Topes: black_nat_max esperando escenas, black_max en total. No cambia modo, clase ni motivo. La radio, la pausa y el selector nunca lo
  *     provocan; desde una pantalla 2D (fin de partida -> continuar, título) tampoco: no hay vista nativa que tapar.
  *   - Pegado a la pared (`wall`) con control: CINE con la pantalla 3D del motor (su cámara de pared, que enseña lo que la primera persona no puede) y el mando original.
+ *   - Cámara de evento del juego con el mando retirado al jugador (`event`: panel del ascensor) con control: lo mismo que la pared (cámara VR apagada a propósito, pantalla 3D del motor
+ *     con su cámara y el mando original), mientras dure; la carga de la planta elegida entra en el fundido a negro y la escena de llegada es una cinemática.
  *   - Se incluye el motivo (VRV_R_*) para el registro y para que la interfaz distinga "el mundo se está pidiendo" de "cine por cinemática". */
 #include <stdint.h>
 
@@ -56,7 +58,9 @@ enum {
     VRV_R_WALL,            /* pegado a la pared con control: la cámara VR se apaga a propósito (vrcam_wall_view) y se ve el juego con SU cámara de pared en la pantalla 3D, con el mando original */
     VRV_R_FROZEN,          /* el motor no está dibujando (carga / cambio de zona: su contador de fotogramas sin dibujo > 0): en pantalla queda su último fotograma; viniendo de una vista nativa, la
                             * vista (modo y clase) se congela con la última escena nativa, nunca se enseña ese fotograma de la VRAM en la pantalla plana; la app la tapa en negro (VrView.black) */
-    VRV_R_HOLD             /* la lista trae 3D de PS1 sin cámara del motor reconocida y se venía de una vista nativa: vista (modo y clase) retenida un tiempo acotado en vez de la pantalla plana */
+    VRV_R_HOLD,            /* la lista trae 3D de PS1 sin cámara del motor reconocida y se venía de una vista nativa: vista (modo y clase) retenida un tiempo acotado en vez de la pantalla plana */
+    VRV_R_EVENT            /* cámara de evento del juego con el mando retirado al jugador y con control (panel del ascensor): la cámara VR se apaga a propósito (vrcam_event_view) y se ve el juego con SU
+                            * cámara en la pantalla 3D, con el mando original. Al final: los valores anteriores no cambian (la app compara algunos por número) */
 };
 
 typedef struct {
@@ -74,6 +78,7 @@ typedef struct {
     uint8_t frozen;        /* el motor no dibuja (contador de fotogramas sin dibujo del motor > 0): lo que hay en la pantalla del juego es un fotograma viejo */
     uint8_t list3d;        /* la última lista capturada trae geometría 3D sustancial, con la cámara que sea (scene3d exige la del motor): la pantalla del juego es un render 3D de PS1 */
     uint8_t fresh;         /* escenas nativas dibujables (partida, escenario y listas enteras) publicadas desde que el motor volvió a dibujar; satura en 255. Solo lo mira el fundido a negro */
+    uint8_t event;         /* cámara de evento del juego con el mando retirado y la vista del juego pedida (vrcam_event_view) */
 } VrViewIn;
 
 /* Qué es lo que se ve (con histéresis propia, ver VrView.kind):

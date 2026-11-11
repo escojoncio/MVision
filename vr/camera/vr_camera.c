@@ -131,6 +131,7 @@ typedef struct {
     float nh[4];                          /* altura de la articulación de la cabeza sobre la raíz aprendida con el jugador quieto, por postura (de pie, agachado, tumbado, en la caja) */
     float sh[2], shv[2];                  /* empuje de las paredes (x, z) filtrado y su velocidad */
     int wall_seen, wall_run, wall_off, wall_cine;   /* pegado a la pared (vrcam_frame): VBlanks que quedan dando PS_WALL por visto, VBlanks seguidos pegado, VBlanks seguidos sin pared, y vista del juego pedida */
+    int ev_run, ev_off, ev_cine;          /* cámara de evento del juego con el mando retirado (vrcam_frame): VBlanks seguidos con ella, VBlanks seguidos sin ella, y vista del juego pedida */
     float prone_k, anc[2];                /* tumbado: mezcla 0..1 hacia el ancla de gateo, y desplazamiento horizontal ojo -> articulación de la cabeza del último plan (lo aplica vrcam_commit a head_at) */
 } Vc;
 static Vc S;
@@ -303,6 +304,14 @@ void vrcam_frame(const uint8_t *ram, const BridgeState *st) {
         else if (!S.wall_cine) { S.wall_run = on ? S.wall_run + 1 : 0; if (S.wall_run >= VRCAM_WALL_ON && wall && ok) { S.wall_cine = 1; S.wall_off = 0; } }   /* `wall`: sigue pegado AHORA (los WALL_SEEN VBlanks de gracia de un roce ya terminado no cuentan para entrar) */
         else { S.wall_off = on ? 0 : S.wall_off + 1; if (S.wall_off >= VRCAM_WALL_OFF) { S.wall_cine = 0; S.wall_run = 0; } }
         if (S.wall_cine) ok = 0;
+        /* Cámara de evento del juego con el mando retirado al jugador (panel del ascensor): igual que en la pared, la vista pasa a la del juego con su cámara y su mando (vr_camera.h).
+         * Con cam_ctl y no in_control: una pausa o la ventana de armas/objetos abiertas ante el panel no devuelven la cámara VR (la vista saltaría a la primera persona y de vuelta). */
+        int ebase = (st->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && st->has_player && st->cam_ctl && S.cfg.head;
+        int ev = ebase && (ps & BRIDGE_PS_PAD_OFF) && (rd_u32(ram, BA_CAMERA + BCAM_FLAG) & BRIDGE_CAMF_EVENT) && rd_u32(ram, BA_CAMERA + BCAM_EVENT_FN);
+        if (!ebase) S.ev_cine = S.ev_run = S.ev_off = 0;
+        else if (!S.ev_cine) { S.ev_run = ev ? S.ev_run + 1 : 0; if (S.ev_run >= VRCAM_EVENT_ON) { S.ev_cine = 1; S.ev_off = 0; } }
+        else { S.ev_off = ev ? 0 : S.ev_off + 1; if (S.ev_off >= VRCAM_EVENT_OFF) { S.ev_cine = 0; S.ev_run = 0; } }
+        if (S.ev_cine) ok = 0;
     }
     if (ok) { if (S.ok_count < 1 << 20) S.ok_count++; } else S.ok_count = 0;
     int want = S.ok_count >= S.cfg.on_frames;
@@ -322,6 +331,7 @@ void vrcam_turn(float deg) { S.extra = wrap180(S.extra + deg); if (isfinite(deg)
 double vrcam_turn_total(void) { return S.turn_total; }
 int vrcam_active(void) { return S.latched; }
 int vrcam_wall_view(void) { return S.wall_cine; }
+int vrcam_event_view(void) { return S.ev_cine; }
 float vrcam_view_yaw_deg(void) { return S.view_yaw; }
 int vrcam_pad_origin(void) {
     float y = S.cfg.loco == VRCAM_LOCO_BODY ? S.theta_body : S.view_yaw;
