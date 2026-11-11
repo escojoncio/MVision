@@ -4,6 +4,8 @@
 #include <string.h>
 
 #define OBJS_PARENT_MAT 0x20   /* puntero a la matriz de otro objeto (objetos pegados; docs/escena_nativa.md §3.2) */
+#define OBJS_FLAG 0x28         /* banderas del conjunto */
+#define OF_HIDDEN 0x080u       /* el motor no dibuja el objeto (la misma que mira ns_extract.c) */
 #define OBJS_NMODELS 0x2E
 #define OBJS_FIRST 0x48
 #define OBJ_SIZE 0x5C
@@ -108,6 +110,16 @@ int ns_player_hide_head_attached(NsScene *sc, const uint8_t *ram, uint32_t key) 
         n++;
     }
     return n;
+}
+
+int ns_player_hide_engine_hidden(NsScene *sc, const uint8_t *ram, uint32_t key) {
+    if (!sc || !ram || !key || !ptr_ok(key, OBJS_FIRST) || !(rd32(ram, key + OBJS_FLAG) & OF_HIDDEN)) return 0;
+    int ii = ns_player_find(sc, key);
+    if (ii < 0) return 0;
+    const NsInstance *in = &sc->inst[ii];
+    if ((uint64_t)in->first_piece + in->n_pieces > sc->n_piece) return 0;
+    for (uint32_t k = 0; k < in->n_pieces; k++) sc->piece[in->first_piece + k].flags |= NS_PF_HIDDEN;
+    return (int)in->n_pieces;
 }
 
 int ns_player_refresh(const NsPlayerMap *m, NsScene *sc, const uint8_t *ram, uint32_t part_mask) {

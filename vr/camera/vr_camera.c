@@ -143,7 +143,7 @@ void vrcam_config_default(VrCamConfig *c) {
     c->hide_head = 1; c->override_pad = 1;
     c->on_frames = 8; c->engine_h = 160; c->draw_lag = 0; c->pitch_limit_deg = 80.0f;
     c->predict_s = 0.10f; c->predict_max_deg = 35.0f; c->vblank_hz = 50.0f;
-    c->wall_view = 1; c->prone_back = 250.0f;
+    c->wall_view = 1; c->prone_back = 120.0f;   /* medido en volcados de gateo (malla de la cabeza tumbada: cara +99 uds por delante de su articulación; el resto del cuerpo queda a 123 uds o más del ojo, fuera del plano cercano de 0,1 m) */
 }
 void vrcam_init(const VrCamConfig *c) {
     memset(&S, 0, sizeof S);
@@ -426,7 +426,8 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
     /* Ancla del cuerpo (ojo -> articulación de la cabeza, horizontal; vrcam_commit la pasa a head_at y vr_body cuelga de ahí el modelo). De pie y agachado la cabeza queda eye_fwd por detrás del
      * ojo según la MIRADA. Tumbado (gateo, conductos) el cuerpo va horizontal: los ojos del modelo están por DELANTE del cuello a lo largo del cuerpo, no encima; con el ancla de pie el ojo
      * quedaba sobre la nuca, con el cuello, los hombros y el pecho pegados alrededor (la vista «dentro del cuerpo»). Tumbado el cuello va prone_back por detrás del ojo según el rumbo del
-     * CUERPO (no gira al mirar a los lados), con transición de 0,3 s. Solo cambia dónde se dibuja el cuerpo: el ojo, la colisión y el mando no se tocan. */
+     * CUERPO (no gira al mirar a los lados), con transición de 0,3 s: el ojo queda en la cara de la cabeza que se dibujaría (oculta), con los antebrazos y las manos del gateo por delante y
+     * debajo. Solo cambia dónde se dibuja el cuerpo: el ojo, la colisión y el mando no se tocan. vr_body lo aplica también cuando el motor oculta al jugador (su primera persona). */
     {
         float kt = b.post == 2 && S.cfg.prone_back > 0.0f ? 1.0f : 0.0f;
         if (snap) S.prone_k = kt; else { float st = dt / 0.3f; S.prone_k += S.prone_k < kt ? (kt - S.prone_k < st ? kt - S.prone_k : st) : (S.prone_k - kt < st ? kt - S.prone_k : -st); }

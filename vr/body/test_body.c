@@ -1320,6 +1320,47 @@ static void test_head_anchor(void) {
     g_view.anchor = 0; memset(g_view.head_at, 0, sizeof g_view.head_at);
 }
 
+/* El ancla no depende de que el motor dibuje al jugador ni de que la IK lleve algún brazo. En SU primera persona (conductos, bajo objetos, paneles) el motor oculta el objeto entero
+ * (visibilidad +0x32 = 0) y el render nativo lo sigue dibujando: sin ancla el cuerpo queda en la raíz, con la cabeza ~420 uds por delante del ojo (medido en d0020: ojo = raíz + 70).
+ * El cuerpo se desplaza igual (sin IK de brazos) y el gancho de aplicación avisa para que la escena nativa copie las matrices; lo mismo sin manos con seguimiento. */
+static int g_hook_n; static float g_hook_head[3];
+static void count_hook(uint8_t *ram) { (void)ram; float R[9]; g_hook_n++; load_xf(part_addr(6), R, g_hook_head); }
+static void test_anchor_hidden(void) {
+    VrBodyConfig cfg; legacy_cfg(&cfg);
+    for (int hidden = 0; hidden < 2; hidden++) {       /* 0: jugador visible sin manos con seguimiento; 1: jugador oculto por el motor con las dos manos válidas */
+        build_body(903 + hidden); vrbody_init(&cfg); vrbody_set_view_fn(view_fn); vrbody_set_apply_hook(count_hook);
+        if (hidden) { w16(PARTSET + 0x32, 0); set_hand(0, -0.2f, 1.3f, -0.4f, 0); set_hand(1, 0.2f, 1.3f, -0.4f, 0); }
+        memcpy(RAM0, RAM, sizeof RAM);
+        float R0[16][9], t0[16][3], R[9], t[3];
+        for (int i = 0; i < 16; i++) load_xf(part_addr(i), R0[i], t0[i]);
+        const float at[3] = {t0[6][0] - 380.0f, t0[6][1] + 12.0f, t0[6][2] + 150.0f};
+        g_view.anchor = 1; for (int j = 0; j < 3; j++) g_view.head_at[j] = at[j];
+        g_hook_n = 0;
+        int n = vrbody_apply(RAM);
+        float worst = 0, rigid = 0; int rot = 0;
+        for (int i = 0; i < 16; i++) {
+            load_xf(part_addr(i), R, t);
+            for (int j = 0; j < 9; j++) rot += R[j] != R0[i][j];
+            for (int j = 0; j < 3; j++) rigid = fmaxf(rigid, fabsf((t[j] - t0[i][j]) - (at[j] - t0[6][j])));
+        }
+        load_xf(part_addr(6), R, t);
+        for (int j = 0; j < 3; j++) worst = fmaxf(worst, fabsf(t[j] - at[j]));
+        const char *w = hidden ? "oculto por el motor" : "sin manos";
+        CHECK(n == 0, "ancla %s: sin IK de brazos (%d)", w, n);
+        CHECK(worst <= 1.0f, "ancla %s: la cabeza del modelo debe quedar en head_at (error %g)", w, worst);
+        CHECK(rigid <= 1.0f && rot == 0, "ancla %s: las 16 piezas se desplazan lo mismo y no giran (error %g, %d)", w, rigid, rot);
+        CHECK(g_hook_n == 1, "ancla %s: el gancho de aplicación debe avisar una vez (%d)", w, g_hook_n);
+        CHECK(g_hook_n == 0 || fabsf(g_hook_head[0] - at[0]) <= 1.0f, "ancla %s: el gancho ve el cuerpo ya desplazado", w);
+        vrbody_restore(RAM);
+        CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "ancla %s: restore devuelve la RAM", w);
+        /* sin ancla ni empuje no hay nada que avisar ni que escribir */
+        g_view.anchor = 0; memset(g_view.head_at, 0, sizeof g_view.head_at); g_hook_n = 0;
+        CHECK(vrbody_apply(RAM) == 0 && g_hook_n == 0 && memcmp(RAM, RAM0, sizeof RAM) == 0, "%s sin ancla: no se toca nada", w);
+        vrbody_restore(RAM);
+    }
+    vrbody_set_apply_hook(NULL);
+}
+
 /* Gateo bajo geometría baja: la cámara aparta el ojo del modelo (VrBodyView.shift); todo el cuerpo del jugador se dibuja desplazado igual, para que no quede
  * por delante del ojo. Sin empuje (shift 0 / no finito) no cambia nada. restore devuelve la RAM. */
 static void place_hands_at(float yaw_deg, float spread_deg);
@@ -1691,7 +1732,7 @@ int main(void) {
     test_glue();
     test_hand_axes(); test_armed_hand_fixed_offset(); test_hand_pitch_api(); test_default_roll(); test_jab_and_grab();
     test_visibility();
-    test_two_sided(); test_own_hands(); test_own_hands_both(); test_arm_live(); test_torso_follow(); test_eye_shift(); test_head_anchor(); test_pelvis_walk(); test_dt_measured(); test_pelvis_gap();
+    test_two_sided(); test_own_hands(); test_own_hands_both(); test_arm_live(); test_torso_follow(); test_eye_shift(); test_head_anchor(); test_anchor_hidden(); test_pelvis_walk(); test_dt_measured(); test_pelvis_gap();
     test_fist_glue();
     test_near_hide();
     test_mirror();

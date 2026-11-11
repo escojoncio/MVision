@@ -833,7 +833,9 @@ static int apply_main(uint8_t *ram) {
     if (!ptr_ok(pset, OBJS_FIRST + OBJ_SIZE)) { G.st.skip_model++; return 0; }
     int nm = rd_s16(ram, pset + OBJS_NPARTS);
     if (nm < cfg->min_parts || nm > MAX_PARTS || !ptr_ok(pset, OBJS_FIRST + OBJ_SIZE * (uint32_t)nm)) { G.st.skip_model++; return 0; }
-    if (rd_s16(ram, pset + OBJS_VIS) == 0) { G.st.skip_offscreen++; return 0; }   /* el objeto entero está fuera de pantalla */
+    /* El motor no dibuja el objeto entero (fuera de pantalla, o SU primera persona: conductos, bajo objetos, paneles). El render nativo sí lo dibuja en primera persona VR, así que el
+     * ancla del cuerpo se aplica igual (sin ella el ojo queda en la raíz, por detrás de la cabeza y los hombros del modelo tumbado); la IK de los brazos y lo demás, no. */
+    const int offscreen = rd_s16(ram, pset + OBJS_VIS) == 0;
 
     int it = cfg->part_torso;
     if (it < 0 || it >= nm) { G.st.skip_model++; return 0; }
@@ -864,6 +866,7 @@ static int apply_main(uint8_t *ram) {
     /* ---- ojo apartado de las paredes (gateo bajo objetos, conductos): la cámara limita el ojo pero el juego solo colisiona el centro del cuerpo, que quedaría por delante del ojo. Todo el cuerpo del jugador
      * se dibuja desplazado igual (world.t += shift, screen.t += R_ojo * shift); lo que sigue lee ya el cuerpo desplazado. restore devuelve las piezas ---- */
     float shf[3] = {0.0f, 0.0f, 0.0f};
+    int shifted = 0;
     if (view.anchor) {
         PartInfo ph;
         if (all_finite(view.head_at, 3) && nm > 6 && read_part(ram, pset, 6, &ph))
@@ -881,9 +884,10 @@ static int apply_main(uint8_t *ram) {
                 wr_i32(ram, pi.addr + OBJ_SCREEN + 0x14 + 4 * (uint32_t)k, to_i32((float)rd_i32(ram, pi.addr + OBJ_SCREEN + 0x14 + 4 * (uint32_t)k) + es[k]));
             }
         }
-        G.pending = 1;
+        G.pending = 1; shifted = 1; G.st.anchored++;
         v_add(torso_w.t, torso_w.t, shf); v_add(torso_s.t, torso_s.t, es);
     }
+    if (offscreen) { G.st.skip_offscreen++; if (shifted && G.hook) G.hook(ram); return 0; }
 
     if (G.grab.active && ++G.grab_age > 3) G.grab.active = 0;      /* ya no se refresca: soltado */
     /* ---- manos ---- */
@@ -917,7 +921,7 @@ static int apply_main(uint8_t *ram) {
         h->was_valid = v;
         any |= v || h->w > 0;
     }
-    if (!any) { G.st.skip_nohands++; G.tf_init = 0; G.pel_have = 0; for (int s = 0; s < 2; s++) G.dbg[s].driven = 0, G.pf[s].ok = 0; return 0; }
+    if (!any) { G.st.skip_nohands++; G.tf_init = 0; G.pel_have = 0; for (int s = 0; s < 2; s++) G.dbg[s].driven = 0, G.pf[s].ok = 0; if (shifted && G.hook) G.hook(ram); return 0; }
 
     /* relación usuario -> mundo del motor */
     float th = (view.theta_deg + 180.0f) * DEG, cs = cosf(th), sn = sinf(th);
@@ -1281,7 +1285,7 @@ static int apply_main(uint8_t *ram) {
         driven++;
     }
     G.st.arms_driven += (uint32_t)driven;
-    if (driven && G.hook) G.hook(ram);
+    if ((driven || shifted) && G.hook) G.hook(ram);
     return driven;
 }
 

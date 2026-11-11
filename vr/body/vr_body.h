@@ -264,6 +264,7 @@ typedef struct VrBodyStats {
     float pelvis_yaw;            /* guiñada de la pelvis (grados) en ese frame */
     float stretch_sum, stretch_max;   /* suma (de los brazos estirados) y máximo del factor de estirado */
     uint32_t stretched, too_close, shoulder_limit, wrist_limit, bad_solve, stale_dropped, vis_forced;
+    uint32_t anchored;           /* applies con el cuerpo entero desplazado (ancla / empuje del ojo), también con el objeto oculto por el motor */
 } VrBodyStats;
 void vrbody_stats(VrBodyStats *s);
 
@@ -310,8 +311,8 @@ int vrbody_arm_resolve(const VrBodyArmLive *a, const float live_p[3], const floa
  * 1 = válido (brazo movido por la IK en el último apply); 0 = no. */
 int vrbody_debug_hand_frame(int side, float m[16]);
 
-/* Gancho de diagnóstico: se llama al final de vrbody_apply (con las matrices IK ya escritas) si se escribió algo. Para
- * herramientas de validación; NULL por defecto. */
+/* Gancho de aplicación: se llama al final de vrbody_apply (con las matrices ya escritas) si la IK llevó algún brazo o el cuerpo se desplazó (ancla / empuje del ojo), también con el
+ * objeto oculto por el motor o sin manos con seguimiento. Lo usa el render nativo para copiar la pose a su escena (ns_hook_post_ik); NULL por defecto. */
 typedef void (*VrBodyHook)(uint8_t *ram);
 void vrbody_set_apply_hook(VrBodyHook fn);
 

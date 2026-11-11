@@ -40,6 +40,11 @@ typedef struct {
  * cabeza rodea el ojo igual que la propia. Devuelve cuántas instancias ocultó. */
 int ns_player_hide_head_attached(NsScene *sc, const uint8_t *ram, uint32_t key);
 
+/* Escena que se dibuja con la cámara del MOTOR (cinemáticas, radio entrante, vista de pared; sin cámara VR): debe enseñar lo que dibuja el motor. El extractor trae al jugador aunque
+ * el motor lo tenga oculto (bandera 0x80 de su conjunto: la primera persona del juego en conductos, bajo objetos y ante paneles), porque la primera persona VR dibuja el cuerpo propio;
+ * con la cámara del motor ese cuerpo queda en el ojo (la cabeza tapa la vista). Si el motor oculta al jugador marca NS_PF_HIDDEN todas sus piezas. Devuelve cuántas ocultó. */
+int ns_player_hide_engine_hidden(NsScene *sc, const uint8_t *ram, uint32_t key);
+
 /* Conjunto de piezas del jugador (clave de instancia) leído de la RAM; 0 si no hay jugador / punteros inválidos. */
 uint32_t ns_player_key(const uint8_t *ram);
 /* Índice de la instancia con esa clave o -1. */

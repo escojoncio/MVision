@@ -94,6 +94,21 @@ static void t_player(void) {
     CHECK(ns_player_bind(&m, s, RAM, OBJ) == 14 && m.part[8].n == 0 && m.part[9].n == 0 && m.part[7].n == 1, "pieza compartida por dos partes: ninguna");
     setup_ram(); extract(RAM, NULL, s, NULL);
     CHECK(ns_player_bind(&m, s, RAM, OBJ) == 16 && m.part[4].n == 2, "encadenadas de una sola parte: ambas");
+    /* Cámara del MOTOR (cinemática, radio entrante, vista de pared): la escena enseña lo que dibuja el motor. El extractor trae al jugador aunque el motor lo oculte (bandera 0x80 del
+     * conjunto: su primera persona en conductos y paneles) para la primera persona VR; con la cámara del motor ese jugador no se dibuja (volcado d0026: la cabeza tapaba la vista). */
+    {
+        int hid = 0;
+        w32(OBJ + 0x28, 0x32Du);
+        CHECK(ns_player_hide_engine_hidden(s, RAM, OBJ) == 0, "jugador que el motor dibuja: no se oculta");
+        for (uint32_t i = 0; i < s->n_piece; i++) hid += (s->piece[i].flags & NS_PF_HIDDEN) != 0;
+        CHECK(hid == 0, "jugador que el motor dibuja: ninguna pieza oculta (%d)", hid);
+        w32(OBJ + 0x28, 0x3ADu);
+        CHECK(ns_player_hide_engine_hidden(s, RAM, 0x80199990u) == 0 && ns_player_hide_engine_hidden(s, RAM, 0) == 0 && ns_player_hide_engine_hidden(NULL, RAM, OBJ) == 0, "jugador ausente o sin clave");
+        CHECK(ns_player_hide_engine_hidden(s, RAM, OBJ) == 17, "jugador oculto por el motor: sus 17 piezas");
+        hid = 0;
+        for (uint32_t i = 1; i < 18; i++) hid += (s->piece[i].flags & NS_PF_HIDDEN) != 0;
+        CHECK(hid == 17 && !(s->piece[0].flags & NS_PF_HIDDEN) && !(s->piece[18].flags & NS_PF_HIDDEN), "solo las piezas del jugador (%d)", hid);
+    }
     ns_bridge_destroy(b);
 }
 

@@ -90,6 +90,7 @@ static const struct { const char *name; uint32_t addr; } FIRE_SITES[] = {
 #define NFIRE (sizeof FIRE_SITES / sizeof FIRE_SITES[0])
 static int body_ok, fire_ok;
 static uint32_t ik_ap0, ik_dr0;          /* vrbody_stats.applies / arms_driven en la captura nativa de este fotograma (ns_ik_idle) */
+static uint32_t eng_hide_n;              /* escenas con la cámara del motor en las que no se dibujó al jugador porque el motor lo oculta (hilo de emulación; registro [cuerpo]) */
 
 /* Huella del código del buscador antiaéreo (edición europea): prólogo de cada función y las dos llamadas internas que usa el sustituto
  * (aaview desde el paso; carga de H del canal desde aaview). Sin ella no se enlazan (las direcciones fijas no se verifican por firma). */
@@ -415,7 +416,10 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
     feedback_to_scene(sc);
     const VrCamRecord *r = vrcam_last_record();
     int core = (bs.valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs.has_player;
-    if (!r || !r->active || !core) return;                 /* cinemática / sin cámara VR: sin mapa VR, el 3D sigue saliendo de la lista de la GPU */
+    if (!r || !r->active || !core) {                       /* cinemática / sin cámara VR: sin mapa VR, el 3D sigue saliendo de la lista de la GPU */
+        eng_hide_n += ns_player_hide_engine_hidden(sc, emu_ram, ns_player_key(emu_ram)) > 0;   /* con la cámara del motor, el jugador que el motor oculta (su primera persona: conductos, paneles) no se dibuja: su cabeza quedaría en el ojo */
+        return;
+    }
     for (int i = 0; i < 3; i++) sc->cam.eye[i] = (float)r->eye[i];
     memcpy(sc->cam.rot, r->M, sizeof sc->cam.rot);
     sc->cam.h = (float)r->screen; sc->cam.overscan_y = 1.0f; sc->cam.vr_active = 1;   /* con la cámara VR el motor no aplica el sobreescaneo (contrato v2) */
@@ -622,9 +626,12 @@ static void ns_frame_check(void) {
                     bc ? bc->own_hands : -1, vrgame_glove_pub(), b.hidden_pieces - b0.hidden_pieces,
                     b.stretched - b0.stretched, b.shoulder_limit - b0.shoulder_limit, b.wrist_limit - b0.wrist_limit,
                     b.stretched > b0.stretched ? (b.stretch_sum - b0.stretch_sum) / (float)(b.stretched - b0.stretched) : 1.0f, b.stretch_max);
-            fprintf(stderr, "[cuerpo] torso_follow=%d aplicado=+%u (guinada torso=%.1f mirada=%.1f dif=%.1f grados) | doble_cara: activa=%d modelos=+%u | piezas_cerca_ocultas=+%u\n",
+            static uint32_t eh0;
+            fprintf(stderr, "[cuerpo] torso_follow=%d aplicado=+%u (guinada torso=%.1f mirada=%.1f dif=%.1f grados) | doble_cara: activa=%d modelos=+%u | piezas_cerca_ocultas=+%u | ancla=+%u (jugador_oculto_por_motor=+%u) camara_del_motor_sin_jugador=+%u\n",
                     bc ? bc->torso_follow : -1, b.torso_applies - b0.torso_applies, b.torso_yaw, b.torso_gaze, b.torso_gaze - b.torso_yaw,
-                    (int)(b.two_sided - b0.two_sided > 0), b.two_sided - b0.two_sided, b.near_hidden - b0.near_hidden);
+                    (int)(b.two_sided - b0.two_sided > 0), b.two_sided - b0.two_sided, b.near_hidden - b0.near_hidden,
+                    b.anchored - b0.anchored, b.skip_offscreen - b0.skip_offscreen, eng_hide_n - eh0);
+            eh0 = eng_hide_n;
             b0 = b;
         }
     }

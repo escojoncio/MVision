@@ -811,6 +811,29 @@ static void test_prone_dumps(void) {
         NEAR(head6, -c.prone_back, 2.0);                        /* tumbado: la articulación de la cabeza, prone_back por detrás del ojo (cuerpo y mirada alineados en el volcado) */
         CHECK(body <= -c.prone_back + 2.0f);                    /* nada del cuerpo por delante de la cabeza */
         CHECK(vrcam_hide_head_now(real) == 1);
+        /* Con las MALLAS del modelo (vértices de cada pieza en el mundo, ya con el ancla): el ojo queda en la cara de la cabeza que se dibujaría (como mucho 60 uds por delante de ella, no
+         * 15 cm), y ninguna otra pieza queda a menos de 100 uds del ojo (plano cercano de 0,1 m) ni por delante de él, salvo los antebrazos y las manos apoyados en el suelo. */
+        float face = -1e9f, ahead = -1e9f, nearest = 1e9f;
+        uint32_t objs; memcpy(&objs, real + (BA_PLAYER_BODY & 0x1FFFFF), 4); memcpy(&objs, real + (objs & 0x1FFFFF), 4);
+        for (int k = 0; k < 16; k++) {
+            const uint8_t *o = real + ((objs + 0x48 + 0x5C * (uint32_t)k) & 0x1FFFFF);
+            int16_t R[9]; int32_t t[3], nv; uint32_t mdl, va;
+            memcpy(R, o, sizeof R); memcpy(t, o + 0x14, sizeof t); memcpy(&mdl, o + 0x40, 4);
+            memcpy(&nv, real + ((mdl + 0x34) & 0x1FFFFF), 4); memcpy(&va, real + ((mdl + 0x38) & 0x1FFFFF), 4);
+            CHECK(nv > 0 && nv <= 256);
+            for (int32_t v = 0; v < nv && nv <= 256; v++) {
+                int16_t lv[3]; memcpy(lv, real + ((va + 8u * (uint32_t)v) & 0x1FFFFF), sizeof lv);
+                float w[3], a = 0;
+                for (int q = 0; q < 3; q++) w[q] = (float)(R[3 * q] * lv[0] + R[3 * q + 1] * lv[1] + R[3 * q + 2] * lv[2]) / 4096.0f + (float)t[q] + (r->head_at[q] - j[6][q]) - (float)p.from[q];
+                for (int q = 0; q < 3; q++) a += w[q] * fw[q];
+                if (k == 6) { face = fmaxf(face, a); continue; }
+                nearest = fminf(nearest, sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]));
+                if (w[1] > -150.0f) ahead = fmaxf(ahead, a);
+            }
+        }
+        printf("tumbado (%s), mallas: cara de la cabeza %.0f uds respecto al ojo; resto del cuerpo: lo mas adelantado (sin lo apoyado en el suelo) %.0f, lo mas cercano al ojo %.0f uds\n", D[i], face, ahead, nearest);
+        CHECK(face <= 0.0f && face >= -60.0f);
+        CHECK(ahead <= 0.0f && nearest >= 100.0f);
     }
     if (!loaded) printf("(volcados de gateo no encontrados en %s: sin prueba de tumbado)\n", root);
 }
