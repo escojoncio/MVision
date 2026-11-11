@@ -894,13 +894,10 @@ final class XRPresenter {
                 if let h = hud, !stereo2DInside {
                     var hp2 = XRDrawItem(kind: .panel, texture: h)
                     hp2.model = model * XRMath.translation(SIMD3<Float>(0, 0, 0.004))
-                    // aspecto REAL de la capa 2D (alto/ancho lógico: 320x240 = 0,75; 320x256 = 0,8, PAL). La pantalla 3D enseña la ventana 4:3 del motor (filas 0..240, ns_cinema_window), así que la capa se recorta
-                    // por abajo a ese mismo 4:3 (las filas que sobran de PAL quedan fuera de la pantalla) y el panel mide lo mismo que la pantalla: sin recorte, la capa (más alta) quedaba centrada sobre la pantalla
-                    // 8 filas más arriba que el 3D, y sus bandas negras dejaban asomar la geometría por el borde de la banda superior.
+                    // aspecto REAL de la capa 2D (alto/ancho lógico: 320x240 = 0,75; 320x256 = 0,8), no el 3/4 fijo de la imagen 3D; solo en esta ruta
                     let lg = hudLogical ?? SIMD2<Float>(Float(h.width), Float(h.height))
-                    let asp = XRCinemaLayout.aspect(width: Int(lg.x.rounded()), height: Int(lg.y.rounded()))
-                    hp2.uvrect = SIMD4<Float>(0, 0, 1, min(1, 0.75 / asp))
-                    hp2.size = SIMD2<Float>(W, W * min(asp, 0.75))
+                    hp2.uvrect = SIMD4<Float>(0, 0, 1, 1)
+                    hp2.size = SIMD2<Float>(W, W * XRCinemaLayout.aspect(width: Int(lg.x.rounded()), height: Int(lg.y.rounded())))
                     hp2.distance = D
                     hp2.curve = cv
                     hp2.cols = it.cols
