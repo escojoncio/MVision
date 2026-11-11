@@ -506,9 +506,11 @@ int main(void) {
         CHECK(ve.mode == VRV_CINEMA && ve.kind == VRV_K_ENGINE && ve.reason == VRV_R_EVENT && !changes && !flat && !pend && !ve.black, "panel y viaje: la vista se mantiene (cambios %d)", changes);
         /* carga de la planta elegida (183 sin dibujo; 2 «sin partida»; 53 sin dibujo con partida, los 2 primeros con control y la cámara de evento de la llegada): negro con la pantalla 3D retenida */
         VrViewIn l; memset(&l, 0, sizeof l); l.frozen = 1; l.list3d = 1;
+        for (int k = 0; k < 9; k++) vrview_step(&ve, &l);
+        CHECK(!ve.black, "viaje: una parada corta (9 VBlanks) no es carga");
         vrview_step(&ve, &l);
         CHECK(ve.black && ve.reason == VRV_R_FROZEN, "viaje: el negro empieza con la carga");
-        EV(ve, l, 182);
+        EV(ve, l, 172);
         VrViewIn n; memset(&n, 0, sizeof n);
         EV(ve, n, 2);
         VrViewIn e2 = world(); e2.cam_active = 0; e2.frozen = 1; e2.event = 1;
@@ -567,10 +569,12 @@ int main(void) {
         CHECK(vb.mode == VRV_WORLD && !vb.black, "mundo: sin negro");
         /* cambio de zona desde el mundo (vb 10868-11084): 196 sin dibujo, 9 «sin partida», 9 sin dibujo con control y sin cámara VR, y el mundo */
         VrViewIn l; memset(&l, 0, sizeof l); l.cam_active = 1; l.frozen = 1; l.list3d = 1;
+        for (int k = 0; k < 9; k++) vrview_step(&vb, &l);
+        CHECK(!vb.black && vb.reason == VRV_R_FROZEN, "parada corta (9 VBlanks): sin negro");
         vrview_step(&vb, &l);
-        CHECK(vb.black && (vb.changed & VRV_CH_BLACK) && vb.reason == VRV_R_FROZEN, "el negro empieza en el primer fotograma sin dibujo");
-        RUN(vb, l, 195, vb.black && vb.mode == VRV_WORLD && vb.kind == VRV_K_WORLD, "carga: negro con la vista retenida (k=%d)", k_);
-        CHECK(vb.black_run == 196, "fotogramas en negro: %d", vb.black_run);
+        CHECK(vb.black && (vb.changed & VRV_CH_BLACK) && vb.reason == VRV_R_FROZEN, "el negro empieza al décimo VBlank sin dibujo");
+        RUN(vb, l, 185, vb.black && vb.mode == VRV_WORLD && vb.kind == VRV_K_WORLD, "carga: negro con la vista retenida (k=%d)", k_);
+        CHECK(vb.black_run == 186, "fotogramas en negro: %d", vb.black_run);
         VrViewIn n; memset(&n, 0, sizeof n); n.cam_active = 1;
         RUN(vb, n, 9, vb.black, "zona cargada, sin partida todavía: sigue en negro (k=%d)", k_);
         VrViewIn p = world(); p.cam_active = 0; p.frozen = 1;
@@ -589,7 +593,8 @@ int main(void) {
         VrViewIn e = world(); e.in_control = 0; e.native_ok = 1; e.list3d = 1; e.fresh = 255;
         for (int k = 0; k < 10; k++) vrview_step(&vb, &e);
         CHECK(vb.mode == VRV_WORLD && vb.reason == VRV_R_WORLD && !vb.black, "ascensor: mundo");
-        RUN(vb, l, 183, vb.black, "ascensor: negro en la carga (k=%d)", k_);
+        RUN(vb, l, 9, 1, "ascensor: primeros VBlanks de la carga (k=%d)", k_);
+        RUN(vb, l, 174, vb.black, "ascensor: negro en la carga (k=%d)", k_);
         n.list3d = 0; RUN(vb, n, 2, vb.black, "ascensor: hueco sin partida en negro (k=%d)", k_);
         VrViewIn e2 = world(); e2.cam_active = 0; e2.frozen = 1;
         RUN(vb, e2, 53, vb.black, "ascensor: segundo tramo sin dibujo en negro (k=%d)", k_);
@@ -607,10 +612,14 @@ int main(void) {
         for (int k = 0; k < 10; k++) vrview_step(&vb, &s);
         CHECK(vb.mode == VRV_CINEMA && vb.kind == VRV_K_ENGINE && !vb.black, "escena del motor en la pantalla 3D");
         VrViewIn sf = s; sf.frozen = 1; sf.fresh = 0;
-        RUN(vb, sf, 8, vb.black && vb.kind == VRV_K_ENGINE, "entre escenas: negro con la pantalla 3D retenida (k=%d)", k_);
+        RUN(vb, sf, 8, !vb.black && vb.kind == VRV_K_ENGINE, "entre escenas: parada corta de 8 VBlanks sin negro (k=%d)", k_);
         VrViewIn sg = s; sg.fresh = 2;
-        RUN(vb, sg, 2, vb.black, "hueco de 2 fotogramas en el desmontaje: no levanta el negro aunque haya escenas (k=%d)", k_);
-        RUN(vb, sf, 25, vb.black, "entre escenas: negro (k=%d)", k_);
+        RUN(vb, sg, 2, !vb.black, "hueco de 2 fotogramas en el desmontaje: la cuenta de parada se reinicia (k=%d)", k_);
+        RUN(vb, sf, 9, !vb.black, "entre escenas: aún sin negro (k=%d)", k_);
+        vrview_step(&vb, &sf);
+        CHECK(vb.black && vb.kind == VRV_K_ENGINE, "entre escenas: negro con la pantalla 3D retenida tras 10 VBlanks de parada");
+        RUN(vb, sf, 15, vb.black, "entre escenas: negro (k=%d)", k_);
+        RUN(vb, sg, 2, vb.black, "hueco de 2 fotogramas con negro: no lo levanta aunque haya escenas (k=%d)", k_);
         sg.fresh = 0; RUN(vb, sg, 8, vb.black, "escena nueva aún sin capturar: negro (k=%d)", k_);
         sg.fresh = 2; vrview_step(&vb, &sg);
         CHECK(!vb.black && vb.kind == VRV_K_ENGINE && vb.mode == VRV_CINEMA, "escena siguiente: se levanta el negro");
@@ -652,6 +661,7 @@ int main(void) {
         VrViewIn ra = world(); ra.in_control = 0; ra.cam_active = 0; ra.comms = 1; ra.stopped = 1; ra.frozen = 1; RUN(vb, ra, 30, !vb.black, "radio: sin negro (k=%d)", k_);
         vrview_reset(&vb);
         for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        RUN(vb, l, 9, 1, "carga: parada corta (k=%d)", k_);
         RUN(vb, l, 20, vb.black, "carga (k=%d)", k_);
         { int stale = 0;
           for (int k = 0; k < 20; k++) { vrview_step(&vb, &ra); stale |= !vb.black && vb.kind != VRV_K_UI; }
@@ -659,6 +669,7 @@ int main(void) {
         /* un vídeo durante el negro lo levanta */
         vrview_reset(&vb);
         for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        RUN(vb, l, 9, 1, "carga: parada corta (k=%d)", k_);
         RUN(vb, l, 20, vb.black, "carga (k=%d)", k_);
         { VrViewIn mv = l; mv.mdec = 1; int stale = 0;
           for (int k = 0; k < 8; k++) { vrview_step(&vb, &mv); stale |= !vb.black && vb.kind != VRV_K_VIDEO; }
@@ -667,12 +678,14 @@ int main(void) {
         /* carga hacia una pantalla 2D (título): el negro se levanta tras black_2d fotogramas dibujando sin 3D; con 3D de PS1 sin cámara del motor aguanta hasta hold_max */
         vrview_reset(&vb);
         for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        RUN(vb, l, 9, 1, "carga: parada corta (k=%d)", k_);
         RUN(vb, l, 50, vb.black, "carga (k=%d)", k_);
         VrViewIn t2; memset(&t2, 0, sizeof t2);
         RUN(vb, t2, vb.black_2d - 1, vb.black, "destino 2D: aún negro (k=%d)", k_);
         vrview_step(&vb, &t2); CHECK(!vb.black && vb.kind == VRV_K_UI && vb.mode == VRV_CINEMA, "destino 2D estable: se levanta el negro");
         vrview_reset(&vb);
         for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        RUN(vb, l, 9, 1, "carga: parada corta (k=%d)", k_);
         RUN(vb, l, 50, vb.black, "carga (k=%d)", k_);
         t2.list3d = 1;
         flat = 0;
@@ -685,19 +698,22 @@ int main(void) {
         /* topes: destino nativo sin escenas nuevas (black_nat_max) y motor que no vuelve a dibujar (black_max) */
         vrview_reset(&vb);
         for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        RUN(vb, l, 9, 1, "carga: parada corta (k=%d)", k_);
         RUN(vb, l, 50, vb.black, "carga (k=%d)", k_);
         z.fresh = 0;
         RUN(vb, z, vb.black_nat_max - 1, vb.black, "mundo sin escenas nuevas: negro (k=%d)", k_);
         vrview_step(&vb, &z); CHECK(!vb.black, "mundo sin escenas nuevas: acotado por black_nat_max");
         vrview_reset(&vb); vb.frozen_max = 20; vb.black_max = 40;
         for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
+        RUN(vb, l, 9, 1, "motor sin dibujar: parada corta (k=%d)", k_);
         RUN(vb, l, 39, vb.black, "motor sin dibujar: negro (k=%d)", k_);
         vrview_step(&vb, &l); CHECK(!vb.black, "motor que no vuelve a dibujar: acotado por black_max");
         RUN(vb, l, 100, !vb.black, "pasado el tope no vuelve al negro hasta que el motor dibuje (k=%d)", k_);
 
         char buf[640];
         vrview_reset(&vb); for (int k = 0; k < 10; k++) vrview_step(&vb, &w);
-        vrview_step(&vb, &l); vrview_describe(&vb, &l, buf, sizeof buf);
+        for (int k = 0; k < 10; k++) vrview_step(&vb, &l);
+        vrview_describe(&vb, &l, buf, sizeof buf);
         CHECK(strstr(buf, "negro=1") && strstr(buf, " negro "), "registro del negro: %s", buf);
         CHECK(vrview_step(NULL, &l) == VRV_CINEMA, "NULL");
         vrview_step(&vb, NULL); CHECK(!vb.black, "entradas NULL: sin negro");

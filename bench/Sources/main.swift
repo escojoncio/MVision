@@ -241,7 +241,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
         bench_make_pattern()
         let headA = headPose(SIMD3<Float>(0.10, 1.60, 0.20), yaw: 0.45)
         let headB = headPose(SIMD3<Float>(0.15, 1.55, 0.10), yaw: 0.50)      // la cabeza se mueve tras anclar: la pantalla debe quedarse
-        var gs = MvVrGameState(); gs.view_mode = 0
+        var gs = MvVrGameState(); gs.view_mode = 0; gs.view_reason = 2   // cine por cinemática (VRV_R_CINEMATIC): con motivo 0 el velo de «mundo pedido» sube
         guard let imgs = render(enc, layered: cfg.layered, color: tg.color, depth: tg.depth, gs: gs, frames: 40, head: { $0 == 39 ? headB : headA }) else {
             check(caso, "render", false, "fallo al renderizar"); continue
         }
@@ -295,7 +295,7 @@ func runCase(_ cfg: Cfg, first: Bool) {
         let headA = headPose(SIMD3<Float>(0.10, 1.60, 0.20), yaw: 0.45)
         let headB = headPose(SIMD3<Float>(0.35, 1.45, -0.10), yaw: 0.20)      // la cabeza se mueve tras anclar: el encuadre de la escena NO debe cambiar
         // 60 fotogramas: sin escena nativa del motor la presentación repite el último válido o funde a negro (ya no existe el respaldo plano) y reinicia el velo.
-        var gs = MvVrGameState(); gs.view_mode = 0; gs.view_kind = 2
+        var gs = MvVrGameState(); gs.view_mode = 0; gs.view_kind = 2; gs.view_reason = 2
         guard let imgs = render(enc, layered: cfg.layered, color: tg.color, depth: tg.depth, gs: gs, frames: 60, head: { $0 == 59 ? headB : headA }) else {
             check(caso, "render", false, "fallo al renderizar"); bench_set_cine_camera(0); break stereoBlock
         }

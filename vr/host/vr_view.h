@@ -115,6 +115,7 @@ typedef struct {
     int hold_run;
     /* --- fundido a negro (ver la política) --- */
     int black;             /* 1 = la app debe tener la vista en negro (funde rápido al subir y al bajar) */
+    int black_pre;         /* fotogramas seguidos con el motor sin dibujar antes de entrar en negro (las paradas cortas al empezar escenas no rewriten la VRAM) */
     int black_run;         /* fotogramas seguidos en negro */
     int black_draw;        /* de ellos, los últimos seguidos con el motor dibujando */
     int black_nat;         /* de ellos, los últimos seguidos con destino nativo (esperando escenas nuevas) */

@@ -30,9 +30,12 @@ void vrview_reset(VrView *v) {
 /* Fundido a negro (política en vr_view.h). `r` = motivo de este fotograma ya con las retenciones; `window2d` = el juego pide una ventana 2D suya. Va antes de la histéresis: modo y clase
  * son los vigentes hasta el fotograma anterior, es decir, lo que la app tiene en pantalla. El negro solo se levanta con la vista vigente ya en su destino: si se levantara antes, la app
  * bajaría el velo sobre la vista retenida (vieja) o sobre la pantalla plana durante los fotogramas de histéresis. */
+#define VRV_BLACK_PRE 10   /* VBlanks de parada del motor antes del negro: medido, las cargas duran >= 52 VBlanks y las paradas al empezar escena 5-9 */
 static void black_step(VrView *v, const VrViewIn *in, int r, int window2d) {
     if (!v->black) {
-        if (r != VRV_R_FROZEN) return;
+        if (r != VRV_R_FROZEN) { v->black_pre = 0; return; }
+        if (++v->black_pre < VRV_BLACK_PRE) return;   /* parada corta: no es una carga */
+        v->black_pre = 0;
         v->black = 1; v->black_run = 0; v->black_draw = 0; v->black_nat = 0;
     }
     int out = 0;

@@ -20,7 +20,7 @@
 #define MAX_FACES     8192         /* por modelo */
 #define MAX_VERTS     256
 #define MAX_NORMS     256
-#define MAX_EXT_DEPTH 128          /* extensiones encadenadas por pieza: medido hasta 10 en un mapa (nx = nº de modelos del def; el bucle se detecta con `seen`) */
+#define MAX_EXT_DEPTH 32           /* extensiones encadenadas por pieza: medido hasta 10 en un mapa (nx = nº de modelos del def; el bucle se detecta con `seen`) */
 /* El motor retira una pieza del dibujo sin tocar su modelo poniéndole el sesgo de orden a -30000 (y un solo paquete): así oculta la cabeza del jugador cuando un objeto equipado (gafas, máscara)
  * trae la suya, pegada a la matriz de la cabeza (medido: pieza 6 del jugador con sesgo -30000 y n_paq 1 con las gafas térmicas puestas; 0 y 81 sin ellas). El extractor rederiva las caras del
  * modelo, así que sin esta regla dibujaba las dos cabezas. Solo objetos dinámicos: en el escenario un sesgo extremo es «al fondo del todo» (cielos), no una retirada. */
