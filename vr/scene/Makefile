@@ -32,14 +32,17 @@ $(B)/libvrscene.a: $(B)/vr_scene.o
 	rm -f $@ && ar rcs $@ $^
 $(B)/test_scene: test_scene.c hud_emu.c hud_emu.h $(B)/libvrscene.a
 	$(CC) $(CFLAGS) $(INC) test_scene.c hud_emu.c $(B)/libvrscene.a -lm -o $@
-$(B)/test_prov_class: test_prov_class.c vr_prov.c vr_prov_rules.c vr_prov.h vr_scene.c vr_scene.h | $(B)
+$(B)/test_prov_class: test_prov_class.c vr_prov.c vr_prov_rules.c vr_prov.h vr_feedback.h vr_scene.c vr_scene.h | $(B)
 	$(CC) $(CFLAGS) $(INC) test_prov_class.c vr_prov.c vr_prov_rules.c vr_scene.c -lm -o $@
+$(B)/test_feedback: test_feedback.c vr_feedback.h | $(B)
+	$(CC) $(CFLAGS) $(INC) test_feedback.c -lm -o $@
 $(B)/test_blend: test_blend.c $(RN)/metal/vr_blend.h | $(B)
 	$(CC) $(CFLAGS) -I$(RN)/metal test_blend.c -lm -o $@
-test: $(B)/test_scene $(B)/test_blend $(B)/test_prov_class
+test: $(B)/test_scene $(B)/test_blend $(B)/test_prov_class $(B)/test_feedback
 	$(B)/test_scene
 	$(B)/test_blend
 	$(B)/test_prov_class
+	$(B)/test_feedback
 test-san:
 	$(MAKE) test B=build-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 
@@ -54,7 +57,7 @@ test-layer2d: $(B)/test_layer2d
 	$(B)/test_layer2d
 
 # Capa 2D de un volcado (list.bin + vram.bin) frente a su frame.png: dif media y % de píxeles distintos a escala 1. Uso: make -C vr/scene l2d-dump ARGS="<carpeta del volcado> [--max-pct P]"
-$(B)/l2d_dump: l2d_dump.c vr_layer2d.c vr_layer2d.h vr_scene.c vr_scene.h vr_prov.c vr_prov_rules.c vr_prov.h $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c ../native/ns_dump.h ../native/ns_fx.c ../native/ns_fx.h ../camera/vr_usermap.h ../host/vr_view.h | $(B)
+$(B)/l2d_dump: l2d_dump.c vr_layer2d.c vr_layer2d.h vr_scene.c vr_scene.h vr_prov.c vr_prov_rules.c vr_prov.h vr_feedback.h $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c ../native/ns_dump.h ../native/ns_fx.c ../native/ns_fx.h ../camera/vr_usermap.h ../host/vr_view.h | $(B)
 	$(CC) $(CFLAGS) $(INC) -I../native -I../camera -I../host l2d_dump.c vr_layer2d.c vr_scene.c vr_prov.c vr_prov_rules.c $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c ../native/ns_fx.c -lm -lpthread -o $@
 l2d-dump: $(B)/l2d_dump
 	$(B)/l2d_dump $(ARGS)

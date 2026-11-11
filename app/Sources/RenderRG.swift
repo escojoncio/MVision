@@ -137,6 +137,9 @@ final class RGRenderer {
         var dv = [Float](repeating: 0, count: Int(VR_POST_ROWS))   // desplazamiento por fila de la imagen original (0 donde no hay tira)
     }
     private struct PostPlan { var sceneColor: [MTLTexture], sceneResolve: [MTLTexture], fxTex: [MTLTexture], dst: [MTLTexture] }
+    /// Realimentación de pantalla del juego para el pase por ojo de la pantalla 3D (vr_fs_feedback; VrPostUniforms.fb_*): mix = (peso de la fuente por canal, peso de la imagen actual),
+    /// m0/m1 = filas de la afín destino -> fuente (m0.w = 1: la fuente es la imagen actual; 0: la imagen anterior), rect = zona afectada (0..1).
+    private struct FeedbackFx { var mix: SIMD4<Float>, m0: SIMD4<Float>, m1: SIMD4<Float>, rect: SIMD4<Float> }
     private var fx = FilterFx()
     /// Anillo de texturas R8 con la resta de la máscara de visión (VR_FRAME_W x VR_FRAME_H, una por escena distinta: la GPU puede seguir leyendo la anterior).
     private var frameTex: [MTLTexture] = []
@@ -1155,7 +1158,26 @@ final class RGRenderer {
         if !(gotNew || stereoDirty || !stereoRendered || n.sceneSeq != stereoSeq || fade != stereoFade) { return }
         // Onda de agua de la cinemática (cabeza del motor dentro del agua): la escena de cada ojo va a una textura intermedia y un pase por ojo la copia a la pantalla 3D desplazando las filas (vr_fs_wave, solo onda).
         let wave = screenFilterEnabled ? n.waveParams : nil
-        let pre: [MTLTexture]? = (wave != nil && ensureFrameTextures() && postPipeline(format: colorFormat, layered: false, wave: true) != nil) ? stereoPreTextures() : nil
+        // Realimentación de pantalla del juego (blur.c, blurpure.c, focus.c; vr/scene/vr_feedback.h): el mismo pase por ojo mezcla la escena recién dibujada con la imagen ANTERIOR de la
+        // pantalla (estela de movimiento) o consigo misma desplazada, con los pesos del original. Esas primitivas ya no van al panel 2D (eran una copia plana del render de la PS1).
+        let fbIn = screenFilterEnabled ? n.feedback : nil
+        let pre: [MTLTexture]? = ((wave != nil || fbIn != nil) && ensureFrameTextures() && postPipeline(format: colorFormat, layered: false, wave: true, feedback: fbIn != nil) != nil) ? stereoPreTextures() : nil
+        var fb: FeedbackFx? = nil
+        var hist: [MTLTexture]? = nil
+        if let f = fbIn, pre != nil {
+            var mix = SIMD4<Float>(f.b.x, f.b.y, f.b.z, f.a)
+            if !f.selfSource {
+                // La imagen anterior se copia ANTES de volver a dibujar la pantalla, y solo al cambiar de escena nativa (redibujar la misma escena reutiliza la misma imagen anterior: el
+                // efecto avanza al ritmo del juego). Sin ella (primer fotograma del efecto, texturas recién creadas) la salida es la imagen actual sola.
+                // (y solo si la pantalla se dibujó con una escena reciente: al volver a la pantalla 3D tras un rato, lo que queda en ella es de otra escena)
+                if stereoRendered, !stereoDirty, n.sceneSeq &- stereoSeq <= 4, let h = stereoHistTextures() {
+                    if n.sceneSeq != stereoSeq || !stereoHistOK { stereoHistOK = copyStereoHist(cb, to: h) }
+                    if stereoHistOK { hist = h }
+                }
+                if hist == nil { mix = SIMD4<Float>(0, 0, 0, 1) }
+            }
+            fb = FeedbackFx(mix: mix, m0: SIMD4<Float>(f.m0.x, f.m0.y, f.m0.z, f.selfSource ? 1 : 0), m1: SIMD4<Float>(f.m1.x, f.m1.y, f.m1.z, 0), rect: f.rect)
+        }
         var projs: [simd_float4x4] = []
         var rendered = 0
         for e in 0..<2 {
@@ -1174,7 +1196,10 @@ final class RGRenderer {
                            views: [], projections: [], isAux: true, last: true, cams: cams) { rendered += 1 }
         }
         guard rendered == 2 else { return }
-        if let p = pre, let w = wave { encodePost(cb, PostPlan(sceneColor: p, sceneResolve: [], fxTex: p, dst: stereoSlices), projections: projs, layered: false, warpOnly: true, wave: w) }
+        if let p = pre, wave != nil || fb != nil {
+            encodePost(cb, PostPlan(sceneColor: p, sceneResolve: [], fxTex: p, dst: stereoSlices), projections: projs, layered: false, warpOnly: true, wave: wave ?? SIMD4<Float>(0, 0, 0, 0), feedback: fb, history: hist)
+        }
+        stereoHistOK = hist != nil      // sin estela en este dibujo: la imagen anterior guardada ya no vale para el siguiente
         stereoPassDiag = "\(auxPassDiag) tris/ojo=\(n.statTrisEye) dibujos=\(n.statDraws)"
         stereoSeq = n.sceneSeq
         stereoFade = fade
@@ -1323,6 +1348,41 @@ final class RGRenderer {
         return out
     }
 
+    /// Texturas con la imagen ANTERIOR de la pantalla 3D (una por ojo, una muestra): fuente de la realimentación de pantalla del juego (estela de movimiento). Se recrean con la pantalla.
+    private var stereoHist: [MTLTexture] = []
+    private var stereoHistKey = ""
+    private var stereoHistOK = false
+    private func stereoHistTextures() -> [MTLTexture]? {
+        if stereoHistKey == stereoKey, stereoHist.count == 2 { return stereoHist }
+        guard let ref = stereoSlices.first else { return nil }
+        var out: [MTLTexture] = []
+        for e in 0..<2 {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorFormat, width: ref.width, height: ref.height, mipmapped: false)
+            d.usage = [.shaderRead]
+            d.storageMode = .private
+            guard let t = device.makeTexture(descriptor: d) else { return nil }
+            t.label = "VR pantalla 3D (ojo \(e), imagen anterior)"
+            out.append(t)
+        }
+        stereoHist = out
+        stereoHistKey = stereoKey
+        stereoHistOK = false
+        return out
+    }
+    /// Copia la imagen vigente de la pantalla 3D (los dos ojos) a `hist` (misma forma y formato). false si no se pudo.
+    private func copyStereoHist(_ cb: MTLCommandBuffer, to hist: [MTLTexture]) -> Bool {
+        guard let tex = stereoTex, hist.count == 2, hist[0].width == tex.width, hist[0].height == tex.height, hist[0].pixelFormat == tex.pixelFormat,
+              let blit = cb.makeBlitCommandEncoder() else { return false }
+        blit.label = "VR pantalla 3D -> imagen anterior"
+        let size = MTLSize(width: tex.width, height: tex.height, depth: 1)
+        let o0 = MTLOrigin(x: 0, y: 0, z: 0)
+        for e in 0..<2 {
+            blit.copy(from: tex, sourceSlice: e, sourceLevel: 0, sourceOrigin: o0, sourceSize: size, to: hist[e], destinationSlice: 0, destinationLevel: 0, destinationOrigin: o0)
+        }
+        blit.endEncoding()
+        return true
+    }
+
     /// Segunda vista (mira óptica / cámara del misil): el render nativo (o, en el modo gpu, la lista de la GPU) desde la cámara pedida, a la textura auxiliar.
     private func encodeAux(_ cb: MTLCommandBuffer, _ a: AuxView) {
         if gpuMode {
@@ -1391,8 +1451,8 @@ final class RGRenderer {
     }
 
     // MARK: filtro de pantalla (post-proceso)
-    private func postPipeline(format: MTLPixelFormat, layered: Bool, wave: Bool = false) -> MTLRenderPipelineState? {
-        let key = "\(format.rawValue)-\(layered)-\(linearOutput)" + (wave ? "-onda" : "")
+    private func postPipeline(format: MTLPixelFormat, layered: Bool, wave: Bool = false, feedback: Bool = false) -> MTLRenderPipelineState? {
+        let key = "\(format.rawValue)-\(layered)-\(linearOutput)" + (wave ? "-onda" : "") + (feedback ? "-realim" : "")
         if let p = postPipes[key] { return p }
         if failed.contains(key) { return nil }      // ya falló: no reintentar (compilar un pipeline por fotograma)
         guard let lib = library else { failed.insert(key); return nil }
@@ -1401,7 +1461,10 @@ final class RGRenderer {
             var lin = linearOutput
             fc.setConstantValue(&lin, type: .bool, index: Int(VR_FC_LINEAR_OUT))
             let fs: MTLFunction
-            if wave {   // onda de pantalla del render nativo (vr_fs_wave): copia desplazada por fila, sin constantes de función
+            if feedback {   // realimentación de pantalla del juego en la pantalla 3D (vr_fs_feedback: incluye la onda; mezcla en gamma, usa VR_FC_LINEAR_OUT): solo ojos sueltos
+                guard !layered else { failed.insert(key); return nil }
+                fs = try lib.makeFunction(name: "vr_fs_feedback", constantValues: fc)
+            } else if wave {   // onda de pantalla del render nativo (vr_fs_wave): copia desplazada por fila, sin constantes de función
                 guard let wf = lib.makeFunction(name: layered ? "vr_fs_wave_layered" : "vr_fs_wave") else { failed.insert(key); return nil }
                 fs = wf
             } else {
@@ -1484,8 +1547,11 @@ final class RGRenderer {
     /// Parámetros por ojo a partir de la proyección: fila del punto principal = H/2*(1+P[2][1]) y focal vertical = H/2*P[1][1] (px).
     /// `warpOnly`: pantalla 3D de las cinemáticas (2 ojos sueltos): solo la onda por fila; sin tinte, recubrimientos, líneas ni máscara (los pone la pantalla al presentar).
     /// `wave`: onda de pantalla del render nativo bajo el agua (vr_fs_wave: amplitud, rad por fila del motor, fase, H del motor); nil = el filtro de pantalla de siempre.
-    private func encodePost(_ cb: MTLCommandBuffer, _ plan: PostPlan, projections: [simd_float4x4], layered: Bool, warpOnly: Bool = false, wave: SIMD4<Float>? = nil) {
-        guard let first = plan.dst.first, let pso = postPipeline(format: first.pixelFormat, layered: layered, wave: wave != nil) else { return }
+    /// `feedback` / `history`: realimentación de pantalla del juego (vr_fs_feedback, solo ojos sueltos; exige `wave` no nil, que puede ser todo ceros) y las texturas con la imagen anterior de cada ojo
+    /// (nil = la fuente es la propia imagen actual).
+    private func encodePost(_ cb: MTLCommandBuffer, _ plan: PostPlan, projections: [simd_float4x4], layered: Bool, warpOnly: Bool = false, wave: SIMD4<Float>? = nil,
+                            feedback: FeedbackFx? = nil, history: [MTLTexture]? = nil) {
+        guard let first = plan.dst.first, let pso = postPipeline(format: first.pixelFormat, layered: layered, wave: wave != nil, feedback: feedback != nil) else { return }
         // por ojo: x = fila del punto principal, y = focal vertical, z = columna del punto principal, w = focal horizontal (todo en píxeles de la textura)
         func eyeParams(_ i: Int, _ width: Int, _ height: Int) -> SIMD4<Float> {
             let h = Float(height), w = Float(width)
@@ -1509,6 +1575,7 @@ final class RGRenderer {
             u.frame = SIMD4<Float>(0, 0, 0, 0)
         }
         if let w = wave { u.wave = w }
+        if let f = feedback { u.fb_mix = f.mix; u.fb_m = (f.m0, f.m1); u.fb_rect = f.rect }
         u.vfx = warpOnly ? SIMD4<Float>(0, 0, 0, 0) : gameFx
         guard !frameTex.isEmpty else { return }
         let frameTexture = frameTex[min(max(fx.frameIdx, 0), frameTex.count - 1)]
@@ -1550,6 +1617,11 @@ final class RGRenderer {
                 enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(dst.width), height: Double(dst.height), znear: 0, zfar: 1))
                 enc.setFragmentTexture(plan.fxTex[i], index: 0)
                 enc.setFragmentTexture(frameTexture, index: 1)
+                if feedback != nil {      // imagen anterior del ojo (vr_fs_feedback, texture(2)); sin ella, la propia imagen actual (el sombreador no la usa)
+                    var hist: MTLTexture = plan.fxTex[i]
+                    if let h = history, i < h.count { hist = h[i] }
+                    enc.setFragmentTexture(hist, index: 2)
+                }
                 enc.setFragmentBytes(&u, length: MemoryLayout<VrPostUniforms>.stride, index: 0)
                 dvCopy.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Void in
                     if let base = raw.baseAddress { enc.setFragmentBytes(base, length: raw.count, index: Int(VR_BUF_POST_DV)) }

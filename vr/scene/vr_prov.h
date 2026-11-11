@@ -60,7 +60,8 @@ int vpc_is_chain(const ProvEntry *e);
  * con animación no cuenta) se descarta para siempre (era HUD): así un componente raro del HUD no desaparece del HUD. Las clases FX / FULL / SCOPE nunca se aprenden como ventana. */
 #define VPC_QUIET_LISTS 30
 #define VPC_LEAK_LISTS 20
-enum { VPC_COV_PACKET = 0, VPC_COV_GAS, VPC_COV_FADE, VPC_COV_MOSAIC };   /* qué se pregunta a VrProvLearn.covered (MOSAIC: el mosaico de censura de esta lista, que el anfitrión convierte en un parche del mundo: vr/host/vr_mosaic.h) */
+enum { VPC_COV_PACKET = 0, VPC_COV_GAS, VPC_COV_FADE, VPC_COV_MOSAIC, VPC_COV_FEEDBACK };   /* qué se pregunta a VrProvLearn.covered (MOSAIC: el mosaico de censura de esta lista, que el anfitrión convierte en un parche del mundo: vr/host/vr_mosaic.h) */
+/* VPC_COV_FEEDBACK: los efectos de realimentación de pantalla de esta lista (vr_feedback.h: sprites que muestrean un frame buffer) los reproduce el nativo sobre su imagen: salen del panel 2D. */
 enum { VPC_ST_OTHER = 0, VPC_ST_CLOSED, VPC_ST_OPEN };   /* estado de la vista de la lista: mundo con ventana cerrada / abierta / otra vista (no se aprende) */
 typedef struct {
     uint8_t win[PROV_MAX];             /* 0 sin decidir, 1 WINDOW, 2 descartado */
@@ -69,6 +70,10 @@ typedef struct {
     uint32_t seen[PROV_MAX];           /* marca de la lista en que se contó el id (una vez por lista) */
     uint32_t tick, nclosed;            /* listas anotadas / listas anotadas con la ventana cerrada */
     uint32_t n_learned, n_demoted;     /* ids aprendidos / descartados (registro) */
+    /* Área mostrada {x, y, w, h} al cerrar la última lista anotada (draw_cur, = su búfer de dibujo) y la anterior (draw_prev, = lo que estaba en pantalla mientras se dibujaba la última:
+     * «el otro búfer» de vr_feedback.h); w = 0 = sin dato. draw_idx = índice de la última lista anotada (una lista anotada dos veces no desplaza la pareja). */
+    int draw_prev[4], draw_cur[4];
+    uint32_t draw_idx; int draw_have;
     int bino;                          /* la última lista anotada (vpc_learn_note, con cualquier estado) trae primitivas de scope.c: prismáticos (SCOPE_BINO) */
     /* Garantía de cobertura nativa (la fija el anfitrión; vpc_learn_reset la borra; NULL = sin garantía: nada es WORLD ni FX_SCREEN). what = VPC_COV_PACKET: ¿el paquete del motor en pkt_addr
      * (GpuOp.pkt_addr) tiene un elemento que el renderer nativo dibuja (ns_fx_covers_packet)? VPC_COV_GAS / VPC_COV_FADE: ¿pinta el nativo ahora el anillo / el fundido? (pkt_addr sin uso) */

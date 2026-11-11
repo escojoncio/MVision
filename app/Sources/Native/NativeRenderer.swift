@@ -263,6 +263,10 @@ final class NativeRenderer {
         boxOverlays = out
         return true
     }
+    /// Realimentación de pantalla del juego (blur.c, blurpure.c, focus.c; vr/scene/vr_feedback.h) de la escena en curso: salida = a * actual + b * fuente(M p) dentro de `rect`, en coordenadas
+    /// 0..1 de la imagen de la pantalla 3D (y hacia abajo). `selfSource`: la fuente es la imagen actual; si no, la imagen anterior de la pantalla. La reproduce RGRenderer.encodeStereo.
+    struct Feedback { var selfSource: Bool; var a: Float; var b: SIMD3<Float>; var m0: SIMD3<Float>; var m1: SIMD3<Float>; var rect: SIMD4<Float> }
+    private(set) var feedback: Feedback? = nil
     /// Onda de pantalla bajo el agua para el post-proceso por ojo de RGRenderer (planWave / vr_fs_wave): (amplitud en px del ojo a 1888 de ancho, rad por fila del motor, fase en rad, H del motor), o nil si no hay onda
     /// (cabeza fuera del agua o efectos de pantalla apagados: ns_screen_build deja water_wave a 0); se calcula en beginFrame.
     var waveParams: SIMD4<Float>? {
@@ -849,6 +853,15 @@ final class NativeRenderer {
         // efectos y efectos de pantalla: copia propia (la escena del puente es de su ranura); solo con NS_SV_FX
         fxCam = sc.pointee.cam
         fogScene = sc.pointee.fog
+        // realimentación de pantalla del juego (la anota el anfitrión desde la lista; no depende de NS_SV_FX)
+        let fbs = sc.pointee.screen
+        let fbv: [Float] = [fbs.fb_a, fbs.fb_b.0, fbs.fb_b.1, fbs.fb_b.2, fbs.fb_m.0, fbs.fb_m.1, fbs.fb_m.2, fbs.fb_m.3, fbs.fb_m.4, fbs.fb_m.5, fbs.fb_rect.0, fbs.fb_rect.1, fbs.fb_rect.2, fbs.fb_rect.3]
+        if fbs.fb_mode != 0, fbv.allSatisfy({ $0.isFinite }) {
+            feedback = Feedback(selfSource: fbs.fb_mode == 2, a: fbv[0], b: SIMD3<Float>(fbv[1], fbv[2], fbv[3]),
+                                m0: SIMD3<Float>(fbv[4], fbv[5], fbv[6]), m1: SIMD3<Float>(fbv[7], fbv[8], fbv[9]), rect: SIMD4<Float>(fbv[10], fbv[11], fbv[12], fbv[13]))
+        } else {
+            feedback = nil
+        }
         screenFx = NsScreenFx()
         if (validBits & UInt32(truncatingIfNeeded: NS_SV_FX)) != 0 {
             screenFx = sc.pointee.screen

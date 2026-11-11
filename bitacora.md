@@ -5,6 +5,11 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 
 
 ## Last done
+- 2026-11-11 (6ª tanda; sin verificar en visor; revisión adversarial hecha):
+  - «Semi-2D» en escenas: causa = efectos de REALIMENTACIÓN de pantalla del juego (`blur.c`, `blurpure.c`, `focus.c`: sprites en 15 bits que muestrean un frame buffer). Iban al panel 2D como copia plana del render de PS1 sobre la pantalla 3D (d0015: panel 94,7 % opaco; también d0003, d0010, d0012, d0014). `vr/scene/vr_feedback.h`: `vrfb_op_source` (fuente = búfer de dibujo o el otro búfer; `VrProvLearn.draw_prev`) y `vrfb_build` (salida = a·actual + b·fuente(M p), M afín por mínimos cuadrados). Salen del panel con `VPC_COV_FEEDBACK` (`vr_prov.c`; solo escritores sin regla). `vrhost.c`: `feedback_from_list`, `feedback_to_scene` (campos `fb_*` de `NsScreenFx`, 180 B), `nat_fb`. Pantalla 3D: `vr_fs_feedback` (`vr_scene.metal`, uniformes `fb_*` en `VrPostUniforms`), `RenderRG.swift encodeStereo` (texturas `stereoHist`, `copyStereoHist`). En el mundo en primera persona se quitan del panel pero no se reproducen.
+  - Muerte: la fase «semi-2D» es el fundido de `over.c` con 3D sin registro de cámara (clase 2D); la cubre `VRV_R_HOLD` (5ª tanda). Después la pantalla de fin de partida es 2D en el original.
+  - Mosaico: el parche de la 5ª tanda NO se construía con datos reales (celdas con `fbk` = 0 porque se pisan su texel; baldosa negra sin textura del actor contada como rara; cámara del registro de la lista ≠ cámara del guion en cinemáticas). Ahora color de `l->vram_end`, cámara de la escena nativa (`ns_cam_note`/`ns_cam_last`), solo cuentan las primitivas texturizadas. Medido: d0013 y d0014 dan 16 celdas.
+  - Mareo en la pantalla 3D: la pantalla seguía la cabeza (`follow2D` por defecto, zona muerta 2,5°, τ 0,12 s; log: `pantallas2D=siguen`). Ahora la pantalla 3D va siempre fija en el mundo (`XRPresent.swift screenModel(fixed:)`), con recolocación lenta a más de ~35° o 0,5 m. Las pantallas planas siguen la opción.
 - 2026-11-11 (5ª tanda, tras Archivo_28: log + 18 volcados; commit c296526; sin verificar en visor; 2 rondas de revisión adversarial; CI `visionos.yml` de c296526 en verde: Swift/Metal compilan, IPA generada):
   - Cuerpo propio oculto / brazos flotando: causa = adelanto global de 0,35 m a todos los dinámicos (`NS_GPU_DYN_RAISE_M`, 4ª tanda): los vértices a <0,45 m del ojo cruzaban el plano cercano y los dinámicos salían por delante de paredes. Quitado. Pies bajo el suelo ahora por pieza: `ns_sink.{c,h}` (bits 8-15 de `NsPiece.flags`, pasos de 8 uds; solo cuerpos articulados no rígidos ≥8 piezas hundidos ≤450 uds y ≤|sesgo| bajo suelo estático con `depth_bias`<0; enganche en `ns_extract_glue.c`, aplicado en `ns_gpu_make_piece`). Medido 0,03-0,15 ms por captura.
   - Conductos: quitado `NS_PARTS_CHEST`; el cuerpo tumbado se ancla 250 uds detrás del ojo según el rumbo del cuerpo (`cfg.prone_back`, `vr_camera.c`).
@@ -21,18 +26,20 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 **Funciona (tests):** todas las baterías de `Comandos` a 0 fallos. `test-dumps` sobre Archivo_28: 6 fallos ya presentes en el commit anterior (d0007 y prov_motse son volcados en plena carga, sin escena).
 **Pendiente de probar en visor (build de c296526):** todo lo de 2026-11-11 y 2026-11-10.
 **Sin causa encontrada:** d0010 (recuerdo en sepia, área 19291: 217 caras con otra textura y 287 ausentes en el mapa 0x8013f704); d0011 (superficie clara de más, piezas 54/57/64 del mapa 0x80162d0c); distorsión al morir (d0018, cobertura 100 %); agarre inferior de la pistola sin ajustar.
+**Cobertura del nativo frente a la lista (nscover, 17 volcados de Archivo_28, sin la pose propia):** 100 % en 13; d0001 99,6; d0016 99,8; d0017 99,1; d0005 85,1 (cabeza de las gafas térmicas, ya tratada); d0010 76,1 (sin causa).
+**Unverified (6ª tanda):** Swift/Metal de la realimentación sin compilar en local; mezcla del bit de máscara aproximada (≥50 % de la fuente = mezclado); `blur.c` ajustado con una afín (residuo 4,3 px); primer fotograma del efecto en el panel 2D; estéreo de la pantalla 3D medido en el log (base 2-65 mm, convergencia 0,3-15 m, paralaje +1°/-1,25°: sin tocar); pantalla 3D de 3,47 m a 2,5 m (~70°).
 **Unverified (5ª tanda):**
 - Vista de pared: rumbo del mando congelado al pegarse; 0,5 s para entrar; se presenta como las cinemáticas (opción `cutscene`).
 - `BA_UNDRAW_COUNT` medido en 18 volcados (0 en juego, 0x7FFEFF7D en carga); que suba en el mismo fotograma del desmontaje no está medido.
 - `VRV_R_HOLD`/`FROZEN` con modo mundo y cámara VR apagada: la app no oscurece (solo el motivo 12).
 - Descarte cercano por triángulo (el motor lo hace por polígono: puede quedar medio cuadrilátero).
-- Mosaico: celdas lisas opacas (sin semitransparencia), un fotograma de retraso de posición, primer fotograma en el panel 2D.
+- Mosaico: celdas lisas opacas (sin semitransparencia), un fotograma de retraso de posición, primer fotograma en el panel 2D; en primera persona se supone `overscan_y` = 1.
 - `ns_sink`: pies hundidos más que |sesgo| del suelo no se adelantan; un pie adelantado puede asomar ante un objeto a menos de ese margen.
 - IRCLUT también en las manos propias (`ns_hand.c` copia `THERMAL_OK`).
 - `make_ready` con el juego en pausa; `ns_player_hide_head_attached` oculta cualquier objeto colgado de la cabeza.
 **Unverified (anteriores):** agarre `MAIN_YAW` de la pistola; zona VRAM del guante; `VRHZD_SKIP_SIGHT`=4; rango 16000 uds de balas enemigas; ventanas 6/15/75 VBlanks de la granada; latencia de locomoción +~55 ms; brazos/IK a 25 Hz; carrera viewsHook vs acquire (`RenderRG.swift`).
-**Si falla la build de Swift/Metal mirar:** `NativeShaders.metal` `ns_vertex` (bloque `one_sided`/`near_reject`, `NSG_PF_IRCLUT`), `NativeRenderer.swift` `u.misc`.
-**Qué mirar en el log:** `[vista]` (pared=, sin_dibujo=, lista3D=), `[mosaico]`, `[recarga]`, `[impacto]`, `[ojo]`, `[cine3d]`, `[prov]`.
+**Si falla la build de Swift/Metal mirar:** `RenderRG.swift` (`encodeStereo`, `encodePost`, `postPipeline`, `stereoHistTextures`), `vr_scene.metal` `vr_fs_feedback`, `NativeRenderer.swift` (`Feedback`, `ingest`), `XRPresent.swift screenModel`.
+**Qué mirar en el log:** `[realim]`, `[vista]` (pared=, sin_dibujo=, lista3D=), `[mosaico]`, `[recarga]`, `[impacto]`, `[ojo]`, `[cine3d]`, `[prov]`.
 **Pendiente técnico:** `test_geom` 2 fallos previos; `vr_hit.c` sin test de clamp int16; `vrhost.c` sin test enlazado (solo `-fsyntax-only` y `vrhost_run`).
 **Código muerto (no borrado):** `hudMenuUV`, `opt_aim`/`mv_vrgame_set_weapon_aim`, `grip_to_wrist_mm`/`wrist_swing_deg`/`hand_twist_deg`, `WL_INHAND`/`WL_DETONATE`/`G.dets`, `vrbody_set_armed`, `l2d_target`/`smooth2D`, `gpuMode`, `ns_fill*`/`ns_cover*`, `eye_shift` (diagnóstico), `vrhzd_wall_near` (normal de pared de la 3ª persona quitada: sin llamadores, solo `test_hzd.c`; comparte `wall_core` con `vrhzd_wall_dist`, que sí se usa).
 
@@ -43,6 +50,8 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 - Orden de profundidad: correcciones por pieza y con causa medida (`ns_sink`), nunca un sesgo global a los dinámicos.
 - Acciones que la primera persona no puede hacer (pegarse a la pared, golpearla): vista del juego con SU cámara en la pantalla 3D y mando original; nunca una 3ª persona propia.
 - Viniendo de una vista nativa nunca se enseña en pantalla plana un fotograma 3D de PS1: se retiene la vista (FROZEN/HOLD/PENDING, acotados).
+- Una primitiva 2D que muestrea un frame buffer (realimentación) no va al panel si el nativo reproduce el efecto: decide lo que MUESTREA (hecho de la lista), solo para escritores sin regla de procedencia.
+- La pantalla 3D va fija en el mundo; nunca persigue la cabeza.
 - 2D: 3 capas por clase de procedencia (HUD fijo, ventana L2/R2, FULL plano); efectos de pantalla del juego → post-proceso nativo. Escalado solo en GPU.
 - Cinemáticas del motor: pantalla con cámara del juego, SOLO render nativo; mismas reglas de descarte que el motor (reversos, cercano).
 - Armas: pose del arma = mando (nunca IK); arma en mano al equiparla; en recarga automática el arma VR nunca queda muerta con balas en el cargador del juego.
@@ -54,15 +63,15 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 ## Files in play
 - `vr/host/vrhost.c`, `vr_view.{c,h}`, `vr_mosaic.h`, `vrgame.c`; `vr/camera/vr_camera.{c,h}`, `vr_camera_hle.c`; `vr/bridge/bridge_addrs.h`.
 - `vr/native/ns_sink.{c,h}`, `ns_gpu.{c,h}`, `ns_gpu_types.h`, `ns_extract.c`, `ns_extract_glue.c`, `ns_player.{c,h}`, `ns_hook.{c,h}`, `ns_cpuref.{c,h}`.
-- `vr/scene/vr_prov.{c,h}`, `vr_prov_rules.c`; `vr/weapons/weapon.h`, `w_pist.c`, `w_gunc.{c,h}`; `vr/body/vr_body.{c,h}`, `vr_body_cam.c`; `vr/gameplay/vr_fire.c`.
-- `app/Sources/Native/NativeShaders.metal`, `NativeRenderer.swift`; `app/Sources/XRPresent.swift` (consume `view_mode`/`view_kind`/`view_reason`: 12 oscurece, 10/11 panel, clase 2 = pantalla 3D); `app/stage.sh`, `bench/build*.sh`.
-- Tests: `vr/host/test_view.c`, `test_mosaic.c`, `test_vrgame_fire.c`; `vr/camera/test_camera.c`; `vr/native/test_ns_sink.c`, `test_ns_net.c`, `test_ns_cpuref.c`, `test_ns_hook.c`, `test_ns_extract.c`; `vr/weapons/test_rifle_sniper.c`; `vr/scene/test_prov_class.c`.
+- `vr/scene/vr_feedback.h`, `vr_prov.{c,h}`, `vr_prov_rules.c`, `l2d_dump.c`; `vr/weapons/weapon.h`, `w_pist.c`, `w_gunc.{c,h}`; `vr/body/vr_body.{c,h}`, `vr_body_cam.c`; `vr/gameplay/vr_fire.c`.
+- `render/metal/vr_scene.metal`, `vr_types.h`; `app/Sources/RenderRG.swift`; `app/Sources/Native/NativeShaders.metal`, `NativeRenderer.swift`; `app/Sources/XRPresent.swift` (consume `view_mode`/`view_kind`/`view_reason`: 12 oscurece, 10/11 panel, clase 2 = pantalla 3D); `app/stage.sh`, `bench/build*.sh`.
+- Tests: `vr/host/test_view.c`, `test_mosaic.c`, `test_vrgame_fire.c`; `vr/camera/test_camera.c`; `vr/native/test_ns_sink.c`, `test_ns_net.c`, `test_ns_cpuref.c`, `test_ns_hook.c`, `test_ns_extract.c`; `vr/weapons/test_rifle_sniper.c`; `vr/scene/test_prov_class.c`, `test_feedback.c`.
 
 ## Comandos
 - Runtime: `cd runtime && make gen GEN=… EXE=../gamedata/main.exe NAMES=../gamedata/names_eu.json && make GEN=… OUT=… CC=clang && make test test_sys`.
 - Pruebas VR: `make -C vr/{host,camera,scene,input,body,hands,radar,weapons,gameplay} test`; `make -C vr/camera test-headcol test-native-coh`; `make -C vr/scene test-layer2d test-split`; `make -f vr/native/extract.mk test test-net test-hand test-solid test-cover test-sink test-cine test-fill`; `make -C vr/native test`; `make -f vr/native/fx.mk test`; `make -f vr/native/integra.mk test`.
 - `vrhost.c`: `make -C vr/host ../../build-host/vrhost_run` (enlaza) o `clang -fsyntax-only` con los `-I` de `vr/*` y `runtime`.
-- Banco: `make -f vr/native/extract.mk test-dumps DUMPS=<dir>`; `make -f vr/native/extract.mk nshito1 nscover` (`nshito1 --dump D --frame F --out O --name N --only game`, `NSHITO_RECHAZO=1` = descarte cercano; `nscover STAGE FRAME`, `NSCOVER_DETALLE=fichero`); `make -C vr/scene dumpview ARGS=...`, `l2d-dump`.
+- Banco: `make -f vr/native/extract.mk test-dumps DUMPS=<dir>`; `make -f vr/native/extract.mk nshito1 nscover` (`nshito1 --dump D --frame F --out O --name N --only game`, `NSHITO_RECHAZO=1` = descarte cercano; `nscover STAGE FRAME`, `NSCOVER_DETALLE=fichero`); `make -C vr/scene dumpview ARGS=...`, `l2d-dump ARGS="<volcado _frame> --png DIR"` (capa del panel; `L2D_SIN_REALIM=1` = como antes).
 - Swift/Metal: solo CI. IPA: `gh workflow run visionos.yml --ref main -f solo_render=false`. Logs de CI con 403: `gh api repos/<repo>/check-runs/<id>/annotations`.
 - Datos locales (nunca al repo): `gamedata/`, volcados.
 

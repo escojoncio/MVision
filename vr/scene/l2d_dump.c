@@ -25,6 +25,7 @@
 #include "vr_scene.h"
 #include "vr_layer2d.h"
 #include "vr_prov.h"
+#include "vr_feedback.h"
 #include "ns_dump.h"
 #include "ns_fx.h"
 #include "vr_camera.h"
@@ -101,10 +102,11 @@ static uint8_t *png_read_stored(const char *path, int *w, int *h) {
 }
 
 /* Garantía de cobertura nativa (VrProvLearn.covered) con la RAM del volcado: como prov_covered de vrhost.c, con el renderer nativo listo y la escena apta. */
-static struct { const uint8_t *ram; NsFxScene *fx; int ok; } g_cov;
+static struct { const uint8_t *ram; NsFxScene *fx; int ok; int fb; } g_cov;
 static int dump_covered(void *ctx, int what, uint32_t pkt_addr) {
     (void)ctx;
     if (!g_cov.ok) return 0;
+    if (what == VPC_COV_FEEDBACK) return g_cov.fb;   /* realimentación de pantalla reproducible (vr_feedback.h): como vrhost.c con la escena nativa ya anotada */
     if (what == VPC_COV_GAS) return g_cov.fx->screen.gas.active && g_cov.fx->screen.gas.intensity > 0;
     if (what == VPC_COV_FADE) return g_cov.fx->screen.fade.active;
     return what == VPC_COV_PACKET && ns_fx_covers_packet(g_cov.ram, g_cov.fx, pkt_addr);
@@ -118,6 +120,9 @@ static int build_scene(const NsDump *d, const GpuDrawList *l, VrScene *sc) {
     if (!g_cov.fx) g_cov.fx = ns_fx_scene_create(0);
     NsFxOpts fo = ns_fx_opts_default();
     g_cov.ram = d->ram; g_cov.ok = d->ram && g_cov.fx && ns_fx_extract(d->ram, &fo, g_cov.fx) == 0;
+    { VrFeedback fb; int fbm = vrfb_build(l->ops, l->nops, NULL, NULL, d->vram, &fb);
+      g_cov.fb = fbm != VRFB_NONE && getenv("L2D_SIN_REALIM") == NULL;
+      if (fb.n) printf("realimentación de pantalla: %d primitivas, %s (a=%.3f b=%.3f, residuo %.1f px)\n", fb.n, fb.mode == VRFB_PREV ? "imagen anterior" : fb.mode == VRFB_SELF ? "misma imagen" : "sin modelo", (double)fb.a, (double)fb.b[0], (double)fb.err_px); }
     learn.covered = dump_covered;
     vpc_learn_note(&learn, l, VPC_ST_OTHER);   /* build_one anota cada lista (vrhost.c): fija bino (prismáticos); sin ventana aprendida (estado OTHER) */
     o.op_class = vpc_op_class_cb; o.op_class_ctx = &learn;

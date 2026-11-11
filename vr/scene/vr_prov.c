@@ -2,6 +2,7 @@
 #include <math.h>
 #include <string.h>
 #include "vr_prov.h"
+#include "vr_feedback.h"
 
 const char *vpc_class_name(int cls) {
     static const char *const nm[VPC_N] = {"HUD_WORLD", "WINDOW", "FULL", "FX_VIGNETTE", "FX_LETTERBOX", "SCOPE_FRAME", "SCOPE_TEXT", "UNKNOWN", "FX_SCREEN", "WORLD", "SCOPE_BINO"};
@@ -42,6 +43,11 @@ static int list_binocular(const GpuDrawList *l) {
 
 void vpc_learn_note(VrProvLearn *S, const GpuDrawList *l, int state) {
     if (!S || !l) return;
+    if (!S->draw_have || l->index != S->draw_idx) {   /* pareja de búferes: el área mostrada al cerrar la lista anterior es el otro búfer de esta */
+        memcpy(S->draw_prev, S->draw_cur, sizeof S->draw_prev);
+        S->draw_cur[0] = l->disp.x; S->draw_cur[1] = l->disp.y; S->draw_cur[2] = l->disp.w; S->draw_cur[3] = l->disp.h;
+        S->draw_idx = l->index; S->draw_have = 1;
+    }
     S->bino = list_binocular(l);
     if (state == VPC_ST_OTHER) return;
     S->tick++;
@@ -69,10 +75,14 @@ int vpc_class_op(const VrProvLearn *S, const GpuDrawList *l, const GpuOp *o) {
     if (!l || !o) return VPC_UNKNOWN;
     unsigned id = vpc_op_id(l, o);
     int c = id_ok(l, id) ? vpc_rule(&l->prov[id], o) : VPC_UNKNOWN;
+    const int c0 = c;   /* clase de la regla de procedencia, antes de degradar */
     int cov = S && S->covered;   /* sin garantía de cobertura nativa nada sale del 2D por WORLD / FX_SCREEN */
     if (c == VPC_FX_SCREEN && !(cov && S->covered(S->covered_ctx, vpc_screen_kind(&l->prov[id]), 0))) c = VPC_UNKNOWN;   /* el nativo no pinta ahora ese efecto de pantalla: sigue en el HUD */
     /* mosaico de censura: con el parche del mundo hecho para ESTA lista (anfitrión) sus celdas 2D salen del panel (el nativo las dibuja sobre el personaje); sin él siguen en el HUD (no se pierde la censura) */
     if (c == VPC_UNKNOWN && id_ok(l, id) && vpc_is_mosaic(&l->prov[id]) && cov && S->covered(S->covered_ctx, VPC_COV_MOSAIC, 0)) return VPC_WORLD;
+    /* realimentación de pantalla (vr_feedback.h): un sprite que muestrea un frame buffer es una copia plana del render de la PS1; si el nativo reproduce el efecto sobre su imagen, sale
+     * del panel. El criterio es lo que la primitiva MUESTREA (un hecho de la lista), solo para escritores sin regla propia; el mosaico tiene su parche. */
+    if (c0 == VPC_UNKNOWN && cov && !(id_ok(l, id) && vpc_is_mosaic(&l->prov[id])) && vrfb_op_source(o, S->draw_prev, NULL) != VRFB_NONE && S->covered(S->covered_ctx, VPC_COV_FEEDBACK, 0)) return VPC_WORLD;   /* c0: las mismas primitivas que mide el anfitrión (feedback_from_list) */
     if (c == VPC_SCOPE_FRAME && S && S->bino) return VPC_SCOPE_BINO;   /* marco del juego de los prismáticos: a la capa HUD (el visor la pinta sobre la vista aumentada) */
     if (id_ok(l, id) && (c == VPC_HUD_WORLD || c == VPC_UNKNOWN) && S && S->win[id] == 1) return VPC_WINDOW;
     if (c == VPC_UNKNOWN && cov && o->pkt_addr && id_ok(l, o->prov) && vpc_is_chain(&l->prov[o->prov]) && S->covered(S->covered_ctx, VPC_COV_PACKET, o->pkt_addr))

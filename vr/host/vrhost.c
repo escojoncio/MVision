@@ -39,6 +39,7 @@
 #include "vr_smooth.h"
 #include "vr_view.h"
 #include "vr_mosaic.h"
+#include "vr_feedback.h"
 #include "vrai.h"
 #include "vr_melee_rt.h"
 #include "vrgame.h"
@@ -334,6 +335,14 @@ static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u);
 static void ns_frame_check(void);
 static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u);
 static void mosaic_to_scene(NsScene *sc);
+static void feedback_to_scene(NsScene *sc);
+static NsCamera ns_cam_last; static int ns_cam_have;   /* cámara de la última escena nativa capturada (ns_ctx): la escena se captura justo antes de ensamblar su lista, así que es la cámara de esa lista */
+static void ns_cam_note(const NsCamera *c) {   /* solo una cámara utilizable: H válida, rotación leída (no a cero) y ojo finito */
+    float n = 0.0f;
+    for (int k = 0; k < 9; k++) n += c->rot[k] * c->rot[k];
+    ns_cam_have = c->h > 8.0f && isfinite(n) && n > 0.5f && isfinite(c->eye[0] + c->eye[1] + c->eye[2]);
+    if (ns_cam_have) ns_cam_last = *c;
+}
 _Static_assert(VR_SKIP_WORLD == NS_SKIP_WORLD && VR_SKIP_FX == NS_SKIP_FX, "las marcas de batch y la decisión del consumidor deben coincidir");
 
 void mv_vrhost_set_render_mode(int mode) { (void)mode; }   /* el modo gpu ya no existe: siempre nativo */
@@ -401,13 +410,16 @@ static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
         float ox = (float)((int32_t)gte_cfc2(ns_cpu_last, 24)) / 65536.0f, oy = (float)((int32_t)gte_cfc2(ns_cpu_last, 25)) / 65536.0f;
         if (ox > 0.0f && ox < 320.0f && oy > 0.0f && oy < 240.0f) { sc->cam.ofx = ox; sc->cam.ofy = oy; }
     }
+    ns_cam_note(&sc->cam);   /* la cámara con la que el motor dibuja la lista que se ensambla a continuación (la del guion en las cinemáticas) */
     mosaic_to_scene(sc);   /* también en las cinemáticas (cámara del juego) */
+    feedback_to_scene(sc);
     const VrCamRecord *r = vrcam_last_record();
     int core = (bs.valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs.has_player;
     if (!r || !r->active || !core) return;                 /* cinemática / sin cámara VR: sin mapa VR, el 3D sigue saliendo de la lista de la GPU */
     for (int i = 0; i < 3; i++) sc->cam.eye[i] = (float)r->eye[i];
     memcpy(sc->cam.rot, r->M, sizeof sc->cam.rot);
     sc->cam.h = (float)r->screen; sc->cam.overscan_y = 1.0f; sc->cam.vr_active = 1;   /* con la cámara VR el motor no aplica el sobreescaneo (contrato v2) */
+    ns_cam_note(&sc->cam);   /* en primera persona, la cámara VR que se dio al motor */
     VrSmSample nsmp;
     if (ns_world_to_vr(r, sc->to_vr, &nsmp)) sc->valid |= NS_SV_TOVR_OK;
     ns_cap_pend = 1; body_pend.n = 0;
@@ -489,6 +501,7 @@ static VrHcOut hc_last;                  /* última consulta (bajo HCMX), solo p
 static uint32_t nat_valid, nat_sfx, nat_vb; static int nat_have;
 #define MOSAIC_KEY 0x4D4F5341u           /* NsEffect.src_key de las celdas del parche */
 static int nat_mosaic;                   /* celdas del parche en la última escena nativa PUBLICADA (ns_solid_tap; 0 = ninguna: las celdas de la lista siguen en el panel 2D) */
+static int nat_fb;                       /* NsScreenFx.fb_mode de la última escena nativa PUBLICADA (0 = sin efecto de realimentación: sus sprites siguen en el panel 2D) */
 static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u) {
     (void)u;
     ns_pub_flush();
@@ -497,6 +510,7 @@ static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u) {
     nat_duct_cut = 0;
     nat_mosaic = 0;
     if (s && s->effects) for (uint32_t i = 0; i < s->n_effect; i++) nat_mosaic += s->effects[i].src_key == MOSAIC_KEY;
+    nat_fb = s ? s->screen.fb_mode : 0;
     if (!hc_on || !s || !st || !(s->valid & NS_SV_TOVR_OK) || !(s->valid & NS_SV_GAME)) return;   /* cinemática / sin cámara VR: no hay ancla */
     NsSolidOpts o; memset(&o, 0, sizeof o);
     float jt[16][3];
@@ -865,26 +879,68 @@ static const uint64_t *fx_classify_list(const GpuDrawList *hl, const VrCamRecord
 /* Mosaico de censura de la lista en curso como parche del mundo (vr_mosaic.h). build_one lo calcula al empezar cada lista (antes de clasificar sus primitivas); ns_ctx lo añade como efectos a
  * las escenas nativas mientras dure. Hilo de emulación. */
 static VrMosaic mosaic_cur;
-static void mosaic_from_list(const GpuDrawList *l, const VrCamRecord *r) {
+static void mosaic_from_list(const GpuDrawList *l) {
     mosaic_cur.n = 0;
-    if (!l || !l->prov || !r || !native_mode() || l->nops == 0) return;
+    if (!l || !l->prov || !ns_cam_have || !native_mode() || l->nops == 0) return;
     int any = 0;
     for (uint32_t i = 0; i < l->nops && !any; i++) { unsigned id = vpc_op_id(l, &l->ops[i]); any = id < l->nprov && vpc_is_mosaic(&l->prov[id]); }
     if (!any) return;
     uint8_t *mk = (uint8_t *)calloc(l->nops, 1);
     if (!mk) return;
-    int odd = 0, cells = 0;   /* primitivas del actor que el parche no sabe reproducir (no son celdas con el texel resuelto, o no caben): con alguna, no hay parche y todo sigue en el panel 2D */
+    /* Celdas = las primitivas TEXTURIZADAS del actor (la baldosa negra sin textura que pinta antes del 3D solo pone el bit de máscara: no lleva imagen). Con alguna que el parche no sepa
+     * reproducir (no es un cuadrilátero con color conocido, o no caben) no hay parche y todo sigue en el panel 2D. El color de las celdas sale de la VRAM de cierre de la lista: la captura no
+     * las resuelve porque cada celda se pisa su propio texel (vr_mosaic.h). */
+    int odd = 0, cells = 0;
     for (uint32_t i = 0; i < l->nops; i++) {
         const GpuOp *op = &l->ops[i];
         unsigned id = vpc_op_id(l, op);
         mk[i] = id < l->nprov && vpc_is_mosaic(&l->prov[id]);
-        if (mk[i] && (op->type != GPU_OP_POLY || op->nv != 4 || !op->fbk || ++cells > VRMOSAIC_MAX)) odd++;
+        if (!mk[i] || !(op->flags & GPU_F_TEXTURED)) continue;
+        if (!vrmosaic_is_cell(op, l->vram_end) || ++cells > VRMOSAIC_MAX) odd++;   /* una celda resuelta como transparente es celda (no pinta nada; el parche la omite) */
     }
-    float eye[3] = {(float)r->eye[0], (float)r->eye[1], (float)r->eye[2]};
-    if (!odd) vrmosaic_build(l->ops, l->nops, mk, eye, r->M, &mosaic_cur);
+    /* cámara: la de la escena nativa capturada para esta lista (en las cinemáticas el registro de cámara de la lista NO es la cámara del guion). Vista del motor -> mundo: R * diag(1, 1/ys, 1),
+     * con ys el factor vertical de su proyección (ns_cinema_to_vr). */
+    const NsCamera *c = &ns_cam_last;
+    const float ys = (c->overscan_y > 0.5f && c->overscan_y < 2.0f) ? c->overscan_y : NS_OVERSCAN_Y;
+    float M[9];
+    for (int k = 0; k < 9; k++) M[k] = (k % 3 == 1) ? c->rot[k] / ys : c->rot[k];
+    if (!odd && cells) vrmosaic_build(l->ops, l->nops, mk, l->vram_end, c->eye, M, &mosaic_cur);
     free(mk);
-    static int said;
-    if (said != (mosaic_cur.n > 0)) { said = mosaic_cur.n > 0; fprintf(stderr, "[mosaico] %s: %d celdas a %.2f m de la camara\n", said ? "parche del mundo" : "sin parche (celdas al panel 2D)", mosaic_cur.n, (double)mosaic_cur.depth / (r->units_per_m > 1.0f ? r->units_per_m : 1000.0f)); }
+    static int said = -1;
+    if (said != (mosaic_cur.n > 0)) { said = mosaic_cur.n > 0; fprintf(stderr, "[mosaico] %s: %d celdas (de %d, raras %d, vram %d) a %.0f uds de la camara\n", said ? "parche del mundo" : "sin parche (celdas al panel 2D)", mosaic_cur.n, cells, odd, l->vram_end != NULL, (double)mosaic_cur.depth); }
+}
+/* Efecto de realimentación de pantalla de la lista en curso (vr_feedback.h: blur.c, blurpure.c, focus.c...). Se mide tras anotar la lista (pareja de búferes de prov_learn) y antes de clasificar
+ * sus primitivas; ns_ctx lo anota en la escena nativa siguiente y la pantalla 3D lo reproduce sobre su imagen. Candidatas: las que muestrean un frame buffer y no tienen regla de
+ * procedencia propia (las mismas que vpc_class_op saca del panel). Hilo de emulación. */
+static VrFeedback fb_cur;
+static void feedback_from_list(const GpuDrawList *l) {
+    memset(&fb_cur, 0, sizeof fb_cur);
+    if (!l || !l->prov || !native_mode() || l->nops == 0) return;
+    uint8_t *mk = NULL;
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *op = &l->ops[i];
+        if (vrfb_op_source(op, prov_learn.draw_prev, NULL) == VRFB_NONE) continue;
+        unsigned id = vpc_op_id(l, op);
+        if (id < l->nprov && (vpc_is_mosaic(&l->prov[id]) || vpc_rule(&l->prov[id], op) != VPC_UNKNOWN)) continue;
+        if (!mk && !(mk = (uint8_t *)calloc(l->nops, 1))) return;
+        mk[i] = 1;
+    }
+    if (!mk) return;
+    vrfb_build(l->ops, l->nops, mk, prov_learn.draw_prev, l->vram_end, &fb_cur);
+    free(mk);
+    static int said = -1, said_n;
+    if (said != fb_cur.mode || said_n != fb_cur.n) {
+        said = fb_cur.mode; said_n = fb_cur.n;
+        fprintf(stderr, "[realim] %s: %d primitivas, a=%.3f b=%.3f M=[%.4f %.4f %.4f | %.4f %.4f %.4f] zona=(%.2f,%.2f)-(%.2f,%.2f) residuo=%.1f px\n",
+                fb_cur.mode == VRFB_PREV ? "imagen anterior" : fb_cur.mode == VRFB_SELF ? "misma imagen" : "sin modelo (al panel 2D)", fb_cur.n, (double)fb_cur.a, (double)fb_cur.b[0],
+                (double)fb_cur.m[0], (double)fb_cur.m[1], (double)fb_cur.m[2], (double)fb_cur.m[3], (double)fb_cur.m[4], (double)fb_cur.m[5],
+                (double)fb_cur.rect[0], (double)fb_cur.rect[1], (double)fb_cur.rect[2], (double)fb_cur.rect[3], (double)fb_cur.err_px);
+    }
+}
+static void feedback_to_scene(NsScene *sc) {
+    NsScreenFx *x = &sc->screen;
+    x->fb_mode = fb_cur.mode; x->fb_a = fb_cur.a;
+    memcpy(x->fb_b, fb_cur.b, sizeof x->fb_b); memcpy(x->fb_m, fb_cur.m, sizeof x->fb_m); memcpy(x->fb_rect, fb_cur.rect, sizeof x->fb_rect);
 }
 /* Añade el parche del mosaico a la escena nativa como efectos (cuadriláteros lisos, sin niebla, por delante de lo que tapan). */
 static void mosaic_to_scene(NsScene *sc) {
@@ -908,6 +964,9 @@ static int prov_covered(void *ctx, int what, uint32_t pkt_addr) {
     /* Mosaico: hay parche para esta lista Y la última escena nativa publicada ya lleva el suyo (la escena se captura antes de ensamblar la lista: el parche de la lista N viaja en la escena
      * N+1; en el primer fotograma del mosaico las celdas siguen en el panel 2D, nunca hay un fotograma sin censura) y el nativo la está dibujando (apta y reciente). */
     if (what == VPC_COV_MOSAIC) return mosaic_cur.n > 0 && nat_mosaic > 0 && vrhost_native_sfx(ready, fit, nat_valid, age, NS_SV_FX);
+    /* Realimentación de pantalla: la lista trae un efecto reproducible Y la última escena publicada ya lo lleva anotado (misma regla de un fotograma que el mosaico); la reproduce la
+     * pantalla 3D. En el mundo en primera persona no se reproduce (una estela de pantalla pegada a la cabeza), pero la copia plana de la PS1 tampoco se enseña. */
+    if (what == VPC_COV_FEEDBACK) return fb_cur.mode != VRFB_NONE && nat_fb != 0 && (view.kind == VRV_K_ENGINE || view.kind == VRV_K_WORLD) && ready && fit && age <= VRHOST_SFX_MAX_AGE;   /* solo con una vista nativa en pantalla */
     if (what != VPC_COV_PACKET || !vrhost_native_sfx(ready, fit, nat_valid, age, NS_SV_FX)) return 0;
     return hx_extract() && ns_fx_covers_packet(emu_ram, hx_fx, pkt_addr);
 }
@@ -1121,7 +1180,7 @@ static void build_one(const GpuDrawList *l, int si) {
      * RAM: la matriz de vista del puente puede ser ya la siguiente. El registro de cámara de la lista (vrcam) trae la correcta. */
     int has3d = 0;
     const VrCamRecord *r = (bs.valid & BRIDGE_OK_EYE) ? list_record(l, &has3d) : NULL;
-    mosaic_from_list(l, r);   /* antes de clasificar: las celdas del mosaico salen del panel 2D solo si hay parche del mundo para esta lista */
+    mosaic_from_list(l);   /* antes de clasificar: las celdas del mosaico salen del panel 2D solo si hay parche del mundo para esta lista */
     int differs = 0;
     int32_t save_pos[3];
     int16_t save_axes[3][3];
@@ -1131,9 +1190,10 @@ static void build_one(const GpuDrawList *l, int si) {
     if (rt_prov_on) {   /* procedencia: aprende la ventana del selector / pausa y clasifica las primitivas del panel (vr_prov.h); sin ella todo es UNKNOWN = HUD */
         int pst = view.kind != VRV_K_WORLD ? VPC_ST_OTHER : view.reason == VRV_R_WORLD ? VPC_ST_CLOSED : view.reason == VRV_R_SELECTOR || view.reason == VRV_R_PAUSE_WORLD ? VPC_ST_OPEN : VPC_ST_OTHER;
         vpc_learn_note(&prov_learn, l, pst);
+        feedback_from_list(l);   /* tras anotar (pareja de búferes) y antes de clasificar */
         o.op_class = vpc_op_class_cb; o.op_class_ctx = &prov_learn;
         prov_learn.covered = prov_covered;   /* WORLD / FX_SCREEN solo con garantía de que el nativo lo dibuja en esta lista */
-    }
+    } else memset(&fb_cur, 0, sizeof fb_cur);   /* sin procedencia no se mide: ningún efecto anotado en las escenas siguientes */
     if (!native_mode() && view.kind == VRV_K_ENGINE) { o.keep_late_clear = 1; o.veil_as_2d = 1; }   /* pantalla 3D del motor (gpu): el 2D se compone dentro del estéreo; el relleno opaco tras el 3D (créditos) y los velos se pintan como 2D */
     int cine_cut = 0;
     {   /* Cinemática del motor (ni mundo ni vídeo/2D puros): la cámara es la del guion, nunca la de la cabeza. Planos y origen fijo por plano. */
@@ -1861,7 +1921,7 @@ static void on_exe_loaded(uint8_t *ram, uint32_t base, uint32_t size) {
     vrcine_config_default(&cine.cfg);
     vrcine_reset(&cine);
     last_scene3d = last_video = last_cover = last_list3d = 0;
-    undraw_since = 0; mosaic_cur.n = 0; nat_mosaic = 0;
+    undraw_since = 0; mosaic_cur.n = 0; nat_mosaic = 0; memset(&fb_cur, 0, sizeof fb_cur); nat_fb = 0; ns_cam_have = 0;
     ns_hook_reset();
 #ifdef MV_NOGEN
     ns_hook_uninstall();

@@ -85,4 +85,8 @@ typedef struct {
     vector_float4 frame;    /* máscara de visión: x,y = ancho y alto de la imagen mostrada del motor (px originales), z = 1 si hay máscara (texture(1)), w sin uso */
     vector_float4 wave;     /* solo vr_fs_wave (render nativo bajo el agua; usa eye[] y cfg.x): x = amplitud (px del ojo a NS_WAVE_REF_W = 1888 de ancho), y = rad por fila del motor, z = fase (rad), w = H del motor (px de la pantalla de 320x240) */
     vector_float4 vfx;      /* solo vr_fs_wave: efectos del juego por procedencia (vr/scene/vr_prov.h): x = intensidad de la viñeta (0 = sin viñeta), y = radio de la zona limpia (alto del ojo / 2 = 1), z = fracción del alto cubierta por las bandas de cinemática (0 = sin bandas), w sin uso */
+    /* solo vr_fs_feedback (realimentación de pantalla del juego en la pantalla 3D; vr/scene/vr_feedback.h): salida = fb_mix.w * actual + fb_mix.xyz * fuente(q), dentro de fb_rect */
+    vector_float4 fb_mix;   /* xyz = peso de la fuente por canal; w = peso de la imagen actual */
+    vector_float4 fb_m[2];  /* q = (dot(fb_m[0].xy, p) + fb_m[0].z, dot(fb_m[1].xy, p) + fb_m[1].z), p = posición 0..1 en la imagen (y hacia abajo); fb_m[0].w = 1: la fuente es la imagen actual (texture(0)); 0: la imagen anterior de la pantalla (texture(2)) */
+    vector_float4 fb_rect;  /* zona afectada: x0, y0, x1, y1 (0..1) */
 } VrPostUniforms;

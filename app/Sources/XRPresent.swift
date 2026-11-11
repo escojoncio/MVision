@@ -814,7 +814,7 @@ final class XRPresenter {
             anchorY = max(0.8, hp.y - (shown == .scene ? 0 : 0.05))
             anchor = XRMath.translation(SIMD3<Float>(hp.x, 0, hp.z)) * XRMath.rotationY(hy)
             needAnchor = false
-        } else if (shown == .cinema || shown == .stereo) && !cfg.follow2D {
+        } else if shown == .stereo || (shown == .cinema && !cfg.follow2D) {      // la pantalla 3D siempre va fija en el mundo (ver screenModel)
             // Seguimiento perezoso de la pantalla (cine y pantalla 3D): al mirar a otro lado más de ~35 grados o alejarse más de 0,5 m, la pantalla se
             // recoloca suavemente delante de la vista (antes se quedaba donde se creó: muerte, cámaras de evento y escenas cortas se perdían a la espalda).
             // La cabeza dentro de la zona muerta no la mueve, así que no hay arrastre al mirar alrededor de la imagen.
@@ -875,7 +875,7 @@ final class XRPresenter {
             let tanX = max(0.2, W / (2 * D)), tanY = tanX * 0.75      // campo de visión = ángulo que la pantalla ocupa desde el usuario (escala real)
             do {
                 r.stereo = RGRenderer.StereoRequest(ipd: mono ? 0 : ipd, tanX: tanX, tanY: tanY, width: Self.stereoW, height: Self.stereoH, distance: D)
-                let model = screenModel(D)
+                let model = screenModel(D, fixed: true)
                 var it = XRDrawItem(kind: .screen3d, texture: nil)
                 it.model = model
                 it.size = SIMD2<Float>(W, W * 0.75)
@@ -1082,8 +1082,11 @@ final class XRPresenter {
     }
 
     /// Pantalla de cine / pantalla 3D: `D` m delante de la cabeza suavizada (siguen la cabeza) o en el ancla fija del mundo.
-    private func screenModel(_ D: Float) -> simd_float4x4 {
-        cfg.follow2D ? XRFollow.model(follow, distance: D, drop: 0.05) : anchor * XRMath.translation(SIMD3<Float>(0, anchorY, -D))
+    /// `fixed`: la pantalla 3D (escenas del motor en estéreo, vista de pared) va SIEMPRE fija en el mundo aunque la opción «Pantallas 2D» sea seguir la cabeza: una imagen 3D en movimiento
+    /// de ~70 grados que persigue cada giro de la cabeza (zona muerta de 2,5 grados) no deja ninguna referencia quieta y marea. Solo se recoloca, despacio, si se mira más de ~35 grados
+    /// a un lado o uno se aleja más de 0,5 m (rama de `compose`).
+    private func screenModel(_ D: Float, fixed: Bool = false) -> simd_float4x4 {
+        (cfg.follow2D && !fixed) ? XRFollow.model(follow, distance: D, drop: 0.05) : anchor * XRMath.translation(SIMD3<Float>(0, anchorY, -D))
     }
 
     /// Codifica los trabajos de la GPU de la presentación (xBR de la imagen de cine); antes del pase final.

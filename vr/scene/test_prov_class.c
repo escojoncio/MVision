@@ -51,12 +51,13 @@ static int cls_of(const VrProvLearn *S, const GpuOp *o) { return vpc_class_op(S,
 /* Cobertura nativa sintética (VrProvLearn.covered): paquetes 0x80100000..0x801000FF = con elemento que el renderer nativo dibuja; el anillo y el fundido, según g_cov_gas / g_cov_fade. */
 #define PK_COV 0x80100000u
 #define PK_NOCOV 0x80150000u
-static int g_cov_gas, g_cov_fade, g_cov_mosaic, g_cov_calls;
+static int g_cov_gas, g_cov_fade, g_cov_mosaic, g_cov_feedback, g_cov_calls;
 static int cov_stub(void *ctx, int what, uint32_t pkt_addr) {
     (void)ctx; g_cov_calls++;
     if (what == VPC_COV_GAS) return g_cov_gas;
     if (what == VPC_COV_FADE) return g_cov_fade;
     if (what == VPC_COV_MOSAIC) return g_cov_mosaic;
+    if (what == VPC_COV_FEEDBACK) return g_cov_feedback;
     return what == VPC_COV_PACKET && pkt_addr >= PK_COV && pkt_addr < PK_COV + 0x100u;
 }
 static void learn_cov(VrProvLearn *S) { vpc_learn_reset(S); S->covered = cov_stub; g_cov_gas = g_cov_fade = 1; }
@@ -102,6 +103,35 @@ static void test_rules(void) {
         S.covered = NULL;
         CHECK(cls_of(&S, m) == VPC_UNKNOWN && cls_of(NULL, m) == VPC_UNKNOWN, "sin gancho de cobertura: HUD");
         g_cov_mosaic = 0;
+    }
+    /* realimentación de pantalla (vr_feedback.h): un sprite sin regla propia que muestrea un frame buffer sale del panel (WORLD) solo si el anfitrión garantiza que el nativo reproduce el
+     * efecto; decide lo que MUESTREA, no quién lo emite; los escritores con regla (HUD, mira...) y el mosaico no cambian */
+    {
+        GpuOp *b = rect(I_OTHER, 320, 27, 160, 184, GPU_F_TEXTURED | GPU_F_SEMI);       /* como blurpure.c: búfer de dibujo en x = 320, fuente en el de x = 0 */
+        b->tp = 2; b->tx = 0; b->ty = 0; b->v[0].u = 0; b->v[0].v = 27; b->cx1 = 320; b->cx2 = 639;
+        GpuOp *t = rect(I_OTHER, 320, 27, 160, 184, GPU_F_TEXTURED | GPU_F_SEMI);       /* igual pero con una textura normal en color directo (x = 640) */
+        t->tp = 2; t->tx = 640; t->ty = 0; t->cx1 = 320; t->cx2 = 639;
+        GpuOp *h = rect(I_MENUMAN, 320, 27, 160, 184, GPU_F_TEXTURED | GPU_F_SEMI);     /* del HUD, muestreando el búfer */
+        h->tp = 2; h->tx = 0; h->ty = 0; h->v[0].v = 27; h->cx1 = 320; h->cx2 = 639;
+        GpuOp *m = add(GPU_OP_POLY, I_MOSAIC);                                           /* celda del mosaico: un texel del propio búfer */
+        m->nv = 4; m->flags = GPU_F_TEXTURED; m->tp = 2; m->tx = 320; m->cx1 = 320; m->cy1 = 0; m->cx2 = 639; m->cy2 = 255;
+        for (int k = 0; k < 4; k++) { m->v[k].u = 73; m->v[k].v = 122; }
+        VrProvLearn S; learn_cov(&S);
+        g_cov_feedback = 0;
+        CHECK(cls_of(&S, b) == VPC_UNKNOWN, "realimentación sin garantía del nativo: sigue en el HUD");
+        g_cov_feedback = 1;
+        CHECK(cls_of(&S, b) == VPC_WORLD, "realimentación con el nativo reproduciéndola: fuera del panel");
+        CHECK(cls_of(&S, t) == VPC_UNKNOWN, "textura normal en color directo: no es realimentación");
+        CHECK(cls_of(&S, h) == VPC_HUD_WORLD, "escritor con regla propia (HUD): no cambia");
+        CHECK(cls_of(&S, m) == VPC_UNKNOWN, "celda del mosaico: no es este efecto (tiene su parche)");
+        /* el otro búfer lo fija la lista anterior anotada (área mostrada al cerrarla) */
+        GpuDrawList prev = dl, cur = dl; prev.index = 7; prev.disp.x = 640; prev.disp.y = 0; prev.disp.w = 320; prev.disp.h = 256; cur.index = 8; cur.disp.x = 320; cur.disp.y = 0; cur.disp.w = 320; cur.disp.h = 256;
+        vpc_learn_note(&S, &prev, VPC_ST_OTHER); vpc_learn_note(&S, &cur, VPC_ST_OTHER); vpc_learn_note(&S, &cur, VPC_ST_OTHER);
+        CHECK(S.draw_prev[0] == 640 && S.draw_cur[0] == 320, "pareja de búferes anotada una vez por lista (%d, %d)", S.draw_prev[0], S.draw_cur[0]);
+        CHECK(cls_of(&S, t) == VPC_WORLD && cls_of(&S, b) == VPC_UNKNOWN, "con el otro búfer en x = 640: la fuente de realimentación es esa, no x = 0");
+        S.covered = NULL;
+        CHECK(cls_of(&S, t) == VPC_UNKNOWN && cls_of(NULL, b) == VPC_UNKNOWN, "sin gancho de cobertura: HUD");
+        g_cov_feedback = 0;
     }
     z->prov2 = I_CINEMA;
     CHECK(cls_of(NULL, z) == VPC_FX_LETTERBOX, "prov == 0 usa prov2");

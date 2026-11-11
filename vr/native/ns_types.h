@@ -278,8 +278,15 @@ typedef struct {
     int32_t gas_abr;
     float fade_amount;   /* 0..1 */
     int32_t fade_white, fade_in;
+    /* Realimentación de pantalla del juego (blur.c, blurpure.c, focus.c; vr/scene/vr_feedback.h). NO la rellena el extractor (no sale de la RAM): la mide el anfitrión en la lista de la GPU y la
+     * anota al capturar la escena. Solo la reproduce la pantalla 3D (imagen de la cámara del juego): salida = fb_a * actual + fb_b * fuente(M p) dentro de fb_rect, en coordenadas 0..1 de esa
+     * imagen (v hacia abajo). */
+    int32_t fb_mode;     /* 0 = sin efecto; 1 = la fuente es la imagen anterior de la pantalla; 2 = la imagen actual */
+    float fb_a, fb_b[3];
+    float fb_m[6];       /* fuente: u' = m0 u + m1 v + m2; v' = m3 u + m4 v + m5 */
+    float fb_rect[4];    /* u0, v0, u1, v1 */
 } NsScreenFx;
-NS_STATIC_ASSERT(screenfx, sizeof(NsScreenFx) == 120);
+NS_STATIC_ASSERT(screenfx, sizeof(NsScreenFx) == 180);
 
 typedef struct NsScene {
     uint32_t size;       /* sizeof(NsScene) de quien la rellenó: el consumidor rechaza la escena si no coincide con el suyo */

@@ -387,6 +387,29 @@ fragment float4 vr_fs_wave(VrPostOut in [[stage_in]], texture2d<float> src [[tex
     return vr_vfx(src.sample(smp, uv), in.pos.xy, 0u, u, float2(src.get_width(), src.get_height()));
 }
 
+/* ---------------- realimentación de pantalla del juego (blur.c, blurpure.c, focus.c; vr/scene/vr_feedback.h) ----------------
+ * Pantalla 3D de las cinemáticas (un pase por ojo, como vr_fs_wave, que incluye): la imagen nativa recién dibujada (src) se mezcla, dentro de la zona del efecto, con la imagen ANTERIOR
+ * de la pantalla (hist; estela de movimiento, con o sin ampliación) o consigo misma desplazada, con los pesos del modo de mezcla original. La mezcla va en el espacio gamma original
+ * (como la GPU del juego): si el destino es lineal (VR_FC_LINEAR_OUT) se convierte, se opera y se vuelve. */
+fragment float4 vr_fs_feedback(VrPostOut in [[stage_in]], texture2d<float> src [[texture(0)]], texture2d<float> hist [[texture(2)]], constant VrPostUniforms &u [[buffer(0)]]) {
+    constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
+    float2 size = float2(float(src.get_width()), float(src.get_height()));
+    float2 uv = float2((in.pos.x + vr_wave_dx(in.pos.y, 0u, u, size.x)) / size.x, in.pos.y / size.y);
+    float4 px = src.sample(smp, uv);
+    float2 p = in.pos.xy / size;
+    if (p.x >= u.fb_rect.x && p.y >= u.fb_rect.y && p.x <= u.fb_rect.z && p.y <= u.fb_rect.w) {
+        float2 q = float2(dot(u.fb_m[0].xy, p) + u.fb_m[0].z, dot(u.fb_m[1].xy, p) + u.fb_m[1].z);
+        float3 s = u.fb_m[0].w > 0.5 ? src.sample(smp, q).rgb : hist.sample(smp, q).rgb;
+        float3 c = clamp(px.rgb, float3(0.0), float3(1.0));
+        s = clamp(s, float3(0.0), float3(1.0));
+        if (kLinear) { c = float3(vr_gam1(c.x), vr_gam1(c.y), vr_gam1(c.z)); s = float3(vr_gam1(s.x), vr_gam1(s.y), vr_gam1(s.z)); }
+        c = clamp(c * u.fb_mix.w + s * u.fb_mix.xyz, float3(0.0), float3(1.0));
+        if (kLinear) c = float3(vr_lin1(c.x), vr_lin1(c.y), vr_lin1(c.z));
+        px = float4(c, px.a);
+    }
+    return vr_vfx(px, in.pos.xy, 0u, u, size);
+}
+
 fragment float4 vr_fs_wave_layered(VrPostOutL in [[stage_in]], texture2d_array<float> src [[texture(0)]], constant VrPostUniforms &u [[buffer(0)]]) {
     constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
     uint eye = min(in.layer, 1u);
