@@ -960,10 +960,13 @@ static void mosaic_from_list(const GpuDrawList *l) {
     const float ys = (c->overscan_y > 0.5f && c->overscan_y < 2.0f) ? c->overscan_y : NS_OVERSCAN_Y;
     float M[9];
     for (int k = 0; k < 9; k++) M[k] = (k % 3 == 1) ? c->rot[k] / ys : c->rot[k];
-    if (!odd && cells) vrmosaic_build(l->ops, l->nops, mk, l->vram_end, c->eye, M, (const float (*)[3])mosaic_pts, mosaic_npts, &mosaic_cur);
+    /* anclas de los actores mosaic.c de la RAM (vr_mosaic.h: el mosaico es un punto del mundo, no una superficie); con una proyectada sobre las celdas, la profundidad es la suya */
+    float anchors[8][3]; int nanch = 0;
+    if (!odd && cells) nanch = vrmosaic_anchors(emu_ram, EMU_RAM_SIZE, anchors, 8);
+    if (!odd && cells) vrmosaic_build(l->ops, l->nops, mk, l->vram_end, c->eye, M, (const float (*)[3])mosaic_pts, mosaic_npts, (const float (*)[3])anchors, nanch, &mosaic_cur);
     free(mk);
     static int said = -1;
-    if (said != (mosaic_cur.n > 0)) { said = mosaic_cur.n > 0; fprintf(stderr, "[mosaico] %s: %d celdas (de %d, raras %d, vram %d) a %.0f uds de la camara\n", said ? "parche del mundo" : "sin parche (celdas al panel 2D)", mosaic_cur.n, cells, odd, l->vram_end != NULL, (double)mosaic_cur.depth); }
+    if (said != (mosaic_cur.n > 0)) { said = mosaic_cur.n > 0; fprintf(stderr, "[mosaico] %s: %d celdas (de %d, raras %d, vram %d) a %.0f uds de la camara (anclas de actor=%d)\n", said ? "parche del mundo" : "sin parche (celdas al panel 2D)", mosaic_cur.n, cells, odd, l->vram_end != NULL, (double)mosaic_cur.depth, nanch); }
 }
 /* Efecto de realimentación de pantalla de la lista en curso (vr_feedback.h: blur.c, blurpure.c, focus.c...). Se mide tras anotar la lista (pareja de búferes de prov_learn) y antes de clasificar
  * sus primitivas; ns_ctx lo anota en la escena nativa siguiente y la pantalla 3D lo reproduce sobre su imagen. Candidatas: las que muestrean un frame buffer y no tienen regla de

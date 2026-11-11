@@ -5,6 +5,7 @@
 #define PAD_R2 (1u << 9)
 #define PAD_R1 (1u << 11)
 #define ABORT_NOT_OK 40            /* VBlanks sin control del jugador que abortan una maniobra */
+#define EMPTY_RETRY_VBL 150        /* VBlanks de espera antes de repetir una maniobra de EMPTY que falló (el juego no cargó: arma bloqueada, menú...) */
 #define NO_MAG_VBL 12              /* VBlanks seguidos con el arma VR sin balas antes de contar toda la munición del juego como reserva (el último disparo VR lo consume el juego 1-2 fotogramas después: sin balas en la reserva todavía) */
 
 static struct {
@@ -17,7 +18,11 @@ static struct {
     int reequip_t;                 /* >0: pulsando R1 para volver a equipar (VBlanks restantes) */
     int not_ok_t;
     int seen_not_ready;            /* EMPTY: se ha visto el arma VR no lista (el gesto empezó) */
-    int wait_t;                    /* EMPTY: espera de la recarga propia del juego tras el gesto */
+    int idle_t;                    /* EMPTY: VBlanks seguidos con el cargador del juego a 0 y reserva > 0 sin que el juego recargue (negativo = espera tras un fallo) */
+    int empty_run;                 /* la maniobra en curso se lanzó desde EMPTY (al terminar vuelve a EMPTY a esperar el gesto del arma VR) */
+    int pickup;                    /* se recogió munición (el total del juego subió) estando en EMPTY y el arma VR aún no se ha rearmado */
+    int arm;                       /* READY: emitir arm_ready en este VBlank */
+    int pk_w, pk_total;            /* arma y total del juego del VBlank anterior (detección de recogida) */
     int adopt;                     /* forzar el cargador VR al del juego en este VBlank */
     int virt_taken;                /* balas cogidas de la reserva y aún no cargadas */
     int no_mag;                    /* VBlanks seguidos con el arma VR sin balas dentro (VrReloadIn.no_mag), saturado */
@@ -30,7 +35,7 @@ static struct {
 void vrreload_cfg_default(VrReloadCfg *c) {
     memset(c, 0, sizeof *c);
     c->method = VRR_VIA_R1_DOUBLE; c->taps = 2; c->press_vbl = 2; c->gap_vbl = 2; c->verify_vbl = 60; c->max_retries = 2;
-    c->empty_wait_vbl = 150; c->lost_weapon_vbl = 24;
+    c->empty_wait_vbl = 25; c->lost_weapon_vbl = 24;
 }
 void vrreload_init(const VrReloadCfg *c) {
     memset(&R, 0, sizeof R);
@@ -43,11 +48,12 @@ void vrreload_init(const VrReloadCfg *c) {
     if (R.cfg.max_retries < 0) R.cfg.max_retries = 0;
     if (R.cfg.empty_wait_vbl < 8) R.cfg.empty_wait_vbl = 8;
     if (R.cfg.lost_weapon_vbl < 4) R.cfg.lost_weapon_vbl = 4;
-    R.state = VRR_OFF; R.last_w = -1;
+    R.state = VRR_OFF; R.last_w = -1; R.pk_w = -1;
 }
 const VrReloadCfg *vrreload_config(void) { return &R.cfg; }
 void vrreload_stats(VrReloadStats *s) { *s = R.st; }
 int vrreload_state(void) { return R.state; }
+int vrreload_pickup_pending(void) { return R.pickup; }
 
 void vrreload_read_game(const BridgeState *bs, VrReloadGame *g) {
     memset(g, 0, sizeof *g);
@@ -76,10 +82,13 @@ static void start_maneuver(const VrReloadGame *g, int is_retry) {
 static void finish_ok(const VrReloadGame *g) {
     (void)g;
     R.st.ok++; R.st.last_latency_vbl = R.total_vbl; R.virt_taken = 0; R.adopt = 1;
+    if (R.empty_run) { R.empty_run = 0; R.idle_t = 0; enter(VRR_EMPTY); return; }   /* el juego ya tiene su cargador: el arma VR sigue seca hasta su gesto (o hasta el rearme por recogida) */
     enter(VRR_READY);
 }
 static void finish_fail(void) {
-    R.st.fails++; R.adopt = 1;
+    R.st.fails++;
+    if (R.empty_run) { R.empty_run = 0; R.idle_t = -EMPTY_RETRY_VBL; enter(VRR_EMPTY); return; }   /* sin cargar nada no hay nada que adoptar: se reintenta pasado un tiempo */
+    R.adopt = 1;
     enter(VRR_READY);
 }
 
@@ -95,6 +104,9 @@ void vrreload_frame(const VrReloadGame *g, const VrReloadIn *in, VrReloadOut *ou
     if (g->weapon >= 0) { if (R.last_w >= 0 && g->weapon != R.last_w) R.virt_taken = 0; R.last_w = g->weapon; }   /* cargadores cogidos de otra arma no cuentan */
     out->show_mag = g->mag > 0 ? g->mag : 0;
     out->show_reserve = g->total - g->mag - R.virt_taken; if (out->show_reserve < 0) out->show_reserve = 0;
+    /* Recogida de munición: el total del juego del arma sube (item.c add_ammo suma a GM_Weapons[arma] y no toca GM_Magazine). Solo importa con el arma en EMPTY (o con la maniobra de EMPTY en curso). */
+    int rose = g->weapon >= 0 && g->weapon == R.pk_w && g->total > R.pk_total && R.pk_total >= 0;
+    R.pk_w = g->weapon; R.pk_total = g->total;
     R.t++;
     int mine = g->ok && in->weapon_id >= 0 && g->weapon == in->weapon_id;
     int busy = R.state == VRR_PRESS || R.state == VRR_VERIFY;
@@ -110,29 +122,35 @@ void vrreload_frame(const VrReloadGame *g, const VrReloadIn *in, VrReloadOut *ou
     }
 
     if (!g->ok && R.state != VRR_PRESS) goto tail;
+    if (rose && g->ok && (R.state == VRR_EMPTY || R.empty_run)) { if (!R.pickup) R.st.pickups++; R.pickup = 1; }
     switch (R.state) {
     case VRR_OFF:
+        R.pickup = 0; R.empty_run = 0; R.arm = 0;
         if (mine) {
             R.adopt = 1; R.seen_not_ready = 0;
             enter(g->mag <= 0 && g->mag_max > 0 ? VRR_EMPTY : VRR_READY);
-            if (R.state == VRR_EMPTY) { R.st.empties++; R.wait_t = 0; }
+            if (R.state == VRR_EMPTY) { R.st.empties++; R.idle_t = 0; }
         }
         break;
     case VRR_READY:
         if (!mine) { enter(VRR_OFF); break; }
-        if (g->mag_max > 0 && g->mag <= 0) { R.st.empties++; R.seen_not_ready = !in->ready; R.wait_t = 0; enter(VRR_EMPTY); break; }
+        if (g->mag_max > 0 && g->mag <= 0) { R.st.empties++; R.seen_not_ready = !in->ready; R.idle_t = 0; enter(VRR_EMPTY); break; }
         if (in->mag_in_edge && g->mag < g->mag_max && g->total > g->mag) start_maneuver(g, 0);
         break;
     case VRR_EMPTY:
         if (!mine) { enter(VRR_OFF); break; }
         if (!in->ready) R.seen_not_ready = 1;
-        if (R.seen_not_ready && in->ready) {            /* gesto terminado */
-            if (g->mag > 0) { R.adopt = 1; R.virt_taken = 0; R.st.ok++; enter(VRR_READY); break; }
-            if (g->total > 0) {
-                if (++R.wait_t > R.cfg.empty_wait_vbl) { R.wait_t = 0; start_maneuver(g, 0); }   /* el juego no recargó solo */
-            }
+        if (R.pickup && g->mag > 0) {                  /* recogida con el arma seca y el juego ya cargó su cargador: el arma VR se deja lista sin exigir el gesto */
+            R.arm = 1; R.adopt = 1; R.virt_taken = 0; R.pickup = 0; R.st.ok++; R.st.arms++; enter(VRR_READY); break;
+        }
+        if (R.seen_not_ready && in->ready && g->mag > 0) {   /* gesto terminado */
+            R.adopt = 1; R.virt_taken = 0; R.pickup = 0; R.st.ok++; enter(VRR_READY); break;
         }
         /* si el juego recargó solo mientras el arma VR sigue vacía: no se copia (bloqueo hasta el gesto) */
+        /* el juego solo recarga solo con el arma levantada (sna_init.c sub_80057BF0): con el disparo VR bloqueado nunca se pulsa el ataque, así que con el cargador a 0 y reserva se provoca sin esperar al gesto */
+        if (g->mag <= 0 && g->total > 0 && !g->menu) {
+            if (++R.idle_t > R.cfg.empty_wait_vbl) { R.idle_t = 0; R.empty_run = 1; R.st.empty_runs++; start_maneuver(g, 0); }
+        } else if (R.idle_t > 0) R.idle_t = 0;
         break;
     case VRR_PRESS:
         R.total_vbl++;
@@ -172,6 +190,7 @@ tail:
         int rounds = g->mag > 0 ? g->mag - 1 : 0, ch = g->mag > 0 ? 1 : 0;
         out->sync_rounds = rounds; out->sync_chambered = ch;          /* tope hacia abajo */
         if (R.adopt) { out->sync_force = 1; R.adopt = 0; }            /* recarga completada o arma recién equipada: fijar */
+        if (R.arm) { out->arm_ready = 1; R.arm = 0; }                 /* recogida con el arma seca: el anfitrión rearma el arma VR */
     }
 }
 

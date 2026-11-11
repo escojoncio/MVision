@@ -168,6 +168,67 @@ static void t_empty_forced(void) {
     for (int i = 0; i < 400; i++) { o = step(&g, in0(), &pl); if (o.pad_force) pressed++; if (o.state == VRR_READY) break; }
     CHECK(pressed == 4 && g.mag > 0 && o.state == VRR_READY, "tras esperar el autoreload se provoca con R1 doble (pulsaciones %d, mag %d)", pressed, g.mag);
 }
+/* ---- 3b. RECOGER MUNICIÓN con el arma seca (log del visor 20261112_000750, [arma] líneas 391-451 de las con esa etiqueta): disparo 13 -> municion=0 cargador_juego=0 reserva=0 (EMPTY);
+ * recoge 12: municion=12 cargador_juego=0 reserva=12; recoge otras 12: municion=24 cargador_juego=0 reserva=24; el juego NO carga su cargador (decompilación: item.c add_ammo solo suma a
+ * GM_Weapons; sna_init.c sub_80057BF0 recarga solo con PLAYER_ATTACK y el disparo VR bloqueado nunca lo activa) y el arma VR se quedaba sin cargador (cargador=0 recamara=0 balas_vr=0) con
+ * recarga=2 (EMPTY) durante todo el resto de la sesión. Debe quedar LISTA sin gesto del usuario (aquí el arma VR sigue sin cargador: ready = 0, no_mag = 1 todo el rato). */
+static void t_pickup_dry(void) {
+    cfg_method(VRR_VIA_R1_DOUBLE, 2);
+    Game g = newgame(1, 1); VrReloadOut o; PulseLog pl = newlog();
+    VrReloadIn dry = in0(); dry.ready = 0; dry.no_mag = 1;
+    run(&g, 5, in0(), &o, &pl);
+    g.mag = 0; g.total = 0;                                     /* último disparo: municion=0 cargador_juego=0 */
+    run(&g, 60, dry, &o, &pl);
+    CHECK(o.state == VRR_EMPTY && !o.fire_allowed && o.show_mag == 0 && o.show_reserve == 0 && o.pad_force == 0 && !o.busy, "sin balas: EMPTY, nada que hacer (estado %d)", o.state);
+    g.total = 12;                                               /* recoge 12: municion=12 cargador_juego=0 (el juego no toca el cargador) */
+    int arms = 0, presses = 0, ready_vbl = -1;
+    for (int i = 0; i < 400; i++) {
+        if (i == 10) g.total = 24;                              /* segunda recogida antes de que el juego cargue: municion=24 */
+        o = step(&g, dry, &pl);
+        if (o.pad_force) presses++;
+        if (o.arm_ready) { arms++; if (ready_vbl < 0) ready_vbl = i; CHECK(o.state == VRR_READY, "arm_ready solo en READY (%d)", o.state); }
+        if (o.state == VRR_READY && ready_vbl >= 0) break;
+    }
+    CHECK(g.weapon == 0 && g.mag == 12, "el juego cargó su cargador (%d): R1 doble sobre mag 0 con 24 balas -> min(12, 24)", g.mag);
+    CHECK(presses == 4, "R1 doble (pulsado %d VBlanks)", presses);
+    CHECK(arms == 1 && ready_vbl >= 0 && ready_vbl < 120, "el arma VR queda lista una vez, en %d VBlanks", ready_vbl);
+    CHECK(o.state == VRR_READY && o.fire_allowed && o.show_mag == 12 && o.show_reserve == 12, "READY con 12/12 (%d/%d)", o.show_mag, o.show_reserve);
+    CHECK(o.sync_rounds == 11 && o.sync_chambered == 1 && o.sync_force, "cuenta del arma VR = cargador del juego - 1 en el cargador + 1 en la recámara (%d)", o.sync_rounds);
+    VrReloadIn rd = in0(); rd.ready = 1;                        /* el anfitrión hizo make_ready: sin más rearmes ni maniobras */
+    run(&g, 200, rd, &o, &pl);
+    CHECK(o.state == VRR_READY && !o.arm_ready && o.pad_force == 0, "estable tras el rearme");
+    VrReloadStats st; vrreload_stats(&st);
+    CHECK(st.pickups == 1 && st.arms == 1 && st.empty_runs == 1, "contadores recogidas=%u rearmes=%u maniobras=%u", st.pickups, st.arms, st.empty_runs);
+    CHECK(vrreload_pickup_pending() == 0, "sin recogida pendiente");
+}
+/* la recogida con el juego que SÍ carga su cargador al recoger (lo que suponía t_ledger_pickup): rearma al instante sin pulsar nada */
+static void t_pickup_game_loads(void) {
+    cfg_method(VRR_VIA_R1_DOUBLE, 2);
+    Game g = newgame(0, 0); VrReloadOut o; PulseLog pl = newlog();
+    VrReloadIn dry = in0(); dry.ready = 0; dry.no_mag = 1;
+    run(&g, 20, dry, &o, &pl);
+    CHECK(o.state == VRR_EMPTY, "EMPTY");
+    g.total = 12; g.mag = 12;
+    o = step(&g, dry, &pl);
+    CHECK(o.state == VRR_READY && o.arm_ready && o.fire_allowed && o.pad_force == 0, "rearma sin maniobra (estado %d)", o.state);
+    o = step(&g, dry, &pl);
+    CHECK(!o.arm_ready, "una sola vez");
+}
+/* sin recogida: el arma VR seca con reserva (modo manual: el usuario debe recargar a mano) NO se rearma sola, pero el juego sí queda cargado (maniobra sin esperar al gesto) */
+static void t_dry_with_reserve(void) {
+    cfg_method(VRR_VIA_R1_DOUBLE, 2);
+    Game g = newgame(1, 30); VrReloadOut o; PulseLog pl = newlog();
+    VrReloadIn dry = in0(); dry.ready = 0; dry.no_mag = 1;
+    run(&g, 5, in0(), &o, &pl);
+    g.mag = 0;                                                  /* último disparo con reserva y el juego sin recargar solo (arma bajada) */
+    int arms = 0;
+    for (int i = 0; i < 300; i++) { o = step(&g, dry, &pl); arms += o.arm_ready; }
+    CHECK(g.mag > 0, "el juego quedó cargado sin esperar al gesto (%d)", g.mag);
+    CHECK(o.state == VRR_EMPTY && !o.fire_allowed && arms == 0, "el arma VR espera su gesto (estado %d, rearmes %d)", o.state, arms);
+    VrReloadIn rd = in0(); rd.ready = 1;
+    o = step(&g, rd, &pl);
+    CHECK(o.state == VRR_READY && o.fire_allowed && !o.arm_ready && o.sync_rounds == g.mag - 1, "gesto -> READY con el cargador del juego");
+}
 /* ---- 3. insertar con el cargador del juego lleno / sin reserva: nada que hacer ---- */
 static void t_nothing_to_do(void) {
     cfg_method(VRR_VIA_R1_DOUBLE, 2);
@@ -319,6 +380,7 @@ static void t_fuzz(void) {
             CHECK(o.sync_rounds >= -1 && o.sync_chambered >= -1, "sync válido");
             CHECK(!o.busy || (o.pad_mask == (R1 | R2)), "ocupado -> máscara");
             CHECK(!(o.busy && o.fire_allowed), "ocupado no dispara");
+            CHECK(!o.arm_ready || (o.state == VRR_READY && o.fire_allowed == (g.mag > 0)), "rearme solo en READY");
             CHECK(o.busy || o.pad_force == 0, "sin maniobra no hay toques sueltos");
             if (it % 7 == 0) { int r = vrreload_ammo_reserve(g.weapon); CHECK(r >= 0, "reserva >= 0"); vrreload_ammo_take(g.weapon, (rand() % 2000) - 1000); }
         }
@@ -331,7 +393,7 @@ static void t_fuzz(void) {
 }
 
 int main(void) {
-    t_tactical(); t_adopt(); t_empty_latch(); t_empty_no_reserve(); t_empty_needs_gesture(); t_empty_forced(); t_nothing_to_do(); t_lost_tap(); t_never();
+    t_tactical(); t_adopt(); t_empty_latch(); t_empty_no_reserve(); t_empty_needs_gesture(); t_empty_forced(); t_pickup_dry(); t_pickup_game_loads(); t_dry_with_reserve(); t_nothing_to_do(); t_lost_tap(); t_never();
     t_r2(); t_ledger(); t_ledger_pickup(); t_ledger_switch(); t_modes_weapon(); t_fuzz();
     printf("test_reload: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

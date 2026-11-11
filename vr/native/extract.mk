@@ -142,3 +142,16 @@ $(B)/nshands: $(NSHSRC) $(HDR) vr/native/ns_hand.h | $(B)
 	$(CC) $(CFLAGS) -Iruntime -Ivr/native -Ivr/body -Ivr/hands -Ivr/weapons $(NSHSRC) vr/weapons/build/libweapons.a -lm -lpthread -o $@
 nshands: $(B)/nshands
 .PHONY: nshands
+
+# Réplica del motor para polígonos (ns_div: Bound/Trans/Divide de libdg) y su validación contra la lista de un volcado.
+#   make -f vr/native/extract.mk test-div     prueba sintética de ns_div
+#   make -f vr/native/extract.mk nsdiv        compila vr/native/build-extract/nsdiv (ver tools/nsdiv.c)
+$(B)/nsdiv: vr/native/tools/nsdiv.c vr/native/ns_div.c vr/native/ns_div.h vr/native/ns_dump.c | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/tools/nsdiv.c vr/native/ns_div.c vr/native/ns_dump.c -lm -o $@
+nsdiv: $(B)/nsdiv
+.PHONY: nsdiv
+$(B)/test_ns_div: vr/native/test_ns_div.c vr/native/ns_div.c vr/native/ns_div.h | $(B)
+	$(CC) $(CFLAGS) -Ivr/native vr/native/test_ns_div.c vr/native/ns_div.c -o $@
+test-div: $(B)/test_ns_div
+	$(B)/test_ns_div
+.PHONY: test-div

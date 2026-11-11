@@ -894,12 +894,27 @@ static void ammo_pickup_after_empty(void) {
             vbl_game(0.0f, 400, &seen);
             int res = vrreload_ammo_reserve(0);
             printf("   modo %d variante %d: juego mag=%d total=%d | VR insertado=%d balas=%d recamara=%d reserva=%d\n", mode, variant, bs.magazine, bs.weapon_ammo[0], pist_st->mag_inserted, pist_st->mag_rounds, pist_st->chambered, res);
-            if (mode == 2) {
-                CHECK(pist_st->mag_inserted && pist_st->chambered && vr_held() <= 12 && vr_held() > 0, "automática: tras recoger 12 el arma VR queda lista (balas %d)", vr_held());
-            } else {
-                CHECK(res == 12 || (pist_st->mag_inserted && pist_st->chambered), "modo %d: con 12 recogidas hay reserva para el gesto (reserva %d) o ya está lista", mode, res);
+            (void)res;
+            /* recoger munición con el arma seca la deja LISTA en cualquier modo de recarga, con o sin cargador del juego cargado por sí mismo: sin gesto (log del visor 20261112_000750: municion=12 cargador_juego=0 reserva=12 y el arma VR sin cargador hasta el final de la sesión) */
+            CHECK(pist_st->mag_inserted && pist_st->chambered && vr_held() <= 12 && vr_held() > 0, "modo %d variante %d: tras recoger 12 el arma VR queda lista (balas %d)", mode, variant, vr_held());
+            CHECK(bs.magazine > 0 && bs.magazine <= 12 && vr_held() <= bs.magazine, "modo %d variante %d: el cargador del juego está cargado (%d) y el arma VR no lleva más (%d)", mode, variant, bs.magazine, vr_held());
+            {   /* y dispara: el cuadrado del juego sale con el gatillo */
+                MvVrGameStatus st; mv_vrgame_status(&st); uint32_t s0 = st.shots;
+                vbl_game(0.9f, 12, &seen); vbl_game(0.0f, 10, &seen);
+                mv_vrgame_status(&st);
+                CHECK(st.shots == s0 + 1, "modo %d variante %d: tras recoger vuelve a disparar (disparos %u)", mode, variant, st.shots - s0);
             }
         }
+    }
+    /* dos recogidas seguidas con el cargador del juego a 0 (24 de reserva, el caso del log): una sola puesta a punto y el cargador del juego carga 12 */
+    for (int mode = 0; mode <= 2; mode++) {
+        vrreload_init(NULL);
+        world(0, 12, 12); fresh_pistol(); mv_vrgame_set_options(1, mode); vbl(0.0f, 20);
+        uint32_t seen = shots_now();
+        pist_st->mag_rounds = 0; pist_st->chambered = 0; bs.magazine = 0; bs.weapon_ammo[0] = 0; vbl(0.0f, 300);
+        bs.weapon_ammo[0] = 12; vbl_game(0.0f, 30, &seen); bs.weapon_ammo[0] = 24; vbl_game(0.0f, 400, &seen);
+        CHECK(bs.magazine == 12 && bs.weapon_ammo[0] == 24 && pist_st->mag_inserted && pist_st->chambered && vr_held() == 12, "modo %d: 24 recogidas con el cargador a 0: juego %d/%d, VR balas %d", mode, bs.magazine, bs.weapon_ammo[0], vr_held());
+        CHECK(vrreload_ammo_reserve(0) == 12, "modo %d: reserva mostrada 12 (%d)", mode, vrreload_ammo_reserve(0));
     }
     /* automática: una vez lista dispara de nuevo */
     {

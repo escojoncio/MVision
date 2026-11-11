@@ -10,7 +10,13 @@
  * el más cercano bajo el centro de CADA celda (prueba de punto en triángulo con profundidad interpolada en 1/z) y las esquinas de la celda se desproyectan a esa profundidad con la
  * proyección MEDIDA en la propia lista (ajuste por mínimos cuadrados x = cx + hx * vx/vz, y = cy + hy * vy/vz sobre sus vértices 3D: sin suponer H, centro ni factor vertical). Un plano común
  * (la profundidad bajo el centro del mosaico) flotaba en medio de la sala cuando una columna o pared tapaba el centro (d0013: 1283 uds frente a un personaje a ~5200). El render
- * nativo lo dibuja como un efecto más (NsEffect) y las primitivas originales salen del panel 2D (clase VPC_WORLD). */
+ * nativo lo dibuja como un efecto más (NsEffect) y las primitivas originales salen del panel 2D (clase VPC_WORLD).
+ *
+ * Ancla exacta (decompilación, takabe/mosaic.c:100-118 y enemy/action.c:1633): el actor del mosaico no se coloca sobre ninguna superficie, sino en UN PUNTO DEL MUNDO: `Work.field_24` apunta a una
+ * MATRIX (en NewMosaicSet es la propia `field_28`, con t = el vector `-p` del guion; en NewMosaic es la raíz del cuerpo del enemigo, `&body.objs->objs[0].world`) y el original lo dibuja con la
+ * profundidad de ese punto en el OT, de modo que lo que está delante (puertas, paredes) lo tapa por orden de dibujo. Medido en d0006 de Archivo_31: actor en RAM con t = (11100, 350, -650) a 4694 uds
+ * de la cámara, proyectado a (162.3, 147.5) frente al centro de las celdas (162, 148); el parche anterior buscaba la superficie bajo las celdas y las pegaba a la puerta de delante (569 uds). Con el
+ * ancla, el parche va al plano de profundidad del punto y el test de profundidad del nativo decide qué lo tapa. */
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
@@ -78,12 +84,65 @@ static inline float vrmosaic_target_z(const float (*pts)[3], int npts, const flo
     return bz;
 }
 
+/* Profundidad de vista del ancla de un actor del mosaico que se proyecta sobre el centro (mx, my) del mosaico, o 0 si ninguna. Tolerancia: 12 px + lo que mueve un desplazamiento vertical de hasta 300 uds
+ * (NewMosaic recibe un desplazamiento -250 sobre la raíz del enemigo que la decompilación no conserva). Entre varias, la más cercana en pantalla (actores muertos con restos en la RAM). */
+static inline float vrmosaic_anchor_z(const float (*anch)[3], int nanch, const float eye[3], const float M[9], double cx, double cy, double hx, double hy, float mx, float my) {
+    if (!anch || nanch <= 0) return 0.0f;
+    const double c00 = M[4] * M[8] - M[5] * M[7], c01 = M[5] * M[6] - M[3] * M[8], c02 = M[3] * M[7] - M[4] * M[6];
+    const double det = M[0] * c00 + M[1] * c01 + M[2] * c02;
+    if (!(fabs(det) > 1e-9)) return 0.0f;
+    const double id = 1.0 / det;
+    const double I[9] = {c00 * id, (M[2] * M[7] - M[1] * M[8]) * id, (M[1] * M[5] - M[2] * M[4]) * id,
+                         c01 * id, (M[0] * M[8] - M[2] * M[6]) * id, (M[2] * M[3] - M[0] * M[5]) * id,
+                         c02 * id, (M[1] * M[6] - M[0] * M[7]) * id, (M[0] * M[4] - M[1] * M[3]) * id};
+    float best = 1e30f, bz = 0.0f;
+    for (int i = 0; i < nanch; i++) {
+        const double d[3] = {anch[i][0] - eye[0], anch[i][1] - eye[1], anch[i][2] - eye[2]};
+        const double vx = I[0] * d[0] + I[1] * d[1] + I[2] * d[2], vy = I[3] * d[0] + I[4] * d[1] + I[5] * d[2], vz = I[6] * d[0] + I[7] * d[1] + I[8] * d[2];   /* vista = M^-1 * (p - ojo) */
+        if (!isfinite(vz) || vz < VRMOSAIC_ZMIN) continue;
+        const double sx = cx + hx * vx / vz, sy = cy + hy * vy / vz;
+        const double dist = hypot(sx - mx, sy - my), tol = 12.0 + 300.0 * fabs(hy) / vz;
+        if (dist <= tol && dist < best) { best = (float)dist; bz = (float)vz; }
+    }
+    return bz;
+}
+
+/* Anclas (mundo del motor) de los actores `mosaic.c` vivos en la RAM del juego. El actor es un GV_ACT (0x20 bytes: filename en +0x14) seguido de Work (takabe/mosaic.c:17-36): +0x24 = puntero a una MATRIX
+ * (su t, en +0x14, es el punto), +0x4C = tamaño. Se localiza por el nombre de fichero que el motor guarda en el actor (GV_SetNamedActor, mosaic.c:81 y 99): cadenas "mosaic.c" y actores cuyo +0x14
+ * las apunta. Comprobaciones de cordura (matriz dentro de la RAM, tamaño 1..8000, t finito y acotado). Devuelve cuántas anclas (<= max); `ram` es la RAM de 2 MiB (dirección 0x80000000 = byte 0). */
+static inline int vrmosaic_anchors(const uint8_t *ram, size_t size, float (*out)[3], int max) {
+    if (!ram || size < 0x1000 || max <= 0) return 0;
+    uint32_t str[8]; int ns = 0;
+    static const char name[] = "mosaic.c";
+    for (size_t o = 0; o + sizeof name <= size && ns < 8; o++)
+        if (ram[o] == 'm' && memcmp(ram + o, name, sizeof name) == 0) str[ns++] = 0x80000000u + (uint32_t)o;
+    if (!ns) return 0;
+    int n = 0;
+    for (size_t o = 0; o + 0x70 <= size && n < max; o += 4) {
+        uint32_t fn; memcpy(&fn, ram + o + 0x14, 4);
+        int hit = 0;
+        for (int k = 0; k < ns && !hit; k++) hit = fn == str[k];
+        if (!hit) continue;
+        uint32_t mp, sz; memcpy(&mp, ram + o + 0x24, 4); memcpy(&sz, ram + o + 0x4C, 4);
+        if (mp < 0x80000000u || (mp & 3u) || (size_t)(mp - 0x80000000u) + 0x20 > size || sz < 1u || sz > 8000u) continue;
+        int32_t t[3]; memcpy(t, ram + (mp - 0x80000000u) + 0x14, sizeof t);
+        int ok = 1;
+        for (int a = 0; a < 3; a++) if (t[a] < -2000000 || t[a] > 2000000) ok = 0;
+        if (!ok || (t[0] == 0 && t[1] == 0 && t[2] == 0)) continue;
+        out[n][0] = (float)t[0]; out[n][1] = (float)t[1]; out[n][2] = (float)t[2]; n++;
+    }
+    return n;
+}
+
 /* Construye el parche a partir de la lista. `is_mosaic[i]` != 0 marca las primitivas del mosaico (procedencia). `vram` (1024x512, puede ser NULL): VRAM al CERRAR la lista (GpuDrawList.vram_end),
  * de donde sale el color de las celdas que la captura no resolvió. `eye` / `M` (vista -> mundo, fila-mayor, columnas X derecha, Y abajo, Z delante): la cámara con la que se dibujó la lista.
  * `pts` / `npts` (puede ser NULL): puntos dinámicos de la escena nativa (ver vrmosaic_target_z); con objetivo conocido, los polígonos a menos de VRMOSAIC_OCC de su profundidad (lo que lo tapa:
  * columnas, paredes) no cuentan para colocar las celdas: van sobre el objetivo y el test de profundidad del nativo las oculta tras lo que lo tape.
+ * `anch` / `nanch` (puede ser NULL): anclas de los actores del mosaico en la RAM (vrmosaic_anchors, mundo del motor). Si alguna se proyecta sobre el centro del mosaico, su profundidad de vista es
+ * la de TODAS las celdas (un plano, como el sprite del original) y no se busca superficie alguna; sin ancla, la heurística anterior (objetivo dinámico / superficie bajo cada celda).
  * Devuelve el número de celdas (0 si no hay mosaico, no hay geometría 3D debajo o la proyección no se puede medir); `out` queda siempre definido. */
-static inline int vrmosaic_build(const GpuOp *ops, uint32_t nops, const uint8_t *is_mosaic, const uint16_t *vram, const float eye[3], const float M[9], const float (*pts)[3], int npts, VrMosaic *out) {
+static inline int vrmosaic_build(const GpuOp *ops, uint32_t nops, const uint8_t *is_mosaic, const uint16_t *vram, const float eye[3], const float M[9], const float (*pts)[3], int npts,
+                                 const float (*anch)[3], int nanch, VrMosaic *out) {
     memset(out, 0, sizeof *out);
     if (!ops || !is_mosaic || !eye || !M) return 0;
     /* 1) celdas y su centro en pantalla (el punto de muestreo de cada una) */
@@ -114,8 +173,10 @@ static inline int vrmosaic_build(const GpuOp *ops, uint32_t nops, const uint8_t 
     /* 3) profundidad de la superficie que tapa cada celda: el polígono opaco más cercano bajo SU centro (con objetivo conocido, solo los que no lo tapan). Cada celda se pega a la superficie del
      * personaje que cubre en la imagen, no a un plano común: un plano a la profundidad de lo más cercano bajo el centro flotaba en medio de la sala cuando una columna o pared tapaba el centro
      * (d0013: 1283 uds frente a un personaje a ~5200). Los semitransparentes (agua, cristal) no tapan: el nativo no escribe su profundidad. */
-    const float tz = vrmosaic_target_z(pts, npts, eye, M, cx, cy, hx, hy, 0.5f * (bx0 + bx1), 0.5f * (by0 + by1)), zlo = tz > 0.0f ? VRMOSAIC_OCC * tz : 0.0f;
-    for (uint32_t i = 0; i < nops; i++) {
+    const float az = vrmosaic_anchor_z(anch, nanch, eye, M, cx, cy, hx, hy, 0.5f * (bx0 + bx1), 0.5f * (by0 + by1));
+    const float tz = az > 0.0f ? az : vrmosaic_target_z(pts, npts, eye, M, cx, cy, hx, hy, 0.5f * (bx0 + bx1), 0.5f * (by0 + by1)), zlo = az > 0.0f ? 0.0f : tz > 0.0f ? VRMOSAIC_OCC * tz : 0.0f;
+    if (az > 0.0f) for (int c = 0; c < nc; c++) cz[c] = az;   /* ancla del actor: un único plano a la profundidad del punto (las celdas del original comparten el z del OT) */
+    for (uint32_t i = 0; i < nops && !(az > 0.0f); i++) {
         const GpuOp *o = &ops[i];
         if (is_mosaic[i] || (o->flags & GPU_F_SEMI) || !vrmosaic_poly_ok(o)) continue;
         for (int c = 0; c < nc; c++) {

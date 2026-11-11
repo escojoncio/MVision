@@ -587,6 +587,7 @@ static struct {
     VrMissile mis;              /* misil guiado del juego vigilado (vr_missile.h) */
     uint32_t mis_serial;        /* nº de misiles creados visto por última vez (vrfire_last_missile) */
     float steady;               /* efecto del tranquilizante suavizado (0..1) */
+    uint32_t rearms;            /* veces que la recogida de munición con el arma seca dejó el arma VR lista (VrReloadOut.arm_ready) */
     float unready_t;            /* recarga automática: s seguidos con balas en el cargador del juego y el arma VR sin bala en la recámara (ver AUTO_READY_S) */
     VrReloadOut ro;             /* última salida de la recarga */
     uint32_t shots, arms, throws, places, dets, rejects;
@@ -1028,14 +1029,17 @@ typedef struct {
     int gweapon, gitem, gammo;
     float d_grip, d_supp;
     int gmag, reserve, rmode, vr_rounds;       /* cargador del juego, reserva de la recarga VR, modo de recarga (0 manual, 1 simplificada, 2 automática) y balas del arma VR (cargador + recámara; -1 sin arma VR) */
+    int gmag_max, pk_pending;                  /* capacidad del cargador del juego (GM_MagazineMax) y recogida pendiente de rearmar el arma VR (vrreload_pickup_pending) */
 } ArmaDiag;
 static void arma_diag(uint64_t now, const ArmaDiag *a) {
     static uint64_t next_ns;
     if (now < next_ns) return;
     next_ns = now + 1000000000ull;
-    fprintf(stderr, "[arma] slot=%d carga=%d modo=%d fire_ok=%d cam=%d nucleo=%d mano_arma_valida=%d | recarga=%d disparo_permitido=%d gatillo=%.2f (crudo %.2f) armado=%d recamara=%d cargador=%d | fo.engaged=%d disparos=%u supresor=%d | juego: arma=%d objeto=%d municion=%d cargador_juego=%d reserva=%d modo_recarga=%d balas_vr=%d | dist empuñadura_arma-agarre_mando=%.3fm mano_libre-soporte=%.3fm\n",
+    VrReloadStats rls;
+    vrreload_stats(&rls);
+    fprintf(stderr, "[arma] slot=%d carga=%d modo=%d fire_ok=%d cam=%d nucleo=%d mano_arma_valida=%d | recarga=%d disparo_permitido=%d gatillo=%.2f (crudo %.2f) armado=%d recamara=%d cargador=%d | fo.engaged=%d disparos=%u supresor=%d | juego: arma=%d objeto=%d municion=%d cargador_juego=%d reserva=%d modo_recarga=%d balas_vr=%d | dist empuñadura_arma-agarre_mando=%.3fm mano_libre-soporte=%.3fm | recarga_vr: cargador_max_juego=%d recogida_pendiente=%d recogidas=%u maniobras_vacio=%u rearmes=%u maniobras_ok=%u maniobras_falladas=%u\n",
             a->eq_slot, a->load, a->mode, G.fire_ok, a->cam, a->core, a->gpw, a->rstate, a->fire_allowed, a->trig, a->trig_raw, a->trig_armed, a->chambered, a->mag_in,
-            a->engaged, G.shots, a->supp, a->gweapon, a->gitem, a->gammo, a->gmag, a->reserve, a->rmode, a->vr_rounds, a->d_grip, a->d_supp);
+            a->engaged, G.shots, a->supp, a->gweapon, a->gitem, a->gammo, a->gmag, a->reserve, a->rmode, a->vr_rounds, a->d_grip, a->d_supp, a->gmag_max, a->pk_pending, rls.pickups, rls.empty_runs, rls.arms, rls.sequences, rls.fails);
 }
 
 uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
@@ -1113,6 +1117,12 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     }
     VrReloadOut ro;
     vrreload_frame(&rg, &ri, &ro);
+    {   /* diagnóstico: recogida de munición con el arma seca (el total del juego subió con el cargador del juego a 0 y el arma VR bloqueada) */
+        static int pk_prev;
+        int pk = vrreload_pickup_pending();
+        if (pk && !pk_prev) fprintf(stderr, "[recarga] municion recogida con el arma seca: arma=%d total=%d cargador_juego=%d cargador_max=%d modo_recarga=%d balas_vr=%d -> se carga el cargador del juego y se deja el arma VR lista\n", bs ? bs->weapon : -1, G.ammo_game, G.game_mag, bs ? bs->magazine_max : -1, rmode, mode && sl ? weapon_held(sl->st) : -1);
+        pk_prev = pk;
+    }
     /* Armas sin cargador en el juego (misil, granadas, minas): puede disparar mientras quede munición. */
     if (mode && !G.mag_weapon) { ro.fire_allowed = G.ammo_game > 0; ro.state = VRR_READY; ro.busy = 0; }
 
@@ -1145,7 +1155,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         G.ro = ro;
         if (core && bs->weapon >= 0) {
             ArmaDiag ad = {eq_slot, eq_slot >= 0 ? atomic_load(&SL[eq_slot].state) : -1, 0, cam, core, gp[w].valid, ro.state, ro.fire_allowed, fo.engaged, game_has_suppressor(bs),
-                           hs[w].trigger, -1.0f, -1, -1, -1, bs->weapon, bs->item, G.ammo_game, -1.0f, -1.0f, bs->magazine, vrreload_ammo_reserve(bs->weapon), rmode, -1};
+                           hs[w].trigger, -1.0f, -1, -1, -1, bs->weapon, bs->item, G.ammo_game, -1.0f, -1.0f, bs->magazine, vrreload_ammo_reserve(bs->weapon), rmode, -1, bs->magazine_max, vrreload_pickup_pending()};
             arma_diag(now, &ad);
         }
         publish_hand_pose(hs, gp, right, NULL, 0);
@@ -1173,6 +1183,14 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     vrbody_set_armed(1);
     vrfire_set_hide(sl->native && !duct ? 0 : 1);      /* las granadas (sl->native, vrgame_weapon_uses_game_model) se dibujan siempre con el modelo del juego y no se oculta; el resto lleva modelo VR y se oculta el del juego (la granada lanzada tampoco se oculta nunca: es otro actor) */
 
+    /* Recogida de munición con el arma seca (vr_reload.h, RECOGIDA): el juego ya cargó su cargador (recoger solo suma a GM_Weapons; lo carga la maniobra de vr_reload) y el arma VR, sin cargador ni bala, se deja
+     * LISTA con la cuenta del juego en cualquier modo de recarga. No pasa por ammo_take (el cargador del juego no cuenta en la reserva) ni es un gesto de «cargador insertado». */
+    if (G.mag_weapon && ro.arm_ready && G.game_mag > 0) {
+        if (def->make_ready) def->make_ready(st, G.game_mag - 1);
+        else { st->mag_inserted = 1; st->mag_rounds = G.game_mag - 1; st->chambered = 1; }
+        G.prev_mag_in = 1; G.unready_t = 0; G.rearms++;
+        fprintf(stderr, "[recarga] arma %d: municion recogida con el arma seca; cargador del juego %d, total %d, modo_recarga=%d -> arma VR lista (%d en el cargador + 1 en la recamara)\n", gid, G.game_mag, G.ammo_game, rmode, G.game_mag - 1);
+    }
     /* tope/sincronía del cargador VR con el del juego (vr_reload.h): solo con cargador dentro y fuera de la espera de recarga */
     if (G.mag_weapon) {
         if (ro.state == VRR_EMPTY && G.prev_state != VRR_EMPTY && weapon_held(st) > 0) weapon_resync(sl);   /* el juego vació y el VR aún tiene balas: se reinicia desde el juego (sin cargador); si ya estaba vacío por disparar se queda como está (cargador vacío y corredera retenida) */
@@ -1425,7 +1443,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         ArmaDiag ad = {eq_slot, eq_slot >= 0 ? atomic_load(&SL[eq_slot].state) : -1, 1, cam, core, gp[w].valid, ro.state, ro.fire_allowed, fo.engaged, (in.game_flags & WGF_SUPP) != 0,
                        hs[w].trigger, in.trigger[0], gid == 0 ? w_pist_trig_armed(st) : -1, st->chambered, st->mag_inserted, bs->weapon, bs->item, G.ammo_game,
                        sqrtf((gp[w].p[0] - in.hand[0].p.x) * (gp[w].p[0] - in.hand[0].p.x) + (gp[w].p[1] - in.hand[0].p.y) * (gp[w].p[1] - in.hand[0].p.y) + (gp[w].p[2] - in.hand[0].p.z) * (gp[w].p[2] - in.hand[0].p.z)), gp[o].valid ? wcore_hand_dist(st, &in, 1, WP_SUPPORT) : -1.0f,
-                       bs->magazine, vrreload_ammo_reserve(bs->weapon), rmode, weapon_held(st)};
+                       bs->magazine, vrreload_ammo_reserve(bs->weapon), rmode, weapon_held(st), bs->magazine_max, vrreload_pickup_pending()};
         arma_diag(now, &ad);
     }
     if (G.det_t > 0) { G.det_t--; if (bs->in_control) out |= PAD_DETONATE; }
