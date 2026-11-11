@@ -286,7 +286,7 @@ int main(int argc, char **argv) {
         float sx = (float)gw / (float)(frame ? fw : rw), sy = (float)gh / (float)(frame ? fh : rh);
         (void)sx; (void)sy;
         float cx = ofx >= 0 ? ofx : (ofx_reg >= 0 ? ofx_reg : (float)(frame ? fw : rw) * 0.5f), cy = ofy >= 0 ? ofy : (ofy_reg >= 0 ? ofy_reg : (float)(frame ? fh : rh) * 0.5f);
-        NsRCam c; ns_cam_game(&c, A, t, H, cx, cy, frame ? fw : rw, frame ? fh : rh, gw, gh); c.znear = 1.0f;
+        NsRCam c; ns_cam_game(&c, A, t, H, cx, cy, frame ? fw : rw, frame ? fh : rh, gw, gh); c.znear = 1.0f; if (getenv("NSHITO_RECHAZO")) c.zreject = 0.5f * H + 4.0f;   /* regla del motor con SU cámara (cinemáticas): fuera los polígonos con algún vértice sin división fiable */
         NsRBuf b; ns_buf_alloc(&b, gw, gh); ns_buf_clear(&b, 0, 0, 0);
         NsAdaptOpts go = ao; go.skip_key = 0; if (!nocull) go.cull_eye = eye;
         NsRTri *gt = NULL; NsAdaptStats gas; size_t gn = ns_adapt_scene(&sc, st, &go, &gt, &gas);

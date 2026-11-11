@@ -31,6 +31,7 @@
 #define BA_PLAYER_ACTION    0x800ACBD0u /* s32  acción/animación actual del jugador */
 #define BA_PLAYER_STATUS    0x800ACBE0u /* u32  banderas de estado del jugador (BRIDGE_PS_*) */
 #define BA_MAGAZINE         0x800ACB7Cu /* s16  munición en el cargador del arma equipada */
+#define BA_UNDRAW_COUNT     0x800AC524u /* s32  fotogramas que el motor NO va a dibujar (su cadena de dibujo corre pero no envía la lista): 0 en juego; al pedir un cambio de zona el motor lo pone a 0x7FFF0000 a la vez que destruye los actores y lo va restando hasta que la zona nueva está cargada (medido en volcados: 0 en todos salvo en plena carga, 0x7FFEFF7D) */
 #define BA_ALERT_MAX        0x800ACB70u /* s32  máximo de alerta acumulado en el fotograma */
 #define BA_DISABLE_WEAPON   0x800ACB74u /* u32  máscara de armas bloqueadas */
 #define BA_AREA_ID          0x800ACB50u /* s16  id (hash) de la zona actual */

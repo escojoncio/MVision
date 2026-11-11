@@ -112,7 +112,6 @@ typedef struct VrBodyView {
     float shift[3];          /* desplazamiento (mundo del motor) con que la cámara apartó el ojo del modelo (paredes, gateo): todo el cuerpo del jugador se dibuja desplazado igual para no quedar por delante del ojo; 0 = sin empuje */
     int anchor;              /* 1: el cuerpo entero se dibuja desplazado para que la articulación de la cabeza del modelo (pieza 6, ya animada en este fotograma) quede en head_at; sustituye a shift */
     float head_at[3];        /* mundo del motor: bajo el ojo que la cámara dio al motor (VrCamRecord.head_at). El torso no hereda el balanceo de la animación de andar ni queda por delante del ojo */
-    int third;               /* 1: la cámara va en tercera persona (pegado a la pared) y `eye` es el ojo de primera persona (VrCamRecord.eye - cam_off): el cuerpo se dibuja entero, sin ocultar piezas por cercanía al ojo */
 } VrBodyView;
 typedef int (*VrBodyViewFn)(VrBodyView *out);    /* devuelve 1 y rellena `out` si hay vista; 0 si no */
 void vrbody_set_view_fn(VrBodyViewFn fn);

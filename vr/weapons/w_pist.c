@@ -223,6 +223,15 @@ static void release_slide(PistState *s) {   /* soltar: vuelve hacia delante y al
 /* ---------------- actualización ---------------- */
 int w_pist_trig_armed(const WeaponState *ws) { return ((const PistState *)ws)->trig_armed; }   /* diagnóstico (vrgame): solo para el estado de la pistola */
 
+static void pist_make_ready(WeaponState *ws, int mag_rounds) {
+    PistState *s = (PistState *)ws;
+    kill_free(s, H_MAG);                       /* cargador suelto o animación de montaje a medias */
+    ws->mag_inserted = 1; ws->mag_rounds = mag_rounds > 0 ? mag_rounds : 0; ws->chambered = 1;
+    set_mag_hidden(s, 0);
+    s->locked = 0; s->cyc = 0; s->charging = 0; s->racked = 0; s->slide = 0; s->auto_stage = 0; s->rel_pending = 0;
+    s->hammer_cocked = 1;
+}
+
 static void pist_init(WeaponState *ws) {
     wcore_state_reset(ws, &w_pist);          /* estado entero a cero, binding conservado */
     PistState *s = (PistState *)ws;
@@ -484,4 +493,5 @@ const WeaponDef w_pist = {
                .two_hand_factor = 0.55f},
     .mode = WF_SEMI, .rpm = 360, .mag_capacity = 12,
     .state_size = sizeof(PistState), .init = pist_init, .update = pist_update,
+    .make_ready = pist_make_ready,
 };

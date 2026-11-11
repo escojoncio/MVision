@@ -221,6 +221,7 @@ static int prep_tri(const Ctx *cx, const NsRTri *t, CV *poly, float *zavg) {
         o->y = c->A[3] * p[0] + c->A[4] * p[1] + c->A[5] * p[2] + c->t[1];
         o->z = c->A[6] * p[0] + c->A[7] * p[1] + c->A[8] * p[2] + c->t[2];
         o->u = t->v[k].u; o->v = t->v[k].v; o->r = t->v[k].r; o->g = t->v[k].g; o->b = t->v[k].b;
+        if (c->zreject > 0 && o->z <= c->zreject) return 0;
         for (int pl = 0; pl < 5; pl++) {
             const float *P = cx->planes[pl];
             dist[k][pl] = P[0] * o->x + P[1] * o->y + P[2] * o->z - P[3];

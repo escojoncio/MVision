@@ -2,6 +2,7 @@
  * Crea el almacén de mallas, registra la extracción de la RAM y el reinicio del almacén al cambiar de ejecutable. Hilo: el de instalación; después el enganche
  * llama a ns_extract_ex en el hilo de emulación (único productor). */
 #include "ns_extract.h"
+#include "ns_sink.h"
 #include "ns_hook.h"
 #include "ns_fx.h"
 #include "ns_fx_export.h"
@@ -36,6 +37,7 @@ static int glue_extract(const uint8_t *ram, const uint8_t *scratch, NsScene *out
         if (have_fx) { eo.shadow_objs = g_fx->shadow_objs; eo.n_shadow = g_fx->n_shadow_objs; }
     }
     int rc = ns_extract_ex(out, (NsMeshStore *)user, ram, NS_RAM_SIZE, scratch, scratch ? 1024u : 0u, &eo, &st);
+    if (rc == 0) ns_sink_apply(out, (NsMeshStore *)user, NULL);   /* pies hundidos bajo un suelo que el motor ordena por detrás: adelanto de orden por pieza (ns_sink.h) */
     if (rc == 0 && have_fx && out->effects) {
         int trunc = 0;
         out->n_effect = ns_fx_export(g_fx, 1, out->effects, out->cap_effect, &trunc);

@@ -357,8 +357,33 @@ static void test_scope(const char *dir) {
     free(s);
 }
 
+/* make_ready (puesta a punto del anfitrión en recarga automática): arma vacía con el cerrojo retenido y sin reserva (la recarga automática no puede arrancar) -> lista con las balas
+ * indicadas, cerrojo cerrado, y dispara; no toca la contabilidad de munición. */
+static void test_make_ready(const WeaponDef *d, int cap) {
+    memset(&B, 0, sizeof B); B.reserve = cap;                               /* justo un cargador: tras montarlo no queda reserva */
+    WeaponState *s = mkw(d); WInput in = mk();
+    step(s, &in, WR_AUTOMATIC, 2);
+    CHECK(s->chambered && s->mag_rounds == cap - 1 && B.reserve == 0);
+    for (int k = 0; k < cap + 4 && (s->chambered || s->mag_rounds); k++) { in.trigger[0] = 1; step(s, &in, WR_AUTOMATIC, 90); in.trigger[0] = 0; step(s, &in, WR_AUTOMATIC, 30); }   /* vaciar (semiautomática o ráfaga) */
+    in.trigger[0] = 0; step(s, &in, WR_AUTOMATIC, 180);
+    CHECK(!s->chambered && s->mag_rounds == 0 && B.fired == cap);       /* muerta: sin reserva la recarga automática espera para siempre */
+    CHECK(d->make_ready != NULL);
+    d->make_ready(s, 7);
+    CHECK(s->mag_inserted && s->chambered && s->mag_rounds == 7 && B.reserve == 0);
+    step(s, &in, WR_AUTOMATIC, 30);
+    CHECK(s->mag_inserted && s->chambered && s->mag_rounds == 7);           /* estable: ninguna secuencia a medias la deshace */
+    CHECK(s->channel[WCH_BOLT] < 0.5f);                                     /* cerrojo cerrado */
+    int f0 = B.fired;
+    in.trigger[0] = 1; step(s, &in, WR_AUTOMATIC, 3); in.trigger[0] = 0; step(s, &in, WR_AUTOMATIC, 30);
+    CHECK(B.fired > f0);                                                    /* vuelve a disparar */
+    d->make_ready(s, -3);
+    CHECK(s->mag_rounds == 0 && s->chambered);                              /* cuenta negativa: cargador a cero, bala en la recámara */
+    free(s);
+}
+
 int main(int argc, char **argv) {
     test_burst();
+    test_make_ready(&w_rifle, RIFLE_MAG); test_make_ready(&w_sniper, SNIPER_MAG);
     reload_manual(&w_rifle, RIFLE_MAG);
     reload_manual(&w_sniper, SNIPER_MAG);
     test_auto_modes();

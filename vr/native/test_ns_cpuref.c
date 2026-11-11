@@ -268,9 +268,34 @@ static void test_perf(void) {
     ns_buf_free(&pano); free(t);
 }
 
+/* Descarte cercano del motor con su cámara (NsRCam.zreject; réplica del de ns_vertex con U.misc.y): el triángulo con ALGÚN vértice a z <= zreject no se dibuja entero; 0 = sin descarte. */
+static int covered(const NsRBuf *b) { int n = 0; for (int i = 0; i < b->w * b->h; i++) n += b->iz[i] > 0; return n; }
+static void test_near_reject(void) {
+    NsRBuf b = newbuf(64, 64); NsRCam c = cam0(64, 64);
+    /* lámina inclinada: de z = 30 (abajo) a z = 300 (arriba), delante de la cámara */
+    NsRTri t[2]; memset(t, 0, sizeof t);
+    t[0].v[0] = V(-20, 20, 30, 0, 0, 128, 128, 128); t[0].v[1] = V(20, 20, 30, 0, 0, 128, 128, 128); t[0].v[2] = V(20, -200, 300, 0, 0, 128, 128, 128);
+    t[1].v[0] = V(-20, 20, 30, 0, 0, 128, 128, 128); t[1].v[1] = V(20, -200, 300, 0, 0, 128, 128, 128); t[1].v[2] = V(-20, -200, 300, 0, 0, 128, 128, 128);
+    render(t, 2, &c, &b, 0);
+    const int full = covered(&b);
+    CHECK(full > 100);                                    /* sin descarte se dibuja entera */
+    c.zreject = 100; ns_buf_clear(&b, 0, 0, 0); render(t, 2, &c, &b, 0);
+    CHECK(covered(&b) == 0);                              /* los dos triángulos tienen un vértice a z = 30 <= 100: ninguno se dibuja (ni la parte lejana) */
+    c.zreject = 29.5f; ns_buf_clear(&b, 0, 0, 0); render(t, 2, &c, &b, 0);
+    CHECK(covered(&b) == full);                           /* todos los vértices por encima del umbral: igual que sin descarte */
+    c.zreject = 30; ns_buf_clear(&b, 0, 0, 0); render(t, 2, &c, &b, 0);
+    CHECK(covered(&b) == 0);                              /* z == umbral también se descarta (<=) */
+    /* un triángulo entero más allá del umbral no se toca aunque otro de la escena se descarte */
+    NsRTri u[4]; memcpy(u, t, sizeof t); quad(u + 2, -10, -10, 10, 10, 150, 0, 0, 0, 0, 128, 0, 0, 0, 0);
+    c.zreject = 100; ns_buf_clear(&b, 0, 0, 0); render(u, 4, &c, &b, 0);
+    NsRBuf far = newbuf(64, 64); NsRCam c0 = cam0(64, 64); render(u + 2, 2, &c0, &far, 0);
+    CHECK(covered(&b) == covered(&far) && covered(&far) > 0);
+    ns_buf_free(&b); ns_buf_free(&far);
+}
+
 int main(void) {
     vram = calloc(1024 * 512, 2);
-    test_texel(); test_textured_quad(); test_gouraud(); test_z_and_semi(); test_clip_and_cam(); test_pano(); test_io(); test_perf();
+    test_texel(); test_textured_quad(); test_gouraud(); test_z_and_semi(); test_clip_and_cam(); test_near_reject(); test_pano(); test_io(); test_perf();
     free(vram);
     if (fails) { printf("%d fallos\n", fails); return 1; }
     printf("test_ns_cpuref: OK\n");

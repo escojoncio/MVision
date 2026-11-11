@@ -66,6 +66,14 @@ test-hand-san:
 	$(MAKE) -f vr/native/extract.mk test-hand B=vr/native/build-extract-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 .PHONY: test-hand test-hand-san
 
+# ns_sink: piezas dinámicas hundidas bajo un suelo con sesgo negativo (pies) -> adelanto de orden por pieza.
+#   make -f vr/native/extract.mk test-sink
+$(B)/test_ns_sink: vr/native/test_ns_sink.c vr/native/ns_sink.c vr/native/ns_sink.h vr/native/ns_gpu.c $(SRC) $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/test_ns_sink.c vr/native/ns_sink.c vr/native/ns_gpu.c vr/native/ns_bridge.c $(SRC) -lm -lpthread -o $@
+test-sink: $(B)/test_ns_sink
+	$(B)/test_ns_sink
+.PHONY: test-sink
+
 # Red de seguridad de vértices (ns_gpu_net_*, réplica de NativeShaders.metal), soldaduras encadenadas, manos propias e interpolación: pruebas sintéticas.
 #   make -f vr/native/extract.mk test-net
 NETSRC := vr/native/ns_gpu.c vr/native/ns_adapt.c vr/native/ns_extract.c vr/native/ns_light.c vr/native/ns_bridge.c vr/body/vr_hand_skin.c vr/body/vr_hand_asset.c
@@ -110,7 +118,7 @@ test-fill-san:
 # Banco sin conexión del enganche (envoltura / respaldo, jugador oculto por el motor) sobre volcados reales NSD1. Los volcados llevan datos del juego: no se suben al repositorio.
 #   make -f vr/native/extract.mk test-dumps DUMPS=<carpeta con volcados>     (sin DUMPS se salta)
 DUMPS ?=
-DUMPSRC := vr/native/ns_extract_glue.c vr/native/ns_hook.c vr/native/ns_bridge.c vr/native/ns_player.c vr/native/ns_dump.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_cpuref.c vr/native/ns_fx.c vr/native/ns_fxcmp.c vr/native/ns_fx_export.c vr/native/ns_gpu.c
+DUMPSRC := vr/native/ns_extract_glue.c vr/native/ns_sink.c vr/native/ns_hook.c vr/native/ns_bridge.c vr/native/ns_player.c vr/native/ns_dump.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_cpuref.c vr/native/ns_fx.c vr/native/ns_fxcmp.c vr/native/ns_fx_export.c vr/native/ns_gpu.c
 $(B)/test_ns_dumps: vr/native/test_ns_dumps.c $(DUMPSRC) $(HDR) vr/native/ns_hook.h vr/native/ns_dump.h | $(B)
 	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/test_ns_dumps.c $(DUMPSRC) -lm -lpthread -o $@
 test-dumps: $(B)/test_ns_dumps

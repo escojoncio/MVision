@@ -140,8 +140,8 @@ static void t_hook(void) {
     ctx_key = 0; ns_capture(RAM, NULL); ns_hook_tick(RAM);
     ns_bridge_acquire(b, ns_now_ns(), &v);
     CHECK(!(v.cur->piece[1 + 6 + 1].flags & NS_PF_HIDDEN), "sin jugador no se oculta nada");
-    /* tumbado en primera persona: además de la cabeza se ocultan torso, cuello y brazos (hombros); antebrazos, manos, pelvis y piernas se quedan */
-    ctx_key = OBJ; ctx_parts = NS_PARTS_CHEST;
+    /* partes pedidas por el contexto (hide_parts): además de la cabeza se ocultan las de la máscara y solo esas */
+    ctx_key = OBJ; ctx_parts = (1u << 1) | (1u << 5) | (1u << 2) | (1u << 7);
     ns_capture(RAM, NULL); ns_hook_tick(RAM);
     ns_bridge_acquire(b, ns_now_ns(), &v);
     #define PIECE_OF(k) (1 + (k) + ((k) > 4 ? 1 : 0))
@@ -149,13 +149,30 @@ static void t_hook(void) {
     static const int hid[] = {1, 2, 5, 6, 7}, vis[] = {0, 3, 4, 8, 9, 10, 11, 12, 13, 14, 15};
     for (unsigned i = 0; i < sizeof hid / sizeof *hid; i++) ok_hid &= (v.cur->piece[PIECE_OF(hid[i])].flags & NS_PF_HIDDEN) != 0;
     for (unsigned i = 0; i < sizeof vis / sizeof *vis; i++) ok_vis &= !(v.cur->piece[PIECE_OF(vis[i])].flags & NS_PF_HIDDEN);
-    CHECK(ok_hid, "tumbado: cabeza, cuello, torso y brazos ocultos");
-    CHECK(ok_vis, "tumbado: antebrazos, manos, pelvis y piernas siguen a la vista");
+    CHECK(ok_hid, "hide_parts: cabeza y las partes de la máscara ocultas");
+    CHECK(ok_vis, "hide_parts: el resto sigue a la vista");
     ctx_parts = 0;
     ns_capture(RAM, NULL); ns_hook_tick(RAM);
     ns_bridge_acquire(b, ns_now_ns(), &v);
-    CHECK(!(v.cur->piece[PIECE_OF(1)].flags & NS_PF_HIDDEN) && !(v.cur->piece[PIECE_OF(2)].flags & NS_PF_HIDDEN), "de pie: torso y brazos a la vista");
+    CHECK(!(v.cur->piece[PIECE_OF(1)].flags & NS_PF_HIDDEN) && !(v.cur->piece[PIECE_OF(2)].flags & NS_PF_HIDDEN), "sin máscara: torso y brazos a la vista");
     #undef PIECE_OF
+    /* objeto pegado a la cabeza del jugador (cabeza con gafas / máscara de un objeto equipado): oculto en primera persona, visible si la cabeza propia se ve */
+    w32(0x80140000u + 0x20, OBJ + 0x48 + 0x5C * 6);
+    CHECK(!(v.cur->piece[18].flags & NS_PF_HIDDEN) && !(v.cur->piece[0].flags & NS_PF_HIDDEN), "antes: los otros objetos se ven");
+    ns_capture(RAM, NULL); ns_hook_tick(RAM);
+    ns_bridge_acquire(b, ns_now_ns(), &v);
+    CHECK((v.cur->piece[18].flags & NS_PF_HIDDEN) != 0, "objeto pegado a la cabeza: oculto en primera persona");
+    CHECK(!(v.cur->piece[0].flags & NS_PF_HIDDEN), "los demás objetos siguen a la vista");
+    { int was = ctx_hide; ctx_hide = 0;
+      ns_capture(RAM, NULL); ns_hook_tick(RAM);
+      ns_bridge_acquire(b, ns_now_ns(), &v);
+      CHECK(!(v.cur->piece[18].flags & NS_PF_HIDDEN), "con la cabeza a la vista (cámara del juego) el objeto pegado también se ve");
+      ctx_hide = was; }
+    w32(0x80140000u + 0x20, OBJ + 0x48 + 0x5C * 4);   /* pegado a la mano (arma): no es de la cabeza */
+    ns_capture(RAM, NULL); ns_hook_tick(RAM);
+    ns_bridge_acquire(b, ns_now_ns(), &v);
+    CHECK(!(v.cur->piece[18].flags & NS_PF_HIDDEN), "objeto pegado a otra pieza: no se toca");
+    w32(0x80140000u + 0x20, 0);
     ns_hook_init(NULL); ns_capture(RAM, NULL);   /* sin puente: no hace nada */
     ns_bridge_destroy(b);
 }

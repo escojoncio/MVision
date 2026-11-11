@@ -67,6 +67,7 @@ const WeaponDef w_rifle = {
     .mode = WF_AUTO, .rpm = RIFLE_RPM, .mag_capacity = RIFLE_MAG,
     .state_size = sizeof(RifleState),
     .init = rifle_init, .update = rifle_update,
+    .make_ready = gun_make_ready,
 };
 
 int rifle_loose_mag(const WeaponState *s, WPose *out) { return gun_loose_mag(&((const RifleState *)s)->g, out); }

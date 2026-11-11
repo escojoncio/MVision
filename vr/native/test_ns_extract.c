@@ -366,6 +366,12 @@ int main(void) {
         w16(piece(O7, 0) + 0x50, 0);
         rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
         CHECK(es.bias_mismatch == 1);
+        CHECK(!(sc.piece[0].flags & NS_PF_HIDDEN));
+        /* pieza retirada por el motor (sesgo -30000: cabeza sustituida por la de un objeto equipado): oculta, con su malla */
+        w16(piece(O7, 0) + 0x50, (uint32_t)-30000 & 0xFFFF);
+        rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
+        CHECK(rc == 0 && sc.n_piece == 1 && (sc.piece[0].flags & NS_PF_HIDDEN) && sc.piece[0].mesh_id != 0);
+        w16(piece(O7, 0) + 0x50, 1000);
     }
     /* un contador por motivo */
     fresh();

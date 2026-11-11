@@ -28,6 +28,7 @@ typedef struct {
     float fx, fy, cx, cy;        /* proyección en píxeles: sx = cx + fx*x/z, sy = cy + fy*y/z */
     int w, h;
     float znear;                 /* plano cercano en unidades del ojo (>0) */
+    float zreject;               /* > 0: se descarta ENTERO el triángulo con algún vértice a z <= zreject (regla del motor con su cámara: sin división fiable no hay polígono; réplica del descarte de ns_vertex con U.misc.y, NativeShaders.metal). 0 = sin descarte */
 } NsRCam;
 
 /* Búfer de color (0..31 por canal) + 1/z (0 = sin cobertura: hueco). */

@@ -51,7 +51,7 @@ void hle_vrcam_view(Cpu *c) {
 
 /* Origen angular del mando (el juego lo fija cada frame a la guiñada de su cámara + 2048). */
 void hle_vrcam_padorg(Cpu *c) {
-    if (vrcam_active() && vrcam_config()->override_pad) A0 = (uint32_t)vrcam_pad_origin();
+    if ((vrcam_active() || vrcam_wall_view()) && vrcam_config()->override_pad) A0 = (uint32_t)vrcam_pad_origin();   /* en la vista de pared del juego el mando conserva el rumbo con el que el jugador se pegó (el stick sigue empujando hacia la pared) */
     rt_orig(c, "vrcam_padorg");
 }
 

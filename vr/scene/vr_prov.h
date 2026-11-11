@@ -48,6 +48,7 @@ typedef struct {
 int vpc_rule(const ProvEntry *e, const GpuOp *o);
 /* ¿Es la entrada scope.c (rutina 0x80063d54), el actor del objeto SCOPE (prismáticos)? sight.c solo (sin scope.c) es la mira de otras armas. e == NULL -> 0. */
 int vpc_is_binocular(const ProvEntry *e);
+int vpc_is_mosaic(const ProvEntry *e);     /* mosaico de censura del juego (mosaic.c): celdas 2D que muestrean el propio fotograma */
 /* Efecto de pantalla de la entrada: VPC_COV_GAS (gas_efct.c), VPC_COV_FADE (fadeio.c) o -1 (no es de la clase FX_SCREEN; e == NULL -> -1). */
 int vpc_screen_kind(const ProvEntry *e);
 /* ¿Es la entrada una rutina de ordenación/encadenado (0x8001da18, 0x80018304)? Encadena paquetes que escribieron otros actores: su id no dice quién dibuja. e == NULL -> 0. */
@@ -59,7 +60,7 @@ int vpc_is_chain(const ProvEntry *e);
  * con animación no cuenta) se descarta para siempre (era HUD): así un componente raro del HUD no desaparece del HUD. Las clases FX / FULL / SCOPE nunca se aprenden como ventana. */
 #define VPC_QUIET_LISTS 30
 #define VPC_LEAK_LISTS 20
-enum { VPC_COV_PACKET = 0, VPC_COV_GAS, VPC_COV_FADE };   /* qué se pregunta a VrProvLearn.covered */
+enum { VPC_COV_PACKET = 0, VPC_COV_GAS, VPC_COV_FADE, VPC_COV_MOSAIC };   /* qué se pregunta a VrProvLearn.covered (MOSAIC: el mosaico de censura de esta lista, que el anfitrión convierte en un parche del mundo: vr/host/vr_mosaic.h) */
 enum { VPC_ST_OTHER = 0, VPC_ST_CLOSED, VPC_ST_OPEN };   /* estado de la vista de la lista: mundo con ventana cerrada / abierta / otra vista (no se aprende) */
 typedef struct {
     uint8_t win[PROV_MAX];             /* 0 sin decidir, 1 WINDOW, 2 descartado */

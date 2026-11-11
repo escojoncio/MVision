@@ -17,6 +17,12 @@
  *     ve igualmente, en pantalla grande.
  *   - Histéresis en fotogramas de VBlank (50 Hz) para que un parpadeo de una bandera del juego no haga saltar la vista:
  *     a CINE tras `to_cine` fotogramas seguidos de motivo de cine; a MUNDO tras `to_world` fotogramas seguidos de motivo de mundo.
+ *   - Viniendo de una vista nativa (mundo o pantalla 3D) no se enseña en la pantalla plana un fotograma 3D rasterizado por la PS1 (baja resolución, sin estéreo): (1) mientras el motor no
+ *     dibuja (cargas, cambios de zona: `frozen`) la vista entera se congela (VRV_R_FROZEN) y el render nativo repite su última escena dibujada; (2) si la clase pedida es 2D pero la última
+ *     lista del juego trae 3D (`list3d`: arranque de una escena o de la vista de pared, cuyas primeras listas aún salen con la cámara VR; zona recién cargada sin jugador) la vista entera
+ *     se retiene (VRV_R_HOLD) como mucho hold_max fotogramas. En los dos casos se retienen MODO y clase: con modo cine la app solo deja la pantalla plana si la clase es la pantalla 3D.
+ *     La radio, la pausa, las ventanas, el juego detenido y la muerte sí son 2D aunque haya 3D detrás.
+ *   - Pegado a la pared (`wall`) con control: CINE con la pantalla 3D del motor (su cámara de pared, que enseña lo que la primera persona no puede) y el mando original.
  *   - Se incluye el motivo (VRV_R_*) para el registro y para que la interfaz distinga "el mundo se está pidiendo" de "cine por cinemática". */
 #include <stdint.h>
 
@@ -39,7 +45,11 @@ enum {
     VRV_R_DEAD,            /* el jugador ha muerto (vida a cero / fin de partida): el motor enseña su escena de muerte con su propia cámara */
     VRV_R_SELECTOR,        /* ventana de armas/objetos con la cámara VR activa: MUNDO en primera persona + ventana como panel flotante */
     VRV_R_PAUSE_WORLD,     /* pausa con la cámara VR activa: igual que el selector */
-    VRV_R_PENDING          /* transición: el jugador ya tiene el control (fin de radio / de escena) pero la cámara VR aún no está: vista congelada, la app muestra negro, NUNCA cine plano */
+    VRV_R_PENDING,         /* transición: el jugador ya tiene el control (fin de radio / de escena) pero la cámara VR aún no está: vista congelada, la app muestra negro, NUNCA cine plano */
+    VRV_R_WALL,            /* pegado a la pared con control: la cámara VR se apaga a propósito (vrcam_wall_view) y se ve el juego con SU cámara de pared en la pantalla 3D, con el mando original */
+    VRV_R_FROZEN,          /* el motor no está dibujando (carga / cambio de zona: su contador de fotogramas sin dibujo > 0): en pantalla queda su último fotograma; viniendo de una vista nativa, la
+                            * vista (modo y clase) se congela con la última escena nativa, nunca se enseña ese fotograma de la VRAM en la pantalla plana */
+    VRV_R_HOLD             /* la lista trae 3D de PS1 sin cámara del motor reconocida y se venía de una vista nativa: vista (modo y clase) retenida un tiempo acotado en vez de la pantalla plana */
 };
 
 typedef struct {
@@ -53,6 +63,9 @@ typedef struct {
     uint8_t video;         /* la última lista es un fotograma de vídeo pregrabado (subidas a VRAM que cubren la zona mostrada, sin 3D) */
     uint8_t mdec;          /* decodificador de vídeo (MDEC) activo en los últimos fotogramas: hay un FMV reproduciéndose (más fiable que `video`; gana al 3D) */
     uint8_t native_ok;     /* la última escena nativa publicada es apta y reciente (ns_hook_native_ready): el mundo se puede dibujar con el render nativo (no basta el puente: la escena debe existir y valer) */
+    uint8_t wall;          /* pegado a la pared con la vista del juego pedida (vrcam_wall_view) */
+    uint8_t frozen;        /* el motor no dibuja (contador de fotogramas sin dibujo del motor > 0): lo que hay en la pantalla del juego es un fotograma viejo */
+    uint8_t list3d;        /* la última lista capturada trae geometría 3D sustancial, con la cámara que sea (scene3d exige la del motor): la pantalla del juego es un render 3D de PS1 */
 } VrViewIn;
 
 /* Qué es lo que se ve (con histéresis propia, ver VrView.kind):
@@ -83,6 +96,10 @@ typedef struct {
     int pend_run;
     int cam_seen;          /* la cámara VR ha estado activa alguna vez (si no, no hay transición que esperar: edición no reconocida) */
     unsigned changed;      /* tras vrview_step: VRV_CH_* de lo que cambió en ese fotograma (0 = nada) */
+    int frozen_max;        /* fotogramas máximos seguidos de VRV_R_FROZEN (tope de seguridad: pasado, clasificación normal) */
+    int frozen_run;
+    int hold_max;          /* fotogramas máximos seguidos de VRV_R_HOLD (pasado, clasificación normal: pantalla plana) */
+    int hold_run;
 } VrView;
 
 enum { VRV_CH_MODE = 1, VRV_CH_KIND = 2, VRV_CH_REASON = 4 };

@@ -120,6 +120,13 @@ void gun_init(GunState *g, const WeaponDef *d, const GunCfg *c) {
     g->equip_latch = 1;
 }
 
+void gun_make_ready(WeaponState *ws, int mag_rounds) {
+    GunState *g = (GunState *)ws;
+    ws->mag_inserted = 1; ws->mag_rounds = mag_rounds > 0 ? mag_rounds : 0; ws->chambered = 1;
+    g->mag_slide = 1.0f; g->mag_loose.active = 0; g->hand_mag = 0;
+    g->bolt_locked = 0; g->bolt_t = 0; g->bolt_pos = 0; g->seq = 0; g->seq_t = 0; g->empty_t = 0; g->charge_pos = 0; g->charge_hand = -1; g->charge_pulled = 0;
+}
+
 int gun_loose_mag(const GunState *g, WPose *out) {
     if (!g->mag_loose.active) return 0;
     *out = g->mag_loose.pose; return 1;

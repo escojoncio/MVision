@@ -349,5 +349,128 @@ int main(void) {
         CHECK(vrhost_stereo2d_inside(1, 0, 0) == 0, "gpu sin nada = panel aparte");
     }
     fprintf(stderr, fails ? "test_view: %d FALLOS\n" : "test_view: OK\n", fails);
+
+    /* ---- pegado a la pared: cine con la pantalla 3D del motor, nunca «esperando cámara VR» ---- */
+    {
+        VrViewIn w = world(); w.cam_active = 0; w.wall = 1;
+        CHECK(vrview_reason(&w) == VRV_R_WALL, "pared con control y cámara VR apagada a propósito");
+        CHECK(vrview_kind_of(&w) == VRV_K_UI, "pared sin lista del motor todavía: la función pura da 2D (el paso la retiene)");
+        w.scene3d = 1; CHECK(vrview_kind_of(&w) == VRV_K_ENGINE, "pared con 3D del motor: pantalla 3D");
+        w.in_control = 0; CHECK(vrview_reason(&w) == VRV_R_LOST_CONTROL, "sin control no es vista de pared");
+        w = world(); w.cam_active = 0; w.wall = 1; w.comms = 1; CHECK(vrview_reason(&w) == VRV_R_COMMS, "la radio gana a la pared");
+        VrView vw; vrview_reset(&vw);
+        VrViewIn a = world(); a.native_ok = 1; a.list3d = 1;
+        for (int k = 0; k < 10; k++) vrview_step(&vw, &a);
+        CHECK(vw.mode == VRV_WORLD && vw.kind == VRV_K_WORLD, "mundo antes de la pared");
+        /* se pega: la cámara VR se apaga; las primeras listas aún salen con la cámara VR (scene3d = 0, list3d = 1): la vista ENTERA se retiene (con modo cine y clase mundo la app
+         * enseñaría la pantalla plana con el fotograma de la PS1) */
+        a.cam_active = 0; a.wall = 1;
+        int saw_flat = 0;   /* lo que la app dibuja como pantalla plana: modo cine con una clase que no es la pantalla 3D */
+        for (int k = 0; k < 8; k++) { vrview_step(&vw, &a); saw_flat |= vw.mode == VRV_CINEMA && vw.kind != VRV_K_ENGINE; CHECK(vw.reason == VRV_R_HOLD, "pared sin lista del motor: vista retenida, no transición"); }
+        CHECK(vw.mode == VRV_WORLD && !saw_flat && vw.kind == VRV_K_WORLD, "pared: mundo retenido hasta la lista del motor (modo %d clase %d)", vw.mode, vw.kind);
+        a.scene3d = 1;
+        for (int k = 0; k < 6; k++) { vrview_step(&vw, &a); saw_flat |= vw.mode == VRV_CINEMA && vw.kind != VRV_K_ENGINE; }
+        CHECK(vw.mode == VRV_CINEMA && vw.kind == VRV_K_ENGINE && vw.reason == VRV_R_WALL && !saw_flat, "pared: pantalla 3D en cuanto el motor dibuja con su cámara, sin pantalla plana");
+        int saw_ui = 0;
+        /* se despega: sin pared ni cámara VR todavía = transición (vista retenida), después el mundo */
+        a.wall = 0; a.scene3d = 0;
+        vrview_step(&vw, &a);
+        CHECK(vw.reason == VRV_R_PENDING && vw.mode == VRV_CINEMA && vw.kind == VRV_K_ENGINE, "al despegarse: transición con la vista retenida");
+        a.cam_active = 1;
+        for (int k = 0; k < 4; k++) { vrview_step(&vw, &a); saw_ui |= vw.kind == VRV_K_UI; }
+        CHECK(vw.mode == VRV_WORLD && vw.kind == VRV_K_WORLD && !saw_ui, "vuelta al mundo sin pasar por 2D");
+    }
+    /* ---- el motor no dibuja (carga / cambio de zona): vista congelada, nunca la pantalla plana con el fotograma viejo ---- */
+    {
+        VrView vf; vrview_reset(&vf);
+        VrViewIn a = world(); a.native_ok = 1; a.list3d = 1;
+        for (int k = 0; k < 10; k++) vrview_step(&vf, &a);
+        CHECK(vf.mode == VRV_WORLD && vf.kind == VRV_K_WORLD, "mundo antes de la carga");
+        VrViewIn l; memset(&l, 0, sizeof l); l.cam_active = 1; l.frozen = 1; l.list3d = 1;      /* sin partida, motor sin dibujar */
+        for (int k = 0; k < 200; k++) { vrview_step(&vf, &l); CHECK(vf.mode == VRV_WORLD && vf.kind == VRV_K_WORLD && vf.reason == VRV_R_FROZEN, "carga: mundo congelado (k=%d modo %d clase %d)", k, vf.mode, vf.kind); }
+        CHECK(vf.changed == 0, "congelado: sin cambios que registrar");
+        /* zona nueva: el motor vuelve a dibujar con una escena (cámara del guion) */
+        VrViewIn c = world(); c.in_control = 0; c.cam_active = 0; c.cinematic = 1; c.list3d = 1;   /* primeras listas: 3D sin cámara del motor reconocida */
+        int saw_flat = 0;
+        for (int k = 0; k < 6; k++) { vrview_step(&vf, &c); saw_flat |= vf.mode == VRV_CINEMA && vf.kind != VRV_K_ENGINE; }
+        CHECK(vf.reason == VRV_R_HOLD && vf.mode == VRV_WORLD && vf.kind == VRV_K_WORLD, "zona nueva sin cámara del motor: vista retenida");
+        c.scene3d = 1;
+        for (int k = 0; k < 6; k++) { vrview_step(&vf, &c); saw_flat |= vf.mode == VRV_CINEMA && vf.kind != VRV_K_ENGINE; }
+        CHECK(vf.mode == VRV_CINEMA && vf.kind == VRV_K_ENGINE && !saw_flat, "de la carga a la escena sin pasar por la pantalla plana");
+        /* una pantalla 2D de verdad (sin 3D en la lista) sí pasa a 2D */
+        VrViewIn m; memset(&m, 0, sizeof m);
+        for (int k = 0; k < 12; k++) vrview_step(&vf, &m);
+        CHECK(vf.kind == VRV_K_UI, "lista sin 3D: 2D");
+        /* motor sin dibujar desde 2D (título -> carga): no hay vista nativa que congelar, clasificación normal (el motivo sigue siendo el de la pantalla: mismo formato de pantalla de texto) */
+        m.frozen = 1;
+        for (int k = 0; k < 20; k++) vrview_step(&vf, &m);
+        CHECK(vf.kind == VRV_K_UI && vf.mode == VRV_CINEMA && vf.reason == VRV_R_NO_GAME, "carga desde un menú: se queda el menú con su motivo");
+        /* un vídeo durante la carga no se congela */
+        m.mdec = 1; vrview_step(&vf, &m); CHECK(vf.reason != VRV_R_FROZEN, "con vídeo no hay congelación");
+        for (int k = 0; k < 5; k++) vrview_step(&vf, &m);
+        CHECK(vf.kind == VRV_K_VIDEO, "vídeo durante la carga: pantalla de vídeo");
+        /* tope de seguridad */
+        VrView vt; vrview_reset(&vt); vt.frozen_max = 5;
+        l.list3d = 0;
+        for (int k = 0; k < 10; k++) vrview_step(&vt, &a);
+        for (int k = 0; k < 5; k++) { vrview_step(&vt, &l); CHECK(vt.reason == VRV_R_FROZEN, "dentro del tope"); }
+        vrview_step(&vt, &l); CHECK(vt.reason == VRV_R_NO_GAME, "pasado el tope: clasificación normal");
+        vrview_step(&vt, &a); vrview_step(&vt, &l); CHECK(vt.reason == VRV_R_FROZEN, "el tope se rearma al volver a dibujar");
+    }
+    /* ---- arranque de una escena desde el mundo: las primeras listas salen aún con la cámara VR (scene3d = 0): la clase no pasa por 2D; la radio, la pausa y el juego detenido sí ---- */
+    {
+        VrView vs; vrview_reset(&vs);
+        VrViewIn a = world(); a.native_ok = 1; a.list3d = 1;
+        for (int k = 0; k < 10; k++) vrview_step(&vs, &a);
+        VrViewIn c = world(); c.in_control = 0; c.cam_active = 0; c.cinematic = 1; c.list3d = 1;
+        int saw_flat = 0;
+        for (int k = 0; k < 8; k++) { vrview_step(&vs, &c); saw_flat |= vs.mode == VRV_CINEMA && vs.kind != VRV_K_ENGINE; }
+        CHECK(vs.mode == VRV_WORLD && vs.kind == VRV_K_WORLD && vs.reason == VRV_R_HOLD && !saw_flat, "escena: vista retenida mientras la lista trae 3D sin cámara del motor");
+        c.scene3d = 1; for (int k = 0; k < 6; k++) { vrview_step(&vs, &c); saw_flat |= vs.mode == VRV_CINEMA && vs.kind != VRV_K_ENGINE; }
+        CHECK(vs.mode == VRV_CINEMA && vs.kind == VRV_K_ENGINE && !saw_flat, "escena: pantalla 3D sin pasar por la plana");
+        /* desde la pantalla 3D también se retiene (corte de plano con listas sin cámara reconocida) y la retención está acotada: pasado hold_max, pantalla plana */
+        c.scene3d = 0;
+        for (int k = 0; k < vs.hold_max; k++) { vrview_step(&vs, &c); CHECK(vs.reason == VRV_R_HOLD && vs.mode == VRV_CINEMA && vs.kind == VRV_K_ENGINE, "retención desde la pantalla 3D (k=%d)", k); }
+        for (int k = 0; k < 12; k++) vrview_step(&vs, &c);
+        CHECK(vs.reason == VRV_R_CINEMATIC && vs.kind == VRV_K_UI, "retención agotada: clasificación normal");
+        c.list3d = 0; vrview_step(&vs, &c); c.list3d = 1; c.scene3d = 1; for (int k = 0; k < 8; k++) vrview_step(&vs, &c);
+        c.scene3d = 0; vrview_step(&vs, &c); CHECK(vs.reason == VRV_R_HOLD, "la retención se rearma cuando deja de hacer falta");
+        /* listas con y sin 3D alternadas: el tope no se rearma con cada lista sin 3D (la retención termina) */
+        vrview_reset(&vs); for (int k = 0; k < 10; k++) vrview_step(&vs, &a);
+        { VrViewIn alt = world(); alt.in_control = 0; alt.cam_active = 0; alt.cinematic = 1; int holds = 0;
+          for (int k = 0; k < 600; k++) { alt.list3d = (uint8_t)(k & 1); vrview_step(&vs, &alt); holds += vs.reason == VRV_R_HOLD; }
+          CHECK(holds == vs.hold_max && vs.kind == VRV_K_UI && vs.mode == VRV_CINEMA, "lista 3D alternada: retención acotada (%d fotogramas) y después 2D", holds); }
+        /* una carga no gasta el plazo de espera de la cámara VR: tras ella sigue la transición (velo), no la pantalla plana */
+        vrview_reset(&vs); for (int k = 0; k < 10; k++) vrview_step(&vs, &a);
+        { VrViewIn nc = world(); nc.cam_active = 0; nc.frozen = 1;
+          for (int k = 0; k < 400; k++) { vrview_step(&vs, &nc); CHECK(vs.reason == VRV_R_FROZEN && vs.mode == VRV_WORLD, "carga con control y sin cámara VR: congelado (k=%d)", k); }
+          nc.frozen = 0; vrview_step(&vs, &nc); vrview_step(&vs, &nc);
+          CHECK(vs.reason == VRV_R_PENDING && vs.mode == VRV_WORLD && vs.kind == VRV_K_WORLD, "tras la carga: esperando la cámara VR, no cine (motivo %d)", vs.reason); }
+        /* una ventana 2D del juego pedida se enseña aunque el motor no dibuje */
+        vrview_reset(&vs); for (int k = 0; k < 10; k++) vrview_step(&vs, &a);
+        { VrViewIn pw = world(); pw.native_ok = 1; pw.paused = 1; pw.frozen = 1; vrview_step(&vs, &pw);
+          CHECK(vs.reason == VRV_R_PAUSE_WORLD, "pausa sobre el mundo con el motor sin dibujar: se enseña la pausa");
+          pw.cam_active = 0; pw.in_control = 0; for (int k = 0; k < 8; k++) vrview_step(&vs, &pw);
+          CHECK(vs.reason == VRV_R_PAUSED && vs.kind == VRV_K_UI, "pausa sin cámara VR con el motor sin dibujar: 2D"); }
+        /* mezcla de modo cine y clase mundo (histéresis separadas): es la pantalla plana para la app, no una vista nativa que retener */
+        vrview_reset(&vs); for (int k = 0; k < 10; k++) vrview_step(&vs, &a);
+        { VrViewIn fz; memset(&fz, 0, sizeof fz); fz.frozen = 1; fz.list3d = 1; vs.mode = VRV_CINEMA; vs.kind = VRV_K_WORLD; vrview_step(&vs, &fz);
+          CHECK(vs.reason != VRV_R_FROZEN && vs.reason != VRV_R_HOLD, "cine con clase mundo: sin retención (motivo %d)", vs.reason); }
+        /* la muerte (menú de fin de partida) no se retiene */
+        vrview_reset(&vs); for (int k = 0; k < 10; k++) vrview_step(&vs, &a);
+        VrViewIn dd = world(); dd.in_control = 0; dd.cam_active = 0; dd.dead = 1; dd.list3d = 1;
+        for (int k = 0; k < 8; k++) vrview_step(&vs, &dd);
+        CHECK(vs.kind == VRV_K_UI && vs.reason == VRV_R_DEAD, "muerte sin escena del motor: 2D, sin retención");
+        vrview_reset(&vs); for (int k = 0; k < 10; k++) vrview_step(&vs, &a);
+        for (int k = 0; k < 8; k++) vrview_step(&vs, &c);
+        c.scene3d = 1; for (int k = 0; k < 6; k++) vrview_step(&vs, &c);
+        VrViewIn r = world(); r.in_control = 0; r.cam_active = 0; r.comms = 1; r.list3d = 1;
+        for (int k = 0; k < 15; k++) vrview_step(&vs, &r);
+        CHECK(vs.kind == VRV_K_UI, "radio: 2D aunque la lista traiga 3D");
+        vrview_reset(&vs); for (int k = 0; k < 10; k++) vrview_step(&vs, &a);
+        VrViewIn pz = world(); pz.in_control = 0; pz.cam_active = 0; pz.paused = 1; pz.list3d = 1;
+        for (int k = 0; k < 6; k++) vrview_step(&vs, &pz);
+        CHECK(vs.kind == VRV_K_UI, "pausa sin cámara VR: 2D");
+    }
     return fails ? 1 : 0;
 }

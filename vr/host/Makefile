@@ -55,6 +55,10 @@ $(OUT)/test_view: test_view.c vr_view.c vr_view.h
 	@mkdir -p $(OUT)
 	$(CC) -I. $(CFLAGS) -o $@ test_view.c vr_view.c
 
+$(OUT)/test_mosaic: test_mosaic.c vr_mosaic.h
+	@mkdir -p $(OUT)
+	$(CC) -I. -I$(RT) $(CFLAGS) -o $@ test_mosaic.c -lm
+
 $(OUT)/test_cine: test_cine.c vr_cine.c vr_cine.h
 	@mkdir -p $(OUT)
 	$(CC) -I. $(CFLAGS) -o $@ test_cine.c vr_cine.c -lm
@@ -84,9 +88,10 @@ $(OUT)/test_bodylive: test_bodylive.c vr_bodylive.h vr_smooth.c vr_smooth.h ../n
 	@mkdir -p $(OUT)
 	$(CC) -I. -I../native $(CFLAGS) -o $@ test_bodylive.c vr_smooth.c ../native/ns_bridge.c -lm -lpthread
 
-test: $(OUT)/test_view $(OUT)/test_cine $(OUT)/test_smooth $(OUT)/test_bodylive $(OUT)/test_dump_pick $(OUT)/test_vrprov $(OUT)/test_vrgame_fire
+test: $(OUT)/test_view $(OUT)/test_mosaic $(OUT)/test_cine $(OUT)/test_smooth $(OUT)/test_bodylive $(OUT)/test_dump_pick $(OUT)/test_vrprov $(OUT)/test_vrgame_fire
 	$(OUT)/test_vrgame_fire
 	$(OUT)/test_view
+	$(OUT)/test_mosaic
 	$(OUT)/test_cine
 	$(OUT)/test_smooth
 	$(OUT)/test_bodylive

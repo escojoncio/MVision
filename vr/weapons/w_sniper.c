@@ -155,6 +155,7 @@ const WeaponDef w_sniper = {
     .mode = WF_SEMI, .rpm = SNIPER_RPM, .mag_capacity = SNIPER_MAG,
     .state_size = sizeof(SniperState),
     .init = sniper_init, .update = sniper_update,
+    .make_ready = gun_make_ready,
 };
 
 int sniper_loose_mag(const WeaponState *s, WPose *out) { return gun_loose_mag(&((const SniperState *)s)->g, out); }

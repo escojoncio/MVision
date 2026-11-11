@@ -111,6 +111,7 @@ static void capture(const uint8_t *ram, const uint8_t *scratch, int kind) {   /*
         if (head_ok && arms_ok && !o.refresh_parts) s->valid |= NS_SV_PLAYER_OK;
         else if (!(head_ok && arms_ok)) { H.refresh_parts = 0; if (o.refresh_parts) inc(&H.st.ik_missed); }
     }
+    if (present >= 0 && o.hide_head) ns_player_hide_head_attached(s, ram, o.player_key);   /* la cabeza de un objeto equipado (gafas, máscara) rodea el ojo igual que la propia */
     /* El jugador está en la escena (el motor lo oculta en ciertas cámaras, pero se extrae) y no se pudo enlazar o ocultar su cabeza: ninguna de sus piezas se dibuja (nunca el cuerpo entero con la cabeza dentro de la vista VR) */
     if (present >= 0 && o.hide_head && !head_ok) {
         const NsInstance *pi = &s->inst[present];

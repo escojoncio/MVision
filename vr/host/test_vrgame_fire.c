@@ -795,6 +795,44 @@ static int drawn_point(WPoint pt, float R[9], float out[3]) {
     return 1;
 }
 static int hp_item(int side) { int it; float tr, th; vrgame_hand_pose_in(side, &it, &tr, &th); return it; }
+/* Recarga automática: con balas en el cargador del juego el arma VR no puede quedarse muerta. Se reproduce el fallo del visor: la cuenta VR se adelanta a la del juego (disparos VR que el
+ * juego no hizo) y la pistola queda con la corredera abierta y sin bala mientras el juego tiene 5 en el cargador y ninguna en reserva (la recarga automática del arma exige reserva > 0). */
+static void auto_reload_never_dead(void) {
+    printf("-- recarga automática: arma VR vacía con balas en el cargador del juego --\n");
+    world(0, 5, 5);
+    fresh_pistol();
+    mv_vrgame_set_options(1, 2);
+    vbl(0.0f, 20);
+    MvVrGameStatus st; mv_vrgame_status(&st);
+    CHECK(st.active && pist_st->mag_inserted && pist_st->chambered, "arranque: pistola lista (cargador %d recámara %d)", pist_st->mag_inserted, pist_st->chambered);
+    /* la cuenta VR se agota antes que la del juego: cargador VR a cero y sin bala; el juego sigue con 5 */
+    pist_st->mag_rounds = 0; pist_st->chambered = 0;
+    uint32_t s0 = st.shots;
+    vbl(0.0f, 10); vbl(0.9f, 12); vbl(0.0f, 10);
+    mv_vrgame_status(&st);
+    CHECK(st.shots == s0 && !pist_st->chambered, "antes del plazo sigue vacía (el gatillo no dispara): disparos %u recámara %d", st.shots - s0, pist_st->chambered);
+    vbl(0.0f, 260);                                   /* > 2 s en total (8 ms por VBlank de prueba) */
+    CHECK(pist_st->mag_inserted && pist_st->chambered && pist_st->mag_rounds == 4, "pasado el plazo: lista con la cuenta del juego (cargador %d, recámara %d, balas %d)", pist_st->mag_inserted, pist_st->chambered, pist_st->mag_rounds);
+    vbl(0.0f, 5); vbl(0.9f, 12); vbl(0.0f, 5);
+    mv_vrgame_status(&st);
+    CHECK(st.shots == s0 + 1, "y vuelve a disparar (disparos %u)", st.shots - s0);
+    /* con el cargador del juego vacío no se inventa munición */
+    world(0, 0, 0);
+    fresh_pistol();
+    mv_vrgame_set_options(1, 2);
+    vbl(0.0f, 300);
+    CHECK(!pist_st->chambered, "juego sin balas: el arma VR sigue vacía");
+    /* en recarga manual el gesto es del jugador: no se toca */
+    world(0, 5, 5);
+    fresh_pistol();
+    mv_vrgame_set_options(1, 0);
+    vbl(0.0f, 20);
+    pist_st->mag_rounds = 0; pist_st->chambered = 0;
+    vbl(0.0f, 300);
+    CHECK(!pist_st->chambered, "recarga manual: sin puesta a punto automática");
+    mv_vrgame_set_options(1, 2);
+}
+
 static void two_hand_pistol(void) {
     printf("-- pistola a dos manos: agarre de la parte delantera/inferior, enganche de la mano de apoyo y apuntado por la línea de las manos --\n");
     for (int ms = 1; ms >= 0; ms--) {
@@ -960,6 +998,7 @@ int main(void) {
     aim_pose();
     aim_guard();
     two_hand_pistol();
+    auto_reload_never_dead();
     laser_stops_at_walls();       /* al final: consume números aleatorios y las pruebas anteriores dependen de la secuencia */
 
     printf("%s vrgame_fire: %d comprobaciones, %d fallos\n", fails ? "FALLO" : "OK", checks, fails);

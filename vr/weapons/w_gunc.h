@@ -76,6 +76,8 @@ void gun_update(GunState *g, const GunCfg *c, const WInput *in, WReloadMode rm,
                 const WGameBridge *br, const WQuat *aim);
 
 /* Datos para el render: cargador suelto cayendo, cargador en la mano y vainas. Devuelven 1 si hay. */
+/* WeaponDef.make_ready de las armas de este núcleo (GunState es el principio de su estado): cargador montado con `mag_rounds`, bala en la recámara, cerrojo cerrado, sin secuencia en curso. */
+void gun_make_ready(WeaponState *s, int mag_rounds);
 int gun_loose_mag(const GunState *g, WPose *out);
 int gun_held_mag(const GunState *g, const GunCfg *c, const WInput *in, WPose *out);
 int gun_casings(const GunState *g, WPose *out, int max);

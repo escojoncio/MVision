@@ -290,26 +290,38 @@ static void test_lerp(void) {
     printf("  interpolación: %ld pares aleatorios (rotaciones de hasta 180 grados, escalas 0,05..1), 0 fuera de rango esperados (%ld), norma máx. de columna %.3f\n", n, bad, worst);
 }
 
-/* 8. sesgo de orden de las piezas dinámicas: los pies (0,12-0,32 m bajo el suelo estático) deben pasar el z-buffer; el escenario y los sesgos negativos no cambian */
-static void test_dyn_raise(void) {
+/* 8. el sesgo de orden llega tal cual (ni el escenario ni los objetos dinámicos reciben adelantos propios: un adelanto global de los dinámicos los sacaba por delante de las paredes y recortaba
+ * el cuerpo propio contra el plano cercano) y la CLUT térmica solo se marca con la visión térmica activa en objetos que la admiten */
+static void test_raise_and_ir(void) {
     W w; build(&w, 0, 0.0f);
-    const float raise_m = 0.05f / 1000.0f, k_units = 0.35f / raise_m;   /* NS_GPU_DYN_RAISE_M = 0,35 m en unidades de `raise` */
     NsGpuPiece o;
     NsInstance *in = &w.sc.inst[0];
     in->flags = 0;
     ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 0, 0, -1, 0, &o);
-    CHECK(o.raise >= k_units * 0.999f, "dinámica sin sesgo: raise=%f (>= %f)", o.raise, k_units);
+    CHECK(o.raise == 0.0f, "dinámica sin sesgo: raise=%f", o.raise);
     ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 1000, 0, -1, 0, &o);
-    CHECK(o.raise >= k_units * 0.999f, "dinámica con decal pequeño: max, raise=%f", o.raise);
-    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 20000, 0, -1, 0, &o);
-    CHECK(o.raise == 20000.0f, "dinámica con sesgo mayor que K: se conserva (max, no suma), raise=%f", o.raise);
+    CHECK(o.raise == 1000.0f, "dinámica con sesgo: tal cual, raise=%f", o.raise);
     ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, -500, 0, -1, 0, &o);
-    CHECK(o.raise == -500.0f, "sesgo negativo (alejar) no se toca, raise=%f", o.raise);
+    CHECK(o.raise == -500.0f, "sesgo negativo tal cual, raise=%f", o.raise);
     in->flags = NS_IF_STATIC;
+    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, -750, 0, -1, 0, &o);
+    CHECK(o.raise == -750.0f, "estática conserva su sesgo: raise=%f", o.raise);
+    /* visión térmica */
+    in->flags = NS_IF_THERMAL_OK;
     ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 0, 0, -1, 0, &o);
-    CHECK(o.raise == 0.0f, "estática sin sesgo: raise=%f", o.raise);
-    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 1000, 0, -1, 0, &o);
-    CHECK(o.raise == 1000.0f, "estática conserva su sesgo: raise=%f", o.raise);
+    CHECK(!(o.flags & NSG_PF_IRCLUT), "sin visión térmica no hay CLUT térmica");
+    w.sc.valid |= NS_SV_FX; w.sc.screen.flags = NS_SFX_MODE_A;
+    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 0, 0, -1, 0, &o);
+    CHECK(!(o.flags & NSG_PF_IRCLUT), "visión nocturna: sin CLUT térmica");
+    w.sc.screen.flags = NS_SFX_MODE_B;
+    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 0, 0, -1, 0, &o);
+    CHECK((o.flags & NSG_PF_IRCLUT) != 0, "visión térmica + objeto que la admite: CLUT térmica");
+    in->flags = 0;
+    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 0, 0, -1, 0, &o);
+    CHECK(!(o.flags & NSG_PF_IRCLUT), "objeto sin textura térmica: su CLUT");
+    w.sc.valid &= ~NS_SV_FX; in->flags = NS_IF_THERMAL_OK;
+    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 0, 0, -1, 0, &o);
+    CHECK(!(o.flags & NSG_PF_IRCLUT), "sin efectos de pantalla válidos (NS_SV_FX) no se lee el modo");
     destroy(&w);
 }
 
@@ -322,7 +334,7 @@ int main(void) {
     test_garbage_vertex();
     test_hand();
     test_lerp();
-    test_dyn_raise();
+    test_raise_and_ir();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

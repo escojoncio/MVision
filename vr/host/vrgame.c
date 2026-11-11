@@ -126,6 +126,7 @@ typedef struct { int valid; float p[3], q[4]; } GripPose;
 static pthread_mutex_t HM = PTHREAD_MUTEX_INITIALIZER;   /* manos, opciones, hápticos, estado, publicación del arma */
 static HandSlot hand_in[2];
 static int opt_right = 1, opt_reload = WR_AUTOMATIC;   /* recarga por defecto automática: sin cinturón ni cargadores a mano */
+#define AUTO_READY_S 2.0f   /* recarga automática: s con balas en el cargador del juego y el arma VR sin bala antes de dejarla lista (la secuencia automática normal dura ~1,5 s) */
 static int opt_aim = 1;            /* sin efecto: el arma cuelga de la mano por el zócalo de vr_grip (la boca apunta como la mano), ya no toma el apuntado del mando */
 static float goff_p[3] = {0, 0, 0}, goff_q[4] = {0, 0, 0, 1};
 static float hap_out[2];
@@ -586,6 +587,7 @@ static struct {
     VrMissile mis;              /* misil guiado del juego vigilado (vr_missile.h) */
     uint32_t mis_serial;        /* nº de misiles creados visto por última vez (vrfire_last_missile) */
     float steady;               /* efecto del tranquilizante suavizado (0..1) */
+    float unready_t;            /* recarga automática: s seguidos con balas en el cargador del juego y el arma VR sin bala en la recámara (ver AUTO_READY_S) */
     VrReloadOut ro;             /* última salida de la recarga */
     uint32_t shots, arms, throws, places, dets, rejects;
     int last_disc;
@@ -607,7 +609,7 @@ static void publish_off(void) {
 void vrgame_reset(void) {
     vrbodyg_reset();
     G.inited = 0; G.active = 0; G.cur = -1; G.prev_mag_in = 0; G.prev_state = VRR_OFF; G.fire_edge = 0;
-    G.boot_done = 0; G.last_ns = 0; G.hand_ns = 0; G.det_t = 0; G.throw_hold = 0; G.two = 0; G.two_k = 0;
+    G.boot_done = 0; G.last_ns = 0; G.hand_ns = 0; G.det_t = 0; G.throw_hold = 0; G.two = 0; G.two_k = 0; G.unready_t = 0;
     aimfix_clear();
     memset(&G.ro, 0, sizeof G.ro);
     G.ro.sync_rounds = G.ro.sync_chambered = -1;
@@ -1075,7 +1077,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     if (mode && slot != G.cur && G.cur >= 0 && G.active) {    /* cambio de arma: la anterior se reinicia al volver a mostrarla */
         Slot *old = &SL[G.cur];
         if (atomic_load(&old->state) == LD_READY) { old->def->init(old->st); old->st->def = old->def; }
-        G.boot_done = 0; G.prev_mag_in = 0;
+        G.boot_done = 0; G.prev_mag_in = 0; G.unready_t = 0;
     }
     Slot *sl = slot >= 0 ? &SL[slot] : NULL;
     const int gid = slot >= 0 ? WPN_TAB[slot].game_id : -1;
@@ -1115,7 +1117,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
             publish_off();
             /* al volver a mostrarla se reinicia el estado del arma (cargador del juego otra vez) */
             if (G.cur >= 0 && atomic_load(&SL[G.cur].state) == LD_READY) { SL[G.cur].def->init(SL[G.cur].st); SL[G.cur].st->def = SL[G.cur].def; }
-            G.boot_done = 0;
+            G.boot_done = 0; G.unready_t = 0;
         }
         G.active = 0;
         G.cur = -1;
@@ -1286,6 +1288,19 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     int booting = !G.boot_done;
     def->update(st, &in, (WReloadMode)rmode, &G.br);
     G.boot_done = 1;      /* la primera actualización es la del arranque del arma */
+    /* Recarga AUTOMÁTICA: el arma VR es un reflejo del cargador del juego; con balas en el cargador del juego no puede quedarse sin disparar. Pasaba cuando su cuenta se adelantaba a la del
+     * juego (disparos VR que el juego no llegó a hacer: Snake recibiendo un golpe) y la reserva VIRTUAL ya no daba para otra recarga automática (wr_auto exige reserva > 0): corredera abierta
+     * y gatillo muerto hasta morir. Si pasa AUTO_READY_S así (más que la recarga automática entera, que no se corta), el arma se deja lista con la cuenta del juego. */
+    if (G.mag_weapon && rmode == WR_AUTOMATIC && G.game_mag > 0 && !(st->mag_inserted && st->chambered)) {
+        G.unready_t += dt;
+        if (G.unready_t > AUTO_READY_S) {
+            if (def->make_ready) def->make_ready(st, G.game_mag - 1);
+            else { st->mag_inserted = 1; st->mag_rounds = G.game_mag - 1; st->chambered = 1; }
+            G.prev_mag_in = 1;        /* no es un gesto de «cargador insertado»: no lanza la maniobra de recarga del juego */
+            G.unready_t = 0;
+            fprintf(stderr, "[recarga] arma %d: VR sin bala con %d en el cargador del juego durante %.1f s (recarga automatica): puesta a punto con la cuenta del juego\n", gid, G.game_mag, (double)AUTO_READY_S);
+        }
+    } else G.unready_t = 0;
     G.throw_hold = is_grenade(gid) && (st->phase == WT_PH_HELD || st->phase == WT_PH_READY);
     if (booting && G.mag_weapon) G.prev_mag_in = st->mag_inserted;   /* el cargador que trae al arrancar no es un gesto de recarga: sin este ajuste el VBlank siguiente veía "cargador insertado" y, con el cargador del juego a medias, lanzaba la maniobra de recarga nada más equipar */
 

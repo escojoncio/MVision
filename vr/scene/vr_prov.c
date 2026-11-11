@@ -71,6 +71,8 @@ int vpc_class_op(const VrProvLearn *S, const GpuDrawList *l, const GpuOp *o) {
     int c = id_ok(l, id) ? vpc_rule(&l->prov[id], o) : VPC_UNKNOWN;
     int cov = S && S->covered;   /* sin garantía de cobertura nativa nada sale del 2D por WORLD / FX_SCREEN */
     if (c == VPC_FX_SCREEN && !(cov && S->covered(S->covered_ctx, vpc_screen_kind(&l->prov[id]), 0))) c = VPC_UNKNOWN;   /* el nativo no pinta ahora ese efecto de pantalla: sigue en el HUD */
+    /* mosaico de censura: con el parche del mundo hecho para ESTA lista (anfitrión) sus celdas 2D salen del panel (el nativo las dibuja sobre el personaje); sin él siguen en el HUD (no se pierde la censura) */
+    if (c == VPC_UNKNOWN && id_ok(l, id) && vpc_is_mosaic(&l->prov[id]) && cov && S->covered(S->covered_ctx, VPC_COV_MOSAIC, 0)) return VPC_WORLD;
     if (c == VPC_SCOPE_FRAME && S && S->bino) return VPC_SCOPE_BINO;   /* marco del juego de los prismáticos: a la capa HUD (el visor la pinta sobre la vista aumentada) */
     if (id_ok(l, id) && (c == VPC_HUD_WORLD || c == VPC_UNKNOWN) && S && S->win[id] == 1) return VPC_WINDOW;
     if (c == VPC_UNKNOWN && cov && o->pkt_addr && id_ok(l, o->prov) && vpc_is_chain(&l->prov[o->prov]) && S->covered(S->covered_ctx, VPC_COV_PACKET, o->pkt_addr))

@@ -20,7 +20,7 @@ for f in bench/c/bench_host.c bench/c/native_synth.c bench/c/fill_stub.c vr/nati
 done
 
 echo "== comprobación de compilación de lo nuevo que el banco no enlaza (efectos, sólido, capa 2D, manos) =="
-for f in vr/native/ns_fx.c vr/native/ns_fx_export.c vr/native/ns_extract_glue.c vr/native/ns_fill.c vr/native/ns_fill_run.c vr/native/ns_fill_glue.c vr/native/ns_solid.c vr/native/ns_hand.c vr/body/vr_hand_skin.c vr/body/vr_hand_asset.c vr/scene/vr_layer2d.c vr/scene/vr_layer2d_async.c; do
+for f in vr/native/ns_fx.c vr/native/ns_fx_export.c vr/native/ns_extract_glue.c vr/native/ns_sink.c vr/native/ns_fill.c vr/native/ns_fill_run.c vr/native/ns_fill_glue.c vr/native/ns_solid.c vr/native/ns_hand.c vr/body/vr_hand_skin.c vr/body/vr_hand_asset.c vr/scene/vr_layer2d.c vr/scene/vr_layer2d_async.c; do
   xcrun clang -c -O1 "${INC[@]}" "$f" -o "$OUT/chk_$(basename "$f" .c).o"
 done
 

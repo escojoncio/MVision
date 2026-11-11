@@ -9,8 +9,7 @@ static int cam_view(VrBodyView *out) {
     const VrCamRecord *r = vrcam_last_record();
     if (!r || !r->active) return 0;
     out->active = 1;
-    for (int i = 0; i < 3; i++) { out->eye[i] = (float)r->eye[i] - r->cam_off[i]; out->p_ref[i] = r->p_ref[i]; }   /* ojo de primera persona: en la tercera persona de la pared el cuerpo y las manos siguen en la cabeza del personaje */
-    out->third = r->third;
+    for (int i = 0; i < 3; i++) { out->eye[i] = (float)r->eye[i]; out->p_ref[i] = r->p_ref[i]; }
     out->theta_deg = r->theta_play_deg;
     for (int i = 0; i < 3; i++) { out->shift[i] = r->eye_shift[i]; out->head_at[i] = r->head_at[i]; }
     out->anchor = 1;

@@ -27,7 +27,6 @@ extern "C" {
 #define NS_PARTS_ARMS ((1u << 2) | (1u << 3) | (1u << 4) | (1u << 7) | (1u << 8) | (1u << 9))   /* brazo/antebrazo/mano derechos e izquierdos */
 #define NS_PARTS_BODY (NS_PARTS_ARMS | (1u << 0) | (1u << 1) | (1u << 5) | (1u << 10) | (1u << 11) | (1u << 12) | (1u << 13) | (1u << 14) | (1u << 15))   /* + pelvis, torso, cuello y piernas (torso_follow) */
 
-#define NS_PARTS_CHEST ((1u << 1) | (1u << 5) | (1u << 2) | (1u << 7))   /* torso, cuello y brazos (hombros): rodean el ojo con el cuerpo tumbado; antebrazos y manos no */
 
 typedef struct {
     int bound;                           /* 1 si se encontró la instancia del jugador */
@@ -35,6 +34,11 @@ typedef struct {
     uint32_t key;                        /* conjunto de piezas del jugador (NsInstance.key) */
     struct { uint8_t n; uint32_t idx[NS_PLAYER_MAXPC]; } part[NS_PLAYER_PARTS];   /* NsPiece (índice global en NsScene.piece) de cada parte */
 } NsPlayerMap;
+
+/* Oculta (NS_PF_HIDDEN) las instancias PEGADAS a la cabeza del jugador: objetos cuyo puntero de matriz padre (+0x20) es la matriz de mundo de la pieza NS_PART_HEAD de `key`. Son las cabezas
+ * de los objetos equipados (gafas térmicas / de visión nocturna, máscara de gas): el motor retira la cabeza del modelo y cuelga ahí otro objeto con la cabeza equipada. En primera persona esa
+ * cabeza rodea el ojo igual que la propia. Devuelve cuántas instancias ocultó. */
+int ns_player_hide_head_attached(NsScene *sc, const uint8_t *ram, uint32_t key);
 
 /* Conjunto de piezas del jugador (clave de instancia) leído de la RAM; 0 si no hay jugador / punteros inválidos. */
 uint32_t ns_player_key(const uint8_t *ram);

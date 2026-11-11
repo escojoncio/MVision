@@ -130,8 +130,8 @@ typedef struct {
     float ey;                             /* altura filtrada de la cabeza (mundo, sin eye_up) */
     float nh[4];                          /* altura de la articulación de la cabeza sobre la raíz aprendida con el jugador quieto, por postura (de pie, agachado, tumbado, en la caja) */
     float sh[2], shv[2];                  /* empuje de las paredes (x, z) filtrado y su velocidad */
-    float tp, to[2], wall_hold; int third_vis;       /* tercera persona en la pared: avance de la transición (0..1), desplazamiento horizontal aplicado a la cámara y cabeza visible (histéresis) */
-    float wn[2]; int wn_have, wn_look;    /* dirección (unitaria, mundo) del desplazamiento en la pared: normal HZD filtrada hacia el lado libre; wn_look = reserva: atrás según la mirada (sin normal) */
+    int wall_seen, wall_run, wall_off, wall_cine;   /* pegado a la pared (vrcam_frame): VBlanks que quedan dando PS_WALL por visto, VBlanks seguidos pegado, VBlanks seguidos sin pared, y vista del juego pedida */
+    float prone_k, anc[2];                /* tumbado: mezcla 0..1 hacia el ancla de gateo, y desplazamiento horizontal ojo -> articulación de la cabeza del último plan (lo aplica vrcam_commit a head_at) */
 } Vc;
 static Vc S;
 
@@ -143,7 +143,7 @@ void vrcam_config_default(VrCamConfig *c) {
     c->hide_head = 1; c->override_pad = 1;
     c->on_frames = 8; c->engine_h = 160; c->draw_lag = 0; c->pitch_limit_deg = 80.0f;
     c->predict_s = 0.10f; c->predict_max_deg = 35.0f; c->vblank_hz = 50.0f;
-    c->wall_back_m = 1.2f; c->wall_up_m = 0.3f; c->wall_s = 0.25f;
+    c->wall_view = 1; c->prone_back = 250.0f;
 }
 void vrcam_init(const VrCamConfig *c) {
     memset(&S, 0, sizeof S);
@@ -154,9 +154,7 @@ void vrcam_init(const VrCamConfig *c) {
     if (!(S.cfg.predict_s >= 0.0f && S.cfg.predict_s <= 0.5f)) S.cfg.predict_s = 0.0f;          /* NaN o fuera de rango: sin predicción */
     if (!(S.cfg.predict_max_deg >= 0.0f && S.cfg.predict_max_deg <= 90.0f)) S.cfg.predict_max_deg = 35.0f;
     if (!(S.cfg.vblank_hz >= 10.0f && S.cfg.vblank_hz <= 240.0f)) S.cfg.vblank_hz = 50.0f;
-    if (!(S.cfg.wall_back_m >= 0.0f && S.cfg.wall_back_m <= 3.0f)) S.cfg.wall_back_m = 0.0f;                 /* NaN o fuera de rango: sin tercera persona */
-    if (!(S.cfg.wall_up_m >= 0.0f && S.cfg.wall_up_m <= 1.0f)) S.cfg.wall_up_m = 0.0f;
-    if (!(S.cfg.wall_s >= 0.05f && S.cfg.wall_s <= 1.0f)) S.cfg.wall_s = 0.25f;
+    if (!(S.cfg.prone_back >= 0.0f && S.cfg.prone_back <= 600.0f)) S.cfg.prone_back = 0.0f;                  /* NaN o fuera de rango: ancla de siempre */
     S.nh[0] = S.nh[1] = S.nh[3] = 394.0f; S.nh[2] = 0.0f;   /* medido en volcados: de pie +394, tumbado -1; se corrige solo con el jugador quieto */
 }
 const VrCamConfig *vrcam_config(void) { return &S.cfg; }
@@ -291,6 +289,21 @@ void vrcam_frame(const uint8_t *ram, const BridgeState *st) {
      * (la vista pasa al cine cuando se agota; ver vr_view.c, to_comms). */
     if (!ok && S.want && st->comms && st->has_player && (st->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && !st->cinematic && S.cfg.head && S.comms_hold < VRCAM_COMMS_GRACE) { S.comms_hold++; ok = 1; }
     else if (!st->comms) S.comms_hold = 0;
+    /* Pegado a la pared: la vista deja la primera persona y pasa a la del juego con SU cámara (la de pared del original, que enseña el pasillo de la esquina) y su mando (el toque es el botón
+     * de golpe, como en el original): la cámara VR se apaga y vr_view presenta la pantalla del juego. PS_WALL parpadea (un tick sí y otro no): cuenta como pegado si se vio en los últimos
+     * WALL_SEEN VBlanks. Se entra cuando lleva WALL_ON seguidos pegado, sigue pegado en ese VBlank y hay control (un roce de menos de WALL_ON no cambia la vista) y se sale WALL_OFF después
+     * de dejar de estarlo, o al perder el control. */
+    {
+        uint32_t ps = rd_u32(ram, BA_PLAYER_STATUS);
+        int base = (st->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && st->has_player && st->in_control && S.cfg.head && S.cfg.wall_view;
+        int wall = base && (ps & BRIDGE_PS_WALL) && !(ps & (BRIDGE_PS_WATCH | BRIDGE_PS_WATCH_PEEK));
+        if (wall) S.wall_seen = VRCAM_WALL_SEEN; else if (S.wall_seen > 0) S.wall_seen--;
+        int on = base && S.wall_seen > 0;
+        if (!base) { S.wall_cine = 0; S.wall_run = S.wall_off = S.wall_seen = 0; }
+        else if (!S.wall_cine) { S.wall_run = on ? S.wall_run + 1 : 0; if (S.wall_run >= VRCAM_WALL_ON && wall && ok) { S.wall_cine = 1; S.wall_off = 0; } }   /* `wall`: sigue pegado AHORA (los WALL_SEEN VBlanks de gracia de un roce ya terminado no cuentan para entrar) */
+        else { S.wall_off = on ? 0 : S.wall_off + 1; if (S.wall_off >= VRCAM_WALL_OFF) { S.wall_cine = 0; S.wall_run = 0; } }
+        if (S.wall_cine) ok = 0;
+    }
     if (ok) { if (S.ok_count < 1 << 20) S.ok_count++; } else S.ok_count = 0;
     int want = S.ok_count >= S.cfg.on_frames;
     if (want && !S.want) { S.have_ref = 0; S.st.activations++; }
@@ -308,6 +321,7 @@ void vrcam_set_zoom_cap(int cap) { S.zoom_cap = cap > 0 ? (cap > 32767 ? 32767 :
 void vrcam_turn(float deg) { S.extra = wrap180(S.extra + deg); if (isfinite(deg)) S.turn_total += (double)deg; }
 double vrcam_turn_total(void) { return S.turn_total; }
 int vrcam_active(void) { return S.latched; }
+int vrcam_wall_view(void) { return S.wall_cine; }
 float vrcam_view_yaw_deg(void) { return S.view_yaw; }
 int vrcam_pad_origin(void) {
     float y = S.cfg.loco == VRCAM_LOCO_BODY ? S.theta_body : S.view_yaw;
@@ -318,7 +332,7 @@ int vrcam_pad_origin(void) {
 int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
     S.st.builds++;
     S.latched = 0;
-    if (!S.want || !S.cfg.head || !p) { if (!S.want) { S.tp = 0.0f; S.wall_hold = 0.0f; S.to[0] = S.to[1] = 0.0f; S.third_vis = 0; S.wn_have = 0; } return 0; }
+    if (!S.want || !S.cfg.head || !p) return 0;
     float h[16]; double t = 0;
     if (!S.cfg.head(h, &t) || !head_finite(h)) { S.st.head_misses++; return 0; }
     Body b = read_body(ram);
@@ -409,51 +423,18 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
       if (!snap && (fabsf(S.ey - ey_prev) > 30.0f || js > 50.0f))
           fprintf(stderr, "[ojo] y=%.0f dy=%.0f suelo=%d shift=%.0f (salto %.0f) uds\n", ey, S.ey - ey_prev, b.floor, hypotf(S.sh[0], S.sh[1]), js);
       p->eye_shift[0] = S.sh[0]; p->eye_shift[1] = 0.0f; p->eye_shift[2] = S.sh[1]; }
-    /* Pegado a la pared (y sin la primera persona del propio juego) la cámara pasa a tercera persona para ver a Snake: el ojo se traslada por el lado libre de la pared (normal HZD; sin ella, atrás según la mirada horizontal; no se gira la cámara) y arriba, con
-     * transición de wall_s, y con las paredes de colisión del juego (el ojo nunca queda dentro de una: hacia dentro al instante; la retirada de ese empuje, a 8 m/s como mucho). El ojo de primera persona
-     * (ex, ey, ez) sigue siendo la referencia de manos, cuerpo y gestos (VrCamRecord.cam_off). */
-    float tox = 0.0f, toy = 0.0f, toz = 0.0f;
-    {   float upm = S.cfg.units_per_m * (S.cfg.calibrate && S.calib.scale > 0 ? S.calib.scale : 1.0f);
-        /* PS_WALL parpadea (un tick sí y otro no): el estado de pared se mantiene 0,2 s tras caer (la primera persona del juego, b.fp, sí lo corta al instante). */
-        S.wall_hold = b.wall ? 0.2f : (snap ? 0.0f : (S.wall_hold > dt ? S.wall_hold - dt : 0.0f));
-        int w3 = S.cfg.wall_back_m > 0.0f && (b.wall || S.wall_hold > 0.0f) && !b.fp;
-        if (snap) S.tp = w3 ? 1.0f : 0.0f;
-        else { S.tp += (w3 ? dt : -dt) / S.cfg.wall_s; S.tp = S.tp < 0.0f ? 0.0f : (S.tp > 1.0f ? 1.0f : S.tp); }
-        float k = S.tp * S.tp * (3.0f - 2.0f * S.tp);
-        if (!w3 && S.tp <= 0.0f) S.wn_have = 0;
-        if (S.tp > 0.0f) {
-            /* dirección: la normal de la pared HZD más cercana al cuerpo, hacia su lado libre (el desplazamiento queda fijo en el mundo mientras dure el estado de pared; la normal se filtra 0,15 s). Sin normal
-             * válida: atrás según la mirada actual. */
-            float nrm[2], bp[3] = {(float)b.bx, ey, (float)b.bz}, dn[2] = {-sinf(yr), -cosf(yr)};
-            int have_n = w3 && vrhzd_wall_near(ram, bp, 0.8f * upm, nrm) >= 0.0f;
-            if (have_n) {
-                if (!S.wn_have) { S.wn[0] = nrm[0]; S.wn[1] = nrm[1]; }
-                else {   /* giro filtrado del ángulo (también con la normal opuesta), con velocidad limitada (360 grados/s y 20 grados por tick): sin brinco del desplazamiento */
-                    float ang = atan2f(S.wn[0] * nrm[1] - S.wn[1] * nrm[0], S.wn[0] * nrm[0] + S.wn[1] * nrm[1]) * (1.0f - expf(-dt / 0.15f)), lim = 2.0f * PI_F * dt < 0.35f ? 2.0f * PI_F * dt : 0.35f;
-                    ang = ang > lim ? lim : (ang < -lim ? -lim : ang);
-                    float c = cosf(ang), sn = sinf(ang), vx = S.wn[0] * c - S.wn[1] * sn, vz = S.wn[0] * sn + S.wn[1] * c, vl = hypotf(vx, vz);
-                    S.wn[0] = vx / vl; S.wn[1] = vz / vl;
-                }
-                S.wn_have = 1; S.wn_look = 0;
-            } else if (!S.wn_have || S.wn_look) { S.wn[0] = dn[0]; S.wn[1] = dn[1]; S.wn_have = 1; S.wn_look = 1; }
-            float back = S.cfg.wall_back_m * upm * k, cx = ex + S.wn[0] * back, cz = ez + S.wn[1] * back, cy = ey + S.cfg.wall_up_m * upm * k, r = 0.18f * upm;
-            vrhzd_clamp_eye(ram, b.bx, b.bz, &cx, &cz, cy, r);
-            float ax = cx - ex, az = cz - ez, dx = ax - S.to[0], dz = az - S.to[1], dl = hypotf(dx, dz), vmax = 8.0f * upm * dt;
-            if (snap) { S.to[0] = ax; S.to[1] = az; }
-            else {
-                if (dx * S.to[0] + dz * S.to[1] > 0.0f && dl > vmax) { dx *= vmax / dl; dz *= vmax / dl; }      /* hacia fuera (la pared se aparta): sin brinco */
-                S.to[0] += dx; S.to[1] += dz;
-                cx = ex + S.to[0]; cz = ez + S.to[1];
-                if (vrhzd_clamp_eye(ram, b.bx, b.bz, &cx, &cz, cy, r) > 0) { S.to[0] = cx - ex; S.to[1] = cz - ez; }     /* el filtrado aún deja el ojo sin holgura: lo que falte, ya */
-            }
-            tox = S.to[0]; toz = S.to[1]; toy = cy - ey;
-        } else S.to[0] = S.to[1] = 0.0f;
-        float len = hypotf(tox, toz);
-        if (len >= 0.5f * upm) S.third_vis = 1; else if (len < 0.35f * upm) S.third_vis = 0;
-        if (S.tp <= 0.0f) S.third_vis = 0;
-        p->cam_off[0] = tox; p->cam_off[1] = toy; p->cam_off[2] = toz; p->third = S.third_vis;
+    /* Ancla del cuerpo (ojo -> articulación de la cabeza, horizontal; vrcam_commit la pasa a head_at y vr_body cuelga de ahí el modelo). De pie y agachado la cabeza queda eye_fwd por detrás del
+     * ojo según la MIRADA. Tumbado (gateo, conductos) el cuerpo va horizontal: los ojos del modelo están por DELANTE del cuello a lo largo del cuerpo, no encima; con el ancla de pie el ojo
+     * quedaba sobre la nuca, con el cuello, los hombros y el pecho pegados alrededor (la vista «dentro del cuerpo»). Tumbado el cuello va prone_back por detrás del ojo según el rumbo del
+     * CUERPO (no gira al mirar a los lados), con transición de 0,3 s. Solo cambia dónde se dibuja el cuerpo: el ojo, la colisión y el mando no se tocan. */
+    {
+        float kt = b.post == 2 && S.cfg.prone_back > 0.0f ? 1.0f : 0.0f;
+        if (snap) S.prone_k = kt; else { float st = dt / 0.3f; S.prone_k += S.prone_k < kt ? (kt - S.prone_k < st ? kt - S.prone_k : st) : (S.prone_k - kt < st ? kt - S.prone_k : -st); }
+        float k = S.prone_k * S.prone_k * (3.0f - 2.0f * S.prone_k), br = b.body_yaw * (PI_F / 180.0f);
+        S.anc[0] = -(1.0f - k) * sinf(yr) * S.cfg.eye_fwd - k * sinf(br) * S.cfg.prone_back;
+        S.anc[1] = -(1.0f - k) * cosf(yr) * S.cfg.eye_fwd - k * cosf(br) * S.cfg.prone_back;
     }
-    p->from[0] = sat16(ex + tox); p->from[1] = sat16(ey + toy); p->from[2] = sat16(ez + toz);
+    p->from[0] = sat16(ex); p->from[1] = sat16(ey); p->from[2] = sat16(ez);
 
     /* objetivo: ojo + dirección * track, con track acotado para que el objetivo quepa en s16 (la dirección sale de
      * objetivo - ojo en el motor; a 3000 uds el redondeo a entero da < 0,01 grados) */
@@ -502,9 +483,7 @@ void vrcam_commit(const uint8_t *ram, const VrCamPlan *p) {
         memcpy(r->p_ref, p->p_ref, sizeof r->p_ref);
         memcpy(r->head, p->head, sizeof r->head);
         memcpy(r->eye_shift, p->eye_shift, sizeof r->eye_shift);
-        float yr = p->yaw_deg * (PI_F / 180.0f);
-        memcpy(r->cam_off, p->cam_off, sizeof r->cam_off); r->third = p->third;
-        r->head_at[0] = (float)p->from[0] - p->cam_off[0] - sinf(yr) * S.cfg.eye_fwd; r->head_at[1] = (float)p->from[1] - p->cam_off[1] - S.cfg.eye_up; r->head_at[2] = (float)p->from[2] - p->cam_off[2] - cosf(yr) * S.cfg.eye_fwd;
+        r->head_at[0] = (float)p->from[0] + S.anc[0]; r->head_at[1] = (float)p->from[1] - S.cfg.eye_up; r->head_at[2] = (float)p->from[2] + S.anc[1];
     }
 }
 
@@ -559,7 +538,7 @@ int vrcam_viewer_active(const uint8_t *ram) {
 }
 
 int vrcam_hide_head_now(const uint8_t *ram) {
-    return S.cfg.hide_head && ((S.latched && !S.third_vis) || vrcam_viewer_active(ram));
+    return S.cfg.hide_head && (S.latched || vrcam_viewer_active(ram));
 }
 
 /* =================================================== re-proyección =================================================== */

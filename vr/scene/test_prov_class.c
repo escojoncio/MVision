@@ -14,7 +14,7 @@ static GpuDrawList dl;
 static ProvEntry tab[64];
 
 /* ids de la tabla sintética */
-enum { I_CINEMA = 1, I_MOTSE, I_TELOP, I_FAMA, I_SCOPE, I_SIGHT, I_MENUMAN, I_CB, I_OTHER, I_EFFECT, I_SCOPE_FN, I_CINEMA_FN, I_WIN, I_X, I_SORT, I_SORT2, I_GAS, I_FADE, I_LAST };
+enum { I_CINEMA = 1, I_MOTSE, I_TELOP, I_FAMA, I_SCOPE, I_SIGHT, I_MENUMAN, I_CB, I_OTHER, I_EFFECT, I_SCOPE_FN, I_CINEMA_FN, I_WIN, I_X, I_SORT, I_SORT2, I_GAS, I_FADE, I_MOSAIC, I_LAST };
 
 static void set_e(int id, const char *name, uint32_t fn) {
     tab[id].id = (uint16_t)id; tab[id].fn = fn; tab[id].actor_node = name && name[0] ? 0x800be4e0u : 0;
@@ -37,6 +37,7 @@ static void reset(void) {
     set_e(I_SORT2, "", 0x80018304u);        /* ordenación de canales (llama a las etapas) */
     set_e(I_GAS, "gas_efct.c", 0x800de1f0u);   /* anillo del gas: efecto de pantalla con paquetes propios */
     set_e(I_FADE, "fadeio.c", 0x800e15e8u);    /* fundido */
+    set_e(I_MOSAIC, "mosaic.c", 0x800d9d80u);  /* mosaico de censura: celdas 2D que muestrean el propio fotograma */
     dl.prov = tab; dl.nprov = I_LAST;
 }
 static GpuOp *add(int type, int prov) { GpuOp *o = &ops[dl.nops++]; o->type = (uint8_t)type; o->prov = (uint16_t)prov; return o; }
@@ -50,11 +51,12 @@ static int cls_of(const VrProvLearn *S, const GpuOp *o) { return vpc_class_op(S,
 /* Cobertura nativa sintética (VrProvLearn.covered): paquetes 0x80100000..0x801000FF = con elemento que el renderer nativo dibuja; el anillo y el fundido, según g_cov_gas / g_cov_fade. */
 #define PK_COV 0x80100000u
 #define PK_NOCOV 0x80150000u
-static int g_cov_gas, g_cov_fade, g_cov_calls;
+static int g_cov_gas, g_cov_fade, g_cov_mosaic, g_cov_calls;
 static int cov_stub(void *ctx, int what, uint32_t pkt_addr) {
     (void)ctx; g_cov_calls++;
     if (what == VPC_COV_GAS) return g_cov_gas;
     if (what == VPC_COV_FADE) return g_cov_fade;
+    if (what == VPC_COV_MOSAIC) return g_cov_mosaic;
     return what == VPC_COV_PACKET && pkt_addr >= PK_COV && pkt_addr < PK_COV + 0x100u;
 }
 static void learn_cov(VrProvLearn *S) { vpc_learn_reset(S); S->covered = cov_stub; g_cov_gas = g_cov_fade = 1; }
@@ -85,6 +87,21 @@ static void test_rules(void) {
         S.covered = NULL;
         CHECK(cls_of(&S, g) == VPC_UNKNOWN && cls_of(&S, f) == VPC_UNKNOWN, "sin gancho de cobertura: los dos en el HUD, como antes");
         CHECK(vpc_layer_of(VPC_FX_SCREEN) == -1 && vpc_layer_of(VPC_UNKNOWN) == VPC_L_HUD, "FX_SCREEN sin capa; UNKNOWN al HUD");
+    }
+    /* mosaico de censura (mosaic.c): sale del panel (WORLD) solo si el anfitrión tiene hecho el parche del mundo de esa lista; si no, sigue en el HUD (la censura no se pierde) */
+    {
+        GpuOp *m = add(GPU_OP_POLY, I_MOSAIC);
+        m->nv = 4; m->flags = GPU_F_TEXTURED;
+        CHECK(vpc_is_mosaic(&tab[I_MOSAIC]) && !vpc_is_mosaic(&tab[I_GAS]) && !vpc_is_mosaic(NULL), "vpc_is_mosaic");
+        CHECK(vpc_rule(&tab[I_MOSAIC], m) == VPC_UNKNOWN, "regla base del mosaico: sin clase propia");
+        VrProvLearn S; learn_cov(&S);
+        g_cov_mosaic = 0;
+        CHECK(cls_of(&S, m) == VPC_UNKNOWN && vpc_layer_of(cls_of(&S, m)) == VPC_L_HUD, "sin parche del mundo: el mosaico sigue en el HUD");
+        g_cov_mosaic = 1;
+        CHECK(cls_of(&S, m) == VPC_WORLD, "con parche del mundo: WORLD (fuera del panel con el nativo dibujando)");
+        S.covered = NULL;
+        CHECK(cls_of(&S, m) == VPC_UNKNOWN && cls_of(NULL, m) == VPC_UNKNOWN, "sin gancho de cobertura: HUD");
+        g_cov_mosaic = 0;
     }
     z->prov2 = I_CINEMA;
     CHECK(cls_of(NULL, z) == VPC_FX_LETTERBOX, "prov == 0 usa prov2");

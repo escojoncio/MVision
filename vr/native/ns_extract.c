@@ -21,6 +21,10 @@
 #define MAX_VERTS     256
 #define MAX_NORMS     256
 #define MAX_EXT_DEPTH 4
+/* El motor retira una pieza del dibujo sin tocar su modelo poniéndole el sesgo de orden a -30000 (y un solo paquete): así oculta la cabeza del jugador cuando un objeto equipado (gafas, máscara)
+ * trae la suya, pegada a la matriz de la cabeza (medido: pieza 6 del jugador con sesgo -30000 y n_paq 1 con las gafas térmicas puestas; 0 y 81 sin ellas). El extractor rederiva las caras del
+ * modelo, así que sin esta regla dibujaba las dos cabezas. Solo objetos dinámicos: en el escenario un sesgo extremo es «al fondo del todo» (cielos), no una retirada. */
+#define PIECE_BIAS_HIDDEN (-30000)
 #define MAX_STATIC_DEFS 256
 #define MEMO_N        16384u       /* potencia de 2 */
 #define ARENA_BUCKETS 4096u        /* potencia de 2 */
@@ -675,6 +679,7 @@ static int emit_object(Ctx *c, const Cand *cd, uint32_t piece_cap) {
         int rr = resolve_piece(c, rd32(r, p + 0x40), cd->def, rd32(r, p + 0x44), flag, nm, rs16(r, p + 0x50), 1, cd->is_static, pc);
         if (rr == RES_FULL) full = 1;
         if (rr != RES_OK) { pc->flags |= NS_PF_HIDDEN; S->n_hidden_pieces++; }
+        else if (!cd->is_static && rs16(r, p + 0x50) <= PIECE_BIAS_HIDDEN) { pc->flags |= NS_PF_HIDDEN; S->n_hidden_pieces++; }   /* pieza retirada por el motor (ver PIECE_BIAS_HIDDEN) */
         if (rr == RES_BAD && cd->is_static) sc->valid |= NS_SV_MAP_INCOMPLETE;   /* geometría del escenario ausente: la escena no es apta (se pinta por GPU) */
         sc->n_piece++; S->n_pieces++;
     }
@@ -702,6 +707,7 @@ static int emit_object(Ctx *c, const Cand *cd, uint32_t piece_cap) {
             int rr = resolve_piece(c, rd32(r, e + 0x40), cd->def, rd32(r, e + 0x44), flag, nm, rs16(r, e + 0x50), 1, cd->is_static, pc);
             if (rr == RES_FULL) full = 1;
             if (rr != RES_OK) { pc->flags |= NS_PF_HIDDEN; S->n_hidden_pieces++; }
+            else if (!cd->is_static && rs16(r, e + 0x50) <= PIECE_BIAS_HIDDEN) { pc->flags |= NS_PF_HIDDEN; S->n_hidden_pieces++; }
             if (rr == RES_BAD && cd->is_static) sc->valid |= NS_SV_MAP_INCOMPLETE;   /* geometría del escenario ausente: la escena no es apta (se pinta por GPU) */
             sc->n_piece++; S->n_pieces++; S->n_ext_pieces++;
             e = rd32(r, e + 0x48);

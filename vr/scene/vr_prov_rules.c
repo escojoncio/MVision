@@ -22,6 +22,7 @@ static const char *const N_BINO[] = {"scope.c", NULL};
 static const char *const N_HUD[] = {"menuman.c", NULL};
 static const char *const N_GAS[] = {"gas_efct.c", NULL};
 static const char *const N_FADE[] = {"fadeio.c", NULL};
+static const char *const N_MOSAIC[] = {"mosaic.c", NULL};
 
 static const uint32_t F_LETTERBOX[] = {0x800e1050u, 0};
 static const uint32_t F_SCOPE[] = {0x80063d54u, 0x800726bcu, 0};
@@ -48,6 +49,7 @@ static int has_fn(const ProvEntry *e, const uint32_t *fns) {
 
 int vpc_is_binocular(const ProvEntry *e) { return e && (has_name(e, N_BINO) || has_fn(e, F_BINO)); }
 int vpc_is_chain(const ProvEntry *e) { return e && has_fn(e, F_CHAIN); }
+int vpc_is_mosaic(const ProvEntry *e) { return e && has_name(e, N_MOSAIC); }
 int vpc_screen_kind(const ProvEntry *e) { return !e ? -1 : has_name(e, N_GAS) ? VPC_COV_GAS : has_name(e, N_FADE) ? VPC_COV_FADE : -1; }
 
 int vpc_rule(const ProvEntry *e, const GpuOp *o) {

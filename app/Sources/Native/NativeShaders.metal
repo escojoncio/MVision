@@ -100,12 +100,21 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
     bool back = false;
     /* U.cull_eye.w = NSG_CULL_ALL (cinemáticas) o NSG_CULL_SEMI (cabeza bajo el agua: solo mallas semitransparentes, p. ej. la superficie del agua vista desde abajo). Réplica: ns_gpu_cull_applies */
     const uint cull = uint(U.cull_eye.w + 0.5);
-    if ((cf & NSG_CF_ONESIDED) != 0u && (cull == uint(NSG_CULL_ALL) || (cull == uint(NSG_CULL_SEMI) && (cf & NSG_CF_SEMI) != 0u))) {
+    const bool one_sided = (cf & NSG_CF_ONESIDED) != 0u && (cull == uint(NSG_CULL_ALL) || (cull == uint(NSG_CULL_SEMI) && (cf & NSG_CF_SEMI) != 0u));
+    /* Cámara del juego (cinemáticas, vista de pared): el motor no dibuja un polígono con algún vértice sin división fiable (z de vista <= H/2: la proyección desborda), así que un casco de
+     * tanque, una pared o un personaje pegados a la cámara del guion no existen en su imagen; aquí tapaban media pantalla. U.misc.y = ese umbral en unidades del motor (0 = sin descarte:
+     * el mundo en primera persona, donde lo cercano sí se ve). Los tres vértices deciden igual. Réplica en C: NsRCam.zreject (ns_cpuref.c). */
+    const bool near_reject = U.misc.y > 0.0;
+    if (one_sided || near_reject) {
         uint f0 = corner_index - corner_index % 3u;
         float3 q0 = ns_world_pos(verts[corners[f0].v], P, verts, pieces);
         float3 q1 = ns_world_pos(verts[corners[f0 + 1u].v], P, verts, pieces);
         float3 q2 = ns_world_pos(verts[corners[f0 + 2u].v], P, verts, pieces);
-        back = dot(q0 - U.cull_eye.xyz, cross(q1 - q0, q2 - q0)) <= 0.0;
+        if (one_sided) back = dot(q0 - U.cull_eye.xyz, cross(q1 - q0, q2 - q0)) <= 0.0;
+        if (near_reject) {
+            float zmin = min(min(dot(U.fog_fwd.xyz, q0), dot(U.fog_fwd.xyz, q1)), dot(U.fog_fwd.xyz, q2)) + U.fog_fwd.w;
+            if (zmin <= U.misc.y) back = true;
+        }
     }
 
     /* color: precalculado de la cara, luz de la pieza o neutro; después niebla (hacia negro) y byte entero */
@@ -151,7 +160,9 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
     o.uv = float2(float(c.u), float(c.t));
     o.col = col;
     o.tpage = uint(c.tpage);
-    o.clutf = uint(c.clut) | (cf << 16);
+    /* visión térmica: los objetos que la admiten se dibujan con la CLUT térmica del motor (NSG_PF_IRCLUT, ver ns_gpu_make_piece) */
+    uint cl = (P.flags & NSG_PF_IRCLUT) != 0u ? uint(NSG_IR_CLUT) : uint(c.clut);
+    o.clutf = cl | (cf << 16);
     o.ew = wp;
     return o;
 }

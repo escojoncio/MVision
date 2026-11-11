@@ -71,7 +71,8 @@ typedef struct VrCamConfig {
     int calibrate;           /* 1: al recentrar se calcula la escala usuario->mundo (vr_calib.h) y se aplica a units_per_m del registro; defecto 0 */
     float user_eye_m;        /* altura de ojos de pie del usuario si se conoce (m); 0 = estimar al recentrar */
     /* --- tercera persona pegado a la pared (al final: no rompe el layout) --- */
-    float wall_back_m, wall_up_m, wall_s;   /* con PS_WALL y sin primera persona del juego: el ojo de la cámara se traslada por el lado libre de la pared (a lo largo de la normal HZD, alejándose de ella; fijo en el mundo, no orbita con la cabeza; sin normal: atrás según la mirada) y arriba, en wall_s segundos, sin girarla; defecto 1,2 m / 0,3 m / 0,25 s; wall_back_m = 0: desactivado */
+    int wall_view;           /* 1 (defecto): pegado a la pared la cámara VR se apaga y la vista es la del juego con su cámara de pared y su mando (vrcam_wall_view; vr_view la presenta en la pantalla del juego) */
+    float prone_back;        /* tumbado (gateo, conductos): la articulación de la cabeza se ancla a esta distancia (unidades) por DETRÁS del ojo a lo largo del rumbo del cuerpo (0 = ancla de siempre, eye_fwd según la mirada) */
 } VrCamConfig;
 
 void vrcam_config_default(VrCamConfig *c);
@@ -132,9 +133,6 @@ typedef struct VrCamRecord {
     uint32_t vbl;            /* VBlanks vistos por vrcam_frame hasta construir esta cámara (reloj de juego sin fluctuación: 1 VBlank = 20 ms) */
     float eye_shift[3];      /* desplazamiento del ojo por las paredes del juego (vr_hzd, filtrado: ojo dado al motor - ojo libre, unidades del motor; 0 sin empuje) */
     float head_at[3];        /* dónde debe quedar la articulación de la cabeza del modelo (mundo): bajo el ojo dado al motor. vr_body dibuja el cuerpo entero desplazado hasta ahí */
-    /* --- tercera persona en la pared (al final: no rompe el layout) --- */
-    float cam_off[3];        /* traslación de la cámara respecto al ojo de primera persona (ojo dado al motor - ojo de primera persona, unidades del motor; 0 fuera de la pared). Manos, cuerpo y gestos se anclan a `eye - cam_off` (el usuario "es" Snake); el render usa `eye` */
-    int third;               /* 1: la cámara está lo bastante lejos de la cabeza para dibujarla (histéresis 0,5 / 0,35 m) */
 } VrCamRecord;
 const VrCamRecord *vrcam_last_record(void);
 uint32_t vrcam_draw_count(void);                         /* envíos de frame al GPU vistos */
@@ -158,8 +156,6 @@ typedef struct VrCamPlan {
     float head[16];
     float p_ref[3];
     float eye_shift[3];      /* empuje del ojo por las paredes del juego (vrhzd_clamp_eye, filtrado; 0 sin empuje) */
-    float cam_off[3];        /* tercera persona en la pared: from - ojo de primera persona (0 fuera de la pared) */
-    int third;
 } VrCamPlan;
 /* Antes de construir la cámara principal. Devuelve 1 y rellena `p` si la cámara VR manda ahora; 0 si no (usar los
  * argumentos originales). Fija el estado "activo" del frame (vrcam_active). `zoom` = distancia de pantalla que pide
@@ -167,6 +163,12 @@ typedef struct VrCamPlan {
 int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p);
 /* Tras construir la matriz (con p o sin él, p == NULL = cámara del juego): lee la matriz resultante y anota el registro. */
 void vrcam_commit(const uint8_t *ram, const VrCamPlan *p);
+/* Pegado a la pared con la vista del juego pedida (cfg.wall_view): la cámara VR está apagada a propósito y el origen angular del mando sigue siendo el último de la cámara VR (el stick empuja
+ * hacia donde empujaba al pegarse). Lo decide vrcam_frame con histéresis (entra cuando lleva VRCAM_WALL_ON VBlanks pegado y lo sigue estando; sale VRCAM_WALL_SEEN + VRCAM_WALL_OFF después de despegarse). */
+#define VRCAM_WALL_SEEN 10
+#define VRCAM_WALL_ON 25
+#define VRCAM_WALL_OFF 6
+int vrcam_wall_view(void);
 /* Oculta la cabeza del modelo del jugador (partes marcadas como no visibles para las etapas siguientes del frame).
  * Devuelve el nº de partes ocultadas. Escribe en la RAM del juego. */
 int vrcam_hide_head(uint8_t *ram);

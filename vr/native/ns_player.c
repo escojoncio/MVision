@@ -3,6 +3,7 @@
 #include <math.h>
 #include <string.h>
 
+#define OBJS_PARENT_MAT 0x20   /* puntero a la matriz de otro objeto (objetos pegados; docs/escena_nativa.md §3.2) */
 #define OBJS_NMODELS 0x2E
 #define OBJS_FIRST 0x48
 #define OBJ_SIZE 0x5C
@@ -89,6 +90,22 @@ int ns_player_hide_part(const NsPlayerMap *m, NsScene *sc, int part) {
     for (int i = 0; i < m->part[part].n; i++) {
         uint32_t p = m->part[part].idx[i];
         if (p < sc->n_piece) { sc->piece[p].flags |= NS_PF_HIDDEN; n++; }
+    }
+    return n;
+}
+
+int ns_player_hide_head_attached(NsScene *sc, const uint8_t *ram, uint32_t key) {
+    if (!sc || !ram || !key || !ptr_ok(key, OBJS_FIRST + OBJ_SIZE * (NS_PART_HEAD + 1))) return 0;
+    const uint32_t head = (key + OBJS_FIRST + OBJ_SIZE * (uint32_t)NS_PART_HEAD) & 0x1FFFFFu;
+    int n = 0;
+    for (uint32_t i = 0; i < sc->n_inst; i++) {
+        const NsInstance *in = &sc->inst[i];
+        if (in->key == key || !ptr_ok(in->key, OBJS_FIRST)) continue;
+        uint32_t pm = rd32(ram, in->key + OBJS_PARENT_MAT);
+        if (!pm || (pm & 0xFFE00000u) != 0x80000000u || (pm & 0x1FFFFFu) != head) continue;
+        if ((uint64_t)in->first_piece + in->n_pieces > sc->n_piece) continue;
+        for (uint32_t k = 0; k < in->n_pieces; k++) sc->piece[in->first_piece + k].flags |= NS_PF_HIDDEN;
+        n++;
     }
     return n;
 }

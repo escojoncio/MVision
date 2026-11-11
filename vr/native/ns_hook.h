@@ -25,7 +25,7 @@ typedef int (*NsExtractFn)(const uint8_t *ram, const uint8_t *scratch, NsScene *
 typedef struct {
     uint32_t player_key;     /* conjunto de piezas del jugador (ns_player_key) o 0 */
     int hide_head;           /* 1: ocultar la cabeza propia (primera persona) */
-    uint32_t hide_parts;     /* además de la cabeza: partes del jugador a ocultar (bit k = parte k; NS_PARTS_CHEST al gatear en primera persona) */
+    uint32_t hide_parts;     /* además de la cabeza: partes del jugador a ocultar (bit k = parte k; NS_PARTS_ARMS con los prismáticos) */
     uint32_t refresh_parts;  /* partes del jugador cuyas matrices se releen tras la IK (NS_PARTS_ARMS o NS_PARTS_BODY) */
 } NsCtxOut;
 typedef void (*NsCtxFn)(NsScene *sc, NsCtxOut *out, void *user);

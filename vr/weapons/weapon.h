@@ -146,6 +146,10 @@ struct WeaponDef {
      * mesh que tenga su mismo nombre (weapon_part_mesh); los objetos sueltos (held[].mesh) usan el
      * índice directo en esta lista. Va al final: no rompe inicializadores. */
     const char *const *mesh_names;
+    /* Opcional (armas con cargador): deja el arma LISTA para disparar con `mag_rounds` balas en el cargador y una en la recámara, sin gesto ni animación (cargador montado, corredera/cerrojo
+     * cerrados, sin secuencia ni cargador suelto a medias). No toca la contabilidad de munición. Lo usa el anfitrión en recarga automática cuando el arma VR se queda vacía con balas en el
+     * cargador del juego (vr/host/vrgame.c). NULL = el anfitrión solo fija los campos comunes. */
+    void (*make_ready)(WeaponState *s, int mag_rounds);
 };
 
 /* ---------- Núcleo (vr/weapons/wcore.c) ---------- */

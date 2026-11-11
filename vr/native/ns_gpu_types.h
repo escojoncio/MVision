@@ -50,6 +50,8 @@ typedef uint8_t ns_u8;
 #define NSG_PF_DRAW   4u     /* se dibuja (malla presente y pieza visible) */
 #define NSG_PF_NET    8u     /* red de seguridad de vértices activa (piezas de objetos dinámicos, no del escenario): el shader colapsa los triángulos con vértices lejos de la pieza o aristas desproporcionadas */
 #define NSG_PF_NOWELD 16u    /* ignorar las soldaduras de esta pieza (la costura con el padre quedó inconsistente este fotograma): sus vértices usan su propia posición local */
+#define NSG_PF_IRCLUT 32u    /* visión térmica: las caras texturizadas de la pieza usan la CLUT fija NSG_IR_CLUT en vez de la suya (objetos con textura térmica, ver ns_gpu_make_piece) */
+#define NSG_IR_CLUT 0x3FFFu  /* CLUT térmica del motor: x = 1008, y = 255 de la VRAM */
 
 #define NSG_NO_WELD 0xFFu
 #define NSG_WELD_DEPTH 4     /* soldaduras encadenadas que se siguen (hijo -> padre -> abuelo ...): el adaptador de la referencia llega a 8, en los datos reales no pasa de 1 */
@@ -124,7 +126,7 @@ typedef struct {
     /* agua (ns_screen): el tinte vive en el MUNDO (la ondulación es un post-proceso de pantalla, ver NsGpuScreen.water_wave). w de water_min = 1 si hay volumen de agua; w de water_tint = 1 si la cabeza está dentro (se tiñe todo) */
     vector_float4 water_min, water_max, water_tint;
     vector_float4 fromvr[3];        /* mundo VR -> mundo del motor, filas de la 3x4 (xyz, traslación en w) */
-    vector_float4 misc;             /* x = índice de ojo del pase cuando NO hay amplificación (0/1: máscara de caras de los efectos) */
+    vector_float4 misc;             /* x = índice de ojo del pase cuando NO hay amplificación (0/1: máscara de caras de los efectos); y = descarte cercano del motor: z de vista de la cámara del juego (unidades del motor) por debajo de la cual un triángulo con algún vértice ahí no se dibuja (0 = sin descarte) */
     vector_float4 cull_eye;         /* xyz = ojo de la cámara del JUEGO en el mundo del motor; w = NSG_CULL_ALL: descartar las caras NSG_CF_ONESIDED vistas por detrás (cinemáticas: la cámara queda fuera de las salas y el motor no dibuja los techos desde arriba); NSG_CULL_SEMI: solo las de mallas semitransparentes (cabeza bajo el agua: el motor no dibuja la superficie del agua vista desde abajo); 0 = doble cara (primera persona) */
 } NsGpuUniforms;
 #endif
