@@ -5,7 +5,7 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 
 
 ## Last done
-- 2026-11-11 (6ª tanda; sin verificar en visor; revisión adversarial hecha):
+- 2026-11-11 (6ª tanda; commit 0d4635f; sin verificar en visor; revisión adversarial hecha; CI `visionos.yml` de 0d4635f en verde: Swift/Metal compilan, IPA generada):
   - «Semi-2D» en escenas: causa = efectos de REALIMENTACIÓN de pantalla del juego (`blur.c`, `blurpure.c`, `focus.c`: sprites en 15 bits que muestrean un frame buffer). Iban al panel 2D como copia plana del render de PS1 sobre la pantalla 3D (d0015: panel 94,7 % opaco; también d0003, d0010, d0012, d0014). `vr/scene/vr_feedback.h`: `vrfb_op_source` (fuente = búfer de dibujo o el otro búfer; `VrProvLearn.draw_prev`) y `vrfb_build` (salida = a·actual + b·fuente(M p), M afín por mínimos cuadrados). Salen del panel con `VPC_COV_FEEDBACK` (`vr_prov.c`; solo escritores sin regla). `vrhost.c`: `feedback_from_list`, `feedback_to_scene` (campos `fb_*` de `NsScreenFx`, 180 B), `nat_fb`. Pantalla 3D: `vr_fs_feedback` (`vr_scene.metal`, uniformes `fb_*` en `VrPostUniforms`), `RenderRG.swift encodeStereo` (texturas `stereoHist`, `copyStereoHist`). En el mundo en primera persona se quitan del panel pero no se reproducen.
   - Muerte: la fase «semi-2D» es el fundido de `over.c` con 3D sin registro de cámara (clase 2D); la cubre `VRV_R_HOLD` (5ª tanda). Después la pantalla de fin de partida es 2D en el original.
   - Mosaico: el parche de la 5ª tanda NO se construía con datos reales (celdas con `fbk` = 0 porque se pisan su texel; baldosa negra sin textura del actor contada como rara; cámara del registro de la lista ≠ cámara del guion en cinemáticas). Ahora color de `l->vram_end`, cámara de la escena nativa (`ns_cam_note`/`ns_cam_last`), solo cuentan las primitivas texturizadas. Medido: d0013 y d0014 dan 16 celdas.
@@ -24,10 +24,11 @@ Convención: repo neutro; repos externos solo vía variables de Actions (`DECOMP
 
 ## Current state
 **Funciona (tests):** todas las baterías de `Comandos` a 0 fallos. `test-dumps` sobre Archivo_28: 6 fallos ya presentes en el commit anterior (d0007 y prov_motse son volcados en plena carga, sin escena).
-**Pendiente de probar en visor (build de c296526):** todo lo de 2026-11-11 y 2026-11-10.
+**Pendiente de probar en visor (build de 0d4635f):** todo lo de 2026-11-11 y 2026-11-10.
+**Propuesto, sin decidir:** en la pantalla 3D (escenas, vista de pared) dibujar la lista del motor como verdad (o rellenar con ella lo que el nativo no cubra: `ns_fill`, desenganchado en 6514ea9); invierte la decisión del 26-oct de «solo nativo».
 **Sin causa encontrada:** d0010 (recuerdo en sepia, área 19291: 217 caras con otra textura y 287 ausentes en el mapa 0x8013f704); d0011 (superficie clara de más, piezas 54/57/64 del mapa 0x80162d0c); distorsión al morir (d0018, cobertura 100 %); agarre inferior de la pistola sin ajustar.
 **Cobertura del nativo frente a la lista (nscover, 17 volcados de Archivo_28, sin la pose propia):** 100 % en 13; d0001 99,6; d0016 99,8; d0017 99,1; d0005 85,1 (cabeza de las gafas térmicas, ya tratada); d0010 76,1 (sin causa).
-**Unverified (6ª tanda):** Swift/Metal de la realimentación sin compilar en local; mezcla del bit de máscara aproximada (≥50 % de la fuente = mezclado); `blur.c` ajustado con una afín (residuo 4,3 px); primer fotograma del efecto en el panel 2D; estéreo de la pantalla 3D medido en el log (base 2-65 mm, convergencia 0,3-15 m, paralaje +1°/-1,25°: sin tocar); pantalla 3D de 3,47 m a 2,5 m (~70°).
+**Unverified (6ª tanda):** realimentación en la pantalla 3D sin ver en el visor (compila); mezcla del bit de máscara aproximada (≥50 % de la fuente = mezclado); `blur.c` ajustado con una afín (residuo 4,3 px); primer fotograma del efecto en el panel 2D; estéreo de la pantalla 3D medido en el log (base 2-65 mm, convergencia 0,3-15 m, paralaje +1°/-1,25°: sin tocar); pantalla 3D de 3,47 m a 2,5 m (~70°).
 **Unverified (5ª tanda):**
 - Vista de pared: rumbo del mando congelado al pegarse; 0,5 s para entrar; se presenta como las cinemáticas (opción `cutscene`).
 - `BA_UNDRAW_COUNT` medido en 18 volcados (0 en juego, 0x7FFEFF7D en carga); que suba en el mismo fotograma del desmontaje no está medido.
