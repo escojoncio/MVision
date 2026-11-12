@@ -360,7 +360,7 @@ final class XRPresenter {
     var onRecenter: (() -> Void)?
     var onExit: (() -> Void)?
 
-    private static let menuW = 1024, menuH = 1180     // 25 filas de 40 px desde y = 106 + pie de ayuda
+    private static let menuW = 1024, menuH = 1220     // 26 filas de 40 px desde y = 106 (la última acaba en 1146) + pie de ayuda en y = menuH - 56 = 1164
 
     init(device: MTLDevice) {
         cinema = XRCinema(device: device)

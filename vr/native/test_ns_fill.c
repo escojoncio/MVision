@@ -151,9 +151,11 @@ static void test_pose_player_and_texfix(void) {
     step(f, &N, &op, 1, &cam, NULL, &cfg, 1, &st);
     uint32_t n; const NsEffect *e = ns_fill_effects(f, &n);
     CHECK(st.cls[NF_FILL_TEXFIX] == 2 && st.filled_tris == 0 && n == 0, "textura corregida: se cuenta pero NO se dibuja por defecto (copia coplanar de la malla nativa): texfix=%u relleno=%u salidas=%u", st.cls[NF_FILL_TEXFIX], st.filled_tris, n);
+    CHECK(st.cover_pct < 1.0f, "textura corregida sin dibujar: no cuenta en la cobertura (%.1f%%)", st.cover_pct);
     cfg.draw_texfix = 1; ns_fill_reset(f);
     step(f, &N, &op, 1, &cam, NULL, &cfg, 1, &st);
     CHECK(st.cls[NF_FILL_TEXFIX] == 2 && st.filled_tris == 2, "draw_texfix=1: se dibuja, texfix=%u", st.cls[NF_FILL_TEXFIX]);
+    CHECK(st.cover_pct > 99.0f, "textura corregida dibujada: cuenta en la cobertura (%.1f%%)", st.cover_pct);
     e = ns_fill_effects(f, &n);
     CHECK(n >= 1 && e[0].depth_bias == cfg.bias && e[0].tpage == PAGE, "bias=%d", n ? e[0].depth_bias : -99);
     cfg.draw_texfix = 0;
@@ -571,6 +573,25 @@ static void test_brake_and_platform(void) {
     step(f, &N, ops, CAL_N + 1, &truth, NULL, &cfg, 1, &st);
     CHECK(st.brake == 0 && st.cal_state == 2 && count_outputs_near(f, hx, hy, hz, hs) == 1, "cámara buena: freno=%d estado=%d salidas en el hueco=%d", st.brake, st.cal_state, count_outputs_near(f, hx, hy, hz, hs));
     ns_fill_destroy(f);
+    /* (b2) escena pequeña (muestra 4..11 < calib_min_tris) con cámara buena: el desfase mide 0 y NO se frena; con muestra < 4 sí; con desfase alto sigue el freno */
+    Nat S2 = {0};
+    for (int i = 0; i < CAL_N; i++) { float x0, y0, zc; cal_world(i, &x0, &y0, &zc); nat_quad(&S2, x0, y0, zc, 600, PAGE, CLUT, 0xC3000000u + (uint32_t)i); }
+    for (int i = 0; i < 40; i++) nat_quad(&S2, 80000.0f + 1500.0f * (float)(i % 8), 80000.0f + 1500.0f * (float)(i / 8), 4000, 600, PAGE, CLUT, 0xE3000000u + (uint32_t)i);   /* nativo presente (>= 64 tris) */
+    const uint32_t shortn[] = {10, 9};
+    for (int k = 0; k < 2; k++) {
+        f = ns_fill_create();
+        step(f, &S2, ops, shortn[k], &truth, NULL, &cfg, 1, &st);
+        CHECK(st.cal_pairs == shortn[k] && st.cal_state == 0 && st.brake == 0 && st.cal_px_before < 0.5f, "muestra corta %u con cámara buena: sin freno (muestra %u, estado %d, desfase %.2f px, freno %d)", shortn[k], st.cal_pairs, st.cal_state, st.cal_px_before, st.brake);
+        ns_fill_destroy(f);
+    }
+    f = ns_fill_create();
+    step(f, &S2, ops, 10, &ram, NULL, &cfg, 1, &st);
+    CHECK(st.cal_pairs == 10 && st.cal_px_before > cfg.brake_px && st.brake == 2, "muestra corta con desfase alto: freno por desfase (muestra %u, desfase %.1f px, freno %d)", st.cal_pairs, st.cal_px_before, st.brake);
+    ns_fill_destroy(f);
+    f = ns_fill_create();
+    step(f, &S2, ops, 2, &truth, NULL, &cfg, 1, &st);
+    CHECK(st.cal_pairs == 2 && st.brake == 1, "muestra 2: freno sin_muestra (muestra %u, freno %d)", st.cal_pairs, st.brake);
+    ns_fill_destroy(f); free(S2.t); free(S2.s);
     /* calibrable: tras corregir queda < 2 px, sin freno */
     f = ns_fill_create();
     step(f, &N, ops, CAL_N + 1, &ram, NULL, &cfg, 1, &st);

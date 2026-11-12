@@ -624,7 +624,7 @@ static int cal_spread_ok(const CalPair *pr, const uint8_t *use, int n) {
 
 /* Calibra la cámara de la lista contra el escenario estático del nativo. Devuelve 1 si hay una corrección que aplicar al mundo desproyectado (x), 0 si no; rellena las estadísticas de S. */
 static int calibrate(NsFill *f, const NsFillCfg *cfg, const GpuOp *ops, uint32_t nops, const uint8_t *skip_op, const NsFillCam *cam, const double Ai[9], CalXf *x, NsFillStats *S) {
-    enum { MAXP = 320, CANDN = 192 };
+    enum { MAXP = 320, CANDN = 192, CAL_MIN_PX = 4 };   /* CAL_MIN_PX: parejas mínimas para medir el desfase sin calibrar */
     S->cal_state = cfg->calib ? 0 : 4;
     if (!cfg->calib || !f->n || !nops) return 0;
     CalPair *pr = (CalPair *)malloc(sizeof(CalPair) * MAXP);
@@ -665,6 +665,16 @@ static int calibrate(NsFill *f, const NsFillCfg *cfg, const GpuOp *ops, uint32_t
     }
     S->cal_pairs = (uint32_t)np;
     int applied = 0;
+    if (np >= CAL_MIN_PX && np < (int)(cfg->calib_min_tris ? cfg->calib_min_tris : 12u)) {   /* muestra corta: no se calibra, pero el desfase sí se mide (lo usa el freno) */
+        float *tmp = (float *)malloc(sizeof(float) * (size_t)np);
+        if (tmp) {
+            CalXf id; memset(&id, 0, sizeof id); id.R[0] = id.R[4] = id.R[8] = 1.0;
+            for (int i = 0; i < np; i++) tmp[i] = (float)(cal_res(&id, &pr[i]) * pr[i].h / pr[i].z);
+            S->cal_px_before = pct_f(tmp, np, 0.5f);
+            S->cal_p90_before = pct_f(tmp, np, 0.9f);
+            free(tmp);
+        }
+    }
     if (np >= (int)(cfg->calib_min_tris ? cfg->calib_min_tris : 12u)) {
         uint8_t *use = (uint8_t *)calloc((size_t)np, 1);
         float *tmp = (float *)malloc(sizeof(float) * (size_t)np);
@@ -862,11 +872,10 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
     S->brake = 0;
     if (cfg.brake && f->n >= (cfg.brake_min_native ? cfg.brake_min_native : 64u)) {
         const float bpx = cfg.brake_px > 0 ? cfg.brake_px : 2.0f;
-        const uint32_t mt = cfg.calib_min_tris ? cfg.calib_min_tris : 12u;
         if (S->cal_state == 1) { if (S->cal_px_after > bpx) S->brake = 3; }
         else if (S->cal_state == 2) S->brake = 0;   /* ya casa */
         else if (S->cal_state != 4) {               /* 0 sin muestra suficiente / 3 rechazada */
-            if (S->cal_pairs < mt) S->brake = 1;
+            if (S->cal_pairs < 4u) S->brake = 1;   /* sin muestra mínima para medir el desfase (con >= 4 parejas y desfase bajo no se frena: escenas pequeñas con cámara buena) */
             else if (S->cal_px_before > bpx) S->brake = 2;
         }
     }
@@ -1034,7 +1043,7 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
 
     uint32_t cov = S->cls[NF_MATCH] + S->cls[NF_SPLIT] + S->cls[NF_SUBDIV] + S->cls[NF_LOCKED];
     uint32_t pose = S->cls[NF_POSE_PLAYER] + S->cls[NF_POSE_OTHER];
-    uint32_t fill_cls = S->cls[NF_FILL_ABSENT] + S->cls[NF_FILL_OTHERTEX] + S->cls[NF_FILL_PARTIAL] + S->cls[NF_FILL_SPRITE] + S->cls[NF_FILL_TEXFIX];
+    uint32_t fill_cls = S->cls[NF_FILL_ABSENT] + S->cls[NF_FILL_OTHERTEX] + S->cls[NF_FILL_PARTIAL] + S->cls[NF_FILL_SPRITE] + (cfg.draw_texfix ? S->cls[NF_FILL_TEXFIX] : 0);   /* textura_corregida solo cubre si se dibuja (por defecto no) */
     uint32_t nearskip = S->cls[NF_SKIP_NEAR];   /* envoltura del jugador / pegado a la cámara: no es escena, fuera del denominador igual que la pose */
     uint32_t denom = S->tris > pose + nearskip ? S->tris - pose - nearskip : 0;
     if (S->brake) fill_cls = 0;   /* frenado: nada de lo rellenable se ve */
