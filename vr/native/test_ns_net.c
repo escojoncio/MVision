@@ -303,6 +303,11 @@ static void test_raise_and_ir(void) {
     in->flags = 0;
     ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 0, 0, -1, 0, &o);
     CHECK(o.raise == 0.0f, "dinámica sin sesgo: raise=%f", o.raise);
+    CHECK(!(o.flags & NSG_PF_NOSPLIT), "objeto sin GBOUND: sus caras se pueden partir");
+    in->flags = NS_IF_GBOUND;
+    ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 0, 0, -1, 0, &o);
+    CHECK((o.flags & NSG_PF_NOSPLIT) != 0, "objeto GBOUND: NSG_PF_NOSPLIT llega a la pieza");
+    in->flags = 0;
     ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 1000, 0, -1, 0, &o);
     CHECK(o.raise == 1000.0f, "dinámica con sesgo: tal cual, raise=%f", o.raise);
     ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, -500, 0, -1, 0, &o);
@@ -326,7 +331,7 @@ static void test_raise_and_ir(void) {
     w.sc.valid &= ~NS_SV_FX; in->flags = NS_IF_THERMAL_OK;
     ns_gpu_make_piece(&w.sc, in, &w.sc.piece[0], 0, 0, 0, -1, 0, &o);
     CHECK(!(o.flags & NSG_PF_IRCLUT), "sin efectos de pantalla válidos (NS_SV_FX) no se lee el modo");
-    destroy(&w);
+    ns_store_destroy(w.st); destroy(&w);
 }
 
 /* 9. la IK alarga los huesos del brazo hasta 2,5 veces (vr_body.c) sobre matrices del motor de escala ~1,003: la pieza se dibuja */
@@ -414,6 +419,75 @@ static void test_gte_clamp(void) {
     CHECK(ns_gpu_gte_tri(ok3, zc, H, HY, out) == NSG_GTE_DRAW && out[0][2] == 400, "triángulo normal: se dibuja intacto");
 }
 
+/* 11c. modo ENGINE (pantalla 3D con la cámara del motor). Dentro de la ventana del motor manda la regla del motor por triángulo ENTERO (lo que el fotograma del juego no tiene no debe tapar);
+ * lo que el motor descarta por reverso o tamaño, sin ser cercano, se dibuja con su geometría real SOLO en los puntos que caen fuera de esa ventana (el otro ojo, los márgenes).
+ * Réplica de ns_vertex / ns_fs (NativeShaders.metal). */
+static void test_engine_tri(void) {
+    NsGpuEngCam c; memset(&c, 0, sizeof c);
+    c.x[0] = 1; c.y[1] = 1; c.fwd[2] = 1; c.h = 320.0f; c.hx = 320.0f; c.hy = 320.0f * 66.0f / 64.0f;   /* cámara en el origen mirando a +z (mundo = vista) */
+    float d[3][3];
+    /* lo que el motor dibuja: igual que ns_gpu_gte_tri, con los vértices cercanos en el plano H/2 */
+    const float one[3][3] = {{-298, -187, 246}, {348, 152, 1187}, {-300, 100, 79}};
+    CHECK(ns_gpu_engine_tri(one, &c, 0, 0, NULL, 0, 0, d) == NSG_ENG_DRAW && d[2][2] == 160.0f && d[2][0] == -300 && d[0][2] == 246, "un vértice cercano: se dibuja ajustado al plano H/2 (z=%f)", d[2][2]);
+    const float none[3][3] = {{100, 50, -10}, {-200, 40, 0}, {300, -30, -625}};
+    CHECK(ns_gpu_engine_tri(none, &c, 0, 0, NULL, 0, 0, d) == NSG_ENG_BEHIND, "los tres vértices detrás: no se dibuja");
+    CHECK(ns_gpu_engine_tri(none, &c, 0, 0, NULL, 0, NSG_ENG_OFF_BEHIND, d) == NSG_ENG_DRAW, "descarte por detrás apagado");
+    /* suelo grande que pasa por debajo de la cámara y cruza la ventana: la tarjeta no lo dibuja y el fotograma del juego no lo tiene. Rescatado: con su geometría real y solo fuera de la ventana
+     * (dibujarlo dentro tapaba la escena) */
+    const float big[3][3] = {{2000, 300, 10}, {-2000, 300, 10}, {0, 300, 4000}};
+    CHECK(ns_gpu_gte_tri(big, 160.0f, c.hx, c.hy, d) == NSG_GTE_OVERSIZE, "suelo grande: la tarjeta lo pierde por tamaño");
+    CHECK(ns_gpu_engine_tri(big, &c, 0, 0, NULL, 0, 0, d) == NSG_ENG_EXTRA && d[0][2] == 10 && d[2][2] == 4000, "grande sobre la ventana del motor: rescatado sin ajustar");
+    const float in_win[3] = {0, 300, 3000}, out_win[3] = {1800, 300, 3000}, out_y[3] = {0, 1500, 3000}, beh[3] = {0, 0, -100};   /* 0/32 px; 192 px a la derecha; 165 px abajo; detrás */
+    CHECK(ns_gpu_engine_win(&c, in_win) == 1 && ns_gpu_engine_win(&c, out_win) == 0 && ns_gpu_engine_win(&c, out_y) == 0 && ns_gpu_engine_win(&c, beh) == 0, "ventana del motor: dentro no se dibuja lo rescatado; fuera sí");
+    CHECK(ns_gpu_engine_tri(big, &c, 0, 0, NULL, 0, NSG_ENG_OFF_SIZE, d) == NSG_ENG_DRAW && d[0][2] == 160.0f, "tope de tamaño apagado: lo dibuja la regla del motor, ajustado");
+    /* objeto pegado a la cámara (z = 94..163 con H = 162, medido en un volcado): demasiado grande y cercano; aunque su proyección saturada quede fuera de la ventana no se rescata */
+    NsGpuEngCam n = c; n.h = 162.0f; n.hx = 162.0f; n.hy = 162.0f;
+    const float stuck[3][3] = {{300, -400, 94}, {900, 500, 120}, {400, 600, 161}};
+    CHECK(ns_gpu_gte_tri(stuck, 81.0f, n.hx, n.hy, d) == NSG_GTE_OVERSIZE && ns_gpu_engine_tri(stuck, &n, 0, 0, NULL, 0, 0, d) == NSG_ENG_OVERSIZE, "pegado a la cámara (zmax < H): descartado entero, sin rescate");
+    /* reverso de una sola cara para el motor: rescatado solo si es anverso desde algún ojo de la vista */
+    const float wl[3][3] = {{10, -500, 1000}, {10, 500, 1000}, {20, 0, 3000}};                   /* pared casi de canto */
+    const int wl_back = ns_gpu_tri_back(wl[0], wl[1], wl[2], c.eye);
+    const float wr[3][3] = {{wl[0][0], wl[0][1], wl[0][2]}, {wl[2][0], wl[2][1], wl[2][2]}, {wl[1][0], wl[1][1], wl[1][2]}};
+    const float (*wb)[3] = wl_back ? wl : wr;                                                    /* el sentido que es reverso desde el ojo del motor */
+    const float eye_r[1][3] = {{33, 0, 0}}, eye_l[1][3] = {{-33, 0, 0}};
+    const float (*eye_f)[3] = ns_gpu_tri_back(wb[0], wb[1], wb[2], eye_r[0]) ? eye_l : eye_r;   /* el ojo que la ve de frente */
+    CHECK(!ns_gpu_tri_back(wb[0], wb[1], wb[2], eye_f[0]), "la pared de canto es anverso desde un ojo");
+    CHECK(ns_gpu_engine_tri(wb, &c, 1, 0, NULL, 0, 0, d) == NSG_ENG_BACK, "reverso para el motor, sin ojos de la vista: no se dibuja");
+    CHECK(ns_gpu_engine_tri(wb, &c, 1, 0, eye_f == eye_r ? eye_l : eye_r, 1, 0, d) == NSG_ENG_BACK, "reverso también desde el ojo de la vista: no se dibuja");
+    CHECK(ns_gpu_engine_tri(wb, &c, 1, 0, eye_f, 1, 0, d) == NSG_ENG_EXTRA && d[0][0] == wb[0][0], "reverso para el motor y anverso desde el ojo de la vista: rescatado (solo fuera de la ventana)");
+    CHECK(ns_gpu_engine_tri(wb, &c, 0, 0, NULL, 0, 0, d) == NSG_ENG_DRAW, "doble cara: se dibuja");
+    CHECK(ns_gpu_engine_tri(wb, &c, 1, 0, eye_f, 1, NSG_ENG_OFF_BACK, d) == NSG_ENG_DRAW, "reversos apagados");
+    /* «Caras cercanas: Original»: la cara grande y cercana de un objeto sin GBOUND que el motor original parte (área > 0x800, profundidad media < 8192) se dibuja con su geometría real también en la ventana */
+    CHECK(ns_gpu_engine_tri(big, &c, 0, 1, NULL, 0, 0, d) == NSG_ENG_SPLIT && d[0][2] == 10 && d[1][0] == -2000, "suelo cercano: partido (geometría real)");
+    CHECK(ns_gpu_engine_tri(big, &c, 0, 1, NULL, 0, NSG_ENG_OFF_SPLIT, d) == NSG_ENG_EXTRA, "«Recortadas»: sin subdivisión, solo el rescate fuera de la ventana");
+    CHECK(ns_gpu_engine_tri(big, &c, 0, 0, NULL, 0, 0, d) == NSG_ENG_EXTRA, "objeto GBOUND (no se parte): regla del motor");
+    CHECK(ns_gpu_engine_tri(one, &c, 0, 1, NULL, 0, 0, d) == NSG_ENG_SPLIT && d[2][2] == 79, "un vértice a z < H/2: partido en vez de ajustado al plano H/2");
+    const float ok3[3][3] = {{-600, -300, 400}, {600, -300, 400}, {0, 300, 400}};
+    CHECK(ns_gpu_engine_tri(ok3, &c, 0, 1, NULL, 0, 0, d) == NSG_ENG_DRAW, "cara normal: como siempre");
+    const float far_big[3][3] = {{-40000, 0, 20000}, {40000, 0, 20000}, {0, 9000, 30000}};       /* 1280 px de ancho a 20-30 m: el motor no la parte (profundidad media >= 8192) */
+    CHECK(ns_gpu_engine_tri(far_big, &c, 0, 1, NULL, 0, 0, d) == NSG_ENG_EXTRA, "enorme y lejana: no se parte (solo rescate fuera de la ventana)");
+    CHECK(ns_gpu_engine_tri(wb, &c, 1, 1, NULL, 0, 0, d) == NSG_ENG_BACK, "el reverso se decide antes de partir");
+    const float sliver[3][3] = {{-3000, 300, 100}, {3000, 300, 100}, {0, 300.2f, 100.05f}};      /* más de 1023 px de ancho y menos de 1 px de alto: área <= 0x800, no se parte */
+    CHECK(ns_gpu_engine_tri(sliver, &c, 0, 1, NULL, 0, 0, d) != NSG_ENG_SPLIT, "astilla sin área: no se parte");
+    /* condiciones de la subdivisión una a una (libdg/divide.c) */
+    const float bs[3][3] = {{-2000, 300, 10}, {2000, 300, 10}, {0, 300, 4000}};                  /* el suelo grande con el otro sentido: uno de los dos es reverso con un vértice a z < H/2 */
+    const float (*bb)[3] = ns_gpu_tri_back(bs[0], bs[1], bs[2], c.eye) ? bs : big;
+    CHECK(ns_gpu_engine_tri(bb, &c, 1, 1, NULL, 0, NSG_ENG_OFF_SIZE, d) == NSG_ENG_BACK, "reverso con un vértice cercano: no se parte");
+    const float wide[3][3] = {{-2000, -100, 200}, {2000, -100, 200}, {0, 200, 400}};             /* todos a z >= H/2 y más de 1023 px de ancho: solo lo pierde el tamaño */
+    CHECK(ns_gpu_engine_tri(wide, &c, 0, 1, NULL, 0, 0, d) == NSG_ENG_SPLIT && ns_gpu_engine_tri(wide, &c, 0, 0, NULL, 0, 0, d) == NSG_ENG_EXTRA, "perdida por tamaño sin vértices cercanos: partida");
+    const float a3000[3][3] = {{0, 0, 100}, {60, 0, 320}, {0, 45, 320}}, a2000[3][3] = {{0, 0, 100}, {40, 0, 320}, {0, 45, 320}};   /* doble área saturada 60 x 46,4 = 2784 y 40 x 46,4 = 1856 px (hy = 330) */
+    CHECK(ns_gpu_engine_tri(a3000, &c, 0, 1, NULL, 0, 0, d) == NSG_ENG_SPLIT, "doble área justo por encima de 0x800: partida");
+    CHECK(ns_gpu_engine_tri(a2000, &c, 0, 1, NULL, 0, 0, d) == NSG_ENG_DRAW && d[0][2] == 160.0f, "doble área justo por debajo de 0x800: regla del motor");
+    const float z6000[3][3] = {{-40000, 0, 6000}, {40000, 0, 6000}, {0, 3000, 6000}};            /* profundidad media 6000 < 8192 */
+    CHECK(ns_gpu_engine_tri(z6000, &c, 0, 1, NULL, 0, 0, d) == NSG_ENG_SPLIT, "profundidad media 6000: partida");
+    const float zneg[3][3] = {{4000, 0, -20000}, {3000, 0, 14000}, {0, 3000, 14000}};            /* media de max(z, 0) = 9333 >= 8192; la de z sin recortar sería 2667 */
+    CHECK(ns_gpu_engine_tri(zneg, &c, 0, 1, NULL, 0, 0, d) == NSG_ENG_DRAW, "el vértice de detrás cuenta como z = 0 en la profundidad media: no se parte");
+    NsGpuEngCam t = c; t.h = 1200.0f; t.hx = 1200.0f; t.hy = 1200.0f;                            /* teleobjetivo (H > 1000): el umbral de profundidad es 60000 */
+    const float tele[3][3] = {{-20000, 0, 10000}, {20000, 0, 10000}, {0, 3000, 12000}}, tele_far[3][3] = {{-200000, 0, 70000}, {200000, 0, 70000}, {0, 30000, 70000}};
+    CHECK(ns_gpu_engine_tri(tele, &t, 0, 1, NULL, 0, 0, d) == NSG_ENG_SPLIT && ns_gpu_engine_tri(tele, &c, 0, 1, NULL, 0, 0, d) != NSG_ENG_SPLIT, "H > 1000: se parte hasta 60000 de profundidad media");
+    CHECK(ns_gpu_engine_tri(tele_far, &t, 0, 1, NULL, 0, 0, d) == NSG_ENG_EXTRA, "H > 1000 y más de 60000: no se parte");
+}
+
 /* 12. piezas sin malla */
 static void test_empty_piece(void) {
     W w; build(&w, 0, 0.0f);
@@ -440,6 +514,7 @@ int main(void) {
     test_back_faces();
     test_oversize();
     test_gte_clamp();
+    test_engine_tri();
     test_empty_piece();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

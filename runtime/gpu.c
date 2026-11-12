@@ -1034,6 +1034,42 @@ void gpu_get_display(GpuDisplay *d) {
     d->mode = g.mode; d->hx1 = g.hx1; d->hx2 = g.hx2; d->vy1 = g.vy1; d->vy2 = g.vy2;
 }
 
+/* Ventana visible fija (gpu.h). Constantes de la norma: ciclos de reloj de la GPU del inicio / fin visibles y líneas visibles. */
+enum { WIN_NTSC_X1 = 608 - 8, WIN_NTSC_X2 = 3168, WIN_NTSC_Y1 = 24, WIN_NTSC_Y2 = 248, WIN_PAL_X1 = 628, WIN_PAL_X2 = 3188, WIN_PAL_Y1 = 30, WIN_PAL_Y2 = 298 };
+void gpu_display_window(const GpuDisplay *d, int full, GpuWindow *o) {
+    const int div = HMODE[hmode_idx(d->mode)].div;
+    const int x1 = d->pal ? WIN_PAL_X1 : WIN_NTSC_X1, x2 = d->pal ? WIN_PAL_X2 : WIN_NTSC_X2, y1 = d->pal ? WIN_PAL_Y1 : WIN_NTSC_Y1, y2 = d->pal ? WIN_PAL_Y2 : WIN_NTSC_Y2;
+    const int sh = d->interlace && (d->mode & 4);   /* 480i: dos filas de VRAM por línea, como disp.h */
+    o->w = (x2 - x1) / div; o->h = (y2 - y1) << sh;
+    o->ox = ((int)d->hx1 / div * div - x1) / div - (full ? d->pad_l : 0);   /* el inicio del rango se alinea al píxel y la parte de píxel que sobra no desplaza (división hacia cero) */
+    o->oy = ((int)d->vy1 - y1) * (1 << sh);
+}
+
+size_t gpu_present_window(const GpuDisplay *d, const uint16_t *vram, uint8_t *dst, size_t cap_px, GpuWindow *win) {
+    GpuWindow w;
+    gpu_display_window(d, 1, &w);
+    if (win) *win = w;
+    const int fw = d->fw > 0 ? d->fw : d->w, h = d->h;
+    if (w.w <= 0 || w.h <= 0 || fw <= 0 || h <= 0 || (size_t)w.w * (size_t)w.h > cap_px) return 0;
+    static uint8_t *tmp; static size_t tmp_px;   /* marco intermedio reutilizado (un solo hilo, como el resto de gpu.c) */
+    if ((size_t)fw * (size_t)h > tmp_px) {
+        uint8_t *q = realloc(tmp, (size_t)fw * (size_t)h * 4);
+        if (!q) return 0;
+        tmp = q; tmp_px = (size_t)fw * (size_t)h;
+    }
+    if (!gpu_present_rgba(d, vram, tmp, tmp_px)) return 0;
+    for (int y = 0; y < w.h; y++) {
+        uint8_t *p = dst + (size_t)y * w.w * 4;
+        const int sy = y - w.oy;
+        for (int x = 0; x < w.w; x++, p += 4) {
+            const int sx = x - w.ox;
+            if (sx >= 0 && sx < fw && sy >= 0 && sy < h) memcpy(p, tmp + ((size_t)sy * fw + sx) * 4, 4);
+            else { p[0] = p[1] = p[2] = 0; p[3] = 255; }
+        }
+    }
+    return (size_t)w.w * (size_t)w.h;
+}
+
 size_t gpu_present_rgba(const GpuDisplay *d, const uint16_t *vram, uint8_t *dst, size_t cap_px) {
     int fw = d->fw > 0 ? d->fw : d->w, h = d->h, w = d->aw > 0 ? d->aw : d->w;
     if (fw <= 0 || h <= 0 || (size_t)fw * (size_t)h > cap_px) return 0;

@@ -52,7 +52,7 @@ int ns_fill_session_run(NsFillSession *s, const uint8_t *ram, const uint8_t *scr
                         NsFillStats *st, int *cam_used) {
     if (!s || !s->ok || !ram) return -1;
     NsFillCfg cfg;
-    if (cfg_in) cfg = *cfg_in; else ns_fill_cfg_default(&cfg);
+    if (cfg_in) cfg = *cfg_in; else { ns_fill_cfg_default(&cfg); cfg.only_absent = 1; }   /* la app: solo malla ausente real (ver NsFillCfg.only_absent) */
     double t0 = now_ms();
     if (ns_extract_ex(&s->sc, s->st, ram, NS_RAM_SIZE, scratch, scratch ? 1024u : 0u, NULL, NULL) != 0) return -2;
     ns_store_ack(s->st, ns_store_epoch(s->st));   /* único consumidor */

@@ -113,7 +113,36 @@ static void test_case(const char *name, const float eye[3], float yaw, float pit
     free(ref); free(img); free(eng); free(es); free(app); free(as);
 }
 
+/* Profundidad cercana filtrada (ns_cinema_depth_filter) cuando entra de golpe algo pegado a la cámara (z_static = 0,05 m): la separación baja en el acto hasta el límite de confort
+ * (lo cercano filtrado nunca queda por detrás de lo que se dibuja: los ojos no se cruzan más de NS_CINEMA_PAR_NEG) y vuelve a subir despacio (<= x1,25 cada 33 ms) cuando se va. */
+static void test_depth_near_jump(void) {
+    NsScene sc; memset(&sc, 0, sizeof sc);
+    const float eye[3] = {0, 0, 0};
+    make_cam(&sc.cam, eye, 0, 0, 0);
+    NsCinemaDepthFilter f; memset(&f, 0, sizeof f);
+    float zn = 0, zs = 0;
+    sc.t_ns = 1000000000ull; f.z_static = 2.0f;
+    CHECK(ns_cinema_depth_filter(&f, &sc, &zn, &zs) == 1 && fabsf(zn - 2.0f) < 1e-4f, "cercano inicial: %g", zn);
+    sc.t_ns += 33000000ull; f.z_static = 0.05f;
+    CHECK(ns_cinema_depth_filter(&f, &sc, &zn, &zs) == 1 && zn <= 0.05f + 1e-6f, "cara pegada a la cámara: lo cercano baja en el acto: %g", zn);
+    const float tx = 160.0f / sc.cam.h;
+    NsCinemaStereo st; float b0 = 0; int slow = 1;
+    const int okst = ns_cinema_stereo(0.064f, zn, zs, tx, 0.6f, 2.5f, &st);
+    const float cross = 0.6f / tx * st.b * (1.0f / 0.05f - 1.0f / st.conv);   /* paralaje cruzado (rad) de lo que se dibuja a 0,05 m con la separación de este fotograma */
+    CHECK(okst && cross <= NS_CINEMA_PAR_NEG * 1.001f, "paralaje cruzado real dentro del límite: %g grados", cross * 57.29578f);
+    b0 = st.b;
+    f.z_static = 2.0f;
+    for (int i = 0; i < 60; i++) {
+        sc.t_ns += 33000000ull;
+        ns_cinema_depth_filter(&f, &sc, &zn, &zs);
+        if (!ns_cinema_stereo(0.064f, zn, zs, tx, 0.6f, 2.5f, &st) || st.b > 1.25f * b0) slow = 0;
+        b0 = st.b;
+    }
+    CHECK(slow && zn > 1.0f, "al irse, la separación sube despacio (<= x1,25 por fotograma de 33 ms) y lo cercano vuelve: %g", zn);
+}
+
 int main(void) {
+    test_depth_near_jump();
     /* suelo y techo (de una sola cara) a 4 m; un techo de doble cara más alto para comprobar que no se descarta */
     plane(0, 6000, 12, -1, 1, 0);        /* suelo: anverso hacia arriba (producto vectorial hacia -Y en el sentido de la regla: se ve desde arriba) */
     plane(4000, 6000, 12, +1, 2, 0);     /* techo: anverso hacia abajo */

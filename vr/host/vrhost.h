@@ -147,6 +147,9 @@ int mv_vrhost_hud2d_layer(int *mode, int *view);
 int mv_vrhost_hud2d_acquire_l(int layer, const uint8_t **px, int *w, int *h, int *full, uint32_t *seq);
 void mv_vrhost_hud2d_release_l(int layer);
 int mv_vrhost_hud2d_layer_l(int layer, int *mode, int *view);
+/* Entre acquire (r >= 0) y release: colocación de la capa adquirida en la ventana visible fija del televisor (vr_layer2d_async.h, vl2a_acquire_window): win6 = ancho y alto de la ventana, ox, oy (primer píxel
+ * del marco del juego dentro de ella), ancho y alto del marco, en píxeles nativos. 0 si no hay capa. */
+int mv_vrhost_hud2d_window_l(int layer, int *win6);
 /* ¿Vale una capa (mode, layer_view) para la vista vigente cur_view? Con overlay (ventana 2D del menú sobre el mundo) solo VL_PANEL; siempre la misma clase de vista (view_kind). */
 int mv_vrhost_hud2d_accept(int mode, int layer_view, int cur_view, int overlay);
 /* Troceo del 2D (defecto 0 = APAGADO; MV_L2D_SPLIT=1 en el entorno lo enciende al instalar): con 0 el radar no se separa del HUD (no hay escena de radar: mv_host_radar devuelve 0). Cualquier hilo. */

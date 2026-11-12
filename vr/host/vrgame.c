@@ -406,6 +406,29 @@ void mv_vrgame_set_missile_view(int32_t mode) {
     pthread_mutex_unlock(&HM);
 }
 
+/* Truco de depuración «Dar todas las armas». Capacidad PROVISIONAL (sin verificar contra el juego: GM_WeaponsMax lo fijan los guiones GCL del disco, no la decompilación) de las armas cuyo máximo aún es 0 en la RAM; las que ya tienen máximo conservan el suyo.
+ * Verificados en volcados (/tmp/a30..a32, 75 RAM): 0 pistola 25, 2 granada 8, 6 adhesivo 4, 7 aturdidora 3, 8 humo 3. Sin verificar: 1 fusil, 3 misil guiado, 4 antiaéreo, 5 mina, 9 francotirador. */
+static const int16_t CHEAT_WEAPON_CAP[BRIDGE_N_WEAPONS] = {25, 450, 8, 8, 8, 8, 4, 3, 3, 15};
+static _Atomic int cheat_weapons_req;      /* petición de la app (hilo de render) -> la aplica el hilo de emulación una vez en vrgame_pad */
+void mv_vrgame_cheat_all_weapons(void) { atomic_store_explicit(&cheat_weapons_req, 1, memory_order_release); }
+/* Lo mismo que el juego al recoger un arma (game/item.c add_weapon): GM_Weapons[i] (BA_VARS + 2 * (17 + i), s16, -1 = no la tiene) = GM_WeaponsMax[i] (BA_VARS + 2 * (27 + i)). Conserva el bit 0x8000 (arma bloqueada) de las que ya se tenían.
+ * Solo toca esas dos tablas de 10 s16. Devuelve cuántas armas escribió (0 con ram NULL). */
+int vrgame_cheat_weapons_apply(uint8_t *ram) {
+    if (!ram) return 0;
+    uint8_t *am = ram + ((BA_VARS + 2u * BRIDGE_V_WEAPON_AMMO) & 0x1FFFFFu);
+    uint8_t *mx = ram + ((BA_VARS + 2u * BRIDGE_V_WEAPON_MAX) & 0x1FFFFFu);
+    for (int i = 0; i < BRIDGE_N_WEAPONS; i++) {
+        int16_t a, m;
+        memcpy(&a, am + 2 * i, 2);
+        memcpy(&m, mx + 2 * i, 2);
+        if (m <= 0) { m = CHEAT_WEAPON_CAP[i]; memcpy(mx + 2 * i, &m, 2); }
+        int16_t n = (int16_t)(m - 1);      /* max - 1: con el cargador al máximo las cajas de munición dan «FULL» y no ejecutan su guion */
+        if (a != -1 && (a & 0x8000)) n = (int16_t)((uint16_t)n | 0x8000u);
+        memcpy(am + 2 * i, &n, 2);
+    }
+    return BRIDGE_N_WEAPONS;
+}
+
 /* ============================================================================================================== carga del arma */
 enum { LD_IDLE = 0, LD_LOADING = 1, LD_READY = 2, LD_FAILED = 3 };
 
@@ -679,34 +702,40 @@ static int cb_projectile(int id, WPose *out) {
 static void cb_steer(int id, float yaw, float pitch) { if (id == 3) vrmis_steer(yaw, pitch); }
 
 /* ---- vistas especiales (mira óptica, visor antiaéreo, pantalla del misil): descriptor para la app (ver vrgame.h) ---- */
-#define SCOPE_TEX 384            /* lado (texels) de la textura de la mira */
-#define SCOPE_LENS_D 0.040f      /* diámetro de la lente (el ocular de la mira), m */
+#define SCOPE_TEX 1024           /* lado (texels) de la textura de la mira (la app admite 16..2048) */
 #define AA_SIGHT_DIST 3.0f       /* distancia (m) a la que se coloca el HUD del visor (colimado: se ve a esa distancia con el tamaño angular del juego) */
 static void put_pose(const WPose *w, float p[3], float q[4]) {
     p[0] = w->p.x; p[1] = w->p.y; p[2] = w->p.z;
     q[0] = w->q.x; q[1] = w->q.y; q[2] = w->q.z; q[3] = w->q.w;
 }
-static void special_view(int gid, WeaponState *st, const WeaponDef *def, const WPose *W, const WInput *in) {
+static void special_view(int gid, WeaponState *st, const WeaponDef *def, const WPose *W, const WInput *in, int duct) {
     MvVrSpecialView sv;
     int fullscreen;
+    (void)def;
     memset(&sv, 0, sizeof sv);
     pthread_mutex_lock(&HM);
     fullscreen = opt_missile_view;
     pthread_mutex_unlock(&HM);
-    if (gid == 9) {
+    if (gid == 9 && !duct) {       /* con el rifle oculto (prismáticos del juego) tampoco hay lente: flotaría sin rifle */
         sv.kind = MV_VIEW_SCOPE;
         sv.blend = st->channel[WCH_SCREEN];
         sv.zoom = sniper_zoom(st);
-        sv.cam_valid = st->aux.active || sv.blend > 0.01f;
+        {   /* la vista de la mira se renderiza siempre con el PSG1 en la mano (imagen viva en la lente); solo se omite si la lente no puede verse */
+            WPose lw;
+            sv.cam_valid = st->aux.active && sniper_lens_world(st, &lw) && sniper_lens_visible(&lw, &in->head);
+        }
         put_pose(&st->aux.camera, sv.cam_pos, sv.cam_rot);
         sv.cam_fov_y = st->aux.fov_y;
         sv.tex_w = sv.tex_h = SCOPE_TEX;
-        WPose lens = wpose_mul(*W, def->parts[SNIPER_PT_LENS].rest);
+        SniperLens sl;      /* la lente es la pieza "lens" del modelo (centro, eje y tamaño de su malla), adelantada hacia el ojo para no solaparse con la placa */
+        sniper_lens(st, &sl);
+        WPose lens = wpose_mul(*W, sl.pose);
+        lens.p = wv_add(lens.p, wquat_rotate(lens.q, wv(0, 0, SNIPER_LENS_LIFT)));
         put_pose(&lens, sv.surf_pos, sv.surf_rot);
-        sv.surf_w = sv.surf_h = SCOPE_LENS_D;
+        sv.surf_w = sv.surf_h = sl.d;
         sv.round = 1;
+        sv.occlude = 1;                          /* la lente es un objeto del mundo: la tapan el escenario y el arma que tenga delante */
         sv.suppress_frame = vrcam_zoom_capped();  /* solo mientras el juego tiene SU mira activa (pidió más aumento que el tope): esa máscara es la abertura, que dibuja vr_scope en la lente; otras máscaras (gafas, careta) se conservan */
-        sv.hide_hud = sv.blend > 0.25f;
         vrcam_set_zoom_cap(320);                 /* la cabeza no se acerca: el aumento está en la lente */
     } else {
         vrcam_set_zoom_cap(0);
@@ -1056,6 +1085,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
 
     int cam = vrcam_active();
     int core = bs && (bs->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs->has_player;
+    if (atomic_exchange_explicit(&cheat_weapons_req, 0, memory_order_acq_rel) && core && bs->in_control && ram) fprintf(stderr, "[truco] dar todas las armas: %d armas puestas a su máximo\n", vrgame_cheat_weapons_apply(ram));   /* una vez; sin partida o sin el control del jugador se descarta */
 
     calib_tick(dt);
     glove_update(ram);
@@ -1117,6 +1147,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     }
     VrReloadOut ro;
     vrreload_frame(&rg, &ri, &ro);
+    if (ro.load_mag > 0 && ram) { int16_t lm = (int16_t)ro.load_mag; memcpy(ram + (BA_MAGAZINE & 0x1FFFFFu), &lm, 2); }   /* recogida con el arma seca: el cargador del juego se carga aquí (VrReloadOut.load_mag); el VBlank siguiente el puente lo lee y el arma VR queda lista */
     {   /* diagnóstico: recogida de munición con el arma seca (el total del juego subió con el cargador del juego a 0 y el arma VR bloqueada) */
         static int pk_prev;
         int pk = vrreload_pickup_pending();
@@ -1178,7 +1209,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     G.active = 1;
     G.cur = slot;
     /* Conducto (tumbado, stance 2): el arma no se ve ni el modelo VR, ni el del juego, ni la copia del juego en la mano (se oculta siempre y no se lleva a la mano). Solo visibilidad: el disparo no se toca (si el juego lo bloquea ahí, es del propio juego). */
-    const int duct = bs->stance == 2 || bs->prone || atomic_load_explicit(&view_hide, memory_order_relaxed);   /* también con los prismáticos del juego (el arma VR no lleva el aumento del mundo) */
+    const int duct = (gid != 9 && (bs->stance == 2 || bs->prone)) || atomic_load_explicit(&view_hide, memory_order_relaxed);   /* también con los prismáticos del juego (el arma VR no lleva el aumento del mundo); el PSG1 no: el original tumba a Snake al sacarlo (sna_init.c) y el rifle VR se sigue viendo */
     atomic_store_explicit(&native_hand, sl->native && !duct ? w : -1, memory_order_relaxed);
     vrbody_set_armed(1);
     vrfire_set_hide(sl->native && !duct ? 0 : 1);      /* las granadas (sl->native, vrgame_weapon_uses_game_model) se dibujan siempre con el modelo del juego y no se oculta; el resto lleva modelo VR y se oculta el del juego (la granada lanzada tampoco se oculta nunca: es otro actor) */
@@ -1312,6 +1343,20 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
         int16_t tq; memcpy(&tq, ram + (0x800B5FBAu & 0x1FFFFFu), 2);
         G.steady += ((tq > 0 ? 1.0f : 0.0f) - G.steady) * 0.02f;
         sniper_set_steady(st, G.steady);
+        {   /* autoenfoque del original (rifle.c GetZoomLimit): primer muro (HZD, misma máscara que su línea de visión) o geometría sólida en el eje de la mira, hasta 3000 unidades */
+            float hit = -1.0f;
+            WPose lp;
+            if (map.valid && sniper_lens_world(st, &lp)) {
+                const WVec3 fw = wquat_rotate(lp.q, wv(0, 0, -1));
+                const float pu[3] = {lp.p.x, lp.p.y, lp.p.z}, du[3] = {fw.x, fw.y, fw.z};
+                float ow[3], dw[3];
+                vrfire_pos_to_world(&map, pu, ow); vrfire_dir_to_world(&map, du, dw);
+                hit = vrhzd_raycast(ram, ow, dw, SNIPER_ZOOM_MAX_H, VRHZD_SKIP_SIGHT);
+                const float t2 = mv_vrhost_ray_distance(ow, dw, hit >= 0.0f ? hit : SNIPER_ZOOM_MAX_H);      /* el original (HZD_CHK_ALL) también ve suelos y objetos: geometría sólida nativa, como el láser */
+                if (t2 >= 0.0f) hit = t2;
+            }
+            sniper_set_range(st, hit, map.units_per_m);
+        }
     }
     int booting = !G.boot_done;
     def->update(st, &in, (WReloadMode)rmode, &G.br);
@@ -1347,6 +1392,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
     pthread_mutex_unlock(&HM);
 
     /* disparo */
+    vrfire_skip_raise(ram);      /* sin el levantado de 8 ticks del arma del juego (vr_fire.h) */
     VrFireGame fg;
     vrfire_read_game(ram, bs, &fg);
     VrFireIn fi;
@@ -1383,7 +1429,7 @@ uint16_t vrgame_pad(uint16_t pad, const BridgeState *bs, uint8_t *ram) {
             fi.raise = 1;
             fi.ready = st->phase == WT_PH_READY;
         }
-        special_view(gid, st, def, &W, &in);
+        special_view(gid, st, def, &W, &in, duct);
         /* láser de la pistola (w_laser.h): desde la boca (la del disparo: sin supresor, la del cañón) a lo largo de su eje, el mismo con el que vr_fire orienta la bala; solo con el jugador al mando y el arma levantada */
         WPose lz = def->points[WP_MUZZLE];
         if (gid == 0 && !(in.game_flags & WGF_SUPP)) lz.p.z = w_pist_bare_muzzle_z;

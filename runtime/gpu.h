@@ -41,6 +41,17 @@ void gpu_get_display(GpuDisplay *d);
  * apagada en negro. dst necesita fw*h*4 bytes; devuelve el número de píxeles escritos (fw*h), 0 si no cabe (cap en píxeles). */
 size_t gpu_present_rgba(const GpuDisplay *d, const uint16_t *vram, uint8_t *dst, size_t cap_px);
 
+/* Ventana visible FIJA del televisor (la presentación de DuckStation con recorte «solo zona visible»): no depende del rango que programe el juego, solo de la norma, así que
+ * la imagen ocupa siempre el mismo rectángulo 4:3 en cualquier modo (256/320/384/512/640, 240 o 256 líneas). En ciclos de reloj de la GPU y líneas: NTSC 600..3168 x 24..248 (608 - 8, ver abajo), PAL 628..3188 x 30..298.
+ * En NTSC el inicio horizontal lleva el ajuste -8 que DuckStation aplica a Metal Gear Solid (displayActiveStartOffset de las ediciones USA / Japón; las PAL no lo llevan).
+ * w, h: tamaño de la ventana en píxeles del modo (ciclos / divisor) y líneas (x2 en 480i). ox, oy: dónde cae en ella el primer píxel del marco: con `full` el de gpu_present_rgba (fw x h),
+ * sin él la zona nominal (disp.w x disp.h desde disp.x: la capa 2D del panel). Negativos = el marco empieza fuera (se recorta); lo que no cubre el marco es borde negro.
+ * La ventana entera se muestra SIEMPRE en 4:3 (el píxel no es cuadrado: 320x268 en PAL). */
+typedef struct { int w, h, ox, oy; } GpuWindow;
+void gpu_display_window(const GpuDisplay *d, int full, GpuWindow *o);
+/* Como gpu_present_rgba pero colocando el marco en la ventana visible fija (win.w x win.h píxeles en dst; borde negro opaco). Devuelve win.w * win.h, 0 si no cabe. */
+size_t gpu_present_window(const GpuDisplay *d, const uint16_t *vram, uint8_t *dst, size_t cap_px, GpuWindow *win);
+
 /* Contadores por frame (para depurar): primitivas recibidas por clase. */
 typedef struct { uint32_t poly, line, rect, fill, copy, upload, download, env, lists; } GpuStats;
 extern GpuStats gpu_stats;

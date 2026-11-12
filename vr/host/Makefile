@@ -83,13 +83,19 @@ $(OUT)/test_vrgame_fire: test_vrgame_fire.c $(VGSRC) vrgame.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) $(CFLAGS) -Wno-unused-parameter -o $@ test_vrgame_fire.c $(VGSRC) -lm -lpthread
 
+# Truco «Dar todas las armas» (vrgame_cheat_weapons_apply + petición consumida en vrgame_pad) sobre una RAM falsa.
+$(OUT)/test_cheat_weapons: test_cheat_weapons.c $(VGSRC) vrgame.h
+	@mkdir -p $(OUT)
+	$(CC) $(INC) $(CFLAGS) -Wno-unused-parameter -o $@ test_cheat_weapons.c $(VGSRC) -lm -lpthread
+
 # Cuerpo del jugador a la cadencia del renderer (vr_bodylive.h) con la corrección de vr_smooth.
 $(OUT)/test_bodylive: test_bodylive.c vr_bodylive.h vr_smooth.c vr_smooth.h ../native/ns_bridge.c ../native/ns_bridge.h ../native/ns_hand.h
 	@mkdir -p $(OUT)
 	$(CC) -I. -I../native $(CFLAGS) -o $@ test_bodylive.c vr_smooth.c ../native/ns_bridge.c -lm -lpthread
 
-test: $(OUT)/test_view $(OUT)/test_mosaic $(OUT)/test_cine $(OUT)/test_smooth $(OUT)/test_bodylive $(OUT)/test_dump_pick $(OUT)/test_vrprov $(OUT)/test_vrgame_fire
+test: $(OUT)/test_view $(OUT)/test_mosaic $(OUT)/test_cine $(OUT)/test_smooth $(OUT)/test_bodylive $(OUT)/test_dump_pick $(OUT)/test_vrprov $(OUT)/test_vrgame_fire $(OUT)/test_cheat_weapons
 	$(OUT)/test_vrgame_fire
+	$(OUT)/test_cheat_weapons
 	$(OUT)/test_view
 	$(OUT)/test_mosaic
 	$(OUT)/test_cine

@@ -21,6 +21,8 @@ struct VrLayer2D {
     int scale, smooth;
     VrLayerPx *px; size_t px_cap;
     uint8_t *rgba; size_t rgba_cap;
+    uint8_t *sub, *gain;         /* planos de resta y de tope (vl2d_sub, vl2d_gain): mismo tamaño que rgba */
+    GpuDisplay disp; int full;   /* zona mostrada y modo de la última capa (vl2d_pack) */
     int w, h, ox, oy, valid;     /* zona mostrada en píxeles nativos y su origen en VRAM */
     int LW, LH;                  /* tamaño de la salida RGBA: w*scale, h*scale */
     int R, PW, PH;               /* escala de RASTERIZADO (1 en modo original: exacto de 5 bits y replicado; = scale en los demás) y tamaño de px: w*R, h*R */
@@ -41,7 +43,7 @@ VrLayer2D *vl2d_new(void) {
     if (L) { L->scale = 4; L->smooth = VL_SMOOTH_ORIGINAL; L->R = 1; L->PW = 1; L->PH = 1; L->LW = 1; L->LH = 1; }
     return L;
 }
-void vl2d_free(VrLayer2D *L) { if (!L) return; free(L->vsnap); free(L->w5); free(L->vmap); free(L->natm); free(L->px); free(L->rgba); free(L->nat); free(L); }
+void vl2d_free(VrLayer2D *L) { if (!L) return; free(L->vsnap); free(L->w5); free(L->vmap); free(L->natm); free(L->px); free(L->rgba); free(L->sub); free(L->gain); free(L->nat); free(L); }
 void vl2d_reset(VrLayer2D *L) { if (!L) return; L->have_vram = 0; L->valid = 0; }
 void vl2d_set_options(VrLayer2D *L, int scale, int smooth) {
     if (!L) return;
@@ -115,33 +117,27 @@ static inline void lplot(Ctx *c, int sx, int sy, int r, int g, int b, int dith, 
     }
     int f[3] = {r, g, b}, cmax = c->cmax;
     if (!semi) {
-        for (int k = 0; k < 3; k++) { p->c[k] = (uint8_t)f[k]; p->d[k] = 0; }
+        for (int k = 0; k < 3; k++) { p->c[k] = (uint8_t)f[k]; p->d[k] = 0; p->g[k] = 0; }
         p->t = 0;
-    } else {
-        switch (c->abr) {
-        case 0:
-            for (int k = 0; k < 3; k++) { p->c[k] = (uint8_t)((p->c[k] + f[k]) >> 1); p->d[k] = (uint16_t)(p->d[k] >> 1); }
-            p->t = (uint16_t)(p->t >> 1);
-            break;
-        case 1:
-            for (int k = 0; k < 3; k++) { int v = p->c[k] + f[k]; p->c[k] = (uint8_t)(v > cmax ? cmax : v); }
-            break;
-        case 2:
-            for (int k = 0; k < 3; k++) {
-                if (p->t == 0) { int v = p->c[k] - f[k]; p->c[k] = (uint8_t)(v < 0 ? 0 : v); }   /* opaco: exacto */
-                else { unsigned v = (unsigned)p->d[k] + (unsigned)f[k] * 4u; p->d[k] = (uint16_t)(v > 60000u ? 60000u : v); }
-            }
-            break;
-        default:
-            for (int k = 0; k < 3; k++) { int v = p->c[k] + (f[k] >> 2); p->c[k] = (uint8_t)(v > cmax ? cmax : v); }
-            break;
-        }
-        if (p->t == 0) {   /* ya opaco (p. ej. tras varias mezclas B/2): la resta pendiente se aplica al color */
-            for (int k = 0; k < 3; k++) {
-                int v = p->c[k] - (int)((p->d[k] + 2) / 4);
-                p->c[k] = (uint8_t)(v < 0 ? 0 : v); p->d[k] = 0;
+    } else {   /* cada mezcla del hardware, con su recorte a 0..cmax, aplicada a la función c + clamp(t*M - d, 0, g) del mundo M (ver vr_layer2d.h) */
+        const int add = c->abr == 1 || c->abr == 3;
+        for (int k = 0; k < 3; k++) {
+            if (c->abr == 0) {
+                p->c[k] = (uint8_t)((p->c[k] + f[k]) >> 1); p->d[k] = (uint16_t)(p->d[k] >> 1); p->g[k] = (uint16_t)(p->g[k] >> 1);
+            } else if (add) {   /* B+F, B+F/4: sube c; el mundo ya no puede aportar más de lo que falta hasta el tope */
+                int v = p->c[k] + (c->abr == 1 ? f[k] : f[k] >> 2);
+                p->c[k] = (uint8_t)(v > cmax ? cmax : v);
+                int room = (cmax - p->c[k]) * 4;
+                if (p->g[k] > room) p->g[k] = (uint16_t)room;
+            } else {            /* B-F: se come primero lo que la capa ya puso (c); el resto se resta del mundo (d) y de lo que este puede aportar (g) */
+                int take = f[k] < p->c[k] ? f[k] : p->c[k], rest = (f[k] - take) * 4;
+                p->c[k] = (uint8_t)(p->c[k] - take);
+                p->d[k] = (uint16_t)(p->d[k] + rest > 60000 ? 60000 : p->d[k] + rest);
+                p->g[k] = (uint16_t)(p->g[k] > rest ? p->g[k] - rest : 0);
             }
         }
+        if (c->abr == 0) p->t = (uint16_t)(p->t >> 1);
+        if (p->t == 0) for (int k = 0; k < 3; k++) p->d[k] = p->g[k] = 0;   /* ya opaco (p. ej. tras varias mezclas B/2): el mundo no interviene */
     }
     p->m = (uint8_t)((mbit | c->mask_set) ? 1 : 0);
 }
@@ -458,7 +454,7 @@ static void px_put(VrLayer2D *L, int vx, int vy, uint16_t v15, int mchk, int mse
         VrLayerPx *p = &L->px[(size_t)(ny * R + j) * L->PW + (size_t)nx * R];
         for (int i = 0; i < R; i++, p++) {
             if (mchk && p->m) continue;
-            for (int k = 0; k < 3; k++) { p->c[k] = (uint8_t)(R > 1 ? ex8(c5[k]) : c5[k]); p->d[k] = 0; }
+            for (int k = 0; k < 3; k++) { p->c[k] = (uint8_t)(R > 1 ? ex8(c5[k]) : c5[k]); p->d[k] = 0; p->g[k] = 0; }
             p->t = 0;
             p->m = (uint8_t)(((v15 >> 15) | mset) ? 1 : 0);
         }
@@ -511,57 +507,37 @@ static void ev_apply(VrLayer2D *L, const GpuOp *o, const GpuDrawList *l, int sin
 /* ---------------- composición y codificación ---------------- */
 void vl2d_compose5(const VrLayerPx *p, const uint8_t bg[3], uint8_t out[3]) {
     for (int k = 0; k < 3; k++) {
-        int v4 = p->c[k] * 4 + (int)(((int)p->t * bg[k] * 4 + 128) / 256) - (int)p->d[k];
-        int v = v4 < 0 ? 0 : (v4 + 2) / 4;
+        int w4 = (int)(((int)p->t * bg[k] * 4 + 128) / 256) - (int)p->d[k];   /* lo que aporta el mundo (cuartos de nivel): entre 0 y g, los recortes intermedios de las mezclas */
+        w4 = w4 < 0 ? 0 : w4 > p->g[k] ? p->g[k] : w4;
+        int v = (p->c[k] * 4 + w4 + 2) / 4;
         out[k] = (uint8_t)(v > 31 ? 31 : v);
     }
 }
 
-static float srgb_to_lin(float c) { return c <= 0.04045f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f); }
-static float lin_to_srgb(float c) { return c <= 0.0031308f ? c * 12.92f : 1.055f * powf(c, 1.0f / 2.4f) - 0.055f; }
-
 void vl2d_encode(const VrLayerPx *p, int hq, uint8_t rgba[4]) {
-    int cmax = hq ? 255 : 31;
-    if (p->t == 0 && !p->d[0] && !p->d[1] && !p->d[2]) {   /* opaco: la salida de vídeo de la GPU original */
-        if (hq) { rgba[0] = p->c[0]; rgba[1] = p->c[1]; rgba[2] = p->c[2]; }
-        else { rgba[0] = (uint8_t)ex8(p->c[0]); rgba[1] = (uint8_t)ex8(p->c[1]); rgba[2] = (uint8_t)ex8(p->c[2]); }
-        rgba[3] = 255;
-        return;
-    }
-    float cov = 1.0f - (float)p->t / 256.0f;                 /* parte de la imagen que tapa lo dibujado */
-    /* Resta pendiente d (cuartos de nivel) junto a una suma c (créditos: B-F y luego B+F, que en el hardware da max(B,F)): el estado no guarda el orden. Si la suma
-     * cubre la resta (d <= 4c) la pareja se codifica como aditivo puro de c (conserva su brillo sobre el mundo oscuro; antes la resta oscurecía C y alfa a la mitad:
-     * C = c*keep, alfa = 1-keep, ~0,25 + 0,52*B en vez de 0,48 + 0,52*B). Si la resta es mayor, resta neta (c se absorbe en d). */
-    unsigned de[3]; float cc[3];
+    for (int k = 0; k < 3; k++) rgba[k] = (uint8_t)(hq ? p->c[k] : ex8(p->c[k]));
+    rgba[3] = (uint8_t)(((256 - (int)p->t) * 255 + 128) / 256);
+}
+
+static void enc4(const uint16_t q[3], int on, int hq, uint8_t rgba[4]) {   /* cuartos de nivel -> 8 bits */
+    const int cmax = hq ? 255 : 31;
     for (int k = 0; k < 3; k++) {
-        unsigned d4c = (unsigned)p->c[k] * 4u;
-        if (p->d[k] <= d4c) { de[k] = 0; cc[k] = (float)p->c[k]; }
-        else { de[k] = p->d[k] - d4c; cc[k] = 0.0f; }
+        int v = on ? (q[k] + 2) / 4 : 0;
+        if (v > cmax) v = cmax;
+        rgba[k] = (uint8_t)(hq ? v : ex8(v));
     }
-    float dm = (float)(de[0] + de[1] + de[2]) / (3.0f * 4.0f * (float)cmax);   /* oscurecimiento medio por la resta pendiente */
-    if (dm > 1.0f) dm = 1.0f;
-    float keep = 1.0f - dm;
-    float C[3];
-    for (int k = 0; k < 3; k++) C[k] = (hq ? cc[k] : (float)ex8((int)cc[k])) / 255.0f * keep;
-    float a = 1.0f - (1.0f - cov) * keep;                    /* alfa premultiplicado equivalente */
-    float mx = C[0] > C[1] ? C[0] : C[1];
-    if (C[2] > mx) mx = C[2];
-    float add[3] = {0, 0, 0};                                /* != 0: el color se reparte como aditivo en luz lineal (ver abajo) */
-    int additive = a < mx;
-    if (additive) {
-        /* Aditivo (alfa 0 en el hardware): el panel mezcla con un destino sRGB/lineal (el visor decodifica la capa a lineal, mezcla y codifica), así que «C + (1-a)*B» tiene que
-         * cumplirse en LUZ LINEAL: alfa = canal máximo de lineal(C), color = lineal(C)/alfa (en gamma al guardar). Con alfa = max(C) en gamma, el color 0,48 sobre negro salía 0,72. */
-        float lm = 0.0f;
-        for (int k = 0; k < 3; k++) { add[k] = srgb_to_lin(C[k]); if (add[k] > lm) lm = add[k]; }
-        if (a < lm) a = lm;
-    }
-    if (a <= 0.0f) { rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0; return; }
-    if (a > 1.0f) a = 1.0f;
+    rgba[3] = 255;
+}
+void vl2d_encode_sub(const VrLayerPx *p, int hq, uint8_t rgba[4]) { enc4(p->d, p->t != 0, hq, rgba); }
+void vl2d_encode_gain(const VrLayerPx *p, int hq, uint8_t rgba[4]) { enc4(p->g, p->t != 0, hq, rgba); }
+
+void vl2d_compose8(const uint8_t a[4], const uint8_t sub[3], const uint8_t gain[3], const uint8_t bg[3], uint8_t out[3]) {
     for (int k = 0; k < 3; k++) {
-        float v = additive ? lin_to_srgb(add[k] / a) : C[k] / a;
-        rgba[k] = (uint8_t)(v <= 0.0f ? 0 : v >= 1.0f ? 255 : (int)(v * 255.0f + 0.5f));
+        int w = ((255 - a[3]) * bg[k] + 127) / 255 - (sub ? sub[k] : 0), g = gain ? gain[k] : 255;
+        w = w < 0 ? 0 : w > g ? g : w;
+        int v = a[k] + w;
+        out[k] = (uint8_t)(v > 255 ? 255 : v);
     }
-    rgba[3] = (uint8_t)(a * 255.0f + 0.5f);
 }
 
 /* ---------------- fondo de la pantalla de cine: zona mostrada de la VRAM espejo ampliada ---------------- */
@@ -637,7 +613,13 @@ static int ensure(VrLayer2D *L, size_t npx, size_t nout) {
     if (nout * 4 > L->rgba_cap) {
         uint8_t *q = (uint8_t *)realloc(L->rgba, nout * 4);
         if (!q) return 0;
-        L->rgba = q; L->rgba_cap = nout * 4; L->cur_scale = 0;
+        L->rgba = q; L->cur_scale = 0;
+        q = (uint8_t *)realloc(L->sub, nout * 4);
+        if (!q) return 0;
+        L->sub = q;
+        q = (uint8_t *)realloc(L->gain, nout * 4);
+        if (!q) return 0;
+        L->gain = q; L->rgba_cap = nout * 4;
     }
     return 1;
 }
@@ -651,8 +633,12 @@ static void blank(VrLayer2D *L, int x0, int y0, int x1, int y1) {   /* [x0,x1) x
     int k = L->LW / L->PW;
     for (int y = y0; y < y1; y++) {
         VrLayerPx *p = &L->px[(size_t)y * L->PW + x0];
-        for (int x = x0; x < x1; x++, p++) { memset(p, 0, sizeof *p); p->t = 256; }
-        for (int j = 0; j < k; j++) memset(&L->rgba[((size_t)(y * k + j) * L->LW + (size_t)x0 * k) * 4], 0, (size_t)(x1 - x0) * k * 4);
+        for (int x = x0; x < x1; x++, p++) { memset(p, 0, sizeof *p); p->t = 256; p->g[0] = p->g[1] = p->g[2] = (uint16_t)(L->hq8 ? 255 * 4 : 31 * 4); }
+        for (int j = 0; j < k; j++) {
+            const size_t o = ((size_t)(y * k + j) * L->LW + (size_t)x0 * k) * 4;
+            memset(&L->rgba[o], 0, (size_t)(x1 - x0) * k * 4);
+            if (!L->full) for (int x = 0; x < (x1 - x0) * k; x++) { memcpy(&L->sub[o + (size_t)x * 4], "\0\0\0\377", 4); memset(&L->gain[o + (size_t)x * 4], 255, 4); }   /* pantalla completa: opaca, sin resta ni tope */
+        }
     }
 }
 
@@ -701,27 +687,34 @@ static int prim_bbox(const GpuOp *o, int *x0, int *y0, int *x1, int *y1) {
     return c > a && d > b;
 }
 
+/* caja de texels (u, v) de una primitiva texturada */
+static void uv_box(const GpuOp *o, int *pumin, int *pumax, int *pvmin, int *pvmax) {
+    int n = o->type == GPU_OP_RECT ? 1 : (o->nv == 4 ? 4 : 3);
+    int umin = 255, umax = 0, vmin = 255, vmax = 0;
+    if (o->type == GPU_OP_RECT) {
+        int u0 = o->v[0].u, v0 = o->v[0].v;
+        int u1 = (o->flags & GPU_F_FLIPX) ? u0 - (o->rw - 1) : u0 + (o->rw - 1), v1 = (o->flags & GPU_F_FLIPY) ? v0 - (o->rh - 1) : v0 + (o->rh - 1);
+        umin = u0 < u1 ? u0 : u1; umax = u0 < u1 ? u1 : u0; vmin = v0 < v1 ? v0 : v1; vmax = v0 < v1 ? v1 : v0;
+    } else {
+        for (int k = 0; k < n; k++) {
+            if (o->v[k].u < umin) umin = o->v[k].u;
+            if (o->v[k].u > umax) umax = o->v[k].u;
+            if (o->v[k].v < vmin) vmin = o->v[k].v;
+            if (o->v[k].v > vmax) vmax = o->v[k].v;
+        }
+    }
+    if (umax > 255) umax = 255;
+    if (vmax > 255) vmax = 255;
+    if (umin < 0) umin = 0;
+    if (vmin < 0) vmin = 0;
+    *pumin = umin; *pumax = umax; *pvmin = vmin; *pvmax = vmax;
+}
+
 /* Rasteriza la primitiva (poligono/rect/linea) con el contexto c (destino ya fijado: capa o espejo) */
 static void raster_prim(Ctx *c, const GpuOp *o) {
     if (o->flags & GPU_F_TEXTURED) {   /* caja de texels de la primitiva */
-        int n = o->type == GPU_OP_RECT ? 1 : (o->nv == 4 ? 4 : 3);
-        int umin = 255, umax = 0, vmin = 255, vmax = 0;
-        if (o->type == GPU_OP_RECT) {
-            int u0 = o->v[0].u, v0 = o->v[0].v;
-            int u1 = (o->flags & GPU_F_FLIPX) ? u0 - (o->rw - 1) : u0 + (o->rw - 1), v1 = (o->flags & GPU_F_FLIPY) ? v0 - (o->rh - 1) : v0 + (o->rh - 1);
-            umin = u0 < u1 ? u0 : u1; umax = u0 < u1 ? u1 : u0; vmin = v0 < v1 ? v0 : v1; vmax = v0 < v1 ? v1 : v0;
-        } else {
-            for (int k = 0; k < n; k++) {
-                if (o->v[k].u < umin) umin = o->v[k].u;
-                if (o->v[k].u > umax) umax = o->v[k].u;
-                if (o->v[k].v < vmin) vmin = o->v[k].v;
-                if (o->v[k].v > vmax) vmax = o->v[k].v;
-            }
-        }
-        if (umax > 255) umax = 255;
-        if (vmax > 255) vmax = 255;
-        if (umin < 0) umin = 0;
-        if (vmin < 0) vmin = 0;
+        int umin, umax, vmin, vmax;
+        uv_box(o, &umin, &umax, &vmin, &vmax);
         c->umin = umin; c->umax = umax; c->vmin = vmin; c->vmax = vmax;
         if (!c->vdst) {
             VrLayer2D *L = c->L;
@@ -811,13 +804,14 @@ static int world_pass(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int
  * tocados y al menos VERIFY_BAD_MIN) o aún dura el respaldo, TODOS los píxeles que toca el panel dilatados 1 px: el resto de la capa sigue transparente (el 3D del motor, que es fiable, se ve por debajo;
  * el respaldo nunca opaca la pantalla entera). Lo que se pone en cada píxel sustituido NO es la imagen del emulador tal cual (llevaría dentro el mundo PS1, que taparía el 3D del motor):
  *   - panel opaco en ese píxel (t = 0): el color del emulador (el mundo no se ve);
- *   - panel semitransparente: la contribución del panel = emulador - mundo reproducido (con recorte), como suma / resta sobre lo que haya debajo;
+ *   - panel semitransparente: la contribución del panel = emulador - mundo reproducido (con recorte), como suma (c) o resta (d) sobre lo que haya debajo, que pasa entero (t = 256, sin tope g);
  *   - mundo reproducido no fiable (fuera del panel no coincide con el emulador: en más del 5 % de lo no tocado o en el entorno 3x3 del píxel): transparente.
  * Rellena la información de verificación. Devuelve 1 si se aplicó el respaldo (la capa entera se vuelve a codificar). */
 static void recover_px(VrLayerPx *p, uint16_t emu, const uint8_t w[3], int reliable, int *nsub, int *ntransp) {
     const int f[3] = {emu & 31, (emu >> 5) & 31, (emu >> 10) & 31};
     p->m = (uint8_t)(emu >> 15);
-    if (p->t == 0) { for (int k = 0; k < 3; k++) { p->c[k] = (uint8_t)f[k]; p->d[k] = 0; } return; }   /* opaco: el color exacto del hardware */
+    if (p->t == 0) { for (int k = 0; k < 3; k++) { p->c[k] = (uint8_t)f[k]; p->d[k] = 0; } return; }
+    p->g[0] = p->g[1] = p->g[2] = 31 * 4;   /* opaco: el color exacto del hardware */
     int mx = 0;
     for (int k = 0; k < 3; k++) { int e = abs(f[k] - (int)w[k]); if (e > mx) mx = e; }
     p->t = 256;   /* lo de debajo (el 3D del motor) pasa entero; el panel solo suma / resta su parte */
@@ -894,6 +888,21 @@ static int verify_panel(VrLayer2D *L, const GpuDisplay *d, const uint16_t *vend,
     return whole;
 }
 
+/* ¿Lee la lista la zona [x0,x1) x [y0,y1) de la VRAM (el búfer que se está dibujando)? Una copia VRAM -> VRAM con origen en ella, o una primitiva texturada cuya página de textura o CLUT la pisa. */
+static int list_reads(const GpuDrawList *l, int x0, int y0, int x1, int y1) {
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *o = &l->ops[i];
+        if (o->type == GPU_OP_VCOPY) { if (rect_hit(o->sx, o->sy, o->rw, o->rh, x0, y0, x1, y1)) return 1; continue; }
+        if ((o->type != GPU_OP_POLY && o->type != GPU_OP_RECT) || !(o->flags & GPU_F_TEXTURED)) continue;
+        int umin = 0, umax = 255, vmin = 0, vmax = 255;
+        if (!(o->twmx | o->twmy)) uv_box(o, &umin, &umax, &vmin, &vmax);   /* con ventana de textura, la página entera */
+        const int sh = o->tp == 0 ? 2 : o->tp == 1 ? 1 : 0;
+        if (rect_hit(o->tx + (umin >> sh), o->ty + vmin, (umax >> sh) - (umin >> sh) + 1, vmax - vmin + 1, x0, y0, x1, y1)) return 1;
+        if (o->tp < 2 && rect_hit(o->clx, o->cly, o->tp == 0 ? 16 : 256, 1, x0, y0, x1, y1)) return 1;
+    }
+    return 0;
+}
+
 int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     if (!L || !l) return 0;
     L->valid = 0;
@@ -930,6 +939,7 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     /* Modo original: el rasterizado es el EXACTO de la GPU original (escala 1: 5 bits, tramado, mismo muestreo de texels) y la salida lo replica S x S (vecino más próximo
      * a escala entera): el texto sale idéntico en forma y color y nítido. Excepción: fotograma completo en 24 bits (vídeo), que necesita los 8 bits por canal. */
     if (L->smooth == VL_SMOOTH_ORIGINAL && !(full && l->disp.depth24)) R = 1;
+    L->full = full;
     const int hq8 = R > 1 || (full && l->disp.depth24);   /* vídeo de 24 bits a R = 1 (raster nativo del visor): se conservan los 8 bits por canal */
     L->hq8 = hq8;
     if (draw) {
@@ -950,7 +960,7 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     if (verify && !world_pass(L, l, sc, aw, h, &lost2d)) verify = 0;
     if (verify) v_ms = l2_now_ms() - v_t0;
     if (draw) {
-        int key = (hq8 << 12) | (R << 8) | (S << 4) | L->smooth;
+        int key = (!!full << 13) | (hq8 << 12) | (R << 8) | (S << 4) | L->smooth;   /* full: el panel lleva además planos de resta y tope */
         int zone = L->cur_scale != key || L->w != w || L->h != h || L->pad != pad || L->aw != aw;   /* otra zona mostrada (tamaño/escala); el cambio de búfer (ox, oy) no la invalida */
         if (zone || L->ox != oxe || L->oy != l->disp.y) {
             L->w = w; L->h = h; L->ox = oxe; L->oy = l->disp.y; L->pad = pad; L->aw = aw; L->LW = w * S; L->LH = h * S;
@@ -975,6 +985,8 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     Ctx c0;
     memset(&c0, 0, sizeof c0);
     c0.L = L; c0.S = R; c0.hq = hq8; c0.smooth = L->smooth; c0.cmax = c0.hq ? 255 : 31;
+    /* panel: si la lista lee el búfer que dibuja (copia de un trozo de pantalla a una textura, pantalla usada como textura), TODAS las primitivas se pintan también en la VRAM espejo, como en el hardware */
+    const int mirror_all = draw && !full && list_reads(l, wx0, wy0, l->disp.x + w, wy1);
     for (uint32_t i = 0; i < l->nops; i++) {
         const GpuOp *o = &l->ops[i];
         switch (o->type) {
@@ -985,7 +997,33 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
             if (!prim_bbox(o, &bx0, &by0, &bx1, &by1)) break;
             int inside = bx0 >= wx0 && bx1 <= (full ? wx1 : l->disp.x + w) && by0 >= wy0 && by1 <= wy1;   /* destino enteramente en la zona mostrada (panel: el rectángulo nominal) */
             int hit = bx0 < wx1 && bx1 > wx0 && by0 < wy1 && by1 > wy0;           /* destino con alguna parte en la zona mostrada */
-            if (vmode || !inside) {   /* actualiza la VRAM espejo (todo en fotograma completo; en el panel solo lo que sale de la zona mostrada: render a textura, búfer alterno) */
+            /* 1) a la capa: las primitivas del panel (o todas, en pantalla completa a alta resolución) que tocan la zona mostrada. Antes que al espejo: la textura se lee como estaba al llegar la primitiva */
+            int layer = !vmode && hit && (full || sc->op_dest[i] == 2);
+            if (layer && o->fbk && o->type != GPU_OP_LINE && (!o->fbt || !(o->flags & GPU_F_TEXTURED))) layer = 0;   /* realimentación resuelta a «no pinta nada» */
+            if (layer) {
+                L->info.prims++;
+                if (o->flags & GPU_F_MASK_CHK) L->info.mask_prims++;
+                Ctx c = c0;
+                c.o = o;
+                c.cx1 = o->cx1 * R; c.cy1 = o->cy1 * R; c.cx2 = (o->cx2 + 1) * R - 1; c.cy2 = (o->cy2 + 1) * R - 1;
+                c.semi = !!(o->flags & GPU_F_SEMI);
+                c.mask_chk = !!(o->flags & GPU_F_MASK_CHK); c.mask_set = !!(o->flags & GPU_F_MASK_SET);
+                c.abr = o->abr;
+                if (o->fbk && o->type != GPU_OP_LINE) c.fixed = 1;   /* realimentación resuelta: un único texel (gpu.h, GpuOp.fbk) */
+                if (!full) {
+                    int a, b, e, f;
+                    op_box(o, R, &a, &b, &e, &f);
+                    a -= L->ox * R; e -= L->ox * R; b -= L->oy * R; f -= L->oy * R;
+                    if (a < ux0) ux0 = a;
+                    if (b < uy0) uy0 = b;
+                    if (e > ux1) ux1 = e;
+                    if (f > uy1) uy1 = f;
+                }
+                raster_prim(&c, o);
+            }
+            /* 2) a la VRAM espejo, con la aritmética de gpu.c: todo en la pantalla completa exacta y en el panel cuya lista lee la pantalla (mirror_all); si no, solo lo que sale de la zona mostrada
+             * (render a textura, búfer alterno) */
+            if (vmode || !inside || mirror_all) {
                 Ctx cm = c0;
                 cm.S = 1; cm.hq = 0; cm.smooth = 0; cm.cmax = 31;
                 cm.vdst = L->vram; cm.o = o;
@@ -994,39 +1032,14 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
                 cm.mask_chk = !!(o->flags & GPU_F_MASK_CHK); cm.mask_set = !!(o->flags & GPU_F_MASK_SET);
                 cm.abr = o->abr;
                 int skip = 0;
-                if (o->fbk && o->type != GPU_OP_LINE && !vmode) {   /* panel: la VRAM espejo no tiene lo dibujado en la zona mostrada: texel único resuelto por la captura */
+                if (o->fbk && o->type != GPU_OP_LINE && !vmode && !mirror_all) {   /* aquí la VRAM espejo no tiene lo dibujado en la zona mostrada: texel único resuelto por la captura */
                     if (!o->fbt || !(o->flags & GPU_F_TEXTURED)) skip = 1;
                     cm.fixed = 1;
                 }
                 if (!skip) raster_prim(&cm, o);
-                if (!vmode) L->info.mirror_prims++;
+                if (!vmode && !inside) L->info.mirror_prims++;
             }
-            if (vmode) { L->info.prims++; if (o->flags & GPU_F_MASK_CHK) L->info.mask_prims++; break; }
-            if (!hit) break;                                   /* no toca la zona mostrada: no se pinta en la capa */
-            if (!full && sc->op_dest[i] != 2) break;
-            L->info.prims++;
-            if (o->flags & GPU_F_MASK_CHK) L->info.mask_prims++;
-            Ctx c = c0;
-            c.o = o;
-            c.cx1 = o->cx1 * R; c.cy1 = o->cy1 * R; c.cx2 = (o->cx2 + 1) * R - 1; c.cy2 = (o->cy2 + 1) * R - 1;
-            c.semi = !!(o->flags & GPU_F_SEMI);
-            c.mask_chk = !!(o->flags & GPU_F_MASK_CHK); c.mask_set = !!(o->flags & GPU_F_MASK_SET);
-            c.abr = o->abr;
-            if (o->fbk && o->type != GPU_OP_LINE) {   /* realimentación resuelta: un único texel (gpu.h, GpuOp.fbk) */
-                if (!o->fbt) break;
-                if (!(o->flags & GPU_F_TEXTURED)) break;
-                c.fixed = 1;
-            }
-            if (!full) {
-                int a, b, e, f;
-                op_box(o, R, &a, &b, &e, &f);
-                a -= L->ox * R; e -= L->ox * R; b -= L->oy * R; f -= L->oy * R;
-                if (a < ux0) ux0 = a;
-                if (b < uy0) uy0 = b;
-                if (e > ux1) ux1 = e;
-                if (f > uy1) uy1 = f;
-            }
-            raster_prim(&c, o);
+            if (vmode) { L->info.prims++; if (o->flags & GPU_F_MASK_CHK) L->info.mask_prims++; }
             break;
         }
         default: break;
@@ -1053,15 +1066,27 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
         int k = L->LW / L->PW;   /* replicado de salida (1 salvo en modo original) */
         for (int y = uy0; y < uy1; y++) {
             const VrLayerPx *p = &L->px[(size_t)y * L->PW + ux0];
-            uint8_t *q = &L->rgba[((size_t)y * k * L->LW + (size_t)ux0 * k) * 4];
-            for (int x = ux0; x < ux1; x++, p++, q += 4 * k) {
+            const size_t row = ((size_t)y * k * L->LW + (size_t)ux0 * k) * 4;
+            uint8_t *q = &L->rgba[row], *qs = &L->sub[row], *qg = &L->gain[row];
+            for (int x = ux0; x < ux1; x++, p++, q += 4 * k, qs += 4 * k, qg += 4 * k) {
                 vl2d_encode(p, c0.hq, q);
                 for (int i = 1; i < k; i++) memcpy(q + 4 * i, q, 4);
+                if (full) continue;
+                vl2d_encode_sub(p, c0.hq, qs);
+                vl2d_encode_gain(p, c0.hq, qg);
+                for (int i = 1; i < k; i++) { memcpy(qs + 4 * i, qs, 4); memcpy(qg + 4 * i, qg, 4); }
             }
-            for (int j = 1; j < k; j++) memcpy(&L->rgba[((size_t)(y * k + j) * L->LW + (size_t)ux0 * k) * 4], &L->rgba[((size_t)y * k * L->LW + (size_t)ux0 * k) * 4], (size_t)(ux1 - ux0) * k * 4);
+            for (int j = 1; j < k; j++) {
+                const size_t o = ((size_t)(y * k + j) * L->LW + (size_t)ux0 * k) * 4;
+                memcpy(&L->rgba[o], &L->rgba[row], (size_t)(ux1 - ux0) * k * 4);
+                if (full) continue;
+                memcpy(&L->sub[o], &L->sub[row], (size_t)(ux1 - ux0) * k * 4);
+                memcpy(&L->gain[o], &L->gain[row], (size_t)(ux1 - ux0) * k * 4);
+            }
         }
         L->dx0 = ux0; L->dy0 = uy0; L->dx1 = ux1; L->dy1 = uy1;
     }
+    L->disp = l->disp;
     L->valid = 1;
     return 1;
 }
@@ -1094,6 +1119,47 @@ const uint8_t *vl2d_rgba(const VrLayer2D *L, int *w, int *h) {
     if (h) *h = L->LH;
     return L->rgba;
 }
+const uint8_t *vl2d_sub(const VrLayer2D *L) { return L && L->valid && !L->full ? L->sub : NULL; }
+const uint8_t *vl2d_gain(const VrLayer2D *L) { return L && L->valid && !L->full ? L->gain : NULL; }
+
+/* Empaquetado para el visor (ver vr_layer2d.h). */
+int vl2d_pack_size(const VrLayer2D *L, int *w, int *h, int *planes) {
+    if (!L || !L->valid) return 0;
+    GpuWindow win;
+    gpu_display_window(&L->disp, L->full, &win);
+    const int S = L->LW / L->w;
+    if (win.w <= 0 || win.h <= 0) return 0;
+    *w = win.w * S; *h = win.h * S; *planes = L->full ? 1 : 3;
+    return 1;
+}
+int vl2d_window(const VrLayer2D *L, int win[6]) {
+    if (!L || !L->valid) return 0;
+    GpuWindow w;
+    gpu_display_window(&L->disp, L->full, &w);
+    win[0] = w.w; win[1] = w.h; win[2] = w.ox; win[3] = w.oy; win[4] = L->w; win[5] = L->h;
+    return 1;
+}
+void vl2d_pack(const VrLayer2D *L, uint8_t *dst) {
+    int W, H, planes;
+    if (!vl2d_pack_size(L, &W, &H, &planes)) return;
+    GpuWindow win;
+    gpu_display_window(&L->disp, L->full, &win);
+    const int S = L->LW / L->w, ox = win.ox * S, oy = win.oy * S;
+    int x0 = ox < 0 ? -ox : 0, x1 = L->LW < W - ox ? L->LW : W - ox;   /* columnas de la capa que caen en la ventana */
+    if (x1 < x0) x1 = x0;
+    for (int pl = 0; pl < planes; pl++) {
+        const uint8_t *src = pl == 0 ? L->rgba : pl == 1 ? L->sub : L->gain;
+        const uint8_t e = (uint8_t)(pl == 2 ? 255 : 0), edge[4] = {e, e, e, (uint8_t)(pl || L->full ? 255 : 0)};   /* fuera del marco: borde negro (pantalla completa) o nada (panel: sin color, sin resta, sin tope) */
+        for (int y = 0; y < H; y++) {
+            uint8_t *q = dst + ((size_t)(pl * H + y) * W) * 4;
+            const int sy = y - oy;
+            const int in = sy >= 0 && sy < L->LH;
+            for (int x = 0; x < W; x++) if (!in || x < x0 + ox || x >= x1 + ox) memcpy(q + (size_t)x * 4, edge, 4);
+            if (in && x1 > x0) memcpy(q + (size_t)(x0 + ox) * 4, src + ((size_t)sy * L->LW + x0) * 4, (size_t)(x1 - x0) * 4);
+        }
+    }
+}
+
 const VrLayerPx *vl2d_px(const VrLayer2D *L, int *w, int *h) {
     if (!L || !L->valid) return NULL;
     if (w) *w = L->PW;

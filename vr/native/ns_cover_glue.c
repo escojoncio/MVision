@@ -26,6 +26,8 @@ static struct {
     uint32_t nops, frame, snap_counter;
     int snap_valid, job, busy;
     int have_cam; float cam_eye[3], cam_M[9];   /* cámara con la que se emitió la lista de esta tarea */
+    int cur_ok, prev_ok, job_prev; float cur_A[12], prev_A[12], job_A[12];   /* cámara mundo -> vista (9 + 3) de la RAM en la entrega actual / en la anterior / la anterior de esta tarea */
+    uint32_t win[NS_WINCMP_WORDS], win_frame; int win_new;    /* nativo frente a la lista en la ventana del motor (NsWinCmp) de la última medida, aún no leída, y el fotograma de su lista */
     char text[8192];
     int text_new;
     unsigned skipped_busy, runs, fails;
@@ -41,6 +43,8 @@ static void *worker(void *arg) {
         uint32_t frame = G.frame, nops = G.nops;
         int jcam = G.have_cam; float ceye[3], cM[9];
         memcpy(ceye, G.cam_eye, sizeof ceye); memcpy(cM, G.cam_M, sizeof cM);
+        const int jprev = G.job_prev; float pA[12];
+        memcpy(pA, G.job_A, sizeof pA);
         pthread_mutex_unlock(&G.mx);
         /* G.ram / G.ops / G.scratch solo los toca el hilo de emulación mientras busy == 0; con job == 1 son del trabajador */
         char buf[sizeof G.text];
@@ -51,15 +55,19 @@ static void *worker(void *arg) {
             NsCoverCfg cfg;
             ns_cover_cfg_default(&cfg);
             if (jcam) { cfg.list_eye = ceye; cfg.list_M = cM; }
+            if (jprev) { cfg.prev_A = pA; cfg.prev_t = pA + 9; }
             rc = ns_cover_run(c, G.ram, G.scratch, G.ops, nops, &cfg, r);
             if (rc == 0) ns_cover_format(r, frame, buf, sizeof buf);
         }
         int pct = (rc == 0 && r) ? (int)(r->cover_pct + 0.5f) : 0;
+        NsWinCmp win; memset(&win, 0, sizeof win);
+        if (rc == 0 && r) win = r->win;
         free(r);
         pthread_mutex_lock(&G.mx);
         if (rc == 0) {
             memcpy(G.text, buf, sizeof G.text); G.text_new = 1; G.runs++;
             G.last_frame = frame; G.last_valid = 1;
+            if (win.cells) { memcpy(G.win, &win, sizeof G.win); G.win_frame = frame; G.win_new = 1; }
             G.last_pct = pct < 0 ? 0 : pct > 100 ? 100 : pct;
         } else G.fails++;   /* rc != 0: sin escena (menú, vídeo): nada que decir */
         G.job = 0; G.busy = 0;
@@ -106,6 +114,13 @@ void ns_cover_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const 
     if (G.off || !ram || !ops || !nops || nops > COVER_MAX_OPS) return;
     pthread_mutex_lock(&G.mx);
     if (!ensure_started() || !G.every) { pthread_mutex_unlock(&G.mx); return; }
+    {   /* cámara del canal en esta entrega; la de la entrega anterior es la de la lista que ahora se entrega */
+        G.prev_ok = G.cur_ok; memcpy(G.prev_A, G.cur_A, sizeof G.prev_A);
+        const uint8_t *m = ram + 0xB2B7Cu + 0x10u;
+        for (int k = 0; k < 9; k++) { int16_t v; memcpy(&v, m + 2 * k, 2); G.cur_A[k] = (float)v * (1.0f / 4096.0f); }
+        for (int k = 0; k < 3; k++) { int32_t v; memcpy(&v, m + 20 + 4 * k, 4); G.cur_A[9 + k] = (float)v; }
+        G.cur_ok = 1;
+    }
     unsigned cnt = ++G.counter;
     if (cnt % G.every != 0) {
         if (G.snap_valid && cnt - G.snap_counter > 3u) G.snap_valid = 0;   /* instantánea caducada */
@@ -122,6 +137,7 @@ void ns_cover_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const 
     if (scratch) memcpy(G.scratch, scratch, sizeof G.scratch); else memset(G.scratch, 0, sizeof G.scratch);
     memcpy(G.ops, ops, (size_t)nops * sizeof(GpuOp));
     G.have_cam = eye && M;
+    G.job_prev = G.prev_ok; memcpy(G.job_A, G.prev_A, sizeof G.job_A);
     if (G.have_cam) { memcpy(G.cam_eye, eye, sizeof G.cam_eye); memcpy(G.cam_M, M, sizeof G.cam_M); }
     G.nops = nops; G.frame = frame; G.busy = 1; G.job = 1;
     pthread_cond_signal(&G.cv);
@@ -143,6 +159,15 @@ size_t ns_cover_glue_poll(char *buf, size_t cap) {
     }
     pthread_mutex_unlock(&G.mx);
     return n;
+}
+
+/* Cualquier hilo: nativo frente a la lista en la ventana del motor de la última medida aún no leída ({celdas, tapa, de más, falta}) y el fotograma de su lista; 0 si no hay ninguna nueva. */
+int ns_cover_glue_win(uint32_t win[NS_WINCMP_WORDS], uint32_t *frame) {
+    pthread_mutex_lock(&G.mx);
+    const int ok = G.win_new;
+    if (ok) { memcpy(win, G.win, sizeof G.win); if (frame) *frame = G.win_frame; G.win_new = 0; }
+    pthread_mutex_unlock(&G.mx);
+    return ok;
 }
 
 /* Cualquier hilo: última medida de cobertura (fotograma de la lista y % de la lista de la GPU que representa la escena nativa). 0 si aún no hay ninguna. */

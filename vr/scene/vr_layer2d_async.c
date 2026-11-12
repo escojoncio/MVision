@@ -41,7 +41,7 @@ typedef struct {
     uint32_t lseq;                 /* nº de envío */
 } Job;
 
-typedef struct { uint8_t *px; size_t cap; int w, h, full, mode, view; uint32_t seq; } Out;   /* mode: VL_* con que se dibujó; view: etiqueta de vista del trabajo */
+typedef struct { uint8_t *px; size_t cap; int w, h, full, mode, view; int win[6]; uint32_t seq; } Out;   /* mode: VL_* con que se dibujó; view: etiqueta de vista del trabajo */
 
 struct VrL2Async {
     pthread_t th; int started;
@@ -49,7 +49,7 @@ struct VrL2Async {
     Job job[NJOB]; int head, count; int busy;   /* cola circular */
     int quit;
     VrLayer2D *L;
-    _Atomic int target, smooth, view_tag;
+    _Atomic int target, smooth, view_tag, native;   /* native: se publica la capa empaquetada para el visor (vl2d_pack) */
     int cur; Vl2aScale scst;
     Out out[3]; int pub, held, have_pub;        /* índice publicado / en uso por el consumidor (-1) */
     uint32_t sub_seq, pub_sub_seq, acq_seq;     /* envíos / envío al que corresponde lo publicado / último adquirido */
@@ -100,11 +100,15 @@ static void *worker(void *arg) {
         VrL2Info inf; vl2d_info(A->L, &inf);
         int w = 0, h = 0;
         const uint8_t *px = have ? vl2d_rgba(A->L, &w, &h) : NULL;
+        int planes = 1;
+        const int pack = px && atomic_load(&A->native);
+        if (pack && !vl2d_pack_size(A->L, &w, &h, &planes)) px = NULL;
         Out *o = &A->out[wi];
         int ok = 0;
-        if (px && w > 0 && h > 0 && grow((void **)&o->px, &o->cap, (size_t)w * h * 4, 1)) {
-            memcpy(o->px, px, (size_t)w * h * 4);
-            o->w = w; o->h = h; o->full = j->full == VL_FULL; o->mode = j->full; o->view = j->view; ok = 1;
+        if (px && w > 0 && h > 0 && grow((void **)&o->px, &o->cap, (size_t)w * h * planes * 4, 1)) {
+            if (pack) vl2d_pack(A->L, o->px); else memcpy(o->px, px, (size_t)w * h * 4);
+            if (!vl2d_window(A->L, o->win)) memset(o->win, 0, sizeof o->win);
+            o->w = w; o->h = h * planes; o->full = j->full == VL_FULL; o->mode = j->full; o->view = j->view; ok = 1;
         }
 
         pthread_mutex_lock(&A->mx);
@@ -149,8 +153,7 @@ void vl2a_free(VrL2Async *A) {
     free(A);
 }
 
-void vl2a_options(VrL2Async *A, int scale, int smooth) {
-    if (!A) return;
+static void set_options(VrL2Async *A, int scale, int smooth) {
     if (scale < 1) scale = 1;
     if (scale > 6) scale = 6;
     int old = atomic_exchange(&A->target, scale);
@@ -158,7 +161,8 @@ void vl2a_options(VrL2Async *A, int scale, int smooth) {
     atomic_store(&A->smooth, smooth < 0 ? 0 : smooth > 2 ? 2 : smooth);
 }
 
-void vl2a_options_native(VrL2Async *A) { vl2a_options(A, 1, VL_SMOOTH_ORIGINAL); }
+void vl2a_options(VrL2Async *A, int scale, int smooth) { if (A) { set_options(A, scale, smooth); atomic_store(&A->native, 0); } }
+void vl2a_options_native(VrL2Async *A) { if (A) { set_options(A, 1, VL_SMOOTH_ORIGINAL); atomic_store(&A->native, 1); } }
 
 void vl2a_set_view(VrL2Async *A, int view) { if (A) atomic_store(&A->view_tag, view); }
 
@@ -219,6 +223,15 @@ int vl2a_acquire(VrL2Async *A, const uint8_t **px, int *w, int *h, int *full, ui
     if (seq) *seq = o->seq;
     pthread_mutex_unlock(&A->mx);
     return r;
+}
+
+int vl2a_acquire_window(VrL2Async *A, int win[6]) {
+    if (!A || !win) return 0;
+    pthread_mutex_lock(&A->mx);
+    const int ok = A->held >= 0 && A->out[A->held].win[0] > 0;
+    if (ok) memcpy(win, A->out[A->held].win, sizeof A->out[A->held].win);
+    pthread_mutex_unlock(&A->mx);
+    return ok;
 }
 
 int vl2a_acquire_info(VrL2Async *A, int *mode, int *view) {

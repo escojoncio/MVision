@@ -169,6 +169,22 @@ static void test_cinema(void) {
         nd[eye][0] = c[0] / c[3]; nd[eye][1] = c[1] / c[3];
     }
     CHECK(fabsf(nd[0][1] - nd[1][1]) < 1e-5f && nd[0][0] != nd[1][0], "paralaje horizontal, misma altura");
+    {   /* la separación de las cámaras en unidades del motor es ipd * 1000 sea cual sea la escala de gv (p. ej. 1026,68 unidades por metro con la calibración del usuario): la vista estéreo
+         * deshace gv y aplica 0,001 m por unidad; con esa escala van la separación que lee el anfitrión (ns_gpu_engine_set_sep) y la cota de paralaje (ns_solid_view_near * 0,001) */
+        float g2[16], t2[12];
+        memcpy(g2, gv, sizeof g2);
+        for (int i = 0; i < 12; i++) g2[i] *= 1000.0f / 1026.68f;
+        CHECK(ns_cinema_to_vr(&cam, g2, t2) == 1, "to_vr con escala");
+        for (int eye = 0; eye < 2; eye++) {
+            const float ou = (eye == 0 ? -500.0f : 500.0f) * ipd;
+            float p[3], w[3], view[16], tan4[4], e[4];
+            for (int r = 0; r < 3; r++) p[r] = cam.eye[r] + cam.rot[r * 3] * ou + cam.rot[r * 3 + 2] * 2000.0f;
+            xf34(t2, p, w);
+            CHECK(ns_cinema_eye(g2, eye, ipd, conv, tanx, tany, view, tan4) == 1, "eye con escala");
+            mat_vec(view, w, e);
+            CHECK(fabsf(e[0]) < 1e-4f && fabsf(e[2] + 2.0f) < 1e-3f, "ojo %d a ipd * 500 unidades del eje y 1000 unidades por metro: x=%g z=%g", eye, e[0], e[2]);
+        }
+    }
     CHECK(nd[0][0] < nd[1][0], "lo lejano queda detrás de la pantalla (ojo izquierdo más a la izquierda) %f %f", nd[0][0], nd[1][0]);
     /* sin cámara válida o con datos no finitos: rechaza */
     float bad[16]; memcpy(bad, gv, sizeof bad); bad[3] = NAN;
@@ -302,9 +318,9 @@ static void test_depth_filter(void) {
     CHECK(STEP() == 1 && zs == zs0 && zn == zn0, "sin sujeto a la vista: se mantiene (%g %g)", zs, zn);
     for (int i = 0; i < 30; i++) STEP();
     CHECK(zs == zs0 && zn == zn0, "y se sigue manteniendo");
-    /* entra una pieza cercana (0,6 m): lo cercano baja poco a poco (antes: b cambiaba de golpe) */
+    /* entra una pieza cercana (0,6 m): lo cercano baja en el acto (con el filtro, la separación cruzaba los ojos de más durante el transitorio); al irse vuelve con tau */
     in[0].n_pieces = 2; PIECE(0, 0, 0, 4000); PIECE(1, 250, 0, 600);
-    CHECK(STEP() == 1 && zn > 1.5f && zn < zn0, "pieza cercana recién entrada: %g", zn);
+    CHECK(STEP() == 1 && fabsf(zn - 0.35f) < 1e-3f, "pieza cercana recién entrada: %g", zn);
     for (int i = 0; i < 90; i++) STEP();
     CHECK(fabsf(zn - 0.35f) < 0.01f, "a los 3 s lo cercano ha llegado: %g", zn);
     /* corte de plano por salto de la cámara: valores nuevos de inmediato */
@@ -322,6 +338,19 @@ static void test_depth_filter(void) {
     CHECK(ns_cinema_depth_filter(&f, &sc, &zn, &zs) == 1 && fabsf(zs - 5.0f) < 1e-3f, "reloj hacia atrás: sin filtrar (%g)", zs);
     /* cámara inválida o sin escena: se olvida todo */
     sc.cam.h = 0;
+    {   /* escenario cercano en la ventana (z_static): acota el cercano de las piezas dinámicas y, sin piezas a la vista, lo da él con la convergencia por defecto */
+        NsCinemaDepthFilter g; memset(&g, 0, sizeof g);
+        NsScene s2 = sc; s2.cam.h = 320; s2.t_ns = 5000 * MS;
+        NsInstance i2[1]; NsPiece p2[2]; memcpy(i2, in, sizeof i2); memcpy(p2, pc, sizeof p2); s2.inst = i2; s2.piece = p2; s2.n_inst = 1;
+        p2[0].world.m[3] = s2.cam.eye[0]; p2[0].world.m[7] = s2.cam.eye[1]; p2[0].world.m[11] = s2.cam.eye[2] + 2000; p2[0].flags = 0;
+        float n2 = -1, z2 = -1;
+        g.z_static = 0.4f;
+        CHECK(ns_cinema_depth_filter(&g, &s2, &n2, &z2) == 1 && fabsf(n2 - 0.4f) < 1e-3f && fabsf(z2 - 2.0f) < 1e-3f, "escenario a 0,4 m por delante del personaje: cercano %g sujeto %g", n2, z2);
+        memset(&g, 0, sizeof g); g.z_static = 5.0f;
+        CHECK(ns_cinema_depth_filter(&g, &s2, &n2, &z2) == 1 && fabsf(n2 - 1.75f) < 1e-3f, "escenario más lejos que el personaje: manda el personaje (%g)", n2);
+        memset(&g, 0, sizeof g); g.z_static = 0.3f; p2[0].flags = NS_PF_HIDDEN;
+        CHECK(ns_cinema_depth_filter(&g, &s2, &n2, &z2) == 1 && fabsf(n2 - 0.3f) < 1e-3f && fabsf(z2 - NS_CINEMA_CONV_DEFAULT) < 1e-3f, "solo escenario: cercano %g y convergencia por defecto %g", n2, z2);
+    }
     CHECK(STEP() == 0 && zs == 0.0f && zn == 0.0f && ns_cinema_depth_filter(&f, NULL, &zn, &zs) == 0 && ns_cinema_depth_filter(NULL, &sc, &zn, &zs) == 0, "cámara inválida");
     sc.cam.h = 320; PIECE(0, 0, 0, 2500);
     CHECK(STEP() == 1 && fabsf(zs - 2.5f) < 1e-3f, "tras lo inválido empieza de nuevo: %g", zs);

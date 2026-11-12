@@ -68,6 +68,8 @@ typedef struct {
     GunLoose casing[GUN_MAX_CASINGS]; int casing_next;
     int shots;
     int equip_latch;         /* gatillo apretado al equipar: no dispara hasta soltarlo */
+    int sight_on;            /* 1: el disparo sale por `sight` (pose en espacio del arma) en vez de WP_MUZZLE (mira telescópica del francotirador) */
+    WPose sight;
 } GunState;
 
 void gun_init(GunState *g, const WeaponDef *d, const GunCfg *c);

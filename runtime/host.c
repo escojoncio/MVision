@@ -90,11 +90,14 @@ static void publish_frame(void) {
     int w = d.fw > 0 ? d.fw : d.w, h = d.h;
     if (w <= 0 || h <= 0) { w = 320; h = 240; d.enabled = 0; d.fw = w; d.aw = w; d.h = h; d.pad_l = 0; }
     if (w > MV_HOST_MAX_W) w = MV_HOST_MAX_W;
-    if (h > MV_HOST_MAX_H) h = MV_HOST_MAX_H;
+    if (h > 512) h = 512;
     d.fw = w; d.h = h;
     if (d.pad_l + d.aw > w) d.aw = w - d.pad_l > 0 ? w - d.pad_l : 0;
     int back = fb_wr;       /* búfer propio del escritor: nadie más lo lee */
-    gpu_present_rgba(&d, NULL, fb[back], (size_t)MV_HOST_MAX_W * MV_HOST_MAX_H);
+    GpuWindow win;   /* el marco colocado en la ventana visible fija (4:3 en cualquier modo, gpu.h: como mucho 640 x 536 en PAL 480i); si no cupiera, el marco tal cual */
+    gpu_display_window(&d, 1, &win);
+    if (win.w <= MV_HOST_MAX_W && win.h <= MV_HOST_MAX_H && gpu_present_window(&d, NULL, fb[back], MV_HOST_FB_BYTES / 4, NULL)) { w = win.w; h = win.h; }
+    else gpu_present_rgba(&d, NULL, fb[back], MV_HOST_FB_BYTES / 4);
     fb_meta[back].w = w; fb_meta[back].h = h; fb_meta[back].seq = ++fb_seq;
     unsigned old = atomic_exchange_explicit(&fb_state, (unsigned)back | 4u, memory_order_acq_rel);
     fb_wr = (int)(old & 3u);   /* el que estaba listo (leído o no) vuelve a ser mío */

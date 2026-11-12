@@ -810,8 +810,8 @@ func runMenuLayout() {
         check("ventana2d", "cine: ancho lógico no válido o ppm no válido -> sin cambio", XRCinemaLayout.snappedWidth(3.0, logicalWidth: 0, pixelsPerMeter: ppm) == 3.0 && XRCinemaLayout.snappedWidth(3.0, logicalWidth: 320, pixelsPerMeter: 0) == 3.0, "")
         let asp1: Float = XRCinemaLayout.aspect(width: 320, height: 256), asp2: Float = XRCinemaLayout.aspect(width: 1280, height: 1024)
         let asp3: Float = XRCinemaLayout.aspect(width: 384 * 3, height: 256 * 3), asp0: Float = XRCinemaLayout.aspect(width: 0, height: 5)
-        let aspOK: Bool = abs(asp1 - 0.8) < 1e-6 && abs(asp2 - 0.8) < 1e-6 && abs(asp3 - Float(2.0 / 3.0)) < 1e-6 && asp0 == 0.75
-        check("ventana2d", "cine: aspecto real (320x256 = 0,8; 384x256 = 0,667; a cualquier escala) y reserva 0,75", aspOK, "")
+        let aspOK: Bool = asp1 == 0.75 && asp2 == 0.75 && asp3 == 0.75 && asp0 == 0.75
+        check("ventana2d", "cine: la ventana visible fija se muestra siempre en 4:3 (320, 384, cualquier escala): la pantalla no cambia de forma con el modo de vídeo", aspOK, "")
         let rl = SIMD4<Float>(0.034, 0.711, 0.375, 0.961)
         let s0 = XRMenuPanelLayout.handSize(uv: rl, aspect: 0.8), s1 = XRMenuPanelLayout.handSize(uv: rl, aspect: 0.8)
         let ratioWant: Float = (0.961 - 0.711) / (0.375 - 0.034) * 0.8
@@ -820,23 +820,39 @@ func runMenuLayout() {
         let sf = XRMenuPanelLayout.handSize(uv: nil, aspect: 2.0 / 3.0)
         let sfH: Float = XRMenuPanelLayout.handWidth * Float(2.0 / 3.0)
         check("ventana2d", "mano sin rect: capa entera a 0,30 m con su aspecto", abs(sf.x - XRMenuPanelLayout.handWidth) < 1e-6 && abs(sf.y - sfH) < 1e-6, "\(sf)")
-        // Región 1 del HUD de partida (créditos y textos; XRFramedLayout): píxeles cuadrados con el aspecto lógico de la capa, tamaño fijo (no depende de cfg.width ni de la ampliación xBR) y fuera del centro de la vista.
+        // Región 1 del HUD de partida (créditos y textos; XRFramedLayout): la capa entera es la ventana visible fija en 4:3, tamaño fijo (no depende de cfg.width, del modo de vídeo ni de la ampliación) y fuera del centro de la vista.
         let r1 = SIMD4<Float>(0.00, 0.17, 0.35, 0.35)
-        let f320 = XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(320, 256)), f384 = XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(384, 256))
-        let want320: Float = (0.35 - 0.17) * 256 / (0.35 * 320), want384: Float = (0.35 - 0.17) * 256 / (0.35 * 384)
-        check("credito-region1", "píxeles cuadrados: alto/ancho = (dv * alto lógico) / (du * ancho lógico) (320x256 y 384x256), no 3/4", abs(f320.y / f320.x - want320) < 1e-5 && abs(f384.y / f384.x - want384) < 1e-5 && abs(f320.y / f320.x - 0.18 * 0.75 / 0.35) > 0.01, "\(f320) \(f384)")
-        check("credito-region1", "mismo píxel lógico en 320 y 384 de ancho (sin cambio de tamaño del texto)", abs(f320.x / (0.35 * 320) - f384.x / (0.35 * 384)) < 1e-6 && abs(f320.x / (0.35 * 320) - XRFramedLayout.pitch) < 1e-6, "")
+        let f320 = XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(320, 268)), f384 = XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(365, 268))
+        check("credito-region1", "alto/ancho = (dv / du) * 3/4 en cualquier modo (ventana visible 4:3)", abs(f320.y / f320.x - 0.18 * 0.75 / 0.35) < 1e-5 && f320 == f384, "\(f320) \(f384)")
         let c1 = XRFramedLayout.center(uv: r1, layerPx: SIMD2<Float>(320, 256))
         let ang: (Float) -> Float = { atan2f($0, XRFramedLayout.distance) * 180 / .pi }
         check("credito-region1", "no tapa el centro de la vista: borde derecho a > 6 grados a la izquierda y borde inferior a > 4 grados arriba; la capa entera mide menos de 50 grados", ang(c1.x + f320.x / 2) < -6 && ang(c1.y - f320.y / 2) > 4 && 2 * ang(XRFramedLayout.layerWidth / 2) < 50, "\(c1)")
         // Panel único del 2D sin trocear (XRPresenter paso 6b): la capa ENTERA con la geometría de XRFramedLayout: centrada en el encuadre, píxel cuadrado (ancho = layerWidth por 320 px lógicos) y aspecto lógico.
         let fu = XRFramedLayout.fullUV
-        let fs240 = XRFramedLayout.size(uv: fu, layerPx: SIMD2<Float>(320, 240)), fs256 = XRFramedLayout.size(uv: fu, layerPx: SIMD2<Float>(320, 256)), fs384 = XRFramedLayout.size(uv: fu, layerPx: SIMD2<Float>(384, 256))
+        let fs240 = XRFramedLayout.size(uv: fu, layerPx: SIMD2<Float>(320, 240)), fs256 = XRFramedLayout.size(uv: fu, layerPx: SIMD2<Float>(320, 268)), fs384 = XRFramedLayout.size(uv: fu, layerPx: SIMD2<Float>(365, 268))
         check("panel2d-completo", "recorte = capa entera (0,0,1,1) y centrado en el encuadre", fu == SIMD4<Float>(0, 0, 1, 1) && XRFramedLayout.center(uv: fu, layerPx: SIMD2<Float>(320, 240)) == SIMD2<Float>(0, 0), "")
-        check("panel2d-completo", "320 px lógicos miden layerWidth (1,30 m) y el aspecto es el lógico (0,75 / 0,8 / 0,667), píxel cuadrado",
-              abs(fs240.x - XRFramedLayout.layerWidth) < 1e-5 && abs(fs240.y / fs240.x - 0.75) < 1e-5 && abs(fs256.y / fs256.x - 0.8) < 1e-5 && abs(fs384.y / fs384.x - 2.0 / 3.0) < 1e-5 && abs(fs384.x / 384 - XRFramedLayout.pitch) < 1e-6, "\(fs240) \(fs256) \(fs384)")
+        check("panel2d-completo", "la capa entera mide layerWidth (1,30 m) x 3/4 en cualquier modo de vídeo: el panel no cambia de tamaño",
+              abs(fs240.x - XRFramedLayout.layerWidth) < 1e-5 && abs(fs240.y / fs240.x - 0.75) < 1e-5 && fs256 == fs240 && fs384 == fs240, "\(fs240) \(fs256) \(fs384)")
         check("panel2d-completo", "la capa entera mide menos de 50 grados de ancho a la distancia del panel", 2 * ang(fs240.x / 2) < 50, "")
-        check("credito-region1", "tamaño lógico no plausible -> reserva 320x240", XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(.nan, 0)) == XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(320, 240)), "")
+        // Registro del panel 2D con la pantalla 3D nativa (XR2DWindow.panelOnScreen3D): la pantalla 3D (W x 0,75 W) son las filas 8..248 de un marco PAL de 256; cada fila del marco debe caer donde la pone el 3D.
+        if let pw = XR2DWindow([320, 268, 0, 5, 320, 256]), let nw = XR2DWindow([321, 224, 1, -8, 320, 240]) {
+            let W: Float = 3.0, px: Float = W / 320
+            var worst: Float = 0
+            for (win, dh) in [(pw, Float(256)), (nw, Float(240))] {
+                guard let g = win.panelOnScreen3D(screenW: W) else { worst = .infinity; continue }
+                for r in [Float(0), 27, 128, 245, dh] {
+                    let panelY: Float = g.offset.y + g.size.y / 2 - (r + win.oy) * px     // altura (m) de la fila r del marco en el panel, desde el centro de la pantalla
+                    let screenY: Float = (dh / 2 - r) * px                                // y en la pantalla 3D (centro de proyección = centro del marco)
+                    worst = max(worst, abs(panelY - screenY) / px)
+                }
+                let panelX: Float = g.offset.x - g.size.x / 2 + win.ox * px, screenX: Float = -win.dw / 2 * px
+                worst = max(worst, abs(panelX - screenX) / px)
+            }
+            check("registro-2d3d", "bandas y subtítulos del panel casan con la pantalla 3D (desfase < 0,01 px del juego en PAL y NTSC)", worst < 0.01, "\(worst)")
+            let fu2 = pw.frameUV(SIMD4<Float>(0, 0, 1, 1))
+            check("registro-2d3d", "recorte del marco -> ventana: v' = (v * 256 + 5) / 268", abs(fu2.y - 5.0 / 268) < 1e-6 && abs(fu2.w - 261.0 / 268) < 1e-6 && fu2.x == 0 && fu2.z == 1, "\(fu2)")
+        } else { check("registro-2d3d", "XR2DWindow válida", false, "") }
+        check("credito-region1", "el tamaño en píxeles de la capa no interviene", XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(.nan, 0)) == XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(320, 240)), "")
         // Ventana 2D abierta (selector, pausa): el panel único va a 0,9 m en la dirección de mirada fijada al abrirse (rumbo + cabeceo), cara al usuario, y mide entre 1x y 1,3x el ángulo del panel de partida.
         let om = XRFramedLayout.overlayModel(position: SIMD3<Float>(1, 1.6, -2), yaw: 0.6, pitch: 0.3)
         let od = XRMath.position(om) - SIMD3<Float>(1, 1.6, -2)

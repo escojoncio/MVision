@@ -42,6 +42,7 @@ typedef uint8_t ns_u8;
 #define NSG_CF_SEMI   2u     /* malla semitransparente */
 #define NSG_CF_ABR(f) (((f) >> 2) & 3u)   /* bits 2-3: modo de mezcla */
 #define NSG_CF_PAINT  16u    /* color precalculado válido en .paint */
+#define NSG_CF_WINCUT 0x8000u /* solo la pone ns_vertex (no viaja en NsGpuCorner): triángulo rescatado del descarte del motor; ns_fs descarta sus fragmentos dentro de la ventana del motor */
 #define NSG_CF_ONESIDED 32u  /* cara de una sola cara (modelo sin NS_MF_TWOSIDED): con NsGpuUniforms.cull_eye.w = 1 el sombreador la descarta vista por detrás (regla del anverso del motor) */
 
 /* Marcas de pieza */
@@ -50,6 +51,7 @@ typedef uint8_t ns_u8;
 #define NSG_PF_DRAW   4u     /* se dibuja (malla presente y pieza visible) */
 #define NSG_PF_NET    8u     /* red de seguridad de vértices activa (piezas de objetos dinámicos, no del escenario): el shader colapsa los triángulos con vértices lejos de la pieza o aristas desproporcionadas */
 #define NSG_PF_NOWELD 16u    /* ignorar las soldaduras de esta pieza (la costura con el padre quedó inconsistente este fotograma): sus vértices usan su propia posición local */
+#define NSG_PF_NOSPLIT 64u   /* objeto GBOUND (NS_IF_GBOUND): el motor original no parte sus caras; en el modo ENGINE siguen la regla por triángulo entero */
 #define NSG_PF_IRCLUT 32u    /* visión térmica: las caras texturizadas de la pieza usan la CLUT fija NSG_IR_CLUT en vez de la suya (objetos con textura térmica, ver ns_gpu_make_piece) */
 #define NSG_IR_CLUT 0x3FFFu  /* CLUT térmica del motor: x = 1008, y = 255 de la VRAM */
 
@@ -78,6 +80,32 @@ typedef uint8_t ns_u8;
 #define NSG_HW_MAX_H 511.0f
 #define NSG_HW_SXY_MIN (-1024.0f)
 #define NSG_HW_SXY_MAX 1023.0f
+/* Modo ENGINE (pantalla 3D con la cámara del motor). Dentro de la ventana del motor la verdad es el fotograma del juego, y lo reproduce la regla del motor por triángulo ENTERO con su ojo
+ * (ns_gpu_gte_tri: ajuste al plano H/2, sin vértice delante, tamaño máximo de la tarjeta; reverso con los vértices ajustados). La pantalla 3D enseña además campo que el juego no tiene (el otro ojo,
+ * los márgenes): el triángulo que el motor descarta por reverso o tamaño y que no es cercano (algún vértice a z >= H) se dibuja con su geometría real, recortado por el plano cercano, SOLO en los
+ * fragmentos cuya proyección con el ojo del motor cae fuera de su ventana (+-NSG_ENG_WIN_X x +-NSG_ENG_WIN_Y px; NSG_CF_WINCUT); el de reverso, solo si es anverso desde el ojo de la vista que se dibuja (cada pase, o cada vista amplificada, decide con el suyo).
+ * «Caras cercanas: Original» (de serie; NSG_ENG_OFF_SPLIT lo apaga): el motor ORIGINAL parte en hasta 4x4x4 trozos la cara de los objetos sin GBOUND (el escenario y parte de los dinámicos) de área de pantalla > NSG_DIV_AREA
+ * y profundidad media < NSG_DIV_Z (NSG_DIV_Z_FAR con H > 1000) y descarta trozo a trozo (libdg/divide.c), así que la cara grande y cercana que la tarjeta perdería entera se ve por trozos. Con
+ * búfer de profundidad equivale a dibujarla con su geometría real recortada por el plano cercano: se hace con la cara de una pieza sin NSG_PF_NOSPLIT que cumple esas condiciones y que la regla por triángulo
+ * entero perdería por tamaño o deformaría (algún vértice a z < H/2). El reverso se decide antes de partir, como el motor.
+ * Réplica en C: ns_gpu_engine_tri y ns_gpu_engine_win (ns_gpu.c). */
+#define NSG_DIV_AREA 2048.0f    /* divide.c:577 (0x800), en unidades de NCLIP: doble del área en px */
+#define NSG_DIV_Z 8192.0f
+#define NSG_DIV_Z_FAR 60000.0f
+#define NSG_ENG_WIN_X 160.0f
+#define NSG_ENG_WIN_Y 128.0f
+/* Resultado de ns_gpu_engine_tri */
+#define NSG_ENG_DRAW 0       /* el motor lo dibuja: con los vértices ajustados al plano H/2 */
+#define NSG_ENG_BEHIND 1     /* los tres vértices detrás de la cámara del motor (z <= 0) */
+#define NSG_ENG_OVERSIZE 2   /* más de NSG_HW_MAX_W x NSG_HW_MAX_H px tras el ajuste: la tarjeta no lo dibuja */
+#define NSG_ENG_BACK 3       /* reverso de una cara de una sola cara desde el ojo del motor */
+#define NSG_ENG_SPLIT 5      /* cara que el motor ORIGINAL parte en trozos (libdg/divide.c) y dibuja por trozos: se dibuja con su geometría real, recortada por el plano cercano, también dentro de la ventana */
+#define NSG_ENG_EXTRA 4      /* el motor lo descarta (reverso o tamaño): se dibuja con su geometría real solo fuera de la ventana del motor (campo extra) */
+/* Reglas apagadas (diagnóstico; NsGpuUniforms.misc.z y ns_gpu_engine_off) */
+#define NSG_ENG_OFF_BEHIND 1
+#define NSG_ENG_OFF_SIZE 2
+#define NSG_ENG_OFF_BACK 4
+#define NSG_ENG_OFF_SPLIT 8   /* «Caras cercanas: Recortadas»: sin la subdivisión del motor original (como el juego con el parche sin-subdivisión: la tarjeta pierde entera la cara grande y cercana) */
 /* Resultado de ns_gpu_gte_tri */
 #define NSG_GTE_DRAW 0     /* se dibuja (con los vértices ya ajustados al plano z = H/2 si estaban más cerca) */
 #define NSG_GTE_BEHIND 1   /* ningún vértice delante de la cámara (z > 0): el motor lo descarta */
@@ -143,7 +171,7 @@ typedef struct {
     /* agua (ns_screen): el tinte vive en el MUNDO (la ondulación es un post-proceso de pantalla, ver NsGpuScreen.water_wave). w de water_min = 1 si hay volumen de agua; w de water_tint = 1 si la cabeza está dentro (se tiñe todo) */
     vector_float4 water_min, water_max, water_tint;
     vector_float4 fromvr[3];        /* mundo VR -> mundo del motor, filas de la 3x4 (xyz, traslación en w) */
-    vector_float4 misc;             /* x = índice de ojo del pase cuando NO hay amplificación (0/1: máscara de caras de los efectos); y = plano z = H/2 de la GTE con la cámara del juego (unidades del motor): el vértice con z de vista por debajo se proyecta en ese plano y solo se descarta el triángulo sin vértices delante (0 = sin ajuste; réplica ns_gpu_gte_tri) */
+    vector_float4 misc;             /* x = índice de ojo del pase cuando NO hay amplificación (0/1: máscara de caras de los efectos); y > 0 = modo ENGINE (cámara del juego en una pantalla): plano z = H/2 de la GTE en unidades del motor; reglas de ns_gpu_engine_tri (0 = mundo en primera persona, sin reglas del motor); z = reglas apagadas (NSG_ENG_OFF_*, diagnóstico) */
     vector_float4 cull_eye;         /* xyz = ojo de la cámara del JUEGO en el mundo del motor; w = NSG_CULL_ALL: descartar las caras NSG_CF_ONESIDED vistas por detrás (cinemáticas: la cámara queda fuera de las salas y el motor no dibuja los techos desde arriba); NSG_CULL_SEMI: solo las de mallas semitransparentes (cabeza bajo el agua: el motor no dibuja la superficie del agua vista desde abajo); 0 = doble cara (primera persona) */
     vector_float4 cam_x, cam_y;     /* cámara del JUEGO en el mundo del motor: xyz = eje X (derecha) / Y (abajo) de la vista; w = píxeles de la pantalla del motor por unidad de tangente (H; H por el factor vertical). Solo se usan con misc.y > 0 (tamaño máximo del hardware, NSG_HW_MAX_*) */
 } NsGpuUniforms;

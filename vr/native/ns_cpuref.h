@@ -28,7 +28,7 @@ typedef struct {
     float fx, fy, cx, cy;        /* proyección en píxeles: sx = cx + fx*x/z, sy = cy + fy*y/z */
     int w, h;
     float znear;                 /* plano cercano en unidades del ojo (>0) */
-    float zreject;               /* > 0: plano z = H/2 de la GTE: el vértice con z < zreject se proyecta en z = zreject (la división satura en 2,0) y solo se descarta el triángulo sin ningún vértice a z > 0; réplica del ajuste de ns_vertex con U.misc.y (NativeShaders.metal, ns_gpu_gte_tri). 0 = sin ajuste */
+    float zreject;               /* > 0: plano z = H/2 de la GTE: el vértice con z < zreject se proyecta en z = zreject (la división satura en 2,0) y solo se descarta el triángulo sin ningún vértice a z > 0; es lo que hace el motor con la cara ENTERA sin partir (ns_gpu_gte_tri); el sombreador ya no lo aplica (reglas por fragmento, ns_gpu_engine_tri). 0 = sin ajuste */
 } NsRCam;
 
 /* Búfer de color (0..31 por canal) + 1/z (0 = sin cobertura: hueco). */

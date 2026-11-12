@@ -656,12 +656,38 @@ static int test_glue_mode(int m) {
     return bad;
 }
 
+/* only_absent (la app): solo se dibuja la malla ausente de verdad; sprite y otra textura se clasifican y cuentan pero no se emiten. */
+static void test_only_absent(void) {
+    NsFillCam cam = cam_id(); NsFillStats st;
+    Nat N = {0};
+    nat_quad(&N, -500, -500, 4000, 1000, PAGE, CLUT, 0xAAAA0001u);
+    float va[4][3] = {{6000, -500, 5000}, {7000, -500, 5300}, {6000, 500, 5600}, {7000, 500, 5900}};   /* malla ausente: lejos de todo y con profundidad variable */
+    float vo[4][3] = {{-500, -500, 4000}, {500, -500, 4000}, {-500, 500, 4000}, {500, 500, 4000}};       /* sobre la cara nativa, con otra página de textura: «otra textura» o «textura corregida» */
+    GpuOp ops[3] = {list_of(3000, -500, 5000, 1000, 1), list_quad(va, 0, TX, CLX), list_quad(vo, 0, TX + 64, CLX)};
+    for (int only = 0; only < 2; only++) {
+        NsFill *f = ns_fill_create(); NsFillCfg cfg; ns_fill_cfg_default(&cfg);
+        CHECK(cfg.only_absent == 0, "defecto del núcleo: se emite todo");
+        cfg.only_absent = only; cfg.calib = 0; cfg.brake = 0;
+        CHECK(step(f, &N, ops, 3, &cam, NULL, &cfg, 1, &st) == 0, "run");
+        CHECK(st.cls[NF_FILL_SPRITE] == 2 && st.cls[NF_FILL_ABSENT] == 2, "clases (only=%d): sprite=%u ausente=%u", only, st.cls[NF_FILL_SPRITE], st.cls[NF_FILL_ABSENT]);
+        uint32_t n; const NsEffect *e = ns_fill_effects(f, &n);
+        uint32_t n_abs = 0, n_spr = 0;
+        for (uint32_t i = 0; i < n; i++) { if (e[i].p[0][0] > 5999.0f) n_abs++; else if (e[i].p[0][0] > 2999.0f) n_spr++; }
+        CHECK(n_abs == 1, "la malla ausente se dibuja siempre (only=%d): %u", only, n_abs);
+        CHECK(n_spr == (only ? 0u : 1u), "sprite (only=%d): %u emitidos", only, n_spr);
+        if (only) CHECK(n == 1 && st.filled_tris == 2, "solo ausente: salidas=%u rellenos=%u", n, st.filled_tris);
+        ns_fill_destroy(f);
+    }
+    free(N.t); free(N.s);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--sin-dibujo")) return test_glue_mode(argc > 2 ? atoi(argv[2]) : 0);
 
     setenv("MV_FILL", "1", 1);   /* los tests del hilo trabajador comprueban lo que se dibuja: modo dibujo explícito (el defecto es solo diagnóstico) */
     test_intro_cover();
     test_fill_and_match();
+    test_only_absent();
     test_camera_ys();
     test_locked_alt_cam();
     test_pose_player_and_texfix();

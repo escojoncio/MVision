@@ -1,6 +1,7 @@
 #include "ns_gpu.h"
 #include "ns_sink.h"
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -309,10 +310,12 @@ void ns_gpu_make_piece(const NsScene *sc, const NsInstance *inst, const NsPiece 
         float lift = ns_sink_lift_of(p->flags) / NS_GPU_RAISE_UNIT;
         if (lift > 0.0f && lift > o->raise) o->raise = lift;      /* sin adelanto, el sesgo de la malla (también el negativo) queda tal cual */
     }
+    if ((inst->flags & NS_IF_STATIC) && inst->zone_mask && sc->group_mask && !(inst->zone_mask & sc->group_mask)) o->raise -= NS_GPU_OFFGROUP_BACK;   /* mapa de un grupo no activo: detrás del activo donde coinciden */
     /* Visión térmica (NS_SFX_MODE_B): el motor dibuja los objetos con la marca de textura térmica (personajes) con la CLUT fija NSG_IR_CLUT, que el propio juego rellena en VRAM (medido en un
      * volcado con las gafas: todas las caras del objeto llevan clut 0x3FFF); el escenario ya llega recoloreado porque el juego reescribe sus CLUT. */
     if ((sc->valid & NS_SV_FX) && (sc->screen.flags & NS_SFX_MODE_B) && (inst->flags & NS_IF_THERMAL_OK) && !(inst->flags & NS_IF_STATIC)) o->flags |= NSG_PF_IRCLUT;
     if (parent_global >= 0) { o->parent = parent_global; o->parent_nverts = parent_nverts; }
+    if (inst->flags & NS_IF_GBOUND) o->flags |= NSG_PF_NOSPLIT;
     if (!(inst->flags & NS_IF_STATIC)) o->flags |= NSG_PF_NET;   /* objetos dinámicos: red de seguridad de vértices (el escenario es fijo y trae triángulos legítimamente enormes: agua, cielo) */
 
     /* luz: la de la instancia (o la global); ambiente propio solo con NS_IF_OWN_AMBIENT */
@@ -561,9 +564,9 @@ static float fx_len_scale(const float *m) {   /* metros por unidad del motor: lo
 
 /* ---- Papeles y registro de los efectos cerca de la cabeza ---- */
 /* Papeles (mismos valores que NSFX_ROLE_*; test_ns_gpu_fx lo comprueba). */
-enum { FXR_SURFACE = 14, FXR_WATER_SURFACE = 15, FXR_VIEW_OVERLAY = 22, FXR_COUNT = 23 };
+enum { FXR_SURFACE = 14, FXR_WATER_SURFACE = 15, FXR_VIEW_OVERLAY = 22, FXR_SKY = 23, FXR_COUNT = 24 };
 static const char *const k_fx_role_names[FXR_COUNT] = {"none", "light", "bubble", "smoke", "spark", "droplet", "splash", "ripple", "tracer", "beam", "decal", "shadow", "shadow_obj", "plasma",
-                                                       "surface", "water_surface", "ambient", "cone", "trail", "strip", "particle", "sprite_anim", "view_overlay"};
+                                                       "surface", "water_surface", "ambient", "cone", "trail", "strip", "particle", "sprite_anim", "view_overlay", "sky"};
 const char *ns_gpu_fx_role_name(int role) { return role >= 0 && role < FXR_COUNT ? k_fx_role_names[role] : "?"; }
 
 /* Diámetro angular (grados) del polígono visto desde la cabeza: mayor ángulo entre dos esquinas. Una esquina en la cabeza cuenta como 180. */
@@ -925,3 +928,43 @@ int ns_gpu_tri_back(const float p0[3], const float p1[3], const float p2[3], con
     const float cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2], cz = e1[0] * e2[1] - e1[1] * e2[0];
     return r[0] * cx + r[1] * cy + r[2] * cz <= 0.0f;
 }
+int ns_gpu_engine_tri(const float p[3][3], const NsGpuEngCam *c, int one_sided, int can_split, const float (*eyes)[3], int neyes, ns_u32 off, float draw[3][3]) {
+    const float zc = 0.5f * c->h;
+    float gv[3][3], g[3][3], zmax = -1e30f, zsum = 0.0f; int squashed = 0;
+    for (int k = 0; k < 3; k++) {
+        const float r[3] = {p[k][0] - c->eye[0], p[k][1] - c->eye[1], p[k][2] - c->eye[2]};
+        gv[k][0] = c->x[0] * r[0] + c->x[1] * r[1] + c->x[2] * r[2]; gv[k][1] = c->y[0] * r[0] + c->y[1] * r[1] + c->y[2] * r[2];
+        const float z = c->fwd[0] * r[0] + c->fwd[1] * r[1] + c->fwd[2] * r[2];
+        if (z > zmax) zmax = z;
+        zsum += z > 0.0f ? z : 0.0f; squashed |= z < zc;
+        gv[k][2] = z < zc ? zc : z;                                                     /* ajuste de la GTE: al plano z = H/2 con x e y de la vista intactas */
+        for (int a = 0; a < 3; a++) g[k][a] = p[k][a] + c->fwd[a] * (gv[k][2] - z);
+    }
+    if (!(off & NSG_ENG_OFF_BEHIND) && !(zmax > 0.0f)) return NSG_ENG_BEHIND;
+    int cause = NSG_ENG_DRAW;
+    if (one_sided && !(off & NSG_ENG_OFF_BACK) && ns_gpu_tri_back(g[0], g[1], g[2], c->eye)) cause = NSG_ENG_BACK;
+    else if (!(off & NSG_ENG_OFF_SIZE) && ns_gpu_tri_oversize((const float (*)[3])gv, c->hx, c->hy)) cause = NSG_ENG_OVERSIZE;
+    if (can_split && !(off & NSG_ENG_OFF_SPLIT) && cause != NSG_ENG_BACK && (cause == NSG_ENG_OVERSIZE || squashed) && zsum < 3.0f * (c->h > 1000.0f ? NSG_DIV_Z_FAR : NSG_DIV_Z)) {
+        float s[3][2];   /* la cara que el motor original parte: doble área de la proyección saturada */
+        for (int k = 0; k < 3; k++) { s[k][0] = ns_clampf(c->hx * gv[k][0] / gv[k][2], NSG_HW_SXY_MIN, NSG_HW_SXY_MAX); s[k][1] = ns_clampf(c->hy * gv[k][1] / gv[k][2], NSG_HW_SXY_MIN, NSG_HW_SXY_MAX); }
+        if (fabsf((s[1][0] - s[0][0]) * (s[2][1] - s[0][1]) - (s[2][0] - s[0][0]) * (s[1][1] - s[0][1])) > NSG_DIV_AREA) { if (draw) memcpy(draw, p, 9 * sizeof(float)); return NSG_ENG_SPLIT; }
+    }
+    if (cause == NSG_ENG_DRAW) { if (draw) memcpy(draw, g, sizeof g); return NSG_ENG_DRAW; }
+    if (zmax >= c->h) {   /* rescate: no cercano; se dibuja solo fuera de la ventana del motor (ns_gpu_engine_win) */
+        int show = cause == NSG_ENG_OVERSIZE;
+        for (int e = 0; e < neyes && !show; e++) show = !ns_gpu_tri_back(p[0], p[1], p[2], eyes[e]);
+        if (show) { if (draw) memcpy(draw, p, 9 * sizeof(float)); return NSG_ENG_EXTRA; }
+    }
+    return cause;
+}
+int ns_gpu_engine_win(const NsGpuEngCam *c, const float p[3]) {
+    const float r[3] = {p[0] - c->eye[0], p[1] - c->eye[1], p[2] - c->eye[2]};
+    const float z = c->fwd[0] * r[0] + c->fwd[1] * r[1] + c->fwd[2] * r[2];
+    return z > 0.0f && fabsf(c->hx * (c->x[0] * r[0] + c->x[1] * r[1] + c->x[2] * r[2])) <= NSG_ENG_WIN_X * z && fabsf(c->hy * (c->y[0] * r[0] + c->y[1] * r[1] + c->y[2] * r[2])) <= NSG_ENG_WIN_Y * z;
+}
+static _Atomic ns_u32 g_eng_off;
+void ns_gpu_engine_set_off(ns_u32 off) { atomic_store_explicit(&g_eng_off, off, memory_order_relaxed); }
+ns_u32 ns_gpu_engine_off(void) { return atomic_load_explicit(&g_eng_off, memory_order_relaxed); }
+static _Atomic ns_u32 g_eng_sep;   /* bits del float */
+void ns_gpu_engine_set_sep(float units) { ns_u32 b; memcpy(&b, &units, sizeof b); atomic_store_explicit(&g_eng_sep, b, memory_order_relaxed); }
+float ns_gpu_engine_sep(void) { const ns_u32 b = atomic_load_explicit(&g_eng_sep, memory_order_relaxed); float f; memcpy(&f, &b, sizeof f); return f; }

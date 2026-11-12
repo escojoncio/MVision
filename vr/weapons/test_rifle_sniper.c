@@ -1,6 +1,6 @@
 /* Pruebas de fusil y francotirador: vaciado, ráfaga, recarga manual/simplificada/automática y mira.
  * Compilar: cc -I. test_rifle_sniper.c w_rifle.c w_sniper.c w_gunc.c wcore.c -lm
- * Con argumento "png-dir" vuelca PPM de la retícula (en /home/claude/work/w2, fuera del repo). */
+ * La mira (siempre activa) tiene además sus propias pruebas en test_sniper_scope.c. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -268,72 +268,24 @@ static void test_dt_guns(void) {
     }
 }
 
-static void test_overlay_iris(void) {
-    WeaponState *s = mkw(&w_sniper);                    /* sin mira activa: iris cerrado (blend = 0) */
-    enum { N = 320 };
-    static uint32_t buf[N * N];
-    for (int i = 0; i < N * N; i++) buf[i] = 0xFFC8C8C8u;
-    sniper_draw_overlay(s, buf, N, N);
-    int cx = N / 2 + 11, cy = N / 2 + 11;               /* r ~ 0,1 del radio, fuera de la retícula */
-    uint32_t px = buf[cy * N + cx];
-    CHECK((px & 255) >= 190);                           /* sin viñeta en el centro del iris cerrado */
-    CHECK(((buf[5 * N + 5]) & 255) == 0);               /* fuera de la lente: negro */
-    for (int i = 0; i < N * N; i++) if ((buf[i] >> 24) != 0xFF) { CHECK(0); break; }
-    uint32_t one = 0xFF808080u; sniper_draw_overlay(s, &one, 1, 1); sniper_draw_overlay(s, NULL, 4, 4);
-    sniper_draw_overlay(s, buf, 0, 0);
-    free(s);
-}
-
-static void write_ppm(const char *dir, const char *name, const uint32_t *px, int w, int h) {
-    char p[512]; snprintf(p, sizeof p, "%s/%s.ppm", dir, name);
-    FILE *f = fopen(p, "wb"); if (!f) return;
-    fprintf(f, "P6\n%d %d\n255\n", w, h);
-    for (int i = 0; i < w * h; i++) { fputc(px[i] & 255, f); fputc((px[i] >> 8) & 255, f); fputc((px[i] >> 16) & 255, f); }
-    fclose(f);
-}
-
-static void dump_scope(const char *dir, const char *name, const WeaponState *s) {
-    if (!dir) return;
-    enum { N = 320 };
-    static uint32_t buf[N * N];
-    float yw, pt; sniper_sway(s, &yw, &pt);
-    for (int y = 0; y < N; y++) for (int x = 0; x < N; x++) {
-        float fx = x + yw * 6000, fy = y - pt * 6000;   /* la escena se desplaza con el balanceo */
-        int sky = fy < N / 2 + 20 * sinf(fx * 0.03f);
-        uint32_t r = sky ? 120 + 80 * y / N : 70 + 40 * (0.5f + 0.5f * sinf(fx * 0.08f));
-        uint32_t g = sky ? 170 + 50 * y / N : 100 + 40 * (0.5f + 0.5f * sinf(fx * 0.08f));
-        uint32_t b = sky ? 230 : 60;
-        buf[y * N + x] = r | (g << 8) | (b << 16) | 0xFF000000u;
-    }
-    sniper_draw_overlay(s, buf, N, N);
-    write_ppm(dir, name, buf, N, N);
-}
-
-static void test_scope(const char *dir) {
+static void test_scope(void) {
     memset(&B, 0, sizeof B); B.reserve = 100;
     WeaponState *s = mkw(&w_sniper); WInput in = mk();
     step(s, &in, WR_MANUAL, 2);
-    CHECK(!s->aux.active);
-    /* ojo derecho junto al ocular, mirando por él */
-    WPose ep = wcore_point_world(s, &in, WP_EYE);
-    in.head.p = wv_sub(ep.p, wv(0.032f, 0, 0)); in.head.p.z += 0.05f;
-    step(s, &in, WR_MANUAL, 20);
+    CHECK(s->aux.active);                                                        /* la mira está siempre activa con el arma en la mano, con la cabeza lejos */
+    step(s, &in, WR_MANUAL, 78);
     CHECK(s->aux.active && s->aux.target_part == SNIPER_PT_LENS && (s->aux.overlay & WO_RETICLE));
-    dump_scope(dir, "scope_6x_rest", s);
     float fov6 = s->aux.fov_y;
-    printf("sniper: mira ACTIVA a %.0f mm; %.3fx -> fov %.2f grados\n", 50.0, sniper_zoom(s), fov6 * 57.3f);
+    printf("sniper: mira SIEMPRE ACTIVA; %.3fx -> fov %.2f grados\n", sniper_zoom(s), fov6 * 57.3f);
     CHECK(sniper_zoom(s) == SNIPER_ZOOM_GAME);                                   /* el aumento del original es el de por defecto */
     CHECK(fabsf(fov6 - 2 * atanf(128.0f / 3000.0f)) < 1e-5f);                    /* 3000/320 sobre el lienzo de 256 px */
-    /* cámara en el objetivo, delante del ojo */
-    CHECK(s->aux.camera.p.z < ep.p.z);
-    /* histéresis: 12 cm sigue activa, 20 cm se apaga */
-    in.head.p.z = ep.p.z + 0.12f; step(s, &in, WR_MANUAL, 3); CHECK(s->aux.active);
-    in.head.p.z = ep.p.z + 0.20f; step(s, &in, WR_MANUAL, 3); CHECK(!s->aux.active);
-    /* zoom */
-    in.head.p.z = ep.p.z + 0.05f; step(s, &in, WR_MANUAL, 10);
+    /* cámara en el objetivo: delante de la lente, sobre el eje del arma */
+    WPose lens = wpose_mul(wcore_weapon_world(s, &in), w_sniper.parts[SNIPER_PT_LENS].rest);
+    CHECK(s->aux.camera.p.z < lens.p.z && fabsf(s->aux.camera.p.y - lens.p.y) < 1e-3f);
+    /* el original no tiene control manual de aumentos: A no lo cambia */
     in.buttons[0] = WB_A; step(s, &in, WR_MANUAL, 1); in.buttons[0] = 0;
-    CHECK(fabsf(sniper_zoom(s) - SNIPER_ZOOM_GAME * 0.5f) < 1e-4f);
-    step(s, &in, WR_MANUAL, 40); dump_scope(dir, "scope_10x_sway", s);
+    CHECK(sniper_zoom(s) == SNIPER_ZOOM_GAME);
+    step(s, &in, WR_MANUAL, 40);
     /* balanceo: amplitud en 6 s con 1 mano, 2 manos y tranquilizante */
     float amp[4];
     for (int c = 0; c < 4; c++) {
@@ -345,8 +297,7 @@ static void test_scope(const char *dir) {
     printf("sniper: balanceo pico 1 mano %.2f mrad | 2 manos %.2f | tranq. %.2f | tranq.+2 manos %.2f\n",
            amp[0] * 1e3f, amp[1] * 1e3f, amp[2] * 1e3f, amp[3] * 1e3f);
     CHECK(amp[1] < amp[0] * 0.7f && amp[2] < amp[0] * 0.4f && amp[3] < amp[2]);
-    in.head.p.z = ep.p.z + 0.13f; step(s, &in, WR_MANUAL, 4); dump_scope(dir, "scope_iris_closing", s);
-    in.head.p.z = ep.p.z + 0.05f; step(s, &in, WR_MANUAL, 30);
+    step(s, &in, WR_MANUAL, 30);
     /* semiautomático: mantener el gatillo = un disparo; seguro bloquea */
     sniper_set_steady(s, 0); in.support_held = 0;
     int f0 = B.fired; in.trigger[0] = 1; step(s, &in, WR_MANUAL, 90); CHECK(B.fired == f0 + 1);
@@ -381,19 +332,18 @@ static void test_make_ready(const WeaponDef *d, int cap) {
     free(s);
 }
 
-int main(int argc, char **argv) {
+int main(void) {
     test_burst();
     test_make_ready(&w_rifle, RIFLE_MAG); test_make_ready(&w_sniper, SNIPER_MAG);
     reload_manual(&w_rifle, RIFLE_MAG);
     reload_manual(&w_sniper, SNIPER_MAG);
     test_auto_modes();
-    test_scope(argc > 1 ? argv[1] : 0);
+    test_scope();
     test_seq_nomag(&w_rifle, RIFLE_MAG); test_seq_nomag(&w_sniper, SNIPER_MAG);
     test_bolt_ammo(&w_rifle); test_bolt_ammo(&w_sniper);
     test_cd_clamp(&w_rifle);
     test_equip_trigger(&w_rifle); test_equip_trigger(&w_sniper);
     test_dt_guns();
-    test_overlay_iris();
     printf(fails ? "RESULTADO: %d FALLOS\n" : "RESULTADO: todo OK\n", fails);
     return fails != 0;
 }

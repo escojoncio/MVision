@@ -47,6 +47,9 @@ void ns_gpu_scan(const NsGpuVert *verts, const NsGpuCorner *corners, uint32_t nt
 
 /* Unidades del motor por unidad de NsGpuPiece.raise (el renderer multiplica raise por fog_par.w = NS_GPU_RAISE_UNIT / units_per_m metros). */
 #define NS_GPU_RAISE_UNIT 0.05f
+/* Retraso de orden (en unidades de `raise`: 40 = 2 unidades del motor) del escenario de un grupo de mapa NO activo. Los mapas de un mismo stage comparten espacio y repiten caras en sus fronteras
+ * (medido: 10-33 triángulos duplicados entre grupos en dos zonas): con todos dibujados, a igual profundidad gana el mapa activo y no parpadean. */
+#define NS_GPU_OFFGROUP_BACK 40.0f
 /* Pieza de la escena (solo se llama con la malla presente: mesh_flags = NsMesh.flags, depth_bias = NsMesh.depth_bias). parent_global: índice global (en NsScene.piece) del
  * padre o -1 (la malla del padre debe estar presente; parent_nverts = su nº de vértices). vert_base: base de la malla en el pool de vértices. */
 void ns_gpu_make_piece(const NsScene *sc, const NsInstance *inst, const NsPiece *p, uint32_t mesh_flags, int depth_bias, uint32_t vert_base,
@@ -75,8 +78,28 @@ float ns_gpu_back_z(int mode, uint32_t cface_flags, int back);
 int ns_gpu_tri_oversize(const float v[3][3], float hx, float hy);
 /* Réplica en C de la proyección de la GTE para un triángulo en la vista del motor (cámara del juego): la división H/SZ satura en 2,0 cuando z <= zc (= H/2), así que un vértice con z < zc se proyecta
  * como si estuviera en el plano z = zc (x e y de la vista intactas) y el polígono se dibuja igualmente. out = vértices tras ese ajuste. NSG_GTE_BEHIND si ningún z > 0; NSG_GTE_OVERSIZE si, ya
- * ajustado, supera el tamaño máximo del hardware (ns_gpu_tri_oversize); si no, NSG_GTE_DRAW. hx/hy como en ns_gpu_tri_oversize. */
+ * ajustado, supera el tamaño máximo del hardware (ns_gpu_tri_oversize); si no, NSG_GTE_DRAW. hx/hy como en ns_gpu_tri_oversize. Es la regla del motor por triángulo entero; ns_gpu_engine_tri la aplica
+ * y añade el rescate en el campo extra de la pantalla 3D. */
 int ns_gpu_gte_tri(const float v[3][3], float zc, float hx, float hy, float out[3][3]);
+/* Réplica en C de las reglas del modo ENGINE de ns_vertex / ns_fs (pantalla 3D con la cámara del motor, U.misc.y > 0; ver NSG_ENG_* en ns_gpu_types.h), por triángulo (p = vértices en el
+ * mundo del motor, orden de ns_gpu_pack). Primero la regla del motor con su ojo, que es la del fotograma del juego: NSG_ENG_BEHIND (ningún z de vista > 0), vértices con z < H/2 movidos al plano
+ * H/2, NSG_ENG_BACK (cara de una sola cara `one_sided` vista por detrás, con los vértices ya movidos) y NSG_ENG_OVERSIZE (más de 1023 x 511 px). Lo que pasa se dibuja con los vértices movidos
+ * (NSG_ENG_DRAW, `draw` = esos vértices). Lo descartado por reverso o tamaño se rescata (NSG_ENG_EXTRA, `draw` = p) si no es cercano (algún vértice a z >= h): el de tamaño siempre; el de
+ * reverso, si es anverso desde alguno de los `neyes` ojos (`eyes`, mundo del motor; ns_vertex decide cada vista con SU ojo: neyes = 1 da lo que dibuja ese pase). De un triángulo rescatado solo se dibujan los puntos FUERA de la ventana del motor
+ * (ns_gpu_engine_win == 0). `can_split` = el objeto no es GBOUND (el motor original parte sus caras; pieza sin NSG_PF_NOSPLIT): si la regla del motor la
+ * perdería por tamaño o la deformaría (algún z < H/2), su doble área saturada pasa de NSG_DIV_AREA y la media de max(z, 0) no llega a NSG_DIV_Z (NSG_DIV_Z_FAR con h > 1000), se dibuja con
+ * su geometría real en todas partes (NSG_ENG_SPLIT, `draw` = p). `off` = reglas apagadas (NSG_ENG_OFF_*). `draw` puede ser NULL. */
+typedef struct { float eye[3], x[3], y[3], fwd[3]; float h, hx, hy; } NsGpuEngCam;   /* ojo y ejes de la vista del motor en el mundo (derecha, abajo, delante); H; px por unidad de tangente en x e y */
+int ns_gpu_engine_tri(const float p[3][3], const NsGpuEngCam *c, int one_sided, int can_split, const float (*eyes)[3], int neyes, ns_u32 off, float draw[3][3]);
+/* 1 si el punto p (mundo del motor) se proyecta con el ojo del motor dentro de su ventana (z > 0, |x| <= NSG_ENG_WIN_X px, |y| <= NSG_ENG_WIN_Y px). Réplica del recorte de ns_fs (NSG_CF_WINCUT). */
+int ns_gpu_engine_win(const NsGpuEngCam *c, const float p[3]);
+/* Reglas del modo ENGINE apagadas desde los ajustes de la app (NSG_ENG_OFF_*; 0 = todas activas). Atómico: lo escribe la interfaz y lo leen el render y el anfitrión. */
+void ns_gpu_engine_set_off(ns_u32 off);
+ns_u32 ns_gpu_engine_off(void);
+/* Separación de las dos cámaras de la pantalla 3D (unidades del motor; ns_cinema_stereo) con la que se dibujó la última vez: los ojos de la vista son el del motor -+ sep / 2 a lo largo de su eje X.
+ * La escribe el render y la lee el anfitrión para contar los descartes con los ojos reales (línea [descartes]). Atómico. */
+void ns_gpu_engine_set_sep(float units);
+float ns_gpu_engine_sep(void);
 /* Comprobación de PIEZA (una vez por fotograma, tras rellenar la tabla): matriz corrupta (NSG_NET_MAT: no dibujar la pieza) y soldaduras cuyo vértice del padre se aleja más de NSG_NET_WELD_GAP_M de
  * la posición propia (NSG_NET_WELD: poner NSG_PF_NOWELD). nverts = nº de vértices de la malla de la pieza; mpu = metros VR por unidad del motor. Devuelve las causas. */
 uint32_t ns_gpu_net_piece(const NsGpuVert *pool, const NsGpuPiece *tbl, uint32_t gi, uint32_t nverts, float mpu, NsGpuNetPiece *out);

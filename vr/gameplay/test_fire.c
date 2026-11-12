@@ -708,6 +708,95 @@ static void t_read_game(void) {
     w32(BA_PLAYER_CTRL, 0); vrfire_read_game(ram, &bs, &g); CHECK(!g.ok, "sin jugador");
     vrfire_read_game(NULL, &bs, &g); CHECK(!g.ok, "RAM NULL"); vrfire_read_game(ram, NULL, &g); CHECK(!g.ok, "bs NULL");
 }
+/* ---------------------------------------------------------------- levantado del arma: modelo tick a tick de la decompilación (chara/snake/sna_init.c)
+ * Cada tick (2 VBlanks): field_914_trigger = 0 (l.7769); en reposo, cuadrado pulsado arranca el ataque con field_910 = 0 (sna_8005009C, l.1115-1153); con PLAYER_ATTACK y tbl & 0x40 se llama a la
+ * función del arma con time = field_910++ (l.7856-7860): sna_gun_800540D0 (l.3614) apunta un soltar en cola y a time == 8 pasa a sub_80057BF0 (l.5918), que pone trigger = 1 | 2 (al soltar, o
+ * mientras se mantiene con tbl & 1) y vuelve a reposo tras 5 ticks sin cuadrado. El actor del arma dispara ese mismo tick con trigger & 2 (weapon/socom.c l.331-360). Edición europea: campos 4 B antes. */
+typedef struct { int vb, prev, attack, shoot, a38, f926, bullets, first_vb; uint32_t tbl; } DGame;
+static void dg_tick(DGame *d, int sq) {
+    if (++d->vb % 2) return;
+    int release = d->prev && !sq, cnt = (int)r32(PW_BASE + 0x90C), trg = 0;
+    d->prev = sq;
+    if (!d->attack && sq) { cnt = 0; d->attack = 1; }
+    if (d->attack && (d->tbl & 0x40)) {
+        int time = cnt++;
+        if (!d->shoot) {
+            if (time == 0) d->a38 = 0;
+            if (release) d->a38 = 1;
+            if (time == 8) { d->shoot = 1; cnt = 0; d->f926 = 0; }
+        } else {
+            int fire = (time == 0 && d->a38) || ((d->tbl & 1) ? sq : release);
+            trg = 1 | (fire ? 2 : 0);
+            if (!sq) { if (++d->f926 > 4 || (d->tbl & 1)) { d->shoot = 0; d->attack = 0; cnt = 0; d->f926 = 0; } } else d->f926 = 0;
+        }
+    }
+    w32(PW_BASE + 0x90C, (uint32_t)cnt); w32(PW_BASE + 0x910, (uint32_t)trg); w32(PW_BASE + 0x908, d->shoot ? 0x80056000u : 0x80054520u);   /* función de estado: la del levantado (edición europea) u otra */
+    if (trg & 2) { VrFireMat m; vrfire_take_projectile(0, &m); d->bullets++; if (!d->first_vb) d->first_vb = d->vb; }
+}
+/* n peticiones de disparo separadas `gap` VBlanks (o gatillo mantenido si hold); devuelve los VBlanks de la primera petición a la primera bala */
+static int dg_lead = 7, dg_stale;       /* VBlanks antes de la primera petición (7: cae a mitad de tick) y contador viejo que deja un levantado cortado */
+static int dg_run(DGame *d, uint32_t tbl, int skip, int n, int gap, int hold) {
+    init_trigger();
+    memset(ram, 0, sizeof ram); memset(d, 0, sizeof *d); d->tbl = tbl;
+    w32(BA_PLAYER_CTRL, PW_BASE + 0x20); w32(PW_BASE + 0x91C, tbl); w32(PW_BASE + 0x90C, (uint32_t)dg_stale); w32(PW_BASE + 0x908, 0x80054520u);
+    BridgeState bs; memset(&bs, 0, sizeof bs); bs.weapon = 0; bs.weapon_ammo[0] = 12; bs.magazine = 12; bs.magazine_max = 12;
+    VrFireMap map = mkmap(100, 200, 300, 40); VrFireIn in = mkin(&map);
+    int req_vb = 0;
+    for (int i = 0; i < dg_lead + n * gap + 120; i++) {
+        int k = i - dg_lead;
+        in.fire = !hold && k >= 0 && k % gap == 0 && k / gap < n; in.trigger_held = hold && k >= 0 && k < 40;
+        if (k == 0) req_vb = d->vb;
+        if (skip) vrfire_skip_raise(ram);
+        VrFireGame g; vrfire_read_game(ram, &bs, &g);
+        VrFireOut o; vrfire_frame(&g, &in, &o);
+        dg_tick(d, o.engaged ? o.square : 0);
+    }
+    return d->first_vb - req_vb;
+}
+static void t_skip_raise(void) {
+    DGame d;
+    int base = dg_run(&d, 0x9042, 0, 1, 1, 0);
+    CHECK(base >= 19 && base <= 23 && d.bullets == 1, "pistola sin salto: %d VBlanks de la petición a la bala (el visor mide 21-22), %d bala", base, d.bullets);
+    int lat = dg_run(&d, 0x9042, 1, 1, 1, 0);
+    VrFireStats st; vrfire_stats(&st);
+    printf("   latencia gatillo -> bala (modelo de la decompilación): sin salto %d VBlanks, con salto %d\n", base, lat);
+    CHECK(lat <= 7 && d.bullets == 1 && st.subst == 1 && st.expired == 0, "pistola con salto: %d VBlanks, %d bala (sustituidas %u)", lat, d.bullets, st.subst);
+    lat = dg_run(&d, 0x9042, 1, 3, 30, 0);
+    CHECK(lat <= 7 && d.bullets == 3, "tres disparos separados: cada uno su bala (%d), el primero en %d VBlanks", d.bullets, lat);
+    lat = dg_run(&d, 0x9042, 1, 3, 5, 0);
+    CHECK(lat <= 7 && d.bullets == 3, "ráfaga de 3 peticiones cada 5 VBlanks: 3 balas (%d)", d.bullets);
+    for (dg_stale = 0; dg_stale <= 9; dg_stale++) for (dg_lead = 6; dg_lead <= 9; dg_lead++) for (int gap = 3; gap <= 40; gap += 37) {
+        lat = dg_run(&d, 0x9042, 1, 2, gap, 0);
+        CHECK(lat <= 9 && d.bullets == 2, "contador viejo %d, fase %d, 2 peticiones cada %d: 2 balas (%d), la primera en %d VBlanks", dg_stale, dg_lead, gap, d.bullets, lat);
+    }
+    dg_stale = 0; dg_lead = 7;
+    base = dg_run(&d, 0x9043, 0, 0, 1, 1); lat = dg_run(&d, 0x9043, 1, 0, 1, 1);
+    CHECK(base >= 17 && lat <= 7 && d.bullets > 3, "fusil mantenido: primera bala en %d VBlanks (sin salto %d)", lat, base);
+    lat = dg_run(&d, 0x20C0, 1, 1, 1, 0);
+    CHECK(lat <= 7 && d.bullets == 1, "lanzamisiles guiado (misma función de estado): %d VBlanks", lat);
+    /* no se toca: granada (tbl & 8: su función usa el contador para otra cosa), armas sin función con contador (antiaéreo, minas, francotirador), arma ya apuntando, contador a 0 o ya pasado, sin petición */
+    static const uint32_t no[] = {0x414C, 0x2220, 0x4110, 0x9220, 0x0110};
+    for (int i = 0; i < 5; i++) {
+        dg_run(&d, no[i], 0, 1, 1, 0);
+        init_trigger(); VrFireMap map = mkmap(0, 0, 0, 0); VrFireIn in = mkin(&map); VrFireGame g; memset(&g, 0, sizeof g); g.ok = 1; VrFireOut o;
+        in.fire = 1; vrfire_frame(&g, &in, &o); CHECK(o.square, "pulsado");
+        w32(PW_BASE + 0x90C, 3); w32(PW_BASE + 0x910, 0);
+        CHECK(!vrfire_skip_raise(ram) && r32(PW_BASE + 0x90C) == 3, "tipo %04x: el contador no se toca", no[i]);
+    }
+    {
+        init_trigger(); VrFireMap map = mkmap(0, 0, 0, 0); VrFireIn in = mkin(&map); VrFireGame g; memset(&g, 0, sizeof g); g.ok = 1; VrFireOut o;
+        memset(ram, 0, sizeof ram); w32(BA_PLAYER_CTRL, PW_BASE + 0x20); w32(PW_BASE + 0x91C, 0x9042); w32(PW_BASE + 0x90C, 5); w32(PW_BASE + 0x908, 0x80054520u);
+        CHECK(!vrfire_skip_raise(ram) && r32(PW_BASE + 0x90C) == 5, "sin petición ni botón mantenido no se toca");
+        in.fire = 1; vrfire_frame(&g, &in, &o);
+        CHECK(!vrfire_skip_raise(ram) && r32(PW_BASE + 0x90C) == 5, "contador viejo (un levantado cortado: no se mueve desde antes de pulsar): no se toca");
+        w32(PW_BASE + 0x90C, 0); CHECK(!vrfire_skip_raise(ram) && r32(PW_BASE + 0x90C) == 0, "contador 0 (el ataque no ha arrancado): no se toca");
+        w32(PW_BASE + 0x90C, 8); CHECK(!vrfire_skip_raise(ram), "contador 8: ya pasa solo");
+        w32(PW_BASE + 0x90C, 3); w32(PW_BASE + 0x910, 1); CHECK(!vrfire_skip_raise(ram) && r32(PW_BASE + 0x90C) == 3, "arma ya apuntando: no se toca");
+        w32(PW_BASE + 0x910, 0); w32(PW_BASE + 0x908, 0x80056000u); CHECK(!vrfire_skip_raise(ram) && r32(PW_BASE + 0x90C) == 3, "otra función de estado (la recarga del propio juego): no se toca");
+        w32(PW_BASE + 0x908, 0x80054520u); CHECK(vrfire_skip_raise(ram) == 1 && r32(PW_BASE + 0x90C) == 8, "contador 3 con petición: salta a 8");
+        w32(BA_PLAYER_CTRL, 0); CHECK(!vrfire_skip_raise(ram) && !vrfire_skip_raise(NULL), "sin jugador / RAM NULL");
+    }
+}
 /* ---------------------------------------------------------------- robustez */
 static void t_fuzz(void) {
     srand(99);
@@ -1168,7 +1257,7 @@ static void t_hit_real(void) {
 
 int main(void) {
     t_hit_zones(); t_hit_motivo(); t_hit_camera(); t_hit_floors(); t_hit_enemy(); t_hit_aim(); t_hit_fist(); t_hit_probe(); t_hit_real();
-    t_matrix(); t_single(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_throw_origin(); t_throw_origin_body(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
+    t_matrix(); t_single(); t_skip_raise(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_throw_origin(); t_throw_origin_body(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
     printf("test_fire: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

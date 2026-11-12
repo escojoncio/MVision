@@ -6,6 +6,8 @@
 #include <time.h>
 #include "ns_fx.h"
 #include "ns_fx_export.h"
+#include <pthread.h>
+#include <stdatomic.h>
 
 /* Nombres neutros de actor: la prueba instala su propia tabla (hash -> papel) con ns_fx_set_actor_table, sin depender de la tabla de producción. */
 #define NAME_SMOKE "actor_a.bin"
@@ -197,6 +199,11 @@ static void test_polygon_and_billboard(void) {
     s = run(-1, &r); CHECK(s->buffer == 1, "selección de búfer por reproyección: %d", s->buffer);
     ns_fx_scene_destroy(s);
     w32(NSFX_A_CLOCK, 1); s = run(-1, &r); CHECK(s->buffer == 1 && s->stats.chk_bad == 0, "búfer del reloj"); ns_fx_scene_destroy(s);
+    /* el reloj de búfer del motor está en 0x800ACAB0 (GV_Clock; el mismo que leen ns_extract y ns_div): con los dos búferes igual de buenos manda él */
+    CHECK(NSFX_A_CLOCK == 0x800ACAB0u, "dirección del reloj: %08x", NSFX_A_CLOCK);
+    memcpy(RAM + (a.pk[0] & 0x1FFFFF), RAM + (a.pk[1] & 0x1FFFFF), 40); memcpy(RAM + (bb.pk[0] & 0x1FFFFF), RAM + (bb.pk[1] & 0x1FFFFF), 40); memcpy(RAM + (sp.pk[0] & 0x1FFFFF), RAM + (sp.pk[1] & 0x1FFFFF), 20);
+    w32(NSFX_A_CLOCK, 0); w32(0x800BCAB0u, 0); w32(0x800ACAB0u, 1); s = run(-1, &r); CHECK(s->buffer == 1, "reloj en 0x800ACAB0 = 1: búfer %d", s->buffer); ns_fx_scene_destroy(s);
+    w32(0x800ACAB0u, 0); s = run(-1, &r); CHECK(s->buffer == 0, "reloj en 0x800ACAB0 = 0: búfer %d", s->buffer); ns_fx_scene_destroy(s);
 }
 
 static void test_filters_and_oneside(void) {
@@ -288,7 +295,7 @@ static void test_covers_packet(void) {
     CHECK(ns_fx_covers_packet(RAM, s, a.pk[1]) == 1 && ns_fx_covers_packet(RAM, s, a.pk[1] + 40) == 1, "los mismos en el otro búfer de paquetes: cubiertos");
     CHECK(ns_fx_covers_packet(RAM, s, a.pk[0] + 4) == 0 && ns_fx_covers_packet(RAM, s, a.pk[0] + 44) == 0, "dirección que no es el inicio de un paquete: no");
     CHECK(ns_fx_covers_packet(RAM, s, so.pk[0]) == 0 && ns_fx_covers_packet(RAM, s, so.pk[1]) == 0, "primitiva de solo ordenación: no");
-    CHECK(ns_fx_covers_packet(RAM, s, inv.pk[0]) == 0 && ns_fx_covers_packet(RAM, s, mp.pk[0]) == 0, "invisible / de otro mapa: no");
+    CHECK(ns_fx_covers_packet(RAM, s, inv.pk[0]) == 1 && ns_fx_covers_packet(RAM, s, mp.pk[0]) == 1, "primitiva de mundo ya oculta / de otro mapa: el motor dejó de dibujarla, su último paquete no cae a la vía 2D");
     CHECK(ns_fx_covers_packet(RAM, s, 0x80180000u) == 0 && ns_fx_covers_packet(RAM, s, 0) == 0 && ns_fx_covers_packet(RAM, s, a.addr) == 0, "dirección fuera de los paquetes de la cola: no");
     CHECK(ns_fx_covers_packet(NULL, s, a.pk[0]) == 0 && ns_fx_covers_packet(RAM, NULL, a.pk[0]) == 0, "sin RAM o sin escena: no");
     CHECK((s->items[2].flags & NSFX_F_TPAGE_UNKNOWN) && ns_fx_covers_packet(RAM, s, sp.pk[0]) == 0, "sprite texturizado sin página de textura conocida (no se exporta): no");
@@ -901,9 +908,198 @@ static TPrim mkfree(int n, int psz, int flags) {
     w32(p.addr + 0x40, p.pk[0]); w32(p.addr + 0x44, p.pk[1]);
     return p;
 }
+/* Fondo de cielo: actor con una imagen en teselas y una primitiva de SOLO ORDENACIÓN (coordenadas de pantalla). ns_fx lo genera en el mundo como cilindro anclado al ojo con la fórmula del actor
+ * (columna <-> azimut, fila <-> pendiente / 285), con las mismas teselas; sus paquetes dejan de ser 2D. La prueba escribe los paquetes como el actor y comprueba que el punto de la imagen que el
+ * actor puso en el centro de la pantalla queda, en el cilindro, en la dirección de la mirada. */
+#define NAME_SKY "actor_sky.bin"
+/* dónde proyecta, con la cámara de la prueba, el punto del cilindro que corresponde a (columna, fila) de la imagen (la imagen se repite cada 8 teselas: vale la repetición más cercana al centro); 0 si no hay tesela */
+static int sky_px(const NsFxScene *s, double col, double row, int tw, int ntx, double *sx, double *sy) {
+    const int tc = (int)(col / tw), tr = (int)(row / tw); int found = 0;
+    for (uint32_t i = 0; i < s->n_items; i++) {
+        const NsFxItem *it = &s->items[i];
+        if (it->role != NSFX_ROLE_SKY || it->idx / ntx != tr || (it->idx % ntx) % 8 != tc % 8) continue;
+        const double fu = (col - tc * tw) / tw, fv = (row - tr * tw) / tw; double p[3], x, y, z;
+        for (int k = 0; k < 3; k++) p[k] = (1 - fu) * (1 - fv) * it->pos[0][k] + fu * (1 - fv) * it->pos[1][k] + (1 - fu) * fv * it->pos[2][k] + fu * fv * it->pos[3][k];
+        if (ref_proj(p, &x, &y, &z) && (!found || fabs(x) < fabs(*sx))) { *sx = x; *sy = y; found = 1; }
+    }
+    return found;
+}
+static _Atomic int sky_mt_stop;
+static void *sky_mt_reset(void *arg) { (void)arg; while (!sky_mt_stop) ns_fx_learn_reset(); return NULL; }
+static void test_sky(void) {
+    static NsFxActorEntry t[1];
+    t[0].hash = ns_fx_name_hash(NAME_SKY); t[0].code = NSFX_ROLE_SKY;
+    ns_fx_set_actor_table(t, 1);
+    ns_fx_learn_reset();
+    reset(); memset(LASTNODE, 0, sizeof LASTNODE);
+    enum { W = 1024, H = 128, TW = 32, NTX = W / TW, NTY = H / TW, NVX = 11, NVY = 9, HALF = 128, ELEV = 10 };
+    int t0[3] = {0, 0, 0};
+    TPrim so = mkprim(18, 0x800, NVX * NVY, 4096, t0, 0);
+    uint32_t node = actor_add(7, NAME_SKY, 0x70), img = alloc(0x14), attr = alloc(4 * 256), tmap = alloc(NTX * NTY), tex = alloc(12);
+    w32(node + 0x20, so.addr); w32(node + 0x24, img); w32(node + 0x28, tex); w16(node + 0x68, 0);
+    w16(img, W); w16(img + 2, H); w16(img + 4, TW); w16(img + 6, TW); w32(img + 0xC, attr); w32(img + 0x10, tmap);
+    w16(tex + 4, 0x0010); w16(tex + 6, 0x3D00); w8(tex + 8, 0); w8(tex + 9, 0);
+    /* 32 teselas distintas (8 x 4 en la página) repetidas a lo ancho: imagen periódica cada 8 columnas, como la del juego */
+    for (int i = 0; i < NTX * NTY; i++) { const int a = (i / NTX) * 8 + (i % NTX) % 8; w8(tmap + (uint32_t)i, a); w8(attr + 4u * (uint32_t)a, 0); w8(attr + 4u * (uint32_t)a + 1, ((i % NTX) % 8) * TW); w8(attr + 4u * (uint32_t)a + 2, (i / NTX) * TW); }
+    /* el actor: columna y fila de la imagen en el centro de la pantalla a partir de la mirada (la cámara de la prueba mira en horizontal con rumbo G_YAW) */
+    const double dir = G_YAW / 6.283185307179586;
+    const int svx = (int)((W - 1) - dir * W), svy = -ELEV;
+    int xi = svx - 160; if (xi < 0) xi += W;
+    int yi = svy + H / 2 - HALF, var = 0; if (yi < 0) { var = -yi; yi = 0; }
+    const int x0 = -(xi % TW) - 160, y0 = var - HALF - yi % TW, tx0 = xi / TW, ty0 = yi / TW;
+    for (int b = 0; b < 2; b++) for (int y = 0; y < NVY; y++) for (int x = 0; x < NVX; x++) {
+        const int ty = ty0 + y < NTY ? ty0 + y : NTY - 1, tx = (tx0 + x) % NTX;
+        uint32_t pk = so.pk[b] + 40u * (uint32_t)(y * NVX + x);
+        w16(pk, 63000); w8(pk + 4, 30); w8(pk + 5, 35); w8(pk + 6, 56); w8(pk + 7, 0x2C);
+        w16(pk + 8, x0 + x * TW); w16(pk + 10, y0 + y * TW); w8(pk + 12, (tx % 8) * TW); w8(pk + 13, ty * TW); w16(pk + 14, 0x3D00); w16(pk + 22, 0x0010);
+    }
+    queue_commit(0);
+    int r; NsFxScene *s = run(0, &r);
+    uint32_t nsky = 0; for (uint32_t i = 0; i < s->n_items; i++) nsky += s->items[i].role == NSFX_ROLE_SKY;
+    CHECK(r == 0 && nsky == NTX * (NTY + NVY) && s->n_items == nsky && s->stats.n_sortonly == 0, "cielo: elementos=%u de %d, solo_orden=%u", nsky, NTX * (NTY + NVY), s->stats.n_sortonly);
+    /* punto de la imagen en el centro de la pantalla (columna W-1-dir*W, fila H/2-ELEV) -> en el cilindro debe estar en la dirección de la mirada */
+    const double colc = (W - 1) - dir * W, rowc = H / 2.0 - ELEV;
+    const int tc = (int)(colc / TW), tr = (int)(rowc / TW);
+    const NsFxItem *it = NULL;
+    for (uint32_t i = 0; i < s->n_items; i++) if (s->items[i].idx == tr * NTX + tc) it = &s->items[i];
+    CHECK(it != NULL, "tesela del centro");
+    if (it) {
+        const double fu = (colc - tc * TW) / TW, fv = (rowc - tr * TW) / TW;
+        double p[3], d[3], l = 0;
+        for (int k = 0; k < 3; k++) { p[k] = (1 - fu) * (1 - fv) * it->pos[0][k] + fu * (1 - fv) * it->pos[1][k] + (1 - fu) * fv * it->pos[2][k] + fu * fv * it->pos[3][k]; d[k] = p[k] - G_E[k]; l += d[k] * d[k]; }
+        l = sqrt(l);
+        const double fwd[3] = {G_R[2][0], G_R[2][1], G_R[2][2]};
+        const double cosang = (d[0] * fwd[0] + d[1] * fwd[1] + d[2] * fwd[2]) / l;
+        CHECK(cosang > 0.99985 && l > 100000.0, "el centro de la imagen en la dirección de la mirada: cos=%.6f distancia=%.0f", cosang, l);
+        double sx, sy, z; const double pw[3] = {p[0], p[1], p[2]};
+        CHECK(ref_proj(pw, &sx, &sy, &z) && fabs(sx) < 1.5 && fabs(sy) < 1.5, "proyecta en el centro de la pantalla del motor: (%.2f %.2f)", sx, sy);
+        CHECK(it->uv[0][0] == (tc % 8) * TW && it->uv[0][1] == tr * TW && it->tpage == 0x0010 && it->clut == 0x3D00 && (it->flags & NSFX_F_TEXTURED) && !(it->flags & NSFX_F_SEMI) && it->shape == NSFX_SH_QUAD && it->rgb[0][2] == 56,
+              "tesela, página, paleta y color del actor: uv=(%d,%d) tpage=%04x clut=%04x", it->uv[0][0], it->uv[0][1], it->tpage, it->clut);
+        /* una tesela a la derecha en la imagen queda a la derecha en la pantalla; una fila más abajo, más abajo */
+        const NsFxItem *rt = NULL, *dn = NULL;
+        for (uint32_t i = 0; i < s->n_items; i++) { if (s->items[i].idx == tr * NTX + (tc + 1) % NTX) rt = &s->items[i]; if (s->items[i].idx == (tr + 1) * NTX + tc) dn = &s->items[i]; }
+        double a[3], b[3], sx2, sy2;
+        for (int k = 0; k < 3; k++) { a[k] = it->pos[0][k]; b[k] = rt ? rt->pos[0][k] : 0; }
+        CHECK(rt && ref_proj(a, &sx, &sy, &z) && ref_proj(b, &sx2, &sy2, &z) && sx2 > sx + 20 && fabs(sy2 - sy) < 6, "columna siguiente a la derecha: %.1f -> %.1f", sx, sx2);
+        for (int k = 0; k < 3; k++) b[k] = dn ? dn->pos[0][k] : 0;
+        CHECK(dn && ref_proj(b, &sx2, &sy2, &z) && sy2 > sy + 20, "fila siguiente hacia abajo: %.1f -> %.1f", sy, sy2);
+    }
+    /* por debajo de la imagen se repite su última fila (como el actor) */
+    for (uint32_t i = 0; i < s->n_items; i++) if (s->items[i].idx >= NTX * NTY) { CHECK(s->items[i].uv[0][1] == (NTY - 1) * TW, "fila repetida: v0=%d", s->items[i].uv[0][1]); break; }
+    /* los paquetes del fondo quedan reclamados por el nativo (ya no son 2D) y se exportan sin niebla */
+    GpuOp o[1]; GpuDrawList dl; memset(&dl, 0, sizeof dl); memset(o, 0, sizeof o); dl.ops = o; dl.nops = 1; dl.disp.w = 320; dl.disp.h = 240;
+    o[0].type = GPU_OP_POLY; o[0].nv = 4; o[0].flags = GPU_F_TEXTURED | GPU_F_QUAD; o[0].pkt_addr = 0x80000000u | ((so.pk[0] + 40u * 5u) & 0x1FFFFF);
+    uint8_t c[1]; int32_t ii[1];
+    CHECK(ns_fx_classify(RAM, s, &dl, c, NULL, ii, NULL) == 0 && c[0] == NSFX_OP_FX && ii[0] >= 0, "paquete del cielo reclamado: clase %d", c[0]);
+    CHECK(ns_fx_covers_packet(RAM, s, o[0].pkt_addr) == 1, "paquete del cielo cubierto");
+    NsEffect *ef = (NsEffect *)calloc(nsky ? nsky : 1, sizeof *ef); int tr2 = 0;
+    uint32_t ne = ns_fx_export(s, 1, ef, nsky, &tr2);
+    CHECK(ne == nsky && ef[0].role == NSFX_ROLE_SKY && (ef[0].flags & NS_EF_NOFOG) && (ef[0].flags & NS_EF_TEXTURED) && !(ef[0].flags & NS_EF_SEMI) && ef[0].kind == NS_EK_QUAD && ef[0].nv == 4, "exportado: n=%u flags=%x", ne, ef[0].flags);
+    free(ef);
+    ns_fx_scene_destroy(s);
+    /* la misma primitiva sin el actor de cielo (HUD, menús): sigue siendo de solo ordenación, 2D */
+    w32(node + 0x20, 0);
+    s = run(0, &r);
+    CHECK(r == 0 && s->n_items == 0 && s->stats.n_sortonly == 1, "sin actor: elementos=%u solo_orden=%u", s->n_items, s->stats.n_sortonly);
+    ns_fx_scene_destroy(s);
+    w32(node + 0x20, so.addr);
+    /* El cielo NUNCA desplaza a otro efecto: su primitiva va la PRIMERA de la cola y aun así sus elementos salen los últimos; si no cabe entero (escena o exportación) se queda fuera entero. */
+    {
+        TPrim a = mkprim(18, 0, 1, 4096, t0, 0);
+        int P[4][3] = {{500, 800, 2000}, {1500, 800, 2000}, {500, 100, 2600}, {1500, 100, 2600}};
+        for (int v = 0; v < 4; v++) put_pos(&a, v, P[v][0], P[v][1], P[v][2]);
+        for (int b = 0; b < 2; b++) {
+            uint32_t pk = a.pk[b]; w16(pk, 1234); w8(pk + 7, 0x2E);
+            for (int v = 0; v < 4; v++) { double w[3] = {P[v][0], P[v][1], P[v][2]}, sx, sy, sz; ref_proj(w, &sx, &sy, &sz); pk_xy(pk, 18, v, (int)lround(sx), (int)lround(sy)); pk_uv(pk, 18, v, 10 * v, 5 * v); }
+            w16(pk + 14, 0x7C10); w16(pk + 22, 0x2A | (1 << 5) | (1 << 7));
+        }
+        queue_commit(0);
+        ns_fx_learn_reset();
+        s = run(0, &r);
+        uint32_t first_sky = 0xFFFFFFFFu, last_other = 0, nother = 0; nsky = 0;
+        for (uint32_t i = 0; i < s->n_items; i++) { if (s->items[i].role == NSFX_ROLE_SKY) { nsky++; if (first_sky == 0xFFFFFFFFu) first_sky = i; } else { nother++; last_other = i; } }
+        CHECK(r == 0 && nsky == NTX * (NTY + NVY) && nother == 1 && last_other < first_sky, "el cielo al final: cielo=%u otros=%u ultimo_otro=%u primer_cielo=%u", nsky, nother, last_other, first_sky);
+        NsEffect *e2 = (NsEffect *)calloc(nsky + 8, sizeof *e2); int tr3 = 0;
+        uint32_t n2 = ns_fx_export(s, 1, e2, 8, &tr3);
+        CHECK(n2 == 1 && tr3 == 1 && e2[0].role != NSFX_ROLE_SKY, "exportación corta: el efecto sale y el cielo se queda fuera entero: n=%u truncado=%d", n2, tr3);
+        n2 = ns_fx_export(s, 1, e2, nsky + 1, &tr3);
+        CHECK(n2 == nsky + 1 && tr3 == 0 && e2[0].role != NSFX_ROLE_SKY && e2[1].role == NSFX_ROLE_SKY, "exportación completa: n=%u truncado=%d", n2, tr3);
+        free(e2);
+        ns_fx_scene_destroy(s);
+        NsFxScene *sm = ns_fx_scene_create(100); NsFxOpts o = ns_fx_opts_default(); o.buffer = 0;   /* escena sin sitio para el cielo */
+        r = ns_fx_extract(RAM, &o, sm);
+        nsky = 0; for (uint32_t i = 0; i < sm->n_items; i++) nsky += sm->items[i].role == NSFX_ROLE_SKY;
+        CHECK(r == 0 && sm->n_items == 1 && nsky == 0 && sm->stats.n_sortonly == 1 && sm->stats.n_overflow > 0, "escena corta: elementos=%u cielo=%u solo_orden=%u", sm->n_items, nsky, sm->stats.n_sortonly);
+        ns_fx_scene_destroy(sm);
+        /* Búfer del cielo con la cámara en movimiento. En la RAM del gancho (hook_ram) el actor ya escribió las teselas de ESTE fotograma en el búfer del reloj (0x800ACAB0), coherentes con la cámara de la RAM,
+         * y la GTE aún no ha generado sus paquetes (los buenos son los del otro búfer): el resto de la escena se lee del otro búfer y el cielo NO debe seguirlo. */
+        w16(node + 0x68, 4);                                             /* cielo animado: el desplazamiento se deduce del paquete */
+        for (int j = 0; j < NVX * NVY; j++) { uint32_t pk = so.pk[0] + 40u * (uint32_t)j; w16(pk + 8, (int16_t)(RAM[(pk + 8) & 0x1FFFFF] | (RAM[(pk + 9) & 0x1FFFFF] << 8)) - 9); }   /* búfer 0: teselas del fotograma anterior (otra mirada: 9 px) */
+        w16(a.pk[1], 99); pk_xy(a.pk[1], 18, 0, 1, 1); pk_xy(a.pk[1], 18, 1, 2, 90); pk_xy(a.pk[1], 18, 2, 80, 3); pk_xy(a.pk[1], 18, 3, -70, -60);   /* búfer 1: el polígono GTE aún no está generado */
+        w32(0x800ACAB0u, 1);
+        ns_fx_learn_reset();
+        NsFxScene *sh = ns_fx_scene_create(0); o = ns_fx_opts_default(); o.hook_ram = 1;
+        r = ns_fx_extract(RAM, &o, sh);
+        double sx = 99, sy = 99;
+        CHECK(r == 0 && sh->buffer == 0, "la escena se lee del búfer que reproyecta: %d", sh->buffer);
+        CHECK(sky_px(sh, (W - 1) - dir * W, H / 2.0 - ELEV, TW, NTX, &sx, &sy) && fabs(sx) < 1.5 && fabs(sy) < 1.5, "cielo del búfer del reloj en el gancho: centro en (%.2f %.2f)", sx, sy);
+        /* RAM de fin de fotograma (volcados con lista): el reloj ya cambió y el cielo coherente con la cámara es el del OTRO búfer */
+        w32(0x800ACAB0u, 0);
+        o.hook_ram = 0; r = ns_fx_extract(RAM, &o, sh); sx = sy = 99;
+        CHECK(r == 0 && sky_px(sh, (W - 1) - dir * W, H / 2.0 - ELEV, TW, NTX, &sx, &sy) && fabs(sx) < 1.5 && fabs(sy) < 1.5, "cielo del búfer anterior al reloj en fin de fotograma: centro en (%.2f %.2f)", sx, sy);
+        /* dos hilos: uno extrae y otro borra lo aprendido: el cielo no puede desaparecer a mitad de una extracción */
+        pthread_t th; sky_mt_stop = 0; int lost = 0;
+        if (pthread_create(&th, NULL, sky_mt_reset, NULL) == 0) {
+            for (int k = 0; k < 4000 && !lost; k++) { ns_fx_extract(RAM, &o, sh); nsky = 0; for (uint32_t i = 0; i < sh->n_items; i++) nsky += sh->items[i].role == NSFX_ROLE_SKY; lost = nsky != NTX * (NTY + NVY); }
+            sky_mt_stop = 1; pthread_join(th, NULL);
+        }
+        CHECK(!lost, "extracción y borrado concurrentes: cielo=%u", nsky);
+        ns_fx_scene_destroy(sh);
+        w32(0x800ACAB0u, 0);
+    }
+    install_test_table(); ns_fx_learn_reset();
+}
+/* Clase 23 SIN la bandera de paquetes propios: el motor la pasa por la regla general (posiciones de mundo en `pos`, `verts` por paquete en voffset + k*vstep). Disposición medida en los volcados
+ * (chispas): 20 B = etiqueta + comando de modo de dibujo + línea plana semitransparente de 2 vértices, voffset 12, vstep 4. Antes se leía el comando de modo como si fuera el de dibujo y no salía
+ * ningún elemento: las chispas se quedaban en la vía 2D. */
+static void test_free_world(void) {
+    reset(); memset(LASTNODE, 0, sizeof LASTNODE);
+    int t0[3] = {0, 0, 0};
+    TPrim p = mkprim(23, 0, 2, 4096, t0, 0);
+    p.pk[0] = alloc(40); p.pk[1] = alloc(40);
+    w16(p.addr + 0x30, 20); w16(p.addr + 0x32, 2); w16(p.addr + 0x34, 12); w16(p.addr + 0x36, 4);
+    w32(p.addr + 0x40, p.pk[0]); w32(p.addr + 0x44, p.pk[1]);
+    const double W[4][3] = {{900, 400, -1500}, {1000, 480, -1400}, {1200, 300, -1000}, {1250, 350, -900}};
+    for (int i = 0; i < 4; i++) put_pos(&p, i, (int)W[i][0], (int)W[i][1], (int)W[i][2]);
+    for (int b = 0; b < 2; b++) for (int j = 0; j < 2; j++) {
+        uint32_t pk = p.pk[b] + 20u * (uint32_t)j;
+        double sx, sy, z; ref_proj(W[2 * j], &sx, &sy, &z);
+        w16(pk, (int)z); w32(pk + 4, 0xE1000220u);                       /* modo de dibujo: mezcla 1 (suma) */
+        w8(pk + 8, 255); w8(pk + 9, 127); w8(pk + 10, 127); w8(pk + 11, 0x42);   /* línea plana semitransparente */
+        for (int e = 0; e < 2; e++) { ref_proj(W[2 * j + e], &sx, &sy, &z); w16(pk + 12 + 4u * (uint32_t)e, (int)lround(sx)); w16(pk + 14 + 4u * (uint32_t)e, (int)lround(sy)); }
+    }
+    queue_commit(0);
+    int r; NsFxScene *s = run(0, &r);
+    CHECK(r == 0 && s->n_items == 2 && s->stats.n_bad == 0, "clase 23 de mundo: items=%u malas=%u", s->n_items, s->stats.n_bad);
+    for (uint32_t k = 0; k < s->n_items && k < 2; k++) {
+        const NsFxItem *it = &s->items[k];
+        CHECK(it->shape == NSFX_SH_RIBBON && it->kind == 23 && it->idx == k && (it->flags & NSFX_F_SEMI) && !(it->flags & NSFX_F_ABR_UNKNOWN) && it->abr == 1, "chispa %u: forma=%d flags=%x abr=%d", k, it->shape, it->flags, it->abr);
+        for (int e = 0; e < 2; e++) CHECK(NEAR(it->pos[e][0], W[2 * k + e][0], 0.5) && NEAR(it->pos[e][1], W[2 * k + e][1], 0.5) && NEAR(it->pos[e][2], W[2 * k + e][2], 0.5), "chispa %u extremo %d en su posición de mundo (%.0f %.0f %.0f)", k, e, it->pos[e][0], it->pos[e][1], it->pos[e][2]);
+        CHECK(it->rgb[0][0] == 255 && it->rgb[0][1] == 127 && it->pcls == 0 && it->pnv == 2, "color y forma de paquete de la chispa");
+    }
+    /* la lista de la GPU: la línea del paquete se reclama (por dirección) y ya no va a la vía 2D; se exporta al renderer */
+    GpuOp o[1]; GpuDrawList dl; memset(&dl, 0, sizeof dl); memset(o, 0, sizeof o); dl.ops = o; dl.nops = 1; dl.disp.w = 320; dl.disp.h = 240;
+    o[0].type = GPU_OP_LINE; o[0].nv = 2; o[0].flags = GPU_F_SEMI; o[0].abr = 1; o[0].pkt_addr = 0x80000000u | ((p.pk[0] + 20) & 0x1FFFFF);
+    uint8_t c[1]; int32_t it1[1];
+    CHECK(ns_fx_classify(RAM, s, &dl, c, NULL, it1, NULL) == 0 && c[0] == NSFX_OP_FX && it1[0] == 1, "la chispa se reclama: clase %d elemento %d", c[0], it1[0]);
+    CHECK(ns_fx_covers_packet(RAM, s, 0x80000000u | (p.pk[0] & 0x1FFFFF)) == 1, "paquete de la chispa cubierto por el nativo");
+    NsEffect ef[4]; int tr = 0;
+    CHECK(ns_fx_export(s, 1, ef, 4, &tr) == 2 && (ef[0].flags & NS_EF_LINE) && ef[0].abr == 1, "chispas exportadas como cintas de mundo");
+    ns_fx_scene_destroy(s);
+}
 static void test_free_kind(void) {
     reset(); memset(LASTNODE, 0, sizeof LASTNODE);
-    TPrim f = mkfree(6, 52, 0);
+    TPrim f = mkfree(6, 52, 0x2000);   /* paquetes propios ya proyectados (bandera de paquetes libres): sin ella la clase 23 pasa por la regla general con posiciones de mundo (ver test_free_world) */
     const int SZ = 1500, PS = 52;
     static const int xs[4] = {-40, 30, -35, 40}, ys[4] = {-30, -28, 25, 33};
     for (int b = 0; b < 2; b++) {
@@ -961,7 +1157,7 @@ static void test_free_kind(void) {
     ns_fx_scene_destroy(s);
     /* comando que no dibuja (ni 0): sin elemento; polilínea con terminador: sin elemento; paquete sin profundidad: no emitido */
     reset(); memset(LASTNODE, 0, sizeof LASTNODE);
-    TPrim g = mkfree(3, 52, 0);
+    TPrim g = mkfree(3, 52, 0x2000);
     for (int b = 0; b < 2; b++) {
         w16(g.pk[b], 1500); w8(g.pk[b] + 7, 0x00);
         w16(g.pk[b] + 52, 1500); w8(g.pk[b] + 52 + 7, 0x4A);
@@ -1162,6 +1358,8 @@ int main(void) {
     test_xform();
     test_stays_2d();
     test_sortonly_wins();
+    test_free_world();
+    test_sky();
     test_gpu_mask();
     test_fuzz();
     test_gas_limits();

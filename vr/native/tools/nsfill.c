@@ -57,7 +57,7 @@ int main(int argc, char **argv) {
     ro.keep_native = 1;
     ro.list_vr = (int)ns_dump_meta_num(dl, "rec_active", 0) != 0;
     NsFillCfg cfg;
-    ns_fill_cfg_default(&cfg);
+    ns_fill_cfg_default(&cfg); cfg.only_absent = 1;   /* como la app */
     if (getenv("NSFILL_POSE")) cfg.pose_fill = atoi(getenv("NSFILL_POSE"));
     if (getenv("NSFILL_NOCALIB")) cfg.calib = 0;   /* sin calibrar la cámara de la lista contra el nativo (desfase RAM/lista) */
     FILE *dbg = getenv("NSFILL_TRI") ? fopen(getenv("NSFILL_TRI"), "w") : NULL;

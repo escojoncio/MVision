@@ -311,6 +311,35 @@ static void t_display(void) {
     for (int i = 0; i < 9; i++) ln[i] = (uint8_t)(10 + i);
     gpu_present_rgba(&d, NULL, disp_img, 1024 * 512);
     EQ(disp_img[0], 10); EQ(disp_img[1], 11); EQ(disp_img[2], 12); EQ(disp_img[4], 13); EQ(disp_img[8 + 2], 18);
+    /* ventana visible fija (gpu_display_window): mismo tamaño 4:3 en todos los modos; PAL 628..3188 x 30..298 */
+    {
+        GpuWindow w;
+        gpu_gp1(0x03000000);
+        put_disp(&c, 320, 256, 0, 16, 256, 256, 0); gpu_get_display(&d);       /* juego: 0x270.. y 35..291 */
+        gpu_display_window(&d, 1, &w); EQ(w.w, 320); EQ(w.h, 268); EQ(w.ox, 0); EQ(w.oy, 5);
+        gpu_display_window(&d, 0, &w); EQ(w.w, 320); EQ(w.h, 268); EQ(w.ox, 0); EQ(w.oy, 5);
+        put_disp(&c, 384, 256, 26, 16, 212, 256, 0); gpu_get_display(&d);      /* códec: marco de 384 desde 0x230, zona activa desde la columna 26 */
+        gpu_display_window(&d, 1, &w); EQ(w.w, 365); EQ(w.h, 268); EQ(w.ox, 16 - 26); EQ(w.oy, 5);
+        gpu_display_window(&d, 0, &w); EQ(w.ox, 16);                            /* la zona nominal (panel) empieza en el rango */
+        for (int y = 0; y < 256; y++) for (int x = 0; x < 400; x++) gpu_vram[y][x] = (uint16_t)(0x1F);
+        gpu_vram[0][0] = 0x03E0; gpu_vram[255][317] = 0x7C00;
+        EQ(gpu_present_window(&d, NULL, disp_img, 1024 * 512, &w), 365 * 268);
+        #define PIX(x, y) (disp_img + 4 * ((y) * 365 + (x)))
+        EQ(PIX(16, 4)[0], 0); EQ(PIX(16, 4)[1], 0); EQ(PIX(16, 4)[3], 255);     /* borde superior negro */
+        EQ(PIX(16, 5)[1], 255); EQ(PIX(15, 5)[0], 0); EQ(PIX(17, 5)[0], 255);   /* VRAM (0,0) en (16,5); a su izquierda borde */
+        EQ(PIX(16 + 317, 5 + 255)[2], 255); EQ(PIX(16 + 318, 5 + 255)[2], 0);   /* última columna y fila visibles */
+        EQ(PIX(100, 5 + 256)[0], 0); EQ(PIX(364, 267)[3], 255);                 /* borde inferior */
+        #undef PIX
+        EQ(gpu_present_window(&d, NULL, disp_img, 100, &w), 0);                 /* no cabe */
+        put_disp(&c, 256, 240, 0, 0, 0, 0, 0); gpu_get_display(&d);
+        gpu_display_window(&d, 1, &w); EQ(w.w, 256); EQ(w.h, 268);
+        put_disp(&c, 640, 256, 0, 16, 256, 256, 0); gpu_get_display(&d);
+        gpu_display_window(&d, 1, &w); EQ(w.w, 640); EQ(w.h, 268);
+        d.pal = 0; d.mode = 0x01; d.interlace = 0; d.hx1 = 0x260; d.vy1 = 16; d.pad_l = 0;   /* NTSC 320: 608 - 8 .. 3168 x 24..248; el juego empieza en 0x260 y en la línea 16 */
+        gpu_display_window(&d, 1, &w); EQ(w.w, 321); EQ(w.h, 224); EQ(w.ox, 1); EQ(w.oy, -8);
+        d.mode = 0x25; d.interlace = 1;                                           /* 480i: líneas dobles */
+        gpu_display_window(&d, 1, &w); EQ(w.h, 448); EQ(w.oy, -16);
+    }
     /* tras gpu_reset el rango por defecto da 256 columnas */
     gpu_reset(); gpu_get_display(&d); EQ(d.w, 256); EQ(d.aw, 256);
     /* screen.w = 255 (vídeos del juego): 2550 ciclos / 8 = 318,75 -> 319 columnas visibles de 320, la última a medias recortada */

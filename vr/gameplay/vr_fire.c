@@ -13,6 +13,9 @@
 /* ---- direcciones/offsets del juego (edición europea; documentados en vr_fire_names.json) ---- */
 #define PW_FROM_CTRL    0x20u        /* bloque del jugador = puntero de control - 0x20 */
 #define PW_WEAPON_ACTOR 0x904u       /* actor del arma equipada (0 = ninguna) */
+#define PW_STATE_FN     0x908u       /* función de estado del arma (decompilación: field_90C_pWeaponFn) */
+#define FN_RAISE        0x80054520u  /* la del levantado en la edición europea (decompilación: sna_gun_800540D0) */
+#define PW_FN_TIME      0x90Cu       /* ticks que lleva la función de estado del arma (decompilación: field_910, 4 B antes del gatillo); ver vrfire_skip_raise */
 #define PW_TRIGGER      0x910u       /* banderas que lee el actor del arma (bit 0: levantada/lista, bit 1: disparar) */
 #define PW_TYPE_TBL     0x91Cu       /* banderas del tipo de arma (bit 0: dispara mientras se mantiene) */
 #define PW_WEAPON_IDX   0x918u       /* índice de arma del jugador (id+1 en la tabla de creadores; -1 ninguna) */
@@ -140,6 +143,8 @@ static struct {
     int infl[NQ], ninfl;                 /* liberaciones que aún no han producido proyectil (edad) */
     int infl_life;                       /* vida de esas liberaciones (INFL_LIFE; más si hay una petición de vida larga en curso) */
     int phase, tphase;
+    int32_t fn_t0;                       /* contador de la función de estado del arma en el último VBlank sin el botón pulsado por esta capa (vrfire_skip_raise) */
+    int skip;                            /* vrfire_skip_raise saltó el levantado en esta pulsación: se suelta sin esperar a «apuntando» */
     int last_raise;                      /* el último VBlank activo trataba el arma como «mantener levantada» (granada, visor): si se pierde el seguimiento con el botón mantenido, lo que suelte el juego es un desarmado */
     int disarm_t;                        /* VBlanks restantes en que un proyectil sin petición se suprime */
     int auto_tail;                       /* VBlanks tras soltar el gatillo en que aún salen balas del juego con la pose viva */
@@ -202,7 +207,7 @@ const VrFireMat *vrfire_last_subst(void) { return &S.last; }
 static void pop_req(void) { if (S.nq > 0) { memmove(&S.q[0], &S.q[1], sizeof(Req) * (size_t)(S.nq - 1)); S.nq--; } }
 static void pop_infl(void) { if (S.ninfl > 0) { memmove(&S.infl[0], &S.infl[1], sizeof(int) * (size_t)(S.ninfl - 1)); S.ninfl--; } }
 
-static void reset_machine(void) { S.nq = 0; S.ninfl = 0; S.infl_life = INFL_LIFE; S.phase = P_IDLE; S.tphase = 0; S.auto_live = 0; }
+static void reset_machine(void) { S.nq = 0; S.ninfl = 0; S.infl_life = INFL_LIFE; S.phase = P_IDLE; S.tphase = 0; S.auto_live = 0; S.skip = 0; }
 
 void vrfire_frame(const VrFireGame *g, const VrFireIn *in, VrFireOut *out) {
     out->square = 0; out->engaged = 0;
@@ -254,8 +259,8 @@ void vrfire_frame(const VrFireGame *g, const VrFireIn *in, VrFireOut *out) {
             else if (S.nq > 0 && !autoh && S.ninfl > 0 && S.tphase >= S.cfg.press_vbl) { /* semi sobre arma de mantener: ya salió una */
                 S.phase = P_IDLE; S.tphase = 0; S.st.releases++; out->square = 0;
             }
-        } else if (unserved > 0 && S.tphase >= S.cfg.press_vbl && (g->armed || S.tphase >= S.cfg.arm_timeout)) {
-            if (!g->armed) S.st.arm_timeouts++;
+        } else if (unserved > 0 && S.tphase >= S.cfg.press_vbl && (g->armed || S.skip || S.tphase >= S.cfg.arm_timeout)) {
+            if (!g->armed && !S.skip) S.st.arm_timeouts++;
             S.phase = P_REL; S.tphase = 0; S.st.releases++; out->square = 0;
             if (S.ninfl < NQ) S.infl[S.ninfl++] = 0;
         } else if (S.nq == 0 && !want && S.tphase >= S.cfg.press_vbl) {
@@ -272,7 +277,22 @@ void vrfire_frame(const VrFireGame *g, const VrFireIn *in, VrFireOut *out) {
         }
         break;
     }
+    if (S.phase != P_HOLD) S.skip = 0;
     out->engaged = 1;
+}
+int vrfire_skip_raise(uint8_t *ram) {
+    if (!ram) return 0;
+    uint32_t pc = rd_u32(ram, BA_PLAYER_CTRL);
+    if (!ptr_ok(pc, 0x20 + 0x9C0)) return 0;
+    uint32_t w = pc - PW_FROM_CTRL;
+    int32_t t = rd_s32(ram, w + PW_FN_TIME);
+    if (S.phase != P_HOLD) { S.fn_t0 = t; return 0; }
+    if (!(S.nq > 0 || S.auto_live)) return 0;
+    if (rd_u32(ram, w + PW_STATE_FN) != FN_RAISE || (rd_u32(ram, w + PW_TYPE_TBL) & 0x48u) != 0x40u || (rd_u32(ram, w + PW_TRIGGER) & 1u)) return 0;   /* 0x40: función de estado con contador; 0x08: granadas (su contador es otra cosa) */
+    if (t == S.fn_t0 || t < 1 || t >= 8) return 0;       /* sin moverse desde antes de pulsar: valor viejo, el ataque no ha arrancado (soltar ya dispararía dos veces); 0: su primer tick prepara la animación y la cola de soltar */
+    wr_s32(ram, w + PW_FN_TIME, 8);
+    S.skip = 1;
+    return 1;
 }
 
 /* ================================================== sustitutos ================================================== */

@@ -31,7 +31,7 @@
 
 /* Direcciones de la RAM del motor (ver docs/efectos_nativos.md §1). */
 #define NSFX_A_CHANL        0x800B2B7Cu  /* canal 3D principal (cola de objetos y primitivas, matrices de cámara) */
-#define NSFX_A_CLOCK        0x800BCAB0u  /* contador de fotogramas: bit 0 = búfer de paquetes que se está generando */
+#define NSFX_A_CLOCK        0x800ACAB0u  /* reloj de búfer del motor (GV_Clock, el mismo de ns_extract y ns_div): bit 0 = búfer de paquetes que se está generando */
 #define NSFX_A_MAP          0x800ACAF8u  /* máscara de mapa actual (grupos visibles) */
 #define NSFX_A_STATUS       0x800AC570u  /* banderas globales de estado (bits 0..3: ver NsFxScreen) */
 #define NSFX_A_ACTOR_LISTS  0x800ADDA8u  /* 9 listas de actores x 68 B */
@@ -72,6 +72,7 @@ enum {
     NSFX_ROLE_PARTICLE,
     NSFX_ROLE_SPRITE_ANIM,
     NSFX_ROLE_VIEW_OVERLAY,  /* sprite pegado a la cámara */
+    NSFX_ROLE_SKY,           /* panorama de cielo (actor de fondo con primitiva de solo ordenación): cilindro de mundo anclado al ojo */
     NSFX_ROLE_COUNT
 };
 /* Códigos de actor que no son papel de primitiva (tabla de actores; ver NsFxActorEntry). */
@@ -231,6 +232,9 @@ typedef struct {
     int include_viewlocked;   /* 1 (def.) */
     int include_engine_culled;/* 1 (def.) */
     int check_reproj;     /* 1 (def.): calcula stats.chk_* */
+    int hook_ram;         /* De qué búfer se leen las teselas del CIELO (las escribe su actor, no la GTE; medido en 76 volcados). 1: la RAM es la del gancho de la etapa «pantalla» (la app): el actor ya escribió
+                           * las de este fotograma en el búfer del reloj, con la cámara que hay en la RAM. 0 (def.): RAM de fin de fotograma (volcados con lista): el reloj ya cambió y esas teselas están en el otro
+                           * búfer. No depende del búfer que se elija por reproyección para el resto (`buffer` forzado: ese). */
 } NsFxOpts;
 
 NsFxOpts ns_fx_opts_default(void);
@@ -250,7 +254,8 @@ int ns_fx_extract(const uint8_t *ram, const NsFxOpts *opt, NsFxScene *out);
  * primitiva; `sc` = escena extraída de ESTA `ram`. Devuelve 1 solo si el paquete es de una primitiva de la cola del canal 3D y `sc` tiene un elemento de ese paquete que se exporta al
  * renderer (ns_fx_export). 0 en todo lo demás: paquetes que no son de la cola (HUD, efectos de pantalla con paquetes propios), primitivas que ns_fx no extrae (solo ordenación, invisibles,
  * de otro mapa, incoherentes, ya retiradas) y sprites texturizados sin página de textura conocida. Un elemento que el motor ya no emite en esta RAM (NSFX_F_ENGINE_CULLED, tenga tamaño o no)
- * cuenta: la lista de la GPU es de un fotograma anterior y el motor ya dejó de dibujarlo. */
+ * cuenta: la lista de la GPU es de un fotograma anterior y el motor ya dejó de dibujarlo. Por lo mismo cuenta el paquete de una primitiva de mundo (ni solo ordenación ni pegada a la cámara) que
+ * en esta RAM ya está oculta o es de otro mapa. El fondo de cielo (solo ordenación) cuenta cuando ns_fx lo genera en el mundo (NSFX_ROLE_SKY). */
 int ns_fx_covers_packet(const uint8_t *ram, const NsFxScene *sc, uint32_t pkt_addr);
 
 /* ---- correspondencia mundo del motor -> VR (misma que vr_scene) ---- */
@@ -314,7 +319,8 @@ uint32_t ns_fx_gpu_mask(const uint8_t *cls, const uint8_t *confirmed, uint32_t n
 /* APRENDIZAJE entre fotogramas (global, sin bloqueos: seguro entre hilos). Los sprites y las primitivas planas semitransparentes no traen en su paquete la página de
  * textura ni el modo de mezcla (los fija un comando de modo de dibujo aparte): sin ellos el renderer los dibujaría con la página 0. Tras clasificar una lista, ns_fx_learn
  * guarda por primitiva lo que la GPU usó para los elementos casados con esos datos desconocidos; ns_fx_extract lo aplica a los siguientes fotogramas
- * (NSFX_F_LEARNED). Devuelve cuántos elementos aprendió. */
+ * (NSFX_F_LEARNED). Devuelve cuántos elementos aprendió. El resto de lo aprendido (tamaños, sombra, cielo, por papel) va bajo un cerrojo interno: ns_fx_extract, ns_fx_learn y
+ * ns_fx_learn_reset pueden llamarse desde hilos distintos (cada uno con su NsFxScene). */
 uint32_t ns_fx_learn(const NsFxScene *sc, const GpuDrawList *dl, const int32_t *item);
 void ns_fx_learn_reset(void);
 

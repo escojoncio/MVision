@@ -85,6 +85,28 @@ int main(void) {
     CHECK(gp.raise == 30000.0f, "un sesgo propio mayor se conserva");
     ns_gpu_make_piece(&sc, &sc.inst[2], &sc.piece[PC(2)], 0, 0, 0, -1, 0, &gp);
     CHECK(gp.raise == 0.0f, "pieza sin adelanto: raise 0");
+    CHECK(!(gp.flags & NSG_PF_NOSPLIT), "objeto sin GBOUND: sus caras se pueden partir");
+    sc.inst[2].flags |= NS_IF_GBOUND; ns_gpu_make_piece(&sc, &sc.inst[2], &sc.piece[PC(2)], 0, 0, 0, -1, 0, &gp); sc.inst[2].flags &= (uint16_t)~NS_IF_GBOUND;
+    CHECK((gp.flags & NSG_PF_NOSPLIT) != 0, "objeto GBOUND: NSG_PF_NOSPLIT");
+    {   /* escenario de un grupo de mapa no activo: se dibuja, retrasado NS_GPU_OFFGROUP_BACK para que el mapa activo gane donde comparten caras; el del grupo activo (o sin grupo) no se toca */
+        const uint16_t f0 = sc.inst[0].flags, z0 = sc.inst[0].zone_mask; const uint32_t g0 = sc.group_mask;
+        sc.inst[0].flags |= NS_IF_STATIC; sc.group_mask = 1;
+        sc.inst[0].zone_mask = 4; ns_gpu_make_piece(&sc, &sc.inst[0], &sc.piece[0], 0, -1000, 0, -1, 0, &gp);
+        CHECK(gp.raise == -1000.0f - NS_GPU_OFFGROUP_BACK && (gp.flags & NSG_PF_DRAW), "mapa de otro grupo: raise %.0f", gp.raise);
+        sc.inst[0].zone_mask = 1; ns_gpu_make_piece(&sc, &sc.inst[0], &sc.piece[0], 0, -1000, 0, -1, 0, &gp);
+        CHECK(gp.raise == -1000.0f, "mapa del grupo activo: raise %.0f", gp.raise);
+        sc.inst[0].zone_mask = 0; ns_gpu_make_piece(&sc, &sc.inst[0], &sc.piece[0], 0, -1000, 0, -1, 0, &gp);
+        CHECK(gp.raise == -1000.0f, "sin grupo: raise %.0f", gp.raise);
+        sc.inst[0].flags = f0; sc.inst[0].zone_mask = z0; sc.group_mask = g0;
+    }
+    {   /* el suelo de un grupo de mapa NO activo no es suelo para los pies (el extractor trae el escenario de todos los grupos) */
+        sc.group_mask = 1; sc.inst[0].zone_mask = 4;
+        CHECK(ns_sink_apply(&sc, st, &ss) == 0 && ss.floor_tris == 0, "suelo de otro grupo: sin adelanto (suelos %u)", ss.floor_tris);
+        sc.inst[0].zone_mask = 1;
+        CHECK(ns_sink_apply(&sc, st, &ss) == 1 && ss.floor_tris >= 2, "suelo del grupo activo: adelanto (suelos %u)", ss.floor_tris);
+        sc.inst[0].zone_mask = 0; sc.group_mask = 0;
+        ns_sink_apply(&sc, st, &ss);
+    }
     /* hundida más de NS_SINK_MAX (aunque dentro del sesgo del motor): es otra planta, no un pie */
     sc.piece[PC(1)].world.m[7] = 900 - 400;      /* suela a 0,6 m bajo la cara: toda la bota por debajo de 0,4 m */
     ns_sink_apply(&sc, st, NULL);

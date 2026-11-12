@@ -298,7 +298,7 @@ void gun_update(GunState *g, const GunCfg *c, const WInput *in, WReloadMode rm,
             break;
         }
         /* bala fuera */
-        WPose pm = wpose_mul(wo, d->points[WP_MUZZLE]);
+        WPose pm = wpose_mul(wo, g->sight_on ? g->sight : d->points[WP_MUZZLE]);
         if (aim) pm.q = wquat_normalize(wquat_mul(pm.q, *aim));
         if (br && br->fire) br->fire(wid, pm);
         SND(WS_FIRE);

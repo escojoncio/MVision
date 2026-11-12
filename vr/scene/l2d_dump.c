@@ -170,14 +170,14 @@ static int build_scene(const NsDump *d, const GpuDrawList *l, VrScene *sc) {
     return rc;
 }
 
-/* capa RGBA no premultiplicada (w x h) sobre un fondo gris a cuadros (casillas de 8 px de la capa), replicada k x k: RGBA opaco en `out` (w*k x h*k). */
+/* capa RGBA premultiplicada (plano de color de vl2d, w x h) sobre un fondo gris a cuadros (casillas de 8 px de la capa), replicada k x k: RGBA opaco en `out` (w*k x h*k). */
 static void on_checker(const uint8_t *rgba, int w, int h, int k, uint8_t *out, int ow) {
     for (int y = 0; y < h * k; y++)
         for (int x = 0; x < w * k; x++) {
             const uint8_t *p = &rgba[((size_t)(y / k) * w + (size_t)(x / k)) * 4];
             int bg = (((x / k) / 8 + (y / k) / 8) & 1) ? 0xB4 : 0x78, a = p[3];
             uint8_t *q = &out[((size_t)y * ow + x) * 4];
-            for (int c = 0; c < 3; c++) q[c] = (uint8_t)((p[c] * a + bg * (255 - a) + 127) / 255);
+            for (int c = 0; c < 3; c++) { int v = p[c] + (bg * (255 - a) + 127) / 255; q[c] = (uint8_t)(v > 255 ? 255 : v); }
             q[3] = 255;
         }
 }
@@ -188,7 +188,7 @@ static const char *base_name(const char *p) {
     return b;
 }
 
-/* Una capa (modo vl2d_run `mode`) del volcado: copia RGBA (w x h) en *out (a liberar). 0 = sin capa. */
+/* Una capa (modo vl2d_run `mode`) del volcado: copia de sus tres planos RGBA (color premultiplicado, resta, tope; w x h cada uno, seguidos) en *out (a liberar). 0 = sin capa. */
 static int layer_of(const GpuDrawList *l, const VrScene *sc, int mode, uint8_t **out, int *w, int *h, VrL2Info *info) {
     GpuDrawList lv = *l;
     if (mode == VL_PANEL_VERIFIED) lv.vram_end = l->vram_start;   /* la VRAM del volcado es la del final de la lista */
@@ -197,49 +197,41 @@ static int layer_of(const GpuDrawList *l, const VrScene *sc, int mode, uint8_t *
     int ok = vl2d_run(L, &lv, sc, mode);
     if (ok) {
         const uint8_t *rg = vl2d_rgba(L, w, h);
-        *out = (uint8_t *)malloc((size_t)*w * *h * 4);
-        if (*out) memcpy(*out, rg, (size_t)*w * *h * 4); else ok = 0;
+        const size_t n = (size_t)*w * *h * 4;
+        *out = (uint8_t *)malloc(n * 3);
+        if (*out) { memcpy(*out, rg, n); memcpy(*out + n, vl2d_sub(L), n); memcpy(*out + 2 * n, vl2d_gain(L), n); } else ok = 0;
         if (info) vl2d_info(L, info);
     }
     vl2d_free(L);
     return ok;
 }
+static int touched(const uint8_t *lay, size_t n, size_t i);
 static void layer_stats(const char *name, const uint8_t *rg, int w, int h) {
     long op = 0, semi = 0, tr = 0;
-    for (long i = 0; i < (long)w * h; i++) { int a = rg[i * 4 + 3]; if (a == 255) op++; else if (a) semi++; else tr++; }
+    for (long i = 0; i < (long)w * h; i++) { int a = rg[i * 4 + 3]; if (a == 255) op++; else if (touched(rg, (size_t)w * h, (size_t)i)) semi++; else tr++; }
     printf("  %-22s %dx%d: opacos %ld (%.1f%%), semitransparentes %ld, transparentes %ld\n", name, w, h, op, 100.0 * op / ((double)w * h), semi, tr);
 }
 
-/* ---- comprobación de la composición del panel: capa RGBA (no premultiplicada) sobre el MUNDO SIN 2D, frente a frame.png (la verdad del hardware) ----
- * El mundo sin 2D es el fotograma completo (vl2d_run full=1) de la lista sin las primitivas que van al panel (op_dest == 2): exactamente lo que hay debajo del panel. La fórmula es la del panel del visor (XRShaders.metal
- * xr_panel_color + mezcla one / oneMinusSrcAlpha): color premultiplicado rgb * a sobre el fondo; `linear` = en espacio lineal (destino sRGB del visor: la capa y el mundo se decodifican, se mezclan y se codifican) o en gamma (como la
- * aritmética de la PS1). */
-static double s2l(double c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
-static double l2s(double c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
-static void compose_panel(const uint8_t *lay, const uint8_t *world, int w, int h, int linear, uint8_t *out) {
-    for (long i = 0; i < (long)w * h; i++) {
-        double a = lay[i * 4 + 3] / 255.0;
-        for (int k = 0; k < 3; k++) {
-            double c = lay[i * 4 + k] / 255.0, b = world[i * 4 + k] / 255.0, v;
-            if (linear) v = l2s(s2l(c) * a + (1.0 - a) * s2l(b)); else v = c * a + (1.0 - a) * b;
-            if (lay[i * 4 + 3] < 5) v = b;   /* alfa < 0,02 -> discard_fragment */
-            out[i * 4 + k] = (uint8_t)(v <= 0 ? 0 : v >= 1 ? 255 : (int)(v * 255.0 + 0.5));
-        }
-        out[i * 4 + 3] = 255;
-    }
+/* ---- comprobación de la composición del panel: los tres planos de la capa sobre el MUNDO SIN 2D, frente a frame.png (la verdad del hardware) ----
+ * El mundo sin 2D es el fotograma completo (vl2d_run full=1) de la lista sin las primitivas que van al panel (op_dest == 2): exactamente lo que hay debajo del panel. La fórmula es la del panel del visor
+ * (vl2d_compose8 = XRShaders.metal xr_panel_l2d): c + clamp((1 - alfa) * mundo - d, 0, g) en el espacio gamma del original. */
+static int touched(const uint8_t *lay, size_t n, size_t i) { const uint8_t *a = &lay[i * 4], *sb = &lay[(n + i) * 4]; return a[3] || a[0] || a[1] || a[2] || sb[0] || sb[1] || sb[2]; }
+static void compose_panel(const uint8_t *lay, const uint8_t *world, int w, int h, uint8_t *out) {
+    const size_t n = (size_t)w * h;
+    for (size_t i = 0; i < n; i++) { vl2d_compose8(&lay[i * 4], &lay[(n + i) * 4], &lay[(2 * n + i) * 4], &world[i * 4], &out[i * 4]); out[i * 4 + 3] = 255; }
 }
-/* diferencia con la verdad: media por canal (0..255) y % de píxeles distintos > 8/255 en un conjunto (sel: 0 todos, 1 con alfa en 1..254 = semitransparentes, 2 con alfa > 0) */
+/* diferencia con la verdad en un conjunto (sel: 0 todos, 1 tocados por el panel y no opacos, 2 tocados por el panel): media por canal (0..255), mayor diferencia de un canal y % de píxeles distintos > 8/255 */
 static int g_zone[4] = {0, 0, 1 << 20, 1 << 20};   /* x0,y0,x1,y1 inclusivo: L2D_ZONA=x0,y0,x1,y1 limita las estadísticas de composición (p. ej. los créditos) */
 static void diff_stats(const char *name, const uint8_t *lay, const uint8_t *img, const uint8_t *ref, int w, int h, int sel, int rw) {
-    long n = 0, bad = 0, sum = 0;
+    long n = 0, bad = 0, sum = 0; int mx = 0;
     for (int y = g_zone[1]; y < h && y <= g_zone[3]; y++) for (int x = g_zone[0]; x < w && x <= g_zone[2]; x++) {
-        int a = lay[((size_t)y * w + x) * 4 + 3];
-        if ((sel == 1 && (a == 0 || a == 255)) || (sel == 2 && a == 0)) continue;
-        const uint8_t *p = &img[((size_t)y * w + x) * 4], *q = &ref[((size_t)y * rw + x) * 4];
+        const size_t i = (size_t)y * w + x;
+        if (sel && (!touched(lay, (size_t)w * h, i) || (sel == 1 && lay[i * 4 + 3] == 255))) continue;
+        const uint8_t *p = &img[i * 4], *q = &ref[((size_t)y * rw + x) * 4];
         int d = 0, m = 0; for (int k = 0; k < 3; k++) { int e = abs(p[k] - q[k]); d += e; if (e > m) m = e; }
-        n++; sum += d; if (m > 8) bad++;
+        n++; sum += d; if (m > 8) bad++; if (m > mx) mx = m;
     }
-    printf("    %-34s px %ld: dif media %.2f / 255, distintos(>8) %ld (%.1f%%)\n", name, n, n ? sum / (3.0 * n) : 0.0, bad, n ? 100.0 * bad / n : 0.0);
+    printf("    %-34s px %ld: dif media %.2f / 255, max %d, distintos(>8) %ld (%.1f%%)\n", name, n, n ? sum / (3.0 * n) : 0.0, mx, bad, n ? 100.0 * bad / n : 0.0);
 }
 /* mundo sin 2D (lo que hay bajo el panel). NULL si falla. */
 static uint8_t *world_without_2d(const GpuDrawList *l, const VrScene *sc, int *w, int *h) {
@@ -309,7 +301,7 @@ static int one_dump(const char *dir, double maxpct, const char *png_dir) {
         for (int y = 0; y < ph && y < rh; y++) for (int x = 0; x < pw && x < rw; x++) {
             const uint8_t *p = &panel[((size_t)y * pw + x) * 4], *q = &ref[((size_t)y * rw + x) * 4];
             if (p[3] == 255) { int e = abs(p[0] - q[0]) + abs(p[1] - q[1]) + abs(p[2] - q[2]); op++; if (e) bad++; sum += e; }
-            else if (p[3]) semi++;
+            else if (touched(panel, (size_t)pw * ph, (size_t)y * pw + x)) semi++;
         }
         printf("panel     (escala 1): %ld píxeles opacos (dif media %.4f / 255, distintos %ld = %.3f%%), %ld semitransparentes | primitivas al panel %d, solo VRAM %d\n", op, op ? sum / (3.0 * op) : 0.0, bad, op ? 100.0 * bad / op : 0.0, semi, in.prims, in.mirror_prims);
         if (bad) rc = 1;
@@ -323,8 +315,9 @@ static int one_dump(const char *dir, double maxpct, const char *png_dir) {
             printf("panel verificado: %s | píxeles del panel %d, distintos del hardware %d (dif media %.3f), sustituidos %d, mundo distinto fuera del panel %d, 2D perdidas %d, respaldo %s\n",
                    in.verify ? "aplicado" : "no aplicable", in.v_cov, in.v_bad, in.v_mean_milli / 1000.0, in.v_patched, in.v_out, in.v_lost2d, in.fallback ? "SI" : "no");
             const uint8_t *rg = vl2d_rgba(L2, &vw, &vh);
-            ver = (uint8_t *)malloc((size_t)vw * vh * 4);
-            if (ver) memcpy(ver, rg, (size_t)vw * vh * 4); else vw = vh = 0;
+            const size_t vn = (size_t)vw * vh * 4;
+            ver = (uint8_t *)malloc(vn * 3);
+            if (ver) { memcpy(ver, rg, vn); memcpy(ver + vn, vl2d_sub(L2), vn); memcpy(ver + 2 * vn, vl2d_gain(L2), vn); } else vw = vh = 0;
         }
         vl2d_free(L2);
     }
@@ -361,49 +354,39 @@ static int one_dump(const char *dir, double maxpct, const char *png_dir) {
                 printf("  PNG %s %s\n", o, ns_png_write_rgba(o, sheet, SW, chh) == 0 ? "(izq: frame.png original | der: capa del panel, x2)" : "ERROR");
             }
             free(sheet); free(tmp);
-            if (mode == VL_PANEL) {   /* composición del panel sobre el mundo SIN 2D frente a frame.png (la verdad): brillo de lo semitransparente / aditivo */
+            if (mode != VL_FULL) {   /* composición del panel (el que llega al visor) sobre el mundo SIN 2D frente a frame.png (la verdad): textos, HUD, fundidos, lo semitransparente */
                 int bw = 0, bh = 0;
                 uint8_t *wd = world_without_2d(&l, &sc, &bw, &bh);
                 if (wd && bw == lw && bh == lh && bw <= rw && bh <= rh) {
-                    diff_stats("mundo sin 2D vs frame (alfa 0)", lay, wd, ref, bw, bh, 0, rw);   /* validez del fondo: fuera del 2D debe ser igual a frame.png */
-                    uint8_t *cg = (uint8_t *)malloc((size_t)bw * bh * 4), *cl = (uint8_t *)malloc((size_t)bw * bh * 4);
-                    if (cg && cl) {
+                    diff_stats("mundo sin 2D vs frame (todo)", lay, wd, ref, bw, bh, 0, rw);   /* validez del fondo: fuera del 2D debe ser igual a frame.png */
+                    uint8_t *cg = (uint8_t *)malloc((size_t)bw * bh * 4);
+                    if (cg) {
                         printf("  composición del panel (capa sobre el mundo sin 2D) frente a frame.png:\n");
-                        compose_panel(lay, wd, bw, bh, 0, cg); compose_panel(lay, wd, bw, bh, 1, cl);
-                        diff_stats("gamma (PS1), px con alfa > 0", lay, cg, ref, bw, bh, 2, rw);
-                        diff_stats("gamma (PS1), solo semitransp.", lay, cg, ref, bw, bh, 1, rw);
-                        diff_stats("lineal (visor sRGB), px alfa > 0", lay, cl, ref, bw, bh, 2, rw);
-                        diff_stats("lineal (visor sRGB), semitransp.", lay, cl, ref, bw, bh, 1, rw);
-                        /* PNG: [frame.png | gamma | lineal | |gamma - frame| x4] x2 */
-                        const int K = 2; int cw = bw * K, SW = cw * 4, chh = bh * K;
+                        compose_panel(lay, wd, bw, bh, cg);
+                        diff_stats("px tocados por el panel", lay, cg, ref, bw, bh, 2, rw);
+                        diff_stats("px tocados y no opacos", lay, cg, ref, bw, bh, 1, rw);
+                        const char *zs = getenv("L2D_ZONA");
+                        if (zs && sscanf(zs, "%d,%d,%d,%d", &g_zone[0], &g_zone[1], &g_zone[2], &g_zone[3]) == 4) {
+                            printf("  zona L2D_ZONA=%s:\n", zs);
+                            diff_stats("px tocados por el panel", lay, cg, ref, bw, bh, 2, rw);
+                            g_zone[0] = g_zone[1] = 0; g_zone[2] = g_zone[3] = 1 << 20;
+                        }
+                        /* PNG: [frame.png | capa sobre el mundo sin 2D | diferencia x4] x2 */
+                        const int K = 2; int cw = bw * K, SW = cw * 3, chh = bh * K;
                         uint8_t *sh = (uint8_t *)malloc((size_t)SW * chh * 4);
                         if (sh) {
                             for (int y = 0; y < chh; y++) for (int x = 0; x < SW; x++) {
                                 int col = x / cw, sx = (x % cw) / K, sy = y / K; uint8_t *q = &sh[((size_t)y * SW + x) * 4];
-                                const uint8_t *r = &ref[((size_t)sy * rw + sx) * 4], *g = &cg[((size_t)sy * bw + sx) * 4], *li = &cl[((size_t)sy * bw + sx) * 4];
-                                for (int k = 0; k < 3; k++) { int v = col == 0 ? r[k] : col == 1 ? g[k] : col == 2 ? li[k] : abs(g[k] - r[k]) * 4; q[k] = (uint8_t)(v > 255 ? 255 : v); }
+                                const uint8_t *r = &ref[((size_t)sy * rw + sx) * 4], *g = &cg[((size_t)sy * bw + sx) * 4];
+                                for (int k = 0; k < 3; k++) { int v = col == 0 ? r[k] : col == 1 ? g[k] : abs(g[k] - r[k]) * 4; q[k] = (uint8_t)(v > 255 ? 255 : v); }
                                 q[3] = 255;
                             }
                             char o[800]; snprintf(o, sizeof o, "%s/%s_compuesta.png", png_dir, nm);
-                            printf("  PNG %s %s\n", o, ns_png_write_rgba(o, sh, SW, chh) == 0 ? "(x2: frame.png | capa sobre mundo sin 2D en gamma | idem en lineal | |gamma - frame| x4)" : "ERROR");
+                            printf("  PNG %s %s\n", o, ns_png_write_rgba(o, sh, SW, chh) == 0 ? "(x2: frame.png | capa sobre mundo sin 2D | diferencia x4)" : "ERROR");
                             free(sh);
                         }
+                        free(cg);
                     }
-                    const char *zs = getenv("L2D_ZONA");
-                    if (zs && cg && cl && sscanf(zs, "%d,%d,%d,%d", &g_zone[0], &g_zone[1], &g_zone[2], &g_zone[3]) == 4) {
-                        printf("  zona L2D_ZONA=%s:\n", zs);
-                        diff_stats("gamma (PS1), px con alfa > 0", lay, cg, ref, bw, bh, 2, rw);
-                        diff_stats("lineal (visor sRGB), px alfa > 0", lay, cl, ref, bw, bh, 2, rw);
-                        long n = 0, sr = 0, sg = 0, sl = 0;   /* brillo medio (canal G) de la zona: frame.png / gamma / lineal, solo px con alfa > 0 */
-                        for (int y = g_zone[1]; y < bh && y <= g_zone[3]; y++) for (int x = g_zone[0]; x < bw && x <= g_zone[2]; x++) {
-                            size_t i = (size_t)y * bw + x;
-                            if (lay[i * 4 + 3] == 0) continue;
-                            n++; sr += ref[((size_t)y * rw + x) * 4 + 1]; sg += cg[i * 4 + 1]; sl += cl[i * 4 + 1];
-                        }
-                        if (n) printf("    brillo medio G de la zona (px alfa>0, %ld): frame.png %.1f | gamma %.1f | lineal %.1f\n", n, (double)sr / n, (double)sg / n, (double)sl / n);
-                        g_zone[0] = g_zone[1] = 0; g_zone[2] = g_zone[3] = 1 << 20;
-                    }
-                    free(cg); free(cl);
                 } else printf("  (composición no comprobable: mundo sin 2D %s)\n", wd ? "de otro tamaño" : "no reproducible");
                 free(wd);
             }

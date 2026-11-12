@@ -166,7 +166,7 @@ size_t ns_adapt_scene(const NsScene *sc, const NsMeshStore *st, const NsAdaptOpt
                     if (textured) T.flags |= NS_TF_TEXTURED;
                     if (m->flags & NS_MF_BLEND) T.flags |= NS_TF_SEMI;
                     if (vec_push(&V, &T)) { free(V.t); free(V.s); return 0; }
-                    V.s[V.n - 1].inst = ii; V.s[V.n - 1].piece = pi; V.s[V.n - 1].face = fi; V.s[V.n - 1].half = (uint32_t)tt; V.s[V.n - 1].mesh_id = (uint32_t)p->mesh_id; V.s[V.n - 1].key = in->key; V.s[V.n - 1].piece_rel = k; V.s[V.n - 1].mflags = m->flags; V.s[V.n - 1].vis = in->vis_state;
+                    V.s[V.n - 1].inst = ii; V.s[V.n - 1].piece = pi; V.s[V.n - 1].face = fi; V.s[V.n - 1].half = (uint32_t)tt; V.s[V.n - 1].mesh_id = (uint32_t)p->mesh_id; V.s[V.n - 1].key = in->key; V.s[V.n - 1].piece_rel = k; V.s[V.n - 1].mflags = m->flags; V.s[V.n - 1].vis = in->vis_state; V.s[V.n - 1].iflags = in->flags;
                     S->faces_out_tris++;
                 }
             }

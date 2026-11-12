@@ -43,7 +43,7 @@ test-cover-san:
 # Geometría sólida de la escena nativa (ns_solid: colisión de la cabeza) y análisis de huecos del escenario sobre volcados.
 #   make -f vr/native/extract.mk test-solid   pruebas sintéticas de ns_solid
 #   make -f vr/native/extract.mk nssolid      compila vr/native/build-extract/nssolid (ver tools/nssolid.c)
-SOLSRC := vr/native/ns_solid.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c
+SOLSRC := vr/native/ns_solid.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_gpu.c
 $(B)/test_ns_solid: vr/native/test_ns_solid.c $(SOLSRC) vr/native/ns_solid.h $(HDR) | $(B)
 	$(CC) $(CFLAGS) -Iruntime -Ivr/native -Ivr/camera -Ivr/scene -Ivr/bridge vr/native/test_ns_solid.c $(SOLSRC) vr/camera/vr_headcol.c -lm -lpthread -o $@
 $(B)/nssolid: vr/native/tools/nssolid.c vr/native/ns_dump.c $(SOLSRC) vr/native/ns_solid.h $(HDR) | $(B)
@@ -107,6 +107,13 @@ $(B)/nsvr: vr/native/tools/nsvr.c vr/native/ns_dump.c $(VRSRC) vr/native/ns_gpu.
 	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/tools/nsvr.c vr/native/ns_dump.c $(VRSRC) -lm -lpthread -o $@
 nsvr: $(B)/nsvr
 .PHONY: nsvr
+
+# Descartes de triángulo entero de la pantalla 3D con la cámara del motor, medidos sobre volcados (ver tools/nsdesc.c).
+#   make -f vr/native/extract.mk nsdesc       compila vr/native/build-extract/nsdesc
+$(B)/nsdesc: vr/native/tools/nsdesc.c vr/native/ns_dump.c $(COVSRC) vr/native/ns_cpuref.c vr/native/ns_div.c vr/native/ns_solid.c vr/native/ns_cinema.c vr/native/ns_solid.h vr/native/ns_cinema.h vr/native/ns_div.h vr/native/ns_cover.h vr/native/ns_gpu.h vr/native/ns_gpu_types.h $(HDR) | $(B)
+	$(CC) $(CFLAGS) -Iruntime -Ivr/native vr/native/tools/nsdesc.c vr/native/ns_dump.c $(COVSRC) vr/native/ns_cpuref.c vr/native/ns_div.c vr/native/ns_solid.c vr/native/ns_cinema.c -lm -lpthread -o $@
+nsdesc: $(B)/nsdesc
+.PHONY: nsdesc
 
 # Relleno por la verdad del motor (ns_fill): pruebas sintéticas y herramienta de volcados.
 #   make -f vr/native/extract.mk test-fill     pruebas sintéticas de ns_fill

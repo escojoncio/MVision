@@ -1,6 +1,7 @@
 /* ns_fx: extracción de efectos del motor desde la RAM y clasificación (candidata) de la lista de la GPU. Formato y semántica: docs/efectos_nativos.md. */
 #include "ns_fx.h"
 #include <math.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,8 +107,8 @@ static const NsFxActorEntry PROD_TAB[] = {
     {0x5B67A1D8u, NSFX_ROLE_TRAIL},
     {0xCBDAE533u, NSFX_ROLE_TRAIL},
     {0x78356D8Du, NSFX_ROLE_STRIP},
-    {0x371FF4B3u, NSFX_ROLE_PARTICLE},
-    {0x7BBF9889u, NSFX_ROLE_PARTICLE},
+    {0x371FF4B3u, NSFX_ROLE_SKY},
+    {0x7BBF9889u, NSFX_ROLE_SKY},
     {0x5771629Au, NSFX_ROLE_SHADOW_OBJ},
 };
 static const NsFxActorEntry *g_tab = PROD_TAB; static uint32_t g_tab_n = sizeof PROD_TAB / sizeof PROD_TAB[0];
@@ -192,6 +193,7 @@ typedef struct {
     uint16_t clut, tpage;
     int w, h;
     int sz;
+    int has_e1; uint32_t e1;   /* formato libre: el paquete trae delante un comando de modo de dibujo (página de textura / mezcla) */
 } Dec;
 
 static int kind_textured(int k) { return (k >= KIND_SPR && k <= KIND_SPR16) || (k >= KIND_P3T && k <= KIND_S2TG); }
@@ -243,7 +245,10 @@ static int dec_pack(const uint8_t *m, uint32_t b, int kind, int verts, int voff,
  * que ve la GPU): 0x20..0x3F polígono (bit 3 = cuadrilátero, bit 2 = texturizado, bit 4 = degradado, bit 1 = semitransparente, bit 0 = sin modular), 0x40..0x5F línea,
  * 0x60..0x7F rectángulo (0x60 tamaño libre, 0x64 sprite con tamaño, +8 = 1x1, +0x10 = 8x8, +0x18 = 16x16). La disposición de campos es la del paquete de hardware con
  * etiqueta (ver docs): se reutiliza dec_pack con la clase equivalente. Devuelve 0, o -1 si el comando no dibuja nada que se pueda interpretar. */
-static int dec_free(const uint8_t *m, uint32_t b, Dec *d) {
+static int dec_free(const uint8_t *m, uint32_t b0, int psz, Dec *d) {
+    /* comandos de estado delante del de dibujo (0xE1..0xE6; spark2.c antepone el modo de dibujo): se saltan y el paquete se decodifica desplazado */
+    uint32_t b = b0, e1 = 0; int has_e1 = 0;
+    while ((int)(b - b0) + 12 <= psz && rd8(m, b + 7) >= 0xE1 && rd8(m, b + 7) <= 0xE6) { if (rd8(m, b + 7) == 0xE1) { has_e1 = 1; e1 = rdu32(m, b + 4); } b += 4; }
     int cmd = (int)rd8(m, b + 7);
     int kind, verts, voff = 8, vst;
     if (cmd >= 0x20 && cmd <= 0x3F) {
@@ -263,6 +268,7 @@ static int dec_free(const uint8_t *m, uint32_t b, Dec *d) {
         else kind = sz == 0 ? KIND_BOX : sz == 1 ? KIND_BOX1 : sz == 2 ? KIND_BOX8 : KIND_BOX16;
     } else return -1;
     if (dec_pack(m, b, kind, verts, voff, vst, 0, d) < 0) return -1;
+    d->sz = (int)rdu16(m, b0); d->has_e1 = has_e1; d->e1 = e1;
     if ((cmd & 0x60) == 0x60 && (cmd & 0x18) == 0x08) { d->w = d->h = 1; }   /* 1x1: dec_pack deja w/h por defecto a 1 solo para BOX1; el sprite 1x1 no trae tamaño */
     return 0;
 }
@@ -302,8 +308,8 @@ static void pm_build(NsFxScene *s) {
 }
 
 typedef struct {
-    const uint8_t *ram; const NsFxOpts *opt; NsFxScene *sc; int buf; uint32_t map;
-    uint32_t qprim[1024]; uint8_t qrole[1024];
+    const uint8_t *ram; const NsFxOpts *opt; NsFxScene *sc; int buf, skybuf; uint32_t map;   /* skybuf: búfer de las teselas del cielo (ver NsFxOpts.hook_ram) */
+    uint32_t qprim[1024]; uint8_t qrole[1024]; uint32_t qnode[1024]; uint16_t qoff[1024];   /* primitivas de la cola, papel, actor dueño (0 = desconocido) y desplazamiento de la referencia dentro del actor */
     int nq;
 } Ctx;
 
@@ -350,6 +356,10 @@ static void fill_common(NsFxItem *it, uint32_t prim, int j, int kind_in, const D
         else it->flags |= NSFX_F_TPAGE_UNKNOWN;
     }
     if (d->semi && (!d->textured || kind < KIND_P3T)) { it->abr = 1; it->flags |= NSFX_F_ABR_UNKNOWN; }
+    if (d->has_e1) {   /* el propio paquete fija la página y la mezcla: nada que aprender de la GPU */
+        if (it->flags & NSFX_F_ABR_UNKNOWN) { it->abr = (uint8_t)((d->e1 >> 5) & 3); it->flags &= (uint16_t)~NSFX_F_ABR_UNKNOWN; }
+        if (it->flags & NSFX_F_TPAGE_UNKNOWN) { it->tpage = (uint16_t)(d->e1 & 0x1FF); it->tp = (uint8_t)((d->e1 >> 7) & 3); it->ptp = it->tp; it->flags &= (uint16_t)~NSFX_F_TPAGE_UNKNOWN; }
+    }
     for (int v = 0; v < 4; v++) {
         int sv = (d->cls == C_RECT || v >= d->nv) ? 0 : v;
         for (int c = 0; c < 3; c++) it->rgb[v][c] = d->rgb[sv][c];
@@ -401,8 +411,116 @@ static void set_uv_rect(NsFxItem *it, const Dec *d) {
     it->uv[3][0] = it->uv[1][0]; it->uv[3][1] = it->uv[2][1];
 }
 
+/* ---- fondo de cielo (sphere.c / sphere2.c de la decompilación: thing/) ----
+ * El actor dibuja una imagen panorámica en teselas con una primitiva de SOLO ORDENACIÓN (coordenadas de pantalla, sin GTE): cada fotograma calcula, a partir de la matriz de ojo del canal, qué columna
+ * y qué fila de la imagen quedan en el centro de la pantalla (GetViewDir) y escribe las teselas visibles alrededor:
+ *     columna_centro = W - 1 - dir * W / 4096 (+ desplazamiento animado),   dir = atan2(fwd.x, fwd.z) en 4096 por vuelta
+ *     fila_centro    = -285 * fwd.y / |fwd.xz| - elevación + H / 2
+ * Invertida, esa regla dice en qué DIRECCIÓN del mundo está cada punto de la imagen: la columna c a 2 pi (c - columna_centro) / W del azimut de la mirada y la fila r en la pendiente
+ * -(r - H / 2 + elevación) / 285. Aquí se genera esa imagen entera como un cilindro de mundo anclado al ojo (una tesela = un cuadrilátero), con las mismas teselas, páginas y UV que usa el actor;
+ * por debajo de la imagen el actor repite su última fila y aquí se repite igual. Nada más: no se inventa geometría.
+ * La elevación y el desplazamiento son variables del actor sin dirección fija (overlay): se recuperan del propio paquete 0 del fotograma (qué tesela es y dónde la puso) con la misma fórmula. */
+#define SKY_RADIUS 200000.0f   /* unidades del motor (200 m): más allá de cualquier escenario medido (±35 m) */
+enum { SKY_MAX_TX = 256, SKY_MAX_TY = 64 };
+static struct { uint32_t node; float elev; int have; } g_sky;   /* elevación aprendida del actor (constante suya); bajo g_fx_mx */
+typedef struct { uint8_t u0, v0; uint16_t tpage, clut; int ok; } SkyTile;
+static int do_sky(Ctx *c, uint32_t p, uint32_t node) {
+    const uint8_t *m = c->ram; NsFxScene *S = c->sc; const NsFxCam *cam = &S->cam;
+    if (!ptr_ok(node) || !in_ram(node, 0x6C) || rdu32(m, node + 0x20) != p) return 0;
+    const uint32_t img = rdu32(m, node + 0x24);
+    if (!ptr_ok(img) || !in_ram(img, 0x14)) return 0;
+    const int W = (int)rdu16(m, img), H = (int)rdu16(m, img + 2), tw = (int)rdu16(m, img + 4), th = (int)rdu16(m, img + 6);
+    const uint32_t attribs = rdu32(m, img + 0xC), tilemap = rdu32(m, img + 0x10);
+    if (tw < 8 || th < 8 || tw > 256 || th > 256 || W < tw || H < th || W % tw || H % th) return 0;
+    const int ntx = W / tw, nty = H / th;
+    if (ntx > SKY_MAX_TX || nty > SKY_MAX_TY || !ptr_ok(tilemap) || !in_ram(tilemap, (uint32_t)(ntx * nty)) || !ptr_ok(attribs) || !in_ram(attribs, 4u * 256u)) return 0;
+    const int n = rds16(m, p + 0x2A), psz = rds16(m, p + 0x30);
+    const uint32_t packs = rdu32(m, p + 0x40 + 4u * (uint32_t)c->skybuf);
+    const int nvx = 320 / tw + 1;
+    if (n <= 0 || n > 1024 || psz != 40 || n % nvx || !ptr_ok(packs) || !in_ram(packs, (uint32_t)n * 40u)) return 0;
+    const int nvy = n / nvx;
+    /* media altura de la pantalla del actor: 112 (224 líneas, la de la decompilación) o 128 (256 líneas, el ejecutable medido: 9 filas de 32 y y0 en -128..-159); la da el nº de filas visibles */
+    const int half = (256 / th + 1 == nvy && (224 / th + 1 != nvy || rds16(m, packs + 10) < -112 - (th - 1))) ? 128 : 112;
+    /* tesela (u0, v0, página, paleta) de cada casilla de la imagen, como la calcula el actor */
+    SkyTile *T = (SkyTile *)calloc((size_t)(ntx * nty), sizeof *T);
+    if (!T) return 0;
+    for (int i = 0; i < ntx * nty; i++) {
+        const uint32_t a = attribs + 4u * rd8(m, tilemap + (uint32_t)i);
+        const uint32_t tex = rdu32(m, node + 0x28 + 4u * (rd8(m, a) & 15u));
+        if (!ptr_ok(tex) || !in_ram(tex, 12)) continue;
+        T[i].u0 = (uint8_t)(rd8(m, a + 1) + rd8(m, tex + 8)); T[i].v0 = (uint8_t)(rd8(m, a + 2) + rd8(m, tex + 9));
+        T[i].tpage = (uint16_t)rdu16(m, tex + 4); T[i].clut = (uint16_t)rdu16(m, tex + 6); T[i].ok = 1;
+    }
+    /* posición de la ventana del fotograma en la imagen: la casilla (tx0, ty0) cuyo bloque de nvx x nvy teselas (columnas en anillo, filas saturadas) es el de los paquetes */
+    int tx0 = -1, ty0 = -1;
+    for (int ty = 0; ty < nty && tx0 < 0; ty++) for (int tx = 0; tx < ntx && tx0 < 0; tx++) {
+        int same = 1;
+        for (int j = 0; j < n && same; j++) {
+            const int r = ty + j / nvx, cc = (tx + j % nvx) % ntx;
+            const SkyTile *t = &T[(r < nty ? r : nty - 1) * ntx + cc];
+            const uint32_t b = packs + 40u * (uint32_t)j;
+            same = t->ok && rd8(m, b + 12) == t->u0 && rd8(m, b + 13) == t->v0 && rdu16(m, b + 14) == t->clut && rdu16(m, b + 22) == t->tpage;
+        }
+        if (same) { tx0 = tx; ty0 = ty; }
+    }
+    /* cámara con la que el actor colocó las teselas: la matriz de ojo del canal (vista -> mundo), columna Z = dirección de la mirada */
+    const float fx = cam->axes[0][2], fy = cam->axes[1][2], fz = cam->axes[2][2], fh = sqrtf(fx * fx + fz * fz);
+    float scroll = 0.0f, elev = g_sky.node == node && g_sky.have ? g_sky.elev : 0.0f;
+    if (tx0 >= 0 && fh > 1e-3f) {
+        const int x0 = rds16(m, packs + 8), y0 = rds16(m, packs + 10);
+        float dir = atan2f(fx, fz) / 6.2831853f; if (dir < 0) dir += 1.0f;                  /* 0..1 de vuelta */
+        const float col_c = (float)(tx0 * tw - (x0 + 160) + 160);                           /* columna de la imagen en el centro de la pantalla */
+        if (rds16(m, node + 0x68) != 0) {                                                                      /* con animación: el desplazamiento es lo que sobra respecto a la fórmula */
+            scroll = col_c - ((float)(W - 1) - dir * (float)W);
+            scroll -= (float)W * floorf(scroll / (float)W);
+        }
+        const int clamped = y0 > -half ? ty0 != 0 : ty0 >= nty - 1;                         /* fila saturada por abajo (o sphere2 por arriba): no da la fila real */
+        if (!clamped && !(y0 == -half && ty0 == 0)) {
+            const float row_c = y0 > -half ? (float)(-(y0 + half) + half) : (float)(ty0 * th + (-half - y0) + half);   /* fila de la imagen en el centro de la pantalla */
+            elev = -285.0f * fy / fh - (row_c - 0.5f * (float)H);
+            g_sky.node = node; g_sky.elev = elev; g_sky.have = 1;
+        }
+    }
+    if (!(g_sky.node == node && g_sky.have)) { free(T); return 0; }   /* sin elevación conocida todavía (primer fotograma mirando al suelo): se queda en 2D hasta medirla */
+    const int rows = nty + nvy;   /* la imagen y, por debajo, su última fila repetida tantas veces como filas pinta el actor */
+    int ks = (int)ceilf(360.0f * (float)tw / (float)W / 12.0f); if (ks < 1) ks = 1; if (ks > 8) ks = 8;   /* teselas de más de 12 grados (imágenes pequeñas): se parten en columnas para seguir el cilindro */
+    if (S->cap_items - S->n_items < (uint32_t)(rows * ntx * ks)) { S->stats.n_overflow++; free(T); return 0; }   /* entero o nada: un cielo a medias es peor que el de la vía 2D */
+    uint8_t rgb[3]; for (int k = 0; k < 3; k++) rgb[k] = (uint8_t)rd8(m, packs + 4u + (uint32_t)k);
+    /* azimut de una columna: el de la mirada más lo que dista de la columna que el actor pone en el centro (hacia la derecha de la pantalla al crecer la columna; al revés en un mundo zurdo) */
+    const float two_pi = 6.2831853f, az_fwd = atan2f(fx, fz), sgn = cam->det_neg ? 1.0f : -1.0f;
+    float dir01 = az_fwd / two_pi; if (dir01 < 0) dir01 += 1.0f;
+    const float col_ctr = (float)(W - 1) - dir01 * (float)W + scroll;
+    int idx = 0;
+    for (int r = 0; r < rows; r++) for (int cc = 0; cc < ntx; cc++, idx++) {
+        const SkyTile *t = &T[(r < nty ? r : nty - 1) * ntx + cc];
+        if (!t->ok) continue;
+        const int u1 = t->u0 + tw > 255 ? 255 : t->u0 + tw, v1 = t->v0 + th > 255 ? 255 : t->v0 + th;
+        for (int si = 0; si < ks; si++) {
+            NsFxItem *it = new_item(c); if (!it) { free(T); return 1; }
+            it->prim = p; it->idx = (uint16_t)idx; it->sub = (uint16_t)si; it->shape = NSFX_SH_QUAD; it->role = NSFX_ROLE_SKY; it->kind = KIND_P4T; it->nv = 4;
+            it->flags = NSFX_F_TEXTURED; it->gflags = GPU_F_TEXTURED;
+            it->tpage = t->tpage; it->clut = t->clut; it->tp = (uint8_t)((t->tpage >> 7) & 3); it->ptp = it->tp; it->abr = (uint8_t)((t->tpage >> 5) & 3);
+            it->sz = 63000; it->pcls = C_POLY; it->pnv = 4;
+            for (int v = 0; v < 4; v++) {
+                const float fu = (float)(si + (v & 1)) / (float)ks;
+                const float col = ((float)cc + fu) * (float)tw, row = (float)((r + (v >> 1)) * th);
+                const float az = az_fwd + sgn * two_pi * (col - col_ctr) / (float)W, sl = -(row - 0.5f * (float)H + elev) / 285.0f;
+                const float d[3] = {sinf(az), sl, cosf(az)};
+                for (int k = 0; k < 3; k++) it->pos[v][k] = cam->eye[k] + SKY_RADIUS * d[k];
+                w2v(cam, it->pos[v], it->vpos[v]);
+                it->uv[v][0] = (uint8_t)lroundf((float)t->u0 + fu * (float)(u1 - t->u0)); it->uv[v][1] = (uint8_t)((v >> 1) ? v1 : t->v0);
+                memcpy(it->rgb[v], rgb, 3);
+            }
+            it->pu0 = t->u0; it->pv0 = t->v0;
+            count_item(c, it);
+        }
+    }
+    free(T);
+    return 1;
+}
+
 /* ---- una primitiva ---- */
-static void do_prim(Ctx *c, uint32_t p, int role_owner) {
+static void do_prim(Ctx *c, uint32_t p, int role_owner, uint32_t node) {
     const uint8_t *m = c->ram; NsFxScene *S = c->sc; const NsFxCam *cam = &S->cam; const NsFxTuning *T = &c->opt->tune;
     S->stats.n_prims++;
     int type = rds32(m, p + 0x24), kind = type & 0x1F;
@@ -410,13 +528,19 @@ static void do_prim(Ctx *c, uint32_t p, int role_owner) {
     int n = rds16(m, p + 0x2A); int16_t raise = (int16_t)rds16(m, p + 0x2E);
     int psz = rds16(m, p + 0x30), verts = rds16(m, p + 0x32), voff = rds16(m, p + 0x34), vst = rds16(m, p + 0x36);
     uint32_t pos = rdu32(m, p + 0x38), rect = rdu32(m, p + 0x3C), packs = rdu32(m, p + 0x40 + 4u * (uint32_t)c->buf);
-    if (type & T_SORTONLY) { S->stats.n_sortonly++; return; }
+    if (type & T_SORTONLY) {   /* solo ordenación: 2D (HUD, menús) salvo el fondo de cielo, que se genera en el mundo */
+        if (role_owner == NSFX_ROLE_SKY && !(type & T_INVISIBLE) && !(group && !(group & c->map)) && do_sky(c, p, node)) return;
+        S->stats.n_sortonly++; return;
+    }
     if (type & T_INVISIBLE) { S->stats.n_invisible++; return; }
     if (group && !(group & c->map)) { S->stats.n_wrong_map++; return; }
     if (n <= 0 || n > 8192 || psz < 8 || psz > 64 || verts < 1 || verts > 4 || !ptr_ok(packs) || !in_ram(packs, (uint32_t)n * (uint32_t)psz) || kind > 23) { S->stats.n_bad++; return; }
     if (kind == KIND_FREE) S->stats.n_free++;   /* formato libre: se interpreta por el comando de cada paquete (dec_free) y se trata como paquete ya proyectado */
     if (!c->opt->include_viewlocked && (type & T_ON_CAMERA)) return;
-    int rectmode = (type & T_RECT) != 0, freepacks = (type & T_FREEPACKS) != 0 || kind == KIND_FREE, oncam = (type & T_ON_CAMERA) != 0, oneside = (type & T_ONESIDE) != 0;
+    /* Formato libre SIN la bandera de paquetes propios: el motor lo pasa por la regla general (libdg/prim.c MakePrims: posiciones de mundo en `pos`, `verts` vértices por paquete escritos en voffset + k*vstep); el
+     * comando de cada paquete solo da la forma. Sin posiciones legibles se trata como paquete ya proyectado. */
+    const int free_world = kind == KIND_FREE && !(type & T_FREEPACKS) && !(type & T_RECT) && ptr_ok(pos) && in_ram(pos, 8u * (uint32_t)n * (uint32_t)verts);
+    int rectmode = (type & T_RECT) != 0, freepacks = (type & T_FREEPACKS) != 0 || (kind == KIND_FREE && !free_world), oncam = (type & T_ON_CAMERA) != 0, oneside = (type & T_ONESIDE) != 0;
     int is_line = kind <= KIND_S4G, is_tex_line = kind == KIND_S2T || kind == KIND_S2TG;
     int vcount = is_tex_line ? 2 : verts;
     if (!freepacks) {
@@ -431,7 +555,12 @@ static void do_prim(Ctx *c, uint32_t p, int role_owner) {
     for (int j = 0; j < n; j++) {
         uint32_t b = packs + (uint32_t)j * (uint32_t)psz;
         Dec d;
-        if ((kind == KIND_FREE ? dec_free(m, b, &d) : dec_pack(m, b, kind, verts, voff, vst, is_tex_line ? 4 : 0, &d)) < 0) continue;
+        if ((kind == KIND_FREE ? dec_free(m, b, psz, &d) : dec_pack(m, b, kind, verts, voff, vst, is_tex_line ? 4 : 0, &d)) < 0) continue;
+        if (free_world) {   /* la forma la da el comando del paquete; debe usar los mismos vértices que la primitiva */
+            if (d.cls != C_RECT && d.nv != verts) continue;
+            if (d.cls == C_RECT && verts != 1) continue;
+            is_line = d.cls == C_LINE;
+        }
         int sz = d.sz, culled = sz == 0;
         if (culled && !c->opt->include_engine_culled) continue;
         float wv[4][3], vv[4][3]; int nvp = 0;
@@ -747,8 +876,9 @@ static void read_screen(Ctx *c) {
 static void run_buffer(Ctx *c, const ActorRec *ar, int na) {
     NsFxScene *S = c->sc;
     S->n_items = 0; S->n_shadow_objs = 0; memset(&S->stats, 0, sizeof S->stats); S->buffer = c->buf;
-    for (int i = 0; i < c->nq; i++) do_prim(c, c->qprim[i], c->qrole[i]);
+    for (int i = 0; i < c->nq; i++) if (c->qrole[i] != NSFX_ROLE_SKY) do_prim(c, c->qprim[i], c->qrole[i], c->qnode[i]);
     for (int i = 0; i < na; i++) if (code_of_hash(ar[i].hash) == NSFX_ROLE_SHADOW_OBJ) do_shadow(c, ar[i].node);
+    for (int i = 0; i < c->nq; i++) if (c->qrole[i] == NSFX_ROLE_SKY) do_prim(c, c->qprim[i], c->qrole[i], c->qnode[i]);   /* el cielo el último: nunca le quita el sitio a otro efecto (escena y exportación) */
 }
 /* ------------------------------------------------------------------------------------------------ aprendizaje de página / modo de mezcla */
 /* Tabla global sin bloqueos (una palabra de 64 bits por entrada): clave = dirección de la primitiva (19 bits), carga = página, paleta, modo de mezcla. */
@@ -778,10 +908,14 @@ static void learn_put(uint32_t prim, uint16_t tpage, uint16_t clut, int abr, int
 }
 /* Por papel: última página / modo aprendidos para cualquier primitiva de ese papel (respaldo de las primitivas que aún no se han visto en una lista). */
 static struct { uint8_t has, abr; uint16_t tpage; } g_role_learn[NSFX_ROLE_COUNT];
-void ns_fx_learn_reset(void) { memset(g_szl, 0, sizeof g_szl); memset(&g_shadow_tex, 0, sizeof g_shadow_tex); memset(g_role_learn, 0, sizeof g_role_learn); for (uint32_t i = 0; i < LEARN_N; i++) atomic_store_explicit(&g_learn[i], 0, memory_order_relaxed); }
+/* Cerrojo de lo aprendido que no es atómico (g_sky, g_szl, g_shadow_tex, g_role_learn): ns_fx_extract se llama desde el hilo de emulación (ns_extract_glue, vrhost) y desde los trabajadores de
+ * cobertura y relleno, cada uno con su escena. */
+static pthread_mutex_t g_fx_mx = PTHREAD_MUTEX_INITIALIZER;
+void ns_fx_learn_reset(void) { pthread_mutex_lock(&g_fx_mx); memset(&g_sky, 0, sizeof g_sky); memset(g_szl, 0, sizeof g_szl); memset(&g_shadow_tex, 0, sizeof g_shadow_tex); memset(g_role_learn, 0, sizeof g_role_learn); for (uint32_t i = 0; i < LEARN_N; i++) atomic_store_explicit(&g_learn[i], 0, memory_order_relaxed); pthread_mutex_unlock(&g_fx_mx); }
 uint32_t ns_fx_learn(const NsFxScene *sc, const GpuDrawList *dl, const int32_t *item) {
     uint32_t n = 0;
     if (!sc || !dl || !item) return 0;
+    pthread_mutex_lock(&g_fx_mx);
     for (uint32_t i = 0; i < dl->nops; i++) {
         int32_t k = item[i]; if (k < 0 || (uint32_t)k >= sc->n_items) continue;
         const NsFxItem *it = &sc->items[k]; const GpuOp *o = &dl->ops[i];
@@ -803,6 +937,7 @@ uint32_t ns_fx_learn(const NsFxScene *sc, const GpuDrawList *dl, const int32_t *
         }
         n++;
     }
+    pthread_mutex_unlock(&g_fx_mx);
     return n;
 }
 static void apply_learned(NsFxScene *S) {
@@ -828,7 +963,14 @@ static int score(const NsFxScene *S) { return (int)S->stats.chk_n - 2 * (int)S->
 typedef struct { uint32_t addr; int k; } PA;
 static int pa_cmp(const void *a, const void *b) { uint32_t x = ((const PA *)a)->addr, y = ((const PA *)b)->addr; return x < y ? -1 : x > y; }
 
+static int fx_extract(const uint8_t *ram, const NsFxOpts *opt_in, NsFxScene *out);
 int ns_fx_extract(const uint8_t *ram, const NsFxOpts *opt_in, NsFxScene *out) {
+    pthread_mutex_lock(&g_fx_mx);
+    const int rc = fx_extract(ram, opt_in, out);
+    pthread_mutex_unlock(&g_fx_mx);
+    return rc;
+}
+static int fx_extract(const uint8_t *ram, const NsFxOpts *opt_in, NsFxScene *out) {
     if (!ram || !out) return -1;
     NsFxOpts opt = opt_in ? *opt_in : ns_fx_opts_default();
     if (opt.tune.y_scale <= 0) opt.tune.y_scale = ns_fx_tuning_default().y_scale;
@@ -843,7 +985,7 @@ int ns_fx_extract(const uint8_t *ram, const NsFxOpts *opt_in, NsFxScene *out) {
     uint32_t ch = NSFX_A_CHANL;
     int qs = rds16(ram, ch + 0x52), pi = rds16(ram, ch + 0x54); uint32_t q = rdu32(ram, ch + 0x58);
     if (!ptr_ok(q) || pi < 0 || qs < pi || qs > 1024) { out->cam.valid = 0; free(c); return -2; }
-    for (int i = pi; i < qs && c->nq < 1024; i++) { uint32_t p = rdu32(ram, q + 4u * (uint32_t)i); if (ptr_ok(p) && in_ram(p, 0x54)) { c->qprim[c->nq] = p; c->qrole[c->nq] = 0; c->nq++; } }
+    for (int i = pi; i < qs && c->nq < 1024; i++) { uint32_t p = rdu32(ram, q + 4u * (uint32_t)i); if (ptr_ok(p) && in_ram(p, 0x54)) { c->qprim[c->nq] = p; c->qrole[c->nq] = 0; c->qnode[c->nq] = 0; c->nq++; } }
     ActorRec *ar = (ActorRec *)calloc(MAX_ACTORS, sizeof *ar); int na = 0;
     if (ar) na = walk_actors(ram, ar, MAX_ACTORS);
     if (opt.owner_roles && c->nq) {
@@ -860,7 +1002,8 @@ int ns_fx_extract(const uint8_t *ram, const NsFxOpts *opt_in, NsFxScene *out) {
                     int lo = 0, hi = c->nq - 1;
                     while (lo <= hi) {
                         int mid = (lo + hi) / 2;
-                        if (pa[mid].addr == w) { if (!c->qrole[pa[mid].k]) c->qrole[pa[mid].k] = (uint8_t)role; break; }
+                        /* la ventana de un actor puede invadir la reserva del siguiente (medido: la primitiva del cielo aparecía en +0x110 de otro actor y en +0x20 del suyo): gana la referencia más cercana al inicio */
+                        if (pa[mid].addr == w) { if (!c->qrole[pa[mid].k] || o < c->qoff[pa[mid].k]) { c->qrole[pa[mid].k] = (uint8_t)role; c->qnode[pa[mid].k] = ar[i].node; c->qoff[pa[mid].k] = (uint16_t)o; } break; }
                         if (pa[mid].addr < w) lo = mid + 1; else hi = mid - 1;
                     }
                 }
@@ -870,6 +1013,7 @@ int ns_fx_extract(const uint8_t *ram, const NsFxOpts *opt_in, NsFxScene *out) {
     }
     int clock = (int)(rdu32(ram, NSFX_A_CLOCK) & 1u);
     c->buf = opt.buffer >= 0 ? (opt.buffer & 1) : clock;
+    c->skybuf = opt.buffer >= 0 ? c->buf : (opt.hook_ram ? clock : clock ^ 1);
     run_buffer(c, ar, na);
     if (opt.buffer < 0 && (out->stats.chk_n == 0 || out->stats.chk_bad * 10 > out->stats.chk_n)) {
         int s0 = score(out);
@@ -902,6 +1046,10 @@ int ns_fx_covers_packet(const uint8_t *ram, const NsFxScene *sc, uint32_t pkt_ad
             uint32_t pk = rdu32(m, p + 0x40 + 4u * b), o = pk & RAMMASK;
             if (!ptr_ok(pk) || !in_ram(pk, (uint32_t)n * (uint32_t)psz) || a < o || a >= o + (uint32_t)n * (uint32_t)psz) continue;
             if ((a - o) % (uint32_t)psz) return 0;
+            {   /* primitiva de MUNDO que en esta RAM ya está oculta o es de otro mapa: el motor dejó de dibujarla (la lista es del fotograma anterior, su último paquete): no debe caer a la vía 2D */
+                const int type = rds32(m, p + 0x24); const uint32_t group = rdu16(m, p + 0x28);
+                if (!(type & (T_SORTONLY | T_ON_CAMERA)) && ((type & T_INVISIBLE) || (group && !(group & sc->cur_map)))) return 1;
+            }
             int32_t k = pm_find(sc, p, (a - o) / (uint32_t)psz);   /* solo las primitivas que do_prim extrajo tienen elemento */
             if (k < 0 || (uint32_t)k >= sc->n_items) return 0;
             return !((sc->items[k].flags & NSFX_F_TEXTURED) && (sc->items[k].flags & NSFX_F_TPAGE_UNKNOWN));   /* ns_fx_export no saca el sprite sin página de textura */
@@ -954,7 +1102,7 @@ int ns_fx_item_faces(const NsFxItem *it, const float eye[3]) {
     return it->fn[0] * (it->pos[0][0] - eye[0]) + it->fn[1] * (it->pos[0][1] - eye[1]) + it->fn[2] * (it->pos[0][2] - eye[2]) > 0;
 }
 static const char *const ROLE_NAMES[NSFX_ROLE_COUNT] = {"none", "light", "bubble", "smoke", "spark", "droplet", "splash", "ripple", "tracer", "beam", "decal", "shadow", "shadow_obj", "plasma", "surface",
-    "water_surface", "ambient", "cone", "trail", "strip", "particle", "sprite_anim", "view_overlay"};
+    "water_surface", "ambient", "cone", "trail", "strip", "particle", "sprite_anim", "view_overlay", "sky"};
 const char *ns_fx_role_name(int r) { return r >= 0 && r < NSFX_ROLE_COUNT ? ROLE_NAMES[r] : "?"; }
 const char *ns_fx_shape_name(int s) { static const char *const n[5] = {"none", "billboard", "quad", "tri", "ribbon"}; return s >= 0 && s < 5 ? n[s] : "?"; }
 
@@ -1117,7 +1265,7 @@ static void idx_add_prims(Idx *ix, const uint8_t *m, const NsFxScene *sc) {
             if (!sortonly && pm_find(sc, p, (uint32_t)j) >= 0) continue;   /* ya indexado desde el elemento */
             int cls = sortonly ? NSFX_OP_2D : hidden ? NSFX_OP_FX_PACK : NSFX_OP_2D;   /* visible y sin elemento: la GPU lo dibuja */
             Dec d;
-            if (kind == KIND_FREE) { if (dec_free(m, b, &d) < 0) continue; }
+            if (kind == KIND_FREE) { if (dec_free(m, b, psz, &d) < 0) continue; }
             else if (dec_pack(m, b, kind, verts, voff, vst, (kind == KIND_S2T || kind == KIND_S2TG) ? 4 : 0, &d) < 0) continue;
             ent_put_dec(ix, &d, cls, -1, (d.textured && d.kind >= KIND_P3T && d.kind != KIND_FREE) ? (int)((d.tpage >> 7) & 3) : 255);
         }

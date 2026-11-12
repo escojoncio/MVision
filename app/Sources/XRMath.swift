@@ -196,9 +196,8 @@ enum XRMenuPanelLayout {
 /// fuera del centro de la vista. `layerPx` = tamaño LÓGICO de la capa (no el de la textura: lleva la ampliación xBR).
 enum XRFramedLayout {
     static let distance: Float = 1.6        // m delante de la cabeza
-    static let layerWidth: Float = 1.30     // m por 320 px lógicos
-    static let refWidthPx: Float = 320
-    static let pitch: Float = layerWidth / refWidthPx   // m por píxel lógico (horizontal y vertical)
+    static let layerWidth: Float = 1.30     // m de ancho de la capa entera (la ventana visible del televisor)
+    static let aspect: Float = 0.75         // alto / ancho de la capa entera: la ventana visible es 4:3 en cualquier modo de vídeo
     /// Recorte (u0, v0, u1, v1) de la capa ENTERA: el panel único del 2D sin trocear (XRLayer2D.split == false) usa `size`/`center` con él.
     static let fullUV = SIMD4<Float>(0, 0, 1, 1)
 
@@ -213,19 +212,38 @@ enum XRFramedLayout {
         return XRMath.translation(p) * XRMath.rotationY(yaw) * XRMath.rotationX(pt) * XRMath.translation(SIMD3<Float>(0, 0, -overlayDistance))
     }
 
-    /// Tamaño lógico válido de la capa; 320x240 si no es plausible.
-    static func layer(_ p: SIMD2<Float>) -> SIMD2<Float> {
-        p.x.isFinite && p.y.isFinite && p.x >= 64 && p.x <= 1024 && p.y >= 64 && p.y <= 1024 ? p : SIMD2<Float>(320, 240)
-    }
-    /// Tamaño (m) del recorte `uv` (u0, v0, u1, v1): píxeles cuadrados.
+    /// Tamaño (m) del recorte `uv` (u0, v0, u1, v1). La capa entera mide SIEMPRE `layerWidth` x `layerWidth * aspect`: el 2D llega colocado en la ventana visible fija del televisor (gpu_display_window:
+    /// 320, 384 del códec, vídeos, 240 o 256 líneas), así que el panel no cambia de tamaño al cambiar de modo y el píxel lleva el aspecto del original (no es cuadrado). `layerPx` ya no interviene.
     static func size(uv: SIMD4<Float>, layerPx: SIMD2<Float>) -> SIMD2<Float> {
-        let l = layer(layerPx)
-        return SIMD2<Float>(max(uv.z - uv.x, 0.01) * l.x * pitch, max(uv.w - uv.y, 0.01) * l.y * pitch)
+        SIMD2<Float>(max(uv.z - uv.x, 0.01) * layerWidth, max(uv.w - uv.y, 0.01) * layerWidth * aspect)
     }
     /// Centro (m, x a la derecha, y arriba) del recorte respecto al centro del encuadre.
     static func center(uv: SIMD4<Float>, layerPx: SIMD2<Float>) -> SIMD2<Float> {
-        let l = layer(layerPx)
-        return SIMD2<Float>(((uv.x + uv.z) / 2 - 0.5) * l.x * pitch, (0.5 - (uv.y + uv.w) / 2) * l.y * pitch)
+        SIMD2<Float>(((uv.x + uv.z) / 2 - 0.5) * layerWidth, (0.5 - (uv.y + uv.w) / 2) * layerWidth * aspect)
+    }
+}
+
+/// Colocación del marco del juego en la ventana visible fija del televisor (runtime/gpu.h, gpu_display_window), en píxeles del juego: la capa 2D fiel llega ya como esa ventana entera.
+struct XR2DWindow: Equatable {
+    var w: Float, h: Float          // tamaño de la ventana (PAL 320: 320 x 268)
+    var ox: Float, oy: Float        // primer píxel del marco dentro de la ventana (PAL: 0, 5)
+    var dw: Float, dh: Float        // tamaño del marco (320 x 256)
+    init?(_ v: [Int32]) {
+        guard v.count >= 6, v[0] > 0, v[1] > 0, v[4] > 0, v[5] > 0 else { return nil }
+        w = Float(v[0]); h = Float(v[1]); ox = Float(v[2]); oy = Float(v[3]); dw = Float(v[4]); dh = Float(v[5])
+    }
+    /// Panel de la capa sobre la pantalla 3D nativa de ancho `screenW` (m). La pantalla 3D mide screenW x 0,75 screenW para 320 x 240 píxeles del juego centrados en el marco (su centro de proyección
+    /// es el centro del marco: desplazamiento de dibujo 160, alto/2), así que un píxel del juego mide screenW / 320 en los dos ejes. Para que bandas y subtítulos casen con el 3D el panel lleva ESE paso
+    /// (no el 4:3 de la ventana) y su centro se desplaza lo que el centro de la ventana dista del centro del marco. Devuelve tamaño (m) y desplazamiento (m, x derecha, y arriba).
+    /// nil si el marco no mide 320 de ancho o la ventana es de alta resolución (h >= 400): el que llama se queda con el tamaño de reserva.
+    func panelOnScreen3D(screenW: Float) -> (size: SIMD2<Float>, offset: SIMD2<Float>)? {
+        guard dw == 320, h < 400 else { return nil }
+        let p = screenW / 320
+        return (SIMD2<Float>(w * p, h * p), SIMD2<Float>((w / 2 - ox - dw / 2) * p, (oy + dh / 2 - h / 2) * p))
+    }
+    /// Recorte (u0, v0, u1, v1) dado en fracciones del MARCO del juego -> fracciones de la ventana (la textura de la capa).
+    func frameUV(_ r: SIMD4<Float>) -> SIMD4<Float> {
+        SIMD4<Float>((r.x * dw + ox) / w, (r.y * dh + oy) / h, (r.z * dw + ox) / w, (r.w * dh + oy) / h)
     }
 }
 
@@ -251,12 +269,9 @@ enum XRCinemaLayout {
         guard texPx.isFinite, texPx > 1 else { return w }
         return max(1, texPx.rounded()) * Float(logicalWidth) / ppm
     }
-    /// Alto/ancho real de la imagen mostrada (la textura lleva el tamaño lógico por la escala: la proporción es la misma a cualquier escala). 0,75 si no es plausible.
-    static func aspect(width: Int, height: Int) -> Float {
-        guard width > 0, height > 0 else { return 0.75 }
-        let a = Float(height) / Float(width)
-        return a.isFinite && a >= 0.5 && a <= 1.0 ? a : 0.75
-    }
+    /// Alto/ancho de la imagen 2D mostrada: siempre 3/4. El fotograma del juego y la capa 2D llegan colocados en la ventana visible fija del televisor (gpu_display_window: el mismo rectángulo en cualquier
+    /// modo de vídeo), que se muestra en 4:3 como en el original; el tamaño en píxeles (320x268, 365x268...) ya no decide la forma de la pantalla.
+    static func aspect(width: Int, height: Int) -> Float { 0.75 }
 }
 
 /// Seguimiento suave de la cabeza por las pantallas 2D (cine, pantalla 3D, ventanas del juego, menú VR). Funciones puras (las prueba el banco).

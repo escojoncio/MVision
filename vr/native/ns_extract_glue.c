@@ -19,6 +19,7 @@ static uint32_t g_fx_seq;
 static struct {
     _Atomic uint32_t calls, mesh_new, memo_stale, zone_changes, epoch_opened, store_full, drop_group, drop_hidden, drop_other, queue_sum;
     _Atomic uint32_t last_queue, last_inst, last_static, last_pieces, last_hidden_pieces, last_drop_group, last_drop_hidden, last_drop_other;
+    _Atomic uint32_t bad_dyn_pieces, last_bad_dyn_pieces, last_static_off_group;
 } G;
 
 static void bump(_Atomic uint32_t *c, uint32_t v) { atomic_fetch_add_explicit(c, v, memory_order_relaxed); }
@@ -33,6 +34,7 @@ static int glue_extract(const uint8_t *ram, const uint8_t *scratch, NsScene *out
     if (!g_fx) g_fx = ns_fx_scene_create(0);
     if (g_fx) {
         NsFxOpts fo = ns_fx_opts_default();
+        fo.hook_ram = 1;   /* RAM del gancho de la etapa «pantalla»: las teselas del cielo de este fotograma están en el búfer del reloj */
         have_fx = ns_fx_extract(ram, &fo, g_fx) == 0;
         if (have_fx) { eo.shadow_objs = g_fx->shadow_objs; eo.n_shadow = g_fx->n_shadow_objs; }
     }
@@ -58,6 +60,9 @@ static int glue_extract(const uint8_t *ram, const uint8_t *scratch, NsScene *out
     atomic_store_explicit(&G.last_drop_group, st.drop_group, memory_order_relaxed);
     atomic_store_explicit(&G.last_drop_hidden, st.drop_hidden_flag, memory_order_relaxed);
     atomic_store_explicit(&G.last_drop_other, other, memory_order_relaxed);
+    bump(&G.bad_dyn_pieces, st.bad_dyn_pieces);
+    atomic_store_explicit(&G.last_bad_dyn_pieces, st.bad_dyn_pieces, memory_order_relaxed);
+    atomic_store_explicit(&G.last_static_off_group, st.static_off_group, memory_order_relaxed);
     return rc;
 }
 static void glue_reset(NsMeshStore *st, void *user) { (void)user; ns_store_reset(st); }
@@ -81,4 +86,7 @@ void ns_extract_glue_stats(NsExtractGlueStats *o) {
     o->last_hidden_pieces = atomic_load_explicit(&G.last_hidden_pieces, memory_order_relaxed);
     o->last_drop_group = atomic_load_explicit(&G.last_drop_group, memory_order_relaxed); o->last_drop_hidden = atomic_load_explicit(&G.last_drop_hidden, memory_order_relaxed);
     o->last_drop_other = atomic_load_explicit(&G.last_drop_other, memory_order_relaxed);
+    o->bad_dyn_pieces = atomic_load_explicit(&G.bad_dyn_pieces, memory_order_relaxed);
+    o->last_bad_dyn_pieces = atomic_load_explicit(&G.last_bad_dyn_pieces, memory_order_relaxed);
+    o->last_static_off_group = atomic_load_explicit(&G.last_static_off_group, memory_order_relaxed);
 }

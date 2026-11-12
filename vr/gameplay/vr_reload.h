@@ -88,6 +88,7 @@ typedef struct VrReloadOut {
     int sync_chambered;      /* >= 0: bala en la recámara (WeaponState.chambered) que corresponde al juego; -1 = no tocar */
     int sync_force;          /* 0: son TOPES (mag_rounds = min(mag_rounds, sync_rounds)); 1: fijar exactamente (recarga completada) */
     int show_mag, show_reserve;   /* munición del juego para la pantalla */
+    int load_mag;            /* > 0: munición sin cargar con el arma seca (recogida): el anfitrión escribe este valor en el cargador del juego (GM_Magazine) = min(GM_MagazineMax, GM_Weapons[arma]) (francotirador: capacidad fija 5), lo que hace el propio juego al recargar (sna_init.c sna_80057A90, time == 0); al verlo cargado sale `arm_ready` */
     int arm_ready;           /* 1 en un solo VBlank (estado READY): la munición recogida con el arma VR seca ya está en el cargador del juego (`show_mag`): dejar el arma VR lista con sync_rounds/sync_chambered (WeaponDef.make_ready) */
 } VrReloadOut;
 

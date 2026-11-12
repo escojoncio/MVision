@@ -160,6 +160,7 @@ enum {
     NS_IF_THERMAL_OK = 16u, /* admite textura térmica (CLUT alterno en VRAM; informativo) */
     NS_IF_RIGID = 32u,   /* todas las piezas comparten la misma matriz */
     NS_IF_ENVREFL = 64u, /* mapa de reflexión (raro; la normal se proyecta sobre la vista) */
+    NS_IF_GBOUND = 256u, /* el motor decide su visibilidad con la caja de la definición (marca GBOUND del objeto): la etapa de subdivisión NO parte sus caras (libdg/divide.c) */
     NS_IF_SHADOW = 128u  /* sombra proyectada: la dibuja el módulo de efectos; el extractor NO la emite (sólo aparece en pruebas/depuración) */
 };
 

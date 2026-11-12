@@ -67,6 +67,12 @@ final class XRFinalPass {
     private let screenPSO: MTLRenderPipelineState
     private let screen3dPSO: MTLRenderPipelineState
     private let panelPSO: MTLRenderPipelineState
+    /// Panel de la capa 2D fiel (vr_layer2d): composición del original leyendo el destino (sin mezcla fija) y su reserva con mezcla «over» premultiplicada (XR2DCompose). nil si la biblioteca no trae la función.
+    private let l2dPSO: MTLRenderPipelineState?
+    private let l2dOverPSO: MTLRenderPipelineState?
+    private let linearTarget: Bool
+    /// Texturas de panel que son capas 2D fieles (las fija el bucle de render cada fotograma): `shown` = la textura del XRDrawItem (puede ser la vista sRGB), `color` = la misma sin sRGB, `planes` = resta y tope.
+    var layerPlanes: [(shown: MTLTexture, color: MTLTexture, planes: MTLTexture)] = []
     private let veilPSO: MTLRenderPipelineState
     private let vignettePSO: MTLRenderPipelineState
     private let dsAlways: MTLDepthStencilState
@@ -136,6 +142,20 @@ final class XRFinalPass {
               let p4 = try? device.makeRenderPipelineState(descriptor: d4),
               let p5 = try? device.makeRenderPipelineState(descriptor: d5) else { return nil }
         resolvePSO = p1; fillPSO = p1f; screenPSO = p2; screen3dPSO = p2b; panelPSO = p3; veilPSO = p4; vignettePSO = p5
+        var p6: MTLRenderPipelineState?, p6o: MTLRenderPipelineState?
+        if device.supportsFamily(.apple2), let f = lib.makeFunction(name: "xr_panel_l2d_fragment" + sfx) {   // leer el destino en el shader: solo GPU de Apple
+            let d = blended("mv.xr.panel.l2d", qV, f, topology: true)
+            d.colorAttachments[0].isBlendingEnabled = false          // la mezcla la hace el shader con el color del destino
+            p6 = try? device.makeRenderPipelineState(descriptor: d)
+        }
+        if let f = lib.makeFunction(name: "xr_panel_l2d_over_fragment" + sfx) {
+            p6o = try? device.makeRenderPipelineState(descriptor: blended("mv.xr.panel.l2dOver", qV, f, topology: true))
+        }
+        l2dPSO = p6; l2dOverPSO = p6o
+        switch colorFormat {
+        case .bgra8Unorm_srgb, .rgba8Unorm_srgb, .rgba16Float: linearTarget = true
+        default: linearTarget = false
+        }
 
         let a = MTLDepthStencilDescriptor()
         a.depthCompareFunction = .always; a.isDepthWriteEnabled = true
@@ -251,21 +271,29 @@ final class XRFinalPass {
                 continue
             }
             guard let tex = it.texture else { continue }
+            // capa 2D fiel: su pipeline (lectura del destino o reserva «over»), el color sin vista sRGB y los planos de resta y tope
+            let layer = it.kind == .panel ? layerPlanes.first(where: { $0.shown === tex }) : nil
+            let l2d = layer == nil ? nil : (XR2DCompose.framebufferFetch ? (l2dPSO ?? l2dOverPSO) : (l2dOverPSO ?? l2dPSO))
             var u = QuadUniforms()
             u.mvp0 = projections[0] * views[0] * it.model
             u.mvp1 = projections[1] * views[1] * it.model
             u.uvrect = it.uvrect
             u.geom = SIMD4<Float>(it.size.x, it.size.y, it.distance, it.curve)
             u.tex = SIMD4<Float>(it.imgSize.x, it.imgSize.y, it.sharp, it.kind == .screen ? 1 : it.opacity)
-            u.cfg = SIMD4<UInt32>(base, max(it.cols, 1), (it.outLinear ? 1 : 0) | (it.storedLinear ? 2 : 0), it.kind == .panel ? it.pixelMode : 0)
+            u.cfg = SIMD4<UInt32>(base, max(it.cols, 1), (it.outLinear || (l2d != nil && linearTarget) ? 1 : 0) | (it.storedLinear ? 2 : 0), it.kind == .panel ? it.pixelMode : 0)
             u.fxTint = SIMD4<Float>(it.tint.x, it.tint.y, it.tint.z, 0)
             if it.covers.count >= 4 { u.fxCov0 = it.covers[0]; u.fxCov1 = it.covers[1]; u.fxCov2 = it.covers[2]; u.fxCov3 = it.covers[3] }
             u.tex.w = (it.kind == .screen || it.kind == .screen3d) ? 1 : it.opacity
-            enc.setRenderPipelineState(it.kind == .screen ? screenPSO : it.kind == .screen3d ? screen3dPSO : panelPSO)
+            enc.setRenderPipelineState(l2d ?? (it.kind == .screen ? screenPSO : it.kind == .screen3d ? screen3dPSO : panelPSO))
             enc.setDepthStencilState(it.kind == .menu || it.onTop ? dsOverlay : dsHud)
             enc.setVertexBytes(&u, length: MemoryLayout<QuadUniforms>.stride, index: 0)
             enc.setFragmentBytes(&u, length: MemoryLayout<QuadUniforms>.stride, index: 0)
-            enc.setFragmentTexture(tex, index: 0)
+            if let l = layer, l2d != nil {
+                enc.setFragmentTexture(l.color, index: 0)
+                enc.setFragmentTexture(l.planes, index: 1)
+            } else {
+                enc.setFragmentTexture(tex, index: 0)
+            }
             enc.setFragmentSamplerState(sampler, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: Int(2 * (max(it.cols, 1) + 1)), instanceCount: instances)
             nDrawn[it.kind, default: 0] += 1

@@ -424,6 +424,21 @@ static void t_cull_policy(void) {
     CHECK(s_below != s_above, "el mismo triángulo es anverso por un lado y reverso por el otro");
 }
 
+/* Fondo de cielo (NSFX_ROLE_SKY): cuadrilátero de mundo opaco y texturizado a 200 m. Entra en el pase opaco (con prueba de profundidad: queda detrás de todo lo que esté más cerca), en su sitio,
+ * visible por los dos ojos, sin niebla aunque la escena la tenga y sin que la red de seguridad lo descarte por tamaño o distancia. */
+static void t_sky(void) {
+    NsEffect e = quad(30000, 60000, 200000, 12000);
+    e.flags = NS_EF_TEXTURED | NS_EF_NOFOG; e.role = 23; e.idx = 7;
+    NsFog fog; memset(&fog, 0, sizeof fog); fog.active = 1; fog.start = 1000; fog.len = 2000;
+    P.fog = &fog; P.drop_inside_m = 0.3f; P.raise_m = 0.001f; P.board_pull = 0.5f;
+    NsGpuFxVert vb[24]; NsGpuFxRun runs[2]; uint64_t keys[2]; NsGpuFxOut o;
+    CHECK(build(&e, 1, vb, runs, keys, &o) == 0 && o.n_opaque == 6 && o.n_semi == 0 && o.n_drawn == 1 && o.n_skipped == 0 && o.n_drop_inside == 0 && o.n_drop_oncam == 0, "cielo: opaco=%u semi=%u dibujados=%u", o.n_opaque, o.n_semi, o.n_drawn);
+    CHECK(fabsf(vb[0].p[2] - 200.0f) < 1e-3f && fabsf(vb[0].p[0] - 18.0f) < 1e-3f && vb[0].eyes == 3u, "a 200 m, en su sitio y para los dos ojos: (%f %f %f)", vb[0].p[0], vb[0].p[1], vb[0].p[2]);
+    CHECK(vb[0].col[0] == 128.0f && vb[0].col[2] == 128.0f, "sin niebla: color %f", vb[0].col[0]);
+    CHECK(strcmp(ns_gpu_fx_role_name(23), "sky") == 0, "papel 23 = sky");
+    P.fog = NULL;
+}
+
 int main(void) {
     setup();
     t_poly();
@@ -433,6 +448,7 @@ int main(void) {
     setup(); t_oneside();
     setup(); t_limits();
     setup(); t_fog();
+    setup(); t_sky();
     setup(); t_merge();
     t_export_roundtrip();
     setup(); t_near();

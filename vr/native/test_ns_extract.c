@@ -7,12 +7,6 @@
 #include <string.h>
 
 static int fails;
-/* Las pruebas heredadas miden la cola sola: el escaneo de objetos fuera de cola se prueba aparte. */
-static int ex_noscan(NsScene *sc, NsMeshStore *st, const uint8_t *ram, size_t n, const uint8_t *scr, size_t sn, NsExtractStats *S) {
-    NsExtractOpts o; memset(&o, 0, sizeof o); o.no_extra_scan = 1;
-    return ns_extract_ex(sc, st, ram, n, scr, sn, &o, S);
-}
-#define ns_extract ex_noscan
 #define CHECK(c) do { if (!(c)) { printf("FALLO %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
 
 static uint8_t *ram;
@@ -234,18 +228,19 @@ int main(void) {
     CHECK((sc.valid & NS_SV_MAP_OK) && (sc.valid & NS_SV_LISTS_OK) && (sc.valid & NS_SV_GAME));
     CHECK(es.queue_n == 11);
     CHECK(es.drop_hidden_flag == 1);
-    CHECK(es.drop_group == 1);
+    CHECK(es.drop_group == 0 && es.static_off_group == 1);   /* objeto 3: escenario de un grupo no activo: se extrae igual */
     CHECK(es.drop_badobj == 1);
     CHECK(es.drop_dup == 1);
     CHECK(es.drop_null == 1);
     CHECK(es.drop_badptr == 2);
     CHECK(es.drop_bad_model == 1);
     CHECK(es.ext_bad == 1);
-    CHECK(sc.n_inst == 4);   /* objetos 0, 1, 5 (modelo roto: pieza oculta) y 6 */
+    CHECK(sc.n_inst == 5);   /* objetos 0, 1, 3 (otro grupo), 5 (modelo roto: pieza oculta) y 6 */
     CHECK(es.n_ext_pieces == 1);
-    CHECK(es.n_static == 3);
+    CHECK(es.n_static == 4);
     CHECK(sc.inst[0].flags & NS_IF_STATIC);   /* el escenario va primero */
-    CHECK(!(sc.inst[3].flags & NS_IF_STATIC) && sc.inst[3].key == (0x80000000u | (O1 & 0x1FFFFFFFu)));
+    CHECK(!(sc.inst[4].flags & NS_IF_STATIC) && sc.inst[4].key == (0x80000000u | (O1 & 0x1FFFFFFFu)));
+    { const NsInstance *i3 = find_inst(&sc, O3); CHECK(i3 && (i3->flags & NS_IF_STATIC) && i3->zone_mask == 4); }
     CHECK(sc.cam.h == 320.0f && fabsf(sc.cam.eye[0] - 100.0f) < 1e-3f && fabsf(sc.cam.rot[0] - 4106.0f / 4096.0f) < 1e-4f);
     CHECK(sc.cam.overscan_y == NS_OVERSCAN_Y);
     CHECK(sc.group_mask == 1);
@@ -316,13 +311,13 @@ int main(void) {
     /* sombras: lista del módulo de efectos y heurística */
     {
         uint32_t skip[1] = {O1};
-        NsExtractOpts xo; memset(&xo, 0, sizeof xo); xo.shadow_objs = skip; xo.n_shadow = 1; xo.no_extra_scan = 1;
+        NsExtractOpts xo; memset(&xo, 0, sizeof xo); xo.shadow_objs = skip; xo.n_shadow = 1;
         rc = ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &xo, &es);
-        CHECK(rc == 0 && es.shadow_omitted == 1 && sc.n_shadow_omitted == 1 && sc.n_inst == 3 && !find_inst(&sc, O1));
+        CHECK(rc == 0 && es.shadow_omitted == 1 && sc.n_shadow_omitted == 1 && sc.n_inst == 4 && !find_inst(&sc, O1));
         q2(O11, O1);
         rc = ns_extract(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &es);
         CHECK(rc == 0 && sc.n_inst == 2 && sc.n_shadow_omitted == 0);
-        memset(&xo, 0, sizeof xo); xo.detect_shadows = 1; xo.no_extra_scan = 1;
+        memset(&xo, 0, sizeof xo); xo.detect_shadows = 1;
         rc = ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &xo, &es);
         CHECK(rc == 0 && sc.n_inst == 1 && sc.n_shadow_omitted == 1 && es.shadow_omitted == 1 && find_inst(&sc, O1));
     }
@@ -551,7 +546,7 @@ int main(void) {
         CHECK(invariants(&s2, st));
         ns_scene_free(&s2);
         CHECK(ns_scene_alloc_exact(&s2, 8, 8, 4, 1) == 0);
-        NsExtractOpts xo; memset(&xo, 0, sizeof xo); xo.max_pieces = 3; xo.no_extra_scan = 1;   /* tope global por llamada */
+        NsExtractOpts xo; memset(&xo, 0, sizeof xo); xo.max_pieces = 3;   /* tope global por llamada */
         q2(O0, O1);
         rc = ns_extract_ex(&s2, st, ram, NS_RAM_SIZE, NULL, 0, &xo, &es);
         CHECK(s2.n_piece == 2 && s2.n_dropped_inst == 1 && (s2.truncated & NS_TR_PIECE));
@@ -562,7 +557,7 @@ int main(void) {
     {
         fresh();
         w32(O1 + 0x28, 0x32Du | OF_HIDDEN_TEST);
-        NsExtractOpts po; memset(&po, 0, sizeof po); po.no_extra_scan = 1;
+        NsExtractOpts po; memset(&po, 0, sizeof po);
         q2(O0, O1);
         rc = ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &po, &es);
         CHECK(rc == 0 && es.drop_hidden_flag == 1 && !find_inst(&sc, O1) && sc.n_inst == 1);
@@ -601,47 +596,47 @@ int main(void) {
         CHECK(ok == 300);
         CHECK(inv == 300);
     }
-    /* Objetos dibujados por el motor pero ausentes de la cola principal */
+    /* Fuente única: la cola del canal. Un objeto con cabecera válida que NO está en la cola no se extrae (antes lo añadía un escaneo de la RAM por firma: fantasmas de la zona anterior). */
     {
-        NsExtractStats a, b; NsExtractOpts o0; memset(&o0, 0, sizeof o0); o0.no_extra_scan = 1;
+        NsExtractStats a;
         fresh(); q1(O0);
-        uint32_t ok_o = object(0x0D, 1, 1, DEF0, LIGHTG);                 /* válido: dinámico, sin ocultar */
-        w32(piece(ok_o, 0) + 0x40, DEF0 + 0x20); wmat(piece(ok_o, 0), 4096, 7, 0, 0);
-        uint32_t hid = object(0x8D, 1, 1, DEF0, LIGHTG);                  /* oculto (reserva): no se dibuja */
-        w32(piece(hid, 0) + 0x40, DEF0 + 0x20); wmat(piece(hid, 0), 4096, 9, 0, 0);
-        uint32_t stat = object(0x03, 1, 1, DEF0, LIGHTG);                 /* precoloreado sin luz: estático */
-        w32(piece(stat, 0) + 0x40, DEF0 + 0x20); wmat(piece(stat, 0), 4096, 11, 0, 0);
-        uint32_t grp = object(0x0D, 4, 1, DEF0, LIGHTG);                  /* grupo no activo */
-        w32(piece(grp, 0) + 0x40, DEF0 + 0x20); wmat(piece(grp, 0), 4096, 13, 0, 0);
-        uint32_t nomd = object(0x0D, 1, 1, DEF0, LIGHTG);                 /* sin firma de modelo (def+0x20) */
-        w32(piece(nomd, 0) + 0x40, DEF0 + 0x40); wmat(piece(nomd, 0), 4096, 15, 0, 0);
-        memset(&a, 0, sizeof a); memset(&b, 0, sizeof b);
-        CHECK(ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, &o0, &a) == 0);
-        uint32_t base = sc.n_inst;
-        CHECK(a.extra_objs == 0);
-        CHECK(ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, NULL, &b) == 0);
-        CHECK(b.extra_objs >= 1);
-        CHECK(sc.n_inst == base + b.extra_objs);
-        int has[5] = {0, 0, 0, 0, 0}, dup = 0;
-        const uint32_t want[5] = {ok_o, hid, stat, grp, nomd};
-        for (uint32_t i = 0; i < sc.n_inst; i++) {
-            for (int k = 0; k < 5; k++) if (sc.inst[i].key == (0x80000000u | (want[k] & 0x1FFFFFFFu))) has[k]++;
-            for (uint32_t j = 0; j < i; j++) if (sc.inst[i].key == sc.inst[j].key) dup++;
-        }
-        CHECK(has[0] == 1);                    /* el válido entra una sola vez */
-        CHECK(has[1] == 0 && has[2] == 0 && has[3] == 0 && has[4] == 0);
-        CHECK(dup == 0);
-        /* sin duplicados: una segunda extracción da lo mismo; y el objeto de la cola no se repite */
-        NsExtractStats c; memset(&c, 0, sizeof c);
-        CHECK(ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, NULL, &c) == 0);
-        CHECK(c.extra_objs == b.extra_objs && sc.n_inst == base + c.extra_objs);
-        /* un objeto presente en la cola no se repite al escanear */
-        fresh(); q2(O0, O1);
-        memset(&b, 0, sizeof b);
-        CHECK(ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, NULL, &b) == 0);
-        dup = 0;
-        for (uint32_t i = 0; i < sc.n_inst; i++) for (uint32_t j = 0; j < i; j++) if (sc.inst[i].key == sc.inst[j].key) dup++;
-        CHECK(dup == 0);
+        uint32_t ghost = object(0x0D, 1, 1, DEF0, LIGHTG);                /* dinámico, sin ocultar, grupo activo, modelo = def + 0x20: la firma que buscaba el escaneo */
+        w32(piece(ghost, 0) + 0x40, DEF0 + 0x20); wmat(piece(ghost, 0), 4096, 7, 0, 0);
+        CHECK(ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, NULL, &a) == 0);
+        CHECK(sc.n_inst == 1 && find_inst(&sc, ghost) == NULL && find_inst(&sc, O0) != NULL);
+    }
+    /* Grupos de mapa: el escenario de un grupo NO activo se extrae igual, marcado con su grupo; un objeto dinámico de un grupo no activo no (el motor no lo dibuja). */
+    {
+        NsExtractStats a;
+        fresh();
+        uint32_t map2 = object(0x57, 4, 1, DEF0, LIGHTG);                 /* escenario del grupo 4 (el activo es 1) */
+        w32(piece(map2, 0) + 0x40, DEF0 + 0x20); wmat(map2, 4096, 500, 0, 0);
+        uint32_t dyn2 = object(0x0D, 4, 1, DEF0, LIGHTG);                 /* dinámico del grupo 4 */
+        w32(piece(dyn2, 0) + 0x40, DEF0 + 0x20); wmat(piece(dyn2, 0), 4096, 13, 0, 0);
+        uint32_t v3[3] = {O0, map2, dyn2};
+        queue_set(3, v3);
+        CHECK(ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, NULL, &a) == 0);
+        const NsInstance *m2 = find_inst(&sc, map2);
+        CHECK(m2 && (m2->flags & NS_IF_STATIC) && m2->zone_mask == 4 && m2->n_pieces == 1);
+        CHECK(m2 && !(sc.piece[m2->first_piece].flags & NS_PF_HIDDEN) && sc.piece[m2->first_piece].mesh_id != 0);
+        CHECK(find_inst(&sc, dyn2) == NULL);
+        CHECK(a.static_off_group == 1 && a.drop_group == 1);
+        CHECK(sc.group_mask == 1);                                          /* la escena sigue diciendo qué grupos tiene activos el motor */
+        CHECK(!(sc.valid & NS_SV_MAP_INCOMPLETE));
+    }
+    /* Pieza dinámica con el modelo roto: queda oculta, la escena sigue apta y se CUENTA (no desaparece en silencio). */
+    {
+        NsExtractStats a;
+        fresh();
+        uint32_t bd = object(0x0D, 1, 2, DEF0, LIGHTG);
+        w32(piece(bd, 0) + 0x40, DEF0 + 0x20); wmat(piece(bd, 0), 4096, 1, 0, 0);
+        w32(piece(bd, 1) + 0x40, 0x801FFFF0u); wmat(piece(bd, 1), 4096, 2, 0, 0);   /* modelo fuera de RAM */
+        q2(O0, bd);
+        CHECK(ns_extract_ex(&sc, st, ram, NS_RAM_SIZE, NULL, 0, NULL, &a) == 0);
+        const NsInstance *ib = find_inst(&sc, bd);
+        CHECK(ib && ib->n_pieces == 2 && (sc.piece[ib->first_piece + 1].flags & NS_PF_HIDDEN) && !(sc.piece[ib->first_piece].flags & NS_PF_HIDDEN));
+        CHECK(a.bad_dyn_pieces == 1);
+        CHECK(!(sc.valid & NS_SV_MAP_INCOMPLETE));
     }
     /* objetos de UNA matriz (M_RIGIDO, 0x40): la rutina de pantalla del motor transforma TODAS las piezas con la matriz de la RAIZ (obj+0x00); lo que quede en la matriz propia de cada pieza (+0x00) es
      * un residuo: en la etapa de la overlay de la introducción son sus traslaciones relativas al ojo (raíz - ojo), aquí unas cualquiera. Los articulados (sin 0x40) sí usan la de cada pieza. */

@@ -133,12 +133,17 @@ int ns_cinema_depth_filter(NsCinemaDepthFilter *f, const NsScene *sc, float *z_n
         if (!(jump <= NS_CINEMA_CUT_DIST) || !(cs >= cosf(NS_CINEMA_CUT_DEG * 0.0174533f))) cut = 1;   /* NaN => corte */
     }
     float zn, zs;
-    const int raw = ns_cinema_depth(sc, &zn, &zs);
+    int raw = ns_cinema_depth(sc, &zn, &zs);
+    if (f->z_static > 0.0f) {   /* el escenario cercano también cuenta para el paralaje */
+        if (!raw) { zn = f->z_static; zs = (!cut && f->inv_subj > 0.0f) ? 1.0f / f->inv_subj : NS_CINEMA_CONV_DEFAULT; raw = 1; }
+        else if (f->z_static < zn) zn = f->z_static;
+    }
     if (cut || (raw && !(f->inv_subj > 0.0f))) {
         f->inv_near = raw ? 1.0f / zn : 0.0f; f->inv_subj = raw ? 1.0f / zs : 0.0f;
     } else if (raw) {
         const float a = 1.0f - expf(-(float)((double)(sc->t_ns - f->t_ns) * 1e-9) / NS_CINEMA_TAU_S);
         f->inv_near += a * (1.0f / zn - f->inv_near); f->inv_subj += a * (1.0f / zs - f->inv_subj);
+        if (1.0f / zn > f->inv_near) f->inv_near = 1.0f / zn;   /* lo que se acerca, en el acto (la separación baja hasta el límite de paralaje cruzado); lo que se aleja, con tau */
     }
     f->have = 1; f->t_ns = sc->t_ns;
     memcpy(f->eye, c->eye, sizeof f->eye); memcpy(f->fwd, fwd, sizeof f->fwd);

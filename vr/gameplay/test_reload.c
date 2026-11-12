@@ -201,6 +201,171 @@ static void t_pickup_dry(void) {
     CHECK(st.pickups == 1 && st.arms == 1 && st.empty_runs == 1, "contadores recogidas=%u rearmes=%u maniobras=%u", st.pickups, st.arms, st.empty_runs);
     CHECK(vrreload_pickup_pending() == 0, "sin recogida pendiente");
 }
+/* ---- 3c. RECOGIDA con el arma seca cuando la maniobra R1 NO recarga (log del visor 20261112_111703, [arma] vb~38096-38202: la primera maniobra no cargó nada, 106 VBlanks con el gatillo muerto):
+ * el cargador del juego se carga directamente (VrReloadOut.load_mag = min(GM_MagazineMax, GM_Weapons), lo mismo que hace el juego en sna_init.c sna_80057A90 con time == 0), sin toques del mando. */
+static void t_pickup_direct(void) {
+    cfg_method(VRR_VIA_R1_DOUBLE, 2);
+    Game g = newgame(1, 1); g.never = 1; VrReloadOut o; PulseLog pl = newlog();
+    VrReloadIn dry = in0(); dry.ready = 0; dry.no_mag = 1;
+    run(&g, 5, in0(), &o, &pl);
+    g.mag = 0; g.total = 0; g.mag_max = 12;                     /* el último disparo deja GM_MagazineMax = 12 (weapon/socom.c:359) */
+    run(&g, 60, dry, &o, &pl);
+    CHECK(o.state == VRR_EMPTY && o.load_mag == 0, "sin balas: nada que cargar (%d)", o.load_mag);
+    g.total = 30;
+    int presses = 0, ready_vbl = -1;
+    for (int i = 0; i < 10 && ready_vbl < 0; i++) {
+        o = step(&g, dry, &pl);
+        if (o.pad_force) presses++;
+        if (o.load_mag > 0) { CHECK(o.load_mag == 12, "carga = min(capacidad 12, total 30) (%d)", o.load_mag); g.mag = o.load_mag; }   /* el anfitrión lo escribe en GM_Magazine */
+        if (o.arm_ready) ready_vbl = i;
+    }
+    CHECK(ready_vbl >= 0 && ready_vbl <= 2 && presses == 0 && o.state == VRR_READY && o.fire_allowed, "lista en %d VBlanks sin maniobra (toques %d, estado %d)", ready_vbl, presses, o.state);
+    CHECK(o.sync_rounds == 11 && o.sync_chambered == 1 && o.load_mag == 0, "cuenta del arma VR 11+1 (%d)", o.sync_rounds);
+    /* recogida con el jugador sin control o el arma VR sin mostrar (el flanco se pierde): al volver, munición sin cargar con el arma seca = lo mismo */
+    g.mag = 0; g.total = 0; run(&g, 60, dry, &o, &pl);
+    g.ok = 0; run(&g, 3, dry, &o, &pl); g.total = 5; run(&g, 3, dry, &o, &pl); g.ok = 1;
+    ready_vbl = -1;
+    for (int i = 0; i < 10 && ready_vbl < 0; i++) {
+        o = step(&g, dry, &pl);
+        if (o.load_mag > 0) { CHECK(o.load_mag == 5, "carga = total 5 (%d)", o.load_mag); g.mag = o.load_mag; }
+        if (o.arm_ready) ready_vbl = i;
+    }
+    CHECK(ready_vbl >= 0 && ready_vbl <= 3 && o.state == VRR_READY && o.sync_rounds == 4, "recogida sin control: lista en %d VBlanks (estado %d)", ready_vbl, o.state);
+    /* recogida con el arma VR sin mostrar (seguimiento perdido): igual */
+    g.mag = 0; g.total = 0; run(&g, 60, dry, &o, &pl);
+    VrReloadIn hid = dry; hid.weapon_id = -1; run(&g, 2, hid, &o, &pl); g.total = 7; run(&g, 2, hid, &o, &pl);
+    ready_vbl = -1;
+    for (int i = 0; i < 10 && ready_vbl < 0; i++) { o = step(&g, dry, &pl); if (o.load_mag > 0) g.mag = o.load_mag; if (o.arm_ready) ready_vbl = i; }
+    CHECK(ready_vbl >= 0 && ready_vbl <= 3 && o.state == VRR_READY && g.mag == 7, "recogida con el arma VR oculta: lista en %d VBlanks (cargador %d)", ready_vbl, g.mag);
+    /* francotirador: el juego recarga siempre 5 (sna_init.c:6098-6106) aunque GM_MagazineMax sea 6 (rifle.c:205) */
+    cfg_method(VRR_VIA_R1_DOUBLE, 2);
+    Game r = newgame(1, 1); r.never = 1; r.weapon = r.equipped_id = 9; r.mag_max = 6;
+    VrReloadIn rin = in0(); rin.weapon_id = 9; VrReloadIn rdry = rin; rdry.ready = 0; rdry.no_mag = 1;
+    run(&r, 5, rin, &o, &pl); r.mag = 0; r.total = 0; run(&r, 60, rdry, &o, &pl);
+    r.total = 20; o = step(&r, rdry, &pl);
+    CHECK(o.load_mag == 5, "francotirador: carga 5 (%d)", o.load_mag);
+    r.mag = 5; r.ok = 0; run(&r, 5, rdry, &o, &pl); r.ok = 1; o = step(&r, rdry, &pl);       /* pausa justo tras cargar: el rearme pendiente es del arma 9 */
+    CHECK(o.arm_ready && o.state == VRR_READY, "francotirador: pausa tras cargar, rearma al volver (estado %d)", o.state);
+}
+/* SIN recogida: cargador agotado con reserva (el gesto de recarga es obligatorio, t_empty_needs_gesture). Una pausa/menú/códec o el arma VR oculta un VBlank NO la dejan lista ni cargan nada. */
+static void t_pause_keeps_gesture(void) {
+    cfg_method(VRR_VIA_R1_DOUBLE, 2);
+    Game g = newgame(1, 30); g.never = 1; VrReloadOut o; PulseLog pl = newlog();
+    VrReloadIn dry = in0(); dry.ready = 0; dry.no_mag = 1;
+    run(&g, 5, in0(), &o, &pl);
+    g.mag = 0;
+    run(&g, 10, dry, &o, &pl);
+    g.ok = 0; run(&g, 3, dry, &o, &pl); g.ok = 1;
+    int arms = 0, loads = 0;
+    for (int i = 0; i < 6; i++) { o = step(&g, dry, &pl); if (o.load_mag > 0) { loads++; g.mag = o.load_mag; } arms += o.arm_ready; }
+    CHECK(o.state == VRR_EMPTY && !o.fire_allowed && arms == 0 && loads == 0, "pausa con el arma seca y reserva, sin recogida: sigue EMPTY (estado %d, rearmes %d, cargas %d)", o.state, arms, loads);
+    VrReloadIn hid = dry; hid.weapon_id = -1; run(&g, 1, hid, &o, &pl);
+    for (int i = 0; i < 6; i++) { o = step(&g, dry, &pl); if (o.load_mag > 0) { loads++; g.mag = o.load_mag; } arms += o.arm_ready; }
+    CHECK(o.state == VRR_EMPTY && !o.fire_allowed && arms == 0 && loads == 0, "arma VR oculta 1 VBlank, sin recogida: sigue EMPTY (estado %d, rearmes %d, cargas %d)", o.state, arms, loads);
+    /* una recogida perdida de OTRA arma no vale para esta */
+    hid.weapon_id = -1; g.weapon = 1; g.total = 0; run(&g, 2, hid, &o, &pl); g.total = 50; run(&g, 2, hid, &o, &pl); g.weapon = 0; g.total = 30;
+    for (int i = 0; i < 6; i++) { o = step(&g, dry, &pl); if (o.load_mag > 0) { loads++; g.mag = o.load_mag; } arms += o.arm_ready; }
+    CHECK(o.state == VRR_EMPTY && arms == 0 && loads == 0, "recogida de otra arma: sigue EMPTY (estado %d, rearmes %d, cargas %d)", o.state, arms, loads);
+}
+/* ---- 3d. ventanas de 1 VBlank de la recogida con el arma seca (cada una dejaba la pistola muerta hasta re-seleccionarla). El anfitrión escribe load_mag en el cargador del juego. ---- */
+typedef struct { int arms, loads, presses; VrReloadOut o; } Acc;
+static void runl(Game *g, int n, VrReloadIn in, Acc *a) {
+    for (int i = 0; i < n; i++) { a->o = step(g, in, NULL); if (a->o.load_mag > 0) { a->loads++; g->mag = a->o.load_mag; } a->arms += a->o.arm_ready; if (a->o.pad_force) a->presses++; }
+}
+static Game drygame(int mag, int total) { Game g = newgame(mag, total); g.never = 1; g.mag_max = 12; return g; }
+static void t_pickup_windows(void) {
+    VrReloadIn rdy = in0(), dry = in0(), hid = in0(); dry.ready = 0; dry.no_mag = 1; hid.weapon_id = -1; hid.ready = 0;
+    Acc a;
+    /* S1: la recogida llega en el mismo VBlank que el último disparo (READY -> EMPTY) */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(1, 1); memset(&a, 0, sizeof a); runl(&g, 5, rdy, &a);
+      g.mag = 0; g.total = 12; runl(&g, 4, dry, &a);
+      CHECK(a.o.state == VRR_READY && a.arms == 1 && a.loads == 1 && a.presses == 0 && g.mag == 12, "S1 recogida en el VBlank del último disparo: lista (estado %d, rearmes %d, cargas %d)", a.o.state, a.arms, a.loads); }
+    /* S3: cargador escrito y el VBlank siguiente sin control (pausa): al volver el arma VR se rearma (no basta READY: sigue sin cargador) */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(0, 0); memset(&a, 0, sizeof a); runl(&g, 5, dry, &a);
+      g.total = 12; runl(&g, 1, dry, &a); CHECK(a.loads == 1 && a.arms == 0, "S3: cargado, aún sin rearmar");
+      g.ok = 0; runl(&g, 30, dry, &a); g.ok = 1; runl(&g, 4, dry, &a);
+      CHECK(a.o.state == VRR_READY && a.arms == 1, "S3 pausa justo tras cargar: rearma al volver (estado %d, rearmes %d)", a.o.state, a.arms); }
+    /* S3b: lo mismo con el arma VR oculta (con control) */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(0, 0); memset(&a, 0, sizeof a); runl(&g, 5, dry, &a);
+      g.total = 12; runl(&g, 1, dry, &a); runl(&g, 30, hid, &a); runl(&g, 4, dry, &a);
+      CHECK(a.o.state == VRR_READY && a.arms == 1 && a.loads == 1, "S3b arma oculta justo tras cargar: rearma al volver (estado %d, rearmes %d)", a.o.state, a.arms);
+      /* ...pero no si entretanto se cambió de arma y se volvió (el arma se crea de nuevo: cuenta del juego, sin rearme pendiente) */
+      cfg_method(VRR_VIA_R1_DOUBLE, 2); g = drygame(0, 0); memset(&a, 0, sizeof a); runl(&g, 5, dry, &a);
+      g.total = 12; runl(&g, 1, dry, &a); runl(&g, 2, hid, &a); g.weapon = 1; runl(&g, 3, hid, &a); g.weapon = 0; g.mag = 0; g.total = 30; runl(&g, 6, dry, &a);
+      CHECK(a.o.state == VRR_EMPTY && a.arms == 0 && a.loads == 1, "S3b con cambio de arma por medio: sin rearme pendiente (estado %d, rearmes %d, cargas %d)", a.o.state, a.arms, a.loads); }
+    /* P6: recogida sin control durante la maniobra de EMPTY, que falla: al volver carga y rearma; una pausa posterior no vuelve a rearmar */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(0, 5); memset(&a, 0, sizeof a);
+      for (int i = 0; i < 400 && !a.o.busy; i++) runl(&g, 1, dry, &a);
+      CHECK(a.o.busy, "P6: maniobra de EMPTY en curso");
+      g.ok = 0; g.total = 17; runl(&g, 10, dry, &a); g.ok = 1; runl(&g, 1500, dry, &a);
+      CHECK(a.o.state == VRR_READY && a.arms == 1 && a.loads == 1 && g.mag == 12 && !vrreload_pickup_pending(), "P6 recogida sin control en la maniobra: lista (estado %d, rearmes %d, cargas %d)", a.o.state, a.arms, a.loads);
+      g.mag = 0; runl(&g, 10, dry, &a); g.ok = 0; runl(&g, 60, dry, &a); g.ok = 1; runl(&g, 20, dry, &a);
+      CHECK(a.o.state == VRR_EMPTY && a.arms == 1 && a.loads == 1, "P6 vaciado con reserva y pausa posterior: sigue EMPTY (estado %d, rearmes %d, cargas %d)", a.o.state, a.arms, a.loads); }
+    /* (a) recogida sin control, el juego carga solo (el arma VR seca se rearma una vez al volver), se vacía con reserva, pausa: sigue EMPTY sin rearme (el cerrojo no sobrevive a READY) */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(0, 0); memset(&a, 0, sizeof a); runl(&g, 5, dry, &a);
+      g.ok = 0; runl(&g, 3, dry, &a); g.total = 30; runl(&g, 3, dry, &a); g.mag = 12; runl(&g, 3, dry, &a); g.ok = 1; runl(&g, 5, dry, &a);
+      CHECK(a.o.state == VRR_READY && a.loads == 0 && a.arms == 1, "(a) el juego cargó solo: READY y arma VR rearmada una vez (estado %d, rearmes %d)", a.o.state, a.arms);
+      int arms0 = a.arms; g.mag = 0; runl(&g, 10, dry, &a); g.ok = 0; runl(&g, 5, dry, &a); g.ok = 1; runl(&g, 10, dry, &a);
+      CHECK(a.o.state == VRR_EMPTY && a.arms == arms0 && a.loads == 0, "(a) vaciado con reserva y pausa: sigue EMPTY (estado %d, rearmes %d, cargas %d)", a.o.state, a.arms - arms0, a.loads); }
+    /* (a3) el cerrojo no sobrevive a READY: recogida sin control con el cargador a 0 en mitad de una recarga táctica; después se vacía con reserva: EMPTY sin carga ni rearme */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(5, 60); memset(&a, 0, sizeof a); runl(&g, 5, rdy, &a);
+      VrReloadIn ins = rdy; ins.mag_in_edge = 1; runl(&g, 1, ins, &a); runl(&g, 8, rdy, &a);
+      CHECK(a.o.state == VRR_VERIFY, "(a3) maniobra táctica en verificación (estado %d)", a.o.state);
+      g.ok = 0; g.mag = 0; runl(&g, 1, rdy, &a); g.total = 70; runl(&g, 2, rdy, &a); g.ok = 1; g.mag = 12; runl(&g, 5, rdy, &a);
+      CHECK(a.o.state == VRR_READY && a.arms == 0, "(a3) recarga táctica terminada: READY (estado %d, rearmes %d)", a.o.state, a.arms);
+      g.mag = 0; runl(&g, 10, dry, &a);
+      CHECK(a.o.state == VRR_EMPTY && a.arms == 0 && a.loads == 0, "(a3) vaciado con reserva: EMPTY, espera el gesto (estado %d, rearmes %d, cargas %d)", a.o.state, a.arms, a.loads); }
+    /* (d) rearme pendiente y, en la pausa, se cambia a otra arma de cargador: la otra no se rearma */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(0, 0); memset(&a, 0, sizeof a); runl(&g, 5, dry, &a);
+      g.total = 12; runl(&g, 1, dry, &a); g.ok = 0; runl(&g, 5, dry, &a); g.weapon = 1; g.mag = 25; g.mag_max = 25; g.total = 100; runl(&g, 5, dry, &a); g.ok = 1;
+      VrReloadIn fam = rdy; fam.weapon_id = 1; runl(&g, 5, fam, &a);
+      CHECK(a.o.state == VRR_READY && a.arms == 0, "(d) otra arma tras la pausa: sin rearme (estado %d, rearmes %d)", a.o.state, a.arms); }
+    /* (e) rearme pendiente y carga de zona en la pausa (el juego sin cargador: capacidad 0): no se rearma un arma sin balas */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(0, 0); memset(&a, 0, sizeof a); runl(&g, 5, dry, &a);
+      g.total = 12; runl(&g, 1, dry, &a); g.ok = 0; runl(&g, 5, dry, &a); g.mag = 0; g.mag_max = 0; g.ok = 1; runl(&g, 5, dry, &a);
+      CHECK(a.arms == 0 && !a.o.fire_allowed, "(e) sin cargador en el juego al volver: sin rearme (estado %d, rearmes %d)", a.o.state, a.arms); }
+    /* (f) arma seca con reserva esperando el gesto (el juego ya recargó su cargador); recogida durante una pausa: el gesto sigue siendo obligatorio (sin rearme) */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(1, 30); memset(&a, 0, sizeof a); runl(&g, 5, rdy, &a);
+      g.mag = 0; runl(&g, 3, dry, &a); g.mag = 12; runl(&g, 3, dry, &a);
+      CHECK(a.o.state == VRR_EMPTY, "(f) espera el gesto (estado %d)", a.o.state);
+      g.ok = 0; runl(&g, 3, dry, &a); g.total = 42; runl(&g, 3, dry, &a); g.ok = 1; runl(&g, 10, dry, &a);
+      CHECK(a.arms == 0 && a.loads == 0, "(f) recogida en pausa con el cargador del juego cargado: sin rearme (rearmes %d)", a.arms); }
+    /* (g) S3 con el juego dando «sin arma» durante la pausa (escena): al volver con la misma arma, rearma; dos pausas seguidas no rearman dos veces */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(0, 0); memset(&a, 0, sizeof a); runl(&g, 5, dry, &a);
+      g.total = 12; runl(&g, 1, dry, &a); g.ok = 0; g.weapon = -1; runl(&g, 30, dry, &a); g.weapon = 0; g.ok = 1; runl(&g, 1, dry, &a);
+      CHECK(a.o.state == VRR_READY && a.arms == 1, "(g) pausa sin arma tras cargar: rearma al volver (estado %d, rearmes %d)", a.o.state, a.arms);
+      g.ok = 0; runl(&g, 5, rdy, &a); g.ok = 1; runl(&g, 5, rdy, &a);
+      CHECK(a.arms == 1, "(g) otra pausa inmediata: sin segundo rearme (%d)", a.arms); }
+    /* (h) rearmada en EMPTY y pausa en el VBlank siguiente: sin segundo rearme */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(0, 0); memset(&a, 0, sizeof a); runl(&g, 5, dry, &a);
+      g.total = 12; runl(&g, 2, dry, &a); CHECK(a.arms == 1, "(h) rearmada");
+      g.ok = 0; runl(&g, 5, rdy, &a); g.ok = 1; runl(&g, 5, rdy, &a);
+      CHECK(a.arms == 1 && a.o.state == VRR_READY, "(h) pausa tras rearmar: sin segundo rearme (%d)", a.arms); }
+    /* (i) recogida sin control durante los toques de la maniobra de EMPTY con el cargador del juego ya cargado: como (f), el gesto sigue siendo obligatorio */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(0, 5); memset(&a, 0, sizeof a);
+      for (int i = 0; i < 400 && !a.o.busy; i++) runl(&g, 1, dry, &a);
+      g.mag = 12; g.ok = 0; g.total = 17; runl(&g, 3, dry, &a); CHECK(a.o.state == VRR_PRESS, "(i) en los toques (estado %d)", a.o.state);
+      g.ok = 1; runl(&g, 100, dry, &a);
+      CHECK(a.o.state == VRR_EMPTY && a.arms == 0 && a.loads == 0, "(i) recogida sin control en los toques, cargador cargado: espera el gesto (estado %d, rearmes %d)", a.o.state, a.arms); }
+    /* (j) puente no válido un VBlank (BridgeState a cero: arma 0, total 0) con el arma seca, reserva y el cargador del juego a 0, sin recogida: el total «0 -> N» al volver no es una recogida */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); memset(&a, 0, sizeof a);
+      BridgeState b; memset(&b, 0, sizeof b); b.valid = BRIDGE_OK_ALL_CORE; b.has_player = 1; b.in_control = 1; b.weapon = 0; b.magazine = 0; b.magazine_max = 12; b.weapon_ammo[0] = 30;
+      BridgeState z; memset(&z, 0, sizeof z);
+      VrReloadGame rg; vrreload_read_game(&z, &rg); CHECK(rg.weapon == -1 && rg.total == 0 && !rg.ok, "(j) puente no válido: sin arma (%d)", rg.weapon);
+      for (int i = 0; i < 20; i++) {
+          vrreload_read_game(i == 10 ? &z : &b, &rg); vrreload_frame(&rg, &dry, &a.o);
+          if (a.o.load_mag > 0) { a.loads++; b.magazine = (int16_t)a.o.load_mag; } a.arms += a.o.arm_ready;
+      }
+      CHECK(a.o.state == VRR_EMPTY && a.arms == 0 && a.loads == 0, "(j) puente no válido 1 VBlank sin recogida: sigue EMPTY (estado %d, rearmes %d, cargas %d)", a.o.state, a.arms, a.loads); }
+    /* (b) recogida en el mismo VBlank en que el arma VR se oculta, con control (EMPTY -> OFF) */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(0, 0); memset(&a, 0, sizeof a); runl(&g, 5, dry, &a);
+      g.total = 12; runl(&g, 3, hid, &a); runl(&g, 4, dry, &a);
+      CHECK(a.o.state == VRR_READY && a.arms == 1 && a.loads == 1, "(b) recogida en el VBlank en que se oculta el arma: lista al volver (estado %d, rearmes %d, cargas %d)", a.o.state, a.arms, a.loads); }
+    /* (c) recogida en el VBlank de OFF -> EMPTY */
+    { cfg_method(VRR_VIA_R1_DOUBLE, 2); Game g = drygame(0, 0); memset(&a, 0, sizeof a); runl(&g, 5, dry, &a);
+      runl(&g, 3, hid, &a); g.total = 12; runl(&g, 4, dry, &a);
+      CHECK(a.o.state == VRR_READY && a.arms == 1 && a.loads == 1, "(c) recogida en el VBlank en que vuelve a mostrarse: lista (estado %d, rearmes %d, cargas %d)", a.o.state, a.arms, a.loads); }
+}
 /* la recogida con el juego que SÍ carga su cargador al recoger (lo que suponía t_ledger_pickup): rearma al instante sin pulsar nada */
 static void t_pickup_game_loads(void) {
     cfg_method(VRR_VIA_R1_DOUBLE, 2);
@@ -393,7 +558,7 @@ static void t_fuzz(void) {
 }
 
 int main(void) {
-    t_tactical(); t_adopt(); t_empty_latch(); t_empty_no_reserve(); t_empty_needs_gesture(); t_empty_forced(); t_pickup_dry(); t_pickup_game_loads(); t_dry_with_reserve(); t_nothing_to_do(); t_lost_tap(); t_never();
+    t_tactical(); t_adopt(); t_empty_latch(); t_empty_no_reserve(); t_empty_needs_gesture(); t_empty_forced(); t_pickup_dry(); t_pickup_direct(); t_pause_keeps_gesture(); t_pickup_windows(); t_pickup_game_loads(); t_dry_with_reserve(); t_nothing_to_do(); t_lost_tap(); t_never();
     t_r2(); t_ledger(); t_ledger_pickup(); t_ledger_switch(); t_modes_weapon(); t_fuzz();
     printf("test_reload: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

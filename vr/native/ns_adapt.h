@@ -29,7 +29,7 @@ typedef struct {
 } NsAdaptOpts;
 
 /* Origen de un triángulo de salida (solo diagnóstico): instancia, pieza (índice absoluto en NsScene.piece), cara y mitad del cuadrilátero. */
-typedef struct NsAdaptSrc { uint32_t inst, piece, face, half, mesh_id, key, piece_rel, mflags; int32_t vis; } NsAdaptSrc;   /* key = NsInstance.key, piece_rel = índice dentro de la instancia, mflags = NsMesh.flags, vis = NsInstance.vis_state */
+typedef struct NsAdaptSrc { uint32_t inst, piece, face, half, mesh_id, key, piece_rel, mflags; int32_t vis; uint32_t iflags; } NsAdaptSrc;   /* key = NsInstance.key, piece_rel = índice dentro de la instancia, mflags = NsMesh.flags, vis = NsInstance.vis_state, iflags = NsInstance.flags (NS_IF_*) */
 
 typedef struct {
     size_t pieces_in, pieces_drawn;

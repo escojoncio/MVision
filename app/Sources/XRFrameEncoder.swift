@@ -49,6 +49,7 @@ final class XRFrameEncoder {
     private var stereoProbeT: CFTimeInterval = 0
 
     init?(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat, layered: Bool, sampleCount: Int) {
+        XR2DFilter.reload()   // «Filtro 2D» del menú: se aplica aquí, al (re)abrir la vista, antes de crear los destinos de la ampliación
         guard let fp = XRFinalPass(device: device, colorFormat: colorFormat, depthFormat: depthFormat, layered: layered) else { return nil }
         finalPass = fp
         renderer = RGRenderer(device: device, colorFormat: colorFormat, depthFormat: depthFormat,
@@ -180,9 +181,8 @@ final class XRFrameEncoder {
         var worldZoom: Float = 1
         if !special && gs.view_kind == 1 && gs.fx.scope_on != 0 {
             if gs.fx.binocular != 0 {
-                let hl = renderer.hudLogical
                 worldZoom = Self.binocularZoom(gs.fx.scope_zoom)
-                sv = Self.binocularFrame(head: recentered, aspect: hl.y > 0 ? hl.x / hl.y : 4.0 / 3.0)
+                sv = Self.binocularFrame(head: recentered, aspect: 4.0 / 3.0)   // la capa 2D es la ventana visible fija del televisor: siempre 4:3 (su tamaño en píxeles no es cuadrado)
             } else {
                 sv = Self.binocularView(head: recentered, zoom: gs.fx.scope_zoom)
             }
@@ -193,11 +193,19 @@ final class XRFrameEncoder {
         var ipd = simd_length(XRMath.position(eyes[0].transform) - XRMath.position(eyes[1].transform))
         if !(ipd > 0.05 && ipd < 0.08) { ipd = 0.063 }
         presenter.hqFull = renderer.hqFull
+        presenter.hudWin = renderer.hudWin
         // Capas 2D por procedencia: ventana del selector / pausa (1) y pantalla completa (2), de la vista vigente; el HUD sigue siendo `hud`.
         var hudWindow: MTLTexture? = renderer.linearOutput ? renderer.auxTextureSRGB[1] : renderer.auxTexture[1]
         if hudWindow != nil && hudWindow!.textureType != .type2D { hudWindow = nil }
         var hudFull: MTLTexture? = renderer.linearOutput ? renderer.auxTextureSRGB[2] : renderer.auxTexture[2]
         if hudFull != nil && hudFull!.textureType != .type2D { hudFull = nil }
+        // Capas 2D fieles (vr_layer2d): el pase final las compone como la GPU original y necesita, de cada textura que va a un panel, el color sin vista sRGB y sus planos de resta y tope.
+        var layerPlanes: [(shown: MTLTexture, color: MTLTexture, planes: MTLTexture)] = []
+        if let h = hud, let c = renderer.hudTexture, let p = renderer.hudPlanes { layerPlanes.append((h, c, p)) }
+        let auxPlanes = renderer.auxPlanes
+        if let h = hudWindow, let c = renderer.auxTexture[1], let p = auxPlanes[1] { layerPlanes.append((h, c, p)) }
+        if let h = hudFull, let c = renderer.auxTexture[2], let p = auxPlanes[2] { layerPlanes.append((h, c, p)) }
+        finalPass.layerPlanes = layerPlanes
         renderer.gameFx = gs.view_kind == 1 ? SIMD4<Float>(gs.fx.vignette, gs.fx.vign_radius, gs.fx.letterbox, 0) : SIMD4<Float>(0, 0, 0, 0)
         var pres = presenter.compose(gs: gs, head: recentered, dt: dt, hud: hud, eyePx: Float(w), p00: projs[0].columns.0.x,
                                      gameView: renderer.gameView, linear: renderer.linearOutput, wrist: wristFrame(), ipd: ipd, shot: renderer.sceneShot,

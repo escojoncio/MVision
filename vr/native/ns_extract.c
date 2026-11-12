@@ -37,6 +37,7 @@
 #define OF_ONE_MATRIX  0x040u   /* ONE_MATRIX_WORLD: las rutinas de pantalla del motor (0x8001C614 en juego, 0x80081200 en la etapa de la overlay de la introducción) transforman TODAS las piezas con la matriz de la raíz
                                   * (obj+0x00, ya con padre_mat copiada). En juego copian esa misma matriz a cada pieza (+0x00); en la overlay escriben ahí la raíz con la traslación RELATIVA AL OJO (raíz - ojo,
                                   * medido: pieza t = -ojo.t con raíz en el origen). Por eso el mundo de un objeto rígido es la raíz, no la matriz de la pieza. */
+#define OF_GBOUND      0x020u   /* visibilidad por la caja de la definición; sus caras no se subdividen (libdg/divide.c) */
 #define OF_HIDDEN      0x080u
 #define OF_OWN_AMBIENT 0x100u
 #define OF_ALT_PALETTE 0x200u
@@ -665,6 +666,7 @@ static int emit_object(Ctx *c, const Cand *cd, uint32_t piece_cap) {
     if (cd->is_static) in->flags |= NS_IF_STATIC;
     if (flag & OF_ALT_PALETTE) in->flags |= NS_IF_THERMAL_OK;
     if (flag & OF_ONE_MATRIX) in->flags |= NS_IF_RIGID;
+    if (flag & OF_GBOUND) in->flags |= NS_IF_GBOUND;
     if (flag & OF_ENV_REFLECT) in->flags |= NS_IF_ENVREFL;
     if (flag & OF_LIT) { NsLight L; read_light(c, rd32(r, o + 0x34), flag, &L); in->light = (int16_t)light_index(c, &L); }
 
@@ -681,6 +683,7 @@ static int emit_object(Ctx *c, const Cand *cd, uint32_t piece_cap) {
         if (rr != RES_OK) { pc->flags |= NS_PF_HIDDEN; S->n_hidden_pieces++; }
         else if (!cd->is_static && rs16(r, p + 0x50) <= PIECE_BIAS_HIDDEN) { pc->flags |= NS_PF_HIDDEN; S->n_hidden_pieces++; }   /* pieza retirada por el motor (ver PIECE_BIAS_HIDDEN) */
         if (rr == RES_BAD && cd->is_static) sc->valid |= NS_SV_MAP_INCOMPLETE;   /* geometría del escenario ausente: la escena no es apta (se pinta por GPU) */
+        if (rr == RES_BAD && !cd->is_static) S->bad_dyn_pieces++;   /* geometría dinámica ausente: la escena sigue siendo apta, pero se cuenta (registro) */
         sc->n_piece++; S->n_pieces++;
     }
     /* extensiones: otra malla que comparte la matriz de la pieza que la enlaza; viven en la parte «extra» del array (índice >= nm) */
@@ -709,6 +712,7 @@ static int emit_object(Ctx *c, const Cand *cd, uint32_t piece_cap) {
             if (rr != RES_OK) { pc->flags |= NS_PF_HIDDEN; S->n_hidden_pieces++; }
             else if (!cd->is_static && rs16(r, e + 0x50) <= PIECE_BIAS_HIDDEN) { pc->flags |= NS_PF_HIDDEN; S->n_hidden_pieces++; }
             if (rr == RES_BAD && cd->is_static) sc->valid |= NS_SV_MAP_INCOMPLETE;   /* geometría del escenario ausente: la escena no es apta (se pinta por GPU) */
+            if (rr == RES_BAD && !cd->is_static) S->bad_dyn_pieces++;
             sc->n_piece++; S->n_pieces++; S->n_ext_pieces++;
             e = rd32(r, e + 0x48);
             if (e && depth == MAX_EXT_DEPTH - 1) S->ext_bad++;   /* cadena demasiado profunda */
@@ -777,46 +781,6 @@ static void do_zone_change(NsMeshStore *st, NsExtractStats *S) {
     if (ns_store_new_epoch(st)) S->epoch_opened = 1;
 }
 
-
-/* Objetos dinámicos que el motor dibuja SIN pasar por la cola del canal principal (medido: el cuerpo y el arma del jugador en la escena de muerte / introducción, 222 de
- * 1882 triángulos de la lista sin dueño; las cinemáticas con partida sí los llevan en la cola). Están en el mismo almacén de objetos que los de la cola, con la misma
- * cabecera: grupo activo, flag sin «oculto» (0x80) y con textura, 1..MAX_EXTRA_PIECES piezas, puntero de definición en RAM y el modelo de la primera pieza = definición + 0x20
- * (firma que cumplen todos los objetos de las cinemáticas y del juego medidos). Los pooled-pero-ocultos (flag 0x8d) y el escenario precolorado (zona) NO entran: lo primero
- * no se dibuja (medido) y lo segundo cambiaría de zona. Sin culling, sin duplicar los de la cola (`seen`). Escanea la RAM a pasos de 8 bytes (~0,3 ms). */
-#define MAX_EXTRA_PIECES 64
-#define EXTRA_LO 0x80010000u
-#define EXTRA_HI 0x80200000u
-static int scan_extra_objects(Ram *r, uint32_t gmask, const uint32_t *seen, uint32_t nseen, Cand *cand, uint32_t *ncand, uint32_t cap, NsExtractStats *S) {
-    uint32_t added = 0;
-    const uint8_t *b = r->b;
-    for (uint32_t o = EXTRA_LO; o + 0x48u + 0x5Cu <= EXTRA_HI && *ncand < cap; o += 8u) {
-        uint32_t off = o & ADDR_MASK;
-        if (off + 0x48u + 0x5Cu > r->size) break;
-        int16_t nm; memcpy(&nm, b + off + 0x2Eu, 2);
-        if (nm < 1 || nm > MAX_EXTRA_PIECES) continue;
-        uint32_t fl; memcpy(&fl, b + off + 0x28u, 4);
-        if ((fl & OF_HIDDEN) || !(fl & OF_TEXTURED) || fl >= 0x1000u) continue;
-        if ((fl & OF_PRECOLORED) && !(fl & OF_LIT)) continue;                       /* escenario de zona: solo por la cola */
-        uint16_t gid; memcpy(&gid, b + off + 0x2Cu, 2);
-        if (gid == 0 || !(gid & gmask)) continue;
-        uint32_t def; memcpy(&def, b + off + 0x24u, 4);
-        if (def < EXTRA_LO || def >= EXTRA_HI || (def & 3u)) continue;
-        if (!ok_rng(r, o + 0x48u, 0x5Cu * (uint32_t)nm)) continue;
-        uint32_t m0; memcpy(&m0, b + off + 0x48u + 0x40u, 4);
-        if (m0 != def + 0x20u) continue;
-        uint32_t on = norm_addr(o);
-        int dup = 0;
-        for (uint32_t k = 0; k < nseen && !dup; k++) dup = seen[k] == on;
-        for (uint32_t k = 0; k < *ncand && !dup; k++) dup = norm_addr(cand[k].o) == on;
-        if (dup) continue;
-        Cand cd;
-        cd.o = o; cd.flag = fl; cd.gid = gid; cd.nm = nm; cd.def = def; cd.is_static = 0;
-        cand[(*ncand)++] = cd;
-        added++;
-    }
-    S->extra_objs += added;
-    return (int)added;
-}
 
 /* Factor vertical (66/64 con la cámara del propio juego, 1 con la de la capa VR) con el que el motor compuso las matrices de PANTALLA (pieza +0x20) que alimentan la GTE, y por tanto las posiciones de vista de la
  * lista de la GPU. Se mide en la RAM: para las primeras piezas de los objetos de la cola, razón entre la norma de la fila Y de la matriz de pantalla y la de (ojo_inv * mundo), con la misma matriz de mundo que
@@ -941,7 +905,10 @@ int ns_extract_ex(NsScene *sc, NsMeshStore *st, const uint8_t *ram, size_t ram_s
             cd.o = o; cd.flag = rd32(r, o + 0x28); cd.gid = rd16(r, o + 0x2C); cd.nm = rs16(r, o + 0x2E); cd.def = rd32(r, o + 0x24);
             cd.is_static = (cd.flag & OF_PRECOLORED) && !(cd.flag & OF_LIT);
             if ((cd.flag & OF_HIDDEN) && !(opt && opt->player_key && norm_addr(opt->player_key) == on)) { S->drop_hidden_flag++; continue; }   /* el jugador oculto por el motor sí se extrae */
-            if (cd.gid != 0 && !(cd.gid & gmask)) { S->drop_group++; continue; }
+            if (cd.gid != 0 && !(cd.gid & gmask)) {   /* grupo de mapa no activo: los objetos dinámicos no se dibujan (libdg/bound.c); el escenario (mapas cargados del stage) se extrae igual, marcado con su grupo (NsInstance.zone_mask) */
+                if (!cd.is_static) { S->drop_group++; continue; }
+                S->static_off_group++;
+            }
             if (cd.nm <= 0 || cd.nm > MAX_PIECES || !ok_rng(r, o + 0x48u, 0x5Cu * (uint32_t)cd.nm)) { S->drop_badobj++; continue; }
             int is_shadow = 0;
             if (opt && opt->shadow_objs) for (uint32_t k = 0; k < opt->n_shadow && !is_shadow; k++) is_shadow = norm_addr(opt->shadow_objs[k]) == on;
@@ -954,8 +921,6 @@ int ns_extract_ex(NsScene *sc, NsMeshStore *st, const uint8_t *ram, size_t ram_s
             }
             cand[ncand++] = cd;
         }
-
-        if (!(opt && opt->no_extra_scan)) scan_extra_objects(r, gmask, seen, nseen, cand, &ncand, MAX_QUEUE, S);
 
         /* cambio de zona: sustitución total de las definiciones del escenario o firmas distintas en modelos conocidos del escenario */
         {

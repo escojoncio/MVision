@@ -107,7 +107,7 @@ fragment float4 vr_fs_weapon(VrWpnVOut in [[stage_in]], constant VrWpnFrame &f [
 struct VrSpcDraw {
     float4x4 model;             /* local -> mundo VR; incluye el tamaño del rectángulo */
     float4 uv;                  /* x, y, ancho, alto del subrectángulo de la textura 0 (HUD); el resto de modos usan (0, 0, 1, 1) */
-    float4 p0;                  /* x = modo, y = opacidad, z = ruido, w = tiempo (s, módulo 64) */
+    float4 p0;                  /* x = modo, y = opacidad, z = ruido (misil) / la textura del HUD es la capa 2D fiel, de alfa PREMULTIPLICADO (modo 1), w = tiempo (s, módulo 64) */
     float4 p1;                  /* x = disco, y = fijado, z = terminado, w = proporción ancho/alto */
     float4 p2;                  /* x = la imagen de la textura 0 ya es lineal (se lleva a gamma antes de mezclar); y, z = prismáticos (modo HUD con y > 0), ver el fragmento */
 };
@@ -159,15 +159,19 @@ fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buff
         float2 hq = float2(r.x * d.p2.y, r.y * d.p2.z) + 0.5;
         if (hq.x < 0.0 || hq.y < 0.0 || hq.x > 1.0 || hq.y > 1.0) return float4(0.0, 0.0, 0.0, 1.0);
         float4 h = img.sample(sLin, float2(d.uv.x, d.uv.y) + hq * float2(d.uv.z, d.uv.w));
+        float al = h.w;
         float3 hc = float3(h.x, h.y, h.z);
+        if (d.p0.z > 0.5) { al = max(h.w, max(h.x, max(h.y, h.z))); hc = hc / max(al, 1e-4); }   /* capa premultiplicada (lo aditivo lleva alfa 0 y color): a alfa directo */
         if (kWpnLinear) hc = float3(vr_wpn_lin1(hc.x), vr_wpn_lin1(hc.y), vr_wpn_lin1(hc.z));
-        return float4(hc, clamp(h.w * a, 0.0, 1.0));
+        return float4(hc, clamp(al * a, 0.0, 1.0));
     } else if (mode < 1.5) {                                             /* visor antiaéreo: el HUD del juego, sin premultiplicar */
         float2 u = float2(d.uv.x, d.uv.y) + q * float2(d.uv.z, d.uv.w);
         if (u.x < 0.0 || u.y < 0.0 || u.x > 1.0 || u.y > 1.0) discard_fragment();
         float4 h = img.sample(sLin, u);
+        float al = h.w;
         rgb = float3(h.x, h.y, h.z);
-        a *= h.w;
+        if (d.p0.z > 0.5) { al = max(h.w, max(h.x, max(h.y, h.z))); rgb = rgb / max(al, 1e-4); }   /* capa premultiplicada: a alfa directo */
+        a *= al;
         if (a < 0.02) discard_fragment();
     } else {                                                             /* pantalla del misil: monocroma, estática, líneas y cruz */
         float2 px = q * float2(256.0 * d.p1.w, 256.0);

@@ -11,5 +11,6 @@
 #include "ns_gpu.h"      /* renderer nativo: empaquetado para la GPU (estructuras compartidas con el shader) */
 #include "ns_screen.h"   /* efectos de pantalla completa nativos (agua, anillo, fundidos, modos de visión) */
 #include "ns_present.h"  /* qué se enseña cuando el nativo no está listo: repetir el último válido o fundir a negro */
-#include "ns_fill_glue.h" /* relleno por la verdad del motor: efectos de lo que la lista de la GPU dibuja y el nativo no tiene */
+#include "ns_fill_glue.h" /* relleno por la verdad del motor: ya sin uso en la app (ni dibujo ni llamadas); se conserva el código C */
+#include "ns_solid.h"     /* lo más cercano dibujado en la ventana del motor (ns_solid_view_near): cota del paralaje de la pantalla 3D */
 #include "ns_cinema.h"   /* cinemáticas del motor con el render nativo desde la cámara del juego */

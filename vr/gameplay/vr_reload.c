@@ -20,6 +20,7 @@ static struct {
     int seen_not_ready;            /* EMPTY: se ha visto el arma VR no lista (el gesto empezó) */
     int idle_t;                    /* EMPTY: VBlanks seguidos con el cargador del juego a 0 y reserva > 0 sin que el juego recargue (negativo = espera tras un fallo) */
     int empty_run;                 /* la maniobra en curso se lanzó desde EMPTY (al terminar vuelve a EMPTY a esperar el gesto del arma VR) */
+    int lost_pk, lost_w;           /* se recogió munición del arma `lost_w` con el cargador del juego a 0 y el arma VR aún no se ha rearmado (también sin control, con el arma VR sin mostrar o en el VBlank del último disparo): vale como recogida en EMPTY y rearma al volver de OFF con el cargador ya cargado; se borra al rearmar, con otra arma equipada y en READY */
     int pickup;                    /* se recogió munición (el total del juego subió) estando en EMPTY y el arma VR aún no se ha rearmado */
     int arm;                       /* READY: emitir arm_ready en este VBlank */
     int pk_w, pk_total;            /* arma y total del juego del VBlank anterior (detección de recogida) */
@@ -60,7 +61,8 @@ void vrreload_read_game(const BridgeState *bs, VrReloadGame *g) {
     g->weapon = -1;
     if (!bs) return;
     g->ok = (bs->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs->has_player && bs->in_control;
-    g->weapon = bs->weapon; g->mag = bs->magazine; g->mag_max = bs->magazine_max;
+    g->mag = bs->magazine; g->mag_max = bs->magazine_max;
+    if (bs->valid & BRIDGE_OK_EQUIP) g->weapon = bs->weapon;   /* puente no válido: BridgeState a cero no es «arma 0 con total 0» (al volver, el total 0 -> N parecería una recogida) */
     if (g->weapon >= 0 && g->weapon < BRIDGE_N_WEAPONS) g->total = bs->weapon_ammo[g->weapon];
     g->menu = bs->menu_state != 0 || bs->pause_level != 0;
 }
@@ -109,6 +111,8 @@ void vrreload_frame(const VrReloadGame *g, const VrReloadIn *in, VrReloadOut *ou
     R.pk_w = g->weapon; R.pk_total = g->total;
     R.t++;
     int mine = g->ok && in->weapon_id >= 0 && g->weapon == in->weapon_id;
+    if (rose && g->mag <= 0) { R.lost_pk = 1; R.lost_w = g->weapon; }
+    else if (g->weapon >= 0 && g->weapon != R.lost_w) R.lost_pk = 0;
     int busy = R.state == VRR_PRESS || R.state == VRR_VERIFY;
 
     /* el jugador deja de ser controlable (menú, pausa, cinemática): una maniobra a medias se aborta pasado un tiempo. Los
@@ -122,7 +126,7 @@ void vrreload_frame(const VrReloadGame *g, const VrReloadIn *in, VrReloadOut *ou
     }
 
     if (!g->ok && R.state != VRR_PRESS) goto tail;
-    if (rose && g->ok && (R.state == VRR_EMPTY || R.empty_run)) { if (!R.pickup) R.st.pickups++; R.pickup = 1; }
+    if (((rose && g->ok) || R.lost_pk) && (R.state == VRR_EMPTY || R.empty_run)) { if (!R.pickup) R.st.pickups++; R.pickup = 1; }
     switch (R.state) {
     case VRR_OFF:
         R.pickup = 0; R.empty_run = 0; R.arm = 0;
@@ -130,19 +134,22 @@ void vrreload_frame(const VrReloadGame *g, const VrReloadIn *in, VrReloadOut *ou
             R.adopt = 1; R.seen_not_ready = 0;
             enter(g->mag <= 0 && g->mag_max > 0 ? VRR_EMPTY : VRR_READY);
             if (R.state == VRR_EMPTY) { R.st.empties++; R.idle_t = 0; }
+            else if (R.lost_pk && g->mag > 0) { R.arm = 1; R.lost_pk = 0; R.st.arms++; }   /* recogida con el arma seca cuyo cargador ya está cargado (load_mag antes de una pausa, o el propio juego): el arma VR sigue seca */
         }
         break;
     case VRR_READY:
         if (!mine) { enter(VRR_OFF); break; }
         if (g->mag_max > 0 && g->mag <= 0) { R.st.empties++; R.seen_not_ready = !in->ready; R.idle_t = 0; enter(VRR_EMPTY); break; }
+        R.lost_pk = 0;
         if (in->mag_in_edge && g->mag < g->mag_max && g->total > g->mag) start_maneuver(g, 0);
         break;
     case VRR_EMPTY:
         if (!mine) { enter(VRR_OFF); break; }
         if (!in->ready) R.seen_not_ready = 1;
         if (R.pickup && g->mag > 0) {                  /* recogida con el arma seca y el juego ya cargó su cargador: el arma VR se deja lista sin exigir el gesto */
-            R.arm = 1; R.adopt = 1; R.virt_taken = 0; R.pickup = 0; R.st.ok++; R.st.arms++; enter(VRR_READY); break;
+            R.arm = 1; R.adopt = 1; R.virt_taken = 0; R.pickup = 0; R.lost_pk = 0; R.st.ok++; R.st.arms++; enter(VRR_READY); break;
         }
+        if (R.pickup && g->total > 0 && g->mag_max > 0) { int cap = g->weapon == 9 ? 5 : g->mag_max; out->load_mag = g->total < cap ? g->total : cap; }   /* francotirador (arma 9): el juego recarga siempre 5 (sna_init.c:6098-6106); recogida y el cargador del juego a 0: lo carga el anfitrión (la maniobra de abajo queda de reserva) */
         if (R.seen_not_ready && in->ready && g->mag > 0) {   /* gesto terminado */
             R.adopt = 1; R.virt_taken = 0; R.pickup = 0; R.st.ok++; enter(VRR_READY); break;
         }

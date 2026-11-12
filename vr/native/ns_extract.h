@@ -6,7 +6,8 @@
  *
  * Reglas de la extracción
  *   - SIN culling: no se mira la cámara, ni la distancia, ni el estado de visibilidad del último fotograma. Sólo se descartan (con contador): objetos ocultos
- *     por el juego (flag 0x80; salvo el del jugador, NsExtractOpts.player_key), objetos de un grupo de mapa no activo, punteros nulos/fuera de RAM, objetos repetidos en la cola y mallas inconsistentes.
+ *     por el juego (flag 0x80; salvo el del jugador, NsExtractOpts.player_key), objetos DINÁMICOS de un grupo de mapa no activo (el escenario se extrae con independencia del grupo), punteros nulos/fuera de RAM, objetos repetidos en la cola y mallas inconsistentes.
+ *   - Fuente única: la cola del canal principal (chanl->queue[0..objs_index)), la misma que recorren las etapas de libdg. No se busca nada por firma en la RAM.
  *   - Orden y capacidades: el escenario (NS_IF_STATIC) se emite PRIMERO y nunca se descarta por capacidad; después las instancias dinámicas por orden de la
  *     cola; lo que no cabe se descarta por el final y se contabiliza (NS_TR_*, n_dropped_*, NS_SV_MAP_INCOMPLETE si ni el escenario cupo). Las tablas de la escena
  *     NO crecen: las reserva quien llama (mínimos NS_MIN_*).
@@ -61,13 +62,16 @@ typedef struct NsExtractStats {
     uint32_t store_full;           /* mallas/colores rechazados por el tope del almacén */
     uint32_t n_lights;
     uint32_t oob_reads;            /* lecturas de RAM rechazadas por estar fuera de rango */
-    uint32_t extra_objs;           /* objetos dinámicos fuera de la cola del canal principal añadidos por el escaneo (cuerpo del jugador en la muerte / introducción) */
+    uint32_t static_off_group;     /* objetos del escenario de un grupo de mapa no activo: se extraen igual (NsInstance.zone_mask lleva su grupo) */
+    uint32_t bad_dyn_pieces;       /* piezas de objetos dinámicos con el modelo ilegible/roto (quedan ocultas: geometría que FALTA) */
 } NsExtractStats;
 
 /* Contadores acumulados del extractor del enganche (ns_extract_glue.c) para el registro de diagnóstico; los acumulados solo crecen (la interfaz hace diferencias por segundo). */
 typedef struct NsExtractGlueStats {
     uint32_t calls, mesh_new, memo_stale, zone_changes, epoch_opened, store_full, drop_group, drop_hidden, drop_other, queue_sum;   /* acumulados */
     uint32_t last_queue, last_inst, last_static, last_pieces, last_hidden_pieces, last_drop_group, last_drop_hidden, last_drop_other;   /* última escena */
+    uint32_t bad_dyn_pieces;                             /* acumulado: piezas dinámicas con el modelo roto (geometría que falta) */
+    uint32_t last_bad_dyn_pieces, last_static_off_group; /* última escena: ídem / objetos del escenario de grupos de mapa no activos (extraídos) */
 } NsExtractGlueStats;
 void ns_extract_glue_stats(NsExtractGlueStats *out);
 
@@ -76,7 +80,6 @@ typedef struct {
     uint32_t n_shadow;
     int detect_shadows;            /* 1: además, heurística propia (objeto de una pieza con una cara plana translúcida iluminada) */
     uint32_t max_pieces;           /* tope global de piezas por llamada (0 = la capacidad de la escena) */
-    int no_extra_scan;             /* 1: no buscar objetos dinámicos fuera de la cola del canal principal (comparaciones A/B) */
     uint32_t player_key;           /* dirección del objeto del jugador (ns_player_key) o 0: el motor le pone la bandera de oculto en primera persona forzada y aun así se extrae (la capa VR oculta su cabeza) */
 } NsExtractOpts;
 

@@ -47,7 +47,8 @@ int ns_cinema_depth(const NsScene *sc, float *z_near, float *z_subj);
 
 /* ns_cinema_depth con suavizado temporal, una llamada por escena (el estado `f` a cero al empezar). Dentro de un plano las dos profundidades se filtran en 1/z (lineal en paralaje)
  * con constante de tiempo NS_CINEMA_TAU_S y el reloj de la escena (NsScene.t_ns; la misma escena repetida no avanza), y si deja de haber piezas a la vista se conserva lo último
- * válido: ni la convergencia ni la separación (ns_cinema_stereo) saltan cuando el sujeto sale de la ventana o entra una pieza cercana. En un corte de plano (primera escena, la cámara
+ * válido: ni la convergencia ni la separación (ns_cinema_stereo) saltan cuando el sujeto sale de la ventana. Excepción: lo cercano que se ACERCA vale en el acto (la separación baja
+ * hasta el límite de paralaje cruzado, nunca lo supera); al alejarse vuelve con la constante de tiempo (la separación sube despacio). En un corte de plano (primera escena, la cámara
  * salta más de NS_CINEMA_CUT_DIST unidades o gira más de NS_CINEMA_CUT_DEG grados entre escenas, como vr_cine, o el reloj retrocede) valen sin filtrar las del plano nuevo (0 si no hay).
  * Escena o cámara no válidas: olvida el estado. Devuelve 1 si las profundidades se conocen (> 0). */
 #define NS_CINEMA_TAU_S 0.3f
@@ -58,6 +59,8 @@ typedef struct {
     uint64_t t_ns;              /* su reloj */
     float eye[3], fwd[3];       /* su cámara (posición y eje Z) */
     float inv_near, inv_subj;   /* 1/m filtradas; 0 = desconocidas */
+    float z_static;             /* ENTRADA (la pone quien llama antes de cada llamada): profundidad (m) de lo más cercano que se dibuja en la ventana del motor (ns_solid_view_near: escenario y dinámicos, cara a cara), 0 = desconocida.
+                                 * Acota z_near (las profundidades de ns_cinema_depth solo miran los orígenes de las piezas dinámicas) y, sin piezas a la vista, da z_near con el sujeto anterior (o NS_CINEMA_CONV_DEFAULT) */
 } NsCinemaDepthFilter;
 int ns_cinema_depth_filter(NsCinemaDepthFilter *f, const NsScene *sc, float *z_near, float *z_subj);
 

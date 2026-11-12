@@ -77,9 +77,9 @@ void mv_vrgame_status(MvVrGameStatus *out);
 /* ---- vistas especiales del arma (hilo de render) ----
  * El arma equipada puede pedir una segunda vista de la escena o un HUD anclado a ella:
  *  - MV_VIEW_SCOPE: mira óptica del francotirador. La app renderiza la escena una segunda vez desde `cam_*` (campo vertical cam_fov_y, textura
- *    cuadrada tex_w x tex_h) y la muestra en un disco (la lente) en `surf_*` con la abertura y retícula de vr_scope.h por encima. `blend` = apertura del
- *    iris (0 = ojo lejos: no hace falta renderizar). La cabeza NO se acerca (el aumento solo está en la lente): suppress_frame pide no aplicar la
- *    máscara de visión del juego y hide_hud ocultar el panel plano del HUD mientras se mira. (Los prismáticos del juego, scope.c, no usan esta vista: el visor amplía el mundo en los dos ojos y pone su marco del HUD
+ *    cuadrada tex_w x tex_h) y la muestra en un disco (la lente) en `surf_*` con la abertura y retícula de vr_scope.h por encima. `blend` = 1 siempre
+ *    (PSG1 en la mano: imagen viva en la lente desde cualquier ángulo y distancia); cam_valid = 0 solo si la lente no puede verse (no mira a la cabeza o está fuera de su campo, no hace falta renderizar).
+ *    La cabeza NO se acerca (el aumento solo está en la lente): suppress_frame pide no aplicar la máscara de visión del juego cuando éste activa la suya; hide_hud = 0 (no se tapa ni el mundo ni el HUD). (Los prismáticos del juego, scope.c, no usan esta vista: el visor amplía el mundo en los dos ojos y pone su marco del HUD
  *    como MV_VIEW_AA_SIGHT; solo sight.c sin scope.c, sin prismáticos, usa un disco SCOPE.)
  *  - MV_VIEW_AA_SIGHT: visor del lanzador antiaéreo. El HUD del propio juego (mira + marco de fijación, en la textura del HUD) se dibuja en un
  *    rectángulo anclado delante del visor (`surf_*`, ya a la distancia y tamaño angular del juego); `uv` = subrectángulo (x, y, w, h) de la textura del HUD
@@ -103,15 +103,19 @@ typedef struct {
     float zoom;                 /* SCOPE: aumento */
     int32_t fullscreen, ended;  /* MISSILE */
     float noise;                /* MISSILE: 0..1 */
+    int32_t occlude;            /* SCOPE: la lente respeta la profundidad (el mundo y el arma que estén delante la tapan) y no se recorta con el plano cercano; 0 = por encima de todo (AA, misil, prismáticos) */
 } MvVrSpecialView;
 /* Vista especial vigente (1 = hay; 0 = ninguna). Se publica una vez por VBlank. */
 int32_t mv_vrgame_special_view(MvVrSpecialView *out);
 /* Misil guiado: 0 = pantalla en el lanzador (se agranda ante el ojo al mirar por la mirilla), 1 = pantalla grande fija ante la cara. */
 void mv_vrgame_set_missile_view(int32_t mode);
+/* Truco de depuración (menú de depuración de la app, acción no persistente): pide dar todas las armas con la munición al máximo. Lo aplica el hilo de emulación UNA vez en el siguiente vrgame_pad; sin partida en curso (puente no válido o sin jugador) o sin el control del jugador (bs->in_control = 0) se descarta, no queda pendiente. */
+void mv_vrgame_cheat_all_weapons(void);
 
 /* ---- uso interno (vrhost.c) ---- */
 struct BridgeState;
 void vrgame_reset(void);                       /* al cargar el EXE */
+int vrgame_cheat_weapons_apply(uint8_t *ram);   /* escribe GM_Weapons/GM_WeaponsMax en la RAM del juego (lo llama vrgame_pad; público para la prueba); devuelve las armas escritas */
 void vrgame_set_enabled(int body_ok, int fire_ok);   /* HLE enlazadas con éxito (sin ellas no se mueven los brazos / no se dispara) */
 /* Manos propias (guantes de vr/hands/vr_glove): on = modo gpu con la IK enlazada; vram = VRAM del emulador (1024 x 512 halfwords) de la que se decodifica el atlas. Hilo de emulación,
  * antes de vrgame_pad. Con on = 0 (o sin guante construido) las piezas de los brazos del juego se dibujan como siempre; con el guante listo se ocultan las de cada brazo movido por la IK (own_hands). */

@@ -37,6 +37,14 @@ typedef struct { uint32_t key; uint16_t piece_rel; uint8_t is_static, pad; uint3
 /* Escribe hasta `cap` triángulos (9 floats cada uno, mundo del motor) en `tris` y devuelve cuántos. `src` puede ser NULL o tener `cap` elementos. */
 size_t ns_solid_collect(const NsScene *sc, const NsMeshStore *st, const NsSolidOpts *opt, float *tris, NsSolidSrc *src, size_t cap, NsSolidStats *stats);
 
+/* Profundidad de vista (unidades del motor) de lo más cercano que la pantalla 3D dibuja DENTRO de la ventana del motor (+-NSG_ENG_WIN_X x +-NSG_ENG_WIN_Y px con su cámara): el escenario (también el de
+ * grupos de mapa no activos, que el renderer dibuja) y los objetos dinámicos (piezas visibles, sin sombras), cara a cara y con la regla del modo ENGINE vigente (ns_gpu_engine_tri con ns_gpu_engine_off): de la cara que dibuja la regla
+ * del motor, el z mínimo de su polígono (vértices ya ajustados al plano H/2) recortado por la ventana; de la cara partida («Caras cercanas: Original», geometría real), el de su polígono recortado
+ * además por el plano cercano de la pantalla 3D (NS_SOLID_SCREEN_NEAR). Lo descartado y lo rescatado (solo fuera de la ventana) no cuentan. 0 si no hay nada o la cámara no es válida. La ventana
+ * estéreo de la pantalla 3D (ns_cinema_depth_filter, NsCinemaDepthFilter.z_static) acota con ella el paralaje cruzado. */
+#define NS_SOLID_SCREEN_NEAR 50.0f   /* plano cercano de la pantalla 3D (0,05 m de la vista estéreo, a 1000 unidades por metro) */
+float ns_solid_view_near(const NsScene *sc, const NsMeshStore *st);
+
 #ifdef __cplusplus
 }
 #endif

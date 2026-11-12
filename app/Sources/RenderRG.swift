@@ -33,6 +33,19 @@ final class RGRenderer {
     private var auxRingSRGB: [[MTLTexture]] = [[], [], []]
     private var auxIdx = [0, 0, 0], auxW = [0, 0, 0], auxH = [0, 0, 0]
     private var auxSeq: [UInt32] = [0, 0, 0]
+    /// Planos de resta y tope (dos planos apilados en vertical, vr_layer2d.h vl2d_pack) de las capas 2D fieles: los de hudTexture (nil con el HUD de reserva) y los de cada capa auxiliar.
+    /// XRFinalPass los necesita, junto con el color sin vista sRGB, para componer la capa sobre el mundo como la GPU original.
+    private var hudPlanesRing: [MTLTexture] = [], hudXbrPlanes: [MTLTexture] = []
+    private var auxPlanesRing: [[MTLTexture]] = [[], [], []]
+    var hudPlanes: MTLTexture? {
+        guard hudHQ, hudHQIdx < hudPlanesRing.count else { return nil }
+        return hudXbr.count == hudHQRing.count && hudHQIdx < hudXbrPlanes.count ? hudXbrPlanes[hudHQIdx] : hudPlanesRing[hudHQIdx]
+    }
+    /// Colocación de la capa de hudTexture en la ventana visible fija del televisor (mv_vrhost_hud2d_window_l), en píxeles del juego: tamaño de la ventana, origen del marco dentro de ella y tamaño del
+    /// marco. nil con el HUD de reserva. XRPresenter la usa para registrar el panel con la pantalla 3D y con los recortes del troceo.
+    private var hudWinRaw: XR2DWindow?
+    var hudWin: XR2DWindow? { hudHQ ? hudWinRaw : nil }
+    var auxPlanes: [MTLTexture?] { (0..<3).map { auxTexture[$0] != nil && auxIdx[$0] < auxPlanesRing[$0].count ? auxPlanesRing[$0][auxIdx[$0]] : nil } }
     /// Efectos de pantalla del juego por procedencia (MvVrGameState.fx; los fija XRFrameEncoder): x = viñeta (intensidad 0..1), y = radio de la zona limpia (alto de medio ojo = 1), z = fracción del alto cubierta por las bandas de cinemática, w sin uso.
     var gameFx = SIMD4<Float>(0, 0, 0, 0)
     /// Suavizado bilineal de texels (respeta transparencia). Por defecto nearest.
@@ -192,7 +205,7 @@ final class RGRenderer {
     private var hudHQRing: [MTLTexture] = [], hudHQRingSRGB: [MTLTexture] = []
     private var hudHQIdx = 0, hudHQW = 0, hudHQH = 0, hudHQSeq: UInt32 = 0
     private var hudHQ = false
-    /// xBR-lv2 x3 de la capa 2D (XRPixelScaler, XR2DFilter.xbr): anillo de destinos paralelo a hudHQRing (mismo índice); hudTexture apunta a él en vez de a la capa nativa.
+    /// Ampliación de la capa 2D en la GPU (XRPixelScaler: MMPX x2 o xBR x3 según XR2DFilter.current): anillo de destinos paralelo a hudHQRing (mismo índice); hudTexture apunta a él en vez de a la capa nativa.
     private var hudScaler: XRPixelScaler?
     private var hudXbr: [MTLTexture] = [], hudXbrSRGB: [MTLTexture] = []
     /// Tamaño LÓGICO (píxeles del juego) de la capa que muestra hudTexture: la textura puede llevar además la ampliación xBR (x3) o la escala del HUD de reserva (x4).
@@ -269,7 +282,7 @@ final class RGRenderer {
             }
             csFill = cp("vr_k_fill"); csUpload = cp("vr_k_upload"); csCopy = cp("vr_k_copy")
         }
-        if XR2DFilter.current == .xbr { hudScaler = XRPixelScaler(device: device) }
+        if XR2DFilter.upscales { hudScaler = XRPixelScaler(device: device) }
         let d1 = MTLDepthStencilDescriptor()
         d1.depthCompareFunction = .greaterEqual; d1.isDepthWriteEnabled = true
         dsOpaque = device.makeDepthStencilState(descriptor: d1)
@@ -582,30 +595,42 @@ final class RGRenderer {
             return
         }
         hqFull = nil
-        if hudHQRing.isEmpty || hudHQW != W || hudHQH != H {
-            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: W, height: H, mipmapped: false)
+        // La capa del panel llega con tres planos apilados en vertical (W x 3 * PH): color premultiplicado (PH filas) y, debajo, resta y tope (2 * PH filas), cada grupo en su textura.
+        let PH = H / 3
+        guard PH > 0, H == PH * 3 else { layerNote = "descartada(alto \(H) no múltiplo de 3 planos)"; return }
+        var win6 = [Int32](repeating: 0, count: 6)
+        hudWinRaw = mv_vrhost_hud2d_window_l(0, &win6) != 0 ? XR2DWindow(win6) : nil
+        if hudHQRing.isEmpty || hudHQW != W || hudHQH != PH {
+            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: W, height: PH, mipmapped: false)
             td.usage = [.shaderRead, .pixelFormatView]
             td.storageMode = .shared
-            var a: [MTLTexture] = [], b: [MTLTexture] = []
+            let pd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: W, height: 2 * PH, mipmapped: false)
+            pd.usage = [.shaderRead]
+            pd.storageMode = .shared
+            var a: [MTLTexture] = [], b: [MTLTexture] = [], c: [MTLTexture] = []
             for i in 0..<3 {
-                guard let t = device.makeTexture(descriptor: td), let v = t.makeTextureView(pixelFormat: .rgba8Unorm_srgb) else { return }
-                t.label = "HUD 2D fiel \(i)"; a.append(t); b.append(v)
+                guard let t = device.makeTexture(descriptor: td), let v = t.makeTextureView(pixelFormat: .rgba8Unorm_srgb), let q = device.makeTexture(descriptor: pd) else { return }
+                t.label = "HUD 2D fiel \(i)"; q.label = "HUD 2D fiel planos \(i)"; a.append(t); b.append(v); c.append(q)
             }
-            hudHQRing = a; hudHQRingSRGB = b; hudHQW = W; hudHQH = H; hudHQSeq = 0
-            hudXbr = []; hudXbrSRGB = []
+            hudHQRing = a; hudHQRingSRGB = b; hudPlanesRing = c; hudHQW = W; hudHQH = PH; hudHQSeq = 0
+            hudXbr = []; hudXbrSRGB = []; hudXbrPlanes = []
             if hudScaler != nil {
                 for i in 0..<3 {
-                    guard let t = XRPixelScaler.makeTarget(device, width: W, height: H, label: "HUD 2D xBR \(i)") else { hudXbr = []; hudXbrSRGB = []; break }
-                    hudXbr.append(t.tex); hudXbrSRGB.append(t.srgb)
+                    guard let t = XRPixelScaler.makeTarget(device, width: W, height: PH, label: "HUD 2D ampliado \(i)"),
+                          let q = XRPixelScaler.makeTarget(device, width: W, height: 2 * PH, label: "HUD 2D ampliado planos \(i)") else { hudXbr = []; hudXbrSRGB = []; hudXbrPlanes = []; break }
+                    hudXbr.append(t.tex); hudXbrSRGB.append(t.srgb); hudXbrPlanes.append(q.tex)
                 }
             }
         }
         let fresh = r == 1 || !hudHQ || hudHQSeq != seq
         if fresh {
             hudHQIdx = (hudHQIdx + 1) % hudHQRing.count
-            hudHQRing[hudHQIdx].replace(region: MTLRegionMake2D(0, 0, W, H), mipmapLevel: 0, withBytes: px!, bytesPerRow: W * 4)
+            hudHQRing[hudHQIdx].replace(region: MTLRegionMake2D(0, 0, W, PH), mipmapLevel: 0, withBytes: px!, bytesPerRow: W * 4)
+            hudPlanesRing[hudHQIdx].replace(region: MTLRegionMake2D(0, 0, W, 2 * PH), mipmapLevel: 0, withBytes: px! + W * PH * 4, bytesPerRow: W * 4)
             hudHQSeq = seq
-            if let sc = hudScaler, hudXbr.count == hudHQRing.count { sc.encode(commandBuffer, src: hudHQRing[hudHQIdx], dst: hudXbr[hudHQIdx], width: W, height: H) }
+            if let sc = hudScaler, hudXbr.count == hudHQRing.count {
+                sc.encode(commandBuffer, src: hudHQRing[hudHQIdx], dst: hudXbr[hudHQIdx], width: W, height: PH, planes: hudPlanesRing[hudHQIdx], planesDst: hudXbrPlanes[hudHQIdx])
+            }
         }
         if hudXbr.count == hudHQRing.count {
             hudTexture = hudXbr[hudHQIdx]; hudTextureSRGB = hudXbrSRGB[hudHQIdx]
@@ -633,21 +658,27 @@ final class RGRenderer {
             auxTexture[k] = nil; auxTextureSRGB[k] = nil
             return
         }
-        let W = Int(w), H = Int(h)
+        // tres planos apilados en vertical, como en takeLayer2D: color (H filas) en auxRing y resta + tope (2 * H filas) en auxPlanesRing
+        let W = Int(w), H = Int(h) / 3
+        guard H > 0, Int(h) == H * 3 else { layerNote = "capa \(k) descartada(alto \(h) no múltiplo de 3 planos)"; auxTexture[k] = nil; auxTextureSRGB[k] = nil; return }
         if auxRing[k].isEmpty || auxW[k] != W || auxH[k] != H {
             let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: W, height: H, mipmapped: false)
             td.usage = [.shaderRead, .pixelFormatView]
             td.storageMode = .shared
-            var a: [MTLTexture] = [], b: [MTLTexture] = []
+            let pd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: W, height: 2 * H, mipmapped: false)
+            pd.usage = [.shaderRead]
+            pd.storageMode = .shared
+            var a: [MTLTexture] = [], b: [MTLTexture] = [], c: [MTLTexture] = []
             for i in 0..<3 {
-                guard let t = device.makeTexture(descriptor: td), let v = t.makeTextureView(pixelFormat: .rgba8Unorm_srgb) else { auxTexture[k] = nil; auxTextureSRGB[k] = nil; return }
-                t.label = "2D capa \(k) \(i)"; a.append(t); b.append(v)
+                guard let t = device.makeTexture(descriptor: td), let v = t.makeTextureView(pixelFormat: .rgba8Unorm_srgb), let q = device.makeTexture(descriptor: pd) else { auxTexture[k] = nil; auxTextureSRGB[k] = nil; return }
+                t.label = "2D capa \(k) \(i)"; q.label = "2D capa \(k) planos \(i)"; a.append(t); b.append(v); c.append(q)
             }
-            auxRing[k] = a; auxRingSRGB[k] = b; auxW[k] = W; auxH[k] = H; auxSeq[k] = 0; auxTexture[k] = nil
+            auxRing[k] = a; auxRingSRGB[k] = b; auxPlanesRing[k] = c; auxW[k] = W; auxH[k] = H; auxSeq[k] = 0; auxTexture[k] = nil
         }
         if r == 1 || auxTexture[k] == nil || auxSeq[k] != seq {
             auxIdx[k] = (auxIdx[k] + 1) % auxRing[k].count
             auxRing[k][auxIdx[k]].replace(region: MTLRegionMake2D(0, 0, W, H), mipmapLevel: 0, withBytes: p, bytesPerRow: W * 4)
+            auxPlanesRing[k][auxIdx[k]].replace(region: MTLRegionMake2D(0, 0, W, 2 * H), mipmapLevel: 0, withBytes: p + W * H * 4, bytesPerRow: W * 4)
             auxSeq[k] = seq
         }
         auxTexture[k] = auxRing[k][auxIdx[k]]; auxTextureSRGB[k] = auxRingSRGB[k][auxIdx[k]]
@@ -1142,6 +1173,9 @@ final class RGRenderer {
         var st = NsCinemaStereo()
         guard ns_cinema_stereo(r.ipd, zn, zs, tx, r.tanX, r.distance, &st) != 0,
               let cam = XRStereo.eye(gameView: gameView, eye: e, ipd: st.b, conv: st.conv, tanX: tx, tanY: ty) else { return nil }
+#if !MV_BENCH
+        ns_gpu_engine_set_sep(st.b * 1000)   // separación de las cámaras en unidades del motor (XRStereo.eye deshace gameView y aplica 0,001 m por unidad: 1000 exactas por metro, sea cual sea la escala del usuario): el anfitrión cuenta los descartes con estos ojos (línea [descartes])
+#endif
         let t = cam.tangents + sh
         guard t.x > 0.01, t.y > 0.01, t.z > 0.01, t.w > 0.01 else { return nil }
         return (cam.view, t)
@@ -1788,7 +1822,7 @@ final class RGRenderer {
                 let bv = bodyViews ?? views
                 weapon?.encode(encoder: enc, views: bv, projections: projections, layered: amplify > 0, viewIndex: viewIndex)
                 if let sv = special {
-                    weapon?.encodeSpecial(encoder: enc, view: sv, aux: auxImage, auxLinear: auxStoredLinear, hud: hudTexture, views: bv,
+                    weapon?.encodeSpecial(encoder: enc, view: sv, aux: auxImage, auxLinear: auxStoredLinear, hud: hudTexture, hudPremultiplied: hudHQ, views: bv,
                                           projections: projections, layered: amplify > 0, viewIndex: viewIndex)
                 }
             }

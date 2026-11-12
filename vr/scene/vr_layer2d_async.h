@@ -20,8 +20,10 @@ VrL2Async *vl2a_new(void);
 void vl2a_free(VrL2Async *A);
 /* Escala objetivo (1..6) y suavizado (VL_SMOOTH_*); cualquier hilo. */
 void vl2a_options(VrL2Async *A, int scale, int smooth);
-/* Opciones del visor: raster NATIVO fijo (escala 1, suavizado original = rasterizado exacto de la GPU original, 24 bits conservados en vídeo). El escalado y el filtro de píxel art (xBR) los hace la GPU del renderer
- * sobre esa capa 1x; la re-rasterización a x2..x6 de la CPU y la escala adaptativa ya no intervienen en la imagen. Equivale a vl2a_options(A, 1, VL_SMOOTH_ORIGINAL). */
+/* Opciones del visor: raster NATIVO fijo (escala 1, suavizado original = rasterizado exacto de la GPU original, 24 bits conservados en vídeo). El escalado y el filtro de píxel art (MMPX / xBR) los hace la GPU del renderer
+ * sobre esa capa 1x; la re-rasterización a x2..x6 de la CPU y la escala adaptativa ya no intervienen en la imagen. Además la capa se publica EMPAQUETADA para el visor (vr_layer2d.h, vl2d_pack): colocada en la
+ * ventana visible fija del televisor (siempre 4:3, el mismo rectángulo en cualquier modo de vídeo) y, si no es pantalla completa (full == 0 en vl2a_acquire), con sus tres planos apilados en vertical
+ * (color premultiplicado + alfa, resta, tope): vl2a_acquire devuelve entonces h = 3 x alto de la ventana. Con vl2a_options (no nativo) se publica solo el plano de color, w x h de la zona mostrada. */
 void vl2a_options_native(VrL2Async *A);
 /* Troceo del 2D (interruptor global, APAGADO por defecto): solo gobierna la separación del radar del juego en vrhost.c (vrradar_split) y las rutas antiguas del visor (mv_vrhost_l2d_split). El reparto del 2D por clases (HUD / ventana / pantalla completa) es por procedencia (vr_prov.h) y no depende de él. Cualquier hilo. */
 void vl2a_set_split(int on);
@@ -35,6 +37,9 @@ int vl2a_acquire(VrL2Async *A, const uint8_t **px, int *w, int *h, int *full, ui
 void vl2a_release(VrL2Async *A);
 /* Consumidor, entre vl2a_acquire (r >= 0) y vl2a_release: modo (VL_PANEL / VL_FULL / VL_PANEL_VERIFIED) y etiqueta de vista (vl2a_set_view) del trabajo que produjo la capa adquirida. 0 si no hay capa. */
 int vl2a_acquire_info(VrL2Async *A, int *mode, int *view);
+/* Consumidor, entre vl2a_acquire (r >= 0) y vl2a_release: colocación de la capa adquirida en la ventana visible fija (vr_layer2d.h, vl2d_window: ancho y alto de la ventana, ox, oy, ancho y alto de la capa,
+ * en píxeles nativos). 0 si no hay capa. */
+int vl2a_acquire_window(VrL2Async *A, int win[6]);
 /* ¿Vale la capa (mode, layer_view) para la vista vigente cur_view? (función pura). La capa debe ser de la misma clase de vista (kind = view >> 8: una capa retrasada de los créditos, kind motor, no entra en el
  * mundo) y, con overlay (ventana 2D del menú sobre el mundo, hudTexture = VL_PANEL), solo VL_PANEL. */
 int vl2a_layer_accept(int mode, int layer_view, int cur_view, int overlay);

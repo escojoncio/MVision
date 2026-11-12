@@ -3,6 +3,7 @@
  * el filtro de articulaciones solo para dinámicos, la malla ausente y el búfer lleno; y de extremo a extremo: la cabeza contra paredes de la escena extraída en 6 direcciones. */
 #include "ns_extract.h"
 #include "ns_solid.h"
+#include "ns_gpu.h"
 #include "vr_headcol.h"
 #include <math.h>
 #include <stdio.h>
@@ -111,6 +112,18 @@ static void test_collect(void) {
     /* DETRÁS: el dinámico en z=-1000 está presente aunque la cámara mire a +z */
     int back = 0; for (size_t i = 0; i < n; i++) if (!src[i].is_static && tris[9 * i + 2] < -900.0f && tris[9 * i + 2] > -1100.0f) back++;
     CHECK(back >= 2, "geometría detrás de la cámara incluida (%d)", back);
+    {   /* el escenario de un grupo de mapa NO activo no es sólido (la cabeza no choca con otra sala): el del grupo activo sí */
+        const uint32_t g0 = sc.group_mask; NsInstance *mi = NULL;
+        for (uint32_t i = 0; i < sc.n_inst; i++) if (sc.inst[i].flags & NS_IF_STATIC) mi = &sc.inst[i];
+        const uint16_t z0 = mi ? mi->zone_mask : 0;
+        if (mi) { sc.group_mask = 1; mi->zone_mask = 4; }
+        size_t nz = ns_solid_collect(&sc, st, &o, tris, NULL, cap, &S);
+        CHECK(mi && nz == n - 2 && S.tris_static == 0, "escenario de otro grupo fuera (%zu vs %zu, estatico=%u)", nz, n, S.tris_static);
+        if (mi) mi->zone_mask = 1;
+        nz = ns_solid_collect(&sc, st, &o, tris, NULL, cap, &S);
+        CHECK(nz == n && S.tris_static == 2, "escenario del grupo activo dentro (%zu)", nz);
+        if (mi) { mi->zone_mask = z0; sc.group_mask = g0; }
+    }
     /* incluir semitransparentes */
     o.include_blend = 1;
     size_t n2 = ns_solid_collect(&sc, st, &o, tris, NULL, cap, &S);
@@ -159,6 +172,94 @@ static void test_missing_mesh(void) {
     CHECK(extract() == 0 && !(sc.valid & NS_SV_MAP_INCOMPLETE), "dinámico ilegible: el escenario sigue completo");
 }
 
+/* la marca GBOUND del objeto (0x20: el motor no parte sus caras, libdg/divide.c) llega a la instancia: el modo ENGINE la usa para decidir qué caras se dibujan «como el motor original» */
+static void test_gbound_flag(void) {
+    base();
+    uint32_t o_gb = wall_obj(OF_DYN | 0x20u, 2, -1000, 500, 0, 0, 0, 0x1), o_pl = wall_obj(OF_DYN, 2, 1000, 500, 0, 0, 0, 0x1), o_map = wall_obj(OF_MAP, 0, 1000, 3000, 0, 0, 0, 0x201);
+    uint32_t q[3] = {o_gb, o_pl, o_map};
+    queue_set(3, q);
+    CHECK(extract() == 0 && sc.n_inst == 3, "extrae (n_inst=%u)", sc.n_inst);
+    int gb = -1, pl = -1, mp = -1;
+    for (uint32_t i = 0; i < sc.n_inst; i++) {
+        const uint32_t k = sc.inst[i].key & 0x1FFFFFFFu;
+        if (k == (o_gb & 0x1FFFFFFFu)) gb = (sc.inst[i].flags & NS_IF_GBOUND) != 0;
+        if (k == (o_pl & 0x1FFFFFFFu)) pl = (sc.inst[i].flags & NS_IF_GBOUND) != 0;
+        if (k == (o_map & 0x1FFFFFFFu)) mp = (sc.inst[i].flags & NS_IF_GBOUND) != 0;
+    }
+    CHECK(gb == 1 && pl == 0 && mp == 0, "NS_IF_GBOUND: objeto GBOUND %d, dinámico sin ella %d, escenario %d", gb, pl, mp);
+}
+
+/* lo más cercano que la pantalla 3D dibuja en la ventana del motor (cota del paralaje): por cara, con el polígono recortado por la ventana, escenario y dinámicos, y con la regla del modo ENGINE */
+float ns_solid_win_min_z(const float t[3][3], float zn);   /* ns_solid.c */
+static float near_of(uint32_t o, float h) {
+    queue_set(1, &o);
+    if (extract() != 0 || sc.n_inst != 1) return -1.0f;
+    sc.cam.h = h;
+    return ns_solid_view_near(&sc, st);
+}
+static void test_view_near(void) {
+    float z;
+    /* suelo del escenario a y = 1300 que pasa bajo la cámara (z = -3000..3000): ni sus vértices ni sus centros caen en la ventana; entra por el borde inferior a z = 1300 * hy / 128 */
+    base(); z = near_of(wall_obj(OF_MAP, 1, 1300, 3000, 0, 0, 0, 0x201), 100.0f);
+    const float hy = 100.0f * (sc.cam.overscan_y > 0.5f && sc.cam.overscan_y < 2.0f ? sc.cam.overscan_y : 1.0f);
+    CHECK(fabsf(z - 1300.0f * hy / 128.0f) < 1.0f && z > 1000.0f, "suelo partido: borde inferior de la ventana: %.1f (esperado %.1f)", z, 1300.0f * hy / 128.0f);
+    ns_gpu_engine_set_off(NSG_ENG_OFF_SPLIT);
+    CHECK(ns_solid_view_near(&sc, st) == 0.0f, "«Recortadas»: el suelo enorme no se dibuja en la ventana: %.1f", ns_solid_view_near(&sc, st));
+    ns_gpu_engine_set_off(0);
+    /* pared lateral a x = 1000: entra por el borde derecho a z = 1000 * H / 160 */
+    base(); z = near_of(wall_obj(OF_MAP, 0, 1000, 3000, 0, 0, 0, 0x201), 100.0f);
+    CHECK(fabsf(z - 625.0f) < 1.0f, "pared lateral: borde derecho de la ventana: %.1f", z);
+    CHECK(sc.n_inst == 1 && (sc.inst[0].flags & NS_IF_STATIC), "es escenario");
+    base(); z = near_of(wall_obj(OF_MAP, 0, -1000, 3000, 0, 0, 0, 0x601), 100.0f);
+    CHECK(fabsf(z - 625.0f) < 1.0f, "pared lateral (doble cara): borde izquierdo de la ventana: %.1f", z);
+    base(); z = near_of(wall_obj(OF_MAP, 1, -1300, 3000, 0, 0, 0, 0x601), 100.0f);
+    CHECK(fabsf(z - 1300.0f * hy / 128.0f) < 1.0f, "techo (doble cara): borde superior de la ventana: %.1f", z);
+    /* pared partida que llega hasta la cámara: el suelo es el plano cercano de la pantalla 3D, no H/2 */
+    base(); z = near_of(wall_obj(OF_MAP, 0, 5, 3000, 0, 0, 0, 0x201), 400.0f);
+    CHECK(z == NS_SOLID_SCREEN_NEAR, "cara partida pegada a la cámara: plano cercano: %.1f", z);
+    /* los dinámicos cuentan: sin GBOUND se parte igual que el escenario */
+    base(); z = near_of(wall_obj(OF_DYN, 1, 1300, 3000, 0, 0, 0, 0x1), 100.0f);
+    CHECK(fabsf(z - 1300.0f * hy / 128.0f) < 1.0f, "dinámico sin GBOUND partido: %.1f", z);
+    sc.inst[0].flags |= NS_IF_SHADOW;
+    CHECK(ns_solid_view_near(&sc, st) == 0.0f, "las sombras no cuentan");
+    sc.inst[0].flags &= ~(uint32_t)NS_IF_SHADOW; sc.piece[sc.inst[0].first_piece].flags |= NS_PF_HIDDEN;
+    CHECK(ns_solid_view_near(&sc, st) == 0.0f, "las piezas ocultas no cuentan");
+    /* dinámico GBOUND pequeño y pegado a la cámara: la regla del motor lo dibuja ajustado al plano H/2 */
+    base(); z = near_of(wall_obj(OF_DYN | 0x20u, 2, 60, 30, 0, 0, 0, 0x1), 200.0f);
+    CHECK(z == 100.0f, "dinámico GBOUND cercano (z = 60 < H/2): en el plano H/2: %.1f", z);
+    /* el mismo sin GBOUND y más grande: partido, hasta el plano cercano; con GBOUND lo pierde el tamaño */
+    base(); z = near_of(wall_obj(OF_DYN, 1, 20, 300, 0, 0, 0, 0x1), 200.0f);
+    CHECK(z == NS_SOLID_SCREEN_NEAR, "dinámico sin GBOUND cercano: partido hasta el plano cercano: %.1f", z);
+    ns_gpu_engine_set_off(NSG_ENG_OFF_SPLIT);
+    const float zr = ns_solid_view_near(&sc, st);
+    ns_gpu_engine_set_off(0);
+    base(); z = near_of(wall_obj(OF_DYN | 0x20u, 1, 20, 300, 0, 0, 0, 0x1), 200.0f);
+    /* una mitad la pierde el tamaño; la otra se dibuja con el vértice de z = -300 en el plano H/2 = 100 y entra en la ventana por el borde derecho a z = 100 + 200 * 44 / 152 */
+    CHECK(fabsf(z - 157.895f) < 0.01f && zr == z, "dinámico GBOUND (o «Recortadas»): regla del motor con el ajuste al plano H/2: %.2f / %.2f", z, zr);
+    /* una cara de una sola cara vista por el reverso no cuenta (con doble cara, sí: arriba) */
+    base(); z = near_of(wall_obj(OF_MAP, 0, -1000, 3000, 0, 0, 0, 0x201), 100.0f);
+    CHECK(z == 0.0f, "pared lateral de una cara por el reverso: no cuenta: %.1f", z);
+    base(); z = near_of(wall_obj(OF_MAP, 0, -200, 3000, 0, 0, 0, 0x201), 400.0f);
+    CHECK(z == 0.0f, "cara de una cara por el reverso pegada a la cámara: no cuenta: %.1f", z);
+    {   /* la poda por lo ya encontrado mira el z MÍNIMO del triángulo: primero una pared de frente a z = 2000, luego el suelo partido (z = -3000..3000) que entra antes por el borde inferior */
+        base(); uint32_t o2[2] = {wall_obj(OF_MAP, 2, 2000, 3000, 0, 0, 0, 0x201), wall_obj(OF_MAP, 1, 1300, 3000, 0, 0, 0, 0x201)};
+        queue_set(2, o2); sc.cam.h = 100.0f;
+        z = extract() == 0 && sc.n_inst == 2 ? (sc.cam.h = 100.0f, ns_solid_view_near(&sc, st)) : -1.0f;
+        CHECK(fabsf(z - 1300.0f * hy / 128.0f) < 1.0f, "pared lejana y suelo partido: manda el suelo: %.1f (esperado %.1f)", z, 1300.0f * hy / 128.0f);
+    }
+    {   /* con H/2 < plano cercano de la pantalla 3D (H = 60): un dinámico GBOUND a z = 20 se dibuja en el plano H/2 = 30, más cerca que otro a z = 40 procesado antes */
+        base(); uint32_t o2[2] = {wall_obj(OF_DYN | 0x20u, 2, 40, 5, 0, 0, 0, 0x1), wall_obj(OF_DYN | 0x20u, 2, 20, 3, 0, 0, 0, 0x1)};
+        queue_set(2, o2);
+        z = extract() == 0 && sc.n_inst == 2 ? (sc.cam.h = 60.0f, ns_solid_view_near(&sc, st)) : -1.0f;
+        CHECK(z == 30.0f, "GBOUND por delante de H/2 < 50: en el plano H/2: %.1f", z);
+    }
+    {   /* recorte por la ventana y el plano cercano que en coma flotante deja más de 8 vértices (antes: desborde de pila; con ASan, fallo) */
+        const float t[3][3] = {{-29111.0586f, 23288.8652f, 181.944168f}, {14559.2559f, -11647.4033f, 90.9953384f}, {-1367.22974f, -840.283752f, 4.71892357f}};
+        z = ns_solid_win_min_z(t, 50.0f);
+        CHECK(z == 0.0f || z >= 50.0f, "polígono recortado degenerado: %g", z);
+    }
+}
+
 /* ---- extremo a extremo: habitación cerrada en la escena nativa y la cabeza empujando contra cada pared ---- */
 static void test_head_vs_native_room(void) {
     base();
@@ -168,6 +269,18 @@ static void test_head_vs_native_room(void) {
     for (int d = 0; d < 6; d++) objs[d] = wall_obj(OF_MAP, d / 2, dist[d], 3000, 0, 0, 0, 0x201);
     queue_set(6, objs);
     CHECK(extract() == 0 && sc.n_inst == 6, "habitación extraída (n_inst=%u)", sc.n_inst);
+    {   /* escenario más cercano en la ventana del motor (para acotar el paralaje de la pantalla 3D): la pared de delante (z = 1000; sus vértices caen fuera de la ventana, su centro dentro) */
+        const float zn = ns_solid_view_near(&sc, st);
+        CHECK(fabsf(zn - 1000.0f) < 1.0f, "escenario más cercano en la ventana: %.0f", zn);
+        const float h0 = sc.cam.h; sc.cam.h = 4000.0f;
+        CHECK(fabsf(ns_solid_view_near(&sc, st) - 1000.0f) < 1.0f, "cara partida (H/2 = 2000 por detrás de ella): su profundidad real: %.0f", ns_solid_view_near(&sc, st));
+        sc.cam.h = h0;
+        const uint32_t g0 = sc.group_mask; sc.group_mask = 1;
+        for (uint32_t i = 0; i < sc.n_inst; i++) sc.inst[i].zone_mask = 4;
+        CHECK(fabsf(ns_solid_view_near(&sc, st) - 1000.0f) < 1.0f && ns_solid_view_near(NULL, st) == 0.0f, "escenario de un grupo no activo: también cuenta (el renderer lo dibuja): %.0f", ns_solid_view_near(&sc, st));
+        for (uint32_t i = 0; i < sc.n_inst; i++) sc.inst[i].zone_mask = 0;
+        sc.group_mask = g0;
+    }
     size_t cap = 4096; float *tris = malloc(cap * 36);
     NsSolidOpts o; memset(&o, 0, sizeof o); NsSolidStats S;
     size_t n = ns_solid_collect(&sc, st, &o, tris, NULL, cap, &S);
@@ -208,6 +321,8 @@ int main(void) {
     if (ns_scene_alloc(&sc, 1, 1, 1, 0)) { printf("sin memoria\n"); return 1; }
     test_collect();
     test_missing_mesh();
+    test_gbound_flag();
+    test_view_near();
     test_head_vs_native_room();
     printf("test_ns_solid: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

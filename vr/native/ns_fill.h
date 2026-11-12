@@ -74,6 +74,8 @@ typedef struct {
     float brake_px;            /* desfase mediano (px del motor) a partir del cual se frena (def. 2,0) */
     uint32_t brake_min_native; /* triángulos nativos mínimos para que haya «nativo presente» y se frene (def. 64): con el nativo vacío o casi no hay nada que duplicar */
     int draw_texfix;           /* 0 (def.): «textura corregida» (el nativo está en su sitio con otra página/CLUT) se cuenta pero NO se dibuja: es una copia coplanar sobre la malla nativa (sesgo de 0,1 mm), con z-fighting y parches; 1 = se dibuja */
+    int only_absent;           /* 1: solo se DIBUJA la malla ausente de verdad (NF_FILL_ABSENT); sprite, otra textura y parcial se clasifican y cuentan pero no se emiten (medido: solo daban sprites flotantes
+                                * y parches sobre superficie que el nativo ya tiene). 0 (def. de ns_fill_cfg_default, pruebas): se emiten. La app (ns_fill_session_run sin configuración) usa 1 */
     void *dbg;                 /* FILE* opcional (herramientas): una línea por triángulo que se rellena o se descarta, con su causa */
 } NsFillCfg;
 void ns_fill_cfg_default(NsFillCfg *c);

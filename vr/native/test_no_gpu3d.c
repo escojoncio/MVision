@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /* Regresión de código del 3D: UN SOLO MODO. El mundo lo dibuja SOLO el render nativo (escena leída de la RAM); la lista de la GPU queda para el 2D. El camino gpuMode de RenderRG es código muerto sin acceso
  * (no hay selector de modo; MV_RENDER solo acepta «nativo»). Lee los fuentes (Swift / Metal / C del host) y comprueba que el camino nativo está cableado de punta a punta y que el
  * código muerto del modo gpu sigue sin acceso. Se ejecuta desde la raíz del repositorio (make -f vr/native/fx.mk test). */
@@ -140,13 +141,8 @@ int main(void) {
     /* 7b) cercanía al ojo, vista y registro del modo gpu */
     CHECK(strstr(vh, "if (!native_mode()) { o.eye_near_m = GPU3D_NEAR_EYE_M; o.line3d_px = 1.0f; o.coplanar_m = 0.005f; o.rect3d = 1; o.billboard = 1; }") != NULL && strstr(vh, "#define GPU3D_NEAR_EYE_M 0.10f") != NULL, "modo gpu: nada a menos de 0,10 m del ojo (vr_scene eye_near_m)");
     CHECK(count(vh, "vin.gpu3d") == 0 && count(vh, "VRV_K_BACKUP") == 0, "vrhost: sin vin.gpu3d y sin respaldo (la medida de cobertura ns_cover_glue sigue como diagnóstico)");
-    /* relleno por la verdad del motor: SOLO en la pantalla 3D con la cámara del motor (VRV_K_ENGINE); nunca la lista como verdad ni relleno en el MUNDO en primera persona. Cada entrada del relleno (instantánea y lista)
-     * lleva la guarda de la vista; las únicas apariciones son la definición débil y la llamada guardada. */
-    CHECK(count(vh, "ns_fill_glue_submit_cam(") == 2 && strstr(vh, "if (view.kind == VRV_K_ENGINE) ns_fill_glue_submit_cam(emu_ram") != NULL, "vrhost: ns_fill_glue_submit_cam solo con view.kind == VRV_K_ENGINE");
-    CHECK(count(vh, "ns_fill_glue_post_ik(") == 2 && strstr(vh, "if (view.kind == VRV_K_ENGINE) ns_fill_glue_post_ik(ram);") != NULL, "vrhost: ns_fill_glue_post_ik solo con view.kind == VRV_K_ENGINE");
-    CHECK(count(vh, "ns_fill_glue_fetch") == 0 && count(vh, "ns_fill_glue_scenery_stale") == 0 && count(vh, "ns_fill_glue_last") == 0, "vrhost: no recoge el relleno ni lo usa como decisión de vista (el renderer lo recoge; sin escenario obsoleto)");
-    CHECK(strstr(vh, "static void ns_fill_gate(void)") != NULL && strstr(vh, "if (eng != was_engine || (eng && have && area != last_area)) ns_fill_glue_reset();") != NULL && count(vh, "ns_fill_gate();") == 1, "vrhost: el relleno se vacía al entrar/salir de la pantalla 3D del motor y al cambiar de zona");
-    CHECK(strstr(vh, "ns_fill_glue_poll(fbuf, sizeof fbuf)") != NULL, "vrhost: la línea [relleno] se imprime una vez por segundo");
+    /* relleno por la verdad del motor: retirado de la app; el anfitrión ya no lo alimenta ni lo consulta (competía por el cerrojo de ns_fx con el hilo de emulación) */
+    CHECK(count(vh, "ns_fill_glue") == 0 && count(vh, "ns_fill_gate") == 0, "vrhost: el relleno está apagado del todo (ni instantáneas, ni trabajador, ni línea [relleno])");
     CHECK(strstr(vh, "int keep3b = vrhost_keep_filter(native_mode(), cine_cand,") != NULL, "modo gpu: fundidos y destellos al panel 2D (vrhost_keep_filter decide qué filtro se conserva)");
     CHECK(strstr(vh, "gpu_capture_hiprec(1)") != NULL && strstr(vh, "if (cap_on && !gte_hp_enabled()) gpu_capture_hiprec(1);") != NULL, "vértices de vista de la GTE en alta precisión siempre que haya captura");
     CHECK(strstr(vh, "\"[gpu3d] fotograma=%u") != NULL && strstr(vh, "gpu3d_log();") != NULL && strstr(vh, "gpu3d_note(&sc, r);") != NULL, "registro [gpu3d] una vez por segundo");
@@ -165,15 +161,48 @@ int main(void) {
     CHECK(strstr(vh, "view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO") != NULL, "la capa 2D entera acompaña a la UI y al vídeo");
     CHECK(count(xp, "engineHealthy") == 0 && count(xp, "engineBackup") == 0 && count(xp, "tipo=respaldo") == 0 && count(xe, "engineHealthy") == 0, "XRPresent no cae a ninguna imagen plana si el nativo no dibuja");
     CHECK(strstr(xp, "XRCinemaLayout.legible(reason: Int32(gs.view_reason), kind: gs.view_kind)") != NULL, "el vídeo y el respaldo se presentan grandes, planos y nítidos");
-    CHECK(count(nr, "scenery_stale") == 0 && count(nr, "ns_fill_glue_fetch") == 1, "NativeRenderer: sin escenario obsoleto; el relleno se recoge en un solo sitio");
-    {   /* el relleno solo entra con la pantalla 3D (cámara del juego, `cinema`): la guarda va justo antes de la recogida y por la misma tubería de efectos (ns_gpu_fx_build_ex) */
-        const char *g = strstr(nr, "if cinema && screenMode, (validBits & UInt32(truncatingIfNeeded: NS_SV_FX)) != 0 {"), *f = strstr(nr, "ns_fill_glue_fetch");
-        CHECK(g && f && f > g && f - g < 400, "NativeRenderer: ns_fill_glue_fetch solo bajo `if cinema && screenMode` (solo en la pantalla 3D (cinema && screenMode): ni en el mundo en primera persona ni en el diorama)");
-        CHECK(strstr(nr, "fxEffects.append(contentsOf: fillBuf[0..<nf])") != NULL && strstr(nr, "ns_gpu_fx_build_ex(fp.baseAddress") != NULL, "NativeRenderer: el relleno pasa por fxEffects -> ns_gpu_fx_build_ex (sin ruta nueva en la GPU)");
+    /* el relleno por la verdad del motor ya no tiene ruta de dibujo en la app (medido: solo aportaba efectos flotantes y su «ausente» era desfase de cámara): ni recogida en el renderer ni ajuste en el menú; el diagnóstico `[relleno]` del anfitrión sigue */
+    CHECK(count(nr, "scenery_stale") == 0 && count(nr, "ns_fill_glue") == 0 && count(nr, "fillBuf") == 0, "NativeRenderer: sin recogida del relleno");
+    CHECK(count(xp, "fill3D") == 0 && count(xp, "ns_fill_glue") == 0 && count(xp, "Relleno en pantalla 3D") == 0, "XRPresent: sin ajuste «Relleno en pantalla 3D»");
+    /* pantalla 3D con la cámara del motor: reglas de descarte de ns_gpu_engine_tri y tres interruptores de diagnóstico en los ajustes, encendidos de serie y persistentes */
+    CHECK(strstr(sh, "const float3 zc = max(zv, float3(U.misc.y));") != NULL && strstr(sh, "const uint eng_off = uint(U.misc.z + 0.5);") != NULL &&
+          strstr(sh, "rescue = zmax >= U.cam_x.w && (!rev || front);") != NULL && strstr(sh, "back = !rescue;") != NULL && strstr(sh, "if (rescue) cf |= NSG_CF_WINCUT;") != NULL &&
+          strstr(sh, "if (ez > 0.0 && abs(U.cam_x.w * dot(U.cam_x.xyz, er)) <= NSG_ENG_WIN_X * ez && abs(U.cam_y.w * dot(U.cam_y.xyz, er)) <= NSG_ENG_WIN_Y * ez) discard_fragment();") != NULL,
+          "sombreador: regla del motor por triángulo entero (ajuste al plano H/2); lo rescatado (no cercano, anverso desde un ojo de la vista) solo se dibuja fuera de la ventana del motor");
+    CHECK(strstr(nr, "let engOff = ns_gpu_engine_off()") != NULL && strstr(nr, "cullBack ? 0.5 * camH : 0, Float(engOff), 0)") != NULL && strstr(nr, "(engOff & UInt32(NSG_ENG_OFF_BACK)) != 0 ? 0 : Float(NSG_CULL_ALL)") != NULL,
+          "NativeRenderer: las reglas apagadas llegan al sombreador (misc.z y cull_eye.w)");
+    CHECK(strstr(xp, "var engBehind = true") != NULL && strstr(xp, "var engSize = true") != NULL && strstr(xp, "var engBack = true") != NULL &&
+          strstr(xp, "c.engBehind = b(\"xr.eng.behind\", true)") != NULL && strstr(xp, "d.set(engSize, forKey: \"xr.eng.size\")") != NULL && strstr(xp, "d.set(engBack, forKey: \"xr.eng.back\")") != NULL,
+          "XRViewConfig: descartes de la pantalla 3D encendidos de serie y persistentes");
+    CHECK(strstr(xp, "ns_gpu_engine_set_off(m)") != NULL && strstr(xp, "if !size { m |= UInt32(NSG_ENG_OFF_SIZE) }") != NULL && strstr(xp, "applyHands(c.newHands); applyDiscards(behind: c.engBehind, size: c.engSize, back: c.engBack, split: c.engSplit)") != NULL && count(xp, "XRViewConfig.applyDiscards(behind: cfg.engBehind, size: cfg.engSize, back: cfg.engBack, split: cfg.engSplit); cfg.save()") == 4 &&
+          strstr(xp, "(\"Descarte por detrás (3D)\", yn(cfg.engBehind))") != NULL && strstr(xp, "(\"Tope de tamaño (3D)\", yn(cfg.engSize))") != NULL && strstr(xp, "(\"Reversos (3D)\", yn(cfg.engBack))") != NULL,
+          "los interruptores aplican la máscara al arrancar y al conmutar, y tienen etiqueta en el menú");
+    /* «Caras cercanas (3D)»: Original (de serie: lo que el motor original parte se dibuja con su geometría real) / Recortadas; persistente; el sombreador lo decide con NSG_ENG_OFF_SPLIT */
+    CHECK(strstr(xp, "var engSplit = true") != NULL && strstr(xp, "c.engSplit = b(\"xr.eng.split\", true)") != NULL && strstr(xp, "d.set(engSplit, forKey: \"xr.eng.split\")") != NULL &&
+          strstr(xp, "if !split { m |= UInt32(NSG_ENG_OFF_SPLIT) }") != NULL && strstr(xp, "(\"Caras cercanas (3D)\", cfg.engSplit ? \"Original\" : \"Recortadas\")") != NULL, "XRViewConfig.engSplit: «Original» de serie, persistente y con etiqueta");
+    CHECK(strstr(sh, "(P.flags & NSG_PF_NOSPLIT) == 0u && (eng_off & uint(NSG_ENG_OFF_SPLIT)) == 0u && !rev && (cull || min(min(zv.x, zv.y), zv.z) < U.misc.y)") != NULL &&
+          strstr(sh, "abs((sx.y - sx.x) * (sy.z - sy.x) - (sx.z - sx.x) * (sy.y - sy.x)) > NSG_DIV_AREA;") != NULL && strstr(sh, "} else if (cull) {") != NULL, "sombreador: cara de un objeto sin GBOUND que el motor original parte: geometría real");
+    /* el rescate del reverso lo decide cada vista con SU ojo (con un pase por ojo, el del pase), no «algún ojo» */
+    CHECK(strstr(sh, "const bool front = sense * dot(v0 - U.eye[amp].xyz, nvr) > 0.0;") != NULL && count(sh, "U.eye[1].xyz, nvr)") == 0, "sombreador: el rescate del reverso usa el ojo de la vista");
+    /* la cota de paralaje de la pantalla 3D se pide en todas las compilaciones (los bancos traen la cabecera y un sustituto: 0 = sin cota) */
+    {
+        char *bh = slurp("bench/NativeBridge.h", 1), *fs = slurp("bench/c/fill_stub.c", 1), *ah = slurp("app/Sources/Bridging-Header.h", 1);
+        const char *zs = strstr(nr, "cineFilter.z_static = 0.001 * ns_solid_view_near(sc, store)");
+        CHECK(zs != NULL && zs - nr > 40 && !memmem(zs - 40, 40, "#if", 3), "NativeRenderer: la cota de paralaje no depende de MV_BENCH");
+        CHECK(zs != NULL && zs - nr > 11 && !memcmp(zs - 11, "if fresh { ", 11), "NativeRenderer: la cota de paralaje se calcula solo con escena nueva");
+        CHECK(bh && fs && ah && strstr(bh, "#include \"ns_solid.h\"") != NULL && strstr(ah, "#include \"ns_solid.h\"") != NULL &&
+              strstr(fs, "float ns_solid_view_near(const NsScene *sc, const NsMeshStore *st) { (void)sc; (void)st; return 0.0f; }") != NULL, "los dos bancos declaran y definen ns_solid_view_near");
+        free(bh); free(fs); free(ah);
     }
-    /* interruptor de la app «Relleno en pantalla 3D»: apagado de serie, persistente, gobierna ns_fill_glue_set_mode (apagado = diagnóstico); mismo patrón que newHands */
-    CHECK(strstr(xp, "var fill3D = false") != NULL && strstr(xp, "c.fill3D = b(\"xr.fill3d\", false)") != NULL && strstr(xp, "d.set(fill3D, forKey: \"xr.fill3d\")") != NULL, "XRViewConfig.fill3D: apagado de serie y persistente (xr.fill3d)");
-    CHECK(strstr(xp, "ns_fill_glue_set_mode(on ? 1 : 0)") != NULL && strstr(xp, "applyHands(c.newHands); applyFill(c.fill3D)") != NULL && strstr(xp, "case .fill3D: cfg.fill3D.toggle(); XRViewConfig.applyFill(cfg.fill3D); cfg.save()") != NULL && strstr(xp, "(\"Relleno en pantalla 3D\", yn(cfg.fill3D))") != NULL, "el interruptor aplica el modo al arrancar y al conmutar, y tiene etiqueta en el menú");
+    /* fuera de la pantalla 3D la medida de ventana del trabajador de cobertura se tira: al entrar no se vuelca `nativo_tapa` con una medida vieja */
+    CHECK(strstr(vh, "else { disc.have_prev = 0; disc.k = 0; disc.f0 = (uint32_t)hle_frame_count(); }") != NULL &&
+          strstr(vh, "const int hw = ns_cover_glue_win(win, &wf) && (int32_t)(wf - disc.f0) > 0;") != NULL, "vrhost: las medidas de ventana de listas anteriores a la entrada en ENGINE se descartan");
+    {   /* el menú principal cabe: 40 px por fila desde y = 106 y el pie de ayuda 56 px por encima del borde */
+        const char *e = strstr(xp, "enum XRMenuItem: Int, CaseIterable {"), *m = strstr(xp, "private static let menuW = 1024, menuH = ");
+        int rows = 0, mh = m ? atoi(m + strlen("private static let menuW = 1024, menuH = ")) : 0;
+        if (e) { const char *q = strstr(e, "case "), *end = q ? strchr(q, '\n') : NULL; rows = 1; for (; q && end && q < end; q++) rows += *q == ','; }
+        CHECK(rows > 0 && mh - 56 >= 106 + 40 * rows + 18, "menú: %d filas en %d px", rows, mh);
+    }
     CHECK(strstr(nr, "[nativo] escena_ausente=") != NULL && strstr(nr, "sceneAbsent += 1") != NULL, "escena nativa ausente: se conserva la última válida y se registra [nativo] escena_ausente=N");
     CHECK(count(xe, "worldNearM") == 0 && strstr(xe, "if dg.projMode == 1 { projNote") != NULL && strstr(xe, "projSource = \"sistema\"") != NULL && strstr(xe, "nearOverride: dg.nearPlane))") != NULL, "proyeccion del sistema (drawable, con su depthRange) por defecto; sin plano cercano propio");
     CHECK(count(nr, "setCullMode(.none)") >= 2 && count(nr, "setCullMode(.back)") == 0 && count(nr, "setCullMode(.front)") == 0, "sin descarte de caras en el mundo ni en los recubrimientos");

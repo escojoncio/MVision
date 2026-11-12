@@ -12,7 +12,7 @@
  * Límites: solo las mallas (los efectos de NsScene.effects no se dibujan), un ojo, cuerpo propio con la pose del juego (sin IK ni manos propias) y la VRAM del volcado.
  *
  * Uso: nsvr --dump DIR --out DIR --name N [--list DIR_FRAME] [--pose head|game] [--look guiñada,cabeceo (grados, sobre la cabeza)] [--size n (640)] [--tan t (1.2)] [--near m (0.1)]
- *           [--sep u (20)] [--gain g (3)] [--old-back] [--old-hw] (como la build 0d4635f: reversos que empatan / sin el tamaño máximo del hardware)
+ *           [--sep u (20)] [--gain g (3)] [--old-back] [--old-hw] (como la build 0d4635f: reversos que empatan / sin el tamaño máximo del hardware) [--old-rule (regla del motor por triángulo entero, sin el rescate del campo extra)] [--recortadas (sin la subdivisión del motor original)]
  *           diagnóstico: [--all-groups (como si el motor tuviera activos todos los grupos de mapa)] [--skip pieza,pieza (no dibujarlas)] [--probe x,y (pieza visible en ese píxel)] */
 #include "../ns_cpuref.h"
 #include "../ns_dump.h"
@@ -47,6 +47,9 @@ static float g_tovr[12], g_mpu, g_raise_m;
 static int g_old_back;   /* --old-back: como la build 0d4635f (los reversos empatan con los anversos) */
 static int g_cull_all, g_no_hw; static float g_zreject, g_cam_fwd[4], g_cam_x[4], g_cam_y[4];   /* pantalla 3D (cámara del motor): descarte de reversos y descarte cercano del motor (cullBack de NativeRenderer) */
 static float g_det_sign = 1.0f, g_hpx, g_hpy;
+static int g_wincut;      /* el triángulo en curso es un rescatado (NSG_ENG_EXTRA): raster no lo dibuja dentro de la ventana del motor (ns_fs, NSG_CF_WINCUT); solo con la vista del motor */
+static int g_no_split;    /* --recortadas: «Caras cercanas: Recortadas» (sin la subdivisión del motor original) */
+static int g_old_rule;   /* --old-rule: regla del sombreador anterior a ns_gpu_engine_tri */
 static int g_old_reject, g_nocull; static uint32_t g_skipflag; static int32_t *g_opmap; static int g_opcur;   /* diagnóstico --miss: operación de la lista que escribió cada píxel de L */
 
 static void buf_alloc(Buf *b, int n) {
@@ -117,6 +120,7 @@ static void raster(Buf *b, const CV t[3], const NsGpuCorner *c0, int pass, int g
         float w1 = ((sx[2] - px) * (sy[0] - py) - (sx[0] - px) * (sy[2] - py)) / area;
         float w2 = 1.0f - w0 - w1;
         if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+        if (g_wincut && fabsf((px - cx) / f) * g_hpx <= NSG_ENG_WIN_X && fabsf((py - cy) / f) * g_hpy <= NSG_ENG_WIN_Y) continue;   /* la vista es la del motor: el píxel es su proyección */
         const float iz = w0 * iw[0] + w1 * iw[1] + w2 * iw[2];
         const size_t o = (size_t)y * b->w + x;
         if (!(iz >= b->iz[o])) {     /* prueba de profundidad de la app: Z invertida, compare >= */
@@ -160,10 +164,11 @@ static void draw_tri(Buf *b, const NsScene *sc, int gi, uint32_t tri, int pass, 
     const NsGpuPiece *P = &g_tbl[gi];
     const NsGpuCorner *c = &g_corners[3u * tri];
     CV v[3];
-    float pvs[3][3], zmin = 1e30f, ev[3][3];
+    float pvs[3][3], zmin = 1e30f, ev[3][3], wps[3][3];
     for (int k = 0; k < 3; k++) {
         float wp[3], pv[3], col[3];
         ns_gpu_vert_world(g_verts, g_tbl, (uint32_t)gi, c[k].v, wp);
+        memcpy(wps[k], wp, sizeof wp);
         ev[k][0] = g_cam_x[0] * wp[0] + g_cam_x[1] * wp[1] + g_cam_x[2] * wp[2] + g_cam_x[3];
         ev[k][1] = g_cam_y[0] * wp[0] + g_cam_y[1] * wp[1] + g_cam_y[2] * wp[2] + g_cam_y[3];
         ev[k][2] = g_cam_fwd[0] * wp[0] + g_cam_fwd[1] * wp[1] + g_cam_fwd[2] * wp[2] + g_cam_fwd[3];
@@ -186,7 +191,7 @@ static void draw_tri(Buf *b, const NsScene *sc, int gi, uint32_t tri, int pass, 
     }
     /* reverso de una cara de una sola cara visto desde ESTE ojo (ns_gpu_tri_back en el mundo VR; g_det_sign = sentido de to_vr): si no se descarta, se dibuja pero pierde los empates (ns_gpu_back_z:
      * la profundidad de recorte, cerca / d, se multiplica por el factor, es decir d se divide por él; la posición en pantalla no cambia) */
-    int back = 0;
+    int back = 0, wincut = 0;
     if (c[0].flags & NSG_CF_ONESIDED) {
         back = ns_gpu_tri_back(pvs[0], pvs[1], pvs[2], b->eye);
         if (g_det_sign < 0.0f) back = !back;
@@ -196,18 +201,32 @@ static void draw_tri(Buf *b, const NsScene *sc, int gi, uint32_t tri, int pass, 
     if (ts) { ts->tris++; ts->back += (uint32_t)back; }
     if (g_zreject > 0.0f && g_old_reject) {
         if (zmin <= g_zreject + 4.0f) { if (ts) ts->near_rej++; return; }   /* descarte cercano anterior (sustituido por el ajuste de la GTE): solo para comparar */
-    } else if (g_zreject > 0.0f) {   /* proyección de la GTE (ns_gpu_gte_tri): el vértice con z < H/2 se proyecta en el plano H/2; solo se descarta el triángulo sin vértices delante, o el de más de 1023 x 511 px */
+        if (g_cull_all && back && !g_nocull) return;
+    } else if (g_zreject > 0.0f && g_old_rule) {   /* --old-rule: la regla anterior (ns_gpu_gte_tri por triángulo entero y reverso con el ojo de la vista), para comparar */
         float ec[3][3];
         const int r = ns_gpu_gte_tri((const float (*)[3])ev, g_zreject, g_hpx, g_hpy, ec);
         if (r == NSG_GTE_BEHIND) { if (ts) ts->near_rej++; return; }
         if (r == NSG_GTE_OVERSIZE && !g_no_hw) { if (ts) ts->hw_big++; return; }
         for (int k = 0; k < 3; k++) if (ec[k][2] != ev[k][2]) { v[k].d = ec[k][2] / 1000.0f; ev[k][2] = ec[k][2]; }
-    }
-    if (g_cull_all && back && !g_nocull) return;                                      /* NSG_CULL_ALL */
+        if (g_cull_all && back && !g_nocull) return;                                  /* NSG_CULL_ALL */
+    } else if (g_zreject > 0.0f) {   /* reglas del modo ENGINE (ns_gpu_engine_tri, como ns_vertex): la del motor por triángulo entero y el rescate en el campo extra */
+        NsGpuEngCam ec;
+        for (int k = 0; k < 3; k++) { ec.eye[k] = sc->cam.eye[k]; ec.x[k] = g_cam_x[k]; ec.y[k] = g_cam_y[k]; ec.fwd[k] = g_cam_fwd[k]; }
+        ec.h = 2.0f * g_zreject; ec.hx = g_hpx; ec.hy = g_hpy;
+        const float eyes[1][3] = {{sc->cam.eye[0], sc->cam.eye[1], sc->cam.eye[2]}};   /* el ojo de esta vista es el del motor */
+        const int r = ns_gpu_engine_tri((const float (*)[3])wps, &ec, (c[0].flags & NSG_CF_ONESIDED) && g_cull_all && !g_nocull, !(P->flags & NSG_PF_NOSPLIT), eyes, 1, (g_no_hw ? NSG_ENG_OFF_SIZE : 0) | (g_no_split ? NSG_ENG_OFF_SPLIT : 0), NULL);   /* NSG_ENG_SPLIT: geometría real, la recorta el plano cercano */
+        if (r == NSG_ENG_BEHIND) { if (ts) ts->near_rej++; return; }
+        if (r == NSG_ENG_OVERSIZE) { if (ts) ts->hw_big++; return; }
+        if (r == NSG_ENG_BACK) return;
+        wincut = r == NSG_ENG_EXTRA;
+        if (r == NSG_ENG_DRAW) for (int k = 0; k < 3; k++) if (ev[k][2] < g_zreject) { v[k].d = g_zreject / 1000.0f; ev[k][2] = g_zreject; }   /* ajuste al plano H/2 (x e y de la vista intactas) */
+    } else if (g_cull_all && back && !g_nocull) return;                               /* NSG_CULL_ALL */
     CV poly[4];
     const int n = clip_near(v, b->znear, poly);
+    g_wincut = wincut;
     if (ts) { if (n == 0) ts->clipped_out++; else if (v[0].d < b->znear || v[1].d < b->znear || v[2].d < b->znear) ts->crossing++; }
     for (int i = 1; i + 1 < n; i++) { const CV t3[3] = {poly[0], poly[i], poly[i + 1]}; raster(b, t3, c, pass, gi, (int)tri, back); }
+    g_wincut = 0;
 }
 
 typedef struct { float depth; int gi; uint32_t tri; } SemiTri;
@@ -239,6 +258,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--miss")) miss_top = atoi(NEXT());
         else if (!strcmp(a, "--old-back")) g_old_back = 1;
         else if (!strcmp(a, "--old-hw")) g_no_hw = 1;
+        else if (!strcmp(a, "--old-rule")) g_old_rule = 1;
+        else if (!strcmp(a, "--recortadas")) g_no_split = 1;
         else { fprintf(stderr, "opción desconocida: %s (véase la cabecera de nsvr.c)\n", a); return 2; }
     }
     if (!dumpd || size < 16) { fprintf(stderr, "uso: nsvr --dump DIR --out DIR --name N (ver cabecera)\n"); return 2; }
@@ -338,7 +359,7 @@ int main(int argc, char **argv) {
     int *is_static = calloc(np ? np : 1, sizeof(int));
     for (uint32_t ii = 0; ii < sc.n_inst; ii++) {
         const NsInstance *in = &sc.inst[ii];
-        const int in_group = sc.group_mask == 0 || in->zone_mask == 0 || (in->zone_mask & sc.group_mask) != 0;
+        const int in_group = (in->flags & NS_IF_STATIC) != 0 || sc.group_mask == 0 || in->zone_mask == 0 || (in->zone_mask & sc.group_mask) != 0;   /* como NativeRenderer: el escenario se dibuja con independencia del grupo activo */
         for (uint32_t k = 0; k < in->n_pieces; k++) {
             const uint32_t gi = in->first_piece + k;
             const NsPiece *p = &sc.piece[gi];

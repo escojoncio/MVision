@@ -72,7 +72,7 @@ void vrfire_load_mat(const uint8_t *ram, uint32_t addr, VrFireMat *m);
 void vrfire_mat_forward(const VrFireMat *m, float out[3]);
 
 /* ---- configuración ---- */
-enum { VRFIRE_ARM_ON_TRIGGER = 0,  /* pulsa cuadrado al disparar (latencia del primer disparo ~0,4 s, sin disparos sobrantes) */
+enum { VRFIRE_ARM_ON_TRIGGER = 0,  /* pulsa cuadrado al disparar (primer disparo ~0,4 s; ~0,1 s con vrfire_skip_raise; sin disparos sobrantes) */
        VRFIRE_ARM_ON_RAISE = 1 };  /* mantiene cuadrado con el arma levantada (primer disparo ~3 VBlanks; bloquea el andar y
                                     * al bajar el arma el juego dispara un tiro sobrante que se suprime, ver vrfire_stats) */
 
@@ -122,6 +122,13 @@ void vrfire_init(const VrFireCfg *c);
 const VrFireCfg *vrfire_config(void);
 /* Una vez por VBlank, antes de enviar el mando al juego. */
 void vrfire_frame(const VrFireGame *g, const VrFireIn *in, VrFireOut *out);
+
+/* Salta el levantado del arma del juego. Pistola, fusil de asalto y lanzamisiles guiado comparten función de estado (decompilación: sna_init.c sna_gun_800540D0): tras pulsar el ataque cuenta 8 ticks
+ * (16 VBlanks) antes de pasar al estado que dispara (sub_80057BF0); el contador (field_910; edición europea: bloque del jugador + 0x90C) lo incrementa el juego en cada tick. Con una petición de disparo
+ * en curso y el botón ya pulsado por esta capa, en cuanto el juego ha arrancado el ataque (contador 1..7, arma aún sin apuntar) se escribe 8: el tick siguiente cambia de estado y el otro dispara
+ * (~5 VBlanks de la petición a la bala en vez de ~21), y vrfire_frame suelta el botón sin esperar a «apuntando» (el soltar queda en cola en el propio juego). Las demás armas no se tocan (su función
+ * de estado usa el contador para otra cosa o no lo tiene). Una vez por VBlank, antes de vrfire_frame. Devuelve 1 si escribió. */
+int vrfire_skip_raise(uint8_t *ram);
 
 /* ---- lo que usan los sustitutos HLE (vr_fire_hle.c) ---- */
 enum { VRFIRE_PASS = 0,    /* llamar al original con los argumentos del juego */

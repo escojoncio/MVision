@@ -28,6 +28,8 @@ struct XRViewConfig {
     var sharp = 1                   // 0 suave, 1 nítida (bilineal de píxel fijo), 2 píxel (vecino más próximo)
     var smooth2D = 0                // suavizado de la capa 2D (HUD, menús, créditos, pantalla de cine): 0 original, 1 nítido (píxel art), 2 suave
     var integerScale = false        // ajusta el ancho para que cada texel ocupe un número entero de píxeles del visor
+    var filter2D = 0                // filtro de píxel art del 2D (XR2DFilter): 0 MMPX, 1 xBR, 2 nítido, 3 sin filtro; se aplica al reabrir la vista (XR2DFilter.reload)
+    var exact2D = true              // composición de la capa 2D sobre el mundo como la GPU original (XR2DCompose.framebufferFetch)
     var cutscene: Cutscene = .stereo // cinemáticas del motor: pantalla de cine 3D estéreo con profundidad real (defecto), la misma en mono (sin profundidad), pantalla de cine plana, diorama o dentro de la escena
     var dioramaScale: Float = 0.15  // metros por metro del motor (0,15: una sala de 8 m cabe en ~1,2 m)
     var hudPanels = true
@@ -40,7 +42,11 @@ struct XRViewConfig {
     var aiRange = 0                 // IA de enemigos: alcance de visión, índice de aiRanges (0 = x1, 1 = x1,5, 2 = x2)
     var aiHead = true               // IA de enemigos: ven también la cabeza VR (no solo el ojo del personaje)
     var newHands = true             // manos del personaje en primera persona: nuevas (articuladas, con puño propio) u originales del motor
-    var fill3D = false              // «Relleno en pantalla 3D»: dibuja en la pantalla 3D del motor lo que la lista de la GPU tiene y el nativo no (apagado de serie = solo diagnóstico `[relleno]` en el log)
+    // Diagnóstico de la pantalla 3D con la cámara del motor: las tres reglas de descarte por triángulo del render nativo (ns_gpu_engine_tri), cada una apagable por separado. Encendidas de serie.
+    var engBehind = true            // «Descarte por detrás (3D)»: triángulo con los tres vértices detrás de la cámara del motor
+    var engSize = true              // «Tope de tamaño (3D)»: triángulo lejano de más de 1023 x 511 px de la pantalla del motor
+    var engBack = true              // «Reversos (3D)»: reverso de las caras de una sola cara
+    var engSplit = true             // «Caras cercanas (3D)»: true = «Original» (las caras grandes y cercanas de los objetos que el motor parte se ven por trozos, como en el motor original); false = «Recortadas» (como el juego con el parche sin-subdivisión: desaparecen enteras)
     var follow2D = true             // pantallas 2D (cine, pantalla 3D, ventanas del juego, menú VR): siguen la cabeza en cada fotograma (true) o quedan fijas en el mundo (false)
     var smoothMotion = true         // fluidez de la locomoción: el mundo se corrige por fotograma de render (giro del stick y avance extrapolados entre escenas del juego)
 
@@ -67,13 +73,18 @@ struct XRViewConfig {
         mv_vrhost_set_hands_new(on ? 1 : 0)
 #endif
     }
-    /// Relleno por la verdad del motor (vr/native/ns_fill_glue): encendido = dibuja (solo en la pantalla 3D con la cámara del motor), apagado = solo diagnóstico. Idempotente; se llama al arrancar y tras cada cambio del menú.
-    static func applyFill(_ on: Bool) {
+    /// Reglas de descarte del modo ENGINE del render nativo (vr/native/ns_gpu: NSG_ENG_OFF_*): cada ajuste apagado deja de descartar por esa regla en la pantalla 3D. Idempotente; se llama al arrancar y tras cada cambio del menú.
+    static func applyDiscards(behind: Bool, size: Bool, back: Bool, split: Bool) {
 #if !MV_BENCH
-        ns_fill_glue_set_mode(on ? 1 : 0)
+        var m: UInt32 = 0
+        if !behind { m |= UInt32(NSG_ENG_OFF_BEHIND) }
+        if !size { m |= UInt32(NSG_ENG_OFF_SIZE) }
+        if !back { m |= UInt32(NSG_ENG_OFF_BACK) }
+        if !split { m |= UInt32(NSG_ENG_OFF_SPLIT) }
+        ns_gpu_engine_set_off(m)
 #endif
     }
-    static func applyStoredAI() { let c = load(); applyAI(range: c.aiRange, head: c.aiHead); applyHands(c.newHands); applyFill(c.fill3D) }
+    static func applyStoredAI() { let c = load(); applyAI(range: c.aiRange, head: c.aiHead); applyHands(c.newHands); applyDiscards(behind: c.engBehind, size: c.engSize, back: c.engBack, split: c.engSplit) }
 
     private static func f(_ k: String, _ d: Float, _ lo: Float, _ hi: Float) -> Float {
         guard UserDefaults.standard.object(forKey: k) != nil else { return d }
@@ -92,6 +103,8 @@ struct XRViewConfig {
         let s = UserDefaults.standard.integer(forKey: "xr.view.sharp")
         c.sharp = UserDefaults.standard.object(forKey: "xr.view.sharp") == nil ? 1 : min(max(s, 0), 2)
         c.integerScale = b("xr.view.integer", false)
+        c.filter2D = XR2DFilter.storedIndex
+        c.exact2D = b(XR2DCompose.key, true)
         let s2 = UserDefaults.standard.integer(forKey: "xr.view.smooth2d2")   // clave nueva: el defecto pasó de «nítido» a «original» (el texto no se deforma)
         c.smooth2D = UserDefaults.standard.object(forKey: "xr.view.smooth2d2") == nil ? 0 : min(max(s2, 0), 2)
         // El defecto es la pantalla de cine 3D estéreo (IPD real, profundidad). Un «screen» (mono, sin profundidad) guardado por el defecto anterior migra a «stereo» UNA sola vez (clave de marca);
@@ -114,7 +127,10 @@ struct XRViewConfig {
         c.smoothMotion = b("xr.view.smoothMotion", true)
         c.follow2D = b("xr.view.follow2d", true)
         c.newHands = b("xr.hands.new", true)
-        c.fill3D = b("xr.fill3d", false)
+        c.engBehind = b("xr.eng.behind", true)
+        c.engSize = b("xr.eng.size", true)
+        c.engBack = b("xr.eng.back", true)
+        c.engSplit = b("xr.eng.split", true)
         // El defecto pasó de x1,5 a x1 (alcance original del juego): lo guardado por el defecto anterior migra a x1 UNA sola vez (clave de marca); elegido después en el menú, sobrevive al reinicio.
         if !UserDefaults.standard.bool(forKey: "xr.ai.range.toX1") {
             UserDefaults.standard.set(0, forKey: "xr.ai.range")
@@ -133,6 +149,8 @@ struct XRViewConfig {
         d.set(Double(curve), forKey: "xr.view.curve")
         d.set(sharp, forKey: "xr.view.sharp")
         d.set(integerScale, forKey: "xr.view.integer")
+        d.set(filter2D, forKey: XR2DFilter.key)
+        d.set(exact2D, forKey: XR2DCompose.key)
         d.set(smooth2D, forKey: "xr.view.smooth2d2")
         d.set(cutscene.rawValue, forKey: "xr.view.cutscene3")
         d.set(Double(dioramaScale), forKey: "xr.view.dioramaScale")
@@ -146,7 +164,10 @@ struct XRViewConfig {
         d.set(smoothMotion, forKey: "xr.view.smoothMotion")
         d.set(follow2D, forKey: "xr.view.follow2d")
         d.set(newHands, forKey: "xr.hands.new")
-        d.set(fill3D, forKey: "xr.fill3d")
+        d.set(engBehind, forKey: "xr.eng.behind")
+        d.set(engSize, forKey: "xr.eng.size")
+        d.set(engBack, forKey: "xr.eng.back")
+        d.set(engSplit, forKey: "xr.eng.split")
         d.set(aiRange, forKey: "xr.ai.range")
         d.set(aiHead, forKey: "xr.ai.head")
     }
@@ -173,7 +194,7 @@ final class XRCinema {
             t.label = "mv.cine.\(i)"
             ring.append(t); ringSRGB.append(v)
         }
-        if XR2DFilter.current == .xbr { scaler = XRPixelScaler(device: device) }
+        if XR2DFilter.upscales { scaler = XRPixelScaler(device: device) }
     }
 
     /// Sube el último fotograma si hay uno nuevo (no espera ni retiene nada del hilo de emulación).
@@ -237,7 +258,7 @@ final class XRCinema {
     /// `video`: vídeo FMV/MDEC (view_kind 3 de vr_view.h, el mismo que XRCinemaLayout.legible): sin xBR, solo sharp-bilinear sobre el marco nativo.
     func prepareUpscale(video: Bool) {
         xbrActive = false
-        guard !video, XR2DFilter.current == .xbr, scaler != nil, let dev = device else { return }
+        guard !video, XR2DFilter.upscales, scaler != nil, let dev = device else { return }
         let sw = hqActive ? hqW : w, sh = hqActive ? hqH : h
         guard sw > 0, sh > 0, let src = sourceTexture(srgb: false) else { return }
         if xbr.isEmpty || xbrW != sw || xbrH != sh {
@@ -283,7 +304,7 @@ struct XRNav: Equatable {
 }
 
 enum XRMenuItem: Int, CaseIterable {
-    case resume, recenter, calibrateHands, width, distance, follow2D, curve, sharp, integerScale, smooth2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, newHands, fill3D, debugAxes, aiMenu, diagnostics, exit
+    case resume, recenter, calibrateHands, width, distance, follow2D, curve, sharp, integerScale, smooth2D, filter2D, exact2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, newHands, engBehind, engSize, engBack, engSplit, debugAxes, aiMenu, diagnostics, exit
 }
 
 /// Submenú «IA de enemigos».
@@ -293,7 +314,7 @@ enum XRAIItem: Int, CaseIterable {
 
 /// Submenú «Diagnóstico» (interruptores en vivo de XRDiag).
 enum XRDiagItem: Int, CaseIterable {
-    case back, reset, magenta, split, rateMap, msaa1, noLayers, nearPlane, projection, noZTest, fillDepth, flatDepth
+    case back, reset, magenta, split, rateMap, msaa1, noLayers, nearPlane, projection, noZTest, fillDepth, flatDepth, giveWeapons
 }
 
 final class XRPresenter {
@@ -315,6 +336,8 @@ final class XRPresenter {
     private let cinema: XRCinema?
     /// Fotograma completo de la capa 2D fiel a alta resolución (lo fija el bucle de render desde RGRenderer.hqFull antes de componer); nil = fotograma normal.
     var hqFull: (bytes: [UInt8], w: Int, h: Int, seq: UInt32)?
+    /// Colocación de la capa 2D fiel del HUD en la ventana visible fija del televisor (RGRenderer.hudWin; lo fija el bucle de render antes de componer); nil = HUD de reserva.
+    var hudWin: XR2DWindow?
     private(set) var shown: Display = .cinema
     private(set) var veil: Float = 1
     /// Fundido a negro por la cabeza empujando contra el escenario (0..1; lo fija el bucle de render con mv_vrhost_head_limit; ya viene suavizado).
@@ -360,7 +383,7 @@ final class XRPresenter {
     var onRecenter: (() -> Void)?
     var onExit: (() -> Void)?
 
-    private static let menuW = 1024, menuH = 1220     // 26 filas de 40 px desde y = 106 (la última acaba en 1146) + pie de ayuda en y = menuH - 56 = 1164
+    private static let menuW = 1024, menuH = 1420     // 31 filas de 40 px desde y = 106 (la última acaba en 1346) + pie de ayuda en y = menuH - 56 = 1364
 
     init(device: MTLDevice) {
         cinema = XRCinema(device: device)
@@ -527,6 +550,12 @@ final class XRPresenter {
         case .noZTest: d.update { $0.noZTest.toggle() }
         case .fillDepth: d.update { $0.fillDepth.toggle() }
         case .flatDepth: d.update { $0.flatDepth.toggle() }
+        case .giveWeapons:      // truco de depuración: acción única (no se guarda); el hilo de emulación la aplica en el siguiente VBlank si hay partida
+            if dir >= 0 {
+#if !MV_BENCH
+                mv_vrgame_cheat_all_weapons()
+#endif
+            }
         }
         menuDirty = true
     }
@@ -554,6 +583,8 @@ final class XRPresenter {
 #if !MV_BENCH
             mv_vrhost_set_hud2d_smooth(Int32(cfg.smooth2D))
 #endif
+        case .filter2D: cfg.filter2D = (cfg.filter2D + dir + 4) % 4      // se aplica al reabrir la vista: los destinos de la ampliación se crean con el factor del filtro (XR2DFilter.reload)
+        case .exact2D: cfg.exact2D.toggle(); XR2DCompose.framebufferFetch = cfg.exact2D
         case .cutscene:
             let all = XRViewConfig.Cutscene.allCases
             let i = all.firstIndex(of: cfg.cutscene) ?? 0
@@ -568,7 +599,10 @@ final class XRPresenter {
         case .vignette: Self.cycleVignette(dir)
         case .hideHands: cfg.hideRealHands.toggle(); cfg.save()      // la escena lo lee de UserDefaults (@AppStorage): se guarda al momento
         case .newHands: cfg.newHands.toggle(); XRViewConfig.applyHands(cfg.newHands); cfg.save()
-        case .fill3D: cfg.fill3D.toggle(); XRViewConfig.applyFill(cfg.fill3D); cfg.save()
+        case .engBehind: cfg.engBehind.toggle(); XRViewConfig.applyDiscards(behind: cfg.engBehind, size: cfg.engSize, back: cfg.engBack, split: cfg.engSplit); cfg.save()
+        case .engSize: cfg.engSize.toggle(); XRViewConfig.applyDiscards(behind: cfg.engBehind, size: cfg.engSize, back: cfg.engBack, split: cfg.engSplit); cfg.save()
+        case .engBack: cfg.engBack.toggle(); XRViewConfig.applyDiscards(behind: cfg.engBehind, size: cfg.engSize, back: cfg.engBack, split: cfg.engSplit); cfg.save()
+        case .engSplit: cfg.engSplit.toggle(); XRViewConfig.applyDiscards(behind: cfg.engBehind, size: cfg.engSize, back: cfg.engBack, split: cfg.engSplit); cfg.save()
         case .debugAxes: cfg.debugAxes.toggle()
         case .aiMenu: if dir >= 0 { page = 2; sel = 0 }
         case .diagnostics: if dir >= 0 { page = 1; sel = 0 }
@@ -596,6 +630,7 @@ final class XRPresenter {
             case .noZTest: return ("Sin prueba de profundidad", yn(s.noZTest))
             case .fillDepth: return ("Profundidad de relleno", yn(s.fillDepth))
             case .flatDepth: return ("No entregar profundidad al sistema", yn(s.flatDepth))
+            case .giveWeapons: return ("Truco: dar todas las armas", "")
             }
         }
     }
@@ -632,6 +667,10 @@ final class XRPresenter {
             case .sharp: return ("Nitidez de la imagen", ["Suave", "Nítida", "Píxel"][min(max(cfg.sharp, 0), 2)])
             case .integerScale: return ("Escalado entero", yn(cfg.integerScale))
             case .smooth2D: return ("Suavizado 2D", ["Original", "Nítido", "Suave"][min(max(cfg.smooth2D, 0), 2)])
+            case .filter2D:
+                let f = min(max(cfg.filter2D, 0), 3)
+                return ("Filtro 2D", ["MMPX", "xBR", "Nítido", "Sin filtro"][f] + (f != XR2DFilter.current.index ? " (al reabrir la vista)" : ""))
+            case .exact2D: return ("Composición 2D exacta", yn(cfg.exact2D))
             case .cutscene:
                 let n: [XRViewConfig.Cutscene: String] = [.screen: "Pantalla de cine 3D (mono)", .stereo: "Pantalla de cine 3D (estéreo)", .cinema: "Pantalla de cine", .diorama: "Diorama", .scene: "Dentro de la escena"]
                 return ("Cinemáticas del motor", n[cfg.cutscene] ?? "")
@@ -645,7 +684,10 @@ final class XRPresenter {
             case .vignette: return ("Viñeta de confort", Self.vignetteName())
             case .hideHands: return ("Ocultar mis manos reales", yn(cfg.hideRealHands))
             case .newHands: return ("Manos del personaje", cfg.newHands ? "Nuevas" : "Originales")
-            case .fill3D: return ("Relleno en pantalla 3D", yn(cfg.fill3D))
+            case .engBehind: return ("Descarte por detrás (3D)", yn(cfg.engBehind))
+            case .engSize: return ("Tope de tamaño (3D)", yn(cfg.engSize))
+            case .engBack: return ("Reversos (3D)", yn(cfg.engBack))
+            case .engSplit: return ("Caras cercanas (3D)", cfg.engSplit ? "Original" : "Recortadas")
             case .debugAxes: return ("Ejes de mandos y manos", yn(cfg.debugAxes))
             case .aiMenu: return ("IA de enemigos", "▸")
             case .diagnostics: return ("Diagnóstico", XRDiag.shared.settings.isNormal ? "▸" : "activo ▸")
@@ -869,13 +911,13 @@ final class XRPresenter {
             }
             var it = XRDrawItem(kind: .screen, texture: tex)
             it.model = screenModel(D)
-            it.size = SIMD2<Float>(W, W * XRCinemaLayout.aspect(width: c.width, height: c.height))       // aspecto real de la imagen (320x256 = 0,8; 384x256 = 0,667), igual a cualquier escala
+            it.size = SIMD2<Float>(W, W * XRCinemaLayout.aspect(width: c.width, height: c.height))       // la imagen es la ventana visible fija del televisor: siempre 4:3, en cualquier modo de vídeo
             it.distance = D
             let cv = XRCinemaLayout.curve(base: cfg.curve, legible: leg)
             it.curve = cv
             it.cols = cv > 0.01 ? 48 : 1
             it.imgSize = SIMD2<Float>(Float(c.width), Float(c.height))
-            it.sharp = XR2DFilter.current == .nearest ? 2 : Float(max(XRCinemaLayout.sharp(base: cfg.sharp, legible: leg), 1))   // xBR: sharp-bilinear (nunca bilineal blando); nearest: vecino más próximo
+            it.sharp = XR2DFilter.current == .nearest ? 2 : Float(max(XRCinemaLayout.sharp(base: cfg.sharp, legible: leg), 1))   // con filtro (MMPX / xBR / nítido): sharp-bilinear (nunca bilineal blando); nearest: vecino más próximo
             r.items.append(it)
         }
 
@@ -905,10 +947,15 @@ final class XRPresenter {
                 if let h = hud, !stereo2DInside {
                     var hp2 = XRDrawItem(kind: .panel, texture: h)
                     hp2.model = model * XRMath.translation(SIMD3<Float>(0, 0, 0.004))
-                    // aspecto REAL de la capa 2D (alto/ancho lógico: 320x240 = 0,75; 320x256 = 0,8), no el 3/4 fijo de la imagen 3D; solo en esta ruta
+                    // Registro con el 3D (solo en esta ruta): la pantalla 3D mide W x 0,75 W para 320 x 240 píxeles del juego centrados en el marco, así que el panel lleva el mismo paso W / 320 por píxel en
+                    // los dos ejes y el desplazamiento del centro de la ventana visible respecto al centro del marco (XR2DWindow.panelOnScreen3D). Sin datos de ventana (HUD de reserva, 320x240): W x 0,75 W.
                     let lg = hudLogical ?? SIMD2<Float>(Float(h.width), Float(h.height))
                     hp2.uvrect = SIMD4<Float>(0, 0, 1, 1)
                     hp2.size = SIMD2<Float>(W, W * XRCinemaLayout.aspect(width: Int(lg.x.rounded()), height: Int(lg.y.rounded())))
+                    if let g = hudWin?.panelOnScreen3D(screenW: W) {
+                        hp2.size = g.size
+                        hp2.model = model * XRMath.translation(SIMD3<Float>(g.offset.x, g.offset.y, 0.004))
+                    }
                     hp2.distance = D
                     hp2.curve = cv
                     hp2.cols = it.cols
@@ -953,8 +1000,8 @@ final class XRPresenter {
             var it = XRDrawItem(kind: .panel, texture: h)
             // Con rect de la ventana (hudMenuUV) solo ella va en el panel de la mano (la capa del selector ya no lleva créditos ni HUD, vr_layer2d.c) y los paneles del HUD (6) no se dibujan mientras dura.
             let mr = hudMenuUV ?? SIMD4<Float>(0, 0, 1, 1)
-            // Aspecto REAL de la capa (alto/ancho en píxeles: 320x256 = 0,8; 384x256 = 0,667; la textura del HUD lleva el tamaño lógico por la escala, que no cambia la proporción).
-            let la = Float(h.height) / Float(max(h.width, 1))
+            // Aspecto de la capa: la ventana visible fija del televisor, siempre 4:3 (su tamaño en píxeles no es cuadrado).
+            let la = XRFramedLayout.aspect
             let psize = XRMenuPanelLayout.handSize(uv: hudMenuUV, aspect: la)
             if let hm = onHand {
                 it.model = hm
@@ -992,9 +1039,10 @@ final class XRPresenter {
                 var it = XRDrawItem(kind: .panel, texture: h)
                 it.pixelMode = XR2DFilter.current.panelMode
                 if shown == .world && Self.hudIsFramed[i] {
-                    // Plano del encuadre del juego (créditos y textos de partida): píxeles cuadrados con el aspecto de la capa (alto/ancho LÓGICO, no el 3/4 fijo ni el de la textura con la ampliación xBR),
-                    // a un tamaño y una distancia cómodos que no dependen del tamaño de la pantalla de cine (XRFramedLayout); solo se ve el recorte de la región, en su sitio del encuadre.
-                    let uv = SIMD4<Float>(rg.u0, rg.v0, rg.u1, rg.v1)
+                    // Plano del encuadre del juego (créditos y textos de partida): la capa entera es la ventana visible fija en 4:3 (XRFramedLayout), a un tamaño y una distancia cómodos que no dependen del
+                    // tamaño de la pantalla de cine; solo se ve el recorte de la región, en su sitio del encuadre. Las regiones van en fracciones del MARCO del juego: se pasan a fracciones de la ventana.
+                    let fuv = SIMD4<Float>(rg.u0, rg.v0, rg.u1, rg.v1)
+                    let uv = hudWin?.frameUV(fuv) ?? fuv
                     let lp = hudLogical ?? SIMD2<Float>(Float(h.width), Float(h.height))
                     let c = XRFramedLayout.center(uv: uv, layerPx: lp)
                     it.model = frame * XRMath.translation(SIMD3<Float>(c.x, c.y, -XRFramedLayout.distance))
@@ -1012,14 +1060,16 @@ final class XRPresenter {
                     let pos = w.center + m.n * 0.002 + w.right * (dir * slotOff[Self.wristSlot[i]])
                     it.model = simd_float4x4(columns: (SIMD4<Float>(w.right, 0), SIMD4<Float>(w.up, 0), SIMD4<Float>(m.n, 0), SIMD4<Float>(pos, 1)))
                     it.uvrect = SIMD4<Float>(rg.u0, rg.v0, rg.u1, rg.v1)
-                    it.size = SIMD2<Float>((rg.u1 - rg.u0) * cfg.wristScale, (rg.v1 - rg.v0) * cfg.wristScale * 0.75)
+                    if let hw = hudWin { it.uvrect = hw.frameUV(it.uvrect) }
+                    it.size = SIMD2<Float>((rg.u1 - rg.u0) * cfg.wristScale, (rg.v1 - rg.v0) * cfg.wristScale * 0.75 * (hudWin.map { $0.dh / $0.h } ?? 1))   // v en fracciones del marco (dh filas), no de la ventana (h)
                     it.opacity = 1      // pegado al antebrazo: con prueba de profundidad normal (no onTop)
                     r.items.append(it)
                     continue
                 }
                 it.model = frame * XRMath.translation(SIMD3<Float>(rg.x * sc / 0.8, rg.y * sc / 0.8, -1.4))
                 it.uvrect = SIMD4<Float>(rg.u0, rg.v0, rg.u1, rg.v1)
-                it.size = SIMD2<Float>((rg.u1 - rg.u0) * sc, (rg.v1 - rg.v0) * sc * 0.75)
+                if let hw = hudWin { it.uvrect = hw.frameUV(it.uvrect) }
+                it.size = SIMD2<Float>((rg.u1 - rg.u0) * sc, (rg.v1 - rg.v0) * sc * 0.75 * (hudWin.map { $0.dh / $0.h } ?? 1))   // v en fracciones del marco (dh filas), no de la ventana (h)
                 it.opacity = 0.92
                 it.onTop = true
                 r.items.append(it)
@@ -1027,8 +1077,8 @@ final class XRPresenter {
         }
 
         // 6b) UN solo panel con la capa 2D COMPLETA del juego (mundo y diorama; en el cine el 2D ya va dentro de la imagen): HUD, radar del juego, menús de objetos/armas (L2/R2), pausa, textos y créditos tal como los dibuja
-        //     el original, con transparencia donde el juego no dibuja 2D. Geometría de pantalla completa XRFramedLayout (píxel cuadrado, aspecto LÓGICO de la capa: 320x240 = 0,75; 320x256 = 0,8) delante de la cabeza con
-        //     el mismo seguimiento perezoso del rumbo (hudYaw); sin prueba de profundidad (onTop). El muestreo es el de XR2DFilter.current (sharp-bilinear por defecto). «Paneles del HUD» (cfg.hudPanels) solo
+        //     el original, con transparencia donde el juego no dibuja 2D. Geometría de pantalla completa XRFramedLayout (la ventana visible fija del televisor, siempre 4:3) delante de la cabeza con
+        //     el mismo seguimiento perezoso del rumbo (hudYaw); sin prueba de profundidad (onTop). El muestreo es el de XR2DFilter.current (MMPX x2 + sharp-bilinear por defecto). «Paneles del HUD» (cfg.hudPanels) solo
         //     afecta al troceo (paso 6): sin trocear, el panel único se dibuja siempre (vida, radar, créditos). Es la capa HUD (clases HUD_WORLD, SCOPE_TEXT, UNKNOWN de vr_prov.h) y queda siempre fija;
         //     la ventana 2D abierta (selector, pausa) es otra capa (6c) y es lo único que se acerca.
         if !split && shown != .cinema && shown != .stereo, let h = hud {
@@ -1121,7 +1171,7 @@ final class XRPresenter {
                                                XRMath.yaw(of: anchor) * 180 / .pi, anchorY)
         d += String(format: " veloNegro=%.2f", pendVeil)
         d += " pantallas2D=" + (cfg.follow2D ? "siguen" : "fijas")
-        d += " relleno3D=" + (cfg.fill3D ? "si" : "no")
+        d += " descartes3D=detras:" + (cfg.engBehind ? "si" : "no") + ",tamano:" + (cfg.engSize ? "si" : "no") + ",reversos:" + (cfg.engBack ? "si" : "no") + ",caras:" + (cfg.engSplit ? "original" : "recortadas")
         d += " items: pantalla=\(n[.screen] ?? 0) pantalla3d=\(n[.screen3d] ?? 0) panel=\(n[.panel] ?? 0) menu=\(n[.menu] ?? 0) velo=\(n[.veil] ?? 0) hudPanels=\(cfg.hudPanels) hud!=nil=\(hudSeen)"
         if let c = cinema {
             d += " cine: fotograma=\(c.haveFrame) \(c.w)x\(c.h) tex=\(c.texture(srgb: true).map { "\($0.width)x\($0.height)/fmt\($0.pixelFormat.rawValue)" } ?? "nil")"

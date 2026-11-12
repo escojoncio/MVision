@@ -351,8 +351,6 @@ final class NativeRenderer {
     /// Geometría de los efectos de la escena actual, en el mundo VR y orientada a la cabeza (se construye en beginFrame con ns_gpu_fx_build). El renderer solo da por
     /// dibujado (la lista de la GPU ya no dibuja nada en 3D).
     private var fxEffects: [NsEffect] = []
-    private var fillBuf: [NsEffect] = []              // relleno por la verdad del motor (ns_fill_glue_fetch): SOLO con la pantalla 3D (cámara del motor)
-    private(set) var statFill = 0                     // rellenos añadidos a los efectos en este fotograma
     private var fxCam = NsCamera()
     private var fxHas = false                      // la escena trae efectos (NS_SV_FX) y es apta para dibujar en el mundo
     private var fxVerts: UnsafeMutablePointer<NsGpuFxVert>?
@@ -706,7 +704,10 @@ final class NativeRenderer {
             camOfy = (c.ofy.isFinite && c.ofy > 0 && c.ofy < 240) ? c.ofy : 120
             camYs = (c.overscan_y.isFinite && c.overscan_y > 0.5 && c.overscan_y < 2) ? c.overscan_y : 1
             var zn: Float = 0, zs: Float = 0
-            if cinema { _ = ns_cinema_depth_filter(&cineFilter, sc, &zn, &zs) } else { cineFilter = NsCinemaDepthFilter() }
+            if cinema {
+                if fresh { cineFilter.z_static = 0.001 * ns_solid_view_near(sc, store) }   // lo más cercano dibujado en la ventana del motor (m de la vista estéreo: 1000 u/m, XRStereo.eye): acota el paralaje de la pantalla 3D; solo con escena nueva
+                _ = ns_cinema_depth_filter(&cineFilter, sc, &zn, &zs)
+            } else { cineFilter = NsCinemaDepthFilter() }
             cineNear = zn; cineSubject = zs
         }
         // Aptitud. Primera persona: la del contrato (ns_scene_native_ok; sin PLAYER_OK se dibuja el mundo sin cuerpo/manos/IK, no se retiene la escena). Cinemática: no hay cámara VR ni jugador, basta con escenario y listas completas.
@@ -783,7 +784,8 @@ final class NativeRenderer {
             guard first + cnt <= nPiece else { continue }
             let isStatic = (instPtr.pointee.flags & staticFlag) != 0
             let zm = UInt32(instPtr.pointee.zone_mask)
-            let inGroup = groupMask == 0 || zm == 0 || (zm & groupMask) != 0
+            // El escenario (mapas cargados del stage) se dibuja con independencia del grupo de mapa activo (hay z-buffer); los objetos dinámicos de un grupo no activo ya no llegan (el extractor no los emite).
+            let inGroup = isStatic || groupMask == 0 || zm == 0 || (zm & groupMask) != 0
             let instKey = instPtr.pointee.key
             // (a) tabla
             for k in 0..<cnt {
@@ -877,15 +879,6 @@ final class NativeRenderer {
                 if n > 0 { fxEffects.append(contentsOf: UnsafeBufferPointer(start: fp, count: n)) }
             }
             fxHas = true
-        }
-        // Relleno por la verdad del motor (ns_fill_glue): triángulos que la lista de la GPU dibuja con la cámara del motor y el nativo no tiene, ya en el mundo del motor (calibrados contra el escenario
-        // estático del nativo); pasan por buildFx (ns_gpu_fx_build_ex) como un efecto más, sin ruta nueva en la GPU. SOLO con la pantalla 3D (`cinema`: la escena se dibuja con la cámara del juego, igual que
-        // el relleno): en el mundo en primera persona no hay relleno ni lista como verdad. Por defecto el glue solo diagnostica (fetch devuelve 0); dibuja si el ajuste «Relleno en pantalla 3D» está encendido (XRViewConfig.fill3D, apagado de serie) o con MV_FILL=1.
-        statFill = 0
-        if cinema && screenMode, (validBits & UInt32(truncatingIfNeeded: NS_SV_FX)) != 0 {
-            if fillBuf.isEmpty { fillBuf = [NsEffect](repeating: NsEffect(), count: 6000) }
-            let nf = Int(fillBuf.withUnsafeMutableBufferPointer { ns_fill_glue_fetch($0.baseAddress, UInt32($0.count)) })
-            if nf > 0 { fxEffects.append(contentsOf: fillBuf[0..<nf]); fxHas = true; statFill = nf }
         }
         curValid = validBits
         for i in 0..<12 { toVR12[i] = t[i] }
@@ -1394,12 +1387,14 @@ final class NativeRenderer {
         u.water_tint = SIMD4<Float>(screenOut.water_tint.0, screenOut.water_tint.1, screenOut.water_tint.2, screenOut.water_tint.3)
         let fv = fromVR12
         u.fromvr = (SIMD4<Float>(fv[0], fv[1], fv[2], fv[3]), SIMD4<Float>(fv[4], fv[5], fv[6], fv[7]), SIMD4<Float>(fv[8], fv[9], fv[10], fv[11]))
-        // misc.y: plano z = H/2 de la GTE (el vértice más cerca se proyecta ahí; solo se descarta el triángulo sin vértices delante) en los modos de pantalla con la cámara del juego; 0 en el mundo en primera persona (ver ns_vertex).
-        u.misc = SIMD4<Float>(layered ? 0 : Float(max(0, min(1, eyeIndex))), cullBack ? 0.5 * camH : 0, 0, 0)
+        // misc.y > 0: modo ENGINE (cámara del juego en una pantalla): reglas del motor por fragmento (ns_vertex, réplica ns_gpu_engine_tri); 0 en el mundo en primera persona. misc.z: reglas apagadas desde
+        // los ajustes (NSG_ENG_OFF_*, diagnóstico; la misma máscara que usa el anfitrión para la línea [descartes]).
+        let engOff = ns_gpu_engine_off()
+        u.misc = SIMD4<Float>(layered ? 0 : Float(max(0, min(1, eyeIndex))), cullBack ? 0.5 * camH : 0, Float(engOff), 0)
         // Descarte de reversos: cinemáticas = todas las caras de una cara (NSG_CULL_ALL); con la cabeza bajo el agua solo las semitransparentes (NSG_CULL_SEMI: la superficie del agua vista desde abajo
         // no se dibuja, como en el motor); si no, doble cara.
         let underwater = screenOut.water_tint.3 > 0.5 && screenOut.water_min.3 > 0.5
-        u.cull_eye = cullBack ? SIMD4<Float>(camEye.x, camEye.y, camEye.z, Float(NSG_CULL_ALL))
+        u.cull_eye = cullBack ? SIMD4<Float>(camEye.x, camEye.y, camEye.z, (engOff & UInt32(NSG_ENG_OFF_BACK)) != 0 ? 0 : Float(NSG_CULL_ALL))
                    : underwater ? SIMD4<Float>(camEye.x, camEye.y, camEye.z, Float(NSG_CULL_SEMI)) : SIMD4<Float>(0, 0, 0, 0)
         // Ejes X (derecha) e Y (abajo) de la cámara del juego en el mundo del motor (columnas 0 y 1 de camRot9) y píxeles de su pantalla por unidad de tangente: tamaño máximo del hardware (ns_vertex, solo con misc.y > 0).
         u.cam_x = SIMD4<Float>(camRot9[0], camRot9[3], camRot9[6], camH)
@@ -1642,7 +1637,7 @@ final class NativeRenderer {
         for (b, n) in bits where (lp.why & b) != 0 { why.append(n) }
         return "nativo: presenta=\(modo) fundido=\(String(format: "%.2f", lp.fade)) motivos=[\(why.joined(separator: ","))] repetidos=\(presentState.n_hold) negros=\(presentState.n_black) coh=\(String(format: "%.3f", cohDist))m " +
                "instancias=\(statInstances) piezas=\(statPieces) mallas=\(statMeshes) semi=\(statSemiTris) tramos_semi=\(mergedN) dibujos=\(statDraws) fallos=\(frameFailures)/\(totalFailures) ausentes=\(frameMisses) " +
-               "relleno=\(statFill) efectos=\(statFxItems) (carteles=\(statFxBillboards) cintas=\(statFxRibbons) poligonos=\(statFxPolys) descartados=\(statFxSkipped) tris=\(statFxTris) dibujados=\(fxAllowed ? "si" : "no")) " +
+               "efectos=\(statFxItems) (carteles=\(statFxBillboards) cintas=\(statFxRibbons) poligonos=\(statFxPolys) descartados=\(statFxSkipped) tris=\(statFxTris) dibujados=\(fxAllowed ? "si" : "no")) " +
                "pantalla=[agua=\(screenOut.water_min.3 > 0.5 ? "si" : "no") recubrimientos=\(overlays.count)] " +
                "\(fxNearText()) [nativo] escena_ausente=\(sceneAbsent) sync_epoca=\(syncHeldFrames) " +
                "escenas=\(statScenes) epoca=\(lastEpoch) cpu(prepare)=\(String(format: "%.2f", cpuPrepareMs))ms cpu(encode)=\(String(format: "%.2f", cpuEncodeMs))ms"

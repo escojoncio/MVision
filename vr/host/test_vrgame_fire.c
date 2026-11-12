@@ -18,6 +18,7 @@
 #include "vr_grip.h"
 #include "vrgame.h"
 #include "w_laser.h"
+#include "w_sniper.h"
 #include "w_throw.h"
 #include "wcore.h"
 
@@ -278,11 +279,11 @@ static float t_ang(const float a[3], const float b[3]) { float d = a[0] * b[0] +
 static WMesh syn_mesh[16];
 static WeaponState *syn_state;
 static const WeaponDef *syn_def;
-static void fresh_pistol_meshes(void) {      /* pistola del registro con una malla mínima por pieza: sus frames no salen vacíos */
+static void fresh_meshes(int gid) {      /* arma del registro con una malla mínima por pieza: sus frames no salen vacíos */
     static WeaponState *old;
     if (old) { free(old); old = NULL; }
     syn_def = NULL;
-    for (int i = 0; i < w_registry_count; i++) if (w_registry[i] && w_registry[i]->game_weapon_id == 0) syn_def = w_registry[i];
+    for (int i = 0; i < w_registry_count; i++) if (w_registry[i] && w_registry[i]->game_weapon_id == gid) syn_def = w_registry[i];
     static WVertex vtx[3] = {{{0, 0, 0}, {0, 1, 0}, {0, 0}, {255, 255, 255, 255}}, {{0.01f, 0, 0}, {0, 1, 0}, {1, 0}, {255, 255, 255, 255}}, {{0, 0.01f, 0}, {0, 1, 0}, {0, 1}, {255, 255, 255, 255}}};
     static uint16_t idx[3] = {0, 1, 2};
     int n = weapon_mesh_count(syn_def);
@@ -294,10 +295,11 @@ static void fresh_pistol_meshes(void) {      /* pistola del registro con una mal
     VrHandsConfig hc; vrhands_default_config(&hc); hc.grip_mode = VRH_GRIP_SOCKET;
     VrHandsRig *rig = vrhands_create(&hc);
     vrhands_bind(rig, st, NULL, 0, 0);
-    vrgame_test_install(0, (void *)syn_def, st, rig);
+    vrgame_test_install(gid, (void *)syn_def, st, rig);
     vrgame_reset();
     vrgame_set_enabled(0, 1);
 }
+static void fresh_pistol_meshes(void) { fresh_meshes(0); }
 static void hand_at(int side, const float p[3], const float q[4]) {
     MvVrHand h;
     memset(&h, 0, sizeof h);
@@ -415,6 +417,45 @@ static void duct_hides_weapon(void) {
     vrgame_test_set_native(2, 0);
     world(-1, 0, 0);
     for (int i = 0; i < 3; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+}
+
+/* ---- PSG1 (id 9): el original lo tumba (stance 2) al sacarlo; con el rifle VR y su lente no se oculta nada (el conducto es solo para el resto de armas) ---- */
+static void psg1_prone_keeps_weapon(void) {
+    printf("-- PSG1 tumbado: el rifle VR se construye y la lente se publica --\n");
+    float dir[3], org[3], p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1};
+    MvVrSpecialView sv;
+    world(9, 5, 20);
+    fresh_meshes(9);
+    mv_vrgame_set_options(1, 2);
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(drawn_weapon(dir, org) == 1 && vrfire_hide_enabled() == 1, "PSG1 de pie: rifle VR dibujado y el del juego oculto");
+    bs.stance = 2;
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(drawn_weapon(dir, org) == 1, "PSG1 con stance 2: el rifle VR sigue dibujado (si no, la lente flotaría sin rifle)");
+    CHECK(vrfire_hide_enabled() == 1, "PSG1 con stance 2: el rifle del juego sigue oculto");
+    CHECK(mv_vrgame_special_view(&sv) == 1 && sv.kind == MV_VIEW_SCOPE && sv.occlude == 1 && sv.surf_w > 0.0f && sv.tex_w == 1024,
+          "PSG1 con stance 2: lente publicada (kind %d occlude %d surf_w %.3f tex %d)", sv.kind, sv.occlude, sv.surf_w, sv.tex_w);
+    CHECK(sv.cam_valid == 1 && sv.blend == 1.0f && sv.hide_hud == 0, "lente viva: cam_valid %d blend %.2f hide_hud %d", sv.cam_valid, sv.blend, sv.hide_hud);
+    bs.stance = 0; bs.prone = 1;
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(drawn_weapon(dir, org) == 1, "PSG1 prone: el rifle VR sigue dibujado");
+    /* los prismáticos del juego sí lo ocultan (el aumento va en el mundo) y entonces tampoco hay lente */
+    vrgame_set_view_hide(1);
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(drawn_weapon(dir, org) == 0, "PSG1 con prismáticos: el rifle VR no se dibuja");
+    CHECK(mv_vrgame_special_view(&sv) == 0 || sv.kind != MV_VIEW_SCOPE, "PSG1 con prismáticos: no se publica la lente (flotaría sin rifle)");
+    vrgame_set_view_hide(0);
+    bs.prone = 0;
+    /* la pistola tumbada sigue ocultándose (conducto) y su vista especial no es una lente */
+    world(0, 12, 36);
+    fresh_pistol_meshes();
+    bs.stance = 2;
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(drawn_weapon(dir, org) == 0, "pistola con stance 2: sigue oculta");
+    CHECK(mv_vrgame_special_view(&sv) == 0 || sv.kind != MV_VIEW_SCOPE, "la pistola no publica lente SCOPE");
+    bs.stance = 0;
+    world(-1, 0, 0);
+    for (int i = 0; i < 3; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
 }
 
 /* ---- prismáticos del juego (scope.c, aumento en el mundo nativo): sin arma VR ni copia del juego en la mano; el disparo no se toca ---- */
@@ -727,6 +768,51 @@ static void laser_stops_at_walls(void) {
     rec = saved;
 }
 
+/* ---- PSG1: el autoenfoque del zoom (rifle.c GetZoomLimit) mide el eje de la mira contra las paredes HZD y la geometría sólida nativa ---- */
+static void psg1_autofocus_wiring(void) {
+    printf("-- PSG1: zoom por distancia al muro en el eje de la mira --\n");
+    static uint8_t ram_saved[sizeof ram];
+    memcpy(ram_saved, ram, sizeof ram);
+    VrCamRecord saved = rec;
+    rec.theta_play_deg = 37.0f; rec.eye[0] = 0; rec.eye[1] = 1500; rec.eye[2] = 0; rec.p_ref[0] = 0.1f; rec.p_ref[2] = -0.2f;
+    VrFireMap map; vrfire_map_from_cam(&map, &rec);
+    float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1};
+    MvVrSpecialView sv;
+    world(9, 5, 20); fresh_meshes(9); mv_vrgame_set_options(1, 2);
+    memset(ram + (0x801F0000 & 0x1FFFFF), 0, 0x1000); w32r(0x800ACB84, 0); ray_stub_mm = -1;
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(mv_vrgame_special_view(&sv) == 1 && sv.kind == MV_VIEW_SCOPE && sv.cam_valid == 1, "PSG1 con lente");
+    /* eje de la mira en coordenadas del motor: cámara de la mira y su -Z */
+    const float x = sv.cam_rot[0], y = sv.cam_rot[1], z = sv.cam_rot[2], w = sv.cam_rot[3];
+    const float fu[3] = {-2.0f * (x * z + w * y), -2.0f * (y * z - w * x), -(1.0f - 2.0f * (x * x + y * y))}, cp[3] = {sv.cam_pos[0], sv.cam_pos[1], sv.cam_pos[2]};
+    float ow[3], dw[3];
+    vrfire_pos_to_world(&map, cp, ow); vrfire_dir_to_world(&map, fu, dw);
+    const int ticks_vbl = 130;                               /* 130 VBlanks de 8 ms = 1,04 s = 26 ticks de 25 Hz: más que los 9 de espera + la subida */
+    /* pared HZD a 500 unidades de la cámara (~800 de la lente): menos de 1000 = sin zoom */
+    hzd_wall(ow, dw, 500.0f);
+    for (int i = 0; i < ticks_vbl; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(fabsf(sniper_zoom(syn_state) - 1.0f) < 1e-4f, "pared HZD a ~800 unidades: sin zoom (%.3f)", sniper_zoom(syn_state));
+    /* sin pared: zoom completo (el rango se vuelve a -1 al desaparecer el impacto) */
+    memset(ram + (0x801F0000 & 0x1FFFFF), 0, 0x1000); w32r(0x800ACB84, 0);
+    for (int i = 0; i < ticks_vbl; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(fabsf(sniper_zoom(syn_state) - SNIPER_ZOOM_GAME) < 1e-3f, "espacio abierto: 9,375x (%.3f)", sniper_zoom(syn_state));
+    /* geometría sólida nativa más cerca que la pared HZD: manda el mínimo */
+    ray_stub_mm = 500.0f;
+    for (int i = 0; i < ticks_vbl; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(fabsf(sniper_zoom(syn_state) - 1.0f) < 1e-4f, "geometría sólida a 500 unidades: sin zoom (%.3f)", sniper_zoom(syn_state));
+    hzd_wall(ow, dw, 2000.0f);                               /* pared HZD lejos (~2300) y geometría sólida más cerca (500) */
+    for (int i = 0; i < ticks_vbl; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(fabsf(sniper_zoom(syn_state) - 1.0f) < 1e-4f, "pared lejana y sólido cerca: gana el más cercano (%.3f)", sniper_zoom(syn_state));
+    ray_stub_mm = -1;                                        /* solo la pared a ~2300: zoom intermedio (limite/320) */
+    for (int i = 0; i < ticks_vbl; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(sniper_zoom(syn_state) > 5.0f && sniper_zoom(syn_state) < SNIPER_ZOOM_GAME - 0.5f, "pared HZD a ~2300 unidades: zoom intermedio (%.3f)", sniper_zoom(syn_state));
+    memcpy(ram, ram_saved, sizeof ram);      /* hzd_wall y vrfire_skip_raise tocan la RAM del juego */
+    world(-1, 0, 0);
+    for (int i = 0; i < 3; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    vrgame_reset();
+    rec = saved;
+}
+
 /* ---- boca = apuntado del mando (aim): el eje del arma, el láser y la bala siguen el eje de apuntado; la empuñadura sigue en el agarre ---- */
 static void hand_aim(const float p[3], const float q[4], const float aq[4], float trig) {
     MvVrHand h;
@@ -876,6 +962,69 @@ static void vbl_game(float trig, int n, uint32_t *seen) {
 static uint32_t shots_now(void) { MvVrGameStatus st; mv_vrgame_status(&st); return st.shots; }
 static void drain_pistol(uint32_t *seen) {      /* dispara hasta que el juego se queda sin balas (la cuenta VR puede ir una por delante: la recarga automática la iguala después) */
     for (int k = 0; k < 60 && bs.weapon_ammo[0] > 0; k++) { vbl_game(0.9f, 12, seen); vbl_game(0.0f, 14, seen); }
+}
+/* Recoger munición con la pistola seca cuando la maniobra R1 del mando NO recarga (log del visor 20261112_111703: 106 VBlanks con el gatillo muerto): el anfitrión carga el cargador del juego en su RAM
+ * (GM_Magazine = min(GM_MagazineMax, GM_Weapons), como sna_init.c sna_80057A90) y el arma VR queda lista en pocos VBlanks, sin toques de R1, en cualquier modo de recarga. */
+static void ammo_pickup_direct(void) {
+    printf("-- munición: recoger con el arma seca carga el cargador del juego directamente --\n");
+    for (int mode = 0; mode <= 2; mode++) {
+        vrreload_init(NULL);
+        world(0, 12, 12); fresh_pistol(); mv_vrgame_set_options(1, mode); vbl(0.0f, 20);
+        pist_st->mag_rounds = 0; pist_st->chambered = 0; bs.magazine = 0; bs.weapon_ammo[0] = 0; vbl(0.0f, 300);
+        int16_t z = 0; memcpy(ram + (BA_MAGAZINE & 0x1FFFFFu), &z, 2);
+        r1_edges = 0;
+        bs.weapon_ammo[0] = 30;                                       /* recoge: solo sube el total */
+        for (int i = 0; i < 4; i++) { vbl(0.0f, 1); memcpy(&z, ram + (BA_MAGAZINE & 0x1FFFFFu), 2); bs.magazine = z; }   /* el puente lee el cargador de la RAM del juego */
+        CHECK(bs.magazine == 12 && r1_edges == 0, "modo %d: cargador del juego cargado en la RAM sin maniobra (%d, flancos R1 %d)", mode, bs.magazine, r1_edges);
+        CHECK(pist_st->mag_inserted && pist_st->chambered && vr_held() == 12, "modo %d: arma VR lista en 4 VBlanks (balas %d)", mode, vr_held());
+        uint32_t s0 = shots_now();
+        vbl(0.9f, 3);
+        CHECK(shots_now() == s0 + 1, "modo %d: dispara al primer gatillo tras recoger (%u)", mode, shots_now() - s0);
+        vbl(0.0f, 30);
+    }
+    /* pausa en el VBlank siguiente a cargar el cargador del juego (antes de rearmar el arma VR): al volver queda lista y dispara */
+    for (int mode = 0; mode <= 2; mode++) {
+        vrreload_init(NULL);
+        world(0, 12, 12); fresh_pistol(); mv_vrgame_set_options(1, mode); vbl(0.0f, 20);
+        uint32_t seen = shots_now(); drain_pistol(&seen); bs.magazine = 0; bs.weapon_ammo[0] = 0; vbl(0.0f, 300);      /* vaciada disparando (la cuenta VR puede ir una por delante: el juego gasta la última): corredera retenida, cargador VR vacío */
+        CHECK(bs.weapon_ammo[0] == 0 && bs.magazine == 0 && vr_held() == 0, "modo %d: vaciada disparando (total %d cargador %d VR %d ins %d)", mode, bs.weapon_ammo[0], bs.magazine, vr_held(), pist_st->mag_inserted);
+        int16_t z = 0; memcpy(ram + (BA_MAGAZINE & 0x1FFFFFu), &z, 2);
+        bs.weapon_ammo[0] = 30; vbl(0.0f, 1); memcpy(&z, ram + (BA_MAGAZINE & 0x1FFFFFu), 2); bs.magazine = z;
+        CHECK(bs.magazine == 12 && vr_held() == 0, "modo %d: cargado el juego, arma VR aún seca (%d, %d)", mode, bs.magazine, vr_held());
+        bs.in_control = 0; vbl(0.0f, 30); bs.in_control = 1; vbl(0.0f, 4);
+        CHECK(pist_st->mag_inserted && pist_st->chambered && vr_held() == 12, "modo %d: pausa justo tras cargar: arma VR lista al volver (insertado %d recámara %d balas %d)", mode, pist_st->mag_inserted, pist_st->chambered, vr_held());
+        uint32_t s0 = shots_now();
+        vbl(0.9f, 3);
+        CHECK(shots_now() == s0 + 1, "modo %d: y dispara (%u)", mode, shots_now() - s0);
+        vbl(0.0f, 30);
+    }
+}
+/* El anfitrión salta el levantado del arma del juego (vrfire_skip_raise). Juego falso tick a tick según la decompilación (sna_init.c: sna_8005009C arranca el ataque con el contador a 0; sna_gun_800540D0 lo cuenta
+ * hasta 8, con el soltar en cola, y pasa a sub_80057BF0, que dispara al soltar), sobre la RAM que ve vrgame_pad: del gatillo a la bala pasan pocos VBlanks (sin el salto, 21) y sale una sola bala. */
+static void raise_skipped(void) {
+    printf("-- disparo: el levantado del arma del juego se salta --\n");
+    const uint32_t pw = (0x80100000u - 0x20u) & 0x1FFFFFu;
+    world(0, 12, 12); fresh_pistol(); vbl(0.0f, 20);
+    uint32_t v = 0x9042u; memcpy(ram + pw + 0x91C, &v, 4); v = 0x80054520u; memcpy(ram + pw + 0x908, &v, 4); v = 0; memcpy(ram + pw + 0x90C, &v, 4); memcpy(ram + pw + 0x910, &v, 4);
+    int prev = 0, attack = 0, shoot = 0, a38 = 0, idle = 0, bullets = 0, first = -1;
+    for (int i = 0; i < 80; i++) {
+        int s0 = sq_seen; vbl(i >= 7 && i < 11 ? 0.9f : 0.0f, 1); int sq = sq_seen > s0;      /* gatillo apretado en el VBlank 7 (a mitad de tick) */
+        if (i % 2) continue;
+        int32_t cnt; memcpy(&cnt, ram + pw + 0x90C, 4);
+        uint32_t trg = 0; int rel = prev && !sq; prev = sq;
+        if (!attack && sq) { cnt = 0; attack = 1; }
+        if (attack) {
+            int time = cnt++;
+            if (!shoot) { if (time == 0) a38 = 0; if (rel) a38 = 1; if (time == 8) { shoot = 1; cnt = 0; idle = 0; } }
+            else { trg = 1u | ((time == 0 && a38) || rel ? 2u : 0u); if (!sq) { if (++idle > 4) { shoot = 0; attack = 0; cnt = 0; } } else idle = 0; }
+        }
+        v = shoot ? 0x80056000u : 0x80054520u;
+        memcpy(ram + pw + 0x90C, &cnt, 4); memcpy(ram + pw + 0x910, &trg, 4); memcpy(ram + pw + 0x908, &v, 4);
+        if (trg & 2u) { VrFireMat m; CHECK(vrfire_take_projectile(0, &m) == VRFIRE_SUBST || bullets > 0, "la bala del juego lleva la boca del arma VR"); bullets++; if (first < 0) first = i - 7; }
+    }
+    CHECK(bullets == 1 && first >= 0 && first <= 7, "gatillo -> bala del juego en %d VBlanks (sin el salto, 21), %d bala", first, bullets);
+    v = 0; memcpy(ram + pw + 0x91C, &v, 4); memcpy(ram + pw + 0x908, &v, 4); memcpy(ram + pw + 0x90C, &v, 4); memcpy(ram + pw + 0x910, &v, 4);
+    vbl(0.0f, 30);
 }
 static void ammo_pickup_after_empty(void) {
     printf("-- munición: gastar todo, recoger 12 y recargar --\n");
@@ -1107,6 +1256,8 @@ int main(void) {
     weapon_follows_controller();
     grenade_models();
     duct_hides_weapon();
+    psg1_prone_keeps_weapon();
+    psg1_autofocus_wiring();
     binocular_hides_weapon();
     hand_frames();
     laser_aims_with_bullet();
@@ -1115,6 +1266,8 @@ int main(void) {
     two_hand_pistol();
     auto_reload_never_dead();
     ammo_pickup_after_empty();
+    ammo_pickup_direct();
+    raise_skipped();
     laser_stops_at_walls();       /* al final: consume números aleatorios y las pruebas anteriores dependen de la secuencia */
 
     printf("%s vrgame_fire: %d comprobaciones, %d fallos\n", fails ? "FALLO" : "OK", checks, fails);

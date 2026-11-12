@@ -254,25 +254,121 @@ fragment float4 xr_panel_fragment_layered(XRQVOutL in [[stage_in]], constant XRQ
     return xr_panel_color(in.uv, u, tex, smp);
 }
 
+/* ---- Panel de la capa 2D fiel (vr/scene/vr_layer2d.h, vl2d_pack) ----
+ * La capa llega en tres planos, sin sRGB: `tex` = color PREMULTIPLICADO c y alfa = 1 - t (lo que tapa del mundo); `pl` = dos planos apilados en vertical, resta d (mitad de arriba) y tope g (mitad de abajo).
+ * Composición del original, por canal y en su espacio gamma:  salida = c + clamp(t * mundo - d, 0, g)  (los 4 modos de semitransparencia de la GPU original en cualquier orden y el texel 0).
+ * El mundo es lo que ya hay en el destino: se lee con [[color(0)]] (mezcla programable) y el pase va SIN mezcla fija. Los planos se muestrean a mano (4 texels, misma posición «sharp-bilinear» que
+ * xr_panel_color): interpolar valores premultiplicados no deja ribete oscuro en los bordes de textos e iconos. */
+struct XRL2D { float3 c; float a; float3 d; float3 g; };
+
+static XRL2D xr_l2d_texel(texture2d<float> tex, texture2d<float> pl, int2 p, int2 sz)
+{
+    p = clamp(p, int2(0), sz - 1);
+    float4 ca = tex.read(uint2(p));
+    XRL2D o;
+    o.c = ca.rgb; o.a = ca.a;
+    o.d = pl.read(uint2(p)).rgb;
+    o.g = pl.read(uint2(p.x, p.y + sz.y)).rgb;
+    return o;
+}
+
+static XRL2D xr_l2d_mix(XRL2D x, XRL2D y, float t)
+{
+    XRL2D o;
+    o.c = mix(x.c, y.c, t); o.a = mix(x.a, y.a, t); o.d = mix(x.d, y.d, t); o.g = mix(x.g, y.g, t);
+    return o;
+}
+
+static XRL2D xr_l2d_sample(float2 uv, int pmode, texture2d<float> tex, texture2d<float> pl)
+{
+    int2 sz = int2(tex.get_width(), tex.get_height());
+    float2 t = uv * float2(sz);
+    float2 p = ((pmode >= 1) ? xr_sharp_pos(t, pmode) : t) - 0.5;
+    float2 f = floor(p);
+    float2 w = p - f;
+    int2 b = int2(f);
+    XRL2D top = xr_l2d_mix(xr_l2d_texel(tex, pl, b, sz), xr_l2d_texel(tex, pl, b + int2(1, 0), sz), w.x);
+    XRL2D bot = xr_l2d_mix(xr_l2d_texel(tex, pl, b + int2(0, 1), sz), xr_l2d_texel(tex, pl, b + int2(1, 1), sz), w.x);
+    return xr_l2d_mix(top, bot, w.y);
+}
+
+static float3 xr_s2l3(float3 c) { return float3(xr_s2l(c.x), xr_s2l(c.y), xr_s2l(c.z)); }
+static float3 xr_l2s3(float3 c) { return float3(xr_l2s(c.x), xr_l2s(c.y), xr_l2s(c.z)); }
+
+/* dst = color que ya hay en el destino (el mundo). u.cfg.z bit0 = el destino guarda valores lineales (formato sRGB / flotante). */
+static float4 xr_panel_l2d(float2 uv, constant XRQuadU &u, texture2d<float> tex, texture2d<float> pl, float4 dst)
+{
+    XRL2D s = xr_l2d_sample(uv, int(u.cfg.w), tex, pl);
+    float op = saturate(u.tex.w);
+    if (max(s.a, max(max(s.c.r, s.c.g), max(s.c.b, max(s.d.r, max(s.d.g, s.d.b))))) * op < 0.004) discard_fragment();   /* la capa no toca el píxel: ni color ni profundidad */
+    bool lin = (u.cfg.z & 1u) != 0u;
+    float3 w = saturate(dst.rgb);
+    if (lin) w = xr_l2s3(w);
+    float3 o = s.c + clamp((1.0 - s.a) * w - s.d, float3(0.0), s.g);
+    o = saturate(mix(w, o, op));
+    if (lin) o = xr_s2l3(o);
+    float cov = s.a * op;
+    return float4(o, cov + dst.a * (1.0 - cov));
+}
+
+/* MV_NO_FBFETCH (el banco de macOS, bench/build.sh): sin las funciones que leen el destino; XRFinalPass usa entonces la reserva de abajo. */
+#ifndef MV_NO_FBFETCH
+fragment float4 xr_panel_l2d_fragment(XRQVOut in [[stage_in]], float4 dst [[color(0)]], constant XRQuadU &u [[buffer(0)]],
+                                      texture2d<float> tex [[texture(0)]], texture2d<float> pl [[texture(1)]])
+{
+    return xr_panel_l2d(in.uv, u, tex, pl, dst);
+}
+
+fragment float4 xr_panel_l2d_fragment_layered(XRQVOutL in [[stage_in]], float4 dst [[color(0)]], constant XRQuadU &u [[buffer(0)]],
+                                              texture2d<float> tex [[texture(0)]], texture2d<float> pl [[texture(1)]])
+{
+    return xr_panel_l2d(in.uv, u, tex, pl, dst);
+}
+#endif
+
+/* Reserva sin lectura del destino (XR2DCompose.framebufferFetch = false, o si el pipeline de arriba no se puede crear): mezcla fija «over» premultiplicada. Lo opaco, lo semitransparente B/2+F/2 y lo
+ * aditivo salen bien salvo que la mezcla ocurre en el espacio del destino; la resta y el tope se pierden. */
+static float4 xr_panel_l2d_over(float2 uv, constant XRQuadU &u, texture2d<float> tex, texture2d<float> pl)
+{
+    XRL2D s = xr_l2d_sample(uv, int(u.cfg.w), tex, pl);
+    float op = saturate(u.tex.w);
+    if (max(s.a, max(s.c.r, max(s.c.g, s.c.b))) * op < 0.004) discard_fragment();
+    float3 c = s.c;
+    if ((u.cfg.z & 1u) != 0u) c = s.a > 0.004 ? xr_s2l3(saturate(c / s.a)) * s.a : xr_s2l3(c);
+    return float4(c * op, s.a * op);
+}
+
+fragment float4 xr_panel_l2d_over_fragment(XRQVOut in [[stage_in]], constant XRQuadU &u [[buffer(0)]],
+                                           texture2d<float> tex [[texture(0)]], texture2d<float> pl [[texture(1)]])
+{
+    return xr_panel_l2d_over(in.uv, u, tex, pl);
+}
+
+fragment float4 xr_panel_l2d_over_fragment_layered(XRQVOutL in [[stage_in]], constant XRQuadU &u [[buffer(0)]],
+                                                   texture2d<float> tex [[texture(0)]], texture2d<float> pl [[texture(1)]])
+{
+    return xr_panel_l2d_over(in.uv, u, tex, pl);
+}
+
 /* ---- Escalado xBR-lv2 x3 de la capa 2D (una pasada) ----
- * Entrada: la imagen 2D a resolución nativa (RGBA8 no premultiplicado, tal como la deja vr_layer2d; el orden de canales es el de la textura y el espacio es el guardado: gamma, la vista sRGB decodifica al muestrear).
+ * Entrada: la imagen 2D a resolución nativa (RGBA8 de alfa PREMULTIPLICADO, tal como la deja vr_layer2d; el orden de canales es el de la textura y el espacio es el guardado: gamma, la vista sRGB decodifica al muestrear),
+ * o los planos de resta y tope de la capa apilados en vertical (dims.z planos de dims.y filas: los vecinos no cruzan de un plano a otro).
  * Salida: 3x3 por píxel, sin interpolar color en espacio lineal: solo se toma el píxel o una mezcla de dos vecinos en el borde de la diagonal.
  * Por cada una de las 4 esquinas del píxel E (rotando el marco 90 grados) se mira el entorno de 5x5 (vecinos B C D F G H I y I4 I5 H5 F4 de la esquina inferior derecha):
  *   edr  = hay un borde en diagonal (suma de distancias ponderadas YUV a un lado < al otro) y E difiere de F y de H;
  *   left / up = el borde es de pendiente 2:1 hacia G (shallow) o hacia C (steep), con las condiciones lv2;
  * y la subposición del píxel de salida decide cuánto del vecino más parecido (F o H) sustituye a E: 45 grados x + y > 1,5; 2:1 y + x/2 > 1 o x + y/2 > 1, con una rampa de 1/3 de píxel (casi sin mezcla).
- * Transparencia: alfa 0 es un color propio (rgb a 0 y alfa en la distancia): xBR nunca mezcla el color de un píxel transparente con uno opaco (en el borde elige uno u otro entero).
+ * Transparencia: el alfa entra en la distancia y, al ser premultiplicado, la mezcla de un píxel transparente (0,0,0,0) con uno opaco es directa (no oscurece el color).
  * Es una implementación propia de xBR-lv2 con esa lógica de bordes, no una copia byte a byte del shader de Hyllian. */
 constant float XBR_EQ = 0.1;
 
-static float4 xbr_px(texture2d<float, access::read> src, int2 p, int2 sz)
+/* sz.xy = primer píxel del plano, sz.zw = último */
+static float4 xbr_px(texture2d<float, access::read> src, int2 p, int4 sz)
 {
-    p = clamp(p, int2(0), sz - 1);
-    float4 c = src.read(uint2(p));
-    return c.a <= 0.0 ? float4(0.0) : c;
+    return src.read(uint2(clamp(p, sz.xy, sz.zw)));
 }
 
-static float4 xbr_at(texture2d<float, access::read> src, int2 base, int2 r, int2 d, int a, int b, int2 sz)
+static float4 xbr_at(texture2d<float, access::read> src, int2 base, int2 r, int2 d, int a, int b, int4 sz)
 {
     return xbr_px(src, base + a * r + b * d, sz);
 }
@@ -288,23 +384,19 @@ static float xbr_wd(float4 a, float4 b)
 
 static bool xbr_eq(float4 a, float4 b) { return xbr_wd(a, b) < XBR_EQ; }
 
-static float4 xbr_mix(float4 a, float4 b, float t)
-{
-    if ((a.a <= 0.0) != (b.a <= 0.0)) return t >= 0.5 ? b : a;   /* transparente contra opaco: nunca se mezcla el color */
-    float aa = mix(a.a, b.a, t);
-    float3 c = (a.rgb * a.a * (1.0 - t) + b.rgb * b.a * t) / max(aa, 1e-4);
-    return float4(c, aa);
-}
+static float4 xbr_mix(float4 a, float4 b, float t) { return mix(a, b, t); }   /* alfa premultiplicado */
 
 kernel void xr_xbr3(texture2d<float, access::read> src [[texture(0)]],
                     texture2d<float, access::write> dst [[texture(1)]],
-                    constant uint2 &dims [[buffer(0)]],               /* tamaño de la imagen nativa (la textura puede ser mayor, como la del cine) */
+                    constant uint4 &dims [[buffer(0)]],               /* x, y = tamaño de un plano de la imagen nativa (la textura puede ser mayor, como la del cine); z = planos apilados en vertical (1 = imagen normal) */
                     uint2 gid [[thread_position_in_grid]])
 {
-    if (gid.x >= dims.x * 3u || gid.y >= dims.y * 3u) return;
-    int2 sz = int2(dims);
+    uint np = max(dims.z, 1u);
+    if (gid.x >= dims.x * 3u || gid.y >= dims.y * np * 3u) return;
     int2 o = int2(gid);
     int2 base = int2(o.x / 3, o.y / 3);
+    int y0 = (base.y / int(dims.y)) * int(dims.y);
+    int4 sz = int4(0, y0, int(dims.x) - 1, y0 + int(dims.y) - 1);
     float2 q = (float2(o - base * 3) + 0.5) / 3.0;                    /* subposición dentro del píxel, y hacia abajo */
     float4 e = xbr_px(src, base, sz);
     float4 res = e;
@@ -332,6 +424,104 @@ kernel void xr_xbr3(texture2d<float, access::read> src [[texture(0)]],
         q = float2(q.y, 1.0 - q.x);                                   /* siguiente esquina: el marco gira 90 grados */
     }
     dst.write(res, gid);
+}
+
+/* ---- Escalado MMPX x2 de la capa 2D (una pasada) ----
+ * MMPX (M. McGuire y M. Gagiu, «MMPX Style-Preserving Pixel Art Magnification», JCGT 2021): cada píxel de salida es la COPIA de un píxel de la entrada (nunca una mezcla), elegida con las reglas de pendiente 1:1,
+ * intersección y pendiente 2:1 sobre el entorno del píxel. Es el mismo algoritmo que vr/scene/mmpx.c (mmpx_scale2x_planes, con pruebas): las posiciones del entorno se agrupan en clases de píxeles idénticos y las
+ * reglas comparan clases. Reglas tomadas de la implementación de referencia MMPX.glc de los autores (Copyright 2020 Morgan McGuire & Mara Gagiu, licencia MIT).
+ * Entrada: `src` = imagen RGBA8 (color premultiplicado de la capa 2D, o el fotograma opaco del cine); `srcP` = planos de resta y tope de la capa apilados en vertical (solo si dims.z = 2). Dos píxeles son iguales
+ * solo si lo son en todos los planos, y la salida copia el mismo píxel de origen en todos (los planos no se desalinean). La luminosidad sale de `src`: (r + g + b + 1) * (256 - alfa). */
+static uint mm_read(texture2d<float, access::read> t, int2 p)
+{
+    uint4 b = uint4(t.read(uint2(p)) * 255.0 + 0.5);
+    return b.x | (b.y << 8) | (b.z << 16) | (b.w << 24);
+}
+static float4 mm_unpack(uint c) { return float4(float(c & 0xFFu), float((c >> 8) & 0xFFu), float((c >> 16) & 0xFFu), float(c >> 24)) / 255.0; }
+static uint mm_luma(uint c) { return ((c & 0xFFu) + ((c >> 8) & 0xFFu) + ((c >> 16) & 0xFFu) + 1u) * (256u - (c >> 24)); }
+static bool mm_eq2(int b, int a0, int a1) { return b == a0 && b == a1; }
+static bool mm_eq3(int b, int a0, int a1, int a2) { return b == a0 && b == a1 && b == a2; }
+static bool mm_eq4(int b, int a0, int a1, int a2, int a3) { return b == a0 && b == a1 && b == a2 && b == a3; }
+static bool mm_any3(int b, int a0, int a1, int a2) { return b == a0 || b == a1 || b == a2; }
+static bool mm_none2(int b, int a0, int a1) { return b != a0 && b != a1; }
+static bool mm_none4(int b, int a0, int a1, int a2, int a3) { return b != a0 && b != a1 && b != a2 && b != a3; }
+
+kernel void xr_mmpx2(texture2d<float, access::read> src [[texture(0)]],
+                     texture2d<float, access::write> dst [[texture(1)]],
+                     texture2d<float, access::read> srcP [[texture(2)]],
+                     texture2d<float, access::write> dstP [[texture(3)]],
+                     constant uint4 &dims [[buffer(0)]],              /* x, y = tamaño de la imagen nativa; z = planos de srcP (0 o 2) */
+                     uint2 gid [[thread_position_in_grid]])           /* un hilo por píxel de ORIGEN: lee su entorno una vez y escribe sus 4 píxeles de salida */
+{
+    if (gid.x >= dims.x || gid.y >= dims.y) return;
+    const int2 sz = int2(dims.xy);
+    const int np = int(min(dims.z, 2u));
+    const int2 base = int2(gid);
+    /* entorno: A B C / D E F / G H I y los 16 vecinos a distancia 2 y 3 que consultan las reglas (mismo orden que TAP de mmpx.c) */
+    const int2 tap[25] = { int2(-1, -1), int2(0, -1), int2(1, -1), int2(-1, 0), int2(0, 0), int2(1, 0), int2(-1, 1), int2(0, 1), int2(1, 1),
+                           int2(0, -2), int2(0, 2), int2(-2, 0), int2(2, 0), int2(3, 0), int2(-3, 0), int2(0, 3), int2(0, -3),
+                           int2(2, -1), int2(-2, -1), int2(2, 1), int2(-2, 1), int2(1, 2), int2(1, -2), int2(-1, 2), int2(-1, -2) };
+    int2 at[25];
+    uint key[25], k1[25], k2[25];
+    int id[25];
+    for (int i = 0; i < 25; i++) {
+        at[i] = clamp(base + tap[i], int2(0), sz - 1);
+        key[i] = mm_read(src, at[i]);
+        k1[i] = np > 0 ? mm_read(srcP, at[i]) : 0u;
+        k2[i] = np > 1 ? mm_read(srcP, int2(at[i].x, at[i].y + sz.y)) : 0u;
+        id[i] = i;
+        for (int j = 0; j < i; j++) {
+            if (key[j] == key[i] && k1[j] == k1[i] && k2[j] == k2[i]) { id[i] = id[j]; break; }
+        }
+    }
+    const int A = id[0], B = id[1], C = id[2], D = id[3], E = id[4], F = id[5], G = id[6], H = id[7], I = id[8];
+    int J = E, K = E, L = E, M = E;                                   /* salida: J K / L M */
+    if (!mm_eq4(E, A, B, C, D) || !mm_eq4(E, F, G, H, I)) {
+        const int P = id[9], S = id[10], Q = id[11], R = id[12];
+        const uint Bl = mm_luma(key[1]), Dl = mm_luma(key[3]), El = mm_luma(key[4]), Fl = mm_luma(key[5]), Hl = mm_luma(key[7]);
+        /* pendiente 1:1 */
+        if ((D == B && D != H && D != F) && (El >= Dl || E == A) && mm_any3(E, A, C, G) && (El < Dl || A != D || E != P || E != Q)) J = D;
+        if ((B == F && B != D && B != H) && (El >= Bl || E == C) && mm_any3(E, A, C, I) && (El < Bl || C != B || E != P || E != R)) K = B;
+        if ((H == D && H != F && H != B) && (El >= Hl || E == G) && mm_any3(E, A, G, I) && (El < Hl || G != H || E != S || E != Q)) L = H;
+        if ((F == H && F != B && F != D) && (El >= Fl || E == I) && mm_any3(E, C, G, I) && (El < Fl || I != H || E != R || E != S)) M = F;
+        /* intersecciones */
+        if ((E != F && mm_eq4(E, C, I, D, Q) && mm_eq2(F, B, H)) && F != id[13]) { K = F; M = F; }
+        if ((E != D && mm_eq4(E, A, G, F, R) && mm_eq2(D, B, H)) && D != id[14]) { J = D; L = D; }
+        if ((E != H && mm_eq4(E, G, I, B, P) && mm_eq2(H, D, F)) && H != id[15]) { L = H; M = H; }
+        if ((E != B && mm_eq4(E, A, C, H, S) && mm_eq2(B, D, F)) && B != id[16]) { J = B; K = B; }
+        if (Bl < El && mm_eq4(E, G, H, I, S) && mm_none4(E, A, D, C, F)) { J = B; K = B; }
+        if (Hl < El && mm_eq4(E, A, B, C, P) && mm_none4(E, D, G, I, F)) { L = H; M = H; }
+        if (Fl < El && mm_eq4(E, A, D, G, Q) && mm_none4(E, B, C, I, H)) { K = F; M = F; }
+        if (Dl < El && mm_eq4(E, C, F, I, R) && mm_none4(E, B, A, G, H)) { J = D; L = D; }
+        /* pendiente 2:1 */
+        if (H != B) {
+            if (H != A && H != E && H != C) {
+                if (mm_eq3(H, G, F, R) && mm_none2(H, D, id[17])) L = M;
+                if (mm_eq3(H, I, D, Q) && mm_none2(H, F, id[18])) M = L;
+            }
+            if (B != I && B != G && B != E) {
+                if (mm_eq3(B, A, F, R) && mm_none2(B, D, id[19])) J = K;
+                if (mm_eq3(B, C, D, Q) && mm_none2(B, F, id[20])) K = J;
+            }
+        }
+        if (F != D) {
+            if (D != I && D != E && D != C) {
+                if (mm_eq3(D, A, H, S) && mm_none2(D, B, id[21])) J = L;
+                if (mm_eq3(D, G, B, P) && mm_none2(D, H, id[22])) L = J;
+            }
+            if (F != E && F != A && F != G) {
+                if (mm_eq3(F, C, H, S) && mm_none2(F, B, id[23])) K = M;
+                if (mm_eq3(F, I, B, P) && mm_none2(F, H, id[24])) M = K;
+            }
+        }
+    }
+    const int pick[4] = { J, K, L, M };
+    for (uint q = 0u; q < 4u; q++) {
+        const uint2 o = gid * 2u + uint2(q & 1u, q >> 1);
+        dst.write(mm_unpack(key[pick[q]]), o);
+        if (np > 0) dstP.write(mm_unpack(k1[pick[q]]), o);
+        if (np > 1) dstP.write(mm_unpack(k2[pick[q]]), uint2(o.x, o.y + dims.y * 2u));
+    }
 }
 
 /* Velo negro a pantalla completa (transiciones mundo <-> cine): c.x = opacidad. Va con el triángulo de xr_fs_vertex. */

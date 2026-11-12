@@ -101,52 +101,71 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
     /* U.cull_eye.w = NSG_CULL_ALL (cinemáticas) o NSG_CULL_SEMI (cabeza bajo el agua: solo mallas semitransparentes, p. ej. la superficie del agua vista desde abajo). Réplica: ns_gpu_cull_applies */
     const uint cull = uint(U.cull_eye.w + 0.5);
     const bool one_sided = (cf & NSG_CF_ONESIDED) != 0u && (cull == uint(NSG_CULL_ALL) || (cull == uint(NSG_CULL_SEMI) && (cf & NSG_CF_SEMI) != 0u));
-    /* Cámara del juego (cinemáticas, vista de pared): la GTE satura la división H/SZ en 2,0 cuando z de vista <= H/2, así que el motor proyecta ese vértice como si estuviera en el plano z = H/2
-     * (x e y de la vista intactas) y dibuja el polígono igualmente (medido en volcados: cámara a pocas unidades de una pared). Solo no hay polígono si ningún vértice está delante (z <= 0).
-     * U.misc.y = H/2 en unidades del motor (0 = sin ajuste: el mundo en primera persona, donde lo cercano se ve tal cual). El reverso y el tamaño máximo se miden con los vértices ya
-     * ajustados. Los tres vértices deciden igual. Réplica en C: ns_gpu_gte_tri (ns_gpu.c) y NsRCam.zreject (ns_cpuref.c). */
+    /* Modo ENGINE (cámara del juego en una pantalla: pantalla 3D y cine; U.misc.y = H/2 > 0). Dentro de la ventana del motor la verdad es el fotograma del juego y lo reproduce la regla del motor
+     * por triángulo ENTERO con su ojo: la GTE satura la división H/SZ en 2,0 cuando z de vista <= H/2, así que el vértice se proyecta como si estuviera en el plano z = H/2 (x e y de la vista
+     * intactas); no hay polígono si ningún vértice está delante (z <= 0), si es el reverso de una cara de una sola cara (con los vértices ya ajustados) o si mide más de 1023 x 511 px (la tarjeta
+     * no lo dibuja). La pantalla 3D enseña además campo que el juego no tiene (el otro ojo, los márgenes): el triángulo descartado por reverso o tamaño que no es cercano (algún vértice a
+     * z >= H) se rescata: se dibuja con su geometría real, recortado por el plano cercano, y ns_fs descarta sus fragmentos dentro de la ventana del motor (NSG_CF_WINCUT); el de reverso, solo
+     * si es anverso desde el ojo de la vista que se dibuja. «Caras cercanas: Original» (sin NSG_ENG_OFF_SPLIT): la cara de un objeto sin GBOUND (pieza sin NSG_PF_NOSPLIT) que el motor original parte en trozos
+     * (libdg/divide.c: doble área de pantalla > NSG_DIV_AREA y profundidad media < NSG_DIV_Z, o NSG_DIV_Z_FAR con H > 1000) y que esta regla perdería por tamaño o deformaría (algún
+     * vértice a z < H/2) se dibuja con su geometría real, recortada por el plano cercano, también dentro de la ventana; el reverso se decide antes, como el motor.
+     * U.misc.z = reglas apagadas (NSG_ENG_OFF_*). Las tres esquinas deciden igual. Réplica en C: ns_gpu_engine_tri (ns_gpu.c). */
     const bool near_reject = U.misc.y > 0.0;
+    const uint eng_off = uint(U.misc.z + 0.5);
     /* Reverso de una cara de una sola cara que NO se descarta (mundo en primera persona: doble cara): se dibuja, pero pierde el empate de profundidad con el anverso que comparte su plano
      * (paredes de dos hojas espalda con espalda: sin esto parpadean entre sus dos texturas). Se decide con el ojo de ESTA vista. Réplica en C: ns_gpu_back_z (ns_gpu.c). */
     const bool back_keep = (cf & NSG_CF_ONESIDED) != 0u && !one_sided;
     bool behind = false;
-    float3 wpos = wp;   /* posición que se proyecta: la del vértice, o su ajuste al plano z = H/2 (near_reject) */
+    float3 wpos = wp;   /* posición que se proyecta: la del vértice, o su ajuste al plano z = H/2 (modo ENGINE) */
+    bool rescue = false;   /* modo ENGINE: descartado por el motor pero dibujado, con su geometría real, fuera de su ventana */
     if (one_sided || near_reject || back_keep) {
         uint f0 = corner_index - corner_index % 3u;
         float3 q0 = ns_world_pos(verts[corners[f0].v], P, verts, pieces);
         float3 q1 = ns_world_pos(verts[corners[f0 + 1u].v], P, verts, pieces);
         float3 q2 = ns_world_pos(verts[corners[f0 + 2u].v], P, verts, pieces);
+        /* el mismo triángulo en el mundo VR (to_vr es una semejanza: el signo de su determinante dice si conserva el sentido) */
+        float3 v0 = float3(dot(U.tovr[0].xyz, q0) + U.tovr[0].w, dot(U.tovr[1].xyz, q0) + U.tovr[1].w, dot(U.tovr[2].xyz, q0) + U.tovr[2].w);
+        float3 v1 = float3(dot(U.tovr[0].xyz, q1) + U.tovr[0].w, dot(U.tovr[1].xyz, q1) + U.tovr[1].w, dot(U.tovr[2].xyz, q1) + U.tovr[2].w);
+        float3 v2 = float3(dot(U.tovr[0].xyz, q2) + U.tovr[0].w, dot(U.tovr[1].xyz, q2) + U.tovr[1].w, dot(U.tovr[2].xyz, q2) + U.tovr[2].w);
+        float sense = dot(U.tovr[0].xyz, cross(U.tovr[1].xyz, U.tovr[2].xyz)) < 0.0 ? -1.0 : 1.0;
+        float3 nvr = cross(v1 - v0, v2 - v0);
         float3 g0 = q0, g1 = q1, g2 = q2;   /* vértices tras el ajuste de la GTE */
-        float3 zv = float3(0.0);
         if (near_reject) {
-            zv = float3(dot(U.fog_fwd.xyz, q0), dot(U.fog_fwd.xyz, q1), dot(U.fog_fwd.xyz, q2)) + U.fog_fwd.w;
-            if (max(max(zv.x, zv.y), zv.z) <= 0.0) back = true;   // ningún vértice delante de la cámara
+            const float3 zv = float3(dot(U.fog_fwd.xyz, q0), dot(U.fog_fwd.xyz, q1), dot(U.fog_fwd.xyz, q2)) + U.fog_fwd.w;   /* z de vista de la cámara del juego */
+            const float zmax = max(max(zv.x, zv.y), zv.z);
+            if ((eng_off & uint(NSG_ENG_OFF_BEHIND)) == 0u && zmax <= 0.0) back = true;   // ningún vértice delante de la cámara
             else {
                 const float3 zc = max(zv, float3(U.misc.y));
                 g0 = q0 + U.fog_fwd.xyz * (zc.x - zv.x); g1 = q1 + U.fog_fwd.xyz * (zc.y - zv.y); g2 = q2 + U.fog_fwd.xyz * (zc.z - zv.z);
-                wpos = corner_index % 3u == 0u ? g0 : (corner_index % 3u == 1u ? g1 : g2);
-                zv = zc;
-            }
-        }
-        if (one_sided && !back) back = dot(g0 - U.cull_eye.xyz, cross(g1 - g0, g2 - g0)) <= 0.0;
-        if (near_reject) {
-            if (!back) {
-                /* Tamaño máximo del hardware: la GPU original no dibuja el triángulo de más de 1023 x 511 px de la pantalla del motor (coordenadas saturadas a -1024..1023), así que una rejilla o un
-                 * suelo pegados a la cámara del guion no existen en su imagen; aquí tapaban la pantalla. Aquí zv ya es max(z, H/2) > 0. Réplica en C: ns_gpu_tri_oversize (ns_gpu.c). */
+                bool cull = one_sided && dot(g0 - U.cull_eye.xyz, cross(g1 - g0, g2 - g0)) <= 0.0;   // reverso para el motor
+                const bool rev = cull;
+                /* tamaño máximo del hardware: la GPU original no dibuja el triángulo de más de 1023 x 511 px de la pantalla del motor (coordenadas de la GTE saturadas a -1024..1023);
+                 * zc >= H/2 > 0. Réplica en C: ns_gpu_tri_oversize */
                 float3 r0 = g0 - U.cull_eye.xyz, r1 = g1 - U.cull_eye.xyz, r2 = g2 - U.cull_eye.xyz;
-                float3 sx = clamp(U.cam_x.w * float3(dot(U.cam_x.xyz, r0), dot(U.cam_x.xyz, r1), dot(U.cam_x.xyz, r2)) / zv, NSG_HW_SXY_MIN, NSG_HW_SXY_MAX);
-                float3 sy = clamp(U.cam_y.w * float3(dot(U.cam_y.xyz, r0), dot(U.cam_y.xyz, r1), dot(U.cam_y.xyz, r2)) / zv, NSG_HW_SXY_MIN, NSG_HW_SXY_MAX);
-                if (max(max(sx.x, sx.y), sx.z) - min(min(sx.x, sx.y), sx.z) > NSG_HW_MAX_W || max(max(sy.x, sy.y), sy.z) - min(min(sy.x, sy.y), sy.z) > NSG_HW_MAX_H) back = true;
+                float3 sx = clamp(U.cam_x.w * float3(dot(U.cam_x.xyz, r0), dot(U.cam_x.xyz, r1), dot(U.cam_x.xyz, r2)) / zc, NSG_HW_SXY_MIN, NSG_HW_SXY_MAX);
+                float3 sy = clamp(U.cam_y.w * float3(dot(U.cam_y.xyz, r0), dot(U.cam_y.xyz, r1), dot(U.cam_y.xyz, r2)) / zc, NSG_HW_SXY_MIN, NSG_HW_SXY_MAX);
+                if (!cull && (eng_off & uint(NSG_ENG_OFF_SIZE)) == 0u &&
+                    (max(max(sx.x, sx.y), sx.z) - min(min(sx.x, sx.y), sx.z) > NSG_HW_MAX_W || max(max(sy.x, sy.y), sy.z) - min(min(sy.x, sy.y), sy.z) > NSG_HW_MAX_H)) cull = true;
+                /* cara que el motor original parte: objeto sin GBOUND, no reverso, perdida por tamaño o con algún vértice a z < H/2, con área y profundidad media dentro de sus umbrales */
+                const float zsum = max(zv.x, 0.0) + max(zv.y, 0.0) + max(zv.z, 0.0);
+                const bool split = (P.flags & NSG_PF_NOSPLIT) == 0u && (eng_off & uint(NSG_ENG_OFF_SPLIT)) == 0u && !rev && (cull || min(min(zv.x, zv.y), zv.z) < U.misc.y) &&
+                                   zsum < 3.0 * (U.cam_x.w > 1000.0 ? NSG_DIV_Z_FAR : NSG_DIV_Z) &&
+                                   abs((sx.y - sx.x) * (sy.z - sy.x) - (sx.z - sx.x) * (sy.y - sy.x)) > NSG_DIV_AREA;
+                if (split) {
+                    /* se dibuja con su geometría real (wpos = wp), sin recorte de ventana */
+                } else if (cull) {
+                    /* rescate en el campo extra: no cercano y, si era reverso, anverso desde el ojo de ESTA vista (U.eye[amp]; sin amplificación, el del pase) */
+                    const bool front = sense * dot(v0 - U.eye[amp].xyz, nvr) > 0.0;
+                    rescue = zmax >= U.cam_x.w && (!rev || front);
+                    back = !rescue;
+                } else {
+                    wpos = corner_index % 3u == 0u ? g0 : (corner_index % 3u == 1u ? g1 : g2);
+                }
             }
+        } else if (one_sided) {
+            back = dot(q0 - U.cull_eye.xyz, cross(q1 - q0, q2 - q0)) <= 0.0;
         }
-        if (back_keep) {
-            /* mismo criterio que arriba, en el mundo VR y con el ojo de la vista (to_vr es una semejanza: el signo de su determinante dice si conserva el sentido) */
-            float3 v0 = float3(dot(U.tovr[0].xyz, q0) + U.tovr[0].w, dot(U.tovr[1].xyz, q0) + U.tovr[1].w, dot(U.tovr[2].xyz, q0) + U.tovr[2].w);
-            float3 v1 = float3(dot(U.tovr[0].xyz, q1) + U.tovr[0].w, dot(U.tovr[1].xyz, q1) + U.tovr[1].w, dot(U.tovr[2].xyz, q1) + U.tovr[2].w);
-            float3 v2 = float3(dot(U.tovr[0].xyz, q2) + U.tovr[0].w, dot(U.tovr[1].xyz, q2) + U.tovr[1].w, dot(U.tovr[2].xyz, q2) + U.tovr[2].w);
-            float sense = dot(U.tovr[0].xyz, cross(U.tovr[1].xyz, U.tovr[2].xyz)) < 0.0 ? -1.0 : 1.0;
-            behind = sense * dot(v0 - U.eye[amp].xyz, cross(v1 - v0, v2 - v0)) <= 0.0;
-        }
+        if (back_keep) behind = sense * dot(v0 - U.eye[amp].xyz, nvr) <= 0.0;   /* mismo criterio, en el mundo VR y con el ojo de la vista */
     }
 
     /* color: precalculado de la cara, luz de la pieza o neutro; después niebla (hacia negro) y byte entero */
@@ -195,6 +214,7 @@ static NsVOut ns_vertex(uint corner_index, uint piece_index, uint amp,
     o.tpage = uint(c.tpage);
     /* visión térmica: los objetos que la admiten se dibujan con la CLUT térmica del motor (NSG_PF_IRCLUT, ver ns_gpu_make_piece) */
     uint cl = (P.flags & NSG_PF_IRCLUT) != 0u ? uint(NSG_IR_CLUT) : uint(c.clut);
+    if (rescue) cf |= NSG_CF_WINCUT;
     o.clutf = cl | (cf << 16);
     o.ew = wp;
     return o;
@@ -301,6 +321,12 @@ fragment float4 ns_fs(NsVOut in [[stage_in]], texture2d<ushort, access::read> vr
 {
     uint flags = in.clutf >> 16;
     uint clut = in.clutf & 0xFFFFu;
+    if ((flags & NSG_CF_WINCUT) != 0u) {
+        /* triángulo rescatado del descarte del motor (ns_vertex): dentro de la ventana del motor manda el fotograma del juego, que no lo tiene. Réplica en C: ns_gpu_engine_win */
+        const float3 er = in.ew - U.cull_eye.xyz;
+        const float ez = dot(U.fog_fwd.xyz, er);
+        if (ez > 0.0 && abs(U.cam_x.w * dot(U.cam_x.xyz, er)) <= NSG_ENG_WIN_X * ez && abs(U.cam_y.w * dot(U.cam_y.xyz, er)) <= NSG_ENG_WIN_Y * ez) discard_fragment();
+    }
     bool semi = (flags & NSG_CF_SEMI) != 0u;
     float3 col = clamp(in.col, 0.0, 255.0);
     /* agua (ns_screen_water_ref): tinte multiplicativo en el volumen, o en todo si la cabeza está dentro; depende solo de la posición del mundo. La ondulación NO va aquí: es un post-proceso de pantalla (vr_fs_wave). */

@@ -8,7 +8,7 @@ INC=(-Iruntime -Ivr/scene -Ivr/bridge -Ivr/camera -Ivr/input -Ivr/host -Ivr/body
 
 echo "== shaders Metal =="
 for f in render/metal/vr_scene.metal render/metal/vr_vram.metal render/metal/vr_radar.metal render/metal/vr_weapon.metal app/Sources/XRShaders.metal app/Sources/Native/NativeShaders.metal; do
-  xcrun -sdk macosx metal -c -Irender/metal -Ivr/native "$f" -o "$OUT/$(basename "$f" .metal).air"
+  xcrun -sdk macosx metal -c -DMV_NO_FBFETCH -Irender/metal -Ivr/native "$f" -o "$OUT/$(basename "$f" .metal).air"
 done
 xcrun -sdk macosx metallib "$OUT"/*.air -o "$OUT/default.metallib"
 

@@ -28,12 +28,14 @@ static void add_tri(const float a[3], const float b[3], const float c[3], float 
 }
 static uint64_t mix(uint64_t h, uint64_t v) { h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2); return h; }
 
+/* escenario de un grupo de mapa no activo (mismo criterio que ns_gpu_make_piece): se dibuja, pero no es suelo para los pies */
+static int off_group(const NsScene *sc, const NsInstance *in) { return in->zone_mask && sc->group_mask && !(in->zone_mask & sc->group_mask); }
 /* Suelos con sesgo negativo del escenario, en el mundo. La firma (mallas y traslaciones de esas piezas) evita rehacerlos cada fotograma. */
 static void floors(const NsScene *sc, const NsMeshStore *st) {
     uint64_t sig = 0x5151u;
     for (uint32_t i = 0; i < sc->n_inst; i++) {
         const NsInstance *in = &sc->inst[i];
-        if (!(in->flags & NS_IF_STATIC) || (uint64_t)in->first_piece + in->n_pieces > sc->n_piece) continue;
+        if (!(in->flags & NS_IF_STATIC) || off_group(sc, in) || (uint64_t)in->first_piece + in->n_pieces > sc->n_piece) continue;
         for (uint32_t k = 0; k < in->n_pieces; k++) {
             const NsPiece *p = &sc->piece[in->first_piece + k];
             if ((p->flags & NS_PF_HIDDEN) || !p->mesh_id) continue;
@@ -47,7 +49,7 @@ static void floors(const NsScene *sc, const NsMeshStore *st) {
     F.n = 0; F.sig = sig; F.have = 1;
     for (uint32_t i = 0; i < sc->n_inst; i++) {
         const NsInstance *in = &sc->inst[i];
-        if (!(in->flags & NS_IF_STATIC) || (uint64_t)in->first_piece + in->n_pieces > sc->n_piece) continue;
+        if (!(in->flags & NS_IF_STATIC) || off_group(sc, in) || (uint64_t)in->first_piece + in->n_pieces > sc->n_piece) continue;
         for (uint32_t k = 0; k < in->n_pieces; k++) {
             const NsPiece *p = &sc->piece[in->first_piece + k];
             if ((p->flags & NS_PF_HIDDEN) || !p->mesh_id) continue;

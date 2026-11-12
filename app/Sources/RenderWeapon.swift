@@ -72,6 +72,7 @@ final class WeaponRenderer {
     }
     private var spcPipes: [SKey: MTLRenderPipelineState] = [:]
     private var spcDepth: MTLDepthStencilState?
+    private var lensDepth: MTLDepthStencilState?     // la lente de la mira (SCOPE con occlude): con prueba de profundidad, sin escribir
     private var overlayTex: MTLTexture?
     private let t0 = CACurrentMediaTime()
     private var failed = Set<String>()
@@ -128,6 +129,10 @@ final class WeaponRenderer {
         sd.depthCompareFunction = .always          // la lente / el panel van por encima del arma y del mundo
         sd.isDepthWriteEnabled = false
         spcDepth = device.makeDepthStencilState(descriptor: sd)
+        let ld = MTLDepthStencilDescriptor()
+        ld.depthCompareFunction = .greaterEqual    // Z invertida, igual que depthState: el escenario y el arma que tenga delante tapan la lente
+        ld.isDepthWriteEnabled = false
+        lensDepth = device.makeDepthStencilState(descriptor: ld)
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: 1, height: 1, mipmapped: false)
         td.usage = .shaderRead
         whiteTexture = device.makeTexture(descriptor: td)
@@ -393,7 +398,8 @@ final class WeaponRenderer {
 
     /// Dibuja la vista especial vigente en el pase de escena en curso (después del arma). `aux` = segunda vista renderizada (mira, misil; valores
     /// en gamma, sin decodificar sRGB), `hud` = panel del HUD del juego en bruto (visor antiaéreo). `auxLinear`: los valores de `aux` ya son lineales.
-    func encodeSpecial(encoder: MTLRenderCommandEncoder, view sv: MvVrSpecialView, aux: MTLTexture?, auxLinear: Bool, hud: MTLTexture?,
+    /// `hudPremultiplied`: `hud` es la capa 2D fiel (color premultiplicado, vr_layer2d) y no el HUD de reserva (alfa directo).
+    func encodeSpecial(encoder: MTLRenderCommandEncoder, view sv: MvVrSpecialView, aux: MTLTexture?, auxLinear: Bool, hud: MTLTexture?, hudPremultiplied: Bool = false,
                        views: [simd_float4x4], projections: [simd_float4x4], layered: Bool, viewIndex: Int = 0) {
         guard enabled, sv.kind != 0 else { return }
         let n = min(views.count, projections.count)
@@ -413,7 +419,7 @@ final class WeaponRenderer {
             guard let h = hud else { return }
             image = h
             d.uv = simd_float4(sv.uv.0, sv.uv.1, sv.uv.2, sv.uv.3)
-            d.p0 = simd_float4(1, 1, 0, 0)
+            d.p0 = simd_float4(1, 1, hudPremultiplied ? 1 : 0, 0)
         case Int32(MV_VIEW_MISSILE):
             guard let a = aux else { return }
             image = a
@@ -445,7 +451,8 @@ final class WeaponRenderer {
         d.model = m
 
         let key = SKey(layered: layered, linear: linearOutput, color: colorFormat, depth: depthFormat, samples: sampleCount)
-        guard let pso = specialPipeline(key), let ds = spcDepth else { return }
+        let occlude = sv.kind == Int32(MV_VIEW_SCOPE) && sv.occlude != 0      // solo la lente de la mira del arma; visor antiaéreo, misil y prismáticos siguen por encima de todo
+        guard let pso = specialPipeline(key), let ds = occlude ? lensDepth : spcDepth else { return }
         var u = WpnFrameU()
         if layered {
             let cnt = min(n, viewCount)
@@ -460,7 +467,12 @@ final class WeaponRenderer {
         encoder.pushDebugGroup("WPN vista especial")
         encoder.setRenderPipelineState(pso)
         encoder.setDepthStencilState(ds)
-        encoder.setDepthBias(0, slopeScale: 0, clamp: 0)
+        if occlude {
+            encoder.setDepthBias(1, slopeScale: 1, clamp: 0)      // hacia el ojo (Z invertida): gana a la placa coplanar del modelo
+            encoder.setDepthClipMode(.clamp)                       // el plano cercano (0,1 m) no recorta la lente al acercar el arma al ojo
+        } else {
+            encoder.setDepthBias(0, slopeScale: 0, clamp: 0)
+        }
         encoder.setCullMode(.none)
         encoder.setVertexBytes(&u, length: MemoryLayout<WpnFrameU>.stride, index: 1)
         encoder.setVertexBytes(&d, length: MemoryLayout<SpcDrawU>.stride, index: 2)
@@ -468,6 +480,10 @@ final class WeaponRenderer {
         encoder.setFragmentTexture(image, index: 0)
         encoder.setFragmentTexture(overlay ?? whiteTexture, index: 1)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        if occlude {
+            encoder.setDepthBias(0, slopeScale: 0, clamp: 0)
+            encoder.setDepthClipMode(.clip)
+        }
         encoder.popDebugGroup()
     }
 }

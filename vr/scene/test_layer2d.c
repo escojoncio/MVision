@@ -400,9 +400,34 @@ static void offlist_text(void) {
             vl2a_flush(N1);
             const uint8_t *np1 = NULL; int nw1 = 0, nh1 = 0, nf1 = 0; uint32_t ns1 = 0;
             int nr1 = vl2a_acquire(N1, &np1, &nw1, &nh1, &nf1, &ns1);
-            CHECK(nr1 >= 0 && np1 && nw1 == hw / 4 && nh1 == hh / 4, "opciones nativas: capa %dx%d (esperada %dx%d)", nw1, nh1, hw / 4, hh / 4);
-            for (int y = 0; y < nh1 && np1 && nw1 == hw / 4; y++) for (int x = 0; x < nw1; x++)
-                if (memcmp(&np1[((size_t)y * nw1 + x) * 4], &hp[((size_t)(y * 4) * hw + x * 4) * 4], 4)) { fails++; printf("FALLO: opciones nativas: el pixel (%d,%d) no es el del raster exacto\n", x, y); y = nh1; break; }
+            /* la capa llega empaquetada (vl2d_pack): raster exacto 1x en la ventana visible fija, tres planos apilados; idéntica a la síncrona de escala 1 */
+            VrLayer2D *P1 = vl2d_new();
+            vl2d_set_options(P1, 1, VL_SMOOTH_ORIGINAL);
+            vl2d_run(P1, c1, &s1, 0); vl2d_run(P1, c2, &s2, 0);
+            int pw1 = 0, ph1 = 0, pl1 = 0;
+            GpuWindow win; gpu_display_window(&c2->disp, 0, &win);
+            CHECK(vl2d_pack_size(P1, &pw1, &ph1, &pl1) && pl1 == 3 && pw1 == win.w && ph1 == win.h, "empaquetado: ventana %dx%d, %d planos", pw1, ph1, pl1);
+            uint8_t *pk = (uint8_t *)malloc((size_t)pw1 * ph1 * pl1 * 4);
+            vl2d_pack(P1, pk);
+            CHECK(nr1 >= 0 && np1 && nw1 == pw1 && nh1 == ph1 * 3 && !memcmp(np1, pk, (size_t)pw1 * ph1 * 3 * 4), "opciones nativas: capa %dx%d (esperada %dx%d: ventana visible, 3 planos, raster exacto)", nw1, nh1, pw1, ph1 * 3);
+            {   /* cada píxel de la ventana es el de la capa desplazado (ox, oy), o el borde (transparente, sin resta, sin tope) */
+                int lw = 0, lh = 0, bad = 0; const uint8_t *la = vl2d_rgba(P1, &lw, &lh), *ls = vl2d_sub(P1), *lg = vl2d_gain(P1);
+                for (int y = 0; y < ph1; y++) for (int x = 0; x < pw1; x++) {
+                    int sx = x - win.ox, sy = y - win.oy, in = sx >= 0 && sx < lw && sy >= 0 && sy < lh;
+                    static const uint8_t e0[4] = {0, 0, 0, 0}, e1[4] = {0, 0, 0, 255}, e2[4] = {255, 255, 255, 255};
+                    bad += memcmp(&pk[((size_t)y * pw1 + x) * 4], in ? &la[((size_t)sy * lw + sx) * 4] : e0, 4) != 0;
+                    bad += memcmp(&pk[((size_t)(ph1 + y) * pw1 + x) * 4], in ? &ls[((size_t)sy * lw + sx) * 4] : e1, 4) != 0;
+                    bad += memcmp(&pk[((size_t)(2 * ph1 + y) * pw1 + x) * 4], in ? &lg[((size_t)sy * lw + sx) * 4] : e2, 4) != 0;
+                }
+                CHECK(bad == 0, "empaquetado: %d píxeles mal colocados en la ventana", bad);
+            }
+            {   /* la colocación en la ventana viaja con la capa adquirida (registro del panel con la pantalla 3D en el visor) */
+                int w6[6] = {0}, v6[6] = {0}, lw = 0, lh = 0;
+                vl2d_rgba(P1, &lw, &lh);
+                CHECK(vl2a_acquire_window(N1, w6) && vl2d_window(P1, v6) && !memcmp(w6, v6, sizeof w6) && w6[0] == win.w && w6[1] == win.h && w6[2] == win.ox && w6[3] == win.oy && w6[4] == lw && w6[5] == lh,
+                      "ventana de la capa adquirida: %d,%d,%d,%d,%d,%d", w6[0], w6[1], w6[2], w6[3], w6[4], w6[5]);
+            }
+            free(pk); vl2d_free(P1);
             vl2a_release(N1);
             for (int i = 0; i < 40; i++) { vl2a_submit(N1, c2, s2.op_dest, 0, 0); vl2a_flush(N1); }
             int nsc = 0; double nwm, nsm; uint32_t nlag;
@@ -424,6 +449,74 @@ static GpuDrawList *run_list(const GpuDrawList *l, VrScene *sc) {
     o.drop_clear = 0;
     if (vr_scene_build(c, NULL, &o, sc) != 0) { free_list(c); return NULL; }
     return c;
+}
+
+/* vl2d_pack: la capa (escala S) colocada en la ventana visible fija; cada píxel de la ventana es el de la capa desplazado (ox, oy) o el borde (pantalla completa: negro opaco, 1 plano) */
+static void check_pack(const VrLayer2D *L, const GpuDisplay *d, int full, int S, const char *name) {
+    GpuWindow win; gpu_display_window(d, full, &win);
+    int pw = 0, ph = 0, pl = 0, lw = 0, lh = 0, bad = 0;
+    const uint8_t *la = vl2d_rgba(L, &lw, &lh);
+    CHECK(vl2d_pack_size(L, &pw, &ph, &pl) && pw == win.w * S && ph == win.h * S && pl == (full ? 1 : 3), "%s x%d: empaquetado %dx%d, %d planos (ventana %dx%d)", name, S, pw, ph, pl, win.w, win.h);
+    if (!la || pw != win.w * S || ph != win.h * S) return;
+    uint8_t *pk = (uint8_t *)malloc((size_t)pw * ph * pl * 4);
+    vl2d_pack(L, pk);
+    for (int y = 0; y < ph; y++) for (int x = 0; x < pw; x++) {
+        int sx = x - win.ox * S, sy = y - win.oy * S, in = sx >= 0 && sx < lw && sy >= 0 && sy < lh;
+        static const uint8_t black[4] = {0, 0, 0, 255}, none[4] = {0, 0, 0, 0};
+        bad += memcmp(&pk[((size_t)y * pw + x) * 4], in ? &la[((size_t)sy * lw + sx) * 4] : full ? black : none, 4) != 0;
+    }
+    CHECK(bad == 0, "%s x%d: %d píxeles mal colocados en la ventana visible (ox %d, oy %d)", name, S, bad, win.ox, win.oy);
+    free(pk);
+}
+
+/* Lectura del búfer de dibujo desde el panel: un sprite 2D (panel) se pinta en la zona mostrada, la GPU copia ese trozo de pantalla a una página de textura y otro sprite lo usa como
+ * textura. La VRAM espejo del panel debe llevar lo pintado por las primitivas (todas, en orden), no solo los eventos: si no, la copia lee el búfer de hace dos fotogramas. */
+static void mirror_case(void) {
+    uint16_t font[16 * 8];
+    for (int i = 0; i < 16 * 8; i++) font[i] = (uint16_t)(0x1111 * (1 + i % 3));
+    const uint16_t clut[4] = {0, 0x7FFF, 0x03E0, 0x7C1F};
+    gpu_capture_enable(0);
+    gpu_reset();
+    gpu_gp1(0x03000000); gpu_gp1(0x08000001);
+    gpu_gp1(0x06000000 | 0x270u | 0xC70u << 12); gpu_gp1(0x07000000 | 0x13u | (0x13u + 240u) << 10);
+    gpu_gp1(0x05000000 | 256u << 10);
+    env(0, 0, 1023, 511, 0, 0, 0);
+    gpu_gp0(0x02000000); gpu_gp0(xy(0, 0)); gpu_gp0(xy(1023, 511));
+    upload(640, 0, 16, 8, font);
+    upload(0, 500, 4, 1, clut);
+    gpu_capture_vram_start(1);
+    gpu_capture_enable(1);
+    env(0, 0, 1023, 511, 10, 0, 0);                                                                         /* página 640, 4 bits */
+    gpu_gp0(0x64u << 24 | 0x808080); gpu_gp0(xy(10, 10)); gpu_gp0((500u << 6) << 16); gpu_gp0(xy(8, 8));    /* sprite A en pantalla */
+    gpu_gp0(0x80000000); gpu_gp0(xy(10, 10)); gpu_gp0(xy(704, 64)); gpu_gp0(xy(8, 8));                      /* pantalla -> página de textura */
+    env(0, 0, 1023, 511, 0x10B, 0, 0);                                                                      /* página 704, 15 bits */
+    gpu_gp0(0x64u << 24 | 0x808080); gpu_gp0(xy(40, 10)); gpu_gp0(64u << 8); gpu_gp0(xy(8, 8));             /* sprite B con lo copiado */
+    gpu_gp1(0x05000000);
+    const GpuDrawList *l = gpu_capture_frame();
+    gpu_capture_vram_start(0);
+    CHECK(l != NULL, "espejo: lista");
+    if (!l) return;
+    VrScene sc;
+    GpuDrawList *c = run_list(l, &sc);
+    CHECK(c != NULL, "espejo: escena");
+    if (!c) return;
+    VrLayer2D *L = vl2d_new();
+    vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+    CHECK(vl2d_run(L, c, &sc, VL_PANEL) == 1, "espejo: vl2d_run");
+    int w = 0, h = 0, bad = 0, lit = 0;
+    const uint8_t *rg = vl2d_rgba(L, &w, &h);
+    for (int y = 10; y < 18 && rg; y++) for (int x = 40; x < 48; x++) {
+        const uint8_t *q = &rg[((size_t)y * w + x) * 4];
+        lit += pix5(x, y, 0) | pix5(x, y, 1) | pix5(x, y, 2) ? 1 : 0;
+        for (int k = 0; k < 3; k++) { int v = pix5(x, y, k); if (q[3] != 255 || q[k] != ((v << 3) | (v >> 2))) { bad++; break; } }
+    }
+    CHECK(lit == 64, "espejo: el oráculo pinta el sprite copiado (%d de 64)", lit);
+    CHECK(bad == 0, "espejo: %d de 64 píxeles del sprite que usa de textura un trozo de pantalla copiado difieren de la GPU", bad);
+    const uint16_t *mv = vl2d_vram(L);
+    int badm = 0;
+    for (int y = 0; y < 240; y++) for (int x = 0; x < 320; x++) badm += mv[y * 1024 + x] != gpu_vram[y][x];
+    CHECK(badm == 0, "espejo: %d píxeles de la zona mostrada del espejo distintos de la VRAM de la GPU", badm);
+    vl2d_free(L); free_list(c);
 }
 
 static void edge_case(const char *name, uint32_t mode, int x1, int x2, int y1, int y2) {
@@ -476,6 +569,8 @@ static void edge_case(const char *name, uint32_t mode, int x1, int x2, int y1, i
         for (int y = 0; y < h && rg && w == cd.fw * sm; y++) for (int x = 0; x < w; x++)
             if (memcmp(&rg[((size_t)y * w + x) * 4], &ref[((size_t)(y / sm) * cd.fw + x / sm) * 4], 3)) { if (!bad) printf("  1a dif (%d,%d) capa=%d,%d,%d gpu=%d,%d,%d\n", x, y, rg[((size_t)y*w+x)*4], rg[((size_t)y*w+x)*4+1], rg[((size_t)y*w+x)*4+2], ref[((size_t)(y/sm)*cd.fw+x/sm)*4], ref[((size_t)(y/sm)*cd.fw+x/sm)*4+1], ref[((size_t)(y/sm)*cd.fw+x/sm)*4+2]); bad++; }
         CHECK(bad == 0, "%s x%d: %d muestras distintas del marco de la GPU (texto en los bordes cortado)", name, sm, bad);
+        check_pack(L, &cd, 1, sm, name);
+        CHECK(vl2d_sub(L) == NULL && vl2d_gain(L) == NULL, "%s x%d: la pantalla completa no lleva planos de resta ni tope", name, sm);
         /* el texto de las 4 esquinas de la zona visible está completo (64 píxeles de glifo, todos no negros) */
         int full4 = 0;
         for (int i = 0; i < 4 && rg && w == cd.fw * sm; i++)
@@ -808,14 +903,7 @@ static void semi_mask_cases(void) {
         const uint8_t *rg = vl2d_rgba(L, &w, &h);
         for (int y = 30; y < 38 && rg; y++) for (int x = 20; x < 60; x++) {
             const uint8_t *q = &rg[((size_t)(y * 4) * w + x * 4) * 4];
-            int pv[3] = {q[0] * q[3] / 255, q[1] * q[3] / 255, q[2] * q[3] / 255};   /* sobre negro: color * alfa */
-            if (m == 1 || m == 3) {   /* aditivo (alfa 0 en el hardware): la capa se reparte en luz lineal (destino sRGB del visor: decodifica, mezcla, codifica) */
-                for (int k = 0; k < 3; k++) {
-                    double cl = q[k] / 255.0, lin = (cl <= 0.04045 ? cl / 12.92 : pow((cl + 0.055) / 1.055, 2.4)) * (q[3] / 255.0);
-                    double g = lin <= 0.0031308 ? lin * 12.92 : 1.055 * pow(lin, 1.0 / 2.4) - 0.055;
-                    pv[k] = (int)(g * 255.0 + 0.5);
-                }
-            }
+            int pv[3] = {q[0], q[1], q[2]};   /* sobre negro: el color ya es premultiplicado (lo aditivo lleva alfa 0 y color) */
             if (pv[0] | pv[1] | pv[2]) nz++;
             for (int k = 0; k < 3; k++) { int v5 = (gpu_vram[y][x] >> (5 * k)) & 31, e = (v5 << 3) | (v5 >> 2); if (abs(pv[k] - e) > 3) { bad++; break; } }
         }
@@ -1175,6 +1263,7 @@ static void panel_verified(void) {
 
 int main(void) {
     gen_atlas();
+    mirror_case();
     edge_case("320x240", 1, 0x270, 0xC70, 0x13, 0x13 + 240);
     edge_case("320x256", 1, 0x270, 0xC70, 0x13, 0x13 + 256);
     edge_case("368x240 (modo 384, rango 368)", 0x40, 0x230, 0x230 + 368 * 7, 0x13, 0x13 + 240);
@@ -1254,11 +1343,18 @@ int main(void) {
         vl2d_run(L, g_list, &g_sc, 0);
         px = vl2d_px(L, &w, &h);
         uint8_t bg[3] = {(uint8_t)(bgs[bi] & 31), (uint8_t)((bgs[bi] >> 5) & 31), (uint8_t)((bgs[bi] >> 10) & 31)};
-        int exact = 0, near1 = 0, far = 0, tot = 0, maxd = 0;
+        int exact = 0, near1 = 0, far = 0, tot = 0, maxd = 0, far8 = 0, pw = 0, ph = 0;
+        const uint8_t *pa = vl2d_rgba(L, &pw, &ph), *ps = vl2d_sub(L), *pg = vl2d_gain(L);
+        const uint8_t bg8[3] = {(uint8_t)(bg[0] << 3 | bg[0] >> 2), (uint8_t)(bg[1] << 3 | bg[1] >> 2), (uint8_t)(bg[2] << 3 | bg[2] >> 2)};
+        CHECK(pa && ps && pg && pw == 320, "fondo %04x: planos de la capa", bgs[bi]);
         for (int y = 0; y < 240 && px; y++)
             for (int x = 0; x < 320; x++) {
-                uint8_t o5[3];
+                uint8_t o5[3], o8[3];
                 vl2d_compose5(&px[y * 320 + x], bg, o5);
+                if (pa && ps && pg) {   /* los tres planos de 8 bits (lo que recibe el visor) compuestos sobre el mismo fondo: como mucho 1 nivel de 5 bits + redondeo de la GPU original */
+                    vl2d_compose8(&pa[(y * 320 + x) * 4], &ps[(y * 320 + x) * 4], &pg[(y * 320 + x) * 4], bg8, o8);
+                    for (int k = 0; k < 3; k++) { int v5 = pix5(x, y, k); if (abs(o8[k] - (v5 << 3 | v5 >> 2)) > 17) { far8++; break; } }
+                }
                 int d = 0;
                 for (int k = 0; k < 3; k++) { int e = abs(o5[k] - pix5(x, y, k)); if (e > d) d = e; }
                 tot++;
@@ -1266,7 +1362,8 @@ int main(void) {
                 if (d > maxd) maxd = d;
             }
         printf("  fondo %04x: exactos %d, <=2 niveles %d, mas %d (max %d) de %d\n", bgs[bi], exact, near1, far, maxd, tot);
-        CHECK(far * 30 < tot && maxd <= 8, "fondo %04x: demasiados píxeles lejos del original (%d de %d)", bgs[bi], far, tot);
+        CHECK(far == 0 && maxd <= 2, "fondo %04x: píxeles lejos del original (%d de %d, max %d): la composición c + clamp(t*M - d, 0, g) debe reproducir las 4 mezclas en cualquier orden", bgs[bi], far, tot, maxd);
+        CHECK(far8 == 0, "fondo %04x: %d píxeles de los planos de 8 bits a más de 2 niveles del original", bgs[bi], far8);
     }
 
     /* ---- escala 4 ---- */
@@ -1454,8 +1551,10 @@ int main(void) {
         int scl; double wms, sms; uint32_t lg;
         vl2a_stats(A, &scl, &wms, &sms, &lg);
         printf("  asincrono: encolar max %.3f ms, retraso max %u listas (tras calentar), escala final %d, trabajador %.1f ms, capas recogidas %d/100\n", smax, lagmax, scl, wms, got);
+#ifndef __SANITIZE_ADDRESS__   /* con sanitizadores el trabajador va varias veces más lento: los tiempos no valen */
         CHECK(smax < 3.0, "encolar tarda %.3f ms (>3 ms)", smax);
         CHECK(lagmax <= 1, "retraso de la capa %u listas (>1)", lagmax);
+#endif
         g_list->vram_init = vi;
         /* ráfaga sin ritmo: la cola nunca bloquea al productor de forma apreciable y la VRAM espejo no se corrompe (solo eventos de las intermedias) */
         double sm2 = 0;
@@ -1465,25 +1564,36 @@ int main(void) {
         vl2a_free(A);
     }
 
-    /* vl2d_encode: aditivo / pareja resta+suma (créditos, B-F y luego B+F = max(B,F)) sobre fondo transparente conservan su brillo; opaco y resta sola no cambian */
+    /* vl2d_encode*: planos de color premultiplicado, resta y tope; vl2d_compose8 = c + clamp((1 - alfa) * mundo - d, 0, g) */
     {
         VrLayerPx q;
-        uint8_t o[4];
-        memset(&q, 0, sizeof q); q.t = 256; q.c[0] = q.c[1] = q.c[2] = 15; q.d[0] = q.d[1] = q.d[2] = 60;   /* gris 15/31, resta pendiente igual */
+        uint8_t o[4], sb[4], gn[4], out[3];
+        const uint8_t dark[3] = {16, 16, 16}, bright[3] = {230, 230, 230};
+        const int e15 = (15 << 3) | (15 >> 2);
+        memset(&q, 0, sizeof q); q.t = 256; q.c[0] = q.c[1] = q.c[2] = 15; q.d[0] = q.d[1] = q.d[2] = 60; q.g[0] = q.g[1] = q.g[2] = 64;   /* créditos: B-F y luego B+F con F = 15 -> max(B, F) */
+        vl2d_encode(&q, 0, o); vl2d_encode_sub(&q, 0, sb); vl2d_encode_gain(&q, 0, gn);
+        CHECK(o[0] == e15 && o[3] == 0 && sb[0] == e15 && sb[3] == 255 && gn[0] == ((16 << 3) | (16 >> 2)), "pareja resta+suma: color %d alfa %d resta %d tope %d", o[0], o[3], sb[0], gn[0]);
+        vl2d_compose8(o, sb, gn, dark, out);
+        CHECK(out[0] == e15, "pareja resta+suma sobre mundo oscuro: %d (esperado %d = F)", out[0], e15);
+        vl2d_compose8(o, sb, gn, bright, out);
+        CHECK(out[0] == 230, "pareja resta+suma sobre mundo claro: %d (esperado 230 = B)", out[0]);
+        memset(&q, 0, sizeof q); q.t = 256; q.d[0] = q.d[1] = q.d[2] = 60; q.g[0] = q.g[1] = q.g[2] = 64;   /* resta sola */
+        vl2d_encode(&q, 0, o); vl2d_encode_sub(&q, 0, sb); vl2d_encode_gain(&q, 0, gn);
+        CHECK(o[0] == 0 && o[1] == 0 && o[2] == 0 && o[3] == 0 && sb[1] == e15, "resta sola: %d,%d,%d alfa %d resta %d", o[0], o[1], o[2], o[3], sb[1]);
+        vl2d_compose8(o, sb, gn, bright, out);
+        CHECK(out[1] == 230 - e15, "resta sola sobre mundo claro: %d (esperado %d)", out[1], 230 - e15);
+        vl2d_compose8(o, sb, gn, dark, out);
+        CHECK(out[1] == 0, "resta sola sobre mundo oscuro: %d (esperado 0)", out[1]);
+        memset(&q, 0, sizeof q); q.t = 128; q.c[0] = 10; q.g[0] = q.g[1] = q.g[2] = 62;   /* B/2+F/2 con F = 20 */
         vl2d_encode(&q, 0, o);
-        double a = o[3] / 255.0, cl = o[0] / 255.0, lin = (cl <= 0.04045 ? cl / 12.92 : pow((cl + 0.055) / 1.055, 2.4)) * a;
-        int ov = (int)((lin <= 0.0031308 ? lin * 12.92 : 1.055 * pow(lin, 1.0 / 2.4) - 0.055) * 255.0 + 0.5);   /* sobre negro, mezcla en luz lineal */
-        CHECK(abs(ov - ((15 << 3) | (15 >> 2))) <= 3, "pareja resta+suma sobre negro: %d (esperado %d)", ov, (15 << 3) | (15 >> 2));
-        CHECK(o[3] > 0 && o[3] < 128, "pareja resta+suma: alfa %d (aditivo: poco alfa, color blanco)", o[3]);
-        memset(&q, 0, sizeof q); q.t = 256; q.d[0] = q.d[1] = q.d[2] = 60;   /* resta sola: oscurece, sin color */
-        vl2d_encode(&q, 0, o);
-        CHECK(o[0] == 0 && o[1] == 0 && o[2] == 0 && abs(o[3] - 123) <= 1, "resta sola: %d,%d,%d alfa %d (esperado negro, alfa 123)", o[0], o[1], o[2], o[3]);
-        memset(&q, 0, sizeof q); q.t = 256; q.c[0] = q.c[1] = q.c[2] = 5; q.d[0] = q.d[1] = q.d[2] = 60;   /* resta mayor que la suma: resta neta (60-20 = 40) */
-        vl2d_encode(&q, 0, o);
-        CHECK(o[0] == 0 && o[1] == 0 && o[2] == 0 && abs(o[3] - 82) <= 1, "resta mayor que suma: %d,%d,%d alfa %d (esperado negro, alfa 82)", o[0], o[1], o[2], o[3]);
+        CHECK(o[0] == ((10 << 3) | (10 >> 2)) && o[3] == 128, "media: color premultiplicado %d alfa %d", o[0], o[3]);
         memset(&q, 0, sizeof q); q.c[0] = 31; q.c[1] = 16; q.c[2] = 0;   /* opaco: sin cambios */
-        vl2d_encode(&q, 0, o);
-        CHECK(o[0] == 255 && o[1] == ((16 << 3) | (16 >> 2)) && o[2] == 0 && o[3] == 255, "opaco: %d,%d,%d,%d", o[0], o[1], o[2], o[3]);
+        vl2d_encode(&q, 0, o); vl2d_encode_sub(&q, 0, sb);
+        CHECK(o[0] == 255 && o[1] == ((16 << 3) | (16 >> 2)) && o[2] == 0 && o[3] == 255 && sb[0] == 0, "opaco: %d,%d,%d,%d", o[0], o[1], o[2], o[3]);
+        memset(&q, 0, sizeof q); q.t = 256; q.g[0] = q.g[1] = q.g[2] = 124;   /* sin tocar: el mundo pasa entero */
+        vl2d_encode(&q, 0, o); vl2d_encode_sub(&q, 0, sb); vl2d_encode_gain(&q, 0, gn);
+        vl2d_compose8(o, sb, gn, bright, out);
+        CHECK(o[0] == 0 && o[3] == 0 && sb[0] == 0 && gn[0] == 255 && out[0] == 230 && out[2] == 230, "sin tocar: transparente");
     }
 
     vl2d_free(L);

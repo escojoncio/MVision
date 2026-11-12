@@ -520,12 +520,12 @@ static void classify_tri_(NsFill *f, const NsFillCfg *cfg, const GpuOp *o, const
         }
     }
     /* 5. el resto se rellena */
-    if (fabsf(vq[0][2] - vq[1][2]) < 2.0f && fabsf(vq[0][2] - vq[2][2]) < 2.0f && on_any == 0) { res->cls = NF_FILL_SPRITE; res->fill = 1; return; }
+    if (fabsf(vq[0][2] - vq[1][2]) < 2.0f && fabsf(vq[0][2] - vq[2][2]) < 2.0f && on_any == 0) { res->cls = NF_FILL_SPRITE; res->fill = !cfg->only_absent; return; }
     if (on_same > 0) {
         if (semi && !cfg->fill_partial_semi) { res->cls = NF_SKIP_PARTIAL_SEMI; return; }
-        res->cls = NF_FILL_PARTIAL; res->fill = 1; res->bias = cfg->bias; return;
+        res->cls = NF_FILL_PARTIAL; res->fill = !cfg->only_absent; res->bias = cfg->bias; return;
     }
-    if (on_any > 0) { res->cls = NF_FILL_OTHERTEX; res->fill = 1; res->bias = cfg->bias; return; }
+    if (on_any > 0) { res->cls = NF_FILL_OTHERTEX; res->fill = !cfg->only_absent; res->bias = cfg->bias; return; }
     res->cls = NF_FILL_ABSENT; res->fill = 1;
 }
 
@@ -1043,7 +1043,7 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
 
     uint32_t cov = S->cls[NF_MATCH] + S->cls[NF_SPLIT] + S->cls[NF_SUBDIV] + S->cls[NF_LOCKED];
     uint32_t pose = S->cls[NF_POSE_PLAYER] + S->cls[NF_POSE_OTHER];
-    uint32_t fill_cls = S->cls[NF_FILL_ABSENT] + S->cls[NF_FILL_OTHERTEX] + S->cls[NF_FILL_PARTIAL] + S->cls[NF_FILL_SPRITE] + (cfg.draw_texfix ? S->cls[NF_FILL_TEXFIX] : 0);   /* textura_corregida solo cubre si se dibuja (por defecto no) */
+    uint32_t fill_cls = S->cls[NF_FILL_ABSENT] + (cfg.only_absent ? 0 : S->cls[NF_FILL_OTHERTEX] + S->cls[NF_FILL_PARTIAL] + S->cls[NF_FILL_SPRITE]) + (cfg.draw_texfix ? S->cls[NF_FILL_TEXFIX] : 0);   /* textura_corregida solo cubre si se dibuja (por defecto no) */
     uint32_t nearskip = S->cls[NF_SKIP_NEAR];   /* envoltura del jugador / pegado a la cámara: no es escena, fuera del denominador igual que la pose */
     uint32_t denom = S->tris > pose + nearskip ? S->tris - pose - nearskip : 0;
     if (S->brake) fill_cls = 0;   /* frenado: nada de lo rellenable se ve */

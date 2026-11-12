@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 /* Tamaño máximo del área de display (VRAM 1024x512): un búfer RGBA8 de este tamaño siempre basta. */
-enum { MV_HOST_MAX_W = 1024, MV_HOST_MAX_H = 512, MV_HOST_FB_BYTES = 1024 * 512 * 4 };
+enum { MV_HOST_MAX_W = 1024, MV_HOST_MAX_H = 576, MV_HOST_FB_BYTES = 1024 * 512 * 4 };   /* alto: la ventana visible PAL en 480i son 536 líneas (640 de ancho); un fotograma nunca pasa de MV_HOST_FB_BYTES */
 
 typedef enum {
     MV_HOST_IDLE = 0,    /* sin arrancar */

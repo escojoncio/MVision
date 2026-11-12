@@ -2,6 +2,7 @@
 #   make -C vr/scene test        prueba sintética (no necesita datos del juego), vr_blend.h (mezclas semitransparentes en gamma, render/metal) y vr_prov (clasificación del 2D por procedencia, test_prov_class.c)
 #   make -C vr/scene test-san    lo mismo con ASan/UBSan (gcc)
 #   make -C vr/scene test-split  prueba de vr_split (partir triángulos largos, recuento de cruces del plano cercano)
+#   make -C vr/scene test-mmpx    filtro MMPX 2x (mmpx.c) con los casos del artículo
 #   make -C vr/scene test-layer2d  capa 2D fiel (vr_layer2d.c) contra el oráculo gpu.c, escala 1 bit a bit y escala 4
 #   make -C vr/scene l2d-dump ARGS="<volcado> [<otro> ...] [--max-pct P] [--png DIR]"  capa 2D de un volcado vs su frame.png (dif media y % de píxeles distintos); --png escribe la capa 2D COMPLETA del panel (sin trocear) sobre gris a cuadros
 #   make -C vr/scene dumpview ARGS="<volcado> [-o lamina.png] [--ipd m] [--conv m] [--filter] [--rects N]"   banco de render sin conexión: lo que dibuja el visor en modo gpu (pantalla 3D) de un volcado NSD1, lámina PNG y métricas vs frame.png
@@ -56,6 +57,12 @@ $(B)/test_layer2d: test_layer2d.c vr_layer2d.c vr_layer2d.h vr_layer2d_async.c v
 test-layer2d: $(B)/test_layer2d
 	$(B)/test_layer2d
 
+# MMPX 2x (mmpx.h): casos del artículo (líneas de 1 px, diagonales, esquinas, transparencia)
+$(B)/test_mmpx: test_mmpx.c mmpx.c mmpx.h | $(B)
+	$(CC) $(CFLAGS) test_mmpx.c mmpx.c -o $@
+test-mmpx: $(B)/test_mmpx
+	$(B)/test_mmpx
+
 # Capa 2D de un volcado (list.bin + vram.bin) frente a su frame.png: dif media y % de píxeles distintos a escala 1. Uso: make -C vr/scene l2d-dump ARGS="<carpeta del volcado> [--max-pct P]"
 $(B)/l2d_dump: l2d_dump.c vr_layer2d.c vr_layer2d.h vr_scene.c vr_scene.h vr_prov.c vr_prov_rules.c vr_prov.h vr_feedback.h $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c ../native/ns_dump.h ../native/ns_fx.c ../native/ns_fx.h ../camera/vr_usermap.h ../host/vr_view.h | $(B)
 	$(CC) $(CFLAGS) $(INC) -I../native -I../camera -I../host l2d_dump.c vr_layer2d.c vr_scene.c vr_prov.c vr_prov_rules.c $(RT)/gpu.c ../native/ns_dump.c ../native/ns_dumpw.c ../native/ns_fx.c -lm -lpthread -o $@
@@ -90,4 +97,4 @@ run: dump
 	MV_DISC=$(DISC) $(OUT)/scene_dump $(EXE) $(SCRIPT) $(ARGS)
 clean:
 	rm -rf build build-san
-.PHONY: all test test-san test-split test-layer2d dumpview dump run probe probe-run clean
+.PHONY: all test test-san test-split test-layer2d test-mmpx dumpview dump run probe probe-run clean

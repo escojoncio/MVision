@@ -330,6 +330,7 @@ static int grow(void **p, size_t *cap, size_t need, size_t esz) {
 #endif
 static NsBridge *_Atomic ns_br;          /* se crea una sola vez (ns_bridge_get); nunca se destruye */
 static pthread_mutex_t NSMX = PTHREAD_MUTEX_INITIALIZER;
+#define NS_HOST_CAP_EFFECT 4160u   /* efectos por escena del puente: todos los de ns_fx (tope de su escena, NSFX_MAX_ITEMS_DEFAULT) más el mosaico; se comprueba al crear el puente */
 static _Atomic int render_req = MV_RENDER_DEFAULT_NATIVE, render_locked, renderer_ready;
 static int dump_point;                   /* 1 = el volcado en curso se tomó en el punto de enganche */
 /* Definición DÉBIL vacía (una referencia débil sin definir no enlaza en Mach-O): ns_extract la sustituye con una fuerte que registra el extractor en el enganche. */
@@ -340,11 +341,12 @@ __attribute__((weak)) void ns_cover_glue_post_ik(const uint8_t *ram) { (void)ram
 __attribute__((weak)) void ns_cover_glue_submit(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; }
 __attribute__((weak)) void ns_cover_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame, const float *eye, const float *M) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; (void)eye; (void)M; }
 __attribute__((weak)) size_t ns_cover_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
-/* Relleno por la verdad del motor (ns_fill_glue.c, solo en la app): lo que la lista de la GPU dibuja y el nativo no tiene, SOLO en la pantalla 3D con la cámara del motor (VRV_K_ENGINE); por defecto solo diagnóstico `[relleno]` (dibuja con el ajuste «Relleno en pantalla 3D» de la app, ns_fill_glue_set_mode, o con MV_FILL=1; MV_FILL=0 lo apaga). Definiciones débiles vacías para las pruebas de escritorio. */
-__attribute__((weak)) void ns_fill_glue_post_ik(const uint8_t *ram) { (void)ram; }
-__attribute__((weak)) void ns_fill_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame, const float *eye, const float *M, int list_vr) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; (void)eye; (void)M; (void)list_vr; }
-__attribute__((weak)) size_t ns_fill_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
-__attribute__((weak)) void ns_fill_glue_reset(void) {}
+/* Descartes por triángulo del modo ENGINE con la réplica en C del sombreador (ns_cover.c, solo en la app; ver ns_cover.h): contadores de cada escena medida y, de la última medida del trabajador de cobertura, el nativo frente a la lista en la ventana del motor. */
+#define DISC_WORDS 11   /* = NS_DISCARDS_WORDS: publicados, enviados, detrás, tamaño, reverso, extra, partidas, dibujados, escenario, dinámicos, extra de un solo ojo */
+#define WIN_WORDS 5     /* = NS_WINCMP_WORDS: celdas, tapa, de más, falta, partidas */
+__attribute__((weak)) void ns_discards_scene(const NsScene *sc, const NsMeshStore *st, uint32_t out[DISC_WORDS]) { (void)sc; (void)st; memset(out, 0, DISC_WORDS * sizeof(uint32_t)); }
+__attribute__((weak)) size_t ns_discards_line(const uint32_t d[DISC_WORDS], float jump_pct, const uint32_t win[WIN_WORDS], char *buf, size_t cap) { (void)d; (void)jump_pct; (void)win; (void)buf; (void)cap; return 0; }
+__attribute__((weak)) int ns_cover_glue_win(uint32_t win[WIN_WORDS], uint32_t *frame) { (void)win; (void)frame; return 0; }
 /* Decodificador de vídeo (runtime/mdec.c): palabras entregadas desde el arranque. En las pruebas de escritorio sin MDEC vale siempre 0 (no hay FMV). */
 __attribute__((weak)) uint32_t mdec_out_words_total(void) { return 0; }
 /* Manos nuevas (ns_hand.c, solo en la app; vr/body/vr_hand_skin.c): definición débil vacía para las pruebas de escritorio, donde la manopla del motor se queda como está. */
@@ -392,7 +394,9 @@ static NsBridge *ns_bridge_get(void) {
     pthread_mutex_lock(&NSMX);
     b = atomic_load(&ns_br);
     if (!b) {
-        NsBridgeCaps bc = {512, 8192, 256, 2048};
+        /* efectos: todos los de ns_fx (el cielo son ~2200 teselas y va al final) más el mosaico: la exportación nunca se trunca y el mosaico siempre cabe */
+        _Static_assert(NS_HOST_CAP_EFFECT >= NSFX_MAX_ITEMS_DEFAULT + VRMOSAIC_MAX, "cupo de efectos: caben todos los de ns_fx y el mosaico");
+        NsBridgeCaps bc = {512, 8192, 256, NS_HOST_CAP_EFFECT};
         b = ns_bridge_create(&bc);
         if (b) {
             ns_hook_init(b);
@@ -540,9 +544,37 @@ static uint32_t nat_valid, nat_sfx, nat_vb; static int nat_have;
 static int nat_mosaic;                   /* celdas del parche en la última escena nativa PUBLICADA (ns_solid_tap; 0 = ninguna: las celdas de la lista siguen en el panel 2D) */
 static int nat_fb;                       /* NsScreenFx.fb_mode de la última escena nativa PUBLICADA (0 = sin efecto de realimentación: sus sprites siguen en el panel 2D) */
 static uint8_t nat_fresh;                /* escenas nativas dibujables (aptitud de cinemática de NativeRenderer.ingest: partida, listas enteras y escenario, sin NS_NATIVE_BAD) publicadas desde que el motor volvió a dibujar (VrViewIn.fresh; publish_state lo pone a 0 mientras no dibuja) */
+/* [descartes]: en la pantalla 3D con la cámara del motor, cuántos triángulos de la escena publicada descarta enteros el render nativo (hilo de emulación). Se miden dos escenas CONSECUTIVAS de
+ * cada DISC_EVERY (~0,5 ms cada una). Guarda la última medida y el mayor salto de descartes entre las dos con la cámara en movimiento (la misma zona, el ojo a menos de 1,5 m y la mirada a
+ * menos de 20 grados de la anterior: un corte de plano no cuenta) para la línea de cada segundo; un salto de más de DISC_JUMP_PCT % de los triángulos enviados pide un volcado automático. */
+#define DISC_JUMP_PCT 20.0f
+#define DISC_EVERY 16u
+typedef struct { int count; double last_s; } DiagDump;
+static struct { uint32_t d[DISC_WORDS], prev[DISC_WORDS]; float eye[3], fwd[3], jump_max; uint32_t zone_gen, k, f0; int have_prev, n; } disc;   /* f0: último fotograma fuera de la vista ENGINE */
+static void diag_autodump(const char *name, DiagDump *st);
+static void disc_scene(const NsScene *s, const NsMeshStore *st) {
+    static DiagDump dumps;
+    if (disc.k++ % DISC_EVERY >= 2u) { disc.have_prev = 0; return; }
+    ns_discards_scene(s, st, disc.d);
+    const float fwd[3] = {s->cam.rot[2], s->cam.rot[5], s->cam.rot[8]};
+    if (disc.have_prev && s->zone_gen == disc.zone_gen) {
+        const float dx = s->cam.eye[0] - disc.eye[0], dy = s->cam.eye[1] - disc.eye[1], dz = s->cam.eye[2] - disc.eye[2], de = sqrtf(dx * dx + dy * dy + dz * dz);
+        const float cs = (fwd[0] * disc.fwd[0] + fwd[1] * disc.fwd[1] + fwd[2] * disc.fwd[2]) / (sqrtf(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]) * sqrtf(disc.fwd[0] * disc.fwd[0] + disc.fwd[1] * disc.fwd[1] + disc.fwd[2] * disc.fwd[2]) + 1e-9f);
+        if ((de > 0.5f || cs < 0.99999f) && de < 1500.0f && cs > 0.94f) {   /* cámara en movimiento, sin corte */
+            const uint32_t a = disc.d[2] + disc.d[3] + disc.d[4], b = disc.prev[2] + disc.prev[3] + disc.prev[4], sent = disc.d[1] > disc.prev[1] ? disc.d[1] : disc.prev[1];
+            const float jump = sent ? 100.0f * (float)(a > b ? a - b : b - a) / (float)sent : 0.0f;
+            if (jump > disc.jump_max) disc.jump_max = jump;
+            if (jump > DISC_JUMP_PCT) diag_autodump("descartes", &dumps);
+        }
+    }
+    memcpy(disc.prev, disc.d, sizeof disc.prev); memcpy(disc.eye, s->cam.eye, sizeof disc.eye); memcpy(disc.fwd, fwd, sizeof disc.fwd);
+    disc.zone_gen = s->zone_gen; disc.have_prev = 1; disc.n++;
+}
 static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u) {
     (void)u;
     ns_pub_flush();
+    if (s && st && view.kind == VRV_K_ENGINE) disc_scene(s, st);
+    else { disc.have_prev = 0; disc.k = 0; disc.f0 = (uint32_t)hle_frame_count(); }   /* fuera de la pantalla 3D: las medidas de ventana de listas hasta aquí no valen (no se vuelca `nativo_tapa` con ellas al entrar) */
     nat_have = s != NULL; nat_valid = s ? s->valid : 0; nat_vb = (uint32_t)hle_frame_count();
     if (s && (s->valid & (NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK)) == (NS_SV_GAME | NS_SV_LISTS_OK | NS_SV_MAP_OK) && !(s->valid & NS_NATIVE_BAD) && nat_fresh < 255) nat_fresh++;
     nat_sfx = s ? vrhost_scene_sfx((s->valid & NS_SV_FX) != 0, s->screen.flags, s->screen.gas_intensity, nat_duct_cut) : 0;   /* anillo del conducto recortado = cubierto: gas_efct.c sale del panel (vr_view.h) */
@@ -579,7 +611,6 @@ static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u) {
 
 static void ns_post_ik(uint8_t *ram) {
     ns_hook_post_ik(ram); ns_cover_glue_post_ik(ram);
-    if (view.kind == VRV_K_ENGINE) ns_fill_glue_post_ik(ram);   /* instantánea con la pose IK para el relleno: solo con la pantalla 3D del motor */
 }
 /* Capa de brazos inactiva: vrbody_apply corrió después de la captura de este fotograma y no manejó ningún brazo (mandos sin pose válida: en los registros, `pose_valida I=0 D=0`,
  * `IK: aplicaciones=+25 brazos=+0` y 25 escenas «sin IK» por segundo => valid=0x47, escena-no-apta, GPU o mundo sin dibujar en solo nativo con el jugador quieto). */
@@ -614,11 +645,22 @@ static void ns_frame_check(void) {
     last_log_ns = t;
     {   /* cobertura de la lista de la GPU por la escena nativa (resultado del hilo trabajador, ~1 por segundo) */
         static char cbuf[8192];
-        if (ns_cover_glue_poll(cbuf, sizeof cbuf)) fputs(cbuf, stderr);
+        static DiagDump dumps;
+        if (ns_cover_glue_poll(cbuf, sizeof cbuf)) {
+            fputs(cbuf, stderr);
+            /* el verificador no puede dar por buena la lista con ninguna cámara conocida: volcado para medirlo fuera (no si la ajustada explica casi toda la lista: es solo la cámara que se movió) */
+            const char *dc = strstr(cbuf, "camara=DISTINTA(explica=");
+            if (dc && atoi(dc + 24) < 99) diag_autodump("camara_distinta", &dumps);
+        }
     }
-    {   /* relleno por la verdad del motor (pantalla 3D del motor): una línea por segundo, `[relleno] fr= tris_rellenables= ... ms= desfase_px=` */
-        static char fbuf[2048];
-        if (ns_fill_glue_poll(fbuf, sizeof fbuf)) fputs(fbuf, stderr);
+    if (disc.n) {   /* descartes por triángulo del modo ENGINE: última escena medida, mayor salto del segundo y nativo frente a la lista en la ventana del motor (trabajador de cobertura) */
+        static DiagDump dumps;
+        char dbuf[400]; uint32_t win[WIN_WORDS];
+        uint32_t wf = 0;
+        const int hw = ns_cover_glue_win(win, &wf) && (int32_t)(wf - disc.f0) > 0;
+        if (ns_discards_line(disc.d, disc.jump_max, hw ? win : NULL, dbuf, sizeof dbuf)) fputs(dbuf, stderr);
+        if (hw && win[0] && (win[1] + win[2]) * 10u > win[0]) diag_autodump("nativo_tapa", &dumps);   /* el nativo tapa o pone de más en más del 10 % de la ventana del motor (sin contar las caras partidas a propósito en «Caras cercanas: Original») */
+        disc.n = 0; disc.jump_max = 0.0f;
     }
     {   /* colisión de la cabeza (una línea por segundo): de dónde sale la geometría y qué hizo la última consulta */
         static uint32_t hs0, hn0, ho0, hr0;
@@ -638,8 +680,8 @@ static void ns_frame_check(void) {
         NsExtractGlueStats g;
         ns_extract_glue_stats(&g);
         if (st.captures || g.calls)
-            fprintf(stderr, "[captura] por s: escenas=%u publicadas=%u sin_IK=%u | ultima: cola=%u instancias=%u escenario=%u piezas=%u ocultas=%u descartes(grupo=%u oculto=%u otros=%u) | por s: mallas_nuevas=%u memo_obsoleto=%u cambios_zona=%u epocas=%u almacen_lleno=%u\n",
-                    dcap, st.published - pub0, dmiss, g.last_queue, g.last_inst, g.last_static, g.last_pieces, g.last_hidden_pieces, g.last_drop_group, g.last_drop_hidden, g.last_drop_other,
+            fprintf(stderr, "[captura] por s: escenas=%u publicadas=%u sin_IK=%u | ultima: cola=%u instancias=%u escenario=%u piezas=%u ocultas=%u descartes(grupo=%u oculto=%u otros=%u) escenario_fuera_grupo=%u piezas_dinamicas_rotas=%u | por s: mallas_nuevas=%u memo_obsoleto=%u cambios_zona=%u epocas=%u almacen_lleno=%u\n",
+                    dcap, st.published - pub0, dmiss, g.last_queue, g.last_inst, g.last_static, g.last_pieces, g.last_hidden_pieces, g.last_drop_group, g.last_drop_hidden, g.last_drop_other, g.last_static_off_group, g.last_bad_dyn_pieces,
                     g.mesh_new - g0.mesh_new, g.memo_stale - g0.memo_stale, g.zone_changes - g0.zone_changes, g.epoch_opened - g0.epoch_opened, g.store_full - g0.store_full);
         g0 = g; pub0 = st.published;
         if (st.captures || capw0 || capb0 || capd0)   /* de dónde sale cada captura: envoltura de la etapa «pantalla» o respaldo del fin del bucle de etapas; la entrada 0 de la tabla delata una copia en overlay (estándar 0x8001d324) */
@@ -1217,6 +1259,26 @@ static void prov_autodump(void) {
     fprintf(stderr, "[prov] autodump motivo=%s carpeta=%s pedido\n", vrprov_code_name(code), dir);
 }
 
+/* Volcado automático de diagnóstico (hilo de emulación): `<carpeta>/auto_<nombre><NN>`, como mucho DIAG_DUMP_MAX por motivo y sesión y con DIAG_DUMP_GAP_S s entre dos del mismo motivo. */
+#define DIAG_DUMP_MAX 3
+#define DIAG_DUMP_GAP_S 10.0
+static void diag_autodump(const char *name, DiagDump *st) {
+    const double t = now_s();
+    if (st->count >= DIAG_DUMP_MAX || (st->last_s != 0.0 && t - st->last_s < DIAG_DUMP_GAP_S)) return;
+    char dir[560], label[48];
+    pthread_mutex_lock(&DMX);
+    snprintf(dir, sizeof dir, "%s", autodump_dir);
+    pthread_mutex_unlock(&DMX);
+    if (!dir[0]) return;
+    const size_t n = strlen(dir);
+    snprintf(dir + n, sizeof dir - n, "/auto_%s%02d", name, st->count + 1);
+    snprintf(label, sizeof label, "auto_%s", name);
+    st->last_s = t;   /* también un intento fallido espera */
+    const int rc = dump_request_l(dir, NULL, label);
+    if (rc == 0) st->count++;
+    fprintf(stderr, "[autodump] motivo=%s carpeta=%s resultado=%s\n", name, dir, rc == 0 ? "pedido" : "no pedido (ocupado)");
+}
+
 static void gpu3d_log(void) {
     uint64_t t = mono_ns();
     if (t - g3.t_log < 1000000000ull) return;
@@ -1653,6 +1715,7 @@ int mv_vrhost_hud2d_layer_l(int layer, int *mode, int *view) { return layer >= 0
 int mv_vrhost_hud2d_acquire(const uint8_t **px, int *w, int *h, int *full, uint32_t *seq) { return mv_vrhost_hud2d_acquire_l(0, px, w, h, full, seq); }
 void mv_vrhost_hud2d_release(void) { mv_vrhost_hud2d_release_l(0); }
 int mv_vrhost_hud2d_layer(int *mode, int *view) { return mv_vrhost_hud2d_layer_l(0, mode, view); }
+int mv_vrhost_hud2d_window_l(int layer, int *win6) { return layer >= 0 && layer < VPC_L_N && l2as[layer] ? vl2a_acquire_window(l2as[layer], win6) : 0; }
 int mv_vrhost_hud2d_accept(int mode, int layer_view, int cur_view, int overlay) { return vl2a_layer_accept(mode, layer_view, cur_view, overlay); }
 void mv_vrhost_set_l2d_split(int on) { vl2a_set_split(on); }
 int mv_vrhost_l2d_split(void) { return vl2a_split(); }
@@ -1916,13 +1979,6 @@ static void dump_at_stage(Cpu *c) {
     dump_point = 0;
 }
 
-/* Vacía el relleno al entrar o salir de la pantalla 3D del motor y al cambiar de zona (cada escena empieza de cero; el trabajador además detecta el cambio de época del extractor y el corte de cámara por salto de ojo/giro). */
-static void ns_fill_gate(void) {
-    static int was_engine, have; static int last_area;
-    const int eng = view.kind == VRV_K_ENGINE, area = (bs.valid & BRIDGE_OK_AREA) ? (int)bs.area_id : last_area;
-    if (eng != was_engine || (eng && have && area != last_area)) ns_fill_glue_reset();
-    was_engine = eng; last_area = area; have = 1;
-}
 
 static void frame_hook_body(Cpu *c, uint32_t f) {
     ns_hook_set_frame((uint32_t)hle_frame_count());
@@ -1937,7 +1993,6 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
     if (mv_vr_take_recenter()) vrcam_recenter();
     bridge_read(emu_ram, &bs);
     publish_state();
-    ns_fill_gate();
     vrcam_frame(emu_ram, &bs);
     vrhead_frame(emu_ram, &bs, bs.moving);
     if (hc_on) {   /* sin cámara VR (cinemática, menú, otra zona) el almacén de colisión no vale */
@@ -1979,8 +2034,6 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
             float ce[3], cm[9];
             if (cr) { for (int i = 0; i < 3; i++) ce[i] = (float)cr->eye[i]; memcpy(cm, cr->M, sizeof cm); }
             ns_cover_glue_submit_cam(emu_ram, emu_scratch, l->ops, l->nops, f, cr ? ce : NULL, cr ? cm : NULL);   /* con la cámara de la lista */
-            /* Relleno: SOLO con la pantalla 3D del motor. En el mundo en primera persona la lista no se usa como verdad ni como relleno (el nativo es el mundo). */
-            if (view.kind == VRV_K_ENGINE) ns_fill_glue_submit_cam(emu_ram, emu_scratch, l->ops, l->nops, f, cr ? ce : NULL, cr ? cm : NULL, cr ? cr->active : 0);
         }   /* 1 de cada N: instantánea y comprobación de cobertura en otro hilo */
         dump_capture(c, f, l);
         if (!cap_on) break;
