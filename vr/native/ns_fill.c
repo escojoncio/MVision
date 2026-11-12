@@ -9,6 +9,8 @@
 const char *const ns_fill_cls_name[NF_N] = {"exacto", "otra_diagonal", "subdividido", "pegado_a_camara", "pose_jugador", "pose_otro", "ausente", "otra_textura", "parcial", "sprite", "textura_corregida",
                                             "detras", "ambiguo", "incoherente", "arista", "lejos", "nan", "texel_unico", "parcial_semi", "junto_a_cabeza", "tope"};
 
+const char *const ns_fill_brake_name[4] = {"ninguno", "sin_muestra", "desfase_alto", "desfase_tras_calibrar"};
+
 void ns_fill_cfg_default(NsFillCfg *c) {
     memset(c, 0, sizeof *c);
     c->tol_base = 20.0f; c->tol_z = 0.004f; c->surf_tol = 80.0f;
@@ -18,6 +20,8 @@ void ns_fill_cfg_default(NsFillCfg *c) {
     c->keep_frames = 15; c->max_out = 6000;
     c->cut_dist = 3000.0f; c->cut_cos = 0.7f; c->bias = 2;
     c->near_skip = 250.0f; c->near_edge_max = 500.0f; c->view_match = 24.0f;
+    c->calib = 1; c->calib_radius = 400.0f; c->calib_min_tris = 12; c->calib_min_px = 1.0f; c->calib_inlier_frac = 0.6f;
+    c->brake = 1; c->brake_px = 2.0f; c->brake_min_native = 64; c->draw_texfix = 0;
 }
 
 #define CELL 256.0f      /* rejilla de esquinas */
@@ -133,6 +137,15 @@ static int inv3(const double *A, double *I) {
     I[3] = c1 * id; I[4] = (A[0] * A[8] - A[2] * A[6]) * id; I[5] = (A[2] * A[3] - A[0] * A[5]) * id;
     I[6] = c2 * id; I[7] = (A[1] * A[6] - A[0] * A[7]) * id; I[8] = (A[0] * A[4] - A[1] * A[3]) * id;
     return 0;
+}
+
+NsFillCam ns_fill_cam_corrected(const NsFillCam *cam, const NsFillStats *st) {
+    NsFillCam o = *cam;
+    if (!st || st->cal_state != 1) return o;
+    const float *R = st->cal_R, *t = st->cal_t;
+    for (int r = 0; r < 3; r++) o.eye[r] = R[3 * r] * cam->eye[0] + R[3 * r + 1] * cam->eye[1] + R[3 * r + 2] * cam->eye[2] + t[r];
+    for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) o.R[3 * r + c] = R[3 * r] * cam->R[c] + R[3 * r + 1] * cam->R[3 + c] + R[3 * r + 2] * cam->R[6 + c];
+    return o;
 }
 
 int ns_fill_cam_maps(const NsFillCam *cam, double A[9], double Ai[9]) {
@@ -402,7 +415,7 @@ static void classify_tri_(NsFill *f, const NsFillCfg *cfg, const GpuOp *o, const
     for (int i = 0; i < nc; i++) { double d = tri_dist(&f->nt[cand[0][i]], q); if (d < best) { best = d; bj = cand[0][i]; } }
     if (bj >= 0 && best <= tol) {
         const FTri *t = &f->nt[bj];
-        if (textured && cfg->fix_texture && !t->player && ((t->page & PAGE_MASK) != (page & PAGE_MASK) || t->clut != clut)) { res->cls = NF_FILL_TEXFIX; res->fill = 1; res->bias = cfg->bias; return; }
+        if (textured && cfg->fix_texture && !t->player && ((t->page & PAGE_MASK) != (page & PAGE_MASK) || t->clut != clut)) { res->cls = NF_FILL_TEXFIX; res->fill = cfg->draw_texfix != 0; res->bias = cfg->bias; return; }
         res->cls = NF_MATCH; return;
     }
     /* 1b. pegado a la cámara del motor: con la cámara alternativa sí casa (el nativo tiene el objeto un fotograma desplazado) */
@@ -514,6 +527,199 @@ static void classify_tri_(NsFill *f, const NsFillCfg *cfg, const GpuOp *o, const
     }
     if (on_any > 0) { res->cls = NF_FILL_OTHERTEX; res->fill = 1; res->bias = cfg->bias; return; }
     res->cls = NF_FILL_ABSENT; res->fill = 1;
+}
+
+
+/* ---------------------------------------------------------------------------------------------------------------- calibración de la cámara de la lista
+ * La lista trae cada vértice en espacio de vista (GTE, exacto) y se desproyecta al mundo con una cámara. La cámara de la RAM puede no ser la que dibujó la lista (el motor la adelanta un tick entre
+ * la captura y el dibujo; en cinemáticas el registro de cámara de la lista no sirve): el escenario ESTÁTICO del nativo está en su sitio verdadero y la lista dibujó ese mismo escenario, así que
+ * las parejas (triángulo de la lista ↔ triángulo estático del nativo con la misma página, CLUT y UV) dan puntos del mundo desproyectado y su sitio verdadero. El movimiento rígido que los
+ * lleva uno a otro (Horn 1987, cuaternión por autovector de una matriz 4x4) es exactamente la corrección de la cámara: lo que se rellena queda en el sitio verdadero y casa con el nativo vecino. */
+typedef struct { double R[9], t[3]; } CalXf;
+typedef struct { float q[3][3], p[3][3], z, h; } CalPair;
+
+static void eig4(double A[4][4], double lam[4], double V[4][4]) {   /* Jacobi cíclico de una matriz simétrica 4x4 (A se destruye) */
+    for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) V[i][j] = i == j;
+    for (int sweep = 0; sweep < 40; sweep++) {
+        double off = 0;
+        for (int i = 0; i < 3; i++) for (int j = i + 1; j < 4; j++) off += A[i][j] * A[i][j];
+        if (off < 1e-24) break;
+        for (int p = 0; p < 3; p++) for (int q = p + 1; q < 4; q++) {
+            if (fabs(A[p][q]) < 1e-300) continue;
+            double th = (A[q][q] - A[p][p]) / (2.0 * A[p][q]);
+            double t = (th >= 0 ? 1.0 : -1.0) / (fabs(th) + sqrt(th * th + 1.0));
+            double c = 1.0 / sqrt(t * t + 1.0), sn = t * c;
+            for (int k = 0; k < 4; k++) { double akp = A[k][p], akq = A[k][q]; A[k][p] = c * akp - sn * akq; A[k][q] = sn * akp + c * akq; }
+            for (int k = 0; k < 4; k++) { double apk = A[p][k], aqk = A[q][k]; A[p][k] = c * apk - sn * aqk; A[q][k] = sn * apk + c * aqk; }
+            for (int k = 0; k < 4; k++) { double vkp = V[k][p], vkq = V[k][q]; V[k][p] = c * vkp - sn * vkq; V[k][q] = sn * vkp + c * vkq; }
+        }
+    }
+    for (int i = 0; i < 4; i++) lam[i] = A[i][i];
+}
+
+static void xf_apply(const CalXf *x, const float in[3], float out[3]) {
+    for (int r = 0; r < 3; r++) out[r] = (float)(x->R[3 * r] * in[0] + x->R[3 * r + 1] * in[1] + x->R[3 * r + 2] * in[2] + x->t[r]);
+}
+static double cal_res(const CalXf *x, const CalPair *p) {   /* peor error de esquina (unidades) de una pareja con la transformación x */
+    double m = 0;
+    for (int k = 0; k < 3; k++) { float o[3]; xf_apply(x, p->q[k], o); double d = d3(o, p->p[k]); if (d > m) m = d; }
+    return m;
+}
+static int cmp_f(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return x < y ? -1 : x > y; }
+static float pct_f(float *v, int n, float q) { if (n <= 0) return 0; qsort(v, (size_t)n, sizeof *v, cmp_f); int i = (int)(q * (float)(n - 1) + 0.5f); return v[i < 0 ? 0 : i >= n ? n - 1 : i]; }
+
+/* Ajuste de la transformación sobre las parejas marcadas en use[]: rotación + traslación (rigid = 1) o solo traslación. 0 = sin datos. */
+static int cal_fit(const CalPair *pr, const uint8_t *use, int n, int rigid, CalXf *x) {
+    double ca[3] = {0, 0, 0}, cb[3] = {0, 0, 0};
+    int m = 0;
+    for (int i = 0; i < n; i++) if (use[i]) for (int k = 0; k < 3; k++) { for (int r = 0; r < 3; r++) { ca[r] += pr[i].q[k][r]; cb[r] += pr[i].p[k][r]; } m++; }
+    if (!m) return 0;
+    for (int r = 0; r < 3; r++) { ca[r] /= m; cb[r] /= m; }
+    memset(x, 0, sizeof *x);
+    x->R[0] = x->R[4] = x->R[8] = 1.0;
+    if (rigid) {
+        double S[3][3] = {{0}};
+        for (int i = 0; i < n; i++) if (use[i]) for (int k = 0; k < 3; k++) {
+            double a[3], b[3];
+            for (int r = 0; r < 3; r++) { a[r] = pr[i].q[k][r] - ca[r]; b[r] = pr[i].p[k][r] - cb[r]; }
+            for (int u = 0; u < 3; u++) for (int v = 0; v < 3; v++) S[u][v] += a[u] * b[v];
+        }
+        double N[4][4] = {
+            {S[0][0] + S[1][1] + S[2][2], S[1][2] - S[2][1], S[2][0] - S[0][2], S[0][1] - S[1][0]},
+            {S[1][2] - S[2][1], S[0][0] - S[1][1] - S[2][2], S[0][1] + S[1][0], S[2][0] + S[0][2]},
+            {S[2][0] - S[0][2], S[0][1] + S[1][0], -S[0][0] + S[1][1] - S[2][2], S[1][2] + S[2][1]},
+            {S[0][1] - S[1][0], S[2][0] + S[0][2], S[1][2] + S[2][1], -S[0][0] - S[1][1] + S[2][2]}};
+        double lam[4], V[4][4];
+        eig4(N, lam, V);
+        int bi = 0;
+        for (int i = 1; i < 4; i++) if (lam[i] > lam[bi]) bi = i;
+        double q0 = V[0][bi], qx = V[1][bi], qy = V[2][bi], qz = V[3][bi], ql = sqrt(q0 * q0 + qx * qx + qy * qy + qz * qz);
+        if (!(ql > 1e-12)) return 0;
+        q0 /= ql; qx /= ql; qy /= ql; qz /= ql;
+        x->R[0] = q0 * q0 + qx * qx - qy * qy - qz * qz; x->R[1] = 2 * (qx * qy - q0 * qz);              x->R[2] = 2 * (qx * qz + q0 * qy);
+        x->R[3] = 2 * (qx * qy + q0 * qz);              x->R[4] = q0 * q0 - qx * qx + qy * qy - qz * qz; x->R[5] = 2 * (qy * qz - q0 * qx);
+        x->R[6] = 2 * (qx * qz - q0 * qy);              x->R[7] = 2 * (qy * qz + q0 * qx);              x->R[8] = q0 * q0 - qx * qx - qy * qy + qz * qz;
+    }
+    for (int r = 0; r < 3; r++) x->t[r] = cb[r] - (x->R[3 * r] * ca[0] + x->R[3 * r + 1] * ca[1] + x->R[3 * r + 2] * ca[2]);
+    return 1;
+}
+
+/* ¿Están los puntos usados lo bastante repartidos para fijar una rotación? (no alineados): distancia máxima al centroide y, desde la recta centroide-más lejano, la máxima perpendicular */
+static int cal_spread_ok(const CalPair *pr, const uint8_t *use, int n) {
+    double c[3] = {0, 0, 0}; int m = 0;
+    for (int i = 0; i < n; i++) if (use[i]) for (int k = 0; k < 3; k++) { for (int r = 0; r < 3; r++) c[r] += pr[i].q[k][r]; m++; }
+    if (!m) return 0;
+    for (int r = 0; r < 3; r++) c[r] /= m;
+    double d1 = 0; const float *far = NULL;
+    for (int i = 0; i < n; i++) if (use[i]) for (int k = 0; k < 3; k++) { double d = d3(pr[i].q[k], (float[3]){(float)c[0], (float)c[1], (float)c[2]}); if (d > d1) { d1 = d; far = pr[i].q[k]; } }
+    if (!far || d1 < 400.0) return 0;
+    double ax[3] = {(far[0] - c[0]) / d1, (far[1] - c[1]) / d1, (far[2] - c[2]) / d1}, d2 = 0;
+    for (int i = 0; i < n; i++) if (use[i]) for (int k = 0; k < 3; k++) {
+        double w[3] = {pr[i].q[k][0] - c[0], pr[i].q[k][1] - c[1], pr[i].q[k][2] - c[2]}, pr_ = dot3(w, ax);
+        double pe[3] = {w[0] - pr_ * ax[0], w[1] - pr_ * ax[1], w[2] - pr_ * ax[2]}, d = sqrt(dot3(pe, pe));
+        if (d > d2) d2 = d;
+    }
+    return d2 >= 200.0;
+}
+
+/* Calibra la cámara de la lista contra el escenario estático del nativo. Devuelve 1 si hay una corrección que aplicar al mundo desproyectado (x), 0 si no; rellena las estadísticas de S. */
+static int calibrate(NsFill *f, const NsFillCfg *cfg, const GpuOp *ops, uint32_t nops, const uint8_t *skip_op, const NsFillCam *cam, const double Ai[9], CalXf *x, NsFillStats *S) {
+    enum { MAXP = 320, CANDN = 192 };
+    S->cal_state = cfg->calib ? 0 : 4;
+    if (!cfg->calib || !f->n || !nops) return 0;
+    CalPair *pr = (CalPair *)malloc(sizeof(CalPair) * MAXP);
+    if (!pr) return 0;
+    const float R = cfg->calib_radius > 0 ? cfg->calib_radius : 400.0f;
+    int np = 0;
+    const uint32_t step = nops / MAXP + 1u;
+    for (uint32_t oi = 0; oi < nops && np < MAXP; oi += step) {
+        const GpuOp *o = &ops[oi];
+        if (o->type != GPU_OP_POLY || o->nv < 3 || !(o->flags & GPU_F_TEXTURED) || o->fbk || (skip_op && skip_op[oi])) continue;
+        OpGeo g;
+        if (!op_view(o, &g) || g.uf || g.recon || g.incoh) continue;
+        const float z = (g.v[0][2] + g.v[1][2] + g.v[2][2]) / 3.0f;
+        if (!(z > 150.0f && z < 40000.0f) || !(o->proj_h > 0)) continue;
+        float q[3][3];
+        for (int k = 0; k < 3; k++) for (int r = 0; r < 3; r++) q[k][r] = (float)(cam->eye[r] + Ai[3 * r] * g.v[k][0] + Ai[3 * r + 1] * g.v[k][1] + Ai[3 * r + 2] * g.v[k][2]);
+        if (d3(q[0], q[1]) < 2 || d3(q[0], q[2]) < 2 || d3(q[1], q[2]) < 2) continue;
+        const uint16_t page = op_page(o), clut = op_clut(o);
+        int32_t cand[CANDN];
+        int nc = corner_query(f, q[0], R, cand, CANDN);
+        double best = 1e30; int bj = -1, bpp = 0;
+        for (int c = 0; c < nc; c++) {
+            const FTri *t = &f->nt[cand[c]];
+            if (t->dyn || t->player || (t->page & PAGE_MASK) != (page & PAGE_MASK) || t->clut != clut) continue;
+            for (int pp = 0; pp < 6; pp++) {
+                int ok = 1;
+                for (int k = 0; k < 3 && ok; k++) { int pk = PERMS[pp][k]; const GpuVtx *v = &o->v[k]; if (fabsf((float)v->u - t->u[pk]) > 1.0f || fabsf((float)v->v - t->v[pk]) > 1.0f) ok = 0; }
+                if (!ok) continue;
+                double m = 0;
+                for (int k = 0; k < 3; k++) { double d = d3(q[k], t->p[PERMS[pp][k]]); if (d > m) m = d; }
+                if (m < best) { best = m; bj = cand[c]; bpp = pp; }
+            }
+        }
+        if (bj < 0 || best > R) continue;
+        CalPair *P = &pr[np++];
+        for (int k = 0; k < 3; k++) { memcpy(P->q[k], q[k], sizeof P->q[k]); memcpy(P->p[k], f->nt[bj].p[PERMS[bpp][k]], sizeof P->p[k]); }
+        P->z = z; P->h = o->proj_h;
+    }
+    S->cal_pairs = (uint32_t)np;
+    int applied = 0;
+    if (np >= (int)(cfg->calib_min_tris ? cfg->calib_min_tris : 12u)) {
+        uint8_t *use = (uint8_t *)calloc((size_t)np, 1);
+        float *tmp = (float *)malloc(sizeof(float) * (size_t)np);
+        if (use && tmp) {
+            CalXf id; memset(&id, 0, sizeof id); id.R[0] = id.R[4] = id.R[8] = 1.0;
+            for (int i = 0; i < np; i++) tmp[i] = (float)(cal_res(&id, &pr[i]) * pr[i].h / pr[i].z);
+            S->cal_px_before = pct_f(tmp, np, 0.5f);   /* (pct_f ordena tmp: el percentil 90 sale del mismo vector) */
+            S->cal_p90_before = pct_f(tmp, np, 0.9f);
+            /* valor inicial: traslación por la mediana (por eje) de las diferencias; atípicos = residuo mayor que 3 veces la mediana */
+            CalXf cur = id;
+            {
+                float *dv = (float *)malloc(sizeof(float) * (size_t)np * 3);
+                if (dv) {
+                    for (int r = 0; r < 3; r++) {
+                        for (int i = 0; i < np; i++) dv[i] = pr[i].p[0][r] - pr[i].q[0][r];
+                        cur.t[r] = pct_f(dv, np, 0.5f);
+                    }
+                    free(dv);
+                }
+            }
+            int rigid = 0, n_in = 0;
+            for (int it = 0; it < 4; it++) {
+                for (int i = 0; i < np; i++) tmp[i] = (float)cal_res(&cur, &pr[i]);
+                float med = pct_f(tmp, np, 0.5f);
+                float thr = fmaxf(3.0f * med, 8.0f);
+                if (it > 0) thr = fmaxf(2.5f * med, 6.0f);
+                n_in = 0;
+                for (int i = 0; i < np; i++) { use[i] = cal_res(&cur, &pr[i]) <= thr; n_in += use[i]; }
+                if (n_in < (int)(cfg->calib_min_tris ? cfg->calib_min_tris : 12u)) break;
+                rigid = cal_spread_ok(pr, use, np);
+                CalXf nx;
+                if (!cal_fit(pr, use, np, rigid, &nx)) break;
+                cur = nx;
+            }
+            S->cal_inliers = (uint32_t)n_in;
+            if (n_in >= (int)(cfg->calib_min_tris ? cfg->calib_min_tris : 12u)) {
+                for (int i = 0; i < np; i++) tmp[i] = (float)(cal_res(&cur, &pr[i]) * pr[i].h / pr[i].z);
+                S->cal_px_after = pct_f(tmp, np, 0.5f);
+                double tr = d3((float[3]){(float)cur.t[0], (float)cur.t[1], (float)cur.t[2]}, (float[3]){0, 0, 0});
+                double tc = (cur.R[0] + cur.R[4] + cur.R[8] - 1.0) * 0.5;
+                S->cal_dt = (float)tr; S->cal_rot_deg = (float)(acos(tc > 1 ? 1 : tc < -1 ? -1 : tc) * 180.0 / 3.14159265358979);
+                if (S->cal_px_before < cfg->calib_min_px) S->cal_state = 2;
+                else if ((float)n_in < (cfg->calib_inlier_frac > 0 ? cfg->calib_inlier_frac : 0.6f) * (float)np) S->cal_state = 3;   /* demasiados atípicos: el escenario no se mueve como un todo */
+                else if (S->cal_px_after <= 0.6f * S->cal_px_before && S->cal_dt <= 800.0f && S->cal_rot_deg <= 4.0f) {
+                    S->cal_state = 1; *x = cur; applied = 1;
+                    for (int i = 0; i < 9; i++) S->cal_R[i] = (float)cur.R[i];
+                    for (int i = 0; i < 3; i++) S->cal_t[i] = (float)cur.t[i];
+                }
+                else S->cal_state = 3;
+            }
+        }
+        free(use); free(tmp);
+    }
+    free(pr);
+    return applied;
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- salida: NsEffect */
@@ -650,6 +856,20 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
         memcpy(f->last_eye, cam->eye, sizeof f->last_eye); memcpy(f->last_fwd, fwd, sizeof fwd); f->last_frame = frame; f->have_last = 1;
     }
 
+    CalXf cx;
+    const int cal_on = calibrate(f, &cfg, ops, nops, skip_op, cam, Ai, &cx, S);   /* desfase RAM/lista: corrección rígida del mundo desproyectado */
+    /* FRENO: sin calibración aplicada y con nativo presente, un desfase alto (o imposible de medir) haría que lo rellenado fuera una copia desplazada del nativo; no se emite nada (solo diagnóstico) */
+    S->brake = 0;
+    if (cfg.brake && f->n >= (cfg.brake_min_native ? cfg.brake_min_native : 64u)) {
+        const float bpx = cfg.brake_px > 0 ? cfg.brake_px : 2.0f;
+        const uint32_t mt = cfg.calib_min_tris ? cfg.calib_min_tris : 12u;
+        if (S->cal_state == 1) { if (S->cal_px_after > bpx) S->brake = 3; }
+        else if (S->cal_state == 2) S->brake = 0;   /* ya casa */
+        else if (S->cal_state != 4) {               /* 0 sin muestra suficiente / 3 rechazada */
+            if (S->cal_pairs < mt) S->brake = 1;
+            else if (S->cal_px_before > bpx) S->brake = 2;
+        }
+    }
     f->nw_n = 0;
     float proj_h = 160.0f, pcx = cfg.screen_w * 0.5f, pcy = cfg.screen_h * 0.5f;
     int have_proj = 0;
@@ -689,6 +909,7 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
         for (int k = 0; k < nv; k++) {
             for (int r = 0; r < 3; r++) g.w[k][r] = (float)(cam->eye[r] + Ai[3 * r] * g.v[k][0] + Ai[3 * r + 1] * g.v[k][1] + Ai[3 * r + 2] * g.v[k][2]);
             if (has_alt) for (int r = 0; r < 3; r++) g.w2[k][r] = (float)(alt->eye[r] + Ai2[3 * r] * g.v[k][0] + Ai2[3 * r + 1] * g.v[k][1] + Ai2[3 * r + 2] * g.v[k][2]);
+            if (cal_on) { float cw[3]; xf_apply(&cx, g.w[k], cw); memcpy(g.w[k], cw, sizeof cw); }
         }
         TriRes tr[2];
         int ok[2] = {0, 0};
@@ -713,7 +934,8 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
             NsEffect e;
             float vc[3] = {0, 0, 0};
             for (int k = 0; k < 4; k++) for (int r = 0; r < 3; r++) vc[r] += g.v[k][r] * 0.25f;
-            if (make_effect(o, &g, I4, 4, tr[0].bias, o->seq, &e)) { rec_push(f, &e, vc); S->filled_tris += 2; }
+            if (S->brake) { /* frenado */ }
+            else if (make_effect(o, &g, I4, 4, tr[0].bias, o->seq, &e)) { rec_push(f, &e, vc); S->filled_tris += 2; }
             else S->cls[NF_SKIP_FB] += 2;
         } else {
             for (int h = 0; h < ntri; h++) {
@@ -722,6 +944,7 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
                 NsEffect e;
                 float vc[3];
                 for (int r = 0; r < 3; r++) vc[r] = (g.v[ci[0]][r] + g.v[ci[1]][r] + g.v[ci[2]][r]) / 3.0f;
+                if (S->brake) continue;
                 if (make_effect(o, &g, ci, 3, tr[h].bias, o->seq * 2u + (uint32_t)h, &e)) { rec_push(f, &e, vc); S->filled_tris++; }
                 else S->cls[NF_SKIP_FB]++;
             }
@@ -732,7 +955,7 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
 
     /* persistencia: lo visto antes y no visto ahora se conserva anclado al mundo mientras no esté en la vista actual */
     {
-        if (cut || !cfg.keep_frames) { S->retired_cut = (uint32_t)f->alive_n; f->alive_n = 0; }
+        if (cut || !cfg.keep_frames || S->brake) { S->retired_cut = (uint32_t)f->alive_n; f->alive_n = 0; }
         size_t nprev = f->alive_n;
         size_t nb = 64;
         while (nb < nprev * 2) nb <<= 1;
@@ -814,6 +1037,7 @@ int ns_fill_run(NsFill *f, const NsFillNative *nat, const GpuOp *ops, uint32_t n
     uint32_t fill_cls = S->cls[NF_FILL_ABSENT] + S->cls[NF_FILL_OTHERTEX] + S->cls[NF_FILL_PARTIAL] + S->cls[NF_FILL_SPRITE] + S->cls[NF_FILL_TEXFIX];
     uint32_t nearskip = S->cls[NF_SKIP_NEAR];   /* envoltura del jugador / pegado a la cámara: no es escena, fuera del denominador igual que la pose */
     uint32_t denom = S->tris > pose + nearskip ? S->tris - pose - nearskip : 0;
+    if (S->brake) fill_cls = 0;   /* frenado: nada de lo rellenable se ve */
     if (S->cls[NF_SKIP_CAP] > 0) fill_cls = fill_cls > S->cls[NF_SKIP_CAP] ? fill_cls - S->cls[NF_SKIP_CAP] : 0;   /* el tope de salida recortó rellenos que se habían contado: no se ven */
     /* los POSE que se rellenan (pose_fill) cuentan como cubiertos */
     uint32_t posefilled = cfg.pose_fill ? S->cls[NF_POSE_OTHER] : 0;
@@ -833,6 +1057,26 @@ size_t ns_fill_format(const NsFillStats *s, uint32_t frame, char *buf, size_t ca
         s->filled_tris, s->cls[NF_FILL_ABSENT], s->cls[NF_FILL_OTHERTEX], s->cls[NF_FILL_PARTIAL], s->cls[NF_FILL_SPRITE], s->cls[NF_FILL_TEXFIX], pose, s->cls[NF_POSE_PLAYER], s->cls[NF_POSE_OTHER],
         s->cls[NF_SKIP_BEHIND], s->cls[NF_SKIP_AMBIG], s->cls[NF_SKIP_INCOH], s->cls[NF_SKIP_EDGE], s->cls[NF_SKIP_FAR], s->cls[NF_SKIP_NAN], s->cls[NF_SKIP_FB], s->cls[NF_SKIP_PARTIAL_SEMI],
         s->cls[NF_SKIP_NEAR], s->cover_pct, s->cam_src == 0 ? "lista" : s->cam_src == 1 ? "RAM(la de la lista casa peor)" : "RAM(sin camara en la lista)", s->n_out, s->persisted, s->retired_view, s->retired_age, s->retired_cut, s->cls[NF_SKIP_CAP], s->nat_tris, s->nat_dyn, s->ms_total, s->ms_index, s->ms_match, s->ms_persist);
+    if (n < 0) return 0;
+    return (size_t)n < cap ? (size_t)n : cap - 1;
+}
+
+size_t ns_fill_format_diag(const NsFillStats *s, uint32_t frame, char *buf, size_t cap) {
+    if (!buf || !cap) return 0;
+    const uint32_t fill = s->cls[NF_FILL_ABSENT] + s->cls[NF_FILL_OTHERTEX] + s->cls[NF_FILL_PARTIAL] + s->cls[NF_FILL_SPRITE];   /* textura_corregida se cuenta aparte: por defecto no se dibuja */
+    const uint32_t pose = s->cls[NF_POSE_PLAYER] + s->cls[NF_POSE_OTHER];
+    static const char *const CALN[] = {"sin_muestra", "aplicada", "innecesaria", "rechazada", "apagada"};
+    char off[96];
+    if (s->cal_pairs) snprintf(off, sizeof off, "%.1f (p90=%.1f, muestra=%u)", s->cal_px_before, s->cal_p90_before, s->cal_pairs);
+    else snprintf(off, sizeof off, "- (sin muestra)");
+    char cal[128];
+    if (s->cal_state == 1 || s->cal_state == 3) snprintf(cal, sizeof cal, "%s tras=%.1fpx dt=%.0fu rot=%.2fgr", CALN[s->cal_state], s->cal_px_after, s->cal_dt, s->cal_rot_deg);
+    else snprintf(cal, sizeof cal, "%s", CALN[s->cal_state >= 0 && s->cal_state <= 4 ? s->cal_state : 0]);
+    int n = snprintf(buf, cap,
+        "[relleno] fr=%u tris_rellenables=%u (exacto=%u pose=%u ausente=%u otra_textura=%u parcial=%u sprite=%u textura_corregida=%u(no dibujada)) ms=%.1f desfase_px=%s | calibracion=%s freno=%s | tris3D=%u cobertura=%.1f%% (nativo %.1f%%) "
+        "salida=%u (persistentes=%u) camara=%s\n",
+        frame, fill, s->cls[NF_MATCH], pose, s->cls[NF_FILL_ABSENT], s->cls[NF_FILL_OTHERTEX], s->cls[NF_FILL_PARTIAL], s->cls[NF_FILL_SPRITE], s->cls[NF_FILL_TEXFIX], s->ms_total, off, cal, ns_fill_brake_name[s->brake >= 0 && s->brake <= 3 ? s->brake : 0],
+        s->tris, s->cover_pct, s->nat_pct, s->n_out, s->persisted, s->cam_src == 0 ? "lista" : s->cam_src == 1 ? "RAM(la de la lista casa peor)" : "RAM(sin camara en la lista)");
     if (n < 0) return 0;
     return (size_t)n < cap ? (size_t)n : cap - 1;
 }

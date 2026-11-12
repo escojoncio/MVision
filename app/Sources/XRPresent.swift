@@ -40,6 +40,7 @@ struct XRViewConfig {
     var aiRange = 0                 // IA de enemigos: alcance de visión, índice de aiRanges (0 = x1, 1 = x1,5, 2 = x2)
     var aiHead = true               // IA de enemigos: ven también la cabeza VR (no solo el ojo del personaje)
     var newHands = true             // manos del personaje en primera persona: nuevas (articuladas, con puño propio) u originales del motor
+    var fill3D = false              // «Relleno en pantalla 3D»: dibuja en la pantalla 3D del motor lo que la lista de la GPU tiene y el nativo no (apagado de serie = solo diagnóstico `[relleno]` en el log)
     var follow2D = true             // pantallas 2D (cine, pantalla 3D, ventanas del juego, menú VR): siguen la cabeza en cada fotograma (true) o quedan fijas en el mundo (false)
     var smoothMotion = true         // fluidez de la locomoción: el mundo se corrige por fotograma de render (giro del stick y avance extrapolados entre escenas del juego)
 
@@ -66,7 +67,13 @@ struct XRViewConfig {
         mv_vrhost_set_hands_new(on ? 1 : 0)
 #endif
     }
-    static func applyStoredAI() { let c = load(); applyAI(range: c.aiRange, head: c.aiHead); applyHands(c.newHands) }
+    /// Relleno por la verdad del motor (vr/native/ns_fill_glue): encendido = dibuja (solo en la pantalla 3D con la cámara del motor), apagado = solo diagnóstico. Idempotente; se llama al arrancar y tras cada cambio del menú.
+    static func applyFill(_ on: Bool) {
+#if !MV_BENCH
+        ns_fill_glue_set_mode(on ? 1 : 0)
+#endif
+    }
+    static func applyStoredAI() { let c = load(); applyAI(range: c.aiRange, head: c.aiHead); applyHands(c.newHands); applyFill(c.fill3D) }
 
     private static func f(_ k: String, _ d: Float, _ lo: Float, _ hi: Float) -> Float {
         guard UserDefaults.standard.object(forKey: k) != nil else { return d }
@@ -107,6 +114,7 @@ struct XRViewConfig {
         c.smoothMotion = b("xr.view.smoothMotion", true)
         c.follow2D = b("xr.view.follow2d", true)
         c.newHands = b("xr.hands.new", true)
+        c.fill3D = b("xr.fill3d", false)
         // El defecto pasó de x1,5 a x1 (alcance original del juego): lo guardado por el defecto anterior migra a x1 UNA sola vez (clave de marca); elegido después en el menú, sobrevive al reinicio.
         if !UserDefaults.standard.bool(forKey: "xr.ai.range.toX1") {
             UserDefaults.standard.set(0, forKey: "xr.ai.range")
@@ -138,6 +146,7 @@ struct XRViewConfig {
         d.set(smoothMotion, forKey: "xr.view.smoothMotion")
         d.set(follow2D, forKey: "xr.view.follow2d")
         d.set(newHands, forKey: "xr.hands.new")
+        d.set(fill3D, forKey: "xr.fill3d")
         d.set(aiRange, forKey: "xr.ai.range")
         d.set(aiHead, forKey: "xr.ai.head")
     }
@@ -274,7 +283,7 @@ struct XRNav: Equatable {
 }
 
 enum XRMenuItem: Int, CaseIterable {
-    case resume, recenter, calibrateHands, width, distance, follow2D, curve, sharp, integerScale, smooth2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, newHands, debugAxes, aiMenu, diagnostics, exit
+    case resume, recenter, calibrateHands, width, distance, follow2D, curve, sharp, integerScale, smooth2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, newHands, fill3D, debugAxes, aiMenu, diagnostics, exit
 }
 
 /// Submenú «IA de enemigos».
@@ -559,6 +568,7 @@ final class XRPresenter {
         case .vignette: Self.cycleVignette(dir)
         case .hideHands: cfg.hideRealHands.toggle(); cfg.save()      // la escena lo lee de UserDefaults (@AppStorage): se guarda al momento
         case .newHands: cfg.newHands.toggle(); XRViewConfig.applyHands(cfg.newHands); cfg.save()
+        case .fill3D: cfg.fill3D.toggle(); XRViewConfig.applyFill(cfg.fill3D); cfg.save()
         case .debugAxes: cfg.debugAxes.toggle()
         case .aiMenu: if dir >= 0 { page = 2; sel = 0 }
         case .diagnostics: if dir >= 0 { page = 1; sel = 0 }
@@ -635,6 +645,7 @@ final class XRPresenter {
             case .vignette: return ("Viñeta de confort", Self.vignetteName())
             case .hideHands: return ("Ocultar mis manos reales", yn(cfg.hideRealHands))
             case .newHands: return ("Manos del personaje", cfg.newHands ? "Nuevas" : "Originales")
+            case .fill3D: return ("Relleno en pantalla 3D", yn(cfg.fill3D))
             case .debugAxes: return ("Ejes de mandos y manos", yn(cfg.debugAxes))
             case .aiMenu: return ("IA de enemigos", "▸")
             case .diagnostics: return ("Diagnóstico", XRDiag.shared.settings.isNormal ? "▸" : "activo ▸")
@@ -1110,6 +1121,7 @@ final class XRPresenter {
                                                XRMath.yaw(of: anchor) * 180 / .pi, anchorY)
         d += String(format: " veloNegro=%.2f", pendVeil)
         d += " pantallas2D=" + (cfg.follow2D ? "siguen" : "fijas")
+        d += " relleno3D=" + (cfg.fill3D ? "si" : "no")
         d += " items: pantalla=\(n[.screen] ?? 0) pantalla3d=\(n[.screen3d] ?? 0) panel=\(n[.panel] ?? 0) menu=\(n[.menu] ?? 0) velo=\(n[.veil] ?? 0) hudPanels=\(cfg.hudPanels) hud!=nil=\(hudSeen)"
         if let c = cinema {
             d += " cine: fotograma=\(c.haveFrame) \(c.w)x\(c.h) tex=\(c.texture(srgb: true).map { "\($0.width)x\($0.height)/fmt\($0.pixelFormat.rawValue)" } ?? "nil")"

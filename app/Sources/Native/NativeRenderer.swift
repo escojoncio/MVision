@@ -351,6 +351,8 @@ final class NativeRenderer {
     /// Geometría de los efectos de la escena actual, en el mundo VR y orientada a la cabeza (se construye en beginFrame con ns_gpu_fx_build). El renderer solo da por
     /// dibujado (la lista de la GPU ya no dibuja nada en 3D).
     private var fxEffects: [NsEffect] = []
+    private var fillBuf: [NsEffect] = []              // relleno por la verdad del motor (ns_fill_glue_fetch): SOLO con la pantalla 3D (cámara del motor)
+    private(set) var statFill = 0                     // rellenos añadidos a los efectos en este fotograma
     private var fxCam = NsCamera()
     private var fxHas = false                      // la escena trae efectos (NS_SV_FX) y es apta para dibujar en el mundo
     private var fxVerts: UnsafeMutablePointer<NsGpuFxVert>?
@@ -875,6 +877,15 @@ final class NativeRenderer {
                 if n > 0 { fxEffects.append(contentsOf: UnsafeBufferPointer(start: fp, count: n)) }
             }
             fxHas = true
+        }
+        // Relleno por la verdad del motor (ns_fill_glue): triángulos que la lista de la GPU dibuja con la cámara del motor y el nativo no tiene, ya en el mundo del motor (calibrados contra el escenario
+        // estático del nativo); pasan por buildFx (ns_gpu_fx_build_ex) como un efecto más, sin ruta nueva en la GPU. SOLO con la pantalla 3D (`cinema`: la escena se dibuja con la cámara del juego, igual que
+        // el relleno): en el mundo en primera persona no hay relleno ni lista como verdad. Por defecto el glue solo diagnostica (fetch devuelve 0); dibuja si el ajuste «Relleno en pantalla 3D» está encendido (XRViewConfig.fill3D, apagado de serie) o con MV_FILL=1.
+        statFill = 0
+        if cinema && screenMode, (validBits & UInt32(truncatingIfNeeded: NS_SV_FX)) != 0 {
+            if fillBuf.isEmpty { fillBuf = [NsEffect](repeating: NsEffect(), count: 6000) }
+            let nf = Int(fillBuf.withUnsafeMutableBufferPointer { ns_fill_glue_fetch($0.baseAddress, UInt32($0.count)) })
+            if nf > 0 { fxEffects.append(contentsOf: fillBuf[0..<nf]); fxHas = true; statFill = nf }
         }
         curValid = validBits
         for i in 0..<12 { toVR12[i] = t[i] }
@@ -1631,7 +1642,7 @@ final class NativeRenderer {
         for (b, n) in bits where (lp.why & b) != 0 { why.append(n) }
         return "nativo: presenta=\(modo) fundido=\(String(format: "%.2f", lp.fade)) motivos=[\(why.joined(separator: ","))] repetidos=\(presentState.n_hold) negros=\(presentState.n_black) coh=\(String(format: "%.3f", cohDist))m " +
                "instancias=\(statInstances) piezas=\(statPieces) mallas=\(statMeshes) semi=\(statSemiTris) tramos_semi=\(mergedN) dibujos=\(statDraws) fallos=\(frameFailures)/\(totalFailures) ausentes=\(frameMisses) " +
-               "efectos=\(statFxItems) (carteles=\(statFxBillboards) cintas=\(statFxRibbons) poligonos=\(statFxPolys) descartados=\(statFxSkipped) tris=\(statFxTris) dibujados=\(fxAllowed ? "si" : "no")) " +
+               "relleno=\(statFill) efectos=\(statFxItems) (carteles=\(statFxBillboards) cintas=\(statFxRibbons) poligonos=\(statFxPolys) descartados=\(statFxSkipped) tris=\(statFxTris) dibujados=\(fxAllowed ? "si" : "no")) " +
                "pantalla=[agua=\(screenOut.water_min.3 > 0.5 ? "si" : "no") recubrimientos=\(overlays.count)] " +
                "\(fxNearText()) [nativo] escena_ausente=\(sceneAbsent) sync_epoca=\(syncHeldFrames) " +
                "escenas=\(statScenes) epoca=\(lastEpoch) cpu(prepare)=\(String(format: "%.2f", cpuPrepareMs))ms cpu(encode)=\(String(format: "%.2f", cpuEncodeMs))ms"

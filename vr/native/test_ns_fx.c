@@ -468,6 +468,49 @@ static void test_learn(void) {
     ns_fx_scene_destroy(s);
 }
 
+/* Identidad por DIRECCIÓN del paquete: un efecto animado (anime.c) reescribe u,v y color del paquete cada fotograma, así que el contenido de la RAM no es el de la lista (medido en a31 d0003/d0005);
+ * la casación por contenido lo dejaba en 2D y el relleno lo contaba como «otra textura». Con GpuOp.pkt_addr el paquete es el del elemento aunque el contenido difiera, en cualquiera de los dos búferes. */
+static void test_classify_by_address(void) {
+    reset();
+    ns_fx_learn_reset();
+    int t0[3] = {0, 0, 0};
+    TPrim a = mkprim(18, 0, 2, 4096, t0, 0x1);
+    int P[4][3] = {{500, 800, 2000}, {1500, 800, 2000}, {500, 100, 2600}, {1500, 100, 2600}};
+    int SX[2][4], SY[2][4];
+    for (int j = 0; j < 2; j++) {
+        for (int v = 0; v < 4; v++) put_pos(&a, j * 4 + v, P[v][0] + 300 * j, P[v][1], P[v][2]);
+        for (int b = 0; b < 2; b++) {
+            uint32_t pk = a.pk[b] + 40u * (uint32_t)j; w16(pk, 1234); w8(pk + 7, 0x2C);
+            for (int v = 0; v < 4; v++) { double w[3] = {P[v][0] + 300 * j, P[v][1], P[v][2]}, sx, sy, z; ref_proj(w, &sx, &sy, &z); SX[j][v] = (int)lround(sx); SY[j][v] = (int)lround(sy); pk_xy(pk, 18, v, SX[j][v], SY[j][v]); }
+        }
+    }
+    TPrim so = mkprim(18, 0x800, 1, 4096, t0, 0);   /* solo ordenación: no es un elemento */
+    for (int b = 0; b < 2; b++) { w16(so.pk[b], 7); w8(so.pk[b] + 7, 0x2C); }
+    queue_commit(0);
+    int r; NsFxScene *s = run(0, &r);
+    CHECK(r == 0 && s->n_items == 2, "escena: 2 cuadriláteros (%u)", s->n_items);
+    enum { N = 4 };
+    GpuOp ops[N]; memset(ops, 0, sizeof ops);
+    for (int k = 0; k < N; k++) {
+        int j = k == 1 ? 1 : 0;
+        ops[k].type = GPU_OP_POLY; ops[k].nv = 4; ops[k].flags = GPU_F_TEXTURED | GPU_F_QUAD; ops[k].tp = 1; ops[k].tx = 640;
+        for (int v = 0; v < 4; v++) { ops[k].v[v].x = (int16_t)SX[j][v]; ops[k].v[v].y = (int16_t)SY[j][v]; ops[k].v[v].u = (uint8_t)(9 + 20 * v); ops[k].v[v].v = 77; ops[k].v[v].r = 3; ops[k].v[v].g = 5; ops[k].v[v].b = 7; }
+    }
+    ops[0].pkt_addr = 0x80000000u | (a.pk[0] & 0x1FFFFF);                  /* elemento 0, búfer 0, u,v,rgb distintos a los de la RAM */
+    ops[1].pkt_addr = 0x80000000u | ((a.pk[1] + 40) & 0x1FFFFF);           /* elemento 1, el OTRO búfer */
+    ops[2].pkt_addr = 0x80000000u | (so.pk[0] & 0x1FFFFF);                 /* paquete de ordenación 2D: no es un elemento */
+    ops[3].pkt_addr = 0;                                                    /* sin dirección: solo vale el contenido (no coincide) */
+    GpuDrawList dl; memset(&dl, 0, sizeof dl); dl.ops = ops; dl.nops = N; dl.disp.w = 320; dl.disp.h = 240;
+    uint8_t cls[N]; int32_t item[N];
+    CHECK(ns_fx_classify(RAM, s, &dl, cls, NULL, item, NULL) == 0, "classify");
+    CHECK(cls[0] == NSFX_OP_FX && item[0] == 0, "elemento 0 por dirección aunque u,v,rgb difieran (%d/%d)", cls[0], item[0]);
+    CHECK(cls[1] == NSFX_OP_FX && item[1] == 1, "elemento 1 por dirección en el otro búfer (%d/%d)", cls[1], item[1]);
+    CHECK(cls[2] != NSFX_OP_FX, "dirección de un paquete que no es elemento: no es efecto (%d)", cls[2]);
+    CHECK(cls[3] == NSFX_OP_2D, "sin dirección y con contenido distinto: 2D (%d)", cls[3]);
+    ns_fx_scene_destroy(s);
+    ns_fx_learn_reset();
+}
+
 static void test_classify(void) {
     reset();
     memset(LASTNODE, 0, sizeof LASTNODE);
@@ -1111,6 +1154,7 @@ int main(void) {
     test_filters_and_oneside();
     test_map_group();
     test_covers_packet();
+    test_classify_by_address();
     test_lines_and_oncamera();
     test_actors_and_screen();
     test_classify();

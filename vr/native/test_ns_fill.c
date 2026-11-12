@@ -149,9 +149,14 @@ static void test_pose_player_and_texfix(void) {
     nat_quad(&N, -500, -500, 4000, 1000, (uint16_t)(PAGE + 1), CLUT, 0xAAAA0003u);
     ns_fill_reset(f);
     step(f, &N, &op, 1, &cam, NULL, &cfg, 1, &st);
-    CHECK(st.cls[NF_FILL_TEXFIX] == 2 && st.filled_tris == 2, "texfix=%u", st.cls[NF_FILL_TEXFIX]);
     uint32_t n; const NsEffect *e = ns_fill_effects(f, &n);
+    CHECK(st.cls[NF_FILL_TEXFIX] == 2 && st.filled_tris == 0 && n == 0, "textura corregida: se cuenta pero NO se dibuja por defecto (copia coplanar de la malla nativa): texfix=%u relleno=%u salidas=%u", st.cls[NF_FILL_TEXFIX], st.filled_tris, n);
+    cfg.draw_texfix = 1; ns_fill_reset(f);
+    step(f, &N, &op, 1, &cam, NULL, &cfg, 1, &st);
+    CHECK(st.cls[NF_FILL_TEXFIX] == 2 && st.filled_tris == 2, "draw_texfix=1: se dibuja, texfix=%u", st.cls[NF_FILL_TEXFIX]);
+    e = ns_fill_effects(f, &n);
     CHECK(n >= 1 && e[0].depth_bias == cfg.bias && e[0].tpage == PAGE, "bias=%d", n ? e[0].depth_bias : -99);
+    cfg.draw_texfix = 0;
     /* si esa pareja nativa es del jugador no se corrige: MATCH normal */
     cfg.player_key = 0xAAAA0003u; ns_fill_reset(f);
     step(f, &N, &op, 1, &cam, NULL, &cfg, 1, &st);
@@ -438,7 +443,202 @@ static void test_pipeline_follow(void) {
     ns_fill_destroy(f);
 }
 
-int main(void) {
+
+/* ---- calibración de la cámara de la lista contra el escenario estático del nativo (desfase RAM/lista) ---- */
+/* Rejilla de 18 cuadriláteros estáticos del mundo; la lista los dibuja con la cámara VERDADERA y ns_fill_run recibe la cámara de la RAM, desplazada y girada (un tick adelantada). */
+#define CAL_N 18
+static void cal_world(int i, float *x0, float *y0, float *zc) { *x0 = -6000.0f + 1500.0f * (float)(i % 6); *y0 = -1500.0f + 1500.0f * (float)(i / 6); *zc = 5000.0f + 700.0f * (float)((i + i / 6) % 4); }
+static NsFillCam cam_from(float yaw, float ex, float ey, float ez) { NsFillCam c = cam_yaw(yaw, ex); c.eye[1] = ey; c.eye[2] = ez; return c; }
+
+static void test_calibration(void) {
+    const NsFillCam truth = cam_from(10.0f, 300, -200, 150), ram = cam_from(10.7f, 350, -170, 190);   /* 50/30/40 u y 0,7 grados de error */
+    Nat N = {0};
+    GpuOp ops[CAL_N + 4];
+    for (int i = 0; i < CAL_N; i++) { float x0, y0, zc; cal_world(i, &x0, &y0, &zc); nat_quad(&N, x0, y0, zc, 600, PAGE, CLUT, 0xC0000000u + (uint32_t)i); ops[i] = list_world_quad(&truth, x0, y0, zc, 600); }
+    /* señuelos: cuadriláteros de la lista SIN pareja en el nativo con la misma textura y UV a ~250 u de uno que sí existe (parejas falsas que la calibración debe descartar) */
+    float dx[3] = {250, -300, 280}, dz[3] = {0, 100, -150};
+    for (int k = 0; k < 3; k++) { float x0, y0, zc; cal_world(2 + 5 * k, &x0, &y0, &zc); ops[CAL_N + k] = list_world_quad(&truth, x0 + dx[k], y0 + 100, zc + dz[k], 600); }
+    /* el hueco que sí hay que rellenar: lejos de todo lo del nativo */
+    const float hx = 1200, hy = -2600, hz = 6500, hs = 500;
+    ops[CAL_N + 3] = list_world_quad(&truth, hx, hy, hz, hs);
+    const float HW[4][3] = {{hx, hy, hz}, {hx + hs, hy, hz}, {hx, hy + hs, hz}, {hx + hs, hy + hs, hz}};
+
+    NsFill *f = ns_fill_create(); NsFillCfg cfg; ns_fill_cfg_default(&cfg); NsFillStats st;
+    CHECK(step(f, &N, ops, CAL_N + 4, &ram, NULL, &cfg, 1, &st) == 0, "run con calibración");
+    CHECK(st.cal_state == 1, "calibración aplicada (estado %d, muestra %u, válidos %u, antes %.2f px, después %.2f px)", st.cal_state, st.cal_pairs, st.cal_inliers, st.cal_px_before, st.cal_px_after);
+    CHECK(st.cal_px_before > 3.0f && st.cal_px_after < 0.5f, "desfase %.2f px -> %.2f px", st.cal_px_before, st.cal_px_after);
+    CHECK(st.cal_rot_deg > 0.4f && st.cal_rot_deg < 1.0f && st.cal_dt > 30.0f && st.cal_dt < 300.0f, "corrección ajustada: rot %.2f gr, dt %.0f u", st.cal_rot_deg, st.cal_dt);
+    CHECK(st.cls[NF_MATCH] == 2 * CAL_N, "todo el nativo casa tras calibrar: exacto=%u (esperado %d)", st.cls[NF_MATCH], 2 * CAL_N);
+    uint32_t n; const NsEffect *e = ns_fill_effects(f, &n);
+    float err = 1e9f; int found = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        float c[3]; centroid(&e[i], c);
+        if (fabsf(c[2] - (hz)) < 400 && fabsf(c[0] - (hx + hs * 0.5f)) < 600 && fabsf(c[1] - (hy + hs * 0.5f)) < 600) {
+            found = 1; err = 0;
+            for (int k = 0; k < e[i].nv && k < 4; k++) for (int a = 0; a < 3; a++) err = fmaxf(err, fabsf(e[i].p[k][a] - HW[k][a]));
+        }
+    }
+    CHECK(found && err < 2.0f, "el hueco se rellena en su sitio verdadero del mundo: error %.2f u (encontrado %d)", err, found);
+    /* la cámara equivalente lleva el mundo del nativo a la vista de la lista */
+    NsFillCam cc = ns_fill_cam_corrected(&ram, &st);
+    double A[9], Ai[9]; ns_fill_cam_maps(&cc, A, Ai);
+    float ev = 0;
+    for (int i = 0; i < CAL_N; i++) { float x0, y0, zc; cal_world(i, &x0, &y0, &zc); float w[3] = {x0, y0, zc}, v[3], v0[3]; world_to_view(&truth, w, v0);
+        for (int r = 0; r < 3; r++) v[r] = (float)(A[3 * r] * (w[0] - cc.eye[0]) + A[3 * r + 1] * (w[1] - cc.eye[1]) + A[3 * r + 2] * (w[2] - cc.eye[2]));
+        for (int a = 0; a < 3; a++) ev = fmaxf(ev, fabsf(v[a] - v0[a])); }
+    CHECK(ev < 1.5f, "ns_fill_cam_corrected reproduce la vista de la lista (error %.2f u)", ev);
+    char buf[2048]; size_t l = ns_fill_format_diag(&st, 7, buf, sizeof buf);
+    CHECK(l > 40 && strstr(buf, "[relleno] fr=7 tris_rellenables=") && strstr(buf, "(exacto=") && strstr(buf, " pose=") && strstr(buf, "ausente=") && strstr(buf, "otra_textura=") && strstr(buf, "parcial=") && strstr(buf, "sprite=")
+          && strstr(buf, " ms=") && strstr(buf, "desfase_px=") && strstr(buf, "calibracion=aplicada"), "línea de diagnóstico: %s", buf);
+    ns_fill_destroy(f);
+
+    /* sin calibrar: el mismo caso falla (la prueba distingue) */
+    f = ns_fill_create(); cfg.calib = 0;
+    step(f, &N, ops, CAL_N + 4, &ram, NULL, &cfg, 1, &st);
+    e = ns_fill_effects(f, &n);
+    float err0 = 0;
+    for (uint32_t i = 0; i < n; i++) { float c[3]; centroid(&e[i], c); if (fabsf(c[2] - hz) < 400 && fabsf(c[0] - (hx + hs * 0.5f)) < 600) for (int k = 0; k < e[i].nv && k < 4; k++) for (int a = 0; a < 3; a++) err0 = fmaxf(err0, fabsf(e[i].p[k][a] - HW[k][a])); }
+    CHECK(st.cal_state == 4 && st.cls[NF_MATCH] < 2 * CAL_N && err0 > 20.0f, "sin calibrar el relleno queda desplazado %.1f u y casan %u/%d (estado %d)", err0, st.cls[NF_MATCH], 2 * CAL_N, st.cal_state);
+    ns_fill_destroy(f);
+
+    /* cámara ya exacta: no se toca nada */
+    f = ns_fill_create(); ns_fill_cfg_default(&cfg);
+    step(f, &N, ops, CAL_N + 4, &truth, NULL, &cfg, 1, &st);
+    e = ns_fill_effects(f, &n);
+    err = 1e9f;
+    for (uint32_t i = 0; i < n; i++) { float c[3]; centroid(&e[i], c); if (fabsf(c[2] - hz) < 400 && fabsf(c[0] - (hx + hs * 0.5f)) < 600) { err = 0; for (int k = 0; k < e[i].nv && k < 4; k++) for (int a = 0; a < 3; a++) err = fmaxf(err, fabsf(e[i].p[k][a] - HW[k][a])); } }
+    CHECK(st.cal_state == 2 && st.cal_px_before < 0.5f && err < 1.0f, "cámara exacta: calibración innecesaria (estado %d, desfase %.2f px, error %.2f u)", st.cal_state, st.cal_px_before, err);
+    ns_fill_destroy(f);
+
+    /* muestra insuficiente (< 12 triángulos con pareja): no se calibra */
+    f = ns_fill_create();
+    step(f, &N, ops, 8, &ram, NULL, &cfg, 1, &st);
+    CHECK(st.cal_state == 0 && st.cal_pairs < 12, "muestra insuficiente: sin calibrar (estado %d, muestra %u)", st.cal_state, st.cal_pairs);
+    ns_fill_destroy(f);
+
+    /* desfase absurdo (la cámara de la RAM es de otra escena): ninguna pareja a < calib_radius, no se inventa una corrección */
+    f = ns_fill_create();
+    NsFillCam far = cam_from(10.0f, 5300, -200, 150);
+    step(f, &N, ops, CAL_N + 4, &far, NULL, &cfg, 1, &st);
+    CHECK(st.cal_state != 1, "cámara de otra escena: nunca se aplica (estado %d)", st.cal_state);
+    ns_fill_destroy(f);
+    free(N.t); free(N.s);
+}
+
+
+
+/* FRENO y plataforma desplazada. Mismo escenario que test_calibration. */
+static int count_outputs_near(const NsFill *f, float hx, float hy, float hz, float hs) {
+    uint32_t n; const NsEffect *e = ns_fill_effects(f, &n); int k = 0;
+    for (uint32_t i = 0; i < n; i++) { float c[3]; centroid(&e[i], c); if (fabsf(c[2] - hz) < 400 && fabsf(c[0] - (hx + hs * 0.5f)) < 600 && fabsf(c[1] - (hy + hs * 0.5f)) < 600) k++; }
+    return k;
+}
+static void test_brake_and_platform(void) {
+    const NsFillCam truth = cam_from(10.0f, 300, -200, 150), ram = cam_from(10.7f, 350, -170, 190);
+    const float hx = 1200, hy = -2600, hz = 6500, hs = 500;
+    NsFill *f; NsFillCfg cfg; ns_fill_cfg_default(&cfg); NsFillStats st;
+    GpuOp ops[CAL_N + 1];
+    Nat N = {0};
+    for (int i = 0; i < CAL_N; i++) { float x0, y0, zc; cal_world(i, &x0, &y0, &zc); nat_quad(&N, x0, y0, zc, 600, PAGE, CLUT, 0xC0000000u + (uint32_t)i); ops[i] = list_world_quad(&truth, x0, y0, zc, 600); }
+    ops[CAL_N] = list_world_quad(&truth, hx, hy, hz, hs);
+
+    /* (a) tipo d0014: nativo presente (>= 64 triángulos) que NO casa con la lista (sin muestra) => cero salidas, solo diagnóstico */
+    Nat M = {0};
+    for (int i = 0; i < 40; i++) nat_quad(&M, 80000.0f + 1500.0f * (float)(i % 8), 80000.0f + 1500.0f * (float)(i / 8), 4000, 600, PAGE, CLUT, 0xE0000000u + (uint32_t)i);   /* 80 triángulos lejos de la vista */
+    f = ns_fill_create();
+    step(f, &M, ops, CAL_N + 1, &ram, NULL, &cfg, 1, &st);
+    uint32_t n; ns_fill_effects(f, &n);
+    CHECK(st.brake == 1 && n == 0 && st.filled_tris == 0 && st.cal_state == 0, "sin muestra con nativo presente: freno=%d salidas=%u relleno=%u estado=%d", st.brake, n, st.filled_tris, st.cal_state);
+    CHECK(st.cls[NF_FILL_ABSENT] + st.cls[NF_FILL_SPRITE] + st.cls[NF_FILL_OTHERTEX] > 0 && st.cover_pct < 50.0f, "el diagnóstico sigue contando lo rellenable (%u) y la cobertura no cuenta lo frenado (%.1f%%)", st.cls[NF_FILL_ABSENT] + st.cls[NF_FILL_SPRITE] + st.cls[NF_FILL_OTHERTEX], st.cover_pct);
+    char buf[2048]; ns_fill_format_diag(&st, 3, buf, sizeof buf);
+    CHECK(strstr(buf, "freno=sin_muestra") != NULL, "la línea dice el motivo: %s", buf);
+    ns_fill_destroy(f);
+    /* mismo caso con el freno apagado: se rellena (la prueba distingue) */
+    f = ns_fill_create(); cfg.brake = 0;
+    step(f, &M, ops, CAL_N + 1, &ram, NULL, &cfg, 1, &st);
+    ns_fill_effects(f, &n);
+    CHECK(st.brake == 0 && n > 0, "sin freno se rellena: salidas=%u", n);
+    ns_fill_destroy(f); cfg.brake = 1;
+    /* nativo casi vacío (intro: 2 triángulos): no hay nada que duplicar, no se frena (ver test_intro_cover) */
+    f = ns_fill_create();
+    step(f, NULL, ops, CAL_N + 1, &ram, NULL, &cfg, 1, &st);
+    ns_fill_effects(f, &n);
+    CHECK(st.brake == 0 && n > 0, "nativo vacío: no se frena (freno=%d salidas=%u)", st.brake, n);
+    ns_fill_destroy(f);
+
+    /* (b) cámara buena con muestra: desfase 0 => sin freno y el relleno se mantiene */
+    f = ns_fill_create();
+    step(f, &N, ops, CAL_N + 1, &truth, NULL, &cfg, 1, &st);
+    CHECK(st.brake == 0 && st.cal_state == 2 && count_outputs_near(f, hx, hy, hz, hs) == 1, "cámara buena: freno=%d estado=%d salidas en el hueco=%d", st.brake, st.cal_state, count_outputs_near(f, hx, hy, hz, hs));
+    ns_fill_destroy(f);
+    /* calibrable: tras corregir queda < 2 px, sin freno */
+    f = ns_fill_create();
+    step(f, &N, ops, CAL_N + 1, &ram, NULL, &cfg, 1, &st);
+    CHECK(st.brake == 0 && st.cal_state == 1 && count_outputs_near(f, hx, hy, hz, hs) == 1, "calibrada: freno=%d estado=%d", st.brake, st.cal_state);
+    ns_fill_destroy(f);
+
+    /* (c) desfase alto que no se puede corregir (la muestra se mueve a trozos con offsets distintos): rechazada => freno por desfase */
+    Nat P = {0};
+    for (int i = 0; i < CAL_N; i++) { float x0, y0, zc; cal_world(i, &x0, &y0, &zc); float o = (i % 3 == 0) ? 0.0f : (i % 3 == 1) ? 160.0f : -170.0f; nat_quad(&P, x0 + o, y0, zc + (i % 2 ? o : -o), 600, PAGE, CLUT, 0xC1000000u + (uint32_t)i); }
+    for (int i = 0; i < 40; i++) nat_quad(&P, 80000.0f + 1500.0f * (float)(i % 8), 80000.0f + 1500.0f * (float)(i / 8), 4000, 600, PAGE, CLUT, 0xE1000000u + (uint32_t)i);   /* nativo presente (>= 64 tris) */
+    f = ns_fill_create();
+    step(f, &P, ops, CAL_N + 1, &truth, NULL, &cfg, 1, &st);
+    ns_fill_effects(f, &n);
+    CHECK(st.cal_state != 1 && st.brake == 2 && n == 0, "desfase alto sin corrección: freno=%d estado=%d antes=%.1f px salidas=%u", st.brake, st.cal_state, st.cal_px_before, n);
+    ns_fill_destroy(f); free(P.t); free(P.s);
+
+    /* (d) plataforma/cabina un tick adelantada: una MINORÍA del escenario estático desplazada, cámara buena => la mediana es ~0, no se toca nada */
+    Nat Q = {0};
+    for (int i = 0; i < CAL_N; i++) { float x0, y0, zc; cal_world(i, &x0, &y0, &zc); float o = i < 5 ? 90.0f : 0.0f; nat_quad(&Q, x0 + o, y0, zc, 600, PAGE, CLUT, 0xC2000000u + (uint32_t)i); }
+    f = ns_fill_create();
+    step(f, &Q, ops, CAL_N + 1, &truth, NULL, &cfg, 1, &st);
+    CHECK(st.cal_state == 2 && st.cal_px_before < 1.0f && count_outputs_near(f, hx, hy, hz, hs) == 1, "minoría desplazada: la cámara buena no se toca (estado %d, desfase %.2f px)", st.cal_state, st.cal_px_before);
+    uint32_t nq; const NsEffect *eq = ns_fill_effects(f, &nq); float errq = 1e9f;
+    for (uint32_t i = 0; i < nq; i++) { float c[3]; centroid(&eq[i], c); if (fabsf(c[2] - hz) < 400) { errq = 0; const float HW[4][3] = {{hx, hy, hz}, {hx + hs, hy, hz}, {hx, hy + hs, hz}, {hx + hs, hy + hs, hz}}; for (int k = 0; k < 4; k++) for (int a = 0; a < 3; a++) errq = fmaxf(errq, fabsf(eq[i].p[k][a] - HW[k][a])); } }
+    CHECK(errq < 1.0f, "el relleno queda exactamente donde dice la lista (error %.2f u)", errq);
+    ns_fill_destroy(f); free(Q.t); free(Q.s);
+    free(M.t); free(M.s); free(N.t); free(N.s);
+}
+
+/* Cautelas del relleno: un semitransparente PARCIAL (la superficie nativa ya está debajo con esa textura) no se rellena (doble mezcla); el no semitransparente sí, con sesgo de profundidad 2 sobre el nativo */
+static void test_partial_semi_and_bias(void) {
+    Nat N = {0};
+    nat_quad(&N, -500, -500, 4000, 1000, PAGE, CLUT, 0xD0000001u);
+    NsFillCam cam = cam_id(); NsFillStats st; NsFillCfg cfg; ns_fill_cfg_default(&cfg);
+    NsFill *f = ns_fill_create();
+    GpuOp semi = list_of(-500, -500, 4000, 2000, 1);   /* cubre el nativo y se sale de él: el triángulo A,B,D es PARCIAL */
+    step(f, &N, &semi, 1, &cam, NULL, &cfg, 1, &st);
+    CHECK(st.cls[NF_SKIP_PARTIAL_SEMI] == 1 && st.cls[NF_FILL_PARTIAL] == 0 && st.cls[NF_FILL_ABSENT] + st.cls[NF_FILL_SPRITE] == 1, "semitransparente parcial: no se rellena (parcial_semi=%u parcial=%u ausente+sprite=%u)", st.cls[NF_SKIP_PARTIAL_SEMI], st.cls[NF_FILL_PARTIAL], st.cls[NF_FILL_ABSENT] + st.cls[NF_FILL_SPRITE]);
+    ns_fill_reset(f);
+    GpuOp opaque = list_of(-500, -500, 4000, 2000, 0);
+    step(f, &N, &opaque, 1, &cam, NULL, &cfg, 2, &st);
+    uint32_t n; const NsEffect *e = ns_fill_effects(f, &n);
+    int bias2 = 0, bias0 = 0;
+    for (uint32_t i = 0; i < n; i++) { bias2 += e[i].depth_bias == 2; bias0 += e[i].depth_bias == 0; }
+    CHECK(st.cls[NF_FILL_PARTIAL] == 1 && st.cls[NF_SKIP_PARTIAL_SEMI] == 0 && n == 2 && bias2 == 1 && bias0 == 1, "opaco parcial: se rellena con sesgo 2 sobre el nativo (parcial=%u salidas=%u sesgo2=%d sesgo0=%d)", st.cls[NF_FILL_PARTIAL], n, bias2, bias0);
+    ns_fill_destroy(f); free(N.t); free(N.s);
+}
+
+/* Modo del glue (procesos aparte: el entorno se lee una sola vez). m: 0 = sin MV_FILL (lo gobierna el interruptor de la app; defecto apagado), 1 = MV_FILL=1 (forzado), 2 = MV_FILL=0 (todo apagado).
+ * El trabajador puede calcular y registrar siempre, pero ns_fill_glue_fetch solo devuelve algo si dibujar está permitido. */
+static int test_glue_mode(int m) {
+    NsEffect one, out[4]; memset(&one, 0, sizeof one); one.nv = 3;
+    int bad = 0;
+    ns_fill_glue_test_set(&one, 1, 100, 105);
+    uint32_t a = ns_fill_glue_fetch(out, 4);                          /* sin tocar el interruptor */
+    ns_fill_glue_set_mode(1); ns_fill_glue_test_set(&one, 1, 100, 105);
+    uint32_t b = ns_fill_glue_fetch(out, 4);                          /* interruptor encendido */
+    ns_fill_glue_set_mode(0); ns_fill_glue_test_set(&one, 1, 100, 105);
+    uint32_t c = ns_fill_glue_fetch(out, 4);                          /* interruptor apagado */
+    const uint32_t ea = m == 1, eb = m == 2 ? 0 : 1, ec = m == 1;     /* esperado */
+    if (a != ea || b != eb || c != ec) { printf("FALLO modo %d: sin interruptor=%u (esp. %u) encendido=%u (esp. %u) apagado=%u (esp. %u)\n", m, a, ea, b, eb, c, ec); bad = 1; }
+    return bad;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "--sin-dibujo")) return test_glue_mode(argc > 2 ? atoi(argv[2]) : 0);
+
+    setenv("MV_FILL", "1", 1);   /* los tests del hilo trabajador comprueban lo que se dibuja: modo dibujo explícito (el defecto es solo diagnóstico) */
     test_intro_cover();
     test_fill_and_match();
     test_camera_ys();
@@ -453,6 +653,16 @@ int main(void) {
     test_pipeline_follow();
     test_glue();
     test_glue_stale();
+    test_calibration();
+    test_partial_semi_and_bias();
+    test_brake_and_platform();
+    for (int m = 0; m < 3 && argc > 0 && strchr(argv[0], '/'); m++) {   /* sin MV_FILL (interruptor de la app, defecto apagado), MV_FILL=1 (forzado) y MV_FILL=0 (necesita la ruta del propio ejecutable) */
+        static const char *const pre[3] = {"env -u MV_FILL", "env MV_FILL=1", "env MV_FILL=0"};
+        char cmd[600];
+        snprintf(cmd, sizeof cmd, "%s '%s' --sin-dibujo %d", pre[m], argv[0], m);
+        int rc = system(cmd);
+        CHECK(rc == 0, "modo del glue %s (rc=%d)", pre[m], rc);
+    }
     if (fails) { printf("test_ns_fill: %d FALLOS\n", fails); return 1; }
     printf("test_ns_fill: OK\n");
     return 0;

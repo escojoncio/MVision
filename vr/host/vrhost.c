@@ -340,6 +340,11 @@ __attribute__((weak)) void ns_cover_glue_post_ik(const uint8_t *ram) { (void)ram
 __attribute__((weak)) void ns_cover_glue_submit(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; }
 __attribute__((weak)) void ns_cover_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame, const float *eye, const float *M) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; (void)eye; (void)M; }
 __attribute__((weak)) size_t ns_cover_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
+/* Relleno por la verdad del motor (ns_fill_glue.c, solo en la app): lo que la lista de la GPU dibuja y el nativo no tiene, SOLO en la pantalla 3D con la cámara del motor (VRV_K_ENGINE); por defecto solo diagnóstico `[relleno]` (dibuja con el ajuste «Relleno en pantalla 3D» de la app, ns_fill_glue_set_mode, o con MV_FILL=1; MV_FILL=0 lo apaga). Definiciones débiles vacías para las pruebas de escritorio. */
+__attribute__((weak)) void ns_fill_glue_post_ik(const uint8_t *ram) { (void)ram; }
+__attribute__((weak)) void ns_fill_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, uint32_t frame, const float *eye, const float *M, int list_vr) { (void)ram; (void)scratch; (void)ops; (void)nops; (void)frame; (void)eye; (void)M; (void)list_vr; }
+__attribute__((weak)) size_t ns_fill_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
+__attribute__((weak)) void ns_fill_glue_reset(void) {}
 /* Decodificador de vídeo (runtime/mdec.c): palabras entregadas desde el arranque. En las pruebas de escritorio sin MDEC vale siempre 0 (no hay FMV). */
 __attribute__((weak)) uint32_t mdec_out_words_total(void) { return 0; }
 /* Manos nuevas (ns_hand.c, solo en la app; vr/body/vr_hand_skin.c): definición débil vacía para las pruebas de escritorio, donde la manopla del motor se queda como está. */
@@ -572,7 +577,10 @@ static void ns_solid_tap(const NsScene *s, const NsMeshStore *st, void *u) {
     atomic_store_explicit(&hcn.last_tris, (uint32_t)n, memory_order_relaxed);
 }
 
-static void ns_post_ik(uint8_t *ram) { ns_hook_post_ik(ram); ns_cover_glue_post_ik(ram); }
+static void ns_post_ik(uint8_t *ram) {
+    ns_hook_post_ik(ram); ns_cover_glue_post_ik(ram);
+    if (view.kind == VRV_K_ENGINE) ns_fill_glue_post_ik(ram);   /* instantánea con la pose IK para el relleno: solo con la pantalla 3D del motor */
+}
 /* Capa de brazos inactiva: vrbody_apply corrió después de la captura de este fotograma y no manejó ningún brazo (mandos sin pose válida: en los registros, `pose_valida I=0 D=0`,
  * `IK: aplicaciones=+25 brazos=+0` y 25 escenas «sin IK» por segundo => valid=0x47, escena-no-apta, GPU o mundo sin dibujar en solo nativo con el jugador quieto). */
 static int ns_ik_idle(void *u) {
@@ -607,6 +615,10 @@ static void ns_frame_check(void) {
     {   /* cobertura de la lista de la GPU por la escena nativa (resultado del hilo trabajador, ~1 por segundo) */
         static char cbuf[8192];
         if (ns_cover_glue_poll(cbuf, sizeof cbuf)) fputs(cbuf, stderr);
+    }
+    {   /* relleno por la verdad del motor (pantalla 3D del motor): una línea por segundo, `[relleno] fr= tris_rellenables= ... ms= desfase_px=` */
+        static char fbuf[2048];
+        if (ns_fill_glue_poll(fbuf, sizeof fbuf)) fputs(fbuf, stderr);
     }
     {   /* colisión de la cabeza (una línea por segundo): de dónde sale la geometría y qué hizo la última consulta */
         static uint32_t hs0, hn0, ho0, hr0;
@@ -1904,6 +1916,14 @@ static void dump_at_stage(Cpu *c) {
     dump_point = 0;
 }
 
+/* Vacía el relleno al entrar o salir de la pantalla 3D del motor y al cambiar de zona (cada escena empieza de cero; el trabajador además detecta el cambio de época del extractor y el corte de cámara por salto de ojo/giro). */
+static void ns_fill_gate(void) {
+    static int was_engine, have; static int last_area;
+    const int eng = view.kind == VRV_K_ENGINE, area = (bs.valid & BRIDGE_OK_AREA) ? (int)bs.area_id : last_area;
+    if (eng != was_engine || (eng && have && area != last_area)) ns_fill_glue_reset();
+    was_engine = eng; last_area = area; have = 1;
+}
+
 static void frame_hook_body(Cpu *c, uint32_t f) {
     ns_hook_set_frame((uint32_t)hle_frame_count());
     ns_hook_tick(emu_ram);                        /* publica la escena nativa capturada en este fotograma de juego */
@@ -1917,6 +1937,7 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
     if (mv_vr_take_recenter()) vrcam_recenter();
     bridge_read(emu_ram, &bs);
     publish_state();
+    ns_fill_gate();
     vrcam_frame(emu_ram, &bs);
     vrhead_frame(emu_ram, &bs, bs.moving);
     if (hc_on) {   /* sin cámara VR (cinemática, menú, otra zona) el almacén de colisión no vale */
@@ -1958,6 +1979,8 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
             float ce[3], cm[9];
             if (cr) { for (int i = 0; i < 3; i++) ce[i] = (float)cr->eye[i]; memcpy(cm, cr->M, sizeof cm); }
             ns_cover_glue_submit_cam(emu_ram, emu_scratch, l->ops, l->nops, f, cr ? ce : NULL, cr ? cm : NULL);   /* con la cámara de la lista */
+            /* Relleno: SOLO con la pantalla 3D del motor. En el mundo en primera persona la lista no se usa como verdad ni como relleno (el nativo es el mundo). */
+            if (view.kind == VRV_K_ENGINE) ns_fill_glue_submit_cam(emu_ram, emu_scratch, l->ops, l->nops, f, cr ? ce : NULL, cr ? cm : NULL, cr ? cr->active : 0);
         }   /* 1 de cada N: instantánea y comprobación de cobertura en otro hilo */
         dump_capture(c, f, l);
         if (!cap_on) break;

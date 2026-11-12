@@ -19,7 +19,7 @@ static uint32_t fdiff(uint32_t a, uint32_t b) { return a >= b ? a - b : 0xFFFFFF
 
 static struct {
     pthread_mutex_t mx; pthread_cond_t cv; pthread_t th;
-    int started, init, off, busy, job, snap_valid, reset;
+    int started, init, off, force, app_draw, busy, job, snap_valid, reset;   /* off: ni calcula (MV_FILL=0); force: dibuja siempre (MV_FILL=1, herramientas); app_draw: interruptor «Relleno en pantalla 3D» de la app (def. 0). Sin ninguno: calcula y registra pero fetch no devuelve nada (diagnóstico) */
     unsigned every, counter;
     uint8_t *ram, *snap; uint8_t scratch[1024];
     GpuOp *ops; uint32_t nops, frame;
@@ -79,7 +79,7 @@ static void *worker(void *arg) {
             G.n_out = n; G.runs++; G.res_frame = frame;
             if (frame - G.seen_frame >= 60u || !G.seen_frame) {   /* ~1 línea por segundo a 60 fotogramas */
                 G.seen_frame = frame;
-                ns_fill_format(&st, frame, G.text, sizeof G.text); G.text_new = 1;
+                ns_fill_format_diag(&st, frame, G.text, sizeof G.text); G.text_new = 1;
             }
         } else {   /* fallo puntual: se conserva el resultado anterior unos pocos fotogramas; después, sin escena (menú, vídeo): nada que rellenar */
             G.fails++;
@@ -93,11 +93,12 @@ static void *worker(void *arg) {
 
 static int ensure_started(void) {   /* con G.mx tomado */
     if (!G.init) {
-        const char *e = getenv("MV_FILL"), *n = getenv("MV_FILL_N");
+        const char *e = getenv("MV_FILL"), *n = getenv("MV_FILL_N");   /* MV_FILL: 0 = apagado; 1 = dibuja siempre (forzado de herramientas); ausente/otro = lo gobierna el interruptor de la app (ns_fill_glue_set_mode; def. apagado = DIAGNÓSTICO: calcula y escribe `[relleno]` pero fetch no devuelve nada) */
         G.every = n ? (unsigned)strtoul(n, NULL, 10) : 1u;
         if (!G.every) G.every = 1u;
         G.init = 1;
         if (e && e[0] == '0') { G.off = 1; cover_clear(); }   /* MV_FILL=0: ninguna medida de relleno */
+        else if (e && e[0] == '1' && !e[1]) G.force = 1;
     }
     if (G.off) return 0;
     if (!G.ram) {
@@ -111,6 +112,13 @@ static int ensure_started(void) {   /* con G.mx tomado */
         G.started = 1;
     }
     return 1;
+}
+
+void ns_fill_glue_set_mode(int draw) {
+    pthread_mutex_lock(&G.mx);
+    G.app_draw = draw != 0;
+    if (!G.app_draw) G.n_out = 0;   /* apagado en caliente: nada de lo vigente se sirve al volver a encender */
+    pthread_mutex_unlock(&G.mx);
 }
 
 void ns_fill_glue_post_ik(const uint8_t *ram) {
@@ -148,7 +156,7 @@ uint32_t ns_fill_glue_fetch(NsEffect *cap, uint32_t max) {
     uint32_t n = 0;
     if (!cap || !max) return 0;
     pthread_mutex_lock(&G.mx);
-    if (!G.off && G.out && G.n_out && fdiff(G.sub_frame, G.res_frame) <= FG_STALE) { n = G.n_out < max ? G.n_out : max; memcpy(cap, G.out, (size_t)n * sizeof(NsEffect)); }
+    if (!G.off && (G.force || G.app_draw) && G.out && G.n_out && fdiff(G.sub_frame, G.res_frame) <= FG_STALE) { n = G.n_out < max ? G.n_out : max; memcpy(cap, G.out, (size_t)n * sizeof(NsEffect)); }
     pthread_mutex_unlock(&G.mx);
     return n;
 }

@@ -9,6 +9,7 @@ void ns_fill_glue_submit_cam(const uint8_t *ram, const uint8_t *scratch, const G
 uint32_t ns_fill_glue_fetch(NsEffect *cap, uint32_t max) { (void)cap; (void)max; return 0; }
 size_t ns_fill_glue_poll(char *buf, size_t cap) { (void)buf; (void)cap; return 0; }
 void ns_fill_glue_reset(void) {}
+void ns_fill_glue_set_mode(int draw) { (void)draw; }
 int ns_fill_glue_scenery_stale(void) { return 0; }
 
 /* Cuerpo del jugador a la cadencia del renderer (vr/host/vrhost.c, que los bancos no enlazan): sin anfitrión, la matriz de la escena tal cual. */

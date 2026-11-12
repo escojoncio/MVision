@@ -139,7 +139,14 @@ int main(void) {
     CHECK(strstr(vh, "if (!native_mode()) vrhc_feed_scene(&hm, &sc") != NULL, "modo gpu: la colisión de la cabeza se alimenta de la lista de la GPU");
     /* 7b) cercanía al ojo, vista y registro del modo gpu */
     CHECK(strstr(vh, "if (!native_mode()) { o.eye_near_m = GPU3D_NEAR_EYE_M; o.line3d_px = 1.0f; o.coplanar_m = 0.005f; o.rect3d = 1; o.billboard = 1; }") != NULL && strstr(vh, "#define GPU3D_NEAR_EYE_M 0.10f") != NULL, "modo gpu: nada a menos de 0,10 m del ojo (vr_scene eye_near_m)");
-    CHECK(count(vh, "vin.gpu3d") == 0 && count(vh, "VRV_K_BACKUP") == 0 && count(vh, "ns_fill_glue") == 0, "vrhost: sin vin.gpu3d, sin respaldo, sin relleno (la medida de cobertura ns_cover_glue sigue como diagnóstico)");
+    CHECK(count(vh, "vin.gpu3d") == 0 && count(vh, "VRV_K_BACKUP") == 0, "vrhost: sin vin.gpu3d y sin respaldo (la medida de cobertura ns_cover_glue sigue como diagnóstico)");
+    /* relleno por la verdad del motor: SOLO en la pantalla 3D con la cámara del motor (VRV_K_ENGINE); nunca la lista como verdad ni relleno en el MUNDO en primera persona. Cada entrada del relleno (instantánea y lista)
+     * lleva la guarda de la vista; las únicas apariciones son la definición débil y la llamada guardada. */
+    CHECK(count(vh, "ns_fill_glue_submit_cam(") == 2 && strstr(vh, "if (view.kind == VRV_K_ENGINE) ns_fill_glue_submit_cam(emu_ram") != NULL, "vrhost: ns_fill_glue_submit_cam solo con view.kind == VRV_K_ENGINE");
+    CHECK(count(vh, "ns_fill_glue_post_ik(") == 2 && strstr(vh, "if (view.kind == VRV_K_ENGINE) ns_fill_glue_post_ik(ram);") != NULL, "vrhost: ns_fill_glue_post_ik solo con view.kind == VRV_K_ENGINE");
+    CHECK(count(vh, "ns_fill_glue_fetch") == 0 && count(vh, "ns_fill_glue_scenery_stale") == 0 && count(vh, "ns_fill_glue_last") == 0, "vrhost: no recoge el relleno ni lo usa como decisión de vista (el renderer lo recoge; sin escenario obsoleto)");
+    CHECK(strstr(vh, "static void ns_fill_gate(void)") != NULL && strstr(vh, "if (eng != was_engine || (eng && have && area != last_area)) ns_fill_glue_reset();") != NULL && count(vh, "ns_fill_gate();") == 1, "vrhost: el relleno se vacía al entrar/salir de la pantalla 3D del motor y al cambiar de zona");
+    CHECK(strstr(vh, "ns_fill_glue_poll(fbuf, sizeof fbuf)") != NULL, "vrhost: la línea [relleno] se imprime una vez por segundo");
     CHECK(strstr(vh, "int keep3b = vrhost_keep_filter(native_mode(), cine_cand,") != NULL, "modo gpu: fundidos y destellos al panel 2D (vrhost_keep_filter decide qué filtro se conserva)");
     CHECK(strstr(vh, "gpu_capture_hiprec(1)") != NULL && strstr(vh, "if (cap_on && !gte_hp_enabled()) gpu_capture_hiprec(1);") != NULL, "vértices de vista de la GTE en alta precisión siempre que haya captura");
     CHECK(strstr(vh, "\"[gpu3d] fotograma=%u") != NULL && strstr(vh, "gpu3d_log();") != NULL && strstr(vh, "gpu3d_note(&sc, r);") != NULL, "registro [gpu3d] una vez por segundo");
@@ -158,7 +165,15 @@ int main(void) {
     CHECK(strstr(vh, "view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO") != NULL, "la capa 2D entera acompaña a la UI y al vídeo");
     CHECK(count(xp, "engineHealthy") == 0 && count(xp, "engineBackup") == 0 && count(xp, "tipo=respaldo") == 0 && count(xe, "engineHealthy") == 0, "XRPresent no cae a ninguna imagen plana si el nativo no dibuja");
     CHECK(strstr(xp, "XRCinemaLayout.legible(reason: Int32(gs.view_reason), kind: gs.view_kind)") != NULL, "el vídeo y el respaldo se presentan grandes, planos y nítidos");
-    CHECK(count(nr, "scenery_stale") == 0 && count(nr, "ns_fill") == 0 && count(nr, "fillBuf") == 0, "NativeRenderer: sin relleno ni escenario obsoleto en el mundo");
+    CHECK(count(nr, "scenery_stale") == 0 && count(nr, "ns_fill_glue_fetch") == 1, "NativeRenderer: sin escenario obsoleto; el relleno se recoge en un solo sitio");
+    {   /* el relleno solo entra con la pantalla 3D (cámara del juego, `cinema`): la guarda va justo antes de la recogida y por la misma tubería de efectos (ns_gpu_fx_build_ex) */
+        const char *g = strstr(nr, "if cinema && screenMode, (validBits & UInt32(truncatingIfNeeded: NS_SV_FX)) != 0 {"), *f = strstr(nr, "ns_fill_glue_fetch");
+        CHECK(g && f && f > g && f - g < 400, "NativeRenderer: ns_fill_glue_fetch solo bajo `if cinema && screenMode` (solo en la pantalla 3D (cinema && screenMode): ni en el mundo en primera persona ni en el diorama)");
+        CHECK(strstr(nr, "fxEffects.append(contentsOf: fillBuf[0..<nf])") != NULL && strstr(nr, "ns_gpu_fx_build_ex(fp.baseAddress") != NULL, "NativeRenderer: el relleno pasa por fxEffects -> ns_gpu_fx_build_ex (sin ruta nueva en la GPU)");
+    }
+    /* interruptor de la app «Relleno en pantalla 3D»: apagado de serie, persistente, gobierna ns_fill_glue_set_mode (apagado = diagnóstico); mismo patrón que newHands */
+    CHECK(strstr(xp, "var fill3D = false") != NULL && strstr(xp, "c.fill3D = b(\"xr.fill3d\", false)") != NULL && strstr(xp, "d.set(fill3D, forKey: \"xr.fill3d\")") != NULL, "XRViewConfig.fill3D: apagado de serie y persistente (xr.fill3d)");
+    CHECK(strstr(xp, "ns_fill_glue_set_mode(on ? 1 : 0)") != NULL && strstr(xp, "applyHands(c.newHands); applyFill(c.fill3D)") != NULL && strstr(xp, "case .fill3D: cfg.fill3D.toggle(); XRViewConfig.applyFill(cfg.fill3D); cfg.save()") != NULL && strstr(xp, "(\"Relleno en pantalla 3D\", yn(cfg.fill3D))") != NULL, "el interruptor aplica el modo al arrancar y al conmutar, y tiene etiqueta en el menú");
     CHECK(strstr(nr, "[nativo] escena_ausente=") != NULL && strstr(nr, "sceneAbsent += 1") != NULL, "escena nativa ausente: se conserva la última válida y se registra [nativo] escena_ausente=N");
     CHECK(count(xe, "worldNearM") == 0 && strstr(xe, "if dg.projMode == 1 { projNote") != NULL && strstr(xe, "projSource = \"sistema\"") != NULL && strstr(xe, "nearOverride: dg.nearPlane))") != NULL, "proyeccion del sistema (drawable, con su depthRange) por defecto; sin plano cercano propio");
     CHECK(count(nr, "setCullMode(.none)") >= 2 && count(nr, "setCullMode(.back)") == 0 && count(nr, "setCullMode(.front)") == 0, "sin descarte de caras en el mundo ni en los recubrimientos");

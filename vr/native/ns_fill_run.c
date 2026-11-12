@@ -121,7 +121,7 @@ int ns_fill_session_run(NsFillSession *s, const uint8_t *ram, const uint8_t *scr
     int rc = ns_fill_run(s->fill, &nat, ops, nops, skip, use, other, &cfg, frame, st);
     if (rc == 0 && st) { st->cam_src = (ro && ro->list_eye && ro->list_M) ? used : 2; st->ms_total += t4 - t3; st->ms_index += 0; st->ms_extract = s->ms_extract; st->ms_adapt = s->ms_adapt; st->ms_fx = s->ms_fx; st->ms_total += s->ms_extract + s->ms_adapt + s->ms_fx; }
     keep_free(s);
-    if (ro && ro->keep_native) { s->k_tr = tr; s->k_src = src; s->k_n = n; s->k_skip = skip; s->k_nops = nops; s->k_cam = *use; }
+    if (ro && ro->keep_native) { s->k_tr = tr; s->k_src = src; s->k_n = n; s->k_skip = skip; s->k_nops = nops; s->k_cam = st ? ns_fill_cam_corrected(use, st) : *use; }   /* herramientas: la cámara tras la calibración (la que casa el nativo con la lista) */
     else { free(skip); free(tr); free(src); }
     return rc;
 }

@@ -1124,6 +1124,45 @@ static void idx_add_prims(Idx *ix, const uint8_t *m, const NsFxScene *sc) {
     }
 }
 
+/* Paquetes de los elementos por DIRECCIÓN: la dirección de un paquete (GpuOp.pkt_addr) de una primitiva con elemento, en CUALQUIERA de sus dos búferes de paquetes, identifica al elemento sin mirar el
+ * contenido. Los efectos animados (anime.c: halos, explosiones, humo) reescriben u,v y color del paquete cada fotograma y los de la RAM no son los de la lista (medido en a31: d0003 sprites 000b/38f1,
+ * d0005 001a/3e32 con u0 y rgb distintos y las mismas x,y; la casación por contenido de idx_find los dejaba en 2D). Mismo criterio de cobertura que ns_fx_covers_packet. */
+typedef struct { uint32_t *key; int32_t *val; uint32_t mask; } AddrMap;
+static void am_free(AddrMap *a) { free(a->key); free(a->val); a->key = NULL; a->val = NULL; a->mask = 0; }
+static int am_build(AddrMap *a, const uint8_t *m, const NsFxScene *sc) {
+    memset(a, 0, sizeof *a);
+    if (!m || !sc->n_items) return 0;
+    uint32_t hs = 16; while (hs < sc->n_items * 4u) hs <<= 1;
+    a->key = (uint32_t *)calloc(hs, sizeof(uint32_t)); a->val = (int32_t *)malloc(sizeof(int32_t) * hs); a->mask = hs - 1;
+    if (!a->key || !a->val) { am_free(a); return -1; }
+    for (uint32_t i = 0; i < sc->n_items; i++) {
+        const NsFxItem *it = &sc->items[i];
+        uint32_t p = it->prim;
+        if (it->flags & NSFX_F_FROM_OBJ) continue;
+        if (!ptr_ok(p) || !in_ram(p, 0x54)) continue;
+        int n = rds16(m, p + 0x2A), psz = rds16(m, p + 0x30);
+        if (n <= 0 || n > 8192 || psz < 8 || psz > 64 || (int)it->idx >= n) continue;
+        for (uint32_t b = 0; b < 2; b++) {
+            uint32_t pk = rdu32(m, p + 0x40 + 4u * b);
+            if (!ptr_ok(pk) || !in_ram(pk, (uint32_t)n * (uint32_t)psz)) continue;
+            uint32_t addr = ((pk & RAMMASK) + (uint32_t)it->idx * (uint32_t)psz) | 0x80000000u;
+            uint32_t h = pm_hash(addr) & a->mask;
+            while (a->key[h] && a->key[h] != addr) h = (h + 1) & a->mask;
+            if (!a->key[h]) { a->key[h] = addr; a->val[h] = (int32_t)i; }
+        }
+    }
+    return 0;
+}
+static int32_t am_find(const AddrMap *a, uint32_t pkt) {
+    if (!a->key || !ptr_ok(pkt)) return -1;
+    uint32_t addr = (pkt & RAMMASK) | 0x80000000u;
+    for (uint32_t h = pm_hash(addr) & a->mask, n = 0; n <= a->mask; h = (h + 1) & a->mask, n++) {
+        if (a->key[h] == addr) return a->val[h];
+        if (!a->key[h]) return -1;
+    }
+    return -1;
+}
+
 int ns_fx_classify(const uint8_t *ram, const NsFxScene *sc, const GpuDrawList *dl, uint8_t *cls, uint8_t *sub, int32_t *item, NsFxClsStats *st) {
     if (!sc || !dl) return -1;
     NsFxClsStats z; memset(&z, 0, sizeof z); NsFxClsStats *S = st ? st : &z; memset(S, 0, sizeof *S);
@@ -1136,6 +1175,7 @@ int ns_fx_classify(const uint8_t *ram, const NsFxScene *sc, const GpuDrawList *d
     if (!hit || !lc || !li) { free(hit); free(lc); free(li); idx_free(&ix); return -1; }
     for (uint32_t i = 0; i < sc->n_items; i++) ent_put_item(&ix, &sc->items[i], (int)i);
     if (ram) { idx_add_prims(&ix, ram, sc); idx_add_objs(&ix, ram, sc); }
+    AddrMap am; if (am_build(&am, ram, sc) < 0) memset(&am, 0, sizeof am);
     S->idx_overflow = (uint32_t)ix.overflow;
     for (uint32_t i = 0; i < sc->n_items; i++) { const NsFxItem *it = &sc->items[i]; if (!(it->flags & (NSFX_F_ENGINE_CULLED | NSFX_F_LOW_CONF))) S->n_fx_items_vis++; }
     const NsFxScreen *scr = &sc->screen;
@@ -1148,6 +1188,14 @@ int ns_fx_classify(const uint8_t *ram, const NsFxScene *sc, const GpuDrawList *d
         uint8_t c = NSFX_OP_2D, sc_sub = NSFX_SC_NONE; int32_t it = -1;
         S->n_ops++;
         if (o->type == GPU_OP_FILL || o->type == GPU_OP_VCOPY || o->type == GPU_OP_UPLOAD || o->type == GPU_OP_DOWNLOAD) { c = NSFX_OP_EVENT; goto done; }
+        if (o->pkt_addr && (o->type == GPU_OP_POLY || o->type == GPU_OP_LINE || o->type == GPU_OP_RECT)) {   /* identidad por dirección del paquete (ver AddrMap) */
+            int32_t k = am_find(&am, o->pkt_addr);
+            if (k >= 0 && (uint32_t)k < sc->n_items) {
+                const NsFxItem *fi = &sc->items[k];
+                int same = o->type == GPU_OP_POLY ? (fi->pcls == 2 && fi->pnv == o->nv) : o->type == GPU_OP_LINE ? fi->pcls == 0 : fi->pcls == 1;
+                if (same && !((fi->flags & NSFX_F_TEXTURED) && (fi->flags & NSFX_F_TPAGE_UNKNOWN))) { c = NSFX_OP_FX; it = k; goto done; }
+            }
+        }
         if (ix.overflow) goto done;   /* índice incompleto: todo 2D */
         {
             int32_t mi = -1; int r = idx_find(&ix, o, &mi);
@@ -1204,7 +1252,7 @@ int ns_fx_classify(const uint8_t *ram, const NsFxScene *sc, const GpuDrawList *d
     if (cls) memcpy(cls, lc, nops);
     if (sub) memcpy(sub, ls, nops);
     if (item) memcpy(item, li, sizeof(int32_t) * nops);
-    free(hit); free(lc); free(li); idx_free(&ix);
+    free(hit); free(lc); free(li); idx_free(&ix); am_free(&am);
     return 0;
 }
 

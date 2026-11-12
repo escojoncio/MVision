@@ -1,6 +1,7 @@
 /* nsfill: relleno por la verdad del motor (ns_fill) sobre un volcado, con las medidas de verificación. NO ejecuta el juego.
  * Uso: nsfill DIR_VOLCADO [DIR_LISTA]   (el segundo, opcional, aporta list.bin si el primero no la trae)
  *   NSFILL_RAMCAM=1   usa siempre la cámara de la RAM (ignora el registro de la lista); por defecto ns_fill elige la que case mejor
+ *   NSFILL_NOCALIB=1  sin la calibración de la cámara (desfase RAM/lista)
  *   NSFILL_REPS=N     repeticiones para medir el coste (def. 20)
  *   NSFILL_DETALLE=f  fichero con una línea por efecto de relleno (clase, textura, esquinas en mundo y error de reproyección)
  * Mide: (1) cobertura de la vista del juego, nativo y nativo+relleno, con el MISMO comparador independiente de ns_cover (ns_cover_core) sobre la escena nativa a la que se
@@ -58,6 +59,7 @@ int main(int argc, char **argv) {
     NsFillCfg cfg;
     ns_fill_cfg_default(&cfg);
     if (getenv("NSFILL_POSE")) cfg.pose_fill = atoi(getenv("NSFILL_POSE"));
+    if (getenv("NSFILL_NOCALIB")) cfg.calib = 0;   /* sin calibrar la cámara de la lista contra el nativo (desfase RAM/lista) */
     FILE *dbg = getenv("NSFILL_TRI") ? fopen(getenv("NSFILL_TRI"), "w") : NULL;
     cfg.dbg = dbg;
     uint32_t frame = (uint32_t)ns_dump_meta_num(dl, "game_frame", 1000);
@@ -71,6 +73,8 @@ int main(int argc, char **argv) {
     char buf[4096];
     ns_fill_format(&st, frame, buf, sizeof buf);
     printf("camara=%s\n%s", cam_used ? "RAM" : "lista", buf);
+    ns_fill_format_diag(&st, frame, buf, sizeof buf);
+    printf("%s", buf);
     uint32_t nfx = 0;
     const NsEffect *fx = ns_fill_session_effects(s, &nfx);
     NsFillNative nat; const uint8_t *skip; NsFillCam cam;
