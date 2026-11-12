@@ -116,6 +116,11 @@ typedef struct {
      * de un fotograma). 0 = sin antirrebote. */
     float menu_debounce_s;
     vri_map_t map;
+    /* Giro de 180 grados con el clic del stick de mover (L3 del mando del juego): un toque corto (menor que flip_tap_s, sin R3 a la vez) gira el cuerpo
+     * 180 grados a la DERECHA en flip_turn_s segundos con curva suave (smoothstep: acelera y frena) y la viñeta de confort al máximo mientras gira. El giro
+     * sale al SOLTAR el toque, no al pulsar: mantener L3 (flip_tap_s o más) sigue siendo el gesto de vr_gesture que abre la ventana de objetos. Una pulsación
+     * = un giro; las pulsadas durante un giro (o que empiezan en él) se ignoran. Nada en menús / escenas / sin control (f->menu). 0 = desactivado. */
+    float flip_turn_s, flip_tap_s;
 } vri_cfg_t;
 
 typedef struct {
@@ -138,6 +143,8 @@ typedef struct {
     float menu_t;                      /* tiempo que f->menu discrepa de menu_eff */
     float adv_hold, adv_phase;         /* avance sostenido: tiempo mantenido y fase del tren de toques */
     bool adv_active;
+    bool flip_on, l3_prev, l3_dual, l3_ign;   /* giro de 180 en curso; L3 anterior; R3 a la vez durante este clic; clic empezado durante un giro */
+    float flip_t, l3_t;                       /* tiempo del giro; duración del clic de L3 */
     vr_pad_t last;
 } vr_input_t;
 
@@ -155,6 +162,8 @@ float vr_input_body_yaw(const vr_input_t *s);
 void vr_input_reset_body_yaw(vr_input_t *s, float yaw);  /* p. ej. al cambiar de sala, o alinear con el juego */
 uint32_t vr_input_snap_count(const vr_input_t *s);       /* incrementa en cada giro por pasos (para fundido breve) */
 float vr_input_vignette(const vr_input_t *s);            /* 0..1 para el renderer */
+bool vr_input_flip_active(const vr_input_t *s);          /* giro de 180 grados en curso */
+float vr_input_flip_curve(float u);                      /* fracción del giro (0..1) tras la fracción de tiempo u (0..1): smoothstep, sin saltos de velocidad al inicio ni al final */
 
 /* Agacharse físico. */
 void vr_input_recalibrate(vr_input_t *s);                /* toma la altura de cabeza del próximo fotograma como "de pie" */

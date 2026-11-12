@@ -215,6 +215,169 @@ static void t_loco(void) {
     vr_input_reset_body_yaw(&s, M_PI / 2); vr_input_update(&s, &f, &o); CHECK(o.lx == 255);
 }
 
+/* Retroceso: el stick de mover hacia atrás empuja al juego hacia atrás respecto a donde mira la cabeza, sin girar la vista (cuerpo ni cámara: body_yaw intacto). */
+static void t_back(void) {
+    vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); vr_pad_t o;
+    f.hand[0].stick_y = -1;                        /* atrás */
+    run(&s, &f, 20, &o);
+    CHECK(o.lx == 0x80 && o.ly == 255);            /* "abajo" del pad respecto al origen del mando (= la mirada) */
+    NEAR(vr_input_body_yaw(&s), 0, 1e-9f);
+    CHECK(vr_input_snap_count(&s) == 0 && !vr_input_flip_active(&s));
+    /* cabeza girada 90 grados a la derecha, origen del juego = esa mirada: atrás sigue siendo "abajo" y la vista no gira */
+    qyaw(f.head_quat, M_PI / 2); vr_input_set_game_up(&s, M_PI / 2);
+    run(&s, &f, 20, &o);
+    CHECK(abs((int)o.lx - 128) <= 1 && o.ly == 255);
+    NEAR(vr_input_body_yaw(&s), 0, 1e-9f);
+    /* atrás y a la derecha (diagonal): el vector del juego sale por detrás-derecha respecto a la mirada */
+    qyaw(f.head_quat, 0); vr_input_set_game_up(&s, 0);
+    f.hand[0].stick_x = 1; f.hand[0].stick_y = -1; vr_input_update(&s, &f, &o);
+    CHECK(o.lx > 128 && o.ly > 128);
+    NEAR(vr_input_body_yaw(&s), 0, 1e-9f);
+}
+
+static float wrapd(float a) { while (a > (float)M_PI) a -= 2 * (float)M_PI; while (a <= -(float)M_PI) a += 2 * (float)M_PI; return a; }
+
+/* Una pasada de n fotogramas con L3 (clic del stick de mover = mano izquierda con dominante derecha) = down; acumula el giro del cuerpo sin envolver. */
+static float flip_run(vr_input_t *s, vr_input_frame_t *f, int n, bool down, float *acc, int *active_frames) {
+    vr_pad_t o;
+    for (int i = 0; i < n; i++) {
+        float y0 = vr_input_body_yaw(s);
+        f->hand[0].buttons = down ? VRI_H_STICK : 0;
+        vr_input_update(s, f, &o);
+        *acc += wrapd(vr_input_body_yaw(s) - y0);
+        if (active_frames && vr_input_flip_active(s)) (*active_frames)++;
+    }
+    return *acc;
+}
+
+static void t_flip(void) {
+    const float PI = (float)M_PI;
+    /* curva: 0 -> 1, simétrica, monótona, velocidad nula en los extremos, saturada fuera de 0..1 y robusta a NaN */
+    NEAR(vr_input_flip_curve(0), 0, 1e-9f); NEAR(vr_input_flip_curve(1), 1, 1e-9f); NEAR(vr_input_flip_curve(0.5f), 0.5f, 1e-6f);
+    NEAR(vr_input_flip_curve(-3), 0, 1e-9f); NEAR(vr_input_flip_curve(7), 1, 1e-9f); NEAR(vr_input_flip_curve(NAN), 0, 1e-9f);
+    CHECK(vr_input_flip_curve(0.02f) < 0.002f && vr_input_flip_curve(0.98f) > 0.998f);
+    { float p = 0; int mono = 1; for (int i = 1; i <= 100; i++) { float v = vr_input_flip_curve(i / 100.0f); if (v < p) mono = 0; p = v; } CHECK(mono); }
+    NEAR(vr_input_flip_curve(0.25f) + vr_input_flip_curve(0.75f), 1, 1e-6f);
+
+    vr_pad_t o; float acc; int act;
+    /* toque corto: sin giro al pulsar; al soltar gira 180 a la derecha en ~0,30 s y se detiene */
+    { vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); acc = 0; act = 0;
+      flip_run(&s, &f, 5, true, &acc, &act);       /* 0,055 s pulsado */
+      NEAR(acc, 0, 1e-9f); CHECK(!vr_input_flip_active(&s));
+      f.hand[0].buttons = VRI_H_STICK; vr_input_update(&s, &f, &o); CHECK(o.buttons & VRI_PAD_L3);   /* L3 sigue llegando al juego (gesto de ventana de objetos) */
+      flip_run(&s, &f, 1, false, &acc, &act);      /* suelta */
+      CHECK(vr_input_flip_active(&s)); CHECK(acc > 0);
+      float a1 = acc;
+      flip_run(&s, &f, 3, false, &acc, &act);
+      CHECK(acc > a1);                             /* arranca despacio y crece (aceleración) */
+      flip_run(&s, &f, 60, false, &acc, &act);
+      NEAR(acc, PI, 1e-3f);                        /* 180 grados exactos a la derecha */
+      CHECK(!vr_input_flip_active(&s));
+      CHECK(act >= 26 && act <= 29);               /* 0,30 s a 90 Hz */
+      NEAR(fabsf(vr_input_body_yaw(&s)), PI, 1e-3f);
+      flip_run(&s, &f, 60, false, &acc, &act); NEAR(acc, PI, 1e-3f);   /* no sigue girando */
+    }
+    /* curva real: a mitad de tiempo, mitad del giro; el paso por fotograma crece y luego decrece */
+    { vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); f.dt = 0.01f; acc = 0; act = 0;
+      flip_run(&s, &f, 5, true, &acc, NULL); flip_run(&s, &f, 1, false, &acc, NULL);
+      flip_run(&s, &f, 14, false, &acc, NULL);     /* 15 pasos de 0,01 = mitad */
+      NEAR(acc, PI / 2, 0.02f);
+      float prev = acc, maxd = 0; int up_then_down = 1, peaked = 0;
+      for (int i = 0; i < 20; i++) { float a = acc; flip_run(&s, &f, 1, false, &acc, NULL); float d = acc - a; if (d > maxd) maxd = d; else if (d < maxd - 1e-6f) peaked = 1; if (peaked && d > maxd + 1e-6f) up_then_down = 0; prev = acc; }
+      (void)prev; CHECK(up_then_down && peaked); NEAR(acc, PI, 1e-3f);
+      /* velocidad máxima = 1,5 x media (smoothstep): 900 grados/s */
+      CHECK(maxd / 0.01f * 180.0f / PI < 910.0f);
+    }
+    /* viñeta de confort: sube mientras gira (reutiliza la de vr_input) y vuelve a 0 */
+    { vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); acc = 0;
+      flip_run(&s, &f, 5, true, &acc, NULL); NEAR(vr_input_vignette(&s), 0, 1e-6f);
+      flip_run(&s, &f, 1, false, &acc, NULL); float mx = 0;
+      for (int i = 0; i < 30; i++) { flip_run(&s, &f, 1, false, &acc, NULL); if (vr_input_vignette(&s) > mx) mx = vr_input_vignette(&s); }
+      CHECK(mx > 0.5f * s.cfg.vignette && mx <= s.cfg.vignette + 1e-6f);
+      flip_run(&s, &f, 360, false, &acc, NULL); CHECK(vr_input_vignette(&s) < 0.01f);
+      flip_run(&s, &f, 1000, false, &acc, NULL);
+      vri_cfg_t c = s.cfg; c.vignette = 0; vr_input_set_cfg(&s, &c); vr_input_reset_body_yaw(&s, 0);   /* viñeta desactivada en ajustes: el giro sigue, sin viñeta */
+      flip_run(&s, &f, 5, true, &acc, NULL); flip_run(&s, &f, 1, false, &acc, NULL); flip_run(&s, &f, 30, false, &acc, NULL);
+      CHECK(vr_input_vignette(&s) < 1e-6f);
+    }
+    /* una pulsación = un giro: toques durante el giro se ignoran (también el que empieza en él y acaba después) */
+    { vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); acc = 0; act = 0;
+      flip_run(&s, &f, 4, true, &acc, &act); flip_run(&s, &f, 1, false, &acc, &act); CHECK(vr_input_flip_active(&s));
+      flip_run(&s, &f, 3, true, &acc, &act); flip_run(&s, &f, 1, false, &acc, &act);   /* toque completo dentro del giro */
+      flip_run(&s, &f, 30, false, &acc, &act); CHECK(!vr_input_flip_active(&s));
+      NEAR(acc, PI, 1e-3f);
+      flip_run(&s, &f, 5, true, &acc, &act); flip_run(&s, &f, 1, false, &acc, &act);   /* ahora sí: segundo giro */
+      flip_run(&s, &f, 60, false, &acc, &act); NEAR(acc, 2 * PI, 2e-3f);
+      /* empieza durante un giro y se suelta cuando ya terminó: no cuenta */
+      flip_run(&s, &f, 4, true, &acc, &act); flip_run(&s, &f, 1, false, &acc, &act); CHECK(vr_input_flip_active(&s));
+      flip_run(&s, &f, 5, true, &acc, &act);       /* pulsa dentro del giro... */
+      flip_run(&s, &f, 5, true, &acc, NULL);
+      CHECK(vr_input_flip_active(&s));
+      flip_run(&s, &f, 30, true, &acc, NULL);      /* ...y lo mantiene hasta que acaba */
+      CHECK(!vr_input_flip_active(&s)); NEAR(acc, 3 * PI, 3e-3f);
+      flip_run(&s, &f, 2, false, &acc, NULL); CHECK(!vr_input_flip_active(&s)); NEAR(acc, 3 * PI, 3e-3f);
+    }
+    /* mantener L3 (gesto de ventana de objetos de vr_gesture) o pasar de flip_tap_s: no gira */
+    { vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); acc = 0;
+      flip_run(&s, &f, 45, true, &acc, NULL); flip_run(&s, &f, 60, false, &acc, NULL);   /* 0,5 s */
+      NEAR(acc, 0, 1e-9f); CHECK(!vr_input_flip_active(&s));
+    }
+    /* L3 + R3 a la vez (volcado): no gira, aunque sea corto y aunque R3 llegue antes o se suelte después */
+    { vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); acc = 0;
+      f.hand[1].buttons = VRI_H_STICK; flip_run(&s, &f, 5, true, &acc, NULL); flip_run(&s, &f, 1, false, &acc, NULL); flip_run(&s, &f, 40, false, &acc, NULL);
+      NEAR(acc, 0, 1e-9f); CHECK(!vr_input_flip_active(&s));
+      f.hand[1].buttons = 0; flip_run(&s, &f, 5, false, &acc, NULL);
+      flip_run(&s, &f, 3, true, &acc, NULL); f.hand[1].buttons = VRI_H_STICK; flip_run(&s, &f, 2, true, &acc, NULL);   /* R3 se une a mitad del clic */
+      f.hand[1].buttons = 0; flip_run(&s, &f, 1, false, &acc, NULL); flip_run(&s, &f, 40, false, &acc, NULL);
+      NEAR(acc, 0, 1e-9f);
+    }
+    /* menús / escenas / códec / sin control (f->menu): no actúa; un giro en curso se corta al entrar en ellos */
+    { vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); acc = 0; f.menu = true;
+      flip_run(&s, &f, 5, true, &acc, NULL); flip_run(&s, &f, 1, false, &acc, NULL); flip_run(&s, &f, 40, false, &acc, NULL);
+      NEAR(acc, 0, 1e-9f); CHECK(!vr_input_flip_active(&s));
+      f.menu = false; flip_run(&s, &f, 20, false, &acc, NULL);
+      flip_run(&s, &f, 5, true, &acc, NULL); flip_run(&s, &f, 1, false, &acc, NULL); flip_run(&s, &f, 5, false, &acc, NULL);
+      CHECK(vr_input_flip_active(&s)); float part = acc; CHECK(part > 0 && part < PI);
+      f.menu = true; flip_run(&s, &f, 30, false, &acc, NULL);   /* pasa el antirrebote (0,12 s) */
+      CHECK(!vr_input_flip_active(&s)); CHECK(acc > part && acc < PI - 0.1f);
+      float cut = acc;
+      f.menu = false; flip_run(&s, &f, 30, false, &acc, NULL); NEAR(acc, cut, 1e-9f);   /* no se reanuda */
+      /* un clic empezado en el menú y soltado ya en juego no cuenta */
+      float a0 = acc; f.menu = true; flip_run(&s, &f, 20, true, &acc, NULL); f.menu = false;
+      flip_run(&s, &f, 30, true, &acc, NULL);      /* el antirrebote tarda 0,12 s en dejar el menú: con L3 ya mantenido más de flip_tap_s */
+      flip_run(&s, &f, 1, false, &acc, NULL); flip_run(&s, &f, 40, false, &acc, NULL);
+      NEAR(acc, a0, 1e-9f);
+    }
+    /* desactivado (flip_turn_s = 0), robusto a valores raros */
+    { vr_input_t s; vr_input_init(&s); vri_cfg_t c = s.cfg; c.flip_turn_s = 0; vr_input_set_cfg(&s, &c); vr_input_frame_t f = frame(); acc = 0;
+      flip_run(&s, &f, 5, true, &acc, NULL); flip_run(&s, &f, 1, false, &acc, NULL); flip_run(&s, &f, 40, false, &acc, NULL);
+      NEAR(acc, 0, 1e-9f);
+      c.flip_turn_s = NAN; vr_input_set_cfg(&s, &c); CHECK(s.cfg.flip_turn_s == 0.0f);
+      c.flip_turn_s = 50; c.flip_tap_s = 9; vr_input_set_cfg(&s, &c); CHECK(s.cfg.flip_turn_s == 1.0f && s.cfg.flip_tap_s <= 0.30f);
+      c.flip_turn_s = 0.001f; vr_input_set_cfg(&s, &c); CHECK(s.cfg.flip_turn_s == 0.15f);
+    }
+    /* modo PAD (mando normal): el clic L3 del mando también */
+    { vr_input_t s; vri_cfg_t c; vr_input_init(&s); c = s.cfg; c.mode = VRI_MODE_PAD; vr_input_set_cfg(&s, &c);
+      vr_input_frame_t f = frame(); acc = 0;
+      for (int i = 0; i < 5; i++) { float y0 = vr_input_body_yaw(&s); f.pad_buttons = VRI_PAD_L3; vr_input_update(&s, &f, &o); acc += wrapd(vr_input_body_yaw(&s) - y0); }
+      f.pad_buttons = 0; flip_run(&s, &f, 60, false, &acc, NULL);
+      NEAR(acc, PI, 1e-3f);
+    }
+    /* mano izquierda como dominante: el clic de mover es el de la mano derecha (L3 = stick_off) */
+    { vr_input_t s; vri_cfg_t c; vr_input_init(&s); c = s.cfg; c.dominant_hand = 0; vr_input_set_cfg(&s, &c);
+      vr_input_frame_t f = frame(); acc = 0;
+      for (int i = 0; i < 5; i++) { float y0 = vr_input_body_yaw(&s); f.hand[1].buttons = VRI_H_STICK; vr_input_update(&s, &f, &o); acc += wrapd(vr_input_body_yaw(&s) - y0); }
+      f.hand[1].buttons = 0; flip_run(&s, &f, 60, false, &acc, NULL);
+      NEAR(acc, PI, 1e-3f);
+    }
+    /* recentrar a mitad de giro lo cancela */
+    { vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); acc = 0;
+      flip_run(&s, &f, 4, true, &acc, NULL); flip_run(&s, &f, 5, false, &acc, NULL); CHECK(vr_input_flip_active(&s));
+      vr_input_reset_body_yaw(&s, 0); CHECK(!vr_input_flip_active(&s));
+      flip_run(&s, &f, 40, false, &acc, NULL); NEAR(vr_input_body_yaw(&s), 0, 1e-6f);
+    }
+}
+
 static void t_snap(void) {
     vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); vr_pad_t o;
     f.hand[1].stick_x = 1;
@@ -482,7 +645,7 @@ static void t_fuzz(void) {
 }
 
 int main(void) {
-    t_axis(); t_heading(); t_sense_buttons(); t_menu_map(); t_pad_mode(); t_loco(); t_snap(); t_smooth();
+    t_axis(); t_heading(); t_sense_buttons(); t_menu_map(); t_pad_mode(); t_loco(); t_back(); t_flip(); t_snap(); t_smooth();
     t_vignette(); t_crouch(); t_posture_modes(); t_calib(); t_menu(); t_robust(); t_review(); t_hold_advance(); t_hysteresis(); t_menu_debounce(); t_fuzz();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

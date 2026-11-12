@@ -67,6 +67,7 @@ void vr_input_cfg_defaults(vri_cfg_t *c) {
     c->hold_advance_s = 0.5f; c->adv_on_s = 0.06f; c->adv_off_s = 0.10f;
     c->analog_on = 0.55f; c->analog_off = 0.45f;
     c->menu_debounce_s = 0.12f;
+    c->flip_turn_s = 0.30f; c->flip_tap_s = 0.25f;   /* el toque corto debe quedar por debajo de item_hold_s (0,35 s) de vr_gesture */
     /* Mapa por defecto (Sense) - TABLA FINAL DE CONTROLES (ver bitacora):
      *   mano dominante: gatillo = R2 = DISPARAR (vrbodyg lo convierte en el botón de ataque del juego SOLO con arma; sin arma no hace
      *     nada), agarre = R1 = puño derecho / agarrar a un enemigo (NO llega al juego: lo consume vr_gesture), A = cruz, B = círculo,
@@ -113,6 +114,8 @@ static void sanitize(vri_cfg_t *c) {
     c->analog_on = clampf(fin0(c->analog_on), 0.2f, 0.95f);
     c->analog_off = clampf(fin0(c->analog_off), 0.05f, c->analog_on - 0.02f);
     c->menu_debounce_s = clampf(fin0(c->menu_debounce_s), 0.0f, 0.5f);
+    c->flip_turn_s = fin0(c->flip_turn_s) <= 0.0f ? 0.0f : clampf(c->flip_turn_s, 0.15f, 1.0f);
+    c->flip_tap_s = clampf(fin0(c->flip_tap_s), 0.05f, 0.30f);
 }
 
 void vr_input_set_cfg(vr_input_t *s, const vri_cfg_t *cfg) {
@@ -128,9 +131,14 @@ void vr_input_init(vr_input_t *s) {
 }
 
 float vr_input_body_yaw(const vr_input_t *s) { return s->body_yaw; }
-void vr_input_reset_body_yaw(vr_input_t *s, float yaw) { s->body_yaw = wrap_pi(fin0(yaw)); }
+void vr_input_reset_body_yaw(vr_input_t *s, float yaw) { s->body_yaw = wrap_pi(fin0(yaw)); s->flip_on = false; }
 uint32_t vr_input_snap_count(const vr_input_t *s) { return s->snap_count; }
 float vr_input_vignette(const vr_input_t *s) { return s->vig; }
+bool vr_input_flip_active(const vr_input_t *s) { return s->flip_on; }
+float vr_input_flip_curve(float u) {
+    u = clampf(fin0(u), 0.0f, 1.0f);
+    return u * u * (3.0f - 2.0f * u);
+}
 void vr_input_recalibrate(vr_input_t *s) { s->need_calib = true; }
 void vr_input_set_height(vr_input_t *s, float h) {
     if (isfinite(h) && h > 0.5f && h < 2.5f) { s->calib_h = h; s->need_calib = false; }
@@ -314,6 +322,32 @@ static uint16_t hold_advance(vr_input_t *s, const vr_input_frame_t *f, uint16_t 
     return b;
 }
 
+/* Giro de 180 grados (ver vri_cfg_t.flip_turn_s). `buttons` = máscara ya calculada (L3 = clic del stick de mover en Sense, o el del mando en modo PAD). */
+static void flip_step(vr_input_t *s, bool menu, uint16_t buttons, float dt) {
+    const vri_cfg_t *c = &s->cfg;
+    if (menu || c->flip_turn_s <= 0.0f) {
+        /* un clic mantenido desde el menú / sin control no cuenta como toque al volver al juego (l3_ign hasta soltarlo) */
+        s->flip_on = false; s->l3_prev = (buttons & VRI_PAD_L3) != 0; s->l3_ign = s->l3_prev; s->l3_dual = false; s->l3_t = 0.0f;
+        return;
+    }
+    bool l3 = (buttons & VRI_PAD_L3) != 0;
+    if (l3) {
+        if (!s->l3_prev) { s->l3_t = 0.0f; s->l3_dual = false; s->l3_ign = s->flip_on; }
+        s->l3_t += dt;
+        if (buttons & VRI_PAD_R3) s->l3_dual = true;
+    } else if (s->l3_prev && !s->l3_ign && !s->l3_dual && !s->flip_on && s->l3_t <= c->flip_tap_s) {
+        s->flip_on = true; s->flip_t = 0.0f;
+    }
+    s->l3_prev = l3;
+    if (s->flip_on) {
+        float u0 = s->flip_t / c->flip_turn_s;
+        s->flip_t += dt;
+        float u1 = s->flip_t >= c->flip_turn_s ? 1.0f : s->flip_t / c->flip_turn_s;
+        s->body_yaw = wrap_pi(s->body_yaw + PI_F * (vr_input_flip_curve(u1) - vr_input_flip_curve(u0)));
+        if (u1 >= 1.0f) s->flip_on = false;
+    }
+}
+
 void vr_input_update(vr_input_t *s, const vr_input_frame_t *f_in, vr_pad_t *out) {
     vri_cfg_t *c = &s->cfg;
     float dt = clampf(fin0(f_in->dt), 0.001f, 0.1f);
@@ -401,12 +435,15 @@ void vr_input_update(vr_input_t *s, const vr_input_frame_t *f_in, vr_pad_t *out)
         buttons |= crouch_step(s, f, dt);
     }
 
-    /* viñeta: máx(giro suave, pulso de giro por pasos, locomoción), suavizada (ataque rápido, suelta lenta) */
+    flip_step(s, f->menu, buttons, dt);
+
+    /* viñeta: máx(giro suave, pulso de giro por pasos, giro de 180, locomoción), suavizada (ataque rápido, suelta lenta) */
     float target = 0.0f;
     if (c->vignette > 0.0f && !f->menu) {
         float t_ang = clampf(fabsf(omega) / (150.0f * PI_F / 180.0f), 0.0f, 1.0f);
         float t_lin = clampf(lin * 0.35f, 0.0f, 1.0f);
-        target = c->vignette * fmaxf(fmaxf(t_ang, 0.6f * s->snap_pulse), t_lin);
+        float t_flip = s->flip_on ? 1.0f : 0.0f;
+        target = c->vignette * fmaxf(fmaxf(fmaxf(t_ang, 0.6f * s->snap_pulse), t_lin), t_flip);
     }
     s->snap_pulse = fmaxf(0.0f, s->snap_pulse - dt / 0.25f);
     float tau = target > s->vig ? 0.06f : 0.5f;

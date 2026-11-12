@@ -227,6 +227,25 @@ static void test_walk(void) {
     NEAR(vrhead_walk_step(&c, NAN, 0.02f), 0, 1e-9);
 }
 
+static void test_back(void) {
+    /* retroceso: con el stick atrás el juego pide un rumbo opuesto a la mirada (+0x4E): el personaje se gira hacia él (no hay animación de caminar hacia atrás) y anda en esa dirección,
+     * pero la VISTA no se mueve (solo vrhead_turn la mueve: giro del stick / L3) ni cuenta como giro del mando */
+    setup(2048, 0); tick(0);
+    float v0 = vrcam_view_yaw_deg(), b0 = body_deg(); double t0 = vrcam_turn_total();
+    w16(CTL + 0x4E, (int16_t)(2048 + 2048));
+    st.moving = 1; st.on_wall = 0; st.first_person = 0; st.knocking = 0;
+    for (int i = 0; i < 40; i++) tick(1);
+    NEAR(fabsf(wrap180(body_deg() - b0)), 180, 0.3);
+    NEAR(wrap180(vrcam_view_yaw_deg() - v0), 0, 0.05);
+    NEAR(vrcam_turn_total(), t0, 1e-9);
+    /* un giro de 180 (L3) en cambio gira vista y personaje juntos, paso a paso */
+    setup(2048, 0); tick(0); v0 = vrcam_view_yaw_deg(); b0 = body_deg(); st.moving = 0;
+    for (int i = 0; i < 15; i++) { vrhead_turn(-12.0f); tick(0); }
+    NEAR(fabsf(wrap180(vrcam_view_yaw_deg() - v0)), 180, 0.3);
+    NEAR(fabsf(wrap180(body_deg() - b0)), 180, 1.0);
+    NEAR(wrap180(vrcam_view_yaw_deg() - body_deg()), 0, 1.0);
+}
+
 static void test_eye(void) {
     /* AUTO: x,z del ojo en la posición de control (raíz de locomoción), no en la articulación de la cabeza del modelo, y sin adelanto */
     setup(2048, 0);
@@ -250,7 +269,7 @@ static void test_eye(void) {
 }
 
 int main(void) {
-    test_turn(); test_torso(); test_guards(); test_calib(); test_step(); test_walk(); test_eye();
+    test_turn(); test_torso(); test_guards(); test_calib(); test_step(); test_walk(); test_back(); test_eye();
     printf("test_heading: %d comprobaciones, %d fallos\n", checks, fails);
     return fails != 0;
 }
