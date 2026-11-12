@@ -126,7 +126,7 @@ float ns_solid_win_min_z(const float t[3][3], float zn) {   /* sin static: la pr
             const float dp = pl == 0 ? NSG_ENG_WIN_X * p[2] - p[0] : pl == 1 ? NSG_ENG_WIN_X * p[2] + p[0] : pl == 2 ? NSG_ENG_WIN_Y * p[2] - p[1] : pl == 3 ? NSG_ENG_WIN_Y * p[2] + p[1] : p[2] - zn;
             const float dq = pl == 0 ? NSG_ENG_WIN_X * q[2] - q[0] : pl == 1 ? NSG_ENG_WIN_X * q[2] + q[0] : pl == 2 ? NSG_ENG_WIN_Y * q[2] - q[1] : pl == 3 ? NSG_ENG_WIN_Y * q[2] + q[1] : q[2] - zn;
             if (dp >= 0.0f) memcpy(b[m++], p, 3 * sizeof(float));
-            if ((dp >= 0.0f) != (dq >= 0.0f)) { const float u = dp / (dp - dq); for (int k = 0; k < 3; k++) b[m][k] = p[k] + u * (q[k] - p[k]); m++; }
+            if ((dp >= 0.0f) != (dq >= 0.0f)) { const float u = dp / (dp - dq); for (int k = 0; k < 3; k++) b[m][k] = p[k] + u * (q[k] - p[k]); if (pl == 4) b[m][2] = fmaxf(b[m][2], zn); m++; }   /* el corte con el plano cercano nunca queda por delante de él (FMA: 49,999996) */
         }
         n = m; memcpy(a, b, sizeof a);
     }

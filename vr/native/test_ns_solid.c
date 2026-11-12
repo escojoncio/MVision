@@ -216,7 +216,7 @@ static void test_view_near(void) {
     CHECK(fabsf(z - 1300.0f * hy / 128.0f) < 1.0f, "techo (doble cara): borde superior de la ventana: %.1f", z);
     /* pared partida que llega hasta la cámara: el suelo es el plano cercano de la pantalla 3D, no H/2 */
     base(); z = near_of(wall_obj(OF_MAP, 0, 5, 3000, 0, 0, 0, 0x201), 400.0f);
-    CHECK(z == NS_SOLID_SCREEN_NEAR, "cara partida pegada a la cámara: plano cercano: %.1f", z);
+    CHECK(fabsf(z - NS_SOLID_SCREEN_NEAR) <= 1e-3f * NS_SOLID_SCREEN_NEAR, "cara partida pegada a la cámara: plano cercano: %.1f", z);
     /* los dinámicos cuentan: sin GBOUND se parte igual que el escenario */
     base(); z = near_of(wall_obj(OF_DYN, 1, 1300, 3000, 0, 0, 0, 0x1), 100.0f);
     CHECK(fabsf(z - 1300.0f * hy / 128.0f) < 1.0f, "dinámico sin GBOUND partido: %.1f", z);
@@ -226,16 +226,16 @@ static void test_view_near(void) {
     CHECK(ns_solid_view_near(&sc, st) == 0.0f, "las piezas ocultas no cuentan");
     /* dinámico GBOUND pequeño y pegado a la cámara: la regla del motor lo dibuja ajustado al plano H/2 */
     base(); z = near_of(wall_obj(OF_DYN | 0x20u, 2, 60, 30, 0, 0, 0, 0x1), 200.0f);
-    CHECK(z == 100.0f, "dinámico GBOUND cercano (z = 60 < H/2): en el plano H/2: %.1f", z);
+    CHECK(fabsf(z - 100.0f) <= 0.1f, "dinámico GBOUND cercano (z = 60 < H/2): en el plano H/2: %.1f", z);
     /* el mismo sin GBOUND y más grande: partido, hasta el plano cercano; con GBOUND lo pierde el tamaño */
     base(); z = near_of(wall_obj(OF_DYN, 1, 20, 300, 0, 0, 0, 0x1), 200.0f);
-    CHECK(z == NS_SOLID_SCREEN_NEAR, "dinámico sin GBOUND cercano: partido hasta el plano cercano: %.1f", z);
+    CHECK(fabsf(z - NS_SOLID_SCREEN_NEAR) <= 1e-3f * NS_SOLID_SCREEN_NEAR, "dinámico sin GBOUND cercano: partido hasta el plano cercano: %.1f", z);
     ns_gpu_engine_set_off(NSG_ENG_OFF_SPLIT);
     const float zr = ns_solid_view_near(&sc, st);
     ns_gpu_engine_set_off(0);
     base(); z = near_of(wall_obj(OF_DYN | 0x20u, 1, 20, 300, 0, 0, 0, 0x1), 200.0f);
     /* una mitad la pierde el tamaño; la otra se dibuja con el vértice de z = -300 en el plano H/2 = 100 y entra en la ventana por el borde derecho a z = 100 + 200 * 44 / 152 */
-    CHECK(fabsf(z - 157.895f) < 0.01f && zr == z, "dinámico GBOUND (o «Recortadas»): regla del motor con el ajuste al plano H/2: %.2f / %.2f", z, zr);
+    CHECK(fabsf(z - 157.895f) < 0.01f && fabsf(zr - z) <= 1e-3f * z, "dinámico GBOUND (o «Recortadas»): regla del motor con el ajuste al plano H/2: %.2f / %.2f", z, zr);
     /* una cara de una sola cara vista por el reverso no cuenta (con doble cara, sí: arriba) */
     base(); z = near_of(wall_obj(OF_MAP, 0, -1000, 3000, 0, 0, 0, 0x201), 100.0f);
     CHECK(z == 0.0f, "pared lateral de una cara por el reverso: no cuenta: %.1f", z);
@@ -251,7 +251,7 @@ static void test_view_near(void) {
         base(); uint32_t o2[2] = {wall_obj(OF_DYN | 0x20u, 2, 40, 5, 0, 0, 0, 0x1), wall_obj(OF_DYN | 0x20u, 2, 20, 3, 0, 0, 0, 0x1)};
         queue_set(2, o2);
         z = extract() == 0 && sc.n_inst == 2 ? (sc.cam.h = 60.0f, ns_solid_view_near(&sc, st)) : -1.0f;
-        CHECK(z == 30.0f, "GBOUND por delante de H/2 < 50: en el plano H/2: %.1f", z);
+        CHECK(fabsf(z - 30.0f) <= 0.03f, "GBOUND por delante de H/2 < 50: en el plano H/2: %.1f", z);
     }
     {   /* recorte por la ventana y el plano cercano que en coma flotante deja más de 8 vértices (antes: desborde de pila; con ASan, fallo) */
         const float t[3][3] = {{-29111.0586f, 23288.8652f, 181.944168f}, {14559.2559f, -11647.4033f, 90.9953384f}, {-1367.22974f, -840.283752f, 4.71892357f}};
