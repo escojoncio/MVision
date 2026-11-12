@@ -177,6 +177,38 @@ int vrcam_wall_view(void);
 #define VRCAM_EVENT_ON 4
 #define VRCAM_EVENT_OFF 6
 int vrcam_event_view(void);
+/* Ampliación (reglas de la decompilación; ver la bitácora): la vista del juego (vrcam_event_view) se pide con CUALQUIERA de estas causas del motor, no solo con el panel del ascensor. Todas son
+ * hechos leídos de la RAM de la partida (nunca la zona ni la escena concreta); el jugador sigue con el control (`in_control` del puente) y el motor no marca escena (DEMO / PAD*).
+ *   VRCAM_EV_CALLBACK  banderas de la cámara 0x2 + retrollamada [1] instalada + BRIDGE_PS_PAD_OFF: camera.c:334-343 llama a la retrollamada y la cámara la coloca un actor (sin PAD_OFF no cuenta: rasen.c:483-485, meryl72.c:293/584, jeepdemo.c:173 la dejan instalada en tramos jugables; panel del ascensor evpanel.c:344-350,
+ *                      command.c:1072-1081, meryl72.c:293, torture/unknown7.c:67, rasen.c:483-485, jeepdemo.c:173).
+ *   VRCAM_EV_FPV_CB    banderas 0x200 + retrollamada [0]: camera.c:291-297 (cámara en primera persona colocada por un actor: findtrap.c:114-115, rasen_el.c:694-697).
+ *   VRCAM_EV_CUT_IN    BRIDGE_GS_CUT_IN (STATE_CUT_IN, 0x40): la pone la cámara de «corte» (takabe/cat_in.c:36, que además llama ella misma a DG_MakeCameraMatrix con su ojo y bloquea el
+ *                      mando con la opción m) y las cámaras de zona con el bit 0 del último parámetro (camera.c:865-870, script.c camera -c).
+ *                      Solo cuenta junto con VRCAM_EV_FOREIGN: las cámaras de zona con ese bit son juego normal en primera persona (medido: a30 línea 2472, área 18107, estado 0x40, jugador 0x40000000, banderas 0x10, con control).
+ *   VRCAM_EV_FOREIGN   la matriz de cámara del canal principal se construyó en los últimos VRCAM_FOREIGN_HOLD VBlanks desde un llamador que no es el sistema de cámara (camera.c pasa siempre el
+ *                      bloque VRCAM_SYS_EYE; cat_in.c, wolf2.c / unknown.c (Sniper Wolf), dog.c, evntmous.c, searchli.c pasan el suyo): lo anota vrcam_note_builder desde el sustituto del constructor.
+ *   VRCAM_EV_PAD_OFF   BRIDGE_PS_PAD_OFF (el actor del jugador no atiende al mando: lo lee un guion u otro actor) puesto por quien NO es una animación propia de recuperación del jugador
+ *                      (enter_duct, sna_init.c:3537, pone PAD_OFF y MENU_DISABLE a la vez y sin ACT_ONLY; la muerte, 4356, lleva además ACT_ONLY y cuenta): PAD_OFF solo (evpanel.c:354, mensaje PADOFF sna_init.c:1754) o con
+ *                      ACT_ONLY (marcha / postura forzada por guion: sna_init.c:4598 mini_cutscene, 4916). Solo cuenta tras VRCAM_PADOFF_ON VBlanks seguidos, contados también durante una escena (sin control): si el guion
+ *                      deja el mando retirado al devolver el control (llegada del ascensor, build 1216f2b: vb 17361-17371, estado 0x20000000 con control y cámara VR), la vista del juego sigue. */
+enum { VRCAM_EV_CALLBACK = 1, VRCAM_EV_FPV_CB = 2, VRCAM_EV_CUT_IN = 4, VRCAM_EV_FOREIGN = 8, VRCAM_EV_PAD_OFF = 16 };
+#define VRCAM_PADOFF_ON 10          /* VBlanks seguidos con VRCAM_EV_PAD_OFF antes de pasar a la vista del juego (las demás causas usan VRCAM_EVENT_ON) */
+#define VRCAM_FOREIGN_HOLD 6        /* VBlanks que sigue valiendo una construcción de cámara ajena (el motor construye una cámara por fotograma de juego = 2 VBlanks, 3-4 con carga) */
+#define VRCAM_SYS_EYE 0x800B89E8u   /* bloque de ojo que camera.c pasa al constructor (gUnkCameraStruct2.position; medido en el desensamblado del volcado: lui a1,0x800c; addiu a1,a1,-30232) */
+/* Causas (VRCAM_EV_*) para unos hechos dados: función pura. `gs`/`ps` = banderas del juego / del jugador; `cam_flag` = BCAM_FLAG; `cb0`/`cb1` = retrollamadas de la cámara (+0x74 / +0x78);
+ * `foreign` = hubo construcción de cámara ajena reciente. */
+unsigned vrcam_engine_cause(uint32_t gs, uint32_t ps, uint32_t cam_flag, uint32_t cb0, uint32_t cb1, int foreign);
+/* El sustituto del constructor de la cámara (hle_vrcam_view) anota quién la construye: `eye_ptr` = argumento 2 (puntero al ojo). Cualquiera distinto de VRCAM_SYS_EYE es ajeno. */
+void vrcam_note_builder(uint32_t eye_ptr);
+/* Última lectura de los hechos del motor (para el registro de la app: banderas, tipo, causas) y si la vista del juego está pedida ahora. */
+typedef struct VrCamEngine {
+    uint32_t gs, ps, cam_flag, cb0, cb1;
+    int16_t cam_type, cam_first;
+    int foreign;             /* construcción de cámara ajena reciente */
+    unsigned cause;          /* VRCAM_EV_* de este VBlank (sin histéresis) */
+    int view;                /* vrcam_event_view() */
+} VrCamEngine;
+void vrcam_engine_info(VrCamEngine *o);
 /* Oculta la cabeza del modelo del jugador (partes marcadas como no visibles para las etapas siguientes del frame).
  * Devuelve el nº de partes ocultadas. Escribe en la RAM del juego. */
 int vrcam_hide_head(uint8_t *ram);

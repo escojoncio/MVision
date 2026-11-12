@@ -45,6 +45,19 @@ typedef struct {
 } NsCoverCfg;
 void ns_cover_cfg_default(NsCoverCfg *c);
 
+/* Huecos del MUNDO: rayos desde un punto (en el espacio de mundo de las NsRTri, Y arriba) repartidos como un panorama equirectangular (NC_HOLE_AZ x NC_HOLE_EL, uniforme en
+ * azimut y elevación, igual que el panorama de nshito1) contra TODOS los triángulos nativos, por las dos caras (el visor dibuja los reversos). Un rayo sin ningún impacto = dirección
+ * en la que el visor no tiene nada que dibujar (techo o cielo que el juego no modela, o geometría ausente). Independiente de la cámara del juego y de lo que dibujó la lista. */
+#define NC_HOLE_AZ 48
+#define NC_HOLE_EL 24
+typedef struct {
+    uint32_t rays, miss;       /* rayos lanzados / sin impacto (0 rayos = no medido) */
+    uint32_t band[12];         /* sin impacto por franja de elevación de 15 grados, de arriba (zenit) a abajo; cada franja tiene rays / 12 rayos */
+    uint32_t miss_up, miss_dn; /* sin impacto por encima / por debajo del horizonte */
+    float eye[3];
+} NsCoverHoles;
+void ns_cover_holes(const NsRTri *tris, size_t ntris, const float eye[3], NsCoverHoles *out);
+
 #define NC_WORST 6
 typedef struct {
     uint8_t cause, semi;
@@ -77,6 +90,7 @@ typedef struct {
     NsFxCmpResult fxc;                                 /* medida de los efectos nativos frente a la lista (ns_fxcmp.h); fxc_ok = 1 si se midió */
     int fxc_ok;
     float ys;                                          /* factor vertical de la vista de la lista que se usó (NsCoverCfg.ys o medido de la RAM; 1 si no se pudo medir) */
+    NsCoverHoles holes;                                /* huecos del mundo nativo desde el ojo del juego (ns_cover_holes); holes.rays = 0 si no se midió */
     double ms;
 } NsCoverResult;
 

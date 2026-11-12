@@ -193,7 +193,7 @@ const char *vrview_reason_name(int r) {
     case VRV_R_WALL: return "pegado a la pared: cámara del juego";
     case VRV_R_FROZEN: return "el motor no dibuja: vista congelada";
     case VRV_R_HOLD: return "render 3D sin cámara del motor: vista retenida";
-    case VRV_R_EVENT: return "cámara de evento del juego (panel): cámara del juego";
+    case VRV_R_EVENT: return "evento: cámara del juego";
     default: return "?";
     }
 }
@@ -203,11 +203,11 @@ int vrview_describe(const VrView *v, const VrViewIn *in, char *buf, int n) {
     VrViewIn z;
     if (!in) { memset(&z, 0, sizeof z); in = &z; }
     int r = snprintf(buf, (size_t)n,
-        "[vista] cambio:%s%s%s%s modo=%s clase=%s motivo=%s (antes: %s) | puente: partida=%d control=%d camVR=%d escena=%d radio=%d pausa=%d menu=%d detenido=%d muerte=%d 3D=%d video=%d nativo=%d pared=%d sin_dibujo=%d lista3D=%d negro=%d nuevas=%d evento=%d",
+        "[vista] cambio:%s%s%s%s modo=%s clase=%s motivo=%s (antes: %s) | puente: partida=%d control=%d camVR=%d escena=%d radio=%d pausa=%d menu=%d detenido=%d muerte=%d 3D=%d video=%d nativo=%d pared=%d sin_dibujo=%d lista3D=%d negro=%d nuevas=%d evento=%d causa=%d",
         (v->changed & VRV_CH_MODE) ? " modo" : "", (v->changed & VRV_CH_KIND) ? " clase" : "", (v->changed & VRV_CH_REASON) ? " motivo" : "", (v->changed & VRV_CH_BLACK) ? " negro" : "",
         v->mode == VRV_WORLD ? "mundo" : "cine", vrview_kind_name(v->kind), vrview_reason_name(v->reason), vrview_reason_name(v->prev_reason),
         in->game, in->in_control, in->cam_active, in->cinematic, in->comms, in->paused, in->menu_open, in->stopped, in->dead, in->scene3d, in->video, in->native_ok, in->wall, in->frozen, in->list3d,
-        v->black, in->fresh, in->event);
+        v->black, in->fresh, in->event, in->event_cause);
     if (r < 0) { buf[0] = 0; return 0; }
     return r >= n ? n - 1 : r;
 }

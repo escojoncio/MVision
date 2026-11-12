@@ -1495,6 +1495,17 @@ static void publish_state(void) {
     {
         VrViewIn vin;
         memset(&vin, 0, sizeof vin);
+        VrCamEngine engine_cam;
+        vrcam_engine_info(&engine_cam);
+        {   /* cámara del motor: cada cambio de causa o de vista queda en el registro con las banderas que la provocan */
+            static unsigned last_cause = ~0u; static int last_view = -1;
+            if (engine_cam.cause != last_cause || engine_cam.view != last_view) {
+                last_cause = engine_cam.cause; last_view = engine_cam.view;
+                fprintf(stderr, "[camara-motor] causa=%u (1=retrollamada 2=1p-retrollamada 4=corte 8=constructor-ajeno 16=mando-retirado) vista-del-juego=%d | gs=%08x ps=%08x camflag=%08x cb0=%08x cb1=%08x camtipo=%d cam1p=%d | vb=%u\n",
+                        engine_cam.cause, engine_cam.view, (unsigned)engine_cam.gs, (unsigned)engine_cam.ps, (unsigned)engine_cam.cam_flag, (unsigned)engine_cam.cb0, (unsigned)engine_cam.cb1,
+                        (int)engine_cam.cam_type, (int)engine_cam.cam_first, (unsigned)hle_frame_count());
+            }
+        }
         vin.game = (uint8_t)core;
         vin.in_control = (uint8_t)g.in_control;
         vin.cam_active = (uint8_t)(g.cam_active != 0);
@@ -1503,7 +1514,7 @@ static void publish_state(void) {
         vin.dead = (uint8_t)(core && (((bs.valid & BRIDGE_OK_LIFE) && bs.life_max > 0 && bs.life <= 0) || (bs.player_status & BRIDGE_PS_GAME_OVER) || (bs.game_status & BRIDGE_GS_GAME_OVER)));
         vin.scene3d = (uint8_t)last_scene3d; vin.video = (uint8_t)last_video;
         vin.native_ok = (uint8_t)(ns_hook_native_ready(ns_now_ns(), 250000000ull) != 0);   /* escena nativa apta y de menos de 250 ms (misma antigüedad que ns_native_decide) */
-        vin.wall = (uint8_t)(wall_view && g.in_control); vin.event = (uint8_t)(event_view && g.in_control); vin.frozen = (uint8_t)engine_undraw(); vin.list3d = (uint8_t)last_list3d;
+        vin.wall = (uint8_t)(wall_view && g.in_control); vin.event = (uint8_t)(event_view && g.in_control); vin.event_cause = (uint8_t)engine_cam.cause; vin.frozen = (uint8_t)engine_undraw(); vin.list3d = (uint8_t)last_list3d;
         if (vin.frozen) nat_fresh = 0;      /* las escenas de antes del desmontaje no son de la zona nueva */
         vin.fresh = nat_fresh;
         {   /* FMV: el decodificador de vídeo entregó píxeles en los últimos 12 VBlank (~0,24 s; un FMV da un fotograma cada 3-4) */

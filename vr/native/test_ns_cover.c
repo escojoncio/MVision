@@ -324,6 +324,51 @@ static void test_screen_ys(void) {
     }
 }
 
+
+/* ---- huecos del mundo: techo sin modelar (volcado d0003 de a31: arriba 50 %, abajo 0 %) ---- */
+static void add_tri(NsRTri *T, size_t *n, const float a[3], const float b[3], const float c[3]) {
+    memset(&T[*n], 0, sizeof T[*n]);
+    memcpy(T[*n].v[0].p, a, 12); memcpy(T[*n].v[1].p, b, 12); memcpy(T[*n].v[2].p, c, 12);
+    (*n)++;
+}
+static void add_quad(NsRTri *T, size_t *n, const float a[3], const float b[3], const float c[3], const float d[3]) { add_tri(T, n, a, b, c); add_tri(T, n, a, c, d); }
+static void test_holes(void) {
+    const float eye[3] = {0, 1600, 0};
+    NsRTri T[16]; size_t n = 0; NsCoverHoles H;
+    const float S = 20000.0f;
+    /* sala cerrada: seis caras de un cubo de 20 m alrededor del ojo */
+    float v[8][3]; for (int i = 0; i < 8; i++) { v[i][0] = (i & 1 ? S : -S); v[i][1] = (i & 2 ? S : -S); v[i][2] = (i & 4 ? S : -S); }
+    const int F[6][4] = {{0, 1, 3, 2}, {4, 5, 7, 6}, {0, 1, 5, 4}, {2, 3, 7, 6}, {0, 2, 6, 4}, {1, 3, 7, 5}};   /* z-, z+, y-, y+, x-, x+ */
+    for (int f = 0; f < 6; f++) add_quad(T, &n, v[F[f][0]], v[F[f][1]], v[F[f][2]], v[F[f][3]]);
+    ns_cover_holes(T, n, eye, &H);
+    CHECK(H.rays == NC_HOLE_AZ * NC_HOLE_EL && H.miss == 0, "sala cerrada sin huecos: miss=%u de %u", H.miss, H.rays);
+    /* sin la cara superior (y+): el techo que el juego no modela */
+    n = 0; for (int f = 0; f < 6; f++) if (f != 3) add_quad(T, &n, v[F[f][0]], v[F[f][1]], v[F[f][2]], v[F[f][3]]);
+    ns_cover_holes(T, n, eye, &H);
+    CHECK(H.miss > 0 && H.miss_dn == 0, "sin techo: nada por debajo del horizonte (abajo=%u)", H.miss_dn);
+    CHECK(H.band[0] == (uint32_t)(H.rays / 12), "zenit 100 %% sin geometría: %u de %u", H.band[0], H.rays / 12);
+    CHECK(H.band[11] == 0 && H.band[6] == 0, "nadir y franja bajo el horizonte cubiertos");
+    CHECK(H.miss_up > 0 && H.miss_up < H.rays / 2, "techo parcial: la mitad superior no está vacía del todo (%u de %u)", H.miss_up, H.rays / 2);
+    /* solo suelo infinito: toda la mitad superior es hueco, la inferior no (el rayo horizontal no toca) */
+    n = 0; { const float a[3] = {-1e6f, 0, -1e6f}, b[3] = {1e6f, 0, -1e6f}, c[3] = {1e6f, 0, 1e6f}, d[3] = {-1e6f, 0, 1e6f}; add_quad(T, &n, a, b, c, d); }
+    ns_cover_holes(T, n, eye, &H);
+    CHECK(H.miss_up == H.rays / 2 && H.miss_dn == 0, "solo suelo: arriba=%u abajo=%u", H.miss_up, H.miss_dn);
+    /* geometría a menos de 1 unidad del ojo no cuenta; sin triángulos no se mide */
+    ns_cover_holes(NULL, 0, eye, &H);
+    CHECK(H.rays == 0, "sin triángulos: sin medida");
+    /* texto de la línea [huecos] */
+    {
+        NsCoverResult r; memset(&r, 0, sizeof r);
+        ns_cover_holes(T, n, eye, &r.holes);
+        char buf[4096];
+        size_t len = ns_cover_format(&r, 77, buf, sizeof buf);
+        CHECK(len > 0 && strstr(buf, "[huecos] fr=77") && strstr(buf, "sin_geometria=50.0%") && strstr(buf, "arriba 100.0%, abajo 0.0%"), "formato: %s", buf);
+        memset(&r.holes, 0, sizeof r.holes);
+        len = ns_cover_format(&r, 77, buf, sizeof buf);
+        CHECK(!strstr(buf, "[huecos]"), "sin medida no hay línea");
+    }
+}
+
 int main(void) {
     test_match();
     test_split_diag();
@@ -335,6 +380,7 @@ int main(void) {
     test_many();
     test_run_and_glue();
     test_screen_ys();
+    test_holes();
     if (fails) { printf("%d FALLOS\n", fails); return 1; }
     printf("OK: todas las pruebas de ns_cover pasan\n");
     return 0;

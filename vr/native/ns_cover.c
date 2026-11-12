@@ -7,6 +7,10 @@
 #include <string.h>
 #include <time.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 const char *const ns_cover_cause_name[NC_N] = {"exacto", "otra_diagonal", "subdividido", "sprite", "pose_distinta", "otra_textura", "parcial", "ausente"};
 const char *const ns_cover_rev_name[NR_N] = {"detras", "plano_cercano", "fuera_de_pantalla", "reverso", "lejos", "objeto_no_visible", "mayor_que_el_hardware", "visible_de_mas"};
 
@@ -446,7 +450,43 @@ void ns_cover_destroy(NsCover *c) {
     free(c);
 }
 
-static int cover_run_once(NsCover *c, const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, const NsCoverCfg *cfg, NsCoverResult *out) {
+/* ---------------------------------------------------------------------------------------------------------------- huecos del mundo */
+void ns_cover_holes(const NsRTri *tris, size_t ntris, const float eye[3], NsCoverHoles *out) {
+    memset(out, 0, sizeof *out);
+    if (!tris || !ntris || !eye) return;
+    memcpy(out->eye, eye, sizeof out->eye);
+    for (int j = 0; j < NC_HOLE_EL; j++) {
+        const double el = ((double)j + 0.5) / NC_HOLE_EL * M_PI - 0.5 * M_PI;   /* de -90 (abajo) a +90 (arriba); j = 0 abajo */
+        const double ce = cos(el), se = sin(el);
+        for (int i = 0; i < NC_HOLE_AZ; i++) {
+            const double az = ((double)i + 0.5) / NC_HOLE_AZ * 2.0 * M_PI;
+            const double d[3] = {ce * sin(az), se, ce * cos(az)};   /* Y arriba */
+            int hit = 0;
+            for (size_t t = 0; t < ntris && !hit; t++) {   /* Möller-Trumbore sin descarte de caras */
+                const float *a = tris[t].v[0].p, *b = tris[t].v[1].p, *c = tris[t].v[2].p;
+                const double e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+                const double p[3] = {d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]};
+                const double det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
+                if (fabs(det) < 1e-9) continue;
+                const double inv = 1.0 / det, s[3] = {eye[0] - a[0], eye[1] - a[1], eye[2] - a[2]};
+                const double u = (s[0] * p[0] + s[1] * p[1] + s[2] * p[2]) * inv;
+                if (u < 0.0 || u > 1.0) continue;
+                const double q[3] = {s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2], s[0] * e1[1] - s[1] * e1[0]};
+                const double v = (d[0] * q[0] + d[1] * q[1] + d[2] * q[2]) * inv;
+                if (v < 0.0 || u + v > 1.0) continue;
+                if ((e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) * inv > 1.0) hit = 1;   /* a más de 1 unidad del ojo */
+            }
+            out->rays++;
+            if (!hit) {
+                out->miss++;
+                if (j >= NC_HOLE_EL / 2) out->miss_up++; else out->miss_dn++;
+                out->band[(NC_HOLE_EL - 1 - j) * 12 / NC_HOLE_EL]++;
+            }
+        }
+    }
+}
+
+static int cover_run_once(NsCover *c, const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, const NsCoverCfg *cfg, NsCoverResult *out, double *holes_ms) {
     if (!c || !c->ok || !ram || !out) return -1;
     memset(out, 0, sizeof *out);
     if (ns_extract_ex(&c->sc, c->st, ram, NS_RAM_SIZE, scratch, scratch ? 1024u : 0u, NULL, NULL) != 0) return -2;
@@ -509,6 +549,14 @@ static int cover_run_once(NsCover *c, const uint8_t *ram, const uint8_t *scratch
     }
     int rc = ns_cover_core(tr, src, n, &cam, rest ? rest : ops, rest ? nrest : nops, cfg, out);
     if (rc == 0) out->ys = ys;
+    if (rc == 0 && tr && n && holes_ms) {   /* ojo de la RAM (el del juego en ese instante); solo en la primera medida: la escena y el ojo son los mismos en la segunda */
+        struct timespec h0, h1;
+        clock_gettime(CLOCK_MONOTONIC, &h0);
+        ns_cover_holes(tr, n, c->sc.cam.eye, &out->holes);
+        clock_gettime(CLOCK_MONOTONIC, &h1);
+        *holes_ms = (double)(h1.tv_sec - h0.tv_sec) * 1e3 + (double)(h1.tv_nsec - h0.tv_nsec) * 1e-6;
+        out->ms += *holes_ms;
+    }
     if (rc == 0 && f_tris) {
         out->list_ops = nops;
         out->list_tris += f_tris;
@@ -566,6 +614,13 @@ size_t ns_cover_format(const NsCoverResult *r, uint32_t frame, char *buf, size_t
         const NsCoverGroup *g = &r->extra[i];
         APP("[cobertura]   nativo_de_mas %u: n=%u objeto=%08x pieza=%u malla=%08x tpage=%04x clut=%04x zmin=%.0f\n", i + 1, g->n, g->key, g->piece, g->mesh, g->tpage, g->clut, g->zmin);
     }
+    if (r->holes.rays) {
+        const NsCoverHoles *H = &r->holes;
+        APP("[huecos] fr=%u ojo=(%.0f,%.0f,%.0f) rayos=%u sin_geometria=%.1f%% (arriba %.1f%%, abajo %.1f%%) franjas15(zenit->nadir)=", frame, H->eye[0], H->eye[1], H->eye[2], H->rays, 100.0 * H->miss / H->rays,
+            100.0 * H->miss_up / (H->rays / 2), 100.0 * H->miss_dn / (H->rays / 2));
+        for (int b = 0; b < 12; b++) APP("%s%.0f%%", b ? " " : "", 100.0 * H->band[b] / (H->rays / 12));
+        APP("\n");
+    }
     if (r->fxc_ok) o += ns_fxcmp_format(&r->fxc, frame, buf + o, cap - o);
 #undef APP
     return o;
@@ -575,11 +630,12 @@ size_t ns_cover_format(const NsCoverResult *r, uint32_t frame, char *buf, size_t
  * saldría 0 % con una escena nativa perfecta (volcado de la muerte: 0,0 % con él y 87,4 % con la cámara de la RAM) y la app abandonaría la pantalla 3D. Si con la cámara de la lista la
  * cobertura es baja se vuelve a medir con la de la RAM (la de la propia escena) y se queda la mejor. */
 int ns_cover_run(NsCover *c, const uint8_t *ram, const uint8_t *scratch, const GpuOp *ops, uint32_t nops, const NsCoverCfg *cfg, NsCoverResult *out) {
-    int rc = cover_run_once(c, ram, scratch, ops, nops, cfg, out);
+    double hms = 0.0;
+    int rc = cover_run_once(c, ram, scratch, ops, nops, cfg, out, &hms);
     if (rc != 0 || !cfg || !cfg->list_eye || !cfg->list_M || out->cover_pct >= 80.0f) return rc;
     NsCoverCfg c2 = *cfg;
     c2.list_eye = NULL; c2.list_M = NULL;
     NsCoverResult r2;
-    if (cover_run_once(c, ram, scratch, ops, nops, &c2, &r2) == 0 && r2.cover_pct > out->cover_pct) { *out = r2; return 0; }
+    if (cover_run_once(c, ram, scratch, ops, nops, &c2, &r2, NULL) == 0 && r2.cover_pct > out->cover_pct) { r2.holes = out->holes; r2.ms += hms; *out = r2; return 0; }
     return 0;   /* ganó la de la lista: `out` conserva esa medida */
 }

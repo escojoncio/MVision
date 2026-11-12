@@ -34,6 +34,7 @@ void hle_vrcam_view(Cpu *c) {
     VrCamPlan p;
     int is_main = (A0 & RAM_MASK) == (0x800B2B7Cu & RAM_MASK);
     if (is_main && !vbuf && !in_view) vbuf = bios_kalloc(16);
+    if (is_main && !in_view) vrcam_note_builder(A1);      /* quién construye la cámara: camera.c pasa siempre su bloque de ojo; otro actor (corte, Sniper Wolf, perro...) = cámara del motor ajena (vr_camera.h, VRCAM_EV_FOREIGN) */
     int vr = 0;
     if (is_main) vr = vrcam_plan(emu_ram, (int16_t)A3, vbuf && !in_view ? &p : NULL);   /* p == NULL: cámara del juego (y limpia "activo") */
     uint32_t a1 = A1, a2 = A2, a3 = A3;

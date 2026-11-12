@@ -101,6 +101,7 @@ static inline int ptr_ok(uint32_t p, uint32_t len) {
 #define VC_OBJ_BOUND    0x4C
 #define VC_OBJ_WORLD_T  0x14
 #define VC_HEAD_PART    6
+#define VC_CAM_CB0      0x74u    /* GM_Camera.callback[0] (la [1] es BCAM_EVENT_FN = 0x78) */
 #define VC_MAX_MODELS   64
 
 typedef struct {
@@ -132,6 +133,9 @@ typedef struct {
     float sh[2], shv[2];                  /* empuje de las paredes (x, z) filtrado y su velocidad */
     int wall_seen, wall_run, wall_off, wall_cine;   /* pegado a la pared (vrcam_frame): VBlanks que quedan dando PS_WALL por visto, VBlanks seguidos pegado, VBlanks seguidos sin pared, y vista del juego pedida */
     int ev_run, ev_off, ev_cine;          /* cámara de evento del juego con el mando retirado (vrcam_frame): VBlanks seguidos con ella, VBlanks seguidos sin ella, y vista del juego pedida */
+    int pad_run;                          /* VBlanks seguidos con VRCAM_EV_PAD_OFF (solo esa causa) */
+    uint32_t fvb;                         /* VBlank (S.vb) de la última construcción de cámara ajena (0 = ninguna) */
+    VrCamEngine eng;                      /* última lectura de los hechos del motor (vrcam_engine_info) */
     float prone_k, anc[2];                /* tumbado: mezcla 0..1 hacia el ancla de gateo, y desplazamiento horizontal ojo -> articulación de la cabeza del último plan (lo aplica vrcam_commit a head_at) */
 } Vc;
 static Vc S;
@@ -304,13 +308,28 @@ void vrcam_frame(const uint8_t *ram, const BridgeState *st) {
         else if (!S.wall_cine) { S.wall_run = on ? S.wall_run + 1 : 0; if (S.wall_run >= VRCAM_WALL_ON && wall && ok) { S.wall_cine = 1; S.wall_off = 0; } }   /* `wall`: sigue pegado AHORA (los WALL_SEEN VBlanks de gracia de un roce ya terminado no cuentan para entrar) */
         else { S.wall_off = on ? 0 : S.wall_off + 1; if (S.wall_off >= VRCAM_WALL_OFF) { S.wall_cine = 0; S.wall_run = 0; } }
         if (S.wall_cine) ok = 0;
-        /* Cámara de evento del juego con el mando retirado al jugador (panel del ascensor): igual que en la pared, la vista pasa a la del juego con su cámara y su mando (vr_camera.h).
+        /* El motor tiene la cámara y/o el jugador no tiene el mando (causas VRCAM_EV_*: cámara de evento con retrollamada, cámara en 1.ª persona de un actor, corte (CUT_IN), construcción de cámara
+         * ajena, mando retirado por guion): igual que en la pared, la vista pasa a la del juego con su cámara y su mando (vr_camera.h).
          * Con cam_ctl y no in_control: una pausa o la ventana de armas/objetos abiertas ante el panel no devuelven la cámara VR (la vista saltaría a la primera persona y de vuelta). */
         int ebase = (st->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && st->has_player && st->cam_ctl && S.cfg.head;
-        int ev = ebase && (ps & BRIDGE_PS_PAD_OFF) && (rd_u32(ram, BA_CAMERA + BCAM_FLAG) & BRIDGE_CAMF_EVENT) && rd_u32(ram, BA_CAMERA + BCAM_EVENT_FN);
+        {
+            VrCamEngine *e = &S.eng;
+            e->gs = rd_u32(ram, BA_GAME_STATUS); e->ps = ps; e->cam_flag = rd_u32(ram, BA_CAMERA + BCAM_FLAG);
+            e->cb0 = rd_u32(ram, BA_CAMERA + VC_CAM_CB0); e->cb1 = rd_u32(ram, BA_CAMERA + BCAM_EVENT_FN);
+            e->cam_type = rd_s16(ram, BA_CAMERA + BCAM_TYPE); e->cam_first = rd_s16(ram, BA_CAMERA + BCAM_FIRST);
+            e->foreign = S.fvb != 0 && S.vb - S.fvb <= VRCAM_FOREIGN_HOLD;
+            e->cause = vrcam_engine_cause(e->gs, e->ps, e->cam_flag, e->cb0, e->cb1, e->foreign);
+        }
+        /* El mando retirado cuenta aunque no haya control (una escena que lo retira lo suele dejar retirado al devolver el control: llegada del ascensor, medido en el visor): al volver el control con el
+         * mando aún retirado más de VRCAM_PADOFF_ON VBlanks, la vista del juego sigue sin pasar por la primera persona. */
+        const int core = (st->valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && st->has_player;
+        const unsigned strong = ebase ? S.eng.cause & ~(unsigned)VRCAM_EV_PAD_OFF : 0u, padoff = ebase ? S.eng.cause & VRCAM_EV_PAD_OFF : 0u;
+        const int ev = strong || padoff;
+        S.pad_run = core && (S.eng.cause & VRCAM_EV_PAD_OFF) ? (S.pad_run < 1 << 20 ? S.pad_run + 1 : S.pad_run) : 0;
         if (!ebase) S.ev_cine = S.ev_run = S.ev_off = 0;
-        else if (!S.ev_cine) { S.ev_run = ev ? S.ev_run + 1 : 0; if (S.ev_run >= VRCAM_EVENT_ON) { S.ev_cine = 1; S.ev_off = 0; } }
+        else if (!S.ev_cine) { S.ev_run = strong ? S.ev_run + 1 : 0; if (S.ev_run >= VRCAM_EVENT_ON || S.pad_run >= VRCAM_PADOFF_ON) { S.ev_cine = 1; S.ev_off = 0; } }
         else { S.ev_off = ev ? 0 : S.ev_off + 1; if (S.ev_off >= VRCAM_EVENT_OFF) { S.ev_cine = 0; S.ev_run = 0; } }
+        S.eng.view = S.ev_cine;
         if (S.ev_cine) ok = 0;
     }
     if (ok) { if (S.ok_count < 1 << 20) S.ok_count++; } else S.ok_count = 0;
@@ -332,6 +351,19 @@ double vrcam_turn_total(void) { return S.turn_total; }
 int vrcam_active(void) { return S.latched; }
 int vrcam_wall_view(void) { return S.wall_cine; }
 int vrcam_event_view(void) { return S.ev_cine; }
+
+unsigned vrcam_engine_cause(uint32_t gs, uint32_t ps, uint32_t cam_flag, uint32_t cb0, uint32_t cb1, int foreign) {
+    unsigned c = 0;
+    if ((cam_flag & BRIDGE_CAMF_EVENT) && cb1 && (ps & BRIDGE_PS_PAD_OFF)) c |= VRCAM_EV_CALLBACK;   /* camera.c:334-343; solo con el mando retirado (rasen.c:483-485, meryl72.c:293/584, jeepdemo.c:173 la dejan instalada en tramos jugables) */
+    if ((cam_flag & 0x200u) && cb0) c |= VRCAM_EV_FPV_CB;                         /* camera.c:291-297 */
+    if ((gs & BRIDGE_GS_CUT_IN) && foreign) c |= VRCAM_EV_CUT_IN;                  /* solo junto con un constructor ajeno: las cámaras de zona con el bit 0x40 son juego normal en primera persona (medido: a30, área 18107) */
+    if (foreign) c |= VRCAM_EV_FOREIGN;
+    /* PAD_OFF de quien no es una animación de recuperación del propio jugador (enter_duct lo pone junto con MENU_DISABLE y sin ACT_ONLY; la muerte lleva además ACT_ONLY y cuenta) */
+    if ((ps & BRIDGE_PS_PAD_OFF) && ((ps & BRIDGE_PS_ACT_ONLY) || !(ps & BRIDGE_PS_MENU_DISABLE))) c |= VRCAM_EV_PAD_OFF;
+    return c;
+}
+void vrcam_note_builder(uint32_t eye_ptr) { if (eye_ptr != VRCAM_SYS_EYE) S.fvb = S.vb ? S.vb : 1u; }
+void vrcam_engine_info(VrCamEngine *o) { if (o) *o = S.eng; }
 float vrcam_view_yaw_deg(void) { return S.view_yaw; }
 int vrcam_pad_origin(void) {
     float y = S.cfg.loco == VRCAM_LOCO_BODY ? S.theta_body : S.view_yaw;

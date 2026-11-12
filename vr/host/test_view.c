@@ -557,6 +557,12 @@ int main(void) {
         char buf[640];
         vrview_describe(&ve, &a, buf, sizeof buf);
         CHECK(strstr(buf, "evento=1"), "registro de la cámara de evento: %s", buf);
+        /* a31 (vb 17361-17371): control devuelto con el mando aún retirado (PAD_OFF) y sin cámara de evento: la vista del juego en la pantalla 3D, con la causa en el registro */
+        VrViewIn pd = world(); pd.cam_active = 0; pd.event = 1; pd.event_cause = 16; pd.scene3d = 1;
+        CHECK(vrview_reason(&pd) == VRV_R_EVENT && vrview_kind_of(&pd) == VRV_K_ENGINE, "mando retirado con control: pantalla 3D del motor");
+        VrView pv; vrview_reset(&pv); for (int k = 0; k < 8; k++) vrview_step(&pv, &pd);
+        vrview_describe(&pv, &pd, buf, sizeof buf);
+        CHECK(pv.mode == VRV_CINEMA && pv.kind == VRV_K_ENGINE && strstr(buf, "causa=16"), "registro con la causa: %s", buf);
 #undef EV
     }
     /* ---- fundido a negro (VrView.black): desde que el motor desmonta / carga con una vista nativa hasta que hay una escena nueva completa; secuencias medidas en el visor (build 0d4635f) ---- */

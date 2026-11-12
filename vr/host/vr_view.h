@@ -78,7 +78,8 @@ typedef struct {
     uint8_t frozen;        /* el motor no dibuja (contador de fotogramas sin dibujo del motor > 0): lo que hay en la pantalla del juego es un fotograma viejo */
     uint8_t list3d;        /* la última lista capturada trae geometría 3D sustancial, con la cámara que sea (scene3d exige la del motor): la pantalla del juego es un render 3D de PS1 */
     uint8_t fresh;         /* escenas nativas dibujables (partida, escenario y listas enteras) publicadas desde que el motor volvió a dibujar; satura en 255. Solo lo mira el fundido a negro */
-    uint8_t event;         /* cámara de evento del juego con el mando retirado y la vista del juego pedida (vrcam_event_view) */
+    uint8_t event;         /* el motor lleva la cámara o el jugador no tiene el mando y la vista del juego está pedida (vrcam_event_view; causas en vr_camera.h) */
+    uint8_t event_cause;   /* máscara VRCAM_EV_* de lo que el motor cumple ahora (vrcam_engine_info); solo diagnóstico, no cambia la vista */
 } VrViewIn;
 
 /* Qué es lo que se ve (con histéresis propia, ver VrView.kind):
