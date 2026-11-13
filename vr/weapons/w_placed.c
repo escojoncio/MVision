@@ -10,7 +10,11 @@
 
 
 /* Datos ajustables (marco del arma; se sustituyen al asociar las partes del modelo original). */
-#define BLOCK_FACE   {0, 0, -0.0225f}       /* centro de la cara adhesiva de la carga; +Z sale de la superficie */
+/* GRIP de la carga (0xf83d, marco HELD; bloque X -92..8, Y -79..170 con antena, Z -156..-56 mm: wcut_tables.c): el centro del bloque en X, a media altura y 19 mm dentro de la cara trasera (la del detonador),
+ * para que la palma quede en esa cara y los dedos rodeen el bloque (con la empunadura en el origen, fuera del bloque, la mano cogía el aire y el modelo quedaba 6-16 cm por delante). */
+#define BLOCK_GRIP   {-0.042f, 0.0f, -0.075f}
+/* Centro de la cara adhesiva de la carga; +Z sale de la superficie. 22,5 mm por delante de la empunadura (la misma pose de colocación respecto a la mano de antes de mover la empunadura). */
+#define BLOCK_FACE   {-0.042f, 0.0f, -0.0975f}
 /* Mina (0x17a1, marco HELD): cara picuda (de disparo) +X, eje largo Z, mira +Y. En la mano va girada R_y(+90) respecto al mando (zócalo FIT_CLAYMORE de vr_grip): cara picuda al frente, eje largo de
  * izquierda a derecha. El evento de colocación lleva la pose del modelo girada R_y(-90): su -Z es la cara picuda, y el anfitrión (place_project) proyecta y orienta con ese delante. */
 #define MINE_FACE_Q  {0, -0.70710678f, 0, 0.70710678f}
@@ -122,13 +126,12 @@ static void placed_update(WeaponState *s, const WInput *in, WReloadMode rm, cons
     [WP_GRIP]    = {GRIP, ID_Q}, [WP_SUPPORT] = {{0, 0, 0}, ID_Q}, [WP_MUZZLE] = {__VA_ARGS__, ID_Q}, \
     [WP_EYE]     = {{0, 0, 0}, ID_Q}, [WP_MAGWELL] = {{0, 0, 0}, ID_Q}, [WP_CHARGE] = {{0, 0, 0}, ID_Q}, \
     [WP_SCREEN]  = {{0, 0, 0}, ID_Q} }
-#define PL_PTS(...) PL_PTS_G(((WVec3){0, 0, 0}), __VA_ARGS__)
 #define PL_RECOIL { .kick_back = 0, .kick_up = 0, .kick_yaw_rand = 0, .stiffness = 0, .damping = 0, .two_hand_factor = 1 }
 static void placed_init_a(WeaponState *s);
 static void placed_init_b(WeaponState *s);
 const WeaponDef w_placed_a = {
     .id = "placed_a", .game_weapon_id = PLACE_ID_A, .meshes = NULL, .nmeshes = 0,
-    .parts = CARGA_PARTS, .nparts = 4, .points = PL_PTS(BLOCK_FACE), .recoil = PL_RECOIL,
+    .parts = CARGA_PARTS, .nparts = 4, .points = PL_PTS_G(((WVec3)BLOCK_GRIP), ((WVec3)BLOCK_FACE)), .recoil = PL_RECOIL,
     .mode = WF_PLACED, .rpm = 0, .mag_capacity = 1, .state_size = sizeof(WPlacedState),
     .init = placed_init_a, .update = placed_update, .mesh_names = CARGA_MESH_NAMES };
 const WeaponDef w_placed_b = {

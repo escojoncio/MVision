@@ -5,6 +5,7 @@
 #include "w_laser.h"
 #include "w_throw.h"
 #include "wcore.h"
+#include "wcut.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -142,6 +143,10 @@ static void test_throw_slow_release(void) {
     }
     CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW, "gatillo lento: lanza");
     if (M.nev) { printf("  gatillo lento: %.2f m/s (pico %.1f)\n", (double)wv_len(M.ev[0].lin_vel), (double)vpk); CHECK(wv_len(M.ev[0].lin_vel) >= 0.85f * vpk, "gatillo lento: velocidad %.2f < 85 %% del pico", (double)wv_len(M.ev[0].lin_vel)); }
+    if (M.nev) {      /* diagnóstico del log [lanzar]: la ventana más rápida recorrida y la velocidad entre las dos últimas poses */
+        CHECK(M.ev[0].v_peak >= M.ev[0].v_used - 1e-3f && M.ev[0].v_peak > 0.85f * vpk, "diagnóstico: v_peak %.2f (pico %.1f)", (double)M.ev[0].v_peak, (double)vpk);
+        CHECK(M.ev[0].v_inst >= 0.0f && M.ev[0].v_inst < 0.5f, "diagnóstico: v_inst %.2f (la mano ya paró)", (double)M.ev[0].v_inst);
+    }
     free(r.s);
 }
 
@@ -609,8 +614,23 @@ static void test_mina_agarre(void) {
     printf("-- mina: punto de empunadura dentro del cuerpo --\n");
     WVec3 g = w_placed_b.points[WP_GRIP].p;
     CHECK(g.x > WGHOST_MINE_X0 && g.x < WGHOST_MINE_X1 && g.y > -WGHOST_MINE_LEGS_U / 1000.0f && g.y < WGHOST_MINE_UP_M && g.z > WGHOST_MINE_Z0 && g.z < WGHOST_MINE_Z1, "empunadura de la mina (%.3f %.3f %.3f) dentro del cuerpo", g.x, g.y, g.z);
+    /* carga adhesiva (0xf83d): con la empunadura en el origen del marco (fuera del bloque: caja z -156..-56 mm) la mano cogía el aire y el modelo quedaba 6-16 cm por delante; el punto debe caer dentro de la caja del modelo,
+     * y el punto de colocación (cara adhesiva) seguir en el mismo sitio respecto a la mano que antes de mover la empunadura (WL_PLACE_C no cambia) */
+    const WCutModel *cm = wcut_find(0xf83d);
     WVec3 c = w_placed_a.points[WP_GRIP].p;
-    CHECK(c.x == 0 && c.y == 0 && c.z == 0, "la carga conserva su empunadura");
+    CHECK(cm && c.x > cm->bounds.lo.x && c.x < cm->bounds.hi.x && c.y > cm->bounds.lo.y && c.y < cm->bounds.hi.y && c.z > cm->bounds.lo.z && c.z < cm->bounds.hi.z, "empunadura de la carga (%.3f %.3f %.3f) dentro del bloque", c.x, c.y, c.z);
+    mock_reset(2);
+    Rig r = rig_new(&w_placed_a, WR_MANUAL);
+    draw(&r);
+    r.in.hand[0].p = wv(0.1f, 1.2f, -0.5f); r.in.hand[0].q = wquat_axis_angle(wv(0, 1, 0), 0.7f); r.in.trigger[0] = 0; step(&r, 3);
+    r.in.trigger[0] = 1; step(&r, 3);
+    r.in.trigger[0] = 0; step(&r, 2);
+    CHECK(M.nev == 1 && M.ev[0].kind == WL_PLACE_C, "carga colocada");
+    if (M.nev) {
+        WVec3 e = wv_add(r.in.hand[0].p, wquat_rotate(r.in.hand[0].q, wv(0, 0, -0.0225f)));
+        CHECK(wv_len(wv_sub(M.ev[0].pose.p, e)) < 1e-4f, "la cara adhesiva sigue 22,5 mm por delante de la mano (%.4f %.4f %.4f)", M.ev[0].pose.p.x - e.x, M.ev[0].pose.p.y - e.y, M.ev[0].pose.p.z - e.z);
+    }
+    free(r.s);
 }
 
 int main(void) {

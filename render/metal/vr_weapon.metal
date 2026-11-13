@@ -142,7 +142,7 @@ vertex VrSpcOut vr_vs_spc_amp(uint vid [[vertex_id]], ushort amp [[amplification
     return vr_spc_pack(vid, f, d, uint(amp));
 }
 
-/* Iconos del HUD del juego que no van en las pantallas LED del arma (misma partición de la capa que XRPresent.hudRegions): vida / oxígeno (arriba izquierda), objeto equipado (L2, abajo izquierda) y arma equipada
+/* Iconos del HUD del juego que no van en las pantallas LED del arma (Stinger y misil) (misma partición de la capa que XRPresent.hudRegions): vida / oxígeno (arriba izquierda), objeto equipado (L2, abajo izquierda) y arma equipada
  * con su munición (R2, abajo derecha). ff = fracciones del MARCO del juego (0..1), como hudRegions; la textura del HUD se pasa a ellas con VrSpcHud.frame. El resto (mira, marco de fijación, textos del misil) se conserva. */
 inline bool vr_spc_hud_icon(float2 ff) {
     return (ff.x < 0.35 && ff.y < 0.17) || (ff.x < 0.25 && ff.y > 0.62) || (ff.x > 0.75 && ff.y > 0.62);

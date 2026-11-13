@@ -26,6 +26,7 @@ typedef struct {
     int index;               /* WL_DETONATE: índice de la carga; resto: 0 */
     uint32_t seq;            /* contador creciente de eventos */
     float v_hand, v_used, win_len, win_lag, rel_lag;   /* WL_THROW, diagnóstico: m/s de la ventana más reciente y de la usada, s de largo y de lag de la usada y s entre empezar a soltar el gatillo y cruzar el umbral */
+    float v_peak, v_inst;    /* WL_THROW, diagnóstico: m/s de la ventana más rápida recorrida (cualquier dirección) y entre las dos últimas poses del historial */
 } WLaunch;
 
 /* Gancho opcional; devuelve 1 si el juego aceptó el evento (p.ej. hay superficie

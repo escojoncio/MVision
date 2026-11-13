@@ -411,7 +411,9 @@ final class VRInput: @unchecked Sendable {
         var s: UInt8 = 0, l: UInt8 = 0
         mv_host_rumble(&s, &l)
         if s != 0 || l != 0 || lastRumbleSmall != 0 || lastRumbleLarge != 0 {
-            rumble(Float(s) / 255, Float(l) / 255)
+            var left: Float = 0, right: Float = 0
+            mv_vrgame_route_rumble(s, l, &left, &right)      // pequeño -> derecha, grande -> izquierda; con el PSG1 el latido (grande) también a la derecha
+            rumble(right, left)
         }
         lastRumbleSmall = s
         lastRumbleLarge = l

@@ -869,7 +869,7 @@ static void t_fire_block(void) {
     }
 }
 
-/* zona del pecho a la altura del pecho, no de la cabeza: su borde superior (con histéresis incluida) queda a 0,13 m bajo la cabeza; con la mira/vista especial levantada o la mano a <= 0,15 m del ojo no abre menús.
+/* zona del pecho a la altura del pecho, no de la cabeza: su borde superior (con histéresis incluida) queda a 0,13 m bajo la cabeza; con la mano a <= 0,15 m del ojo no abre menús (la mira levantada no la anula).
  * PSG1 apuntando: la mano del arma a 8-12 cm bajo el ojo, el disparo sale y no se abre ninguna ventana aunque se apriete el grip */
 static void t_face_aim(void) {
     for (int s = 0; s < 2; s++) {
@@ -888,20 +888,21 @@ static void t_face_aim(void) {
             }
             CHECK(f.shots == 1 && !opened && !blocked);
         }
-        /* mira del juego levantada (face_view: PSG1 con la mira, prismáticos, vista especial): la zona no actúa en la mano que la sostiene (la dominante), ni con ella dentro de la zona de siempre.
-         * La OTRA mano sigue pudiendo abrir menús en el pecho (con los prismáticos y las manos libres era imposible abrir el menú de objetos) */
-        { vrg_t g; vrg_in_t in = phys_base(); fsim_t f; vrg_init(&g); fsim_init(&f); in.face_view = 1;
-          const int dom = g.cfg.right_handed ? 1 : 0;
-          if (s == dom) {
-              for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-              for (int i = 0; i < 6; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
-              CHECK(!fo.chest_in[s]);
-              in.fist_btn[s] = 1;
-              for (int i = 0; i < 40; i++) fire_step(&g, &in, &f, s, 0.0f, 1.0f, 1);
-              CHECK(f.shots == 1 && g.menu_hold == 0);
-          } else {
-              vrg_out_t o; CHECK(open_hold(&g, &in, s, &o) && (g.menu_hold & (1 << s)));      /* la mano libre abre su menú con la vista especial levantada */
-          } }
+        /* PSG1 equipado y tumbado (ojo del juego a 0,31 m del suelo, la mano del mundo a ras de suelo o por debajo, con la mira levantada): la zona del pecho es FÍSICA (hrel), no depende de la altura
+         * del ojo del juego, y con la mira levantada abre en CUALQUIER mano: la dominante (R2, ventana de armas: la única forma de quitarse el PSG1) y la libre (L2) */
+        for (int low = 0; low < 2; low++) {
+            vrg_t g; vrg_in_t in = phys_base(); vrg_out_t o; uint16_t pr = 0; int op = 0;
+            vrg_init(&g);
+            const int dom = g.cfg.right_handed ? 1 : 0;
+            in.weapon = 9; in.weapon_busy = 1; in.stance = 2; in.head[1] = 0.31f;
+            put_hf(&in, s, sd * 0.16f, ZDN, ZFW, 1.0f);      /* escala 1: la mano del mundo queda a ~0 m del suelo */
+            if (low) in.hand[s][1] = -0.10f;                  /* ... o bajo el suelo (las manos tumbado no tienen tope) */
+            for (int i = 0; i < 12; i++) hold_step(&g, &in, &o, 1, 0);
+            CHECK(o.chest_in[s]);
+            in.fist_btn[s] = 1;
+            for (int i = 0; i < 30; i++) { hold_step(&g, &in, &o, 1, 0); pr |= o.press; op |= o.menu_open[s]; }
+            CHECK(op && (g.menu_hold & (1 << s)) && (pr & (s == dom ? VRG_R2 : VRG_L2)));
+        }
         /* borde superior de la zona (0,13 m bajo la cabeza): a 0,12 m dentro de la esfera de salida pero por encima, no hay zona y el grip no abre; a 0,14 m, zona */
         { vrg_t g; vrg_in_t in = phys_base(); fsim_t f; vrg_out_t o; vrg_init(&g); fsim_init(&f); int op = 0;
           for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);

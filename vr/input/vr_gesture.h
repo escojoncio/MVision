@@ -90,7 +90,6 @@ typedef struct {
     int tracked[2];          /* 0 = izquierda física, 1 = derecha física */
     double hand_time[2];     /* instante (s, reloj monótono) de la pose de cada mano; <= 0: sin marca (se usa dt por llamada). Repetir la marca = misma muestra */
     int throw_hold;          /* arrojadiza VR (granada, aturdidora, chaff) en la mano del arma, sin preparar o preparada: solo impide los golpes y agarres */
-    int face_view;           /* el juego tiene una mira o vista especial levantada (PSG1 con la mira, prismáticos, gafas: vrcam_zoom_capped o item_scope): la zona del pecho no actúa en la mano que la sostiene (la dominante); la otra mano sigue pudiendo abrir menús en el pecho */
     int item_scope;          /* prismáticos equipados (objeto IT_Scope, sin arma): en el original ○ es el zoom y no hay golpe, agarre ni toque; aquí tampoco */
     int weapon_busy;         /* arma VR mostrada o maniobra de recarga en curso (el juego desequipa el arma un instante al recargar) */
     float hand[2][3], grip[2];   /* mano en el mundo (cercanía a enemigos); grip = agarre (puño), NO decide el agarre del enemigo */

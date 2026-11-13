@@ -383,9 +383,9 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
             float side = s == 0 ? -c->chest_side : c->chest_side;
             float dx = hfs[s][0] - side, dy = hfs[s][1] + c->chest_down, dz = hfs[s][2] - c->chest_fwd;
             chest_d[s] = sqrtf(dx * dx + dy * dy + dz * dz);
-            /* ni la zona ni su histéresis suben del borde superior (chest_radius - chest_down respecto a la cabeza: a la altura del pecho, no de la cabeza); con la mira o una vista
-             * especial levantada (solo en la mano que la sostiene: la dominante; la otra mano sigue pudiendo abrir menús en el pecho), o la mano a face_radius del ojo (arma apuntada a la cara), la zona no actúa en esa mano */
-            const int face = (in->face_view && s == (c->right_handed ? 1 : 0)) || sqrtf(hfs[s][0] * hfs[s][0] + hfs[s][1] * hfs[s][1] + hfs[s][2] * hfs[s][2]) <= c->face_radius;
+            /* ni la zona ni su histéresis suben del borde superior (chest_radius - chest_down respecto a la cabeza: a la altura del pecho, no de la cabeza); con la mano a face_radius del ojo
+             * (arma apuntada a la cara) la zona no actúa en esa mano. La mira levantada (PSG1, prismáticos) NO anula la zona de la mano dominante: es la única forma de abrir la ventana de armas y quitarse el PSG1 */
+            const int face = sqrtf(hfs[s][0] * hfs[s][0] + hfs[s][1] * hfs[s][1] + hfs[s][2] * hfs[s][2]) <= c->face_radius;
             const int low = !face && hfs[s][1] <= c->chest_radius - c->chest_down;
             chest[s] = low && chest_d[s] <= (g->chest_prev[s] ? c->chest_exit : c->chest_radius);
             out->chest_in[s] = chest[s];

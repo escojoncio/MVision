@@ -228,15 +228,25 @@ static int throw_it(WThrowState *t, const WInput *in, const WGameBridge *g) {
      * 0,2-2 m/s con tiros de 4-8 m/s). Se recorren ventanas que acaban cada vez antes (hasta V_BACK antes de empezar a soltar el gatillo) y vale la más rápida, siempre que vaya en la misma
      * dirección (a menos de ~60 grados) que la última marcha significativa o que el frente de la mano: un amago hacia atrás más rápido no manda la granada hacia atrás. */
     const WVec3 front = wquat_rotate(wquat_normalize(in->hand[0].q), wv(0, 0, -1));
+    float v_peak = wvh_jump(&t->hist, V_WIN, win_lag) ? 0.0f : wv_len(vh);                              /* diagnóstico: la ventana más rápida de las recorridas (sin filtro de dirección, sin saltos de pose) */
     WVec3 ref = wv_len(vh) > 0.3f ? vh : wv(0, 0, 0);      /* la dirección de la última marcha significativa (>= 0,3 m/s); el frente de la mano no basta: el marco de la mano nueva no mira al frente */
     for (float l = win_lag + V_STEP; l <= lag + V_BACK; l += V_STEP) {
         WVec3 vs, ws;
         if (!wvh_in_history(&t->hist, V_WIN, l)) continue;      /* ventana candidata fuera del historial: se descarta */
         wvh_estimate(&t->hist, V_WIN, l, &vs, &ws);
         if (wv_len(ref) == 0.0f && wv_len(vs) > 0.3f) ref = vs;
+        if (wv_len(vs) > v_peak && !wvh_jump(&t->hist, V_WIN, l)) v_peak = wv_len(vs);
         if (!(wv_len(vs) > V_UP * wv_len(vh)) || wvh_jump(&t->hist, V_WIN, l)) continue;
         const float cs = 1.0f / wv_len(vs), cr = wv_len(ref) > 0.0f ? 1.0f / wv_len(ref) : 0.0f;
         if (cs * wv_dot(vs, front) >= V_SLOW_COS || (cr > 0.0f && cs * cr * wv_dot(vs, ref) >= V_SLOW_COS)) { vh = vs; wh = ws; win_lag = l; }
+    }
+    ev.v_peak = v_peak;
+    if (t->hist.n >= 2) {        /* diagnóstico: velocidad entre las dos últimas poses distintas del historial */
+        const WVSample *b = &t->hist.s[(t->hist.head - 1 + WV_HIST) % WV_HIST];
+        for (int i = 2; i <= t->hist.n; i++) {
+            const WVSample *a = &t->hist.s[(t->hist.head - i + WV_HIST) % WV_HIST];
+            if (b->t - a->t >= 1e-3f) { ev.v_inst = wv_len(wv_sub(b->p.p, a->p.p)) / (b->t - a->t); break; }
+        }
     }
     ev.v_used = wv_len(vh); ev.win_len = V_WIN; ev.win_lag = win_lag; ev.rel_lag = lag;
     float wl = wv_len(wh);

@@ -25,6 +25,7 @@
 #define SUPPOSE (vrgrip_find(0)->support_pose)
 #define SUP_D sup_dist()
 #include "vrgame.h"
+#include "w_guided.h"
 #include "w_laser.h"
 #include "wload.h"
 #include "w_sniper.h"
@@ -53,7 +54,20 @@ int mv_vr_get_head(float m[16], double *t) { memcpy(m, g_head, sizeof g_head); i
 int mv_vrhost_hands_active(void) { return 0; }
 float mv_vrhost_wall_distance(const float p[3], float mx) { (void)p; (void)mx; return -1; }
 static float ray_stub_mm = -1;      /* geometría sólida de vr_headcol sustituida: impacto a esta distancia (mm del motor), -1 ninguno */
-float mv_vrhost_ray_distance(const float o[3], const float d[3], float mx) { (void)o; (void)d; return ray_stub_mm >= 0 && ray_stub_mm <= mx ? ray_stub_mm : -1; }
+#define RAY_LOG_MAX 512
+static float ray_log_o[RAY_LOG_MAX][3], ray_log_d[RAY_LOG_MAX][3];      /* origen y dirección (mundo del motor) de cada rayo pedido desde ray_log_n = 0 */
+static int ray_log_n;
+static float ray_floor_u = -1e9f;      /* suelo plano en espacio de usuario (m): sin impacto fijo (ray_stub_mm), los rayos hacia abajo impactan en él; -1e9 = no hay geometría */
+float mv_vrhost_ray_distance(const float o[3], const float d[3], float mx) {
+    if (ray_log_n < RAY_LOG_MAX) { memcpy(ray_log_o[ray_log_n], o, sizeof ray_log_o[0]); memcpy(ray_log_d[ray_log_n], d, sizeof ray_log_d[0]); ray_log_n++; }
+    if (ray_stub_mm < 0 && ray_floor_u > -1e8f) {
+        VrFireMap map; float uo[3], ud[3];
+        vrfire_map_from_cam(&map, &rec); vrfire_pos_from_world(&map, o, uo); vrfire_dir_from_world(&map, d, ud);
+        if (ud[1] < -0.5f && uo[1] >= ray_floor_u) { const float t = (uo[1] - ray_floor_u) / -ud[1] * map.units_per_m; return t <= mx ? t : -1; }
+        return -1;
+    }
+    return ray_stub_mm >= 0 && ray_stub_mm <= mx ? ray_stub_mm : -1;
+}
 int vr_scene_build(void) { return 0; }
 void vr_scene_opts_default(void) {}
 int vrmelee_rt_installed(void) { return 0; }
@@ -775,6 +789,39 @@ static void fresh_meshes(int gid) {      /* arma del registro con una malla mín
     vrgame_set_enabled(0, 1);
 }
 static void fresh_pistol_meshes(void) { fresh_meshes(0); }
+/* Como fresh_meshes, pero con la pieza de la pantalla LED sintética (un rectángulo de cara +Z) para que aa_led_face / guided_led_face la hallen: Stinger = pieza "screen" (en el modelo real cuelga del cuerpo con parent -1), Nikita = cara del "tube" */
+static WPart led_parts[16];
+static void fresh_led_meshes(int gid) {
+    static WeaponState *old;
+    if (old) { free(old); old = NULL; }
+    syn_def = NULL;
+    for (int i = 0; i < w_registry_count; i++) if (w_registry[i] && w_registry[i]->game_weapon_id == gid) syn_def = w_registry[i];
+    static WVertex tri[3] = {{{0, 0, 0}, {0, 1, 0}, {0, 0}, {255, 255, 255, 255}}, {{0.01f, 0, 0}, {0, 1, 0}, {1, 0}, {255, 255, 255, 255}}, {{0, 0.01f, 0}, {0, 1, 0}, {0, 1}, {255, 255, 255, 255}}};
+    static uint16_t tidx[3] = {0, 1, 2};
+    static WVertex quad_aa[4] = {{{-0.03f, -0.0225f, 0}, {0, 0, 1}, {0, 0}, {255, 255, 255, 255}}, {{0.03f, -0.0225f, 0}, {0, 0, 1}, {1, 0}, {255, 255, 255, 255}}, {{0.03f, 0.0225f, 0}, {0, 0, 1}, {1, 1}, {255, 255, 255, 255}}, {{-0.03f, 0.0225f, 0}, {0, 0, 1}, {0, 1}, {255, 255, 255, 255}}};
+    static WVertex quad_gd[4] = {{{-0.09f, -0.03f, -0.08f}, {0, 0, 1}, {0, 0}, {255, 255, 255, 255}}, {{-0.02f, -0.03f, -0.08f}, {0, 0, 1}, {1, 0}, {255, 255, 255, 255}}, {{-0.02f, 0.03f, -0.08f}, {0, 0, 1}, {1, 1}, {255, 255, 255, 255}}, {{-0.09f, 0.03f, -0.08f}, {0, 0, 1}, {0, 1}, {255, 255, 255, 255}}};
+    static uint16_t qidx[6] = {0, 1, 2, 0, 2, 3};
+    int n = weapon_mesh_count(syn_def), np = syn_def->nparts;
+    for (int i = 0; i < n; i++) syn_mesh[i] = (WMesh){syn_def->mesh_names[i], tri, 3, tidx, 3, 0};
+    for (int i = 0; i < np && i < 16; i++) {
+        led_parts[i] = syn_def->parts[i];
+        if (gid == 4 && led_parts[i].name && !strcmp(led_parts[i].name, "screen")) led_parts[i].parent = -1;
+    }
+    for (int i = 0; i < n; i++) {
+        if (gid == 4 && !strcmp(syn_def->mesh_names[i], "screen")) syn_mesh[i] = (WMesh){syn_def->mesh_names[i], quad_aa, 4, qidx, 6, 0};
+        if (gid == 3 && !strcmp(syn_def->mesh_names[i], "tube")) syn_mesh[i] = (WMesh){syn_def->mesh_names[i], quad_gd, 4, qidx, 6, 0};
+    }
+    WeaponState *st = calloc(1, syn_def->state_size);
+    st->def = syn_def; syn_def->init(st); st->def = syn_def;
+    weapon_bind(st, syn_mesh, n, led_parts, np);
+    syn_state = old = st;
+    VrHandsConfig hc; vrhands_default_config(&hc); hc.grip_mode = VRH_GRIP_SOCKET;
+    VrHandsRig *rig = vrhands_create(&hc);
+    vrhands_bind(rig, st, NULL, 0, 0);
+    vrgame_test_install(gid, (void *)syn_def, st, rig);
+    vrgame_reset();
+    vrgame_set_enabled(0, 1);
+}
 static void hand_at(int side, const float p[3], const float q[4]) {
     MvVrHand h;
     memset(&h, 0, sizeof h);
@@ -1175,6 +1222,40 @@ static void install_extra(int gid) {
     vrhands_bind(rig, st, NULL, 0, 0);
     vrgame_test_install(gid, (void *)d, st, rig);
 }
+/* La vista especial pegada al arma (lente del PSG1, pantalla LED del Nikita y del Stinger) se publica con la pose de la mano del VBlank (50 Hz), pero el modelo del arma se dibuja con la mano de AHORA (mv_host_hands, 90 Hz): sin la misma
+ * compensación la pantalla se queda atrás del modelo al mover el arma y parte de ella cae detrás de las caras vecinas del tubo («se borra un poco al moverlo»). */
+static void special_view_follows_hand(void) {
+    printf("-- vista especial: sigue a la mano de ahora igual que el modelo del arma --\n");
+    float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1}, p2[3] = {0.26f, 1.22f, -0.34f}, dir[3], org0[3], org1[3];
+    MvVrSpecialView a, b;
+    world(0, 12, 36);
+    fresh_pistol_meshes();
+    install_extra(9);
+    bs.weapon = 9; bs.weapon_ammo[9] = 20;
+    for (int i = 0; i < 14; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(mv_vrgame_special_view(&a) == 1 && a.kind == MV_VIEW_SCOPE && drawn_weapon(dir, org0) == 1, "PSG1 listo: lente publicada y arma dibujada");
+    hand_at(1, p2, q); vrgame_test_advance(2000000ull);                  /* el mando se mueve entre dos VBlanks */
+    CHECK(mv_vrgame_special_view(&b) == 1 && drawn_weapon(dir, org1) == 1, "tras mover el mando: lente y arma siguen");
+    float dl[3], dw[3], err = 0, mv = 0;
+    for (int i = 0; i < 3; i++) { dl[i] = b.surf_pos[i] - a.surf_pos[i]; dw[i] = org1[i] - org0[i]; err += (dl[i] - dw[i]) * (dl[i] - dw[i]); mv += dw[i] * dw[i]; }
+    CHECK(mv > 1e-4f && sqrtf(err) < 0.002f, "la lente se desplaza como el arma (error %.1f mm de %.1f mm)", sqrtf(err) * 1000.0f, sqrtf(mv) * 1000.0f);
+    /* giro del mando entre dos VBlanks: surf_rot = dq * surf_rot del VBlank, con dq = giro del mando de ahora * inverso del de la simulación (el producto no conmuta: q_mul(sq, dq) daría otro giro) */
+    const float a1 = 0.45f, q3[4] = {0.3f * sinf(a1), sinf(a1) * 0.9539392f, 0.0f, cosf(a1)};
+    float q3n[4] = {q3[0], q3[1], q3[2], q3[3]};
+    t_qnorm(q3n);
+    hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);      /* nuevo VBlank con el mando sin girar: la simulación vuelve a q identidad */
+    MvVrSpecialView c0, c1;
+    CHECK(mv_vrgame_special_view(&c0) == 1 && c0.kind == MV_VIEW_SCOPE, "PSG1 listo tras otro VBlank: lente publicada");
+    hand_at(1, p, q3n); vrgame_test_advance(2000000ull);
+    CHECK(mv_vrgame_special_view(&c1) == 1 && c1.kind == MV_VIEW_SCOPE, "mando girado entre VBlanks: lente publicada");
+    float want[4];
+    t_qmul(q3n, c0.surf_rot, want);      /* q_mul(dq, sq): dq = q3n (el mando de la simulación está sin girar) */
+    const float dot = fabsf(want[0] * c1.surf_rot[0] + want[1] * c1.surf_rot[1] + want[2] * c1.surf_rot[2] + want[3] * c1.surf_rot[3]);
+    float wrong[4];
+    t_qmul(c0.surf_rot, q3n, wrong);
+    const float dotw = fabsf(wrong[0] * c1.surf_rot[0] + wrong[1] * c1.surf_rot[1] + wrong[2] * c1.surf_rot[2] + wrong[3] * c1.surf_rot[3]);
+    CHECK(dot > 0.9999f, "lente girada con el mando: surf_rot = dq * surf_rot del VBlank (producto escalar %.5f; orden contrario %.5f)", dot, dotw);
+}
 /* Cambio de arma (selector abierto o directo): la vista especial (lente SCOPE del PSG1) del arma que entra no se publica mientras dura el cambio, solo cuando está lista */
 static void special_view_waits_on_weapon_change(void) {
     printf("-- vista especial: durante el cambio de arma no se publica la del arma que entra --\n");
@@ -1233,6 +1314,82 @@ static void special_view_waits_on_weapon_change(void) {
     bs.menu_open = 0; bs.menu_state = 0; bs.in_control = 1; bs.cam_ctl = 0;
 }
 
+/* Stinger equipado: el HUD va solo en la pantalla LED del visor (o su respaldo), nunca en el panel plano del mundo: hide_hud = 1 con el visor en uso o sin usar */
+static void stinger_hud_only_on_led(void) {
+    printf("-- Stinger: sin panel plano del HUD en el mundo --\n");
+    float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1};
+    MvVrSpecialView sv;
+    world(4, 1, 4);
+    fresh_meshes(4);
+    mv_vrgame_set_options(1, 2);
+    for (int i = 0; i < 12; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    if (mv_vrgame_special_view(&sv) == 1 && (sv.kind == MV_VIEW_AA_SCREEN || sv.kind == MV_VIEW_AA_SIGHT)) CHECK(sv.hide_hud == 1, "Stinger sin usar el visor: hide_hud %d (kind %d)", sv.hide_hud, sv.kind);
+    else printf("   (sin pieza LED en la malla mínima de la prueba: no se publica vista, comprobación de hide_hud omitida)\n");
+}
+/* Pantallas LED con pieza sintética: hide_hud de cada vista (Stinger: siempre 1; Nikita: 1 en vuelo y en pantalla grande, 0 en espera) y que con el arma oculta (INTRUDE) no se publica la vista LED
+ * (la pantalla grande del vuelo, que no depende del arma, se mantiene) */
+static void led_views_hide_hud(void) {
+    printf("-- pantallas LED sintéticas: hide_hud y arma oculta --\n");
+    float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1};
+    MvVrSpecialView sv;
+    mv_vrgame_set_missile_view(0);
+    world(4, 1, 4);
+    fresh_led_meshes(4);
+    mv_vrgame_set_options(1, 2);
+    for (int i = 0; i < 12; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(mv_vrgame_special_view(&sv) == 1 && sv.kind == MV_VIEW_AA_SCREEN, "Stinger con pieza LED: vista AA_SCREEN publicada (kind %d)", sv.kind);
+    CHECK(sv.hide_hud == 1, "Stinger AA_SCREEN: hide_hud %d", sv.hide_hud);
+    bs.player_status |= BRIDGE_PS_INTRUDE;
+    for (int i = 0; i < 4; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(mv_vrgame_special_view(&sv) == 0 && sv.kind == MV_VIEW_NONE, "Stinger con INTRUDE: sin vista LED ni visor (kind %d)", sv.kind);
+    bs.player_status &= ~(uint32_t)BRIDGE_PS_INTRUDE;
+
+    world(3, 1, 4);
+    fresh_led_meshes(3);
+    mv_vrgame_set_options(1, 2);
+    GuidedState *gs = (GuidedState *)syn_state;
+    for (int i = 0; i < 12; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(mv_vrgame_special_view(&sv) == 1 && sv.kind == MV_VIEW_MISSILE && !sv.fullscreen && sv.standby == 1, "Nikita en espera: pantalla LED (kind %d fullscreen %d standby %d)", sv.kind, sv.fullscreen, sv.standby);
+    CHECK(sv.hide_hud == 0, "Nikita en espera: el HUD normal sigue (hide_hud %d)", sv.hide_hud);
+    for (int mode = 0; mode < 2; mode++) {
+        mv_vrgame_set_missile_view(mode);
+        syn_state->phase = G_FLIGHT; gs->flight_t = 0; gs->fuel = GD_FUEL_TIME; gs->seen = 0;
+        hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
+        const int got = mv_vrgame_special_view(&sv);
+        CHECK(got == 1 && sv.kind == MV_VIEW_MISSILE && sv.fullscreen == mode && sv.standby == 0, "Nikita en vuelo (pantalla grande %d): vista MISSILE (kind %d fullscreen %d)", mode, sv.kind, sv.fullscreen);
+        CHECK(sv.hide_hud == 1, "Nikita en vuelo (pantalla grande %d): hide_hud %d", mode, sv.hide_hud);
+        bs.player_status |= BRIDGE_PS_INTRUDE;
+        syn_state->phase = G_FLIGHT; gs->flight_t = 0; gs->fuel = GD_FUEL_TIME; gs->seen = 0;
+        hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
+        const int got2 = mv_vrgame_special_view(&sv);
+        if (mode) CHECK(got2 == 1 && sv.kind == MV_VIEW_MISSILE && sv.fullscreen == 1 && sv.hide_hud == 1, "Nikita en vuelo con INTRUDE y pantalla grande: la cámara del misil se mantiene (kind %d)", sv.kind);
+        else CHECK(got2 == 0 && sv.kind == MV_VIEW_NONE, "Nikita en vuelo con INTRUDE y pantalla en el lanzador: sin vista LED (kind %d)", sv.kind);
+        bs.player_status &= ~(uint32_t)BRIDGE_PS_INTRUDE;
+    }
+    mv_vrgame_set_missile_view(0);
+}
+/* Vibración del juego por mando: el pequeño a la derecha y el grande a la izquierda; con el PSG1 mostrado el grande (latido del corazón al apuntar) también a la derecha */
+static void rumble_routing(void) {
+    printf("-- vibración: latido del PSG1 en las dos manos --\n");
+    float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1}, l, r;
+    world(0, 12, 36);
+    fresh_pistol_meshes();
+    for (int i = 0; i < 12; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    mv_vrgame_route_rumble(0, 255, &l, &r);
+    CHECK(l == 1.0f && r == 0.0f, "pistola: el motor grande solo vibra a la izquierda (%.2f %.2f)", l, r);
+    mv_vrgame_route_rumble(128, 0, &l, &r);
+    CHECK(l == 0.0f && fabsf(r - 128.0f / 255.0f) < 1e-6f, "pistola: el pequeño solo a la derecha (%.2f %.2f)", l, r);
+    world(9, 5, 20);
+    fresh_meshes(9);
+    for (int i = 0; i < 12; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    mv_vrgame_route_rumble(0, 196, &l, &r);
+    CHECK(fabsf(l - 196.0f / 255.0f) < 1e-6f && r == l, "PSG1: el latido (motor grande) vibra en las dos manos (%.3f %.3f)", l, r);
+    mv_vrgame_route_rumble(255, 100, &l, &r);
+    CHECK(r == 1.0f && fabsf(l - 100.0f / 255.0f) < 1e-6f, "PSG1: el pequeño más fuerte se conserva a la derecha (%.3f %.3f)", l, r);
+    mv_vrgame_route_rumble(0, 0, &l, &r);
+    CHECK(l == 0.0f && r == 0.0f, "PSG1 sin vibración: nada");
+    mv_vrgame_route_rumble(0, 90, NULL, &r); mv_vrgame_route_rumble(0, 90, &l, NULL);
+}
 /* ---- mina: se apoya en el suelo por las patas (modelo 0x17a1: el punto más bajo del modelo real, medido con wload y dibujado con la matriz del juego) y no se coloca sin suelo; el fantasma queda fijo en el suelo (sin la compensación de latencia de la mano) ---- */
 static int mine_try(float pitch_deg, VrFireMat *m) {
     { VrFireMat dm; for (int n = 0; n < 8 && vrfire_take_projectile(2, &dm) == VRFIRE_SUBST; n++) {} }
@@ -1282,6 +1439,7 @@ static void mine_rests_on_floor(void) {
     bs.ctl_pos.y = -2500;                                       /* suelo del juego a 0,9 m bajo el ojo del motor */
     VrFireMap map; vrfire_map_from_cam(&map, &rec);
     const float y0 = g_head[13] - (float)(map.eye[1] - bs.ctl_pos.y) / map.units_per_m;
+    ray_floor_u = y0;                                           /* la geometría de render tiene el suelo a la altura de los pies */
     int accepted = 0;
     for (int pitch = -60; pitch <= 90; pitch += 15) {
         VrFireMat m;
@@ -1301,6 +1459,7 @@ static void mine_rests_on_floor(void) {
     CHECK(accepted >= 4, "se colocó con %d de 11 inclinaciones (mano horizontal y hacia el suelo)", accepted);
     if (have) wload_free(&mm);
     /* sin suelo conocido (pies fuera de rango): no se puede colocar */
+    ray_floor_u = -1e9f;
     bs.ctl_pos.y = 0;
     MvVrGameStatus s0, s1; mv_vrgame_status(&s0);
     VrFireMat m;
@@ -1310,6 +1469,41 @@ static void mine_rests_on_floor(void) {
     CHECK(any == 0 && s1.places == s0.places && s1.rejects > s0.rejects, "sin suelo: ninguna colocación (colocadas %u, rechazos %u)", s1.places - s0.places, s1.rejects - s0.rejects);
     bs.ctl_pos.y = 0;
 }
+/* mina: el suelo es el REAL bajo el punto de colocación (rayo hacia abajo contra la geometría sólida), no el plano de los pies: en un escalón o una escalera no queda en el aire ni enterrada */
+static void mine_real_floor(void) {
+    printf("-- mina: suelo real bajo el punto (escalón y escalera) --\n");
+    world(5, 0, 4);
+    bs.ctl_pos.y = -2500;
+    VrFireMap map; vrfire_map_from_cam(&map, &rec);
+    const float upm = map.units_per_m, feet = g_head[13] - (float)(map.eye[1] - bs.ctl_pos.y) / upm;
+    const float dz[3] = {0.30f, -0.40f, 0.0f};      /* suelo real respecto a los pies: escalón arriba, escalera abajo, igual */
+    int accepted = 0;
+    for (int k = 0; k < 3; k++) for (int pitch = -60; pitch <= 0; pitch += 30) {
+        VrFireMat m;
+        const float real = feet + dz[k];
+        ray_stub_mm = 0.0f;      /* primer intento solo para conocer la pose de la mano (impacto a 0 mm: suelo = altura de partida del rayo) */
+        if (!mine_try((float)pitch, &m)) { ray_stub_mm = -1; continue; }
+        const float top = w_launch_last()->pose.p.y, y0 = top > feet + 0.5f ? top : feet + 0.5f;
+        ray_stub_mm = (y0 - real) * upm;
+        ray_log_n = 0;
+        if (!mine_try((float)pitch, &m)) { ray_stub_mm = -1; CHECK(0, "con suelo real %+.2f m y inclinación %d la mina se rechazó", dz[k], pitch); continue; }
+        float w[3] = {(float)m.t[0], (float)m.t[1], (float)m.t[2]}, uv[3];
+        vrfire_pos_from_world(&map, w, uv);
+        const float want = real + WGHOST_MINE_LEGS_U / upm;
+        CHECK(fabsf(uv[1] - want) <= 0.01f, "suelo real %+.2f m sobre los pies, inclinación %d: la mina queda a %.3f (esperado %.3f, plano de los pies %.3f)", dz[k], pitch, uv[1], want, feet + WGHOST_MINE_LEGS_U / upm);
+        int down = 0;      /* rayo de place_floor_y: desde la mano (o pies + PLACE_FLOOR_STEP_M si la mano está más baja) hacia abajo (0,-1,0) */
+        for (int r = 0; r < ray_log_n; r++) {
+            float uo[3], ud[3];
+            vrfire_pos_from_world(&map, ray_log_o[r], uo); vrfire_dir_from_world(&map, ray_log_d[r], ud);
+            if (fabsf(ud[0]) < 1e-3f && ud[1] < -0.999f && fabsf(ud[2]) < 1e-3f && fabsf(uo[1] - y0) < 0.02f) down++;
+        }
+        CHECK(down >= 1, "suelo real %+.2f m, inclinación %d: rayo hacia abajo desde y0 %.3f (rayos pedidos %d, bajo ese origen %d)", dz[k], pitch, y0, ray_log_n, down);
+        accepted++;
+    }
+    ray_stub_mm = -1;
+    CHECK(accepted >= 6, "se colocó con %d de 9 combinaciones", accepted);
+    bs.ctl_pos.y = 0;
+}
 /* orientación de la mina colocada: la cara picuda (+X del modelo 0x17a1) mira hacia donde apunta el jugador (guiñada del delante de la mano), sea cual sea esa guiñada */
 static void mine_orientation(void) {
     printf("-- mina: orientación (cara picuda hacia delante) --\n");
@@ -1317,6 +1511,7 @@ static void mine_orientation(void) {
     bs.ctl_pos.y = -2500;
     VrFireMap map; vrfire_map_from_cam(&map, &rec);
     int n = 0;
+    ray_floor_u = g_head[13] - (float)(map.eye[1] - bs.ctl_pos.y) / map.units_per_m;
     const float yaws[5] = {0.0f, 60.0f, -120.0f, 170.0f, 250.0f};
     for (int k = 0; k < 5; k++) for (int pitch = -30; pitch <= 0; pitch += 30) {
         c4_yaw_deg = yaws[k];
@@ -1334,6 +1529,7 @@ static void mine_orientation(void) {
         n++;
     }
     c4_yaw_deg = 0.0f;
+    ray_floor_u = -1e9f;
     CHECK(n >= 6, "se colocó con %d de 10 combinaciones de guiñada e inclinación", n);
     bs.ctl_pos.y = 0;
 }
@@ -1344,6 +1540,7 @@ static void mine_ghost_fixed(void) {
     VrFireMap map; vrfire_map_from_cam(&map, &rec);
     const float y0 = g_head[13] - (float)(map.eye[1] - bs.ctl_pos.y) / map.units_per_m;
     fresh_meshes(5);
+    ray_floor_u = y0;
     float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1};
     { float a = -45.0f * 0.017453292f * 0.5f; q[0] = sinf(a); q[3] = cosf(a); }
     for (int i = 0; i < 80; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
@@ -1356,6 +1553,24 @@ static void mine_ghost_fixed(void) {
         CHECK(ghost_verts(lo2, hi2) == 1 && fabsf(lo2[0] - lo[0]) < 1e-5f && fabsf(lo2[1] - lo[1]) < 1e-5f && fabsf(lo2[2] - lo[2]) < 1e-5f && fabsf(hi2[0] - hi[0]) < 1e-5f && fabsf(hi2[2] - hi[2]) < 1e-5f,
               "fantasma sin compensación de latencia (x %.4f -> %.4f, z %.4f -> %.4f)", lo[0], lo2[0], lo[2], lo2[2]);
     }
+    /* sin impacto del rayo (geometría no disponible): ni fantasma verde ni colocación (antes caía al plano de los pies y la mina quedaba en el aire) */
+    ray_floor_u = -1e9f;
+    fresh_meshes(5);
+    for (int i = 0; i < 80; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(ghost_verts(lo, hi) == 0, "sin impacto del rayo no hay fantasma");
+    bs.ctl_pos.y = 0;
+}
+/* mina sin impacto del rayo (suelo de los pies conocido, geometría de render ausente): se rechaza en todas las inclinaciones, el arma no gasta nada */
+static void mine_no_ray_hit_rejects(void) {
+    printf("-- mina: sin impacto del rayo no se coloca --\n");
+    world(5, 0, 4);
+    bs.ctl_pos.y = -2500;
+    ray_floor_u = -1e9f; ray_stub_mm = -1;
+    MvVrGameStatus s0, s1; mv_vrgame_status(&s0);
+    VrFireMat m; int any = 0;
+    for (int pitch = -60; pitch <= 90; pitch += 30) any += mine_try((float)pitch, &m);
+    mv_vrgame_status(&s1);
+    CHECK(any == 0 && s1.places == s0.places && s1.rejects > s0.rejects, "sin impacto: ninguna colocación (colocadas %u, rechazos %u)", s1.places - s0.places, s1.rejects - s0.rejects);
     bs.ctl_pos.y = 0;
 }
 static void psg1_prone_keeps_weapon(void) {
@@ -2344,9 +2559,14 @@ int main(void) {
     c4_remote_grip();
     c4_direct_chain();
     c4_remote_chest();
+    stinger_hud_only_on_led();
+    led_views_hide_hud();
+    rumble_routing();
     mine_rests_on_floor();
+    mine_real_floor();
     mine_orientation();
     mine_ghost_fixed();
+    mine_no_ray_hit_rejects();
     duct_hides_weapon();
     equip_uses_new_turn();
     stinger_hidden_body_and_led_gesture();
@@ -2367,6 +2587,7 @@ int main(void) {
     ammo_pickup_direct();
     raise_skipped();
     special_view_waits_on_weapon_change();
+    special_view_follows_hand();
     laser_stops_at_walls();       /* al final: consume números aleatorios y las pruebas anteriores dependen de la secuencia */
 
     printf("%s vrgame_fire: %d comprobaciones, %d fallos\n", fails ? "FALLO" : "OK", checks, fails);

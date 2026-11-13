@@ -429,16 +429,50 @@ void mv_vrgame_take_haptics(float *left, float *right) {
     hap_out[0] = hap_out[1] = 0;
     pthread_mutex_unlock(&HM);
 }
+/* Vibración del juego (motor pequeño / grande, 0..255) por mando: el pequeño va a la derecha y el grande a la izquierda. El latido del corazón al apuntar con el PSG1 (sna_anim_psg1_helper_80057FD4:
+ * NewPadVibration(dword_8009EF1C, 2) = GM_PadVibration2 = motor GRANDE) solo movía el mando izquierdo: con el PSG1 mostrado el motor grande se refleja también en el mando derecho. */
+void mv_vrgame_route_rumble(uint8_t small, uint8_t large, float *left, float *right) {
+    pthread_mutex_lock(&HM);
+    const int psg1 = pub_status.active && pub_status.weapon == 9;
+    pthread_mutex_unlock(&HM);
+    float l = (float)large / 255.0f, r = (float)small / 255.0f;
+    if (psg1 && l > r) r = l;
+    if (left) *left = l;
+    if (right) *right = r;
+}
 void mv_vrgame_status(MvVrGameStatus *out) {
     if (!out) return;
     pthread_mutex_lock(&HM);
     *out = pub_status;
     pthread_mutex_unlock(&HM);
 }
+/* Movimiento rígido D de la mano del arma desde el VBlank que simuló el último frame (pub_sim_hand) hasta el mando de AHORA (90 Hz): el mismo D con el que mv_host_hands mueve el modelo del arma. HM tomado. 0 si no hay D válido. */
+static int sim_delta_locked(float dq[4], float dp[3]) {
+    GripPose hn = hand_frame_locked(opt_right ? 1 : 0, mono_ns()), hs = pub_sim_hand;
+    if (!pub_sim_valid || !hn.valid || !hs.valid) return 0;
+    float qc[4], rp[3];
+    q_conj(hs.q, qc);
+    q_mul(hn.q, qc, dq);
+    q_norm(dq);
+    q_rot(dq, hs.p, rp);
+    for (int i = 0; i < 3; i++) dp[i] = hn.p[i] - rp[i];
+    float dmove = sqrtf((hn.p[0] - hs.p[0]) * (hn.p[0] - hs.p[0]) + (hn.p[1] - hs.p[1]) * (hn.p[1] - hs.p[1]) + (hn.p[2] - hs.p[2]) * (hn.p[2] - hs.p[2]));
+    return dmove < 0.35f && 2.0f * acosf(fminf(1.0f, fabsf(dq[3]))) < 1.2f;
+}
 int32_t mv_vrgame_special_view(MvVrSpecialView *out) {
     if (!out) return 0;
     pthread_mutex_lock(&HM);
     *out = pub_special;
+    /* Vistas pegadas al modelo del arma (lente del PSG1, pantalla LED del Stinger y del Nikita): la superficie sigue al mando de ahora, igual que el modelo (mv_host_hands); con la pose del VBlank se quedaba atrás
+     * al mover el arma y parte de la pantalla caía detrás de las caras vecinas del tubo. La cámara de la segunda vista (cam_pos / cam_rot) es la de la simulación y no se toca. */
+    float dq[4], dp[3];
+    if ((out->kind == MV_VIEW_SCOPE || out->kind == MV_VIEW_AA_SCREEN || (out->kind == MV_VIEW_MISSILE && !out->fullscreen)) && sim_delta_locked(dq, dp)) {
+        float rp[3], sq[4] = {out->surf_rot[0], out->surf_rot[1], out->surf_rot[2], out->surf_rot[3]}, nq[4];
+        q_rot(dq, out->surf_pos, rp);
+        for (int i = 0; i < 3; i++) out->surf_pos[i] = rp[i] + dp[i];
+        q_mul(dq, sq, nq); q_norm(nq);
+        for (int i = 0; i < 4; i++) out->surf_rot[i] = nq[i];
+    }
     pthread_mutex_unlock(&HM);
     return out->kind != MV_VIEW_NONE;
 }
@@ -785,7 +819,7 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
         vrcam_set_zoom_cap(320);                 /* la cabeza no se acerca: el aumento está en la lente */
     } else {
         vrcam_set_zoom_cap(0);
-        if (ready && gid == 4) {
+        if (ready && gid == 4 && !duct) {       /* con el lanzador oculto (conducto, tumbado, prismáticos) no hay pantalla LED ni visor plano: flotarían sin arma */
             VrAaSight sg;
             vraa_sight(&sg);
             WScreenFace af;
@@ -812,7 +846,7 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
                 sv.npoly = af.npoly;
                 for (int i = 0; i < af.npoly; i++) { sv.poly[2 * i] = af.poly[i][0] / af.w + 0.5f; sv.poly[2 * i + 1] = 0.5f - af.poly[i][1] / af.h; }
                 sv.occlude = 1;
-                sv.hide_hud = sg.active;         /* el panel plano del HUD sobra solo mientras el visor está en uso (su mira y marco van en la pieza) */
+                sv.hide_hud = 1;                 /* con el Stinger equipado el HUD (mira, marco, alarma, radar) va solo en la pantalla LED de la pieza: nunca el panel plano ni el radar de muñeca en el mundo */
                 sv.locked = sg.locked; sv.converged = sg.converged;
             } else
             if (sg.active && sg.half_fov_deg > 0.5f && sg.half_fov_deg < 80.0f) {
@@ -848,7 +882,8 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
                 sv.tex_w = GD_VIEW_W; sv.tex_h = GD_VIEW_H;
                 sv.noise = gs->noise;
                 sv.ended = route == GLED_STATIC || st->phase == G_STATIC;
-            } else if (guided_led_face(st, &lf) && lf.w > 1e-4f && lf.h > 1e-4f) {
+                sv.hide_hud = 1;                 /* vista de la cámara del misil: sin panel plano del HUD (alarma, radar) ni radar de muñeca */
+            } else if (!duct && guided_led_face(st, &lf) && lf.w > 1e-4f && lf.h > 1e-4f) {      /* con el lanzador oculto no hay pantalla LED; la vista completa del vuelo no depende del arma y se mantiene */
                 /* Pantalla LED en la cara trasera del visor del modelo (como la lente del PSG1, recortada a su contorno), siempre a la vista mientras se sostiene el lanzador: en reposo muestra la pantalla
                  * en espera; en vuelo, la cámara del misil del juego (el jugador sigue viendo el mundo normal y el control del misil no cambia); al terminar, la estática. */
                 WPose face = wpose_mul(*W, lf.face);
@@ -872,6 +907,7 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
                 sv.noise = gs->noise;
                 sv.ended = route == GLED_STATIC;
                 sv.standby = route == GLED_STANDBY;
+                sv.hide_hud = route != GLED_STANDBY;     /* misil en vuelo o estática final: sin alarma ni radar; en espera (lanzador sin misil) el HUD normal sigue */
             }
         }
     }
@@ -880,18 +916,37 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
     pthread_mutex_unlock(&HM);
 }
 
+/* Suelo REAL bajo (x, z) (espacio de usuario). El juego decide si se puede colocar (snake.c sub_8004E5E8 / sub_8004E588): HZD_LevelHazardCheck(HZD_CHK_FLOOR) en el hueso del pecho (objs[4]) + (150, 0, 50); acepta si el suelo
+ * queda a menos de 350 uds bajo ese hueso o el techo a menos de 125 uds sobre él, si no rechaza (no es un sondeo del claymore: claymore_loader_helper_800735A0 sondea hacia delante, alcance de la explosión). Aquí solo se
+ * da la altura: un rayo hacia abajo contra la geometría sólida nativa (mv_vrhost_ray_distance: es geometría de render, así que puede incluir objetos además de los suelos de colisión) desde `top` (mano) o, si la mano está
+ * más baja, PLACE_FLOOR_STEP_M sobre los pies (escalón), hasta PLACE_FLOOR_DROP_M bajo ellos (escalera). Origen (x, y0, z) y dirección (0, -1, 0) en espacio de usuario, pasados al motor con vrfire_pos/dir_to_world; mv_vrhost_ray_distance
+ * devuelve mm del motor y se divide por units_per_m. Sin impacto (geometría no disponible o suelo fuera de alcance) devuelve NAN: la mina NO se coloca (caer al plano de los pies la dejaba en el aire, no hay forma de saber si ahí hay suelo).
+ * Falta para usar el suelo de COLISIÓN del juego (HZD_CHK_FLOOR, snake.c sub_8004E5E8): vr/camera/vr_hzd*.h solo lee las PAREDES del mapa (grupos HZD +16, paredes de 16 B); el suelo son HZD_FLR (libhzd/level.c,
+ * HZD_LevelHazardCheck: cuadriláteros con altura por nivel) y no hay lector en RAM; habría que añadirlo (estructura de HZD_FLR del EXE EU, sin medir). */
+#define PLACE_FLOOR_STEP_M 0.5f
+#define PLACE_FLOOR_DROP_M 1.5f
+static struct { float floor, hand, org[3]; int hit; } mine_dbg;      /* última colocación de mina probada (registro [mina]): suelo del rayo, mano, impacto, origen de la mina */
+static float place_floor_y(float x, float z, float top) {
+    const float y0 = top > G.floor_u + PLACE_FLOOR_STEP_M ? top : G.floor_u + PLACE_FLOOR_STEP_M;
+    const float o[3] = {x, y0, z}, d[3] = {0.0f, -1.0f, 0.0f}, upm = G.map.units_per_m;
+    float ow[3], dw[3];
+    vrfire_pos_to_world(&G.map, o, ow); vrfire_dir_to_world(&G.map, d, dw);
+    const float t = mv_vrhost_ray_distance(ow, dw, (y0 - (G.floor_u - PLACE_FLOOR_DROP_M)) * upm);
+    return t >= 0.0f && isfinite(t) ? y0 - t / upm : NAN;
+}
+
 /* ---- colocación (mina, carga adhesiva) ----
  * El juego decide la superficie y si se puede; aquí solo se da la pose. El jugador puede estar SENTADO: no se exige acercar
  * la mano al suelo físico. Desde la pose del objeto en la mano se traza el rayo de su "delante" (-Z) y se proyecta sobre el
- * suelo del juego (plano a la altura de los pies del personaje); sin inclinación hacia abajo se coloca a la distancia máxima
+ * suelo del juego (el real bajo el punto, place_floor_y; sin impacto del rayo se rechaza); sin inclinación hacia abajo se coloca a la distancia máxima
  * alcanzable (pared: no hay geometría del escenario en esta capa, es aproximado). En los dos casos la mina se apoya en el suelo por las
  * patas: el origen del modelo 0x17a1 queda WGHOST_MINE_LEGS_U uds sobre él; sin suelo conocido no se coloca. Dentro de PLACE_REACH_M
  * de la cabeza; fuera se rechaza (el arma no gasta nada). Devuelve 0 si se rechaza. */
 static int place_project(const WPose *obj, WPose *out) {
+    mine_dbg.floor = NAN; mine_dbg.hand = obj->p.y; mine_dbg.hit = 0; mine_dbg.org[0] = mine_dbg.org[1] = mine_dbg.org[2] = NAN;
     if (!isfinite(obj->p.x) || !isfinite(obj->p.y) || !isfinite(obj->p.z) || !isfinite(obj->q.x) || !isfinite(obj->q.y) || !isfinite(obj->q.z) ||
         !isfinite(obj->q.w) || !isfinite(G.head.p.x) || !isfinite(G.head.p.z)) return 0;   /* mano no rastreada / pose inválida: no se coloca */
     if (!G.floor_ok || !G.map.valid || !(G.map.units_per_m > 0)) return 0;      /* la altura de la mina sale del suelo: sin él no hay dónde apoyarla */
-    const float rest_y = G.floor_u + WGHOST_MINE_LEGS_U / G.map.units_per_m;    /* origen del modelo con las patas en el suelo */
     float qn = sqrtf(obj->q.x * obj->q.x + obj->q.y * obj->q.y + obj->q.z * obj->q.z + obj->q.w * obj->q.w);
     if (!(qn > 1e-3f)) return 0;
     const float qx = obj->q.x / qn, qy = obj->q.y / qn, qz = obj->q.z / qn, qw = obj->q.w / qn;   /* la fórmula del "delante" exige cuaternión unitario */
@@ -900,17 +955,25 @@ static int place_project(const WPose *obj, WPose *out) {
     float fz = -(1 - 2 * (qx * qx + qy * qy));
     float hx = obj->p.x - G.head.p.x, hz = obj->p.z - G.head.p.z;
     float p[3] = {obj->p.x, obj->p.y, obj->p.z};
-    p[1] = rest_y;
-    if (fy < -0.2f && obj->p.y > G.floor_u) {                         /* apunta hacia abajo: suelo */
-        float t = (G.floor_u - obj->p.y) / fy;
-        p[0] = obj->p.x + fx * t; p[2] = obj->p.z + fz * t;
+    float gy = G.floor_u;                                             /* suelo bajo el punto de colocación: el real del mapa (place_floor_y), no el plano de los pies */
+    if (fy < -0.2f && obj->p.y > G.floor_u) {                         /* apunta hacia abajo: suelo (dos pasadas: el suelo real puede estar a otra altura que el de los pies) */
+        for (int it = 0; it < 2 && obj->p.y > gy; it++) {
+            float t = (gy - obj->p.y) / fy;
+            p[0] = obj->p.x + fx * t; p[2] = obj->p.z + fz * t;
+            gy = place_floor_y(p[0], p[2], obj->p.y);
+            if (!isfinite(gy)) return 0;                              /* sin impacto: no se coloca */
+        }
     } else {                                                          /* horizontal: a la distancia máxima, apoyada en el suelo bajo ese punto */
         float hl = sqrtf(fx * fx + fz * fz);
         if (hl < 1e-3f) return 0;
         float t = PLACE_REACH_M * 0.8f - sqrtf(hx * hx + hz * hz);
         if (t < 0.1f) t = 0.1f;
         p[0] = obj->p.x + fx / hl * t; p[2] = obj->p.z + fz / hl * t;
+        gy = place_floor_y(p[0], p[2], obj->p.y);
+        if (!isfinite(gy)) return 0;                                  /* sin impacto: no se coloca */
     }
+    p[1] = gy + WGHOST_MINE_LEGS_U / G.map.units_per_m;               /* origen del modelo con las patas en el suelo */
+    mine_dbg.floor = gy; mine_dbg.hit = 1; mine_dbg.org[0] = p[0]; mine_dbg.org[1] = p[1]; mine_dbg.org[2] = p[2];
     float dx = p[0] - G.head.p.x, dz = p[2] - G.head.p.z;
     if (!(sqrtf(dx * dx + dz * dz) <= PLACE_REACH_M) || !isfinite(p[1])) return 0;
     out->p.x = p[0]; out->p.y = p[1]; out->p.z = p[2];
@@ -1063,8 +1126,10 @@ static int launch_hook(void *user, const WLaunch *ev) {
         if (ev->kind == WL_INHAND) v[0] = v[1] = v[2] = 0;     /* cocinada hasta el final en la mano: cae a los pies (mecha del juego) */
         float p[3] = {ev->pose.p.x, ev->pose.p.y, ev->pose.p.z};
         const int ok = vrfire_set_throw(p, v, THROW_TICK_S);
-        fprintf(stderr, "[lanzar] arma=%d v_mando=%.2f v_usada=%.2f m/s ventana=%.0f ms (acaba %.0f ms antes del ultimo muestreo) soltar=%.0f ms tras empezar a abrir el gatillo v_actor=%.2f m/s (%.2f %.2f %.2f) angular=%.1f rad/s aceptado=%d\n", ev->weapon_id,
-                ev->v_hand, ev->v_used, 1000.0f * ev->win_len, 1000.0f * ev->win_lag, 1000.0f * ev->rel_lag, vrfire_throw_mps(), v[0], v[1], v[2], wv_len(ev->ang_vel), ok);
+        float pe[3];
+        vrfire_pos_to_world(&G.map, p, pe);
+        fprintf(stderr, "[lanzar] arma=%d v_mando=%.2f v_usada=%.2f m/s ventana=%.0f ms (acaba %.0f ms antes del ultimo muestreo) soltar=%.0f ms tras empezar a abrir el gatillo v_pico=%.2f v_entre_poses=%.2f m/s v_actor=%.2f m/s (%.2f %.2f %.2f) angular=%.1f rad/s pos_motor=(%.0f %.0f %.0f) aceptado=%d\n", ev->weapon_id,
+                ev->v_hand, ev->v_used, 1000.0f * ev->win_len, 1000.0f * ev->win_lag, 1000.0f * ev->rel_lag, ev->v_peak, ev->v_inst, vrfire_throw_mps(), v[0], v[1], v[2], wv_len(ev->ang_vel), pe[0], pe[1], pe[2], ok);
         if (!ok) { G.rejects++; return 0; }
         G.fire_edge = 1; G.fire_pose = ev->pose; G.shots++; G.throws++;
         return 1; }
@@ -1073,7 +1138,11 @@ static int launch_hook(void *user, const WLaunch *ev) {
         if (G.ammo_game <= 0 || !G.map.valid) { G.rejects++; return 0; }
         WPose pp;
         int via_game = 1;
-        if (!(ev->kind == WL_PLACE_C ? place_c4(&ev->pose, &pp, &via_game) : place_project(&ev->pose, &pp))) { G.rejects++; return 0; }
+        const int placed = ev->kind == WL_PLACE_C ? place_c4(&ev->pose, &pp, &via_game) : place_project(&ev->pose, &pp);
+        if (ev->kind == WL_PLACE_MINE)
+            fprintf(stderr, "[mina] colocar=%s suelo_rayo=%.3f pies=%.3f mano=%.3f impacto=%s origen_mina=(%.3f %.3f %.3f) m (espacio de usuario)\n", placed ? "si" : "rechazada", mine_dbg.floor, G.floor_u, mine_dbg.hand,
+                    mine_dbg.hit ? "si" : "no", mine_dbg.org[0], mine_dbg.org[1], mine_dbg.org[2]);
+        if (!placed) { G.rejects++; return 0; }
         if (ev->kind == WL_PLACE_C && !via_game) {      /* C4 en la pared o el suelo: el actor se crea directamente donde apunta el mando (vr_fire.h), SIN el ataque del juego: Snake no hace ninguna animación */
             if ((place_ram && c4_live_count(place_ram) >= 16) || !vrfire_c4_request(&G.map, &pp)) { G.rejects++; return 0; }
             G.shots++; G.places++;
@@ -1791,7 +1860,7 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
         int lz_on = gid == 0 && !duct && bs->in_control && wlaser_raised(&lz);
         float lz_hit_m = -1.0f;
         const int gh_on = gid == 5 && !duct && bs->in_control && G.probe_ok && st->phase == WPL_PH_HELD;   /* mina en la mano con sitio donde colocarla: fantasma (contorno + flecha de su dirección de disparo) en el punto y con la orientación de colocación */
-        if (gh_on) { lz = G.probe_pose; lz.p.y = G.floor_u; }      /* el fantasma se tiende sobre el suelo (w_laser.h): placed.p.y es el origen del modelo, WGHOST_MINE_LEGS_U uds más arriba */
+        if (gh_on) { lz = G.probe_pose; lz.p.y -= WGHOST_MINE_LEGS_U / map.units_per_m; }      /* el fantasma se tiende sobre el suelo (w_laser.h): placed.p.y es el origen del modelo, WGHOST_MINE_LEGS_U uds más arriba */
         if (lz_on && map.valid) {
             /* El rayo acaba donde acaba la bala: misma prueba y mismo alcance (vrhit_shot_dist: primer blanco con los volúmenes de la bala, paredes HZD con la máscara de su línea de visión y suelos de
              * colisión). La geometría de render nativa (vr_headcol) no corta: no bloquea balas (cristales con huecos, rejillas), y el láser debe parar en lo que para la bala. */

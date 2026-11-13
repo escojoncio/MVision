@@ -59,6 +59,8 @@ int32_t mv_vrgame_hand_matrix(int32_t side, float m[16]);
 int32_t mv_vrgame_debug_frame(int32_t kind, int32_t side, float m[16]);
 /* Hápticos pendientes del arma (0..1 por mando físico); se consumen (una lectura = un pulso). */
 void mv_vrgame_take_haptics(float *left, float *right);
+/* Vibración del juego por mando (0..1): pequeño -> derecha, grande -> izquierda; con el PSG1 mostrado el grande (latido del corazón) también va a la derecha. */
+void mv_vrgame_route_rumble(uint8_t small, uint8_t large, float *left, float *right);
 void mv_vrgame_grip_diag(float raw[2], int32_t valid[2]);   /* diagnóstico: agarre crudo de cada mano (0 izq, 1 der) y si su pose era válida */
 
 typedef struct {
@@ -90,6 +92,7 @@ void mv_vrgame_status(MvVrGameStatus *out);
  *    `uv` = recorte 4:3 de la imagen, occlude = 1), siempre publicada con el lanzador en la mano: `standby` = 1 sin misil (cam_valid = 0), cámara del misil en vuelo, estática al terminar. No toma la vista del jugador. Segunda vista de la escena desde `cam_*` (la posición y dirección del misil del juego) mostrada en
  *    una pantalla (`surf_*`, rectángulo; `blend` 0 = pantallita del lanzador .. 1 = visor grande ante el ojo) con ruido/estática (`noise`) y, al terminar el
  *    vuelo, `ended` = 1 (solo estática). `fullscreen` = pantalla grande fija ante la cara (opción de comodidad; la cabeza nunca se mueve).
+ *    hide_hud = 1 con el misil en vuelo o la estática final (sin panel plano del HUD, alarma ni radar de muñeca; la app también oculta el radar con hide_hud de AA_SCREEN / AA_SIGHT), 0 en espera.
  *    La cámara (`cam_*`) va en la punta del misil, 2 cm por delante del morro (GD_CAM_*; el modelo queda detrás de ella). En vuelo la app dibuja encima los textos del HUD del juego (capa 2D) sin los iconos de vida / equipo. Con un cambio de arma en curso (SV_SETTLE_TICKS
  *    VBlanks, o el selector abierto sobre un arma que no era la lista) no se publica ninguna vista especial del arma que entra.
  * Poses en el espacio recentrado (el de la cabeza); cara visible de la superficie = +Z local; delante de la cámara = -Z local. */
