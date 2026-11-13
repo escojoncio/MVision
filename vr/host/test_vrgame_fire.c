@@ -15,6 +15,7 @@
 #include "vr_fire.h"
 #include "vr_hands.h"
 #include "vr_hit.h"
+#include "vr_missile.h"
 #include "vr_hzd.h"
 #include "vr_pose.h"
 #include "vr_reload.h"
@@ -222,18 +223,20 @@ static void grenade_gesture(void) {
     for (int i = 0; i < 40; i++) gvbl(0.7f, 0.0f, 0.0f, 0);
     CHECK(inst_state->phase != WT_PH_READY, "tras lanzar, la mano ya no está preparada (fase %d)", inst_state->phase);
 
-    printf("-- granada: flojo llega cerca, fuerte lejos (velocidad proporcional a la del mando, de punta a punta) --\n");
+    printf("-- granada: un soltar flojo (< 1 m/s) cae cerca; cualquier gesto de lanzar sale al maximo del juego (4,93 m/s, 20 grados de elevacion minima), de punta a punta --\n");
     int16_t v_soft[3], v_mid[3], v_hard[3];
     for (int i = 0; i < 60; i++) gvbl(0.2f, 0.0f, 0.0f, 0);                       /* sale la siguiente */
     int h_soft = throw_with_trigger(0.0045f, v_soft);
     for (int i = 0; i < 60; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
-    int h_mid = throw_with_trigger(0.020f, v_mid);
+    int h_mid = throw_with_trigger(0.030f, v_mid);
     for (int i = 0; i < 60; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
     int h_hard = throw_with_trigger(0.080f, v_hard);
     printf("   velocidad horizontal por tick: suave %d, media %d, fuerte %d\n", h_soft, h_mid, h_hard);
     CHECK(h_soft >= 0 && h_mid >= 0 && h_hard >= 0, "tres lanzamientos con datos");
-    CHECK(h_soft < h_mid && h_mid < h_hard, "más rápido el mando, más velocidad en el motor");
-    CHECK(h_hard > 4 * h_soft + 40 && h_hard > 150, "fuerte (~10 m/s) sale mucho más rápido que flojo (~0,6 m/s): %d frente a %d", h_hard, h_soft);
+    /* 4,93 m/s con 20 grados de elevación (el gesto es horizontal): 4,93 * cos(20) * 1000 u/m * 0,04 s = 185 u/tick en horizontal y 67 en vertical */
+    CHECK(abs(h_mid - 185) <= 4 && abs(h_hard - 185) <= 4, "gesto medio (1,5 m/s) y fuerte (4 m/s): los dos salen al maximo del juego (%d y %d u/tick, esperado 185)", h_mid, h_hard);
+    CHECK(h_soft < 60, "soltar flojo (0,2 m/s): cae a los pies, no es un lanzamiento (%d u/tick)", h_soft);
+    CHECK(abs(v_mid[1] - v_hard[1]) <= 2 && v_mid[1] > 0, "misma elevación mínima en los dos (vertical %d y %d u/tick: 67 de lanzamiento menos la gravedad del juego del retardo de la animación)", v_mid[1], v_hard[1]);
 
     printf("-- granada lista y arma fuera: no se lanza con la velocidad del juego --\n");
     world(2, 0, 3);
@@ -904,12 +907,13 @@ static void throw_bench(void) {
             for (int ms = 0; ms <= (int)(falls[f] * 600.0f); ms++) { float h = fabsf(bench_speed(vps[a], (float)(150 + offs[o] + ms) * 0.001f, (w & 1) ? 2.0f : 0.0f)) * 0.958f; if (h > up) up = h; }
             if (offs[o] >= -60 && offs[o] <= 60) {
                 if (pk > 0 && v / pk < worst) worst = v / pk;
-                CHECK(v >= 0.7f * pk, "pico %.2f, gatillo %+d ms, caida %.0f ms, retroceso/rafaga %d: llegan %.2f m/s (< 70 %% del pico %.2f; mano al soltar %.2f)", vps[a] * 0.958f, offs[o], falls[f] * 1000.0f, w, v, pk, rl);
-                CHECK(v <= 1.25f * up + 0.3f, "pico %.2f, gatillo %+d ms, caida %.0f ms, retroceso/rafaga %d: llegan %.2f m/s (por encima de lo que llego a ir la mano, %.2f)", vps[a] * 0.958f, offs[o], falls[f] * 1000.0f, w, v, up);
+                /* el gesto (mano a 3,8-7,7 m/s hacia delante y 14,5 grados arriba) siempre es un lanzamiento: sale con el módulo fijo del juego (4,93 m/s) a 20 grados de elevación -> 4,63 m/s en horizontal */
+                (void)up; (void)rl;
+                CHECK(fabsf(v - 4.63f) < 0.12f, "pico %.2f, gatillo %+d ms, caida %.0f ms, retroceso/rafaga %d: llegan %.2f m/s en horizontal (esperado 4,63, el máximo del juego; pico de la mano %.2f)", vps[a] * 0.958f, offs[o], falls[f] * 1000.0f, w, v, pk);
             } else if (offs[o] == 100 && pk > 0 && v / pk > best_late) best_late = v / pk;
         }
     bench_burst = 0;
-    printf("   peor caso con el gatillo de -60 a +60 ms del pico: %.0f %% de la velocidad pico de la mano\n", 100.0f * worst);
+    printf("   peor caso con el gatillo de -60 a +60 ms del pico: %.0f %% de la velocidad pico de la mano (la salida es el módulo fijo del juego)\n", 100.0f * worst);
 }
 static void weapon_follows_controller(void) {
     printf("-- arma colgada del mando: la boca sigue al mando girado por un desvío fijo --\n");
@@ -1226,7 +1230,7 @@ static void install_extra(int gid) {
  * compensación la pantalla se queda atrás del modelo al mover el arma y parte de ella cae detrás de las caras vecinas del tubo («se borra un poco al moverlo»). */
 static void special_view_follows_hand(void) {
     printf("-- vista especial: sigue a la mano de ahora igual que el modelo del arma --\n");
-    float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1}, p2[3] = {0.26f, 1.22f, -0.34f}, dir[3], org0[3], org1[3];
+    float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1}, p2[3] = {0.26f, 1.22f, -0.34f}, p3[3] = {0.14f, 1.17f, -0.25f}, dir[3], org0[3], org1[3];
     MvVrSpecialView a, b;
     world(0, 12, 36);
     fresh_pistol_meshes();
@@ -1272,6 +1276,8 @@ static void special_view_waits_on_weapon_change(void) {
     int leaked = 0;
     for (int i = 0; i < 12; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); if (mv_vrgame_special_view(&sv) == 1 && sv.kind == MV_VIEW_SCOPE) leaked++; }
     CHECK(leaked == 0, "selector abierto con el PSG1 de paso: lente publicada en %d VBlanks", leaked);
+    { MvVrGameStatus gst; mv_vrgame_status(&gst);      /* la app solo pone el disco de reserva de sight.c (mira circular grande ante la cabeza) si NO hay arma VR mostrada: aqui la hay, y sin lente */
+      CHECK(gst.active == 1 && gst.weapon == 9, "PSG1 de paso por el selector: arma VR mostrada (active %d weapon %d), la app no debe poner el disco de reserva", gst.active, gst.weapon); }
     /* el selector se cierra con el PSG1 elegido: el primer VBlank (arma recién entrada) no la publica; unos VBlanks después sí */
     bs.menu_open = 0; bs.menu_state = 0; bs.in_control = 1; bs.cam_ctl = 0;
     hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
@@ -1314,19 +1320,19 @@ static void special_view_waits_on_weapon_change(void) {
     bs.menu_open = 0; bs.menu_state = 0; bs.in_control = 1; bs.cam_ctl = 0;
 }
 
-/* Stinger equipado: el HUD va solo en la pantalla LED del visor (o su respaldo), nunca en el panel plano del mundo: hide_hud = 1 con el visor en uso o sin usar */
+/* Stinger equipado: el panel plano del HUD del jugador (radar, vida...) SIGUE visible como con cualquier arma: hide_hud = 0 con el visor en uso o sin usar (su HUD propio se recorta del panel en la app: XRPresent.weaponHudMask) */
 static void stinger_hud_only_on_led(void) {
-    printf("-- Stinger: sin panel plano del HUD en el mundo --\n");
+    printf("-- Stinger: el panel plano del HUD sigue en el mundo --\n");
     float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1};
     MvVrSpecialView sv;
     world(4, 1, 4);
     fresh_meshes(4);
     mv_vrgame_set_options(1, 2);
     for (int i = 0; i < 12; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
-    if (mv_vrgame_special_view(&sv) == 1 && (sv.kind == MV_VIEW_AA_SCREEN || sv.kind == MV_VIEW_AA_SIGHT)) CHECK(sv.hide_hud == 1, "Stinger sin usar el visor: hide_hud %d (kind %d)", sv.hide_hud, sv.kind);
+    if (mv_vrgame_special_view(&sv) == 1 && (sv.kind == MV_VIEW_AA_SCREEN || sv.kind == MV_VIEW_AA_SIGHT)) CHECK(sv.hide_hud == 0, "Stinger sin usar el visor: el panel plano sigue (hide_hud %d, kind %d)", sv.hide_hud, sv.kind);
     else printf("   (sin pieza LED en la malla mínima de la prueba: no se publica vista, comprobación de hide_hud omitida)\n");
 }
-/* Pantallas LED con pieza sintética: hide_hud de cada vista (Stinger: siempre 1; Nikita: 1 en vuelo y en pantalla grande, 0 en espera) y que con el arma oculta (INTRUDE) no se publica la vista LED
+/* Pantallas LED con pieza sintética: hide_hud de cada vista (Stinger y Nikita con pantalla LED: siempre 0, el radar y el resto del panel plano siguen; Nikita con pantalla grande ante la cara en vuelo: 1, el panel taparía la cámara del misil) y que con el arma oculta (INTRUDE) no se publica la vista LED
  * (la pantalla grande del vuelo, que no depende del arma, se mantiene) */
 static void led_views_hide_hud(void) {
     printf("-- pantallas LED sintéticas: hide_hud y arma oculta --\n");
@@ -1338,7 +1344,7 @@ static void led_views_hide_hud(void) {
     mv_vrgame_set_options(1, 2);
     for (int i = 0; i < 12; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
     CHECK(mv_vrgame_special_view(&sv) == 1 && sv.kind == MV_VIEW_AA_SCREEN, "Stinger con pieza LED: vista AA_SCREEN publicada (kind %d)", sv.kind);
-    CHECK(sv.hide_hud == 1, "Stinger AA_SCREEN: hide_hud %d", sv.hide_hud);
+    CHECK(sv.hide_hud == 0, "Stinger AA_SCREEN: el panel plano del HUD sigue (hide_hud %d)", sv.hide_hud);
     bs.player_status |= BRIDGE_PS_INTRUDE;
     for (int i = 0; i < 4; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
     CHECK(mv_vrgame_special_view(&sv) == 0 && sv.kind == MV_VIEW_NONE, "Stinger con INTRUDE: sin vista LED ni visor (kind %d)", sv.kind);
@@ -1357,7 +1363,7 @@ static void led_views_hide_hud(void) {
         hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
         const int got = mv_vrgame_special_view(&sv);
         CHECK(got == 1 && sv.kind == MV_VIEW_MISSILE && sv.fullscreen == mode && sv.standby == 0, "Nikita en vuelo (pantalla grande %d): vista MISSILE (kind %d fullscreen %d)", mode, sv.kind, sv.fullscreen);
-        CHECK(sv.hide_hud == 1, "Nikita en vuelo (pantalla grande %d): hide_hud %d", mode, sv.hide_hud);
+        CHECK(sv.hide_hud == (mode ? 1 : 0), "Nikita en vuelo (pantalla grande %d): hide_hud %d (solo la pantalla grande oculta el panel)", mode, sv.hide_hud);
         bs.player_status |= BRIDGE_PS_INTRUDE;
         syn_state->phase = G_FLIGHT; gs->flight_t = 0; gs->fuel = GD_FUEL_TIME; gs->seen = 0;
         hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
@@ -1367,6 +1373,81 @@ static void led_views_hide_hud(void) {
         bs.player_status &= ~(uint32_t)BRIDGE_PS_INTRUDE;
     }
     mv_vrgame_set_missile_view(0);
+}
+/* La pantalla pegada al arma debe moverse con la MISMA mano con la que mv_host_hands colocó el modelo en el fotograma: entre mv_vrgame_special_view (inicio del fotograma de la app) y el dibujo del arma pasan varios ms y el mando
+ * se ha movido, así que sin mv_vrgame_special_sync la pantalla queda atrás del modelo (hundida tras sus caras, «se borra al moverla»). */
+static void special_view_synced_to_drawn_model(void) {
+    printf("-- vista especial: reajustada a la mano con la que se dibujó el modelo --\n");
+    float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1}, p2[3] = {0.26f, 1.22f, -0.34f}, p3[3] = {0.14f, 1.17f, -0.25f}, dir[3], org0[3], org1[3];
+    MvVrSpecialView a, b;
+    world(0, 12, 36);
+    fresh_pistol_meshes();
+    install_extra(9);
+    bs.weapon = 9; bs.weapon_ammo[9] = 20;
+    for (int i = 0; i < 14; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(mv_vrgame_special_view(&a) == 1 && a.kind == MV_VIEW_SCOPE && drawn_weapon(dir, org0) == 1, "PSG1 listo: lente publicada y arma dibujada");
+    MvVrSpecialView early;
+    hand_at(1, p2, q); vrgame_test_advance(2000000ull);
+    CHECK(mv_vrgame_special_view(&early) == 1, "vista leida al inicio del fotograma");      /* la app la lee aqui... */
+    hand_at(1, p3, q); vrgame_test_advance(6000000ull);                                        /* ...y el mando sigue moviendose hasta el dibujo del arma (6 ms despues), a una pose DISTINTA de la simulada (D no identidad) */
+    CHECK(drawn_weapon(dir, org1) == 1, "arma dibujada con la mano de ese instante");
+    b = early;
+    CHECK(mv_vrgame_special_sync(&b) == 1, "sync: la vista coincide con la publicada");
+    float dl[3], dw[3], err = 0, err_early = 0, mv = 0;
+    for (int i = 0; i < 3; i++) {
+        dl[i] = b.surf_pos[i] - a.surf_pos[i]; dw[i] = org1[i] - org0[i];
+        err += (dl[i] - dw[i]) * (dl[i] - dw[i]); mv += dw[i] * dw[i];
+        const float de = early.surf_pos[i] - a.surf_pos[i];
+        err_early += (de - dw[i]) * (de - dw[i]);
+    }
+    CHECK(sqrtf(err_early) > 0.02f, "sin sync la pantalla quedaria %.1f mm fuera del modelo (mas que los 6 mm de adelanto de la LED)", sqrtf(err_early) * 1000.0f);
+    CHECK(sqrtf(mv) > 0.05f, "el modelo se dibujo con una D no identidad (mov. del arma %.1f mm)", sqrtf(mv) * 1000.0f);
+    CHECK(sqrtf(err) < 0.0005f, "con sync la pantalla sigue al modelo dibujado (error %.2f mm, mov. del arma %.1f mm)", sqrtf(err) * 1000.0f, sqrtf(mv) * 1000.0f);
+    {   /* hubo un VBlank (nueva publicacion) entre mv_host_hands y el sync: la D guardada es de la mano de la publicacion anterior, no se mezcla con la base vigente (la vista no se toca) */
+        MvVrSpecialView late = early;
+        vrgame_test_advance(2000000ull); vrgame_pad(0, &bs, ram);
+        CHECK(mv_vrgame_special_sync(&late) == 0 && memcmp(late.surf_pos, early.surf_pos, sizeof late.surf_pos) == 0 && memcmp(late.surf_rot, early.surf_rot, sizeof late.surf_rot) == 0,
+              "sync: con otra publicacion vigente que la de la D guardada no se aplica y la vista queda intacta");
+    }
+    MvVrSpecialView other = early;
+    other.surf_w *= 1.5f;      /* una vista de la app (prismaticos...) no se toca */
+    float keep[3]; memcpy(keep, other.surf_pos, sizeof keep);
+    CHECK(mv_vrgame_special_sync(&other) == 0 && memcmp(keep, other.surf_pos, sizeof keep) == 0, "sync: otra vista (otro tamano) intacta");
+}
+/* HUD propio del Nikita: el juego solo emite combustible / cifras / ENEMY con el boton triangulo mantenido (rmissile.c, vista en 1a persona), que aqui nunca se pulsa; la app los dibuja (nik_hud, nik_fuel, nik_pos) con la formula del juego */
+static void nikita_native_hud(void) {
+    printf("-- Nikita en vuelo: HUD propio (combustible y posicion del misil) --\n");
+    float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1};
+    MvVrSpecialView sv;
+    mv_vrgame_set_missile_view(0);
+    world(3, 1, 4);
+    fresh_led_meshes(3);
+    mv_vrgame_set_options(1, 2);
+    GuidedState *gs = (GuidedState *)syn_state;
+    const uint32_t actor = 0x80100000u, ao = actor & 0x1FFFFFu;
+    uint8_t saved[0x328];
+    memcpy(saved, ram + ao, sizeof saved);
+    memset(ram + ao, 0, sizeof saved);
+    hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);      /* primer VBlank: el juego fija el nº de misil visto; el actor se anota despues */
+    vrmis_reset();
+    vrmis_begin(actor);
+    for (int i = 0; i < 12; i++) {
+        const int16_t age = (int16_t)(250 + i * 2), pos[3] = {1234, -567, 8901};
+        memcpy(ram + ao + 0x118, &age, 2);
+        memcpy(ram + ao + 0x20, pos, sizeof pos);
+        memcpy(ram + ao + 0x108, pos, sizeof pos);
+        syn_state->phase = G_FLIGHT; gs->flight_t = 0; gs->fuel = GD_FUEL_TIME; gs->seen = 0;
+        hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
+    }
+    CHECK(mv_vrgame_special_view(&sv) == 1 && sv.kind == MV_VIEW_MISSILE && sv.standby == 0, "Nikita en vuelo con misil vivo (kind %d standby %d)", sv.kind, sv.standby);
+    CHECK(sv.nik_hud == 1, "HUD del Nikita pedido (nik_hud %d)", sv.nik_hud);
+    CHECK(sv.nik_fuel == (float)(((1000 - 272) * 60) / 1000), "barra de combustible = (1000 - edad) * 60 / 1000 = 43 px (%.1f)", sv.nik_fuel);
+    CHECK(sv.nik_pos[0] == 1234.0f && sv.nik_pos[1] == -567.0f && sv.nik_pos[2] == 8901.0f, "cifras = posicion del misil (%.0f %.0f %.0f)", sv.nik_pos[0], sv.nik_pos[1], sv.nik_pos[2]);
+    vrmis_reset();
+    syn_state->phase = G_IDLE;
+    for (int i = 0; i < 6; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(mv_vrgame_special_view(&sv) == 1 && sv.nik_hud == 0, "sin misil vivo no hay HUD propio (nik_hud %d)", sv.nik_hud);
+    memcpy(ram + ao, saved, sizeof saved);
 }
 /* Vibración del juego por mando: el pequeño a la derecha y el grande a la izquierda; con el PSG1 mostrado el grande (latido del corazón al apuntar) también a la derecha */
 static void rumble_routing(void) {
@@ -2561,6 +2642,8 @@ int main(void) {
     c4_remote_chest();
     stinger_hud_only_on_led();
     led_views_hide_hud();
+    special_view_synced_to_drawn_model();
+    nikita_native_hud();
     rumble_routing();
     mine_rests_on_floor();
     mine_real_floor();

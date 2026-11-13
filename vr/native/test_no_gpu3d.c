@@ -269,8 +269,8 @@ int main(void) {
                   "XRPresent: panel de la mano (5b) y paneles de regiones/muñeca (6) solo con el troceo");
             int n6b = count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if !split && shown != .cinema && shown != .stereo && overlay2D, let wh = hudWindow {", "r.items.append(");
             CHECK(n6b == 1 && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if !split && shown != .cinema && shown != .stereo && overlay2D, let wh = hudWindow {", "XRFramedLayout.fullUV") == 1
-                  && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if !split && shown != .cinema && shown != .stereo && overlay2D, let wh = hudWindow {", "uvrect = uv") == 1 && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if !split && shown != .cinema && shown != .stereo && overlay2D, let wh = hudWindow {", "XR2DFilter.current.panelMode") == 1,
-                  "XRPresent 6b: UN solo panel con la capa entera (uv 0,0,1,1), geometría XRFramedLayout y muestreo XR2DFilter (%d elementos)", n6b);
+                  && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if !split && shown != .cinema && shown != .stereo && overlay2D, let wh = hudWindow {", "uvrect = s") == 1 && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if !split && shown != .cinema && shown != .stereo && overlay2D, let wh = hudWindow {", "XR2DFilter.current.panelMode") == 1,
+                  "XRPresent 6b: UN solo panel con la capa entera (uv 0,0,1,1; en tiras solo si hay weaponHudMask), geometría XRFramedLayout y muestreo XR2DFilter (%d elementos)", n6b);
             CHECK(strstr(xm, "static let fullUV = SIMD4<Float>(0, 0, 1, 1)") != NULL, "XRFramedLayout.fullUV: capa entera");
             /* la capa 2D del mundo y de las cinemáticas del motor no arrastra 3D: en el modo nativo el host activa drop_world2d (polígonos sin vista dentro del pase 3D no van al panel; vr_scene.h; regla en vrhost_drop_world2d, probada en vr/host/test_view.c) */
             CHECK(strstr(vh, "if (vrhost_drop_world2d(native_mode(), view.kind, view.reason)) o.drop_world2d = 1;") != NULL, "vrhost: modo nativo en vista mundo (sin selector ni pausa) o cinemática del motor -> opts.drop_world2d (la capa 2D no lleva 3D sin resolver)");
@@ -320,15 +320,41 @@ int main(void) {
         char *rw = slurp("app/Sources/RenderWeapon.swift", 1), *wm = slurp("render/metal/vr_weapon.metal", 0);
         CHECK(rw && wm, "fuentes de las vistas especiales del arma");
         if (rw && wm) {
-            CHECK(strstr(rw, "MemoryLayout<SpcDrawU>.stride != 192") != NULL && strstr(rw, "MemoryLayout<SpcHudU>.stride != 32") != NULL && strstr(rw, "w.frameUV(") != NULL && strstr(rw, "sv.kind == Int32(MV_VIEW_MISSILE) || sv.kind == Int32(MV_VIEW_AA_SCREEN)") != NULL
+            CHECK(strstr(rw, "MemoryLayout<SpcDrawU>.stride != 192") != NULL && strstr(rw, "MemoryLayout<SpcHudU>.stride != 48") != NULL && strstr(rw, "w.frameUV(") != NULL && strstr(rw, "sv.kind == Int32(MV_VIEW_MISSILE) || sv.kind == Int32(MV_VIEW_AA_SCREEN)") != NULL
                   && strstr(rw, "encoder.setFragmentBytes(&hd, length: MemoryLayout<SpcHudU>.stride, index: 3)") != NULL && strstr(rg, "hudPremultiplied: hudHQ, hudWin: hudWin,") != NULL,
-                  "RenderWeapon: marco y vista 4:3 en uv de la textura (frameUV del hudWin de RGRenderer) por el buffer 3; layouts vigilados (192 / 32)");
+                  "RenderWeapon: marco y vista 4:3 en uv de la textura (frameUV del hudWin de RGRenderer) por el buffer 3; layouts vigilados (192 / 48)");
             CHECK(strstr(wm, "#define VR_SPC_BUF_HUD 3") != NULL && strstr(wm, "constant VrSpcHud &hd [[buffer(VR_SPC_BUF_HUD)]]") != NULL
-                  && count(wm, "vr_spc_hud_icon((hu - hd.frame.xy) / hd.frame.zw)") == 2 && count(wm, "vr_spc_hud_icon(hu)") == 0
+                  && count(wm, "vr_spc_hud_keep((hu - hd.frame.xy) / hd.frame.zw, ") == 2 && count(wm, "vr_spc_hud_icon(") == 0
                   && count(wm, "float2 hu = hd.view.xy + (float2(d.uv.x, d.uv.y) + q * float2(d.uv.z, d.uv.w)) * hd.view.zw;") == 2 && strstr(wm, "(ambas 4:3)") == NULL,
                   "vr_weapon.metal: la máscara de iconos (AA y misil) va en fracciones del marco y el recorte del misil sobre la vista 4:3 de la textura; modos 0 y 1 sin cambios");
         }
+        if (rw && wm) CHECK(strstr(rw, "mv_vrgame_special_sync(&synced)") != NULL && strstr(rw, "hd.nik = simd_float4(") != NULL && strstr(wm, "float4 nik;") != NULL && strstr(wm, "vr_spc_dot(rgb, r, ain") != NULL
+                            && count(wm, "vr_spc_dot(rgb, r, ain") == 2 && strstr(wm, "float3(1.0, 0.08, 0.05)") != NULL && strstr(wm, "float3(0.2, 1.0, 0.25)") != NULL,
+                            "LED: sync con la mano del modelo, HUD propio del Nikita (nik) y puntos de mira (rojo Stinger, verde Nikita)");
         free(rw); free(wm);
+    }
+    {   /* HUD del jugador con Stinger / Nikita: el panel plano 2D (radar, vida, alerta...) SIGUE como con cualquier arma. Solo el HUD propio del arma se recorta del panel (mismos rectángulos que la lista blanca de la LCD,
+         * donde no hay radar); hide_hud solo con la pantalla grande del misil ante la cara (taparía la cámara) y los prismáticos. Fallan si se vuelve a ocultar el radar / el panel con el arma equipada. */
+        char *xm = slurp("app/Sources/XRMath.swift", 1), *vg = slurp("vr/host/vrgame.c", 1), *wm = slurp("render/metal/vr_weapon.metal", 0);
+        if (xm && vg && wm) {
+            CHECK(count(rg, "hide_hud") == 0 && count_range(rg, "if last && drawBody {", "weapon?.sampleCount", "radar?.encodeQuad(") == 1,
+                  "RenderRG: el radar VR (encodeQuad) se dibuja siempre en el pase que resuelve el MSAA, sin condición por hide_hud / vista especial");
+            CHECK(count(vg, "sv.hide_hud = 0;") == 3 && count(vg, "sv.hide_hud = 1;") == 1 && count(vg, "route != GLED_STANDBY;") == 0 && count(vg, "sv.hide_hud = sg.active") == 0,
+                  "vrgame.c: hide_hud = 0 con el Stinger (LED y respaldo) y la pantalla LED del Nikita; 1 solo con la pantalla grande del misil (%d / %d)", count(vg, "sv.hide_hud = 0;"), count(vg, "sv.hide_hud = 1;"));
+            CHECK(count(xe, "if special && sv.hide_hud != 0 { hud = nil }") == 1 && count(xe, "presenter.weaponHudMask = special && sv.hide_hud == 0 ? XRFramedLayout.weaponHudMask(kind: sv.kind) : []") == 1,
+                  "XRFrameEncoder: el panel plano solo se quita con hide_hud (pantalla grande / prismáticos); con el arma equipada se recorta su HUD propio (weaponHudMask)");
+            CHECK(count(xp, "XRFramedLayout.strips(uv: uv, holes: holes)") == 1 && count(xp, "var weaponHudMask: [SIMD4<Float>] = []") == 1,
+                  "XRPresent: el panel 6b se dibuja en tiras que saltan weaponHudMask");
+            CHECK(strstr(xp, "if kind == Int32(MV_VIEW_MISSILE) { return [r(112, 96, 176, 120)] }") != NULL
+                  && strstr(xp, "[r(14, 44, 60, 212), r(52, 72, 296, 212), r(176, 16, 232, 36)]") != NULL
+                  && strstr(wm, "p.x >= 112.0 && p.x <= 176.0 && p.y >= 96.0 && p.y <= 120.0") != NULL
+                  && strstr(wm, "p.x >= 14.0 && p.x <= 60.0 && p.y >= 44.0 && p.y <= 212.0") != NULL && strstr(wm, "p.x >= 52.0 && p.x <= 296.0 && p.y >= 72.0 && p.y <= 212.0") != NULL
+                  && strstr(wm, "p.x >= 176.0 && p.x <= 232.0 && p.y >= 16.0 && p.y <= 36.0") != NULL && strstr(wm, "p.x >= 24.0 && p.x <= 235.0") == NULL && strstr(xp, "r(24, 21, 235, 29)") == NULL,
+                  "las cadenas de los rectángulos de XRPresent.swift (weaponHudMask) y de la lista blanca vr_spc_hud_keep de vr_weapon.metal coinciden (solo comparación de texto; no se evalúa la geometría) y la barra de canal (24,21)-(235,29) ya no está en ninguno");
+            CHECK(count(xm, "MV_VIEW_") == 0 && count(xm, "weaponHudMask") == 0,
+                  "XRMath.swift no usa símbolos de vrgame.h (MV_VIEW_*): bench/build_native.sh lo compila solo con NativeBridge.h; weaponHudMask vive en XRPresent.swift");
+        }
+        free(xm); free(vg); free(wm);
     }
     printf("test_no_gpu3d: %d comprobaciones, %d fallos\n", checks, fails);
     if (!fails) printf("TODO OK\n");

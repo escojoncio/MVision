@@ -142,7 +142,7 @@ static void test_throw_slow_release(void) {
         step(&r, 1);
     }
     CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW, "gatillo lento: lanza");
-    if (M.nev) { printf("  gatillo lento: %.2f m/s (pico %.1f)\n", (double)wv_len(M.ev[0].lin_vel), (double)vpk); CHECK(wv_len(M.ev[0].lin_vel) >= 0.85f * vpk, "gatillo lento: velocidad %.2f < 85 %% del pico", (double)wv_len(M.ev[0].lin_vel)); }
+    if (M.nev) { printf("  gatillo lento: %.2f m/s (pico %.1f)\n", (double)wv_len(M.ev[0].lin_vel), (double)vpk); CHECK(M.ev[0].v_gest >= 0.85f * vpk, "gatillo lento: el gesto medido %.2f < 85 %% del pico", (double)M.ev[0].v_gest); CHECK(fabsf(wv_len(M.ev[0].lin_vel) - 4.93f) < 0.01f && M.ev[0].thr_mode == WLM_MAX, "gatillo lento: sale al maximo del juego (%.2f m/s, modo %d)", (double)wv_len(M.ev[0].lin_vel), M.ev[0].thr_mode); }
     if (M.nev) {      /* diagnóstico del log [lanzar]: la ventana más rápida recorrida y la velocidad entre las dos últimas poses */
         CHECK(M.ev[0].v_peak >= M.ev[0].v_used - 1e-3f && M.ev[0].v_peak > 0.85f * vpk, "diagnóstico: v_peak %.2f (pico %.1f)", (double)M.ev[0].v_peak, (double)vpk);
         CHECK(M.ev[0].v_inst >= 0.0f && M.ev[0].v_inst < 0.5f, "diagnóstico: v_inst %.2f (la mano ya paró)", (double)M.ev[0].v_inst);
@@ -233,13 +233,15 @@ static void test_throw_flow(void) {
     CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW, "evento de lanzamiento (%d)", M.nev);
     if (M.nev) {
         WLaunch *e = &M.ev[0];
-        float err = wv_len(wv_sub(e->lin_vel, tv)) / wv_len(tv);
-        printf("  v estimada %.2f %.2f %.2f  real %.2f %.2f %.2f  (%.1f %%)\n", e->lin_vel.x, e->lin_vel.y, e->lin_vel.z, tv.x, tv.y, tv.z, err * 100);
+        float err = fabsf(e->v_gest - wv_len(tv)) / wv_len(tv);      /* la estimación del gesto (la salida es el módulo fijo del juego, en la dirección del gesto) */
+        printf("  v_gesto %.2f  salida %.2f %.2f %.2f  real %.2f %.2f %.2f  (%.1f %%)\n", e->v_gest, e->lin_vel.x, e->lin_vel.y, e->lin_vel.z, tv.x, tv.y, tv.z, err * 100);
         CHECK(err < 0.15f, "error velocidad lineal %.3f", err);
+        CHECK(e->thr_mode == WLM_MAX && fabsf(wv_len(e->lin_vel) - 4.93f) < 0.01f, "lanzamiento al maximo del juego (%.2f m/s, modo %d)", wv_len(e->lin_vel), e->thr_mode);
+        CHECK(e->lin_vel.z * tv.z > 0 && e->elev_deg >= 19.9f && e->elev_deg <= 60.1f, "sale hacia donde va la mano (z %.2f frente a %.2f), elevación %.1f", e->lin_vel.z, tv.z, e->elev_deg);
         CHECK(wv_len(wv_sub(e->ang_vel, tw)) / wv_len(tw) < 0.3f, "velocidad angular");
         CHECK(fabsf(e->fuse_left - 3.0f) < 0.01f, "espoleta %.2f", e->fuse_left);
         CHECK(e->cooked == 0, "sin cocinar");
-        CHECK(wv_len(e->lin_vel) <= 22.01f, "tope de velocidad");
+        CHECK(wv_len(e->lin_vel) <= 4.93f + 0.01f, "tope de velocidad (el máximo de su tipo)");
         CHECK(wv_len(e->lin_vel) > 1.0f, "lanzamiento rapido (%.2f m/s)", wv_len(e->lin_vel));
     }
     CHECK(M.taken == 1 && M.ammo == 2, "municion descontada una vez");
@@ -315,7 +317,7 @@ static void test_gentle(void) {
     CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW, "lanzo");
     if (M.nev) {
         CHECK(wv_len(M.ev[0].ang_vel) <= 45.01f, "ang_vel acotada: %f", wv_len(M.ev[0].ang_vel));
-        CHECK(wv_len(M.ev[0].lin_vel) <= 22.01f, "lin_vel acotada: %f", wv_len(M.ev[0].lin_vel));
+        CHECK(wv_len(M.ev[0].lin_vel) <= 4.94f, "lin_vel acotada: %f", wv_len(M.ev[0].lin_vel));
         CHECK(isfinite(M.ev[0].lin_vel.x) && isfinite(M.ev[0].ang_vel.x), "velocidades finitas");
     }
     free(r.s);
@@ -345,9 +347,12 @@ static float clk_dt(Clk *c) {
     return 0.014f + 0.026f * clk_rnd(c);                        /* 14..40 ms */
 }
 /* v(t): velocidad de la mano en m/s a lo largo de dir; acel = 0: constante v0; si no, v0 + acel * t. Devuelve 1 si hubo lanzamiento y escribe su velocidad y la real (en t del soltar) */
+static int tr_orient;                      /* 1: throw_run usa tr_head_q / tr_hand_q en vez de la identidad (mirada y mano) */
+static WQuat tr_head_q, tr_hand_q;
 static int throw_run(float v0, float acel, WVec3 dir, uint32_t seed, int jitter, int stale, WVec3 *got, float *true_speed, const WeaponDef *def) {
     mock_reset(3);
     Rig r = rig_new(def, WR_MANUAL);
+    if (tr_orient) { r.in.head.q = tr_head_q; r.in.hand[0].q = tr_hand_q; }
     Clk c = { seed, jitter, stale };
     const WVec3 p0 = wv(0.25f, 1.0f, -0.3f);
     r.in.hand[0].p = p0;
@@ -387,38 +392,96 @@ static float ballistic_range(WVec3 v) {          /* alcance horizontal (m) desde
     return vh * t;
 }
 
+/* Todo lanzamiento (gesto >= 1 m/s) sale SIEMPRE con el módulo máximo de su tipo (granada 4,93, aturdidora 5,154, chaff 1,131 m/s: weapon/grenade.c dword_8009F3EC), sin excepciones; por debajo es soltar suave con la velocidad medida. */
+#define V_FIX 4.93f
+#define V_STUN 5.154f
+#define V_CHAFF 1.131f
+static float heading_deg(WVec3 a, WVec3 b) {      /* ángulo horizontal entre dos vectores */
+    float la = sqrtf(a.x * a.x + a.z * a.z), lb = sqrtf(b.x * b.x + b.z * b.z);
+    if (la < 1e-6f || lb < 1e-6f) return 180.0f;
+    return acosf(wcore_clampf((a.x * b.x + a.z * b.z) / (la * lb), -1, 1)) * 57.29578f;
+}
 static void test_proportional(void) {
-    printf("-- velocidad de salida proporcional a la del mando --\n");
+    printf("-- todo lanzamiento sale al maximo del juego, en la direccion del gesto --\n");
     const WVec3 dir = wv(0, 0.70710678f, -0.70710678f);          /* hacia delante y arriba, 45 grados */
     const float speeds[] = { 0.4f, 1.0f, 2.0f, 4.0f, 6.0f, 9.0f, 13.0f, 18.0f };
     const int ns = (int)(sizeof speeds / sizeof *speeds);
     for (int mode = 0; mode < 3; mode++) {           /* 0: 50 Hz exactos; 1: con fluctuacion y rafagas; 2: ademas pose de 90 Hz con antiguedad */
-        float prev_speed = 0, prev_range = 0; int mono = 1;
+        float rng_ref = -1;
         for (int i = 0; i < ns; i++) {
             WVec3 got = wv(0, 0, 0); float ts;
             int ok = throw_run(speeds[i], 0, dir, 777u + (uint32_t)i, mode >= 1, mode >= 2, &got, &ts, &w_throw_frag);
             CHECK(ok, "modo %d v=%.1f: lanza al soltar el gatillo", mode, speeds[i]);
             if (!ok) continue;
-            float sp = wv_len(got), ratio = sp / speeds[i], rng = ballistic_range(got);
-            CHECK(ratio > 0.88f && ratio < 1.12f, "modo %d: velocidad de salida %.2f m/s para una mano a %.2f (x%.2f)", mode, sp, speeds[i], ratio);
-            if (!(sp > prev_speed) || !(rng > prev_range)) mono = 0;
-            prev_speed = sp; prev_range = rng;
-            if (i == 0) CHECK(rng < 0.35f, "modo %d: mano casi quieta (0,4 m/s): cae cerca (%.2f m)", mode, rng);
-            if (i == 1) CHECK(rng < 0.9f, "modo %d: suave (1 m/s): cerca (%.2f m)", mode, rng);
-            if (i == ns - 3) CHECK(rng > 8.0f, "modo %d: fuerte (9 m/s): lejos (%.2f m)", mode, rng);
-            if (i == ns - 1) CHECK(sp <= 22.01f, "modo %d: tope fisico (%.2f)", mode, sp);
+            const WLaunch *e = &M.ev[M.nev - 1];
+            float sp = wv_len(got), rng = ballistic_range(got);
+            if (i == 0) { CHECK(e->thr_mode == WLM_SOFT && sp < 1.0f && rng < 0.35f, "modo %d: mano casi quieta (0,4 m/s): soltar suave y cae cerca (%.2f m/s, %.2f m, modo %d)", mode, sp, rng, e->thr_mode); continue; }
+            if (i == 1) { CHECK((e->thr_mode == WLM_SOFT && sp < 1.0f) || (e->thr_mode == WLM_MAX && fabsf(sp - V_FIX) < 0.01f), "modo %d: 1 m/s: suave o maximo (%.2f m/s, modo %d)", mode, sp, e->thr_mode); continue; }
+            CHECK(e->thr_mode == WLM_MAX && fabsf(sp - V_FIX) < 0.01f, "modo %d: mano a %.2f m/s: sale al maximo del juego (%.3f m/s, modo %d)", mode, speeds[i], sp, e->thr_mode);
+            CHECK(sp <= V_FIX + 0.01f, "modo %d: tope fisico (%.2f)", mode, sp);
+            CHECK(heading_deg(got, dir) < 12.0f, "modo %d: va hacia donde la mano (rumbo a %.1f grados)", mode, heading_deg(got, dir));
+            CHECK(e->elev_deg > 19.9f && e->elev_deg < 60.1f && fabsf(atan2f(got.y, sqrtf(got.x * got.x + got.z * got.z)) * 57.29578f - e->elev_deg) < 0.1f, "modo %d: elevacion %.1f", mode, e->elev_deg);
+            CHECK(rng > 2.5f, "modo %d: llega lejos (%.2f m)", mode, rng);
+            if (rng_ref < 0) rng_ref = rng;
+            CHECK(fabsf(rng - rng_ref) < 0.15f, "modo %d: el alcance no depende del gesto (%.2f frente a %.2f m)", mode, rng, rng_ref);
         }
-        CHECK(mono, "modo %d: a mas velocidad del mando, mas velocidad y mas alcance (estrictamente)", mode);
     }
-    /* mismas velocidades con las otras dos arrojadizas (aturdidora, chaff) */
+    /* las otras dos arrojadizas salen al maximo de SU tipo: aturdidora 5,154 m/s, chaff 1,131 m/s (no 4,93 para todas) */
     const WeaponDef *vs[2] = { &w_throw_b, &w_throw_c };
+    const float vmax_k[2] = { V_STUN, V_CHAFF };
     for (int k = 0; k < 2; k++) {
         WVec3 lo, hi; float ts;
         CHECK(throw_run(2.0f, 0, dir, 5, 1, 1, &lo, &ts, vs[k]) && throw_run(8.0f, 0, dir, 5, 1, 1, &hi, &ts, vs[k]), "variante %d lanza", k);
-        CHECK(wv_len(hi) > 3.0f * wv_len(lo), "variante %d: 8 m/s sale mucho mas rapido que 2 (%.2f / %.2f)", k, wv_len(hi), wv_len(lo));
+        CHECK(fabsf(wv_len(hi) - vmax_k[k]) < 0.005f && fabsf(wv_len(lo) - vmax_k[k]) < 0.005f, "variante %d: 2 y 8 m/s salen a su maximo %.3f (%.3f / %.3f)", k, vmax_k[k], wv_len(lo), wv_len(hi));
+        WVec3 dn, bk;      /* gesto hacia abajo (60 grados) y hacia atras, a 9 m/s: tambien al maximo de su tipo y hacia delante */
+        CHECK(throw_run(9.0f, 0, wv_norm(wv(0, -1.732f, -1)), 6, 1, 1, &dn, &ts, vs[k]) && throw_run(9.0f, 0, wv(0, 0, 1), 7, 1, 1, &bk, &ts, vs[k]), "variante %d: gestos abajo y atras lanzan", k);
+        CHECK(fabsf(wv_len(dn) - vmax_k[k]) < 0.005f && fabsf(wv_len(bk) - vmax_k[k]) < 0.005f && dn.y > 0 && dn.z < 0 && bk.y > 0 && bk.z < 0, "variante %d: abajo/atras a 9 m/s salen a %.3f hacia delante y arriba (%.3f / %.3f)", k, vmax_k[k], wv_len(dn), wv_len(bk));
     }
-    /* mano acelerando (un lanzamiento real): la salida sigue a la velocidad al soltar y no se queda en 0 */
-    float worst = 9, worst_lo = 9, worst_hi = 0;
+    /* direcciones: plano = elevacion minima; casi vertical = frente de la mano; lado; abajo y atras tambien salen al maximo (hacia delante) */
+    struct { const char *n; WVec3 d; float v; int mode; float el_lo, el_hi; } cs[] = {
+        { "horizontal hacia delante", wv(0, 0, -1), 3.0f, WLM_MAX, 19.9f, 20.1f },
+        { "hacia la derecha", wv(1, 0, 0), 3.0f, WLM_MAX, 19.9f, 20.1f },
+        { "hacia arriba y delante (80 grados)", wv_norm(wv(0, 5.67f, -1)), 3.0f, WLM_MAX, 59.9f, 60.1f },
+        { "casi vertical (frente de la mano)", wv(0, 1, 0), 3.0f, WLM_MAX, 59.9f, 60.1f },
+        { "hacia delante y abajo suave (20 grados)", wv_norm(wv(0, -0.364f, -1)), 3.0f, WLM_MAX, 19.9f, 20.1f },
+        { "hacia abajo (60 grados)", wv_norm(wv(0, -1.732f, -1)), 3.0f, WLM_MAX, 19.9f, 20.1f },
+        { "hacia atras", wv(0, 0, 1), 3.0f, WLM_MAX, 19.9f, 20.1f },
+        { "hacia atras y arriba", wv_norm(wv(0, 0.5f, 1)), 3.0f, WLM_MAX, 26.0f, 27.1f },
+        { "hacia abajo (60 grados) a 9 m/s", wv_norm(wv(0, -1.732f, -1)), 9.0f, WLM_MAX, 19.9f, 20.1f },
+        { "hacia atras a 9 m/s", wv(0, 0, 1), 9.0f, WLM_MAX, 19.9f, 20.1f },
+        { "hacia abajo vertical a 9 m/s", wv(0, -1, 0), 9.0f, WLM_MAX, 19.9f, 20.1f },
+        { "hacia atras y abajo a 12 m/s", wv_norm(wv(0, -1, 1)), 12.0f, WLM_MAX, 19.9f, 20.1f },
+    };
+    for (size_t i = 0; i < sizeof cs / sizeof *cs; i++) {
+        WVec3 got = wv(0, 0, 0); float ts;
+        int ok = throw_run(cs[i].v, 0, cs[i].d, 900u + (uint32_t)i, 0, 0, &got, &ts, &w_throw_frag);
+        CHECK(ok, "%s: lanza", cs[i].n);
+        if (!ok) continue;
+        const WLaunch *e = &M.ev[M.nev - 1];
+        float sp = wv_len(got);
+        CHECK(e->thr_mode == cs[i].mode, "%s: modo %d (esperado %d)", cs[i].n, e->thr_mode, cs[i].mode);
+        CHECK(fabsf(sp - V_FIX) < 0.01f && e->elev_deg >= cs[i].el_lo && e->elev_deg <= cs[i].el_hi, "%s: %.3f m/s, elevacion %.1f", cs[i].n, sp, e->elev_deg);
+        if (i == 1) CHECK(got.x > 4.0f && fabsf(got.z) < 0.2f, "%s: sale hacia +X (%.2f %.2f %.2f)", cs[i].n, got.x, got.y, got.z);
+        if (i == 3) CHECK(got.z < -2.0f, "%s: sale hacia el frente de la mano, no hacia arriba (%.2f %.2f %.2f)", cs[i].n, got.x, got.y, got.z);
+        if (i == 5 || i == 8) CHECK(got.y > 1.0f && got.z < -1.0f, "%s: sale hacia delante y arriba, no hacia abajo (%.2f %.2f %.2f)", cs[i].n, got.x, got.y, got.z);
+        if (i == 6 || i == 7 || i == 9 || i == 10 || i == 11) CHECK(got.z < -1.0f && got.y > 1.0f, "%s: el frente de la mano, nunca hacia atras (%.2f %.2f %.2f)", cs[i].n, got.x, got.y, got.z);
+    }
+    {   /* rumbo segun mirada y mano: gesto a 90 grados de la mirada = valido; gesto y mano hacia atras = la mirada */
+        WVec3 got; float ts;
+        tr_orient = 1;
+        tr_head_q = wquat_axis_angle(wv(0, 1, 0), 1.5707963f);       /* mira hacia -X */
+        tr_hand_q = wquat_axis_angle(wv(0, 1, 0), 3.14159265f);      /* la mano apunta hacia +Z */
+        int ok = throw_run(9.0f, 0, wv(0, 0, 1), 950u, 0, 0, &got, &ts, &w_throw_frag);      /* gesto hacia +Z, mirada hacia -X */
+        tr_orient = 0;
+        CHECK(ok && fabsf(wv_len(got) - V_FIX) < 0.01f && got.z > 4.0f, "gesto a 90 grados de la mirada (es hacia delante, <= 120): rumbo del gesto, maximo (%.3f %.3f %.3f)", got.x, got.y, got.z);
+        tr_orient = 1;
+        tr_head_q = wquat_axis_angle(wv(0, 1, 0), 0.0f);            /* mira hacia -Z */
+        ok = throw_run(9.0f, 0, wv(0, 0, 1), 951u, 0, 0, &got, &ts, &w_throw_frag);          /* gesto hacia +Z (180 grados de la mirada), mano hacia +Z: sale hacia la mirada (-Z) */
+        tr_orient = 0;
+        CHECK(ok && fabsf(wv_len(got) - V_FIX) < 0.01f && got.z < -1.0f, "gesto y mano hacia atras: sale hacia la mirada, al maximo (%.3f %.3f %.3f)", got.x, got.y, got.z);
+    }
+    /* mano acelerando (un lanzamiento real): sale siempre al maximo, hacia donde va la mano */
+    float worst_h = 0, worst_sp = 0;
     for (int trial = 0; trial < 300; trial++) {
         Clk c = { 1000u + (uint32_t)trial, 1, 1 };
         float v0 = 0.5f + 3.0f * clk_rnd(&c), acel = 8.0f + 20.0f * clk_rnd(&c);       /* hasta ~12 m/s a los 0,4 s */
@@ -427,14 +490,13 @@ static void test_proportional(void) {
         int ok = throw_run(v0, acel, d, 31u * (uint32_t)trial + 3u, 1, 1, &got, &ts, &w_throw_frag);
         CHECK(ok, "prueba %d: lanza", trial);
         if (!ok) continue;
-        float ratio = wv_len(got) / ts;               /* ts: velocidad de la mano en el fotograma en que el gatillo empezo a soltarse */
-        if (ratio < worst_lo) worst_lo = ratio;
-        if (ratio > worst_hi) worst_hi = ratio;
-        if (wv_len(got) < worst) worst = wv_len(got);
+        float h = heading_deg(got, d), e = fabsf(wv_len(got) - V_FIX);
+        if (h > worst_h) worst_h = h;
+        if (e > worst_sp) worst_sp = e;
     }
-    printf("  mano acelerando, 300 pruebas con fluctuacion: salida/mano entre x%.2f y x%.2f (salida minima %.2f m/s)\n", worst_lo, worst_hi, worst);
-    CHECK(worst_lo > 0.75f && worst_hi < 1.2f, "salida entre x0,75 y x1,2 de la velocidad de la mano (x%.2f..x%.2f)", worst_lo, worst_hi);
-    CHECK(worst > 1.5f, "con la mano en movimiento nunca sale con velocidad ~0 (min %.2f m/s)", worst);
+    printf("  mano acelerando, 300 pruebas con fluctuacion: rumbo de salida a %.1f grados como mucho de la mano; modulo a %.3f m/s del maximo como mucho\n", worst_h, worst_sp);
+    CHECK(worst_sp < 0.01f, "siempre al maximo (peor desviacion %.3f m/s)", worst_sp);
+    CHECK(worst_h < 15.0f, "siempre hacia donde va la mano (peor rumbo %.1f grados)", worst_h);
 }
 
 /* ---------------- colocables ---------------- */

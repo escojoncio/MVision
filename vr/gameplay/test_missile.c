@@ -46,6 +46,13 @@ int main(void) {
     CHECK(m.pos[0] == x && m.pos[1] == y && m.pos[2] == z, "posicion del actor");
     CHECK(fabsf(m.dir[0] - 1.0f) < 1e-3f && fabsf(m.dir[1]) < 1e-3f, "direccion de vuelo desde el desplazamiento");
     CHECK(m.heading == 1024 && m.age == 30, "guinada y edad");
+    CHECK(m.dy == 0 && m.done == 0 && m.state == 0, "diagnóstico: paso vertical, bandera y estado del actor (log [nikita])");
+    tick(&x, &y, &z, 0, 250, 0, &age); vrmis_poll(ram, &m);
+    CHECK(m.dy == 250 && m.alive, "paso vertical del último tick (pos.y - previa) = 250: el juego lo explota con >= 200");
+    w32(ACTOR + 0x11C, -2); w8(ACTOR + 0x112, 1); vrmis_poll(ram, &m);
+    CHECK(m.dy == 250 && m.done == 1 && m.state == -2 && m.ended == 1, "bandera y estado negativo en el informe de la explosión");
+    w32(ACTOR + 0x11C, 0); w8(ACTOR + 0x112, 0); vrmis_begin(ACTOR); w16(ACTOR + 0x118, 0); age = 0; for (int k = 0; k < 14; k++) { tick(&x, &y, &z, 20, 0, 0, &age); vrmis_poll(ram, &m); }
+    CHECK(m.alive, "(restablece el misil de prueba)");
 
     /* parado: deja de avanzar la edad -> terminado (2) tras 12 VBlanks */
     int n = 0;

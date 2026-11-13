@@ -52,7 +52,7 @@ int vrmis_poll(const uint8_t *ram, VrMissile *out) {
         for (int i = 0; i < 3; i++) { p[i] = rd_s16(ram, a + MA_POS + 2u * (uint32_t)i); q[i] = rd_s16(ram, a + MA_PREV + 2u * (uint32_t)i); }
         if (S.last_age >= 0 && age < S.last_age) { m->ended = 2; m->alive = 0; if (out) *out = *m; return 1; }   /* la edad retrocede: el puntero se reciclaba con otro actor */
         if (age != S.last_age) { S.stall = 0; S.last_age = age; } else S.stall++;
-        m->age = age;
+        m->age = age; m->dy = p[1] - q[1]; m->done = done; m->state = state;
         m->heading = (uint16_t)rd_s16(ram, a + MA_HEADING) & 4095;
         for (int i = 0; i < 3; i++) m->pos[i] = p[i];
         float d[3] = {(float)(p[0] - q[0]), (float)(p[1] - q[1]), (float)(p[2] - q[2])};

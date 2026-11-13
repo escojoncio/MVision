@@ -84,15 +84,15 @@ void mv_vrgame_status(MvVrGameStatus *out);
  *    como MV_VIEW_AA_SIGHT; solo sight.c sin scope.c, sin prismáticos, usa un disco SCOPE.)
  *  - MV_VIEW_AA_SIGHT: visor del lanzador antiaéreo. El HUD del propio juego (mira + marco de fijación, en la textura del HUD) se dibuja en un
  *    rectángulo anclado delante del visor (`surf_*`, ya a la distancia y tamaño angular del juego); `uv` = subrectángulo (x, y, w, h) de la textura del HUD
- *    que cubre el rectángulo (el centro óptico del juego es el centro del rectángulo). hide_hud = 1.
+ *    que cubre el rectángulo (el centro óptico del juego es el centro del rectángulo). hide_hud = 0 (el panel plano del HUD sigue, con el HUD propio del Stinger recortado: XRPresent.weaponHudMask).
  *  - MV_VIEW_AA_SCREEN: visor del lanzador antiaéreo en la pieza "screen" del modelo (cara trasera de la mira). Segunda vista de la escena desde `cam_*` (eje del buscador, cam_fov_y; textura tex_w x tex_h con la proporción de
  *    la pieza) en la superficie `surf_*` (la caja de la pieza, +Z hacia el ojo) recortada al contorno `poly`/`npoly`; encima, la mira y el marco de fijación del HUD del juego (subrectángulo `uv` de la textura del HUD, capa
- *    premultiplicada si la app la da así). occlude = 1 (es un objeto del mundo), hide_hud = 1. Sin pieza en el modelo se usa MV_VIEW_AA_SIGHT.
+ *    premultiplicada si la app la da así). occlude = 1 (es un objeto del mundo), hide_hud = 0 (el panel plano del HUD del jugador sigue; su HUD propio se recorta del panel). Sin pieza en el modelo se usa MV_VIEW_AA_SIGHT.
  *  - MV_VIEW_MISSILE: vista del misil guiado en vuelo. Por defecto (fullscreen = 0) es la pantalla LED del lanzador: la cara trasera del visor del modelo (`surf_*` = su caja, `poly`/`npoly` = su contorno, `frame` = marco del sombreador,
  *    `uv` = recorte 4:3 de la imagen, occlude = 1), siempre publicada con el lanzador en la mano: `standby` = 1 sin misil (cam_valid = 0), cámara del misil en vuelo, estática al terminar. No toma la vista del jugador. Segunda vista de la escena desde `cam_*` (la posición y dirección del misil del juego) mostrada en
  *    una pantalla (`surf_*`, rectángulo; `blend` 0 = pantallita del lanzador .. 1 = visor grande ante el ojo) con ruido/estática (`noise`) y, al terminar el
  *    vuelo, `ended` = 1 (solo estática). `fullscreen` = pantalla grande fija ante la cara (opción de comodidad; la cabeza nunca se mueve).
- *    hide_hud = 1 con el misil en vuelo o la estática final (sin panel plano del HUD, alarma ni radar de muñeca; la app también oculta el radar con hide_hud de AA_SCREEN / AA_SIGHT), 0 en espera.
+ *    hide_hud = 1 solo con la pantalla grande ante la cara (fullscreen: el panel plano la taparía); con la pantalla LED siempre 0 (el panel plano del HUD del jugador sigue; el ENEMY del Nikita se recorta del panel: XRPresent.weaponHudMask).
  *    La cámara (`cam_*`) va en la punta del misil, 2 cm por delante del morro (GD_CAM_*; el modelo queda detrás de ella). En vuelo la app dibuja encima los textos del HUD del juego (capa 2D) sin los iconos de vida / equipo. Con un cambio de arma en curso (SV_SETTLE_TICKS
  *    VBlanks, o el selector abierto sobre un arma que no era la lista) no se publica ninguna vista especial del arma que entra.
  * Poses en el espacio recentrado (el de la cabeza); cara visible de la superficie = +Z local; delante de la cámara = -Z local. */
@@ -115,9 +115,16 @@ typedef struct {
     float frame;                /* AA_SCREEN y MISSILE: grosor del marco oscuro de la pantalla LED, fracción de su altura (0 = sin marco); lo dibuja el sombreador dentro de la superficie y la imagen/HUD se reduce a la parte interior */
     int32_t standby;            /* MISSILE: pantalla LED en espera (sin misil en vuelo ni estática): fondo oscuro tenue en lugar de la imagen */
     float poly[16]; int32_t npoly;  /* SCOPE: polígono convexo de la abertura (hasta 8 vértices u,v en 0..1 sobre la superficie, v hacia abajo); fuera de él el fragmento se descarta; npoly = 0 = sin máscara (rectángulo o disco) */
+    int32_t nik_hud;            /* MISSILE en vuelo: la app dibuja el HUD propio del Nikita (barra de combustible y coordenadas del misil de bullet/rmissile.c, DrawMissileHud) en la pantalla LED. El juego solo lo emite con el botón ▲ mantenido (vista en 1ª persona del misil, que aquí nunca se pulsa), así que no llega en la capa 2D */
+    float nik_fuel;             /* anchura de la barra de combustible en píxeles del marco del juego, 0..60 ((1000 - edad del misil) * 60 / 1000, como el juego) */
+    float nik_pos[3];           /* posición del misil (unidades del motor, s16) = las tres cifras que escribe el juego */
 } MvVrSpecialView;
 /* Vista especial vigente (1 = hay; 0 = ninguna). Se publica una vez por VBlank. */
 int32_t mv_vrgame_special_view(MvVrSpecialView *out);
+/* Reajusta surf_pos / surf_rot de una vista pegada al arma (lente PSG1, pantalla LED, misil no fullscreen) a la MISMA mano con la que mv_host_hands colocó el modelo en este fotograma (misma muestra D). Llamar justo después de dibujar el arma, antes
+ * de la vista: entre mv_vrgame_special_view (inicio del fotograma) y el dibujo del arma pasan varios ms y la mano se ha movido, así que sin esto la pantalla queda atrás del modelo y se hunde tras sus caras (se «borra»). 1 = reajustada; 0 = io no
+ * coincide con la vista publicada (no se toca). */
+int32_t mv_vrgame_special_sync(MvVrSpecialView *io);
 /* Misil guiado: 0 = pantalla en el lanzador (se agranda ante el ojo al mirar por la mirilla), 1 = pantalla grande fija ante la cara. */
 void mv_vrgame_set_missile_view(int32_t mode);
 /* Truco de depuración (menú de depuración de la app, acción no persistente): pide dar todas las armas con la munición al máximo. Lo aplica el hilo de emulación UNA vez en el siguiente vrgame_pad; sin partida en curso (puente no válido o sin jugador) o sin el control del jugador (bs->in_control = 0) se descarta, no queda pendiente. */

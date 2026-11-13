@@ -2,7 +2,8 @@
  * Interacción: el objeto equipado aparece en la mano (sin gesto). Apretar el GATILLO = "preparada" (el anfitrión mantiene el botón de ataque del
  * juego, que es el que saca el pasador; mientras se mantiene no sale nada); soltarlo = lanzamiento físico con la velocidad lineal/angular de la mano
  * estimada con el historial de poses (wvh_estimate) en la ventana V_WIN que acaba cuando el gatillo EMPIEZA a soltarse (no cuando acaba de abrirse: la
- * mano ya frena) o, si es más rápida y va en la misma dirección, en una de las anteriores hasta V_BACK antes (la mano ya había parado cuando el dedo abrió). La velocidad de salida es la de la mano (ganancia 1, sin valor fijo); solo el tope físico V_MAX la limita. Soltar sin haber
+ * mano ya frena) o, si es más rápida y va en la misma dirección, en una de las anteriores hasta V_BACK antes (la mano ya había parado cuando el dedo abrió). Esa velocidad solo decide SI es un lanzamiento (>= V_THROW_MIN) y HACIA DÓNDE:
+ * todo lanzamiento (gesto >= V_THROW_MIN) sale SIEMPRE con el módulo máximo de SU tipo (KINDS[].vmax: el paso fijo que el juego da al soltar la granada, aturdidora o señuelo; ver abajo), sin excepciones (ni hacia abajo ni hacia atrás), con la elevación del gesto acotada a [THROW_EL_MIN, THROW_EL_MAX] y el rumbo horizontal del gesto si hay componente horizontal suficiente y va hacia delante (a menos de 120 grados de la mirada); si no, el frente horizontal de la mano (o la mirada): nunca hacia atrás. Soltar sin haber
  * preparado no hace nada; el agarre no interviene. Por debajo de V_THROW_MIN (m/s) es un soltar suave (la velocidad medida, sin sonido de
  * lanzamiento). Sin anilla, pasador ni palanca propios: el pasador y la palanca son piezas del modelo, pegadas a él.
  * Si el juego rechaza el evento (w5_emit devuelve 0) no se gasta nada: la arrojadiza sigue lista y se reintenta cada RETRY_T s. */
@@ -16,7 +17,10 @@
 #define TRIG_ON           0.70f   /* umbrales del gatillo con histéresis: por encima se prepara; por debajo de TRIG_ON empieza a soltarse; por debajo de TRIG_OFF se lanza */
 #define TRIG_OFF          0.40f
 #define V_THROW_MIN       1.0f    /* velocidad de la mano (m/s) por debajo de la cual el soltar es un dejar caer suave */
-#define V_MAX             22.0f   /* tope de velocidad de lanzamiento (m/s) */
+#define THROW_EL_MIN      0.349f  /* elevación mínima del lanzamiento (rad, 20 grados): un gesto plano no deja la granada a los pies (el juego original sale a 40,5 grados: atan(128/150)) */
+#define THROW_EL_MAX      1.047f  /* ... y máxima (60 grados) */
+#define THROW_BACK_COS    (-0.5f) /* gesto horizontal a más de 120 grados de la mirada: hacia atrás */
+#define THROW_VERT_K      0.25f   /* componente horizontal < esta fracción de la velocidad (gesto casi vertical hacia arriba): dirección ambigua, se usa el frente de la mano */
 #define W_MAX             45.0f   /* tope de velocidad angular entregada (rad/s) */
 #define DT_MAX            0.1f    /* un cuadro largo no cuenta más que esto */
 #define RETRY_T           0.15f   /* espera antes de reintentar un evento rechazado */
@@ -31,9 +35,12 @@
 #define V_UP              1.15f   /* una ventana más antigua solo sustituye a la última si es al menos tantas veces más rápida (el máximo de muchas estimaciones ruidosas sesga al alza) */
 #define RESPAWN_T         0.40f   /* tiempo hasta volver a poder sacar otra */
 
-/* Datos ajustables por tipo: s de espoleta (provisionales; el juego pone la suya al crear la granada). */
-typedef struct { float fuse; } WThrowKind;
-static const WThrowKind KINDS[3] = { { 3.0f }, { 2.5f }, { 1.8f } };   /* variante base, b, c */
+/* Datos ajustables por tipo: s de espoleta (provisionales; el juego pone la suya al crear la granada) y módulo MÁXIMO de lanzamiento (m/s) = el paso fijo que el juego da al soltar (weapon/grenade.c:55-59,152-172, tabla dword_8009F3EC;
+ * u/tick con 1000 u/m y el tick de 0,04 s, vr_fire.c vrfire_set_throw: v_motor = v_mps * upm * 0,04): variante base = granada (id 2) {0, 128, 150} = 197,2 u/tick = 4,93 m/s; b = aturdidora (id 7) {0, 50, 200} = 206,2 u/tick = 5,15 m/s;
+ * c = señuelo / chaff (id 8) {0, 32, 32} = 45,25 u/tick = 1,13 m/s (el original la deja caer casi a los pies: es su valor, no un error; V_THROW_MIN = 1,0 m/s sigue siendo el umbral del gesto). El juego solo usa la dirección (elevación 40,5 / 14 / 45 grados) del paso;
+ * aquí la elevación sale del gesto, acotada a [THROW_EL_MIN, THROW_EL_MAX]. */
+typedef struct { float fuse, vmax; } WThrowKind;
+static const WThrowKind KINDS[3] = { { 3.0f, 4.93f }, { 2.5f, 5.154f }, { 1.8f, 1.131f } };   /* variante base, b, c */
 
 /* Piezas esperadas del modelo original (por nombre -> canal). mesh = -1: se asocian por nombre a mesh_names. */
 #define PART(nm, ch, ax, ay, az, rot) { nm, -1, {{0,0,0},{0,0,0,1}}, -1, ch, {ax, ay, az}, rot }
@@ -209,6 +216,31 @@ static void throw_init_k(WeaponState *s, const WeaponDef *d, int kind) {
 static void snd(const WGameBridge *g, int id, int ev) { if (g && g->sound) g->sound(id, ev); }
 static void hap(const WGameBridge *g, int hand, float a, float sec) { if (g && g->haptic) g->haptic(hand, a, sec); }
 
+/* Dirección de un lanzamiento: elevación del gesto (velocidad v de módulo sp) acotada a [THROW_EL_MIN, THROW_EL_MAX]; rumbo horizontal del gesto si tiene componente horizontal suficiente (THROW_VERT_K) y va hacia delante (a menos de 120 grados de la mirada).
+ * Si no (gesto hacia atrás o casi vertical) se usa el frente horizontal de la mano y, si éste tampoco va hacia delante (o la mano apunta arriba/abajo), la mirada: nunca sale hacia atrás. */
+static WVec3 horiz_unit(WVec3 a, WVec3 fallback) {
+    float l = sqrtf(a.x * a.x + a.z * a.z);
+    return l > 1e-3f ? wv(a.x / l, 0, a.z / l) : fallback;
+}
+static WVec3 throw_dir(const WInput *in, WVec3 v, float sp, float *elev) {
+    const WVec3 hf = horiz_unit(wquat_rotate(wquat_normalize(in->head.q), wv(0, 0, -1)), wv(0, 0, -1));      /* mirada, en horizontal */
+    const WVec3 hand_f = wquat_rotate(wquat_normalize(in->hand[0].q), wv(0, 0, -1));
+    const float hand_l = sqrtf(hand_f.x * hand_f.x + hand_f.z * hand_f.z);
+    const float hl = sqrtf(v.x * v.x + v.z * v.z);
+    WVec3 hd = hf;
+    int gesture = 0;
+    if (hl >= THROW_VERT_K * sp) {
+        const WVec3 g = wv(v.x / hl, 0, v.z / hl);
+        if (wv_dot(g, hf) >= THROW_BACK_COS) { hd = g; gesture = 1; }
+    }
+    if (!gesture && hand_l > 0.3f) {
+        const WVec3 h = wv(hand_f.x / hand_l, 0, hand_f.z / hand_l);
+        if (wv_dot(h, hf) >= THROW_BACK_COS) hd = h;
+    }
+    *elev = wcore_clampf(atan2f(v.y, hl), THROW_EL_MIN, THROW_EL_MAX);
+    return wv(hd.x * cosf(*elev), sinf(*elev), hd.z * cosf(*elev));
+}
+
 /* Entrega el lanzamiento. Devuelve 1 si el juego lo aceptó: solo entonces se gasta la munición y el objeto pasa a GONE; si no, sigue listo en la
  * mano y se reintentará. */
 static int throw_it(WThrowState *t, const WInput *in, const WGameBridge *g) {
@@ -254,7 +286,14 @@ static int throw_it(WThrowState *t, const WInput *in, const WGameBridge *g) {
     WVec3 r = wv_sub(ev.pose.p, in->hand[0].p);          /* de la mano al centro del objeto */
     WVec3 v = wv_add(vh, wv_cross(wh, r));
     float sp = wv_len(v);
-    if (!(sp <= V_MAX)) v = sp > 0 && sp == sp ? wv_scale(v, V_MAX / sp) : wv(0, 0, 0);
+    ev.v_gest = sp; ev.thr_mode = WLM_SOFT; ev.elev_deg = 0.0f;
+    const float vmax = KINDS[t->kind].vmax;
+    if (sp >= V_THROW_MIN && sp <= 1e6f) {                  /* es un lanzamiento (no un dejar caer): SIEMPRE al módulo máximo de su tipo, sin excepción; el gesto solo da el rumbo y la elevación */
+        float el;
+        v = wv_scale(throw_dir(in, v, sp, &el), vmax); sp = vmax; ev.thr_mode = WLM_MAX; ev.elev_deg = el * (180.0f / 3.14159265f);
+    }
+    if (!(sp <= vmax)) v = sp > 0 && sp == sp ? wv_scale(v, vmax / sp) : wv(0, 0, 0);      /* tope de seguridad: un dejar caer (< 1 m/s) o una medida absurda (> 1e6, NaN) nunca pasa del máximo de su tipo */
+    sp = wv_len(v);
     ev.lin_vel = v; ev.ang_vel = wh;
     if (!w5_emit(g, ev)) {                                   /* el juego no lo acepta: sigue en la mano */
         t->retry = RETRY_T;

@@ -182,6 +182,19 @@ void vrfire_set_probe(VrFireProbe f);
 void vrfire_probe(int kind, int decision, uint32_t result, const VrFireMat *m);
 /* Dirección del último actor de misil creado (0 = ninguno) y nº de misiles creados desde el arranque. */
 uint32_t vrfire_last_missile(uint32_t *serial);
+/* Misil guiado del juego (bullet/rmissile.c NewRMissile, Nikita). Dos arreglos del arranque, ambos solo para ese misil (el antiaéreo no los usa):
+ *  1) vrfire_level_matrix: GM_ConfigControlMatrix saca la guiñada del misil con DG_MatrixRotYXZ(matriz) y SOLO usa rot.vy (GV_DirVec2(rot.vy...)). El juego original le pasa siempre RotMatrixYXZ(-1024, guiñada, 0) (cañón
+ *     nivelado: punto de bloqueo del cardán, donde vy es exactamente la guiñada). Con la matriz de una mano real (cabeceo y balanceo de unos grados) la descomposición YXZ sale del bloqueo y vy ya no es la guiñada del cañón
+ *     (con el cañón casi nivelado, unos grados de balanceo de la muñeca dan errores de decenas de grados, hasta 90). Se sustituye por la matriz nivelada con la MISMA guiñada y la misma posición. Devuelve 0 (sin tocar) si el
+ *     cañón apunta casi vertical.
+ *  2) vrfire_missile_settle: el actor nace en GM_PlayerPosition (los pies de Snake, ctrl->mov) y "planea" hasta la posición de la matriz durante 8 ticks (field_110 = 8; Act: NearExp2 = mitad de la distancia restante por tick). El juego
+ *     explota el misil si en un tick sube 200 o más (rmissile_act_helper_8006C114: pos.y - prev.y >= 200). El original lanza a +320 sobre los pies (rcm.c: mt2.t[1] = GM_PlayerPosition.vy + 320; el primer paso del planeo es 160); la boca
+ *     del lanzador VR queda a 0,8-1,7 m (paso de 400-850): el misil explotaba al nacer junto a Snake (bola de fuego sobre él). Se coloca el actor ya en su posición de lanzamiento (ctrl->mov y posición del tick anterior = field_100)
+ *     y el contador del planeo a 1 (el siguiente tick lo da por terminado: paso 0). Solo toca el actor si el contador vale 1..16 (el valor de creación es 8). Devuelve 1 si lo modificó; info (opcional) recibe lo que había. */
+typedef struct VrFireMissileBirth { int16_t home[3], start[3]; int glide; int first_dy; } VrFireMissileBirth;   /* first_dy: primer paso vertical del planeo que habría hecho el juego (mitad de la distancia vertical) */
+int vrfire_level_matrix(VrFireMat *m);
+int vrfire_missile_settle(uint8_t *ram, uint32_t actor, VrFireMissileBirth *info);
+#define VRFIRE_MIS_MAX_STEP_Y 200   /* paso vertical por tick (unidades del motor) a partir del cual el juego explota el misil */
 /* Último proyectil sustituido (para pruebas). */
 const VrFireMat *vrfire_last_subst(void);
 

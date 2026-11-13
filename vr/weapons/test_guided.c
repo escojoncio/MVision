@@ -12,7 +12,7 @@ static int fails = 0, checks = 0;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; printf("FALLO %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
 
 typedef struct {
-    int reserve, taken, fired, alive, steer_calls, sounds[16];
+    int reserve, taken, fired, alive, steer_calls, sounds[16], delay;
     float last_yaw, last_pitch, proj_x, proj_z;
     WPose muzzle;
 } Sim;
@@ -23,7 +23,7 @@ static void b_fire(int id, WPose m) { (void)id; sim.fired++; sim.alive = 1; sim.
 static void b_hap(int h, float s, float t) { (void)h; (void)s; (void)t; }
 static void b_snd(int id, int ev) { (void)id; if (ev >= 0 && ev < 16) sim.sounds[ev]++; }
 static int b_proj(int id, WPose *o) {
-    (void)id; if (!sim.alive) return 0;
+    (void)id; if (!sim.alive || sim.delay > 0) return 0;      /* delay: el juego aún no ha creado el misil */
     o->p = wv(sim.muzzle.p.x, 1.6f, sim.proj_z); o->q = wquat_identity(); return 1;
 }
 static void b_steer(int id, float y, float p) { (void)id; sim.steer_calls++; sim.last_yaw = y; sim.last_pitch = p; }
@@ -304,9 +304,61 @@ static void t_equip(void) {
     CHECK(weapon_part_mesh(&S2->base, GP_ROUND) == GP_ROUND && weapon_part_mesh(&S2->base, GP_TUBE) == GP_TUBE);
 }
 
+
+/* neutro del guiado: la inclinación del tubo al acercarlo a la cara no es una orden de giro */
+static void t_neutral(void) {
+    reset(3);
+    WInput in = base_input();
+    step(&in, WR_MANUAL, 5);
+    sim.delay = 1;                                   /* el misil aún no existe (~0,65 s) */
+    pull(&in, WR_MANUAL);
+    CHECK(S->base.phase == G_FLIGHT);
+    for (int i = 0; i < 40; i++) { in.hand[0].q = qy(0.75f * (float)i); step(&in, WR_MANUAL, 1); }       /* el jugador gira el tubo 30 grados para ver la pantalla */
+    CHECK(!S->seen && fabsf(sim.last_yaw) < 0.01f && fabsf(S->steer_raw[0]) < 0.01f);
+    sim.delay = 0; step(&in, WR_MANUAL, 3);
+    CHECK(S->seen && fabsf(S->steer_raw[0]) < 0.01f);                     /* nace con esa orientación como neutra: sigue recto */
+    for (int i = 0; i < 20; i++) { in.hand[0].q = qy(30.0f + (float)i); step(&in, WR_MANUAL, 1); }     /* 20 grados más: ahora sí es guiado */
+    CHECK(fabsf(S->steer_raw[0]) > 0.5f);
+    /* aparta el ojo, inclina 25 grados y vuelve a la pantalla: al volver el neutro es la postura de ahora */
+    WInput far = in; far.hand[0].p = wv(0.127f + 0.5f, 1.524f, -0.40f);
+    step(&far, WR_MANUAL, 20);
+    CHECK(!S->eye_near);
+    far.hand[0].q = qy(-25.0f); step(&far, WR_MANUAL, 10);
+    CHECK(fabsf(S->steer_raw[0]) > 0.5f);                                  /* fuera de la pantalla, la inclinación guía */
+    WInput back = base_input(); back.hand[0].q = qy(-25.0f);
+    back.hand[0].p = wv_sub(wv(0.032f, 1.7f, 0.0f), wquat_rotate(back.hand[0].q, wv(-0.095f, 0.176f, 0.40f)));      /* la mirilla (WP_EYE) otra vez sobre el ojo con el tubo girado */
+    step(&back, WR_MANUAL, 40);
+    CHECK(S->eye_near && fabsf(S->steer_raw[0]) < 0.01f && fabsf(sim.last_yaw) < 0.05f);
+}
+static float wall_z(void *u, WVec3 p) { (void)u; float d = fabsf(p.z - (-1.3f)); return d > 3.0f ? -1.0f : d; }      /* pared plana en z = -1,3 */
+static float wall_all(void *u, WVec3 p) { (void)u; (void)p; return 0.10f; }
+static void t_spawn(void) {
+    const WVec3 head = wv(0, 1.7f, 0);
+    GuidedSpawnInfo i;
+    WPose m = { wv(0.1f, 1.6f, -1.0f), qy(0) };
+    WPose o = guided_spawn_pose(m, head, NULL, NULL, &i);
+    CHECK(!i.moved && wv_len(wv_sub(o.p, m.p)) < 1e-6f && o.q.w == m.q.w);            /* boca a 1 m de la cabeza y sin dato de pared: igual */
+    m.p = wv(0.0f, 1.7f, -0.20f);                                                      /* arma pegada a la cara: la boca a 0,2 m de la cabeza */
+    o = guided_spawn_pose(m, head, NULL, NULL, &i);
+    CHECK(i.moved && i.shift_m > 0.2f && i.head_m >= GD_SPAWN_HEAD_M - 1e-4f && o.p.z < m.p.z && fabsf(o.p.x - m.p.x) < 1e-6f && o.q.w == m.q.w && o.q.y == m.q.y);   /* hacia delante, misma dirección */
+    WPose tilt = { wv(0.0f, 1.7f, -0.20f), qx(30) };
+    o = guided_spawn_pose(tilt, head, NULL, NULL, &i);
+    {   WVec3 ax = wquat_rotate(tilt.q, wv(0, 0, -1)), d = wv_sub(o.p, tilt.p);
+        CHECK(i.moved && wv_len(wv_cross(ax, d)) < 1e-4f && wv_dot(ax, d) > 0); }       /* el corrimiento va por el eje del tubo */
+    WPose w = { wv(0.1f, 1.6f, -1.15f), qy(0) };                                      /* pared 0,15 m por delante de la boca */
+    o = guided_spawn_pose(w, head, wall_z, NULL, &i);
+    CHECK(i.wall0_m < 0.16f && i.moved && i.shift_m < 0 && i.wall_m >= GD_SPAWN_WALL_M - 1e-4f && o.p.z > w.p.z && o.q.w == w.q.w);   /* hacia atrás por el tubo hasta quedar a >= 0,30 m de la pared */
+    CHECK(i.head_m >= GD_SPAWN_HEAD_M);
+    o = guided_spawn_pose(w, head, wall_all, NULL, &i);
+    CHECK(!i.moved && wv_len(wv_sub(o.p, w.p)) < 1e-6f && i.wall_m < GD_SPAWN_WALL_M);   /* sin hueco libre: la boca tal cual (no inventa) */
+    WPose f = { wv(0.0f, 1.7f, 0.0f), qy(0) };                                          /* boca en la cabeza y pared pegada: el corrimiento máximo está acotado */
+    o = guided_spawn_pose(f, head, wall_all, NULL, &i);
+    CHECK(fabsf(i.shift_m) <= GD_SPAWN_MAX_SHIFT + 1e-4f);
+}
+
 int main(void) {
     t_equip();
-    t_proximity(); t_flight(); t_dry();
+    t_proximity(); t_flight(); t_neutral(); t_spawn(); t_dry();
     t_reload_auto(WR_AUTOMATIC, 1); t_reload_auto(WR_SIMPLIFIED, 0); t_reload_manual(); t_overlay();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

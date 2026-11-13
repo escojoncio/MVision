@@ -17,6 +17,7 @@
  *   vrfire_aaview     ()                                     carga la matriz del canal 3D principal en la GTE (lo llama el buscador)
  */
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include "cpu.h"
 #include "sys.h"
@@ -45,10 +46,11 @@ void hle_vrfire_reset(void) { zbuf = 0; aa_pending = 0; aa_swapped = 0; }
 static int zone(void) { if (!zbuf) zbuf = bios_kalloc(96); return zbuf != 0; }
 
 /* Núcleo común de los que reciben (matriz*, ...): kind 0 bala, 1 misil, 2 mina/carga. */
-static void with_matrix(Cpu *c, const char *orig, int kind) {
+static void with_matrix_n(Cpu *c, const char *orig, int kind, int nikita) {
     VrFireMat m = {{0}, {0}};
     int r = zone() ? vrfire_take_projectile(kind, &m) : VRFIRE_PASS;
     if (r == VRFIRE_SKIP) { V0 = 0; return; }
+    if (nikita && r == VRFIRE_SUBST) vrfire_level_matrix(&m);     /* misil guiado: guiñada de la mano con el cañón nivelado, como el original (vr_fire.h) */
     uint32_t a0 = A0, a3 = A3;
     if (r == VRFIRE_SUBST) { vrfire_store_mat(emu_ram, zbuf + Z_BULLET, &m); A0 = zbuf + Z_BULLET; }
     /* El tipo 1 de la decompilación (bullet.c NewBullet: alcance 10000, 5000 por tick; pistola y fusil de asalto) traza la colisión del juego solo hasta 10000 unidades, menos que el alcance del tiro VR (SOCOM 25 m, FAMAS 30 m, resto 15 m; vrhit_weapon_range_m): lo que hubiera
@@ -59,9 +61,16 @@ static void with_matrix(Cpu *c, const char *orig, int kind) {
     rt_orig(c, orig);
     A3 = a3;
     if (kind == 0 && r == VRFIRE_SUBST) vrhit_bullet(emu_ram, V0, NULL);     /* bala apuntada con el arma VR: cápsulas, zonas y línea de tiro (vr_hit.h) */
+    if (nikita && r == VRFIRE_SUBST && V0) {      /* sin planeo desde los pies de Snake: nace ya en la boca (vr_fire.h) */
+        VrFireMissileBirth b;
+        const int fixed = vrfire_missile_settle(emu_ram, V0, &b);
+        fprintf(stderr, "[nikita] nace actor=%08x pos_matriz=(%d %d %d) pos_planeo_inicial=(%d %d %d) primer_paso_y=%d (el juego explota con >= %d) contador_planeo=%d sin_planeo=%d\n", (unsigned)V0,
+                b.home[0], b.home[1], b.home[2], b.start[0], b.start[1], b.start[2], b.first_dy, VRFIRE_MIS_MAX_STEP_Y, b.glide, fixed);
+    }
     vrfire_probe(kind, r, V0, &m);
     A0 = a0;     /* a0 es de quien llama (convenio o32: el llamado puede cambiarlo; se restaura por si el llamador lo reutiliza) */
 }
+static void with_matrix(Cpu *c, const char *orig, int kind) { with_matrix_n(c, orig, kind, 0); }
 
 void hle_vrfire_bullet(Cpu *c) {
     if ((A1 & 0xFFu) != PLAYER_SIDE) {       /* bala de un enemigo: misma regla de línea de tiro contra la caja del jugador; ni su puntería ni su decisión de disparar se tocan */
@@ -73,7 +82,7 @@ void hle_vrfire_bullet(Cpu *c) {
 }
 void hle_vrfire_rmissile(Cpu *c) {
     if ((A1 & 0xFFu) != PLAYER_SIDE) { rt_orig(c, "vrfire_rmissile"); return; }
-    with_matrix(c, "vrfire_rmissile", 1);
+    with_matrix_n(c, "vrfire_rmissile", 1, 1);
 }
 void hle_vrfire_amissile(Cpu *c) {
     if ((A1 & 0xFFu) != PLAYER_SIDE) { rt_orig(c, "vrfire_amissile"); return; }

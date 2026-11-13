@@ -132,6 +132,7 @@ static float goff_p[3] = {0, 0, 0}, goff_q[4] = {0, 0, 0, 1};
 static float hap_out[2];
 static MvVrGameStatus pub_status;
 static MvVrSpecialView pub_special;      /* vista especial del arma (mira, visor, pantalla del misil) */
+static uint32_t pub_special_ser;      /* número de publicación de pub_special (sube con cada publicación; HM) */
 static int opt_missile_view;               /* 0 pantalla en el lanzador, 1 pantalla grande ante la cara */
 static MvVrForearm pub_fore[2];
 static int pub_fore_ok[2];
@@ -147,6 +148,7 @@ static uint64_t pub_live_ns[2];            /* instante del último apply de la I
 static uint32_t pub_live_applies;
 #define GLOVE_REBUILD_VB 15u               /* VBlanks mínimos entre comprobaciones/reconstrucciones del guante ya publicado */
 #define GLOVE_MAX_AGE_NS 250000000ull      /* IK más vieja que esto: sin guante (el motor dejó de aplicar el cuerpo: cinemática, menú) */
+static struct { int valid; uint32_t ser; float dq[4], dp[3]; } hd_last;      /* movimiento rígido D con el que el ÚLTIMO mv_host_hands colocó el modelo del arma (valid = 0 si no lo aplicó); lo reutiliza mv_vrgame_special_sync (HM) ; ser = pub_special_ser vigente cuando se aplicó (sync solo la usa si sigue siendo la misma publicación) */
 static GripPose pub_sim_hand;      /* mano del arma con la que se simuló el último frame publicado (compensación de latencia) */
 static int pub_sim_valid;
 static float aimfix_q[2][4] = {{0, 0, 0, 1}, {0, 0, 0, 1}};      /* giro extra agarre -> mano que lleva vr_body (vrbody_set_aim_fix) para que la boca apunte como el mando; solo hilo de emulación */
@@ -459,6 +461,18 @@ static int sim_delta_locked(float dq[4], float dp[3]) {
     float dmove = sqrtf((hn.p[0] - hs.p[0]) * (hn.p[0] - hs.p[0]) + (hn.p[1] - hs.p[1]) * (hn.p[1] - hs.p[1]) + (hn.p[2] - hs.p[2]) * (hn.p[2] - hs.p[2]));
     return dmove < 0.35f && 2.0f * acosf(fminf(1.0f, fabsf(dq[3]))) < 1.2f;
 }
+/* ¿La vista va pegada al modelo del arma (la superficie sigue al mando igual que el modelo)? Lente del PSG1, pantalla LED del Stinger y del Nikita en el lanzador; no la pantalla grande del misil */
+static int view_follows_weapon(const MvVrSpecialView *v) {
+    return v->kind == MV_VIEW_SCOPE || v->kind == MV_VIEW_AA_SCREEN || (v->kind == MV_VIEW_MISSILE && !v->fullscreen);
+}
+/* surf = D * surf (D = giro dq y desplazamiento dp de la mano) */
+static void apply_hand_delta(MvVrSpecialView *v, const float dq[4], const float dp[3]) {
+    float rp[3], sq[4] = {v->surf_rot[0], v->surf_rot[1], v->surf_rot[2], v->surf_rot[3]}, nq[4];
+    q_rot(dq, v->surf_pos, rp);
+    for (int i = 0; i < 3; i++) v->surf_pos[i] = rp[i] + dp[i];
+    q_mul(dq, sq, nq); q_norm(nq);
+    for (int i = 0; i < 4; i++) v->surf_rot[i] = nq[i];
+}
 int32_t mv_vrgame_special_view(MvVrSpecialView *out) {
     if (!out) return 0;
     pthread_mutex_lock(&HM);
@@ -466,15 +480,26 @@ int32_t mv_vrgame_special_view(MvVrSpecialView *out) {
     /* Vistas pegadas al modelo del arma (lente del PSG1, pantalla LED del Stinger y del Nikita): la superficie sigue al mando de ahora, igual que el modelo (mv_host_hands); con la pose del VBlank se quedaba atrás
      * al mover el arma y parte de la pantalla caía detrás de las caras vecinas del tubo. La cámara de la segunda vista (cam_pos / cam_rot) es la de la simulación y no se toca. */
     float dq[4], dp[3];
-    if ((out->kind == MV_VIEW_SCOPE || out->kind == MV_VIEW_AA_SCREEN || (out->kind == MV_VIEW_MISSILE && !out->fullscreen)) && sim_delta_locked(dq, dp)) {
-        float rp[3], sq[4] = {out->surf_rot[0], out->surf_rot[1], out->surf_rot[2], out->surf_rot[3]}, nq[4];
-        q_rot(dq, out->surf_pos, rp);
-        for (int i = 0; i < 3; i++) out->surf_pos[i] = rp[i] + dp[i];
-        q_mul(dq, sq, nq); q_norm(nq);
-        for (int i = 0; i < 4; i++) out->surf_rot[i] = nq[i];
-    }
+    if (view_follows_weapon(out) && sim_delta_locked(dq, dp)) apply_hand_delta(out, dq, dp);
     pthread_mutex_unlock(&HM);
     return out->kind != MV_VIEW_NONE;
+}
+int32_t mv_vrgame_special_sync(MvVrSpecialView *io) {
+    int32_t ok = 0;
+    if (!io) return 0;
+    pthread_mutex_lock(&HM);
+    /* Misma vista que la publicada (no una de la app, como los prismáticos: mismo tipo pero otro tamaño / redondez) */
+    if (io->kind == pub_special.kind && io->round == pub_special.round && io->fullscreen == pub_special.fullscreen && fabsf(io->surf_w - pub_special.surf_w) < 1e-6f && fabsf(io->surf_h - pub_special.surf_h) < 1e-6f && view_follows_weapon(&pub_special)) {
+        /* D calculada contra la mano de OTRA publicación (hubo un VBlank entre mv_host_hands y esta llamada): no vale para la superficie base de la vigente; no se toca y la app conserva la muestra de mv_vrgame_special_view */
+        if (hd_last.valid && hd_last.ser != pub_special_ser) { pthread_mutex_unlock(&HM); return 0; }
+        MvVrSpecialView b = pub_special;      /* superficie base de la simulación + la D EXACTA del modelo dibujado (o ninguna si el modelo se dibujó sin D) */
+        if (hd_last.valid) apply_hand_delta(&b, hd_last.dq, hd_last.dp);
+        memcpy(io->surf_pos, b.surf_pos, sizeof io->surf_pos);
+        memcpy(io->surf_rot, b.surf_rot, sizeof io->surf_rot);
+        ok = 1;
+    }
+    pthread_mutex_unlock(&HM);
+    return ok;
 }
 void mv_vrgame_set_missile_view(int32_t mode) {
     pthread_mutex_lock(&HM);
@@ -702,6 +727,8 @@ static void publish_off(int keep_weld) {      /* keep_weld: retención de la sol
     pub_laser.on = 0;
     if (!keep_weld) { pub_weld.on = 0; pub_weld.off_ns = 0; }
     memset(&pub_special, 0, sizeof pub_special);
+    pub_special_ser++;
+    hd_last.valid = 0;
     pthread_mutex_unlock(&HM);
 }
 
@@ -780,6 +807,14 @@ static void put_pose(const WPose *w, float p[3], float q[4]) {
     p[0] = w->p.x; p[1] = w->p.y; p[2] = w->p.z;
     q[0] = w->q.x; q[1] = w->q.y; q[2] = w->q.z; q[3] = w->q.w;
 }
+/* HUD propio del Nikita (bullet/rmissile.c DrawMissileHud): barra de combustible de ((1000 - edad) * 60) / 1000 píxeles (tope 60) y la posición del misil. Solo con el misil vivo */
+static void nikita_hud(MvVrSpecialView *sv, int live) {
+    if (!live || !G.mis.alive) return;
+    int w = ((1000 - G.mis.age) * 60) / 1000;
+    sv->nik_hud = 1;
+    sv->nik_fuel = (float)(w < 0 ? 0 : w > 60 ? 60 : w);
+    for (int i = 0; i < 3; i++) sv->nik_pos[i] = (float)G.mis.pos[i];
+}
 static void special_view(int gid, WeaponState *st, const WeaponDef *def, const WPose *W, const WInput *in, int duct, int ready) {      /* ready = 0: arma recién entrada o cambio en curso, no se publica su vista */
     MvVrSpecialView sv;
     int fullscreen;
@@ -846,7 +881,7 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
                 sv.npoly = af.npoly;
                 for (int i = 0; i < af.npoly; i++) { sv.poly[2 * i] = af.poly[i][0] / af.w + 0.5f; sv.poly[2 * i + 1] = 0.5f - af.poly[i][1] / af.h; }
                 sv.occlude = 1;
-                sv.hide_hud = 1;                 /* con el Stinger equipado el HUD (mira, marco, alarma, radar) va solo en la pantalla LED de la pieza: nunca el panel plano ni el radar de muñeca en el mundo */
+                sv.hide_hud = 0;                 /* el panel plano del HUD del jugador (radar, vida, alerta...) SIGUE como con cualquier arma; solo el HUD propio del Stinger (mira, escala, LOCK_ON) se recorta del panel (XRPresent.weaponHudMask) y va en la pantalla LED */
                 sv.locked = sg.locked; sv.converged = sg.converged;
             } else
             if (sg.active && sg.half_fov_deg > 0.5f && sg.half_fov_deg < 80.0f) {
@@ -860,7 +895,7 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
                 sv.surf_w = 2.0f * AA_SIGHT_DIST * t;
                 sv.surf_h = sv.surf_w * 0.75f;           /* la imagen de la consola (320 x 256) se muestra a 4:3 */
                 sv.uv[0] = 0; sv.uv[1] = 0; sv.uv[2] = 1; sv.uv[3] = 1;
-                sv.hide_hud = 1;
+                sv.hide_hud = 0;                 /* respaldo: igual que la pantalla LED, el panel plano sigue (con el HUD propio del Stinger recortado) */
                 sv.locked = sg.locked; sv.converged = sg.converged;
             }
         } else if (ready && gid == 3) {
@@ -882,7 +917,8 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
                 sv.tex_w = GD_VIEW_W; sv.tex_h = GD_VIEW_H;
                 sv.noise = gs->noise;
                 sv.ended = route == GLED_STATIC || st->phase == G_STATIC;
-                sv.hide_hud = 1;                 /* vista de la cámara del misil: sin panel plano del HUD (alarma, radar) ni radar de muñeca */
+                sv.hide_hud = 1;                 /* pantalla grande del misil ante la cara: el panel plano (se dibuja encima de la escena) taparía la cámara del misil */
+                nikita_hud(&sv, sv.cam_valid && !sv.ended);
             } else if (!duct && guided_led_face(st, &lf) && lf.w > 1e-4f && lf.h > 1e-4f) {      /* con el lanzador oculto no hay pantalla LED; la vista completa del vuelo no depende del arma y se mantiene */
                 /* Pantalla LED en la cara trasera del visor del modelo (como la lente del PSG1, recortada a su contorno), siempre a la vista mientras se sostiene el lanzador: en reposo muestra la pantalla
                  * en espera; en vuelo, la cámara del misil del juego (el jugador sigue viendo el mundo normal y el control del misil no cambia); al terminar, la estática. */
@@ -907,12 +943,14 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
                 sv.noise = gs->noise;
                 sv.ended = route == GLED_STATIC;
                 sv.standby = route == GLED_STANDBY;
-                sv.hide_hud = route != GLED_STANDBY;     /* misil en vuelo o estática final: sin alarma ni radar; en espera (lanzador sin misil) el HUD normal sigue */
+                sv.hide_hud = 0;                 /* pantalla LED (espera, vuelo, estática): el panel plano del HUD del jugador sigue; solo el HUD propio del Nikita (ENEMY) se recorta del panel (XRPresent.weaponHudMask) */
+                nikita_hud(&sv, sv.cam_valid && !sv.ended);
             }
         }
     }
     pthread_mutex_lock(&HM);
     pub_special = sv;
+    pub_special_ser++;
     pthread_mutex_unlock(&HM);
 }
 
@@ -1128,8 +1166,9 @@ static int launch_hook(void *user, const WLaunch *ev) {
         const int ok = vrfire_set_throw(p, v, THROW_TICK_S);
         float pe[3];
         vrfire_pos_to_world(&G.map, p, pe);
-        fprintf(stderr, "[lanzar] arma=%d v_mando=%.2f v_usada=%.2f m/s ventana=%.0f ms (acaba %.0f ms antes del ultimo muestreo) soltar=%.0f ms tras empezar a abrir el gatillo v_pico=%.2f v_entre_poses=%.2f m/s v_actor=%.2f m/s (%.2f %.2f %.2f) angular=%.1f rad/s pos_motor=(%.0f %.0f %.0f) aceptado=%d\n", ev->weapon_id,
-                ev->v_hand, ev->v_used, 1000.0f * ev->win_len, 1000.0f * ev->win_lag, 1000.0f * ev->rel_lag, ev->v_peak, ev->v_inst, vrfire_throw_mps(), v[0], v[1], v[2], wv_len(ev->ang_vel), pe[0], pe[1], pe[2], ok);
+        static const char *const LM[2] = {"suave", "maximo"};
+        fprintf(stderr, "[lanzar] arma=%d modo=%s v_gesto=%.2f m/s elevacion=%.0f grados (salida SIEMPRE al maximo de su tipo del juego: granada 4,93 / aturdidora 5,15 / chaff 1,13 m/s; suave < 1 m/s = velocidad medida) v_mando=%.2f v_usada=%.2f m/s ventana=%.0f ms (acaba %.0f ms antes del ultimo muestreo) soltar=%.0f ms tras empezar a abrir el gatillo v_pico=%.2f v_entre_poses=%.2f m/s v_actor=%.2f m/s (%.2f %.2f %.2f) angular=%.1f rad/s pos_motor=(%.0f %.0f %.0f) aceptado=%d\n", ev->weapon_id,
+                ev->kind == WL_INHAND ? "en_mano" : LM[ev->thr_mode >= 0 && ev->thr_mode <= 1 ? ev->thr_mode : 0], ev->v_gest, ev->elev_deg, ev->v_hand, ev->v_used, 1000.0f * ev->win_len, 1000.0f * ev->win_lag, 1000.0f * ev->rel_lag, ev->v_peak, ev->v_inst, vrfire_throw_mps(), v[0], v[1], v[2], wv_len(ev->ang_vel), pe[0], pe[1], pe[2], ok);
         if (!ok) { G.rejects++; return 0; }
         G.fire_edge = 1; G.fire_pose = ev->pose; G.shots++; G.throws++;
         return 1; }
@@ -1455,6 +1494,58 @@ static uint16_t c4_remote(uint16_t out, const BridgeState *bs, const uint8_t *ra
     if (c4_eq || G.det_c4 > 0) out = (uint16_t)(out & ~PAD_DETONATE);       /* con el C4 equipado el círculo físico (CQC) ya no detona */
     if (G.det_c4 > 0) { G.det_c4--; if (core) out |= PAD_DETONATE; }
     return out;
+}
+
+/* ---- Nikita: nacimiento seguro y registro [nikita] (causa de la explosión al nacer: ver vr_fire.h, vrfire_missile_settle y vrfire_level_matrix) ---- */
+typedef struct { const uint8_t *ram; const VrFireMap *map; } NikWall;
+static float nik_wall_m(void *u, WVec3 p) {      /* distancia (m) de un punto de usuario a la pared de colisión más cercana (HZD del juego), -1 = ninguna a < 1,5 m */
+    const NikWall *w = (const NikWall *)u;
+    const float pu[3] = {p.x, p.y, p.z};
+    float ew[3];
+    vrfire_pos_to_world(w->map, pu, ew);
+    const float d = vrhzd_wall_dist(w->ram, ew, 1500.0f);
+    return d < 0.0f ? -1.0f : d / w->map->units_per_m;
+}
+/* La boca del tubo (la pose que pide el arma) corrida por el eje del tubo si queda cerca de la cabeza o de una pared (guided_spawn_pose); la dirección no cambia. */
+static WPose nikita_spawn(const WPose *mz, const WInput *in, const VrFireMap *map, const uint8_t *ram, const BridgeState *bs) {
+    NikWall nw = {ram, map};
+    GuidedSpawnInfo gi;
+    const WPose used = guided_spawn_pose(*mz, in->head.p, ram ? nik_wall_m : NULL, &nw, &gi);
+    const float eu[3] = {used.p.x, used.p.y, used.p.z};
+    float ew[3];
+    vrfire_pos_to_world(map, eu, ew);
+    const float dy = ew[1] - (float)bs->ctl_pos.y;
+    fprintf(stderr, "[nikita] disparo mano=(%.3f %.3f %.3f) boca=(%.3f %.3f %.3f) usada=(%.3f %.3f %.3f) m (espacio de usuario) corrimiento=%.3f m (%s) | cabeza: boca %.2f, usada %.2f m (minimo %.2f) | pared mas cercana: boca %.2f, usada %.2f m (minimo %.2f; -1 = ninguna a < 1,5 m) | altura de la boca sobre los pies de Snake=%.0f u: el planeo del juego habria dado un primer paso vertical de %.0f u (explota con >= %d; vr_fire.c coloca el actor ya en la boca) | pos_motor=(%.0f %.0f %.0f)\n",
+            in->hand[0].p.x, in->hand[0].p.y, in->hand[0].p.z, mz->p.x, mz->p.y, mz->p.z, used.p.x, used.p.y, used.p.z, gi.shift_m, gi.moved ? (gi.shift_m > 0 ? "adelantada" : "retrasada") : "sin mover",
+            gi.head0_m, gi.head_m, GD_SPAWN_HEAD_M, gi.wall0_m, gi.wall_m, GD_SPAWN_WALL_M, dy, dy * 0.5f, VRFIRE_MIS_MAX_STEP_Y, ew[0], ew[1], ew[2]);
+    return used;
+}
+static struct { uint32_t serial; int vb, reported; } NK;
+/* Seguimiento del misil guiado: una línea cada 10 VBlanks (0,2 s) en vuelo y una al terminar con el motivo que se puede deducir de lo que da el juego (rmissile_act_helper_8006C114). pad_bits = cruceta enviada al juego. */
+static void nikita_track(const WeaponState *st, const uint8_t *ram, const BridgeState *bs, uint16_t pad_bits) {
+    const GuidedState *gs = (const GuidedState *)st;
+    if (G.mis.serial != NK.serial) { NK.serial = G.mis.serial; NK.vb = 0; NK.reported = 0; }
+    if (!G.mis.actor) return;
+    NK.vb++;
+    const float pw[3] = {(float)G.mis.pos[0], (float)G.mis.pos[1], (float)G.mis.pos[2]};
+    const float wall = ram ? vrhzd_wall_dist(ram, pw, 1500.0f) : -1.0f;
+    const float dx = pw[0] - (float)bs->ctl_pos.x, dyy = pw[1] - (float)bs->ctl_pos.y, dz = pw[2] - (float)bs->ctl_pos.z, snake = sqrtf(dx * dx + dyy * dyy + dz * dz);
+    if (G.mis.alive && NK.vb % 10 == 0)
+        fprintf(stderr, "[nikita] vuelo t=%.2f s edad=%d ticks (combustible del juego %d/1000 ticks; VR %.1f s) pos=(%d %d %d) dir=(%.2f %.2f %.2f) paso_y=%d guinada=%d fase=%d guiado enviado yaw=%.2f pitch=%.2f (bruto %.2f %.2f) cruceta=0x%02x | pared=%.0f u Snake=%.0f u\n",
+                (float)NK.vb * 0.02f, G.mis.age, 1000 - G.mis.age, gs->fuel, G.mis.pos[0], G.mis.pos[1], G.mis.pos[2], G.mis.dir[0], G.mis.dir[1], G.mis.dir[2], G.mis.dy, G.mis.heading, st->phase,
+                gs->steer[0], gs->steer[1], gs->steer_raw[0], gs->steer_raw[1], (unsigned)pad_bits, wall, snake);
+    if (!G.mis.alive && G.mis.ended && !NK.reported) {
+        char why[200] = "";
+        if (G.mis.ended == 2) strcat(why, " edad_parada(actor destruido o reciclado)");
+        if (G.mis.dy >= VRFIRE_MIS_MAX_STEP_Y) strcat(why, " paso_vertical>=200");
+        if (G.mis.age >= 999) strcat(why, " combustible(1000 ticks)");
+        if (abs(G.mis.pos[0]) > 30000 || abs(G.mis.pos[1]) > 30000 || abs(G.mis.pos[2]) > 30000) strcat(why, " limite_30000");
+        if (wall >= 0.0f && wall < 250.0f) strcat(why, " pared<250u(NearHazard)");
+        if (!why[0]) strcpy(why, " toque_o_poder_o_mensaje(no distinguible desde fuera)");
+        NK.reported = 1;
+        fprintf(stderr, "[nikita] fin t=%.2f s ended=%d motivo:%s | edad=%d ticks estado=%d terminado=%d pos=(%d %d %d) paso_y=%d pared=%.0f u Snake=%.0f u (blast de Snake si < ~2000 u) fase=%d\n", (float)NK.vb * 0.02f, G.mis.ended, why, G.mis.age, (int)G.mis.state,
+                G.mis.done, G.mis.pos[0], G.mis.pos[1], G.mis.pos[2], G.mis.dy, wall, snake, st->phase);
+    }
 }
 
 static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ram);
@@ -1880,6 +1971,7 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
     fi.fire_pose = G.fire_pose;
     /* pose del disparo sin retroceso (el residuo del disparo anterior incluido): conserva las correcciones del arma (eje óptico, apuntado) y solo quita recoil_offset */
     if (gid == 0 || gid == 1 || gid == 9) fi.fire_pose = wpose_mul(aim_fix, G.fire_pose);
+    if (gid == 3 && fi.fire && map.valid) fi.fire_pose = nikita_spawn(&fi.fire_pose, &in, &map, ram, bs);      /* misil guiado: nace en la boca, a distancia segura de la cabeza y de las paredes */
     vrhit_frame();
     if (map.valid) vrhit_set_range(vrhit_weapon_range_m(gid) * map.units_per_m, map.units_per_m);      /* alcance del tiro = el del arma en la mano (SOCOM 25 m, FAMAS 30 m, resto 15 m) y el del láser (vr_hit.h) */
     if (fi.fire && map.valid) {      /* instante del gatillo: se anota a qué enemigo y zona apunta la boca ahora (el juego crea la bala ~0,4 s después y el enemigo se habrá movido) */
@@ -1903,10 +1995,13 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
     uint16_t out = pad;
     if (bs->in_control) out = (uint16_t)(out & ~(PAD_SQUARE | PAD_R1));
     out |= ro.pad_force;
+    uint16_t nk_pad = 0;
     if (gid == 3 && bs->in_control && G.mis.alive) {
         out = (uint16_t)(out & ~0xF0u);        /* durante el guiado la cruceta es solo del guiado (una sola fuente: sin mezclar bits del mando físico) */
-        out |= vrmis_pad(vrcam_pad_origin());
+        nk_pad = vrmis_pad(vrcam_pad_origin());
+        out |= nk_pad;
     }   /* guiado: la cruceta del juego (vr_missile.h) */
+    if (gid == 3) nikita_track(st, ram, bs, nk_pad);
     if (fo.engaged && fo.square) out |= PAD_SQUARE;
     publish_hand_pose(hs, gp, right, ge, in.support_held);
     if (bs->weapon >= 0) {
@@ -2119,6 +2214,7 @@ int mv_host_hands(VrHandsFrame *out) {
     uint64_t now = mono_ns();
     pthread_mutex_lock(&HM);
     glv_read = -1;
+    hd_last.valid = 0;
     rc = vrhands_fetch(out);
     if (rc && pub_sim_valid && out->meshes && out->nmeshes > 0 && out->nmeshes <= VRH_MAX_MESHES) {
         int w = opt_right ? 1 : 0;
@@ -2137,6 +2233,7 @@ int mv_host_hands(VrHandsFrame *out) {
                 float D[16];
                 m16_from_pq(pd, qd, D);
                 memcpy(dq, qd, sizeof dq); memcpy(dp, pd, sizeof dp); have_d = 1;
+                hd_last.valid = 1; hd_last.ser = pub_special_ser; memcpy(hd_last.dq, qd, sizeof hd_last.dq); memcpy(hd_last.dp, pd, sizeof hd_last.dp);
                 for (int k = 0; k < out->nmeshes; k++) {
                     buf[k] = out->meshes[k];
                     if (buf[k].flags & VRH_MF_HELD) continue;

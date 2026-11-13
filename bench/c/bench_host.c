@@ -287,6 +287,8 @@ int mv_host_hands(VrHandsFrame *out) {
 }
 void mv_host_hands_done(void) {}
 int32_t mv_vrgame_special_view(MvVrSpecialView *out) { (void)out; return 0; }
+int32_t mv_vrgame_special_sync(MvVrSpecialView *io) { (void)io; return 0; }   /* sin vista pegada al arma: nada que reajustar */
+void mv_vrgame_status(MvVrGameStatus *out) { if (out) memset(out, 0, sizeof *out); if (out) out->weapon = -1; }   /* sin arma VR mostrada (active = 0) */
 int32_t mv_vrgame_forearm(int32_t side, MvVrForearm *out) { (void)side; (void)out; return 0; }
 int32_t mv_vrgame_hand_matrix(int32_t side, float m[16]) { (void)side; (void)m; return 0; }
 int32_t mv_vrgame_menu_hand(void) { return -1; }   /* mano que mantiene abierta la ventana de armas/objetos: el banco no tiene menú del pecho */

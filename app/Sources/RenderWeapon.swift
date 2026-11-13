@@ -39,10 +39,11 @@ struct SpcDrawU {
     var p2 = simd_float4(0, 0, 0, 0)      // x = la imagen ya es lineal, y = (modo misil) pantalla LED en espera, z = (modo misil) HUD del juego encima (0 no, 1 alfa directo, 2 premultiplicado), w = nº de vértices de la máscara poligonal de la mira (0 = sin máscara)
     var poly = (simd_float4(0, 0, 0, 0), simd_float4(0, 0, 0, 0), simd_float4(0, 0, 0, 0), simd_float4(0, 0, 0, 0))   // vértices (u, v) de la máscara, 2 por simd_float4
 }
-// Mismo layout que VrSpcHud de vr_weapon.metal (32 bytes, fragmento, buffer 3): dónde caen el marco del juego y la vista 3D 4:3 dentro de la textura del HUD.
+// Mismo layout que VrSpcHud de vr_weapon.metal (48 bytes, fragmento, buffer 3): dónde caen el marco del juego y la vista 3D 4:3 dentro de la textura del HUD.
 struct SpcHudU {
     var frame = simd_float4(0, 0, 1, 1)   // x, y, ancho, alto (uv de la textura) del MARCO del juego
     var view = simd_float4(0, 0, 1, 1)    // x, y, ancho, alto (uv de la textura) de la vista 3D 4:3 (GD_VIEW), centrada en el marco
+    var nik = simd_float4(-1, 0, 0, 0)    // HUD propio del Nikita: x = anchura de la barra de combustible en píxeles del marco (<0 = sin HUD propio), yzw = posición del misil
 }
 
 final class WeaponRenderer {
@@ -123,7 +124,7 @@ final class WeaponRenderer {
         let lib = MVLib.library(device)
         library = lib
         if lib == nil { print("[WeaponRenderer] sin biblioteca Metal por defecto: falta vr_weapon.metal en el target") }
-        if MemoryLayout<WpnFrameU>.stride != 192 || MemoryLayout<WpnDrawU>.stride != 64 || MemoryLayout<SpcDrawU>.stride != 192 || MemoryLayout<SpcHudU>.stride != 32 {
+        if MemoryLayout<WpnFrameU>.stride != 192 || MemoryLayout<WpnDrawU>.stride != 64 || MemoryLayout<SpcDrawU>.stride != 192 || MemoryLayout<SpcHudU>.stride != 48 {
             print("[WeaponRenderer] layout de uniformes incompatible con vr_weapon.metal (\(MemoryLayout<WpnFrameU>.stride)/\(MemoryLayout<WpnDrawU>.stride))")
         }
         if MemoryLayout<VrHandsVertex>.stride != 36 { print("[WeaponRenderer] VrHandsVertex no mide 36 bytes") }
@@ -406,9 +407,13 @@ final class WeaponRenderer {
     /// en gamma, sin decodificar sRGB), `hud` = panel del HUD del juego en bruto (visor antiaéreo). `auxLinear`: los valores de `aux` ya son lineales.
     /// `hudPremultiplied`: `hud` es la capa 2D fiel (color premultiplicado, vr_layer2d) y no el HUD de reserva (alfa directo).
     /// `hudWin`: colocación del marco del juego dentro de `hud` (RGRenderer.hudWin; nil = la textura es el marco / la vista entera, como el HUD de reserva).
-    func encodeSpecial(encoder: MTLRenderCommandEncoder, view sv: MvVrSpecialView, aux: MTLTexture?, auxLinear: Bool, hud: MTLTexture?, hudPremultiplied: Bool = false, hudWin: XR2DWindow? = nil,
+    func encodeSpecial(encoder: MTLRenderCommandEncoder, view svIn: MvVrSpecialView, aux: MTLTexture?, auxLinear: Bool, hud: MTLTexture?, hudPremultiplied: Bool = false, hudWin: XR2DWindow? = nil,
                        views: [simd_float4x4], projections: [simd_float4x4], layered: Bool, viewIndex: Int = 0) {
-        guard enabled, sv.kind != 0 else { return }
+        guard enabled, svIn.kind != 0 else { return }
+        var sv = svIn      // copia propia: la sincronización con la mano del modelo solo cambia la superficie
+        // La superficie pegada al arma se recoloca con la misma mano con la que se acaba de dibujar el modelo (vrgame.c: mv_vrgame_special_sync); leída al inicio del fotograma iba varios ms por detrás y se hundía tras las caras del modelo.
+        var synced = sv
+        if mv_vrgame_special_sync(&synced) != 0 { sv.surf_pos = synced.surf_pos; sv.surf_rot = synced.surf_rot }
         let n = min(views.count, projections.count)
         guard n >= 1 else { return }
         let finite = [sv.surf_pos.0, sv.surf_pos.1, sv.surf_pos.2, sv.surf_rot.0, sv.surf_rot.1, sv.surf_rot.2, sv.surf_rot.3, sv.surf_w, sv.surf_h, sv.blend]
@@ -433,10 +438,11 @@ final class WeaponRenderer {
             }
         case Int32(MV_VIEW_AA_SCREEN):
             // Visor del lanzador antiaéreo en su pieza del modelo: segunda vista viva (textura 0) y, encima, la mira y el marco de fijación del HUD del juego (textura 1, subrectángulo `uv`), recortado al contorno de la pieza.
-            guard sv.blend > 0.02, sv.cam_valid != 0, let a = aux, let h = hud else { return }
-            image = a; overlay = h
+            guard sv.blend > 0.02, sv.cam_valid != 0, let a = aux else { return }
+            image = a; overlay = hud      // sin capa del HUD (cambio de vista) la pantalla sigue viva, solo sin la mira del juego
             d.uv = simd_float4(sv.uv.0, sv.uv.1, sv.uv.2, sv.uv.3)
             d.p0 = simd_float4(3, min(max(sv.blend, 0), 1), hudPremultiplied ? 1 : 0, 0)
+            d.p2.z = hud != nil ? 1 : 0      // 1 = hay capa del HUD que mezclar encima de la imagen
             d.p1.y = sv.frame.isFinite ? min(max(sv.frame, 0), 0.2) : 0      // marco oscuro del sombreador (fracción de la altura)
             let np = Int(sv.npoly)
             if np >= 3 && np <= 8 {
@@ -499,6 +505,9 @@ final class WeaponRenderer {
         // Marco y vista 4:3 dentro de la textura del HUD: con la capa HQ es la ventana visible (PAL 320x268, marco 320x256 con oy = 5), así que las fracciones del marco (iconos) y el recorte 4:3 del misil se
         // pasan a uv de la textura con el mismo frameUV que XRPresent. La vista 3D (320x240, GD_VIEW) está centrada en el marco (XR2DWindow.panelOnScreen3D).
         var hd = SpcHudU()
+        if sv.kind == Int32(MV_VIEW_MISSILE) && sv.nik_hud != 0 && sv.ended == 0 && sv.nik_fuel.isFinite && sv.nik_pos.0.isFinite && sv.nik_pos.1.isFinite && sv.nik_pos.2.isFinite {
+            hd.nik = simd_float4(min(max(sv.nik_fuel, 0), 60), sv.nik_pos.0, sv.nik_pos.1, sv.nik_pos.2)      // HUD propio del Nikita (el juego no lo emite sin el botón ▲): lo dibuja el sombreador
+        }
         if let w = hudWin {
             let f = w.frameUV(simd_float4(0, 0, 1, 1))
             hd.frame = simd_float4(f.x, f.y, f.z - f.x, f.w - f.y)

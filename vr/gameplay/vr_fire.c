@@ -101,6 +101,36 @@ int vrfire_make_matrix(const VrFireMap *map, const WPose *mz, float shift, VrFir
     for (int i = 0; i < 3; i++) out->t[i] = round_clamp(w[i] + shift * f[i]);
     return 1;
 }
+int vrfire_level_matrix(VrFireMat *m) {
+    if (!m) return 0;
+    float f[3];
+    vrfire_mat_forward(m, f);
+    const float hl = sqrtf(f[0] * f[0] + f[2] * f[2]);
+    if (!(hl > 0.2f)) return 0;                                   /* tubo casi vertical (o matriz inválida): sin guiñada fiable */
+    const float fx = f[0] / hl, fz = f[2] / hl;
+    /* columnas como vrfire_make_matrix con arriba = +Y y delante horizontal: c0 = arriba x delante, c1 = -delante, c2 = delante x c0 = arriba */
+    const float c0[3] = {fz, 0.0f, -fx}, c1[3] = {-fx, 0.0f, -fz}, c2[3] = {0.0f, 1.0f, 0.0f};
+    for (int i = 0; i < 3; i++) { m->m[3 * i + 0] = q12(c0[i]); m->m[3 * i + 1] = q12(c1[i]); m->m[3 * i + 2] = q12(c2[i]); }
+    return 1;
+}
+#define RM_MOV   0x20u      /* rmissile.c Work: control.mov (s16[3]) */
+#define RM_HOME  0x100u     /* field_100_svector: posición de la matriz de creación */
+#define RM_PREV  0x108u     /* field_108_svector: posición del tick anterior */
+#define RM_GLIDE 0x110u     /* field_110: ticks de planeo restantes (8 al crear) */
+#define RM_SIZE  0x328u
+int vrfire_missile_settle(uint8_t *ram, uint32_t actor, VrFireMissileBirth *info) {
+    if (!ram || !ptr_ok(actor, RM_SIZE)) return 0;
+    VrFireMissileBirth b;
+    memset(&b, 0, sizeof b);
+    for (int i = 0; i < 3; i++) { b.home[i] = rd_s16(ram, actor + RM_HOME + 2u * (uint32_t)i); b.start[i] = rd_s16(ram, actor + RM_MOV + 2u * (uint32_t)i); }
+    b.glide = (int8_t)ram[(actor + RM_GLIDE) & RAM_MASK];
+    b.first_dy = (b.home[1] - b.start[1]) / 2;
+    if (info) *info = b;
+    if (b.glide < 1 || b.glide > 16) return 0;                    /* no es el contador de un actor recién creado: no se toca */
+    for (int i = 0; i < 3; i++) { wr_s16(ram, actor + RM_MOV + 2u * (uint32_t)i, b.home[i]); wr_s16(ram, actor + RM_PREV + 2u * (uint32_t)i, b.home[i]); }
+    ram[(actor + RM_GLIDE) & RAM_MASK] = 1;
+    return 1;
+}
 void vrfire_store_mat(uint8_t *ram, uint32_t a, const VrFireMat *m) {
     for (int i = 0; i < 9; i++) wr_s16(ram, a + 2u * (uint32_t)i, m->m[i]);
     wr_s16(ram, a + 18, 0);

@@ -279,6 +279,12 @@ static void g_update(WeaponState *s, const WInput *in, WReloadMode rm, const WGa
         }
         /* guiado: inclinación relativa al disparo (orientación de la mano del arma) o stick */
         if (btn_b_edge) { gs->q0 = in->hand[0].q; b_haptic(g, 0, 0.2f, 0.04f); }   /* recentrar */
+        /* Neutro del guiado: la orientación de la mano mientras el juego aún no ha creado el misil (~0,65 s tras el disparo, el jugador acerca el lanzador a la cara para ver la pantalla) y al acercar el ojo a la
+         * pantalla en pleno vuelo (flanco de eye_near): inclinar el tubo para mirar la pantalla no es una orden de giro (con q0 fija en el gatillo, esa inclinación eran 20-40 grados = guiado a fondo sin querer). */
+        if (!gs->seen || (gs->eye_near && !gs->eye_prev)) {
+            gs->q0 = in->hand[0].q;
+            if (gs->seen) { gs->steer[0] = gs->steer[1] = 0; b_haptic(g, 0, 0.1f, 0.03f); }
+        }
         WQuat rel = qmul(qconj(gs->q0), in->hand[0].q);
         WVec3 f = qrot(rel, v3(0, 0, -1));
         float yaw = atan2f(f.x, -f.z), pitch = asinf(clampf(f.y, -1, 1));
@@ -343,6 +349,34 @@ static void g_update(WeaponState *s, const WInput *in, WReloadMode rm, const WGa
         if (s->held[0].active) s->held[0].world = hm;
     }
     gs->prev_trig = trig; gs->prev_grip1 = grip1; gs->prev_btn0 = in->buttons[0];
+    gs->eye_prev = gs->eye_near;
+}
+
+WPose guided_spawn_pose(WPose muzzle, WVec3 head, float (*wall_m)(void *user, WVec3 p), void *user, GuidedSpawnInfo *info) {
+    GuidedSpawnInfo in; memset(&in, 0, sizeof in);
+    const WVec3 ax = vnorm(qrot(qnorm(muzzle.q), v3(0, 0, -1)));
+    const float step = 0.05f;
+    WPose out = muzzle;
+    in.head0_m = vlen(vsub(muzzle.p, head));
+    in.wall0_m = wall_m ? wall_m(user, muzzle.p) : -1.0f;
+    float shift = 0;
+    for (; shift < GD_SPAWN_MAX_SHIFT && vlen(vsub(vadd(muzzle.p, vmul(ax, shift)), head)) < GD_SPAWN_HEAD_M; shift += step) {}      /* lejos de la cabeza: hacia delante */
+    if (shift > GD_SPAWN_MAX_SHIFT) shift = GD_SPAWN_MAX_SHIFT;
+    const WVec3 p0 = vadd(muzzle.p, vmul(ax, shift));
+    float wd = wall_m ? wall_m(user, p0) : -1.0f;
+    if (wd >= 0.0f && wd < GD_SPAWN_WALL_M) {                                                                                      /* pared cerca: hacia atrás por el tubo hasta un punto libre (y lejos de la cabeza) */
+        for (float b = step; b <= GD_SPAWN_MAX_SHIFT; b += step) {
+            WVec3 p = vadd(p0, vmul(ax, -b));
+            float w = wall_m(user, p);
+            if ((w < 0.0f || w >= GD_SPAWN_WALL_M) && vlen(vsub(p, head)) >= GD_SPAWN_HEAD_M) { shift -= b; break; }
+        }
+    }
+    out.p = vadd(muzzle.p, vmul(ax, shift));
+    in.shift_m = shift; in.moved = shift != 0.0f;
+    in.head_m = vlen(vsub(out.p, head));
+    in.wall_m = wall_m ? wall_m(user, out.p) : -1.0f;
+    if (info) *info = in;
+    return out;
 }
 
 /* ------------------------------------------------------------------ servicios para el renderer */

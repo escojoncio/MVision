@@ -30,6 +30,9 @@ typedef struct VrMissile {
     int      heading;      /* guiñada del juego (0..4095) */
     int      age;          /* edad en ticks */
     uint32_t serial;       /* nº de misil vigilado (sube con cada begin) */
+    int      dy;           /* paso vertical del último tick (pos.y - posición previa, unidades del motor): el juego explota el misil con dy >= 200 (rmissile_act_helper_8006C114) */
+    int      done;         /* bandera de terminado del actor (+0x112) en la última lectura */
+    int32_t  state;        /* estado del actor (+0x11C) en la última lectura (negativo al explotar) */
 } VrMissile;
 
 void vrmis_reset(void);

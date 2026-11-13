@@ -113,12 +113,13 @@ struct VrSpcDraw {
     float4 p2;                  /* x = la imagen de la textura 0 ya es lineal (se lleva a gamma antes de mezclar); y, z = prismáticos (modo HUD con y > 0); z en el modo misil = HUD del juego encima (0 no, 1 alfa directo, 2 premultiplicado); y > 0,5 en el modo misil = pantalla LED en espera, ver el fragmento; w = nº de vértices de la máscara poligonal (mira; 0 = sin máscara) */
     float4 poly[4];             /* máscara poligonal convexa de la mira: vértices (u, v) sobre el rectángulo (v hacia abajo), 2 por float4 (xy, zw), hasta 8 */
 };
-/* Colocación del marco del juego en la textura del HUD (fragmento, buffer 3; Swift: SpcHudU, 32 bytes). Con la capa 2D fiel (HQ) la textura es la ventana visible (PAL 320x268) y el marco 320x256 va desplazado
+/* Colocación del marco del juego en la textura del HUD (fragmento, buffer 3; Swift: SpcHudU, 48 bytes). Con la capa 2D fiel (HQ) la textura es la ventana visible (PAL 320x268) y el marco 320x256 va desplazado
  * (XR2DWindow.frameUV); con el HUD de reserva la textura es el marco / la vista entera y ambos rectángulos son (0, 0, 1, 1). */
 #define VR_SPC_BUF_HUD 3
 struct VrSpcHud {
     float4 frame;               /* x, y, ancho, alto (uv de la textura del HUD) del MARCO del juego: las fracciones del marco (iconos del HUD) se pasan a la textura con frame.xy + f * frame.zw */
     float4 view;                /* x, y, ancho, alto (uv de la textura del HUD) de la vista 3D 4:3 (GD_VIEW, 320x240), centrada en el marco: el recorte uv del misil es sobre ella, no sobre la textura entera */
+    float4 nik;                 /* HUD propio del Nikita: x = anchura de la barra de combustible en píxeles del marco (< 0 = no se dibuja), yzw = posición del misil (cifras) */
 };
 struct VrSpcOut {
     float4 pos [[position]];
@@ -144,8 +145,51 @@ vertex VrSpcOut vr_vs_spc_amp(uint vid [[vertex_id]], ushort amp [[amplification
 
 /* Iconos del HUD del juego que no van en las pantallas LED del arma (Stinger y misil) (misma partición de la capa que XRPresent.hudRegions): vida / oxígeno (arriba izquierda), objeto equipado (L2, abajo izquierda) y arma equipada
  * con su munición (R2, abajo derecha). ff = fracciones del MARCO del juego (0..1), como hudRegions; la textura del HUD se pasa a ellas con VrSpcHud.frame. El resto (mira, marco de fijación, textos del misil) se conserva. */
-inline bool vr_spc_hud_icon(float2 ff) {
-    return (ff.x < 0.35 && ff.y < 0.17) || (ff.x < 0.25 && ff.y > 0.62) || (ff.x > 0.75 && ff.y > 0.62);
+/* LISTA BLANCA (antes una lista negra de tres esquinas que dejaba pasar el radar, la alerta, la vida enemiga...): de la capa 2D del juego solo se pinta lo propio del arma, en píxeles del MARCO 320x256 (ff * (320, 256)).
+ * Desfase en y de las coordenadas del juego respecto al marco (la vista 240 va centrada en el marco 256): 0-2 px medido en auto06; radar 0. Medido en los volcados (radar x 235-305 y 15-60, alerta «EVASION» x 235-300 y 15-67, vida arriba izquierda y < 44, iconos L2/R2 y 213-245).
+ *   Stinger (stnsight.c): escala de cabeceo con sus números a la izquierda (x 14-60, y 44-212), retícula y marco de fijación del misil (centro x 52-296, y 72-212) y «LOCK_ON» (180, 16; rectángulo desde y 16, glifos de 6 px + 0-2 de desfase). Limitaciones aceptadas: las etiquetas
+ *   bajas de la escala (y 213-230) y sus líneas fuera de x 14-60 / y 44-212 quedan en el panel (conflicto con el icono L2 y la vida). La barra de tiempos de canal (bg_prim de stnsight.c) cae sobre la barra de vida del jugador
+ *   (menu/life.c: filas 17-34 desde x 15) y no es separable: NO se incluye y se acepta que salga en el panel. Las líneas de convergencia borde a borde de sgtrect3.c tampoco son separables y no se tocan.
+ *   Nikita (bullet/rmissile.c): solo «ENEMY» (116, 98 + 0-2; rectángulo desde y 96); combustible y cifras de posición las dibuja este sombreador (el juego solo las emite con ▲ mantenido). */
+inline bool vr_spc_hud_keep(float2 ff, bool nikita) {
+    float2 p = ff * float2(320.0, 256.0);
+    if (nikita) return p.x >= 112.0 && p.x <= 176.0 && p.y >= 96.0 && p.y <= 120.0;
+    return (p.x >= 14.0 && p.x <= 60.0 && p.y >= 44.0 && p.y <= 212.0) || (p.x >= 52.0 && p.x <= 296.0 && p.y >= 72.0 && p.y <= 212.0) || (p.x >= 176.0 && p.x <= 232.0 && p.y >= 16.0 && p.y <= 36.0);
+}
+
+/* Fuente 3x5 (15 bits, fila superior en los bits altos, columna izquierda en el bit alto de cada fila) para las cifras del Nikita */
+inline int vr_spc_digit_glyph(int d) {
+    switch (d) {
+        case 0: return 31599; case 1: return 11415; case 2: return 29671; case 3: return 29647; case 4: return 23497;
+        case 5: return 31183; case 6: return 31215; case 7: return 29257; case 8: return 31727; case 9: return 31695;
+        default: return 0;
+    }
+}
+/* Entero con signo en píxeles del marco: cada píxel de la fuente mide 2 x 1,5; avance de 8 px por carácter. 1 = pintado */
+inline float vr_spc_num(float2 fp, float2 org, int v) {
+    float2 t = (fp - org) / float2(2.0, 1.5);
+    if (t.x < 0.0 || t.y < 0.0 || t.y >= 5.0) return 0.0;
+    int ci = int(floor(t.x / 4.0));
+    int cx = int(floor(t.x)) - 4 * ci;
+    int cy = int(floor(t.y));
+    int n = v < 0 ? -v : v;
+    int nd = 1, p10 = 1;
+    for (int i = 0; i < 4; i++) { if (n >= p10 * 10) { p10 *= 10; nd++; } }
+    int neg = v < 0 ? 1 : 0;
+    if (ci >= nd + neg || cx >= 3) return 0.0;
+    int g = 448;                                                         /* signo menos */
+    if (!(neg == 1 && ci == 0)) {
+        int pw = 1;
+        for (int i = 0; i < nd - 1 - (ci - neg); i++) pw *= 10;
+        g = vr_spc_digit_glyph((n / pw) % 10);
+    }
+    return ((g >> (3 * (4 - cy) + (2 - cx))) & 1) != 0 ? 1.0 : 0.0;
+}
+/* Punto de mira: núcleo de radio rad (unidades de media altura útil) con aro oscuro; col = color del núcleo */
+inline float3 vr_spc_dot(float3 rgb, float2 r, float aspect_in, float rad, float3 col) {
+    float dist = length(float2(r.x * aspect_in, r.y));
+    rgb = mix(rgb, float3(0.0, 0.0, 0.0), 0.7 * (1.0 - smoothstep(rad * 1.5, rad * 2.2, dist)));
+    return mix(rgb, col, 1.0 - smoothstep(rad * 0.7, rad, dist));
 }
 
 inline float vr_spc_enc1(float c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
@@ -197,8 +241,10 @@ fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buff
         float al = h.w;
         float3 hc = float3(h.x, h.y, h.z);
         if (d.p0.z > 0.5) { al = max(h.w, max(h.x, max(h.y, h.z))); hc = hc / max(al, 1e-4); }   /* capa premultiplicada (lo aditivo lleva alfa 0 y color): a alfa directo */
-        if (hu.x < 0.0 || hu.y < 0.0 || hu.x > 1.0 || hu.y > 1.0 || vr_spc_hud_icon((hu - hd.frame.xy) / hd.frame.zw)) al = 0.0;     /* sin los iconos de vida / equipo L2 / equipo R2 (hu es de la textura; los iconos van en fracciones del marco) */
+        if (d.p2.z < 0.5 || hu.x < 0.0 || hu.y < 0.0 || hu.x > 1.0 || hu.y > 1.0 || !vr_spc_hud_keep((hu - hd.frame.xy) / hd.frame.zw, false)) al = 0.0;     /* solo el HUD propio del Stinger (lista blanca; hu es de la textura, la lista va en fracciones del marco); p2.z = 0: sin capa del HUD */
         rgb = mix(rgb, hc, clamp(al, 0.0, 1.0));
+        float ain = (d.p1.w - 2.0 * d.p1.y) / max(1.0 - 2.0 * d.p1.y, 0.01);     /* proporción ancho/alto del interior (sin marco) */
+        rgb = vr_spc_dot(rgb, r, ain, 0.0125 / max(0.5 * (1.0 - 2.0 * d.p1.y), 0.05), float3(1.0, 0.08, 0.05));      /* punto ROJO en el eje de la cámara (centro de la imagen); radio 1,25 % de la altura de la pantalla */
     } else if (mode < 0.5) {                                             /* mira: imagen aumentada + abertura y retícula */
         rgb = img.sample(sLin, q).xyz;
         if (d.p2.x > 0.5) rgb = float3(vr_spc_enc1(rgb.x), vr_spc_enc1(rgb.y), vr_spc_enc1(rgb.z));
@@ -252,8 +298,20 @@ fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buff
             float al = h.w;
             float3 hc = float3(h.x, h.y, h.z);
             if (d.p2.z > 1.5) { al = max(h.w, max(h.x, max(h.y, h.z))); hc = hc / max(al, 1e-4); }
-            if (hu.x < 0.0 || hu.y < 0.0 || hu.x > 1.0 || hu.y > 1.0 || vr_spc_hud_icon((hu - hd.frame.xy) / hd.frame.zw)) al = 0.0;
+            if (hu.x < 0.0 || hu.y < 0.0 || hu.x > 1.0 || hu.y > 1.0 || !vr_spc_hud_keep((hu - hd.frame.xy) / hd.frame.zw, true)) al = 0.0;     /* solo «ENEMY» del juego (lista blanca) */
             rgb = mix(rgb, hc, clamp(al, 0.0, 1.0));
+        }
+        if (d.p1.z < 0.5) {
+            float2 hv = hd.view.xy + (float2(d.uv.x, d.uv.y) + q * float2(d.uv.z, d.uv.w)) * hd.view.zw;
+            float2 fp = ((hv - hd.frame.xy) / hd.frame.zw) * float2(320.0, 256.0) - float2(d.uv.x * 320.0, 8.0);     /* píxeles del juego (la vista 240 va centrada en el marco 256), con x desde el borde izquierdo VISIBLE: la pantalla recorta el ancho sobrante de la imagen 4:3 y a x = 8 las cifras quedarían fuera */
+            if (hd.nik.x >= 0.0) {          /* HUD propio: barra de combustible (31, 39) 10 px de alto y cifras (8, 136 / 144 / 152), como DrawMissileHud */
+                float3 bc = hd.nik.x < 15.0 ? float3(0.83, 0.31, 0.31) : float3(0.55, 0.95, 0.55);
+                if (fp.x >= 31.0 && fp.x <= 31.0 + hd.nik.x && fp.y >= 39.0 && fp.y <= 49.0) rgb = mix(rgb, bc, 0.85);
+                float tx = vr_spc_num(fp, float2(8.0, 136.0), int(hd.nik.y)) + vr_spc_num(fp, float2(8.0, 144.0), int(hd.nik.z)) + vr_spc_num(fp, float2(8.0, 152.0), int(hd.nik.w));
+                rgb = mix(rgb, float3(0.8, 0.9, 0.8), clamp(tx, 0.0, 1.0));
+            }
+            float ain = (d.p1.w - 2.0 * d.p1.y) / max(1.0 - 2.0 * d.p1.y, 0.01);
+            rgb = vr_spc_dot(rgb, r, ain, 0.0125 / max(0.5 * (1.0 - 2.0 * d.p1.y), 0.05), float3(0.2, 1.0, 0.25));      /* punto VERDE brillante en el eje del misil (centro de la imagen) */
         }
         float e = max(abs(r.x), abs(r.y));
         rgb *= e > 0.97 ? 0.15 : 1.0;                                    /* marco */

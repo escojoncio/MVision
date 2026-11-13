@@ -179,7 +179,11 @@ final class XRFrameEncoder {
         // vista ni lente) y el marco del propio juego (rejilla, retícula, textos, tinte verdoso, radar: capa del HUD) va en un rectángulo fijo a la cabeza ante los ojos, con el mismo camino que el visor antiaéreo
         // (MV_VIEW_AA_SIGHT, sin panel plano del HUD). Sin scope.c (sight.c solo): disco con visión estrecha, como antes.
         var worldZoom: Float = 1
-        if !special && gs.view_kind == 1 && gs.fx.scope_on != 0 {
+        // Con un arma VR mostrada (PSG1, Stinger, Nikita...) el marco de mira del juego (sight.c, que sigue unos ticks tras cambiar de arma) NO se convierte en el disco de reserva: durante el cambio la vista del arma no se publica
+        // (vrgame.c sv_wait / selector) y ese disco de 0,34 m a 0,45 m de la cabeza era la «mirilla enorme». Solo los prismáticos (scope.c) o una mira sin arma VR usan estas vistas.
+        var vrWeapon = MvVrGameStatus()
+        mv_vrgame_status(&vrWeapon)
+        if !special && gs.view_kind == 1 && gs.fx.scope_on != 0 && (gs.fx.binocular != 0 || vrWeapon.active == 0) {
             if gs.fx.binocular != 0 {
                 worldZoom = Self.binocularWorldZoom(gs.fx.scope_zoom)
                 sv = Self.binocularFrame(head: recentered, aspect: 4.0 / 3.0)   // la capa 2D es la ventana visible fija del televisor: siempre 4:3 (su tamaño en píxeles no es cuadrado)
@@ -188,7 +192,8 @@ final class XRFrameEncoder {
             }
             special = true
         }
-        if special && sv.hide_hud != 0 { hud = nil }          // el panel plano del HUD sobra mientras se mira por la mira / el visor
+        if special && sv.hide_hud != 0 { hud = nil }          // el panel plano del HUD sobra solo con la pantalla grande del misil (la taparía) y con los prismáticos
+        presenter.weaponHudMask = special && sv.hide_hud == 0 ? XRFramedLayout.weaponHudMask(kind: sv.kind) : []   // Stinger / Nikita: su HUD propio solo en su LCD; el resto del panel (radar, vida...) sigue
         // Presentación: mundo en primera persona, pantalla de cine o diorama, paneles del HUD, velo de transición y menú.
         var ipd = simd_length(XRMath.position(eyes[0].transform) - XRMath.position(eyes[1].transform))
         if !(ipd > 0.05 && ipd < 0.08) { ipd = 0.063 }

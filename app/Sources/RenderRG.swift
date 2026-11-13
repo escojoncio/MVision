@@ -1845,10 +1845,7 @@ final class RGRenderer {
         // contra la profundidad del mundo.
         defer {
             if last && drawBody {
-                // Sin el radar de muñeca con la vista del misil o el visor del Stinger (hide_hud; los prismáticos del juego, round 2, lo conservan).
-                if !(special.map { $0.hide_hud != 0 && $0.round != 2 } ?? false) {
-                    radar?.encodeQuad(enc, uniforms: uniforms, layered: amplify > 0, color: color.pixelFormat, depth: depth.pixelFormat, samples: samples)
-                }
+                radar?.encodeQuad(enc, uniforms: uniforms, layered: amplify > 0, color: color.pixelFormat, depth: depth.pixelFormat, samples: samples)
                 weapon?.sampleCount = samples      // las muestras del pase pueden cambiar en vivo (diagnóstico MSAA 1x)
                 let bv = bodyViews ?? views
                 weapon?.encode(encoder: enc, views: bv, projections: projections, layered: amplify > 0, viewIndex: viewIndex)

@@ -210,6 +210,35 @@ enum XRFramedLayout {
     static func center(uv: SIMD4<Float>, layerPx: SIMD2<Float>) -> SIMD2<Float> {
         SIMD2<Float>(((uv.x + uv.z) / 2 - 0.5) * layerWidth, (0.5 - (uv.y + uv.w) / 2) * layerWidth * aspect)
     }
+    /// Tiras (u0, v0, u1, v1) que quedan del recorte `uv` al quitarle los rectángulos `holes` (mismas coordenadas uv): bandas horizontales entre los bordes de los huecos, con cada banda partida solo donde hay hueco.
+    /// Sin huecos devuelve [uv].
+    static func strips(uv: SIMD4<Float>, holes: [SIMD4<Float>]) -> [SIMD4<Float>] {
+        var ys: [Float] = [uv.y, uv.w]
+        for h in holes {
+            if h.y > uv.y && h.y < uv.w { ys.append(h.y) }
+            if h.w > uv.y && h.w < uv.w { ys.append(h.w) }
+        }
+        ys.sort()
+        var out: [SIMD4<Float>] = []
+        for i in 0..<(ys.count - 1) {
+            let y0 = ys[i], y1 = ys[i + 1]
+            if y1 - y0 < 1e-6 { continue }
+            let mid = (y0 + y1) / 2
+            var cuts: [SIMD2<Float>] = []
+            for h in holes where h.y <= mid && mid <= h.w {
+                let a = max(h.x, uv.x), b = min(h.z, uv.z)
+                if a < b { cuts.append(SIMD2<Float>(a, b)) }
+            }
+            cuts.sort { $0.x < $1.x }
+            var x = uv.x
+            for c in cuts {
+                if c.x > x { out.append(SIMD4<Float>(x, y0, c.x, y1)) }
+                x = max(x, c.y)
+            }
+            if x < uv.z { out.append(SIMD4<Float>(x, y0, uv.z, y1)) }
+        }
+        return out
+    }
 }
 
 /// Colocación del marco del juego en la ventana visible fija del televisor (runtime/gpu.h, gpu_display_window), en píxeles del juego: la capa 2D fiel llega ya como esa ventana entera.

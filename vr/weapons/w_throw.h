@@ -27,7 +27,12 @@ typedef struct {
     uint32_t seq;            /* contador creciente de eventos */
     float v_hand, v_used, win_len, win_lag, rel_lag;   /* WL_THROW, diagnóstico: m/s de la ventana más reciente y de la usada, s de largo y de lag de la usada y s entre empezar a soltar el gatillo y cruzar el umbral */
     float v_peak, v_inst;    /* WL_THROW, diagnóstico: m/s de la ventana más rápida recorrida (cualquier dirección) y entre las dos últimas poses del historial */
+    float v_gest;            /* WL_THROW, diagnóstico: m/s del gesto (mano + giro) antes de sustituirlo por el módulo máximo de su tipo */
+    float elev_deg;          /* WL_THROW, diagnóstico: elevación entregada (grados; 0 si no es WLM_MAX) */
+    int thr_mode;            /* WL_THROW: WLM_* */
 } WLaunch;
+/* thr_mode: dejar caer (gesto < V_THROW_MIN: velocidad medida) / lanzamiento al módulo máximo de su tipo (KINDS[].vmax en w_throw.c: 4,93 / 5,15 / 1,13 m/s), rumbo y elevación del gesto; sin otra excepción */
+enum { WLM_SOFT = 0, WLM_MAX = 1 };
 
 /* Gancho opcional; devuelve 1 si el juego aceptó el evento (p.ej. hay superficie
  * para la carga), 0 si lo rechaza. Un rechazo no consume munición ni cambia el estado del arma

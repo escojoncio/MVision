@@ -1584,9 +1584,107 @@ static void t_c4_direct(void) {
     CHECK(vrfire_c4_request(&map, &pose) == 1 && vrfire_c4_take(&t) == 1 && mat_eq(&t, &want) && !vrfire_c4_pending() && vrfire_c4_take(&t) == 0, "vrfire_c4_take saca la petición sin comprobar el juego (pruebas)");
 }
 
+
+static WQuat qmul_(WQuat a, WQuat b) { WQuat r = { a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x, a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z }; return r; }
+/* ---- misil guiado (Nikita): guiñada con la matriz de una mano real y nacimiento sin planeo (vr_fire.h) ---- */
+/* réplica de DG_MatrixRotYXZ (libdg/matrix.c) y de GM_ConfigControlMatrix: devuelve vy = la guiñada con la que el juego mueve el misil (4096 = vuelta) */
+static int psx_ratan2(int y, int x) { return (int)lrint(atan2((double)y, (double)x) * 4096.0 / (2.0 * PI)) & 0xfff; }
+static int dg_yxz_vy(const VrFireMat *M) {
+#define MM(r, c) ((int)M->m[3 * (r) + (c)])
+    int i1 = -MM(1, 2), i2 = (int)lrint(sqrt((double)(0x1000000 - i1 * i1)));
+    int vx, vy, vz;
+    if (i2 < 0x80) return psx_ratan2(-MM(2, 0), MM(0, 0));
+    vx = psx_ratan2(i1, i2); vy = psx_ratan2((MM(0, 2) << 12) / i2, (MM(2, 2) << 12) / i2); vz = psx_ratan2((MM(1, 0) << 12) / i2, (MM(1, 1) << 12) / i2);
+    if (abs(vz) > 0x400) { vz = (vz + 0x800) & 0xfff; vy = (vy + 0x800) & 0xfff; vx = (0x800 - vx) & 0xfff; }
+    (void)vx; (void)vz;
+#undef MM
+    return vy;
+}
+static double yaw_err_deg(int vy, const VrFireMat *M) {      /* error (grados) entre vy y la guiñada real del cañón (horizontal de su delante) */
+    float f[3]; vrfire_mat_forward(M, f);
+    double want = atan2((double)f[0], (double)f[2]) * 4096.0 / (2.0 * PI), d = fmod((double)vy - want + 2048.0 + 4096.0 * 8, 4096.0) - 2048.0;
+    return fabs(d) * 360.0 / 4096.0;
+}
+/* el planeo de rmissile.c (Act + helper_8006C114): devuelve el mayor paso vertical por tick visto por la comprobación de explosión */
+static int glide_max_dy(int hy, int sy, int g) {
+    int mov = sy, prev = sy, worst = 0, age = 0;
+    for (int tick = 0; tick < 14; tick++) {
+        int step = 0;
+        if (g) { if (--g != 0) { if (age != 0) { int d = hy - mov; step = (d > -2 && d < 2) ? d : d / 2; } } else step = hy - mov; }   /* NearExp2 */
+        { int dy = mov - prev; if (dy > worst) worst = dy; }       /* la comprobación del tick ve el paso del anterior */
+        age++; prev = mov; mov += step;
+    }
+    return worst;
+}
+static void t_missile_birth(void) {
+    printf("-- misil guiado: guiñada con la matriz de la mano y nacimiento sin planeo --\n");
+    VrFireMap map = mkmap(1000, 2000, -3000, 0);
+    VrFireMat m, l;
+    WPose lv = {{0.1f, 1.6f, -0.2f}, {0, 0, 0, 1}};
+    CHECK(vrfire_make_matrix(&map, &lv, 0, &m) && vrfire_make_matrix(&map, &lv, 0, &l) && vrfire_level_matrix(&l) && !memcmp(&m, &l, sizeof m), "cañón nivelado y sin balanceo: la matriz ya es la del original (nivelar no cambia nada)");
+    int bad_raw = 0, n = 0; double worst_raw = 0, worst_lvl = 0;
+    for (int yaw = -180; yaw < 180; yaw += 15)
+        for (int pit = -30; pit <= 30; pit += 5)
+            for (int rol = -20; rol <= 20; rol += 5) {
+                WPose p = {{0.1f, 1.6f, -0.2f}, {0, 0, 0, 1}};
+                WQuat qy = {0, (float)sin(yaw * PI / 360), 0, (float)cos(yaw * PI / 360)}, qx = {(float)sin(pit * PI / 360), 0, 0, (float)cos(pit * PI / 360)}, qz = {0, 0, (float)sin(rol * PI / 360), (float)cos(rol * PI / 360)};
+                p.q = qmul_(qy, qmul_(qx, qz));
+                VrFireMat a, b;
+                if (!vrfire_make_matrix(&map, &p, 0, &a)) continue;
+                b = a;
+                CHECK(vrfire_level_matrix(&b) == 1, "nivelar yaw=%d pit=%d rol=%d", yaw, pit, rol);
+                double er = yaw_err_deg(dg_yxz_vy(&a), &a), el = yaw_err_deg(dg_yxz_vy(&b), &a);
+                if (er > 10.0) bad_raw++;
+                if (er > worst_raw) worst_raw = er;
+                if (el > worst_lvl) worst_lvl = el;
+                CHECK(a.t[0] == b.t[0] && a.t[1] == b.t[1] && a.t[2] == b.t[2], "la posición no cambia");
+                n++;
+            }
+    printf("   guiñada del juego con la matriz de la mano: %d de %d posturas con error > 10 grados (peor %.0f); nivelada: peor %.2f grados\n", bad_raw, n, worst_raw, worst_lvl);
+    CHECK(bad_raw > n / 10 && worst_raw > 45.0, "la matriz cruda de una mano real da una guiñada errónea al sacar vy con DG_MatrixRotYXZ (%d de %d, peor %.0f grados): es la causa que se corrige", bad_raw, n, worst_raw);
+    CHECK(worst_lvl < 0.5, "con la matriz nivelada la guiñada del juego es la del cañón (peor %.2f grados)", worst_lvl);
+    WPose up = {{0.1f, 1.6f, -0.2f}, {-0.7071068f, 0, 0, 0.7071068f}};     /* cañón vertical hacia arriba */
+    VrFireMat v0, v1;
+    vrfire_make_matrix(&map, &up, 0, &v0); v1 = v0;
+    CHECK(vrfire_level_matrix(&v1) == 0 && !memcmp(&v0, &v1, sizeof v0) && vrfire_level_matrix(NULL) == 0, "cañón vertical o sin matriz: no se toca");
+    {   /* umbral de verticalidad (componente horizontal del tubo > 0,2): a 80 grados de cabeceo (0,174) no hay guiñada fiable y no se toca; a 76 grados (0,242) sí se nivela */
+        for (int k = 0; k < 2; k++) {
+            const int pit = k ? 76 : 80;
+            WPose pp = {{0.1f, 1.6f, -0.2f}, {(float)sin(pit * PI / 360), 0, 0, (float)cos(pit * PI / 360)}};
+            VrFireMat a, b;
+            vrfire_make_matrix(&map, &pp, 0, &a); b = a;
+            const int r = vrfire_level_matrix(&b);
+            CHECK(k ? (r == 1 && memcmp(&a, &b, sizeof a) != 0 && b.m[5] == 4096) : (r == 0 && !memcmp(&a, &b, sizeof a)), "cabeceo %d grados: %s (devuelve %d)", pit, k ? "se nivela (hl 0,24 > 0,2)" : "no se toca (hl 0,17 <= 0,2)", r);
+        }
+    }
+
+    /* planeo de rmissile.c: el original (+320) no explota; la boca VR (0,9-1,7 m) sí explota al nacer; con el actor ya colocado no hay planeo */
+    CHECK(glide_max_dy(320, 0, 8) < VRFIRE_MIS_MAX_STEP_Y, "el original (+320 sobre los pies) no supera el paso de explosión (%d)", glide_max_dy(320, 0, 8));
+    CHECK(glide_max_dy(900, 0, 8) >= VRFIRE_MIS_MAX_STEP_Y && glide_max_dy(1700, 0, 8) >= VRFIRE_MIS_MAX_STEP_Y, "la boca VR a 0,9 y 1,7 m sobre los pies hace explotar el misil en el planeo (%d, %d)", glide_max_dy(900, 0, 8), glide_max_dy(1700, 0, 8));
+    CHECK(glide_max_dy(1700, 1700, 1) == 0, "colocado en su sitio con el contador a 1: sin planeo ni salto");
+    uint8_t *ram = calloc(1, 0x200000);
+    const uint32_t A = 0x80170000u;
+    int16_t home[3] = {-4000, 1700, 900}, start[3] = {-3000, 120, 800};
+    memcpy(ram + (A & 0x1FFFFF) + 0x100, home, 6); memcpy(ram + (A & 0x1FFFFF) + 0x20, start, 6); memcpy(ram + (A & 0x1FFFFF) + 0x108, start, 6); ram[(A & 0x1FFFFF) + 0x110] = 8;
+    VrFireMissileBirth b;
+    CHECK(vrfire_missile_settle(ram, A, &b) == 1, "actor recién creado: se coloca");
+    CHECK(b.first_dy == 790 && b.glide == 8 && b.start[1] == 120 && b.home[1] == 1700, "informe: primer paso del planeo %d (esperado 790), contador %d", b.first_dy, b.glide);
+    int16_t mov[3], prev[3]; memcpy(mov, ram + (A & 0x1FFFFF) + 0x20, 6); memcpy(prev, ram + (A & 0x1FFFFF) + 0x108, 6);
+    CHECK(!memcmp(mov, home, 6) && !memcmp(prev, home, 6) && ram[(A & 0x1FFFFF) + 0x110] == 1, "posición y posición previa = la de la matriz, contador a 1");
+    ram[(A & 0x1FFFFF) + 0x110] = 0;
+    memcpy(ram + (A & 0x1FFFFF) + 0x20, start, 6);
+    CHECK(vrfire_missile_settle(ram, A, NULL) == 0 && ram[(A & 0x1FFFFF) + 0x110] == 0, "contador 0 (actor ya en vuelo): no se toca");
+    memcpy(mov, ram + (A & 0x1FFFFF) + 0x20, 6);
+    CHECK(!memcmp(mov, start, 6), "... ni su posición");
+    ram[(A & 0x1FFFFF) + 0x110] = 100;
+    CHECK(vrfire_missile_settle(ram, A, NULL) == 0, "contador absurdo: no se toca");
+    CHECK(vrfire_missile_settle(ram, 0x00001000u, NULL) == 0 && vrfire_missile_settle(NULL, A, NULL) == 0, "puntero inválido / sin RAM: nada");
+    free(ram);
+}
+
 int main(void) {
     t_hit_zones(); t_hit_motivo(); t_hit_camera(); t_hit_floors(); t_hit_enemy(); t_hit_aim(); t_hit_fist(); t_hit_probe(); t_laser_is_bullet(); t_silencer(); t_weapon_range(); t_hit_real();
-    t_matrix(); t_single(); t_skip_raise(); t_snapshot(); t_cancel(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_throw_origin(); t_throw_origin_body(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg(); t_c4_direct();
+    t_matrix(); t_single(); t_skip_raise(); t_snapshot(); t_cancel(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_throw_origin(); t_throw_origin_body(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg(); t_c4_direct(); t_missile_birth();
     printf("test_fire: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

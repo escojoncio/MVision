@@ -59,7 +59,19 @@ typedef struct {
     float prev_grip1, prev_trig; uint32_t prev_btn0;   /* prev_trig = 1 al equipar: hay que soltar el gatillo */
     float deny_t;
     uint32_t seed;
+    int eye_prev;               /* eye_near del fotograma anterior (flanco de subida en vuelo = recentrar el guiado) */
 } GuidedState;
+
+/* Nacimiento del misil (la matriz que recibe NewRMissile): la boca del tubo (WP_MUZZLE por la pose del arma), corrida a lo largo del eje del tubo (misma dirección) hasta una distancia segura:
+ *  - de la cabeza >= GD_SPAWN_HEAD_M: si la boca queda más cerca (arma pegada a la cara o al cuerpo) se adelanta hasta esa distancia;
+ *  - de cualquier pared >= GD_SPAWN_WALL_M (rmissile.c, rmissile_act_helper_8006C114: HZD_NearHazardCheck(pos, 250, ...) explota con una pared a menos de 0,25 m, y el cuerpo de colisión del misil tiene radio 0,2 m: GM_ConfigControlHazard(400, 200, 200)):
+ *    si la boca queda a menos, se retrasa por el propio tubo (a una pared por delante no se la puede acercar) hasta el primer punto libre, como mucho GD_SPAWN_MAX_SHIFT.
+ * wall_m(user, p) = distancia (m) de p a la pared de colisión más cercana (< 0 o NULL: sin dato / sin pared: no se corrige por pared). Sin corrección posible devuelve la boca tal cual. info (opcional) rellena lo medido. */
+#define GD_SPAWN_HEAD_M    0.45f
+#define GD_SPAWN_WALL_M    0.30f
+#define GD_SPAWN_MAX_SHIFT 0.60f
+typedef struct { float head0_m, wall0_m, head_m, wall_m, shift_m; int moved; } GuidedSpawnInfo;
+WPose guided_spawn_pose(WPose muzzle, WVec3 head, float (*wall_m)(void *user, WVec3 p), void *user, GuidedSpawnInfo *info);
 
 /* Entrada alternativa de guiado (el contrato WInput no trae ejes de stick). */
 void guided_set_stick(WeaponState *s, float x, float y);
