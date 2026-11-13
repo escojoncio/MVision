@@ -295,6 +295,7 @@ void mv_vrgame_calibrate_hands(float delay_s) { (void)delay_s; }
 float mv_vrgame_calibration_countdown(void) { return 0.0f; }
 void mv_vrgame_clear_hand_calibration(void) {}
 int32_t mv_vrgame_hand_calibration(int32_t side, float q[4]) { (void)side; (void)q; return 0; }
+int32_t mv_vrgame_arm_length(int32_t side, float *len_m) { (void)side; (void)len_m; return 0; }
 void mv_vrhost_set_ai_range(float scale) { (void)scale; }
 void mv_vrhost_set_ai_head(int on) { (void)on; }
 void mv_vrhost_set_hands_new(int on) { (void)on; }

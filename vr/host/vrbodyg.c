@@ -141,7 +141,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, cons
                 }
             }
         }
-        in.weapon = bs->weapon; in.item_scope = bs->item == 1; /* IT_Scope */ in.stance = bs->stance; in.on_wall = bs->on_wall; in.in_box = bs->in_box; in.in_water = bs->in_water;
+        in.weapon = bs->weapon; in.item_scope = bs->item == 1; /* IT_Scope */ in.face_view = in.item_scope || vrcam_zoom_capped(); /* mira del juego / vista especial levantada: la zona del pecho no actúa */ { const int wm = vrgame_weld_main(); if (wm >= 0) in.ring_off[wm] = 1; } /* arma de dos manos soldada: la mano del gatillo no tiene anillo de anticipación (un fusil al hombro cae dentro) */ in.stance = bs->stance; in.on_wall = bs->on_wall; in.in_box = bs->in_box; in.in_water = bs->in_water;
         in.holding = act_holds(bs->player_action); in.life = bs->life;
         in.body[0] = bs->ctl_pos.x * 0.001f; in.body[1] = bs->ctl_pos.y * 0.001f; in.body[2] = bs->ctl_pos.z * 0.001f;
         in.yaw = (float)bs->ctl_rot.y * (6.2831853f / 4096.0f);

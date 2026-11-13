@@ -28,7 +28,7 @@ static struct {
 
 void vraa_cfg_default(VrAaCfg *c) {
     memset(c, 0, sizeof *c);
-    c->enter_m = 0.20f; c->leave_m = 0.30f; c->axis_deg = 40.0f; c->sight_back_m = 0.10f; c->on_vbl = 3; c->h_scale = 1.0f;
+    c->enter_m = 0.30f; c->leave_m = 0.42f; c->axis_deg = 40.0f; c->sight_back_m = 0.0f; c->on_vbl = 3; c->h_scale = 1.0f;
 }
 void vraa_init(const VrAaCfg *c) {
     memset(&S, 0, sizeof S);
@@ -63,7 +63,7 @@ int vraa_gesture(const WPose *head, const WPose *sight, int equipped) {
     if (equipped && head && sight && finite_pose(head) && finite_pose(sight)) {
         float hf[3], hu[3], sf[3], su[3];
         if (pose_axes(head, hf, hu) && pose_axes(sight, sf, su)) {
-            /* el ojo se apoya detrás del punto del visor, sobre el eje del tubo */
+            /* el ojo se apoya detrás del punto de referencia (la cara de la pantalla LED; sight_back_m = 0), sobre el eje del tubo */
             float rear[3] = {sight->p.x - sf[0] * S.cfg.sight_back_m, sight->p.y - sf[1] * S.cfg.sight_back_m, sight->p.z - sf[2] * S.cfg.sight_back_m};
             float dx = head->p.x - rear[0], dy = head->p.y - rear[1], dz = head->p.z - rear[2];
             float d = sqrtf(dx * dx + dy * dy + dz * dz);

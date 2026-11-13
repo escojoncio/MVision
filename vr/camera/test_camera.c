@@ -1047,7 +1047,45 @@ static void test_event_dumps(void) {
     if (!loaded) printf("(volcados del ascensor no encontrados en %s: sin prueba con datos reales)\n", root);
 }
 
+/* C4: colocar la carga hace que el juego reproduzca la animacion de colocar (cuerpo a ras de suelo, ojo 1420 -> ~700 uds en el registro [ojo] del 13-11) como animacion de SUPERPOSICION
+ * (OBJECT.action2 = 49 de pie / 54 agachado, tabla C4Attack de la edicion europea medida en RAM en 0x8009FEF8+4), sin cambiar de postura (sin banderas SQUAT/GROUND). La cabeza VR no sigue
+ * esa caida (la mano pone la carga; el usuario no se agacha) y la altura de pie aprendida no se corrompe. Con otra arma o sin la animacion, la cabeza sigue a la articulacion como siempre. */
+static void test_c4_plant(void) {
+    VrCamConfig c; BridgeState s; VrCamPlan p;
+    anchor_start(&c, &s);
+    const int yst = 1029, jy_stand = 468, jy_low = 100;
+    for (int k = 0; k < 25; k++) anchor_tick(&s, 1000, yst, 10, jy_stand, 20, 0, &p);
+    const float stand_y = p.from[1];
+    NEAR(stand_y, yst + jy_stand + c.eye_up, 3.0);
+    for (int act = 49; act <= 54; act += 5) {
+        w16(BA_VARS + 2u * BRIDGE_V_WEAPON, 6);
+        w16(BODY + 16, (int16_t)act);
+        float worst = 0.0f;
+        for (int k = 0; k < 60; k++) {                           /* la articulacion baja a ras de suelo en 0,4 s y se queda ahi 1 s */
+            int jy = k < 10 ? jy_stand - (jy_stand - jy_low) * (k + 1) / 10 : jy_low;
+            anchor_tick(&s, 1000, yst, 10, jy, 20, 0, &p);
+            float d = fabsf(p.from[1] - stand_y);
+            if (d > worst) worst = d;
+        }
+        printf("C4 colocando (accion %d): mayor desvio del ojo %.1f uds\n", act, (double)worst);
+        CHECK(worst <= 3.0f);
+        w16(BODY + 16, 0);                                        /* acaba la animacion: la articulacion vuelve */
+        for (int k = 0; k < 25; k++) anchor_tick(&s, 1000, yst, 10, jy_stand, 20, 0, &p);
+        NEAR(p.from[1], stand_y, 3.0);
+        for (int k = 0; k < 60; k++) anchor_tick(&s, 1000 + 4 * (k + 1), yst, 10, jy_stand + (k & 1 ? 30 : -30), 20, BRIDGE_PS_MOVE, &p);   /* andando: usa la altura aprendida de pie */
+        NEAR(p.from[1], stand_y, 6.0);
+        for (int k = 0; k < 25; k++) anchor_tick(&s, 1000 + 4 * 60, yst, 10, jy_stand, 20, 0, &p);
+    }
+    /* otra arma con la misma animacion de superposicion: no es la carga, la cabeza sigue a la articulacion */
+    w16(BA_VARS + 2u * BRIDGE_V_WEAPON, 0);
+    w16(BODY + 16, 49);
+    for (int k = 0; k < 40; k++) anchor_tick(&s, 1000 + 4 * 60, yst, 10, jy_low, 20, 0, &p);
+    NEAR(p.from[1], yst + jy_low + c.eye_up, 4.0);
+    w16(BODY + 16, 0);
+}
+
 int main(void) {
+    test_c4_plant();
     test_psg1_stance();
     test_angles();
     test_patch();

@@ -311,7 +311,7 @@ static int aa_hull(float (*pt)[2], int n, float (*h)[2]) {
 }
 
 int aa_sight_face(const WeaponState *s, AaSightFace *out) {
-    if (!s || !out || s->def != &w_aa) return 0;
+    if (!s || !out || !s->def || s->def->game_weapon_id != w_aa.game_weapon_id) return 0;   /* el anfitrion enlaza una COPIA de la definicion (vrgame.c): se compara el id, no la direccion */
     int np = 0, ni;
     const WPart *parts = weapon_parts(s, &np);
     const WMesh *meshes = weapon_meshes(s, &ni);
@@ -378,4 +378,14 @@ int aa_led_face(const WeaponState *s, WScreenFace *out) {
     out->face.q = q;
     out->w = ow; out->h = oh;
     return 1;
+}
+
+WPose aa_gesture_point(const WeaponState *s) {
+    WPose p;
+    WScreenFace lf;
+    memset(&p, 0, sizeof p);
+    p.q.w = 1.0f;
+    if (s && aa_led_face(s, &lf)) p.p = lf.face.p;
+    else p.p = v3(AA_LED_NOMINAL_X, AA_LED_NOMINAL_Y, AA_LED_NOMINAL_Z);
+    return p;
 }

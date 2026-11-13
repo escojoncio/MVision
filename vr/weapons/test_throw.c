@@ -121,6 +121,60 @@ static void do_throw(Rig *r, float t_det, WVec3 *tv, WVec3 *tw) {
     r->in.trigger[0] = 0.1f; r->in.hand[0] = traj((n + 2) * dt); step(r, 1);
 }
 
+/* Gatillo lento: la mano frena justo tras empezar a soltar y el soltar (0,7 -> 0,4) tarda 0,2 s; la velocidad que vale es la del pico (log 13-11: lanzadas medidas a 0,2-2 m/s, caian a los pies) */
+static void test_throw_slow_release(void) {
+    mock_reset(3);
+    Rig r = rig_new(&w_throw_frag, WR_MANUAL);
+    const float vpk = 8.0f, dt = 0.02f;
+    r.in.dt = dt;
+    float x = 0, t = 0;
+    r.in.trigger[0] = 0; step(&r, 3);
+    r.in.trigger[0] = 1; step(&r, 3);
+    for (int i = 0; i < 40 && M.nev == 0; i++) {
+        t += dt;
+        float v = t < 0.30f ? vpk * t / 0.30f : fmaxf(0.0f, vpk * (1.0f - (t - 0.30f) / 0.10f));
+        x += v * dt;
+        r.in.hand[0].p = wv(0.25f, 1.0f, -0.3f - x);
+        r.in.trigger[0] = t < 0.30f ? 1.0f : (t < 0.30f + 0.2f ? 0.6f : 0.1f);      /* empieza a soltar en el pico y no cruza 0,4 hasta 0,2 s despues */
+        step(&r, 1);
+    }
+    CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW, "gatillo lento: lanza");
+    if (M.nev) { printf("  gatillo lento: %.2f m/s (pico %.1f)\n", (double)wv_len(M.ev[0].lin_vel), (double)vpk); CHECK(wv_len(M.ev[0].lin_vel) >= 0.85f * vpk, "gatillo lento: velocidad %.2f < 85 %% del pico", (double)wv_len(M.ev[0].lin_vel)); }
+    free(r.s);
+}
+
+/* Gatillo lento tras un amago hacia atrás: la mano va hacia atrás rápido (preparar el brazo), invierte justo antes de empezar a soltar el gatillo y avanza despacio. La ventana lenta (hasta V_LAG_SLOW antes) ve el
+ * amago (más rápido que la ventana corta pero en sentido contrario); no debe ganar por |v| sin mirar la dirección: la granada saldría hacia atrás. Solo vale si apunta a menos de ~60 grados de la ventana corta o del frente de la mano. */
+static float slow_dir_run(float back_speed, float fwd_speed, float t_rev) {
+    mock_reset(3);
+    Rig r = rig_new(&w_throw_frag, WR_MANUAL);
+    const float dt = 0.02f;
+    r.in.dt = dt;
+    float z = 0, t = 0, vz = 0;
+    r.in.trigger[0] = 0; step(&r, 3);
+    r.in.trigger[0] = 1; step(&r, 3);
+    for (int i = 0; i < 80 && M.nev == 0; i++) {
+        t += dt;
+        const float v = t < t_rev ? back_speed : -fwd_speed;           /* +Z = hacia atrás (el frente de la mano es -Z) */
+        z += v * dt;
+        r.in.hand[0].p = wv(0.25f, 1.0f, -0.3f + z);
+        r.in.trigger[0] = t < 0.45f ? 1.0f : (t < 0.45f + 0.2f ? 0.6f : 0.1f);
+        step(&r, 1);
+    }
+    CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW, "gatillo lento tras un amago: lanza");
+    if (M.nev) vz = M.ev[0].lin_vel.z;
+    free(r.s);
+    return vz;
+}
+static void test_throw_slow_release_direction(void) {
+    printf("-- arrojadiza: gatillo lento tras un amago hacia atrás --\n");
+    const float vz = slow_dir_run(6.0f, 1.5f, 0.46f);
+    printf("  amago atrás 6 m/s, avance 1,5 m/s: vz = %.2f\n", (double)vz);
+    CHECK(vz < 0.0f, "gatillo lento: la granada sale hacia delante, no hacia el amago (vz %.2f)", (double)vz);
+    const float vz2 = slow_dir_run(1.0f, 6.0f, 0.30f);                    /* sin amago contrario: la ventana lenta más rápida sigue ganando (el lanzamiento fuerte antes de frenar) */
+    CHECK(vz2 < -3.0f, "gatillo lento sin amago: sigue ganando la ventana rápida del pico (vz %.2f)", (double)vz2);
+}
+
 static void test_throw_flow(void) {
     printf("-- arrojadiza: flujo con el gatillo --\n");
     mock_reset(3);
@@ -493,6 +547,8 @@ static void test_defs(void) {
 int main(void) {
     test_estimator();
     test_throw_flow();
+    test_throw_slow_release();
+    test_throw_slow_release_direction();
     test_gentle();
     test_proportional();
     test_carga();

@@ -623,7 +623,7 @@ void guided_draw_overlay(const WeaponState *s, uint32_t *rgba, int w, int h) {
 }
 
 int guided_led_face(const WeaponState *s, WScreenFace *out) {
-    if (!s || !out || s->def != &w_guided) return 0;
+    if (!s || !out || !s->def || s->def->game_weapon_id != w_guided.game_weapon_id) return 0;   /* el anfitrion enlaza una COPIA de la definicion (vrgame.c): se compara el id, no la direccion */
     int np = 0, ni = 0;
     const WPart *parts = weapon_parts(s, &np);
     const WMesh *meshes = weapon_meshes(s, &ni);

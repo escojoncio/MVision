@@ -101,6 +101,12 @@ static inline int ptr_ok(uint32_t p, uint32_t len) {
 #define VC_OBJ_BOUND    0x4C
 #define VC_OBJ_WORLD_T  0x14
 #define VC_HEAD_PART    6
+/* Colocar la carga adhesiva (arma 6): el juego (sna_80057378) reproduce la animacion de colocar como SUPERPOSICION (OBJECT.action2, +16 del objeto animado) sin cambiar de postura:
+ * attack->field_6 = 49 de pie, field_7 = 54 agachado (tabla C4Attack de la edicion europea, medida en RAM en 0x8009FEF8+4). */
+#define VC_OBJ_ACTION2  16
+#define VC_WEAPON_C4    6
+#define VC_C4_PLANT_A   49
+#define VC_C4_PLANT_B   54
 #define VC_CAM_CB0      0x74u    /* GM_Camera.callback[0] (la [1] es BCAM_EVENT_FN = 0x78) */
 #define VC_MAX_MODELS   64
 
@@ -213,7 +219,7 @@ static void hzd_log(float moved_u, float upm) {
 }
 
 /* ============================================ lectura del estado del juego ============================================ */
-typedef struct { int ok; int32_t eye_x, eye_z; float body_yaw; int post, move, follow, wall, fp; int psg; int joint; int32_t jx, jy, jz; int32_t bx, by, bz, floor; } Body;
+typedef struct { int ok; int32_t eye_x, eye_z; float body_yaw; int post, move, follow, wall, fp; int psg; int plant; int joint; int32_t jx, jy, jz; int32_t bx, by, bz, floor; } Body;
 
 static Body read_body(const uint8_t *ram) {
     Body b = {0};
@@ -225,6 +231,10 @@ static Body read_body(const uint8_t *ram) {
     b.wall = (status & BRIDGE_PS_WALL) != 0;                              /* pegado a la pared */
     b.fp = (status & (BRIDGE_PS_WATCH | BRIDGE_PS_WATCH_PEEK)) != 0;      /* primera persona del propio juego */
     b.follow = (status & (BRIDGE_PS_DOWNED | BRIDGE_PS_DAMAGED)) != 0;   /* derribado / recibiendo un golpe: no es una postura, la cabeza va donde la lleve la animación */
+    if (ptr_ok(ob, VC_OBJ_ACTION2 + 2) && rd_s16(ram, BA_VARS + 2u * BRIDGE_V_WEAPON) == VC_WEAPON_C4) {
+        const int16_t a2 = rd_s16(ram, ob + VC_OBJ_ACTION2);
+        b.plant = a2 == VC_C4_PLANT_A || a2 == VC_C4_PLANT_B;
+    }
     int have_ctl = ptr_ok(ctl, BC_SIZE);
     int16_t mx = 0, my = 0, mz = 0;
     if (have_ctl) {
@@ -393,7 +403,10 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
     if (snap) S.ey = (float)b.jy;
     else {
         float target = (float)b.jy;
-        if ((dr[0] || dr[2] || b.move) && !b.follow) {
+        if (b.plant) {              /* colocando la carga: la animacion del juego agacha el cuerpo, pero la mano pone la carga y la cabeza VR no baja; ni se aprende esa altura */
+            if (abs(dr[1]) <= 200) S.ey += (float)dr[1];
+            target = S.ey;
+        } else if ((dr[0] || dr[2] || b.move) && !b.follow) {
             if (abs(dr[1]) <= 200) S.ey += (float)dr[1];
             target = (float)b.by + S.nh[b.post];
         } else if (b.joint && !b.follow && !b.psg) S.nh[b.post] += (1.0f - expf(-dt / 0.16f)) * ((float)(b.jy - b.by) - S.nh[b.post]);

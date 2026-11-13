@@ -145,8 +145,8 @@ final class NativeRenderer {
     static let maxSemiTris = 1 << 17
     static let maxStaticTris = 1 << 21
     static let sortHeadThreshold: Float = 0.03     // m: la cabeza debe moverse más que esto para reordenar los semitransparentes
-    /// Filtro de texturas 3D (ajuste «Filtro de texturas 3D» de XRPresent; clave xr.view.tex3d): true = MMPX (ns_mmpx de NativeShaders.metal, vía NsGpuUniforms.misc.w), false = sin filtro. En vivo, sin recrear pipelines.
-    static var tex3DMMPX = true
+    /// Filtro de texturas 3D: true = MMPX (ns_mmpx de NativeShaders.metal, vía NsGpuUniforms.misc.w), false = sin filtro. Siempre apagado en la app (sin ajuste en el menú ni valor guardado); solo los bancos lo tocan.
+    static var tex3DMMPX = false
     private let device: MTLDevice
     private let library: MTLLibrary
     private let ringSize: Int

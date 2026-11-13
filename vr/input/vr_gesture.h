@@ -32,7 +32,6 @@ typedef struct {
     int enable;              /* 0: el módulo no hace nada (modo botón) */
     int fist_required;       /* 1 (defecto): el golpe solo cuenta con la mano en PUÑO (agarre cerrado con histéresis grip_on/off); 0 = como antes (el puño es indiferente) */
     float fist_haptic;       /* háptico suave al cerrar el puño con las manos libres (0,12); 0 = ninguno */
-    float item_hold_s;       /* con manos libres los grips NO llegan al juego (solo cierran el puño): mantener el clic del stick de cada mano este tiempo (0,35 s) emite R1 (dominante) / L1 (la otra) = ventana de objetos / armas */
     float punch_dir_cos;     /* el golpe exige que la velocidad RELATIVA A LA CABEZA vaya al menos este coseno hacia delante Y radialmente hacia fuera de la cabeza (0,5 = dentro de 60 grados): un gesto lateral o girar el cuerpo no valen */
     float trig_on, trig_off; /* histéresis del gatillo (0,6 / 0,3) */
     int punch, grab, knock, peek;   /* conmutadores por gesto (1 activo) */
@@ -50,7 +49,8 @@ typedef struct {
     float grab_range;        /* distancia máxima cuerpo-enemigo para agarrar (1,3 m) */
     float neck_radius;       /* radio de la mano al cuello o a la espalda del enemigo para agarrar (0,30 m) */
     float back_dist;         /* la espalda: punto a esta distancia (0,25 m) detrás del enemigo, a 0,2 m de altura */
-    float chest_side, chest_down, chest_fwd, chest_radius, chest_exit;   /* zonas de menú (m), UNA POR MANO, fijas respecto a la cabeza en el marco FÍSICO (metros reales, delante = head_fwd, hrel de la mano; sin escala del motor ni rumbo del personaje): la mano izquierda (objetos, L2) a su lado izquierdo y la derecha (armas, R2) al derecho; lateral 0,16 hacia cada lado, 0,26 bajo la cabeza, delante -0,02, radio 0,15 para entrar y chest_exit 0,20 para seguir dentro (histéresis), medidas en el registro del visor con las manos donde el usuario pulsó */
+    float chest_side, chest_down, chest_fwd, chest_radius, chest_exit;   /* zonas de menú (m), UNA POR MANO, fijas respecto a la cabeza en el marco FÍSICO (metros reales, delante = head_fwd, hrel de la mano; sin escala del motor ni rumbo del personaje): la mano izquierda (objetos, L2) a su lado izquierdo y la derecha (armas, R2) al derecho; lateral 0,16 hacia cada lado, 0,305 bajo la cabeza, delante +0,005, radio 0,175 para entrar y chest_exit 0,225 para seguir dentro (histéresis); antes 0,26 / -0,02 / 0,15 / 0,20. Borde superior = chest_radius - chest_down = 0,13 m bajo la cabeza (antes 0,11): ni la histéresis ni el anillo suben de ahí. Crece 5 cm hacia delante (0,13 -> 0,18), ~2,5 cm a los lados, 7 cm hacia abajo (0,41 -> 0,48); detrás igual (0,17). Medidas en el registro del visor con las manos donde el usuario pulsó */
+    float face_radius;       /* mano a esta distancia (0,15 m) del ojo o menos: está en la cara (apuntando con PSG1, prismáticos, lanzador...), la zona del pecho no bloquea ni abre menús */
     float chest_hold_s;      /* gatillo de la mano (L2 izquierda, R2 derecha) mantenido sin interrupción dentro de SU zona este tiempo (0,30 s) para abrir la ventana; salir de la zona o soltar lo reinicia. Dentro de la zona el gatillo no llega al juego (mask) */
     float grab_after_punch_s;/* sin agarres tras un golpe durante este tiempo (0,3 s) */
     float neck_height;       /* altura del cuello sobre la posición del enemigo (0,45 m, posición del motor = cintura) */
@@ -89,12 +89,14 @@ typedef struct {
     float wall_ny[2];        /* |componente vertical de la normal| de esa superficie junto a la mano (0 = pared vertical, 1 = suelo/techo) */
     int tracked[2];          /* 0 = izquierda física, 1 = derecha física */
     double hand_time[2];     /* instante (s, reloj monótono) de la pose de cada mano; <= 0: sin marca (se usa dt por llamada). Repetir la marca = misma muestra */
-    int throw_hold;          /* arrojadiza VR (granada, aturdidora, chaff) en la mano del arma, sin preparar o preparada: su gatillo la prepara/lanza y NO abre la ventana de armas del pecho */
-    int item_scope;          /* prismáticos equipados (objeto IT_Scope, sin arma): en el original ○ es el zoom y no hay golpe, agarre ni toque; aquí tampoco (las ventanas por clic de stick siguen) */
+    int throw_hold;          /* arrojadiza VR (granada, aturdidora, chaff) en la mano del arma, sin preparar o preparada: solo impide los golpes y agarres; en la zona del pecho su gatillo se bloquea y abre la ventana como el de cualquier arma */
+    int face_view;           /* el juego tiene una mira o vista especial levantada (PSG1 con la mira, prismáticos, gafas: vrcam_zoom_capped o item_scope): la zona del pecho no actúa en la mano que la sostiene (la dominante); la otra mano sigue pudiendo abrir menús en el pecho */
+    int ring_off[2];         /* por mano física: el anillo de anticipación del bloqueo de disparo (chest_exit) no actúa. Arma de dos manos soldada: la mano del gatillo (un fusil al hombro queda dentro del anillo); la zona en sí se mantiene */
+    int item_scope;          /* prismáticos equipados (objeto IT_Scope, sin arma): en el original ○ es el zoom y no hay golpe, agarre ni toque; aquí tampoco */
     int weapon_busy;         /* arma VR mostrada o maniobra de recarga en curso (el juego desequipa el arma un instante al recargar) */
     float hand[2][3], grip[2];   /* mano en el mundo (cercanía a enemigos); grip = agarre (puño), NO decide el agarre del enemigo */
     float trig[2];           /* gatillo analógico por mano física */
-    int stick_dom, stick_off; /* clic del stick de la mano dominante / de la otra (R3 / L3 del mando del juego) */
+    int stick_dom, stick_off; /* clic del stick de la mano dominante / de la otra (R3 / L3 del mando del juego); informativo: mantenerlo NO abre ninguna ventana */
     int fist_btn[2];         /* botón del puño pulsado por mano física (R1 de la dominante / L1 de la otra, ya mapeados): ESTO decide puño y agarre; el grip analógico solo es la pose */
     int cap_valid;           /* el anfitrión aporta el contacto del puño con las cápsulas por pieza de los enemigos (vr/gameplay/vr_hit): sustituye al cilindro body_radius */
     int cap_zone[2];         /* con cap_valid: zona que toca el puño de cada mano en este VBlank (0 ninguna, 1 cabeza, 2 cuerpo, 3 extremidad) */
@@ -120,6 +122,7 @@ typedef struct {
     int grab_start;          /* 1: lanzar el agarre del motor este VBlank (mano grab_side, enemigo grab_en) */
     int grab_hold;           /* 1: el botón del puño sigue pulsado durante el agarre (mantiene el agarre del motor) */
     int chest_in[2];         /* la mano física está dentro de SU zona de menú (con histéresis chest_radius/chest_exit) en este VBlank; 0 si el módulo no actúa */
+    int chest_ring[2];       /* la mano física está a chest_exit o menos del centro de SU zona (anillo de anticipación del bloqueo de disparo); 0 si el módulo no actúa */
     int menu_open[2];        /* ventana abierta por la mano física (0 objetos/L2, 1 armas/R2) mientras se mantiene el gatillo; vrg_out.press ya lleva L2/R2 */
     int knock_side;          /* -1 nada; 0/1: llamar con los nudillos (acción del motor) con esa mano */
     const char *knock_why;   /* motivo del último intento de toque de este VBlank ("ok", "lento", "mano_quieta", "sin_puno", "postura", "no_vertical", "enfriamiento", "enemigo", "lejos_de_la_pared"...) */
@@ -145,6 +148,7 @@ typedef struct {
     float cool;
     float since_punch;       /* s desde el último golpe */
     int near_prev[2];
+    int ring_pend[2];        /* pulsación NUEVA hecha en el anillo (disparo bloqueado, zona aún no alcanzada): si la mano entra en la zona con el gatillo aún apretado, el intento de abrir el menú sigue sin pulsar de nuevo */
     int menu_hold, chest_prev[2], chest_live[2];   /* chest_live: intento en curso (gatillo apretado dentro de la zona) */
     int fb[2];               /* bloqueo de disparo por mano física (VRG_FB_*): lo calcula vrg_step_pad; vrg_fire_gate lo aplica al gatillo */
     float fb_last[2];        /* último gatillo físico visto con la mano libre de bloqueo (el que sigue viendo el arma mientras dura) */
@@ -170,7 +174,6 @@ typedef struct {
     float gest_tokens;       /* cupo de registros [gest] (10 por segundo) */
     int swing[2];            /* movimiento casi rápido en curso por mano (histéresis del registro) */
     float fist_hap_cool[2];  /* s hasta el próximo háptico de cierre de puño por mano (evita el temblor con el grip en el umbral) */
-    float item_t[2];         /* s con el clic de stick mantenido (dominante, otra) */
     vrg_gest_t gpk[2];       /* mejor registro del movimiento en curso por mano (se emite al terminar) */
     float prev_head[3], prev_fwd[2]; int have_head;
     float prev_hand[2][3]; int prev_hand_ok[2];   /* mano (mundo) del VBlank anterior: barrido continuo contra la cápsula del enemigo */
@@ -198,8 +201,8 @@ typedef struct {
 uint16_t vrg_step_pad(vrg_t *g, const vrg_in_t *in, vrg_out_t *out, const vrg_pad_t *p);
 
 /* Bloqueo de disparo en la zona de menú. Desde que la mano entra en SU zona (mismo umbral que el háptico de aviso: chest_radius para entrar, chest_exit > chest_radius para salir)
- * y mientras tenga la ventana abierta, su gatillo NO es del arma (ni dispara, ni prepara, ni lanza, ni detona); al salir de la zona con el gatillo aún apretado sigue bloqueado hasta soltarlo
- * (trig <= trig_off): hace falta una pulsación nueva. vrg_step_pad lo actualiza una vez por VBlank. */
+ * y mientras tenga la ventana abierta (o haya cualquier menú de armas/objetos abierto: vrg_pad_t.menu_open), su gatillo NO es del arma (ni dispara, ni prepara, ni lanza, ni detona; también con una arrojadiza en la mano);
+ * al salir de la zona con el gatillo aún apretado sigue bloqueado hasta soltarlo (trig <= trig_off): hace falta una pulsación nueva. Una pulsación NUEVA con la mano a chest_exit o menos de la zona (llegando al pecho) también se bloquea hasta soltarla. vrg_step_pad lo actualiza una vez por VBlank. */
 enum { VRG_FB_NONE = 0, VRG_FB_ZONE = 1, VRG_FB_WINDOW = 2, VRG_FB_RELEASE = 3 };
 const char *vrg_fire_block_name(int why);          /* "zona", "ventana", "soltar_gatillo"; "ninguno" con VRG_FB_NONE */
 /* Gatillo que debe ver el arma de la mano física `side`: el real, o con bloqueo el último visto antes de empezar (el arma no ve flancos, ni sube ni baja: así una granada preparada no se lanza ni

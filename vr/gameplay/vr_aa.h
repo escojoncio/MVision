@@ -28,10 +28,10 @@ extern "C" {
 
 /* ---- gesto del visor ---- */
 typedef struct VrAaCfg {
-    float enter_m;       /* distancia ojo-visor para entrar (m) (defecto 0,20) */
-    float leave_m;       /* distancia para salir (m) (defecto 0,30) */
+    float enter_m;       /* distancia cabeza-cara de la pantalla LED para entrar (m) (defecto 0,30: a esa distancia la LED, ~90 x 74 mm, abarca ~17 grados y se lee; con el brazo estirado, 0,6 m o más, no entra) */
+    float leave_m;       /* distancia para salir (m) (defecto 0,42: 0,12 m de histéresis, por encima del temblor de la cabeza) */
     float axis_deg;      /* ángulo máximo entre el eje del tubo y la mirada para entrar (defecto 40) */
-    float sight_back_m;  /* el ojo apoya a esta distancia por detrás del punto del visor, sobre el eje (defecto 0,10) */
+    float sight_back_m;  /* el ojo apoya a esta distancia por detrás del punto de referencia, sobre el eje (defecto 0: la referencia es la propia cara de la LED) */
     int   on_vbl;        /* VBlanks seguidos cumpliendo la condición antes de entrar (defecto 3) */
     float h_scale;       /* H original del juego / H del motor con la cámara VR (= 320 / engine_h; 1 sin cámara VR): el visor
                           * usa la H del juego para que su campo y la ventana del buscador sean los del original */
@@ -44,7 +44,7 @@ void vraa_set_h_scale(float k);
 const VrAaCfg *vraa_config(void);
 
 /* Una vez por VBlank. head: pose de la cabeza (espacio de usuario); sight: pose del punto del visor del lanzador
- * (WP_EYE en mundo de usuario; delante = -Z local). equipped: el lanzador VR está empuñado y puede apuntar.
+ * (cara de la pantalla LED con la orientación del arma, aa_gesture_pose; delante = -Z local = eje del tubo). equipped: el lanzador VR está empuñado y puede apuntar.
  * Devuelve 1 si el jugador mira por el visor (con histéresis). */
 int vraa_gesture(const WPose *head, const WPose *sight, int equipped);
 int vraa_aiming(void);

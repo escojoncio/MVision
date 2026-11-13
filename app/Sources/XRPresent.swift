@@ -30,7 +30,6 @@ struct XRViewConfig {
     var integerScale = false        // ajusta el ancho para que cada texel ocupe un número entero de píxeles del visor
     var filter2D = 0                // filtro de píxel art del 2D (XR2DFilter): 0 MMPX, 1 xBR, 2 nítido, 3 sin filtro; se aplica al reabrir la vista (XR2DFilter.reload)
     var exact2D = true              // composición de la capa 2D sobre el mundo como la GPU original (XR2DCompose.framebufferFetch)
-    var tex3D = true                // filtro de texturas del mundo 3D (render nativo): true = MMPX (por subtexel en el sombreador), false = sin filtro; en vivo (NativeRenderer.tex3DMMPX)
     var cutscene: Cutscene = .stereo // cinemáticas del motor: pantalla de cine 3D estéreo con profundidad real (defecto), la misma en mono (sin profundidad), pantalla de cine plana, diorama o dentro de la escena
     var dioramaScale: Float = 0.15  // metros por metro del motor (0,15: una sala de 8 m cabe en ~1,2 m)
     var hudPanels = true
@@ -85,9 +84,7 @@ struct XRViewConfig {
         ns_gpu_engine_set_off(m)
 #endif
     }
-    /// Filtro de texturas del mundo 3D: MMPX o sin filtro (NativeRenderer lo lee en cada dibujo, uniforme NsGpuUniforms.misc.w). Idempotente; se llama al arrancar y tras cada cambio del menú.
-    static func applyTex3D(_ mmpx: Bool) { NativeRenderer.tex3DMMPX = mmpx }
-    static func applyStoredAI() { let c = load(); applyAI(range: c.aiRange, head: c.aiHead); applyHands(c.newHands); applyDiscards(behind: c.engBehind, size: c.engSize, back: c.engBack, split: c.engSplit); applyTex3D(c.tex3D) }
+    static func applyStoredAI() { let c = load(); applyAI(range: c.aiRange, head: c.aiHead); applyHands(c.newHands); applyDiscards(behind: c.engBehind, size: c.engSize, back: c.engBack, split: c.engSplit) }
 
     private static func f(_ k: String, _ d: Float, _ lo: Float, _ hi: Float) -> Float {
         guard UserDefaults.standard.object(forKey: k) != nil else { return d }
@@ -108,7 +105,6 @@ struct XRViewConfig {
         c.integerScale = b("xr.view.integer", false)
         c.filter2D = XR2DFilter.storedIndex
         c.exact2D = b(XR2DCompose.key, true)
-        c.tex3D = b("xr.view.tex3d", true)
         let s2 = UserDefaults.standard.integer(forKey: "xr.view.smooth2d2")   // clave nueva: el defecto pasó de «nítido» a «original» (el texto no se deforma)
         c.smooth2D = UserDefaults.standard.object(forKey: "xr.view.smooth2d2") == nil ? 0 : min(max(s2, 0), 2)
         // El defecto es la pantalla de cine 3D estéreo (IPD real, profundidad). Un «screen» (mono, sin profundidad) guardado por el defecto anterior migra a «stereo» UNA sola vez (clave de marca);
@@ -155,7 +151,6 @@ struct XRViewConfig {
         d.set(integerScale, forKey: "xr.view.integer")
         d.set(filter2D, forKey: XR2DFilter.key)
         d.set(exact2D, forKey: XR2DCompose.key)
-        d.set(tex3D, forKey: "xr.view.tex3d")
         d.set(smooth2D, forKey: "xr.view.smooth2d2")
         d.set(cutscene.rawValue, forKey: "xr.view.cutscene3")
         d.set(Double(dioramaScale), forKey: "xr.view.dioramaScale")
@@ -309,7 +304,7 @@ struct XRNav: Equatable {
 }
 
 enum XRMenuItem: Int, CaseIterable {
-    case resume, recenter, calibrateHands, width, distance, follow2D, curve, sharp, integerScale, smooth2D, filter2D, tex3D, exact2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, newHands, engBehind, engSize, engBack, engSplit, debugAxes, aiMenu, diagnostics, exit
+    case resume, recenter, calibrateHands, width, distance, follow2D, curve, sharp, smooth2D, filter2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, newHands, aiMenu, diagnostics, exit
 }
 
 /// Submenú «IA de enemigos».
@@ -319,7 +314,7 @@ enum XRAIItem: Int, CaseIterable {
 
 /// Submenú «Diagnóstico» (interruptores en vivo de XRDiag).
 enum XRDiagItem: Int, CaseIterable {
-    case back, reset, magenta, split, rateMap, msaa1, noLayers, nearPlane, projection, noZTest, fillDepth, flatDepth, giveWeapons
+    case back, reset, magenta, split, rateMap, msaa1, noLayers, nearPlane, projection, noZTest, fillDepth, flatDepth, engBehind, engSize, engBack, engSplit, exact2D, integerScale, debugAxes, giveWeapons
 }
 
 final class XRPresenter {
@@ -389,7 +384,7 @@ final class XRPresenter {
     var onRecenter: (() -> Void)?
     var onExit: (() -> Void)?
 
-    private static let menuW = 1024, menuH = 1460     // 32 filas de 40 px desde y = 106 (la última acaba en 1386) + pie de ayuda en y = menuH - 56 = 1404
+    private static let menuW = 1024, menuH = 1140     // 24 filas de 40 px (la página más larga: el menú principal con troceo 2D) desde y = 106 (la última acaba en 1066) + pie de ayuda en y = menuH - 56 = 1084
 
     init(device: MTLDevice) {
         cinema = XRCinema(device: device)
@@ -462,8 +457,8 @@ final class XRPresenter {
             if blockT > 2 || !(s.pad.active || s.left.active || s.right.active) { blockUntilNeutral = false }
         }
         // Mientras se mantiene el botón de menú (>0,3 s) el juego no lo recibe (evita que la pulsación larga se vea como Select mantenido).
-        // R3 mantenido NO bloquea nada: el juego lo sigue recibiendo (R3 corto, y el gesto de vr_gesture R3 0,35 s = ventana de armas con las manos libres, y el movimiento / disparo). A los 3 s se abre el menú
-        // «Diagnóstico»; al abrirse, `menuOpen` bloquea la entrada y VRInput.releaseAll suelta R2/R3, así que una ventana de armas abierta por ese mismo R3 se cierra.
+        // R3 mantenido NO bloquea nada: el juego lo sigue recibiendo (R3 corto, y el movimiento / disparo; mantener L3/R3 no abre ninguna ventana de armas/objetos en vr_gesture). A los 3 s se abre el menú
+        // «Diagnóstico»; al abrirse, `menuOpen` bloquea la entrada y VRInput.releaseAll suelta R2/R3.
         return menuOpen || blockUntilNeutral || (!menuOpen && menuHeld && holdT > 0.3)
     }
 
@@ -565,6 +560,13 @@ final class XRPresenter {
         case .noZTest: d.update { $0.noZTest.toggle() }
         case .fillDepth: d.update { $0.fillDepth.toggle() }
         case .flatDepth: d.update { $0.flatDepth.toggle() }
+        case .engBehind: cfg.engBehind.toggle(); XRViewConfig.applyDiscards(behind: cfg.engBehind, size: cfg.engSize, back: cfg.engBack, split: cfg.engSplit); cfg.save()
+        case .engSize: cfg.engSize.toggle(); XRViewConfig.applyDiscards(behind: cfg.engBehind, size: cfg.engSize, back: cfg.engBack, split: cfg.engSplit); cfg.save()
+        case .engBack: cfg.engBack.toggle(); XRViewConfig.applyDiscards(behind: cfg.engBehind, size: cfg.engSize, back: cfg.engBack, split: cfg.engSplit); cfg.save()
+        case .engSplit: cfg.engSplit.toggle(); XRViewConfig.applyDiscards(behind: cfg.engBehind, size: cfg.engSize, back: cfg.engBack, split: cfg.engSplit); cfg.save()
+        case .exact2D: cfg.exact2D.toggle(); XR2DCompose.framebufferFetch = cfg.exact2D
+        case .integerScale: cfg.integerScale.toggle()
+        case .debugAxes: cfg.debugAxes.toggle()
         case .giveWeapons:      // truco de depuración: acción única (no se guarda); el hilo de emulación la aplica en el siguiente VBlank si hay partida
             if dir >= 0 {
 #if !MV_BENCH
@@ -585,22 +587,19 @@ final class XRPresenter {
         case .resume: closeMenu()
         case .recenter: onRecenter?(); closeMenu()
         case .calibrateHands:
-            // Izquierda borra la calibración; seleccionar/derecha empieza una cuenta atrás de 3 s (un pulso háptico por segundo) para poner los brazos rectos al frente.
+            // Izquierda borra la calibración (orientación de las manos y largo de brazos); seleccionar/derecha empieza una cuenta atrás de 3 s (un pulso háptico por segundo) para poner los brazos rectos al frente: mide la orientación de los mandos y el largo de los brazos.
             if dir < 0 { mv_vrgame_clear_hand_calibration() } else { mv_vrgame_calibrate_hands(3.0); closeMenu() }
         case .width: cfg.width = cycle(cfg.width, XRViewConfig.widths, dir)
         case .distance: cfg.distance = cycle(cfg.distance, XRViewConfig.distances, dir)
         case .follow2D: cfg.follow2D.toggle(); needAnchor = true; followSnap = true; cfg.save()      // al fijarlas, se anclan donde está la cabeza ahora
         case .curve: cfg.curve = cycle(cfg.curve, XRViewConfig.curves, dir)
         case .sharp: cfg.sharp = (cfg.sharp + dir + 3) % 3
-        case .integerScale: cfg.integerScale.toggle()
         case .smooth2D:
             cfg.smooth2D = (cfg.smooth2D + dir + 3) % 3
 #if !MV_BENCH
             mv_vrhost_set_hud2d_smooth(Int32(cfg.smooth2D))
 #endif
         case .filter2D: cfg.filter2D = (cfg.filter2D + dir + 4) % 4      // se aplica al reabrir la vista: los destinos de la ampliación se crean con el factor del filtro (XR2DFilter.reload)
-        case .tex3D: cfg.tex3D.toggle(); XRViewConfig.applyTex3D(cfg.tex3D); cfg.save()
-        case .exact2D: cfg.exact2D.toggle(); XR2DCompose.framebufferFetch = cfg.exact2D
         case .cutscene:
             let all = XRViewConfig.Cutscene.allCases
             let i = all.firstIndex(of: cfg.cutscene) ?? 0
@@ -615,11 +614,6 @@ final class XRPresenter {
         case .vignette: Self.cycleVignette(dir)
         case .hideHands: cfg.hideRealHands.toggle(); cfg.save()      // la escena lo lee de UserDefaults (@AppStorage): se guarda al momento
         case .newHands: cfg.newHands.toggle(); XRViewConfig.applyHands(cfg.newHands); cfg.save()
-        case .engBehind: cfg.engBehind.toggle(); XRViewConfig.applyDiscards(behind: cfg.engBehind, size: cfg.engSize, back: cfg.engBack, split: cfg.engSplit); cfg.save()
-        case .engSize: cfg.engSize.toggle(); XRViewConfig.applyDiscards(behind: cfg.engBehind, size: cfg.engSize, back: cfg.engBack, split: cfg.engSplit); cfg.save()
-        case .engBack: cfg.engBack.toggle(); XRViewConfig.applyDiscards(behind: cfg.engBehind, size: cfg.engSize, back: cfg.engBack, split: cfg.engSplit); cfg.save()
-        case .engSplit: cfg.engSplit.toggle(); XRViewConfig.applyDiscards(behind: cfg.engBehind, size: cfg.engSize, back: cfg.engBack, split: cfg.engSplit); cfg.save()
-        case .debugAxes: cfg.debugAxes.toggle()
         case .aiMenu: if dir >= 0 { page = 2; sel = 0 }
         case .diagnostics: if dir >= 0 { page = 1; sel = 0 }
         case .exit: cfg.save(); onExit?()
@@ -646,6 +640,13 @@ final class XRPresenter {
             case .noZTest: return ("Sin prueba de profundidad", yn(s.noZTest))
             case .fillDepth: return ("Profundidad de relleno", yn(s.fillDepth))
             case .flatDepth: return ("No entregar profundidad al sistema", yn(s.flatDepth))
+            case .engBehind: return ("Descarte por detrás (3D)", yn(cfg.engBehind))
+            case .engSize: return ("Tope de tamaño (3D)", yn(cfg.engSize))
+            case .engBack: return ("Reversos (3D)", yn(cfg.engBack))
+            case .engSplit: return ("Caras cercanas (3D)", cfg.engSplit ? "Original" : "Recortadas")
+            case .exact2D: return ("Composición 2D exacta", yn(cfg.exact2D))
+            case .integerScale: return ("Escalado entero", yn(cfg.integerScale))
+            case .debugAxes: return ("Ejes de mandos y manos", yn(cfg.debugAxes))
             case .giveWeapons: return ("Truco: dar todas las armas", "")
             }
         }
@@ -674,20 +675,19 @@ final class XRPresenter {
             case .calibrateHands:
                 let cd = mv_vrgame_calibration_countdown()
                 var q: [Float] = [0, 0, 0, 0]
+                var armLen: Float = 0
                 let have = mv_vrgame_hand_calibration(0, &q) != 0 || mv_vrgame_hand_calibration(1, &q) != 0
-                return ("Calibrar manos", cd > 0 ? "brazos rectos: \(Int(cd.rounded(.up))) s" : (have ? "Hecha (izq. borra)" : "Sin calibrar"))
+                    || mv_vrgame_arm_length(0, &armLen) != 0 || mv_vrgame_arm_length(1, &armLen) != 0
+                return ("Calibrar manos y brazos", cd > 0 ? "brazos rectos: \(Int(cd.rounded(.up))) s" : (have ? "Hecha (izq. borra)" : "Sin calibrar"))
             case .width: return ("Tamaño de la pantalla", m(cfg.width))
             case .distance: return ("Distancia de la pantalla", m(cfg.distance))
             case .follow2D: return ("Pantallas 2D", cfg.follow2D ? "Siguen la cabeza" : "Fijas en el mundo")
             case .curve: return ("Curvatura de la pantalla", curveName[ci])
             case .sharp: return ("Nitidez de la imagen", ["Suave", "Nítida", "Píxel"][min(max(cfg.sharp, 0), 2)])
-            case .integerScale: return ("Escalado entero", yn(cfg.integerScale))
             case .smooth2D: return ("Suavizado 2D", ["Original", "Nítido", "Suave"][min(max(cfg.smooth2D, 0), 2)])
             case .filter2D:
                 let f = min(max(cfg.filter2D, 0), 3)
                 return ("Filtro 2D", ["MMPX", "xBR", "Nítido", "Sin filtro"][f] + (f != XR2DFilter.current.index ? " (al reabrir la vista)" : ""))
-            case .tex3D: return ("Filtro de texturas 3D", cfg.tex3D ? "MMPX" : "Sin filtro")
-            case .exact2D: return ("Composición 2D exacta", yn(cfg.exact2D))
             case .cutscene:
                 let n: [XRViewConfig.Cutscene: String] = [.screen: "Pantalla de cine 3D (mono)", .stereo: "Pantalla de cine 3D (estéreo)", .cinema: "Pantalla de cine", .diorama: "Diorama", .scene: "Dentro de la escena"]
                 return ("Cinemáticas del motor", n[cfg.cutscene] ?? "")
@@ -701,11 +701,6 @@ final class XRPresenter {
             case .vignette: return ("Viñeta de confort", Self.vignetteName())
             case .hideHands: return ("Ocultar mis manos reales", yn(cfg.hideRealHands))
             case .newHands: return ("Manos del personaje", cfg.newHands ? "Nuevas" : "Originales")
-            case .engBehind: return ("Descarte por detrás (3D)", yn(cfg.engBehind))
-            case .engSize: return ("Tope de tamaño (3D)", yn(cfg.engSize))
-            case .engBack: return ("Reversos (3D)", yn(cfg.engBack))
-            case .engSplit: return ("Caras cercanas (3D)", cfg.engSplit ? "Original" : "Recortadas")
-            case .debugAxes: return ("Ejes de mandos y manos", yn(cfg.debugAxes))
             case .aiMenu: return ("IA de enemigos", "▸")
             case .diagnostics: return ("Diagnóstico", XRDiag.shared.settings.isNormal ? "▸" : "activo ▸")
             case .exit: return ("Salir de VR", "")

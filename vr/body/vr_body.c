@@ -156,7 +156,7 @@ static float twist_angle(const float *tw, const float *ax) {
 
 /* ======================================================= 2) solver ================================================ */
 void vrbody_stretch_bone(float R[9], const float off[3], float s) {
-    if (!(s > 1.0f) || !isfinite(s) || !all_finite(off, 3)) return;
+    if (!(s > 0.0f) || s == 1.0f || !isfinite(s) || !all_finite(off, 3)) return;      /* s < 1: acorta (brazo del usuario más corto que el del modelo) */
     float l[3], rl[3];
     if (v_norm(l, off, NULL) < 1e-6f) return;
     m_mulv(rl, R, l);
@@ -184,6 +184,7 @@ static void bone_frame(float *R, const float *off_local, const float *w, const f
     for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) R[3 * i + j] = w[i] * l0[j] + w1[i] * l1[j] + w2[i] * l2[j];
 }
 
+#define HARD_STRETCH_MAX 6.0f      /* tope del estirado del brazo atado al arma (el normal es VrArmLimits.stretch_max <= 2,5): solo un salto de pose absurdo lo alcanza */
 static int solve_core(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn *in, VrArmOut *out, float swivel_deg) {
     if (!rig || !lim || !in || !out) return -1;
     if (!isfinite(lim->elbow_min_deg) || !isfinite(lim->reach_margin) || !isfinite(lim->shoulder_back) || !isfinite(lim->shoulder_cross) ||
@@ -203,6 +204,9 @@ static int solve_core(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn
     const float emin = clampf(lim->elbow_min_deg, 5.0f, 120.0f) * DEG;
     const float dmin = sqrtf(fmaxf(L1 * L1 + L2 * L2 - 2 * L1 * L2 * cosf(emin), 1.0f));
     const float dmax = (L1 + L2) * clampf(lim->reach_margin, 0.5f, 1.0f);
+    /* Brazo atado al arma (sin límites de hombro: vrgame/vr_body lo piden con shoulder_back = shoulder_cross = -1): la muñeca es una restricción DURA. Sin tope de flexión del codo (dmin), sin límite de hombro ni
+     * de flexión, estirado hasta HARD_STRETCH_MAX y la muñeca puesta en el objetivo aunque quede a menos de |L1 - L2| (el codo se resuelve como pueda, sea cual sea su postura). */
+    const int hard = lim->shoulder_back <= -1.0f && lim->shoulder_cross <= -1.0f;
 
     float S[3]; v_cp(S, in->shoulder);
     float v[3]; v_sub(v, in->wrist, S);
@@ -210,11 +214,12 @@ static int solve_core(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn
     float down[3]; v_scale(down, TY, -1.0f);
     float vh[3]; v_norm(vh, v, down);
     /* fuera de alcance: ambos huesos se alargan por igual a lo largo de su eje (continuo: 1 en dmax) y la muñeca llega al objetivo; tope 2.5x */
-    const float sk = d > dmax ? fminf(d / dmax, isfinite(lim->stretch_max) ? clampf(lim->stretch_max, 1.0f, 2.5f) : 2.5f) : 1.0f;
+    const float sk_max = hard ? HARD_STRETCH_MAX : (isfinite(lim->stretch_max) ? clampf(lim->stretch_max, 1.0f, 2.5f) : 2.5f);
+    const float sk = d > dmax ? fminf(d / dmax, sk_max) : 1.0f;
     const float L1e = L1 * sk, L2e = L2 * sk;
-    float dd = d < dmin ? dmin : (d > dmax ? fminf(d, dmax * sk) : d);
+    float dd = d > dmax ? fminf(d, dmax * sk) : (hard ? fmaxf(d, 0.01f) : (d < dmin ? dmin : d));      /* 0,01: evita dividir por cero con la muñeca en el hombro */
     if (d > dmax) flags |= VRARM_STRETCHED;
-    if (d < dmin) flags |= VRARM_TOO_CLOSE;
+    if (d < dmin && !hard) flags |= VRARM_TOO_CLOSE;
     float W[3]; v_madd(W, S, vh, dd);
 
     /* vector polar: perpendicular al brazo; si es paralelo, alternativas del marco del torso */
@@ -239,7 +244,7 @@ static int solve_core(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn
     float u[3]; v_sub(u, E, S); v_scale(u, u, 1.0f / L1e);
 
     /* límites del hombro (marco del torso); con el brazo estirado la mano manda: el límite se desvanece entre sk = 1 y 1.1 (smoothstep) para que no haya saltos */
-    {
+    if (!hard) {
         float kf = clampf((sk - 1.0f) / 0.1f, 0.0f, 1.0f); kf = kf * kf * (3.0f - 2.0f * kf);
         float c[3] = {v_dot(u, TX) * side, v_dot(u, TY), v_dot(u, TZ)};   /* [0] hacia fuera, [1] arriba, [2] delante */
         float c0[3] = {c[0], c[1], c[2]};
@@ -275,7 +280,7 @@ static int solve_core(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn
         /* flexión máxima del codo: el ángulo interior entre -u y f no baja de emin */
         float mu[3]; v_scale(mu, u, -1.0f);
         float ci = clampf(v_dot(mu, f), -1.0f, 1.0f);
-        if (acosf(ci) < emin - 1e-4f) {
+        if (!hard && acosf(ci) < emin - 1e-4f) {
             float perp[3]; v_madd(perp, f, mu, -ci);
             if (v_norm(perp, perp, NULL) < 1e-6f) { v_cp(perp, pp); v_madd(perp, perp, mu, -v_dot(perp, mu)); v_norm(perp, perp, pp); }
             v_scale(f, mu, cosf(emin)); v_madd(f, f, perp, sinf(emin));
@@ -284,6 +289,7 @@ static int solve_core(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn
         }
     }
     float W2[3]; v_madd(W2, E, f, L2e);
+    if (hard) v_cp(W2, W);      /* restricción dura: la muñeca en el objetivo (con dd < |L1e - L2e| el antebrazo mide |W - E|, no L2e) */
 
     /* bisagra del codo: eje x local del brazo = v x pp (plano polar); se proyecta a cada hueso */
     float h[3]; v_cross(h, vh, pp);
@@ -379,6 +385,8 @@ typedef struct {
     int init;              /* filtro inicializado (con una pose válida) */
     int was_valid;
     float pos[3], q[4];    /* pose filtrada (espacio del usuario) */
+    int pos_real;          /* pos es la del mando de esta mano (no la derivada de un arma soldada): vale para medir el largo de brazo */
+    float qc[4]; int qc_ok; /* agarre filtrado del MANDO de esta mano para calibrar (VrHandPose.raw_rot; igual que q salvo en la mano soldada al arma); qc_ok = 0: no calibrable */
     int tau_ok; float tau, tau_f, swivel;   /* giro de la mano respecto al antebrazo y del codo del último cálculo (continuidad) */
     float aq[4]; int aim_ok; /* apuntado filtrado (si el mando lo entrega) */
     float pitch_s; int pitch_init, pitch_miss;   /* cabeceo automático suavizado, y fotogramas seguidos sin valor válido */
@@ -421,15 +429,17 @@ static struct {
     VrBodyHook hook;
     Hand hand[2];
     int armed;
-    int weld[2];                 /* brazo atado al arma (vrbody_set_weld): huesos de largo fijo */
+    VrBodyHiddenIkFn hid_fn;     /* vrbody_set_hidden_ik_fn: sonda de la petición en el propio apply (sobrevive a vrbody_init) */
+    int hid_ik;                  /* vrbody_set_engine_hidden_ik: arma de dos manos empuñada con el jugador al mando; la IK se aplica aunque el motor oculte a Snake de pie */
+    int weld[2];                 /* brazo atado al arma (vrbody_set_weld): la mano manda, sin límites de hombro */
     int pole_set[2]; float pole_ov[2][3];   /* dirección del codo por brazo (vrbody_set_pole); si no, cfg.pole */
     VrBodyStats st;
     VrBodyGrab grab; int grab_age;         /* petición vigente y apply sin refrescarla */
     VrBodyDebug dbg[2];
     /* vista del último apply (para volver del mundo del motor al espacio del usuario en vrbody_forearm_pose) */
     int view_ok;
-    float view_eye[3], view_pref[3], view_T[9], view_upm;
-    struct { int ok; float q[4]; } cal[2];   /* calibración de manos (sobrevive a vrbody_init) */
+    float view_eye[3], view_pref[3], view_T[9], view_upm, view_gaze;   /* view_gaze: guiñada de la mirada en el mundo del motor (grados) */
+    struct { int ok; float q[4]; float len; } cal[2];   /* calibración de manos (sobrevive a vrbody_init); len = largo de brazo del usuario en m (0 = sin medir), bajo cal_lock */
     struct { int on; float q[4]; } aimfix[2]; /* giro extra agarre -> mano de la mano que empuña el arma, para que su boca coincida con el apuntado del mando (vrbody_set_aim_fix); bajo cal_lock */
     struct { int on; float q[4]; } turn[2];   /* giro LOCAL de la mano respecto al mando (vrbody_set_hand_turn), ya llevado al marco del agarre (M D M^T); se aplica DESPUÉS del desvío fijo; bajo cal_lock */
     float fore_q[2][4];                /* orientación del marco de agarre (espacio del usuario, sin hand_rot_offset) del último apply */
@@ -546,13 +556,13 @@ int vrbody_calibrate_hands(void) {
     int n = 0;
     for (int s = 0; s < 2; s++) {
         Hand *h = &G.hand[s];
-        if (!h->init || !h->was_valid) continue;
+        if (!h->init || !h->was_valid || !h->qc_ok) continue;
         float q[4];
-        if (vrbody_calib_offset(h->q, (s == 0 ? 1.0f : -1.0f) * G.cfg.hand_roll_deg, q)) { cal_lock(); memcpy(G.cal[s].q, q, sizeof q); G.cal[s].ok = 1; cal_unlock(); n++; }
+        if (vrbody_calib_offset(h->qc, (s == 0 ? 1.0f : -1.0f) * G.cfg.hand_roll_deg, q)) { cal_lock(); memcpy(G.cal[s].q, q, sizeof q); G.cal[s].ok = 1; cal_unlock(); n++; }
     }
     return n;
 }
-void vrbody_clear_calibration(void) { cal_lock(); G.cal[0].ok = G.cal[1].ok = 0; cal_unlock(); }
+void vrbody_clear_calibration(void) { cal_lock(); G.cal[0].ok = G.cal[1].ok = 0; G.cal[0].len = G.cal[1].len = 0; cal_unlock(); }
 int vrbody_get_calibration(int side, float q[4]) {
     if ((side != 0 && side != 1) || !q) return 0;
     cal_lock(); int ok = G.cal[side].ok; if (ok) memcpy(q, G.cal[side].q, sizeof G.cal[side].q); cal_unlock();
@@ -564,6 +574,69 @@ void vrbody_set_calibration(int side, const float q[4]) {
     float n2 = t[0] * t[0] + t[1] * t[1] + t[2] * t[2] + t[3] * t[3];
     if (!(n2 >= 0.25f && n2 <= 4.0f)) return;               /* norma fuera de 0,5..2: dato corrupto, no es un cuaternión de rotación */
     q_normalize(t); cal_lock(); memcpy(G.cal[side].q, t, sizeof t); G.cal[side].ok = 1; cal_unlock();
+}
+
+/* Largo de brazo del usuario. Hombro estimado = cabeza + 0,17 m al lado (derecha del rumbo para la mano derecha) - 0,22 m en Y - 0,05 m por detrás: las constantes del hombro de vr/weapons/w_guided.c. */
+#define SHOULDER_SIDE_M 0.17f
+#define SHOULDER_DOWN_M 0.22f
+#define SHOULDER_BACK_M 0.05f
+int vrbody_shoulder_estimate(int side, const float head[3], const float fwd[3], float out[3]) {
+    if ((side != 0 && side != 1) || !head || !fwd || !out || !all_finite(head, 3) || !all_finite(fwd, 3)) return 0;
+    const float hx = fwd[0], hz = fwd[2], n = sqrtf(hx * hx + hz * hz);
+    if (!(n > 1e-3f)) return 0;
+    const float fx = hx / n, fz = hz / n, rx = -fz, rz = fx;      /* derecha = adelante x arriba (Y arriba) */
+    const float sg = side == 1 ? 1.0f : -1.0f;
+    out[0] = head[0] + sg * SHOULDER_SIDE_M * rx - SHOULDER_BACK_M * fx;
+    out[1] = head[1] - SHOULDER_DOWN_M;
+    out[2] = head[2] + sg * SHOULDER_SIDE_M * rz - SHOULDER_BACK_M * fz;
+    return 1;
+}
+int vrbody_measure_arm(int side, const float head[3], const float fwd[3], const float grip[3], float *len_m) {
+    float sh[3];
+    if (!len_m || !grip || !all_finite(grip, 3) || !vrbody_shoulder_estimate(side, head, fwd, sh)) return 0;
+    float d[3]; v_sub(d, grip, sh);
+    float gc[3]; vrhs_grip_center(side == 1 ? 1 : -1, gc);      /* muñeca -> agarre (mm, mano a tamaño real): el modelo mide hombro -> muñeca */
+    const float L = v_len(d) - 0.001f * v_len(gc), n = sqrtf(fwd[0] * fwd[0] + fwd[2] * fwd[2]);
+    if (!(L >= VRBODY_ARM_LEN_MIN_M && L <= VRBODY_ARM_LEN_MAX_M)) return 0;
+    if ((d[0] * fwd[0] + d[2] * fwd[2]) / n < 0.5f * L) return 0;      /* el brazo no está al frente (caído o a un lado): la distancia no es el largo */
+    *len_m = L;
+    return 1;
+}
+float vrbody_arm_scale(float user_len_m, float model_len_m) {
+    if (!(isfinite(user_len_m) && isfinite(model_len_m) && user_len_m > 0.0f && model_len_m > 0.0f)) return 1.0f;
+    return clampf(user_len_m / model_len_m, 0.5f, 2.0f);
+}
+int vrbody_calibrate_arms(void) {
+    if (!G.view_ok || !isfinite(G.view_gaze) || !(G.view_upm > 1.0f)) return 0;
+    const float yaw = G.view_gaze * DEG, gw[3] = {sinf(yaw), 0.0f, cosf(yaw)};      /* rumbo en el mundo del motor (0 = +Z, + hacia +X) */
+    float tr[9], fwd[3]; m_transpose(tr, G.view_T); m_mulv(fwd, tr, gw);            /* ... en el espacio del usuario */
+    {   /* rumbo del CUERPO: dirección horizontal de la cabeza al punto medio de los dos mandos (brazos al frente); la mirada puede ir girada hasta ~60 grados y desviaba el hombro estimado +-8,5 cm. Una sola mano, manos
+         * junto a la cabeza o detrás de la mirada: la mirada. */
+        const Hand *a = &G.hand[0], *b = &G.hand[1];
+        if (a->init && a->was_valid && a->pos_real && b->init && b->was_valid && b->pos_real) {
+            const float mx = 0.5f * (a->pos[0] + b->pos[0]) - G.view_pref[0], mz = 0.5f * (a->pos[2] + b->pos[2]) - G.view_pref[2], n = sqrtf(mx * mx + mz * mz);
+            if (n > 0.2f && (mx * fwd[0] + mz * fwd[2]) > 0.0f) { fwd[0] = mx; fwd[1] = 0.0f; fwd[2] = mz; }
+        }
+    }
+    int n = 0;
+    for (int s = 0; s < 2; s++) {
+        const Hand *h = &G.hand[s];
+        float L;
+        if (!h->init || !h->was_valid || !h->pos_real || !vrbody_measure_arm(s, G.view_pref, fwd, h->pos, &L)) continue;
+        cal_lock(); G.cal[s].len = L; cal_unlock(); n++;
+    }
+    return n;
+}
+int vrbody_get_arm_length(int side, float *len_m) {
+    if ((side != 0 && side != 1) || !len_m) return 0;
+    cal_lock(); float L = G.cal[side].len; cal_unlock();
+    if (!(L > 0.0f)) return 0;
+    *len_m = L;
+    return 1;
+}
+void vrbody_set_arm_length(int side, float len_m) {
+    if ((side != 0 && side != 1) || !(isfinite(len_m) && len_m >= VRBODY_ARM_LEN_MIN_M && len_m <= VRBODY_ARM_LEN_MAX_M)) return;
+    cal_lock(); G.cal[side].len = len_m; cal_unlock();
 }
 
 void vrbody_config_default(VrBodyConfig *c) {
@@ -587,10 +660,10 @@ void vrbody_config_default(VrBodyConfig *c) {
     c->smooth_tau_s = 0.02f; c->frame_dt_s = 0.02f; c->blend_s = 0.25f; c->max_hand_jump_m = 3.0f;
 }
 void vrbody_init(const VrBodyConfig *c) {
-    VrBodyViewFn fn = G.view_fn; VrBodyHook hk = G.hook; int sup = G.fist_suppress;
+    VrBodyViewFn fn = G.view_fn; VrBodyHook hk = G.hook; int sup = G.fist_suppress; VrBodyHiddenIkFn hf = G.hid_fn;
     typeof(G.cal) cal; cal_lock(); memcpy(cal, G.cal, sizeof cal); cal_unlock();
     memset(&G, 0, sizeof G);
-    G.view_fn = fn; G.hook = hk; G.fist_suppress = sup; cal_lock(); memcpy(G.cal, cal, sizeof cal); cal_unlock();
+    G.view_fn = fn; G.hook = hk; G.fist_suppress = sup; G.hid_fn = hf; cal_lock(); memcpy(G.cal, cal, sizeof cal); cal_unlock();
     if (c) G.cfg = *c; else vrbody_config_default(&G.cfg);
     if (!(G.cfg.frame_dt_s > 1e-4f && G.cfg.frame_dt_s < 1.0f)) G.cfg.frame_dt_s = 0.02f;
     if (!(G.cfg.blend_s >= 0)) G.cfg.blend_s = 0.25f;
@@ -640,7 +713,11 @@ int vrbody_fist_point(int side, float out[3]) {
 void vrbody_set_grip(int side, float v) { if ((side == 0 || side == 1) && isfinite(v)) G.hand[side].grip_set = clampf(v, 0.0f, 1.0f); }
 void vrbody_set_dominant(int side) { G.cfg.dominant = side ? 1 : 0; }
 void vrbody_set_armed(int on) { G.armed = on ? 1 : 0; }
+void vrbody_set_engine_hidden_ik(int on) { G.hid_ik = on ? 1 : 0; }
+int vrbody_engine_hidden_ik(void) { return G.hid_ik; }
 void vrbody_set_weld(int side, int on) { if (side == 0 || side == 1) G.weld[side] = on ? 1 : 0; }
+int vrbody_get_weld(int side) { return side == 0 || side == 1 ? G.weld[side] : 0; }
+void vrbody_set_hidden_ik_fn(VrBodyHiddenIkFn fn) { G.hid_fn = fn; }
 void vrbody_set_pole(int side, const float pole[3]) {
     if (side != 0 && side != 1) return;
     G.pole_set[side] = pole && all_finite(pole, 3) && pole[0] * pole[0] + pole[1] * pole[1] + pole[2] * pole[2] > 1e-6f;
@@ -863,11 +940,12 @@ static int apply_main(uint8_t *ram) {
     if (nm < cfg->min_parts || nm > MAX_PARTS || !ptr_ok(pset, OBJS_FIRST + OBJ_SIZE * (uint32_t)nm)) { G.st.skip_model++; return 0; }
     /* El motor no dibuja el objeto entero (fuera de pantalla, o SU primera persona: conductos, PSG1, bajo objetos, paneles). El render nativo sí lo dibuja en primera persona VR, así que el
      * ancla del cuerpo se aplica igual (sin ella el ojo queda en la raíz, por detrás de la cabeza y los hombros del modelo tumbado). La IK de los brazos TAMBIÉN cuando el jugador está tumbado o
-     * agachado (estado del jugador GROUND / SQUAT) y el motor no lo oculta por otro motivo (caja BOX, derribado DOWNED, GAME_OVER, NOT_PLAYABLE; HIDDEN no: es la zona de escondite HZD 0xF715 y ahí sí hay IK): ahí el motor lo oculta por su primera persona (bound_mode 0), pero las matrices de las piezas sí se actualizan (libdg/screen.c
+     * agachado (estado del jugador GROUND / SQUAT), o de pie con un arma de dos manos empuñada y el jugador al mando (vrbody_set_engine_hidden_ik: el Stinger hace que el motor oculte a Snake en su primera persona), y el motor no lo oculta por otro motivo (caja BOX, derribado DOWNED, GAME_OVER, NOT_PLAYABLE; HIDDEN no: es la zona de escondite HZD 0xF715 y ahí sí hay IK): ahí el motor lo oculta por su primera persona (bound_mode 0), pero las matrices de las piezas sí se actualizan (libdg/screen.c
      * DG_ScreenChanl corre antes del recorte y no mira bound_mode ni el bit de invisible), así que los brazos siguen a los mandos como de pie. Sin esa postura (fuera de pantalla de verdad) no. */
     const uint32_t pst = rd_u32(ram, BA_PLAYER_STATUS);
+    const int hid_ik = G.hid_ik || (G.hid_fn && G.hid_fn(ram));      /* la sonda cubre el primer frame tras equipar (la petición del VBlank llega después del dibujado) */
     const int offscreen = rd_s16(ram, pset + OBJS_VIS) == 0 &&
-        (!(pst & (uint32_t)(BRIDGE_PS_GROUND | BRIDGE_PS_SQUAT)) ||
+        ((!(pst & (uint32_t)(BRIDGE_PS_GROUND | BRIDGE_PS_SQUAT)) && !hid_ik) ||
          (pst & (uint32_t)(BRIDGE_PS_BOX | BRIDGE_PS_DOWNED | BRIDGE_PS_GAME_OVER | BRIDGE_PS_NOT_PLAYABLE)));
 
     int it = cfg->part_torso;
@@ -935,6 +1013,9 @@ static int apply_main(uint8_t *ram) {
         else h->w = clampf(h->w + (v ? dt : -dt) / cfg->blend_s, 0.0f, 1.0f);
         if (v) {
             float q[4] = {hp[s].rot[0], hp[s].rot[1], hp[s].rot[2], hp[s].rot[3]}; q_normalize(q);
+            float qc[4]; int qc_ok = 0;      /* calibración: agarre real del mando; la mano derivada (soldada al arma) sin mando propio no se calibra */
+            if (hp[s].raw_valid && all_finite(hp[s].raw_rot, 4) && hp[s].raw_rot[0] * hp[s].raw_rot[0] + hp[s].raw_rot[1] * hp[s].raw_rot[1] + hp[s].raw_rot[2] * hp[s].raw_rot[2] + hp[s].raw_rot[3] * hp[s].raw_rot[3] > 1e-6f) { memcpy(qc, hp[s].raw_rot, sizeof qc); q_normalize(qc); qc_ok = 1; }
+            else if (!hp[s].derived) { memcpy(qc, q, sizeof qc); qc_ok = 1; }
             float jump = 0;
             if (h->init) { float d3[3]; v_sub(d3, hp[s].pos, h->pos); jump = v_len(d3); }
             float aqn[4] = {hp[s].aim_rot[0], hp[s].aim_rot[1], hp[s].aim_rot[2], hp[s].aim_rot[3]};
@@ -942,14 +1023,18 @@ static int apply_main(uint8_t *ram) {
             if (aok) q_normalize(aqn);
             if (!h->init || !h->was_valid || (cfg->max_hand_jump_m > 0 && jump > cfg->max_hand_jump_m)) {
                 v_cp(h->pos, hp[s].pos); memcpy(h->q, q, sizeof q); h->init = 1;
+                if (qc_ok) memcpy(h->qc, qc, sizeof qc);
                 if (aok) memcpy(h->aq, aqn, sizeof aqn);
             } else {
                 float a = cfg->smooth_tau_s > 0 ? 1 - expf(-dt / cfg->smooth_tau_s) : 1.0f;
                 for (int i = 0; i < 3; i++) h->pos[i] += a * (hp[s].pos[i] - h->pos[i]);
                 q_slerp(h->q, h->q, q, a);
+                if (qc_ok) { if (h->qc_ok) q_slerp(h->qc, h->qc, qc, a); else memcpy(h->qc, qc, sizeof qc); }
                 if (aok) { if (h->aim_ok) q_slerp(h->aq, h->aq, aqn, a); else memcpy(h->aq, aqn, sizeof aqn); }
             }
             h->aim_ok = aok;
+            h->qc_ok = qc_ok;
+            h->pos_real = !hp[s].derived;
         }
         h->was_valid = v;
         any |= v || h->w > 0;
@@ -959,7 +1044,7 @@ static int apply_main(uint8_t *ram) {
     /* relación usuario -> mundo del motor */
     float th = (view.theta_deg + 180.0f) * DEG, cs = cosf(th), sn = sinf(th);
     const float T[9] = {cs, 0, sn, 0, 1, 0, -sn, 0, cs};
-    G.view_ok = 1; v_cp(G.view_eye, view.eye); v_cp(G.view_pref, view.p_ref); memcpy(G.view_T, T, sizeof T); G.view_upm = view.units_per_m;
+    G.view_ok = 1; v_cp(G.view_eye, view.eye); v_cp(G.view_pref, view.p_ref); memcpy(G.view_T, T, sizeof T); G.view_upm = view.units_per_m; G.view_gaze = view.gaze_yaw_deg;
 
     typeof(G.cal) cal_snap; typeof(G.aimfix) fix_snap; typeof(G.turn) turn_snap; cal_lock(); memcpy(cal_snap, G.cal, sizeof cal_snap); memcpy(fix_snap, G.aimfix, sizeof fix_snap); memcpy(turn_snap, G.turn, sizeof turn_snap); cal_unlock();
     int driven = 0, ns = 0;
@@ -1106,7 +1191,9 @@ static int apply_main(uint8_t *ram) {
         if (pa.parent != it || pe.parent != ia || pw.parent != ie) { G.st.skip_model++; continue; }    /* jerarquía esperada */
         VrArmRig rig;
         rig.side = s == 0 ? 1.0f : -1.0f;                  /* lado del personaje: izquierda (s=0) = +X */
-        v_cp(rig.elbow_off, pe.t); v_cp(rig.wrist_off, pw.t);
+        /* largo de brazo del usuario: huesos del solver escalados por k = largo / (L1+L2 del modelo en m); 1 sin medida */
+        const float lk = vrbody_arm_scale(cal_snap[s].len, (v_len(pe.t) + v_len(pw.t)) / view.units_per_m);
+        v_scale(rig.elbow_off, pe.t, lk); v_scale(rig.wrist_off, pw.t, lk);
         {   /* el hombro debe estar donde dice el modelo respecto al torso (matrices compuestas, no otro esquema) */
             Xf wa; xf_read(ram, pa.addr + OBJ_WORLD, &wa);
             float ex_[3]; m_mulv(ex_, torso_w.R, pa.t); v_add(ex_, ex_, torso_w.t);
@@ -1240,7 +1327,7 @@ static int apply_main(uint8_t *ram) {
         in.has_prev = h->tau_ok; in.tau_prev = h->tau; in.tau_f_prev = h->tau_f; in.swivel_prev = h->swivel;
         VrArmOut sol;
         VrArmLimits lim_s = cfg->limits;
-        if (G.weld[s]) lim_s.stretch_max = 1.0f;      /* brazo atado al arma: no se estira */
+        if (G.weld[s]) lim_s.shoulder_back = lim_s.shoulder_cross = -1.0f;      /* brazo atado al arma: la mano va soldada a ella y manda (se alarga si hace falta, sin tope de hombro): nunca queda corta ni suelta */
         if (vrbody_solve_arm(&rig, &lim_s, &in, &sol) != 0) { G.st.bad_solve++; h->tau_ok = 0; continue; }
         h->tau_ok = 1; h->tau = sol.tau; h->tau_f = sol.tau_f; h->swivel = sol.swivel;
         if (sol.flags & VRARM_STRETCHED) G.st.stretched++;
@@ -1253,9 +1340,9 @@ static int apply_main(uint8_t *ram) {
         const float *Rin[3] = {sol.R_upper, sol.R_fore, sol.R_hand};
         Xf nw[3];
         for (int k = 0; k < 3; k++) memcpy(nw[k].R, Rin[k], sizeof nw[k].R);
-        if (sol.stretch > 1.0f) {   /* brazo estirado: la malla de cada hueso se alarga a lo largo de su eje */
-            G.st.stretch_sum += sol.stretch; if (sol.stretch > G.st.stretch_max) G.st.stretch_max = sol.stretch;
-            vrbody_stretch_bone(nw[0].R, rig.elbow_off, sol.stretch); vrbody_stretch_bone(nw[1].R, rig.wrist_off, sol.stretch);
+        if (sol.stretch > 1.0f) { G.st.stretch_sum += sol.stretch; if (sol.stretch > G.st.stretch_max) G.st.stretch_max = sol.stretch; }
+        if (fabsf(sol.stretch * lk - 1.0f) > 1e-4f) {   /* brazo estirado y/o de otro largo que el del modelo (lk): la malla de cada hueso se alarga a lo largo de su eje (rig solo da la dirección) */
+            vrbody_stretch_bone(nw[0].R, rig.elbow_off, sol.stretch * lk); vrbody_stretch_bone(nw[1].R, rig.wrist_off, sol.stretch * lk);
         }
         v_cp(nw[0].t, Sh); v_cp(nw[1].t, sol.elbow); v_cp(nw[2].t, sol.wrist);
         for (int k = 0; k < 3; k++) xf_quant(&nw[k]);
@@ -1301,7 +1388,7 @@ static int apply_main(uint8_t *ram) {
             VrBodyArmLive *L = &G.live[s].a;
             float tr[9]; m_transpose(tr, T);
             memset(L, 0, sizeof *L);
-            L->rig = rig; L->lim = lim_s; L->upm = view.units_per_m;
+            L->rig = rig; L->lim = lim_s; L->upm = view.units_per_m; L->len_k = lk;
             /* la ruta viva (vrbody_arm_resolve) parte del giro del antebrazo del ÚLTIMO apply (tau_prev, tau_f_prev): su antebrazo cambia como mucho 25 grados respecto a él */
             L->has_prev = in.has_prev; L->tau_prev = in.tau_prev; L->tau_f_prev = in.tau_f_prev; L->swivel_prev = in.swivel_prev;
             float v[3];
@@ -1430,8 +1517,9 @@ int vrbody_arm_resolve(const VrBodyArmLive *a, const float live_p[3], const floa
     v_cp(out->shoulder, a->shoulder);
     v_scale(out->elbow, sol.elbow, inv); v_scale(out->wrist, sol.wrist, inv);
     memcpy(out->R_upper, sol.R_upper, sizeof out->R_upper); memcpy(out->R_fore, sol.R_fore, sizeof out->R_fore); memcpy(out->R_hand, sol.R_hand, sizeof out->R_hand);
-    vrbody_stretch_bone(out->R_upper, a->rig.elbow_off, sol.stretch); vrbody_stretch_bone(out->R_fore, a->rig.wrist_off, sol.stretch);
-    out->stretch = sol.stretch;
+    const float lk = a->len_k > 0.0f ? a->len_k : 1.0f;       /* rig ya escalado por el largo de brazo del usuario */
+    vrbody_stretch_bone(out->R_upper, a->rig.elbow_off, sol.stretch * lk); vrbody_stretch_bone(out->R_fore, a->rig.wrist_off, sol.stretch * lk);
+    out->stretch = sol.stretch * lk;
     out->err_mm = sol.err_mm / a->upm * 1000.0f; out->flags = sol.flags;
     return all_finite(out->elbow, 3) && all_finite(out->wrist, 3) && all_finite(out->R_hand, 9) ? 0 : -1;
 }

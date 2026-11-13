@@ -174,6 +174,7 @@ static void aimfix_lost(int i, float dt) {
 /* Mano de apoyo SOLDADA al arma de fuego (vrgame_pad -> grip_eff_locked, bajo HM): lado de la mano soldada y pose de SU agarre en el marco del agarre de la mano que empuña. El agarre efectivo de la mano soldada es
  * siempre agarre_dominante * (p, q): el mando de ese lado no lo mueve (solo es fantasma de gestos, vrgame_hand_raw). */
 static struct { int on, side; float p[3], q[4]; uint64_t off_ns; } pub_weld;      /* off_ns: instante en que se soltó (0 = no hay rampa); durante WELD_FADE_NS la mano vuelve al mando mezclando */
+#define WELD_HOLD_VBL 6                 /* VBlanks que se retiene la soldadura tras desequipar (~0,12 s): la recarga del juego quita el arma un instante y no debe soltar las manos del arma */
 #define WELD_FADE_NS 200000000ull       /* al desequipar el arma, la mano de apoyo vuelve al mando en 0,2 s */
 static struct { int on; float p[3], q[4], hit_m; } pub_laser;      /* láser de la pistola: pose de la boca (espacio VR) del último VBlank y distancia (m) al primer impacto con el escenario (-1 = sin impacto: 15 m); on = 0: no se dibuja (w_laser.h) */
 
@@ -338,6 +339,11 @@ int vrpose_get_hands(VrHandPose out[2]) {
         if (!g.valid) continue;
         out[i].valid = 1;
         memcpy(out[i].pos, g.p, sizeof g.p); memcpy(out[i].rot, g.q, sizeof g.q);
+        if (i == pub_weld.side && (pub_weld.on || (pub_weld.off_ns && now > pub_weld.off_ns && now - pub_weld.off_ns < WELD_FADE_NS))) {      /* mano soldada (o en la rampa de salida): su pose sale de la mano que empuña; la calibración del cuerpo parte del agarre REAL de su mando (vr_pose.h: derived / raw_rot) */
+            const GripPose r = grip_locked(&hand_in[i], now);
+            out[i].derived = 1;
+            if (r.valid) { out[i].raw_valid = 1; memcpy(out[i].raw_rot, r.q, sizeof r.q); }
+        }
         if (hand_in[i].aim_valid && !(pub_weld.on && i == pub_weld.side)) { out[i].aim_valid = 1; memcpy(out[i].aim_rot, hand_in[i].aim_rot, sizeof out[i].aim_rot); }   /* el apuntado endereza la mano del personaje (vr/body); la mano soldada no lleva el del mando fantasma */
         n++;
     }
@@ -356,6 +362,8 @@ void mv_vrgame_calibrate_hands(float delay_s) { cal_countdown = (isfinite(delay_
 float mv_vrgame_calibration_countdown(void) { return cal_countdown; }
 void mv_vrgame_clear_hand_calibration(void) { vrbody_clear_calibration(); cal_serial++; }
 int32_t mv_vrgame_hand_calibration(int32_t side, float q[4]) { return vrbody_get_calibration(side, q); }
+int32_t mv_vrgame_arm_length(int32_t side, float *len_m) { return vrbody_get_arm_length(side, len_m); }
+void mv_vrgame_set_arm_length(int32_t side, float len_m) { vrbody_set_arm_length(side, len_m); }
 void mv_vrgame_set_hand_calibration(int32_t side, const float q[4]) { vrbody_set_calibration(side, q); }
 uint32_t mv_vrgame_calibration_serial(void) { return cal_serial; }
 /* Una vez por VBlank (hilo de emulación): cuenta atrás de la calibración con háptico. La calibración tiene prioridad sobre el cabeceo/alabeo configurados de esa mano. */
@@ -379,9 +387,9 @@ static void calib_tick(float dt) {
         return;
     }
     cal_countdown = 0;
-    int n = vrbody_calibrate_hands();
-    if (n > 0) { cal_serial++; vrgame_haptic(0, 1.0f); vrgame_haptic(1, 1.0f); }     /* una calibración fallida (n = 0) no cambia nada ni se persiste */
-    fprintf(stderr, "[manos] calibradas %d manos (corrección agarre->mano fija)%s\n", n, n ? "" : ": ninguna (¿mandos sin seguimiento o dedos casi verticales?)");
+    int n = vrbody_calibrate_hands(), na = vrbody_calibrate_arms();
+    if (n > 0 || na > 0) { cal_serial++; vrgame_haptic(0, 1.0f); vrgame_haptic(1, 1.0f); }     /* una calibración fallida (n = na = 0) no cambia nada ni se persiste */
+    fprintf(stderr, "[manos] calibradas %d manos (corrección agarre->mano fija)%s; largo de brazo medido en %d lados\n", n, n ? "" : ": ninguna (¿mandos sin seguimiento o dedos casi verticales?)", na);
 }
 
 int32_t mv_vrgame_hand_matrix(int32_t side, float m[16]) {
@@ -637,6 +645,7 @@ static struct {
     int det_c4;                 /* VBlanks restantes del círculo que detona el C4 (agarre derecho, c4_remote) */
     int det_arm;                /* el agarre derecho estuvo suelto desde la última detonación / desde el arranque: puede detonar */
     int fblk;                   /* bloqueo de la zona de menú del último VBlank con arma VR (0 sin ella) */
+    int weld_hold;              /* VBlanks restantes en que un desequipado breve (recarga: el juego retira el arma un instante) NO suelta el brazo atado ni la petición de IK; 0 = suelta de inmediato */
     int rl_latch;               /* recarga del juego en curso (ro.busy): el gatillo sigue sin llegar al arma hasta bajar de 0,3 (si no, el arma ve un flanco al acabar la recarga y dispara sola) */
     WGameBridge br;
     VrMissile mis;              /* misil guiado del juego vigilado (vr_missile.h) */
@@ -648,12 +657,12 @@ static struct {
     int logged;
 } G;
 
-static void publish_off(void) {
+static void publish_off(int keep_weld) {      /* keep_weld: retención de la soldadura tras un desequipado breve (WELD_HOLD_VBL): la relación de la mano de apoyo se conserva */
     vrhands_post_clear();
     pthread_mutex_lock(&HM);
     pub_sim_valid = 0;
     pub_laser.on = 0;
-    pub_weld.on = 0; pub_weld.off_ns = 0;
+    if (!keep_weld) { pub_weld.on = 0; pub_weld.off_ns = 0; }
     memset(&pub_special, 0, sizeof pub_special);
     pthread_mutex_unlock(&HM);
 }
@@ -663,10 +672,11 @@ void vrgame_reset(void) {
     G.inited = 0; G.active = 0; G.cur = -1; G.trig_prev = 0; G.shots_prev = G.shots; G.fire_edge = 0;
     G.last_ns = 0; G.hand_ns = 0; G.det_t = 0; G.det_c4 = 0; G.det_arm = 0; G.fblk = 0; G.rl_latch = 0; G.throw_hold = 0;
     vrbody_set_weld(0, 0); vrbody_set_weld(1, 0); vrbody_set_pole(0, NULL); vrbody_set_pole(1, NULL);
+    vrbody_set_engine_hidden_ik(0);
     vrbody_set_hand_turn(0, NULL); vrbody_set_hand_turn(1, NULL);
     aimfix_clear();
     memset(&G.ro, 0, sizeof G.ro);
-    publish_off();      /* un arma publicada antes de reiniciar el motor no debe quedarse dibujada */
+    publish_off(0);      /* un arma publicada antes de reiniciar el motor no debe quedarse dibujada */
     pthread_mutex_lock(&HM);
     glv_pub = -1; pub_live_ok[0] = pub_live_ok[1] = 0;      /* los huecos se reutilizan (el renderer puede estar leyendo uno) */
     pthread_mutex_unlock(&HM);
@@ -1027,9 +1037,11 @@ static int launch_hook(void *user, const WLaunch *ev) {
     }
 }
 
+static int ik_probe(const uint8_t *ram);      /* regla de la IK de brazos con el motor ocultando a Snake: más abajo, junto a is_duct */
 static void init_once(void) {
     if (G.inited) return;
     G.inited = 1;
+    vrbody_set_hidden_ik_fn(ik_probe);
     VrFireCfg fc;
     vrfire_cfg_default(&fc);
     vrfire_init(&fc);
@@ -1083,7 +1095,7 @@ int vrgame_hand_raw(int side, float p[3], float *grip, float *trig, double *t_s)
 }
 /* arma VR mostrada */
 int vrgame_weapon_engaged(void) { return G.active || G.cur >= 0; }
-/* arrojadiza VR en la mano del arma, sin preparar o preparada: su gatillo es suyo y no abre la ventana de armas del pecho (vr_gesture throw_hold) */
+/* arrojadiza VR en la mano del arma, sin preparar o preparada (vr_gesture throw_hold: sin golpes ni agarres; en la zona del pecho su gatillo se bloquea y abre la ventana como el de cualquier arma) */
 int vrgame_throw_hold(void) { return G.throw_hold; }
 int vrgame_glove_pub(void) { return glv_pub; }
 void vrgame_haptic(int side, float s) {
@@ -1183,9 +1195,34 @@ int vrgame_hand_frame_now(int side, float p[3], float q[4]) {
     memcpy(p, h.p, sizeof h.p); memcpy(q, h.q, sizeof h.q);
     return 1;
 }
+int vrgame_weld_main(void) {
+    pthread_mutex_lock(&HM);
+    const int m = pub_weld.on ? 1 - pub_weld.side : -1;
+    pthread_mutex_unlock(&HM);
+    return m;
+}
 int vrgame_native_hand(void) { return atomic_load_explicit(&native_hand, memory_order_relaxed); }
 static _Atomic int view_hide;   /* vrhost: prismáticos del juego activos (mundo ampliado): el arma no se ve, como en el conducto */
 void vrgame_set_view_hide(int on) { atomic_store_explicit(&view_hide, on != 0, memory_order_relaxed); }
+/* Conducto (estado INTRUDE) o tumbado (stance 2 / prone) sin PSG1 (gid 9: el original tumba a Snake al sacarlo y el rifle VR se sigue viendo), o prismáticos del juego (el arma VR no lleva el aumento del mundo): el arma no se ve ni se lleva a la mano */
+static int is_duct(const BridgeState *bs, int gid) {
+    return (bs->player_status & BRIDGE_PS_INTRUDE) != 0 || (gid != 9 && (bs->stance == 2 || bs->prone)) || atomic_load_explicit(&view_hide, memory_order_relaxed);
+}
+/* Se pide la IK de brazos aunque el motor oculte a Snake (vrbody_set_engine_hidden_ik): arma de dos manos mostrada (modelo cargado) con la cámara VR y el jugador al mando o con un menú / la pausa encima (cam_ctl), sin cinemática ni escena.
+ * Caja, derribo y muerte los descarta vr_body. Es la regla del VBlank (pad_core) y de la sonda del apply (ik_probe). */
+static int ik_wanted(const BridgeState *bs) {
+    if (!bs || (bs->valid & BRIDGE_OK_ALL_CORE) != BRIDGE_OK_ALL_CORE || !bs->has_player || !(bs->in_control || bs->cam_ctl) || bs->cinematic || !G.fire_ok || !vrcam_active()) return 0;
+    const int slot = slot_of(bs->weapon);
+    if (slot < 0 || atomic_load_explicit(&SL[slot].state, memory_order_acquire) != LD_READY) return 0;
+    const VrGripEntry *ge = vrgrip_find(WPN_TAB[slot].game_id);
+    return ge && ge->support_pose >= 0 && !is_duct(bs, WPN_TAB[slot].game_id);
+}
+int vrgame_ik_hidden_wanted(const BridgeState *bs) { return ik_wanted(bs); }
+/* El apply corre en el dibujado, después del VBlank que fijó la petición: al equipar un arma de dos manos ya cargada el motor oculta a Snake en ESE frame y la petición del VBlank siguiente llegaría un fotograma tarde */
+static int ik_probe(const uint8_t *ram) {
+    BridgeState b;
+    return ram && bridge_read(ram, &b) ? ik_wanted(&b) : 0;
+}
 
 /* Pruebas: instala un arma ya construida en la ranura de su id (sin cargar modelos del disco). */
 void vrgame_test_install(int game_id, void *def, void *state, void *rig) {
@@ -1391,8 +1428,9 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
         { uint32_t ser; vrfire_last_missile(&ser); G.mis_serial = ser; }
         vraa_set_scope(0, NULL, NULL);
         vraa_gesture(NULL, NULL, 0);     /* sin arma o sin mano rastreada: el gesto del visor se reinicia (sin estado viejo al volver) */
+        const int hold = G.weld_hold > 0 && core && cam;
         if (G.active) {
-            publish_off();
+            publish_off(hold);
             /* al volver a mostrarla se reinicia el estado del arma (cargador del juego otra vez) */
             if (G.cur >= 0 && atomic_load(&SL[G.cur].state) == LD_READY) { SL[G.cur].def->init(SL[G.cur].st); SL[G.cur].st->def = SL[G.cur].def; }
         }
@@ -1404,8 +1442,13 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
         atomic_store_explicit(&native_hand, -1, memory_order_relaxed);
         vrbody_set_armed(0);
         vrbody_set_hand_turn(0, NULL); vrbody_set_hand_turn(1, NULL);
-        vrbody_set_weld(0, 0); vrbody_set_weld(1, 0); vrbody_set_pole(0, NULL); vrbody_set_pole(1, NULL);
-        pthread_mutex_lock(&HM); if (pub_weld.on) pub_weld.off_ns = mono_ns(); pub_weld.on = 0; pthread_mutex_unlock(&HM);
+        if (hold) G.weld_hold--;      /* desequipado breve (recarga): las manos siguen en el arma unos VBlanks por si vuelve; si no vuelve se sueltan y empieza la rampa WELD_FADE_NS */
+        else {
+            G.weld_hold = 0;
+            vrbody_set_engine_hidden_ik(0);
+            vrbody_set_weld(0, 0); vrbody_set_weld(1, 0); vrbody_set_pole(0, NULL); vrbody_set_pole(1, NULL);
+            pthread_mutex_lock(&HM); if (pub_weld.on) pub_weld.off_ns = mono_ns(); pub_weld.on = 0; pthread_mutex_unlock(&HM);
+        }
         aimfix_clear();
         vrfire_set_hide(0);
         VrFireGame fg;
@@ -1439,7 +1482,7 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
     G.cur = slot;
     /* Conducto (estado INTRUDE) o tumbado (stance 2 / prone): el arma no se ve ni el modelo VR, ni el del juego, ni la copia del juego en la mano (se oculta siempre y no se lleva a la mano). Solo visibilidad: el disparo no se toca (si el juego lo bloquea ahí, es del propio juego).
      * El arma VR solo se ve tumbado con el PSG1 (gid 9). */
-    const int duct = (bs->player_status & BRIDGE_PS_INTRUDE) != 0 || (gid != 9 && (bs->stance == 2 || bs->prone)) || atomic_load_explicit(&view_hide, memory_order_relaxed);   /* también con los prismáticos del juego (el arma VR no lleva el aumento del mundo); el PSG1 no: el original tumba a Snake al sacarlo (sna_init.c) y el rifle VR se sigue viendo */
+    const int duct = is_duct(bs, gid);
     atomic_store_explicit(&native_hand, sl->native && !duct ? w : -1, memory_order_relaxed);
     vrbody_set_armed(1);
     vrfire_set_hide(sl->native && !duct ? 0 : 1);      /* las granadas (sl->native, vrgame_weapon_uses_game_model) se dibujan siempre con el modelo del juego y no se oculta; el resto lleva modelo VR y se oculta el del juego (la granada lanzada tampoco se oculta nunca: es otro actor) */
@@ -1634,7 +1677,9 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
             if (on) { pub_weld.on = 1; pub_weld.off_ns = 0; pub_weld.side = o; memcpy(pub_weld.p, rp, sizeof rp); memcpy(pub_weld.q, rq, sizeof rq); }
             else { if (pub_weld.on) pub_weld.off_ns = mono_ns(); pub_weld.on = 0; }      /* sin soldar: se conserva la última relación para la rampa de salida */
             pthread_mutex_unlock(&HM);
-            vrbody_set_weld(o, on); vrbody_set_weld(w, 0);      /* los huesos del brazo atado conservan su largo */
+            vrbody_set_weld(o, on); vrbody_set_weld(w, !duct);      /* los DOS brazos atados al arma (la que empuña y la de apoyo soldada; conducto / tumbado: el arma está oculta): la muñeca llega siempre al arma, sin límites de hombro ni tope del codo */
+            G.weld_hold = (on || !duct) ? WELD_HOLD_VBL : 0;
+            vrbody_set_engine_hidden_ik(on && (bs->in_control || bs->cam_ctl) && !bs->cinematic);      /* arma de dos manos con el control del jugador o con la pausa / un menú encima (cam_ctl), sin cinemática ni escena: la IK de brazos y manos se aplica aunque el motor oculte a Snake de pie (el Stinger lo hace en su primera persona; sin IK el arma flotaba sin manos) */
             if (ge) {   /* codos como los pone Snake con esa arma (vr/hands/vr_grip.c: medidos en sus animaciones); sin soldar, los del cuerpo */
                 const float em[3] = {ge->elbow_main.x, ge->elbow_main.y, ge->elbow_main.z}, es[3] = {ge->elbow_support.x, ge->elbow_support.y, ge->elbow_support.z};
                 vrbody_set_pole(w, on ? em : NULL); vrbody_set_pole(o, on ? es : NULL);
@@ -1643,8 +1688,9 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
         if (gid == 4) {
             /* Visor del lanzador: con el arma al ojo el juego tiene su mira y su buscador (vr_fire mantiene el botón) y el buscador
              * del juego corre con la vista de este visor (vr_aa). Sin gesto (a la cadera) se dispara como antes, sin fijar. */
-            WPose sight = wpose_mul(W, def->points[WP_EYE]);
-            int aim = vraa_gesture(&G.head, &sight, st->phase == AA_P_READY && st->mag_rounds > 0);
+            WPose sight = wpose_mul(W, def->points[WP_EYE]);        /* origen y eje de la vista del buscador: el tubo, no la cabeza */
+            WPose led = wpose_mul(W, aa_gesture_point(st));         /* gesto: la cabeza junto a la cara de la pantalla LED (WP_EYE queda ~0,6 m por delante), con el eje del tubo */
+            int aim = vraa_gesture(&G.head, &led, st->phase == AA_P_READY && st->mag_rounds > 0);
             vraa_set_h_scale(vrcam_config()->engine_h > 0 ? 320.0f / (float)vrcam_config()->engine_h : 1.0f);   /* cámara VR activa (mode la exige): el canal lleva la H del motor */
             vraa_set_scope(aim, &map, &sight);
             fi.ready = aim;

@@ -33,6 +33,11 @@ typedef struct {
                         * cabeceo fijo entre el agarre y el apuntado (el mango del mando de seguimiento está inclinado ~35 grados) y endereza la mano del personaje: con el mando apuntando
                         * horizontal, los dedos del personaje quedan horizontales. 0 = sin apuntado (se usa VrBodyConfig.hand_pitch_deg). */
     float aim_rot[4];
+    /* Calibración de manos (vrbody_calibrate_hands): parte del agarre REAL del mando, nunca de una pose ya corregida. `derived` = 1: pos/rot de esta mano no son los de su mando (mano de apoyo soldada
+     * al arma, que cuelga de la mano que empuña); entonces la calibración usa `raw_rot` (agarre de su propio mando, solo si raw_valid = 1) y, sin él, esa mano no se calibra. derived = 0: rot ya es el del mando. */
+    int   derived;
+    int   raw_valid;
+    float raw_rot[4];
 } VrHandPose;
 
 /* Rellena out[0] (izquierda) y out[1] (derecha). Devuelve cuántas son válidas. Débil: por defecto 0 manos. */

@@ -67,7 +67,7 @@ void vr_input_cfg_defaults(vri_cfg_t *c) {
     c->hold_advance_s = 0.5f; c->adv_on_s = 0.06f; c->adv_off_s = 0.10f;
     c->analog_on = 0.55f; c->analog_off = 0.45f;
     c->menu_debounce_s = 0.12f;
-    c->flip_turn_s = 0.30f; c->flip_tap_s = 0.25f;   /* el toque corto debe quedar por debajo de item_hold_s (0,35 s) de vr_gesture */
+    c->flip_turn_s = 0.30f; c->flip_tap_s = 0.25f;
     /* Mapa por defecto (Sense) - TABLA FINAL DE CONTROLES (ver bitacora):
      *   mano dominante: gatillo = R2 = DISPARAR (vrbodyg lo convierte en el botón de ataque del juego SOLO con arma; sin arma no hace
      *     nada), agarre = R1 = puño derecho / agarrar a un enemigo (NO llega al juego: lo consume vr_gesture), A = cruz, B = círculo,

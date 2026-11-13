@@ -48,8 +48,9 @@ typedef struct VrArmRig {
 typedef struct VrArmLimits {
     float elbow_min_deg;     /* ángulo interior mínimo del codo (flexión máxima = 180 - esto); defecto 32 */
     float reach_margin;      /* fracción de L1+L2 que se usa como alcance máximo; defecto 0.999 */
-    float shoulder_back;     /* componente "hacia delante" mínima del brazo superior (marco del torso, unitario); defecto -0.80 */
-    float shoulder_cross;    /* componente "hacia fuera" mínima (negativa = cruza el pecho); defecto -0.85 */
+    float shoulder_back;     /* componente "hacia delante" mínima del brazo superior (marco del torso, unitario); defecto -0.80. shoulder_back = shoulder_cross = -1 (brazo atado al arma, vrbody_set_weld) = restricción DURA: ver abajo */
+    float shoulder_cross;    /* componente "hacia fuera" mínima (negativa = cruza el pecho); defecto -0.85. Con ambos a -1 el solver ignora también elbow_min_deg (sin tope de flexión ni dmin), lleva el estirado hasta 6x (no stretch_max) y pone la
+                              * muñeca EN el objetivo siempre, aunque quede a menos de |L1 - L2| del hombro (el codo adopta la postura que sea; VRARM_TOO_CLOSE no se activa) */
     float wrist_swing_deg;   /* SIN USO (la mano lleva siempre la orientación del mando); se conserva por compatibilidad */
     float forearm_share;     /* parte del giro (pronación) que asume el antebrazo, 0..1; defecto 1 (el antebrazo gira con la mano: brazo y mano continuos) */
     float forearm_twist_deg; /* giro máximo del antebrazo sobre su eje; defecto 180 (sin tope efectivo: el exceso sobre +-100 grados lo absorbe el giro del codo, swivel) */
@@ -91,8 +92,8 @@ typedef struct VrArmOut {
 } VrArmOut;
 
 void vrbody_limits_default(VrArmLimits *l);
-/* Alarga la matriz de un hueso (R de rotación pura que lleva `off` a la dirección del hueso) a lo largo de su eje local: R' = R (I + (s-1) l l^T), l = off/|off|. s <= 1 no hace nada.
- * Es la que usan el apply y la ruta de la mano viva para que la malla alcance al hueso siguiente cuando el brazo se estira. */
+/* Alarga la matriz de un hueso (R de rotación pura que lleva `off` a la dirección del hueso) a lo largo de su eje local: R' = R (I + (s-1) l l^T), l = off/|off|. s = 1, no finito o <= 0 no hace nada; s < 1 acorta el hueso.
+ * Es la que usan el apply y la ruta de la mano viva para que la malla alcance al hueso siguiente cuando el brazo se estira o se escala al largo de brazo del usuario. */
 void vrbody_stretch_bone(float R[9], const float off[3], float s);
 /* 0 = bien; -1 = entrada no finita o rig inválido (out sin tocar). Longitud de huesos: |elbow_off|, |wrist_off|. */
 int vrbody_solve_arm(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn *in, VrArmOut *out);
@@ -178,9 +179,17 @@ const VrBodyConfig *vrbody_config(void);
 
 void vrbody_set_grip(int side, float v);     /* side 0 izquierda / 1 derecha; v 0 (abierta) .. 1 (cerrada) */
 void vrbody_set_dominant(int side);          /* 0 izquierda / 1 derecha */
-void vrbody_set_weld(int side, int on);      /* el brazo de ese lado va atado al arma (mano de apoyo soldada): sus huesos conservan el largo (VrArmLimits.stretch_max = 1) aunque el objetivo quede fuera de alcance */
+void vrbody_set_weld(int side, int on);      /* el brazo de ese lado va atado al arma (la mano que empuña y la de apoyo soldada): la muñeca llega SIEMPRE al objetivo (error 0), a cualquier ángulo, distancia y largo de brazo: sin límites de hombro ni tope de
+                                              * flexión del codo (dmin / elbow_min_deg), estirado hasta 6x y, si el objetivo queda a menos de |L1 - L2| del hombro, la muñeca se pone igualmente (el codo adopta la postura que sea). La mano nunca se suelta del arma */
+int vrbody_get_weld(int side);               /* petición vigente de ese lado (diagnóstico y pruebas); vrbody_init la retira */
 void vrbody_set_pole(int side, const float pole[3]);   /* dirección del codo de ese brazo (marco del torso como VrBodyCfg.pole: x = hacia fuera de su lado, y = arriba, z = delante; no hace falta que sea unitaria): pose de Snake con el arma (vr/hands/vr_grip.h elbow_*). NULL, nula o no finita = la de VrBodyCfg.pole */
 void vrbody_set_armed(int on);               /* la mano dominante empuña un arma: su corrección agarre -> mano es la FIJA (vrbody_hand_offset, sin cabeceo automático por el apuntado); la pose de los dedos la decide vr_hand_pose según el objeto */
+void vrbody_set_engine_hidden_ik(int on);   /* arma de dos manos empuñada con el jugador al mando: la IK de los brazos se aplica aunque el motor oculte a Snake de pie (Stinger: su primera persona lo oculta y sin IK el arma flotaba sin manos). Caja, derribo, muerte y escenas siguen sin aplicarse. vrbody_init lo retira */
+int vrbody_engine_hidden_ik(void);        /* petición vigente (diagnóstico y pruebas) */
+/* Sonda que vrbody_apply consulta además de la petición (con la RAM del frame): el apply corre en el dibujado, después del VBlank que fijó la petición; al equipar el arma el motor ya oculta a Snake en el frame en curso y la petición del
+ * VBlank siguiente llegaría un fotograma tarde. Devuelve 1 = pedirla. NULL = sin sonda (defecto). Sobrevive a vrbody_init. */
+typedef int (*VrBodyHiddenIkFn)(const uint8_t *ram);
+void vrbody_set_hidden_ik_fn(VrBodyHiddenIkFn fn);
 void vrbody_set_enabled(int on);
 /* El anfitrión suprime el puño deformado de la malla del motor (las manos nuevas de ns_hand ya hacen el puño). Va aparte de cfg.fist_enabled (ajuste del usuario, no se modifica). */
 void vrbody_set_fist_suppressed(int on);
@@ -213,12 +222,33 @@ void vrbody_set_hand_pitch_auto(int on);
 int vrbody_pitch_from_aim(const float grip_q[4], const float aim_q[4], float *deg);
 /* Calibración "Calibrar manos": con los brazos rectos al frente y los mandos sujetos de forma natural, toma la orientación ACTUAL de cada agarre y guarda la corrección fija
  * (cuaternión agarre -> mano) que deja la mano del personaje con los dedos horizontales al frente y el dorso girado hand_roll_deg hacia fuera. Tiene PRIORIDAD sobre hand_pitch_deg/hand_pitch_auto/hand_roll_deg de esa mano
- * (cambiarlos después no la afecta) hasta vrbody_clear_calibration. Devuelve cuántas manos se calibraron (0..2; una mano sin seguimiento o con los dedos apuntando casi vertical no se calibra). */
+ * (cambiarlos después no la afecta) hasta vrbody_clear_calibration. Devuelve cuántas manos se calibraron (0..2; una mano sin seguimiento o con los dedos apuntando casi vertical no se calibra).
+ * Parte siempre del agarre REAL del mando (VrHandPose.raw_rot si lo hay): una mano derivada (soldada al arma, VrHandPose.derived) sin mando propio no se calibra, y con él se calibra igual que sin arma (idempotente). */
 int vrbody_calibrate_hands(void);
 void vrbody_clear_calibration(void);
 /* Persistencia: obtener (devuelve 1 si hay calibración) / restaurar la corrección de un lado (0 izq, 1 der). */
 int vrbody_get_calibration(int side, float q[4]);
 void vrbody_set_calibration(int side, const float q[4]);   /* rechaza datos no finitos o con la norma fuera de 0,5..2 */
+/* Largo de brazo del usuario ("Calibrar manos" también lo mide): distancia (m) de su hombro estimado a su muñeca (el agarre del mando menos la distancia muñeca-agarre) con el brazo recto al frente. vrbody_clear_calibration lo borra. Con él, la IK
+ * escala los huesos de brazo y antebrazo de ese lado por k = largo / (L1+L2 del modelo en m, con units_per_m de la vista): el brazo del personaje mide lo que el del usuario y no se estira (el estirado, hasta stretch_max, queda de reserva).
+ * Sin medida k = 1. Se guarda el largo y no k, para que valga con cualquier modelo/escala. */
+#define VRBODY_ARM_LEN_MIN_M 0.45f
+#define VRBODY_ARM_LEN_MAX_M 0.85f
+/* Pura. Hombro estimado del usuario (m, espacio del usuario) desde la cabeza `head` y el rumbo horizontal `fwd` (hacia delante; la componente Y se ignora; side 0 izquierda / 1 derecha): 0,17 m al lado, 0,22 m
+ * por debajo y 0,05 m por detrás de la cabeza (las constantes del hombro de vr/weapons/w_guided.c). 1 = bien; 0 = rumbo nulo o datos no finitos. */
+int vrbody_shoulder_estimate(int side, const float head[3], const float fwd[3], float out[3]);
+/* Pura. Mide el largo de brazo hombro -> muñeca (como el modelo): |agarre - hombro estimado| - |muñeca -> agarre| (vrhs_grip_center, ~90 mm). 1 = válida (dentro de VRBODY_ARM_LEN_MIN_M..MAX_M y el agarre delante del hombro, al menos 0,5 del largo en el rumbo: brazo al frente, no caído);
+ * 0 = rechazada (len_m sin tocar). */
+int vrbody_measure_arm(int side, const float head[3], const float fwd[3], const float grip[3], float *len_m);
+/* Pura. k = largo del usuario / largo del modelo (m), acotado a 0,5..2; 1 si alguno no es finito o <= 0 (sin medir). */
+float vrbody_arm_scale(float user_len_m, float model_len_m);
+/* Mide el largo de brazo de cada mano con seguimiento (agarre propio, no soldado al arma) con la cabeza del último vrbody_apply y el rumbo del CUERPO: la dirección horizontal de la cabeza al punto medio de los dos mandos (brazos al frente; con la cabeza girada la
+ * mirada desviaba el hombro estimado hasta +-8,5 cm); con una sola mano, o las manos junto a la cabeza o detrás de la mirada, el rumbo es la mirada. Devuelve cuántos lados se midieron (0..2); un lado
+ * rechazado conserva su medida anterior. Idempotente: con los brazos en el mismo sitio da la misma medida. Lo llama vrgame junto a vrbody_calibrate_hands. */
+int vrbody_calibrate_arms(void);
+/* Persistencia: obtener (1 si hay medida) / restaurar el largo de un lado (0 izq, 1 der). set rechaza datos no finitos o fuera de rango. */
+int vrbody_get_arm_length(int side, float *len_m);
+void vrbody_set_arm_length(int side, float len_m);
 /* Corrección fija agarre -> mano de un lado (cuaternión x,y,z,w): la calibrada si la hay (devuelve 1) o cabeceo fijo hand_pitch_deg seguido del alabeo hand_rot_offset (devuelve 0). Con la mano armada es la misma
  * que usa vrbody_apply para dibujar la mano; el arma cuelga del agarre del mando con ella (mano = agarre * este desvío). */
 int vrbody_hand_offset(int side, float q[4]);
@@ -297,6 +327,7 @@ typedef struct VrBodyArmLive {
     float grip_floor;            /* mínimo del agarre mientras golpea (1) */
     float fade;                  /* peso de fundido 0..1 (suavizado) */
     int has_prev; float tau_prev, tau_f_prev, swivel_prev;   /* giro del antebrazo y del codo del apply (ver VrArmIn) */
+    float len_k;                 /* k del largo de brazo del usuario (vrbody_arm_scale) con que `rig` ya viene escalado; 0 (memset) = 1 */
 } VrBodyArmLive;
 int vrbody_arm_live(int side, VrBodyArmLive *out);
 /* Brazo resuelto (espacio del usuario, m): origen de las piezas brazo, antebrazo y mano y sus orientaciones (columnas = ejes locales de la pieza). */
@@ -304,7 +335,7 @@ typedef struct VrBodyArmPose {
     float shoulder[3], elbow[3], wrist[3];
     float R_upper[9], R_fore[9], R_hand[9];   /* R_upper y R_fore ya alargadas (vrbody_stretch_bone) con `stretch` */
     float err_mm;
-    float stretch;               /* >= 1: factor de estirado de los huesos */
+    float stretch;               /* factor de largo de los huesos respecto al modelo: estirado del solver (>= 1) por len_k (< 1 si el brazo del usuario es más corto que el del modelo) */
     unsigned flags;              /* VRARM_* */
 } VrBodyArmPose;
 /* Pura. Repite la IK con el agarre vivo (live_p, live_q; cuaternión x,y,z,w): muñeca y mano del objetivo se mueven con D = vivo * inv(agarre simulado), el hombro, el torso y el

@@ -42,9 +42,17 @@ int main(int argc, char **argv) {
     CHECK(aa_sight_face(&st.base, &f) == 0, "sin modelo enlazado no hay cara");
     CHECK(aa_sight_face(NULL, &f) == 0 && aa_sight_face(&st.base, NULL) == 0, "argumentos nulos");
     { WScreenFace lf; CHECK(aa_led_face(&st.base, &lf) == 0 && aa_led_face(NULL, &lf) == 0 && aa_led_face(&st.base, NULL) == 0, "LED: sin modelo / argumentos nulos no hay pantalla"); }
-    const char *c[3] = { argc > 1 ? argv[1] : NULL, getenv("STAGE_FILE"), "../../gamedata/stages.bin" };
+    {   /* punto del gesto de apuntar (aa_gesture_point): sin modelo, el centro nominal de la LED del Stinger (x -70, y 172, z -44 mm medidos en el modelo real); orientación sin giro */
+        WPose gp = aa_gesture_point(&st.base);
+        CHECK(fabsf(gp.p.x + 0.070f) < 0.002f && fabsf(gp.p.y - 0.172f) < 0.002f && fabsf(gp.p.z + 0.044f) < 0.002f, "punto del gesto sin modelo: (%.1f %.1f %.1f) mm", gp.p.x * 1000, gp.p.y * 1000, gp.p.z * 1000);
+        CHECK(gp.q.x == 0 && gp.q.y == 0 && gp.q.z == 0 && gp.q.w == 1, "punto del gesto sin giro");
+        WPose g0 = aa_gesture_point(NULL);
+        CHECK(fabsf(g0.p.z - gp.p.z) < 1e-6f, "punto del gesto con estado nulo: el nominal");
+        CHECK(fabsf(gp.p.z - w_aa.points[WP_EYE].p.z) > 0.5f, "el punto del gesto esta a >0,5 m del visor WP_EYE (z %.0f vs %.0f mm): la cabeza no llega a el", gp.p.z * 1000, w_aa.points[WP_EYE].p.z * 1000);
+    }
+    const char *c[4] = { argc > 1 ? argv[1] : NULL, getenv("STAGE_FILE"), "/tmp/gamedata/STAGE.DIR", "../../gamedata/stages.bin" };
     uint8_t *d = NULL; size_t n = 0;
-    for (int i = 0; i < 3 && !d; i++) d = slurp(c[i], &n);
+    for (int i = 0; i < 4 && !d; i++) d = slurp(c[i], &n);
     if (!d) { printf("test_aa_sight: sin modelos reales: parte real omitida\n"); }
     else {
         const char *stage = getenv("STAGE_NAME"); if (!stage) stage = "init";
@@ -77,8 +85,15 @@ int main(int argc, char **argv) {
           CHECK(fabsf(lf.face.p.x + 0.070f) < 0.004f && fabsf(lf.face.p.y - 0.172f) < 0.004f && fabsf(lf.face.p.z + 0.044f + 0.002f) < 0.006f, "centro (%.1f %.1f %.1f) mm", lf.face.p.x * 1000, lf.face.p.y * 1000, lf.face.p.z * 1000); }
         CHECK(led_hits(&st.base, &lf, 0.0f) == 0, "un triangulo del modelo atraviesa la pantalla del Stinger");
         CHECK(led_hits(&st.base, &lf, 0.010f) == 0, "un triangulo del modelo cruza el prisma de 1 cm delante de la pantalla del Stinger");
+        { WPose gp = aa_gesture_point(&st.base);       /* con el modelo: el centro de la cara de la LED (sin el levantado hacia el ojo de la normal) */
+          CHECK(fabsf(gp.p.x - lf.face.p.x) < 1e-6f && fabsf(gp.p.y - lf.face.p.y) < 1e-6f && fabsf(gp.p.z - lf.face.p.z) < 1e-6f, "punto del gesto = centro de la LED (%.1f %.1f %.1f mm)", gp.p.x * 1000, gp.p.y * 1000, gp.p.z * 1000);
+          CHECK(gp.q.x == 0 && gp.q.y == 0 && gp.q.z == 0 && gp.q.w == 1, "punto del gesto con el eje del tubo (sin el giro de la LED)"); }
         /* fija respecto al modelo: no depende de la entrada (mano/cabeza) ni del estado */
         { WScreenFace l2; st.base.channel[WCH_LID] = 0.7f; CHECK(aa_led_face(&st.base, &l2) == 1 && !memcmp(&lf, &l2, sizeof lf), "LED idéntica con otro estado de canales"); }
+        /* como lo carga el anfitrion (vrgame.c load_thread): la definicion es una COPIA en el monton, no &w_aa; la pantalla debe hallarse igual */
+        { static WeaponDef copy; copy = w_aa; st.base.def = &copy;
+          WScreenFace cf; CHECK(aa_led_face(&st.base, &cf) == 1 && !memcmp(&cf, &lf, sizeof cf), "LED con la definicion copiada por el anfitrion");
+          CHECK(aa_sight_face(&st.base, &f) == 1, "cara con la definicion copiada"); st.base.def = &w_aa; }
         wcut_free(&cs); wload_free(&m); free(d);
     }
     printf(fails ? "test_aa_sight: FALLO (%d)\n" : "test_aa_sight: OK\n", fails);

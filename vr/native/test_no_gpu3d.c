@@ -197,11 +197,29 @@ int main(void) {
     /* fuera de la pantalla 3D la medida de ventana del trabajador de cobertura se tira: al entrar no se vuelca `nativo_tapa` con una medida vieja */
     CHECK(strstr(vh, "else { disc.have_prev = 0; disc.k = 0; disc.f0 = (uint32_t)hle_frame_count(); }") != NULL &&
           strstr(vh, "const int hw = ns_cover_glue_win(win, &wf) && (int32_t)(wf - disc.f0) > 0;") != NULL, "vrhost: las medidas de ventana de listas anteriores a la entrada en ENGINE se descartan");
-    {   /* el menú principal cabe: 40 px por fila desde y = 106 y el pie de ayuda 56 px por encima del borde */
-        const char *e = strstr(xp, "enum XRMenuItem: Int, CaseIterable {"), *m = strstr(xp, "private static let menuW = 1024, menuH = ");
-        int rows = 0, mh = m ? atoi(m + strlen("private static let menuW = 1024, menuH = ")) : 0;
-        if (e) { const char *q = strstr(e, "case "), *end = q ? strchr(q, '\n') : NULL; rows = 1; for (; q && end && q < end; q++) rows += *q == ','; }
-        CHECK(rows > 0 && mh - 56 >= 106 + 40 * rows + 18, "menú: %d filas en %d px", rows, mh);
+    {   /* la página más larga del menú (principal o Diagnóstico) cabe: 40 px por fila desde y = 106 y el pie de ayuda 56 px por encima del borde */
+        const char *m = strstr(xp, "private static let menuW = 1024, menuH = ");
+        int mh = m ? atoi(m + strlen("private static let menuW = 1024, menuH = ")) : 0, rows = 0;
+        const char *names[2] = { "enum XRMenuItem: Int, CaseIterable {", "enum XRDiagItem: Int, CaseIterable {" };
+        int per[2] = { 0, 0 };
+        for (int k = 0; k < 2; k++) {
+            const char *e = strstr(xp, names[k]), *q = e ? strstr(e, "case ") : NULL, *end = q ? strchr(q, '\n') : NULL;
+            if (q && end) { per[k] = 1; for (; q < end; q++) per[k] += *q == ','; }
+            if (per[k] > rows) rows = per[k];
+        }
+        CHECK(per[0] > 0 && per[1] > 0 && mh - 56 >= 106 + 40 * rows + 18, "menú: principal %d filas, Diagnóstico %d filas, %d px", per[0], per[1], mh);
+        /* «Filtro de texturas 3D» ya no existe en el menú ni se guarda: el filtro MMPX de las texturas 3D queda siempre apagado */
+        CHECK(strstr(nr, "static var tex3DMMPX = false") != NULL && count(xp, "tex3D") == 0 && count(xp, "Filtro de texturas 3D") == 0 && count(xp, "xr.view.tex3d") == 0, "texturas 3D: sin ajuste en el menú, apagado fijo");
+        /* esos siete ajustes viven solo en la página de Diagnóstico (no en el menú principal) */
+        { const char *de = strstr(xp, "enum XRDiagItem: Int, CaseIterable {"), *dl = de ? strchr(de, '\n') : NULL, *dn = dl ? strchr(dl + 1, '\n') : NULL;
+          const char *me = strstr(xp, "enum XRMenuItem: Int, CaseIterable {"), *ml = me ? strchr(me, '\n') : NULL, *mn = ml ? strchr(ml + 1, '\n') : NULL;
+          const char *k[7] = { "engBehind", "engSize", "engBack", "engSplit", "exact2D", "integerScale", "debugAxes" };
+          int in_diag = 0, in_main = 0;
+          for (int i = 0; i < 7; i++) {
+              const char *p = de ? strstr(de, k[i]) : NULL; in_diag += p && dn && p < dn;
+              p = me ? strstr(me, k[i]) : NULL; in_main += p && mn && p < mn;
+          }
+          CHECK(in_diag == 7 && in_main == 0, "menú: los 7 ajustes 3D/2D están en Diagnóstico y no en el principal (%d/%d)", in_diag, in_main); }
     }
     CHECK(strstr(nr, "[nativo] escena_ausente=") != NULL && strstr(nr, "sceneAbsent += 1") != NULL, "escena nativa ausente: se conserva la última válida y se registra [nativo] escena_ausente=N");
     CHECK(count(xe, "worldNearM") == 0 && strstr(xe, "if dg.projMode == 1 { projNote") != NULL && strstr(xe, "projSource = \"sistema\"") != NULL && strstr(xe, "nearOverride: dg.nearPlane))") != NULL, "proyeccion del sistema (drawable, con su depthRange) por defecto; sin plano cercano propio");

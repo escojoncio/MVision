@@ -79,6 +79,9 @@ int main(int argc, char **argv) {
         CHECK(led_hits(&st.base, &f, 0.010f) == 0, "un triangulo del modelo cruza el prisma de 1 cm delante de la pantalla");
         /* fija respecto al modelo: no depende del estado */
         { WScreenFace l2; st.base.phase = G_FLIGHT; st.base.channel[WCH_LID] = 0.6f; CHECK(guided_led_face(&st.base, &l2) == 1 && !memcmp(&f, &l2, sizeof f), "identica en vuelo / con la tapa abierta"); }
+        /* como lo carga el anfitrion (vrgame.c load_thread): la definicion es una COPIA en el monton, no &w_guided */
+        { static WeaponDef copy; copy = w_guided; st.base.def = &copy;
+          WScreenFace cf; CHECK(guided_led_face(&st.base, &cf) == 1 && !memcmp(&cf, &f, sizeof cf), "LED con la definicion copiada por el anfitrion"); st.base.def = &w_guided; }
         wcut_free(&cs); wload_free(&m); free(d);
     }
     printf(fails ? "test_guided_led: FALLO (%d)\n" : "test_guided_led: OK\n", fails);

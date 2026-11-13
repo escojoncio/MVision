@@ -171,10 +171,11 @@ static inline int vrhost_load_boost(int black, int black_run, int32_t undraw, in
 }
 
 /* ¿Se quitan de la capa 2D los polígonos 3D sin vista (opts.drop_world2d de vr_scene.h)? Solo con render nativo, que dibuja el 3D: el mundo (también con la ventana del selector encima: son rects 2D y el cielo / las
- * estrellas sin vista que el juego sigue dibujando no deben llegar al panel HUD, donde son un cuadrado opaco ante la cara; sí se conserva con la pausa, sin volcado que lo respalde) y la cinemática del motor
+ * estrellas sin vista que el juego sigue dibujando no deben llegar al panel HUD, donde son un cuadrado opaco ante la cara; también con la pausa: el nativo sigue dibujando el mundo congelado y esos polígonos eran el cuadrado con imagen al pulsar Start) y la cinemática del motor
  * (pantalla 3D: encima solo va 2D de verdad, nunca trozos de la imagen de PS1). Menús y vídeo son 2D enteros. Función pura; vrhost.c. */
 static inline int vrhost_drop_world2d(int native, int kind, int reason) {
-    return native && ((kind == VRV_K_WORLD && reason != VRV_R_PAUSE_WORLD) || kind == VRV_K_ENGINE);
+    (void)reason;
+    return native && (kind == VRV_K_WORLD || kind == VRV_K_ENGINE);
 }
 
 /* ¿Pinta el render nativo AHORA el efecto de pantalla `bit` (NS_SFX_FADE, NS_SFX_GAS) que el juego dibuja con paquetes propios (fadeio.c, gas_efct.c)? Solo entonces esas primitivas salen del

@@ -161,6 +161,7 @@ final class VRInput: @unchecked Sendable {
         started = true
         hub.onChange = { [weak self] in self?.controllersChanged() }
         Self.restoreHandCalibration()
+        Self.restoreArmLengths()
         hub.start()
         controllersChanged()
     }
@@ -170,6 +171,8 @@ final class VRInput: @unchecked Sendable {
     private static let handCalKey = "vri.handCal2"          // [versión, izq x,y,z,w, der x,y,z,w]
     private static let handCalVersion = 1.0
     private static var handCalSerial: UInt32 = 0
+    private static let armLenKey = "vri.armLen1"          // [versión, largo de brazo izq (m), der (m)]; 0 = sin medir. Clave aparte: handCal2 no cambia
+    private static let armLenVersion = 1.0
 
     /// Restaura la calibración guardada (9 números: versión 1 + izquierda x,y,z,w + derecha x,y,z,w; un cuaternión nulo = sin calibrar; versión o tamaño distintos se ignoran).
     static func restoreHandCalibration(_ d: UserDefaults = .standard) {
@@ -179,6 +182,12 @@ final class VRInput: @unchecked Sendable {
             mv_vrgame_set_hand_calibration(Int32(s), q)
         }
         handCalSerial = mv_vrgame_calibration_serial()
+    }
+
+    /// Restaura el largo de brazo medido por "Calibrar manos" (3 números: versión 1 + izquierda + derecha, en metros; 0 = sin medir; C rechaza lo que quede fuera de 0,45..0,85 m).
+    static func restoreArmLengths(_ d: UserDefaults = .standard) {
+        guard let a = d.array(forKey: armLenKey) as? [Double], a.count == 3, a[0] == armLenVersion, a.allSatisfy({ $0.isFinite }) else { return }
+        for s in 0..<2 where a[1 + s] > 0 { mv_vrgame_set_arm_length(Int32(s), Float(a[1 + s])) }
     }
 
     /// Guarda la calibración cuando cambia (la hace o la borra el hilo del juego).
@@ -192,6 +201,12 @@ final class VRInput: @unchecked Sendable {
             if mv_vrgame_hand_calibration(Int32(s), &q) != 0 { for i in 0..<4 { out[1 + 4 * s + i] = Double(q[i]) } }
         }
         d.set(out, forKey: handCalKey)
+        var arms = [Double](repeating: 0, count: 3); arms[0] = armLenVersion       // el largo de brazo cambia con la misma calibración (mismo contador) y se borra con ella
+        for s in 0..<2 {
+            var l: Float = 0
+            if mv_vrgame_arm_length(Int32(s), &l) != 0 { arms[1 + s] = Double(l) }
+        }
+        d.set(arms, forKey: armLenKey)
     }
 
     /// Conexión tardía incluida: cada alta/baja de un mando vuelve a pedir el seguimiento del conjunto actual.

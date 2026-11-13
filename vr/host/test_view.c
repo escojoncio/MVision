@@ -335,7 +335,7 @@ int main(void) {
     {   /* vrhost_drop_world2d: ¿los polígonos 3D sin vista (el nativo los dibuja) se quitan de la capa 2D? (native, kind, reason) */
         CHECK(vrhost_drop_world2d(1, VRV_K_WORLD, VRV_R_WORLD) == 1, "nativo + mundo = quita el 3D sin resolver");
         CHECK(vrhost_drop_world2d(1, VRV_K_WORLD, VRV_R_SELECTOR) == 1, "nativo + selector de armas/objetos = quita el 3D sin resolver (cielo, estrellas): la ventana son rects 2D y el cielo sin vista no es un cuadrado en el HUD");
-        CHECK(vrhost_drop_world2d(1, VRV_K_WORLD, VRV_R_PAUSE_WORLD) == 0, "nativo + pausa con la camara VR: sin cambios (sin volcado de la pausa que lo respalde)");
+        CHECK(vrhost_drop_world2d(1, VRV_K_WORLD, VRV_R_PAUSE_WORLD) == 1, "nativo + pausa con la camara VR = quita el 3D sin resolver: el nativo sigue dibujando el mundo congelado (nat-diag dibujado=true en pausa, log 13-11) y esos poligonos (volcado d0001: cuña con textura) eran el cuadrado con imagen del panel");
         CHECK(vrhost_drop_world2d(1, VRV_K_ENGINE, VRV_R_CINEMATIC) == 1 && vrhost_drop_world2d(1, VRV_K_ENGINE, VRV_R_NO_GAME) == 1, "nativo + cinematica del motor (con o sin partida) = la capa 2D solo lleva 2D (el 3D lo dibuja el nativo)");
         CHECK(vrhost_drop_world2d(1, VRV_K_UI, VRV_R_NO_GAME) == 0 && vrhost_drop_world2d(1, VRV_K_VIDEO, VRV_R_NO_GAME) == 0, "nativo + menu / video = todo es 2D");
         CHECK(vrhost_drop_world2d(0, VRV_K_WORLD, VRV_R_WORLD) == 0 && vrhost_drop_world2d(0, VRV_K_ENGINE, VRV_R_CINEMATIC) == 0, "modo gpu: no");

@@ -23,6 +23,8 @@
 #define V_WIN             0.100f  /* ventana de estimación (s) */
 #define V_LAG_MIN         0.010f  /* la ventana acaba al menos este tiempo antes del último muestreo (el borde de la parábola es ruidoso) */
 #define V_LAG_MAX         0.120f  /* ... y como mucho este tiempo antes (un soltar muy lento no mide una velocidad de hace medio segundo) */
+#define V_SLOW_COS        0.5f    /* coseno de 60 grados: la ventana lenta solo vale si apunta a menos de esto de la corta o del frente de la mano */
+#define V_LAG_SLOW        0.300f  /* soltar lento del gatillo (de TRIG_ON a TRIG_OFF): la mano ya frena cuando se detecta; se mide tambien la ventana que acaba al empezar a soltar (hasta este tiempo antes) y vale la mas rapida */
 #define RESPAWN_T         0.40f   /* tiempo hasta volver a poder sacar otra */
 
 /* Datos ajustables por tipo: s de espoleta (provisionales; el juego pone la suya al crear la granada). */
@@ -189,6 +191,15 @@ static int throw_it(WThrowState *t, const WInput *in, const WGameBridge *g) {
     WVec3 vh, wh;
     float lag = t->rel_t >= 0 ? t->hist.clock - t->rel_t : 0.0f;       /* el instante que vale es el de empezar a soltar el gatillo, no el de detectarlo abierto */
     wvh_estimate(&t->hist, V_WIN, wcore_clampf(lag, V_LAG_MIN, V_LAG_MAX), &vh, &wh);
+    if (lag > V_LAG_MAX) {      /* gatillo lento: el tope de V_LAG_MAX deja la ventana en plena frenada de la mano (granadas que caian a los pies); gana la ventana de antes si es mas rapida */
+        WVec3 vs, ws;
+        wvh_estimate(&t->hist, V_WIN, wcore_clampf(lag, V_LAG_MIN, V_LAG_SLOW), &vs, &ws);
+        if (wv_len(vs) > wv_len(vh)) {      /* ... pero solo si va en la misma dirección (a menos de ~60 grados) que la ventana corta o que el frente de la mano: un amago hacia atrás más rápido no manda la granada hacia atrás */
+            const WVec3 front = wquat_rotate(wquat_normalize(in->hand[0].q), wv(0, 0, -1));
+            const float cs = wv_len(vs) > 1e-6f ? 1.0f / wv_len(vs) : 0.0f, ch = wv_len(vh) > 0.3f ? 1.0f / wv_len(vh) : 0.0f;      /* ventana corta de menos de 0,3 m/s: sin dirección fiable */
+            if (cs * wv_dot(vs, front) >= V_SLOW_COS || (ch > 0.0f && cs * ch * wv_dot(vs, vh) >= V_SLOW_COS)) { vh = vs; wh = ws; }
+        }
+    }
     float wl = wv_len(wh);
     if (!(wl <= W_MAX)) wh = wl > 0 && wl == wl ? wv_scale(wh, W_MAX / wl) : wv(0, 0, 0);   /* tope (y NaN -> 0) */
     WVec3 r = wv_sub(ev.pose.p, in->hand[0].p);          /* de la mano al centro del objeto */

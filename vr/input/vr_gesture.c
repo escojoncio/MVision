@@ -7,11 +7,11 @@ static int fin3(const float *v) { return fin(v[0]) && fin(v[1]) && fin(v[2]); }
 
 void vrg_cfg_defaults(vrg_cfg_t *c) {
     memset(c, 0, sizeof *c);
-    c->enable = 1; c->fist_required = 1; c->fist_haptic = 0.12f; c->item_hold_s = 0.35f; c->punch_dir_cos = 0.35f; c->trig_on = 0.6f; c->trig_off = 0.3f; c->punch = c->grab = c->knock = c->peek = 1;
+    c->enable = 1; c->fist_required = 1; c->fist_haptic = 0.12f; c->punch_dir_cos = 0.35f; c->trig_on = 0.6f; c->trig_off = 0.3f; c->punch = c->grab = c->knock = c->peek = 1;
     c->right_handed = 1;
     c->punch_speed = 0.5f; c->knock_speed = 0.4f; c->knock_touch = 0.08f; c->knock_touch_wall = 0.12f; c->knock_speed_wall = 0.2f; c->knock_ny_max = 0.5f; c->knock_cooldown_s = 0.25f; c->knock_enemy_m = 1.0f; c->reach_min = 0.20f; c->melee_range = 3.0f; c->front_cos = 0.5f;
     c->grab_range = 1.3f; c->neck_radius = 0.36f; c->neck_height = 0.45f; c->back_dist = 0.25f; c->grab_after_punch_s = 0.2f;
-    c->chest_side = 0.16f; c->chest_down = 0.26f; c->chest_fwd = -0.02f; c->chest_radius = 0.15f; c->chest_exit = 0.20f; c->chest_hold_s = 0.30f;
+    c->chest_side = 0.16f; c->chest_down = 0.305f; c->chest_fwd = 0.005f; c->chest_radius = 0.175f; c->chest_exit = 0.225f; c->chest_hold_s = 0.30f; c->face_radius = 0.15f;
     c->grip_on = 0.65f; c->grip_off = 0.35f; c->peek_on = 0.12f; c->peek_off = 0.06f; c->cooldown_s = 0.12f;
     c->throw_speed = 1.0f; c->throw_reach = 0.30f; c->grab_slow_speed = 0.9f; c->grab_delay_s = 0.3f; c->contact_latch_s = 0.15f; c->contact_speed = 0.5f; c->body_radius = 0.28f; c->body_low = 0.5f; c->body_high = 0.65f; c->fist_radius = 0.12f; c->contact_tol = 0.05f;
 }
@@ -392,9 +392,14 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
             float side = s == 0 ? -c->chest_side : c->chest_side;
             float dx = hfs[s][0] - side, dy = hfs[s][1] + c->chest_down, dz = hfs[s][2] - c->chest_fwd;
             chest_d[s] = sqrtf(dx * dx + dy * dy + dz * dz);
-            chest[s] = chest_d[s] <= (g->chest_prev[s] ? c->chest_exit : c->chest_radius);
+            /* ni la zona, ni su histéresis, ni el anillo de anticipación suben del borde superior (chest_radius - chest_down respecto a la cabeza: a la altura del pecho, no de la cabeza); con la mira o una vista
+             * especial levantada (solo en la mano que la sostiene: la dominante; la otra mano sigue pudiendo abrir menús en el pecho), o la mano a face_radius del ojo (arma apuntada a la cara), la zona no actúa en esa mano */
+            const int face = (in->face_view && s == (c->right_handed ? 1 : 0)) || sqrtf(hfs[s][0] * hfs[s][0] + hfs[s][1] * hfs[s][1] + hfs[s][2] * hfs[s][2]) <= c->face_radius;
+            const int low = !face && hfs[s][1] <= c->chest_radius - c->chest_down;
+            chest[s] = low && chest_d[s] <= (g->chest_prev[s] ? c->chest_exit : c->chest_radius);
             out->chest_in[s] = chest[s];
-            if (chest[s] && !(in->throw_hold && s == (c->right_handed ? 1 : 0))) trig_mask |= (uint16_t)(s == (c->right_handed ? 1 : 0) ? VRG_R2 : VRG_L2);   /* dentro de su zona el gatillo no llega al juego (ni disparo ni acción); con arrojadiza en la mano del arma el gatillo es suyo: se prepara junto al pecho */
+            out->chest_ring[s] = low && chest_d[s] <= c->chest_exit && !in->ring_off[s];      /* ring_off: arma de dos manos soldada, la mano del gatillo no tiene anillo (la zona sí) */
+            if (chest[s]) trig_mask |= (uint16_t)(s == (c->right_handed ? 1 : 0) ? VRG_R2 : VRG_L2);   /* dentro de su zona el gatillo no llega al juego (ni disparo ni acción), tampoco con una arrojadiza en la mano del arma */
             if (chest[s] && !g->chest_prev[s] && !trg[s] && g->warm == 0 && g->chest_cool[s] <= 0) { g->chest_cool[s] = 0.5f; if (out->haptic[s] < 0.15f) out->haptic[s] = 0.15f; }   /* aviso al entrar en la zona */
             g->chest_prev[s] = chest[s];
             if (g->chest_cool[s] > 0) g->chest_cool[s] -= dt;
@@ -486,9 +491,13 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
     /* ventana del pecho: el GATILLO de la mano apretado (flanco) abre un intento; fuera de la zona se rechaza ya; dentro, debe mantenerse chest_hold_s */
     for (int s = 0; s < 2; s++) {
         if (!tedge[s] || ((g->menu_hold >> s) & 1) || g->chest_lock[s]) continue;
-        if (in->throw_hold && s == (c->right_handed ? 1 : 0)) continue;     /* arrojadiza en la mano del arma: el gatillo es suyo (preparar/lanzar), no abre la ventana de armas */
         if (chest[s]) { g->chest_live[s] = 1; g->chest_t[s] = 0; }
-        else { out->pecho[s].valid = 1; out->pecho[s].dist = chest_d[s]; out->pecho[s].reason = "lejos"; }
+        else { out->pecho[s].valid = 1; out->pecho[s].dist = chest_d[s]; out->pecho[s].reason = "lejos"; if (out->chest_ring[s]) g->ring_pend[s] = 1; }      /* en el anillo el disparo ya está bloqueado (vrg_step_pad): si entra en la zona con el gatillo apretado, sigue */
+    }
+    for (int s = 0; s < 2; s++) {      /* pulsación hecha en el anillo: vale mientras el gatillo siga apretado y la mano en el anillo; al llegar a la zona empieza el intento (sin pulsar otra vez) */
+        if (!g->ring_pend[s]) continue;
+        if (!tr[s] || !trg[s] || !out->chest_ring[s] || ((g->menu_hold >> s) & 1) || g->chest_lock[s]) g->ring_pend[s] = 0;
+        else if (chest[s]) { g->ring_pend[s] = 0; g->chest_live[s] = 1; g->chest_t[s] = 0; }
     }
     for (int s = 0; s < 2; s++) {      /* intento en curso: el gatillo sigue apretado dentro de la zona; al cumplir chest_hold_s se abre la ventana */
         if (!g->chest_live[s] || tedge[s]) continue;      /* en el fotograma de la pulsación el tiempo es 0 */
@@ -497,7 +506,6 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
         else if (!trg[s]) why = "soltado";
         else if (!chest[s]) why = "salio_zona";
         else if (grabbing || grab_start || g->gp_t[s] > 0) why = "agarre";
-        else if (in->throw_hold && s == (c->right_handed ? 1 : 0)) why = "arrojadiza";     /* se preparó con el intento en curso */
         if (!why) {
             g->chest_t[s] += dt;
             if (g->chest_t[s] + 1e-3f < c->chest_hold_s) continue;
@@ -517,16 +525,6 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
     if (fist_guard) out->mask |= (uint16_t)(VRG_R1 | VRG_L1);
     out->mask |= trig_mask;
 
-    /* ventana de objetos (R1) / armas (L1): con las manos libres los grips no las abren; mantener el clic del stick de cada mano sí */
-    {
-        int st[2] = {in->stick_dom, in->stick_off};
-        /* los dos clics a la vez (mantenidos 1 s = gesto de volcado de otra rama) no abren ninguna ventana */
-        if (st[0] && st[1]) st[0] = st[1] = 0;
-        for (int k = 0; k < 2; k++) {
-            if (st[k] && free_hands) g->item_t[k] += dt; else g->item_t[k] = 0;
-            if (g->item_t[k] >= c->item_hold_s) out->press |= (uint16_t)(k == 0 ? VRG_R2 : VRG_L2);
-        }
-    }
     for (int s = 0; s < 2; s++) { if (tr[s]) { memcpy(g->prev_hand[s], in->hand[s], sizeof g->prev_hand[s]); g->prev_hand_ok[s] = 1; } else g->prev_hand_ok[s] = 0; }
     if (circle) out->press |= VRG_CIRCLE;
     if (triangle) out->press |= VRG_TRIANGLE;
@@ -567,8 +565,10 @@ uint16_t vrg_step_pad(vrg_t *g, const vrg_in_t *in, vrg_out_t *out, const vrg_pa
         if (!g->cfg.enable) r = VRG_FB_NONE;
         else if (!p->tracked[s]) r = g->fb[s];      /* sin seguimiento se conserva (y fb_last): al recuperarlo con el gatillo apretado no se ve un flanco */
         else if (win) r = VRG_FB_WINDOW;
-        else if (out->chest_in[s] && !(in->throw_hold && s == (g->cfg.right_handed ? 1 : 0))) r = VRG_FB_ZONE;      /* arrojadiza en la mano del arma: se prepara junto al pecho (sin bloqueo) */
+        else if (p->menu_open) r = VRG_FB_WINDOW;      /* menú de armas/objetos abierto (lo abra quien lo abra): ninguna mano usa su arma ni su objeto */
+        else if (out->chest_in[s]) r = VRG_FB_ZONE;      /* también con una arrojadiza en la mano del arma: pulsar el gatillo para abrir el menú no la prepara ni la lanza */
         else if (g->fb[s] != VRG_FB_NONE && dn) r = VRG_FB_RELEASE;
+        else if (out->chest_ring[s] && dn && g->fb_last[s] <= g->cfg.trig_off) r = VRG_FB_RELEASE;      /* anticipo: pulsación NUEVA ya junto a la zona (entre chest_radius y chest_exit), la mano llegando al pecho; hasta soltarlo */
         g->fb[s] = r;
         if (r == VRG_FB_NONE) g->fb_last[s] = (p->tracked[s] && fin(p->trig[s])) ? p->trig[s] : 0.0f;
     }

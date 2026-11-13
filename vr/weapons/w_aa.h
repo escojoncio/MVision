@@ -6,7 +6,7 @@
  * estado visible (aa_lock_state / aa_lock_progress). La mira y el marco de fijación son los del HUD del juego; el tono
  * de fijación es el del juego. Sin vista auxiliar ni superposición propia.
  *
- * El visor (WP_EYE) es el punto desde el que se mira: el anfitrión lo pasa a vr_aa (vraa_gesture / vraa_set_scope). */
+ * El visor (WP_EYE) es el origen de la vista del buscador del juego (vraa_set_scope; su dirección es el eje del tubo, no la de la cabeza); el gesto de apuntar (vraa_gesture) se mide contra la LED (aa_gesture_point). */
 #pragma once
 #include "weapon.h"
 
@@ -66,8 +66,14 @@ void aa_feed_game_lock(WeaponState *s, const AAGameLock *g);
 int aa_spare_pose(const WeaponState *s, const WInput *in, WPose *out);
 /* Zona de la espalda donde está el tubo de repuesto (mundo); radio en m. */
 WVec3 aa_back_zone(const WInput *in, float *radius);
-/* Pose mundo del visor (WP_EYE): el punto desde el que mira el buscador del juego (para vraa_gesture/vraa_set_scope). */
+/* Pose mundo del visor (WP_EYE): el punto desde el que mira el buscador del juego (para vraa_set_scope). */
 WPose aa_sight_pose(const WeaponState *s, const WInput *in);
+/* Punto del gesto de apuntar (marco del arma, sin giro: el eje del tubo es -Z): el centro de la pantalla LED (aa_led_face), contra el que vraa_gesture mide la distancia de la cabeza; la LED esta pegada a la cara del
+ * jugador cuando mira por el visor, mientras que WP_EYE (origen de la camara del buscador) queda ~0,6 m por delante. Sin modelo enlazado (o s nulo): el centro nominal medido en el modelo real. */
+#define AA_LED_NOMINAL_X (-0.070f)
+#define AA_LED_NOMINAL_Y  0.172f
+#define AA_LED_NOMINAL_Z (-0.044f)
+WPose aa_gesture_point(const WeaponState *s);
 /* Cara trasera de la mira del modelo (pieza "screen": el polígono por el que mira el ojo), en el marco del arma: face = centro y orientación (+Z hacia el ojo, sin giro) adelantada AA_FACE_LIFT hacia el ojo,
  * w x h = caja del contorno (m, ejes x derecha / y arriba), poly = contorno convexo (npoly <= AA_POLY_MAX) relativo al centro (x derecha, y arriba, m). Devuelve 0 sin modelo enlazado o sin pieza (el anfitrión usa
  * entonces el rectángulo del HUD de siempre). */
