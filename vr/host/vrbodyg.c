@@ -28,12 +28,32 @@ void mv_vrgame_set_gestures(int32_t enable, int32_t mask) {
 }
 static _Atomic int32_t g_menu_hand = -1;       /* publicado por el hilo de juego (pub_menu_hand); el hilo de render solo lo lee */
 static void pub_menu_hand(void) { int h = inited ? G.menu_hold : 0; atomic_store(&g_menu_hand, h & 1 ? 0 : (h & 2 ? 1 : -1)); }
-void vrbodyg_reset(void) { if (inited) { vrg_reset(&G); pub_menu_hand(); } }
+static int melee_busy, busy_force;              /* golpe/agarre del cuerpo en el último VBlank (lo lee vrgame c4_remote); busy_force: solo pruebas */
+void vrbodyg_reset(void) { melee_busy = 0; if (inited) { vrg_reset(&G); pub_menu_hand(); } }
+int vrbodyg_melee_busy(void) { return melee_busy || busy_force; }
+void vrbodyg_test_force_busy(int on) { busy_force = on != 0; }
 unsigned vrbodyg_event_count(int ev) { return ev >= 0 && ev < 16 ? n_events[ev] : 0; }
 /* mano física que mantiene abierta la ventana de armas/objetos con el gesto del pecho (0 izquierda = L2, 1 derecha = R2); -1 ninguna. Lectura atómica del valor publicado al final de la actualización del mando. */
 int32_t mv_vrgame_menu_hand(void) { return atomic_load(&g_menu_hand); }
 
 static int act_holds(int a) { return a == 7 || a == 38 || a == 124; }
+
+/* Bloqueo de disparo en la zona de menú (vr_gesture: vrg_fire_gate): el gatillo del arma de la mano `side` es el real o, con la mano en su zona / con su ventana abierta / hasta soltarlo tras salir, el último visto
+ * antes del bloqueo. Con la mano del arma anula además el disparo en cola. Registro [disparo] bloqueado_menu= en cada cambio. Devuelve VRG_FB_* (0 libre). Una vez por VBlank y mano, tras vrbodyg_pad. */
+int vrbodyg_fire_gate(int side, int weapon_hand, float *trig) {
+    static int prev[2];
+    if (!inited || side < 0 || side > 1 || !trig) return 0;
+    const float raw = *trig;
+    int why = 0;
+    *trig = vrg_fire_gate(&G, side, raw, &why);
+    const int canc = why && weapon_hand ? vrfire_cancel_pending() : 0;
+    if (why != prev[side] || canc) {
+        if (why) fprintf(stderr, "[disparo] bloqueado_menu=%s mano=%d gatillo=%.2f cola_cancelada=%d\n", vrg_fire_block_name(why), side, raw, canc);
+        else fprintf(stderr, "[disparo] bloqueado_menu=fin mano=%d gatillo=%.2f\n", side, raw);
+        prev[side] = why;
+    }
+    return why;
+}
 
 uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, const uint8_t *ram) {
     if (!inited) { vrg_init(&G); inited = 1; }
@@ -121,7 +141,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, cons
                 }
             }
         }
-        in.weapon = bs->weapon; in.stance = bs->stance; in.on_wall = bs->on_wall; in.in_box = bs->in_box; in.in_water = bs->in_water;
+        in.weapon = bs->weapon; in.item_scope = bs->item == 1; /* IT_Scope */ in.stance = bs->stance; in.on_wall = bs->on_wall; in.in_box = bs->in_box; in.in_water = bs->in_water;
         in.holding = act_holds(bs->player_action); in.life = bs->life;
         in.body[0] = bs->ctl_pos.x * 0.001f; in.body[1] = bs->ctl_pos.y * 0.001f; in.body[2] = bs->ctl_pos.z * 0.001f;
         in.yaw = (float)bs->ctl_rot.y * (6.2831853f / 4096.0f);
@@ -153,6 +173,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, cons
     pp.ctl = ctl; pp.menu_open = core && bs->menu_open; pp.pad = pad; pp.pad_in = pad_in; pp.r2_fire = r2_fire;
     for (int s = 0; s < 2; s++) { float p3[3], tg = 0.0f; pp.tracked[s] = vrgame_hand_raw(s, p3, NULL, &tg, NULL); pp.trig[s] = tg; }
     const uint16_t res = vrg_step_pad(&G, &in, &out, &pp);
+    melee_busy = out.punch_side >= 0 || out.grab_start || out.grab_side >= 0 || out.swinging || out.squeeze || out.throw_side >= 0;
     pub_menu_hand();
     {   /* registro [gest] (va al log del visor): cada intento con su motivo, y cada evento */
         static const char *evn[] = {"", "golpe", "agarre", "apreton", "soltar", "pared", "asomar", "pared2", "dano", "impacto", "ventana", "lanzamiento"};

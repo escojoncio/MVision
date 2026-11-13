@@ -220,7 +220,7 @@ final class XRRenderLoop {
         presenter.collisionFade = XRDiag.shared.settings.noLayers ? 0 : max(0, min(1, headFade))      // diagnóstico «sin capas finales»: sin oscurecimiento por colisión
         let renderRecenterInverse = (headCorr[0] != 0 || headCorr[1] != 0 || headCorr[2] != 0)
             ? XRMath.translation(SIMD3<Float>(headCorr[0], headCorr[1], headCorr[2])) * recenterInverse : recenterInverse
-        // Menú VR (mantener el botón de menú izquierdo): mientras está abierto el juego no recibe entrada.
+        // Menú VR (botón de menú izquierdo 0,8 s; R3 3 s = submenú Diagnóstico): mientras está abierto el juego no recibe entrada.
         let blocked = presenter.updateInput(ControllerHub.shared.sample(), dt: dt, head: recentered)
         if blocked {
             if !wasBlocked { VRInput.shared.releaseAll() }

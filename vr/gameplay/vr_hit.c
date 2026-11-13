@@ -22,12 +22,14 @@
 #define A_HZD_MASK   0x800ACB38u     /* grupos de colisión activos */
 /* actor de la bala (0x800779a8 lo crea; 0x800771ac es su tick) */
 #define B_SIZE   0x170u
+#define SILENCER_FLAG 0x800B5FA0u    /* BA_VARS (0x800B5F28) + 2 * 60: GM_SilencerFlag */
 #define B_TARGET 0x44u               /* su blanco de daño (72 B; el daño en +38) */
 #define B_POS    0x110u              /* posición s16[3]: origen del segmento del próximo tick */
 #define B_END    0x118u              /* final del trazado s16[3] (pared del juego o alcance) */
 #define B_VEL    0x120u              /* avance por tick s16[3] */
 #define B_LIMIT  0x138u              /* distancia a la que acaba */
 #define B_WALLHIT 0x140u             /* 1 = su trazado dio en la colisión del juego (pared, suelo, puerta u otra colisión dinámica) a la distancia B_LIMIT */
+#define B_TYPE   0x144u              /* tipo de la bala (bullet.c work->type): 2 hace GM_SetNoise(100,2,hitpos) al impactar, 1 no */
 #define B_SIDE   0x148u
 #define B_DAMAGE 0x154u
 #define B_RANGE  0x158u
@@ -299,7 +301,7 @@ typedef struct {
 } Res;
 
 /* Un único criterio de línea de tiro: el blanco más cercano que toca el rayo antes que la geometría sólida y dentro del alcance. */
-static void resolve(uint8_t *ram, const VrHitTarget *t, int n, const float o[3], const float d[3], float R, float game_wall, Res *r) {
+static void resolve(uint8_t *ram, const VrHitTarget *t, int n, const float o[3], const float d[3], float R, float game_wall, int want_solid, Res *r) {
     memset(r, 0, sizeof *r);
     r->idx = -1; r->wall = R; r->solid = -1.0f;
     float best = R;
@@ -325,7 +327,7 @@ static void resolve(uint8_t *ram, const VrHitTarget *t, int n, const float o[3],
         else if (tcam >= 0.0f && tcam < best) { best = tcam; r->idx = -1; r->cam_ext = tg; r->zone = VRHIT_Z_BOX; r->cam = 1; }
     }
     r->dist = best;
-    if (W.solid) r->solid = W.solid(ram, o, d, best);
+    if (want_solid && W.solid) r->solid = W.solid(ram, o, d, best);
     for (int i = 0; i < 3; i++) r->pt[i] = o[i] + d[i] * best;
 }
 
@@ -340,15 +342,60 @@ float vrhit_probe(const uint8_t *ram, const float o[3], const float d[3], float 
     return best;
 }
 
+/* ---- láser = bala ---- */
+typedef struct { int on, age, hit; float o[3], d[3], pt[3]; } Note;
+static Note g_note[N_AIM];
+static float g_range = VRHIT_RANGE_MIN, g_upm;      /* g_upm: unidades por metro reales (calibradas) que da el anfitrión cada VBlank; 0 = aún no */
+static float log_upm(void) { return g_upm > 0.0f ? g_upm : W.units_per_m > 0.0f ? W.units_per_m : 1000.0f; }
+static int g_ext;
+void vrhit_set_range(float units, float upm) {
+    g_range = isfinite(units) && units > 1000.0f ? units : VRHIT_RANGE_MIN;
+    g_upm = isfinite(upm) && upm > 0.0f ? upm : 0.0f;
+}
+void vrhit_next_bullet_extended(void) { g_ext = 1; }
+
+float vrhit_shot_dist(const uint8_t *ram, const float o[3], const float d[3], float max) {
+    float dn[3]; Res r;
+    if (!ram || !o || !d || !(max > 0.0f) || !unit3(d, dn)) return -1.0f;
+    int n = vrhit_scan(ram, PLAYER_SIDE, 0x10, 1, g_t, VRHIT_MAX_T);
+    resolve((uint8_t *)ram, g_t, n, o, dn, max, -1.0f, 0, &r);
+    return r.dist < max ? r.dist : -1.0f;
+}
+
+void vrhit_note_laser(const uint8_t *ram, const float o[3], const float d[3]) {
+    float dn[3];
+    if (!ram || !o || !d || !unit3(d, dn)) return;
+    float t = vrhit_shot_dist(ram, o, dn, g_range);
+    Note *a = &g_note[0];
+    for (int i = 0; i < N_AIM; i++) { if (!g_note[i].on) { a = &g_note[i]; break; } if (g_note[i].age > a->age) a = &g_note[i]; }
+    a->on = 1; a->age = 0; a->hit = t >= 0.0f;
+    for (int i = 0; i < 3; i++) { a->o[i] = o[i]; a->d[i] = dn[i]; a->pt[i] = o[i] + dn[i] * (t >= 0.0f ? t : g_range); }
+}
+
+/* Anotación del láser para la bala que sale por (o, d): la más reciente que coincide (misma tolerancia que la puntería); se consume. NULL si no hay. */
+static const Note *take_note(const float o[3], const float d[3]) {
+    Note *best = NULL;
+    for (int k = 0; k < N_AIM; k++) {
+        Note *a = &g_note[k];
+        if (!a->on || fabsf(a->o[0] - o[0]) > 16.0f || fabsf(a->o[1] - o[1]) > 16.0f || fabsf(a->o[2] - o[2]) > 16.0f || dot3(a->d, d) < 0.9995f) continue;
+        if (!best || a->age < best->age) best = a;
+    }
+    if (best) best->on = 0;
+    return best;
+}
+
 void vrhit_frame(void) {
-    for (int i = 0; i < N_AIM; i++) if (g_aim[i].on && ++g_aim[i].age > VRHIT_AIM_LIFE) g_aim[i].on = 0;
+    for (int i = 0; i < N_AIM; i++) {
+        if (g_aim[i].on && ++g_aim[i].age > VRHIT_AIM_LIFE) g_aim[i].on = 0;
+        if (g_note[i].on && ++g_note[i].age > VRHIT_AIM_LIFE) g_note[i].on = 0;
+    }
 }
 
 void vrhit_aim(const uint8_t *ram, const float o[3], const float d[3]) {
     float dn[3]; Res r;
     if (!w_set || !ram || !o || !d || !unit3(d, dn)) return;
     int n = vrhit_scan(ram, PLAYER_SIDE, 0x10, 1, g_t, VRHIT_MAX_T);
-    resolve((uint8_t *)ram, g_t, n, o, dn, VRHIT_RANGE_MIN, -1.0f, &r);
+    resolve((uint8_t *)ram, g_t, n, o, dn, VRHIT_RANGE_MIN, -1.0f, 1, &r);
     if (r.idx < 0) return;
     Aim *a = &g_aim[0];
     for (int i = 0; i < N_AIM; i++) { if (!g_aim[i].on) { a = &g_aim[i]; break; } if (g_aim[i].age > a->age) a = &g_aim[i]; }
@@ -392,6 +439,12 @@ static void void_bullet(uint8_t *ram, uint32_t actor) {
     ws32(ram, actor + B_LIMIT, 0);
 }
 
+/* Bala de alcance ampliado sin impacto dentro del alcance del láser: acaba ahí, sin chispa ni sonido de una pared lejana (lo que le queda de recorrido al juego no existe para el tiro VR). */
+static void trim_bullet(uint8_t *ram, uint32_t actor, const float o[3], const float d[3], float R) {
+    ws32(ram, actor + B_LIMIT, (int32_t)R); ws32(ram, actor + B_WALLHIT, 0);
+    for (int k = 0; k < 3; k++) { long q = lrintf(o[k] + d[k] * R); ws16(ram, actor + B_END + 2u * (uint32_t)k, (int16_t)(q > 32767 ? 32767 : q < -32768 ? -32768 : q)); }
+}
+
 /* Bala de un enemigo: ni se recoloca ni se anula ni se marca impacto. Si su rayo cruza la caja de un blanco de otro bando (el jugador) más allá de donde el juego la acaba,
  * su trazado no dio en nada y la geometría del anfitrión (que aquí solo resta) está despejada hasta esa caja, se amplía su recorrido hasta VRHIT_RANGE_MIN: quien sella es
  * el tick del juego. Devuelve 1 si cruza alguna caja (hay algo que anotar). */
@@ -417,6 +470,11 @@ static int enemy_bullet(uint8_t *ram, uint32_t actor, unsigned side, const float
 }
 
 int vrhit_bullet(uint8_t *ram, uint32_t actor, VrHitShot *out) {
+    const int ext_req = g_ext;
+    g_ext = 0;       /* la marca es de esta bala, se resuelva o no */
+    /* Con el silenciador puesto el impacto de la bala promocionada a tipo 2 no debe hacer ruido (el original la crea de tipo 1 y los guardias no oyen la SOCOM silenciada): se devuelve a tipo 1 (el alcance ya se trazó en GetResources).
+     * GM_SilencerFlag = linkvarbuf[60] (s16 en BA_VARS + 120; socom.c GetResources: < 0 sin supresor, >= 0 con él). Sin silenciador el ruido se mantiene. */
+    if (ext_req && ram && ptr_ok(actor, B_SIZE) && rs16(ram, SILENCER_FLAG) >= 0) ws32(ram, actor + B_TYPE, 1);
     if (!w_set || !ram || !ptr_ok(actor, B_SIZE)) return 0;
     float o[3], v[3], d[3];
     for (int i = 0; i < 3; i++) { o[i] = rs16(ram, actor + B_POS + 2u * (uint32_t)i); v[i] = rs16(ram, actor + B_VEL + 2u * (uint32_t)i); }
@@ -424,12 +482,14 @@ int vrhit_bullet(uint8_t *ram, uint32_t actor, VrHitShot *out) {
     unsigned side = ru32(ram, actor + B_SIDE) & 0xFFFFu;
     int player = side == PLAYER_SIDE;
     float R = (float)rs32(ram, actor + B_RANGE);
-    if (!(R >= VRHIT_RANGE_MIN)) R = VRHIT_RANGE_MIN;
+    const int ext = ext_req && player;      /* alcance ampliado por la capa VR: manda el del láser, no el del actor */
+    if (player) R = ext ? g_range : (R > g_range ? R : g_range);
+    else if (!(R >= VRHIT_RANGE_MIN)) R = VRHIT_RANGE_MIN;
     VrHitShot s = {(int)side, -1, VRHIT_Z_MISS, VRHIT_ACT_NONE, rs32(ram, actor + B_DAMAGE), -1, 0.0f};
     if (!player) {
         if (enemy_bullet(ram, actor, side, o, d, &s))
             fprintf(stderr, "[impacto] blanco=%d zona=%s dist=%.2f m vida=%d | bando=enemigo dano=%d accion=%s\n", s.target, s.target >= 0 ? "jugador" : vrhit_zone_name(s.zone),
-                    s.dist / (W.units_per_m > 0.0f ? W.units_per_m : 1000.0f), s.vital, s.damage, s.action == VRHIT_ACT_RANGE ? "alcance" : "intacta");
+                    s.dist / log_upm(), s.vital, s.damage, s.action == VRHIT_ACT_RANGE ? "alcance" : "intacta");
         if (out) *out = s;
         return 1;
     }
@@ -437,7 +497,7 @@ int vrhit_bullet(uint8_t *ram, uint32_t actor, VrHitShot *out) {
     /* geometría sólida = la del anfitrión + los suelos de colisión + lo que ya encontró el trazado del propio juego (colisión del mapa del tirador, puertas y demás colisión dinámica) */
     float gw = rs32(ram, actor + B_WALLHIT) == 1 ? (float)rs32(ram, actor + B_LIMIT) : -1.0f;
     Res r;
-    if (!take_aim(ram, o, d, g_t, n, R, gw, &r)) resolve(ram, g_t, n, o, d, R, gw, &r);
+    if (!take_aim(ram, o, d, g_t, n, R, gw, &r)) resolve(ram, g_t, n, o, d, R, gw, 1, &r);
     s.dist = r.dist;
     int16_t P[3];
     if (r.idx >= 0) {
@@ -462,10 +522,11 @@ int vrhit_bullet(uint8_t *ram, uint32_t actor, VrHitShot *out) {
         s.zone = VRHIT_Z_BOX; s.action = VRHIT_ACT_VOID;
     } else {
         s.zone = r.wall < R ? VRHIT_Z_WALL : VRHIT_Z_MISS; s.dist = r.wall;
+        if (ext && !(r.wall < R) && (float)rs32(ram, actor + B_LIMIT) > R + 1.0f) trim_bullet(ram, actor, o, d, R);
         if (r.crossed) { void_bullet(ram, actor); s.action = VRHIT_ACT_VOID; }
     }
     {
-        float upm = W.units_per_m > 0.0f ? W.units_per_m : 1000.0f;
+        float upm = log_upm();
         const char *zn = r.cam ? "camara" : vrhit_zone_name(s.zone);
         char ex[320]; int ne = 0;
         ex[0] = 0;
@@ -482,6 +543,17 @@ int vrhit_bullet(uint8_t *ram, uint32_t actor, VrHitShot *out) {
         if (r.solid >= 0.0f && r.solid < s.dist - 1.0f) snprintf(ex + ne, sizeof ex - (size_t)ne, " escena=%.2f m(no bloquea)", r.solid / upm);
         fprintf(stderr, "[impacto] blanco=%d zona=%s dist=%.2f m vida=%d | bando=%s dano=%d accion=%s%s\n", s.target, zn, s.dist / upm, s.vital, "jugador", s.damage,
                 s.action == VRHIT_ACT_SEAL ? "sellada" : s.action == VRHIT_ACT_VOID ? "anulada" : "intacta", ex);
+    }
+    {   /* láser frente a bala: dónde acababa el rayo del láser al disparar y dónde acaba la bala (mismo criterio, ver vrhit_shot_dist); desvío = distancia entre ambos puntos */
+        const Note *nt = take_note(o, d);
+        float upm = log_upm();
+        if (nt) {
+            float dv[3] = {nt->pt[0] - r.pt[0], nt->pt[1] - r.pt[1], nt->pt[2] - r.pt[2]}, dev = sqrtf(dot3(dv, dv));
+            fprintf(stderr, "[disparo] laser=(%.0f,%.0f,%.0f) bala_impacto=(%.0f,%.0f,%.0f) desvio=%.0f uds (%.1f cm) | laser %s, bala %s (%s) alcance=%.1f m\n", nt->pt[0], nt->pt[1], nt->pt[2], r.pt[0], r.pt[1], r.pt[2],
+                    dev, dev / upm * 100.0f, nt->hit ? "impacta" : "sin impacto", r.dist < R ? "impacta" : "sin impacto", vrhit_zone_name(s.zone), R / upm);
+        } else {
+            fprintf(stderr, "[disparo] laser=sin_dato bala_impacto=(%.0f,%.0f,%.0f) desvio=? | bala %s (%s) alcance=%.1f m\n", r.pt[0], r.pt[1], r.pt[2], r.dist < R ? "impacta" : "sin impacto", vrhit_zone_name(s.zone), R / upm);
+        }
     }
     if (out) *out = s;
     return 1;

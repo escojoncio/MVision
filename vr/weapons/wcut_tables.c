@@ -90,8 +90,9 @@ NAMES(N_MINE, "body", "plate", "sight", "legl", "legr");
              .mat_body = MAG_BODY, .mat_case = MAG_CASE, .mat_bullet = MAG_BULLET}, \
      .note = "base del fondo del mango + cargador completo generado (cuerpo, labios, ranura y cartucho)"}
 #define PIST_TRIGGER \
-    {.name = "trigger", .sel = CLIP(0, 6, -92, 3, 6, 6), .cap_piece = PM, .cap_hole = PD, .pivot = PV(0, 13, -92), \
-     .channel = WCH_TRIGGER, .axis = AX(-0.35f, 0, 0), .rotates = 1, .note = "volumen que cruza la cara frontal de la empuñadura"}
+    {.name = "trigger", .sel = CLIP(0, 25.7f, -124.3f, 12, 8, 6), .cap_piece = PM, .cap_hole = PD, .pivot = PV(0, 33.7f, -124.3f), \
+     .channel = WCH_TRIGGER, .axis = AX(-0.35f, 0, 0), .rotates = 1, \
+     .note = "losa del gatillo en el lateral del armazón, centrada en el punto que marcó el usuario (vista lateral izquierda, círculo proyectado sobre la malla: y 25,7, z -124,3); cruza el armazón de lado a lado y gira con bisagra arriba"}
 /* cartucho (round) y vaina (case): copias pequeñas de la pared del prisma interior del cargador (mismo material). */
 #define PIST_ROUND \
     {.name = "round", .src = "mag", .sel = CLIP(8.8f, -20, -61.4f, 2.5f, 5, 2.5f), .flags = WCUT_COPY, .cap_piece = PM, .cap_hole = PD, \
@@ -118,9 +119,10 @@ static const WCutRule R_RIFLE[] = {
     /* cargador: caja propia en el original (triángulos enteros); se cierra su cara superior abierta. */
     {.name = "mag", .sel = WHOLE(0, -14, 64, 20, 52, 34), .flags = WCUT_CAP_OPEN, .cap_piece = RM, .cap_hole = RD, .pivot = PV(0, 36, 64),
      .channel = WCH_MAG, .axis = AX(0, -0.15f, 0), .note = "caja original bajo el cuerpo"},
-    /* gatillo: prisma del bloque de empuñadura que cruza su cara inferior. */
-    {.name = "trigger", .sel = CLIP(0, -26, -83, 3, 14, 7), .cap_piece = RM, .cap_hole = RD, .pivot = PV(0, -14, -83),
-     .channel = WCH_TRIGGER, .axis = AX(-0.40f, 0, 0), .rotates = 1, .note = "volumen que cruza la base del bloque de empuñadura"},
+    /* gatillo: la cola gris pintada en las dos caras laterales del bloque de empuñadura, colgando del techo del hueco negro (lazo del guardamonte pintado): z -110..-124, y 16..48
+     * (barrido de la textura a 1 mm); la losa cruza el bloque de lado a lado y gira con bisagra arriba. */
+    {.name = "trigger", .sel = CLIP(0, 32, -117, 19, 16, 7), .cap_piece = RM, .cap_hole = RD, .pivot = PV(0, 48, -117),
+     .channel = WCH_TRIGGER, .axis = AX(-0.40f, 0, 0), .rotates = 1, .note = "losa de la cola pintada del gatillo, de lado a lado del bloque de empuñadura"},
     /* selector: botón en la pared lateral derecha. */
     {.name = "selector", .sel = CLIP(18, 60, -45, 4, 6, 8), .cap_piece = RM, .cap_hole = RD, .pivot = NOPIV,
      .channel = WCH_SAFETY, .axis = AX(1.1f, 0, 0), .rotates = 1, .note = "prisma de la pared lateral derecha"},
@@ -255,8 +257,8 @@ static const WCutSeal S_GUIDED[] = {
     {.id = ID, .tag = TAG, .fix = FIX, .body = BODY, .names = NAMES_, .rules = RULES, .nrules = NR(RULES), .note = NOTE, \
      .weapon = WEAPON, .src_tris = TRIS, .bounds = BB, ##__VA_ARGS__}
 static const WCutModel MODELS[] = {
-    MODEL(0x36f6, "pist_supp", "frame", N_PIST, R_PIST, "pist", 52, WCUT_BB(-13, -36, -371, 13, 75, -34), "pistola con supresor (el cuerpo desnudo es el mismo que 21b6)"),
-    MODEL(0x21b6, "pist", "frame", N_PIST, R_PIST_BARE, "pist", 36, WCUT_BB(-11, -36, -217, 11, 72, -34), "pistola sin supresor"),
+    MODEL(0x36f6, "pist_supp", "frame", N_PIST, R_PIST, "pist", 52, WCUT_BB(-13, -36, -371, 13, 75, -34), "pistola con supresor (el cuerpo desnudo es el mismo que 21b6)", .out_k = W_PIST_K),
+    MODEL(0x21b6, "pist", "frame", N_PIST, R_PIST_BARE, "pist", 36, WCUT_BB(-11, -36, -217, 11, 72, -34), "pistola sin supresor", .out_k = W_PIST_K),
     MODEL(0x4725, "rifle", "body", N_RIFLE, R_RIFLE, "rifle", 70, WCUT_BB(-18, -64, -486, 18, 166, 251), "fusil bullpup; el cañón (componente 0) queda con el cuerpo", SEALS(S_RIFLE)),
     MODEL(0x2d3b, "sniper", "body", N_SNIPER, R_SNIPER, "sniper", 106, WCUT_BB(-22, -46, -782, 22, 162, 271), "rifle de cerrojo; mira y culata quedan en el cuerpo", SEALS(S_SNIPER)),
     MODEL(0x15a9, "guided", "tube", N_GUIDED, R_GUIDED, "guided", 81, WCUT_BB(-120, -63, -456, 60, 229, 543), "lanzador guiado; el misil es el modelo 76ab", SEALS(S_GUIDED)),

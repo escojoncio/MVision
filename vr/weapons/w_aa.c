@@ -67,7 +67,7 @@ const WeaponDef w_aa = {
     .parts = aa_parts, .nparts = PT_N,
     .points = {
         [WP_GRIP]    = POSE(0, -0.03f, 0.02f),
-        [WP_SUPPORT] = POSE(0, 0.045f, -0.43f),     /* unidad de batería, bajo el tubo */
+        [WP_SUPPORT] = POSE(0, 0.040f, -0.447f),    /* unidad de batería, bajo el tubo (vértice del modelo real) */
         [WP_MUZZLE]  = POSE(0, 0.11f, -0.98f),
         [WP_EYE]     = POSE(0, 0.165f, -0.64f),     /* origen de la cámara de la pantalla (sobre el tubo, ante la mira) */
         [WP_MAGWELL] = POSE(0, 0.11f, 0.15f),       /* centro del tubo nuevo al empezar el encaje */
@@ -287,4 +287,95 @@ static void aa_update(WeaponState *s, const WInput *in, WReloadMode rm, const WG
     s->aux.active = 0;
 
     wcore_recoil_step(s, in, dt);
+}
+
+/* ------------------------------------------------------------------ cara de la mira (pieza "screen") */
+/* Casco convexo (cadena monótona, antihorario) de n puntos (se reordenan). Devuelve nº de vértices (<= 2n). */
+static int aa_hull(float (*pt)[2], int n, float (*h)[2]) {
+    for (int i = 1; i < n; i++) {
+        float x = pt[i][0], y = pt[i][1]; int j = i - 1;
+        while (j >= 0 && (pt[j][0] > x || (pt[j][0] == x && pt[j][1] > y))) { pt[j + 1][0] = pt[j][0]; pt[j + 1][1] = pt[j][1]; j--; }
+        pt[j + 1][0] = x; pt[j + 1][1] = y;
+    }
+    int k = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        int start = k;
+        for (int ii = 0; ii < n; ii++) {
+            int i = pass == 0 ? ii : n - 1 - ii;
+            while (k >= start + 2 && (h[k - 1][0] - h[k - 2][0]) * (pt[i][1] - h[k - 2][1]) - (h[k - 1][1] - h[k - 2][1]) * (pt[i][0] - h[k - 2][0]) <= 1e-12f) k--;
+            h[k][0] = pt[i][0]; h[k][1] = pt[i][1]; k++;
+        }
+        k--;
+    }
+    return k;
+}
+
+int aa_sight_face(const WeaponState *s, AaSightFace *out) {
+    if (!s || !out || s->def != &w_aa) return 0;
+    int np = 0, ni;
+    const WPart *parts = weapon_parts(s, &np);
+    const WMesh *meshes = weapon_meshes(s, &ni);
+    if (!parts || !meshes) return 0;
+    int pi = -1;
+    for (int i = 0; i < np; i++) if (parts[i].name && !strcmp(parts[i].name, "screen")) pi = i;
+    if (pi < 0 || parts[pi].parent != -1) return 0;                  /* la pieza cuelga del cuerpo: su reposo es su posición en el marco del arma */
+    int mi = weapon_part_mesh(s, pi);
+    if (mi < 0 || mi >= ni || !meshes[mi].v || meshes[mi].nv < 3 || meshes[mi].nv > 4096) return 0;
+    const WMesh *m = &meshes[mi];
+    const WVec3 o = parts[pi].rest.p;
+    float zmax = -1e30f;
+    for (uint32_t i = 0; i < m->nv; i++) { float z = o.z + m->v[i].pos[2]; if (!(z == z)) return 0; if (z > zmax) zmax = z; }
+    static float pt[4096][2], hull[2 * 4096 + 2][2];                 /* solo los vértices de la cara más cercana al ojo (la trasera: máx. z) */
+    int n = 0;
+    for (uint32_t i = 0; i < m->nv; i++) {
+        if (o.z + m->v[i].pos[2] < zmax - 0.001f) continue;
+        pt[n][0] = o.x + m->v[i].pos[0]; pt[n][1] = o.y + m->v[i].pos[1]; n++;
+    }
+    if (n < 3) return 0;
+    float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+    for (int i = 0; i < n; i++) {
+        if (pt[i][0] < x0) x0 = pt[i][0]; if (pt[i][0] > x1) x1 = pt[i][0];
+        if (pt[i][1] < y0) y0 = pt[i][1]; if (pt[i][1] > y1) y1 = pt[i][1];
+    }
+    if (!(x1 - x0 > 1e-4f) || !(y1 - y0 > 1e-4f)) return 0;
+    float cx = 0.5f * (x0 + x1), cy = 0.5f * (y0 + y1);
+    int k = aa_hull(pt, n, hull);
+    if (k < 3) return 0;
+    while (k > AA_POLY_MAX) {                                        /* quita el vértice de menor área con sus vecinos */
+        int bi = 0; float ba = 1e30f;
+        for (int i = 0; i < k; i++) {
+            const float *a = hull[(i + k - 1) % k], *b = hull[i], *c = hull[(i + 1) % k];
+            float ar = fabsf((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]));
+            if (ar < ba) { ba = ar; bi = i; }
+        }
+        for (int i = bi; i + 1 < k; i++) { hull[i][0] = hull[i + 1][0]; hull[i][1] = hull[i + 1][1]; }
+        k--;
+    }
+    memset(out, 0, sizeof *out);
+    out->face.p = v3(cx, cy, zmax + AA_FACE_LIFT);
+    out->face.q.x = 0; out->face.q.y = 0; out->face.q.z = 0; out->face.q.w = 1;
+    out->w = x1 - x0; out->h = y1 - y0;
+    out->npoly = k;
+    for (int i = 0; i < k; i++) { out->poly[i][0] = hull[i][0] - cx; out->poly[i][1] = hull[i][1] - cy; }
+    return 1;
+}
+
+int aa_led_face(const WeaponState *s, WScreenFace *out) {
+    AaSightFace af;
+    if (!out || !aa_sight_face(s, &af)) return 0;
+    const float zback = af.face.p.z - AA_FACE_LIFT, ybot = af.face.p.y - 0.5f * af.h;   /* plano trasero de la unidad y borde superior del tubo (la caja de "screen" empieza en el) */
+    const float yaw = AA_LED_YAW_DEG * 0.01745329252f, pit = AA_LED_PITCH_DEG * 0.01745329252f;
+    const float oh = af.h + 0.0025f, ow = oh * (4.0f / 3.0f);
+    const float sy = sinf(0.5f * yaw), cy = cosf(0.5f * yaw), sx = sinf(-0.5f * pit), cx = cosf(0.5f * pit);
+    WQuat q = { cy * sx, sy * cx, -sy * sx, cy * cx };
+    WVec3 R = wquat_rotate(q, v3(1, 0, 0)), U = wquat_rotate(q, v3(0, 1, 0)), N = wquat_rotate(q, v3(0, 0, 1));
+    float hz = 0.5f * ow * fabsf(R.z) + 0.5f * oh * fabsf(U.z), hy = 0.5f * ow * fabsf(R.y) + 0.5f * oh * fabsf(U.y);
+    WVec3 c = v3(af.face.p.x, af.face.p.y, zback);
+    if (c.z - hz < zback + 0.0005f) c.z = zback + 0.0005f + hz;           /* no entra en la unidad de la mira */
+    if (c.y - hy < ybot + 0.0005f) c.y = ybot + 0.0005f + hy;             /* no apoya sobre el tubo */
+    memset(out, 0, sizeof *out);
+    out->face.p = v3(c.x + N.x * AA_LED_LIFT, c.y + N.y * AA_LED_LIFT, c.z + N.z * AA_LED_LIFT);
+    out->face.q = q;
+    out->w = ow; out->h = oh;
+    return 1;
 }

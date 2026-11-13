@@ -90,6 +90,7 @@ typedef struct {
     int tracked[2];          /* 0 = izquierda física, 1 = derecha física */
     double hand_time[2];     /* instante (s, reloj monótono) de la pose de cada mano; <= 0: sin marca (se usa dt por llamada). Repetir la marca = misma muestra */
     int throw_hold;          /* arrojadiza VR (granada, aturdidora, chaff) en la mano del arma, sin preparar o preparada: su gatillo la prepara/lanza y NO abre la ventana de armas del pecho */
+    int item_scope;          /* prismáticos equipados (objeto IT_Scope, sin arma): en el original ○ es el zoom y no hay golpe, agarre ni toque; aquí tampoco (las ventanas por clic de stick siguen) */
     int weapon_busy;         /* arma VR mostrada o maniobra de recarga en curso (el juego desequipa el arma un instante al recargar) */
     float hand[2][3], grip[2];   /* mano en el mundo (cercanía a enemigos); grip = agarre (puño), NO decide el agarre del enemigo */
     float trig[2];           /* gatillo analógico por mano física */
@@ -118,6 +119,7 @@ typedef struct {
     int punch_side;          /* -1 nada; 0/1: lanzar el golpe del motor (mano física que lo dio) */
     int grab_start;          /* 1: lanzar el agarre del motor este VBlank (mano grab_side, enemigo grab_en) */
     int grab_hold;           /* 1: el botón del puño sigue pulsado durante el agarre (mantiene el agarre del motor) */
+    int chest_in[2];         /* la mano física está dentro de SU zona de menú (con histéresis chest_radius/chest_exit) en este VBlank; 0 si el módulo no actúa */
     int menu_open[2];        /* ventana abierta por la mano física (0 objetos/L2, 1 armas/R2) mientras se mantiene el gatillo; vrg_out.press ya lleva L2/R2 */
     int knock_side;          /* -1 nada; 0/1: llamar con los nudillos (acción del motor) con esa mano */
     const char *knock_why;   /* motivo del último intento de toque de este VBlank ("ok", "lento", "mano_quieta", "sin_puno", "postura", "no_vertical", "enfriamiento", "enemigo", "lejos_de_la_pared"...) */
@@ -144,6 +146,8 @@ typedef struct {
     float since_punch;       /* s desde el último golpe */
     int near_prev[2];
     int menu_hold, chest_prev[2], chest_live[2];   /* chest_live: intento en curso (gatillo apretado dentro de la zona) */
+    int fb[2];               /* bloqueo de disparo por mano física (VRG_FB_*): lo calcula vrg_step_pad; vrg_fire_gate lo aplica al gatillo */
+    float fb_last[2];        /* último gatillo físico visto con la mano libre de bloqueo (el que sigue viendo el arma mientras dura) */
     int chest_lock[2];       /* tras abrir la ventana no hay otra apertura hasta soltar el gatillo (con seguimiento): perder y recuperar el seguimiento con el gatillo apretado no es una pulsación */
     int hold_lost[2];        /* VBlanks seguidos sin seguimiento de la mano con la ventana del pecho abierta (vrg_step_pad tolera VRG_HOLD_LOST_MAX antes de soltarla) */
     int trig_dn[2];          /* gatillo de cada mano apretado (histéresis trig_on/trig_off) */
@@ -192,6 +196,15 @@ typedef struct {
 /* vrg_update + mando final. La ventana abierta con el gesto del pecho se sostiene con el GATILLO de la mano (histéresis trig_off), NO con el mando entrante ni con la capa:
  * L2 (la otra mano) / R2 (la dominante) va pulsado de forma continua en todos los VBlanks mientras el gatillo siga apretado (cambie la capa o no) y se suelta al soltarlo. */
 uint16_t vrg_step_pad(vrg_t *g, const vrg_in_t *in, vrg_out_t *out, const vrg_pad_t *p);
+
+/* Bloqueo de disparo en la zona de menú. Desde que la mano entra en SU zona (mismo umbral que el háptico de aviso: chest_radius para entrar, chest_exit > chest_radius para salir)
+ * y mientras tenga la ventana abierta, su gatillo NO es del arma (ni dispara, ni prepara, ni lanza, ni detona); al salir de la zona con el gatillo aún apretado sigue bloqueado hasta soltarlo
+ * (trig <= trig_off): hace falta una pulsación nueva. vrg_step_pad lo actualiza una vez por VBlank. */
+enum { VRG_FB_NONE = 0, VRG_FB_ZONE = 1, VRG_FB_WINDOW = 2, VRG_FB_RELEASE = 3 };
+const char *vrg_fire_block_name(int why);          /* "zona", "ventana", "soltar_gatillo"; "ninguno" con VRG_FB_NONE */
+/* Gatillo que debe ver el arma de la mano física `side`: el real, o con bloqueo el último visto antes de empezar (el arma no ve flancos, ni sube ni baja: así una granada preparada no se lanza ni
+ * una carga armada se coloca al entrar en la zona). *why = VRG_FB_* (0 libre). */
+float vrg_fire_gate(const vrg_t *g, int side, float raw, int *why);
 
 #ifdef __cplusplus
 }

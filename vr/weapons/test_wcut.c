@@ -352,7 +352,8 @@ static int inside_orig(const WLoaded *m, const float *pt) {   /* mayoría de tre
     return votes >= 2;
 }
 
-static void check_pistol(const char *tag, const WCutModel *cm, const WLoaded *m, const WCutSet *s) {
+/* k: escala de salida de la pistola (W_PIST_K); las cotas de w_pist (d->points, partes, w_pist_*) van escaladas y se comparan / k con el corte original. */
+static void check_pistol(const char *tag, const WCutModel *cm, const WLoaded *m, const WCutSet *s, float k) {
     const WCutPiece *bar = wcut_piece(s, "barrel"), *mag = wcut_piece(s, "mag"), *slide = wcut_piece(s, "slide");
     CHECK(bar && bar->ni >= 3, "%s: el cañón existe y no está vacío", tag);
     CHECK(mag && mag->ni >= 3 && slide, "%s: cargador y corredera", tag);
@@ -368,8 +369,8 @@ static void check_pistol(const char *tag, const WCutModel *cm, const WLoaded *m,
         for (uint32_t k = 0; k < bar->nv; k++) if (fabsf(bar->v[k].pos[2] - zm) < 1e-6f) {
             float r = hypotf((float)(bar->v[k].pos[0] - cx), (float)(bar->v[k].pos[1] - cy)); if (r > rmax) rmax = r;
         }
-        const WVec3 mz = d->points[WP_MUZZLE].p;
-        float zexp = cm->id == 0x36f6 ? wcut_piece(s, "supp")->bmin.z : w_pist_bare_muzzle_z;   /* con supresor, WP_MUZZLE es su punta */
+        const WVec3 mz = {d->points[WP_MUZZLE].p.x / k, d->points[WP_MUZZLE].p.y / k, d->points[WP_MUZZLE].p.z / k};
+        float zexp = cm->id == 0x36f6 ? wcut_piece(s, "supp")->bmin.z : w_pist_bare_muzzle_z / k;   /* con supresor, WP_MUZZLE es su punta */
         CHECK(hypotf((float)(mz.x - cx), (float)(mz.y - cy)) < rmax, "%s: WP_MUZZLE cae dentro de la boca del cañón", tag);
         CHECK(fabsf(mz.x - (float)cx) < 1e-3f && fabsf(mz.y - (float)cy) < 1e-3f, "%s: WP_MUZZLE centrado en la boca", tag);
         CHECK(fabsf(zexp - (cm->id == 0x36f6 ? mz.z : zm)) < 2e-5f, "%s: z de la boca / punta del supresor", tag);
@@ -403,7 +404,7 @@ static void check_pistol(const char *tag, const WCutModel *cm, const WLoaded *m,
         CHECK(bar->bmax.y <= yc && bar->bmin.y >= slide->bmin.y + wall, "%s: el cañón queda entre el techo y el suelo interiores", tag);
         CHECK(bar->bmax.x <= hw && bar->bmin.x >= -hw, "%s: el capuchon cabe en el ancho interior", tag);
         CHECK(fabsf(bar->bmax.x - (hw - tb->gap)) < 2e-5f, "%s: capuchon de ancho = interior - holgura", tag);
-        CHECK(fabsf(tb->travel - w_pist_slide_travel) < 1e-6f, "%s: recorrido de la tabla = el de w_pist", tag);
+        CHECK(fabsf(tb->travel - w_pist_slide_travel / k) < 1e-6f, "%s: recorrido de la tabla = el de w_pist", tag);
     }
     /* recamara sobre el cartucho del cargador: el culote del capuchon cae en el culote del cartucho y su largo es el cartucho
      * completo; el capuchon queda sobre los labios (y minimo del cañón > y maximo del cargador) */
@@ -585,8 +586,8 @@ static void check_pistol(const char *tag, const WCutModel *cm, const WLoaded *m,
             const WPart *dp = d->parts; int dsup = -1, dbar = -1;
             for (int i = 0; i < d->nparts; i++) { if (!strcmp(dp[i].name, "supp")) dsup = i; if (!strcmp(dp[i].name, "barrel")) dbar = i; }
             CHECK(dsup > dbar && dbar >= 0 && dp[dsup].parent == dbar, "%s: w_pist: el supresor cuelga del cañón", tag);
-            CHECK(dsup >= 0 && fabsf(dp[dsup].rest.p.z - s->parts[is].rest.p.z) < 2e-5f && fabsf(dp[dsup].rest.p.y - s->parts[is].rest.p.y) < 2e-5f
-                  && fabsf(w_pist_supp_seat_z - s->parts[is].rest.p.z) < 2e-5f, "%s: w_pist: asiento del supresor = el del modelo", tag);
+            CHECK(dsup >= 0 && fabsf(dp[dsup].rest.p.z / k - s->parts[is].rest.p.z) < 2e-5f && fabsf(dp[dsup].rest.p.y / k - s->parts[is].rest.p.y) < 2e-5f
+                  && fabsf(w_pist_supp_seat_z / k - s->parts[is].rest.p.z) < 2e-5f, "%s: w_pist: asiento del supresor = el del modelo", tag);
             const WCutPiece *su = wcut_piece(s, "supp");
             for (int pos = 0; pos < 2; pos++) {
                 WeaponState st; memset(&st, 0, sizeof st); st.def = d; weapon_bind(&st, s->meshes, s->nmeshes, s->parts, s->nparts);
@@ -619,9 +620,28 @@ static void check_model(const uint8_t *d, size_t n, const char *stage, const WCu
     int r = wload_model(d, n, stage, cm->id, &o, &m);
     CHECK(r == 0, "%s: wload_model", tag);
     if (r) return;
+    /* Las comprobaciones geométricas van contra el ORIGINAL: se corta sin la escala de salida (out_k) y aparte se comprueba que la salida escalada es exactamente k veces esa. */
+    const WCutModel *cm_scaled = cm;
+    WCutModel cm0 = *cm; cm0.out_k = 0.0f; cm = &cm0;
+    const float ok = cm_scaled->out_k > 0.0f ? cm_scaled->out_k : 1.0f;
     WCutSet s; r = wcut_run(&m, cm, &s);
     CHECK(r == 0, "%s: wcut_run", tag);
     if (r) { wload_free(&m); return; }
+    if (ok != 1.0f) {
+        WCutSet sk; int rk = wcut_run(&m, cm_scaled, &sk);
+        CHECK(rk == 0 && sk.npiece == s.npiece && sk.nparts == s.nparts, "%s: wcut_run con out_k", tag);
+        if (rk == 0) {
+            float e = 0;
+            for (int i = 0; i < s.npiece && i < sk.npiece; i++) {
+                for (uint32_t q = 0; q < s.piece[i].nv; q++) for (int a = 0; a < 3; a++) e = fmaxf(e, fabsf(sk.piece[i].v[q].pos[a] - ok * s.piece[i].v[q].pos[a]));
+                for (uint32_t q = 0; q < s.meshes[i].nv; q++) for (int a = 0; a < 3; a++) e = fmaxf(e, fabsf(sk.meshes[i].v[q].pos[a] - ok * s.meshes[i].v[q].pos[a]));
+                e = fmaxf(e, fabsf(sk.piece[i].pivot.z - ok * s.piece[i].pivot.z));
+            }
+            for (int i = 0; i < s.nparts && i < sk.nparts; i++) e = fmaxf(e, fabsf(sk.parts[i].rest.p.z - ok * s.parts[i].rest.p.z) + fabsf(sk.parts[i].rest.p.y - ok * s.parts[i].rest.p.y));
+            CHECK(e < 1e-6f, "%s: la salida con out_k = %.3f es la original escalada (error %.2g m)", tag, ok, e);
+            wcut_free(&sk);
+        }
+    }
     check_weapon(tag, cm);
     int nnames = 0; while (cm->names && cm->names[nnames]) nnames++;
     CHECK(s.nmeshes >= nnames, "%s: menos meshes que nombres", tag);
@@ -708,7 +728,7 @@ static void check_model(const uint8_t *d, size_t n, const char *stage, const WCu
         VERB("%s: volumen original %.1f cm3, unión %.1f cm3 (%.2f %%)", tag, v0 * 1e6, v1 * 1e6, v0 != 0 ? 100.0 * (v1 - v0) / v0 : 0.0);
         wcut_free(&s0);
     }
-    if (!strncmp(cm->tag, "pist", 4)) check_pistol(tag, cm, &m, &s);
+    if (!strncmp(cm->tag, "pist", 4)) check_pistol(tag, cm, &m, &s, ok);
     /* id distinto: la tabla de este modelo aplicada a otro -> -4 */
     for (int j = 0; j < wcut_model_count(); j++) {
         const WCutModel *other = wcut_model_at(j);

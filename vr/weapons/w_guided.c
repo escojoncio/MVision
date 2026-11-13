@@ -42,7 +42,7 @@ const WeaponDef w_guided = {
     .parts = g_parts, .nparts = GP_COUNT,
     .points = {
         [WP_GRIP]    = {{0, 0, 0}, QI},
-        [WP_SUPPORT] = {{0, -0.04f, 0.25f}, QI},
+        [WP_SUPPORT] = {{-0.029f, 0.045f, -0.197f}, QI},
         [WP_MUZZLE]  = {{0, AXY, -0.62f}, QI},
         [WP_EYE]     = {{-0.095f, 0.176f, 0.40f}, QI},
         [WP_MAGWELL] = {{0, AXY, MOUTH_Z}, QI},
@@ -620,4 +620,82 @@ void guided_draw_overlay(const WeaponState *s, uint32_t *rgba, int w, int h) {
         }
     }
     frame(&im, k);
+}
+
+int guided_led_face(const WeaponState *s, WScreenFace *out) {
+    if (!s || !out || s->def != &w_guided) return 0;
+    int np = 0, ni = 0;
+    const WPart *parts = weapon_parts(s, &np);
+    const WMesh *meshes = weapon_meshes(s, &ni);
+    if (!parts || !meshes) return 0;
+    int pi = -1;
+    for (int i = 0; i < np; i++) if (parts[i].name && !strcmp(parts[i].name, "tube")) pi = i;
+    int mi = pi >= 0 ? weapon_part_mesh(s, pi) : -1;
+    if (pi < 0 || parts[pi].parent != -1 || mi < 0 || mi >= ni || !meshes[mi].v || !meshes[mi].idx || meshes[mi].nv < 3 || meshes[mi].nv > 4096 || meshes[mi].ni > 65535) return 0;
+    const WMesh *m = &meshes[mi];
+    const WVec3 o = parts[pi].rest.p;
+    /* la cara: triangulo de mayor area con normal +Z, todo en la mitad delantera (z < 0) e izquierda (x < 0) del tubo */
+    float best = 0, zf = 0;
+    for (uint32_t t = 0; t + 2 < m->ni; t += 3) {
+        const float *a = m->v[m->idx[t]].pos, *b = m->v[m->idx[t + 1]].pos, *c = m->v[m->idx[t + 2]].pos;
+        float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+        float nz = e1[0] * e2[1] - e1[1] * e2[0], nx = e1[1] * e2[2] - e1[2] * e2[1], ny = e1[2] * e2[0] - e1[0] * e2[2];
+        float ar = 0.5f * sqrtf(nx * nx + ny * ny + nz * nz);
+        if (!(ar > 1e-6f) || nz < 0.99f * 2.0f * ar) continue;
+        if (fmaxf(a[0], fmaxf(b[0], c[0])) + o.x >= -0.0005f || fmaxf(a[2], fmaxf(b[2], c[2])) + o.z >= -0.0005f) continue;
+        if (fabsf(a[2] - b[2]) > 0.0005f || fabsf(a[2] - c[2]) > 0.0005f) continue;
+        if (ar > best) { best = ar; zf = a[2] + o.z; }
+    }
+    if (!(best > 0)) return 0;
+    float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f; int any = 0;
+    for (uint32_t t = 0; t + 2 < m->ni; t += 3) {
+        const float *p[3] = {m->v[m->idx[t]].pos, m->v[m->idx[t + 1]].pos, m->v[m->idx[t + 2]].pos};
+        float e1[3] = {p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]}, e2[3] = {p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]};
+        float nz = e1[0] * e2[1] - e1[1] * e2[0], nx = e1[1] * e2[2] - e1[2] * e2[1], ny = e1[2] * e2[0] - e1[0] * e2[2];
+        float ar2 = sqrtf(nx * nx + ny * ny + nz * nz);
+        if (!(ar2 > 1e-9f) || nz < 0.99f * ar2) continue;
+        int ok = 1;
+        for (int k = 0; k < 3; k++) if (fabsf(p[k][2] + o.z - zf) > 0.0005f || p[k][0] + o.x >= -0.0005f) ok = 0;
+        if (!ok) continue;
+        for (int k = 0; k < 3; k++) {
+            float x = p[k][0] + o.x, y = p[k][1] + o.y;
+            if (x < x0) x0 = x;
+            if (x > x1) x1 = x;
+            if (y < y0) y0 = y;
+            if (y > y1) y1 = y;
+        }
+        any = 1;
+    }
+    if (!any || !(x1 - x0 > 1e-3f) || !(y1 - y0 > 1e-3f)) return 0;
+    /* esquina recortada por el hexagono del tubo: vertices del tubo en ese plano sobre el borde inferior (A) y el derecho (B) de la caja */
+    int haveA = 0, haveB = 0; float ax = 0, by = 0;
+    for (uint32_t i = 0; i < m->nv; i++) {
+        float x = m->v[i].pos[0] + o.x, y = m->v[i].pos[1] + o.y, z = m->v[i].pos[2] + o.z;
+        if (fabsf(z - zf) > 0.0005f) continue;
+        if (fabsf(y - y0) < 0.0005f && x > x0 + 0.002f && x < x1 - 0.002f) { haveA = 1; ax = x; }
+        if (fabsf(x - x1) < 0.0005f && y > y0 + 0.002f && y < y1 - 0.002f) { haveB = 1; by = y; }
+    }
+    const float cx = 0.5f * (x0 + x1), cy = 0.5f * (y0 + y1);
+    memset(out, 0, sizeof *out);
+    out->face.p = v3(cx, cy, zf + GD_LED_LIFT);
+    out->face.q.x = 0; out->face.q.y = 0; out->face.q.z = 0; out->face.q.w = 1;
+    const float sc = GD_LED_DIAG / sqrtf((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));   /* reduccion uniforme hacia el centro: un contorno convexo reducido hacia un punto interior sigue dentro del original */
+    out->w = (x1 - x0) * sc; out->h = (y1 - y0) * sc;
+    if (haveA && haveB) {
+        const float P[5][2] = {{x0, y0}, {ax, y0}, {x1, by}, {x1, y1}, {x0, y1}};
+        out->npoly = 5;
+        for (int i = 0; i < 5; i++) { out->poly[i][0] = (P[i][0] - cx) * sc; out->poly[i][1] = (P[i][1] - cy) * sc; }
+    } else {
+        const float P[4][2] = {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}};
+        out->npoly = 4;
+        for (int i = 0; i < 4; i++) { out->poly[i][0] = (P[i][0] - cx) * sc; out->poly[i][1] = (P[i][1] - cy) * sc; }
+    }
+    return 1;
+}
+
+int guided_led_route(const WeaponState *s, int mis_alive, int fullscreen) {
+    (void)mis_alive;
+    if (!s || s->phase == G_IDLE) return GLED_STANDBY;
+    if (fullscreen) return GLED_FULLSCREEN;
+    return s->phase == G_STATIC ? GLED_STATIC : GLED_LIVE;
 }

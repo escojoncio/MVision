@@ -312,6 +312,75 @@ static uint ns_texel(texture2d<ushort, access::read> vram, uint tpage, uint clut
     return uint(vram.read(uint2(uint((tx + u) & 1023), uint(y))).x);
 }
 
+/* ---------------- filtro de texturas MMPX (ajuste «Filtro de texturas 3D»; U.misc.w > 0,5) ----------------
+ * MMPX, McGuire y Gagiu 2020 (licencia MIT, Copyright 2020 Morgan McGuire & Mara Gagiu): reglas de vr/scene/mmpx.c. Réplica línea a línea en C: ns_mmpx de vr/native/test_ns_mmpx.c (probada contra mmpx_scale2x).
+ * Para la UV del fragmento (coordenadas de texel con fracción) toma el texel de origen E y sus vecinos con ns_texel (misma página, CLUT, envoltura a 256; sin ventana de textura), decide el subtexel 2x J K / L M
+ * con las reglas y devuelve el texel de VRAM de ese subtexel (0 = transparente: ns_fs lo descarta como siempre). Los texels se comparan por su valor de 16 bits ya decodificado (no por el índice de la CLUT). */
+static uint ns_mm_luma(uint t)
+{
+    return t == 0u ? 256u : (((t & 31u) + ((t >> 5) & 31u) + ((t >> 10) & 31u)) * 8u + (t >> 15) + 1u);
+}
+static bool ns_mm_eq2(uint b, uint a0, uint a1) { return b == a0 && b == a1; }
+static bool ns_mm_eq3(uint b, uint a0, uint a1, uint a2) { return b == a0 && b == a1 && b == a2; }
+static bool ns_mm_eq4(uint b, uint a0, uint a1, uint a2, uint a3) { return b == a0 && b == a1 && b == a2 && b == a3; }
+static bool ns_mm_any3(uint b, uint a0, uint a1, uint a2) { return b == a0 || b == a1 || b == a2; }
+static bool ns_mm_none2(uint b, uint a0, uint a1) { return b != a0 && b != a1; }
+static bool ns_mm_none4(uint b, uint a0, uint a1, uint a2, uint a3) { return b != a0 && b != a1 && b != a2 && b != a3; }
+
+#define NS_TAP(dx, dy) ns_texel(vram, tpage, clut, bu + (dx), bv + (dy))
+static uint ns_mmpx(texture2d<ushort, access::read> vram, uint tpage, uint clut, float2 uv)
+{
+    const float2 fu = uv + 1.0e-4;
+    const float2 bf = floor(fu);
+    const int bu = int(bf.x), bv = int(bf.y);
+    const float2 fr = fu - bf;
+    const uint A = NS_TAP(-1, -1), B = NS_TAP(0, -1), C = NS_TAP(1, -1);
+    const uint D = NS_TAP(-1, 0), E = NS_TAP(0, 0), F = NS_TAP(1, 0);
+    const uint G = NS_TAP(-1, 1), H = NS_TAP(0, 1), I = NS_TAP(1, 1);
+    uint J = E, K = E, L = E, M = E;
+    if (!ns_mm_eq4(E, A, B, C, D) || !ns_mm_eq4(E, F, G, H, I)) {
+        const uint P = NS_TAP(0, -2), S = NS_TAP(0, 2), Q = NS_TAP(-2, 0), R = NS_TAP(2, 0);
+        const uint Bl = ns_mm_luma(B), Dl = ns_mm_luma(D), El = ns_mm_luma(E), Fl = ns_mm_luma(F), Hl = ns_mm_luma(H);
+        /* pendiente 1:1 */
+        if ((D == B && D != H && D != F) && (El >= Dl || E == A) && ns_mm_any3(E, A, C, G) && (El < Dl || A != D || E != P || E != Q)) J = D;
+        if ((B == F && B != D && B != H) && (El >= Bl || E == C) && ns_mm_any3(E, A, C, I) && (El < Bl || C != B || E != P || E != R)) K = B;
+        if ((H == D && H != F && H != B) && (El >= Hl || E == G) && ns_mm_any3(E, A, G, I) && (El < Hl || G != H || E != S || E != Q)) L = H;
+        if ((F == H && F != B && F != D) && (El >= Fl || E == I) && ns_mm_any3(E, C, G, I) && (El < Fl || I != H || E != R || E != S)) M = F;
+        /* intersecciones */
+        if ((E != F && ns_mm_eq4(E, C, I, D, Q) && ns_mm_eq2(F, B, H)) && F != NS_TAP(3, 0)) { K = F; M = F; }
+        if ((E != D && ns_mm_eq4(E, A, G, F, R) && ns_mm_eq2(D, B, H)) && D != NS_TAP(-3, 0)) { J = D; L = D; }
+        if ((E != H && ns_mm_eq4(E, G, I, B, P) && ns_mm_eq2(H, D, F)) && H != NS_TAP(0, 3)) { L = H; M = H; }
+        if ((E != B && ns_mm_eq4(E, A, C, H, S) && ns_mm_eq2(B, D, F)) && B != NS_TAP(0, -3)) { J = B; K = B; }
+        if (Bl < El && ns_mm_eq4(E, G, H, I, S) && ns_mm_none4(E, A, D, C, F)) { J = B; K = B; }
+        if (Hl < El && ns_mm_eq4(E, A, B, C, P) && ns_mm_none4(E, D, G, I, F)) { L = H; M = H; }
+        if (Fl < El && ns_mm_eq4(E, A, D, G, Q) && ns_mm_none4(E, B, C, I, H)) { K = F; M = F; }
+        if (Dl < El && ns_mm_eq4(E, C, F, I, R) && ns_mm_none4(E, B, A, G, H)) { J = D; L = D; }
+        /* pendiente 2:1 */
+        if (H != B) {
+            if (H != A && H != E && H != C) {
+                if (ns_mm_eq3(H, G, F, R) && ns_mm_none2(H, D, NS_TAP(2, -1))) L = M;
+                if (ns_mm_eq3(H, I, D, Q) && ns_mm_none2(H, F, NS_TAP(-2, -1))) M = L;
+            }
+            if (B != I && B != G && B != E) {
+                if (ns_mm_eq3(B, A, F, R) && ns_mm_none2(B, D, NS_TAP(2, 1))) J = K;
+                if (ns_mm_eq3(B, C, D, Q) && ns_mm_none2(B, F, NS_TAP(-2, 1))) K = J;
+            }
+        }
+        if (F != D) {
+            if (D != I && D != E && D != C) {
+                if (ns_mm_eq3(D, A, H, S) && ns_mm_none2(D, B, NS_TAP(1, 2))) J = L;
+                if (ns_mm_eq3(D, G, B, P) && ns_mm_none2(D, H, NS_TAP(1, -2))) L = J;
+            }
+            if (F != E && F != A && F != G) {
+                if (ns_mm_eq3(F, C, H, S) && ns_mm_none2(F, B, NS_TAP(-1, 2))) K = M;
+                if (ns_mm_eq3(F, I, B, P) && ns_mm_none2(F, H, NS_TAP(-1, -2))) M = K;
+            }
+        }
+    }
+    return fr.x < 0.5 ? (fr.y < 0.5 ? J : L) : (fr.y < 0.5 ? K : M);
+}
+#undef NS_TAP
+
 static float ns_lin1(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
 
 /* Pase 0 (opaco): caras no semitransparentes completas; en las semitransparentes solo los texels con bit15 = 0 (las sin textura no entran).
@@ -342,7 +411,9 @@ fragment float4 ns_fs(NsVOut in [[stage_in]], texture2d<ushort, access::read> vr
         /* malla opaca sin textura: ni lectura de VRAM ni descarte */
         rgb = col / 255.0;
     } else if ((flags & NSG_CF_TEX) != 0u) {
-        uint tn = ns_texel(vram, in.tpage, clut, int(floor(in.uv.x + 1.0e-4)), int(floor(in.uv.y + 1.0e-4)));
+        /* U.misc.w > 0,5: filtro de texturas MMPX (ns_mmpx: subtexel 2x del texel de origen); si no, el texel de origen tal cual. Uniforme: la rama es la misma para todo el dibujo. */
+        uint tn = U.misc.w > 0.5 ? ns_mmpx(vram, in.tpage, clut, in.uv)
+                                 : ns_texel(vram, in.tpage, clut, int(floor(in.uv.x + 1.0e-4)), int(floor(in.uv.y + 1.0e-4)));
         if (tn == 0u) discard_fragment();
         bool b15 = (tn & 0x8000u) != 0u;
         if (kNsPass == 0u) { if (semi && b15) discard_fragment(); }

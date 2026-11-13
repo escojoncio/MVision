@@ -169,7 +169,7 @@ int main(void) {
           strstr(sh, "rescue = zmax >= U.cam_x.w && (!rev || front);") != NULL && strstr(sh, "back = !rescue;") != NULL && strstr(sh, "if (rescue) cf |= NSG_CF_WINCUT;") != NULL &&
           strstr(sh, "if (ez > 0.0 && abs(U.cam_x.w * dot(U.cam_x.xyz, er)) <= NSG_ENG_WIN_X * ez && abs(U.cam_y.w * dot(U.cam_y.xyz, er)) <= NSG_ENG_WIN_Y * ez) discard_fragment();") != NULL,
           "sombreador: regla del motor por triángulo entero (ajuste al plano H/2); lo rescatado (no cercano, anverso desde un ojo de la vista) solo se dibuja fuera de la ventana del motor");
-    CHECK(strstr(nr, "let engOff = ns_gpu_engine_off()") != NULL && strstr(nr, "cullBack ? 0.5 * camH : 0, Float(engOff), 0)") != NULL && strstr(nr, "(engOff & UInt32(NSG_ENG_OFF_BACK)) != 0 ? 0 : Float(NSG_CULL_ALL)") != NULL,
+    CHECK(strstr(nr, "let engOff = ns_gpu_engine_off()") != NULL && strstr(nr, "cullBack ? 0.5 * camH : 0, Float(engOff), Self.tex3DMMPX ? 1 : 0)") != NULL && strstr(nr, "(engOff & UInt32(NSG_ENG_OFF_BACK)) != 0 ? 0 : Float(NSG_CULL_ALL)") != NULL,
           "NativeRenderer: las reglas apagadas llegan al sombreador (misc.z y cull_eye.w)");
     CHECK(strstr(xp, "var engBehind = true") != NULL && strstr(xp, "var engSize = true") != NULL && strstr(xp, "var engBack = true") != NULL &&
           strstr(xp, "c.engBehind = b(\"xr.eng.behind\", true)") != NULL && strstr(xp, "d.set(engSize, forKey: \"xr.eng.size\")") != NULL && strstr(xp, "d.set(engBack, forKey: \"xr.eng.back\")") != NULL,
@@ -270,7 +270,7 @@ int main(void) {
             CHECK(strstr(xp, "if !overlay2D { overlayAim = nil } else if overlayAim == nil { overlayAim = (hy, XRFollow.pitch(of: head)) }") != NULL
                   && count_range(xp, "if !split && shown != .cinema && shown != .stereo && overlay2D, let aim = overlayAim, let wh = hudWindow {", "if !split && shown != .cinema && shown != .stereo, let fh = hudFull {", "XRFramedLayout.overlayModel(position: hp, yaw: aim.yaw, pitch: aim.pitch)") == 1
                   && count_range(xp, "if !split && shown != .cinema && shown != .stereo && overlay2D, let aim = overlayAim, let wh = hudWindow {", "if !split && shown != .cinema && shown != .stereo, let fh = hudFull {", "XRFramedLayout.overlayScale") == 1
-                  && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if !split && shown != .cinema && shown != .stereo && overlay2D, let aim = overlayAim, let wh = hudWindow {", "overlayAim") == 0 && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let fh = hudFull {", "if pending || blackout || worldDue { pendVeil = min(1", "overlayModel") == 0 && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let fh = hudFull {", "if pending || blackout || worldDue { pendVeil = min(1", "r.items.append(") == 1
+                  && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let h = hud {", "if !split && shown != .cinema && shown != .stereo && overlay2D, let aim = overlayAim, let wh = hudWindow {", "overlayAim") == 1 && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let fh = hudFull {", "if pending || blackout || worldDue { pendVeil = min(1", "overlayModel") == 0 && count_range(xp, "if !split && shown != .cinema && shown != .stereo, let fh = hudFull {", "if pending || blackout || worldDue { pendVeil = min(1", "r.items.append(") == 1
                   && strstr(xm, "static let overlayDistance: Float = 0.9") != NULL && strstr(xm, "static func overlayModel(position p: SIMD3<Float>, yaw: Float, pitch: Float) -> simd_float4x4 {") != NULL,
                   "XRPresent 6b: con ventana 2D abierta el panel va a 0,9 m, centrado en el rumbo y cabeceo de la cabeza al abrirse (fijos mientras dure)");
             CHECK(strstr(xp, "hudPanels=\\(cfg.hudPanels) hud!=nil=\\(hudSeen)") != NULL && strstr(xp, "hudSeen = hud != nil") != NULL, "xr-diag items: hudPanels y hud!=nil");
@@ -286,7 +286,7 @@ int main(void) {
             CHECK(count(rp, "XRLayer2D.split") == 5 && strstr(rp, "guard XRLayer2D.split else { quadValid = false; glow = 0; visibility = 0; return }") != NULL, "RadarPanel: ingest, renderTexture, updatePose, wristFrame y encodeQuad apagados sin troceo (%d)", count(rp, "XRLayer2D.split"));
             CHECK(strstr(rg, "mv_vrhost_hud2d_menu_rect") == NULL && strstr(rg, "menuUVBuf") == NULL && strstr(rg, "hudMenuUV = nil ") != NULL,
                   "RenderRG: sin rect de la ventana del menú (hudMenuUV siempre nil; la ventana es la capa WINDOW)");
-            CHECK(strstr(rg, "private func takeAuxLayer(_ k: Int) {") != NULL && strstr(rg, "takeAuxLayer(1); takeAuxLayer(2)") != NULL && count_range(rg, "private func takeAuxLayer(", "private struct BoxMaskIn", "drawPrimitives") == 0
+            CHECK(strstr(rg, "private func takeAuxLayer(_ k: Int, _ commandBuffer: MTLCommandBuffer) {") != NULL && strstr(rg, "takeAuxLayer(1, commandBuffer); takeAuxLayer(2, commandBuffer)") != NULL && count_range(rg, "private func takeAuxLayer(", "private struct BoxMaskIn", "drawPrimitives") == 0
                   && strstr(rg, "u.vfx = warpOnly ? SIMD4<Float>(0, 0, 0, 0) : gameFx") != NULL,
                   "RenderRG: capas WINDOW y FULL (takeAuxLayer) y viñeta / bandas del juego en el pase de post existente, sin drawPrimitives nuevos");
         }

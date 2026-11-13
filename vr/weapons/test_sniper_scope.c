@@ -5,6 +5,8 @@
 #include <string.h>
 #include <math.h>
 #include "w_sniper.h"
+#include "wload.h"
+#include "wcut.h"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FALLO %s:%d  %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
@@ -28,7 +30,7 @@ static WInput mk(void) {
     in.dt = 1.0f / 90;
     return in;
 }
-static WeaponState *mkw(void) { WeaponState *s = calloc(1, w_sniper.state_size); s->def = &w_sniper; w_sniper.init(s); return s; }
+static WeaponState *mkw(void) { WeaponState *s = calloc(1, w_sniper.state_size); s->def = &w_sniper; w_sniper.init(s); w_sniper.make_ready(s, 5); return s; }   /* cargada, como la deja el anfitrión */
 static void step(WeaponState *s, WInput *in, int n) { for (int i = 0; i < n; i++) s->def->update(s, in, WR_MANUAL, &BR); }
 static WVec3 fwd_of(WQuat q) { return wquat_rotate(q, wv(0, 0, -1)); }
 
@@ -94,22 +96,134 @@ static void test_lens_model(void) {
     a = fwd_of(L.pose.q);
     CHECK(NEAR(a.z, -1, 1e-5f));
     free(s);
-    /* malla vacía / diámetro fuera de rango: sin romper */
-    quad(0.2f, 0.2f, 0.0f, 0);
+    /* malla vacía / tamaño absurdo: sin romper; sin límite 30-60 mm: una placa de 20 x 10 mm da 20 x 10 */
+    quad(0.2f, 0.2f, 0.0f, 0);                                       /* 400 mm: absurdo, reposo */
     s = mkbound(wv(0, 0.130f, 0.074f));
-    sniper_lens(s, &L);
-    CHECK(NEAR(L.d, 0.06f, 1e-6f));
+    CHECK(sniper_lens(s, &L) == 0 && !L.model && NEAR(L.w, 0.04f, 1e-6f));
     free(s);
-    quad(0.010f, 0.005f, 0.0f, 0);                                   /* placa de 20 x 10 mm: el diámetro mínimo es 30 mm */
+    quad(0.010f, 0.005f, 0.0f, 0);
     s = mkbound(wv(0, 0.130f, 0.074f));
-    sniper_lens(s, &L);
-    CHECK(NEAR(L.d, 0.03f, 1e-6f));
+    CHECK(sniper_lens(s, &L) == 1 && NEAR(L.w, 0.020f, 1e-6f) && NEAR(L.h, 0.010f, 1e-6f) && NEAR(L.d, 0.010f, 1e-6f) && !L.rim);
     free(s);
     quad(0.2f, 0.2f, 0.0f, 0);
     s = mkbound(wv(0, 0.130f, 0.074f));
     meshes[MESH_LENS].nv = 0;
     CHECK(sniper_lens(s, &L) == 0 && !L.model && NEAR(L.pose.p.y, 0.130f, 1e-6f));
     free(s);
+}
+
+/* ---- abertura trasera del tubo de la mira (cuerpo): la imagen llena su contorno interior ---- */
+enum { MAXBV = 64 };
+static WVertex bv[MAXBV];
+static uint16_t bi_[3];
+static int nbv;
+static void bvert(float x, float y, float z) { bv[nbv].pos[0] = x; bv[nbv].pos[1] = y; bv[nbv].pos[2] = z; nbv++; }
+/* tubo de n lados centrado en (0, cy): anillo exterior ro y anillo interior ri a zr (el interior a zr + dz_in), fondo del tubo a zbot; decoy = cara trasera de una culata por debajo del eje */
+static void tube(int n, float phase_deg, float ro, float ri, float cy, float zr, float dz_in, float zbot, int decoy) {
+    nbv = 0;
+    for (int k = 0; k < n; k++) {
+        float a = (phase_deg + 360.0f * k / n) * 0.017453292f;
+        bvert(ro * cosf(a), cy + ro * sinf(a), zr);
+        bvert(ri * cosf(a), cy + ri * sinf(a), zr + dz_in);
+        bvert(ri * cosf(a), cy + ri * sinf(a), zbot);
+    }
+    if (decoy) {   /* caja de culata: por debajo y detrás del eje (no rodea el centro) */
+        bvert(-0.03f, cy - 0.025f, 0.20f); bvert(0.03f, cy - 0.025f, 0.20f);
+        bvert(0.03f, cy - 0.075f, 0.20f); bvert(-0.03f, cy - 0.075f, 0.20f);
+    }
+    memset(meshes, 0, sizeof meshes);
+    meshes[MESH_LENS] = (WMesh){ .name = "lens", .v = qv, .nv = 4, .idx = qi, .ni = 6 };
+    meshes[0] = (WMesh){ .name = "body", .v = bv, .nv = (uint32_t)nbv, .idx = bi_, .ni = 3 };
+}
+static void test_rim(void) {
+    SniperLens L;
+    const float cy = 0.1475f, zl = 0.1002f;
+    /* octógono (vértices a 22,5 grados): anillo interior 0,8 mm por delante del borde exterior; plano del borde 40 mm detrás de la placa; culata como señuelo más atrás */
+    quad(0.025f, 0.016f, 0.0f, 0);
+    tube(8, 22.5f, 0.034f, 0.026f, cy, zl + 0.040f, -0.0008f, zl - 0.030f, 1);
+    WeaponState *s = mkbound(wv(0, cy, zl));
+    CHECK(sniper_lens(s, &L) == 1 && L.model && L.rim == 1 && L.npoly == 8);
+    float half = 0.026f * cosf(22.5f * 0.017453292f);              /* semilado del octógono interior */
+    CHECK(NEAR(L.w, 2 * half, 1e-3f) && NEAR(L.h, 2 * half, 1e-3f));                 /* contorno interior, no la placa de 50 x 32 ni un disco acotado */
+    CHECK(NEAR(L.face.p.x, 0, 1e-3f) && NEAR(L.face.p.y, cy, 1e-3f) && NEAR(L.face.p.z, zl + 0.040f, 1e-3f));   /* centro en el plano del borde */
+    WVec3 a = fwd_of(L.face.q);
+    CHECK(NEAR(a.z, -1, 1e-5f));
+    CHECK(NEAR(L.pose.p.y, cy, 1e-6f) && NEAR(L.pose.p.z, zl, 1e-6f));              /* cámara y bala siguen saliendo de la placa */
+    free(s);
+    /* anillo de 16 lados centrado 5 mm más alto que la placa: el centro sale del contorno */
+    tube(16, 0.0f, 0.040f, 0.030f, cy + 0.005f, zl + 0.020f, 0.0f, zl - 0.030f, 1);
+    s = mkbound(wv(0, cy, zl));
+    CHECK(sniper_lens(s, &L) == 1 && L.rim == 1);
+    CHECK(NEAR(L.w, 0.060f, 1e-3f) && NEAR(L.h, 0.060f, 1e-3f) && NEAR(L.face.p.y, cy + 0.005f, 1e-3f) && NEAR(L.face.p.x, 0, 1e-3f));
+    free(s);
+    /* sin tubo que rodee el centro (solo la culata): se usa la placa */
+    nbv = 0;
+    bvert(-0.03f, cy - 0.025f, 0.20f); bvert(0.03f, cy - 0.025f, 0.20f); bvert(0.03f, cy - 0.075f, 0.20f); bvert(-0.03f, cy - 0.075f, 0.20f);
+    meshes[0] = (WMesh){ .name = "body", .v = bv, .nv = 4, .idx = bi_, .ni = 3 };
+    s = mkbound(wv(0, cy, zl));
+    CHECK(sniper_lens(s, &L) == 1 && L.rim == 0 && NEAR(L.w, 0.050f, 1e-6f) && NEAR(L.h, 0.032f, 1e-6f) && !L.round && NEAR(L.face.p.z, zl, 1e-6f));
+    free(s);
+}
+
+/* ---- modelo REAL del PSG1 (solo si hay datos del juego: argumento, STAGE_FILE, /tmp/gamedata/STAGE.DIR, gamedata/stages.bin; si no, se omite) ---- */
+static uint8_t *slurp(const char *path, size_t *n) {
+    FILE *f = fopen(path, "rb"); if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long l = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *d = (uint8_t *)malloc(l > 0 ? (size_t)l : 1);
+    if (!d || fread(d, 1, (size_t)l, f) != (size_t)l) { free(d); fclose(f); return NULL; }
+    fclose(f); *n = (size_t)l; return d;
+}
+static void test_real(const char *arg) {
+    const char *cands[5] = { arg, getenv("STAGE_FILE"), "/tmp/gamedata/STAGE.DIR", "gamedata/stages.bin", "../../gamedata/stages.bin" };
+    uint8_t *d = NULL; size_t n = 0;
+    for (int i = 0; i < 5 && !d; i++) if (cands[i]) d = slurp(cands[i], &n);
+    if (!d) { printf("test_sniper_scope: sin datos del juego: parte del modelo real omitida\n"); return; }
+    const char *stage = getenv("STAGE_NAME"); if (!stage) stage = "init";
+    const WCutModel *cm = wcut_find(0x2d3b);
+    WLoadOpts o; wload_default_opts(&o); o.resident = stage;
+    WLoaded m; WCutSet cs;
+    int r = wload_model(d, n, stage, 0x2d3b, &o, &m);
+    CHECK(r == 0 && cm);
+    if (r || !cm) { free(d); return; }
+    r = wcut_run(&m, cm, &cs);
+    CHECK(r == 0);
+    if (r) { wload_free(&m); free(d); return; }
+    WeaponState *s = mkw();
+    weapon_bind(s, cs.meshes, cs.nmeshes, cs.parts, cs.nparts);
+    SniperLens L;
+    CHECK(sniper_lens(s, &L) == 1 && L.model && L.rim == 1);
+    printf("sniper (modelo real): abertura %.1f x %.1f mm, centro (%.1f, %.1f, %.1f) mm, placa lens en (%.1f, %.1f, %.1f) mm\n", L.w * 1e3f, L.h * 1e3f, L.face.p.x * 1e3f, L.face.p.y * 1e3f, L.face.p.z * 1e3f, L.pose.p.x * 1e3f, L.pose.p.y * 1e3f, L.pose.p.z * 1e3f);
+    /* los vértices del borde trasero de la mira (plano de la cara, dentro de 6 cm del centro) deben quedar dentro de la caja de la abertura y tocar sus cuatro lados: la imagen coincide con el contorno */
+    int np; const WPart *pt = weapon_parts(s, &np);
+    (void)pt;
+    int nm; const WMesh *ms = weapon_meshes(s, &nm);
+    int bi = wcore_part_find(s, "body"), mb = bi >= 0 ? weapon_part_mesh(s, bi) : -1;
+    CHECK(mb >= 0 && mb < nm);
+    if (mb >= 0 && mb < nm) {
+        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f; int cnt = 0;
+        for (uint32_t k = 0; k < ms[mb].nv; k++) {
+            const float *p = ms[mb].v[k].pos;
+            if (fabsf(p[2] - L.face.p.z) > 0.001f || fabsf(p[0] - L.face.p.x) > 0.05f || fabsf(p[1] - L.face.p.y) > 0.05f) continue;
+            cnt++;
+            if (p[0] < x0) x0 = p[0];
+            if (p[0] > x1) x1 = p[0];
+            if (p[1] < y0) y0 = p[1];
+            if (p[1] > y1) y1 = p[1];
+        }
+        CHECK(cnt >= 4);
+        CHECK(NEAR(x0, L.face.p.x - L.w * 0.5f, 1e-3f) && NEAR(x1, L.face.p.x + L.w * 0.5f, 1e-3f) && NEAR(y0, L.face.p.y - L.h * 0.5f, 1e-3f) && NEAR(y1, L.face.p.y + L.h * 0.5f, 1e-3f));
+    }
+    /* medido en el original: la cara trasera es un octógono achatado de ~44 x 44 mm (la placa "lens" son solo sus 2 triángulos inferiores) a 74 mm detrás del origen del arma, normal -Z */
+    CHECK(L.round == 1 && NEAR(L.w, 0.044f, 1.5e-3f) && NEAR(L.h, 0.044f, 1.5e-3f) && NEAR(L.face.p.z, 0.074f, 1.5e-3f) && NEAR(L.face.p.x, 0.0f, 1e-3f));
+    /* polígono = hexágono medido (mm, respecto al centro (0,140)): (±10,+22), (±22,+3), (±18,-22); cada vértice dentro de 1 mm */
+    CHECK(L.npoly == 6);
+    { const float ex[6][2] = { {10, 22}, {-10, 22}, {-22, 3}, {-18, -22}, {18, -22}, {22, 3} };
+      for (int e = 0; e < 6; e++) { int ok = 0; for (int i = 0; i < L.npoly; i++) if (NEAR(L.poly[i][0] * 1e3f, ex[e][0], 1.0f) && NEAR(L.poly[i][1] * 1e3f, ex[e][1], 1.0f)) ok = 1; CHECK(ok); }
+      float ar = 0; for (int i = 0; i < L.npoly; i++) { int j = (i + 1) % L.npoly; ar += L.poly[i][0] * L.poly[j][1] - L.poly[j][0] * L.poly[i][1]; }
+      CHECK(ar > 0); }                                                /* antihorario */
+    WVec3 a = fwd_of(L.face.q);
+    CHECK(NEAR(a.z, -1, 1e-4f));
+    free(s); wcut_free(&cs); wload_free(&m); free(d);
 }
 
 /* ---- visibilidad de la lente (solo decide si merece la pena el segundo render) ---- */
@@ -284,8 +398,11 @@ static void test_fire_axis(float tilt_deg) {
     free(s);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     test_lens_model();
+    test_rim();
+    test_real(argc > 1 ? argv[1] : NULL);
+
     test_visible();
     test_zoom();
     test_fire_axis(-1.0f);     /* sin enlazar */

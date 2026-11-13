@@ -30,6 +30,7 @@ struct XRViewConfig {
     var integerScale = false        // ajusta el ancho para que cada texel ocupe un número entero de píxeles del visor
     var filter2D = 0                // filtro de píxel art del 2D (XR2DFilter): 0 MMPX, 1 xBR, 2 nítido, 3 sin filtro; se aplica al reabrir la vista (XR2DFilter.reload)
     var exact2D = true              // composición de la capa 2D sobre el mundo como la GPU original (XR2DCompose.framebufferFetch)
+    var tex3D = true                // filtro de texturas del mundo 3D (render nativo): true = MMPX (por subtexel en el sombreador), false = sin filtro; en vivo (NativeRenderer.tex3DMMPX)
     var cutscene: Cutscene = .stereo // cinemáticas del motor: pantalla de cine 3D estéreo con profundidad real (defecto), la misma en mono (sin profundidad), pantalla de cine plana, diorama o dentro de la escena
     var dioramaScale: Float = 0.15  // metros por metro del motor (0,15: una sala de 8 m cabe en ~1,2 m)
     var hudPanels = true
@@ -84,7 +85,9 @@ struct XRViewConfig {
         ns_gpu_engine_set_off(m)
 #endif
     }
-    static func applyStoredAI() { let c = load(); applyAI(range: c.aiRange, head: c.aiHead); applyHands(c.newHands); applyDiscards(behind: c.engBehind, size: c.engSize, back: c.engBack, split: c.engSplit) }
+    /// Filtro de texturas del mundo 3D: MMPX o sin filtro (NativeRenderer lo lee en cada dibujo, uniforme NsGpuUniforms.misc.w). Idempotente; se llama al arrancar y tras cada cambio del menú.
+    static func applyTex3D(_ mmpx: Bool) { NativeRenderer.tex3DMMPX = mmpx }
+    static func applyStoredAI() { let c = load(); applyAI(range: c.aiRange, head: c.aiHead); applyHands(c.newHands); applyDiscards(behind: c.engBehind, size: c.engSize, back: c.engBack, split: c.engSplit); applyTex3D(c.tex3D) }
 
     private static func f(_ k: String, _ d: Float, _ lo: Float, _ hi: Float) -> Float {
         guard UserDefaults.standard.object(forKey: k) != nil else { return d }
@@ -105,6 +108,7 @@ struct XRViewConfig {
         c.integerScale = b("xr.view.integer", false)
         c.filter2D = XR2DFilter.storedIndex
         c.exact2D = b(XR2DCompose.key, true)
+        c.tex3D = b("xr.view.tex3d", true)
         let s2 = UserDefaults.standard.integer(forKey: "xr.view.smooth2d2")   // clave nueva: el defecto pasó de «nítido» a «original» (el texto no se deforma)
         c.smooth2D = UserDefaults.standard.object(forKey: "xr.view.smooth2d2") == nil ? 0 : min(max(s2, 0), 2)
         // El defecto es la pantalla de cine 3D estéreo (IPD real, profundidad). Un «screen» (mono, sin profundidad) guardado por el defecto anterior migra a «stereo» UNA sola vez (clave de marca);
@@ -151,6 +155,7 @@ struct XRViewConfig {
         d.set(integerScale, forKey: "xr.view.integer")
         d.set(filter2D, forKey: XR2DFilter.key)
         d.set(exact2D, forKey: XR2DCompose.key)
+        d.set(tex3D, forKey: "xr.view.tex3d")
         d.set(smooth2D, forKey: "xr.view.smooth2d2")
         d.set(cutscene.rawValue, forKey: "xr.view.cutscene3")
         d.set(Double(dioramaScale), forKey: "xr.view.dioramaScale")
@@ -304,7 +309,7 @@ struct XRNav: Equatable {
 }
 
 enum XRMenuItem: Int, CaseIterable {
-    case resume, recenter, calibrateHands, width, distance, follow2D, curve, sharp, integerScale, smooth2D, filter2D, exact2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, newHands, engBehind, engSize, engBack, engSplit, debugAxes, aiMenu, diagnostics, exit
+    case resume, recenter, calibrateHands, width, distance, follow2D, curve, sharp, integerScale, smooth2D, filter2D, tex3D, exact2D, cutscene, hud, hudScale, wristHud, wristScale, wristSide, smoothMotion, turnMode, vignette, hideHands, newHands, engBehind, engSize, engBack, engSplit, debugAxes, aiMenu, diagnostics, exit
 }
 
 /// Submenú «IA de enemigos».
@@ -375,6 +380,7 @@ final class XRPresenter {
     private var menuTexSRGB: [MTLTexture] = []
     private var menuIdx = 0
     private var holdT: Float = 0
+    private var diagT: Float = 0           // s con R3 mantenido (abre el submenú «Diagnóstico» a los 3 s)
     private var prevHeld = false
     private var prevNav = XRNav()
     private var blockUntilNeutral = false
@@ -383,7 +389,7 @@ final class XRPresenter {
     var onRecenter: (() -> Void)?
     var onExit: (() -> Void)?
 
-    private static let menuW = 1024, menuH = 1420     // 31 filas de 40 px desde y = 106 (la última acaba en 1346) + pie de ayuda en y = menuH - 56 = 1364
+    private static let menuW = 1024, menuH = 1460     // 32 filas de 40 px desde y = 106 (la última acaba en 1386) + pie de ayuda en y = menuH - 56 = 1404
 
     init(device: MTLDevice) {
         cinema = XRCinema(device: device)
@@ -413,17 +419,24 @@ final class XRPresenter {
     /// Entrada del menú VR. Devuelve true si el juego NO debe recibir la entrada de este fotograma (menú abierto, o recién cerrado
     /// con algo aún pulsado: evita un disparo o un movimiento accidental).
     func updateInput(_ s: ControllerHub.Sample, dt: Float, head: simd_float4x4) -> Bool {
-        let held = s.left.menu || (s.kind == .gamepad && (s.pad.buttons & 1) != 0)   // Create/Options izquierdo o Select del mando
+        // Menú VR: botón de menú izquierdo (Create/Options) mantenido 0,8 s. Select del mando NO abre nada (llega al juego).
+        // Submenú «Diagnóstico» directo: R3 (clic del stick derecho; bit 2 del mando) mantenido 3 s. No cuenta con L3 pulsado (L3 + R3 = gesto de volcado de DumpCapture) ni mientras ese gesto está enganchado.
+        let menuHeld = s.left.menu
+        let r3 = s.right.stickClick || (s.pad.buttons & 4) != 0
+        let l3 = s.left.stickClick || (s.pad.buttons & 2) != 0
+        let diagHeld = r3 && !l3 && !DumpCapture.shared.suppressesStickClicks
+        let held = menuHeld || diagHeld
         if menuOpen {
-            if held && !prevHeld { closeMenu() }
+            if menuHeld && !prevHeld { closeMenu() }      // cerrar solo con el botón de menú (B también); un clic de stick sin querer al navegar no cierra
         } else if held && !needRelease {
-            holdT += dt
-            if holdT >= 0.8 { openMenu(head: head); holdT = 0 }
+            if menuHeld { holdT += dt; diagT = 0 } else { diagT += dt; holdT = 0 }
+            if holdT >= 0.8 { openMenu(head: head, diag: false); holdT = 0 }
+            else if diagT >= 3 { openMenu(head: head, diag: true); diagT = 0 }
         } else {
-            holdT = 0
+            holdT = 0; diagT = 0
         }
         if !held { needRelease = false }
-        prevHeld = held
+        prevHeld = menuHeld
 
         if menuOpen {
             let nav = Self.nav(from: s)
@@ -449,7 +462,9 @@ final class XRPresenter {
             if blockT > 2 || !(s.pad.active || s.left.active || s.right.active) { blockUntilNeutral = false }
         }
         // Mientras se mantiene el botón de menú (>0,3 s) el juego no lo recibe (evita que la pulsación larga se vea como Select mantenido).
-        return menuOpen || blockUntilNeutral || (held && !menuOpen && holdT > 0.3)
+        // R3 mantenido NO bloquea nada: el juego lo sigue recibiendo (R3 corto, y el gesto de vr_gesture R3 0,35 s = ventana de armas con las manos libres, y el movimiento / disparo). A los 3 s se abre el menú
+        // «Diagnóstico»; al abrirse, `menuOpen` bloquea la entrada y VRInput.releaseAll suelta R2/R3, así que una ventana de armas abierta por ese mismo R3 se cierra.
+        return menuOpen || blockUntilNeutral || (!menuOpen && menuHeld && holdT > 0.3)
     }
 
     private static func nav(from s: ControllerHub.Sample) -> XRNav {
@@ -475,10 +490,10 @@ final class XRPresenter {
 
 #endif
 
-    private func openMenu(head: simd_float4x4) {
+    private func openMenu(head: simd_float4x4, diag: Bool) {
         menuOpen = true
         sel = 0
-        page = 0
+        page = diag ? 1 : 0      // 1 = submenú «Diagnóstico»
         menuDirty = true
         prevNav = XRNav()
         menuModel = XRMenuLayout.model(head: head)      // cerca, abajo e inclinado hacia la cara: nunca sobre la pantalla de cine / códec
@@ -584,6 +599,7 @@ final class XRPresenter {
             mv_vrhost_set_hud2d_smooth(Int32(cfg.smooth2D))
 #endif
         case .filter2D: cfg.filter2D = (cfg.filter2D + dir + 4) % 4      // se aplica al reabrir la vista: los destinos de la ampliación se crean con el factor del filtro (XR2DFilter.reload)
+        case .tex3D: cfg.tex3D.toggle(); XRViewConfig.applyTex3D(cfg.tex3D); cfg.save()
         case .exact2D: cfg.exact2D.toggle(); XR2DCompose.framebufferFetch = cfg.exact2D
         case .cutscene:
             let all = XRViewConfig.Cutscene.allCases
@@ -670,6 +686,7 @@ final class XRPresenter {
             case .filter2D:
                 let f = min(max(cfg.filter2D, 0), 3)
                 return ("Filtro 2D", ["MMPX", "xBR", "Nítido", "Sin filtro"][f] + (f != XR2DFilter.current.index ? " (al reabrir la vista)" : ""))
+            case .tex3D: return ("Filtro de texturas 3D", cfg.tex3D ? "MMPX" : "Sin filtro")
             case .exact2D: return ("Composición 2D exacta", yn(cfg.exact2D))
             case .cutscene:
                 let n: [XRViewConfig.Cutscene: String] = [.screen: "Pantalla de cine 3D (mono)", .stereo: "Pantalla de cine 3D (estéreo)", .cinema: "Pantalla de cine", .diorama: "Diorama", .scene: "Dentro de la escena"]
@@ -817,6 +834,7 @@ final class XRPresenter {
     /// `hud`: panel 2D (textura del renderer, ya la vista sRGB si el destino es lineal). `eyePx`/`p00`: ancho en píxeles de un ojo y P[0][0].
     func compose(gs: MvVrGameState, head: simd_float4x4, dt: Float, hud: MTLTexture?, eyePx: Float, p00: Float,
                  gameView: simd_float4x4, linear: Bool, wrist: Wrist? = nil, ipd: Float = 0.063, shot: UInt32 = 0, stereo2DInside: Bool = false, hudMenuUV: SIMD4<Float>? = nil, hudLogical: SIMD2<Float>? = nil, hudWindow: MTLTexture? = nil, hudFull: MTLTexture? = nil) -> Result {
+        diagK = p00 > 0 && eyePx > 0 ? p00 * eyePx / 2 : 0      // diagnóstico del filtro 2D: píxeles del visor de un objeto de `s` m a `d` m = s * diagK / d
         // 1) qué toca mostrar. view_kind 2 (vr_view.h, VRV_K_ENGINE) = cinemática del motor con 3D y cámara del guion; los vídeos pregrabados (3), los menús, el códec/radio,
         //    las cargas, la pausa y las ventanas de armas/objetos (0) siguen en la pantalla de cine.
         var target: Display = gs.view_mode == 1 ? .world : .cinema
@@ -1079,8 +1097,8 @@ final class XRPresenter {
         // 6b) UN solo panel con la capa 2D COMPLETA del juego (mundo y diorama; en el cine el 2D ya va dentro de la imagen): HUD, radar del juego, menús de objetos/armas (L2/R2), pausa, textos y créditos tal como los dibuja
         //     el original, con transparencia donde el juego no dibuja 2D. Geometría de pantalla completa XRFramedLayout (la ventana visible fija del televisor, siempre 4:3) delante de la cabeza con
         //     el mismo seguimiento perezoso del rumbo (hudYaw); sin prueba de profundidad (onTop). El muestreo es el de XR2DFilter.current (MMPX x2 + sharp-bilinear por defecto). «Paneles del HUD» (cfg.hudPanels) solo
-        //     afecta al troceo (paso 6): sin trocear, el panel único se dibuja siempre (vida, radar, créditos). Es la capa HUD (clases HUD_WORLD, SCOPE_TEXT, UNKNOWN de vr_prov.h) y queda siempre fija;
-        //     la ventana 2D abierta (selector, pausa) es otra capa (6c) y es lo único que se acerca.
+        //     afecta al troceo (paso 6): sin trocear, el panel único se dibuja siempre (vida, radar, créditos). Es la capa HUD (clases HUD_WORLD, SCOPE_TEXT, UNKNOWN de vr_prov.h) y queda fija delante de la cabeza con el rumbo perezoso;
+        //     con la ventana 2D abierta (selector, pausa) se acerca al mismo plano que la ventana (6c), centrada en la mirada fijada al abrirse (overlayAim).
         if !split && shown != .cinema && shown != .stereo, let h = hud {
             let uv = XRFramedLayout.fullUV
             let lp = hudLogical ?? SIMD2<Float>(Float(h.width), Float(h.height))
@@ -1089,6 +1107,13 @@ final class XRPresenter {
             it.model = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw) * XRMath.translation(SIMD3<Float>(c.x, c.y, -XRFramedLayout.distance))
             it.size = XRFramedLayout.size(uv: uv, layerPx: lp)
             it.distance = XRFramedLayout.distance
+            // Con la ventana 2D abierta (selector de armas R2 / objetos L2, pausa) la capa HUD va en el MISMO plano que la ventana (6c): partes de un mismo menú caen en una u otra capa según el escritor que
+            // las dibuje (vr_prov: ids de ventana aprendidos, UNKNOWN/HUD_WORLD sin aprender o degradados), y a 1,6 m frente a 0,9 m el menú se veía partido en dos profundidades.
+            if overlay2D, let aim = overlayAim {
+                it.model = XRFramedLayout.overlayModel(position: hp, yaw: aim.yaw, pitch: aim.pitch)
+                it.size = it.size * XRFramedLayout.overlayScale
+                it.distance = XRFramedLayout.overlayDistance
+            }
             it.uvrect = uv
             it.opacity = 1
             it.onTop = true
@@ -1162,6 +1187,7 @@ final class XRPresenter {
     /// Estado de la pantalla de cine para el diagnóstico [radio-src]: capa 2D fiel en uso y xBR aplicado.
     var cineSrc: (hq: Bool, xbr: Bool) { (cinema?.hqActive ?? false, cinema?.xbrActive ?? false) }
 
+    private var diagK: Float = 0
     /// Resumen para el registro (1 vez por segundo): qué presentación está activa, dónde está anclada la pantalla y qué se dibuja.
     func diagnostics(items: [XRDrawItem]) -> String {
         var n = [XRDrawItem.Kind: Int]()
@@ -1181,6 +1207,12 @@ final class XRPresenter {
         for it in items where it.kind == .screen {
             let p = it.model.columns.3
             d += String(format: " pantalla: pos=(%.2f %.2f %.2f) tam=%.2fx%.2f dist=%.2f curva=%.2f", p.x, p.y, p.z, it.size.x, it.size.y, it.distance, it.curve)
+            d += String(format: " px_visor=%.0f", it.size.x * diagK / max(it.distance, 0.01))
+        }
+        // Filtro 2D efectivo (MMPX mejora solo si la textura muestreada es mayor que la nativa) y, por panel 2D, textura muestreada y píxeles que ocupa en el visor (ancho).
+        d += " filtro2D=\(XR2DFilter.current)(guardado=\(XR2DFilter.storedIndex),env=\(getenv("MV_2D_FILTER") != nil ? "si" : "no")) factor=\(XR2DFilter.upscales ? XR2DFilter.factor : 1) cine_ampliado=\(cinema?.xbrActive ?? false)"
+        for it in items where it.kind == .panel {
+            d += " panel2D: tex=\(it.texture?.width ?? 0)x\(it.texture?.height ?? 0)" + String(format: " tam=%.2fm px_visor=%.0f", it.size.x, it.size.x * diagK / max(it.distance, 0.01))
         }
         return d
     }

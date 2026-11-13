@@ -165,7 +165,7 @@ void vrbody_stretch_bone(float R[9], const float off[3], float s) {
 void vrbody_limits_default(VrArmLimits *l) {
     l->elbow_min_deg = 32; l->reach_margin = 0.999f; l->shoulder_back = -0.80f; l->shoulder_cross = -0.85f;
     l->wrist_swing_deg = 70; l->forearm_share = 1.0f; l->forearm_twist_deg = 180; l->hand_twist_deg = 70;
-    l->wrist_flex_deg = 80; l->wrist_ext_deg = 70; l->wrist_rad_deg = 20; l->wrist_uln_deg = 30; l->swivel_max_deg = 90;
+    l->wrist_flex_deg = 80; l->wrist_ext_deg = 70; l->wrist_rad_deg = 20; l->wrist_uln_deg = 30; l->swivel_max_deg = 90; l->stretch_max = 2.5f;
 }
 
 /* Marco de un hueso: R * offset_local = largo * w (w unitario), con el eje x local llevado (lo más cerca posible) a `hint`.
@@ -210,7 +210,7 @@ static int solve_core(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn
     float down[3]; v_scale(down, TY, -1.0f);
     float vh[3]; v_norm(vh, v, down);
     /* fuera de alcance: ambos huesos se alargan por igual a lo largo de su eje (continuo: 1 en dmax) y la muñeca llega al objetivo; tope 2.5x */
-    const float sk = d > dmax ? fminf(d / dmax, 2.5f) : 1.0f;
+    const float sk = d > dmax ? fminf(d / dmax, isfinite(lim->stretch_max) ? clampf(lim->stretch_max, 1.0f, 2.5f) : 2.5f) : 1.0f;
     const float L1e = L1 * sk, L2e = L2 * sk;
     float dd = d < dmin ? dmin : (d > dmax ? fminf(d, dmax * sk) : d);
     if (d > dmax) flags |= VRARM_STRETCHED;
@@ -421,6 +421,8 @@ static struct {
     VrBodyHook hook;
     Hand hand[2];
     int armed;
+    int weld[2];                 /* brazo atado al arma (vrbody_set_weld): huesos de largo fijo */
+    int pole_set[2]; float pole_ov[2][3];   /* dirección del codo por brazo (vrbody_set_pole); si no, cfg.pole */
     VrBodyStats st;
     VrBodyGrab grab; int grab_age;         /* petición vigente y apply sin refrescarla */
     VrBodyDebug dbg[2];
@@ -429,6 +431,7 @@ static struct {
     float view_eye[3], view_pref[3], view_T[9], view_upm;
     struct { int ok; float q[4]; } cal[2];   /* calibración de manos (sobrevive a vrbody_init) */
     struct { int on; float q[4]; } aimfix[2]; /* giro extra agarre -> mano de la mano que empuña el arma, para que su boca coincida con el apuntado del mando (vrbody_set_aim_fix); bajo cal_lock */
+    struct { int on; float q[4]; } turn[2];   /* giro LOCAL de la mano respecto al mando (vrbody_set_hand_turn), ya llevado al marco del agarre (M D M^T); se aplica DESPUÉS del desvío fijo; bajo cal_lock */
     float fore_q[2][4];                /* orientación del marco de agarre (espacio del usuario, sin hand_rot_offset) del último apply */
     float dbg_frame[2][16];            /* marco efectivo de la mano tras la IK (espacio del usuario, m; ver vrbody_debug_hand_frame) */
     int dbg_frame_ok[2];
@@ -502,16 +505,35 @@ int vrbody_calib_offset(const float grip_q[4], float roll_signed_deg, float out_
 int vrbody_hand_offset(int side, float q[4]) {
     if (side < 0 || side > 1 || !q) return 0;
     int cal_ok; float cq[4];
-    int fix_on; float fq[4];
-    cal_lock(); cal_ok = G.cal[side].ok; memcpy(cq, G.cal[side].q, sizeof cq); fix_on = G.aimfix[side].on; memcpy(fq, G.aimfix[side].q, sizeof fq); cal_unlock();
+    int fix_on, turn_on; float fq[4], tq[4];
+    cal_lock(); cal_ok = G.cal[side].ok; memcpy(cq, G.cal[side].q, sizeof cq); fix_on = G.aimfix[side].on; memcpy(fq, G.aimfix[side].q, sizeof fq); turn_on = G.turn[side].on; memcpy(tq, G.turn[side].q, sizeof tq); cal_unlock();
     if (cal_ok) { memcpy(q, cq, sizeof cq); q_normalize(q); }
     else {
         float qp[4], qr[4] = {G.cfg.hand_rot_offset[side][0], G.cfg.hand_rot_offset[side][1], G.cfg.hand_rot_offset[side][2], G.cfg.hand_rot_offset[side][3]};
         pitch_quat(G.cfg.hand_pitch_deg, qp); q_normalize(qr);
         q_mul(q, qp, qr);
     }
+    if (turn_on) { float t[4]; memcpy(t, q, sizeof t); q_mul(q, t, tq); }
     if (fix_on) { float t[4]; memcpy(t, q, sizeof t); q_mul(q, fq, t); }
     return cal_ok;
+}
+/* Marco de la pieza mano (forward declaration: hand_map está más abajo). */
+static void hand_map(float side, float *M);
+void vrbody_set_hand_turn(int side, const float q[4]) {
+    if (side < 0 || side > 1) return;
+    float L[4] = {0, 0, 0, 1};
+    int ok = q && all_finite(q, 4);
+    if (ok) {
+        float d[4] = {q[0], q[1], q[2], q[3]}; const float n2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2] + d[3] * d[3];
+        ok = n2 >= 0.25f && n2 <= 4.0f;
+        if (ok) {   /* D en el marco de vr_hand_skin -> L = M D M^T en el marco del agarre (R_mano = R(agarre * desvío) * M) */
+            q_normalize(d);
+            float D[9], M[9], Mt[9], T[9], R[9];
+            vrbody_quat_to_mat(d, D); hand_map(side == 1 ? -1.0f : 1.0f, M); m_transpose(Mt, M);
+            m_mulm(T, M, D); m_mulm(R, T, Mt); vrbody_mat_to_quat(R, L); q_normalize(L);
+        }
+    }
+    cal_lock(); G.turn[side].on = ok; memcpy(G.turn[side].q, L, sizeof L); cal_unlock();
 }
 void vrbody_set_aim_fix(int side, const float q[4]) {
     if (side < 0 || side > 1) return;
@@ -618,6 +640,12 @@ int vrbody_fist_point(int side, float out[3]) {
 void vrbody_set_grip(int side, float v) { if ((side == 0 || side == 1) && isfinite(v)) G.hand[side].grip_set = clampf(v, 0.0f, 1.0f); }
 void vrbody_set_dominant(int side) { G.cfg.dominant = side ? 1 : 0; }
 void vrbody_set_armed(int on) { G.armed = on ? 1 : 0; }
+void vrbody_set_weld(int side, int on) { if (side == 0 || side == 1) G.weld[side] = on ? 1 : 0; }
+void vrbody_set_pole(int side, const float pole[3]) {
+    if (side != 0 && side != 1) return;
+    G.pole_set[side] = pole && all_finite(pole, 3) && pole[0] * pole[0] + pole[1] * pole[1] + pole[2] * pole[2] > 1e-6f;
+    if (G.pole_set[side]) memcpy(G.pole_ov[side], pole, sizeof G.pole_ov[side]);
+}
 void vrbody_set_enabled(int on) { G.cfg.enabled = on ? 1 : 0; }
 void vrbody_stats(VrBodyStats *s) { *s = G.st; }
 int vrbody_pending(void) { return G.pending; }
@@ -833,9 +861,14 @@ static int apply_main(uint8_t *ram) {
     if (!ptr_ok(pset, OBJS_FIRST + OBJ_SIZE)) { G.st.skip_model++; return 0; }
     int nm = rd_s16(ram, pset + OBJS_NPARTS);
     if (nm < cfg->min_parts || nm > MAX_PARTS || !ptr_ok(pset, OBJS_FIRST + OBJ_SIZE * (uint32_t)nm)) { G.st.skip_model++; return 0; }
-    /* El motor no dibuja el objeto entero (fuera de pantalla, o SU primera persona: conductos, bajo objetos, paneles). El render nativo sí lo dibuja en primera persona VR, así que el
-     * ancla del cuerpo se aplica igual (sin ella el ojo queda en la raíz, por detrás de la cabeza y los hombros del modelo tumbado); la IK de los brazos y lo demás, no. */
-    const int offscreen = rd_s16(ram, pset + OBJS_VIS) == 0;
+    /* El motor no dibuja el objeto entero (fuera de pantalla, o SU primera persona: conductos, PSG1, bajo objetos, paneles). El render nativo sí lo dibuja en primera persona VR, así que el
+     * ancla del cuerpo se aplica igual (sin ella el ojo queda en la raíz, por detrás de la cabeza y los hombros del modelo tumbado). La IK de los brazos TAMBIÉN cuando el jugador está tumbado o
+     * agachado (estado del jugador GROUND / SQUAT) y el motor no lo oculta por otro motivo (caja BOX, derribado DOWNED, GAME_OVER, NOT_PLAYABLE; HIDDEN no: es la zona de escondite HZD 0xF715 y ahí sí hay IK): ahí el motor lo oculta por su primera persona (bound_mode 0), pero las matrices de las piezas sí se actualizan (libdg/screen.c
+     * DG_ScreenChanl corre antes del recorte y no mira bound_mode ni el bit de invisible), así que los brazos siguen a los mandos como de pie. Sin esa postura (fuera de pantalla de verdad) no. */
+    const uint32_t pst = rd_u32(ram, BA_PLAYER_STATUS);
+    const int offscreen = rd_s16(ram, pset + OBJS_VIS) == 0 &&
+        (!(pst & (uint32_t)(BRIDGE_PS_GROUND | BRIDGE_PS_SQUAT)) ||
+         (pst & (uint32_t)(BRIDGE_PS_BOX | BRIDGE_PS_DOWNED | BRIDGE_PS_GAME_OVER | BRIDGE_PS_NOT_PLAYABLE)));
 
     int it = cfg->part_torso;
     if (it < 0 || it >= nm) { G.st.skip_model++; return 0; }
@@ -928,7 +961,7 @@ static int apply_main(uint8_t *ram) {
     const float T[9] = {cs, 0, sn, 0, 1, 0, -sn, 0, cs};
     G.view_ok = 1; v_cp(G.view_eye, view.eye); v_cp(G.view_pref, view.p_ref); memcpy(G.view_T, T, sizeof T); G.view_upm = view.units_per_m;
 
-    typeof(G.cal) cal_snap; typeof(G.aimfix) fix_snap; cal_lock(); memcpy(cal_snap, G.cal, sizeof cal_snap); memcpy(fix_snap, G.aimfix, sizeof fix_snap); cal_unlock();
+    typeof(G.cal) cal_snap; typeof(G.aimfix) fix_snap; typeof(G.turn) turn_snap; cal_lock(); memcpy(cal_snap, G.cal, sizeof cal_snap); memcpy(fix_snap, G.aimfix, sizeof fix_snap); memcpy(turn_snap, G.turn, sizeof turn_snap); cal_unlock();
     int driven = 0, ns = 0;
 
     /* ---- cuerpo completo: todos los modelos del jugador a doble cara (bit 0x400 de model[0]) mientras se dibuja ---- */
@@ -1121,6 +1154,7 @@ static int apply_main(uint8_t *ram) {
                 qr[0] = cfg->hand_rot_offset[s][0]; qr[1] = cfg->hand_rot_offset[s][1]; qr[2] = cfg->hand_rot_offset[s][2]; qr[3] = cfg->hand_rot_offset[s][3]; q_normalize(qr);
                 q_mul(qo, qp, qr);
             }
+            if (turn_snap[s].on) { float t[4]; memcpy(t, qo, sizeof t); q_mul(qo, t, turn_snap[s].q); }      /* giro local de la mano (mismo orden que vrbody_hand_offset) */
             if (fix_snap[s].on) { float t[4]; memcpy(t, qo, sizeof t); q_mul(qo, fix_snap[s].q, t); }     /* boca del arma = apuntado del mando (mismo giro que vrbody_hand_offset) */
             q_mul(Rq, h->q, qo);
         }
@@ -1194,7 +1228,7 @@ static int apply_main(uint8_t *ram) {
         float qa[4], qb[4], qm[4], Rtb[9];
         vrbody_mat_to_quat(wr_w, qa); vrbody_mat_to_quat(Rt, qb); q_slerp(qm, qa, qb, we_w); vrbody_quat_to_mat(qm, Rtb);
         float pole_nat[3];
-        { float pl[3] = {cfg->pole[0] * rig.side, cfg->pole[1], cfg->pole[2]}; float tmp[3]; m_mulv(tmp, Tq, pl); v_norm(pole_nat, tmp, NULL); }
+        { const float *pc = G.pole_set[s] ? G.pole_ov[s] : cfg->pole; float pl[3] = {pc[0] * rig.side, pc[1], pc[2]}; float tmp[3]; m_mulv(tmp, Tq, pl); v_norm(pole_nat, tmp, NULL); }
         float pole[3]; v_cp(pole, pole_nat);
         {   /* codo de la animación (perpendicular a hombro->muñeca) mezclado con el natural */
             float va[3]; v_sub(va, Wa, Sh); float vah[3]; v_norm(vah, va, NULL);
@@ -1205,7 +1239,9 @@ static int apply_main(uint8_t *ram) {
         VrArmIn in; v_cp(in.shoulder, Sh); memcpy(in.torso, Tq, sizeof Tq); v_cp(in.wrist, wt); memcpy(in.hand, Rtb, sizeof Rtb); v_cp(in.pole, pole);
         in.has_prev = h->tau_ok; in.tau_prev = h->tau; in.tau_f_prev = h->tau_f; in.swivel_prev = h->swivel;
         VrArmOut sol;
-        if (vrbody_solve_arm(&rig, &cfg->limits, &in, &sol) != 0) { G.st.bad_solve++; h->tau_ok = 0; continue; }
+        VrArmLimits lim_s = cfg->limits;
+        if (G.weld[s]) lim_s.stretch_max = 1.0f;      /* brazo atado al arma: no se estira */
+        if (vrbody_solve_arm(&rig, &lim_s, &in, &sol) != 0) { G.st.bad_solve++; h->tau_ok = 0; continue; }
         h->tau_ok = 1; h->tau = sol.tau; h->tau_f = sol.tau_f; h->swivel = sol.swivel;
         if (sol.flags & VRARM_STRETCHED) G.st.stretched++;
         if (sol.flags & VRARM_TOO_CLOSE) G.st.too_close++;
@@ -1265,7 +1301,7 @@ static int apply_main(uint8_t *ram) {
             VrBodyArmLive *L = &G.live[s].a;
             float tr[9]; m_transpose(tr, T);
             memset(L, 0, sizeof *L);
-            L->rig = rig; L->lim = cfg->limits; L->upm = view.units_per_m;
+            L->rig = rig; L->lim = lim_s; L->upm = view.units_per_m;
             /* la ruta viva (vrbody_arm_resolve) parte del giro del antebrazo del ÚLTIMO apply (tau_prev, tau_f_prev): su antebrazo cambia como mucho 25 grados respecto a él */
             L->has_prev = in.has_prev; L->tau_prev = in.tau_prev; L->tau_f_prev = in.tau_f_prev; L->swivel_prev = in.swivel_prev;
             float v[3];

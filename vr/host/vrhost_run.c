@@ -318,8 +318,8 @@ int main(int argc, char **argv) {
             }
             if (vr_hands && f % wlog == 0 && cam_f) {
                 MvVrGameStatus gst; mv_vrgame_status(&gst);
-                fprintf(stderr, "[vr] f=%u arma: carga=%d activa=%d cargador=%d recámara=%d dentro=%d | juego mag=%d reserva=%d recarga=%d disparos=%u brazos=%u arma_juego=%d\n", f, gst.loader, gst.active, gst.mag_rounds,
-                        gst.chambered, gst.mag_inserted, gst.game_mag, gst.game_reserve, gst.reload_state, gst.shots, gst.arms_driven, gs.weapon);
+                fprintf(stderr, "[vr] f=%u arma: carga=%d activa=%d cargador=%d recámara=%d dentro=%d | juego mag=%d reserva=%d disparos=%u brazos=%u arma_juego=%d\n", f, gst.loader, gst.active, gst.mag_rounds,
+                        gst.chambered, gst.mag_inserted, gst.game_mag, gst.game_reserve, gst.shots, gst.arms_driven, gs.weapon);
                 { VrFireStats fs2; vrfire_stats(&fs2); fprintf(stderr, "[vr]   VR=%d lanz=%u colo=%u deton=%u rech=%u | fuego: pet=%u sust=%u pas=%u sup=%u cad=%u pulsa=%u | ammo_juego=%d/%d item=%d\n", gst.weapon, gst.throws, gst.places, gst.dets, gst.rejects,
                         fs2.requests, fs2.subst, fs2.passed, fs2.skipped, fs2.expired, fs2.presses, gs.ammo, gs.ammo_max, gs.item);
                   static BridgeState *lb2; if (!lb2) lb2 = malloc(sizeof *lb2);
@@ -442,8 +442,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[run] cuerpo: apply %u, brazos %u, restore %u, pendiente %d, saltos (sin vista %u, modelo %u, fuera %u, sin manos %u); antebrazo izq. %s\n", bst.applies, bst.arms_driven, bst.restores,
                 vrbody_pending(), bst.skip_noview, bst.skip_model, bst.skip_offscreen, bst.skip_nohands, fl ? "IK" : "no");
         fprintf(stderr, "[run] radar: escenas con radar %u de %u\n", n_radar, n_scenes);
-        fprintf(stderr, "[run] arma VR: carga=%d disparos VR %u; juego: peticiones %u, sustituidas %u, pasadas %u, suprimidas %u, caducadas %u, pulsaciones %u; recarga: secuencias %u ok %u fallos %u\n", gst.loader, gst.shots,
-                fst.requests, fst.subst, fst.passed, fst.skipped, fst.expired, fst.presses, rst.sequences, rst.ok, rst.fails);
+        fprintf(stderr, "[run] arma VR: carga=%d disparos VR %u; juego: peticiones %u, sustituidas %u, pasadas %u, suprimidas %u, caducadas %u, pulsaciones %u; recarga: pulsaciones con el cargador vacio %u, cargas por recogida %u, correcciones del arma VR %u\n", gst.loader, gst.shots,
+                fst.requests, fst.subst, fst.passed, fst.skipped, fst.expired, fst.presses, rst.presses, rst.loads, rst.syncs);
         if (vr_hands) {
             CHECK(bst.arms_driven > 0 && vrbody_pending() == 0, "la IK no movió brazos o quedó sin restaurar");
             CHECK(n_radar > 0 || !mv_vrhost_l2d_split(), "ninguna escena trajo radar");   /* el radar separado solo existe con el troceo del 2D (MV_L2D_SPLIT=1; defecto apagado: el radar va en la capa 2D completa) */

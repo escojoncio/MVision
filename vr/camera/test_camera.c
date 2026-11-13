@@ -913,6 +913,52 @@ static void test_prone_anchor(void) {
 
 /* Tumbado en un conducto (RAM real de los volcados d0008 / d0009; VRCAM_DUMPS24 = carpeta): con el ojo en la raíz de locomoción el cuerpo se dibuja desplazado hasta que la
  * articulación de la cabeza queda en VrCamRecord.head_at. Ni la cabeza ni el cuello, el torso, la cadera o las piernas quedan por delante del ojo, y la cabeza sigue oculta. */
+/* PSG1 (arma 9): el juego tumba a Snake (agachado -> suelo -> primera persona, pose de apuntado aim 44) y la cámara/cuerpo VR siguen su postura real, sin levitación.
+ * Medido en el volcado a33 (PSG1 equipado, tumbado; unidades del motor): raíz de control +133 sobre el suelo, articulación de la cabeza +200 (raíz + 67), malla de la cabeza 128..365, ojo del
+ * modelo (articulación + eye_up 110) = 310 = 0,31 m sobre el suelo. El ojo VR queda ahí; el cuerpo no se desplaza en vertical (head_at.y = articulación): apoyado donde lo dejó el juego.
+ * Entrada: de pie (raíz 1016, cabeza +357..394) -> tumbado en un solo salto de la raíz (883 uds): el ojo baja suave. Salida: sube suave. La altura del PSG1 no se aprende como la del gateo. */
+static void test_psg1_stance(void) {
+    VrCamConfig c; BridgeState s; VrCamPlan p;
+    anchor_start(&c, &s);
+    const int yst = 1016, yprone = 133, jy_prone = 67, jy_stand = 394;
+    for (int k = 0; k < 25; k++) anchor_tick(&s, 1000, yst, 10, jy_stand, 20, 0, &p);
+    const float stand_y = p.from[1];
+    NEAR(stand_y, yst + jy_stand + c.eye_up, 3.0);
+    w16(BA_VARS + 2u * BRIDGE_V_WEAPON, 9);
+    /* equipar: la raíz salta a la altura del tumbado y la articulación de la cabeza cae a +67 de golpe (peor caso de la animación); el ojo baja filtrado, sin pasos bruscos */
+    const float target = (float)(yprone + jy_prone) + c.eye_up;
+    float prev = stand_y, worst = 0.0f;
+    for (int k = 0; k < 40; k++) {
+        anchor_tick(&s, 1000, yprone, 10, jy_prone, 20, BRIDGE_PS_GROUND | (k > 10 ? BRIDGE_PS_WATCH : 0u), &p);
+        float step = prev - p.from[1]; prev = p.from[1];
+        CHECK(step >= -1.0f);                                   /* nunca sube mientras baja */
+        if (step > worst) worst = step;
+    }
+    printf("PSG1 tumbado: ojo %.0f uds (objetivo %.0f, de pie %.0f), mayor paso al bajar %.0f\n", (double)p.from[1], (double)target, (double)stand_y, (double)worst);
+    NEAR(p.from[1], target, 3.0);                                /* la altura de la cabeza tumbada, sobre el suelo (0,32 m), no la de pie */
+    CHECK(worst < 0.3f * (stand_y - target));
+    const VrCamRecord *r = vrcam_last_record();
+    CHECK(r != NULL);
+    if (r) {
+        NEAR(r->head_at[1], yprone + jy_prone, 3.0);             /* el cuerpo no se desplaza en vertical: ni flota ni se hunde */
+        NEAR(p.from[0] - r->head_at[0], c.prone_back, 2.0);      /* cuello prone_back por detrás del ojo según el rumbo del cuerpo (como al gatear) */
+    }
+    /* sin el PSG1, gateando: la altura de la articulación del PSG1 (+67) no se aprendió para la postura tumbada (cabeza a ras, +0) */
+    w16(BA_VARS + 2u * BRIDGE_V_WEAPON, 0);
+    for (int k = 0; k < 60; k++) anchor_tick(&s, 1000 + 4 * (k + 1), yprone, 10, 0, 20, BRIDGE_PS_GROUND | BRIDGE_PS_MOVE, &p);
+    NEAR(p.from[1], yprone + c.eye_up, 4.0);
+    /* guardar el arma: el juego se levanta; el ojo sube suave hasta la altura de pie */
+    prev = p.from[1]; worst = 0.0f;
+    for (int k = 0; k < 60; k++) {
+        anchor_tick(&s, 1000 + 4 * 60, yst, 10, jy_stand, 20, 0, &p);
+        float step = p.from[1] - prev; prev = p.from[1];
+        CHECK(step >= -1.0f);
+        if (step > worst) worst = step;
+    }
+    NEAR(p.from[1], stand_y, 12.0);
+    CHECK(worst < 0.3f * (stand_y - target));
+}
+
 static void test_prone_dumps(void) {
     const char *root = getenv("VRCAM_DUMPS24"); if (!root) root = "/home/claude/work/adj24/Dumps";
     static const char *D[] = {"d0008_20261103-001918_frame", "d0009_20261103-002117_frame"};
@@ -1002,6 +1048,7 @@ static void test_event_dumps(void) {
 }
 
 int main(void) {
+    test_psg1_stance();
     test_angles();
     test_patch();
     test_scan_overlay();

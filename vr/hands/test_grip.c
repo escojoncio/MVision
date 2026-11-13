@@ -89,7 +89,7 @@ static void test_proxy(void) {
     CHECK(vrhands_derive_grip(&a.st, &g) == 0, "derive_grip de la pistola primitiva");
     CHECK(dist(g.p, wv(0, -0.050f, 0.0175f)) < 1e-4f, "agarre derivado (%.4f %.4f %.4f)", g.p.x, g.p.y, g.p.z);
     const VrGripEntry *e = vrgrip_find(0);
-    CHECK(e && e->pose == HP_GRIP_PISTOL && e->has_trigger, "entrada de la pistola");
+    CHECK(e && (e->pose == HP_GRIP_PISTOL || e->pose >= HP_W_FIRST) && e->has_trigger, "entrada de la pistola");
     if (!e) { proxy_free(&a); return; }
     for (int side = 1; side >= -1; side -= 2) {
         WVec3 palm, tip;
@@ -98,14 +98,14 @@ static void test_proxy(void) {
         WVec3 P = wpose_apply(W, palm), I = wpose_apply(W, tip);
         WVec3 tc = wv(side < 0 ? -a.trigger_c.x : a.trigger_c.x, a.trigger_c.y, a.trigger_c.z);
         float dp = dist(P, g.p) * 1000.0f, di = dist(I, tc) * 1000.0f, pg = palm_gap(side, W, e->pose);
-        CHECK(dp < 10.0f, "lado %d: centro de agarre a %.1f mm del mango derivado", side, dp);
-        CHECK(pg > -4.0f && pg < 10.0f, "lado %d: palma a %.1f mm de la cara del mango (< 10)", side, pg);
-        CHECK(di < 8.0f, "lado %d: yema del índice a %.1f mm del gatillo", side, di);
+        /* Contrato nuevo: el zócalo de la pistola (id 0) está ajustado al modelo REAL de la SOCOM (dedo en el gatillo, mano a 20 grados de la de Snake: la palma queda ~51 mm bajo el punto derivado del mango);
+         * la pistola primitiva es otra forma, así que aquí solo se informa y no se exige cercanía. */
+        (void)pg;
         printf("  pistola primitiva lado %+d: centro de agarre %.1f mm, palma-mango %.1f mm, yema-gatillo %.1f mm\n", side, dp, pg, di);
-        /* el punto del gatillo de la tabla (en el marco de empuñadura) coincide con la yema */
+        /* el punto del gatillo de la tabla (en el marco de empuñadura) coincide con la yema; centrada en X solo en la pose genérica (la ajustada a la SOCOM apoya la yema al lado del gatillo, x = 11 mm; la mide test_gripfit) */
         WPose Wh = vrgrip_weapon_from_hand(wpose_identity(), e->grip, side);
         WVec3 Ih = wpose_apply(Wh, tip);
-        CHECK(fabsf(Ih.x) < 0.008f && dist(Ih, wv(side < 0 ? -e->trigger.x : e->trigger.x, e->trigger.y, e->trigger.z)) < 0.008f, "lado %d: trigger de la tabla (%.4f %.4f %.4f) vs yema (%.4f %.4f %.4f)",
+        CHECK((e->pose >= HP_W_FIRST || fabsf(Ih.x) < 0.008f) && dist(Ih, wv(side < 0 ? -e->trigger.x : e->trigger.x, e->trigger.y, e->trigger.z)) < 0.008f, "lado %d: trigger de la tabla (%.4f %.4f %.4f) vs yema (%.4f %.4f %.4f)",
               side, e->trigger.x, e->trigger.y, e->trigger.z, Ih.x, Ih.y, Ih.z);
         /* con el gatillo a fondo la yema se mueve hacia atrás (+Z del arma) entre 12 y 45 mm */
         WVec3 palm1, tip1;
@@ -129,6 +129,17 @@ static void test_proxy(void) {
     proxy_free(&a);
 }
 
+/* Pose de apuntar de Snake MEDIDA en sus animaciones (OAR "snake" de init + esqueleto del KMD; acciones SocomAttack.aim 42, FamasAttack.aim 5, StingerAttack/NikitaAttack.aim 74, PSG1Attack.aim 44; último fotograma,
+ * RotMatrixZYX; validado con el volcado a33 del PSG1 a <= 5 mm). R = orientación de la mano IZQUIERDA (parte 9) en el marco del arma (= hueso de la mano derecha, (x, y, z) -> (-x, z, y)), por filas;
+ * pole_main / pole_support = dirección del codo derecho / izquierdo en el marco del torso (x hacia fuera de su lado, y arriba, z delante). Los datos van aquí para que la prueba no necesite el juego. */
+static const struct { int id; const char *name; float R[9]; float pole_main[3], pole_support[3]; } SNAKE[] = {
+    {0, "SOCOM", {-0.9187f, -0.3611f, -0.1601f, -0.1246f, -0.1197f, 0.9850f, -0.3748f, 0.9248f, 0.0650f}, {0.532f, -0.288f, 0.796f}, {0.566f, -0.776f, 0.280f}},
+    {1, "FAMAS", {0.2308f, -0.9472f, -0.2228f, -0.9708f, -0.2394f, 0.0119f, -0.0646f, 0.2135f, -0.9748f}, {0.580f, -0.619f, 0.529f}, {0.232f, -0.969f, 0.079f}},
+    {3, "NIKITA", {-0.6251f, -0.6093f, -0.4878f, 0.2197f, -0.7371f, 0.6391f, -0.7490f, 0.2923f, 0.5946f}, {0.649f, -0.625f, 0.433f}, {0.266f, -0.964f, -0.009f}},
+    {4, "STINGER", {-0.6251f, -0.6093f, -0.4878f, 0.2197f, -0.7371f, 0.6391f, -0.7490f, 0.2923f, 0.5946f}, {0.649f, -0.625f, 0.433f}, {0.266f, -0.964f, -0.009f}},
+    {9, "PSG1", {0.2890f, -0.7404f, -0.6068f, -0.9440f, -0.1152f, -0.3090f, 0.1589f, 0.6622f, -0.7323f}, {0.655f, 0.122f, 0.746f}, {0.143f, -0.111f, 0.983f}},
+};
+
 static void test_table(void) {
     CHECK(vrgrip_count() == w_registry_count, "la tabla tiene %d entradas y el registro %d armas", vrgrip_count(), w_registry_count);
     for (int i = 0; i < w_registry_count; i++) {
@@ -142,11 +153,15 @@ static void test_table(void) {
         for (int j = i + 1; j < w_registry_count; j++) CHECK(e != vrgrip_find(w_registry[j]->game_weapon_id), "id repetido");
         /* una mano con apoyo en el arma tiene punto de apoyo propio (WP_SUPPORT); las armas sin apoyo (granadas, colocables) no tienen otra pose */
         if (d->mode == WF_THROWN || d->mode == WF_PLACED) CHECK(e->support_pose == -1 && !e->has_trigger, "%s: lanzables y colocables van a una mano", d->id);
-        else CHECK(e->support_pose == HP_GRIP_SUPPORT && e->has_trigger, "%s: arma de dos manos sin pose de apoyo o sin gatillo", d->id);
+        else CHECK((e->support_pose == HP_GRIP_SUPPORT || e->support_pose >= HP_W_FIRST) && e->has_trigger, "%s: arma de dos manos sin pose de apoyo o sin gatillo", d->id);
+        /* Armas ajustadas contra la malla real (FIT_* de gripfit_gen.c, poses HP_W_*): orientación, centro de agarre y contacto los comprueba test_gripfit contra el modelo; aquí no se exige
+         * el apretón de manos genérico ni la orientación de apoyo de Snake (el ajuste las cambia a propósito: copa bajo la SOCOM, palma bajo el guardamanos, etc.). */
+        const int fitted = e->pose >= HP_W_FIRST;
         /* los zócalos son rotaciones propias (cuaternión unitario) y llevan la palma y el pulgar a donde se supone */
         const WPose *sockets[2] = {&e->grip, &e->support};
         for (int s = 0; s < 2; s++) {
             if (s == 1 && e->support_pose < 0) continue;
+            if (fitted) continue;
             const WPose *p = sockets[s];
             float n = sqrtf(p->q.x * p->q.x + p->q.y * p->q.y + p->q.z * p->q.z + p->q.w * p->q.w);
             CHECK(fabsf(n - 1.0f) < 1e-3f, "%s zócalo %d: |q| = %.5f", d->id, s, n);
@@ -156,18 +171,31 @@ static void test_table(void) {
             (void)thumb;
             if (s == 0) {   /* apretón de manos: eje del mango hacia arriba (+Y), dedos hacia la boca (-Z), palma a la izquierda (-X); con cabeceo y guiñada de hasta ~38 grados (mano a la escala del brazo del juego sobre un arma de tamaño real) */
                 CHECK(hax.y > 0.93f && fing.z < -0.78f && palmn.x < -0.78f, "%s: orientación de la mano del arma (eje %.2f dedos %.2f %.2f %.2f palma %.2f)", d->id, hax.y, fing.x, fing.y, fing.z, palmn.x);
-            } else {        /* apoyo bajo el guardamanos: eje del mango hacia la boca, palma hacia arriba, dedos hacia -X para la derecha */
-                CHECK(hax.z < -0.99f && palmn.y > 0.99f && fing.x < -0.80f, "%s: orientación de la mano de apoyo", d->id);
+            } else {        /* apoyo: orientación MEDIDA en Snake (tabla SNAKE): matriz de la mano de apoyo canónica (derecha) = espejo X de la medida de la izquierda (S R S, S = diag(-1, 1, 1)) */
+                int found = 0;
+                for (unsigned k = 0; k < sizeof SNAKE / sizeof SNAKE[0]; k++) {
+                    if (SNAKE[k].id != d->game_weapon_id) continue;
+                    found = 1;
+                    float R[9], qx = p->q.x, qy = p->q.y, qz = p->q.z, qw = p->q.w, Q[9] = {1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw), 2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw), 2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)};
+                    float dsum = 0;
+                    for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) { R[r * 3 + c] = SNAKE[k].R[r * 3 + c] * (r == 0 ? -1.0f : 1.0f) * (c == 0 ? -1.0f : 1.0f); dsum += (R[r * 3 + c] - Q[r * 3 + c]) * (R[r * 3 + c] - Q[r * 3 + c]); }
+                    CHECK(sqrtf(dsum) < 0.03f, "%s: orientación de la mano de apoyo = la medida en Snake (%s), desviación %.3f", d->id, SNAKE[k].name, sqrtf(dsum));
+                }
+                CHECK(found, "%s: hay medida de Snake de la mano de apoyo", d->id);
             }
         }
         /* el centro de agarre cae en el origen del marco de empuñadura / apoyo */
         WVec3 palm, tip;
         hand_points(1, e->pose, 0.0f, &palm, &tip);
         if (e->pose == HP_GRIP_SPHERE) palm.x += 0.015f;   /* la granada va 15 unidades por delante de la palma (SPHERE) */
+        if (!fitted)
         CHECK(dist(wpose_apply(e->grip, palm), wv(0, 0, 0)) < 0.010f, "%s: centro de agarre a %.1f mm del punto de empuñadura", d->id, dist(wpose_apply(e->grip, palm), wv(0, 0, 0)) * 1000.0f);
         if (e->support_pose >= 0) {
+            for (unsigned k = 0; k < sizeof SNAKE / sizeof SNAKE[0]; k++) if (SNAKE[k].id == d->game_weapon_id) {
+                CHECK(dist(e->elbow_main, wv(SNAKE[k].pole_main[0], SNAKE[k].pole_main[1], SNAKE[k].pole_main[2])) < 0.01f && dist(e->elbow_support, wv(SNAKE[k].pole_support[0], SNAKE[k].pole_support[1], SNAKE[k].pole_support[2])) < 0.01f, "%s: dirección de los codos = la medida en Snake", d->id);
+            }
             hand_points(1, e->support_pose, 0.0f, &palm, &tip);
-            CHECK(dist(wpose_apply(e->support, palm), wv(0, 0, 0)) < 0.010f, "%s: centro de agarre de apoyo a %.1f mm de WP_SUPPORT", d->id, dist(wpose_apply(e->support, palm), wv(0, 0, 0)) * 1000.0f);
+            if (!fitted) CHECK(dist(wpose_apply(e->support, palm), wv(0, 0, 0)) < 0.010f, "%s: centro de agarre de apoyo a %.1f mm de WP_SUPPORT", d->id, dist(wpose_apply(e->support, palm), wv(0, 0, 0)) * 1000.0f);
         }
         if (e->has_trigger) {
             hand_points(1, e->pose, 0.0f, &palm, &tip);
@@ -231,17 +259,97 @@ static void test_real(const char *path, const char *stage) {
             WPose W = vrgrip_weapon_from_hand(g, e->grip, 1);
             float dp = dist(wpose_apply(W, palm), g.p) * 1000.0f, di = dist(wpose_apply(W, tip), T) * 1000.0f;
             printf("  modelo real %04x: palma-mango %.1f mm, yema-gatillo %.1f mm (centro de la pieza gatillo)\n", id, dp, di);
-            CHECK(dp < 10.0f, "modelo real: centro de agarre a %.1f mm del mango", dp);
+            CHECK(dp < 60.0f, "modelo real: centro de agarre a %.1f mm del punto derivado del mango (la palma baja ~51 mm por el mango, como Snake)", dp);
             CHECK(di < 25.0f, "modelo real: la yema queda a %.1f mm del gatillo (afinar la tabla de vr_grip.c)", di);
         }
     }
     free(st); wcut_free(&cs); wload_free(&m); free(data);
 }
 
+/* Con datos del juego: el punto WP_SUPPORT de cada arma de fuego cae sobre su geometría real (la mano de apoyo soldada agarra el arma, no el aire), con la palma hacia arriba y la mano a lo largo del cañón. */
+static void test_real_support(const char *path, const char *stage) {
+    struct stat sb;
+    if (!path || stat(path, &sb) != 0) return;
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    size_t n = (size_t)sb.st_size;
+    uint8_t *data = malloc(n + 1);
+    if (!data || fread(data, 1, n, f) != n) { fclose(f); free(data); return; }
+    fclose(f);
+    static const struct { uint16_t id; float max_mm; } W[] = {{0x21b6, 10}, {0x4725, 10}, {0x2d3b, 10}, {0x57f8, 10}, {0x15a9, 10}};      /* pistola, FAMAS, PSG1, Stinger, Nikita: WP_SUPPORT a <= 10 mm de un vértice del modelo real */
+    for (unsigned k = 0; k < sizeof W / sizeof W[0]; k++) {
+        WLoadOpts o; wload_default_opts(&o); o.resident = stage; o.upscale = 2;
+        WLoaded m;
+        if (wload_model(data, n, stage, W[k].id, &o, &m)) { printf("  (apoyo real %04x: no se carga el modelo)\n", W[k].id); continue; }
+        const WCutModel *cm = wcut_find(W[k].id);
+        WCutSet cs;
+        const WeaponDef *def = NULL;
+        int r = cm ? wcut_run(&m, cm, &cs) : -1;
+        for (int i = 0; r == 0 && i < w_registry_count; i++) if (cm->weapon && !strcmp(w_registry[i]->id, cm->weapon)) def = w_registry[i];
+        if (r || !def) { printf("  (apoyo real %04x: wcut_run=%d)\n", W[k].id, r); wload_free(&m); continue; }
+        WeaponState *st = calloc(1, def->state_size);
+        st->def = def; def->init(st);
+        weapon_bind(st, cs.meshes, cs.nmeshes, cs.parts, cs.nparts);
+        int np; weapon_parts(st, &np);
+        WPose po[64]; WeaponState tmp = *st; memset(tmp.channel, 0, sizeof tmp.channel);
+        const int cnt = wcore_part_poses(&tmp, wpose_identity(), po, 64);
+        int nm;
+        const WMesh *ms = weapon_meshes(st, &nm);
+        const WVec3 sp = def->points[WP_SUPPORT].p;
+        float dmin = 1e9f;
+        for (int i = 0; i < cnt && i < np; i++) {
+            const int mi = weapon_part_mesh(st, i);
+            if (mi < 0 || mi >= nm) continue;
+            for (uint32_t v = 0; v < ms[mi].nv; v++) {
+                const float d = dist(wpose_apply(po[i], wv(ms[mi].v[v].pos[0], ms[mi].v[v].pos[1], ms[mi].v[v].pos[2])), sp);
+                if (d < dmin) dmin = d;
+            }
+        }
+        const VrGripEntry *e = vrgrip_find(def->game_weapon_id);
+        printf("  apoyo real %04x (%s): WP_SUPPORT (%.3f, %.3f, %.3f) a %.1f mm de la geometría\n", W[k].id, def->id, sp.x, sp.y, sp.z, dmin * 1000.0f);
+        CHECK(e && e->support_pose >= 0, "%s: tiene mano de apoyo en la tabla", def->id);
+        CHECK(dmin * 1000.0f < W[k].max_mm, "%s: WP_SUPPORT a %.1f mm de la geometría real (max %.0f)", def->id, dmin * 1000.0f, (double)W[k].max_mm);
+        free(st); wcut_free(&cs); wload_free(&m);
+    }
+    free(data);
+}
+
+/* Colocación del objeto del juego en la mano (granadas 2, 7, 8; vr_grip_obj.inc): la relación con la que se ajustaron las poses (gripfit_gen.c / test_gripfit.c: p_obj = Hm * (p_mano + dR) * 0.001 contra la malla
+ * wload en marco HELD girado 180 grados sobre Z, HELD = (x, -z, y) del motor) escrita aquí por separado de la tabla. Los demás ids no tienen desplazamiento y no se tocan los argumentos. */
+static void test_object_offset(void) {
+    static const float Hm[9] = {-1, 0, 0, 0, 0, 1, 0, 1, 0}, dR[3] = {-47.7f, 54.8f, 15.4f};
+    const int with[3] = {2, 7, 8}, without[] = {0, 1, 3, 4, 5, 6, 9, -1, 99};
+    for (int g = 0; g < 3; g++) {
+        float R[9], t[3];
+        CHECK(vrgrip_object_offset(with[g], R, t) == 1, "granada %d: tiene desplazamiento de objeto", with[g]);
+        const float det = R[0] * (R[4] * R[8] - R[5] * R[7]) - R[1] * (R[3] * R[8] - R[5] * R[6]) + R[2] * (R[3] * R[7] - R[4] * R[6]);
+        float oc = 0; for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) { float d = 0; for (int k = 0; k < 3; k++) d += R[3 * i + k] * R[3 * j + k]; oc += fabsf(d - (i == j)); }
+        CHECK(fabsf(det - 1.0f) < 1e-5f && oc < 1e-5f, "granada %d: R es un giro (det %.5f, ortonormalidad %.2g)", with[g], det, oc);
+        float worst = 0;
+        for (int k = 0; k < 20; k++) {
+            const float e[3] = {-100.0f + 15.0f * k, 70.0f - 9.0f * k, -120.0f + 13.0f * k};                     /* punto del modelo (mm del motor) */
+            float p[3], q[3], qd[3];
+            for (int r = 0; r < 3; r++) p[r] = R[3 * r] * e[0] + R[3 * r + 1] * e[1] + R[3 * r + 2] * e[2] + t[r];   /* en la mano (mm) */
+            const float held[3] = {e[0], -e[2], e[1]}, rot[3] = {-held[0], -held[1], held[2]};                  /* malla de test_gripfit (m * 1000) */
+            for (int r = 0; r < 3; r++) q[r] = Hm[3 * r] * (p[0] + dR[0]) + Hm[3 * r + 1] * (p[1] + dR[1]) + Hm[3 * r + 2] * (p[2] + dR[2]);
+            for (int r = 0; r < 3; r++) qd[r] = q[r] - rot[r];
+            worst = fmaxf(worst, sqrtf(qd[0] * qd[0] + qd[1] * qd[1] + qd[2] * qd[2]));
+        }
+        CHECK(worst < 1e-3f, "granada %d: la tabla es la relación mano-objeto del ajuste (error %.5f mm)", with[g], worst);
+    }
+    for (unsigned i = 0; i < sizeof without / sizeof without[0]; i++) {
+        float R[9], t[3]; for (int k = 0; k < 9; k++) R[k] = 7.0f; for (int k = 0; k < 3; k++) t[k] = 7.0f;
+        CHECK(vrgrip_object_offset(without[i], R, t) == 0 && R[0] == 7.0f && R[8] == 7.0f && t[0] == 7.0f && t[2] == 7.0f, "id %d: sin desplazamiento y sin tocar los argumentos", without[i]);
+    }
+    CHECK(vrgrip_object_offset(2, NULL, NULL) == 1 && vrgrip_object_offset(0, NULL, NULL) == 0, "argumentos nulos");
+}
+
 int main(int argc, char **argv) {
     test_proxy();
     test_table();
+    test_object_offset();
     test_real(argc > 1 ? argv[1] : NULL, argc > 2 ? argv[2] : "init");
+    test_real_support(argc > 1 ? argv[1] : NULL, argc > 2 ? argv[2] : "init");
     printf("%s vr_grip: %d comprobaciones, %d fallos\n", fails ? "FALLO" : "OK", checks, fails);
     return fails ? 1 : 0;
 }

@@ -213,13 +213,14 @@ static void hzd_log(float moved_u, float upm) {
 }
 
 /* ============================================ lectura del estado del juego ============================================ */
-typedef struct { int ok; int32_t eye_x, eye_z; float body_yaw; int post, move, follow, wall, fp; int joint; int32_t jx, jy, jz; int32_t bx, by, bz, floor; } Body;
+typedef struct { int ok; int32_t eye_x, eye_z; float body_yaw; int post, move, follow, wall, fp; int psg; int joint; int32_t jx, jy, jz; int32_t bx, by, bz, floor; } Body;
 
 static Body read_body(const uint8_t *ram) {
     Body b = {0};
     uint32_t ob = rd_u32(ram, VC_PLAYER_BODY), ctl = rd_u32(ram, BA_PLAYER_CTRL);
     uint32_t status = rd_u32(ram, BA_PLAYER_STATUS);
     b.post = (status & BRIDGE_PS_BOX) ? 3 : (status & BRIDGE_PS_GROUND) ? 2 : (status & BRIDGE_PS_SQUAT) ? 1 : 0;
+    b.psg = b.post == 2 && rd_s16(ram, BA_VARS + 2u * BRIDGE_V_WEAPON) == 9;   /* PSG1 (el juego tumba a Snake y lo deja en su pose de apuntado, aim 44: cabeza a +0,07 m de la raíz, no a ras como al gatear): el ojo la sigue, pero esa altura no se aprende como la del gateo */
     b.move = (status & BRIDGE_PS_MOVE) != 0;
     b.wall = (status & BRIDGE_PS_WALL) != 0;                              /* pegado a la pared */
     b.fp = (status & (BRIDGE_PS_WATCH | BRIDGE_PS_WATCH_PEEK)) != 0;      /* primera persona del propio juego */
@@ -395,7 +396,7 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
         if ((dr[0] || dr[2] || b.move) && !b.follow) {
             if (abs(dr[1]) <= 200) S.ey += (float)dr[1];
             target = (float)b.by + S.nh[b.post];
-        } else if (b.joint && !b.follow) S.nh[b.post] += (1.0f - expf(-dt / 0.16f)) * ((float)(b.jy - b.by) - S.nh[b.post]);
+        } else if (b.joint && !b.follow && !b.psg) S.nh[b.post] += (1.0f - expf(-dt / 0.16f)) * ((float)(b.jy - b.by) - S.nh[b.post]);
         S.ey += (1.0f - expf(-dt / 0.15f)) * (target - S.ey);
     }
     S.pb[0] = b.bx; S.pb[1] = b.by; S.pb[2] = b.bz; S.pb_ok = 1; S.pb_vb = S.vb;

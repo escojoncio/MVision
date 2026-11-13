@@ -145,6 +145,8 @@ final class NativeRenderer {
     static let maxSemiTris = 1 << 17
     static let maxStaticTris = 1 << 21
     static let sortHeadThreshold: Float = 0.03     // m: la cabeza debe moverse más que esto para reordenar los semitransparentes
+    /// Filtro de texturas 3D (ajuste «Filtro de texturas 3D» de XRPresent; clave xr.view.tex3d): true = MMPX (ns_mmpx de NativeShaders.metal, vía NsGpuUniforms.misc.w), false = sin filtro. En vivo, sin recrear pipelines.
+    static var tex3DMMPX = true
     private let device: MTLDevice
     private let library: MTLLibrary
     private let ringSize: Int
@@ -265,7 +267,7 @@ final class NativeRenderer {
     }
     /// Realimentación de pantalla del juego (blur.c, blurpure.c, focus.c; vr/scene/vr_feedback.h) de la escena en curso: salida = a * actual + b * fuente(M p) dentro de `rect`, en coordenadas
     /// 0..1 de la imagen de la pantalla 3D (y hacia abajo). `selfSource`: la fuente es la imagen actual; si no, la imagen anterior de la pantalla. La reproduce RGRenderer.encodeStereo.
-    struct Feedback { var selfSource: Bool; var a: Float; var b: SIMD3<Float>; var m0: SIMD3<Float>; var m1: SIMD3<Float>; var rect: SIMD4<Float> }
+    struct Feedback { var selfSource: Bool; var a: Float; var b: SIMD3<Float>; var m0: SIMD3<Float>; var m1: SIMD3<Float>; var rect: SIMD4<Float>; var wave: SIMD2<Float> }
     private(set) var feedback: Feedback? = nil
     /// Onda de pantalla bajo el agua para el post-proceso por ojo de RGRenderer (planWave / vr_fs_wave): (amplitud en px del ojo a 1888 de ancho, rad por fila del motor, fase en rad, H del motor), o nil si no hay onda
     /// (cabeza fuera del agua o efectos de pantalla apagados: ns_screen_build deja water_wave a 0); se calcula en beginFrame.
@@ -864,10 +866,10 @@ final class NativeRenderer {
         fogScene = sc.pointee.fog
         // realimentación de pantalla del juego (la anota el anfitrión desde la lista; no depende de NS_SV_FX)
         let fbs = sc.pointee.screen
-        let fbv: [Float] = [fbs.fb_a, fbs.fb_b.0, fbs.fb_b.1, fbs.fb_b.2, fbs.fb_m.0, fbs.fb_m.1, fbs.fb_m.2, fbs.fb_m.3, fbs.fb_m.4, fbs.fb_m.5, fbs.fb_rect.0, fbs.fb_rect.1, fbs.fb_rect.2, fbs.fb_rect.3]
+        let fbv: [Float] = [fbs.fb_a, fbs.fb_b.0, fbs.fb_b.1, fbs.fb_b.2, fbs.fb_m.0, fbs.fb_m.1, fbs.fb_m.2, fbs.fb_m.3, fbs.fb_m.4, fbs.fb_m.5, fbs.fb_rect.0, fbs.fb_rect.1, fbs.fb_rect.2, fbs.fb_rect.3, fbs.fb_wave.0, fbs.fb_wave.1]
         if fbs.fb_mode != 0, fbv.allSatisfy({ $0.isFinite }) {
             feedback = Feedback(selfSource: fbs.fb_mode == 2, a: fbv[0], b: SIMD3<Float>(fbv[1], fbv[2], fbv[3]),
-                                m0: SIMD3<Float>(fbv[4], fbv[5], fbv[6]), m1: SIMD3<Float>(fbv[7], fbv[8], fbv[9]), rect: SIMD4<Float>(fbv[10], fbv[11], fbv[12], fbv[13]))
+                                m0: SIMD3<Float>(fbv[4], fbv[5], fbv[6]), m1: SIMD3<Float>(fbv[7], fbv[8], fbv[9]), rect: SIMD4<Float>(fbv[10], fbv[11], fbv[12], fbv[13]), wave: SIMD2<Float>(fbv[14], fbv[15]))
         } else {
             feedback = nil
         }
@@ -1390,7 +1392,7 @@ final class NativeRenderer {
         // misc.y > 0: modo ENGINE (cámara del juego en una pantalla): reglas del motor por fragmento (ns_vertex, réplica ns_gpu_engine_tri); 0 en el mundo en primera persona. misc.z: reglas apagadas desde
         // los ajustes (NSG_ENG_OFF_*, diagnóstico; la misma máscara que usa el anfitrión para la línea [descartes]).
         let engOff = ns_gpu_engine_off()
-        u.misc = SIMD4<Float>(layered ? 0 : Float(max(0, min(1, eyeIndex))), cullBack ? 0.5 * camH : 0, Float(engOff), 0)
+        u.misc = SIMD4<Float>(layered ? 0 : Float(max(0, min(1, eyeIndex))), cullBack ? 0.5 * camH : 0, Float(engOff), Self.tex3DMMPX ? 1 : 0)   // w: filtro de texturas 3D (1 = MMPX)
         // Descarte de reversos: cinemáticas = todas las caras de una cara (NSG_CULL_ALL); con la cabeza bajo el agua solo las semitransparentes (NSG_CULL_SEMI: la superficie del agua vista desde abajo
         // no se dibuja, como en el motor); si no, doble cara.
         let underwater = screenOut.water_tint.3 > 0.5 && screenOut.water_min.3 > 0.5
@@ -1635,7 +1637,7 @@ final class NativeRenderer {
         let bits: [(UInt32, String)] = [(UInt32(NS_PRW_NO_RENDERER), "renderer"), (UInt32(NS_PRW_NO_SCENE), "sin-escena"), (UInt32(NS_PRW_UNFIT), "no-apta"),
                                         (UInt32(NS_PRW_MESHES), "mallas"), (UInt32(NS_PRW_STALE), "vieja(solo-log)"), (UInt32(NS_PRW_INCOHERENT), "incoherente(solo-log)")]
         for (b, n) in bits where (lp.why & b) != 0 { why.append(n) }
-        return "nativo: presenta=\(modo) fundido=\(String(format: "%.2f", lp.fade)) motivos=[\(why.joined(separator: ","))] repetidos=\(presentState.n_hold) negros=\(presentState.n_black) coh=\(String(format: "%.3f", cohDist))m " +
+        return "nativo: tex3d=\(Self.tex3DMMPX ? "mmpx" : "off") presenta=\(modo) fundido=\(String(format: "%.2f", lp.fade)) motivos=[\(why.joined(separator: ","))] repetidos=\(presentState.n_hold) negros=\(presentState.n_black) coh=\(String(format: "%.3f", cohDist))m " +
                "instancias=\(statInstances) piezas=\(statPieces) mallas=\(statMeshes) semi=\(statSemiTris) tramos_semi=\(mergedN) dibujos=\(statDraws) fallos=\(frameFailures)/\(totalFailures) ausentes=\(frameMisses) " +
                "efectos=\(statFxItems) (carteles=\(statFxBillboards) cintas=\(statFxRibbons) poligonos=\(statFxPolys) descartados=\(statFxSkipped) tris=\(statFxTris) dibujados=\(fxAllowed ? "si" : "no")) " +
                "pantalla=[agua=\(screenOut.water_min.3 > 0.5 ? "si" : "no") recubrimientos=\(overlays.count)] " +

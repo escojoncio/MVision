@@ -181,7 +181,7 @@ final class XRFrameEncoder {
         var worldZoom: Float = 1
         if !special && gs.view_kind == 1 && gs.fx.scope_on != 0 {
             if gs.fx.binocular != 0 {
-                worldZoom = Self.binocularZoom(gs.fx.scope_zoom)
+                worldZoom = Self.binocularWorldZoom(gs.fx.scope_zoom)
                 sv = Self.binocularFrame(head: recentered, aspect: 4.0 / 3.0)   // la capa 2D es la ventana visible fija del televisor: siempre 4:3 (su tamaño en píxeles no es cuadrado)
             } else {
                 sv = Self.binocularView(head: recentered, zoom: gs.fx.scope_zoom)
@@ -322,6 +322,7 @@ final class XRFrameEncoder {
             diagT = now
             var d = "xr-diag: modo=\(gs.view_mode) motivo=\(gs.view_reason) clase=\(gs.view_kind) negro=\(gs.view_black) plano=\(gs.cine_shot) cortes=\(gs.cine_cuts) cubiertas=\(gs.cine_cover) cinem=\(gs.cinematic) estereo=\(renderer.stereoRendered) | " + presenter.diagnostics(items: pres.items)
             d += " | escena: " + renderer.diagnostics()
+            d += " | capas2D(ampliadas): hud=\(renderer.hudLogical.x)x\(renderer.hudLogical.y)->\(renderer.hudTexture?.width ?? 0)x\(renderer.hudTexture?.height ?? 0) ventana=\(renderer.auxDiag[1]) completa=\(renderer.auxDiag[2])"
             let c = colorTex[0], z = depthTex[0]
             d += " | color: tipo=\(c.textureType.rawValue) fmt=\(c.pixelFormat.rawValue) \(c.width)x\(c.height)x\(c.arrayLength) n=\(colorTex.count) | prof: fmt=\(z.pixelFormat.rawValue) n=\(depthTex.count)"
             let pl = Self.planes(depthRange)
@@ -389,6 +390,9 @@ final class XRFrameEncoder {
     /// Aumento de los prismáticos: el del juego (H de la pantalla / 160) acotado a 2...8.
     private static func binocularZoom(_ zoom: Float) -> Float { min(max(zoom.isFinite ? zoom : 2, 2), 8) }
 
+    /// Aumento del mundo en los prismáticos del juego: el zoom del juego (1...10, scope_zoom = GM_Camera.zoom / 320) llevado a 2...8 de forma continua (potencia 0,60206 = log10(4): 1 -> 2, 10 -> 8). Con el tope plano de antes (2...8 directo) el mundo no cambiaba mientras el juego subía de 1 a 2 (unos 0,9 s con ○ pulsado).
+    private static func binocularWorldZoom(_ zoom: Float) -> Float { 2 * powf(min(max(zoom.isFinite ? zoom : 1, 1), 10), 0.60206) }
+
     /// Marco de los prismáticos del juego (scope.c en la lista): rectángulo con la proporción `aspect` de la capa del HUD, fijo a la cabeza a 1 m y de 58 grados de alto, que dibuja la capa del HUD del juego
     /// en vivo (MV_VIEW_AA_SIGHT: textura entera, sin premultiplicar) por encima del mundo ampliado; el exterior del rectángulo se tapa con negro (borde de la pantalla del original). Es geometría real, así que se ve a profundidad correcta en estéreo; sin prueba de profundidad (nada lo tapa).
     private static func binocularFrame(head: simd_float4x4, aspect: Float) -> MvVrSpecialView {
@@ -435,7 +439,7 @@ final class XRFrameEncoder {
     }
 
     private func auxView(_ sv: MvVrSpecialView, _ pl: (near: Float, far: Float, valid: Bool)) -> RGRenderer.AuxView? {
-        let wantsAux = sv.kind == Int32(MV_VIEW_SCOPE) || (sv.kind == Int32(MV_VIEW_MISSILE) && sv.ended == 0)
+        let wantsAux = sv.kind == Int32(MV_VIEW_SCOPE) || sv.kind == Int32(MV_VIEW_AA_SCREEN) || (sv.kind == Int32(MV_VIEW_MISSILE) && sv.ended == 0)
         guard wantsAux, sv.cam_valid != 0, sv.tex_w >= 16, sv.tex_h >= 16, sv.tex_w <= 2048, sv.tex_h <= 2048 else { return nil }
         let vals = [sv.cam_pos.0, sv.cam_pos.1, sv.cam_pos.2, sv.cam_rot.0, sv.cam_rot.1, sv.cam_rot.2, sv.cam_rot.3, sv.cam_fov_y]
         guard vals.allSatisfy({ $0.isFinite }), sv.cam_fov_y > 0.005, sv.cam_fov_y < 2.5 else { return nil }

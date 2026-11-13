@@ -201,11 +201,11 @@ static void test_apply(void) {
         /* vértices = skin de la pose (derecha agarre 0, izquierda agarre 1, sin objeto) fuera del puño; matrices = la de la manopla; pieza 0 = anillo de la costura */
         static float pr[VRHA_NV][3], pl[VRHA_NV][3];
         float xr[VRHS_J][12], xl[VRHS_J][12];
-        {   /* misma cuantización que ns_hand (cierres a 1/32) */
+        {   /* misma cuantización que ns_hand (ángulos de vrhandpose_angles en pasos de 1,5 grados, vrhs_pose_ang) */
             VrHandPoseIn a0 = {HP_RELAX, 0.0f, 0.0f, 0.0f, 0.0f}, a1 = {HP_RELAX, 1.0f, 0.0f, 0.0f, 0.0f};
-            VrHandCurls c0, c1; vrhandpose_curls(&a0, &c0); vrhandpose_curls(&a1, &c1);
-            for (int i = 0; i < 5; i++) { c0.curl[i] = roundf(c0.curl[i] * 32.0f) / 32.0f; c1.curl[i] = roundf(c1.curl[i] * 32.0f) / 32.0f; }
-            vrhs_pose(c0.curl, roundf(c0.thumb_spread * 32.0f) / 32.0f, 1, xr); vrhs_pose(c1.curl, roundf(c1.thumb_spread * 32.0f) / 32.0f, -1, xl);
+            float g0[VRHS_NANG], g1[VRHS_NANG]; vrhandpose_angles(&a0, g0); vrhandpose_angles(&a1, g1);
+            for (int i = 0; i < VRHS_NANG; i++) { g0[i] = (float)lrintf(g0[i] / 1.5f) * 1.5f; g1[i] = (float)lrintf(g1[i] / 1.5f) * 1.5f; }
+            vrhs_pose_ang(g0, 1, xr); vrhs_pose_ang(g1, -1, xl);
         }
         vrhs_skin(xr, 1, pr, NULL); vrhs_skin(xl, -1, pl, NULL);
         float verr = 0; int ntri = 0, okc = 1, wind = 0, wind_n = 0;

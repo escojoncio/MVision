@@ -73,3 +73,15 @@ int guided_round_visible(const WeaponState *s);
  * En vuelo se superpone a la imagen del juego (tinte monocromo, ruido, scanlines, retícula,
  * telemetría, marco); en estática o en reposo (fase IDLE) pinta la pantalla completa. */
 void guided_draw_overlay(const WeaponState *s, uint32_t *rgba, int w, int h);
+
+/* Pantalla LED del Nikita (marco del arma): la cara trasera del visor del modelo (la unica cara +Z del tubo en su mitad delantera izquierda, plano z = -81 mm, x -120..-30, y 97..171, ~90x74 mm), reducida a GD_LED_DIAG de diagonal alrededor de su centro,
+ * adelantada GD_LED_LIFT hacia el ojo; el hexagono del tubo recorta su esquina inferior derecha (contorno de 5 vertices; 4 si el modelo no lo recorta). Sin giro (+Z local hacia el ojo).
+ * Devuelve 0 sin modelo enlazado o sin esa cara. */
+#define GD_LED_LIFT 0.003f   /* 3 mm hacia el ojo respecto al plano de la cara del modelo */
+#define GD_LED_DIAG 0.090f   /* diagonal de la pantalla (m): la cara (~90 x 74 mm, 117 mm) se reduce de forma uniforme hacia su centro, asi queda dentro de su contorno */
+int guided_led_face(const WeaponState *s, WScreenFace *out);
+
+/* Ruta de la vista del Nikita (que muestra la pantalla): GLED_STANDBY = espera (sin misil en vuelo), GLED_LIVE = en vuelo, cámara del misil del juego en la pantalla LED (el jugador sigue viendo el mundo), GLED_STATIC = estática al
+ * terminar el vuelo, GLED_FULLSCREEN = opción de comodidad "pantalla grande ante la cara" (solo con el vuelo en curso o la estática). mis_alive = el juego tiene el misil vivo (solo vigila cam_valid, no cambia la ruta). */
+enum { GLED_STANDBY = 0, GLED_LIVE = 1, GLED_STATIC = 2, GLED_FULLSCREEN = 3 };
+int guided_led_route(const WeaponState *s, int mis_alive, int fullscreen);

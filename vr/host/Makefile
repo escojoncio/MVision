@@ -22,6 +22,7 @@ SRC_VR := ../bridge/bridge.c ../bridge/bridge_addrs.c ../camera/vr_camera.c ../c
   ../gameplay/vr_fire.c ../gameplay/vr_fire_hle.c ../gameplay/vr_hit.c ../gameplay/vr_aa.c ../gameplay/vr_missile.c ../gameplay/vr_scope.c ../gameplay/vr_reload.c \
   ../ai/vrai.c ../ai/vr_ai_scan.c ../ai/vr_perception.c ../ai/vr_perception_rt.c ../ai/vr_cameras.c ../ai/vr_activity.c ../ai/vr_activity_rt.c vrgame.c vrbodyg.c vr_melee_rt.c vr_view.c vr_cine.c vr_smooth.c vrhost.c ../native/ns_dumpw.c ../native/ns_bridge.c ../native/ns_player.c ../native/ns_wphide.c ../native/ns_hook.c ../native/ns_hook_rt.c ../native/ns_fx.c
 SRC_RT := $(filter-out $(RT)/headless.c $(RT)/test_%.c $(RT)/wip_%.c,$(wildcard $(RT)/*.c))
+GRIPINC := ../hands/vr_grip_fit.inc ../hands/vr_grip_obj.inc ../hands/vr_hand_grips.inc      # incluidos por vr_grip.c y vr_hand_pose.c
 INC := -I. -I$(RT) -I../bridge -I../camera -I../input -I../scene -I../body -I../radar -I../hands -I../weapons -I../gameplay -I../ai -I../native
 
 check:
@@ -33,7 +34,7 @@ t={n:int(a,16) for n,a in re.findall(r'\{\"(\w+)\", 0x([0-9a-fA-F]+)u\}',s)}; \
 t['vrbody_sort']=int(re.search(r'BODY_SORT_ADDR 0x([0-9a-fA-F]+)u',s).group(1),16); \
 print('OK' if t==e else 'DIFERENTE'); sys.exit(0 if t==e else 1)"
 
-$(OUT)/vrhost_run: vrhost_run.c ../scene/hud_emu.c ../scene/hud_emu.h $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h
+$(OUT)/vrhost_run: vrhost_run.c ../scene/hud_emu.c ../scene/hud_emu.h $(SRC_VR) $(GRIPINC) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
 	  -o $@ vrhost_run.c ../scene/hud_emu.c $(SRC_VR) $(SRC_RT) -lm -lpthread
@@ -43,7 +44,7 @@ $(SIGS): $(SIGS_REF)
 	python3 ../../tools/sig/hlesigs.py $< $@ $(wildcard $(RT)/hle*.txt)
 
 # Validación de la IA VR sobre el host completo (guion de pruebas por fotograma; ver ../ai/test_ai_run.c y la bitácora)
-$(OUT)/test_ai_run: ../ai/test_ai_run.c ../scene/hud_emu.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h
+$(OUT)/test_ai_run: ../ai/test_ai_run.c ../scene/hud_emu.c $(SRC_VR) $(GRIPINC) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
 	  -o $@ ../ai/test_ai_run.c ../scene/hud_emu.c $(SRC_VR) $(SRC_RT) $(AITEST_EXTRA) -lm -lpthread
@@ -79,12 +80,12 @@ $(OUT)/test_vrprov: test_vrprov.c vrprov.h vr_view.h ../scene/vr_prov.c ../scene
 VGSRC := vrgame.c vrbodyg.c ../camera/vr_hzd_ray.c ../bridge/bridge.c ../bridge/bridge_addrs.c ../input/vr_gesture.c ../input/vr_melee.c ../body/vr_body.c ../body/vr_fist.c ../body/vr_hand_skin.c ../body/vr_hand_asset.c ../body/vr_body_cam.c ../body/vr_pose.c \
   ../radar/vr_radar.c ../hands/vr_hands.c ../hands/vr_glove.c ../hands/vr_grip.c ../hands/vr_hand_pose.c $(filter-out ../weapons/test_%.c,$(wildcard ../weapons/*.c)) \
   ../gameplay/vr_fire.c ../gameplay/vr_hit.c ../gameplay/vr_aa.c ../gameplay/vr_missile.c ../gameplay/vr_scope.c ../gameplay/vr_reload.c
-$(OUT)/test_vrgame_fire: test_vrgame_fire.c $(VGSRC) vrgame.h
+$(OUT)/test_vrgame_fire: test_vrgame_fire.c $(VGSRC) $(GRIPINC) vrgame.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) $(CFLAGS) -Wno-unused-parameter -o $@ test_vrgame_fire.c $(VGSRC) -lm -lpthread
 
 # Truco «Dar todas las armas» (vrgame_cheat_weapons_apply + petición consumida en vrgame_pad) sobre una RAM falsa.
-$(OUT)/test_cheat_weapons: test_cheat_weapons.c $(VGSRC) vrgame.h
+$(OUT)/test_cheat_weapons: test_cheat_weapons.c $(VGSRC) $(GRIPINC) vrgame.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) $(CFLAGS) -Wno-unused-parameter -o $@ test_cheat_weapons.c $(VGSRC) -lm -lpthread
 
@@ -107,7 +108,7 @@ test: $(OUT)/test_view $(OUT)/test_mosaic $(OUT)/test_cine $(OUT)/test_smooth $(
 .PHONY: check run test
 
 # Banco de pruebas de las mecánicas de cuerpo (bodyrun.c): host completo, sin escenas, con guion de mando/manos sintéticas por VBlank.
-$(OUT)/bodyrun: bodyrun.c eyeshot.c eyeshot.h $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
+$(OUT)/bodyrun: bodyrun.c eyeshot.c eyeshot.h $(SRC_VR) $(GRIPINC) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
 	  -o $@ bodyrun.c eyeshot.c $(SRC_VR) $(SRC_RT) -lm -lpthread
@@ -115,7 +116,7 @@ $(OUT)/bodyrun: bodyrun.c eyeshot.c eyeshot.h $(SRC_VR) $(SRC_RT) $(wildcard $(R
 bodyrun: $(OUT)/bodyrun
 
 # Fluidez de la locomoción medida sobre el juego real con reloj virtual de 100 Hz (smoothrun.c; bitácora, sección de fluidez).
-$(OUT)/smoothrun: smoothrun.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vr_smooth.h
+$(OUT)/smoothrun: smoothrun.c $(SRC_VR) $(GRIPINC) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vr_smooth.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
 	  -o $@ smoothrun.c $(SRC_VR) $(SRC_RT) -lm -lpthread
@@ -123,7 +124,7 @@ $(OUT)/smoothrun: smoothrun.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h
 smoothrun: $(OUT)/smoothrun
 
 # Cinemáticas del motor en 3D: clasificación, planos y emulación por CPU de la pantalla 3D estéreo (cinerun.c).
-$(OUT)/cinerun: cinerun.c ../scene/hud_emu.c ../scene/hud_emu.h vr_cine.h $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h
+$(OUT)/cinerun: cinerun.c ../scene/hud_emu.c ../scene/hud_emu.h vr_cine.h $(SRC_VR) $(GRIPINC) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
 	  -o $@ cinerun.c ../scene/hud_emu.c $(SRC_VR) $(SRC_RT) -lm -lpthread
@@ -131,7 +132,7 @@ $(OUT)/cinerun: cinerun.c ../scene/hud_emu.c ../scene/hud_emu.h vr_cine.h $(SRC_
 cinerun: $(OUT)/cinerun
 
 # Recorrido título -> partida con acciones de Sense sintéticas y la tabla de mandos de vr_input (padrun.c).
-$(OUT)/padrun: padrun.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
+$(OUT)/padrun: padrun.c $(SRC_VR) $(GRIPINC) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
 	  -o $@ padrun.c $(SRC_VR) $(SRC_RT) -lm -lpthread
@@ -139,7 +140,7 @@ $(OUT)/padrun: padrun.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgam
 padrun: $(OUT)/padrun
 
 # Prueba de integración del apuntado del lanzador antiaéreo (test_aa_run.c): host completo, manos y blanco sintéticos, juego real en MV_NOGEN.
-$(OUT)/test_aa_run: test_aa_run.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
+$(OUT)/test_aa_run: test_aa_run.c $(SRC_VR) $(GRIPINC) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
 	  -o $@ test_aa_run.c $(SRC_VR) $(SRC_RT) -lm -lpthread
@@ -147,7 +148,7 @@ $(OUT)/test_aa_run: test_aa_run.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrho
 test_aa_run: $(OUT)/test_aa_run
 
 # Vistas especiales del arma (test_special_run.c): mira óptica del francotirador, visor antiaéreo y pantalla del misil guiado, juego real en MV_NOGEN.
-$(OUT)/test_special_run: test_special_run.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
+$(OUT)/test_special_run: test_special_run.c $(SRC_VR) $(GRIPINC) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
 	  -o $@ test_special_run.c $(SRC_VR) $(SRC_RT) -lm -lpthread
@@ -155,7 +156,7 @@ $(OUT)/test_special_run: test_special_run.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)
 test_special_run: $(OUT)/test_special_run
 
 # Entradas hostiles (NaN, umbrales, armas al azar) sobre el host completo (fuzzrun.c). Para sanitizadores: make fuzzrun CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer".
-$(OUT)/fuzzrun: fuzzrun.c $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
+$(OUT)/fuzzrun: fuzzrun.c $(SRC_VR) $(GRIPINC) $(SRC_RT) $(wildcard $(RT)/*.h) vrhost.h vrgame.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
 	  -o $@ fuzzrun.c $(SRC_VR) $(SRC_RT) -lm -lpthread

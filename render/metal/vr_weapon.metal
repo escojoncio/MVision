@@ -98,18 +98,20 @@ fragment float4 vr_fs_weapon(VrWpnVOut in [[stage_in]], constant VrWpnFrame &f [
 
 /* ---- Vistas especiales del arma (mira óptica, visor antiaéreo, pantalla del misil): un rectángulo texturizado anclado al arma o a la cabeza ----
  * Mismo pase, mismo estado de profundidad que el arma pero con test siempre y mezcla alfa (iris de la mira, panel transparente del visor).
- * Rectángulo local: x, y en [-0,5; 0,5], cara visible +Z; uv = (x + 0,5; 0,5 - y). Mismo layout en Swift (RenderWeapon.swift: SpcDrawU, 128 bytes). */
+ * Rectángulo local: x, y en [-0,5; 0,5], cara visible +Z; uv = (x + 0,5; 0,5 - y). Mismo layout en Swift (RenderWeapon.swift: SpcDrawU, 192 bytes). */
 #define VR_SPC_BUF_DRAW 2
 #define VR_SPC_MODE_SCOPE 0.0
 #define VR_SPC_MODE_HUD 1.0
 #define VR_SPC_MODE_MISSILE 2.0
+#define VR_SPC_MODE_AASCREEN 3.0   /* visor del antiaéreo en su pieza: imagen viva (textura 0) + HUD del juego (textura 1, subrectángulo uv, p0.z = premultiplicado) */
 
 struct VrSpcDraw {
     float4x4 model;             /* local -> mundo VR; incluye el tamaño del rectángulo */
     float4 uv;                  /* x, y, ancho, alto del subrectángulo de la textura 0 (HUD); el resto de modos usan (0, 0, 1, 1) */
     float4 p0;                  /* x = modo, y = opacidad, z = ruido (misil) / la textura del HUD es la capa 2D fiel, de alfa PREMULTIPLICADO (modo 1), w = tiempo (s, módulo 64) */
-    float4 p1;                  /* x = disco, y = fijado, z = terminado, w = proporción ancho/alto */
-    float4 p2;                  /* x = la imagen de la textura 0 ya es lineal (se lleva a gamma antes de mezclar); y, z = prismáticos (modo HUD con y > 0), ver el fragmento */
+    float4 p1;                  /* x = disco, y = grosor del marco oscuro de las pantallas LED (modos 2 y 3; fracción de la altura, 0 = sin marco), z = terminado, w = proporción ancho/alto */
+    float4 p2;                  /* x = la imagen de la textura 0 ya es lineal (se lleva a gamma antes de mezclar); y, z = prismáticos (modo HUD con y > 0); y > 0,5 en el modo misil = pantalla LED en espera, ver el fragmento; w = nº de vértices de la máscara poligonal (mira; 0 = sin máscara) */
+    float4 poly[4];             /* máscara poligonal convexa de la mira: vértices (u, v) sobre el rectángulo (v hacia abajo), 2 por float4 (xy, zw), hasta 8 */
 };
 struct VrSpcOut {
     float4 pos [[position]];
@@ -146,10 +148,45 @@ fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buff
     float2 q = in.q;
     float2 r = q * 2.0 - 1.0;
     if (d.p1.x > 0.5 && dot(r, r) > 1.0) discard_fragment();            /* disco */
+    if (d.p2.w > 2.5) {                                                  /* máscara poligonal convexa (abertura de la mira): se descarta si el punto cae a ambos lados de las aristas */
+        int pn = min(int(d.p2.w + 0.5), 8);
+        bool pos = false, neg = false;
+        for (int i = 0; i < pn; i++) {
+            int j = (i + 1 == pn) ? 0 : i + 1;
+            float4 pa = d.poly[i >> 1], pb = d.poly[j >> 1];
+            float2 a = (i & 1) == 0 ? pa.xy : pa.zw;
+            float2 b = (j & 1) == 0 ? pb.xy : pb.zw;
+            float cr = (b.x - a.x) * (q.y - a.y) - (b.y - a.y) * (q.x - a.x);
+            if (cr > 1e-6) pos = true;
+            if (cr < -1e-6) neg = true;
+        }
+        if (pos && neg) discard_fragment();
+    }
     float mode = d.p0.x;
     float3 rgb;
     float a = d.p0.y;
-    if (mode < 0.5) {                                                    /* mira: imagen aumentada + abertura y retícula */
+    if (mode > 1.5 && d.p1.y > 0.0) {                                    /* pantallas LED (misil y visor del antiaéreo): marco fino oscuro; p1.y = grosor como fracción de la altura; la imagen ocupa el interior */
+        float2 bw = float2(d.p1.y / max(d.p1.w, 0.01), d.p1.y);
+        float2 ee = min(q, 1.0 - q);
+        if (ee.x < bw.x || ee.y < bw.y) {
+            float3 fc = float3(0.015, 0.016, 0.02);
+            if (kWpnLinear) fc = float3(vr_wpn_lin1(fc.x), vr_wpn_lin1(fc.y), vr_wpn_lin1(fc.z));
+            return float4(fc, 1.0);
+        }
+        q = (q - bw) / (1.0 - 2.0 * bw);
+        r = q * 2.0 - 1.0;
+    }
+    if (mode > 2.5) {                                                    /* visor del antiaéreo: imagen viva + mira y marco de fijación del HUD, ya recortado a la máscara poligonal */
+        rgb = img.sample(sLin, q).xyz;
+        if (d.p2.x > 0.5) rgb = float3(vr_spc_enc1(rgb.x), vr_spc_enc1(rgb.y), vr_spc_enc1(rgb.z));
+        float2 hu = float2(d.uv.x, d.uv.y) + q * float2(d.uv.z, d.uv.w);
+        float4 h = ovl.sample(sLin, hu);
+        float al = h.w;
+        float3 hc = float3(h.x, h.y, h.z);
+        if (d.p0.z > 0.5) { al = max(h.w, max(h.x, max(h.y, h.z))); hc = hc / max(al, 1e-4); }   /* capa premultiplicada (lo aditivo lleva alfa 0 y color): a alfa directo */
+        if (hu.x < 0.0 || hu.y < 0.0 || hu.x > 1.0 || hu.y > 1.0) al = 0.0;
+        rgb = mix(rgb, hc, clamp(al, 0.0, 1.0));
+    } else if (mode < 0.5) {                                             /* mira: imagen aumentada + abertura y retícula */
         rgb = img.sample(sLin, q).xyz;
         if (d.p2.x > 0.5) rgb = float3(vr_spc_enc1(rgb.x), vr_spc_enc1(rgb.y), vr_spc_enc1(rgb.z));
         float4 o = ovl.sample(sLin, q);
@@ -175,8 +212,14 @@ fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buff
         if (a < 0.02) discard_fragment();
     } else {                                                             /* pantalla del misil: monocroma, estática, líneas y cruz */
         float2 px = q * float2(256.0 * d.p1.w, 256.0);
-        float3 s = img.sample(sLin, q).xyz;
+        float3 s = img.sample(sLin, float2(d.uv.x, d.uv.y) + q * float2(d.uv.z, d.uv.w)).xyz;    /* uv = recorte de la imagen 4:3 sobre la pantalla (por defecto 0, 0, 1, 1) */
         if (d.p2.x > 0.5) s = float3(vr_spc_enc1(s.x), vr_spc_enc1(s.y), vr_spc_enc1(s.z));
+        if (d.p2.y > 0.5) {                                              /* pantalla LED en espera (sin misil): fondo verde oscuro tenue con líneas de exploración y una pequeña cruz */
+            rgb = float3(0.02, 0.07, 0.04) * (0.85 + 0.15 * sin(px.y * 3.14159265));
+            float2 c = abs(px - float2(128.0 * d.p1.w, 128.0));
+            float xh = (c.x < 0.6 && c.y > 6.0 && c.y < 14.0) || (c.y < 0.6 && c.x > 6.0 && c.x < 14.0) ? 1.0 : 0.0;
+            rgb = mix(rgb, float3(0.25, 0.7, 0.3), xh * 0.8);
+        } else {
         float lum = dot(s, float3(0.299, 0.587, 0.114));
         float n = vr_spc_hash(floor(px), d.p0.w);
         float noise = clamp(d.p0.z, 0.0, 1.0);
@@ -192,6 +235,7 @@ fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buff
         }
         float e = max(abs(r.x), abs(r.y));
         rgb *= e > 0.97 ? 0.15 : 1.0;                                    /* marco */
+            }
     }
     if (kWpnLinear) rgb = float3(vr_wpn_lin1(rgb.x), vr_wpn_lin1(rgb.y), vr_wpn_lin1(rgb.z));
     return float4(rgb, clamp(a, 0.0, 1.0));

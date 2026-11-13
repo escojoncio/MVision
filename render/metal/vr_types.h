@@ -89,4 +89,5 @@ typedef struct {
     vector_float4 fb_mix;   /* xyz = peso de la fuente por canal; w = peso de la imagen actual */
     vector_float4 fb_m[2];  /* q = (dot(fb_m[0].xy, p) + fb_m[0].z, dot(fb_m[1].xy, p) + fb_m[1].z), p = posición 0..1 en la imagen (y hacia abajo); fb_m[0].w = 1: la fuente es la imagen actual (texture(0)); 0: la imagen anterior de la pantalla (texture(2)) */
     vector_float4 fb_rect;  /* zona afectada: x0, y0, x1, y1 (0..1) */
+    vector_float4 fb_wv;    /* ondulación vertical de la fuente (agua de la intro, wt_view.c; vr_feedback.h VRFB_WAVE_K): q.y += x * sin(K (p.y - 0,5)) + y * cos(K (p.y - 0,5)); z = K (rad por unidad de v); 0 = sin ondulación */
 } VrPostUniforms;

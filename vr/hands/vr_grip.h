@@ -27,11 +27,20 @@ typedef struct {
     WPose grip;           /* marco de la mano (m) -> marco de empuñadura */
     WVec3 trigger;        /* yema del índice con el gatillo suelto, en el marco de empuñadura (m); solo si has_trigger */
     WPose support;        /* marco de la mano de apoyo (m) -> marco del punto WP_SUPPORT */
+    WVec3 elbow_main;     /* dirección del codo del brazo que empuña (marco del torso: x hacia fuera de su lado, y arriba, z delante; medida en Snake, ver vr_grip.c); (0,0,0) = sin dato */
+    WVec3 elbow_support;  /* igual, brazo de apoyo */
+    WQuat turn;           /* giro local de la mano que empuña respecto al mando (marco de vr_hand_skin; vrbody_set_hand_turn): grip ya lo incluye, así que el arma conserva la orientación
+                           * respecto al mando que tendría sin él. (0, 0, 0, 0) o (0, 0, 0, 1) = sin giro */
 } VrGripEntry;
 
 const VrGripEntry *vrgrip_find(int game_weapon_id);   /* NULL si el arma no está en la tabla */
 int vrgrip_count(void);
 const VrGripEntry *vrgrip_at(int i);                  /* 0..count-1; NULL fuera de rango */
+
+/* Colocación del objeto del juego respecto a la mano (granadas 2, 7, 8): pose del marco local del modelo (unidades del motor = mm) en el marco de la mano derecha canónica (mm): p_mano = R * p_modelo + t, R fila-mayor
+ * 3x3. Es la relación con la que se ajustaron las poses de granada (gripfit_gen.c / test_gripfit.c; ver vr_grip_obj.inc). 1 = hay desplazamiento (R y t rellenados, pueden ser NULL); 0 = el id no lo tiene y conserva la
+ * relación mano-objeto del juego. Para ns_wphide_carry_off. */
+int vrgrip_object_offset(int game_weapon_id, float R[9], float t[3]);
 
 /* Zócalo de la mano izquierda a partir del de la derecha: refleja X (posición x -> -x; cuaternión (x, y, z, w) -> (x, -y, -z, w)). Es una involución. */
 WPose vrgrip_mirror(WPose p);

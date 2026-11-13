@@ -33,11 +33,7 @@ static const WPart sniper_parts[SNIPER_PT_N] = {
 
 static const GunCfg sniper_cfg = {
     .interval = 60.0f / SNIPER_RPM, .bolt_cycle = 0.09f,
-    .charge_travel = 0.06000f, .charge_grab_r = 0.05f,
-    .magwell_r = 0.12f, .mag_align_cos = 0.82f,
     .burst_kick = 0.0f,
-    .mag_len = 0.19000f, .mag_in_hand = 0.03f,
-    .mag_rest = { 0.00000f, -0.03500f, -0.11500f },
     .eject_pos = { 0.022f, 0.092f, -0.04f }, .eject_vel = { 2.5f, 1.8f, 0.5f },
     .floor_drop = 1.65f, .can_select = 0, .has_safety = 1, .start_semi = 1,
 };
@@ -103,14 +99,123 @@ static WQuat arc_from_fwd(WVec3 a) {
     return wquat_normalize(q);
 }
 
+/* Marco de la lente: origen c0 (centro de la placa), x/y en el plano de la cara, +Z hacia el ojo. Vértice de malla (marco de la pieza w) -> ese marco. */
+static WVec3 lens_frame(const WPose *w, WQuat qi, WVec3 c0, const float *pos) {
+    return wquat_rotate(qi, wv_sub(wpose_apply(*w, wv(pos[0], pos[1], pos[2])), c0));
+}
+
+/* Casco convexo (cadena monótona, antihorario) de los puntos de la abertura y reducción a SNIPER_POLY_MAX vértices quitando el de menor área con sus vecinos. n <= SNIPER_RIM_BINS. */
+static int rim_hull(float (*pt)[2], int n, float (*res)[2]) {
+    float out[2 * SNIPER_RIM_BINS + 2][2];
+    for (int i = 1; i < n; i++) {                                        /* orden por x, luego y */
+        float x = pt[i][0], y = pt[i][1]; int j = i - 1;
+        while (j >= 0 && (pt[j][0] > x || (pt[j][0] == x && pt[j][1] > y))) { pt[j + 1][0] = pt[j][0]; pt[j + 1][1] = pt[j][1]; j--; }
+        pt[j + 1][0] = x; pt[j + 1][1] = y;
+    }
+    float h[2 * SNIPER_RIM_BINS + 2][2]; int k = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        int start = k;
+        for (int ii = 0; ii < n; ii++) {
+            int i = pass == 0 ? ii : n - 1 - ii;
+            while (k >= start + 2 && (h[k - 1][0] - h[k - 2][0]) * (pt[i][1] - h[k - 2][1]) - (h[k - 1][1] - h[k - 2][1]) * (pt[i][0] - h[k - 2][0]) <= 1e-9f) k--;
+            h[k][0] = pt[i][0]; h[k][1] = pt[i][1]; k++;
+        }
+        k--;                                                             /* el último punto es el primero de la otra mitad */
+    }
+    for (int i = 0; i < k; i++) { out[i][0] = h[i][0]; out[i][1] = h[i][1]; }
+    while (k > SNIPER_POLY_MAX) {
+        int bi = 0; float ba = 1e30f;
+        for (int i = 0; i < k; i++) {
+            const float *a = out[(i + k - 1) % k], *b = out[i], *c2 = out[(i + 1) % k];
+            float ar = fabsf((b[0] - a[0]) * (c2[1] - a[1]) - (b[1] - a[1]) * (c2[0] - a[0]));
+            if (ar < ba) { ba = ar; bi = i; }
+        }
+        for (int i = bi; i + 1 < k; i++) { out[i][0] = out[i + 1][0]; out[i][1] = out[i + 1][1]; }
+        k--;
+    }
+    for (int i = 0; i < k; i++) { res[i][0] = out[i][0]; res[i][1] = out[i][1]; }
+    return k;
+}
+
+/* Abertura trasera del tubo de la mira: el contorno INTERIOR del extremo trasero del cuerpo. Entre los vértices del cuerpo cerca del eje (radio lateral <= SNIPER_RIM_R),
+ * detrás de la placa, se toma el plano más trasero (con una losa de SNIPER_RIM_SLAB por si la pared interior acaba unos milímetros antes que el borde exterior) cuyos vértices
+ * RODEAN el centro de la placa (hueco angular < 120 grados; la culata y demás piezas no lo rodean). En cada dirección (cubos de 3 grados) manda el vértice más cercano al centro
+ * = el anillo interior. Devuelve 1 y la caja del contorno interior en el marco de la lente (x0..x1, y0..y1) y la profundidad z del borde. */
+static int sniper_rim(const WeaponState *s, const WPart *pt, int np, WQuat qi, WVec3 c0, float *x0, float *x1, float *y0, float *y1, float *zr, float (*poly)[2], int *npoly) {
+    int bi = wcore_part_find(s, "body");
+    int nm; const WMesh *ms = weapon_meshes(s, &nm);
+    if (bi < 0 || bi >= np) return 0;
+    int mi = weapon_part_mesh(s, bi);
+    if (mi < 0 || mi >= nm || !ms[mi].v || ms[mi].nv == 0) return 0;
+    const WMesh *m = &ms[mi];
+    WPose w = pt[bi].rest;
+    for (int k = pt[bi].parent, g = 0; k >= 0 && k < np && g < 8; k = pt[k].parent, g++) w = wpose_mul(pt[k].rest, w);
+    /* una sola pasada: vértices candidatos (cerca del eje y no por delante de la placa) en el marco de la lente */
+    WVec3 cand[SNIPER_RIM_CAND];
+    int nc = 0;
+    for (uint32_t k = 0; k < m->nv && nc < SNIPER_RIM_CAND; k++) {
+        WVec3 p = lens_frame(&w, qi, c0, m->v[k].pos);
+        if (!isfinite(p.x + p.y + p.z) || p.z < -SNIPER_RIM_BACK || p.z > SNIPER_RIM_FWD || p.x * p.x + p.y * p.y > SNIPER_RIM_R * SNIPER_RIM_R) continue;
+        cand[nc++] = p;
+    }
+    float top = 1e30f;                                                    /* los planos ya descartados están por encima de esta profundidad */
+    for (int it = 0; it < 64; it++) {
+        float s0 = -1e30f;
+        for (int k = 0; k < nc; k++) if (cand[k].z < top && cand[k].z > s0) s0 = cand[k].z;
+        if (s0 < -1e29f) return 0;
+        float ox = 0.0f, oy = 0.0f;                                       /* 1.ª vuelta: cubos alrededor del centro de la placa (decide si el plano rodea la abertura); 2.ª: alrededor del centro del plano (anillos concéntricos aunque la placa esté descentrada) */
+        for (int pass = 0; pass < 2; pass++) {
+            float bx[SNIPER_RIM_BINS], by[SNIPER_RIM_BINS], br[SNIPER_RIM_BINS];
+            float lx = 1e30f, hx = -1e30f, ly = 1e30f, hy = -1e30f;
+            for (int j = 0; j < SNIPER_RIM_BINS; j++) br[j] = 1e30f;
+            for (int k = 0; k < nc; k++) {
+                WVec3 p = cand[k];
+                if (p.z > s0 + 1e-6f || p.z < s0 - SNIPER_RIM_SLAB) continue;
+                if (p.x < lx) lx = p.x;
+                if (p.x > hx) hx = p.x;
+                if (p.y < ly) ly = p.y;
+                if (p.y > hy) hy = p.y;
+                float dx = p.x - ox, dy = p.y - oy, r2 = dx * dx + dy * dy;
+                int j = (int)((atan2f(dy, dx) + 3.14159265f) * (SNIPER_RIM_BINS / 6.2831853f) + 0.37f) % SNIPER_RIM_BINS;   /* fase 0,37: los ángulos redondos (0, 22,5, 45...) no caen en el borde de un cubo */
+                if (r2 < br[j]) { br[j] = r2; bx[j] = p.x; by[j] = p.y; }
+            }
+            int n = 0, gap = 0, maxgap = 0, first = -1, last = -1;
+            float ix0 = 1e30f, ix1 = -1e30f, iy0 = 1e30f, iy1 = -1e30f;
+            for (int j = 0; j < SNIPER_RIM_BINS; j++) {
+                if (br[j] > 1e29f) { gap++; continue; }
+                if (first < 0) first = j; else if (gap > maxgap) maxgap = gap;
+                gap = 0; last = j; n++;
+                if (bx[j] < ix0) ix0 = bx[j];
+                if (bx[j] > ix1) ix1 = bx[j];
+                if (by[j] < iy0) iy0 = by[j];
+                if (by[j] > iy1) iy1 = by[j];
+            }
+            if (n < 3 || first < 0) break;
+            int wrap = (SNIPER_RIM_BINS - 1 - last) + first;              /* el hueco que cruza el cubo 0 */
+            if (wrap > maxgap) maxgap = wrap;
+            if ((maxgap + 1) * (360 / SNIPER_RIM_BINS) >= 120) break;      /* no rodea el centro */
+            if (pass == 1) {
+                float pp[SNIPER_RIM_BINS][2]; int np2 = 0;
+                for (int j = 0; j < SNIPER_RIM_BINS; j++) if (br[j] < 1e29f) { pp[np2][0] = bx[j]; pp[np2][1] = by[j]; np2++; }
+                *npoly = rim_hull(pp, np2, poly);                         /* contorno interior (vértices en el marco de la lente) */
+                *x0 = ix0; *x1 = ix1; *y0 = iy0; *y1 = iy1; *zr = s0; return 1;
+            }
+            ox = (lx + hx) * 0.5f; oy = (ly + hy) * 0.5f;
+        }
+        top = s0 - SNIPER_RIM_SLAB;                                       /* este plano no rodea el centro (culata, guardamanos...): se sigue con los de más abajo */
+    }
+    return 0;
+}
+
 int sniper_lens(const WeaponState *s, SniperLens *out) {
     int np; const WPart *pt = weapon_parts(s, &np);
     int i = wcore_part_find(s, "lens");
     out->pose = sniper_parts[SNIPER_PT_LENS].rest; out->d = 0.040f; out->model = 0;
+    out->face = out->pose; out->w = out->h = 0.040f; out->rim = 0; out->round = 1; out->npoly = 0;
     if (i < 0 || i >= np) return 0;
     WPose w = pt[i].rest;
     for (int k = pt[i].parent, g = 0; k >= 0 && k < np && g < 8; k = pt[k].parent, g++) w = wpose_mul(pt[k].rest, w);
-    out->pose = w;
+    out->pose = w; out->face = w;
     int nm; const WMesh *ms = weapon_meshes(s, &nm);
     int mi = weapon_part_mesh(s, i);
     if (mi < 0 || mi >= nm || !ms[mi].v || !ms[mi].idx || ms[mi].nv == 0) return 0;
@@ -137,10 +242,42 @@ int sniper_lens(const WeaponState *s, SniperLens *out) {
     WVec3 ax = wquat_rotate(w.q, wv_norm(ns));
     if (ax.z > 0.0f) ax = wv_scale(ax, -1.0f);
     if (!(ax.z < -0.985f)) ax = wv(0, 0, -1);
-    float d = hi.x - lo.x < hi.y - lo.y ? hi.x - lo.x : hi.y - lo.y;
-    out->pose.p = wpose_apply(w, ctr);
-    out->pose.q = arc_from_fwd(ax);
-    out->d = d < 0.03f ? 0.03f : (d > 0.06f ? 0.06f : d);
+    WQuat q = arc_from_fwd(ax), qi = wquat_inv(q);
+    WVec3 c0 = wpose_apply(w, ctr);
+    /* la placa en el marco de la lente: caja de su cara (ancho x alto) */
+    float px0 = 1e30f, px1 = -1e30f, py0 = 1e30f, py1 = -1e30f;
+    for (uint32_t k = 0; k < m->nv; k++) {
+        WVec3 p = lens_frame(&w, qi, c0, m->v[k].pos);
+        if (p.x < px0) px0 = p.x;
+        if (p.x > px1) px1 = p.x;
+        if (p.y < py0) py0 = p.y;
+        if (p.y > py1) py1 = p.y;
+    }
+    float fx0 = px0, fx1 = px1, fy0 = py0, fy1 = py1, fz = 0.0f;
+    float rx0, rx1, ry0, ry1, rz, rpoly[SNIPER_POLY_MAX][2];
+    int rim = 0, rnp = 0;
+    if (sniper_rim(s, pt, np, qi, c0, &rx0, &rx1, &ry0, &ry1, &rz, rpoly, &rnp) && rnp >= 3 && rx1 - rx0 >= SNIPER_FACE_MIN && ry1 - ry0 >= SNIPER_FACE_MIN &&
+        rx1 - rx0 <= SNIPER_FACE_MAX && ry1 - ry0 <= SNIPER_FACE_MAX) {
+        fx0 = rx0; fx1 = rx1; fy0 = ry0; fy1 = ry1; fz = rz; rim = 1;   /* abertura del tubo: la imagen la llena entera, en el plano de su borde */
+    }
+    if (!(fx1 - fx0 >= SNIPER_FACE_MIN && fy1 - fy0 >= SNIPER_FACE_MIN && fx1 - fx0 <= SNIPER_FACE_MAX && fy1 - fy0 <= SNIPER_FACE_MAX)) return 0;   /* malla absurda: reposo */
+    out->pose.p = c0;
+    out->pose.q = q;
+    out->face.q = q;
+    out->face.p = wv_add(c0, wquat_rotate(q, wv((fx0 + fx1) * 0.5f, (fy0 + fy1) * 0.5f, fz)));
+    out->w = fx1 - fx0; out->h = fy1 - fy0;
+    {   /* polígono de la abertura (convexo, antihorario, hasta 8 vértices) relativo al centro de la cara; sin tubo hallado, el rectángulo de la placa */
+        const float cx = (fx0 + fx1) * 0.5f, cy = (fy0 + fy1) * 0.5f;
+        if (rim) { out->npoly = rnp; for (int i = 0; i < rnp; i++) { out->poly[i][0] = rpoly[i][0] - cx; out->poly[i][1] = rpoly[i][1] - cy; } }
+        else {
+            const float hx = out->w * 0.5f, hy = out->h * 0.5f, rc[4][2] = { { -hx, -hy }, { hx, -hy }, { hx, hy }, { -hx, hy } };
+            out->npoly = 4; for (int i = 0; i < 4; i++) { out->poly[i][0] = rc[i][0]; out->poly[i][1] = rc[i][1]; }
+        }
+    }
+    out->round = 0;
+    if (fabsf(out->w - out->h) <= SNIPER_ROUND_TOL * (out->w > out->h ? out->w : out->h)) out->round = 1;   /* casi cuadrada (informativo: se dibuja con el polígono) */
+    out->d = out->w < out->h ? out->w : out->h;
+    out->rim = rim;
     out->model = 1;
     return 1;
 }
@@ -231,7 +368,7 @@ const WeaponDef w_sniper = {
     .parts = sniper_parts, .nparts = SNIPER_PT_N,
     .points = {
         [WP_GRIP]    = POSE(0, 0, 0),
-        [WP_SUPPORT] = POSE(0.00000f, 0.04500f, -0.33000f),
+        [WP_SUPPORT] = POSE(-0.01200f, 0.04800f, -0.14400f),
         [WP_MUZZLE]  = POSE(0.00000f, 0.08000f, -0.84000f),
         [WP_EYE]     = POSE(0, 0, 0),    /* sin uso: la mira es la pieza "lens" (sniper_lens) */
         [WP_MAGWELL] = POSE(0.00000f, -0.02000f, -0.11500f),
@@ -246,8 +383,4 @@ const WeaponDef w_sniper = {
     .make_ready = gun_make_ready,
 };
 
-int sniper_loose_mag(const WeaponState *s, WPose *out) { return gun_loose_mag(&((const SniperState *)s)->g, out); }
-int sniper_held_mag(const WeaponState *s, const WInput *in, WPose *out) {
-    return gun_held_mag(&((const SniperState *)s)->g, &sniper_cfg, in, out);
-}
 int sniper_casings(const WeaponState *s, WPose *out, int max) { return gun_casings(&((const SniperState *)s)->g, out, max); }

@@ -68,3 +68,18 @@ int aa_spare_pose(const WeaponState *s, const WInput *in, WPose *out);
 WVec3 aa_back_zone(const WInput *in, float *radius);
 /* Pose mundo del visor (WP_EYE): el punto desde el que mira el buscador del juego (para vraa_gesture/vraa_set_scope). */
 WPose aa_sight_pose(const WeaponState *s, const WInput *in);
+/* Cara trasera de la mira del modelo (pieza "screen": el polígono por el que mira el ojo), en el marco del arma: face = centro y orientación (+Z hacia el ojo, sin giro) adelantada AA_FACE_LIFT hacia el ojo,
+ * w x h = caja del contorno (m, ejes x derecha / y arriba), poly = contorno convexo (npoly <= AA_POLY_MAX) relativo al centro (x derecha, y arriba, m). Devuelve 0 sin modelo enlazado o sin pieza (el anfitrión usa
+ * entonces el rectángulo del HUD de siempre). */
+#define AA_POLY_MAX   8
+#define AA_FACE_LIFT  0.002f
+typedef struct { WPose face; float w, h; int npoly; float poly[AA_POLY_MAX][2]; } AaSightFace;
+int aa_sight_face(const WeaponState *s, AaSightFace *out);
+
+/* Pantalla LED del Stinger (marco del arma): sobre la cara trasera de la unidad de la mira (plano de la pieza "screen"), 4:3 (marco de sombreador incluido), girada AA_LED_YAW / AA_LED_PITCH
+ * hacia el ojo de apuntar y desplazada lo justo para no atravesar ni la unidad ni el tubo (la caja de "screen" da el plano trasero y el borde superior del tubo). Rectangular (npoly = 0).
+ * 0 sin modelo enlazado o sin pieza "screen". Sustituye a aa_sight_face (cuadrilatero fino y alabeado ~19 grados, ~113x30 mm) como superficie del visor. */
+#define AA_LED_LIFT      0.003f   /* 3 mm hacia el ojo (a lo largo de la normal de la pantalla) */
+#define AA_LED_YAW_DEG   8.2f
+#define AA_LED_PITCH_DEG 8.6f
+int aa_led_face(const WeaponState *s, WScreenFace *out);

@@ -18,17 +18,25 @@
 #include <string.h>
 #include "gpu.h"
 
+#define VRFB_STRIP_MIN_W 16
 enum { VRFB_NONE = 0, VRFB_PREV = 1, VRFB_SELF = 2 };   /* fuente: ninguna / el otro búfer (fotograma anterior) / el búfer que se dibuja (mismo fotograma) */
 #define VRFB_IMG_W 320.0f
 #define VRFB_IMG_H 240.0f
 #define VRFB_MAX_ERR_PX 12.0f     /* residuo máximo del ajuste afín (px del motor): la rejilla deformada de blur.c se aparta ~5 px */
 #define VRFB_MIN_AREA 0.2f        /* fracción mínima de la imagen que deben cubrir (un sprite pequeño que muestrea la pantalla no es este efecto) */
+/* Ondulación del agua de la intro (takabe/wt_view.c): tiras SPRT de 160 x 2 (o 1) filas que releen el MISMO búfer con la fila de origen desplazada v0 = fila + rsin(i * 128) / 1024 (+-4 filas, periodo de 32 tiras = 64 filas
+ * del motor, la fase avanza con el reloj). No cabe en una afín: se ajusta aparte como v' += wave[0] * sin(K (v - 0,5)) + wave[1] * cos(K (v - 0,5)), K = 2 pi * 240 / 64 rad por unidad de v. */
+#define VRFB_WAVE_K (2.0f * 3.14159265f * VRFB_IMG_H / 64.0f)
+#define VRFB_WAVE_MIN_STRIPS 16   /* tiras mínimas para intentar el ajuste de la ondulación */
+#define VRFB_WAVE_MAX_ERR_PX 2.0f /* residuo máximo (filas del motor) tras restar la ondulación: la tabla de wt_view es entera; medido en la intro (auto01, auto02): 1,2-1,4 */
+#define VRFB_WAVE_CAP 2048        /* vértices de tira admitidos en el ajuste (228 tiras x 4 = 912 en la intro) */
 
 typedef struct {
     int n;             /* primitivas de realimentación candidatas de la lista */
     int mode;          /* VRFB_PREV / VRFB_SELF; VRFB_NONE = no hay o no encajan en el modelo (siguen en el panel 2D) */
     float a, b[3];     /* salida = a * actual + b[c] * fuente */
     float m[6];        /* fuente: u' = m[0] u + m[1] v + m[2]; v' = m[3] u + m[4] v + m[5] */
+    float wave[2];     /* ondulación vertical que se suma a v' (ver VRFB_WAVE_K): wave[0] sin + wave[1] cos de K (v - 0,5), en unidades de v; 0, 0 = sin ondulación */
     float rect[4];     /* zona afectada u0, v0, u1, v1 (recortada a 0..1) */
     float err_px;      /* residuo máximo del ajuste (px del motor) */
 } VrFeedback;
@@ -41,7 +49,7 @@ static inline int vrfb_op_source(const GpuOp *o, const int other[4], int org[2])
     if (!o || !(o->flags & GPU_F_TEXTURED) || o->tp < 2 || o->fbk || o->twmx || o->twmy || (o->flags & (GPU_F_FLIPX | GPU_F_FLIPY))) return VRFB_NONE;
     int u0 = 255, v0 = 255, u1 = 0, v1 = 0;
     if (o->type == GPU_OP_RECT) {
-        if (o->rw < 2 || o->rh < 2) return VRFB_NONE;
+        if (o->rw < 2 || (o->rh < 2 && o->rw < VRFB_STRIP_MIN_W)) return VRFB_NONE;     /* una tira de 1 fila (wt_view.c) vale si es ancha; un sprite diminuto no */
         u0 = o->v[0].u; v0 = o->v[0].v; u1 = u0 + o->rw - 1; v1 = v0 + o->rh - 1;
     } else if (o->type == GPU_OP_POLY && (o->nv == 3 || o->nv == 4)) {
         for (int k = 0; k < o->nv; k++) {
@@ -76,6 +84,12 @@ static inline int vrfb_op_source(const GpuOp *o, const int other[4], int org[2])
     return VRFB_NONE;
 }
 
+/* ¿Es una tira de la ondulación (sprite ancho de 1 o 2 filas que muestrea el mismo búfer)? El anfitrión, si una lista trae >= VRFB_WAVE_MIN_STRIPS, modela solo ellas (una lista con la onda y además un
+ * desenfoque no cabe en un único modelo: el desenfoque se pierde, la onda no). */
+static inline int vrfb_is_strip(const GpuOp *o) {
+    return o && o->type == GPU_OP_RECT && o->rw >= VRFB_STRIP_MIN_W && o->rh >= 1 && o->rh <= 2 && vrfb_op_source(o, NULL, NULL) == VRFB_SELF;
+}
+
 /* Modelo del efecto de la lista. cand[i] != 0 marca las primitivas a considerar (el anfitrión: clase UNKNOWN por procedencia y vrfb_op_source != 0); NULL = todas las que muestrean un
  * frame buffer. other: ver vrfb_op_source. vram (opcional, 1024x512): VRAM al cerrar la lista, para saber si la fuente lleva el bit de máscara (los texels sin él se pintan opacos aunque el sprite sea
  * semitransparente); sin ella, un sprite semitransparente se da por mezclado. Devuelve out->mode; out queda siempre definido. Todas las candidatas deben compartir fuente, mezcla y color. */
@@ -99,7 +113,9 @@ static inline int vrfb_build(const GpuOp *ops, uint32_t nops, const uint8_t *can
     float r0 = 1e9f, r1 = 1e9f, r2 = -1e9f, r3 = -1e9f;
     /* dos pasadas: 0 acumula, 1 mide el residuo */
     double mu[3] = {1, 0, 0}, mv[3] = {0, 1, 0};
-    float err = 0.0f;
+    float err = 0.0f, err_u = 0.0f, err_v = 0.0f;
+    static float wx[VRFB_WAVE_CAP], wr[VRFB_WAVE_CAP];   /* muestras de la ondulación (hilo de emulación: una sola llamada a la vez) */
+    int nw = 0, wave_ok = 1;
     for (int pass = 0; pass < 2 && !bad; pass++) {
         for (uint32_t i = 0; i < nops; i++) {
             const GpuOp *o = &ops[i];
@@ -147,6 +163,11 @@ static inline int vrfb_build(const GpuOp *ops, uint32_t nops, const uint8_t *can
                     const float eu = (float)fabs(mu[0] * pu + mu[1] * pv + mu[2] - qu) * VRFB_IMG_W, ev = (float)fabs(mv[0] * pu + mv[1] * pv + mv[2] - qv) * VRFB_IMG_H;
                     if (eu > err) err = eu;
                     if (ev > err) err = ev;
+                    if (eu > err_u) err_u = eu;
+                    if (ev > err_v) err_v = ev;
+                    if (o->type == GPU_OP_RECT && o->rw >= VRFB_STRIP_MIN_W && o->rh <= 2) {      /* muestra de la ondulación: fila de destino y lo que la fuente se aparta de la afín */
+                        if (nw < VRFB_WAVE_CAP) { wx[nw] = (float)(pv - 0.5); wr[nw] = (float)(qv - (mv[0] * pu + mv[1] * pv + mv[2])); nw++; } else wave_ok = 0;
+                    } else wave_ok = 0;
                 }
             }
         }
@@ -161,6 +182,24 @@ static inline int vrfb_build(const GpuOp *ops, uint32_t nops, const uint8_t *can
                 m[1] = (S[0][0] * (b[1] * S[2][2] - S[1][2] * b[2]) - b[0] * (S[1][0] * S[2][2] - S[1][2] * S[2][0]) + S[0][2] * (S[1][0] * b[2] - b[1] * S[2][0])) / det;
                 m[2] = (S[0][0] * (S[1][1] * b[2] - b[1] * S[2][1]) - S[0][1] * (S[1][0] * b[2] - b[1] * S[2][0]) + b[0] * (S[1][0] * S[2][1] - S[1][1] * S[2][0])) / det;
             }
+        }
+    }
+    /* ondulación del agua: solo si TODAS las candidatas son tiras (>= VRFB_WAVE_MIN_STRIPS) y la afín deja un residuo vertical grande. Mínimos cuadrados de (sin, cos) con K fijo; vale si lo que queda es <= VRFB_WAVE_MAX_ERR_PX. */
+    if (!bad && wave_ok && out->n >= VRFB_WAVE_MIN_STRIPS && nw > 0 && err_v > VRFB_WAVE_MAX_ERR_PX) {
+        double ss = 0, cc = 0, sc = 0, rs = 0, rc = 0;
+        for (int i = 0; i < nw; i++) {
+            const double sn = sin((double)VRFB_WAVE_K * wx[i]), cs = cos((double)VRFB_WAVE_K * wx[i]);
+            ss += sn * sn; cc += cs * cs; sc += sn * cs; rs += wr[i] * sn; rc += wr[i] * cs;
+        }
+        const double det = ss * cc - sc * sc;
+        if (fabs(det) > 1e-6) {
+            const double as = (rs * cc - rc * sc) / det, ac = (rc * ss - rs * sc) / det;
+            float ew = 0.0f;
+            for (int i = 0; i < nw; i++) {
+                const float e = (float)fabs(wr[i] - as * sin((double)VRFB_WAVE_K * wx[i]) - ac * cos((double)VRFB_WAVE_K * wx[i])) * VRFB_IMG_H;
+                if (e > ew) ew = e;
+            }
+            if (isfinite(as) && isfinite(ac) && ew <= VRFB_WAVE_MAX_ERR_PX) { out->wave[0] = (float)as; out->wave[1] = (float)ac; err = err_u > ew ? err_u : ew; }
         }
     }
     out->err_px = err;

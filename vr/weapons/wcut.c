@@ -1860,6 +1860,15 @@ static int run_impl(const WLoaded *m, const WCutModel *model, WCutSet *out, doub
         out->atlas = (uint8_t *)malloc(sz ? sz : 1);
         if (!out->atlas) rc = -3; else { memcpy(out->atlas, m->atlas, sz); out->atlas_w = m->atlas_w; out->atlas_h = m->atlas_h; }
     }
+    if (!rc && model->out_k > 0.0f && model->out_k != 1.0f) {   /* escala de salida del modelo (WCutModel.out_k): posiciones, pivotes, cajas, volumen generado y reposo de las partes */
+        const float k = model->out_k;
+        for (int i = 0; i < nord; i++) {
+            WCutPiece *pp = &out->piece[i];
+            for (uint32_t q = 0; q < pp->nv; q++) for (int a = 0; a < 3; a++) { pp->v[q].pos[a] *= k; if (out->mv[i]) out->mv[i][q].pos[a] *= k; }
+            pp->pivot = (WVec3){pp->pivot.x * k, pp->pivot.y * k, pp->pivot.z * k}; pp->bmin = (WVec3){pp->bmin.x * k, pp->bmin.y * k, pp->bmin.z * k}; pp->bmax = (WVec3){pp->bmax.x * k, pp->bmax.y * k, pp->bmax.z * k}; pp->gen_vol *= (double)k * k * k;
+        }
+        for (int i = 0; i < out->nparts; i++) { WVec3 *r = &out->parts[i].rest.p; r->x *= k; r->y *= k; r->z *= k; }
+    }
     for (int i = 0; i < npc; i++) tl_free(&pc[i].tl);
     return rc;
 }

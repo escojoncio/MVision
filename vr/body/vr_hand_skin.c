@@ -40,34 +40,57 @@ static void mirror_xf(float *o, const float *a) {   /* S a S, S = diag(-1, 1, 1)
     for (int k = 0; k < 12; k++) o[k] = a[k] * sg[k];
 }
 
-void vrhs_pose(const float curl[5], float thumb_spread, int side, float xf[VRHS_J][12]) {
+/* Límites anatómicos por articulación (grados): metacarpo, MCP, PIP, DIP, abducción; pulgar: flexión MC, oposición, separación, proximal, distal. */
+static const float ANG_LO[VRHS_NANG] = {0, -15, 0, 0, -15,  0, -15, 0, 0, -15,  0, -15, 0, 0, -15,  0, -15, 0, 0, -15,   0, 0, -25, 0, 0};
+static const float ANG_HI[VRHS_NANG] = {10, 90, 110, 80, 15, 10, 90, 110, 80, 15, 10, 90, 110, 80, 15, 10, 90, 110, 80, 15,  45, 45, 25, 60, 70};
+
+void vrhs_curl_to_ang(const float curl[5], float thumb_spread, float ang[VRHS_NANG]) {
     float c[5];
     for (int i = 0; i < 5; i++) c[i] = curl ? c01(curl[i]) : 0.0f;
     const float sp = cpm1(thumb_spread);
+    for (int f = 0; f < 4; f++) {
+        for (int k = 0; k < 4; k++) ang[5 * f + k] = FINGER_DEG[f][k] * c[f];
+        ang[5 * f + 4] = FINGER_CONVERGE_DEG[f] * c[f];
+    }
+    ang[20] = THUMB_MC_FLEX * c[4]; ang[21] = THUMB_MC_OPP * c[4]; ang[22] = THUMB_SPREAD * sp; ang[23] = THUMB_PROX * c[4]; ang[24] = THUMB_DIST * c[4];
+}
+
+void vrhs_pose_ang(const float angle[VRHS_NANG], int side, float xf[VRHS_J][12]) {
+    float a[VRHS_NANG];
+    for (int i = 0; i < VRHS_NANG; i++) {
+        const float v = (angle && angle[i] == angle[i] && angle[i] - angle[i] == 0.0f) ? angle[i] : 0.0f;
+        a[i] = v < ANG_LO[i] ? ANG_LO[i] : (v > ANG_HI[i] ? ANG_HI[i] : v);
+    }
     static const float AX[3] = {1, 0, 0}, AY[3] = {0, 1, 0}, AZ[3] = {0, 0, 1};
     for (int j = 0; j < VRHS_J; j++) {
         float loc[12], r[12], r2[12];
         const int p = vrha_parent[j];
-        if (p < 0) { memcpy(loc, vrha_bind[j], sizeof loc); for (int a = 0; a < 3; a++) { for (int b = 0; b < 4; b++) loc[4 * a + b] *= VRHS_FIT_K; loc[4 * a + 3] += VRHS_FIT_O[a]; } }   /* raíz: ajuste a la escala del brazo del juego */
+        if (p < 0) { memcpy(loc, vrha_bind[j], sizeof loc); for (int q = 0; q < 3; q++) { for (int b = 0; b < 4; b++) loc[4 * q + b] *= VRHS_FIT_K; loc[4 * q + 3] += VRHS_FIT_O[q]; } }   /* raíz: ajuste a la escala del brazo del juego */
         else xf_mul(loc, vrha_ibm[p], vrha_bind[j]);                 /* local de reposo respecto al padre */
         memset(r, 0, sizeof r); r[0] = r[5] = r[10] = 1;
         if (j >= VRHS_INDEX_MC) {
             const int f = (j - VRHS_INDEX_MC) / 5, k = (j - VRHS_INDEX_MC) % 5;   /* k: 0 metacarpo, 1 proximal, 2 media, 3 distal, 4 punta */
             if (k <= 3) {
-                rot_axis(r, AX, -FINGER_DEG[f][k] * DEG * c[f]);
-                if (k == 1 && FINGER_CONVERGE_DEG[f] != 0.0f) { rot_axis(r2, AY, FINGER_CONVERGE_DEG[f] * DEG * c[f]); xf_mul(r, r2, r); }
+                rot_axis(r, AX, -a[5 * f + k] * DEG);
+                if (k == 1 && a[5 * f + 4] != 0.0f) { rot_axis(r2, AY, a[5 * f + 4] * DEG); xf_mul(r, r2, r); }
             }
         } else if (j == VRHS_THUMB_MC) {
-            rot_axis(r, AX, -THUMB_MC_FLEX * DEG * c[4]);
-            rot_axis(r2, AY, THUMB_MC_OPP * DEG * c[4]); xf_mul(r, r2, r);
-            rot_axis(r2, AZ, -THUMB_SPREAD * DEG * sp); xf_mul(r, r2, r);
-        } else if (j == VRHS_THUMB_PROX) rot_axis(r, AX, -THUMB_PROX * DEG * c[4]);
-        else if (j == VRHS_THUMB_DIST) rot_axis(r, AX, -THUMB_DIST * DEG * c[4]);
+            rot_axis(r, AX, -a[20] * DEG);
+            rot_axis(r2, AY, a[21] * DEG); xf_mul(r, r2, r);
+            rot_axis(r2, AZ, -a[22] * DEG); xf_mul(r, r2, r);
+        } else if (j == VRHS_THUMB_PROX) rot_axis(r, AX, -a[23] * DEG);
+        else if (j == VRHS_THUMB_DIST) rot_axis(r, AX, -a[24] * DEG);
         xf_mul(loc, loc, r);
         if (p < 0) memcpy(xf[j], loc, sizeof loc);
         else xf_mul(xf[j], xf[p], loc);
     }
     if (side < 0) for (int j = 0; j < VRHS_J; j++) mirror_xf(xf[j], xf[j]);
+}
+
+void vrhs_pose(const float curl[5], float thumb_spread, int side, float xf[VRHS_J][12]) {
+    float a[VRHS_NANG];
+    vrhs_curl_to_ang(curl, thumb_spread, a);
+    vrhs_pose_ang(a, side, xf);
 }
 
 void vrhs_skin_mats(const float xf[VRHS_J][12], int side, float sk[VRHS_J][12]) {

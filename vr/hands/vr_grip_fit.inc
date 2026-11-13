@@ -1,0 +1,31 @@
+/* GENERADO por vr/hands/gripfit_gen.c (ver vr_hand_grips.inc): zócalos por arma (mano que empuña -> marco de empuñadura vrhands_grip; mano de apoyo, reflejada -> punto WP_SUPPORT) y yema del índice con el gatillo suelto. */
+#define FIT_SOCOM_GRIP {{0.05488f, 0.00700f, 0.09402f}, {0.00031f, 0.75912f, 0.65095f, 0.00001f}}
+#define FIT_SOCOM_SUP {{0.02230f, 0.02567f, 0.09308f}, {-0.09424f, -0.77488f, -0.37975f, -0.49646f}}
+#define FIT_SOCOM_TRIG {0.00097f, 0.00655f, -0.05192f}
+#define FIT_SOCOM_POSE HP_W_SOCOM_R
+#define FIT_SOCOM_SUPPOSE HP_W_SOCOM_L
+#define FIT_FAMAS_GRIP {{0.04182f, 0.05816f, 0.00256f}, {-0.17203f, 0.70917f, 0.65671f, -0.19033f}}
+#define FIT_FAMAS_SUP {{0.07361f, -0.10642f, 0.01954f}, {-0.60029f, -0.74763f, 0.05472f, -0.27876f}}
+#define FIT_FAMAS_TRIG {0.00057f, 0.03183f, -0.11717f}
+#define FIT_FAMAS_POSE HP_W_FAMAS_R
+#define FIT_FAMAS_SUPPOSE HP_W_FAMAS_L
+#define FIT_PSG1_GRIP {{0.07165f, 0.05255f, 0.03013f}, {-0.09891f, 0.78869f, 0.59325f, -0.12742f}}
+#define FIT_PSG1_SUP {{0.05855f, -0.09548f, 0.02022f}, {0.71716f, 0.63123f, 0.04130f, 0.29245f}}
+#define FIT_PSG1_TRIG {0.01605f, 0.01605f, -0.11502f}
+#define FIT_PSG1_POSE HP_W_PSG1_R
+#define FIT_PSG1_SUPPOSE HP_W_PSG1_L
+#define FIT_STINGER_GRIP {{0.08481f, 0.02122f, -0.00813f}, {-0.18992f, 0.69317f, 0.69072f, -0.07964f}}
+#define FIT_STINGER_SUP {{0.05631f, -0.13278f, 0.13481f}, {-0.58439f, -0.80372f, -0.04841f, -0.10087f}}
+#define FIT_STINGER_TRIG {0.03471f, -0.00776f, -0.14343f}
+#define FIT_STINGER_POSE HP_W_STINGER_R
+#define FIT_STINGER_SUPPOSE HP_W_STINGER_L
+#define FIT_STINGER_TURN {0.00173f, 0.19061f, -0.07798f, 0.97856f}
+#define FIT_NIKITA_GRIP {{0.05180f, 0.03959f, 0.00757f}, {-0.22025f, 0.77690f, 0.58405f, -0.08252f}}
+#define FIT_NIKITA_SUP {{0.10655f, -0.15128f, 0.04683f}, {-0.12255f, -0.19914f, -0.90935f, -0.34410f}}
+#define FIT_NIKITA_TRIG {0.00405f, -0.00686f, -0.09601f}
+#define FIT_NIKITA_POSE HP_W_NIKITA_R
+#define FIT_NIKITA_SUPPOSE HP_W_NIKITA_L
+#define FIT_NIKITA_TURN {0.13637f, 0.21409f, -0.09739f, 0.96233f}
+#define FIT_FRAG_POSE HP_W_FRAG_R
+#define FIT_STUN_POSE HP_W_STUN_R
+#define FIT_CHAFF_POSE HP_W_CHAFF_R

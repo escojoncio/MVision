@@ -137,6 +137,32 @@ static void test_ray_synth(void) {
     CHECK(rc(5000, 7500, -9500, 1, 0, 0, 15000, 0) < 0 && rc(5000, 7500, -9500, 0, 0, 1, 100, 0) < 0, "espacio abierto: sin impacto");
 }
 
+/* ---- segmentos dinámicos (puertas): la bala del juego (HZD_CHK_ALL) para en ellos y el láser también ---- */
+static void test_ray_door(void) {
+    build();                                          /* paredes fijas z=-9000 (a 500 del origen) y z=-10000 */
+    uint32_t wr = 0x8015cde4, list = 0x80150000, door = 0x80150100, dflag = 0x80150200;
+    int16_t dw[8] = {4000, -9200, 7000, 2000, 6000, -9200, 7000, 2000};      /* puerta z=-9200 (a 300), x 4000..6000 */
+    for (int k = 0; k < 8; k++) w16(door + 2 * k, dw[k]);
+    w32(list, door);
+    w16(wr + 10, 1); w16(wr + 18, 4); w32(wr + 32, list); w32(wr + 36, dflag);
+    float t = rc(5000, 7500, -9500, 0, 0, 1, 15000, 0);
+    CHECK(fabsf(t - 300.0f) < 0.5f, "puerta dinámica a 300 delante de la pared fija a 500 (t=%.2f)", t);
+    t = rc(5000, 7500, -9500, 0, 0, 1, 15000, 4);
+    CHECK(fabsf(t - 300.0f) < 0.5f, "máscara 4 sin bit en la bandera de la puerta: cuenta (t=%.2f)", t);
+    ram[dflag & 0x1FFFFF] = 4;
+    t = rc(5000, 7500, -9500, 0, 0, 1, 15000, 4);
+    CHECK(fabsf(t - 500.0f) < 0.5f, "máscara 4 con la puerta marcada con 4: se ignora y vale la fija (t=%.2f)", t);
+    ram[dflag & 0x1FFFFF] = 0;
+    CHECK(rc(7000, 7500, -9500, 0, 0, 1, 15000, 0) > 499.0f, "fuera del ancho de la puerta: la pared fija");
+    CHECK(rc(5000, 7500, -9500, 0, 0, 1, 250, 0) < 0, "puerta más allá del tope de alcance: sin impacto");
+    w16(wr + 10, 0);
+    t = rc(5000, 7500, -9500, 0, 0, 1, 15000, 0);
+    CHECK(fabsf(t - 500.0f) < 0.5f, "sin segmentos dinámicos: la pared fija (t=%.2f)", t);
+    w16(wr + 10, 99);                                 /* contador corrupto (> máximo): se ignora */
+    t = rc(5000, 7500, -9500, 0, 0, 1, 15000, 0);
+    CHECK(fabsf(t - 500.0f) < 0.5f, "contador dinámico corrupto: se ignora (t=%.2f)", t);
+}
+
 /* ---- vrhzd_wall_dist: distancia de un punto a la pared de colisión más cercana (golpe en la pared estando pegado a ella) ---- */
 static float wd(float x, float y, float z, float mx) { float p[3] = {x, y, z}; return vrhzd_wall_dist(ram, p, mx); }
 static void test_wall_dist(void) {
@@ -222,7 +248,7 @@ static void test_ray_dumps(const char *root) {
 int main(void) {
     test_synth();
     const char *dd = getenv("VRHZD_DUMPS");
-    test_ray_synth();
+    test_ray_synth(); test_ray_door();
     test_wall_dist();
     test_wall_near();
     if (dd && *dd) { test_dumps(dd); test_ray_dumps(dd); }

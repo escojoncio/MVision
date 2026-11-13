@@ -286,8 +286,9 @@ typedef struct {
     float fb_a, fb_b[3];
     float fb_m[6];       /* fuente: u' = m0 u + m1 v + m2; v' = m3 u + m4 v + m5 */
     float fb_rect[4];    /* u0, v0, u1, v1 */
+    float fb_wave[2];    /* ondulación vertical de la fuente (agua de la intro, wt_view.c; vr_feedback.h VRFB_WAVE_K): v' += fb_wave[0] * sin(K (v - 0,5)) + fb_wave[1] * cos(K (v - 0,5)); 0, 0 = sin ondulación */
 } NsScreenFx;
-NS_STATIC_ASSERT(screenfx, sizeof(NsScreenFx) == 180);
+NS_STATIC_ASSERT(screenfx, sizeof(NsScreenFx) == 188);
 
 typedef struct NsScene {
     uint32_t size;       /* sizeof(NsScene) de quien la rellenó: el consumidor rechaza la escena si no coincide con el suyo */

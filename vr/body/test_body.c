@@ -143,6 +143,36 @@ static void test_solver(void) {
     printf("  solver: %d casos, estirados %d, demasiado cerca %d, límite de hombro %d, de muñeca %d\n", solved, n_stretch, n_close, n_lim, n_flag_wrist);
 }
 
+/* Brazo atado al arma (VrArmLimits.stretch_max = 1): con el objetivo fuera de alcance los huesos conservan su largo (el antebrazo no se estira) y la muñeca se queda corta; con el tope por defecto sí se estiran. */
+static void test_weld_fixed_length(void) {
+    VrArmLimits fixed, def; vrbody_limits_default(&fixed); vrbody_limits_default(&def);
+    fixed.stretch_max = 1.0f;
+    int far_n = 0, longer = 0;
+    for (int it = 0; it < 4000; it++) {
+        VrArmRig rig = {(it & 1) ? 1.0f : -1.0f, {ELB[0], ELB[1], ELB[2]}, {WRI[0], WRI[1], WRI[2]}};
+        VrArmIn in; memset(&in, 0, sizeof in);
+        rand_rot(in.torso, 0.5f);
+        for (int i = 0; i < 3; i++) in.shoulder[i] = frand(-3000, 3000);
+        float dir[3] = {frand(-1, 1), frand(-1, 1), frand(-1, 1)}, dl = lenv(dir), r = frand(900, 2500);
+        if (dl < 1e-3f) continue;
+        for (int i = 0; i < 3; i++) in.wrist[i] = in.shoulder[i] + dir[i] / dl * r;
+        rand_rot(in.hand, 3.14159f);
+        float pole[3] = {frand(-1, 1) * rig.side, -1, frand(-0.6f, 0.2f)}; memcpy(in.pole, pole, sizeof pole);
+        const float L1 = lenv(rig.elbow_off), L2 = lenv(rig.wrist_off);
+        VrArmOut of, od; memset(&of, 0, sizeof of); memset(&od, 0, sizeof od);
+        CHECK(vrbody_solve_arm(&rig, &fixed, &in, &of) == 0 && vrbody_solve_arm(&rig, &def, &in, &od) == 0, "solve rc");
+        if (lenv(rig.elbow_off) + lenv(rig.wrist_off) >= r) continue;      /* dentro de alcance: no es el caso */
+        far_n++;
+        float ue[3], ew[3]; for (int i = 0; i < 3; i++) { ue[i] = of.elbow[i] - in.shoulder[i]; ew[i] = of.wrist[i] - of.elbow[i]; }
+        CHECK(fabsf(lenv(ue) - L1) < 0.5f && fabsf(lenv(ew) - L2) < 0.5f && of.stretch == 1.0f, "atado: huesos de largo fijo (%g/%g, %g/%g, estirado %g)", lenv(ue), L1, lenv(ew), L2, of.stretch);
+        CHECK(lenv(ue) + lenv(ew) < r, "atado: la muñeca no llega al objetivo lejano");
+        if (od.stretch > 1.0f) longer++;
+    }
+    CHECK(far_n > 1000 && longer > 1000, "cobertura del caso atado: %d lejanos, %d estirados con el tope por defecto", far_n, longer);
+    vrbody_set_weld(0, 1); vrbody_set_weld(1, 0); vrbody_set_weld(2, 1); vrbody_set_weld(0, 0);
+    printf("  brazo atado: %d objetivos fuera de alcance con los huesos de largo fijo\n", far_n);
+}
+
 static void test_solver_nonfinite(void) {
     VrArmLimits lim; vrbody_limits_default(&lim);
     VrArmRig rig = {-1, {ELB[0], ELB[1], ELB[2]}, {WRI[0], WRI[1], WRI[2]}};
@@ -340,6 +370,51 @@ static void test_natural_elbow(void) {
             /* flexión hacia delante: la muñeca queda por delante del codo si la mano está delante */
             if (tg[k][2] > 300) CHECK(o.wrist[2] > o.elbow[2], "antebrazo no va hacia delante");
         }
+    }
+}
+
+/* Brazos como los pone Snake con cada arma. Datos MEDIDOS en las animaciones de apuntar de Snake (OAR "snake" + esqueleto del KMD de init; acciones SocomAttack.aim 42, FamasAttack.aim 5, StingerAttack/NikitaAttack.aim 74,
+ * PSG1Attack.aim 44; ver vr/hands/vr_grip.c; validado con el volcado a33 del PSG1): lado (-1 derecho / +1 izquierdo), dirección del codo (marco del torso, x hacia fuera de su lado), muñeca y codo respecto al hombro
+ * (hacia fuera de su lado, arriba, delante; mm). El IK con esa muñeca y ese polo debe devolver el codo de Snake (huesos de Snake: ELB/WRI); la dirección del codo es el polo (vrbody_set_pole la fija por brazo). */
+static void test_snake_arms(void) {
+    static const struct { const char *w; int side; float pole[3]; float wr[3], el[3]; } A[] = {
+    {"SOCOM", -1, {0.532f, -0.288f, 0.796f}, {-353, 158, 293}, {-133, 55, 222}},
+    {"SOCOM", 1, {0.566f, -0.776f, 0.280f}, {47, 140, 293}, {138, -81, 211}},
+    {"FAMAS", -1, {0.580f, -0.619f, 0.529f}, {-200, -12, 204}, {18, -140, 224}},
+    {"FAMAS", 1, {0.232f, -0.969f, 0.079f}, {58, 37, 276}, {81, -190, 165}},
+    {"STINGER", -1, {0.649f, -0.625f, 0.433f}, {-173, -19, 232}, {47, -144, 217}},
+    {"STINGER", 1, {0.266f, -0.964f, -0.009f}, {118, 30, 294}, {117, -181, 154}},
+    {"PSG1", -1, {0.655f, 0.122f, 0.746f}, {-143, 276, 80}, {58, 171, 194}},
+    {"PSG1", 1, {0.143f, -0.111f, 0.983f}, {-168, 390, 69}, {-66, 185, 177}},
+    };
+    VrArmLimits lim; vrbody_limits_default(&lim);
+    for (unsigned k = 0; k < sizeof A / sizeof A[0]; k++) {
+        const int side = A[k].side;
+        VrArmRig rig = {(float)side, {ELB[0], ELB[1], ELB[2]}, {WRI[0], WRI[1], WRI[2]}};
+        VrArmIn in; memset(&in, 0, sizeof in);
+        in.torso[0] = in.torso[4] = in.torso[8] = 1;
+        in.shoulder[0] = side * 190; in.shoulder[1] = 260; in.shoulder[2] = -29;
+        in.wrist[0] = in.shoulder[0] + side * A[k].wr[0]; in.wrist[1] = in.shoulder[1] + A[k].wr[1]; in.wrist[2] = in.shoulder[2] + A[k].wr[2];
+        in.pole[0] = A[k].pole[0] * side; in.pole[1] = A[k].pole[1]; in.pole[2] = A[k].pole[2];
+        float z[3] = {in.wrist[0] - in.shoulder[0], in.wrist[1] - in.shoulder[1], in.wrist[2] - in.shoulder[2]}, zl = lenv(z), up[3] = {0, 1, 0}, x[3], y[3];
+        for (int i = 0; i < 3; i++) z[i] /= zl;
+        y[0] = up[0] - z[0] * dotv(up, z); y[1] = up[1] - z[1] * dotv(up, z); y[2] = up[2] - z[2] * dotv(up, z);
+        float yl = lenv(y); if (yl < 1e-3f) { y[0] = 0; y[1] = 0; y[2] = 1; yl = 1; }
+        for (int i = 0; i < 3; i++) y[i] /= yl;
+        x[0] = -z[1] * y[2] + z[2] * y[1]; x[1] = -z[2] * y[0] + z[0] * y[2]; x[2] = -z[0] * y[1] + z[1] * y[0];
+        float H[9] = {x[0], -z[0], y[0], x[1], -z[1], y[1], x[2], -z[2], y[2]}; memcpy(in.hand, H, sizeof H);
+        VrArmOut o; CHECK(vrbody_solve_arm(&rig, &lim, &in, &o) == 0, "%s lado %d: solve", A[k].w, side);
+        const float ex = in.shoulder[0] + side * A[k].el[0], ey = in.shoulder[1] + A[k].el[1], ez = in.shoulder[2] + A[k].el[2];
+        const float d = sqrtf((o.elbow[0] - ex) * (o.elbow[0] - ex) + (o.elbow[1] - ey) * (o.elbow[1] - ey) + (o.elbow[2] - ez) * (o.elbow[2] - ez));
+        {   /* dirección del codo del IK (perpendicular a hombro -> muñeca) frente al polo medido */
+            float e[3] = {o.elbow[0] - in.shoulder[0], o.elbow[1] - in.shoulder[1], o.elbow[2] - in.shoulder[2]}, pe[3], pl = dotv(e, z);
+            for (int i = 0; i < 3; i++) pe[i] = e[i] - z[i] * pl;
+            float pn = lenv(pe), dd = pn > 1e-3f ? dotv(pe, in.pole) / (pn * lenv(in.pole)) : 0.0f;
+            if (!(o.flags & (VRARM_SHOULDER_LIMIT | VRARM_WRIST_LIMIT))) CHECK(dd > 0.8f, "%s lado %d: dirección del codo del IK frente al polo medido: cos %.2f", A[k].w, side, dd);
+            printf("  %s lado %d: codo IK a %.0f mm del de Snake, cos(polo) %.2f, flags %u\n", A[k].w, side, d, dd, (unsigned)o.flags);
+        }
+        /* con el límite de la muñeca del cuerpo nuevo activo (VRARM_WRIST_LIMIT: brazo izquierdo de FAMAS, Stinger y Nikita; la mano de Snake lo rebasa) el codo se desvía hasta 200 mm: solo se informa (arriba) */
+        if (!(o.flags & (VRARM_SHOULDER_LIMIT | VRARM_WRIST_LIMIT))) CHECK(d < 120.0f, "%s lado %d: el codo del IK queda a %.0f mm del de Snake", A[k].w, side, d);
     }
 }
 
@@ -673,6 +748,29 @@ static void test_glue(void) {
     vrbody_set_enabled(0); CHECK(vrbody_apply(RAM) == 0 && memcmp(RAM, RAM0, sizeof RAM) == 0, "deshabilitado"); vrbody_set_enabled(1);
     w16(PARTSET + 0x32, 0); memcpy(RAM0, RAM, sizeof RAM); CHECK(vrbody_apply(RAM) == 0 && memcmp(RAM, RAM0, sizeof RAM) == 0, "objeto fuera de pantalla"); w16(PARTSET + 0x32, 2);
     w16(PARTSET + 0x2E, 12); memcpy(RAM0, RAM, sizeof RAM); CHECK(vrbody_apply(RAM) == 0 && memcmp(RAM, RAM0, sizeof RAM) == 0, "modelo con 12 piezas"); w16(PARTSET + 0x2E, 16);
+    /* tumbado (GROUND; también el PSG1: aim 44) o agachado (SQUAT) con el cuerpo oculto por el motor (su primera persona: conducto, PSG1): la IK de los brazos se aplica igual, con o sin arma (arma 9 / sin arma) */
+    w16(PARTSET + 0x32, 0);
+    static const uint32_t posts[] = {BRIDGE_PS_GROUND, BRIDGE_PS_GROUND | BRIDGE_PS_WATCH | BRIDGE_PS_INVISIBLE, BRIDGE_PS_SQUAT, BRIDGE_PS_HIDDEN | BRIDGE_PS_SQUAT};   /* HIDDEN: zona de escondite (HZD 0xF715): sí hay IK */
+    static const int16_t weapons[] = {-1, 9, 0, 0};
+    for (unsigned k = 0; k < 4; k++) {
+        w32(BA_PLAYER_STATUS, posts[k]); w16(BA_VARS + 2u * BRIDGE_V_WEAPON, weapons[k]); memcpy(RAM0, RAM, sizeof RAM);
+        int n = 0; for (int f = 0; f < 30; f++) { set_hand(0, -0.25f, 1.3f, -0.4f, 0.3f); set_hand(1, 0.30f, 1.25f, -0.45f, -0.2f); memcpy(RAM, RAM0, sizeof RAM); n = vrbody_apply(RAM); }
+        CHECK(n == 2, "postura %u arma %d con el cuerpo oculto por el motor: IK de brazos aplicada (%d)", k, weapons[k], n);
+        CHECK(vrbody_debug(0)->driven && vrbody_debug(1)->driven && vrbody_debug(0)->w > 0.99f, "postura %u: brazos dirigidos por los mandos", k);
+        vrbody_restore(RAM); CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "postura %u: restore devuelve la RAM", k);
+    }
+    {   /* agachado/tumbado pero oculto por otro motivo (caja, derribado, muerto, escena): no se aplica */
+        static const uint32_t hid[] = {BRIDGE_PS_BOX | BRIDGE_PS_SQUAT, BRIDGE_PS_BOX | BRIDGE_PS_GROUND, BRIDGE_PS_DOWNED | BRIDGE_PS_GROUND, BRIDGE_PS_GAME_OVER | BRIDGE_PS_SQUAT,
+                                       BRIDGE_PS_NOT_PLAYABLE | BRIDGE_PS_GROUND};
+        for (unsigned k = 0; k < sizeof hid / sizeof hid[0]; k++) {
+            w32(BA_PLAYER_STATUS, hid[k]); memcpy(RAM0, RAM, sizeof RAM);
+            set_hand(0, -0.25f, 1.3f, -0.4f, 0.3f); set_hand(1, 0.30f, 1.25f, -0.45f, -0.2f);
+            CHECK(vrbody_apply(RAM) == 0 && memcmp(RAM, RAM0, sizeof RAM) == 0, "estado %08x con el objeto oculto: sin IK de brazos", (unsigned)hid[k]);
+        }
+    }
+    w32(BA_PLAYER_STATUS, 0); memcpy(RAM0, RAM, sizeof RAM);          /* de pie y oculto por el motor (fuera de pantalla): no se aplica */
+    CHECK(vrbody_apply(RAM) == 0 && memcmp(RAM, RAM0, sizeof RAM) == 0, "de pie con el objeto oculto: fuera de pantalla como siempre");
+    w16(BA_VARS + 2u * BRIDGE_V_WEAPON, 0); w16(PARTSET + 0x32, 2); memcpy(RAM0, RAM, sizeof RAM);
     w32(PMODELS + 0x3C * 3 + 0x2C, 7); memcpy(RAM0, RAM, sizeof RAM);
     { int n = vrbody_apply(RAM); CHECK(n <= 1, "jerarquía distinta: %d brazos", n); vrbody_restore(RAM); CHECK(memcmp(RAM, RAM0, sizeof RAM) == 0, "restore con jerarquía distinta"); }
 
@@ -835,6 +933,28 @@ static void test_armed_hand_fixed_offset(void) {
     CHECK(vrbody_hand_offset(1, q) == 1 && fabsf(q[1] - 0.3826834f) < 1e-5f, "con calibración devuelve la calibrada");
     CHECK(!vrbody_hand_offset(2, q) && !vrbody_hand_offset(1, NULL), "lado o destino inválidos");
     vrbody_clear_calibration();
+    /* Giro local de la mano (vrbody_set_hand_turn, FIT_*_TURN de vr_grip): el marco de mano R(agarre * desvío) * M pasa a ser el de antes por D (D en el marco de vr_hand_skin). Con el zócalo
+     * compensado (S = S0 * D) el arma, mano * inv(S), conserva su orientación respecto al mando: se comprueba R(q1) M = R(q0) M D en ambos lados, y que NULL lo quita. */
+    for (int side = 0; side < 2; side++) {
+        float q0[4], q1[4], D[4] = {0.5f, 0.5f, -0.5f, 0.5f}, R0[9], R1[9], Rd[9], M[9], A[9], B[9];
+        const float MR[9] = {0, 0, -1, -1, 0, 0, 0, 1, 0}, ML[9] = {0, 0, 1, 1, 0, 0, 0, 1, 0};
+        memcpy(M, side ? MR : ML, sizeof M);
+        vrbody_hand_offset(side, q0);
+        vrbody_set_hand_turn(side, D);
+        vrbody_hand_offset(side, q1);
+        vrbody_quat_to_mat(q0, R0); vrbody_quat_to_mat(q1, R1); vrbody_quat_to_mat(D, Rd);
+        float e = 0;
+        for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) {
+            A[3 * r + c] = R1[3 * r] * M[c] + R1[3 * r + 1] * M[3 + c] + R1[3 * r + 2] * M[6 + c];
+            float rm[3]; for (int k = 0; k < 3; k++) rm[k] = R0[3 * r] * M[k] + R0[3 * r + 1] * M[3 + k] + R0[3 * r + 2] * M[6 + k];
+            B[3 * r + c] = rm[0] * Rd[c] + rm[1] * Rd[3 + c] + rm[2] * Rd[6 + c];
+            e = fmaxf(e, fabsf(A[3 * r + c] - B[3 * r + c]));
+        }
+        CHECK(e < 1e-5f, "giro local de la mano lado %d: R(desvío girado) M = R(desvío) M D (error %g)", side, e);
+        vrbody_set_hand_turn(side, NULL);
+        vrbody_hand_offset(side, q1);
+        CHECK(fabsf(fabsf(q0[0] * q1[0] + q0[1] * q1[1] + q0[2] * q1[2] + q0[3] * q1[3]) - 1.0f) < 1e-6f, "sin giro (NULL) vuelve el desvío de antes, lado %d", side);
+    }
 }
 static void test_hand_axes(void) {
     hand_axes_run(0.0f, 0);      /* sin giro: marco de vr_pose.h tal cual */
@@ -1726,7 +1846,8 @@ int main(void) {
     test_math();
     test_solver();
     test_solver_nonfinite();
-    test_natural_elbow();
+    test_weld_fixed_length();
+    test_natural_elbow(); test_snake_arms();
     test_stretch_continuous(); test_stretch_bone(); test_resolve_stretch(); test_shoulder_blend(); test_twist_continuity(); test_wrist_continuity();
     test_continuity();
     test_glue();

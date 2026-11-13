@@ -67,7 +67,6 @@ typedef struct {
     int32_t weapon;          /* arma VR mostrada (índice del puente), -1 ninguna */
     int32_t mag_rounds, chambered, mag_inserted;   /* arma VR */
     int32_t game_mag, game_reserve;                 /* munición del juego */
-    int32_t reload_state;    /* VRR_* de vr_reload.h */
     uint32_t shots;          /* disparos VR desde el arranque */
     uint32_t throws, places, dets, rejects;   /* lanzamientos de granada, colocaciones, detonaciones y eventos rechazados (sin munición, fuera de alcance) */
     uint32_t arms_driven;    /* brazos movidos por la IK desde el arranque */
@@ -77,18 +76,22 @@ void mv_vrgame_status(MvVrGameStatus *out);
 /* ---- vistas especiales del arma (hilo de render) ----
  * El arma equipada puede pedir una segunda vista de la escena o un HUD anclado a ella:
  *  - MV_VIEW_SCOPE: mira óptica del francotirador. La app renderiza la escena una segunda vez desde `cam_*` (campo vertical cam_fov_y, textura
- *    cuadrada tex_w x tex_h) y la muestra en un disco (la lente) en `surf_*` con la abertura y retícula de vr_scope.h por encima. `blend` = 1 siempre
+ *    cuadrada tex_w x tex_h) y la muestra en la abertura trasera del tubo de la mira del modelo (`surf_*`: disco si round = 1, rectángulo si 0; tex_w x tex_h con su proporción) con la abertura y retícula de vr_scope.h por encima. `blend` = 1 siempre
  *    (PSG1 en la mano: imagen viva en la lente desde cualquier ángulo y distancia); cam_valid = 0 solo si la lente no puede verse (no mira a la cabeza o está fuera de su campo, no hace falta renderizar).
  *    La cabeza NO se acerca (el aumento solo está en la lente): suppress_frame pide no aplicar la máscara de visión del juego cuando éste activa la suya; hide_hud = 0 (no se tapa ni el mundo ni el HUD). (Los prismáticos del juego, scope.c, no usan esta vista: el visor amplía el mundo en los dos ojos y pone su marco del HUD
  *    como MV_VIEW_AA_SIGHT; solo sight.c sin scope.c, sin prismáticos, usa un disco SCOPE.)
  *  - MV_VIEW_AA_SIGHT: visor del lanzador antiaéreo. El HUD del propio juego (mira + marco de fijación, en la textura del HUD) se dibuja en un
  *    rectángulo anclado delante del visor (`surf_*`, ya a la distancia y tamaño angular del juego); `uv` = subrectángulo (x, y, w, h) de la textura del HUD
  *    que cubre el rectángulo (el centro óptico del juego es el centro del rectángulo). hide_hud = 1.
- *  - MV_VIEW_MISSILE: vista del misil guiado en vuelo. Segunda vista de la escena desde `cam_*` (la posición y dirección del misil del juego) mostrada en
+ *  - MV_VIEW_AA_SCREEN: visor del lanzador antiaéreo en la pieza "screen" del modelo (cara trasera de la mira). Segunda vista de la escena desde `cam_*` (eje del buscador, cam_fov_y; textura tex_w x tex_h con la proporción de
+ *    la pieza) en la superficie `surf_*` (la caja de la pieza, +Z hacia el ojo) recortada al contorno `poly`/`npoly`; encima, la mira y el marco de fijación del HUD del juego (subrectángulo `uv` de la textura del HUD, capa
+ *    premultiplicada si la app la da así). occlude = 1 (es un objeto del mundo), hide_hud = 1. Sin pieza en el modelo se usa MV_VIEW_AA_SIGHT.
+ *  - MV_VIEW_MISSILE: vista del misil guiado en vuelo. Por defecto (fullscreen = 0) es la pantalla LED del lanzador: la cara trasera del visor del modelo (`surf_*` = su caja, `poly`/`npoly` = su contorno, `frame` = marco del sombreador,
+ *    `uv` = recorte 4:3 de la imagen, occlude = 1), siempre publicada con el lanzador en la mano: `standby` = 1 sin misil (cam_valid = 0), cámara del misil en vuelo, estática al terminar. No toma la vista del jugador. Segunda vista de la escena desde `cam_*` (la posición y dirección del misil del juego) mostrada en
  *    una pantalla (`surf_*`, rectángulo; `blend` 0 = pantallita del lanzador .. 1 = visor grande ante el ojo) con ruido/estática (`noise`) y, al terminar el
  *    vuelo, `ended` = 1 (solo estática). `fullscreen` = pantalla grande fija ante la cara (opción de comodidad; la cabeza nunca se mueve).
  * Poses en el espacio recentrado (el de la cabeza); cara visible de la superficie = +Z local; delante de la cámara = -Z local. */
-enum { MV_VIEW_NONE = 0, MV_VIEW_SCOPE = 1, MV_VIEW_AA_SIGHT = 2, MV_VIEW_MISSILE = 3 };
+enum { MV_VIEW_NONE = 0, MV_VIEW_SCOPE = 1, MV_VIEW_AA_SIGHT = 2, MV_VIEW_MISSILE = 3, MV_VIEW_AA_SCREEN = 4 };
 typedef struct {
     int32_t kind;
     float blend;
@@ -96,7 +99,7 @@ typedef struct {
     float cam_pos[3], cam_rot[4], cam_fov_y;
     int32_t tex_w, tex_h;
     float surf_pos[3], surf_rot[4], surf_w, surf_h;
-    int32_t round;              /* la superficie es un disco de diámetro surf_w (SCOPE; el arma VR siempre round = 1) */
+    int32_t round;              /* la superficie es un disco de diámetro surf_w (SCOPE: 1 si la abertura del modelo es casi cuadrada, como la del PSG1) */
     float uv[4];                /* AA: subrectángulo de la textura del HUD */
     int32_t hide_hud, suppress_frame;
     int32_t locked, converged;  /* AA: blanco fijado / marco cerrado */
@@ -104,6 +107,9 @@ typedef struct {
     int32_t fullscreen, ended;  /* MISSILE */
     float noise;                /* MISSILE: 0..1 */
     int32_t occlude;            /* SCOPE: la lente respeta la profundidad (el mundo y el arma que estén delante la tapan) y no se recorta con el plano cercano; 0 = por encima de todo (AA, misil, prismáticos) */
+    float frame;                /* AA_SCREEN y MISSILE: grosor del marco oscuro de la pantalla LED, fracción de su altura (0 = sin marco); lo dibuja el sombreador dentro de la superficie y la imagen/HUD se reduce a la parte interior */
+    int32_t standby;            /* MISSILE: pantalla LED en espera (sin misil en vuelo ni estática): fondo oscuro tenue en lugar de la imagen */
+    float poly[16]; int32_t npoly;  /* SCOPE: polígono convexo de la abertura (hasta 8 vértices u,v en 0..1 sobre la superficie, v hacia abajo); fuera de él el fragmento se descarta; npoly = 0 = sin máscara (rectángulo o disco) */
 } MvVrSpecialView;
 /* Vista especial vigente (1 = hay; 0 = ninguna). Se publica una vez por VBlank. */
 int32_t mv_vrgame_special_view(MvVrSpecialView *out);
@@ -146,15 +152,19 @@ uint32_t mv_vrgame_calibration_serial(void);                           /* cambia
 void vrbodyg_reset(void);
 unsigned vrbodyg_event_count(int ev);                                  /* VRG_EV_* acumulados (pruebas) */
 uint16_t vrbodyg_pad(uint16_t pad, const struct BridgeState *bs, int right_handed, const uint8_t *ram);
+int vrbodyg_fire_gate(int side, int weapon_hand, float *trig);          /* bloqueo de disparo en la zona de menú: filtra el gatillo del arma de la mano `side` (y anula el disparo en cola si weapon_hand); devuelve VRG_FB_* (0 libre) */
+int vrbodyg_melee_busy(void);                                      /* 1 si el cuerpo está en golpe/agarre/lanzamiento en el último VBlank (vrbodyg_pad) */
+void vrbodyg_test_force_busy(int on);                                   /* pruebas: fuerza vrbodyg_melee_busy */
 int32_t mv_vrgame_menu_hand(void);                                     /* mano física (0 izq, 1 der) que mantiene abierta la ventana de armas/objetos del gesto del pecho; -1 ninguna */
 int vrgame_hand_raw(int side, float p[3], float *grip, float *trig, double *t_s);   /* pose del agarre (espacio usuario, m), grip (puño), gatillo y marca de tiempo (s, monótono; 0 con guion de pruebas); 1 si hay seguimiento */
 /* Modelo VR (id16 en el stage residente) del arma de id de juego dado; 0 = sin modelo VR (se queda el arma del juego). */
 uint16_t vrgame_weapon_model(int game_id);
 int vrgame_weapon_uses_game_model(int game_id);   /* 1 = el arma se dibuja con el modelo real del juego (granadas 2, 7, 8: escena nativa, sin ocultar); su lógica VR sigue */
 void vrgame_test_install(int game_id, void *def, void *state, void *rig);   /* pruebas: arma ya construida (WeaponDef, WeaponState, VrHandsRig) en la ranura de su id */
-int vrgame_test_load_logic(int game_id);   /* pruebas: carga la ranura solo de lógica (modelo 0: granada 7) sin disco; 1 = lista */
+int vrgame_test_load_logic(int game_id);   /* pruebas: carga la ranura solo de lógica (granadas: ranura de solo lógica) sin disco; 1 = lista */
 void vrgame_test_clock(uint64_t ns);                                 /* pruebas: reloj inyectado que arranca en ns (0 = vuelve al reloj real); solo avanza con vrgame_test_advance */
 void vrgame_test_advance(uint64_t ns);                                 /* pruebas: avanza el reloj inyectado */
+int vrgame_test_sim_hand(float p[3], float q[4]);                          /* pruebas: mano del arma (marco de la mano nueva) con la que se simuló el último frame publicado; 0 si no hay frame publicado */
 void vrgame_test_set_native(int game_id, int on);                          /* pruebas: marca la ranura como «dibujada por el juego» (textura incompleta) */
 int vrgame_hand_pose_in(int side, int *item_pose, float *trigger, float *thumb);   /* pose de la mano nueva (vr_hand_pose.h: HP_*), gatillo y pulgar de la mano física side; 1 si hay seguimiento (si no, HP_RELAX y ceros) */
 /* Marco de la mano del mando en el espacio del usuario (m, cuaternión x,y,z,w; el del arma: agarre * desvío fijo) del lado `side` (0 izquierda / 1 derecha): _sim con el agarre filtrado con el que se simuló la última IK de ese brazo

@@ -9,6 +9,7 @@ import simd
 // Sube las imágenes (referencia, Metal, diferencia, panoramas) como artefacto.
 
 setvbuf(stdout, nil, _IONBF, 0)
+NativeRenderer.tex3DMMPX = false   // el banco compara con ns_cpuref (sin filtro de texturas 3D)
 guard CommandLine.arguments.count >= 3 else { print("uso: nbench <native.metallib> <directorio de salida>"); exit(2) }
 let libPath = CommandLine.arguments[1]
 let outDir = CommandLine.arguments[2]

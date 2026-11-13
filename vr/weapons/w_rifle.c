@@ -1,9 +1,9 @@
 /* Fusil de asalto bullpup: definición, piezas y config. La mecánica está en w_gunc.c.
  *
  * Parámetros físicos:
- *  - cadencia 950 rpm (intervalo 63,2 ms); cerrojo ida y vuelta en 45 ms;
+ *  - cadencia 750 rpm (intervalo 80 ms; la del juego en PAL); cerrojo ida y vuelta en 45 ms;
  *  - retroceso: resorte k=220, amortiguación ζ≈0,85 (c=25); por disparo 0,30 m/s hacia atrás y
- *    0,9 rad/s de cabeceo; a 15,8 disp/s eso da ~2 cm de retroceso y ~3,7 grados de subida
+ *    0,9 rad/s de cabeceo; a 12,5 disp/s eso da ~2 cm de retroceso y ~3,7 grados de subida
  *    sostenida a una mano, más hasta 0,55 rad/s extra de cabeceo según crece la ráfaga (30 disparos);
  *    con la mano de apoyo en el guardamanos se multiplica por 0,45. */
 #include <string.h>
@@ -27,11 +27,7 @@ static const WPart rifle_parts[RIFLE_PT_N] = {
 
 static const GunCfg rifle_cfg = {
     .interval = 60.0f / RIFLE_RPM, .bolt_cycle = 0.045f,
-    .charge_travel = 0.06500f, .charge_grab_r = 0.05f,
-    .magwell_r = 0.12f, .mag_align_cos = 0.82f,
     .burst_kick = 0.55f,
-    .mag_len = 0.20000f, .mag_in_hand = 0.03f,
-    .mag_rest = { 0.00000f, -0.04000f, 0.10500f },
     .eject_pos = { 0.03f, 0.098f, -0.02f }, .eject_vel = { 2.2f, 1.6f, 0.6f },
     .floor_drop = 1.65f, .can_select = 1, .has_safety = 0, .start_semi = 0,
 };
@@ -55,7 +51,7 @@ const WeaponDef w_rifle = {
     .parts = rifle_parts, .nparts = RIFLE_PT_N,
     .points = {
         [WP_GRIP]    = POSE(0, 0, 0),
-        [WP_SUPPORT] = POSE(0.00000f, 0.08200f, -0.22500f),
+        [WP_SUPPORT] = POSE(0.01400f, 0.11600f, -0.23000f),
         [WP_MUZZLE]  = POSE(0.00000f, 0.09000f, -0.45500f),
         [WP_EYE]     = POSE(0.00000f, 0.21200f, 0.22500f),
         [WP_MAGWELL] = POSE(0.00000f, -0.03300f, 0.10500f),
@@ -70,9 +66,5 @@ const WeaponDef w_rifle = {
     .make_ready = gun_make_ready,
 };
 
-int rifle_loose_mag(const WeaponState *s, WPose *out) { return gun_loose_mag(&((const RifleState *)s)->g, out); }
-int rifle_held_mag(const WeaponState *s, const WInput *in, WPose *out) {
-    return gun_held_mag(&((const RifleState *)s)->g, &rifle_cfg, in, out);
-}
 int rifle_casings(const WeaponState *s, WPose *out, int max) { return gun_casings(&((const RifleState *)s)->g, out, max); }
 int rifle_is_semi(const WeaponState *s) { return ((const RifleState *)s)->g.semi; }

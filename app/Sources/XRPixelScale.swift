@@ -29,8 +29,8 @@ enum XR2DFilter {
 
     /// El filtro amplía la imagen nativa en la GPU antes de muestrearla (MMPX x2, xBR x3).
     static var upscales: Bool { current == .mmpx || current == .xbr }
-    /// Factor de ampliación del filtro vigente (xr_mmpx2: 2; xr_xbr3: 3).
-    static var factor: Int { current == .mmpx ? 2 : 3 }
+    /// Factor de ampliación del filtro vigente: MMPX x2 aplicado DOS veces = x4 (como los emuladores; con una sola pasada la imagen ampliada 2x apenas supera la densidad de píxeles del visor y no se distingue); xr_xbr3: 3.
+    static var factor: Int { current == .mmpx ? 4 : 3 }
     /// Muestreo del panel en el shader (XRQuadU.cfg.w): 1 sharp-bilinear (sobre la imagen nativa o la ampliada), 2 vecino más próximo.
     var panelMode: UInt32 { self == .nearest ? 2 : 1 }
 }
@@ -47,9 +47,13 @@ enum XR2DCompose {
 final class XRPixelScaler {
     private let pso: MTLComputePipelineState
     private let mmpx: Bool
+    private let device: MTLDevice
+    /// Intermedios de la 1.ª pasada MMPX (x2) por tamaño de origen (ancho << 16 | alto): color y planos apilados (2 * alto). Las pasadas van en orden en el mismo búfer de comandos (Metal serializa el uso de los recursos).
+    private var mids: [Int: (tex: MTLTexture, planes: MTLTexture)] = [:]
 
     init?(device: MTLDevice) {
         mmpx = XR2DFilter.current == .mmpx
+        self.device = device
         guard let lib = MVLib.library(device), let fn = lib.makeFunction(name: mmpx ? "xr_mmpx2" : "xr_xbr3"),
               let p = try? device.makeComputePipelineState(function: fn) else { return nil }
         pso = p
@@ -68,24 +72,43 @@ final class XRPixelScaler {
     }
 
     /// Ampliar la zona (0, 0, width, height) de `src` a `dst`. `planes` / `planesDst`: los planos de resta y tope de la capa 2D fiel (`width` x 2 * `height`) y su destino ampliado; nil = imagen de un solo plano.
-    func encode(_ cb: MTLCommandBuffer, src: MTLTexture, dst: MTLTexture, width: Int, height: Int, planes: MTLTexture? = nil, planesDst: MTLTexture? = nil) {
+    /// Devuelve false si no se codificó nada (tamaños que no cuadran, sin codificador o sin el intermedio MMPX): `dst` no se ha escrito y el llamador debe mostrar la imagen sin ampliar.
+    @discardableResult
+    func encode(_ cb: MTLCommandBuffer, src: MTLTexture, dst: MTLTexture, width: Int, height: Int, planes: MTLTexture? = nil, planesDst: MTLTexture? = nil) -> Bool {
         let f = XR2DFilter.factor
         guard width > 0, height > 0, width <= src.width, height <= src.height, dst.width >= width * f, dst.height >= height * f,
-              let enc = cb.makeComputeCommandEncoder() else { return }
+              let enc = cb.makeComputeCommandEncoder() else { return false }
         var extra: (src: MTLTexture, dst: MTLTexture)?
         if let p = planes, let pd = planesDst, p.width >= width, p.height >= 2 * height, pd.width >= width * f, pd.height >= 2 * height * f { extra = (p, pd) }
         let group = MTLSize(width: 16, height: 8, depth: 1)
         enc.setComputePipelineState(pso)
         if mmpx {
-            // una pasada: decide con todos los planos y escribe todos
-            enc.label = "mv.2d.mmpx2"
-            enc.setTexture(src, index: 0)
-            enc.setTexture(dst, index: 1)
-            enc.setTexture(extra?.src ?? src, index: 2)
-            enc.setTexture(extra?.dst ?? dst, index: 3)
-            var dims = SIMD4<UInt32>(UInt32(width), UInt32(height), extra == nil ? 0 : 2, 0)
-            enc.setBytes(&dims, length: MemoryLayout<SIMD4<UInt32>>.stride, index: 0)
-            enc.dispatchThreads(MTLSize(width: width, height: height, depth: 1), threadsPerThreadgroup: group)   // un hilo por píxel de origen
+            // dos pasadas x2 (x4): decide con todos los planos y escribe todos; la 2.ª lee la salida de la 1.ª
+            let key = width << 16 | height
+            if mids[key] == nil {
+                if mids.count >= 4 { mids.removeAll() }      // un intermedio por tamaño visto: se limita (los usados por trabajos ya codificados los retiene su búfer de comandos)
+                let md = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width * 2, height: height * 2, mipmapped: false)
+                md.usage = [.shaderRead, .shaderWrite]; md.storageMode = .private
+                let mp = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width * 2, height: height * 4, mipmapped: false)
+                mp.usage = [.shaderRead, .shaderWrite]; mp.storageMode = .private
+                if let a = device.makeTexture(descriptor: md), let b = device.makeTexture(descriptor: mp) { a.label = "mv.2d.mmpx.mid"; b.label = "mv.2d.mmpx.mid.planos"; mids[key] = (a, b) }
+            }
+            guard let mid = mids[key] else { enc.endEncoding(); return false }
+            enc.label = "mv.2d.mmpx2x2"
+            var curSrc = src, curP = extra?.src ?? src, cw = width, ch = height
+            for pass in 0..<2 {
+                let last = pass == 1
+                let d = last ? dst : mid.tex, dp = last ? (extra?.dst ?? dst) : (extra != nil ? mid.planes : mid.tex)
+                enc.setTexture(curSrc, index: 0)
+                enc.setTexture(d, index: 1)
+                enc.setTexture(curP, index: 2)
+                enc.setTexture(dp, index: 3)
+                var dims = SIMD4<UInt32>(UInt32(cw), UInt32(ch), extra == nil ? 0 : 2, 0)
+                enc.setBytes(&dims, length: MemoryLayout<SIMD4<UInt32>>.stride, index: 0)
+                enc.dispatchThreads(MTLSize(width: cw, height: ch, depth: 1), threadsPerThreadgroup: group)   // un hilo por píxel de origen
+                curSrc = d; curP = dp; cw *= 2; ch *= 2
+                if !last { enc.memoryBarrier(scope: .textures) }
+            }
         } else {
             enc.label = "mv.2d.xbr3"
             enc.setTexture(src, index: 0)
@@ -102,5 +125,6 @@ final class XRPixelScaler {
             }
         }
         enc.endEncoding()
+        return true
     }
 }

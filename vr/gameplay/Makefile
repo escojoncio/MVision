@@ -20,7 +20,7 @@ SIGS ?= ../../gamedata/hle_sigs.json
 SCRIPT ?= gp_script.txt
 FRAMES ?= 12000
 
-all: $(OUT)/test_fire $(OUT)/test_reload $(OUT)/test_aa $(OUT)/test_scope $(OUT)/test_missile
+all: $(OUT)/test_fire $(OUT)/test_reload $(OUT)/test_aa $(OUT)/test_scope $(OUT)/test_missile $(OUT)/test_bino
 $(OUT)/test_fire: test_fire.c vr_fire.c vr_fire.h vr_hit.c vr_hit.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) $(INC) test_fire.c vr_fire.c vr_hit.c -o $@ -lm
@@ -36,7 +36,11 @@ $(OUT)/test_scope: test_scope.c vr_scope.c vr_scope.h
 $(OUT)/test_missile: test_missile.c vr_missile.c vr_missile.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) $(INC) test_missile.c vr_missile.c -o $@ -lm
-test: $(OUT)/test_fire $(OUT)/test_reload $(OUT)/test_aa $(OUT)/test_scope $(OUT)/test_missile
+$(OUT)/test_bino: test_bino.c vr_bino.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) $(INC) test_bino.c -o $@
+test: $(OUT)/test_fire $(OUT)/test_reload $(OUT)/test_aa $(OUT)/test_scope $(OUT)/test_missile $(OUT)/test_bino
+	$(OUT)/test_bino
 	$(OUT)/test_fire
 	$(OUT)/test_reload
 	$(OUT)/test_aa

@@ -48,9 +48,15 @@ static void with_matrix(Cpu *c, const char *orig, int kind) {
     VrFireMat m = {{0}, {0}};
     int r = zone() ? vrfire_take_projectile(kind, &m) : VRFIRE_PASS;
     if (r == VRFIRE_SKIP) { V0 = 0; return; }
-    uint32_t a0 = A0;
+    uint32_t a0 = A0, a3 = A3;
     if (r == VRFIRE_SUBST) { vrfire_store_mat(emu_ram, zbuf + Z_BULLET, &m); A0 = zbuf + Z_BULLET; }
+    /* El tipo 1 de la decompilación (bullet.c NewBullet: alcance 10000, 5000 por tick; pistola y fusil de asalto) traza la colisión del juego solo hasta 10000 unidades, menos que el láser (15 m): lo que hubiera
+     * más allá no llegaba a producir impacto. El tipo 2 (el del PSG1: alcance 100000, misma velocidad) traza hasta 100000 con la misma colisión (HZD_CHK_ALL), así que
+     * el juego mismo da el punto, la chispa y el sonido en la pared del láser; vrhit_bullet recorta lo que pase del alcance del láser. */
+    const int ext = kind == 0 && r == VRFIRE_SUBST && A3 == 1u;
+    if (ext) { A3 = 2u; vrhit_next_bullet_extended(); }
     rt_orig(c, orig);
+    A3 = a3;
     if (kind == 0 && r == VRFIRE_SUBST) vrhit_bullet(emu_ram, V0, NULL);     /* bala apuntada con el arma VR: cápsulas, zonas y línea de tiro (vr_hit.h) */
     vrfire_probe(kind, r, V0, &m);
     A0 = a0;     /* a0 es de quien llama (convenio o32: el llamado puede cambiarlo; se restaura por si el llamador lo reutiliza) */
@@ -75,6 +81,12 @@ void hle_vrfire_amissile(Cpu *c) {
 void hle_vrfire_mine(Cpu *c) { with_matrix(c, "vrfire_mine", 2); }
 void hle_vrfire_charge(Cpu *c) {
     if ((A3 & 0xFFu) != PLAYER_SIDE) { rt_orig(c, "vrfire_charge"); return; }
+    if (A2 != 0) {      /* adherida a un blanco móvil (enemigo): el actor sigue la matriz del blanco (puntero que guarda), así que no se le puede dar la de la zona temporal; la petición VR se consume */
+        VrFireMat d;
+        if (zone()) vrfire_take_projectile(2, &d);
+        rt_orig(c, "vrfire_charge");
+        return;
+    }
     with_matrix(c, "vrfire_charge", 2);
 }
 

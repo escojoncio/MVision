@@ -9,7 +9,7 @@
 static int checks, fails;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("FALLO l.%d: %s ", __LINE__, #c); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
-static const char *const NAME[HP_COUNT] = {"open", "relax", "fist", "point", "trigger", "grip_pistol", "grip_rifle", "grip_support", "grip_sphere", "grip_placed", "grip_box"};
+static const char *const NAME[HP_COUNT] = {"open", "relax", "fist", "point", "trigger", "grip_pistol", "grip_rifle", "grip_support", "grip_sphere", "grip_placed", "grip_box", "w_socom_r", "w_socom_l", "w_famas_r", "w_famas_l", "w_psg1_r", "w_psg1_l", "w_stinger_r", "w_stinger_l", "w_nikita_r", "w_nikita_l", "w_frag_r", "w_stun_r", "w_chaff_r"};
 static const int SIDE[2] = {1, -1};   /* 0 derecha, 1 izquierda */
 
 static int all_finite(const float xf[VRHS_J][12]) {
@@ -102,6 +102,8 @@ static void test_monotonic(void) {
     }
 }
 
+/* Los umbrales en mm se fijaron con la mano a VRHS_FIT_K = 1,27; escalan con el tamaño de la mano (HS). */
+#define HS (VRHS_FIT_K / 1.27f)
 /* Sin autopenetración gruesa en ninguna pose: las yemas de dedos vecinos no se funden (centros a > 12 mm) y la punta de cada dedo no entra en la palma (su centro queda por delante
  * de la superficie palmar, x > superficie - 3 mm en la mano derecha) */
 static void check_collision(int side, const VrHandPoseIn *in, const char *what) {
@@ -121,7 +123,7 @@ static void check_collision(int side, const VrHandPoseIn *in, const char *what) 
         float in_ = palm_x - SIDE[side] * t[3];
         if (in_ > worst_in) worst_in = in_;
     }
-    CHECK(dmin > 12.0f && worst_in < 3.0f, "mano %d %s: yemas vecinas a %.1f mm, punta dentro de la palma %.1f mm", side, what, dmin, worst_in);
+    CHECK(dmin > 12.0f * HS && worst_in < 3.0f, "mano %d %s: yemas vecinas a %.1f mm, punta dentro de la palma %.1f mm", side, what, dmin, worst_in);
 }
 static void test_collision(void) {
     char what[96];
@@ -147,9 +149,9 @@ static void test_trigger_zone(void) {
             vrhandpose_blend(SIDE[side], &in, xf); vrhandpose_index_tip(xf, tip);
             vrhandpose_blend(SIDE[side], &in1, xf); vrhandpose_index_tip(xf, tip1);
             float dx = sg * (tip[0] - pc[0]), dy = tip[1] - pc[1], dz = tip[2] - pc[2];
-            CHECK(dx > -20.0f && dx < 30.0f && dy < -45.0f && dy > -85.0f && dz > 0.0f && dz < 40.0f, "mano %d %s: yema fuera de la zona del gatillo: (%.1f, %.1f, %.1f) mm", side, NAME[poses[k]], dx, dy, dz);
+            CHECK(dx > -20.0f * HS && dx < 30.0f * HS && dy < -45.0f * HS && dy > -85.0f * HS && dz > 0.0f && dz < 40.0f * HS, "mano %d %s: yema fuera de la zona del gatillo: (%.1f, %.1f, %.1f) mm", side, NAME[poses[k]], dx, dy, dz);
             float back = tip1[1] - tip[1];
-            CHECK(back > 12.0f && back < 45.0f, "mano %d %s: recorrido de la yema con el gatillo %.1f mm (12..45)", side, NAME[poses[k]], back);
+            CHECK(back > 12.0f * HS && back < 45.0f * HS, "mano %d %s: recorrido de la yema con el gatillo %.1f mm (12..45 a la escala 1,27)", side, NAME[poses[k]], back);
         }
     }
 }

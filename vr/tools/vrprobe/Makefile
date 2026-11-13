@@ -20,16 +20,17 @@ SRC_VR := $(VR)/bridge/bridge.c $(VR)/bridge/bridge_addrs.c $(VR)/camera/vr_came
   $(VR)/gameplay/vr_fire.c $(VR)/gameplay/vr_fire_hle.c $(VR)/gameplay/vr_hit.c $(VR)/gameplay/vr_aa.c $(VR)/gameplay/vr_missile.c $(VR)/gameplay/vr_scope.c $(VR)/gameplay/vr_reload.c \
   $(VR)/ai/vrai.c $(VR)/ai/vr_ai_scan.c $(VR)/ai/vr_perception.c $(VR)/ai/vr_perception_rt.c $(VR)/ai/vr_cameras.c $(VR)/ai/vr_activity.c $(VR)/ai/vr_activity_rt.c \
   $(VR)/host/vrgame.c $(VR)/host/vrbodyg.c $(VR)/host/vr_melee_rt.c $(VR)/host/vr_view.c $(VR)/host/vr_cine.c $(VR)/host/vr_smooth.c $(VR)/host/vrhost.c $(VR)/native/ns_dumpw.c $(VR)/native/ns_bridge.c $(VR)/native/ns_player.c $(VR)/native/ns_wphide.c $(VR)/native/ns_hook.c $(VR)/native/ns_hook_rt.c $(VR)/native/ns_fx.c
+GRIPINC := $(VR)/hands/vr_grip_fit.inc $(VR)/hands/vr_grip_obj.inc $(VR)/hands/vr_hand_grips.inc      # incluidos por vr_grip.c y vr_hand_pose.c
 SRC_RT := $(filter-out $(RT)/headless.c $(RT)/test_%.c $(RT)/wip_%.c,$(wildcard $(RT)/*.c))
 INC := -I. -I$(RT) -I$(VR)/bridge -I$(VR)/camera -I$(VR)/input -I$(VR)/scene -I$(VR)/body -I$(VR)/radar -I$(VR)/hands -I$(VR)/weapons -I$(VR)/gameplay -I$(VR)/ai -I$(VR)/host -I$(VR)/native
 
-$(BUILD)/vrprobe: vrprobe.c probe_raster.c probe_raster.h probe_view.c probe_view.h $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) $(wildcard $(VR)/*/*.h)
+$(BUILD)/vrprobe: vrprobe.c probe_raster.c probe_raster.h probe_view.c probe_view.h $(SRC_VR) $(GRIPINC) $(SRC_RT) $(wildcard $(RT)/*.h) $(wildcard $(VR)/*/*.h)
 	@mkdir -p $(BUILD)
 	$(CC) $(INC) -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
 	  -o $@ vrprobe.c probe_raster.c probe_view.c $(SRC_VR) $(SRC_RT) -lm -lpthread
 
 # probe2d: comparación por fotograma real (ref_raster) vs composición 2D+3D (vr/scene/hud_emu.c) con la cámara del juego
-$(BUILD)/probe2d: probe2d.c probe_raster.c probe_raster.h $(SRC_VR) $(SRC_RT) $(wildcard $(RT)/*.h) $(wildcard $(VR)/*/*.h) ../../../render/ref_raster.c $(VR)/scene/hud_emu.c
+$(BUILD)/probe2d: probe2d.c probe_raster.c probe_raster.h $(SRC_VR) $(GRIPINC) $(SRC_RT) $(wildcard $(RT)/*.h) $(wildcard $(VR)/*/*.h) ../../../render/ref_raster.c $(VR)/scene/hud_emu.c
 	@mkdir -p $(BUILD)
 	$(CC) $(INC) -I../../../render -DMV_NOGEN $(CFLAGS) -Wno-unused-label -Wno-unused-but-set-variable -foptimize-sibling-calls \
 	  -o $@ probe2d.c probe_raster.c ../../../render/ref_raster.c $(VR)/scene/hud_emu.c $(SRC_VR) $(SRC_RT) -lm -lpthread

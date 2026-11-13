@@ -217,6 +217,47 @@ static void t_snapshot(void) {
     VrFireMat m; WPose p0 = mkin(&map).muzzle; vrfire_make_matrix(&map, &p0, 400, &m);
     CHECK(g.bullets == 1 && mat_eq(&m, &g.last), "la bala sale con la pose del instante del disparo, no con la actual");
 }
+/* vrfire_cancel_pending (mano en la zona de menú): una petición en cola que aún no ha producido bala se anula; las ya soltadas (la bala va a salir) se suprimen; el siguiente disparo normal sale */
+static void t_cancel(void) {
+    VrFireMap map = mkmap(0, 0, 0, 0); VrFireStats st;
+    /* (a) petición recién hecha, el juego aún levanta el arma: 0 balas, sin disparos sobrantes, el botón se suelta */
+    init_trigger(); FGame g; fg_init(&g, 12, 0); VrFireIn in = mkin(&map);
+    in.fire = 1; vstep(&g, &in, NULL); in.fire = 0;
+    settle(&g, in, 4, NULL);
+    CHECK(vrfire_cancel_pending() == 1, "una petición anulada");
+    settle(&g, in, 120, NULL);
+    vrfire_stats(&st);
+    CHECK(g.bullets == 0 && g.pass_n == 0 && st.cancelled == 1 && st.requests == 1 && st.subst == 0, "petición en cola anulada = 0 balas (%d, anuladas %u)", g.bullets, st.cancelled);
+    int sq = 0; for (int i = 0; i < 100; i++) sq += vstep(&g, &in, NULL);
+    CHECK(sq == 0, "queda libre");
+    CHECK(vrfire_cancel_pending() == 0, "nada que anular");
+    /* disparo normal después: sale con su pose */
+    in.fire = 1; vstep(&g, &in, NULL); in.fire = 0; settle(&g, in, 80, NULL);
+    CHECK(g.bullets == 1 && g.subst_n == 1, "tras anular, un disparo nuevo sale (%d)", g.bullets);
+    /* (b) la liberación ya está en vuelo (el juego creará la bala): se suprime, no sale una bala suelta del juego */
+    init_trigger(); fg_init(&g, 12, 0);
+    in.fire = 1; vstep(&g, &in, NULL); in.fire = 0;
+    for (int i = 0; i < 400; i++) { vrfire_stats(&st); if (st.releases) break; vstep(&g, &in, NULL); }
+    vrfire_stats(&st);
+    CHECK(st.releases >= 1 && g.bullets == 0, "liberación en vuelo sin bala aún (releases %u, balas %d)", st.releases, g.bullets);
+    CHECK(vrfire_cancel_pending() == 1, "anula la petición ya soltada");
+    settle(&g, in, 120, NULL);
+    vrfire_stats(&st);
+    CHECK(g.bullets == 0 && g.skip_n >= 1 && g.pass_n == 0 && g.subst_n == 0, "la bala en vuelo se suprime (balas %d, suprimidas %d, pasadas %d)", g.bullets, g.skip_n, g.pass_n);
+    /* (c) varias peticiones en cola */
+    init_trigger(); fg_init(&g, 12, 0);
+    for (int k = 0; k < 3; k++) { in.fire = 1; vstep(&g, &in, NULL); in.fire = 0; vstep(&g, &in, NULL); }
+    CHECK(vrfire_cancel_pending() == 3, "tres peticiones anuladas");
+    settle(&g, in, 150, NULL);
+    CHECK(g.bullets == 0 && g.pass_n == 0, "ráfaga anulada = 0 balas (%d)", g.bullets);
+    /* (d) automático: la cola de balas del gatillo mantenido se corta */
+    init_trigger(); fg_init(&g, 30, 1);
+    in.trigger_held = 1; settle(&g, in, 40, NULL);
+    int b0 = g.bullets; CHECK(b0 > 0, "el automático dispara (%d)", b0);
+    vrfire_cancel_pending(); in.trigger_held = 0;
+    settle(&g, in, 120, NULL);
+    CHECK(g.pass_n == 0, "sin balas sueltas del juego tras anular el automático (pasadas %d)", g.pass_n);
+}
 static void t_burst(void) {
     init_trigger();
     VrFireMap map = mkmap(0, 0, 0, 0); FGame g; fg_init(&g, 12, 0); PW pw = {1000, 1000, 0, 0, 0, 0};
@@ -660,6 +701,7 @@ static int r16(uint32_t a) { int16_t v; memcpy(&v, ram + (a & 0x1FFFFF), 2); ret
 #define OBJS 0x80120000u
 #define PRIM1 0x80130000u
 #define PRIM2 0x80131000u
+#define CCTRL_NM (PW_BASE + 0x20 + 0x2E)
 static void build_ram(int n, int weapon) {
     memset(ram, 0, sizeof ram);
     w32(BA_PLAYER_CTRL, PW_BASE + 0x20);
@@ -686,6 +728,22 @@ static void t_hide(void) {
     build_ram(2, 0); w32(WACT + 0x20, 0x801FFFF0u); CHECK(vrfire_hide_weapon(ram) == 0, "objs al final de la RAM");
     build_ram(0, 0); CHECK(vrfire_hide_weapon(ram) == 0, "0 modelos");
     build_ram(200, 0); CHECK(vrfire_hide_weapon(ram) == 0, "nº de modelos absurdo");
+    {   /* grenade/bomb(C4)/mine: +0x20 = CONTROL del jugador, +0x28 = conjunto de piezas colgado de la mano; el control no se toca */
+        const uint32_t BODY = 0x80140000u, POBJS = 0x80150000u, CTRLB = PW_BASE + 0x20;
+        build_ram(3, 6);
+        w32(WACT + 0x20, CTRLB); w32(WACT + 0x28, OBJS); w16(CCTRL_NM, 3);
+        w32(0x800ACBB0u, BODY); w32(BODY, POBJS); w16(POBJS + 0x2E, 16); w32(OBJS + 0x20, POBJS + 0x48 + 0x5C * 4);
+        for (int i = 0; i < 3; i++) w16(CTRLB + 0x48 + 0x5C * (uint32_t)i + 0x4C, 0x777);
+        CHECK(vrfire_hide_weapon(ram) == 3 && r16(OBJS + 0x48 + 0x4C) == 0 && r16(CTRLB + 0x48 + 0x4C) == 0x777, "disposición B: se oculta el modelo de la mano y no se escribe en el control del jugador");
+    }
+    {   /* endurecimiento: si el +0x20 del control del jugador pareciera colgar de una parte del cuerpo, el control no es candidato (nunca se escribe en él) */
+        const uint32_t BODY = 0x80140000u, POBJS = 0x80150000u, CTRLB = PW_BASE + 0x20;
+        build_ram(3, 6);
+        w32(WACT + 0x20, CTRLB); w32(WACT + 0x28, OBJS); w16(CCTRL_NM, 3);
+        w32(0x800ACBB0u, BODY); w32(BODY, POBJS); w16(POBJS + 0x2E, 16); w32(OBJS + 0x20, POBJS + 0x48 + 0x5C * 4); w32(CTRLB + 0x20, POBJS + 0x48 + 0x5C * 4);
+        for (int i = 0; i < 3; i++) w16(CTRLB + 0x48 + 0x5C * (uint32_t)i + 0x4C, 0x777);
+        CHECK(vrfire_hide_weapon(ram) == 3 && r16(OBJS + 0x48 + 0x4C) == 0 && r16(CTRLB + 0x48 + 0x4C) == 0x777, "control del jugador con +0x20 de parte del cuerpo: descartado como candidato");
+    }
     build_ram(2, 0); w16(OBJS + 0x2E, -5); CHECK(vrfire_hide_weapon(ram) == 0, "nº negativo");
     build_ram(63, 0); w32(WACT + 0x20, 0x801FFFF0u - 0x5C * 30u); CHECK(vrfire_hide_weapon(ram) == 0, "los modelos no caben en la RAM");
     build_ram(2, 0); w32(WACT + 0x20, 0xA0120000u); CHECK(vrfire_hide_weapon(ram) == 0, "puntero KSEG1 rechazado (solo KSEG0)");
@@ -1203,6 +1261,156 @@ static void t_hit_probe(void) {
     CHECK(vrhit_probe(NULL, o, d, 15780.0f) < 0.0f && vrhit_probe(ram, o, NULL, 15780.0f) < 0.0f, "láser: RAM / dirección nulas");
 }
 
+
+/* ---------------------------------------------------------------- láser = bala (SOCOM y FAMAS)
+ * El juego crea la bala con la matriz inyectada (decompilación bullet.c): origen = t + R*(0,400,0), avance = R*(0,-v,0), sin dispersión ni autoapuntado. Aquí se reproduce eso sobre la
+ * matriz que inyecta vr_fire (SOCOM: petición del gatillo con la pose del disparo; FAMAS: ráfaga con la boca en vivo) y se compara con el rayo del láser (pose -> mundo, delante = -Z) y con el
+ * punto donde acaba el láser (vrhit_shot_dist) frente a donde acaba la bala (vrhit_bullet) contra un muro HZD y contra un enemigo. */
+static void quat_fwd(const WQuat *q, double out[3]) {       /* q * (0,0,-1), rotación estándar v + 2w(u x v) + 2 u x (u x v) */
+    double u[3] = {q->x, q->y, q->z}, w = q->w, v[3] = {0, 0, -1};
+    double c1[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+    double c2[3] = {u[1] * c1[2] - u[2] * c1[1], u[2] * c1[0] - u[0] * c1[2], u[0] * c1[1] - u[1] * c1[0]};
+    for (int i = 0; i < 3; i++) out[i] = v[i] + 2 * w * c1[i] + 2 * c2[i];
+}
+/* bala del juego a partir de la matriz (tipo 2: avance 5000 por tick, como la sustituye vr_fire_hle.c): origen y dirección unitaria */
+static void game_bullet(const VrFireMat *m, float o[3], float d[3]) {
+    double st[3], l = 0;
+    for (int i = 0; i < 3; i++) {
+        o[i] = (float)m->t[i] + (float)m->m[3 * i + 1] * 400.0f / 4096.0f;
+        st[i] = lrint(-(double)m->m[3 * i + 1] / 4096.0 * 5000.0);
+        l += st[i] * st[i];
+    }
+    l = sqrt(l);
+    for (int i = 0; i < 3; i++) d[i] = (float)(st[i] / l);
+}
+static float dist3(const float a[3], const float b[3]) { return sqrtf((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2])); }
+static void t_laser_is_bullet(void) {
+    const float REACH = 15000.0f;
+    VrFireMap map = mkmap(0, 1500, 0, 37.0f);
+    srand(777);
+    double worst_ang = 0, worst_org = 0, worst_wall = 0, worst_enemy = 0;
+    int wall_ok = 0, enemy_ok = 0, seal_ok = 0, far_ok = 0, n = 0;
+    for (int weapon = 0; weapon < 2; weapon++) {      /* 0 SOCOM (petición del gatillo, pose del disparo), 1 FAMAS (ráfaga: boca en vivo) */
+        for (int k = 0; k < 40; k++, n++) {
+            WPose pz; memset(&pz, 0, sizeof pz);
+            pz.p.x = (float)(rand() % 600 - 300) / 1000.0f; pz.p.y = 1.0f + (float)(rand() % 600) / 1000.0f; pz.p.z = -(float)(rand() % 600) / 1000.0f;
+            pz.q = qypr(rand() % 360 - 180, rand() % 50 - 25, rand() % 60 - 30);
+            double fu[3]; quat_fwd(&pz.q, fu);
+            float pu[3] = {pz.p.x, pz.p.y, pz.p.z}, du[3] = {(float)fu[0], (float)fu[1], (float)fu[2]}, ow[3], dw[3];
+            vrfire_pos_to_world(&map, pu, ow); vrfire_dir_to_world(&map, du, dw);       /* el rayo del láser (vrgame.c) */
+            init_trigger();
+            VrFireGame g; memset(&g, 0, sizeof g); g.ok = 1; g.hold_fires = weapon; g.weapon = weapon;
+            VrFireIn in = mkin(&map); in.muzzle = pz; in.fire_pose = pz;
+            if (weapon == 0) in.fire = 1; else in.trigger_held = 1;
+            VrFireOut fo; vrfire_frame(&g, &in, &fo);
+            VrFireMat m; memset(&m, 0, sizeof m);
+            CHECK(vrfire_take_projectile(0, &m) == VRFIRE_SUBST, "arma %d pose %d: bala sustituida", weapon, k);
+            float bo[3], bd[3];
+            game_bullet(&m, bo, bd);
+            double a = acos(fmin(1.0, (double)(bd[0] * dw[0] + bd[1] * dw[1] + bd[2] * dw[2])));
+            double dorg = dist3(bo, ow);
+            if (a > worst_ang) worst_ang = a;
+            if (dorg > worst_org) worst_org = dorg;
+            CHECK(a < 1e-3 && dorg < 1.5, "arma %d pose %d: la bala sale por el rayo del láser (dirección %.2e rad, origen %.2f uds)", weapon, k, a, dorg);
+            float to[3] = {bo[0] + bd[0] * 1000.0f, bo[1] + bd[1] * 1000.0f, bo[2] + bd[2] * 1000.0f};
+            /* --- muro HZD en el rayo (a 3-14 m): el láser y la bala acaban en el mismo punto, y el juego (tipo 2) traza hasta él --- */
+            {
+                float D = 3000.0f + (float)(rand() % 11000);
+                h_world(); h_reg(); vrhit_set_range(REACH, 1000.0f);
+                hw_wall = D;
+                float tl = vrhit_shot_dist(ram, ow, dw, REACH);
+                vrhit_note_laser(ram, ow, dw);
+                h_bullet(1, bo, to, 100000, (int)D);
+                VrHitShot sh; memset(&sh, 0, sizeof sh);
+                vrhit_next_bullet_extended(); vrhit_bullet(ram, HB, &sh);
+                float lp[3] = {ow[0] + dw[0] * tl, ow[1] + dw[1] * tl, ow[2] + dw[2] * tl}, bp[3] = {bo[0] + bd[0] * sh.dist, bo[1] + bd[1] * sh.dist, bo[2] + bd[2] * sh.dist};
+                double dv = dist3(lp, bp);
+                if (dv > worst_wall) worst_wall = dv;
+                if (fabsf(tl - D) < 1.0f && sh.zone == VRHIT_Z_WALL && dv < 8.0 && (int)r32(HB + 0x138) == (int)D) wall_ok++;
+                else CHECK(0, "arma %d pose %d: muro a %.0f: láser %.0f, bala zona %d dist %.0f, desvío %.1f, límite %d", weapon, k, D, tl, sh.zone, sh.dist, dv, (int)r32(HB + 0x138));
+            }
+            /* --- muro más allá del alcance del láser: ni el láser ni la bala llegan; la bala del juego (traza larga) se recorta a ese alcance sin chispa --- */
+            {
+                h_world(); h_reg(); vrhit_set_range(REACH, 1000.0f);
+                hw_wall = 15600.0f;      /* lo ve el rayo de quien lo pida más lejos; aquí fuera del alcance (el callback respeta max) */
+                float tl = vrhit_shot_dist(ram, ow, dw, REACH);
+                h_bullet(1, bo, to, 100000, 15600);
+                VrHitShot sh; memset(&sh, 0, sizeof sh);
+                vrhit_next_bullet_extended(); vrhit_bullet(ram, HB, &sh);
+                float ep[3] = {(float)hs16(HB + 0x118), (float)hs16(HB + 0x11A), (float)hs16(HB + 0x11C)}, want[3] = {bo[0] + bd[0] * REACH, bo[1] + bd[1] * REACH, bo[2] + bd[2] * REACH};
+                if (tl < 0.0f && sh.zone == VRHIT_Z_MISS && (int)r32(HB + 0x138) == (int)REACH && r32(HB + 0x140) == 0 && dist3(ep, want) < 3.0f) far_ok++;
+                else CHECK(0, "arma %d pose %d: muro a 15,6 m: láser %.0f, zona %d, límite %d, hit %u, final a %.1f del alcance", weapon, k, tl, sh.zone, (int)r32(HB + 0x138), r32(HB + 0x140), dist3(ep, want));
+            }
+            /* --- enemigo a 6 m en el rayo: el láser acaba en su volumen, la bala sella ese mismo blanco en ese mismo punto --- */
+            {
+                h_world(); h_reg(); vrhit_set_range(REACH, 1000.0f);
+                float c[3] = {ow[0] + dw[0] * 6000.0f, ow[1] + dw[1] * 6000.0f, ow[2] + dw[2] * 6000.0f};
+                h_soldier(0, 0, (int)lrintf(c[0]), (int)lrintf(c[1]) - 300, (int)lrintf(c[2]), 128);
+                float tl = vrhit_shot_dist(ram, ow, dw, REACH);
+                vrhit_note_laser(ram, ow, dw);
+                h_bullet(1, bo, to, 100000, -1);
+                VrHitShot sh; memset(&sh, 0, sizeof sh);
+                vrhit_next_bullet_extended(); vrhit_bullet(ram, HB, &sh);
+                float lp[3] = {ow[0] + dw[0] * tl, ow[1] + dw[1] * tl, ow[2] + dw[2] * tl}, bp[3] = {bo[0] + bd[0] * sh.dist, bo[1] + bd[1] * sh.dist, bo[2] + bd[2] * sh.dist};
+                double dv = tl >= 0 ? dist3(lp, bp) : 1e9;
+                if (dv > worst_enemy && tl >= 0) worst_enemy = dv;
+                int sealed = -1;
+                for (int t = 0; t < 8 && sealed < 0; t++) { sealed = h_tick(); }
+                if (tl > 4000.0f && tl < 6100.0f && sh.target == 0 && sh.action == VRHIT_ACT_SEAL && dv < 8.0) enemy_ok++;
+                else CHECK(0, "arma %d pose %d: enemigo a 6 m: láser %.0f, bala blanco %d acción %d dist %.0f, desvío %.1f", weapon, k, tl, sh.target, sh.action, sh.dist, dv);
+                if (sealed == 0 && h_vital(0) < 128) seal_ok++;
+                else CHECK(0, "arma %d pose %d: el juego sella al enemigo (sellado %d vida %d)", weapon, k, sealed, h_vital(0));
+            }
+        }
+    }
+    CHECK(wall_ok == n && far_ok == n && enemy_ok == n && seal_ok == n, "láser = bala: muro %d/%d, muro lejano recortado %d/%d, enemigo %d/%d, sellado %d/%d", wall_ok, n, far_ok, n, enemy_ok, n, seal_ok, n);
+    printf("   láser = bala (SOCOM y FAMAS, %d poses): peor dirección %.2e rad, origen %.2f uds, final en muro %.2f uds, en enemigo %.2f uds\n", n, worst_ang, worst_org, worst_wall, worst_enemy);
+    /* sin dispersión: el mismo rayo da siempre la misma matriz (petición y ráfaga) */
+    for (int weapon = 0; weapon < 2; weapon++) {
+        init_trigger();
+        VrFireGame g; memset(&g, 0, sizeof g); g.ok = 1; g.hold_fires = weapon;
+        VrFireIn in = mkin(&map); VrFireOut fo; VrFireMat first, mm;
+        int same = 1;
+        for (int i = 0; i < 30; i++) {
+            in.fire = weapon == 0; in.trigger_held = weapon == 1;
+            vrfire_frame(&g, &in, &fo);
+            vrfire_take_projectile(0, &mm);
+            if (i == 0) first = mm; else if (!mat_eq(&first, &mm)) same = 0;
+            if (weapon == 0) vrfire_init(NULL);
+        }
+        CHECK(same, "arma %d: 30 balas con la misma pose, misma matriz (sin dispersión)", weapon);
+    }
+    /* enemigo fuera del alcance del láser (17 m): ni láser ni bala */
+    {
+        WPose pz; memset(&pz, 0, sizeof pz); pz.p.y = 1.3f; pz.q = qypr(0, 0, 0);
+        double fu[3]; quat_fwd(&pz.q, fu);
+        float pu[3] = {pz.p.x, pz.p.y, pz.p.z}, du[3] = {(float)fu[0], (float)fu[1], (float)fu[2]}, ow[3], dw[3];
+        vrfire_pos_to_world(&map, pu, ow); vrfire_dir_to_world(&map, du, dw);
+        h_world(); h_reg(); vrhit_set_range(REACH, 1000.0f);
+        h_soldier(0, 0, (int)lrintf(ow[0] + dw[0] * 17000.0f), (int)lrintf(ow[1] + dw[1] * 17000.0f) - 300, (int)lrintf(ow[2] + dw[2] * 17000.0f), 128);
+        CHECK(vrhit_shot_dist(ram, ow, dw, REACH) < 0.0f, "enemigo a 17 m: el láser no llega");
+    }
+}
+
+/* Silenciador: la bala promocionada a tipo 2 (ruido de impacto 100) vuelve a tipo 1 si GM_SilencerFlag (BA_VARS + 2 * 60) >= 0 (con supresor); sin silenciador (< 0) conserva el tipo 2 y su ruido */
+static void t_silencer(void) {
+    float o[3] = {0, 1300, 0}, to[3] = {0, 1300, 8000};
+    static const struct { int flag, ext, want; const char *what; } c[] = {
+        {-1, 1, 2, "sin silenciador: tipo 2 (ruido del impacto)"}, {0, 1, 1, "silenciador puesto: tipo 1 (sin ruido)"}, {1, 1, 1, "silenciador pendiente de montar: tipo 1"},
+        {0, 0, 2, "silenciador pero bala sin ampliar: no se toca"},
+    };
+    for (unsigned i = 0; i < sizeof c / sizeof c[0]; i++) {
+        h_world(); h_reg(); vrhit_set_range(15000.0f, 1000.0f);
+        h_bullet(1, o, to, 100000, -1);
+        w32(HB + 0x144, 2); w16(BA_VARS + 2 * 60, c[i].flag);
+        VrHitShot sh; memset(&sh, 0, sizeof sh);
+        if (c[i].ext) vrhit_next_bullet_extended();
+        vrhit_bullet(ram, HB, &sh);
+        CHECK((int)r32(HB + 0x144) == c[i].want, "%s (tipo %d)", c[i].what, (int)r32(HB + 0x144));
+    }
+    w16(BA_VARS + 2 * 60, 0);
+}
+
 static void t_hit_real(void) {
     static const char *nm[] = {"d0008_20261103-001918_stage", "d0009_20261103-002117_stage"};
     const char *dir = getenv("MV_DUMPS"); if (!dir) dir = "/home/claude/work/adj24/Dumps";
@@ -1256,8 +1464,8 @@ static void t_hit_real(void) {
 }
 
 int main(void) {
-    t_hit_zones(); t_hit_motivo(); t_hit_camera(); t_hit_floors(); t_hit_enemy(); t_hit_aim(); t_hit_fist(); t_hit_probe(); t_hit_real();
-    t_matrix(); t_single(); t_skip_raise(); t_snapshot(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_throw_origin(); t_throw_origin_body(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
+    t_hit_zones(); t_hit_motivo(); t_hit_camera(); t_hit_floors(); t_hit_enemy(); t_hit_aim(); t_hit_fist(); t_hit_probe(); t_laser_is_bullet(); t_silencer(); t_hit_real();
+    t_matrix(); t_single(); t_skip_raise(); t_snapshot(); t_cancel(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_throw_origin(); t_throw_origin_body(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
     printf("test_fire: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }

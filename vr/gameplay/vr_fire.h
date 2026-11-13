@@ -123,6 +123,11 @@ const VrFireCfg *vrfire_config(void);
 /* Una vez por VBlank, antes de enviar el mando al juego. */
 void vrfire_frame(const VrFireGame *g, const VrFireIn *in, VrFireOut *out);
 
+/* Anula todo disparo pedido que aún no ha producido proyectil (la mano entró en la zona de menú: el gatillo ya no es del arma). Las peticiones sin soltar desaparecen y el botón se suelta como un desarmado;
+ * las ya soltadas (el juego va a crear la bala) y la cola de la ráfaga automática se suprimen cuando el juego cree el proyectil (misma ventana que el disparo de desarmado, si suppress_disarm).
+ * Una vez por VBlank antes de vrfire_frame, también sin peticiones (no hace nada). Devuelve cuántas peticiones anuló. */
+int vrfire_cancel_pending(void);
+
 /* Salta el levantado del arma del juego. Pistola, fusil de asalto y lanzamisiles guiado comparten función de estado (decompilación: sna_init.c sna_gun_800540D0): tras pulsar el ataque cuenta 8 ticks
  * (16 VBlanks) antes de pasar al estado que dispara (sub_80057BF0); el contador (field_910; edición europea: bloque del jugador + 0x90C) lo incrementa el juego en cada tick. Con una petición de disparo
  * en curso y el botón ya pulsado por esta capa, en cuanto el juego ha arrancado el ataque (contador 1..7, arma aún sin apuntar) se escribe 8: el tick siguiente cambia de estado y el otro dispara
@@ -166,6 +171,7 @@ typedef struct VrFireStats {
     uint32_t presses, releases;          /* pulsaciones y soltados del botón */
     uint32_t arm_timeouts;
     uint32_t lat_last, lat_max;          /* VBlanks entre la petición de disparo (gatillo) y el proyectil sustituido: el último y el máximo (la espera es sobre todo el levantar del arma del juego) */
+    uint32_t cancelled;                  /* peticiones de disparo anuladas por vrfire_cancel_pending */
 } VrFireStats;
 void vrfire_stats(VrFireStats *s);
 /* Sonda de pruebas: los sustitutos la llaman tras ejecutar el original (result = valor devuelto, normalmente el puntero

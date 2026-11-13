@@ -9,7 +9,7 @@
 
 _Static_assert(NS_HAND_PIECES == VRHA_NP + 2, "NS_HAND_PIECES = anillo + transición + piezas de la mano");
 
-#define NS_HAND_QC 32.0f            /* pasos de cuantización de los cierres y de la separación del pulgar */
+#define NS_HAND_ANG_STEP 1.5f       /* paso de cuantización de los ángulos de articulación (grados) */
 #define NS_HAND_LR 6                /* anillos de la transición antebrazo -> mano (0 = extremo del antebrazo, NS_HAND_LR - 1 = borde de la muñeca de la mano) */
 #define NS_HAND_FMAX 16             /* vértices del extremo del antebrazo como mucho */
 #define NS_HAND_LV (NS_HAND_FMAX + (NS_HAND_LR - 1) * VRHA_NCUFF)
@@ -47,7 +47,7 @@ typedef struct {
     int32_t ftw;                 /* giro (grados) con que se hizo; INT32_MIN = ninguno */
     uint64_t fsrc;
     int have_pose;
-    int32_t key[6];              /* pose cuantizada de las mallas actuales: 5 cierres y separación */
+    int32_t key[VRHS_NANG];      /* pose cuantizada de las mallas actuales: ángulos de articulación en pasos de NS_HAND_ANG_STEP grados (vrhs_pose_ang) */
     float pos[VRHA_NV][3], nrm[VRHA_NV][3];
     NsVert v[VRHA_NV];
     NsNorm n[VRHA_NV];
@@ -563,11 +563,11 @@ static int fore_twist(HandCache *c, const NsMesh *fm, const NsXf *U, const NsXf 
     return 1;
 }
 
-/* Mallas de la pose cuantizada `key` (cierres y separación ya cuantizados): skin, normales interiores. */
-static void pose_meshes(HandCache *c, int side, const int32_t key[6], const NsMesh *g) {
-    float curl[5], xf[VRHS_J][12];
-    for (int i = 0; i < 5; i++) curl[i] = (float)key[i] / NS_HAND_QC;
-    vrhs_pose(curl, (float)key[5] / NS_HAND_QC, side, xf);
+/* Mallas de la pose cuantizada `key` (ángulos ya cuantizados): skin, normales interiores. */
+static void pose_meshes(HandCache *c, int side, const int32_t key[VRHS_NANG], const NsMesh *g) {
+    float ang[VRHS_NANG], xf[VRHS_J][12];
+    for (int i = 0; i < VRHS_NANG; i++) ang[i] = (float)key[i] * NS_HAND_ANG_STEP;
+    vrhs_pose_ang(ang, side, xf);
     vrhs_skin(xf, side, c->pos, c->nrm);
     for (int i = 0; i < VRHA_NV; i++) {
         c->v[i].x = (int16_t)ns_clampf(floorf(c->pos[i][0] + 0.5f), -32768.0f, 32767.0f);
@@ -668,12 +668,11 @@ static int one_hand(NsScene *sc, NsMeshStore *st, const NsPlayerMap *map, const 
     memset(&hpi, 0, sizeof hpi);
     hpi.item_pose = HP_RELAX;
     if (in->driven[h]) { hpi.item_pose = in->item_pose[h]; hpi.grip = in->grip[h]; hpi.trigger = in->trigger[h]; hpi.thumb_btn = in->thumb[h]; }
-    if (hpi.item_pose >= HP_GRIP_PISTOL && hpi.item_pose <= HP_GRIP_BOX) hpi.grip = 1.0f;    /* con un objeto en la mano (HP_GRIP_*) la mano siempre lo rodea, con o sin botón de agarre; el gatillo sigue moviendo el índice */
-    VrHandCurls cu;
-    vrhandpose_curls(&hpi, &cu);
-    int32_t pk[6];
-    for (int i = 0; i < 5; i++) pk[i] = quant(cu.curl[i], NS_HAND_QC);
-    pk[5] = quant(cu.thumb_spread, NS_HAND_QC);
+    if (hpi.item_pose >= HP_GRIP_PISTOL && hpi.item_pose < HP_COUNT) hpi.grip = 1.0f;    /* con un objeto en la mano (HP_GRIP_*) la mano siempre lo rodea, con o sin botón de agarre; el gatillo sigue moviendo el índice */
+    float ang[VRHS_NANG];
+    vrhandpose_angles(&hpi, ang);
+    int32_t pk[VRHS_NANG];
+    for (int i = 0; i < VRHS_NANG; i++) pk[i] = quant(ang[i], 1.0f / NS_HAND_ANG_STEP);
     if (!c->have_pose || memcmp(pk, c->key, sizeof pk) != 0) pose_meshes(c, side, pk, g);
     if (c->seam && !loft_mesh(c, &fp->world, &gp->world, g)) c->seam = 0;   /* matrices degeneradas: sin anillo ni transición este fotograma (se rehace después) */
     for (int p = 0; p < VRHA_NP; p++) if (ns_store_put(st, &c->mesh[p]) < 0) { S.st.put_fail++; return 0; }

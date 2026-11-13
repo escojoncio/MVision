@@ -152,6 +152,7 @@ typedef struct {
     uint32_t src_tris;    /* nº de triángulos esperado del modelo; 0 = no comprobar. Si no coincide: wcut_run devuelve -4 */
     WCutBounds bounds;    /* caja envolvente esperada (aprox.); ignorada si src_tris == 0 */
     const WCutSeal *seals; int nseals;
+    float out_k;          /* escala de la salida (mallas, pivotes, partes) respecto al modelo original; 0 = 1. Las reglas y la caja van en las medidas del ORIGINAL */
 } WCutModel;
 
 /* Origen de cada triángulo de una pieza. */

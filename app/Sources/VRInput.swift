@@ -11,7 +11,6 @@ struct VRInputSettings: Equatable {
     var vignette: Float = 0.6         // 0..1
     var locomotionFromHand = false    // false: relativa a la cabeza
     var rightHanded = true            // mano dominante
-    var weaponReload = 2              // recarga del arma VR: 0 manual, 1 simplificada, 2 automática (defecto)
     var allowProne = false
     var physicalPosture = 0           // postura por altura de la cabeza: 0 desactivada (defecto; el botón del juego manda), 1 solo para bajar, 2 completa
     var headHeight: Float = 0         // altura de pie calibrada en metros; 0 = autocalibrar
@@ -30,7 +29,6 @@ struct VRInputSettings: Equatable {
         if has("vignette") { s.vignette = d.float(forKey: prefix + "vignette") }
         if has("locoHand") { s.locomotionFromHand = d.bool(forKey: prefix + "locoHand") }
         if has("rightHanded") { s.rightHanded = d.bool(forKey: prefix + "rightHanded") }
-        if has("wreload") { s.weaponReload = min(max(d.integer(forKey: prefix + "wreload"), 0), 2) }
         if has("prone") { s.allowProne = d.bool(forKey: prefix + "prone") }
         if has("posture") { s.physicalPosture = min(max(d.integer(forKey: prefix + "posture"), 0), 2) }
         if has("height") { s.headHeight = d.float(forKey: prefix + "height") }
@@ -47,7 +45,6 @@ struct VRInputSettings: Equatable {
         d.set(vignette, forKey: Self.prefix + "vignette")
         d.set(locomotionFromHand, forKey: Self.prefix + "locoHand")
         d.set(rightHanded, forKey: Self.prefix + "rightHanded")
-        d.set(weaponReload, forKey: Self.prefix + "wreload")
         d.set(allowProne, forKey: Self.prefix + "prone")
         d.set(physicalPosture, forKey: Self.prefix + "posture")
         d.set(headHeight, forKey: Self.prefix + "height")
@@ -143,7 +140,7 @@ final class VRInput: @unchecked Sendable {
         c.prone_drop_m = settings.proneDrop
         c.hold_advance_s = settings.holdAdvance
         vr_input_set_cfg(&state, &c)
-        mv_vrgame_set_options(settings.rightHanded ? 1 : 0, Int32(settings.weaponReload))   // mano y recarga del arma VR
+        mv_vrgame_set_options(settings.rightHanded ? 1 : 0, 0)   // mano dominante (el 2.º argumento no tiene efecto en C)
         if applyHeight, settings.headHeight > 0 {
             vr_input_set_height(&state, settings.headHeight)
             Self.pushEyeHeight(settings.headHeight)

@@ -28,6 +28,7 @@ targets:
         compilerFlags: ["-O2", "-foptimize-sibling-calls", "-Wno-unused-label", "-Wno-unused-but-set-variable"]
       - path: .stage/vr
         compilerFlags: ["-O2"]
+        excludes: ["**/*.inc"]   # los .inc se incluyen con #include (vr_grip.c, vr_hand_pose.c): no son fuentes ni recursos
       - path: .stage/metal
       - path: .stage/extras
         optional: true

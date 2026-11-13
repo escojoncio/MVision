@@ -1,5 +1,5 @@
 # Manos/armas en el renderer VR (vr/hands). Uso (desde la raíz del repo):
-#   make -C vr/hands test          pruebas sintéticas (no necesitan datos del juego) + vr_glove (con volcados reales de MV_DUMP o /home/claude/mv2/Dumps/d0001_* si existen)
+#   make -C vr/hands test          (incluye test_gripfit: poses por arma y granada contra el modelo real; sin datos se omite) pruebas sintéticas (no necesitan datos del juego) + vr_glove (con volcados reales de MV_DUMP o /home/claude/mv2/Dumps/d0001_* si existen)
 #                                  + vr_hand_pose (poses de la mano nueva) + vr_grip (agarre por arma; con STAGES y datos del juego, también con el modelo real)
 #   make -C vr/hands test-san      lo mismo con ASan/UBSan
 #   make -C vr/hands preview       render de referencia por software de las pistolas 36f6/21b6 (necesita gamedata/stages.bin)
@@ -28,24 +28,31 @@ $(B)/vr_hands.o: vr_hands.c vr_hands.h vr_hands_frame.h | $(B)
 $(B)/test_hands: test_hands.c $(B)/vr_hands.o $(WB)/libweapons.a
 	$(CC) $(CFLAGS) $(INC) test_hands.c $(B)/vr_hands.o $(WB)/libweapons.a -lm -lpthread -o $@
 PREVSRC := hands_preview.c ../../tools/wmodel/wprev.c vr_hand_pose.c vr_grip.c vr_glove.c ../body/vr_hand_skin.c ../body/vr_hand_asset.c ../body/vr_body.c ../body/vr_pose.c ../body/vr_fist.c
-$(B)/hands_preview: $(PREVSRC) vr_hand_pose.h vr_grip.h ../body/vr_hand_skin.h ../body/vr_hand_asset.h ../body/vr_body.h $(B)/vr_hands.o $(WB)/libweapons.a
+$(B)/hands_preview: $(PREVSRC) vr_hand_pose.h vr_grip.h vr_grip_fit.inc vr_grip_obj.inc vr_hand_grips.inc ../body/vr_hand_skin.h ../body/vr_hand_asset.h ../body/vr_body.h $(B)/vr_hands.o $(WB)/libweapons.a
 	$(CC) $(CFLAGS) -Wno-misleading-indentation -DVRH_PREVIEW_BUILD $(INC) -I../body -I../../tools/wmodel $(PREVSRC) $(B)/vr_hands.o $(WB)/libweapons.a -lm -lpthread -o $@
 
 $(B)/test_glove: test_glove.c vr_glove.c vr_glove.h vr_hands_frame.h ../body/vr_fist.c ../body/vr_fist.h | $(B)
 	$(CC) $(CFLAGS) -I. -I../body test_glove.c vr_glove.c ../body/vr_fist.c -lm -o $@
 
 HANDSRC := ../body/vr_hand_skin.c ../body/vr_hand_asset.c vr_hand_pose.c
-HANDHDR := ../body/vr_hand_skin.h ../body/vr_hand_asset.h vr_hand_pose.h
+HANDHDR := ../body/vr_hand_skin.h ../body/vr_hand_asset.h vr_hand_pose.h vr_hand_grips.inc
 $(B)/test_hand_pose: test_hand_pose.c $(HANDSRC) $(HANDHDR) | $(B)
 	$(CC) $(CFLAGS) -I. -I../body test_hand_pose.c $(HANDSRC) -lm -o $@
-$(B)/test_grip: test_grip.c vr_grip.c vr_grip.h $(HANDSRC) $(HANDHDR) $(B)/vr_hands.o $(WB)/libweapons.a
+$(B)/test_grip: test_grip.c vr_grip.c vr_grip.h vr_grip_fit.inc vr_grip_obj.inc $(HANDSRC) $(HANDHDR) $(B)/vr_hands.o $(WB)/libweapons.a
 	$(CC) $(CFLAGS) $(INC) -I../body test_grip.c vr_grip.c $(HANDSRC) $(B)/vr_hands.o $(WB)/libweapons.a -lm -lpthread -o $@
 
-test: $(B)/test_hands $(B)/test_glove $(B)/test_hand_pose $(B)/test_grip
+$(B)/test_gripfit: test_gripfit.c gripfit.h vr_grip.c vr_grip.h vr_grip_fit.inc vr_grip_obj.inc vr_hand_grips.inc $(HANDSRC) $(HANDHDR) $(B)/vr_hands.o $(WB)/libweapons.a
+	$(CC) $(CFLAGS) -Wno-unused-function $(INC) -I../body test_gripfit.c vr_grip.c $(HANDSRC) $(B)/vr_hands.o $(WB)/libweapons.a -lm -lpthread -o $@
+
+test-gripfit: $(B)/test_gripfit
+	$(B)/test_gripfit $(STAGES)
+
+test: $(B)/test_hands $(B)/test_glove $(B)/test_hand_pose $(B)/test_grip $(B)/test_gripfit
 	$(B)/test_hands
 	$(B)/test_glove
 	$(B)/test_hand_pose
 	$(B)/test_grip $(STAGES)
+	$(B)/test_gripfit $(STAGES)
 test-san:
 	$(MAKE) test B=build-san CFLAGS="-O1 -g -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 POSES_OUT ?= $(B)/poses

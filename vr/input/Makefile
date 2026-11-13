@@ -21,10 +21,13 @@ $(B)/test_vr_input: test_vr_input.c $(B)/libvr_input.a
 	$(CC) $(CFLAGS) -I. $< $(B)/libvr_input.a -lm -o $@
 $(B)/test_vr_melee: test_vr_melee.c $(B)/libvr_input.a
 	$(CC) $(CFLAGS) -I. $< $(B)/libvr_input.a -lm -o $@
-test: $(B)/test_vr_input $(B)/test_vr_gesture $(B)/test_vr_melee
+$(B)/test_vr_nopunch: test_vr_nopunch.c vr_nopunch.h | $(B)
+	$(CC) $(CFLAGS) -I. $< -o $@
+test: $(B)/test_vr_input $(B)/test_vr_gesture $(B)/test_vr_melee $(B)/test_vr_nopunch
 	$(B)/test_vr_input
 	$(B)/test_vr_gesture
 	$(B)/test_vr_melee
+	$(B)/test_vr_nopunch
 # rutinas reales del motor interpretadas sobre una instantánea de RAM local (VRM_DUMPS=<dir con body.bin>; sin ella la prueba se omite)
 RTSRC = $(addprefix ../../runtime/,$(filter-out headless.c test_%.c wip_%.c nogen.c,$(notdir $(wildcard ../../runtime/*.c))))
 $(B)/test_vr_melee_real: test_vr_melee_real.c ../host/vr_melee_rt.c $(B)/libvr_input.a | $(B)

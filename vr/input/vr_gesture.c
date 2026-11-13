@@ -156,6 +156,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
         if ((dx * sinf(in->yaw) + dz * cosf(in->yaw)) / d >= c->front_cos && d < ndf) { ndf = d; nf = i; }
     }
     int free_hands = no_wpn && !in->in_box && !in->in_water;
+    const int melee_hands = free_hands && !in->item_scope;      /* golpe, agarre y toque: nunca con arma ni con los prismáticos (las ventanas por clic de stick siguen con free_hands) */
 
     /* ---------------- pared: golpear y asomarse ---------------- */
     int circle = 0, triangle = 0;
@@ -196,7 +197,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                     if (sqrtf(dx * dx + dy * dy + dz * dz) < c->knock_enemy_m) enemy_near = 1;
                 }
                 if (!c->knock) why = "desactivado";
-                else if (!free_hands || in->throw_hold) why = "manos_ocupadas";
+                else if (!melee_hands || in->throw_hold) why = "manos_ocupadas";
                 else if (in->stance != 0) why = "postura";                              /* agachado, tumbado o gateando las manos cruzan el suelo y los objetos sin querer; también pegado a la pared: vrm_action_input rechaza SQUAT/GROUND/BOX tras gastar enfriamiento y háptica */
                 else if (!(in->wall_ny[s] <= c->knock_ny_max)) why = "no_vertical";     /* suelo, techo, tapa de una caja */
                 else if (!in->fist_btn[s]) why = "sin_puno";
@@ -282,7 +283,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
 
     /* ---------------- golpe: gesto físico CON EL PUÑO cerrado (R1/L1 mantenido); estando agarrado = apretar/rematar ---------------- */
     if (c->punch) {
-        int busy = !(free_hands && !in->on_wall) ? 1 : 0;
+        int busy = !(melee_hands && !in->on_wall) ? 1 : 0;
         for (int s = 0; s < 2; s++) {
             if (!tr[s] || out->knock_side == s) continue;       /* el puño que acaba de dar en la pared no es un golpe a un enemigo */
             float sp_min = c->contact_speed > 0 && c->contact_speed < c->punch_speed ? c->contact_speed : c->punch_speed;
@@ -392,7 +393,8 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
             float dx = hfs[s][0] - side, dy = hfs[s][1] + c->chest_down, dz = hfs[s][2] - c->chest_fwd;
             chest_d[s] = sqrtf(dx * dx + dy * dy + dz * dz);
             chest[s] = chest_d[s] <= (g->chest_prev[s] ? c->chest_exit : c->chest_radius);
-            if (chest[s]) trig_mask |= (uint16_t)(s == (c->right_handed ? 1 : 0) ? VRG_R2 : VRG_L2);   /* dentro de su zona el gatillo no llega al juego (ni disparo ni acción) */
+            out->chest_in[s] = chest[s];
+            if (chest[s] && !(in->throw_hold && s == (c->right_handed ? 1 : 0))) trig_mask |= (uint16_t)(s == (c->right_handed ? 1 : 0) ? VRG_R2 : VRG_L2);   /* dentro de su zona el gatillo no llega al juego (ni disparo ni acción); con arrojadiza en la mano del arma el gatillo es suyo: se prepara junto al pecho */
             if (chest[s] && !g->chest_prev[s] && !trg[s] && g->warm == 0 && g->chest_cool[s] <= 0) { g->chest_cool[s] = 0.5f; if (out->haptic[s] < 0.15f) out->haptic[s] = 0.15f; }   /* aviso al entrar en la zona */
             g->chest_prev[s] = chest[s];
             if (g->chest_cool[s] > 0) g->chest_cool[s] -= dt;
@@ -452,7 +454,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                 /* al pulsar: cuello/espalda de un enemigo = agarre; si no, puño (la ventana de la zona del pecho es del gatillo, no del puño) */
                 if (ne >= 0 && nd <= 3.0f) {
                     const char *why = "ok";
-                    if (!free_hands || in->on_wall || in->stance >= 2) why = "manos_ocupadas";
+                    if (!melee_hands || in->on_wall || in->stance >= 2) why = "manos_ocupadas";
                     else if (g->since_punch < c->grab_after_punch_s) why = "tras_golpe";
                     else if (g->settle > 0) why = "calma";
                     else if (nd > c->grab_range) why = "cuerpo_lejos";
@@ -471,7 +473,7 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
                 const float *ep = in->en[ne].p;
                 int behind = (in->body[0] - ep[0]) * sinf(in->en[ne].yaw) + (in->body[2] - ep[2]) * cosf(in->en[ne].yaw) < 0.0f;
                 out->grab_why = "puno_cerrado"; out->grab_dist = hd[s]; out->grab_side_try = s;
-                if (behind && nd <= c->grab_range && spd[s] < c->grab_slow_speed && free_hands && !in->on_wall && in->stance < 2 && g->since_punch >= c->grab_after_punch_s && g->settle <= 0) {
+                if (behind && nd <= c->grab_range && spd[s] < c->grab_slow_speed && melee_hands && !in->on_wall && in->stance < 2 && g->since_punch >= c->grab_after_punch_s && g->settle <= 0) {
                     g->gp_t[s] = c->grab_delay_s; g->gp_en[s] = ne; g->gp_only[s] = 0; out->grab_why = "pendiente";
                 }
             }
@@ -533,8 +535,10 @@ void vrg_update(vrg_t *g, const vrg_in_t *in, vrg_out_t *out) {
 uint16_t vrg_step_pad(vrg_t *g, const vrg_in_t *in, vrg_out_t *out, const vrg_pad_t *p) {
     const int keep = g->menu_hold;                   /* vrg_update lo borra al perder el control, pero con la ventana abierta debe sobrevivir */
     const int lost[2] = {g->hold_lost[0], g->hold_lost[1]};   /* ídem (vrg_reset lo pone a 0) */
+    const int fb0[2] = {g->fb[0], g->fb[1]}; const float fl0[2] = {g->fb_last[0], g->fb_last[1]};   /* bloqueo de disparo: igual, sobrevive al reinicio */
     vrg_update(g, in, out);
     g->hold_lost[0] = lost[0]; g->hold_lost[1] = lost[1];
+    g->fb[0] = fb0[0]; g->fb[1] = fb0[1]; g->fb_last[0] = fl0[0]; g->fb_last[1] = fl0[1];
     if (!p->ctl) g->menu_hold = p->menu_open ? keep : 0;
     /* La ventana se sostiene con el gatillo FÍSICO de la mano (histéresis: ya abierta, basta trig > trig_off), no con el mando entrante: la capa de menú de vr_input solo lleva L2 de la
      * mano no dominante tras su antirrebote (R2 de la dominante sí lo lleva siempre), y si el botón faltaba un VBlank el juego cerraba el selector y lo reabría en bucle.
@@ -554,8 +558,31 @@ uint16_t vrg_step_pad(vrg_t *g, const vrg_in_t *in, vrg_out_t *out, const vrg_pa
         hold |= (uint16_t)(s == (g->cfg.right_handed ? 1 : 0) ? VRG_R2 : VRG_L2);
         if (!p->ctl) g->trig_dn[s] = 1;              /* vrg_update lo reinició: al volver el control el gatillo sigue apretado (histéresis), no hay que superar trig_on otra vez */
     }
+    /* Bloqueo de disparo (vrg_fire_gate): dentro de su zona de menú, o con su ventana abierta, el gatillo de la mano no es del arma; al salir con el gatillo apretado sigue bloqueado hasta soltarlo.
+     * Entra con chest_radius y sale con chest_exit (histéresis de la zona, la misma del háptico de aviso). Sin seguimiento o con los gestos apagados no hay bloqueo. */
+    for (int s = 0; s < 2; s++) {
+        const int dn = p->tracked[s] && fin(p->trig[s]) && p->trig[s] > g->cfg.trig_off;
+        const int win = (g->menu_hold >> s) & 1;
+        int r = VRG_FB_NONE;
+        if (!g->cfg.enable) r = VRG_FB_NONE;
+        else if (!p->tracked[s]) r = g->fb[s];      /* sin seguimiento se conserva (y fb_last): al recuperarlo con el gatillo apretado no se ve un flanco */
+        else if (win) r = VRG_FB_WINDOW;
+        else if (out->chest_in[s] && !(in->throw_hold && s == (g->cfg.right_handed ? 1 : 0))) r = VRG_FB_ZONE;      /* arrojadiza en la mano del arma: se prepara junto al pecho (sin bloqueo) */
+        else if (g->fb[s] != VRG_FB_NONE && dn) r = VRG_FB_RELEASE;
+        g->fb[s] = r;
+        if (r == VRG_FB_NONE) g->fb_last[s] = (p->tracked[s] && fin(p->trig[s])) ? p->trig[s] : 0.0f;
+    }
     if (!p->ctl) return (uint16_t)(p->pad_in | hold);
     uint16_t res = (uint16_t)(((p->pad & ~out->mask) | out->press) | hold);
-    if (p->r2_fire && (out->mask & VRG_R2)) res = (uint16_t)(res & ~VRG_SQUARE);   /* gatillo dentro de la zona de menú: no dispara */
+    if (p->r2_fire && ((out->mask & VRG_R2) || g->fb[g->cfg.right_handed ? 1 : 0])) res = (uint16_t)(res & ~VRG_SQUARE);   /* gatillo dentro de la zona de menú (o hasta soltarlo tras salir): no dispara */
     return res;
+}
+
+const char *vrg_fire_block_name(int why) {
+    return why == VRG_FB_ZONE ? "zona" : why == VRG_FB_WINDOW ? "ventana" : why == VRG_FB_RELEASE ? "soltar_gatillo" : "ninguno";
+}
+float vrg_fire_gate(const vrg_t *g, int side, float raw, int *why) {
+    const int f = side >= 0 && side < 2 ? g->fb[side] : VRG_FB_NONE;
+    if (why) *why = f;
+    return f ? g->fb_last[side] : raw;
 }

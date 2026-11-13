@@ -57,8 +57,9 @@ test-solid-san:
 
 # Manos propias con skin (ns_hand + vr/body/vr_hand_skin): escena, manopla y antebrazo sintéticos.
 #   make -f vr/native/extract.mk test-hand
+GRIPINC := vr/hands/vr_grip_fit.inc vr/hands/vr_grip_obj.inc vr/hands/vr_hand_grips.inc      # incluidos por vr_grip.c y vr_hand_pose.c
 HANDSRC := vr/native/ns_hand.c vr/native/ns_player.c vr/native/ns_solid.c vr/native/ns_extract.c vr/native/ns_adapt.c vr/native/ns_light.c vr/native/ns_gpu.c vr/body/vr_hand_skin.c vr/body/vr_hand_asset.c vr/hands/vr_hand_pose.c
-$(B)/test_ns_hand: vr/native/test_ns_hand.c $(HANDSRC) vr/native/ns_hand.h vr/body/vr_hand_skin.h vr/body/vr_hand_asset.h vr/hands/vr_hand_pose.h $(HDR) | $(B)
+$(B)/test_ns_hand: vr/native/test_ns_hand.c $(HANDSRC) $(GRIPINC) vr/native/ns_hand.h vr/body/vr_hand_skin.h vr/body/vr_hand_asset.h vr/hands/vr_hand_pose.h $(HDR) | $(B)
 	$(CC) $(CFLAGS) -Iruntime -Ivr/native -Ivr/body -Ivr/hands vr/native/test_ns_hand.c $(HANDSRC) -lm -lpthread -o $@
 test-hand: $(B)/test_ns_hand
 	$(B)/test_ns_hand
@@ -144,7 +145,7 @@ test-dumps: $(B)/test_ns_dumps
 #   make -f vr/native/extract.mk nshands && vr/native/build-extract/nshands <dir_volcado> <dir_salida>
 NSHSRC := vr/native/tools/nshands.c $(SRC) vr/native/ns_player.c vr/native/ns_hand.c vr/native/ns_wphide.c vr/body/vr_hand_skin.c vr/body/vr_hand_asset.c vr/hands/vr_hand_pose.c vr/hands/vr_grip.c \
   vr/body/vr_body.c vr/body/vr_pose.c vr/body/vr_fist.c
-$(B)/nshands: $(NSHSRC) $(HDR) vr/native/ns_hand.h | $(B)
+$(B)/nshands: $(NSHSRC) $(GRIPINC) $(HDR) vr/native/ns_hand.h | $(B)
 	$(MAKE) -C vr/weapons lib
 	$(CC) $(CFLAGS) -Iruntime -Ivr/native -Ivr/body -Ivr/hands -Ivr/weapons $(NSHSRC) vr/weapons/build/libweapons.a -lm -lpthread -o $@
 nshands: $(B)/nshands
@@ -162,3 +163,11 @@ $(B)/test_ns_div: vr/native/test_ns_div.c vr/native/ns_div.c vr/native/ns_div.h 
 test-div: $(B)/test_ns_div
 	$(B)/test_ns_div
 .PHONY: test-div
+
+# Filtro de texturas MMPX del mundo 3D: réplica en C del sombreador (ns_mmpx de NativeShaders.metal) frente a mmpx_scale2x (vr/scene/mmpx.c), píxel a píxel.
+#   make -f vr/native/extract.mk test-mmpx
+$(B)/test_ns_mmpx: vr/native/test_ns_mmpx.c vr/scene/mmpx.c vr/scene/mmpx.h | $(B)
+	$(CC) $(CFLAGS) -Ivr/scene vr/native/test_ns_mmpx.c vr/scene/mmpx.c -lm -o $@
+test-mmpx: $(B)/test_ns_mmpx
+	$(B)/test_ns_mmpx
+.PHONY: test-mmpx

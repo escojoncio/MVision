@@ -399,6 +399,7 @@ fragment float4 vr_fs_feedback(VrPostOut in [[stage_in]], texture2d<float> src [
     float2 p = in.pos.xy / size;
     if (p.x >= u.fb_rect.x && p.y >= u.fb_rect.y && p.x <= u.fb_rect.z && p.y <= u.fb_rect.w) {
         float2 q = float2(dot(u.fb_m[0].xy, p) + u.fb_m[0].z, dot(u.fb_m[1].xy, p) + u.fb_m[1].z);
+        if (u.fb_wv.z > 0.0) q.y += u.fb_wv.x * sin(u.fb_wv.z * (p.y - 0.5)) + u.fb_wv.y * cos(u.fb_wv.z * (p.y - 0.5));   /* ondulación del agua de la intro */
         float3 s = u.fb_m[0].w > 0.5 ? src.sample(smp, q).rgb : hist.sample(smp, q).rgb;
         float3 c = clamp(px.rgb, float3(0.0), float3(1.0));
         s = clamp(s, float3(0.0), float3(1.0));

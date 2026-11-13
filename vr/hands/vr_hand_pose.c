@@ -18,14 +18,22 @@ static const PoseDef TABLE[HP_COUNT] = {
     [HP_GRIP_BOX]     = {{0.60f, 0.62f, 0.64f, 0.66f, 0.45f},  0.10f, -1.0f},
 };
 
+/* Poses por arma (HP_W_*): ángulos en grados (orden de vrhs_pose_ang) y, en las de la mano que empuña, los del índice con el gatillo a fondo. Generado por gripfit_gen.c. */
+typedef struct { float ang[VRHS_NANG]; int has_pull; float pull[5]; } WeaponPoseDef;
+#include "vr_hand_grips.inc"
+
 static float fin(float x) { return x == x && x - x == 0.0f; }
 static float c01(float x) { return fin(x) ? (x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x)) : 0.0f; }
 static float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 
-int vrhandpose_has_trigger(int pose) { return pose >= 0 && pose < HP_COUNT && TABLE[pose].pulled >= 0.0f; }
+int vrhandpose_has_trigger(int pose) {
+    if (pose >= HP_W_FIRST && pose < HP_COUNT) return WTAB[pose - HP_W_FIRST].has_pull;
+    return pose >= 0 && pose <= HP_GRIP_BOX && TABLE[pose].pulled >= 0.0f;
+}
 
 void vrhandpose_curls(const VrHandPoseIn *in, VrHandCurls *out) {
     int item = (in && in->item_pose >= 0 && in->item_pose < HP_COUNT) ? in->item_pose : HP_RELAX;
+    if (item >= HP_W_FIRST) item = WTAB[item - HP_W_FIRST].has_pull ? HP_GRIP_RIFLE : HP_GRIP_SUPPORT;   /* cierres aproximados de una pose por arma (la real va por ángulos: vrhandpose_angles) */
     float g = in ? c01(in->grip) : 0.0f, tr = in ? c01(in->trigger) : 0.0f, tb = in ? c01(in->thumb_btn) : 0.0f, fb = in ? c01(in->fist_btn) : 0.0f;
     int target = item;
     if (item == HP_RELAX) { target = HP_FIST; if (fb > g) g = fb; }     /* sin objeto: el agarre y el botón de puño cierran el puño */
@@ -37,10 +45,28 @@ void vrhandpose_curls(const VrHandPoseIn *in, VrHandCurls *out) {
     out->thumb_spread = lerpf(out->thumb_spread, fmaxf(out->thumb_spread, 0.6f), tb);   /* abre hacia los botones (nunca lo cierra) */
 }
 
+void vrhandpose_angles(const VrHandPoseIn *in, float ang[VRHS_NANG]) {
+    const int item = (in && in->item_pose >= HP_W_FIRST && in->item_pose < HP_COUNT) ? in->item_pose : -1;
+    if (item < 0) {
+        VrHandCurls c;
+        vrhandpose_curls(in, &c);
+        vrhs_curl_to_ang(c.curl, c.thumb_spread, ang);
+        return;
+    }
+    const WeaponPoseDef *w = &WTAB[item - HP_W_FIRST];
+    const float g = c01(in->grip), tr = c01(in->trigger), tb = c01(in->thumb_btn);
+    float rel[VRHS_NANG];
+    vrhs_curl_to_ang(TABLE[HP_RELAX].curl, TABLE[HP_RELAX].spread, rel);
+    for (int i = 0; i < VRHS_NANG; i++) ang[i] = lerpf(rel[i], w->ang[i], g);
+    if (w->has_pull) for (int i = 0; i < 5; i++) ang[i] = lerpf(ang[i], w->pull[i], tr);   /* índice: 5 primeros ángulos */
+    for (int i = 20; i < 25; i++) if (i != 22) ang[i] = lerpf(ang[i], 0.0f, tb);          /* pulgar levantado hacia los botones */
+    ang[22] = lerpf(ang[22], fmaxf(ang[22], 0.6f * 22.0f), tb);
+}
+
 void vrhandpose_blend(int side, const VrHandPoseIn *in, float xf[VRHS_J][12]) {
-    VrHandCurls c;
-    vrhandpose_curls(in, &c);
-    vrhs_pose(c.curl, c.thumb_spread, side, xf);
+    float a[VRHS_NANG];
+    vrhandpose_angles(in, a);
+    vrhs_pose_ang(a, side, xf);
 }
 
 void vrhandpose_index_tip(const float xf[VRHS_J][12], float out[3]) { vrhs_index_pad(xf, out); }

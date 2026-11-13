@@ -57,6 +57,7 @@ typedef struct VrArmLimits {
     float wrist_flex_deg, wrist_ext_deg;   /* flexión (palma) y extensión (dorso) máximas de la muñeca; defecto 80 / 70 */
     float wrist_rad_deg, wrist_uln_deg;    /* desviación radial (pulgar) y cubital máximas; defecto 20 / 30 */
     float swivel_max_deg;    /* giro máximo del codo alrededor de la recta hombro-muñeca respecto al codo polar para respetar esos límites; defecto 90 (0 = codo polar fijo) */
+    float stretch_max;       /* tope del factor de estirado de los huesos con el objetivo fuera de alcance (1..2,5); defecto 2,5; 1 = huesos de largo fijo (la muñeca se queda en el alcance máximo) */
 } VrArmLimits;
 
 enum {
@@ -177,6 +178,8 @@ const VrBodyConfig *vrbody_config(void);
 
 void vrbody_set_grip(int side, float v);     /* side 0 izquierda / 1 derecha; v 0 (abierta) .. 1 (cerrada) */
 void vrbody_set_dominant(int side);          /* 0 izquierda / 1 derecha */
+void vrbody_set_weld(int side, int on);      /* el brazo de ese lado va atado al arma (mano de apoyo soldada): sus huesos conservan el largo (VrArmLimits.stretch_max = 1) aunque el objetivo quede fuera de alcance */
+void vrbody_set_pole(int side, const float pole[3]);   /* dirección del codo de ese brazo (marco del torso como VrBodyCfg.pole: x = hacia fuera de su lado, y = arriba, z = delante; no hace falta que sea unitaria): pose de Snake con el arma (vr/hands/vr_grip.h elbow_*). NULL, nula o no finita = la de VrBodyCfg.pole */
 void vrbody_set_armed(int on);               /* la mano dominante empuña un arma: su corrección agarre -> mano es la FIJA (vrbody_hand_offset, sin cabeceo automático por el apuntado); la pose de los dedos la decide vr_hand_pose según el objeto */
 void vrbody_set_enabled(int on);
 /* El anfitrión suprime el puño deformado de la malla del motor (las manos nuevas de ns_hand ya hacen el puño). Va aparte de cfg.fist_enabled (ajuste del usuario, no se modifica). */
@@ -222,6 +225,9 @@ int vrbody_hand_offset(int side, float q[4]);
 /* Giro extra agarre -> mano de un lado (cuaternión x,y,z,w), aplicado ANTES del desvío fijo/calibrado en vrbody_hand_offset y al dibujar esa mano (offset total = q * desvío): lo calcula vrgame para que la boca del arma apunte donde el mando
  * (VrHandPose.aim). NULL, no finito o norma fuera de 0,5..2: se desactiva (identidad). No sobrevive a vrbody_init. */
 void vrbody_set_aim_fix(int side, const float q[4]);
+/* Giro LOCAL de la mano que empuña respecto a su marco del mando (cuaternión en el marco de vr_hand_skin: dedos -Y, palma +X en la derecha, pulgar +Z; side 0 izquierda, 1 derecha; NULL = sin giro):
+ * la malla de la mano gira sobre su centro de agarre y, con el zócalo de vr_grip compensado (FIT_*_TURN), el arma conserva su orientación respecto al mando. Lo usan vrbody_hand_offset y el dibujo. */
+void vrbody_set_hand_turn(int side, const float q[4]);
 /* Pura (sin estado): corrección agarre -> mano que deja los dedos horizontales y el dorso a roll_signed_deg (izq +, der -) del cenit. 1 = bien; 0 = dedos casi verticales. */
 int vrbody_calib_offset(const float grip_q[4], float roll_signed_deg, float out_q[4]);
 

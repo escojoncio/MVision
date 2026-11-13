@@ -61,7 +61,7 @@ float vrhit_floor_ray(const uint8_t *ram, const float o[3], const float d[3], fl
 
 /* Geometría y cámaras que aporta el anfitrión (vr/host). Sin registrar (o con NULL) vrhit_bullet y vrhit_aim no hacen nada. */
 typedef struct VrHitWorld {
-    float units_per_m;                   /* solo para el registro (0 = 1000) */
+    float units_per_m;                   /* solo para el registro; 0 = el valor real que da vrhit_set_range cada VBlank (calibrado), o 1000 si aún no llegó */
     /* primer impacto del rayo con las paredes de colisión del juego (HZD): distancia en (0, max] o -1. NULL = ninguna (los suelos de colisión se prueban siempre) */
     float (*wall)(const uint8_t *ram, const float o[3], const float d[3], float max);
     /* rayo contra las cámaras de vigilancia vivas: 1 si da en alguna, con la distancia y la dirección de su blanco. NULL = ninguna */
@@ -98,6 +98,20 @@ void vrhit_aim(const uint8_t *ram, const float o[3], const float d[3]);
 float vrhit_probe(const uint8_t *ram, const float o[3], const float d[3], float max);
 /* Una vez por VBlank: caduca las punterías anotadas. */
 void vrhit_frame(void);
+
+/* ---- láser = bala (una sola prueba de colisión y un solo alcance) ----
+ * El alcance del tiro del jugador es el del láser: `units` (unidades del motor; el anfitrión da WLASER_MAX_M * unidades_por_metro cada VBlank; `upm` solo para el registro). Por defecto VRHIT_RANGE_MIN.
+ * vrhit_bullet resuelve la bala del jugador con ese alcance y vrhit_shot_dist (láser) con el mismo criterio que vrhit_bullet (resolve): primer blanco (cápsulas/caja/cámara), pared HZD (la misma
+ * llamada que usa la bala) y suelos de colisión; NO la geometría de render (no bloquea balas, ver VrHitWorld.solid). */
+void vrhit_set_range(float units, float upm);
+/* Distancia (unidades) al primer impacto del tiro o + t*d (d se normaliza) con alcance `max`; -1 si no hay impacto en el alcance. Sin anotar nada. */
+float vrhit_shot_dist(const uint8_t *ram, const float o[3], const float d[3], float max);
+/* La capa VR amplió el alcance de la siguiente bala del jugador que resuelva vrhit_bullet (el sustituto la crea con tipo 2: el juego traza hasta 100000 unidades, ver vr_fire_hle.c): su alcance
+ * es el del tiro (vrhit_set_range) y no el que figura en el actor; el tramo que sobra se recorta. Se consume con esa bala. */
+void vrhit_next_bullet_extended(void);
+/* Anota el rayo del láser (boca y dirección) y dónde acaba, para el registro `[disparo] laser=(x,y,z) bala_impacto=(x,y,z) desvio=` que escribe vrhit_bullet con la bala que salga por ese rayo
+ * (mismo origen y dirección que en vrhit_aim; hasta VRHIT_AIM_LIFE VBlanks). */
+void vrhit_note_laser(const uint8_t *ram, const float o[3], const float d[3]);
 
 #ifdef __cplusplus
 }

@@ -25,8 +25,12 @@ enum {
     HP_GRIP_SPHERE,       /* granada */
     HP_GRIP_PLACED,       /* mina / C4 / detonador */
     HP_GRIP_BOX,          /* caja (cargador, objeto genérico) */
+    /* Poses por arma y mano, por ángulos de articulación (tabla generada offline contra la malla del arma: vr_hand_grips.inc, ver gripfit_gen.c). _R = mano que empuña (con gatillo), _L = mano de apoyo. */
+    HP_W_SOCOM_R, HP_W_SOCOM_L, HP_W_FAMAS_R, HP_W_FAMAS_L, HP_W_PSG1_R, HP_W_PSG1_L, HP_W_STINGER_R, HP_W_STINGER_L, HP_W_NIKITA_R, HP_W_NIKITA_L,
+    HP_W_FRAG_R, HP_W_STUN_R, HP_W_CHAFF_R,   /* granadas (mano derecha, sin gatillo): rodean el modelo del juego que lleva la mano (grenade.c: grenade 0x3b88; aturdidora y señuelo can_gren 0x7a64) */
     HP_COUNT
 };
+#define HP_W_FIRST HP_W_SOCOM_R
 
 typedef struct {
     int item_pose;        /* HP_*; HP_RELAX = sin objeto */
@@ -44,6 +48,9 @@ typedef struct {
 
 int vrhandpose_has_trigger(int pose);                                  /* 1 si el objeto de esta pose tiene gatillo (el índice sigue la entrada de gatillo) */
 void vrhandpose_curls(const VrHandPoseIn *in, VrHandCurls *out);       /* la mezcla sin esqueleto; in NULL = mano relajada */
+/* Lo mismo por ángulos de articulación (vrhs_pose_ang): para HP_W_* los de la tabla por arma (base = lerp(HP_RELAX -> pose, agarre); índice -> índice tirado con el gatillo en las poses _R; pulgar levantado con thumb_btn);
+ * para el resto, los cierres de vrhandpose_curls convertidos (idéntico a vrhs_pose). */
+void vrhandpose_angles(const VrHandPoseIn *in, float ang[VRHS_NANG]);
 /* Pose de las articulaciones (vrhs_pose) de la mano side (+1 derecha, -1 izquierda). */
 void vrhandpose_blend(int side, const VrHandPoseIn *in, float xf[VRHS_J][12]);
 /* Yema del índice (vrhs_index_pad) en el marco de la mano (mm). */

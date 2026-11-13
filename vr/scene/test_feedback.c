@@ -136,6 +136,40 @@ int main(void) {
     { GpuOp o = sprite(0, 0, 27, 160, 184, 0, 0, 27, GPU_F_SEMI, 0, 120); o.ty = 256; CHECK(vrfb_op_source(&o, NULL, org) == VRFB_PREV && org[1] == 256, "pareja vertical"); }
     CHECK(vrfb_op_source(NULL, NULL, NULL) == VRFB_NONE && vrfb_build(NULL, 0, NULL, NULL, NULL, &f) == VRFB_NONE && f.n == 0, "entradas vacías");
 
+    /* ---- ondulación del agua de la intro (wt_view.c, volcados auto01/auto02 de Archivo_33): tiras de 160 x 2 que releen el MISMO búfer con la fila de origen v = y + rsin(i * 128) / 1024 ---- */
+    {
+        static GpuOp w[300];
+        memset(w, 0, sizeof w);
+        w[0] = tri3d(320);
+        int n = 1;
+        for (int i = 0, y = 6; y < 218; y += 2, i++) {
+            const int off = (int)(4096.0 * sin(i * 128 * 2.0 * 3.14159265358979 / 4096.0)) / 1024;
+            w[n++] = sprite(320, 320, y, 160, 2, 320, 0, y + off, 0, 0, 82);
+            w[n++] = sprite(320, 480, y, 160, 2, 448, 32, y + off, 0, 0, 82);
+        }
+        mask(320, 320, 0);
+        CHECK(vrfb_op_source(&w[1], NULL, org) == VRFB_SELF && vrfb_is_strip(&w[1]) && !vrfb_is_strip(&w[0]), "tira de la onda: mismo búfer");
+        CHECK(vrfb_build(w, (uint32_t)n, NULL, NULL, vram, &f) == VRFB_SELF && f.n == n - 1, "onda: modelo SELF con todas las tiras (modo %d n %d)", f.mode, f.n);
+        const float amp = sqrtf(f.wave[0] * f.wave[0] + f.wave[1] * f.wave[1]) * VRFB_IMG_H;
+        CHECK(amp > 3.0f && amp < 4.5f && f.err_px <= VRFB_WAVE_MAX_ERR_PX, "onda: amplitud ~4 filas y residuo corto (amp %f, err %f)", amp, f.err_px);
+        CHECK(NEAR(f.m[0], 1, 1e-3) && NEAR(f.m[4], 1, 1e-2) && f.a == 0.0f && NEAR(f.b[0], 82 / 128.0, 1e-6), "onda: afín casi identidad, opaco, tinte 82/128 (a %f b %f)", f.a, f.b[0]);
+        /* con una tira de 1 fila (la fuente a 1 fila de distancia): también vale; un sprite ancho de 1 fila no se descarta, uno diminuto sí */
+        { GpuOp t = sprite(320, 320, 20, 160, 1, 320, 0, 19, 0, 0, 82); CHECK(vrfb_op_source(&t, NULL, NULL) == VRFB_SELF && vrfb_is_strip(&t), "tira de 1 fila: SELF");
+          GpuOp u = sprite(320, 320, 20, 8, 1, 320, 0, 19, 0, 0, 82); CHECK(vrfb_op_source(&u, NULL, NULL) == VRFB_NONE && !vrfb_is_strip(&u), "sprite diminuto de 1 fila: no"); }
+        /* la afín sola (focus) no lleva onda */
+        CHECK(f.wave[0] != 0.0f || f.wave[1] != 0.0f, "onda ajustada");
+        /* con otra realimentación en la misma lista, sin restringir a las tiras no hay modelo (el anfitrión las separa con vrfb_is_strip) */
+        w[n] = sprite(320, 320, 27, 160, 184, 0, 0, 27, GPU_F_SEMI | GPU_F_MASK_SET, 0, 120);
+        CHECK(vrfb_build(w, (uint32_t)n + 1, NULL, NULL, vram, &f) == VRFB_NONE, "tiras + desenfoque sin separar: sin modelo");
+        static uint8_t mk[300];
+        for (int i = 0; i <= n; i++) mk[i] = vrfb_is_strip(&w[i]);
+        CHECK(vrfb_build(w, (uint32_t)n + 1, mk, NULL, vram, &f) == VRFB_SELF && f.n == n - 1, "tiras separadas del desenfoque: modelo de la onda (n %d)", f.n);
+        /* un desplazamiento constante (focus con tiras) no es onda: afín exacta, sin ondulación */
+        memset(w, 0, sizeof w); w[0] = tri3d(320); n = 1;
+        for (int y = 6; y < 218; y += 2) w[n++] = sprite(320, 320, y, 160, 2, 320, 2, y, 0, 0, 128);
+        CHECK(vrfb_build(w, (uint32_t)n, NULL, NULL, vram, &f) == VRFB_SELF && f.wave[0] == 0.0f && f.wave[1] == 0.0f && NEAR(f.m[2], 2 / 320.0, 1e-5), "tiras sin onda: solo desplazamiento");
+    }
+
     free(vram);
     printf("test_feedback: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

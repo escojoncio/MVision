@@ -37,15 +37,22 @@ final class RGRenderer {
     /// XRFinalPass los necesita, junto con el color sin vista sRGB, para componer la capa sobre el mundo como la GPU original.
     private var hudPlanesRing: [MTLTexture] = [], hudXbrPlanes: [MTLTexture] = []
     private var auxPlanesRing: [[MTLTexture]] = [[], [], []]
+    /// Ampliación MMPX de las capas auxiliares (ventana del selector / pausa, pantalla completa): UN solo destino (Metal serializa su escritura y su lectura), su vista sRGB y los planos ampliados (solo con «Composición 2D exacta»). Vacío = sin ampliar.
+    private var auxUp: [[MTLTexture]] = [[], [], []], auxUpSRGB: [[MTLTexture]] = [[], [], []], auxUpPlanes: [[MTLTexture]] = [[], [], []]
+    /// Última capa 2D auxiliar (diagnóstico): tamaño de la textura que se muestrea y filtro aplicado.
+    private(set) var auxDiag = ["", "", ""]
     var hudPlanes: MTLTexture? {
         guard hudHQ, hudHQIdx < hudPlanesRing.count else { return nil }
-        return hudXbr.count == hudHQRing.count && hudHQIdx < hudXbrPlanes.count ? hudXbrPlanes[hudHQIdx] : hudPlanesRing[hudHQIdx]
+        return hudUpOK && !hudXbr.isEmpty && !hudXbrPlanes.isEmpty ? hudXbrPlanes[0] : hudPlanesRing[hudHQIdx]
     }
     /// Colocación de la capa de hudTexture en la ventana visible fija del televisor (mv_vrhost_hud2d_window_l), en píxeles del juego: tamaño de la ventana, origen del marco dentro de ella y tamaño del
     /// marco. nil con el HUD de reserva. XRPresenter la usa para registrar el panel con la pantalla 3D y con los recortes del troceo.
     private var hudWinRaw: XR2DWindow?
     var hudWin: XR2DWindow? { hudHQ ? hudWinRaw : nil }
-    var auxPlanes: [MTLTexture?] { (0..<3).map { auxTexture[$0] != nil && auxIdx[$0] < auxPlanesRing[$0].count ? auxPlanesRing[$0][auxIdx[$0]] : nil } }
+    var auxPlanes: [MTLTexture?] { (0..<3).map { k in
+        guard auxTexture[k] != nil, auxIdx[k] < auxPlanesRing[k].count else { return nil }
+        return auxUpOK[k] && !auxUp[k].isEmpty && !auxUpPlanes[k].isEmpty ? auxUpPlanes[k][0] : auxPlanesRing[k][auxIdx[k]]
+    } }
     /// Efectos de pantalla del juego por procedencia (MvVrGameState.fx; los fija XRFrameEncoder): x = viñeta (intensidad 0..1), y = radio de la zona limpia (alto de medio ojo = 1), z = fracción del alto cubierta por las bandas de cinemática, w sin uso.
     var gameFx = SIMD4<Float>(0, 0, 0, 0)
     /// Suavizado bilineal de texels (respeta transparencia). Por defecto nearest.
@@ -152,7 +159,7 @@ final class RGRenderer {
     private struct PostPlan { var sceneColor: [MTLTexture], sceneResolve: [MTLTexture], fxTex: [MTLTexture], dst: [MTLTexture] }
     /// Realimentación de pantalla del juego para el pase por ojo de la pantalla 3D (vr_fs_feedback; VrPostUniforms.fb_*): mix = (peso de la fuente por canal, peso de la imagen actual),
     /// m0/m1 = filas de la afín destino -> fuente (m0.w = 1: la fuente es la imagen actual; 0: la imagen anterior), rect = zona afectada (0..1).
-    private struct FeedbackFx { var mix: SIMD4<Float>, m0: SIMD4<Float>, m1: SIMD4<Float>, rect: SIMD4<Float> }
+    private struct FeedbackFx { var mix: SIMD4<Float>, m0: SIMD4<Float>, m1: SIMD4<Float>, rect: SIMD4<Float>, wave: SIMD4<Float> }
     private var fx = FilterFx()
     /// Anillo de texturas R8 con la resta de la máscara de visión (VR_FRAME_W x VR_FRAME_H, una por escena distinta: la GPU puede seguir leyendo la anterior).
     private var frameTex: [MTLTexture] = []
@@ -208,6 +215,8 @@ final class RGRenderer {
     /// Ampliación de la capa 2D en la GPU (XRPixelScaler: MMPX x2 o xBR x3 según XR2DFilter.current): anillo de destinos paralelo a hudHQRing (mismo índice); hudTexture apunta a él en vez de a la capa nativa.
     private var hudScaler: XRPixelScaler?
     private var hudXbr: [MTLTexture] = [], hudXbrSRGB: [MTLTexture] = []
+    private var hudUpOK = false          // la última ampliación del HUD se codificó (si no, se muestra la capa nativa)
+    private var auxUpOK = [false, false, false]
     /// Tamaño LÓGICO (píxeles del juego) de la capa que muestra hudTexture: la textura puede llevar además la ampliación xBR (x3) o la escala del HUD de reserva (x4).
     var hudLogical: SIMD2<Float> { hudHQ ? SIMD2<Float>(Float(hudHQW), Float(hudHQH)) : SIMD2<Float>(320, 240) }
     private var hudHQMode: Int32 = 0, hudHQView: Int32 = 0   // modo (VL_*) y vista ((view_kind << 8) | view_reason) del trabajo que produjo la capa mostrada
@@ -613,27 +622,28 @@ final class RGRenderer {
                 t.label = "HUD 2D fiel \(i)"; q.label = "HUD 2D fiel planos \(i)"; a.append(t); b.append(v); c.append(q)
             }
             hudHQRing = a; hudHQRingSRGB = b; hudPlanesRing = c; hudHQW = W; hudHQH = PH; hudHQSeq = 0
-            hudXbr = []; hudXbrSRGB = []; hudXbrPlanes = []
-            if hudScaler != nil {
-                for i in 0..<3 {
-                    guard let t = XRPixelScaler.makeTarget(device, width: W, height: PH, label: "HUD 2D ampliado \(i)"),
-                          let q = XRPixelScaler.makeTarget(device, width: W, height: 2 * PH, label: "HUD 2D ampliado planos \(i)") else { hudXbr = []; hudXbrSRGB = []; hudXbrPlanes = []; break }
-                    hudXbr.append(t.tex); hudXbrSRGB.append(t.srgb); hudXbrPlanes.append(q.tex)
-                }
-            }
+            hudXbr = []; hudXbrSRGB = []; hudXbrPlanes = []; hudUpOK = false
+            if hudScaler != nil, let t = XRPixelScaler.makeTarget(device, width: W, height: PH, label: "HUD 2D ampliado") { hudXbr = [t.tex]; hudXbrSRGB = [t.srgb] }
         }
-        let fresh = r == 1 || !hudHQ || hudHQSeq != seq
+        // Planos de resta y tope ampliados solo con «Composición 2D exacta» (sin ella el pase final usa la mezcla fija «over» y nadie los muestrea); si no se pueden crear, la capa se muestra sin ampliar.
+        var planesNew = false
+        if !XR2DCompose.framebufferFetch { hudXbrPlanes = [] }
+        else if !hudXbr.isEmpty && hudXbrPlanes.isEmpty {
+            if let q = XRPixelScaler.makeTarget(device, width: W, height: 2 * PH, label: "HUD 2D ampliado planos") { hudXbrPlanes = [q.tex]; planesNew = true }
+            else { hudXbr = []; hudXbrSRGB = [] }
+        }
+        let fresh = r == 1 || !hudHQ || hudHQSeq != seq || planesNew
         if fresh {
             hudHQIdx = (hudHQIdx + 1) % hudHQRing.count
             hudHQRing[hudHQIdx].replace(region: MTLRegionMake2D(0, 0, W, PH), mipmapLevel: 0, withBytes: px!, bytesPerRow: W * 4)
             hudPlanesRing[hudHQIdx].replace(region: MTLRegionMake2D(0, 0, W, 2 * PH), mipmapLevel: 0, withBytes: px! + W * PH * 4, bytesPerRow: W * 4)
             hudHQSeq = seq
-            if let sc = hudScaler, hudXbr.count == hudHQRing.count {
-                sc.encode(commandBuffer, src: hudHQRing[hudHQIdx], dst: hudXbr[hudHQIdx], width: W, height: PH, planes: hudPlanesRing[hudHQIdx], planesDst: hudXbrPlanes[hudHQIdx])
+            if let sc = hudScaler, !hudXbr.isEmpty {
+                hudUpOK = sc.encode(commandBuffer, src: hudHQRing[hudHQIdx], dst: hudXbr[0], width: W, height: PH, planes: hudXbrPlanes.isEmpty ? nil : hudPlanesRing[hudHQIdx], planesDst: hudXbrPlanes.first)
             }
         }
-        if hudXbr.count == hudHQRing.count {
-            hudTexture = hudXbr[hudHQIdx]; hudTextureSRGB = hudXbrSRGB[hudHQIdx]
+        if hudUpOK && !hudXbr.isEmpty {
+            hudTexture = hudXbr[0]; hudTextureSRGB = hudXbrSRGB[0]
         } else {
             hudTexture = hudHQRing[hudHQIdx]; hudTextureSRGB = hudHQRingSRGB[hudHQIdx]
         }
@@ -644,7 +654,7 @@ final class RGRenderer {
 
 
     /// Capa 2D auxiliar k (1 = ventana del selector / pausa, 2 = pantalla completa) del trabajador de su clase (mv_vrhost_hud2d_acquire_l): misma aceptación por vista que takeLayer2D; sin capa o rechazada = nil (el panel no se dibuja).
-    private func takeAuxLayer(_ k: Int) {
+    private func takeAuxLayer(_ k: Int, _ commandBuffer: MTLCommandBuffer) {
 #if MV_BENCH
         return
 #else
@@ -674,14 +684,31 @@ final class RGRenderer {
                 t.label = "2D capa \(k) \(i)"; q.label = "2D capa \(k) planos \(i)"; a.append(t); b.append(v); c.append(q)
             }
             auxRing[k] = a; auxRingSRGB[k] = b; auxPlanesRing[k] = c; auxW[k] = W; auxH[k] = H; auxSeq[k] = 0; auxTexture[k] = nil
+            auxUp[k] = []; auxUpSRGB[k] = []; auxUpPlanes[k] = []; auxUpOK[k] = false
+            if hudScaler != nil, let t = XRPixelScaler.makeTarget(device, width: W, height: H, label: "2D capa \(k) ampliada") { auxUp[k] = [t.tex]; auxUpSRGB[k] = [t.srgb] }
         }
-        if r == 1 || auxTexture[k] == nil || auxSeq[k] != seq {
+        // Planos ampliados solo con «Composición 2D exacta»; si no se pueden crear, la capa se muestra sin ampliar (como en takeLayer2D).
+        var planesNew = false
+        if !XR2DCompose.framebufferFetch { auxUpPlanes[k] = [] }
+        else if !auxUp[k].isEmpty && auxUpPlanes[k].isEmpty {
+            if let q = XRPixelScaler.makeTarget(device, width: W, height: 2 * H, label: "2D capa \(k) ampliada planos") { auxUpPlanes[k] = [q.tex]; planesNew = true }
+            else { auxUp[k] = []; auxUpSRGB[k] = [] }
+        }
+        if r == 1 || auxTexture[k] == nil || auxSeq[k] != seq || planesNew {
             auxIdx[k] = (auxIdx[k] + 1) % auxRing[k].count
             auxRing[k][auxIdx[k]].replace(region: MTLRegionMake2D(0, 0, W, H), mipmapLevel: 0, withBytes: p, bytesPerRow: W * 4)
             auxPlanesRing[k][auxIdx[k]].replace(region: MTLRegionMake2D(0, 0, W, 2 * H), mipmapLevel: 0, withBytes: p + W * H * 4, bytesPerRow: W * 4)
             auxSeq[k] = seq
+            if let sc = hudScaler, !auxUp[k].isEmpty {
+                auxUpOK[k] = sc.encode(commandBuffer, src: auxRing[k][auxIdx[k]], dst: auxUp[k][0], width: W, height: H, planes: auxUpPlanes[k].isEmpty ? nil : auxPlanesRing[k][auxIdx[k]], planesDst: auxUpPlanes[k].first)
+            }
         }
-        auxTexture[k] = auxRing[k][auxIdx[k]]; auxTextureSRGB[k] = auxRingSRGB[k][auxIdx[k]]
+        if auxUpOK[k] && !auxUp[k].isEmpty {
+            auxTexture[k] = auxUp[k][0]; auxTextureSRGB[k] = auxUpSRGB[k][0]
+        } else {
+            auxTexture[k] = auxRing[k][auxIdx[k]]; auxTextureSRGB[k] = auxRingSRGB[k][auxIdx[k]]
+        }
+        auxDiag[k] = "\(W)x\(H)->\(auxTexture[k]?.width ?? 0)x\(auxTexture[k]?.height ?? 0)"
 #endif
     }
 
@@ -837,7 +864,7 @@ final class RGRenderer {
             groups.append((0, batches.count, Int.max))
         }
         takeLayer2D(commandBuffer)
-        takeAuxLayer(1); takeAuxLayer(2)
+        takeAuxLayer(1, commandBuffer); takeAuxLayer(2, commandBuffer)
         let doHud = (gotNew || !hudDone) && drawWorld && !hudHQ
         // Render nativo: se prepara SIEMPRE (reconoce épocas del almacén aunque no se dibuje: menús) y lo que no se pueda dibujar se REPITE (último válido) o se funde a negro.
         // Modo gpu: no hay nada nativo que preparar; la pantalla 3D se considera sana (el 3D sale de la lista) salvo que encodeStereo falle.
@@ -1210,7 +1237,8 @@ final class RGRenderer {
                 }
                 if hist == nil { mix = SIMD4<Float>(0, 0, 0, 1) }
             }
-            fb = FeedbackFx(mix: mix, m0: SIMD4<Float>(f.m0.x, f.m0.y, f.m0.z, f.selfSource ? 1 : 0), m1: SIMD4<Float>(f.m1.x, f.m1.y, f.m1.z, 0), rect: f.rect)
+            fb = FeedbackFx(mix: mix, m0: SIMD4<Float>(f.m0.x, f.m0.y, f.m0.z, f.selfSource ? 1 : 0), m1: SIMD4<Float>(f.m1.x, f.m1.y, f.m1.z, 0), rect: f.rect,
+                            wave: (f.wave.x != 0 || f.wave.y != 0) ? SIMD4<Float>(f.wave.x, f.wave.y, 2 * Float.pi * 240 / 64, 0) : SIMD4<Float>(0, 0, 0, 0))   // K = VRFB_WAVE_K (vr_feedback.h)
         }
         var projs: [simd_float4x4] = []
         var rendered = 0
@@ -1609,7 +1637,7 @@ final class RGRenderer {
             u.frame = SIMD4<Float>(0, 0, 0, 0)
         }
         if let w = wave { u.wave = w }
-        if let f = feedback { u.fb_mix = f.mix; u.fb_m = (f.m0, f.m1); u.fb_rect = f.rect }
+        if let f = feedback { u.fb_mix = f.mix; u.fb_m = (f.m0, f.m1); u.fb_rect = f.rect; u.fb_wv = f.wave }
         u.vfx = warpOnly ? SIMD4<Float>(0, 0, 0, 0) : gameFx
         guard !frameTex.isEmpty else { return }
         let frameTexture = frameTex[min(max(fx.frameIdx, 0), frameTex.count - 1)]

@@ -1,7 +1,7 @@
 /* Explosivos colocables: carga adhesiva y mina direccional.
  * Aparecen en la mano al equiparlos (sin gesto del chaleco). Se coloca soltando el gatillo (tras apretarlo a fondo): el juego resuelve la superficie y aquí
  * solo se entrega la pose (cara adhesiva en la carga; cuerpo con frente = -Z en la mina) por WL_PLACE_C / WL_PLACE_MINE. La detonación de las cargas es el
- * botón del propio juego (sin mando remoto, tapa ni botón virtuales).
+ * AGARRE del mando derecho con el C4 equipado (vrgame.c c4_remote lo convierte en el círculo que ve el juego; sin mando remoto, tapa ni botón virtuales).
  * Si el juego rechaza el evento (w5_emit devuelve 0: sin superficie al alcance) no se consume munición y el objeto sigue en la mano. */
 #include "w_throw.h"
 #include "wcore.h"

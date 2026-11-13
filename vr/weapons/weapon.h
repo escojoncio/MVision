@@ -5,9 +5,16 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Escala de la pistola (modelos 36f6/21b6) respecto al original del juego, fijada por el alcance al gatillo con la mano VR a tamaño real: del dorso del mango (z -58,6 mm del original a la
+ * altura del gatillo, y 25,7) al centro del gatillo marcado por el usuario en el lateral del armazón (z -124,3; wcut_tables.c PIST_TRIGGER) hay 65,7 mm en el original -> 72,5 mm de la Mk23
+ * real (70-75 mm) con K = 1,104 (antes 1,339, por el largo total de 0,245 m: dejaba el gatillo a 88 mm). La aplica wcut (WCutModel.out_k) a las mallas y partes cortadas, y w_pist.c a sus cotas. */
+#define W_PIST_K 1.104f
 typedef struct { float x, y, z; } WVec3;
 typedef struct { float x, y, z, w; } WQuat;
 typedef struct { WVec3 p; WQuat q; } WPose;
+/* Pantalla LED fija al modelo (visor/pantalla de un lanzador), en el marco del arma: face = centro y orientacion (+Z = cara visible hacia el ojo) ya adelantada hacia el ojo,
+ * w x h = caja de la superficie (m, ejes x derecha / y arriba), poly = contorno convexo relativo al centro (npoly <= 8; 0 = rectangulo completo). */
+typedef struct { WPose face; float w, h; int npoly; float poly[8][2]; } WScreenFace;
 
 /* ---------- Geometría ---------- */
 typedef struct {

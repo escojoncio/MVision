@@ -28,6 +28,8 @@
 #include "vr_usermap.h"
 #include "vr_cine.h"
 #include "vr_fire.h"
+#include "vr_bino.h"
+#include "vr_nopunch.h"
 #include "vr_hit.h"
 #include "vr_hzd.h"
 #include "vr_cameras.h"
@@ -43,6 +45,7 @@
 #include "vrai.h"
 #include "vr_melee_rt.h"
 #include "vrgame.h"
+#include "vr_grip.h"
 #include "hle.h"
 #include "ns_dump.h"
 #include "ns_extract.h"
@@ -437,6 +440,7 @@ static VrSmSample ns_smp_pend;           /* muestra de la escena nativa capturad
 
 /* Prismáticos del juego (scope.c en la lista de la GPU, VrFx.binocular): el XRFrameEncoder amplía el mundo nativo entero, también las piezas del cuerpo; las manos, los antebrazos y el arma no se dibujan. Hilo de emulación (fx_hold se escribe en build_one). */
 static int bino_view(void) { return fx_hold.fx.scope_on && fx_hold.fx.binocular; }
+static uint16_t last_game_pad;     /* mando que vio el juego en el último VBlank (pad_hook; lo lee la medida [prismaticos] de vr_bino.h) */
 /* Contexto de la captura (hilo de emulación, en la etapa «pantalla»): zona, cámara VR y mapa mundo -> usuario, y qué hacer con el jugador. */
 static Cpu *ns_cpu_last;   /* CPU del último enganche de fotograma (hilo de emulación, el mismo que llama a ns_ctx): para leer los registros de cálculo OFX/OFY */
 static void ns_ctx(NsScene *sc, NsCtxOut *o, void *u) {
@@ -492,8 +496,9 @@ static void ns_hands_finalize(NsScene *sc, NsMeshStore *st, const NsPlayerMap *m
     { const uint32_t fk = vrfire_flier_key(); if (fk && ns_wphide_has(sc, fk)) vrfire_flier_seen(); }   /* granada lanzada: el actor ya está en esta escena -> el modelo de la mano se oculta desde ESTA escena (sin hueco ni duplicado) */
     if (vrfire_held_hidden()) ns_wphide_apply(sc, emu_ram, 1);
     else if (held_side >= 0) {
-        float Ra[9], ta[3], Rd[9], td[3], hp[3];
-        if (vrbody_hand_anim(1, Ra, ta) && vrbody_hand_state(held_side, NULL, Rd, td) && ns_wphide_carry(sc, emu_ram, Ra, ta, Rd, td, held_side == 0) > 0) {
+        float Ra[9], ta[3], Rd[9], td[3], hp[3], Ro[9], to[3];
+        const int placed = vrgrip_object_offset(bs.weapon, Ro, to);   /* granadas: el objeto va donde se diseñó la pose de la mano (vr_grip_obj.inc), no con la relación del juego; el resto de ids conserva la del juego */
+        if (vrbody_hand_anim(1, Ra, ta) && vrbody_hand_state(held_side, NULL, Rd, td) && ns_wphide_carry_off(sc, emu_ram, Ra, ta, Rd, td, held_side == 0, placed ? Ro : NULL, placed ? to : NULL) > 0) {
             held_key = ns_wphide_key(emu_ram);
             if (ns_wphide_pos(sc, emu_ram, hp)) {     /* donde se ve el objeto en la mano: ahí nace la granada lanzada, salvo que haya una pared de colisión entre el cuerpo y la mano o esté a más de 1,5 m (vr_fire.h) */
                 const float bp[3] = {(float)bs.player_pos.x, hp[1], (float)bs.player_pos.z}, bd[3] = {hp[0] - bp[0], 0.0f, hp[2] - bp[2]}, bl = hypotf(bd[0], bd[2]);
@@ -1039,21 +1044,28 @@ static void feedback_from_list(const GpuDrawList *l) {
         mk[i] = 1;
     }
     if (!mk) return;
+    {   /* ondulación del agua de la intro (wt_view.c): con >= VRFB_WAVE_MIN_STRIPS tiras solo se modelan ellas; otra realimentación de la misma lista (desenfoque) no cabe en un único modelo y se pierde, la onda no */
+        uint32_t nstrip = 0;
+        for (uint32_t i = 0; i < l->nops; i++) if (mk[i] && vrfb_is_strip(&l->ops[i])) nstrip++;
+        if (nstrip >= VRFB_WAVE_MIN_STRIPS) for (uint32_t i = 0; i < l->nops; i++) if (mk[i] && !vrfb_is_strip(&l->ops[i])) mk[i] = 0;
+    }
     vrfb_build(l->ops, l->nops, mk, prov_learn.draw_prev, l->vram_end, &fb_cur);
     free(mk);
     static int said = -1, said_n;
     if (said != fb_cur.mode || said_n != fb_cur.n) {
         said = fb_cur.mode; said_n = fb_cur.n;
-        fprintf(stderr, "[realim] %s: %d primitivas, a=%.3f b=%.3f M=[%.4f %.4f %.4f | %.4f %.4f %.4f] zona=(%.2f,%.2f)-(%.2f,%.2f) residuo=%.1f px\n",
+        fprintf(stderr, "[realim] %s: %d primitivas, a=%.3f b=%.3f M=[%.4f %.4f %.4f | %.4f %.4f %.4f] zona=(%.2f,%.2f)-(%.2f,%.2f) residuo=%.1f px onda=%.1f filas\n",
                 fb_cur.mode == VRFB_PREV ? "imagen anterior" : fb_cur.mode == VRFB_SELF ? "misma imagen" : "sin modelo (al panel 2D)", fb_cur.n, (double)fb_cur.a, (double)fb_cur.b[0],
                 (double)fb_cur.m[0], (double)fb_cur.m[1], (double)fb_cur.m[2], (double)fb_cur.m[3], (double)fb_cur.m[4], (double)fb_cur.m[5],
-                (double)fb_cur.rect[0], (double)fb_cur.rect[1], (double)fb_cur.rect[2], (double)fb_cur.rect[3], (double)fb_cur.err_px);
+                (double)fb_cur.rect[0], (double)fb_cur.rect[1], (double)fb_cur.rect[2], (double)fb_cur.rect[3], (double)fb_cur.err_px,
+                sqrt((double)fb_cur.wave[0] * fb_cur.wave[0] + (double)fb_cur.wave[1] * fb_cur.wave[1]) * VRFB_IMG_H);
     }
 }
 static void feedback_to_scene(NsScene *sc) {
     NsScreenFx *x = &sc->screen;
     x->fb_mode = fb_cur.mode; x->fb_a = fb_cur.a;
     memcpy(x->fb_b, fb_cur.b, sizeof x->fb_b); memcpy(x->fb_m, fb_cur.m, sizeof x->fb_m); memcpy(x->fb_rect, fb_cur.rect, sizeof x->fb_rect);
+    memcpy(x->fb_wave, fb_cur.wave, sizeof x->fb_wave);
 }
 /* Añade el parche del mosaico a la escena nativa como efectos (cuadriláteros lisos, sin niebla, por delante de lo que tapan). */
 static void mosaic_to_scene(NsScene *sc) {
@@ -2003,6 +2015,10 @@ static void frame_hook_body(Cpu *c, uint32_t f) {
     }
     ai_feed_head();
     vrai_frame(&bs, f);
+    vrnopunch_frame(emu_ram);   /* sin puñetazos con el arma equipada: ACTATTACK.punch = 0x88 en las armas con golpe (vr_nopunch.h) */
+    vrbino_set_item((bs.valid & BRIDGE_OK_ALL_CORE) == BRIDGE_OK_ALL_CORE && bs.has_player && bs.item == 1);   /* IT_Scope */
+    vrbino_frame(emu_ram, bs.cam_zoom, bino_view(), f, 1);
+    vrbino_pad(f, bs.cam_zoom, last_game_pad, fx_hold.fx.scope_zoom);   /* prismáticos: sin la espera propia de scope.c (16 + 7 ticks) y medida [prismaticos] del retardo hasta el zoom (vr_bino.h) */
     if (test_cb) test_cb(c, f);
     vrgame_frame_end();
 
@@ -2173,7 +2189,7 @@ static void on_bound(void) {
     vrgame_set_enabled(body_ok, fire_ok);
     if (vrai_on_bound() < 0) fprintf(stderr, "[vrhost] IA de enemigos no instalada\n");
     if (vrmelee_rt_install() < 0) fprintf(stderr, "[vrhost] acciones de cuerpo (golpe/agarre/toque) no instaladas\n");
-    { VrHitWorld hw = {0.0f, hit_wall, hit_camera, hit_camera_hit, hit_solid}; vrhit_set_world(&hw); }
+    { VrHitWorld hw = {0.0f /* unidades por metro: las da vrgame cada VBlank con vrhit_set_range (valor calibrado) */, hit_wall, hit_camera, hit_camera_hit, hit_solid}; vrhit_set_world(&hw); }
 }
 
 static void on_start(void) {
@@ -2190,7 +2206,8 @@ static void on_start(void) {
 static uint16_t pad_hook(uint16_t buttons) {
     vrgame_set_gloves(body_ok && !native_mode(), &gpu_vram[0][0]);   /* manos propias (vr_glove) solo con la lista de la GPU: el render nativo trae sus manos */
     vrgame_set_view_hide(bino_view());
-    return vrgame_pad(buttons, &bs, emu_ram);
+    last_game_pad = vrgame_pad(buttons, &bs, emu_ram);
+    return last_game_pad;
 }
 
 /* Radar de muñeca: copia de la percepción activa (cono original + cono ampliado más tenue; nada con el ajuste original). */

@@ -19,7 +19,7 @@
 #include "vr_reload.h"
 #include "bridge_addrs.h"
 
-enum { C_VRFIRE, C_MAPAUTO, C_MUZZLE, C_SHOT, C_READY, C_AUTO, C_HIDE, C_THROW, C_RELOAD, C_MAGIN, C_NOTREADY };
+enum { C_VRFIRE, C_MAPAUTO, C_MUZZLE, C_SHOT, C_READY, C_AUTO, C_HIDE, C_THROW, C_RELOAD };
 typedef struct { int kind, t0, t1, mode; double v[6]; } Cmd;
 static Cmd cmd[128]; static int ncmd;
 static uint8_t *g_ram;
@@ -35,9 +35,7 @@ void gptest_cmd(const char *l) {
     else if (!strcmp(k, "ready") && sscanf(l, "%*s %d %d", &c.t0, &c.t1) == 2) c.kind = C_READY;
     else if (!strcmp(k, "autohold") && sscanf(l, "%*s %d %d", &c.t0, &c.t1) == 2) c.kind = C_AUTO;
     else if (!strcmp(k, "throw") && sscanf(l, "%*s %d %lf %lf %lf %lf %lf %lf", &c.t0, &c.v[0], &c.v[1], &c.v[2], &c.v[3], &c.v[4], &c.v[5]) == 7) c.kind = C_THROW;
-    else if (!strcmp(k, "reload") && sscanf(l, "%*s %15s %d %d", m, &c.t0, &c.t1) == 3) { c.kind = C_RELOAD; c.mode = !strcmp(m, "r2"); }
-    else if (!strcmp(k, "magin") && sscanf(l, "%*s %d", &c.t0) == 1) c.kind = C_MAGIN;
-    else if (!strcmp(k, "notready") && sscanf(l, "%*s %d %d", &c.t0, &c.t1) == 2) c.kind = C_NOTREADY;
+    else if (!strcmp(k, "reload") && sscanf(l, "%*s %15s %d %d", m, &c.t0, &c.t1) == 3) c.kind = C_RELOAD;      /* reload _ T0 T1: recarga del juego (vr_reload.h) activa; el primer argumento ya no se usa */
     else if (!strcmp(k, "hide") && sscanf(l, "%*s %d %d", &c.t0, &c.t1) == 2) c.kind = C_HIDE;
     else return;
     if (ncmd < 128) cmd[ncmd++] = c;
@@ -120,12 +118,11 @@ void gptest_frame(uint32_t f, int t, const BridgeState *bs, uint16_t *pad) {
     if (!g_inited) {
         g_inited = 1;
         VrFireCfg cfg; vrfire_cfg_default(&cfg);
-        VrReloadCfg rc; vrreload_cfg_default(&rc);
-        for (int i = 0; i < ncmd; i++) { if (cmd[i].kind == C_VRFIRE) cfg.arm_mode = cmd[i].mode; if (cmd[i].kind == C_RELOAD) rc.method = cmd[i].mode ? VRR_VIA_R2_TAPS : VRR_VIA_R1_DOUBLE; }
-        vrfire_init(&cfg); vrreload_init(&rc);
+        for (int i = 0; i < ncmd; i++) if (cmd[i].kind == C_VRFIRE) cfg.arm_mode = cmd[i].mode;
+        vrfire_init(&cfg); vrreload_init();
         vrfire_set_probe(probe);
     }
-    int on = 0, ready = 0, autoh = 0, hide = 0, fire = 0, rl_on = 0, magin = 0, notready = 0;
+    int on = 0, ready = 0, autoh = 0, hide = 0, fire = 0, rl_on = 0;
     double dy = 1600, theta = 0; int have_map = 0;
     for (int i = 0; i < ncmd; i++) {
         Cmd *c = &cmd[i];
@@ -140,8 +137,6 @@ void gptest_frame(uint32_t f, int t, const BridgeState *bs, uint16_t *pad) {
         case C_THROW: if (t == c->t0) { float p[3] = {(float)c->v[0], (float)c->v[1], (float)c->v[2]}, v[3] = {(float)c->v[3], (float)c->v[4], (float)c->v[5]}; fire = 1;
                           fprintf(stderr, "[throw] t=%d set=%d\n", t, vrfire_set_throw(p, v, 0.04f)); } break;
         case C_RELOAD: if (t >= c->t0 && t < c->t1) rl_on = 1; break;
-        case C_MAGIN: if (t == c->t0) magin = 1; break;
-        case C_NOTREADY: if (t >= c->t0 && t < c->t1) notready = 1; break;
         case C_HIDE: if (t >= c->t0 && t < c->t1) hide = 1; break;
         }
     }
@@ -156,22 +151,22 @@ void gptest_frame(uint32_t f, int t, const BridgeState *bs, uint16_t *pad) {
     VrReloadOut ro; memset(&ro, 0, sizeof ro);
     if (rl_on) {
         VrReloadGame rg; vrreload_read_game(bs, &rg);
-        VrReloadIn ri = {0, magin, !notready};
+        VrReloadIn ri; memset(&ri, 0, sizeof ri);
+        ri.weapon_id = bs->weapon; ri.trigger_edge = fire; ri.vr_held = bs->magazine;      /* sin arma VR: no hay nada que igualar */
         vrreload_frame(&rg, &ri, &ro);
-        static int last_state = -1, last_force;
-        if (ro.state != last_state || ro.pad_force != last_force) {
-            fprintf(stderr, "[reload] t=%d estado=%d busy=%d force=%04x mag=%d/%d mun=%d permitido=%d juego_arma=%d\n", t, ro.state, ro.busy, ro.pad_force, bs->magazine, bs->magazine_max,
+        static int last_busy = -1, last_force;
+        if (ro.busy != last_busy || ro.pad_force != last_force) {
+            fprintf(stderr, "[reload] t=%d busy=%d force=%04x mag=%d/%d mun=%d permitido=%d juego_arma=%d\n", t, ro.busy, ro.pad_force, bs->magazine, bs->magazine_max,
                     bs->weapon >= 0 ? bs->weapon_ammo[bs->weapon] : -9, ro.fire_allowed, bs->weapon);
-            last_state = ro.state; last_force = ro.pad_force;
+            last_busy = ro.busy; last_force = ro.pad_force;
         }
         if (!ro.fire_allowed) fire = 0;
-        if (ro.busy) *pad = (uint16_t)(*pad & ~ro.pad_mask);
         *pad |= ro.pad_force;
     }
     if (!on) { VrFireIn in; memset(&in, 0, sizeof in); VrFireGame g; VrFireOut o; vrfire_read_game(g_ram, bs, &g); vrfire_frame(&g, &in, &o); return; }
     VrFireGame g; vrfire_read_game(g_ram, bs, &g);
     VrFireIn in; memset(&in, 0, sizeof in);
-    in.active = bs->in_control && bs->has_player && !ro.busy && (!rl_on || ro.fire_allowed || ro.state == VRR_READY || ro.state == VRR_OFF); in.muzzle = g_mz; in.fire_pose = g_mz; in.ready = ready; in.fire = fire; in.trigger_held = autoh; in.map = &map;
+    in.active = bs->in_control && bs->has_player && !ro.busy; in.muzzle = g_mz; in.fire_pose = g_mz; in.ready = ready; in.fire = fire; in.trigger_held = autoh; in.map = &map;
     VrFireOut out; vrfire_frame(&g, &in, &out);
     if (out.engaged) { *pad = (uint16_t)(*pad & ~(1u << 15)); if (out.square) *pad |= 1u << 15; }
     (void)r32;

@@ -30,13 +30,14 @@ struct WpnFrameU {
 struct WpnDrawU {
     var model = matrix_identity_float4x4
 }
-// Mismo layout que VrSpcDraw de vr_weapon.metal (128 bytes): vistas especiales del arma.
+// Mismo layout que VrSpcDraw de vr_weapon.metal (192 bytes): vistas especiales del arma.
 struct SpcDrawU {
     var model = matrix_identity_float4x4
     var uv = simd_float4(0, 0, 1, 1)
     var p0 = simd_float4(0, 1, 0, 0)      // x = modo (0 mira, 1 HUD, 2 misil), y = opacidad, z = ruido, w = tiempo
-    var p1 = simd_float4(0, 0, 0, 1)      // x = disco, y = fijado, z = terminado, w = proporción ancho/alto
-    var p2 = simd_float4(0, 0, 0, 0)      // x = la imagen ya es lineal
+    var p1 = simd_float4(0, 0, 0, 1)      // x = disco, y = grosor del marco oscuro de las pantallas LED (fracción de la altura; modos 2 y 3), z = terminado, w = proporción ancho/alto
+    var p2 = simd_float4(0, 0, 0, 0)      // x = la imagen ya es lineal, y = (modo misil) pantalla LED en espera, w = nº de vértices de la máscara poligonal de la mira (0 = sin máscara)
+    var poly = (simd_float4(0, 0, 0, 0), simd_float4(0, 0, 0, 0), simd_float4(0, 0, 0, 0), simd_float4(0, 0, 0, 0))   // vértices (u, v) de la máscara, 2 por simd_float4
 }
 
 final class WeaponRenderer {
@@ -117,7 +118,7 @@ final class WeaponRenderer {
         let lib = MVLib.library(device)
         library = lib
         if lib == nil { print("[WeaponRenderer] sin biblioteca Metal por defecto: falta vr_weapon.metal en el target") }
-        if MemoryLayout<WpnFrameU>.stride != 192 || MemoryLayout<WpnDrawU>.stride != 64 || MemoryLayout<SpcDrawU>.stride != 128 {
+        if MemoryLayout<WpnFrameU>.stride != 192 || MemoryLayout<WpnDrawU>.stride != 64 || MemoryLayout<SpcDrawU>.stride != 192 {
             print("[WeaponRenderer] layout de uniformes incompatible con vr_weapon.metal (\(MemoryLayout<WpnFrameU>.stride)/\(MemoryLayout<WpnDrawU>.stride))")
         }
         if MemoryLayout<VrHandsVertex>.stride != 36 { print("[WeaponRenderer] VrHandsVertex no mide 36 bytes") }
@@ -415,19 +416,58 @@ final class WeaponRenderer {
             guard sv.blend > 0.02, sv.cam_valid != 0, let a = aux, let o = scopeOverlay() else { return }
             image = a; overlay = o
             d.p0 = simd_float4(0, min(max(sv.blend, 0), 1), 0, 0)
+            let np = Int(sv.npoly)
+            if np >= 3 && np <= 8 {      // máscara poligonal convexa de la abertura de la mira (MvVrSpecialView.poly, u/v sobre la superficie)
+                let pv: [Float] = withUnsafeBytes(of: sv.poly) { Array($0.bindMemory(to: Float.self)) }
+                if pv.count >= 16 && pv.allSatisfy({ $0.isFinite }) {
+                    d.poly = (simd_float4(pv[0], pv[1], pv[2], pv[3]), simd_float4(pv[4], pv[5], pv[6], pv[7]),
+                              simd_float4(pv[8], pv[9], pv[10], pv[11]), simd_float4(pv[12], pv[13], pv[14], pv[15]))
+                    d.p2.w = Float(np)
+                }
+            }
+        case Int32(MV_VIEW_AA_SCREEN):
+            // Visor del lanzador antiaéreo en su pieza del modelo: segunda vista viva (textura 0) y, encima, la mira y el marco de fijación del HUD del juego (textura 1, subrectángulo `uv`), recortado al contorno de la pieza.
+            guard sv.blend > 0.02, sv.cam_valid != 0, let a = aux, let h = hud else { return }
+            image = a; overlay = h
+            d.uv = simd_float4(sv.uv.0, sv.uv.1, sv.uv.2, sv.uv.3)
+            d.p0 = simd_float4(3, min(max(sv.blend, 0), 1), hudPremultiplied ? 1 : 0, 0)
+            d.p1.y = sv.frame.isFinite ? min(max(sv.frame, 0), 0.2) : 0      // marco oscuro del sombreador (fracción de la altura)
+            let np = Int(sv.npoly)
+            if np >= 3 && np <= 8 {
+                let pv: [Float] = withUnsafeBytes(of: sv.poly) { Array($0.bindMemory(to: Float.self)) }
+                if pv.count >= 16 && pv.allSatisfy({ $0.isFinite }) {
+                    d.poly = (simd_float4(pv[0], pv[1], pv[2], pv[3]), simd_float4(pv[4], pv[5], pv[6], pv[7]),
+                              simd_float4(pv[8], pv[9], pv[10], pv[11]), simd_float4(pv[12], pv[13], pv[14], pv[15]))
+                    d.p2.w = Float(np)
+                }
+            }
         case Int32(MV_VIEW_AA_SIGHT):
             guard let h = hud else { return }
             image = h
             d.uv = simd_float4(sv.uv.0, sv.uv.1, sv.uv.2, sv.uv.3)
             d.p0 = simd_float4(1, 1, hudPremultiplied ? 1 : 0, 0)
         case Int32(MV_VIEW_MISSILE):
-            guard let a = aux else { return }
-            image = a
+            // Pantalla LED del lanzador (o la pantalla grande de comodidad): cámara del misil en vuelo; en espera (standby) o en la estática final no hay imagen renderizada y se dibuja con la textura blanca.
+            guard sv.standby != 0 || sv.ended != 0 || aux != nil else { return }
+            image = aux ?? whiteTexture
             let live = sv.cam_valid != 0 && sv.ended == 0
             let t = Float((CACurrentMediaTime() - t0).truncatingRemainder(dividingBy: 64))
             d.p0 = simd_float4(2, 1, min(max(sv.noise, 0), 1), t)
-            d.p1.y = sv.locked != 0 ? 1 : 0
+            d.p1.y = sv.frame.isFinite ? min(max(sv.frame, 0), 0.2) : 0      // marco oscuro del sombreador (0 = sin marco, p. ej. pantalla grande)
             d.p1.z = live ? 0 : 1
+            d.p2.y = sv.standby != 0 ? 1 : 0
+            if sv.uv.2 > 0.001 && sv.uv.3 > 0.001 && [sv.uv.0, sv.uv.1, sv.uv.2, sv.uv.3].allSatisfy({ $0.isFinite }) {      // recorte 4:3 de la imagen sobre la pantalla (por defecto 0, 0, 1, 1)
+                d.uv = simd_float4(sv.uv.0, sv.uv.1, sv.uv.2, sv.uv.3)
+            }
+            let np = Int(sv.npoly)
+            if np >= 3 && np <= 8 {      // contorno convexo de la cara del visor del modelo (como la lente del PSG1)
+                let pv: [Float] = withUnsafeBytes(of: sv.poly) { Array($0.bindMemory(to: Float.self)) }
+                if pv.count >= 16 && pv.allSatisfy({ $0.isFinite }) {
+                    d.poly = (simd_float4(pv[0], pv[1], pv[2], pv[3]), simd_float4(pv[4], pv[5], pv[6], pv[7]),
+                              simd_float4(pv[8], pv[9], pv[10], pv[11]), simd_float4(pv[12], pv[13], pv[14], pv[15]))
+                    d.p2.w = Float(np)
+                }
+            }
         default:
             return
         }
@@ -451,7 +491,7 @@ final class WeaponRenderer {
         d.model = m
 
         let key = SKey(layered: layered, linear: linearOutput, color: colorFormat, depth: depthFormat, samples: sampleCount)
-        let occlude = sv.kind == Int32(MV_VIEW_SCOPE) && sv.occlude != 0      // solo la lente de la mira del arma; visor antiaéreo, misil y prismáticos siguen por encima de todo
+        let occlude = (sv.kind == Int32(MV_VIEW_SCOPE) || sv.kind == Int32(MV_VIEW_AA_SCREEN) || sv.kind == Int32(MV_VIEW_MISSILE)) && sv.occlude != 0      // objetos del mundo: lente de la mira, pantallas LED (antiaéreo y misil); el visor HUD antiaéreo de reserva, la pantalla grande del misil y los prismáticos siguen por encima de todo
         guard let pso = specialPipeline(key), let ds = occlude ? lensDepth : spcDepth else { return }
         var u = WpnFrameU()
         if layered {

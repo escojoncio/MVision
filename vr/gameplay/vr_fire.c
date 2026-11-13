@@ -19,7 +19,8 @@
 #define PW_TRIGGER      0x910u       /* banderas que lee el actor del arma (bit 0: levantada/lista, bit 1: disparar) */
 #define PW_TYPE_TBL     0x91Cu       /* banderas del tipo de arma (bit 0: dispara mientras se mantiene) */
 #define PW_WEAPON_IDX   0x918u       /* índice de arma del jugador (id+1 en la tabla de creadores; -1 ninguna) */
-#define WA_OBJS         0x20u        /* actor de arma: lista de modelos del modelo */
+#define WA_OBJS         0x20u        /* actor de arma: lista de modelos del modelo (socom, famas, rifle, rcm, aam) */
+#define WA_OBJS_B       0x28u        /* ... en grenade, bomb y mine (delante van root_ctrl y root_obj) */
 #define OBJS_NMODELS    0x2Eu
 #define OBJS_FIRST      0x48u
 #define OBJ_SIZE        0x5Cu
@@ -280,6 +281,14 @@ void vrfire_frame(const VrFireGame *g, const VrFireIn *in, VrFireOut *out) {
     if (S.phase != P_HOLD) S.skip = 0;
     out->engaged = 1;
 }
+int vrfire_cancel_pending(void) {
+    const int n = S.nq, flying = S.ninfl > 0 || S.auto_live || S.auto_tail > 0;
+    if (n == 0 && !flying) return 0;
+    S.nq = 0; S.ninfl = 0; S.infl_life = INFL_LIFE; S.auto_live = 0; S.auto_tail = 0;
+    S.st.cancelled += (uint32_t)n;
+    if (flying) S.disarm_t = DISARM_WINDOW;
+    return n;
+}
 int vrfire_skip_raise(uint8_t *ram) {
     if (!ram) return 0;
     uint32_t pc = rd_u32(ram, BA_PLAYER_CTRL);
@@ -444,6 +453,14 @@ int vrfire_hide_weapon(uint8_t *ram) {
     uint32_t wa = rd_u32(ram, pc - PW_FROM_CTRL + PW_WEAPON_ACTOR);
     if (!ptr_ok(wa, WA_LIGHT_PRIM + 4u)) return 0;
     uint32_t objs = rd_u32(ram, wa + WA_OBJS);
+    {   /* grenade, bomb (C4) y mine guardan root_ctrl y root_obj antes del objeto: su conjunto de piezas está en +0x28 y +0x20 es el control del jugador. Regla general: el candidato cuya matriz padre (+0x20) es una parte del cuerpo del jugador */
+        uint32_t ob = rd_u32(ram, BA_PLAYER_BODY), po = ptr_ok(ob, 8) ? rd_u32(ram, ob) : 0;
+        static const uint32_t slot[2] = {WA_OBJS, WA_OBJS_B};
+        for (int i = 0; po && ptr_ok(po, OBJS_FIRST + OBJ_SIZE * 16u) && i < 2; i++) {
+            uint32_t c = rd_u32(ram, wa + slot[i]), pm = ptr_ok(c, OBJS_FIRST) ? rd_u32(ram, c + 0x20u) : 0;
+            if (c != pc && pm >= po + OBJS_FIRST && pm < po + OBJS_FIRST + OBJ_SIZE * 16u && (pm - po - OBJS_FIRST) % OBJ_SIZE == 0) { objs = c; break; }
+        }
+    }
     if (!ptr_ok(objs, OBJS_FIRST)) return 0;
     int n = rd_s16(ram, objs + OBJS_NMODELS);
     if (n <= 0 || n > MAX_MODELS || !ptr_ok(objs, OBJS_FIRST + OBJ_SIZE * (uint32_t)n)) return 0;
