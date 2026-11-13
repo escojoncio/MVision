@@ -273,7 +273,9 @@ static void g_update(WeaponState *s, const WInput *in, WReloadMode rm, const WGa
             gs->proj_prev = gs->proj_pos; gs->proj_pos = pp.p; gs->proj_valid = 1;
             gs->dist = vlen(vsub(pp.p, gs->launch_pos)) * gs->world_scale;
             gs->alt = fmaxf(0, (pp.p.y - gs->launch_ground_y) * gs->world_scale);
-            s->aux.camera = pp;
+            /* cámara de la pantalla: en la punta del misil (2 cm por delante del morro), mirando en su dirección: el modelo queda entero detrás de ella */
+            s->aux.camera.p = vadd(pp.p, qrot(pp.q, v3(0, 0, -(GD_CAM_NOSE + GD_CAM_AHEAD))));
+            s->aux.camera.q = pp.q;
         }
         /* guiado: inclinación relativa al disparo (orientación de la mano del arma) o stick */
         if (btn_b_edge) { gs->q0 = in->hand[0].q; b_haptic(g, 0, 0.2f, 0.04f); }   /* recentrar */

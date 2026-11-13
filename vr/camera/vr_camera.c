@@ -105,6 +105,13 @@ static inline int ptr_ok(uint32_t p, uint32_t len) {
  * attack->field_6 = 49 de pie, field_7 = 54 agachado (tabla C4Attack de la edicion europea, medida en RAM en 0x8009FEF8+4). */
 #define VC_OBJ_ACTION2  16
 #define VC_WEAPON_C4    6
+#define VC_WEAPON_MINE  5
+/* Con la carga o la mina equipada el juego agacha el cuerpo al colocarla sin cambiar de postura ni (verificado solo en el registro [ojo] del 13-11: 1420 -> 696 uds) dejar un numero de accion fiable: se detecta por
+ * el efecto, la articulacion de la cabeza se hunde bajo la altura aprendida de la postura con el jugador quieto, y el ojo se mantiene mientras dure (con histeresis y tope de tiempo). */
+#define VC_DIP_ON       50.0f    /* uds por debajo de la altura aprendida: empieza la animacion */
+#define VC_DIP_OFF      40.0f    /* uds por debajo: la cabeza ha vuelto, termina */
+#define VC_DIP_SETTLE_S 0.6f     /* s con la misma postura antes de fiarse de la altura aprendida (tras cambiar de postura se aprende, no se retiene) */
+#define VC_DIP_MAX_S    4.0f     /* tope de retencion: pasado esto la cabeza vuelve a seguir a la articulacion */
 #define VC_C4_PLANT_A   49
 #define VC_C4_PLANT_B   54
 #define VC_CAM_CB0      0x74u    /* GM_Camera.callback[0] (la [1] es BCAM_EVENT_FN = 0x78) */
@@ -142,6 +149,8 @@ typedef struct {
     int pad_run;                          /* VBlanks seguidos con VRCAM_EV_PAD_OFF (solo esa causa) */
     uint32_t fvb;                         /* VBlank (S.vb) de la última construcción de cámara ajena (0 = ninguna) */
     VrCamEngine eng;                      /* última lectura de los hechos del motor (vrcam_engine_info) */
+    float dip_t, post_t, ey_ok, ey_ok2, nh_prev;   /* carga/mina: s en retencion, s con la misma postura, altura del ojo antes de hundirse (la de hace 1 y 2 construcciones: la animacion ya la ha arrastrado un poco al detectarla) y altura aprendida del VBlank anterior */
+    int dip, dip_lock, dip_post;           /* retencion activa, bloqueo hasta que la cabeza vuelva (tras el tope) y postura del VBlank anterior */
     float prone_k, anc[2];                /* tumbado: mezcla 0..1 hacia el ancla de gateo, y desplazamiento horizontal ojo -> articulación de la cabeza del último plan (lo aplica vrcam_commit a head_at) */
 } Vc;
 static Vc S;
@@ -219,7 +228,7 @@ static void hzd_log(float moved_u, float upm) {
 }
 
 /* ============================================ lectura del estado del juego ============================================ */
-typedef struct { int ok; int32_t eye_x, eye_z; float body_yaw; int post, move, follow, wall, fp; int psg; int plant; int joint; int32_t jx, jy, jz; int32_t bx, by, bz, floor; } Body;
+typedef struct { int ok; int32_t eye_x, eye_z; float body_yaw; int post, move, follow, wall, fp; int psg; int plant; int mine; int wpn, act, act2; uint32_t status; int joint; int32_t jx, jy, jz; int32_t bx, by, bz, floor; } Body;
 
 static Body read_body(const uint8_t *ram) {
     Body b = {0};
@@ -231,7 +240,11 @@ static Body read_body(const uint8_t *ram) {
     b.wall = (status & BRIDGE_PS_WALL) != 0;                              /* pegado a la pared */
     b.fp = (status & (BRIDGE_PS_WATCH | BRIDGE_PS_WATCH_PEEK)) != 0;      /* primera persona del propio juego */
     b.follow = (status & (BRIDGE_PS_DOWNED | BRIDGE_PS_DAMAGED)) != 0;   /* derribado / recibiendo un golpe: no es una postura, la cabeza va donde la lleve la animación */
-    if (ptr_ok(ob, VC_OBJ_ACTION2 + 2) && rd_s16(ram, BA_VARS + 2u * BRIDGE_V_WEAPON) == VC_WEAPON_C4) {
+    const int16_t wpn = rd_s16(ram, BA_VARS + 2u * BRIDGE_V_WEAPON);
+    b.mine = wpn == VC_WEAPON_C4 || wpn == VC_WEAPON_MINE;
+    b.wpn = wpn; b.status = status;
+    if (ptr_ok(ob, VC_OBJ_ACTION2 + 2)) { b.act = rd_s16(ram, ob + VC_OBJ_ACTION2 - 2); b.act2 = rd_s16(ram, ob + VC_OBJ_ACTION2); }   /* diagnostico [ojo]: accion principal (+14) y de superposicion (+16) */
+    if (ptr_ok(ob, VC_OBJ_ACTION2 + 2) && wpn == VC_WEAPON_C4) {
         const int16_t a2 = rd_s16(ram, ob + VC_OBJ_ACTION2);
         b.plant = a2 == VC_C4_PLANT_A || a2 == VC_C4_PLANT_B;
     }
@@ -400,19 +413,34 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
     int32_t dr[3] = {b.bx - S.pb[0], b.by - S.pb[1], b.bz - S.pb[2]};
     int snap = !S.pb_ok || abs(dr[0]) > 400 || abs(dr[1]) > 1500 || abs(dr[2]) > 400;
     float ey_prev = S.ey;
+    const int still = !(dr[0] || dr[2] || b.move);
+    const float nh_before = S.nh[b.post];
+    if (snap || b.post != S.dip_post) { S.post_t = 0.0f; S.dip = S.dip_lock = 0; } else S.post_t += dt;
+    S.dip_post = b.post;
+    if (!b.mine || b.follow || !b.joint || b.psg || !still) S.dip = S.dip_lock = 0;
+    else {
+        const float dev = (float)(b.jy - b.by) - S.nh[b.post];
+        if (dev > -VC_DIP_OFF) S.dip_lock = 0;
+        if (S.dip) { S.dip_t += dt; if (dev > -VC_DIP_OFF || S.dip_t > VC_DIP_MAX_S) { S.dip = 0; S.dip_lock = dev <= -VC_DIP_OFF; } }
+        else if (!S.dip_lock && S.post_t >= VC_DIP_SETTLE_S && dev < -VC_DIP_ON) { S.dip = 1; S.dip_t = 0.0f; S.nh[b.post] = S.nh_prev; }
+    }
     if (snap) S.ey = (float)b.jy;
     else {
         float target = (float)b.jy;
-        if (b.plant) {              /* colocando la carga: la animacion del juego agacha el cuerpo, pero la mano pone la carga y la cabeza VR no baja; ni se aprende esa altura */
+        if (S.dip && !b.plant) {    /* hundimiento de la cabeza con la carga/mina equipada y la misma postura: el ojo se queda donde estaba */
+            target = S.ey_ok2;
+        } else if (b.plant) {              /* colocando la carga: la animacion del juego agacha el cuerpo, pero la mano pone la carga y la cabeza VR no baja; ni se aprende esa altura */
             if (abs(dr[1]) <= 200) S.ey += (float)dr[1];
             target = S.ey;
         } else if ((dr[0] || dr[2] || b.move) && !b.follow) {
             if (abs(dr[1]) <= 200) S.ey += (float)dr[1];
             target = (float)b.by + S.nh[b.post];
-        } else if (b.joint && !b.follow && !b.psg) S.nh[b.post] += (1.0f - expf(-dt / 0.16f)) * ((float)(b.jy - b.by) - S.nh[b.post]);
+        } else if (b.joint && !b.follow && !b.psg && !S.dip_lock) S.nh[b.post] += (1.0f - expf(-dt / 0.16f)) * ((float)(b.jy - b.by) - S.nh[b.post]);
         S.ey += (1.0f - expf(-dt / 0.15f)) * (target - S.ey);
     }
     S.pb[0] = b.bx; S.pb[1] = b.by; S.pb[2] = b.bz; S.pb_ok = 1; S.pb_vb = S.vb;
+    if (!S.dip && !b.plant) { S.ey_ok2 = S.ey_ok; S.ey_ok = S.ey; }
+    if (!S.dip) S.nh_prev = nh_before;
 
     float a_yaw, elev;
     vrcam_head_angles(h, &a_yaw, &elev);
@@ -477,7 +505,8 @@ int vrcam_plan(const uint8_t *ram, int16_t zoom, VrCamPlan *p) {
       hzd_log(hypotf(S.sh[0], S.sh[1]), upm);
       float js = hypotf(S.sh[0] - sh_prev[0], S.sh[1] - sh_prev[1]);
       if (!snap && (fabsf(S.ey - ey_prev) > 30.0f || js > 50.0f))
-          fprintf(stderr, "[ojo] y=%.0f dy=%.0f suelo=%d shift=%.0f (salto %.0f) uds\n", ey, S.ey - ey_prev, b.floor, hypotf(S.sh[0], S.sh[1]), js);
+          fprintf(stderr, "[ojo] y=%.0f dy=%.0f suelo=%d shift=%.0f (salto %.0f) uds | arma=%d post=%d estado=%x accion=%d accion2=%d raiz_y=%d cabeza_y=%d aprendida=%.0f retenido=%d\n", ey, S.ey - ey_prev, b.floor, hypotf(S.sh[0], S.sh[1]), js,
+                  b.wpn, b.post, (unsigned)b.status, b.act, b.act2, b.by, b.jy, S.nh[b.post], S.dip);
       p->eye_shift[0] = S.sh[0]; p->eye_shift[1] = 0.0f; p->eye_shift[2] = S.sh[1]; }
     /* Ancla del cuerpo (ojo -> articulación de la cabeza, horizontal; vrcam_commit la pasa a head_at y vr_body cuelga de ahí el modelo). De pie y agachado la cabeza queda eye_fwd por detrás del
      * ojo según la MIRADA. Tumbado (gateo, conductos) el cuerpo va horizontal: los ojos del modelo están por DELANTE del cuello a lo largo del cuerpo, no encima; con el ancla de pie el ojo

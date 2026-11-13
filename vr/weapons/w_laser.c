@@ -72,3 +72,55 @@ void wlaser_mesh(const WLaserMesh *m, VrHandsMesh *out) {
     out->idx = m->idx; out->nidx = WLASER_NI;
     out->flags = VRH_MF_DYNAMIC;
 }
+
+/* ---- fantasma de colocación (ver w_laser.h) ---- */
+static void ghost_strip(WGhostMesh *o, int k, WVec3 a, WVec3 b) {
+    WVec3 d = wv_sub(b, a), n = wv(-d.z, 0, d.x);
+    float nl = sqrtf(n.x * n.x + n.z * n.z);
+    n = nl > 1e-6f ? wv_scale(n, WGHOST_STRIP_HALF_W / nl) : wv(WGHOST_STRIP_HALF_W, 0, 0);
+    const WVec3 c[4] = {wv_sub(a, n), wv_add(a, n), wv_add(b, n), wv_sub(b, n)};
+    for (int i = 0; i < 4; i++) {
+        VrHandsVertex *v = &o->v[4 * k + i];
+        put(v, c[i], wv(0, 1, 0));
+        v->rgba[0] = 0; v->rgba[1] = 255; v->rgba[2] = 0;
+    }
+    uint16_t *ix = &o->idx[12 * k];
+    const uint16_t b0 = (uint16_t)(4 * k);
+    static const uint16_t f[12] = {0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2};     /* las dos caras */
+    for (int i = 0; i < 12; i++) ix[i] = (uint16_t)(b0 + f[i]);
+}
+
+int wghost_build(const WPose *placed, float arrow_len, WGhostMesh *out) {
+    if (!out || !placed || !isfinite(placed->p.x) || !isfinite(placed->p.y) || !isfinite(placed->p.z) || !isfinite(placed->q.x) || !isfinite(placed->q.y) || !isfinite(placed->q.z) || !isfinite(placed->q.w)) return 0;
+    if (!(arrow_len > 0.0f) || !isfinite(arrow_len)) return 0;
+    const float qn = placed->q.x * placed->q.x + placed->q.y * placed->q.y + placed->q.z * placed->q.z + placed->q.w * placed->q.w;
+    if (!(qn > 1e-6f)) return 0;
+    const WQuat q = wquat_normalize(placed->q);
+    WVec3 f = wquat_rotate(q, wv(1, 0, 0)), r = wquat_rotate(q, wv(0, 0, 1));         /* +X del modelo (cara picuda) y +Z, tendidos en horizontal */
+    f.y = 0; r.y = 0;
+    const float fl = sqrtf(f.x * f.x + f.z * f.z), rl = sqrtf(r.x * r.x + r.z * r.z);
+    if (!(fl > 1e-4f) || !(rl > 1e-4f)) return 0;
+    f = wv_scale(f, 1.0f / fl); r = wv_scale(r, 1.0f / rl);
+    const WVec3 o = wv(placed->p.x, placed->p.y + WGHOST_LIFT_M, placed->p.z);
+#define GP(x, z) wv_add(o, wv_add(wv_scale(f, (x)), wv_scale(r, (z))))
+    const WVec3 q4[4] = {GP(WGHOST_MINE_X1, WGHOST_MINE_Z0), GP(WGHOST_MINE_X1, WGHOST_MINE_Z1), GP(WGHOST_MINE_X0, WGHOST_MINE_Z1), GP(WGHOST_MINE_X0, WGHOST_MINE_Z0)};
+    const WVec3 base = GP(WGHOST_MINE_X1, WGHOST_MINE_ZA);
+#undef GP
+    for (int i = 0; i < 4; i++) ghost_strip(out, i, q4[i], q4[(i + 1) & 3]);
+    const WVec3 tip = wv_add(base, wv_scale(f, arrow_len));
+    ghost_strip(out, 4, base, tip);
+    const float hl = 0.25f * arrow_len;
+    ghost_strip(out, 5, tip, wv_add(tip, wv_add(wv_scale(f, -hl), wv_scale(r, hl))));
+    ghost_strip(out, 6, tip, wv_add(tip, wv_sub(wv_scale(f, -hl), wv_scale(r, hl))));
+    return 1;
+}
+
+void wghost_mesh(const WGhostMesh *m, VrHandsMesh *out) {
+    memset(out, 0, sizeof *out);
+    out->mesh_id = WGHOST_MESH_ID;
+    out->tex_id = 0;
+    out->model[0] = out->model[5] = out->model[10] = out->model[15] = 1.0f;
+    out->verts = m->v; out->nverts = WGHOST_NV;
+    out->idx = m->idx; out->nidx = WGHOST_NI;
+    out->flags = VRH_MF_DYNAMIC;
+}

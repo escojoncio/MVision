@@ -202,7 +202,7 @@ static void save(const char *dir, const char *id, const char *tag, const VrHands
 
 
 /* ---- modo --poses: la mano nueva (vr_hand_skin) en cada pose de vr_hand_pose, sosteniendo objetos y con el antebrazo de la IK ---- */
-static const char *const POSE_NAME[HP_COUNT] = {"open", "relax", "fist", "point", "trigger", "grip_pistol", "grip_rifle", "grip_support", "grip_sphere", "grip_placed", "grip_box", "w_socom_r", "w_socom_l", "w_famas_r", "w_famas_l", "w_psg1_r", "w_psg1_l", "w_stinger_r", "w_stinger_l", "w_nikita_r", "w_nikita_l", "w_frag_r", "w_stun_r", "w_chaff_r"};
+static const char *const POSE_NAME[HP_COUNT] = {"open", "relax", "fist", "point", "trigger", "grip_pistol", "grip_rifle", "grip_support", "grip_sphere", "grip_placed", "grip_box", "w_socom_r", "w_socom_l", "w_famas_r", "w_famas_l", "w_psg1_r", "w_psg1_l", "w_stinger_r", "w_stinger_l", "w_nikita_r", "w_nikita_l", "w_frag_r", "w_stun_r", "w_chaff_r", "w_claymore_r"};
 static VrHandsVertex hp_v[2][3 * VRHA_NT]; static uint16_t hp_i[3 * VRHA_NT];
 static float hp_pos[VRHA_NV][3], hp_nrm[VRHA_NV][3];
 

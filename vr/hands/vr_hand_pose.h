@@ -28,6 +28,7 @@ enum {
     /* Poses por arma y mano, por ángulos de articulación (tabla generada offline contra la malla del arma: vr_hand_grips.inc, ver gripfit_gen.c). _R = mano que empuña (con gatillo), _L = mano de apoyo. */
     HP_W_SOCOM_R, HP_W_SOCOM_L, HP_W_FAMAS_R, HP_W_FAMAS_L, HP_W_PSG1_R, HP_W_PSG1_L, HP_W_STINGER_R, HP_W_STINGER_L, HP_W_NIKITA_R, HP_W_NIKITA_L,
     HP_W_FRAG_R, HP_W_STUN_R, HP_W_CHAFF_R,   /* granadas (mano derecha, sin gatillo): rodean el modelo del juego que lleva la mano (grenade.c: grenade 0x3b88; aturdidora y señuelo can_gren 0x7a64) */
+    HP_W_CLAYMORE_R,      /* claymore (id 5, mano derecha, sin gatillo): palma en la cara trasera central y dedos por encima del canto superior del modelo del juego 0x17a1 */
     HP_COUNT
 };
 #define HP_W_FIRST HP_W_SOCOM_R

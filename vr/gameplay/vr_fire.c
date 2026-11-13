@@ -179,8 +179,10 @@ void vrfire_cfg_default(VrFireCfg *c) {
     c->arm_mode = VRFIRE_ARM_ON_TRIGGER; c->press_vbl = 2; c->release_vbl = 2; c->req_window = 60; c->arm_timeout = 40;
     c->bullet_shift = 400.0f; c->flash_shift_a = 130.0f; c->suppress_disarm = 1;
 }
+static struct { int on, age; VrFireMat m; } C4Q;       /* colocación directa del C4 pendiente (vr_fire.h) */
 void vrfire_init(const VrFireCfg *c) {
     memset(&S, 0, sizeof S);
+    memset(&C4Q, 0, sizeof C4Q);
     S.infl_life = INFL_LIFE;
     if (c) S.cfg = *c; else vrfire_cfg_default(&S.cfg);
     if (S.cfg.press_vbl < 2) S.cfg.press_vbl = 2;
@@ -212,6 +214,7 @@ static void reset_machine(void) { S.nq = 0; S.ninfl = 0; S.infl_life = INFL_LIFE
 
 void vrfire_frame(const VrFireGame *g, const VrFireIn *in, VrFireOut *out) {
     out->square = 0; out->engaged = 0;
+    if (C4Q.on && ++C4Q.age > VRFIRE_C4_LIFE) C4Q.on = 0;
     if (S.disarm_t > 0) S.disarm_t--;
     if (S.auto_tail > 0) S.auto_tail--;
     if (S.flash_age < 1000000) S.flash_age++;
@@ -353,6 +356,10 @@ int vrfire_set_throw(const float pos_user[3], const float vel_user_mps[3], float
     if (!S.live_ok) return 0;
     return set_throw(pos_user, vel_user_mps, tick_s);
 }
+float vrfire_throw_mps(void) {
+    if (!S.tok || !S.live_map.valid || !(S.ttick_s > 0)) return 0.0f;
+    return sqrtf(S.tvel[0] * S.tvel[0] + S.tvel[1] * S.tvel[1] + S.tvel[2] * S.tvel[2]) / (S.live_map.units_per_m * S.ttick_s);
+}
 void vrfire_set_throw_body(const float body[3], int wall_between) {
     S.body_ok = body && finite3(body);
     if (!S.body_ok) return;
@@ -414,7 +421,8 @@ int vrfire_take_throw(int16_t pos[3], int16_t vel[3]) {
 void vrfire_log_grenade(const int16_t o_pos[3], const int16_t o_vel[3], int subst, const int16_t pos[3], const int16_t vel[3]) {
     fprintf(stderr, "[granada] retardo_vbl=%d origen=%s sustituida=%d mapa_valido=%d agarre_vivo=%d peticiones=%d | original pos=(%d,%d,%d) vel=(%d,%d,%d) | ",
             S.born_age, S.born_hand ? "mano" : "adelantado", subst != 0, S.live_map.valid != 0, S.live_ok != 0, S.nq, o_pos[0], o_pos[1], o_pos[2], o_vel[0], o_vel[1], o_vel[2]);
-    if (subst) fprintf(stderr, "sustituida pos=(%d,%d,%d) vel=(%d,%d,%d)\n", pos[0], pos[1], pos[2], vel[0], vel[1], vel[2]);
+    if (subst) fprintf(stderr, "sustituida pos=(%d,%d,%d) vel=(%d,%d,%d) (%.2f m/s horizontal+vertical, con la gravedad descontada si nace adelantada)\n", pos[0], pos[1], pos[2], vel[0], vel[1], vel[2],
+                       S.live_map.valid && S.ttick_s > 0 ? sqrtf((float)vel[0] * vel[0] + (float)vel[1] * vel[1] + (float)vel[2] * vel[2]) / (S.live_map.units_per_m * S.ttick_s) : 0.0f);
     else fprintf(stderr, "sin sustituir\n");
 }
 
@@ -474,4 +482,39 @@ int vrfire_hide_weapon(uint8_t *ram) {
         }
     }
     return n;
+}
+
+/* ================================================== C4 directo ================================================== */
+#define C4_WEAPON_ID 6          /* GM_Weapons / arma equipada del C4 (WP_C4) */
+#define C4_MAX_LIVE 16
+#define C4_SE_PUT 0x31          /* SE_C4_PUT (sound/g_sound.h SE_C4PUT01) */
+int vrfire_c4_request(const VrFireMap *map, const WPose *pose) {
+    VrFireMat m;
+    if (C4Q.on || !map || !pose || !map->valid || !vrfire_make_matrix(map, pose, 0.0f, &m)) return 0;
+    C4Q.m = m; C4Q.age = 0; C4Q.on = 1;
+    return 1;
+}
+int vrfire_c4_pending(void) { return C4Q.on; }
+int vrfire_c4_take(VrFireMat *m) {
+    if (!C4Q.on) return 0;
+    C4Q.on = 0;
+    if (m) *m = C4Q.m;
+    return 1;
+}
+int vrfire_c4_pump(uint8_t *ram, const VrFireC4Ops *ops) {
+    if (!C4Q.on || !ram || !ops || !ops->create) return 0;
+    VrFireMat m;
+    vrfire_c4_take(&m);          /* consumida pase lo que pase: una carga vieja no debe aparecer luego */
+    const uint32_t pc = rd_u32(ram, BA_PLAYER_CTRL), ammo_a = BA_VARS + 2u * (BRIDGE_V_WEAPON_AMMO + C4_WEAPON_ID);
+    if (!ptr_ok(pc, 0x20 + 0x9C0)) return 0;
+    if (rd_s16(ram, BA_VARS + 2u * BRIDGE_V_WEAPON) != C4_WEAPON_ID) return 0;
+    const int ammo = rd_s16(ram, ammo_a), live = rd_s32(ram, VRFIRE_BA_C4_COUNT);     /* ammo <= 0: sin unidades o arma bloqueada (bit 0x8000), como el `ammo > 0` de bomb.c */
+    if (ammo <= 0 || live < 0 || live >= C4_MAX_LIVE) return 0;
+    const uint32_t actor = ops->create(ops->user, &m);
+    if (!actor) return 0;        /* NewBakudan falló: el original tampoco gasta la unidad */
+    wr_s16(ram, ammo_a, (int16_t)(ammo - 1));
+    if (ops->sound) ops->sound(ops->user, pc, C4_SE_PUT);
+    vrfire_probe(2, VRFIRE_SUBST, actor, &m);
+    fprintf(stderr, "[c4] carga creada directamente (sin animacion): actor=%08x t=(%d,%d,%d) municion %d -> %d cargas vivas %d\n", actor, m.t[0], m.t[1], m.t[2], ammo, ammo - 1, live + 1);
+    return 1;
 }

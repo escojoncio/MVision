@@ -26,6 +26,8 @@ static void w16(uint32_t a, int16_t v) { *(int16_t *)(emu_ram + (a & RAM_MASK & 
 static uint32_t vbuf;
 static int in_view;      /* guarda de reentrada: el constructor no vuelve a entrar, pero si lo hiciera se usarían los argumentos originales */
 void hle_vrcam_reset(void) { vbuf = 0; in_view = 0; }
+/* Colocación directa del C4 (vr/gameplay/vr_fire_hle.c): se bombea aquí porque la cámara es un actor (fase de actores). Sin la capa de disparo enlazada no hace nada. */
+__attribute__((weak)) void hle_vrfire_c4_pump(Cpu *c) { (void)c; }
 
 /* Constructor de la matriz de cámara: (canal, *ojo, *objetivo, distancia de pantalla). Solo para el canal principal.
  * Preserva sp, a1-a3 y el resto de registros del llamador (el original conserva los suyos); solo cambian a1-a3 durante
@@ -33,6 +35,7 @@ void hle_vrcam_reset(void) { vbuf = 0; in_view = 0; }
 void hle_vrcam_view(Cpu *c) {
     VrCamPlan p;
     int is_main = (A0 & RAM_MASK) == (0x800B2B7Cu & RAM_MASK);
+    if (is_main && !in_view) hle_vrfire_c4_pump(c);
     if (is_main && !vbuf && !in_view) vbuf = bios_kalloc(16);
     if (is_main && !in_view) vrcam_note_builder(A1);      /* quién construye la cámara: camera.c pasa siempre su bloque de ojo; otro actor (corte, Sniper Wolf, perro...) = cámara del motor ajena (vr_camera.h, VRCAM_EV_FOREIGN) */
     int vr = 0;

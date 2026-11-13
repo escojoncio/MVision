@@ -84,13 +84,13 @@ static void t_limits(void) {
 }
 
 static void t_length(void) {
-    CHECK(wlaser_length(-1.0f) == WLASER_MAX_M && wlaser_length(NAN) == WLASER_MAX_M && wlaser_length(INFINITY) == WLASER_MAX_M, "sin impacto / no válida: 15 m");
-    CHECK(wlaser_length(WLASER_MAX_M + 5.0f) == WLASER_MAX_M && wlaser_length(WLASER_MAX_M + WLASER_SURF_GAP_M) == WLASER_MAX_M, "impacto más allá del alcance: 15 m");
+    CHECK(wlaser_length(-1.0f) == WLASER_MAX_M && wlaser_length(NAN) == WLASER_MAX_M && wlaser_length(INFINITY) == WLASER_MAX_M, "sin impacto / no válida: WLASER_MAX_M");
+    CHECK(wlaser_length(WLASER_MAX_M + 5.0f) == WLASER_MAX_M && wlaser_length(WLASER_MAX_M + WLASER_SURF_GAP_M) == WLASER_MAX_M, "impacto más allá del alcance: WLASER_MAX_M");
     CHECK(fabsf(wlaser_length(3.0f) - (3.0f - WLASER_SURF_GAP_M)) < 1e-6f, "impacto a 3 m: el rayo acaba 5 mm antes (%.4f)", wlaser_length(3.0f));
     CHECK(wlaser_length(0.0f) == 0.0f && wlaser_length(WLASER_SURF_GAP_M * 0.5f) == 0.0f, "impacto pegado a la boca: longitud 0 (no se dibuja)");
     float prev = -1.0f; int mono = 1;
     for (int i = 0; i <= 400; i++) { float l = wlaser_length(0.05f * (float)i); if (l < prev || l > WLASER_MAX_M) mono = 0; prev = l; }
-    CHECK(mono, "monótona y acotada por 15 m");
+    CHECK(mono, "monótona y acotada por WLASER_MAX_M");
     /* la punta del octaedro (extremo del rayo) queda delante de la superficie, no sobre ella */
     WPose mz = {{0, 1.2f, 0}, {0, 0, 0, 1}};
     WLaserMesh m;
@@ -135,7 +135,37 @@ static void t_raised(void) {
     CHECK(!wlaser_raised(&p) && !wlaser_raised(NULL), "pose no válida / NULL: no levantada");
 }
 
+/* Fantasma de colocacion de la mina: huella del modelo con las patas desplegadas (WGHOST_MINE_*, marco del modelo) sobre el suelo en la pose de colocacion y flecha desde la punta de la cara picuda (+X del modelo). */
+static void test_ghost(void) {
+    printf("-- fantasma de colocacion --\n");
+    static WGhostMesh g;
+    const float s45 = 0.70710678f;
+    WPose P = {{1.0f, 0.0f, -2.0f}, {0, s45, 0, s45}};       /* R_y(+90): cara picuda (+X del modelo) hacia -Z del mundo, +Z del modelo hacia +X */
+    CHECK(fabsf(WGHOST_MINE_X0 + 0.080f) < 0.001f && fabsf(WGHOST_MINE_X1 - 0.031f) < 0.001f, "huella en X = la del modelo que dibuja el juego (-80..31 mm), no la de las patas VR (%.0f..%.0f mm)", WGHOST_MINE_X0 * 1000, WGHOST_MINE_X1 * 1000);
+    CHECK(wghost_build(&P, 0.4f, &g) == 1, "se construye");
+    float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
+    int ok = 1;
+    for (int i = 0; i < WGHOST_NV; i++) for (int a = 0; a < 3; a++) { float x = g.v[i].pos[a]; if (!isfinite(x)) ok = 0; if (x < lo[a]) lo[a] = x; if (x > hi[a]) hi[a] = x; }
+    CHECK(ok, "vertices finitos");
+    for (int i = 0; i < WGHOST_NI; i++) if (g.idx[i] >= WGHOST_NV) ok = 0;
+    CHECK(ok, "indices dentro de rango");
+    CHECK(lo[1] >= 0.0f && hi[1] <= 0.0f + WGHOST_LIFT_M + 1e-4f, "tendido sobre el suelo (y %.4f..%.4f)", lo[1], hi[1]);
+    const float w = WGHOST_STRIP_HALF_W + 1e-3f;
+    CHECK(fabsf(lo[0] - (1.0f + WGHOST_MINE_Z0)) < w + 0.002f && hi[0] <= 1.0f + WGHOST_MINE_Z1 + w + 0.002f, "eje largo de la huella = Z del modelo (x %.3f..%.3f)", lo[0], hi[0]);
+    CHECK(hi[2] <= -2.0f - WGHOST_MINE_X0 + w && hi[2] >= -2.0f - WGHOST_MINE_X0 - w, "borde trasero de la huella (z max %.3f)", hi[2]);
+    CHECK(fabsf(lo[2] - (-2.0f - WGHOST_MINE_X1 - 0.4f)) < w, "la flecha sale de la cara picuda hacia delante (z min %.3f)", lo[2]);
+    {   /* punta de la flecha: a la altura de la punta de la cara picuda */
+        float zt = 1e9f, xt = 0; for (int i = 0; i < WGHOST_NV; i++) if (g.v[i].pos[2] < zt) { zt = g.v[i].pos[2]; xt = g.v[i].pos[0]; }
+        CHECK(fabsf(xt - (1.0f + WGHOST_MINE_ZA)) < 0.012f, "flecha centrada en la punta (x %.3f)", xt);
+    }
+    VrHandsMesh hm; wghost_mesh(&g, &hm);
+    CHECK(hm.nverts == WGHOST_NV && hm.nidx == WGHOST_NI && (hm.flags & VRH_MF_DYNAMIC) && hm.nverts * sizeof(VrHandsVertex) <= 4096, "malla dinamica (%zu bytes)", (size_t)hm.nverts * sizeof(VrHandsVertex));
+    WPose nanp = P; nanp.p.x = NAN; WPose q0 = P; q0.q = (WQuat){0, 0, 0, 0}; WPose up = P; up.q = (WQuat){0, 0, s45, s45};   /* R_z(90): +X del modelo vertical */
+    CHECK(wghost_build(&nanp, 0.4f, &g) == 0 && wghost_build(&q0, 0.4f, &g) == 0 && wghost_build(&up, 0.4f, &g) == 0 && wghost_build(&P, 0.0f, &g) == 0 && wghost_build(&P, 0.4f, NULL) == 0 && wghost_build(NULL, 0.4f, &g) == 0, "entradas invalidas: 0");
+}
+
 int main(void) {
+    test_ghost();
     printf("-- w_laser: geometría --\n"); t_geometry();
     printf("-- w_laser: límites y entradas degeneradas --\n"); t_limits();
     printf("-- w_laser: longitud hasta el impacto --\n"); t_length();

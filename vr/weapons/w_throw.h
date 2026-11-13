@@ -25,6 +25,7 @@ typedef struct {
     float cooked;            /* s que estuvo cocinada antes del lanzamiento */
     int index;               /* WL_DETONATE: índice de la carga; resto: 0 */
     uint32_t seq;            /* contador creciente de eventos */
+    float v_hand, v_used, win_len, win_lag, rel_lag;   /* WL_THROW, diagnóstico: m/s de la ventana más reciente y de la usada, s de largo y de lag de la usada y s entre empezar a soltar el gatillo y cruzar el umbral */
 } WLaunch;
 
 /* Gancho opcional; devuelve 1 si el juego aceptó el evento (p.ej. hay superficie
@@ -34,6 +35,10 @@ typedef struct {
 typedef int (*WLaunchHook)(void *user, const WLaunch *ev);
 void w_throw_set_hook(WLaunchHook hook, void *user);
 const WLaunch *w_launch_last(void);
+/* Sondeo de colocación SIN efectos (carga y mina en la mano): mismo evento que se enviaría al soltar, pero por un gancho propio (no cuenta como evento ni toca w_launch_last); devuelve 1 si el juego
+ * podría colocar ahí ahora. Sin gancho de sondeo: 0 (sin dato, no se vibra). */
+void w_throw_set_probe(WLaunchHook hook, void *user);
+int w5_probe(WLaunch ev);
 
 /* Sonidos propios: están en el enum WS_* del contrato (weapon.h); estos son solo alias de lectura. */
 enum { W5_S_DRAW = WS_DRAW, W5_S_PIN = WS_PIN, W5_S_LEVER = WS_LEVER, W5_S_THROW = WS_THROW,
@@ -46,7 +51,7 @@ int  w5_emit(const WGameBridge *g, WLaunch ev);
 void w5_hide(WeaponState *s, int hidden);
 
 /* ---------- Estimación de lanzamiento (testeable por separado) ---------- */
-#define WV_HIST 24
+#define WV_HIST 40
 typedef struct { float t; WPose p; } WVSample;
 typedef struct { WVSample s[WV_HIST]; int n, head; float clock; } WVHist;
 void wvh_reset(WVHist *h);
@@ -79,5 +84,7 @@ typedef struct {
     float deploy;             /* mina: patas desplegadas 0..1 */
     int trig_ready;           /* el gatillo pasó por reposo tras sacar el objeto: puede prepararse */
     int armed;                /* gatillo apretado a fondo: al soltarlo se coloca */
+    int probe_on;             /* sondeo de superficie válido (con histéresis): el pulso háptico es al pasar de 0 a 1 */
+    float probe_t_on, probe_t_off;   /* s seguidos con el sondeo válido / no válido */
 } WPlacedState;
 extern const WeaponDef w_placed_a, w_placed_b;

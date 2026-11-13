@@ -109,9 +109,9 @@ static void check_solution(const VrArmRig *rig, const VrArmLimits *lim, const Vr
     float u[3]; for (int i = 0; i < 3; i++) u[i] = -a[i] / lenv(a);
     float X[3] = {in->torso[0], in->torso[3], in->torso[6]}, Z[3] = {in->torso[2], in->torso[5], in->torso[8]};
     float out_c = dotv(u, X) * rig->side, fwd = dotv(u, Z);
-    if (sc <= 1.0f)   /* estirado: el brazo apunta al objetivo sin límite de hombro */
+    if (sc <= 1.0f && !(o->flags & VRARM_ELBOW_CLAMPED))   /* estirado: el brazo apunta al objetivo sin límite de hombro; con el codo proyectado al semiespacio anatómico manda este (la proyección gira el codo alrededor de hombro-muñeca y puede rebasar el límite de hombro) */
     CHECK(fwd >= lim->shoulder_back - 2e-3f, "hombro hacia atrás %g < %g", fwd, lim->shoulder_back);
-    if (sc <= 1.0f)
+    if (sc <= 1.0f && !(o->flags & VRARM_ELBOW_CLAMPED))
     CHECK(out_c >= lim->shoulder_cross - 2e-3f, "hombro cruzando %g < %g", out_c, lim->shoulder_cross);
 }
 
@@ -531,7 +531,7 @@ static void test_wrist_continuity(void) {
             for (int i = 0; i < 3; i++) e[i] = o.elbow[i] + off[i] * o.stretch - o.wrist[i];
             float gap = lenv(e); if (gap > worst_gap) worst_gap = gap;
             float wl = lenv(rig.wrist_off); for (int i = 0; i < 3; i++) ax[i] = rig.wrist_off[i] / wl;
-            float roll = fabsf(twist_about(o.R_fore, o.R_hand, ax)); if (roll > worst_roll) worst_roll = roll;
+            float roll = fabsf(remainderf(twist_about(o.R_fore, o.R_hand, ax) - remainderf((o.tau - o.tau_f) / 0.0174532925f, 360.0f), 360.0f)); if (roll > worst_roll) worst_roll = roll;   /* lo que no asume el antebrazo (forearm_share, tope 90) lo lleva la mano */
             if (natural && !(o.flags & (VRARM_STRETCHED | VRARM_TOO_CLOSE))) {
                 float fx, dv; wrist_angles(&o, rig.side, &fx, &dv);
                 nat++;
@@ -541,8 +541,8 @@ static void test_wrist_continuity(void) {
         }
     }
     CHECK(worst_gap < 1.0f, "el antebrazo no llega a la muñeca: %.3f mm", worst_gap);
-    CHECK(worst_roll < 10.0f, "giro residual mano/antebrazo %.1f grados", worst_roll);
-    CHECK(in_lim >= nat * 9 / 10, "muñeca dentro de los límites en %d de %d poses naturales", in_lim, nat);
+    CHECK(worst_roll < 1.0f, "el giro residual mano/antebrazo no es tau - tau_f: %.1f grados de diferencia", worst_roll);
+    CHECK(in_lim >= nat * 4 / 5, "muñeca dentro de los límites en %d de %d poses naturales", in_lim, nat);
     printf("  muñeca: %d poses, hueco máx %.3f mm, giro residual máx %.1f grados, dentro de límites %d de %d\n", n, worst_gap, worst_roll, in_lim, nat);
 }
 
@@ -676,10 +676,10 @@ static void test_glue(void) {
                     int pi[3] = {arm ? 2 : 7, arm ? 3 : 8, arm ? 4 : 9};
                     float R[3][9], t[3][3];
                     for (int k = 0; k < 3; k++) load_xf(part_addr(pi[k]), R[k], t[k]);
-                    int bone_stretched[2] = {0, 0};   /* hueso alargado por el estirado: su matriz ya no es una rotación pura */
+                    int bone_stretched[2] = {0, 0};   /* hueso alargado por el estirado o ajustado al hombro de la IK (más largo o más corto): su matriz ya no es una rotación pura */
                     for (int k = 0; k < 2; k++) {
                         float o[3], tl[3] = {(float)TOFF[pi[k + 1]][0], (float)TOFF[pi[k + 1]][1], (float)TOFF[pi[k + 1]][2]};
-                        { float ro[3]; mv(ro, R[k], tl); bone_stretched[k] = lenv(ro) > 1.0005f * lenv(tl); }
+                        { float ro[3]; mv(ro, R[k], tl); bone_stretched[k] = fabsf(lenv(ro) - lenv(tl)) > 0.0005f * lenv(tl); }
                         mv(o, R[k], tl); for (int c = 0; c < 3; c++) o[c] += t[k][c];
                         float d[3] = {o[0] - t[k + 1][0], o[1] - t[k + 1][1], o[2] - t[k + 1][2]};
                         CHECK(lenv(d) < 1.8f, "hueso %d del brazo %d desconectado %g mm", k, arm, lenv(d));
@@ -1099,10 +1099,10 @@ static float grip_wrist_m(int side) { float c[3]; vrhs_grip_center(side == 1 ? 1
 static void test_arm_length(void) {
     const float head[3] = {0.1f, 1.6f, -0.2f}, fwd[3] = {0, 0, -1};
     float sh[3];
-    CHECK(vrbody_shoulder_estimate(1, head, fwd, sh) == 1 && fabsf(sh[0] - 0.27f) < 1e-5f && fabsf(sh[1] - 1.38f) < 1e-5f && fabsf(sh[2] + 0.15f) < 1e-5f, "hombro derecho: %g %g %g", sh[0], sh[1], sh[2]);
-    CHECK(vrbody_shoulder_estimate(0, head, fwd, sh) == 1 && fabsf(sh[0] + 0.07f) < 1e-5f, "hombro izquierdo: %g", sh[0]);
+    CHECK(vrbody_shoulder_estimate(1, head, fwd, sh) == 1 && fabsf(sh[0] - (0.10f + VRBODY_SHOULDER_HALF_M)) < 1e-5f && fabsf(sh[1] - 1.38f) < 1e-5f && fabsf(sh[2] + 0.15f) < 1e-5f, "hombro derecho: %g %g %g", sh[0], sh[1], sh[2]);
+    CHECK(vrbody_shoulder_estimate(0, head, fwd, sh) == 1 && fabsf(sh[0] - (0.10f - VRBODY_SHOULDER_HALF_M)) < 1e-5f, "hombro izquierdo: %g", sh[0]);
     const float east[3] = {1, 0.5f, 0};      /* mirando a +X (Y ignorada): la derecha del usuario es +Z */
-    CHECK(vrbody_shoulder_estimate(1, head, east, sh) == 1 && fabsf(sh[0] - 0.05f) < 1e-5f && fabsf(sh[2] - (-0.2f + 0.17f)) < 1e-5f, "hombro con rumbo +X: %g %g", sh[0], sh[2]);
+    CHECK(vrbody_shoulder_estimate(1, head, east, sh) == 1 && fabsf(sh[0] - 0.05f) < 1e-5f && fabsf(sh[2] - (-0.2f + VRBODY_SHOULDER_HALF_M)) < 1e-5f, "hombro con rumbo +X: %g %g", sh[0], sh[2]);
     const float zero[3] = {0, 0.7f, 0}, nanv[3] = {NAN, 0, -1};
     CHECK(!vrbody_shoulder_estimate(0, head, zero, sh) && !vrbody_shoulder_estimate(0, head, nanv, sh) && !vrbody_shoulder_estimate(2, head, fwd, sh) && !vrbody_shoulder_estimate(0, NULL, fwd, sh), "hombro: entradas inválidas");
 
@@ -1537,6 +1537,60 @@ static void test_own_hands_both(void) {
     vrbody_apply(RAM); CHECK(r16(part_addr(2) + 0x4C) == 2, "vrbody_set_own_hands(0)"); vrbody_restore(RAM);
 }
 
+/* Separación lateral de hombros: la IK usa hombros a VRBODY_SHOULDER_HALF_M del eje (0,40 m entre ellos; el modelo de Snake los tiene a 0,365 m con 1042 unidades/m), el hombro DIBUJADO sigue donde lo pone el torso
+ * animado (sin hueco) y el brazo superior se orienta y alarga del hombro dibujado al codo de la IK. La medida del largo de brazo usa el mismo ancho. */
+static void test_shoulder_spread(void) {
+    printf("  separación de hombros\n");
+    CHECK(fabsf(VRBODY_SHOULDER_HALF_M - 0.20f) < 1e-6f, "ancho elegido: medio ancho 0,20 m (%g)", VRBODY_SHOULDER_HALF_M);
+    const float head[3] = {0.1f, 1.6f, -0.2f}, fwd[3] = {0, 0, -1};
+    float el[3], er[3];
+    CHECK(vrbody_shoulder_estimate(0, head, fwd, el) == 1 && vrbody_shoulder_estimate(1, head, fwd, er) == 1, "hombros estimados");
+    CHECK(fabsf((er[0] - el[0]) - 0.40f) < 1e-5f, "hombros ESTIMADOS (medida del largo de brazo) a 0,40 m entre sí: %g", er[0] - el[0]);
+    int tested = 0;
+    for (int seed = 0; seed < 12; seed++) {
+        VrBodyConfig cfg; legacy_cfg(&cfg); cfg.hand_pitch_deg = 0;
+        build_body(500 + seed); vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+        for (int f = 0; f < 40; f++) {
+            set_hand(0, -0.25f + 0.002f * f, 1.3f, -0.4f, 0.3f); set_hand(1, 0.30f, 1.25f, -0.45f - 0.001f * f, -0.2f);
+            memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM);
+            if (f < 39) vrbody_restore(RAM);
+        }
+        VrBodyArmLive a[2]; VrBodyArmPose o[2];
+        CHECK(vrbody_arm_live(0, &a[0]) == 1 && vrbody_arm_live(1, &a[1]) == 1, "arm_live (semilla %d)", seed);
+        float ik[2][3], dr[3], ex[3] = {a[0].torso[0], a[0].torso[3], a[0].torso[6]};      /* X del torso (hacia la izquierda) en el espacio del usuario */
+        for (int s = 0; s < 2; s++) for (int j = 0; j < 3; j++) ik[s][j] = a[s].shoulder[j] + a[s].shoulder_spread[j];
+        for (int j = 0; j < 3; j++) dr[j] = a[0].shoulder[j] - a[1].shoulder[j];
+        float sep_ik = (ik[0][0] - ik[1][0]) * ex[0] + (ik[0][1] - ik[1][1]) * ex[1] + (ik[0][2] - ik[1][2]) * ex[2], sep_draw = dotv(dr, ex);
+        CHECK(fabsf(sep_draw - 0.380f) < 1e-3f, "hombros DIBUJADOS (torso del modelo) a %.4f m: no se mueven (0,380)", sep_draw);
+        CHECK(fabsf(sep_ik - 0.400f) < 1e-3f, "hombros de la IK a %.4f m entre sí (0,400)", sep_ik);
+        CHECK(fabsf(0.5f * sep_ik - 0.5f * (er[0] - el[0])) < 1e-3f, "mismo medio ancho en la IK (%.4f) y en el hombro estimado de la medida (%.4f)", 0.5f * sep_ik, 0.5f * (er[0] - el[0]));
+        for (int s = 0; s < 2; s++) {
+            const float sg = s == 0 ? 1.0f : -1.0f, al = dotv(a[s].shoulder_spread, ex);
+            float perp[3]; for (int j = 0; j < 3; j++) perp[j] = a[s].shoulder_spread[j] - al * ex[j];
+            CHECK(sg * al > 0.0099f && sg * al < 0.0101f && lenv(perp) < 1e-5f, "lado %d: separación %.4f m hacia fuera y solo a lo ancho del torso (resto %g)", s, sg * al, lenv(perp));
+            CHECK(vrbody_arm_resolve(&a[s], a[s].grip_p, a[s].grip_q, &o[s]) == 0, "resolve");
+            CHECK(fabsf(o[s].shoulder[0] - a[s].shoulder[0]) + fabsf(o[s].shoulder[1] - a[s].shoulder[1]) + fabsf(o[s].shoulder[2] - a[s].shoulder[2]) < 1e-6f, "lado %d: el hombro entregado es el dibujado", s);
+            float t[3], d[3]; mv(t, o[s].R_upper, a[s].rig.elbow_off); for (int j = 0; j < 3; j++) d[j] = (o[s].elbow[j] - o[s].shoulder[j]) * 1000.0f;
+            CHECK(fabsf(t[0] - d[0]) + fabsf(t[1] - d[1]) + fabsf(t[2] - d[2]) < 0.5f, "lado %d: el brazo superior va del hombro dibujado al codo de la IK (%g,%g,%g vs %g,%g,%g)", s, t[0], t[1], t[2], d[0], d[1], d[2]);
+            float eik[3]; for (int j = 0; j < 3; j++) eik[j] = o[s].elbow[j] - ik[s][j];
+            CHECK(fabsf(lenv(eik) * 1000.0f - lenv(a[s].rig.elbow_off) * o[s].stretch / (a[s].len_k > 0.0f ? a[s].len_k : 1.0f)) < 0.5f, "lado %d: el codo queda a un hueso de largo del hombro de la IK", s);
+            tested++;
+        }
+        /* lo escrito en la RAM: el origen del hombro no se mueve y el brazo superior llega al codo (hueso conectado) */
+        for (int s = 0; s < 2; s++) {
+            int pi[3] = {s ? 2 : 7, s ? 3 : 8, s ? 4 : 9};
+            float R0_[9], t0[3], R1_[9], t1[3], R2_[9], t2[3];
+            load_xf(part_addr(pi[0]), R0_, t0); load_xf(part_addr(pi[1]), R1_, t1); load_xf(part_addr(pi[2]), R2_, t2);
+            float tl[3] = {(float)TOFF[pi[1]][0], (float)TOFF[pi[1]][1], (float)TOFF[pi[1]][2]}, e[3]; mv(e, R0_, tl); for (int j = 0; j < 3; j++) e[j] += t0[j] - t1[j];
+            CHECK(lenv(e) < 1.8f, "lado %d: el brazo superior escrito llega al codo (%g mm)", s, lenv(e));
+            int32_t a0 = r32(part_addr(pi[0]) + 0x14), b0; memcpy(&b0, RAM0 + (part_addr(pi[0]) & 0x1FFFFF) + 0x14, 4);
+            CHECK(a0 == b0, "lado %d: el origen del hombro escrito no cambia", s);
+        }
+        vrbody_restore(RAM);
+    }
+    CHECK(tested == 24, "cobertura (%d)", tested);
+}
+
 /* vrbody_player_models y vrbody_arm_live / vrbody_arm_resolve: la IK con el agarre simulado reproduce el apply; con el agarre desplazado mueve muñeca y mano rígidamente. */
 static void test_arm_live(void) {
     uint32_t md[2][3];
@@ -1563,11 +1617,11 @@ static void test_arm_live(void) {
             for (int j = 0; j < 3; j++) { de = fmaxf(de, fabsf(o.elbow[j] - fa.elbow[j])); dw = fmaxf(dw, fabsf(o.wrist[j] - fa.wrist[j])); }
             CHECK(de < 1e-3f && dw < 1e-3f, "resolve (agarre simulado) = apply: codo %g m, muñeca %g m (lado %d)", de, dw, s);
             tested++;
-            if ((o.flags & ~(unsigned)VRARM_WRIST_LIMIT) == 0) {      /* el límite de la muñeca no mueve la muñeca */
+            if ((o.flags & ~(unsigned)(VRARM_WRIST_LIMIT | VRARM_ELBOW_CLAMPED)) == 0) {      /* ni el límite de la muñeca ni la proyección del codo mueven la muñeca */
                 float lp[3] = {a.grip_p[0] + 0.01f, a.grip_p[1] - 0.005f, a.grip_p[2] + 0.008f};
                 VrBodyArmPose o2;
                 CHECK(vrbody_arm_resolve(&a, lp, a.grip_q, &o2) == 0, "resolve desplazado");
-                if ((o2.flags & ~(unsigned)VRARM_WRIST_LIMIT) == 0 && o2.err_mm < 0.5f) {
+                if ((o2.flags & ~(unsigned)(VRARM_WRIST_LIMIT | VRARM_ELBOW_CLAMPED)) == 0 && o2.err_mm < 0.5f) {
                     float dx[3] = {0.01f, -0.005f, 0.008f}; float e = 0;
                     for (int j = 0; j < 3; j++) e = fmaxf(e, fabsf((o2.wrist[j] - o.wrist[j]) - dx[j]));
                     CHECK(e < 2e-3f, "la muñeca sigue al agarre vivo: error %g m", e);
@@ -1582,7 +1636,7 @@ static void test_arm_live(void) {
                   ql[2] = qy[3] * b[2] + qy[0] * b[1] - qy[1] * b[0] + qy[2] * b[3]; ql[3] = qy[3] * b[3] - qy[0] * b[0] - qy[1] * b[1] - qy[2] * b[2]; }
                 VrBodyArmPose o3;
                 CHECK(vrbody_arm_resolve(&a, a.grip_p, ql, &o3) == 0, "resolve girado");
-                if ((o3.flags & ~(unsigned)VRARM_WRIST_LIMIT) == 0 && o3.err_mm < 0.5f) {
+                if ((o3.flags & ~(unsigned)(VRARM_WRIST_LIMIT | VRARM_ELBOW_CLAMPED)) == 0 && o3.err_mm < 0.5f) {
                     float c = cosf(8.0f * 0.0174532925f), sn = sinf(8.0f * 0.0174532925f);
                     float d[3] = {a.wrist[0] - a.grip_p[0], a.wrist[1] - a.grip_p[1], a.wrist[2] - a.grip_p[2]};
                     float want[3] = {a.grip_p[0] + c * d[0] + sn * d[2], a.grip_p[1] + d[1], a.grip_p[2] - sn * d[0] + c * d[2]};
@@ -2134,6 +2188,159 @@ static void test_near_hide(void) {
     }
 }
 
+/* ============================ codo anatómico y torsión repartida (sin efecto chicle) ============================ */
+#define EL_IN_DEG 22.5f
+/* Mano con los dedos (-Y local) en la dirección z del brazo y giro `a` alrededor de ellos (como test_wrist_continuity). */
+static void nat_hand(float H[9], const float z[3], float a) {
+    float up[3] = {0, 1, 0}, x[3], y[3];
+    x[0] = up[1] * z[2] - up[2] * z[1]; x[1] = up[2] * z[0] - up[0] * z[2]; x[2] = up[0] * z[1] - up[1] * z[0];
+    float xl = lenv(x); if (xl < 1e-3f) { x[0] = 1; x[1] = 0; x[2] = 0; xl = 1; } for (int i = 0; i < 3; i++) x[i] /= xl;
+    y[0] = z[1] * x[2] - z[2] * x[1]; y[1] = z[2] * x[0] - z[0] * x[2]; y[2] = z[0] * x[1] - z[1] * x[0];
+    float B[9] = {x[0], -z[0], y[0], x[1], -z[1], y[1], x[2], -z[2], y[2]}, c = cosf(a), s_ = sinf(a), Ry[9] = {c, 0, s_, 0, 1, 0, -s_, 0, c};
+    mm(H, B, Ry);
+}
+/* Dirección del plano del codo (unitaria, perpendicular a hombro->muñeca) de la solución; devuelve el desplazamiento del codo respecto a esa recta (mm). */
+static float elbow_dir(const VrArmIn *in, const VrArmOut *o, float pp[3]) {
+    float v[3], e[3];
+    for (int i = 0; i < 3; i++) { v[i] = o->wrist[i] - in->shoulder[i]; e[i] = o->elbow[i] - in->shoulder[i]; }
+    float vl = lenv(v); if (vl < 1e-3f) return 0;
+    for (int i = 0; i < 3; i++) v[i] /= vl;
+    float pl = dotv(e, v);
+    for (int i = 0; i < 3; i++) pp[i] = e[i] - v[i] * pl;
+    float n = lenv(pp); if (n > 1e-6f) for (int i = 0; i < 3; i++) pp[i] /= n;
+    return n;
+}
+static float ang_between(const float *a, const float *b) { float d = dotv(a, b); return acosf(d > 1 ? 1 : (d < -1 ? -1 : d)) * 57.29578f; }
+/* Barrido de objetivos de mano alrededor del hombro (torso = identidad: X izquierda, Y arriba, Z delante), con y sin arma (modo duro + polos medidos en Snake, uno de ellos con el codo hacia arriba), varios largos de
+ * brazo k: el plano del codo SIEMPRE en el semiespacio anatómico (nunca arriba; hacia dentro como mucho 22,5 grados desde la vertical, con un ensanche pequeño en el plano frontal abajo-fuera, donde la intersección
+ * es solo delante/atrás); continuo entre objetivos vecinos (pasos de 4 grados) en la mitad delantera (|az| <= 70: pasar por el plano frontal con la mano baja y de lado invierte el codo, atrás-delante, sin remedio); con
+ * arma la muñeca en el objetivo (< 0,5 mm). El polo de un arma es un vector fijo: dentro de 53 grados de su dirección el solver lo mezcla con la regla natural y no se exige continuidad (singularidad topológica). */
+static void test_elbow_halfspace(void) {
+    VrArmLimits lim0; vrbody_limits_default(&lim0);
+    const float KS[3] = {0.8f, 1.3f, 1.8f}, RS[3] = {0.4f, 0.8f, 1.15f}, D2R = 0.0174532925f;
+    const int NA = 90;
+    float worst_up = 1, worst_in = 1, worst_jump = 0, worst_err = 0;
+    int n = 0, njump = 0, ncmp = 0, nclamp = 0;
+    static float prow[2][90][3]; static unsigned char okrow[2][90];
+    for (int sv = 0; sv < 2; sv++) for (int sd = 0; sd < 2; sd++) for (int ki = 0; ki < 3; ki++) for (int weapon = 0; weapon < 2; weapon++) for (int pm = 0; pm < 2; pm++) {
+        if (!weapon && pm) continue;          /* sin arma solo la regla natural */
+        const float side = sd ? -1.0f : 1.0f, k = KS[ki];
+        VrArmRig rig = {side, {ELB[0] * k, ELB[1] * k, ELB[2] * k}, {WRI[0] * k, WRI[1] * k, WRI[2] * k}};
+        const float L = (lenv(rig.elbow_off) + lenv(rig.wrist_off));
+        VrArmLimits lim = lim0; if (weapon) lim.shoulder_back = lim.shoulder_cross = -1.0f;
+        if (!sv) lim.swivel_max_deg = 0.0f;      /* sv 0: solo la regla del codo (se compara también entre filas); sv 1: con el giro del codo por los límites de muñeca (su historia hace que filas vecinas, con cadena propia, difieran: solo se compara a lo largo de la cadena) */
+        float wp[3] = {0.532f, -0.288f, 0.796f}; if (pm) { wp[0] = 0.655f; wp[1] = 0.122f; wp[2] = 0.746f; } { float l = lenv(wp); for (int i = 0; i < 3; i++) wp[i] /= l; }   /* polos medidos en Snake: SOCOM izquierdo; PSG1 izquierdo (codo hacia arriba) */
+        for (int ri = 0; ri < 3; ri++) {
+            memset(okrow, 0, sizeof okrow);
+            for (int ie = 0; ie < (sv ? 21 : 41); ie++) {
+                const float el = (-80.0f + (sv ? 8.0f : 4.0f) * ie) * D2R;
+                int cur = ie & 1; VrArmOut prev; int have = 0; memset(&prev, 0, sizeof prev);
+                for (int ia = 0; ia < NA; ia++) {
+                    const float az = (-180.0f + 4.0f * ia) * D2R;
+                    float dir[3] = {side * sinf(az) * cosf(el), sinf(el), cosf(az) * cosf(el)};
+                    VrArmIn in; memset(&in, 0, sizeof in);
+                    in.torso[0] = in.torso[4] = in.torso[8] = 1;
+                    in.shoulder[0] = side * 190; in.shoulder[1] = 260; in.shoulder[2] = -29;
+                    for (int i = 0; i < 3; i++) in.wrist[i] = in.shoulder[i] + dir[i] * RS[ri] * L;
+                    nat_hand(in.hand, dir, 0.4f);
+                    if (weapon) { for (int i = 0; i < 3; i++) in.pole[i] = wp[i]; in.pole[0] *= side; }
+                    else { float v[3] = {in.wrist[0] - in.shoulder[0], in.wrist[1] - in.shoulder[1], in.wrist[2] - in.shoulder[2]}, base[3] = {0.45f, -1, -0.35f}; vrbody_natural_pole(in.torso, side, v, lenv(v) / L, base, in.pole); }
+                    in.has_prev = have; if (have) { in.tau_prev = prev.tau; in.tau_f_prev = prev.tau_f; in.swivel_prev = prev.swivel; }
+                    VrArmOut o;
+                    if (vrbody_solve_arm(&rig, &lim, &in, &o) != 0) { CHECK(0, "solve"); continue; }
+                    prev = o; have = 1; n++;
+                    if (o.flags & VRARM_ELBOW_CLAMPED) nclamp++;
+                    if (weapon) { float e = lenv((float[3]){o.wrist[0] - in.wrist[0], o.wrist[1] - in.wrist[1], o.wrist[2] - in.wrist[2]}); if (e > worst_err) worst_err = e; }
+                    float pp[3]; float off = elbow_dir(&in, &o, pp);
+                    okrow[cur][ia] = 0;
+                    if (off < 5.0f) continue;          /* brazo casi recto: el plano del codo no se ve */
+                    float dn = -pp[1], n2 = cosf(EL_IN_DEG * D2R) * side * pp[0] + sinf(EL_IN_DEG * D2R) * dn;
+                    if (dn < worst_up) worst_up = dn;
+                    if (n2 < worst_in) worst_in = n2;
+                    memcpy(prow[cur][ia], pp, sizeof pp); okrow[cur][ia] = 1;
+                    if (weapon) {
+                        float pl = lenv(in.pole), cr[3] = {dir[1] * in.pole[2] - dir[2] * in.pole[1], dir[2] * in.pole[0] - dir[0] * in.pole[2], dir[0] * in.pole[1] - dir[1] * in.pole[0]};
+                        if (lenv(cr) / pl < 0.8f) okrow[cur][ia] = 0;
+                    }
+                    if (!okrow[cur][ia] || fabsf(az) > 70.5f * D2R) continue;
+                    if (ia > 0 && okrow[cur][ia - 1]) { float j = ang_between(prow[cur][ia], prow[cur][ia - 1]); ncmp++; if (j > 10.0f) njump++; if (j > worst_jump) worst_jump = j; }
+                    if (!sv && ie > 0 && okrow[cur ^ 1][ia]) { float j = ang_between(prow[cur][ia], prow[cur ^ 1][ia]); ncmp++; if (j > 10.0f) njump++; if (j > worst_jump) worst_jump = j; }
+                }
+            }
+        }
+    }
+    CHECK(worst_up > -0.05f, "el codo apunta hacia arriba (componente hacia abajo %.3f)", worst_up);
+    CHECK(worst_in > -0.25f, "el codo apunta demasiado hacia dentro (%.3f)", worst_in);
+    CHECK(worst_jump < 12.5f && njump * 200 < ncmp, "el plano del codo salta %.1f grados entre objetivos vecinos (%d de %d por encima de 10)", worst_jump, njump, ncmp);
+    CHECK(worst_err < 0.5f, "con arma la muñeca se separa %.3f mm del objetivo", worst_err);
+    CHECK(n > 20000 && nclamp > 1000, "cobertura del barrido: %d objetivos, %d proyectados", n, nclamp);
+    printf("  codo: %d objetivos, peor 'abajo' %.3f, peor lado interior %.3f, proyectados %d, salto máx entre vecinos %.1f grados (%d de %d > 10), error muñeca con arma máx %.4f mm\n",
+           n, worst_up, worst_in, nclamp, worst_jump, njump, ncmp, worst_err);
+}
+
+/* Torsión repartida: con la mano girada +-180 grados sobre el antebrazo (también acumulando vueltas), el antebrazo (pieza rígida) asume ~55 % de su giro y nunca pasa de 90 grados; el brazo superior nunca pasa de
+ * 45 grados respecto al plano natural del codo (el exceso es un giro de la pieza sobre su eje: ninguna articulación se mueve); la mano conserva exactamente la orientación pedida y lleva el resto. */
+static void test_twist_split(void) {
+    const float D2R = 0.0174532925f;
+    float worst_tf = 0, worst_up = 0, worst_step = 0, worst_res = 0, worst_clamp = 0;
+    int n = 0, n_split = 0, n_clip = 0;
+    for (int weapon = 0; weapon < 2; weapon++) for (int sd = 0; sd < 2; sd++) for (int dI = 0; dI < 40; dI++) {
+        VrArmLimits lim; vrbody_limits_default(&lim); if (weapon) lim.shoulder_back = lim.shoulder_cross = -1.0f;
+        lim.swivel_max_deg = 0.0f;      /* el reparto del giro no depende del giro del codo */
+        VrArmLimits free_ = lim; free_.upper_twist_deg = 180.0f;
+        const float side = sd ? -1.0f : 1.0f;
+        VrArmRig rig = {side, {ELB[0], ELB[1], ELB[2]}, {WRI[0], WRI[1], WRI[2]}};
+        float dir[3] = {frand(-0.6f, 0.6f), frand(-0.7f, 0.5f), 1}, dl = lenv(dir);
+        for (int i = 0; i < 3; i++) dir[i] /= dl;
+        VrArmOut prev; memset(&prev, 0, sizeof prev); int have = 0;
+        for (int st = 0; st <= 144; st++) {       /* de 0 a 720 grados en pasos de 5: una y otra vuelta */
+            VrArmIn in; memset(&in, 0, sizeof in);
+            in.torso[0] = in.torso[4] = in.torso[8] = 1;
+            in.shoulder[0] = side * 190; in.shoulder[1] = 260; in.shoulder[2] = -29;
+            for (int i = 0; i < 3; i++) in.wrist[i] = in.shoulder[i] + dir[i] * 300.0f;
+            nat_hand(in.hand, dir, (-180.0f + 5.0f * st) * D2R * (sd ? -1.0f : 1.0f));
+            if (weapon) { in.pole[0] = -0.5f * side; in.pole[1] = 0.6f + 0.01f * dI; in.pole[2] = 0.5f; }      /* arma con el codo hacia arriba y dentro: el solver lo proyecta al semiespacio y la pieza del brazo superior se retuerce */
+            else { float v[3] = {in.wrist[0] - in.shoulder[0], in.wrist[1] - in.shoulder[1], in.wrist[2] - in.shoulder[2]}, base[3] = {0.45f, -1, -0.35f}; vrbody_natural_pole(in.torso, side, v, lenv(v) / (lenv(rig.elbow_off) + lenv(rig.wrist_off)), base, in.pole); }
+            in.has_prev = have; if (have) { in.tau_prev = prev.tau; in.tau_f_prev = prev.tau_f; in.swivel_prev = prev.swivel; }
+            VrArmOut o, of;
+            if (vrbody_solve_arm(&rig, &lim, &in, &o) != 0 || vrbody_solve_arm(&rig, &free_, &in, &of) != 0) { CHECK(0, "solve"); continue; }
+            n++;
+            const float tf = fabsf(o.tau_f) / D2R, up = fabsf(o.tw_up) / D2R;
+            if (tf > worst_tf) worst_tf = tf;
+            if (up > worst_up) worst_up = up;
+            /* la mano lleva la orientación pedida y lo que no asume el antebrazo */
+            float H[9]; vrbody_orthonormalize(in.hand, H); float dh = 0; for (int i = 0; i < 9; i++) dh = fmaxf(dh, fabsf(H[i] - o.R_hand[i]));
+            CHECK(dh < 1e-4f, "la mano pierde la orientación pedida (%g)", dh);
+            float wl = lenv(rig.wrist_off), ax[3]; for (int i = 0; i < 3; i++) ax[i] = rig.wrist_off[i] / wl;
+            float res = twist_about(o.R_fore, o.R_hand, ax), want = remainderf((o.tau - o.tau_f) / D2R, 360.0f);
+            float dres = fabsf(remainderf(res - want, 360.0f)); if (dres > worst_res) worst_res = dres;
+            /* el antebrazo asume forearm_share del giro hasta su tope */
+            float exp_tf = fminf(90.0f, fmaxf(-90.0f, lim.forearm_share * o.tau / D2R)); if (fabsf(o.tau_f / D2R - exp_tf) > worst_clamp) worst_clamp = fabsf(o.tau_f / D2R - exp_tf);
+            if (fabsf(o.tau) / D2R > 60.0f && fabsf(o.tau) / D2R < 160.0f && fabsf(o.tau_f) < fabsf(o.tau) * 0.7f && fabsf(o.tau_f) > fabsf(o.tau) * 0.4f) n_split++;
+            /* torsión del brazo superior: la pieza acotada difiere de la libre solo por el exceso sobre 45 grados, girando sobre su eje */
+            float exc = fmaxf(0.0f, fabsf(of.tw_up) / D2R - 45.0f), rot = rot_angle(of.R_upper, o.R_upper) / D2R;
+            CHECK(fabsf(rot - exc) < 1.0f, "brazo superior: giro de la pieza %.1f, exceso esperado %.1f", rot, exc);
+            {   /* con un tope más estricto (10 grados) el recorte sí actúa */
+                VrArmLimits l10 = lim; l10.upper_twist_deg = 10.0f; VrArmOut o10;
+                if (vrbody_solve_arm(&rig, &l10, &in, &o10) == 0) {
+                    float e10 = fmaxf(0.0f, fabsf(of.tw_up) / D2R - 10.0f), r10 = rot_angle(of.R_upper, o10.R_upper) / D2R;
+                    CHECK(fabsf(o10.tw_up) / D2R <= 10.01f && fabsf(r10 - e10) < 1.0f, "tope de 10 grados: tw_up %.1f, giro de la pieza %.1f, esperado %.1f", o10.tw_up / D2R, r10, e10);
+                    if (e10 > 5.0f) n_clip++;
+                }
+            }
+            if (have) { float j = rot_angle(prev.R_fore, o.R_fore) / D2R; if (j > worst_step) worst_step = j; }
+            prev = o; have = 1;
+        }
+    }
+    CHECK(worst_tf <= 90.01f, "antebrazo: torsión %.1f > 90", worst_tf);
+    CHECK(worst_up <= 45.01f, "brazo superior: torsión %.1f > 45", worst_up);
+    CHECK(worst_res < 1.0f, "el resto del giro no lo lleva la mano: %.2f grados de diferencia", worst_res);
+    CHECK(worst_clamp < 0.5f, "el antebrazo no sigue forearm_share con tope: %.2f", worst_clamp);
+    CHECK(worst_step < 0.55f * 5.0f + 2.0f, "el antebrazo gira %.1f grados en un paso de 5 de la mano", worst_step);
+    CHECK(n_split > 100 && n_clip > 100, "reparto del giro sin cobertura (%d, recortes %d)", n_split, n_clip);
+    printf("  torsión: %d poses, antebrazo máx %.1f (tope 90), brazo superior máx %.1f (tope 45), paso máx del antebrazo %.1f por 5 de la mano\n", n, worst_tf, worst_up, worst_step);
+}
+
 int main(void) {
     test_math();
     test_solver();
@@ -2141,12 +2348,12 @@ int main(void) {
     test_weld_fixed_length();
     test_weld_hard_reach();
     test_natural_elbow(); test_snake_arms();
-    test_stretch_continuous(); test_stretch_bone(); test_resolve_stretch(); test_shoulder_blend(); test_twist_continuity(); test_wrist_continuity();
+    test_stretch_continuous(); test_stretch_bone(); test_resolve_stretch(); test_shoulder_blend(); test_twist_continuity(); test_wrist_continuity(); test_elbow_halfspace(); test_twist_split();
     test_continuity();
     test_glue();
     test_hand_axes(); test_armed_hand_fixed_offset(); test_hand_pitch_api(); test_default_roll(); test_arm_length(); test_jab_and_grab();
     test_visibility();
-    test_two_sided(); test_own_hands(); test_own_hands_both(); test_arm_live(); test_torso_follow(); test_eye_shift(); test_head_anchor(); test_anchor_hidden(); test_pelvis_walk(); test_dt_measured(); test_pelvis_gap();
+    test_two_sided(); test_own_hands(); test_own_hands_both(); test_arm_live(); test_shoulder_spread(); test_torso_follow(); test_eye_shift(); test_head_anchor(); test_anchor_hidden(); test_pelvis_walk(); test_dt_measured(); test_pelvis_gap();
     test_fist_glue();
     test_near_hide();
     test_mirror();

@@ -80,12 +80,12 @@ $(OUT)/test_vrprov: test_vrprov.c vrprov.h vr_view.h ../scene/vr_prov.c ../scene
 VGSRC := vrgame.c vrbodyg.c ../camera/vr_hzd_ray.c ../bridge/bridge.c ../bridge/bridge_addrs.c ../input/vr_gesture.c ../input/vr_melee.c ../body/vr_body.c ../body/vr_fist.c ../body/vr_hand_skin.c ../body/vr_hand_asset.c ../body/vr_body_cam.c ../body/vr_pose.c \
   ../radar/vr_radar.c ../hands/vr_hands.c ../hands/vr_glove.c ../hands/vr_grip.c ../hands/vr_hand_pose.c $(filter-out ../weapons/test_%.c,$(wildcard ../weapons/*.c)) \
   ../gameplay/vr_fire.c ../gameplay/vr_hit.c ../gameplay/vr_aa.c ../gameplay/vr_missile.c ../gameplay/vr_scope.c ../gameplay/vr_reload.c
-$(OUT)/test_vrgame_fire: test_vrgame_fire.c $(VGSRC) $(GRIPINC) vrgame.h
+$(OUT)/test_vrgame_fire: test_vrgame_fire.c $(VGSRC) $(GRIPINC) vrgame.h $(wildcard ../weapons/*.h) $(wildcard ../gameplay/*.h) ../bridge/bridge.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) $(CFLAGS) -Wno-unused-parameter -o $@ test_vrgame_fire.c $(VGSRC) -lm -lpthread
 
 # Truco «Dar todas las armas» (vrgame_cheat_weapons_apply + petición consumida en vrgame_pad) sobre una RAM falsa.
-$(OUT)/test_cheat_weapons: test_cheat_weapons.c $(VGSRC) $(GRIPINC) vrgame.h
+$(OUT)/test_cheat_weapons: test_cheat_weapons.c $(VGSRC) $(GRIPINC) vrgame.h $(wildcard ../weapons/*.h) $(wildcard ../gameplay/*.h) ../bridge/bridge.h
 	@mkdir -p $(OUT)
 	$(CC) $(INC) $(CFLAGS) -Wno-unused-parameter -o $@ test_cheat_weapons.c $(VGSRC) -lm -lpthread
 

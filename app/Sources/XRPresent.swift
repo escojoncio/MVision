@@ -14,7 +14,7 @@ import UIKit
 //        igual al que la pantalla ocupa desde el usuario: escala real) en una pantalla grande y curva fija en el mundo. Mover la cabeza NO cambia el encuadre ni la
 //        perspectiva, solo hacia dónde de la pantalla se mira. Los cortes de plano los hace el juego (sin fundido). Subtítulos/créditos/bandas van en el panel 2D encima.
 //      * Dentro de la escena (opción): la cabeza en la cámara del plano, anclada al empezar el plano (fundido de 0,15 s en cada corte).
-//      * Diorama (opción): la escena 3D en miniatura delante del usuario.
+//      * Diorama: RETIRADO del menú (código muerto, ver el paso 5 de compose).
 //  - 2D del juego en primera persona (HUD, radar del juego, menús L2/R2, pausa, textos): la capa 2D COMPLETA en UN solo panel plano delante de la cabeza (paso 6b). El troceo antiguo (paneles de regiones del HUD, ventana
 //    del menú en la mano, radar aparte) queda desactivado tras XRLayer2D.split (apagado por defecto).
 //  - Menú de opciones VR: se abre manteniendo el botón de menú izquierdo (o Select del mando) y se maneja con el mando.
@@ -30,7 +30,7 @@ struct XRViewConfig {
     var integerScale = false        // ajusta el ancho para que cada texel ocupe un número entero de píxeles del visor
     var filter2D = 0                // filtro de píxel art del 2D (XR2DFilter): 0 MMPX, 1 xBR, 2 nítido, 3 sin filtro; se aplica al reabrir la vista (XR2DFilter.reload)
     var exact2D = true              // composición de la capa 2D sobre el mundo como la GPU original (XR2DCompose.framebufferFetch)
-    var cutscene: Cutscene = .stereo // cinemáticas del motor: pantalla de cine 3D estéreo con profundidad real (defecto), la misma en mono (sin profundidad), pantalla de cine plana, diorama o dentro de la escena
+    var cutscene: Cutscene = .stereo // cinemáticas del motor: pantalla de cine 3D estéreo con profundidad real (defecto), la misma en mono (sin profundidad), pantalla de cine plana o dentro de la escena
     var dioramaScale: Float = 0.15  // metros por metro del motor (0,15: una sala de 8 m cabe en ~1,2 m)
     var hudPanels = true
     var hudScale: Float = 0.8
@@ -50,7 +50,7 @@ struct XRViewConfig {
     var follow2D = true             // pantallas 2D (cine, pantalla 3D, ventanas del juego, menú VR): siguen la cabeza en cada fotograma (true) o quedan fijas en el mundo (false)
     var smoothMotion = true         // fluidez de la locomoción: el mundo se corrige por fotograma de render (giro del stick y avance extrapolados entre escenas del juego)
 
-    enum Cutscene: String, CaseIterable { case screen, stereo, cinema, diorama, scene }
+    enum Cutscene: String, CaseIterable { case screen, stereo, cinema, scene }   // sin .diorama: opción retirada del menú (el código del diorama del paso 5 queda MUERTO: Display.diorama ya no se elige nunca)
     static let widths: [Float] = [2.4, 3.0, 3.6, 4.5]
     static let distances: [Float] = [2.0, 2.5, 3.0, 4.0]
     static let curves: [Float] = [0, 0.35, 0.7, 1.0]
@@ -356,7 +356,6 @@ final class XRPresenter {
     private var menuSnap = false
     private var followSnap = true
     private var prevOverlay2D = false
-    private var overlayAim: (yaw: Float, pitch: Float)?    // mirada (rumbo y cabeceo de la cabeza) al abrirse la ventana 2D del juego: el panel 6b queda centrado ahí mientras dure
     private var hudSeen = false                            // el último compose recibió textura de la capa 2D (diagnóstico)
     private var overlayHand = -1               // mano física (0 izq, 1 der) que abrió la ventana 2D del juego mientras dura; -1 = sin mano (pausa, sin pose)
     // Dentro de la escena: cámara del plano (vista del motor -> mundo VR al empezar el plano) y plano visto
@@ -689,7 +688,7 @@ final class XRPresenter {
                 let f = min(max(cfg.filter2D, 0), 3)
                 return ("Filtro 2D", ["MMPX", "xBR", "Nítido", "Sin filtro"][f] + (f != XR2DFilter.current.index ? " (al reabrir la vista)" : ""))
             case .cutscene:
-                let n: [XRViewConfig.Cutscene: String] = [.screen: "Pantalla de cine 3D (mono)", .stereo: "Pantalla de cine 3D (estéreo)", .cinema: "Pantalla de cine", .diorama: "Diorama", .scene: "Dentro de la escena"]
+                let n: [XRViewConfig.Cutscene: String] = [.screen: "Pantalla de cine 3D (mono)", .stereo: "Pantalla de cine 3D (estéreo)", .cinema: "Pantalla de cine", .scene: "Dentro de la escena"]
                 return ("Cinemáticas del motor", n[cfg.cutscene] ?? "")
             case .hud: return ("Paneles del HUD", yn(cfg.hudPanels))
             case .hudScale: return ("Tamaño de los paneles", "\(Int((cfg.hudScale * 100).rounded())) %")
@@ -836,7 +835,6 @@ final class XRPresenter {
         if target == .cinema && gs.view_kind == 2 && Self.gameViewOK(gameView) {
             switch cfg.cutscene {
             case .screen, .stereo: target = .stereo
-            case .diorama: target = .diorama
             case .scene: target = .scene
             case .cinema: break
             }
@@ -880,7 +878,6 @@ final class XRPresenter {
         followSnap = false
         prevOverlay2D = overlay2D
         hudSeen = hud != nil
-        if !overlay2D { overlayAim = nil } else if overlayAim == nil { overlayAim = (hy, XRFollow.pitch(of: head)) }
         if needAnchor && shown != .world {
             anchorY = max(0.8, hp.y - (shown == .scene ? 0 : 0.05))
             anchor = XRMath.translation(SIMD3<Float>(hp.x, 0, hp.z)) * XRMath.rotationY(hy)
@@ -987,7 +984,7 @@ final class XRPresenter {
             r.dioramaModel = anchor * XRMath.translation(SIMD3<Float>(0, anchorY, 0)) * f * shotView.inverse
         }
 
-        // 5) diorama
+        // 5) diorama: CÓDIGO MUERTO (la opción se quitó del menú; `target` nunca vale .diorama, así que `shown` tampoco)
         if shown == .diorama, Self.dioramaOK(gameView) {
             let s = cfg.dioramaScale * 0.001
             let f = simd_float4x4(diagonal: SIMD4<Float>(s, -s, -s, 1))      // vista del juego (x der, y abajo, z delante; unidades) -> usuario (m)
@@ -998,7 +995,7 @@ final class XRPresenter {
         let split = XRLayer2D.split
         // 5b) ventana 2D del juego sobre el mundo (selector de armas/objetos, pausa): el mundo sigue en primera persona y la capa 2D completa va en un panel flotante delante,
         //     por delante de la geometría. Sustituye a los paneles sueltos del HUD mientras dura (la capa 2D ya los trae).
-        //     Si la abrió una mano (gesto del pecho: L2 izquierda, R2 derecha) el panel va sobre esa mano, de cara a la cabeza, y la sigue mientras dura; sin mano o sin pose válida, delante de la cabeza.
+        //     Si la abrió una mano (gesto del pecho: apretar el grip con la mano en su zona; L2 izquierda, R2 derecha) el panel va sobre esa mano, de cara a la cabeza, y la sigue mientras dura; sin mano o sin pose válida, delante de la cabeza.
         if !overlay2D { overlayHand = -1 } else if overlayHand < 0 { overlayHand = Int(mv_vrgame_menu_hand()) }
         if split && overlay2D, let h = hud {
             var onHand: simd_float4x4?
@@ -1093,7 +1090,7 @@ final class XRPresenter {
         //     el original, con transparencia donde el juego no dibuja 2D. Geometría de pantalla completa XRFramedLayout (la ventana visible fija del televisor, siempre 4:3) delante de la cabeza con
         //     el mismo seguimiento perezoso del rumbo (hudYaw); sin prueba de profundidad (onTop). El muestreo es el de XR2DFilter.current (MMPX x2 + sharp-bilinear por defecto). «Paneles del HUD» (cfg.hudPanels) solo
         //     afecta al troceo (paso 6): sin trocear, el panel único se dibuja siempre (vida, radar, créditos). Es la capa HUD (clases HUD_WORLD, SCOPE_TEXT, UNKNOWN de vr_prov.h) y queda fija delante de la cabeza con el rumbo perezoso;
-        //     con la ventana 2D abierta (selector, pausa) se acerca al mismo plano que la ventana (6c), centrada en la mirada fijada al abrirse (overlayAim).
+        //     con la ventana 2D abierta (selector, pausa) NO se mueve: vida, vida del enemigo, oxígeno y radar se quedan donde estaban (mismo plano, escala y rumbo que sin ventana).
         if !split && shown != .cinema && shown != .stereo, let h = hud {
             let uv = XRFramedLayout.fullUV
             let lp = hudLogical ?? SIMD2<Float>(Float(h.width), Float(h.height))
@@ -1102,27 +1099,22 @@ final class XRPresenter {
             it.model = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw) * XRMath.translation(SIMD3<Float>(c.x, c.y, -XRFramedLayout.distance))
             it.size = XRFramedLayout.size(uv: uv, layerPx: lp)
             it.distance = XRFramedLayout.distance
-            // Con la ventana 2D abierta (selector de armas R2 / objetos L2, pausa) la capa HUD va en el MISMO plano que la ventana (6c): partes de un mismo menú caen en una u otra capa según el escritor que
-            // las dibuje (vr_prov: ids de ventana aprendidos, UNKNOWN/HUD_WORLD sin aprender o degradados), y a 1,6 m frente a 0,9 m el menú se veía partido en dos profundidades.
-            if overlay2D, let aim = overlayAim {
-                it.model = XRFramedLayout.overlayModel(position: hp, yaw: aim.yaw, pitch: aim.pitch)
-                it.size = it.size * XRFramedLayout.overlayScale
-                it.distance = XRFramedLayout.overlayDistance
-            }
             it.uvrect = uv
             it.opacity = 1
             it.onTop = true
             it.pixelMode = XR2DFilter.current.panelMode
             r.items.append(it)
         }
-        // 6c) capa WINDOW (ventana del selector / pausa, clase de procedencia aprendida): lo único que se acerca (XRFramedLayout.overlayDistance) y se centra en la mirada fijada al abrirse (overlayAim); va tras el HUD fijo.
-        if !split && shown != .cinema && shown != .stereo && overlay2D, let aim = overlayAim, let wh = hudWindow {
+        // 6c) capa WINDOW (ventana del selector L2 / armas R2 / pausa, clase de procedencia aprendida): EXACTAMENTE el mismo plano que el HUD fijo (6b: XRFramedLayout.distance, rumbo hudYaw, tamaño de la capa entera), tras él.
+        //     Así los dos menús (L2 y R2) caen siempre a la misma profundidad fija, vayan en esta capa o en la del HUD, y al abrirse o cerrarse no hay transición de distancia; nada se acerca ni se centra en la mirada.
+        if !split && shown != .cinema && shown != .stereo && overlay2D, let wh = hudWindow {
             let uv = XRFramedLayout.fullUV
             let wp = SIMD2<Float>(Float(wh.width), Float(wh.height))
+            let c = XRFramedLayout.center(uv: uv, layerPx: wp)
             var it = XRDrawItem(kind: .panel, texture: wh)
-            it.model = XRFramedLayout.overlayModel(position: hp, yaw: aim.yaw, pitch: aim.pitch)
-            it.size = XRFramedLayout.size(uv: uv, layerPx: wp) * XRFramedLayout.overlayScale
-            it.distance = XRFramedLayout.overlayDistance
+            it.model = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw) * XRMath.translation(SIMD3<Float>(c.x, c.y, -XRFramedLayout.distance))
+            it.size = XRFramedLayout.size(uv: uv, layerPx: wp)
+            it.distance = XRFramedLayout.distance
             it.uvrect = uv
             it.opacity = 1
             it.onTop = true

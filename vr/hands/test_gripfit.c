@@ -22,6 +22,7 @@
 #include "vr_hands.h"
 #include "vr_grip.h"
 #include "gripfit.h"
+#include "w_throw.h"
 static int fails, checks;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("  FALLO: " __VA_ARGS__); printf("\n"); } } while (0)
 static int warns;
@@ -170,6 +171,48 @@ int main(int argc, char **argv) {
             }
         }
         wload_free(&M_); gf_free(&WT); free(TWp);
+    }
+    /* claymore (id 5, placed_b, modelo 0x17a1 con las patas desplegadas): la mano derecha la coge por el medio (pose propia sin gatillo, zócalo FIT_CLAYMORE_GRIP respecto a WP_GRIP); avisa si penetra > 2 mm o si la
+     * palma, un dedo o el pulgar quedan a > 3 mm. Estructural: con el giro de mano (turn) la mina queda girada R_y(+90) respecto al marco del arma del zócalo MAIN de antes (la cara picuda +X del modelo
+     * hacia el -Z de entonces, el delante del mando), que es lo que compensa w_placed.c (MINE_FACE_Q) al colocar. */
+    {
+        WLoadOpts o; wload_default_opts(&o); o.resident = "init"; o.upscale = 2; o.frame = W_FRAME_HELD; o.scale = 0.001f;
+        WCutSet cs; memset(&cs, 0, sizeof cs); const WCutModel *cm = wcut_find(0x17a1);
+        if (wload_model(arch, alen, "init", 0x17a1, &o, &M_) || !cm || wcut_run(&M_, cm, &cs)) printf("  (CLAYMORE: no se carga el modelo, se omite)\n");
+        else {
+            const WeaponDef *base = NULL; for (int i = 0; i < w_registry_count; i++) if (w_registry[i] && !strcmp(w_registry[i]->id, cm->weapon)) base = w_registry[i];
+            WeaponDef *def = malloc(sizeof *def); WeaponState *st = calloc(1, base->state_size); *def = *base; st->def = def; def->init(st); st->def = def; weapon_bind(st, cs.meshes, cs.nmeshes, cs.parts, cs.nparts);
+            if (def->make_ready) def->make_ready(st, def->mag_capacity);
+            st->phase = WPL_PH_HELD; w5_hide(st, 0); st->channel[WCH_CUSTOM0] = 1.0f;
+            VrHandsConfig hc; vrhands_default_config(&hc); hc.grip_mode = VRH_GRIP_SOCKET; VrHandsRig *rig = vrhands_create(&hc); vrhands_bind(rig, st, cs.atlas, cs.atlas_w, cs.atlas_h);
+            GR = vrhands_grip(rig, st); vrhands_set_socket(rig, wpose_inv(GR));
+            VrHandsPose hp; memset(&hp, 0, sizeof hp); hp.valid = 1; hp.rot[3] = 1;
+            if (vrhands_build(rig, st, &hp, &FR) > 0) {
+                NT = 0; for (int m = 0; m < FR.nmeshes; m++) NT += FR.meshes[m].nidx / 3; TWp = malloc(sizeof(float) * 9 * NT); int k = 0;
+                for (int m = 0; m < FR.nmeshes; m++) { const VrHandsMesh *Mm = &FR.meshes[m]; for (uint32_t t = 0; t + 2 < Mm->nidx; t += 3) for (int c3 = 0; c3 < 3; c3++) { const float *q = Mm->verts[Mm->idx[t + c3]].pos, *a = Mm->model;
+                    TWp[k][0] = a[0] * q[0] + a[4] * q[1] + a[8] * q[2] + a[12]; TWp[k][1] = a[1] * q[0] + a[5] * q[1] + a[9] * q[2] + a[13]; TWp[k][2] = a[2] * q[0] + a[6] * q[1] + a[10] * q[2] + a[14]; k++; } }
+                gf_build(&WT, TWp, NT); gf_orient_outward(&WT);
+                const VrGripEntry *e = vrgrip_find(5);
+                CHECK(e && e->pose >= HP_W_FIRST && !vrhandpose_has_trigger(e->pose) && e->support_pose == -1, "CLAYMORE: sin pose propia en vr_grip");
+                if (e) {
+                    check_angles("CLAYMORE", e->pose);
+                    hand_pts(e, 1, e->pose, GR, e->grip, NULL);
+                    float mo[GF_NPART], worst = 0; for (int i = 0; i < GF_NPART; i++) mo[i] = 1e9f;
+                    for (int v = 0; v < VRHA_NV; v++) { float sd = gf_sd(&WT, Hw[1][v], 0.05f, 1) * 1000.f; if (sd < mo[PART[v]]) mo[PART[v]] = sd; if (-sd > worst) worst = -sd; }
+                    float g[6]; g[0] = mo[0]; for (int f = 0; f < 4; f++) g[1 + f] = fminf(mo[1 + 3 * f], fminf(mo[2 + 3 * f], mo[3 + 3 * f])); g[5] = fminf(mo[13], mo[14]);
+                    printf("CLAYMORE (gid 5): penetracion max %.2f mm; contacto (mm) palma %.1f indice %.1f corazon %.1f anular %.1f menique %.1f pulgar %.1f\n", worst, g[0], g[1], g[2], g[3], g[4], g[5]);
+                    WARN(worst <= 2.0f, "CLAYMORE: penetracion %.2f mm > 2", worst);
+                    for (int f = 0; f < 6; f++) WARN(g[f] <= 3.0f, "CLAYMORE: parte %d a %.1f mm (> 3)", f, g[f]);
+                    /* arma respecto al mando: turn * (giro de la mano en el modelo)^-1 = MAIN^-1 * R_y(+90) */
+                    WPose hm = wpose_mul(GR, e->grip); WQuat hq = wquat_normalize(hm.q), hi = {-hq.x, -hq.y, -hq.z, hq.w};
+                    WQuat wq = wquat_mul(e->turn, hi), mq = {0.0f, -0.5f, -0.86603f, 0.0f}, want = wquat_mul(mq, wquat_axis_angle(wv(0, 1, 0), 1.5707963f));
+                    float d = fabsf(wq.x * want.x + wq.y * want.y + wq.z * want.z + wq.w * want.w);
+                    CHECK(d > 0.9995f, "CLAYMORE: la mina no queda girada R_y(+90) respecto al mando (|dot| %.5f)", d);
+                }
+                gf_free(&WT); free(TWp);
+            }
+            wload_free(&M_);
+        }
     }
     printf("%s test_gripfit: %d comprobaciones, %d fallos, %d avisos (penetracion/contacto/yema: orden del usuario)\n", fails ? "FALLA" : "OK", checks, fails, warns);
     return fails ? 1 : 0;

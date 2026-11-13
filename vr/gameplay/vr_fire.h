@@ -147,6 +147,7 @@ int vrfire_take_flash(int style, VrFireMat *m);
 /* Lanzamiento de granada: posición y velocidad del motor (unidades; v por tick) para la última pose de lanzamiento. */
 int vrfire_set_throw(const float pos_user[3], const float vel_user_mps[3], float tick_s);
 int vrfire_take_throw(int16_t pos[3], int16_t vel[3]);
+float vrfire_throw_mps(void);      /* diagnóstico: velocidad (m/s) guardada por el último vrfire_set_throw, ya en unidades del motor y vuelta a metros */
 /* Granada en la mano: el anfitrión da en cada escena nativa la posición (unidades del motor) del objeto del juego que lleva la mano VR (ns_wphide_pos tras el carry). Si hay una de las últimas
  * VBlanks, el actor de la granada lanzada nace ahí (sin adelantar la trayectoria: se ve salir de la mano) con la velocidad del gesto; si no, la trayectoria adelantada de siempre. NULL / no finito: se ignora. */
 void vrfire_set_throw_origin(const float p_engine[3]);
@@ -183,6 +184,25 @@ void vrfire_probe(int kind, int decision, uint32_t result, const VrFireMat *m);
 uint32_t vrfire_last_missile(uint32_t *serial);
 /* Último proyectil sustituido (para pruebas). */
 const VrFireMat *vrfire_last_subst(void);
+
+/* ---- C4 (carga adhesiva) colocada directamente, SIN la animación de Snake ----
+ * El juego solo crea la carga cuando su animación de colocar (cuerpo entero: acción 55/56, o la superposición action2 49/54 contra una pared; decompilación sna_init.c sna_80057118 / sna_80057378) llega al fotograma
+ * de soltarla: el actor lo crea weapon/bomb.c con NewBakudan (bullet/bakudan.c; edición europea 0x8006B69C = vrfire_charge) cuando el jugador pone field_914_trigger = 3, gasta GM_Weapons[WP_C4] (BA_VARS + 2 * (17 + 6)),
+ * suena SE_C4_PUT (0x31) en control.mov y respeta el límite de 16 cargas (contador 0x800A0604). Aquí se hace lo mismo sin pasar por esa animación: el anfitrión pide la colocación con la pose ya calculada
+ * (vrfire_c4_request: la matriz del motor se calcula en ese instante, con la correspondencia de ese VBlank) y un gancho que corre dentro del juego (hle_vrfire_c4_pump, vr_fire_hle.c; se llama desde la construcción
+ * de la cámara, en la fase de actores) la consume con vrfire_c4_pump: comprueba arma/munición/límite, crea el actor con las operaciones del invitado y solo si existe gasta la unidad y suena. No toca el estado del jugador.
+ * Una sola petición a la vez; caduca a los VRFIRE_C4_LIFE VBlanks (vrfire_frame la envejece). La carga adherida a un enemigo sigue haciéndola el propio juego (necesita su blanco y su animación). */
+#define VRFIRE_BA_C4_COUNT 0x800A0604u   /* nº de cargas vivas (bakudan_count; NewBakudan lo compara con 16) */
+#define VRFIRE_C4_LIFE 50
+typedef struct VrFireC4Ops {
+    uint32_t (*create)(void *user, const VrFireMat *m);          /* NewBakudan(m, NULL, 0, jugador, 0) en el invitado: devuelve el actor o 0 */
+    void (*sound)(void *user, uint32_t pos_addr, int se_id);     /* GM_SeSet(pos, id); NULL = sin sonido */
+    void *user;
+} VrFireC4Ops;
+int vrfire_c4_request(const VrFireMap *map, const WPose *pose);  /* 1 si queda pendiente (mapa y pose válidos, ninguna otra pendiente) */
+int vrfire_c4_pending(void);
+int vrfire_c4_take(VrFireMat *m);                                /* saca la petición sin comprobar el juego (pruebas); 1 si había */
+int vrfire_c4_pump(uint8_t *ram, const VrFireC4Ops *ops);        /* 1 si se creó la carga */
 
 /* ---- modelo del arma del juego (ocultar) ---- */
 /* Pone a 0 el límite de pantalla de los modelos del arma que lleva el jugador, tras la etapa de recorte: no se dibuja.

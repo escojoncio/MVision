@@ -334,6 +334,7 @@ static void t_range_scale(void) {
     build_list(1);
     VrRadarSplit s;
     CHECK(vrradar_split(&L, &s) == 0 && s.present, "split range_scale");
+    s.rect[0] = -4000; s.rect[1] = -4000; s.rect[2] = 8000; s.rect[3] = 8000;   /* aquí se mide la escala pura: sin límite de ventana (ver t_range_fit) */
     VrRadarPerc p1 = {1, 2.4f, 0.6f, 0.5f, 1.0f}, p0 = {1, 2.4f, 0.6f, 0.5f, 0.0f}, p15 = {1, 2.4f, 0.6f, 0.5f, 1.5f};
     VrRadarPerc *pp[3] = {&p1, &p0, &p15};
     double area[3] = {0, 0, 0};
@@ -349,6 +350,39 @@ static void t_range_scale(void) {
     CHECK(NEAR(area[1] / area[0], 1.0, 1e-6), "range_scale 0 == 1: %.2f vs %.2f", area[1], area[0]);
     double want = (1.5 * 1.5 * 2.4 * 2.4 - 1.0) / (2.4 * 2.4 - 1.0);
     CHECK(NEAR(area[2] / area[0], want, 1e-3), "corona con range_scale 1,5: razón de áreas %.3f (esperada %.3f)", area[2] / area[0], want);
+}
+
+/* range_scale con el alcance ampliado fuera de la ventana (71x54 px): la corona no puede quedar fuera de lo que el radar muestra (si no, el borde de la sospecha y
+ * de la visión desaparece y solo queda un relleno tenue). Se reduce el factor hasta que quepa, sin bajar nunca del de x1 ni pasar de range_scale. */
+static void t_range_fit(void) {
+    build_list(0);
+    static const float c0[4][2] = {{3, -6}, {0, 0}, {6, 0}, {3, 6}}, c1[4][2] = {{-17, 7}, {-20, 10}, {-14, 10}, {-17, 13}};
+    for (int c = 0; c < 2; c++) {
+        GpuOp *op = &ops[idx_cone_first + (uint32_t)c];
+        for (int i = 0; i < 4; i++) { op->v[i].x = (int16_t)((c ? c1[i][0] : c0[i][0]) + CX); op->v[i].y = (int16_t)((c ? c1[i][1] : c0[i][1]) + CY); }
+    }
+    VrRadarSplit s;
+    CHECK(vrradar_split(&L, &s) == 0 && s.present, "split range_fit");
+    const float rs[3] = {1.0f, 1.5f, 2.0f};
+    double ext[3] = {0, 0, 0}, over[3] = {-1e9, -1e9, -1e9};
+    for (int k = 0; k < 3; k++) {
+        VrRadarScene r;
+        VrRadarPerc p = {1, 2.4f, 0.6f, 0.5f, rs[k]};
+        vrradar_set_perception(&p);
+        CHECK(vrradar_build(&s, &r) == 0 && r.n_cones_ext == 2, "build range_fit %d", k);
+        for (uint32_t i = 0; i < r.nb; i++) {
+            if (r.b[i].blend != 1 || r.b[i].count != r.n_ext_tris * 3) continue;
+            for (uint32_t t = 0; t < r.b[i].count; t++) {
+                const VrVtx *v = &r.v[r.b[i].first + t];
+                double ex = fmax(fabs(v->pos[0] - CX) - 35.0, fabs(v->pos[1] - CY) - 27.0), d = fmax(fabs(v->pos[0] - CX), fabs(v->pos[1] - CY));
+                if (ex > over[k]) over[k] = ex;
+                if (d > ext[k]) ext[k] = d;
+            }
+        }
+        CHECK(k == 0 || over[k] <= 2.5, "range_scale %.1f: la corona se sale %.1f px de la ventana del radar", rs[k], over[k]);
+    }
+    CHECK(ext[1] >= ext[0] - 1e-6 && ext[2] >= ext[1] - 1e-6, "la corona no se encoge al subir range_scale: %.1f %.1f %.1f", ext[0], ext[1], ext[2]);
+    CHECK(ext[2] > ext[0] + 4.0, "con range_scale 2 la corona es mayor que con x1: %.1f vs %.1f", ext[2], ext[0]);
 }
 
 /* La numeración de seq de la captura vuelve a 0 al reencenderla: los rangos viejos no deben marcar primitivas nuevas. */
@@ -948,6 +982,7 @@ int main(int argc, char **argv) {
     t_corona_placement();
     t_periph_near();
     t_range_scale();
+    t_range_fit();
     t_seq_restart();
     t_ot_marks();
     t_anchor();

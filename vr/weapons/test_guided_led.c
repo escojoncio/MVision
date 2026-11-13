@@ -54,6 +54,7 @@ int main(int argc, char **argv) {
       CHECK(guided_led_route(&s->base, 0, 0) == GLED_STATIC && guided_led_route(&s->base, 0, 1) == GLED_FULLSCREEN, "estatica al terminar el vuelo");
       CHECK(guided_led_route(NULL, 1, 0) == GLED_STANDBY, "estado nulo");
       s->base.phase = G_IDLE; }
+    CHECK(GD_LED_LIFT >= 0.005f, "la pantalla va al menos 5 mm por delante del plano del modelo (%.1f mm), como la lente del PSG1 con su margen de profundidad", GD_LED_LIFT * 1000);
     const char *c[4] = { argc > 1 ? argv[1] : NULL, getenv("STAGE_FILE"), "/tmp/gamedata/STAGE.DIR", "../../gamedata/stages.bin" };
     uint8_t *d = NULL; size_t n = 0;
     for (int i = 0; i < 4 && !d; i++) d = slurp(c[i], &n);
@@ -65,7 +66,7 @@ int main(int argc, char **argv) {
         weapon_bind(&st.base, cs.meshes, cs.nmeshes, cs.parts, cs.nparts);
         CHECK(guided_led_face(&st.base, &f) == 1, "pantalla hallada");
         CHECK(fabsf(sqrtf(f.w * f.w + f.h * f.h) - GD_LED_DIAG) < 0.001f && fabsf(f.w / f.h - 0.090f / 0.074f) < 0.01f, "diagonal %.1f mm (8-10 cm) y proporcion de la cara (%.1f x %.1f mm)", sqrtf(f.w * f.w + f.h * f.h) * 1000, f.w * 1000, f.h * 1000);
-        CHECK(fabsf(f.face.p.x + 0.075f) < 0.002f && fabsf(f.face.p.y - 0.134f) < 0.002f && fabsf(f.face.p.z + 0.081f - GD_LED_LIFT) < 0.001f, "centro (%.1f %.1f %.1f) mm: centrada en la cara, 3 mm por delante", f.face.p.x * 1000, f.face.p.y * 1000, f.face.p.z * 1000);
+        CHECK(fabsf(f.face.p.x + 0.075f) < 0.002f && fabsf(f.face.p.y - 0.134f) < 0.002f && fabsf(f.face.p.z + 0.081f - GD_LED_LIFT) < 0.001f, "centro (%.1f %.1f %.1f) mm: centrada en la cara, GD_LED_LIFT por delante", f.face.p.x * 1000, f.face.p.y * 1000, f.face.p.z * 1000);
         CHECK(fabsf(f.face.q.x) + fabsf(f.face.q.y) + fabsf(f.face.q.z) < 1e-6f && f.face.q.w > 0.9999f, "sin giro: +Z local hacia el ojo");
         CHECK(f.npoly == 5, "contorno de 5 vertices recortado por el hexagono del tubo (%d)", f.npoly);
         /* dentro del contorno original de la cara (mm, marco del arma): pentagono (-120,97) (-60,97) (-30,149) (-30,171) (-120,171) */

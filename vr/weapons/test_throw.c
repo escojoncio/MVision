@@ -2,6 +2,7 @@
  * sintética, lanzamiento con el gatillo (apretar = preparada, soltar = lanzar con la velocidad de la mano; el agarre no interviene; sin anilla ni pasador sueltos), soltar suave,
  * colocación al soltar el gatillo (sin tapa ni botón virtuales) y sanidad de mallas.
  * Compilar: gcc -std=gnu11 -I. test_throw.c w_throw.c w_placed.c wcore.c -lm */
+#include "w_laser.h"
 #include "w_throw.h"
 #include "wcore.h"
 #include <stdio.h>
@@ -13,12 +14,13 @@ static int fails = 0, checks = 0;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("FALLO %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
 /* ---------------- puente simulado ---------------- */
-typedef struct { int ammo; int taken, fires, sounds_dry, sounds_empty, sounds_pin, sounds_lever, sounds_throw; WLaunch ev[16]; int nev; int accept; } Mock;
+typedef struct { int ammo; int taken, fires, sounds_dry, sounds_empty, sounds_pin, sounds_lever, sounds_throw; WLaunch ev[16]; int nev; int accept; int haps, probe; } Mock;
 static Mock M;
 static int b_reserve(int id) { (void)id; return M.ammo; }
 static void b_take(int id, int n) { (void)id; M.taken += n; M.ammo -= n; }
 static void b_fire(int id, WPose p) { (void)id; (void)p; M.fires++; }
-static void b_haptic(int h, float a, float s) { (void)h; (void)a; (void)s; }
+static void b_haptic(int h, float a, float s) { (void)h; (void)a; (void)s; M.haps++; }
+static int probe_hook(void *u, const WLaunch *e) { (void)u; (void)e; return M.probe; }
 static void b_sound(int id, int e) {
     (void)id;
     if (e == WS_DRY) M.sounds_dry++;
@@ -173,6 +175,28 @@ static void test_throw_slow_release_direction(void) {
     CHECK(vz < 0.0f, "gatillo lento: la granada sale hacia delante, no hacia el amago (vz %.2f)", (double)vz);
     const float vz2 = slow_dir_run(1.0f, 6.0f, 0.30f);                    /* sin amago contrario: la ventana lenta más rápida sigue ganando (el lanzamiento fuerte antes de frenar) */
     CHECK(vz2 < -3.0f, "gatillo lento sin amago: sigue ganando la ventana rápida del pico (vz %.2f)", (double)vz2);
+}
+
+/* Soltar muy lento (gatillo a medias 0,6 s, más que el historial de ventanas): las ventanas candidatas que caen fuera del historial se descartan, no devuelven la velocidad de las dos últimas muestras (aquí un barrido rápido DESPUES de empezar a soltar) */
+static void test_throw_window_outside_history(void) {
+    printf("-- arrojadiza: ventana candidata fuera del historial --\n");
+    mock_reset(3);
+    Rig r = rig_new(&w_throw_frag, WR_MANUAL);
+    const float dt = 0.02f;
+    r.in.dt = dt;
+    float z = 0, t = 0;
+    r.in.trigger[0] = 0; step(&r, 3);
+    r.in.trigger[0] = 1; step(&r, 3);
+    for (int i = 0; i < 80 && M.nev == 0; i++) {
+        t += dt;
+        z -= (t < 0.64f ? 0.4f : 8.0f) * dt;                       /* hacia delante (-Z): lento, y rápido solo en las 4 últimas muestras */
+        r.in.hand[0].p = wv(0.25f, 1.0f, -0.3f + z);
+        r.in.trigger[0] = t < 0.10f ? 1.0f : (t < 0.10f + 0.60f ? 0.6f : 0.1f);      /* empieza a soltar en 0,1 s y acaba 0,6 s después */
+        step(&r, 1);
+    }
+    CHECK(M.nev == 1 && M.ev[0].kind == WL_THROW, "soltar a medias 0,6 s: lanza");
+    if (M.nev) { printf("  velocidad %.2f m/s\n", (double)wv_len(M.ev[0].lin_vel)); CHECK(wv_len(M.ev[0].lin_vel) < 1.5f, "el barrido posterior al soltar no cuenta: velocidad %.2f m/s", (double)wv_len(M.ev[0].lin_vel)); }
+    free(r.s);
 }
 
 static void test_throw_flow(void) {
@@ -465,11 +489,11 @@ static void test_mina(void) {
     r.in.trigger[0] = 0; step(&r, 2);
     CHECK(M.nev == 1 && M.ev[0].kind == WL_PLACE_MINE, "colocada al soltar");
     if (M.nev) {
-        WQuat a = M.ev[0].pose.q, b = r.in.hand[0].q;
+        WQuat a = M.ev[0].pose.q, b = wquat_mul(r.in.hand[0].q, wquat_axis_angle(wv(0, 1, 0), -1.5707963f));   /* modelo en la mano (WP_GRIP sin giro) girado R_y(-90): -Z = cara picuda (+X del modelo) */
         float dot = fabsf(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
-        CHECK(dot > 0.9999f, "orientacion igual a la de la mano");
-        WVec3 f = wquat_rotate(a, wv(0, 0, -1));
-        CHECK(fabsf(f.x - (-sinf(-1.1f))) < 1e-3f, "frente de la mina = -Z local girado");
+        CHECK(dot > 0.9999f, "orientacion = la del modelo con -Z en la cara picuda");
+        WVec3 f = wquat_rotate(a, wv(0, 0, -1)), fm = wquat_rotate(r.in.hand[0].q, wv(1, 0, 0));
+        CHECK(fabsf(f.x - fm.x) < 1e-3f && fabsf(f.z - fm.z) < 1e-3f, "frente del evento = +X del modelo girado (cara picuda)");
     }
     CHECK(M.taken == 1 && !any_held(&r), "municion");
     free(r.s);
@@ -544,11 +568,59 @@ static void test_defs(void) {
     }
 }
 
+/* Pulso haptico al detectar donde colocar (carga y mina): una sola vez por entrada (del sondeo no valido a valido), con histeresis: parpadeos cortos del sondeo no repiten el pulso. */
+static void probe_run(const WeaponDef *d, const char *nm) {
+    mock_reset(4); w_throw_set_probe(probe_hook, NULL);
+    Rig r = rig_new(d, WR_MANUAL);
+    draw(&r); step(&r, 50);                         /* mina: patas desplegadas */
+    int h0 = M.haps;
+    M.probe = 0; step(&r, 90);
+    CHECK(M.haps == h0, "%s: sin superficie no vibra (%d)", nm, M.haps - h0);
+    M.probe = 1; step(&r, 90);
+    CHECK(M.haps == h0 + 1, "%s: al entrar en una superficie valida vibra una vez (%d)", nm, M.haps - h0);
+    int h1 = M.haps;
+    for (int k = 0; k < 40; k++) { M.probe = (k % 6) < 2 ? 0 : 1; step(&r, 1); }      /* parpadeo corto del sondeo (0,02 s): no repite */
+    M.probe = 1; step(&r, 90);
+    CHECK(M.haps == h1, "%s: el parpadeo del sondeo no repite el pulso (%d)", nm, M.haps - h1);
+    M.probe = 0; step(&r, 60); M.probe = 1; step(&r, 90);
+    CHECK(M.haps == h1 + 1, "%s: al salir y volver a entrar vibra otra vez (%d)", nm, M.haps - h1);
+    M.probe = 0; step(&r, 90);
+    h1 = M.haps;
+    r.in.trigger[0] = 1; step(&r, 5); M.probe = 1; r.in.trigger[0] = 0; step(&r, 90);    /* colocada: la siguiente aparece sin pulso de superficie hasta que haya sondeo valido */
+    CHECK(M.haps >= h1, "%s: colocar no rompe el contador", nm);
+    free(r.s);
+    w_throw_set_probe(NULL, NULL);
+}
+static void test_probe_haptic(void) {
+    printf("-- pulso haptico al detectar superficie --\n");
+    probe_run(&w_placed_a, "carga");
+    probe_run(&w_placed_b, "mina");
+    mock_reset(4);
+    Rig r = rig_new(&w_placed_a, WR_MANUAL);
+    draw(&r); step(&r, 20);
+    int h0 = M.haps; step(&r, 90);
+    CHECK(M.haps == h0, "sin gancho de sondeo no vibra");
+    free(r.s);
+}
+
+/* Claymore en la mano: el punto de empuñadura (el que va al centro de agarre de la mano) cae dentro del cuerpo del modelo (marco del arma, m: la caja de w_laser.h WGHOST_MINE_*: x -0,080..0,031, y -0,224..0,100, z -0,370..-0,045), no en su origen
+ * (detras de la cara trasera: el bloque flotaba 21 cm por delante de la mano). */
+static void test_mina_agarre(void) {
+    printf("-- mina: punto de empunadura dentro del cuerpo --\n");
+    WVec3 g = w_placed_b.points[WP_GRIP].p;
+    CHECK(g.x > WGHOST_MINE_X0 && g.x < WGHOST_MINE_X1 && g.y > -WGHOST_MINE_LEGS_U / 1000.0f && g.y < WGHOST_MINE_UP_M && g.z > WGHOST_MINE_Z0 && g.z < WGHOST_MINE_Z1, "empunadura de la mina (%.3f %.3f %.3f) dentro del cuerpo", g.x, g.y, g.z);
+    WVec3 c = w_placed_a.points[WP_GRIP].p;
+    CHECK(c.x == 0 && c.y == 0 && c.z == 0, "la carga conserva su empunadura");
+}
+
 int main(void) {
+    test_mina_agarre();
+    test_probe_haptic();
     test_estimator();
     test_throw_flow();
     test_throw_slow_release();
     test_throw_slow_release_direction();
+    test_throw_window_outside_history();
     test_gentle();
     test_proportional();
     test_carga();

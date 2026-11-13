@@ -106,6 +106,15 @@ static void t_flight(void) {
     CHECK(S->base.aux.overlay & WO_TELEMETRY); CHECK(S->base.aux.overlay & WO_NOISE);
     CHECK(S->base.aux.overlay & WO_SCANLINES); CHECK(S->base.aux.overlay & WO_RETICLE);
     CHECK(S->base.aux.target_part >= 0);
+    {   /* la cámara de la pantalla va en la punta del misil: 2 cm por delante del morro, en su dirección y sin inclinación */
+        const WVec3 mp = wv(sim.muzzle.p.x, 1.6f, sim.proj_z);
+        const WPose c = S->base.aux.camera;
+        const WVec3 fw = wquat_rotate(c.q, wv(0, 0, -1));
+        CHECK(fabsf((mp.z - c.p.z) - (GD_CAM_NOSE + 0.02f)) < 1e-4f);    /* misil con delante = -Z: la cámara está 0,425 m por delante del origen */
+        CHECK(fabsf(c.p.y - mp.y) < 1e-5f && fabsf(c.p.x - mp.x) < 1e-5f);
+        CHECK(fw.z < -0.9999f && fabsf(fw.y) < 1e-4f);
+        CHECK(fabsf(GD_CAM_AHEAD - 0.02f) < 1e-6f);
+    }
     step(&in, WR_MANUAL, 60);                 /* 0,67 s: visor grande */
     CHECK(S->view_blend > 0.99f);
     WPose pp; float pw, ph;

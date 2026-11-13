@@ -1850,7 +1850,7 @@ final class RGRenderer {
                 let bv = bodyViews ?? views
                 weapon?.encode(encoder: enc, views: bv, projections: projections, layered: amplify > 0, viewIndex: viewIndex)
                 if let sv = special {
-                    weapon?.encodeSpecial(encoder: enc, view: sv, aux: auxImage, auxLinear: auxStoredLinear, hud: hudTexture, hudPremultiplied: hudHQ, views: bv,
+                    weapon?.encodeSpecial(encoder: enc, view: sv, aux: auxImage, auxLinear: auxStoredLinear, hud: hudTexture, hudPremultiplied: hudHQ, hudWin: hudWin, views: bv,
                                           projections: projections, layered: amplify > 0, viewIndex: viewIndex)
                 }
             }

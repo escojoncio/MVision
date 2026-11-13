@@ -227,7 +227,21 @@ static void scl2(float o[2], const float O[2], const float p[2], float m) { o[0]
 
 /* Corona de un cono: polígono del juego v0=A, v1=O (origen), v2=F (frente), v3=B. Región original = triángulos (A,O,F) y (O,F,B), cuyos
  * bordes exteriores son A-F y F-B; la ampliada son los trapecios entre esos bordes y su escalado respecto a O. */
-static int ext_cone(const GpuOp *o, int kind, const VrRadarPerc *p) {
+/* Mayor factor k (>= 0) con el que A, F y B escalados respecto a O (O + k (P - O)) siguen dentro de la ventana del radar (rect: x, y, w, h). La corona de
+ * range_mult x range_scale sobre el cono del juego (~20 px) se sale de la ventana de 71x54 px: se dibuja solo la parte que cabe, para que se vea su borde. */
+static float fit_k(const float O[2], const float *const P[3], const int rect[4]) {
+    float k = 1e9f;
+    const float lo[2] = {(float)rect[0], (float)rect[1]}, hi[2] = {(float)(rect[0] + rect[2]), (float)(rect[1] + rect[3])};
+    for (int i = 0; i < 3; i++)
+        for (int a = 0; a < 2; a++) {
+            float d = P[i][a] - O[a];
+            float kk = d > 1e-3f ? (hi[a] - O[a]) / d : d < -1e-3f ? (lo[a] - O[a]) / d : 1e9f;
+            if (kk < k) k = kk;
+        }
+    return k;
+}
+
+static int ext_cone(const GpuOp *o, int kind, const VrRadarPerc *p, const int rect[4]) {
     const uint8_t *col = CONES[kind - 1].m;
     float A[2] = {o->v[0].x, o->v[0].y}, O[2] = {o->v[1].x, o->v[1].y}, F[2] = {o->v[2].x, o->v[2].y}, B[2] = {o->v[3].x, o->v[3].y};
     float m = p->range_mult;
@@ -244,6 +258,11 @@ static int ext_cone(const GpuOp *o, int kind, const VrRadarPerc *p) {
     if (has_p && p->periph_near > 1.0f) {
         if (p->periph_near >= m) { has_p = 0; pf = 1.0f; }
         else n = p->periph_near;
+    }
+    if (rs > 1.0f && rect) {   /* sin sobrepasar la ventana del radar (ni bajar del x1: el original queda tal cual lo dibujaba range_scale 1) */
+        const float *Q[3] = {A, F, B};
+        float fit = fit_k(O, Q, rect) / m;
+        rs = fit < 1.0f ? 1.0f : fit < rs ? fit : rs;
     }
     m *= rs; n *= rs;      /* la sospecha y la periferia se miden sobre el alcance ya escalado; entre 1 y rs*n todo es núcleo */
     /* lado 1: F -> A ; lado 2: F -> B */
@@ -301,7 +320,7 @@ int vrradar_build(const VrRadarSplit *s, VrRadarScene *out) {
         if (first_cone < 0) first_cone = (int)i;
         if (enable) {
             size_t before = ext.n;
-            if (!ext_cone(op, k, &perc)) { ext.n = before; return -2; }
+            if (!ext_cone(op, k, &perc, s->rect)) { ext.n = before; return -2; }
             if (ext.n > before) next++;
         }
     }

@@ -26,6 +26,7 @@
 #define SUP_D sup_dist()
 #include "vrgame.h"
 #include "w_laser.h"
+#include "wload.h"
 #include "w_sniper.h"
 #include "w_throw.h"
 #include "wcore.h"
@@ -59,6 +60,7 @@ int vrmelee_rt_installed(void) { return 0; }
 void vrmelee_rt_frame(const void *f) { (void)f; }
 
 #define PAD_SQUARE (1u << 15)
+#define PAD_R1 (1u << 11)
 static uint8_t ram[2 * 1024 * 1024];
 static BridgeState bs;
 static WeaponState *pist_st;
@@ -249,11 +251,16 @@ static void grenade_gesture(void) {
 }
 
 /* ---- C4: se coloca en el punto del rayo de la mano (pared, suelo), con su cara adhesiva apoyada, y se rechaza fuera de alcance ---- */
+static float c4_yaw_deg;      /* guiñada de la mano (alrededor de Y, antes de la inclinación); 0 salvo en la prueba de orientación de la mina */
 static uint16_t c4vbl(float pitch_deg, float trig) {      /* mano derecha en (0,2; 1,2; -0,3) inclinada `pitch_deg` hacia abajo (rotación en X) */
     MvVrHand h;
     memset(&h, 0, sizeof h);
     float a = -pitch_deg * 0.017453292f * 0.5f;
     h.valid = 1; h.pos[0] = 0.2f; h.pos[1] = 1.2f; h.pos[2] = -0.3f; h.rot[0] = sinf(a); h.rot[3] = cosf(a); h.trigger = trig; h.grip = 0.0f;
+    if (c4_yaw_deg != 0.0f) {      /* q = Ry(yaw) * Rx(a) */
+        const float ya = c4_yaw_deg * 0.017453292f * 0.5f, sy = sinf(ya), cy = cosf(ya), sx = sinf(a), cx = cosf(a);
+        h.rot[0] = cy * sx; h.rot[1] = sy * cx; h.rot[2] = -sy * sx; h.rot[3] = cy * cx;
+    }
     mv_vrgame_set_hand(1, &h);
     vrgame_test_advance(8000000ull);
     uint16_t o = vrgame_pad(0, &bs, ram);
@@ -262,9 +269,10 @@ static uint16_t c4vbl(float pitch_deg, float trig) {      /* mano derecha en (0,
 }
 /* aprieta a fondo, suelta (= colocar) y devuelve 1 si el hook aceptó; `hit` = distancia del impacto simulado en mm (-1 ninguno) */
 static float c4_f[3];      /* delante de la carga en el último c4_try aceptado (espacio de usuario) */
+static int c4_direct_last;     /* 1: el último c4_try aceptado salió por la colocación directa (sin pulsar el ataque del juego); 0: por el juego (blanco C4 adherido) */
 static int c4_try(float pitch_deg, float hit_mm, VrFireMat *m, float *exp_p, float *dist_m) {
     ray_stub_mm = hit_mm;
-    { VrFireMat dm; for (int n = 0; n < 8 && vrfire_take_projectile(2, &dm) == VRFIRE_SUBST; n++) {} }
+    { VrFireMat dm; for (int n = 0; n < 8 && vrfire_take_projectile(2, &dm) == VRFIRE_SUBST; n++) {} while (vrfire_c4_take(&dm)) {} }
     fresh_weapon(6);
     for (int i = 0; i < 6; i++) c4vbl(pitch_deg, 0.0f);
     for (int i = 0; i < 6; i++) c4vbl(pitch_deg, 1.0f);
@@ -279,7 +287,22 @@ static int c4_try(float pitch_deg, float hit_mm, VrFireMat *m, float *exp_p, flo
     memcpy(c4_f, f, sizeof f);
     exp_p[0] = ev->pose.p.x + f[0] * d; exp_p[1] = ev->pose.p.y + f[1] * d; exp_p[2] = ev->pose.p.z + f[2] * d;
     *dist_m = d;
+    if (vrfire_c4_take(m)) { c4_direct_last = 1; return 1; }
+    c4_direct_last = 0;
     return vrfire_take_projectile(2, m) == VRFIRE_SUBST;
+}
+static void hzd_wall(const float o[3], const float d[3], float dist);
+static void w16r(uint32_t a, int16_t v);
+/* C4 con superficie a 0,9 m detrás del soldado: la carga la acepta el hook, sale por la colocación directa (nunca el ataque del juego, que la pegaría al soldado) y queda 7,9 cm sobre el punto del rayo */
+static int c4_surface_not_soldier(const VrFireMap *map) {
+    VrFireMat m; float e[3], d, u[3];
+    MvVrGameStatus s0, s1; mv_vrgame_status(&s0);
+    const int ok = c4_try(-55.0f, 900.0f, &m, e, &d);      /* c4_try pone sq_seen a 0 (fresh_weapon) */
+    mv_vrgame_status(&s1);
+    if (!ok || s1.places != s0.places + 1 || c4_direct_last != 1 || sq_seen != 0) return 0;
+    vrfire_pos_from_world(map, (float[3]){(float)m.t[0], (float)m.t[1], (float)m.t[2]}, u);
+    const float dd = sqrtf((u[0] - e[0]) * (u[0] - e[0]) + (u[1] - e[1]) * (u[1] - e[1]) + (u[2] - e[2]) * (u[2] - e[2]));
+    return fabsf(dd - 0.079f) < 0.02f;
 }
 static void c4_ray_placement(void) {
     printf("-- C4: colocación por rayo --\n");
@@ -289,6 +312,7 @@ static void c4_ray_placement(void) {
     /* pared a 0,5 m delante (mano inclinada 55 grados hacia arriba: el delante de la carga, con el agarre MAIN, queda ~horizontal): la carga queda en el punto del impacto, 7,9 cm hacia fuera (sin pared HZD en la RAM de
      * pruebas la normal es la opuesta al rayo), con el eje Z del modelo (c4_bomb) saliendo de la pared */
     CHECK(c4_try(-55.0f, 500.0f, &m, e, &d) == 1, "pared a 0,5 m: aceptada");
+    CHECK(c4_direct_last == 1 && sq_seen == 0, "pared: colocación directa, el ataque del juego (animación de Snake) no se pulsa nunca (cuadrados %d)", sq_seen);
     float hl = sqrtf(c4_f[0] * c4_f[0] + c4_f[2] * c4_f[2]), wn[3] = {-c4_f[0] / hl, 0.0f, -c4_f[2] / hl};
     CHECK(fabsf(c4_f[1]) < 0.4f, "delante de la carga ~horizontal (%.2f)", c4_f[1]);
     vrfire_pos_from_world(&map, (float[3]){(float)m.t[0], (float)m.t[1], (float)m.t[2]}, u);
@@ -298,6 +322,7 @@ static void c4_ray_placement(void) {
     CHECK(nz[0] * wn[0] + nz[2] * wn[2] > 0.95f && fabsf(nz[1]) < 0.1f, "pared: eje Z del modelo (%.2f %.2f %.2f) sale de la pared", nz[0], nz[1], nz[2]);
     /* mano sin inclinar: el delante de la carga apunta ~55 grados hacia abajo: suelo/cara superior, Z del modelo hacia arriba */
     CHECK(c4_try(0.0f, 600.0f, &m, e, &d) == 1, "suelo a 0,6 m: aceptado");
+    CHECK(c4_direct_last == 1 && sq_seen == 0, "suelo: colocación directa, sin pulsar el ataque del juego (cuadrados %d)", sq_seen);
     vrfire_pos_from_world(&map, (float[3]){(float)m.t[0], (float)m.t[1], (float)m.t[2]}, u);
     CHECK(fabsf(u[0] - e[0]) < 0.01f && fabsf(u[1] - (e[1] + 0.079f)) < 0.01f && fabsf(u[2] - e[2]) < 0.01f, "suelo: punto (%.3f %.3f %.3f) frente al del rayo (%.3f %.3f %.3f)+7,9 cm arriba", u[0], u[1], u[2], e[0], e[1], e[2]);
     for (int i = 0; i < 3; i++) cz[i] = (float)m.m[3 * i + 2] / 4096.0f;
@@ -316,24 +341,120 @@ static void c4_ray_placement(void) {
     CHECK(c4_try(-55.0f, 1500.0f, &m, e, &d) == 0, "pared a 1,5 m (fuera del brazo): rechazada");
     mv_vrgame_status(&s1);
     CHECK(s1.places == s0.places && s1.rejects >= s0.rejects + 2, "dos rechazos y ninguna colocación (colocadas %u, rechazos %u)", s1.places - s0.places, s1.rejects - s0.rejects);
-    /* sin impacto pero con un blanco C4 del juego delante (espalda de un guardia): se deja pasar al original (el juego pega la carga al enemigo) */
+    /* soldado (blanco C4 del juego) EN el rayo: el juego (sna_8004FDE8 / NewBakudan attached=1) pega la carga a su cuerpo y le sigue; la pose VR no vale. Si el rayo no lo toca, o el juego no lo
+     * tomaría (fuera de su caja de sonda, ya marcado), NO se intenta pegar: con la pose de la mano la carga quedaba flotando en el aire. El rayo se reconstruye del último evento aceptado. */
+    CHECK(c4_try(-55.0f, 500.0f, &m, e, &d) == 1, "pared a 0,5 m (rayo de referencia para el soldado): aceptada");
+    const WLaunch *rev = w_launch_last();
+    float rf[3], rq = sqrtf(rev->pose.q.x * rev->pose.q.x + rev->pose.q.y * rev->pose.q.y + rev->pose.q.z * rev->pose.q.z + rev->pose.q.w * rev->pose.q.w), ro[3] = {rev->pose.p.x, rev->pose.p.y, rev->pose.p.z}, rw[3], rd[3];
+    { const float qx = rev->pose.q.x / rq, qy = rev->pose.q.y / rq, qz = rev->pose.q.z / rq, qw = rev->pose.q.w / rq;
+      rf[0] = -2 * (qx * qz + qw * qy); rf[1] = -2 * (qy * qz - qw * qx); rf[2] = -(1 - 2 * (qx * qx + qy * qy)); }
+    vrfire_pos_to_world(&map, ro, rw); vrfire_dir_to_world(&map, rf, rd);
+    const float upm = map.units_per_m, sold_c[3] = {rw[0] + rd[0] * 0.4f * upm, rw[1] + rd[1] * 0.4f * upm, rw[2] + rd[2] * 0.4f * upm};
+    const int32_t ctl0[3] = {bs.ctl_pos.x, bs.ctl_pos.y, bs.ctl_pos.z};
     bs.valid |= BRIDGE_OK_TARGETS; bs.n_targets = 1;
-    bs.targets[0].cls = 64; bs.targets[0].side = 2; bs.targets[0].center.x = 0; bs.targets[0].center.y = 0; bs.targets[0].center.z = 300;
-    bs.targets[0].half_size.x = 200; bs.targets[0].half_size.y = 500; bs.targets[0].half_size.z = 200;
+    bs.targets[0].cls = 64; bs.targets[0].side = 2; bs.targets[0].damaged = 0;
+    bs.player_map = 1; bs.targets[0].map = 1;                   /* el puente da player_map (BRIDGE_OK_PLAYER_ST): el juego exige player_map & map */
+    bs.targets[0].half_size.x = 200; bs.targets[0].half_size.y = 2500; bs.targets[0].half_size.z = 200;   /* y alto: el rayo de la prueba va ~2 m bajo el origen de y de ctl_pos (que no se mueve para no tocar el suelo del juego) */
+    #define SET_SOLDIER(cx, cz) do { bs.targets[0].center.x = (int)lroundf(cx); bs.targets[0].center.y = (int)lroundf(sold_c[1]); bs.targets[0].center.z = (int)lroundf(cz); \
+        bs.ctl_pos.x = (int)lroundf((cx)); bs.ctl_pos.y = ctl0[1]; bs.ctl_pos.z = (int)lroundf((cz) - 300.0f); } while (0)
+    SET_SOLDIER(sold_c[0], sold_c[2]);                           /* el jugador a 300 unidades detrás del soldado, mirando a él (ctl_rot.y = 0): dentro de la caja de sonda del juego */
+    CHECK(fabsf((float)bs.targets[0].center.y - (float)bs.ctl_pos.y) <= (float)bs.targets[0].half_size.y + 600.0f, "montaje: el soldado cae en la altura de la caja de sonda (y %d)", (int)bs.targets[0].center.y);
     mv_vrgame_status(&s0);
     c4_try(-55.0f, -1.0f, &m, e, &d);
     mv_vrgame_status(&s1);
-    CHECK(s1.places == s0.places + 1, "sin superficie pero con blanco C4 delante: se deja pasar al juego (colocadas %u)", s1.places - s0.places);
+    CHECK(s1.places == s0.places + 1, "soldado en el rayo, sin superficie: se deja pasar al juego (colocadas %u)", s1.places - s0.places);
+    CHECK(c4_direct_last == 0 && sq_seen > 0, "adherida a un enemigo: la pone el propio juego (necesita su animación y su blanco), no la colocación directa (cuadrados %d)", sq_seen);
+    mv_vrgame_status(&s0);
+    c4_try(-55.0f, 900.0f, &m, e, &d);
+    mv_vrgame_status(&s1);
+    CHECK(s1.places == s0.places + 1 && c4_direct_last == 0, "soldado en el rayo con una pared 0,5 m más atrás: va al juego (se pega al soldado), no a la pared de detrás (colocadas %u, directa %d)", s1.places - s0.places, c4_direct_last);
+    /* el soldado está en la caja de sonda pero el rayo pasa de largo (0,5 m al lado): no se intenta pegar */
+    { const float hl = sqrtf(rd[0] * rd[0] + rd[2] * rd[2]), sx = sold_c[0] + rd[2] / hl * 500.0f, sz = sold_c[2] - rd[0] / hl * 500.0f;
+      SET_SOLDIER(sx, sz); }
+    mv_vrgame_status(&s0);
+    c4_try(-55.0f, -1.0f, &m, e, &d);
+    mv_vrgame_status(&s1);
+    CHECK(s1.places == s0.places, "rayo sin superficie que no toca al soldado: rechazada, no se deja la carga en el aire");
+    SET_SOLDIER(sold_c[0], sold_c[2]);
     bs.targets[0].damaged = 64;                                  /* ya marcado por otra carga: el juego no lo toma */
     mv_vrgame_status(&s0);
     c4_try(-55.0f, -1.0f, &m, e, &d);
     mv_vrgame_status(&s1);
     CHECK(s1.places == s0.places, "blanco C4 ya marcado: rechazada");
-    bs.targets[0].damaged = 0; bs.targets[0].center.z = 3000;   /* lejos de la caja de sonda */
+    bs.targets[0].damaged = 0;
+    SET_SOLDIER(sold_c[0], sold_c[2]); bs.ctl_pos.z -= 3000;     /* el jugador 3000 unidades más atrás: el juego no tomaría al soldado (fuera de su caja de sonda) */
     mv_vrgame_status(&s0);
     c4_try(-55.0f, -1.0f, &m, e, &d);
     mv_vrgame_status(&s1);
-    CHECK(s1.places == s0.places, "blanco C4 fuera de la caja de sonda: rechazada");
+    CHECK(s1.places == s0.places, "soldado en el rayo pero fuera de la caja de sonda del juego: rechazada");
+    /* el juego no toma al soldado pero hay superficie detrás: NO se rechaza, la carga va a la superficie como un C4 normal (nunca flotando ni pegada al soldado) */
+    CHECK(c4_surface_not_soldier(&map), "soldado en el rayo fuera de la caja de sonda con pared detrás: la carga va a la pared (superficie), no al soldado");
+    static uint8_t ram_c4[sizeof ram];
+    memcpy(ram_c4, ram, sizeof ram);
+    /* pared HZD entre Snake (ctl_pos) y el soldado (sna_line_check) que el rayo VR no cruza: el juego descarta al soldado */
+    SET_SOLDIER(sold_c[0], sold_c[2]);
+    { const float o3[3] = {(float)bs.ctl_pos.x, (float)bs.ctl_pos.y, (float)bs.ctl_pos.z}, c3[3] = {(float)bs.targets[0].center.x, (float)bs.targets[0].center.y, (float)bs.targets[0].center.z};
+      const float d3[3] = {c3[0] - o3[0], c3[1] - o3[1], c3[2] - o3[2]};
+      hzd_wall(o3, d3, 150.0f);                                  /* monta la cadena HZD; después se estrecha la pared a +-30 uds, atravesada en el medio del segmento */
+      const float y0 = (o3[1] < c3[1] ? o3[1] : c3[1]) - 200.0f, h = fabsf(d3[1]) + 400.0f;
+      const int16_t wl[8] = {(int16_t)lroundf(o3[0] - 30.0f), (int16_t)lroundf(o3[2] + 150.0f), (int16_t)lroundf(y0), (int16_t)lroundf(h),
+                             (int16_t)lroundf(o3[0] + 30.0f), (int16_t)lroundf(o3[2] + 150.0f), (int16_t)lroundf(y0), (int16_t)lroundf(h)};
+      for (int k = 0; k < 8; k++) w16r(0x801F0400u + 2u * (uint32_t)k, wl[k]);
+      CHECK(vrhzd_raycast(ram, o3, d3, sqrtf(d3[0] * d3[0] + d3[1] * d3[1] + d3[2] * d3[2]), 0u) >= 0.0f, "montaje: hay pared entre Snake y el soldado");
+      CHECK(vrhzd_raycast(ram, rw, rd, 1000.0f, 0u) < 0.0f, "montaje: el rayo VR no cruza esa pared"); }
+    CHECK(c4_surface_not_soldier(&map), "pared entre Snake y el soldado: no se pega al soldado, va a la superficie de detrás");
+    /* SEGMENT_ATR = HZD_SEG_NO_COLLIDE (0x01): sna_line_check ignora las paredes marcadas NO_COLLIDE; otras banderas (p. ej. 4 = línea de visión) siguen bloqueando */
+    ram[0x801F0500u & 0x1FFFFFu] = 4;
+    CHECK(c4_surface_not_soldier(&map), "pared con bandera 4 (no NO_COLLIDE): sigue bloqueando al soldado");
+    ram[0x801F0500u & 0x1FFFFFu] = 1;
+    { const float o3[3] = {(float)bs.ctl_pos.x, (float)bs.ctl_pos.y, (float)bs.ctl_pos.z}, d3[3] = {(float)bs.targets[0].center.x - o3[0], (float)bs.targets[0].center.y - o3[1], (float)bs.targets[0].center.z - o3[2]};
+      CHECK(vrhzd_raycast(ram, o3, d3, sqrtf(d3[0] * d3[0] + d3[1] * d3[1] + d3[2] * d3[2]), 1u) < 0.0f, "montaje: con la bandera NO_COLLIDE la pared no cuenta para el juego"); }
+    mv_vrgame_status(&s0); { c4_try(-55.0f, 900.0f, &m, e, &d); mv_vrgame_status(&s1);
+      CHECK(s1.places == s0.places + 1 && c4_direct_last == 0 && sq_seen > 0, "pared NO_COLLIDE entre Snake y el soldado: no lo rechaza, va al juego (directa %d)", c4_direct_last); }
+    ram[0x801F0500u & 0x1FFFFFu] = 0;
+    ray_stub_mm = -1;
+    mv_vrgame_status(&s0); c4_try(-55.0f, -1.0f, &m, e, &d); mv_vrgame_status(&s1);
+    CHECK(s1.places == s0.places, "pared entre Snake y el soldado y sin superficie detrás: rechazada (solo se rechaza sin superficie)");
+    memcpy(ram, ram_c4, sizeof ram);
+    /* sin pared: el juego sí lo toma (control positivo del montaje) */
+    mv_vrgame_status(&s0); { c4_try(-55.0f, 900.0f, &m, e, &d); mv_vrgame_status(&s1);
+      CHECK(s1.places == s0.places + 1 && c4_direct_last == 0 && sq_seen > 0, "sin pared: va al juego (se pega al soldado)"); }
+    /* el juego toma el PRIMER blanco de su lista; el rayo VR toca a otro: no se pega */
+    { const float hl = sqrtf(rd[0] * rd[0] + rd[2] * rd[2]), sx = sold_c[0] + rd[2] / hl * 500.0f, sz = sold_c[2] - rd[0] / hl * 500.0f;
+      bs.n_targets = 2; bs.targets[1] = bs.targets[0];
+      bs.targets[0].center.x = (int)lroundf(sx); bs.targets[0].center.z = (int)lroundf(sz);
+      CHECK(fabsf((float)bs.targets[0].center.x - (float)(bs.ctl_pos.x)) <= 600.0f && fabsf((float)bs.targets[0].center.z - ((float)bs.ctl_pos.z + 300.0f)) <= 600.0f, "montaje: el blanco lateral está en la caja de sonda");
+      CHECK(c4_surface_not_soldier(&map), "el juego toma el primer blanco y el rayo toca al segundo: no se pega al soldado tocado, va a la superficie");
+      bs.targets[0] = bs.targets[1]; bs.n_targets = 1; }
+    /* clase 0x20: el juego descarta el blanco y no pega */
+    bs.targets[0].cls = 64 | 0x20;
+    CHECK(c4_surface_not_soldier(&map), "blanco con clase 0x20: no se pega, va a la superficie");
+    bs.targets[0].cls = 64;
+    /* MapConflict: el mapa del blanco no comparte bits con el del jugador */
+    bs.targets[0].map = 2;
+    CHECK(c4_surface_not_soldier(&map), "blanco en otro mapa: no se pega, va a la superficie");
+    bs.targets[0].map = 3;
+    mv_vrgame_status(&s0); { c4_try(-55.0f, 900.0f, &m, e, &d); mv_vrgame_status(&s1);
+      CHECK(s1.places == s0.places + 1 && c4_direct_last == 0 && sq_seen > 0, "blanco en el mapa del jugador: va al juego"); }
+    /* con BRIDGE_OK_PLAYER_ST válido, player_map = 0 es un valor real del juego: player_map & map == 0, MapConflict (el caso sin ST no es alcanzable por vrgame_pad: pide ALL_CORE) */
+    bs.player_map = 0; bs.targets[0].map = 2;
+    CHECK(c4_surface_not_soldier(&map), "player_map 0 con el puente válido: MapConflict, va a la superficie");
+    /* bando: side & 1 != 0 no es un blanco del C4 (aunque el resto cumpla) */
+    bs.player_map = 1; bs.targets[0].map = 1; bs.targets[0].side = 1;
+    mv_vrgame_status(&s0); c4_try(-55.0f, -1.0f, &m, e, &d); mv_vrgame_status(&s1);
+    CHECK(s1.places == s0.places, "blanco con side&1: no es de otro bando, el juego no lo toma, sin superficie: rechazada");
+    CHECK(c4_surface_not_soldier(&map), "blanco con side&1 en el rayo: no se pega, va a la superficie");
+    bs.targets[0].side = 2;
+    /* soldado a 0,9 m en el rayo: una pared MÁS CERCA que el soldado gana (la carga va a ella), una pared pegada a su entrada no */
+    SET_SOLDIER(rw[0] + rd[0] * 0.9f * upm, rw[2] + rd[2] * 0.9f * upm);
+    mv_vrgame_status(&s0); { c4_try(-55.0f, 300.0f, &m, e, &d); mv_vrgame_status(&s1);
+      CHECK(s1.places == s0.places + 1 && c4_direct_last == 1 && sq_seen == 0, "pared a 0,3 m ANTES del soldado (0,9 m): gana la pared, colocación directa (directa %d, cuadrados %d)", c4_direct_last, sq_seen); }
+    mv_vrgame_status(&s0); { c4_try(-55.0f, 600.0f, &m, e, &d); mv_vrgame_status(&s1);
+      CHECK(s1.places == s0.places + 1 && c4_direct_last == 0 && sq_seen > 0, "pared a 0,6 m junto a la entrada del soldado: va al juego (directa %d)", c4_direct_last); }
+    SET_SOLDIER(sold_c[0], sold_c[2]);
+    ray_stub_mm = -1;
+    #undef SET_SOLDIER
+    bs.ctl_pos.x = ctl0[0]; bs.ctl_pos.y = ctl0[1]; bs.ctl_pos.z = ctl0[2];
     bs.n_targets = 0;
     ray_stub_mm = -1;
 }
@@ -404,7 +525,48 @@ static void c4_remote_grip(void) {
     c4_set_placed(0);
 }
 
-/* ---- zona de menú junto al cuerpo: con la mano del arma en su zona (o con el gatillo apretado desde dentro) el gatillo no dispara; la petición en cola se anula ---- */
+
+/* ---- C4 directo de punta a punta: colocar (sin ataque del juego) -> NewBakudan falso -> munición -> detonar con el agarre ---- */
+static int ch_made;
+static uint32_t ch_create(void *u, const VrFireMat *m) {
+    (void)u; (void)m;
+    ch_made++;
+    int32_t n; memcpy(&n, ram + (0x800A0604u & 0x1FFFFFu), 4); n++; memcpy(ram + (0x800A0604u & 0x1FFFFFu), &n, 4);
+    return 0x800D0000u;
+}
+static void ch_sound(void *u, uint32_t pos, int id) { (void)u; (void)pos; (void)id; }
+static void c4_direct_chain(void) {
+    printf("-- C4 directo: colocar, gastar una unidad y detonar --\n");
+    world(6, 0, 4);
+    const uint32_t ctrl = 0x800C0020u, ammo_a = BA_VARS + 2u * (BRIDGE_V_WEAPON_AMMO + 6), w_a = BA_VARS + 2u * BRIDGE_V_WEAPON;
+    const int16_t w6 = 6, am = 4;
+    uint8_t keep[4 + 2 + 2];      /* lo que había en esas posiciones (otras pruebas dependen del bloque de jugador de la RAM) */
+    memcpy(keep, ram + (BA_PLAYER_CTRL & 0x1FFFFFu), 4); memcpy(keep + 4, ram + (w_a & 0x1FFFFFu), 2); memcpy(keep + 6, ram + (ammo_a & 0x1FFFFFu), 2);
+    memcpy(ram + (BA_PLAYER_CTRL & 0x1FFFFFu), &ctrl, 4);
+    memcpy(ram + (w_a & 0x1FFFFFu), &w6, 2); memcpy(ram + (ammo_a & 0x1FFFFFu), &am, 2);
+    c4_set_placed(0);
+    ray_stub_mm = 500.0f;
+    { VrFireMat dm; while (vrfire_c4_take(&dm)) {} }
+    fresh_weapon(6);
+    for (int i = 0; i < 6; i++) c4vbl(-55.0f, 0.0f);
+    for (int i = 0; i < 6; i++) c4vbl(-55.0f, 1.0f);
+    for (int i = 0; i < 4; i++) c4vbl(-55.0f, 0.0f);
+    CHECK(vrfire_c4_pending() && sq_seen == 0, "soltar el gatillo contra la pared deja una petición directa y no pulsa el ataque (cuadrados %d)", sq_seen);
+    const VrFireC4Ops ops = {ch_create, ch_sound, NULL};
+    CHECK(vrfire_c4_pump(ram, &ops) == 1 && ch_made == 1, "el juego (gancho de la cámara) crea la carga");
+    int16_t am2; memcpy(&am2, ram + (ammo_a & 0x1FFFFFu), 2);
+    CHECK(am2 == 3, "se gasta una unidad (%d)", am2);
+    int circ = 0;
+    for (int i = 0; i < 6; i++) gvbl(0.2f, 0.0f, 0.0f, 0);
+    for (int i = 0; i < 12; i++) circ += (gvbl(0.2f, 1.0f, 0.0f, 0) & PAD_CIRCLE) != 0;
+    CHECK(circ >= 2 && circ <= 6, "con la carga creada así el agarre derecho detona (círculo %d VBlanks)", circ);
+    c4_set_placed(0);
+    memcpy(ram + (BA_PLAYER_CTRL & 0x1FFFFFu), keep, 4); memcpy(ram + (w_a & 0x1FFFFFu), keep + 4, 2); memcpy(ram + (ammo_a & 0x1FFFFFu), keep + 6, 2);
+    ray_stub_mm = -1;
+}
+
+/* ---- zona de menú junto al cuerpo: el menú se abre con el GRIP (botón R1 del mando entrante) de la mano en su zona; el gatillo en la zona dispara como fuera; con el menú abierto el gatillo del arma está bloqueado ---- */
+static uint16_t zone_pad;           /* mando entrante de las pruebas de zona: PAD_R1 = grip derecho apretado (vr_input lo entrega como R1 de la mano dominante) */
 static float zone_grip = 1.0f;      /* agarre de la mano en las pruebas de zona (la granada se prepara con la mano abierta: 0) */
 static float zone_off[3];            /* desvío entre la pose puesta y la que lee vrgame (agarre del mando) */
 static uint16_t zvbl(float d, float trig) {      /* mano derecha a `d` m lateral de su zona de menú (0,16 a la derecha, 0,305 bajo la cabeza, 0,005 delante; el "delante" de la cabeza de la prueba es -Z) */
@@ -413,55 +575,69 @@ static uint16_t zvbl(float d, float trig) {      /* mano derecha a `d` m lateral
     h.valid = 1; h.pos[0] = 0.16f + d - zone_off[0]; h.pos[1] = 1.6f - 0.305f - zone_off[1]; h.pos[2] = -0.005f - zone_off[2]; h.rot[3] = 1.0f; h.trigger = trig; h.grip = zone_grip;
     mv_vrgame_set_hand(1, &h);
     vrgame_test_advance(8000000ull);
-    uint16_t o = vrgame_pad(0, &bs, ram);
+    uint16_t o = vrgame_pad(zone_pad, &bs, ram);
     if (o & PAD_SQUARE) sq_seen++;
     return o;
 }
 static void zones(float d, float trig, int n) { for (int i = 0; i < n; i++) zvbl(d, trig); }
 static void menu_zone_blocks_fire(void) {
-    printf("-- zona de menú: el gatillo en la zona no dispara --\n");
+    printf("-- zona de menú: el gatillo dispara y no abre; el grip abre y bloquea el gatillo --\n");
     world(0, 12, 48);
     fresh_pistol();
     { MvVrHand h; memset(&h, 0, sizeof h); h.valid = 1; h.pos[1] = 1.0f; h.rot[3] = 1.0f; mv_vrgame_set_hand(1, &h); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
       float p[3]; if (vrgame_hand_raw(1, p, NULL, NULL, NULL)) { zone_off[0] = p[0] - 0.0f; zone_off[1] = p[1] - 1.0f; zone_off[2] = p[2] - 0.0f; } }
+    zone_pad = 0;
     zones(0.6f, 0.0f, 10);
     MvVrGameStatus st; mv_vrgame_status(&st);
     CHECK(st.active && st.weapon == 0, "pistola mostrada");
     uint32_t s0 = st.shots; VrFireStats fs; vrfire_stats(&fs); uint32_t r0 = fs.requests; sq_seen = 0;
     zones(0.0f, 0.0f, 8);                                            /* entra en la zona con el gatillo suelto */
-    zones(0.0f, 0.9f, 12);                                           /* y lo aprieta dentro (< 0,3 s: aún no abre la ventana) */
+    zones(0.0f, 0.9f, 12);                                           /* y lo aprieta dentro */
     mv_vrgame_status(&st); vrfire_stats(&fs);
-    CHECK(st.shots == s0 && fs.requests == r0 && sq_seen == 0, "gatillo apretado en la zona = 0 disparos (%u), 0 peticiones (%u), cuadrado %d", st.shots - s0, fs.requests - r0, sq_seen);
-    zones(0.0f, 0.9f, 30);                                           /* sigue apretado: abre la ventana, tampoco dispara */
-    zones(0.6f, 0.9f, 12);                                           /* sale de la zona con el gatillo apretado */
-    mv_vrgame_status(&st);
-    CHECK(st.shots == s0 && sq_seen == 0, "salir con el gatillo apretado no dispara (%u)", st.shots - s0);
-    zones(0.6f, 0.0f, 6);                                            /* lo suelta */
-    zones(0.6f, 0.9f, 4);                                            /* y lo aprieta de nuevo: flanco nuevo */
-    mv_vrgame_status(&st);
-    CHECK(st.shots == s0 + 1, "soltar y apretar de nuevo fuera = 1 disparo (%u)", st.shots - s0);
-    zones(0.6f, 0.0f, 60); { VrFireMat m; (void)m; while (vrfire_take_projectile(0, &m) == VRFIRE_SUBST) {} }
-    /* petición en cola: el gatillo se apretó fuera y la mano entra en la zona antes de salir la bala */
+    CHECK(st.shots == s0 + 1 && fs.requests == r0 + 1, "gatillo apretado en la zona = 1 disparo (%u), 1 petición (%u)", st.shots - s0, fs.requests - r0);
+    zones(0.0f, 0.9f, 60);                                           /* mantenido 1 s: no abre ninguna ventana */
+    CHECK(mv_vrgame_menu_hand() == -1, "el gatillo mantenido en la zona no abre el menú (mano %d)", (int)mv_vrgame_menu_hand());
+    zones(0.0f, 0.0f, 6);
+    /* gatillo ya apretado fuera (disparo pedido) y la mano entra en la zona: la petición en cola NO se anula */
+    zones(0.6f, 0.0f, 20);
     mv_vrgame_status(&st); s0 = st.shots; vrfire_stats(&fs); r0 = fs.requests; uint32_t c0 = fs.cancelled;
     zones(0.6f, 0.9f, 1);
-    mv_vrgame_status(&st); vrfire_stats(&fs);
-    CHECK(st.shots == s0 + 1 && fs.requests == r0 + 1, "disparo pedido fuera (disparos %u, peticiones %u)", st.shots - s0, fs.requests - r0);
     zones(0.0f, 0.9f, 1);                                            /* entra en la zona con la petición en cola */
-    vrfire_stats(&fs);
-    CHECK(fs.cancelled == c0 + 1, "la petición en cola se anula al entrar en la zona (anuladas %u)", fs.cancelled - c0);
-    zones(0.0f, 0.9f, 60);
-    VrFireMat m2; int dec = vrfire_take_projectile(0, &m2);
-    CHECK(dec != VRFIRE_SUBST, "no sale ninguna bala sustituida tras anular (decisión %d)", dec);
-    zones(0.6f, 0.0f, 20);
+    mv_vrgame_status(&st); vrfire_stats(&fs);
+    CHECK(st.shots == s0 + 1 && fs.requests == r0 + 1 && fs.cancelled == c0, "entrar en la zona con el disparo en cola no lo anula (disparos %u, peticiones %u, anuladas %u)", st.shots - s0, fs.requests - r0, fs.cancelled - c0);
+    zones(0.0f, 0.0f, 20); { VrFireMat m; (void)m; while (vrfire_take_projectile(0, &m) == VRFIRE_SUBST) {} }
+    zones(0.6f, 0.0f, 20); { VrFireMat m; (void)m; while (vrfire_take_projectile(0, &m) == VRFIRE_SUBST) {} }
+    /* el grip en la zona abre la ventana (0,3 s) y bloquea el gatillo del arma; la mano puede salir; al soltar el grip con el gatillo apretado sigue bloqueado hasta soltarlo */
+    mv_vrgame_status(&st); s0 = st.shots;
+    zones(0.0f, 0.0f, 8);
+    zone_pad = PAD_R1; zones(0.0f, 0.0f, 30);
+    CHECK(mv_vrgame_menu_hand() == 1, "grip derecho en la zona: ventana de armas abierta (mano %d)", (int)mv_vrgame_menu_hand());
+    sq_seen = 0; zones(0.0f, 0.9f, 12);                              /* gatillo con la ventana abierta */
+    mv_vrgame_status(&st);
+    CHECK(st.shots == s0 && sq_seen == 0, "ventana abierta: el gatillo no dispara (%u, cuadrado %d)", st.shots - s0, sq_seen);
+    zones(0.6f, 0.9f, 12);                                           /* la mano sale con el grip y el gatillo apretados */
+    CHECK(mv_vrgame_menu_hand() == 1, "al salir de la zona la ventana sigue mientras siga el grip (mano %d)", (int)mv_vrgame_menu_hand());
+    zone_pad = 0; zones(0.6f, 0.9f, 8);                              /* suelta el grip con el gatillo apretado: sigue bloqueado hasta soltarlo */
+    mv_vrgame_status(&st);
+    CHECK(mv_vrgame_menu_hand() == -1 && st.shots == s0 && sq_seen == 0, "grip suelto: ventana cerrada y gatillo aún bloqueado (mano %d, disparos %u)", (int)mv_vrgame_menu_hand(), st.shots - s0);
+    zones(0.6f, 0.0f, 6);
+    zones(0.6f, 0.9f, 4);                                            /* pulsación nueva */
+    mv_vrgame_status(&st);
+    CHECK(st.shots == s0 + 1, "soltar y apretar de nuevo = 1 disparo (%u)", st.shots - s0);
+    /* grip FUERA de la zona: no abre */
+    zones(0.6f, 0.0f, 60);
+    zone_pad = PAD_R1; zones(0.6f, 0.0f, 40);
+    CHECK(mv_vrgame_menu_hand() == -1, "grip fuera de la zona no abre el menú (mano %d)", (int)mv_vrgame_menu_hand());
+    zone_pad = 0; zones(0.6f, 0.0f, 20);
     printf("   zona de menú: desvío de la pose %.3f %.3f %.3f\n", zone_off[0], zone_off[1], zone_off[2]);
 }
 
-/* granada equipada y gatillo (R2) pulsado en la zona del pecho para abrir el menú: no se prepara ni se lanza (corto, mantenido hasta abrir la ventana y al soltar); fuera de la zona sí se lanza */
+/* granada equipada: el gatillo en la zona del pecho la prepara y la lanza como fuera; con la ventana abierta con el grip no se prepara ni se lanza */
 static void menu_zone_blocks_grenade(void) {
-    printf("-- zona de menú: la granada no se lanza al abrir el menú R2 --\n");
+    printf("-- zona de menú: la granada se lanza con el gatillo; el menú abierto con el grip la bloquea --\n");
     world(2, 0, 3);
     fresh_weapon(2);
-    zone_grip = 0.0f;
+    zone_grip = 0.0f; zone_pad = 0;
     { MvVrHand h; memset(&h, 0, sizeof h); h.valid = 1; h.pos[1] = 1.0f; h.rot[3] = 1.0f; mv_vrgame_set_hand(1, &h); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
       float p[3]; if (vrgame_hand_raw(1, p, NULL, NULL, NULL)) { zone_off[0] = p[0] - 0.0f; zone_off[1] = p[1] - 1.0f; zone_off[2] = p[2] - 0.0f; } }
     zones(0.6f, 0.0f, 12);
@@ -469,23 +645,59 @@ static void menu_zone_blocks_grenade(void) {
     const uint32_t t0 = st.throws;                                   /* el contador de lanzamientos es acumulado */
     CHECK(st.active && st.weapon == 2 && inst_state->phase == WT_PH_HELD, "granada mostrada en la mano (fase %d)", inst_state->phase);
     zones(0.0f, 0.0f, 8);                                            /* mano en la zona, gatillo suelto */
-    zones(0.0f, 0.9f, 12);                                           /* pulsación corta en la zona (< 0,3 s) */
-    CHECK(inst_state->phase == WT_PH_HELD && sq_seen == 0, "pulsación corta en la zona: la granada no se prepara (fase %d, cuadrado %d)", inst_state->phase, sq_seen);
-    zones(0.0f, 0.0f, 6);
+    zones(0.0f, 0.9f, 12);                                           /* gatillo en la zona: se prepara */
+    CHECK(inst_state->phase == WT_PH_READY, "gatillo en la zona: la granada se prepara (fase %d)", inst_state->phase);
+    CHECK(mv_vrgame_menu_hand() == -1, "y no se abre ningún menú (mano %d)", (int)mv_vrgame_menu_hand());
+    zones(0.0f, 0.0f, 8);
     mv_vrgame_status(&st);
-    CHECK(st.throws == t0 && inst_state->phase == WT_PH_HELD, "soltar en la zona: sin lanzamiento (%u, fase %d)", st.throws - t0, inst_state->phase);
-    zones(0.0f, 0.9f, 45);                                           /* mantenido: abre la ventana de armas */
-    CHECK(inst_state->phase == WT_PH_HELD && sq_seen == 0, "mantenido hasta abrir la ventana: la granada no se prepara (fase %d, cuadrado %d)", inst_state->phase, sq_seen);
-    zones(0.6f, 0.9f, 10);                                           /* sale con el gatillo apretado */
-    zones(0.6f, 0.0f, 8);                                            /* y lo suelta */
+    CHECK(st.throws == t0 + 1, "soltar en la zona la lanza (%u)", st.throws - t0);
+    zones(0.6f, 0.0f, 120);
     mv_vrgame_status(&st);
-    CHECK(st.throws == t0 && inst_state->phase == WT_PH_HELD && sq_seen == 0, "salir y soltar: sin lanzamiento (%u, fase %d, cuadrado %d)", st.throws - t0, inst_state->phase, sq_seen);
-    zones(0.6f, 0.9f, 10);                                           /* fuera de la zona: pulsación nueva = preparada */
-    CHECK(inst_state->phase == WT_PH_READY, "fuera de la zona sí se prepara (fase %d)", inst_state->phase);
-    zones(0.6f, 0.0f, 8);
-    mv_vrgame_status(&st);
-    CHECK(st.throws == t0 + 1, "y soltar fuera la lanza (%u)", st.throws - t0);
+    if (inst_state->phase == WT_PH_HELD) {
+        sq_seen = 0;
+        zones(0.0f, 0.0f, 8);
+        zone_pad = PAD_R1; zones(0.0f, 0.0f, 45);                    /* grip en la zona: abre la ventana de armas */
+        CHECK(mv_vrgame_menu_hand() == 1, "grip en la zona: ventana abierta (mano %d)", (int)mv_vrgame_menu_hand());
+        zones(0.0f, 0.9f, 12);                                       /* gatillo con la ventana abierta */
+        CHECK(inst_state->phase == WT_PH_HELD && sq_seen == 0, "ventana abierta: la granada no se prepara (fase %d, cuadrado %d)", inst_state->phase, sq_seen);
+        zones(0.6f, 0.9f, 10);                                       /* sale con el grip y el gatillo apretados */
+        zone_pad = 0; zones(0.6f, 0.9f, 6);                          /* suelta el grip: sigue bloqueado hasta soltar el gatillo */
+        zones(0.6f, 0.0f, 8);
+        mv_vrgame_status(&st);
+        CHECK(st.throws == t0 + 1 && inst_state->phase == WT_PH_HELD && sq_seen == 0, "salir, soltar el grip y el gatillo: sin lanzamiento nuevo (%u, fase %d, cuadrado %d)", st.throws - t0, inst_state->phase, sq_seen);
+    } else printf("   (sin segunda granada en la mano tras lanzar: fase %d; se omite la parte con la ventana abierta)\n", inst_state->phase);
+    zone_pad = 0;
     zone_grip = 1.0f;
+}
+
+/* C4 y zona del pecho: el grip derecho abre el menú de armas y NO detona dentro de la zona; fuera de ella detona (el círculo del CQC sigue retirado con el C4 equipado) */
+static void c4_remote_chest(void) {
+    printf("-- C4: el grip en la zona del pecho abre el menú y no detona; fuera detona --\n");
+    world(6, 0, 4);
+    vrgame_reset(); vrgame_set_enabled(0, 1);
+    zone_grip = 1.0f; zone_pad = 0;
+    { MvVrHand h; memset(&h, 0, sizeof h); h.valid = 1; h.pos[1] = 1.0f; h.rot[3] = 1.0f; mv_vrgame_set_hand(1, &h); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
+      float p[3]; if (vrgame_hand_raw(1, p, NULL, NULL, NULL)) { zone_off[0] = p[0]; zone_off[1] = p[1] - 1.0f; zone_off[2] = p[2]; } }
+    c4_set_placed(1);
+    int circ = 0;
+    zone_grip = 0.0f; zones(0.0f, 0.0f, 10);                      /* mano en la zona, grip suelto */
+    zone_grip = 1.0f; zone_pad = PAD_R1;                          /* grip a fondo (analógico y R1 del mando entrante) */
+    for (int i = 0; i < 40; i++) circ += (zvbl(0.0f, 0.0f) & PAD_CIRCLE) != 0;
+    CHECK(circ == 0, "grip en la zona con C4: no detona (%d VBlanks con círculo)", circ);
+    CHECK(mv_vrgame_menu_hand() == 1, "grip en la zona con C4: abre la ventana de armas (mano %d)", (int)mv_vrgame_menu_hand());
+    zone_grip = 0.0f; zone_pad = 0; zones(0.0f, 0.0f, 10);        /* suelta el grip */
+    CHECK(mv_vrgame_menu_hand() == -1, "soltar el grip cierra la ventana (mano %d)", (int)mv_vrgame_menu_hand());
+    zones(0.6f, 0.0f, 10);                                        /* fuera de la zona, grip suelto */
+    zone_grip = 1.0f; zone_pad = PAD_R1; circ = 0;
+    for (int i = 0; i < 12; i++) circ += (zvbl(0.6f, 0.0f) & PAD_CIRCLE) != 0;
+    CHECK(circ >= 2, "grip fuera de la zona con C4: detona (%d)", circ);
+    CHECK(mv_vrgame_menu_hand() == -1, "y no abre ningún menú (mano %d)", (int)mv_vrgame_menu_hand());
+    /* entra en la zona con el grip ya apretado tras detonar: ni detona otra vez ni abre */
+    circ = 0;
+    for (int i = 0; i < 30; i++) circ += (zvbl(0.0f, 0.0f) & PAD_CIRCLE) != 0;
+    CHECK(circ == 0 && mv_vrgame_menu_hand() == -1, "grip mantenido que entra en la zona: sin detonar ni abrir (%d, mano %d)", circ, (int)mv_vrgame_menu_hand());
+    zone_grip = 1.0f; zone_pad = 0; c4_set_placed(0);
+    zones(0.6f, 0.0f, 20);
 }
 
 /* ---- arma colgada del mando: mundo = agarre del mando * desvío fijo * zócalo^-1 (a la cadencia del renderer) ---- */
@@ -570,16 +782,87 @@ static void hand_at(int side, const float p[3], const float q[4]) {
     mv_vrgame_set_hand(side, &h);
 }
 /* Pose de la pieza raíz del arma dibujada por el renderer (mv_host_hands): dirección de la boca (-Z) y origen del arma. 1 = hay arma dibujada. */
+static float drawn_up[3];      /* +Y del arma de la última llamada (arriba del arma: su alabeo alrededor de la boca) */
 static int drawn_weapon(float dir[3], float org[3]) {
     VrHandsFrame f;
     int rc = mv_host_hands(&f);
     if (!rc || f.nmeshes < 1) { mv_host_hands_done(); return 0; }
     const float *m = f.meshes[0].model;      /* piezas por orden de def->parts: la 0 es la raíz */
     dir[0] = -m[8]; dir[1] = -m[9]; dir[2] = -m[10];
+    drawn_up[0] = m[4]; drawn_up[1] = m[5]; drawn_up[2] = m[6];
     const WPose *rest = &syn_def->parts[0].rest;
     for (int i = 0; i < 3; i++) org[i] = m[12 + i] - (m[i] * rest->p.x + m[4 + i] * rest->p.y + m[8 + i] * rest->p.z);
     mv_host_hands_done();
     return 1;
+}
+/* ---- banco de lanzamiento real: curva de mano de una persona, gatillo que se abre en distintos momentos, por la cadena completa de vrgame ----
+ * Poses del mando a ~100 Hz con jitter (mv_vrgame_set_hand, reloj inyectado), VBlanks a 50 Hz con jitter (vrgame_pad), gatillo analógico que cae en 60 ms. La mano acelera hasta `vp` en 0,15 s
+ * (smoothstep), frena en 0,12 s y el gatillo empieza a abrirse `off` ms después del pico. Se mide lo que llega al motor (vrfire_take_throw, velocidad horizontal por tick -> m/s). */
+static float bench_speed(float vp, float t, float windup) {
+    const float ta = 0.15f, td = 0.12f, tw = 0.30f;
+    if (t < 0) { float x = (t + tw) / tw; return x > 0 && windup > 0 ? -windup * sinf(3.14159265f * x) : 0.0f; }
+    if (t < ta) { float x = t / ta; return vp * x * x * (3 - 2 * x); }
+    if (t < ta + td) { float x = (t - ta) / td; return vp * (1 - x * x * (3 - 2 * x)); }
+    return 0.0f;
+}
+/* Devuelve la velocidad horizontal que llega al motor (m/s; -1: sin lanzamiento); v_pk = pico de la mano en los 250 ms previos a abrirse el gatillo; v_rel = velocidad al empezar a abrirse. */
+static int bench_burst;      /* 1: de cada 5 VBlanks, el siguiente llega pegado (el emulador se pone al día: misma pose, 0 ms) */
+static float bench_throw(float vp, int off_ms, float windup, float fall_s, float *v_pk, float *v_rel, int hold_after) {
+    enum { T0 = 1000, N = 3000 };
+    static float px[N + 1], pz[N + 1], py[N + 1];
+    const float dx = 0.2f, dy = 0.25f, dz = -0.95f, dl = sqrtf(dx * dx + dy * dy + dz * dz), hz = sqrtf(dx * dx + dz * dz) / dl;
+    float x = 0.2f, y = 1.2f, z = -0.3f;
+    for (int ms = 0; ms <= N; ms++) {
+        float v = bench_speed(vp, (float)(ms - T0) * 0.001f, windup);
+        x += dx / dl * v * 0.001f; y += dy / dl * v * 0.001f; z += dz / dl * v * 0.001f;
+        px[ms] = x; py[ms] = y; pz[ms] = z;
+    }
+    const int rel = T0 + 150 + off_ms;                                 /* ms en que el gatillo empieza a abrirse */
+    *v_pk = 0; *v_rel = fabsf(bench_speed(vp, (float)(rel - T0) * 0.001f, windup)) * hz;
+    for (int ms = rel - 250; ms <= rel; ms++) { float v = fabsf(bench_speed(vp, (float)(ms - T0) * 0.001f, windup)) * hz; if (v > *v_pk) *v_pk = v; }
+    world(2, 0, 3);
+    fresh_weapon(2);
+    int16_t cp[3], cv[3];
+    vrfire_take_throw(cp, cv);                                         /* vacía lo anterior */
+    int k = 0;
+    for (int ms = 0; ms < rel + hold_after; ms++) {
+        vrgame_test_advance(1000000ull);
+        if (ms % 10 == 3) {                                            /* pose del visor (~100 Hz) con el gatillo analógico del momento */
+            float tr = ms < 400 ? 0.0f : ms < 430 ? (float)(ms - 400) / 30.0f : ms < rel ? 1.0f : 1.0f - (float)(ms - rel) / (fall_s * 1000.0f);
+            if (tr < 0) tr = 0;
+            MvVrHand h; memset(&h, 0, sizeof h);
+            h.valid = 1; h.pos[0] = px[ms]; h.pos[1] = py[ms]; h.pos[2] = pz[ms]; h.rot[3] = 1.0f; h.trigger = tr; h.grip = 0.0f;
+            mv_vrgame_set_hand(1, &h);
+        }
+        if (ms >= 20 * k + ((k * 37) % 9) - 4) { k++; vrgame_pad(0, &bs, ram); if (bench_burst && k % 5 == 0) vrgame_pad(0, &bs, ram); }      /* VBlank a 50 Hz con jitter de +-4 ms */
+    }
+    int16_t pos[3], vel[3];
+    if (!vrfire_take_throw(pos, vel)) return -1.0f;
+    return sqrtf((float)vel[0] * (float)vel[0] + (float)vel[2] * (float)vel[2]) / (1000.0f * 0.04f);
+}
+static void throw_bench(void) {
+    printf("-- banco de lanzamiento real (cadena completa): velocidad que llega al motor frente a la de la mano --\n");
+    static const float vps[3] = {4.0f, 6.0f, 8.0f};
+    static const int offs[7] = {-60, -30, 0, 30, 60, 100, 150};
+    static const float falls[2] = {0.05f, 0.12f};
+    float worst = 9.0f, best_late = 0.0f;
+    for (int w = 0; w < 4; w++)
+    for (int f = 0; f < 2; f++)
+    for (int a = 0; a < 3; a++)
+        for (int o = 0; o < 7; o++) {
+            bench_burst = w >> 1;
+            float pk, rl, v = bench_throw(vps[a], offs[o], (w & 1) ? 2.0f : 0.0f, falls[f], &pk, &rl, 400);
+            /* techo: la mano sigue acelerando hasta que el gatillo cruza 0,4 (~60 % de la caida tras empezar a abrirse) */
+            float up = pk;
+            for (int ms = 0; ms <= (int)(falls[f] * 600.0f); ms++) { float h = fabsf(bench_speed(vps[a], (float)(150 + offs[o] + ms) * 0.001f, (w & 1) ? 2.0f : 0.0f)) * 0.958f; if (h > up) up = h; }
+            if (offs[o] >= -60 && offs[o] <= 60) {
+                if (pk > 0 && v / pk < worst) worst = v / pk;
+                CHECK(v >= 0.7f * pk, "pico %.2f, gatillo %+d ms, caida %.0f ms, retroceso/rafaga %d: llegan %.2f m/s (< 70 %% del pico %.2f; mano al soltar %.2f)", vps[a] * 0.958f, offs[o], falls[f] * 1000.0f, w, v, pk, rl);
+                CHECK(v <= 1.25f * up + 0.3f, "pico %.2f, gatillo %+d ms, caida %.0f ms, retroceso/rafaga %d: llegan %.2f m/s (por encima de lo que llego a ir la mano, %.2f)", vps[a] * 0.958f, offs[o], falls[f] * 1000.0f, w, v, up);
+            } else if (offs[o] == 100 && pk > 0 && v / pk > best_late) best_late = v / pk;
+        }
+    bench_burst = 0;
+    printf("   peor caso con el gatillo de -60 a +60 ms del pico: %.0f %% de la velocidad pico de la mano\n", 100.0f * worst);
 }
 static void weapon_follows_controller(void) {
     printf("-- arma colgada del mando: la boca sigue al mando girado por un desvío fijo --\n");
@@ -875,6 +1158,206 @@ static void duct_hides_weapon(void) {
 }
 
 /* ---- PSG1 (id 9): el original lo tumba (stance 2) al sacarlo; con el rifle VR y su lente no se oculta nada (el conducto es solo para el resto de armas) ---- */
+/* Instala además el arma `gid` (sin tocar la de fresh_meshes): para probar el cambio de un arma a otra */
+static void install_extra(int gid) {
+    static WMesh mesh2[16];
+    static WVertex vtx[3] = {{{0, 0, 0}, {0, 1, 0}, {0, 0}, {255, 255, 255, 255}}, {{0.01f, 0, 0}, {0, 1, 0}, {1, 0}, {255, 255, 255, 255}}, {{0, 0.01f, 0}, {0, 1, 0}, {0, 1}, {255, 255, 255, 255}}};
+    static uint16_t idx[3] = {0, 1, 2};
+    const WeaponDef *d = NULL;
+    for (int i = 0; i < w_registry_count; i++) if (w_registry[i] && w_registry[i]->game_weapon_id == gid) d = w_registry[i];
+    int n = weapon_mesh_count(d);
+    for (int i = 0; i < n; i++) mesh2[i] = (WMesh){d->mesh_names[i], vtx, 3, idx, 3, 0};
+    WeaponState *st = calloc(1, d->state_size);
+    st->def = d; d->init(st); st->def = d;
+    weapon_bind(st, mesh2, n, d->parts, d->nparts);
+    VrHandsConfig hc; vrhands_default_config(&hc); hc.grip_mode = VRH_GRIP_SOCKET;
+    VrHandsRig *rig = vrhands_create(&hc);
+    vrhands_bind(rig, st, NULL, 0, 0);
+    vrgame_test_install(gid, (void *)d, st, rig);
+}
+/* Cambio de arma (selector abierto o directo): la vista especial (lente SCOPE del PSG1) del arma que entra no se publica mientras dura el cambio, solo cuando está lista */
+static void special_view_waits_on_weapon_change(void) {
+    printf("-- vista especial: durante el cambio de arma no se publica la del arma que entra --\n");
+    float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1};
+    MvVrSpecialView sv;
+    world(0, 12, 36);
+    fresh_pistol_meshes();
+    install_extra(9);
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(drawn_weapon((float[3]){0}, (float[3]){0}) == 1 && (mv_vrgame_special_view(&sv) == 0 || sv.kind != MV_VIEW_SCOPE), "la pistola equipada no publica lente");
+    /* el selector de armas se abre y el cursor pasa por el PSG1 (equipado en el juego): ni un solo VBlank con su lente */
+    bs.menu_open = 1; bs.menu_state = 2; bs.in_control = 0; bs.cam_ctl = 1;
+    bs.weapon = 9; bs.weapon_ammo[9] = 20;
+    int leaked = 0;
+    for (int i = 0; i < 12; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); if (mv_vrgame_special_view(&sv) == 1 && sv.kind == MV_VIEW_SCOPE) leaked++; }
+    CHECK(leaked == 0, "selector abierto con el PSG1 de paso: lente publicada en %d VBlanks", leaked);
+    /* el selector se cierra con el PSG1 elegido: el primer VBlank (arma recién entrada) no la publica; unos VBlanks después sí */
+    bs.menu_open = 0; bs.menu_state = 0; bs.in_control = 1; bs.cam_ctl = 0;
+    hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
+    CHECK(mv_vrgame_special_view(&sv) == 0 || sv.kind != MV_VIEW_SCOPE, "selector recién cerrado: el PSG1 aún no está listo, sin lente");
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(mv_vrgame_special_view(&sv) == 1 && sv.kind == MV_VIEW_SCOPE && sv.cam_valid == 1, "PSG1 ya listo: lente publicada");
+    /* cambio directo (sin selector) del PSG1 a la pistola y vuelta: la lente tampoco aparece en el primer VBlank del PSG1 */
+    bs.weapon = 0;
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    bs.weapon = 9;
+    hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
+    CHECK(mv_vrgame_special_view(&sv) == 0 || sv.kind != MV_VIEW_SCOPE, "cambio directo a PSG1: el primer VBlank no publica la lente");
+    /* el selector abierto con el arma ya lista (sin cambiar): su vista se mantiene */
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    bs.menu_open = 1; bs.menu_state = 2; bs.in_control = 0; bs.cam_ctl = 1;
+    for (int i = 0; i < 4; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(mv_vrgame_special_view(&sv) == 1 && sv.kind == MV_VIEW_SCOPE, "selector abierto sin cambiar de arma: la lente del PSG1 ya listo se mantiene");
+    bs.menu_open = 0; bs.menu_state = 0; bs.in_control = 1; bs.cam_ctl = 0;
+    /* recarga: el juego retira el arma un instante y vuelve la misma (la soldadura se retiene): la lente no espera otra vez */
+    bs.weapon = -1;
+    for (int i = 0; i < 2; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    bs.weapon = 9;
+    hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
+    CHECK(mv_vrgame_special_view(&sv) == 1 && sv.kind == MV_VIEW_SCOPE, "desequipado breve (recarga) y vuelta del mismo PSG1: la lente no espera");
+    /* desequipado de verdad (pasa la retención): al volver sí espera */
+    bs.weapon = -1;
+    for (int i = 0; i < 12; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    bs.weapon = 9;
+    hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
+    CHECK(mv_vrgame_special_view(&sv) == 0 || sv.kind != MV_VIEW_SCOPE, "desequipado largo y vuelta del PSG1: la lente espera");
+    /* desequipado y selector abierto con el cursor por el PSG1: no conserva el derecho del PSG1 de antes de desequipar */
+    for (int i = 0; i < 8; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    CHECK(mv_vrgame_special_view(&sv) == 1 && sv.kind == MV_VIEW_SCOPE, "PSG1 listo otra vez: lente publicada");
+    bs.weapon = -1;
+    for (int i = 0; i < 12; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    bs.menu_open = 1; bs.menu_state = 2; bs.in_control = 0; bs.cam_ctl = 1; bs.weapon = 9; bs.weapon_ammo[9] = 20;
+    leaked = 0;
+    for (int i = 0; i < 12; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); if (mv_vrgame_special_view(&sv) == 1 && sv.kind == MV_VIEW_SCOPE) leaked++; }
+    CHECK(leaked == 0, "desequipar y pasar el cursor del selector por el PSG1: lente publicada en %d VBlanks", leaked);
+    bs.menu_open = 0; bs.menu_state = 0; bs.in_control = 1; bs.cam_ctl = 0;
+}
+
+/* ---- mina: se apoya en el suelo por las patas (modelo 0x17a1: el punto más bajo del modelo real, medido con wload y dibujado con la matriz del juego) y no se coloca sin suelo; el fantasma queda fijo en el suelo (sin la compensación de latencia de la mano) ---- */
+static int mine_try(float pitch_deg, VrFireMat *m) {
+    { VrFireMat dm; for (int n = 0; n < 8 && vrfire_take_projectile(2, &dm) == VRFIRE_SUBST; n++) {} }
+    fresh_weapon(5);
+    for (int i = 0; i < 70; i++) c4vbl(pitch_deg, 0.0f);          /* las patas tardan 0,4 s en desplegarse (w_placed.c LEGS_TIME) */
+    for (int i = 0; i < 6; i++) c4vbl(pitch_deg, 1.0f);
+    MvVrGameStatus st0, st; mv_vrgame_status(&st0);
+    for (int i = 0; i < 4; i++) c4vbl(pitch_deg, 0.0f);
+    mv_vrgame_status(&st);
+    if (st.places == st0.places) return 0;
+    return vrfire_take_projectile(2, m) == VRFIRE_SUBST;
+}
+static int ghost_verts(float lo[3], float hi[3]) {
+    VrHandsFrame f; int found = 0;
+    if (mv_host_hands(&f)) for (int i = 0; i < f.nmeshes; i++) {
+        const VrHandsMesh *m = &f.meshes[i];
+        if (m->mesh_id != WGHOST_MESH_ID) continue;
+        found = 1;
+        for (int k = 0; k < 3; k++) { lo[k] = 1e9f; hi[k] = -1e9f; }
+        for (uint32_t v = 0; v < (uint32_t)m->nverts; v++) for (int k = 0; k < 3; k++) { if (m->verts[v].pos[k] < lo[k]) lo[k] = m->verts[v].pos[k]; if (m->verts[v].pos[k] > hi[k]) hi[k] = m->verts[v].pos[k]; }
+    }
+    mv_host_hands_done();
+    return found;
+}
+/* modelo REAL 0x17a1 (marco del motor sin rotar, uds = mm) del archivo de stages del usuario; 0 si no hay datos del juego (la comprobación con la medida real se omite) */
+static int mine_model(WLoaded *out) {
+    const char *cands[3] = {getenv("STAGE_FILE"), "/tmp/gamedata/STAGE.DIR", "gamedata/stages.bin"};
+    FILE *f = NULL;
+    for (int i = 0; i < 3 && !f; i++) if (cands[i]) f = fopen(cands[i], "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *d = n > 0 ? (uint8_t *)malloc((size_t)n) : NULL;
+    const int rd = d && fread(d, 1, (size_t)n, f) == (size_t)n;
+    fclose(f);
+    WLoadOpts o; wload_default_opts(&o);
+    o.frame = W_FRAME_ENGINE; o.scale = 1.0f; o.resident = "init";
+    const int ok = rd && wload_model(d, (size_t)n, "init", 0x17a1, &o, out) == 0;
+    free(d);
+    return ok;
+}
+static void mine_rests_on_floor(void) {
+    printf("-- mina: apoyada en el suelo por las patas --\n");
+    WLoaded mm;
+    const int have = mine_model(&mm);
+    if (!have) printf("   sin datos del juego (STAGE.DIR): la altura de las patas no se mide con el modelo real (omitido)\n");
+    world(5, 0, 4);
+    bs.ctl_pos.y = -2500;                                       /* suelo del juego a 0,9 m bajo el ojo del motor */
+    VrFireMap map; vrfire_map_from_cam(&map, &rec);
+    const float y0 = g_head[13] - (float)(map.eye[1] - bs.ctl_pos.y) / map.units_per_m;
+    int accepted = 0;
+    for (int pitch = -60; pitch <= 90; pitch += 15) {
+        VrFireMat m;
+        if (!mine_try((float)pitch, &m)) continue;
+        accepted++;
+        if (have) {      /* el punto más bajo del modelo real dibujado con la matriz que recibe el juego (columnas de VrFireMat: izquierda, -delante, arriba) */
+            float low = 1e9f;
+            for (uint32_t k = 0; k < mm.nv; k++) {
+                const float *v = mm.v[k].pos; float w[3], uv[3];
+                for (int i = 0; i < 3; i++) w[i] = (float)m.t[i] + ((float)m.m[3 * i] * v[0] + (float)m.m[3 * i + 1] * v[1] + (float)m.m[3 * i + 2] * v[2]) / 4096.0f;
+                vrfire_pos_from_world(&map, w, uv);
+                if (uv[1] < low) low = uv[1];
+            }
+            CHECK(fabsf(low - y0) <= 0.01f, "inclinación %d: el punto más bajo del modelo real de la mina (%.3f) queda a %.3f del suelo (%.3f)", pitch, low, low - y0, y0);
+        }
+    }
+    CHECK(accepted >= 4, "se colocó con %d de 11 inclinaciones (mano horizontal y hacia el suelo)", accepted);
+    if (have) wload_free(&mm);
+    /* sin suelo conocido (pies fuera de rango): no se puede colocar */
+    bs.ctl_pos.y = 0;
+    MvVrGameStatus s0, s1; mv_vrgame_status(&s0);
+    VrFireMat m;
+    int any = 0;
+    for (int pitch = -60; pitch <= 90; pitch += 30) any += mine_try((float)pitch, &m);
+    mv_vrgame_status(&s1);
+    CHECK(any == 0 && s1.places == s0.places && s1.rejects > s0.rejects, "sin suelo: ninguna colocación (colocadas %u, rechazos %u)", s1.places - s0.places, s1.rejects - s0.rejects);
+    bs.ctl_pos.y = 0;
+}
+/* orientación de la mina colocada: la cara picuda (+X del modelo 0x17a1) mira hacia donde apunta el jugador (guiñada del delante de la mano), sea cual sea esa guiñada */
+static void mine_orientation(void) {
+    printf("-- mina: orientación (cara picuda hacia delante) --\n");
+    world(5, 0, 4);
+    bs.ctl_pos.y = -2500;
+    VrFireMap map; vrfire_map_from_cam(&map, &rec);
+    int n = 0;
+    const float yaws[5] = {0.0f, 60.0f, -120.0f, 170.0f, 250.0f};
+    for (int k = 0; k < 5; k++) for (int pitch = -30; pitch <= 0; pitch += 30) {
+        c4_yaw_deg = yaws[k];
+        VrFireMat m;
+        if (!mine_try((float)pitch, &m)) continue;
+        const WLaunch *ev = w_launch_last();
+        const float qx = ev->pose.q.x, qy = ev->pose.q.y, qz = ev->pose.q.z, qw = ev->pose.q.w;
+        float fx = -2 * (qx * qz + qw * qy), fz = -(1 - 2 * (qx * qx + qy * qy));
+        const float fl = sqrtf(fx * fx + fz * fz);
+        /* columna 0 de la matriz del juego = izquierda del objeto colocado (arriba x delante): su +X (cara picuda) es el opuesto */
+        float cx[3] = {-(float)m.m[0] / 4096.0f, -(float)m.m[3] / 4096.0f, -(float)m.m[6] / 4096.0f}, ux[3];
+        vrfire_dir_from_world(&map, cx, ux);
+        const float ul = sqrtf(ux[0] * ux[0] + ux[2] * ux[2]);
+        CHECK(fl > 0.1f && ul > 0.5f && (ux[0] * fx + ux[2] * fz) / (ul * fl) > 0.98f, "guiñada %.0f inclinación %d: +X del objeto (%.2f %.2f) mira al delante de la mano (%.2f %.2f)", yaws[k], pitch, ux[0], ux[2], fx / fl, fz / fl);
+        n++;
+    }
+    c4_yaw_deg = 0.0f;
+    CHECK(n >= 6, "se colocó con %d de 10 combinaciones de guiñada e inclinación", n);
+    bs.ctl_pos.y = 0;
+}
+static void mine_ghost_fixed(void) {
+    printf("-- mina: fantasma fijo en el suelo --\n");
+    world(5, 0, 4);
+    bs.ctl_pos.y = -2500;
+    VrFireMap map; vrfire_map_from_cam(&map, &rec);
+    const float y0 = g_head[13] - (float)(map.eye[1] - bs.ctl_pos.y) / map.units_per_m;
+    fresh_meshes(5);
+    float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1};
+    { float a = -45.0f * 0.017453292f * 0.5f; q[0] = sinf(a); q[3] = cosf(a); }
+    for (int i = 0; i < 80; i++) { hand_at(1, p, q); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram); }
+    float lo[3], hi[3], lo2[3], hi2[3];
+    CHECK(ghost_verts(lo, hi) == 1, "mina en la mano con suelo: hay fantasma");
+    if (ghost_verts(lo, hi)) {
+        CHECK(lo[1] >= y0 - 1e-3f && hi[1] <= y0 + WGHOST_LIFT_M + 1e-3f, "fantasma anclado al suelo (y %.3f..%.3f, suelo %.3f)", lo[1], hi[1], y0);
+        float p2[3] = {p[0] + 0.1f, p[1] + 0.05f, p[2] - 0.08f};      /* la mano se mueve tras la simulación: el fantasma no la sigue */
+        hand_at(1, p2, q);
+        CHECK(ghost_verts(lo2, hi2) == 1 && fabsf(lo2[0] - lo[0]) < 1e-5f && fabsf(lo2[1] - lo[1]) < 1e-5f && fabsf(lo2[2] - lo[2]) < 1e-5f && fabsf(hi2[0] - hi[0]) < 1e-5f && fabsf(hi2[2] - hi[2]) < 1e-5f,
+              "fantasma sin compensación de latencia (x %.4f -> %.4f, z %.4f -> %.4f)", lo[0], lo2[0], lo[2], lo2[2]);
+    }
+    bs.ctl_pos.y = 0;
+}
 static void psg1_prone_keeps_weapon(void) {
     printf("-- PSG1 tumbado: el rifle VR se construye y la lente se publica --\n");
     float dir[3], org[3], p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1};
@@ -1236,7 +1719,7 @@ static void laser_stops_at_walls(void) {
     memset(ram + (0x801F0000 & 0x1FFFFF), 0, 0x1000); w32r(0x800ACB84, 0); ray_stub_mm = -1;
     lvbl(p, q, 0.0f, 6);
     float org[3], ax[3], len = 0, ow[3], dw[3];
-    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "sin datos de colisión: 15 m (%.3f)", len);
+    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "sin datos de colisión: alcance completo (%.3f)", len);
     vrfire_pos_to_world(&map, org, ow); vrfire_dir_to_world(&map, ax, dw);
     const float dists_m[] = {0.5f, 1.0f, 2.5f, 4.0f, 9.0f, 14.0f};
     float prev = 0; int mono = 1;
@@ -1251,7 +1734,10 @@ static void laser_stops_at_walls(void) {
     }
     CHECK(mono, "paredes cada vez más lejos: longitud estrictamente creciente");
     hzd_wall(ow, dw, 20.0f * map.units_per_m); lvbl(p, q, 0.0f, 2);
-    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "pared a 20 m (fuera de alcance): 15 m (%.3f)", len);
+    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - (20.0f - WLASER_SURF_GAP_M)) < 0.01f, "pared a 20 m (dentro del alcance de 25 m): %.3f m", len);
+    CHECK(fabsf(WLASER_MAX_M - vrhit_weapon_range_m(0)) < 1e-6f, "el láser mide el alcance de la bala de la SOCOM (%.0f m)", WLASER_MAX_M);
+    hzd_wall(ow, dw, 26.0f * map.units_per_m); lvbl(p, q, 0.0f, 2);
+    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "pared a 26 m (fuera de alcance): %.0f m (%.3f)", WLASER_MAX_M, len);
     float back[3] = {-dw[0], -dw[1], -dw[2]};
     hzd_wall(ow, back, 3.0f * map.units_per_m); lvbl(p, q, 0.0f, 2);
     CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "pared a la espalda: no corta (%.3f)", len);
@@ -1262,11 +1748,11 @@ static void laser_stops_at_walls(void) {
     ray_stub_mm = -1; lvbl(p, q, 0.0f, 2);
     CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - (6.0f - WLASER_SURF_GAP_M)) < 0.01f, "sin sólido: pared HZD a 6 m: %.3f m", len);
     ray_stub_mm = 3.0f * map.units_per_m; w32r(0x800ACB84, 0); lvbl(p, q, 0.0f, 2);
-    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "solo sólido de render a 3 m (sin HZD): no corta, 15 m (%.3f)", len);
+    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "solo sólido de render a 3 m (sin HZD): no corta, alcance completo (%.3f)", len);
     ray_stub_mm = -1; hzd_wall(ow, dw, 0.02f * map.units_per_m); lvbl(p, q, 0.0f, 2);
     CHECK(drawn_laser(org, ax, &len) == 0, "pared HZD a 2 cm de la boca: nada que dibujar");
     ray_stub_mm = -1; w32r(0x800ACB84, 0); lvbl(p, q, 0.0f, 2);
-    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "espacio abierto otra vez: 15 m (%.3f)", len);
+    CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "espacio abierto otra vez: alcance completo (%.3f)", len);
     /* un enemigo en el rayo lo corta como corta la bala (vr_hit): sin esto el punto caía en la pared de detrás del enemigo */
     {
         const uint32_t tb = 0x800B7660u + 72u * 5u;
@@ -1284,8 +1770,8 @@ static void laser_stops_at_walls(void) {
             else CHECK(fabsf(l - (2.0f - WLASER_SURF_GAP_M)) < 0.01f, "pared a 2 m delante del enemigo a 6 m: manda la pared (%.3f m)", l);
         }
         memset(ram + (tb & 0x1FFFFF), 0, 72);
-        hzd_wall(ow, dw, 20.0f * map.units_per_m); lvbl(p, q, 0.0f, 2);
-        CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "sin el enemigo: 15 m otra vez (%.3f)", len);
+        hzd_wall(ow, dw, 30.0f * map.units_per_m); lvbl(p, q, 0.0f, 2);
+        CHECK(drawn_laser(org, ax, &len) == 1 && fabsf(len - WLASER_MAX_M) < 1e-3f, "sin el enemigo (pared a 30 m): alcance completo otra vez (%.3f)", len);
     }
     vrhit_set_world(NULL);
     vrgame_reset();
@@ -1353,7 +1839,7 @@ static void aim_pose(void) {
     VrCamRecord saved = rec;
     rec.theta_play_deg = 37.0f; rec.eye[0] = 1234; rec.eye[2] = -4321; rec.p_ref[0] = 0.1f; rec.p_ref[2] = -0.2f;
     VrFireMap map; vrfire_map_from_cam(&map, &rec);
-    float worst_w = 0, worst_l = 0, worst_b = 0, worst_g = 0, worst_nofix = 0, worst_back = 0;
+    float worst_w = 0, worst_l = 0, worst_b = 0, worst_g = 0, worst_nofix = 0, worst_back = 0, worst_up = 0;
     int shots = 0;
     for (int k = 0; k < 12; k++) {
         float q[4], R[9], want[3], p[3] = {0.1f + 0.3f * t_rnd(), 1.0f + 0.4f * t_rnd(), -0.2f - 0.4f * t_rnd()};
@@ -1372,6 +1858,10 @@ static void aim_pose(void) {
         if (!drawn_weapon(dir, org)) { CHECK(0, "pose %d: arma dibujada", k); continue; }
         float ew = t_ang(dir, aim);
         if (ew > worst_w) worst_w = ew;
+        {   /* el alabeo también sigue al mando: el arriba del arma es el arriba del apuntado (+Y de aq) */
+            float R[9], aup[3]; t_qmat(aq, R); aup[0] = R[1]; aup[1] = R[4]; aup[2] = R[7];
+            float eu = t_ang(drawn_up, aup); if (eu > worst_up) worst_up = eu;
+        }
         float dg = sqrtf((org[0] - p[0]) * (org[0] - p[0]) + (org[1] - p[1]) * (org[1] - p[1]) + (org[2] - p[2]) * (org[2] - p[2]));
         if (dg > worst_g) worst_g = dg;
         float lorg[3], lax[3], ll;
@@ -1397,9 +1887,52 @@ static void aim_pose(void) {
     CHECK(worst_nofix > 10.0f, "sin apuntado la boca difiere del apuntado (prueba con sentido): %.1f grados", worst_nofix);
     CHECK(worst_w < 0.5f, "el arma dibujada apunta como el mando: %.3f grados (< 0,5)", worst_w);
     CHECK(worst_l < 0.5f, "el láser sigue el apuntado del mando: %.3f grados (< 0,5)", worst_l);
+    CHECK(worst_up < 0.5f, "el arriba del arma es el del apuntado del mando (sin alabeo heredado de la mano): %.3f grados (< 0,5)", worst_up);
     CHECK(shots == 12 && worst_b < 0.15f, "la bala sale por el apuntado del mando: %.3f grados, %d disparos (< 0,15)", worst_b, shots);
     CHECK(worst_g > sock_grip_dist() - 0.003f && worst_g < sock_grip_dist() + 0.003f, "la empuñadura sigue al agarre del mando a la distancia fija del zócalo (%.1f mm; ver arriba): %.4f m", sock_grip_dist() * 1000.0f, worst_g);
     CHECK(worst_back < 0.5f, "sin apuntado válido vuelve el desvío fijo: %.3f grados", worst_back);
+    rec = saved;
+}
+
+/* ---- mando recto = arma recta: con el mando como se coge una pistola (apuntado horizontal al frente y arriba arriba; el agarre del mando queda 35 grados por encima del apuntado) la boca sale recta al frente
+ * y el arma no se alabea. Ni el giro de mano (hand_roll_deg) ni la calibración de manos lo cambian: son la corrección agarre -> mano (cómo se dibuja la mano), no la del arma. Causa que medía el fallo:
+ * el zócalo de la SOCOM (FIT_SOCOM_GRIP) se diseñó con la mano en apretón de manos (alabeo 90); con el alabeo de mando por defecto (45) el arma quedaba alabeada 45 grados y la boca 6 arriba y 6 a un lado,
+ * y el giro corto de la boca al apuntado (aimfix) no quita el alabeo. ---- */
+static void hand_aim_side(int side, const float p[3], const float q[4], const float aq[4]) {
+    MvVrHand h;
+    memset(&h, 0, sizeof h);
+    h.valid = 1; memcpy(h.pos, p, sizeof h.pos); memcpy(h.rot, q, sizeof h.rot); h.grip = 1.0f; h.trigger = 0.0f;
+    h.aim_valid = 1; memcpy(h.aim_pos, p, sizeof h.aim_pos); memcpy(h.aim_rot, aq, sizeof h.aim_rot);
+    mv_vrgame_set_hand(side, &h);
+}
+static void aim_upright(void) {
+    printf("-- mando recto: la boca al frente y el arma sin alabeo, con cualquier giro de mano y calibración --\n");
+    VrCamRecord saved = rec;
+    rec.theta_play_deg = 37.0f; rec.eye[0] = 1234; rec.eye[2] = -4321; rec.p_ref[0] = 0.1f; rec.p_ref[2] = -0.2f;
+    const float p[3] = {0.2f, 1.2f, -0.3f}, aq[4] = {0, 0, 0, 1}, a35 = 35.0f * 0.017453292f * 0.5f, q[4] = {sinf(a35), 0, 0, cosf(a35)};      /* agarre = apuntado girado +35 sobre X */
+    const float fwd[3] = {0, 0, -1}, up[3] = {0, 1, 0};
+    const float rolls[] = {45.0f, 0.0f, 90.0f, -30.0f};
+    float worst_b = 0, worst_u = 0;
+    for (int side = 1; side >= 0; side--) {
+        for (int k = 0; k < 6; k++) {
+            VrBodyConfig bc; vrbody_config_default(&bc); vrbody_init(&bc); vrbody_clear_calibration();      /* alabeo por defecto (45), sin calibración */
+            if (k < 4) vrbody_set_hand_roll(rolls[k]);
+            if (k == 4) { const float qc[4] = {0.2f, 0.3f, 0.5f, 0.78f}; vrbody_set_calibration(side, qc); }
+            if (k == 5) { vrbody_set_hand_roll(60.0f); const float qc[4] = {0.0f, 0.38268f, 0.0f, 0.92388f}; vrbody_set_calibration(side, qc); }
+            world(0, 12, 60);
+            fresh_pistol_meshes();
+            mv_vrgame_set_options(side, 2);
+            for (int i = 0; i < 10; i++) { vrgame_test_advance(8000000ull); hand_aim_side(side, p, q, aq); vrgame_pad(0, &bs, ram); }
+            float dir[3], org[3];
+            if (!drawn_weapon(dir, org)) { CHECK(0, "lado %d, caso %d: arma dibujada", side, k); continue; }
+            float eb = t_ang(dir, fwd), eu = t_ang(drawn_up, up);
+            if (eb > worst_b) worst_b = eb;
+            if (eu > worst_u) worst_u = eu;
+            CHECK(eb < 0.5f && eu < 0.5f, "lado %d, caso %d (giro de mano %.0f, calibrada %d): boca %.2f grados del frente, arriba del arma %.2f grados del arriba (< 0,5)", side, k, k < 4 ? rolls[k] : (k == 5 ? 60.0f : 45.0f), k >= 4, eb, eu);
+        }
+    }
+    printf("   mando recto: boca peor %.3f grados del frente, alabeo peor %.3f grados (12 combinaciones de lado, giro de mano y calibración)\n", worst_b, worst_u);
+    { VrBodyConfig bc; vrbody_config_default(&bc); vrbody_init(&bc); vrbody_clear_calibration(); }
     rec = saved;
 }
 
@@ -1443,7 +1976,7 @@ static void vbl_game(float trig, int n, uint32_t *seen) {
         vbl(trig, 1);
         { int16_t z; memcpy(&z, ram + (BA_MAGAZINE & 0x1FFFFFu), 2); bs.magazine = z; }
         game_shots_follow(seen);
-        if (sq_seen > sq0 && bs.magazine == 0 && bs.weapon_ammo[0] > 0 && !gm_rl) gm_rl = 17;      /* ataque pulsado con el cargador vacío: el juego pasa a su recarga (sna_init.c sub_80057BF0) */
+        if (sq_seen > 0 && bs.magazine == 0 && bs.weapon_ammo[0] > 0 && !gm_rl) gm_rl = 17;      /* ataque pulsado con el cargador vacío: el juego pasa a su recarga (sna_init.c sub_80057BF0) */
         if (gm_rl > 0 && --gm_rl == 0 && bs.magazine == 0 && bs.weapon_ammo[0] > 0) bs.magazine = bs.weapon_ammo[0] < 12 ? bs.weapon_ammo[0] : 12;
     }
 }
@@ -1718,13 +2251,13 @@ static void aim_guard(void) {
     avbl(p, q, aq, 0.0f, 10);
     vrbody_hand_offset(1, off);
     float conv = q_angle_deg(base, off);
-    /* Giro esperado = ángulo entre la boca sin corregir (-Z del arma con el zócalo FIT_SOCOM_GRIP de vr_grip_fit.inc, expected_weapon_rot) y el apuntado (agarre girado -35 grados): depende de la
-     * tabla, no de una constante. El umbral fijo antiguo (10 grados) venía de la geometría anterior de la mano y del zócalo; con el ajuste actual sale 9,7. Se exige que el
+    /* Giro esperado = ángulo del giro que lleva el marco del arma sin corregir (R(agarre) R(cabeceo) R(alabeo) M R(zócalo FIT_SOCOM_GRIP)^T, expected_weapon_rot) al marco del apuntado (agarre girado -35 grados): boca Y
+     * alabeo (contrato cambiado: antes solo la boca, 9,7 grados, y el arma conservaba el alabeo de 45 de la mano). Depende de la tabla y del giro de mano, no de una constante. Se exige que el
      * giro sea el de la tabla (+-0,5 grados) y que no sea despreciable (> 1 grado: la corrección actúa). */
-    float R0[9], want0[3], aim0[3];
-    expected_weapon_rot(1, q, R0); want0[0] = -R0[2]; want0[1] = -R0[5]; want0[2] = -R0[8]; rot_z(aq, aim0);
-    const float conv_exp = t_ang(want0, aim0);
-    CHECK(conv > 1.0f && fabsf(conv - conv_exp) < 0.5f, "pistola con apuntado: la mano se gira para alinear la boca (%.1f grados; la tabla del zócalo da %.1f)", conv, conv_exp);
+    float R0[9], R0t[9], Ra0[9], Rrel[9];
+    expected_weapon_rot(1, q, R0); t_qmat(aq, Ra0); t_mtr(R0, R0t); t_mmul(R0t, Ra0, Rrel);
+    const float conv_exp = acosf(fminf(1.0f, fmaxf(-1.0f, (Rrel[0] + Rrel[4] + Rrel[8] - 1.0f) * 0.5f))) * 57.29578f;
+    CHECK(conv > 1.0f && fabsf(conv - conv_exp) < 0.5f, "pistola con apuntado: la mano se gira para alinear la boca y el alabeo (%.1f grados; la tabla del zócalo y el giro de mano dan %.1f)", conv, conv_exp);
     float prev[4]; memcpy(prev, off, sizeof prev);
     avbl(p, q, NULL, 0.0f, 3);                                    /* un parpadeo del apuntado (~25 ms) */
     vrbody_hand_offset(1, off);
@@ -1758,10 +2291,13 @@ static void rv_extra(void) {
     { MvVrHand h; memset(&h, 0, sizeof h); h.valid = 1; h.pos[1] = 1.0f; h.rot[3] = 1.0f; mv_vrgame_set_hand(1, &h); vrgame_test_advance(8000000ull); vrgame_pad(0, &bs, ram);
       float p[3]; if (vrgame_hand_raw(1, p, NULL, NULL, NULL)) { zone_off[0] = p[0]; zone_off[1] = p[1] - 1.0f; zone_off[2] = p[2]; } }
     bs.magazine = 0; bs.weapon_ammo[0] = 12; zones(0.6f, 0.0f, 100);
-    zones(0.0f, 0.0f, 8); sq_seen = 0; zones(0.0f, 0.9f, 12);
-    printf("   RV zona seca: cuadrado=%d\n", sq_seen);
-    CHECK(sq_seen == 0, "RV: gatillo en la zona de menu con el arma seca no pulsa el ataque (cuadrado %d)", sq_seen);
-    zones(0.6f, 0.0f, 60);
+    zones(0.6f, 0.9f, 12); const int sq_out = sq_seen; zones(0.6f, 0.0f, 60); sq_seen = 0;
+    zones(0.0f, 0.0f, 8); zones(0.0f, 0.9f, 12);
+    printf("   RV zona seca: cuadrado dentro=%d fuera=%d\n", sq_seen, sq_out);
+    CHECK(sq_seen > 0 && sq_out > 0, "RV: gatillo en la zona con el arma seca pulsa el ataque como fuera (dentro %d, fuera %d)", sq_seen, sq_out);
+    zones(0.0f, 0.0f, 8); zone_pad = PAD_R1; zones(0.0f, 0.0f, 45); sq_seen = 0; zones(0.0f, 0.9f, 12);
+    CHECK(sq_seen == 0, "RV: con la ventana abierta con el grip el gatillo con el arma seca no pulsa el ataque (cuadrado %d)", sq_seen);
+    zone_pad = 0; zones(0.6f, 0.0f, 60);
 }
 
 int main(void) {
@@ -1800,11 +2336,17 @@ int main(void) {
     CHECK(st.shots == base && sq_seen == 0, "sin munición: no sale disparo (%u) ni cuadrado (%d)", st.shots - base, sq_seen);
 
     grenade_gesture();
+    throw_bench();
     weapon_follows_controller();
     grenade_models();
     menu_zone_blocks_grenade();
     c4_ray_placement();
     c4_remote_grip();
+    c4_direct_chain();
+    c4_remote_chest();
+    mine_rests_on_floor();
+    mine_orientation();
+    mine_ghost_fixed();
     duct_hides_weapon();
     equip_uses_new_turn();
     stinger_hidden_body_and_led_gesture();
@@ -1816,6 +2358,7 @@ int main(void) {
     laser_aims_with_bullet();
     laser_ignores_recoil();
     aim_pose();
+    aim_upright();
     aim_guard();
     weld_firearm();
     prone_releases_support_hand();
@@ -1823,6 +2366,7 @@ int main(void) {
     ammo_pickup_after_empty();
     ammo_pickup_direct();
     raise_skipped();
+    special_view_waits_on_weapon_change();
     laser_stops_at_walls();       /* al final: consume números aleatorios y las pruebas anteriores dependen de la secuencia */
 
     printf("%s vrgame_fire: %d comprobaciones, %d fallos\n", fails ? "FALLO" : "OK", checks, fails);

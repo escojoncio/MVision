@@ -29,8 +29,10 @@ void mv_vrgame_set_gestures(int32_t enable, int32_t mask) {
 static _Atomic int32_t g_menu_hand = -1;       /* publicado por el hilo de juego (pub_menu_hand); el hilo de render solo lo lee */
 static void pub_menu_hand(void) { int h = inited ? G.menu_hold : 0; atomic_store(&g_menu_hand, h & 1 ? 0 : (h & 2 ? 1 : -1)); }
 static int melee_busy, busy_force;              /* golpe/agarre del cuerpo en el último VBlank (lo lee vrgame c4_remote); busy_force: solo pruebas */
-void vrbodyg_reset(void) { melee_busy = 0; if (inited) { vrg_reset(&G); pub_menu_hand(); } }
+static int chest_in[2];                         /* mano física dentro de SU zona de menú en el último VBlank (lo lee vrgame c4_remote: ahí el grip abre el menú y no detona) */
+void vrbodyg_reset(void) { melee_busy = 0; chest_in[0] = chest_in[1] = 0; if (inited) { vrg_reset(&G); pub_menu_hand(); } }
 int vrbodyg_melee_busy(void) { return melee_busy || busy_force; }
+int vrbodyg_hand_in_chest(int side) { return side >= 0 && side < 2 && chest_in[side]; }
 void vrbodyg_test_force_busy(int on) { busy_force = on != 0; }
 unsigned vrbodyg_event_count(int ev) { return ev >= 0 && ev < 16 ? n_events[ev] : 0; }
 /* mano física que mantiene abierta la ventana de armas/objetos con el gesto del pecho (0 izquierda = L2, 1 derecha = R2); -1 ninguna. Lectura atómica del valor publicado al final de la actualización del mando. */
@@ -38,8 +40,8 @@ int32_t mv_vrgame_menu_hand(void) { return atomic_load(&g_menu_hand); }
 
 static int act_holds(int a) { return a == 7 || a == 38 || a == 124; }
 
-/* Bloqueo de disparo en la zona de menú (vr_gesture: vrg_fire_gate): el gatillo del arma de la mano `side` es el real o, con la mano en su zona / con su ventana abierta / hasta soltarlo tras salir, el último visto
- * antes del bloqueo. Con la mano del arma anula además el disparo en cola. Registro [disparo] bloqueado_menu= en cada cambio. Devuelve VRG_FB_* (0 libre). Una vez por VBlank y mano, tras vrbodyg_pad. */
+/* Bloqueo de disparo con un menú abierto (vr_gesture: vrg_fire_gate): el gatillo del arma de la mano `side` es el real o, con su ventana abierta / cualquier menú abierto / hasta soltarlo tras cerrarse, el último visto
+ * antes del bloqueo (la zona del pecho no bloquea: el menú se abre con el grip). Con la mano del arma anula además el disparo en cola. Registro [disparo] bloqueado_menu= en cada cambio. Devuelve VRG_FB_* (0 libre). Una vez por VBlank y mano, tras vrbodyg_pad. */
 int vrbodyg_fire_gate(int side, int weapon_hand, float *trig) {
     static int prev[2];
     if (!inited || side < 0 || side > 1 || !trig) return 0;
@@ -113,7 +115,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, cons
             if (in.tracked[s]) {
                 vrfire_pos_to_world(&map, p, w);
                 for (int i = 0; i < 3; i++) { in.hand[s][i] = w[i] * 0.001f; mf.fist[s][i] = w[i]; }
-                in.grip[s] = gr; in.trig[s] = tg;
+                in.grip[s] = gr;
                 mf.fist_ok[s] = 1; mf.fist_closed[s] = in.fist_btn[s];
                 { float fp[3]; if (mv_vrhost_hands_active() && vrbody_fist_point(s, fp)) for (int i = 0; i < 3; i++) mf.fist[s][i] = fp[i]; }   /* el golpe sale de los nudillos de la mano nueva, no del mando */
                 if (in.cap_valid) {      /* esfera del puño (0,12 m) barrida desde el VBlank anterior contra las cápsulas; un salto de pose no es un barrido */
@@ -141,7 +143,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, cons
                 }
             }
         }
-        in.weapon = bs->weapon; in.item_scope = bs->item == 1; /* IT_Scope */ in.face_view = in.item_scope || vrcam_zoom_capped(); /* mira del juego / vista especial levantada: la zona del pecho no actúa */ { const int wm = vrgame_weld_main(); if (wm >= 0) in.ring_off[wm] = 1; } /* arma de dos manos soldada: la mano del gatillo no tiene anillo de anticipación (un fusil al hombro cae dentro) */ in.stance = bs->stance; in.on_wall = bs->on_wall; in.in_box = bs->in_box; in.in_water = bs->in_water;
+        in.weapon = bs->weapon; in.item_scope = bs->item == 1; /* IT_Scope */ in.face_view = in.item_scope || vrcam_zoom_capped(); /* mira del juego / vista especial levantada: la zona del pecho no actúa */ in.stance = bs->stance; in.on_wall = bs->on_wall; in.in_box = bs->in_box; in.in_water = bs->in_water;
         in.holding = act_holds(bs->player_action); in.life = bs->life;
         in.body[0] = bs->ctl_pos.x * 0.001f; in.body[1] = bs->ctl_pos.y * 0.001f; in.body[2] = bs->ctl_pos.z * 0.001f;
         in.yaw = (float)bs->ctl_rot.y * (6.2831853f / 4096.0f);
@@ -171,9 +173,10 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, cons
     vrg_pad_t pp;                                    /* manos y gatillo físicos también fuera de la capa de juego: sostienen la ventana abierta con el gesto del pecho */
     memset(&pp, 0, sizeof pp);
     pp.ctl = ctl; pp.menu_open = core && bs->menu_open; pp.pad = pad; pp.pad_in = pad_in; pp.r2_fire = r2_fire;
-    for (int s = 0; s < 2; s++) { float p3[3], tg = 0.0f; pp.tracked[s] = vrgame_hand_raw(s, p3, NULL, &tg, NULL); pp.trig[s] = tg; }
+    for (int s = 0; s < 2; s++) { float p3[3], tg = 0.0f; pp.tracked[s] = vrgame_hand_raw(s, p3, NULL, &tg, NULL); pp.trig[s] = tg; pp.fist[s] = (pad_in & (s == domside ? VRG_R1 : VRG_L1)) != 0; }   /* grip = botón del puño de la mano (R1 de la dominante, L1 de la otra) del mando entrante, también en la capa de menú */
     const uint16_t res = vrg_step_pad(&G, &in, &out, &pp);
     melee_busy = out.punch_side >= 0 || out.grab_start || out.grab_side >= 0 || out.swinging || out.squeeze || out.throw_side >= 0;
+    chest_in[0] = out.chest_in[0]; chest_in[1] = out.chest_in[1];
     pub_menu_hand();
     {   /* registro [gest] (va al log del visor): cada intento con su motivo, y cada evento */
         static const char *evn[] = {"", "golpe", "agarre", "apreton", "soltar", "pared", "asomar", "pared2", "dano", "impacto", "ventana", "lanzamiento"};
@@ -190,7 +193,7 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, cons
         }
         for (int s = 0; s < 2; s++) {
             const char *rs = out.pecho[s].opened ? "abierta" : "rechazada";
-            if (out.pecho[s].valid) fprintf(stderr, "[pecho] vb=%u mano=%d zona=%s (%.2f m a su lado, %.2f m bajo la cabeza, %.2f m delante) hf=(lat %.3f, alt %.3f, delante %.3f) m upm=%.0f yaw_personaje=%.1f yaw_cabeza=%.1f grados dist=%.3f m (max %.2f) mantenido=%.2f s (min %.2f) resultado=%s motivo=%s rearme=%s\n", vb, s, s == 0 ? "izquierda" : "derecha", G.cfg.chest_side, G.cfg.chest_down, G.cfg.chest_fwd, out.pecho[s].hf[0], out.pecho[s].hf[1], out.pecho[s].hf[2], map.units_per_m, in.yaw * (180.0f / 3.14159265f), atan2f(in.head_fwd[0], in.head_fwd[1]) * (180.0f / 3.14159265f), out.pecho[s].dist, G.cfg.chest_radius, out.pecho[s].hold, G.cfg.chest_hold_s, rs, out.pecho[s].reason, out.pecho[s].rearm ? "bloqueado_hasta_soltar_gatillo" : "armado");
+            if (out.pecho[s].valid) fprintf(stderr, "[pecho] vb=%u mano=%d zona=%s (%.2f m a su lado, %.2f m bajo la cabeza, %.2f m delante) hf=(lat %.3f, alt %.3f, delante %.3f) m upm=%.0f yaw_personaje=%.1f yaw_cabeza=%.1f grados dist=%.3f m (max %.2f) mantenido=%.2f s (min %.2f) resultado=%s motivo=%s rearme=%s\n", vb, s, s == 0 ? "izquierda" : "derecha", G.cfg.chest_side, G.cfg.chest_down, G.cfg.chest_fwd, out.pecho[s].hf[0], out.pecho[s].hf[1], out.pecho[s].hf[2], map.units_per_m, in.yaw * (180.0f / 3.14159265f), atan2f(in.head_fwd[0], in.head_fwd[1]) * (180.0f / 3.14159265f), out.pecho[s].dist, G.cfg.chest_radius, out.pecho[s].hold, G.cfg.chest_hold_s, rs, out.pecho[s].reason, out.pecho[s].rearm ? "bloqueado_hasta_soltar_grip" : "armado");
         }
         if (out.grab_why) fprintf(stderr, "[gest] vb=%u agarre %s mano=%d distancia=%.2f m (cuello/espalda, limite 0,30)\n", vb, out.grab_why, out.grab_side_try, out.grab_dist);
         if (out.knock_why) { int ks = out.knock_try_side >= 0 ? out.knock_try_side : 0; fprintf(stderr, "[toque] vb=%u motivo=%s mano=%d v=%.2f m/s distancia=%.3f m puno=%d ny=%.2f postura=%d en_pared=%d fuente=%c\n", vb, out.knock_why, out.knock_try_side, out.knock_speed, out.knock_dist, in.fist_btn[ks], in.wall_ny[ks], in.stance, in.on_wall, wsrc[ks]); }
@@ -224,6 +227,6 @@ uint16_t vrbodyg_pad(uint16_t pad, const BridgeState *bs, int right_handed, cons
     }
     if (out.event > 0 && out.event < 16) n_events[out.event]++;
     if (out.haptic[0] > 0 || out.haptic[1] > 0) { vrgame_haptic(0, out.haptic[0]); vrgame_haptic(1, out.haptic[1]); }
-    /* Capa de MENÚ (!ctl): ningún gesto toca el mando salvo la ventana de armas/objetos abierta con el gesto del pecho, que vrg_step_pad mantiene con el gatillo de esa mano. */
+    /* Capa de MENÚ (!ctl): ningún gesto toca el mando salvo la ventana de armas/objetos abierta con el gesto del pecho, que vrg_step_pad mantiene con el grip de esa mano. */
     return res;
 }

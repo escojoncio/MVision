@@ -1084,7 +1084,61 @@ static void test_c4_plant(void) {
     w16(BODY + 16, 0);
 }
 
+/* C4 / mina: la animacion de colocar hunde la articulacion de la cabeza sin cambiar de postura y sin el numero de accion esperado (OBJECT.action2 = 0, ni 49 ni 54): la cabeza VR no la sigue
+ * (se detecta por el efecto). Con otra arma, o si la postura cambia de verdad (agacharse), el ojo sigue a la articulacion. */
+static void test_c4_dip(void) {
+    VrCamConfig c; BridgeState s; VrCamPlan p;
+    const int yst = 1029, jy_stand = 468, jy_low = 100;
+    for (int wpn = 5; wpn <= 6; wpn++) {
+        anchor_start(&c, &s);
+        w16(BA_VARS + 2u * BRIDGE_V_WEAPON, (int16_t)wpn);
+        w16(BODY + 16, 0);
+        for (int k = 0; k < 40; k++) anchor_tick(&s, 1000, yst, 10, jy_stand, 20, 0, &p);
+        const float stand_y = p.from[1];
+        float worst = 0.0f;
+        for (int k = 0; k < 90; k++) {                           /* baja a ras de suelo en 0,4 s y se queda 2 s */
+            int jy = k < 10 ? jy_stand - (jy_stand - jy_low) * (k + 1) / 10 : jy_low;
+            anchor_tick(&s, 1000, yst, 10, jy, 20, 0, &p);
+            float d = fabsf(p.from[1] - stand_y);
+            if (d > worst) worst = d;
+        }
+        printf("arma %d colocando sin accion 49/54: mayor desvio del ojo %.1f uds\n", wpn, (double)worst);
+        CHECK(worst <= 12.0f);
+        for (int k = 0; k < 40; k++) anchor_tick(&s, 1000, yst, 10, jy_stand, 20, 0, &p);        /* la cabeza vuelve */
+        NEAR(p.from[1], stand_y, 4.0);
+        for (int k = 0; k < 60; k++) anchor_tick(&s, 1000 + 4 * (k + 1), yst, 10, jy_stand + (k & 1 ? 30 : -30), 20, BRIDGE_PS_MOVE, &p);   /* andando: la altura de pie aprendida no se corrompio */
+        NEAR(p.from[1], stand_y, 6.0);
+        /* agacharse de verdad (la postura cambia): el ojo baja */
+        for (int k = 0; k < 40; k++) anchor_tick(&s, 1000 + 4 * 60, yst, 10, jy_stand, 20, 0, &p);
+        for (int k = 0; k < 70; k++) anchor_tick(&s, 1000 + 4 * 60, yst, 10, k < 10 ? jy_stand - (jy_stand - 250) * (k + 1) / 10 : 250, 20, BRIDGE_PS_SQUAT, &p);
+        NEAR(p.from[1], yst + 250 + c.eye_up, 6.0);
+    }
+    /* sin carga ni mina el ojo sigue a la articulacion (comportamiento de siempre) */
+    anchor_start(&c, &s);
+    w16(BA_VARS + 2u * BRIDGE_V_WEAPON, 0);
+    for (int k = 0; k < 40; k++) anchor_tick(&s, 1000, yst, 10, jy_stand, 20, 0, &p);
+    for (int k = 0; k < 60; k++) anchor_tick(&s, 1000, yst, 10, jy_low, 20, 0, &p);
+    NEAR(p.from[1], yst + jy_low + c.eye_up, 4.0);
+}
+
+/* Tras el tope de retencion con la cabeza aun abajo, la altura aprendida no se contamina con el hundimiento: al volver la cabeza y andar, el ojo vuelve a la altura de antes de la retencion */
+static void test_c4_dip_timeout(void) {
+    VrCamConfig c; BridgeState s; VrCamPlan p;
+    const int yst = 1029, jy_stand = 468, jy_low = 100;
+    anchor_start(&c, &s);
+    w16(BA_VARS + 2u * BRIDGE_V_WEAPON, 5);
+    w16(BODY + 16, 0);
+    for (int k = 0; k < 40; k++) anchor_tick(&s, 1000, yst, 10, jy_stand, 20, 0, &p);
+    const float stand_y = p.from[1];
+    for (int k = 0; k < 280; k++) anchor_tick(&s, 1000, yst, 10, k < 10 ? jy_stand - (jy_stand - jy_low) * (k + 1) / 10 : jy_low, 20, 0, &p);      /* 5,6 s abajo: pasa el tope de 4 s */
+    for (int k = 0; k < 90; k++) anchor_tick(&s, 1000 + 4 * (k + 1), yst, 10, jy_stand + (k & 1 ? 30 : -30), 20, BRIDGE_PS_MOVE, &p);        /* vuelve la cabeza y anda */
+    printf("mina: tras el tope de retencion y andar, ojo %.1f (de pie %.1f)\n", (double)p.from[1], (double)stand_y);
+    NEAR(p.from[1], stand_y, 6.0);
+}
+
 int main(void) {
+    test_c4_dip_timeout();
+    test_c4_dip();
     test_c4_plant();
     test_psg1_stance();
     test_angles();

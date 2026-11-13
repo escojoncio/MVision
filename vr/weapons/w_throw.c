@@ -2,7 +2,7 @@
  * Interacción: el objeto equipado aparece en la mano (sin gesto). Apretar el GATILLO = "preparada" (el anfitrión mantiene el botón de ataque del
  * juego, que es el que saca el pasador; mientras se mantiene no sale nada); soltarlo = lanzamiento físico con la velocidad lineal/angular de la mano
  * estimada con el historial de poses (wvh_estimate) en la ventana V_WIN que acaba cuando el gatillo EMPIEZA a soltarse (no cuando acaba de abrirse: la
- * mano ya frena). La velocidad de salida es la de la mano (ganancia 1, sin valor fijo); solo el tope físico V_MAX la limita. Soltar sin haber
+ * mano ya frena) o, si es más rápida y va en la misma dirección, en una de las anteriores hasta V_BACK antes (la mano ya había parado cuando el dedo abrió). La velocidad de salida es la de la mano (ganancia 1, sin valor fijo); solo el tope físico V_MAX la limita. Soltar sin haber
  * preparado no hace nada; el agarre no interviene. Por debajo de V_THROW_MIN (m/s) es un soltar suave (la velocidad medida, sin sonido de
  * lanzamiento). Sin anilla, pasador ni palanca propios: el pasador y la palanca son piezas del modelo, pegadas a él.
  * Si el juego rechaza el evento (w5_emit devuelve 0) no se gasta nada: la arrojadiza sigue lista y se reintenta cada RETRY_T s. */
@@ -24,7 +24,11 @@
 #define V_LAG_MIN         0.010f  /* la ventana acaba al menos este tiempo antes del último muestreo (el borde de la parábola es ruidoso) */
 #define V_LAG_MAX         0.120f  /* ... y como mucho este tiempo antes (un soltar muy lento no mide una velocidad de hace medio segundo) */
 #define V_SLOW_COS        0.5f    /* coseno de 60 grados: la ventana lenta solo vale si apunta a menos de esto de la corta o del frente de la mano */
-#define V_LAG_SLOW        0.300f  /* soltar lento del gatillo (de TRIG_ON a TRIG_OFF): la mano ya frena cuando se detecta; se mide tambien la ventana que acaba al empezar a soltar (hasta este tiempo antes) y vale la mas rapida */
+#define V_BACK            0.250f  /* las ventanas candidatas acaban hasta este tiempo antes de empezar a soltar el gatillo (la mano frena antes de que el dedo abra) */
+#define V_STEP            0.020f  /* paso entre ventanas candidatas (un VBlank) */
+#define V_JUMP_V          2.0f    /* paso entre muestras (m/s) a partir del cual puede ser un salto de pose si sus vecinos van casi parados */
+#define V_JUMP_K          0.25f   /* ... y "casi parados" = menos de esta fracción de su velocidad */
+#define V_UP              1.15f   /* una ventana más antigua solo sustituye a la última si es al menos tantas veces más rápida (el máximo de muchas estimaciones ruidosas sesga al alza) */
 #define RESPAWN_T         0.40f   /* tiempo hasta volver a poder sacar otra */
 
 /* Datos ajustables por tipo: s de espoleta (provisionales; el juego pone la suya al crear la granada). */
@@ -46,6 +50,9 @@ static WLaunch g_last;
 static WLaunchHook g_hook; static void *g_hook_user;
 static uint32_t g_seq;
 void w_throw_set_hook(WLaunchHook hook, void *user) { g_hook = hook; g_hook_user = user; }
+static WLaunchHook g_probe; static void *g_probe_user;
+void w_throw_set_probe(WLaunchHook hook, void *user) { g_probe = hook; g_probe_user = user; }
+int w5_probe(WLaunch ev) { return g_probe && g_probe(g_probe_user, &ev) ? 1 : 0; }
 const WLaunch *w_launch_last(void) { return &g_last; }
 
 int w5_emit(const WGameBridge *g, WLaunch ev) {
@@ -164,6 +171,30 @@ int wvh_estimate(const WVHist *h, float win, float lag, WVec3 *lin, WVec3 *ang) 
     return n;
 }
 
+/* La ventana [now - lag - win, now - lag] contiene al menos dos muestras (si no, wvh_estimate usaría las dos más recientes, que no son de esa ventana). */
+static int wvh_in_history(const WVHist *h, float win, float lag) {
+    const float t1 = h->clock - lag, t0 = t1 - win;
+    int n = 0;
+    for (int i = h->n; i >= 1; i--) { const WVSample *s = &h->s[(h->head - i + WV_HIST) % WV_HIST]; if (s->t >= t0 && s->t <= t1) n++; }
+    return n >= 2;
+}
+
+/* La ventana contiene un salto de pose de una sola muestra (pérdida y recuperación del seguimiento, recentrado): un paso de >= V_JUMP_V m/s con los pasos vecinos casi parados. Un lanzamiento acelera y frena en rampa, nunca así. */
+static int wvh_jump(const WVHist *h, float win, float lag) {
+    const float t1 = h->clock - lag, t0 = t1 - win;
+    float sp[WV_HIST]; int n = 0; WVec3 pp = wv(0, 0, 0); float pt = 0; int have = 0;
+    for (int i = h->n; i >= 1; i--) {
+        const WVSample *s = &h->s[(h->head - i + WV_HIST) % WV_HIST];
+        if (s->t < t0 || s->t > t1) continue;
+        if (have && s->t - pt >= 1e-3f) { sp[n++] = wv_len(wv_sub(s->p.p, pp)) / (s->t - pt); }
+        else if (have) continue;          /* muestra repetida (VBlanks pegados): no cuenta como paso */
+        pp = s->p.p; pt = s->t; have = 1;
+    }
+    for (int i = 0; i < n; i++)
+        if (sp[i] >= V_JUMP_V && (i == 0 || sp[i - 1] < V_JUMP_K * sp[i]) && (i == n - 1 || sp[i + 1] < V_JUMP_K * sp[i])) return 1;
+    return 0;
+}
+
 /* ---------------------------------------------------------------- arrojadizas */
 static void throw_init_k(WeaponState *s, const WeaponDef *d, int kind) {
     WThrowState *t = (WThrowState *)s;
@@ -190,16 +221,24 @@ static int throw_it(WThrowState *t, const WInput *in, const WGameBridge *g) {
     ev.kind = WL_THROW;
     WVec3 vh, wh;
     float lag = t->rel_t >= 0 ? t->hist.clock - t->rel_t : 0.0f;       /* el instante que vale es el de empezar a soltar el gatillo, no el de detectarlo abierto */
-    wvh_estimate(&t->hist, V_WIN, wcore_clampf(lag, V_LAG_MIN, V_LAG_MAX), &vh, &wh);
-    if (lag > V_LAG_MAX) {      /* gatillo lento: el tope de V_LAG_MAX deja la ventana en plena frenada de la mano (granadas que caian a los pies); gana la ventana de antes si es mas rapida */
+    float win_lag = wcore_clampf(lag, V_LAG_MIN, V_LAG_MAX);
+    wvh_estimate(&t->hist, V_WIN, win_lag, &vh, &wh);
+    ev.v_hand = wv_len(vh);
+    /* La mano ya frena cuando el dedo abre el gatillo (el gesto de lanzar acaba en la parada y el dedo tarda 50-150 ms): la ventana que acaba al empezar a soltar mide el final del frenado (el log de campo daba
+     * 0,2-2 m/s con tiros de 4-8 m/s). Se recorren ventanas que acaban cada vez antes (hasta V_BACK antes de empezar a soltar el gatillo) y vale la más rápida, siempre que vaya en la misma
+     * dirección (a menos de ~60 grados) que la última marcha significativa o que el frente de la mano: un amago hacia atrás más rápido no manda la granada hacia atrás. */
+    const WVec3 front = wquat_rotate(wquat_normalize(in->hand[0].q), wv(0, 0, -1));
+    WVec3 ref = wv_len(vh) > 0.3f ? vh : wv(0, 0, 0);      /* la dirección de la última marcha significativa (>= 0,3 m/s); el frente de la mano no basta: el marco de la mano nueva no mira al frente */
+    for (float l = win_lag + V_STEP; l <= lag + V_BACK; l += V_STEP) {
         WVec3 vs, ws;
-        wvh_estimate(&t->hist, V_WIN, wcore_clampf(lag, V_LAG_MIN, V_LAG_SLOW), &vs, &ws);
-        if (wv_len(vs) > wv_len(vh)) {      /* ... pero solo si va en la misma dirección (a menos de ~60 grados) que la ventana corta o que el frente de la mano: un amago hacia atrás más rápido no manda la granada hacia atrás */
-            const WVec3 front = wquat_rotate(wquat_normalize(in->hand[0].q), wv(0, 0, -1));
-            const float cs = wv_len(vs) > 1e-6f ? 1.0f / wv_len(vs) : 0.0f, ch = wv_len(vh) > 0.3f ? 1.0f / wv_len(vh) : 0.0f;      /* ventana corta de menos de 0,3 m/s: sin dirección fiable */
-            if (cs * wv_dot(vs, front) >= V_SLOW_COS || (ch > 0.0f && cs * ch * wv_dot(vs, vh) >= V_SLOW_COS)) { vh = vs; wh = ws; }
-        }
+        if (!wvh_in_history(&t->hist, V_WIN, l)) continue;      /* ventana candidata fuera del historial: se descarta */
+        wvh_estimate(&t->hist, V_WIN, l, &vs, &ws);
+        if (wv_len(ref) == 0.0f && wv_len(vs) > 0.3f) ref = vs;
+        if (!(wv_len(vs) > V_UP * wv_len(vh)) || wvh_jump(&t->hist, V_WIN, l)) continue;
+        const float cs = 1.0f / wv_len(vs), cr = wv_len(ref) > 0.0f ? 1.0f / wv_len(ref) : 0.0f;
+        if (cs * wv_dot(vs, front) >= V_SLOW_COS || (cr > 0.0f && cs * cr * wv_dot(vs, ref) >= V_SLOW_COS)) { vh = vs; wh = ws; win_lag = l; }
     }
+    ev.v_used = wv_len(vh); ev.win_len = V_WIN; ev.win_lag = win_lag; ev.rel_lag = lag;
     float wl = wv_len(wh);
     if (!(wl <= W_MAX)) wh = wl > 0 && wl == wl ? wv_scale(wh, W_MAX / wl) : wv(0, 0, 0);   /* tope (y NaN -> 0) */
     WVec3 r = wv_sub(ev.pose.p, in->hand[0].p);          /* de la mano al centro del objeto */

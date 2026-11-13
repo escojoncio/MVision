@@ -29,7 +29,7 @@
  *   del cono incluida), sin reconstruirla. Color = el del cono (celeste normal, rojo alerta), relleno aditivo tenue, borde punteado;
  *   la periferia (fracción del semiángulo > periph_frac) más tenue y con punteado más ralo ("solo cuenta si te mueves").
  *   Las cámaras de vigilancia (cono amarillo) y el cono del propio jugador no se amplían. Con perception.enabled == 0 o
- *   range_mult <= 1 (preset ORIGINAL) no se dibuja nada extra. Desaparece solo cuando el juego oculta o interfiere el radar
+ *   range_mult <= 1 (preset ORIGINAL) no se dibuja nada extra. range_scale > 1 se limita a lo que cabe en la ventana del radar (71x54 px; nunca baja del x1): fuera de ella el borde no se vería. Desaparece solo cuando el juego oculta o interfiere el radar
  *   (no hay conos de soldado en el dibujo).
  *
  * 4. Anclaje al antebrazo (vrradar_wrist_quad)

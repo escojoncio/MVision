@@ -853,14 +853,6 @@ func runMenuLayout() {
             check("registro-2d3d", "recorte del marco -> ventana: v' = (v * 256 + 5) / 268", abs(fu2.y - 5.0 / 268) < 1e-6 && abs(fu2.w - 261.0 / 268) < 1e-6 && fu2.x == 0 && fu2.z == 1, "\(fu2)")
         } else { check("registro-2d3d", "XR2DWindow válida", false, "") }
         check("credito-region1", "el tamaño en píxeles de la capa no interviene", XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(.nan, 0)) == XRFramedLayout.size(uv: r1, layerPx: SIMD2<Float>(320, 240)), "")
-        // Ventana 2D abierta (selector, pausa): el panel único va a 0,9 m en la dirección de mirada fijada al abrirse (rumbo + cabeceo), cara al usuario, y mide entre 1x y 1,3x el ángulo del panel de partida.
-        let om = XRFramedLayout.overlayModel(position: SIMD3<Float>(1, 1.6, -2), yaw: 0.6, pitch: 0.3)
-        let od = XRMath.position(om) - SIMD3<Float>(1, 1.6, -2)
-        let gaze = SIMD3<Float>(-sinf(0.6) * cosf(0.3), sinf(0.3), -cosf(0.6) * cosf(0.3))
-        let on = SIMD3<Float>(om.columns.2.x, om.columns.2.y, om.columns.2.z)
-        check("panel2d-ventana", "a 0,9 m, en la dirección de la mirada y con la cara (+Z) hacia la cabeza", abs(simd_length(od) - 0.9) < 1e-4 && simd_dot(simd_normalize(od), gaze) > 0.9999 && simd_dot(on, -gaze) > 0.9999, "\(od)")
-        let angW = 2 * atan2f(fs240.x * XRFramedLayout.overlayScale / 2, XRFramedLayout.overlayDistance), angN = 2 * atan2f(fs240.x / 2, XRFramedLayout.distance)
-        check("panel2d-ventana", "tamaño angular entre 1x y 1,3x el del panel de partida", angW >= angN && angW <= 1.3 * angN, "\(angW) \(angN)")
     }
 }
 

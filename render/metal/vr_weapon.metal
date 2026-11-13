@@ -103,15 +103,22 @@ fragment float4 vr_fs_weapon(VrWpnVOut in [[stage_in]], constant VrWpnFrame &f [
 #define VR_SPC_MODE_SCOPE 0.0
 #define VR_SPC_MODE_HUD 1.0
 #define VR_SPC_MODE_MISSILE 2.0
-#define VR_SPC_MODE_AASCREEN 3.0   /* visor del antiaéreo en su pieza: imagen viva (textura 0) + HUD del juego (textura 1, subrectángulo uv, p0.z = premultiplicado) */
+#define VR_SPC_MODE_AASCREEN 3.0   /* visor del antiaéreo en su pieza: imagen viva (textura 0) + HUD del juego (textura 1, subrectángulo uv de la vista 4:3 del juego, p0.z = premultiplicado) */
 
 struct VrSpcDraw {
     float4x4 model;             /* local -> mundo VR; incluye el tamaño del rectángulo */
     float4 uv;                  /* x, y, ancho, alto del subrectángulo de la textura 0 (HUD); el resto de modos usan (0, 0, 1, 1) */
     float4 p0;                  /* x = modo, y = opacidad, z = ruido (misil) / la textura del HUD es la capa 2D fiel, de alfa PREMULTIPLICADO (modo 1), w = tiempo (s, módulo 64) */
     float4 p1;                  /* x = disco, y = grosor del marco oscuro de las pantallas LED (modos 2 y 3; fracción de la altura, 0 = sin marco), z = terminado, w = proporción ancho/alto */
-    float4 p2;                  /* x = la imagen de la textura 0 ya es lineal (se lleva a gamma antes de mezclar); y, z = prismáticos (modo HUD con y > 0); y > 0,5 en el modo misil = pantalla LED en espera, ver el fragmento; w = nº de vértices de la máscara poligonal (mira; 0 = sin máscara) */
+    float4 p2;                  /* x = la imagen de la textura 0 ya es lineal (se lleva a gamma antes de mezclar); y, z = prismáticos (modo HUD con y > 0); z en el modo misil = HUD del juego encima (0 no, 1 alfa directo, 2 premultiplicado); y > 0,5 en el modo misil = pantalla LED en espera, ver el fragmento; w = nº de vértices de la máscara poligonal (mira; 0 = sin máscara) */
     float4 poly[4];             /* máscara poligonal convexa de la mira: vértices (u, v) sobre el rectángulo (v hacia abajo), 2 por float4 (xy, zw), hasta 8 */
+};
+/* Colocación del marco del juego en la textura del HUD (fragmento, buffer 3; Swift: SpcHudU, 32 bytes). Con la capa 2D fiel (HQ) la textura es la ventana visible (PAL 320x268) y el marco 320x256 va desplazado
+ * (XR2DWindow.frameUV); con el HUD de reserva la textura es el marco / la vista entera y ambos rectángulos son (0, 0, 1, 1). */
+#define VR_SPC_BUF_HUD 3
+struct VrSpcHud {
+    float4 frame;               /* x, y, ancho, alto (uv de la textura del HUD) del MARCO del juego: las fracciones del marco (iconos del HUD) se pasan a la textura con frame.xy + f * frame.zw */
+    float4 view;                /* x, y, ancho, alto (uv de la textura del HUD) de la vista 3D 4:3 (GD_VIEW, 320x240), centrada en el marco: el recorte uv del misil es sobre ella, no sobre la textura entera */
 };
 struct VrSpcOut {
     float4 pos [[position]];
@@ -135,6 +142,12 @@ vertex VrSpcOut vr_vs_spc_amp(uint vid [[vertex_id]], ushort amp [[amplification
     return vr_spc_pack(vid, f, d, uint(amp));
 }
 
+/* Iconos del HUD del juego que no van en las pantallas LED del arma (misma partición de la capa que XRPresent.hudRegions): vida / oxígeno (arriba izquierda), objeto equipado (L2, abajo izquierda) y arma equipada
+ * con su munición (R2, abajo derecha). ff = fracciones del MARCO del juego (0..1), como hudRegions; la textura del HUD se pasa a ellas con VrSpcHud.frame. El resto (mira, marco de fijación, textos del misil) se conserva. */
+inline bool vr_spc_hud_icon(float2 ff) {
+    return (ff.x < 0.35 && ff.y < 0.17) || (ff.x < 0.25 && ff.y > 0.62) || (ff.x > 0.75 && ff.y > 0.62);
+}
+
 inline float vr_spc_enc1(float c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
 
 inline float vr_spc_hash(float2 p, float t) {
@@ -142,7 +155,7 @@ inline float vr_spc_hash(float2 p, float t) {
 }
 
 /* texture 0 = imagen (segunda vista renderizada o textura del HUD), texture 1 = abertura y retícula (solo la mira). */
-fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buffer(VR_SPC_BUF_DRAW)]],
+fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buffer(VR_SPC_BUF_DRAW)]], constant VrSpcHud &hd [[buffer(VR_SPC_BUF_HUD)]],
                           texture2d<float> img [[texture(0)]], texture2d<float> ovl [[texture(1)]]) {
     constexpr sampler sLin(filter::linear, address::clamp_to_edge);
     float2 q = in.q;
@@ -179,12 +192,12 @@ fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buff
     if (mode > 2.5) {                                                    /* visor del antiaéreo: imagen viva + mira y marco de fijación del HUD, ya recortado a la máscara poligonal */
         rgb = img.sample(sLin, q).xyz;
         if (d.p2.x > 0.5) rgb = float3(vr_spc_enc1(rgb.x), vr_spc_enc1(rgb.y), vr_spc_enc1(rgb.z));
-        float2 hu = float2(d.uv.x, d.uv.y) + q * float2(d.uv.z, d.uv.w);
+        float2 hu = hd.view.xy + (float2(d.uv.x, d.uv.y) + q * float2(d.uv.z, d.uv.w)) * hd.view.zw;     /* uv = recorte sobre la vista 4:3 del juego; se lleva a la vista dentro de la textura del HUD (como el misil) */
         float4 h = ovl.sample(sLin, hu);
         float al = h.w;
         float3 hc = float3(h.x, h.y, h.z);
         if (d.p0.z > 0.5) { al = max(h.w, max(h.x, max(h.y, h.z))); hc = hc / max(al, 1e-4); }   /* capa premultiplicada (lo aditivo lleva alfa 0 y color): a alfa directo */
-        if (hu.x < 0.0 || hu.y < 0.0 || hu.x > 1.0 || hu.y > 1.0) al = 0.0;
+        if (hu.x < 0.0 || hu.y < 0.0 || hu.x > 1.0 || hu.y > 1.0 || vr_spc_hud_icon((hu - hd.frame.xy) / hd.frame.zw)) al = 0.0;     /* sin los iconos de vida / equipo L2 / equipo R2 (hu es de la textura; los iconos van en fracciones del marco) */
         rgb = mix(rgb, hc, clamp(al, 0.0, 1.0));
     } else if (mode < 0.5) {                                             /* mira: imagen aumentada + abertura y retícula */
         rgb = img.sample(sLin, q).xyz;
@@ -232,6 +245,15 @@ fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buff
             float2 c = abs(px - float2(128.0 * d.p1.w, 128.0));
             float xh = (c.x < 0.6 && c.y > 6.0 && c.y < 22.0) || (c.y < 0.6 && c.x > 6.0 && c.x < 22.0) ? 1.0 : 0.0;
             rgb = mix(rgb, float3(0.7, 1.0, 0.7), xh * 0.9);
+        }
+        if (d.p2.z > 0.5 && d.p1.z < 0.5) {                              /* HUD del juego (textos y marcas del misil, capa 2D fiel) encima de la imagen; p2.z = 1 alfa directo, 2 premultiplicado. El recorte uv es sobre la imagen 4:3 (GD_VIEW): se lleva a la vista 4:3 DENTRO de la textura del HUD (hd.view; con la capa HQ la textura es la ventana 320x268, más alta que la vista 320x240) */
+            float2 hu = hd.view.xy + (float2(d.uv.x, d.uv.y) + q * float2(d.uv.z, d.uv.w)) * hd.view.zw;
+            float4 h = ovl.sample(sLin, hu);
+            float al = h.w;
+            float3 hc = float3(h.x, h.y, h.z);
+            if (d.p2.z > 1.5) { al = max(h.w, max(h.x, max(h.y, h.z))); hc = hc / max(al, 1e-4); }
+            if (hu.x < 0.0 || hu.y < 0.0 || hu.x > 1.0 || hu.y > 1.0 || vr_spc_hud_icon((hu - hd.frame.xy) / hd.frame.zw)) al = 0.0;
+            rgb = mix(rgb, hc, clamp(al, 0.0, 1.0));
         }
         float e = max(abs(r.x), abs(r.y));
         rgb *= e > 0.97 ? 0.15 : 1.0;                                    /* marco */

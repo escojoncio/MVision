@@ -41,6 +41,7 @@
 #include "vr_hand_skin.h"
 #include "vr_hand_asset.h"
 #include "gripfit.h"
+#include "w_throw.h"
 #include "rast.h"
 #ifndef RES_DIR
 #define RES_DIR "/tmp/w63"
@@ -59,9 +60,13 @@ static const WI_t WI[]={
   * grenade.c: GRD_GRENADE -> grenade (0x3b88), GRD_STUN y GRD_CHAFF -> can_gren (0x7a64). La palma no se mueve (t = r = 0): solo se diseñan los ángulos. */
  {"FRAG",0x3b88,2,{0,0,0},{0,0,0,1},{0,0,0},{-47.7f,54.8f,15.4f}},
  {"STUN",0x7a64,7,{0,0,0},{0,0,0,1},{0,0,0},{-47.7f,54.8f,15.4f}},
- {"CHAFF",0x7a64,8,{0,0,0},{0,0,0,1},{0,0,0},{-47.7f,54.8f,15.4f}}};
+ {"CHAFF",0x7a64,8,{0,0,0},{0,0,0,1},{0,0,0},{-47.7f,54.8f,15.4f}},
+ /* claymore (placed_b, id 5): el objeto en la mano es el modelo del juego con las patas desplegadas (wcut, canal CUSTOM0 = 1), en su marco HELD (cara picuda +X, eje largo Z, mira +Y). Solo mano derecha y sin gatillo;
+  * la base de la mano no es la de Snake sino CL_HAND (palma en la cara trasera central, dedos hacia arriba rodeando el canto superior) y el zócalo/giro se emiten con CL_ROT (ver emit_weapon). */
+ {"CLAYMORE",0x17a1,5,{0,0,0},{0,0,0,1},{0,0,0},{0,0,0}}};
 #define NW 5      /* armas (con malla de wcut y dos manos) */
-#define NWI 8     /* + granadas */
+#define NWI 9     /* + granadas y claymore */
+#define CL 8      /* índice de la claymore */
 static const float Hm[9]={-1,0,0, 0,0,1, 0,1,0};
 static const float ANG_LO[25]={0,-15,0,0,-15, 0,-15,0,0,-15, 0,-15,0,0,-15, 0,-15,0,0,-15, 0,0,-25,0,0};
 static const float ANG_HI[25]={10,90,110,80,15, 10,90,110,80,15, 10,90,110,80,15, 10,90,110,80,15, 45,45,25,60,70};
@@ -83,7 +88,21 @@ static int load_object(const uint8_t*arch,size_t alen,int wi){   /* granada: mal
   WLoadOpts o;wload_default_opts(&o);o.resident="init";o.upscale=2;o.frame=W_FRAME_HELD;o.scale=0.001f;if(wload_model(arch,alen,"init",WI[wi].model,&o,&M_)){fprintf(stderr,"load\n");return -1;}
   NT=M_.ni/3;TWp=malloc(sizeof(float)*9*NT);for(int i=0;i<(int)M_.ni;i++){const WVertex*v=&M_.v[M_.idx[i]];TWp[i][0]=-v->pos[0];TWp[i][1]=-v->pos[1];TWp[i][2]=v->pos[2];}
   gf_build(&WT,TWp,NT);gf_orient_outward(&WT);HASTRIG=0;TSURF=0;memset(&TBASE,0,sizeof TBASE);memset(&TFRAME,0,sizeof TFRAME);memset(&GR,0,sizeof GR);GR.q.w=1;OBJ=1;return 0;}
+static int load_claymore(const uint8_t*arch,size_t alen){   /* placed_b con el modelo del juego y las patas desplegadas, en el marco del modelo (W = identidad) */
+  WLoadOpts o;wload_default_opts(&o);o.resident="init";o.upscale=2;o.frame=W_FRAME_HELD;o.scale=0.001f;if(wload_model(arch,alen,"init",WI[CL].model,&o,&M_)){fprintf(stderr,"load\n");return -1;}
+  WCutSet cs;memset(&cs,0,sizeof cs);const WCutModel*cm=wcut_find(WI[CL].model);if(!cm||wcut_run(&M_,cm,&cs)){fprintf(stderr,"wcut\n");return -1;}
+  const WeaponDef*base=NULL;for(int i=0;i<w_registry_count;i++)if(w_registry[i]&&!strcmp(w_registry[i]->id,cm->weapon))base=w_registry[i];if(!base)return -1;
+  WeaponDef*def=malloc(sizeof *def);WeaponState*st=calloc(1,base->state_size);*def=*base;st->def=def;def->init(st);st->def=def;weapon_bind(st,cs.meshes,cs.nmeshes,cs.parts,cs.nparts);
+  if(def->make_ready)def->make_ready(st,def->mag_capacity);st->phase=WPL_PH_HELD;w5_hide(st,0);st->channel[WCH_CUSTOM0]=1.0f;
+  VrHandsConfig hc;vrhands_default_config(&hc);hc.grip_mode=VRH_GRIP_SOCKET;VrHandsRig*rig=vrhands_create(&hc);vrhands_bind(rig,st,cs.atlas,cs.atlas_w,cs.atlas_h);
+  GR=vrhands_grip(rig,st);memset(&SP,0,sizeof SP);SP.q.w=1;vrhands_set_socket(rig,wpose_inv(GR));
+  VrHandsPose hp;memset(&hp,0,sizeof hp);hp.valid=1;hp.rot[3]=1;if(vrhands_build(rig,st,&hp,&FR)<=0){fprintf(stderr,"build\n");return -1;}
+  NT=0;for(int m=0;m<FR.nmeshes;m++)NT+=FR.meshes[m].nidx/3;TWp=malloc(sizeof(float)*9*NT);int k=0;
+  for(int m=0;m<FR.nmeshes;m++){const VrHandsMesh*Mm=&FR.meshes[m];for(uint32_t t=0;t+2<Mm->nidx;t+=3)for(int c3=0;c3<3;c3++){const float*q=Mm->verts[Mm->idx[t+c3]].pos,*a=Mm->model;
+    TWp[k][0]=a[0]*q[0]+a[4]*q[1]+a[8]*q[2]+a[12];TWp[k][1]=a[1]*q[0]+a[5]*q[1]+a[9]*q[2]+a[13];TWp[k][2]=a[2]*q[0]+a[6]*q[1]+a[10]*q[2]+a[14];k++;}}
+  gf_build(&WT,TWp,NT);gf_orient_outward(&WT);HASTRIG=0;TSURF=0;OBJ=0;memset(&TBASE,0,sizeof TBASE);memset(&TFRAME,0,sizeof TFRAME);return 0;}
 static int load_weapon(const uint8_t*arch,size_t alen,int wi){
+  if(wi==CL)return load_claymore(arch,alen);
   if(wi>=NW)return load_object(arch,alen,wi);OBJ=0;
   WLoadOpts o;wload_default_opts(&o);o.resident="init";o.upscale=2;o.frame=W_FRAME_HELD;o.scale=0.001f;
   if(wload_model(arch,alen,"init",WI[wi].model,&o,&M_)){fprintf(stderr,"load\n");return -1;}
@@ -108,7 +127,14 @@ static int load_weapon(const uint8_t*arch,size_t alen,int wi){
   return 0;}
 /* ---- mano ---- */
 typedef struct{int side;float R[9],o[3],d[3],c[3];}Base;
+/* claymore: CL_HAND = orientación de diseño de la mano derecha en el marco del modelo (columnas = palma +X -> +X, dedos -Y -> +Y, pulgar +Z -> -Z: palma contra la cara trasera, dedos hacia arriba);
+ * base con o = 0 y d = -c: t (mm, marco de la base) lleva el centro de agarre. CL_ROT = giro del modelo respecto al marco del arma de antes (zócalo MAIN, -Z = delante del mando): R_y(+90), la cara picuda +X al frente
+ * y el eje largo Z de izquierda a derecha; Q_MAIN = giro del zócalo MAIN de vr_grip.c. */
+static const float CL_HAND[9]={1,0,0, 0,-1,0, 0,0,-1};
+static const float CL_ROT[9]={0,0,1, 0,1,0, -1,0,0};
+static const float Q_MAIN[4]={0.0f,0.5f,0.86603f,0.0f};
 static void make_base(int wi,int side,Base*B){memset(B,0,sizeof *B);B->side=side;vrhs_grip_center(side,B->c);
+  if(wi==CL){memcpy(B->R,CL_HAND,36);for(int a=0;a<3;a++)B->d[a]=-B->c[a];return;}
   if(side>0){memcpy(B->R,Hm,36);memcpy(B->d,WI[wi].dR,12);}
   else{q2m(WI[wi].Lq,B->R);memcpy(B->o,WI[wi].Lp,12);memcpy(B->d,WI[wi].dL,12);}}
 /* x: t[3] mm (marco de la base), r[3] grados (giro alrededor del centro de agarre), ang[25] -> vértices en el marco del arma (m), pose (Rt, ot) y yema del índice */
@@ -291,7 +317,12 @@ static WPose pose_of(const float*R,const float*o){float q[4];m2q(R,q);WPose p;p.
 static void pr_pose(FILE*f,WPose p){fprintf(f,"{{%.5ff, %.5ff, %.5ff}, {%.5ff, %.5ff, %.5ff, %.5ff}}",p.p.x,p.p.y,p.p.z,p.q.x,p.q.y,p.q.z,p.q.w);}
 static FILE *FG,*FS;
 static void emit_weapon(int wi){
-  static const char*up[NWI]={"SOCOM","FAMAS","PSG1","STINGER","NIKITA","FRAG","STUN","CHAFF"};
+  static const char*up[NWI]={"SOCOM","FAMAS","PSG1","STINGER","NIKITA","FRAG","STUN","CHAFF","CLAYMORE"};
+  if(wi==CL){Base B;make_base(wi,1,&B);float Rt[9],ot[3];hand_world(&B,RES[wi][1],NULL,Rt,ot,NULL);WPose grip=wpose_mul(wpose_inv(GR),pose_of(Rt,ot));
+    /* giro de la mano respecto al mando: T = Q_MAIN^-1 * CL_ROT * Rt (el arma queda girada CL_ROT respecto a la de antes, la mano donde la pone el ajuste); turn y zócalo como en vr_grip.h */
+    float Qm[9],Qt[9],A[9],T[9],q[4];q2m(Q_MAIN,Qm);for(int r=0;r<3;r++)for(int c=0;c<3;c++)Qt[3*r+c]=Qm[3*c+r];mm3(Qt,CL_ROT,A);mm3(A,Rt,T);m2q(T,q);if(q[3]<0)for(int i=0;i<4;i++)q[i]=-q[i];
+    fprintf(FS,"#define FIT_%s_GRIP ",up[wi]);pr_pose(FS,grip);fprintf(FS,"\n#define FIT_%s_POSE HP_W_%s_R\n#define FIT_%s_TURN {%.5ff, %.5ff, %.5ff, %.5ff}\n",up[wi],up[wi],up[wi],q[0],q[1],q[2],q[3]);
+    const float*x=RES[wi][1];fprintf(FG,"    [HP_W_%s_R - HP_W_FIRST] = {{",up[wi]);for(int i=0;i<25;i++)fprintf(FG,"%.1ff%s",x[6+i],i<24?", ":"");fprintf(FG,"}, 0, {0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},\n");return;}
   if(wi>=NW){const float*x=RES[wi][1];fprintf(FS,"#define FIT_%s_POSE HP_W_%s_R\n",up[wi],up[wi]);fprintf(FG,"    [HP_W_%s_R - HP_W_FIRST] = {{",up[wi]);   /* granada: sin gatillo ni zócalo propio */
     for(int i=0;i<25;i++)fprintf(FG,"%.1ff%s",x[6+i],i<24?", ":"");fprintf(FG,"}, 0, {0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},\n");return;}
   Base B[2];make_base(wi,1,&B[1]);make_base(wi,-1,&B[0]);float Rt[9],ot[3],pad[3];

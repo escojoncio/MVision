@@ -36,8 +36,13 @@ struct SpcDrawU {
     var uv = simd_float4(0, 0, 1, 1)
     var p0 = simd_float4(0, 1, 0, 0)      // x = modo (0 mira, 1 HUD, 2 misil), y = opacidad, z = ruido, w = tiempo
     var p1 = simd_float4(0, 0, 0, 1)      // x = disco, y = grosor del marco oscuro de las pantallas LED (fracción de la altura; modos 2 y 3), z = terminado, w = proporción ancho/alto
-    var p2 = simd_float4(0, 0, 0, 0)      // x = la imagen ya es lineal, y = (modo misil) pantalla LED en espera, w = nº de vértices de la máscara poligonal de la mira (0 = sin máscara)
+    var p2 = simd_float4(0, 0, 0, 0)      // x = la imagen ya es lineal, y = (modo misil) pantalla LED en espera, z = (modo misil) HUD del juego encima (0 no, 1 alfa directo, 2 premultiplicado), w = nº de vértices de la máscara poligonal de la mira (0 = sin máscara)
     var poly = (simd_float4(0, 0, 0, 0), simd_float4(0, 0, 0, 0), simd_float4(0, 0, 0, 0), simd_float4(0, 0, 0, 0))   // vértices (u, v) de la máscara, 2 por simd_float4
+}
+// Mismo layout que VrSpcHud de vr_weapon.metal (32 bytes, fragmento, buffer 3): dónde caen el marco del juego y la vista 3D 4:3 dentro de la textura del HUD.
+struct SpcHudU {
+    var frame = simd_float4(0, 0, 1, 1)   // x, y, ancho, alto (uv de la textura) del MARCO del juego
+    var view = simd_float4(0, 0, 1, 1)    // x, y, ancho, alto (uv de la textura) de la vista 3D 4:3 (GD_VIEW), centrada en el marco
 }
 
 final class WeaponRenderer {
@@ -118,7 +123,7 @@ final class WeaponRenderer {
         let lib = MVLib.library(device)
         library = lib
         if lib == nil { print("[WeaponRenderer] sin biblioteca Metal por defecto: falta vr_weapon.metal en el target") }
-        if MemoryLayout<WpnFrameU>.stride != 192 || MemoryLayout<WpnDrawU>.stride != 64 || MemoryLayout<SpcDrawU>.stride != 192 {
+        if MemoryLayout<WpnFrameU>.stride != 192 || MemoryLayout<WpnDrawU>.stride != 64 || MemoryLayout<SpcDrawU>.stride != 192 || MemoryLayout<SpcHudU>.stride != 32 {
             print("[WeaponRenderer] layout de uniformes incompatible con vr_weapon.metal (\(MemoryLayout<WpnFrameU>.stride)/\(MemoryLayout<WpnDrawU>.stride))")
         }
         if MemoryLayout<VrHandsVertex>.stride != 36 { print("[WeaponRenderer] VrHandsVertex no mide 36 bytes") }
@@ -400,7 +405,8 @@ final class WeaponRenderer {
     /// Dibuja la vista especial vigente en el pase de escena en curso (después del arma). `aux` = segunda vista renderizada (mira, misil; valores
     /// en gamma, sin decodificar sRGB), `hud` = panel del HUD del juego en bruto (visor antiaéreo). `auxLinear`: los valores de `aux` ya son lineales.
     /// `hudPremultiplied`: `hud` es la capa 2D fiel (color premultiplicado, vr_layer2d) y no el HUD de reserva (alfa directo).
-    func encodeSpecial(encoder: MTLRenderCommandEncoder, view sv: MvVrSpecialView, aux: MTLTexture?, auxLinear: Bool, hud: MTLTexture?, hudPremultiplied: Bool = false,
+    /// `hudWin`: colocación del marco del juego dentro de `hud` (RGRenderer.hudWin; nil = la textura es el marco / la vista entera, como el HUD de reserva).
+    func encodeSpecial(encoder: MTLRenderCommandEncoder, view sv: MvVrSpecialView, aux: MTLTexture?, auxLinear: Bool, hud: MTLTexture?, hudPremultiplied: Bool = false, hudWin: XR2DWindow? = nil,
                        views: [simd_float4x4], projections: [simd_float4x4], layered: Bool, viewIndex: Int = 0) {
         guard enabled, sv.kind != 0 else { return }
         let n = min(views.count, projections.count)
@@ -456,6 +462,7 @@ final class WeaponRenderer {
             d.p1.y = sv.frame.isFinite ? min(max(sv.frame, 0), 0.2) : 0      // marco oscuro del sombreador (0 = sin marco, p. ej. pantalla grande)
             d.p1.z = live ? 0 : 1
             d.p2.y = sv.standby != 0 ? 1 : 0
+            if live, let h = hud { overlay = h; d.p2.z = hudPremultiplied ? 2 : 1 }      // textos y marcas del juego (capa 2D) sobre la imagen del misil, sin los iconos de vida / equipo (sombreador)
             if sv.uv.2 > 0.001 && sv.uv.3 > 0.001 && [sv.uv.0, sv.uv.1, sv.uv.2, sv.uv.3].allSatisfy({ $0.isFinite }) {      // recorte 4:3 de la imagen sobre la pantalla (por defecto 0, 0, 1, 1)
                 d.uv = simd_float4(sv.uv.0, sv.uv.1, sv.uv.2, sv.uv.3)
             }
@@ -489,6 +496,20 @@ final class WeaponRenderer {
         m.columns.1 *= quadH
         m.columns.3 = simd_float4(sv.surf_pos.0, sv.surf_pos.1, sv.surf_pos.2, 1)
         d.model = m
+        // Marco y vista 4:3 dentro de la textura del HUD: con la capa HQ es la ventana visible (PAL 320x268, marco 320x256 con oy = 5), así que las fracciones del marco (iconos) y el recorte 4:3 del misil se
+        // pasan a uv de la textura con el mismo frameUV que XRPresent. La vista 3D (320x240, GD_VIEW) está centrada en el marco (XR2DWindow.panelOnScreen3D).
+        var hd = SpcHudU()
+        if let w = hudWin {
+            let f = w.frameUV(simd_float4(0, 0, 1, 1))
+            hd.frame = simd_float4(f.x, f.y, f.z - f.x, f.w - f.y)
+            if sv.kind == Int32(MV_VIEW_MISSILE) || sv.kind == Int32(MV_VIEW_AA_SCREEN) {      // ambos recortes uv (vrgame.c) son sobre la vista 3D 4:3 del juego, 320x240
+                let hx = 320 / (2 * w.dw), hy = 240 / (2 * w.dh)
+                let v = w.frameUV(simd_float4(0.5 - hx, 0.5 - hy, 0.5 + hx, 0.5 + hy))
+                hd.view = simd_float4(v.x, v.y, v.z - v.x, v.w - v.y)
+            } else {
+                hd.view = hd.frame
+            }
+        }
 
         let key = SKey(layered: layered, linear: linearOutput, color: colorFormat, depth: depthFormat, samples: sampleCount)
         let occlude = (sv.kind == Int32(MV_VIEW_SCOPE) || sv.kind == Int32(MV_VIEW_AA_SCREEN) || sv.kind == Int32(MV_VIEW_MISSILE)) && sv.occlude != 0      // objetos del mundo: lente de la mira, pantallas LED (antiaéreo y misil); el visor HUD antiaéreo de reserva, la pantalla grande del misil y los prismáticos siguen por encima de todo
@@ -517,6 +538,7 @@ final class WeaponRenderer {
         encoder.setVertexBytes(&u, length: MemoryLayout<WpnFrameU>.stride, index: 1)
         encoder.setVertexBytes(&d, length: MemoryLayout<SpcDrawU>.stride, index: 2)
         encoder.setFragmentBytes(&d, length: MemoryLayout<SpcDrawU>.stride, index: 2)
+        encoder.setFragmentBytes(&hd, length: MemoryLayout<SpcHudU>.stride, index: 3)
         encoder.setFragmentTexture(image, index: 0)
         encoder.setFragmentTexture(overlay ?? whiteTexture, index: 1)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)

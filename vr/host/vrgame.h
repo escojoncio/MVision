@@ -90,6 +90,8 @@ void mv_vrgame_status(MvVrGameStatus *out);
  *    `uv` = recorte 4:3 de la imagen, occlude = 1), siempre publicada con el lanzador en la mano: `standby` = 1 sin misil (cam_valid = 0), cámara del misil en vuelo, estática al terminar. No toma la vista del jugador. Segunda vista de la escena desde `cam_*` (la posición y dirección del misil del juego) mostrada en
  *    una pantalla (`surf_*`, rectángulo; `blend` 0 = pantallita del lanzador .. 1 = visor grande ante el ojo) con ruido/estática (`noise`) y, al terminar el
  *    vuelo, `ended` = 1 (solo estática). `fullscreen` = pantalla grande fija ante la cara (opción de comodidad; la cabeza nunca se mueve).
+ *    La cámara (`cam_*`) va en la punta del misil, 2 cm por delante del morro (GD_CAM_*; el modelo queda detrás de ella). En vuelo la app dibuja encima los textos del HUD del juego (capa 2D) sin los iconos de vida / equipo. Con un cambio de arma en curso (SV_SETTLE_TICKS
+ *    VBlanks, o el selector abierto sobre un arma que no era la lista) no se publica ninguna vista especial del arma que entra.
  * Poses en el espacio recentrado (el de la cabeza); cara visible de la superficie = +Z local; delante de la cámara = -Z local. */
 enum { MV_VIEW_NONE = 0, MV_VIEW_SCOPE = 1, MV_VIEW_AA_SIGHT = 2, MV_VIEW_MISSILE = 3, MV_VIEW_AA_SCREEN = 4 };
 typedef struct {
@@ -135,7 +137,7 @@ void vrgame_set_driver(VrGameDriver f);
 /* Gestos de cuerpo (vr/input/vr_gesture): golpe (puño + movimiento rápido de la mano relativo a la cabeza, hacia delante y hacia fuera, con el enemigo delante), agarre/estrangulamiento
  * (gatillo con la mano abierta junto al cuello; con el enemigo ya sujeto basta el gatillo), golpear la pared, asomarse. mask: bit 1 golpe, 2 agarre, 4 pared, 8 asomarse (defecto todos).
  * Solo con el jugador al mando, cámara VR activa y SIN arma equipada ni caja/agua. Con las manos libres y rastreadas el módulo gobierna esos botones: los GRIPS solo cierran el puño (nunca
- * llegan al juego como R1/L1; la ventana de objetos/armas se abre con el gesto del pecho, nunca con el clic de stick) y el cuadrado físico (gatillo / A de la otra mano) se retira y lo sustituye lo que decide
+ * llegan al juego como R1/L1; la ventana de objetos/armas se abre con el gesto del pecho (apretar el grip con la mano en su zona), nunca con el clic de stick) y el cuadrado físico (gatillo / A de la otra mano) se retira y lo sustituye lo que decide
  * el módulo. Con arma, sin seguimiento de manos (mando normal) o fuera de control, los botones pasan tal cual. */
 void mv_vrgame_set_gestures(int32_t enable, int32_t mask);
 /* Orientación de las manos del personaje respecto al agarre del mando (vr/body/vr_body.h): cabeceo fijo (grados; defecto -35: el agarre del Sense está inclinado 35 grados respecto al
@@ -155,8 +157,9 @@ uint32_t mv_vrgame_calibration_serial(void);                           /* cambia
 void vrbodyg_reset(void);
 unsigned vrbodyg_event_count(int ev);                                  /* VRG_EV_* acumulados (pruebas) */
 uint16_t vrbodyg_pad(uint16_t pad, const struct BridgeState *bs, int right_handed, const uint8_t *ram);
-int vrbodyg_fire_gate(int side, int weapon_hand, float *trig);          /* bloqueo de disparo en la zona de menú: filtra el gatillo del arma de la mano `side` (y anula el disparo en cola si weapon_hand); devuelve VRG_FB_* (0 libre) */
+int vrbodyg_fire_gate(int side, int weapon_hand, float *trig);          /* bloqueo de disparo con un menú abierto: filtra el gatillo del arma de la mano `side` (y anula el disparo en cola si weapon_hand); devuelve VRG_FB_* (0 libre) */
 int vrbodyg_melee_busy(void);                                      /* 1 si el cuerpo está en golpe/agarre/lanzamiento en el último VBlank (vrbodyg_pad) */
+int vrbodyg_hand_in_chest(int side);                                /* 1 si la mano física `side` (0 izq, 1 der) está en SU zona de menú del pecho en el último VBlank (vrbodyg_pad): ahí el grip abre el menú */
 void vrbodyg_test_force_busy(int on);                                   /* pruebas: fuerza vrbodyg_melee_busy */
 int32_t mv_vrgame_menu_hand(void);                                     /* mano física (0 izq, 1 der) que mantiene abierta la ventana de armas/objetos del gesto del pecho; -1 ninguna */
 int vrgame_hand_raw(int side, float p[3], float *grip, float *trig, double *t_s);   /* pose del agarre (espacio usuario, m), grip (puño), gatillo y marca de tiempo (s, monótono; 0 con guion de pruebas); 1 si hay seguimiento */
@@ -165,7 +168,7 @@ uint16_t vrgame_weapon_model(int game_id);
 int vrgame_weapon_uses_game_model(int game_id);   /* 1 = el arma se dibuja con el modelo real del juego (granadas 2, 7, 8: escena nativa, sin ocultar); su lógica VR sigue */
 void vrgame_test_install(int game_id, void *def, void *state, void *rig);   /* pruebas: arma ya construida (WeaponDef, WeaponState, VrHandsRig) en la ranura de su id */
 int vrgame_test_load_logic(int game_id);   /* pruebas: carga la ranura solo de lógica (granadas: ranura de solo lógica) sin disco; 1 = lista */
-/* Mano física (0 izquierda / 1 derecha) que empuña un arma de dos manos con la otra soldada a ella (pub_weld); -1 si no hay: vrbodyg le quita el anillo de anticipación del bloqueo de disparo en la zona del pecho (vrg_in_t.ring_off). */
+/* Mano física (0 izquierda / 1 derecha) que empuña un arma de dos manos con la otra soldada a ella (pub_weld); -1 si no hay. */
 int vrgame_weld_main(void);
 /* La IK de brazos se pide aunque el motor oculte a Snake (arma de dos manos mostrada, jugador al mando o con menú / pausa encima, sin cinemática): la regla que vr_body consulta además en su propio apply (primer frame tras equipar). Pura sobre `bs`. */
 int vrgame_ik_hidden_wanted(const struct BridgeState *bs);

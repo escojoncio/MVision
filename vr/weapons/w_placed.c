@@ -11,6 +11,9 @@
 
 /* Datos ajustables (marco del arma; se sustituyen al asociar las partes del modelo original). */
 #define BLOCK_FACE   {0, 0, -0.0225f}       /* centro de la cara adhesiva de la carga; +Z sale de la superficie */
+/* Mina (0x17a1, marco HELD): cara picuda (de disparo) +X, eje largo Z, mira +Y. En la mano va girada R_y(+90) respecto al mando (zócalo FIT_CLAYMORE de vr_grip): cara picuda al frente, eje largo de
+ * izquierda a derecha. El evento de colocación lleva la pose del modelo girada R_y(-90): su -Z es la cara picuda, y el anfitrión (place_project) proyecta y orienta con ese delante. */
+#define MINE_FACE_Q  {0, -0.70710678f, 0, 0.70710678f}
 /* Piezas esperadas (nombre -> canal). Carga (placed_a): "block","adh","det","ant"(CUSTOM1 antena). Mina (placed_b): "body","plate","sight","legl","legr"
  * (CUSTOM0 = despliegue; legr rota -Z, legl +Z). Las piezas llevan mesh = -1: se asocian por nombre a mesh_names. */
 #define PART(nm, ch, ax, ay, az, rot) { nm, -1, {{0,0,0},{0,0,0,1}}, -1, ch, {ax, ay, az}, rot }
@@ -25,6 +28,8 @@ static const char *const MINE_MESH_NAMES[] = { "body", "plate", "sight", "legl",
 #define PLACE_REL      0.30f     /* soltar por debajo de esto = colocar */
 #define LEGS_TIME      0.40f
 #define RESPAWN_T      0.40f
+#define PROBE_ON_T     0.08f     /* s con superficie valida seguidos para dar el pulso */
+#define PROBE_OFF_T    0.30f     /* s sin ella seguidos para volver a poder darlo (histeresis: sin vibrar en continuo) */
 #define PLACE_ID_A     6       /* adhesivo con mando */
 #define PLACE_ID_B     5       /* mina */
 
@@ -37,6 +42,22 @@ static void placed_init_k(WeaponState *s, const WeaponDef *d, int kind) {
     p->kind = kind;
     s->phase = WPL_PH_VEST;
     w5_hide(s, 1);
+}
+
+/* Evento de colocación con la pose actual del objeto en la mano (el de soltar el gatillo y el del sondeo). */
+static WLaunch place_event(const WeaponState *s, const WInput *in, const WPlacedState *p, int id) {
+    WLaunch ev; memset(&ev, 0, sizeof ev);
+    ev.weapon_id = id;
+    WPose w = wcore_weapon_world(s, in);
+    if (p->kind == 0) {
+        static const WVec3 face = BLOCK_FACE;
+        ev.kind = WL_PLACE_C;
+        ev.pose.p = wpose_apply(w, face); ev.pose.q = w.q;        /* +Z local sale de la superficie */
+    } else {
+        static const WQuat face = MINE_FACE_Q;
+        ev.kind = WL_PLACE_MINE; ev.pose.p = w.p; ev.pose.q = wquat_mul(w.q, face);   /* -Z del evento = cara picuda (+X del modelo) = delante del mando */
+    }
+    return ev;
 }
 
 static void placed_update(WeaponState *s, const WInput *in, WReloadMode rm, const WGameBridge *g) {
@@ -55,7 +76,7 @@ static void placed_update(WeaponState *s, const WInput *in, WReloadMode rm, cons
     case WPL_PH_VEST:     /* sin objeto en la mano: lo equipado en el menú del juego aparece en la mano si queda reserva (sin gesto del chaleco) */
         if (reserve > 0) {
             s->phase = WPL_PH_HELD; s->t = 0; w5_hide(s, 0);
-            p->deploy = 0; p->trig_ready = 0; p->armed = 0; s->channel[WCH_CUSTOM1] = 0; s->channel[WCH_CUSTOM0] = 0;
+            p->deploy = 0; p->trig_ready = 0; p->armed = 0; p->probe_on = 0; p->probe_t_on = p->probe_t_off = 0; s->channel[WCH_CUSTOM1] = 0; s->channel[WCH_CUSTOM0] = 0;
             snd(g, id, W5_S_DRAW); hap(g, 0, 0.3f, 0.04f);
             if (p->kind) snd(g, id, W5_S_LEGS);
         }
@@ -71,21 +92,19 @@ static void placed_update(WeaponState *s, const WInput *in, WReloadMode rm, cons
             s->channel[WCH_CUSTOM1] = wcore_approach(s->channel[WCH_CUSTOM1], in->trigger[0] > 0.3f ? 1.0f : 0.0f, dt / 0.12f);
         }
         int ready = p->kind == 1 ? p->deploy > 0.95f : 1;
+        if (ready && w5_probe(place_event(s, in, p, id))) {        /* sondeo: pulso corto al pasar de sin superficie a con superficie, una vez por entrada */
+            p->probe_t_off = 0; p->probe_t_on += dt;
+            if (!p->probe_on && p->probe_t_on >= PROBE_ON_T) { p->probe_on = 1; hap(g, 0, 0.35f, 0.05f); }
+        } else {
+            p->probe_t_on = 0; p->probe_t_off += dt;
+            if (p->probe_on && p->probe_t_off >= PROBE_OFF_T) p->probe_on = 0;
+        }
         if (in->trigger[0] > PLACE_TRIG && p->trig_ready && ready) p->armed = 1;     /* sacar con el gatillo apretado no prepara */
         if (in->trigger[0] >= PLACE_REL) break;
         p->trig_ready = 1;
         if (!p->armed) break;
         p->armed = 0;                                         /* soltar tras apretar a fondo = colocar */
-        WLaunch ev; memset(&ev, 0, sizeof ev);
-        ev.weapon_id = id;
-        WPose w = wcore_weapon_world(s, in);
-        if (p->kind == 0) {
-            static const WVec3 face = BLOCK_FACE;
-            ev.kind = WL_PLACE_C;
-            ev.pose.p = wpose_apply(w, face); ev.pose.q = w.q;        /* +Z local sale de la superficie */
-        } else {
-            ev.kind = WL_PLACE_MINE; ev.pose = w;                     /* orientación = la de la mano */
-        }
+        WLaunch ev = place_event(s, in, p, id);
         if (w5_emit(g, ev)) {
             if (g && g->ammo_take && reserve > 0) g->ammo_take(id, 1);
             snd(g, id, W5_S_PLACE); hap(g, 0, 0.7f, 0.06f);
@@ -97,10 +116,13 @@ static void placed_update(WeaponState *s, const WInput *in, WReloadMode rm, cons
 }
 
 #define ID_Q {0, 0, 0, 1}
-#define PL_PTS(MUZ) { \
-    [WP_GRIP]    = {{0, 0, 0}, ID_Q}, [WP_SUPPORT] = {{0, 0, 0}, ID_Q}, [WP_MUZZLE] = {MUZ, ID_Q}, \
+/* GRIP: el punto del modelo que la mano empuña (el zócalo FIT_CLAYMORE_GRIP de vr_grip.c pone la mano respecto a él). Mina (marco del arma; cuerpo X -68..31, Y -99..100, Z -370..-45 mm; con patas X -80..31, Y -224..100: w_laser.h WGHOST_MINE_RAW_*): la mano la coge por el MEDIO,
+ * palma en la cara trasera central y dedos por encima del canto superior; GRIP = centro del canto superior, dentro del cuerpo (gripfit_gen.c, CLAYMORE). */
+#define PL_PTS_G(GRIP, ...) { \
+    [WP_GRIP]    = {GRIP, ID_Q}, [WP_SUPPORT] = {{0, 0, 0}, ID_Q}, [WP_MUZZLE] = {__VA_ARGS__, ID_Q}, \
     [WP_EYE]     = {{0, 0, 0}, ID_Q}, [WP_MAGWELL] = {{0, 0, 0}, ID_Q}, [WP_CHARGE] = {{0, 0, 0}, ID_Q}, \
     [WP_SCREEN]  = {{0, 0, 0}, ID_Q} }
+#define PL_PTS(...) PL_PTS_G(((WVec3){0, 0, 0}), __VA_ARGS__)
 #define PL_RECOIL { .kick_back = 0, .kick_up = 0, .kick_yaw_rand = 0, .stiffness = 0, .damping = 0, .two_hand_factor = 1 }
 static void placed_init_a(WeaponState *s);
 static void placed_init_b(WeaponState *s);
@@ -111,7 +133,7 @@ const WeaponDef w_placed_a = {
     .init = placed_init_a, .update = placed_update, .mesh_names = CARGA_MESH_NAMES };
 const WeaponDef w_placed_b = {
     .id = "placed_b", .game_weapon_id = PLACE_ID_B, .meshes = NULL, .nmeshes = 0,
-    .parts = MINE_PARTS, .nparts = 5, .points = PL_PTS(((WVec3){0, 0, -0.03f})), .recoil = PL_RECOIL,
+    .parts = MINE_PARTS, .nparts = 5, .points = PL_PTS_G(((WVec3){-0.015f, 0.090f, -0.205f}), ((WVec3){0, 0, -0.03f})), .recoil = PL_RECOIL,
     .mode = WF_PLACED, .rpm = 0, .mag_capacity = 1, .state_size = sizeof(WPlacedState),
     .init = placed_init_b, .update = placed_update, .mesh_names = MINE_MESH_NAMES };
 /* Un init por variante: no dependen de que el llamador haya asignado s->def. */

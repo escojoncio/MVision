@@ -90,6 +90,13 @@
 #ifndef FIT_CHAFF_POSE
 #define FIT_CHAFF_POSE HP_GRIP_SPHERE
 #endif
+#ifndef FIT_CLAYMORE_GRIP   /* claymore sin ajuste: pose genérica de colocables */
+#define FIT_CLAYMORE_GRIP MAIN
+#define FIT_CLAYMORE_POSE HP_GRIP_PLACED
+#endif
+#ifndef FIT_CLAYMORE_TURN
+#define FIT_CLAYMORE_TURN {0, 0, 0, 1}
+#endif
 
 /* ids de game_weapon_id (tabla del puente): 0 pistola, 1 fusil, 2 granada, 3 guiado, 4 antiaéreo, 5 mina, 6 adhesivo con mando, 7 y 8 variantes de granada, 9 francotirador. */
 static const VrGripEntry TABLE[] = {
@@ -98,7 +105,7 @@ static const VrGripEntry TABLE[] = {
     {2, FIT_FRAG_POSE,  -1,              0, SPHERE,     {0, 0, 0},    NONE_POSE, {0, 0, 0}, {0, 0, 0}, {0, 0, 0, 1}},
     {3, FIT_NIKITA_POSE, FIT_NIKITA_SUPPOSE, 1, FIT_NIKITA_GRIP, FIT_NIKITA_TRIG, FIT_NIKITA_SUP, {0.649f, -0.625f, 0.433f}, {0.266f, -0.964f, -0.009f}, FIT_NIKITA_TURN},
     {4, FIT_STINGER_POSE, FIT_STINGER_SUPPOSE, 1, FIT_STINGER_GRIP, FIT_STINGER_TRIG, FIT_STINGER_SUP, {0.649f, -0.625f, 0.433f}, {0.266f, -0.964f, -0.009f}, FIT_STINGER_TURN},
-    {5, HP_GRIP_PLACED,  -1,              0, MAIN,     {0, 0, 0},    NONE_POSE, {0, 0, 0}, {0, 0, 0}, {0, 0, 0, 1}},
+    {5, FIT_CLAYMORE_POSE, -1,            0, FIT_CLAYMORE_GRIP, {0, 0, 0}, NONE_POSE, {0, 0, 0}, {0, 0, 0}, FIT_CLAYMORE_TURN},   /* claymore: girada R_y(+90) respecto al mando (cara picuda al frente), cogida por el medio */
     {6, HP_GRIP_PLACED,  -1,              0, MAIN,     {0, 0, 0},    NONE_POSE, {0, 0, 0}, {0, 0, 0}, {0, 0, 0, 1}},
     {7, FIT_STUN_POSE,  -1,              0, SPHERE,     {0, 0, 0},    NONE_POSE, {0, 0, 0}, {0, 0, 0}, {0, 0, 0, 1}},
     {8, FIT_CHAFF_POSE,  -1,              0, SPHERE,     {0, 0, 0},    NONE_POSE, {0, 0, 0}, {0, 0, 0}, {0, 0, 0, 1}},

@@ -9,7 +9,7 @@
 static int checks, fails;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("FALLO l.%d: %s ", __LINE__, #c); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
-static const char *const NAME[HP_COUNT] = {"open", "relax", "fist", "point", "trigger", "grip_pistol", "grip_rifle", "grip_support", "grip_sphere", "grip_placed", "grip_box", "w_socom_r", "w_socom_l", "w_famas_r", "w_famas_l", "w_psg1_r", "w_psg1_l", "w_stinger_r", "w_stinger_l", "w_nikita_r", "w_nikita_l", "w_frag_r", "w_stun_r", "w_chaff_r"};
+static const char *const NAME[HP_COUNT] = {"open", "relax", "fist", "point", "trigger", "grip_pistol", "grip_rifle", "grip_support", "grip_sphere", "grip_placed", "grip_box", "w_socom_r", "w_socom_l", "w_famas_r", "w_famas_l", "w_psg1_r", "w_psg1_l", "w_stinger_r", "w_stinger_l", "w_nikita_r", "w_nikita_l", "w_frag_r", "w_stun_r", "w_chaff_r", "w_claymore_r"};
 static const int SIDE[2] = {1, -1};   /* 0 derecha, 1 izquierda */
 
 static int all_finite(const float xf[VRHS_J][12]) {

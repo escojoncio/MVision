@@ -23,6 +23,7 @@
 #include "vr_fire.h"
 #include "vr_aa.h"
 #include "vr_hit.h"
+#include "rtpatch.h"
 
 #define RAM_MASK 0x1FFFFFu
 #define A0 c->r[4]
@@ -50,7 +51,7 @@ static void with_matrix(Cpu *c, const char *orig, int kind) {
     if (r == VRFIRE_SKIP) { V0 = 0; return; }
     uint32_t a0 = A0, a3 = A3;
     if (r == VRFIRE_SUBST) { vrfire_store_mat(emu_ram, zbuf + Z_BULLET, &m); A0 = zbuf + Z_BULLET; }
-    /* El tipo 1 de la decompilación (bullet.c NewBullet: alcance 10000, 5000 por tick; pistola y fusil de asalto) traza la colisión del juego solo hasta 10000 unidades, menos que el láser (15 m): lo que hubiera
+    /* El tipo 1 de la decompilación (bullet.c NewBullet: alcance 10000, 5000 por tick; pistola y fusil de asalto) traza la colisión del juego solo hasta 10000 unidades, menos que el alcance del tiro VR (SOCOM 25 m, FAMAS 30 m, resto 15 m; vrhit_weapon_range_m): lo que hubiera
      * más allá no llegaba a producir impacto. El tipo 2 (el del PSG1: alcance 100000, misma velocidad) traza hasta 100000 con la misma colisión (HZD_CHK_ALL), así que
      * el juego mismo da el punto, la chispa y el sonido en la pared del láser; vrhit_bullet recorta lo que pase del alcance del láser. */
     const int ext = kind == 0 && r == VRFIRE_SUBST && A3 == 1u;
@@ -184,4 +185,39 @@ void hle_vrfire_aalock(Cpu *c) {
         c->r[31] = ra;
     }
     vraa_after_step(emu_ram, actor, sw);
+}
+
+/* ---- C4 directo (vr_fire.h): crear la carga sin la animación de Snake ----
+ * hle_vrfire_c4_pump la llama el gancho de la construcción de la cámara (vr_camera_hle.c hle_vrcam_view, lienzo principal: la cámara es un actor y corre en la fase de actores, nunca en la de dibujado) UNA vez por
+ * llamada; sin petición pendiente no hace nada. Crea el actor con el código original de NewBakudan (0x8006B69C, el mismo que hle_vrfire_charge sustituye, aquí sin sustituir) como lo llama weapon/bomb.c:
+ * NewBakudan(world, NULL, 0, side, GM_BombSeg). La matriz va en la zona propia; el quinto argumento (GM_BombSeg: segmento/suelo al que se pega la carga, solo para que el juego la destruya con una pared rompible
+ * o la mueva con un ascensor) va en la pila, 16 bytes sobre un marco nuevo bajo sp, y se pasa 0 (no hay forma de leer GM_BombSeg sin su dirección en la edición europea). Los registros que el llamante espera
+ * (a0-a3, v0, v1, sp, ra) se restauran: la HLE sustituida (vrcam_view) sigue con sus argumentos intactos. */
+#define SE_PLAY_POS 0x800335a0u         /* GM_SeSet(pos, id) de la edición europea; la misma dirección, longitud y huella que vr/ai/vrai.c (SE_PLAY_NW / SE_PLAY_HASH) */
+#define SE_PLAY_NW 67u
+#define SE_PLAY_HASH 0xcd503c2b4fcaf495ull
+static uint32_t c4_create(void *user, const VrFireMat *m) {
+    Cpu *c = user;
+    if (!zone()) return 0;
+    vrfire_store_mat(emu_ram, zbuf + Z_BULLET, m);
+    const uint32_t sp = c->r[29], nsp = sp - 32u, zero = 0;
+    memcpy(emu_ram + ((nsp + 16u) & RAM_MASK), &zero, 4);
+    c->r[29] = nsp; A0 = zbuf + Z_BULLET; A1 = 0; A2 = 0; A3 = PLAYER_SIDE;
+    rt_orig(c, "vrfire_charge");
+    const uint32_t res = V0;
+    c->r[29] = sp;
+    return res;
+}
+static void c4_sound(void *user, uint32_t pos, int id) {
+    Cpu *c = user;
+    if (rt_code_hash(SE_PLAY_POS, SE_PLAY_NW) != SE_PLAY_HASH) return;     /* otra edición / otro código: sin sonido antes que llamar a ciegas */
+    A0 = pos; A1 = (uint32_t)id;
+    rt_call(c, SE_PLAY_POS);
+}
+void hle_vrfire_c4_pump(Cpu *c) {
+    if (!vrfire_c4_pending()) return;
+    const uint32_t a0 = A0, a1 = A1, a2 = A2, a3 = A3, v0 = V0, v1 = c->r[3], sp = c->r[29], ra = c->r[31];
+    const VrFireC4Ops ops = {c4_create, c4_sound, c};
+    vrfire_c4_pump(emu_ram, &ops);
+    A0 = a0; A1 = a1; A2 = a2; A3 = a3; V0 = v0; c->r[3] = v1; c->r[29] = sp; c->r[31] = ra;
 }

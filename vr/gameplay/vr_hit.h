@@ -29,6 +29,9 @@ extern "C" {
 #define VRHIT_MAX_T 24
 #define VRHIT_MAX_CAP 24
 #define VRHIT_RANGE_MIN 16000.0f     /* alcance mínimo (unidades del motor) con el que se resuelve una bala: el láser del arma mide 15 m (15780 unidades a 1052 por metro) */
+#define VRHIT_SHOT_M 15.0f           /* alcance del tiro (m) del resto de armas del jugador */
+#define VRHIT_SHOT_M_SOCOM 25.0f     /* alcance del tiro de la SOCOM (game_id 0) en metros; el láser mide lo mismo (WLASER_MAX_M, vr/weapons/w_laser.h) */
+#define VRHIT_SHOT_M_FAMAS 30.0f     /* alcance del tiro del FAMAS (game_id 1) en metros */
 #define VRHIT_AIM_LIFE 120           /* VBlanks de vida de una puntería anotada en el gatillo (la bala del juego sale ~20 después; hasta 60 con la petición en cola) */
 
 enum { VRHIT_Z_NONE = 0, VRHIT_Z_HEAD, VRHIT_Z_BODY, VRHIT_Z_LIMB, VRHIT_Z_BOX, VRHIT_Z_WALL, VRHIT_Z_MISS };
@@ -104,6 +107,10 @@ void vrhit_frame(void);
  * vrhit_bullet resuelve la bala del jugador con ese alcance y vrhit_shot_dist (láser) con el mismo criterio que vrhit_bullet (resolve): primer blanco (cápsulas/caja/cámara), pared HZD (la misma
  * llamada que usa la bala) y suelos de colisión; NO la geometría de render (no bloquea balas, ver VrHitWorld.solid). */
 void vrhit_set_range(float units, float upm);
+/* Alcance del tiro (m) del arma con ese game_id: SOCOM (0) VRHIT_SHOT_M_SOCOM, FAMAS (1) VRHIT_SHOT_M_FAMAS, las demás (y -1) VRHIT_SHOT_M. El anfitrión da en vrhit_set_range ese valor
+ * por las unidades por metro reales del mundo (units_per_m: ~1052 unidades/m, calibrado cada VBlank): 25 m = 25 * units_per_m unidades del motor. La bala del juego llega a ese alcance porque el sustituto
+ * la promueve a tipo 2 (alcance 100000, ~95 m): no hay que tocar su vida ni su velocidad. */
+float vrhit_weapon_range_m(int game_id);
 /* Distancia (unidades) al primer impacto del tiro o + t*d (d se normaliza) con alcance `max`; -1 si no hay impacto en el alcance. Sin anotar nada. */
 float vrhit_shot_dist(const uint8_t *ram, const float o[3], const float d[3], float max);
 /* La capa VR amplió el alcance de la siguiente bala del jugador que resuelva vrhit_bullet (el sustituto la crea con tipo 2: el juego traza hasta 100000 unidades, ver vr_fire_hle.c): su alcance

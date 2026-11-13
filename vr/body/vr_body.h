@@ -52,13 +52,14 @@ typedef struct VrArmLimits {
     float shoulder_cross;    /* componente "hacia fuera" mínima (negativa = cruza el pecho); defecto -0.85. Con ambos a -1 el solver ignora también elbow_min_deg (sin tope de flexión ni dmin), lleva el estirado hasta 6x (no stretch_max) y pone la
                               * muñeca EN el objetivo siempre, aunque quede a menos de |L1 - L2| del hombro (el codo adopta la postura que sea; VRARM_TOO_CLOSE no se activa) */
     float wrist_swing_deg;   /* SIN USO (la mano lleva siempre la orientación del mando); se conserva por compatibilidad */
-    float forearm_share;     /* parte del giro (pronación) que asume el antebrazo, 0..1; defecto 1 (el antebrazo gira con la mano: brazo y mano continuos) */
-    float forearm_twist_deg; /* giro máximo del antebrazo sobre su eje; defecto 180 (sin tope efectivo: el exceso sobre +-100 grados lo absorbe el giro del codo, swivel) */
+    float forearm_share;     /* parte del giro (pronación) que asume el antebrazo, 0..1; defecto 0,55 (cúbito/radio: la pieza rígida del antebrazo gira un ~55 % del giro de la mano y la mano absorbe el resto; con 1 el codo se retorcía como un chicle) */
+    float forearm_twist_deg; /* giro máximo del antebrazo sobre su eje; defecto 90 (el exceso lo absorbe la mano, que conserva siempre la orientación del mando) */
     float hand_twist_deg;    /* SIN USO (la mano absorbe todo el giro sobrante); se conserva por compatibilidad */
     float wrist_flex_deg, wrist_ext_deg;   /* flexión (palma) y extensión (dorso) máximas de la muñeca; defecto 80 / 70 */
     float wrist_rad_deg, wrist_uln_deg;    /* desviación radial (pulgar) y cubital máximas; defecto 20 / 30 */
     float swivel_max_deg;    /* giro máximo del codo alrededor de la recta hombro-muñeca respecto al codo polar para respetar esos límites; defecto 90 (0 = codo polar fijo) */
     float stretch_max;       /* tope del factor de estirado de los huesos con el objetivo fuera de alcance (1..2,5); defecto 2,5; 1 = huesos de largo fijo (la muñeca se queda en el alcance máximo) */
+    float upper_twist_deg;   /* giro máximo (visual) de la pieza del brazo superior sobre su eje respecto al plano del codo natural (vrbody_natural_pole); defecto 45. No mueve ninguna articulación */
 } VrArmLimits;
 
 enum {
@@ -66,7 +67,8 @@ enum {
     VRARM_TOO_CLOSE = 2,       /* objetivo más cerca que la flexión máxima del codo */
     VRARM_SHOULDER_LIMIT = 4,  /* se aplicó el límite del hombro */
     VRARM_WRIST_LIMIT = 8,     /* la muñeca quedó fuera de sus límites aun girando el codo, o el giro del antebrazo quedó recortado por forearm_twist_deg; la mano nunca se limita */
-    VRARM_POLE_FALLBACK = 16   /* el vector polar era paralelo al brazo: se usó una alternativa */
+    VRARM_POLE_FALLBACK = 16,  /* el vector polar era paralelo al brazo: se usó una alternativa */
+    VRARM_ELBOW_CLAMPED = 32   /* el codo pedido caía fuera del semiespacio anatómico (abajo / fuera / hasta ~22 grados hacia dentro; nunca arriba): se proyectó a él. La muñeca no se mueve por esto */
 };
 
 typedef struct VrArmIn {
@@ -85,13 +87,18 @@ typedef struct VrArmOut {
     float R_upper[9], R_fore[9], R_hand[9]; /* orientación de las piezas brazo, antebrazo y mano */
     float reach;                         /* distancia pedida hombro->muñeca / (L1 + L2) */
     float err_mm;                        /* distancia entre el objetivo de muñeca y la muñeca resultante */
-    float tau, tau_f;                    /* giro (rad) mano respecto al antebrazo, desenvuelto de forma continua, y la parte que asume el antebrazo (con su límite) */
+    float tau, tau_f;                    /* giro (rad) mano respecto al antebrazo, desenvuelto de forma continua, y la parte que asume el antebrazo (con su límite; el resto, tau - tau_f, lo lleva la mano) */
+    float tw_up;                         /* giro (rad) de la pieza del brazo superior respecto al plano del codo natural, ya acotado por upper_twist_deg */
     float swivel;                        /* giro del codo (grados) alrededor de la recta hombro-muñeca respecto al codo polar, elegido para la muñeca y el giro del antebrazo */
     float stretch;                       /* escala de ambos huesos a lo largo de su eje (>= 1): objetivo más lejos que el alcance => brazo estirado, muñeca en el objetivo */
     unsigned flags;                      /* VRARM_* */
 } VrArmOut;
 
 void vrbody_limits_default(VrArmLimits *l);
+/* Dirección natural del codo (unitaria, mundo) según la mano: v = muñeca - hombro (mm, mundo), reach = |v| / (L1 + L2), torso = marco del torso (columnas X izquierda, Y arriba, Z delante), side +1 brazo izquierdo / -1 derecho,
+ * base = x fuera, y arriba, z delante en el marco del torso (VrBodyCfg.pole: 0,45 / -1 / -0,35). Regla: abajo + fuera + atrás; más hacia fuera cuanto más cerca de ella o más alta esté la mano, más atrás con la mano baja,
+ * algo delante con la mano alta. Continua en la mano; solo es indeterminada (el solver usa una alternativa) con la mano justo en la dirección del propio polo. */
+void vrbody_natural_pole(const float torso[9], float side, const float v[3], float reach, const float base[3], float out[3]);
 /* Alarga la matriz de un hueso (R de rotación pura que lleva `off` a la dirección del hueso) a lo largo de su eje local: R' = R (I + (s-1) l l^T), l = off/|off|. s = 1, no finito o <= 0 no hace nada; s < 1 acorta el hueso.
  * Es la que usan el apply y la ruta de la mano viva para que la malla alcance al hueso siguiente cuando el brazo se estira o se escala al largo de brazo del usuario. */
 void vrbody_stretch_bone(float R[9], const float off[3], float s);
@@ -156,7 +163,7 @@ typedef struct VrBodyConfig {
     float near_hide_vtx_m;       /* 0,12 (defecto; 0 = desactivado): ... o con algún vértice a menos de esta distancia (m) del ojo, esté donde esté el centro */
     int force_arm_visible;       /* 1 (defecto): si el motor dejó a 0 la visibilidad de una pieza del brazo movida por la IK, se fuerza durante la transformación (brazos siempre dibujados) */
     /* codo */
-    float pole[3];               /* dirección del codo en el marco del torso para el brazo izquierdo: x = hacia fuera, y = arriba, z = delante; el derecho se refleja en x. Defecto (0.45,-1,-0.35) */
+    float pole[3];               /* dirección del codo en el marco del torso para el brazo izquierdo: x = hacia fuera, y = arriba, z = delante; el derecho se refleja en x. Defecto (0.45,-1,-0.35). Sin codo de arma (vrbody_set_pole) es la BASE de vrbody_natural_pole (la regla lo modula según la posición de la mano); el solver proyecta siempre el codo al semiespacio anatómico */
     VrArmLimits limits;
     /* tiempo */
     float smooth_tau_s;          /* constante del suavizado de las manos (0 = sin suavizado); defecto 0.02 */
@@ -234,8 +241,13 @@ void vrbody_set_calibration(int side, const float q[4]);   /* rechaza datos no f
  * Sin medida k = 1. Se guarda el largo y no k, para que valga con cualquier modelo/escala. */
 #define VRBODY_ARM_LEN_MIN_M 0.45f
 #define VRBODY_ARM_LEN_MAX_M 0.85f
-/* Pura. Hombro estimado del usuario (m, espacio del usuario) desde la cabeza `head` y el rumbo horizontal `fwd` (hacia delante; la componente Y se ignora; side 0 izquierda / 1 derecha): 0,17 m al lado, 0,22 m
- * por debajo y 0,05 m por detrás de la cabeza (las constantes del hombro de vr/weapons/w_guided.c). 1 = bien; 0 = rumbo nulo o datos no finitos. */
+/* Distancia lateral (m) del hombro al eje del cuerpo: la separación entre hombros es el doble (0,40 m). Es la de la IK (vrbody_apply: el hombro de la IK se separa del del modelo hasta este valor; el del modelo de Snake
+ * está a 190 unidades del eje = 0,182 m con las 1042 unidades/m medidas, 0,365 m entre hombros) y la del hombro ESTIMADO con el que se mide el largo de brazo (vrbody_shoulder_estimate): una sola cifra, para que
+ * el largo medido sea el que usa la IK. 0,40 m: extremo alto de 0,36-0,40 m entre articulaciones de hombro de un adulto (anchura biacromial ~0,36-0,41 m). Los huesos de brazo se escalan al largo del usuario (k) pero los
+ * hombros del torso no, así que con Snake a 0,365 m los brazos del personaje convergían más al frente que los reales. */
+#define VRBODY_SHOULDER_HALF_M 0.20f
+/* Pura. Hombro estimado del usuario (m, espacio del usuario) desde la cabeza `head` y el rumbo horizontal `fwd` (hacia delante; la componente Y se ignora; side 0 izquierda / 1 derecha): VRBODY_SHOULDER_HALF_M al lado, 0,22 m
+ * por debajo y 0,05 m por detrás de la cabeza (altura y fondo: las constantes del hombro de vr/weapons/w_guided.c). 1 = bien; 0 = rumbo nulo o datos no finitos. */
 int vrbody_shoulder_estimate(int side, const float head[3], const float fwd[3], float out[3]);
 /* Pura. Mide el largo de brazo hombro -> muñeca (como el modelo): |agarre - hombro estimado| - |muñeca -> agarre| (vrhs_grip_center, ~90 mm). 1 = válida (dentro de VRBODY_ARM_LEN_MIN_M..MAX_M y el agarre delante del hombro, al menos 0,5 del largo en el rumbo: brazo al frente, no caído);
  * 0 = rechazada (len_m sin tocar). */
@@ -317,7 +329,7 @@ int vrbody_forearm_pose(int side, VrBodyForearm *out);
 typedef struct VrBodyArmLive {
     VrArmRig rig; VrArmLimits lim;
     float upm;
-    float shoulder[3];           /* hombro del torso enderezado */
+    float shoulder[3];           /* hombro del torso enderezado (el dibujado: la IK usa shoulder + shoulder_spread) */
     float torso[9];              /* marco del torso */
     float pole[3];               /* hacia dónde apunta el codo (unitario) */
     float wrist[3];              /* objetivo de la muñeca */
@@ -328,6 +340,8 @@ typedef struct VrBodyArmLive {
     float fade;                  /* peso de fundido 0..1 (suavizado) */
     int has_prev; float tau_prev, tau_f_prev, swivel_prev;   /* giro del antebrazo y del codo del apply (ver VrArmIn) */
     float len_k;                 /* k del largo de brazo del usuario (vrbody_arm_scale) con que `rig` ya viene escalado; 0 (memset) = 1 */
+    float shoulder_spread[3];    /* m, espacio del usuario: desplazamiento del hombro de la IK respecto a `shoulder` (separación lateral de hombros, VRBODY_SHOULDER_HALF_M); `shoulder` sigue siendo el hombro DIBUJADO
+                                  * (unido al torso) y el brazo superior se orienta y alarga de él al codo. 0 (memset) = sin separación */
 } VrBodyArmLive;
 int vrbody_arm_live(int side, VrBodyArmLive *out);
 /* Brazo resuelto (espacio del usuario, m): origen de las piezas brazo, antebrazo y mano y sus orientaciones (columnas = ejes locales de la pieza). */

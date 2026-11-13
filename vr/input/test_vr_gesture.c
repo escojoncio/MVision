@@ -89,7 +89,7 @@ static int run_path(vrg_t *g, vrg_in_t in, const float a[3], const float b[3], i
     return ev;
 }
 static void chest_center(const vrg_in_t *in, int s, float c[3]);
-static int hold_trig(vrg_t *g, vrg_in_t *in, int s, int after, vrg_out_t *o);
+static int hold_grip(vrg_t *g, vrg_in_t *in, int s, int after, vrg_out_t *o);
 static void t_contact(void) {
     vrg_t g; vrg_in_t in = base(); in.n_en = 1; in.en[0].p[0] = 0; in.en[0].p[1] = 1.0f; in.en[0].p[2] = 0.9f; in.fist_btn[1] = 1;
     float a[3] = {0.2f, 1.2f, 0.1f}, b[3] = {0.1f, 1.2f, 0.6f};            /* directo corto: el puño acaba a 0,3 m del eje del enemigo (dentro del cuerpo + tolerancia) */
@@ -112,7 +112,7 @@ static void t_contact(void) {
     /* ventana abierta en la zona del pecho, puño cerrado y enemigo delante: el golpe cancela la ventana y pega */
     {
         vrg_out_t o; vrg_init(&g); vrg_in_t m = in; m.fist_btn[1] = 0; float c1[3]; chest_center(&m, 1, c1);
-        memcpy(m.hand[1], c1, sizeof c1); settle(&g, &m, 12); hold_trig(&g, &m, 1, 15, &o);
+        memcpy(m.hand[1], c1, sizeof c1); settle(&g, &m, 12); hold_grip(&g, &m, 1, 15, &o);
         CHECK(o.menu_open[1] == 1);
         m.fist_btn[1] = 1;      /* puño cerrado con la ventana abierta: el golpe de verdad la cancela */
         int ev = 0, still = 0; float x[3];
@@ -295,8 +295,8 @@ static void rel_pos(const vrg_in_t *in, float lat, float up, float fwd, float c[
 /* zona de menú de la mano `s` (0 izquierda, 1 derecha): 0,16 m a su lado, 0,26 m bajo la cabeza, 0,02 m detrás del plano de la cabeza */
 static void chest_center(const vrg_in_t *in, int s, float c[3]) { rel_pos(in, s == 0 ? -0.16f : 0.16f, ZDN, ZFW, c); }
 /* aprieta el gatillo de la mano `s` y lo mantiene `after` fotogramas más (0,02 s cada uno); devuelve 1 si la ventana se abrió en algún fotograma */
-static int hold_trig(vrg_t *g, vrg_in_t *in, int s, int after, vrg_out_t *o) {
-    int opened = 0; in->trig[s] = 1.0f;
+static int hold_grip(vrg_t *g, vrg_in_t *in, int s, int after, vrg_out_t *o) {
+    int opened = 0; in->fist_btn[s] = 1;
     for (int i = 0; i <= after; i++) { upd(g, in, o); opened |= o->menu_open[s] && (o->press & (VRG_L2 | VRG_R2)); }
     return opened;
 }
@@ -306,15 +306,15 @@ static void t_chest_throw(void) {
     float c0[3], c1[3]; chest_center(&in, 0, c0); chest_center(&in, 1, c1);
     memcpy(in.hand[1], c1, sizeof c1); settle(&g, &in, 12);
     in.throw_hold = 1;
-    CHECK(hold_trig(&g, &in, 1, 30, &o) && (o.press & VRG_R2) && g.menu_hold == 2);                /* 0,6 s con el gatillo en el pecho: abre armas aunque la granada esté en la mano */
-    in.trig[1] = 0; settle(&g, &in, 3);
+    CHECK(hold_grip(&g, &in, 1, 30, &o) && (o.press & VRG_R2) && g.menu_hold == 2);                /* 0,6 s con el gatillo en el pecho: abre armas aunque la granada esté en la mano */
+    in.fist_btn[1] = 0; settle(&g, &in, 3);
     memcpy(in.hand[0], c0, sizeof c0); settle(&g, &in, 12);
-    CHECK(hold_trig(&g, &in, 0, 15, &o) && (o.press & VRG_L2) && !(o.press & VRG_R2));            /* la mano libre abre objetos */
-    in.trig[0] = 0; settle(&g, &in, 3);
+    CHECK(hold_grip(&g, &in, 0, 15, &o) && (o.press & VRG_L2) && !(o.press & VRG_R2));            /* la mano libre abre objetos */
+    in.fist_btn[0] = 0; settle(&g, &in, 3);
     in.throw_hold = 0; settle(&g, &in, 12);
-    CHECK(hold_trig(&g, &in, 1, 15, &o) && (o.press & VRG_R2) && o.pecho[1].opened);              /* sin arrojadiza: abre igual */
-    in.trig[1] = 0; settle(&g, &in, 3);
-    in.trig[1] = 1; int op = 0;                                                                   /* se prepara con el intento ya en curso: el intento sigue y abre */
+    CHECK(hold_grip(&g, &in, 1, 15, &o) && (o.press & VRG_R2) && o.pecho[1].opened);              /* sin arrojadiza: abre igual */
+    in.fist_btn[1] = 0; settle(&g, &in, 3);
+    in.fist_btn[1] = 1; int op = 0;                                                                   /* se prepara con el intento ya en curso: el intento sigue y abre */
     for (int i = 0; i < 10; i++) upd(&g, &in, &o);
     in.throw_hold = 1;
     for (int i = 0; i < 30; i++) { upd(&g, &in, &o); op |= o.menu_open[1] && (o.press & VRG_R2); }
@@ -329,55 +329,55 @@ static void t_chest(void) {
         float c0[3], c1[3]; chest_center(&in, 0, c0); chest_center(&in, 1, c1);
         /* manos fuera de la zona: pulsar = puño solamente */
         settle(&g, &in, 12);
-        CHECK(hold_trig(&g, &in, 0, 0, &o) == 0 && o.pecho[0].valid && !o.pecho[0].opened && !strcmp(o.pecho[0].reason, "lejos") && o.pecho[0].dist > 0.175f);   /* [pecho] del rechazo */
-        CHECK(!hold_trig(&g, &in, 0, 25, &o) && o.menu_open[0] == 0 && !(o.press & VRG_L2)); in.trig[0] = 0; settle(&g, &in, 3);
+        CHECK(hold_grip(&g, &in, 0, 0, &o) == 0 && o.pecho[0].valid && !o.pecho[0].opened && !strcmp(o.pecho[0].reason, "lejos") && o.pecho[0].dist > 0.175f);   /* [pecho] del rechazo */
+        CHECK(!hold_grip(&g, &in, 0, 25, &o) && o.menu_open[0] == 0 && !(o.press & VRG_L2)); in.fist_btn[0] = 0; settle(&g, &in, 3);
         /* mano izquierda en el pecho: 0,2 s no abre, 0,28 s tampoco; 0,30 s abre objetos (L2 del motor) y se mantiene */
         memcpy(in.hand[0], c0, sizeof c0); settle(&g, &in, 12);
-        CHECK(!hold_trig(&g, &in, 0, 10, &o)); in.trig[0] = 0; upd(&g, &in, &o);
+        CHECK(!hold_grip(&g, &in, 0, 10, &o)); in.fist_btn[0] = 0; upd(&g, &in, &o);
         CHECK(o.pecho[0].valid && !o.pecho[0].opened && !strcmp(o.pecho[0].reason, "soltado") && fabsf(o.pecho[0].hold - 0.2f) < 0.005f); settle(&g, &in, 3);
-        CHECK(!hold_trig(&g, &in, 0, 14, &o)); in.trig[0] = 0; settle(&g, &in, 3);
-        CHECK(hold_trig(&g, &in, 0, 15, &o));
+        CHECK(!hold_grip(&g, &in, 0, 14, &o)); in.fist_btn[0] = 0; settle(&g, &in, 3);
+        CHECK(hold_grip(&g, &in, 0, 15, &o));
         CHECK(o.menu_open[0] == 1 && (o.press & VRG_L2) && !(o.press & VRG_R2) && o.grab_start == 0);
         CHECK(o.pecho[0].valid && o.pecho[0].opened && !strcmp(o.pecho[0].reason, "ok") && o.pecho[0].hold > 0.29f && o.pecho[0].dist < 0.01f);
         int kept = 0; for (int i = 0; i < 25; i++) { in.hand[0][2] += 0.01f; upd(&g, &in, &o); kept += (o.press & VRG_L2) != 0; }   /* la mano puede moverse: sigue abierta */
         CHECK(kept == 25);
-        in.trig[0] = 0; upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L2));
+        in.fist_btn[0] = 0; upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L2));
         /* mano derecha en SU zona (el lado derecho) -> R2 (armas) */
         settle(&g, &in, 5); memcpy(in.hand[1], c1, sizeof c1); settle(&g, &in, 12);
-        CHECK(hold_trig(&g, &in, 1, 15, &o)); CHECK(o.menu_open[1] == 1 && (o.press & VRG_R2) && !(o.press & VRG_L2));
-        in.trig[1] = 0; settle(&g, &in, 3);
+        CHECK(hold_grip(&g, &in, 1, 15, &o)); CHECK(o.menu_open[1] == 1 && (o.press & VRG_R2) && !(o.press & VRG_L2));
+        in.fist_btn[1] = 0; settle(&g, &in, 3);
         /* salir de la zona antes de 0,30 s reinicia el tiempo: no abre ni al volver */
         settle(&g, &in, 12); memcpy(in.hand[0], c0, sizeof c0); settle(&g, &in, 12);
-        { int op = 0; in.trig[0] = 1; for (int i = 0; i < 40; i++) { if (i == 8) in.hand[0][1] -= 0.5f; if (i == 9) in.hand[0][1] += 0.5f; upd(&g, &in, &o); op |= o.menu_open[0]; } CHECK(!op); }
-        in.trig[0] = 0; settle(&g, &in, 3);
+        { int op = 0; in.fist_btn[0] = 1; for (int i = 0; i < 40; i++) { if (i == 8) in.hand[0][1] -= 0.5f; if (i == 9) in.hand[0][1] += 0.5f; upd(&g, &in, &o); op |= o.menu_open[0]; } CHECK(!op); }
+        in.fist_btn[0] = 0; settle(&g, &in, 3);
         /* mano colgando al costado (0,20 m lateral, 0,60 m bajo la cabeza): NO abre ni manteniendo el puño 1 s */
         for (int s = 0; s < 2; s++) {
             float lx = cosf(in.yaw), lz = -sinf(in.yaw), sd = s == 0 ? 1.0f : -1.0f;
-            in.trig[s] = 0; settle(&g, &in, 12);
+            in.fist_btn[s] = 0; settle(&g, &in, 12);
             in.hand[s][0] = in.head[0] + lx * 0.20f * sd; in.hand[s][1] = in.head[1] - 0.60f; in.hand[s][2] = in.head[2] + lz * 0.20f * sd;
             settle(&g, &in, 12);
-            CHECK(!hold_trig(&g, &in, s, 50, &o)); in.trig[s] = 0; settle(&g, &in, 3);
+            CHECK(!hold_grip(&g, &in, s, 50, &o)); in.fist_btn[s] = 0; settle(&g, &in, 3);
         }
         /* cada mano solo en SU zona: la izquierda en la zona derecha (y al revés) no abre; ni la zona de una mano sirve a la otra aunque esté a 0,32 m */
         memcpy(in.hand[0], c1, sizeof c1); memcpy(in.hand[1], c0, sizeof c0); settle(&g, &in, 12);
-        CHECK(hold_trig(&g, &in, 0, 0, &o) == 0 && !strcmp(o.pecho[0].reason, "lejos") && o.pecho[0].dist > 0.30f);
-        CHECK(!hold_trig(&g, &in, 0, 25, &o)); in.trig[0] = 0; settle(&g, &in, 3);
-        CHECK(!hold_trig(&g, &in, 1, 25, &o) && !(o.press & VRG_R2)); in.trig[1] = 0; settle(&g, &in, 3);
+        CHECK(hold_grip(&g, &in, 0, 0, &o) == 0 && !strcmp(o.pecho[0].reason, "lejos") && o.pecho[0].dist > 0.30f);
+        CHECK(!hold_grip(&g, &in, 0, 25, &o)); in.fist_btn[0] = 0; settle(&g, &in, 3);
+        CHECK(!hold_grip(&g, &in, 1, 25, &o) && !(o.press & VRG_R2)); in.fist_btn[1] = 0; settle(&g, &in, 3);
         /* posiciones reconstruidas del registro (lateral, arriba, delante): izquierda (-0,164, -0,26, +0,003), derecha (+0,149, -0,26, -0,041): abren cada una en su zona */
         rel_pos(&in, -0.164f, ZDN, ZFW + 0.023f, in.hand[0]); rel_pos(&in, 0.149f, ZDN, ZFW - 0.021f, in.hand[1]); settle(&g, &in, 12);
-        CHECK(hold_trig(&g, &in, 0, 15, &o) && (o.press & VRG_L2) && o.pecho[0].opened && o.pecho[0].dist < 0.05f); in.trig[0] = 0; settle(&g, &in, 3);
-        CHECK(hold_trig(&g, &in, 1, 15, &o) && (o.press & VRG_R2) && o.pecho[1].opened && o.pecho[1].dist < 0.05f); in.trig[1] = 0; settle(&g, &in, 3);
+        CHECK(hold_grip(&g, &in, 0, 15, &o) && (o.press & VRG_L2) && o.pecho[0].opened && o.pecho[0].dist < 0.05f); in.fist_btn[0] = 0; settle(&g, &in, 3);
+        CHECK(hold_grip(&g, &in, 1, 15, &o) && (o.press & VRG_R2) && o.pecho[1].opened && o.pecho[1].dist < 0.05f); in.fist_btn[1] = 0; settle(&g, &in, 3);
         /* el punto fijo anterior (0,30 m bajo la cabeza, 0,18 m delante, centrado) ya no abre */
-        rel_pos(&in, 0.0f, -0.30f, 0.18f, in.hand[0]); settle(&g, &in, 12); CHECK(!hold_trig(&g, &in, 0, 25, &o)); in.trig[0] = 0; settle(&g, &in, 3);
+        rel_pos(&in, 0.0f, -0.30f, 0.18f, in.hand[0]); settle(&g, &in, 12); CHECK(!hold_grip(&g, &in, 0, 25, &o)); in.fist_btn[0] = 0; settle(&g, &in, 3);
         /* 0,5 m fuera de la zona: no */
-        memcpy(in.hand[0], c0, sizeof c0); in.hand[0][1] -= 0.5f; settle(&g, &in, 12); CHECK(!hold_trig(&g, &in, 0, 25, &o));
-        in.trig[0] = 0; settle(&g, &in, 3);
+        memcpy(in.hand[0], c0, sizeof c0); in.hand[0][1] -= 0.5f; settle(&g, &in, 12); CHECK(!hold_grip(&g, &in, 0, 25, &o));
+        in.fist_btn[0] = 0; settle(&g, &in, 3);
         /* regla dura: puño ya cerrado y la mano ENTRA en la zona: no se abre la ventana */
         memcpy(in.hand[0], base().hand[0], sizeof in.hand[0]); in.hand[0][0] += in.head[0]; in.hand[0][2] += in.head[2];
-        in.trig[0] = 1; settle(&g, &in, 12);
+        in.fist_btn[0] = 1; settle(&g, &in, 12);
         memcpy(in.hand[0], c0, sizeof c0); upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L2));
         settle(&g, &in, 25); upd(&g, &in, &o); CHECK(o.menu_open[0] == 0 && !(o.press & VRG_L2));
-        in.trig[0] = 0; settle(&g, &in, 3);
+        in.fist_btn[0] = 0; settle(&g, &in, 3);
         /* aviso háptico corto al entrar en la zona con la mano libre */
         vrg_init(&g); in.hand[1][0] = 5; in.hand[1][1] = 1.0f; settle(&g, &in, 12);
         memcpy(in.hand[1], c1, sizeof c1); upd(&g, &in, &o); CHECK(o.haptic[1] > 0.1f && o.haptic[1] < 0.3f);
@@ -386,11 +386,11 @@ static void t_chest(void) {
     {
         vrg_out_t o; vrg_t g; vrg_init(&g); vrg_in_t in = base(); in.head[0] = 0.3f; in.head[1] = 1.65f; in.head[2] = -0.4f; in.yaw = 0.0f; in.head_fwd[0] = 0.0f; in.head_fwd[1] = 1.0f;
         in.hand[0][0] = 0.46f; in.hand[0][1] = 1.39f; in.hand[0][2] = -0.42f; in.hand[1][0] = 0.46f; in.hand[1][1] = 1.39f; in.hand[1][2] = -0.42f; settle(&g, &in, 12);
-        CHECK(hold_trig(&g, &in, 0, 15, &o) && (o.press & VRG_L2)); in.trig[0] = 0; settle(&g, &in, 3);
-        CHECK(!hold_trig(&g, &in, 1, 25, &o) && !(o.press & VRG_R2)); in.trig[1] = 0; settle(&g, &in, 3);
+        CHECK(hold_grip(&g, &in, 0, 15, &o) && (o.press & VRG_L2)); in.fist_btn[0] = 0; settle(&g, &in, 3);
+        CHECK(!hold_grip(&g, &in, 1, 25, &o) && !(o.press & VRG_R2)); in.fist_btn[1] = 0; settle(&g, &in, 3);
         in.hand[0][0] = 0.14f; in.hand[1][0] = 0.14f; settle(&g, &in, 12);
-        CHECK(!hold_trig(&g, &in, 0, 25, &o) && !(o.press & VRG_L2)); in.trig[0] = 0; settle(&g, &in, 3);
-        CHECK(hold_trig(&g, &in, 1, 15, &o) && (o.press & VRG_R2));
+        CHECK(!hold_grip(&g, &in, 0, 25, &o) && !(o.press & VRG_L2)); in.fist_btn[0] = 0; settle(&g, &in, 3);
+        CHECK(hold_grip(&g, &in, 1, 15, &o) && (o.press & VRG_R2));
     }
     /* cuello de un enemigo dentro de la zona del pecho: el puño (R1/L1) agarra y NO abre la ventana (la abre solo el gatillo) */
     vrg_out_t o; vrg_t g; vrg_init(&g); vrg_in_t in = base(); in.body[2] = 0.0f;
@@ -400,7 +400,7 @@ static void t_chest(void) {
     in.fist_btn[1] = 1; pgrab(&g, &in, &o);
     CHECK(o.grab_start == 1 && o.menu_open[1] == 0 && !(o.press & VRG_R2));
     /* con el enemigo caído (sin agarre posible) el gatillo abre la ventana */
-    vrg_init(&g); in.en[0].down = 1; in.fist_btn[1] = 0; settle(&g, &in, 12); CHECK(hold_trig(&g, &in, 1, 15, &o));
+    vrg_init(&g); in.en[0].down = 1; in.fist_btn[1] = 0; settle(&g, &in, 12); CHECK(hold_grip(&g, &in, 1, 15, &o));
     CHECK(o.grab_start == 0 && o.menu_open[1] == 1);
     /* la ventana abierta bloquea el golpe de esa mano */
     int pc = 0; for (int i = 1; i <= 6; i++) { in.hand[1][2] += 0.1f; upd(&g, &in, &o); pc += o.punch_side >= 0; } CHECK(pc == 0);
@@ -517,38 +517,46 @@ static void t_robust(void) {
     }
 }
 
-/* los menús los abre el GATILLO de la mano en su zona (L2 izquierda, R2 derecha); el agarre (R1/L1) no; el gatillo en la zona no llega al juego */
-static void t_trigmenu(void) {
+/* los menús los abre el GRIP de la mano (botón del puño R1/L1) en su zona (L2 izquierda, R2 derecha); el gatillo no (ver t_fire_block: en la zona dispara); el grip no se retira del mando por esto */
+static void t_gripmenu(void) {
     vrg_out_t o; vrg_t g; vrg_init(&g); vrg_in_t in = base(); float c[2][3];
     chest_center(&in, 0, c[0]); chest_center(&in, 1, c[1]);
     for (int s = 0; s < 2; s++) {
         uint16_t btn = s == 0 ? VRG_L2 : VRG_R2;
         vrg_init(&g); in = base(); memcpy(in.hand[s], c[s], sizeof c[s]); settle(&g, &in, 12);
-        /* gatillo en la zona: abre a los 0,30 s con L2 (izquierda) / R2 (derecha) y el gatillo queda retirado del mando */
-        CHECK(!hold_trig(&g, &in, s, 10, &o) && (o.mask & btn) && !(o.press & btn));              /* 0,22 s: aún no, pero ya enmascarado */
-        in.trig[s] = 0; settle(&g, &in, 3);
-        CHECK(hold_trig(&g, &in, s, 15, &o) && o.menu_open[s] == 1 && (o.press & btn) && (o.mask & btn) && o.pecho[s].opened);
-        in.trig[s] = 0; upd(&g, &in, &o); CHECK(o.menu_open[s] == 0 && !(o.press & btn)); settle(&g, &in, 3);
-        /* el agarre (R1/L1) en la zona NO abre */
-        in.fist_btn[s] = 1; int op = 0, mk = 0;
+        /* grip en la zona: abre a los 0,30 s con L2 (izquierda) / R2 (derecha); nada se retira del mando salvo R1/L1 (siempre) */
+        CHECK(!hold_grip(&g, &in, s, 10, &o) && !(o.mask & (VRG_L2 | VRG_R2)) && !(o.press & btn));      /* 0,22 s: aún no */
+        in.fist_btn[s] = 0; settle(&g, &in, 3);
+        CHECK(hold_grip(&g, &in, s, 15, &o) && o.menu_open[s] == 1 && (o.press & btn) && !(o.mask & (VRG_L2 | VRG_R2)) && o.pecho[s].opened);
+        in.fist_btn[s] = 0; upd(&g, &in, &o); CHECK(o.menu_open[s] == 0 && !(o.press & btn)); settle(&g, &in, 3);
+        /* el gatillo (in no lo lleva: vrg_update no lo mira) no abre: sin grip, 40 fotogramas en la zona = nada */
+        int op = 0;
         for (int i = 0; i < 40; i++) { upd(&g, &in, &o); op |= o.menu_open[s] || (o.press & (VRG_L2 | VRG_R2)) || o.pecho[s].valid; }
-        CHECK(!op); in.fist_btn[s] = 0; settle(&g, &in, 3);
-        /* gatillo bajo el umbral de pulsación (0,5 < 0,6): no abre; con histéresis ya pulsado sigue a 0,4 y suelta a 0,2 */
-        in.trig[s] = 0.5f; op = 0; for (int i = 0; i < 40; i++) { upd(&g, &in, &o); op |= o.menu_open[s]; } CHECK(!op); in.trig[s] = 0; settle(&g, &in, 3);
-        in.trig[s] = 1.0f; settle(&g, &in, 3); in.trig[s] = 0.4f; settle(&g, &in, 20); upd(&g, &in, &o); CHECK(o.menu_open[s] == 1 && (o.press & btn));
-        in.trig[s] = 0.2f; upd(&g, &in, &o); CHECK(o.menu_open[s] == 0 && !(o.press & btn)); in.trig[s] = 0; settle(&g, &in, 3);
-        /* gatillo FUERA de la zona: no abre y no se retira (sigue siendo disparo) */
+        CHECK(!op);
+        /* grip FUERA de la zona: no abre */
         vrg_init(&g); in = base(); memcpy(in.hand[s], c[s], sizeof c[s]); in.hand[s][1] -= 0.5f; settle(&g, &in, 12);
-        op = 0; mk = 0; in.trig[s] = 1.0f;
-        for (int i = 0; i < 40; i++) { upd(&g, &in, &o); op |= o.menu_open[s] || (o.press & btn); mk |= (o.mask & (VRG_L2 | VRG_R2)) != 0; }
-        CHECK(!op && !mk);
-        /* la mano entra con el gatillo ya apretado: no abre, pero en la zona sigue retirado del mando; al salir vuelve a llegar */
-        memcpy(in.hand[s], c[s], sizeof c[s]); upd(&g, &in, &o); CHECK((o.mask & btn) && !o.menu_open[s]);
-        settle(&g, &in, 25); upd(&g, &in, &o); CHECK((o.mask & btn) && !o.menu_open[s] && !(o.press & btn));
-        in.hand[s][1] -= 0.5f; upd(&g, &in, &o); CHECK(!(o.mask & btn));
+        op = 0; in.fist_btn[s] = 1;
+        for (int i = 0; i < 40; i++) { upd(&g, &in, &o); op |= o.menu_open[s] || (o.press & btn); }
+        CHECK(!op);
+        /* la mano entra con el grip ya apretado: no abre (hace falta una pulsación nueva dentro) */
+        memcpy(in.hand[s], c[s], sizeof c[s]); upd(&g, &in, &o); CHECK(!o.menu_open[s]);
+        settle(&g, &in, 25); upd(&g, &in, &o); CHECK(!o.menu_open[s] && !(o.press & btn));
     }
-    /* el gatillo de una mano no se retira por estar la OTRA en su zona */
-    vrg_init(&g); in = base(); memcpy(in.hand[0], c[0], sizeof c[0]); settle(&g, &in, 12); in.trig[1] = 1.0f; upd(&g, &in, &o); CHECK(!(o.mask & VRG_R2));
+    /* el grip de una mano en SU zona no abre la ventana de la otra */
+    vrg_init(&g); in = base(); memcpy(in.hand[0], c[0], sizeof c[0]); settle(&g, &in, 12); in.fist_btn[1] = 1; for (int i = 0; i < 40; i++) { upd(&g, &in, &o); CHECK(!(o.press & VRG_R2) && !o.menu_open[0] && !o.menu_open[1]); }
+    /* un golpe de verdad dentro de la zona (puño + contacto con un enemigo) cancela el intento en curso: no se abre la ventana después */
+    {
+        vrg_init(&g); in = with_enemy(); in.cap_valid = 1; in.en[0].p[0] = c[1][0]; in.en[0].p[1] = c[1][1] - 0.4f; in.en[0].p[2] = c[1][2] + 2.0f;      /* lejos del cuello: sin agarre pendiente, solo el golpe por contacto */
+        memcpy(in.hand[1], c[1], sizeof c[1]); settle(&g, &in, 12);
+        float z0 = in.hand[1][2]; int pk = 0, opened = 0;
+        in.fist_btn[1] = 1;
+        for (int i = 0; i < 40; i++) {
+            if (i >= 1 && i <= 4) in.hand[1][2] = z0 + 0.035f * i;
+            in.cap_zone[1] = i >= 2 && i <= 4 ? 2 : 0;
+            upd(&g, &in, &o); pk += o.punch_side == 1; opened |= o.menu_open[1] || (o.press & VRG_R2) || (o.pecho[1].valid && o.pecho[1].opened);
+        }
+        CHECK(pk == 1 && !opened && !g.chest_live[1]);
+    }
 }
 
 /* zona de menú en el marco FÍSICO: la cabeza/mano del mundo (escaladas) y el rumbo del personaje no intervienen; manda hrel + head_fwd */
@@ -571,7 +579,7 @@ static vrg_in_t phys_base(void) {
 }
 /* aprieta el gatillo de `s` durante `n` fotogramas; devuelve cuántas veces se abrió la ventana (flancos de pecho.opened) */
 static int press_phys(vrg_t *g, vrg_in_t *in, int s, int n, vrg_out_t *o) {
-    int cnt = 0; in->trig[s] = 1.0f;
+    int cnt = 0; in->fist_btn[s] = 1;
     for (int i = 0; i < n; i++) { upd_phys(g, in, o); cnt += o->pecho[s].valid && o->pecho[s].opened; }
     return cnt;
 }
@@ -590,7 +598,7 @@ static void t_chest_phys(void) {
         in.tracked[s] = 0; upd_phys(&g, &in, &o); in.tracked[s] = 1;
         CHECK(press_phys(&g, &in, s, 40, &o) == 0 && o.menu_open[s] == 0);
         /* soltar el gatillo rearma: otra pulsación abre otra vez */
-        in.trig[s] = 0; for (int i = 0; i < 3; i++) upd_phys(&g, &in, &o);
+        in.fist_btn[s] = 0; for (int i = 0; i < 3; i++) upd_phys(&g, &in, &o);
         CHECK(press_phys(&g, &in, s, 16, &o) == 1);
         /* (c) 0,35 m fuera de la zona: no abre */
         vrg_init(&g); in = phys_base();
@@ -598,7 +606,7 @@ static void t_chest_phys(void) {
         press_phys(&g, &in, s, 1, &o); CHECK(o.pecho[s].valid && o.pecho[s].reason && !strcmp(o.pecho[s].reason, "lejos"));
         CHECK(press_phys(&g, &in, s, 40, &o) == 0 && o.menu_open[s] == 0);
         /* histéresis: entra a 0,15, sigue dentro hasta 0,20; entrando de fuera a 0,18 no vale */
-        vrg_init(&g); in = phys_base(); in.trig[s] = 0;
+        vrg_init(&g); in = phys_base(); in.fist_btn[s] = 0;
         put_hf(&in, s, sd * 0.16f, ZDN, ZFW, 0.85f); for (int i = 0; i < 12; i++) upd_phys(&g, &in, &o);
         put_hf(&in, s, sd * 0.16f, ZDN - 0.20f, ZFW, 0.85f); upd_phys(&g, &in, &o);
         CHECK(press_phys(&g, &in, s, 16, &o) == 1);
@@ -616,22 +624,23 @@ static void t_chest_phys(void) {
 }
 
 
-/* ---- ventana del pecho sostenida por el GATILLO (vrg_step_pad): L2/R2 continuo mientras el gatillo siga apretado, cambie la capa o no ---- */
+/* ---- ventana del pecho sostenida por el GRIP (vrg_step_pad): L2/R2 continuo mientras el grip siga apretado, cambie la capa o no ---- */
+static float ptrig[2];      /* gatillo analógico físico de cada mano en las pruebas de vrg_step_pad (vrg_pad_t.trig) */
 static uint16_t hold_step(vrg_t *g, const vrg_in_t *in, vrg_out_t *o, int ctl, uint16_t pad_in) {
     vrg_pad_t p; memset(&p, 0, sizeof p);
     p.ctl = ctl; p.menu_open = !ctl; p.pad = p.pad_in = pad_in;
-    for (int s = 0; s < 2; s++) { p.tracked[s] = in->tracked[s]; p.trig[s] = in->trig[s]; }
+    for (int s = 0; s < 2; s++) { p.tracked[s] = in->tracked[s]; p.trig[s] = ptrig[s]; p.fist[s] = in->fist_btn[s]; }   /* vrbodyg lleva el grip (R1/L1 del mando entrante) también fuera de la capa de juego */
     vrg_in_t iv = *in;
-    if (!ctl) { iv.active = 0; memset(iv.tracked, 0, sizeof iv.tracked); memset(iv.trig, 0, sizeof iv.trig); }   /* fuera de la capa de juego vrbodyg no rellena manos ni gatillo */
+    if (!ctl) { iv.active = 0; memset(iv.tracked, 0, sizeof iv.tracked); }   /* fuera de la capa de juego vrbodyg no rellena las manos */
     memcpy(iv.head_u, iv.head, sizeof iv.head_u);
     for (int s = 0; s < 2; s++) memcpy(iv.hand_u[s], iv.hand[s], sizeof iv.hand_u[s]);
     return vrg_step_pad(g, &iv, o, &p);
 }
-static int open_hold(vrg_t *g, vrg_in_t *in, int s, vrg_out_t *o) {   /* mano en la zona, gatillo apretado en la capa de juego hasta abrir; 1 si abrió */
+static int open_hold(vrg_t *g, vrg_in_t *in, int s, vrg_out_t *o) {   /* mano en la zona, grip apretado en la capa de juego hasta abrir; 1 si abrió */
     float sd = s == 0 ? -1.0f : 1.0f;
     put_hf(in, s, sd * 0.16f, ZDN, ZFW, 0.85f);
     for (int i = 0; i < 12; i++) hold_step(g, in, o, 1, 0);
-    in->trig[s] = 1.0f;
+    in->fist_btn[s] = 1;
     for (int i = 0; i < 30; i++) { hold_step(g, in, o, 1, 0); if (o->pecho[s].valid && o->pecho[s].opened) return 1; }
     return 0;
 }
@@ -639,17 +648,19 @@ static void t_menu_hold(void) {
     vrg_out_t o;
     for (int s = 0; s < 2; s++) {
         uint16_t btn = s == 0 ? VRG_L2 : VRG_R2, other = s == 0 ? VRG_R2 : VRG_L2;
-        /* (a) patrón del registro real: 3 VBlanks de juego, luego control/menú de 2 en 2; el mando entrante (capa de menú con antirrebote) no lleva el botón los primeros 9 VBlanks. 3 s de gatillo */
+        /* (a) patrón del registro real: 3 VBlanks de juego, luego control/menú de 2 en 2; el mando entrante (capa de menú con antirrebote) no lleva el botón los primeros 9 VBlanks. 3 s de grip */
         vrg_t g; vrg_init(&g); vrg_in_t in = phys_base();
         CHECK(open_hold(&g, &in, s, &o));
-        int edges = 0, prev = 1, all = 1, oth = 0;   /* prev = 1: el VBlank de la apertura ya llevaba el botón */
+        const uint16_t gbit = s == 1 ? VRG_R1 : VRG_L1;      /* el grip de la mano que sostiene la ventana (R1 dominante, L1 la otra) */
+        int edges = 0, prev = 1, all = 1, oth = 0, leak = 0;   /* prev = 1: el VBlank de la apertura ya llevaba el botón */
         for (int i = 0; i < 150; i++) {
-            uint16_t r = hold_step(&g, &in, &o, i < 2 ? 1 : ((i / 2) & 1) ^ 1, i < 9 ? 0 : btn);
-            int on = (r & btn) != 0; if (on && !prev) edges++; if (!on) all = 0; prev = on; oth |= (r & other) != 0;
+            uint16_t r = hold_step(&g, &in, &o, i < 2 ? 1 : ((i / 2) & 1) ^ 1, (uint16_t)((i < 9 ? 0 : btn) | gbit));      /* el mando entrante lleva el grip (R1/L1) */
+            int on = (r & btn) != 0; if (on && !prev) edges++; if (!on) all = 0; prev = on; oth |= (r & other) != 0; leak |= (r & gbit) != 0;
         }
         CHECK(all);                                   /* el bit está a 1 en TODOS los VBlanks */
         CHECK(edges == 0);                            /* sin flancos nuevos tras abrir (el flanco de subida fue el de la apertura) */
         CHECK(!oth);
+        CHECK(!leak);                                 /* el grip que sostiene la ventana no llega al juego como R1/L1 en ninguna capa */
         /* (b) lo mismo con un patrón pseudoaleatorio de capa y de mando entrante */
         vrg_init(&g); in = phys_base(); CHECK(open_hold(&g, &in, s, &o));
         unsigned r = 777u; all = 1;
@@ -659,16 +670,16 @@ static void t_menu_hold(void) {
             if (!(rr & btn)) all = 0;
         }
         CHECK(all);
-        /* (c) histéresis: a 0,45 (entre trig_off y trig_on) sigue en las dos capas; a 0,2 se suelta y no vuelve sin nueva apertura */
-        in.trig[s] = 0.45f;
+        /* (c) el grip es el botón del puño (con histéresis en vr_input): soltarlo cierra en las dos capas y no vuelve sin nueva apertura */
+        in.fist_btn[s] = 1;
         for (int i = 0; i < 20; i++) CHECK(hold_step(&g, &in, &o, (i / 2) & 1, 0) & btn);
-        in.trig[s] = 0.2f;
+        in.fist_btn[s] = 0;
         CHECK(!(hold_step(&g, &in, &o, 0, 0) & btn) && !(g.menu_hold & (1 << s)));
-        in.trig[s] = 1.0f;
-        for (int i = 0; i < 20; i++) CHECK(!(hold_step(&g, &in, &o, (i / 2) & 1, 0) & btn));   /* gatillo apretado de nuevo sin pasar por el flanco de apertura: nada */
-        /* (d) soltar el gatillo estando en la capa de menú también suelta; perder el seguimiento también */
+        in.fist_btn[s] = 1;
+        for (int i = 0; i < 20; i++) CHECK(!(hold_step(&g, &in, &o, (i / 2) & 1, 0) & btn));   /* grip apretado de nuevo sin pasar por el flanco de apertura: nada */
+        /* (d) soltar el grip estando en la capa de menú también suelta; perder el seguimiento también */
         vrg_init(&g); in = phys_base(); CHECK(open_hold(&g, &in, s, &o));
-        hold_step(&g, &in, &o, 0, 0); in.trig[s] = 0.0f;
+        hold_step(&g, &in, &o, 0, 0); in.fist_btn[s] = 0;
         CHECK(!(hold_step(&g, &in, &o, 0, 0) & btn));
         /* perder el seguimiento: se toleran 3 VBlanks seguidos con el botón (en ambas capas); el cuarto suelta. Recuperarlo antes reinicia la cuenta */
         for (int lay = 0; lay < 2; lay++) {
@@ -686,15 +697,15 @@ static void t_menu_hold(void) {
             CHECK(!(hold_step(&g, &in, &o, lay, 0) & btn));
         }
         vrg_init(&g); in = phys_base(); CHECK(open_hold(&g, &in, s, &o));
-        hold_step(&g, &in, &o, 0, 0); in.tracked[s] = 1; in.trig[s] = 0.0f;
+        hold_step(&g, &in, &o, 0, 0); in.tracked[s] = 1; in.fist_btn[s] = 0;
         CHECK(!(hold_step(&g, &in, &o, 0, 0) & btn));
         /* (e) ventana abierta y el juego sale del menú (menu_open = 0 en la capa de menú: pausa, códec): se olvida */
         vrg_init(&g); in = phys_base(); CHECK(open_hold(&g, &in, s, &o));
-        { vrg_pad_t p; memset(&p, 0, sizeof p); vrg_in_t iv = in; iv.active = 0; memset(iv.tracked, 0, sizeof iv.tracked); p.tracked[s] = 1; p.trig[s] = 1.0f;
+        { vrg_pad_t p; memset(&p, 0, sizeof p); vrg_in_t iv = in; iv.active = 0; memset(iv.tracked, 0, sizeof iv.tracked); p.tracked[s] = 1; p.fist[s] = 1;
           CHECK(!(vrg_step_pad(&g, &iv, &o, &p) & btn) && g.menu_hold == 0); }
     }
 }
-/* Bucle cerrado con vr_input real (antirrebote de menú) y un juego que abre el selector con el botón y lo cierra al soltarlo con 2 VBlanks de retardo: 3 s de gatillo = UNA apertura y el selector queda abierto */
+/* Bucle cerrado con vr_input real (antirrebote de menú) y un juego que abre el selector con el botón y lo cierra al soltarlo con 2 VBlanks de retardo: 3 s de grip = UNA apertura y el selector queda abierto */
 static void t_menu_loop(void) {
     vr_input_t vi; vr_input_init(&vi);
     vr_input_frame_t f; memset(&f, 0, sizeof f);
@@ -703,8 +714,9 @@ static void t_menu_loop(void) {
     put_hf(&in, 0, -0.16f, ZDN, ZFW, 0.85f);
     int menu = 0, hist[3] = {0, 0, 0}, opens = 0, pulses = 0, l2prev = 0, seen_open = 0, l2_after = 0, l2_total = 0;
     for (int t = 0; t < 200; t++) {
-        in.trig[0] = f.hand[0].trigger = t < 12 ? 0.0f : 1.0f;
+        f.hand[0].grip = t < 12 ? 0.0f : 1.0f;
         f.menu = menu != 0; vr_input_update(&vi, &f, &vo);
+        in.fist_btn[0] = (vo.buttons & VRG_L1) != 0;      /* el grip de la mano no dominante llega como L1 (también en la capa de menú) */
         uint16_t pin = vo.buttons, pad = pin;
         if (!menu) pad = (uint16_t)(pad & ~VRG_R2);
         uint16_t r = hold_step(&g, &in, &o, !menu, pin);
@@ -725,14 +737,16 @@ static void t_menu_loop(void) {
     CHECK(menu == 1 && l2_after == l2_total);
 }
 
-/* ---- bloqueo de disparo en la zona de menú (vrg_fire_gate): el arma simulada cuenta flancos del gatillo que RECIBE (sube a >= 0,5 tras haber bajado a <= 0,3) ---- */
+/* ---- bloqueo de disparo (vrg_fire_gate): el arma simulada cuenta flancos del gatillo que RECIBE (sube a >= 0,5 tras haber bajado a <= 0,3). La zona del pecho NO bloquea (el gatillo dispara y no abre nada);
+ *      solo bloquea la ventana abierta con el grip (o cualquier menú abierto), y hasta soltar el gatillo tras cerrarse ---- */
 typedef struct { int armed, shots, last_why; float seen; int primed, ready, thrown; } fsim_t;   /* primed/ready/thrown: granada simulada (se prepara al apretar >= 0,6 tras ver <= 0,3, se lanza al soltar <= 0,3) */
 static void fsim_init(fsim_t *f) { memset(f, 0, sizeof *f); f->armed = 1; }
-/* un VBlank con la mano `s` a `d` m (lateral) de su zona y gatillo `trig`; devuelve el bloqueo (VRG_FB_*) y cuenta los disparos del arma */
+static vrg_out_t fo;      /* salida de vrg_step_pad del último fire_step */
+/* un VBlank con la mano `s` a `d` m (lateral) de su zona y gatillo `trig` (el grip es in->fist_btn[s]); devuelve el bloqueo (VRG_FB_*) y cuenta los disparos del arma */
 static int fire_step(vrg_t *g, vrg_in_t *in, fsim_t *f, int s, float d, float trig, int ctl) {
-    float sd = s == 0 ? -1.0f : 1.0f; vrg_out_t o;
-    put_hf(in, s, sd * (0.16f + d), ZDN, ZFW, 0.85f); in->trig[s] = trig;
-    hold_step(g, in, &o, ctl, 0);
+    float sd = s == 0 ? -1.0f : 1.0f;
+    put_hf(in, s, sd * (0.16f + d), ZDN, ZFW, 0.85f); ptrig[s] = trig;
+    hold_step(g, in, &fo, ctl, 0);
     int why = 0; float seen = vrg_fire_gate(g, s, trig, &why);
     if (seen <= 0.3f) f->armed = 1;
     if (seen >= 0.5f && f->armed) { f->armed = 0; f->shots++; }
@@ -750,113 +764,92 @@ static void t_fire_block(void) {
         for (int i = 0; i < 12; i++) why = fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
         CHECK(why == VRG_FB_NONE);
         fire_step(&g, &in, &f, s, 0.5f, 0.9f, 1); CHECK(f.shots == 1 && f.seen == 0.9f && f.last_why == VRG_FB_NONE);
-        /* (b) la mano entra en la zona con el gatillo suelto y lo aprieta dentro: 0 disparos (y el gesto de la ventana sigue funcionando: se abre a los 0,3 s) */
+        /* (b) la zona NO bloquea: el gatillo apretado dentro dispara, llega tal cual y NO abre ninguna ventana (ni a los 3 s), ni retira L2/R2 */
         vrg_init(&g); in = phys_base(); fsim_init(&f);
         for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
         for (int i = 0; i < 6; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
-        CHECK(f.last_why == VRG_FB_ZONE);
-        for (int i = 0; i < 40; i++) fire_step(&g, &in, &f, s, 0.0f, 1.0f, 1);
-        CHECK(f.shots == 0 && f.seen == 0.0f);                       /* el arma no ve el gatillo */
-        CHECK(f.last_why == VRG_FB_WINDOW && (g.menu_hold & (1 << s)));   /* abrió la ventana (la pulsación en la zona selecciona) */
-        /* (c) la ventana abierta mantiene el bloqueo aunque la mano salga (hasta soltar el gatillo); soltar y volver a apretar fuera dispara */
-        for (int i = 0; i < 10; i++) fire_step(&g, &in, &f, s, 0.5f, 1.0f, 1);
-        CHECK(f.shots == 0 && f.last_why == VRG_FB_WINDOW && f.seen == 0.0f);
-        fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1); CHECK(f.last_why == VRG_FB_NONE && f.shots == 0);
-        for (int i = 0; i < 3; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-        fire_step(&g, &in, &f, s, 0.5f, 0.9f, 1); CHECK(f.shots == 1 && f.last_why == VRG_FB_NONE);      /* flanco nuevo */
-        /* (c2) sale de la zona SIN haber abierto la ventana y con el gatillo apretado: sigue bloqueado hasta soltarlo (aflojar a 0,5 no es soltar) */
+        CHECK(f.last_why == VRG_FB_NONE && fo.chest_in[s]);
+        int opened = 0;
+        for (int i = 0; i < 150; i++) { fire_step(&g, &in, &f, s, 0.0f, 1.0f, 1); opened |= fo.menu_open[s] || (fo.press & (VRG_L2 | VRG_R2)) || (fo.mask & (VRG_L2 | VRG_R2)) || fo.pecho[s].valid; }
+        CHECK(f.shots == 1 && f.seen == 1.0f && f.last_why == VRG_FB_NONE && g.menu_hold == 0 && !opened);
+        for (int k = 0; k < 2; k++) { for (int i = 0; i < 3; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1); fire_step(&g, &in, &f, s, 0.0f, 0.9f, 1); }
+        CHECK(f.shots == 3);                                                    /* soltar y apretar de nuevo dentro: un disparo por pulsación */
+        /* (b2) la zona no parpadea ningún bloqueo al entrar y salir con el gatillo apretado o suelto */
+        int flick = 0;
+        for (int i = 0; i < 60; i++) { why = fire_step(&g, &in, &f, s, (i & 1) ? 0.0f : 0.5f, (i / 6) & 1 ? 0.9f : 0.0f, 1); flick += why != VRG_FB_NONE; }
+        CHECK(flick == 0);
+        /* (c) el grip en la zona abre la ventana (0,3 s): desde ahí el gatillo está bloqueado, también al salir la mano (hasta soltar el grip); al cerrarse con el gatillo apretado sigue bloqueado hasta soltarlo */
         vrg_init(&g); in = phys_base(); fsim_init(&f);
         for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-        for (int i = 0; i < 4; i++) fire_step(&g, &in, &f, s, 0.0f, 1.0f, 1);
+        for (int i = 0; i < 6; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
+        in.fist_btn[s] = 1;
+        for (int i = 0; i < 40; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
+        CHECK(f.last_why == VRG_FB_WINDOW && (g.menu_hold & (1 << s)) && fo.menu_open[s]);
+        for (int i = 0; i < 10; i++) fire_step(&g, &in, &f, s, 0.0f, 1.0f, 1);
+        CHECK(f.shots == 0 && f.last_why == VRG_FB_WINDOW && f.seen == 0.0f);   /* el arma no ve el gatillo con la ventana abierta */
         for (int i = 0; i < 10; i++) fire_step(&g, &in, &f, s, 0.5f, 1.0f, 1);
-        CHECK(f.shots == 0 && f.last_why == VRG_FB_RELEASE && f.seen == 0.0f);
-        for (int i = 0; i < 10; i++) fire_step(&g, &in, &f, s, 0.5f, 0.5f, 1);
+        CHECK(f.shots == 0 && f.last_why == VRG_FB_WINDOW && f.seen == 0.0f);   /* la mano sale: sigue abierta mientras siga el grip */
+        in.fist_btn[s] = 0; fire_step(&g, &in, &f, s, 0.5f, 1.0f, 1);
+        CHECK(f.last_why == VRG_FB_RELEASE && f.shots == 0 && !(g.menu_hold & (1 << s)));      /* grip suelto, gatillo aún apretado: hasta soltarlo */
+        for (int i = 0; i < 10; i++) fire_step(&g, &in, &f, s, 0.5f, 0.5f, 1);                 /* aflojar a 0,5 no es soltar */
         CHECK(f.shots == 0 && f.last_why == VRG_FB_RELEASE);
         fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1); CHECK(f.last_why == VRG_FB_NONE && f.shots == 0);
-        fire_step(&g, &in, &f, s, 0.5f, 0.9f, 1); CHECK(f.shots == 1);
-        /* (d) con el gatillo ya apretado fuera (arma disparando) la mano entra en la zona: sin disparos nuevos, el nivel que ve el arma no cambia; soltar dentro y apretar dentro tampoco */
+        fire_step(&g, &in, &f, s, 0.5f, 0.9f, 1); CHECK(f.shots == 1 && f.last_why == VRG_FB_NONE);      /* flanco nuevo */
+        /* (d) con el gatillo ya apretado fuera (arma disparando) la mano entra en la zona: sigue sin cambios (sin disparos nuevos, el nivel que ve el arma no cambia) */
         vrg_init(&g); in = phys_base(); fsim_init(&f);
         for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
         for (int i = 0; i < 4; i++) fire_step(&g, &in, &f, s, 0.5f, 1.0f, 1);
         CHECK(f.shots == 1);
-        for (int i = 0; i < 4; i++) fire_step(&g, &in, &f, s, 0.0f, 1.0f, 1);
-        CHECK(f.shots == 1 && f.seen == 1.0f && f.last_why == VRG_FB_ZONE);     /* congelado: ni baja (una granada preparada no se lanza) ni sube */
-        for (int i = 0; i < 3; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
-        CHECK(f.seen == 1.0f);                                                  /* soltar dentro tampoco llega al arma */
-        for (int i = 0; i < 3; i++) fire_step(&g, &in, &f, s, 0.0f, 0.9f, 1);
-        CHECK(f.shots == 1 && f.seen == 1.0f);
-        /* (e) histéresis sin parpadeo: entra a 0,175, sale a 0,225 */
+        for (int i = 0; i < 4; i++) why = fire_step(&g, &in, &f, s, 0.0f, 1.0f, 1);
+        CHECK(f.shots == 1 && f.seen == 1.0f && why == VRG_FB_NONE);
+        /* (f) sin seguimiento se conserva el bloqueo de la ventana (y el nivel visto); los gestos apagados no bloquean */
         vrg_init(&g); in = phys_base(); fsim_init(&f);
-        for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-        for (int i = 0; i < 4; i++) why = fire_step(&g, &in, &f, s, 0.20f, 0.0f, 1);
-        CHECK(why == VRG_FB_NONE);                                              /* a 0,20 m desde fuera aún no entró (radio 0,175) */
-        why = fire_step(&g, &in, &f, s, 0.14f, 0.0f, 1); CHECK(why == VRG_FB_ZONE);
-        int flick = 0;
-        for (int i = 0; i < 40; i++) { why = fire_step(&g, &in, &f, s, i & 1 ? 0.21f : 0.18f, 0.0f, 1); flick += why != VRG_FB_ZONE; }
-        CHECK(flick == 0);                                                      /* entre 0,175 y 0,225 sigue dentro */
-        why = fire_step(&g, &in, &f, s, 0.24f, 0.0f, 1); CHECK(why == VRG_FB_NONE);
-        for (int i = 0; i < 40; i++) { why = fire_step(&g, &in, &f, s, i & 1 ? 0.21f : 0.19f, 0.0f, 1); flick += why != VRG_FB_NONE; }
-        CHECK(flick == 0);                                                      /* ya fuera: entre 0,175 y 0,225 NO vuelve a entrar */
-        /* (f) sin seguimiento se conserva el bloqueo (y el nivel visto); los gestos apagados no bloquean */
-        vrg_init(&g); in = phys_base(); fsim_init(&f);
-        for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
-        CHECK(f.last_why == VRG_FB_ZONE);
-        in.tracked[s] = 0; { vrg_out_t o; hold_step(&g, &in, &o, 1, 0); } CHECK(g.fb[s] == VRG_FB_ZONE);
+        { vrg_out_t o; CHECK(open_hold(&g, &in, s, &o)); }
+        hold_step(&g, &in, &fo, 1, 0); CHECK(g.fb[s] == VRG_FB_WINDOW);
+        in.tracked[s] = 0; hold_step(&g, &in, &fo, 1, 0); CHECK(g.fb[s] == VRG_FB_WINDOW);
         in.tracked[s] = 1;
-        for (int i = 0; i < 3; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
+        for (int i = 0; i < 3; i++) hold_step(&g, &in, &fo, 1, 0);
+        CHECK(g.fb[s] == VRG_FB_WINDOW);
         g.cfg.enable = 0; fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1); CHECK(f.last_why == VRG_FB_NONE);
-        /* (f2) pierde el seguimiento dentro de la zona con el gatillo apretado y lo recupera fuera con el gatillo aún apretado: sin flanco */
+        /* (f2) cierra la ventana con el gatillo apretado, pierde el seguimiento y lo recupera con el gatillo aún apretado: sin flanco */
         vrg_init(&g); in = phys_base(); fsim_init(&f);
-        for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-        for (int i = 0; i < 4; i++) fire_step(&g, &in, &f, s, 0.0f, 1.0f, 1);
-        in.tracked[s] = 0; { vrg_out_t o; for (int i = 0; i < 3; i++) hold_step(&g, &in, &o, 1, 0); }
+        { vrg_out_t o; CHECK(open_hold(&g, &in, s, &o)); }
+        in.fist_btn[s] = 0; for (int i = 0; i < 2; i++) fire_step(&g, &in, &f, s, 0.0f, 1.0f, 1);
+        CHECK(g.fb[s] == VRG_FB_RELEASE);
+        in.tracked[s] = 0; for (int i = 0; i < 3; i++) hold_step(&g, &in, &fo, 1, 0);
         in.tracked[s] = 1;
         for (int i = 0; i < 6; i++) fire_step(&g, &in, &f, s, 0.5f, 1.0f, 1);
         CHECK(f.shots == 0 && f.last_why == VRG_FB_RELEASE && f.seen == 0.0f);
-        /* (f3) granada equipada (throw_hold): el gatillo en la zona del pecho tampoco la prepara ni la lanza: pulsarlo para abrir el menú R2 (corto o mantenido) no lanza nada; fuera de la zona sí */
+        /* (f3) granada equipada (throw_hold): en la zona el gatillo SÍ la prepara y la lanza; con la ventana abierta con el grip no (ni al soltar) */
         vrg_init(&g); in = phys_base(); fsim_init(&f); in.throw_hold = 1;
         for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
         for (int i = 0; i < 6; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
-        CHECK(f.last_why == VRG_FB_ZONE);
-        for (int i = 0; i < 8; i++) fire_step(&g, &in, &f, s, 0.0f, 0.9f, 1);                  /* pulsación corta (< 0,3 s) en la zona */
+        for (int i = 0; i < 8; i++) fire_step(&g, &in, &f, s, 0.0f, 0.9f, 1);
+        CHECK(f.ready == 1 && g.menu_hold == 0);
         for (int i = 0; i < 4; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
-        CHECK(f.thrown == 0 && f.ready == 0 && f.shots == 0);
-        for (int i = 0; i < 40; i++) fire_step(&g, &in, &f, s, 0.0f, 1.0f, 1);                  /* mantenida: abre la ventana */
-        CHECK((g.menu_hold & (1 << s)) && f.last_why == VRG_FB_WINDOW && f.thrown == 0 && f.ready == 0);
-        for (int i = 0; i < 10; i++) fire_step(&g, &in, &f, s, 0.5f, 1.0f, 1);                 /* la mano sale con la ventana abierta */
-        for (int i = 0; i < 4; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-        CHECK(f.thrown == 0 && f.ready == 0);
-        for (int i = 0; i < 8; i++) fire_step(&g, &in, &f, s, 0.5f, 1.0f, 1);                  /* fuera de la zona (y del anillo) se prepara */
-        CHECK(f.ready == 1);
-        for (int i = 0; i < 4; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
         CHECK(f.thrown == 1);
-        if (s == (g.cfg.right_handed ? 1 : 0)) { vrg_pad_t p; memset(&p, 0, sizeof p); vrg_out_t o; vrg_init(&g); fsim_init(&f);     /* respaldo del cuadrado con throw_hold: en la zona tampoco llega */
-          for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
-          p.ctl = 1; p.pad = VRG_SQUARE; p.r2_fire = 1; p.tracked[s] = 1; p.trig[s] = 0.9f;
-          vrg_in_t iv = in; memcpy(iv.head_u, iv.head, sizeof iv.head_u); for (int k = 0; k < 2; k++) memcpy(iv.hand_u[k], iv.hand[k], sizeof iv.hand_u[k]);
-          CHECK(!(vrg_step_pad(&g, &iv, &o, &p) & VRG_SQUARE) && (o.mask & VRG_R2)); }
-        /* (i) anillo de anticipación: apretar el gatillo YA CERCA de la zona (entre el radio 0,175 y chest_exit 0,225), con la mano llegando al pecho, no dispara; sigue bloqueado hasta soltarlo.
-         *     Un gatillo ya apretado fuera (disparo en curso) que cruza el anillo no se corta; más allá de chest_exit se dispara con normalidad */
-        vrg_init(&g); in = phys_base(); fsim_init(&f);
-        for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-        for (int i = 0; i < 4; i++) why = fire_step(&g, &in, &f, s, 0.20f, 0.0f, 1);
-        CHECK(why == VRG_FB_NONE);                                              /* en el anillo con el gatillo suelto: libre */
-        for (int i = 0; i < 6; i++) why = fire_step(&g, &in, &f, s, 0.20f, 0.9f, 1);
-        CHECK(f.shots == 0 && why == VRG_FB_RELEASE && f.seen == 0.0f);
-        for (int i = 0; i < 6; i++) why = fire_step(&g, &in, &f, s, 0.5f, 0.9f, 1);            /* la mano se aleja con el gatillo apretado */
-        CHECK(f.shots == 0 && why == VRG_FB_RELEASE);
-        fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1); CHECK(f.last_why == VRG_FB_NONE);
-        for (int i = 0; i < 3; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-        fire_step(&g, &in, &f, s, 0.5f, 0.9f, 1); CHECK(f.shots == 1);
-        vrg_init(&g); in = phys_base(); fsim_init(&f);
-        for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-        for (int i = 0; i < 4; i++) fire_step(&g, &in, &f, s, 0.5f, 1.0f, 1);
-        for (int i = 0; i < 6; i++) why = fire_step(&g, &in, &f, s, 0.20f, 1.0f, 1);
-        CHECK(f.shots == 1 && why == VRG_FB_NONE && f.seen == 1.0f);           /* disparo en curso: sigue */
-        vrg_init(&g); in = phys_base(); fsim_init(&f);
-        for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-        for (int i = 0; i < 4; i++) why = fire_step(&g, &in, &f, s, 0.24f, 0.9f, 1);
-        CHECK(f.shots == 1 && why == VRG_FB_NONE);                              /* fuera de chest_exit: dispara */
+        in.fist_btn[s] = 1; for (int i = 0; i < 40; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);      /* ventana abierta con el grip */
+        CHECK((g.menu_hold & (1 << s)) && f.last_why == VRG_FB_WINDOW);
+        for (int i = 0; i < 8; i++) fire_step(&g, &in, &f, s, 0.0f, 0.9f, 1);
+        for (int i = 0; i < 4; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
+        CHECK(f.thrown == 1 && f.ready == 0);
+        /* (h) respaldo del cuadrado (arma VR fuera de servicio, mano dominante): en la zona el cuadrado derivado del gatillo PASA; con la ventana abierta con el grip, o hasta soltar el gatillo tras cerrarse, no llega */
+        if (s == (g.cfg.right_handed ? 1 : 0)) {
+            vrg_init(&g); in = phys_base(); fsim_init(&f);
+            for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
+            for (int i = 0; i < 4; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
+            vrg_pad_t p; memset(&p, 0, sizeof p); vrg_out_t o; p.ctl = 1; p.pad = VRG_SQUARE; p.r2_fire = 1; p.tracked[s] = 1; p.trig[s] = 0.9f;
+            vrg_in_t iv = in; memcpy(iv.head_u, iv.head, sizeof iv.head_u); for (int k = 0; k < 2; k++) memcpy(iv.hand_u[k], iv.hand[k], sizeof iv.hand_u[k]);
+            CHECK((vrg_step_pad(&g, &iv, &o, &p) & VRG_SQUARE) && !(o.mask & (VRG_L2 | VRG_R2)));      /* en la zona dispara */
+            iv.fist_btn[s] = 1; p.fist[s] = 1; p.trig[s] = 0.0f;
+            for (int i = 0; i < 20; i++) vrg_step_pad(&g, &iv, &o, &p);                                /* el grip abre la ventana */
+            CHECK(g.menu_hold & (1 << s));
+            p.trig[s] = 0.9f; CHECK(!(vrg_step_pad(&g, &iv, &o, &p) & VRG_SQUARE));                    /* ventana abierta: no llega */
+            iv.fist_btn[s] = 0; p.fist[s] = 0;
+            CHECK(!(vrg_step_pad(&g, &iv, &o, &p) & VRG_SQUARE) && g.fb[s] == VRG_FB_RELEASE);          /* grip suelto, gatillo apretado: hasta soltarlo */
+            p.trig[s] = 0.0f; vrg_step_pad(&g, &iv, &o, &p);
+            p.trig[s] = 0.9f; CHECK((vrg_step_pad(&g, &iv, &o, &p) & VRG_SQUARE));                     /* flanco nuevo: pasa */
+        }
         /* (j) menú de armas/objetos abierto (menu_open del puente): ninguna mano usa su arma aunque esté lejos de su zona y la ventana la haya abierto otra cosa; al cerrarse con el gatillo apretado sigue bloqueado hasta soltarlo */
         vrg_init(&g); in = phys_base(); fsim_init(&f);
         for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
@@ -866,31 +859,18 @@ static void t_fire_block(void) {
         CHECK(f.shots == 0 && why == VRG_FB_RELEASE);
         fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1); for (int i = 0; i < 3; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
         fire_step(&g, &in, &f, s, 0.5f, 0.9f, 1); CHECK(f.shots == 1);
-        /* (g) pérdida del control con la ventana abierta (capa de menú): sigue bloqueado; al soltar el gatillo y salir de la zona queda libre */
+        /* (g) pérdida del control con la ventana abierta (capa de menú): sigue bloqueado; al soltar el grip y el gatillo queda libre */
         vrg_init(&g); in = phys_base(); fsim_init(&f);
         CHECK(open_hold(&g, &in, s, &(vrg_out_t){0}));
         for (int i = 0; i < 10; i++) { vrg_out_t o; hold_step(&g, &in, &o, i & 1, 0); CHECK(g.fb[s] == VRG_FB_WINDOW); }
-        put_hf(&in, s, (s == 0 ? -1.0f : 1.0f) * 0.7f, ZDN, ZFW, 0.85f); in.trig[s] = 1.0f;
+        put_hf(&in, s, (s == 0 ? -1.0f : 1.0f) * 0.7f, ZDN, ZFW, 0.85f);
         { vrg_out_t o; hold_step(&g, &in, &o, 0, 0); CHECK(g.fb[s] == VRG_FB_WINDOW); }
-        in.trig[s] = 0.0f; { vrg_out_t o; hold_step(&g, &in, &o, 0, 0); hold_step(&g, &in, &o, 1, 0); CHECK(g.fb[s] == VRG_FB_NONE); }
-        /* (h) respaldo del cuadrado (arma VR fuera de servicio): con el bloqueo, también tras salir con el gatillo apretado, el cuadrado derivado del gatillo no llega */
-        if (s == 1) {
-            vrg_init(&g); in = phys_base(); fsim_init(&f);
-            for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-            for (int i = 0; i < 4; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
-            vrg_pad_t p; memset(&p, 0, sizeof p); vrg_out_t o; p.ctl = 1; p.pad = VRG_SQUARE; p.r2_fire = 1; p.tracked[s] = 1; p.trig[s] = 0.0f;
-            vrg_in_t iv = in; memcpy(iv.head_u, iv.head, sizeof iv.head_u); for (int k = 0; k < 2; k++) memcpy(iv.hand_u[k], iv.hand[k], sizeof iv.hand_u[k]);
-            CHECK(!(vrg_step_pad(&g, &iv, &o, &p) & VRG_SQUARE));                     /* en la zona */
-            put_hf(&iv, s, 0.16f + 0.5f, ZDN, ZFW, 0.85f); p.trig[s] = 1.0f; iv.trig[s] = 1.0f;
-            CHECK(!(vrg_step_pad(&g, &iv, &o, &p) & VRG_SQUARE) && g.fb[s] == VRG_FB_RELEASE);   /* fuera con el gatillo apretado desde dentro */
-            p.trig[s] = 0.0f; iv.trig[s] = 0.0f; vrg_step_pad(&g, &iv, &o, &p);
-            p.trig[s] = 1.0f; iv.trig[s] = 1.0f; vrg_step_pad(&g, &iv, &o, &p); CHECK((vrg_step_pad(&g, &iv, &o, &p) & VRG_SQUARE));    /* flanco nuevo: pasa */
-        }
+        in.fist_btn[s] = 0; ptrig[s] = 0.0f; { vrg_out_t o; hold_step(&g, &in, &o, 0, 0); hold_step(&g, &in, &o, 1, 0); CHECK(g.fb[s] == VRG_FB_NONE); }
     }
 }
 
-/* zona del pecho a la altura del pecho, no de la cabeza: su borde superior (con histéresis y anillo incluidos) queda a 0,13 m bajo la cabeza; con la mira/vista especial levantada o la mano a <= 0,15 m del ojo no bloquea ni abre menús.
- * PSG1 apuntando: la mano del arma a 8-12 cm bajo el ojo, el disparo sale y no se abre ninguna ventana */
+/* zona del pecho a la altura del pecho, no de la cabeza: su borde superior (con histéresis incluida) queda a 0,13 m bajo la cabeza; con la mira/vista especial levantada o la mano a <= 0,15 m del ojo no abre menús.
+ * PSG1 apuntando: la mano del arma a 8-12 cm bajo el ojo, el disparo sale y no se abre ninguna ventana aunque se apriete el grip */
 static void t_face_aim(void) {
     for (int s = 0; s < 2; s++) {
         float sd = s == 0 ? -1.0f : 1.0f;
@@ -898,93 +878,49 @@ static void t_face_aim(void) {
             vrg_t g; vrg_in_t in = phys_base(); fsim_t f; vrg_out_t o; int opened = 0, blocked = 0;
             vrg_init(&g); fsim_init(&f); in.weapon = 9; in.weapon_busy = 1;
             for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-            put_hf(&in, s, sd * 0.12f, -(float)dn * 0.01f, 0.05f, 0.85f);                  /* PSG1 apuntando: mano 8-12 cm bajo el ojo, dentro de la esfera de salida de la zona */
+            put_hf(&in, s, sd * 0.12f, -(float)dn * 0.01f, 0.05f, 0.85f);                  /* PSG1 apuntando: mano 8-12 cm bajo el ojo, por encima del borde de la zona */
             for (int i = 0; i < 6; i++) { hold_step(&g, &in, &o, 1, 0); blocked |= g.fb[s] != VRG_FB_NONE; }
-            in.trig[s] = 1.0f;
+            in.fist_btn[s] = 1; ptrig[s] = 1.0f;
             for (int i = 0; i < 40; i++) {
                 hold_step(&g, &in, &o, 1, 0); opened |= o.menu_open[s] | (o.press & (VRG_R2 | VRG_L2)) | (o.pecho[s].valid && o.pecho[s].opened);
-                int why = 0; float seen = vrg_fire_gate(&g, s, in.trig[s], &why); blocked |= why != VRG_FB_NONE;
+                int why = 0; float seen = vrg_fire_gate(&g, s, ptrig[s], &why); blocked |= why != VRG_FB_NONE;
                 if (seen <= 0.3f) f.armed = 1; if (seen >= 0.5f && f.armed) { f.armed = 0; f.shots++; }
             }
             CHECK(f.shots == 1 && !opened && !blocked);
         }
         /* mira del juego levantada (face_view: PSG1 con la mira, prismáticos, vista especial): la zona no actúa en la mano que la sostiene (la dominante), ni con ella dentro de la zona de siempre.
-         * La OTRA mano sigue pudiendo bloquear el disparo y abrir menús en el pecho (con los prismáticos y las manos libres era imposible abrir el menú de objetos) */
+         * La OTRA mano sigue pudiendo abrir menús en el pecho (con los prismáticos y las manos libres era imposible abrir el menú de objetos) */
         { vrg_t g; vrg_in_t in = phys_base(); fsim_t f; vrg_init(&g); fsim_init(&f); in.face_view = 1;
           const int dom = g.cfg.right_handed ? 1 : 0;
           if (s == dom) {
               for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
               for (int i = 0; i < 6; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
-              CHECK(f.last_why == VRG_FB_NONE);
+              CHECK(!fo.chest_in[s]);
+              in.fist_btn[s] = 1;
               for (int i = 0; i < 40; i++) fire_step(&g, &in, &f, s, 0.0f, 1.0f, 1);
               CHECK(f.shots == 1 && g.menu_hold == 0);
           } else {
               vrg_out_t o; CHECK(open_hold(&g, &in, s, &o) && (g.menu_hold & (1 << s)));      /* la mano libre abre su menú con la vista especial levantada */
-              vrg_init(&g); in = phys_base(); in.face_view = 1; fsim_init(&f);
-              for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-              for (int i = 0; i < 6; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
-              CHECK(f.last_why == VRG_FB_ZONE);
           } }
-        /* borde superior de la zona (0,13 m bajo la cabeza): a 0,12 m dentro de la esfera de salida pero por encima, ni zona ni anillo; a 0,14 m, zona */
-        { vrg_t g; vrg_in_t in = phys_base(); fsim_t f; vrg_init(&g); fsim_init(&f);
+        /* borde superior de la zona (0,13 m bajo la cabeza): a 0,12 m dentro de la esfera de salida pero por encima, no hay zona y el grip no abre; a 0,14 m, zona */
+        { vrg_t g; vrg_in_t in = phys_base(); fsim_t f; vrg_out_t o; vrg_init(&g); fsim_init(&f); int op = 0;
           for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-          put_hf(&in, s, sd * 0.16f, -0.12f, 0.005f, 0.85f); in.trig[s] = 0.0f;
-          for (int i = 0; i < 6; i++) { vrg_out_t o; hold_step(&g, &in, &o, 1, 0); }
-          in.trig[s] = 1.0f; for (int i = 0; i < 3; i++) { vrg_out_t o; hold_step(&g, &in, &o, 1, 0); }
-          CHECK(g.fb[s] == VRG_FB_NONE);
-          vrg_init(&g); in.trig[s] = 0.0f;
-          put_hf(&in, s, sd * 0.16f, -0.14f, 0.005f, 0.85f); for (int i = 0; i < 6; i++) { vrg_out_t o; hold_step(&g, &in, &o, 1, 0); }
-          CHECK(g.fb[s] == VRG_FB_ZONE); }
+          put_hf(&in, s, sd * 0.16f, -0.12f, 0.005f, 0.85f);
+          for (int i = 0; i < 6; i++) hold_step(&g, &in, &o, 1, 0);
+          CHECK(!o.chest_in[s]);
+          in.fist_btn[s] = 1; for (int i = 0; i < 40; i++) { hold_step(&g, &in, &o, 1, 0); op |= o.menu_open[s]; }
+          CHECK(!op && !o.chest_in[s]);
+          vrg_init(&g); in.fist_btn[s] = 0;
+          put_hf(&in, s, sd * 0.16f, -0.14f, 0.005f, 0.85f); for (int i = 0; i < 6; i++) hold_step(&g, &in, &o, 1, 0);
+          CHECK(o.chest_in[s]); }
         /* mano del arma a menos de face_radius del ojo: la zona no actúa (radio ampliado a propósito para que alcance la zona) */
         { vrg_t g; vrg_in_t in = phys_base(); fsim_t f; vrg_init(&g); fsim_init(&f); g.cfg.face_radius = 0.40f;
           for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
           for (int i = 0; i < 6; i++) fire_step(&g, &in, &f, s, 0.0f, 0.0f, 1);
-          CHECK(f.last_why == VRG_FB_NONE);
+          CHECK(!fo.chest_in[s]);
+          in.fist_btn[s] = 1;
           for (int i = 0; i < 40; i++) fire_step(&g, &in, &f, s, 0.0f, 1.0f, 1);
           CHECK(f.shots == 1 && g.menu_hold == 0); }
-    }
-}
-
-/* anillo de anticipación (chest_exit 0,225): arma de dos manos soldada (FAMAS al hombro: la mano del gatillo ~16 cm bajo el ojo, 9 a su lado y 14 delante, dentro del anillo y fuera de la zona): el anillo no le bloquea el disparo
- * (in.ring_off); la zona en sí se mantiene. Sin ring_off sigue bloqueando. Una pulsación hecha en el anillo que luego entra en la zona con el gatillo apretado abre el menú sin pulsar de nuevo; si la mano sale del anillo o suelta, no. */
-static int ring_shots(int s, int ring_off, int *why_out) {
-    float sd = s == 0 ? -1.0f : 1.0f;
-    vrg_t g; vrg_in_t in = phys_base(); fsim_t f; vrg_init(&g); fsim_init(&f);
-    in.weapon = 5; in.weapon_busy = 1; in.ring_off[s] = ring_off;
-    for (int i = 0; i < 12; i++) fire_step(&g, &in, &f, s, 0.5f, 0.0f, 1);
-    put_hf(&in, s, sd * 0.09f, -0.16f, 0.14f, 0.85f);
-    for (int i = 0; i < 6; i++) { vrg_out_t o; in.trig[s] = 0.0f; hold_step(&g, &in, &o, 1, 0); }
-    int why = 0;
-    for (int i = 0; i < 20; i++) {
-        vrg_out_t o; in.trig[s] = 1.0f; hold_step(&g, &in, &o, 1, 0);
-        float seen = vrg_fire_gate(&g, s, in.trig[s], &why);
-        if (seen <= 0.3f) f.armed = 1; if (seen >= 0.5f && f.armed) { f.armed = 0; f.shots++; }
-    }
-    if (why_out) *why_out = why;
-    return f.shots;
-}
-static int ring_pend_opens(int s, int leave_ring, int release) {
-    float sd = s == 0 ? -1.0f : 1.0f;
-    vrg_t g; vrg_in_t in = phys_base(); vrg_out_t o; vrg_init(&g);
-    for (int i = 0; i < 12; i++) hold_step(&g, &in, &o, 1, 0);
-    put_hf(&in, s, sd * 0.09f, -0.16f, 0.14f, 0.85f); in.trig[s] = 0.0f;
-    for (int i = 0; i < 6; i++) hold_step(&g, &in, &o, 1, 0);
-    in.trig[s] = 1.0f; for (int i = 0; i < 3; i++) hold_step(&g, &in, &o, 1, 0);                     /* pulsación NUEVA en el anillo */
-    if (leave_ring) { put_hf(&in, s, sd * 0.6f, -0.16f, 0.14f, 0.85f); for (int i = 0; i < 3; i++) hold_step(&g, &in, &o, 1, 0); }
-    if (release) { in.trig[s] = 0.0f; for (int i = 0; i < 3; i++) hold_step(&g, &in, &o, 1, 0); }       /* soltó el gatillo antes de entrar en la zona */
-    put_hf(&in, s, sd * 0.16f, ZDN, ZFW, 0.85f);                                                    /* entra en la zona (con el gatillo aún apretado si no lo soltó) */
-    int opened = 0;
-    for (int i = 0; i < 30; i++) { hold_step(&g, &in, &o, 1, 0); opened |= (o.pecho[s].valid && o.pecho[s].opened) || (g.menu_hold >> s & 1); }
-    return opened;
-}
-static void t_ring(void) {
-    for (int s = 0; s < 2; s++) {
-        int why = 0;
-        CHECK(ring_shots(s, 0, &why) == 0 && why == VRG_FB_RELEASE);          /* sin la excepción el anillo bloquea (comportamiento previo) */
-        CHECK(ring_shots(s, 1, &why) == 1 && why == VRG_FB_NONE);             /* arma de dos manos soldada: dispara */
-        CHECK(ring_pend_opens(s, 0, 0) == 1);                                 /* pulsación en el anillo, entra en la zona: abre sin pulsar otra vez */
-        CHECK(ring_pend_opens(s, 1, 0) == 0);                                 /* salió del anillo con el gatillo apretado: ya no vale */
-        CHECK(ring_pend_opens(s, 0, 1) == 0);                                 /* soltó el gatillo antes de entrar: no abre */
     }
 }
 
@@ -1015,7 +951,7 @@ static void t_repeat(void) {
 
 int main(void) {
     t_repeat();
-    t_punch(); t_armed(); t_contact(); t_rules(); t_throw(); t_walk(); t_grab(); t_chest(); t_chest_throw(); t_chest_phys(); t_menu_hold(); t_menu_loop(); t_fire_block(); t_face_aim(); t_ring(); t_stick_hold(); t_trigmenu(); t_knock(); t_caps(); t_peek(); t_robust();
+    t_punch(); t_armed(); t_contact(); t_rules(); t_throw(); t_walk(); t_grab(); t_chest(); t_chest_throw(); t_chest_phys(); t_menu_hold(); t_menu_loop(); t_fire_block(); t_face_aim(); t_stick_hold(); t_gripmenu(); t_knock(); t_caps(); t_peek(); t_robust();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails != 0;
 }

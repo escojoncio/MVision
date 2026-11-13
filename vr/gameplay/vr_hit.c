@@ -352,6 +352,7 @@ void vrhit_set_range(float units, float upm) {
     g_range = isfinite(units) && units > 1000.0f ? units : VRHIT_RANGE_MIN;
     g_upm = isfinite(upm) && upm > 0.0f ? upm : 0.0f;
 }
+float vrhit_weapon_range_m(int game_id) { return game_id == 0 ? VRHIT_SHOT_M_SOCOM : game_id == 1 ? VRHIT_SHOT_M_FAMAS : VRHIT_SHOT_M; }
 void vrhit_next_bullet_extended(void) { g_ext = 1; }
 
 float vrhit_shot_dist(const uint8_t *ram, const float o[3], const float d[3], float max) {
@@ -395,7 +396,7 @@ void vrhit_aim(const uint8_t *ram, const float o[3], const float d[3]) {
     float dn[3]; Res r;
     if (!w_set || !ram || !o || !d || !unit3(d, dn)) return;
     int n = vrhit_scan(ram, PLAYER_SIDE, 0x10, 1, g_t, VRHIT_MAX_T);
-    resolve((uint8_t *)ram, g_t, n, o, dn, VRHIT_RANGE_MIN, -1.0f, 1, &r);
+    resolve((uint8_t *)ram, g_t, n, o, dn, g_range > VRHIT_RANGE_MIN ? g_range : VRHIT_RANGE_MIN, -1.0f, 1, &r);      /* la puntería llega al alcance del arma (SOCOM 25 m, FAMAS 30 m) */
     if (r.idx < 0) return;
     Aim *a = &g_aim[0];
     for (int i = 0; i < N_AIM; i++) { if (!g_aim[i].on) { a = &g_aim[i]; break; } if (g_aim[i].age > a->age) a = &g_aim[i]; }

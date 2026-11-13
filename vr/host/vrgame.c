@@ -176,7 +176,7 @@ static void aimfix_lost(int i, float dt) {
 static struct { int on, side; float p[3], q[4]; uint64_t off_ns; } pub_weld;      /* off_ns: instante en que se soltó (0 = no hay rampa); durante WELD_FADE_NS la mano vuelve al mando mezclando */
 #define WELD_HOLD_VBL 6                 /* VBlanks que se retiene la soldadura tras desequipar (~0,12 s): la recarga del juego quita el arma un instante y no debe soltar las manos del arma */
 #define WELD_FADE_NS 200000000ull       /* al desequipar el arma, la mano de apoyo vuelve al mando en 0,2 s */
-static struct { int on; float p[3], q[4], hit_m; } pub_laser;      /* láser de la pistola: pose de la boca (espacio VR) del último VBlank y distancia (m) al primer impacto con el escenario (-1 = sin impacto: 15 m); on = 0: no se dibuja (w_laser.h) */
+static struct { int on, ghost; float p[3], q[4], hit_m; } pub_laser;      /* láser de la pistola: pose de la boca (espacio VR) del último VBlank y distancia (m) al primer impacto con el escenario (-1 = sin impacto: 15 m); on = 0: no se dibuja (w_laser.h) */
 
 #define HAND_MAX_AGE_NS 300000000ull    /* mano sin actualizar más de 0,3 s = sin seguimiento */
 
@@ -619,7 +619,6 @@ static void load_start(int si) {
 #define DET_PRESS_VBL 4
 
 #define PLACE_REACH_M 1.6f      /* radio (m, desde la cabeza) dentro del cual se coloca una mina o carga */
-#define PLACE_LIFT_M 0.02f      /* separación del suelo (la mina se apoya, no se hunde) */
 #define THROW_TICK_S 0.04f      /* un tick del motor (2 VBlanks de 50 Hz) */
 
 static struct {
@@ -634,6 +633,8 @@ static struct {
     uint32_t shots_prev;        /* G.shots del VBlank anterior (disparo VR en el VBlank = VrReloadIn.vr_shot) */
     int fire_edge;              /* lo pone el callback fire() (o el gancho de lanzamiento) dentro de update */
     WPose fire_pose;
+    int probe_ok;               /* sondeo de colocación (probe_hook) de este VBlank: el juego podría colocar el objeto en la mano ahora; probe_pose = dónde y con qué orientación quedaría */
+    WPose probe_pose;
     int mag_weapon;             /* el arma activa lleva cargador en el juego (contabilidad virtual de cargadores) */
     int ammo_game;              /* munición total del arma activa en el juego (para los lanzamientos) */
     int game_mag;               /* cargador del juego (el cargador VR arranca con él) */
@@ -644,8 +645,11 @@ static struct {
     int det_t;                  /* VBlanks restantes pulsando el botón de detonación */
     int det_c4;                 /* VBlanks restantes del círculo que detona el C4 (agarre derecho, c4_remote) */
     int det_arm;                /* el agarre derecho estuvo suelto desde la última detonación / desde el arranque: puede detonar */
-    int fblk;                   /* bloqueo de la zona de menú del último VBlank con arma VR (0 sin ella) */
+    int fblk;                   /* bloqueo de disparo por menú abierto del último VBlank con arma VR (0 sin ella) */
     int weld_hold;              /* VBlanks restantes en que un desequipado breve (recarga: el juego retira el arma un instante) NO suelta el brazo atado ni la petición de IK; 0 = suelta de inmediato */
+    int sv_wait;                /* VBlanks que faltan para que la vista especial del arma mostrada pueda publicarse (arma recién entrada o cambio en curso, SV_SETTLE_TICKS) */
+    int sv_prev;                /* ranura del arma retirada un instante (recarga, weld_hold): si vuelve la misma no espera otra vez a que su vista especial esté lista; -1 = ninguna */
+    int sv_slot;                /* ranura del último arma cuya vista especial se publicó con el selector cerrado: con el selector abierto solo esa conserva su vista */
     int rl_latch;               /* recarga del juego en curso (ro.busy): el gatillo sigue sin llegar al arma hasta bajar de 0,3 (si no, el arma ve un flanco al acabar la recarga y dispara sola) */
     WGameBridge br;
     VrMissile mis;              /* misil guiado del juego vigilado (vr_missile.h) */
@@ -669,6 +673,7 @@ static void publish_off(int keep_weld) {      /* keep_weld: retención de la sol
 
 void vrgame_reset(void) {
     vrbodyg_reset();
+    G.sv_wait = 0; G.sv_slot = -1; G.sv_prev = -1;
     G.inited = 0; G.active = 0; G.cur = -1; G.trig_prev = 0; G.shots_prev = G.shots; G.fire_edge = 0;
     G.last_ns = 0; G.hand_ns = 0; G.det_t = 0; G.det_c4 = 0; G.det_arm = 0; G.fblk = 0; G.rl_latch = 0; G.throw_hold = 0;
     vrbody_set_weld(0, 0); vrbody_set_weld(1, 0); vrbody_set_pole(0, NULL); vrbody_set_pole(1, NULL);
@@ -734,13 +739,14 @@ static void cb_steer(int id, float yaw, float pitch) { if (id == 3) vrmis_steer(
 /* ---- vistas especiales (mira óptica, visor antiaéreo, pantalla del misil): descriptor para la app (ver vrgame.h) ---- */
 #define SCOPE_TEX 1024           /* lado (texels) de la textura de la mira (la app admite 16..2048) */
 #define AA_SIGHT_DEF_HALF_FOV 26.565f /* semicampo horizontal (grados) del visor del Stinger mientras el juego aún no ha dado el suyo: atan(160 / 320); el Stinger no cambia GM_Camera.zoom (camera.c:980, stnsight.c, aam.c) y la proyección normal tiene H = 320 en una pantalla de 320 de ancho */
+#define SV_SETTLE_TICKS 3        /* VBlanks que espera la vista especial de un arma recién mostrada (cambio de arma) antes de publicarse */
 #define LED_FRAME_FRAC 0.045f    /* grosor del marco oscuro de las pantallas LED (sombreador), como fracción de su altura */
 #define AA_SIGHT_DIST 3.0f       /* distancia (m) a la que se coloca el HUD del visor (colimado: se ve a esa distancia con el tamaño angular del juego) */
 static void put_pose(const WPose *w, float p[3], float q[4]) {
     p[0] = w->p.x; p[1] = w->p.y; p[2] = w->p.z;
     q[0] = w->q.x; q[1] = w->q.y; q[2] = w->q.z; q[3] = w->q.w;
 }
-static void special_view(int gid, WeaponState *st, const WeaponDef *def, const WPose *W, const WInput *in, int duct) {
+static void special_view(int gid, WeaponState *st, const WeaponDef *def, const WPose *W, const WInput *in, int duct, int ready) {      /* ready = 0: arma recién entrada o cambio en curso, no se publica su vista */
     MvVrSpecialView sv;
     int fullscreen;
     (void)def;
@@ -748,7 +754,7 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
     pthread_mutex_lock(&HM);
     fullscreen = opt_missile_view;
     pthread_mutex_unlock(&HM);
-    if (gid == 9 && !duct) {       /* con el rifle oculto (prismáticos del juego) tampoco hay lente: flotaría sin rifle */
+    if (ready && gid == 9 && !duct) {       /* con el rifle oculto (prismáticos del juego) tampoco hay lente: flotaría sin rifle */
         sv.kind = MV_VIEW_SCOPE;
         sv.blend = st->channel[WCH_SCREEN];
         sv.zoom = sniper_zoom(st);
@@ -779,7 +785,7 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
         vrcam_set_zoom_cap(320);                 /* la cabeza no se acerca: el aumento está en la lente */
     } else {
         vrcam_set_zoom_cap(0);
-        if (gid == 4) {
+        if (ready && gid == 4) {
             VrAaSight sg;
             vraa_sight(&sg);
             WScreenFace af;
@@ -823,7 +829,7 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
                 sv.hide_hud = 1;
                 sv.locked = sg.locked; sv.converged = sg.converged;
             }
-        } else if (gid == 3) {
+        } else if (ready && gid == 3) {
             const GuidedState *gs = (const GuidedState *)st;
             WScreenFace lf;
             const int route = guided_led_route(st, G.mis.alive, fullscreen);
@@ -877,12 +883,15 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
 /* ---- colocación (mina, carga adhesiva) ----
  * El juego decide la superficie y si se puede; aquí solo se da la pose. El jugador puede estar SENTADO: no se exige acercar
  * la mano al suelo físico. Desde la pose del objeto en la mano se traza el rayo de su "delante" (-Z) y se proyecta sobre el
- * suelo del juego (plano a la altura de los pies del personaje); sin inclinación hacia abajo se coloca a la altura de la mano
- * a la distancia máxima alcanzable (pared: no hay geometría del escenario en esta capa, es aproximado). Dentro de PLACE_REACH_M
+ * suelo del juego (plano a la altura de los pies del personaje); sin inclinación hacia abajo se coloca a la distancia máxima
+ * alcanzable (pared: no hay geometría del escenario en esta capa, es aproximado). En los dos casos la mina se apoya en el suelo por las
+ * patas: el origen del modelo 0x17a1 queda WGHOST_MINE_LEGS_U uds sobre él; sin suelo conocido no se coloca. Dentro de PLACE_REACH_M
  * de la cabeza; fuera se rechaza (el arma no gasta nada). Devuelve 0 si se rechaza. */
 static int place_project(const WPose *obj, WPose *out) {
     if (!isfinite(obj->p.x) || !isfinite(obj->p.y) || !isfinite(obj->p.z) || !isfinite(obj->q.x) || !isfinite(obj->q.y) || !isfinite(obj->q.z) ||
         !isfinite(obj->q.w) || !isfinite(G.head.p.x) || !isfinite(G.head.p.z)) return 0;   /* mano no rastreada / pose inválida: no se coloca */
+    if (!G.floor_ok || !G.map.valid || !(G.map.units_per_m > 0)) return 0;      /* la altura de la mina sale del suelo: sin él no hay dónde apoyarla */
+    const float rest_y = G.floor_u + WGHOST_MINE_LEGS_U / G.map.units_per_m;    /* origen del modelo con las patas en el suelo */
     float qn = sqrtf(obj->q.x * obj->q.x + obj->q.y * obj->q.y + obj->q.z * obj->q.z + obj->q.w * obj->q.w);
     if (!(qn > 1e-3f)) return 0;
     const float qx = obj->q.x / qn, qy = obj->q.y / qn, qz = obj->q.z / qn, qw = obj->q.w / qn;   /* la fórmula del "delante" exige cuaternión unitario */
@@ -891,10 +900,11 @@ static int place_project(const WPose *obj, WPose *out) {
     float fz = -(1 - 2 * (qx * qx + qy * qy));
     float hx = obj->p.x - G.head.p.x, hz = obj->p.z - G.head.p.z;
     float p[3] = {obj->p.x, obj->p.y, obj->p.z};
-    if (G.floor_ok && fy < -0.2f && obj->p.y > G.floor_u) {          /* apunta hacia abajo: suelo */
-        float t = (G.floor_u + PLACE_LIFT_M - obj->p.y) / fy;
-        p[0] = obj->p.x + fx * t; p[1] = G.floor_u + PLACE_LIFT_M; p[2] = obj->p.z + fz * t;
-    } else {                                                          /* horizontal: a la distancia máxima */
+    p[1] = rest_y;
+    if (fy < -0.2f && obj->p.y > G.floor_u) {                         /* apunta hacia abajo: suelo */
+        float t = (G.floor_u - obj->p.y) / fy;
+        p[0] = obj->p.x + fx * t; p[2] = obj->p.z + fz * t;
+    } else {                                                          /* horizontal: a la distancia máxima, apoyada en el suelo bajo ese punto */
         float hl = sqrtf(fx * fx + fz * fz);
         if (hl < 1e-3f) return 0;
         float t = PLACE_REACH_M * 0.8f - sqrtf(hx * hx + hz * hz);
@@ -904,9 +914,9 @@ static int place_project(const WPose *obj, WPose *out) {
     float dx = p[0] - G.head.p.x, dz = p[2] - G.head.p.z;
     if (!(sqrtf(dx * dx + dz * dz) <= PLACE_REACH_M) || !isfinite(p[1])) return 0;
     out->p.x = p[0]; out->p.y = p[1]; out->p.z = p[2];
-    /* orientación: solo la guiñada de la mano (el "delante" del objeto horizontal), así la mina mira hacia donde apunta el jugador */
+    /* orientación: solo la guiñada del "delante" del evento (-Z = cara picuda de la mina, w_placed.c MINE_FACE_Q) y el modelo girado R_y(+90) sobre ella: su cara picuda (+X del modelo 0x17a1) mira hacia donde apunta el jugador */
     float hl = sqrtf(fx * fx + fz * fz);
-    float yaw = hl > 1e-3f ? atan2f(-fx, -fz) : 0.0f;
+    float yaw = (hl > 1e-3f ? atan2f(-fx, -fz) : 0.0f) + 1.5707963f;
     out->q.x = 0; out->q.y = sinf(yaw * 0.5f); out->q.z = 0; out->q.w = cosf(yaw * 0.5f);
     return 1;
 }
@@ -920,23 +930,51 @@ static int place_project(const WPose *obj, WPose *out) {
 #define C4_LIFT_M 0.079f
 static const uint8_t *place_ram;      /* RAM del juego del VBlank en curso (vrgame_pad), para los rayos HZD */
 static const BridgeState *place_bs;   /* puente del VBlank en curso (vrgame_pad), para el blanco C4 del juego */
-/* 1 si el juego tendría un blanco al que pegar la carga: réplica de sna_8004FDE8/GM_C4Target (sna_init.c, game/target.c). field_8E8 del jugador solo se rellena al empezar la animación de ataque, no se puede leer antes;
- * se replica su prueba: caja de sonda stru_8009EFE4[0] (centro (0,0,300) delante del jugador, semitamaños (400,600,400)) contra los blancos con clase C4 (64), sin el bit 64 en damaged y de otro bando (side & 1 == 0).
- * Sin comprobar el mapa ni la línea de visión (sna_line_check): un falso positivo deja la carga en la pose de la mano. */
-static int c4_game_target(void) {
+/* Blanco al que el juego pegaría la carga: réplica de sna_8004FDE8 / GM_C4Target / TargetConflict (sna_init.c, game/target.c). field_8E8 del jugador solo se rellena al empezar la animación de ataque, no se puede leer antes;
+ * se replica su prueba: caja de sonda stru_8009EFE4[0] (centro (0,0,300) delante del jugador, semitamaños (400,600,400)) contra los blancos en el ORDEN DEL JUEGO; el juego se queda con el PRIMERO con clase C4 (64),
+ * sin el bit 64 en damaged, de otro bando (side & 1 == 0), dentro de la caja y con MapConflict (player_map & map; solo si el puente da BRIDGE_OK_PLAYER_ST). Después, si ese blanco tiene clase 0x20 no se pega, y si sna_line_check
+ * (SEGMENT_ATR = HZD_SEG_NO_COLLIDE, sna_init.c: aquí vrhzd_raycast con skip 1, las paredes marcadas NO_COLLIDE no cuentan) halla pared entre Snake (ctl_pos) y el centro del blanco, el juego lo descarta.
+ * El juego pega la carga al cuerpo del soldado (NewBakudan attached=1, desplazamiento fijo en su espacio local; sna_800571B8) con SU blanco, no con el punto del rayo VR: solo se deja pasar al juego si el rayo
+ * TOCA a ese mismo blanco. Devuelve 1 si lo hay; *t_touch = unidades hasta el primer soldado enemigo tocado por el rayo (con o sin la prueba del juego), -1 ninguno. */
+#define C4_AIM_TOL 150.0f       /* holgura (unidades = mm) del rayo contra la caja del soldado */
+static int c4_aim_target(const float ow[3], const float dw[3], float reach, float *t_touch) {
+    *t_touch = -1.0f;
     const BridgeState *bs = place_bs;
     if (!bs || !(bs->valid & BRIDGE_OK_TARGETS)) return 0;
     const float yaw = (float)bs->ctl_rot.y * (6.2831853f / 4096.0f), sn = sinf(yaw), cs = cosf(yaw);
     const float cx = (float)bs->ctl_pos.x + 300.0f * sn, cy = (float)bs->ctl_pos.y, cz = (float)bs->ctl_pos.z + 300.0f * cs;
+    int game = -1, touched = -1;
     for (int i = 0; i < bs->n_targets && i < BRIDGE_MAX_TARGETS; i++) {
         const BridgeTarget *t = &bs->targets[i];
-        if (!(t->cls & 64) || (t->damaged & 64) || (t->side & 1)) continue;
-        if (fabsf((float)t->center.x - cx) <= (float)t->half_size.x + 400.0f && fabsf((float)t->center.z - cz) <= (float)t->half_size.z + 400.0f &&
-            fabsf((float)t->center.y - cy) <= (float)t->half_size.y + 600.0f) return 1;
+        if (!(t->cls & 64) || (t->side & 1)) continue;
+        const float c[3] = {(float)t->center.x, (float)t->center.y, (float)t->center.z}, hs[3] = {(float)t->half_size.x, (float)t->half_size.y, (float)t->half_size.z};
+        if (game < 0 && !(t->damaged & 64) && fabsf(c[0] - cx) <= hs[0] + 400.0f && fabsf(c[2] - cz) <= hs[2] + 400.0f && fabsf(c[1] - cy) <= hs[1] + 600.0f &&
+            (!(bs->valid & BRIDGE_OK_PLAYER_ST) || (bs->player_map & t->map))) game = i;
+        float tn = 0.0f, tf = reach;
+        int hit = 1;
+        for (int k = 0; k < 3 && hit; k++) {      /* rayo contra caja alineada a los ejes (losas) */
+            const float lo = c[k] - hs[k] - C4_AIM_TOL - ow[k], hi = c[k] + hs[k] + C4_AIM_TOL - ow[k];
+            if (fabsf(dw[k]) < 1e-6f) { if (lo > 0.0f || hi < 0.0f) hit = 0; continue; }
+            float t0 = lo / dw[k], t1 = hi / dw[k];
+            if (t0 > t1) { const float x = t0; t0 = t1; t1 = x; }
+            if (t0 > tn) tn = t0;
+            if (t1 < tf) tf = t1;
+            if (tn > tf) hit = 0;
+        }
+        if (hit && (*t_touch < 0.0f || tn < *t_touch)) { *t_touch = tn; touched = i; }
     }
-    return 0;
+    if (game < 0 || game != touched) return 0;                                  /* el juego tomaría a otro (o a ninguno): la carga no se pega a este */
+    const BridgeTarget *g = &bs->targets[game];
+    if (g->cls & 0x20) return 0;                                                  /* sna_8004FDE8: clase 0x20 -> descarta el blanco y no pega */
+    if (place_ram) {                                                              /* sna_line_check(ctl_pos -> centro del blanco): con pared en medio el juego lo descarta */
+        const float o[3] = {(float)bs->ctl_pos.x, (float)bs->ctl_pos.y, (float)bs->ctl_pos.z}, d[3] = {(float)g->center.x - o[0], (float)g->center.y - o[1], (float)g->center.z - o[2]};
+        const float dl = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (dl > 1.0f && vrhzd_raycast(place_ram, o, d, dl, 1u) >= 0.0f) return 0;
+    }
+    return 1;
 }
-static int place_c4(const WPose *obj, WPose *out) {
+static int place_c4(const WPose *obj, WPose *out, int *via_game) {      /* via_game = 1: la pose no vale, la carga se pega a un blanco del juego (adherida a un enemigo) y la pone el propio juego */
+    *via_game = 0;
     if (!isfinite(obj->p.x) || !isfinite(obj->p.y) || !isfinite(obj->p.z) || !isfinite(obj->q.x) || !isfinite(obj->q.y) || !isfinite(obj->q.z) || !isfinite(obj->q.w) ||
         !isfinite(G.head.p.x) || !isfinite(G.head.p.z) || !G.map.valid || !(G.map.units_per_m > 0)) return 0;
     float qn = sqrtf(obj->q.x * obj->q.x + obj->q.y * obj->q.y + obj->q.z * obj->q.z + obj->q.w * obj->q.w);
@@ -960,10 +998,13 @@ static int place_c4(const WPose *obj, WPose *out) {
         if (tw >= 0.0f) { best = tw / upm; on_floor = tplane >= 0.0f && fabsf(best - tplane) <= 0.05f; }
     }
     if (best < 0.0f && tplane >= 0.0f) { best = tplane; on_floor = 1; }          /* sin impacto: el plano de los pies (nunca gana a una colisión más lejana: pasado un borde la carga quedaría flotando) */
-    if (!(best >= 0.0f) || !isfinite(best)) {
-        if (c4_game_target()) { *out = *obj; return 1; }      /* sin superficie pero con un blanco del juego (espalda de un guardia): el juego pega la carga al enemigo (NewBakudan attached=1; hle_vrfire_charge ignora la pose) */
-        return 0;
+    if (!isfinite(best)) return 0;
+    float t_sold;
+    const int sold_ok = c4_aim_target(ow, dw, PLACE_RAY_M * upm, &t_sold);
+    if (sold_ok && t_sold >= 0.0f && (!(best >= 0.0f) || t_sold / upm <= best + 0.05f)) {      /* el rayo toca al soldado que el juego tomaría, antes que a una superficie: apuntas al soldado, no a lo que hay tras él */
+        *out = *obj; *via_game = 1; return 1;                                         /* el juego la pega al soldado (NewBakudan attached=1; hle_vrfire_charge ignora la pose) y la lleva con él */
     }
+    if (!(best >= 0.0f)) return 0;                                                    /* sin superficie y sin blanco del juego: con la pose de la mano la carga quedaría flotando */
     float p[3] = {o[0] + f[0] * best, o[1] + f[1] * best, o[2] + f[2] * best}, n[3] = {0, 1, 0};
     if (on_floor || (G.floor_ok && p[1] <= G.floor_u + 0.04f && f[1] < 0.0f) || f[1] < -0.7f) { n[0] = 0; n[1] = 1; n[2] = 0; }   /* suelo o cara superior */
     else if (f[1] > 0.7f) { n[1] = -1; }                                                                                             /* techo */
@@ -1008,6 +1049,9 @@ static int place_c4(const WPose *obj, WPose *out) {
     return 1;
 }
 
+/* Cargas vivas del juego (bakudan_count, 0x800A0604; NewBakudan no crea la 17ª). Como c4_placed, más abajo, pero antes de su definición. */
+static int c4_live_count(const uint8_t *ram) { int32_t n; memcpy(&n, ram + (VRFIRE_BA_C4_COUNT & 0x1FFFFFu), 4); return n; }
+
 static int launch_hook(void *user, const WLaunch *ev) {
     (void)user;
     if (!ev) return 0;
@@ -1018,15 +1062,23 @@ static int launch_hook(void *user, const WLaunch *ev) {
         float v[3] = {ev->lin_vel.x, ev->lin_vel.y, ev->lin_vel.z};
         if (ev->kind == WL_INHAND) v[0] = v[1] = v[2] = 0;     /* cocinada hasta el final en la mano: cae a los pies (mecha del juego) */
         float p[3] = {ev->pose.p.x, ev->pose.p.y, ev->pose.p.z};
-        fprintf(stderr, "[lanzar] arma=%d velocidad_mano=%.2f m/s (%.2f %.2f %.2f) angular=%.1f rad/s\n", ev->weapon_id, sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]), v[0], v[1], v[2], wv_len(ev->ang_vel));
-        if (!vrfire_set_throw(p, v, THROW_TICK_S)) { G.rejects++; return 0; }
+        const int ok = vrfire_set_throw(p, v, THROW_TICK_S);
+        fprintf(stderr, "[lanzar] arma=%d v_mando=%.2f v_usada=%.2f m/s ventana=%.0f ms (acaba %.0f ms antes del ultimo muestreo) soltar=%.0f ms tras empezar a abrir el gatillo v_actor=%.2f m/s (%.2f %.2f %.2f) angular=%.1f rad/s aceptado=%d\n", ev->weapon_id,
+                ev->v_hand, ev->v_used, 1000.0f * ev->win_len, 1000.0f * ev->win_lag, 1000.0f * ev->rel_lag, vrfire_throw_mps(), v[0], v[1], v[2], wv_len(ev->ang_vel), ok);
+        if (!ok) { G.rejects++; return 0; }
         G.fire_edge = 1; G.fire_pose = ev->pose; G.shots++; G.throws++;
         return 1; }
     case WL_PLACE_C:
     case WL_PLACE_MINE: {
         if (G.ammo_game <= 0 || !G.map.valid) { G.rejects++; return 0; }
         WPose pp;
-        if (!(ev->kind == WL_PLACE_C ? place_c4(&ev->pose, &pp) : place_project(&ev->pose, &pp))) { G.rejects++; return 0; }
+        int via_game = 1;
+        if (!(ev->kind == WL_PLACE_C ? place_c4(&ev->pose, &pp, &via_game) : place_project(&ev->pose, &pp))) { G.rejects++; return 0; }
+        if (ev->kind == WL_PLACE_C && !via_game) {      /* C4 en la pared o el suelo: el actor se crea directamente donde apunta el mando (vr_fire.h), SIN el ataque del juego: Snake no hace ninguna animación */
+            if ((place_ram && c4_live_count(place_ram) >= 16) || !vrfire_c4_request(&G.map, &pp)) { G.rejects++; return 0; }
+            G.shots++; G.places++;
+            return 1;
+        }
         G.fire_edge = 1; G.fire_pose = pp; G.shots++; G.places++;
         return 1; }
     case WL_DETONATE:
@@ -1035,6 +1087,17 @@ static int launch_hook(void *user, const WLaunch *ev) {
     default:
         return 0;
     }
+}
+
+/* Sondeo de colocación sin efectos (w_throw.h w5_probe): la misma prueba que al soltar el gatillo, sin consumir nada. Devuelve 1 si hay dónde colocar y deja la pose resultante en G.probe_pose. */
+static int probe_hook(void *user, const WLaunch *ev) {
+    (void)user;
+    if (!ev || G.ammo_game <= 0 || !G.map.valid) return 0;
+    WPose pp;
+    int via_game;
+    const int ok = ev->kind == WL_PLACE_C ? place_c4(&ev->pose, &pp, &via_game) : ev->kind == WL_PLACE_MINE ? place_project(&ev->pose, &pp) : 0;
+    if (ok) { G.probe_ok = 1; G.probe_pose = pp; }
+    return ok;
 }
 
 static int ik_probe(const uint8_t *ram);      /* regla de la IK de brazos con el motor ocultando a Snake: más abajo, junto a is_duct */
@@ -1059,6 +1122,7 @@ static void init_once(void) {
     vrmis_reset();
     G.cur = -1;
     w_throw_set_hook(launch_hook, NULL);
+    w_throw_set_probe(probe_hook, NULL);
 }
 
 static void head_pose(WPose *h) {
@@ -1294,7 +1358,7 @@ static void arma_diag(uint64_t now, const ArmaDiag *a) {
  * que mientras haya cargas colocadas (BA_C4_COUNT: contador de actores de bakudan.c; dirección de la edición europea confirmada por desensamblado: NewBakudan 0x8006B69C lo compara con 16; su valor con
  * cargas puestas no está medido en volcado) el círculo del usuario se retira y el juego solo lo ve como pulsación nuestra al apretar a fondo el agarre derecho (flanco; antes debe haber estado suelto).
  * Siempre el derecho, sea cual sea la mano dominante. Solo con el C4 equipado (C4_WEAPON; con otra arma el círculo pasa tal cual y el juego detona como en el original) y nunca si vr_gesture está en golpe/agarre
- * en ese VBlank (vrbodyg_melee_busy) ni con el bloqueo de la zona de menú; la pulsación del agarre sin detonar también gasta el flanco. No actúa sin el control del jugador. */
+ * en ese VBlank (vrbodyg_melee_busy), ni con la mano derecha en su zona de menú del pecho (ahí el grip abre el menú: vrbodyg_hand_in_chest), ni con el bloqueo de disparo de un menú abierto; la pulsación del agarre sin detonar también gasta el flanco. No actúa sin el control del jugador. */
 #define C4_WEAPON 6
 #define BA_C4_COUNT 0x800A0604u
 #define C4_GRIP_ON 0.85f
@@ -1317,7 +1381,7 @@ static uint16_t c4_remote(uint16_t out, const BridgeState *bs, const uint8_t *ra
     if (gr < C4_GRIP_OFF) G.det_arm = 1;
     if (live && G.det_arm && gr > C4_GRIP_ON) {
         G.det_arm = 0;
-        if (c4_eq && !G.fblk && !vrbodyg_melee_busy()) { G.det_c4 = DET_PRESS_VBL; G.dets++; }
+        if (c4_eq && !G.fblk && !vrbodyg_melee_busy() && !vrbodyg_hand_in_chest(1)) { G.det_c4 = DET_PRESS_VBL; G.dets++; }
     }
     if (c4_eq || G.det_c4 > 0) out = (uint16_t)(out & ~PAD_DETONATE);       /* con el C4 equipado el círculo físico (CQC) ya no detona */
     if (G.det_c4 > 0) { G.det_c4--; if (core) out |= PAD_DETONATE; }
@@ -1399,11 +1463,11 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
     VrReloadIn ri;
     memset(&ri, 0, sizeof ri);
     ri.weapon_id = mode && G.mag_weapon ? gid : -1;
-    float gtr = hs[w].trigger;      /* gatillo tras el bloqueo de la zona de menú (vrbodyg_fire_gate: una vez por VBlank, aquí) */
+    float gtr = hs[w].trigger;      /* gatillo tras el bloqueo del menú abierto (vrbodyg_fire_gate: una vez por VBlank, aquí) */
     const int fblk = mode ? vrbodyg_fire_gate(w, 1, &gtr) != 0 : 0;
     {
         const int tr = hs[w].trigger > 0.5f;
-        ri.trigger_edge = tr && !G.trig_prev && !fblk;      /* en la zona no hay flanco: con el cargador vacío no pulsa el cuadrado de recarga */
+        ri.trigger_edge = tr && !G.trig_prev && !fblk;      /* con un menú abierto no hay flanco: con el cargador vacío no pulsa el cuadrado de recarga */
         G.trig_prev = tr;
     }
     ri.vr_held = ri.weapon_id >= 0 ? weapon_held(sl->st) : 0;
@@ -1411,7 +1475,7 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
     G.shots_prev = G.shots;
     VrReloadOut ro;
     vrreload_frame(&rg, &ri, &ro);
-    if (fblk && ro.pad_force) vrreload_cancel_press(&ro);      /* en la zona de menú el gatillo no pulsa el ataque (ni mantiene una pulsación en curso) */
+    if (fblk && ro.pad_force) vrreload_cancel_press(&ro);      /* con un menú abierto el gatillo no pulsa el ataque (ni mantiene una pulsación en curso) */
     if (ro.load_mag > 0 && ram) { int16_t lm = (int16_t)ro.load_mag; memcpy(ram + (BA_MAGAZINE & 0x1FFFFFu), &lm, 2); }   /* recogida con el arma seca: el cargador del juego se carga aquí (VrReloadOut.load_mag); el VBlank siguiente el puente lo lee y el arma VR queda lista */
     {   /* diagnóstico: recogida de munición con el arma seca (el total del juego subió con el cargador del juego a 0) */
         static int pk_prev;
@@ -1430,10 +1494,13 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
         vraa_gesture(NULL, NULL, 0);     /* sin arma o sin mano rastreada: el gesto del visor se reinicia (sin estado viejo al volver) */
         const int hold = G.weld_hold > 0 && core && cam;
         if (G.active) {
+            G.sv_slot = -1;                   /* desequipada: la vista especial de antes no da derecho a conservarla con el selector abierto */
+            G.sv_prev = hold ? G.cur : -1;    /* recarga: si vuelve esta misma arma no espera otra vez */
             publish_off(hold);
             /* al volver a mostrarla se reinicia el estado del arma (cargador del juego otra vez) */
             if (G.cur >= 0 && atomic_load(&SL[G.cur].state) == LD_READY) { SL[G.cur].def->init(SL[G.cur].st); SL[G.cur].st->def = SL[G.cur].def; }
         }
+        if (!hold) G.sv_prev = -1;
         G.active = 0;
         G.cur = -1;
         G.det_t = 0;             /* una pulsación de detonación a medias no sobrevive a desequipar el arma */
@@ -1479,6 +1546,13 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
     WeaponState *st = sl->st;
     const WeaponDef *def = sl->def;
     G.active = 1;
+    /* Vista especial (lente del PSG1, pantalla del Stinger / Nikita): solo la del arma realmente lista. Un arma que entra (cambio directo, o tras desequipar) espera SV_SETTLE_TICKS VBlanks, y con el selector
+     * abierto solo conserva la suya el arma que ya estaba lista al abrirlo: el cursor pasando por el PSG1 (el juego lo equipa al pasar) no enseña su lente. */
+    if ((slot != G.cur && slot != G.sv_prev) || (bs->menu_open && slot != G.sv_slot)) G.sv_wait = SV_SETTLE_TICKS;
+    else if (G.sv_wait > 0) G.sv_wait--;
+    const int sv_ready = G.sv_wait == 0 && (!bs->menu_open || slot == G.sv_slot);
+    if (sv_ready && !bs->menu_open) G.sv_slot = slot;
+    G.sv_prev = -1;
     G.cur = slot;
     /* Conducto (estado INTRUDE) o tumbado (stance 2 / prone): el arma no se ve ni el modelo VR, ni el del juego, ni la copia del juego en la mano (se oculta siempre y no se lleva a la mano). Solo visibilidad: el disparo no se toca (si el juego lo bloquea ahí, es del propio juego).
      * El arma VR solo se ve tumbado con el PSG1 (gid 9). */
@@ -1529,9 +1603,11 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
         const float sg = gp[o].valid ? hs[o].grip : 0.0f, sdist = gp[o].valid ? wcore_hand_dist(st, &in, 1, WP_SUPPORT) : 1e9f;
         sup_held = welded ? 1 : (sg > 0.5f && sdist < 0.07f);
     }
-    /* Boca = apuntado del mando: el eje del cañón (sin retroceso) se lleva al eje de apuntado (-Z de aim_rot) con el giro más corto, aplicado como giro extra agarre -> mano (vrbody_set_aim_fix) a la mano que
-     * empuña (y que dibuja vr_body) y al arma que cuelga de ella: la empuñadura sigue en el agarre del mando. La relación agarre/apuntado del mando es fija, así que converge en un fotograma y se queda;
-     * sin apuntado válido se mantiene la última corrección 0,25 s y se retira suavemente; solo en pistola y fusil (aimfix_weapon). */
+    /* Arma = marco del apuntado del mando: el marco del cañón (sin retroceso: -Z = boca, +Y = arriba del arma) se lleva al marco de apuntado de aim_rot (-Z hacia donde apunta, +Y arriba), boca Y alabeo, aplicado como giro
+     * extra agarre -> mano (vrbody_set_aim_fix) a la mano que empuña (y que dibuja vr_body) y al arma que cuelga de ella: la empuñadura sigue en el agarre del mando. Con el mando recto el arma sale recta al frente y sin
+     * alabeo, MANDE lo que mande el giro de mano (hand_roll_deg), la calibración y el zócalo de vr_grip: esos solo fijan cómo se dibuja la mano. (Antes solo se corregía la boca con el giro más corto: el zócalo FIT_*_GRIP se
+     * diseñó con la mano en apretón de manos, alabeo 90, y con el 45 de los mandos el arma salía alabeada 45 grados -SOCOM- que ese giro no quita.) La relación agarre/apuntado del mando es fija, así que converge en un
+     * fotograma y se queda; sin apuntado válido se mantiene la última corrección 0,25 s y se retira suavemente; solo en pistola y fusil (aimfix_weapon). */
     {
         int fixed_ok = 0;
         if (!aimfix_weapon(gid)) { aimfix_clear_side(w); fixed_ok = 2; }      /* arma sin boca real: nunca se gira */
@@ -1540,20 +1616,25 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
             const WQuat wq = wquat_mul(in.hand[0].q, wquat_inv(wquat_normalize(gr.q)));      /* giro del arma */
             WQuat bq = wquat_mul(wq, def->points[WP_MUZZLE].q);
             WVec3 bwv = wquat_rotate(wquat_normalize(bq), wv(0, 0, -1));
-            float bw[3] = {bwv.x, bwv.y, bwv.z}, aw[3], z[3] = {0, 0, -1}, ax[3], axg[4], qc[4];
+            float bw[3] = {bwv.x, bwv.y, bwv.z}, aw[3], z[3] = {0, 0, -1}, ax[3], qc[4];
             q_rot(hs[w].aim_rot, z, aw);
             ax[0] = bw[1] * aw[2] - bw[2] * aw[1]; ax[1] = bw[2] * aw[0] - bw[0] * aw[2]; ax[2] = bw[0] * aw[1] - bw[1] * aw[0];
             float sn = sqrtf(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]), cs = bw[0] * aw[0] + bw[1] * aw[1] + bw[2] * aw[2];
             float ang = atan2f(sn, cs);
             if (finite_n(bw, 3) && finite_n(aw, 3) && ang < 1.5f) {
                 fixed_ok = 1;
-                if (ang > 0.0005f) {      /* eje de giro en el marco del agarre: Dg = conj(q_agarre) Dw q_agarre; nuevo = Dg * actual */
-                    q_conj(gp[w].q, qc);
-                    q_rot(qc, ax, axg);
-                    float h = 0.5f * ang, k = sinf(h) / sn, dg[4] = {axg[0] * k, axg[1] * k, axg[2] * k, cosf(h)}, nf[4];
-                    q_mul(dg, aimfix_q[w], nf); q_norm(nf);
-                    memcpy(aimfix_q[w], nf, sizeof nf);
-                    vrbody_set_aim_fix(w, aimfix_q[w]);
+                {      /* giro del mundo Dw = apuntado * conj(marco del cañón) (boca y alabeo); en el marco del agarre: Dg = conj(q_agarre) Dw q_agarre; nuevo = Dg * actual */
+                    const WQuat bn = wquat_normalize(bq);
+                    const float bqa[4] = {bn.x, bn.y, bn.z, bn.w};
+                    float bqc[4], dw[4], t1[4], dg[4], nf[4];
+                    q_conj(bqa, bqc); q_mul(hs[w].aim_rot, bqc, dw); q_norm(dw);
+                    if (dw[3] < 0.0f) for (int k = 0; k < 4; k++) dw[k] = -dw[k];
+                    if (dw[3] < 0.9999999f) {      /* > ~0,05 grados */
+                        q_conj(gp[w].q, qc); q_mul(qc, dw, t1); q_mul(t1, gp[w].q, dg); q_norm(dg);
+                        q_mul(dg, aimfix_q[w], nf); q_norm(nf);
+                        memcpy(aimfix_q[w], nf, sizeof nf);
+                        vrbody_set_aim_fix(w, aimfix_q[w]);
+                    }
                 }
             }
         }
@@ -1563,7 +1644,7 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
     in.trigger[0] = hs[w].trigger;
     in.grip[0] = hs[w].grip;
     if (gp[o].valid) { in.trigger[1] = hs[o].trigger; in.grip[1] = hs[o].grip; }
-    /* zona de menú junto al cuerpo (vr_gesture VRG_FB_*): con la mano en su zona, con su ventana abierta o con el gatillo aún apretado tras salir, el gatillo no es del arma (ni dispara, ni prepara, ni lanza, ni detona) y el disparo en cola se anula */
+    /* menú abierto (vr_gesture VRG_FB_*): con la ventana de la mano abierta, con cualquier menú abierto o con el gatillo aún apretado tras cerrarse, el gatillo no es del arma (ni dispara, ni prepara, ni lanza, ni detona) y el disparo en cola se anula */
     if (fblk) in.trigger[0] = is_grenade(gid) ? gtr : 0.0f;      /* arrojadiza: nivel congelado (no se lanza ni se prepara); armas de fuego: suelto (el auto-disparo de w_gunc no sigue con el gatillo congelado) */
     G.fblk = fblk;
     if (gp[o].valid) vrbodyg_fire_gate(o, 0, &in.trigger[1]);
@@ -1620,6 +1701,7 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
             sniper_set_range(st, hit, map.units_per_m);
         }
     }
+    G.probe_ok = 0;
     def->update(st, &in, WR_AUTOMATIC, &G.br);
     G.throw_hold = is_grenade(gid) && (st->phase == WT_PH_HELD || st->phase == WT_PH_READY);
 
@@ -1701,26 +1783,28 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
             fi.raise = 1;
             fi.ready = st->phase == WT_PH_READY;
         }
-        special_view(gid, st, def, &W, &in, duct);
+        special_view(gid, st, def, &W, &in, duct, sv_ready);
         /* láser de la pistola (w_laser.h): desde la boca (la del disparo: sin supresor, la del cañón) a lo largo de su eje, el mismo con el que vr_fire orienta la bala; solo con el jugador al mando y el arma levantada */
         WPose lz = def->points[WP_MUZZLE];
         if (gid == 0 && !(in.game_flags & WGF_SUPP)) lz.p.z = w_pist_bare_muzzle_z;
         lz = wpose_mul(Wa, lz);
         int lz_on = gid == 0 && !duct && bs->in_control && wlaser_raised(&lz);
         float lz_hit_m = -1.0f;
+        const int gh_on = gid == 5 && !duct && bs->in_control && G.probe_ok && st->phase == WPL_PH_HELD;   /* mina en la mano con sitio donde colocarla: fantasma (contorno + flecha de su dirección de disparo) en el punto y con la orientación de colocación */
+        if (gh_on) { lz = G.probe_pose; lz.p.y = G.floor_u; }      /* el fantasma se tiende sobre el suelo (w_laser.h): placed.p.y es el origen del modelo, WGHOST_MINE_LEGS_U uds más arriba */
         if (lz_on && map.valid) {
             /* El rayo acaba donde acaba la bala: misma prueba y mismo alcance (vrhit_shot_dist: primer blanco con los volúmenes de la bala, paredes HZD con la máscara de su línea de visión y suelos de
              * colisión). La geometría de render nativa (vr_headcol) no corta: no bloquea balas (cristales con huecos, rejillas), y el láser debe parar en lo que para la bala. */
             WVec3 fw = wquat_rotate(wquat_normalize(lz.q), wv(0, 0, -1));
             float pu[3] = {lz.p.x, lz.p.y, lz.p.z}, du[3] = {fw.x, fw.y, fw.z}, ow[3], dw[3];
             vrfire_pos_to_world(&map, pu, ow); vrfire_dir_to_world(&map, du, dw);
-            float t = vrhit_shot_dist(ram, ow, dw, WLASER_MAX_M * map.units_per_m);
+            float t = vrhit_shot_dist(ram, ow, dw, vrhit_weapon_range_m(gid) * map.units_per_m);
             if (t >= 0.0f) lz_hit_m = t / map.units_per_m;
         }
         pthread_mutex_lock(&HM);
-        pub_laser.on = lz_on;
+        pub_laser.on = lz_on || gh_on; pub_laser.ghost = gh_on;
         pub_laser.hit_m = lz_hit_m;
-        if (lz_on) { pub_laser.p[0] = lz.p.x; pub_laser.p[1] = lz.p.y; pub_laser.p[2] = lz.p.z; pub_laser.q[0] = lz.q.x; pub_laser.q[1] = lz.q.y; pub_laser.q[2] = lz.q.z; pub_laser.q[3] = lz.q.w; }
+        if (lz_on || gh_on) { pub_laser.p[0] = lz.p.x; pub_laser.p[1] = lz.p.y; pub_laser.p[2] = lz.p.z; pub_laser.q[0] = lz.q.x; pub_laser.q[1] = lz.q.y; pub_laser.q[2] = lz.q.z; pub_laser.q[3] = lz.q.w; }
         pthread_mutex_unlock(&HM);
     }
     fi.fire = G.fire_edge && ro.fire_allowed && !fblk;
@@ -1728,7 +1812,7 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
     /* pose del disparo sin retroceso (el residuo del disparo anterior incluido): conserva las correcciones del arma (eje óptico, apuntado) y solo quita recoil_offset */
     if (gid == 0 || gid == 1 || gid == 9) fi.fire_pose = wpose_mul(aim_fix, G.fire_pose);
     vrhit_frame();
-    if (map.valid) vrhit_set_range(WLASER_MAX_M * map.units_per_m, map.units_per_m);      /* alcance del tiro = el del láser (vr_hit.h) */
+    if (map.valid) vrhit_set_range(vrhit_weapon_range_m(gid) * map.units_per_m, map.units_per_m);      /* alcance del tiro = el del arma en la mano (SOCOM 25 m, FAMAS 30 m, resto 15 m) y el del láser (vr_hit.h) */
     if (fi.fire && map.valid) {      /* instante del gatillo: se anota a qué enemigo y zona apunta la boca ahora (el juego crea la bala ~0,4 s después y el enemigo se habrá movido) */
         VrFireMat am;
         if (vrfire_make_matrix(&map, &fi.fire_pose, 0.0f, &am)) { float ao[3] = {(float)am.t[0], (float)am.t[1], (float)am.t[2]}, ad[3]; vrfire_mat_forward(&am, ad); vrhit_aim(ram, ao, ad); if (aimfix_weapon(gid)) vrhit_note_laser(ram, ao, ad); }
@@ -1958,6 +2042,7 @@ static void agarre_diag(uint64_t now, int side, const GripPose *wh, const GripPo
 int mv_host_hands(VrHandsFrame *out) {
     static VrHandsMesh buf[VRH_MAX_MESHES];
     static VrHandsTex tbuf[VRH_MAX_BOUND + 1];
+    static WGhostMesh gzbuf[3];       /* fantasma de la mina: mismo anillo y mismo hueco que el láser (nunca a la vez) */
     static WLaserMesh lzbuf[3];       /* láser: el renderer lee el frame anterior mientras se arma el siguiente (mismo anillo de 3 que vr_hands) */
     static unsigned lzi;
     int rc, copied = 0, have_d = 0;
@@ -2021,7 +2106,7 @@ int mv_host_hands(VrHandsFrame *out) {
     if (pub_laser.on && (!rc || (out->meshes && out->nmeshes > 0 && out->nmeshes < VRH_MAX_MESHES))) {
         float lp[3], lq[4];
         memcpy(lp, pub_laser.p, sizeof lp); memcpy(lq, pub_laser.q, sizeof lq);
-        if (have_d) {
+        if (have_d && !pub_laser.ghost) {      /* el fantasma está fijo en el suelo: no sigue a la mano */
             float rp[3], nq[4];
             q_rot(dq, lp, rp);
             for (int i = 0; i < 3; i++) lp[i] = rp[i] + dp[i];
@@ -2030,7 +2115,8 @@ int mv_host_hands(VrHandsFrame *out) {
         }
         WPose lz = {{lp[0], lp[1], lp[2]}, {lq[0], lq[1], lq[2], lq[3]}};
         WLaserMesh *lm = &lzbuf[lzi % 3];
-        if (wlaser_build(&lz, wlaser_length(pub_laser.hit_m), lm)) {
+        WGhostMesh *gm = &gzbuf[lzi % 3];
+        if (pub_laser.ghost ? wghost_build(&lz, 0.45f, gm) : wlaser_build(&lz, wlaser_length(pub_laser.hit_m), lm)) {
             lzi++;
             int n0 = rc ? out->nmeshes : 0;
             if (!rc) {                       /* sin arma publicada ni guante: iluminación por defecto de vr/hands */
@@ -2039,7 +2125,7 @@ int mv_host_hands(VrHandsFrame *out) {
                 memset(out, 0, sizeof *out);
                 memcpy(out->light_dir, hc.light_dir, sizeof out->light_dir); out->ambient = hc.ambient; out->diffuse = hc.diffuse;
             } else if (out->meshes != buf) memcpy(buf, out->meshes, (size_t)n0 * sizeof buf[0]);
-            wlaser_mesh(lm, &buf[n0]);
+            if (pub_laser.ghost) wghost_mesh(gm, &buf[n0]); else wlaser_mesh(lm, &buf[n0]);
             out->meshes = buf; out->nmeshes = n0 + 1;
             rc = 1;
         }

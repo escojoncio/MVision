@@ -30,6 +30,8 @@ enum { GR_NONE = 0, GR_WAIT, GR_OPEN, GR_INSERT, GR_CLOSE };
 #define GD_CREATE_GRACE    1.50f   /* s que se espera a que el juego cree el misil antes de darlo por no creado */
 #define GD_VIEW_W          320
 #define GD_VIEW_H          240
+#define GD_CAM_NOSE        0.405f  /* m: morro del modelo del misil (0x76ab, medido: z de -0,318 a +0,405 m, morro afilado en +Z) respecto al origen del actor */
+#define GD_CAM_AHEAD       0.02f   /* m: la cámara de la pantalla va 2 cm por delante del morro: ningún triángulo del misil queda delante de ella */
 
 typedef struct {
     WeaponState base;
@@ -77,7 +79,7 @@ void guided_draw_overlay(const WeaponState *s, uint32_t *rgba, int w, int h);
 /* Pantalla LED del Nikita (marco del arma): la cara trasera del visor del modelo (la unica cara +Z del tubo en su mitad delantera izquierda, plano z = -81 mm, x -120..-30, y 97..171, ~90x74 mm), reducida a GD_LED_DIAG de diagonal alrededor de su centro,
  * adelantada GD_LED_LIFT hacia el ojo; el hexagono del tubo recorta su esquina inferior derecha (contorno de 5 vertices; 4 si el modelo no lo recorta). Sin giro (+Z local hacia el ojo).
  * Devuelve 0 sin modelo enlazado o sin esa cara. */
-#define GD_LED_LIFT 0.003f   /* 3 mm hacia el ojo respecto al plano de la cara del modelo */
+#define GD_LED_LIFT 0.006f   /* 6 mm hacia el ojo respecto al plano de la cara del modelo (lente del PSG1: 2 mm + sesgo de profundidad de encodeSpecial; aquí el doble de margen contra el clipping) */
 #define GD_LED_DIAG 0.090f   /* diagonal de la pantalla (m): la cara (~90 x 74 mm, 117 mm) se reduce de forma uniforme hacia su centro, asi queda dentro de su contorno */
 int guided_led_face(const WeaponState *s, WScreenFace *out);
 

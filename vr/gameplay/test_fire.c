@@ -1411,6 +1411,30 @@ static void t_silencer(void) {
     w16(BA_VARS + 2 * 60, 0);
 }
 
+/* Alcance por arma: SOCOM (game_id 0) 25 m, FAMAS (1) 30 m, el resto 15 m. Con 1000 unidades por metro (h_reg/vrhit_set_range) la bala promocionada (alcance 100000) llega a esa distancia y el láser (vrhit_shot_dist) acaba en lo mismo. */
+static void t_weapon_range(void) {
+    CHECK(vrhit_weapon_range_m(0) == 25.0f && vrhit_weapon_range_m(1) == 30.0f, "alcance SOCOM %.0f m, FAMAS %.0f m", vrhit_weapon_range_m(0), vrhit_weapon_range_m(1));
+    for (int g = -1; g <= 12; g++) if (g != 0 && g != 1) CHECK(vrhit_weapon_range_m(g) == 15.0f, "arma %d: alcance sin cambiar (15 m)", g);
+    static const struct { int gid; int near_u, far_u; const char *n; } c[] = {{0, 24000, 26000, "SOCOM"}, {1, 29000, 31000, "FAMAS"}};
+    for (unsigned i = 0; i < 2; i++) {
+        const float upm = 1000.0f, R = vrhit_weapon_range_m(c[i].gid) * upm;
+        VrHitShot sh;
+        h_world(); h_reg(); vrhit_set_range(R, upm); h_soldier(0, 0, 0, 1000, c[i].near_u, 128);
+        vrhit_next_bullet_extended();
+        CHECK(h_shoot(1, 0, 1300, 0, 0, 1190, (float)c[i].near_u, 100000, -1, &sh) == 0 && h_vital(0) == 64 && sh.action == VRHIT_ACT_SEAL, "%s: enemigo a %d m recibe el impacto (vida %d)", c[i].n, c[i].near_u / 1000, h_vital(0));
+        h_world(); h_reg(); vrhit_set_range(R, upm); h_soldier(0, 0, 0, 1000, c[i].far_u, 128);
+        vrhit_next_bullet_extended();
+        CHECK(h_shoot(1, 0, 1300, 0, 0, 1190, (float)c[i].far_u, 100000, -1, &sh) == -1 && h_vital(0) == 128, "%s: enemigo a %d m no recibe el impacto (vida %d)", c[i].n, c[i].far_u / 1000, h_vital(0));
+        /* el láser = la bala: la misma prueba y el mismo alcance */
+        h_world(); h_reg(); vrhit_set_range(R, upm); h_soldier(0, 0, 0, 1000, c[i].near_u, 128);
+        float o[3] = {0, 1300, 0}, d[3] = {0, -110, (float)c[i].near_u}, t = vrhit_shot_dist(ram, o, d, R);
+        CHECK(t > 0.0f && t < R, "%s: el láser acaba en el enemigo a %d m (%.0f)", c[i].n, c[i].near_u / 1000, t);
+        h_world(); h_reg(); vrhit_set_range(R, upm); h_soldier(0, 0, 0, 1000, c[i].far_u, 128);
+        d[2] = (float)c[i].far_u;
+        CHECK(vrhit_shot_dist(ram, o, d, R) < 0.0f, "%s: el láser no llega al enemigo a %d m", c[i].n, c[i].far_u / 1000);
+    }
+}
+
 static void t_hit_real(void) {
     static const char *nm[] = {"d0008_20261103-001918_stage", "d0009_20261103-002117_stage"};
     const char *dir = getenv("MV_DUMPS"); if (!dir) dir = "/home/claude/work/adj24/Dumps";
@@ -1463,9 +1487,106 @@ static void t_hit_real(void) {
     }
 }
 
+
+/* ---------------------------------------------------------------- C4 directo: sin animación del jugador */
+/* Juego falso: RAM con el bloque del jugador (con un patrón en su estado y en el objeto animado: acción, acción2, postura), el contador de cargas, el arma equipada y su munición. NewBakudan falso: guarda la matriz,
+ * suma 1 al contador y devuelve un actor; el sonido falso anota el emisor y el id. */
+static uint8_t c4ram[0x200000];
+static int c4_made, c4_se_n, c4_se_id, c4_fail;
+static uint32_t c4_se_pos;
+static VrFireMat c4_mat;
+#define C4_CTRL 0x800C0020u
+#define C4_BODY 0x800C8000u
+#define C4_AMMO_AT (BA_VARS + 2u * (BRIDGE_V_WEAPON_AMMO + 6))
+static int32_t c4r32(uint32_t a) { int32_t v; memcpy(&v, c4ram + (a & 0x1FFFFFu), 4); return v; }
+static int16_t c4r16(uint32_t a) { int16_t v; memcpy(&v, c4ram + (a & 0x1FFFFFu), 2); return v; }
+static void c4w32(uint32_t a, int32_t v) { memcpy(c4ram + (a & 0x1FFFFFu), &v, 4); }
+static void c4w16(uint32_t a, int16_t v) { memcpy(c4ram + (a & 0x1FFFFFu), &v, 2); }
+static uint32_t c4_create(void *u, const VrFireMat *m) {
+    (void)u;
+    if (c4_fail) return 0;
+    c4_made++; c4_mat = *m;
+    c4w32(VRFIRE_BA_C4_COUNT, c4r32(VRFIRE_BA_C4_COUNT) + 1);
+    return 0x800D0000u + 0x100u * (uint32_t)c4_made;
+}
+static void c4_sound(void *u, uint32_t pos, int id) { (void)u; c4_se_n++; c4_se_pos = pos; c4_se_id = id; }
+static void c4_world(int weapon, int ammo, int count) {
+    memset(c4ram, 0, sizeof c4ram);
+    c4w32(BA_PLAYER_CTRL, (int32_t)C4_CTRL); c4w32(BA_PLAYER_BODY, (int32_t)C4_BODY);
+    for (uint32_t i = 0; i < 0xA00; i++) c4ram[((C4_CTRL - 0x20u) & 0x1FFFFFu) + i] = (uint8_t)(i * 7 + 3);
+    for (uint32_t i = 0; i < 0x100; i++) c4ram[(C4_BODY & 0x1FFFFFu) + i] = (uint8_t)(i * 13 + 5);      /* OBJECT: acción, acción2 (+16), tiempos... */
+    c4w16(BA_VARS + 2u * BRIDGE_V_WEAPON, (int16_t)weapon); c4w16(C4_AMMO_AT, (int16_t)ammo); c4w32(VRFIRE_BA_C4_COUNT, count);
+    c4_made = 0; c4_se_n = 0; c4_fail = 0;
+}
+static void t_c4_direct(void) {
+    printf("-- C4 directo: sin animación del jugador --\n");
+    vrfire_init(NULL);
+    const VrFireC4Ops ops = {c4_create, c4_sound, NULL};
+    VrFireMap map = mkmap(100, -200, 300, 20.0f);
+    WPose pose; pose.p.x = 0.3f; pose.p.y = 1.1f; pose.p.z = -0.5f; pose.q = qypr(35, -20, 5);
+    VrFireMat want;
+    CHECK(vrfire_make_matrix(&map, &pose, 0.0f, &want), "matriz esperada");
+    static uint8_t before[0x200000];
+    /* petición + bombeo: el actor existe con la matriz pedida, la munición baja 1, suena, y NADA del jugador cambia */
+    c4_world(6, 4, 0);
+    memcpy(before, c4ram, sizeof c4ram);
+    CHECK(!vrfire_c4_pending(), "sin petición");
+    CHECK(vrfire_c4_pump(c4ram, &ops) == 0 && c4_made == 0, "sin petición no se crea nada");
+    CHECK(vrfire_c4_request(&map, &pose) == 1 && vrfire_c4_pending(), "petición aceptada");
+    VrFireGame g; memset(&g, 0, sizeof g); VrFireIn in; memset(&in, 0, sizeof in); VrFireOut o; VrFireStats s0, s1;
+    vrfire_stats(&s0);
+    vrfire_frame(&g, &in, &o);
+    vrfire_stats(&s1);
+    CHECK(o.square == 0 && s1.presses == s0.presses && s1.requests == s0.requests, "colocar no pulsa el botón de ataque del juego (la animación de Snake) ni pide proyectil por pulsación");
+    CHECK(vrfire_c4_request(&map, &pose) == 0, "con una petición en curso no entra otra");
+    CHECK(vrfire_c4_pump(c4ram, &ops) == 1, "bombeo: creada");
+    CHECK(c4_made == 1 && mat_eq(&c4_mat, &want), "el actor se crea en la posición y con la orientación pedidas (t=%d %d %d)", c4_mat.t[0], c4_mat.t[1], c4_mat.t[2]);
+    CHECK(c4r16(C4_AMMO_AT) == 3, "munición 4 -> 3 (%d)", c4r16(C4_AMMO_AT));
+    CHECK(c4r32(VRFIRE_BA_C4_COUNT) == 1, "contador de cargas del juego = 1");
+    CHECK(c4_se_n == 1 && c4_se_id == 0x31 && c4_se_pos == C4_CTRL, "sonido de colocar (SE 0x31) en la posición del jugador (n=%d id=%#x pos=%#x)", c4_se_n, c4_se_id, c4_se_pos);
+    CHECK(!vrfire_c4_pending() && vrfire_c4_pump(c4ram, &ops) == 0 && c4_made == 1, "petición consumida: no se crea dos veces");
+    {   /* lo único que cambia en toda la RAM: munición, contador (lo hace el juego falso) */
+        int bad = 0;
+        for (uint32_t i = 0; i < sizeof c4ram; i++) {
+            uint32_t a = 0x80000000u | i;
+            if ((a >= C4_AMMO_AT && a < C4_AMMO_AT + 2) || (a >= (VRFIRE_BA_C4_COUNT) && a < VRFIRE_BA_C4_COUNT + 4)) continue;
+            if (c4ram[i] != before[i]) bad++;
+        }
+        CHECK(bad == 0, "ni acción, ni acción2, ni postura ni estado del jugador cambian (bytes distintos: %d)", bad);
+    }
+    /* límites del original: 16 cargas, sin munición, otra arma, creación fallida -> no se gasta nada */
+    c4_world(6, 4, 16);
+    CHECK(vrfire_c4_request(&map, &pose) && vrfire_c4_pump(c4ram, &ops) == 0 && c4_made == 0 && c4r16(C4_AMMO_AT) == 4, "16 cargas: no se coloca ni se gasta munición");
+    c4_world(6, 0, 0);
+    CHECK(vrfire_c4_request(&map, &pose) && vrfire_c4_pump(c4ram, &ops) == 0 && c4_made == 0, "sin munición: no se coloca");
+    c4_world(5, 4, 0);
+    CHECK(vrfire_c4_request(&map, &pose) && vrfire_c4_pump(c4ram, &ops) == 0 && c4_made == 0 && c4r16(C4_AMMO_AT) == 4, "otra arma equipada: no se coloca");
+    c4_world(6, 4, 0); c4_fail = 1;
+    CHECK(vrfire_c4_request(&map, &pose) && vrfire_c4_pump(c4ram, &ops) == 0 && c4r16(C4_AMMO_AT) == 4 && c4_se_n == 0, "NewBakudan devuelve NULL: sin munición gastada ni sonido");
+    c4_world(6, 4, 0);
+    c4w32(BA_PLAYER_CTRL, 0);
+    CHECK(vrfire_c4_request(&map, &pose) && vrfire_c4_pump(c4ram, &ops) == 0 && c4_made == 0, "sin bloque de jugador: no se coloca");
+    /* caducidad: sin bombeo la petición se descarta y no aparece una carga vieja */
+    c4_world(6, 4, 0);
+    CHECK(vrfire_c4_request(&map, &pose), "petición");
+    for (int i = 0; i < VRFIRE_C4_LIFE + 2; i++) vrfire_frame(&g, &in, &o);
+    CHECK(!vrfire_c4_pending() && vrfire_c4_pump(c4ram, &ops) == 0 && c4_made == 0, "petición caducada: nada que crear");
+    /* entradas inválidas */
+    VrFireMap bad = map; bad.valid = 0;
+    CHECK(vrfire_c4_request(&bad, &pose) == 0 && vrfire_c4_request(NULL, &pose) == 0 && vrfire_c4_request(&map, NULL) == 0, "mapa inválido / nulos: rechazada");
+    WPose nan = pose; nan.p.x = NAN;
+    CHECK(vrfire_c4_request(&map, &nan) == 0 && !vrfire_c4_pending(), "pose no finita: rechazada");
+    CHECK(vrfire_c4_pump(NULL, &ops) == 0 && vrfire_c4_pump(c4ram, NULL) == 0, "bombeo sin RAM / sin operaciones: nada");
+    /* reinicio */
+    CHECK(vrfire_c4_request(&map, &pose) == 1, "petición"); vrfire_init(NULL);
+    CHECK(!vrfire_c4_pending(), "vrfire_init descarta la petición");
+    VrFireMat t;
+    CHECK(vrfire_c4_request(&map, &pose) == 1 && vrfire_c4_take(&t) == 1 && mat_eq(&t, &want) && !vrfire_c4_pending() && vrfire_c4_take(&t) == 0, "vrfire_c4_take saca la petición sin comprobar el juego (pruebas)");
+}
+
 int main(void) {
-    t_hit_zones(); t_hit_motivo(); t_hit_camera(); t_hit_floors(); t_hit_enemy(); t_hit_aim(); t_hit_fist(); t_hit_probe(); t_laser_is_bullet(); t_silencer(); t_hit_real();
-    t_matrix(); t_single(); t_skip_raise(); t_snapshot(); t_cancel(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_throw_origin(); t_throw_origin_body(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg();
+    t_hit_zones(); t_hit_motivo(); t_hit_camera(); t_hit_floors(); t_hit_enemy(); t_hit_aim(); t_hit_fist(); t_hit_probe(); t_laser_is_bullet(); t_silencer(); t_weapon_range(); t_hit_real();
+    t_matrix(); t_single(); t_skip_raise(); t_snapshot(); t_cancel(); t_burst(); t_dry(); t_raise(); t_hold_auto(); t_kinds(); t_throw(); t_throw_game(); t_throw_prop(); t_grenade_gesture(); t_grenade_cancel(); t_grenade_track(); t_throw_origin(); t_throw_origin_body(); t_long_life(); t_inverse(); t_invalid_input(); t_hide(); t_read_game(); t_fuzz(); t_cfg(); t_c4_direct();
     printf("test_fire: %d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;
 }
