@@ -14,7 +14,7 @@ static GpuDrawList dl;
 static ProvEntry tab[64];
 
 /* ids de la tabla sintética */
-enum { I_CINEMA = 1, I_MOTSE, I_TELOP, I_FAMA, I_SCOPE, I_SIGHT, I_MENUMAN, I_CB, I_OTHER, I_EFFECT, I_SCOPE_FN, I_CINEMA_FN, I_WIN, I_X, I_SORT, I_SORT2, I_GAS, I_FADE, I_MOSAIC, I_LAST };
+enum { I_CINEMA = 1, I_MOTSE, I_TELOP, I_FAMA, I_SCOPE, I_SIGHT, I_MENUMAN, I_CB, I_OTHER, I_EFFECT, I_SCOPE_FN, I_CINEMA_FN, I_WIN, I_X, I_SORT, I_SORT2, I_GAS, I_FADE, I_MOSAIC, I_STN, I_SGT, I_RMS, I_LAST };
 
 static void set_e(int id, const char *name, uint32_t fn) {
     tab[id].id = (uint16_t)id; tab[id].fn = fn; tab[id].actor_node = name && name[0] ? 0x800be4e0u : 0;
@@ -38,6 +38,9 @@ static void reset(void) {
     set_e(I_GAS, "gas_efct.c", 0x800de1f0u);   /* anillo del gas: efecto de pantalla con paquetes propios */
     set_e(I_FADE, "fadeio.c", 0x800e15e8u);    /* fundido */
     set_e(I_MOSAIC, "mosaic.c", 0x800d9d80u);  /* mosaico de censura: celdas 2D que muestrean el propio fotograma */
+    set_e(I_STN, "stnsight.c", 0x80069c18u);   /* HUD propio del Stinger */
+    set_e(I_SGT, "sgtrect3.c", 0x80070000u);   /* marco de fijación / líneas de convergencia del Stinger */
+    set_e(I_RMS, "rmissile.c", 0x8006e000u);   /* HUD propio del Nikita */
     dl.prov = tab; dl.nprov = I_LAST;
 }
 static GpuOp *add(int type, int prov) { GpuOp *o = &ops[dl.nops++]; o->type = (uint8_t)type; o->prov = (uint16_t)prov; return o; }
@@ -371,7 +374,7 @@ static void test_unknown_and_split(void) {
     uint8_t cls[8], od[8] = {2, 2, 2, 2, 2, 2, 2, 2};
     for (int i = 0; i < 8; i++) cls[i] = vpc_op_class_cb(&nsl1, (uint32_t)i, NULL);
     uint32_t cnt[VPC_N], lc[VPC_L_N];
-    uint8_t *out[VPC_L_N]; uint8_t b0[8], b1[8], b2[8]; out[0] = b0; out[1] = b1; out[2] = b2;
+    uint8_t *out[VPC_L_N]; uint8_t b0[8], b1[8], b2[8], b3[8]; out[0] = b0; out[1] = b1; out[2] = b2; out[3] = b3;
     vpc_tally(od, cls, 8, cnt);
     CHECK(cnt[VPC_UNKNOWN] == 8, "NSL1: todo UNKNOWN (%u)", cnt[VPC_UNKNOWN]);
     vpc_split_dest(od, cls, 8, out, lc);
@@ -415,7 +418,7 @@ static void test_scene_hook(void) {
         CHECK(s.op_dest[0] == 2 && s.op_dest[1] == 2 && s.op_dest[2] == 2 && s.op_dest[3] == 2, "las 4 primitivas van al panel (%u %u %u %u)", s.op_dest[0], s.op_dest[1], s.op_dest[2], s.op_dest[3]);
         CHECK(s.op_cls[0] == VPC_HUD_WORLD && s.op_cls[1] == VPC_FX_LETTERBOX && s.op_cls[2] == VPC_FULL && s.op_cls[3] == VPC_UNKNOWN,
               "clases en vr_scene: %u %u %u %u", s.op_cls[0], s.op_cls[1], s.op_cls[2], s.op_cls[3]);
-        uint8_t b0[4], b1[4], b2[4]; uint8_t *out[VPC_L_N] = {b0, b1, b2}; uint32_t lc[VPC_L_N];
+        uint8_t b0[4], b1[4], b2[4], b3[4]; uint8_t *out[VPC_L_N] = {b0, b1, b2, b3}; uint32_t lc[VPC_L_N];
         vpc_split_dest(s.op_dest, s.op_cls, s.n_op_dest, out, lc);
         CHECK(lc[VPC_L_HUD] == 2 && lc[VPC_L_FULL] == 1 && lc[VPC_L_WINDOW] == 0, "reparto de la escena: %u %u %u", lc[0], lc[1], lc[2]);
     }
@@ -457,7 +460,7 @@ static void test_scene_world(void) {
         CHECK(s.op_dest[8] == 2 && s.op_cls[8] == VPC_FX_SCREEN, "gas_efct.c cubierto por el nativo: sale de vr_scene con la clase FX_SCREEN (%u %u)", s.op_dest[8], s.op_cls[8]);
         CHECK(s.op_dest[10] == 2 && s.op_cls[10] == VPC_UNKNOWN && fate[10] == VR_FATE_2D && s.op_dest[11] == 2 && s.op_cls[11] == VPC_UNKNOWN && fate[11] == VR_FATE_2D,
               "primitivas de pantalla de un actor sin regla, encadenadas por la ordenación y SIN elemento nativo: siguen en el panel (UNKNOWN) (%u/%u %u/%u)", s.op_dest[10], s.op_cls[10], s.op_dest[11], s.op_cls[11]);
-        uint8_t b0[12], b1[12], b2[12]; uint8_t *out[VPC_L_N] = {b0, b1, b2}; uint32_t lc[VPC_L_N];
+        uint8_t b0[12], b1[12], b2[12], b3[12]; uint8_t *out[VPC_L_N] = {b0, b1, b2, b3}; uint32_t lc[VPC_L_N];
         vpc_split_dest(s.op_dest, s.op_cls, s.n_op_dest, out, lc);
         CHECK(lc[VPC_L_HUD] == 6 && lc[VPC_L_FULL] == 1 && lc[VPC_L_WINDOW] == 0 && b0[8] == 0 && b1[8] == 0 && b2[8] == 0 && b0[0] == 0 && b0[1] == 0 && b0[2] == 0 && b0[10] == 2 && b0[11] == 2,
               "panel: HUD 6 (menuman x2, sin procedencia, otra función, las 2 de pantalla sin cobertura), créditos 1; ni el gas (sin capa) ni los efectos del mundo (no salen de vr_scene) (%u %u %u)", lc[0], lc[1], lc[2]);
@@ -477,7 +480,7 @@ static void test_scene_world(void) {
     CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.op_dest && s.op_cls && s.op_dest[0] == 2 && s.op_dest[1] == 2 && s.op_dest[2] == 2 && s.op_cls[0] == VPC_WORLD && s.op_cls[1] == VPC_WORLD && s.op_cls[2] == VPC_WORLD,
           "sin drop_world2d: vr_scene no descarta nada; clase WORLD");
     if (s.op_dest && s.op_cls) {
-        uint8_t b0[12], b1[12], b2[12]; uint8_t *out[VPC_L_N] = {b0, b1, b2}; uint32_t lc[VPC_L_N];
+        uint8_t b0[12], b1[12], b2[12], b3[12]; uint8_t *out[VPC_L_N] = {b0, b1, b2, b3}; uint32_t lc[VPC_L_N];
         vpc_split_dest(s.op_dest, s.op_cls, s.n_op_dest, out, lc);
         CHECK(lc[VPC_L_HUD] == 9 && b0[0] == 2 && b0[1] == 2 && b0[2] == 2 && b0[8] == 0, "sin drop_world2d: las primitivas del canal 3D siguen en la capa HUD, como antes; el gas cubierto no (%u)", lc[0]);
     }
@@ -595,11 +598,139 @@ static void test_fx(void) {
     CHECK(H.age_v == 0 && H.age_l == 0 && H.age_s == 0, "hold: reaparecer reinicia la cuenta");
 }
 
+/* HUD propio del arma (WEAPON_HUD): stnsight.c / sgtrect3.c / rmissile.c van a una capa propia que el panel plano no incluye; el sight.c del Stinger (lista con stnsight.c, sin prismáticos) también; el resto
+ * (sight.c de otras armas, menuman) no cambia. */
+static void test_weapon_hud(void) {
+    reset();
+    GpuOp *sa = rect(I_STN, 18, 60, 24, 2, 0);                     /* 0: línea de la escala */
+    GpuOp *st = rect(I_STN, 22, 62, 6, 5, GPU_F_TEXTURED);         /* 1: cifra de la escala / LOCK_ON (texturado: antes SCOPE_TEXT, panel) */
+    GpuOp *sb = add(GPU_OP_POLY, I_STN); sb->nv = 4; sb->flags = (uint16_t)(GPU_F_GOURAUD | GPU_F_SEMI | GPU_F_QUAD); sb->cx2 = 319; sb->cy2 = 255;   /* 2: barra de tiempos de canal */
+    { const int x[4] = {24, 75, 24, 75}, y[4] = {22, 22, 28, 28}; for (int i = 0; i < 4; i++) { sb->v[i].x = (int16_t)x[i]; sb->v[i].y = (int16_t)y[i]; } }
+    GpuOp *gl = add(GPU_OP_LINE, I_SGT); gl->v[0].x = 0; gl->v[0].y = 0; gl->v[1].x = 150; gl->v[1].y = 100; gl->cx2 = 319; gl->cy2 = 255;   /* 3: línea de convergencia */
+    GpuOp *rm = rect(I_RMS, 116, 98, 30, 6, GPU_F_TEXTURED);       /* 4: ENEMY del Nikita */
+    GpuOp *sg = rect(I_SIGHT, 0, 33, 320, 1, 0);                   /* 5: sight.c del Stinger sin textura (marco) */
+    GpuOp *sx = rect(I_SIGHT, 21, 13, 6, 5, GPU_F_TEXTURED);       /* 6: sight.c del Stinger texturado (rótulo STINGER) */
+    GpuOp *m = rect(I_MENUMAN, 10, 200, 20, 8, 0);                 /* 7: HUD normal */
+    GpuOp *sk = rect(I_STN, 10, 10, 6, 5, 0); sk->prov = I_STN; (void)sk;   /* 8: otra de stnsight.c */
+    VrProvLearn S; vpc_learn_reset(&S);
+    CHECK(cls_of(NULL, sa) == VPC_WEAPON_HUD && cls_of(NULL, st) == VPC_WEAPON_HUD && cls_of(NULL, sb) == VPC_WEAPON_HUD, "stnsight.c (líneas, texto, barra de canal): WEAPON_HUD (y no cae en la regla de mira: «stnsight.c» no es «sight.c») (%s %s %s)", vpc_class_name(cls_of(NULL, sa)), vpc_class_name(cls_of(NULL, st)), vpc_class_name(cls_of(NULL, sb)));
+    CHECK(cls_of(NULL, gl) == VPC_WEAPON_HUD && cls_of(NULL, rm) == VPC_WEAPON_HUD, "sgtrect3.c y rmissile.c: WEAPON_HUD");
+    CHECK(cls_of(NULL, m) == VPC_HUD_WORLD && cls_of(NULL, sg) == VPC_SCOPE_FRAME && cls_of(NULL, sx) == VPC_SCOPE_TEXT, "sin anotar la lista: el HUD normal y sight.c no cambian (%s %s %s)", vpc_class_name(cls_of(NULL, m)), vpc_class_name(cls_of(NULL, sg)), vpc_class_name(cls_of(NULL, sx)));
+    vpc_learn_note(&S, &dl, VPC_ST_OTHER);
+    CHECK(S.guided == 1 && S.bino == 0, "la lista con stnsight.c marca arma guiada (%d %d)", S.guided, S.bino);
+    CHECK(cls_of(&S, sg) == VPC_WEAPON_HUD && cls_of(&S, sx) == VPC_WEAPON_HUD, "sight.c en una lista con stnsight.c: WEAPON_HUD, marco y rótulo (%s %s)", vpc_class_name(cls_of(&S, sg)), vpc_class_name(cls_of(&S, sx)));
+    CHECK(cls_of(&S, m) == VPC_HUD_WORLD && vpc_layer_of(cls_of(&S, m)) == VPC_L_HUD, "el HUD del jugador sigue en la capa HUD (%s)", vpc_class_name(cls_of(&S, m)));
+    CHECK(vpc_layer_of(VPC_WEAPON_HUD) == VPC_L_WEAPON && VPC_L_WEAPON != VPC_L_HUD && !strcmp(vpc_class_name(VPC_WEAPON_HUD), "WEAPON_HUD"), "WEAPON_HUD tiene capa propia, distinta de la del HUD");
+    CHECK(vpc_is_weapon_hud(&tab[I_STN]) && vpc_is_weapon_hud(&tab[I_SGT]) && vpc_is_weapon_hud(&tab[I_RMS]) && !vpc_is_weapon_hud(&tab[I_SIGHT]) && !vpc_is_weapon_hud(&tab[I_MENUMAN]) && !vpc_is_weapon_hud(NULL), "vpc_is_weapon_hud");
+    {   /* con prismáticos (scope.c en la lista) el marco de sight.c es el de los prismáticos, no del Stinger; stnsight.c sigue siendo del arma */
+        reset();
+        GpuOp *a = rect(I_STN, 18, 60, 24, 2, 0), *b = rect(I_SIGHT, 0, 0, 30, 30, 0), *c = rect(I_SIGHT, 10, 10, 6, 5, GPU_F_TEXTURED); rect(I_SCOPE, 0, 0, 30, 30, 0);
+        vpc_learn_reset(&S); vpc_learn_note(&S, &dl, VPC_ST_CLOSED);
+        CHECK(S.bino == 1 && S.guided == 1 && cls_of(&S, a) == VPC_WEAPON_HUD && cls_of(&S, b) == VPC_SCOPE_BINO && cls_of(&S, c) == VPC_SCOPE_TEXT, "prismáticos con Stinger equipado: sight.c sigue siendo de los prismáticos (%s %s %s)", vpc_class_name(cls_of(&S, a)), vpc_class_name(cls_of(&S, b)), vpc_class_name(cls_of(&S, c)));
+    }
+    {   /* sight.c de otra arma (sin stnsight.c): no es del Stinger; la marca no se arrastra a la lista siguiente */
+        reset();
+        GpuOp *a = rect(I_SIGHT, 0, 0, 30, 30, 0), *b = rect(I_SIGHT, 10, 10, 6, 5, GPU_F_TEXTURED);
+        vpc_learn_reset(&S); vpc_learn_note(&S, &dl, VPC_ST_OPEN);
+        CHECK(S.guided == 0 && cls_of(&S, a) == VPC_SCOPE_FRAME && cls_of(&S, b) == VPC_SCOPE_TEXT, "sight.c sin stnsight.c: SCOPE_*, como antes");
+        reset(); rect(I_STN, 0, 0, 30, 30, 0); vpc_learn_note(&S, &dl, VPC_ST_CLOSED); CHECK(S.guided == 1, "lista con stnsight.c");
+        reset(); rect(I_MENUMAN, 0, 0, 30, 30, 0); vpc_learn_note(&S, &dl, VPC_ST_CLOSED); CHECK(S.guided == 0, "lista siguiente sin stnsight.c: sin arma guiada");
+        reset(); dl.prov = NULL; dl.nprov = 0; rect(0, 0, 0, 30, 30, 0); vpc_learn_note(&S, &dl, VPC_ST_CLOSED); CHECK(S.guided == 0, "sin tabla de procedencia: sin arma guiada");
+    }
+    {   /* lista de arma guiada SIN stnsight.c (solo sgtrect3.c o solo rmissile.c): su sight.c también es HUD del arma; con prismáticos o sin ellos como antes; el PSG-1 (rifle.c / rfsight.c, sin HUD de arma guiada) no cambia */
+        const int only[2] = {I_SGT, I_RMS};
+        for (int k = 0; k < 2; k++) {
+            reset();
+            GpuOp *a = rect(only[k], 0, 0, 30, 30, 0), *b = rect(I_SIGHT, 0, 33, 320, 1, 0), *c = rect(I_SIGHT, 21, 13, 6, 5, GPU_F_TEXTURED);
+            vpc_learn_reset(&S); vpc_learn_note(&S, &dl, VPC_ST_CLOSED);
+            CHECK(S.guided == 1 && S.bino == 0 && cls_of(&S, a) == VPC_WEAPON_HUD && cls_of(&S, b) == VPC_WEAPON_HUD && cls_of(&S, c) == VPC_WEAPON_HUD,
+                  "lista con solo %s: sight.c a WEAPON_HUD (%d %s %s)", tab[only[k]].name, S.guided, vpc_class_name(cls_of(&S, b)), vpc_class_name(cls_of(&S, c)));
+            reset();
+            rect(only[k], 0, 0, 30, 30, 0); rect(I_SCOPE, 0, 0, 30, 30, 0); b = rect(I_SIGHT, 0, 0, 30, 30, 0); c = rect(I_SIGHT, 10, 10, 6, 5, GPU_F_TEXTURED);
+            vpc_learn_reset(&S); vpc_learn_note(&S, &dl, VPC_ST_CLOSED);
+            CHECK(S.bino == 1 && cls_of(&S, b) == VPC_SCOPE_BINO && cls_of(&S, c) == VPC_SCOPE_TEXT, "con prismáticos y %s: sight.c sigue siendo de los prismáticos (%s %s)", tab[only[k]].name, vpc_class_name(cls_of(&S, b)), vpc_class_name(cls_of(&S, c)));
+        }
+        reset();
+        set_e(I_X, "rifle.c", 0x80068c48u); set_e(I_OTHER, "rfsight.c", 0x8006a604u);
+        GpuOp *r1 = rect(I_X, 0, 0, 30, 30, 0), *r2 = rect(I_OTHER, 0, 0, 30, 30, 0), *a = rect(I_SIGHT, 0, 33, 320, 1, 0), *c = rect(I_SIGHT, 21, 13, 6, 5, GPU_F_TEXTURED);
+        vpc_learn_reset(&S); vpc_learn_note(&S, &dl, VPC_ST_CLOSED);
+        CHECK(S.guided == 0 && cls_of(&S, a) == VPC_SCOPE_FRAME && cls_of(&S, c) == VPC_SCOPE_TEXT && cls_of(&S, r1) == VPC_UNKNOWN && cls_of(&S, r2) == VPC_UNKNOWN,
+              "PSG-1 (rifle.c + rfsight.c + sight.c): sight.c como antes y rifle.c / rfsight.c sin regla (%d %s %s %s %s)", S.guided, vpc_class_name(cls_of(&S, a)), vpc_class_name(cls_of(&S, c)), vpc_class_name(cls_of(&S, r1)), vpc_class_name(cls_of(&S, r2)));
+    }
+    {   /* nombres por archivo completo: «rfsight.c», «stnsight.c» o «xscope.c» no casan con «sight.c» / «scope.c»; «sight.c» tras '/' o espacio y con espacio final sí */
+        reset();
+        const char *no[] = {"rfsight.c", "xsight.c", "sight.cc", "sight.c.bak", "insight.c", "xscope.c", "cinema.cx", "motse.c2"};
+        for (size_t k = 0; k < sizeof no / sizeof *no; k++) {
+            set_e(I_X, no[k], 0x80099999u);
+            CHECK(!vpc_is_scope_actor(&tab[I_X]) && !vpc_is_binocular(&tab[I_X]) && !vpc_is_weapon_hud(&tab[I_X]) && vpc_rule(&tab[I_X], NULL) == VPC_UNKNOWN, "«%s» no es ninguna regla por nombre (%s)", no[k], vpc_class_name(vpc_rule(&tab[I_X], NULL)));
+        }
+        const char *yes[] = {"sight.c", "thing/sight.c", "x sight.c", "sight.c x", "a/b sight.c"};
+        for (size_t k = 0; k < sizeof yes / sizeof *yes; k++) {
+            set_e(I_X, yes[k], 0x80099999u);
+            CHECK(vpc_is_scope_actor(&tab[I_X]) && vpc_rule(&tab[I_X], NULL) == VPC_SCOPE_FRAME, "«%s» sí es sight.c (%s)", yes[k], vpc_class_name(vpc_rule(&tab[I_X], NULL)));
+        }
+        set_e(I_X, "xsight.c sight.c", 0x80099999u);   /* una segunda coincidencia válida tras una parcial */
+        CHECK(vpc_is_scope_actor(&tab[I_X]), "«xsight.c sight.c»: la segunda palabra es sight.c");
+        set_e(I_X, "stnsight.c", 0x80099999u); CHECK(vpc_rule(&tab[I_X], NULL) == VPC_WEAPON_HUD && !vpc_is_scope_actor(&tab[I_X]), "stnsight.c: WEAPON_HUD y no es mira");
+    }
+    {   /* nunca se aprende como ventana (con la ventana cerrada 40 listas sin emitir, luego abierta) */
+        reset();
+        GpuOp *w = rect(I_STN, 18, 60, 24, 2, 0);
+        vpc_learn_reset(&S);
+        for (int k = 0; k < 40; k++) { GpuDrawList e = dl; e.nops = 0; vpc_learn_note(&S, &e, VPC_ST_CLOSED); }
+        vpc_learn_note(&S, &dl, VPC_ST_OPEN);
+        CHECK(cls_of(&S, w) == VPC_WEAPON_HUD, "stnsight.c no se aprende como WINDOW (%s)", vpc_class_name(cls_of(&S, w)));
+    }
+    {   /* efectos: el Stinger sigue contando como mira (VrFx.scope_on) aunque su 2D ya no vaya al panel */
+        reset();
+        rect(I_STN, 18, 60, 24, 2, 0); rect(I_SIGHT, 0, 33, 320, 1, 0);
+        vpc_learn_reset(&S); vpc_learn_note(&S, &dl, VPC_ST_CLOSED);
+        VrFx fx; vpc_fx_extract(&S, &dl, 160, &fx);
+        CHECK(fx.scope_on == 1 && fx.binocular == 0, "Stinger: scope_on sin prismáticos, como antes (%d %d)", fx.scope_on, fx.binocular);
+        reset(); rect(I_SGT, 0, 0, 30, 30, 0); rect(I_RMS, 0, 0, 30, 30, 0);
+        vpc_learn_reset(&S); vpc_learn_note(&S, &dl, VPC_ST_CLOSED);
+        vpc_fx_extract(&S, &dl, 160, &fx);
+        CHECK(fx.scope_on == 0, "sgtrect3.c / rmissile.c no son mira (scope_on %d)", fx.scope_on);
+    }
+    {   /* reparto por capas: WEAPON_HUD a la capa del arma, nunca a la del HUD */
+        uint8_t od[4] = {2, 2, 2, 0}, cl[4] = {VPC_WEAPON_HUD, VPC_HUD_WORLD, VPC_WEAPON_HUD, VPC_WEAPON_HUD};
+        uint8_t b0[4], b1[4], b2[4], b3[4]; uint8_t *out[VPC_L_N] = {b0, b1, b2, b3}; uint32_t lc[VPC_L_N];
+        vpc_split_dest(od, cl, 4, out, lc);
+        CHECK(lc[VPC_L_WEAPON] == 2 && lc[VPC_L_HUD] == 1 && lc[VPC_L_WINDOW] == 0 && lc[VPC_L_FULL] == 0 && b3[0] == 2 && b3[2] == 2 && b3[1] == 0 && b3[3] == 0 && b0[0] == 0 && b0[2] == 0 && b0[1] == 2,
+              "reparto: 2 a la capa del arma (la de op_dest 0 no cuenta), 1 al HUD, ninguna del arma en el HUD (%u %u %u %u)", lc[0], lc[1], lc[2], lc[3]);
+    }
+    {   /* vr_scene: el HUD propio del arma queda en op_dest = 2 (su capa) pero NO entra en los lotes del panel (ruta de reserva por sombreador): mismos vértices que sin él */
+        reset();
+        rect(I_MENUMAN, 10, 200, 20, 8, 0);                        /* 0: HUD normal */
+        rect(I_STN, 18, 60, 24, 4, 0);                             /* 1: HUD del arma */
+        { GpuOp *o = add(GPU_OP_LINE, I_SGT); o->v[0].x = 0; o->v[0].y = 0; o->v[1].x = 150; o->v[1].y = 100; o->v[0].r = o->v[1].r = 200; o->cx2 = 319; o->cy2 = 255; }   /* 2: línea de sgtrect3.c */
+        VrProvLearn B; vpc_learn_reset(&B); vpc_learn_note(&B, &dl, VPC_ST_CLOSED);
+        VrSceneOpts o = vr_scene_opts_default();
+        o.op_class = vpc_op_class_cb; o.op_class_ctx = &B;
+        VrScene s;
+        CHECK(vr_scene_build(&dl, NULL, &o, &s) == 0 && s.op_dest && s.op_cls && s.n_op_dest == 3, "escena con HUD de arma");
+        uint32_t nv_all = s.nv;
+        if (s.op_dest && s.op_cls && s.n_op_dest == 3) {
+            CHECK(s.op_dest[0] == 2 && s.op_cls[0] == VPC_HUD_WORLD && s.op_dest[1] == 2 && s.op_cls[1] == VPC_WEAPON_HUD && s.op_dest[2] == 2 && s.op_cls[2] == VPC_WEAPON_HUD,
+                  "op_dest = 2 y clase WEAPON_HUD para stnsight.c / sgtrect3.c (%u/%u %u/%u %u/%u)", s.op_dest[0], s.op_cls[0], s.op_dest[1], s.op_cls[1], s.op_dest[2], s.op_cls[2]);
+            uint32_t nb2d = 0; for (uint32_t i = 0; i < s.nb; i++) if (s.b[i].kind == 2) nb2d += s.b[i].count;
+            CHECK(nb2d == 6, "lotes del panel (kind 2): solo el rect del HUD normal (2 triángulos = 6 vértices), no el del arma ni la línea (%u)", nb2d);
+        }
+        GpuDrawList only = dl; only.nops = 1;   /* solo el HUD normal */
+        VrProvLearn B2; vpc_learn_reset(&B2); o.op_class_ctx = &B2;
+        CHECK(vr_scene_build(&only, NULL, &o, &s) == 0 && s.nv <= nv_all, "referencia sin HUD de arma");
+        uint32_t nb_ref = 0; for (uint32_t i = 0; i < s.nb; i++) if (s.b[i].kind == 2) nb_ref += s.b[i].count;
+        CHECK(nb_ref == 6, "el HUD normal sigue emitiendo igual sin el del arma (%u)", nb_ref);
+        vr_scene_release();
+    }
+}
+
 int main(void) {
     test_rules();
     test_window_learning();
     test_chain();
     test_binocular();
+    test_weapon_hud();
     test_unknown_and_split();
     test_scene_hook();
     test_scene_world();

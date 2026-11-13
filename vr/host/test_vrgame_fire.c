@@ -1320,7 +1320,7 @@ static void special_view_waits_on_weapon_change(void) {
     bs.menu_open = 0; bs.menu_state = 0; bs.in_control = 1; bs.cam_ctl = 0;
 }
 
-/* Stinger equipado: el panel plano del HUD del jugador (radar, vida...) SIGUE visible como con cualquier arma: hide_hud = 0 con el visor en uso o sin usar (su HUD propio se recorta del panel en la app: XRPresent.weaponHudMask) */
+/* Stinger equipado: el panel plano del HUD del jugador (radar, vida...) SIGUE visible como con cualquier arma: hide_hud = 0 con el visor en uso o sin usar (su HUD propio es la clase WEAPON_HUD, otra capa) */
 static void stinger_hud_only_on_led(void) {
     printf("-- Stinger: el panel plano del HUD sigue en el mundo --\n");
     float p[3] = {0.2f, 1.2f, -0.3f}, q[4] = {0, 0, 0, 1};

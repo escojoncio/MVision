@@ -703,7 +703,13 @@ do_jalr:
             uint16_t old = rt_prov_enter(tg, r[4]); cont = b->end; pf(c); rt_prov_leave(old); pc = cont; goto dispatch;
         }
 #endif
-        if (!is_bios_vec(tg) && !hle_bind_is(tg) && !rt_patch_is(tg)) rt_prov_push(tg, r[4], b->end, r[29]);   /* llamada plana: se cierra en el jr que vuelve a b->end */
+        if (!is_bios_vec(tg)) {
+            if (hle_bind_is(tg) || rt_patch_is(tg)) {   /* HLE enlazada / sustitución: vuelve por C, sin jr que cierre un marco de la pila sombra; se ejecuta aquí dentro de su ámbito (lo que escriba el original que llame, p. ej. rt_orig, lleva su id) */
+                FuncPtr hf = rt_patch_is(tg) ? rt_patch_lookup(tg) : NULL;
+                if (!hf) hf = hle_bind_lookup(tg);
+                if (hf) { uint16_t old = rt_prov_enter(tg, r[4]); hf(c); rt_prov_leave(old); pc = r[31]; goto dispatch; }
+            } else rt_prov_push(tg, r[4], b->end, r[29]);   /* llamada plana: se cierra en el jr que vuelve a b->end */
+        }
     }
     goto call_common;
 

@@ -8,6 +8,11 @@
  *  - gas_efct.c (rutina 0x800de1f0 en su overlay: anillo del gas, 16 polígonos semitransparentes) y fadeio.c (0x800e15e8: fundido): efectos de pantalla que el renderer nativo hace de la RAM
  *    (ns_fx / ns_screen). Solo por nombre de actor: sus rutinas viven en overlays y la dirección sola no los identifica. Esta es la regla BASE: vpc_class_op solo los deja en FX_SCREEN
  *    mientras el anfitrión garantiza que el nativo pinta ese efecto (VrProvLearn.covered); si no, UNKNOWN.
+ *  - HUD propio del arma (clase WEAPON_HUD, capa propia que el panel plano no incluye): stnsight.c (Stinger, rutina 0x80069c18 medida en auto06; sus MENU_Printf y addPrim corren en su ámbito, así que textos, líneas, retícula
+ *    y la barra de canal llevan su id), sgtrect3.c (Stinger: marco de fijación y líneas de convergencia) y rmissile.c (Nikita: ENEMY, cifras y barra de DrawMissileHud). Los nombres se comparan por nombre de archivo COMPLETO (has_name): «stnsight.c» y «rfsight.c» (gestor de la mira del PSG-1, no dibuja)
+ *    no casan con «sight.c». El sight.c del Stinger no se distingue por nombre (es el mismo actor de la mira de otras armas): lo decide vpc_class_op con VrProvLearn.guided (lista con HUD propio de arma guiada).
+ *  - La procedencia de un actor exige que su rutina se llame por jalr con ámbito abierto (runtime/prov.h; interp.c do_jalr también abre el ámbito de las rutinas con HLE enlazada o sustituidas por rtpatch): el paso de
+ *    sgtrect3.c (0x80071fc8) lo envuelve vrfire_aalock y antes sus paquetes salían con id 0.
  *  - Otros actores (o2_damge.c, breath.c: efectos; cualquier otro) y lo que no tiene procedencia: UNKNOWN (van al HUD, como antes, y se cuentan). Única excepción, en vpc_class_op: la
  *    primitiva que encadenó la ordenación del canal 3D y cuyo paquete tiene un elemento que el renderer nativo dibuja (VrProvLearn.covered) es WORLD; sus primitivas de pantalla, sin ese
  *    elemento, siguen siendo UNKNOWN. */
@@ -23,10 +28,12 @@ static const char *const N_HUD[] = {"menuman.c", NULL};
 static const char *const N_GAS[] = {"gas_efct.c", NULL};
 static const char *const N_FADE[] = {"fadeio.c", NULL};
 static const char *const N_MOSAIC[] = {"mosaic.c", NULL};
+static const char *const N_WEAPON[] = {"stnsight.c", "sgtrect3.c", "rmissile.c", NULL};
 
 static const uint32_t F_LETTERBOX[] = {0x800e1050u, 0};
 static const uint32_t F_SCOPE[] = {0x80063d54u, 0x800726bcu, 0};
 static const uint32_t F_BINO[] = {0x80063d54u, 0};
+static const uint32_t F_STINGER[] = {0x80069c18u, 0};   /* stnsight.c (medido en el volcado auto06: ProvEntry.fn del actor) */
 static const uint32_t F_HUD[] = {
     0x800394f8u,                                                       /* menuman.c */
     0x800404e4u, 0x8003f918u, 0x8003d90cu, 0x8003c238u, 0x800431d4u,   /* componentes de la tabla */
@@ -36,9 +43,16 @@ static const uint32_t F_HUD[] = {
 /* Rutinas que solo ENCADENAN paquetes que escribieron otros (no dibujan): etapa de ordenación del canal principal (tabla de etapas 0x8009E534, docs/escena_nativa.md §10) y la ordenación de canales que la llama. */
 static const uint32_t F_CHAIN[] = {0x8001da18u, 0x80018304u, 0};
 
+/* ¿Es `n` (nombre de archivo, p. ej. «sight.c») el nombre completo de `s`? Límite de palabra: inicio o tras '/' o espacio, y fin o espacio ("rfsight.c" y "stnsight.c" no son "sight.c"). */
+static int name_is(const char *s, const char *n) {
+    size_t k = strlen(n);
+    for (const char *p = strstr(s, n); p; p = strstr(p + 1, n))
+        if ((p == s || p[-1] == '/' || p[-1] == ' ') && (p[k] == 0 || p[k] == ' ')) return 1;
+    return 0;
+}
 static int has_name(const ProvEntry *e, const char *const *names) {
     if (!e->name[0]) return 0;
-    for (; *names; names++) if (strstr(e->name, *names)) return 1;
+    for (; *names; names++) if (name_is(e->name, *names)) return 1;
     return 0;
 }
 static int has_fn(const ProvEntry *e, const uint32_t *fns) {
@@ -49,6 +63,8 @@ static int has_fn(const ProvEntry *e, const uint32_t *fns) {
 
 int vpc_is_binocular(const ProvEntry *e) { return e && (has_name(e, N_BINO) || has_fn(e, F_BINO)); }
 int vpc_is_chain(const ProvEntry *e) { return e && has_fn(e, F_CHAIN); }
+int vpc_is_weapon_hud(const ProvEntry *e) { return e && (has_name(e, N_WEAPON) || has_fn(e, F_STINGER)); }
+int vpc_is_scope_actor(const ProvEntry *e) { return e && (has_name(e, N_SCOPE) || has_fn(e, F_SCOPE)); }
 int vpc_is_mosaic(const ProvEntry *e) { return e && has_name(e, N_MOSAIC); }
 int vpc_screen_kind(const ProvEntry *e) { return !e ? -1 : has_name(e, N_GAS) ? VPC_COV_GAS : has_name(e, N_FADE) ? VPC_COV_FADE : -1; }
 
@@ -57,6 +73,7 @@ int vpc_rule(const ProvEntry *e, const GpuOp *o) {
     if (has_name(e, N_LETTERBOX) || has_fn(e, F_LETTERBOX)) return VPC_FX_LETTERBOX;
     if (has_name(e, N_VIGNETTE)) return VPC_FX_VIGNETTE;
     if (has_name(e, N_FULL)) return VPC_FULL;
+    if (vpc_is_weapon_hud(e)) return VPC_WEAPON_HUD;
     if (has_name(e, N_SCOPE) || has_fn(e, F_SCOPE)) return o && (o->flags & GPU_F_TEXTURED) ? VPC_SCOPE_TEXT : VPC_SCOPE_FRAME;
     if (has_name(e, N_HUD) || has_fn(e, F_HUD)) return VPC_HUD_WORLD;
     if (vpc_screen_kind(e) >= 0) return VPC_FX_SCREEN;

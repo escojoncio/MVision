@@ -159,7 +159,7 @@ static BridgeState bs;                   /* último puente leído */
 /* Capa 2D fiel y en alta resolución (vr_layer2d.h) en un HILO TRABAJADOR (vr_layer2d_async.h): el hilo de emulación solo copia la lista a una cola (memcpy) y el render recoge
  * la última capa publicada con mv_vrhost_hud2d_acquire; nadie espera. MV_HUD2D=0 la apaga (el renderer vuelve al shader). MV_HUD2D_SCALE=1..6 fija la escala objetivo (defecto 4);
  * la escala baja sola si el trabajador tarda (mide su propio coste) y sube al recuperarse. */
-static VrL2Async *l2as[VPC_L_N];   /* una capa 2D por clase de procedencia (vr_prov.h): 0 HUD, 1 ventana del selector / pausa, 2 pantalla completa. Solo la vista mundo reparte; en las demás todo va a la 0 */
+static VrL2Async *l2as[VPC_L_N];   /* una capa 2D por clase de procedencia (vr_prov.h): 0 HUD, 1 ventana del selector / pausa, 2 pantalla completa, 3 HUD propio del arma (Stinger / Nikita: solo lo lee su pantalla LED, nunca el panel plano). Solo la vista mundo reparte; en las demás todo va a la 0 */
 static VrProvLearn prov_learn;     /* WINDOW aprendido por id de procedencia (toda la sesión; hilo de emulación) */
 static VrFxHold fx_hold;           /* efectos de pantalla (viñeta, bandas, mira) con retención; se publican en MvVrGameState.fx */
 static uint8_t *l2_opd[VPC_L_N]; static size_t l2_opd_cap;   /* op_dest por capa */
@@ -1439,8 +1439,8 @@ static void build_one(const GpuDrawList *l, int si) {
         vpc_fx_hold(&fx_hold, &fxn);
     }
     /* Capa 2D fiel: se encola (copia) para el hilo trabajador. Con escena fallida solo se aplican los eventos de VRAM (la VRAM espejo debe verlos todos). En vista de cine (UI / vídeo)
-     * la capa es el fotograma ENTERO; en las demás, solo las primitivas que vr_scene mandó al panel. Vista mundo (VL_PANEL): el panel se reparte por clase de procedencia en 3 capas
-     * (HUD / ventana / pantalla completa; FX_* y SCOPE_FRAME no van al 2D); las capas 1 y 2 solo se encolan si tienen primitivas o las tenían (para publicar el vacío). */
+     * la capa es el fotograma ENTERO; en las demás, solo las primitivas que vr_scene mandó al panel. Vista mundo (VL_PANEL): el panel se reparte por clase de procedencia en 4 capas
+     * (HUD / ventana / pantalla completa / HUD propio del arma; FX_* y SCOPE_FRAME no van al 2D); las capas 1 a 3 solo se encolan si tienen primitivas o las tenían (para publicar el vacío). */
     if (atomic_load(&l2d_enabled)) {
         if (!l2as[0]) l2as[0] = vl2a_new();
         if (l2as[0]) {
@@ -1448,7 +1448,7 @@ static void build_one(const GpuDrawList *l, int si) {
             int l2_full = view.kind == VRV_K_UI || view.kind == VRV_K_VIDEO ? VL_FULL : view.kind == VRV_K_ENGINE ? VL_PANEL_VERIFIED : VL_PANEL;
             int vtag = (view.kind << 8) | (view.reason & 255);
             const uint8_t *od = rc == 0 && sc.op_dest && sc.n_op_dest >= hl->nops ? sc.op_dest : NULL;
-            uint32_t lc[VPC_L_N] = {0, 0, 0};
+            uint32_t lc[VPC_L_N] = {0, 0, 0, 0};
             int routed = od && l2_full == VL_PANEL && sc.op_cls;
             if (od && hl->nops > l2_opd_cap) {
                 size_t nc = (size_t)hl->nops + 256;
@@ -1476,8 +1476,8 @@ static void build_one(const GpuDrawList *l, int si) {
               if (nn - l2_log_ns >= 1000000000ull) { char lb[1024]; l2_log_ns = nn; if (vl2a_report(l2as[0], lb, sizeof lb) > 0) fprintf(stderr, "%s\n", lb); } }
             if (rt_prov_on && mono_ns() - pc_log_ns >= 1000000000ull) {   /* [prov2d]: clases del panel en el último segundo; UNKNOWN va al HUD */
                 pc_log_ns = mono_ns();
-                if (pc_lists) fprintf(stderr, "[prov2d] vista=%s listas=%u HUD_WORLD=%u WINDOW=%u FULL=%u FX_VIGNETTE=%u FX_LETTERBOX=%u SCOPE_FRAME=%u SCOPE_TEXT=%u UNKNOWN=%u FX_SCREEN=%u WORLD=%u SCOPE_BINO=%u | ventanas_aprendidas=%u descartadas=%u | fx: vineta=%.2f radio=%.2f bandas=%.2f mira=%d prismaticos=%d zoom=%.2f\n",
-                    vrprov_view_name(vrprov_view(view.kind, view.reason)), pc_lists, pc_cls[VPC_HUD_WORLD], pc_cls[VPC_WINDOW], pc_cls[VPC_FULL], pc_cls[VPC_FX_VIGNETTE], pc_cls[VPC_FX_LETTERBOX], pc_cls[VPC_SCOPE_FRAME], pc_cls[VPC_SCOPE_TEXT], pc_cls[VPC_UNKNOWN], pc_cls[VPC_FX_SCREEN], pc_cls[VPC_WORLD], pc_cls[VPC_SCOPE_BINO],
+                if (pc_lists) fprintf(stderr, "[prov2d] vista=%s listas=%u HUD_WORLD=%u WINDOW=%u FULL=%u FX_VIGNETTE=%u FX_LETTERBOX=%u SCOPE_FRAME=%u SCOPE_TEXT=%u UNKNOWN=%u FX_SCREEN=%u WORLD=%u SCOPE_BINO=%u WEAPON_HUD=%u | ventanas_aprendidas=%u descartadas=%u | fx: vineta=%.2f radio=%.2f bandas=%.2f mira=%d prismaticos=%d zoom=%.2f\n",
+                    vrprov_view_name(vrprov_view(view.kind, view.reason)), pc_lists, pc_cls[VPC_HUD_WORLD], pc_cls[VPC_WINDOW], pc_cls[VPC_FULL], pc_cls[VPC_FX_VIGNETTE], pc_cls[VPC_FX_LETTERBOX], pc_cls[VPC_SCOPE_FRAME], pc_cls[VPC_SCOPE_TEXT], pc_cls[VPC_UNKNOWN], pc_cls[VPC_FX_SCREEN], pc_cls[VPC_WORLD], pc_cls[VPC_SCOPE_BINO], pc_cls[VPC_WEAPON_HUD],
                     prov_learn.n_learned, prov_learn.n_demoted, (double)fx_hold.fx.vignette, (double)fx_hold.fx.vign_radius, (double)fx_hold.fx.letterbox, (int)fx_hold.fx.scope_on, (int)fx_hold.fx.binocular, (double)fx_hold.fx.scope_zoom);
                 memset(pc_cls, 0, sizeof pc_cls); pc_lists = 0;
             }

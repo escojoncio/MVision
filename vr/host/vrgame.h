@@ -84,7 +84,7 @@ void mv_vrgame_status(MvVrGameStatus *out);
  *    como MV_VIEW_AA_SIGHT; solo sight.c sin scope.c, sin prismáticos, usa un disco SCOPE.)
  *  - MV_VIEW_AA_SIGHT: visor del lanzador antiaéreo. El HUD del propio juego (mira + marco de fijación, en la textura del HUD) se dibuja en un
  *    rectángulo anclado delante del visor (`surf_*`, ya a la distancia y tamaño angular del juego); `uv` = subrectángulo (x, y, w, h) de la textura del HUD
- *    que cubre el rectángulo (el centro óptico del juego es el centro del rectángulo). hide_hud = 0 (el panel plano del HUD sigue, con el HUD propio del Stinger recortado: XRPresent.weaponHudMask).
+ *    que cubre el rectángulo (el centro óptico del juego es el centro del rectángulo). hide_hud = 0 (el panel plano del HUD sigue, el HUD propio del Stinger es WEAPON_HUD, otra capa).
  *  - MV_VIEW_AA_SCREEN: visor del lanzador antiaéreo en la pieza "screen" del modelo (cara trasera de la mira). Segunda vista de la escena desde `cam_*` (eje del buscador, cam_fov_y; textura tex_w x tex_h con la proporción de
  *    la pieza) en la superficie `surf_*` (la caja de la pieza, +Z hacia el ojo) recortada al contorno `poly`/`npoly`; encima, la mira y el marco de fijación del HUD del juego (subrectángulo `uv` de la textura del HUD, capa
  *    premultiplicada si la app la da así). occlude = 1 (es un objeto del mundo), hide_hud = 0 (el panel plano del HUD del jugador sigue; su HUD propio se recorta del panel). Sin pieza en el modelo se usa MV_VIEW_AA_SIGHT.
@@ -92,7 +92,7 @@ void mv_vrgame_status(MvVrGameStatus *out);
  *    `uv` = recorte 4:3 de la imagen, occlude = 1), siempre publicada con el lanzador en la mano: `standby` = 1 sin misil (cam_valid = 0), cámara del misil en vuelo, estática al terminar. No toma la vista del jugador. Segunda vista de la escena desde `cam_*` (la posición y dirección del misil del juego) mostrada en
  *    una pantalla (`surf_*`, rectángulo; `blend` 0 = pantallita del lanzador .. 1 = visor grande ante el ojo) con ruido/estática (`noise`) y, al terminar el
  *    vuelo, `ended` = 1 (solo estática). `fullscreen` = pantalla grande fija ante la cara (opción de comodidad; la cabeza nunca se mueve).
- *    hide_hud = 1 solo con la pantalla grande ante la cara (fullscreen: el panel plano la taparía); con la pantalla LED siempre 0 (el panel plano del HUD del jugador sigue; el ENEMY del Nikita se recorta del panel: XRPresent.weaponHudMask).
+ *    hide_hud = 1 solo con la pantalla grande ante la cara (fullscreen: el panel plano la taparía); con la pantalla LED siempre 0 (el panel plano del HUD del jugador sigue; el HUD de rmissile.c es WEAPON_HUD, otra capa).
  *    La cámara (`cam_*`) va en la punta del misil, 2 cm por delante del morro (GD_CAM_*; el modelo queda detrás de ella). En vuelo la app dibuja encima los textos del HUD del juego (capa 2D) sin los iconos de vida / equipo. Con un cambio de arma en curso (SV_SETTLE_TICKS
  *    VBlanks, o el selector abierto sobre un arma que no era la lista) no se publica ninguna vista especial del arma que entra.
  * Poses en el espacio recentrado (el de la cabeza); cara visible de la superficie = +Z local; delante de la cámara = -Z local. */

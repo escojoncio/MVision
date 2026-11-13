@@ -143,19 +143,10 @@ vertex VrSpcOut vr_vs_spc_amp(uint vid [[vertex_id]], ushort amp [[amplification
     return vr_spc_pack(vid, f, d, uint(amp));
 }
 
-/* Iconos del HUD del juego que no van en las pantallas LED del arma (Stinger y misil) (misma partición de la capa que XRPresent.hudRegions): vida / oxígeno (arriba izquierda), objeto equipado (L2, abajo izquierda) y arma equipada
- * con su munición (R2, abajo derecha). ff = fracciones del MARCO del juego (0..1), como hudRegions; la textura del HUD se pasa a ellas con VrSpcHud.frame. El resto (mira, marco de fijación, textos del misil) se conserva. */
-/* LISTA BLANCA (antes una lista negra de tres esquinas que dejaba pasar el radar, la alerta, la vida enemiga...): de la capa 2D del juego solo se pinta lo propio del arma, en píxeles del MARCO 320x256 (ff * (320, 256)).
- * Desfase en y de las coordenadas del juego respecto al marco (la vista 240 va centrada en el marco 256): 0-2 px medido en auto06; radar 0. Medido en los volcados (radar x 235-305 y 15-60, alerta «EVASION» x 235-300 y 15-67, vida arriba izquierda y < 44, iconos L2/R2 y 213-245).
- *   Stinger (stnsight.c): escala de cabeceo con sus números a la izquierda (x 14-60, y 44-212), retícula y marco de fijación del misil (centro x 52-296, y 72-212) y «LOCK_ON» (180, 16; rectángulo desde y 16, glifos de 6 px + 0-2 de desfase). Limitaciones aceptadas: las etiquetas
- *   bajas de la escala (y 213-230) y sus líneas fuera de x 14-60 / y 44-212 quedan en el panel (conflicto con el icono L2 y la vida). La barra de tiempos de canal (bg_prim de stnsight.c) cae sobre la barra de vida del jugador
- *   (menu/life.c: filas 17-34 desde x 15) y no es separable: NO se incluye y se acepta que salga en el panel. Las líneas de convergencia borde a borde de sgtrect3.c tampoco son separables y no se tocan.
- *   Nikita (bullet/rmissile.c): solo «ENEMY» (116, 98 + 0-2; rectángulo desde y 96); combustible y cifras de posición las dibuja este sombreador (el juego solo las emite con ▲ mantenido). */
-inline bool vr_spc_hud_keep(float2 ff, bool nikita) {
-    float2 p = ff * float2(320.0, 256.0);
-    if (nikita) return p.x >= 112.0 && p.x <= 176.0 && p.y >= 96.0 && p.y <= 120.0;
-    return (p.x >= 14.0 && p.x <= 60.0 && p.y >= 44.0 && p.y <= 212.0) || (p.x >= 52.0 && p.x <= 296.0 && p.y >= 72.0 && p.y <= 212.0) || (p.x >= 176.0 && p.x <= 232.0 && p.y >= 16.0 && p.y <= 36.0);
-}
+/* HUD PROPIO del arma en las pantallas LED: la textura 1 (ovl) NO es la capa del HUD del jugador sino la capa WEAPON_HUD (vr/scene/vr_prov.h, RGRenderer.auxTexture[3]), que solo contiene lo que emiten el actor del arma (Stinger:
+ * stnsight.c = escala de cabeceo con sus cifras, retícula, marco de fijación, barra de tiempos de canal y LOCK_ON; sgtrect3.c = marco y líneas de convergencia; el sight.c de su lista = marco y rótulo. Nikita: rmissile.c = ENEMY, cifras
+ * y barra, que el juego solo emite con ▲ mantenido). Radar, vida, alerta, oxígeno y los iconos L2 / R2 son del HUD del jugador y no llegan aquí: no hace falta recortar por posición (antes: lista blanca de rectángulos).
+ * Las coordenadas de la capa son las del MARCO 320x256 (ff * (320, 256)); la vista 240 va centrada en el marco. El Nikita añade ADEMÁS la barra de combustible y las cifras de posición que dibuja este sombreador (el juego solo las emite con ▲). */
 
 /* Fuente 3x5 (15 bits, fila superior en los bits altos, columna izquierda en el bit alto de cada fila) para las cifras del Nikita */
 inline int vr_spc_digit_glyph(int d) {
@@ -241,7 +232,7 @@ fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buff
         float al = h.w;
         float3 hc = float3(h.x, h.y, h.z);
         if (d.p0.z > 0.5) { al = max(h.w, max(h.x, max(h.y, h.z))); hc = hc / max(al, 1e-4); }   /* capa premultiplicada (lo aditivo lleva alfa 0 y color): a alfa directo */
-        if (d.p2.z < 0.5 || hu.x < 0.0 || hu.y < 0.0 || hu.x > 1.0 || hu.y > 1.0 || !vr_spc_hud_keep((hu - hd.frame.xy) / hd.frame.zw, false)) al = 0.0;     /* solo el HUD propio del Stinger (lista blanca; hu es de la textura, la lista va en fracciones del marco); p2.z = 0: sin capa del HUD */
+        if (d.p2.z < 0.5 || hu.x < 0.0 || hu.y < 0.0 || hu.x > 1.0 || hu.y > 1.0) al = 0.0;     /* la textura 1 es la capa WEAPON_HUD (solo el HUD propio del Stinger); p2.z = 0: sin capa */
         rgb = mix(rgb, hc, clamp(al, 0.0, 1.0));
         float ain = (d.p1.w - 2.0 * d.p1.y) / max(1.0 - 2.0 * d.p1.y, 0.01);     /* proporción ancho/alto del interior (sin marco) */
         rgb = vr_spc_dot(rgb, r, ain, 0.0125 / max(0.5 * (1.0 - 2.0 * d.p1.y), 0.05), float3(1.0, 0.08, 0.05));      /* punto ROJO en el eje de la cámara (centro de la imagen); radio 1,25 % de la altura de la pantalla */
@@ -298,7 +289,7 @@ fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buff
             float al = h.w;
             float3 hc = float3(h.x, h.y, h.z);
             if (d.p2.z > 1.5) { al = max(h.w, max(h.x, max(h.y, h.z))); hc = hc / max(al, 1e-4); }
-            if (hu.x < 0.0 || hu.y < 0.0 || hu.x > 1.0 || hu.y > 1.0 || !vr_spc_hud_keep((hu - hd.frame.xy) / hd.frame.zw, true)) al = 0.0;     /* solo «ENEMY» del juego (lista blanca) */
+            if (hu.x < 0.0 || hu.y < 0.0 || hu.x > 1.0 || hu.y > 1.0) al = 0.0;     /* la textura 1 es la capa WEAPON_HUD: solo lo del Nikita (ENEMY...) */
             rgb = mix(rgb, hc, clamp(al, 0.0, 1.0));
         }
         if (d.p1.z < 0.5) {

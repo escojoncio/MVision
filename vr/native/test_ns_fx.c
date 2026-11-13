@@ -956,7 +956,7 @@ static void test_sky(void) {
     queue_commit(0);
     int r; NsFxScene *s = run(0, &r);
     uint32_t nsky = 0; for (uint32_t i = 0; i < s->n_items; i++) nsky += s->items[i].role == NSFX_ROLE_SKY;
-    CHECK(r == 0 && nsky == NTX * (NTY + NVY) && s->n_items == nsky && s->stats.n_sortonly == 0, "cielo: elementos=%u de %d, solo_orden=%u", nsky, NTX * (NTY + NVY), s->stats.n_sortonly);
+    CHECK(r == 0 && nsky == NTX * (NTY + 1) && s->n_items == nsky && s->stats.n_sortonly == 0, "cielo: elementos=%u de %d, solo_orden=%u", nsky, NTX * (NTY + 1), s->stats.n_sortonly);
     /* punto de la imagen en el centro de la pantalla (columna W-1-dir*W, fila H/2-ELEV) -> en el cilindro debe estar en la dirección de la mirada */
     const double colc = (W - 1) - dir * W, rowc = H / 2.0 - ELEV;
     const int tc = (int)(colc / TW), tr = (int)(rowc / TW);
@@ -984,8 +984,9 @@ static void test_sky(void) {
         for (int k = 0; k < 3; k++) b[k] = dn ? dn->pos[0][k] : 0;
         CHECK(dn && ref_proj(b, &sx2, &sy2, &z) && sy2 > sy + 20, "fila siguiente hacia abajo: %.1f -> %.1f", sy, sy2);
     }
-    /* por debajo de la imagen se repite su última fila (como el actor) */
-    for (uint32_t i = 0; i < s->n_items; i++) if (s->items[i].idx >= NTX * NTY) { CHECK(s->items[i].uv[0][1] == (NTY - 1) * TW, "fila repetida: v0=%d", s->items[i].uv[0][1]); break; }
+    /* por debajo de la imagen NO se emiten las filas repetidas del actor (relleno): solo queda la tapa superior (idx >= NTX*NTY: borde de la fila 0, v = primer texel) */
+    { int ncap = 0, bad = 0; for (uint32_t i = 0; i < s->n_items; i++) if (s->items[i].idx >= NTX * NTY) { ncap++; bad += s->items[i].uv[0][1] != 0 || s->items[i].idx >= NTX * (NTY + 1); }
+      CHECK(ncap == NTX && bad == 0, "sin filas repetidas bajo la imagen: items fuera del tilemap=%d mal=%d", ncap, bad); }
     /* los paquetes del fondo quedan reclamados por el nativo (ya no son 2D) y se exportan sin niebla */
     GpuOp o[1]; GpuDrawList dl; memset(&dl, 0, sizeof dl); memset(o, 0, sizeof o); dl.ops = o; dl.nops = 1; dl.disp.w = 320; dl.disp.h = 240;
     o[0].type = GPU_OP_POLY; o[0].nv = 4; o[0].flags = GPU_F_TEXTURED | GPU_F_QUAD; o[0].pkt_addr = 0x80000000u | ((so.pk[0] + 40u * 5u) & 0x1FFFFF);
@@ -1018,7 +1019,7 @@ static void test_sky(void) {
         s = run(0, &r);
         uint32_t first_sky = 0xFFFFFFFFu, last_other = 0, nother = 0; nsky = 0;
         for (uint32_t i = 0; i < s->n_items; i++) { if (s->items[i].role == NSFX_ROLE_SKY) { nsky++; if (first_sky == 0xFFFFFFFFu) first_sky = i; } else { nother++; last_other = i; } }
-        CHECK(r == 0 && nsky == NTX * (NTY + NVY) && nother == 1 && last_other < first_sky, "el cielo al final: cielo=%u otros=%u ultimo_otro=%u primer_cielo=%u", nsky, nother, last_other, first_sky);
+        CHECK(r == 0 && nsky == NTX * (NTY + 1) && nother == 1 && last_other < first_sky, "el cielo al final: cielo=%u otros=%u ultimo_otro=%u primer_cielo=%u", nsky, nother, last_other, first_sky);
         NsEffect *e2 = (NsEffect *)calloc(nsky + 8, sizeof *e2); int tr3 = 0;
         uint32_t n2 = ns_fx_export(s, 1, e2, 8, &tr3);
         CHECK(n2 == 1 && tr3 == 1 && e2[0].role != NSFX_ROLE_SKY, "exportación corta: el efecto sale y el cielo se queda fuera entero: n=%u truncado=%d", n2, tr3);
@@ -1050,7 +1051,7 @@ static void test_sky(void) {
         /* dos hilos: uno extrae y otro borra lo aprendido: el cielo no puede desaparecer a mitad de una extracción */
         pthread_t th; sky_mt_stop = 0; int lost = 0;
         if (pthread_create(&th, NULL, sky_mt_reset, NULL) == 0) {
-            for (int k = 0; k < 4000 && !lost; k++) { ns_fx_extract(RAM, &o, sh); nsky = 0; for (uint32_t i = 0; i < sh->n_items; i++) nsky += sh->items[i].role == NSFX_ROLE_SKY; lost = nsky != NTX * (NTY + NVY); }
+            for (int k = 0; k < 4000 && !lost; k++) { ns_fx_extract(RAM, &o, sh); nsky = 0; for (uint32_t i = 0; i < sh->n_items; i++) nsky += sh->items[i].role == NSFX_ROLE_SKY; lost = nsky != NTX * (NTY + 1); }
             sky_mt_stop = 1; pthread_join(th, NULL);
         }
         CHECK(!lost, "extracción y borrado concurrentes: cielo=%u", nsky);
@@ -1343,6 +1344,90 @@ static void test_learned_size(void) {
     ns_fx_scene_destroy(s);
 }
 
+/* Cúpula del cielo: el cilindro se cierra por arriba con una tapa (borde de la imagen estirado hasta la vertical del ojo) y, con un color de fondo no negro en el canal 0 del motor, una caja lisa detrás. Las filas
+ * repetidas del actor (relleno bajo el tilemap) y las últimas filas de una sola tesela por fila (soporte plano) NO se emiten, y no hay tapa inferior: bajo el cielo se ve el fondo. Sin ramas por escena: se prueba
+ * con varias imágenes (teselas, filas y columnas distintas, teselas partidas en columnas, con y sin cola plana, con y sin fondo). */
+static int sky_ks(int w, int tw) { int k = (int)ceil(360.0 * tw / w / 12.0); return k < 1 ? 1 : k > 8 ? 8 : k; }
+static void sky_dome_cfg(int W, int H, int TW, int flat_tail, int bgr, int bgg, int bgb, const char *name) {
+    enum { HALF = 128, ELEV = 10 };
+    static NsFxActorEntry t[1];
+    t[0].hash = ns_fx_name_hash(NAME_SKY); t[0].code = NSFX_ROLE_SKY;
+    ns_fx_set_actor_table(t, 1);
+    ns_fx_learn_reset();
+    reset(); memset(LASTNODE, 0, sizeof LASTNODE);
+    const int NTX = W / TW, NTY = H / TW, NVX = 320 / TW + 1, NVY = 256 / TW + 1, KS = sky_ks(W, TW), ROWS = NTY - flat_tail;   /* ROWS: filas que se emiten */
+    const int has_bg = bgr || bgg || bgb;
+    int t0[3] = {0, 0, 0};
+    TPrim so = mkprim(18, 0x800, NVX * NVY, 4096, t0, 0);
+    uint32_t node = actor_add(7, NAME_SKY, 0x70), img = alloc(0x14), attr = alloc(4 * 256), tmap = alloc((uint32_t)(NTX * NTY)), tex = alloc(12);
+    w32(node + 0x20, so.addr); w32(node + 0x24, img); w32(node + 0x28, tex); w16(node + 0x68, 0);
+    w16(img, W); w16(img + 2, H); w16(img + 4, TW); w16(img + 6, TW); w32(img + 0xC, attr); w32(img + 0x10, tmap);
+    w16(tex + 4, 0x0010); w16(tex + 6, 0x3D00); w8(tex + 8, 0); w8(tex + 9, 0);
+    /* filas de imagen: 8 teselas distintas repetidas a lo ancho; cola plana: una sola tesela por fila en todas las columnas */
+    for (int i = 0; i < NTX * NTY; i++) {
+        const int row = i / NTX, flat = row >= ROWS, a = flat ? row * 8 : row * 8 + (i % NTX) % 8;
+        w8(tmap + (uint32_t)i, a); w8(attr + 4u * (uint32_t)a, 0); w8(attr + 4u * (uint32_t)a + 1, flat ? 0 : ((i % NTX) % 8) * TW); w8(attr + 4u * (uint32_t)a + 2, row * TW);
+    }
+    const double dir = G_YAW / 6.283185307179586;
+    const int svx = (int)((W - 1) - dir * W), svy = -ELEV;
+    int xi = svx - 160; if (xi < 0) xi += W;
+    int yi = svy + H / 2 - HALF, var = 0; if (yi < 0) { var = -yi; yi = 0; }
+    const int x0 = -(xi % TW) - 160, y0 = var - HALF - yi % TW, tx0 = xi / TW, ty0 = yi / TW;
+    for (int b = 0; b < 2; b++) for (int y = 0; y < NVY; y++) for (int x = 0; x < NVX; x++) {
+        const int ty = ty0 + y < NTY ? ty0 + y : NTY - 1, tx = (tx0 + x) % NTX;
+        uint32_t pk = so.pk[b] + 40u * (uint32_t)(y * NVX + x);
+        w16(pk, 63000); w8(pk + 4, 30); w8(pk + 5, 35); w8(pk + 6, 56); w8(pk + 7, 0x2C);
+        w16(pk + 8, x0 + x * TW); w16(pk + 10, y0 + y * TW); w8(pk + 12, ty >= ROWS ? 0 : (tx % 8) * TW); w8(pk + 13, ty * TW); w16(pk + 14, 0x3D00); w16(pk + 22, 0x0010);
+    }
+    if (has_bg) for (int b = 0; b < 2; b++) {   /* DG_Chanls[0].env1[b]: comando 0xE3 del área de dibujo y relleno 0x60bbggrr */
+        const uint32_t env = NSFX_A_CHANL - 0x1ECu + 108u + 64u * (uint32_t)b;
+        w32(env + 4, 0xE3000000u); w32(env + 28, 0x60000000u | ((uint32_t)bgb << 16) | ((uint32_t)bgg << 8) | (uint32_t)bgr);
+    }
+    queue_commit(0);
+    int r; NsFxScene *s = run(0, &r);
+    const uint32_t want = (uint32_t)(NTX * KS * ROWS + NTX * KS) + (has_bg ? 48u : 0u);
+    CHECK(r == 0 && s->n_items == want && s->stats.n_sortonly == 0, "cúpula %s: elementos=%u de %u", name, s->n_items, want);
+    const double R = 200000.0, sl_top = (0.5 * H - ELEV) / 285.0, sl_bot = -((double)(ROWS * TW) - 0.5 * H + ELEV) / 285.0;
+    const uint32_t i_top = (uint32_t)(ROWS * NTX), i_bg = i_top + (uint32_t)NTX;
+    int ntop = 0, nbg = 0, bad_top = 0, bad_bg = 0, bad_role = 0, ntile = 0, bad_tile = 0;
+    for (uint32_t i = 0; i < s->n_items; i++) {
+        const NsFxItem *it = &s->items[i];
+        bad_role += it->role != NSFX_ROLE_SKY;
+        if (it->idx < i_top) {   /* teselas de la imagen: solo filas < ROWS, nada por debajo de su borde inferior (ni gris plano ni filas repetidas) */
+            ntile++;
+            bad_tile += (int)it->idx / NTX >= ROWS || !(it->flags & NSFX_F_TEXTURED);
+            for (int v = 0; v < 4; v++) bad_tile += it->pos[v][1] < G_E[1] + R * sl_bot - 8.0;
+        } else if (it->idx < i_bg) {   /* tapa superior: vértices 0 y 1 en el centro (ojo + R*sl_top en vertical), 2 y 3 en el borde; v = primera fila de texels */
+            ntop++;
+            for (int v = 0; v < 4; v++) {
+                const double dx = it->pos[v][0] - G_E[0], dz = it->pos[v][2] - G_E[2], hd = sqrt(dx * dx + dz * dz);
+                bad_top += !(fabs(it->pos[v][1] - (G_E[1] + R * sl_top)) < 8.0 && (v < 2 ? hd < 8.0 : fabs(hd - R) < 8.0) && it->uv[v][1] == 0);
+            }
+            bad_top += !(it->flags & NSFX_F_TEXTURED);
+        } else {   /* caja de fondo: lisa, con el color del motor, a 1,02 x */
+            nbg++;
+            bad_bg += (it->flags & NSFX_F_TEXTURED) != 0 || it->rgb[0][0] != bgr || it->rgb[0][1] != bgg || it->rgb[0][2] != bgb;
+            for (int v = 0; v < 4; v++) {
+                const double dx = it->pos[v][0] - G_E[0], dz = it->pos[v][2] - G_E[2], hd = sqrt(dx * dx + dz * dz);
+                bad_bg += !(hd < 8.0 || fabs(hd - 1.02 * R) < 8.0);
+            }
+        }
+    }
+    CHECK(ntile == NTX * KS * ROWS && bad_tile == 0, "cúpula %s: teselas de imagen %d (filas %d), mal=%d", name, ntile, ROWS, bad_tile);
+    CHECK(ntop == NTX * KS && bad_top == 0, "cúpula %s: tapa superior %d teselas, mal=%d", name, ntop, bad_top);
+    CHECK(nbg == (has_bg ? 48 : 0) && bad_bg == 0 && bad_role == 0, "cúpula %s: caja de fondo %d, mal=%d, otro papel=%d", name, nbg, bad_bg, bad_role);
+    NsEffect *ef = (NsEffect *)calloc(s->n_items ? s->n_items : 1, sizeof *ef); int trn = 0;
+    CHECK(ns_fx_export(s, 1, ef, s->n_items, &trn) == s->n_items && trn == 0 && (ef[s->n_items - 1].flags & NS_EF_NOFOG), "cúpula %s: se exporta entera y sin niebla", name);
+    free(ef);
+    ns_fx_scene_destroy(s);
+}
+static void test_sky_dome(void) {
+    sky_dome_cfg(1024, 224, 32, 0, 0, 0, 0, "1024x224 teselas 32 sin cola plana ni fondo");
+    sky_dome_cfg(512, 96, 16, 0, 0, 0, 0, "512x96 teselas 16 (nvy=17) sin fondo");
+    sky_dome_cfg(1024, 224, 32, 2, 10, 20, 40, "1024x224 con 2 filas planas finales y fondo 10,20,40");
+    sky_dome_cfg(256, 128, 32, 1, 70, 60, 50, "256x128 teselas partidas en 4, 1 fila plana y fondo 70,60,50");
+}
+
 int main(void) {
     install_test_table();
     RAM = (uint8_t *)calloc(NSFX_RAM_SIZE, 1);
@@ -1360,6 +1445,7 @@ int main(void) {
     test_sortonly_wins();
     test_free_world();
     test_sky();
+    test_sky_dome();
     test_gpu_mask();
     test_fuzz();
     test_gas_limits();

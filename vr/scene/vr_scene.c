@@ -18,7 +18,7 @@
  *    Los pies resultantes caen a +-50 mm del suelo real; el host puede afinarlo con el suelo que vea (pendiente).
  * ========================================================================================================== */
 #include "vr_scene.h"
-#include "vr_prov.h"   /* solo la constante VPC_WORLD (la clase la da el gancho opts.op_class) */
+#include "vr_prov.h"   /* solo las constantes VPC_WORLD / VPC_WEAPON_HUD (la clase la da el gancho opts.op_class) */
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1406,6 +1406,11 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
             for (size_t k = s; k < e; k++) {
                 const Tri *t = &g_tri[k];
                 if (t->kind != kind) continue;
+                uint8_t cl = 0; int has_cl = 0;
+                if (kind == 2 && o.op_class && t->src_op < g_opc_cap && t->src_op < n) {   /* HUD propio del arma (clase WEAPON_HUD): no entra en los lotes del panel (ruta de reserva por sombreador); queda en op_dest = 2 para su capa propia */
+                    cl = o.op_class(dl, t->src_op, o.op_class_ctx); has_cl = 1;
+                    if (cl == VPC_WEAPON_HUD) { g_opd[t->src_op] = 2; g_opc[t->src_op] = cl; continue; }
+                }
                 if (!cur || cur->blend != t->blend) {
                     cur = &g_bat[nb++];
                     cur->first = (uint32_t)nv; cur->count = 0; cur->kind = (uint8_t)kind; cur->blend = t->blend; cur->skip_if_native = 0; cur->pad = 0;
@@ -1417,7 +1422,7 @@ int vr_scene_build(const GpuDrawList *dl, const BridgeState *bs, const VrSceneOp
 
                 if (nv / 3 < g_tsrc_cap) g_tsrc[nv / 3] = t->src_op;
                 if ((kind == 2 || kind == 3) && t->src_op < g_opd_cap) g_opd[t->src_op] = (uint8_t)kind;
-                if (kind == 2 && o.op_class && t->src_op < g_opc_cap && t->src_op < n) g_opc[t->src_op] = o.op_class(dl, t->src_op, o.op_class_ctx);
+                if (has_cl) g_opc[t->src_op] = cl;
                 nv += 3; cur->count += 3;
             }
         }

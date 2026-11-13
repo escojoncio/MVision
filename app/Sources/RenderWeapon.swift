@@ -406,11 +406,17 @@ final class WeaponRenderer {
     /// Dibuja la vista especial vigente en el pase de escena en curso (después del arma). `aux` = segunda vista renderizada (mira, misil; valores
     /// en gamma, sin decodificar sRGB), `hud` = panel del HUD del juego en bruto (visor antiaéreo). `auxLinear`: los valores de `aux` ya son lineales.
     /// `hudPremultiplied`: `hud` es la capa 2D fiel (color premultiplicado, vr_layer2d) y no el HUD de reserva (alfa directo).
+    /// `weaponHud`: capa 2D del HUD PROPIO del arma (RGRenderer.auxTexture[3], clase WEAPON_HUD, premultiplicada): la leen las pantallas LED y el visor de reserva del Stinger EN LUGAR de `hud` (el panel plano nunca la dibuja); solo con `hudWin` (capa fiel).
     /// `hudWin`: colocación del marco del juego dentro de `hud` (RGRenderer.hudWin; nil = la textura es el marco / la vista entera, como el HUD de reserva).
-    func encodeSpecial(encoder: MTLRenderCommandEncoder, view svIn: MvVrSpecialView, aux: MTLTexture?, auxLinear: Bool, hud: MTLTexture?, hudPremultiplied: Bool = false, hudWin: XR2DWindow? = nil,
+    func encodeSpecial(encoder: MTLRenderCommandEncoder, view svIn: MvVrSpecialView, aux: MTLTexture?, auxLinear: Bool, hud hudIn: MTLTexture?, hudPremultiplied hudPremIn: Bool = false, weaponHud: MTLTexture? = nil, hudWin: XR2DWindow? = nil,
                        views: [simd_float4x4], projections: [simd_float4x4], layered: Bool, viewIndex: Int = 0) {
         guard enabled, svIn.kind != 0 else { return }
         var sv = svIn      // copia propia: la sincronización con la mano del modelo solo cambia la superficie
+        // HUD PROPIO del arma (clase WEAPON_HUD de vr_prov.h: stnsight.c, sgtrect3.c, rmissile.c): capa 2D aparte que el panel plano nunca incluye (RGRenderer.auxTexture[3], siempre premultiplicada). Lo leen las pantallas LED del Stinger y del Nikita
+        // y el visor de reserva del Stinger; sin esa capa (HUD de reserva sin ventana, vista distinta) no hay HUD del juego en la pantalla. Los prismáticos (AA_SIGHT con round = 2) siguen leyendo la capa del HUD (su marco es SCOPE_BINO).
+        let weaponLayer = sv.kind == Int32(MV_VIEW_AA_SCREEN) || sv.kind == Int32(MV_VIEW_MISSILE) || (sv.kind == Int32(MV_VIEW_AA_SIGHT) && sv.round != 2)
+        let hud: MTLTexture? = weaponLayer ? (hudWin != nil ? weaponHud : nil) : hudIn
+        let hudPremultiplied = weaponLayer ? true : hudPremIn
         // La superficie pegada al arma se recoloca con la misma mano con la que se acaba de dibujar el modelo (vrgame.c: mv_vrgame_special_sync); leída al inicio del fotograma iba varios ms por detrás y se hundía tras las caras del modelo.
         var synced = sv
         if mv_vrgame_special_sync(&synced) != 0 { sv.surf_pos = synced.surf_pos; sv.surf_rot = synced.surf_rot }
@@ -439,7 +445,7 @@ final class WeaponRenderer {
         case Int32(MV_VIEW_AA_SCREEN):
             // Visor del lanzador antiaéreo en su pieza del modelo: segunda vista viva (textura 0) y, encima, la mira y el marco de fijación del HUD del juego (textura 1, subrectángulo `uv`), recortado al contorno de la pieza.
             guard sv.blend > 0.02, sv.cam_valid != 0, let a = aux else { return }
-            image = a; overlay = hud      // sin capa del HUD (cambio de vista) la pantalla sigue viva, solo sin la mira del juego
+            image = a; overlay = hud      // sin capa del HUD del arma (cambio de vista) la pantalla sigue viva, solo sin la mira del juego
             d.uv = simd_float4(sv.uv.0, sv.uv.1, sv.uv.2, sv.uv.3)
             d.p0 = simd_float4(3, min(max(sv.blend, 0), 1), hudPremultiplied ? 1 : 0, 0)
             d.p2.z = hud != nil ? 1 : 0      // 1 = hay capa del HUD que mezclar encima de la imagen
@@ -468,7 +474,7 @@ final class WeaponRenderer {
             d.p1.y = sv.frame.isFinite ? min(max(sv.frame, 0), 0.2) : 0      // marco oscuro del sombreador (0 = sin marco, p. ej. pantalla grande)
             d.p1.z = live ? 0 : 1
             d.p2.y = sv.standby != 0 ? 1 : 0
-            if live, let h = hud { overlay = h; d.p2.z = hudPremultiplied ? 2 : 1 }      // textos y marcas del juego (capa 2D) sobre la imagen del misil, sin los iconos de vida / equipo (sombreador)
+            if live, let h = hud { overlay = h; d.p2.z = hudPremultiplied ? 2 : 1 }      // textos y marcas propios del Nikita (capa WEAPON_HUD, sin el HUD del jugador) sobre la imagen del misil
             if sv.uv.2 > 0.001 && sv.uv.3 > 0.001 && [sv.uv.0, sv.uv.1, sv.uv.2, sv.uv.3].allSatisfy({ $0.isFinite }) {      // recorte 4:3 de la imagen sobre la pantalla (por defecto 0, 0, 1, 1)
                 d.uv = simd_float4(sv.uv.0, sv.uv.1, sv.uv.2, sv.uv.3)
             }

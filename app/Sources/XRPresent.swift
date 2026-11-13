@@ -317,19 +317,6 @@ enum XRDiagItem: Int, CaseIterable {
     case back, reset, magenta, split, rateMap, msaa1, noLayers, nearPlane, projection, noZTest, fillDepth, flatDepth, engBehind, engSize, engBack, engSplit, exact2D, integerScale, debugAxes, giveWeapons
 }
 
-extension XRFramedLayout {
-    /// HUD PROPIO del arma equipada que no va en el panel plano (rectángulos u0, v0, u1, v1 en fracciones del MARCO 320 x 256): los mismos de la lista blanca vr_spc_hud_keep de vr_weapon.metal. Vive aquí y no en XRMath.swift porque usa MV_VIEW_*
-    /// (vrgame.h) y bench/build_native.sh compila XRMath.swift solo con NativeBridge.h.
-    /// Stinger (AA_SCREEN / AA_SIGHT): escala de cabeceo con sus números, retícula y marco de fijación, y «LOCK_ON». La barra de tiempos de canal de stnsight.c (bg_prim) cae sobre la barra de vida (menu/life.c) y no es separable: no se incluye y sale en el panel; las etiquetas bajas de la escala (y 213-230) y sus líneas fuera de x 14-60 / y 44-212 también quedan en el panel (limitación aceptada). Nikita (MISSILE): «ENEMY». Otras vistas: vacío.
-    /// No separables (no se tocan): las líneas de convergencia borde a borde de sgtrect3.c cruzan el marco entero y se solapan con el radar y los iconos; recortarlas rompería el panel.
-    static func weaponHudMask(kind: Int32) -> [SIMD4<Float>] {
-        func r(_ x0: Float, _ y0: Float, _ x1: Float, _ y1: Float) -> SIMD4<Float> { SIMD4<Float>(x0 / 320, y0 / 256, x1 / 320, y1 / 256) }
-        if kind == Int32(MV_VIEW_MISSILE) { return [r(112, 96, 176, 120)] }
-        if kind == Int32(MV_VIEW_AA_SCREEN) || kind == Int32(MV_VIEW_AA_SIGHT) { return [r(14, 44, 60, 212), r(52, 72, 296, 212), r(176, 16, 232, 36)] }
-        return []
-    }
-}
-
 final class XRPresenter {
     enum Display { case world, cinema, diorama, stereo, scene }
 
@@ -351,9 +338,6 @@ final class XRPresenter {
     var hqFull: (bytes: [UInt8], w: Int, h: Int, seq: UInt32)?
     /// Colocación de la capa 2D fiel del HUD en la ventana visible fija del televisor (RGRenderer.hudWin; lo fija el bucle de render antes de componer); nil = HUD de reserva.
     var hudWin: XR2DWindow?
-    /// Rectángulos (u0, v0, u1, v1, fracciones del MARCO del juego) del HUD PROPIO del arma equipada (Stinger / Nikita) que NO se dibujan en el panel plano del mundo: solo van en su pantalla LED (lista blanca vr_spc_hud_keep de
-    /// vr_weapon.metal). El resto del panel (radar, vida, alerta, oxígeno, equipo) se dibuja entero. Vacío = panel sin recortes. Lo fija el bucle de render antes de componer.
-    var weaponHudMask: [SIMD4<Float>] = []
     private(set) var shown: Display = .cinema
     private(set) var veil: Float = 1
     /// Fundido a negro por la cabeza empujando contra el escenario (0..1; lo fija el bucle de render con mv_vrhost_head_limit; ya viene suavizado).
@@ -1110,21 +1094,17 @@ final class XRPresenter {
         if !split && shown != .cinema && shown != .stereo, let h = hud {
             let uv = XRFramedLayout.fullUV
             let lp = hudLogical ?? SIMD2<Float>(Float(h.width), Float(h.height))
-            // Con el Stinger / Nikita equipados el panel va entero (radar, vida, alerta...) salvo los rectángulos del HUD propio del arma (weaponHudMask: solo van en su pantalla LED): se dibuja en tiras que los saltan.
-            var holes: [SIMD4<Float>] = []
-            for m in weaponHudMask { holes.append(hudWin?.frameUV(m) ?? m) }
-            for s in XRFramedLayout.strips(uv: uv, holes: holes) {
-                let c = XRFramedLayout.center(uv: s, layerPx: lp)
-                var it = XRDrawItem(kind: .panel, texture: h)
-                it.model = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw) * XRMath.translation(SIMD3<Float>(c.x, c.y, -XRFramedLayout.distance))
-                it.size = XRFramedLayout.size(uv: s, layerPx: lp)
-                it.distance = XRFramedLayout.distance
-                it.uvrect = s
-                it.opacity = 1
-                it.onTop = true
-                it.pixelMode = XR2DFilter.current.panelMode
-                r.items.append(it)
-            }
+            // Con el Stinger / Nikita equipados el panel va entero tal cual: su HUD propio (clase WEAPON_HUD) ya no llega a esta capa, vive en otra (RGRenderer.auxTexture[3]) que solo leen sus pantallas LED.
+            let c = XRFramedLayout.center(uv: uv, layerPx: lp)
+            var it = XRDrawItem(kind: .panel, texture: h)
+            it.model = XRMath.translation(SIMD3<Float>(hp.x, hp.y, hp.z)) * XRMath.rotationY(hudYaw) * XRMath.translation(SIMD3<Float>(c.x, c.y, -XRFramedLayout.distance))
+            it.size = XRFramedLayout.size(uv: uv, layerPx: lp)
+            it.distance = XRFramedLayout.distance
+            it.uvrect = uv
+            it.opacity = 1
+            it.onTop = true
+            it.pixelMode = XR2DFilter.current.panelMode
+            r.items.append(it)
         }
         // 6c) capa WINDOW (ventana del selector L2 / armas R2 / pausa, clase de procedencia aprendida): EXACTAMENTE el mismo plano que el HUD fijo (6b: XRFramedLayout.distance, rumbo hudYaw, tamaño de la capa entera), tras él.
         //     Así los dos menús (L2 y R2) caen siempre a la misma profundidad fija, vayan en esta capa o en la del HUD, y al abrirse o cerrarse no hay transición de distancia; nada se acerca ni se centra en la mirada.

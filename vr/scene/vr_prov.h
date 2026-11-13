@@ -12,13 +12,16 @@
  *    SCOPE_TEXT    scope.c / sight.c texturado: textos de la mira; van al HUD
  *    SCOPE_BINO    scope.c / sight.c sin textura en una lista CON prismáticos (hay primitivas de scope.c: el objeto SCOPE; VrProvLearn.bino): el marco del juego (rejilla, retícula, bandas, tinte verdoso a pantalla completa).
  *                  Va a la capa HUD (que el visor pinta sobre la vista aumentada de los prismáticos, VrFx.binocular) y vr_scene no lo trata como recubrimiento del filtro de pantalla
+ *    WEAPON_HUD    HUD PROPIO del arma equipada: stnsight.c y sgtrect3.c (Stinger: escala de cabeceo, retícula, marco de fijación, LOCK_ON, barra de canal, líneas de convergencia), rmissile.c (Nikita: ENEMY, cifras, barra)
+ *                  y, en una lista que trae HUD propio de arma guiada (stnsight.c / sgtrect3.c / rmissile.c: VrProvLearn.guided) sin prismáticos, el sight.c de esa arma (marco y rótulo; no es un efecto de zoom). Capa PROPIA (VPC_L_WEAPON): el panel plano del mundo NO la
+ *                  incluye; solo la leen las pantallas LED del arma (RenderWeapon.encodeSpecial). Nunca es candidata a WINDOW
  *    UNKNOWN       sin procedencia o de otro actor/función: va al HUD (como antes) y se cuenta
  *    FX_SCREEN     gas_efct.c (anillo del gas) y fadeio.c (fundido): efectos de pantalla con paquetes propios que el renderer nativo hace de la RAM (ns_fx: NsFxGas / NsFxFade). No van al 2D,
  *                  pero SOLO mientras el anfitrión garantice que el nativo pinta ese efecto ahora (VrProvLearn.covered); si no, son UNKNOWN y siguen en el HUD (un fundido no se pierde)
  *    WORLD         encadenada por la ordenación del canal 3D (vpc_is_chain), con un escritor sin regla (o sin escritor) y con GARANTÍA de cobertura nativa de su paquete (VrProvLearn.covered: el
  *                  paquete tiene un elemento que el renderer nativo dibuja; nieve, chaff, humo...). Con VrSceneOpts.drop_world2d vr_scene no la emite al panel (VR_FATE_WORLD2D). Sin
  *                  drop_world2d (ventana del selector / pausa) sale al panel y va al HUD, como antes. Sin esa garantía (primitivas de pantalla de actores sin regla, fondo de cielo) es UNKNOWN
- *  Capas 2D (VPC_L_*): HUD (HUD_WORLD, SCOPE_TEXT, SCOPE_BINO, UNKNOWN, WORLD), WINDOW, FULL; las clases FX_* y SCOPE_FRAME no tienen capa (-1).
+ *  Capas 2D (VPC_L_*): HUD (HUD_WORLD, SCOPE_TEXT, SCOPE_BINO, UNKNOWN, WORLD), WINDOW, FULL, WEAPON (WEAPON_HUD); las clases FX_* y SCOPE_FRAME no tienen capa (-1).
  *  Sin procedencia (volcados NSL1, rt_prov apagado) todo es UNKNOWN y por tanto HUD: el comportamiento de antes.
  *  Id efectivo de una primitiva: el de quien encadenó el paquete (GpuOp.prov) salvo que sea una rutina de ordenación (vpc_is_chain): entonces el de quien rellenó el comando (GpuOp.prov2), o 0 si no consta o es otra rutina de ordenación. */
 #include <stdint.h>
@@ -28,8 +31,8 @@
 extern "C" {
 #endif
 
-enum { VPC_HUD_WORLD = 0, VPC_WINDOW, VPC_FULL, VPC_FX_VIGNETTE, VPC_FX_LETTERBOX, VPC_SCOPE_FRAME, VPC_SCOPE_TEXT, VPC_UNKNOWN, VPC_FX_SCREEN, VPC_WORLD, VPC_SCOPE_BINO, VPC_N };   /* HUD_WORLD = 0: memset a cero = todo HUD */
-enum { VPC_L_HUD = 0, VPC_L_WINDOW, VPC_L_FULL, VPC_L_N };
+enum { VPC_HUD_WORLD = 0, VPC_WINDOW, VPC_FULL, VPC_FX_VIGNETTE, VPC_FX_LETTERBOX, VPC_SCOPE_FRAME, VPC_SCOPE_TEXT, VPC_UNKNOWN, VPC_FX_SCREEN, VPC_WORLD, VPC_SCOPE_BINO, VPC_WEAPON_HUD, VPC_N };   /* HUD_WORLD = 0: memset a cero = todo HUD */
+enum { VPC_L_HUD = 0, VPC_L_WINDOW, VPC_L_FULL, VPC_L_WEAPON, VPC_L_N };
 const char *vpc_class_name(int cls);
 int vpc_layer_of(int cls);   /* VPC_L_* o -1 (no va al 2D) */
 
@@ -48,6 +51,11 @@ typedef struct {
 int vpc_rule(const ProvEntry *e, const GpuOp *o);
 /* ¿Es la entrada scope.c (rutina 0x80063d54), el actor del objeto SCOPE (prismáticos)? sight.c solo (sin scope.c) es la mira de otras armas. e == NULL -> 0. */
 int vpc_is_binocular(const ProvEntry *e);
+/* ¿Es la entrada del HUD propio de un arma guiada (stnsight.c = rutina 0x80069c18, sgtrect3.c, rmissile.c)? Una lista con primitivas suyas (VrProvLearn.guided) trae también el sight.c de esa arma. Los nombres se
+ * comparan por nombre de archivo completo («rfsight.c» / «stnsight.c» no son «sight.c»). e == NULL -> 0. */
+int vpc_is_weapon_hud(const ProvEntry *e);
+/* ¿Es la entrada scope.c / sight.c (regla de mira)? Un actor de arma cuya clase deja de ser SCOPE_* conserva así el efecto de mira (VrFx.scope_on). e == NULL -> 0. */
+int vpc_is_scope_actor(const ProvEntry *e);
 int vpc_is_mosaic(const ProvEntry *e);     /* mosaico de censura del juego (mosaic.c): celdas 2D que muestrean el propio fotograma */
 /* Efecto de pantalla de la entrada: VPC_COV_GAS (gas_efct.c), VPC_COV_FADE (fadeio.c) o -1 (no es de la clase FX_SCREEN; e == NULL -> -1). */
 int vpc_screen_kind(const ProvEntry *e);
@@ -74,6 +82,7 @@ typedef struct {
      * «el otro búfer» de vr_feedback.h); w = 0 = sin dato. draw_idx = índice de la última lista anotada (una lista anotada dos veces no desplaza la pareja). */
     int draw_prev[4], draw_cur[4];
     uint32_t draw_idx; int draw_have;
+    int guided;                        /* la última lista anotada trae primitivas de stnsight.c / sgtrect3.c / rmissile.c (Stinger o Nikita equipado, aunque falte stnsight.c): su sight.c (sin prismáticos) es HUD del arma (WEAPON_HUD) */
     int bino;                          /* la última lista anotada (vpc_learn_note, con cualquier estado) trae primitivas de scope.c: prismáticos (SCOPE_BINO) */
     /* Garantía de cobertura nativa (la fija el anfitrión; vpc_learn_reset la borra; NULL = sin garantía: nada es WORLD ni FX_SCREEN). what = VPC_COV_PACKET: ¿el paquete del motor en pkt_addr
      * (GpuOp.pkt_addr) tiene un elemento que el renderer nativo dibuja (ns_fx_covers_packet)? VPC_COV_GAS / VPC_COV_FADE: ¿pinta el nativo ahora el anillo / el fundido? (pkt_addr sin uso) */

@@ -275,6 +275,18 @@ static int one_dump(const char *dir, double maxpct, const char *png_dir) {
     if (build_scene(d, &l, &sc) != 0) { fprintf(stderr, "%s: vr_scene_build falló\n", dir); free(ref); ns_dump_close(d); return 2; }
     printf("== %s\nlista: %u ops, zona mostrada (%d,%d) %dx%d marco %d aw=%d pad_l=%d; frame.png %dx%d; vista %s\n", dir, l.nops, l.disp.x, l.disp.y, l.disp.w, l.disp.h, l.disp.fw, l.disp.aw, l.disp.pad_l, rw, rh,
            (int)ns_dump_meta_num(d, "view_mode", 1) ? "mundo" : "cine");
+    if (sc.op_dest && sc.op_cls) {   /* reparto de las primitivas del panel (op_dest == 2) por capa 2D; L2D_IDS=1: además por id de procedencia */
+        uint32_t cnt[VPC_L_N] = {0, 0, 0, 0};
+        for (uint32_t i = 0; i < sc.n_op_dest; i++) if (sc.op_dest[i] == 2) { int k = vpc_layer_of(sc.op_cls[i]); if (k >= 0) cnt[k]++; }
+        printf("capas del panel (primitivas): HUD %u, ventana %u, pantalla completa %u, arma %u\n", cnt[VPC_L_HUD], cnt[VPC_L_WINDOW], cnt[VPC_L_FULL], cnt[VPC_L_WEAPON]);
+        if (getenv("L2D_IDS")) {
+            for (uint32_t id = 0; id <= l.nprov && id < PROV_MAX; id++) for (int k = 0; k < VPC_L_N; k++) {
+                uint32_t n = 0;
+                for (uint32_t i = 0; i < sc.n_op_dest; i++) if (sc.op_dest[i] == 2 && vpc_layer_of(sc.op_cls[i]) == k && vpc_op_id(&l, &l.ops[i]) == id) n++;
+                if (n) printf("  capa %d id %-4u %-12s fn %08x: %u\n", k, id, id && id < l.nprov ? l.prov[id].name : "(sin id)", id && id < l.nprov ? l.prov[id].fn : 0u, n);
+            }
+        }
+    }
     int rc = 0;
     VrL2Info in;
     int w = 0, h = 0;

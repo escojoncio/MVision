@@ -192,8 +192,7 @@ final class XRFrameEncoder {
             }
             special = true
         }
-        if special && sv.hide_hud != 0 { hud = nil }          // el panel plano del HUD sobra solo con la pantalla grande del misil (la taparía) y con los prismáticos
-        presenter.weaponHudMask = special && sv.hide_hud == 0 ? XRFramedLayout.weaponHudMask(kind: sv.kind) : []   // Stinger / Nikita: su HUD propio solo en su LCD; el resto del panel (radar, vida...) sigue
+        if special && sv.hide_hud != 0 { hud = nil }          // el panel plano del HUD sobra solo con la pantalla grande del misil (la taparía) y con los prismáticos; el HUD propio del Stinger / Nikita no está en esta capa (clase WEAPON_HUD, solo en su LED)
         // Presentación: mundo en primera persona, pantalla de cine o diorama, paneles del HUD, velo de transición y menú.
         var ipd = simd_length(XRMath.position(eyes[0].transform) - XRMath.position(eyes[1].transform))
         if !(ipd > 0.05 && ipd < 0.08) { ipd = 0.063 }
@@ -327,7 +326,7 @@ final class XRFrameEncoder {
             diagT = now
             var d = "xr-diag: modo=\(gs.view_mode) motivo=\(gs.view_reason) clase=\(gs.view_kind) negro=\(gs.view_black) plano=\(gs.cine_shot) cortes=\(gs.cine_cuts) cubiertas=\(gs.cine_cover) cinem=\(gs.cinematic) estereo=\(renderer.stereoRendered) | " + presenter.diagnostics(items: pres.items)
             d += " | escena: " + renderer.diagnostics()
-            d += " | capas2D(ampliadas): hud=\(renderer.hudLogical.x)x\(renderer.hudLogical.y)->\(renderer.hudTexture?.width ?? 0)x\(renderer.hudTexture?.height ?? 0) ventana=\(renderer.auxDiag[1]) completa=\(renderer.auxDiag[2])"
+            d += " | capas2D(ampliadas): hud=\(renderer.hudLogical.x)x\(renderer.hudLogical.y)->\(renderer.hudTexture?.width ?? 0)x\(renderer.hudTexture?.height ?? 0) ventana=\(renderer.auxDiag[1]) completa=\(renderer.auxDiag[2]) arma=\(renderer.auxDiag[3])"
             let c = colorTex[0], z = depthTex[0]
             d += " | color: tipo=\(c.textureType.rawValue) fmt=\(c.pixelFormat.rawValue) \(c.width)x\(c.height)x\(c.arrayLength) n=\(colorTex.count) | prof: fmt=\(z.pixelFormat.rawValue) n=\(depthTex.count)"
             let pl = Self.planes(depthRange)

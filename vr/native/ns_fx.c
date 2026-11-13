@@ -421,9 +421,37 @@ static void set_uv_rect(NsFxItem *it, const Dec *d) {
  * por debajo de la imagen el actor repite su última fila y aquí se repite igual. Nada más: no se inventa geometría.
  * La elevación y el desplazamiento son variables del actor sin dirección fija (overlay): se recuperan del propio paquete 0 del fotograma (qué tesela es y dónde la puso) con la misma fórmula. */
 #define SKY_RADIUS 200000.0f   /* unidades del motor (200 m): más allá de cualquier escenario medido (±35 m) */
-enum { SKY_MAX_TX = 256, SKY_MAX_TY = 64 };
+enum { SKY_MAX_TX = 256, SKY_MAX_TY = 64, SKY_BG_SEG = 16 };
 static struct { uint32_t node; float elev; int have; } g_sky;   /* elevación aprendida del actor (constante suya); bajo g_fx_mx */
 typedef struct { uint8_t u0, v0; uint16_t tpage, clut; int ok; } SkyTile;
+/* Color con el que el motor borra el fondo del canal 0 (DG_CHANL.env1[buf] del canal de fondo, justo antes del 3D: comando 0xE3 del área de dibujo y relleno 0x60rrggbb; DG_CHANL = 0x1EC bytes y el 3D es
+ * DG_Chanls[1] = NSFX_A_CHANL). Donde la imagen del cielo es transparente (texel 0) el motor deja ver este color. 0 si la RAM no tiene esa forma o el color es negro. */
+static int sky_bg_color(const uint8_t *m, int buf, uint8_t rgb[3]) {
+    const uint32_t env = NSFX_A_CHANL - 0x1ECu + 108u + 64u * (uint32_t)(buf & 1);
+    if (!in_ram(env, 64) || (rdu32(m, env + 4) >> 24) != 0xE3u || (rdu32(m, env + 28) >> 24) != 0x60u) return 0;
+    const uint32_t w = rdu32(m, env + 28);
+    rgb[0] = (uint8_t)(w & 255u); rgb[1] = (uint8_t)((w >> 8) & 255u); rgb[2] = (uint8_t)((w >> 16) & 255u);
+    return (w & 0xFFFFFFu) != 0;
+}
+/* Cuadrilátero de cierre del cielo (anclado al ojo, mismo papel que las teselas): con tesela t y uv = textura de la tesela (borde de la imagen estirado); con t == NULL, color liso `rgb` (fondo del motor). */
+static int sky_emit_quad(Ctx *c, uint32_t p, int idx, int sub, const float P[4][3], const SkyTile *t, const uint8_t uv[4][2], const uint8_t rgb[3]) {
+    const NsFxCam *cam = &c->sc->cam;
+    NsFxItem *it = new_item(c); if (!it) return 0;
+    it->prim = p; it->idx = (uint16_t)idx; it->sub = (uint16_t)sub; it->shape = NSFX_SH_QUAD; it->role = NSFX_ROLE_SKY; it->nv = 4;
+    it->sz = 63000; it->pcls = C_POLY; it->pnv = 4;
+    if (t) {
+        it->kind = KIND_P4T; it->flags = NSFX_F_TEXTURED; it->gflags = GPU_F_TEXTURED;
+        it->tpage = t->tpage; it->clut = t->clut; it->tp = (uint8_t)((t->tpage >> 7) & 3); it->ptp = it->tp; it->abr = (uint8_t)((t->tpage >> 5) & 3);
+        it->pu0 = t->u0; it->pv0 = t->v0;
+    } else it->kind = KIND_P4F;
+    for (int v = 0; v < 4; v++) {
+        memcpy(it->pos[v], P[v], sizeof it->pos[v]); w2v(cam, it->pos[v], it->vpos[v]);
+        if (t) { it->uv[v][0] = uv[v][0]; it->uv[v][1] = uv[v][1]; }
+        memcpy(it->rgb[v], rgb, 3);
+    }
+    count_item(c, it);
+    return 1;
+}
 static int do_sky(Ctx *c, uint32_t p, uint32_t node) {
     const uint8_t *m = c->ram; NsFxScene *S = c->sc; const NsFxCam *cam = &S->cam;
     if (!ptr_ok(node) || !in_ram(node, 0x6C) || rdu32(m, node + 0x20) != p) return 0;
@@ -482,9 +510,20 @@ static int do_sky(Ctx *c, uint32_t p, uint32_t node) {
         }
     }
     if (!(g_sky.node == node && g_sky.have)) { free(T); return 0; }   /* sin elevación conocida todavía (primer fotograma mirando al suelo): se queda en 2D hasta medirla */
-    const int rows = nty + nvy;   /* la imagen y, por debajo, su última fila repetida tantas veces como filas pinta el actor */
+    /* Filas de la imagen que son cielo. sphere.c: el actor pinta nvy filas y, pasada la última fila del tilemap, repite esa fila (y_tile_iter se satura): esas filas son relleno del actor, no imagen, y no se emiten.
+     * Del tilemap tampoco se emiten las últimas filas cuyo tilemap es una sola tesela en todas las columnas tras la última fila con variación horizontal: sin contenido de panorama, son el soporte plano que
+     * el actor deja bajo el horizonte (en el exterior medido, filas 18-24 de 25, teselas 88/89/90: gris plano). Sin ninguna fila con variación (o ntx < 2) no se recorta nada. Es estructura del tilemap, no color. */
+    int rows = nty;
+    if (ntx >= 2) {
+        int last_var = -1;
+        for (int r = 0; r < nty; r++) for (int cc = 1; cc < ntx; cc++) if (rd8(m, tilemap + (uint32_t)(r * ntx + cc)) != rd8(m, tilemap + (uint32_t)(r * ntx))) { last_var = r; break; }
+        if (last_var >= 0) rows = last_var + 1;
+    }
     int ks = (int)ceilf(360.0f * (float)tw / (float)W / 12.0f); if (ks < 1) ks = 1; if (ks > 8) ks = 8;   /* teselas de más de 12 grados (imágenes pequeñas): se parten en columnas para seguir el cilindro */
-    if (S->cap_items - S->n_items < (uint32_t)(rows * ntx * ks)) { S->stats.n_overflow++; free(T); return 0; }   /* entero o nada: un cielo a medias es peor que el de la vía 2D */
+    /* cierre 360: tapa superior por columna (borde de la imagen) y, si el motor borra el fondo con un color no negro, una caja lisa de SKY_BG_SEG lados algo mayor que el cilindro; por debajo de la imagen nada: se ve el fondo */
+    uint8_t bg[3]; const int has_bg = sky_bg_color(m, c->skybuf, bg);
+    const uint32_t extra = (uint32_t)(ntx * ks) + (has_bg ? 3u * SKY_BG_SEG : 0u);
+    if (S->cap_items - S->n_items < (uint32_t)(rows * ntx * ks) + extra) { S->stats.n_overflow++; free(T); return 0; }   /* entero o nada: un cielo a medias es peor que el de la vía 2D */
     uint8_t rgb[3]; for (int k = 0; k < 3; k++) rgb[k] = (uint8_t)rd8(m, packs + 4u + (uint32_t)k);
     /* azimut de una columna: el de la mirada más lo que dista de la columna que el actor pone en el centro (hacia la derecha de la pantalla al crecer la columna; al revés en un mundo zurdo) */
     const float two_pi = 6.2831853f, az_fwd = atan2f(fx, fz), sgn = cam->det_neg ? 1.0f : -1.0f;
@@ -513,6 +552,40 @@ static int do_sky(Ctx *c, uint32_t p, uint32_t node) {
             }
             it->pu0 = t->u0; it->pv0 = t->v0;
             count_item(c, it);
+        }
+    }
+    {   /* Cierre 360 con los datos del propio cielo: tapa superior (borde de la imagen: primera fila de texels de cada tesela de la fila 0) a la altura del borde del cilindro, convergiendo en la vertical del ojo.
+         * El texel de borde se estira, sin inventar estrellas ni nubes; si es transparente (0) se descarta como en el motor y deja ver el fondo. Mismo azimut y mismas columnas que el cilindro. Por debajo del
+         * último renglón de imagen no se emite nada (ni filas repetidas ni tapa): se ve el fondo. */
+        const float sl_top = -(0.0f - 0.5f * (float)H + elev) / 285.0f, sl_bot = -((float)(rows * th) - 0.5f * (float)H + elev) / 285.0f;
+        const float ctr_t[3] = {cam->eye[0], cam->eye[1] + SKY_RADIUS * sl_top, cam->eye[2]};
+        for (int cc = 0; cc < ntx; cc++) {
+            const SkyTile *t = &T[cc];
+            if (!t->ok) continue;
+            const int u1 = t->u0 + tw > 255 ? 255 : t->u0 + tw;
+            for (int si = 0; si < ks; si++) {
+                float P[4][3]; uint8_t uv[4][2];
+                for (int v = 0; v < 4; v++) {
+                    const float fu = (float)(si + (v & 1)) / (float)ks, col = ((float)cc + fu) * (float)tw;
+                    const float az = az_fwd + sgn * two_pi * (col - col_ctr) / (float)W;
+                    if (v >= 2) { const float d[3] = {sinf(az), sl_top, cosf(az)}; for (int k = 0; k < 3; k++) P[v][k] = cam->eye[k] + SKY_RADIUS * d[k]; }   /* vértices 2 y 3: borde; 0 y 1: centro */
+                    else memcpy(P[v], ctr_t, sizeof P[v]);
+                    uv[v][0] = (uint8_t)lroundf((float)t->u0 + fu * (float)(u1 - t->u0)); uv[v][1] = t->v0;
+                }
+                if (!sky_emit_quad(c, p, rows * ntx + cc, si, P, t, uv, rgb)) { free(T); return 1; }
+            }
+        }
+        if (has_bg) {   /* caja lisa con el color de fondo del motor, detrás del cilindro y de las tapas (1,02 x): lo transparente de la imagen deja de ser el clear del visor */
+            const float K = 1.02f * SKY_RADIUS, y_t = cam->eye[1] + K * sl_top, y_b = cam->eye[1] + K * sl_bot;
+            for (int i = 0; i < SKY_BG_SEG; i++) {
+                const float a0 = az_fwd + two_pi * (float)i / (float)SKY_BG_SEG, a1 = az_fwd + two_pi * (float)(i + 1) / (float)SKY_BG_SEG;
+                const float x0 = cam->eye[0] + K * sinf(a0), z0 = cam->eye[2] + K * cosf(a0), x1 = cam->eye[0] + K * sinf(a1), z1 = cam->eye[2] + K * cosf(a1);
+                const float side[4][3] = {{x0, y_t, z0}, {x1, y_t, z1}, {x0, y_b, z0}, {x1, y_b, z1}};
+                const float lt[4][3] = {{cam->eye[0], y_t, cam->eye[2]}, {cam->eye[0], y_t, cam->eye[2]}, {x0, y_t, z0}, {x1, y_t, z1}};
+                const float lb[4][3] = {{x0, y_b, z0}, {x1, y_b, z1}, {cam->eye[0], y_b, cam->eye[2]}, {cam->eye[0], y_b, cam->eye[2]}};
+                if (!sky_emit_quad(c, p, rows * ntx + ntx + i, 0, side, NULL, NULL, bg) || !sky_emit_quad(c, p, rows * ntx + ntx + SKY_BG_SEG + i, 0, lt, NULL, NULL, bg) ||
+                    !sky_emit_quad(c, p, rows * ntx + ntx + 2 * SKY_BG_SEG + i, 0, lb, NULL, NULL, bg)) { free(T); return 1; }
+            }
         }
     }
     free(T);

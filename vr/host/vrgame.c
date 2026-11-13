@@ -881,7 +881,7 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
                 sv.npoly = af.npoly;
                 for (int i = 0; i < af.npoly; i++) { sv.poly[2 * i] = af.poly[i][0] / af.w + 0.5f; sv.poly[2 * i + 1] = 0.5f - af.poly[i][1] / af.h; }
                 sv.occlude = 1;
-                sv.hide_hud = 0;                 /* el panel plano del HUD del jugador (radar, vida, alerta...) SIGUE como con cualquier arma; solo el HUD propio del Stinger (mira, escala, LOCK_ON) se recorta del panel (XRPresent.weaponHudMask) y va en la pantalla LED */
+                sv.hide_hud = 0;                 /* el panel plano del HUD del jugador (radar, vida, alerta...) SIGUE como con cualquier arma; el HUD propio del Stinger (mira, escala, LOCK_ON, barra de canal) es la clase WEAPON_HUD (capa 3, vr_prov.h): no llega al panel y solo lo lee la pantalla LED */
                 sv.locked = sg.locked; sv.converged = sg.converged;
             } else
             if (sg.active && sg.half_fov_deg > 0.5f && sg.half_fov_deg < 80.0f) {
@@ -895,7 +895,7 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
                 sv.surf_w = 2.0f * AA_SIGHT_DIST * t;
                 sv.surf_h = sv.surf_w * 0.75f;           /* la imagen de la consola (320 x 256) se muestra a 4:3 */
                 sv.uv[0] = 0; sv.uv[1] = 0; sv.uv[2] = 1; sv.uv[3] = 1;
-                sv.hide_hud = 0;                 /* respaldo: igual que la pantalla LED, el panel plano sigue (con el HUD propio del Stinger recortado) */
+                sv.hide_hud = 0;                 /* respaldo: igual que la pantalla LED, el panel plano sigue (el HUD propio del Stinger es WEAPON_HUD, otra capa) */
                 sv.locked = sg.locked; sv.converged = sg.converged;
             }
         } else if (ready && gid == 3) {
@@ -943,7 +943,7 @@ static void special_view(int gid, WeaponState *st, const WeaponDef *def, const W
                 sv.noise = gs->noise;
                 sv.ended = route == GLED_STATIC;
                 sv.standby = route == GLED_STANDBY;
-                sv.hide_hud = 0;                 /* pantalla LED (espera, vuelo, estática): el panel plano del HUD del jugador sigue; solo el HUD propio del Nikita (ENEMY) se recorta del panel (XRPresent.weaponHudMask) */
+                sv.hide_hud = 0;                 /* pantalla LED (espera, vuelo, estática): el panel plano del HUD del jugador sigue; el HUD propio del Nikita (rmissile.c) es la clase WEAPON_HUD: no llega al panel, solo a la LED */
                 nikita_hud(&sv, sv.cam_valid && !sv.ended);
             }
         }

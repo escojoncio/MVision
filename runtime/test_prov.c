@@ -10,6 +10,8 @@
 #include "fiber.h"
 #include "gpu.h"
 #include "prov.h"
+#include "rtpatch.h"
+#include "hlebind.h"
 
 #define NAT_A     0x80030000u
 #define NAT_B     0x80030010u
@@ -213,6 +215,52 @@ static void t_flat(void) {
     OK(id != 0); EQ(rt_prov_tab[id].fn, NAT_LEAF);
     EQ(tag(0x80100310u), 0); EQ(rt_prov_cur, 0);
 #endif
+    rt_prov_set(0);
+}
+
+/* funciones con sustitución (rtpatch) o HLE enlazada, llamadas por jalr como un actor (GV_ExecActorSystem): el ámbito del actor se abre igual y lo que escribe el código original que
+ * llaman (rt_call_orig / rt_orig) lleva su id, no el del llamante. Caso real: vrfire_aalock envuelve el paso de sgtrect3.c (0x80071fc8). */
+#define WP 0x80100070u
+static uint16_t pw_scope;
+static void nat_patch_wrap(Cpu *c) { pw_scope = rt_prov_cur; mem_w32(c, WP, 0xB0); rt_call_orig(c, 0x80021500u); }
+static void jalr_prog(uint32_t at, uint32_t fn) {
+    pc_asm = at;
+    emit(ADDIU(SP, SP, -8)); emit(SW(RA, SP, 0));
+    emit(LUI(T9, (int)(fn >> 16))); emit(ORI(T9, T9, (int)(fn & 0xFFFF)));
+    emit(JALR(RA, T9)); emit(NOP);
+    emit(SW(A1, A2, 0));                                 /* tras volver: fuera del ámbito */
+    emit(LW(RA, SP, 0)); emit(ADDIU(SP, SP, 8));
+    emit(JR_RA); emit(NOP);
+}
+static void check_scoped(uint32_t node, uint32_t fn, const char *name, uint32_t after) {
+    uint16_t id = tag(node + 16);
+    OK(id != 0);
+    EQ(rt_prov_tab[id].fn, fn); EQ(rt_prov_tab[id].actor_node, node); OK(!strcmp(rt_prov_tab[id].name, name));
+    EQ(tag(after), 0);                                   /* escrito tras el retorno: sin ámbito */
+    EQ(rt_prov_cur, 0);
+}
+static void t_patched(void) {
+    rt_prov_reset(); rt_prov_set(1); reset();
+    stub_leaf(0x80021500u);
+    jalr_prog(0x80020200u, 0x80021500u);
+    put_str(0x80111400u, "sgtrect3.c"); put_actor(0x80110c00u, 0x80021500u, 0x80111400u);
+    EQ(rt_patch(0x80021500u, nat_patch_wrap), RT_PATCH_OK);
+    C.r[A0] = 0x80110c00u; C.r[A1] = 0x77; C.r[A2] = 0x80100320u;
+    interp_call(&C, 0x80020200u);
+    check_scoped(0x80110c00u, 0x80021500u, "sgtrect3.c", 0x80100320u);
+    EQ(tag(WP), tag(0x80110c00u + 16)); EQ(pw_scope, tag(0x80110c00u + 16));   /* también lo que escribe el propio sustituto */
+    rt_unpatch(0x80021500u);
+    /* HLE enlazada por dirección (la real: hle_vrfire_aalock delega en el original con rt_orig) */
+    stub_leaf(0x80021600u);
+    jalr_prog(0x80020300u, 0x80021600u);
+    put_str(0x80111500u, "sgtrect3.c"); put_actor(0x80110d00u, 0x80021600u, 0x80111500u);
+    EQ(hle_bind_fixed("vrfire_aalock", 0x80021600u), 0);
+    C.r[A0] = 0x80110d00u; C.r[A1] = 0x77; C.r[A2] = 0x80100330u;
+    interp_call(&C, 0x80020300u);
+    check_scoped(0x80110d00u, 0x80021600u, "sgtrect3.c", 0x80100330u);
+    /* una segunda llamada no deja marcos sin cerrar en la pila sombra (el ámbito sigue siendo 0 y cada llamada vuelve a abrir el suyo) */
+    C.r[A0] = 0x80110d00u; interp_call(&C, 0x80020300u);
+    EQ(rt_prov_cur, 0);
     rt_prov_set(0);
 }
 
@@ -425,6 +473,7 @@ int main(int argc, char **argv) {
     t_longjmp();
     t_fiber();
     t_flat();
+    t_patched();
     t_stack();
     t_actors();
     t_full();

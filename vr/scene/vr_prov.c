@@ -5,7 +5,7 @@
 #include "vr_feedback.h"
 
 const char *vpc_class_name(int cls) {
-    static const char *const nm[VPC_N] = {"HUD_WORLD", "WINDOW", "FULL", "FX_VIGNETTE", "FX_LETTERBOX", "SCOPE_FRAME", "SCOPE_TEXT", "UNKNOWN", "FX_SCREEN", "WORLD", "SCOPE_BINO"};
+    static const char *const nm[VPC_N] = {"HUD_WORLD", "WINDOW", "FULL", "FX_VIGNETTE", "FX_LETTERBOX", "SCOPE_FRAME", "SCOPE_TEXT", "UNKNOWN", "FX_SCREEN", "WORLD", "SCOPE_BINO", "WEAPON_HUD"};
     return cls >= 0 && cls < VPC_N ? nm[cls] : "?";
 }
 
@@ -14,6 +14,7 @@ int vpc_layer_of(int cls) {
     case VPC_HUD_WORLD: case VPC_SCOPE_TEXT: case VPC_SCOPE_BINO: case VPC_UNKNOWN: case VPC_WORLD: return VPC_L_HUD;
     case VPC_WINDOW: return VPC_L_WINDOW;
     case VPC_FULL: return VPC_L_FULL;
+    case VPC_WEAPON_HUD: return VPC_L_WEAPON;
     default: return -1;
     }
 }
@@ -41,6 +42,18 @@ static int list_binocular(const GpuDrawList *l) {
     return 0;
 }
 
+/* ¿Trae la lista primitivas del HUD propio de un arma guiada (stnsight.c, sgtrect3.c o rmissile.c)? */
+static int list_guided(const GpuDrawList *l) {
+    if (!l->prov) return 0;
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *o = &l->ops[i];
+        if (!is_prim(o)) continue;
+        unsigned id = vpc_op_id(l, o);
+        if (id_ok(l, id) && vpc_is_weapon_hud(&l->prov[id])) return 1;
+    }
+    return 0;
+}
+
 void vpc_learn_note(VrProvLearn *S, const GpuDrawList *l, int state) {
     if (!S || !l) return;
     if (!S->draw_have || l->index != S->draw_idx) {   /* pareja de búferes: el área mostrada al cerrar la lista anterior es el otro búfer de esta */
@@ -49,6 +62,7 @@ void vpc_learn_note(VrProvLearn *S, const GpuDrawList *l, int state) {
         S->draw_idx = l->index; S->draw_have = 1;
     }
     S->bino = list_binocular(l);
+    S->guided = list_guided(l);
     if (state == VPC_ST_OTHER) return;
     S->tick++;
     if (state == VPC_ST_CLOSED) S->nclosed++;
@@ -84,6 +98,7 @@ int vpc_class_op(const VrProvLearn *S, const GpuDrawList *l, const GpuOp *o) {
      * del panel. El criterio es lo que la primitiva MUESTREA (un hecho de la lista), solo para escritores sin regla propia; el mosaico tiene su parche. */
     if (c0 == VPC_UNKNOWN && cov && !(id_ok(l, id) && vpc_is_mosaic(&l->prov[id])) && vrfb_op_source(o, S->draw_prev, NULL) != VRFB_NONE && S->covered(S->covered_ctx, VPC_COV_FEEDBACK, 0)) return VPC_WORLD;   /* c0: las mismas primitivas que mide el anfitrión (feedback_from_list) */
     if (c == VPC_SCOPE_FRAME && S && S->bino) return VPC_SCOPE_BINO;   /* marco del juego de los prismáticos: a la capa HUD (el visor la pinta sobre la vista aumentada) */
+    if ((c == VPC_SCOPE_FRAME || c == VPC_SCOPE_TEXT) && S && S->guided && !S->bino) return VPC_WEAPON_HUD;   /* sight.c de un arma guiada (lista con stnsight.c / sgtrect3.c / rmissile.c, sin prismáticos): rótulo y marco de su HUD, a la capa del arma */
     if (id_ok(l, id) && (c == VPC_HUD_WORLD || c == VPC_UNKNOWN) && S && S->win[id] == 1) return VPC_WINDOW;
     if (c == VPC_UNKNOWN && cov && o->pkt_addr && id_ok(l, o->prov) && vpc_is_chain(&l->prov[o->prov]) && S->covered(S->covered_ctx, VPC_COV_PACKET, o->pkt_addr))
         return VPC_WORLD;   /* del canal 3D, sin escritor con regla y con un elemento que el nativo dibuja: efecto del mundo */
@@ -169,8 +184,8 @@ void vpc_fx_extract(const VrProvLearn *S, const GpuDrawList *l, int rec_screen, 
                 if (y > maxy) maxy = y;
                 if (col > cmax) cmax = col;
             }
-        } else if (c == VPC_SCOPE_FRAME || c == VPC_SCOPE_TEXT || c == VPC_SCOPE_BINO) {
-            scope = 1;
+        } else if (c == VPC_SCOPE_FRAME || c == VPC_SCOPE_TEXT || c == VPC_SCOPE_BINO || (c == VPC_WEAPON_HUD && vpc_is_scope_actor(&l->prov[vpc_op_id(l, o)]))) {
+            scope = 1;   /* el sight.c / stnsight.c del Stinger siguen contando como mira (VrFx.scope_on) aunque su 2D ya no vaya al panel: comportamiento de antes */
         }
     }
     if (any_bar) {

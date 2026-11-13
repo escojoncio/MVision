@@ -26,21 +26,22 @@ final class RGRenderer {
     private(set) var hudTextureSRGB: MTLTexture?
     /// Rect UV (u0, v0, u1, v1; margen del 1 %) de la ventana de menú dentro de hudTexture: las primitivas 2D nuevas respecto al HUD de antes de abrir el menú. nil = usar la capa entera (créditos incluidos).
     private(set) var hudMenuUV: SIMD4<Float>?
-    /// Capas 2D auxiliares por clase de procedencia (vr/scene/vr_prov.h): 1 = ventana del selector / pausa, 2 = pantalla completa (créditos); el índice 0 no se usa (el HUD es hudTexture). nil = sin capa: ese panel no se dibuja.
-    private(set) var auxTexture: [MTLTexture?] = [nil, nil, nil]
-    private(set) var auxTextureSRGB: [MTLTexture?] = [nil, nil, nil]
-    private var auxRing: [[MTLTexture]] = [[], [], []]
-    private var auxRingSRGB: [[MTLTexture]] = [[], [], []]
-    private var auxIdx = [0, 0, 0], auxW = [0, 0, 0], auxH = [0, 0, 0]
-    private var auxSeq: [UInt32] = [0, 0, 0]
+    /// Capas 2D auxiliares por clase de procedencia (vr/scene/vr_prov.h): 1 = ventana del selector / pausa, 2 = pantalla completa (créditos), 3 = HUD PROPIO del arma (Stinger / Nikita: clase WEAPON_HUD; NO es un panel, solo la leen las pantallas LED en encodeSpecial);
+    /// el índice 0 no se usa (el HUD es hudTexture). nil = sin capa: ese panel no se dibuja.
+    private(set) var auxTexture: [MTLTexture?] = [nil, nil, nil, nil]
+    private(set) var auxTextureSRGB: [MTLTexture?] = [nil, nil, nil, nil]
+    private var auxRing: [[MTLTexture]] = [[], [], [], []]
+    private var auxRingSRGB: [[MTLTexture]] = [[], [], [], []]
+    private var auxIdx = [0, 0, 0, 0], auxW = [0, 0, 0, 0], auxH = [0, 0, 0, 0]
+    private var auxSeq: [UInt32] = [0, 0, 0, 0]
     /// Planos de resta y tope (dos planos apilados en vertical, vr_layer2d.h vl2d_pack) de las capas 2D fieles: los de hudTexture (nil con el HUD de reserva) y los de cada capa auxiliar.
     /// XRFinalPass los necesita, junto con el color sin vista sRGB, para componer la capa sobre el mundo como la GPU original.
     private var hudPlanesRing: [MTLTexture] = [], hudXbrPlanes: [MTLTexture] = []
-    private var auxPlanesRing: [[MTLTexture]] = [[], [], []]
+    private var auxPlanesRing: [[MTLTexture]] = [[], [], [], []]
     /// Ampliación MMPX de las capas auxiliares (ventana del selector / pausa, pantalla completa): UN solo destino (Metal serializa su escritura y su lectura), su vista sRGB y los planos ampliados (solo con «Composición 2D exacta»). Vacío = sin ampliar.
-    private var auxUp: [[MTLTexture]] = [[], [], []], auxUpSRGB: [[MTLTexture]] = [[], [], []], auxUpPlanes: [[MTLTexture]] = [[], [], []]
+    private var auxUp: [[MTLTexture]] = [[], [], [], []], auxUpSRGB: [[MTLTexture]] = [[], [], [], []], auxUpPlanes: [[MTLTexture]] = [[], [], [], []]
     /// Última capa 2D auxiliar (diagnóstico): tamaño de la textura que se muestrea y filtro aplicado.
-    private(set) var auxDiag = ["", "", ""]
+    private(set) var auxDiag = ["", "", "", ""]
     var hudPlanes: MTLTexture? {
         guard hudHQ, hudHQIdx < hudPlanesRing.count else { return nil }
         return hudUpOK && !hudXbr.isEmpty && !hudXbrPlanes.isEmpty ? hudXbrPlanes[0] : hudPlanesRing[hudHQIdx]
@@ -49,7 +50,7 @@ final class RGRenderer {
     /// marco. nil con el HUD de reserva. XRPresenter la usa para registrar el panel con la pantalla 3D y con los recortes del troceo.
     private var hudWinRaw: XR2DWindow?
     var hudWin: XR2DWindow? { hudHQ ? hudWinRaw : nil }
-    var auxPlanes: [MTLTexture?] { (0..<3).map { k in
+    var auxPlanes: [MTLTexture?] { (0..<4).map { k in
         guard auxTexture[k] != nil, auxIdx[k] < auxPlanesRing[k].count else { return nil }
         return auxUpOK[k] && !auxUp[k].isEmpty && !auxUpPlanes[k].isEmpty ? auxUpPlanes[k][0] : auxPlanesRing[k][auxIdx[k]]
     } }
@@ -216,7 +217,7 @@ final class RGRenderer {
     private var hudScaler: XRPixelScaler?
     private var hudXbr: [MTLTexture] = [], hudXbrSRGB: [MTLTexture] = []
     private var hudUpOK = false          // la última ampliación del HUD se codificó (si no, se muestra la capa nativa)
-    private var auxUpOK = [false, false, false]
+    private var auxUpOK = [false, false, false, false]
     /// Tamaño LÓGICO (píxeles del juego) de la capa que muestra hudTexture: la textura puede llevar además la ampliación xBR (x3) o la escala del HUD de reserva (x4).
     var hudLogical: SIMD2<Float> { hudHQ ? SIMD2<Float>(Float(hudHQW), Float(hudHQH)) : SIMD2<Float>(320, 240) }
     private var hudHQMode: Int32 = 0, hudHQView: Int32 = 0   // modo (VL_*) y vista ((view_kind << 8) | view_reason) del trabajo que produjo la capa mostrada
@@ -653,7 +654,7 @@ final class RGRenderer {
     }
 
 
-    /// Capa 2D auxiliar k (1 = ventana del selector / pausa, 2 = pantalla completa) del trabajador de su clase (mv_vrhost_hud2d_acquire_l): misma aceptación por vista que takeLayer2D; sin capa o rechazada = nil (el panel no se dibuja).
+    /// Capa 2D auxiliar k (1 = ventana del selector / pausa, 2 = pantalla completa, 3 = HUD propio del arma) del trabajador de su clase (mv_vrhost_hud2d_acquire_l): misma aceptación por vista que takeLayer2D; sin capa o rechazada = nil (el panel no se dibuja).
     private func takeAuxLayer(_ k: Int, _ commandBuffer: MTLCommandBuffer) {
 #if MV_BENCH
         return
@@ -864,7 +865,7 @@ final class RGRenderer {
             groups.append((0, batches.count, Int.max))
         }
         takeLayer2D(commandBuffer)
-        takeAuxLayer(1, commandBuffer); takeAuxLayer(2, commandBuffer)
+        takeAuxLayer(1, commandBuffer); takeAuxLayer(2, commandBuffer); takeAuxLayer(3, commandBuffer)
         let doHud = (gotNew || !hudDone) && drawWorld && !hudHQ
         // Render nativo: se prepara SIEMPRE (reconoce épocas del almacén aunque no se dibuje: menús) y lo que no se pueda dibujar se REPITE (último válido) o se funde a negro.
         // Modo gpu: no hay nada nativo que preparar; la pantalla 3D se considera sana (el 3D sale de la lista) salvo que encodeStereo falle.
@@ -1850,7 +1851,7 @@ final class RGRenderer {
                 let bv = bodyViews ?? views
                 weapon?.encode(encoder: enc, views: bv, projections: projections, layered: amplify > 0, viewIndex: viewIndex)
                 if let sv = special {
-                    weapon?.encodeSpecial(encoder: enc, view: sv, aux: auxImage, auxLinear: auxStoredLinear, hud: hudTexture, hudPremultiplied: hudHQ, hudWin: hudWin, views: bv,
+                    weapon?.encodeSpecial(encoder: enc, view: sv, aux: auxImage, auxLinear: auxStoredLinear, hud: hudTexture, hudPremultiplied: hudHQ, weaponHud: auxTexture[3], hudWin: hudWin, views: bv,
                                           projections: projections, layered: amplify > 0, viewIndex: viewIndex)
                 }
             }
