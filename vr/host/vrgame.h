@@ -67,6 +67,7 @@ typedef struct {
     int32_t loader;          /* 0 sin pedir, 1 cargando, 2 listo, 3 fallo */
     int32_t active;          /* arma VR mostrada y mandando */
     int32_t weapon;          /* arma VR mostrada (índice del puente), -1 ninguna */
+    int32_t game_weapon;     /* arma equipada en el juego (BridgeState.weapon; -1 ninguna o sin partida), tenga o no arma VR mostrada */
     int32_t mag_rounds, chambered, mag_inserted;   /* arma VR */
     int32_t game_mag, game_reserve;                 /* munición del juego */
     uint32_t shots;          /* disparos VR desde el arranque */
@@ -182,6 +183,8 @@ int vrgame_test_load_logic(int game_id);   /* pruebas: carga la ranura solo de l
 int vrgame_weld_main(void);
 /* La IK de brazos se pide aunque el motor oculte a Snake (arma de dos manos mostrada, jugador al mando o con menú / pausa encima, sin cinemática): la regla que vr_body consulta además en su propio apply (primer frame tras equipar). Pura sobre `bs`. */
 int vrgame_ik_hidden_wanted(const struct BridgeState *bs);
+/* Nikita: cuánto (u del motor) hay que adelantar la boca del misil por su dirección dir_w (unitaria, mundo) para que quede fuera del cajón de colisión de Snake (|dx|,|dz| < 450 u y |dy| < 800 u alrededor de body_w; TargetConflict). 0 si ya está fuera, si no hay dirección horizontal útil o si la pared (blocked(user, t_u) != 0 a t_u u por delante; opcional) lo impide. Pura. */
+float vrgame_nikita_body_push(const float mouth_w[3], const float body_w[3], const float dir_w[3], int (*blocked)(void *user, float t_u), void *user);
 void vrgame_test_clock(uint64_t ns);                                 /* pruebas: reloj inyectado que arranca en ns (0 = vuelve al reloj real); solo avanza con vrgame_test_advance */
 void vrgame_test_advance(uint64_t ns);                                 /* pruebas: avanza el reloj inyectado */
 int vrgame_test_sim_hand(float p[3], float q[4]);                          /* pruebas: mano del arma (marco de la mano nueva) con la que se simuló el último frame publicado; 0 si no hay frame publicado */

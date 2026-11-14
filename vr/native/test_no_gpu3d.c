@@ -122,6 +122,8 @@ int main(void) {
     CHECK(strstr(nr, "if r.kind != 0 && !drawFx { continue }") != NULL, "con los efectos no permitidos se omiten los tramos de efectos (continue), no se pierde el fotograma");
     CHECK(strstr(nr, "serial &- lastForceGc >= 10") != NULL, "barrido forzado de mallas como mucho cada 10 fotogramas");
     CHECK(strstr(xe, "renderer.stereoImage") != NULL, "la imagen estéreo llega a la pantalla 3D");
+    CHECK(strstr(xe, "(gs.fx.binocular != 0 || (vrWeapon.active == 0 && vrWeapon.game_weapon == 9))") != NULL && strstr(xe, "gs.fx.binocular != 0 || vrWeapon.active == 0)") == NULL,
+          "XRFrameEncoder: el disco de mira de reserva (sight.c sin scope.c) solo con el PSG1 equipado en el juego y sin arma VR mostrada; al desequipar el PSG1 (o con otra arma / sin arma) no sale la mirilla");
     /* 6) modo de render: gpu por defecto, nativo con MV_RENDER=nativo; sin menú ni ajuste guardado (el modo no se cambia en caliente desde la interfaz) */
     CHECK(count(xp, "renderMode") == 0 && count(gm, "renderMode") == 0, "el menú VR y el modelo no tienen modo de render");
     CHECK(count(xp, "XRMenuItem.render") == 0, "sin elemento de menú de render");
@@ -331,6 +333,8 @@ int main(void) {
         if (rw && wm) CHECK(strstr(rw, "mv_vrgame_special_sync(&synced)") != NULL && strstr(rw, "hd.nik = simd_float4(") != NULL && strstr(wm, "float4 nik;") != NULL && strstr(wm, "vr_spc_dot(rgb, r, ain") != NULL
                             && count(wm, "vr_spc_dot(rgb, r, ain") == 2 && strstr(wm, "float3(1.0, 0.08, 0.05)") != NULL && strstr(wm, "float3(0.2, 1.0, 0.25)") != NULL,
                             "LED: sync con la mano del modelo, HUD propio del Nikita (nik) y puntos de mira (rojo Stinger, verde Nikita)");
+        if (wm) CHECK(count(wm, "vr_spc_dot(rgb, r, ain, 0.0065 / max(0.5 * (1.0 - 2.0 * d.p1.y), 0.05)") == 2 && strstr(wm, "0.0125") == NULL,
+                      "LED: punto de mira PEQUEÑO e igual en Stinger y Nikita (radio 0,65 %% de la altura de la pantalla)");
         free(rw); free(wm);
     }
     {   /* HUD del jugador con Stinger / Nikita: el panel plano 2D (radar, vida, alerta...) SIGUE como con cualquier arma, ENTERO y sin recortes por posición. El HUD propio del arma (stnsight.c, sgtrect3.c, rmissile.c) es la clase

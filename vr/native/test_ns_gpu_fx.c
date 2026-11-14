@@ -436,6 +436,16 @@ static void t_sky(void) {
     CHECK(fabsf(vb[0].p[2] - 200.0f) < 1e-3f && fabsf(vb[0].p[0] - 18.0f) < 1e-3f && vb[0].eyes == 3u, "a 200 m, en su sitio y para los dos ojos: (%f %f %f)", vb[0].p[0], vb[0].p[1], vb[0].p[2]);
     CHECK(vb[0].col[0] == 128.0f && vb[0].col[2] == 128.0f, "sin niebla: color %f", vb[0].col[0]);
     CHECK(strcmp(ns_gpu_fx_role_name(23), "sky") == 0, "papel 23 = sky");
+    /* uv de las teselas: ninguna esquina cae en el borde exacto (u0 / u0 + ancho): el texel vecino de VRAM no es de la tesela y el error de perspectiva (~1e-3 texel) lo dejaría leer */
+    { int in = 1; for (int k = 0; k < 6; k++) if (!(vb[k].u >= 0.01f && vb[k].u <= 30.99f && vb[k].v >= 0.01f && vb[k].v <= 30.99f)) in = 0;
+      CHECK(in, "uv del cielo dentro de la tesela [0,31] con margen: (%f %f) (%f %f)", vb[0].u, vb[0].v, vb[3].u, vb[3].v);
+      CHECK(fabsf(vb[0].u - 0.02f) < 1e-4f && fabsf(vb[1].u - 30.98f) < 1e-4f, "margen de 0,02 texel: %f %f", vb[0].u, vb[1].u); }
+    /* última columna / fila de la página: ns_fx guarda 255 como arista final de una tesela que llega a 256; son 32 texels (224..255), no 31 */
+    { NsEffect l = e; for (int v = 0; v < 4; v++) { l.uv[v][0] = (uint8_t)(v & 1 ? 255 : 224); l.uv[v][1] = (uint8_t)(v >> 1 ? 255 : 224); }
+      CHECK(build(&l, 1, vb, runs, keys, &o) == 0 && o.n_opaque == 6, "cielo en el borde de la página");
+      CHECK(fabsf(vb[0].u - 224.02f) < 1e-4f && fabsf(vb[1].u - 255.98f) < 1e-4f && fabsf(vb[0].v - 224.02f) < 1e-4f && fabsf(vb[2].v - 255.98f) < 1e-4f, "arista 255 = final de página: u %f..%f v %f..%f", vb[0].u, vb[1].u, vb[0].v, vb[2].v); }
+    /* fuera del cielo los uv no se tocan (mismo quad con NOFOG de la lista de la GPU) */
+    { NsEffect n = e; n.role = 0; CHECK(build(&n, 1, vb, runs, keys, &o) == 0 && vb[0].u == 0.0f && vb[1].u == 31.0f, "no cielo: uv intactos (%f %f)", vb[0].u, vb[1].u); }
     P.fog = NULL;
 }
 

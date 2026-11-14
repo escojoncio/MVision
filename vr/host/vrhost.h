@@ -77,7 +77,7 @@ typedef struct {
     int32_t posture;     /* -1 desconocida, 0 de pie, 1 agachado, 2 tumbado */
     int32_t menu;        /* 1 = fuera de control (título, carga, pausa, menú, comunicador, escena): sin locomoción, stick -> cruceta */
     int32_t cam_active;  /* 1 si la cámara del motor es la de la cabeza del usuario */
-    int32_t first_person;
+    int32_t first_person;   /* 1 = 1.ª persona en la que el stick del juego solo mira (vrhost_look_only): sin locomoción. NO es el bit WATCH crudo */
     int32_t weapon;      /* -1 ninguna, 0..9 */
     int32_t life, life_max;
     /* --- presentación (vr_view.h; al final: no rompe a quien solo lea lo anterior) --- */

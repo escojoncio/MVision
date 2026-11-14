@@ -216,6 +216,37 @@ static void t_loco(void) {
 }
 
 /* Retroceso: el stick de mover hacia atrás empuja al juego hacia atrás respecto a donde mira la cabeza, sin girar la vista (cuerpo ni cámara: body_yaw intacto). */
+/* Primera persona del juego (PLAYER_WATCH): el stick izquierdo del original mira (gira/inclina el cuerpo de Snake), pero aquí la cámara es la cabeza:
+ * no debe llegar al juego (lx/ly neutros, sin viñeta de locomoción). Fuera de primera persona la locomoción no cambia. */
+static void t_first_person(void) {
+    for (int mode = 0; mode < 2; mode++) {
+        vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); vr_pad_t o;
+        if (mode) { vri_cfg_t c = s.cfg; c.mode = VRI_MODE_PAD; vr_input_set_cfg(&s, &c); }
+        float dirs[4][2] = {{0, 1}, {0, -1}, {1, 0}, {-1, 0}};
+        for (int d = 0; d < 4; d++) {
+            f.first_person = false;
+            if (mode) { f.pad_lx = dirs[d][0]; f.pad_ly = dirs[d][1]; } else { f.hand[0].stick_x = dirs[d][0]; f.hand[0].stick_y = dirs[d][1]; }
+            vr_input_update(&s, &f, &o);
+            CHECK(o.lx != 0x80 || o.ly != 0x80);            /* fuera de primera persona: camina */
+            f.first_person = true;
+            vr_input_update(&s, &f, &o);
+            CHECK(o.lx == 0x80 && o.ly == 0x80);            /* en primera persona: neutro */
+            run(&s, &f, 90, &o);
+            CHECK(o.lx == 0x80 && o.ly == 0x80 && vr_input_vignette(&s) < 0.05f);
+            f.first_person = false;
+            vr_input_update(&s, &f, &o);
+            CHECK(o.lx != 0x80 || o.ly != 0x80);            /* al salir vuelve la locomoción */
+        }
+    }
+    /* los botones y el resto no cambian en primera persona (gatillo = R2) */
+    vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); vr_pad_t o;
+    f.first_person = true; f.hand[1].trigger = 1; f.hand[0].stick_y = 1; vr_input_update(&s, &f, &o);
+    CHECK(o.buttons == VRI_PAD_R2 && o.lx == 0x80 && o.ly == 0x80);
+    /* en menús no cambia nada (el stick sigue haciendo de cruceta) */
+    vr_input_init(&s); f = frame(); f.first_person = true; f.menu = true; f.hand[0].stick_y = 1; vr_input_update(&s, &f, &o);
+    CHECK(o.buttons == VRI_PAD_UP);
+}
+
 static void t_back(void) {
     vr_input_t s; vr_input_init(&s); vr_input_frame_t f = frame(); vr_pad_t o;
     f.hand[0].stick_y = -1;                        /* atrás */
@@ -645,7 +676,7 @@ static void t_fuzz(void) {
 }
 
 int main(void) {
-    t_axis(); t_heading(); t_sense_buttons(); t_menu_map(); t_pad_mode(); t_loco(); t_back(); t_flip(); t_snap(); t_smooth();
+    t_axis(); t_heading(); t_sense_buttons(); t_menu_map(); t_pad_mode(); t_loco(); t_first_person(); t_back(); t_flip(); t_snap(); t_smooth();
     t_vignette(); t_crouch(); t_posture_modes(); t_calib(); t_menu(); t_robust(); t_review(); t_hold_advance(); t_hysteresis(); t_menu_debounce(); t_fuzz();
     printf("%d comprobaciones, %d fallos\n", checks, fails);
     return fails ? 1 : 0;

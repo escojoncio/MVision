@@ -227,7 +227,7 @@ final class XRRenderLoop {
             ControllerHub.shared.releaseAll(from: .vr)
         } else {
             VRInput.shared.frame(head: tracked || !everTracked ? recentered : nil, dt: dt,
-                                 gamePosture: gs.posture, menu: gs.menu != 0, comms: gs.comms != 0, recenter: recenterInverse)
+                                 gamePosture: gs.posture, menu: gs.menu != 0, comms: gs.comms != 0, firstPerson: gs.first_person != 0, recenter: recenterInverse)
         }
         wasBlocked = blocked
         // Hápticos del arma VR (disparo, recarga) y pose del radar de muñeca (antebrazo izquierdo tras la IK de vr/body).

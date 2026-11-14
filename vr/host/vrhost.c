@@ -1575,7 +1575,7 @@ static void publish_state(void) {
     g.menu = !(core && bs.in_control) || wall_view || event_view;   /* capa de mando original (stick = cruceta, un botón por botón): menús, escenas, la vista de pared y la de evento */
     g.posture = core && bs.stance >= 0 && bs.stance <= 2 ? bs.stance : -1;
     g.cam_active = vrcam_active();
-    g.first_person = bs.first_person;
+    g.first_person = vrhost_look_only(bs.first_person, (bs.player_status & BRIDGE_PS_MOVE_WATCH) != 0, (bs.player_status & BRIDGE_PS_INTRUDE) != 0);   /* solo la 1.ª persona de mirar (vr_input corta la locomoción); la de andar (GM_FirstPerson) no */
     g.weapon = bs.weapon;
     g.life = bs.life; g.life_max = bs.life_max;
     {

@@ -51,6 +51,11 @@ int main(void) {
     i = world(); i.in_control = 1; i.scene3d = 1; i.native_ok = 1; CHECK(vrview_reason(&i) == VRV_R_WORLD && vrview_kind_of(&i) == VRV_K_WORLD, "caja con control: mundo");
     i.in_control = 0; CHECK(vrview_reason(&i) == VRV_R_WORLD && vrview_kind_of(&i) == VRV_K_WORLD, "caja sin control (transicion al entrar/salir): mundo continuo");
     CHECK(vrhost_duct_ring(1, 1, 2) == 1 && vrhost_duct_ring(1, 0, 2) == 0 && vrhost_duct_ring(0, 1, 2) == 0 && vrhost_duct_ring(1, 1, 1) == 0, "anillo del conducto: solo con camara VR + 1a persona de gateo (INTRUDE) + anillo de resta");
+    /* stick de locomoción cortado solo en la primera persona "de mirar" (watch, move_watch, intrude) */
+    CHECK(vrhost_look_only(1, 0, 0) == 1 && vrhost_look_only(0, 0, 0) == 0, "mirar parado (WATCH sin MOVE_WATCH): el stick solo miraria, se corta");
+    CHECK(vrhost_look_only(1, 1, 0) == 0, "1a persona con andar (GM_FirstPerson: WATCH + MOVE_WATCH): el stick camina, no se corta");
+    CHECK(vrhost_look_only(1, 1, 1) == 1, "mirar en conducto (INTRUDE marca MOVE_WATCH siempre): se corta");
+    CHECK(vrhost_look_only(0, 1, 0) == 0, "andar sin WATCH: nada que cortar");
     CHECK(vrhost_box_mask(1, 1, 1) == 1 && vrhost_box_mask(1, 0, 1) == 0 && vrhost_box_mask(1, 1, 0) == 0 && vrhost_box_mask(0, 1, 1) == 0, "mascara de la caja: solo nativo + en la caja + con mascara");
 
     VrView v;

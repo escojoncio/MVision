@@ -1396,6 +1396,14 @@ static void sky_dome_cfg(int W, int H, int TW, int flat_tail, int bgr, int bgg, 
         if (it->idx < i_top) {   /* teselas de la imagen: solo filas < ROWS, nada por debajo de su borde inferior (ni gris plano ni filas repetidas) */
             ntile++;
             bad_tile += (int)it->idx / NTX >= ROWS || !(it->flags & NSFX_F_TEXTURED);
+            {   /* uv: aristas reales de la tesela (u0 + k*TW/KS, v0 / v0 + TW); la que pasa de 255 (última columna de la página: 224 + 32 = 256) se guarda saturada a 255, sin encoger la tesela */
+                const int cc = (int)it->idx % NTX, u0 = (cc % 8) * TW, v0 = ((int)it->idx / NTX) * TW;
+                for (int v = 0; v < 4; v++) {
+                    long eu = lround((double)u0 + (double)(it->sub + (v & 1)) / KS * TW); if (eu > 255) eu = 255;
+                    int ev = (v >> 1) ? v0 + TW : v0; if (ev > 255) ev = 255;
+                    bad_tile += it->uv[v][0] != eu || it->uv[v][1] != ev;
+                }
+            }
             for (int v = 0; v < 4; v++) bad_tile += it->pos[v][1] < G_E[1] + R * sl_bot - 8.0;
         } else if (it->idx < i_bg) {   /* tapa superior: vértices 0 y 1 en el centro (ojo + R*sl_top en vertical), 2 y 3 en el borde; v = primera fila de texels */
             ntop++;

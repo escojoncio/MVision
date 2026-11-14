@@ -418,8 +418,8 @@ void vr_input_update(vr_input_t *s, const vr_input_frame_t *f_in, vr_pad_t *out)
             rx = vr_input_axis_u8(raw_rx);
             ry = vr_input_axis_u8(-raw_ry);
         }
-        /* locomoción */
-        if (mmag > 0.0f) {
+        /* locomoción (en primera persona del juego el stick izquierdo solo miraría: la cámara es la cabeza, se deja neutro) */
+        if (mmag > 0.0f && !f->first_person) {
             float ref = 0.0f;
             if (c->loco_ref == VRI_LOCO_HAND && c->mode == VRI_MODE_SENSE && move_hand->tracked)
                 ref = vr_input_quat_heading(move_hand->quat);

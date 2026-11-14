@@ -254,7 +254,9 @@ static void bone_frame(float *R, const float *off_local, const float *w, const f
     for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) R[3 * i + j] = w[i] * l0[j] + w1[i] * l1[j] + w2[i] * l2[j];
 }
 
-#define HARD_STRETCH_MAX 6.0f      /* tope del estirado del brazo atado al arma (el normal es VrArmLimits.stretch_max <= 2,5): solo un salto de pose absurdo lo alcanza */
+#define WELD_FOREARM_SHARE 0.3f        /* brazo atado al arma (vrbody_set_weld): parte del giro que asume el antebrazo y su tope (grados); ver vrbody_apply */
+#define WELD_FOREARM_TWIST_DEG 30.0f
+#define HARD_STRETCH_MAX 6.0f     /* tope del estirado del brazo atado al arma (el normal es VrArmLimits.stretch_max <= 2,5): solo un salto de pose absurdo lo alcanza */
 static int solve_core(const VrArmRig *rig, const VrArmLimits *lim, const VrArmIn *in, VrArmOut *out, float swivel_deg) {
     if (!rig || !lim || !in || !out) return -1;
     if (!isfinite(lim->elbow_min_deg) || !isfinite(lim->reach_margin) || !isfinite(lim->shoulder_back) || !isfinite(lim->shoulder_cross) ||
@@ -1450,7 +1452,11 @@ static int apply_main(uint8_t *ram) {
         in.has_prev = h->tau_ok; in.tau_prev = h->tau; in.tau_f_prev = h->tau_f; in.swivel_prev = h->swivel;
         VrArmOut sol;
         VrArmLimits lim_s = cfg->limits;
-        if (G.weld[s]) lim_s.shoulder_back = lim_s.shoulder_cross = -1.0f;      /* brazo atado al arma: la mano va soldada a ella y manda (se alarga si hace falta, sin tope de hombro): nunca queda corta ni suelta */
+        if (G.weld[s]) {      /* brazo atado al arma: la mano va soldada a ella y manda (se alarga si hace falta, sin tope de hombro): nunca queda corta ni suelta */
+            lim_s.shoulder_back = lim_s.shoulder_cross = -1.0f;
+            /* el giro que pide el arma lo asume sobre todo la mano (ya lleva la orientación pedida sin límite, la muñeca no se mueve); el antebrazo, pieza rígida, solo ~30 grados: con 90 cizalla la malla en el codo */
+            lim_s.forearm_share = fminf(lim_s.forearm_share, WELD_FOREARM_SHARE); lim_s.forearm_twist_deg = fminf(lim_s.forearm_twist_deg, WELD_FOREARM_TWIST_DEG);
+        }
         if (vrbody_solve_arm(&rig, &lim_s, &in, &sol) != 0) { G.st.bad_solve++; h->tau_ok = 0; continue; }
         h->tau_ok = 1; h->tau = sol.tau; h->tau_f = sol.tau_f; h->swivel = sol.swivel;
         if (sol.flags & VRARM_STRETCHED) G.st.stretched++;

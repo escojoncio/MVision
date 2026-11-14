@@ -194,6 +194,10 @@ static inline int vrhost_box_mask(int native, int in_box, int frame_on) { return
  * bordes de esa cámara 2D. Con la cámara VR sería una viñeta a pantalla completa pegada a la cabeza: no se dibuja. Fuera de INTRUDE, o con otro modo de mezcla (un anillo de gas de
  * verdad), se queda. `intrude` = BRIDGE_PS_INTRUDE del estado del jugador; `abr` = modo de mezcla del anillo (2 = resta). */
 static inline int vrhost_duct_ring(int vr_active, int intrude, int abr) { return vr_active && intrude && abr == 2; }
+/* ¿Primera persona en la que el stick izquierdo del juego solo MIRA (cuerpo/mira de Snake) y por tanto no se envía locomoción (vr_input first_person)? `watch` = BRIDGE_PS_WATCH|WATCH_PEEK;
+ * `move_watch` = BRIDGE_PS_MOVE_WATCH (modo GM_FirstPerson, sna_init.c:8189: indicador 0x10 sin 0x20 = Snake ANDA en 1.ª persona, con WATCH puesto por sub_8004EB74); `intrude` = BRIDGE_PS_INTRUDE.
+ * En conductos el indicador 0x10 lo pone sna_8004EC8C al entrar y MOVE_WATCH queda puesto también al mirar con triángulo (sub_80052468 mira con el stick), así que con INTRUDE no cuenta. */
+static inline int vrhost_look_only(int watch, int move_watch, int intrude) { return watch && !(move_watch && !intrude); }
 /* Banderas de efectos de pantalla (NS_SFX_*) de la última escena publicada tal como las ve prov_covered. `has_fx` = escena con NS_SV_FX; `gas_intensity` = intensidad del anillo (0 = sin anillo); `duct_cut` = el cierre
  * de la escena recortó el anillo del conducto (vrhost_duct_ring): el nativo ya no lo pinta PERO tampoco debe verse el de gas_efct.c en el panel 2D (marco 4:3), así que cuenta como cubierto (NS_SFX_GAS). */
 static inline uint32_t vrhost_scene_sfx(int has_fx, uint32_t flags, float gas_intensity, int duct_cut) {

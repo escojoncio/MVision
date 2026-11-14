@@ -650,6 +650,23 @@ size_t ns_gpu_fx_near_describe(const NsGpuFxNearAcc *a, char *buf, size_t cap) {
     return n > 0 ? ((size_t)n < cap ? (size_t)n : cap - 1) : 0;
 }
 
+/* Teselas del cielo: sus esquinas caen EXACTAMENTE en el borde de la tesela (u0 y u1 = u0 + ancho, que es ya el primer texel de la tesela vecina). Con quads de 200 m el uv interpolado con perspectiva
+ * tiene un error ~1e-3 texel: en el borde el texel leído (floor) puede ser el vecino y pinta una línea tenue donde la tesela es transparente. Se meten las esquinas SKY_UV_INSET texel hacia dentro.
+ * ns_fx recorta la arista final a 255 cuando la tesela llega al final de la página de textura (u0 + ancho >= 256, no cabe en un byte): esa arista es 256. */
+#define SKY_UV_INSET 0.02f
+static void fx_sky_uv_inset(float uvs[4][2]) {
+    for (int a = 0; a < 2; a++) {
+        float mn = uvs[0][a], mx = uvs[0][a];
+        for (int v = 1; v < 4; v++) { if (uvs[v][a] < mn) mn = uvs[v][a]; if (uvs[v][a] > mx) mx = uvs[v][a]; }
+        const float hi_edge = (mx == 255.0f && mn < 255.0f) ? 256.0f : mx;
+        if (!(hi_edge - mn > 4.0f * SKY_UV_INSET)) continue;
+        for (int v = 0; v < 4; v++) {
+            const float u = uvs[v][a];
+            uvs[v][a] = u >= mx ? hi_edge - SKY_UV_INSET : u <= mn ? mn + SKY_UV_INSET : u;
+        }
+    }
+}
+
 int ns_gpu_fx_build(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *prm, NsGpuFxVert *verts, uint32_t cap_verts, NsGpuFxRun *runs, uint32_t cap_runs,
                     uint64_t *keys, uint32_t cap_keys, NsGpuFxOut *out) {
     return ns_gpu_fx_build_ex(fx, n_fx, prm, verts, cap_verts, runs, cap_runs, keys, cap_keys, NULL, 0, out);
@@ -692,6 +709,7 @@ int ns_gpu_fx_build_ex(const NsEffect *fx, uint32_t n_fx, const NsGpuFxParams *p
         uint32_t mask = all_eyes;
         int nq = 0, tri_only = 0, used_zref = 0;
         for (int v = 0; v < 4; v++) { uvs[v][0] = e->uv[v][0]; uvs[v][1] = e->uv[v][1]; for (int c = 0; c < 3; c++) cols[v][c] = e->rgb[v][c]; }
+        if (e->role == FXR_SKY && (e->flags & NS_EF_TEXTURED)) fx_sky_uv_inset(uvs);
         if (e->kind == NS_EK_BILLBOARD) {
             const int wsz = (e->flags & NS_EF_WORLD_SIZE) != 0;
             if (!fx_finite3(e->p[0]) || (!wsz && !(e->ref_h > 0))) ok = 0;

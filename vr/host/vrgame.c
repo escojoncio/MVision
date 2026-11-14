@@ -1023,7 +1023,7 @@ static int place_project(const WPose *obj, WPose *out) {
 }
 
 /* ---- carga adhesiva (C4): colocación por rayo ----
- * El rayo parte de la cara adhesiva de la carga en la mano y sigue su "delante" (-Z) hasta PLACE_RAY_M (alcance de brazo). Impacta con el primero de: el suelo del juego, las paredes de
+ * El rayo parte de la cara adhesiva de la carga en la mano y sigue su "delante" (-Z) hasta PLACE_RAY_M (alcance de brazo). Impacta con el primero de: las paredes de
  * colisión HZD (vrhzd_raycast) y la geometría sólida nativa (mv_vrhost_ray_distance: suelos, objetos). La carga queda en el punto del impacto, con la cara adhesiva apoyada en la superficie
  * y el eje Z del modelo (c4_bomb, medido en STAGE.DIR: cara adhesiva en z = -79, antena hasta z = 170) saliendo de ella; suelo/techo: el eje largo sigue la guiñada de la mano; pared: vertical.
  * Sin impacto en el alcance, o con el punto a más de PLACE_REACH_M de la cabeza: se rechaza (la carga sigue en la mano). */
@@ -1038,10 +1038,13 @@ static const BridgeState *place_bs;   /* puente del VBlank en curso (vrgame_pad)
  * El juego pega la carga al cuerpo del soldado (NewBakudan attached=1, desplazamiento fijo en su espacio local; sna_800571B8) con SU blanco, no con el punto del rayo VR: solo se deja pasar al juego si el rayo
  * TOCA a ese mismo blanco. Devuelve 1 si lo hay; *t_touch = unidades hasta el primer soldado enemigo tocado por el rayo (con o sin la prueba del juego), -1 ninguno. */
 #define C4_AIM_TOL 150.0f       /* holgura (unidades = mm) del rayo contra la caja del soldado */
+static struct { const char *kind; int game, touched, n_targets; float surf_m, sold_m; } c4_dbg;      /* diagnóstico [c4] objetivo=: de dónde sale el resultado de la última place_c4 */
 static int c4_aim_target(const float ow[3], const float dw[3], float reach, float *t_touch) {
     *t_touch = -1.0f;
+    c4_dbg.game = c4_dbg.touched = -1; c4_dbg.n_targets = 0;
     const BridgeState *bs = place_bs;
     if (!bs || !(bs->valid & BRIDGE_OK_TARGETS)) return 0;
+    c4_dbg.n_targets = bs->n_targets;
     const float yaw = (float)bs->ctl_rot.y * (6.2831853f / 4096.0f), sn = sinf(yaw), cs = cosf(yaw);
     const float cx = (float)bs->ctl_pos.x + 300.0f * sn, cy = (float)bs->ctl_pos.y, cz = (float)bs->ctl_pos.z + 300.0f * cs;
     int game = -1, touched = -1;
@@ -1064,6 +1067,7 @@ static int c4_aim_target(const float ow[3], const float dw[3], float reach, floa
         }
         if (hit && (*t_touch < 0.0f || tn < *t_touch)) { *t_touch = tn; touched = i; }
     }
+    c4_dbg.game = game; c4_dbg.touched = touched;
     if (game < 0 || game != touched) return 0;                                  /* el juego tomaría a otro (o a ninguno): la carga no se pega a este */
     const BridgeTarget *g = &bs->targets[game];
     if (g->cls & 0x20) return 0;                                                  /* sna_8004FDE8: clase 0x20 -> descarta el blanco y no pega */
@@ -1076,6 +1080,7 @@ static int c4_aim_target(const float ow[3], const float dw[3], float reach, floa
 }
 static int place_c4(const WPose *obj, WPose *out, int *via_game) {      /* via_game = 1: la pose no vale, la carga se pega a un blanco del juego (adherida a un enemigo) y la pone el propio juego */
     *via_game = 0;
+    c4_dbg.kind = "rechazado (pose o mapa no validos)"; c4_dbg.game = c4_dbg.touched = -1; c4_dbg.n_targets = 0; c4_dbg.surf_m = c4_dbg.sold_m = -1.0f;
     if (!isfinite(obj->p.x) || !isfinite(obj->p.y) || !isfinite(obj->p.z) || !isfinite(obj->q.x) || !isfinite(obj->q.y) || !isfinite(obj->q.z) || !isfinite(obj->q.w) ||
         !isfinite(G.head.p.x) || !isfinite(G.head.p.z) || !G.map.valid || !(G.map.units_per_m > 0)) return 0;
     float qn = sqrtf(obj->q.x * obj->q.x + obj->q.y * obj->q.y + obj->q.z * obj->q.z + obj->q.w * obj->q.w);
@@ -1098,11 +1103,14 @@ static int place_c4(const WPose *obj, WPose *out, int *via_game) {      /* via_g
         const float tw = ts >= 0.0f ? ts : th;
         if (tw >= 0.0f) { best = tw / upm; on_floor = tplane >= 0.0f && fabsf(best - tplane) <= 0.05f; }
     }
-    if (best < 0.0f && tplane >= 0.0f) { best = tplane; on_floor = 1; }          /* sin impacto: el plano de los pies (nunca gana a una colisión más lejana: pasado un borde la carga quedaría flotando) */
-    if (!isfinite(best)) return 0;
+    /* El plano de los pies (tplane) solo confirma el suelo de un impacto real (on_floor): sin impacto de colisión ni de geometría NO es una superficie (antes la carga se pegaba en el aire sobre ese plano). */
+    if (!isfinite(best)) { c4_dbg.kind = "rechazado (distancia a la superficie no finita)"; return 0; }
     float t_sold;
     const int sold_ok = c4_aim_target(ow, dw, PLACE_RAY_M * upm, &t_sold);
-    if (sold_ok && t_sold >= 0.0f && (!(best >= 0.0f) || t_sold / upm <= best + 0.05f)) {      /* el rayo toca al soldado que el juego tomaría, antes que a una superficie: apuntas al soldado, no a lo que hay tras él */
+    c4_dbg.surf_m = best; c4_dbg.sold_m = t_sold >= 0.0f ? t_sold / upm : -1.0f;
+    c4_dbg.kind = "rechazado (ni blanco del juego ni superficie al alcance)";
+    if (sold_ok && t_sold >= 0.0f && (!(best >= 0.0f) || t_sold / upm <= best + 0.05f)) {
+        c4_dbg.kind = "enemigo (la pega el juego a su blanco GM_C4Target)";      /* el rayo toca al soldado que el juego tomaría, antes que a una superficie: apuntas al soldado, no a lo que hay tras él */
         *out = *obj; *via_game = 1; return 1;                                         /* el juego la pega al soldado (NewBakudan attached=1; hle_vrfire_charge ignora la pose) y la lleva con él */
     }
     if (!(best >= 0.0f)) return 0;                                                    /* sin superficie y sin blanco del juego: con la pose de la mano la carga quedaría flotando */
@@ -1134,7 +1142,8 @@ static int place_c4(const WPose *obj, WPose *out, int *via_game) {      /* via_g
         }
     }
     float dx = p[0] - G.head.p.x, dz = p[2] - G.head.p.z;
-    if (!(sqrtf(dx * dx + dz * dz) <= PLACE_REACH_M)) return 0;
+    if (!(sqrtf(dx * dx + dz * dz) <= PLACE_REACH_M)) { c4_dbg.kind = "rechazado (superficie fuera del alcance del brazo)"; return 0; }
+    c4_dbg.kind = "superficie (impacto real del rayo)";
     out->p.x = p[0] + n[0] * C4_LIFT_M; out->p.y = p[1] + n[1] * C4_LIFT_M; out->p.z = p[2] + n[2] * C4_LIFT_M;
     /* "delante" de la pose = hacia la superficie (-n); arriba de la pose = n (el eje Z del modelo sale de la superficie) */
     float fp[3] = {-n[0], -n[1], -n[2]};
@@ -1181,6 +1190,9 @@ static int launch_hook(void *user, const WLaunch *ev) {
         if (ev->kind == WL_PLACE_MINE)
             fprintf(stderr, "[mina] colocar=%s suelo_rayo=%.3f pies=%.3f mano=%.3f impacto=%s origen_mina=(%.3f %.3f %.3f) m (espacio de usuario)\n", placed ? "si" : "rechazada", mine_dbg.floor, G.floor_u, mine_dbg.hand,
                     mine_dbg.hit ? "si" : "no", mine_dbg.org[0], mine_dbg.org[1], mine_dbg.org[2]);
+        if (ev->kind == WL_PLACE_C)
+            fprintf(stderr, "[c4] objetivo=%s | superficie=%.3f m soldado_tocado=%.3f m (-1 = ninguno) | blanco_del_juego=%d blanco_tocado=%d de %d (puente_blancos=%s)\n", c4_dbg.kind ? c4_dbg.kind : "?", c4_dbg.surf_m, c4_dbg.sold_m,
+                    c4_dbg.game, c4_dbg.touched, c4_dbg.n_targets, place_bs && (place_bs->valid & BRIDGE_OK_TARGETS) ? "si" : "no");
         if (!placed) { G.rejects++; return 0; }
         if (ev->kind == WL_PLACE_C && !via_game) {      /* C4 en la pared o el suelo: el actor se crea directamente donde apunta el mando (vr_fire.h), SIN el ataque del juego: Snake no hace ninguna animación */
             if ((place_ram && c4_live_count(place_ram) >= 16) || !vrfire_c4_request(&G.map, &pp)) { G.rejects++; return 0; }
@@ -1506,18 +1518,67 @@ static float nik_wall_m(void *u, WVec3 p) {      /* distancia (m) de un punto de
     const float d = vrhzd_wall_dist(w->ram, ew, 1500.0f);
     return d < 0.0f ? -1.0f : d / w->map->units_per_m;
 }
+#define NIK_MIN_ABOVE_FEET 200      /* altura minima (u del motor) de la boca sobre los pies de Snake al nacer el misil (el original usa +320: rcm.c) */
+#define NIK_BODY_XZ   450.0f        /* separacion horizontal minima (Chebyshev, u) de la boca respecto a Snake: 300 (blanco de Snake) + 100 (misil) + 50 de margen; TargetConflict (game/target.c:84) */
+#define NIK_BODY_Y    800.0f        /* separacion vertical a partir de la cual no hay solape: 650 + 100 + 50 */
+#define NIK_BODY_MAXU 600.0f        /* empuje maximo (u): igual que GD_SPAWN_MAX_SHIFT (0,6 m) */
+float vrgame_nikita_body_push(const float mouth_w[3], const float body_w[3], const float dir_w[3], int (*blocked)(void *user, float t_u), void *user) {
+    if (!mouth_w || !body_w || !dir_w) return 0.0f;
+    const float hl = sqrtf(dir_w[0] * dir_w[0] + dir_w[2] * dir_w[2]);
+    if (!(hl > 0.2f)) return 0.0f;                                     /* tubo casi vertical: avanzar no aleja en horizontal */
+    float last_ok = 0.0f;
+    for (float t = 0.0f; t <= NIK_BODY_MAXU; t += 10.0f) {
+        const float x = fabsf(mouth_w[0] + dir_w[0] * t - body_w[0]), z = fabsf(mouth_w[2] + dir_w[2] * t - body_w[2]), y = fabsf(mouth_w[1] + dir_w[1] * t - body_w[1]);
+        if (blocked && t > 0.0f && blocked(user, t)) return last_ok;      /* pared por delante: no se atraviesa */
+        if (x >= NIK_BODY_XZ || z >= NIK_BODY_XZ || y >= NIK_BODY_Y) return t;
+        last_ok = t;
+    }
+    return NIK_BODY_MAXU;
+}
+typedef struct { const NikWall *w; const VrFireMap *map; const float *p0_u, *ax_u; } NikPush;
+static int nik_push_blocked(void *user, float t_u) {      /* ¿la boca adelantada t_u unidades queda a menos de GD_SPAWN_WALL_M de una pared? */
+    const NikPush *n = (const NikPush *)user;
+    const float d = t_u / n->map->units_per_m;
+    const WVec3 p = {n->p0_u[0] + n->ax_u[0] * d, n->p0_u[1] + n->ax_u[1] * d, n->p0_u[2] + n->ax_u[2] * d};
+    const float w = nik_wall_m((void *)n->w, p);
+    return w >= 0.0f && w < GD_SPAWN_WALL_M;
+}
 /* La boca del tubo (la pose que pide el arma) corrida por el eje del tubo si queda cerca de la cabeza o de una pared (guided_spawn_pose); la dirección no cambia. */
 static WPose nikita_spawn(const WPose *mz, const WInput *in, const VrFireMap *map, const uint8_t *ram, const BridgeState *bs) {
     NikWall nw = {ram, map};
     GuidedSpawnInfo gi;
-    const WPose used = guided_spawn_pose(*mz, in->head.p, ram ? nik_wall_m : NULL, &nw, &gi);
-    const float eu[3] = {used.p.x, used.p.y, used.p.z};
+    WPose used = guided_spawn_pose(*mz, in->head.p, ram ? nik_wall_m : NULL, &nw, &gi);
+    float eu[3] = {used.p.x, used.p.y, used.p.z};
     float ew[3];
     vrfire_pos_to_world(map, eu, ew);
-    const float dy = ew[1] - (float)bs->ctl_pos.y;
-    fprintf(stderr, "[nikita] disparo mano=(%.3f %.3f %.3f) boca=(%.3f %.3f %.3f) usada=(%.3f %.3f %.3f) m (espacio de usuario) corrimiento=%.3f m (%s) | cabeza: boca %.2f, usada %.2f m (minimo %.2f) | pared mas cercana: boca %.2f, usada %.2f m (minimo %.2f; -1 = ninguna a < 1,5 m) | altura de la boca sobre los pies de Snake=%.0f u: el planeo del juego habria dado un primer paso vertical de %.0f u (explota con >= %d; vr_fire.c coloca el actor ya en la boca) | pos_motor=(%.0f %.0f %.0f)\n",
+    float dy = ew[1] - (float)bs->ctl_pos.y, raised = 0.0f;
+    if (dy < NIK_MIN_ABOVE_FEET && map->units_per_m > 0.0f) {      /* boca muy baja (agachado/tumbado): el blanco del misil nace en los pies de Snake y no debe solaparlo al pasar a bando 0; el original lanza a +320 */
+        raised = (float)NIK_MIN_ABOVE_FEET - dy;
+        used.p.y += raised / map->units_per_m;
+        eu[1] = used.p.y;
+        vrfire_pos_to_world(map, eu, ew);
+        dy = ew[1] - (float)bs->ctl_pos.y;
+    }
+    float body_push = 0.0f;
+    if (map->units_per_m > 0.0f) {      /* separacion horizontal del cajon de colisión de Snake: adelanta la boca por su eje (sin atravesar paredes) */
+        const WVec3 ax = wv_norm(wquat_rotate(used.q, wv(0, 0, -1)));
+        const float axu[3] = {ax.x, ax.y, ax.z};
+        float axw[3];
+        vrfire_dir_to_world(map, axu, axw);
+        const float body[3] = {(float)bs->ctl_pos.x, (float)bs->ctl_pos.y, (float)bs->ctl_pos.z};
+        NikPush np = {&nw, map, eu, axu};
+        body_push = vrgame_nikita_body_push(ew, body, axw, ram ? nik_push_blocked : NULL, &np);
+        if (body_push > 0.0f) {
+            used.p.x += ax.x * body_push / map->units_per_m; used.p.y += ax.y * body_push / map->units_per_m; used.p.z += ax.z * body_push / map->units_per_m;
+            eu[0] = used.p.x; eu[1] = used.p.y; eu[2] = used.p.z;
+            vrfire_pos_to_world(map, eu, ew);
+            dy = ew[1] - (float)bs->ctl_pos.y;
+        }
+    }
+    const float sep_xz = fmaxf(fabsf(ew[0] - (float)bs->ctl_pos.x), fabsf(ew[2] - (float)bs->ctl_pos.z));
+    fprintf(stderr, "[nikita] disparo mano=(%.3f %.3f %.3f) boca=(%.3f %.3f %.3f) usada=(%.3f %.3f %.3f) m (espacio de usuario) corrimiento=%.3f m (%s) | cabeza: boca %.2f, usada %.2f m (minimo %.2f) | pared mas cercana: boca %.2f, usada %.2f m (minimo %.2f; -1 = ninguna a < 1,5 m) | altura de la boca sobre los pies de Snake=%.0f u: el planeo del juego habria dado un primer paso vertical de %.0f u (explota con >= %d; vr_fire.c coloca el actor ya en la boca) | pos_motor=(%.0f %.0f %.0f) | elevada_por_altura_minima=%.0f u (minimo %d u sobre los pies) | separacion_final_de_Snake=%.0f u horizontal (minimo %.0f u; adelantada +%.0f u por el cajon del blanco de Snake)\n",
             in->hand[0].p.x, in->hand[0].p.y, in->hand[0].p.z, mz->p.x, mz->p.y, mz->p.z, used.p.x, used.p.y, used.p.z, gi.shift_m, gi.moved ? (gi.shift_m > 0 ? "adelantada" : "retrasada") : "sin mover",
-            gi.head0_m, gi.head_m, GD_SPAWN_HEAD_M, gi.wall0_m, gi.wall_m, GD_SPAWN_WALL_M, dy, dy * 0.5f, VRFIRE_MIS_MAX_STEP_Y, ew[0], ew[1], ew[2]);
+            gi.head0_m, gi.head_m, GD_SPAWN_HEAD_M, gi.wall0_m, gi.wall_m, GD_SPAWN_WALL_M, dy, dy * 0.5f, VRFIRE_MIS_MAX_STEP_Y, ew[0], ew[1], ew[2], raised, NIK_MIN_ABOVE_FEET, sep_xz, NIK_BODY_XZ, body_push);
     return used;
 }
 static struct { uint32_t serial; int vb, reported; } NK;
@@ -1543,9 +1604,23 @@ static void nikita_track(const WeaponState *st, const uint8_t *ram, const Bridge
         if (wall >= 0.0f && wall < 250.0f) strcat(why, " pared<250u(NearHazard)");
         if (!why[0]) strcpy(why, " toque_o_poder_o_mensaje(no distinguible desde fuera)");
         NK.reported = 1;
-        fprintf(stderr, "[nikita] fin t=%.2f s ended=%d motivo:%s | edad=%d ticks estado=%d terminado=%d pos=(%d %d %d) paso_y=%d pared=%.0f u Snake=%.0f u (blast de Snake si < ~2000 u) fase=%d\n", (float)NK.vb * 0.02f, G.mis.ended, why, G.mis.age, (int)G.mis.state,
-                G.mis.done, G.mis.pos[0], G.mis.pos[1], G.mis.pos[2], G.mis.dy, wall, snake, st->phase);
+        VrFireMissileDiag md = {0, 0, 0, {0, 0, 0}};
+        const int md_ok = ram && vrfire_missile_diag(ram, G.mis.actor, &md);
+        fprintf(stderr, "[nikita] fin t=%.2f s ended=%d motivo:%s | edad=%d ticks estado=%d terminado=%d pos=(%d %d %d) paso_y=%d pared=%.0f u Snake=%.0f u (blast de Snake si < ~2000 u) fase=%d | blanco: field_110=%d side=%d vital=%d centro=(%d %d %d) (offsets unverified; basura si el actor ya se destruyo) | vida Snake (GM_Vitality)=%d/%d\n", (float)NK.vb * 0.02f, G.mis.ended, why, G.mis.age, (int)G.mis.state,
+                G.mis.done, G.mis.pos[0], G.mis.pos[1], G.mis.pos[2], G.mis.dy, wall, snake, st->phase, md_ok ? md.glide : -1, md_ok ? md.side : -1, md_ok ? md.vital : -1, md.center[0], md.center[1], md.center[2], (int)bs->life, (int)bs->life_max);
     }
+}
+
+/* Peticiones de disparo del Nikita que no llegan a crear misil (caducadas o anuladas por vrfire): una linea por cambio de los contadores mientras el arma es el Nikita. */
+static void nikita_lost(int active) {
+    static uint32_t exp0, can0;
+    static int init;
+    VrFireStats fs;
+    vrfire_stats(&fs);
+    if (!init) { exp0 = fs.expired; can0 = fs.cancelled; init = 1; }      /* primer uso: parte de los contadores actuales (no emite una línea falsa por lo acumulado antes) */
+    if (active && (fs.expired != exp0 || fs.cancelled != can0))
+        fprintf(stderr, "[nikita] sin_nacimiento motivo=peticion_%s (caducadas +%u, anuladas +%u; el juego no creo el misil a tiempo o no puede disparar otro con uno en vuelo)\n", fs.cancelled != can0 ? "anulada" : "caducada", fs.expired - exp0, fs.cancelled - can0);
+    exp0 = fs.expired; can0 = fs.cancelled;
 }
 
 static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ram);
@@ -1695,6 +1770,7 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
         out |= ro.pad_force;
         pthread_mutex_lock(&HM);
         pub_status.loader = eq_slot >= 0 ? atomic_load(&SL[eq_slot].state) : 0;
+        pub_status.game_weapon = core ? bs->weapon : -1;      /* arma equipada en el juego (con o sin modelo VR mostrado): el visor solo abre el disco de mira de reserva si es el PSG1 */
         pub_status.active = 0; pub_status.weapon = -1; pub_status.mag_rounds = pub_status.chambered = pub_status.mag_inserted = 0;
         pub_status.game_mag = pub_status.game_reserve = 0;
         pub_status.shots = G.shots;
@@ -2002,6 +2078,7 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
         out |= nk_pad;
     }   /* guiado: la cruceta del juego (vr_missile.h) */
     if (gid == 3) nikita_track(st, ram, bs, nk_pad);
+    nikita_lost(gid == 3);
     if (fo.engaged && fo.square) out |= PAD_SQUARE;
     publish_hand_pose(hs, gp, right, ge, in.support_held);
     if (bs->weapon >= 0) {
@@ -2018,6 +2095,7 @@ static uint16_t vrgame_pad_core(uint16_t pad, const BridgeState *bs, uint8_t *ra
     pub_status.loader = LD_READY;
     pub_status.active = 1;
     pub_status.weapon = gid;
+    pub_status.game_weapon = core ? bs->weapon : -1;
     pub_status.mag_rounds = st->mag_rounds; pub_status.chambered = st->chambered; pub_status.mag_inserted = st->mag_inserted;
     pub_status.game_mag = ro.show_mag; pub_status.game_reserve = ro.show_reserve;
     pub_status.shots = G.shots;

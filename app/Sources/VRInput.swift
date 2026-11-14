@@ -278,7 +278,7 @@ final class VRInput: @unchecked Sendable {
     /// Un fotograma: lee, procesa y envía al juego. `head` = transformación cabeza->origen (deviceAnchor) o nil.
     /// `gamePosture` del puente RAM (0 de pie, 1 agachado, 2 tumbado, -1 desconocida). Devuelve el pad enviado.
     @discardableResult
-    func frame(head: simd_float4x4?, dt: Float, gamePosture: Int32 = -1, menu: Bool = false, comms: Bool = false,
+    func frame(head: simd_float4x4?, dt: Float, gamePosture: Int32 = -1, menu: Bool = false, comms: Bool = false, firstPerson: Bool = false,
                recenter: simd_float4x4 = matrix_identity_float4x4) -> vr_pad_t {
         var sample = hub.sample()
         // Volcado de desarrollo: los dos clics de stick mantenidos ~1 s (ver DumpCapture). Mientras estén los dos pulsados (y hasta soltar ambos) se ocultan
@@ -307,6 +307,7 @@ final class VRInput: @unchecked Sendable {
         f.game_posture = gamePosture
         f.menu = menu
         f.comms = comms
+        f.first_person = firstPerson
         if let m = head {
             f.head_valid = true
             f.head_pos = (m.columns.3.x, m.columns.3.y, m.columns.3.z)

@@ -235,7 +235,7 @@ fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buff
         if (d.p2.z < 0.5 || hu.x < 0.0 || hu.y < 0.0 || hu.x > 1.0 || hu.y > 1.0) al = 0.0;     /* la textura 1 es la capa WEAPON_HUD (solo el HUD propio del Stinger); p2.z = 0: sin capa */
         rgb = mix(rgb, hc, clamp(al, 0.0, 1.0));
         float ain = (d.p1.w - 2.0 * d.p1.y) / max(1.0 - 2.0 * d.p1.y, 0.01);     /* proporción ancho/alto del interior (sin marco) */
-        rgb = vr_spc_dot(rgb, r, ain, 0.0125 / max(0.5 * (1.0 - 2.0 * d.p1.y), 0.05), float3(1.0, 0.08, 0.05));      /* punto ROJO en el eje de la cámara (centro de la imagen); radio 1,25 % de la altura de la pantalla */
+        rgb = vr_spc_dot(rgb, r, ain, 0.0065 / max(0.5 * (1.0 - 2.0 * d.p1.y), 0.05), float3(1.0, 0.08, 0.05));      /* punto ROJO en el eje de la cámara (centro de la imagen); radio 0,65 % de la altura de la pantalla (mismo en el Nikita) */
     } else if (mode < 0.5) {                                             /* mira: imagen aumentada + abertura y retícula */
         rgb = img.sample(sLin, q).xyz;
         if (d.p2.x > 0.5) rgb = float3(vr_spc_enc1(rgb.x), vr_spc_enc1(rgb.y), vr_spc_enc1(rgb.z));
@@ -302,7 +302,7 @@ fragment float4 vr_fs_spc(VrSpcOut in [[stage_in]], constant VrSpcDraw &d [[buff
                 rgb = mix(rgb, float3(0.8, 0.9, 0.8), clamp(tx, 0.0, 1.0));
             }
             float ain = (d.p1.w - 2.0 * d.p1.y) / max(1.0 - 2.0 * d.p1.y, 0.01);
-            rgb = vr_spc_dot(rgb, r, ain, 0.0125 / max(0.5 * (1.0 - 2.0 * d.p1.y), 0.05), float3(0.2, 1.0, 0.25));      /* punto VERDE brillante en el eje del misil (centro de la imagen) */
+            rgb = vr_spc_dot(rgb, r, ain, 0.0065 / max(0.5 * (1.0 - 2.0 * d.p1.y), 0.05), float3(0.2, 1.0, 0.25));      /* punto VERDE brillante en el eje del misil (centro de la imagen) */
         }
         float e = max(abs(r.x), abs(r.y));
         rgb *= e > 0.97 ? 0.15 : 1.0;                                    /* marco */

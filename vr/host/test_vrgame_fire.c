@@ -351,6 +351,10 @@ static void c4_ray_placement(void) {
     CHECK(c4_try(0.0f, 900.0f, &m, e, &d) == 1, "colisión a 0,9 m más lejos que el plano de los pies: aceptada");
     vrfire_pos_from_world(&map, (float[3]){(float)m.t[0], (float)m.t[1], (float)m.t[2]}, u);
     CHECK(fabsf(u[0] - e[0]) < 0.01f && fabsf(u[1] - (e[1] + 0.079f)) < 0.01f && fabsf(u[2] - e[2]) < 0.01f, "borde: punto (%.3f %.3f %.3f) en la colisión del rayo (%.3f %.3f %.3f), no en el plano de los pies", u[0], u[1], u[2], e[0], e[1], e[2]);
+    { MvVrGameStatus f0, f1; mv_vrgame_status(&f0);
+      CHECK(c4_try(0.0f, -1.0f, &m, e, &d) == 0, "suelo del juego al alcance (plano de los pies a ~0,6 m en el rayo) pero SIN impacto de colisión ni de geometría: rechazada, nunca pegada a la nada");
+      mv_vrgame_status(&f1);
+      CHECK(f1.places == f0.places && f1.rejects == f0.rejects + 1, "sin impacto ni blanco: un rechazo y ninguna colocación (colocadas %u, rechazos %u)", f1.places - f0.places, f1.rejects - f0.rejects); }
     bs.ctl_pos.y = 0;
     /* fuera de alcance: sin impacto en 1 m, o el impacto más allá del alcance de brazo */
     MvVrGameStatus s0, s1; mv_vrgame_status(&s0);
@@ -2596,6 +2600,37 @@ static void rv_extra(void) {
     zone_pad = 0; zones(0.6f, 0.0f, 60);
 }
 
+/* Nikita: el blanco de Snake (300/650/300) y el del misil (tamaño 100) solapan con |dy|<=750 y |dx|,|dz|<=400 u (TargetConflict, game/target.c:84); a partir del tick 8 el misil pasa a bando 0 y, si la boca
+ * queda en ese cajón, explota en la cara. vrgame_nikita_body_push da cuánto adelantar la boca (u del motor, por su dirección) para quedar fuera con margen; 0 si ya está fuera. */
+static int nik_blocked_from_50(void *u, float t) { (void)u; return t >= 50.0f; }
+static float nik_cheb(const float m[3], const float b[3], const float d[3], float t) {
+    const float x = fabsf(m[0] + d[0] * t - b[0]), z = fabsf(m[2] + d[2] * t - b[2]);
+    return x > z ? x : z;
+}
+static void nikita_body_clear(void) {
+    const float body[3] = {1000, 200, -500}, dx[3] = {1, 0, 0}, dz[3] = {0, 0, 1};
+    const float dd[3] = {0.7071f, 0, 0.7071f}, up[3] = {0, 1, 0};
+    float mouth[3] = {1300, 200, -500};                                      /* 0,3 m de Snake */
+    float t = vrgame_nikita_body_push(mouth, body, dx, NULL, NULL);
+    CHECK(t > 0.0f && nik_cheb(mouth, body, dx, t) >= 450.0f - 0.01f, "boca a 0,3 m de Snake: adelantada hasta >= 450 u (empuje %.1f u, separacion %.1f u)", t, nik_cheb(mouth, body, dx, t));
+    mouth[0] = 1000; mouth[2] = -200;                                        /* al lado, disparando a lo largo de z (alejandose de Snake) */
+    t = vrgame_nikita_body_push(mouth, body, dz, NULL, NULL);
+    CHECK(t > 0.0f && nik_cheb(mouth, body, dz, t) >= 450.0f - 0.01f, "boca a 0,3 m (z): >= 450 u tras el empuje (%.1f)", nik_cheb(mouth, body, dz, t));
+    mouth[0] = 1100; mouth[2] = -400;
+    t = vrgame_nikita_body_push(mouth, body, dd, NULL, NULL);
+    CHECK(t > 0.0f && nik_cheb(mouth, body, dd, t) >= 450.0f - 0.01f, "direccion en diagonal: >= 450 u (%.1f)", nik_cheb(mouth, body, dd, t));
+    mouth[0] = 1600; mouth[1] = 200; mouth[2] = -500;                        /* ya a 600 u */
+    CHECK(vrgame_nikita_body_push(mouth, body, dx, NULL, NULL) == 0.0f, "boca ya lejos (600 u): no se mueve");
+    mouth[0] = 1100; mouth[1] = 200 + 850; mouth[2] = -500;                  /* cerca en horizontal pero 850 u por encima: ya fuera del cajon vertical */
+    CHECK(vrgame_nikita_body_push(mouth, body, dx, NULL, NULL) == 0.0f, "boca >800 u por encima: no se mueve");
+    mouth[0] = 1100; mouth[1] = 200; mouth[2] = -500;
+    t = vrgame_nikita_body_push(mouth, body, up, NULL, NULL);
+    CHECK(t == 0.0f, "disparo vertical: sin direccion horizontal util, no se mueve");
+    t = vrgame_nikita_body_push(mouth, body, dx, nik_blocked_from_50, NULL);
+    CHECK(t >= 0.0f && t < 50.0f, "con pared a 50 u por delante no se atraviesa (empuje %.1f u)", t);
+    CHECK(vrgame_nikita_body_push(NULL, body, dx, NULL, NULL) == 0.0f && vrgame_nikita_body_push(mouth, NULL, dx, NULL, NULL) == 0.0f, "punteros nulos: 0");
+}
+
 int main(void) {
     vrgame_test_clock(1000000000ull);                               /* tiempo simulado: los dt de vrgame_pad y la antigüedad de las manos no dependen del reloj real */
     VrBodyConfig bc;
@@ -2622,6 +2657,13 @@ int main(void) {
     vbl(0.0f, 5); vbl(0.9f, 10);
     mv_vrgame_status(&st); vrfire_stats(&fs);
     CHECK(!st.active && st.shots == base && sq_seen == 0 && fs.requests == 0, "sin arma: ni disparo ni cuadrado (activo %d, disparos %u, cuadrado %d)", st.active, st.shots - base, sq_seen);
+    CHECK(st.game_weapon == -1, "sin arma: el estado publica que el juego no tiene arma equipada (%d): el visor no abre el disco de mira de reserva (mirilla al desequipar el PSG1)", st.game_weapon);
+    world(9, 0, 5); vbl(0.0f, 3);                                  /* PSG1 equipado en el juego (sin modelo VR cargado en esta prueba): el estado lo dice aunque no haya arma VR mostrada */
+    mv_vrgame_status(&st);
+    CHECK(!st.active && st.game_weapon == 9, "PSG1 equipado sin arma VR mostrada: game_weapon = 9 (%d, activo %d)", st.game_weapon, st.active);
+    world(-1, 0, 0); vbl(0.0f, 3);                                 /* se desequipa: de inmediato ya no es el PSG1 */
+    mv_vrgame_status(&st);
+    CHECK(st.game_weapon == -1, "al desequipar el PSG1 el estado deja de decir PSG1 (%d)", st.game_weapon);
 
     printf("-- arma equipada sin munición en el juego --\n");
     world(0, 0, 0);
@@ -2644,6 +2686,7 @@ int main(void) {
     led_views_hide_hud();
     special_view_synced_to_drawn_model();
     nikita_native_hud();
+    nikita_body_clear();
     rumble_routing();
     mine_rests_on_floor();
     mine_real_floor();

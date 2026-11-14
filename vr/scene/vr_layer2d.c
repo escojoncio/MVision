@@ -19,6 +19,7 @@ struct VrLayer2D {
     int pad, aw;                 /* ventana visible dentro de la capa (pantalla completa): columnas [pad, pad+aw) de w, el resto negro */
     uint8_t *natm; size_t natm_cap;   /* bit 15 (máscara) de la VRAM mostrada, por píxel nativo */
     int scale, smooth;
+    int nodither;                /* 1: la capa (no la VRAM espejo) no hornea el tramado de la GPU original: vl2d_set_dither */
     VrLayerPx *px; size_t px_cap;
     uint8_t *rgba; size_t rgba_cap;
     uint8_t *sub, *gain;         /* planos de resta y de tope (vl2d_sub, vl2d_gain): mismo tamaño que rgba */
@@ -32,6 +33,7 @@ struct VrLayer2D {
     uint16_t tc[65536]; uint32_t ts[65536]; uint32_t stamp;   /* caché de texels de la primitiva en curso */
     uint32_t qc[262144]; uint32_t qs[262144];                 /* caché del modo nítido por cuarto de texel: texel que cubre | color corregido << 16 */
     uint8_t *nat; size_t nat_cap;                             /* imagen nativa descodificada de la zona mostrada (fondo de la pantalla de cine) */
+    uint16_t *vexact;                                         /* fotograma completo sin tramado (vl2d_set_dither): VRAM espejo exacta al cerrar la lista, mientras se rehace la imagen mostrada sin tramado */
     uint16_t *vsnap;                                          /* copia de la VRAM espejo al empezar la lista (verificación del panel: la pasada del mundo la modifica y se restaura) */
     uint8_t *w5; size_t w5_cap;                               /* el mundo del panel (todo salvo las primitivas 2D del panel) en la zona mostrada: aw x h x 3, 5 bits por canal */
     uint8_t *vmap; size_t vmap_cap;                           /* mapa por píxel de la verificación (tocado / mundo distinto fuera / distinto) */
@@ -43,8 +45,9 @@ VrLayer2D *vl2d_new(void) {
     if (L) { L->scale = 4; L->smooth = VL_SMOOTH_ORIGINAL; L->R = 1; L->PW = 1; L->PH = 1; L->LW = 1; L->LH = 1; }
     return L;
 }
-void vl2d_free(VrLayer2D *L) { if (!L) return; free(L->vsnap); free(L->w5); free(L->vmap); free(L->natm); free(L->px); free(L->rgba); free(L->sub); free(L->gain); free(L->nat); free(L); }
+void vl2d_free(VrLayer2D *L) { if (!L) return; free(L->vsnap); free(L->vexact); free(L->w5); free(L->vmap); free(L->natm); free(L->px); free(L->rgba); free(L->sub); free(L->gain); free(L->nat); free(L); }
 void vl2d_reset(VrLayer2D *L) { if (!L) return; L->have_vram = 0; L->valid = 0; }
+void vl2d_set_dither(VrLayer2D *L, int on) { if (L) L->nodither = !on; }
 void vl2d_set_options(VrLayer2D *L, int scale, int smooth) {
     if (!L) return;
     L->scale = scale < 1 ? 1 : scale > 6 ? 6 : scale;
@@ -63,6 +66,7 @@ typedef struct {
     int semi, mask_chk, mask_set, abr;
     int fixed;                    /* primitiva de realimentación: un solo texel (op->fbt) */
     uint16_t (*vdst)[VW];         /* != NULL: el destino es la VRAM espejo (escala 1, 15 bits, igual que gpu.c plot), no la capa: dibujos fuera de la zona mostrada / fotograma completo */
+    int plain;                    /* 1: vplot sin tramado (solo la pasada de la imagen mostrada sin tramado; la VRAM espejo definitiva no la usa) */
     int umin, umax, vmin, vmax;   /* caja de texels de la primitiva (el filtrado no sale de ella: sin sangrado entre sprites del atlas) */
 } Ctx;
 
@@ -71,7 +75,7 @@ typedef struct {
 static inline void vplot(Ctx *c, int x, int y, int r, int g, int b, int dith, int semi, int mbit) {   /* gpu.c plot, sobre la VRAM espejo */
     uint16_t *p = &c->vdst[y & (VH - 1)][x & (VW - 1)];
     if (c->mask_chk && (*p & 0x8000)) return;
-    if (dith) { int d = dither_m[y & 3][x & 3]; r += d; g += d; b += d; }
+    if (dith && !c->plain) { int d = dither_m[y & 3][x & 3]; r += d; g += d; b += d; }
     r = r < 0 ? 0 : r > 255 ? 255 : r;
     g = g < 0 ? 0 : g > 255 ? 255 : g;
     b = b < 0 ? 0 : b > 255 ? 255 : b;
@@ -106,7 +110,7 @@ static inline void lplot(Ctx *c, int sx, int sy, int r, int g, int b, int dith, 
     g = g < 0 ? 0 : g > 255 ? 255 : g;
     b = b < 0 ? 0 : b > 255 ? 255 : b;
     if (!c->hq) {
-        if (dith) {
+        if (dith && !L->nodither) {
             int d = dither_m[sy & 3][sx & 3];
             r += d; g += d; b += d;
             r = r < 0 ? 0 : r > 255 ? 255 : r;
@@ -903,6 +907,26 @@ static int list_reads(const GpuDrawList *l, int x0, int y0, int x1, int y1) {
     return 0;
 }
 
+/* Fotograma completo a escala 1 sin tramado (vl2d_set_dither(L, 0)): la lista entera otra vez sobre la VRAM espejo, desde su estado inicial, con vplot sin tramado, solo para leer la imagen mostrada.
+ * Es el mismo cuerpo del bucle principal en modo vmode (eventos y primitivas sobre el espejo, en orden). La VRAM espejo y la fidelidad son las de la pasada normal (con tramado). */
+static void plain_pass(VrLayer2D *L, const GpuDrawList *l, const Ctx *c0) {
+    for (uint32_t i = 0; i < l->nops; i++) {
+        const GpuOp *o = &l->ops[i];
+        if (o->type == GPU_OP_FILL || o->type == GPU_OP_UPLOAD || o->type == GPU_OP_VCOPY) { ev_apply(L, o, l, SINK_NONE); continue; }
+        if (o->type != GPU_OP_POLY && o->type != GPU_OP_RECT && o->type != GPU_OP_LINE) continue;
+        int bx0, by0, bx1, by1;
+        if (!prim_bbox(o, &bx0, &by0, &bx1, &by1)) continue;
+        Ctx cm = *c0;
+        cm.S = 1; cm.hq = 0; cm.smooth = 0; cm.cmax = 31; cm.plain = 1;
+        cm.vdst = L->vram; cm.o = o;
+        cm.cx1 = o->cx1; cm.cy1 = o->cy1; cm.cx2 = o->cx2; cm.cy2 = o->cy2;
+        cm.semi = !!(o->flags & GPU_F_SEMI);
+        cm.mask_chk = !!(o->flags & GPU_F_MASK_CHK); cm.mask_set = !!(o->flags & GPU_F_MASK_SET);
+        cm.abr = o->abr;
+        raster_prim(&cm, o);
+    }
+}
+
 int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     if (!L || !l) return 0;
     L->valid = 0;
@@ -987,6 +1011,12 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
     c0.L = L; c0.S = R; c0.hq = hq8; c0.smooth = L->smooth; c0.cmax = c0.hq ? 255 : 31;
     /* panel: si la lista lee el búfer que dibuja (copia de un trozo de pantalla a una textura, pantalla usada como textura), TODAS las primitivas se pintan también en la VRAM espejo, como en el hardware */
     const int mirror_all = draw && !full && list_reads(l, wx0, wy0, l->disp.x + w, wy1);
+    const int plain_img = vmode && L->nodither;   /* la imagen mostrada se rehace sin tramado tras la pasada normal */
+    if (plain_img) {
+        if (!L->vsnap) L->vsnap = (uint16_t *)malloc(sizeof L->vram);
+        if (!L->vexact) L->vexact = (uint16_t *)malloc(sizeof L->vram);
+        if (L->vsnap && L->vexact) memcpy(L->vsnap, L->vram, sizeof L->vram);
+    }
     for (uint32_t i = 0; i < l->nops; i++) {
         const GpuOp *o = &l->ops[i];
         switch (o->type) {
@@ -1051,6 +1081,13 @@ int vl2d_run(VrLayer2D *L, const GpuDrawList *l, const VrScene *sc, int full) {
         if (l->vram_end && !l->disp.depth24) {   /* (24 bits: el marco no es la lectura de 15 bits) medida de fidelidad contra la imagen real; si la capa no es idéntica, se usa la imagen exacta del emulador (respaldo) */
             fidelity(L, &l->disp, l->vram_end);
             if (L->info.fid_bad > 0) { fill_backdrop(L, &l->disp, l->vram_end); L->info.fallback = 1; }
+        }
+        if (plain_img && L->vsnap && L->vexact && !L->info.fallback) {   /* imagen mostrada sin tramado; el espejo definitivo y la fidelidad (arriba) siguen siendo los exactos */
+            memcpy(L->vexact, L->vram, sizeof L->vram);
+            memcpy(L->vram, L->vsnap, sizeof L->vram);
+            plain_pass(L, l, &c0);
+            fill_backdrop(L, &l->disp, &L->vram[0][0]);
+            memcpy(L->vram, L->vexact, sizeof L->vram);
         }
     }
     if (verify) {

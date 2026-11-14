@@ -61,6 +61,12 @@ void vl2d_reset(VrLayer2D *L);
 /* Escala interna (1..6; defecto 4) y suavizado (VL_SMOOTH_*; defecto nítido). Escala 1 = rasterizado exacto de 5 bits con tramado (idéntico a la GPU original bit a bit);
  * escala > 1 = muestras de 8 bits sin tramado, geometría a alta resolución con el mismo relleno (muestreo en el centro de cada submuestra). */
 void vl2d_set_options(VrLayer2D *L, int scale, int smooth);
+/* Tramado (dither 4x4 de la GPU original, E1.9) de la CAPA: on = 1 (defecto) bit a bit como la GPU original; on = 0 la capa lleva el color sin tramar. El tramado horneado deja un tablero de dos valores que un
+ * escalador de píxel art posterior (MMPX: igualdad exacta) no puede suavizar; con on = 0 un sprite plano sale de un solo valor. Afecta a la capa del panel y a la imagen del fotograma completo, ambos a escala 1 (original);
+ * la VRAM espejo (lo que lee el juego) conserva el tramado. Fotograma completo a escala 1 (VL_FULL): se ejecuta la lista dos veces; la normal (con tramado) deja la VRAM espejo y la medida de fidelidad contra
+ * vram_end (fid_bad, respaldo: bit a bit como antes), y una segunda sobre una copia sin tramado da solo la imagen mostrada (coste: ~2x el rasterizado de la lista; si la fidelidad falla se usa la imagen del emulador,
+ * con su tramado). En el panel verificado (VL_PANEL_VERIFIED) la diferencia (<= 1 nivel de 5 bits) queda dentro de la tolerancia de la verificación. */
+void vl2d_set_dither(VrLayer2D *L, int on);
 
 /* VRAM de partida de cada lista: l->vram_start (la REAL del emulador al abrirla, gpu_capture_vram_start(1)) si viene; si no, la de la primera lista/resincronización (vram_init) con los eventos
  * de las anteriores. Con vram_start la capa no depende de que todas las escrituras de VRAM (DMA, copias, dibujos a VRAM) generen eventos.

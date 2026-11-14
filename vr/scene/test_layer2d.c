@@ -222,6 +222,103 @@ static void world2d_cases(void) {
     free_list(c);
 }
 
+/* Tramado y escalador de píxel art (MMPX compara igualdad exacta): un sprite plano con modulación neutra sale de la capa como un tablero 4x4 de dos valores (el tramado de la GPU original se hornea
+ * antes del escalador y este no lo puede suavizar). Con vl2d_set_dither(L, 0) la capa lleva el texel limpio (un solo valor); el defecto (tramado) y la VRAM espejo no cambian. */
+static void dither_cases(void) {
+    uint16_t tex[16 * 16];
+    const uint16_t texel = (uint16_t)(10 | 12 << 5 | 14 << 10);
+    for (int i = 0; i < 16 * 16; i++) tex[i] = texel;
+    gpu_capture_enable(0);
+    gpu_reset();
+    gpu_gp1(0x08000001); gpu_gp1(0x03000000); gpu_gp1(0x05000000 | 256u << 10);
+    env(0, 0, 1023, 511, 0, 0, 0);
+    gpu_gp0(0x02000000); gpu_gp0(xy(0, 0)); gpu_gp0(xy(320, 240));
+    upload(640, 0, 16, 16, tex);   /* página x = 640, 15 bits: texels directos */
+    gpu_capture_vram_start(1);
+    gpu_capture_enable(1);
+    env(0, 0, 319, 239, 10 | 2u << 7 | 1u << 9, 0, 0);   /* tpage 10 en 15 bits, tramado (E1.9) */
+    gpu_gp0(0x2C808080);   /* FT4 con modulación neutra */
+    gpu_gp0(xy(100, 80)); gpu_gp0(0);
+    gpu_gp0(xy(132, 80)); gpu_gp0((10u | 2u << 7) << 16 | 15);
+    gpu_gp0(xy(100, 112)); gpu_gp0(15 << 8);
+    gpu_gp0(xy(132, 112)); gpu_gp0(15 << 8 | 15);
+    gpu_gp1(0x05000000);
+    const GpuDrawList *l = gpu_capture_frame();
+    GpuDrawList *c = l ? dup_list(l) : NULL;
+    gpu_capture_vram_start(0);
+    CHECK(c && c->nops >= 1 && c->ops[0].type == GPU_OP_POLY && (c->ops[0].flags & GPU_F_DITHER), "dither: lista de prueba (%u ops)", c ? c->nops : 0);
+    if (!c || c->nops < 1) { free_list(c); return; }
+    VrSceneOpts o = vr_scene_opts_default();
+    o.drop_clear = 0;
+    VrScene sc;
+    CHECK(vr_scene_build(c, NULL, &o, &sc) == 0 && sc.op_dest[0] == 2, "dither: el sprite va al panel");
+    for (int off = 0; off < 2; off++) {
+        VrLayer2D *L = vl2d_new();
+        vl2d_set_options(L, 1, VL_SMOOTH_ORIGINAL);
+        if (off) vl2d_set_dither(L, 0);
+        CHECK(vl2d_run(L, c, &sc, 0) == 1, "dither (%s): vl2d_run", off ? "sin" : "con");
+        int w = 0, h = 0;
+        const VrLayerPx *px = vl2d_px(L, &w, &h);
+        int nvals = 0, opaque = 0; uint32_t vals[16];
+        for (int y = 84; y < 108 && px; y++) for (int x = 104; x < 128; x++) {   /* interior del sprite */
+            const VrLayerPx *q = &px[y * w + x];
+            if (q->t != 0) continue;
+            opaque++;
+            uint32_t v = (uint32_t)q->c[0] | (uint32_t)q->c[1] << 8 | (uint32_t)q->c[2] << 16;
+            int k = 0; while (k < nvals && vals[k] != v) k++;
+            if (k == nvals && nvals < 16) vals[nvals++] = v;
+        }
+        CHECK(opaque == 24 * 24, "dither (%s): interior opaco %d", off ? "sin" : "con", opaque);
+        if (off) CHECK(nvals == 1 && vals[0] == (10u | 12u << 8 | 14u << 16), "sin tramado: %d valores (esperado 1: el texel 10,12,14; primero %06x)", nvals, nvals ? vals[0] : 0);
+        else CHECK(nvals == 2, "con tramado (defecto): %d valores (esperado 2, el tablero 4x4)", nvals);
+        /* pantalla completa: la imagen mostrada no lleva tramado con la opcion (segunda pasada); la VRAM espejo y la fidelidad (fid_bad contra vram_end) siguen siendo las exactas, con tramado */
+        double t0 = now_ms();
+        CHECK(vl2d_run(L, c, &sc, VL_FULL) == 1, "dither (%s): vl2d_run completo", off ? "sin" : "con");
+        double dt = now_ms() - t0;
+        VrL2Info inf; vl2d_info(L, &inf);
+        CHECK(inf.fid_n > 0 && inf.fid_bad == 0 && !inf.fallback, "dither (%s): fotograma completo exacto: fidelidad %d/%d", off ? "sin" : "con", inf.fid_n - inf.fid_bad, inf.fid_n);
+        px = vl2d_px(L, &w, &h);
+        nvals = 0;
+        for (int y = 84; y < 108 && px; y++) for (int x = 104; x < 128; x++) {
+            const VrLayerPx *q = &px[y * w + x];
+            uint32_t v = (uint32_t)q->c[0] | (uint32_t)q->c[1] << 8 | (uint32_t)q->c[2] << 16;
+            int k = 0; while (k < nvals && vals[k] != v) k++;
+            if (k == nvals && nvals < 16) vals[nvals++] = v;
+        }
+        if (off) CHECK(nvals == 1 && vals[0] == (10u | 12u << 8 | 14u << 16), "dither (sin): fotograma completo sin tramado: %d valores (esperado 1; primero %06x)", nvals, nvals ? vals[0] : 0);
+        else CHECK(nvals == 2, "dither (con): fotograma completo con el tramado del emulador: %d valores (esperado 2)", nvals);
+        { const uint16_t *vm = vl2d_vram(L); int mbad = 0;   /* espejo = VRAM real al cerrar la lista, con tramado, en los dos casos */
+          for (int y = 0; y < 240 && vm && c->vram_end; y++) for (int x = 0; x < 320; x++) mbad += vm[y * 1024 + x] != c->vram_end[(size_t)y * 1024 + x];
+          CHECK(vm && c->vram_end && mbad == 0, "dither (%s): VRAM espejo identica a la del emulador (%d distintos)", off ? "sin" : "con", mbad); }
+        printf("  dither %s: vl2d_run completo %.2f ms (sprite 32x32)\n", off ? "sin" : "con", dt);
+        vl2d_free(L);
+    }
+    /* visor: vl2a_options_native (escalador MMPX en la GPU) recibe la capa sin tramado, panel y pantalla completa; vl2a_options (resto) conserva el tramado */
+    for (int nat = 0; nat < 2; nat++) for (int fm = 0; fm < 2; fm++) {
+        VrL2Async *A = vl2a_new();
+        if (nat) vl2a_options_native(A); else vl2a_options(A, 1, VL_SMOOTH_ORIGINAL);
+        vl2a_submit(A, c, sc.op_dest, fm ? VL_FULL : VL_PANEL, 1);
+        vl2a_flush(A);
+        const uint8_t *ap = NULL; int aw = 0, ah = 0, af = 0; uint32_t aseq = 0;
+        int ar = vl2a_acquire(A, &ap, &aw, &ah, &af, &aseq);
+        int nv = 0, nop = 0; uint32_t vals[16];
+        int rows = fm ? ah : (nat ? ah / 3 : ah);   /* panel nativo: tres planos apilados, el de color son las primeras ah/3 filas */
+        for (int y = 0; y < rows && ar >= 0 && ap; y++) for (int x = 0; x < aw; x++) {
+            const uint8_t *q = &ap[((size_t)y * aw + x) * 4];
+            if (q[3] != 255 || (q[0] | q[1] | q[2]) == 0) continue;   /* solo el sprite (opaco y no negro) */
+            nop++;
+            uint32_t v = (uint32_t)q[0] | (uint32_t)q[1] << 8 | (uint32_t)q[2] << 16;
+            int k = 0; while (k < nv && vals[k] != v) k++;
+            if (k == nv && nv < 16) vals[nv++] = v;
+        }
+        CHECK(ar >= 0 && nop >= 24 * 24, "asincrono (%s, %s): sprite en la capa (%d px)", nat ? "nativo" : "no nativo", fm ? "completo" : "panel", nop);
+        CHECK(nv == (nat ? 1 : 2), "asincrono (%s, %s): %d valores de color (esperado %d)", nat ? "nativo" : "no nativo", fm ? "completo" : "panel", nv, nat ? 1 : 2);
+        vl2a_release(A);
+        vl2a_free(A);
+    }
+    free_list(c);
+}
+
 static void offlist_text(void) {
     /* fuente 4 bpp: 16 glifos de 8x8 en (640,0), índices 0..3 (0 = transparente); CLUT en (0,500) con 4 colores (uno con bit 15) */
     uint16_t font[64 * 8];   /* 64 halfwords de ancho (256 texels) x 8 filas */
@@ -1284,6 +1381,7 @@ int main(void) {
     offscreen_compose();
     offlist_text();
     world2d_cases();
+    dither_cases();
     panel_verified();
     scale_step_cases();
 
@@ -1491,8 +1589,27 @@ int main(void) {
         classify();
         VrLayer2D *LF = vl2d_new();
         vl2d_set_options(LF, 1, VL_SMOOTH_ORIGINAL);
+        double tfe = now_ms();
         CHECK(vl2d_run(LF, g_list, &g_sc, 1) == 1, "vl2d_run full");
+        tfe = now_ms() - tfe;
         const VrLayerPx *pf = vl2d_px(LF, &w, &h);
+        {   /* misma lista con vl2d_set_dither(0): fidelidad y espejo intactos; la imagen mostrada difiere de la exacta solo por el tramado (<= 2 niveles de 5 bits) y no tiene tablero en lo plano */
+            VrLayer2D *LN = vl2d_new();
+            vl2d_set_options(LN, 1, VL_SMOOTH_ORIGINAL); vl2d_set_dither(LN, 0);
+            double tfn = now_ms();
+            CHECK(vl2d_run(LN, g_list, &g_sc, 1) == 1, "vl2d_run full sin tramado");
+            tfn = now_ms() - tfn;
+            VrL2Info ie, in2; vl2d_info(LF, &ie); vl2d_info(LN, &in2);
+            CHECK(in2.fid_n == ie.fid_n && in2.fid_bad == 0 && ie.fid_bad == 0 && !in2.fallback, "sin tramado: fidelidad %d/%d (como con tramado %d/%d)", in2.fid_n - in2.fid_bad, in2.fid_n, ie.fid_n - ie.fid_bad, ie.fid_n);
+            const uint16_t *ve = vl2d_vram(LF), *vn = vl2d_vram(LN);
+            CHECK(ve && vn && memcmp(ve, vn, sizeof gpu_vram) == 0, "sin tramado: la VRAM espejo es la misma que con tramado");
+            int nw = 0, nh = 0, dmax = 0, ndiff = 0;
+            const VrLayerPx *pn = vl2d_px(LN, &nw, &nh);
+            for (int i = 0; i < w * h && pn && nw == w && nh == h; i++) for (int k = 0; k < 3; k++) { int d = abs((int)pn[i].c[k] - (int)pf[i].c[k]); if (d) ndiff++; if (d > dmax) dmax = d; }
+            CHECK(nw == w && nh == h && dmax <= 2 && ndiff > 0, "sin tramado: diferencia maxima con la imagen exacta %d niveles (%d canales distintos)", dmax, ndiff);
+            printf("  vl2d_run full 320x240, lista de prueba (%u ops): con tramado %.2f ms, sin tramado (doble pasada) %.2f ms\n", g_list->nops, tfe, tfn);
+            vl2d_free(LN);
+        }
         GpuDisplay gd; gpu_get_display(&gd);
         CHECK(w == gd.fw && h == gd.h, "marco completo %dx%d (fw %d)", w, h, gd.fw);
         int badf = 0;

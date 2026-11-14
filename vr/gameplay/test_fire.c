@@ -1661,7 +1661,7 @@ static void t_missile_birth(void) {
     /* planeo de rmissile.c: el original (+320) no explota; la boca VR (0,9-1,7 m) sí explota al nacer; con el actor ya colocado no hay planeo */
     CHECK(glide_max_dy(320, 0, 8) < VRFIRE_MIS_MAX_STEP_Y, "el original (+320 sobre los pies) no supera el paso de explosión (%d)", glide_max_dy(320, 0, 8));
     CHECK(glide_max_dy(900, 0, 8) >= VRFIRE_MIS_MAX_STEP_Y && glide_max_dy(1700, 0, 8) >= VRFIRE_MIS_MAX_STEP_Y, "la boca VR a 0,9 y 1,7 m sobre los pies hace explotar el misil en el planeo (%d, %d)", glide_max_dy(900, 0, 8), glide_max_dy(1700, 0, 8));
-    CHECK(glide_max_dy(1700, 1700, 1) == 0, "colocado en su sitio con el contador a 1: sin planeo ni salto");
+    CHECK(glide_max_dy(1700, 1700, 1) == 0 && glide_max_dy(1700, 1700, 8) == 0, "colocado en su sitio (contador 1 u 8 como el de creación): sin planeo ni salto");
     uint8_t *ram = calloc(1, 0x200000);
     const uint32_t A = 0x80170000u;
     int16_t home[3] = {-4000, 1700, 900}, start[3] = {-3000, 120, 800};
@@ -1670,7 +1670,22 @@ static void t_missile_birth(void) {
     CHECK(vrfire_missile_settle(ram, A, &b) == 1, "actor recién creado: se coloca");
     CHECK(b.first_dy == 790 && b.glide == 8 && b.start[1] == 120 && b.home[1] == 1700, "informe: primer paso del planeo %d (esperado 790), contador %d", b.first_dy, b.glide);
     int16_t mov[3], prev[3]; memcpy(mov, ram + (A & 0x1FFFFF) + 0x20, 6); memcpy(prev, ram + (A & 0x1FFFFF) + 0x108, 6);
-    CHECK(!memcmp(mov, home, 6) && !memcmp(prev, home, 6) && ram[(A & 0x1FFFFF) + 0x110] == 1, "posición y posición previa = la de la matriz, contador a 1");
+    CHECK(!memcmp(mov, home, 6) && !memcmp(prev, home, 6), "posición y posición previa = la de la matriz");
+    CHECK(ram[(A & 0x1FFFFF) + 0x110] == 8, "el contador de planeo queda como lo creó el juego (8): no se toca (a 1 el tick 1 pone target.side=0 con el blanco aún en los pies de Snake y explota en su cara)");
+    {   /* tick 1 del Act de rmissile.c (field_110 && !field_112: --field_110; si llega a 0 -> target.side = 0): el blanco del misil sigue en GM_PlayerPosition hasta el final del tick (GM_MoveTarget) y solapa el de Snake */
+        const uint32_t TS = 0x122u;      /* Work: target en +0x120 (tras field_11C), TARGET.side en +2 */
+        uint16_t side1 = 1; memcpy(ram + (A & 0x1FFFFF) + TS, &side1, 2);
+        int8_t g8 = (int8_t)ram[(A & 0x1FFFFF) + 0x110];
+        if (ram[(A & 0x1FFFFF) + 0x112] == 0 && g8 != 0 && --g8 == 0) { uint16_t z = 0; memcpy(ram + (A & 0x1FFFFF) + TS, &z, 2); }
+        uint16_t side_after; memcpy(&side_after, ram + (A & 0x1FFFFF) + TS, 2);
+        CHECK(side_after == 1, "tras el tick 1 del Act el blanco del misil sigue en el bando 1 (no choca con Snake): side=%u", side_after);
+    }
+    {   /* diagnóstico del blanco (offsets del layout: target +0x120, side +2, center +8, vital +0x26) */
+        VrFireMissileDiag d; int16_t c3[3] = {-4000, 1700, 900}, vt = 7; uint16_t sd = 1;
+        memcpy(ram + (A & 0x1FFFFF) + 0x122, &sd, 2); memcpy(ram + (A & 0x1FFFFF) + 0x128, c3, 6); memcpy(ram + (A & 0x1FFFFF) + 0x146, &vt, 2);
+        CHECK(vrfire_missile_diag(ram, A, &d) == 1 && d.glide == 8 && d.side == 1 && d.vital == 7 && d.center[0] == -4000 && d.center[1] == 1700 && d.center[2] == 900, "diagnóstico: contador, bando, vida y centro del blanco");
+        CHECK(vrfire_missile_diag(ram, 0x00001000u, &d) == 0 && vrfire_missile_diag(NULL, A, &d) == 0 && vrfire_missile_diag(ram, A, NULL) == 0, "diagnóstico: puntero inválido / sin RAM / sin salida: nada");
+    }
     ram[(A & 0x1FFFFF) + 0x110] = 0;
     memcpy(ram + (A & 0x1FFFFF) + 0x20, start, 6);
     CHECK(vrfire_missile_settle(ram, A, NULL) == 0 && ram[(A & 0x1FFFFF) + 0x110] == 0, "contador 0 (actor ya en vuelo): no se toca");

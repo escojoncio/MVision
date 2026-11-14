@@ -49,7 +49,10 @@ static int zone(void) { if (!zbuf) zbuf = bios_kalloc(96); return zbuf != 0; }
 static void with_matrix_n(Cpu *c, const char *orig, int kind, int nikita) {
     VrFireMat m = {{0}, {0}};
     int r = zone() ? vrfire_take_projectile(kind, &m) : VRFIRE_PASS;
-    if (r == VRFIRE_SKIP) { V0 = 0; return; }
+    if (r == VRFIRE_SKIP) {
+        if (nikita) fprintf(stderr, "[nikita] sin_nacimiento motivo=suprimido_por_desarme (disparo sobrante del juego tras soltar sin peticion VR; no se crea el misil)\n");
+        V0 = 0; return;
+    }
     if (nikita && r == VRFIRE_SUBST) vrfire_level_matrix(&m);     /* misil guiado: guiñada de la mano con el cañón nivelado, como el original (vr_fire.h) */
     uint32_t a0 = A0, a3 = A3;
     if (r == VRFIRE_SUBST) { vrfire_store_mat(emu_ram, zbuf + Z_BULLET, &m); A0 = zbuf + Z_BULLET; }
@@ -64,9 +67,14 @@ static void with_matrix_n(Cpu *c, const char *orig, int kind, int nikita) {
     if (nikita && r == VRFIRE_SUBST && V0) {      /* sin planeo desde los pies de Snake: nace ya en la boca (vr_fire.h) */
         VrFireMissileBirth b;
         const int fixed = vrfire_missile_settle(emu_ram, V0, &b);
-        fprintf(stderr, "[nikita] nace actor=%08x pos_matriz=(%d %d %d) pos_planeo_inicial=(%d %d %d) primer_paso_y=%d (el juego explota con >= %d) contador_planeo=%d sin_planeo=%d\n", (unsigned)V0,
-                b.home[0], b.home[1], b.home[2], b.start[0], b.start[1], b.start[2], b.first_dy, VRFIRE_MIS_MAX_STEP_Y, b.glide, fixed);
+        VrFireMissileDiag d = {0, 0, 0, {0, 0, 0}};
+        vrfire_missile_diag(emu_ram, V0, &d);
+        fprintf(stderr, "[nikita] nace actor=%08x pos_matriz=(%d %d %d) pos_planeo_inicial=(%d %d %d) primer_paso_y=%d (el juego explota con >= %d) contador_planeo_creacion=%d sin_planeo=%d | tras colocar: field_110=%d target.side=%d target.vital=%d target.center=(%d %d %d) (offsets del blanco unverified)\n", (unsigned)V0,
+                b.home[0], b.home[1], b.home[2], b.start[0], b.start[1], b.start[2], b.first_dy, VRFIRE_MIS_MAX_STEP_Y, b.glide, fixed,
+                d.glide, d.side, d.vital, d.center[0], d.center[1], d.center[2]);
     }
+    if (nikita && r == VRFIRE_SUBST && !V0) fprintf(stderr, "[nikita] sin_nacimiento motivo=NewRMissile_devolvio_0 (peticion VR consumida; el juego no creo el actor)\n");
+    if (nikita && r == VRFIRE_PASS) fprintf(stderr, "[nikita] sin_nacimiento motivo=sin_peticion_VR actor=%08x (el juego creo el misil con su propia matriz: sin colocar ni nivelar)\n", (unsigned)V0);
     vrfire_probe(kind, r, V0, &m);
     A0 = a0;     /* a0 es de quien llama (convenio o32: el llamado puede cambiarlo; se restaura por si el llamador lo reutiliza) */
 }

@@ -533,7 +533,7 @@ static int do_sky(Ctx *c, uint32_t p, uint32_t node) {
     for (int r = 0; r < rows; r++) for (int cc = 0; cc < ntx; cc++, idx++) {
         const SkyTile *t = &T[(r < nty ? r : nty - 1) * ntx + cc];
         if (!t->ok) continue;
-        const int u1 = t->u0 + tw > 255 ? 255 : t->u0 + tw, v1 = t->v0 + th > 255 ? 255 : t->v0 + th;
+        const int u1 = t->u0 + tw, v1 = t->v0 + th;   /* aristas reales (pueden ser 256); al guardarse en un byte se saturan a 255 y ns_gpu_fx_build lee 255 como el final de la página */
         for (int si = 0; si < ks; si++) {
             NsFxItem *it = new_item(c); if (!it) { free(T); return 1; }
             it->prim = p; it->idx = (uint16_t)idx; it->sub = (uint16_t)si; it->shape = NSFX_SH_QUAD; it->role = NSFX_ROLE_SKY; it->kind = KIND_P4T; it->nv = 4;
@@ -547,7 +547,7 @@ static int do_sky(Ctx *c, uint32_t p, uint32_t node) {
                 const float d[3] = {sinf(az), sl, cosf(az)};
                 for (int k = 0; k < 3; k++) it->pos[v][k] = cam->eye[k] + SKY_RADIUS * d[k];
                 w2v(cam, it->pos[v], it->vpos[v]);
-                it->uv[v][0] = (uint8_t)lroundf((float)t->u0 + fu * (float)(u1 - t->u0)); it->uv[v][1] = (uint8_t)((v >> 1) ? v1 : t->v0);
+                { const long uu = lroundf((float)t->u0 + fu * (float)(u1 - t->u0)); it->uv[v][0] = (uint8_t)(uu > 255 ? 255 : uu); } it->uv[v][1] = (uint8_t)((v >> 1) ? (v1 > 255 ? 255 : v1) : t->v0);
                 memcpy(it->rgb[v], rgb, 3);
             }
             it->pu0 = t->u0; it->pv0 = t->v0;
@@ -562,7 +562,7 @@ static int do_sky(Ctx *c, uint32_t p, uint32_t node) {
         for (int cc = 0; cc < ntx; cc++) {
             const SkyTile *t = &T[cc];
             if (!t->ok) continue;
-            const int u1 = t->u0 + tw > 255 ? 255 : t->u0 + tw;
+            const int u1 = t->u0 + tw;
             for (int si = 0; si < ks; si++) {
                 float P[4][3]; uint8_t uv[4][2];
                 for (int v = 0; v < 4; v++) {
@@ -570,7 +570,7 @@ static int do_sky(Ctx *c, uint32_t p, uint32_t node) {
                     const float az = az_fwd + sgn * two_pi * (col - col_ctr) / (float)W;
                     if (v >= 2) { const float d[3] = {sinf(az), sl_top, cosf(az)}; for (int k = 0; k < 3; k++) P[v][k] = cam->eye[k] + SKY_RADIUS * d[k]; }   /* vértices 2 y 3: borde; 0 y 1: centro */
                     else memcpy(P[v], ctr_t, sizeof P[v]);
-                    uv[v][0] = (uint8_t)lroundf((float)t->u0 + fu * (float)(u1 - t->u0)); uv[v][1] = t->v0;
+                    { const long uu = lroundf((float)t->u0 + fu * (float)(u1 - t->u0)); uv[v][0] = (uint8_t)(uu > 255 ? 255 : uu); } uv[v][1] = t->v0;
                 }
                 if (!sky_emit_quad(c, p, rows * ntx + cc, si, P, t, uv, rgb)) { free(T); return 1; }
             }

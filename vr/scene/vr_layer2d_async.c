@@ -91,6 +91,7 @@ static void *worker(void *arg) {
         if (j->reset) vl2d_reset(A->L);
         int draw = (j->has_opd || j->full) && !later;   /* fotograma completo: no necesita la clasificación de la escena (capa exacta aunque vr_scene_build fallase) */
         vl2d_set_options(A->L, scale, atomic_load(&A->smooth));
+        vl2d_set_dither(A->L, !atomic_load(&A->native));   /* opciones nativas: el escalador de píxel art (MMPX, en la GPU del renderer) recibe la capa sin tramado; el resto, bit a bit como la GPU original */
         memset(&sc, 0, sizeof sc);
         if (draw && j->has_opd) { sc.op_dest = j->opd; sc.n_op_dest = j->l.nops; }
         double t0 = now_ms();

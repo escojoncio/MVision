@@ -116,7 +116,7 @@ int vrfire_level_matrix(VrFireMat *m) {
 #define RM_MOV   0x20u      /* rmissile.c Work: control.mov (s16[3]) */
 #define RM_HOME  0x100u     /* field_100_svector: posición de la matriz de creación */
 #define RM_PREV  0x108u     /* field_108_svector: posición del tick anterior */
-#define RM_GLIDE 0x110u     /* field_110: ticks de planeo restantes (8 al crear) */
+#define RM_GLIDE 0x110u     /* field_110: ticks de planeo restantes (8 al crear); solo se lee */
 #define RM_SIZE  0x328u
 int vrfire_missile_settle(uint8_t *ram, uint32_t actor, VrFireMissileBirth *info) {
     if (!ram || !ptr_ok(actor, RM_SIZE)) return 0;
@@ -127,8 +127,18 @@ int vrfire_missile_settle(uint8_t *ram, uint32_t actor, VrFireMissileBirth *info
     b.first_dy = (b.home[1] - b.start[1]) / 2;
     if (info) *info = b;
     if (b.glide < 1 || b.glide > 16) return 0;                    /* no es el contador de un actor recién creado: no se toca */
+    /* El contador de planeo NO se toca (queda en 8): a 1, el Act del primer tick lo baja a 0 y pone target.side = 0 mientras el blanco del misil aún está en los pies de Snake
+     * (GM_MoveTarget va al final del tick), solapa el suyo y GM_PowerTarget explota el misil en su cara. Con mov == field_100 el planeo da paso 0 y el blanco se mueve a la boca al final del tick 1. */
     for (int i = 0; i < 3; i++) { wr_s16(ram, actor + RM_MOV + 2u * (uint32_t)i, b.home[i]); wr_s16(ram, actor + RM_PREV + 2u * (uint32_t)i, b.home[i]); }
-    ram[(actor + RM_GLIDE) & RAM_MASK] = 1;
+    return 1;
+}
+#define RM_TARGET 0x120u    /* Work.target (TARGET tras field_11C, rmissile.c): side +2, center +8 (SVECTOR), vital +0x26. Offsets deducidos del layout de g_struct.h, sin medir en el juego (unverified) */
+int vrfire_missile_diag(const uint8_t *ram, uint32_t actor, VrFireMissileDiag *d) {
+    if (!ram || !d || !ptr_ok(actor, RM_SIZE)) return 0;
+    d->glide = (int8_t)ram[(actor + RM_GLIDE) & RAM_MASK];
+    d->side = (uint16_t)rd_s16(ram, actor + RM_TARGET + 2u);
+    d->vital = rd_s16(ram, actor + RM_TARGET + 0x26u);
+    for (int i = 0; i < 3; i++) d->center[i] = rd_s16(ram, actor + RM_TARGET + 8u + 2u * (uint32_t)i);
     return 1;
 }
 void vrfire_store_mat(uint8_t *ram, uint32_t a, const VrFireMat *m) {

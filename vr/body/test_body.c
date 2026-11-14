@@ -798,6 +798,39 @@ static void test_glue(void) {
         CHECK(n > 1400 && near_n > 800 && miss == 0, "brazo atado (principal y apoyo): la muñeca queda corta en %d de %d objetivos (peor %.1f mm; %d cerca del hombro)", miss, n, worst, near_n);
     }
 
+    /* d3) brazo atado al arma: el antebrazo es una pieza rígida; con un giro grande cizalla la malla en el codo («espagueti»). Atado, el antebrazo asume como mucho 30 grados (la mano absorbe el resto sin
+     * separarse del arma: la muñeca sigue en el objetivo, error < 0,5 mm), con cualquier orientación de la mano y de cualquiera de los dos brazos. */
+    build_body(78);
+    vrbody_init(&cfg); vrbody_set_view_fn(view_fn);
+    {
+        int n = 0, big = 0, miss = 0; float worst_tf = 0;
+        vrbody_set_weld(0, 1); vrbody_set_weld(1, 1);
+        for (int i = 0; i < 300; i++) {
+            vrbody_set_arm_length(0, frand(0.55f, 0.75f)); vrbody_set_arm_length(1, frand(0.55f, 0.75f));
+            for (int s_ = 0; s_ < 2; s_++) {
+                float R[9], q[4]; rand_rot(R, 3.14159f); vrbody_mat_to_quat(R, q);
+                set_hand(s_, (s_ ? 0.25f : -0.25f) * frand(0.2f, 1.0f) + 0.0f, frand(1.25f, 1.5f), frand(-0.75f, -0.35f), 0);
+                memcpy(g_hands[s_].rot, q, sizeof q);
+            }
+            for (int f = 0; f < 3; f++) { memcpy(RAM, RAM0, sizeof RAM); vrbody_apply(RAM); if (f < 2) vrbody_restore(RAM); }
+            for (int s_ = 0; s_ < 2; s_++) {
+                const VrBodyDebug *d = vrbody_debug(s_);
+                if (!d->driven) continue;
+                n++;
+                const float tf = fabsf(d->sol.tau_f) * 57.29578f;
+                if (tf > worst_tf) worst_tf = tf;
+                if (fabsf(d->sol.tau) * 57.29578f > 60.0f) big++;
+                if (!(d->sol.err_mm < 0.5f)) miss++;
+            }
+            vrbody_restore(RAM);
+        }
+        vrbody_set_weld(0, 0); vrbody_set_weld(1, 0); vrbody_clear_calibration();
+        CHECK(n > 500 && big > 100, "cobertura del giro atado: %d brazos, %d con giro de mano > 60 grados", n, big);
+        CHECK(worst_tf <= 30.01f, "brazo atado: el antebrazo gira %.1f grados (tope 30)", worst_tf);
+        CHECK(miss == 0, "brazo atado: la muñeca queda corta en %d de %d", miss, n);
+        printf("  brazo atado, giro del antebrazo: máx %.1f grados (tope 30) en %d brazos\n", worst_tf, n);
+    }
+
     /* e) fundido: al perder la mano el brazo vuelve a la animación en ~0,25 s sin saltos bruscos */
     build_body(79);
     vrbody_init(&cfg); vrbody_set_view_fn(view_fn);

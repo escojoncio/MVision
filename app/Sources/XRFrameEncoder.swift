@@ -180,10 +180,10 @@ final class XRFrameEncoder {
         // (MV_VIEW_AA_SIGHT, sin panel plano del HUD). Sin scope.c (sight.c solo): disco con visión estrecha, como antes.
         var worldZoom: Float = 1
         // Con un arma VR mostrada (PSG1, Stinger, Nikita...) el marco de mira del juego (sight.c, que sigue unos ticks tras cambiar de arma) NO se convierte en el disco de reserva: durante el cambio la vista del arma no se publica
-        // (vrgame.c sv_wait / selector) y ese disco de 0,34 m a 0,45 m de la cabeza era la «mirilla enorme». Solo los prismáticos (scope.c) o una mira sin arma VR usan estas vistas.
+        // (vrgame.c sv_wait / selector) y ese disco de 0,34 m a 0,45 m de la cabeza era la «mirilla enorme». Solo los prismáticos (scope.c) o la mira del PSG1 equipado en el juego sin arma VR mostrada (game_weapon == 9) usan estas vistas: con otra arma o sin arma el sight.c del juego que aún queda en la lista unos ticks (y el retén de VrFx.scope_on) no abre el disco al desequipar el PSG1.
         var vrWeapon = MvVrGameStatus()
         mv_vrgame_status(&vrWeapon)
-        if !special && gs.view_kind == 1 && gs.fx.scope_on != 0 && (gs.fx.binocular != 0 || vrWeapon.active == 0) {
+        if !special && gs.view_kind == 1 && gs.fx.scope_on != 0 && (gs.fx.binocular != 0 || (vrWeapon.active == 0 && vrWeapon.game_weapon == 9)) {
             if gs.fx.binocular != 0 {
                 worldZoom = Self.binocularWorldZoom(gs.fx.scope_zoom)
                 sv = Self.binocularFrame(head: recentered, aspect: 4.0 / 3.0)   // la capa 2D es la ventana visible fija del televisor: siempre 4:3 (su tamaño en píxeles no es cuadrado)

@@ -65,6 +65,7 @@ typedef struct {
     int game_posture;               /* 0 de pie, 1 agachado, 2 tumbado */
     bool menu;                      /* pausa / menú / comunicador: sin locomoción ni agacharse, stick -> cruceta */
     bool comms;                     /* comunicador (radio) abierto: habilita el avance sostenido de textos (cfg.hold_advance_s) */
+    bool first_person;              /* el juego está en primera persona (PLAYER_WATCH): ahí el stick izquierdo del original solo MIRA (mueve el cuerpo/la mira de Snake) y la cámara es la cabeza: no se envía locomoción */
 } vr_input_frame_t;
 
 typedef struct {
